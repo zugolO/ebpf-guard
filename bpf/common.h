@@ -1,0 +1,176 @@
+/*
+ * common.h - Shared structures between eBPF programs and Go userspace.
+ * Target: Linux kernel 5.15+ with BTF/CO-RE support.
+ */
+
+#ifndef __EBPF_GUARD_COMMON_H
+#define __EBPF_GUARD_COMMON_H
+
+#include <linux/types.h>
+
+/* Event type identifiers - must match pkg/types/event.go */
+#define EVENT_TYPE_SYSCALL     1
+#define EVENT_TYPE_TCP_CONNECT 2
+#define EVENT_TYPE_FILE_ACCESS 3
+
+/* File operation codes - must match pkg/types/event.go */
+#define FILE_OP_OPEN  0
+#define FILE_OP_READ  1
+#define FILE_OP_WRITE 2
+
+/* Address family codes - must match pkg/types/event.go */
+#define AF_INET   2
+#define AF_INET6  10
+
+/* Maximum lengths for string fields */
+#define COMM_LEN     16
+#define FILENAME_LEN 256
+
+/*
+ * struct event - Unified event structure sent from kernel to userspace.
+ * Layout must match exactly with Go struct Event in pkg/types/event.go
+ */
+struct event {
+	__u32 type;
+	__u64 timestamp;
+	__u32 pid;
+	__u32 tgid;
+	__u32 uid;
+	__u8  comm[COMM_LEN];
+	/* Union-style payload - only one field is valid based on type */
+	union {
+		struct {
+			__s64 nr;
+			__s64 ret;
+			__u64 args[6];
+		} syscall;
+		struct {
+			__u8  saddr[16];	/* Source IP: IPv4 in first 4 bytes, IPv6 uses all 16 */
+			__u8  daddr[16];	/* Dest IP: IPv4 in first 4 bytes, IPv6 uses all 16 */
+			__u16 sport;
+			__u16 dport;
+			__u8  proto;
+			__u8  family;		/* AF_INET (2) or AF_INET6 (10) */
+		} network;
+		struct {
+			__u8  filename[FILENAME_LEN];
+			__s32 flags;
+			__u32 mode;
+			__u8  op;
+		} file;
+	};
+} __attribute__((packed));
+
+/* Sampling configuration - configurable per event type */
+struct sampling_config {
+	__u32 syscall_rate;   /* Sample 1 in N syscall events (0 = disable, 1 = all) */
+	__u32 network_rate;   /* Sample 1 in N network events (0 = disable, 1 = all) */
+	__u32 file_rate;      /* Sample 1 in N file events (0 = disable, 1 = all) */
+	__u32 enabled;        /* Global sampling enable flag */
+};
+
+/* Sampling config map - writable from userspace */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct sampling_config);
+} sampling_config SEC(".maps");
+
+/* Per-CPU event counters for sampling */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 3); /* 0=syscall, 1=network, 2=file */
+	__type(key, __u32);
+	__type(value, __u64);
+} event_counters SEC(".maps");
+
+/* BPF map definitions using BTF-enabled maps (kernel 5.15+) */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 256 * 1024); /* 256KB ring buffer */
+} events SEC(".maps");
+
+/* Helper: check if event should be sampled based on rate */
+static __always_inline bool should_sample(__u32 event_type, __u32 rate)
+{
+	struct sampling_config *cfg;
+	__u32 key = 0;
+	__u32 counter_key;
+	__u64 *counter;
+	__u64 new_count;
+
+	/* Get sampling config */
+	cfg = bpf_map_lookup_elem(&sampling_config, &key);
+	if (!cfg || !cfg->enabled)
+		return true; /* No sampling config, emit all events */
+
+	/* Map event type to counter index */
+	switch (event_type) {
+	case EVENT_TYPE_SYSCALL:
+		counter_key = 0;
+		if (rate == 0) rate = cfg->syscall_rate;
+		break;
+	case EVENT_TYPE_TCP_CONNECT:
+		counter_key = 1;
+		if (rate == 0) rate = cfg->network_rate;
+		break;
+	case EVENT_TYPE_FILE_ACCESS:
+		counter_key = 2;
+		if (rate == 0) rate = cfg->file_rate;
+		break;
+	default:
+		return true;
+	}
+
+	/* Rate of 0 means disabled, rate of 1 means all events */
+	if (rate == 0)
+		return false; /* Drop all events of this type */
+	if (rate == 1)
+		return true;  /* Emit all events */
+
+	/* Increment counter and check if we should sample */
+	counter = bpf_map_lookup_elem(&event_counters, &counter_key);
+	if (counter) {
+		new_count = __sync_fetch_and_add(counter, 1);
+	} else {
+		new_count = 0;
+	}
+
+	/* Sample 1 in 'rate' events */
+	return (new_count % rate) == 0;
+}
+
+/* Helper macro to reserve space in ring buffer with sampling check */
+#define reserve_event_with_sampling(event_type, sample_rate) \
+	({ \
+		struct event *__e = NULL; \
+		if (should_sample(event_type, sample_rate)) { \
+			__e = bpf_ringbuf_reserve(&events, sizeof(struct event), 0); \
+		} \
+		__e; \
+	})
+
+/* Helper macro to reserve space in ring buffer (no sampling - legacy) */
+#define reserve_event() \
+	bpf_ringbuf_reserve(&events, sizeof(struct event), 0)
+
+/* Helper macro to submit event to ring buffer */
+#define submit_event(e) \
+	bpf_ringbuf_submit(e, 0)
+
+/* Helper to get current process info */
+static __always_inline void fill_process_info(struct event *e)
+{
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	__u64 uid_gid = bpf_get_current_uid_gid();
+	
+	e->pid = (__u32)(pid_tgid >> 32);
+	e->tgid = (__u32)pid_tgid;
+	e->uid = (__u32)uid_gid;
+	
+	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+	e->timestamp = bpf_ktime_get_ns();
+}
+
+#endif /* __EBPF_GUARD_COMMON_H */

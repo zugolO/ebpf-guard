@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ebpf-guard-config
+  namespace: ebpf-guard
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+    app.kubernetes.io/managed-by: manual
+data:
+  config.yaml: |
+    server:
+      bind_address: ":9090"
+      metrics_path: "/metrics"
+      health_path: "/health"
+    
+    bpf:
+      map_sizes:
+        events: 65536
+        processes: 16384
+        connections: 32768
+    
+    rules:
+      path: "/etc/ebpf-guard/rules.yaml"
+      hot_reload: true
+      rate_limit_alerts: true
+      rate_limit_window: 60
+      max_alerts_per_window: 10
+    
+    correlator:
+      buffer_size: 1000
+    
+    profiler:
+      enabled: true
+      learning_period: 3600
+      anomaly_threshold: 0.8
+      ewma_weight: 0.3
+      profile_ttl: 86400
+    
+    exporter:
+      enabled: true
+    
+    alerting:
+      enabled: false
+      webhook_url: ""
+      generator_url: "http://ebpf-guard:9090"
+      batch_size: 100
+      batch_timeout: 5
+      circuit_breaker_threshold: 5
+    
+    kubernetes:
+      enabled: true
+      kubeconfig_path: ""
+      resync_period: 300
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ebpf-guard-rules
+  namespace: ebpf-guard
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+    app.kubernetes.io/managed-by: manual
+data:
+  rules.yaml: |
+    rules:
+      - id: unexpected_egress
+        name: "Unexpected network egress"
+        description: "Process opened TCP connection to unknown destination"
+        event_type: network
+        condition:
+          field: dport
+          op: not_in
+          values: [80, 443, 53]
+        severity: warning
+        action: alert
+
+      - id: sensitive_file_read
+        name: "Sensitive file read"
+        description: "Process read sensitive system file"
+        event_type: file
+        condition:
+          field: filename
+          op: prefix
+          values: ["/etc/shadow", "/etc/passwd", "/proc/keys"]
+        severity: critical
+        action: alert

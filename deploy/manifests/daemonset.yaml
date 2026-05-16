@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpf-guard
+  namespace: ebpf-guard
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+    app.kubernetes.io/managed-by: manual
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ebpf-guard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ebpf-guard
+    spec:
+      serviceAccountName: ebpf-guard
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: ebpf-guard
+          image: ebpf-guard/ebpf-guard:0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            - name: cgroup-fs
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: proc-fs
+              mountPath: /proc
+              readOnly: true
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: config
+              mountPath: /etc/ebpf-guard/config.yaml
+              subPath: config.yaml
+            - name: rules
+              mountPath: /etc/ebpf-guard/rules.yaml
+              subPath: rules.yaml
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: cgroup-fs
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: proc-fs
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: config
+          configMap:
+            name: ebpf-guard-config
+        - name: rules
+          configMap:
+            name: ebpf-guard-rules

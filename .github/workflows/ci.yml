@@ -1,0 +1,292 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CLANG_VERSION: '15'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23']
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }}
+        sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: latest
+        args: --timeout=5m
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23']
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
+        sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run tests
+      run: go test -v -race -coverprofile=coverage.out ./...
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v4
+      with:
+        files: ./coverage.out
+        fail_ci_if_error: false
+
+  race-detector:
+    name: Race Detector
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23']
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
+        sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run race detector tests
+      run: go test -race ./internal/exporter/... ./internal/profiler/... -count=3
+
+    - name: Run stress tests
+      run: go test -race ./internal/exporter/... ./internal/profiler/... -count=10 -run "Stress|Concurrent|Race"
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23']
+        arch: [amd64, arm64]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
+        sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Set up QEMU
+      if: matrix.arch == 'arm64'
+      uses: docker/setup-qemu-action@v3
+
+    - name: Build binary
+      env:
+        GOOS: linux
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 0
+      run: |
+        make build
+        mv ebpf-guard ebpf-guard-linux-${{ matrix.arch }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ebpf-guard-linux-${{ matrix.arch }}-go${{ matrix.go-version }}
+        path: ebpf-guard-linux-${{ matrix.arch }}
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: false
+        tags: ebpf-guard:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  helm:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: '3.14.0'
+
+    - name: Lint Helm chart
+      run: |
+        helm lint deploy/helm/ebpf-guard
+        helm template deploy/helm/ebpf-guard > /dev/null
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run gosec
+      uses: securego/gosec@master
+      with:
+        args: '-no-fail -fmt sarif -out gosec-results.sarif ./...'
+
+    - name: Upload gosec results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'gosec-results.sarif'
+
+  performance:
+    name: Performance Regression Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.23']
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
+        sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run performance tests
+      run: |
+        go test -v ./e2e/... -run "TestPerformanceRegression|TestShardedLockContention|TestMemoryProfileAtLoad" -timeout 10m
+
+    - name: Run benchmarks
+      run: |
+        go test -bench=BenchmarkCorrelationEngine -benchtime=10s ./e2e/...
+        go test -bench=BenchmarkShardedBufferContention -benchtime=10s ./e2e/...
+
+    - name: Run profiler benchmarks (Sprint 13.2)
+      run: |
+        echo "=== ProcessEvent Benchmark (target p99 < 10µs) ==="
+        go test -bench=BenchmarkProcessEvent -benchtime=5s ./internal/profiler/...
+        echo "=== IsLearningComplete Benchmark (atomic.Bool fast path) ==="
+        go test -bench=BenchmarkIsLearningComplete -benchtime=5s ./internal/profiler/...
+        echo "=== Parallel Processing Benchmark ==="
+        go test -bench=BenchmarkProcessEventParallel -benchtime=5s ./internal/profiler/...
+
+    - name: Upload performance results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: performance-results-go${{ matrix.go-version }}
+        path: |
+          /tmp/ebpf-guard-*.prof
+          /tmp/performance-*.json

@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Build artifacts
+*.exe
+*.test
+*.out
+coverage.out
+ebpf-guard
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+e2e.test
+
+# Local config (don't bake secrets into images)
+config/local.yaml
+config/secrets.yaml
+
+# CI/CD
+.github/
+
+# Helm charts (separate build)
+deploy/helm/
+
+# eBPF object files (will be regenerated)
+*.o

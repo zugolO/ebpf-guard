@@ -1,0 +1,121 @@
+# VerticalPodAutoscaler for ebpf-guard
+# 
+# The VPA automatically adjusts CPU and memory requests/limits for pods
+# based on actual usage. This helps optimize resource allocation and
+# prevent OOMKills or CPU throttling.
+#
+# IMPORTANT: For eBPF workloads, VPA should be used with caution because:
+# 1. eBPF programs run in kernel space and don't directly consume container resources
+# 2. Memory usage is primarily for event buffering and correlation
+# 3. CPU usage spikes during high event rates
+#
+# Recommendation: Start with "Off" mode to observe recommendations, then
+# switch to "Auto" or "Initial" mode once baseline is established.
+#
+# Installation:
+#   kubectl apply -f deploy/manifests/verticalpodautoscaler.yaml
+#
+# Prerequisites:
+#   - VPA admission controller must be installed in the cluster
+#   - See: https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler
+
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ebpf-guard-vpa
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+    app.kubernetes.io/component: autoscaler
+spec:
+  # targetRef points to the DaemonSet managing ebpf-guard pods
+  targetRef:
+    apiVersion: apps/v1
+    kind: DaemonSet
+    name: ebpf-guard
+  
+  # updatePolicy controls how VPA applies recommendations
+  updatePolicy:
+    # updateMode options:
+    # - "Off": VPA does not modify resources, only provides recommendations
+    # - "Initial": VPA assigns recommendations only at pod creation
+    # - "Recreate": VPA evicts and recreates pods to apply recommendations
+    # - "Auto": Same as Recreate (deprecated, use Recreate instead)
+    updateMode: "Off"
+    
+    # Minimum number of replicas that must be kept during eviction
+    # For DaemonSet, this ensures at least one pod per node remains
+    minReplicas: 1
+  
+  # resourcePolicy controls which containers and resources are autoscaled
+  resourcePolicy:
+    containerPolicies:
+      - containerName: ebpf-guard
+        # Control which resources are autoscaled
+        controlledResources:
+          - cpu
+          - memory
+        
+        # Controlled values determines what VPA adjusts:
+        # - "RequestsAndLimits": VPA adjusts both requests and limits
+        # - "RequestsOnly": VPA adjusts only requests (recommended for eBPF)
+        controlledValues: RequestsOnly
+        
+        # Minimum allowed resources (prevent over-aggressive downscaling)
+        minAllowed:
+          cpu: 50m
+          memory: 64Mi
+        
+        # Maximum allowed resources (prevent runaway scaling)
+        maxAllowed:
+          cpu: 2000m
+          memory: 1Gi
+        
+        # Target resource utilization percentage
+        # Lower values = more headroom, higher values = tighter packing
+        # For eBPF workloads, recommend 60-70% to handle event spikes
+        #
+        # Note: targetRef is not valid in containerPolicies, removing it
+  
+  # recommendationAdditionalFields allows fetching extra information
+  # about VPA recommendations (experimental)
+  # recommendationAdditionalFields:
+  #   containerRecommendations: true
+
+---
+# Example VPA in "Recreate" mode for production use
+# Only apply after observing recommendations in "Off" mode
+# and establishing baseline resource usage
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ebpf-guard-vpa-active
+  namespace: default
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+    app.kubernetes.io/component: autoscaler
+    mode: active
+  annotations:
+    # This VPA is disabled by default - remove annotation to enable
+    vpa.disabled: "true"
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: DaemonSet
+    name: ebpf-guard
+  updatePolicy:
+    updateMode: "Recreate"
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: ebpf-guard
+        controlledResources:
+          - cpu
+          - memory
+        controlledValues: RequestsOnly
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: 1000m
+          memory: 512Mi

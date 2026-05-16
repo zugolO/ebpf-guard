@@ -1,0 +1,351 @@
+# Container Escape Detection Rules for ebpf-guard
+# Detects attempts to break out of container isolation
+
+rules:
+  # ============================================================================
+  # Privilege Escalation via Mount
+  # ============================================================================
+
+  # Mount syscall from container (potential container escape)
+  - id: container_escape_mount
+    name: "Container Escape: Mount syscall from container"
+    description: "Container process executed mount syscall (attempting to access host filesystem)"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["165"]  # mount syscall
+    severity: critical
+    action: alert
+    tags: [container-escape, privilege-escalation, mount, cis]
+
+  # Mount of sensitive host paths
+  - id: container_escape_host_mount
+    name: "Container Escape: Mount of host filesystem path"
+    description: "Container attempting to mount host root or sensitive directories"
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/host/"
+        - "/hostroot/"
+        - "/proc/1/root/"
+        - "/var/lib/docker/"
+        - "/var/lib/containerd/"
+        - "/var/lib/kubelet/"
+        - "/run/containerd/"
+    severity: critical
+    action: alert
+    tags: [container-escape, host-mount, docker-socket]
+
+  # ============================================================================
+  # Namespace Breakout
+  # ============================================================================
+
+  # nsenter syscall (enter another namespace)
+  - id: container_escape_nsenter
+    name: "Container Escape: Namespace enter attempt"
+    description: "Process used nsenter to enter another namespace"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["308"]  # setns syscall (nsenter uses this)
+    severity: critical
+    action: alert
+    tags: [container-escape, namespace-breakout, nsenter]
+
+  # unshare with CLONE_NEWUSER (attempting to create new user namespace)
+  - id: container_escape_unshare_user
+    name: "Container Escape: User namespace creation"
+    description: "Process created new user namespace (potential privilege escalation)"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["272"]  # unshare syscall
+    severity: warning
+    action: alert
+    tags: [container-escape, unshare, user-namespace]
+
+  # ============================================================================
+  # Kernel Exploitation
+  # ============================================================================
+
+  # Write to /proc/sysrq-trigger (system request key)
+  - id: container_escape_sysrq_trigger
+    name: "Container Escape: SysRq trigger write"
+    description: "Process wrote to /proc/sysrq-trigger (kernel debugging interface)"
+    event_type: file
+    condition:
+      field: filename
+      op: equals
+      values: ["/proc/sysrq-trigger"]
+    severity: critical
+    action: alert
+    tags: [container-escape, kernel-exploit, sysrq, privilege-escalation]
+
+  # Access to kernel memory devices
+  - id: container_escape_kmem_access
+    name: "Container Escape: Kernel memory device access"
+    description: "Process accessed /dev/mem or /dev/kmem (direct kernel memory access)"
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/dev/mem"
+        - "/dev/kmem"
+        - "/dev/port"
+        - "/dev/kmsg"
+    severity: critical
+    action: alert
+    tags: [container-escape, kernel-memory, device-access]
+
+  # Access to kernel modules
+  - id: container_escape_module_access
+    name: "Container Escape: Kernel module access"
+    description: "Process accessing kernel module interface"
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/sys/module/"
+        - "/lib/modules/"
+        - "/proc/kallsyms"
+        - "/proc/modules"
+    severity: warning
+    action: alert
+    tags: [container-escape, kernel-module, rootkit]
+
+  # ============================================================================
+  # Capabilities Abuse
+  # ============================================================================
+
+  # CAP_SYS_ADMIN operations (full system administration)
+  - id: container_escape_cap_sys_admin
+    name: "Container Escape: CAP_SYS_ADMIN operation"
+    description: "Process performed operation requiring CAP_SYS_ADMIN"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values:
+        - "165"   # mount
+        - "166"   # umount2
+        - "272"   # unshare
+        - "308"   # setns
+        - "159"   # pivot_root
+    severity: critical
+    action: alert
+    tags: [container-escape, capabilities, cap-sys-admin]
+
+  # pivot_root syscall (change root directory)
+  - id: container_escape_pivot_root
+    name: "Container Escape: pivot_root syscall"
+    description: "Process changed root filesystem (pivot_root)"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["155"]  # pivot_root syscall
+    severity: critical
+    action: alert
+    tags: [container-escape, pivot-root, chroot]
+
+  # chroot syscall (potential chroot escape)
+  - id: container_escape_chroot
+    name: "Container Escape: chroot syscall"
+    description: "Process executed chroot (may indicate escape attempt)"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["161"]  # chroot syscall
+    severity: warning
+    action: alert
+    tags: [container-escape, chroot, filesystem]
+
+  # ============================================================================
+  # cgroup Escape
+  # ============================================================================
+
+  # cgroup v1 release_agent escape
+  - id: container_escape_cgroup_v1_release_agent
+    name: "Container Escape: cgroup v1 release_agent modification"
+    description: "Process modified cgroup release_agent (known escape vector)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/sys/fs/cgroup/.*release_agent"
+        - "/sys/fs/cgroup/memory/release_agent"
+        - "/sys/fs/cgroup/rdma/release_agent"
+    severity: critical
+    action: alert
+    tags: [container-escape, cgroup, release-agent, cve]
+
+  # cgroup v2 escape attempt
+  - id: container_escape_cgroup_v2
+    name: "Container Escape: cgroup v2 manipulation"
+    description: "Process manipulating cgroup v2 filesystem"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/sys/fs/cgroup/\\.\\./"
+        - "/sys/fs/cgroup/unified/"
+    severity: warning
+    action: alert
+    tags: [container-escape, cgroup, cgroup-v2]
+
+  # ============================================================================
+  # Docker/Podman Socket Abuse
+  # ============================================================================
+
+  # Access to Docker socket
+  - id: container_escape_docker_socket
+    name: "Container Escape: Docker socket access"
+    description: "Process accessing Docker daemon socket (container breakout)"
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/var/run/docker.sock"
+        - "/run/docker.sock"
+        - "/var/run/docker.socket"
+    severity: critical
+    action: alert
+    tags: [container-escape, docker-socket, container-breakout]
+
+  # Access to containerd socket
+  - id: container_escape_containerd_socket
+    name: "Container Escape: containerd socket access"
+    description: "Process accessing containerd socket (container breakout)"
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/run/containerd/containerd.sock"
+        - "/run/containerd/snapshotter/"
+        - "/var/run/containerd/containerd.sock"
+    severity: critical
+    action: alert
+    tags: [container-escape, containerd-socket, container-breakout]
+
+  # Access to CRI-O socket
+  - id: container_escape_crio_socket
+    name: "Container Escape: CRI-O socket access"
+    description: "Process accessing CRI-O socket (container breakout)"
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/var/run/crio/crio.sock"
+        - "/run/crio/crio.sock"
+    severity: critical
+    action: alert
+    tags: [container-escape, crio-socket, container-breakout]
+
+  # ============================================================================
+  # Host Network Abuse
+  # ============================================================================
+
+  # Access to host network namespace
+  - id: container_escape_host_network
+    name: "Container Escape: Host network interface access"
+    description: "Container process accessing host network configuration"
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/sys/class/net/"
+        - "/proc/net/"
+        - "/sys/devices/virtual/net/"
+    severity: warning
+    action: alert
+    tags: [container-escape, host-network, network-namespace]
+
+  # ============================================================================
+  # Core Pattern / Crash Exploitation
+  # ============================================================================
+
+  # Core pattern modification (privilege escalation via core dump)
+  - id: container_escape_core_pattern
+    name: "Container Escape: Core pattern modification"
+    description: "Process modifying kernel core dump pattern (privilege escalation vector)"
+    event_type: file
+    condition:
+      field: filename
+      op: equals
+      values: ["/proc/sys/kernel/core_pattern"]
+    severity: critical
+    action: alert
+    tags: [container-escape, core-pattern, privilege-escalation, cve]
+
+  # ============================================================================
+  # Device Abuse
+  # ============================================================================
+
+  # Access to host devices
+  - id: container_escape_host_device
+    name: "Container Escape: Host device access"
+    description: "Container accessing raw host block devices"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/dev/sd[a-z][0-9]*"
+        - "/dev/hd[a-z][0-9]*"
+        - "/dev/nvme[0-9]n[0-9]*"
+        - "/dev/vd[a-z][0-9]*"
+        - "/dev/xvd[a-z][0-9]*"
+        - "/dev/mapper/"
+        - "/dev/dm-[0-9]+"
+    severity: critical
+    action: alert
+    tags: [container-escape, host-device, block-device]
+
+  # ============================================================================
+  # procfs and sysfs Abuse
+  # ============================================================================
+
+  # Writing to /proc (kernel parameters)
+  - id: container_escape_proc_write
+    name: "Container Escape: /proc write attempt"
+    description: "Process writing to /proc filesystem (kernel parameter modification)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/proc/sys/.*"
+        - "/proc/irq/.*"
+        - "/proc/bus/.*"
+    severity: warning
+    action: alert
+    tags: [container-escape, procfs, kernel-parameters]
+
+  # Access to host's /proc/1
+  - id: container_escape_init_proc
+    name: "Container Escape: Init process access"
+    description: "Container accessing init process (PID 1) information"
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/proc/1/"
+        - "/proc/self/root/proc/1/"
+    severity: warning
+    action: alert
+    tags: [container-escape, init-process, pid-1]

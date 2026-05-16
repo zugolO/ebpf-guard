@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  GO_VERSION: '1.23'
+  CLANG_VERSION: '15'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
+        sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Set up QEMU
+      if: matrix.arch == 'arm64'
+      uses: docker/setup-qemu-action@v3
+
+    - name: Get version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.os }}
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 0
+        LDFLAGS: >-
+          -X main.Version=${{ steps.get_version.outputs.VERSION }}
+          -X main.Commit=${{ github.sha }}
+      run: |
+        go build -ldflags "$LDFLAGS" -o ebpf-guard-${{ matrix.os }}-${{ matrix.arch }} ./cmd/ebpf-guard
+
+    - name: Create checksum
+      run: |
+        sha256sum ebpf-guard-${{ matrix.os }}-${{ matrix.arch }} > ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.sha256
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}
+        path: |
+          ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}
+          ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.sha256
+
+  docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=tag
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+
+    - name: Build and push
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  helm:
+    name: Package and Push Helm Chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: '3.14.0'
+
+    - name: Log in to Container Registry
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+    - name: Package Helm chart
+      run: |
+        helm package deploy/helm/ebpf-guard --destination .
+
+    - name: Push Helm chart
+      run: |
+        CHART_FILE=$(ls ebpf-guard-*.tgz | head -n1)
+        helm push "$CHART_FILE" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, docker, helm]
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        pattern: ebpf-guard-*
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+        git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD~1)..HEAD >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        body: |
+          ## Changes
+          ${{ steps.changelog.outputs.CHANGELOG }}
+
+          ## Docker Images
+          - `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
+
+          ## Helm Chart
+          ```bash
+          helm install ebpf-guard oci://ghcr.io/${{ github.repository_owner }}/charts/ebpf-guard --version ${{ github.ref_name }}
+          ```
+        files: |
+          artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64
+          artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64.sha256
+          artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64
+          artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.sha256
+        draft: false
+        prerelease: ${{ contains(github.ref_name, '-') }}

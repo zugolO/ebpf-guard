@@ -1,0 +1,305 @@
+package correlator
+
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestShardedEventBuffer_AddAndGet(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	event := types.Event{
+		Type: types.EventSyscall,
+		PID:  1234,
+	}
+
+	sb.Add(1234, event)
+
+	events := sb.Get(1234)
+	require.Len(t, events, 1)
+	assert.Equal(t, types.EventSyscall, events[0].Type)
+	assert.Equal(t, uint32(1234), events[0].PID)
+}
+
+func TestShardedEventBuffer_GetNonExistent(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	events := sb.Get(9999)
+	assert.Nil(t, events)
+}
+
+func TestShardedEventBuffer_CircularBuffer(t *testing.T) {
+	sb := NewShardedEventBuffer(5)
+
+	// Add 7 events (more than capacity)
+	for i := 0; i < 7; i++ {
+		event := types.Event{
+			Type:      types.EventSyscall,
+			PID:       1234,
+			Timestamp: uint64(i),
+		}
+		sb.Add(1234, event)
+	}
+
+	events := sb.Get(1234)
+	require.Len(t, events, 5)
+
+	// Should contain events 2-6 (oldest 2 were overwritten)
+	for i, e := range events {
+		assert.Equal(t, uint64(i+2), e.Timestamp)
+	}
+}
+
+func TestShardedEventBuffer_GetRecent(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	for i := 0; i < 10; i++ {
+		event := types.Event{
+			Type:      types.EventSyscall,
+			PID:       1234,
+			Timestamp: uint64(i),
+		}
+		sb.Add(1234, event)
+	}
+
+	recent := sb.GetRecent(1234, 3)
+	require.Len(t, recent, 3)
+	assert.Equal(t, uint64(7), recent[0].Timestamp)
+	assert.Equal(t, uint64(8), recent[1].Timestamp)
+	assert.Equal(t, uint64(9), recent[2].Timestamp)
+}
+
+func TestShardedEventBuffer_Remove(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	sb.Add(1234, types.Event{Type: types.EventSyscall, PID: 1234})
+	sb.Remove(1234)
+
+	events := sb.Get(1234)
+	assert.Nil(t, events)
+}
+
+func TestShardedEventBuffer_Clear(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	for i := uint32(1); i <= 5; i++ {
+		sb.Add(i, types.Event{Type: types.EventSyscall, PID: i})
+	}
+
+	sb.Clear()
+
+	for i := uint32(1); i <= 5; i++ {
+		events := sb.Get(i)
+		assert.Nil(t, events)
+	}
+}
+
+func TestShardedEventBuffer_PIDs(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	for i := uint32(1); i <= 5; i++ {
+		sb.Add(i, types.Event{Type: types.EventSyscall, PID: i})
+	}
+
+	pids := sb.PIDs()
+	assert.Len(t, pids, 5)
+
+	pidMap := make(map[uint32]bool)
+	for _, pid := range pids {
+		pidMap[pid] = true
+	}
+
+	for i := uint32(1); i <= 5; i++ {
+		assert.True(t, pidMap[i], "PID %d should be in the list", i)
+	}
+}
+
+func TestShardedEventBuffer_Count(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	assert.Equal(t, 0, sb.Count())
+
+	for i := uint32(1); i <= 5; i++ {
+		sb.Add(i, types.Event{Type: types.EventSyscall, PID: i})
+	}
+
+	assert.Equal(t, 5, sb.Count())
+}
+
+func TestShardedEventBuffer_ConcurrentAccess(t *testing.T) {
+	sb := NewShardedEventBuffer(100)
+
+	var wg sync.WaitGroup
+	numGoroutines := 100
+	eventsPerGoroutine := 100
+
+	// Concurrent writes
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(pid uint32) {
+			defer wg.Done()
+			for j := 0; j < eventsPerGoroutine; j++ {
+				sb.Add(pid, types.Event{
+					Type: types.EventSyscall,
+					PID:  pid,
+				})
+			}
+		}(uint32(i))
+	}
+
+	// Concurrent reads
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(pid uint32) {
+			defer wg.Done()
+			for j := 0; j < eventsPerGoroutine; j++ {
+				sb.Get(pid)
+			}
+		}(uint32(i))
+	}
+
+	wg.Wait()
+
+	// Verify all data is present
+	assert.Equal(t, numGoroutines, sb.Count())
+}
+
+func TestShardedEventBuffer_Distribution(t *testing.T) {
+	// Test that events are distributed across shards
+	sb := NewShardedEventBuffer(10)
+
+	// Add events with PIDs that hash to different shards
+	for i := uint32(0); i < 1000; i++ {
+		sb.Add(i, types.Event{Type: types.EventSyscall, PID: i})
+	}
+
+	// Count events per shard
+	counts := make([]int, shardCount)
+	for i := 0; i < shardCount; i++ {
+		shard := sb.shards[i]
+		shard.mu.RLock()
+		counts[i] = len(shard.buffers)
+		shard.mu.RUnlock()
+	}
+
+	// All shards should have some data (with 1000 PIDs and 16 shards)
+	for i, count := range counts {
+		assert.Greater(t, count, 0, "Shard %d should have data", i)
+	}
+}
+
+func TestShardedLock_Basic(t *testing.T) {
+	sl := NewShardedLock()
+	pid := uint32(1234)
+
+	sl.Lock(pid)
+	assert.True(t, true) // Lock acquired
+	sl.Unlock(pid)
+}
+
+func TestShardedLock_TryLock(t *testing.T) {
+	sl := NewShardedLock()
+	pid := uint32(1234)
+
+	assert.True(t, sl.TryLock(pid))
+	sl.Unlock(pid)
+}
+
+func TestShardedLock_Concurrent(t *testing.T) {
+	sl := NewShardedLock()
+	var counter atomic.Int64
+	var wg sync.WaitGroup
+
+	numGoroutines := 100
+	iterations := 1000
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(pid uint32) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				sl.Lock(pid)
+				counter.Add(1)
+				sl.Unlock(pid)
+			}
+		}(uint32(i % shardCount)) // Use only shardCount different PIDs
+	}
+
+	wg.Wait()
+	assert.Equal(t, int64(numGoroutines*iterations), counter.Load())
+}
+
+func BenchmarkShardedEventBuffer_Add(b *testing.B) {
+	sb := NewShardedEventBuffer(100)
+	event := types.Event{Type: types.EventSyscall}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		pid := uint32(1)
+		for pb.Next() {
+			sb.Add(pid, event)
+			pid++
+		}
+	})
+}
+
+func BenchmarkShardedEventBuffer_AddSamePID(b *testing.B) {
+	sb := NewShardedEventBuffer(100)
+	event := types.Event{Type: types.EventSyscall, PID: 1234}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			sb.Add(1234, event)
+		}
+	})
+}
+
+func BenchmarkEventBuffer_Add(b *testing.B) {
+	eb := NewEventBuffer(100)
+	event := types.Event{Type: types.EventSyscall}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		pid := uint32(1)
+		for pb.Next() {
+			eb.Add(pid, event)
+			pid++
+		}
+	})
+}
+
+func BenchmarkShardedLock_Contention(b *testing.B) {
+	sl := NewShardedLock()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		pid := uint32(1)
+		for pb.Next() {
+			start := time.Now()
+			sl.Lock(pid)
+			sl.RecordContention(pid, time.Since(start).Nanoseconds())
+			sl.Unlock(pid)
+			pid++
+		}
+	})
+}
+
+func BenchmarkShardedLock_SamePID(b *testing.B) {
+	sl := NewShardedLock()
+	pid := uint32(1234)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			sl.Lock(pid)
+			sl.Unlock(pid)
+		}
+	})
+}

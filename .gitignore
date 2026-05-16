@@ -1,0 +1,72 @@
+# ── Binaries ──────────────────────────────────────────────────────────────────
+ebpf-guard
+ebpf-guard.exe
+*.exe
+*.test
+*.test.exe
+e2e.test
+e2e.test.exe
+
+# ── Build artifacts ────────────────────────────────────────────────────────────
+/bin/
+/dist/
+/out/
+
+# ── eBPF generated objects (require clang + Linux to rebuild) ─────────────────
+bpf/*.o
+bpf/*_bpf.go
+internal/bpf/*_bpf.go
+internal/bpf/*_bpfel.go
+internal/bpf/*_bpfeb.go
+internal/bpf/*_x86_bpfel.go
+internal/bpf/*_arm64_bpfeb.go
+vmlinux.h
+
+# ── Go toolchain ───────────────────────────────────────────────────────────────
+vendor/
+coverage.out
+coverage.html
+*.prof
+cpu.prof
+mem.prof
+trace.out
+
+# ── Secrets & credentials ──────────────────────────────────────────────────────
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+.env
+.env.*
+!.env.example
+secrets/
+config/secrets.yaml
+config/secrets.yml
+
+# ── Kubernetes / Helm generated ────────────────────────────────────────────────
+deploy/helm/*/charts/
+deploy/helm/*/*.lock
+
+# ── AI-assisted development meta-files ────────────────────────────────────────
+AGENTS.md
+TASK.md
+KIMI_SYSTEM_PROMT.md
+ANALYZE_PROJECT.md
+ANALYZE_PROJECT-2.md
+ANALYZE_PROJECT*.md
+*.session.md
+.cursor/
+.aider*
+.claude/
+
+# ── OS & editor noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

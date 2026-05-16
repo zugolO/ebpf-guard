@@ -1,0 +1,92 @@
+# ebpf-guard Makefile
+# Requires: go 1.23+, clang, llvm, kernel headers
+
+.PHONY: all generate build test lint clean docker helm-lint
+
+# Variables
+BINARY_NAME := ebpf-guard
+BUILD_DIR := build
+BPF_DIR := bpf
+GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
+BPF_FILES := $(wildcard $(BPF_DIR)/*.bpf.c)
+
+# BPF build flags
+BPF_CLANG := clang
+BPF_CFLAGS := -O2 -g -Wall -Werror -target bpf -D__TARGET_ARCH_x86_64 -I/usr/include/x86_64-linux-gnu
+
+# Default target
+all: generate build
+
+# Generate Go bindings from eBPF C code using bpf2go
+# This requires clang and kernel headers to be installed
+generate:
+	@echo "Generating eBPF bindings with bpf2go..."
+	@which clang > /dev/null 2>&1 || (echo "Error: clang not found. Install clang and llvm." && exit 1)
+	go generate ./...
+
+# Build the main binary
+build:
+	@echo "Building $(BINARY_NAME)..."
+	mkdir -p $(BUILD_DIR)
+	go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
+
+# Run all tests with race detector
+test:
+	@echo "Running tests with race detector..."
+	go test -v -race ./...
+
+# Run tests without race detector (for platforms that don't support it)
+test-norace:
+	@echo "Running tests without race detector..."
+	go test -v ./...
+
+# Run go vet and linting
+lint:
+	@echo "Running linters..."
+	go vet ./...
+	@which golangci-lint > /dev/null 2>&1 && golangci-lint run || echo "golangci-lint not installed, skipping"
+
+# Clean build artifacts
+clean:
+	@echo "Cleaning..."
+	rm -rf $(BUILD_DIR)
+	go clean
+
+# Build Docker image
+docker:
+	@echo "Building Docker image..."
+	docker build -t ebpf-guard:latest .
+
+# Lint Helm charts
+helm-lint:
+	@echo "Linting Helm charts..."
+	@which helm > /dev/null 2>&1 && helm lint deploy/helm/ || echo "helm not installed, skipping"
+
+# Development helpers
+fmt:
+	go fmt ./...
+
+vet:
+	go vet ./...
+
+mod-tidy:
+	go mod tidy
+
+# Run the agent locally (requires root for eBPF)
+run: build
+	sudo $(BUILD_DIR)/$(BINARY_NAME)
+
+# Install dependencies
+deps:
+	go mod download
+	go mod verify
+
+# Run storage benchmarks
+bench-store:
+	@echo "Running storage benchmarks..."
+	go test -bench=BenchmarkStore -benchtime=10s -count=3 ./internal/store/...
+
+# Run all benchmarks
+bench:
+	@echo "Running all benchmarks..."
+	go test -bench=. -benchtime=10s -count=3 ./...

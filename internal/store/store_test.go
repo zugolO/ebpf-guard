@@ -1,0 +1,287 @@
+// Package store provides storage backends for alerts and profiles.
+package store
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestMemoryStore_StoreAndQuery(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	alert := types.Alert{
+		ID:        "test-1",
+		Timestamp: time.Now(),
+		RuleID:    "rule-001",
+		Severity:  types.SeverityWarning,
+		PID:       1234,
+		Comm:      "test-process",
+		Message:   "Test alert",
+	}
+
+	err := store.Store(ctx, alert)
+	require.NoError(t, err)
+
+	// Query by ID
+	result, err := store.QueryByID(ctx, "test-1")
+	require.NoError(t, err)
+	assert.Equal(t, alert.ID, result.ID)
+	assert.Equal(t, alert.RuleID, result.RuleID)
+}
+
+func TestMemoryStore_QueryWithFilters(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	now := time.Now()
+	alerts := []types.Alert{
+		{ID: "1", Timestamp: now, RuleID: "rule-a", Severity: types.SeverityWarning, PID: 100, Comm: "proc1"},
+		{ID: "2", Timestamp: now.Add(-time.Hour), RuleID: "rule-b", Severity: types.SeverityCritical, PID: 200, Comm: "proc2"},
+		{ID: "3", Timestamp: now.Add(-2 * time.Hour), RuleID: "rule-a", Severity: types.SeverityWarning, PID: 100, Comm: "proc1"},
+	}
+
+	for _, alert := range alerts {
+		require.NoError(t, store.Store(ctx, alert))
+	}
+
+	tests := []struct {
+		name     string
+		filters  QueryFilters
+		expected int
+	}{
+		{
+			name:     "no filters returns all",
+			filters:  QueryFilters{},
+			expected: 3,
+		},
+		{
+			name:     "filter by rule_id",
+			filters:  QueryFilters{RuleIDs: []string{"rule-a"}},
+			expected: 2,
+		},
+		{
+			name:     "filter by severity",
+			filters:  QueryFilters{Severity: []types.Severity{types.SeverityCritical}},
+			expected: 1,
+		},
+		{
+			name:     "filter by pid",
+			filters:  QueryFilters{PIDs: []uint32{100}},
+			expected: 2,
+		},
+		{
+			name:     "filter by time range",
+			filters:  QueryFilters{Since: now.Add(-30 * time.Minute)},
+			expected: 1,
+		},
+		{
+			name:     "limit results",
+			filters:  QueryFilters{Limit: 2},
+			expected: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			results, err := store.Query(ctx, tt.filters)
+			require.NoError(t, err)
+			assert.Len(t, results, tt.expected)
+		})
+	}
+}
+
+func TestMemoryStore_StoreBatch(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	alerts := []types.Alert{
+		{ID: "1", Timestamp: time.Now(), RuleID: "rule-1", Severity: types.SeverityWarning},
+		{ID: "2", Timestamp: time.Now(), RuleID: "rule-2", Severity: types.SeverityCritical},
+		{ID: "3", Timestamp: time.Now(), RuleID: "rule-3", Severity: types.SeverityWarning},
+	}
+
+	err := store.StoreBatch(ctx, alerts)
+	require.NoError(t, err)
+
+	count, err := store.Count(ctx, QueryFilters{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
+}
+
+func TestMemoryStore_Delete(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	oldAlert := types.Alert{
+		ID:        "old",
+		Timestamp: time.Now().Add(-48 * time.Hour),
+		RuleID:    "rule-1",
+		Severity:  types.SeverityWarning,
+	}
+	newAlert := types.Alert{
+		ID:        "new",
+		Timestamp: time.Now(),
+		RuleID:    "rule-2",
+		Severity:  types.SeverityCritical,
+	}
+
+	require.NoError(t, store.Store(ctx, oldAlert))
+	require.NoError(t, store.Store(ctx, newAlert))
+
+	deleted, err := store.Delete(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+
+	count, err := store.Count(ctx, QueryFilters{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+}
+
+func TestMemoryStore_Healthy(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	assert.True(t, store.Healthy(ctx))
+}
+
+func TestMemoryProfileStore(t *testing.T) {
+	store := NewMemoryProfileStore()
+	ctx := context.Background()
+
+	profile := &types.ProcessProfile{
+		Comm:      "nginx",
+		Namespace: "production",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		SyscallCounts: map[int]float64{
+			0: 100, // read
+			1: 50,  // write
+		},
+	}
+
+	err := store.Store(ctx, profile)
+	require.NoError(t, err)
+
+	// Load by key
+	key := profileKey(profile)
+	loaded, err := store.Load(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, profile.Comm, loaded.Comm)
+	assert.Equal(t, profile.Namespace, loaded.Namespace)
+
+	// Load all
+	all, err := store.LoadAll(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 1)
+
+	// Delete
+	err = store.Delete(ctx, key)
+	require.NoError(t, err)
+
+	_, err = store.Load(ctx, key)
+	assert.Error(t, err)
+}
+
+func TestMatchesFilters(t *testing.T) {
+	now := time.Now()
+	alert := types.Alert{
+		Timestamp: now,
+		RuleID:    "rule-1",
+		Severity:  types.SeverityWarning,
+		PID:       1234,
+		Enrichment: types.EnrichmentInfo{
+			PodName:   "test-pod",
+			Namespace: "default",
+		},
+	}
+
+	tests := []struct {
+		name    string
+		filters QueryFilters
+		want    bool
+	}{
+		{
+			name:    "empty filters matches",
+			filters: QueryFilters{},
+			want:    true,
+		},
+		{
+			name:    "matching rule_id",
+			filters: QueryFilters{RuleIDs: []string{"rule-1"}},
+			want:    true,
+		},
+		{
+			name:    "non-matching rule_id",
+			filters: QueryFilters{RuleIDs: []string{"rule-2"}},
+			want:    false,
+		},
+		{
+			name:    "matching severity",
+			filters: QueryFilters{Severity: []types.Severity{types.SeverityWarning}},
+			want:    true,
+		},
+		{
+			name:    "non-matching severity",
+			filters: QueryFilters{Severity: []types.Severity{types.SeverityCritical}},
+			want:    false,
+		},
+		{
+			name:    "matching pid",
+			filters: QueryFilters{PIDs: []uint32{1234}},
+			want:    true,
+		},
+		{
+			name:    "non-matching pid",
+			filters: QueryFilters{PIDs: []uint32{5678}},
+			want:    false,
+		},
+		{
+			name:    "matching pod name",
+			filters: QueryFilters{PodName: "test-pod"},
+			want:    true,
+		},
+		{
+			name:    "non-matching pod name",
+			filters: QueryFilters{PodName: "other-pod"},
+			want:    false,
+		},
+		{
+			name:    "matching namespace",
+			filters: QueryFilters{Namespace: "default"},
+			want:    true,
+		},
+		{
+			name:    "non-matching namespace",
+			filters: QueryFilters{Namespace: "kube-system"},
+			want:    false,
+		},
+		{
+			name:    "time range includes alert",
+			filters: QueryFilters{Since: now.Add(-time.Hour), Until: now.Add(time.Hour)},
+			want:    true,
+		},
+		{
+			name:    "time range excludes alert (before)",
+			filters: QueryFilters{Until: now.Add(-time.Hour)},
+			want:    false,
+		},
+		{
+			name:    "time range excludes alert (after)",
+			filters: QueryFilters{Since: now.Add(time.Hour)},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesFilters(alert, tt.filters)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

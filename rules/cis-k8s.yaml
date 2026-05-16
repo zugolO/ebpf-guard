@@ -1,0 +1,51 @@
+# CIS Kubernetes Benchmark Rules for ebpf-guard
+# Based on CIS Kubernetes Benchmark v1.8.0 (5.x controls)
+
+rules:
+  # CIS 5.1.1: Ensure that the cluster-admin role is only used where required
+  - id: cis_5_1_1_cluster_admin_usage
+    name: "CIS 5.1.1: Cluster-admin role usage"
+    description: "Detects processes using cluster-admin privileges"
+    event_type: syscall
+    condition:
+      field: comm
+      op: regex
+      values: ["kubectl", "helm"]
+    severity: warning
+    action: alert
+
+  # CIS 5.1.3: Minimize access to secrets
+  - id: cis_5_1_3_secret_access
+    name: "CIS 5.1.3: Direct secret access detected"
+    description: "Process accessing Kubernetes secrets directly"
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values: ["/var/lib/kubelet/pods/", "/run/secrets/kubernetes.io/"]
+    severity: warning
+    action: alert
+
+  # CIS 5.2.1: Minimize the admission of privileged containers
+  - id: cis_5_2_1_privileged_container
+    name: "CIS 5.2.1: Privileged container detected"
+    description: "Container running with privileged security context"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["160"]  # unshare syscall
+    severity: critical
+    action: alert
+
+  # CIS 5.2.5: Minimize the admission of containers with allowPrivilegeEscalation
+  - id: cis_5_2_5_privilege_escalation
+    name: "CIS 5.2.5: Privilege escalation detected"
+    description: "Process attempting privilege escalation"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["82", "105"]  # setuid, setgid
+    severity: critical
+    action: alert

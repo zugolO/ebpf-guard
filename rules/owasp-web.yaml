@@ -1,0 +1,210 @@
+# OWASP Top 10 Web Application Security Rules for ebpf-guard
+# Detects common web attacks and suspicious behavior from web server processes
+
+rules:
+  # ============================================================================
+  # A01:2021 - Broken Access Control
+  # ============================================================================
+
+  # Path Traversal Detection
+  - id: owasp_path_traversal
+    name: "OWASP: Path traversal attempt"
+    description: "Process accessed file with path traversal pattern (../../)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "\\.\\./"
+        - "\\.\\.\\\\"
+        - "%2e%2e%2f"
+        - "%252e%252e%252f"
+    severity: critical
+    action: alert
+    tags: [owasp, path-traversal, a01-broken-access-control]
+
+  # Sensitive file access by web server
+  - id: owasp_web_sensitive_file_read
+    name: "OWASP: Web server reading sensitive system files"
+    description: "Web server process (nginx, apache, node, python) accessed sensitive files"
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/shadow"
+        - "/etc/passwd"
+        - "/etc/hosts"
+        - "/proc/self/environ"
+        - "/proc/self/cmdline"
+        - "/proc/self/maps"
+        - "/proc/self/mem"
+        - "/root/.ssh/"
+        - "/home/*/.ssh/"
+    severity: critical
+    action: alert
+    tags: [owasp, sensitive-file, a01-broken-access-control, lfi]
+
+  # ============================================================================
+  # A03:2021 - Injection (Command Injection, Code Injection)
+  # ============================================================================
+
+  # Shell spawn by web server process
+  - id: owasp_web_shell_spawn
+    name: "OWASP: Shell spawned by web server process"
+    description: "Web server executed shell command (potential command injection)"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["59", "322", "545"]  # execve, execveat, execveat (x86_64)
+    severity: critical
+    action: alert
+    tags: [owasp, command-injection, a03-injection, rce]
+
+  # Suspicious file write in web directories
+  - id: owasp_web_suspicious_write
+    name: "OWASP: Suspicious file write in web root"
+    description: "Non-deploy process wrote to web server document root (potential webshell)"
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/www/"
+        - "/srv/www/"
+        - "/usr/share/nginx/html/"
+        - "/app/public/"
+        - "/app/static/"
+        - "/var/lib/docker/volumes/"
+    severity: warning
+    action: alert
+    tags: [owasp, webshell, a03-injection, file-upload]
+
+  # ============================================================================
+  # A10:2021 - Server-Side Request Forgery (SSRF)
+  # ============================================================================
+
+  # Outbound connection from web process to non-standard port
+  - id: owasp_web_ssrf_outbound
+    name: "OWASP: Web server outbound connection to non-standard port"
+    description: "Web process connecting to unusual port (potential SSRF)"
+    event_type: network
+    condition:
+      field: dport
+      op: not_in
+      values: ["80", "443", "8080", "8443", "53", "123"]
+    severity: warning
+    action: alert
+    tags: [owasp, ssrf, a10-ssrf, outbound]
+
+  # Connection to internal/metadata endpoints
+  - id: owasp_web_metadata_access
+    name: "OWASP: Web server accessing cloud metadata endpoint"
+    description: "Web process accessing cloud metadata service (SSRF attack vector)"
+    event_type: network
+    condition:
+      field: daddr
+      op: in
+      values:
+        - "169.254.169.254"  # AWS, GCP, Azure metadata
+        - "100.100.100.200"  # Alibaba Cloud
+    severity: critical
+    action: alert
+    tags: [owasp, ssrf, a10-ssrf, metadata, cloud]
+
+  # ============================================================================
+  # A06:2021 - Vulnerable and Outdated Components
+  # ============================================================================
+
+  # Access to package manager files (indicating potential supply chain attack)
+  - id: owasp_package_manager_access
+    name: "OWASP: Suspicious access to package manager files"
+    description: "Web process accessing npm/pip/gem package directories"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "node_modules/.*\\.js$"
+        - "site-packages/.*\\.py$"
+        - "vendor/.*\\.php$"
+    severity: warning
+    action: alert
+    tags: [owasp, supply-chain, a06-vulnerable-components]
+
+  # ============================================================================
+  # A09:2021 - Security Logging and Monitoring Failures
+  # ============================================================================
+
+  # Log file tampering
+  - id: owasp_log_tampering
+    name: "OWASP: Potential log tampering"
+    description: "Process writing to or truncating log files"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/var/log/.*\\.log$"
+        - "/var/log/nginx/"
+        - "/var/log/apache2/"
+        - "/var/log/httpd/"
+    severity: warning
+    action: alert
+    tags: [owasp, log-tampering, a09-logging-failures]
+
+  # ============================================================================
+  # Additional Web Attack Patterns
+  # ============================================================================
+
+  # PHP file execution in upload directories
+  - id: owasp_php_in_upload
+    name: "OWASP: PHP execution in upload directory"
+    description: "PHP file accessed in common upload directory (potential webshell)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/uploads/.*\\.php"
+        - "/upload/.*\\.php"
+        - "/files/.*\\.php"
+        - "/attachments/.*\\.php"
+    severity: critical
+    action: alert
+    tags: [owasp, webshell, file-upload, rce]
+
+  # Access to backup/config files
+  - id: owasp_backup_config_access
+    name: "OWASP: Access to backup or config files"
+    description: "Process accessing backup or configuration files"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "\\.sql$"
+        - "\\.bak$"
+        - "\\.backup$"
+        - "\\.old$"
+        - "\\.orig$"
+        - "config\\.php"
+        - "database\\.yml"
+        - "\\.env$"
+    severity: warning
+    action: alert
+    tags: [owasp, information-disclosure, backup-files]
+
+  # Reverse shell network pattern
+  - id: owasp_reverse_shell_pattern
+    name: "OWASP: Suspicious outbound connection pattern"
+    description: "Process connecting to external IP on high port (potential reverse shell)"
+    event_type: network
+    condition:
+      field: dport
+      op: gt
+      values: ["10000"]
+    severity: warning
+    action: alert
+    tags: [owasp, reverse-shell, c2, backdoor]

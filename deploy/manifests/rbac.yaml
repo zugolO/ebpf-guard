@@ -1,0 +1,36 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ebpf-guard
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+    app.kubernetes.io/managed-by: manual
+rules:
+  # Read pods across all namespaces for metadata enrichment
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Read nodes for node metadata
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Read namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ebpf-guard
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+    app.kubernetes.io/managed-by: manual
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ebpf-guard
+subjects:
+  - kind: ServiceAccount
+    name: ebpf-guard
+    namespace: ebpf-guard

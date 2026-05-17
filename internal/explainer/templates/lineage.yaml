@@ -1,0 +1,142 @@
+# Lineage pattern explanation templates
+# These explain process lineage anomalies (parent-child relationships)
+
+templates:
+  - id: lineage_web_shell_spawn
+    name: "Web Server Spawned Shell"
+    category: lineage
+    summary: "Web server {{.Comm}} spawned a shell process (PID {{.PID}})"
+    detail: |
+      The web server process {{.Comm}} (PID {{.PID}}, parent: {{.ParentComm}}) 
+      spawned a shell process. This is highly suspicious behavior as web servers 
+      should not typically spawn interactive shells. This pattern is commonly 
+      associated with successful exploitation of web applications, where an 
+      attacker gains code execution and spawns a shell for further access.
+      
+      Context: Process {{.Comm}} running in pod {{.Pod}} (namespace {{.Namespace}})
+      triggered this alert at {{.Timestamp}}.
+    severity: "critical"
+    severity_why: |
+      Critical severity because web server spawning shell is a classic indicator 
+      of successful remote code execution (RCE) exploitation. This is often the 
+      first step in a post-exploitation chain leading to full system compromise.
+    mitigations:
+      - "Immediately investigate process {{.Comm}} (PID {{.PID}}) and its parent {{.ParentComm}}"
+      - "Check web server access logs for suspicious requests (SQL injection, command injection attempts)"
+      - "Review process tree: ps auxf | grep -A5 -B5 {{.PID}}"
+      - "Check for webshells: find /var/www -name '*.php' -o -name '*.jsp' -o -name '*.asp' | xargs grep -l 'system\|exec\|eval'"
+      - "Consider isolating pod {{.Pod}} in namespace {{.Namespace}}"
+      - "Scan for persistence mechanisms: crontab, systemd services, .bashrc modifications"
+    references:
+      - "https://attack.mitre.org/techniques/T1190/"
+      - "https://attack.mitre.org/techniques/T1505/003/"
+      - "https://owasp.org/www-community/attacks/Command_Injection"
+    mitre:
+      tactic: "Initial Access"
+      technique_id: "T1190"
+      technique: "Exploit Public-Facing Application"
+      url: "https://attack.mitre.org/techniques/T1190/"
+
+  - id: lineage_shell_network_tool
+    name: "Shell Spawned Network Tool"
+    category: lineage
+    summary: "Shell process {{.ParentComm}} spawned network tool {{.Comm}} (PID {{.PID}})"
+    detail: |
+      A shell process ({{.ParentComm}}) spawned a network tool ({{.Comm}}, PID {{.PID}}). 
+      This pattern indicates potential post-exploitation activity where an attacker 
+      with shell access is performing network reconnaissance or data exfiltration.
+      
+      Common network tools used in attacks include: curl, wget, nc (netcat), 
+      nmap, python (for reverse shells), and ssh. This is particularly suspicious 
+      when the shell was spawned by a web server or other application process.
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because this often represents the second stage of an 
+      attack: after gaining initial shell access, the attacker is establishing 
+      outbound connectivity for C2 communication or data exfiltration.
+    mitigations:
+      - "Investigate the full process chain: pstree -p {{.PID}}"
+      - "Check network connections: netstat -tulpn | grep {{.PID}}"
+      - "Review shell history: cat /proc/{{.PID}}/cwd/.bash_history"
+      - "Check command line arguments: cat /proc/{{.PID}}/cmdline"
+      - "Monitor outbound connections from pod {{.Pod}}"
+      - "Check for data exfiltration in network logs"
+      - "Consider network policies to restrict egress from {{.Namespace}} namespace"
+    references:
+      - "https://attack.mitre.org/techniques/T1046/"
+      - "https://attack.mitre.org/techniques/T1041/"
+      - "https://attack.mitre.org/techniques/T1071/"
+    mitre:
+      tactic: "Discovery"
+      technique_id: "T1046"
+      technique: "Network Service Scanning"
+      url: "https://attack.mitre.org/techniques/T1046/"
+
+  - id: lineage_shell_interpreter
+    name: "Shell Spawned Script Interpreter"
+    category: lineage
+    summary: "Shell {{.ParentComm}} spawned interpreter {{.Comm}} (PID {{.PID}})"
+    detail: |
+      A shell process spawned a script interpreter (Python, Perl, Ruby, etc.). 
+      This is commonly used by attackers to execute post-exploitation scripts, 
+      run exploits, or establish reverse shells with more functionality than 
+      a basic shell provides.
+      
+      Python is particularly popular for:
+      - Reverse shells: python -c 'import socket,subprocess,os; ...'
+      - Data exfiltration scripts
+      - Cryptomining payloads
+      - Lateral movement tools
+    severity: "warning"
+    severity_why: |
+      Warning severity because this could be legitimate (e.g., deployment scripts, 
+      cron jobs), but warrants investigation especially when the parent shell 
+      was spawned by a web server or other application.
+    mitigations:
+      - "Check the command line: cat /proc/{{.PID}}/cmdline | tr '\0' ' '"
+      - "Review the script being executed if visible in process tree"
+      - "Check for suspicious Python imports or network activity"
+      - "Verify if this is part of a legitimate deployment or maintenance task"
+      - "Monitor file system activity from PID {{.PID}}"
+    references:
+      - "https://attack.mitre.org/techniques/T1059/006/"
+      - "https://attack.mitre.org/techniques/T1059/"
+    mitre:
+      tactic: "Execution"
+      technique_id: "T1059"
+      technique: "Command and Scripting Interpreter"
+      url: "https://attack.mitre.org/techniques/T1059/"
+
+  - id: lineage_chain_suspicious
+    name: "Suspicious Process Chain"
+    category: lineage
+    summary: "Suspicious process chain detected: {{.ParentComm}} → {{.Comm}}"
+    detail: |
+      A process chain was detected that matches known attack patterns. 
+      The relationship between {{.ParentComm}} and {{.Comm}} is unusual 
+      and may indicate compromise or malicious activity.
+      
+      Process chains are important indicators because:
+      - They show the progression of an attack
+      - Each step may be individually benign but together form malicious activity
+      - They help identify the entry point and scope of compromise
+    severity: "warning"
+    severity_why: |
+      Warning severity because process chains require context to evaluate. 
+      The specific parent-child relationship may be suspicious but not 
+      definitively malicious without additional investigation.
+    mitigations:
+      - "Analyze the full process tree: ps auxf"
+      - "Check parent process credentials and environment"
+      - "Review system logs around the time of process creation"
+      - "Look for other indicators of compromise on the system"
+      - "Document the process chain for forensic analysis"
+    references:
+      - "https://attack.mitre.org/tactics/TA0002/"
+    mitre:
+      tactic: "Execution"
+      technique_id: "T1204"
+      technique: "User Execution"
+      url: "https://attack.mitre.org/techniques/T1204/"

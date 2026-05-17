@@ -1,0 +1,169 @@
+# TLS Inspection Detection Rules
+# 
+# These rules analyze plaintext TLS payloads captured via uprobes on libssl.
+# The TLS collector attaches to SSL_write/SSL_read to capture data before
+# encryption and after decryption.
+#
+# Requirements:
+#   - collectors.tls.enabled: true (requires CAP_SYS_PTRACE)
+#   - Target processes must use OpenSSL/libssl
+#
+# Limitations:
+#   - Only first 256 bytes of each TLS record are captured
+#   - Go crypto/tls uses native implementation (not libssl) - not captured
+#   - May miss data if payload spans multiple SSL_write/SSL_read calls
+
+rules:
+  # Rule: HTTP Basic Auth credentials in TLS
+  # Detects cleartext credential transmission (security misconfiguration)
+  - id: tls_http_basic_auth
+    name: "HTTP Basic Auth in TLS"
+    description: "Detected HTTP Basic Authorization header in TLS payload - potential credential exposure"
+    event_type: tls
+    condition:
+      field: data
+      op: contains
+      values: ["Authorization: Basic "]
+    severity: warning
+    action: alert
+    tags: [tls, credential-exposure, http]
+
+  # Rule: Suspicious User-Agent from production process
+  # Detects automated tools (curl, wget) used from application processes
+  - id: tls_suspicious_user_agent
+    name: "Suspicious User-Agent in TLS"
+    description: "Detected suspicious User-Agent (curl/wget) from production process"
+    event_type: tls
+    condition:
+      field: data
+      op: regex
+      values: ["User-Agent: (curl|wget)/[0-9]"]
+    severity: warning
+    action: alert
+    tags: [tls, reconnaissance, data-exfil]
+
+  # Rule: Data exfiltration via TLS
+  # Detects outbound TLS data containing sensitive file patterns
+  - id: tls_data_exfil_patterns
+    name: "Potential Data Exfiltration via TLS"
+    description: "Detected sensitive data patterns in outbound TLS payload"
+    event_type: tls
+    condition:
+      field: data
+      op: contains
+      values:
+        - "root:x:0:0:"                    # /etc/passwd content
+        - "$6$"                            # SHA-512 password hash prefix
+        - "ssh-rsa "                       # SSH private key
+        - "BEGIN RSA PRIVATE KEY"          # PEM private key
+        - "BEGIN OPENSSH PRIVATE KEY"      # OpenSSH private key
+        - "AWS_ACCESS_KEY_ID"              # AWS credentials
+        - "AKIA"                           # AWS access key ID prefix
+    severity: critical
+    action: alert
+    tags: [tls, data-exfil, credential-theft]
+
+  # Rule: SQL injection in outbound TLS
+  # Detects SQL patterns that may indicate successful injection
+  - id: tls_sql_patterns
+    name: "SQL Data in TLS Payload"
+    description: "Detected SQL query results or error messages in TLS payload"
+    event_type: tls
+    condition:
+      field: data
+      op: regex
+      values:
+        - "(SELECT|INSERT|UPDATE|DELETE|DROP|UNION).*FROM"
+        - "SQL syntax.*error"
+        - "ODBC SQL Server Driver"
+        - "PostgreSQL.*ERROR"
+        - "ORA-[0-9]{5}"                   # Oracle error codes
+    severity: warning
+    action: alert
+    tags: [tls, sql-injection, data-exfil]
+
+  # Rule: API key or token patterns
+  # Detects common API key and token formats
+  - id: tls_api_key_exposure
+    name: "API Key in TLS Payload"
+    description: "Detected potential API key or token in TLS payload"
+    event_type: tls
+    condition:
+      field: data
+      op: regex
+      values:
+        - "api[_-]?key['\"\\s]*[:=]['\"\\s]*[a-zA-Z0-9]{16,}"
+        - "bearer['\"\\s]+[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+"
+        - "token['\"\\s]*[:=]['\"\\s]*[a-zA-Z0-9]{20,}"
+        - "sk-[a-zA-Z0-9]{20,}"            # OpenAI API key format
+    severity: warning
+    action: alert
+    tags: [tls, credential-exposure, api]
+
+  # Rule: Reverse shell indicators
+  # Detects patterns common in reverse shell communication
+  - id: tls_reverse_shell_indicator
+    name: "Reverse Shell Pattern in TLS"
+    description: "Detected potential reverse shell communication pattern"
+    event_type: tls
+    condition:
+      field: data
+      op: contains
+      values:
+        - "/bin/bash -i"                   # Common reverse shell
+        - "/bin/sh -i"
+        - "python -c 'import pty"
+        - "script -q /dev/null"            # TTY allocation
+    severity: critical
+    action: alert
+    tags: [tls, reverse-shell, rce]
+
+  # Rule: Large outbound TLS from unexpected process
+  # This would require correlation with process info (nginx, apache, etc.)
+  # Note: This is a placeholder - actual implementation would need
+  # threshold-based detection in the correlator
+  - id: tls_unexpected_large_transfer
+    name: "Large TLS Transfer from System Process"
+    description: "Large TLS data transfer from non-application process"
+    event_type: tls
+    condition:
+      field: data_len
+      op: gt
+      values: [65536]                       # 64KB threshold
+    severity: warning
+    action: alert
+    tags: [tls, data-exfil, anomaly]
+
+# TLS Inspection Configuration Notes:
+#
+# 1. Enable TLS inspection in config.yaml:
+#    collectors:
+#      tls:
+#        enabled: true
+#        scan_interval: 30s
+#        max_data_size: 256
+#
+# 2. Required capabilities:
+#    - CAP_SYS_PTRACE (for uprobe attachment)
+#    - CAP_BPF (for loading eBPF programs)
+#
+# 3. Performance considerations:
+#    - Each SSL_write/SSL_read adds ~1-2µs latency
+#    - Ring buffer size: 256KB default
+#    - Process scanning every 30s for new libssl users
+#
+# 4. Privacy considerations:
+#    - TLS inspection captures plaintext before encryption
+#    - Ensure compliance with organizational policies
+#    - Consider data retention limits for captured payloads
+#
+# 5. Known limitations:
+#    - Go applications using crypto/tls: NOT captured
+#    - Java applications using JSSE: NOT captured (use BoringSSL/OpenSSL)
+#    - Node.js using built-in TLS: NOT captured (unless compiled with OpenSSL)
+#    - Only first 256 bytes per SSL_write/SSL_read
+#
+# 6. Testing:
+#    - Use `curl https://httpbin.org/get` to generate test traffic
+#    - Check metrics: ebpf_guard_events_total{type="tls"}
+#    - Verify alerts: ebpf_guard_alerts_total{rule_id="tls_*"}

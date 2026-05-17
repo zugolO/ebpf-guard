@@ -1,0 +1,213 @@
+# Process Lineage Patterns
+# Suspicious parent-child relationships that may indicate compromise.
+#
+# These patterns detect when a process spawns another process in a way
+# that is unusual or suspicious for the given application context.
+
+patterns:
+  # Web servers spawning shells is a strong indicator of RCE or webshell activity
+  - name: web_shell_spawn
+    description: "Web server spawning shell - potential RCE or webshell"
+    parent_comms:
+      - nginx
+      - apache2
+      - httpd
+      - node
+      - nodejs
+      - python
+      - python3
+      - gunicorn
+      - uwsgi
+      - php-fpm
+      - php
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+      - fish
+      - csh
+      - ksh
+    severity: critical
+    reference: "https://attack.mitre.org/techniques/T1190/"
+
+  # Shells spawning network tools may indicate data exfiltration or lateral movement
+  - name: shell_network_tool
+    description: "Shell spawning network tool - potential data exfil or lateral movement"
+    parent_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+      - fish
+      - csh
+      - ksh
+    child_comms:
+      - curl
+      - wget
+      - nc
+      - netcat
+      - ncat
+      - python
+      - python3
+      - ruby
+      - perl
+      - php
+    severity: critical
+    reference: "https://attack.mitre.org/techniques/T1041/"
+
+  # Shells spawning reconnaissance tools
+  - name: shell_recon_tool
+    description: "Shell spawning reconnaissance tool"
+    parent_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+      - fish
+    child_comms:
+      - nmap
+      - masscan
+      - zmap
+      - dig
+      - nslookup
+      - host
+      - whois
+    severity: warning
+    reference: "https://attack.mitre.org/techniques/T1046/"
+
+  # Databases spawning shells - potential SQL injection leading to RCE
+  - name: database_shell_spawn
+    description: "Database process spawning shell - potential SQL injection RCE"
+    parent_comms:
+      - mysqld
+      - postgres
+      - postgresql
+      - mongod
+      - redis-server
+      - mariadbd
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+      - python
+      - python3
+      - perl
+    severity: critical
+    reference: "https://attack.mitre.org/techniques/T1190/"
+
+  # Container runtime spawning unexpected processes
+  - name: container_escape_attempt
+    description: "Container runtime spawning shell - potential container escape"
+    parent_comms:
+      - containerd-shim
+      - runc
+      - docker-runc
+      - containerd
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - mount
+      - umount
+      - nsenter
+      - pivot_root
+    severity: critical
+    reference: "https://attack.mitre.org/techniques/T1611/"
+
+  # Package managers spawning shells - may indicate supply chain attack
+  - name: package_manager_shell
+    description: "Package manager spawning shell - potential post-install backdoor"
+    parent_comms:
+      - apt
+      - apt-get
+      - yum
+      - dnf
+      - pip
+      - pip3
+      - npm
+      - gem
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - python
+      - python3
+      - curl
+      - wget
+    severity: warning
+    reference: "https://attack.mitre.org/techniques/T1195/"
+
+  # SSH daemon spawning shells from unusual sources
+  - name: ssh_suspicious_shell
+    description: "SSH daemon spawning shell - verify authentication logs"
+    parent_comms:
+      - sshd
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+      - python
+      - python3
+      - ruby
+      - perl
+    severity: warning
+    condition: "verify_source_ip"  # Should be correlated with auth logs
+    reference: "https://attack.mitre.org/techniques/T1021/"
+
+  # Cron spawning shells - check for cron-based persistence
+  - name: cron_shell_spawn
+    description: "Cron daemon spawning shell - verify crontab entries"
+    parent_comms:
+      - cron
+      - crond
+      - anacron
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - python
+      - python3
+      - curl
+      - wget
+      - nc
+    severity: warning
+    reference: "https://attack.mitre.org/techniques/T1053/"
+
+  # Init/systemd spawning direct shells (not through login)
+  - name: init_direct_shell
+    description: "Init process spawning shell directly - potential backdoor"
+    parent_comms:
+      - init
+      - systemd
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+      - python
+      - python3
+    severity: critical
+    condition: "not_getty_or_login"
+    reference: "https://attack.mitre.org/techniques/T1543/"
+
+  # Interpreted languages spawning shells - potential code injection
+  - name: interpreter_shell_spawn
+    description: "Scripting language spawning shell - potential code injection"
+    parent_comms:
+      - python
+      - python3
+      - ruby
+      - perl
+      - node
+      - nodejs
+      - php
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+    severity: warning
+    reference: "https://attack.mitre.org/techniques/T1059/"

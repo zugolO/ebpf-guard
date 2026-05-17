@@ -1,0 +1,181 @@
+# File access explanation templates
+# These explain sensitive file access patterns
+
+templates:
+  - id: file_etc_passwd_read
+    name: "Sensitive File Read: /etc/passwd"
+    category: file
+    summary: "Process {{.Comm}} (PID {{.PID}}) read /etc/passwd"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) accessed the /etc/passwd file, 
+      which contains system user account information. While reading this file 
+      is common for many system utilities, unauthorized access can be part of 
+      reconnaissance activity by attackers.
+      
+      Attackers read /etc/passwd to:
+      - Enumerate user accounts on the system
+      - Identify privileged accounts (UID 0, sudo users)
+      - Plan privilege escalation attacks
+      - Map the system for lateral movement
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because reading /etc/passwd is common for legitimate 
+      processes (ls, id, getent, etc.), but unexpected from web servers, 
+      databases, or application processes.
+    mitigations:
+      - "Verify if {{.Comm}} legitimately needs user account information"
+      - "Check for other reconnaissance activity from PID {{.PID}}"
+      - "Review application code for file access patterns"
+      - "Consider using non-root containers to limit information exposure"
+      - "Monitor for subsequent access to /etc/shadow or other sensitive files"
+    references:
+      - "https://attack.mitre.org/techniques/T1087/001/"
+      - "https://attack.mitre.org/techniques/T1003/008/"
+    mitre:
+      tactic: "Discovery"
+      technique_id: "T1087"
+      technique: "Account Discovery"
+      url: "https://attack.mitre.org/techniques/T1087/"
+
+  - id: file_etc_shadow_read
+    name: "Critical File Read: /etc/shadow"
+    category: file
+    summary: "CRITICAL: Process {{.Comm}} (PID {{.PID}}) read /etc/shadow"
+    detail: |
+      ALERT: The process {{.Comm}} (PID {{.PID}}) accessed /etc/shadow, 
+      which contains hashed passwords for all system users. This file should 
+      NEVER be read by normal application processes and is a strong indicator 
+      of credential harvesting activity.
+      
+      This activity typically indicates:
+      - Password hash dumping for offline cracking
+      - Preparation for privilege escalation
+      - Credential access for lateral movement
+      - Malware attempting to steal authentication data
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because /etc/shadow contains password hashes that 
+      can be cracked offline. Access to this file is almost always malicious 
+      and represents an active credential access attack.
+    mitigations:
+      - "IMMEDIATE: Isolate pod {{.Pod}} and investigate process {{.PID}}"
+      - "Check if password hashes were exfiltrated"
+      - "Force password rotation for all system accounts"
+      - "Review process {{.Comm}} - likely compromised or malicious"
+      - "Check for rootkit installation or persistence mechanisms"
+      - "Audit all processes running as root in namespace {{.Namespace}}"
+      - "Consider rotating Kubernetes service account tokens"
+    references:
+      - "https://attack.mitre.org/techniques/T1003/008/"
+      - "https://attack.mitre.org/techniques/T1552/001/"
+    mitre:
+      tactic: "Credential Access"
+      technique_id: "T1003"
+      technique: "OS Credential Dumping"
+      url: "https://attack.mitre.org/techniques/T1003/008/"
+
+  - id: file_proc_self_environ
+    name: "Process Environment Access"
+    category: file
+    summary: "Process {{.Comm}} (PID {{.PID}}) read /proc/self/environ"
+    detail: |
+      The process {{.Comm}} accessed its own environment variables through 
+      /proc/self/environ. While this can be legitimate, it is also commonly 
+      used by attackers to harvest sensitive data passed through environment 
+      variables such as API keys, database credentials, and cloud tokens.
+      
+      In containerized environments, environment variables often contain:
+      - Database passwords and connection strings
+      - Cloud provider credentials (AWS_ACCESS_KEY_ID, etc.)
+      - API tokens and service account keys
+      - Internal service endpoints and credentials
+    severity: "warning"
+    severity_why: |
+      Warning severity because environment variable access can be legitimate, 
+      but is also a known technique for credential harvesting in container 
+      and cloud environments.
+    mitigations:
+      - "Review environment variables that may be exposed: cat /proc/{{.PID}}/environ"
+      - "Check if {{.Comm}} legitimately needs to inspect its environment"
+      - "Audit secrets management practices in namespace {{.Namespace}}"
+      - "Consider using secret management solutions instead of env vars"
+      - "Monitor for subsequent suspicious network activity from {{.PID}}"
+      - "Review Kubernetes Secrets and ConfigMaps used by pod {{.Pod}}"
+    references:
+      - "https://attack.mitre.org/techniques/T1552/001/"
+      - "https://attack.mitre.org/techniques/T1083/"
+    mitre:
+      tactic: "Credential Access"
+      technique_id: "T1552"
+      technique: "Unsecured Credentials"
+      url: "https://attack.mitre.org/techniques/T1552/001/"
+
+  - id: file_path_traversal
+    name: "Path Traversal Attempt"
+    category: file
+    summary: "Process {{.Comm}} (PID {{.PID}}) attempted path traversal"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) accessed a file path containing 
+      directory traversal sequences (../, ..\). This is a common attack 
+      pattern used to access files outside of the intended directory, 
+      potentially exposing sensitive system files.
+      
+      Path traversal attacks attempt to:
+      - Read arbitrary files (/etc/passwd, application config, source code)
+      - Write to unauthorized locations
+      - Execute commands through file inclusion
+      - Bypass access controls
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because path traversal is a common and serious 
+      vulnerability that can lead to arbitrary file read, remote code 
+      execution, and complete system compromise.
+    mitigations:
+      - "Review the file path accessed and validate input sanitization"
+      - "Check application logs for the source of the malicious request"
+      - "Implement proper input validation and path canonicalization"
+      - "Use chroot jails or containers to limit file system access"
+      - "Consider Web Application Firewall (WAF) rules for path traversal"
+      - "Review and fix the vulnerable code path in {{.Comm}}"
+    references:
+      - "https://attack.mitre.org/techniques/T1083/"
+      - "https://owasp.org/www-community/attacks/Path_Traversal"
+    mitre:
+      tactic: "Discovery"
+      technique_id: "T1083"
+      technique: "File and Directory Discovery"
+      url: "https://attack.mitre.org/techniques/T1083/"
+
+  - id: file_sensitive_write
+    name: "Sensitive Directory Write"
+    category: file
+    summary: "Process {{.Comm}} (PID {{.PID}}) wrote to sensitive location"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) wrote files to a sensitive 
+      directory location. This may indicate:
+      - Web shell installation
+      - Backdoor or persistence mechanism
+      - Configuration tampering
+      - Malicious payload deployment
+      
+      Sensitive write locations include:
+      - Web directories (/var/www, /srv, /app)
+      - System configuration directories
+      - User startup files (.bashrc, .profile)
+      - Systemd service directories
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because writes to sensitive directories can be 
+      legitimate (deployments, updates), but unexpected writes from 
+      application processes may indicate compromise.
+    mitigations:
+      - "Verify the file written and its contents"
+      - "Check if this 

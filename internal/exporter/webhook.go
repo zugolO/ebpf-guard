@@ -15,6 +15,40 @@ import (
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 )
 
+// validateHeaders checks that all header names are valid RFC 7230 tokens and
+// header values contain no CR or LF characters (header injection prevention).
+func validateHeaders(headers map[string]string) error {
+	for name, value := range headers {
+		if !isValidHeaderName(name) {
+			return fmt.Errorf("exporter/webhook: invalid header name %q (must be RFC 7230 token)", name)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("exporter/webhook: header %q value contains CR or LF (header injection)", name)
+		}
+	}
+	return nil
+}
+
+// isValidHeaderName checks the name against RFC 7230 token definition:
+// token = 1*tchar  tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" /
+//         "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+func isValidHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	const tchar = "!#$%&'*+-.^_`|~"
+	for _, c := range name {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		if strings.ContainsRune(tchar, c) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // WebhookConfig holds generic webhook configuration.
 type WebhookConfig struct {
 	Enabled     bool              `mapstructure:"enabled"`
@@ -31,6 +65,7 @@ type GenericWebhookNotifier struct {
 	logger      *slog.Logger
 	minSeverity types.Severity
 	tmpl        *template.Template
+	falcoOutput bool // emit Falco-compatible JSON when true
 }
 
 // defaultWebhookTemplate is the default JSON template for webhook payloads.
@@ -68,8 +103,21 @@ type WebhookTemplateData struct {
 }
 
 // NewGenericWebhookNotifier creates a new generic webhook notifier.
+// Use NewGenericWebhookNotifierWithCompat to enable Falco-compatible output.
 func NewGenericWebhookNotifier(cfg WebhookConfig, logger *slog.Logger) *GenericWebhookNotifier {
+	return NewGenericWebhookNotifierWithCompat(cfg, logger, false)
+}
+
+// NewGenericWebhookNotifierWithCompat creates a webhook notifier with optional Falco-compatible output.
+// When falcoOutput is true the payload uses the Falco JSON schema regardless of any custom template.
+// Returns an error if any custom header name or value is invalid (RFC 7230 / header-injection check).
+func NewGenericWebhookNotifierWithCompat(cfg WebhookConfig, logger *slog.Logger, falcoOutput bool) *GenericWebhookNotifier {
 	if !cfg.Enabled || cfg.URL == "" {
+		return &GenericWebhookNotifier{config: cfg, logger: logger}
+	}
+
+	if err := validateHeaders(cfg.Headers); err != nil {
+		logger.Error("exporter/webhook: invalid headers — notifier disabled", "error", err)
 		return &GenericWebhookNotifier{config: cfg, logger: logger}
 	}
 
@@ -102,6 +150,7 @@ func NewGenericWebhookNotifier(cfg WebhookConfig, logger *slog.Logger) *GenericW
 		logger:      logger,
 		minSeverity: minSev,
 		tmpl:        tmpl,
+		falcoOutput: falcoOutput,
 	}
 }
 
@@ -158,6 +207,9 @@ func (w *GenericWebhookNotifier) Send(ctx context.Context, alert types.Alert) er
 }
 
 func (w *GenericWebhookNotifier) buildPayload(alert types.Alert) ([]byte, error) {
+	if w.falcoOutput {
+		return MarshalFalcoAlert(alert)
+	}
 	data := WebhookTemplateData{
 		ID:          alert.ID,
 		RuleID:      alert.RuleID,

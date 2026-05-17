@@ -26,12 +26,12 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "network rule - dport equals",
 			rules: []Rule{
 				{
-					ID:          "net_001",
-					Name:        "Port 8080 Rule",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "net_001",
+					Name:      "Port 8080 Rule",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -44,12 +44,12 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "network rule - dport not equals",
 			rules: []Rule{
 				{
-					ID:          "net_001",
-					Name:        "Port 8080 Rule",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "net_001",
+					Name:      "Port 8080 Rule",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -62,12 +62,12 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "network rule - dport in list",
 			rules: []Rule{
 				{
-					ID:          "net_002",
-					Name:        "Allowed Ports",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpIn, Values: []string{"80", "443", "53"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "net_002",
+					Name:      "Allowed Ports",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpIn, Values: []string{"80", "443", "53"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -80,12 +80,12 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "network rule - dport not_in list",
 			rules: []Rule{
 				{
-					ID:          "net_003",
-					Name:        "Unexpected Egress",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpNotIn, Values: []string{"80", "443", "53"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "net_003",
+					Name:      "Unexpected Egress",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpNotIn, Values: []string{"80", "443", "53"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -98,12 +98,12 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "file rule - filename prefix",
 			rules: []Rule{
 				{
-					ID:          "file_001",
-					Name:        "Sensitive File Access",
-					EventType:   types.EventFileAccess,
-					Condition:   RuleCondition{Field: "filename", Op: OpPrefix, Values: []string{"/etc/shadow", "/etc/passwd"}},
-					Severity:    types.SeverityCritical,
-					Action:      ActionAlert,
+					ID:        "file_001",
+					Name:      "Sensitive File Access",
+					EventType: types.EventFileAccess,
+					Condition: RuleCondition{Field: "filename", Op: OpPrefix, Values: []string{"/etc/shadow", "/etc/passwd"}},
+					Severity:  types.SeverityCritical,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -118,12 +118,12 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "file rule - filename no match",
 			rules: []Rule{
 				{
-					ID:          "file_001",
-					Name:        "Sensitive File Access",
-					EventType:   types.EventFileAccess,
-					Condition:   RuleCondition{Field: "filename", Op: OpPrefix, Values: []string{"/etc/shadow"}},
-					Severity:    types.SeverityCritical,
-					Action:      ActionAlert,
+					ID:        "file_001",
+					Name:      "Sensitive File Access",
+					EventType: types.EventFileAccess,
+					Condition: RuleCondition{Field: "filename", Op: OpPrefix, Values: []string{"/etc/shadow"}},
+					Severity:  types.SeverityCritical,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -138,12 +138,12 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "wrong event type",
 			rules: []Rule{
 				{
-					ID:          "net_001",
-					Name:        "Network Rule",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "net_001",
+					Name:      "Network Rule",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -155,20 +155,20 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "multiple rules - one matches",
 			rules: []Rule{
 				{
-					ID:          "rule_001",
-					Name:        "Port 80",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"80"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "rule_001",
+					Name:      "Port 80",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"80"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 				{
-					ID:          "rule_002",
-					Name:        "Port 8080",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "rule_002",
+					Name:      "Port 8080",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -181,20 +181,20 @@ func TestRuleEngine_Evaluate(t *testing.T) {
 			name: "multiple rules - both match",
 			rules: []Rule{
 				{
-					ID:          "rule_001",
-					Name:        "Any Port",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpNotIn, Values: []string{}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "rule_001",
+					Name:      "Any Port",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpNotIn, Values: []string{}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 				{
-					ID:          "rule_002",
-					Name:        "Port 8080",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityCritical,
-					Action:      ActionAlert,
+					ID:        "rule_002",
+					Name:      "Port 8080",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityCritical,
+					Action:    ActionAlert,
 				},
 			},
 			event: types.Event{
@@ -297,11 +297,11 @@ func TestRuleEngine_RegexOperator(t *testing.T) {
 
 func TestRuleEngine_NumericOperators(t *testing.T) {
 	tests := []struct {
-		name     string
-		op       RuleConditionOperator
-		value    uint16
+		name      string
+		op        RuleConditionOperator
+		value     uint16
 		threshold string
-		expected bool
+		expected  bool
 	}{
 		{"gt - greater", OpGreaterThan, 100, "50", true},
 		{"gt - equal", OpGreaterThan, 100, "100", false},
@@ -786,3 +786,35 @@ func TestValidateRule_CIDRValidation(t *testing.T) {
 	}
 }
 
+// BenchmarkAlertIDGeneration measures allocations for Alert ID generation.
+// Target: 1 alloc/op (fmt.Sprintf) instead of 4 (string concatenation).
+// Results: fmt.Sprintf("%s-%d-%d", ruleID, ts, pid) = 1 alloc/op
+func BenchmarkAlertIDGeneration(b *testing.B) {
+	rules := []Rule{
+		{
+			ID:        "rule_bench_001",
+			Name:      "Benchmark Rule",
+			EventType: types.EventTCPConnect,
+			Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		},
+	}
+	engine := NewRuleEngine(rules)
+	event := types.Event{
+		Type:      types.EventTCPConnect,
+		Timestamp: 1234567890123456789,
+		PID:       12345,
+		Network:   &types.NetworkEvent{Dport: 8080},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		alerts := engine.Evaluate(event)
+		if len(alerts) == 0 {
+			b.Fatal("expected alert")
+		}
+		_ = alerts[0].ID
+	}
+}

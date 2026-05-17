@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -15,18 +16,36 @@ import (
 
 // FileaccessCollector collects file access events using eBPF kprobes.
 type FileaccessCollector struct {
-	logger    *slog.Logger
-	objs      *bpf.FileaccessObjects
-	links     []link.Link
-	reader    *bpf.RingbufReader
-	loadError error // Tracks if the collector failed to load (stub mode)
+	logger     *slog.Logger
+	objs       *bpf.FileaccessObjects
+	links      []link.Link
+	reader     *bpf.RingbufReader
+	loadError  error // Tracks if the collector failed to load (stub mode)
+	dropLogger *dropLogger
+	status     StatusReporter
+	strategy   BackpressureStrategy
 }
 
 // NewFileaccessCollector creates a new file access event collector.
 func NewFileaccessCollector(logger *slog.Logger) (*FileaccessCollector, error) {
 	return &FileaccessCollector{
-		logger: logger.With("collector", "fileaccess"),
+		logger:     logger.With("collector", "fileaccess"),
+		dropLogger: newDropLogger(5 * time.Second),
+		status:     NoopStatusReporter{},
+		strategy:   StrategyDrop,
 	}, nil
+}
+
+// WithStatusReporter sets the StatusReporter used to signal up/down state.
+func (c *FileaccessCollector) WithStatusReporter(r StatusReporter) *FileaccessCollector {
+	c.status = r
+	return c
+}
+
+// WithBackpressureStrategy sets the backpressure strategy for the event channel.
+func (c *FileaccessCollector) WithBackpressureStrategy(s BackpressureStrategy) *FileaccessCollector {
+	c.strategy = s
+	return c
 }
 
 // Name returns the collector identifier.
@@ -42,14 +61,14 @@ func (c *FileaccessCollector) Start(ctx context.Context, out chan<- types.Event)
 	// Load eBPF objects
 	if err := c.loadObjects(); err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("fileaccess", false)
+		c.status.SetUp("fileaccess", false)
 		return fmt.Errorf("collector/fileaccess: load eBPF objects: %w", err)
 	}
 
 	// Attach kprobes
 	if err := c.attachPrograms(); err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("fileaccess", false)
+		c.status.SetUp("fileaccess", false)
 		c.Close()
 		return fmt.Errorf("collector/fileaccess: attach programs: %w", err)
 	}
@@ -58,13 +77,13 @@ func (c *FileaccessCollector) Start(ctx context.Context, out chan<- types.Event)
 	reader, err := bpf.NewRingbufReader(c.objs.Events)
 	if err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("fileaccess", false)
+		c.status.SetUp("fileaccess", false)
 		c.Close()
 		return fmt.Errorf("collector/fileaccess: create ringbuf reader: %w", err)
 	}
 	c.reader = reader
 	c.loadError = nil
-	exporter.SetCollectorUp("fileaccess", true)
+	c.status.SetUp("fileaccess", true)
 
 	// Start reading loop
 	go c.readLoop(ctx, out)
@@ -83,6 +102,41 @@ func (c *FileaccessCollector) IsHealthy() bool {
 // LoadError returns the error from failed load, if any.
 func (c *FileaccessCollector) LoadError() error {
 	return c.loadError
+}
+
+// IsAttached returns true if the BPF program is still attached.
+// Implements watchdog.BPFProgramChecker interface.
+func (c *FileaccessCollector) IsAttached() bool {
+	if c.objs == nil {
+		return false
+	}
+	// Check if we have active links
+	return len(c.links) > 0
+}
+
+// Reload attempts to reload the BPF program.
+// Implements watchdog.BPFProgramChecker interface.
+func (c *FileaccessCollector) Reload() error {
+	c.logger.Info("reloading fileaccess collector")
+
+	// Close existing resources
+	if err := c.Close(); err != nil {
+		c.logger.Warn("error closing during reload", slog.Any("error", err))
+	}
+
+	// Reload objects
+	if err := c.loadObjects(); err != nil {
+		return fmt.Errorf("reload objects: %w", err)
+	}
+
+	// Re-attach programs
+	if err := c.attachPrograms(); err != nil {
+		c.Close()
+		return fmt.Errorf("re-attach programs: %w", err)
+	}
+
+	c.logger.Info("fileaccess collector reloaded successfully")
+	return nil
 }
 
 // Close releases all eBPF resources.
@@ -174,13 +228,10 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 			continue
 		}
 
-		// Send event (non-blocking)
-		select {
-		case out <- *event:
-		default:
-			c.logger.Warn("event channel full, dropping event")
+		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordDropped("fileaccess", "channel_full")
-		}
+			c.dropLogger.record(c.logger, "fileaccess")
+		})
 	}
 }
 

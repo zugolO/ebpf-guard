@@ -10,9 +10,9 @@ import (
 // EventBuffer stores events per process for correlation analysis.
 // It maintains a bounded queue of recent events for each PID.
 type EventBuffer struct {
-	mu       sync.RWMutex
-	buffers  map[uint32]*ringBuffer
-	maxSize  int
+	mu      sync.RWMutex
+	buffers map[uint32]*ringBuffer
+	maxSize int
 }
 
 // ringBuffer is a circular buffer for events.

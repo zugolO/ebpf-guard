@@ -1,0 +1,270 @@
+# DNS Threat Detection Rules
+# These rules detect DNS-based threats including DGA domains, DNS tunneling,
+# and suspicious query patterns.
+
+rules:
+  # DGA (Domain Generation Algorithm) Detection
+  # High entropy domains are characteristic of malware using DGAs
+  - id: dns_dga_high_entropy
+    name: "DGA Domain Detected"
+    description: "Domain name exhibits high entropy characteristics typical of DGA malware"
+    event_type: dns
+    condition:
+      field: qname_entropy
+      op: gt
+      value: 3.5
+    severity: critical
+    action: alert
+    tags: [dns, dga, malware]
+    mitigation: |
+      1. Isolate the affected host from the network
+      2. Check for malware infections on the host
+      3. Review DNS query logs for similar patterns
+      4. Consider blocking the domain at the DNS resolver level
+
+  # DNS Tunneling Detection
+  # Excessively long domain names may indicate data exfiltration via DNS
+  - id: dns_tunneling_long_domain
+    name: "DNS Tunneling Detected"
+    description: "Unusually long domain name suggesting DNS tunneling or data exfiltration"
+    event_type: dns
+    condition:
+      field: qname_length
+      op: gt
+      value: 50
+    severity: critical
+    action: alert
+    tags: [dns, tunneling, exfiltration]
+    mitigation: |
+      1. Investigate the process making the query
+      2. Check for unauthorized data transfer
+      3. Review firewall logs for related traffic
+      4. Implement DNS query length limits if not present
+
+  # Suspicious TLD Detection
+  # Known malicious TLDs used by malware
+  - id: dns_suspicious_tld_onion
+    name: "Tor Hidden Service DNS Query"
+    description: "Query to .onion domain via regular DNS (possible misconfiguration or malicious activity)"
+    event_type: dns
+    condition:
+      field: qname
+      op: suffix
+      values: [".onion"]
+    severity: warning
+    action: alert
+    tags: [dns, tor, suspicious-tld]
+
+  - id: dns_suspicious_tld_emercoin
+    name: "Emercoin TLD Query"
+    description: "Query to Emercoin blockchain TLD (often used by malware)"
+    event_type: dns
+    condition:
+      field: qname
+      op: suffix
+      values: [".bit", ".bazar", ".coin", ".lib", ".emc"]
+    severity: warning
+    action: alert
+    tags: [dns, emercoin, suspicious-tld]
+
+  # TXT Record Abuse
+  # TXT queries from non-mail processes may indicate DNS tunneling
+  - id: dns_txt_suspicious
+    name: "Suspicious TXT DNS Query"
+    description: "TXT record query from non-mail process (possible DNS tunneling)"
+    event_type: dns
+    condition:
+      field: qtype
+      op: eq
+      value: 16  # TXT
+    severity: warning
+    action: alert
+    tags: [dns, txt, tunneling]
+    filters:
+      - field: comm
+        op: not_in
+        values: ["postfix", "sendmail", "exim", "dovecot", "master"]  # Mail processes
+
+  # ANY Query Detection
+  # ANY queries are often used for amplification attacks or reconnaissance
+  - id: dns_any_query
+    name: "DNS ANY Query"
+    description: "DNS ANY query detected (possible amplification attack or reconnaissance)"
+    event_type: dns
+    condition:
+      field: qtype
+      op: eq
+      value: 255  # ANY
+    severity: warning
+    action: alert
+    tags: [dns, any, amplification]
+
+  # High-Frequency DNS Detection
+  # Rapid DNS queries may indicate C2 beaconing or scanning
+  - id: dns_high_frequency
+    name: "High-Frequency DNS Queries"
+    description: "Process making unusually high number of DNS queries (possible C2 beaconing)"
+    event_type: dns
+    condition:
+      field: query_rate
+      op: gt
+      value: 100  # queries per minute
+    severity: warning
+    action: alert
+    tags: [dns, high-frequency, c2]
+    mitigation: |
+      1. Identify the process making the queries
+      2. Check for command-and-control communication
+      3. Review the queried domains for patterns
+      4. Consider rate-limiting DNS queries per process
+
+  # NXDOMAIN Flood Detection
+  # Many NXDOMAIN responses may indicate DGA or scanning
+  - id: dns_nxdomain_flood
+    name: "NXDOMAIN Response Flood"
+    description: "Multiple NXDOMAIN responses suggesting DGA or domain scanning"
+    event_type: dns
+    condition:
+      field: rcode
+      op: eq
+      value: 3  # NXDOMAIN
+    severity: warning
+    action: alert
+    tags: [dns, nxdomain, dga, scanning]
+    rate_limit:
+      window: 60
+      max_alerts: 5
+
+  # PTR Query Detection
+  # Reverse DNS queries may indicate reconnaissance
+  - id: dns_ptr_recon
+    name: "Reverse DNS Reconnaissance"
+    description: "PTR queries detected (possible network reconnaissance)"
+    event_type: dns
+    condition:
+      field: qtype
+      op: eq
+      value: 12  # PTR
+    severity: info
+    action: alert
+    tags: [dns, ptr, reconnaissance]
+    filters:
+      - field: comm
+        op: not_in
+        values: ["nslookup", "dig", "host"]  # Exclude expected tools
+
+  # CNAME Chain Detection
+  # Long CNAME chains may indicate domain fronting or evasion
+  - id: dns_cname_chain
+    name: "Long CNAME Chain"
+    description: "DNS response with multiple CNAME records (possible domain fronting)"
+    event_type: dns
+    condition:
+      field: cname_count
+      op: gt
+      value: 3
+    severity: warning
+    action: alert
+    tags: [dns, cname, domain-fronting]
+
+  # Dynamic DNS Detection
+  # Queries to dynamic DNS services may indicate C2 communication
+  - id: dns_dynamic_dns
+    name: "Dynamic DNS Query"
+    description: "Query to known dynamic DNS service (possible C2 communication)"
+    event_type: dns
+    condition:
+      field: qname
+      op: suffix
+      values:
+        - ".ddns.net"
+        - ".duckdns.org"
+        - ".no-ip.com"
+        - ".dynu.com"
+        - ".changeip.com"
+        - ".dnsdynamic.org"
+        - ".hopto.org"
+        - ".zapto.org"
+        - ".synology.me"
+        - ".myqnapcloud.com"
+    severity: warning
+    action: alert
+    tags: [dns, dynamic-dns, c2]
+
+  # DNS over HTTPS (DoH) Detection
+  # DoH can be used to bypass DNS monitoring
+  - id: dns_doh_detected
+    name: "DNS over HTTPS Detected"
+    description: "Connection to known DoH resolver (may bypass DNS monitoring)"
+    event_type: dns
+    condition:
+      field: qname
+      op: in
+      values:
+        - "cloudflare-dns.com"
+        - "dns.google"
+        - "dns.quad9.net"
+        - "doh.opendns.com"
+        - "dns.nextdns.io"
+    severity: info
+    action: alert
+    tags: [dns, doh, bypass]
+
+  # Newly Registered Domain (NRD) Detection
+  # Placeholder for NRD detection (requires external threat feed)
+  - id: dns_nrd_query
+    name: "Newly Registered Domain Query"
+    description: "Query to newly registered domain (requires threat feed integration)"
+    event_type: dns
+    condition:
+      field: qname
+      op: in_threat_feed
+      feed: newly_registered_domains
+    severity: warning
+    action: alert
+    tags: [dns, nrd, threat-intel]
+    enabled: false  # Requires external threat feed
+
+# Configuration for DNS threat detection
+config:
+  # Entropy threshold for DGA detection (bits per character)
+  dga_entropy_threshold: 3.5
+
+  # Minimum domain length for DGA detection
+  dga_min_length: 10
+
+  # Minimum domain length for tunneling detection
+  tunneling_min_length: 50
+
+  # High-frequency query threshold (queries per minute)
+  high_frequency_threshold: 100
+
+  # Rate limiting for NXDOMAIN alerts
+  nxdomain_rate_limit:
+    window_seconds: 60
+    max_alerts: 5
+
+  # Suspicious TLDs list
+  suspicious_tlds:
+    - ".onion"
+    - ".bit"
+    - ".bazar"
+    - ".coin"
+    - ".lib"
+    - ".emc"
+    - ".zip"
+    - ".mov"
+    - ".phd"
+
+  # Dynamic DNS domains
+  dynamic_dns_domains:
+    - ".ddns.net"
+    - ".duckdns.org"
+    - ".no-ip.com"
+    - ".dynu.com"
+    - ".changeip.com"
+    - ".dnsdynamic.org"
+    - ".hopto.org"
+    - ".zapto.org"
+    - ".synology.me"
+    - ".myqnapcloud.com"

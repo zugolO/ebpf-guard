@@ -46,10 +46,11 @@ func TestEnforcement_KillAction(t *testing.T) {
 	defer auditLogger.Close()
 
 	// Create enforcer with kill enabled
-	enf := enforcer.NewEnforcer(logger, enforcer.Config{
+	enf, err := enforcer.NewEnforcer(logger, enforcer.Config{
 		EnableKill:      true,
 		AuditLogChannel: auditLogger.AuditChannel(100),
 	})
+	require.NoError(t, err)
 
 	// Create a test process
 	testCmd := exec.Command("sleep", "30")
@@ -125,9 +126,10 @@ func TestEnforcement_BlockAction(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	// Create enforcer with block enabled
-	enf := enforcer.NewEnforcer(logger, enforcer.Config{
+	enf, err := enforcer.NewEnforcer(logger, enforcer.Config{
 		EnableBlock: true,
 	})
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		RuleID:   "test_block_rule",
@@ -143,7 +145,7 @@ func TestEnforcement_BlockAction(t *testing.T) {
 
 	// Execute block action (currently logs only)
 	ctx := context.Background()
-	err := enf.Execute(ctx, enforcer.ActionBlock, alert)
+	err = enf.Execute(ctx, enforcer.ActionBlock, alert)
 	assert.NoError(t, err)
 }
 
@@ -167,9 +169,10 @@ func TestEnforcement_ThrottleAction(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	// Create enforcer with throttle enabled
-	enf := enforcer.NewEnforcer(logger, enforcer.Config{
+	enf, err := enforcer.NewEnforcer(logger, enforcer.Config{
 		EnableThrottle: true,
 	})
+	require.NoError(t, err)
 
 	// Use current process for testing
 	pid := uint32(os.Getpid())
@@ -188,7 +191,7 @@ func TestEnforcement_ThrottleAction(t *testing.T) {
 
 	// Execute throttle action
 	ctx := context.Background()
-	err := enf.Execute(ctx, enforcer.ActionThrottle, alert)
+	err = enf.Execute(ctx, enforcer.ActionThrottle, alert)
 
 	// Throttle may fail if cgroup setup is not complete
 	// Just verify it doesn't panic and logs appropriately
@@ -209,7 +212,8 @@ func TestEnforcement_DisabledActions(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	// Create enforcer with all actions disabled
-	enf := enforcer.NewEnforcer(logger, enforcer.Config{})
+	enf, err := enforcer.NewEnforcer(logger, enforcer.Config{})
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		RuleID: "test_rule",
@@ -219,7 +223,7 @@ func TestEnforcement_DisabledActions(t *testing.T) {
 	ctx := context.Background()
 
 	// All actions should fail with "disabled" error
-	err := enf.Execute(ctx, enforcer.ActionKill, alert)
+	err = enf.Execute(ctx, enforcer.ActionKill, alert)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "disabled")
 
@@ -270,7 +274,8 @@ func TestEnforcement_AuditLogRotation(t *testing.T) {
 func TestEnforcement_CleanupThrottles(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	enf := enforcer.NewEnforcer(logger, enforcer.Config{EnableThrottle: true})
+	enf, err := enforcer.NewEnforcer(logger, enforcer.Config{EnableThrottle: true})
+	require.NoError(t, err)
 
 	// Manually add throttle states with different ages
 	enf.RemoveThrottle(1) // Ensure clean state

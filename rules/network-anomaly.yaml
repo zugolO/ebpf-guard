@@ -1,0 +1,124 @@
+rules:
+  # Long-lived connection to common C2 ports (>5 minutes).
+  # HTTP/HTTPS sessions lasting minutes to hours are normal; these non-standard
+  # ports lasting that long are not.
+  - id: net_long_c2_connection
+    name: "Long-lived connection to suspicious port"
+    description: >
+      A TCP connection to a known C2/exfiltration port remained open for more
+      than 5 minutes. Legitimate short-request protocols (HTTP, gRPC, SMTP) do
+      not sustain multi-minute connections on these ports. Indicates possible
+      C2 beaconing or data exfiltration channel.
+    event_type: net_close
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: in
+          values:
+            - "4444"   # common reverse-shell port
+            - "1337"   # common C2 port
+            - "31337"  # Elite/common backdoor
+            - "8888"   # common RAT
+            - "9999"   # common RAT
+            - "6666"   # common IRC/botnet
+            - "6667"   # IRC botnet
+        - field: duration_sec
+          op: gt
+          values: ["300"]   # > 5 minutes
+    severity: critical
+    action: alert
+    tags: [mitre:T1071.001, c2, network-anomaly]
+
+  # HTTP (port 80) or unencrypted connection lasting >5 minutes is unusual
+  # for interactive HTTP but normal for some streaming. Flag as warning.
+  - id: net_long_plaintext_http
+    name: "Long-lived unencrypted HTTP connection"
+    description: >
+      An unencrypted HTTP connection (port 80) remained open for more than
+      5 minutes. This may indicate data exfiltration over HTTP or a persistent
+      C2 channel disguised as web traffic.
+    event_type: net_close
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: equals
+          values: ["80"]
+        - field: duration_sec
+          op: gt
+          values: ["300"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1071.001, network-anomaly, exfiltration]
+
+  # HTTPS (port 443) connection lasting extremely long (>1h) may indicate
+  # a tunneled C2 channel. Normal HTTPS requests complete in seconds.
+  - id: net_long_https_connection
+    name: "Extremely long-lived HTTPS connection (>1h)"
+    description: >
+      An HTTPS connection (port 443) remained open for more than 1 hour.
+      While HTTPS keep-alives and streaming are valid, a >1h session from a
+      non-browser process is anomalous and may indicate a C2 tunnel.
+    event_type: net_close
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: equals
+          values: ["443"]
+        - field: duration_sec
+          op: gt
+          values: ["3600"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1071.001, network-anomaly, c2]
+
+  # Very short connections (<100ms) to many different ports are indicative of
+  # port scanning. Captured as individual close events with tiny durations.
+  - id: net_portscan_indicator
+    name: "Port scan indicator — very short connection"
+    description: >
+      A TCP connection closed within 100 ms on a non-standard port. A burst of
+      such events from one PID indicates port scanning activity. Single events
+      may be false positives; combine with count-based alerting in SIEM.
+    event_type: net_close
+    condition_group:
+      operator: and
+      conditions:
+        - field: duration_ms
+          op: lt
+          values: ["100"]
+        - field: dport
+          op: not_in
+          values:
+            - "22"    # SSH
+            - "80"    # HTTP
+            - "443"   # HTTPS
+            - "53"    # DNS
+            - "8080"  # alt HTTP
+            - "8443"  # alt HTTPS
+    severity: warning
+    action: alert
+    tags: [mitre:T1046, network-anomaly, portscan]
+
+  # SSH session lasting more than 72 hours is unusual even for admins.
+  - id: net_long_ssh_session
+    name: "SSH session lasting more than 72 hours"
+    description: >
+      An SSH connection (port 22) remained open for more than 72 hours.
+      This may indicate a persistent backdoor or an attacker maintaining
+      interactive access.
+    event_type: net_close
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: equals
+          values: ["22"]
+        - field: duration_sec
+          op: gt
+          values: ["259200"]   # 72 hours
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.004, network-anomaly]

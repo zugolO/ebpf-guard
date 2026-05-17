@@ -41,6 +41,10 @@ const (
 	OpInCIDR RuleConditionOperator = "in_cidr"
 	// OpNotInCIDR checks if IP address is not within CIDR range.
 	OpNotInCIDR RuleConditionOperator = "not_in_cidr"
+	// OpCapsGained checks if any of the named capabilities were gained (new &^ old).
+	OpCapsGained RuleConditionOperator = "caps_gained"
+	// OpCapsDropped checks if any of the named capabilities were dropped (old &^ new).
+	OpCapsDropped RuleConditionOperator = "caps_dropped"
 )
 
 // RuleCondition defines a single condition for rule evaluation.
@@ -86,8 +90,8 @@ type Rule struct {
 	Condition RuleCondition `yaml:"condition"`
 	// ConditionGroup allows complex AND/OR logic (takes precedence over Condition)
 	ConditionGroup *RuleConditionGroup `yaml:"condition_group,omitempty"`
-	Severity    types.AlertSeverity `yaml:"severity"`
-	Action      RuleAction      `yaml:"action"`
+	Severity       types.AlertSeverity `yaml:"severity"`
+	Action         RuleAction          `yaml:"action"`
 	// Tags are optional metadata for rule categorization and filtering
 	Tags []string `yaml:"tags,omitempty"`
 }
@@ -123,7 +127,7 @@ func NewRuleEngine(rules []Rule) *RuleEngine {
 func (re *RuleEngine) GetRules() []Rule {
 	re.mu.RLock()
 	defer re.mu.RUnlock()
-	
+
 	rulesCopy := make([]Rule, len(re.rules))
 	copy(rulesCopy, re.rules)
 	return rulesCopy
@@ -180,7 +184,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 
 		// Generate alert
 		alert := types.Alert{
-			ID:        rule.ID + "-" + strconv.FormatUint(e.Timestamp, 10) + "-" + strconv.Itoa(int(e.PID)),
+			ID:        fmt.Sprintf("%s-%d-%d", rule.ID, e.Timestamp, e.PID),
 			Timestamp: time.Unix(0, int64(e.Timestamp)),
 			RuleID:    rule.ID,
 			RuleName:  rule.Name,
@@ -245,10 +249,30 @@ func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleCondition
 	}
 }
 
+// fieldNotFound is a sentinel returned by getFieldValue when the field name
+// does not exist for the event type. This lets evaluateCondition distinguish
+// "field is missing" from "field exists but has an empty string value".
+const fieldNotFound = "\x00__field_not_found__"
+
 // evaluateCondition evaluates a single condition against an event.
 func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool {
-	// Get field value based on event type and field name
+	// caps_gained / caps_dropped operate directly on the Privesc struct —
+	// they don't go through getFieldValue.
+	switch cond.Op {
+	case OpCapsGained:
+		return re.matchesCaps(e, cond.Values, true)
+	case OpCapsDropped:
+		return re.matchesCaps(e, cond.Values, false)
+	}
+
+	// Get field value based on event type and field name.
+	// fieldNotFound means the field name is unknown for this event type —
+	// treat as no-match for all operators (rule is misconfigured but was
+	// already rejected at load time via validateFieldName).
 	value := re.getFieldValue(e, cond.Field)
+	if value == fieldNotFound {
+		return false
+	}
 	if value == "" && cond.Op != OpEquals && cond.Op != OpNotEquals {
 		return false
 	}
@@ -284,7 +308,54 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool 
 	}
 }
 
+// matchesCaps evaluates caps_gained (gained=true) or caps_dropped (gained=false).
+// cond.Values contains capability names like ["CAP_SYS_ADMIN", "CAP_NET_RAW"].
+// Returns true if ANY of the listed caps appear in the relevant delta mask.
+func (re *RuleEngine) matchesCaps(e types.Event, capNames []string, gained bool) bool {
+	if e.Privesc == nil {
+		return false
+	}
+	var delta uint64
+	if gained {
+		delta = e.Privesc.NewCaps &^ e.Privesc.OldCaps // bits set in new but not old
+	} else {
+		delta = e.Privesc.OldCaps &^ e.Privesc.NewCaps // bits set in old but not new
+	}
+	for _, name := range capNames {
+		if bit, ok := capNameToBit(name); ok {
+			if delta&(1<<bit) != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// capNameToBit converts a capability name like "CAP_SYS_ADMIN" to its bit index.
+var capBitByName = map[string]uint{
+	"CAP_CHOWN": 0, "CAP_DAC_OVERRIDE": 1, "CAP_DAC_READ_SEARCH": 2,
+	"CAP_FOWNER": 3, "CAP_FSETID": 4, "CAP_KILL": 5,
+	"CAP_SETGID": 6, "CAP_SETUID": 7, "CAP_SETPCAP": 8,
+	"CAP_LINUX_IMMUTABLE": 9, "CAP_NET_BIND_SERVICE": 10, "CAP_NET_BROADCAST": 11,
+	"CAP_NET_ADMIN": 12, "CAP_NET_RAW": 13, "CAP_IPC_LOCK": 14,
+	"CAP_IPC_OWNER": 15, "CAP_SYS_MODULE": 16, "CAP_SYS_RAWIO": 17,
+	"CAP_SYS_CHROOT": 18, "CAP_SYS_PTRACE": 19, "CAP_SYS_PACCT": 20,
+	"CAP_SYS_ADMIN": 21, "CAP_SYS_BOOT": 22, "CAP_SYS_NICE": 23,
+	"CAP_SYS_RESOURCE": 24, "CAP_SYS_TIME": 25, "CAP_SYS_TTY_CONFIG": 26,
+	"CAP_MKNOD": 27, "CAP_LEASE": 28, "CAP_AUDIT_WRITE": 29,
+	"CAP_AUDIT_CONTROL": 30, "CAP_SETFCAP": 31, "CAP_MAC_OVERRIDE": 32,
+	"CAP_MAC_ADMIN": 33, "CAP_SYSLOG": 34, "CAP_WAKE_ALARM": 35,
+	"CAP_BLOCK_SUSPEND": 36, "CAP_AUDIT_READ": 37, "CAP_PERFMON": 38,
+	"CAP_BPF": 39, "CAP_CHECKPOINT_RESTORE": 40,
+}
+
+func capNameToBit(name string) (uint, bool) {
+	bit, ok := capBitByName[strings.ToUpper(name)]
+	return bit, ok
+}
+
 // getFieldValue extracts a field value from an event based on field name.
+// Returns fieldNotFound if the field name is not valid for the event type.
 func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 	switch e.Type {
 	case types.EventTCPConnect:
@@ -336,8 +407,76 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "ret":
 			return fmt.Sprintf("%d", e.Syscall.Ret)
 		}
+	case types.EventDNS:
+		if e.DNS == nil {
+			return ""
+		}
+		switch field {
+		case "qname":
+			return e.DNS.QName
+		case "qtype":
+			return fmt.Sprintf("%d", e.DNS.QType)
+		case "rcode":
+			return fmt.Sprintf("%d", e.DNS.RCode)
+		case "direction":
+			return fmt.Sprintf("%d", e.DNS.Direction)
+		}
+	case types.EventTLS:
+		if e.TLS == nil {
+			return ""
+		}
+		switch field {
+		case "tls_data":
+			l := e.TLS.DataLen
+			if l > uint32(len(e.TLS.Data)) {
+				l = uint32(len(e.TLS.Data))
+			}
+			return string(e.TLS.Data[:l])
+		case "direction":
+			return fmt.Sprintf("%d", e.TLS.Direction)
+		case "data_len":
+			return fmt.Sprintf("%d", e.TLS.DataLen)
+		}
+	case types.EventPrivesc:
+		// caps_gained / caps_dropped are handled before getFieldValue.
+		// Common process fields are also accessible.
+		switch field {
+		case "uid":
+			return fmt.Sprintf("%d", e.UID)
+		case "comm":
+			return bytesToString(e.Comm[:])
+		case "caps":
+			// Return hex bitmask of new caps for generic comparisons.
+			if e.Privesc != nil {
+				return fmt.Sprintf("0x%x", e.Privesc.NewCaps)
+			}
+			return "0x0"
+		}
+	case types.EventNetClose:
+		if e.NetClose == nil {
+			return ""
+		}
+		switch field {
+		case "dport":
+			return fmt.Sprintf("%d", e.NetClose.Dport)
+		case "sport":
+			return fmt.Sprintf("%d", e.NetClose.Sport)
+		case "daddr":
+			return formatIP(e.NetClose.Daddr[:], e.NetClose.Family)
+		case "saddr":
+			return formatIP(e.NetClose.Saddr[:], e.NetClose.Family)
+		case "family":
+			if e.NetClose.Family == types.AFInet6 {
+				return "ipv6"
+			}
+			return "ipv4"
+		case "duration_sec":
+			return fmt.Sprintf("%d", int64(e.NetClose.Duration.Seconds()))
+		case "duration_ms":
+			return fmt.Sprintf("%d", e.NetClose.Duration.Milliseconds())
+		}
 	}
-	return ""
+	return fieldNotFound
 }
 
 // matchesRegex checks if value matches any of the regex patterns.

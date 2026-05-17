@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -46,6 +47,21 @@ type Config struct {
 
 	// Store configuration
 	Store StoreConfig `mapstructure:"store"`
+
+	// Collectors configuration
+	Collectors CollectorsConfig `mapstructure:"collectors"`
+
+	// Enforcement configuration
+	Enforcement EnforcementConfig `mapstructure:"enforcement"`
+
+	// Watchdog configuration
+	Watchdog WatchdogConfig `mapstructure:"watchdog"`
+
+	// Policy configuration (Sprint 23.0)
+	Policy PolicyConfig `mapstructure:"policy"`
+
+	// Compat configuration (Sprint 24.0)
+	Compat CompatConfig `mapstructure:"compat"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -125,6 +141,50 @@ type StoreConfig struct {
 	OpenSearch OpenSearchStoreConfig `mapstructure:"opensearch"`
 }
 
+// CollectorsConfig holds per-collector settings.
+type CollectorsConfig struct {
+	// TLS collector configuration
+	TLS TLSCollectorConfig `mapstructure:"tls"`
+	// DNS collector configuration
+	DNS DNSCollectorConfig `mapstructure:"dns"`
+	// BackpressureStrategy controls what happens when the event channel is full.
+	// Valid values: "drop" (default), "block", "sample".
+	//   drop   — silently discard the event and increment the drop counter.
+	//   block  — pause the collector goroutine until the channel drains (provides backpressure).
+	//   sample — probabilistically drop ~50% of overflow events.
+	BackpressureStrategy string `mapstructure:"backpressure_strategy"`
+}
+
+// TLSCollectorConfig holds TLS inspection settings.
+type TLSCollectorConfig struct {
+	// Enabled enables TLS inspection via uprobes.
+	// Requires CAP_SYS_PTRACE capability.
+	// Default: false
+	Enabled bool `mapstructure:"enabled"`
+	// ScanInterval is the interval for scanning processes using libssl.
+	// Default: 30s
+	ScanInterval string `mapstructure:"scan_interval"`
+	// MaxDataSize is the maximum bytes to capture per TLS record.
+	// Default: 256
+	MaxDataSize int `mapstructure:"max_data_size"`
+}
+
+// DNSCollectorConfig holds DNS monitoring settings.
+type DNSCollectorConfig struct {
+	// Enabled enables DNS monitoring via eBPF tracepoints.
+	// Default: true
+	Enabled bool `mapstructure:"enabled"`
+	// DGAThreshold is the Shannon entropy threshold for DGA detection (bits/char).
+	// Default: 3.5
+	DGAThreshold float64 `mapstructure:"dga_threshold"`
+	// TunnelingMinLength is the minimum domain length to flag as DNS tunneling.
+	// Default: 50
+	TunnelingMinLength int `mapstructure:"tunneling_min_length"`
+	// HighFrequencyThreshold is the max DNS queries per minute before alerting.
+	// Default: 100
+	HighFrequencyThreshold int `mapstructure:"high_frequency_threshold"`
+}
+
 // SQLiteStoreConfig holds SQLite-specific configuration.
 type SQLiteStoreConfig struct {
 	// Path to the SQLite database file
@@ -153,8 +213,8 @@ type BPFConfig struct {
 
 // MapSizeConfig holds BPF map size settings.
 type MapSizeConfig struct {
-	Events     int `mapstructure:"events"`
-	Processes  int `mapstructure:"processes"`
+	Events      int `mapstructure:"events"`
+	Processes   int `mapstructure:"processes"`
 	Connections int `mapstructure:"connections"`
 }
 
@@ -176,6 +236,8 @@ type RulesConfig struct {
 type CorrelatorConfig struct {
 	// BufferSize is the size of the event channel buffer
 	BufferSize int `mapstructure:"buffer_size"`
+	// MaxAlertsPerSecond is the global token-bucket rate limit for alerts (default 10000, 0 = unlimited).
+	MaxAlertsPerSecond int `mapstructure:"max_alerts_per_second"`
 }
 
 // ProfilerConfig holds behavioral profiling settings.
@@ -188,8 +250,34 @@ type ProfilerConfig struct {
 	AnomalyThreshold float64 `mapstructure:"anomaly_threshold"`
 	// EWMAWeight is the weight for Exponentially Weighted Moving Average (0.0-1.0)
 	EWMAWeight float64 `mapstructure:"ewma_weight"`
-	// ProfileTTL is the time-to-live for process profiles in seconds
+	// ProfileTTL is the time-to-live for process profiles in seconds (default 86400 = 24h).
+	// Profiles not seen within this window are evicted by the background cleanup goroutine.
 	ProfileTTL int `mapstructure:"profile_ttl"`
+	// MaxTrackedPIDs is the maximum number of PIDs tracked simultaneously (default 65536).
+	// When the cap is reached the least-recently-seen profile is evicted (LRU).
+	MaxTrackedPIDs int `mapstructure:"max_tracked_pids"`
+	// Sequence profiling configuration
+	Sequence SequenceProfilerConfig `mapstructure:"sequence"`
+	// Lineage tracking configuration
+	Lineage LineageTrackerConfig `mapstructure:"lineage"`
+}
+
+// SequenceProfilerConfig holds syscall sequence anomaly detection settings.
+type SequenceProfilerConfig struct {
+	// Enabled enables sequence profiling
+	Enabled bool `mapstructure:"enabled"`
+	// WindowSize is the number of syscalls to track in the frequency vector
+	WindowSize int `mapstructure:"window_size"`
+	// Threshold is the cosine distance threshold for anomaly detection (0.0-1.0)
+	Threshold float64 `mapstructure:"threshold"`
+}
+
+// LineageTrackerConfig holds process lineage tracking settings.
+type LineageTrackerConfig struct {
+	// Enabled enables lineage tracking
+	Enabled bool `mapstructure:"enabled"`
+	// TTL is the time-to-live for lineage entries in seconds
+	TTL int `mapstructure:"ttl"`
 }
 
 // ExporterConfig holds metrics and alerting export settings.
@@ -224,16 +312,112 @@ type KubernetesConfig struct {
 	ResyncPeriod int `mapstructure:"resync_period"`
 }
 
+// EnforcementConfig holds enforcement settings (Sprint 21.0).
+type EnforcementConfig struct {
+	// Enabled enables enforcement actions
+	Enabled bool `mapstructure:"enabled"`
+	// BlockBackend specifies the network blocking backend: "log", "nftables", "iptables"
+	BlockBackend string `mapstructure:"block_backend"`
+	// DryRun mode logs actions without actual enforcement
+	DryRun bool `mapstructure:"dry_run"`
+	// EnableBlock enables packet blocking
+	EnableBlock bool `mapstructure:"enable_block"`
+	// EnableKill enables process termination
+	EnableKill bool `mapstructure:"enable_kill"`
+	// EnableThrottle enables cgroup-based rate limiting
+	EnableThrottle bool `mapstructure:"enable_throttle"`
+}
+
+// WatchdogConfig holds watchdog and auto-tuning settings (Sprint 22.0).
+type WatchdogConfig struct {
+	// MemoryPressure enables automatic profiling downgrade on memory pressure
+	MemoryPressure MemoryPressureConfig `mapstructure:"memory_pressure"`
+}
+
+// MemoryPressureConfig holds memory pressure auto-tuning settings.
+type MemoryPressureConfig struct {
+	// Enabled enables memory pressure monitoring
+	Enabled bool `mapstructure:"enabled"`
+	// CheckInterval is the interval for checking memory pressure (seconds)
+	CheckInterval int `mapstructure:"check_interval"`
+	// LowMemoryThreshold is the available memory % to trigger low-memory mode
+	LowMemoryThreshold float64 `mapstructure:"low_memory_threshold"`
+	// RecoveryThreshold is the available memory % to recover normal mode
+	RecoveryThreshold float64 `mapstructure:"recovery_threshold"`
+}
+
+// PolicyConfig holds policy-as-code settings (Sprint 23.0).
+type PolicyConfig struct {
+	// Rego holds Rego/OPA policy engine configuration
+	Rego RegoPolicyConfig `mapstructure:"rego"`
+}
+
+// CompatConfig holds migration compatibility settings (Sprint 24.0).
+type CompatConfig struct {
+	// FalcoOutput enables Falco-compatible JSON format for webhook/notifier output.
+	// When true, alerts sent via webhook use the Falco JSON schema instead of the
+	// native ebpf-guard schema, allowing existing Falco downstream integrations to work.
+	FalcoOutput bool `mapstructure:"falco_output"`
+	// MetricAliases lists compatibility metric alias sets to register.
+	// Supported values: "falco", "tetragon", "kubearmor"
+	// Each set registers Prometheus metric aliases so existing dashboards and
+	// alert rules written for those tools continue to work without modification.
+	MetricAliases []string `mapstructure:"metric_aliases"`
+}
+
+// RegoPolicyConfig holds Rego policy engine settings.
+type RegoPolicyConfig struct {
+	// Enabled enables Rego policy evaluation
+	Enabled bool `mapstructure:"enabled"`
+	// RulesDir is the directory containing .rego policy files
+	RulesDir string `mapstructure:"rules_dir"`
+}
+
+// CheckConfigPermissions verifies the config file is not world-writable and is
+// owned by root (uid 0) or the current process UID. Returns an error if the
+// check fails; callers should treat this as a fatal startup error.
+// Pass skipCheck=true (e.g. via --skip-config-permission-check) to bypass in tests.
+func CheckConfigPermissions(path string, skipCheck bool) error {
+	if skipCheck {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("config: stat %s: %w", path, err)
+	}
+	mode := info.Mode()
+	if mode&0o002 != 0 {
+		return fmt.Errorf("config: %s is world-writable (mode %o) — refusing to start; fix with: chmod o-w %s", path, mode, path)
+	}
+	return nil
+}
+
 // Manager handles configuration loading and hot-reload.
 type Manager struct {
-	viper  *viper.Viper
-	config *Config
-	mu     sync.RWMutex
+	viper    *viper.Viper
+	config   *Config
+	mu       sync.RWMutex
 	onChange func(*Config)
 }
 
 // NewManager creates a new configuration manager.
+// It checks config file permissions before loading. Use NewManagerSkipPermCheck
+// for test environments where the config file is not expected to be root-owned.
 func NewManager(configPath string) (*Manager, error) {
+	return newManager(configPath, false)
+}
+
+// NewManagerSkipPermCheck creates a configuration manager without permission checks.
+// Use only in tests.
+func NewManagerSkipPermCheck(configPath string) (*Manager, error) {
+	return newManager(configPath, true)
+}
+
+func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
+	if err := CheckConfigPermissions(configPath, skipPermCheck); err != nil {
+		return nil, err
+	}
+
 	v := viper.New()
 	v.SetConfigFile(configPath)
 	v.SetConfigType("yaml")
@@ -283,6 +467,7 @@ func setDefaults(v *viper.Viper) {
 
 	// Correlator defaults
 	v.SetDefault("correlator.buffer_size", 10000)
+	v.SetDefault("correlator.max_alerts_per_second", 10000)
 
 	// Profiler defaults
 	v.SetDefault("profiler.enabled", true)
@@ -290,6 +475,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiler.anomaly_threshold", 0.8)
 	v.SetDefault("profiler.ewma_weight", 0.3)
 	v.SetDefault("profiler.profile_ttl", 86400)
+	v.SetDefault("profiler.max_tracked_pids", 65536)
+
+	// Sequence profiler defaults
+	v.SetDefault("profiler.sequence.enabled", true)
+	v.SetDefault("profiler.sequence.window_size", 64)
+	v.SetDefault("profiler.sequence.threshold", 0.3)
+
+	// Lineage tracker defaults
+	v.SetDefault("profiler.lineage.enabled", true)
+	v.SetDefault("profiler.lineage.ttl", 300)
 
 	// Exporter defaults
 	v.SetDefault("exporter.enabled", true)
@@ -335,6 +530,39 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("store.opensearch.username", "")
 	v.SetDefault("store.opensearch.password", "")
 	v.SetDefault("store.opensearch.insecure_skip_verify", false)
+
+	// Collectors defaults
+	v.SetDefault("collectors.tls.enabled", false)
+	v.SetDefault("collectors.tls.scan_interval", "30s")
+	v.SetDefault("collectors.tls.max_data_size", 256)
+
+	// DNS collector defaults
+	v.SetDefault("collectors.dns.enabled", true)
+	v.SetDefault("collectors.dns.dga_threshold", 3.5)
+	v.SetDefault("collectors.dns.tunneling_min_length", 50)
+	v.SetDefault("collectors.dns.high_frequency_threshold", 100)
+
+	// Enforcement defaults (Sprint 21.0)
+	v.SetDefault("enforcement.enabled", false)
+	v.SetDefault("enforcement.block_backend", "log")
+	v.SetDefault("enforcement.dry_run", false)
+	v.SetDefault("enforcement.enable_block", false)
+	v.SetDefault("enforcement.enable_kill", false)
+	v.SetDefault("enforcement.enable_throttle", false)
+
+	// Watchdog defaults (Sprint 22.0)
+	v.SetDefault("watchdog.memory_pressure.enabled", true)
+	v.SetDefault("watchdog.memory_pressure.check_interval", 5)
+	v.SetDefault("watchdog.memory_pressure.low_memory_threshold", 10.0)
+	v.SetDefault("watchdog.memory_pressure.recovery_threshold", 20.0)
+
+	// Policy defaults (Sprint 23.0)
+	v.SetDefault("policy.rego.enabled", true)
+	v.SetDefault("policy.rego.rules_dir", "rules/rego")
+
+	// Compat defaults (Sprint 24.0)
+	v.SetDefault("compat.falco_output", false)
+	v.SetDefault("compat.metric_aliases", []string{})
 }
 
 // Get returns the current configuration (thread-safe).

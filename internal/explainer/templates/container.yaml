@@ -1,0 +1,149 @@
+# Container escape explanation templates
+
+templates:
+  - id: container_mount_escape
+    name: "Container Escape via Mount"
+    category: container
+    summary: "CRITICAL: Container process {{.Comm}} executed mount syscall"
+    detail: |
+      ALERT: The container process {{.Comm}} (PID {{.PID}}) executed a 
+      mount syscall, which is a common technique for container escape. 
+      Mount operations inside containers can be exploited to:
+      - Access host file system
+      - Modify system binaries
+      - Escalate privileges
+      - Establish persistence on the host
+      
+      This is a critical security event indicating potential container 
+      escape or attempted privilege escalation.
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because mount syscalls from within containers 
+      are a primary vector for container escape attacks, potentially 
+      leading to full host compromise.
+    mitigations:
+      - "IMMEDIATE: Isolate pod {{.Pod}} and stop container if possible"
+      - "Check if container has unnecessary CAP_SYS_ADMIN capability"
+      - "Review container security context and capabilities"
+      - "Check for successful escape: look for host processes/files"
+      - "Audit the host for unauthorized changes"
+      - "Review PodSecurityPolicy or PodSecurityStandard configuration"
+      - "Consider running with read-only root filesystem"
+    references:
+      - "https://attack.mitre.org/techniques/T1611/"
+      - "https://attack.mitre.org/techniques/T1053/"
+    mitre:
+      tactic: "Privilege Escalation"
+      technique_id: "T1611"
+      technique: "Escape to Host"
+      url: "https://attack.mitre.org/techniques/T1611/"
+
+  - id: container_nsenter_escape
+    name: "Container Escape via nsenter"
+    category: container
+    summary: "CRITICAL: Container process {{.Comm}} used nsenter"
+    detail: |
+      ALERT: The container process {{.Comm}} (PID {{.PID}}) executed 
+      nsenter or similar namespace manipulation syscalls. This is a 
+      known technique for escaping container isolation by entering 
+      the host's namespaces.
+      
+      nsenter can be used to:
+      - Enter the host's PID namespace
+      - Access host network interfaces
+      - Modify host mount points
+      - Execute commands as root on the host
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because nsenter is a direct container escape 
+      technique that can provide immediate root access to the host system.
+    mitigations:
+      - "IMMEDIATE: Isolate pod {{.Pod}} and investigate"
+      - "Check for successful host access"
+      - "Review why container has access to nsenter"
+      - "Audit host system for unauthorized changes"
+      - "Review and tighten seccomp profiles"
+      - "Consider dropping CAP_SYS_ADMIN capability"
+      - "Check for other compromised containers on the host"
+    references:
+      - "https://attack.mitre.org/techniques/T1611/"
+    mitre:
+      tactic: "Privilege Escalation"
+      technique_id: "T1611"
+      technique: "Escape to Host"
+      url: "https://attack.mitre.org/techniques/T1611/"
+
+  - id: container_sysrq_trigger
+    name: "Write to sysrq-trigger"
+    category: container
+    summary: "CRITICAL: Process {{.Comm}} wrote to /proc/sysrq-trigger"
+    detail: |
+      ALERT: The process {{.Comm}} (PID {{.PID}}) wrote to 
+      /proc/sysrq-trigger, which is a dangerous interface that allows 
+      low-level system control. From within a container, this indicates:
+      - Successful container escape
+      - Host namespace access
+      - Potential system shutdown or reboot attempt
+      - Kernel debugging or memory dump initiation
+      
+      This should NEVER be possible from within a properly isolated container.
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because access to sysrq-trigger from a container 
+      indicates complete container isolation failure and potential full 
+      host compromise.
+    mitigations:
+      - "IMMEDIATE: Emergency response - check host integrity"
+      - "Verify if sysrq was triggered and what command was sent"
+      - "Check for host-level compromise"
+      - "Review container runtime configuration"
+      - "Audit all containers on the affected host"
+      - "Consider host rebuild if compromise is confirmed"
+    references:
+      - "https://attack.mitre.org/techniques/T1529/"
+    mitre:
+      tactic: "Impact"
+      technique_id: "T1529"
+      technique: "System Shutdown/Reboot"
+      url: "https://attack.mitre.org/techniques/T1529/"
+
+  - id: container_dev_mem_access
+    name: "Access to /dev/mem or /dev/kmem"
+    category: container
+    summary: "CRITICAL: Process {{.Comm}} accessed kernel memory device"
+    detail: |
+      ALERT: The process {{.Comm}} (PID {{.PID}}) accessed /dev/mem or 
+      /dev/kmem, which provide direct access to physical memory. This is:
+      - A serious container escape indicator
+      - A direct memory manipulation attempt
+      - Potentially used for rootkit installation
+      - A complete security boundary violation
+      
+      No legitimate container workload should access these devices.
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because /dev/mem access allows direct kernel 
+      memory manipulation, bypassing all security controls and potentially 
+      leading to complete system compromise.
+    mitigations:
+      - "IMMEDIATE: Isolate pod and investigate for rootkit"
+      - "Check host memory integrity"
+      - "Review device access policies"
+      - "Audit for unauthorized kernel modules"
+      - "Consider host rebuild if compromise suspected"
+      - "Review container runtime security configuration"
+    references:
+      - "https://attack.mitre.org/techniques/T1068/"
+    mitre:
+      tactic: "Privilege Escalation"
+      technique_id: "T1068"
+      technique: "Exploitation for Privilege Escalation"
+      url: "https://attack.mitre.org/techniques/T1068/"

@@ -46,15 +46,15 @@ func (fg *FingerprintGenerator) Generate(alert types.Alert) string {
 
 	// Create a canonical representation of critical fields
 	data := struct {
-		ID        string    `json:"id"`
-		Timestamp int64     `json:"ts"` // Unix timestamp for precision
-		RuleID    string    `json:"rule_id"`
-		Severity  string    `json:"severity"`
-		PID       uint32    `json:"pid"`
-		Comm      string    `json:"comm"`
-		Message   string    `json:"msg"`
-		Pod       string    `json:"pod,omitempty"`
-		Namespace string    `json:"ns,omitempty"`
+		ID        string `json:"id"`
+		Timestamp int64  `json:"ts"` // Unix timestamp for precision
+		RuleID    string `json:"rule_id"`
+		Severity  string `json:"severity"`
+		PID       uint32 `json:"pid"`
+		Comm      string `json:"comm"`
+		Message   string `json:"msg"`
+		Pod       string `json:"pod,omitempty"`
+		Namespace string `json:"ns,omitempty"`
 	}{
 		ID:        alert.ID,
 		Timestamp: alert.Timestamp.UnixNano(),
@@ -79,15 +79,15 @@ func (fg *FingerprintGenerator) Generate(alert types.Alert) string {
 
 // fallbackHash creates a simple hash without JSON marshaling.
 func (fg *FingerprintGenerator) fallbackHash(data struct {
-	ID        string    `json:"id"`
-	Timestamp int64     `json:"ts"`
-	RuleID    string    `json:"rule_id"`
-	Severity  string    `json:"severity"`
-	PID       uint32    `json:"pid"`
-	Comm      string    `json:"comm"`
-	Message   string    `json:"msg"`
-	Pod       string    `json:"pod,omitempty"`
-	Namespace string    `json:"ns,omitempty"`
+	ID        string `json:"id"`
+	Timestamp int64  `json:"ts"`
+	RuleID    string `json:"rule_id"`
+	Severity  string `json:"severity"`
+	PID       uint32 `json:"pid"`
+	Comm      string `json:"comm"`
+	Message   string `json:"msg"`
+	Pod       string `json:"pod,omitempty"`
+	Namespace string `json:"ns,omitempty"`
 }) string {
 	str := fmt.Sprintf("%s|%d|%s|%s|%d|%s|%s|%s|%s",
 		data.ID, data.Timestamp, data.RuleID, data.Severity,

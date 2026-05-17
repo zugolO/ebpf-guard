@@ -3,16 +3,19 @@ package correlator
 
 import (
 	"context"
-	"strconv"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/ebpf-guard/ebpf-guard/internal/policy"
 	"github.com/ebpf-guard/ebpf-guard/internal/profiler"
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 )
 
 // tracer is the OpenTelemetry tracer for the correlator package.
@@ -38,7 +41,28 @@ type CorrelationEngine struct {
 	enableAnomaly   bool
 
 	// Rate limiting
-	rateLimiter *RateLimiter
+	rateLimiter       *RateLimiter
+	rlStatesGauge     prometheus.Gauge // ebpf_guard_ratelimiter_states_total
+	cancelCleanup     context.CancelFunc
+
+	// Global token-bucket rate limit — caps total alerts/sec across all rules.
+	globalLimiter        *rate.Limiter
+	globalLimiterEnabled bool
+	alertsDroppedGlobal  prometheus.Counter // ebpf_guard_alerts_dropped_total{reason="global_rate_limit"}
+
+	// Rego policy engine (post-YAML filter, Sprint 23.0)
+	regoEngine     *policy.RegoEngine
+	enableRegoEval bool
+
+	// Monotonic counter for unique Alert IDs — prevents collision when
+	// two alerts share the same ruleID+timestamp+pid (e.g. bursts in <1ns resolution).
+	alertSeq atomic.Uint64
+
+	// queueDepthFn returns the current fill level (len) of the shared event channel.
+	// Wired via SetQueueDepthFn after the channel is created in main.
+	queueDepthFn func() int
+	// queueCapFn returns the capacity of the shared event channel.
+	queueCapFn func() int
 
 	// Metrics
 	processedEvents atomic.Uint64
@@ -71,6 +95,14 @@ type CorrelationEngineConfig struct {
 	RateLimitWindow    time.Duration
 	MaxAlertsPerWindow int
 
+	// Rego policy engine configuration (Sprint 23.0)
+	EnableRegoEval bool
+	RegoEngine     *policy.RegoEngine
+
+	// Global alert rate limit — maximum alerts per second across all rules.
+	// Zero means unlimited. Default: 10000.
+	MaxAlertsPerSecond int
+
 	// Metrics callback (optional)
 	OnCorrelate MetricsCallback
 }
@@ -87,6 +119,7 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		EnableRateLimit:    true,
 		RateLimitWindow:    time.Minute,
 		MaxAlertsPerWindow: 10,
+		MaxAlertsPerSecond: 10000,
 	}
 }
 
@@ -99,13 +132,41 @@ func NewCorrelationEngine(rules []Rule) *CorrelationEngine {
 
 // NewCorrelationEngineWithConfig creates a new correlation engine with full configuration.
 func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *CorrelationEngine {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rlStatesGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_ratelimiter_states_total",
+		Help: "Current number of per-rule state entries in the rate limiter.",
+	})
+
+	alertsDroppedGlobal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name:        "ebpf_guard_alerts_dropped_total",
+		Help:        "Total alerts dropped by the global rate limiter.",
+		ConstLabels: prometheus.Labels{"reason": "global_rate_limit"},
+	})
+
+	maxRPS := config.MaxAlertsPerSecond
+	if maxRPS <= 0 {
+		maxRPS = 10000
+	}
+	var globalLimiter *rate.Limiter
+	globalLimiterEnabled := true
+	globalLimiter = rate.NewLimiter(rate.Limit(maxRPS), maxRPS)
+
 	ce := &CorrelationEngine{
-		ruleEngine:    NewRuleEngine(config.Rules),
-		buffer:        NewShardedEventBuffer(config.BufferSize),
-		pending:       make([]types.Alert, 0),
-		enableAnomaly: config.EnableAnomaly,
-		rateLimiter:   NewRateLimiter(config.RateLimitWindow, config.MaxAlertsPerWindow, config.EnableRateLimit),
-		onCorrelate:   config.OnCorrelate,
+		ruleEngine:           NewRuleEngine(config.Rules),
+		buffer:               NewShardedEventBuffer(config.BufferSize),
+		pending:              make([]types.Alert, 0),
+		enableAnomaly:        config.EnableAnomaly,
+		rateLimiter:          NewRateLimiterWithContext(ctx, config.RateLimitWindow, config.MaxAlertsPerWindow, config.EnableRateLimit),
+		rlStatesGauge:        rlStatesGauge,
+		cancelCleanup:        cancel,
+		enableRegoEval:       config.EnableRegoEval,
+		regoEngine:           config.RegoEngine,
+		onCorrelate:          config.OnCorrelate,
+		globalLimiter:        globalLimiter,
+		globalLimiterEnabled: globalLimiterEnabled,
+		alertsDroppedGlobal:  alertsDroppedGlobal,
 	}
 
 	// Initialize anomaly detector if enabled
@@ -117,7 +178,59 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		)
 	}
 
+	// Update the gauge periodically so it reflects the live state count.
+	go ce.updateRLGaugeLoop(ctx)
+
 	return ce
+}
+
+// updateRLGaugeLoop refreshes the ratelimiter states gauge every 30 seconds.
+func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ce.rlStatesGauge.Set(float64(ce.rateLimiter.StateCount()))
+		}
+	}
+}
+
+// Close stops background goroutines started by the engine.
+func (ce *CorrelationEngine) Close() {
+	ce.cancelCleanup()
+}
+
+// SetQueueDepthFn wires len/cap closures for the shared event channel so that
+// QueueDepth() can report fill level without importing types or holding the channel.
+// Called once from main after the event channel is created.
+func (ce *CorrelationEngine) SetQueueDepthFn(lenFn, capFn func() int) {
+	ce.queueDepthFn = lenFn
+	ce.queueCapFn = capFn
+}
+
+// QueueDepth returns the current fill level of the shared event channel as a
+// fraction in [0, 1]. Returns 0 if not wired (SetQueueDepthFn not called).
+// Used by collectors in block strategy to implement adaptive backpressure.
+func (ce *CorrelationEngine) QueueDepth() float64 {
+	if ce.queueDepthFn == nil || ce.queueCapFn == nil {
+		return 0
+	}
+	cap := ce.queueCapFn()
+	if cap == 0 {
+		return 0
+	}
+	return float64(ce.queueDepthFn()) / float64(cap)
+}
+
+// RegisterMetrics registers the engine's Prometheus metrics with the given registerer.
+func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
+	if err := reg.Register(ce.rlStatesGauge); err != nil {
+		return err
+	}
+	return reg.Register(ce.alertsDroppedGlobal)
 }
 
 // Ingest processes a single event and may produce alerts.
@@ -152,11 +265,22 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// Evaluate against rules
 	ruleAlerts := ce.ruleEngine.Evaluate(e)
 	for _, alert := range ruleAlerts {
-		// Check rate limiting
+		// Per-rule rate limit check
 		if !ce.rateLimiter.Allow(alert.RuleID) {
 			ce.alertsDropped.Add(1)
 			continue
 		}
+		// Global token-bucket rate limit
+		if ce.globalLimiterEnabled && !ce.globalLimiter.Allow() {
+			ce.alertsDropped.Add(1)
+			ce.alertsDroppedGlobal.Add(1)
+			continue
+		}
+
+		// Append monotonic sequence number to guarantee uniqueness across
+		// concurrent alerts that share ruleID+timestamp+pid.
+		seq := ce.alertSeq.Add(1)
+		alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
 
 		// Add trace context from event if present
 		if e.TraceContext != nil {
@@ -172,7 +296,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		if result := ce.anomalyDetector.ProcessEvent(e); result != nil && result.IsAnomaly {
 			// Create anomaly alert
 			anomalyAlert := types.Alert{
-				ID:        "anomaly-" + strconv.FormatUint(e.Timestamp, 10) + "-" + strconv.Itoa(int(e.PID)),
+				ID:        fmt.Sprintf("anomaly-%d-%d-%d", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
 				Timestamp: time.Unix(0, int64(e.Timestamp)),
 				RuleID:    "anomaly_detection",
 				RuleName:  "Behavioral Anomaly Detected",
@@ -188,12 +312,17 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				anomalyAlert.TraceID = e.TraceContext.TraceID
 			}
 
-			// Check rate limiting for anomaly alerts
-			if ce.rateLimiter.Allow(anomalyAlert.RuleID) {
+			// Check per-rule and global rate limiting for anomaly alerts
+			perRuleOK := ce.rateLimiter.Allow(anomalyAlert.RuleID)
+			globalOK := !ce.globalLimiterEnabled || ce.globalLimiter.Allow()
+			if perRuleOK && globalOK {
 				alerts = append(alerts, anomalyAlert)
 				ce.alertsGenerated.Add(1)
 			} else {
 				ce.alertsDropped.Add(1)
+				if !globalOK {
+					ce.alertsDroppedGlobal.Add(1)
+				}
 			}
 		}
 	}
@@ -201,12 +330,84 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// Update span with alert count
 	span.SetAttributes(attribute.Int("alerts.generated", len(alerts)))
 
+	// Rego policy evaluation (post-YAML filter, Sprint 23.0)
+	// This is called ONLY on alerts, not on raw events, for performance
+	if ce.enableRegoEval && ce.regoEngine != nil && len(alerts) > 0 {
+		alerts = ce.evaluateRegoPolicies(ctx, alerts)
+	}
+
 	// Store alerts
 	ce.pendingMu.Lock()
 	ce.pending = append(ce.pending, alerts...)
 	ce.pendingMu.Unlock()
 
 	return alerts
+}
+
+// evaluateRegoPolicies evaluates alerts against Rego policies.
+// This is called post-YAML filter to minimize OPA evaluation overhead.
+func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []types.Alert) []types.Alert {
+	var enhancedAlerts []types.Alert
+
+	for _, alert := range alerts {
+		// Evaluate alert against Rego policies
+		decisions, err := ce.regoEngine.Evaluate(ctx, alert)
+		if err != nil {
+			// Log error but don't drop the alert
+			// Continue with original alert
+			enhancedAlerts = append(enhancedAlerts, alert)
+			continue
+		}
+
+		if len(decisions) == 0 {
+			// No Rego decisions, keep original alert
+			enhancedAlerts = append(enhancedAlerts, alert)
+			continue
+		}
+
+		// Apply the most severe decision
+		// In production, you might want to aggregate all decisions
+		decision := selectMostSevereDecision(decisions)
+
+		// Enhance alert with Rego decision
+		enhancedAlert := alert
+		enhancedAlert.RuleID = decision.RuleID
+		if decision.Severity != "" {
+			enhancedAlert.Severity = decision.Severity
+		}
+		if decision.Message != "" {
+			enhancedAlert.Message = decision.Message
+		}
+		if enhancedAlert.Details == nil {
+			enhancedAlert.Details = make(map[string]interface{})
+		}
+		enhancedAlert.Details["rego_action"] = decision.Action
+		enhancedAlert.Details["mitre_technique"] = decision.MitreTechnique
+
+		enhancedAlerts = append(enhancedAlerts, enhancedAlert)
+	}
+
+	return enhancedAlerts
+}
+
+// selectMostSevereDecision selects the most severe decision from a list.
+func selectMostSevereDecision(decisions []policy.PolicyDecision) policy.PolicyDecision {
+	if len(decisions) == 0 {
+		return policy.PolicyDecision{}
+	}
+
+	if len(decisions) == 1 {
+		return decisions[0]
+	}
+
+	// Priority: critical > warning
+	for _, d := range decisions {
+		if d.Severity == types.SeverityCritical {
+			return d
+		}
+	}
+
+	return decisions[0]
 }
 
 // Flush returns and resets pending alerts.

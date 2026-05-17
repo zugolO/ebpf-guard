@@ -206,3 +206,61 @@ func (rl *RateLimiter) SetRates(syscallRate, networkRate, fileRate uint32) {
 	rl.networkRate = networkRate
 	rl.fileRate = fileRate
 }
+
+// SetSamplingRate sets the sampling rate for a specific event type.
+// This method implements the BPFSamplingController interface.
+// rate should be in range [0.0, 1.0] where 1.0 means 100% sampling.
+func (rl *RateLimiter) SetSamplingRate(eventType string, rate float64) {
+	// Convert float64 rate to uint32 (1/rate)
+	// rate=1.0 -> sample every 1 event
+	// rate=0.1 -> sample every 10 events
+	// rate=0.0 -> disable (sample every 0 = disable)
+	var sampleRate uint32
+	if rate <= 0 {
+		sampleRate = 0 // Disable
+	} else if rate >= 1.0 {
+		sampleRate = 1 // All events
+	} else {
+		sampleRate = uint32(1.0 / rate)
+		if sampleRate < 1 {
+			sampleRate = 1
+		}
+	}
+
+	switch eventType {
+	case "syscall":
+		rl.syscallRate = sampleRate
+	case "network":
+		rl.networkRate = sampleRate
+	case "file":
+		rl.fileRate = sampleRate
+	}
+}
+
+// SetSamplingRateFloat sets the sampling rate using float64 for all event types.
+// This is a convenience method for memory pressure handling.
+func (sc *SamplingController) SetSamplingRate(eventType string, rate float64) error {
+	// Convert float64 rate to uint32
+	var sampleRate uint32
+	if rate <= 0 {
+		sampleRate = 0
+	} else if rate >= 1.0 {
+		sampleRate = 1
+	} else {
+		sampleRate = uint32(1.0 / rate)
+		if sampleRate < 1 {
+			sampleRate = 1
+		}
+	}
+
+	switch eventType {
+	case "syscall":
+		return sc.SetSyscallRate(sampleRate)
+	case "network":
+		return sc.SetNetworkRate(sampleRate)
+	case "file":
+		return sc.SetFileRate(sampleRate)
+	default:
+		return fmt.Errorf("bpf: unknown event type: %s", eventType)
+	}
+}

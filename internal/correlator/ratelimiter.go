@@ -2,18 +2,19 @@
 package correlator
 
 import (
+	"context"
 	"sync"
 	"time"
 )
 
 // RateLimiter implements per-rule alert rate limiting.
 type RateLimiter struct {
-	mu sync.RWMutex
+	mu sync.Mutex // single mutex: eliminates double-checked locking race
 
 	// Configuration
-	window     time.Duration // Time window for rate limiting
-	maxAlerts  int           // Maximum alerts per window
-	enabled    bool
+	window    time.Duration
+	maxAlerts int
+	enabled   bool
 
 	// State: map[ruleID] -> *ruleState
 	states map[string]*ruleState
@@ -22,18 +23,41 @@ type RateLimiter struct {
 // ruleState tracks alert history for a single rule.
 type ruleState struct {
 	mu       sync.Mutex
-	alerts   []time.Time // Timestamps of recent alerts
+	alerts   []time.Time
 	window   time.Duration
 	maxCount int
 }
 
-// NewRateLimiter creates a new rate limiter.
+// NewRateLimiter creates a new rate limiter with a background cleanup goroutine
+// that runs until the process exits.
 func NewRateLimiter(window time.Duration, maxAlerts int, enabled bool) *RateLimiter {
-	return &RateLimiter{
+	return NewRateLimiterWithContext(context.Background(), window, maxAlerts, enabled)
+}
+
+// NewRateLimiterWithContext creates a rate limiter whose cleanup goroutine
+// stops when ctx is cancelled.
+func NewRateLimiterWithContext(ctx context.Context, window time.Duration, maxAlerts int, enabled bool) *RateLimiter {
+	rl := &RateLimiter{
 		window:    window,
 		maxAlerts: maxAlerts,
 		enabled:   enabled,
 		states:    make(map[string]*ruleState),
+	}
+	go rl.cleanupLoop(ctx)
+	return rl
+}
+
+// cleanupLoop runs Cleanup every 5 minutes until ctx is cancelled.
+func (rl *RateLimiter) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rl.Cleanup(10 * time.Minute)
+		}
 	}
 }
 
@@ -44,23 +68,16 @@ func (rl *RateLimiter) Allow(ruleID string) bool {
 		return true
 	}
 
-	rl.mu.RLock()
+	rl.mu.Lock()
 	state, exists := rl.states[ruleID]
-	rl.mu.RUnlock()
-
 	if !exists {
-		rl.mu.Lock()
-		// Double-check after acquiring write lock
-		state, exists = rl.states[ruleID]
-		if !exists {
-			state = &ruleState{
-				window:   rl.window,
-				maxCount: rl.maxAlerts,
-			}
-			rl.states[ruleID] = state
+		state = &ruleState{
+			window:   rl.window,
+			maxCount: rl.maxAlerts,
 		}
-		rl.mu.Unlock()
+		rl.states[ruleID] = state
 	}
+	rl.mu.Unlock()
 
 	return state.allow()
 }
@@ -80,28 +97,25 @@ func (rs *ruleState) allow() bool {
 			validStart = i
 			break
 		}
-		// If we reach the end without finding a valid timestamp, all are expired
 		if i == len(rs.alerts)-1 {
 			validStart = len(rs.alerts)
 		}
 	}
 	rs.alerts = rs.alerts[validStart:]
 
-	// Check if we can add another alert
 	if len(rs.alerts) >= rs.maxCount {
 		return false
 	}
 
-	// Record this alert
 	rs.alerts = append(rs.alerts, now)
 	return true
 }
 
 // GetCount returns the number of alerts in the current window for a rule.
 func (rl *RateLimiter) GetCount(ruleID string) int {
-	rl.mu.RLock()
+	rl.mu.Lock()
 	state, exists := rl.states[ruleID]
-	rl.mu.RUnlock()
+	rl.mu.Unlock()
 
 	if !exists {
 		return 0
@@ -118,7 +132,6 @@ func (rs *ruleState) count() int {
 	now := time.Now()
 	cutoff := now.Add(-rs.window)
 
-	// Count alerts within window
 	count := 0
 	for _, ts := range rs.alerts {
 		if ts.After(cutoff) {
@@ -137,8 +150,8 @@ func (rl *RateLimiter) Reset() {
 
 // GetRuleIDs returns all tracked rule IDs.
 func (rl *RateLimiter) GetRuleIDs() []string {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 
 	ids := make([]string, 0, len(rl.states))
 	for id := range rl.states {
@@ -147,18 +160,30 @@ func (rl *RateLimiter) GetRuleIDs() []string {
 	return ids
 }
 
-// Cleanup removes state for rules that haven't had alerts recently.
-func (rl *RateLimiter) Cleanup(maxAge time.Duration) int {
+// StateCount returns the number of tracked rule states (for observability).
+func (rl *RateLimiter) StateCount() int {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	return len(rl.states)
+}
 
-	now := time.Now()
-	cutoff := now.Add(-maxAge)
-	removed := 0
+// Cleanup removes state for rules that haven't had alerts recently.
+// Fine-grained locking: snapshot the map under rl.mu, then check each
+// state under its own mutex (rl.mu released), then delete stale entries
+// under rl.mu again. This avoids holding the global map lock while
+// iterating per-state slices.
+func (rl *RateLimiter) Cleanup(maxAge time.Duration) int {
+	rl.mu.Lock()
+	snapshot := make(map[string]*ruleState, len(rl.states))
+	for id, s := range rl.states {
+		snapshot[id] = s
+	}
+	rl.mu.Unlock()
 
-	for id, state := range rl.states {
+	cutoff := time.Now().Add(-maxAge)
+	var stale []string
+	for id, state := range snapshot {
 		state.mu.Lock()
-		// Check if any recent alerts
 		hasRecent := false
 		for _, ts := range state.alerts {
 			if ts.After(cutoff) {
@@ -167,17 +192,25 @@ func (rl *RateLimiter) Cleanup(maxAge time.Duration) int {
 			}
 		}
 		state.mu.Unlock()
-
 		if !hasRecent {
-			delete(rl.states, id)
-			removed++
+			stale = append(stale, id)
 		}
 	}
 
+	if len(stale) == 0 {
+		return 0
+	}
+
+	rl.mu.Lock()
+	for _, id := range stale {
+		delete(rl.states, id)
+	}
+	removed := len(stale)
+	rl.mu.Unlock()
 	return removed
 }
 
-// Stats holds rate limiter statistics.
+// RateLimiterStats holds rate limiter statistics.
 type RateLimiterStats struct {
 	TotalRules    int
 	TotalAlerts   int
@@ -186,8 +219,8 @@ type RateLimiterStats struct {
 
 // GetStats returns statistics about the rate limiter.
 func (rl *RateLimiter) GetStats() RateLimiterStats {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 
 	stats := RateLimiterStats{
 		TotalRules: len(rl.states),
@@ -211,8 +244,8 @@ func (rl *RateLimiter) SetEnabled(enabled bool) {
 
 // IsEnabled returns whether rate limiting is enabled.
 func (rl *RateLimiter) IsEnabled() bool {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 	return rl.enabled
 }
 
@@ -224,7 +257,6 @@ func (rl *RateLimiter) UpdateConfig(window time.Duration, maxAlerts int) {
 	rl.window = window
 	rl.maxAlerts = maxAlerts
 
-	// Update existing states
 	for _, state := range rl.states {
 		state.mu.Lock()
 		state.window = window

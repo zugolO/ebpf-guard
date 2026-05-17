@@ -3,6 +3,7 @@ package enforcer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,9 +12,48 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 )
+
+// ErrInvalidEvent is returned when an event fails validation before enforcement.
+var ErrInvalidEvent = errors.New("enforcer: invalid event")
+
+// maxLinuxPID is the maximum valid Linux PID.
+const maxLinuxPID uint32 = 4194304
+
+// sanitizeComm strips non-UTF-8 bytes and replaces non-printable characters
+// with \xNN escapes so attacker-controlled comm fields are safe to log.
+func sanitizeComm(raw string) string {
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); {
+		r, size := utf8.DecodeRuneInString(raw[i:])
+		if r == utf8.RuneError && size == 1 {
+			out = append(out, []byte(fmt.Sprintf(`\x%02x`, raw[i]))...)
+			i++
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			out = append(out, []byte(fmt.Sprintf(`\x%02x`, r))...)
+		} else {
+			out = append(out, raw[i:i+size]...)
+		}
+		i += size
+	}
+	return string(out)
+}
+
+// validateEvent checks UID and PID ranges before any enforcement action.
+func validateEvent(e types.Event) error {
+	if e.UID > 65535 {
+		return fmt.Errorf("%w: UID %d out of range [0,65535]", ErrInvalidEvent, e.UID)
+	}
+	if e.PID < 1 || e.PID > maxLinuxPID {
+		return fmt.Errorf("%w: PID %d out of range [1,%d]", ErrInvalidEvent, e.PID, maxLinuxPID)
+	}
+	return nil
+}
 
 // ActionType represents the type of enforcement action.
 type ActionType string
@@ -25,6 +65,11 @@ const (
 	ActionKill ActionType = "kill"
 	// ActionThrottle rate-limits the process.
 	ActionThrottle ActionType = "throttle"
+	// ActionLog only logs the action without enforcement.
+	ActionLog ActionType = "log"
+	// ActionLSMBlock uses LSM BPF for pre-execution blocking (Sprint 22.0).
+	// Falls back to nftables if LSM is unavailable.
+	ActionLSMBlock ActionType = "lsm_block"
 )
 
 // AuditEntry records an enforcement action for audit purposes.
@@ -42,6 +87,26 @@ type AuditEntry struct {
 	EventType   types.EventType `json:"event_type"`
 }
 
+// BlockBackend represents the network blocking backend to use.
+type BlockBackend string
+
+const (
+	// BlockBackendLog only logs block actions without actual blocking.
+	BlockBackendLog BlockBackend = "log"
+	// BlockBackendNFTables uses nftables for network blocking.
+	BlockBackendNFTables BlockBackend = "nftables"
+	// BlockBackendIPTables uses iptables for network blocking (legacy).
+	BlockBackendIPTables BlockBackend = "iptables"
+)
+
+// LSMBlocklistManager interface for LSM-based blocking.
+// Implemented by collector.LSMCollector.
+type LSMBlocklistManager interface {
+	IsAvailable() bool
+	AddToBlocklist(pid uint32) error
+	RemoveFromBlocklist(pid uint32) error
+}
+
 // Enforcer performs active enforcement actions based on security alerts.
 type Enforcer struct {
 	logger    *slog.Logger
@@ -49,6 +114,14 @@ type Enforcer struct {
 	throttles map[uint32]*ThrottleState
 	mu        sync.RWMutex
 	enabled   map[ActionType]bool
+	// blockBackend is the network blocking backend to use
+	blockBackend BlockBackend
+	// nftablesMgr is the nftables manager (nil if not using nftables)
+	nftablesMgr *NFTablesManager
+	// lsmManager is the LSM blocklist manager (nil if not using LSM)
+	lsmManager LSMBlocklistManager
+	// dryRun mode logs actions without enforcement
+	dryRun bool
 }
 
 // ThrottleState tracks rate limiting state for a process.
@@ -67,33 +140,58 @@ type Config struct {
 	EnableKill bool
 	// EnableThrottle enables cgroup-based rate limiting
 	EnableThrottle bool
+	// BlockBackend specifies the network blocking backend (log, nftables, iptables)
+	BlockBackend BlockBackend
+	// DryRun mode logs actions without actual enforcement
+	DryRun bool
 	// AuditLogChannel receives audit entries (optional)
 	AuditLogChannel chan<- AuditEntry
+	// LSMManager is the LSM blocklist manager for pre-execution blocking (optional)
+	LSMManager LSMBlocklistManager
 }
 
 // NewEnforcer creates a new enforcement engine.
-func NewEnforcer(logger *slog.Logger, cfg Config) *Enforcer {
-	return &Enforcer{
-		logger:    logger.With("component", "enforcer"),
-		auditLog:  cfg.AuditLogChannel,
-		throttles: make(map[uint32]*ThrottleState),
+func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
+	e := &Enforcer{
+		logger:       logger.With("component", "enforcer"),
+		auditLog:     cfg.AuditLogChannel,
+		throttles:    make(map[uint32]*ThrottleState),
+		blockBackend: cfg.BlockBackend,
+		lsmManager:   cfg.LSMManager,
+		dryRun:       cfg.DryRun,
 		enabled: map[ActionType]bool{
 			ActionBlock:    cfg.EnableBlock,
 			ActionKill:     cfg.EnableKill,
 			ActionThrottle: cfg.EnableThrottle,
 		},
 	}
+
+	// Initialize block backend if blocking is enabled
+	if cfg.EnableBlock && cfg.BlockBackend == BlockBackendNFTables {
+		nftCfg := NFTablesConfig{
+			DryRun: cfg.DryRun,
+		}
+		nftMgr, err := NewNFTablesManager(logger, nftCfg)
+		if err != nil {
+			return nil, fmt.Errorf("enforcer: init nftables: %w", err)
+		}
+		e.nftablesMgr = nftMgr
+	}
+
+	return e, nil
 }
 
 // Execute performs the specified enforcement action.
 func (e *Enforcer) Execute(ctx context.Context, action ActionType, alert types.Alert) error {
-	if !e.enabled[action] {
+	if !e.enabled[action] && action != ActionLSMBlock {
 		return fmt.Errorf("enforcer: action %s is disabled", action)
 	}
 
 	switch action {
 	case ActionBlock:
 		return e.executeBlock(ctx, alert)
+	case ActionLSMBlock:
+		return e.executeLSMBlock(ctx, alert)
 	case ActionKill:
 		return e.executeKill(ctx, alert)
 	case ActionThrottle:
@@ -109,45 +207,151 @@ func (e *Enforcer) IsEnabled(action ActionType) bool {
 }
 
 // executeBlock blocks network packets matching the alert.
-// Currently implemented via iptables/nftables rules (TC/XDP requires more setup).
+// Uses nftables for actual blocking if configured, otherwise logs only.
 func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
+	if err := validateEvent(alert.Event); err != nil {
+		e.logger.Warn("block rejected: invalid event", "error", err)
+		return err
+	}
+
+	comm := sanitizeComm(string(bytesToString(alert.Event.Comm[:])))
 	entry := AuditEntry{
 		Timestamp:   time.Now(),
 		Action:      ActionBlock,
 		RuleID:      alert.RuleID,
 		PID:         alert.Event.PID,
 		TGID:        alert.Event.TGID,
-		Comm:        string(bytesToString(alert.Event.Comm[:])),
+		Comm:        comm,
 		UID:         alert.Event.UID,
 		Description: fmt.Sprintf("Block network traffic from PID %d", alert.Event.PID),
 		EventType:   alert.Event.Type,
 	}
 
-	// For now, log the block action. Full TC/XDP implementation would require:
-	// 1. Loading an XDP program to drop packets
-	// 2. Or using netfilter to add drop rules
-	// This is a placeholder for the enforcement framework.
-
 	e.logger.Warn("BLOCK action executed",
 		"rule_id", alert.RuleID,
 		"pid", alert.Event.PID,
-		"comm", entry.Comm,
+		"comm", comm,
+		"backend", e.blockBackend,
+		"dry_run", e.dryRun,
 	)
+
+	// Apply actual block based on backend
+	switch e.blockBackend {
+	case BlockBackendNFTables:
+		if e.nftablesMgr != nil {
+			// Block by UID
+			if err := e.nftablesMgr.BlockUID(ctx, alert.Event.UID); err != nil {
+				entry.Success = false
+				entry.Error = err.Error()
+				e.logAudit(entry)
+				return fmt.Errorf("enforcer/block: nftables block UID %d: %w", alert.Event.UID, err)
+			}
+		}
+	case BlockBackendIPTables:
+		// iptables backend not yet implemented - log only
+		e.logger.Warn("iptables backend not implemented, logging only",
+			"uid", alert.Event.UID,
+		)
+	case BlockBackendLog:
+		// Log only mode - already logged above
+	}
 
 	entry.Success = true
 	e.logAudit(entry)
 	return nil
 }
 
+// executeLSMBlock uses LSM BPF for pre-execution blocking.
+// Falls back to nftables if LSM is unavailable.
+func (e *Enforcer) executeLSMBlock(ctx context.Context, alert types.Alert) error {
+	if err := validateEvent(alert.Event); err != nil {
+		e.logger.Warn("lsm_block rejected: invalid event", "error", err)
+		return err
+	}
+
+	comm := sanitizeComm(string(bytesToString(alert.Event.Comm[:])))
+	entry := AuditEntry{
+		Timestamp:   time.Now(),
+		Action:      ActionLSMBlock,
+		RuleID:      alert.RuleID,
+		PID:         alert.Event.PID,
+		TGID:        alert.Event.TGID,
+		Comm:        comm,
+		UID:         alert.Event.UID,
+		Description: fmt.Sprintf("LSM block PID %d", alert.Event.PID),
+		EventType:   alert.Event.Type,
+	}
+
+	e.logger.Warn("LSM_BLOCK action executed",
+		"rule_id", alert.RuleID,
+		"pid", alert.Event.PID,
+		"comm", comm,
+		"dry_run", e.dryRun,
+	)
+
+	if e.dryRun {
+		entry.Success = true
+		entry.Description += " (dry run)"
+		e.logAudit(entry)
+		return nil
+	}
+
+	// Try LSM first, fallback to nftables
+	if e.lsmManager != nil && e.lsmManager.IsAvailable() {
+		if err := e.lsmManager.AddToBlocklist(alert.Event.PID); err != nil {
+			e.logger.Warn("LSM block failed, falling back to nftables",
+				"error", err,
+				"pid", alert.Event.PID,
+			)
+			// Fall through to nftables fallback
+		} else {
+			e.logger.Info("PID added to LSM blocklist",
+				"pid", alert.Event.PID,
+			)
+			entry.Success = true
+			e.logAudit(entry)
+			return nil
+		}
+	}
+
+	// Fallback to nftables
+	if e.nftablesMgr != nil {
+		if err := e.nftablesMgr.BlockUID(ctx, alert.Event.UID); err != nil {
+			entry.Success = false
+			entry.Error = err.Error()
+			e.logAudit(entry)
+			return fmt.Errorf("enforcer/lsm_block: nftables fallback failed for UID %d: %w", alert.Event.UID, err)
+		}
+		e.logger.Info("LSM unavailable, used nftables fallback",
+			"uid", alert.Event.UID,
+		)
+		entry.Success = true
+		e.logAudit(entry)
+		return nil
+	}
+
+	// No blocking backend available
+	entry.Success = false
+	entry.Error = "no blocking backend available (LSM or nftables)"
+	e.logAudit(entry)
+	return fmt.Errorf("enforcer/lsm_block: no blocking backend available")
+}
+
 // executeKill sends SIGKILL to the offending process.
 func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
+	if err := validateEvent(alert.Event); err != nil {
+		e.logger.Warn("kill rejected: invalid event", "error", err)
+		return err
+	}
+
+	comm := sanitizeComm(string(bytesToString(alert.Event.Comm[:])))
 	entry := AuditEntry{
 		Timestamp:   time.Now(),
 		Action:      ActionKill,
 		RuleID:      alert.RuleID,
 		PID:         alert.Event.PID,
 		TGID:        alert.Event.TGID,
-		Comm:        string(bytesToString(alert.Event.Comm[:])),
+		Comm:        comm,
 		UID:         alert.Event.UID,
 		Description: fmt.Sprintf("SIGKILL sent to PID %d", alert.Event.PID),
 		EventType:   alert.Event.Type,
@@ -181,7 +385,7 @@ func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
 	e.logger.Warn("KILL action executed",
 		"rule_id", alert.RuleID,
 		"pid", pid,
-		"comm", entry.Comm,
+		"comm", comm,
 	)
 
 	entry.Success = true
@@ -191,13 +395,19 @@ func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
 
 // executeThrottle rate-limits the process using cgroups v2.
 func (e *Enforcer) executeThrottle(ctx context.Context, alert types.Alert) error {
+	if err := validateEvent(alert.Event); err != nil {
+		e.logger.Warn("throttle rejected: invalid event", "error", err)
+		return err
+	}
+
+	comm := sanitizeComm(string(bytesToString(alert.Event.Comm[:])))
 	entry := AuditEntry{
 		Timestamp:   time.Now(),
 		Action:      ActionThrottle,
 		RuleID:      alert.RuleID,
 		PID:         alert.Event.PID,
 		TGID:        alert.Event.TGID,
-		Comm:        string(bytesToString(alert.Event.Comm[:])),
+		Comm:        comm,
 		UID:         alert.Event.UID,
 		Description: fmt.Sprintf("Throttle PID %d via cgroups v2", alert.Event.PID),
 		EventType:   alert.Event.Type,
@@ -230,7 +440,7 @@ func (e *Enforcer) executeThrottle(ctx context.Context, alert types.Alert) error
 	e.logger.Warn("THROTTLE action executed",
 		"rule_id", alert.RuleID,
 		"pid", pid,
-		"comm", entry.Comm,
+		"comm", comm,
 		"throttle_count", state.Count,
 	)
 
@@ -374,13 +584,80 @@ func ParseActionType(s string) (ActionType, error) {
 	switch s {
 	case "block":
 		return ActionBlock, nil
+	case "lsm_block":
+		return ActionLSMBlock, nil
 	case "kill":
 		return ActionKill, nil
 	case "throttle":
 		return ActionThrottle, nil
+	case "log":
+		return ActionLog, nil
 	default:
 		return "", fmt.Errorf("unknown action type: %s", s)
 	}
+}
+
+// ParseBlockBackend parses a block backend string.
+func ParseBlockBackend(s string) (BlockBackend, error) {
+	switch s {
+	case "log":
+		return BlockBackendLog, nil
+	case "nftables":
+		return BlockBackendNFTables, nil
+	case "iptables":
+		return BlockBackendIPTables, nil
+	default:
+		return "", fmt.Errorf("unknown block backend: %s", s)
+	}
+}
+
+// GetBlockBackend returns the configured block backend.
+func (e *Enforcer) GetBlockBackend() BlockBackend {
+	return e.blockBackend
+}
+
+// IsDryRun returns true if dry-run mode is enabled.
+func (e *Enforcer) IsDryRun() bool {
+	return e.dryRun
+}
+
+// SetLSMManager sets the LSM blocklist manager.
+// This is called after initialization when the LSM collector is created.
+func (e *Enforcer) SetLSMManager(manager LSMBlocklistManager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lsmManager = manager
+}
+
+// Cleanup removes all enforcement rules.
+func (e *Enforcer) Cleanup() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.nftablesMgr != nil {
+		if err := e.nftablesMgr.Cleanup(); err != nil {
+			return err
+		}
+	}
+
+	// Note: LSM blocklist is cleared by closing the BPF maps
+	// which happens in LSMCollector.Close()
+
+	return nil
+}
+
+// Close closes the enforcer and releases resources.
+func (e *Enforcer) Close() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.nftablesMgr != nil {
+		if err := e.nftablesMgr.Close(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // String returns the string representation of an action type.

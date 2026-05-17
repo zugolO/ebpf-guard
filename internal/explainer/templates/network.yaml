@@ -1,0 +1,71 @@
+# Network anomaly explanation templates
+
+templates:
+  - id: network_unexpected_egress
+    name: "Unexpected Network Egress"
+    category: network
+    summary: "Process {{.Comm}} (PID {{.PID}}) made unexpected outbound connection"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) established a network connection 
+      to an unexpected destination. This may indicate:
+      - Command and control (C2) communication
+      - Data exfiltration attempt
+      - Lateral movement to another system
+      - Unauthorized external access
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because unexpected connections can be legitimate 
+      but warrant investigation, especially from application processes 
+      that should not make outbound connections.
+    mitigations:
+      - "Investigate the destination IP and port"
+      - "Check process command line: cat /proc/{{.PID}}/cmdline"
+      - "Review network logs for data transfer volume"
+      - "Consider implementing egress network policies"
+      - "Check for signs of compromise in process {{.Comm}}"
+    references:
+      - "https://attack.mitre.org/techniques/T1071/"
+      - "https://attack.mitre.org/techniques/T1041/"
+    mitre:
+      tactic: "Command and Control"
+      technique_id: "T1071"
+      technique: "Application Layer Protocol"
+      url: "https://attack.mitre.org/techniques/T1071/"
+
+  - id: network_ssrf_attempt
+    name: "Potential SSRF Attempt"
+    category: network
+    summary: "Web process {{.Comm}} connected to internal service"
+    detail: |
+      The web process {{.Comm}} (PID {{.PID}}) made a connection that may 
+      indicate Server-Side Request Forgery (SSRF). SSRF allows an attacker 
+      to make the server perform requests to internal services that should 
+      not be accessible from outside.
+      
+      SSRF can be used to:
+      - Access internal APIs and services
+      - Scan internal networks
+      - Read internal configuration
+      - Bypass access controls
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because SSRF can lead to complete internal network 
+      compromise, access to cloud metadata services, and bypass of security controls.
+    mitigations:
+      - "Review the URL/request that triggered the connection"
+      - "Check application code for SSRF vulnerabilities"
+      - "Implement URL validation and allowlisting"
+      - "Block access to internal IP ranges from application servers"
+      - "Use network policies to restrict pod egress"
+    references:
+      - "https://attack.mitre.org/techniques/T1195/"
+      - "https://owasp.org/www-community/attacks/Server_Side_Request_Forgery"
+    mitre:
+      tactic: "Initial Access"
+      technique_id: "T1195"
+      technique: "Supply Chain Compromise"
+      url: "https://attack.mitre.org/techniques/T1195/"

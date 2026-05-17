@@ -49,7 +49,7 @@ func TestNewEnforcer(t *testing.T) {
 		},
 		{
 			name: "all disabled",
-			cfg: Config{},
+			cfg:  Config{},
 			want: map[ActionType]bool{
 				ActionBlock:    false,
 				ActionKill:     false,
@@ -60,7 +60,8 @@ func TestNewEnforcer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := NewEnforcer(logger, tt.cfg)
+			e, err := NewEnforcer(logger, tt.cfg)
+			require.NoError(t, err)
 			require.NotNil(t, e)
 
 			for action, enabled := range tt.want {
@@ -72,7 +73,8 @@ func TestNewEnforcer(t *testing.T) {
 
 func TestEnforcer_Execute_Disabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	e := NewEnforcer(logger, Config{})
+	e, err := NewEnforcer(logger, Config{})
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		RuleID: "test_rule",
@@ -80,7 +82,7 @@ func TestEnforcer_Execute_Disabled(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	err := e.Execute(ctx, ActionKill, alert)
+	err = e.Execute(ctx, ActionKill, alert)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "disabled")
 }
@@ -153,7 +155,8 @@ func TestIsCgroupV2Available(t *testing.T) {
 
 func TestEnforcer_ThrottleState(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	e := NewEnforcer(logger, Config{EnableThrottle: true})
+	e, err := NewEnforcer(logger, Config{EnableThrottle: true})
+	require.NoError(t, err)
 
 	// Test initial state
 	state := e.GetThrottleState(1234)
@@ -185,7 +188,8 @@ func TestEnforcer_ThrottleState(t *testing.T) {
 
 func TestEnforcer_CleanupThrottles(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	e := NewEnforcer(logger, Config{})
+	e, err := NewEnforcer(logger, Config{})
+	require.NoError(t, err)
 
 	now := time.Now()
 
@@ -282,6 +286,71 @@ func TestAuditEntry_JSON(t *testing.T) {
 	assert.NotEmpty(t, data)
 }
 
+func TestValidateEvent(t *testing.T) {
+	tests := []struct {
+		name    string
+		event   types.Event
+		wantErr bool
+	}{
+		{"valid event", types.Event{PID: 1234, UID: 1000}, false},
+		{"pid zero", types.Event{PID: 0, UID: 0}, true},
+		{"pid over max", types.Event{PID: 4194305, UID: 0}, true},
+		{"uid over max", types.Event{PID: 1, UID: 99999}, true},
+		{"uid at boundary", types.Event{PID: 1, UID: 65535}, false},
+		{"pid at boundary", types.Event{PID: 4194304, UID: 0}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateEvent(tt.event)
+			if tt.wantErr {
+				assert.ErrorIs(t, err, ErrInvalidEvent)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestSanitizeComm(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"nginx", "nginx"},
+		{"nginx\x00\xff\x01", "nginx\x00\xff\x01"},
+		{"\x00", `\x00`},
+		{"\x1b[31m", `\x1b[31m`},
+		{"normal-process", "normal-process"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			// Build expected: sanitizeComm escapes control chars and invalid UTF-8
+			got := sanitizeComm(tt.input)
+			// Ensure no raw control characters survive
+			for _, r := range got {
+				assert.True(t, r >= 0x20 || r == '\t', "unexpected control char %U in sanitized output", r)
+			}
+			assert.NotEmpty(t, got)
+		})
+	}
+}
+
+func TestEnforcer_Execute_InvalidUID(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	e, err := NewEnforcer(logger, Config{EnableKill: true})
+	require.NoError(t, err)
+
+	alert := types.Alert{
+		RuleID: "test_rule",
+		Event:  types.Event{PID: 1, UID: 99999},
+	}
+
+	ctx := context.Background()
+	err = e.Execute(ctx, ActionKill, alert)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidEvent)
+}
+
 // Integration test for kill action (skipped on non-Linux)
 func TestEnforcer_ExecuteKill_Integration(t *testing.T) {
 	if runtime.GOOS != "linux" {
@@ -301,9 +370,10 @@ func TestEnforcer_ExecuteKill_Integration(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Create enforcer
-	e := NewEnforcer(logger, Config{
+	e, err := NewEnforcer(logger, Config{
 		EnableKill: true,
 	})
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		RuleID:   "test_kill_rule",
@@ -335,5 +405,3 @@ func TestEnforcer_ExecuteKill_Integration(t *testing.T) {
 	// Verify process state was tracked
 	// Note: We can't verify this on the killed process since it's gone
 }
-
-

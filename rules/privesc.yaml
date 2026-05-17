@@ -1,0 +1,110 @@
+rules:
+  # MITRE ATT&CK: T1548.001 — Abuse Elevation Control Mechanism: Setuid and Setgid
+  # Fires when any process gains CAP_SYS_ADMIN at runtime after initialisation.
+  - id: privesc_sys_admin_gained
+    name: "CAP_SYS_ADMIN gained at runtime"
+    description: >
+      A process gained CAP_SYS_ADMIN after startup. This capability allows
+      mounting filesystems, loading kernel modules, and bypassing many security
+      controls. Gaining it at runtime is a strong indicator of privilege
+      escalation or container escape.
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_gained
+      values:
+        - CAP_SYS_ADMIN
+    severity: critical
+    action: alert
+    tags: [mitre:T1548.001, container-escape, privesc]
+
+  # CAP_NET_RAW allows raw socket creation (packet sniffing, ARP spoofing).
+  # Gaining it outside container init is suspicious.
+  - id: privesc_net_raw_gained
+    name: "CAP_NET_RAW gained outside container init"
+    description: >
+      A process gained CAP_NET_RAW at runtime. This capability enables raw
+      socket creation and is commonly abused for network sniffing and ARP
+      spoofing. Legitimate containers set this at startup, not at runtime.
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_gained
+      values:
+        - CAP_NET_RAW
+    severity: warning
+    action: alert
+    tags: [mitre:T1548.001, privesc, network]
+
+  # CAP_SYS_MODULE allows loading/unloading kernel modules (rootkit path).
+  - id: privesc_sys_module_gained
+    name: "CAP_SYS_MODULE gained at runtime"
+    description: >
+      A process gained CAP_SYS_MODULE, allowing it to load arbitrary kernel
+      modules. This is the primary rootkit installation path on Linux.
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_gained
+      values:
+        - CAP_SYS_MODULE
+    severity: critical
+    action: alert
+    tags: [mitre:T1547.006, privesc, rootkit]
+
+  # CAP_SYS_PTRACE allows tracing other processes (credential theft).
+  - id: privesc_sys_ptrace_gained
+    name: "CAP_SYS_PTRACE gained at runtime"
+    description: >
+      A process gained CAP_SYS_PTRACE, enabling it to inspect and modify
+      the memory of other processes. Often used for credential theft or
+      injecting code into running services.
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_gained
+      values:
+        - CAP_SYS_PTRACE
+    severity: critical
+    action: alert
+    tags: [mitre:T1548.001, mitre:T1055, privesc]
+
+  # Drop-all then re-gain is an evasion pattern: process deliberately drops
+  # all caps (to appear unprivileged to monitors) then re-acquires them.
+  - id: privesc_caps_drop_all
+    name: "Process dropped all capabilities (evasion pattern)"
+    description: >
+      A process dropped all capabilities simultaneously. Combined with a
+      subsequent cap gain, this is a known evasion technique to temporarily
+      appear unprivileged to security monitors while retaining the ability
+      to re-acquire privileges.
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_dropped
+      values:
+        - CAP_SYS_ADMIN
+        - CAP_NET_ADMIN
+        - CAP_SYS_MODULE
+        - CAP_SYS_PTRACE
+        - CAP_NET_RAW
+    severity: warning
+    action: alert
+    tags: [mitre:T1548.001, privesc, evasion]
+
+  # Gaining SETUID/SETGID allows changing to any UID/GID.
+  - id: privesc_setuid_gained
+    name: "CAP_SETUID or CAP_SETGID gained at runtime"
+    description: >
+      A process gained CAP_SETUID or CAP_SETGID, enabling it to change its
+      effective user or group identity to any value including root (UID 0).
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_gained
+      values:
+        - CAP_SETUID
+        - CAP_SETGID
+    severity: critical
+    action: alert
+    tags: [mitre:T1548.001, privesc]

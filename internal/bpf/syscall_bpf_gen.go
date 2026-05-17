@@ -6,6 +6,7 @@ package bpf
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -72,7 +73,10 @@ type SyscallObjects struct {
 // NetworkObjects contains all eBPF objects for network collection.
 type NetworkObjects struct {
 	TraceTCPConnect *ebpf.Program `ebpf:"trace_tcp_connect"`
+	TraceTCPClose   *ebpf.Program `ebpf:"trace_tcp_close"`
 	Events          *ebpf.Map     `ebpf:"events"`
+	ConnStartMap    *ebpf.Map     `ebpf:"conn_start_map"`
+	ConnMetaMap     *ebpf.Map     `ebpf:"conn_meta_map"`
 }
 
 // FileaccessObjects contains all eBPF objects for file access collection.
@@ -121,8 +125,17 @@ func (o *NetworkObjects) Close() error {
 	if o.TraceTCPConnect != nil {
 		o.TraceTCPConnect.Close()
 	}
+	if o.TraceTCPClose != nil {
+		o.TraceTCPClose.Close()
+	}
 	if o.Events != nil {
 		o.Events.Close()
+	}
+	if o.ConnStartMap != nil {
+		o.ConnStartMap.Close()
+	}
+	if o.ConnMetaMap != nil {
+		o.ConnMetaMap.Close()
 	}
 	return nil
 }
@@ -327,6 +340,382 @@ func (e *FileaccessEvent) ToTypesEvent() types.Event {
 			Flags:    e.Flags,
 			Mode:     e.Mode,
 			Op:       e.Op,
+		},
+	}
+}
+
+// PrivescObjects contains all eBPF objects for privilege escalation detection.
+type PrivescObjects struct {
+	TraceCapset      *ebpf.Program `ebpf:"tracepoint__sys_enter_capset"`
+	TraceCommitCreds *ebpf.Program `ebpf:"kprobe__commit_creds"`
+	Events           *ebpf.Map     `ebpf:"events"`
+	PidCaps          *ebpf.Map     `ebpf:"pid_caps"`
+}
+
+// Close closes all eBPF objects.
+func (o *PrivescObjects) Close() error {
+	if o.TraceCapset != nil {
+		o.TraceCapset.Close()
+	}
+	if o.TraceCommitCreds != nil {
+		o.TraceCommitCreds.Close()
+	}
+	if o.Events != nil {
+		o.Events.Close()
+	}
+	if o.PidCaps != nil {
+		o.PidCaps.Close()
+	}
+	return nil
+}
+
+// LoadPrivescObjects loads privesc eBPF objects from embedded bytecode.
+func LoadPrivescObjects(obj *PrivescObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// PrivescRawEvent is the wire-format event for EVENT_TYPE_PRIVESC.
+// old_caps is in args[0], new_caps in args[1] (reusing the syscall union).
+type PrivescRawEvent struct {
+	Type      uint32
+	Timestamp uint64
+	PID       uint32
+	TGID      uint32
+	PPID      uint32
+	UID       uint32
+	Comm      [16]byte
+	ParentComm [16]byte
+	OldCaps   uint64 // args[0]
+	NewCaps   uint64 // args[1]
+}
+
+// ParsePrivescEvent parses a raw ring-buffer sample into a PrivescRawEvent.
+// Wire layout (packed): type(4) ts(8) pid(4) tgid(4) ppid(4) uid(4) comm(16)
+//   parent_comm(16) nr(8) ret(8) args[0](8)=old_caps args[1](8)=new_caps ...
+func ParsePrivescEvent(raw []byte) (*PrivescRawEvent, error) {
+	// header: 4+8+4+4+4+4+16+16 = 60 bytes; then syscall union: 8+8+8+8 = 32 bytes minimum
+	const minSize = 60 + 8 + 8 + 8 + 8
+	if len(raw) < minSize {
+		return nil, fmt.Errorf("privesc raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	evt := &PrivescRawEvent{}
+	off := 0
+	evt.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	evt.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.TGID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(evt.Comm[:], raw[off:off+16]); off += 16
+	copy(evt.ParentComm[:], raw[off:off+16]); off += 16
+	// skip nr(8) and ret(8)
+	off += 16
+	evt.OldCaps = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	evt.NewCaps = binary.LittleEndian.Uint64(raw[off:])
+	return evt, nil
+}
+
+// ToTypesEvent converts a PrivescRawEvent to types.Event.
+func (e *PrivescRawEvent) ToTypesEvent() types.Event {
+	return types.Event{
+		Type:       types.EventPrivesc,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
+		Privesc: &types.PrivescEvent{
+			OldCaps: e.OldCaps,
+			NewCaps: e.NewCaps,
+		},
+	}
+}
+
+// NetworkCloseRawEvent is the wire-format event for EVENT_TYPE_NET_CLOSE.
+// Duration (ns) is encoded in args[0] of the syscall union.
+type NetworkCloseRawEvent struct {
+	Type       uint32
+	Timestamp  uint64
+	PID        uint32
+	TGID       uint32
+	PPID       uint32
+	UID        uint32
+	Comm       [16]byte
+	ParentComm [16]byte
+	// Network tuple (from network union)
+	Saddr      [16]byte
+	Daddr      [16]byte
+	Sport      uint16
+	Dport      uint16
+	Proto      uint8
+	Family     uint8
+	DurationNs uint64 // encoded in syscall.args[0]
+}
+
+// ParseNetworkCloseEvent parses a raw ring-buffer sample for EVENT_NET_CLOSE.
+// The BPF program writes the network tuple in the network union fields and
+// then overlays duration_ns into the first 8 bytes of the syscall args
+// (args[0]). Because the C struct union shares the same memory, we read
+// the network fields from their fixed offsets and duration from the syscall
+// args[0] offset.
+//
+// Wire layout (packed, little-endian):
+//   [0 ]  type        uint32   (4)
+//   [4 ]  timestamp   uint64   (8)
+//   [12]  pid         uint32   (4)
+//   [16]  tgid        uint32   (4)
+//   [20]  ppid        uint32   (4)
+//   [24]  uid         uint32   (4)
+//   [28]  comm        [16]byte (16)
+//   [44]  parent_comm [16]byte (16)
+//   [60]  union start — network layout:
+//         saddr [16], daddr [16], sport u16, dport u16, proto u8, family u8
+//   [60]  union start — syscall layout (same offset):
+//         nr s64(8), ret s64(8), args[0] u64(8) = duration_ns
+//
+// We read the network fields first (saddr starts at 60), then read
+// duration_ns from offset 60+8+8 = 76 (args[0] in the syscall layout).
+func ParseNetworkCloseEvent(raw []byte) (*NetworkCloseRawEvent, error) {
+	const networkUnionOffset = 60
+	const durationOffset = networkUnionOffset + 8 + 8 // skip nr + ret
+	const minSize = durationOffset + 8
+	if len(raw) < minSize {
+		return nil, fmt.Errorf("net_close raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	evt := &NetworkCloseRawEvent{}
+	off := 0
+	evt.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	evt.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.TGID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(evt.Comm[:], raw[off:off+16]); off += 16
+	copy(evt.ParentComm[:], raw[off:off+16]); off += 16
+	// off == 60 == networkUnionOffset
+	copy(evt.Saddr[:], raw[off:off+16]); off += 16
+	copy(evt.Daddr[:], raw[off:off+16]); off += 16
+	evt.Sport = binary.LittleEndian.Uint16(raw[off:]); off += 2
+	evt.Dport = binary.LittleEndian.Uint16(raw[off:]); off += 2
+	evt.Proto = raw[off]; off++
+	evt.Family = raw[off]
+	// Read duration_ns from syscall union args[0] offset.
+	evt.DurationNs = binary.LittleEndian.Uint64(raw[durationOffset:])
+	return evt, nil
+}
+
+// ToTypesEvent converts a NetworkCloseRawEvent to types.Event.
+func (e *NetworkCloseRawEvent) ToTypesEvent() types.Event {
+	return types.Event{
+		Type:       types.EventNetClose,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
+		NetClose: &types.NetworkCloseEvent{
+			Saddr:    e.Saddr,
+			Daddr:    e.Daddr,
+			Sport:    e.Sport,
+			Dport:    e.Dport,
+			Family:   types.AddressFamily(e.Family),
+			Duration: time.Duration(e.DurationNs),
+		},
+	}
+}
+
+// -----------------------------------------------------------------------
+// Sprint 33.0: Kernel Module Load & Cgroup Escape
+// -----------------------------------------------------------------------
+
+// KmodObjects contains all eBPF objects for kernel module load detection.
+type KmodObjects struct {
+	LsmKernelModuleRequest *ebpf.Program `ebpf:"lsm_kernel_module_request"`
+	LsmKernelReadFile      *ebpf.Program `ebpf:"lsm_kernel_read_file"`
+	TraceExecRecordCgroup  *ebpf.Program `ebpf:"trace_exec_record_cgroup"`
+	LsmEvents              *ebpf.Map     `ebpf:"lsm_events"`
+	PidInitialCgroup       *ebpf.Map     `ebpf:"pid_initial_cgroup"`
+}
+
+// Close closes all eBPF objects.
+func (o *KmodObjects) Close() error {
+	for _, p := range []*ebpf.Program{
+		o.LsmKernelModuleRequest,
+		o.LsmKernelReadFile,
+		o.TraceExecRecordCgroup,
+	} {
+		if p != nil {
+			p.Close()
+		}
+	}
+	for _, m := range []*ebpf.Map{o.LsmEvents, o.PidInitialCgroup} {
+		if m != nil {
+			m.Close()
+		}
+	}
+	return nil
+}
+
+// LoadKmodObjects loads kmod eBPF objects from embedded bytecode.
+func LoadKmodObjects(obj *KmodObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// KmodRawEvent is the wire-format event for EVENT_TYPE_KMOD_LOAD.
+// Wire layout (packed):
+//
+//	[0 ] type        uint32 (4)
+//	[4 ] timestamp   uint64 (8)
+//	[12] pid         uint32 (4)
+//	[16] uid         uint32 (4)
+//	[20] comm        [16]byte (16)
+//	[36] parent_comm [16]byte (16)
+//	[52] ppid        uint32  (4)
+//	[56] mod_name    [64]byte (64)
+//	[120] from_tmpfs uint8 (1)
+type KmodRawEvent struct {
+	Type       uint32
+	Timestamp  uint64
+	PID        uint32
+	UID        uint32
+	Comm       [16]byte
+	ParentComm [16]byte
+	PPID       uint32
+	ModName    [64]byte
+	FromTmpfs  uint8
+}
+
+// ParseKmodEvent parses a raw ring-buffer sample for EVENT_TYPE_KMOD_LOAD.
+func ParseKmodEvent(raw []byte) (*KmodRawEvent, error) {
+	const minSize = 4 + 8 + 4 + 4 + 16 + 16 + 4 + 64 + 1 // 121 bytes
+	if len(raw) < minSize {
+		return nil, fmt.Errorf("kmod raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	e := &KmodRawEvent{}
+	off := 0
+	e.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	e.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(e.Comm[:], raw[off:off+16]); off += 16
+	copy(e.ParentComm[:], raw[off:off+16]); off += 16
+	e.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(e.ModName[:], raw[off:off+64]); off += 64
+	e.FromTmpfs = raw[off]
+	return e, nil
+}
+
+// ToTypesEvent converts a KmodRawEvent to types.Event.
+func (e *KmodRawEvent) ToTypesEvent() types.Event {
+	// Trim null bytes from mod name.
+	name := e.ModName[:]
+	for i, b := range name {
+		if b == 0 {
+			name = e.ModName[:i]
+			break
+		}
+	}
+	return types.Event{
+		Type:       types.EventKmodLoad,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		UID:        e.UID,
+		PPID:       e.PPID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
+		Kmod: &types.KmodEvent{
+			ModName:   string(name),
+			FromTmpfs: e.FromTmpfs != 0,
+		},
+	}
+}
+
+// CgroupObjects contains all eBPF objects for cgroup escape detection.
+type CgroupObjects struct {
+	LsmCgroupAttachTask *ebpf.Program `ebpf:"lsm_cgroup_attach_task"`
+	CgroupEvents        *ebpf.Map     `ebpf:"cgroup_events"`
+	PidInitialCgroup    *ebpf.Map     `ebpf:"pid_initial_cgroup"`
+}
+
+// Close closes all eBPF objects.
+func (o *CgroupObjects) Close() error {
+	if o.LsmCgroupAttachTask != nil {
+		o.LsmCgroupAttachTask.Close()
+	}
+	for _, m := range []*ebpf.Map{o.CgroupEvents, o.PidInitialCgroup} {
+		if m != nil {
+			m.Close()
+		}
+	}
+	return nil
+}
+
+// LoadCgroupObjects loads cgroup eBPF objects from embedded bytecode.
+func LoadCgroupObjects(obj *CgroupObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// CgroupEscapeRawEvent is the wire-format event for EVENT_TYPE_CGROUP_ESC.
+// Wire layout (packed):
+//
+//	[0 ] type          uint32 (4)
+//	[4 ] timestamp     uint64 (8)
+//	[12] pid           uint32 (4)
+//	[16] uid           uint32 (4)
+//	[20] comm          [16]byte (16)
+//	[36] parent_comm   [16]byte (16)
+//	[52] ppid          uint32  (4)
+//	[56] init_cgroup_id uint64 (8)
+//	[64] new_cgroup_id  uint64 (8)
+type CgroupEscapeRawEvent struct {
+	Type         uint32
+	Timestamp    uint64
+	PID          uint32
+	UID          uint32
+	Comm         [16]byte
+	ParentComm   [16]byte
+	PPID         uint32
+	InitCgroupID uint64
+	NewCgroupID  uint64
+}
+
+// ParseCgroupEscapeEvent parses a raw ring-buffer sample for EVENT_TYPE_CGROUP_ESC.
+func ParseCgroupEscapeEvent(raw []byte) (*CgroupEscapeRawEvent, error) {
+	const minSize = 4 + 8 + 4 + 4 + 16 + 16 + 4 + 8 + 8 // 72 bytes
+	if len(raw) < minSize {
+		return nil, fmt.Errorf("cgroup_esc raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	e := &CgroupEscapeRawEvent{}
+	off := 0
+	e.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	e.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(e.Comm[:], raw[off:off+16]); off += 16
+	copy(e.ParentComm[:], raw[off:off+16]); off += 16
+	e.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.InitCgroupID = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	e.NewCgroupID = binary.LittleEndian.Uint64(raw[off:])
+	return e, nil
+}
+
+// ToTypesEvent converts a CgroupEscapeRawEvent to types.Event.
+func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
+	return types.Event{
+		Type:       types.EventCgroupEsc,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		UID:        e.UID,
+		PPID:       e.PPID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
+		CgroupEsc: &types.CgroupEscapeEvent{
+			InitCgroupID: e.InitCgroupID,
+			NewCgroupID:  e.NewCgroupID,
 		},
 	}
 }

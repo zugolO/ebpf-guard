@@ -1,0 +1,111 @@
+# Kernel Integrity Rules for ebpf-guard
+# Detects kernel module loading — a primary rootkit/implant vector.
+# Sprint 33.0: Kernel Module Load & Container Cgroup Escape
+
+rules:
+  # ============================================================================
+  # Kernel Module Load from unexpected parent
+  # ============================================================================
+
+  # Any module load whose parent is not modprobe/kmod/depmod is suspicious.
+  # Legitimate kernel module loading always originates from modprobe (called by
+  # the kernel automatically) or package manager post-install scripts via kmod.
+  - id: kmod_unexpected_parent
+    name: "Kernel Integrity: Module load from unexpected parent"
+    description: "A kernel module was loaded by a process whose parent is not modprobe, kmod, or depmod. This is a strong indicator of a rootkit or kernel implant."
+    event_type: kmod
+    condition:
+      condition_group:
+        op: AND
+        conditions:
+          - field: parent_comm
+            op: not_in
+            values:
+              - "modprobe"
+              - "kmod"
+              - "depmod"
+              - "insmod"
+              - "systemd"
+              - "udevadm"
+    severity: critical
+    action: alert
+    tags: [kernel-integrity, rootkit, kmod, mitre-t1547]
+
+  # ============================================================================
+  # Kernel Module Load from /tmp or /dev/shm
+  # ============================================================================
+
+  # Loading a module from a world-writable tmpfs path is a classic rootkit
+  # technique: drop .ko to /tmp, load via insmod. This should never happen
+  # in a production system.
+  - id: kmod_load_from_tmpfs
+    name: "Kernel Integrity: Module loaded from /tmp or /dev/shm"
+    description: "A kernel module was loaded from a world-writable temporary directory. Legitimate modules are always under /lib/modules or /usr/lib/modules."
+    event_type: kmod
+    condition:
+      field: from_tmpfs
+      op: eq
+      values: ["true"]
+    severity: critical
+    action: alert
+    tags: [kernel-integrity, rootkit, kmod, tmpfs, mitre-t1547]
+
+  # ============================================================================
+  # Capability drop then re-acquire evasion pattern
+  # (kmod variant: process drops all caps then loads module)
+  # ============================================================================
+
+  # Any process that is not a package manager or boot script and loads a module
+  # while running as non-root UID (UID > 0) is extremely suspicious.
+  - id: kmod_load_nonroot
+    name: "Kernel Integrity: Module load by non-root process"
+    description: "A kernel module was loaded by a process running as non-root. This requires CAP_SYS_MODULE and is almost never legitimate outside of privileged containers."
+    event_type: kmod
+    condition:
+      field: uid
+      op: gt
+      values: ["0"]
+    severity: critical
+    action: alert
+    tags: [kernel-integrity, rootkit, kmod, privilege-escalation, mitre-t1547]
+
+  # ============================================================================
+  # Suspicious module names
+  # ============================================================================
+
+  # Hidden or obfuscated module names (dot-prefix, random hex, numeric-only).
+  - id: kmod_suspicious_name
+    name: "Kernel Integrity: Suspicious kernel module name"
+    description: "A kernel module with a suspicious name was loaded. Rootkits often use hidden (dot-prefixed), random hex, or numeric module names."
+    event_type: kmod
+    condition:
+      field: mod_name
+      op: regex
+      values:
+        - "^\\..*"          # dot-prefixed (hidden)
+        - "^[0-9a-f]{8,}$"  # looks like a random hex string
+        - "^[0-9]+$"        # purely numeric
+    severity: critical
+    action: alert
+    tags: [kernel-integrity, rootkit, kmod, obfuscation, mitre-t1547]
+
+  # ============================================================================
+  # Container: any module load is suspicious
+  # ============================================================================
+
+  # A containerised process should never need to load kernel modules.
+  # If a container has CAP_SYS_MODULE, that is itself a misconfiguration.
+  - id: kmod_from_container
+    name: "Kernel Integrity: Kernel module load from container"
+    description: "A process inside a container namespace loaded a kernel module. Containers should never have CAP_SYS_MODULE; this likely indicates a container escape or misconfiguration."
+    event_type: kmod
+    condition:
+      field: comm
+      op: not_in
+      values:
+        - "modprobe"
+        - "kmod"
+        - "depmod"
+    severity: critical
+    action: alert
+    tags: [kernel-integrity, rootkit, kmod, container-escape, mitre-t1611]

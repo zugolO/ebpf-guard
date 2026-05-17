@@ -2,6 +2,7 @@
 package profiler
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -10,15 +11,18 @@ import (
 
 // ProcessProfile tracks the behavioral baseline for a single process.
 type ProcessProfile struct {
-	mu sync.RWMutex
+	// mu guards all mutable fields on this profile.
+	// Lock order: pm.mu (ProfileManager) must be acquired before profile.mu
+	// when both are needed simultaneously.
+	mu sync.Mutex
 
 	// Identity
 	PID  uint32
 	Comm string
 
 	// Timestamps
-	CreatedAt   time.Time
-	LastSeenAt  time.Time
+	CreatedAt  time.Time
+	LastSeenAt time.Time
 
 	// Network behavior
 	NetworkProfile NetworkProfile
@@ -66,9 +70,9 @@ type SyscallProfile struct {
 func NewProcessProfile(pid uint32, comm string) *ProcessProfile {
 	now := time.Now()
 	return &ProcessProfile{
-		PID:       pid,
-		Comm:      comm,
-		CreatedAt: now,
+		PID:        pid,
+		Comm:       comm,
+		CreatedAt:  now,
 		LastSeenAt: now,
 		NetworkProfile: NetworkProfile{
 			DestPorts: make(map[uint16]*EWMA),
@@ -170,8 +174,8 @@ func (p *ProcessProfile) recordSyscallEventLocked(e *types.SyscallEvent, weight 
 
 // GetAnomalyScore returns the current anomaly score.
 func (p *ProcessProfile) GetAnomalyScore() float64 {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.AnomalyScore
 }
 
@@ -184,8 +188,8 @@ func (p *ProcessProfile) SetAnomalyScore(score float64) {
 
 // IsExpired checks if the profile has expired based on TTL.
 func (p *ProcessProfile) IsExpired(ttl time.Duration) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return time.Since(p.LastSeenAt) > ttl
 }
 
@@ -195,18 +199,55 @@ type ProfileManager struct {
 	profiles map[uint32]*ProcessProfile
 	weight   float64 // EWMA weight
 	ttl      time.Duration
+	maxPIDs  int // maximum number of tracked PIDs; 0 = unlimited
 }
 
 // NewProfileManager creates a new profile manager.
+// Deprecated: use NewProfileManagerWithContext to enable background cleanup.
 func NewProfileManager(weight float64, ttl time.Duration) *ProfileManager {
 	return &ProfileManager{
 		profiles: make(map[uint32]*ProcessProfile),
 		weight:   weight,
 		ttl:      ttl,
+		maxPIDs:  65536,
+	}
+}
+
+// NewProfileManagerWithContext creates a profile manager that runs a background
+// cleanup goroutine which exits when ctx is cancelled.
+func NewProfileManagerWithContext(ctx context.Context, weight float64, ttl time.Duration, maxPIDs int) *ProfileManager {
+	if maxPIDs <= 0 {
+		maxPIDs = 65536
+	}
+	pm := &ProfileManager{
+		profiles: make(map[uint32]*ProcessProfile),
+		weight:   weight,
+		ttl:      ttl,
+		maxPIDs:  maxPIDs,
+	}
+	go pm.cleanupLoop(ctx, ttl/4)
+	return pm
+}
+
+// cleanupLoop periodically removes expired profiles until ctx is cancelled.
+func (pm *ProfileManager) cleanupLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 90 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			pm.CleanupExpired()
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
 // GetOrCreate returns an existing profile or creates a new one.
+// When the map is at capacity (maxPIDs), the least-recently-seen entry is evicted.
 func (pm *ProfileManager) GetOrCreate(pid uint32, comm string) *ProcessProfile {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -215,9 +256,34 @@ func (pm *ProfileManager) GetOrCreate(pid uint32, comm string) *ProcessProfile {
 		return profile
 	}
 
+	if pm.maxPIDs > 0 && len(pm.profiles) >= pm.maxPIDs {
+		pm.evictLRULocked()
+	}
+
 	profile := NewProcessProfile(pid, comm)
 	pm.profiles[pid] = profile
 	return profile
+}
+
+// evictLRULocked removes the profile with the oldest LastSeenAt timestamp.
+// Caller must hold pm.mu (write lock).
+func (pm *ProfileManager) evictLRULocked() {
+	var lruPID uint32
+	var lruTime time.Time
+	first := true
+	for pid, p := range pm.profiles {
+		p.mu.Lock()
+		seen := p.LastSeenAt
+		p.mu.Unlock()
+		if first || seen.Before(lruTime) {
+			lruPID = pid
+			lruTime = seen
+			first = false
+		}
+	}
+	if !first {
+		delete(pm.profiles, lruPID)
+	}
 }
 
 // Get returns an existing profile or nil.
@@ -275,26 +341,27 @@ func (pm *ProfileManager) PIDs() []uint32 {
 }
 
 // RecordEvent processes an event and updates the appropriate profile.
-// This method is thread-safe and ensures per-PID event ordering.
+// Two-phase locking: pm.mu is held only for the map lookup/create, then
+// released before the profile update runs under the per-profile mutex.
+// This eliminates pm.mu contention on the hot path when many goroutines
+// record events for different PIDs simultaneously.
 //
-// Lock scope note: pm.mu is held for the entire duration of this method,
-// including the profile update. This prevents race conditions with
-// calculateAnomalyScore which reads profile data.
-//
-// Lock order invariant: pm.mu must be acquired before profile.mu.
-// This is enforced by holding pm.mu before accessing any profile fields.
-// The invariant prevents deadlock between RecordEvent and calculateAnomalyScore.
+// Lock order invariant: when both locks are needed, acquire pm.mu before
+// profile.mu (e.g. in evictLRULocked). Here we hold only one at a time.
 func (pm *ProfileManager) RecordEvent(e types.Event) {
 	pm.mu.Lock()
-	
 	profile, exists := pm.profiles[e.PID]
 	if !exists {
+		if pm.maxPIDs > 0 && len(pm.profiles) >= pm.maxPIDs {
+			pm.evictLRULocked()
+		}
 		profile = NewProcessProfile(e.PID, string(bytesToString(e.Comm[:])))
 		pm.profiles[e.PID] = profile
 	}
-	
-	// Hold lock during entire event recording to ensure single-goroutine-per-PID invariant
-	// This prevents race between RecordEvent and calculateAnomalyScore
+	pm.mu.Unlock()
+
+	// Profile update runs under the per-profile mutex, not the map mutex.
+	profile.mu.Lock()
 	switch e.Type {
 	case types.EventTCPConnect:
 		if e.Network != nil {
@@ -309,8 +376,7 @@ func (pm *ProfileManager) RecordEvent(e types.Event) {
 			profile.recordSyscallEventLocked(e.Syscall, pm.weight)
 		}
 	}
-	
-	pm.mu.Unlock()
+	profile.mu.Unlock()
 }
 
 // Helper functions

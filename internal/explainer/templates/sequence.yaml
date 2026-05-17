@@ -1,0 +1,37 @@
+# Sequence anomaly explanation templates
+
+templates:
+  - id: sequence_anomaly_detected
+    name: "Syscall Sequence Anomaly"
+    category: sequence
+    summary: "Process {{.Comm}} (PID {{.PID}}) exhibited anomalous syscall pattern"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) executed a sequence of system 
+      calls that significantly deviates from its established baseline. 
+      This behavioral anomaly may indicate:
+      - Compromised process executing unexpected operations
+      - Exploitation triggering unusual code paths
+      - Malware performing post-exploitation activities
+      
+      The sequence profiler detected this through frequency vector analysis 
+      of syscall patterns over a sliding time window.
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because sequence anomalies can indicate compromise 
+      but may also result from legitimate changes in application behavior 
+      (updates, new features, different load patterns).
+    mitigations:
+      - "Review recent changes to application {{.Comm}}"
+      - "Check process {{.PID}} for signs of compromise"
+      - "Analyze the specific syscall sequence that triggered the alert"
+      - "Consider if the anomaly correlates with deployment or update"
+      - "Monitor for additional anomalies from the same process"
+    references:
+      - "https://attack.mitre.org/tactics/TA0002/"
+    mitre:
+      tactic: "Execution"
+      technique_id: "T1059"
+      technique: "Command and Scripting Interpreter"
+      url: "https://attack.mitre.org/techniques/T1059/"

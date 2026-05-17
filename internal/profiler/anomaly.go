@@ -23,13 +23,17 @@ type AnomalyDetector struct {
 	weight         float64       // EWMA weight
 
 	// State
-	learner         *BaselineLearner
-	profileManager  *ProfileManager
+	learner        *BaselineLearner
+	profileManager *ProfileManager
 
 	// Learning phase tracking - atomic.Bool for hot path performance
 	// This eliminates ~10,000 mutex acquisitions/sec after learning completes
-	learningStartTime  time.Time
-	learningComplete   atomic.Bool
+	learningStartTime time.Time
+	learningComplete  atomic.Bool
+
+	// Controllable state for memory pressure handling
+	enabled      bool
+	samplingRate float64
 }
 
 // AnomalyResult contains the result of anomaly detection.
@@ -44,11 +48,11 @@ type AnomalyResult struct {
 
 // AnomalyContribution describes which aspect contributed to the anomaly score.
 type AnomalyContribution struct {
-	Category    string  // "network", "file", "syscall"
-	Field       string  // Specific field (e.g., "dport", "directory")
-	Value       string  // The observed value
-	Expected    float64 // Expected frequency (baseline)
-	Observed    float64 // Observed frequency
+	Category     string  // "network", "file", "syscall"
+	Field        string  // Specific field (e.g., "dport", "directory")
+	Value        string  // The observed value
+	Expected     float64 // Expected frequency (baseline)
+	Observed     float64 // Observed frequency
 	Contribution float64 // Contribution to total score (0.0-1.0)
 }
 
@@ -61,6 +65,8 @@ func NewAnomalyDetector(threshold float64, learningPeriod time.Duration, weight 
 		learner:           NewBaselineLearner(learningPeriod, 100),
 		profileManager:    NewProfileManager(weight, 24*time.Hour),
 		learningStartTime: time.Now(),
+		enabled:           true,
+		samplingRate:      1.0,
 	}
 	// learningComplete defaults to false (zero value)
 	return ad
@@ -73,6 +79,10 @@ func NewAnomalyDetector(threshold float64, learningPeriod time.Duration, weight 
 // The profileManager.RecordEvent and calculateAnomalyScore calls are not
 // thread-safe for the same PID and require external synchronization.
 func (ad *AnomalyDetector) ProcessEvent(e types.Event) *AnomalyResult {
+	if !ad.IsEnabled() {
+		return nil
+	}
+
 	// Record the event in the profile
 	ad.profileManager.RecordEvent(e)
 
@@ -135,8 +145,8 @@ func (ad *AnomalyDetector) GetProfileManager() *ProfileManager {
 // This is enforced by the call chain: ProcessEvent -> Get (holds pm.mu) -> calculateAnomalyScore.
 // The invariant prevents deadlock between RecordEvent and calculateAnomalyScore.
 func (ad *AnomalyDetector) calculateAnomalyScore(profile *ProcessProfile, event types.Event) *AnomalyResult {
-	profile.mu.RLock()
-	defer profile.mu.RUnlock()
+	profile.mu.Lock()
+	defer profile.mu.Unlock()
 
 	result := &AnomalyResult{
 		PID:       profile.PID,
@@ -369,4 +379,46 @@ func formatIP(addr [16]byte, family types.AddressFamily) string {
 	}
 	// IPv4 - use only first 4 bytes
 	return net.IP(addr[:4]).String()
+}
+
+// Enable activates the anomaly detector.
+func (ad *AnomalyDetector) Enable() {
+	ad.mu.Lock()
+	defer ad.mu.Unlock()
+	ad.enabled = true
+}
+
+// Disable deactivates the anomaly detector.
+func (ad *AnomalyDetector) Disable() {
+	ad.mu.Lock()
+	defer ad.mu.Unlock()
+	ad.enabled = false
+}
+
+// IsEnabled returns true if the anomaly detector is currently active.
+func (ad *AnomalyDetector) IsEnabled() bool {
+	ad.mu.RLock()
+	defer ad.mu.RUnlock()
+	return ad.enabled
+}
+
+// SetSamplingRate adjusts the anomaly detector's sampling rate.
+// rate must be in range [0.0, 1.0] where 1.0 means 100% sampling.
+func (ad *AnomalyDetector) SetSamplingRate(rate float64) {
+	if rate < 0.0 {
+		rate = 0.0
+	}
+	if rate > 1.0 {
+		rate = 1.0
+	}
+	ad.mu.Lock()
+	defer ad.mu.Unlock()
+	ad.samplingRate = rate
+}
+
+// GetSamplingRate returns the current sampling rate.
+func (ad *AnomalyDetector) GetSamplingRate() float64 {
+	ad.mu.RLock()
+	defer ad.mu.RUnlock()
+	return ad.samplingRate
 }

@@ -124,6 +124,16 @@ func SetCollectorUp(collector string, up bool) {
 	CollectorUp.WithLabelValues(collector).Set(value)
 }
 
+// CollectorStatusReporter implements collector.StatusReporter using the global
+// Prometheus CollectorUp gauge. Collectors should accept this interface rather
+// than importing the exporter package directly.
+type CollectorStatusReporter struct{}
+
+// SetUp sets the named collector's up/down Prometheus gauge.
+func (CollectorStatusReporter) SetUp(name string, up bool) {
+	SetCollectorUp(name, up)
+}
+
 // RecordLogLine increments the log lines counter for the given level.
 func RecordLogLine(level string) {
 	LogLinesTotal.WithLabelValues(level).Inc()

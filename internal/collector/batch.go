@@ -45,12 +45,12 @@ type BatchReader struct {
 
 // BatchMetrics tracks batch reading performance.
 type BatchMetrics struct {
-	BatchesRead     uint64
-	EventsRead      uint64
-	EventsDropped   uint64
-	AvgBatchSize    float64
-	MaxBatchSize    int
-	TotalWaitTime   time.Duration
+	BatchesRead   uint64
+	EventsRead    uint64
+	EventsDropped uint64
+	AvgBatchSize  float64
+	MaxBatchSize  int
+	TotalWaitTime time.Duration
 }
 
 // NewBatchReader creates a new batch reader.
@@ -91,9 +91,16 @@ func (b *BatchReader) ReadBatch(ctx context.Context) ([]ringbuf.Record, error) {
 				// Timeout, return what we have
 				break
 			}
-			if ctx.Err() != nil {
-				return batch, ctx.Err()
+			// Check context cancellation after every Read() to avoid blocking shutdown.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return batch, ctxErr
 			}
+			return batch, err
+		}
+
+		// Check context again after a successful read — shutdown may have been
+		// signalled while we were blocked in Read().
+		if err := ctx.Err(); err != nil {
 			return batch, err
 		}
 

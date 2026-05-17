@@ -13,16 +13,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Valid field names for each event type
+// Valid field names for each event type. These are the single source of truth
+// for field name validation — keep in sync with getFieldValue in rules.go.
 var (
 	validNetworkFields = map[string]bool{
-		"dport": true, "sport": true, "daddr": true, "saddr": true, "proto": true,
+		"dport": true, "sport": true, "daddr": true, "saddr": true, "proto": true, "family": true,
 	}
 	validFileFields = map[string]bool{
 		"filename": true, "flags": true, "mode": true, "op": true, "directory": true, "extension": true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
+	}
+	validDNSFields = map[string]bool{
+		"qname": true, "qtype": true, "rcode": true, "direction": true,
+	}
+	validTLSFields = map[string]bool{
+		"tls_data": true, "direction": true, "data_len": true,
+	}
+	// caps_gained / caps_dropped use the OpCapsGained / OpCapsDropped operators
+	// (not standard value comparison), so their only meaningful field is "caps".
+	validPrivescFields = map[string]bool{
+		"caps": true, "uid": true, "comm": true,
+	}
+	validNetCloseFields = map[string]bool{
+		"dport": true, "sport": true, "daddr": true, "saddr": true,
+		"family": true, "duration_sec": true, "duration_ms": true,
 	}
 )
 
@@ -123,17 +139,17 @@ func getConditionsFromGroup(group *RuleConditionGroup) []RuleCondition {
 	if group == nil {
 		return nil
 	}
-	
+
 	var conditions []RuleCondition
-	
+
 	// Add direct conditions
 	conditions = append(conditions, group.Conditions...)
-	
+
 	// Recursively process subgroups
 	for i := range group.SubGroups {
 		conditions = append(conditions, getConditionsFromGroup(&group.SubGroups[i])...)
 	}
-	
+
 	return conditions
 }
 
@@ -181,6 +197,14 @@ func validateFieldName(field string, eventType types.EventType) error {
 		validFields = validFileFields
 	case types.EventSyscall:
 		validFields = validSyscallFields
+	case types.EventDNS:
+		validFields = validDNSFields
+	case types.EventTLS:
+		validFields = validTLSFields
+	case types.EventPrivesc:
+		validFields = validPrivescFields
+	case types.EventNetClose:
+		validFields = validNetCloseFields
 	default:
 		return fmt.Errorf("unknown event type: %d", eventType)
 	}

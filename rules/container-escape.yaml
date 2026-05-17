@@ -349,3 +349,37 @@ rules:
     severity: warning
     action: alert
     tags: [container-escape, init-process, pid-1]
+
+  # ============================================================================
+  # Cgroup Namespace Escape (Sprint 33.0)
+  # ============================================================================
+
+  # Process migrated to a cgroup outside its initial container cgroup hierarchy.
+  # This is the classic cgroup escape technique: move the process into the root
+  # cgroup before executing a command via cgroup v1 release_agent.
+  - id: container_escape_cgroup_migrate
+    name: "Container Escape: Process migrated to different cgroup"
+    description: "A process moved to a cgroup outside its initial container cgroup hierarchy. This is a key indicator of cgroup-based container escape (CVE-2022-0492 class)."
+    event_type: cgroup_esc
+    condition:
+      field: new_cgroup_id
+      op: neq
+      values: ["0"]  # any migration where new_cgroup_id != 0 was already filtered BPF-side
+    severity: critical
+    action: alert
+    tags: [container-escape, cgroup, cgroup-escape, cve, mitre-t1611]
+
+  # Process that was in a non-root cgroup migrated to cgroup ID 1 (root cgroup).
+  # Moving to the root cgroup is almost always the precursor to a release_agent
+  # escape and should be treated as critical with immediate blocking.
+  - id: container_escape_cgroup_to_root
+    name: "Container Escape: Process migrated to root cgroup"
+    description: "A process was moved into cgroup ID 1 (root cgroup). This is the exact precursor step for the cgroup v1 release_agent escape technique."
+    event_type: cgroup_esc
+    condition:
+      field: new_cgroup_id
+      op: eq
+      values: ["1"]
+    severity: critical
+    action: block
+    tags: [container-escape, cgroup, cgroup-escape, cve, mitre-t1611]

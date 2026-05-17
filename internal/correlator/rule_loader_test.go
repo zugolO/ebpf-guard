@@ -539,6 +539,53 @@ rules:
 	assert.Equal(t, "owasp_ssrf", ssrfRules[0].ID)
 }
 
+// TestRuleLoaderRejectsUnknownField verifies that a rule referencing a
+// non-existent field name is rejected at load time (Sprint 27.0 Part C).
+func TestRuleLoaderRejectsUnknownField(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	yamlContent := `rules:
+  - id: bad_field_rule
+    name: Bad Field Rule
+    event_type: 2
+    condition:
+      field: "unknwon_typo"
+      op: equals
+      values: ["8080"]
+    severity: warning
+    action: alert
+`
+	path := filepath.Join(tmpDir, "bad.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0644))
+
+	_, err := LoadRulesFromFile(path)
+	require.Error(t, err, "rule with unknown field should be rejected")
+	assert.Contains(t, err.Error(), "unknwon_typo", "error should mention the bad field name")
+}
+
+// TestEvaluateConditionEmptyLegitValue verifies that a field with a real empty
+// string value is handled differently from a completely missing field, so that
+// legitimate empty-value matches still work (Sprint 27.0 Part C).
+func TestEvaluateConditionEmptyLegitValue(t *testing.T) {
+	// A rule that checks dport equals "0" — a legitimate (if unusual) zero port.
+	rule := Rule{
+		ID:        "zero_port",
+		Name:      "Zero Port Rule",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"0"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+	engine := NewRuleEngine([]Rule{rule})
+	event := types.Event{
+		Type:    types.EventTCPConnect,
+		Network: &types.NetworkEvent{Dport: 0},
+	}
+	// "0" is a non-empty string — the rule must match.
+	alerts := engine.Evaluate(event)
+	assert.Len(t, alerts, 1, "rule for dport==0 must match event with Dport=0")
+}
+
 // filterRulesByTag is a helper function to filter rules by a specific tag.
 func filterRulesByTag(rules []Rule, tag string) []Rule {
 	if tag == "" {

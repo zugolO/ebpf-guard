@@ -2,6 +2,9 @@
 package correlator
 
 import (
+	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -204,4 +207,67 @@ func TestRateLimiter_ConcurrentAccess(t *testing.T) {
 
 	// Should have exactly 100 alerts (the limit)
 	assert.Equal(t, 100, rl.GetCount("concurrent_rule"))
+}
+
+// TestRateLimiterNoDuplicateState verifies that two concurrent Allow() calls for a new
+// ruleID create exactly one ruleState entry (no double-create race).
+func TestRateLimiterNoDuplicateState(t *testing.T) {
+	rl := NewRateLimiterWithContext(context.Background(), 1*time.Second, 1000, true)
+
+	const ruleID = "new_rule"
+	const goroutines = 50
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			rl.Allow(ruleID)
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	// All goroutines targeted the same ruleID — there must be exactly one state entry.
+	assert.Equal(t, 1, rl.StateCount(), "expected exactly one ruleState for %q", ruleID)
+	assert.Equal(t, goroutines, rl.GetCount(ruleID))
+}
+
+// BenchmarkRateLimiterCleanup measures Cleanup with many stale entries.
+func BenchmarkRateLimiterCleanup(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		rl := NewRateLimiterWithContext(context.Background(), time.Second, 1000, true)
+		for j := 0; j < 500; j++ {
+			rl.Allow(fmt.Sprintf("rule_%d", j))
+		}
+		b.StartTimer()
+		rl.Cleanup(0) // maxAge=0 makes all entries stale
+	}
+}
+
+// TestRateLimiterCleanupRemovesExpired verifies that Cleanup deletes stale entries.
+func TestRateLimiterCleanupRemovesExpired(t *testing.T) {
+	rl := NewRateLimiterWithContext(context.Background(), 1*time.Second, 10, true)
+
+	rl.Allow("old_rule")
+	rl.Allow("old_rule2")
+
+	// Wait so alerts age past the cleanup threshold
+	time.Sleep(60 * time.Millisecond)
+
+	// Add a fresh entry after the sleep
+	rl.Allow("fresh_rule")
+
+	removed := rl.Cleanup(50 * time.Millisecond)
+	assert.Equal(t, 2, removed)
+
+	ids := rl.GetRuleIDs()
+	assert.Len(t, ids, 1)
+	assert.Contains(t, ids, "fresh_rule")
 }

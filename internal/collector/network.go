@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -15,18 +16,36 @@ import (
 
 // NetworkCollector collects TCP connection events using eBPF kprobes.
 type NetworkCollector struct {
-	logger    *slog.Logger
-	objs      *bpf.NetworkObjects
-	links     []link.Link
-	reader    *bpf.RingbufReader
-	loadError error // Tracks if the collector failed to load (stub mode)
+	logger     *slog.Logger
+	objs       *bpf.NetworkObjects
+	links      []link.Link
+	reader     *bpf.RingbufReader
+	loadError  error // Tracks if the collector failed to load (stub mode)
+	dropLogger *dropLogger
+	status     StatusReporter
+	strategy   BackpressureStrategy
 }
 
 // NewNetworkCollector creates a new network event collector.
 func NewNetworkCollector(logger *slog.Logger) (*NetworkCollector, error) {
 	return &NetworkCollector{
-		logger: logger.With("collector", "network"),
+		logger:     logger.With("collector", "network"),
+		dropLogger: newDropLogger(5 * time.Second),
+		status:     NoopStatusReporter{},
+		strategy:   StrategyDrop,
 	}, nil
+}
+
+// WithStatusReporter sets the StatusReporter used to signal up/down state.
+func (c *NetworkCollector) WithStatusReporter(r StatusReporter) *NetworkCollector {
+	c.status = r
+	return c
+}
+
+// WithBackpressureStrategy sets the backpressure strategy for the event channel.
+func (c *NetworkCollector) WithBackpressureStrategy(s BackpressureStrategy) *NetworkCollector {
+	c.strategy = s
+	return c
 }
 
 // Name returns the collector identifier.
@@ -42,14 +61,14 @@ func (c *NetworkCollector) Start(ctx context.Context, out chan<- types.Event) er
 	// Load eBPF objects
 	if err := c.loadObjects(); err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("network", false)
+		c.status.SetUp("network", false)
 		return fmt.Errorf("collector/network: load eBPF objects: %w", err)
 	}
 
 	// Attach kprobes
 	if err := c.attachPrograms(); err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("network", false)
+		c.status.SetUp("network", false)
 		c.Close()
 		return fmt.Errorf("collector/network: attach programs: %w", err)
 	}
@@ -58,13 +77,13 @@ func (c *NetworkCollector) Start(ctx context.Context, out chan<- types.Event) er
 	reader, err := bpf.NewRingbufReader(c.objs.Events)
 	if err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("network", false)
+		c.status.SetUp("network", false)
 		c.Close()
 		return fmt.Errorf("collector/network: create ringbuf reader: %w", err)
 	}
 	c.reader = reader
 	c.loadError = nil
-	exporter.SetCollectorUp("network", true)
+	c.status.SetUp("network", true)
 
 	// Start reading loop
 	go c.readLoop(ctx, out)
@@ -83,6 +102,41 @@ func (c *NetworkCollector) IsHealthy() bool {
 // LoadError returns the error from failed load, if any.
 func (c *NetworkCollector) LoadError() error {
 	return c.loadError
+}
+
+// IsAttached returns true if the BPF program is still attached.
+// Implements watchdog.BPFProgramChecker interface.
+func (c *NetworkCollector) IsAttached() bool {
+	if c.objs == nil {
+		return false
+	}
+	// Check if we have active links
+	return len(c.links) > 0
+}
+
+// Reload attempts to reload the BPF program.
+// Implements watchdog.BPFProgramChecker interface.
+func (c *NetworkCollector) Reload() error {
+	c.logger.Info("reloading network collector")
+
+	// Close existing resources
+	if err := c.Close(); err != nil {
+		c.logger.Warn("error closing during reload", slog.Any("error", err))
+	}
+
+	// Reload objects
+	if err := c.loadObjects(); err != nil {
+		return fmt.Errorf("reload objects: %w", err)
+	}
+
+	// Re-attach programs
+	if err := c.attachPrograms(); err != nil {
+		c.Close()
+		return fmt.Errorf("re-attach programs: %w", err)
+	}
+
+	c.logger.Info("network collector reloaded successfully")
+	return nil
 }
 
 // Close releases all eBPF resources.
@@ -118,12 +172,19 @@ func (c *NetworkCollector) loadObjects() error {
 
 // attachPrograms attaches the eBPF programs to kprobes.
 func (c *NetworkCollector) attachPrograms() error {
-	// Attach tcp_connect kprobe
-	l, err := link.Kprobe("tcp_connect", c.objs.TraceTCPConnect, nil)
+	// Attach tcp_connect kprobe.
+	l1, err := link.Kprobe("tcp_connect", c.objs.TraceTCPConnect, nil)
 	if err != nil {
 		return fmt.Errorf("attach tcp_connect kprobe: %w", err)
 	}
-	c.links = append(c.links, l)
+	c.links = append(c.links, l1)
+
+	// Attach tcp_close kprobe for connection duration tracking.
+	l2, err := link.Kprobe("tcp_close", c.objs.TraceTCPClose, nil)
+	if err != nil {
+		return fmt.Errorf("attach tcp_close kprobe: %w", err)
+	}
+	c.links = append(c.links, l2)
 
 	return nil
 }
@@ -146,7 +207,6 @@ func (c *NetworkCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			continue
 		}
 
-		// Parse raw event into types.Event
 		event, err := c.parseEvent(record.RawSample)
 		if err != nil {
 			c.logger.Error("failed to parse event", "error", err)
@@ -154,22 +214,37 @@ func (c *NetworkCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			continue
 		}
 
-		// Send event (non-blocking)
-		select {
-		case out <- *event:
-		default:
-			c.logger.Warn("event channel full, dropping event")
+		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordDropped("network", "channel_full")
-		}
+			c.dropLogger.record(c.logger, "network")
+		})
 	}
 }
 
 // parseEvent converts raw bytes from ring buffer to types.Event.
+// Routes to the appropriate parser based on the event type field.
 func (c *NetworkCollector) parseEvent(raw []byte) (*types.Event, error) {
-	evt, err := bpf.ParseNetworkEvent(raw)
-	if err != nil {
-		return nil, err
+	if len(raw) < 4 {
+		return nil, fmt.Errorf("raw sample too short: %d bytes", len(raw))
 	}
-	result := evt.ToTypesEvent()
-	return &result, nil
+	// Read event type from the first 4 bytes (little-endian uint32).
+	evtType := uint32(raw[0]) | uint32(raw[1])<<8 | uint32(raw[2])<<16 | uint32(raw[3])<<24
+
+	switch types.EventType(evtType) {
+	case types.EventNetClose:
+		evt, err := bpf.ParseNetworkCloseEvent(raw)
+		if err != nil {
+			return nil, err
+		}
+		result := evt.ToTypesEvent()
+		return &result, nil
+	default:
+		// EventTCPConnect and any unknown network events.
+		evt, err := bpf.ParseNetworkEvent(raw)
+		if err != nil {
+			return nil, err
+		}
+		result := evt.ToTypesEvent()
+		return &result, nil
+	}
 }

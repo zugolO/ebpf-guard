@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -15,18 +16,36 @@ import (
 
 // SyscallCollector collects syscall events using eBPF tracepoints.
 type SyscallCollector struct {
-	logger    *slog.Logger
-	objs      *bpf.SyscallObjects
-	links     []link.Link
-	reader    *bpf.RingbufReader
-	loadError error // Tracks if the collector failed to load (stub mode)
+	logger     *slog.Logger
+	objs       *bpf.SyscallObjects
+	links      []link.Link
+	reader     *bpf.RingbufReader
+	loadError  error // Tracks if the collector failed to load (stub mode)
+	dropLogger *dropLogger
+	status     StatusReporter
+	strategy   BackpressureStrategy
 }
 
 // NewSyscallCollector creates a new syscall event collector.
 func NewSyscallCollector(logger *slog.Logger) (*SyscallCollector, error) {
 	return &SyscallCollector{
-		logger: logger.With("collector", "syscall"),
+		logger:     logger.With("collector", "syscall"),
+		dropLogger: newDropLogger(5 * time.Second),
+		status:     NoopStatusReporter{},
+		strategy:   StrategyDrop,
 	}, nil
+}
+
+// WithStatusReporter sets the StatusReporter used to signal up/down state.
+func (c *SyscallCollector) WithStatusReporter(r StatusReporter) *SyscallCollector {
+	c.status = r
+	return c
+}
+
+// WithBackpressureStrategy sets the backpressure strategy for the event channel.
+func (c *SyscallCollector) WithBackpressureStrategy(s BackpressureStrategy) *SyscallCollector {
+	c.strategy = s
+	return c
 }
 
 // Name returns the collector identifier.
@@ -42,14 +61,14 @@ func (c *SyscallCollector) Start(ctx context.Context, out chan<- types.Event) er
 	// Load eBPF objects
 	if err := c.loadObjects(); err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("syscall", false)
+		c.status.SetUp("syscall", false)
 		return fmt.Errorf("collector/syscall: load eBPF objects: %w", err)
 	}
 
 	// Attach tracepoints
 	if err := c.attachPrograms(); err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("syscall", false)
+		c.status.SetUp("syscall", false)
 		c.Close()
 		return fmt.Errorf("collector/syscall: attach programs: %w", err)
 	}
@@ -58,13 +77,13 @@ func (c *SyscallCollector) Start(ctx context.Context, out chan<- types.Event) er
 	reader, err := bpf.NewRingbufReader(c.objs.Events)
 	if err != nil {
 		c.loadError = err
-		exporter.SetCollectorUp("syscall", false)
+		c.status.SetUp("syscall", false)
 		c.Close()
 		return fmt.Errorf("collector/syscall: create ringbuf reader: %w", err)
 	}
 	c.reader = reader
 	c.loadError = nil
-	exporter.SetCollectorUp("syscall", true)
+	c.status.SetUp("syscall", true)
 
 	// Start reading loop
 	go c.readLoop(ctx, out)
@@ -83,6 +102,41 @@ func (c *SyscallCollector) IsHealthy() bool {
 // LoadError returns the error from failed load, if any.
 func (c *SyscallCollector) LoadError() error {
 	return c.loadError
+}
+
+// IsAttached returns true if the BPF program is still attached.
+// Implements watchdog.BPFProgramChecker interface.
+func (c *SyscallCollector) IsAttached() bool {
+	if c.objs == nil {
+		return false
+	}
+	// Check if we have active links
+	return len(c.links) > 0
+}
+
+// Reload attempts to reload the BPF program.
+// Implements watchdog.BPFProgramChecker interface.
+func (c *SyscallCollector) Reload() error {
+	c.logger.Info("reloading syscall collector")
+
+	// Close existing resources
+	if err := c.Close(); err != nil {
+		c.logger.Warn("error closing during reload", slog.Any("error", err))
+	}
+
+	// Reload objects
+	if err := c.loadObjects(); err != nil {
+		return fmt.Errorf("reload objects: %w", err)
+	}
+
+	// Re-attach programs
+	if err := c.attachPrograms(); err != nil {
+		c.Close()
+		return fmt.Errorf("re-attach programs: %w", err)
+	}
+
+	c.logger.Info("syscall collector reloaded successfully")
+	return nil
 }
 
 // Close releases all eBPF resources.
@@ -168,13 +222,10 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 				slog.Int64("syscall_nr", event.Syscall.Nr))
 		}
 
-		// Send event (non-blocking)
-		select {
-		case out <- *event:
-		default:
-			c.logger.Warn("event channel full, dropping event")
+		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordDropped("syscall", "channel_full")
-		}
+			c.dropLogger.record(c.logger, "syscall")
+		})
 	}
 }
 

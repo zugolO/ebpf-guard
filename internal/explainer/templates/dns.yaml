@@ -1,0 +1,140 @@
+# DNS threat explanation templates
+
+templates:
+  - id: dns_dga_detected
+    name: "DGA Domain Detected"
+    category: dns
+    summary: "Process {{.Comm}} queried DGA domain (high entropy)"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) queried a domain with characteristics 
+      of a Domain Generation Algorithm (DGA). DGA domains are algorithmically 
+      generated and used by malware to communicate with command and control 
+      servers while evading static domain blacklists.
+      
+      Indicators:
+      - High entropy (random-looking) domain name
+      - Unusual length and character distribution
+      - No meaningful dictionary words
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because DGA domains are a strong indicator of active 
+      malware infection attempting C2 communication. This requires immediate 
+      investigation and containment.
+    mitigations:
+      - "IMMEDIATE: Isolate pod {{.Pod}} and investigate process {{.PID}}"
+      - "Check for malware infection on the affected system"
+      - "Review DNS query logs for other DGA patterns"
+      - "Block DGA domains at DNS resolver or firewall"
+      - "Check for other indicators of compromise"
+      - "Consider network isolation for namespace {{.Namespace}}"
+    references:
+      - "https://attack.mitre.org/techniques/T1568/002/"
+      - "https://attack.mitre.org/techniques/T1071/004/"
+    mitre:
+      tactic: "Command and Control"
+      technique_id: "T1568"
+      technique: "Dynamic Resolution"
+      url: "https://attack.mitre.org/techniques/T1568/002/"
+
+  - id: dns_tunneling
+    name: "DNS Tunneling Detected"
+    category: dns
+    summary: "Process {{.Comm}} performed DNS tunneling (long QNAME)"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) made a DNS query with an unusually 
+      long query name. This is characteristic of DNS tunneling, where data 
+      is encoded in DNS queries to bypass network security controls.
+      
+      DNS tunneling is used for:
+      - Data exfiltration through DNS queries
+      - C2 communication in restricted networks
+      - Bypassing firewalls that allow DNS
+      - Covert channels in enterprise environments
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because DNS tunneling indicates active data exfiltration 
+      or C2 communication, often used by advanced attackers to bypass network 
+      security controls.
+    mitigations:
+      - "Investigate process {{.PID}} and its parent processes"
+      - "Check DNS query logs for data patterns in subdomain"
+      - "Implement DNS query length limits"
+      - "Use DNS security services (DNSSEC, DNS filtering)"
+      - "Monitor for unusual DNS query volumes"
+      - "Consider isolating affected pod {{.Pod}}"
+    references:
+      - "https://attack.mitre.org/techniques/T1071/004/"
+      - "https://attack.mitre.org/techniques/T1048/003/"
+    mitre:
+      tactic: "Command and Control"
+      technique_id: "T1071"
+      technique: "Application Layer Protocol"
+      url: "https://attack.mitre.org/techniques/T1071/004/"
+
+  - id: dns_suspicious_tld
+    name: "Suspicious TLD Query"
+    category: dns
+    summary: "Process {{.Comm}} queried suspicious TLD"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) queried a domain with a suspicious 
+      top-level domain (TLD) commonly associated with malicious activity. 
+      Certain TLDs are frequently used for malware C2, phishing, and other 
+      malicious purposes.
+      
+      Suspicious TLDs include:
+      - .onion (Tor hidden services)
+      - .bit (Namecoin blockchain domains)
+      - .bazar (Emercoin blockchain domains)
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because queries to these TLDs can be legitimate in 
+      some contexts (privacy research, etc.), but are commonly associated 
+      with malicious activity and warrant investigation.
+    mitigations:
+      - "Investigate why process {{.Comm}} is querying this TLD"
+      - "Check for malware or unauthorized software"
+      - "Review application configuration and requirements"
+      - "Consider DNS filtering for suspicious TLDs"
+      - "Monitor for other suspicious activity from PID {{.PID}}"
+    references:
+      - "https://attack.mitre.org/techniques/T1568/002/"
+    mitre:
+      tactic: "Command and Control"
+      technique_id: "T1568"
+      technique: "Dynamic Resolution"
+      url: "https://attack.mitre.org/techniques/T1568/002/"
+
+  - id: dns_txt_tunneling
+    name: "TXT Record Tunneling"
+    category: dns
+    summary: "Non-mail process {{.Comm}} queried TXT record"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}), which is not a mail-related 
+      process, queried a DNS TXT record. TXT records are sometimes abused 
+      for DNS tunneling and data exfiltration because they can contain 
+      larger amounts of data than standard A/AAAA queries.
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because TXT queries from non-mail processes can 
+      indicate tunneling activity, though some legitimate applications 
+      may use TXT records for configuration or verification.
+    mitigations:
+      - "Check the content of TXT responses if logged"
+      - "Investigate process {{.PID}} behavior"
+      - "Monitor for patterns of TXT queries"
+      - "Check for other indicators of DNS tunneling"
+    references:
+      - "https://attack.mitre.org/techniques/T1071/004/"
+    mitre:
+      tactic: "Command and Control"
+      technique_id: "T1071"
+      technique: "Application Layer Protocol"
+      url: "https://attack.mitre.org/techniques/T1071/004/"

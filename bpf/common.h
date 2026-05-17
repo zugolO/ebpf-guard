@@ -12,6 +12,12 @@
 #define EVENT_TYPE_SYSCALL     1
 #define EVENT_TYPE_TCP_CONNECT 2
 #define EVENT_TYPE_FILE_ACCESS 3
+#define EVENT_TYPE_TLS         4
+#define EVENT_TYPE_DNS         5
+#define EVENT_TYPE_PRIVESC     6  /* Privilege escalation: capability change */
+#define EVENT_TYPE_NET_CLOSE   7  /* TCP connection closed with duration */
+#define EVENT_TYPE_KMOD_LOAD   8  /* Kernel module load (insmod/init_module) */
+#define EVENT_TYPE_CGROUP_ESC  9  /* Process migrated to different cgroup namespace */
 
 /* File operation codes - must match pkg/types/event.go */
 #define FILE_OP_OPEN  0
@@ -25,6 +31,7 @@
 /* Maximum lengths for string fields */
 #define COMM_LEN     16
 #define FILENAME_LEN 256
+#define KMOD_NAME_LEN 64  /* MODULE_NAME_LEN from kernel is 56; use 64 for alignment */
 
 /*
  * struct event - Unified event structure sent from kernel to userspace.
@@ -35,8 +42,10 @@ struct event {
 	__u64 timestamp;
 	__u32 pid;
 	__u32 tgid;
+	__u32 ppid;		/* Parent process ID */
 	__u32 uid;
 	__u8  comm[COMM_LEN];
+	__u8  parent_comm[COMM_LEN];	/* Parent process name (if available) */
 	/* Union-style payload - only one field is valid based on type */
 	union {
 		struct {
@@ -59,6 +68,38 @@ struct event {
 			__u8  op;
 		} file;
 	};
+} __attribute__((packed));
+
+/*
+ * struct kmod_event - Sent when a kernel module is loaded.
+ * Emitted by lsm/kernel_module_request and lsm/kernel_read_file hooks.
+ */
+struct kmod_event {
+	__u32 type;           /* EVENT_TYPE_KMOD_LOAD */
+	__u64 timestamp;
+	__u32 pid;
+	__u32 uid;
+	__u8  comm[COMM_LEN];
+	__u8  parent_comm[COMM_LEN];
+	__u32 ppid;
+	__u8  mod_name[KMOD_NAME_LEN]; /* module name or path */
+	__u8  from_tmpfs;              /* 1 if path is in /tmp or /dev/shm */
+} __attribute__((packed));
+
+/*
+ * struct cgroup_escape_event - Sent when a process migrates to a different
+ * cgroup namespace than its recorded-at-exec initial cgroup.
+ */
+struct cgroup_escape_event {
+	__u32 type;           /* EVENT_TYPE_CGROUP_ESC */
+	__u64 timestamp;
+	__u32 pid;
+	__u32 uid;
+	__u8  comm[COMM_LEN];
+	__u8  parent_comm[COMM_LEN];
+	__u32 ppid;
+	__u64 init_cgroup_id; /* cgroup id recorded at exec */
+	__u64 new_cgroup_id;  /* cgroup id at migration time */
 } __attribute__((packed));
 
 /* Sampling configuration - configurable per event type */
@@ -164,6 +205,8 @@ static __always_inline void fill_process_info(struct event *e)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u64 uid_gid = bpf_get_current_uid_gid();
+	struct task_struct *task;
+	struct task_struct *parent;
 	
 	e->pid = (__u32)(pid_tgid >> 32);
 	e->tgid = (__u32)pid_tgid;
@@ -171,6 +214,18 @@ static __always_inline void fill_process_info(struct event *e)
 	
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->timestamp = bpf_ktime_get_ns();
+	
+	/* Get parent process info via current task */
+	task = (struct task_struct *)bpf_get_current_task();
+	parent = task->real_parent;
+	if (parent) {
+		e->ppid = parent->tgid;
+		bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), 
+			&parent->comm);
+	} else {
+		e->ppid = 0;
+		__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));
+	}
 }
 
 #endif /* __EBPF_GUARD_COMMON_H */

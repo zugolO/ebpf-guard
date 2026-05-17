@@ -119,6 +119,51 @@ topk(10, ebpf_guard_profiler_anomaly_score)
 
 ---
 
+#### `ebpf_guard_profiler_sequence_distance`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | `pid`, `comm` (process name) |
+| **Description** | Cosine distance between current and baseline syscall frequency vectors (0.0-1.0) |
+
+**Purpose:** Detects anomalous syscall patterns by comparing the current syscall frequency distribution against a learned baseline. High values indicate the process is making syscalls in an unusual pattern.
+
+**Configuration:**
+```yaml
+profiler:
+  sequence:
+    enabled: true       # Enable sequence profiling
+    window_size: 64     # Number of syscalls in the frequency window
+    threshold: 0.3      # Distance threshold for anomaly detection
+```
+
+**Example:**
+```promql
+# Processes with unusual syscall sequences
+ebpf_guard_profiler_sequence_distance > 0.3
+
+# Correlation with anomaly score
+ebpf_guard_profiler_anomaly_score > 0.8 and ebpf_guard_profiler_sequence_distance > 0.3
+```
+
+**Alert Example:**
+```yaml
+groups:
+  - name: ebpf-guard
+    rules:
+      - alert: SuspiciousSyscallSequence
+        expr: ebpf_guard_profiler_sequence_distance > 0.5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Process showing unusual syscall pattern"
+          description: "PID {{ $labels.pid }} ({{ $labels.comm }}) has syscall sequence distance of {{ $value }}"
+```
+
+---
+
 #### `ebpf_guard_learning_progress`
 
 | Attribute | Value |
@@ -165,7 +210,7 @@ ebpf_guard_bpf_map_entries / 65536
 | Attribute | Value |
 |-----------|-------|
 | **Type** | Gauge |
-| **Labels** | `collector` (syscall\|network\|fileaccess) |
+| **Labels** | `collector` (syscall\|network\|fileaccess\|dns\|tls) |
 | **Description** | Whether the collector is up (1) or down/stub (0) |
 
 **Example:**
@@ -182,6 +227,155 @@ ebpf_guard_bpf_map_entries / 65536
 
 ---
 
+#### `ebpf_guard_dns_queries_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | `qtype` (A\|AAAA\|TXT\|MX\|etc), `rcode` (NOERROR\|NXDOMAIN\|etc) |
+| **Description** | Total number of DNS queries by QTYPE and RCODE |
+
+**Purpose:** Monitor DNS query patterns and detect anomalies.
+
+**Example:**
+```promql
+# DNS queries per second by type
+rate(ebpf_guard_dns_queries_total[5m])
+
+# NXDOMAIN rate (possible DGA or scanning)
+sum(rate(ebpf_guard_dns_queries_total{rcode="NXDOMAIN"}[5m]))
+
+# TXT queries (possible DNS tunneling)
+rate(ebpf_guard_dns_queries_total{qtype="TXT"}[5m])
+```
+
+**Alert Example:**
+```yaml
+groups:
+  - name: ebpf-guard-dns
+    rules:
+      - alert: HighDNSQueryRate
+        expr: rate(ebpf_guard_dns_queries_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High DNS query rate detected"
+          description: "DNS query rate exceeds 1000/sec for 5 minutes"
+```
+
+---
+
+#### `ebpf_guard_dns_events_dropped_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | None |
+| **Description** | Total number of DNS events dropped due to ring buffer overflow |
+
+**Purpose:** Detect when DNS events are being lost due to high load.
+
+**Example:**
+```promql
+# Alert on dropped DNS events
+- name: DNSEventsDropped
+  rules:
+    - alert: DNSEventsDropped
+      expr: rate(ebpf_guard_dns_events_dropped_total[5m]) > 0
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        summary: "DNS events are being dropped"
+        description: "Ring buffer overflow detected - consider increasing buffer size"
+```
+
+---
+
+### Watchdog Metrics
+
+#### `ebpf_guard_heartbeat_timestamp_seconds`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Unix timestamp of the last agent heartbeat |
+
+**Purpose:** This metric is used by the `EbpfGuardAgentDown` alert to detect when the agent has stopped running.
+
+**Example Alert:**
+```yaml
+# Alert when agent is down for more than 60 seconds
+groups:
+  - name: ebpf-guard
+    rules:
+      - alert: EbpfGuardAgentDown
+        expr: time() - ebpf_guard_heartbeat_timestamp_seconds > 60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "eBPF Guard agent is down"
+          description: "eBPF Guard agent has not sent a heartbeat for more than 60 seconds"
+```
+
+---
+
+#### `ebpf_guard_bpf_programs_loaded`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | `program` (syscall\|network\|fileaccess) |
+| **Description** | Whether each BPF program is loaded and attached (1) or not (0) |
+
+**Example:**
+```promql
+# Check if any BPF program is detached
+ebpf_guard_bpf_programs_loaded == 0
+```
+
+---
+
+### Integrity Metrics
+
+#### `ebpf_guard_integrity_findings_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | `check` (ld_preload\|cron\|bashrc\|anon_exec) |
+| **Description** | Number of integrity findings detected at startup by check type |
+
+**Check Types:**
+
+| Check | Description |
+|-------|-------------|
+| `ld_preload` | Entries in `/etc/ld.so.preload` (LD_PRELOAD hijack) |
+| `cron` | Recently modified files in cron directories |
+| `bashrc` | Recently modified root shell config files |
+| `anon_exec` | Anonymous executable memory regions (shellcode injection) |
+
+**Example Alert:**
+```yaml
+# Alert on integrity findings
+groups:
+  - name: ebpf-guard
+    rules:
+      - alert: EbpfGuardIntegrityFinding
+        expr: ebpf_guard_integrity_findings_total > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eBPF Guard integrity finding detected"
+          description: "Startup integrity scan detected potential persistence technique"
+```
+
+---
+
 ### System Metrics
 
 #### `ebpf_guard_log_lines_total`
@@ -191,6 +385,85 @@ ebpf_guard_bpf_map_entries / 65536
 | **Type** | Counter |
 | **Labels** | `level` (debug\|info\|warn\|error) |
 | **Description** | Total number of log lines by level |
+
+---
+
+#### `ebpf_guard_memory_pressure_mode`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | `mode` (low\|normal) |
+| **Description** | Current memory pressure mode (1 = active, 0 = inactive) |
+
+**Behavior:**
+- When available memory drops below `watchdog.memory_pressure.low_memory_threshold` (default: 10%), the agent enters low-memory mode
+- In low-memory mode: sequence profiling is disabled, BPF sampling rate reduced to 10%
+- When available memory recovers above `watchdog.memory_pressure.recovery_threshold` (default: 20%), normal operation resumes
+
+**Example Alert:**
+```yaml
+# Alert on memory pressure
+groups:
+  - name: ebpf-guard
+    rules:
+      - alert: EbpfGuardMemoryPressure
+        expr: ebpf_guard_memory_pressure_mode{mode="low"} == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "eBPF Guard in low-memory mode"
+          description: "eBPF Guard has downgraded profiling due to memory pressure"
+```
+
+---
+
+#### `ebpf_guard_lsm_blocks_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | `hook` (file_open\|socket_connect\|task_kill), `action` (allow\|block) |
+| **Description** | Total number of LSM hook invocations and blocking decisions |
+
+**Requirements:**
+- Kernel 5.7+ with `CONFIG_BPF_LSM=y`
+- LSM BPF enabled in kernel command line: `lsm=...,bpf`
+
+**Example:**
+```promql
+# Block rate by hook type
+rate(ebpf_guard_lsm_blocks_total{action="block"}[5m])
+```
+
+---
+
+#### `ebpf_guard_tls_tracked_pids_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Current number of PIDs tracked by the TLS collector (processes with libssl uprobes attached) |
+
+**Purpose:** Indicates how many processes currently have TLS uprobes attached. Grows as new libssl-using processes are discovered; shrinks every 60s as dead PIDs are cleaned up.
+
+**Example:**
+```promql
+# Monitor TLS uprobe attachment count
+ebpf_guard_tls_tracked_pids_total
+
+# Alert if TLS tracking grows unbounded (indicates cleanup goroutine failure)
+- alert: EbpfGuardTLSPIDLeaking
+  expr: ebpf_guard_tls_tracked_pids_total > 500
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "TLS collector tracking excessive PIDs"
+    description: "TLS collector is tracking {{ $value }} PIDs — cleanup may not be running correctly"
+```
 
 ---
 
@@ -209,6 +482,46 @@ ebpf_guard_bpf_map_entries / 65536
 # 99th percentile correlation latency
 histogram_quantile(0.99, rate(ebpf_guard_correlation_duration_seconds_bucket[5m]))
 ```
+
+---
+
+#### `ebpf_guard_ratelimiter_states_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Current number of active entries in the alert rate limiter state map |
+
+**Purpose:** Each unique rule ID that has been evaluated gets one entry. The cleanup goroutine removes expired entries every 5 minutes. A continuously growing value indicates the cleanup loop is not running.
+
+**Example:**
+```promql
+# Monitor rate limiter state growth
+ebpf_guard_ratelimiter_states_total
+
+# Alert if cleanup is not working
+- alert: EbpfGuardRateLimiterLeak
+  expr: ebpf_guard_ratelimiter_states_total > 10000
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Rate limiter state map growing unbounded"
+```
+
+---
+
+### Alert Rules (built-in PrometheusRule)
+
+The Helm chart ships `deploy/helm/ebpf-guard/templates/prometheusrule.yaml` with the following pre-configured alerts:
+
+| Alert | Expression | Severity | Description |
+|-------|-----------|----------|-------------|
+| `EbpfGuardAgentDown` | `time() - ebpf_guard_heartbeat_timestamp_seconds > 60` | critical | Agent heartbeat stopped |
+| `EbpfGuardMemoryPressure` | `ebpf_guard_memory_pressure_mode{mode="low"} == 1` | warning | Agent downgraded due to memory pressure |
+| `CryptominerDetected` | `increase(ebpf_guard_alerts_total{rule_id=~"cryptominer.*"}[5m]) > 0` | critical | Cryptominer activity detected |
+| `EbpfGuardEventDropHigh` | `rate(ebpf_guard_events_dropped_total[1m]) > 100` | warning | High event drop rate — consider increasing ring buffer or reducing load |
 
 ---
 

@@ -57,12 +57,12 @@ func TestCorrelationEngine_Ingest(t *testing.T) {
 			name: "non-matching event type",
 			rules: []Rule{
 				{
-					ID:          "rule_001",
-					Name:        "Test Rule",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "rule_001",
+					Name:      "Test Rule",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			events: []types.Event{
@@ -74,12 +74,12 @@ func TestCorrelationEngine_Ingest(t *testing.T) {
 			name: "drop action - no alert",
 			rules: []Rule{
 				{
-					ID:          "rule_001",
-					Name:        "Drop Rule",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionDrop,
+					ID:        "rule_001",
+					Name:      "Drop Rule",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionDrop,
 				},
 			},
 			events: []types.Event{
@@ -97,12 +97,12 @@ func TestCorrelationEngine_Ingest(t *testing.T) {
 			name: "multiple events accumulate alerts",
 			rules: []Rule{
 				{
-					ID:          "rule_001",
-					Name:        "Port Rule",
-					EventType:   types.EventTCPConnect,
-					Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-					Severity:    types.SeverityWarning,
-					Action:      ActionAlert,
+					ID:        "rule_001",
+					Name:      "Port Rule",
+					EventType: types.EventTCPConnect,
+					Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+					Severity:  types.SeverityWarning,
+					Action:    ActionAlert,
 				},
 			},
 			events: []types.Event{
@@ -133,12 +133,12 @@ func TestCorrelationEngine_Ingest(t *testing.T) {
 func TestCorrelationEngine_Flush(t *testing.T) {
 	rules := []Rule{
 		{
-			ID:          "rule_001",
-			Name:        "Test Rule",
-			EventType:   types.EventTCPConnect,
-			Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-			Severity:    types.SeverityWarning,
-			Action:      ActionAlert,
+			ID:        "rule_001",
+			Name:      "Test Rule",
+			EventType: types.EventTCPConnect,
+			Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
 		},
 	}
 
@@ -202,12 +202,12 @@ func TestCorrelationEngine_Buffer(t *testing.T) {
 func TestCorrelationEngine_Ingest_WithTraceContext(t *testing.T) {
 	rules := []Rule{
 		{
-			ID:          "rule_001",
-			Name:        "Test Rule",
-			EventType:   types.EventTCPConnect,
-			Condition:   RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
-			Severity:    types.SeverityWarning,
-			Action:      ActionAlert,
+			ID:        "rule_001",
+			Name:      "Test Rule",
+			EventType: types.EventTCPConnect,
+			Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
 		},
 	}
 
@@ -230,4 +230,43 @@ func TestCorrelationEngine_Ingest_WithTraceContext(t *testing.T) {
 	alerts := engine.Ingest(ctx, event)
 	require.Len(t, alerts, 1)
 	assert.Equal(t, "abc123", alerts[0].TraceID)
+}
+
+// TestAlertIDUniqueness verifies that 10 000 alerts generated with identical
+// ruleID + timestamp + pid all receive unique IDs (Sprint 27.0 Part A).
+func TestAlertIDUniqueness(t *testing.T) {
+	rule := Rule{
+		ID:        "net_001",
+		Name:      "Test Rule",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8080"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{rule}
+	cfg.EnableRateLimit = false // disable rate limiting so all 10k alerts pass through
+	cfg.EnableAnomaly = false
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	ctx := context.Background()
+	event := types.Event{
+		Type:      types.EventTCPConnect,
+		Timestamp: 1234567890123456789,
+		PID:       42,
+		Network:   &types.NetworkEvent{Dport: 8080},
+	}
+
+	const n = 10_000
+	seen := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		alerts := engine.Ingest(ctx, event)
+		require.Len(t, alerts, 1, "expected one alert per ingest")
+		id := alerts[0].ID
+		_, dup := seen[id]
+		assert.False(t, dup, "duplicate Alert ID: %s", id)
+		seen[id] = struct{}{}
+	}
+	assert.Len(t, seen, n, "all %d Alert IDs must be unique", n)
 }

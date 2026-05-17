@@ -122,16 +122,10 @@ func (sb *ShardedEventBuffer) Clear() {
 }
 
 // PIDs returns all PIDs with buffered events.
+// Single-pass: holds each shard lock once, appends directly, pre-allocates
+// with a rough estimate to avoid reallocation in the common case.
 func (sb *ShardedEventBuffer) PIDs() []uint32 {
-	var totalCount int
-	for i := 0; i < shardCount; i++ {
-		shard := sb.shards[i]
-		shard.mu.RLock()
-		totalCount += len(shard.buffers)
-		shard.mu.RUnlock()
-	}
-
-	pids := make([]uint32, 0, totalCount)
+	pids := make([]uint32, 0, shardCount*8)
 	for i := 0; i < shardCount; i++ {
 		shard := sb.shards[i]
 		shard.mu.RLock()

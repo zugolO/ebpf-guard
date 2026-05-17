@@ -1,0 +1,185 @@
+# Cryptominer Detection Rules
+# 
+# These rules detect cryptocurrency mining activity in Kubernetes environments.
+# Mining pools and ports are maintained in mining-pools.txt
+#
+# Severity: critical (immediate action required)
+# MITRE ATT&CK: Impact - Resource Hijacking (T1496)
+
+rules:
+  # Rule: Known mining pool ports
+  # Detects outbound connections to well-known mining pool ports
+  - id: cryptominer_pool_ports
+    name: "Cryptominer: Connection to known mining pool port"
+    description: "Process connected to a port commonly used by cryptocurrency mining pools"
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: [3333, 4444, 14444, 45560, 8080, 9999, 20535, 20536, 45700, 45570]
+    severity: critical
+    action: alert
+    tags: [cryptominer, crypto, mining, network]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"
+
+  # Rule: Known mining binary names
+  # Detects processes with names matching known mining software
+  - id: cryptominer_binary_name
+    name: "Cryptominer: Known mining binary detected"
+    description: "Process with name matching known cryptocurrency mining software"
+    event_type: syscall
+    condition:
+      field: comm
+      op: regex
+      values: ["^(xmrig|minerd|cgminer|bfgminer|cpuminer|ethminer|nbminer|teamredminer|phoenixminer|trexminer|lolminer| gminer|excavator)$"]
+    severity: critical
+    action: alert
+    tags: [cryptominer, crypto, mining, process]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"
+
+  # Rule: Mining pool domains in DNS queries
+  # Detects DNS queries to known mining pool domains
+  - id: cryptominer_dns_pool
+    name: "Cryptominer: DNS query to known mining pool domain"
+    description: "Process queried DNS for a known cryptocurrency mining pool domain"
+    event_type: dns
+    condition:
+      field: qname
+      op: regex
+      values:
+        - "pool\.supportxmr\.com"
+        - "monerohash\.com"
+        - "xmrpool\.eu"
+        - "xmr\. nanopool\.org"
+        - "eth\. nanopool\.org"
+        - "btc\. nanopool\.org"
+        - "pool\.minexmr\.com"
+        - "moneroocean\.stream"
+        - "hashvault\.pro"
+        - "c3pool\.org"
+        - "2miners\.com"
+        - "herominers\.com"
+        - "minergate\.com"
+        - "nicehash\.com"
+        - "miningpoolhub\.com"
+        - "slushpool\.com"
+        - "antpool\.com"
+        - "f2pool\.com"
+        - "viabtc\.com"
+        - "binance\.pool"
+    severity: critical
+    action: alert
+    tags: [cryptominer, crypto, mining, dns]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"
+
+  # Rule: Stratum protocol detection
+  # Stratum is the protocol used by most mining pools
+  - id: cryptominer_stratum_protocol
+    name: "Cryptominer: Stratum mining protocol detected"
+    description: "Network traffic matching Stratum mining protocol patterns"
+    event_type: tls
+    condition:
+      field: data
+      op: contains
+      values:
+        - "mining.subscribe"
+        - "mining.authorize"
+        - "mining.notify"
+        - "mining.submit"
+        - "stratum+tcp"
+        - "stratum+ssl"
+    severity: critical
+    action: alert
+    tags: [cryptominer, crypto, mining, stratum, protocol]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"
+
+  # Rule: High CPU + Network combination
+  # Detects processes with high syscall rate (CPU) combined with network activity
+  # This is a heuristic rule that may need tuning based on environment
+  - id: cryptominer_high_cpu_network
+    name: "Cryptominer: High CPU usage with network activity"
+    description: "Process showing high CPU usage combined with outbound network connections - possible mining activity"
+    event_type: sequence
+    condition:
+      field: pattern
+      op: match
+      values: ["high_syscall_rate_followed_by_network"]
+    severity: warning
+    action: alert
+    tags: [cryptominer, crypto, mining, heuristic, anomaly]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"
+
+  # Rule: Mining via compromised container
+  # Detects mining-related activity from containerized workloads
+  - id: cryptominer_container_workload
+    name: "Cryptominer: Suspicious activity in container workload"
+    description: "Container workload exhibiting patterns consistent with cryptomining"
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: [3333, 4444, 14444, 45560]
+    severity: critical
+    action: alert
+    tags: [cryptominer, crypto, mining, container]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"
+
+  # Rule: XMRig specific signatures
+  # XMRig is the most common Monero mining software
+  - id: cryptominer_xmrig_signature
+    name: "Cryptominer: XMRig signature detected"
+    description: "Process exhibiting XMRig-specific behavior patterns"
+    event_type: file
+    condition:
+      field: filename
+      op: contains
+      values:
+        - "xmrig"
+        - "config.json"
+        - "pools.txt"
+    severity: critical
+    action: alert
+    tags: [cryptominer, xmrig, monero, mining]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"
+
+  # Rule: Wallet address in command line or network
+  # Mining software often includes wallet addresses in config or traffic
+  - id: cryptominer_wallet_address
+    name: "Cryptominer: Cryptocurrency wallet address detected"
+    description: "Process using or transmitting cryptocurrency wallet address"
+    event_type: tls
+    condition:
+      field: data
+      op: regex
+      values:
+        - "4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}"  # Monero address pattern
+        - "[13][a-km-zA-HJ-NP-Z1-9]{25,34}"   # Bitcoin address pattern
+        - "0x[a-fA-F0-9]{40}"                  # Ethereum address pattern
+    severity: critical
+    action: alert
+    tags: [cryptominer, crypto, wallet, address]
+    mitre:
+      tactic: "Impact"
+      technique: "T1496"
+      technique_name: "Resource Hijacking"

@@ -1,0 +1,106 @@
+# TLS inspection explanation templates
+
+templates:
+  - id: tls_basic_auth_exposed
+    name: "HTTP Basic Auth Credentials in TLS"
+    category: tls
+    summary: "Process {{.Comm}} sent HTTP Basic Auth credentials"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) transmitted HTTP Basic 
+      Authentication credentials over TLS. While the connection is 
+      encrypted, credentials in HTTP headers can be:
+      - Logged by proxies and load balancers
+      - Stored in browser history
+      - Exposed through referrer headers
+      - Cached by intermediate systems
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because Basic Auth over HTTPS is common but 
+      represents a security risk compared to token-based authentication.
+      Credentials may be exposed in logs or through other channels.
+    mitigations:
+      - "Review authentication mechanism used by {{.Comm}}"
+      - "Consider migrating to token-based authentication (OAuth, JWT)"
+      - "Check proxy and load balancer configurations for header logging"
+      - "Audit access logs for credential exposure"
+      - "Implement credential rotation policy"
+    references:
+      - "https://attack.mitre.org/techniques/T1071/"
+      - "https://cwe.mitre.org/data/definitions/522.html"
+    mitre:
+      tactic: "Credential Access"
+      technique_id: "T1552"
+      technique: "Unsecured Credentials"
+      url: "https://attack.mitre.org/techniques/T1552/"
+
+  - id: tls_suspicious_user_agent
+    name: "Suspicious User-Agent in TLS Traffic"
+    category: tls
+    summary: "Process {{.Comm}} used suspicious User-Agent"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) made an HTTPS request with 
+      a User-Agent string commonly associated with command-line tools 
+      (curl, wget) rather than a browser or legitimate application.
+      
+      This may indicate:
+      - Automated attack tools
+      - Data exfiltration scripts
+      - C2 communication
+      - Unauthorized API access
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "warning"
+    severity_why: |
+      Warning severity because command-line tools can be used legitimately 
+      but are also commonly used in attacks for automation and evasion.
+    mitigations:
+      - "Verify if {{.Comm}} legitimately uses command-line HTTP tools"
+      - "Check the destination and purpose of the request"
+      - "Review for signs of automated attack activity"
+      - "Monitor for data exfiltration patterns"
+      - "Consider User-Agent filtering at API gateway"
+    references:
+      - "https://attack.mitre.org/techniques/T1071/001/"
+    mitre:
+      tactic: "Command and Control"
+      technique_id: "T1071"
+      technique: "Application Layer Protocol"
+      url: "https://attack.mitre.org/techniques/T1071/001/"
+
+  - id: tls_data_exfil_pattern
+    name: "Potential Data Exfiltration in TLS"
+    category: tls
+    summary: "Process {{.Comm}} transmitted sensitive data pattern"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) transmitted data over TLS 
+      that matches patterns of sensitive information, such as:
+      - System file contents (/etc/passwd patterns)
+      - Database records
+      - Configuration files
+      - Credential patterns
+      
+      This may indicate active data exfiltration by a compromised process.
+      
+      Context: Running in pod {{.Pod}} (namespace {{.Namespace}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because transmission of sensitive system data 
+      over the network is a strong indicator of active data exfiltration 
+      and system compromise.
+    mitigations:
+      - "IMMEDIATE: Investigate process {{.PID}} and isolate if necessary"
+      - "Check the destination of the data transmission"
+      - "Review volume of data transmitted"
+      - "Check for signs of compromise in {{.Comm}}"
+      - "Audit data access patterns in the application"
+      - "Consider DLP (Data Loss Prevention) controls"
+    references:
+      - "https://attack.mitre.org/techniques/T1041/"
+      - "https://attack.mitre.org/techniques/T1567/"
+    mitre:
+      tactic: "Exfiltration"
+      technique_id: "T1041"
+      technique: "Exfiltration Over C2 Channel"
+      url: "https://attack.mitre.org/techniques/T1041/"

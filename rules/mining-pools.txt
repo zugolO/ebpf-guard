@@ -1,0 +1,95 @@
+# Known Cryptocurrency Mining Pools
+# 
+# This file contains known mining pool IP addresses and domains.
+# It is used by the correlator to detect cryptomining activity.
+# 
+# Format:
+#   # Comments start with #
+#   IP_ADDRESS/MASK    # Optional comment
+#   DOMAIN.NAME        # Optional comment
+#
+# Last updated: 2026-05-17
+# Source: Community-maintained list of known mining pools
+
+# IPv4 CIDR ranges
+0.0.0.0/0              # Placeholder - replace with actual pool ranges
+
+# Monero (XMR) Pools
+pool.supportxmr.com
+monerohash.com
+xmrpool.eu
+xmr.nanopool.org
+pool.minexmr.com
+moneroocean.stream
+hashvault.pro
+c3pool.org
+herominers.com
+minergate.com
+xmrpool.net
+minexmr.com
+moneropool.com
+xmr.pt
+xmrpool.de
+monero.hashvault.pro
+pool.xmr.pt
+moneroocean.stream
+
+# Ethereum (ETH) Pools
+eth.nanopool.org
+ethpool.org
+ethermine.org
+2miners.com
+hiveon.net
+sparkpool.com
+f2pool.com
+crazypool.org
+beepool.org
+zhizhu.top
+
+# Bitcoin (BTC) Pools
+btc.nanopool.org
+slushpool.com
+antpool.com
+f2pool.com
+viabtc.com
+pool.btc.com
+binance.pool
+huobi.pool
+okex.pool
+
+# Multi-coin Pools
+2miners.com
+miningpoolhub.com
+nicehash.com
+prohashing.com
+zpool.ca
+mining-dutch.nl
+ahashpool.com
+blazepool.com
+
+# ZCash (ZEC) Pools
+zec.nanopool.org
+flypool.org
+2miners.com
+luxor.tech
+
+# Ravencoin (RVN) Pools
+rvn.nanopool.org
+2miners.com
+flypool.org
+herominers.com
+
+# Ergo (ERG) Pools
+ergo.herominers.com
+2miners.com
+nanopool.org
+
+# Conflux (CFX) Pools
+cfx.nanopool.org
+2miners.com
+herominers.com
+
+# Known mining pool IP ranges (examples - update with actual ranges)
+# 104.16.0.0/12        # Cloudflare range used by some pools
+# 172.64.0.0/13        # Cloudflare range used by some pools
+# 192.0.2.0/24         # Example documentation range

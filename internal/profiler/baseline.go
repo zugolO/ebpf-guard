@@ -17,7 +17,9 @@ type EWMA struct {
 }
 
 // NewEWMA creates a new EWMA with the given weight.
-// Weight should be between 0 and 1. Higher values give more weight to recent observations.
+// weight must be in (0, 1); 1.0 is intentionally rejected — it would reduce
+// the EWMA to a pure last-observation sampler with no smoothing. Use 0.99
+// for near-instant adaptation.
 func NewEWMA(weight float64) *EWMA {
 	if weight <= 0 || weight > 1 {
 		weight = 0.3 // Default weight
@@ -101,19 +103,19 @@ func (bl *BaselineLearner) RecordSample() {
 // IsLearningComplete checks if the learning phase is complete.
 func (bl *BaselineLearner) IsLearningComplete() bool {
 	bl.mu.RLock()
-	defer bl.mu.RUnlock()
-
 	if bl.learningComplete {
+		bl.mu.RUnlock()
 		return true
 	}
-
-	// Check if learning period has elapsed and minimum samples collected
 	elapsed := time.Since(bl.startTime)
-	if elapsed >= bl.learningPeriod && bl.sampleCount >= bl.minSamples {
+	done := elapsed >= bl.learningPeriod && bl.sampleCount >= bl.minSamples
+	bl.mu.RUnlock()
+	if done {
+		bl.mu.Lock()
 		bl.learningComplete = true
+		bl.mu.Unlock()
 		return true
 	}
-
 	return false
 }
 

@@ -4,6 +4,7 @@ package profiler
 import (
 	"testing"
 
+	"github.com/ebpf-guard/ebpf-guard/internal/util"
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 )
@@ -165,7 +166,7 @@ func TestFormatIP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatIP(tt.addr, tt.family)
+			result := util.FormatIP16(tt.addr, tt.family)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

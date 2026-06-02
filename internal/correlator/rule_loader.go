@@ -115,6 +115,11 @@ func validateRule(rule *Rule) error {
 		rule.Severity = "warning" // Default severity
 	}
 
+	// Reject empty condition_group (Н-4): would silently match every event.
+	if rule.ConditionGroup != nil && len(rule.ConditionGroup.Conditions) == 0 && len(rule.ConditionGroup.SubGroups) == 0 {
+		return fmt.Errorf("rule %s: condition_group has no conditions or subgroups", rule.ID)
+	}
+
 	// Validate conditions
 	conditions := getAllConditions(rule)
 	for _, cond := range conditions {

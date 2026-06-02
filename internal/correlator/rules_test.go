@@ -2,6 +2,7 @@
 package correlator
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
@@ -239,6 +240,8 @@ func TestRuleEngine_AlertContent(t *testing.T) {
 	require.Len(t, alerts, 1)
 
 	alert := alerts[0]
+	// ID is intentionally empty from Evaluate — Ingest assigns the canonical monotonic ID.
+	assert.Empty(t, alert.ID)
 	assert.Equal(t, "test_001", alert.RuleID)
 	assert.Equal(t, "Test Alert", alert.RuleName)
 	assert.Equal(t, "This is a test alert", alert.Message)
@@ -783,6 +786,240 @@ func TestValidateRule_CIDRValidation(t *testing.T) {
 				assert.ErrorContains(t, err, tt.wantError)
 			}
 		})
+	}
+}
+
+// TestSubGroupNestedANDOR verifies two-level AND(OR(c1, c2), c3) SubGroup evaluation.
+func TestSubGroupNestedANDOR(t *testing.T) {
+	// AND( OR(dport==80, dport==443), daddr==192.168.1.1 )
+	rule := Rule{
+		ID:        "subgroup_001",
+		Name:      "SubGroup AND/OR Test",
+		EventType: types.EventTCPConnect,
+		ConditionGroup: &RuleConditionGroup{
+			Operator: "and",
+			Conditions: []RuleCondition{
+				{Field: "daddr", Op: OpEquals, Values: []string{"192.168.1.1"}},
+			},
+			SubGroups: []RuleConditionGroup{
+				{
+					Operator: "or",
+					Conditions: []RuleCondition{
+						{Field: "dport", Op: OpEquals, Values: []string{"80"}},
+						{Field: "dport", Op: OpEquals, Values: []string{"443"}},
+					},
+				},
+			},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+	engine := NewRuleEngine([]Rule{rule})
+
+	// Both outer cond and subgroup OR match → should alert
+	ev1 := types.Event{
+		Type: types.EventTCPConnect,
+		Network: &types.NetworkEvent{
+			Dport:  443,
+			Daddr:  ipToBytes("192.168.1.1"),
+			Family: types.AFInet,
+		},
+	}
+	assert.Len(t, engine.Evaluate(ev1), 1, "AND(OR(80,443), daddr match) should alert")
+
+	// Outer cond matches but subgroup OR does not → no alert
+	ev2 := types.Event{
+		Type: types.EventTCPConnect,
+		Network: &types.NetworkEvent{
+			Dport:  8080,
+			Daddr:  ipToBytes("192.168.1.1"),
+			Family: types.AFInet,
+		},
+	}
+	assert.Len(t, engine.Evaluate(ev2), 0, "AND(OR no match, daddr match) should not alert")
+
+	// SubGroup OR matches but outer cond does not → no alert
+	ev3 := types.Event{
+		Type: types.EventTCPConnect,
+		Network: &types.NetworkEvent{
+			Dport:  80,
+			Daddr:  ipToBytes("10.0.0.1"),
+			Family: types.AFInet,
+		},
+	}
+	assert.Len(t, engine.Evaluate(ev3), 0, "AND(OR match, daddr no match) should not alert")
+}
+
+// TestSubGroupRegexPatternCompiled verifies regex inside a SubGroup is compiled and matches.
+func TestSubGroupRegexPatternCompiled(t *testing.T) {
+	rule := Rule{
+		ID:        "subgroup_regex",
+		Name:      "SubGroup Regex Test",
+		EventType: types.EventFileAccess,
+		ConditionGroup: &RuleConditionGroup{
+			Operator: "and",
+			Conditions: []RuleCondition{
+				{Field: "op", Op: OpEquals, Values: []string{"open"}},
+			},
+			SubGroups: []RuleConditionGroup{
+				{
+					Operator: "or",
+					Conditions: []RuleCondition{
+						{Field: "filename", Op: OpRegex, Values: []string{`^/etc/.*\.key$`}},
+					},
+				},
+			},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+	engine := NewRuleEngine([]Rule{rule})
+
+	// Matches regex in subgroup
+	ev1 := types.Event{
+		Type: types.EventFileAccess,
+		File: &types.FileEvent{
+			Op:       0,
+			Filename: stringToByteArray("/etc/ssl/private.key"),
+		},
+	}
+	assert.Len(t, engine.Evaluate(ev1), 1, "regex in subgroup should match")
+
+	// Does not match regex
+	ev2 := types.Event{
+		Type: types.EventFileAccess,
+		File: &types.FileEvent{
+			Op:       0,
+			Filename: stringToByteArray("/etc/ssl/cert.pem"),
+		},
+	}
+	assert.Len(t, engine.Evaluate(ev2), 0, "regex in subgroup should not match")
+}
+
+// TestSubGroupCIDRCondition verifies CIDR condition inside a SubGroup matches IP.
+func TestSubGroupCIDRCondition(t *testing.T) {
+	rule := Rule{
+		ID:        "subgroup_cidr",
+		Name:      "SubGroup CIDR Test",
+		EventType: types.EventTCPConnect,
+		ConditionGroup: &RuleConditionGroup{
+			Operator: "and",
+			Conditions: []RuleCondition{
+				{Field: "dport", Op: OpEquals, Values: []string{"443"}},
+			},
+			SubGroups: []RuleConditionGroup{
+				{
+					Operator: "or",
+					Conditions: []RuleCondition{
+						{Field: "daddr", Op: OpInCIDR, Values: []string{"10.0.0.0/8"}},
+					},
+				},
+			},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+	engine := NewRuleEngine([]Rule{rule})
+
+	evMatch := types.Event{
+		Type: types.EventTCPConnect,
+		Network: &types.NetworkEvent{
+			Dport:  443,
+			Daddr:  ipToBytes("10.1.2.3"),
+			Family: types.AFInet,
+		},
+	}
+	assert.Len(t, engine.Evaluate(evMatch), 1, "CIDR in subgroup should match")
+
+	evNoMatch := types.Event{
+		Type: types.EventTCPConnect,
+		Network: &types.NetworkEvent{
+			Dport:  443,
+			Daddr:  ipToBytes("192.168.1.1"),
+			Family: types.AFInet,
+		},
+	}
+	assert.Len(t, engine.Evaluate(evNoMatch), 0, "CIDR in subgroup should not match out-of-range IP")
+}
+
+// TestOpNotInEmptyFieldValue verifies OpNotIn with empty field and non-empty values list returns true.
+func TestOpNotInEmptyFieldValue(t *testing.T) {
+	// DNS event with empty qname — OpNotIn should return true (empty is not in the list)
+	rule := Rule{
+		ID:        "opnotin_empty",
+		Name:      "OpNotIn Empty Field Test",
+		EventType: types.EventDNS,
+		Condition: RuleCondition{
+			Field:  "qname",
+			Op:     OpNotIn,
+			Values: []string{"evil.com", "malware.net"},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+	engine := NewRuleEngine([]Rule{rule})
+
+	evEmptyQName := types.Event{
+		Type: types.EventDNS,
+		DNS:  &types.DNSEvent{QName: ""},
+	}
+	// Empty string is not in ["evil.com", "malware.net"] → OpNotIn should be true → alert fires
+	assert.Len(t, engine.Evaluate(evEmptyQName), 1, "OpNotIn with empty field value should return true")
+
+	evMatchingQName := types.Event{
+		Type: types.EventDNS,
+		DNS:  &types.DNSEvent{QName: "evil.com"},
+	}
+	// "evil.com" IS in the list → OpNotIn should be false → no alert
+	assert.Len(t, engine.Evaluate(evMatchingQName), 0, "OpNotIn with matching value should return false")
+}
+
+// TestRuleLoaderEmptyConditionGroup verifies that loading a rule with an empty
+// condition_group returns a validation error.
+func TestRuleLoaderEmptyConditionGroup(t *testing.T) {
+	rule := &Rule{
+		ID:        "empty_group",
+		Name:      "Empty Group Rule",
+		EventType: types.EventTCPConnect,
+		ConditionGroup: &RuleConditionGroup{
+			Operator:   "and",
+			Conditions: []RuleCondition{},
+			SubGroups:  []RuleConditionGroup{},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+	err := validateRule(rule)
+	require.Error(t, err, "empty condition_group should fail validation")
+	assert.Contains(t, err.Error(), "condition_group has no conditions or subgroups")
+}
+
+// BenchmarkOpInLargeSet measures O(1) map lookup vs O(n) linear scan for a 1000-element set.
+func BenchmarkOpInLargeSet(b *testing.B) {
+	// Build a 1000-element values list
+	values := make([]string, 1000)
+	for i := range values {
+		values[i] = fmt.Sprintf("value-%d", i)
+	}
+	rule := Rule{
+		ID:        "bench_in",
+		Name:      "Bench OpIn",
+		EventType: types.EventDNS,
+		Condition: RuleCondition{Field: "qname", Op: OpIn, Values: values},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+	engine := NewRuleEngine([]Rule{rule})
+	// Use a value that is NOT in the list — worst case for linear scan.
+	event := types.Event{
+		Type: types.EventDNS,
+		DNS:  &types.DNSEvent{QName: "not-in-list"},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = engine.Evaluate(event)
 	}
 }
 

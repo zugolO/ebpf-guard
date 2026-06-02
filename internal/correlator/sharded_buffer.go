@@ -4,6 +4,7 @@ package correlator
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 )
@@ -26,8 +27,9 @@ type ShardedEventBuffer struct {
 
 // eventBufferShard is a single shard of the sharded buffer.
 type eventBufferShard struct {
-	mu      sync.RWMutex
-	buffers map[uint32]*ringBuffer
+	mu       sync.RWMutex
+	buffers  map[uint32]*ringBuffer
+	lastSeen map[uint32]time.Time
 }
 
 // NewShardedEventBuffer creates a new sharded event buffer with the given max size per process.
@@ -37,7 +39,8 @@ func NewShardedEventBuffer(maxSize int) *ShardedEventBuffer {
 	}
 	for i := 0; i < shardCount; i++ {
 		sb.shards[i] = &eventBufferShard{
-			buffers: make(map[uint32]*ringBuffer),
+			buffers:  make(map[uint32]*ringBuffer),
+			lastSeen: make(map[uint32]time.Time),
 		}
 	}
 	return sb
@@ -57,6 +60,7 @@ func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
 		}
 		shard.buffers[pid] = rb
 	}
+	shard.lastSeen[pid] = time.Now()
 
 	// Add event to circular buffer
 	rb.events[rb.head] = e
@@ -109,6 +113,7 @@ func (sb *ShardedEventBuffer) Remove(pid uint32) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	delete(shard.buffers, pid)
+	delete(shard.lastSeen, pid)
 }
 
 // Clear removes all buffers.
@@ -117,8 +122,29 @@ func (sb *ShardedEventBuffer) Clear() {
 		shard := sb.shards[i]
 		shard.mu.Lock()
 		shard.buffers = make(map[uint32]*ringBuffer)
+		shard.lastSeen = make(map[uint32]time.Time)
 		shard.mu.Unlock()
 	}
+}
+
+// CleanupExpired removes per-PID buffers that have not received an event within ttl.
+// Returns the number of PID entries removed across all shards.
+func (sb *ShardedEventBuffer) CleanupExpired(ttl time.Duration) int {
+	var removed int
+	cutoff := time.Now().Add(-ttl)
+	for i := 0; i < shardCount; i++ {
+		shard := sb.shards[i]
+		shard.mu.Lock()
+		for pid, ts := range shard.lastSeen {
+			if ts.Before(cutoff) {
+				delete(shard.buffers, pid)
+				delete(shard.lastSeen, pid)
+				removed++
+			}
+		}
+		shard.mu.Unlock()
+	}
+	return removed
 }
 
 // PIDs returns all PIDs with buffered events.
@@ -151,8 +177,10 @@ func (sb *ShardedEventBuffer) Count() int {
 
 // ShardedLock provides a sharded mutex for PID-keyed locking.
 // It reduces contention by distributing locks across 16 shards.
+// Using sync.RWMutex allows multiple concurrent readers per shard
+// without blocking each other, which improves throughput when reads dominate.
 type ShardedLock struct {
-	shards [shardCount]sync.Mutex
+	shards [shardCount]sync.RWMutex
 	// contentionStats tracks lock acquisition time for metrics (nanoseconds)
 	contentionStats [shardCount]atomic.Int64
 }
@@ -162,29 +190,30 @@ func NewShardedLock() *ShardedLock {
 	return &ShardedLock{}
 }
 
-// Lock locks the shard for the given PID.
+// Lock acquires an exclusive write lock on the shard for the given PID.
 func (sl *ShardedLock) Lock(pid uint32) {
 	sl.shards[shardIndex(pid)].Lock()
 }
 
-// Unlock unlocks the shard for the given PID.
+// Unlock releases the exclusive write lock on the shard for the given PID.
 func (sl *ShardedLock) Unlock(pid uint32) {
 	sl.shards[shardIndex(pid)].Unlock()
 }
 
-// TryLock attempts to lock the shard for the given PID without blocking.
+// TryLock attempts to acquire an exclusive write lock without blocking.
 func (sl *ShardedLock) TryLock(pid uint32) bool {
 	return sl.shards[shardIndex(pid)].TryLock()
 }
 
-// RLock locks the shard for reading.
+// RLock acquires a shared read lock on the shard for the given PID.
+// Multiple goroutines can hold RLock on the same shard simultaneously.
 func (sl *ShardedLock) RLock(pid uint32) {
-	sl.shards[shardIndex(pid)].Lock()
+	sl.shards[shardIndex(pid)].RLock()
 }
 
-// RUnlock unlocks the shard for reading.
+// RUnlock releases a shared read lock on the shard for the given PID.
 func (sl *ShardedLock) RUnlock(pid uint32) {
-	sl.shards[shardIndex(pid)].Unlock()
+	sl.shards[shardIndex(pid)].RUnlock()
 }
 
 // RecordContention records lock contention time for metrics.

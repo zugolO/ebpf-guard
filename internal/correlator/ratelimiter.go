@@ -90,15 +90,14 @@ func (rs *ruleState) allow() bool {
 	now := time.Now()
 	cutoff := now.Add(-rs.window)
 
-	// Remove old alerts outside the window
-	validStart := 0
+	// Remove old alerts outside the window.
+	// rs.alerts is always appended in time order, so the first entry >= cutoff
+	// marks where the valid window starts. Default to len (all stale).
+	validStart := len(rs.alerts)
 	for i, ts := range rs.alerts {
 		if ts.After(cutoff) || ts.Equal(cutoff) {
 			validStart = i
 			break
-		}
-		if i == len(rs.alerts)-1 {
-			validStart = len(rs.alerts)
 		}
 	}
 	rs.alerts = rs.alerts[validStart:]

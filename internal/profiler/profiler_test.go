@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ebpf-guard/ebpf-guard/internal/util"
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 )
@@ -388,7 +389,7 @@ func TestHelperFunctions(t *testing.T) {
 
 	// Test formatIP - returns proper dotted-decimal notation
 	ip := [16]byte{192, 168, 1, 1}
-	formatted := formatIP(ip, types.AFInet)
+	formatted := util.FormatIP16(ip, types.AFInet)
 	assert.Equal(t, "192.168.1.1", formatted)
 
 	// Test formatPort - returns proper string representation

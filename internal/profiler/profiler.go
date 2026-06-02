@@ -68,7 +68,7 @@ func NewProfilerWithContext(ctx context.Context, cfg ProfilerConfig, logger *slo
 	}
 
 	p := &Profiler{
-		detector:  NewAnomalyDetector(cfg.Threshold, time.Hour, cfg.Weight),
+		detector:  NewAnomalyDetectorWithContext(ctx, cfg.Threshold, time.Hour, cfg.Weight),
 		sequence:  NewSequenceProfilerWithContext(ctx, cfg.Sequence, ttl, maxPIDs),
 		lineage:   NewLineageTracker(cfg.Lineage, logger),
 		threshold: cfg.Threshold,

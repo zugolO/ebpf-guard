@@ -31,7 +31,7 @@ type Engine interface {
 
 // CorrelationEngine correlates events and applies detection rules.
 type CorrelationEngine struct {
-	ruleEngine *RuleEngine
+	ruleEngine atomic.Pointer[RuleEngine]
 	buffer     *ShardedEventBuffer // Uses sharded locks for better concurrency
 	pending    []types.Alert
 	pendingMu  sync.Mutex // Protects pending alerts slice
@@ -108,6 +108,10 @@ type CorrelationEngineConfig struct {
 	// Zero means unlimited. Default: 10000.
 	MaxAlertsPerSecond int
 
+	// BufferTTL is the idle TTL for per-PID event buffers. PIDs that have not
+	// produced an event within this duration are evicted. Default: 10 minutes.
+	BufferTTL time.Duration
+
 	// Metrics callback (optional)
 	OnCorrelate MetricsCallback
 }
@@ -125,6 +129,7 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		RateLimitWindow:    time.Minute,
 		MaxAlertsPerWindow: 10,
 		MaxAlertsPerSecond: 10000,
+		BufferTTL:          10 * time.Minute,
 	}
 }
 
@@ -175,7 +180,6 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	globalLimiter = rate.NewLimiter(rate.Limit(maxRPS), maxRPS)
 
 	ce := &CorrelationEngine{
-		ruleEngine:           NewRuleEngine(config.Rules),
 		buffer:               NewShardedEventBuffer(config.BufferSize),
 		pending:              make([]types.Alert, 0),
 		enableAnomaly:        config.EnableAnomaly,
@@ -193,12 +197,33 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		activeRulesGauge:     activeRulesGauge,
 	}
 
+	ce.ruleEngine.Store(NewRuleEngine(config.Rules))
+
 	// Seed active rules gauge
 	activeRulesGauge.Set(float64(len(config.Rules)))
 
+	// Background goroutine that evicts stale per-PID event buffers.
+	bufferTTL := config.BufferTTL
+	if bufferTTL <= 0 {
+		bufferTTL = 10 * time.Minute
+	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ce.buffer.CleanupExpired(bufferTTL)
+			}
+		}
+	}()
+
 	// Initialize anomaly detector if enabled
 	if config.EnableAnomaly {
-		ce.anomalyDetector = profiler.NewAnomalyDetector(
+		ce.anomalyDetector = profiler.NewAnomalyDetectorWithContext(
+			ctx,
 			config.AnomalyThreshold,
 			config.LearningPeriod,
 			config.EWMAWeight,
@@ -300,7 +325,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	var alerts []types.Alert
 
 	// Evaluate against rules
-	ruleAlerts := ce.ruleEngine.Evaluate(e)
+	ruleAlerts := ce.ruleEngine.Load().Evaluate(e)
 	for _, alert := range ruleAlerts {
 		// Per-rule rate limit check
 		if !ce.rateLimiter.Allow(alert.RuleID) {
@@ -512,14 +537,13 @@ type EngineStats struct {
 
 // UpdateRules updates the rule engine with new rules.
 func (ce *CorrelationEngine) UpdateRules(rules []Rule) {
-	ce.ruleEngine = NewRuleEngine(rules)
+	ce.ruleEngine.Store(NewRuleEngine(rules))
 	ce.activeRulesGauge.Set(float64(len(rules)))
 }
 
 // GetRules returns the currently loaded rules.
 func (ce *CorrelationEngine) GetRules() []Rule {
-	// Return a copy of the rules from the rule engine
-	return ce.ruleEngine.GetRules()
+	return ce.ruleEngine.Load().GetRules()
 }
 
 // ReloadRules reloads the rules in the rule engine.

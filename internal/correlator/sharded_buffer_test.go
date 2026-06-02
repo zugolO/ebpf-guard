@@ -317,3 +317,80 @@ func BenchmarkShardedLock_SamePID(b *testing.B) {
 		}
 	})
 }
+
+// TestShardedBufferCleanup verifies that CleanupExpired removes stale PID entries.
+func TestShardedBufferCleanup(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	// Add events for 100 PIDs
+	for i := uint32(0); i < 100; i++ {
+		sb.Add(i, types.Event{Type: types.EventSyscall, PID: i})
+	}
+	require.Equal(t, 100, sb.Count())
+
+	// Wait to ensure all lastSeen timestamps are older than the TTL we pass.
+	time.Sleep(20 * time.Millisecond)
+
+	removed := sb.CleanupExpired(10 * time.Millisecond)
+
+	assert.Equal(t, 100, removed, "all 100 PID entries should have been removed")
+	assert.Equal(t, 0, sb.Count(), "buffer should be empty after cleanup")
+
+	// Verify individual PIDs are gone
+	for i := uint32(0); i < 5; i++ {
+		assert.Nil(t, sb.Get(i), "PID %d should have no events after cleanup", i)
+	}
+}
+
+// TestShardedBufferCleanup_KeepsRecent verifies that recently-active PIDs survive cleanup.
+func TestShardedBufferCleanup_KeepsRecent(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+
+	// Add events for PIDs 0–49
+	for i := uint32(0); i < 50; i++ {
+		sb.Add(i, types.Event{Type: types.EventSyscall, PID: i})
+	}
+
+	// Wait a tiny bit so those entries are older
+	time.Sleep(5 * time.Millisecond)
+
+	// Add events for PIDs 50–99 (fresher timestamps)
+	for i := uint32(50); i < 100; i++ {
+		sb.Add(i, types.Event{Type: types.EventSyscall, PID: i})
+	}
+
+	// CleanupExpired with a TTL of 2ms — only the first batch is stale
+	removed := sb.CleanupExpired(2 * time.Millisecond)
+
+	assert.Equal(t, 50, removed, "only the 50 stale PIDs should have been removed")
+	assert.Equal(t, 50, sb.Count(), "50 recent PIDs should remain")
+
+	// Verify the recent PIDs still have events
+	for i := uint32(50); i < 55; i++ {
+		assert.NotNil(t, sb.Get(i), "PID %d should still have events", i)
+	}
+}
+
+// BenchmarkShardedLockReadContention measures 8 concurrent readers sharing the same shard.
+// With sync.RWMutex, concurrent RLock calls don't block each other; with sync.Mutex they would.
+func BenchmarkShardedLockReadContention(b *testing.B) {
+	sl := NewShardedLock()
+	// All goroutines use the same shard to maximise read contention measurement.
+	pid := uint32(0)
+
+	b.ResetTimer()
+	b.SetParallelism(8)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			sl.RLock(pid)
+			sl.RUnlock(pid)
+		}
+	})
+}
+
+// TestShardedBufferCleanup_ZeroRemoved verifies cleanup on an already-empty buffer.
+func TestShardedBufferCleanup_ZeroRemoved(t *testing.T) {
+	sb := NewShardedEventBuffer(10)
+	removed := sb.CleanupExpired(time.Hour)
+	assert.Equal(t, 0, removed)
+}

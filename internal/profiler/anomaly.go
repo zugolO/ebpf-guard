@@ -2,14 +2,15 @@
 package profiler
 
 import (
+	"context"
 	"fmt"
 	"math"
-	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/ebpf-guard/ebpf-guard/internal/util"
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 )
 
@@ -56,20 +57,26 @@ type AnomalyContribution struct {
 	Contribution float64 // Contribution to total score (0.0-1.0)
 }
 
-// NewAnomalyDetector creates a new anomaly detector.
-func NewAnomalyDetector(threshold float64, learningPeriod time.Duration, weight float64) *AnomalyDetector {
+// NewAnomalyDetectorWithContext creates a new anomaly detector whose background
+// cleanup goroutines (ProfileManager LRU eviction) exit when ctx is cancelled.
+func NewAnomalyDetectorWithContext(ctx context.Context, threshold float64, learningPeriod time.Duration, weight float64) *AnomalyDetector {
 	ad := &AnomalyDetector{
 		threshold:         threshold,
 		learningPeriod:    learningPeriod,
 		weight:            weight,
 		learner:           NewBaselineLearner(learningPeriod, 100),
-		profileManager:    NewProfileManager(weight, 24*time.Hour),
+		profileManager:    NewProfileManagerWithContext(ctx, weight, 24*time.Hour, 65536),
 		learningStartTime: time.Now(),
 		enabled:           true,
 		samplingRate:      1.0,
 	}
-	// learningComplete defaults to false (zero value)
 	return ad
+}
+
+// NewAnomalyDetector creates a new anomaly detector.
+// Deprecated: use NewAnomalyDetectorWithContext to enable background cleanup goroutines.
+func NewAnomalyDetector(threshold float64, learningPeriod time.Duration, weight float64) *AnomalyDetector {
+	return NewAnomalyDetectorWithContext(context.Background(), threshold, learningPeriod, weight)
 }
 
 // ProcessEvent processes an event and returns anomaly results if detected.
@@ -222,7 +229,7 @@ func (ad *AnomalyDetector) analyzeNetworkBehavior(profile *ProcessProfile, event
 	}
 
 	// Check destination address
-	daddr := formatIP(event.Daddr, event.Family)
+	daddr := util.FormatIP16(event.Daddr, event.Family)
 	if addrEWMA, exists := profile.NetworkProfile.DestAddrs[daddr]; exists {
 		freq := addrEWMA.Value()
 		addrScore := 1.0 - freq
@@ -258,7 +265,7 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 	var score float64
 	var contributions []AnomalyContribution
 
-	filename := string(bytesToString(event.Filename[:]))
+	filename := util.BytesToString(event.Filename[:])
 	dir := extractDirectory(filename)
 
 	// Check directory access
@@ -371,15 +378,6 @@ func formatSyscall(nr int64) string {
 	return fmt.Sprintf("syscall_%d", nr)
 }
 
-// formatIP converts a 16-byte IP address to string representation.
-// For IPv4, only the first 4 bytes are used.
-func formatIP(addr [16]byte, family types.AddressFamily) string {
-	if family == types.AFInet6 {
-		return net.IP(addr[:]).String()
-	}
-	// IPv4 - use only first 4 bytes
-	return net.IP(addr[:4]).String()
-}
 
 // Enable activates the anomaly detector.
 func (ad *AnomalyDetector) Enable() {

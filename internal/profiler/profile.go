@@ -7,6 +7,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ebpf-guard/ebpf-guard/internal/util"
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -116,7 +117,7 @@ func (p *ProcessProfile) recordNetworkEventLocked(e *types.NetworkEvent, weight 
 	p.NetworkProfile.DestPorts[e.Dport].Update(1.0)
 
 	// Update destination address EWMA
-	daddr := formatIP(e.Daddr, e.Family)
+	daddr := util.FormatIP16(e.Daddr, e.Family)
 	if p.NetworkProfile.DestAddrs[daddr] == nil {
 		p.NetworkProfile.DestAddrs[daddr] = NewEWMA(weight)
 	}

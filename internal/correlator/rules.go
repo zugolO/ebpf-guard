@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ebpf-guard/ebpf-guard/internal/util"
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 )
 
@@ -108,6 +110,9 @@ type RuleEngine struct {
 	regexCache map[string]*regexp.Regexp
 	// compiled CIDR ranges
 	cidrCache map[string]*net.IPNet
+	// valueSetCache maps a canonical key (sorted joined values) → set for O(1) OpIn/OpNotIn lookup.
+	// Built once in compilePatterns; never mutated after construction.
+	valueSetCache map[string]map[string]struct{}
 	// mu protects the rules slice
 	mu sync.RWMutex
 }
@@ -115,9 +120,10 @@ type RuleEngine struct {
 // NewRuleEngine creates a new rule engine with the given rules.
 func NewRuleEngine(rules []Rule) *RuleEngine {
 	re := &RuleEngine{
-		rules:      rules,
-		regexCache: make(map[string]*regexp.Regexp),
-		cidrCache:  make(map[string]*net.IPNet),
+		rules:         rules,
+		regexCache:    make(map[string]*regexp.Regexp),
+		cidrCache:     make(map[string]*net.IPNet),
+		valueSetCache: make(map[string]map[string]struct{}),
 	}
 	re.compilePatterns()
 	return re
@@ -133,7 +139,7 @@ func (re *RuleEngine) GetRules() []Rule {
 	return rulesCopy
 }
 
-// compilePatterns pre-compiles regex and CIDR patterns for performance.
+// compilePatterns pre-compiles regex, CIDR, and OpIn/OpNotIn value sets for performance.
 func (re *RuleEngine) compilePatterns() {
 	for _, rule := range re.rules {
 		conditions := re.getAllConditions(rule)
@@ -155,21 +161,65 @@ func (re *RuleEngine) compilePatterns() {
 						}
 					}
 				}
+			case OpIn, OpNotIn:
+				key := valueSetKey(cond.Values)
+				if _, exists := re.valueSetCache[key]; !exists {
+					set := make(map[string]struct{}, len(cond.Values))
+					for _, v := range cond.Values {
+						set[v] = struct{}{}
+					}
+					re.valueSetCache[key] = set
+				}
 			}
 		}
 	}
 }
 
-// getAllConditions extracts all conditions from a rule (handles both Condition and ConditionGroup).
+// valueSetKey returns a stable cache key for a values slice.
+// Sorts a copy so the key is order-independent (rule YAML order must not matter).
+func valueSetKey(values []string) string {
+	cp := make([]string, len(values))
+	copy(cp, values)
+	sort.Strings(cp)
+	return strings.Join(cp, "\x00")
+}
+
+// inSetLookup returns true if value is present in the pre-built set for values.
+// Falls back to linear scan if no set was cached (should not happen after compilePatterns).
+func (re *RuleEngine) inSetLookup(values []string, value string) bool {
+	key := valueSetKey(values)
+	if set, ok := re.valueSetCache[key]; ok {
+		_, found := set[value]
+		return found
+	}
+	return contains(values, value)
+}
+
+// getAllConditions extracts all conditions from a rule, recursively traversing SubGroups.
 func (re *RuleEngine) getAllConditions(rule Rule) []RuleCondition {
 	if rule.ConditionGroup != nil {
-		return rule.ConditionGroup.Conditions
+		return collectConditions(rule.ConditionGroup)
 	}
 	return []RuleCondition{rule.Condition}
 }
 
+// collectConditions recursively collects all conditions from a group and its SubGroups.
+func collectConditions(g *RuleConditionGroup) []RuleCondition {
+	if g == nil {
+		return nil
+	}
+	conds := append([]RuleCondition{}, g.Conditions...)
+	for i := range g.SubGroups {
+		conds = append(conds, collectConditions(&g.SubGroups[i])...)
+	}
+	return conds
+}
+
 // Evaluate checks an event against all rules and returns matching alerts.
 func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
 	var alerts []types.Alert
 
 	for _, rule := range re.rules {
@@ -182,9 +232,9 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			continue // Silently drop
 		}
 
-		// Generate alert
+		// Generate alert — ID intentionally omitted; set by CorrelationEngine.Ingest
+		// with a monotonic sequence number to guarantee uniqueness.
 		alert := types.Alert{
-			ID:        fmt.Sprintf("%s-%d-%d", rule.ID, e.Timestamp, e.PID),
 			Timestamp: time.Unix(0, int64(e.Timestamp)),
 			RuleID:    rule.ID,
 			RuleName:  rule.Name,
@@ -215,33 +265,33 @@ func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
 	return re.evaluateCondition(e, rule.Condition)
 }
 
-// evaluateConditionGroup evaluates a group of conditions with AND/OR logic.
+// evaluateConditionGroup evaluates a group of conditions with AND/OR logic, recursing into SubGroups.
 func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleConditionGroup) bool {
-	if len(group.Conditions) == 0 {
+	if len(group.Conditions) == 0 && len(group.SubGroups) == 0 {
 		return true
 	}
 
 	switch strings.ToLower(group.Operator) {
 	case "or":
-		// OR: at least one condition must match
 		for _, cond := range group.Conditions {
 			if re.evaluateCondition(e, cond) {
 				return true
 			}
 		}
+		for i := range group.SubGroups {
+			if re.evaluateConditionGroup(e, &group.SubGroups[i]) {
+				return true
+			}
+		}
 		return false
-	case "and", "":
-		// AND: all conditions must match (default)
+	default: // "and" or ""
 		for _, cond := range group.Conditions {
 			if !re.evaluateCondition(e, cond) {
 				return false
 			}
 		}
-		return true
-	default:
-		// Unknown operator, default to AND
-		for _, cond := range group.Conditions {
-			if !re.evaluateCondition(e, cond) {
+		for i := range group.SubGroups {
+			if !re.evaluateConditionGroup(e, &group.SubGroups[i]) {
 				return false
 			}
 		}
@@ -273,16 +323,16 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool 
 	if value == fieldNotFound {
 		return false
 	}
-	if value == "" && cond.Op != OpEquals && cond.Op != OpNotEquals {
+	if value == "" && cond.Op != OpEquals && cond.Op != OpNotEquals && cond.Op != OpNotIn {
 		return false
 	}
 
 	// Evaluate condition
 	switch cond.Op {
 	case OpIn:
-		return contains(cond.Values, value)
+		return re.inSetLookup(cond.Values, value)
 	case OpNotIn:
-		return !contains(cond.Values, value)
+		return !re.inSetLookup(cond.Values, value)
 	case OpEquals:
 		return len(cond.Values) > 0 && value == cond.Values[0]
 	case OpNotEquals:
@@ -368,9 +418,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "sport":
 			return fmt.Sprintf("%d", e.Network.Sport)
 		case "daddr":
-			return formatIP(e.Network.Daddr[:], e.Network.Family)
+			return util.FormatIP(e.Network.Daddr[:], e.Network.Family)
 		case "saddr":
-			return formatIP(e.Network.Saddr[:], e.Network.Family)
+			return util.FormatIP(e.Network.Saddr[:], e.Network.Family)
 		case "proto":
 			return fmt.Sprintf("%d", e.Network.Proto)
 		case "family":
@@ -385,7 +435,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		}
 		switch field {
 		case "filename":
-			return string(bytesToString(e.File.Filename[:]))
+			return util.BytesToString(e.File.Filename[:])
 		case "flags":
 			return fmt.Sprintf("%d", e.File.Flags)
 		case "mode":
@@ -444,7 +494,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "uid":
 			return fmt.Sprintf("%d", e.UID)
 		case "comm":
-			return bytesToString(e.Comm[:])
+			return util.BytesToString(e.Comm[:])
 		case "caps":
 			// Return hex bitmask of new caps for generic comparisons.
 			if e.Privesc != nil {
@@ -462,9 +512,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "sport":
 			return fmt.Sprintf("%d", e.NetClose.Sport)
 		case "daddr":
-			return formatIP(e.NetClose.Daddr[:], e.NetClose.Family)
+			return util.FormatIP(e.NetClose.Daddr[:], e.NetClose.Family)
 		case "saddr":
-			return formatIP(e.NetClose.Saddr[:], e.NetClose.Family)
+			return util.FormatIP(e.NetClose.Saddr[:], e.NetClose.Family)
 		case "family":
 			if e.NetClose.Family == types.AFInet6 {
 				return "ipv6"
@@ -544,23 +594,3 @@ func hasPrefix(prefixes []string, value string) bool {
 	return false
 }
 
-// bytesToString converts a byte slice to string, stopping at first null byte.
-func bytesToString(b []byte) string {
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
-		}
-	}
-	return string(b)
-}
-
-// formatIP formats an IP address based on address family.
-// For IPv4, uses the first 4 bytes; for IPv6, uses all 16 bytes.
-func formatIP(addr []byte, family types.AddressFamily) string {
-	if family == types.AFInet6 {
-		// IPv6 address
-		return net.IP(addr).String()
-	}
-	// IPv4 address - only use first 4 bytes
-	return fmt.Sprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
-}

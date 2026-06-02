@@ -206,15 +206,9 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 	// Calculate cosine distance
 	distance = cosineDistance(currentVec, state.baseline)
 
-	// Update metric
-	comm := string(e.Comm[:])
-	// Trim null bytes
-	for i := 0; i < len(comm); i++ {
-		if comm[i] == 0 {
-			comm = comm[:i]
-			break
-		}
-	}
+	// Update metric (cleanComm strips the trailing NUL padding so the Prometheus
+	// label is a clean process name rather than "comm\x00\x00…").
+	comm := cleanComm(e.Comm[:])
 	sp.distance.WithLabelValues(strconv.FormatUint(uint64(e.PID), 10), comm).Set(distance)
 
 	// Check threshold

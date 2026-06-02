@@ -10,6 +10,7 @@ import (
 
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
@@ -365,7 +366,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				Message:   formatAnomalyDescription(result),
 				Severity:  types.SeverityWarning,
 				PID:       e.PID,
-				Comm:      string(e.Comm[:]),
+				Comm:      util.BytesToString(e.Comm[:]),
 				Event:     e,
 			}
 

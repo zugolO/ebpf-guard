@@ -134,7 +134,7 @@ func (p *Profiler) Ingest(e types.Event) []*Anomaly {
 	if dist, isAnomaly := p.sequence.Update(e); isAnomaly {
 		anomalies = append(anomalies, &Anomaly{
 			PID:   e.PID,
-			Comm:  string(e.Comm[:]),
+			Comm:  cleanComm(e.Comm[:]),
 			Score: dist,
 			Contributions: map[string]interface{}{
 				"sequence_distance": dist,

@@ -241,7 +241,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Severity:  rule.Severity,
 			Message:   rule.Description,
 			PID:       e.PID,
-			Comm:      string(e.Comm[:]),
+			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 		}
 		alerts = append(alerts, alert)

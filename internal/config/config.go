@@ -247,6 +247,11 @@ type ProfilerConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// LearningPeriod is the initial learning period in seconds (no alerts)
 	LearningPeriod int `mapstructure:"learning_period"`
+	// MinLearningSamples is the minimum number of events that must be observed
+	// before the learning phase can complete, regardless of LearningPeriod.
+	// Prevents premature anomaly scoring on nodes that started receiving
+	// traffic just before the LearningPeriod timer expired. Default: 100.
+	MinLearningSamples uint64 `mapstructure:"min_learning_samples"`
 	// AnomalyThreshold is the score threshold for generating alerts (0.0-1.0)
 	AnomalyThreshold float64 `mapstructure:"anomaly_threshold"`
 	// EWMAWeight is the weight for Exponentially Weighted Moving Average (0.0-1.0)
@@ -473,6 +478,7 @@ func setDefaults(v *viper.Viper) {
 	// Profiler defaults
 	v.SetDefault("profiler.enabled", true)
 	v.SetDefault("profiler.learning_period", 3600)
+	v.SetDefault("profiler.min_learning_samples", 100)
 	v.SetDefault("profiler.anomaly_threshold", 0.8)
 	v.SetDefault("profiler.ewma_weight", 0.3)
 	v.SetDefault("profiler.profile_ttl", 86400)

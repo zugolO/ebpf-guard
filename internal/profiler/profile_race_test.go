@@ -133,9 +133,10 @@ func TestProfileManager_ConcurrentRecordAndCalculateAnomaly(t *testing.T) {
 			for j := 0; j < 100; j++ {
 				profile := pm.Get(1234)
 				if profile != nil {
-					// Read profile data (simulates what calculateAnomalyScore does)
+					// GetAnomalyScore acquires profile.mu — mirrors what
+					// calculateAnomalyScore does. Direct field access without
+					// the lock is a data race; use the accessor instead.
 					_ = profile.GetAnomalyScore()
-					_ = profile.NetworkProfile.TotalConnections
 				}
 			}
 		}()

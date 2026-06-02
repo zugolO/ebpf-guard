@@ -139,9 +139,14 @@ patterns:
     severity: warning
     reference: "https://attack.mitre.org/techniques/T1195/"
 
-  # SSH daemon spawning shells from unusual sources
+  # SSH daemon spawning shells.
+  # NOTE: sshd spawns a shell on every interactive login, so this pattern
+  # fires unconditionally and will produce noise in environments that allow
+  # SSH access. Set severity to "info" or disable this pattern if your
+  # team uses SSH routinely. Future versions will support source-IP
+  # filtering via the condition field.
   - name: ssh_suspicious_shell
-    description: "SSH daemon spawning shell - verify authentication logs"
+    description: "SSH daemon spawning shell - fires on every interactive SSH login"
     parent_comms:
       - sshd
     child_comms:
@@ -153,8 +158,7 @@ patterns:
       - python3
       - ruby
       - perl
-    severity: warning
-    condition: "verify_source_ip"  # Should be correlated with auth logs
+    severity: info
     reference: "https://attack.mitre.org/techniques/T1021/"
 
   # Cron spawning shells - check for cron-based persistence
@@ -176,7 +180,10 @@ patterns:
     severity: warning
     reference: "https://attack.mitre.org/techniques/T1053/"
 
-  # Init/systemd spawning direct shells (not through login)
+  # Init/systemd spawning direct shells.
+  # NOTE: systemd may legitimately spawn shells during boot (e.g. emergency
+  # mode, getty). This pattern fires unconditionally; tune severity or
+  # disable if it causes false positives in your environment.
   - name: init_direct_shell
     description: "Init process spawning shell directly - potential backdoor"
     parent_comms:
@@ -189,8 +196,7 @@ patterns:
       - zsh
       - python
       - python3
-    severity: critical
-    condition: "not_getty_or_login"
+    severity: warning
     reference: "https://attack.mitre.org/techniques/T1543/"
 
   # Interpreted languages spawning shells - potential code injection

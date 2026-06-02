@@ -186,20 +186,27 @@ func TestLineageTrackerCleanup(t *testing.T) {
 
 func TestMatchesAny(t *testing.T) {
 	tests := []struct {
+		name     string
 		s        string
 		patterns []string
 		want     bool
 	}{
-		{"bash", []string{"sh", "bash", "zsh"}, true},
-		{"bash", []string{"sh", "zsh"}, false},
-		{"nginx", []string{"nginx", "apache2"}, true},
-		{"nginx-worker", []string{"nginx"}, true}, // prefix match
-		{"", []string{"bash"}, false},
-		{"bash", []string{}, false},
+		{"exact match", "bash", []string{"sh", "bash", "zsh"}, true},
+		{"no match", "bash", []string{"sh", "zsh"}, false},
+		{"exact nginx", "nginx", []string{"nginx", "apache2"}, true},
+		{"hyphen variant nginx-worker", "nginx-worker", []string{"nginx"}, true},
+		{"digit variant python3", "python3", []string{"python"}, true},
+		{"digit-dot variant python3.11", "python3.11", []string{"python"}, true},
+		// underscore suffix must NOT match — prevents node_exporter matching node
+		{"underscore suffix node_exporter", "node_exporter", []string{"node"}, false},
+		// letter suffix must NOT match — node and nodejs are separate entries in patterns
+		{"letter suffix nodejs", "nodejs", []string{"node"}, false},
+		{"empty string", "", []string{"bash"}, false},
+		{"empty patterns", "bash", []string{}, false},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.s, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			got := matchesAny(tt.s, tt.patterns)
 			assert.Equal(t, tt.want, got)
 		})
@@ -224,6 +231,42 @@ func TestCleanComm(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestLineagePatternConditionParsed(t *testing.T) {
+	// Patterns with a Condition field must be parsed (not silently dropped by
+	// the YAML decoder) and must still fire — condition is not yet evaluated.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	config := LineageConfig{
+		Enabled: true,
+		TTL:     5 * time.Minute,
+		Patterns: []LineagePattern{
+			{
+				Name:        "test_conditional",
+				Description: "fires unconditionally despite condition field",
+				ParentComms: []string{"sshd"},
+				ChildComms:  []string{"bash"},
+				Severity:    "info",
+				Condition:   "verify_source_ip",
+			},
+		},
+	}
+
+	tracker := NewLineageTracker(config, logger)
+
+	e := types.Event{
+		Type:       types.EventSyscall,
+		PID:        1000,
+		PPID:       999,
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("sshd"),
+	}
+
+	match := tracker.Update(e)
+	// Pattern should still fire — Condition is parsed but not evaluated.
+	require.NotNil(t, match, "pattern with condition field must still fire unconditionally")
+	assert.Equal(t, "test_conditional", match.Pattern.Name)
+	assert.Equal(t, "verify_source_ip", match.Pattern.Condition)
 }
 
 func TestNewLineageTrackerDefaults(t *testing.T) {

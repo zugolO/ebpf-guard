@@ -46,6 +46,7 @@ func TestNewManager_Defaults(t *testing.T) {
 	// Check profiler defaults
 	assert.True(t, cfg.Profiler.Enabled)
 	assert.Equal(t, 3600, cfg.Profiler.LearningPeriod)
+	assert.Equal(t, uint64(100), cfg.Profiler.MinLearningSamples)
 	assert.Equal(t, 0.8, cfg.Profiler.AnomalyThreshold)
 	assert.Equal(t, 0.3, cfg.Profiler.EWMAWeight)
 	assert.Equal(t, 86400, cfg.Profiler.ProfileTTL)

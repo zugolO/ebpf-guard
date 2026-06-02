@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 )
 
 func TestAlertmanagerClient_SendAlert(t *testing.T) {
+	var mu sync.Mutex
 	var receivedAlerts []types.AlertPayload
 
 	// Create test server
@@ -25,8 +27,13 @@ func TestAlertmanagerClient_SendAlert(t *testing.T) {
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 
-		err = json.Unmarshal(body, &receivedAlerts)
+		var alerts []types.AlertPayload
+		err = json.Unmarshal(body, &alerts)
 		require.NoError(t, err)
+
+		mu.Lock()
+		receivedAlerts = alerts
+		mu.Unlock()
 
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -63,6 +70,8 @@ func TestAlertmanagerClient_SendAlert(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Verify alert was received
+	mu.Lock()
+	defer mu.Unlock()
 	require.Len(t, receivedAlerts, 1)
 	assert.Equal(t, "EbpfGuardAlert", receivedAlerts[0].Labels.Alertname)
 	assert.Equal(t, "rule_001", receivedAlerts[0].Labels.RuleID)
@@ -72,6 +81,7 @@ func TestAlertmanagerClient_SendAlert(t *testing.T) {
 }
 
 func TestAlertmanagerClient_BatchSending(t *testing.T) {
+	var mu sync.Mutex
 	var receivedBatches int
 	var totalAlerts int
 
@@ -80,8 +90,10 @@ func TestAlertmanagerClient_BatchSending(t *testing.T) {
 		var alerts []types.AlertPayload
 		json.Unmarshal(body, &alerts)
 
+		mu.Lock()
 		receivedBatches++
 		totalAlerts += len(alerts)
+		mu.Unlock()
 
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -111,6 +123,8 @@ func TestAlertmanagerClient_BatchSending(t *testing.T) {
 	client.Flush()
 	time.Sleep(100 * time.Millisecond)
 
+	mu.Lock()
+	defer mu.Unlock()
 	assert.GreaterOrEqual(t, receivedBatches, 2)
 	assert.Equal(t, 12, totalAlerts)
 }
@@ -181,9 +195,12 @@ func TestAlertmanagerClient_alertToPayload(t *testing.T) {
 // TestAlertmanagerClient_CircuitBreakerCooldown tests that the circuit breaker
 // recovers after the cooldown period expires.
 func TestAlertmanagerClient_CircuitBreakerCooldown(t *testing.T) {
+	var mu sync.Mutex
 	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		requestCount++
+		mu.Unlock()
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
@@ -220,7 +237,9 @@ func TestAlertmanagerClient_CircuitBreakerCooldown(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 
 	// Reset request count to track new requests
+	mu.Lock()
 	requestCount = 0
+	mu.Unlock()
 
 	// Send another alert - circuit should be closed and request should go through
 	client.SendAlert(ctx, types.Alert{
@@ -232,7 +251,10 @@ func TestAlertmanagerClient_CircuitBreakerCooldown(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// After cooldown, the circuit should be closed and we should see a new request
-	assert.GreaterOrEqual(t, requestCount, 1, "circuit should be closed after cooldown and allow requests")
+	mu.Lock()
+	count := requestCount
+	mu.Unlock()
+	assert.GreaterOrEqual(t, count, 1, "circuit should be closed after cooldown and allow requests")
 
 	// Verify circuit breaker state is reset
 	client.mu.Lock()

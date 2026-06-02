@@ -77,6 +77,15 @@ func NewLSMCollector(config LSMConfig, logger *slog.Logger) (*LSMCollector, erro
 		}, []string{"hook", "action"}),
 	}
 
+	// Pre-initialize the known label combinations to 0 so the metric is present
+	// in /metrics from startup (rather than appearing only after the first block),
+	// which lets dashboards and alerting rules reference it immediately.
+	for _, hook := range []string{"file_open", "socket_connect", "task_kill"} {
+		for _, action := range []string{"allow", "block"} {
+			lc.blocksTotal.WithLabelValues(hook, action)
+		}
+	}
+
 	// Check availability
 	available := lc.checkAvailability()
 	lc.available = available

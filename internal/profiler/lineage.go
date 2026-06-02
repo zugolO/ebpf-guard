@@ -163,7 +163,16 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 	// First try to get from event (if BPF provides PPID)
 	if e.PPID > 0 {
-		// Check if we have cached parent comm
+		// Prefer the parent comm captured by BPF at fork/exec time. This is
+		// authoritative and, crucially, survives short-lived parents (e.g. the
+		// bash in nginx→bash→curl) that may already have exited before we can
+		// read /proc. Without this, attack-chain detection silently misses the
+		// most interesting cases.
+		if parentComm := cleanComm(e.ParentComm[:]); parentComm != "" {
+			return e.PPID, parentComm
+		}
+
+		// Otherwise reuse a parent comm cached from a previous event.
 		lt.mu.RLock()
 		if info, ok := lt.lineage[e.PPID]; ok {
 			lt.mu.RUnlock()
@@ -171,7 +180,7 @@ func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 		}
 		lt.mu.RUnlock()
 
-		// Read from /proc/<ppid>/comm
+		// Last resort: read from /proc/<ppid>/comm (parent may already be gone).
 		comm := readProcComm(e.PPID)
 		return e.PPID, comm
 	}

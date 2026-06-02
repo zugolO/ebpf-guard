@@ -156,13 +156,21 @@ func (w *Watchdog) IsRunning() bool {
 	return w.running
 }
 
+// nowSeconds returns the current time as fractional Unix seconds. Sub-second
+// precision keeps the heartbeat gauge monotonic even with short heartbeat
+// intervals (e.g. 50ms), where whole-second Unix() would not advance between
+// ticks. The metric unit (…_seconds) is unchanged.
+func nowSeconds() float64 {
+	return float64(time.Now().UnixNano()) / 1e9
+}
+
 // runHeartbeat periodically updates the heartbeat timestamp.
 func (w *Watchdog) runHeartbeat(ctx context.Context) {
 	ticker := time.NewTicker(w.heartbeatInterval)
 	defer ticker.Stop()
 
 	// Update immediately on start
-	HeartbeatTimestamp.Set(float64(time.Now().Unix()))
+	HeartbeatTimestamp.Set(nowSeconds())
 
 	for {
 		select {
@@ -170,7 +178,7 @@ func (w *Watchdog) runHeartbeat(ctx context.Context) {
 			w.logger.Debug("heartbeat stopped")
 			return
 		case <-ticker.C:
-			HeartbeatTimestamp.Set(float64(time.Now().Unix()))
+			HeartbeatTimestamp.Set(nowSeconds())
 			w.logger.Debug("heartbeat updated")
 		}
 	}

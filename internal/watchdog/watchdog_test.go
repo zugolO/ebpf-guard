@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -136,9 +137,9 @@ func TestHeartbeatUpdates(t *testing.T) {
 }
 
 func getHeartbeatValue() float64 {
-	// We can't easily get the value from the default registry in tests,
-	// so we'll verify through behavior
-	return float64(time.Now().Unix())
+	// Read the actual gauge value rather than re-sampling the clock, so the
+	// test verifies that runHeartbeat advances the metric.
+	return testutil.ToFloat64(HeartbeatTimestamp)
 }
 
 func TestCheckProgramAttached(t *testing.T) {

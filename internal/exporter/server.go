@@ -29,24 +29,25 @@ type Server struct {
 	metricsPath string
 	healthPath  string
 	server      *http.Server
+	mux         *http.ServeMux // retained for post-construction route registration
 	mu          sync.RWMutex
 	logger      *slog.Logger
-	
+
 	// Health state
 	healthy           bool
 	ready             bool
 	startTime         time.Time
 	collectorStatuses map[string]CollectorStatus
-	
+
 	// Debug handler (optional)
 	debugHandler *DebugHandler
-	
+
 	// Alert store for REST API
 	alertStore store.AlertStore
-	
+
 	// Rules provider for REST API
 	rulesProviderFn func() []correlator.Rule
-	
+
 	// Rules reload handler
 	rulesReloadFn func() error
 }
@@ -87,6 +88,7 @@ func NewServerWithAuth(bindAddress, metricsPath, healthPath string, enablePprof,
 	}
 
 	mux := http.NewServeMux()
+	s.mux = mux
 	mux.Handle(metricsPath, promhttp.Handler())
 	mux.HandleFunc(healthPath, s.handleHealth)
 	mux.HandleFunc(healthPath+"/ready", s.handleReady)
@@ -135,6 +137,15 @@ func NewServerWithAuth(bindAddress, metricsPath, healthPath string, enablePprof,
 	}
 
 	return s
+}
+
+// RegisterGossipRoutes mounts the provided handler under /gossip/ on the
+// server's internal mux. Must be called before Start.
+func (s *Server) RegisterGossipRoutes(h http.Handler) {
+	if s.mux == nil {
+		return
+	}
+	s.mux.Handle("/gossip/", h)
 }
 
 // Start starts the HTTP server in a goroutine.

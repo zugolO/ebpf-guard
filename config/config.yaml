@@ -84,3 +84,17 @@ store:
     username: admin
     password: ""              # or reference to Kubernetes Secret
     insecure_skip_verify: false  # Set to true for self-signed certs
+
+# Gossip configuration
+# Cross-node IOC (Indicator of Compromise) sharing between ebpf-guard agents.
+# When enabled, each node broadcasts newly detected IOCs (IPs, domains, fingerprints)
+# to configured peers so the entire cluster benefits from a single node's detections.
+#
+# Security note: set a strong shared secret and use HTTPS peers in production.
+gossip:
+  enabled: false
+  secret: ""                  # Shared secret for X-Gossip-Secret header auth
+  peers: []                   # Peer base URLs, e.g. ["http://10.0.0.2:9090"]
+  ioc_ttl: 3600               # Seconds an IOC is considered valid (default: 1 hour)
+  max_iocs: 100000            # Maximum IOC store size per node
+  push_interval: 30           # Seconds between delta pushes to peers

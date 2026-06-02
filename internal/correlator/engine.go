@@ -30,6 +30,15 @@ type Engine interface {
 	Flush() []types.Alert
 }
 
+// IOCMatcher allows the correlation engine to check events against cluster-wide
+// IOC intelligence provided by the gossip sub-system.
+// Implemented by gossip.Manager; decoupled here to avoid an import cycle.
+type IOCMatcher interface {
+	MatchIP(ip string) bool
+	MatchDNS(domain string) bool
+	MatchFingerprint(fp string) bool
+}
+
 // CorrelationEngine correlates events and applies detection rules.
 type CorrelationEngine struct {
 	ruleEngine atomic.Pointer[RuleEngine]
@@ -77,6 +86,9 @@ type CorrelationEngine struct {
 
 	// Metrics callback
 	onCorrelate MetricsCallback
+
+	// IOC matcher (gossip integration — optional)
+	iocMatcher IOCMatcher
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -119,6 +131,11 @@ type CorrelationEngineConfig struct {
 
 	// Metrics callback (optional)
 	OnCorrelate MetricsCallback
+
+	// IOCMatcher integrates gossip-based cluster-wide IOC intelligence.
+	// When set, events are checked against known IOCs and produce alerts.
+	// Optional — nil disables this check entirely.
+	IOCMatcher IOCMatcher
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -194,6 +211,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		enableRegoEval:       config.EnableRegoEval,
 		regoEngine:           config.RegoEngine,
 		onCorrelate:          config.OnCorrelate,
+		iocMatcher:           config.IOCMatcher,
 		globalLimiter:        globalLimiter,
 		globalLimiterEnabled: globalLimiterEnabled,
 		alertsDroppedGlobal:  alertsDroppedGlobal,
@@ -362,6 +380,19 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
+	}
+
+	// Gossip IOC matching — check event against cluster-wide indicators.
+	if ce.iocMatcher != nil {
+		if iocAlert := ce.checkIOCMatch(e); iocAlert != nil {
+			if ce.rateLimiter.Allow(iocAlert.RuleID) &&
+				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
+				alerts = append(alerts, *iocAlert)
+				ce.alertsGenerated.Add(1)
+			} else {
+				ce.alertsDropped.Add(1)
+			}
+		}
 	}
 
 	// Anomaly detection (if enabled and learning complete)
@@ -571,6 +602,54 @@ func (ce *CorrelationEngine) ReloadRules(rules []Rule) {
 func (ce *CorrelationEngine) UpdateRateLimiter(window time.Duration, maxAlerts int, enabled bool) {
 	ce.rateLimiter.UpdateConfig(window, maxAlerts)
 	ce.rateLimiter.SetEnabled(enabled)
+}
+
+// checkIOCMatch checks e against the gossip IOC store and returns an alert when matched.
+func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
+	const ruleID = "gossip_ioc_match"
+
+	var matched bool
+	var indicator string
+
+	switch e.Type {
+	case types.EventTCPConnect:
+		if e.Network != nil {
+			ip := util.FormatIP16(e.Network.Daddr, e.Network.Family)
+			if ce.iocMatcher.MatchIP(ip) {
+				matched = true
+				indicator = "ip:" + ip
+			}
+		}
+	case types.EventDNS:
+		if e.DNS != nil && ce.iocMatcher.MatchDNS(e.DNS.QName) {
+			matched = true
+			indicator = "dns:" + e.DNS.QName
+		}
+	}
+
+	if !matched {
+		return nil
+	}
+
+	seq := ce.alertSeq.Add(1)
+	alert := &types.Alert{
+		ID:        fmt.Sprintf("%s-%d-%d-%d", ruleID, e.Timestamp, e.PID, seq),
+		Timestamp: time.Unix(0, int64(e.Timestamp)),
+		RuleID:    ruleID,
+		RuleName:  "Gossip IOC Match",
+		Message:   "Event matched a cluster-wide IOC: " + indicator,
+		Severity:  types.SeverityCritical,
+		PID:       e.PID,
+		Comm:      util.BytesToString(e.Comm[:]),
+		Event:     e,
+	}
+	if e.TraceContext != nil {
+		alert.TraceID = e.TraceContext.TraceID
+	}
+	if e.Enrichment != nil {
+		alert.Enrichment = *e.Enrichment
+	}
+	return alert
 }
 
 // formatAnomalyDescription creates a human-readable description of an anomaly.

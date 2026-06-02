@@ -20,6 +20,10 @@ type LineagePattern struct {
 	ParentComms []string `yaml:"parent_comms"`
 	ChildComms  []string `yaml:"child_comms"`
 	Severity    string   `yaml:"severity"`
+	// Condition is reserved for future conditional evaluation (e.g. source IP
+	// verification). Currently parsed but not evaluated — patterns fire
+	// unconditionally regardless of this field's value.
+	Condition string `yaml:"condition,omitempty"`
 }
 
 // LineageConfig holds configuration for lineage tracking.
@@ -92,12 +96,23 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 		config.TTL = 5 * time.Minute
 	}
 
-	return &LineageTracker{
+	lt := &LineageTracker{
 		config:  config,
 		logger:  logger,
 		lineage: make(map[uint32]*parentInfo),
 		onMatch: func(m LineageMatch) {}, // no-op default
 	}
+
+	for _, p := range config.Patterns {
+		if p.Condition != "" {
+			logger.Warn("lineage: pattern has an unimplemented condition and will fire unconditionally",
+				slog.String("pattern", p.Name),
+				slog.String("condition", p.Condition),
+			)
+		}
+	}
+
+	return lt
 }
 
 // SetMatchHandler sets the callback for lineage pattern matches.
@@ -244,10 +259,20 @@ func (lt *LineageTracker) checkPattern(parentComm, childComm string) *LineagePat
 }
 
 // matchesAny checks if a string matches any pattern in the list.
+// Exact matches always succeed. Prefix matches succeed only when the
+// character immediately after the pattern is a hyphen or ASCII digit —
+// allowing nginx-worker and python3 to match their base names while
+// preventing false positives such as "node_exporter" matching "node".
 func matchesAny(s string, patterns []string) bool {
 	for _, p := range patterns {
-		if s == p || strings.HasPrefix(s, p) {
+		if s == p {
 			return true
+		}
+		if strings.HasPrefix(s, p) && len(s) > len(p) {
+			next := s[len(p)]
+			if next == '-' || (next >= '0' && next <= '9') {
+				return true
+			}
 		}
 	}
 	return false

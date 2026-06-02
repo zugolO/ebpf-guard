@@ -5,8 +5,10 @@ import (
 	"context"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // ProcessProfile tracks the behavioral baseline for a single process.
@@ -200,6 +202,12 @@ type ProfileManager struct {
 	weight   float64 // EWMA weight
 	ttl      time.Duration
 	maxPIDs  int // maximum number of tracked PIDs; 0 = unlimited
+
+	// Sprint 34.0 metrics
+	evictions      uint64 // atomic counter for LRU evictions
+	trackedGauge   prometheus.Gauge   // ebpf_guard_tracked_pids_total
+	evictionsTotal prometheus.Counter // ebpf_guard_profile_evictions_total
+	memBytesGauge  prometheus.Gauge   // ebpf_guard_profiler_memory_bytes
 }
 
 // NewProfileManager creates a new profile manager.
@@ -224,9 +232,64 @@ func NewProfileManagerWithContext(ctx context.Context, weight float64, ttl time.
 		weight:   weight,
 		ttl:      ttl,
 		maxPIDs:  maxPIDs,
+		trackedGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_tracked_pids_total",
+			Help: "Number of PIDs currently tracked by the profiler.",
+		}),
+		evictionsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_profile_evictions_total",
+			Help: "Total number of LRU profile evictions due to maxPIDs cap.",
+		}),
+		memBytesGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_profiler_memory_bytes",
+			Help: "Estimated memory used by in-memory process profiles.",
+		}),
 	}
 	go pm.cleanupLoop(ctx, ttl/4)
+	go pm.metricsLoop(ctx)
 	return pm
+}
+
+// RegisterMetrics registers the ProfileManager's Prometheus metrics.
+func (pm *ProfileManager) RegisterMetrics(reg prometheus.Registerer) error {
+	for _, c := range []prometheus.Collector{
+		pm.trackedGauge,
+		pm.evictionsTotal,
+		pm.memBytesGauge,
+	} {
+		if c == nil {
+			continue
+		}
+		if err := reg.Register(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// metricsLoop updates tracked-PIDs and memory gauges every 30 seconds.
+func (pm *ProfileManager) metricsLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pm.mu.RLock()
+			n := len(pm.profiles)
+			pm.mu.RUnlock()
+			if pm.trackedGauge != nil {
+				pm.trackedGauge.Set(float64(n))
+			}
+			if pm.memBytesGauge != nil {
+				// Each ProcessProfile holds several maps; use unsafe.Sizeof for the
+				// struct overhead and add a flat per-entry estimate for map buckets.
+				const perProfileEstimate = int(unsafe.Sizeof(ProcessProfile{})) + 512
+				pm.memBytesGauge.Set(float64(n * perProfileEstimate))
+			}
+		}
+	}
 }
 
 // cleanupLoop periodically removes expired profiles until ctx is cancelled.
@@ -283,6 +346,9 @@ func (pm *ProfileManager) evictLRULocked() {
 	}
 	if !first {
 		delete(pm.profiles, lruPID)
+		if pm.evictionsTotal != nil {
+			pm.evictionsTotal.Inc()
+		}
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // ErrInvalidEvent is returned when an event fails validation before enforcement.
@@ -122,6 +123,10 @@ type Enforcer struct {
 	lsmManager LSMBlocklistManager
 	// dryRun mode logs actions without enforcement
 	dryRun bool
+
+	// Sprint 34.0 metrics
+	actionsTotal    *prometheus.CounterVec // ebpf_guard_enforcement_actions_total{action}
+	auditDropped    prometheus.Counter     // ebpf_guard_audit_log_dropped_total
 }
 
 // ThrottleState tracks rate limiting state for a process.
@@ -164,6 +169,14 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 			ActionKill:     cfg.EnableKill,
 			ActionThrottle: cfg.EnableThrottle,
 		},
+		actionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ebpf_guard_enforcement_actions_total",
+			Help: "Total enforcement actions executed by action type.",
+		}, []string{"action"}),
+		auditDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_audit_log_dropped_total",
+			Help: "Total audit log entries dropped due to a full channel.",
+		}),
 	}
 
 	// Initialize block backend if blocking is enabled
@@ -179,6 +192,19 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 	}
 
 	return e, nil
+}
+
+// RegisterMetrics registers the Enforcer's Prometheus metrics with the given registerer.
+func (e *Enforcer) RegisterMetrics(reg prometheus.Registerer) error {
+	for _, c := range []prometheus.Collector{e.actionsTotal, e.auditDropped} {
+		if c == nil {
+			continue
+		}
+		if err := reg.Register(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Execute performs the specified enforcement action.
@@ -258,6 +284,9 @@ func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
 
 	entry.Success = true
 	e.logAudit(entry)
+	if e.actionsTotal != nil {
+		e.actionsTotal.WithLabelValues("block").Inc()
+	}
 	return nil
 }
 
@@ -289,52 +318,46 @@ func (e *Enforcer) executeLSMBlock(ctx context.Context, alert types.Alert) error
 		"dry_run", e.dryRun,
 	)
 
+	var execErr error
+
 	if e.dryRun {
 		entry.Success = true
 		entry.Description += " (dry run)"
-		e.logAudit(entry)
-		return nil
-	}
-
-	// Try LSM first, fallback to nftables
-	if e.lsmManager != nil && e.lsmManager.IsAvailable() {
+	} else if e.lsmManager != nil && e.lsmManager.IsAvailable() {
 		if err := e.lsmManager.AddToBlocklist(alert.Event.PID); err != nil {
-			e.logger.Warn("LSM block failed, falling back to nftables",
-				"error", err,
-				"pid", alert.Event.PID,
-			)
-			// Fall through to nftables fallback
-		} else {
-			e.logger.Info("PID added to LSM blocklist",
-				"pid", alert.Event.PID,
-			)
-			entry.Success = true
-			e.logAudit(entry)
-			return nil
+			e.logger.Warn("LSM block failed, falling back to nftables", "error", err, "pid", alert.Event.PID)
+			// fall through to nftables
+			goto nftablesFallback
 		}
+		e.logger.Info("PID added to LSM blocklist", "pid", alert.Event.PID)
+		entry.Success = true
+	} else {
+		goto nftablesFallback
 	}
+	goto done
 
-	// Fallback to nftables
+nftablesFallback:
 	if e.nftablesMgr != nil {
 		if err := e.nftablesMgr.BlockUID(ctx, alert.Event.UID); err != nil {
 			entry.Success = false
 			entry.Error = err.Error()
-			e.logAudit(entry)
-			return fmt.Errorf("enforcer/lsm_block: nftables fallback failed for UID %d: %w", alert.Event.UID, err)
+			execErr = fmt.Errorf("enforcer/lsm_block: nftables fallback failed for UID %d: %w", alert.Event.UID, err)
+		} else {
+			e.logger.Info("LSM unavailable, used nftables fallback", "uid", alert.Event.UID)
+			entry.Success = true
 		}
-		e.logger.Info("LSM unavailable, used nftables fallback",
-			"uid", alert.Event.UID,
-		)
-		entry.Success = true
-		e.logAudit(entry)
-		return nil
+	} else {
+		entry.Success = false
+		entry.Error = "no blocking backend available (LSM or nftables)"
+		execErr = fmt.Errorf("enforcer/lsm_block: no blocking backend available")
 	}
 
-	// No blocking backend available
-	entry.Success = false
-	entry.Error = "no blocking backend available (LSM or nftables)"
+done:
 	e.logAudit(entry)
-	return fmt.Errorf("enforcer/lsm_block: no blocking backend available")
+	if entry.Success && e.actionsTotal != nil {
+		e.actionsTotal.WithLabelValues("lsm_block").Inc()
+	}
+	return execErr
 }
 
 // executeKill sends SIGKILL to the offending process.
@@ -390,6 +413,9 @@ func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
 
 	entry.Success = true
 	e.logAudit(entry)
+	if e.actionsTotal != nil {
+		e.actionsTotal.WithLabelValues("kill").Inc()
+	}
 	return nil
 }
 
@@ -446,6 +472,9 @@ func (e *Enforcer) executeThrottle(ctx context.Context, alert types.Alert) error
 
 	entry.Success = true
 	e.logAudit(entry)
+	if e.actionsTotal != nil {
+		e.actionsTotal.WithLabelValues("throttle").Inc()
+	}
 	return nil
 }
 
@@ -535,6 +564,9 @@ func (e *Enforcer) logAudit(entry AuditEntry) {
 				"action", entry.Action,
 				"pid", entry.PID,
 			)
+			if e.auditDropped != nil {
+				e.auditDropped.Inc()
+			}
 		}
 	}
 }

@@ -54,6 +54,9 @@ type Watchdog struct {
 	alertFunc         func(types.Alert)
 	mu                sync.RWMutex
 	running           bool
+
+	// Sprint 34.0 metrics
+	reattachTotal prometheus.Counter // ebpf_guard_bpf_program_reattach_total
 }
 
 // Config holds watchdog configuration.
@@ -90,7 +93,19 @@ func New(logger *slog.Logger, cfg Config) *Watchdog {
 		heartbeatInterval: cfg.HeartbeatInterval,
 		checkInterval:     cfg.CheckInterval,
 		alertFunc:         cfg.AlertFunc,
+		reattachTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_bpf_program_reattach_total",
+			Help: "Total number of successful BPF program reattachments after detach.",
+		}),
 	}
+}
+
+// RegisterMetrics registers the Watchdog's Prometheus metrics with the given registerer.
+func (w *Watchdog) RegisterMetrics(reg prometheus.Registerer) error {
+	if w.reattachTotal == nil {
+		return nil
+	}
+	return reg.Register(w.reattachTotal)
 }
 
 // RegisterChecker adds a BPF program checker to the watchdog.
@@ -260,6 +275,9 @@ func (w *Watchdog) checkProgram(checker BPFProgramChecker) {
 			slog.String("program", name),
 		)
 		BPFProgramsLoaded.WithLabelValues(name).Set(1)
+		if w.reattachTotal != nil {
+			w.reattachTotal.Inc()
+		}
 	}
 }
 

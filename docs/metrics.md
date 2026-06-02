@@ -512,6 +512,177 @@ ebpf_guard_ratelimiter_states_total
 
 ---
 
+### Sprint 34.0 Metrics (Observability & Operational Excellence)
+
+#### `ebpf_guard_event_queue_depth`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Current event channel fill level as a fraction [0, 1]. Values near 1.0 indicate back-pressure. |
+
+**Example:**
+```promql
+# Alert when queue is more than 80% full
+ebpf_guard_event_queue_depth > 0.8
+```
+
+---
+
+#### `ebpf_guard_correlation_latency_seconds`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Histogram |
+| **Labels** | None |
+| **Description** | Latency of a single event through the correlation engine (rule evaluation + anomaly scoring). |
+
+**Buckets:** 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0
+
+**Example:**
+```promql
+# 99th percentile correlation latency
+histogram_quantile(0.99, rate(ebpf_guard_correlation_latency_seconds_bucket[5m]))
+```
+
+---
+
+#### `ebpf_guard_active_rules_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Number of detection rules currently loaded in the rule engine. Drops to new count on hot-reload. |
+
+---
+
+#### `ebpf_guard_tracked_pids_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Number of PIDs currently tracked by the profiler. Updated every 30 seconds. |
+
+**Example:**
+```promql
+# Alert when approaching maxPIDs cap (default 65536)
+ebpf_guard_tracked_pids_total > 58982
+```
+
+---
+
+#### `ebpf_guard_profile_evictions_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | None |
+| **Description** | Total number of LRU profile evictions triggered when the `maxPIDs` cap is reached. |
+
+---
+
+#### `ebpf_guard_profiler_memory_bytes`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Estimated memory used by in-memory process profiles (struct overhead + map bucket estimate). |
+
+---
+
+#### `ebpf_guard_enforcement_actions_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | `action` (block\|kill\|throttle\|lsm_block) |
+| **Description** | Total enforcement actions executed by action type. Only incremented on success. |
+
+**Example:**
+```promql
+# Kill rate over last 5 minutes
+rate(ebpf_guard_enforcement_actions_total{action="kill"}[5m])
+```
+
+---
+
+#### `ebpf_guard_audit_log_dropped_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | None |
+| **Description** | Total audit log entries dropped because the audit channel was full. Any non-zero value indicates the consumer is too slow. |
+
+**Alert Example:**
+```yaml
+groups:
+  - name: ebpf-guard
+    rules:
+      - alert: EbpfGuardAuditLogDropped
+        expr: increase(ebpf_guard_audit_log_dropped_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit log entries are being dropped"
+          description: "Enforcement audit entries are being lost — audit channel consumer may be stuck"
+```
+
+---
+
+#### `ebpf_guard_store_alerts_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | None |
+| **Description** | Total number of alerts successfully persisted to the alert store backend. |
+
+---
+
+#### `ebpf_guard_store_latency_seconds`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Histogram |
+| **Labels** | None |
+| **Description** | Latency of alert store write operations (single `Store` or `StoreBatch` call). |
+
+**Buckets:** 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0
+
+---
+
+#### `ebpf_guard_memory_pressure_ratio`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | None |
+| **Description** | Ratio of available memory to total memory (0.0–1.0). Lower values indicate higher memory pressure. Updated every 5 seconds. |
+
+**Example:**
+```promql
+# Available memory below 15%
+ebpf_guard_memory_pressure_ratio < 0.15
+```
+
+---
+
+#### `ebpf_guard_bpf_program_reattach_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | None |
+| **Description** | Total number of successful BPF program reattachments after the watchdog detected a detach event. |
+
+---
+
 ### Alert Rules (built-in PrometheusRule)
 
 The Helm chart ships `deploy/helm/ebpf-guard/templates/prometheusrule.yaml` with the following pre-configured alerts:
@@ -522,6 +693,9 @@ The Helm chart ships `deploy/helm/ebpf-guard/templates/prometheusrule.yaml` with
 | `EbpfGuardMemoryPressure` | `ebpf_guard_memory_pressure_mode{mode="low"} == 1` | warning | Agent downgraded due to memory pressure |
 | `CryptominerDetected` | `increase(ebpf_guard_alerts_total{rule_id=~"cryptominer.*"}[5m]) > 0` | critical | Cryptominer activity detected |
 | `EbpfGuardEventDropHigh` | `rate(ebpf_guard_events_dropped_total[1m]) > 100` | warning | High event drop rate — consider increasing ring buffer or reducing load |
+| `EbpfGuardQueueDepthHigh` | `ebpf_guard_event_queue_depth > 0.8` | warning | Event queue above 80% — correlation engine may be falling behind |
+| `EbpfGuardAuditLogDropped` | `increase(ebpf_guard_audit_log_dropped_total[5m]) > 0` | critical | Audit log entries dropped — enforcement audit trail incomplete |
+| `EbpfGuardTrackedPIDsHigh` | `ebpf_guard_tracked_pids_total > 58982` | warning | Tracked PIDs above 90% of default cap (65536) — LRU evictions imminent |
 
 ---
 

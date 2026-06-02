@@ -51,6 +51,7 @@ deploy/helm/*/*.lock
 
 # ── AI-assisted development meta-files ────────────────────────────────────────
 AGENTS.md
+CLAUDE.md
 TASK.md
 KIMI_SYSTEM_PROMT.md
 ANALYZE_PROJECT.md

@@ -51,6 +51,7 @@ type MemoryPressureWatcher struct {
 
 	// Metrics
 	pressureGauge *prometheus.GaugeVec
+	pressureRatio prometheus.Gauge // ebpf_guard_memory_pressure_ratio
 }
 
 // MemoryConfig holds configuration for memory pressure handling.
@@ -99,12 +100,21 @@ func NewMemoryPressureWatcher(
 			Name: "ebpf_guard_memory_pressure_mode",
 			Help: "Current memory pressure mode (1 = low memory, 0 = normal)",
 		}, []string{"mode"}),
+		pressureRatio: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_memory_pressure_ratio",
+			Help: "Ratio of available memory to total memory (0.0–1.0). Lower is more constrained.",
+		}),
 	}
 }
 
 // RegisterMetrics registers Prometheus metrics.
 func (w *MemoryPressureWatcher) RegisterMetrics(reg prometheus.Registerer) error {
-	return reg.Register(w.pressureGauge)
+	for _, c := range []prometheus.Collector{w.pressureGauge, w.pressureRatio} {
+		if err := reg.Register(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Start begins monitoring memory pressure.
@@ -144,6 +154,7 @@ func (w *MemoryPressureWatcher) checkMemory() {
 	}
 
 	availablePercent := (float64(memAvailable) / float64(memTotal)) * 100
+	w.pressureRatio.Set(float64(memAvailable) / float64(memTotal))
 
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // AlertStore defines the interface for alert persistence backends.
@@ -134,6 +135,81 @@ func New(cfg Config) (AlertStore, error) {
 		return nil, fmt.Errorf("unknown store backend: %s", cfg.Backend)
 	}
 }
+
+// InstrumentedStore wraps an AlertStore with Prometheus metrics.
+type InstrumentedStore struct {
+	inner        AlertStore
+	alertsTotal  prometheus.Counter   // ebpf_guard_store_alerts_total
+	latency      prometheus.Histogram // ebpf_guard_store_latency_seconds
+}
+
+// NewInstrumentedStore wraps an AlertStore with Sprint 34.0 metrics.
+func NewInstrumentedStore(inner AlertStore) *InstrumentedStore {
+	return &InstrumentedStore{
+		inner: inner,
+		alertsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_store_alerts_total",
+			Help: "Total number of alerts persisted to the store.",
+		}),
+		latency: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "ebpf_guard_store_latency_seconds",
+			Help:    "Latency of alert store write operations.",
+			Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0},
+		}),
+	}
+}
+
+// RegisterMetrics registers the store metrics with the given Prometheus registerer.
+func (s *InstrumentedStore) RegisterMetrics(reg prometheus.Registerer) error {
+	for _, c := range []prometheus.Collector{s.alertsTotal, s.latency} {
+		if err := reg.Register(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Store persists a single alert and records metrics.
+func (s *InstrumentedStore) Store(ctx context.Context, alert types.Alert) error {
+	start := time.Now()
+	err := s.inner.Store(ctx, alert)
+	s.latency.Observe(time.Since(start).Seconds())
+	if err == nil {
+		s.alertsTotal.Add(1)
+	}
+	return err
+}
+
+// StoreBatch persists multiple alerts and records metrics.
+func (s *InstrumentedStore) StoreBatch(ctx context.Context, alerts []types.Alert) error {
+	start := time.Now()
+	err := s.inner.StoreBatch(ctx, alerts)
+	s.latency.Observe(time.Since(start).Seconds())
+	if err == nil {
+		s.alertsTotal.Add(float64(len(alerts)))
+	}
+	return err
+}
+
+func (s *InstrumentedStore) Query(ctx context.Context, filters QueryFilters) ([]types.Alert, error) {
+	return s.inner.Query(ctx, filters)
+}
+
+func (s *InstrumentedStore) QueryByID(ctx context.Context, alertID string) (*types.Alert, error) {
+	return s.inner.QueryByID(ctx, alertID)
+}
+
+func (s *InstrumentedStore) Count(ctx context.Context, filters QueryFilters) (int64, error) {
+	return s.inner.Count(ctx, filters)
+}
+
+func (s *InstrumentedStore) Delete(ctx context.Context, olderThan time.Duration) (int64, error) {
+	return s.inner.Delete(ctx, olderThan)
+}
+
+func (s *InstrumentedStore) Close() error { return s.inner.Close() }
+
+func (s *InstrumentedStore) Healthy(ctx context.Context) bool { return s.inner.Healthy(ctx) }
 
 // NewProfileStore creates a new ProfileStore based on the configuration.
 func NewProfileStore(cfg Config) (ProfileStore, error) {

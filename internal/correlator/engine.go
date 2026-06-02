@@ -41,9 +41,9 @@ type CorrelationEngine struct {
 	enableAnomaly   bool
 
 	// Rate limiting
-	rateLimiter       *RateLimiter
-	rlStatesGauge     prometheus.Gauge // ebpf_guard_ratelimiter_states_total
-	cancelCleanup     context.CancelFunc
+	rateLimiter   *RateLimiter
+	rlStatesGauge prometheus.Gauge // ebpf_guard_ratelimiter_states_total
+	cancelCleanup context.CancelFunc
 
 	// Global token-bucket rate limit — caps total alerts/sec across all rules.
 	globalLimiter        *rate.Limiter
@@ -68,6 +68,11 @@ type CorrelationEngine struct {
 	processedEvents atomic.Uint64
 	alertsGenerated atomic.Uint64
 	alertsDropped   atomic.Uint64
+
+	// Sprint 34.0 Prometheus metrics
+	queueDepthGauge    prometheus.Gauge     // ebpf_guard_event_queue_depth
+	latencyHistogram   prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
+	activeRulesGauge   prometheus.Gauge     // ebpf_guard_active_rules_total
 
 	// Metrics callback
 	onCorrelate MetricsCallback
@@ -145,6 +150,22 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		ConstLabels: prometheus.Labels{"reason": "global_rate_limit"},
 	})
 
+	queueDepthGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_event_queue_depth",
+		Help: "Current event channel fill level as a fraction [0,1].",
+	})
+
+	latencyHistogram := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ebpf_guard_correlation_latency_seconds",
+		Help:    "Latency of a single event through the correlation engine.",
+		Buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0},
+	})
+
+	activeRulesGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_active_rules_total",
+		Help: "Number of detection rules currently loaded in the rule engine.",
+	})
+
 	maxRPS := config.MaxAlertsPerSecond
 	if maxRPS <= 0 {
 		maxRPS = 10000
@@ -167,7 +188,13 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		globalLimiter:        globalLimiter,
 		globalLimiterEnabled: globalLimiterEnabled,
 		alertsDroppedGlobal:  alertsDroppedGlobal,
+		queueDepthGauge:      queueDepthGauge,
+		latencyHistogram:     latencyHistogram,
+		activeRulesGauge:     activeRulesGauge,
 	}
+
+	// Seed active rules gauge
+	activeRulesGauge.Set(float64(len(config.Rules)))
 
 	// Initialize anomaly detector if enabled
 	if config.EnableAnomaly {
@@ -184,7 +211,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	return ce
 }
 
-// updateRLGaugeLoop refreshes the ratelimiter states gauge every 30 seconds.
+// updateRLGaugeLoop refreshes the ratelimiter states gauge and queue depth gauge every 30 seconds.
 func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -194,6 +221,7 @@ func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			ce.rlStatesGauge.Set(float64(ce.rateLimiter.StateCount()))
+			ce.queueDepthGauge.Set(ce.QueueDepth())
 		}
 	}
 }
@@ -227,10 +255,18 @@ func (ce *CorrelationEngine) QueueDepth() float64 {
 
 // RegisterMetrics registers the engine's Prometheus metrics with the given registerer.
 func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
-	if err := reg.Register(ce.rlStatesGauge); err != nil {
-		return err
+	for _, c := range []prometheus.Collector{
+		ce.rlStatesGauge,
+		ce.alertsDroppedGlobal,
+		ce.queueDepthGauge,
+		ce.latencyHistogram,
+		ce.activeRulesGauge,
+	} {
+		if err := reg.Register(c); err != nil {
+			return err
+		}
 	}
-	return reg.Register(ce.alertsDroppedGlobal)
+	return nil
 }
 
 // Ingest processes a single event and may produce alerts.
@@ -249,6 +285,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// Record duration metric
 	defer func() {
 		duration := time.Since(start).Seconds()
+		ce.latencyHistogram.Observe(duration)
 		if ce.onCorrelate != nil {
 			ce.onCorrelate(duration)
 		}
@@ -476,6 +513,7 @@ type EngineStats struct {
 // UpdateRules updates the rule engine with new rules.
 func (ce *CorrelationEngine) UpdateRules(rules []Rule) {
 	ce.ruleEngine = NewRuleEngine(rules)
+	ce.activeRulesGauge.Set(float64(len(rules)))
 }
 
 // GetRules returns the currently loaded rules.

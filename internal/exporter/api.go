@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/correlator"
-	"github.com/ebpf-guard/ebpf-guard/internal/store"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/store"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // RegisterAPIRoutes registers REST API routes on the given mux.

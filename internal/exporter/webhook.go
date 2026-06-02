@@ -12,7 +12,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // validateHeaders checks that all header names are valid RFC 7230 tokens and

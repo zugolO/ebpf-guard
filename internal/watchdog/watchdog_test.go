@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // mockChecker is a mock BPF program checker for testing.

@@ -22,7 +22,7 @@ This guide covers deploying ebpf-guard to Kubernetes clusters.
 
 2. Install the chart:
    ```bash
-   helm install ebpf-guard ebpf-guard/ebpf-guard \
+   helm install ebpf-guard zugolO/ebpf-guard \
      --namespace ebpf-guard \
      --create-namespace
    ```

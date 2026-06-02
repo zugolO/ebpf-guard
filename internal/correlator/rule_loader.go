@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"gopkg.in/yaml.v3"
 )
 

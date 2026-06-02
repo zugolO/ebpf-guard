@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/correlator"
-	"github.com/ebpf-guard/ebpf-guard/internal/store"
+	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 

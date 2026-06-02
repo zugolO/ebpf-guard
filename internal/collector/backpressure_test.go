@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // TestSendEvent_Drop verifies that StrategyDrop calls the dropped callback

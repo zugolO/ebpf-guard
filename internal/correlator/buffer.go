@@ -4,7 +4,7 @@ package correlator
 import (
 	"sync"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // EventBuffer stores events per process for correlation analysis.

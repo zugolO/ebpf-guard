@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )

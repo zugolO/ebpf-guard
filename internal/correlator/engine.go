@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/policy"
-	"github.com/ebpf-guard/ebpf-guard/internal/profiler"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/policy"
+	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -19,7 +19,7 @@ import (
 )
 
 // tracer is the OpenTelemetry tracer for the correlator package.
-var tracer = otel.Tracer("github.com/ebpf-guard/ebpf-guard/internal/correlator")
+var tracer = otel.Tracer("github.com/zugolO/ebpf-guard/internal/correlator")
 
 // Engine defines the interface for event correlation engines.
 type Engine interface {

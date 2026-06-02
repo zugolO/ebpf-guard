@@ -21,7 +21,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: ebpf-guard
-          image: ebpf-guard/ebpf-guard:0.1.0
+          image: zugolO/ebpf-guard:0.1.0
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true

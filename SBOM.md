@@ -28,14 +28,14 @@ Every release includes SBOMs as attached artifacts:
 ```bash
 # Download SBOM for a specific release
 curl -L -o ebpf-guard.spdx.json \
-  https://github.com/ebpf-guard/ebpf-guard/releases/download/v0.1.0/ebpf-guard-linux-amd64.spdx.json
+  https://github.com/zugolO/ebpf-guard/releases/download/v0.1.0/ebpf-guard-linux-amd64.spdx.json
 ```
 
 ### GitHub Actions Artifacts
 
 SBOMs are generated on every push to main and available as workflow artifacts:
 
-1. Go to [Actions → SBOM workflow](https://github.com/ebpf-guard/ebpf-guard/actions/workflows/sbom.yml)
+1. Go to [Actions → SBOM workflow](https://github.com/zugolO/ebpf-guard/actions/workflows/sbom.yml)
 2. Select the latest run
 3. Download the `sbom` artifact
 
@@ -114,5 +114,5 @@ snyk monitor --file=go.mod
 
 For questions about SBOMs or supply chain security, please:
 
-1. Open an issue in the [GitHub repository](https://github.com/ebpf-guard/ebpf-guard/issues)
+1. Open an issue in the [GitHub repository](https://github.com/zugolO/ebpf-guard/issues)
 2. Contact the maintainers (see [MAINTAINERS.md](MAINTAINERS.md))

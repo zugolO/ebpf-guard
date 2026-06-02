@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/util"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/util"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 )
 

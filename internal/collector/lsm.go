@@ -19,8 +19,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/ebpf-guard/ebpf-guard/internal/bpf"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

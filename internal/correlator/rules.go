@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/util"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/util"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // RuleConditionOperator defines the comparison operation for a rule condition.

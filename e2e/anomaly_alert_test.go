@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/config"
-	"github.com/ebpf-guard/ebpf-guard/internal/correlator"
-	"github.com/ebpf-guard/ebpf-guard/internal/exporter"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/config"
+	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

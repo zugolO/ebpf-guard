@@ -1,7 +1,7 @@
 # ebpf-guard
 
-[![CI](https://github.com/ebpf-guard/ebpf-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/ebpf-guard/ebpf-guard/actions/workflows/ci.yml)
-[![Release](https://github.com/ebpf-guard/ebpf-guard/actions/workflows/release.yml/badge.svg)](https://github.com/ebpf-guard/ebpf-guard/releases)
+[![CI](https://github.com/zugolO/ebpf-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/zugolO/ebpf-guard/actions/workflows/ci.yml)
+[![Release](https://github.com/zugolO/ebpf-guard/actions/workflows/release.yml/badge.svg)](https://github.com/zugolO/ebpf-guard/releases)
 [![Go Version](https://img.shields.io/badge/go-1.23-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev/spec/v1.0/levels)
@@ -161,7 +161,7 @@ make test
 
 ```bash
 make docker
-# produces: ghcr.io/ebpf-guard/ebpf-guard:latest
+# produces: ghcr.io/zugolO/ebpf-guard:latest
 ```
 
 ### 3. Run locally (requires root and Linux)

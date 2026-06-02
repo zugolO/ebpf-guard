@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

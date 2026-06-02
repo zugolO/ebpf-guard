@@ -78,7 +78,7 @@ For security issues, email: **security@ebpf-guard.io**
 
 ### General Questions
 
-For general questions about maintainership, open a [GitHub Discussion](https://github.com/ebpf-guard/ebpf-guard/discussions).
+For general questions about maintainership, open a [GitHub Discussion](https://github.com/zugolO/ebpf-guard/discussions).
 
 ### Direct Contact
 

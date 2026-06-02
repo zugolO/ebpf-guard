@@ -27,6 +27,10 @@ type NFTablesManager struct {
 	blockedUIDs map[uint32]struct{}
 	// blockedIPs tracks blocked destination IPs
 	blockedIPs map[string]struct{}
+	// blockedCgroups tracks cgroup IDs for which a block was requested. Netlink
+	// rule application for cgroups is not yet wired, but the intent is recorded
+	// so it is observable via GetBlockedCgroups and metrics.
+	blockedCgroups map[uint64]struct{}
 	// mu protects the maps
 	mu sync.RWMutex
 	// dryRun mode logs actions without applying rules
@@ -49,10 +53,11 @@ func NewNFTablesManager(logger *slog.Logger, cfg NFTablesConfig) (*NFTablesManag
 	}
 
 	m := &NFTablesManager{
-		logger:      logger.With("component", "nftables"),
-		blockedUIDs: make(map[uint32]struct{}),
-		blockedIPs:  make(map[string]struct{}),
-		dryRun:      cfg.DryRun,
+		logger:         logger.With("component", "nftables"),
+		blockedUIDs:    make(map[uint32]struct{}),
+		blockedIPs:     make(map[string]struct{}),
+		blockedCgroups: make(map[uint64]struct{}),
+		dryRun:         cfg.DryRun,
 	}
 
 	if m.dryRun {
@@ -137,19 +142,18 @@ func (m *NFTablesManager) initialize() error {
 // Note: nftables doesn't have direct UID matching in socket expression.
 // We use meta skuid which requires kernel support.
 func (m *NFTablesManager) BlockUID(ctx context.Context, uid uint32) error {
-	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would block UID",
-			"uid", uid,
-		)
-		return nil
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Check if already blocked
 	if _, exists := m.blockedUIDs[uid]; exists {
 		return nil // Already blocked
+	}
+
+	if m.dryRun {
+		m.logger.Info("[DRY-RUN] Would block UID", "uid", uid)
+		m.blockedUIDs[uid] = struct{}{}
+		return nil
 	}
 
 	// Add rule: drop output traffic from this UID using meta expression
@@ -191,19 +195,18 @@ func (m *NFTablesManager) BlockUID(ctx context.Context, uid uint32) error {
 
 // UnblockUID removes the block rule for a specific UID.
 func (m *NFTablesManager) UnblockUID(ctx context.Context, uid uint32) error {
-	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would unblock UID",
-			"uid", uid,
-		)
-		return nil
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Check if blocked
 	if _, exists := m.blockedUIDs[uid]; !exists {
 		return nil // Not blocked
+	}
+
+	if m.dryRun {
+		m.logger.Info("[DRY-RUN] Would unblock UID", "uid", uid)
+		delete(m.blockedUIDs, uid)
+		return nil
 	}
 
 	// Find and delete the rule
@@ -237,47 +240,52 @@ func (m *NFTablesManager) UnblockUID(ctx context.Context, uid uint32) error {
 // Note: This is a placeholder as cgroup matching requires kernel support
 // that may not be available in all environments.
 func (m *NFTablesManager) BlockCgroup(ctx context.Context, cgroupID uint64) error {
-	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would block cgroup",
-			"cgroup_id", cgroupID,
-		)
-		return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.blockedCgroups[cgroupID]; exists {
+		return nil // Already blocked
 	}
 
-	// Cgroup matching via nftables requires specific kernel support.
-	// For now, we log the request and return without error.
-	// In production, this could use socket cgroupv2 matching if available.
-	m.logger.Info("Cgroup blocking requested (not implemented)",
-		"cgroup_id", cgroupID,
-	)
+	// Cgroup matching via nftables requires specific kernel support and is not
+	// yet wired to a netlink rule. We record the intent so it is observable via
+	// GetBlockedCgroups; rule application can be added later (cgroupv2 socket
+	// matching) without changing this contract.
+	if m.dryRun {
+		m.logger.Info("[DRY-RUN] Would block cgroup", "cgroup_id", cgroupID)
+	} else {
+		m.logger.Info("Cgroup blocking requested (rule application not implemented)", "cgroup_id", cgroupID)
+	}
+	m.blockedCgroups[cgroupID] = struct{}{}
 
 	return nil
 }
 
 // UnblockCgroup removes the block rule for a specific cgroup.
 func (m *NFTablesManager) UnblockCgroup(ctx context.Context, cgroupID uint64) error {
-	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would unblock cgroup",
-			"cgroup_id", cgroupID,
-		)
-		return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.blockedCgroups[cgroupID]; !exists {
+		return nil // Not blocked
 	}
 
-	// Cgroup blocking is not implemented, nothing to do
-	m.logger.Info("Cgroup unblocking requested (not implemented)",
-		"cgroup_id", cgroupID,
-	)
+	if m.dryRun {
+		m.logger.Info("[DRY-RUN] Would unblock cgroup", "cgroup_id", cgroupID)
+	} else {
+		m.logger.Info("Cgroup unblocking requested (rule application not implemented)", "cgroup_id", cgroupID)
+	}
+	delete(m.blockedCgroups, cgroupID)
 
 	return nil
 }
 
 // BlockIP adds a rule to block outbound traffic to a specific IP address.
 func (m *NFTablesManager) BlockIP(ctx context.Context, ip string) error {
-	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would block IP",
-			"ip", ip,
-		)
-		return nil
+	// Validate first so invalid input is rejected consistently in both modes.
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP address: %s", ip)
 	}
 
 	m.mu.Lock()
@@ -287,9 +295,10 @@ func (m *NFTablesManager) BlockIP(ctx context.Context, ip string) error {
 		return nil
 	}
 
-	parsedIP := net.ParseIP(ip)
-	if parsedIP == nil {
-		return fmt.Errorf("invalid IP address: %s", ip)
+	if m.dryRun {
+		m.logger.Info("[DRY-RUN] Would block IP", "ip", ip)
+		m.blockedIPs[ip] = struct{}{}
+		return nil
 	}
 
 	var data []byte
@@ -345,17 +354,16 @@ func (m *NFTablesManager) BlockIP(ctx context.Context, ip string) error {
 
 // UnblockIP removes the block rule for a specific IP.
 func (m *NFTablesManager) UnblockIP(ctx context.Context, ip string) error {
-	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would unblock IP",
-			"ip", ip,
-		)
-		return nil
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if _, exists := m.blockedIPs[ip]; !exists {
+		return nil
+	}
+
+	if m.dryRun {
+		m.logger.Info("[DRY-RUN] Would unblock IP", "ip", ip)
+		delete(m.blockedIPs, ip)
 		return nil
 	}
 
@@ -402,11 +410,16 @@ func (m *NFTablesManager) GetBlockedUIDs() []uint32 {
 	return uids
 }
 
-// GetBlockedCgroups returns a list of currently blocked cgroups.
-// Note: Always returns empty as cgroup blocking is not implemented.
+// GetBlockedCgroups returns a list of cgroup IDs for which a block was requested.
 func (m *NFTablesManager) GetBlockedCgroups() []uint64 {
-	// Cgroup blocking is not implemented
-	return []uint64{}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	cgroups := make([]uint64, 0, len(m.blockedCgroups))
+	for cg := range m.blockedCgroups {
+		cgroups = append(cgroups, cg)
+	}
+	return cgroups
 }
 
 // GetBlockedIPs returns a list of currently blocked IPs.
@@ -423,13 +436,17 @@ func (m *NFTablesManager) GetBlockedIPs() []string {
 
 // Cleanup removes all rules added by this manager.
 func (m *NFTablesManager) Cleanup() error {
-	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would cleanup all nftables rules")
-		return nil
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.dryRun {
+		m.logger.Info("[DRY-RUN] Would cleanup all nftables rules")
+		// Still clear the recorded intent so state is consistent with prod.
+		m.blockedUIDs = make(map[uint32]struct{})
+		m.blockedIPs = make(map[string]struct{})
+		m.blockedCgroups = make(map[uint64]struct{})
+		return nil
+	}
 
 	if m.conn == nil {
 		return nil
@@ -446,6 +463,7 @@ func (m *NFTablesManager) Cleanup() error {
 	// Clear tracking maps
 	m.blockedUIDs = make(map[uint32]struct{})
 	m.blockedIPs = make(map[string]struct{})
+	m.blockedCgroups = make(map[uint64]struct{})
 
 	m.logger.Info("Cleaned up all nftables rules")
 

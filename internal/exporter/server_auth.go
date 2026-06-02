@@ -8,8 +8,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 )
+
+// tokenPreview returns a short, non-sensitive prefix of a token suitable for
+// correlating log lines without disclosing the secret. Tokens are 64 hex chars,
+// so an 8-char prefix is not enough to brute-force.
+func tokenPreview(token string) string {
+	if len(token) <= 8 {
+		return "********"
+	}
+	return token[:8] + "…"
+}
 
 // AuthConfig holds authentication configuration.
 type AuthConfig struct {
@@ -44,9 +55,16 @@ func SetupAuth(authCfg AuthConfig, logger *slog.Logger) (string, bool) {
 			logger.Error("auth: failed to generate random token, disabling auth", slog.Any("error", err))
 			return "", false
 		}
-		logger.Warn("auth: no bearer token configured, generated random token",
-			slog.String("token", token),
-			slog.String("note", "use this token for Prometheus scraping and API access"))
+		// Do NOT put the secret in the structured logger — that stream is
+		// typically shipped to a SIEM / log aggregator and persisted. Log only a
+		// short, non-sensitive preview for correlation, and print the full token
+		// once to stderr so the operator can copy it on first start.
+		logger.Warn("auth: no bearer token configured, generated a random one",
+			slog.String("token_preview", tokenPreview(token)),
+			slog.String("note", "full token printed once to stderr; set alerting/auth token in config to suppress"))
+		fmt.Fprintf(os.Stderr,
+			"\n=== ebpf-guard: generated bearer token (shown once) ===\n%s\nUse this token for Prometheus scraping and API access. Configure it explicitly to stop auto-generation.\n\n",
+			token)
 	} else {
 		logger.Info("auth: bearer token configured from config file")
 	}

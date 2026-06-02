@@ -89,7 +89,7 @@ func NewMemoryPressureWatcher(
 		config.RecoveryThreshold = 20.0
 	}
 
-	return &MemoryPressureWatcher{
+	w := &MemoryPressureWatcher{
 		logger:             logger,
 		profilers:          profilers,
 		bpfController:      bpfController,
@@ -105,6 +105,14 @@ func NewMemoryPressureWatcher(
 			Help: "Ratio of available memory to total memory (0.0–1.0). Lower is more constrained.",
 		}),
 	}
+
+	// Initialize the mode gauge to the default (normal) state so the metric is
+	// present in /metrics from startup rather than only after the first mode
+	// transition. The watcher starts in normal mode.
+	w.pressureGauge.WithLabelValues("normal").Set(1)
+	w.pressureGauge.WithLabelValues("low").Set(0)
+
+	return w
 }
 
 // RegisterMetrics registers Prometheus metrics.

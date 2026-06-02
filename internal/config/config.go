@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -590,6 +591,14 @@ func (m *Manager) Watch() error {
 		var newConfig Config
 		if err := m.viper.Unmarshal(&newConfig); err != nil {
 			slog.Warn("config: hot-reload rejected, keeping previous config", slog.Any("error", err))
+			return
+		}
+
+		// viper.WatchConfig commonly fires OnConfigChange more than once for a
+		// single write (WRITE+CHMOD, atomic-rename saves, etc.). Skip callbacks
+		// when the effective config is unchanged so consumers don't see spurious
+		// duplicate reloads.
+		if m.config != nil && reflect.DeepEqual(m.config, &newConfig) {
 			return
 		}
 

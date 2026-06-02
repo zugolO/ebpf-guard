@@ -40,7 +40,7 @@ This project adheres to the [CNCF Code of Conduct](CODE_OF_CONDUCT.md). By parti
 
 3. **Add upstream remote**:
    ```bash
-   git remote add upstream https://github.com/ebpf-guard/ebpf-guard.git
+   git remote add upstream https://github.com/zugolO/ebpf-guard.git
    ```
 
 4. **Install dependencies**:
@@ -347,7 +347,7 @@ See [SECURITY.md](SECURITY.md) for our security policy.
 ## Questions?
 
 - Join our [Discord](https://discord.gg/ebpf-guard) (coming soon)
-- Open a [GitHub Discussion](https://github.com/ebpf-guard/ebpf-guard/discussions)
+- Open a [GitHub Discussion](https://github.com/zugolO/ebpf-guard/discussions)
 - Contact maintainers (see [MAINTAINERS.md](MAINTAINERS.md))
 
 ## Recognition

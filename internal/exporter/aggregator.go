@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // AlertAggregator batches similar alerts to reduce noise.

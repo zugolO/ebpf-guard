@@ -64,7 +64,7 @@ metadata:
   name: ebpf-guard-dashboard
   namespace: monitoring
 spec:
-  url: https://raw.githubusercontent.com/ebpf-guard/ebpf-guard/main/deploy/grafana/ebpf-guard-dashboard.json
+  url: https://raw.githubusercontent.com/zugolO/ebpf-guard/main/deploy/grafana/ebpf-guard-dashboard.json
   datasources:
     - inputName: "DS_PROMETHEUS"
       datasourceName: "Prometheus"

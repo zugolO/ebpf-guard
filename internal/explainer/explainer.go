@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
@@ -286,13 +287,21 @@ func (e *Explainer) findTemplate(ruleID string) *TemplateDefinition {
 		return tmpl
 	}
 
-	// Try category prefix match (e.g., "lineage_" -> lineage templates)
+	// Try category prefix match (e.g., "lineage_" -> lineage templates).
+	// Iterate template IDs in sorted order so the fallback choice is
+	// deterministic when several templates share a category prefix (map
+	// iteration order would otherwise be random).
 	parts := strings.Split(ruleID, "_")
 	if len(parts) > 0 {
 		category := parts[0]
-		for id, tmpl := range e.templates {
+		ids := make([]string, 0, len(e.templates))
+		for id := range e.templates {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
 			if strings.HasPrefix(id, category) {
-				return tmpl
+				return e.templates[id]
 			}
 		}
 	}

@@ -58,5 +58,5 @@ Collecting detailed process and network telemetry for debugging and performance 
 
 For questions about the adopters program, please:
 
-- Open a [GitHub Discussion](https://github.com/ebpf-guard/ebpf-guard/discussions)
+- Open a [GitHub Discussion](https://github.com/zugolO/ebpf-guard/discussions)
 - Email: adopters@ebpf-guard.io

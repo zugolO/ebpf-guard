@@ -326,7 +326,7 @@ We use [Developer Certificate of Origin (DCO)](https://developercertificate.org/
 ## Appendix: CNCF Sandbox Requirements Checklist
 
 - [x] **Open source**: Apache 2.0 license
-- [x] **GitHub repo**: https://github.com/ebpf-guard/ebpf-guard
+- [x] **GitHub repo**: https://github.com/zugolO/ebpf-guard
 - [x] **Documentation**: README, docs/, CONTRIBUTING.md
 - [x] **Governance**: GOVERNANCE.md, MAINTAINERS.md, CODE_OF_CONDUCT.md
 - [x] **Security**: SECURITY.md, vulnerability disclosure process
@@ -340,5 +340,5 @@ We use [Developer Certificate of Origin (DCO)](https://developercertificate.org/
 
 For questions about this document or the CNCF application:
 
-- Open an issue: https://github.com/ebpf-guard/ebpf-guard/issues
+- Open an issue: https://github.com/zugolO/ebpf-guard/issues
 - Email: cncf@ebpf-guard.io

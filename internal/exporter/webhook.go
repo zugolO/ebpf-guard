@@ -12,7 +12,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // validateHeaders checks that all header names are valid RFC 7230 tokens and
@@ -112,6 +112,12 @@ func NewGenericWebhookNotifier(cfg WebhookConfig, logger *slog.Logger) *GenericW
 // When falcoOutput is true the payload uses the Falco JSON schema regardless of any custom template.
 // Returns an error if any custom header name or value is invalid (RFC 7230 / header-injection check).
 func NewGenericWebhookNotifierWithCompat(cfg WebhookConfig, logger *slog.Logger, falcoOutput bool) *GenericWebhookNotifier {
+	// Guard against a nil logger: callers may not wire one, and the
+	// invalid-headers path below logs, which would otherwise nil-panic.
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	if !cfg.Enabled || cfg.URL == "" {
 		return &GenericWebhookNotifier{config: cfg, logger: logger}
 	}

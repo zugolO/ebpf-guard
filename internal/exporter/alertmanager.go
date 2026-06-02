@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
-var tracer = otel.Tracer("github.com/ebpf-guard/ebpf-guard/internal/exporter")
+var tracer = otel.Tracer("github.com/zugolO/ebpf-guard/internal/exporter")
 
 // MTLSConfig holds mTLS configuration for Alertmanager.
 type MTLSConfig struct {

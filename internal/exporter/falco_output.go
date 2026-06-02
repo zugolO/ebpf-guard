@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // FalcoAlert is the Falco-compatible JSON alert format.

@@ -9,7 +9,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // ErrNoCGO is returned when SQLite is requested but CGO is disabled.

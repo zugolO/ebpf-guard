@@ -9,9 +9,9 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-	"github.com/ebpf-guard/ebpf-guard/internal/bpf"
-	"github.com/ebpf-guard/ebpf-guard/internal/exporter"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // FileaccessCollector collects file access events using eBPF kprobes.

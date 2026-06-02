@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -134,7 +134,7 @@ func (p *Profiler) Ingest(e types.Event) []*Anomaly {
 	if dist, isAnomaly := p.sequence.Update(e); isAnomaly {
 		anomalies = append(anomalies, &Anomaly{
 			PID:   e.PID,
-			Comm:  string(e.Comm[:]),
+			Comm:  cleanComm(e.Comm[:]),
 			Score: dist,
 			Contributions: map[string]interface{}{
 				"sequence_distance": dist,

@@ -48,6 +48,14 @@ func (m *mockControllableProfiler) IsEnabled() bool {
 }
 
 func (m *mockControllableProfiler) SetSamplingRate(rate float64) {
+	// Mirror the real ControllableProfiler contract, which clamps to [0,1]
+	// (see profiler.AnomalyDetector / SequenceProfiler.SetSamplingRate).
+	if rate < 0.0 {
+		rate = 0.0
+	}
+	if rate > 1.0 {
+		rate = 1.0
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.samplingRate = rate
@@ -114,11 +122,13 @@ func TestMemoryPressureWatcher_RegisterMetrics(t *testing.T) {
 	err := watcher.RegisterMetrics(reg)
 	require.NoError(t, err)
 
-	// Verify metrics are registered
+	// Verify both metrics are registered. Gather() returns families sorted by
+	// name, so "mode" precedes "ratio".
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	require.Len(t, families, 1)
+	require.Len(t, families, 2)
 	assert.Equal(t, "ebpf_guard_memory_pressure_mode", *families[0].Name)
+	assert.Equal(t, "ebpf_guard_memory_pressure_ratio", *families[1].Name)
 }
 
 func TestMemoryPressureWatcher_LowMemoryMode(t *testing.T) {

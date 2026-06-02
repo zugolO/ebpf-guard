@@ -4,7 +4,7 @@ package util
 import (
 	"net"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // BytesToString converts a byte slice to a string, stopping at the first null byte.

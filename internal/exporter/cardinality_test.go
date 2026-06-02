@@ -145,9 +145,13 @@ func TestCleanupHeapIntegrity(t *testing.T) {
 		heap.Push(&guard.heap, entry)
 	}
 
-	// Remove half the entries via cleanup
-	removed := guard.Cleanup(30 * time.Minute)
-	assert.Equal(t, 69, removed, "expected 69 stale entries (30+ minutes old, indices 31-99)")
+	// Remove stale entries. Use a half-minute offset so no entry sits exactly
+	// on the boundary: Cleanup captures its own time.Now() a few microseconds
+	// after the entries were stamped, which would otherwise flip the exactly-30m
+	// entry (index 30) across the threshold non-deterministically.
+	// With maxAge=30m30s, indices 31..99 (31m..99m old) are removed = 69.
+	removed := guard.Cleanup(30*time.Minute + 30*time.Second)
+	assert.Equal(t, 69, removed, "expected 69 stale entries (older than 30m30s, indices 31-99)")
 
 	// Verify heap property is maintained
 	// The lowest score should be at index 0

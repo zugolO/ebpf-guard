@@ -1,4 +1,4 @@
-module github.com/ebpf-guard/ebpf-guard
+module github.com/zugolO/ebpf-guard
 
 go 1.25.0
 

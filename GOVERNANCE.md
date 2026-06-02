@@ -125,7 +125,7 @@ We follow [Semantic Versioning](https://semver.org/):
 ## Roadmap
 
 The project roadmap is maintained in:
-- [GitHub Milestones](https://github.com/ebpf-guard/ebpf-guard/milestones)
+- [GitHub Milestones](https://github.com/zugolO/ebpf-guard/milestones)
 - [Task.md](Task.md) - Detailed sprint planning
 
 ### Roadmap Ownership

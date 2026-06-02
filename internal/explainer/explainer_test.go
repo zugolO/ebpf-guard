@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -252,9 +252,11 @@ func TestFindTemplate(t *testing.T) {
 		expectedTmpl string
 	}{
 		{"lineage_web_shell", "lineage_web_shell"}, // Direct match
-		{"lineage_unknown", "lineage_web_shell"},   // Category prefix match
-		{"file_sensitive", "file_sensitive"},       // Direct match
-		{"unknown_rule", ""},                       // No match
+		// Category prefix fallback: deterministically returns the
+		// lexicographically-first matching "lineage" template.
+		{"lineage_unknown", "lineage_shell_net"},
+		{"file_sensitive", "file_sensitive"}, // Direct match
+		{"unknown_rule", ""},                 // No match
 	}
 
 	for _, tt := range tests {

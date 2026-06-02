@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/util"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
+	"github.com/zugolO/ebpf-guard/internal/util"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // RuleConditionOperator defines the comparison operation for a rule condition.
@@ -241,7 +241,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Severity:  rule.Severity,
 			Message:   rule.Description,
 			PID:       e.PID,
-			Comm:      string(e.Comm[:]),
+			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 		}
 		alerts = append(alerts, alert)

@@ -8,10 +8,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ebpf-guard/ebpf-guard/internal/policy"
-	"github.com/ebpf-guard/ebpf-guard/internal/profiler"
-	"github.com/ebpf-guard/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/zugolO/ebpf-guard/internal/policy"
+	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/internal/util"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -19,7 +20,7 @@ import (
 )
 
 // tracer is the OpenTelemetry tracer for the correlator package.
-var tracer = otel.Tracer("github.com/ebpf-guard/ebpf-guard/internal/correlator")
+var tracer = otel.Tracer("github.com/zugolO/ebpf-guard/internal/correlator")
 
 // Engine defines the interface for event correlation engines.
 type Engine interface {
@@ -70,9 +71,9 @@ type CorrelationEngine struct {
 	alertsDropped   atomic.Uint64
 
 	// Sprint 34.0 Prometheus metrics
-	queueDepthGauge    prometheus.Gauge     // ebpf_guard_event_queue_depth
-	latencyHistogram   prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
-	activeRulesGauge   prometheus.Gauge     // ebpf_guard_active_rules_total
+	queueDepthGauge  prometheus.Gauge     // ebpf_guard_event_queue_depth
+	latencyHistogram prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
+	activeRulesGauge prometheus.Gauge     // ebpf_guard_active_rules_total
 
 	// Metrics callback
 	onCorrelate MetricsCallback
@@ -94,6 +95,10 @@ type CorrelationEngineConfig struct {
 	AnomalyThreshold float64
 	LearningPeriod   time.Duration
 	EWMAWeight       float64
+	// MinLearningSamples is the minimum number of events that must be observed
+	// before the learning phase can complete (in addition to LearningPeriod
+	// elapsing). Zero falls back to the detector default (100).
+	MinLearningSamples uint64
 
 	// Rate limiting configuration
 	EnableRateLimit    bool
@@ -222,11 +227,12 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 
 	// Initialize anomaly detector if enabled
 	if config.EnableAnomaly {
-		ce.anomalyDetector = profiler.NewAnomalyDetectorWithContext(
+		ce.anomalyDetector = profiler.NewAnomalyDetectorWithSamples(
 			ctx,
 			config.AnomalyThreshold,
 			config.LearningPeriod,
 			config.EWMAWeight,
+			config.MinLearningSamples,
 		)
 	}
 
@@ -349,6 +355,11 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 			alert.TraceID = e.TraceContext.TraceID
 		}
 
+		// Carry Kubernetes enrichment from the event onto the alert.
+		if e.Enrichment != nil {
+			alert.Enrichment = *e.Enrichment
+		}
+
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
 	}
@@ -365,13 +376,18 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				Message:   formatAnomalyDescription(result),
 				Severity:  types.SeverityWarning,
 				PID:       e.PID,
-				Comm:      string(e.Comm[:]),
+				Comm:      util.BytesToString(e.Comm[:]),
 				Event:     e,
 			}
 
 			// Add trace context from event if present
 			if e.TraceContext != nil {
 				anomalyAlert.TraceID = e.TraceContext.TraceID
+			}
+
+			// Carry Kubernetes enrichment from the event onto the alert.
+			if e.Enrichment != nil {
+				anomalyAlert.Enrichment = *e.Enrichment
 			}
 
 			// Check per-rule and global rate limiting for anomaly alerts

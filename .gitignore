@@ -71,3 +71,6 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# Cygwin/Windows crash dumps
+*.stackdump

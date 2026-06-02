@@ -63,6 +63,9 @@ type Config struct {
 
 	// Compat configuration (Sprint 24.0)
 	Compat CompatConfig `mapstructure:"compat"`
+
+	// Gossip configuration — cross-node IOC sharing.
+	Gossip GossipConfig `mapstructure:"gossip"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -358,6 +361,24 @@ type PolicyConfig struct {
 	Rego RegoPolicyConfig `mapstructure:"rego"`
 }
 
+// GossipConfig holds cross-node IOC sharing settings.
+type GossipConfig struct {
+	// Enabled enables the gossip sub-system.
+	Enabled bool `mapstructure:"enabled"`
+	// Secret is the shared authentication token sent in X-Gossip-Secret.
+	// If empty, gossip requests are accepted without authentication.
+	Secret string `mapstructure:"secret"`
+	// Peers is the list of peer base URLs to push IOCs to.
+	// Example: ["http://10.0.0.2:9090", "http://10.0.0.3:9090"]
+	Peers []string `mapstructure:"peers"`
+	// IOCTTLSeconds is how long a published IOC remains valid (seconds). Default: 3600.
+	IOCTTLSeconds int `mapstructure:"ioc_ttl"`
+	// MaxIOCs caps the in-memory IOC store. Default: 100000.
+	MaxIOCs int `mapstructure:"max_iocs"`
+	// PushIntervalSeconds controls how often the delta is sent to peers. Default: 30.
+	PushIntervalSeconds int `mapstructure:"push_interval"`
+}
+
 // CompatConfig holds migration compatibility settings (Sprint 24.0).
 type CompatConfig struct {
 	// FalcoOutput enables Falco-compatible JSON format for webhook/notifier output.
@@ -570,6 +591,14 @@ func setDefaults(v *viper.Viper) {
 	// Compat defaults (Sprint 24.0)
 	v.SetDefault("compat.falco_output", false)
 	v.SetDefault("compat.metric_aliases", []string{})
+
+	// Gossip defaults — disabled by default; operators opt in per node.
+	v.SetDefault("gossip.enabled", false)
+	v.SetDefault("gossip.secret", "")
+	v.SetDefault("gossip.peers", []string{})
+	v.SetDefault("gossip.ioc_ttl", 3600)
+	v.SetDefault("gossip.max_iocs", 100_000)
+	v.SetDefault("gossip.push_interval", 30)
 }
 
 // Get returns the current configuration (thread-safe).

@@ -4,6 +4,7 @@ package correlator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,23 @@ type Engine interface {
 	Ingest(ctx context.Context, e types.Event) []types.Alert
 	// Flush returns and resets pending state (for testing).
 	Flush() []types.Alert
+}
+
+// IOCMatcher allows the correlation engine to check events against cluster-wide
+// IOC intelligence provided by the gossip sub-system.
+// Implemented by gossip.Manager; decoupled here to avoid an import cycle.
+type IOCMatcher interface {
+	MatchIP(ip string) bool
+	MatchDNS(domain string) bool
+	MatchFingerprint(fp string) bool
+}
+
+// ActionExecutor triggers active enforcement when a rule specifies a
+// non-alert action (kill, block, throttle).
+// Implemented by *enforcer.Enforcer; decoupled to avoid an import cycle.
+type ActionExecutor interface {
+	ExecuteAction(ctx context.Context, action string, alert types.Alert) error
+	IsDryRun() bool
 }
 
 // CorrelationEngine correlates events and applies detection rules.
@@ -77,6 +95,15 @@ type CorrelationEngine struct {
 
 	// Metrics callback
 	onCorrelate MetricsCallback
+
+	// IOC matcher (gossip integration — optional)
+	iocMatcher IOCMatcher
+
+	// Rule-based enforcement (optional)
+	actionExecutor     ActionExecutor
+	enforceCooldown    time.Duration
+	cooldowns          sync.Map // key="ruleID:PID", value=time.Time
+	enforcedCounter    prometheus.Counter
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -119,6 +146,20 @@ type CorrelationEngineConfig struct {
 
 	// Metrics callback (optional)
 	OnCorrelate MetricsCallback
+
+	// IOCMatcher integrates gossip-based cluster-wide IOC intelligence.
+	// When set, events are checked against known IOCs and produce alerts.
+	// Optional — nil disables this check entirely.
+	IOCMatcher IOCMatcher
+
+	// ActionExecutor is the enforcement backend (optional).
+	// When set, rules with action: kill|block|throttle call ExecuteAction
+	// asynchronously while the alert is still emitted for auditing.
+	ActionExecutor ActionExecutor
+
+	// EnforcementCooldown is the minimum interval between enforcement
+	// executions for the same (rule, PID) pair. Zero → 5 seconds.
+	EnforcementCooldown time.Duration
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -184,6 +225,16 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	globalLimiterEnabled := true
 	globalLimiter = rate.NewLimiter(rate.Limit(maxRPS), maxRPS)
 
+	enforceCooldown := config.EnforcementCooldown
+	if enforceCooldown <= 0 {
+		enforceCooldown = 5 * time.Second
+	}
+
+	enforcedCounter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ebpf_guard_enforcement_triggered_total",
+		Help: "Number of rule-based enforcement actions triggered by the correlation engine.",
+	})
+
 	ce := &CorrelationEngine{
 		buffer:               NewShardedEventBuffer(config.BufferSize),
 		pending:              make([]types.Alert, 0),
@@ -194,6 +245,10 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		enableRegoEval:       config.EnableRegoEval,
 		regoEngine:           config.RegoEngine,
 		onCorrelate:          config.OnCorrelate,
+		iocMatcher:           config.IOCMatcher,
+		actionExecutor:       config.ActionExecutor,
+		enforceCooldown:      enforceCooldown,
+		enforcedCounter:      enforcedCounter,
 		globalLimiter:        globalLimiter,
 		globalLimiterEnabled: globalLimiterEnabled,
 		alertsDroppedGlobal:  alertsDroppedGlobal,
@@ -360,8 +415,41 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 			alert.Enrichment = *e.Enrichment
 		}
 
+		// Rule-based enforcement: kill / block / throttle.
+		// The alert is always emitted for auditing; enforcement runs async.
+		if ce.actionExecutor != nil && isEnforcedAction(alert.Action) {
+			if ce.tryAcquireEnforceCooldown(alert.RuleID, alert.PID) {
+				alert.Enforced = true
+				ce.enforcedCounter.Inc()
+				a := alert // capture
+				go func() {
+					if err := ce.actionExecutor.ExecuteAction(ctx, a.Action, a); err != nil {
+						slog.Warn("correlator: rule enforcement failed",
+							slog.String("rule_id", a.RuleID),
+							slog.String("action", a.Action),
+							slog.Uint64("pid", uint64(a.PID)),
+							slog.Any("err", err),
+						)
+					}
+				}()
+			}
+		}
+
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
+	}
+
+	// Gossip IOC matching — check event against cluster-wide indicators.
+	if ce.iocMatcher != nil {
+		if iocAlert := ce.checkIOCMatch(e); iocAlert != nil {
+			if ce.rateLimiter.Allow(iocAlert.RuleID) &&
+				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
+				alerts = append(alerts, *iocAlert)
+				ce.alertsGenerated.Add(1)
+			} else {
+				ce.alertsDropped.Add(1)
+			}
+		}
 	}
 
 	// Anomaly detection (if enabled and learning complete)
@@ -571,6 +659,75 @@ func (ce *CorrelationEngine) ReloadRules(rules []Rule) {
 func (ce *CorrelationEngine) UpdateRateLimiter(window time.Duration, maxAlerts int, enabled bool) {
 	ce.rateLimiter.UpdateConfig(window, maxAlerts)
 	ce.rateLimiter.SetEnabled(enabled)
+}
+
+// isEnforcedAction returns true when the action demands active enforcement
+// (i.e. something beyond generating an alert).
+func isEnforcedAction(action string) bool {
+	return action == "block" || action == "kill" || action == "throttle"
+}
+
+// tryAcquireEnforceCooldown returns true if enforcement should proceed for
+// the (ruleID, pid) pair. Successive calls within enforceCooldown return false
+// to prevent enforcement spam when the same process keeps triggering a rule.
+func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32) bool {
+	key := fmt.Sprintf("%s:%d", ruleID, pid)
+	now := time.Now()
+	if prev, loaded := ce.cooldowns.Load(key); loaded {
+		if prevTime, ok := prev.(time.Time); ok && now.Sub(prevTime) < ce.enforceCooldown {
+			return false
+		}
+	}
+	ce.cooldowns.Store(key, now)
+	return true
+}
+
+// checkIOCMatch checks e against the gossip IOC store and returns an alert when matched.
+func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
+	const ruleID = "gossip_ioc_match"
+
+	var matched bool
+	var indicator string
+
+	switch e.Type {
+	case types.EventTCPConnect:
+		if e.Network != nil {
+			ip := util.FormatIP16(e.Network.Daddr, e.Network.Family)
+			if ce.iocMatcher.MatchIP(ip) {
+				matched = true
+				indicator = "ip:" + ip
+			}
+		}
+	case types.EventDNS:
+		if e.DNS != nil && ce.iocMatcher.MatchDNS(e.DNS.QName) {
+			matched = true
+			indicator = "dns:" + e.DNS.QName
+		}
+	}
+
+	if !matched {
+		return nil
+	}
+
+	seq := ce.alertSeq.Add(1)
+	alert := &types.Alert{
+		ID:        fmt.Sprintf("%s-%d-%d-%d", ruleID, e.Timestamp, e.PID, seq),
+		Timestamp: time.Unix(0, int64(e.Timestamp)),
+		RuleID:    ruleID,
+		RuleName:  "Gossip IOC Match",
+		Message:   "Event matched a cluster-wide IOC: " + indicator,
+		Severity:  types.SeverityCritical,
+		PID:       e.PID,
+		Comm:      util.BytesToString(e.Comm[:]),
+		Event:     e,
+	}
+	if e.TraceContext != nil {
+		alert.TraceID = e.TraceContext.TraceID
+	}
+	if e.Enrichment != nil {
+		alert.Enrichment = *e.Enrichment
+	}
+	return alert
 }
 
 // formatAnomalyDescription creates a human-readable description of an anomaly.

@@ -243,6 +243,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			PID:       e.PID,
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
+			Action:    string(rule.Action),
 		}
 		alerts = append(alerts, alert)
 	}

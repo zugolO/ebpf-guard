@@ -95,7 +95,8 @@ func TestCosineDistance(t *testing.T) {
 			name: "partial overlap",
 			a:    FrequencyVector{1: 0.7, 2: 0.3},
 			b:    FrequencyVector{1: 0.3, 2: 0.7},
-			want: 0.4, // approximate
+			// dot=0.42, |a|=|b|=sqrt(0.58); cos=0.42/0.58≈0.7241; distance≈0.2759
+			want: 0.2759,
 		},
 	}
 

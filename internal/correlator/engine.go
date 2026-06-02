@@ -355,6 +355,11 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 			alert.TraceID = e.TraceContext.TraceID
 		}
 
+		// Carry Kubernetes enrichment from the event onto the alert.
+		if e.Enrichment != nil {
+			alert.Enrichment = *e.Enrichment
+		}
+
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
 	}
@@ -378,6 +383,11 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 			// Add trace context from event if present
 			if e.TraceContext != nil {
 				anomalyAlert.TraceID = e.TraceContext.TraceID
+			}
+
+			// Carry Kubernetes enrichment from the event onto the alert.
+			if e.Enrichment != nil {
+				anomalyAlert.Enrichment = *e.Enrichment
 			}
 
 			// Check per-rule and global rate limiting for anomaly alerts

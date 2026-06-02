@@ -21,6 +21,10 @@ rules:
 profiler:
   enabled: true
   learning_period: 3600
+  # min_learning_samples: minimum events required before learning completes,
+  # in addition to learning_period elapsing. Prevents false positives when a
+  # node receives its first burst of traffic right before the timer fires.
+  min_learning_samples: 100
   anomaly_threshold: 0.8
   ewma_weight: 0.3
   profile_ttl: 86400

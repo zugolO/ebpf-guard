@@ -232,6 +232,12 @@ func (e *Enforcer) IsEnabled(action ActionType) bool {
 	return e.enabled[action]
 }
 
+// ExecuteAction satisfies correlator.ActionExecutor.
+// It converts the plain string action name to ActionType and delegates to Execute.
+func (e *Enforcer) ExecuteAction(ctx context.Context, action string, alert types.Alert) error {
+	return e.Execute(ctx, ActionType(action), alert)
+}
+
 // executeBlock blocks network packets matching the alert.
 // Uses nftables for actual blocking if configured, otherwise logs only.
 func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {

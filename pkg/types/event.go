@@ -173,6 +173,11 @@ type Alert struct {
 	Event      Event                  `json:"-"` // the triggering event (not serialized to store)
 	// Fingerprint is a SHA-256 hash for tamper detection (optional)
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// Action is the enforcement action declared by the matching rule
+	// (e.g. "kill", "block", "throttle"). Empty string means "alert only".
+	Action string `json:"action,omitempty"`
+	// Enforced is true when the rule action was executed by the enforcer.
+	Enforced bool `json:"enforced,omitempty"`
 }
 
 // TraceContext holds OpenTelemetry trace context for propagation.

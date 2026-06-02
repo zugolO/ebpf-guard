@@ -4,6 +4,7 @@ package correlator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,14 @@ type IOCMatcher interface {
 	MatchIP(ip string) bool
 	MatchDNS(domain string) bool
 	MatchFingerprint(fp string) bool
+}
+
+// ActionExecutor triggers active enforcement when a rule specifies a
+// non-alert action (kill, block, throttle).
+// Implemented by *enforcer.Enforcer; decoupled to avoid an import cycle.
+type ActionExecutor interface {
+	ExecuteAction(ctx context.Context, action string, alert types.Alert) error
+	IsDryRun() bool
 }
 
 // CorrelationEngine correlates events and applies detection rules.
@@ -89,6 +98,12 @@ type CorrelationEngine struct {
 
 	// IOC matcher (gossip integration — optional)
 	iocMatcher IOCMatcher
+
+	// Rule-based enforcement (optional)
+	actionExecutor     ActionExecutor
+	enforceCooldown    time.Duration
+	cooldowns          sync.Map // key="ruleID:PID", value=time.Time
+	enforcedCounter    prometheus.Counter
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -136,6 +151,15 @@ type CorrelationEngineConfig struct {
 	// When set, events are checked against known IOCs and produce alerts.
 	// Optional — nil disables this check entirely.
 	IOCMatcher IOCMatcher
+
+	// ActionExecutor is the enforcement backend (optional).
+	// When set, rules with action: kill|block|throttle call ExecuteAction
+	// asynchronously while the alert is still emitted for auditing.
+	ActionExecutor ActionExecutor
+
+	// EnforcementCooldown is the minimum interval between enforcement
+	// executions for the same (rule, PID) pair. Zero → 5 seconds.
+	EnforcementCooldown time.Duration
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -201,6 +225,16 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	globalLimiterEnabled := true
 	globalLimiter = rate.NewLimiter(rate.Limit(maxRPS), maxRPS)
 
+	enforceCooldown := config.EnforcementCooldown
+	if enforceCooldown <= 0 {
+		enforceCooldown = 5 * time.Second
+	}
+
+	enforcedCounter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ebpf_guard_enforcement_triggered_total",
+		Help: "Number of rule-based enforcement actions triggered by the correlation engine.",
+	})
+
 	ce := &CorrelationEngine{
 		buffer:               NewShardedEventBuffer(config.BufferSize),
 		pending:              make([]types.Alert, 0),
@@ -212,6 +246,9 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		regoEngine:           config.RegoEngine,
 		onCorrelate:          config.OnCorrelate,
 		iocMatcher:           config.IOCMatcher,
+		actionExecutor:       config.ActionExecutor,
+		enforceCooldown:      enforceCooldown,
+		enforcedCounter:      enforcedCounter,
 		globalLimiter:        globalLimiter,
 		globalLimiterEnabled: globalLimiterEnabled,
 		alertsDroppedGlobal:  alertsDroppedGlobal,
@@ -376,6 +413,26 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		// Carry Kubernetes enrichment from the event onto the alert.
 		if e.Enrichment != nil {
 			alert.Enrichment = *e.Enrichment
+		}
+
+		// Rule-based enforcement: kill / block / throttle.
+		// The alert is always emitted for auditing; enforcement runs async.
+		if ce.actionExecutor != nil && isEnforcedAction(alert.Action) {
+			if ce.tryAcquireEnforceCooldown(alert.RuleID, alert.PID) {
+				alert.Enforced = true
+				ce.enforcedCounter.Inc()
+				a := alert // capture
+				go func() {
+					if err := ce.actionExecutor.ExecuteAction(ctx, a.Action, a); err != nil {
+						slog.Warn("correlator: rule enforcement failed",
+							slog.String("rule_id", a.RuleID),
+							slog.String("action", a.Action),
+							slog.Uint64("pid", uint64(a.PID)),
+							slog.Any("err", err),
+						)
+					}
+				}()
+			}
 		}
 
 		alerts = append(alerts, alert)
@@ -602,6 +659,27 @@ func (ce *CorrelationEngine) ReloadRules(rules []Rule) {
 func (ce *CorrelationEngine) UpdateRateLimiter(window time.Duration, maxAlerts int, enabled bool) {
 	ce.rateLimiter.UpdateConfig(window, maxAlerts)
 	ce.rateLimiter.SetEnabled(enabled)
+}
+
+// isEnforcedAction returns true when the action demands active enforcement
+// (i.e. something beyond generating an alert).
+func isEnforcedAction(action string) bool {
+	return action == "block" || action == "kill" || action == "throttle"
+}
+
+// tryAcquireEnforceCooldown returns true if enforcement should proceed for
+// the (ruleID, pid) pair. Successive calls within enforceCooldown return false
+// to prevent enforcement spam when the same process keeps triggering a rule.
+func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32) bool {
+	key := fmt.Sprintf("%s:%d", ruleID, pid)
+	now := time.Now()
+	if prev, loaded := ce.cooldowns.Load(key); loaded {
+		if prevTime, ok := prev.(time.Time); ok && now.Sub(prevTime) < ce.enforceCooldown {
+			return false
+		}
+	}
+	ce.cooldowns.Store(key, now)
+	return true
 }
 
 // checkIOCMatch checks e against the gossip IOC store and returns an alert when matched.

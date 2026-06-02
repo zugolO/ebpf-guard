@@ -8,11 +8,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
-	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -71,9 +71,9 @@ type CorrelationEngine struct {
 	alertsDropped   atomic.Uint64
 
 	// Sprint 34.0 Prometheus metrics
-	queueDepthGauge    prometheus.Gauge     // ebpf_guard_event_queue_depth
-	latencyHistogram   prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
-	activeRulesGauge   prometheus.Gauge     // ebpf_guard_active_rules_total
+	queueDepthGauge  prometheus.Gauge     // ebpf_guard_event_queue_depth
+	latencyHistogram prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
+	activeRulesGauge prometheus.Gauge     // ebpf_guard_active_rules_total
 
 	// Metrics callback
 	onCorrelate MetricsCallback

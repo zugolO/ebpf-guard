@@ -390,7 +390,6 @@ func formatSyscall(nr int64) string {
 	return fmt.Sprintf("syscall_%d", nr)
 }
 
-
 // Enable activates the anomaly detector.
 func (ad *AnomalyDetector) Enable() {
 	ad.mu.Lock()

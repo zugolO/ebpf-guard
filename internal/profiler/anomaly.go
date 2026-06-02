@@ -60,11 +60,22 @@ type AnomalyContribution struct {
 // NewAnomalyDetectorWithContext creates a new anomaly detector whose background
 // cleanup goroutines (ProfileManager LRU eviction) exit when ctx is cancelled.
 func NewAnomalyDetectorWithContext(ctx context.Context, threshold float64, learningPeriod time.Duration, weight float64) *AnomalyDetector {
+	return NewAnomalyDetectorWithSamples(ctx, threshold, learningPeriod, weight, 100)
+}
+
+// NewAnomalyDetectorWithSamples is like NewAnomalyDetectorWithContext but allows
+// the minimum number of learning samples to be configured. Learning completes
+// only once both the learning period has elapsed and minSamples have been
+// observed. A minSamples of 0 falls back to the default of 100.
+func NewAnomalyDetectorWithSamples(ctx context.Context, threshold float64, learningPeriod time.Duration, weight float64, minSamples uint64) *AnomalyDetector {
+	if minSamples == 0 {
+		minSamples = 100
+	}
 	ad := &AnomalyDetector{
 		threshold:         threshold,
 		learningPeriod:    learningPeriod,
 		weight:            weight,
-		learner:           NewBaselineLearner(learningPeriod, 100),
+		learner:           NewBaselineLearner(learningPeriod, minSamples),
 		profileManager:    NewProfileManagerWithContext(ctx, weight, 24*time.Hour, 65536),
 		learningStartTime: time.Now(),
 		enabled:           true,
@@ -90,26 +101,27 @@ func (ad *AnomalyDetector) ProcessEvent(e types.Event) *AnomalyResult {
 		return nil
 	}
 
-	// Record the event in the profile
-	ad.profileManager.RecordEvent(e)
-
-	// During learning phase, just record samples
+	// During the learning phase, just fold the event into the baseline.
 	if !ad.IsLearningComplete() {
+		ad.profileManager.RecordEvent(e)
 		ad.learner.RecordSample()
 		return nil
 	}
 
-	// Get the profile for this process
+	// Score the event against the established baseline BEFORE recording it.
+	// Recording first would fold the current observation into the profile
+	// (e.g. add a never-before-seen destination port with EWMA value 1.0),
+	// making the event look normal when scored against itself and defeating
+	// the "new port / new behavior" detection.
 	profile := ad.profileManager.Get(e.PID)
-	if profile == nil {
-		return nil
+	var result *AnomalyResult
+	if profile != nil {
+		result = ad.calculateAnomalyScore(profile, e)
+		profile.SetAnomalyScore(result.Score)
 	}
 
-	// Calculate anomaly score
-	result := ad.calculateAnomalyScore(profile, e)
-
-	// Update profile's anomaly score
-	profile.SetAnomalyScore(result.Score)
+	// Now fold the event into the profile so the baseline keeps adapting.
+	ad.profileManager.RecordEvent(e)
 
 	return result
 }

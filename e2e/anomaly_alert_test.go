@@ -53,6 +53,7 @@ func TestAnomalyAlertReachesAlertmanager(t *testing.T) {
 		EnableAnomaly:      true,
 		AnomalyThreshold:   0.1, // Low threshold to trigger anomaly quickly
 		LearningPeriod:     100 * time.Millisecond,
+		MinLearningSamples: 5,
 		EWMAWeight:         0.3,
 		EnableRateLimit:    false,
 		RateLimitWindow:    time.Minute,
@@ -157,6 +158,7 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 		EnableAnomaly:      true,
 		AnomalyThreshold:   0.1,
 		LearningPeriod:     100 * time.Millisecond,
+		MinLearningSamples: 5,
 		EWMAWeight:         0.3,
 		EnableRateLimit:    false,
 		RateLimitWindow:    time.Minute,
@@ -176,7 +178,8 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 			UID:       1000,
 			Comm:      [16]byte{'a', 'p', 'p'},
 			File: &types.FileEvent{
-				Filename: [256]byte{'/', 'e', 't', 'c', '/', 'h', 'o', 's', 't', 's'},
+				// Baseline: app normally reads its own log directory.
+				Filename: [256]byte{'/', 'v', 'a', 'r', '/', 'l', 'o', 'g', '/', 'a', 'p', 'p', '.', 'l', 'o', 'g'},
 				Flags:    0,
 				Mode:     0644,
 				Op:       0,
@@ -245,6 +248,7 @@ func TestDryRunModeAnomalyDetection(t *testing.T) {
 		EnableAnomaly:      cfg.Profiler.Enabled,
 		AnomalyThreshold:   cfg.Profiler.AnomalyThreshold,
 		LearningPeriod:     100 * time.Millisecond,
+		MinLearningSamples: 5,
 		EWMAWeight:         cfg.Profiler.EWMAWeight,
 		EnableRateLimit:    false,
 		RateLimitWindow:    time.Minute,

@@ -95,6 +95,10 @@ type CorrelationEngineConfig struct {
 	AnomalyThreshold float64
 	LearningPeriod   time.Duration
 	EWMAWeight       float64
+	// MinLearningSamples is the minimum number of events that must be observed
+	// before the learning phase can complete (in addition to LearningPeriod
+	// elapsing). Zero falls back to the detector default (100).
+	MinLearningSamples uint64
 
 	// Rate limiting configuration
 	EnableRateLimit    bool
@@ -223,11 +227,12 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 
 	// Initialize anomaly detector if enabled
 	if config.EnableAnomaly {
-		ce.anomalyDetector = profiler.NewAnomalyDetectorWithContext(
+		ce.anomalyDetector = profiler.NewAnomalyDetectorWithSamples(
 			ctx,
 			config.AnomalyThreshold,
 			config.LearningPeriod,
 			config.EWMAWeight,
+			config.MinLearningSamples,
 		)
 	}
 

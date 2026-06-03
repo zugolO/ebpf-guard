@@ -85,6 +85,36 @@ store:
     password: ""              # or reference to Kubernetes Secret
     insecure_skip_verify: false  # Set to true for self-signed certs
 
+# Collectors configuration
+# Controls per-collector behaviour including TLS plaintext inspection and
+# OTel Trace Context extraction for APM ↔ security timeline correlation.
+collectors:
+  tls:
+    enabled: false              # Requires CAP_SYS_PTRACE; attach uprobes to libssl processes
+    scan_interval: 30s          # Interval to scan /proc for new libssl processes
+    max_data_size: 256          # Maximum bytes captured per SSL_write/SSL_read call
+  dns:
+    enabled: true
+    dga_threshold: 3.5          # Shannon entropy bits/char; above this → DGA suspicion
+    tunneling_min_length: 50    # Domain length above this → tunneling suspicion
+    high_frequency_threshold: 100  # DNS queries/min above this → alert
+  backpressure_strategy: drop   # drop | block | sample
+  otel_tracing:
+    # When enabled, ebpf-guard scans TLS plaintext headers for the W3C "traceparent"
+    # header and propagates the extracted trace_id/span_id to security alerts.
+    # This links APM spans (Jaeger, Tempo, Datadog APM) to security events, producing
+    # a single unified timeline across observability and security.
+    # Requires collectors.tls.enabled=true to have effect.
+    enabled: true
+    # OTLP gRPC endpoint to export security-linked OTel spans.
+    # Example: "otel-collector.monitoring.svc.cluster.local:4317"
+    # When empty, spans flow only into the process-wide OTel SDK provider (if configured).
+    exporter_endpoint: ""
+    # OTel service.name on exported security spans.
+    service_name: ebpf-guard
+    # Include trace_id and span_id fields in generated alerts (JSON, Alertmanager, store).
+    propagate_to_alerts: true
+
 # Gossip configuration
 # Cross-node IOC (Indicator of Compromise) sharing between ebpf-guard agents.
 # When enabled, each node broadcasts newly detected IOCs (IPs, domains, fingerprints)

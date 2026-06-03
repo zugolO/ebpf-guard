@@ -157,6 +157,34 @@ type CollectorsConfig struct {
 	//   block  — pause the collector goroutine until the channel drains (provides backpressure).
 	//   sample — probabilistically drop ~50% of overflow events.
 	BackpressureStrategy string `mapstructure:"backpressure_strategy"`
+	// OTelTracing configures W3C Trace Context extraction from TLS payloads and OTel span linking.
+	// Requires collectors.tls.enabled=true to have effect.
+	OTelTracing OTelTracingConfig `mapstructure:"otel_tracing"`
+}
+
+// OTelTracingConfig configures automatic W3C Trace Context extraction and OTel span
+// linking between APM traces and security events.
+//
+// When the TLS collector captures plaintext HTTP/gRPC traffic, ebpf-guard scans
+// the headers for the W3C "traceparent" header. If found, the trace ID and parent
+// span ID are attached to all security events and alerts generated for that request.
+// This links APM observability and runtime security into a single timeline.
+type OTelTracingConfig struct {
+	// Enabled activates traceparent header extraction from TLS plaintext payloads.
+	// Auto-enabled when collectors.tls.enabled=true; set to false to opt out.
+	// Default: true
+	Enabled bool `mapstructure:"enabled"`
+	// ExporterEndpoint is the OTLP gRPC endpoint for exporting security-linked spans.
+	// Example: "localhost:4317" or "otel-collector.monitoring.svc:4317"
+	// When empty, spans are emitted only into the global OTel provider (if configured).
+	// Default: ""
+	ExporterEndpoint string `mapstructure:"exporter_endpoint"`
+	// ServiceName is the OTel service.name attribute on exported security spans.
+	// Default: "ebpf-guard"
+	ServiceName string `mapstructure:"service_name"`
+	// PropagateToAlerts controls whether trace_id and span_id appear in generated alerts.
+	// Default: true
+	PropagateToAlerts bool `mapstructure:"propagate_to_alerts"`
 }
 
 // TLSCollectorConfig holds TLS inspection settings.

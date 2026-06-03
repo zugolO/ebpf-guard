@@ -180,6 +180,9 @@ type Alert struct {
 	Message    string                 `json:"message"`
 	Details    map[string]interface{} `json:"details,omitempty"`
 	TraceID    string                 `json:"trace_id,omitempty"`
+	// SpanID is the parent APM span ID extracted from the W3C traceparent header.
+	// Set when the alert was triggered for a request carrying OTel trace context.
+	SpanID     string                 `json:"span_id,omitempty"`
 	Enrichment EnrichmentInfo         `json:"enrichment,omitempty"`
 	Event      Event                  `json:"-"` // the triggering event (not serialized to store)
 	// ProcessTree holds the full ancestor chain for the triggering process.
@@ -196,9 +199,16 @@ type Alert struct {
 }
 
 // TraceContext holds OpenTelemetry trace context for propagation.
+// Fields follow W3C Trace Context spec (https://www.w3.org/TR/trace-context/).
 type TraceContext struct {
+	// TraceID is the 32-hex-char trace identifier from the traceparent header.
 	TraceID string
-	SpanID  string
+	// SpanID is the 16-hex-char parent span identifier from the traceparent header.
+	SpanID string
+	// TraceFlags is the 2-hex-char flags byte from the traceparent header (e.g. "01" = sampled).
+	TraceFlags string
+	// TraceState is the optional tracestate header value carrying vendor-specific trace metadata.
+	TraceState string
 }
 
 // AlertPayload is the JSON structure sent to Alertmanager.

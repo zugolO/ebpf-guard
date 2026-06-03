@@ -18,6 +18,7 @@
 #define EVENT_TYPE_NET_CLOSE   7  /* TCP connection closed with duration */
 #define EVENT_TYPE_KMOD_LOAD   8  /* Kernel module load (insmod/init_module) */
 #define EVENT_TYPE_CGROUP_ESC  9  /* Process migrated to different cgroup namespace */
+#define EVENT_TYPE_GPU        10  /* CUDA/GPU memory operation (DtoH/HtoD/alloc/free) */
 
 /* File operation codes - must match pkg/types/event.go */
 #define FILE_OP_OPEN  0

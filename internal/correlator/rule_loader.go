@@ -43,6 +43,14 @@ var (
 		"dport": true, "sport": true, "daddr": true, "saddr": true,
 		"family": true, "duration_sec": true, "duration_ms": true,
 	}
+	validGPUFields = map[string]bool{
+		"gpu_op":       true, // operation name: alloc, free, memcpy_htod, memcpy_dtoh, memcpy_dtod, kernel_launch
+		"gpu_size":     true, // bytes transferred or allocated
+		"gpu_dev_ptr":  true, // device memory address (hex string)
+		"gpu_host_ptr": true, // host memory address (hex string)
+		"comm":         true, // process name (allows filtering by process)
+		"uid":          true, // user ID (allows filtering non-root access)
+	}
 )
 
 // Ensure RuleConditionGroup has SubGroups field for recursive validation.
@@ -215,6 +223,8 @@ func validateFieldName(field string, eventType types.EventType) error {
 		validFields = validPrivescFields
 	case types.EventNetClose:
 		validFields = validNetCloseFields
+	case types.EventGPU:
+		validFields = validGPUFields
 	default:
 		return fmt.Errorf("unknown event type: %d", eventType)
 	}

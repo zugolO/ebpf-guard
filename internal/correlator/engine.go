@@ -125,6 +125,11 @@ type CorrelationEngine struct {
 	enforceCooldown    time.Duration
 	cooldowns          sync.Map // key="ruleID:PID", value=time.Time
 	enforcedCounter    prometheus.Counter
+
+	// scoreReporter is called after every anomaly score update so an external
+	// cardinality-guarded Prometheus gauge can be kept in sync without importing
+	// the exporter package (which would create a circular dependency).
+	scoreReporter func(pid, comm string, score float64)
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -194,6 +199,11 @@ type CorrelationEngineConfig struct {
 	// WasmEngine evaluates custom WASM detection plugins on every event.
 	// When nil, WASM plugin evaluation is skipped.
 	WasmEngine WasmEvaluator
+
+	// AnomalyScoreReporter is called after every anomaly ProcessEvent so an
+	// external cardinality-guarded metric (e.g. exporter.SetAnomalyScoreWithGuard)
+	// can track scores without creating a circular import.  Optional — nil disables.
+	AnomalyScoreReporter func(pid, comm string, score float64)
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -331,6 +341,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 			config.EWMAWeight,
 			config.MinLearningSamples,
 		)
+		ce.scoreReporter = config.AnomalyScoreReporter
 	}
 
 	// Update the gauge periodically so it reflects the live state count.
@@ -552,53 +563,61 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 
 	// Anomaly detection (if enabled and learning complete)
 	if ce.enableAnomaly && ce.anomalyDetector != nil {
-		if result := ce.anomalyDetector.ProcessEvent(e); result != nil && result.IsAnomaly {
-			// Build workload context for alert details.
-			details := map[string]interface{}{}
-			if result.Namespace != "" {
-				details["namespace"] = result.Namespace
-			}
-			if result.AppLabel != "" {
-				details["app_label"] = result.AppLabel
+		if result := ce.anomalyDetector.ProcessEvent(e); result != nil {
+			// Always report the score (even non-anomalous) so the cardinality-guarded
+			// Prometheus gauge tracks all active processes, not only anomaly triggers.
+			if ce.scoreReporter != nil {
+				ce.scoreReporter(fmt.Sprintf("%d", e.PID), util.BytesToString(e.Comm[:]), result.Score)
 			}
 
-			// Create anomaly alert
-			anomalyAlert := types.Alert{
-				ID:        fmt.Sprintf("anomaly-%d-%d-%d", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
-				Timestamp: time.Unix(0, int64(e.Timestamp)),
-				RuleID:    "anomaly_detection",
-				RuleName:  "Behavioral Anomaly Detected",
-				Message:   formatAnomalyDescription(result),
-				Severity:  types.SeverityWarning,
-				PID:       e.PID,
-				Comm:      util.BytesToString(e.Comm[:]),
-				Details:   details,
-				Event:     e,
-			}
+			if result.IsAnomaly {
+				// Build workload context for alert details.
+				details := map[string]interface{}{}
+				if result.Namespace != "" {
+					details["namespace"] = result.Namespace
+				}
+				if result.AppLabel != "" {
+					details["app_label"] = result.AppLabel
+				}
 
-			// Add trace context from event if present
-			if e.TraceContext != nil {
-				anomalyAlert.TraceID = e.TraceContext.TraceID
-			}
+				// Create anomaly alert
+				anomalyAlert := types.Alert{
+					ID:        fmt.Sprintf("anomaly-%d-%d-%d", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
+					Timestamp: time.Unix(0, int64(e.Timestamp)),
+					RuleID:    "anomaly_detection",
+					RuleName:  "Behavioral Anomaly Detected",
+					Message:   formatAnomalyDescription(result),
+					Severity:  types.SeverityWarning,
+					PID:       e.PID,
+					Comm:      util.BytesToString(e.Comm[:]),
+					Details:   details,
+					Event:     e,
+				}
 
-			// Carry Kubernetes enrichment from the event onto the alert.
-			if e.Enrichment != nil {
-				anomalyAlert.Enrichment = *e.Enrichment
-			}
+				// Add trace context from event if present
+				if e.TraceContext != nil {
+					anomalyAlert.TraceID = e.TraceContext.TraceID
+				}
 
-			// Attach full process tree for SOC triage.
-			anomalyAlert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+				// Carry Kubernetes enrichment from the event onto the alert.
+				if e.Enrichment != nil {
+					anomalyAlert.Enrichment = *e.Enrichment
+				}
 
-			// Check per-rule and global rate limiting for anomaly alerts
-			perRuleOK := ce.rateLimiter.Allow(anomalyAlert.RuleID)
-			globalOK := !ce.globalLimiterEnabled || ce.globalLimiter.Allow()
-			if perRuleOK && globalOK {
-				alerts = append(alerts, anomalyAlert)
-				ce.alertsGenerated.Add(1)
-			} else {
-				ce.alertsDropped.Add(1)
-				if !globalOK {
-					ce.alertsDroppedGlobal.Add(1)
+				// Attach full process tree for SOC triage.
+				anomalyAlert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+
+				// Check per-rule and global rate limiting for anomaly alerts
+				perRuleOK := ce.rateLimiter.Allow(anomalyAlert.RuleID)
+				globalOK := !ce.globalLimiterEnabled || ce.globalLimiter.Allow()
+				if perRuleOK && globalOK {
+					alerts = append(alerts, anomalyAlert)
+					ce.alertsGenerated.Add(1)
+				} else {
+					ce.alertsDropped.Add(1)
+					if !globalOK {
+						ce.alertsDroppedGlobal.Add(1)
+					}
 				}
 			}
 		}

@@ -153,10 +153,14 @@ func (s *Server) RegisterGossipRoutes(h http.Handler) {
 }
 
 // Start starts the HTTP server in a goroutine.
+// It also launches the anomaly score cardinality cleanup goroutine so stale
+// per-PID Prometheus label sets are removed before they cause OOM.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	s.ready = true
 	s.mu.Unlock()
+
+	go StartAnomalyScoreCleanup(ctx, AnomalyScoreEvictionInterval, 30*time.Minute)
 	
 	errCh := make(chan error, 1)
 	

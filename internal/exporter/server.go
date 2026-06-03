@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/explainer"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -54,6 +55,9 @@ type Server struct {
 
 	// feedbackManager handles false-positive feedback from analysts (optional).
 	feedbackManager *feedback.Manager
+
+	// alertExplainer generates human-readable explanations for alerts (optional).
+	alertExplainer *explainer.Explainer
 }
 
 // NewServer creates a new HTTP server for metrics and health.
@@ -233,6 +237,48 @@ func (s *Server) SetFeedbackManager(fm *feedback.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.feedbackManager = fm
+}
+
+// SetExplainer wires an Explainer so GET /api/v1/alerts/{id}/explain is served.
+// Must be called before Start.
+func (s *Server) SetExplainer(e *explainer.Explainer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alertExplainer = e
+}
+
+// SetupExplainer creates an Explainer from templatesDir and wires it to the server.
+// If templatesDir is empty or missing, the explainer falls back to built-in templates.
+// Call before Start to enable GET /api/v1/alerts/{id}/explain.
+func (s *Server) SetupExplainer(templatesDir string) error {
+	var exp *explainer.Explainer
+	var err error
+	if templatesDir == "" {
+		exp, err = explainer.NewWithDefaults()
+	} else {
+		exp, err = explainer.New(templatesDir)
+	}
+	if err != nil {
+		return fmt.Errorf("exporter: create explainer: %w", err)
+	}
+	s.SetExplainer(exp)
+	s.logger.Info("exporter/server: alert explainer configured",
+		slog.String("templates_dir", templatesDir))
+	return nil
+}
+
+// SetupFeedbackManager creates a feedback.Manager, loads any previously persisted
+// suppressions from exportPath (empty = in-memory only), and wires it to the server.
+// Call before Start to enable the feedback REST endpoints instead of returning 501.
+func (s *Server) SetupFeedbackManager(exportPath string) error {
+	fm := feedback.NewManager(exportPath, s.logger)
+	if err := fm.LoadFromFile(); err != nil {
+		return fmt.Errorf("exporter: load feedback records: %w", err)
+	}
+	s.SetFeedbackManager(fm)
+	s.logger.Info("exporter/server: feedback manager configured",
+		slog.String("export_path", exportPath))
+	return nil
 }
 
 // GetCollectorStatuses returns a copy of all collector statuses.

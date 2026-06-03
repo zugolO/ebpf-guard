@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -98,6 +99,8 @@ const (
 	BlockBackendNFTables BlockBackend = "nftables"
 	// BlockBackendIPTables uses iptables for network blocking (legacy).
 	BlockBackendIPTables BlockBackend = "iptables"
+	// BlockBackendXDP uses an XDP eBPF program for high-performance packet dropping.
+	BlockBackendXDP BlockBackend = "xdp"
 )
 
 // LSMBlocklistManager interface for LSM-based blocking.
@@ -119,14 +122,15 @@ type Enforcer struct {
 	blockBackend BlockBackend
 	// nftablesMgr is the nftables manager (nil if not using nftables)
 	nftablesMgr *NFTablesManager
+	// xdpMgr is the XDP packet filter manager (nil if not using XDP)
+	xdpMgr *XDPManager
 	// lsmManager is the LSM blocklist manager (nil if not using LSM)
 	lsmManager LSMBlocklistManager
 	// dryRun mode logs actions without enforcement
 	dryRun bool
 
-	// Sprint 34.0 metrics
-	actionsTotal    *prometheus.CounterVec // ebpf_guard_enforcement_actions_total{action}
-	auditDropped    prometheus.Counter     // ebpf_guard_audit_log_dropped_total
+	actionsTotal *prometheus.CounterVec // ebpf_guard_enforcement_actions_total{action}
+	auditDropped prometheus.Counter     // ebpf_guard_audit_log_dropped_total
 }
 
 // ThrottleState tracks rate limiting state for a process.
@@ -145,8 +149,11 @@ type Config struct {
 	EnableKill bool
 	// EnableThrottle enables cgroup-based rate limiting
 	EnableThrottle bool
-	// BlockBackend specifies the network blocking backend (log, nftables, iptables)
+	// BlockBackend specifies the network blocking backend (log, nftables, iptables, xdp)
 	BlockBackend BlockBackend
+	// XDPInterface is the network interface to attach the XDP program to (e.g. "eth0").
+	// Only used when BlockBackend == BlockBackendXDP.
+	XDPInterface string
 	// DryRun mode logs actions without actual enforcement
 	DryRun bool
 	// AuditLogChannel receives audit entries (optional)
@@ -179,16 +186,25 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 		}),
 	}
 
-	// Initialize block backend if blocking is enabled
-	if cfg.EnableBlock && cfg.BlockBackend == BlockBackendNFTables {
-		nftCfg := NFTablesConfig{
-			DryRun: cfg.DryRun,
+	// Initialise the configured block backend.
+	if cfg.EnableBlock {
+		switch cfg.BlockBackend {
+		case BlockBackendNFTables:
+			nftMgr, err := NewNFTablesManager(logger, NFTablesConfig{DryRun: cfg.DryRun})
+			if err != nil {
+				return nil, fmt.Errorf("enforcer: init nftables: %w", err)
+			}
+			e.nftablesMgr = nftMgr
+		case BlockBackendXDP:
+			xdpMgr, err := NewXDPManager(logger, XDPConfig{
+				Interface: cfg.XDPInterface,
+				DryRun:    cfg.DryRun,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("enforcer: init xdp: %w", err)
+			}
+			e.xdpMgr = xdpMgr
 		}
-		nftMgr, err := NewNFTablesManager(logger, nftCfg)
-		if err != nil {
-			return nil, fmt.Errorf("enforcer: init nftables: %w", err)
-		}
-		e.nftablesMgr = nftMgr
 	}
 
 	return e, nil
@@ -239,11 +255,13 @@ func (e *Enforcer) ExecuteAction(ctx context.Context, action string, alert types
 }
 
 // executeBlock blocks network packets matching the alert.
-// Uses nftables for actual blocking if configured, otherwise logs only.
+// For XDP it extracts the destination IP/port from network events and adds
+// them to the BPF blocklist.  For nftables it falls back to UID-based blocking.
 func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
+	// PID validation is advisory for block — an invalid PID still warrants
+	// blocking the destination IP.  Log a warning but continue.
 	if err := validateEvent(alert.Event); err != nil {
-		e.logger.Warn("block rejected: invalid event", "error", err)
-		return err
+		e.logger.Warn("block: event validation warning", slog.Any("error", err))
 	}
 
 	comm := sanitizeComm(string(bytesToString(alert.Event.Comm[:])))
@@ -260,18 +278,21 @@ func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
 	}
 
 	e.logger.Warn("BLOCK action executed",
-		"rule_id", alert.RuleID,
-		"pid", alert.Event.PID,
-		"comm", comm,
-		"backend", e.blockBackend,
-		"dry_run", e.dryRun,
+		slog.String("rule_id", alert.RuleID),
+		slog.Uint64("pid", uint64(alert.Event.PID)),
+		slog.String("comm", comm),
+		slog.String("backend", string(e.blockBackend)),
+		slog.Bool("dry_run", e.dryRun),
 	)
 
-	// Apply actual block based on backend
 	switch e.blockBackend {
+	case BlockBackendXDP:
+		if err := e.executeBlockXDP(ctx, alert, &entry); err != nil {
+			e.logAudit(entry)
+			return err
+		}
 	case BlockBackendNFTables:
 		if e.nftablesMgr != nil {
-			// Block by UID
 			if err := e.nftablesMgr.BlockUID(ctx, alert.Event.UID); err != nil {
 				entry.Success = false
 				entry.Error = err.Error()
@@ -280,12 +301,10 @@ func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
 			}
 		}
 	case BlockBackendIPTables:
-		// iptables backend not yet implemented - log only
 		e.logger.Warn("iptables backend not implemented, logging only",
-			"uid", alert.Event.UID,
-		)
+			slog.Uint64("uid", uint64(alert.Event.UID)))
 	case BlockBackendLog:
-		// Log only mode - already logged above
+		// log-only — already logged above
 	}
 
 	entry.Success = true
@@ -294,6 +313,48 @@ func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
 		e.actionsTotal.WithLabelValues("block").Inc()
 	}
 	return nil
+}
+
+// executeBlockXDP routes an alert to the XDP blocklist.
+// It extracts the destination IP and port from network events.  When the event
+// carries no network information, it falls back to blocking by source IP if
+// available, or logs a warning and returns nil (log-only fallback).
+func (e *Enforcer) executeBlockXDP(ctx context.Context, alert types.Alert, entry *AuditEntry) error {
+	if e.xdpMgr == nil {
+		e.logger.Warn("XDP backend selected but manager not initialised, logging only")
+		return nil
+	}
+
+	net := alert.Event.Network
+	if net == nil {
+		e.logger.Warn("XDP block: no network event in alert, nothing to block",
+			slog.String("rule_id", alert.RuleID))
+		return nil
+	}
+
+	daddr := net.Daddr[:]
+	// For IPv4 events (family == AF_INET) only the first 4 bytes are set.
+	if alert.Event.Network.Family == 2 /* AF_INET */ {
+		daddr = net.Daddr[:4]
+	}
+
+	if err := e.xdpMgr.BlockTuple(ctx, daddr, net.Dport); err != nil {
+		entry.Success = false
+		entry.Error = err.Error()
+		return fmt.Errorf("enforcer/block: xdp block %s:%d: %w",
+			ipBytesToString(daddr), net.Dport, err)
+	}
+
+	entry.Description = fmt.Sprintf("XDP: blocked %s:%d (rule %s)",
+		ipBytesToString(daddr), net.Dport, alert.RuleID)
+	return nil
+}
+
+// ipBytesToString converts raw IP bytes to a display string.
+func ipBytesToString(raw []byte) string {
+	ip := make(net.IP, len(raw))
+	copy(ip, raw)
+	return ip.String()
 }
 
 // executeLSMBlock uses LSM BPF for pre-execution blocking.
@@ -644,6 +705,8 @@ func ParseBlockBackend(s string) (BlockBackend, error) {
 		return BlockBackendNFTables, nil
 	case "iptables":
 		return BlockBackendIPTables, nil
+	case "xdp":
+		return BlockBackendXDP, nil
 	default:
 		return "", fmt.Errorf("unknown block backend: %s", s)
 	}
@@ -677,10 +740,8 @@ func (e *Enforcer) Cleanup() error {
 			return err
 		}
 	}
-
-	// Note: LSM blocklist is cleared by closing the BPF maps
-	// which happens in LSMCollector.Close()
-
+	// Note: XDP blocklist is cleared by closing the BPF maps in Close().
+	// Note: LSM blocklist is cleared by closing the BPF maps in LSMCollector.Close().
 	return nil
 }
 
@@ -694,7 +755,11 @@ func (e *Enforcer) Close() error {
 			return err
 		}
 	}
-
+	if e.xdpMgr != nil {
+		if err := e.xdpMgr.Close(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

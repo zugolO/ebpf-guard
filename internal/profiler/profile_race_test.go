@@ -2,6 +2,7 @@ package profiler
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -372,25 +373,32 @@ func TestProfileManager_CleanupRemovesStale(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 }
 
-// TestSequenceProfiler_MaxPIDsCap verifies SequenceProfiler never exceeds maxPIDs.
-func TestSequenceProfiler_MaxPIDsCap(t *testing.T) {
-	const maxPIDs = 50
+// TestSequenceProfiler_MaxWorkloadsCap verifies SequenceProfiler never exceeds maxPIDs
+// workload entries even when many distinct workload keys arrive concurrently.
+func TestSequenceProfiler_MaxWorkloadsCap(t *testing.T) {
+	const maxWorkloads = 50
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sp := NewSequenceProfilerWithContext(ctx, DefaultSequenceConfig(), time.Hour, maxPIDs)
+	sp := NewSequenceProfilerWithContext(ctx, DefaultSequenceConfig(), time.Hour, maxWorkloads)
 
 	var wg sync.WaitGroup
+	// Send 10 000 events across 200 distinct workload names (more than the cap).
 	for i := 0; i < 10_000; i++ {
 		wg.Add(1)
-		go func(pid uint32) {
+		go func(idx int) {
 			defer wg.Done()
+			// 200 unique comm strings → 200 distinct workload keys.
+			var comm [16]byte
+			commStr := fmt.Sprintf("app%d", idx%200)
+			copy(comm[:], commStr)
 			sp.Update(types.Event{
 				Type:    types.EventSyscall,
-				PID:     pid,
+				PID:     uint32(idx),
+				Comm:    comm,
 				Syscall: &types.SyscallEvent{Nr: 1},
 			})
-		}(uint32(i))
+		}(i)
 	}
 	wg.Wait()
 
@@ -398,5 +406,5 @@ func TestSequenceProfiler_MaxPIDsCap(t *testing.T) {
 	size := len(sp.states)
 	sp.mu.RUnlock()
 
-	require.LessOrEqual(t, size, maxPIDs, "SequenceProfiler map must not exceed maxPIDs")
+	require.LessOrEqual(t, size, maxWorkloads, "SequenceProfiler map must not exceed maxPIDs cap")
 }

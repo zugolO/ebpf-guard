@@ -4,7 +4,6 @@ package profiler
 import (
 	"context"
 	"math"
-	"strconv"
 	"sync"
 	"time"
 
@@ -96,9 +95,10 @@ type pidSequenceState struct {
 }
 
 // SequenceProfiler detects anomalies in syscall sequences using frequency vectors.
+// State is keyed by WorkloadKey so all replicas of a workload share one baseline.
 type SequenceProfiler struct {
 	config       SequenceConfig
-	states       map[uint32]*pidSequenceState
+	states       map[string]*pidSequenceState // key: WorkloadKey.String()
 	mu           sync.RWMutex
 	distance     *prometheus.GaugeVec
 	ttl          time.Duration
@@ -133,11 +133,11 @@ func newSequenceProfiler(config SequenceConfig, ttl time.Duration, maxPIDs int) 
 	}
 	return &SequenceProfiler{
 		config: config,
-		states: make(map[uint32]*pidSequenceState),
+		states: make(map[string]*pidSequenceState),
 		distance: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "ebpf_guard_profiler_sequence_distance",
-			Help: "Cosine distance between current and baseline syscall frequency vectors",
-		}, []string{"pid", "comm"}),
+			Help: "Cosine distance between current and baseline syscall frequency vectors per workload class.",
+		}, []string{"comm", "namespace", "app"}),
 		ttl:          ttl,
 		maxPIDs:      maxPIDs,
 		enabled:      config.Enabled,
@@ -165,15 +165,19 @@ func (sp *SequenceProfiler) RegisterMetrics(reg prometheus.Registerer) error {
 }
 
 // Update processes a syscall event and returns distance if anomaly detected.
+// State is keyed by workload class so all replicas train the same baseline.
 func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly bool) {
 	if !sp.enabled || e.Type != types.EventSyscall || e.Syscall == nil {
 		return 0, false
 	}
 
+	key := WorkloadKeyFromEvent(e)
+	ks := key.String()
+
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	state, exists := sp.states[e.PID]
+	state, exists := sp.states[ks]
 	if !exists {
 		if sp.maxPIDs > 0 && len(sp.states) >= sp.maxPIDs {
 			sp.evictLRULocked()
@@ -182,7 +186,7 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 			window:     newSyscallWindow(sp.config.WindowSize),
 			lastUpdate: time.Now(),
 		}
-		sp.states[e.PID] = state
+		sp.states[ks] = state
 	}
 
 	state.window.push(int(e.Syscall.Nr))
@@ -193,12 +197,10 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 
 	// Learning phase: build baseline
 	if state.sampleCount < sp.config.WindowSize {
-		// Still collecting initial samples
 		return 0, false
 	}
 
 	if len(state.baseline) == 0 {
-		// First baseline established
 		state.baseline = currentVec
 		return 0, false
 	}
@@ -206,46 +208,42 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 	// Calculate cosine distance
 	distance = cosineDistance(currentVec, state.baseline)
 
-	// Update metric (cleanComm strips the trailing NUL padding so the Prometheus
-	// label is a clean process name rather than "comm\x00\x00…").
-	comm := cleanComm(e.Comm[:])
-	sp.distance.WithLabelValues(strconv.FormatUint(uint64(e.PID), 10), comm).Set(distance)
+	sp.distance.WithLabelValues(key.Comm, key.Namespace, key.AppLabel).Set(distance)
 
 	// Check threshold
 	isAnomaly = distance > sp.config.Threshold
 
-	// Update baseline with EWMA-like smoothing
+	// Gradually adapt baseline for normal behavior
 	if !isAnomaly {
-		// Gradually adapt baseline for normal behavior
 		state.baseline = mergeVectors(state.baseline, currentVec, 0.1)
 	}
 
 	return distance, isAnomaly
 }
 
-// GetState returns the current sequence state for a PID (for testing).
-func (sp *SequenceProfiler) GetState(pid uint32) (*pidSequenceState, bool) {
+// GetStateByKey returns the current sequence state for a workload key (for testing).
+func (sp *SequenceProfiler) GetStateByKey(key WorkloadKey) (*pidSequenceState, bool) {
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()
-	state, ok := sp.states[pid]
+	state, ok := sp.states[key.String()]
 	return state, ok
 }
 
 // evictLRULocked removes the state with the oldest lastUpdate timestamp.
 // Caller must hold sp.mu (write lock).
 func (sp *SequenceProfiler) evictLRULocked() {
-	var lruPID uint32
+	var lruKey string
 	var lruTime time.Time
 	first := true
-	for pid, s := range sp.states {
+	for ks, s := range sp.states {
 		if first || s.lastUpdate.Before(lruTime) {
-			lruPID = pid
+			lruKey = ks
 			lruTime = s.lastUpdate
 			first = false
 		}
 	}
 	if !first {
-		delete(sp.states, lruPID)
+		delete(sp.states, lruKey)
 	}
 }
 

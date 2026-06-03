@@ -104,6 +104,19 @@ func (c *FileaccessCollector) LoadError() error {
 	return c.loadError
 }
 
+// GetPrograms returns the loaded BPF programs for attestation.
+// Implements watchdog.BPFProgramProvider interface.
+func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {
+	if c.objs == nil {
+		return nil
+	}
+	return map[string]*ebpf.Program{
+		"trace_open":  c.objs.TraceOpen,
+		"trace_read":  c.objs.TraceRead,
+		"trace_write": c.objs.TraceWrite,
+	}
+}
+
 // IsAttached returns true if the BPF program is still attached.
 // Implements watchdog.BPFProgramChecker interface.
 func (c *FileaccessCollector) IsAttached() bool {

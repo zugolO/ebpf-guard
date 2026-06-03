@@ -145,7 +145,8 @@ func TestSequenceProfilerUpdate(t *testing.T) {
 
 	profiler := NewSequenceProfiler(config, 5*time.Minute)
 
-	// Create events with consistent syscall pattern
+	// Create events with consistent syscall pattern.
+	// Two different PIDs with the same comm share one workload baseline.
 	makeEvent := func(pid uint32, syscallNr int) types.Event {
 		return types.Event{
 			Type: types.EventSyscall,
@@ -172,9 +173,10 @@ func TestSequenceProfilerUpdate(t *testing.T) {
 		}
 	}
 
-	// Verify state exists
-	state, ok := profiler.GetState(pid)
-	require.True(t, ok, "state should exist for PID")
+	// Verify workload state exists keyed by comm (no K8s enrichment → namespace/app empty)
+	key := WorkloadKey{Comm: "bash"}
+	state, ok := profiler.GetStateByKey(key)
+	require.True(t, ok, "state should exist for workload key")
 	require.NotNil(t, state.baseline, "baseline should be established")
 
 	// Continue with same pattern - should not trigger
@@ -254,10 +256,11 @@ func TestSequenceProfilerCleanup(t *testing.T) {
 	ttl := 100 * time.Millisecond
 	profiler := NewSequenceProfiler(config, ttl)
 
-	// Add state for a PID
+	// Add state using a named workload (comm "svc")
 	e := types.Event{
 		Type: types.EventSyscall,
 		PID:  1234,
+		Comm: [16]byte{'s', 'v', 'c'},
 		Syscall: &types.SyscallEvent{
 			Nr: 1,
 		},
@@ -267,8 +270,10 @@ func TestSequenceProfilerCleanup(t *testing.T) {
 		profiler.Update(e)
 	}
 
+	key := WorkloadKey{Comm: "svc"}
+
 	// Verify state exists
-	_, ok := profiler.GetState(1234)
+	_, ok := profiler.GetStateByKey(key)
 	require.True(t, ok, "state should exist before cleanup")
 
 	// Wait for TTL to expire
@@ -278,11 +283,13 @@ func TestSequenceProfilerCleanup(t *testing.T) {
 	profiler.Cleanup(time.Now())
 
 	// State should be removed
-	_, ok = profiler.GetState(1234)
+	_, ok = profiler.GetStateByKey(key)
 	assert.False(t, ok, "state should be removed after cleanup")
 }
 
-func TestSequenceProfilerMultiplePIDs(t *testing.T) {
+func TestSequenceProfilerWorkloadIsolation(t *testing.T) {
+	// Verifies that different workloads (different comms) maintain separate
+	// baselines, while replicas of the same workload (same comm) share one.
 	config := SequenceConfig{
 		Enabled:    true,
 		WindowSize: 4,
@@ -291,31 +298,41 @@ func TestSequenceProfilerMultiplePIDs(t *testing.T) {
 
 	profiler := NewSequenceProfiler(config, 5*time.Minute)
 
-	makeEvent := func(pid uint32, syscallNr int) types.Event {
+	makeEvent := func(pid uint32, comm string, syscallNr int) types.Event {
+		var c [16]byte
+		copy(c[:], comm)
 		return types.Event{
 			Type: types.EventSyscall,
 			PID:  pid,
-			Comm: [16]byte{'a', 'p', 'p'},
+			Comm: c,
 			Syscall: &types.SyscallEvent{
 				Nr: int64(syscallNr),
 			},
 		}
 	}
 
-	// Different patterns for different PIDs
+	// Two different workloads with distinct syscall patterns.
 	for i := 0; i < 6; i++ {
-		profiler.Update(makeEvent(100, 1)) // PID 100: syscall 1
-		profiler.Update(makeEvent(200, 2)) // PID 200: syscall 2
+		profiler.Update(makeEvent(100, "nginx", 1)) // nginx workload: syscall 1
+		profiler.Update(makeEvent(200, "redis", 2)) // redis workload: syscall 2
 	}
 
-	// Verify both states exist with different baselines
-	state100, ok := profiler.GetState(100)
+	// Each workload has its own separate baseline.
+	stateNginx, ok := profiler.GetStateByKey(WorkloadKey{Comm: "nginx"})
 	require.True(t, ok)
-	assert.InDelta(t, 1.0, state100.baseline[1], 0.01)
+	assert.InDelta(t, 1.0, stateNginx.baseline[1], 0.01)
 
-	state200, ok := profiler.GetState(200)
+	stateRedis, ok := profiler.GetStateByKey(WorkloadKey{Comm: "redis"})
 	require.True(t, ok)
-	assert.InDelta(t, 1.0, state200.baseline[2], 0.01)
+	assert.InDelta(t, 1.0, stateRedis.baseline[2], 0.01)
+
+	// A second nginx replica (different PID, same comm) shares the same state.
+	for i := 0; i < 6; i++ {
+		profiler.Update(makeEvent(101, "nginx", 1)) // another nginx pod
+	}
+	stateNginx2, ok := profiler.GetStateByKey(WorkloadKey{Comm: "nginx"})
+	require.True(t, ok)
+	assert.Equal(t, stateNginx, stateNginx2, "nginx replicas must share one state")
 }
 
 func TestDefaultSequenceConfig(t *testing.T) {

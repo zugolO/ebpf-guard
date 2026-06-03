@@ -321,12 +321,15 @@ type KubernetesConfig struct {
 	ResyncPeriod int `mapstructure:"resync_period"`
 }
 
-// EnforcementConfig holds enforcement settings (Sprint 21.0).
+// EnforcementConfig holds enforcement settings.
 type EnforcementConfig struct {
 	// Enabled enables enforcement actions
 	Enabled bool `mapstructure:"enabled"`
-	// BlockBackend specifies the network blocking backend: "log", "nftables", "iptables"
+	// BlockBackend specifies the network blocking backend: "log", "nftables", "iptables", "xdp"
 	BlockBackend string `mapstructure:"block_backend"`
+	// XDPInterface is the network interface to attach the XDP program to (e.g. "eth0").
+	// Only used when block_backend is "xdp".
+	XDPInterface string `mapstructure:"xdp_interface"`
 	// DryRun mode logs actions without actual enforcement
 	DryRun bool `mapstructure:"dry_run"`
 	// EnableBlock enables packet blocking
@@ -570,9 +573,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.dns.tunneling_min_length", 50)
 	v.SetDefault("collectors.dns.high_frequency_threshold", 100)
 
-	// Enforcement defaults (Sprint 21.0)
+	// Enforcement defaults
 	v.SetDefault("enforcement.enabled", false)
 	v.SetDefault("enforcement.block_backend", "log")
+	v.SetDefault("enforcement.xdp_interface", "")
 	v.SetDefault("enforcement.dry_run", false)
 	v.SetDefault("enforcement.enable_block", false)
 	v.SetDefault("enforcement.enable_kill", false)

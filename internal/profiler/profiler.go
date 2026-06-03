@@ -24,6 +24,8 @@ type Profiler struct {
 type Anomaly struct {
 	PID           uint32
 	Comm          string
+	Namespace     string // K8s namespace; empty for non-K8s processes
+	AppLabel      string // pod label "app"; empty when absent
 	Score         float64
 	Contributions map[string]interface{}
 	Type          AnomalyType
@@ -124,6 +126,8 @@ func (p *Profiler) Ingest(e types.Event) []*Anomaly {
 		anomalies = append(anomalies, &Anomaly{
 			PID:           result.PID,
 			Comm:          result.Comm,
+			Namespace:     result.Namespace,
+			AppLabel:      result.AppLabel,
 			Score:         result.Score,
 			Contributions: contributions,
 			Type:          AnomalyTypeBehavior,
@@ -132,10 +136,17 @@ func (p *Profiler) Ingest(e types.Event) []*Anomaly {
 
 	// Run sequence anomaly detection
 	if dist, isAnomaly := p.sequence.Update(e); isAnomaly {
+		ns, app := "", ""
+		if e.Enrichment != nil {
+			ns = e.Enrichment.Namespace
+			app = e.Enrichment.Labels["app"]
+		}
 		anomalies = append(anomalies, &Anomaly{
-			PID:   e.PID,
-			Comm:  cleanComm(e.Comm[:]),
-			Score: dist,
+			PID:       e.PID,
+			Comm:      cleanComm(e.Comm[:]),
+			Namespace: ns,
+			AppLabel:  app,
+			Score:     dist,
 			Contributions: map[string]interface{}{
 				"sequence_distance": dist,
 				"threshold":         p.sequence.config.Threshold,
@@ -150,10 +161,17 @@ func (p *Profiler) Ingest(e types.Event) []*Anomaly {
 		if match.Pattern.Severity == "critical" {
 			severity = 1.0
 		}
+		ns, app := "", ""
+		if e.Enrichment != nil {
+			ns = e.Enrichment.Namespace
+			app = e.Enrichment.Labels["app"]
+		}
 		anomalies = append(anomalies, &Anomaly{
-			PID:   e.PID,
-			Comm:  match.Comm,
-			Score: severity,
+			PID:       e.PID,
+			Comm:      match.Comm,
+			Namespace: ns,
+			AppLabel:  app,
+			Score:     severity,
 			Contributions: map[string]interface{}{
 				"pattern":     match.Pattern.Name,
 				"description": match.Pattern.Description,

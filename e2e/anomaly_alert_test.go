@@ -168,6 +168,15 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Shared enrichment: all events from the same pod carry the same metadata.
+	// Baseline and anomalous events must use the same workload key so they
+	// score against the same behavioral profile.
+	podEnrichment := &types.EnrichmentInfo{
+		PodName:     "test-pod-abc123",
+		Namespace:   "test-namespace",
+		ContainerID: "container123",
+	}
+
 	// Send baseline events
 	for i := 0; i < 10; i++ {
 		event := types.Event{
@@ -177,6 +186,7 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 			TGID:      5678,
 			UID:       1000,
 			Comm:      [16]byte{'a', 'p', 'p'},
+			Enrichment: podEnrichment,
 			File: &types.FileEvent{
 				// Baseline: app normally reads its own log directory.
 				Filename: [256]byte{'/', 'v', 'a', 'r', '/', 'l', 'o', 'g', '/', 'a', 'p', 'p', '.', 'l', 'o', 'g'},
@@ -191,7 +201,8 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 	// Wait for learning
 	time.Sleep(200 * time.Millisecond)
 
-	// Send anomalous event with K8s enrichment
+	// Send anomalous event with the same K8s enrichment so it scores against
+	// the baseline profile established above.
 	event := types.Event{
 		Type:      types.EventFileAccess,
 		Timestamp: uint64(time.Now().UnixNano()),
@@ -199,16 +210,12 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 		TGID:      5678,
 		UID:       1000,
 		Comm:      [16]byte{'a', 'p', 'p'},
+		Enrichment: podEnrichment,
 		File: &types.FileEvent{
 			Filename: [256]byte{'/', 'e', 't', 'c', '/', 's', 'h', 'a', 'd', 'o', 'w'},
 			Flags:    0,
 			Mode:     0644,
 			Op:       0,
-		},
-		Enrichment: &types.EnrichmentInfo{
-			PodName:       "test-pod-abc123",
-			Namespace:     "test-namespace",
-			ContainerID:   "container123",
 		},
 	}
 

@@ -104,6 +104,18 @@ func (c *NetworkCollector) LoadError() error {
 	return c.loadError
 }
 
+// GetPrograms returns the loaded BPF programs for attestation.
+// Implements watchdog.BPFProgramProvider interface.
+func (c *NetworkCollector) GetPrograms() map[string]*ebpf.Program {
+	if c.objs == nil {
+		return nil
+	}
+	return map[string]*ebpf.Program{
+		"trace_tcp_connect": c.objs.TraceTCPConnect,
+		"trace_tcp_close":   c.objs.TraceTCPClose,
+	}
+}
+
 // IsAttached returns true if the BPF program is still attached.
 // Implements watchdog.BPFProgramChecker interface.
 func (c *NetworkCollector) IsAttached() bool {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
@@ -17,8 +18,11 @@ import (
 func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// Alert endpoints
 	mux.HandleFunc("/api/v1/alerts", s.handleAlerts)
-	mux.HandleFunc("/api/v1/alerts/", s.handleAlertByID)
+	mux.HandleFunc("/api/v1/alerts/", s.handleAlertPath) // GET /{id} + POST /{id}/feedback
 	mux.HandleFunc("/api/v1/alerts/export/cef", s.handleExportCEF)
+
+	// Feedback list endpoint
+	mux.HandleFunc("/api/v1/feedback", s.handleFeedbackList)
 
 	// Status endpoint
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
@@ -54,34 +58,107 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(alerts)
 }
 
-// handleAlertByID handles GET /api/v1/alerts/{id}.
-func (s *Server) handleAlertByID(w http.ResponseWriter, r *http.Request) {
+// handleAlertPath dispatches sub-paths under /api/v1/alerts/:
+//
+//	GET  /api/v1/alerts/{id}          → return single alert
+//	POST /api/v1/alerts/{id}/feedback → record analyst feedback
+func (s *Server) handleAlertPath(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/alerts/")
+	if path == "" || path == r.URL.Path {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	// POST /api/v1/alerts/{id}/feedback
+	if r.Method == http.MethodPost && strings.HasSuffix(path, "/feedback") {
+		alertID := strings.TrimSuffix(path, "/feedback")
+		if alertID == "" {
+			http.Error(w, "Invalid alert ID", http.StatusBadRequest)
+			return
+		}
+		s.submitAlertFeedback(w, r, alertID)
+		return
+	}
+
+	// GET /api/v1/alerts/{id} — reject IDs containing slashes (reserved for sub-paths)
+	if r.Method == http.MethodGet && !strings.Contains(path, "/") {
+		if s.alertStore == nil {
+			http.Error(w, "Alert store not configured", http.StatusServiceUnavailable)
+			return
+		}
+		alert, err := s.alertStore.QueryByID(r.Context(), path)
+		if err != nil {
+			http.Error(w, "Alert not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(alert)
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// submitAlertFeedback handles POST /api/v1/alerts/{id}/feedback.
+func (s *Server) submitAlertFeedback(w http.ResponseWriter, r *http.Request, alertID string) {
+	s.mu.RLock()
+	fm := s.feedbackManager
+	as := s.alertStore
+	s.mu.RUnlock()
+
+	if as == nil {
+		http.Error(w, "Alert store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if fm == nil {
+		http.Error(w, "Feedback not configured", http.StatusNotImplemented)
+		return
+	}
+
+	alert, err := as.QueryByID(r.Context(), alertID)
+	if err != nil || alert == nil {
+		http.Error(w, "Alert not found", http.StatusNotFound)
+		return
+	}
+
+	var req feedback.Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Verdict != feedback.VerdictFalsePositive && req.Verdict != feedback.VerdictTruePositive {
+		http.Error(w, "Invalid verdict: must be false_positive or true_positive", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := fm.Submit(*alert, req.Verdict, req.Reason)
+	if err != nil {
+		s.logger.Error("feedback: failed to persist", "err", err)
+		// Still return 200 — feedback was recorded in memory even if file write failed.
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleFeedbackList handles GET /api/v1/feedback — returns all recorded feedback.
+func (s *Server) handleFeedbackList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if s.alertStore == nil {
-		http.Error(w, "Alert store not configured", http.StatusServiceUnavailable)
-		return
-	}
+	s.mu.RLock()
+	fm := s.feedbackManager
+	s.mu.RUnlock()
 
-	// Extract ID from path: /api/v1/alerts/{id}
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/alerts/")
-	if path == "" || path == r.URL.Path {
-		http.Error(w, "Invalid alert ID", http.StatusBadRequest)
-		return
-	}
-
-	ctx := r.Context()
-	alert, err := s.alertStore.QueryByID(ctx, path)
-	if err != nil {
-		http.Error(w, "Alert not found", http.StatusNotFound)
+	if fm == nil {
+		http.Error(w, "Feedback not configured", http.StatusNotImplemented)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(alert)
+	json.NewEncoder(w).Encode(fm.Records())
 }
 
 // handleExportCEF handles GET /api/v1/alerts/export/cef for SIEM integration.

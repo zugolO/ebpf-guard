@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/util"
@@ -100,6 +101,10 @@ type CorrelationEngine struct {
 	// with a full process tree. Created automatically if not provided via config.
 	lineageTracker *profiler.LineageTracker
 
+	// feedbackManager suppresses alerts whose (ruleID, comm) pair has been
+	// marked as a false positive by an analyst. Optional — nil disables suppression.
+	feedbackManager *feedback.Manager
+
 	// IOC matcher (gossip integration — optional)
 	iocMatcher IOCMatcher
 
@@ -155,6 +160,10 @@ type CorrelationEngineConfig struct {
 	// When nil, a new tracker with DefaultLineageConfig is created automatically.
 	// Pass the Profiler's LineageTracker to share ancestry state.
 	LineageTracker *profiler.LineageTracker
+
+	// FeedbackManager drops alerts whose (ruleID, comm) pair has been marked as a
+	// false positive. Optional — nil disables analyst-driven suppression.
+	FeedbackManager *feedback.Manager
 
 	// IOCMatcher integrates gossip-based cluster-wide IOC intelligence.
 	// When set, events are checked against known IOCs and produce alerts.
@@ -260,6 +269,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		regoEngine:           config.RegoEngine,
 		onCorrelate:          config.OnCorrelate,
 		lineageTracker:       lt,
+		feedbackManager:      config.FeedbackManager,
 		iocMatcher:           config.IOCMatcher,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
@@ -535,6 +545,12 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// This is called ONLY on alerts, not on raw events, for performance
 	if ce.enableRegoEval && ce.regoEngine != nil && len(alerts) > 0 {
 		alerts = ce.evaluateRegoPolicies(ctx, alerts)
+	}
+
+	// Analyst false-positive suppression: drop alerts whose (ruleID, comm) pair
+	// has been marked as a false positive via POST /api/v1/alerts/{id}/feedback.
+	if ce.feedbackManager != nil && len(alerts) > 0 {
+		alerts = ce.feedbackManager.FilterAlerts(alerts)
 	}
 
 	// Store alerts

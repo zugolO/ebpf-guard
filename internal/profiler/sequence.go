@@ -4,6 +4,7 @@ package profiler
 import (
 	"context"
 	"math"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -176,6 +177,12 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
+
+	// Under memory pressure the watchdog reduces samplingRate via SetSamplingRate.
+	// Drop events probabilistically so the profiler doesn't contribute to OOM.
+	if sp.samplingRate < 1.0 && rand.Float64() >= sp.samplingRate {
+		return 0, false
+	}
 
 	state, exists := sp.states[ks]
 	if !exists {

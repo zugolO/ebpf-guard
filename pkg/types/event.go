@@ -157,6 +157,17 @@ const (
 // AlertSeverity is an alias for backward compatibility.
 type AlertSeverity = Severity
 
+// ProcessNode represents a single process in an ancestry chain.
+type ProcessNode struct {
+	PID  uint32 `json:"pid"`
+	PPID uint32 `json:"ppid"`
+	Comm string `json:"comm"`
+}
+
+// ProcessTree is an ordered ancestry chain from the oldest known ancestor to the
+// triggering process, e.g. [systemd] → [kubelet] → [containerd-shim] → [nginx] → [bash] → [curl].
+type ProcessTree []ProcessNode
+
 // Alert represents a detected security anomaly or rule violation.
 type Alert struct {
 	ID         string                 `json:"id"`
@@ -171,6 +182,10 @@ type Alert struct {
 	TraceID    string                 `json:"trace_id,omitempty"`
 	Enrichment EnrichmentInfo         `json:"enrichment,omitempty"`
 	Event      Event                  `json:"-"` // the triggering event (not serialized to store)
+	// ProcessTree holds the full ancestor chain for the triggering process.
+	// Ordered from oldest known ancestor to the process that fired the alert.
+	// Populated by CorrelationEngine when a LineageTracker is configured.
+	ProcessTree ProcessTree `json:"process_tree,omitempty"`
 	// Fingerprint is a SHA-256 hash for tamper detection (optional)
 	Fingerprint string `json:"fingerprint,omitempty"`
 	// Action is the enforcement action declared by the matching rule

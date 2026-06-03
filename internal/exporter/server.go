@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -50,6 +51,9 @@ type Server struct {
 
 	// Rules reload handler
 	rulesReloadFn func() error
+
+	// feedbackManager handles false-positive feedback from analysts (optional).
+	feedbackManager *feedback.Manager
 }
 
 // NewServer creates a new HTTP server for metrics and health.
@@ -217,6 +221,14 @@ func (s *Server) SetAlertStore(st store.AlertStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alertStore = st
+}
+
+// SetFeedbackManager wires the feedback manager so POST /api/v1/alerts/{id}/feedback
+// is handled. Must be called before the server starts.
+func (s *Server) SetFeedbackManager(fm *feedback.Manager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.feedbackManager = fm
 }
 
 // GetCollectorStatuses returns a copy of all collector statuses.

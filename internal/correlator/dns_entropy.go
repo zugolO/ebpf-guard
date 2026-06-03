@@ -137,6 +137,8 @@ func (c *DNSEntropyCalculator) AnalyzeDomain(domain string) DomainAnalysis {
 
 	entropy := c.CalculateShannonEntropy(baseDomain)
 
+	ngramScore := Score(domain) // N-gram bigram model score from dga_ngram.go
+
 	return DomainAnalysis{
 		Domain:              domain,
 		BaseDomain:          baseDomain,
@@ -148,6 +150,7 @@ func (c *DNSEntropyCalculator) AnalyzeDomain(domain string) DomainAnalysis {
 		SubdomainCount:      c.countSubdomains(domain),
 		DigitRatio:          c.calculateDigitRatio(baseDomain),
 		ConsonantVowelRatio: c.calculateConsonantVowelRatio(baseDomain),
+		NgramScore:          ngramScore,
 	}
 }
 
@@ -163,6 +166,11 @@ type DomainAnalysis struct {
 	SubdomainCount      int     `json:"subdomain_count"`
 	DigitRatio          float64 `json:"digit_ratio"`
 	ConsonantVowelRatio float64 `json:"consonant_vowel_ratio"`
+	// NgramScore is the DGA probability [0,1] from the character bigram model.
+	// Higher values indicate the domain is more likely algorithm-generated.
+	// This complements Entropy: modern DGAs can mimic normal entropy profiles
+	// but still produce unusual character-level n-gram sequences.
+	NgramScore float64 `json:"ngram_score"`
 }
 
 // extractBaseDomain extracts the domain part without TLD for entropy calculation.

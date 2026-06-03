@@ -6,15 +6,38 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// feedbackResponse mirrors feedback.Response for JSON decoding in tests.
+type feedbackResponse struct {
+	AlertID    string          `json:"alert_id"`
+	Verdict    feedback.Verdict `json:"verdict"`
+	Suppressed bool            `json:"suppressed"`
+}
+
+// feedbackRecord mirrors feedback.Record for JSON decoding in tests.
+type feedbackRecord struct {
+	AlertID string          `json:"alert_id"`
+	Verdict feedback.Verdict `json:"verdict"`
+	RuleID  string          `json:"rule_id"`
+	Comm    string          `json:"comm"`
+}
+
+// newTestFeedbackManager creates an in-memory FeedbackManager for tests.
+func newTestFeedbackManager(t *testing.T) *feedback.Manager {
+	t.Helper()
+	return feedback.NewManager("", nil)
+}
 
 // mockAlertStore is a mock implementation of store.AlertStore for testing
 type mockAlertStore struct {
@@ -220,7 +243,7 @@ func TestHandleAlertByID(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/alerts/alert-1", nil)
 		w := httptest.NewRecorder()
 
-		srv.handleAlertByID(w, req)
+		srv.handleAlertPath(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
@@ -234,7 +257,7 @@ func TestHandleAlertByID(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/alerts/unknown", nil)
 		w := httptest.NewRecorder()
 
-		srv.handleAlertByID(w, req)
+		srv.handleAlertPath(w, req)
 
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
@@ -489,4 +512,126 @@ func TestFormatCEF(t *testing.T) {
 	assert.Contains(t, cef, "dpid=1234")
 	assert.Contains(t, cef, "dhost=mypod")
 	assert.Contains(t, cef, "cs2=default")
+}
+
+func TestHandleAlertFeedback(t *testing.T) {
+	alert := types.Alert{
+		ID:        "alert-42",
+		RuleID:    "rule_001",
+		Comm:      "nginx",
+		Severity:  types.SeverityWarning,
+		Timestamp: time.Now(),
+		Message:   "suspicious spawn",
+	}
+	mockStore := &mockAlertStore{alerts: []types.Alert{alert}, healthy: true}
+
+	srv := NewServerWithAuth("localhost:9090", "/metrics", "/health", false, false, "", false)
+	srv.SetAlertStore(mockStore)
+
+	fm := newTestFeedbackManager(t)
+	srv.SetFeedbackManager(fm)
+
+	t.Run("POST false_positive suppresses future alerts", func(t *testing.T) {
+		body := strings.NewReader(`{"verdict":"false_positive","reason":"noisy"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts/alert-42/feedback", body)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.handleAlertPath(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp feedbackResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "alert-42", resp.AlertID)
+		assert.Equal(t, "false_positive", string(resp.Verdict))
+		assert.True(t, resp.Suppressed)
+		assert.True(t, fm.IsSuppressed("rule_001", "nginx"))
+	})
+
+	t.Run("POST unknown alert returns 404", func(t *testing.T) {
+		body := strings.NewReader(`{"verdict":"false_positive"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts/no-such-alert/feedback", body)
+		w := httptest.NewRecorder()
+		srv.handleAlertPath(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("POST invalid verdict returns 400", func(t *testing.T) {
+		body := strings.NewReader(`{"verdict":"maybe"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts/alert-42/feedback", body)
+		w := httptest.NewRecorder()
+		srv.handleAlertPath(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("GET feedback list returns records", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/feedback", nil)
+		w := httptest.NewRecorder()
+		srv.handleFeedbackList(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var records []feedbackRecord
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &records))
+		require.Len(t, records, 1)
+		assert.Equal(t, "alert-42", records[0].AlertID)
+	})
+
+	t.Run("feedback endpoint not configured returns 501", func(t *testing.T) {
+		srvNoFM := NewServerWithAuth("localhost:9090", "/metrics", "/health", false, false, "", false)
+		srvNoFM.SetAlertStore(mockStore)
+		body := strings.NewReader(`{"verdict":"false_positive"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts/alert-42/feedback", body)
+		w := httptest.NewRecorder()
+		srvNoFM.handleAlertPath(w, req)
+		assert.Equal(t, http.StatusNotImplemented, w.Code)
+	})
+}
+
+func TestCorrelationEngineWithFeedbackManager(t *testing.T) {
+	fm := newTestFeedbackManager(t)
+
+	rule := correlator.Rule{
+		ID:        "rule_fp",
+		EventType: types.EventTCPConnect,
+		Condition: correlator.RuleCondition{
+			Field:  "dport",
+			Op:     correlator.OpEquals,
+			Values: []string{"80"},
+		},
+		Severity: types.SeverityWarning,
+		Action:   correlator.ActionAlert,
+	}
+	cfg := correlator.DefaultCorrelationEngineConfig()
+	cfg.Rules = []correlator.Rule{rule}
+	cfg.EnableRateLimit = false
+	cfg.EnableAnomaly = false
+	cfg.FeedbackManager = fm
+	engine := correlator.NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	commOf := func(s string) [16]byte {
+		var b [16]byte
+		copy(b[:], s)
+		return b
+	}
+	event := types.Event{
+		Type:      types.EventTCPConnect,
+		PID:       42,
+		Comm:      commOf("nginx"),
+		Timestamp: 1234567890,
+		Network:   &types.NetworkEvent{Dport: 80},
+	}
+
+	// Pre-suppression: alert fires normally.
+	alerts := engine.Ingest(context.Background(), event)
+	require.Len(t, alerts, 1, "alert should fire before suppression")
+
+	// Mark as false positive.
+	_, err := fm.Submit(alerts[0], "false_positive", "test")
+	require.NoError(t, err)
+
+	// Post-suppression: alert must be filtered.
+	alerts = engine.Ingest(context.Background(), event)
+	assert.Empty(t, alerts, "alert should be suppressed after feedback")
 }

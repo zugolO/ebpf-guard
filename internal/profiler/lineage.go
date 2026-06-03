@@ -31,13 +31,17 @@ type LineageConfig struct {
 	Enabled  bool             `yaml:"enabled"`
 	TTL      time.Duration    `yaml:"ttl"`
 	Patterns []LineagePattern `yaml:"patterns"`
+	// MaxDepth is the maximum number of ancestors stored per process.
+	// Zero or negative values default to 16.
+	MaxDepth int `yaml:"max_depth"`
 }
 
 // DefaultLineageConfig returns default lineage configuration.
 func DefaultLineageConfig() LineageConfig {
 	return LineageConfig{
-		Enabled: true,
-		TTL:     5 * time.Minute,
+		Enabled:  true,
+		TTL:      5 * time.Minute,
+		MaxDepth: 16,
 		Patterns: []LineagePattern{
 			{
 				Name:        "web_shell_spawn",
@@ -83,11 +87,13 @@ type LineageMatch struct {
 
 // LineageTracker tracks process parent-child relationships and detects suspicious patterns.
 type LineageTracker struct {
-	config  LineageConfig
-	logger  *slog.Logger
-	lineage map[uint32]*parentInfo
-	mu      sync.RWMutex
-	onMatch func(LineageMatch)
+	config   LineageConfig
+	logger   *slog.Logger
+	lineage  map[uint32]*parentInfo
+	ancestry map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
+	maxDepth int
+	mu       sync.RWMutex
+	onMatch  func(LineageMatch)
 }
 
 // NewLineageTracker creates a new lineage tracker.
@@ -95,12 +101,18 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 	if config.TTL <= 0 {
 		config.TTL = 5 * time.Minute
 	}
+	maxDepth := config.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = 16
+	}
 
 	lt := &LineageTracker{
-		config:  config,
-		logger:  logger,
-		lineage: make(map[uint32]*parentInfo),
-		onMatch: func(m LineageMatch) {}, // no-op default
+		config:   config,
+		logger:   logger,
+		lineage:  make(map[uint32]*parentInfo),
+		ancestry: make(map[uint32][]types.ProcessNode),
+		maxDepth: maxDepth,
+		onMatch:  func(m LineageMatch) {}, // no-op default
 	}
 
 	for _, p := range config.Patterns {
@@ -120,8 +132,27 @@ func (lt *LineageTracker) SetMatchHandler(handler func(LineageMatch)) {
 	lt.onMatch = handler
 }
 
-// Update processes an event and updates lineage information.
-// Returns a match if a suspicious pattern is detected.
+// Track records the process ancestry for e without performing pattern detection.
+// It is safe to call concurrently with Update.
+// CorrelationEngine calls this on every event so that GetProcessTree can later
+// return the full ancestor chain when enriching alerts.
+func (lt *LineageTracker) Track(e types.Event) {
+	if !lt.config.Enabled {
+		return
+	}
+	ppid, parentComm := lt.getParentInfo(e)
+	if ppid == 0 {
+		return
+	}
+	comm := cleanComm(e.Comm[:])
+	lt.mu.Lock()
+	lt.lineage[e.PID] = &parentInfo{PPID: ppid, ParentComm: parentComm, Timestamp: time.Now()}
+	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
+	lt.mu.Unlock()
+}
+
+// Update processes an event, updates lineage information, and returns a match if
+// a suspicious pattern is detected.
 func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 	if !lt.config.Enabled {
 		return nil
@@ -133,17 +164,19 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 		return nil
 	}
 
-	// Store lineage info
+	comm := cleanComm(e.Comm[:])
+
+	// Store lineage info and update ancestry chain under a single lock acquisition.
 	lt.mu.Lock()
 	lt.lineage[e.PID] = &parentInfo{
 		PPID:       ppid,
 		ParentComm: parentComm,
 		Timestamp:  time.Now(),
 	}
+	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
 	lt.mu.Unlock()
 
 	// Check for pattern match
-	comm := cleanComm(e.Comm[:])
 	match := lt.checkPattern(parentComm, comm)
 	if match != nil {
 		result := LineageMatch{
@@ -172,6 +205,89 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 	}
 
 	return nil
+}
+
+// GetProcessTree returns the full ancestor chain for pid, ordered from the
+// oldest known ancestor to pid itself.  Returns nil if no ancestry has been
+// recorded for the PID.
+func (lt *LineageTracker) GetProcessTree(pid uint32) types.ProcessTree {
+	lt.mu.RLock()
+	defer lt.mu.RUnlock()
+	chain := lt.ancestry[pid]
+	if len(chain) == 0 {
+		return nil
+	}
+	result := make(types.ProcessTree, len(chain))
+	copy(result, chain)
+	return result
+}
+
+// buildAncestryLocked extends the ancestry chain for pid. Must be called with lt.mu held for writing.
+func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm, comm string) {
+	parentChain := lt.ancestry[ppid]
+	if len(parentChain) == 0 {
+		// We haven't seen the parent's events yet; try to bootstrap from /proc.
+		parentChain = buildChainFromProc(ppid, lt.maxDepth-1)
+	}
+
+	node := types.ProcessNode{PID: pid, PPID: ppid, Comm: comm}
+	newChain := make([]types.ProcessNode, len(parentChain)+1)
+	copy(newChain, parentChain)
+	newChain[len(parentChain)] = node
+
+	// Ensure the parent node's Comm is set correctly (may have been set to "" by /proc miss).
+	if len(newChain) >= 2 {
+		parent := &newChain[len(newChain)-2]
+		if parent.PID == ppid && parent.Comm == "" {
+			parent.Comm = parentComm
+		}
+	}
+
+	if len(newChain) > lt.maxDepth {
+		newChain = newChain[len(newChain)-lt.maxDepth:]
+	}
+	lt.ancestry[pid] = newChain
+}
+
+// buildChainFromProc walks /proc to reconstruct up to maxDepth ancestors for pid.
+// Results are ordered from oldest ancestor to pid.
+func buildChainFromProc(pid uint32, maxDepth int) []types.ProcessNode {
+	if maxDepth <= 0 {
+		return nil
+	}
+	var chain []types.ProcessNode
+	cur := pid
+	for len(chain) < maxDepth && cur > 1 {
+		comm := readProcComm(cur)
+		ppid := readProcPPID(cur)
+		chain = append([]types.ProcessNode{{PID: cur, PPID: ppid, Comm: comm}}, chain...)
+		if ppid == 0 || ppid == cur {
+			break
+		}
+		cur = ppid
+	}
+	return chain
+}
+
+// readProcPPID reads the parent PID for a process from /proc/<pid>/status.
+func readProcPPID(pid uint32) uint32 {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "PPid:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				v, err := strconv.ParseUint(fields[1], 10, 32)
+				if err == nil {
+					return uint32(v)
+				}
+			}
+			break
+		}
+	}
+	return 0
 }
 
 // getParentInfo extracts parent PID and comm from event or /proc.
@@ -288,7 +404,7 @@ func cleanComm(comm []byte) string {
 	return string(comm)
 }
 
-// Cleanup removes stale lineage entries.
+// Cleanup removes stale lineage and ancestry entries.
 func (lt *LineageTracker) Cleanup(now time.Time) {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
@@ -296,6 +412,7 @@ func (lt *LineageTracker) Cleanup(now time.Time) {
 	for pid, info := range lt.lineage {
 		if now.Sub(info.Timestamp) > lt.config.TTL {
 			delete(lt.lineage, pid)
+			delete(lt.ancestry, pid)
 		}
 	}
 }

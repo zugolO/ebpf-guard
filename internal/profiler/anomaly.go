@@ -25,7 +25,7 @@ type AnomalyDetector struct {
 
 	// State
 	learner        *BaselineLearner
-	profileManager *ProfileManager
+	profileManager *WorkloadProfileManager // keyed by WorkloadKey for per-workload baselines
 
 	// Learning phase tracking - atomic.Bool for hot path performance
 	// This eliminates ~10,000 mutex acquisitions/sec after learning completes
@@ -41,6 +41,8 @@ type AnomalyDetector struct {
 type AnomalyResult struct {
 	PID           uint32
 	Comm          string
+	Namespace     string // K8s namespace; empty for non-K8s processes
+	AppLabel      string // pod label "app"; empty when absent
 	Score         float64
 	IsAnomaly     bool
 	Contributions []AnomalyContribution
@@ -76,7 +78,7 @@ func NewAnomalyDetectorWithSamples(ctx context.Context, threshold float64, learn
 		learningPeriod:    learningPeriod,
 		weight:            weight,
 		learner:           NewBaselineLearner(learningPeriod, minSamples),
-		profileManager:    NewProfileManagerWithContext(ctx, weight, 24*time.Hour, 65536),
+		profileManager:    NewWorkloadProfileManager(ctx, weight, 24*time.Hour, 65536),
 		learningStartTime: time.Now(),
 		enabled:           true,
 		samplingRate:      1.0,
@@ -113,10 +115,14 @@ func (ad *AnomalyDetector) ProcessEvent(e types.Event) *AnomalyResult {
 	// (e.g. add a never-before-seen destination port with EWMA value 1.0),
 	// making the event look normal when scored against itself and defeating
 	// the "new port / new behavior" detection.
-	profile := ad.profileManager.Get(e.PID)
+	//
+	// Profile is keyed by workload class (comm + namespace + pod app label) so
+	// all replicas of the same workload share one baseline.
+	key := WorkloadKeyFromEvent(e)
+	profile := ad.profileManager.GetByKey(key)
 	var result *AnomalyResult
 	if profile != nil {
-		result = ad.calculateAnomalyScore(profile, e)
+		result = ad.calculateAnomalyScore(profile, e, key)
 		profile.SetAnomalyScore(result.Score)
 	}
 
@@ -153,23 +159,26 @@ func (ad *AnomalyDetector) TimeRemaining() time.Duration {
 	return ad.learner.TimeRemaining()
 }
 
-// GetProfileManager returns the underlying profile manager.
-func (ad *AnomalyDetector) GetProfileManager() *ProfileManager {
+// GetProfileManager returns the underlying workload profile manager.
+func (ad *AnomalyDetector) GetProfileManager() *WorkloadProfileManager {
 	return ad.profileManager
 }
 
-// calculateAnomalyScore calculates the anomaly score for a process.
+// calculateAnomalyScore calculates the anomaly score for a workload profile.
 //
-// Lock order invariant: pm.mu (ProfileManager) must be acquired before profile.mu.
-// This is enforced by the call chain: ProcessEvent -> Get (holds pm.mu) -> calculateAnomalyScore.
+// Lock order invariant: wpm.mu (WorkloadProfileManager) must be acquired before
+// profile.mu. This is enforced by the call chain:
+//   ProcessEvent -> GetByKey (holds wpm.mu) -> calculateAnomalyScore.
 // The invariant prevents deadlock between RecordEvent and calculateAnomalyScore.
-func (ad *AnomalyDetector) calculateAnomalyScore(profile *ProcessProfile, event types.Event) *AnomalyResult {
+func (ad *AnomalyDetector) calculateAnomalyScore(profile *ProcessProfile, event types.Event, key WorkloadKey) *AnomalyResult {
 	profile.mu.Lock()
 	defer profile.mu.Unlock()
 
 	result := &AnomalyResult{
-		PID:       profile.PID,
+		PID:       event.PID, // from event, not profile — profile is shared across PIDs
 		Comm:      profile.Comm,
+		Namespace: key.Namespace,
+		AppLabel:  key.AppLabel,
 		Timestamp: time.Now(),
 	}
 

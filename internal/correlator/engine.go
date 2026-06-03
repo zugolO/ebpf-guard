@@ -455,6 +455,15 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// Anomaly detection (if enabled and learning complete)
 	if ce.enableAnomaly && ce.anomalyDetector != nil {
 		if result := ce.anomalyDetector.ProcessEvent(e); result != nil && result.IsAnomaly {
+			// Build workload context for alert details.
+			details := map[string]interface{}{}
+			if result.Namespace != "" {
+				details["namespace"] = result.Namespace
+			}
+			if result.AppLabel != "" {
+				details["app_label"] = result.AppLabel
+			}
+
 			// Create anomaly alert
 			anomalyAlert := types.Alert{
 				ID:        fmt.Sprintf("anomaly-%d-%d-%d", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
@@ -465,6 +474,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				Severity:  types.SeverityWarning,
 				PID:       e.PID,
 				Comm:      util.BytesToString(e.Comm[:]),
+				Details:   details,
 				Event:     e,
 			}
 

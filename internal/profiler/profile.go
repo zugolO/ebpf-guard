@@ -12,7 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// ProcessProfile tracks the behavioral baseline for a single process.
+// ProcessProfile tracks the behavioral baseline for a workload or process.
 type ProcessProfile struct {
 	// mu guards all mutable fields on this profile.
 	// Lock order: pm.mu (ProfileManager) must be acquired before profile.mu
@@ -20,8 +20,9 @@ type ProcessProfile struct {
 	mu sync.Mutex
 
 	// Identity
-	PID  uint32
-	Comm string
+	PID         uint32
+	Comm        string
+	WorkloadKey WorkloadKey // workload class this profile belongs to
 
 	// Timestamps
 	CreatedAt  time.Time
@@ -73,10 +74,33 @@ type SyscallProfile struct {
 func NewProcessProfile(pid uint32, comm string) *ProcessProfile {
 	now := time.Now()
 	return &ProcessProfile{
-		PID:        pid,
-		Comm:       comm,
-		CreatedAt:  now,
-		LastSeenAt: now,
+		PID:         pid,
+		Comm:        comm,
+		WorkloadKey: WorkloadKey{Comm: comm},
+		CreatedAt:   now,
+		LastSeenAt:  now,
+		NetworkProfile: NetworkProfile{
+			DestPorts: make(map[uint16]*EWMA),
+			DestAddrs: make(map[string]*EWMA),
+		},
+		FileProfile: FileProfile{
+			Directories: make(map[string]*EWMA),
+			Extensions:  make(map[string]*EWMA),
+		},
+		SyscallProfile: SyscallProfile{
+			Syscalls: make(map[int64]*EWMA),
+		},
+	}
+}
+
+// NewProcessProfileForWorkload creates a profile for a workload class.
+func NewProcessProfileForWorkload(key WorkloadKey) *ProcessProfile {
+	now := time.Now()
+	return &ProcessProfile{
+		Comm:        key.Comm,
+		WorkloadKey: key,
+		CreatedAt:   now,
+		LastSeenAt:  now,
 		NetworkProfile: NetworkProfile{
 			DestPorts: make(map[uint16]*EWMA),
 			DestAddrs: make(map[string]*EWMA),

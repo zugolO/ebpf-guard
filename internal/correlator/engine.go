@@ -332,6 +332,33 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		}
 	}()
 
+	// Background goroutine that evicts expired enforcement cooldown entries.
+	// Without this the cooldowns sync.Map grows unbounded with unique (ruleID,PID) pairs.
+	go func() {
+		// Check every 5× the cooldown window so entries live long enough to
+		// block repeated enforcement, but dead PIDs don't accumulate forever.
+		interval := enforceCooldown * 5
+		if interval < time.Minute {
+			interval = time.Minute
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-enforceCooldown)
+				ce.cooldowns.Range(func(k, v any) bool {
+					if t, ok := v.(time.Time); ok && t.Before(cutoff) {
+						ce.cooldowns.Delete(k)
+					}
+					return true
+				})
+			}
+		}
+	}()
+
 	// Initialize anomaly detector if enabled
 	if config.EnableAnomaly {
 		ce.anomalyDetector = profiler.NewAnomalyDetectorWithSamples(

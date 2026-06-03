@@ -2,6 +2,7 @@
 package profiler
 
 import (
+	"container/heap"
 	"context"
 	"sync"
 	"time"
@@ -228,8 +229,12 @@ type ProfileManager struct {
 	ttl      time.Duration
 	maxPIDs  int // maximum number of tracked PIDs; 0 = unlimited
 
+	// LRU eviction structures — O(log n) eviction via a min-heap.
+	lruHeap  lruUint32Heap
+	lruIndex lruUint32Index
+
 	// Sprint 34.0 metrics
-	evictions      uint64 // atomic counter for LRU evictions
+	evictions      uint64             // atomic counter for LRU evictions
 	trackedGauge   prometheus.Gauge   // ebpf_guard_tracked_pids_total
 	evictionsTotal prometheus.Counter // ebpf_guard_profile_evictions_total
 	memBytesGauge  prometheus.Gauge   // ebpf_guard_profiler_memory_bytes
@@ -243,6 +248,7 @@ func NewProfileManager(weight float64, ttl time.Duration) *ProfileManager {
 		weight:   weight,
 		ttl:      ttl,
 		maxPIDs:  65536,
+		lruIndex: make(lruUint32Index),
 	}
 }
 
@@ -257,6 +263,7 @@ func NewProfileManagerWithContext(ctx context.Context, weight float64, ttl time.
 		weight:   weight,
 		ttl:      ttl,
 		maxPIDs:  maxPIDs,
+		lruIndex: make(lruUint32Index),
 		trackedGauge: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_tracked_pids_total",
 			Help: "Number of PIDs currently tracked by the profiler.",
@@ -335,12 +342,13 @@ func (pm *ProfileManager) cleanupLoop(ctx context.Context, interval time.Duratio
 }
 
 // GetOrCreate returns an existing profile or creates a new one.
-// When the map is at capacity (maxPIDs), the least-recently-seen entry is evicted.
+// When the map is at capacity (maxPIDs), the least-recently-accessed entry is evicted.
 func (pm *ProfileManager) GetOrCreate(pid uint32, comm string) *ProcessProfile {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	if profile, exists := pm.profiles[pid]; exists {
+		pm.lruIndex.touch(&pm.lruHeap, pid)
 		return profile
 	}
 
@@ -350,30 +358,21 @@ func (pm *ProfileManager) GetOrCreate(pid uint32, comm string) *ProcessProfile {
 
 	profile := NewProcessProfile(pid, comm)
 	pm.profiles[pid] = profile
+	pm.lruIndex.push(&pm.lruHeap, pid)
 	return profile
 }
 
-// evictLRULocked removes the profile with the oldest LastSeenAt timestamp.
-// Caller must hold pm.mu (write lock).
+// evictLRULocked removes the profile with the oldest last-access time.
+// Caller must hold pm.mu (write lock). O(log n) via the min-heap.
 func (pm *ProfileManager) evictLRULocked() {
-	var lruPID uint32
-	var lruTime time.Time
-	first := true
-	for pid, p := range pm.profiles {
-		p.mu.Lock()
-		seen := p.LastSeenAt
-		p.mu.Unlock()
-		if first || seen.Before(lruTime) {
-			lruPID = pid
-			lruTime = seen
-			first = false
-		}
+	if pm.lruHeap.Len() == 0 {
+		return
 	}
-	if !first {
-		delete(pm.profiles, lruPID)
-		if pm.evictionsTotal != nil {
-			pm.evictionsTotal.Inc()
-		}
+	e := heap.Pop(&pm.lruHeap).(*lruUint32Entry)
+	delete(pm.lruIndex, e.key)
+	delete(pm.profiles, e.key)
+	if pm.evictionsTotal != nil {
+		pm.evictionsTotal.Inc()
 	}
 }
 
@@ -388,6 +387,7 @@ func (pm *ProfileManager) Get(pid uint32) *ProcessProfile {
 func (pm *ProfileManager) Remove(pid uint32) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	pm.lruIndex.remove(&pm.lruHeap, pid)
 	delete(pm.profiles, pid)
 }
 
@@ -412,6 +412,7 @@ func (pm *ProfileManager) CleanupExpired() int {
 	removed := 0
 	for pid, profile := range pm.profiles {
 		if profile.IsExpired(pm.ttl) {
+			pm.lruIndex.remove(&pm.lruHeap, pid)
 			delete(pm.profiles, pid)
 			removed++
 		}
@@ -448,6 +449,9 @@ func (pm *ProfileManager) RecordEvent(e types.Event) {
 		}
 		profile = NewProcessProfile(e.PID, string(bytesToString(e.Comm[:])))
 		pm.profiles[e.PID] = profile
+		pm.lruIndex.push(&pm.lruHeap, e.PID)
+	} else {
+		pm.lruIndex.touch(&pm.lruHeap, e.PID)
 	}
 	pm.mu.Unlock()
 

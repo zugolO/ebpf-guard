@@ -2,6 +2,7 @@
 package profiler
 
 import (
+	"container/heap"
 	"context"
 	"math"
 	"math/rand"
@@ -106,6 +107,10 @@ type SequenceProfiler struct {
 	maxPIDs      int
 	enabled      bool
 	samplingRate float64
+
+	// LRU eviction structures — O(log n) eviction via a min-heap.
+	lruHeap  lruStringHeap
+	lruIndex lruStringIndex
 }
 
 // NewSequenceProfiler creates a new sequence profiler.
@@ -143,6 +148,7 @@ func newSequenceProfiler(config SequenceConfig, ttl time.Duration, maxPIDs int) 
 		maxPIDs:      maxPIDs,
 		enabled:      config.Enabled,
 		samplingRate: 1.0,
+		lruIndex:     make(lruStringIndex),
 	}
 }
 
@@ -194,6 +200,9 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 			lastUpdate: time.Now(),
 		}
 		sp.states[ks] = state
+		sp.lruIndex.push(&sp.lruHeap, ks)
+	} else {
+		sp.lruIndex.touch(&sp.lruHeap, ks)
 	}
 
 	state.window.push(int(e.Syscall.Nr))
@@ -236,22 +245,15 @@ func (sp *SequenceProfiler) GetStateByKey(key WorkloadKey) (*pidSequenceState, b
 	return state, ok
 }
 
-// evictLRULocked removes the state with the oldest lastUpdate timestamp.
-// Caller must hold sp.mu (write lock).
+// evictLRULocked removes the state with the oldest last-access time.
+// Caller must hold sp.mu (write lock). O(log n) via the min-heap.
 func (sp *SequenceProfiler) evictLRULocked() {
-	var lruKey string
-	var lruTime time.Time
-	first := true
-	for ks, s := range sp.states {
-		if first || s.lastUpdate.Before(lruTime) {
-			lruKey = ks
-			lruTime = s.lastUpdate
-			first = false
-		}
+	if sp.lruHeap.Len() == 0 {
+		return
 	}
-	if !first {
-		delete(sp.states, lruKey)
-	}
+	e := heap.Pop(&sp.lruHeap).(*lruEntry)
+	delete(sp.lruIndex, e.key)
+	delete(sp.states, e.key)
 }
 
 // Cleanup removes stale PID states.
@@ -259,9 +261,10 @@ func (sp *SequenceProfiler) Cleanup(now time.Time) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	for pid, state := range sp.states {
+	for ks, state := range sp.states {
 		if now.Sub(state.lastUpdate) > sp.ttl {
-			delete(sp.states, pid)
+			sp.lruIndex.remove(&sp.lruHeap, ks)
+			delete(sp.states, ks)
 		}
 	}
 }

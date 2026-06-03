@@ -676,7 +676,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 // evaluateRegoPolicies evaluates alerts against Rego policies.
 // This is called post-YAML filter to minimize OPA evaluation overhead.
 func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []types.Alert) []types.Alert {
-	var enhancedAlerts []types.Alert
+	enhancedAlerts := make([]types.Alert, 0, len(alerts))
 
 	for _, alert := range alerts {
 		// Evaluate alert against Rego policies

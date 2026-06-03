@@ -1,6 +1,7 @@
 package profiler
 
 import (
+	"container/heap"
 	"context"
 	"sync"
 	"time"
@@ -50,6 +51,10 @@ type WorkloadProfileManager struct {
 	ttl      time.Duration
 	maxKeys  int
 
+	// LRU eviction structures — O(log n) eviction via a min-heap.
+	lruHeap  lruStringHeap
+	lruIndex lruStringIndex
+
 	evictionsTotal prometheus.Counter
 	trackedGauge   prometheus.Gauge
 	memBytesGauge  prometheus.Gauge
@@ -66,6 +71,7 @@ func NewWorkloadProfileManager(ctx context.Context, weight float64, ttl time.Dur
 		weight:   weight,
 		ttl:      ttl,
 		maxKeys:  maxKeys,
+		lruIndex: make(lruStringIndex),
 		trackedGauge: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_workload_profiles_total",
 			Help: "Number of workload classes currently tracked by the profiler.",
@@ -154,6 +160,7 @@ func (wpm *WorkloadProfileManager) GetOrCreateByKey(key WorkloadKey) *ProcessPro
 
 	ks := key.String()
 	if p, ok := wpm.profiles[ks]; ok {
+		wpm.lruIndex.touch(&wpm.lruHeap, ks)
 		return p
 	}
 	if wpm.maxKeys > 0 && len(wpm.profiles) >= wpm.maxKeys {
@@ -161,6 +168,7 @@ func (wpm *WorkloadProfileManager) GetOrCreateByKey(key WorkloadKey) *ProcessPro
 	}
 	p := NewProcessProfileForWorkload(key)
 	wpm.profiles[ks] = p
+	wpm.lruIndex.push(&wpm.lruHeap, ks)
 	return p
 }
 
@@ -181,6 +189,9 @@ func (wpm *WorkloadProfileManager) RecordEvent(e types.Event) {
 		}
 		p = NewProcessProfileForWorkload(key)
 		wpm.profiles[ks] = p
+		wpm.lruIndex.push(&wpm.lruHeap, ks)
+	} else {
+		wpm.lruIndex.touch(&wpm.lruHeap, ks)
 	}
 	wpm.mu.Unlock()
 
@@ -210,6 +221,7 @@ func (wpm *WorkloadProfileManager) CleanupExpired() int {
 	removed := 0
 	for ks, p := range wpm.profiles {
 		if p.IsExpired(wpm.ttl) {
+			wpm.lruIndex.remove(&wpm.lruHeap, ks)
 			delete(wpm.profiles, ks)
 			removed++
 		}
@@ -217,27 +229,17 @@ func (wpm *WorkloadProfileManager) CleanupExpired() int {
 	return removed
 }
 
-// evictLRULocked removes the workload profile with the oldest LastSeenAt.
-// Caller must hold wpm.mu write lock.
+// evictLRULocked removes the workload profile with the oldest last-access time.
+// Caller must hold wpm.mu write lock. O(log n) via the min-heap.
 func (wpm *WorkloadProfileManager) evictLRULocked() {
-	var lruKey string
-	var lruTime time.Time
-	first := true
-	for ks, p := range wpm.profiles {
-		p.mu.Lock()
-		seen := p.LastSeenAt
-		p.mu.Unlock()
-		if first || seen.Before(lruTime) {
-			lruKey = ks
-			lruTime = seen
-			first = false
-		}
+	if wpm.lruHeap.Len() == 0 {
+		return
 	}
-	if !first {
-		delete(wpm.profiles, lruKey)
-		if wpm.evictionsTotal != nil {
-			wpm.evictionsTotal.Inc()
-		}
+	e := heap.Pop(&wpm.lruHeap).(*lruEntry)
+	delete(wpm.lruIndex, e.key)
+	delete(wpm.profiles, e.key)
+	if wpm.evictionsTotal != nil {
+		wpm.evictionsTotal.Inc()
 	}
 }
 

@@ -21,16 +21,24 @@
 // The event JSON format passed to evaluate:
 //
 //	{
-//	  "type": 2,           // EventType constant (1=syscall, 2=network, 3=file, 4=tls, 5=dns)
+//	  "type": 2,           // EventType constant:
+//	                       //   1=syscall, 2=network, 3=file, 4=tls, 5=dns,
+//	                       //   6=privesc, 7=net_close, 8=kmod, 9=cgroup_esc, 10=gpu
 //	  "pid": 1234,
 //	  "ppid": 1,
 //	  "uid": 0,
 //	  "comm": "nginx",
 //	  "parent_comm": "containerd-shim",
-//	  "network": { "saddr": "10.0.0.1", "daddr": "1.2.3.4", "sport": 54321, "dport": 443 },
-//	  "file": { "filename": "/etc/shadow", "flags": 0, "op": 0 },
-//	  "dns": { "qname": "example.com", "qtype": 1 },
-//	  "tls": { "direction": 0, "data_len": 256 }
+//	  "network":    { "saddr": "10.0.0.1", "daddr": "1.2.3.4", "sport": 54321, "dport": 443, "proto": 6, "family": 2 },
+//	  "file":       { "filename": "/etc/shadow", "flags": 0, "mode": 0, "op": 0 },
+//	  "dns":        { "qname": "example.com", "qtype": 1, "rcode": 0, "direction": 0 },
+//	  "tls":        { "direction": 0, "data_len": 256 },
+//	  "syscall":    { "nr": 59, "ret": 0 },
+//	  "privesc":    { "old_caps": 0, "new_caps": 4096 },
+//	  "net_close":  { "saddr": "10.0.0.1", "daddr": "1.2.3.4", "sport": 54321, "dport": 443, "family": 2, "duration_ms": 120 },
+//	  "kmod":       { "mod_name": "evil.ko", "from_tmpfs": true },
+//	  "cgroup_esc": { "init_cgroup_id": 1, "new_cgroup_id": 2 },
+//	  "gpu":        { "op": 3, "dev_ptr": 140234567890, "host_ptr": 0, "size": 1048576 }
 //	}
 package wasm
 
@@ -299,6 +307,42 @@ func SerializeEvent(e types.Event) ([]byte, error) {
 		m["syscall"] = map[string]interface{}{
 			"nr":  e.Syscall.Nr,
 			"ret": e.Syscall.Ret,
+		}
+	}
+	if e.Privesc != nil {
+		m["privesc"] = map[string]interface{}{
+			"old_caps": e.Privesc.OldCaps,
+			"new_caps": e.Privesc.NewCaps,
+		}
+	}
+	if e.NetClose != nil {
+		m["net_close"] = map[string]interface{}{
+			"saddr":       formatIP(e.NetClose.Saddr, e.NetClose.Family),
+			"daddr":       formatIP(e.NetClose.Daddr, e.NetClose.Family),
+			"sport":       e.NetClose.Sport,
+			"dport":       e.NetClose.Dport,
+			"family":      int(e.NetClose.Family),
+			"duration_ms": e.NetClose.Duration.Milliseconds(),
+		}
+	}
+	if e.Kmod != nil {
+		m["kmod"] = map[string]interface{}{
+			"mod_name":   e.Kmod.ModName,
+			"from_tmpfs": e.Kmod.FromTmpfs,
+		}
+	}
+	if e.CgroupEsc != nil {
+		m["cgroup_esc"] = map[string]interface{}{
+			"init_cgroup_id": e.CgroupEsc.InitCgroupID,
+			"new_cgroup_id":  e.CgroupEsc.NewCgroupID,
+		}
+	}
+	if e.GPU != nil {
+		m["gpu"] = map[string]interface{}{
+			"op":       int(e.GPU.Op),
+			"dev_ptr":  e.GPU.DevPtr,
+			"host_ptr": e.GPU.HostPtr,
+			"size":     e.GPU.Size,
 		}
 	}
 	return json.Marshal(m)

@@ -421,7 +421,7 @@ type GossipConfig struct {
 	// If empty, gossip requests are accepted without authentication.
 	Secret string `mapstructure:"secret"`
 	// Peers is the list of peer base URLs to push IOCs to.
-	// Example: ["http://10.0.0.2:9090", "http://10.0.0.3:9090"]
+	// With TLS enabled use https:// URLs, e.g. "https://10.0.0.2:9090".
 	Peers []string `mapstructure:"peers"`
 	// IOCTTLSeconds is how long a published IOC remains valid (seconds). Default: 3600.
 	IOCTTLSeconds int `mapstructure:"ioc_ttl"`
@@ -429,6 +429,15 @@ type GossipConfig struct {
 	MaxIOCs int `mapstructure:"max_iocs"`
 	// PushIntervalSeconds controls how often the delta is sent to peers. Default: 30.
 	PushIntervalSeconds int `mapstructure:"push_interval"`
+	// TLSEnabled activates mTLS for all peer-to-peer gossip connections.
+	// When true, TLSCertFile, TLSKeyFile, and TLSCAFile must be set.
+	TLSEnabled bool `mapstructure:"tls_enabled"`
+	// TLSCertFile is the path to the PEM-encoded client certificate.
+	TLSCertFile string `mapstructure:"tls_cert_file"`
+	// TLSKeyFile is the path to the PEM-encoded private key for TLSCertFile.
+	TLSKeyFile string `mapstructure:"tls_key_file"`
+	// TLSCAFile is the path to the PEM-encoded CA bundle used to verify peer certificates.
+	TLSCAFile string `mapstructure:"tls_ca_file"`
 }
 
 // CompatConfig holds migration compatibility settings (Sprint 24.0).
@@ -723,6 +732,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gossip.ioc_ttl", 3600)
 	v.SetDefault("gossip.max_iocs", 100_000)
 	v.SetDefault("gossip.push_interval", 30)
+	v.SetDefault("gossip.tls_enabled", false)
+	v.SetDefault("gossip.tls_cert_file", "")
+	v.SetDefault("gossip.tls_key_file", "")
+	v.SetDefault("gossip.tls_ca_file", "")
 
 	// OSINT defaults — disabled by default; operators configure sources explicitly.
 	v.SetDefault("osint.enabled", false)

@@ -171,7 +171,7 @@ func (d *NgramDGADetector) Score(domain string) float64 {
 // IsDGA returns true when the domain's N-gram score is at or above the detector
 // threshold. Short or non-qualifying domains always return false.
 func (d *NgramDGADetector) IsDGA(domain string) bool {
-	return Score(domain) >= d.threshold
+	return d.Score(domain) >= d.threshold
 }
 
 // Score is a package-level convenience wrapper that uses the singleton detector.

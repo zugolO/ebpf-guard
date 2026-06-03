@@ -3,6 +3,7 @@ package exporter
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -61,6 +62,7 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 // handleAlertPath dispatches sub-paths under /api/v1/alerts/:
 //
 //	GET  /api/v1/alerts/{id}          → return single alert
+//	GET  /api/v1/alerts/{id}/explain  → return human-readable explanation
 //	POST /api/v1/alerts/{id}/feedback → record analyst feedback
 func (s *Server) handleAlertPath(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/alerts/")
@@ -77,6 +79,17 @@ func (s *Server) handleAlertPath(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.submitAlertFeedback(w, r, alertID)
+		return
+	}
+
+	// GET /api/v1/alerts/{id}/explain
+	if r.Method == http.MethodGet && strings.HasSuffix(path, "/explain") {
+		alertID := strings.TrimSuffix(path, "/explain")
+		if alertID == "" {
+			http.Error(w, "Invalid alert ID", http.StatusBadRequest)
+			return
+		}
+		s.explainAlert(w, r, alertID)
 		return
 	}
 
@@ -97,6 +110,41 @@ func (s *Server) handleAlertPath(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// explainAlert handles GET /api/v1/alerts/{id}/explain.
+// Returns a human-readable explanation with MITRE ATT&CK mappings and mitigations.
+func (s *Server) explainAlert(w http.ResponseWriter, r *http.Request, alertID string) {
+	s.mu.RLock()
+	exp := s.alertExplainer
+	as := s.alertStore
+	s.mu.RUnlock()
+
+	if as == nil {
+		http.Error(w, "Alert store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if exp == nil {
+		http.Error(w, "Explainer not configured", http.StatusNotImplemented)
+		return
+	}
+
+	alert, err := as.QueryByID(r.Context(), alertID)
+	if err != nil || alert == nil {
+		http.Error(w, "Alert not found", http.StatusNotFound)
+		return
+	}
+
+	explanation, err := exp.Explain(*alert)
+	if err != nil {
+		s.logger.Error("explainer: failed to explain alert",
+			slog.String("alert_id", alertID), slog.Any("error", err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(explanation)
 }
 
 // submitAlertFeedback handles POST /api/v1/alerts/{id}/feedback.

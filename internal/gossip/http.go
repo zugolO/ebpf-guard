@@ -3,6 +3,7 @@ package gossip
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,15 +23,19 @@ type gossipClient struct {
 	http   *http.Client
 }
 
-func newGossipClient(secret string) *gossipClient {
+func newGossipClient(secret string, tlsCfg *tls.Config) *gossipClient {
+	transport := &http.Transport{
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	if tlsCfg != nil {
+		transport.TLSClientConfig = tlsCfg
+	}
 	return &gossipClient{
 		secret: secret,
 		http: &http.Client{
-			Timeout: clientTimeout,
-			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 4,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			Timeout:   clientTimeout,
+			Transport: transport,
 		},
 	}
 }

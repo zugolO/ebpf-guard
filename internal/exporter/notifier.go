@@ -33,9 +33,10 @@ type FanoutNotifier struct {
 
 // FanoutConfig holds configuration for all notification backends.
 type FanoutConfig struct {
-	Slack   SlackConfig   `mapstructure:"slack"`
-	Teams   TeamsConfig   `mapstructure:"teams"`
-	Webhook WebhookConfig `mapstructure:"webhook"`
+	Slack       SlackConfig   `mapstructure:"slack"`
+	Teams       TeamsConfig   `mapstructure:"teams"`
+	Webhook     WebhookConfig `mapstructure:"webhook"`
+	FalcoOutput bool          `mapstructure:"falco_output"` // emit Falco-compatible JSON for the webhook notifier
 }
 
 // NewFanoutNotifier creates a new fanout notifier with the given configuration.
@@ -63,7 +64,7 @@ func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Log
 	}
 
 	// Initialize generic webhook notifier if enabled
-	if webhookNotifier := NewGenericWebhookNotifier(cfg.Webhook, logger); webhookNotifier.Enabled() {
+	if webhookNotifier := NewGenericWebhookNotifierWithCompat(cfg.Webhook, logger, cfg.FalcoOutput); webhookNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, webhookNotifier)
 		logger.Info("exporter/notifier: Webhook notifier enabled",
 			slog.String("url", cfg.Webhook.URL))

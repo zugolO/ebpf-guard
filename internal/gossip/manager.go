@@ -2,8 +2,12 @@ package gossip
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -22,7 +26,8 @@ type Config struct {
 	// Secret is the shared authentication token used between peers.
 	// Requests without a matching X-Gossip-Secret header are rejected.
 	Secret string
-	// Peers is the list of peer base URLs (e.g. "http://10.0.0.2:9090").
+	// Peers is the list of peer base URLs.
+	// Use https:// URLs when TLSEnabled=true, e.g. "https://10.0.0.2:9090".
 	Peers []string
 	// IOCTTL is how long a published IOC remains valid. Default: 1 hour.
 	IOCTTL time.Duration
@@ -30,6 +35,15 @@ type Config struct {
 	MaxIOCs int
 	// PushInterval controls how often the delta is flushed to peers. Default: 30 s.
 	PushInterval time.Duration
+	// TLSEnabled activates mTLS for all peer connections.
+	// When true, TLSCertFile, TLSKeyFile, and TLSCAFile must be set.
+	TLSEnabled bool
+	// TLSCertFile is the path to the PEM-encoded client certificate.
+	TLSCertFile string
+	// TLSKeyFile is the path to the PEM-encoded private key.
+	TLSKeyFile string
+	// TLSCAFile is the path to the PEM-encoded CA bundle used to verify peers.
+	TLSCAFile string
 }
 
 // DefaultConfig returns a safe default configuration (gossip disabled).
@@ -65,8 +79,9 @@ type Manager struct {
 }
 
 // NewManager creates a gossip Manager.
+// Returns an error if TLS is enabled but cert/key/CA files cannot be loaded.
 // Use Start to launch background goroutines.
-func NewManager(cfg Config, logger *slog.Logger) *Manager {
+func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -80,10 +95,20 @@ func NewManager(cfg Config, logger *slog.Logger) *Manager {
 		cfg.PushInterval = 30 * time.Second
 	}
 
+	var tlsCfg *tls.Config
+	if cfg.TLSEnabled {
+		var err error
+		tlsCfg, err = buildGossipTLSConfig(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("gossip: %w", err)
+		}
+		logger.Info("gossip: mTLS configured for peer connections")
+	}
+
 	return &Manager{
 		cfg:       cfg,
 		store:     NewIOCStore(cfg.MaxIOCs, cfg.IOCTTL),
-		client:    newGossipClient(cfg.Secret),
+		client:    newGossipClient(cfg.Secret, tlsCfg),
 		discovery: NewStaticPeerDiscovery(cfg.Peers),
 		logger:    logger,
 
@@ -107,7 +132,31 @@ func NewManager(cfg Config, logger *slog.Logger) *Manager {
 			Name: "ebpf_guard_gossip_store_size",
 			Help: "Current IOC store entry count.",
 		}),
+	}, nil
+}
+
+// buildGossipTLSConfig creates an mTLS config for gossip peer connections.
+func buildGossipTLSConfig(cfg Config) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load peer client cert: %w", err)
 	}
+
+	caCert, err := os.ReadFile(cfg.TLSCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read peer CA bundle: %w", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("parse peer CA bundle: no valid certificates found")
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 // RegisterMetrics registers all gossip Prometheus metrics with reg.

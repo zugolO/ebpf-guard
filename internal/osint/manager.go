@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/config"
@@ -18,6 +19,7 @@ const stateFileName = ".osint_state.json"
 // It runs periodic syncs and writes generated YAML rules to OutputDir so
 // the correlator's hot-reload watcher picks them up automatically.
 type Manager struct {
+	mu        sync.Mutex // serialises sync() calls from Run ticker and explicit Sync()
 	clients   []Client
 	generator *Generator
 	cfg       config.OSINTConfig
@@ -138,6 +140,9 @@ func (m *Manager) Sync(ctx context.Context) {
 }
 
 func (m *Manager) sync(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	state := m.loadState()
 
 	for _, client := range m.clients {

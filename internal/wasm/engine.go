@@ -33,6 +33,11 @@ var (
 	}, []string{"plugin_id"})
 )
 
+// pluginEvalTimeout is the per-invocation deadline for a single WASM plugin.
+// A plugin that exceeds this limit (e.g. infinite loop) has its module execution
+// interrupted by wazero via context cancellation so it cannot stall the pipeline.
+const pluginEvalTimeout = 100 * time.Millisecond
+
 // Engine manages WASM detection plugins loaded from a directory.
 // All plugins run in the same wazero Runtime (shared compilation cache)
 // but each evaluation gets a fresh module instance for full isolation.
@@ -136,17 +141,30 @@ func (e *Engine) Evaluate(ctx context.Context, event types.Event) []types.Alert 
 
 // evalPlugin runs a single plugin and builds the resulting alert on a match.
 func (e *Engine) evalPlugin(ctx context.Context, p *Plugin, event types.Event, eventJSON []byte) (types.Alert, bool) {
+	pluginCtx, cancel := context.WithTimeout(ctx, pluginEvalTimeout)
+	defer cancel()
+
 	start := time.Now()
-	result, err := p.Evaluate(ctx, eventJSON)
+	result, err := p.Evaluate(pluginCtx, eventJSON)
 	elapsed := time.Since(start)
 
 	pluginLatency.WithLabelValues(p.ID()).Observe(elapsed.Seconds())
 
 	if err != nil {
-		e.logger.Warn("WASM plugin evaluation error",
-			slog.String("plugin", p.ID()),
-			slog.Any("error", err))
-		pluginEvals.WithLabelValues(p.ID(), "error").Inc()
+		if pluginCtx.Err() != nil {
+			// Timeout: the plugin exceeded pluginEvalTimeout. Log with enough detail
+			// for operators to identify and optimise or remove the offending plugin.
+			e.logger.Warn("WASM plugin timed out",
+				slog.String("plugin", p.ID()),
+				slog.Duration("limit", pluginEvalTimeout),
+				slog.Duration("elapsed", elapsed))
+			pluginEvals.WithLabelValues(p.ID(), "timeout").Inc()
+		} else {
+			e.logger.Warn("WASM plugin evaluation error",
+				slog.String("plugin", p.ID()),
+				slog.Any("error", err))
+			pluginEvals.WithLabelValues(p.ID(), "error").Inc()
+		}
 		return types.Alert{}, false
 	}
 

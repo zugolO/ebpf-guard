@@ -213,7 +213,11 @@ func newTestManager(peers ...string) *Manager {
 		PushInterval: time.Hour, // long interval so pushLoop doesn't fire in tests
 		Peers:        peers,
 	}
-	return NewManager(cfg, nil)
+	m, err := NewManager(cfg, nil)
+	if err != nil {
+		panic(err) // TLS is disabled in tests; this path is unreachable
+	}
+	return m
 }
 
 func TestManager_MatchIP(t *testing.T) {
@@ -242,7 +246,8 @@ func TestManager_MatchFingerprint(t *testing.T) {
 
 func TestManager_DisabledMatchAlwaysFalse(t *testing.T) {
 	cfg := Config{Enabled: false}
-	m := NewManager(cfg, nil)
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
 	m.store.Add(IOC{Type: IOCTypeIP, Value: "1.2.3.4", ExpiresAt: time.Now().Add(time.Hour)})
 
 	assert.False(t, m.MatchIP("1.2.3.4"), "disabled manager must not match")
@@ -333,7 +338,8 @@ func TestManager_ExtractFromAlert_Fingerprint(t *testing.T) {
 
 func TestManager_ExtractFromAlert_Disabled(t *testing.T) {
 	cfg := Config{Enabled: false}
-	m := NewManager(cfg, nil)
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		Fingerprint: "abc123",
@@ -415,7 +421,8 @@ func TestHTTP_AuthEnforced(t *testing.T) {
 		MaxIOCs:      100,
 		PushInterval: time.Hour,
 	}
-	m := NewManager(cfg, nil)
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
 	handler := Handler(m)
 
 	iocs := []IOC{{Type: IOCTypeIP, Value: "1.1.1.1", ExpiresAt: time.Now().Add(time.Hour)}}
@@ -483,7 +490,7 @@ func TestGossipClient_PushIOCs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newGossipClient("")
+	c := newGossipClient("", nil)
 	iocs := []IOC{
 		{Type: IOCTypeIP, Value: "8.8.8.8", ExpiresAt: time.Now().Add(time.Hour)},
 	}
@@ -504,7 +511,7 @@ func TestGossipClient_EmptyBatchNoRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newGossipClient("")
+	c := newGossipClient("", nil)
 	err := c.PushIOCs(context.Background(), srv.URL, nil)
 	require.NoError(t, err)
 	assert.False(t, called, "no HTTP request should be made for empty batch")
@@ -516,7 +523,8 @@ func TestGossipClient_EmptyBatchNoRequest(t *testing.T) {
 
 func TestManager_Start_DisabledIsNoop(t *testing.T) {
 	cfg := Config{Enabled: false}
-	m := NewManager(cfg, nil)
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -534,7 +542,8 @@ func TestManager_CleanupLoop(t *testing.T) {
 		MaxIOCs:      100,
 		PushInterval: time.Hour,
 	}
-	m := NewManager(cfg, nil)
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
 
 	m.store.Add(IOC{
 		Type:      IOCTypeIP,
@@ -578,7 +587,8 @@ func TestManager_PushLoop(t *testing.T) {
 		PushInterval: 50 * time.Millisecond, // fast for test
 		Peers:        []string{peer.URL},
 	}
-	m := NewManager(cfg, nil)
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -493,7 +493,14 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				ce.enforcedCounter.Inc()
 				a := alert // capture
 				go func() {
-					if err := ce.actionExecutor.ExecuteAction(ctx, a.Action, a); err != nil {
+					// Detach from the per-request span context: the parent span ends
+					// when Ingest() returns (via defer span.End()), which may happen
+					// before this goroutine runs under load.  WithoutCancel inherits
+					// baggage and trace values so OTel propagation still works, while
+					// the 30 s timeout prevents a hung enforcer from leaking goroutines.
+					enfCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					defer cancel()
+					if err := ce.actionExecutor.ExecuteAction(enfCtx, a.Action, a); err != nil {
 						slog.Warn("correlator: rule enforcement failed",
 							slog.String("rule_id", a.RuleID),
 							slog.String("action", a.Action),

@@ -133,20 +133,17 @@ func (lc *LSMCollector) Load() error {
 		return nil
 	}
 
-	// Remove memory limit for locked memory
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("lsm: remove memlock limit: %w", err)
 	}
 
-	// TODO: Load BPF objects using bpf2go generated code
-	// For now, this is a stub that will be implemented when bpf2go is run
-	lc.logger.Info("lsm: BPF programs loaded (stub)")
-
-	// Add agent PID to whitelist
-	if err := lc.whitelistAgentPID(); err != nil {
-		lc.logger.Warn("lsm: failed to whitelist agent PID", "error", err)
-	}
-
+	// lsm_bpf_gen.go does not exist yet — run `make generate` after
+	// bpf/lsm.bpf.c is finalised to produce it and replace this block
+	// with the real LoadLsmObjects call + link.AttachLSM calls.
+	// Until then, mark as unavailable so IsAvailable(), AddToBlocklist(),
+	// and the enforcer LSM path all correctly report no enforcement active.
+	lc.logger.Warn("lsm: bpf2go bindings not yet generated; LSM enforcement inactive — run `make generate`")
+	lc.available = false
 	return nil
 }
 

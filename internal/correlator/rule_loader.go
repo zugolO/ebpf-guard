@@ -27,6 +27,9 @@ var (
 	}
 	validDNSFields = map[string]bool{
 		"qname": true, "qtype": true, "rcode": true, "direction": true,
+		// Enriched fields computed on demand from qname
+		"qname_length": true, "qname_entropy": true, "qname_dga_score": true,
+		"qname_digit_ratio": true, "qname_subdomain_count": true, "qname_is_dga": true,
 	}
 	validTLSFields = map[string]bool{
 		"tls_data": true, "direction": true, "data_len": true,
@@ -179,7 +182,9 @@ func validateCondition(cond *RuleCondition, eventType types.EventType) error {
 		if cond.Field != "daddr" && cond.Field != "saddr" {
 			return fmt.Errorf("CIDR operator %s can only be used with daddr/saddr fields, not %s", cond.Op, cond.Field)
 		}
-	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpGreaterThan, OpLessThan, OpGreaterOrEqual, OpLessOrEqual:
+	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpSuffix,
+		OpGreaterThan, OpLessThan, OpGreaterOrEqual, OpLessOrEqual,
+		OpCapsGained, OpCapsDropped:
 		// These operators don't need pre-validation
 	default:
 		return fmt.Errorf("unknown operator: %s", cond.Op)

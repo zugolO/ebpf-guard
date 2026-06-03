@@ -47,6 +47,8 @@ const (
 	OpCapsGained RuleConditionOperator = "caps_gained"
 	// OpCapsDropped checks if any of the named capabilities were dropped (old &^ new).
 	OpCapsDropped RuleConditionOperator = "caps_dropped"
+	// OpSuffix checks if the field value ends with any of the given suffixes.
+	OpSuffix RuleConditionOperator = "suffix"
 )
 
 // RuleCondition defines a single condition for rule evaluation.
@@ -102,6 +104,11 @@ type Rule struct {
 type RuleSet struct {
 	Rules []Rule `yaml:"rules"`
 }
+
+// globalDNSAnalyzer is the package-level DNS entropy/n-gram calculator used by
+// getFieldValue to evaluate enriched DNS rule fields (qname_entropy, qname_dga_score,
+// qname_length, qname_digit_ratio, qname_subdomain_count, qname_is_dga) on demand.
+var globalDNSAnalyzer = NewDNSEntropyCalculator()
 
 // RuleEngine evaluates events against rules.
 type RuleEngine struct {
@@ -340,6 +347,13 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool 
 		return len(cond.Values) == 0 || value != cond.Values[0]
 	case OpPrefix:
 		return hasPrefix(cond.Values, value)
+	case OpSuffix:
+		for _, sfx := range cond.Values {
+			if strings.HasSuffix(value, sfx) {
+				return true
+			}
+		}
+		return false
 	case OpRegex:
 		return re.matchesRegex(cond.Values, value)
 	case OpGreaterThan:
@@ -471,6 +485,27 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			return fmt.Sprintf("%d", e.DNS.RCode)
 		case "direction":
 			return fmt.Sprintf("%d", e.DNS.Direction)
+		// ── Enriched DNS fields (computed on demand) ──────────────────────
+		case "qname_length":
+			return fmt.Sprintf("%d", len(e.DNS.QName))
+		case "qname_entropy":
+			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			return fmt.Sprintf("%.4f", a.Entropy)
+		case "qname_dga_score":
+			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			return fmt.Sprintf("%.4f", a.NgramScore)
+		case "qname_digit_ratio":
+			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			return fmt.Sprintf("%.4f", a.DigitRatio)
+		case "qname_subdomain_count":
+			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			return fmt.Sprintf("%d", a.SubdomainCount)
+		case "qname_is_dga":
+			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			if a.IsDGA || a.NgramScore >= DefaultNgramDGADetector().threshold {
+				return "true"
+			}
+			return "false"
 		}
 	case types.EventTLS:
 		if e.TLS == nil {

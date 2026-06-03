@@ -69,6 +69,9 @@ type Config struct {
 
 	// Wasm configuration — custom detection plugin engine.
 	Wasm WasmConfig `mapstructure:"wasm"`
+
+	// OSINT configuration — automated rule generation from threat intelligence feeds.
+	OSINT OSINTConfig `mapstructure:"osint"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -449,6 +452,76 @@ type RegoPolicyConfig struct {
 	RulesDir string `mapstructure:"rules_dir"`
 }
 
+// OSINTConfig holds OSINT threat intelligence feed integration settings.
+type OSINTConfig struct {
+	// Enabled activates the OSINT feed sync engine.
+	Enabled bool `mapstructure:"enabled"`
+	// RefreshInterval is the duration between feed syncs (e.g., "3h", "30m").
+	RefreshInterval string `mapstructure:"refresh_interval"`
+	// OutputDir is the directory where generated rule YAML files are written.
+	// The correlator's hot-reload watcher picks up changes automatically.
+	OutputDir string `mapstructure:"output_dir"`
+	// MaxIoCsPerRule caps how many indicator values appear in a single rule's
+	// condition list. Larger batches reduce file count but may slow evaluation.
+	MaxIoCsPerRule int `mapstructure:"max_iocs_per_rule"`
+	// MISP holds settings for a MISP threat sharing platform instance.
+	MISP MISPConfig `mapstructure:"misp"`
+	// OpenCTI holds settings for an OpenCTI threat intelligence platform.
+	OpenCTI OpenCTIConfig `mapstructure:"opencti"`
+	// VirusTotal holds settings for VirusTotal threat intelligence feeds.
+	VirusTotal VirusTotalConfig `mapstructure:"virustotal"`
+}
+
+// MISPConfig configures the MISP REST API client.
+type MISPConfig struct {
+	// Enabled activates MISP feed fetching.
+	Enabled bool `mapstructure:"enabled"`
+	// URL is the base URL of the MISP instance (e.g., "https://misp.example.com").
+	URL string `mapstructure:"url"`
+	// APIKey is the MISP automation key (found in MISP → My Profile → Auth key).
+	APIKey string `mapstructure:"api_key"`
+	// VerifyTLS controls whether the MISP server's TLS certificate is verified.
+	VerifyTLS bool `mapstructure:"verify_tls"`
+	// AttributeTypes restricts which MISP attribute types are fetched.
+	// Defaults to ["ip-dst", "ip-src", "domain", "hostname"].
+	AttributeTypes []string `mapstructure:"attribute_types"`
+	// MinThreatLevel filters events by MISP threat level (1=high … 4=undefined).
+	// Default: 3 (high + medium + low).
+	MinThreatLevel int `mapstructure:"min_threat_level"`
+	// Tags is an optional list of MISP tags to filter attributes (OR logic).
+	Tags []string `mapstructure:"tags"`
+}
+
+// OpenCTIConfig configures the OpenCTI GraphQL API client.
+type OpenCTIConfig struct {
+	// Enabled activates OpenCTI indicator fetching.
+	Enabled bool `mapstructure:"enabled"`
+	// URL is the base URL of the OpenCTI instance (e.g., "https://opencti.example.com").
+	URL string `mapstructure:"url"`
+	// APIKey is the OpenCTI API token.
+	APIKey string `mapstructure:"api_key"`
+	// VerifyTLS controls whether the OpenCTI server's TLS certificate is verified.
+	VerifyTLS bool `mapstructure:"verify_tls"`
+	// ConfidenceMin is the minimum indicator confidence score (0–100) to include.
+	ConfidenceMin int `mapstructure:"confidence_min"`
+	// TLPMarkings filters indicators to those with any of the listed TLP markings.
+	// Empty list means accept all markings.
+	// Example: ["TLP:WHITE", "TLP:GREEN"]
+	TLPMarkings []string `mapstructure:"tlp_markings"`
+}
+
+// VirusTotalConfig configures the VirusTotal API v3 client.
+type VirusTotalConfig struct {
+	// Enabled activates VirusTotal feed fetching.
+	Enabled bool `mapstructure:"enabled"`
+	// APIKey is the VirusTotal API key.
+	APIKey string `mapstructure:"api_key"`
+	// EnterpriseFeeds enables the VirusTotal Intelligence feed endpoints
+	// (/api/v3/feeds/ips and /api/v3/feeds/domains), which require a
+	// VirusTotal Intelligence subscription. Set false for community-only usage.
+	EnterpriseFeeds bool `mapstructure:"enterprise_feeds"`
+}
+
 // CheckConfigPermissions verifies the config file is not world-writable and is
 // owned by root (uid 0) or the current process UID. Returns an error if the
 // check fails; callers should treat this as a fatal startup error.
@@ -650,6 +723,31 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gossip.ioc_ttl", 3600)
 	v.SetDefault("gossip.max_iocs", 100_000)
 	v.SetDefault("gossip.push_interval", 30)
+
+	// OSINT defaults — disabled by default; operators configure sources explicitly.
+	v.SetDefault("osint.enabled", false)
+	v.SetDefault("osint.refresh_interval", "3h")
+	v.SetDefault("osint.output_dir", "rules/osint")
+	v.SetDefault("osint.max_iocs_per_rule", 500)
+
+	v.SetDefault("osint.misp.enabled", false)
+	v.SetDefault("osint.misp.url", "")
+	v.SetDefault("osint.misp.api_key", "")
+	v.SetDefault("osint.misp.verify_tls", true)
+	v.SetDefault("osint.misp.attribute_types", []string{"ip-dst", "ip-src", "domain", "hostname"})
+	v.SetDefault("osint.misp.min_threat_level", 3)
+	v.SetDefault("osint.misp.tags", []string{})
+
+	v.SetDefault("osint.opencti.enabled", false)
+	v.SetDefault("osint.opencti.url", "")
+	v.SetDefault("osint.opencti.api_key", "")
+	v.SetDefault("osint.opencti.verify_tls", true)
+	v.SetDefault("osint.opencti.confidence_min", 50)
+	v.SetDefault("osint.opencti.tlp_markings", []string{})
+
+	v.SetDefault("osint.virustotal.enabled", false)
+	v.SetDefault("osint.virustotal.api_key", "")
+	v.SetDefault("osint.virustotal.enterprise_feeds", false)
 }
 
 // Get returns the current configuration (thread-safe).

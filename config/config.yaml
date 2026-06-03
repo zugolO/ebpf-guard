@@ -146,3 +146,46 @@ gossip:
   ioc_ttl: 3600               # Seconds an IOC is considered valid (default: 1 hour)
   max_iocs: 100000            # Maximum IOC store size per node
   push_interval: 30           # Seconds between delta pushes to peers
+
+# OSINT threat intelligence integration
+# Automatically generates ebpf-guard detection rules from external IoC feeds.
+# Supported sources: MISP, OpenCTI, VirusTotal (Enterprise).
+#
+# Generated YAML rule files are written to osint.output_dir and picked up
+# by the correlator's hot-reload watcher without restarting the agent.
+#
+# Rule naming convention:
+#   osint_<source>_ip_001.yaml      — IP blocklist rules (field: daddr, op: in)
+#   osint_<source>_cidr_001.yaml    — CIDR blocklist rules (op: in_cidr, condition_group OR)
+#   osint_<source>_domain_001.yaml  — Domain rules (field: qname, op: suffix)
+osint:
+  enabled: false
+  refresh_interval: "3h"         # Duration between feed syncs (e.g., "1h", "30m", "12h")
+  output_dir: rules/osint        # Directory for generated rule files
+  max_iocs_per_rule: 500         # Max values per rule condition (larger = fewer files)
+
+  misp:
+    enabled: false
+    url: ""                       # e.g., https://misp.example.com
+    api_key: ""                   # MISP automation key (My Profile → Auth key)
+    verify_tls: true
+    attribute_types:              # MISP attribute types to fetch
+      - ip-dst
+      - ip-src
+      - domain
+      - hostname
+    min_threat_level: 3           # 1=high, 2=medium, 3=low, 4=undefined
+    tags: []                      # Filter by MISP tags (OR logic); empty = all
+
+  opencti:
+    enabled: false
+    url: ""                       # e.g., https://opencti.example.com
+    api_key: ""                   # OpenCTI API token
+    verify_tls: true
+    confidence_min: 50            # Minimum indicator confidence score (0-100)
+    tlp_markings: []              # e.g., ["TLP:WHITE", "TLP:GREEN"]; empty = all
+
+  virustotal:
+    enabled: false
+    api_key: ""                   # VirusTotal API key
+    enterprise_feeds: false       # Requires VirusTotal Intelligence subscription

@@ -287,6 +287,8 @@ type LineageTrackerConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// TTL is the time-to-live for lineage entries in seconds
 	TTL int `mapstructure:"ttl"`
+	// MaxDepth is the maximum number of ancestors stored per process (default 16).
+	MaxDepth int `mapstructure:"max_depth"`
 }
 
 // ExporterConfig holds metrics and alerting export settings.
@@ -516,6 +518,7 @@ func setDefaults(v *viper.Viper) {
 	// Lineage tracker defaults
 	v.SetDefault("profiler.lineage.enabled", true)
 	v.SetDefault("profiler.lineage.ttl", 300)
+	v.SetDefault("profiler.lineage.max_depth", 16)
 
 	// Exporter defaults
 	v.SetDefault("exporter.enabled", true)

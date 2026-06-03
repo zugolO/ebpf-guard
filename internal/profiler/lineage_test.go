@@ -1,6 +1,7 @@
 package profiler
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -313,6 +314,116 @@ func commBytes(s string) [16]byte {
 	var b [16]byte
 	copy(b[:], s)
 	return b
+}
+
+func TestLineageTrackerGetProcessTree_SingleEvent(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tracker := NewLineageTracker(DefaultLineageConfig(), logger)
+
+	e := types.Event{
+		Type:       types.EventSyscall,
+		PID:        5678,
+		PPID:       1234,
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("nginx"),
+	}
+	tracker.Update(e)
+
+	tree := tracker.GetProcessTree(5678)
+	require.NotNil(t, tree)
+	// Last node must be bash itself.
+	last := tree[len(tree)-1]
+	assert.Equal(t, uint32(5678), last.PID)
+	assert.Equal(t, "bash", last.Comm)
+	assert.Equal(t, uint32(1234), last.PPID)
+}
+
+func TestLineageTrackerGetProcessTree_Chain(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tracker := NewLineageTracker(DefaultLineageConfig(), logger)
+
+	// Simulate: nginx (100) → bash (200) → curl (300)
+	tracker.Track(types.Event{
+		Type:       types.EventSyscall,
+		PID:        200,
+		PPID:       100,
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("nginx"),
+	})
+	tracker.Track(types.Event{
+		Type:       types.EventSyscall,
+		PID:        300,
+		PPID:       200,
+		Comm:       commBytes("curl"),
+		ParentComm: commBytes("bash"),
+	})
+
+	tree := tracker.GetProcessTree(300)
+	require.NotNil(t, tree, "process tree should be built for curl")
+
+	// The chain must end with curl.
+	last := tree[len(tree)-1]
+	assert.Equal(t, uint32(300), last.PID)
+	assert.Equal(t, "curl", last.Comm)
+
+	// The second-to-last must be bash.
+	require.GreaterOrEqual(t, len(tree), 2)
+	prev := tree[len(tree)-2]
+	assert.Equal(t, uint32(200), prev.PID)
+	assert.Equal(t, "bash", prev.Comm)
+}
+
+func TestLineageTrackerGetProcessTree_MaxDepth(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg := DefaultLineageConfig()
+	cfg.MaxDepth = 3
+	tracker := NewLineageTracker(cfg, logger)
+
+	// Build a 5-deep chain: pid 1→2→3→4→5
+	for i := uint32(2); i <= 5; i++ {
+		p := commBytes(fmt.Sprintf("proc%d", i-1))
+		c := commBytes(fmt.Sprintf("proc%d", i))
+		tracker.Track(types.Event{
+			Type:       types.EventSyscall,
+			PID:        i,
+			PPID:       i - 1,
+			Comm:       c,
+			ParentComm: p,
+		})
+	}
+
+	tree := tracker.GetProcessTree(5)
+	require.NotNil(t, tree)
+	assert.LessOrEqual(t, len(tree), 3, "tree should be capped at MaxDepth")
+	// Must still end at pid 5.
+	assert.Equal(t, uint32(5), tree[len(tree)-1].PID)
+}
+
+func TestLineageTrackerGetProcessTree_Unknown(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tracker := NewLineageTracker(DefaultLineageConfig(), logger)
+
+	tree := tracker.GetProcessTree(99999)
+	assert.Nil(t, tree, "unknown PID should return nil")
+}
+
+func TestLineageTrackerTrackDoesNotFireCallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tracker := NewLineageTracker(DefaultLineageConfig(), logger)
+
+	fired := false
+	tracker.SetMatchHandler(func(LineageMatch) { fired = true })
+
+	// nginx→bash matches the web_shell_spawn pattern; Track must NOT fire the callback.
+	tracker.Track(types.Event{
+		Type:       types.EventSyscall,
+		PID:        5678,
+		PPID:       1234,
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("nginx"),
+	})
+
+	assert.False(t, fired, "Track must not invoke the match callback")
 }
 
 // BenchmarkLineageTrackerUpdate benchmarks the lineage tracker hot path.

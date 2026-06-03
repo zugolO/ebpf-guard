@@ -3,8 +3,10 @@ package correlator
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
+	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -269,4 +271,65 @@ func TestAlertIDUniqueness(t *testing.T) {
 		seen[id] = struct{}{}
 	}
 	assert.Len(t, seen, n, "all %d Alert IDs must be unique", n)
+}
+
+func TestCorrelationEngine_ProcessTree(t *testing.T) {
+	rule := Rule{
+		ID:        "test_rule",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"1"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	lt := profiler.NewLineageTracker(profiler.DefaultLineageConfig(), slog.Default())
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{rule}
+	cfg.EnableRateLimit = false
+	cfg.EnableAnomaly = false
+	cfg.LineageTracker = lt
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	commOf := func(s string) [16]byte {
+		var b [16]byte
+		copy(b[:], s)
+		return b
+	}
+
+	// Feed the ancestry chain: nginx(100) → bash(200) → curl(300)
+	engine.Ingest(ctx, types.Event{
+		Type:       types.EventSyscall,
+		PID:        200,
+		PPID:       100,
+		Comm:       commOf("bash"),
+		ParentComm: commOf("nginx"),
+		Syscall:    &types.SyscallEvent{Nr: 99},
+	})
+	engine.Ingest(ctx, types.Event{
+		Type:       types.EventSyscall,
+		PID:        300,
+		PPID:       200,
+		Comm:       commOf("curl"),
+		ParentComm: commOf("bash"),
+		Syscall:    &types.SyscallEvent{Nr: 1}, // matches rule
+	})
+
+	alerts := engine.Flush()
+	require.Len(t, alerts, 1)
+
+	tree := alerts[0].ProcessTree
+	require.NotNil(t, tree, "alert should carry a process tree")
+	require.GreaterOrEqual(t, len(tree), 2, "chain must include at least bash→curl")
+
+	last := tree[len(tree)-1]
+	assert.Equal(t, uint32(300), last.PID, "last node should be curl")
+	assert.Equal(t, "curl", last.Comm)
+
+	prev := tree[len(tree)-2]
+	assert.Equal(t, uint32(200), prev.PID, "second-to-last should be bash")
+	assert.Equal(t, "bash", prev.Comm)
 }

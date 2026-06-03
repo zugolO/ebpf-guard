@@ -3,7 +3,6 @@ package collector
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -573,11 +572,24 @@ func (c *GPUCollector) parseEvent(raw []byte) (*types.Event, error) {
 		return nil, fmt.Errorf("GPU event too short: %d bytes (need %d)", len(raw), gpuEventRawSize)
 	}
 
+	// The C struct is declared __attribute__((packed)) so there is no alignment
+	// padding between fields. binary.Read on the Go struct would insert 4 bytes
+	// after Type (to align Timestamp) and 7 bytes after Op (to align DevPtr),
+	// reading 96 bytes instead of 85 and producing garbage field values.
+	// Parse at the exact packed offsets instead.
 	var rawEvent GPUEventRaw
-	buf := bytes.NewReader(raw)
-	if err := binary.Read(buf, binary.LittleEndian, &rawEvent); err != nil {
-		return nil, fmt.Errorf("parse raw GPU event: %w", err)
-	}
+	rawEvent.Type      = binary.LittleEndian.Uint32(raw[0:4])
+	rawEvent.Timestamp = binary.LittleEndian.Uint64(raw[4:12])
+	rawEvent.PID       = binary.LittleEndian.Uint32(raw[12:16])
+	rawEvent.TGID      = binary.LittleEndian.Uint32(raw[16:20])
+	rawEvent.PPID      = binary.LittleEndian.Uint32(raw[20:24])
+	rawEvent.UID       = binary.LittleEndian.Uint32(raw[24:28])
+	copy(rawEvent.Comm[:], raw[28:44])
+	copy(rawEvent.ParentComm[:], raw[44:60])
+	rawEvent.Op      = raw[60]
+	rawEvent.DevPtr  = binary.LittleEndian.Uint64(raw[61:69])
+	rawEvent.HostPtr = binary.LittleEndian.Uint64(raw[69:77])
+	rawEvent.Size    = binary.LittleEndian.Uint64(raw[77:85])
 
 	result := rawEvent.ToTypesEvent()
 	return &result, nil

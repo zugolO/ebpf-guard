@@ -118,7 +118,7 @@ func (s *OpenSearchStore) StoreBatch(ctx context.Context, alerts []types.Alert) 
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		s.addresses[0]+"/_bulk",
+		s.addresses[0]+"/_bulk?refresh=wait_for",
 		&buf)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)

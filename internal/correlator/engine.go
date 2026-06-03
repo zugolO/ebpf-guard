@@ -33,6 +33,13 @@ type Engine interface {
 	Flush() []types.Alert
 }
 
+// WasmEvaluator is the interface for the WASM plugin engine.
+// Implemented by *wasm.Engine; defined here to avoid an import cycle.
+type WasmEvaluator interface {
+	// Evaluate runs all loaded WASM plugins against the event.
+	Evaluate(ctx context.Context, e types.Event) []types.Alert
+}
+
 // IOCMatcher allows the correlation engine to check events against cluster-wide
 // IOC intelligence provided by the gossip sub-system.
 // Implemented by gossip.Manager; decoupled here to avoid an import cycle.
@@ -109,6 +116,10 @@ type CorrelationEngine struct {
 	// IOC matcher (gossip integration — optional)
 	iocMatcher IOCMatcher
 
+	// WASM plugin engine for custom detection logic (optional).
+	// When set, all loaded .wasm plugins are evaluated on every event.
+	wasmEngine WasmEvaluator
+
 	// Rule-based enforcement (optional)
 	actionExecutor     ActionExecutor
 	enforceCooldown    time.Duration
@@ -179,6 +190,10 @@ type CorrelationEngineConfig struct {
 	// EnforcementCooldown is the minimum interval between enforcement
 	// executions for the same (rule, PID) pair. Zero → 5 seconds.
 	EnforcementCooldown time.Duration
+
+	// WasmEngine evaluates custom WASM detection plugins on every event.
+	// When nil, WASM plugin evaluation is skipped.
+	WasmEngine WasmEvaluator
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -272,6 +287,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		lineageTracker:       lt,
 		feedbackManager:      config.FeedbackManager,
 		iocMatcher:           config.IOCMatcher,
+		wasmEngine:           config.WasmEngine,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
 		enforcedCounter:      enforcedCounter,
@@ -491,6 +507,27 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
+	}
+
+	// WASM plugin evaluation — run custom detection plugins.
+	if ce.wasmEngine != nil {
+		wasmAlerts := ce.wasmEngine.Evaluate(ctx, e)
+		for _, alert := range wasmAlerts {
+			if !ce.rateLimiter.Allow(alert.RuleID) {
+				ce.alertsDropped.Add(1)
+				continue
+			}
+			if ce.globalLimiterEnabled && !ce.globalLimiter.Allow() {
+				ce.alertsDropped.Add(1)
+				ce.alertsDroppedGlobal.Add(1)
+				continue
+			}
+			seq := ce.alertSeq.Add(1)
+			alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
+			alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+			alerts = append(alerts, alert)
+			ce.alertsGenerated.Add(1)
+		}
 	}
 
 	// Gossip IOC matching — check event against cluster-wide indicators.

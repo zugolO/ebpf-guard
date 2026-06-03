@@ -66,6 +66,9 @@ type Config struct {
 
 	// Gossip configuration — cross-node IOC sharing.
 	Gossip GossipConfig `mapstructure:"gossip"`
+
+	// Wasm configuration — custom detection plugin engine.
+	Wasm WasmConfig `mapstructure:"wasm"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -160,6 +163,19 @@ type CollectorsConfig struct {
 	// OTelTracing configures W3C Trace Context extraction from TLS payloads and OTel span linking.
 	// Requires collectors.tls.enabled=true to have effect.
 	OTelTracing OTelTracingConfig `mapstructure:"otel_tracing"`
+}
+
+// WasmConfig configures the WASM detection plugin engine.
+type WasmConfig struct {
+	// Enabled activates the WASM plugin engine.
+	// Default: true (auto-activates when plugin files are present in PluginDir)
+	Enabled bool `mapstructure:"enabled"`
+	// PluginDir is the directory scanned for .wasm plugin files.
+	// Default: "rules/custom"
+	PluginDir string `mapstructure:"plugin_dir"`
+	// MemoryLimitMB is the linear memory limit per plugin instance in megabytes.
+	// Default: 16 (256 pages × 64KB)
+	MemoryLimitMB int `mapstructure:"memory_limit_mb"`
 }
 
 // OTelTracingConfig configures automatic W3C Trace Context extraction and OTel span

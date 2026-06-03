@@ -115,6 +115,24 @@ collectors:
     # Include trace_id and span_id fields in generated alerts (JSON, Alertmanager, store).
     propagate_to_alerts: true
 
+# WASM detection plugin engine
+# Enables custom detection logic written in any language that compiles to WebAssembly.
+# Place .wasm files (and optional .meta.yaml manifests) in the plugin directory.
+#
+# Plugin ABI — the .wasm module must export:
+#   malloc(size i32) i32          — allocate memory in linear memory
+#   free(ptr i32)                 — release allocated memory
+#   evaluate(ptr i32, len i32) i32 — evaluate event JSON, return 1=match, 0=no match
+#   alert_severity() i32          — 0=warning, 1=critical (called when evaluate=1)
+#   alert_message_ptr() i32       — pointer to alert message string
+#   alert_message_len() i32       — byte length of alert message
+#
+# Each .wasm file may have a companion .meta.yaml with: id, name, description, severity, action, tags
+wasm:
+  enabled: true
+  plugin_dir: rules/custom     # Directory scanned for .wasm files at startup
+  memory_limit_mb: 16          # Linear memory cap per plugin instance
+
 # Gossip configuration
 # Cross-node IOC (Indicator of Compromise) sharing between ebpf-guard agents.
 # When enabled, each node broadcasts newly detected IOCs (IPs, domains, fingerprints)

@@ -104,6 +104,18 @@ func (c *SyscallCollector) LoadError() error {
 	return c.loadError
 }
 
+// GetPrograms returns the loaded BPF programs for attestation.
+// Implements watchdog.BPFProgramProvider interface.
+func (c *SyscallCollector) GetPrograms() map[string]*ebpf.Program {
+	if c.objs == nil {
+		return nil
+	}
+	return map[string]*ebpf.Program{
+		"trace_sys_enter": c.objs.TraceSysEnter,
+		"trace_sys_exit":  c.objs.TraceSysExit,
+	}
+}
+
 // IsAttached returns true if the BPF program is still attached.
 // Implements watchdog.BPFProgramChecker interface.
 func (c *SyscallCollector) IsAttached() bool {

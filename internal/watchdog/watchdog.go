@@ -3,14 +3,17 @@ package watchdog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -45,6 +48,16 @@ type BPFProgramChecker interface {
 	Reload() error
 }
 
+// BPFProgramProvider extends BPFProgramChecker with access to the loaded
+// *ebpf.Program handles so the watchdog can perform tag-based attestation.
+// Collectors that implement this interface opt in to runtime tamper detection.
+type BPFProgramProvider interface {
+	BPFProgramChecker
+	// GetPrograms returns the loaded *ebpf.Program handles keyed by program name.
+	// Returns nil or an empty map when the programs are not yet loaded.
+	GetPrograms() map[string]*ebpf.Program
+}
+
 // Watchdog monitors agent health and BPF program liveness.
 type Watchdog struct {
 	logger            *slog.Logger
@@ -55,8 +68,11 @@ type Watchdog struct {
 	mu                sync.RWMutex
 	running           bool
 
-	// Sprint 34.0 metrics
-	reattachTotal prometheus.Counter // ebpf_guard_bpf_program_reattach_total
+	attestor *bpf.Attestor
+
+	reattachTotal  prometheus.Counter // ebpf_guard_bpf_program_reattach_total
+	tamperingTotal prometheus.Counter // ebpf_guard_bpf_attestation_violations_total
+	checksTotal    prometheus.Counter // ebpf_guard_bpf_attestation_checks_total
 }
 
 // Config holds watchdog configuration.
@@ -93,19 +109,33 @@ func New(logger *slog.Logger, cfg Config) *Watchdog {
 		heartbeatInterval: cfg.HeartbeatInterval,
 		checkInterval:     cfg.CheckInterval,
 		alertFunc:         cfg.AlertFunc,
+		attestor:          bpf.NewAttestor(),
 		reattachTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ebpf_guard_bpf_program_reattach_total",
 			Help: "Total number of successful BPF program reattachments after detach.",
+		}),
+		tamperingTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_bpf_attestation_violations_total",
+			Help: "Total number of BPF program tag mismatches indicating possible tampering.",
+		}),
+		checksTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_bpf_attestation_checks_total",
+			Help: "Total number of BPF program attestation checks performed.",
 		}),
 	}
 }
 
 // RegisterMetrics registers the Watchdog's Prometheus metrics with the given registerer.
 func (w *Watchdog) RegisterMetrics(reg prometheus.Registerer) error {
-	if w.reattachTotal == nil {
-		return nil
+	for _, c := range []prometheus.Collector{w.reattachTotal, w.tamperingTotal, w.checksTotal} {
+		if c == nil {
+			continue
+		}
+		if err := reg.Register(c); err != nil {
+			return err
+		}
 	}
-	return reg.Register(w.reattachTotal)
+	return nil
 }
 
 // RegisterChecker adds a BPF program checker to the watchdog.
@@ -225,6 +255,7 @@ func (w *Watchdog) checkProgram(checker BPFProgramChecker) {
 		w.logger.Debug("BPF program attached",
 			slog.String("program", name),
 		)
+		w.runAttestation(checker)
 		return
 	}
 
@@ -285,6 +316,58 @@ func (w *Watchdog) checkProgram(checker BPFProgramChecker) {
 		BPFProgramsLoaded.WithLabelValues(name).Set(1)
 		if w.reattachTotal != nil {
 			w.reattachTotal.Inc()
+		}
+	}
+}
+
+// runAttestation verifies BPF program tags for checkers that implement
+// BPFProgramProvider.  A tag mismatch fires a critical tampering alert.
+func (w *Watchdog) runAttestation(checker BPFProgramChecker) {
+	provider, ok := checker.(BPFProgramProvider)
+	if !ok {
+		return
+	}
+	programs := provider.GetPrograms()
+	if len(programs) == 0 {
+		return
+	}
+
+	if w.checksTotal != nil {
+		w.checksTotal.Add(float64(len(programs)))
+	}
+
+	if err := w.attestor.VerifyAll(programs); err != nil {
+		if w.tamperingTotal != nil {
+			w.tamperingTotal.Inc()
+		}
+
+		var violation bpf.AttestationViolation
+		errors.As(err, &violation)
+		programName := checker.Name()
+		if violation.Program != "" {
+			programName = violation.Program
+		}
+
+		w.logger.Error("BPF program tampering detected",
+			slog.String("program", programName),
+			slog.String("expected_tag", violation.ExpectedTag),
+			slog.String("actual_tag", violation.ActualTag),
+		)
+
+		if w.alertFunc != nil {
+			w.alertFunc(types.Alert{
+				RuleID:    "watchdog_bpf_tampering",
+				RuleName:  "BPF Program Tampering Detected",
+				Severity:  types.SeverityCritical,
+				Message:   err.Error(),
+				Timestamp: time.Now(),
+				Details: map[string]interface{}{
+					"program":      programName,
+					"expected_tag": violation.ExpectedTag,
+					"actual_tag":   violation.ActualTag,
+					"description":  "BPF program kernel tag changed — possible replacement or tampering",
+				},
+			})
 		}
 	}
 }

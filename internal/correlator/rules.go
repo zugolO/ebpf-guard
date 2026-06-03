@@ -561,6 +561,28 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "duration_ms":
 			return fmt.Sprintf("%d", e.NetClose.Duration.Milliseconds())
 		}
+	case types.EventGPU:
+		if e.GPU == nil {
+			return ""
+		}
+		switch field {
+		case "gpu_op":
+			ops := []string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}
+			if int(e.GPU.Op) < len(ops) {
+				return ops[e.GPU.Op]
+			}
+			return fmt.Sprintf("%d", e.GPU.Op)
+		case "gpu_size":
+			return fmt.Sprintf("%d", e.GPU.Size)
+		case "gpu_dev_ptr":
+			return fmt.Sprintf("0x%x", e.GPU.DevPtr)
+		case "gpu_host_ptr":
+			return fmt.Sprintf("0x%x", e.GPU.HostPtr)
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "uid":
+			return fmt.Sprintf("%d", e.UID)
+		}
 	}
 	return fieldNotFound
 }

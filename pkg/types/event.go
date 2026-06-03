@@ -1,7 +1,13 @@
 // Package types defines the canonical event structures shared across ebpf-guard components.
 package types
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
 
 // EventType identifies the category of a kernel event.
 type EventType uint32
@@ -25,7 +31,47 @@ const (
 	EventKmodLoad EventType = 8
 	// EventCgroupEsc indicates a process migrating to a different cgroup namespace.
 	EventCgroupEsc EventType = 9
+	// EventGPU indicates a CUDA/GPU memory operation (alloc, free, DtoH copy, HtoD copy).
+	EventGPU EventType = 10
 )
+
+// eventTypeNames maps string names used in rule YAML to numeric EventType constants.
+// Kept lowercase; matching is case-insensitive.
+var eventTypeNames = map[string]EventType{
+	"syscall":     EventSyscall,
+	"network":     EventTCPConnect,
+	"tcp_connect": EventTCPConnect,
+	"file":        EventFileAccess,
+	"file_access": EventFileAccess,
+	"tls":         EventTLS,
+	"dns":         EventDNS,
+	"privesc":     EventPrivesc,
+	"net_close":   EventNetClose,
+	"kmod":        EventKmodLoad,
+	"kmod_load":   EventKmodLoad,
+	"cgroup_esc":  EventCgroupEsc,
+	"gpu":         EventGPU,
+}
+
+// UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.
+// Rule files may use either form: `event_type: 3` or `event_type: file`.
+func (et *EventType) UnmarshalYAML(value *yaml.Node) error {
+	var n uint32
+	if err := value.Decode(&n); err == nil {
+		*et = EventType(n)
+		return nil
+	}
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return fmt.Errorf("event_type must be a number or string, got: %s", value.Value)
+	}
+	mapped, ok := eventTypeNames[strings.ToLower(s)]
+	if !ok {
+		return fmt.Errorf("unknown event_type %q", s)
+	}
+	*et = mapped
+	return nil
+}
 
 // Event is the unified structure for all kernel events.
 // Only one of Syscall, Network, File, TLS, DNS, Privesc, or NetClose is populated based on Type.
@@ -39,15 +85,16 @@ type Event struct {
 	Comm       [16]byte // process name from BPF
 	ParentComm [16]byte // parent process name (if available)
 	// Type-specific fields below (union-style, only one populated)
-	Syscall  *SyscallEvent
-	Network  *NetworkEvent
-	File     *FileEvent
-	TLS      *TLSEvent
-	DNS      *DNSEvent
+	Syscall    *SyscallEvent
+	Network    *NetworkEvent
+	File       *FileEvent
+	TLS        *TLSEvent
+	DNS        *DNSEvent
 	Privesc    *PrivescEvent
 	NetClose   *NetworkCloseEvent
 	Kmod       *KmodEvent
 	CgroupEsc  *CgroupEscapeEvent
+	GPU        *GPUEvent
 	// TraceContext holds OpenTelemetry trace context for distributed tracing.
 	TraceContext *TraceContext
 	// Enrichment holds Kubernetes metadata for the event.
@@ -269,6 +316,38 @@ type CgroupEscapeEvent struct {
 	InitCgroupID uint64
 	// NewCgroupID is the destination cgroup ID at migration time.
 	NewCgroupID uint64
+}
+
+// GPUOpType identifies the type of GPU/CUDA memory operation captured via uprobes.
+type GPUOpType uint8
+
+const (
+	// GPUOpAlloc indicates a GPU memory allocation (cuMemAlloc_v2 / cudaMalloc).
+	GPUOpAlloc GPUOpType = 0
+	// GPUOpFree indicates a GPU memory deallocation (cuMemFree_v2 / cudaFree).
+	GPUOpFree GPUOpType = 1
+	// GPUOpMemcpyHtoD indicates a Host-to-Device memory copy.
+	GPUOpMemcpyHtoD GPUOpType = 2
+	// GPUOpMemcpyDtoH indicates a Device-to-Host memory copy — primary exfiltration vector.
+	GPUOpMemcpyDtoH GPUOpType = 3
+	// GPUOpMemcpyDtoD indicates a Device-to-Device memory copy (peer GPU or same GPU).
+	GPUOpMemcpyDtoD GPUOpType = 4
+	// GPUOpKernelLaunch indicates a GPU kernel launch (cuLaunchKernel).
+	GPUOpKernelLaunch GPUOpType = 5
+)
+
+// GPUEvent contains CUDA/GPU memory operation data captured via uprobes on libcuda.so / libcudart.so.
+// Device-to-Host copies (GPUOpMemcpyDtoH) are the primary exfiltration signal:
+// training data lives in GPU memory and must pass through this call to reach the network.
+type GPUEvent struct {
+	// Op is the GPU operation type (alloc, free, memcpy direction, kernel launch).
+	Op GPUOpType
+	// DevPtr is the GPU device-memory address involved in the operation.
+	DevPtr uint64
+	// HostPtr is the host CPU-memory address (only set for HtoD and DtoH copies).
+	HostPtr uint64
+	// Size is the byte count for the operation (allocation size or transfer size).
+	Size uint64
 }
 
 // ProcessProfile represents a learned behavioral profile for a process type.

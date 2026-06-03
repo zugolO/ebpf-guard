@@ -1,0 +1,231 @@
+# GPU Memory Monitoring Detection Rules
+#
+# These rules detect suspicious CUDA/GPU memory operations in AI/ML workloads.
+# The GPU collector attaches uprobes to libcuda.so and libcudart.so to intercept
+# memory allocations, frees, and — most critically — Device-to-Host copies that
+# are the primary vector for exfiltrating training data residing in GPU memory.
+#
+# Threat model:
+#   AI/ML training data (datasets, model weights, embeddings) lives in GPU device
+#   memory for the duration of training. The only way to exfiltrate it is to copy
+#   it to host CPU memory (cuMemcpyDtoH / cudaMemcpy[DtoH]) and then transmit it
+#   over the network. Rules here detect unusual DtoH copy patterns, large single
+#   transfers, and CUDA access from unexpected processes.
+#
+# Requirements:
+#   - collectors.gpu.enabled: true
+#   - NVIDIA CUDA runtime or driver present on the host
+#   - CAP_SYS_PTRACE (for uprobe attachment)
+#
+# Performance:
+#   - Uprobe overhead: ~1–3 µs per cuMemcpyDtoH call
+#   - Ring buffer: 256 KB (sufficient for ~3 000 events/s burst)
+#   - Process scan: every 30 s (negligible)
+
+rules:
+  # ── Data exfiltration: large Device-to-Host copies ──────────────────────
+
+  # Rule: Single large DtoH transfer
+  # A single cuMemcpyDtoH copying >= 100 MB is almost never legitimate from a
+  # non-training process. Training jobs typically copy small validation batches.
+  - id: gpu_large_dtoh_copy
+    name: "Large GPU Device-to-Host Memory Copy"
+    description: >
+      A single CUDA Device-to-Host transfer exceeding 100 MB was observed.
+      This is the primary exfiltration path for AI/ML training data (model weights,
+      embeddings, datasets) from GPU device memory to host CPU memory.
+    event_type: gpu
+    condition:
+      field: gpu_size
+      op: gt
+      values: ["104857600"]   # 100 MB
+    severity: critical
+    action: alert
+    tags: [gpu, data-exfil, ml-training, cuda]
+
+  # Rule: Very large single DtoH transfer (gigabyte scale)
+  # Anything over 1 GB in a single copy is essentially always suspicious.
+  - id: gpu_very_large_dtoh_copy
+    name: "Very Large GPU Device-to-Host Copy (>1 GB)"
+    description: >
+      A single CUDA Device-to-Host transfer exceeding 1 GB was observed.
+      This volume corresponds to entire model checkpoint or large dataset exfiltration.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_op
+          op: equals
+          values: ["memcpy_dtoh"]
+        - field: gpu_size
+          op: gt
+          values: ["1073741824"]  # 1 GB
+    severity: critical
+    action: alert
+    tags: [gpu, data-exfil, ml-training, cuda, high-volume]
+
+  # Rule: DtoH copy from unexpected process
+  # Legitimate CUDA processes are typically ml-training frameworks (python, torch,
+  # tensorflow). A DtoH copy from a shell, cron, or sysadmin tool is anomalous.
+  - id: gpu_dtoh_from_shell
+    name: "GPU DtoH Copy from Shell Process"
+    description: >
+      A CUDA Device-to-Host memory copy was performed by a shell or utility process
+      (bash, sh, python -c, wget, curl). This may indicate an attacker exfiltrating
+      GPU training data after gaining code execution on the ML node.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_op
+          op: equals
+          values: ["memcpy_dtoh"]
+        - field: comm
+          op: in
+          values: ["bash", "sh", "dash", "zsh", "ksh", "wget", "curl", "nc", "ncat", "python3", "python"]
+    severity: critical
+    action: alert
+    tags: [gpu, data-exfil, shell-access, cuda]
+
+  # ── Unauthorized GPU access ──────────────────────────────────────────────
+
+  # Rule: GPU allocation from unexpected process
+  # GPU memory allocation (cuMemAlloc) from non-ML framework processes is unusual.
+  # Shells, cron jobs, or network tools should never be calling CUDA.
+  - id: gpu_alloc_from_unexpected_process
+    name: "GPU Memory Allocation from Unexpected Process"
+    description: >
+      A CUDA memory allocation was performed by a process that is not a known
+      ML framework or training tool. Attackers who have gained execution on an
+      ML node may use CUDA APIs to access or exfiltrate GPU-resident data.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_op
+          op: equals
+          values: ["alloc"]
+        - field: comm
+          op: in
+          values: ["bash", "sh", "dash", "zsh", "wget", "curl", "nc", "ncat",
+                   "perl", "ruby", "lua", "awk", "sed", "find", "xargs"]
+    severity: warning
+    action: alert
+    tags: [gpu, unauthorized-access, cuda]
+
+  # Rule: Root-owned GPU DtoH copy
+  # Production ML training workloads typically run as non-root. A DtoH copy
+  # initiated by root (uid=0) may indicate privilege escalation followed by data
+  # exfiltration, or a misconfigured privileged container.
+  - id: gpu_root_dtoh_copy
+    name: "GPU DtoH Copy by Root Process"
+    description: >
+      A CUDA Device-to-Host memory copy was performed by a root-owned process (uid=0).
+      Production ML workloads rarely run as root; this may indicate privilege escalation
+      combined with training data exfiltration.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_op
+          op: equals
+          values: ["memcpy_dtoh"]
+        - field: uid
+          op: equals
+          values: ["0"]
+        - field: gpu_size
+          op: gt
+          values: ["1048576"]   # 1 MB — ignore trivial copies
+    severity: warning
+    action: alert
+    tags: [gpu, data-exfil, privilege-escalation, cuda]
+
+  # ── Model weight & embedding theft ─────────────────────────────────────
+
+  # Rule: Moderate DtoH copy outside known training windows
+  # 10 MB – 100 MB DtoH copies are common during validation/inference but
+  # should be correlated with the process name. This rule flags medium-volume
+  # copies from processes not in the expected ML framework list.
+  - id: gpu_medium_dtoh_non_framework
+    name: "Medium GPU DtoH Copy from Non-Framework Process"
+    description: >
+      A CUDA Device-to-Host copy of 10–100 MB from a process name not matching
+      known ML frameworks. This size range corresponds to individual model layers,
+      attention head outputs, or gradient tensors that could be exfiltrated.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_op
+          op: equals
+          values: ["memcpy_dtoh"]
+        - field: gpu_size
+          op: gt
+          values: ["10485760"]  # 10 MB
+        - field: comm
+          op: not_in
+          values: ["python3", "python", "torch_shm", "pt_main_thread",
+                   "tensorflow", "tf_serving", "tritonserver", "onnxruntime",
+                   "train", "eval", "inference"]
+    severity: warning
+    action: alert
+    tags: [gpu, data-exfil, ml-training, cuda, model-theft]
+
+  # ── Kernel launch anomalies ──────────────────────────────────────────────
+
+  # Rule: GPU kernel launch from shell process
+  # Launching a CUDA kernel from a shell is highly anomalous and may indicate
+  # a CUDA-based cryptominer or data extraction tool.
+  - id: gpu_kernel_launch_from_shell
+    name: "GPU Kernel Launch from Shell Process"
+    description: >
+      A CUDA kernel was launched (cuLaunchKernel) from a shell or utility process.
+      This pattern is associated with GPU-accelerated cryptomining or CUDA-based
+      data extraction tools executed by an attacker.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_op
+          op: equals
+          values: ["kernel_launch"]
+        - field: comm
+          op: in
+          values: ["bash", "sh", "dash", "zsh", "wget", "curl", "nc", "ncat",
+                   "perl", "ruby", "xmrig", "nbminer", "t-rex", "gminer"]
+    severity: critical
+    action: alert
+    tags: [gpu, cryptominer, shell-access, cuda]
+
+# Configuration notes:
+#
+# Enable GPU monitoring in config.yaml:
+#   collectors:
+#     gpu:
+#       enabled: true
+#       scan_interval: 30s
+#
+# Required capabilities:
+#   - CAP_SYS_PTRACE (for uprobe attachment)
+#   - CAP_BPF (for loading eBPF programs)
+#
+# Tuning thresholds:
+#   - Adjust gpu_large_dtoh_copy threshold based on your model sizes.
+#     LLM inference may legitimately copy 200 MB+ for large language models.
+#   - Add your ML framework process names to not_in lists in medium-copy rule.
+#   - Consider rate-limiting rules for high-throughput training loops.
+#
+# Known limitations:
+#   - Only intercepts CUDA Driver API (libcuda.so) and Runtime API (libcudart.so).
+#     PyTorch/JAX compiled with custom GPU backends may bypass monitoring.
+#   - Memory-mapped GPU allocations (CUDA Unified Memory) are tracked at alloc
+#     time only; page faults during access are not captured.
+#   - Async memcpy operations (cuMemcpyDtoHAsync) are captured at submission,
+#     not at completion — size is correct but timing differs slightly.
+#
+# Testing:
+#   - Use `nvidia-smi` to verify GPUs are present on the host.
+#   - Run a CUDA bandwidth test to generate synthetic DtoH traffic:
+#     /usr/local/cuda/extras/demo_suite/bandwidthTest
+#   - Check metrics: ebpf_guard_events_total{type="gpu"}
+#   - Check alerts:  ebpf_guard_alerts_total{rule_id="gpu_*"}

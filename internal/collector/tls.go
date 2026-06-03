@@ -527,6 +527,26 @@ func (c *TLSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			continue
 		}
 
+		// Scan TLS plaintext for W3C Trace Context headers (traceparent/tracestate).
+		// This links APM spans to security events when the application is instrumented
+		// with OpenTelemetry and passes W3C Trace Context in HTTP/gRPC headers.
+		if event.TLS != nil {
+			capturedLen := event.TLS.DataLen
+			if capturedLen > uint32(len(event.TLS.Data)) {
+				capturedLen = uint32(len(event.TLS.Data))
+			}
+			if tc := ExtractTraceContext(event.TLS.Data[:capturedLen]); tc != nil {
+				event.TraceContext = tc
+				if c.logger.Enabled(ctx, slog.LevelDebug) {
+					c.logger.Debug("W3C trace context extracted from TLS payload",
+						slog.Uint64("pid", uint64(event.PID)),
+						slog.String("trace_id", tc.TraceID),
+						slog.String("span_id", tc.SpanID),
+						slog.String("trace_flags", tc.TraceFlags))
+				}
+			}
+		}
+
 		// Debug logging
 		if c.logger.Enabled(ctx, slog.LevelDebug) {
 			direction := "write"

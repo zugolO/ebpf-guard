@@ -1,0 +1,6 @@
+id: example_custom_001
+name: "Example Custom Detector"
+description: "Example WASM plugin — replace with your detector logic"
+severity: warning
+action: alert
+tags: [custom, example]

@@ -3,6 +3,7 @@ package correlator
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -30,6 +31,13 @@ type Engine interface {
 	Ingest(ctx context.Context, e types.Event) []types.Alert
 	// Flush returns and resets pending state (for testing).
 	Flush() []types.Alert
+}
+
+// WasmEvaluator is the interface for the WASM plugin engine.
+// Implemented by *wasm.Engine; defined here to avoid an import cycle.
+type WasmEvaluator interface {
+	// Evaluate runs all loaded WASM plugins against the event.
+	Evaluate(ctx context.Context, e types.Event) []types.Alert
 }
 
 // IOCMatcher allows the correlation engine to check events against cluster-wide
@@ -108,6 +116,10 @@ type CorrelationEngine struct {
 	// IOC matcher (gossip integration — optional)
 	iocMatcher IOCMatcher
 
+	// WASM plugin engine for custom detection logic (optional).
+	// When set, all loaded .wasm plugins are evaluated on every event.
+	wasmEngine WasmEvaluator
+
 	// Rule-based enforcement (optional)
 	actionExecutor     ActionExecutor
 	enforceCooldown    time.Duration
@@ -178,6 +190,10 @@ type CorrelationEngineConfig struct {
 	// EnforcementCooldown is the minimum interval between enforcement
 	// executions for the same (rule, PID) pair. Zero → 5 seconds.
 	EnforcementCooldown time.Duration
+
+	// WasmEngine evaluates custom WASM detection plugins on every event.
+	// When nil, WASM plugin evaluation is skipped.
+	WasmEngine WasmEvaluator
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -271,6 +287,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		lineageTracker:       lt,
 		feedbackManager:      config.FeedbackManager,
 		iocMatcher:           config.IOCMatcher,
+		wasmEngine:           config.WasmEngine,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
 		enforcedCounter:      enforcedCounter,
@@ -384,13 +401,33 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.Alert {
 	start := time.Now()
 
-	// Start OpenTelemetry span
-	ctx, span := tracer.Start(ctx, "CorrelationEngine.Ingest",
+	// Build span start options; if the event carries W3C Trace Context (extracted from
+	// HTTP/gRPC headers by the TLS uprobe), add a span link so this internal span is
+	// visible alongside the originating APM trace in distributed tracing backends.
+	spanOpts := []trace.SpanStartOption{
 		trace.WithAttributes(
 			attribute.Int("event.pid", int(e.PID)),
 			attribute.Int("event.type", int(e.Type)),
 		),
-	)
+	}
+	if e.TraceContext != nil && e.TraceContext.TraceID != "" {
+		if remoteCtx, err := buildRemoteSpanContext(e.TraceContext.TraceID, e.TraceContext.SpanID); err == nil {
+			spanOpts = append(spanOpts, trace.WithLinks(trace.Link{
+				SpanContext: remoteCtx,
+				Attributes: []attribute.KeyValue{
+					attribute.String("link.type", "apm_security_correlation"),
+					attribute.String("link.trace_id", e.TraceContext.TraceID),
+				},
+			}))
+			spanOpts = append(spanOpts, trace.WithAttributes(
+				attribute.String("apm.trace_id", e.TraceContext.TraceID),
+				attribute.String("apm.span_id", e.TraceContext.SpanID),
+			))
+		}
+	}
+
+	// Start OpenTelemetry span
+	ctx, span := tracer.Start(ctx, "CorrelationEngine.Ingest", spanOpts...)
 	defer span.End()
 
 	// Record duration metric
@@ -434,9 +471,10 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		seq := ce.alertSeq.Add(1)
 		alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
 
-		// Add trace context from event if present
+		// Propagate W3C Trace Context from event to alert for APM correlation.
 		if e.TraceContext != nil {
 			alert.TraceID = e.TraceContext.TraceID
+			alert.SpanID = e.TraceContext.SpanID
 		}
 
 		// Carry Kubernetes enrichment from the event onto the alert.
@@ -469,6 +507,27 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
+	}
+
+	// WASM plugin evaluation — run custom detection plugins.
+	if ce.wasmEngine != nil {
+		wasmAlerts := ce.wasmEngine.Evaluate(ctx, e)
+		for _, alert := range wasmAlerts {
+			if !ce.rateLimiter.Allow(alert.RuleID) {
+				ce.alertsDropped.Add(1)
+				continue
+			}
+			if ce.globalLimiterEnabled && !ce.globalLimiter.Allow() {
+				ce.alertsDropped.Add(1)
+				ce.alertsDroppedGlobal.Add(1)
+				continue
+			}
+			seq := ce.alertSeq.Add(1)
+			alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
+			alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+			alerts = append(alerts, alert)
+			ce.alertsGenerated.Add(1)
+		}
 	}
 
 	// Gossip IOC matching — check event against cluster-wide indicators.
@@ -774,12 +833,46 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 	}
 	if e.TraceContext != nil {
 		alert.TraceID = e.TraceContext.TraceID
+		alert.SpanID = e.TraceContext.SpanID
 	}
 	if e.Enrichment != nil {
 		alert.Enrichment = *e.Enrichment
 	}
 	alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
 	return alert
+}
+
+// buildRemoteSpanContext constructs an OTel SpanContext from W3C Trace Context hex strings
+// so the correlator's internal span can be linked to the originating APM trace.
+func buildRemoteSpanContext(traceID, spanID string) (trace.SpanContext, error) {
+	if len(traceID) != 32 {
+		return trace.SpanContext{}, fmt.Errorf("trace_id must be 32 hex chars")
+	}
+	traceIDBytes, err := hex.DecodeString(traceID)
+	if err != nil {
+		return trace.SpanContext{}, fmt.Errorf("decode trace_id: %w", err)
+	}
+	var tid [16]byte
+	copy(tid[:], traceIDBytes)
+
+	var sid [8]byte
+	if spanID != "" && len(spanID) == 16 {
+		sidBytes, err := hex.DecodeString(spanID)
+		if err == nil {
+			copy(sid[:], sidBytes)
+		}
+	}
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID(tid),
+		SpanID:     trace.SpanID(sid),
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	if !sc.IsValid() {
+		return trace.SpanContext{}, fmt.Errorf("invalid span context")
+	}
+	return sc, nil
 }
 
 // formatAnomalyDescription creates a human-readable description of an anomaly.

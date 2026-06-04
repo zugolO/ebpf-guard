@@ -13,6 +13,11 @@ var runeFreqPool = sync.Pool{
 	New: func() interface{} { return make(map[rune]int, 64) },
 }
 
+// analysisCacheMaxSize is the maximum number of entries in the per-instance
+// analysis cache before it is cleared. Sized to cover a realistic burst of
+// unique DNS queries without unbounded growth.
+const analysisCacheMaxSize = 512
+
 // DNSEntropyCalculator computes Shannon entropy for DNS domain names.
 // High entropy domains are characteristic of DGA (Domain Generation Algorithm)
 // malware and DNS tunneling.
@@ -28,6 +33,12 @@ type DNSEntropyCalculator struct {
 
 	// SuspiciousTLDs contains known suspicious top-level domains used by malware.
 	SuspiciousTLDs map[string]bool
+
+	// analysisCache caches recent AnalyzeDomain results to avoid recomputing
+	// entropy + n-gram scores when the same domain appears in multiple rule
+	// conditions during the same event evaluation pass.
+	cacheMu       sync.Mutex
+	analysisCache map[string]DomainAnalysis
 }
 
 // NewDNSEntropyCalculator creates a new entropy calculator with default settings.
@@ -35,6 +46,7 @@ func NewDNSEntropyCalculator() *DNSEntropyCalculator {
 	return &DNSEntropyCalculator{
 		DGAThreshold:       3.5,
 		TunnelingMinLength: 50,
+		analysisCache:      make(map[string]DomainAnalysis, 64),
 		SuspiciousTLDs: map[string]bool{
 			".onion": true, // Tor hidden services
 			".bit":   true, // Namecoin / Emercoin
@@ -130,16 +142,27 @@ func (c *DNSEntropyCalculator) IsHighFrequencyQuery(domain string, uniqueDomains
 }
 
 // AnalyzeDomain performs a comprehensive analysis of a domain name.
-// Returns a struct with all detection results.
+// Results are cached — repeated calls for the same domain within a burst
+// return immediately without recomputing entropy or n-gram scores.
 func (c *DNSEntropyCalculator) AnalyzeDomain(domain string) DomainAnalysis {
 	domain = strings.ToLower(domain)
+
+	c.cacheMu.Lock()
+	if cached, ok := c.analysisCache[domain]; ok {
+		c.cacheMu.Unlock()
+		return cached
+	}
+	// Evict entire cache when it exceeds the size cap to bound memory use.
+	if len(c.analysisCache) >= analysisCacheMaxSize {
+		c.analysisCache = make(map[string]DomainAnalysis, 64)
+	}
+	c.cacheMu.Unlock()
+
 	baseDomain := c.extractBaseDomain(domain)
-
 	entropy := c.CalculateShannonEntropy(baseDomain)
+	ngramScore := Score(domain)
 
-	ngramScore := Score(domain) // N-gram bigram model score from dga_ngram.go
-
-	return DomainAnalysis{
+	result := DomainAnalysis{
 		Domain:              domain,
 		BaseDomain:          baseDomain,
 		Entropy:             entropy,
@@ -152,6 +175,12 @@ func (c *DNSEntropyCalculator) AnalyzeDomain(domain string) DomainAnalysis {
 		ConsonantVowelRatio: c.calculateConsonantVowelRatio(baseDomain),
 		NgramScore:          ngramScore,
 	}
+
+	c.cacheMu.Lock()
+	c.analysisCache[domain] = result
+	c.cacheMu.Unlock()
+
+	return result
 }
 
 // DomainAnalysis holds the results of domain analysis.

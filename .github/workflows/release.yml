@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.25'
   CLANG_VERSION: '15'
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -152,20 +152,34 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Check if Helm chart exists
+      id: helm_check
+      run: |
+        if [ -f "deploy/helm/ebpf-guard/Chart.yaml" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "::warning::Helm chart not found at deploy/helm/ebpf-guard/Chart.yaml — skipping release"
+        fi
+
     - name: Set up Helm
+      if: steps.helm_check.outputs.exists == 'true'
       uses: azure/setup-helm@v4
       with:
         version: '3.14.0'
 
     - name: Log in to Container Registry
+      if: steps.helm_check.outputs.exists == 'true'
       run: |
         echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
     - name: Package Helm chart
+      if: steps.helm_check.outputs.exists == 'true'
       run: |
         helm package deploy/helm/ebpf-guard --destination .
 
     - name: Push Helm chart
+      if: steps.helm_check.outputs.exists == 'true'
       run: |
         CHART_FILE=$(ls ebpf-guard-*.tgz | head -n1)
         helm push "$CHART_FILE" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts

@@ -126,14 +126,19 @@ func (s *SQLiteStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 	defer stmt.Close()
 
 	for _, alert := range alerts {
-		labelsJSON, _ := json.Marshal(alert.Enrichment.Labels)
-		detailsJSON, _ := json.Marshal(alert.Details)
+		labelsJSON, err := json.Marshal(alert.Enrichment.Labels)
+		if err != nil {
+			return fmt.Errorf("marshal labels for alert %s: %w", alert.ID, err)
+		}
+		detailsJSON, err := json.Marshal(alert.Details)
+		if err != nil {
+			return fmt.Errorf("marshal details for alert %s: %w", alert.ID, err)
+		}
 
-		_, err := stmt.ExecContext(ctx, alert.ID, alert.Timestamp, alert.RuleID,
+		if _, err = stmt.ExecContext(ctx, alert.ID, alert.Timestamp, alert.RuleID,
 			string(alert.Severity), alert.PID, alert.Comm, alert.Message,
 			detailsJSON, alert.TraceID, alert.Enrichment.PodName,
-			alert.Enrichment.Namespace, alert.Enrichment.ContainerID, labelsJSON)
-		if err != nil {
+			alert.Enrichment.Namespace, alert.Enrichment.ContainerID, labelsJSON); err != nil {
 			return fmt.Errorf("insert alert: %w", err)
 		}
 	}

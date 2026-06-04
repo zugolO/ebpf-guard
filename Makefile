@@ -10,9 +10,19 @@ BPF_DIR := bpf
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 BPF_FILES := $(wildcard $(BPF_DIR)/*.bpf.c)
 
-# BPF build flags
+# BPF build flags — architecture-aware
 BPF_CLANG := clang
-BPF_CFLAGS := -O2 -g -Wall -Werror -target bpf -D__TARGET_ARCH_x86_64 -I/usr/include/x86_64-linux-gnu
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),aarch64)
+  BPF_ARCH      := arm64
+  BPF_ARCH_DEF  := __TARGET_ARCH_arm64
+  BPF_INCLUDE   := /usr/include/aarch64-linux-gnu
+else
+  BPF_ARCH      := x86
+  BPF_ARCH_DEF  := __TARGET_ARCH_x86_64
+  BPF_INCLUDE   := /usr/include/x86_64-linux-gnu
+endif
+BPF_CFLAGS := -O2 -g -Wall -Werror -target bpf -D$(BPF_ARCH_DEF) -I$(BPF_INCLUDE)
 
 # Default target
 all: generate build

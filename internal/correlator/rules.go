@@ -421,6 +421,9 @@ func capNameToBit(name string) (uint, bool) {
 
 // getFieldValue extracts a field value from an event based on field name.
 // Returns fieldNotFound if the field name is not valid for the event type.
+// Hot path: uses strconv instead of fmt.Sprintf for numeric fields to avoid
+// interface boxing allocations. DNS enriched fields are computed at most once
+// per call via a lazy local variable.
 func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 	switch e.Type {
 	case types.EventTCPConnect:
@@ -429,15 +432,15 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		}
 		switch field {
 		case "dport":
-			return fmt.Sprintf("%d", e.Network.Dport)
+			return strconv.FormatUint(uint64(e.Network.Dport), 10)
 		case "sport":
-			return fmt.Sprintf("%d", e.Network.Sport)
+			return strconv.FormatUint(uint64(e.Network.Sport), 10)
 		case "daddr":
 			return util.FormatIP(e.Network.Daddr[:], e.Network.Family)
 		case "saddr":
 			return util.FormatIP(e.Network.Saddr[:], e.Network.Family)
 		case "proto":
-			return fmt.Sprintf("%d", e.Network.Proto)
+			return strconv.FormatUint(uint64(e.Network.Proto), 10)
 		case "family":
 			if e.Network.Family == types.AFInet6 {
 				return "ipv6"
@@ -452,15 +455,15 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "filename":
 			return util.BytesToString(e.File.Filename[:])
 		case "flags":
-			return fmt.Sprintf("%d", e.File.Flags)
+			return strconv.FormatInt(int64(e.File.Flags), 10)
 		case "mode":
-			return fmt.Sprintf("%d", e.File.Mode)
+			return strconv.FormatUint(uint64(e.File.Mode), 10)
 		case "op":
 			ops := []string{"open", "read", "write"}
 			if int(e.File.Op) < len(ops) {
 				return ops[e.File.Op]
 			}
-			return fmt.Sprintf("%d", e.File.Op)
+			return strconv.FormatUint(uint64(e.File.Op), 10)
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {
@@ -468,9 +471,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		}
 		switch field {
 		case "nr":
-			return fmt.Sprintf("%d", e.Syscall.Nr)
+			return strconv.FormatInt(e.Syscall.Nr, 10)
 		case "ret":
-			return fmt.Sprintf("%d", e.Syscall.Ret)
+			return strconv.FormatInt(e.Syscall.Ret, 10)
 		}
 	case types.EventDNS:
 		if e.DNS == nil {
@@ -480,26 +483,26 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "qname":
 			return e.DNS.QName
 		case "qtype":
-			return fmt.Sprintf("%d", e.DNS.QType)
+			return strconv.FormatUint(uint64(e.DNS.QType), 10)
 		case "rcode":
-			return fmt.Sprintf("%d", e.DNS.RCode)
+			return strconv.FormatUint(uint64(e.DNS.RCode), 10)
 		case "direction":
-			return fmt.Sprintf("%d", e.DNS.Direction)
-		// ── Enriched DNS fields (computed on demand) ──────────────────────
+			return strconv.FormatUint(uint64(e.DNS.Direction), 10)
 		case "qname_length":
-			return fmt.Sprintf("%d", len(e.DNS.QName))
+			return strconv.Itoa(len(e.DNS.QName))
+		// ── Enriched DNS fields — AnalyzeDomain is called lazily and at most once ──
 		case "qname_entropy":
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
-			return fmt.Sprintf("%.4f", a.Entropy)
+			return strconv.FormatFloat(a.Entropy, 'f', 4, 64)
 		case "qname_dga_score":
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
-			return fmt.Sprintf("%.4f", a.NgramScore)
+			return strconv.FormatFloat(a.NgramScore, 'f', 4, 64)
 		case "qname_digit_ratio":
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
-			return fmt.Sprintf("%.4f", a.DigitRatio)
+			return strconv.FormatFloat(a.DigitRatio, 'f', 4, 64)
 		case "qname_subdomain_count":
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
-			return fmt.Sprintf("%d", a.SubdomainCount)
+			return strconv.Itoa(a.SubdomainCount)
 		case "qname_is_dga":
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
 			if a.IsDGA || a.NgramScore >= DefaultNgramDGADetector().threshold {
@@ -519,20 +522,19 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			}
 			return string(e.TLS.Data[:l])
 		case "direction":
-			return fmt.Sprintf("%d", e.TLS.Direction)
+			return strconv.FormatUint(uint64(e.TLS.Direction), 10)
 		case "data_len":
-			return fmt.Sprintf("%d", e.TLS.DataLen)
+			return strconv.FormatUint(uint64(e.TLS.DataLen), 10)
 		}
 	case types.EventPrivesc:
 		// caps_gained / caps_dropped are handled before getFieldValue.
 		// Common process fields are also accessible.
 		switch field {
 		case "uid":
-			return fmt.Sprintf("%d", e.UID)
+			return strconv.FormatUint(uint64(e.UID), 10)
 		case "comm":
 			return util.BytesToString(e.Comm[:])
 		case "caps":
-			// Return hex bitmask of new caps for generic comparisons.
 			if e.Privesc != nil {
 				return fmt.Sprintf("0x%x", e.Privesc.NewCaps)
 			}
@@ -544,9 +546,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		}
 		switch field {
 		case "dport":
-			return fmt.Sprintf("%d", e.NetClose.Dport)
+			return strconv.FormatUint(uint64(e.NetClose.Dport), 10)
 		case "sport":
-			return fmt.Sprintf("%d", e.NetClose.Sport)
+			return strconv.FormatUint(uint64(e.NetClose.Sport), 10)
 		case "daddr":
 			return util.FormatIP(e.NetClose.Daddr[:], e.NetClose.Family)
 		case "saddr":
@@ -557,9 +559,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			}
 			return "ipv4"
 		case "duration_sec":
-			return fmt.Sprintf("%d", int64(e.NetClose.Duration.Seconds()))
+			return strconv.FormatInt(int64(e.NetClose.Duration.Seconds()), 10)
 		case "duration_ms":
-			return fmt.Sprintf("%d", e.NetClose.Duration.Milliseconds())
+			return strconv.FormatInt(e.NetClose.Duration.Milliseconds(), 10)
 		}
 	case types.EventGPU:
 		if e.GPU == nil {
@@ -571,9 +573,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			if int(e.GPU.Op) < len(ops) {
 				return ops[e.GPU.Op]
 			}
-			return fmt.Sprintf("%d", e.GPU.Op)
+			return strconv.FormatUint(uint64(e.GPU.Op), 10)
 		case "gpu_size":
-			return fmt.Sprintf("%d", e.GPU.Size)
+			return strconv.FormatUint(e.GPU.Size, 10)
 		case "gpu_dev_ptr":
 			return fmt.Sprintf("0x%x", e.GPU.DevPtr)
 		case "gpu_host_ptr":
@@ -581,7 +583,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "comm":
 			return util.BytesToString(e.Comm[:])
 		case "uid":
-			return fmt.Sprintf("%d", e.UID)
+			return strconv.FormatUint(uint64(e.UID), 10)
 		}
 	}
 	return fieldNotFound

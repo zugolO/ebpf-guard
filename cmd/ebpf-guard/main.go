@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
+	"github.com/zugolO/ebpf-guard/internal/canary"
 	"github.com/zugolO/ebpf-guard/internal/collector"
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
@@ -59,10 +60,13 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 	root.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
 	root.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "run without real eBPF probes (uses synthetic events)")
 
+	rulesCmd := newRulesCmd(&cfgPath)
+	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
+
 	root.AddCommand(
 		newAlertsCmd(&cfgPath),
 		newStatusCmd(),
-		newRulesCmd(&cfgPath),
+		rulesCmd,
 		newVersionCmd(),
 		newLearnCmd(),
 	)
@@ -96,6 +100,42 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 		rules = nil
 	} else {
 		slog.Info("rules loaded", slog.Int("count", len(rules)))
+	}
+
+	// Feature D: canary trap / honeypot detection.
+	if cfg.Canary.Enabled {
+		cm := canary.New(canary.Config{
+			Enabled:       true,
+			AutoCreate:    cfg.Canary.AutoCreate,
+			Files:         cfg.Canary.Files,
+			AlertSeverity: cfg.Canary.AlertSeverity,
+		})
+		cm.Setup()
+		canaryRules := cm.Rules()
+		rules = append(rules, canaryRules...)
+		slog.Info("canary: traps armed",
+			slog.Int("files", len(cm.Paths())),
+			slog.Int("rules", len(canaryRules)))
+	}
+
+	// Feature C: event log for rule replay.
+	var eventLog *store.EventLog
+	if cfg.EventLog.Enabled {
+		maxBytes := int64(cfg.EventLog.MaxSizeMB) * 1024 * 1024
+		el, elErr := store.NewEventLog(store.EventLogConfig{
+			Path:         cfg.EventLog.Path,
+			MaxSizeBytes: maxBytes,
+		})
+		if elErr != nil {
+			slog.Warn("event log: failed to open, replay will be unavailable",
+				slog.String("path", cfg.EventLog.Path),
+				slog.Any("error", elErr))
+		} else {
+			eventLog = el
+			defer eventLog.Close()
+			slog.Info("event log: recording events for replay",
+				slog.String("path", cfg.EventLog.Path))
+		}
 	}
 
 	engineCfg := correlator.DefaultCorrelationEngineConfig()
@@ -246,6 +286,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 		case event, ok := <-eventCh:
 			if !ok {
 				return nil
+			}
+			if eventLog != nil {
+				if wErr := eventLog.Write(event); wErr != nil {
+					slog.Debug("event log: write error", slog.Any("error", wErr))
+				}
 			}
 			alerts := engine.Ingest(ctx, event)
 
@@ -406,6 +451,88 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// newRulesTestCmd returns the "rules test" subcommand that replays historical
+// events from the event log through a rule and reports how many alerts would fire.
+//
+// Usage:
+//
+//	ebpf-guard rules test --rule my-rule.yaml --replay 24h
+//	ebpf-guard rules test --rule rules/cryptominer.yaml --replay 1h --limit 50
+func newRulesTestCmd(cfgPath *string) *cobra.Command {
+	var (
+		ruleFile    string
+		replayWindow string
+		eventsLog   string
+		sampleLimit int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "test",
+		Short: "Replay historical events through a rule and count how many alerts would fire",
+		Long: `Test a detection rule against the historical event log without touching production.
+
+ebpf-guard writes a JSONL event log when event_log.enabled=true in the config.
+This command reads that log, applies your rule, and reports:
+  - how many events were replayed
+  - how many alerts would have fired (per rule)
+  - a sample of the matching alerts
+
+This lets you tune rule thresholds before enabling them in production.
+
+Examples:
+  ebpf-guard rules test --rule rules/cryptominer.yaml --replay 24h
+  ebpf-guard rules test --rule my-rule.yaml --replay 1h --limit 50
+  ebpf-guard rules test --rule rules/dns-threats.yaml --replay 7d --events-log /var/lib/ebpf-guard/events.jsonl`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if ruleFile == "" {
+				return fmt.Errorf("--rule is required")
+			}
+
+			window, err := time.ParseDuration(replayWindow)
+			if err != nil {
+				return fmt.Errorf("invalid --replay %q: %w (use e.g. 24h, 1h, 7d)", replayWindow, err)
+			}
+
+			// Resolve event log path: flag > config default.
+			logPath := eventsLog
+			if logPath == "" {
+				cfgManager, cfgErr := config.NewManagerSkipPermCheck(*cfgPath)
+				if cfgErr == nil {
+					logPath = cfgManager.Get().EventLog.Path
+				}
+				if logPath == "" {
+					logPath = "/var/lib/ebpf-guard/events.jsonl"
+				}
+			}
+
+			rules, err := correlator.LoadRulesFromFile(ruleFile)
+			if err != nil {
+				return fmt.Errorf("load rule file %s: %w", ruleFile, err)
+			}
+			fmt.Printf("Loaded %d rule(s) from %s\n", len(rules), ruleFile)
+
+			since := time.Now().Add(-window)
+			fmt.Printf("Reading events since %s from %s…\n\n", since.Format(time.RFC3339), logPath)
+
+			events, err := store.ReadEventsSince(logPath, since)
+			if err != nil {
+				return fmt.Errorf("read event log: %w", err)
+			}
+
+			engine := correlator.NewRuleEngine(rules)
+			result := correlator.Replay(cmd.Context(), engine, events, window, logPath, sampleLimit)
+			fmt.Print(result.PrintSummary())
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&ruleFile, "rule", "", "path to rule YAML file to test (required)")
+	cmd.Flags().StringVar(&replayWindow, "replay", "24h", "time window to replay (e.g. 1h, 24h, 7d)")
+	cmd.Flags().StringVar(&eventsLog, "events-log", "", "path to event log (default: from config)")
+	cmd.Flags().IntVar(&sampleLimit, "limit", 20, "maximum number of sample alerts to display")
+	return cmd
 }
 
 // newLearnCmd returns the "learn" subcommand that observes container behaviour

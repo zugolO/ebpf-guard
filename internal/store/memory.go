@@ -11,10 +11,25 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// byTimeEntry is a compact index record stored in the time-ordered index.
+// Caching ts, severity, and namespace avoids a 488-byte Alert map lookup for
+// entries that don't pass the two most common Query filters, so the hot path
+// does full s.alerts lookups only for O(limit) results that pass all filters.
+type byTimeEntry struct {
+	id        string
+	ts        time.Time
+	severity  types.Severity // pod severity — cached for pre-filtering
+	namespace string         // pod namespace — cached for pre-filtering
+}
+
 // MemoryStore is an in-memory AlertStore implementation for testing.
 type MemoryStore struct {
 	mu     sync.RWMutex
 	alerts map[string]types.Alert
+	// byTime holds index entries sorted by ts DESC (newest first).
+	// insertSorted maintains this invariant on every write; binary search on
+	// entry.ts (no map lookup) narrows time-range queries to O(log n).
+	byTime []byTimeEntry
 	seq    int64
 }
 
@@ -38,8 +53,38 @@ func (s *MemoryStore) Store(ctx context.Context, alert types.Alert) error {
 		alert.Timestamp = time.Now()
 	}
 
+	// Remove the old index entry if this is an update.
+	if _, exists := s.alerts[alert.ID]; exists {
+		s.removeFromByTime(alert.ID)
+	}
+
 	s.alerts[alert.ID] = alert
+	s.insertSorted(alert.ID, alert.Timestamp, alert.Severity, alert.Enrichment.Namespace)
 	return nil
+}
+
+// insertSorted inserts an entry into byTime maintaining DESC timestamp order.
+// Binary search uses entry.ts directly — no map lookup needed.
+// Caller must hold s.mu write lock.
+func (s *MemoryStore) insertSorted(id string, ts time.Time, sev types.Severity, ns string) {
+	pos := sort.Search(len(s.byTime), func(i int) bool {
+		return s.byTime[i].ts.Before(ts)
+	})
+	s.byTime = append(s.byTime, byTimeEntry{})
+	copy(s.byTime[pos+1:], s.byTime[pos:])
+	s.byTime[pos] = byTimeEntry{id: id, ts: ts, severity: sev, namespace: ns}
+}
+
+// removeFromByTime removes the entry for id from byTime.  Called only on
+// updates (rare); linear scan is acceptable on a hot-path miss.
+// Caller must hold s.mu write lock.
+func (s *MemoryStore) removeFromByTime(id string) {
+	for i := range s.byTime {
+		if s.byTime[i].id == id {
+			s.byTime = append(s.byTime[:i], s.byTime[i+1:]...)
+			return
+		}
+	}
 }
 
 // StoreBatch persists multiple alerts.
@@ -53,34 +98,65 @@ func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 }
 
 // Query retrieves alerts matching the filters.
+// byTime is kept sorted DESC, so time-range narrowing is O(log n) (using
+// entry.ts with no map lookup) and results are already in newest-first order.
+// The scan loop pre-filters on the cached severity and namespace fields before
+// doing the expensive 488-byte Alert map lookup, so only O(limit) full lookups
+// are needed on queries that use those filters.
 func (s *MemoryStore) Query(ctx context.Context, filters QueryFilters) ([]types.Alert, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Binary-search entry.ts directly — no map lookup needed.
+	start, end := 0, len(s.byTime)
+	if !filters.Until.IsZero() {
+		start = sort.Search(len(s.byTime), func(i int) bool {
+			return !s.byTime[i].ts.After(filters.Until)
+		})
+	}
+	if !filters.Since.IsZero() {
+		end = sort.Search(len(s.byTime), func(i int) bool {
+			return s.byTime[i].ts.Before(filters.Since)
+		})
+	}
+
 	var results []types.Alert
-	for _, alert := range s.alerts {
+	skipped := 0
+	for i := start; i < end; i++ {
+		e := &s.byTime[i]
+
+		// Pre-filter on cached index fields before the expensive map lookup.
+		if len(filters.Severity) > 0 {
+			found := false
+			for _, sev := range filters.Severity {
+				if e.severity == sev {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		if filters.Namespace != "" && e.namespace != filters.Namespace {
+			continue
+		}
+
+		// Remaining filters (PIDs, RuleIDs, PodName, time boundary) require the
+		// full alert.  Only reached by entries that pass the pre-filter above.
+		alert := s.alerts[e.id]
 		if !matchesFilters(alert, filters) {
 			continue
 		}
-		results = append(results, alert)
-	}
-
-	// Sort by timestamp descending
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Timestamp.After(results[j].Timestamp)
-	})
-
-	// Apply offset and limit
-	if filters.Offset > 0 {
-		if filters.Offset >= len(results) {
-			return []types.Alert{}, nil
+		if skipped < filters.Offset {
+			skipped++
+			continue
 		}
-		results = results[filters.Offset:]
+		results = append(results, alert)
+		if filters.Limit > 0 && len(results) >= filters.Limit {
+			break
+		}
 	}
-	if filters.Limit > 0 && filters.Limit < len(results) {
-		results = results[:filters.Limit]
-	}
-
 	return results, nil
 }
 
@@ -111,18 +187,23 @@ func (s *MemoryStore) Count(ctx context.Context, filters QueryFilters) (int64, e
 }
 
 // Delete removes alerts older than the given duration.
+// byTime is sorted DESC so old alerts cluster at the tail — O(log n) to find
+// the cut point, then O(k) to remove the k expired entries.
 func (s *MemoryStore) Delete(ctx context.Context, olderThan time.Duration) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	cutoff := time.Now().Add(-olderThan)
+	// entry.ts is directly comparable — no map lookup needed.
+	idx := sort.Search(len(s.byTime), func(i int) bool {
+		return s.byTime[i].ts.Before(cutoff)
+	})
 	var deleted int64
-	for id, alert := range s.alerts {
-		if alert.Timestamp.Before(cutoff) {
-			delete(s.alerts, id)
-			deleted++
-		}
+	for _, e := range s.byTime[idx:] {
+		delete(s.alerts, e.id)
+		deleted++
 	}
+	s.byTime = s.byTime[:idx]
 	return deleted, nil
 }
 

@@ -1,0 +1,314 @@
+# Default values for ebpf-guard.
+
+image:
+  repository: zugolO/ebpf-guard
+  tag: ""  # Defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Create a dedicated namespace. Set to false if the namespace already exists.
+namespaceCreate: true
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# DaemonSet update strategy
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+# Pod-level settings
+podAnnotations: {}
+podLabels: {}
+
+# Allow scheduling on all nodes including control-plane taints
+tolerations:
+  - operator: Exists
+
+# Node selector to restrict to specific nodes
+nodeSelector: {}
+
+# Affinity rules
+affinity: {}
+
+# Priority class for security-critical workloads
+priorityClassName: ""
+
+# Security context for the pod
+podSecurityContext: {}
+
+# Security context for the container.
+# privileged: true is required for eBPF programs.
+securityContext:
+  privileged: true
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Liveness and readiness probes
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 3
+
+# Additional volume mounts for the agent container
+extraVolumeMounts: []
+# - name: custom-rules
+#   mountPath: /etc/ebpf-guard/custom
+
+# Additional volumes
+extraVolumes: []
+# - name: custom-rules
+#   configMap:
+#     name: my-custom-rules
+
+# Additional environment variables
+extraEnv: []
+# - name: MY_VAR
+#   value: "value"
+
+# Additional init containers
+initContainers: []
+
+# Kubernetes Service for Prometheus scraping
+service:
+  type: ClusterIP
+  port: 9090
+  annotations: {}
+
+# Prometheus ServiceMonitor (requires prometheus-operator)
+serviceMonitor:
+  enabled: false
+  namespace: ""  # Defaults to release namespace
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+# PrometheusRule for alerting (requires prometheus-operator)
+prometheusRule:
+  enabled: false
+  namespace: ""  # Defaults to release namespace
+  labels: {}
+  groups:
+    - name: ebpf-guard.rules
+      rules:
+        - alert: EbpfGuardDown
+          expr: absent(ebpf_guard_heartbeat_timestamp_seconds) or (time() - ebpf_guard_heartbeat_timestamp_seconds > 60)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ebpf-guard agent is down on {{ $labels.node }}"
+            description: "No heartbeat received from ebpf-guard for more than 2 minutes."
+        - alert: EbpfGuardHighAlertRate
+          expr: rate(ebpf_guard_alerts_total[5m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High alert rate on {{ $labels.node }}"
+            description: "ebpf-guard is generating more than 10 alerts/sec on {{ $labels.node }}."
+
+# VerticalPodAutoscaler
+vpa:
+  enabled: false
+  updateMode: "Off"  # Off | Initial | Recreate
+  minAllowed:
+    cpu: 50m
+    memory: 64Mi
+  maxAllowed:
+    cpu: 2000m
+    memory: 1Gi
+
+# ebpf-guard agent configuration
+config:
+  server:
+    bind_address: ":9090"
+    metrics_path: "/metrics"
+    health_path: "/health"
+
+  bpf:
+    map_sizes:
+      events: 65536
+      processes: 16384
+      connections: 32768
+
+  rules:
+    path: "/etc/ebpf-guard/rules.yaml"
+    hot_reload: true
+    rate_limit_alerts: true
+    rate_limit_window: 60
+    max_alerts_per_window: 10
+
+  profiler:
+    enabled: true
+    learning_period: 3600
+    min_learning_samples: 100
+    anomaly_threshold: 0.8
+    ewma_weight: 0.3
+    profile_ttl: 86400
+
+  alerting:
+    enabled: false
+    webhook_url: ""
+    generator_url: ""
+    batch_size: 100
+    batch_timeout: 5
+    circuit_breaker_threshold: 5
+
+  kubernetes:
+    enabled: true
+    kubeconfig_path: ""
+    resync_period: 300
+
+  auth:
+    enabled: true
+    bearer_token: ""  # Auto-generated at startup if empty
+
+  notifications:
+    slack:
+      enabled: false
+      webhook_url: ""
+      channel: "#security-alerts"
+      min_severity: warning
+    teams:
+      enabled: false
+      webhook_url: ""
+      min_severity: warning
+    webhook:
+      enabled: false
+      url: ""
+      headers: {}
+      template: ""
+      min_severity: warning
+
+  store:
+    backend: memory  # memory | sqlite | opensearch
+    sqlite:
+      path: /var/lib/ebpf-guard/events.db
+    opensearch:
+      url: ""
+      index: ebpf-guard-events
+      username: admin
+      password: ""
+      insecure_skip_verify: false
+
+  collectors:
+    tls:
+      enabled: false
+      scan_interval: 30s
+      max_data_size: 256
+    dns:
+      enabled: true
+      dga_threshold: 3.5
+      tunneling_min_length: 50
+      high_frequency_threshold: 100
+    backpressure_strategy: drop
+    otel_tracing:
+      enabled: true
+      exporter_endpoint: ""
+      service_name: ebpf-guard
+      propagate_to_alerts: true
+
+  wasm:
+    enabled: true
+    plugin_dir: rules/custom
+    memory_limit_mb: 16
+
+  gossip:
+    enabled: false
+    secret: ""
+    peers: []
+    ioc_ttl: 3600
+    max_iocs: 100000
+    push_interval: 30
+
+  osint:
+    enabled: false
+    refresh_interval: "3h"
+    output_dir: rules/osint
+    max_iocs_per_rule: 500
+    misp:
+      enabled: false
+      url: ""
+      api_key: ""
+      verify_tls: true
+      attribute_types:
+        - ip-dst
+        - ip-src
+        - domain
+        - hostname
+      min_threat_level: 3
+      tags: []
+    opencti:
+      enabled: false
+      url: ""
+      api_key: ""
+      verify_tls: true
+      confidence_min: 50
+      tlp_markings: []
+    virustotal:
+      enabled: false
+      api_key: ""
+      enterprise_feeds: false
+
+# Detection rules written into the rules ConfigMap.
+# Override to supply your own rule set.
+rules:
+  content: |
+    rules:
+      - id: unexpected_egress
+        name: "Unexpected network egress"
+        description: "Process opened TCP connection to unknown destination"
+        event_type: network
+        condition:
+          field: dport
+          op: not_in
+          values: [80, 443, 53]
+        severity: warning
+        action: alert
+
+      - id: sensitive_file_read
+        name: "Sensitive file read"
+        description: "Process read sensitive system file"
+        event_type: file
+        condition:
+          field: filename
+          op: prefix
+          values: ["/etc/shadow", "/etc/passwd", "/proc/keys"]
+        severity: critical
+        action: alert
+
+# Grafana dashboard ConfigMap (loaded by Grafana sidecar if enabled)
+grafana:
+  dashboard:
+    enabled: false
+    namespace: ""  # Defaults to release namespace
+    label: grafana_dashboard
+    labelValue: "1"

@@ -1,0 +1,75 @@
+# Production hardened values for ebpf-guard.
+# Usage: helm install ebpf-guard ./deploy/helm/ebpf-guard -f values-secure.yaml
+
+image:
+  pullPolicy: Always
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+priorityClassName: system-node-critical
+
+podAnnotations:
+  seccomp.security.alpha.kubernetes.io/pod: runtime/default
+
+# Restrict to Linux nodes only
+nodeSelector:
+  kubernetes.io/os: linux
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+prometheusRule:
+  enabled: true
+  labels:
+    prometheus: kube-prometheus
+
+vpa:
+  enabled: true
+  updateMode: "Initial"
+
+config:
+  profiler:
+    enabled: true
+    learning_period: 7200
+    anomaly_threshold: 0.75
+    min_learning_samples: 500
+
+  alerting:
+    enabled: true
+    batch_size: 50
+    batch_timeout: 2
+    circuit_breaker_threshold: 10
+
+  store:
+    backend: sqlite
+    sqlite:
+      path: /var/lib/ebpf-guard/events.db
+
+  collectors:
+    tls:
+      enabled: true
+    dns:
+      enabled: true
+      dga_threshold: 3.0
+    backpressure_strategy: sample
+
+  wasm:
+    enabled: true
+    memory_limit_mb: 32
+
+extraVolumeMounts:
+  - name: varlib
+    mountPath: /var/lib/ebpf-guard
+
+extraVolumes:
+  - name: varlib
+    hostPath:
+      path: /var/lib/ebpf-guard
+      type: DirectoryOrCreate

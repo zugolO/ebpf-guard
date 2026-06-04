@@ -1,0 +1,41 @@
+ebpf-guard has been deployed as a DaemonSet on every node.
+
+** IMPORTANT: ebpf-guard requires a Linux kernel 5.15+ and runs privileged. **
+   LSM enforcement features require kernel 5.7+.
+
+Get the agent status:
+  kubectl -n {{ include "ebpf-guard.namespace" . }} get daemonset {{ include "ebpf-guard.fullname" . }}
+
+View logs from one node:
+  kubectl -n {{ include "ebpf-guard.namespace" . }} logs daemonset/{{ include "ebpf-guard.fullname" . }}
+
+Access the metrics endpoint (port-forward):
+  kubectl -n {{ include "ebpf-guard.namespace" . }} port-forward daemonset/{{ include "ebpf-guard.fullname" . }} 9090:9090
+  curl http://localhost:9090/metrics
+
+View recent alerts:
+  kubectl -n {{ include "ebpf-guard.namespace" . }} port-forward daemonset/{{ include "ebpf-guard.fullname" . }} 9090:9090
+  curl -H "Authorization: Bearer <token>" http://localhost:9090/alerts
+
+The bearer token is logged at agent startup if not set in values.yaml:
+  kubectl -n {{ include "ebpf-guard.namespace" . }} logs daemonset/{{ include "ebpf-guard.fullname" . }} | grep "bearer token"
+
+{{- if .Values.serviceMonitor.enabled }}
+
+Prometheus ServiceMonitor is enabled. Ensure the prometheus-operator CRDs are installed.
+{{- end }}
+
+{{- if .Values.prometheusRule.enabled }}
+
+PrometheusRule alerts are enabled. Check them with:
+  kubectl -n {{ .Values.prometheusRule.namespace | default (include "ebpf-guard.namespace" .) }} get prometheusrule {{ include "ebpf-guard.fullname" . }}
+{{- end }}
+
+{{- if .Values.vpa.enabled }}
+
+VPA is enabled in {{ .Values.vpa.updateMode | quote }} mode.
+{{- if eq .Values.vpa.updateMode "Off" }}
+View resource recommendations:
+  kubectl -n {{ include "ebpf-guard.namespace" . }} describe vpa {{ include "ebpf-guard.fullname" . }}
+{{- end }}
+{{- end }}

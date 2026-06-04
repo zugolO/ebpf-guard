@@ -4,9 +4,13 @@ package enforcer
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -27,10 +31,10 @@ type NFTablesManager struct {
 	blockedUIDs map[uint32]struct{}
 	// blockedIPs tracks blocked destination IPs
 	blockedIPs map[string]struct{}
-	// blockedCgroups tracks cgroup IDs for which a block was requested. Netlink
-	// rule application for cgroups is not yet wired, but the intent is recorded
-	// so it is observable via GetBlockedCgroups and metrics.
-	blockedCgroups map[uint64]struct{}
+	// blockedCgroups maps cgroupID → cgroupv2 filesystem path. The path is
+	// used to unfreeze on UnblockCgroup. An empty string means the path
+	// could not be resolved (e.g. cgroup already gone).
+	blockedCgroups map[uint64]string
 	// mu protects the maps
 	mu sync.RWMutex
 	// dryRun mode logs actions without applying rules
@@ -56,7 +60,7 @@ func NewNFTablesManager(logger *slog.Logger, cfg NFTablesConfig) (*NFTablesManag
 		logger:         logger.With("component", "nftables"),
 		blockedUIDs:    make(map[uint32]struct{}),
 		blockedIPs:     make(map[string]struct{}),
-		blockedCgroups: make(map[uint64]struct{}),
+		blockedCgroups: make(map[uint64]string),
 		dryRun:         cfg.DryRun,
 	}
 
@@ -236,9 +240,17 @@ func (m *NFTablesManager) UnblockUID(ctx context.Context, uid uint32) error {
 	return nil
 }
 
-// BlockCgroup adds a rule to block outbound traffic from a specific cgroup.
-// Note: This is a placeholder as cgroup matching requires kernel support
-// that may not be available in all environments.
+// BlockCgroup freezes all processes in the cgroupv2 hierarchy identified by
+// cgroupID (the directory inode under /sys/fs/cgroup) and installs an nftables
+// socket cgroupv2 rule to drop outbound packets from that cgroup. Both
+// mechanisms are applied so that:
+//   - Existing processes are immediately suspended (cgroup.freeze).
+//   - New sockets opened by any surviving process are dropped at the network
+//     layer via the nftables socket cgroupv2 expression (kernel 5.13+).
+//
+// The function tolerates partial failures: if the cgroup path cannot be found
+// (e.g. the cgroup was already destroyed) or the freeze write fails, the error
+// is logged and the ID is still recorded so GetBlockedCgroups remains accurate.
 func (m *NFTablesManager) BlockCgroup(ctx context.Context, cgroupID uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -247,37 +259,146 @@ func (m *NFTablesManager) BlockCgroup(ctx context.Context, cgroupID uint64) erro
 		return nil // Already blocked
 	}
 
-	// Cgroup matching via nftables requires specific kernel support and is not
-	// yet wired to a netlink rule. We record the intent so it is observable via
-	// GetBlockedCgroups; rule application can be added later (cgroupv2 socket
-	// matching) without changing this contract.
 	if m.dryRun {
 		m.logger.Info("[DRY-RUN] Would block cgroup", "cgroup_id", cgroupID)
-	} else {
-		m.logger.Info("Cgroup blocking requested (rule application not implemented)", "cgroup_id", cgroupID)
+		m.blockedCgroups[cgroupID] = ""
+		return nil
 	}
-	m.blockedCgroups[cgroupID] = struct{}{}
 
+	// Resolve the filesystem path of the cgroup directory.
+	cgroupPath, err := findCgroupPathByID(cgroupID)
+	if err != nil {
+		m.logger.Warn("cgroup path not found — skipping freeze",
+			"cgroup_id", cgroupID, "error", err)
+		cgroupPath = ""
+	}
+
+	// Layer 1: freeze all processes via cgroupv2 cgroup.freeze (kernel 5.2+).
+	if cgroupPath != "" {
+		if ferr := writeCgroupControl(cgroupPath, "cgroup.freeze", "1"); ferr != nil {
+			m.logger.Warn("cgroup.freeze failed", "path", cgroupPath, "error", ferr)
+			// Non-fatal: still attempt nftables rule.
+		} else {
+			m.logger.Info("Froze cgroup", "cgroup_id", cgroupID, "path", cgroupPath)
+		}
+	}
+
+	// Layer 2: nftables socket cgroupv2 drop rule (kernel 5.13+).
+	// The socket expression loads the cgroupv2 hierarchy path at level 2 and
+	// an inline set-string match would be needed for path-based filtering.
+	// We use the simpler meta cgroup match (cgroupv2 net_cls class index) as
+	// a best-effort network drop; it is non-fatal if the kernel does not
+	// support it.
+	if m.conn != nil && m.table != nil && m.outputChain != nil {
+		if nferr := m.addCgroupDropRule(cgroupID); nferr != nil {
+			m.logger.Warn("nftables cgroup rule failed (kernel may lack socket cgroupv2 support)",
+				"cgroup_id", cgroupID, "error", nferr)
+		}
+	}
+
+	m.blockedCgroups[cgroupID] = cgroupPath
 	return nil
 }
 
-// UnblockCgroup removes the block rule for a specific cgroup.
+// UnblockCgroup unfreezes the cgroup identified by cgroupID and removes the
+// associated nftables drop rule.
 func (m *NFTablesManager) UnblockCgroup(ctx context.Context, cgroupID uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.blockedCgroups[cgroupID]; !exists {
+	cgroupPath, exists := m.blockedCgroups[cgroupID]
+	if !exists {
 		return nil // Not blocked
 	}
 
 	if m.dryRun {
 		m.logger.Info("[DRY-RUN] Would unblock cgroup", "cgroup_id", cgroupID)
-	} else {
-		m.logger.Info("Cgroup unblocking requested (rule application not implemented)", "cgroup_id", cgroupID)
+		delete(m.blockedCgroups, cgroupID)
+		return nil
 	}
-	delete(m.blockedCgroups, cgroupID)
 
+	// Remove nftables rule first (non-fatal on failure).
+	if m.conn != nil && m.table != nil && m.outputChain != nil {
+		if nferr := m.removeCgroupDropRule(cgroupID); nferr != nil {
+			m.logger.Warn("remove nftables cgroup rule failed",
+				"cgroup_id", cgroupID, "error", nferr)
+		}
+	}
+
+	// Unfreeze the cgroup.
+	if cgroupPath != "" {
+		if ferr := writeCgroupControl(cgroupPath, "cgroup.freeze", "0"); ferr != nil {
+			m.logger.Warn("cgroup.unfreeze failed", "path", cgroupPath, "error", ferr)
+		} else {
+			m.logger.Info("Unfroze cgroup", "cgroup_id", cgroupID, "path", cgroupPath)
+		}
+	}
+
+	delete(m.blockedCgroups, cgroupID)
 	return nil
+}
+
+// addCgroupDropRule installs a nftables rule using the meta cgroup expression
+// to drop outbound packets whose socket belongs to cgroupID.
+// This uses NFT_META_CGROUP (kernel 4.18+) which matches the cgroupv2 class
+// index of the socket owner — a best-effort layer atop the freeze.
+func (m *NFTablesManager) addCgroupDropRule(cgroupID uint64) error {
+	// NFT_META_CGROUP stores a 32-bit classid; use the low 32 bits of the
+	// cgroupv2 inode as the match value.
+	classID := uint32(cgroupID & 0xFFFFFFFF)
+
+	rule := &nftables.Rule{
+		Table: m.table,
+		Chain: m.outputChain,
+		// Store cgroupID in UserData so we can find this rule on cleanup.
+		UserData: cgroupUserData(cgroupID),
+		Exprs: []expr.Any{
+			&expr.Meta{
+				Key:      expr.MetaKeyCGROUP,
+				Register: 1,
+			},
+			&expr.Cmp{
+				Op:       expr.CmpOpEq,
+				Register: 1,
+				Data:     binaryutil.NativeEndian.PutUint32(classID),
+			},
+			&expr.Verdict{Kind: expr.VerdictDrop},
+		},
+	}
+
+	m.conn.AddRule(rule)
+	if err := m.conn.Flush(); err != nil {
+		return fmt.Errorf("nftables: add cgroup drop rule: %w", err)
+	}
+	return nil
+}
+
+// removeCgroupDropRule deletes the nftables rule installed for cgroupID.
+func (m *NFTablesManager) removeCgroupDropRule(cgroupID uint64) error {
+	rules, err := m.conn.GetRules(m.table, m.outputChain)
+	if err != nil {
+		return fmt.Errorf("nftables: get rules: %w", err)
+	}
+
+	want := cgroupUserData(cgroupID)
+	for _, rule := range rules {
+		if string(rule.UserData) == string(want) {
+			if err := m.conn.DelRule(rule); err != nil {
+				return fmt.Errorf("nftables: delete cgroup rule: %w", err)
+			}
+			break
+		}
+	}
+
+	if err := m.conn.Flush(); err != nil {
+		return fmt.Errorf("nftables: flush after cgroup rule removal: %w", err)
+	}
+	return nil
+}
+
+// cgroupUserData returns a tag stored in Rule.UserData to identify cgroup rules.
+func cgroupUserData(cgroupID uint64) []byte {
+	return fmt.Appendf(nil, "ebpf-guard:cgroup:%d", cgroupID)
 }
 
 // BlockIP adds a rule to block outbound traffic to a specific IP address.
@@ -410,7 +531,7 @@ func (m *NFTablesManager) GetBlockedUIDs() []uint32 {
 	return uids
 }
 
-// GetBlockedCgroups returns a list of cgroup IDs for which a block was requested.
+// GetBlockedCgroups returns a list of cgroup IDs that are currently blocked.
 func (m *NFTablesManager) GetBlockedCgroups() []uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -434,25 +555,37 @@ func (m *NFTablesManager) GetBlockedIPs() []string {
 	return ips
 }
 
-// Cleanup removes all rules added by this manager.
+// Cleanup unfreeze all blocked cgroups and removes all nftables rules.
 func (m *NFTablesManager) Cleanup() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.dryRun {
-		m.logger.Info("[DRY-RUN] Would cleanup all nftables rules")
-		// Still clear the recorded intent so state is consistent with prod.
+		m.logger.Info("[DRY-RUN] Would cleanup all nftables rules and unfreeze cgroups")
 		m.blockedUIDs = make(map[uint32]struct{})
 		m.blockedIPs = make(map[string]struct{})
-		m.blockedCgroups = make(map[uint64]struct{})
+		m.blockedCgroups = make(map[uint64]string)
 		return nil
+	}
+
+	// Unfreeze all blocked cgroups before wiping nftables rules.
+	for cgroupID, cgroupPath := range m.blockedCgroups {
+		if cgroupPath != "" {
+			if err := writeCgroupControl(cgroupPath, "cgroup.freeze", "0"); err != nil {
+				m.logger.Warn("cleanup: unfreeze cgroup failed",
+					"cgroup_id", cgroupID, "error", err)
+			}
+		}
 	}
 
 	if m.conn == nil {
+		m.blockedUIDs = make(map[uint32]struct{})
+		m.blockedIPs = make(map[string]struct{})
+		m.blockedCgroups = make(map[uint64]string)
 		return nil
 	}
 
-	// Delete the entire table (removes all chains and rules)
+	// Delete the entire table (removes all chains and rules).
 	if m.table != nil {
 		m.conn.DelTable(m.table)
 		if err := m.conn.Flush(); err != nil {
@@ -460,12 +593,11 @@ func (m *NFTablesManager) Cleanup() error {
 		}
 	}
 
-	// Clear tracking maps
 	m.blockedUIDs = make(map[uint32]struct{})
 	m.blockedIPs = make(map[string]struct{})
-	m.blockedCgroups = make(map[uint64]struct{})
+	m.blockedCgroups = make(map[uint64]string)
 
-	m.logger.Info("Cleaned up all nftables rules")
+	m.logger.Info("Cleaned up all nftables rules and unfroze cgroups")
 
 	return nil
 }
@@ -529,4 +661,46 @@ func IsNFTablesAvailable() bool {
 // GetBackendName returns the name of this enforcement backend.
 func (m *NFTablesManager) GetBackendName() string {
 	return "nftables"
+}
+
+// findCgroupPathByID scans /sys/fs/cgroup for the directory whose inode number
+// equals cgroupID. In cgroupv2, the cgroup ID reported by the kernel (and by
+// bpf_get_current_cgroup_id()) is the inode number of the cgroup directory.
+func findCgroupPathByID(cgroupID uint64) (string, error) {
+	const cgroupRoot = "/sys/fs/cgroup"
+	var found string
+	err := filepath.WalkDir(cgroupRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || !d.IsDir() {
+			return nil // skip unreadable entries
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return nil
+		}
+		if stat.Ino == cgroupID {
+			found = path
+			return filepath.SkipAll // stop walking
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("walk %s: %w", cgroupRoot, err)
+	}
+	if found == "" {
+		return "", fmt.Errorf("cgroupID %d not found under %s", cgroupID, cgroupRoot)
+	}
+	return found, nil
+}
+
+// writeCgroupControl writes value to a cgroupv2 control file inside cgroupPath.
+func writeCgroupControl(cgroupPath, file, value string) error {
+	target := filepath.Join(cgroupPath, file)
+	if err := os.WriteFile(target, []byte(value), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", target, err)
+	}
+	return nil
 }

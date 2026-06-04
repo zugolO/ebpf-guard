@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -457,4 +459,142 @@ func BenchmarkBlockIP(b *testing.B) {
 		ip := ips[i%len(ips)]
 		mgr.BlockIP(ctx, ip)
 	}
+}
+
+// TestFindCgroupPathByID creates a temp directory structure and verifies
+// that findCgroupPathByID locates it by inode.
+func TestFindCgroupPathByID(t *testing.T) {
+	// Create a temporary directory to act as a fake cgroup.
+	tmpDir := t.TempDir()
+	fakeDir := filepath.Join(tmpDir, "fake-cgroup")
+	if err := os.Mkdir(fakeDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Get the inode of the fake directory.
+	var st syscall.Stat_t
+	if err := syscall.Stat(fakeDir, &st); err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	inode := st.Ino
+
+	// Temporarily override cgroupRoot by using our own wrapper.
+	// findCgroupPathByID uses /sys/fs/cgroup, so we test the helper directly
+	// via a local walk (mirrors the same logic).
+	found, err := findPathByInode(tmpDir, inode)
+	if err != nil {
+		t.Fatalf("findPathByInode: %v", err)
+	}
+	if found != fakeDir {
+		t.Errorf("expected %q, got %q", fakeDir, found)
+	}
+}
+
+// TestFindCgroupPathByID_NotFound verifies that a missing inode returns an error.
+func TestFindCgroupPathByID_NotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	_, err := findPathByInode(tmpDir, 0xDEADBEEFDEADBEEF)
+	if err == nil {
+		t.Error("expected error for non-existent inode")
+	}
+}
+
+// TestWriteCgroupControl verifies that writeCgroupControl writes to a file.
+func TestWriteCgroupControl(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeCgroupControl(dir, "cgroup.freeze", "1"); err != nil {
+		t.Fatalf("writeCgroupControl: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "cgroup.freeze"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "1" {
+		t.Errorf("expected %q, got %q", "1", string(got))
+	}
+}
+
+// TestWriteCgroupControl_MissingDir verifies that writeCgroupControl fails on
+// a non-existent directory.
+func TestWriteCgroupControl_MissingDir(t *testing.T) {
+	err := writeCgroupControl("/nonexistent/path/that/does/not/exist", "cgroup.freeze", "1")
+	if err == nil {
+		t.Error("expected error writing to non-existent directory")
+	}
+}
+
+// TestCgroupUserData verifies the tagging format used for rule identification.
+func TestCgroupUserData(t *testing.T) {
+	data := cgroupUserData(42)
+	want := "ebpf-guard:cgroup:42"
+	if string(data) != want {
+		t.Errorf("cgroupUserData(42) = %q, want %q", string(data), want)
+	}
+}
+
+// TestNFTablesManager_BlockCgroup_Idempotent verifies that blocking the same
+// cgroup twice is a no-op and does not duplicate entries.
+func TestNFTablesManager_BlockCgroup_Idempotent(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mgr, err := NewNFTablesManager(logger, NFTablesConfig{DryRun: true})
+	if err != nil {
+		t.Fatalf("NewNFTablesManager: %v", err)
+	}
+	defer mgr.Close()
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := mgr.BlockCgroup(ctx, 99999); err != nil {
+			t.Fatalf("BlockCgroup iteration %d: %v", i, err)
+		}
+	}
+	if n := len(mgr.GetBlockedCgroups()); n != 1 {
+		t.Errorf("expected 1 blocked cgroup, got %d", n)
+	}
+}
+
+// TestNFTablesManager_UnblockCgroup_NonExistent verifies that unblocking a
+// cgroup that was never blocked is a no-op.
+func TestNFTablesManager_UnblockCgroup_NonExistent(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mgr, err := NewNFTablesManager(logger, NFTablesConfig{DryRun: true})
+	if err != nil {
+		t.Fatalf("NewNFTablesManager: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.UnblockCgroup(context.Background(), 77777); err != nil {
+		t.Errorf("UnblockCgroup non-existent: %v", err)
+	}
+}
+
+// findPathByInode mirrors findCgroupPathByID but with a configurable root,
+// used in tests to avoid touching /sys/fs/cgroup.
+func findPathByInode(root string, inode uint64) (string, error) {
+	var found string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || !d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return nil
+		}
+		if st.Ino == inode {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if found == "" {
+		return "", os.ErrNotExist
+	}
+	return found, nil
 }

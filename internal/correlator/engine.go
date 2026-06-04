@@ -144,8 +144,8 @@ type CorrelationEngine struct {
 	// Rule-based enforcement (optional)
 	actionExecutor      ActionExecutor
 	enforceCooldown     time.Duration
-	cooldowns           sync.Map   // key="ruleID:PID", value=time.Time
-	cooldownsMu         sync.Mutex // serialises the Load+Store check-and-set to prevent duplicate enforcement
+	cooldowns           map[cooldownKey]time.Time // protected by cooldownsMu
+	cooldownsMu         sync.Mutex               // serialises the check-and-set to prevent duplicate enforcement
 	enforcedCounter     prometheus.Counter
 	enforceQueue        chan enforceTask
 	enforceQueueDropped prometheus.Counter
@@ -158,6 +158,12 @@ type CorrelationEngine struct {
 
 // MetricsCallback is a function called to record metrics.
 type MetricsCallback func(duration float64)
+
+// cooldownKey is the zero-allocation composite key for enforcement cooldown tracking.
+type cooldownKey struct {
+	ruleID string
+	pid    uint32
+}
 
 // enforceTask is a unit of work dispatched to the enforcement worker pool.
 type enforceTask struct {
@@ -359,6 +365,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		wasmEngine:           config.WasmEngine,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
+		cooldowns:            make(map[cooldownKey]time.Time),
 		enforcedCounter:      enforcedCounter,
 		enforceQueue:         enforceQueue,
 		enforceQueueDropped:  enforceQueueDropped,
@@ -410,12 +417,13 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				return
 			case <-ticker.C:
 				cutoff := time.Now().Add(-enforceCooldown)
-				ce.cooldowns.Range(func(k, v any) bool {
-					if t, ok := v.(time.Time); ok && t.Before(cutoff) {
-						ce.cooldowns.Delete(k)
+				ce.cooldownsMu.Lock()
+				for k, t := range ce.cooldowns {
+					if t.Before(cutoff) {
+						delete(ce.cooldowns, k)
 					}
-					return true
-				})
+				}
+				ce.cooldownsMu.Unlock()
 			}
 		}
 	}()
@@ -538,16 +546,20 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.Alert {
 	start := time.Now()
 
-	// Build span start options; if the event carries W3C Trace Context (extracted from
-	// HTTP/gRPC headers by the TLS uprobe), add a span link so this internal span is
-	// visible alongside the originating APM trace in distributed tracing backends.
-	spanOpts := []trace.SpanStartOption{
-		trace.WithAttributes(
-			attribute.Int("event.pid", int(e.PID)),
-			attribute.Int("event.type", int(e.Type)),
-		),
-	}
+	// Open an OTel span only when the event carries APM trace context (extracted
+	// by the TLS uprobe from HTTP/gRPC headers). Kernel-generated events (~99%
+	// of traffic) have no TraceContext and skip span creation entirely, saving
+	// the ~50-80 ns overhead of tracer.Start on every call.
+	var span trace.Span
 	if e.TraceContext != nil && e.TraceContext.TraceID != "" {
+		spanOpts := []trace.SpanStartOption{
+			trace.WithAttributes(
+				attribute.Int("event.pid", int(e.PID)),
+				attribute.Int("event.type", int(e.Type)),
+				attribute.String("apm.trace_id", e.TraceContext.TraceID),
+				attribute.String("apm.span_id", e.TraceContext.SpanID),
+			),
+		}
 		if remoteCtx, err := buildRemoteSpanContext(e.TraceContext.TraceID, e.TraceContext.SpanID); err == nil {
 			spanOpts = append(spanOpts, trace.WithLinks(trace.Link{
 				SpanContext: remoteCtx,
@@ -556,25 +568,21 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 					attribute.String("link.trace_id", e.TraceContext.TraceID),
 				},
 			}))
-			spanOpts = append(spanOpts, trace.WithAttributes(
-				attribute.String("apm.trace_id", e.TraceContext.TraceID),
-				attribute.String("apm.span_id", e.TraceContext.SpanID),
-			))
 		}
+		ctx, span = tracer.Start(ctx, "CorrelationEngine.Ingest", spanOpts...)
+		defer span.End()
 	}
 
-	// Start OpenTelemetry span
-	ctx, span := tracer.Start(ctx, "CorrelationEngine.Ingest", spanOpts...)
-	defer span.End()
-
-	// Record duration metric
+	// Record latency metric (always).
 	defer func() {
 		duration := time.Since(start).Seconds()
 		ce.latencyHistogram.Observe(duration)
 		if ce.onCorrelate != nil {
 			ce.onCorrelate(duration)
 		}
-		span.SetAttributes(attribute.Float64("correlation.duration_seconds", duration))
+		if span != nil {
+			span.SetAttributes(attribute.Float64("correlation.duration_seconds", duration))
+		}
 	}()
 
 	ce.processedEvents.Add(1)
@@ -767,7 +775,9 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	}
 
 	// Update span with alert count
-	span.SetAttributes(attribute.Int("alerts.generated", len(alerts)))
+	if span != nil {
+		span.SetAttributes(attribute.Int("alerts.generated", len(alerts)))
+	}
 
 	// Rego policy evaluation (post-YAML filter, Sprint 23.0)
 	// This is called ONLY on alerts, not on raw events, for performance
@@ -953,21 +963,19 @@ func isEnforcedAction(action string) bool {
 // the (ruleID, pid) pair. Successive calls within enforceCooldown return false
 // to prevent enforcement spam when the same process keeps triggering a rule.
 //
-// cooldownsMu makes the Load+compare+Store atomic so two concurrent goroutines
+// cooldownsMu makes the lookup+compare+store atomic so two concurrent goroutines
 // for the same (ruleID, pid) cannot both slip through and fire the action twice.
 func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32) bool {
-	key := fmt.Sprintf("%s:%d", ruleID, pid)
+	key := cooldownKey{ruleID: ruleID, pid: pid}
 	now := time.Now()
 
 	ce.cooldownsMu.Lock()
 	defer ce.cooldownsMu.Unlock()
 
-	if prev, loaded := ce.cooldowns.Load(key); loaded {
-		if prevTime, ok := prev.(time.Time); ok && now.Sub(prevTime) < ce.enforceCooldown {
-			return false
-		}
+	if prev, ok := ce.cooldowns[key]; ok && now.Sub(prev) < ce.enforceCooldown {
+		return false
 	}
-	ce.cooldowns.Store(key, now)
+	ce.cooldowns[key] = now
 	return true
 }
 

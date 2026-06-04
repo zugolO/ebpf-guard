@@ -307,6 +307,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	srv.SetRulesProvider(func() []correlator.Rule {
 		return engine.GetRules()
 	})
+	srv.SetIncidentTracker(engine.IncidentTracker())
 
 	if gossipMgr != nil {
 		srv.RegisterGossipRoutes(gossip.Handler(gossipMgr))

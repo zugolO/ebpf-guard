@@ -58,6 +58,9 @@ type Server struct {
 
 	// alertExplainer generates human-readable explanations for alerts (optional).
 	alertExplainer *explainer.Explainer
+
+	// incidentTracker exposes the engine's incident grouping state (optional).
+	incidentTracker *correlator.IncidentTracker
 }
 
 // NewServer creates a new HTTP server for metrics and health.
@@ -237,6 +240,13 @@ func (s *Server) SetFeedbackManager(fm *feedback.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.feedbackManager = fm
+}
+
+// SetIncidentTracker wires the incident tracker so GET /api/v1/incidents is served.
+func (s *Server) SetIncidentTracker(t *correlator.IncidentTracker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.incidentTracker = t
 }
 
 // SetExplainer wires an Explainer so GET /api/v1/alerts/{id}/explain is served.

@@ -31,6 +31,10 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// Rules endpoints
 	mux.HandleFunc("/api/v1/rules", s.handleRules)
 	mux.HandleFunc("/api/v1/rules/reload", s.handleRulesReload)
+
+	// Incident endpoints
+	mux.HandleFunc("/api/v1/incidents", s.handleIncidents)
+	mux.HandleFunc("/api/v1/incidents/", s.handleIncidentByID)
 }
 
 // handleAlerts handles GET /api/v1/alerts with query parameter filters.
@@ -557,4 +561,67 @@ func escapeCEF(s string) string {
 	s = strings.ReplaceAll(s, "\n", "\\n")
 	s = strings.ReplaceAll(s, "\r", "\\r")
 	return s
+}
+
+// handleIncidents handles GET /api/v1/incidents.
+//
+// Query parameters:
+//   - namespace: filter by Kubernetes namespace (empty = all namespaces)
+//   - status: "open" | "closed" (empty = both)
+//   - limit: maximum number of results (default unlimited)
+func (s *Server) handleIncidents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.incidentTracker == nil {
+		http.Error(w, "Incident tracking not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	q := r.URL.Query()
+	namespace := q.Get("namespace")
+	status := q.Get("status")
+
+	limit := 0
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	incidents := s.incidentTracker.GetAll(namespace, status, limit)
+	if incidents == nil {
+		incidents = []types.Incident{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(incidents)
+}
+
+// handleIncidentByID handles GET /api/v1/incidents/{id}.
+func (s *Server) handleIncidentByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.incidentTracker == nil {
+		http.Error(w, "Incident tracking not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/incidents/")
+	if id == "" {
+		http.Error(w, "Missing incident ID", http.StatusBadRequest)
+		return
+	}
+
+	inc, ok := s.incidentTracker.GetByID(id)
+	if !ok {
+		http.Error(w, "Incident not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(inc)
 }

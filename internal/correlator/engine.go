@@ -163,6 +163,10 @@ type CorrelationEngine struct {
 	// cardinality-guarded Prometheus gauge can be kept in sync without importing
 	// the exporter package (which would create a circular dependency).
 	scoreReporter func(pid, comm string, score float64)
+
+	// incidentTracker groups alerts from the same (pid, namespace) within a
+	// sliding window into Incident records for higher-level attack correlation.
+	incidentTracker *IncidentTracker
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -287,6 +291,10 @@ type CorrelationEngineConfig struct {
 	// DedupWindow is the deduplication suppression window.
 	// Zero → 5 seconds.
 	DedupWindow time.Duration
+
+	// IncidentWindow is the sliding time window for grouping alerts from the
+	// same (pid, namespace) into an Incident. Zero → 60 seconds.
+	IncidentWindow time.Duration
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -305,6 +313,7 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		BufferTTL:          10 * time.Minute,
 		EnableDedup:        true,
 		DedupWindow:        5 * time.Second,
+		IncidentWindow:     60 * time.Second,
 	}
 }
 
@@ -439,6 +448,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		queueDepthGauge:      queueDepthGauge,
 		latencyHistogram:     latencyHistogram,
 		activeRulesGauge:     activeRulesGauge,
+		incidentTracker:      newIncidentTracker(config.IncidentWindow),
 	}
 
 	ce.ruleEngine.Store(NewRuleEngine(config.Rules))
@@ -498,6 +508,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 					}
 				}
 				ce.dedupMu.Unlock()
+
+				ce.incidentTracker.Cleanup(now)
 			}
 		}
 	}()
@@ -975,6 +987,11 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	ce.pending = append(ce.pending, alerts...)
 	ce.pendingMu.Unlock()
 
+	// Group alerts into incidents.
+	for i := range alerts {
+		ce.incidentTracker.Add(alerts[i])
+	}
+
 	return alerts
 }
 
@@ -1130,6 +1147,13 @@ func (ce *CorrelationEngine) ReloadRules(rules []Rule) {
 func (ce *CorrelationEngine) UpdateRateLimiter(window time.Duration, maxAlerts int, enabled bool) {
 	ce.rateLimiter.UpdateConfig(window, maxAlerts)
 	ce.rateLimiter.SetEnabled(enabled)
+}
+
+// IncidentTracker returns the engine's incident tracker so callers (e.g. the
+// HTTP server) can serve incident query results without coupling to the engine's
+// internals.
+func (ce *CorrelationEngine) IncidentTracker() *IncidentTracker {
+	return ce.incidentTracker
 }
 
 // isEnforcedAction returns true when the action demands active enforcement

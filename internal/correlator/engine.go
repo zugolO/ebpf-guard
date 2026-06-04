@@ -143,7 +143,8 @@ type CorrelationEngine struct {
 	// Rule-based enforcement (optional)
 	actionExecutor      ActionExecutor
 	enforceCooldown     time.Duration
-	cooldowns           sync.Map // key="ruleID:PID", value=time.Time
+	cooldowns           sync.Map   // key="ruleID:PID", value=time.Time
+	cooldownsMu         sync.Mutex // serialises the Load+Store check-and-set to prevent duplicate enforcement
 	enforcedCounter     prometheus.Counter
 	enforceQueue        chan enforceTask
 	enforceQueueDropped prometheus.Counter
@@ -941,9 +942,16 @@ func isEnforcedAction(action string) bool {
 // tryAcquireEnforceCooldown returns true if enforcement should proceed for
 // the (ruleID, pid) pair. Successive calls within enforceCooldown return false
 // to prevent enforcement spam when the same process keeps triggering a rule.
+//
+// cooldownsMu makes the Load+compare+Store atomic so two concurrent goroutines
+// for the same (ruleID, pid) cannot both slip through and fire the action twice.
 func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32) bool {
 	key := fmt.Sprintf("%s:%d", ruleID, pid)
 	now := time.Now()
+
+	ce.cooldownsMu.Lock()
+	defer ce.cooldownsMu.Unlock()
+
 	if prev, loaded := ce.cooldowns.Load(key); loaded {
 		if prevTime, ok := prev.(time.Time); ok && now.Sub(prevTime) < ce.enforceCooldown {
 			return false

@@ -24,6 +24,7 @@ type Watcher struct {
 	client    kubernetes.Interface
 	informer  cache.SharedIndexInformer
 	stopCh    chan struct{}
+	stopOnce  sync.Once // guards close(stopCh) against double-close panics
 	logger    *slog.Logger
 
 	// podCache maps container ID -> PodInfo
@@ -142,10 +143,10 @@ func (w *Watcher) Start(ctx context.Context) error {
 	return w.Stop()
 }
 
-// Stop stops the watcher.
+// Stop stops the watcher. Safe to call multiple times — subsequent calls are no-ops.
 func (w *Watcher) Stop() error {
 	w.logger.Info("stopping pod watcher")
-	close(w.stopCh)
+	w.stopOnce.Do(func() { close(w.stopCh) })
 	return nil
 }
 

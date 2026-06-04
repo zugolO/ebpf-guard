@@ -70,13 +70,20 @@ func NewEnricher(config EnricherConfig, logger *slog.Logger) (*Enricher, error) 
 func (e *Enricher) Start(ctx context.Context) error {
 	e.logger.Info("starting k8s enricher")
 
-	// Start background cache cleanup
 	cleanupCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go e.cacheCleanupLoop(cleanupCtx)
 
-	// Start the watcher (blocks until context cancelled)
-	return e.watcher.Start(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		e.cacheCleanupLoop(cleanupCtx)
+	}()
+
+	// watcher.Start blocks until ctx is cancelled.
+	err := e.watcher.Start(ctx)
+	cancel()  // signal cleanup goroutine to stop
+	wg.Wait() // wait for it to exit before returning
+	return err
 }
 
 // Stop stops the enricher.
@@ -147,9 +154,15 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 		CachedAt:    time.Now(),
 	}
 
-	// Cache the result
+	// Cache the result. Re-check under the write lock: another goroutine may
+	// have populated a fresh entry while we were calling GetPodInfoByPID.
+	// If so, prefer the existing entry to avoid overwriting more-recent data.
 	e.mu.Lock()
-	e.enrichmentCache[pid] = info
+	if existing, ok := e.enrichmentCache[pid]; ok && time.Since(existing.CachedAt) < e.cacheTTL {
+		info = existing
+	} else {
+		e.enrichmentCache[pid] = info
+	}
 	e.mu.Unlock()
 
 	return info

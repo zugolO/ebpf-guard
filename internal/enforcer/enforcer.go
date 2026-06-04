@@ -123,6 +123,8 @@ type Enforcer struct {
 	blockBackend BlockBackend
 	// nftablesMgr is the nftables manager (nil if not using nftables)
 	nftablesMgr *NFTablesManager
+	// iptablesMgr is the iptables manager (nil if not using iptables)
+	iptablesMgr *IPTablesManager
 	// xdpMgr is the XDP packet filter manager (nil if not using XDP)
 	xdpMgr *XDPManager
 	// lsmManager is the LSM blocklist manager (nil if not using LSM)
@@ -224,6 +226,12 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 				return nil, fmt.Errorf("enforcer: init nftables: %w", err)
 			}
 			e.nftablesMgr = nftMgr
+		case BlockBackendIPTables:
+			ipt, err := NewIPTablesManager(logger, IPTablesConfig{DryRun: cfg.DryRun})
+			if err != nil {
+				return nil, fmt.Errorf("enforcer: init iptables: %w", err)
+			}
+			e.iptablesMgr = ipt
 		case BlockBackendXDP:
 			xdpMgr, err := NewXDPManager(logger, XDPConfig{
 				Interface: cfg.XDPInterface,
@@ -348,8 +356,14 @@ func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
 			}
 		}
 	case BlockBackendIPTables:
-		e.logger.Warn("iptables backend not implemented, logging only",
-			slog.Uint64("uid", uint64(alert.Event.UID)))
+		if e.iptablesMgr != nil {
+			if err := e.iptablesMgr.BlockUID(ctx, alert.Event.UID); err != nil {
+				entry.Success = false
+				entry.Error = err.Error()
+				e.logAudit(entry)
+				return fmt.Errorf("enforcer/block: iptables block UID %d: %w", alert.Event.UID, err)
+			}
+		}
 	case BlockBackendLog:
 		// log-only — already logged above
 	}
@@ -460,9 +474,18 @@ nftablesFallback:
 			e.logger.Info("LSM unavailable, used nftables fallback", "uid", alert.Event.UID)
 			entry.Success = true
 		}
+	} else if e.iptablesMgr != nil {
+		if err := e.iptablesMgr.BlockUID(ctx, alert.Event.UID); err != nil {
+			entry.Success = false
+			entry.Error = err.Error()
+			execErr = fmt.Errorf("enforcer/lsm_block: iptables fallback failed for UID %d: %w", alert.Event.UID, err)
+		} else {
+			e.logger.Info("LSM unavailable, used iptables fallback", "uid", alert.Event.UID)
+			entry.Success = true
+		}
 	} else {
 		entry.Success = false
-		entry.Error = "no blocking backend available (LSM or nftables)"
+		entry.Error = "no blocking backend available (LSM, nftables, or iptables)"
 		execErr = fmt.Errorf("enforcer/lsm_block: no blocking backend available")
 	}
 
@@ -787,6 +810,11 @@ func (e *Enforcer) Cleanup() error {
 			return err
 		}
 	}
+	if e.iptablesMgr != nil {
+		if err := e.iptablesMgr.Cleanup(); err != nil {
+			return err
+		}
+	}
 	// Note: XDP blocklist is cleared by closing the BPF maps in Close().
 	// Note: LSM blocklist is cleared by closing the BPF maps in LSMCollector.Close().
 	return nil
@@ -803,6 +831,11 @@ func (e *Enforcer) Close() error {
 
 	if e.nftablesMgr != nil {
 		if err := e.nftablesMgr.Close(); err != nil {
+			return err
+		}
+	}
+	if e.iptablesMgr != nil {
+		if err := e.iptablesMgr.Close(); err != nil {
 			return err
 		}
 	}

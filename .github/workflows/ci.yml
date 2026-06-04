@@ -15,10 +15,6 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.24', '1.25']
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -26,7 +22,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -38,15 +34,11 @@ jobs:
       uses: golangci/golangci-lint-action@v6
       with:
         version: latest
-        args: --timeout=5m --go=1.25
+        args: --timeout=5m
 
   test:
     name: Test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.24', '1.25']
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -54,7 +46,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -87,10 +79,6 @@ jobs:
   race-detector:
     name: Race Detector
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.24', '1.25']
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -98,7 +86,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -234,7 +222,6 @@ jobs:
     needs: [lint, test]
     strategy:
       matrix:
-        go-version: ['1.24', '1.25']
         arch: [amd64, arm64]
     steps:
     - name: Checkout
@@ -243,7 +230,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -267,7 +254,7 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ebpf-guard-linux-${{ matrix.arch }}-go${{ matrix.go-version }}
+        name: ebpf-guard-linux-${{ matrix.arch }}
         path: ebpf-guard-linux-${{ matrix.arch }}
 
   docker:
@@ -337,7 +324,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24'
+        go-version: '1.25'
 
     - name: Run gosec
       uses: securego/gosec@master

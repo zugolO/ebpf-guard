@@ -33,7 +33,9 @@ func NewSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 		cfg.MaxIdleConns = 5
 	}
 
-	db, err := sql.Open("sqlite3", cfg.Path+"?_journal_mode=WAL&_busy_timeout=5000")
+	// _journal_mode and _synchronous in the DSN ensure every connection
+	// opened by the pool inherits these settings without an extra round-trip.
+	db, err := sql.Open("sqlite3", cfg.Path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -42,6 +44,11 @@ func NewSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(time.Hour)
 
+	if err := applySQLitePragmas(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply sqlite pragmas: %w", err)
+	}
+
 	store := &SQLiteStore{db: db}
 	if err := store.initSchema(); err != nil {
 		db.Close()
@@ -49,6 +56,27 @@ func NewSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 	}
 
 	return store, nil
+}
+
+// applySQLitePragmas sets performance-tuning PRAGMAs on an open database.
+//
+//   - journal_mode=WAL  — write-ahead log; readers never block writers.
+//   - synchronous=NORMAL — fsync only at WAL checkpoints, not every commit;
+//     safe against OS crash, sacrifices durability only on power loss.
+//   - cache_size=-32000  — page cache of 32 MB (negative = kibibytes);
+//     reduces I/O for bursty alert writes.
+func applySQLitePragmas(db *sql.DB) error {
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA cache_size=-32000",
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // initSchema creates the alerts table if it doesn't exist.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -27,6 +28,7 @@ type DNSCollector struct {
 	enabled    bool
 	dropLogger *dropLogger
 	strategy   BackpressureStrategy
+	lostTotal  atomic.Uint64
 }
 
 // dnsMetrics holds Prometheus metrics for DNS collection.
@@ -188,7 +190,6 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			slog.Error("dns: read from ringbuf", slog.Any("error", err))
 			continue
 		}
-
 		event := c.parseEvent(record.RawSample)
 		if event == nil {
 			continue
@@ -203,8 +204,15 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			c.metrics.eventsDropped.Inc()
 			c.dropLogger.record(slog.Default(), "dns")
+			c.lostTotal.Add(1)
 		})
 	}
+}
+
+// LostEvents returns the total number of events lost in the BPF ring buffer
+// since the collector started. Implements watchdog.DropTracker.
+func (c *DNSCollector) LostEvents() uint64 {
+	return c.lostTotal.Load()
 }
 
 // parseEvent parses a raw ring buffer record into a types.Event.

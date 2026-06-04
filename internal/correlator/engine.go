@@ -94,8 +94,10 @@ type CorrelationEngine struct {
 	alertsDroppedGlobal  prometheus.Counter // ebpf_guard_alerts_dropped_total{reason="global_rate_limit"}
 
 	// Rego policy engine (post-YAML filter, Sprint 23.0)
-	regoEngine     *policy.RegoEngine
-	enableRegoEval bool
+	regoEngine      *policy.RegoEngine
+	enableRegoEval  bool
+	regoQueue       chan regoTask
+	regoQueueDropped prometheus.Counter
 
 	// Monotonic counter for unique Alert IDs — prevents collision when
 	// two alerts share the same ruleID+timestamp+pid (e.g. bursts in <1ns resolution).
@@ -141,6 +143,13 @@ type CorrelationEngine struct {
 	// When set, all loaded .wasm plugins are evaluated on every event.
 	wasmEngine WasmEvaluator
 
+	// Alert deduplication — sliding 5 s window keyed on (ruleID, pid, comm).
+	enableDedup         bool
+	dedupWindow         time.Duration
+	dedups              map[dedupKey]time.Time
+	dedupMu             sync.Mutex
+	alertsDedupDropped  prometheus.Counter
+
 	// Rule-based enforcement (optional)
 	actionExecutor      ActionExecutor
 	enforceCooldown     time.Duration
@@ -154,6 +163,10 @@ type CorrelationEngine struct {
 	// cardinality-guarded Prometheus gauge can be kept in sync without importing
 	// the exporter package (which would create a circular dependency).
 	scoreReporter func(pid, comm string, score float64)
+
+	// incidentTracker groups alerts from the same (pid, namespace) within a
+	// sliding window into Incident records for higher-level attack correlation.
+	incidentTracker *IncidentTracker
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -165,12 +178,26 @@ type cooldownKey struct {
 	pid    uint32
 }
 
+// dedupKey is the composite key for the sliding-window alert deduplication map.
+type dedupKey struct {
+	ruleID string
+	pid    uint32
+	comm   string
+}
+
 // enforceTask is a unit of work dispatched to the enforcement worker pool.
 type enforceTask struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	action string
 	alert  types.Alert
+}
+
+// regoTask is a unit of work dispatched to the async Rego evaluation pool.
+type regoTask struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	alerts []types.Alert
 }
 
 // CorrelationEngineConfig holds configuration for the correlation engine.
@@ -199,6 +226,10 @@ type CorrelationEngineConfig struct {
 	// Rego policy engine configuration (Sprint 23.0)
 	EnableRegoEval bool
 	RegoEngine     *policy.RegoEngine
+
+	// RegoWorkerCount is the number of goroutines draining the async Rego
+	// evaluation queue. Zero → max(2, runtime.NumCPU()/2).
+	RegoWorkerCount int
 
 	// Global alert rate limit — maximum alerts per second across all rules.
 	// Zero means unlimited. Default: 10000.
@@ -251,6 +282,19 @@ type CorrelationEngineConfig struct {
 	// external cardinality-guarded metric (e.g. exporter.SetAnomalyScoreWithGuard)
 	// can track scores without creating a circular import.  Optional — nil disables.
 	AnomalyScoreReporter func(pid, comm string, score float64)
+
+	// EnableDedup enables sliding-window alert deduplication.
+	// Duplicate (ruleID, pid, comm) alerts within DedupWindow are dropped.
+	// Default: true.
+	EnableDedup bool
+
+	// DedupWindow is the deduplication suppression window.
+	// Zero → 5 seconds.
+	DedupWindow time.Duration
+
+	// IncidentWindow is the sliding time window for grouping alerts from the
+	// same (pid, namespace) into an Incident. Zero → 60 seconds.
+	IncidentWindow time.Duration
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -267,6 +311,9 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		MaxAlertsPerWindow: 10,
 		MaxAlertsPerSecond: 10000,
 		BufferTTL:          10 * time.Minute,
+		EnableDedup:        true,
+		DedupWindow:        5 * time.Second,
+		IncidentWindow:     60 * time.Second,
 	}
 }
 
@@ -347,6 +394,26 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	// without consuming significant memory. Each task is ~200 bytes.
 	enforceQueue := make(chan enforceTask, 1024)
 
+	dedupWindow := config.DedupWindow
+	if dedupWindow <= 0 {
+		dedupWindow = 5 * time.Second
+	}
+
+	alertsDedupDropped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ebpf_guard_alerts_dedup_dropped_total",
+		Help: "Alerts suppressed by the sliding-window deduplication filter.",
+	})
+
+	var regoQueue chan regoTask
+	var regoQueueDropped prometheus.Counter
+	if config.EnableRegoEval && config.RegoEngine != nil {
+		regoQueueDropped = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_rego_queue_dropped_total",
+			Help: "Rego evaluation tasks dropped because the async worker queue was full.",
+		})
+		regoQueue = make(chan regoTask, 1024)
+	}
+
 	ce := &CorrelationEngine{
 		buffer:               NewShardedEventBuffer(config.BufferSize),
 		pending:              make([]types.Alert, 0),
@@ -356,6 +423,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		cancelCleanup:        cancel,
 		enableRegoEval:       config.EnableRegoEval,
 		regoEngine:           config.RegoEngine,
+		regoQueue:            regoQueue,
+		regoQueueDropped:     regoQueueDropped,
 		onCorrelate:          config.OnCorrelate,
 		lineageTracker:       lt,
 		feedbackManager:      config.FeedbackManager,
@@ -363,6 +432,10 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		sensitivityAdjuster:  config.SensitivityAdjuster,
 		baseAnomalyThreshold: config.AnomalyThreshold,
 		wasmEngine:           config.WasmEngine,
+		enableDedup:          config.EnableDedup,
+		dedupWindow:          dedupWindow,
+		dedups:               make(map[dedupKey]time.Time),
+		alertsDedupDropped:   alertsDedupDropped,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
 		cooldowns:            make(map[cooldownKey]time.Time),
@@ -375,6 +448,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		queueDepthGauge:      queueDepthGauge,
 		latencyHistogram:     latencyHistogram,
 		activeRulesGauge:     activeRulesGauge,
+		incidentTracker:      newIncidentTracker(config.IncidentWindow),
 	}
 
 	ce.ruleEngine.Store(NewRuleEngine(config.Rules))
@@ -400,8 +474,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		}
 	}()
 
-	// Background goroutine that evicts expired enforcement cooldown entries.
-	// Without this the cooldowns sync.Map grows unbounded with unique (ruleID,PID) pairs.
+	// Background goroutine that evicts expired enforcement cooldown and dedup entries.
+	// Without this the maps grow unbounded with unique (ruleID,PID) pairs.
 	go func() {
 		// Check every 5× the cooldown window so entries live long enough to
 		// block repeated enforcement, but dead PIDs don't accumulate forever.
@@ -416,14 +490,26 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				cutoff := time.Now().Add(-enforceCooldown)
+				now := time.Now()
+				cooldownCutoff := now.Add(-enforceCooldown)
 				ce.cooldownsMu.Lock()
 				for k, t := range ce.cooldowns {
-					if t.Before(cutoff) {
+					if t.Before(cooldownCutoff) {
 						delete(ce.cooldowns, k)
 					}
 				}
 				ce.cooldownsMu.Unlock()
+
+				dedupCutoff := now.Add(-ce.dedupWindow)
+				ce.dedupMu.Lock()
+				for k, t := range ce.dedups {
+					if t.Before(dedupCutoff) {
+						delete(ce.dedups, k)
+					}
+				}
+				ce.dedupMu.Unlock()
+
+				ce.incidentTracker.Cleanup(now)
 			}
 		}
 	}()
@@ -446,6 +532,21 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	if config.ActionExecutor != nil {
 		for i := 0; i < enforceWorkers; i++ {
 			go ce.enforceWorker(ctx)
+		}
+	}
+
+	// Start async Rego evaluation worker pool. Pool size is max(2, NumCPU/2)
+	// to avoid blocking the Ingest hot path while still bounding goroutine growth.
+	if config.EnableRegoEval && config.RegoEngine != nil {
+		regoWorkers := config.RegoWorkerCount
+		if regoWorkers <= 0 {
+			regoWorkers = runtime.NumCPU() / 2
+			if regoWorkers < 2 {
+				regoWorkers = 2
+			}
+		}
+		for i := 0; i < regoWorkers; i++ {
+			go ce.regoWorker(ctx)
 		}
 	}
 
@@ -494,6 +595,75 @@ func (ce *CorrelationEngine) enforceWorker(ctx context.Context) {
 	}
 }
 
+// regoWorker drains the async Rego evaluation queue. For each task it evaluates
+// the alerts through OPA, applies analyst suppression, then appends enriched
+// alerts to pending so downstream consumers can read them via Flush.
+func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
+	for {
+		select {
+		case task, ok := <-ce.regoQueue:
+			if !ok {
+				return
+			}
+			enriched := ce.evaluateRegoPolicies(task.ctx, task.alerts)
+			task.cancel()
+
+			if ce.feedbackManager != nil && len(enriched) > 0 {
+				enriched = ce.feedbackManager.FilterAlerts(enriched)
+			}
+
+			ce.pendingMu.Lock()
+			ce.pending = append(ce.pending, enriched...)
+			ce.pendingMu.Unlock()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// filterDuplicates removes alerts whose (ruleID, pid, comm) key was already seen
+// within the dedup window. The first occurrence is always kept; subsequent ones
+// within the window are dropped and counted. Operates in-place on the slice.
+func (ce *CorrelationEngine) filterDuplicates(alerts []types.Alert) []types.Alert {
+	if len(alerts) == 0 {
+		return alerts
+	}
+	now := time.Now()
+	cutoff := now.Add(-ce.dedupWindow)
+
+	out := alerts[:0]
+	ce.dedupMu.Lock()
+	defer ce.dedupMu.Unlock()
+	for _, alert := range alerts {
+		key := dedupKey{ruleID: alert.RuleID, pid: alert.PID, comm: alert.Comm}
+		if prev, ok := ce.dedups[key]; ok && prev.After(cutoff) {
+			ce.alertsDedupDropped.Add(1)
+			ce.alertsDropped.Add(1)
+			continue
+		}
+		ce.dedups[key] = now
+		out = append(out, alert)
+	}
+	return out
+}
+
+// DrainEnforceQueue blocks until the enforcement queue is empty or ctx expires.
+// Call this during graceful shutdown to let in-flight enforcement tasks complete
+// before closing the engine.
+func (ce *CorrelationEngine) DrainEnforceQueue(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if len(ce.enforceQueue) == 0 {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Close stops background goroutines started by the engine.
 func (ce *CorrelationEngine) Close() {
 	ce.cancelCleanup()
@@ -531,6 +701,8 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.activeRulesGauge,
 		ce.enforceQueueDropped,
 		ce.enforcedCounter,
+		ce.regoQueueDropped,
+		ce.alertsDedupDropped,
 	} {
 		if c == nil {
 			continue
@@ -774,15 +946,34 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		}
 	}
 
+	// Sliding-window deduplication: drop repeated (ruleID, pid, comm) alerts
+	// within the configured window to suppress burst duplicates.
+	if ce.enableDedup && len(alerts) > 0 {
+		alerts = ce.filterDuplicates(alerts)
+	}
+
 	// Update span with alert count
 	if span != nil {
 		span.SetAttributes(attribute.Int("alerts.generated", len(alerts)))
 	}
 
-	// Rego policy evaluation (post-YAML filter, Sprint 23.0)
-	// This is called ONLY on alerts, not on raw events, for performance
+	// Rego policy evaluation (post-YAML filter, Sprint 23.0).
+	// Dispatched to the async worker pool so Ingest returns without blocking on
+	// OPA. The enriched alerts (with MITRE enrichment) land in pending via the
+	// regoWorker; feedback filtering also happens there after enrichment.
 	if ce.enableRegoEval && ce.regoEngine != nil && len(alerts) > 0 {
-		alerts = ce.evaluateRegoPolicies(ctx, alerts)
+		regoCtx, regoCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		task := regoTask{ctx: regoCtx, cancel: regoCancel, alerts: alerts}
+		select {
+		case ce.regoQueue <- task:
+			// Submitted successfully — worker appends to pending after enrichment.
+			return alerts
+		default:
+			// Queue full: cancel the context and fall through to synchronous eval.
+			regoCancel()
+			ce.regoQueueDropped.Add(1)
+			alerts = ce.evaluateRegoPolicies(ctx, alerts)
+		}
 	}
 
 	// Analyst false-positive suppression: drop alerts whose (ruleID, comm) pair
@@ -795,6 +986,11 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	ce.pendingMu.Lock()
 	ce.pending = append(ce.pending, alerts...)
 	ce.pendingMu.Unlock()
+
+	// Group alerts into incidents.
+	for i := range alerts {
+		ce.incidentTracker.Add(alerts[i])
+	}
 
 	return alerts
 }
@@ -951,6 +1147,13 @@ func (ce *CorrelationEngine) ReloadRules(rules []Rule) {
 func (ce *CorrelationEngine) UpdateRateLimiter(window time.Duration, maxAlerts int, enabled bool) {
 	ce.rateLimiter.UpdateConfig(window, maxAlerts)
 	ce.rateLimiter.SetEnabled(enabled)
+}
+
+// IncidentTracker returns the engine's incident tracker so callers (e.g. the
+// HTTP server) can serve incident query results without coupling to the engine's
+// internals.
+func (ce *CorrelationEngine) IncidentTracker() *IncidentTracker {
+	return ce.incidentTracker
 }
 
 // isEnforcedAction returns true when the action demands active enforcement

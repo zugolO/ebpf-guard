@@ -1,0 +1,257 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+// baseConfig returns a minimal valid Config so individual tests only need
+// to override the field they're testing.
+func baseConfig() *Config {
+	return &Config{
+		Server: ServerConfig{BindAddress: ":9090"},
+		Store:  StoreConfig{Backend: "memory"},
+		Profiler: ProfilerConfig{
+			Enabled:          true,
+			LearningPeriod:   3600,
+			AnomalyThreshold: 0.8,
+			EWMAWeight:       0.3,
+			Sequence:         SequenceProfilerConfig{Threshold: 0.3},
+		},
+		Rules: RulesConfig{
+			RateLimitAlerts: true,
+			RateLimitWindow: 60,
+		},
+		Alerting:    AlertingConfig{Enabled: false},
+		Enforcement: EnforcementConfig{Enabled: false, BlockBackend: "log"},
+		Watchdog: WatchdogConfig{MemoryPressure: MemoryPressureConfig{
+			Enabled:             false,
+			LowMemoryThreshold:  10,
+			RecoveryThreshold:   20,
+		}},
+		Canary: CanaryConfig{AlertSeverity: "critical"},
+	}
+}
+
+func TestValidateConfig_Valid(t *testing.T) {
+	if err := ValidateConfig(baseConfig()); err != nil {
+		t.Fatalf("expected no error for valid base config, got: %v", err)
+	}
+}
+
+func TestValidateConfig_StoreBackend(t *testing.T) {
+	tests := []struct {
+		backend string
+		wantErr bool
+	}{
+		{"memory", false},
+		{"sqlite", false},
+		{"opensearch", false},
+		{"postgres", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		cfg := baseConfig()
+		cfg.Store.Backend = tt.backend
+		err := ValidateConfig(cfg)
+		if tt.wantErr && err == nil {
+			t.Errorf("backend %q: expected error, got nil", tt.backend)
+		}
+		if !tt.wantErr && err != nil {
+			t.Errorf("backend %q: unexpected error: %v", tt.backend, err)
+		}
+	}
+}
+
+func TestValidateConfig_BlockBackend(t *testing.T) {
+	tests := []struct {
+		backend string
+		wantErr bool
+	}{
+		{"log", false},
+		{"nftables", false},
+		{"iptables", false},
+		{"lsm", false},
+		{"xdp", false},
+		{"ebpf", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		cfg := baseConfig()
+		cfg.Enforcement.Enabled = true
+		cfg.Enforcement.BlockBackend = tt.backend
+		cfg.Enforcement.ThrottleCPUPercent = 10
+		cfg.Enforcement.ThrottleMaxAgeMinutes = 30
+		err := ValidateConfig(cfg)
+		if tt.wantErr && err == nil {
+			t.Errorf("block_backend %q: expected error, got nil", tt.backend)
+		}
+		if !tt.wantErr && err != nil {
+			t.Errorf("block_backend %q: unexpected error: %v", tt.backend, err)
+		}
+	}
+}
+
+func TestValidateConfig_Thresholds(t *testing.T) {
+	tests := []struct {
+		name  string
+		patch func(*Config)
+		want  string
+	}{
+		{
+			"anomaly_threshold below range",
+			func(c *Config) { c.Profiler.AnomalyThreshold = -0.1 },
+			"profiler.anomaly_threshold",
+		},
+		{
+			"anomaly_threshold above range",
+			func(c *Config) { c.Profiler.AnomalyThreshold = 1.5 },
+			"profiler.anomaly_threshold",
+		},
+		{
+			"ewma_weight below range",
+			func(c *Config) { c.Profiler.EWMAWeight = -0.01 },
+			"profiler.ewma_weight",
+		},
+		{
+			"ewma_weight above range",
+			func(c *Config) { c.Profiler.EWMAWeight = 1.1 },
+			"profiler.ewma_weight",
+		},
+		{
+			"sequence threshold out of range",
+			func(c *Config) { c.Profiler.Sequence.Threshold = 2.0 },
+			"profiler.sequence.threshold",
+		},
+		{
+			"boundary 0.0 is valid",
+			func(c *Config) { c.Profiler.AnomalyThreshold = 0.0 },
+			"", // no error expected
+		},
+		{
+			"boundary 1.0 is valid",
+			func(c *Config) { c.Profiler.AnomalyThreshold = 1.0 },
+			"", // no error expected
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			tt.patch(cfg)
+			err := ValidateConfig(cfg)
+			if tt.want == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not mention field %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateConfig_Duration(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Profiler.Enabled = true
+	cfg.Profiler.LearningPeriod = 0
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for learning_period=0, got nil")
+	}
+	if !strings.Contains(err.Error(), "profiler.learning_period") {
+		t.Errorf("error does not mention profiler.learning_period: %v", err)
+	}
+}
+
+func TestValidateConfig_BindAddress(t *testing.T) {
+	tests := []struct {
+		addr    string
+		wantErr bool
+	}{
+		{":9090", false},
+		{"0.0.0.0:9090", false},
+		{"127.0.0.1:8080", false},
+		{"[::]:9090", false},
+		{"not-valid", true},
+		{"192.168.1.300:9090", true}, // invalid IP octet
+	}
+	for _, tt := range tests {
+		cfg := baseConfig()
+		cfg.Server.BindAddress = tt.addr
+		err := ValidateConfig(cfg)
+		if tt.wantErr && err == nil {
+			t.Errorf("addr %q: expected error, got nil", tt.addr)
+		}
+		if !tt.wantErr && err != nil {
+			t.Errorf("addr %q: unexpected error: %v", tt.addr, err)
+		}
+	}
+}
+
+func TestValidateConfig_Alerting(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = ""
+	cfg.Alerting.BatchTimeout = 5
+	err := ValidateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "alerting.webhook_url") {
+		t.Errorf("expected alerting.webhook_url error, got: %v", err)
+	}
+
+	cfg.Alerting.WebhookURL = "ftp://bad-scheme"
+	err = ValidateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "alerting.webhook_url") {
+		t.Errorf("expected scheme error, got: %v", err)
+	}
+
+	cfg.Alerting.WebhookURL = "http://alertmanager:9093/api/v2/alerts"
+	cfg.Alerting.BatchTimeout = 0
+	err = ValidateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "alerting.batch_timeout") {
+		t.Errorf("expected batch_timeout error, got: %v", err)
+	}
+
+	cfg.Alerting.BatchTimeout = 5
+	err = ValidateConfig(cfg)
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+}
+
+func TestValidateConfig_WatchdogThresholds(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Watchdog.MemoryPressure.Enabled = true
+	cfg.Watchdog.MemoryPressure.LowMemoryThreshold = 20
+	cfg.Watchdog.MemoryPressure.RecoveryThreshold = 10 // lo >= hi
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for lo >= hi, got nil")
+	}
+	if !strings.Contains(err.Error(), "low_memory_threshold") {
+		t.Errorf("error does not mention low_memory_threshold: %v", err)
+	}
+}
+
+func TestValidateConfig_MultipleErrors(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Store.Backend = "invalid"
+	cfg.Profiler.AnomalyThreshold = 2.0
+	cfg.Profiler.EWMAWeight = -1.0
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected multiple errors, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"store.backend", "profiler.anomaly_threshold", "profiler.ewma_weight"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing field %q: %s", want, msg)
+		}
+	}
+}

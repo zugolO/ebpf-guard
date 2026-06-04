@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -25,6 +26,7 @@ type FileaccessCollector struct {
 	status      StatusReporter
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
+	lostTotal   atomic.Uint64
 }
 
 // NewFileaccessCollector creates a new file access event collector.
@@ -244,7 +246,6 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 			c.logger.Error("failed to read from ringbuf", "error", err)
 			continue
 		}
-
 		// Parse raw event into types.Event
 		event, err := c.parseEvent(record.RawSample)
 		if err != nil {
@@ -256,8 +257,15 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordDropped("fileaccess", "channel_full")
 			c.dropLogger.record(c.logger, "fileaccess")
+			c.lostTotal.Add(1)
 		})
 	}
+}
+
+// LostEvents returns the total number of events lost in the BPF ring buffer
+// since the collector started. Implements watchdog.DropTracker.
+func (c *FileaccessCollector) LostEvents() uint64 {
+	return c.lostTotal.Load()
 }
 
 // parseEvent converts raw bytes from ring buffer to types.Event.

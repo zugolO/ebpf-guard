@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -174,6 +175,7 @@ type GPUCollector struct {
 	cancel          context.CancelFunc
 	status          StatusReporter
 	strategy        BackpressureStrategy
+	lostTotal       atomic.Uint64
 }
 
 // NewGPUCollector creates a new GPU/CUDA event collector.
@@ -535,7 +537,6 @@ func (c *GPUCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			c.logger.Error("failed to read from GPU ringbuf", slog.Any("error", err))
 			continue
 		}
-
 		event, err := c.parseEvent(record.RawSample)
 		if err != nil {
 			c.logger.Error("failed to parse GPU event", slog.Any("error", err))
@@ -553,11 +554,18 @@ func (c *GPUCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordDropped("gpu", "channel_full")
 			c.dropLogger.record(c.logger, "gpu")
+			c.lostTotal.Add(1)
 		})
 	}
 }
 
 // parseEvent converts raw ring buffer bytes to a types.Event.
+// LostEvents returns the total number of events lost in the BPF ring buffer
+// since the collector started. Implements watchdog.DropTracker.
+func (c *GPUCollector) LostEvents() uint64 {
+	return c.lostTotal.Load()
+}
+
 func (c *GPUCollector) parseEvent(raw []byte) (*types.Event, error) {
 	if len(raw) < 4 {
 		return nil, fmt.Errorf("event too short: %d bytes", len(raw))

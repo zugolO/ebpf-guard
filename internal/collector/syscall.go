@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -25,6 +26,7 @@ type SyscallCollector struct {
 	status      StatusReporter
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
+	lostTotal   atomic.Uint64
 }
 
 // NewSyscallCollector creates a new syscall event collector.
@@ -239,7 +241,6 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			c.logger.Error("failed to read from ringbuf", "error", err)
 			continue
 		}
-
 		// Parse raw event into types.Event
 		event, err := c.parseEvent(record.RawSample)
 		if err != nil {
@@ -258,8 +259,15 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordDropped("syscall", "channel_full")
 			c.dropLogger.record(c.logger, "syscall")
+			c.lostTotal.Add(1)
 		})
 	}
+}
+
+// LostEvents returns the total number of events lost in the BPF ring buffer
+// since the collector started. Implements watchdog.DropTracker.
+func (c *SyscallCollector) LostEvents() uint64 {
+	return c.lostTotal.Load()
 }
 
 // parseEvent converts raw bytes from ring buffer to types.Event.

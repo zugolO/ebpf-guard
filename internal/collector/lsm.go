@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -278,18 +279,19 @@ func (lc *LSMCollector) RegisterMetrics(reg prometheus.Registerer) error {
 // cgroup.bpf.c respectively. It provides a tracepoint fallback
 // (sys_enter_init_module) for kernels older than 5.7.
 type KmodCollector struct {
-	logger     *slog.Logger
-	kmodObjs   *bpf.KmodObjects
-	cgroupObjs *bpf.CgroupObjects
-	kmodLinks  []link.Link
-	cgroupLinks []link.Link
-	kmodReader  *bpf.RingbufReader
+	logger       *slog.Logger
+	kmodObjs     *bpf.KmodObjects
+	cgroupObjs   *bpf.CgroupObjects
+	kmodLinks    []link.Link
+	cgroupLinks  []link.Link
+	kmodReader   *bpf.RingbufReader
 	cgroupReader *bpf.RingbufReader
-	loadError  error
-	dropLogger *dropLogger
-	status     StatusReporter
-	strategy   BackpressureStrategy
-	available  bool
+	loadError    error
+	dropLogger   *dropLogger
+	status       StatusReporter
+	strategy     BackpressureStrategy
+	available    bool
+	lostTotal    atomic.Uint64
 }
 
 // NewKmodCollector creates a new kernel-module-load and cgroup-escape collector.
@@ -493,8 +495,15 @@ func (c *KmodCollector) readLoop(ctx context.Context, out chan<- types.Event, re
 		}
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			c.dropLogger.record(c.logger, "kmod")
+			c.lostTotal.Add(1)
 		})
 	}
+}
+
+// LostEvents returns the total number of events lost in the BPF ring buffer
+// since the collector started. Implements watchdog.DropTracker.
+func (c *KmodCollector) LostEvents() uint64 {
+	return c.lostTotal.Load()
 }
 
 func (c *KmodCollector) parseKmodOrFallback(raw []byte) (*types.Event, error) {

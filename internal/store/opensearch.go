@@ -103,8 +103,8 @@ func (s *OpenSearchStore) StoreBatch(ctx context.Context, alerts []types.Alert) 
 	indexName := s.indexName()
 
 	for _, alert := range alerts {
-		// Index action
-		meta := fmt.Sprintf(`{"index":{"_index":"%s"}}%s`, indexName, "\n")
+		// Index action with explicit _id so QueryByID can retrieve by alert.ID.
+		meta := fmt.Sprintf("{\"index\":{\"_index\":%q,\"_id\":%q}}\n", indexName, alert.ID)
 		buf.WriteString(meta)
 
 		// Document

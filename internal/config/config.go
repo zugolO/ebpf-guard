@@ -318,7 +318,8 @@ type ProfilerConfig struct {
 	// ProfileTTL is the time-to-live for process profiles in seconds (default 86400 = 24h).
 	// Profiles not seen within this window are evicted by the background cleanup goroutine.
 	ProfileTTL int `mapstructure:"profile_ttl"`
-	// MaxTrackedPIDs is the maximum number of PIDs tracked simultaneously (default 65536).
+	// MaxTrackedPIDs is the maximum number of PIDs tracked simultaneously.
+	// Default 0 means auto-detect from /proc/sys/kernel/pid_max (falls back to 65536).
 	// When the cap is reached the least-recently-seen profile is evicted (LRU).
 	MaxTrackedPIDs int `mapstructure:"max_tracked_pids"`
 	// Sequence profiling configuration
@@ -652,7 +653,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiler.anomaly_threshold", 0.8)
 	v.SetDefault("profiler.ewma_weight", 0.3)
 	v.SetDefault("profiler.profile_ttl", 86400)
-	v.SetDefault("profiler.max_tracked_pids", 65536)
+	v.SetDefault("profiler.max_tracked_pids", 0) // 0 = auto-detect from /proc/sys/kernel/pid_max
 
 	// Sequence profiler defaults
 	v.SetDefault("profiler.sequence.enabled", true)

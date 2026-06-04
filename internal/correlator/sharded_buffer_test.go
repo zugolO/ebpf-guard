@@ -180,15 +180,16 @@ func TestShardedEventBuffer_Distribution(t *testing.T) {
 	}
 
 	// Count events per shard
-	counts := make([]int, shardCount)
-	for i := 0; i < shardCount; i++ {
+	numShards := sb.ShardCount()
+	counts := make([]int, numShards)
+	for i := 0; i < numShards; i++ {
 		shard := sb.shards[i]
 		shard.mu.RLock()
 		counts[i] = len(shard.buffers)
 		shard.mu.RUnlock()
 	}
 
-	// All shards should have some data (with 1000 PIDs and 16 shards)
+	// All shards should have some data (with 1000 PIDs distributed across shards)
 	for i, count := range counts {
 		assert.Greater(t, count, 0, "Shard %d should have data", i)
 	}
@@ -228,7 +229,7 @@ func TestShardedLock_Concurrent(t *testing.T) {
 				counter.Add(1)
 				sl.Unlock(pid)
 			}
-		}(uint32(i % shardCount)) // Use only shardCount different PIDs
+		}(uint32(i % lockShardCount)) // Use only lockShardCount different PIDs
 	}
 
 	wg.Wait()

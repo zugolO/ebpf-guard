@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -605,7 +606,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		// Append monotonic sequence number to guarantee uniqueness across
 		// concurrent alerts that share ruleID+timestamp+pid.
 		seq := ce.alertSeq.Add(1)
-		alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
+		alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
 
 		// Propagate W3C Trace Context from event to alert for APM correlation.
 		if e.TraceContext != nil {
@@ -662,7 +663,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				continue
 			}
 			seq := ce.alertSeq.Add(1)
-			alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
+			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
 			alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
 			alerts = append(alerts, alert)
 			ce.alertsGenerated.Add(1)
@@ -715,7 +716,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 
 				// Create anomaly alert
 				anomalyAlert := types.Alert{
-					ID:        fmt.Sprintf("anomaly-%d-%d-%d", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
+					ID:        buildAlertID("anomaly", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
 					Timestamp: time.Unix(0, int64(e.Timestamp)),
 					RuleID:    "anomaly_detection",
 					RuleName:  "Behavioral Anomaly Detected",
@@ -990,7 +991,7 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 
 	seq := ce.alertSeq.Add(1)
 	alert := &types.Alert{
-		ID:        fmt.Sprintf("%s-%d-%d-%d", ruleID, e.Timestamp, e.PID, seq),
+		ID:        buildAlertID(ruleID, e.Timestamp, e.PID, seq),
 		Timestamp: time.Unix(0, int64(e.Timestamp)),
 		RuleID:    ruleID,
 		RuleName:  "Gossip IOC Match",
@@ -1042,6 +1043,32 @@ func buildRemoteSpanContext(traceID, spanID string) (trace.SpanContext, error) {
 		return trace.SpanContext{}, fmt.Errorf("invalid span context")
 	}
 	return sc, nil
+}
+
+// alertIDPool reuses []byte buffers for alert ID construction, reducing
+// hot-path allocations from ~3 (fmt.Sprintf) to 1 (the final string copy).
+var alertIDPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 128)
+		return &b
+	},
+}
+
+// buildAlertID returns "<prefix>-<ts>-<pid>-<seq>" without fmt.Sprintf overhead.
+func buildAlertID(prefix string, ts uint64, pid uint32, seq uint64) string {
+	bp := alertIDPool.Get().(*[]byte)
+	b := (*bp)[:0]
+	b = append(b, prefix...)
+	b = append(b, '-')
+	b = strconv.AppendUint(b, ts, 10)
+	b = append(b, '-')
+	b = strconv.AppendUint(b, uint64(pid), 10)
+	b = append(b, '-')
+	b = strconv.AppendUint(b, seq, 10)
+	id := string(b) // copy before returning buffer to pool
+	*bp = b
+	alertIDPool.Put(bp)
+	return id
 }
 
 // formatAnomalyDescription creates a human-readable description of an anomaly.

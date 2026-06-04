@@ -2,6 +2,7 @@
 package correlator
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,20 +10,41 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
-// shardCount is the number of shards for the sharded lock.
-// Using 16 shards provides good balance between contention reduction and memory overhead.
-const shardCount = 16
+// lockShardCount is the fixed shard count used by ShardedLock's static arrays.
+// ShardedEventBuffer uses a dynamic count instead (see computeBufferShards).
+const lockShardCount = 16
 
-// shardIndex returns the shard index for a given PID.
+// shardIndex returns the shard index for a ShardedLock with lockShardCount shards.
 func shardIndex(pid uint32) uint32 {
-	return pid % shardCount
+	return pid % lockShardCount
+}
+
+// computeBufferShards returns the optimal shard count for ShardedEventBuffer on this
+// machine. Uses the next power of 2 ≥ NumCPU, clamped to [4, 256].
+// Power-of-2 counts enable fast PID→shard mapping via bitmasking (pid & mask).
+func computeBufferShards() (count int, mask uint32) {
+	n := runtime.NumCPU()
+	if n < 4 {
+		n = 4
+	}
+	p := 4
+	for p < n {
+		p <<= 1
+	}
+	if p > 256 {
+		p = 256
+	}
+	return p, uint32(p - 1)
 }
 
 // ShardedEventBuffer stores events per process using sharded locks for better concurrency.
-// It replaces the single sync.Mutex with 16 shard-specific locks to reduce contention.
+// The shard count scales with the number of CPUs (next power of 2 ≥ NumCPU, min 4, max 256),
+// so high-core-count servers automatically benefit from reduced lock contention.
 type ShardedEventBuffer struct {
-	shards  [shardCount]*eventBufferShard
-	maxSize int
+	shards   []*eventBufferShard
+	numShards int
+	mask     uint32 // numShards-1; enables fast pid→shard via bitmasking
+	maxSize  int
 }
 
 // eventBufferShard is a single shard of the sharded buffer.
@@ -32,12 +54,22 @@ type eventBufferShard struct {
 	lastSeen map[uint32]time.Time
 }
 
+// bufferShardIdx returns the shard index for a given PID using a bitmask (O(1), no division).
+func (sb *ShardedEventBuffer) bufferShardIdx(pid uint32) uint32 {
+	return pid & sb.mask
+}
+
 // NewShardedEventBuffer creates a new sharded event buffer with the given max size per process.
+// The number of shards scales with runtime.NumCPU() so high-core servers reduce contention automatically.
 func NewShardedEventBuffer(maxSize int) *ShardedEventBuffer {
+	numShards, mask := computeBufferShards()
 	sb := &ShardedEventBuffer{
-		maxSize: maxSize,
+		shards:    make([]*eventBufferShard, numShards),
+		numShards: numShards,
+		mask:      mask,
+		maxSize:   maxSize,
 	}
-	for i := 0; i < shardCount; i++ {
+	for i := 0; i < numShards; i++ {
 		sb.shards[i] = &eventBufferShard{
 			buffers:  make(map[uint32]*ringBuffer),
 			lastSeen: make(map[uint32]time.Time),
@@ -48,7 +80,7 @@ func NewShardedEventBuffer(maxSize int) *ShardedEventBuffer {
 
 // Add adds an event to the buffer for the given PID.
 func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
-	shard := sb.shards[shardIndex(pid)]
+	shard := sb.shards[sb.bufferShardIdx(pid)]
 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -72,7 +104,7 @@ func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
 
 // Get returns all events for a given PID.
 func (sb *ShardedEventBuffer) Get(pid uint32) []types.Event {
-	shard := sb.shards[shardIndex(pid)]
+	shard := sb.shards[sb.bufferShardIdx(pid)]
 
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
@@ -104,7 +136,7 @@ func (sb *ShardedEventBuffer) GetRecent(pid uint32, n int) []types.Event {
 	if n <= 0 {
 		return nil
 	}
-	shard := sb.shards[shardIndex(pid)]
+	shard := sb.shards[sb.bufferShardIdx(pid)]
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
@@ -146,7 +178,7 @@ func (sb *ShardedEventBuffer) GetRecent(pid uint32, n int) []types.Event {
 
 // Remove deletes the buffer for a given PID.
 func (sb *ShardedEventBuffer) Remove(pid uint32) {
-	shard := sb.shards[shardIndex(pid)]
+	shard := sb.shards[sb.bufferShardIdx(pid)]
 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -156,7 +188,7 @@ func (sb *ShardedEventBuffer) Remove(pid uint32) {
 
 // Clear removes all buffers.
 func (sb *ShardedEventBuffer) Clear() {
-	for i := 0; i < shardCount; i++ {
+	for i := 0; i < sb.numShards; i++ {
 		shard := sb.shards[i]
 		shard.mu.Lock()
 		shard.buffers = make(map[uint32]*ringBuffer)
@@ -170,7 +202,7 @@ func (sb *ShardedEventBuffer) Clear() {
 func (sb *ShardedEventBuffer) CleanupExpired(ttl time.Duration) int {
 	var removed int
 	cutoff := time.Now().Add(-ttl)
-	for i := 0; i < shardCount; i++ {
+	for i := 0; i < sb.numShards; i++ {
 		shard := sb.shards[i]
 		shard.mu.Lock()
 		for pid, ts := range shard.lastSeen {
@@ -189,8 +221,8 @@ func (sb *ShardedEventBuffer) CleanupExpired(ttl time.Duration) int {
 // Single-pass: holds each shard lock once, appends directly, pre-allocates
 // with a rough estimate to avoid reallocation in the common case.
 func (sb *ShardedEventBuffer) PIDs() []uint32 {
-	pids := make([]uint32, 0, shardCount*8)
-	for i := 0; i < shardCount; i++ {
+	pids := make([]uint32, 0, sb.numShards*8)
+	for i := 0; i < sb.numShards; i++ {
 		shard := sb.shards[i]
 		shard.mu.RLock()
 		for pid := range shard.buffers {
@@ -204,7 +236,7 @@ func (sb *ShardedEventBuffer) PIDs() []uint32 {
 // Count returns the total number of buffered PIDs across all shards.
 func (sb *ShardedEventBuffer) Count() int {
 	var count int
-	for i := 0; i < shardCount; i++ {
+	for i := 0; i < sb.numShards; i++ {
 		shard := sb.shards[i]
 		shard.mu.RLock()
 		count += len(shard.buffers)
@@ -213,14 +245,18 @@ func (sb *ShardedEventBuffer) Count() int {
 	return count
 }
 
+// ShardCount returns the number of shards (for observability/testing).
+func (sb *ShardedEventBuffer) ShardCount() int {
+	return sb.numShards
+}
+
 // ShardedLock provides a sharded mutex for PID-keyed locking.
-// It reduces contention by distributing locks across 16 shards.
-// Using sync.RWMutex allows multiple concurrent readers per shard
-// without blocking each other, which improves throughput when reads dominate.
+// It uses a fixed lockShardCount (16) shards; its static array layout avoids
+// heap allocations and false-sharing padding is provided by sync.RWMutex.
 type ShardedLock struct {
-	shards [shardCount]sync.RWMutex
+	shards [lockShardCount]sync.RWMutex
 	// contentionStats tracks lock acquisition time for metrics (nanoseconds)
-	contentionStats [shardCount]atomic.Int64
+	contentionStats [lockShardCount]atomic.Int64
 }
 
 // NewShardedLock creates a new sharded lock.
@@ -260,9 +296,9 @@ func (sl *ShardedLock) RecordContention(pid uint32, nanoseconds int64) {
 }
 
 // GetContentionStats returns total contention time per shard.
-func (sl *ShardedLock) GetContentionStats() [shardCount]int64 {
-	var stats [shardCount]int64
-	for i := 0; i < shardCount; i++ {
+func (sl *ShardedLock) GetContentionStats() [lockShardCount]int64 {
+	var stats [lockShardCount]int64
+	for i := 0; i < lockShardCount; i++ {
 		stats[i] = sl.contentionStats[i].Load()
 	}
 	return stats

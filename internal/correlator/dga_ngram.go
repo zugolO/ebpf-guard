@@ -70,6 +70,8 @@ type NgramDGADetector struct {
 	// bigramLP[prev][curr] = ln P(curr | prev), row-normalised with Laplace smoothing.
 	bigramLP  [ngramCharsetSize][ngramCharsetSize]float32
 	threshold float64
+	// whitelist contains SLD labels that are never classified as DGA.
+	whitelist map[string]struct{}
 }
 
 var (
@@ -92,6 +94,18 @@ func NewNgramDGADetector(threshold float64) *NgramDGADetector {
 	d := &NgramDGADetector{threshold: threshold}
 	d.train()
 	return d
+}
+
+// SetWhitelist replaces the detector's SLD whitelist.
+// Domain labels in this set are never classified as DGA regardless of their score.
+// This is the primary mechanism to suppress false positives on CDN or internal domains
+// whose SLD names happen to look random (e.g. "r2", "clarity", "akamaiedge").
+func (d *NgramDGADetector) SetWhitelist(slds []string) {
+	wl := make(map[string]struct{}, len(slds))
+	for _, s := range slds {
+		wl[strings.ToLower(s)] = struct{}{}
+	}
+	d.whitelist = wl
 }
 
 // train computes row-normalised ln-probabilities from the embedded corpus.
@@ -170,7 +184,14 @@ func (d *NgramDGADetector) Score(domain string) float64 {
 
 // IsDGA returns true when the domain's N-gram score is at or above the detector
 // threshold. Short or non-qualifying domains always return false.
+// Domains whose SLD appears in the whitelist always return false.
 func (d *NgramDGADetector) IsDGA(domain string) bool {
+	if len(d.whitelist) > 0 {
+		sld := ngramExtractSLD(domain)
+		if _, ok := d.whitelist[sld]; ok {
+			return false
+		}
+	}
 	return d.Score(domain) >= d.threshold
 }
 

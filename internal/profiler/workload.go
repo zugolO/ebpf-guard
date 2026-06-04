@@ -3,6 +3,9 @@ package profiler
 import (
 	"container/heap"
 	"context"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -10,6 +13,20 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+// readSystemPIDMax reads /proc/sys/kernel/pid_max and returns its value.
+// Falls back to 65536 if the file is unavailable (non-Linux, containers without procfs).
+func readSystemPIDMax() int {
+	data, err := os.ReadFile("/proc/sys/kernel/pid_max")
+	if err != nil {
+		return 65536
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || v <= 0 {
+		return 65536
+	}
+	return v
+}
 
 // WorkloadKey identifies a workload class for behavioral profiling.
 // Processes sharing the same (comm, namespace, app label) tuple are grouped
@@ -62,9 +79,10 @@ type WorkloadProfileManager struct {
 
 // NewWorkloadProfileManager creates a WorkloadProfileManager whose background
 // cleanup goroutines exit when ctx is cancelled.
+// Pass maxKeys=0 to auto-detect the limit from /proc/sys/kernel/pid_max.
 func NewWorkloadProfileManager(ctx context.Context, weight float64, ttl time.Duration, maxKeys int) *WorkloadProfileManager {
 	if maxKeys <= 0 {
-		maxKeys = 65536
+		maxKeys = readSystemPIDMax()
 	}
 	wpm := &WorkloadProfileManager{
 		profiles: make(map[string]*ProcessProfile),

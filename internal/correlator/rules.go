@@ -126,11 +126,32 @@ type RuleEngine struct {
 
 // NewRuleEngine creates a new rule engine with the given rules.
 func NewRuleEngine(rules []Rule) *RuleEngine {
+	return NewRuleEngineWithCache(rules, nil)
+}
+
+// NewRuleEngineWithCache creates a RuleEngine and inherits compiled patterns from a
+// prior engine so that unchanged regex/CIDR/set entries are not recompiled on hot-reload.
+// Pass nil prior for the initial load. Stale entries (patterns no longer referenced by
+// any rule) are harmless — they remain in the cache but are never evaluated.
+func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 	re := &RuleEngine{
 		rules:         rules,
 		regexCache:    make(map[string]*regexp.Regexp),
 		cidrCache:     make(map[string]*net.IPNet),
 		valueSetCache: make(map[string]map[string]struct{}),
+	}
+	if prior != nil {
+		prior.mu.RLock()
+		for k, v := range prior.regexCache {
+			re.regexCache[k] = v
+		}
+		for k, v := range prior.cidrCache {
+			re.cidrCache[k] = v
+		}
+		for k, v := range prior.valueSetCache {
+			re.valueSetCache[k] = v
+		}
+		prior.mu.RUnlock()
 	}
 	re.compilePatterns()
 	return re

@@ -1,6 +1,7 @@
 package osint
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zugolO/ebpf-guard/internal/config"
 )
 
 // --- Generator tests ---
@@ -292,6 +295,172 @@ func TestBatch(t *testing.T) {
 func TestBatchEmpty(t *testing.T) {
 	if got := batch(nil, 10); got != nil {
 		t.Errorf("expected nil for empty input, got %v", got)
+	}
+}
+
+// --- Manager lifecycle tests ---
+
+func TestNewManager_Disabled(t *testing.T) {
+	m, err := NewManager(config.OSINTConfig{Enabled: false})
+	if err != nil {
+		t.Fatalf("unexpected error for disabled manager: %v", err)
+	}
+	if m != nil {
+		t.Error("expected nil manager when disabled")
+	}
+}
+
+func TestNewManager_MISPMissingURL(t *testing.T) {
+	_, err := NewManager(config.OSINTConfig{
+		Enabled: true,
+		MISP:    config.MISPConfig{Enabled: true, APIKey: "key"},
+	})
+	if err == nil {
+		t.Error("expected error when MISP url is empty")
+	}
+}
+
+func TestNewManager_MISPMissingAPIKey(t *testing.T) {
+	_, err := NewManager(config.OSINTConfig{
+		Enabled: true,
+		MISP:    config.MISPConfig{Enabled: true, URL: "https://misp.example.com"},
+	})
+	if err == nil {
+		t.Error("expected error when MISP api_key is empty")
+	}
+}
+
+func TestNewManager_OpenCTIMissingURL(t *testing.T) {
+	_, err := NewManager(config.OSINTConfig{
+		Enabled: true,
+		OpenCTI: config.OpenCTIConfig{Enabled: true, APIKey: "key"},
+	})
+	if err == nil {
+		t.Error("expected error when OpenCTI url is empty")
+	}
+}
+
+func TestNewManager_OpenCTIMissingAPIKey(t *testing.T) {
+	_, err := NewManager(config.OSINTConfig{
+		Enabled: true,
+		OpenCTI: config.OpenCTIConfig{Enabled: true, URL: "https://opencti.example.com"},
+	})
+	if err == nil {
+		t.Error("expected error when OpenCTI api_key is empty")
+	}
+}
+
+func TestNewManager_VirusTotalMissingAPIKey(t *testing.T) {
+	_, err := NewManager(config.OSINTConfig{
+		Enabled:    true,
+		VirusTotal: config.VirusTotalConfig{Enabled: true},
+	})
+	if err == nil {
+		t.Error("expected error when VirusTotal api_key is empty")
+	}
+}
+
+func TestNewManager_NoSources(t *testing.T) {
+	// enabled=true but no sources configured is valid (warns, doesn't error)
+	m, err := NewManager(config.OSINTConfig{
+		Enabled:    true,
+		OutputDir:  t.TempDir(),
+		MaxIoCsPerRule: 10,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for enabled manager with no sources: %v", err)
+	}
+	if m == nil {
+		t.Fatal("expected non-nil manager")
+	}
+}
+
+func TestManager_StatePersistence(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(config.OSINTConfig{
+		Enabled:        true,
+		OutputDir:      dir,
+		MaxIoCsPerRule: 10,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Initial load returns empty state.
+	state := m.loadState()
+	if len(state.LastSync) != 0 {
+		t.Errorf("expected empty LastSync, got %v", state.LastSync)
+	}
+
+	// Save a state with a timestamp.
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	state.LastSync[SourceMISP] = ts
+	m.saveState(state)
+
+	// Reload and confirm persistence.
+	loaded := m.loadState()
+	got, ok := loaded.LastSync[SourceMISP]
+	if !ok {
+		t.Fatal("SourceMISP not found in loaded state")
+	}
+	if !got.Equal(ts) {
+		t.Errorf("timestamp mismatch: got %v want %v", got, ts)
+	}
+}
+
+func TestManager_StateCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	m, _ := NewManager(config.OSINTConfig{Enabled: true, OutputDir: dir, MaxIoCsPerRule: 10})
+
+	// Write corrupt JSON to the state file.
+	statePath := m.statePath
+	if err := os.WriteFile(statePath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// loadState should recover gracefully and return empty state.
+	state := m.loadState()
+	if state.LastSync == nil {
+		t.Error("expected non-nil LastSync after corrupt state recovery")
+	}
+	if len(state.LastSync) != 0 {
+		t.Errorf("expected empty LastSync after corrupt state, got %d entries", len(state.LastSync))
+	}
+}
+
+func TestManager_SyncNilManager(t *testing.T) {
+	// Calling methods on a nil *Manager must not panic (disabled=false path).
+	var m *Manager
+	ctx := context.Background()
+	// Should be no-ops.
+	m.Sync(ctx)
+	if err := m.Run(ctx); err != nil {
+		t.Errorf("nil manager Run: %v", err)
+	}
+}
+
+func TestManager_ConcurrentSync(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(config.OSINTConfig{
+		Enabled:        true,
+		OutputDir:      dir,
+		MaxIoCsPerRule: 10,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx := context.Background()
+	const workers = 10
+	done := make(chan struct{}, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			m.Sync(ctx)
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < workers; i++ {
+		<-done
 	}
 }
 

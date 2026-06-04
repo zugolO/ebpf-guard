@@ -106,6 +106,23 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 		maxDepth = 16
 	}
 
+	// Reject patterns that set the Condition field: it is not yet evaluated, so
+	// including such patterns would cause them to fire on every parent-child match
+	// regardless of the condition — a silent misconfiguration.  Operators must
+	// remove the condition field until conditional lineage evaluation is implemented.
+	var activePatterns []LineagePattern
+	for _, p := range config.Patterns {
+		if p.Condition != "" {
+			logger.Error("lineage: pattern skipped — Condition field is not yet evaluated; remove it or the pattern will never fire",
+				slog.String("pattern", p.Name),
+				slog.String("condition", p.Condition),
+			)
+			continue
+		}
+		activePatterns = append(activePatterns, p)
+	}
+	config.Patterns = activePatterns
+
 	lt := &LineageTracker{
 		config:   config,
 		logger:   logger,
@@ -113,15 +130,6 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 		ancestry: make(map[uint32][]types.ProcessNode),
 		maxDepth: maxDepth,
 		onMatch:  func(m LineageMatch) {}, // no-op default
-	}
-
-	for _, p := range config.Patterns {
-		if p.Condition != "" {
-			logger.Warn("lineage: pattern has an unimplemented condition and will fire unconditionally",
-				slog.String("pattern", p.Name),
-				slog.String("condition", p.Condition),
-			)
-		}
 	}
 
 	return lt

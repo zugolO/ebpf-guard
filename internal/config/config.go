@@ -179,6 +179,10 @@ type WasmConfig struct {
 	// MemoryLimitMB is the linear memory limit per plugin instance in megabytes.
 	// Default: 16 (256 pages × 64KB)
 	MemoryLimitMB int `mapstructure:"memory_limit_mb"`
+	// PluginTimeoutMS is the per-invocation deadline for a single WASM plugin in milliseconds.
+	// A plugin exceeding this limit is interrupted so it cannot stall the event pipeline.
+	// Default: 100
+	PluginTimeoutMS int `mapstructure:"plugin_timeout_ms"`
 }
 
 // OTelTracingConfig configures automatic W3C Trace Context extraction and OTel span
@@ -234,6 +238,11 @@ type DNSCollectorConfig struct {
 	// HighFrequencyThreshold is the max DNS queries per minute before alerting.
 	// Default: 100
 	HighFrequencyThreshold int `mapstructure:"high_frequency_threshold"`
+	// DGAWhitelist contains second-level domain labels that should never be
+	// classified as DGA-generated regardless of their n-gram score.
+	// Use to suppress false positives on CDN or internal naming patterns.
+	// Example: ["clarity", "akamaiedge", "r2", "azureedge", "trafficmanager"]
+	DGAWhitelist []string `mapstructure:"dga_whitelist"`
 }
 
 // SQLiteStoreConfig holds SQLite-specific configuration.
@@ -260,6 +269,12 @@ type OpenSearchStoreConfig struct {
 type BPFConfig struct {
 	// MapSizes defines the size of BPF maps (number of entries)
 	MapSizes MapSizeConfig `mapstructure:"map_sizes"`
+
+	// RingBufSize is the BPF ring buffer size in bytes applied to each
+	// event ring buffer (syscall, network, file, TLS, LSM).
+	// 0 = auto-detect: 1% of MemAvailable from /proc/meminfo, clamped to [256 KB, 32 MB].
+	// Non-multiples of the page size (4096) are rounded up automatically.
+	RingBufSize int `mapstructure:"ring_buf_size"`
 }
 
 // MapSizeConfig holds BPF map size settings.
@@ -309,7 +324,8 @@ type ProfilerConfig struct {
 	// ProfileTTL is the time-to-live for process profiles in seconds (default 86400 = 24h).
 	// Profiles not seen within this window are evicted by the background cleanup goroutine.
 	ProfileTTL int `mapstructure:"profile_ttl"`
-	// MaxTrackedPIDs is the maximum number of PIDs tracked simultaneously (default 65536).
+	// MaxTrackedPIDs is the maximum number of PIDs tracked simultaneously.
+	// Default 0 means auto-detect from /proc/sys/kernel/pid_max (falls back to 65536).
 	// When the cap is reached the least-recently-seen profile is evicted (LRU).
 	MaxTrackedPIDs int `mapstructure:"max_tracked_pids"`
 	// Sequence profiling configuration
@@ -387,6 +403,15 @@ type EnforcementConfig struct {
 	EnableKill bool `mapstructure:"enable_kill"`
 	// EnableThrottle enables cgroup-based rate limiting
 	EnableThrottle bool `mapstructure:"enable_throttle"`
+	// ThrottleCPUPercent is the CPU limit (1-99) applied when throttling a process via cgroup v2.
+	// Default: 10
+	ThrottleCPUPercent int `mapstructure:"throttle_cpu_percent"`
+	// ThrottleMaxAgeMinutes is how long (minutes) a throttle entry is kept after last use.
+	// Default: 30
+	ThrottleMaxAgeMinutes int `mapstructure:"throttle_max_age_minutes"`
+	// ThrottleCleanupIntervalMinutes is how often (minutes) the stale-entry cleanup runs.
+	// Default: 5
+	ThrottleCleanupIntervalMinutes int `mapstructure:"throttle_cleanup_interval_minutes"`
 }
 
 // WatchdogConfig holds watchdog and auto-tuning settings (Sprint 22.0).
@@ -615,6 +640,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.events", 65536)
 	v.SetDefault("bpf.map_sizes.processes", 16384)
 	v.SetDefault("bpf.map_sizes.connections", 32768)
+	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
 
 	// Rules defaults
 	v.SetDefault("rules.path", "/etc/ebpf-guard/rules.yaml")
@@ -634,7 +660,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiler.anomaly_threshold", 0.8)
 	v.SetDefault("profiler.ewma_weight", 0.3)
 	v.SetDefault("profiler.profile_ttl", 86400)
-	v.SetDefault("profiler.max_tracked_pids", 65536)
+	v.SetDefault("profiler.max_tracked_pids", 0) // 0 = auto-detect from /proc/sys/kernel/pid_max
 
 	// Sequence profiler defaults
 	v.SetDefault("profiler.sequence.enabled", true)
@@ -701,6 +727,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.dns.dga_threshold", 3.5)
 	v.SetDefault("collectors.dns.tunneling_min_length", 50)
 	v.SetDefault("collectors.dns.high_frequency_threshold", 100)
+	v.SetDefault("collectors.dns.dga_whitelist", []string{})
 
 	// Enforcement defaults
 	v.SetDefault("enforcement.enabled", false)
@@ -710,6 +737,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("enforcement.enable_block", false)
 	v.SetDefault("enforcement.enable_kill", false)
 	v.SetDefault("enforcement.enable_throttle", false)
+	v.SetDefault("enforcement.throttle_cpu_percent", 10)
+	v.SetDefault("enforcement.throttle_max_age_minutes", 30)
+	v.SetDefault("enforcement.throttle_cleanup_interval_minutes", 5)
 
 	// Watchdog defaults (Sprint 22.0)
 	v.SetDefault("watchdog.memory_pressure.enabled", true)
@@ -761,6 +791,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("osint.virustotal.enabled", false)
 	v.SetDefault("osint.virustotal.api_key", "")
 	v.SetDefault("osint.virustotal.enterprise_feeds", false)
+
+	// WASM plugin engine defaults.
+	v.SetDefault("wasm.enabled", true)
+	v.SetDefault("wasm.plugin_dir", "rules/custom")
+	v.SetDefault("wasm.memory_limit_mb", 16)
+	v.SetDefault("wasm.plugin_timeout_ms", 100)
 }
 
 // Get returns the current configuration (thread-safe).

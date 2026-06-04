@@ -129,6 +129,12 @@ type Enforcer struct {
 	lsmManager LSMBlocklistManager
 	// dryRun mode logs actions without enforcement
 	dryRun bool
+	// throttleCPUPercent is the CPU limit applied when throttling (1-99).
+	throttleCPUPercent int
+	// throttleMaxAge is the TTL for inactive throttle entries.
+	throttleMaxAge time.Duration
+	// throttleCleanupInterval is how often the cleanup goroutine runs.
+	throttleCleanupInterval time.Duration
 
 	actionsTotal *prometheus.CounterVec // ebpf_guard_enforcement_actions_total{action}
 	auditDropped prometheus.Counter     // ebpf_guard_audit_log_dropped_total
@@ -161,17 +167,39 @@ type Config struct {
 	AuditLogChannel chan<- AuditEntry
 	// LSMManager is the LSM blocklist manager for pre-execution blocking (optional)
 	LSMManager LSMBlocklistManager
+	// ThrottleCPUPercent is the CPU limit (1-99) applied when throttling via cgroup v2. Default: 10.
+	ThrottleCPUPercent int
+	// ThrottleMaxAge is how long a throttle entry is kept after last use. Default: 30m.
+	ThrottleMaxAge time.Duration
+	// ThrottleCleanupInterval is how often the stale-entry cleanup goroutine runs. Default: 5m.
+	ThrottleCleanupInterval time.Duration
 }
 
 // NewEnforcer creates a new enforcement engine.
 func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
+	cpuPct := cfg.ThrottleCPUPercent
+	if cpuPct < 1 || cpuPct > 99 {
+		cpuPct = 10
+	}
+	maxAge := cfg.ThrottleMaxAge
+	if maxAge <= 0 {
+		maxAge = 30 * time.Minute
+	}
+	cleanupInterval := cfg.ThrottleCleanupInterval
+	if cleanupInterval <= 0 {
+		cleanupInterval = 5 * time.Minute
+	}
+
 	e := &Enforcer{
-		logger:       logger.With("component", "enforcer"),
-		auditLog:     cfg.AuditLogChannel,
-		throttles:    make(map[uint32]*ThrottleState),
-		blockBackend: cfg.BlockBackend,
-		lsmManager:   cfg.LSMManager,
-		dryRun:       cfg.DryRun,
+		logger:                  logger.With("component", "enforcer"),
+		auditLog:                cfg.AuditLogChannel,
+		throttles:               make(map[uint32]*ThrottleState),
+		blockBackend:            cfg.BlockBackend,
+		lsmManager:              cfg.LSMManager,
+		dryRun:                  cfg.DryRun,
+		throttleCPUPercent:      cpuPct,
+		throttleMaxAge:          maxAge,
+		throttleCleanupInterval: cleanupInterval,
 		enabled: map[ActionType]bool{
 			ActionBlock:    cfg.EnableBlock,
 			ActionKill:     cfg.EnableKill,
@@ -209,23 +237,17 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 	}
 
 	// Background goroutine that evicts dead-PID throttle entries.
-	// CleanupThrottles exists but was never called automatically, causing the map
-	// to grow unbounded as unique PIDs trigger throttle actions over time.
 	cleanupCtx, cancel := context.WithCancel(context.Background())
 	e.stopCleanup = cancel
 	go func() {
-		const (
-			throttleMaxAge  = 30 * time.Minute
-			cleanupInterval = 5 * time.Minute
-		)
-		ticker := time.NewTicker(cleanupInterval)
+		ticker := time.NewTicker(e.throttleCleanupInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-cleanupCtx.Done():
 				return
 			case <-ticker.C:
-				if removed := e.CleanupThrottles(throttleMaxAge); removed > 0 {
+				if removed := e.CleanupThrottles(e.throttleMaxAge); removed > 0 {
 					e.logger.Debug("cleaned up stale throttle entries", slog.Int("removed", removed))
 				}
 			}
@@ -572,15 +594,15 @@ func (e *Enforcer) executeThrottle(ctx context.Context, alert types.Alert) error
 
 // applyCgroupThrottle applies CPU throttling via cgroups v2.
 func (e *Enforcer) applyCgroupThrottle(pid uint32) error {
-	// Find the cgroup for the process
 	cgroupPath, err := e.findCgroupPath(pid)
 	if err != nil {
 		return fmt.Errorf("find cgroup path: %w", err)
 	}
 
-	// Apply 10% CPU limit: "10000 100000" means 10ms per 100ms period
+	const periodUS = 100_000 // 100ms scheduling period
+	quotaUS := periodUS * e.throttleCPUPercent / 100
 	cpuMaxPath := filepath.Join(cgroupPath, "cpu.max")
-	if err := os.WriteFile(cpuMaxPath, []byte("10000 100000\n"), 0644); err != nil {
+	if err := os.WriteFile(cpuMaxPath, []byte(fmt.Sprintf("%d %d\n", quotaUS, periodUS)), 0644); err != nil {
 		return fmt.Errorf("write cpu.max: %w", err)
 	}
 

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -121,10 +122,12 @@ type CorrelationEngine struct {
 	wasmEngine WasmEvaluator
 
 	// Rule-based enforcement (optional)
-	actionExecutor     ActionExecutor
-	enforceCooldown    time.Duration
-	cooldowns          sync.Map // key="ruleID:PID", value=time.Time
-	enforcedCounter    prometheus.Counter
+	actionExecutor      ActionExecutor
+	enforceCooldown     time.Duration
+	cooldowns           sync.Map // key="ruleID:PID", value=time.Time
+	enforcedCounter     prometheus.Counter
+	enforceQueue        chan enforceTask
+	enforceQueueDropped prometheus.Counter
 
 	// scoreReporter is called after every anomaly score update so an external
 	// cardinality-guarded Prometheus gauge can be kept in sync without importing
@@ -134,6 +137,14 @@ type CorrelationEngine struct {
 
 // MetricsCallback is a function called to record metrics.
 type MetricsCallback func(duration float64)
+
+// enforceTask is a unit of work dispatched to the enforcement worker pool.
+type enforceTask struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	action string
+	alert  types.Alert
+}
 
 // CorrelationEngineConfig holds configuration for the correlation engine.
 type CorrelationEngineConfig struct {
@@ -195,6 +206,10 @@ type CorrelationEngineConfig struct {
 	// EnforcementCooldown is the minimum interval between enforcement
 	// executions for the same (rule, PID) pair. Zero → 5 seconds.
 	EnforcementCooldown time.Duration
+
+	// EnforceWorkerCount is the number of goroutines that drain the
+	// enforcement queue. Zero → max(2, runtime.NumCPU()).
+	EnforceWorkerCount int
 
 	// WasmEngine evaluates custom WASM detection plugins on every event.
 	// When nil, WASM plugin evaluation is skipped.
@@ -279,10 +294,26 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		Help: "Number of rule-based enforcement actions triggered by the correlation engine.",
 	})
 
+	enforceQueueDropped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ebpf_guard_enforcement_queue_dropped_total",
+		Help: "Enforcement actions dropped because the enforcement queue was full.",
+	})
+
 	lt := config.LineageTracker
 	if lt == nil {
 		lt = profiler.NewLineageTracker(profiler.DefaultLineageConfig(), slog.Default())
 	}
+
+	enforceWorkers := config.EnforceWorkerCount
+	if enforceWorkers <= 0 {
+		enforceWorkers = runtime.NumCPU()
+		if enforceWorkers < 2 {
+			enforceWorkers = 2
+		}
+	}
+	// Queue depth: 1024 gives burst capacity for typical enforcement spikes
+	// without consuming significant memory. Each task is ~200 bytes.
+	enforceQueue := make(chan enforceTask, 1024)
 
 	ce := &CorrelationEngine{
 		buffer:               NewShardedEventBuffer(config.BufferSize),
@@ -301,6 +332,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
 		enforcedCounter:      enforcedCounter,
+		enforceQueue:         enforceQueue,
+		enforceQueueDropped:  enforceQueueDropped,
 		globalLimiter:        globalLimiter,
 		globalLimiterEnabled: globalLimiterEnabled,
 		alertsDroppedGlobal:  alertsDroppedGlobal,
@@ -371,6 +404,15 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		ce.scoreReporter = config.AnomalyScoreReporter
 	}
 
+	// Start bounded enforcement worker pool. Workers drain enforceQueue and call
+	// ExecuteAction; the pool size is capped so enforcement can never create an
+	// unbounded number of goroutines under a burst of matching events.
+	if config.ActionExecutor != nil {
+		for i := 0; i < enforceWorkers; i++ {
+			go ce.enforceWorker(ctx)
+		}
+	}
+
 	// Update the gauge periodically so it reflects the live state count.
 	go ce.updateRLGaugeLoop(ctx)
 
@@ -388,6 +430,30 @@ func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
 		case <-ticker.C:
 			ce.rlStatesGauge.Set(float64(ce.rateLimiter.StateCount()))
 			ce.queueDepthGauge.Set(ce.QueueDepth())
+		}
+	}
+}
+
+// enforceWorker drains the enforcement queue and calls ExecuteAction for each task.
+// It exits when ctx is cancelled and the queue is drained.
+func (ce *CorrelationEngine) enforceWorker(ctx context.Context) {
+	for {
+		select {
+		case task, ok := <-ce.enforceQueue:
+			if !ok {
+				return
+			}
+			if err := ce.actionExecutor.ExecuteAction(task.ctx, task.action, task.alert); err != nil {
+				slog.Warn("correlator: rule enforcement failed",
+					slog.String("rule_id", task.alert.RuleID),
+					slog.String("action", task.action),
+					slog.Uint64("pid", uint64(task.alert.PID)),
+					slog.Any("err", err),
+				)
+			}
+			task.cancel()
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -427,7 +493,12 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.queueDepthGauge,
 		ce.latencyHistogram,
 		ce.activeRulesGauge,
+		ce.enforceQueueDropped,
+		ce.enforcedCounter,
 	} {
+		if c == nil {
+			continue
+		}
 		if err := reg.Register(c); err != nil {
 			return err
 		}
@@ -524,29 +595,25 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
 
 		// Rule-based enforcement: kill / block / throttle.
-		// The alert is always emitted for auditing; enforcement runs async.
+		// The alert is always emitted for auditing; enforcement is dispatched
+		// to a bounded worker pool to cap goroutine growth under event bursts.
 		if ce.actionExecutor != nil && isEnforcedAction(alert.Action) {
 			if ce.tryAcquireEnforceCooldown(alert.RuleID, alert.PID) {
 				alert.Enforced = true
 				ce.enforcedCounter.Inc()
-				a := alert // capture
-				go func() {
-					// Detach from the per-request span context: the parent span ends
-					// when Ingest() returns (via defer span.End()), which may happen
-					// before this goroutine runs under load.  WithoutCancel inherits
-					// baggage and trace values so OTel propagation still works, while
-					// the 30 s timeout prevents a hung enforcer from leaking goroutines.
-					enfCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-					defer cancel()
-					if err := ce.actionExecutor.ExecuteAction(enfCtx, a.Action, a); err != nil {
-						slog.Warn("correlator: rule enforcement failed",
-							slog.String("rule_id", a.RuleID),
-							slog.String("action", a.Action),
-							slog.Uint64("pid", uint64(a.PID)),
-							slog.Any("err", err),
-						)
-					}
-				}()
+				// Detach from the per-request span context: the parent span ends
+				// when Ingest() returns, which may be before the worker runs.
+				// WithoutCancel preserves OTel baggage; the 30 s timeout prevents
+				// a hung enforcer from blocking a worker indefinitely.
+				enfCtx, enfCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				task := enforceTask{ctx: enfCtx, cancel: enfCancel, action: alert.Action, alert: alert}
+				select {
+				case ce.enforceQueue <- task:
+				default:
+					// Queue full: drop this enforcement action and record the drop.
+					enfCancel()
+					ce.enforceQueueDropped.Add(1)
+				}
 			}
 		}
 
@@ -803,8 +870,11 @@ type EngineStats struct {
 }
 
 // UpdateRules updates the rule engine with new rules.
+// Compiled regex/CIDR/set entries from the previous engine are inherited so
+// patterns that appear in both old and new rule sets are not recompiled.
 func (ce *CorrelationEngine) UpdateRules(rules []Rule) {
-	ce.ruleEngine.Store(NewRuleEngine(rules))
+	prior := ce.ruleEngine.Load()
+	ce.ruleEngine.Store(NewRuleEngineWithCache(rules, prior))
 	ce.activeRulesGauge.Set(float64(len(rules)))
 }
 

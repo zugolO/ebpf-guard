@@ -33,10 +33,8 @@ var (
 	}, []string{"plugin_id"})
 )
 
-// pluginEvalTimeout is the per-invocation deadline for a single WASM plugin.
-// A plugin that exceeds this limit (e.g. infinite loop) has its module execution
-// interrupted by wazero via context cancellation so it cannot stall the pipeline.
-const pluginEvalTimeout = 100 * time.Millisecond
+// defaultPluginEvalTimeout is the fallback per-invocation deadline when none is configured.
+const defaultPluginEvalTimeout = 100 * time.Millisecond
 
 // Engine manages WASM detection plugins loaded from a directory.
 // All plugins run in the same wazero Runtime (shared compilation cache)
@@ -47,18 +45,25 @@ type Engine struct {
 	rt      wazero.Runtime
 	dir     string
 	logger  *slog.Logger
+	timeout time.Duration // per-invocation deadline; 0 uses defaultPluginEvalTimeout
 }
 
 // NewEngine creates a WASM engine and loads all .wasm files found in dir.
 // If the directory does not exist, the engine starts with zero plugins.
-func NewEngine(ctx context.Context, dir string, logger *slog.Logger) (*Engine, error) {
+// timeout sets the per-invocation deadline; pass 0 to use the default (100ms).
+func NewEngine(ctx context.Context, dir string, logger *slog.Logger, timeout time.Duration) (*Engine, error) {
+	if timeout <= 0 {
+		timeout = defaultPluginEvalTimeout
+	}
+
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
 		WithMemoryLimitPages(256)) // 256 pages = 16 MB per instance
 
 	e := &Engine{
-		rt:     rt,
-		dir:    dir,
-		logger: logger.With("component", "wasm_engine"),
+		rt:      rt,
+		dir:     dir,
+		logger:  logger.With("component", "wasm_engine"),
+		timeout: timeout,
 	}
 
 	if err := e.loadDir(ctx, dir); err != nil {
@@ -141,7 +146,7 @@ func (e *Engine) Evaluate(ctx context.Context, event types.Event) []types.Alert 
 
 // evalPlugin runs a single plugin and builds the resulting alert on a match.
 func (e *Engine) evalPlugin(ctx context.Context, p *Plugin, event types.Event, eventJSON []byte) (types.Alert, bool) {
-	pluginCtx, cancel := context.WithTimeout(ctx, pluginEvalTimeout)
+	pluginCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
 	start := time.Now()
@@ -152,11 +157,11 @@ func (e *Engine) evalPlugin(ctx context.Context, p *Plugin, event types.Event, e
 
 	if err != nil {
 		if pluginCtx.Err() != nil {
-			// Timeout: the plugin exceeded pluginEvalTimeout. Log with enough detail
-			// for operators to identify and optimise or remove the offending plugin.
+			// Timeout: the plugin exceeded the configured deadline. Log with enough
+			// detail for operators to identify and optimise or remove the offending plugin.
 			e.logger.Warn("WASM plugin timed out",
 				slog.String("plugin", p.ID()),
-				slog.Duration("limit", pluginEvalTimeout),
+				slog.Duration("limit", e.timeout),
 				slog.Duration("elapsed", elapsed))
 			pluginEvals.WithLabelValues(p.ID(), "timeout").Inc()
 		} else {

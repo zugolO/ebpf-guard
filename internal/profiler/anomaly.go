@@ -62,23 +62,26 @@ type AnomalyContribution struct {
 // NewAnomalyDetectorWithContext creates a new anomaly detector whose background
 // cleanup goroutines (ProfileManager LRU eviction) exit when ctx is cancelled.
 func NewAnomalyDetectorWithContext(ctx context.Context, threshold float64, learningPeriod time.Duration, weight float64) *AnomalyDetector {
-	return NewAnomalyDetectorWithSamples(ctx, threshold, learningPeriod, weight, 100)
+	return NewAnomalyDetectorWithSamples(ctx, threshold, learningPeriod, weight, 100, 0)
 }
 
 // NewAnomalyDetectorWithSamples is like NewAnomalyDetectorWithContext but allows
-// the minimum number of learning samples to be configured. Learning completes
-// only once both the learning period has elapsed and minSamples have been
-// observed. A minSamples of 0 falls back to the default of 100.
-func NewAnomalyDetectorWithSamples(ctx context.Context, threshold float64, learningPeriod time.Duration, weight float64, minSamples uint64) *AnomalyDetector {
+// the minimum number of learning samples and the maximum number of tracked
+// workload profiles to be configured.
+// A minSamples of 0 falls back to 100; a maxPIDs of 0 falls back to 65536.
+func NewAnomalyDetectorWithSamples(ctx context.Context, threshold float64, learningPeriod time.Duration, weight float64, minSamples uint64, maxPIDs int) *AnomalyDetector {
 	if minSamples == 0 {
 		minSamples = 100
+	}
+	if maxPIDs <= 0 {
+		maxPIDs = 65536
 	}
 	ad := &AnomalyDetector{
 		threshold:         threshold,
 		learningPeriod:    learningPeriod,
 		weight:            weight,
 		learner:           NewBaselineLearner(learningPeriod, minSamples),
-		profileManager:    NewWorkloadProfileManager(ctx, weight, 24*time.Hour, 65536),
+		profileManager:    NewWorkloadProfileManager(ctx, weight, 24*time.Hour, maxPIDs),
 		learningStartTime: time.Now(),
 		enabled:           true,
 		samplingRate:      1.0,

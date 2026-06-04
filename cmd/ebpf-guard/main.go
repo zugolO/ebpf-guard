@@ -20,6 +20,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/drift"
+	"github.com/zugolO/ebpf-guard/internal/enforcer"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/internal/gossip"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
@@ -227,6 +228,33 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// Initialize enforcer when enabled in config.
+	// Wired to the engine so rule actions (kill/block/throttle) are executed
+	// asynchronously via the engine's bounded worker pool.
+	var enf *enforcer.Enforcer
+	if cfg.Enforcement.Enabled {
+		enfCfg := enforcer.Config{
+			DryRun:                  cfg.Enforcement.DryRun,
+			BlockBackend:            enforcer.BlockBackend(cfg.Enforcement.BlockBackend),
+			EnableBlock:             cfg.Enforcement.EnableBlock,
+			EnableKill:              cfg.Enforcement.EnableKill,
+			EnableThrottle:          cfg.Enforcement.EnableThrottle,
+			ThrottleCPUPercent:      cfg.Enforcement.ThrottleCPUPercent,
+			ThrottleMaxAge:          time.Duration(cfg.Enforcement.ThrottleMaxAgeMinutes) * time.Minute,
+			ThrottleCleanupInterval: time.Duration(cfg.Enforcement.ThrottleCleanupIntervalMinutes) * time.Minute,
+		}
+		if e, enfErr := enforcer.NewEnforcer(slog.Default(), enfCfg); enfErr != nil {
+			slog.Warn("enforcer: failed to initialize, enforcement disabled",
+				slog.Any("error", enfErr))
+		} else {
+			enf = e
+			engineCfg.ActionExecutor = enf
+			slog.Info("enforcer: active",
+				slog.String("backend", cfg.Enforcement.BlockBackend),
+				slog.Bool("dry_run", cfg.Enforcement.DryRun))
+		}
+	}
+
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
 
 	// Feature E: BPF self-telemetry — per-program CPU overhead metrics.
@@ -354,18 +382,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("shutting down")
-			if simCollector != nil {
-				simCollector.PrintReport(os.Stdout)
-			}
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer shutdownCancel()
-			for _, c := range collectors {
-				if err := c.Close(); err != nil {
-					slog.Warn("collector close error", slog.String("name", c.Name()), slog.Any("error", err))
-				}
-			}
-			srv.Shutdown(shutdownCtx) //nolint:errcheck
+			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector)
 			return nil
 
 		case event, ok := <-eventCh:
@@ -406,6 +423,80 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 		}
 	}
+}
+
+// gracefulShutdown orchestrates an ordered, time-bounded shutdown sequence:
+//  1. Drain enforcement queue (up to 5 s) — let in-flight kill/block tasks finish.
+//  2. Flush pending alerts from the correlation engine into the store.
+//  3. Cleanup nftables/iptables chains left by the enforcer (if active).
+//  4. Close BPF programs and collectors.
+//  5. Shutdown the HTTP server.
+//
+// The entire procedure is bounded by a 30-second context.
+func gracefulShutdown(
+	engine *correlator.CorrelationEngine,
+	collectors []collector.Collector,
+	alertStore store.AlertStore,
+	srv *exporter.Server,
+	enf *enforcer.Enforcer,
+	simCollector *simulate.Collector,
+) {
+	slog.Info("graceful shutdown: starting", slog.String("budget", "30s"))
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	// Print simulation report before anything else so it's always visible.
+	if simCollector != nil {
+		simCollector.PrintReport(os.Stdout)
+	}
+
+	// Step 1: drain the enforcement worker queue so in-flight kill/block/throttle
+	// tasks are not abandoned mid-execution. Capped at 5 s to avoid hanging.
+	drainCtx, drainCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+	slog.Info("graceful shutdown: draining enforcement queue")
+	engine.DrainEnforceQueue(drainCtx)
+	drainCancel()
+
+	// Step 2: flush any pending alerts buffered in the correlation engine.
+	slog.Info("graceful shutdown: flushing pending alerts")
+	if pending := engine.Flush(); len(pending) > 0 {
+		if err := alertStore.StoreBatch(shutdownCtx, pending); err != nil {
+			slog.Warn("graceful shutdown: failed to flush pending alerts",
+				slog.Int("count", len(pending)), slog.Any("error", err))
+		} else {
+			slog.Info("graceful shutdown: pending alerts flushed", slog.Int("count", len(pending)))
+		}
+	}
+
+	// Step 3: remove nftables/iptables rules the enforcer installed.
+	if enf != nil {
+		slog.Info("graceful shutdown: cleaning up enforcement chains")
+		if err := enf.Cleanup(); err != nil {
+			slog.Warn("graceful shutdown: enforcement cleanup error", slog.Any("error", err))
+		}
+		if err := enf.Close(); err != nil {
+			slog.Warn("graceful shutdown: enforcer close error", slog.Any("error", err))
+		}
+	}
+
+	// Step 4: close BPF ring-buffer readers and detach probes.
+	slog.Info("graceful shutdown: closing BPF collectors")
+	for _, c := range collectors {
+		if err := c.Close(); err != nil {
+			slog.Warn("graceful shutdown: collector close error",
+				slog.String("name", c.Name()), slog.Any("error", err))
+		}
+	}
+	engine.Close()
+
+	// Step 5: drain the HTTP server.
+	slog.Info("graceful shutdown: shutting down HTTP server")
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("graceful shutdown: HTTP server shutdown error", slog.Any("error", err))
+	}
+
+	slog.Info("graceful shutdown: complete")
 }
 
 func setupLogger(level string) {

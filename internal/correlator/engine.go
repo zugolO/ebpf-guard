@@ -635,6 +635,23 @@ func (ce *CorrelationEngine) filterDuplicates(alerts []types.Alert) []types.Aler
 	return out
 }
 
+// DrainEnforceQueue blocks until the enforcement queue is empty or ctx expires.
+// Call this during graceful shutdown to let in-flight enforcement tasks complete
+// before closing the engine.
+func (ce *CorrelationEngine) DrainEnforceQueue(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if len(ce.enforceQueue) == 0 {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Close stops background goroutines started by the engine.
 func (ce *CorrelationEngine) Close() {
 	ce.cancelCleanup()

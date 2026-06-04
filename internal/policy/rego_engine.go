@@ -35,11 +35,16 @@ type RegoEngine struct {
 	enabled    atomic.Bool
 
 	// Metrics
-	evalDuration  atomic.Value // stores prometheus.Observer
+	// evalDuration is called with the Evaluate latency when non-nil.
+	// Use SetDurationObserver to wire up a prometheus.Observer or any callback.
+	evalDuration  atomic.Value // stores DurationObserver
 	evalTotal     atomic.Uint64
 	evalErrors    atomic.Uint64
 	reloadCounter atomic.Uint64
 }
+
+// DurationObserver is a callback that receives Evaluate latency measurements.
+type DurationObserver func(time.Duration)
 
 // RegoEngineConfig holds configuration for the Rego engine.
 type RegoEngineConfig struct {
@@ -71,7 +76,7 @@ func NewRegoEngine(config RegoEngineConfig) (*RegoEngine, error) {
 		return nil, fmt.Errorf("policy/rego: load policies: %w", err)
 	}
 
-	if err := engine.compile(); err != nil {
+	if err := engine.compile(context.Background()); err != nil {
 		return nil, fmt.Errorf("policy/rego: compile policies: %w", err)
 	}
 
@@ -115,8 +120,9 @@ func (re *RegoEngine) loadPolicies() error {
 }
 
 // compile creates a prepared evaluation query from loaded policies.
-// This is called once at startup or reload, not per evaluation.
-func (re *RegoEngine) compile() error {
+// Accepts a context so callers can cancel a long-running compilation (e.g.
+// during graceful shutdown or hot-reload with a deadline).
+func (re *RegoEngine) compile(ctx context.Context) error {
 	if len(re.policies) == 0 {
 		// No policies loaded, clear prepared query
 		re.mu.Lock()
@@ -136,7 +142,7 @@ func (re *RegoEngine) compile() error {
 
 	// Create rego instance and prepare for evaluation
 	r := rego.New(opts...)
-	prepared, err := r.PrepareForEval(context.Background())
+	prepared, err := r.PrepareForEval(ctx)
 	if err != nil {
 		return fmt.Errorf("prepare for eval: %w", err)
 	}
@@ -177,11 +183,9 @@ func (re *RegoEngine) Evaluate(ctx context.Context, alert types.Alert) ([]Policy
 		return nil, fmt.Errorf("rego eval: %w", err)
 	}
 
-	duration := time.Since(start)
-	if observer := re.evalDuration.Load(); observer != nil {
-		// Metrics will be recorded if observer is set
+	if fn, ok := re.evalDuration.Load().(DurationObserver); ok {
+		fn(time.Since(start))
 	}
-	_ = duration // Used for potential metrics recording
 
 	// Extract decisions from results
 	var decisions []PolicyDecision
@@ -335,21 +339,30 @@ func parseDecision(m map[string]interface{}) PolicyDecision {
 	return d
 }
 
-// Reload reloads policies from disk and recompiles.
-// This is safe for concurrent use via atomic swap of prepared query.
+// Reload reloads policies from disk and recompiles using context.Background().
+// Use ReloadWithContext when a deadline or cancellation is needed.
 func (re *RegoEngine) Reload() error {
-	// Reload policies (no lock needed, modifies local state)
+	return re.ReloadWithContext(context.Background())
+}
+
+// ReloadWithContext reloads policies from disk and recompiles.
+// The supplied context can be used to cancel a slow compilation.
+// Safe for concurrent use — the prepared query is swapped atomically.
+func (re *RegoEngine) ReloadWithContext(ctx context.Context) error {
 	if err := re.loadPolicies(); err != nil {
 		return fmt.Errorf("reload policies: %w", err)
 	}
-
-	// Recompile (handles its own locking)
-	if err := re.compile(); err != nil {
+	if err := re.compile(ctx); err != nil {
 		return fmt.Errorf("recompile policies: %w", err)
 	}
-
 	re.reloadCounter.Add(1)
 	return nil
+}
+
+// SetDurationObserver wires up a latency callback for Evaluate calls.
+// Pass nil to disable. Thread-safe.
+func (re *RegoEngine) SetDurationObserver(fn DurationObserver) {
+	re.evalDuration.Store(fn)
 }
 
 // SetEnabled enables or disables the Rego engine.

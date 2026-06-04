@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,7 +144,8 @@ type CorrelationEngine struct {
 	// Rule-based enforcement (optional)
 	actionExecutor      ActionExecutor
 	enforceCooldown     time.Duration
-	cooldowns           sync.Map // key="ruleID:PID", value=time.Time
+	cooldowns           sync.Map   // key="ruleID:PID", value=time.Time
+	cooldownsMu         sync.Mutex // serialises the Load+Store check-and-set to prevent duplicate enforcement
 	enforcedCounter     prometheus.Counter
 	enforceQueue        chan enforceTask
 	enforceQueueDropped prometheus.Counter
@@ -584,6 +586,11 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// the most recent parent information available for this event's PID.
 	ce.lineageTracker.Track(e)
 
+	// Compute the process tree once and share it across all alerts generated
+	// by this event. Avoids acquiring the lineage read-lock once per alert
+	// (rule, WASM, anomaly, IOC) under burst conditions.
+	processTree := ce.lineageTracker.GetProcessTree(e.PID)
+
 	var alerts []types.Alert
 
 	// Evaluate against rules
@@ -604,7 +611,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		// Append monotonic sequence number to guarantee uniqueness across
 		// concurrent alerts that share ruleID+timestamp+pid.
 		seq := ce.alertSeq.Add(1)
-		alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
+		alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
 
 		// Propagate W3C Trace Context from event to alert for APM correlation.
 		if e.TraceContext != nil {
@@ -618,7 +625,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		}
 
 		// Attach full process tree for SOC triage.
-		alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+		alert.ProcessTree = processTree
 
 		// Rule-based enforcement: kill / block / throttle.
 		// The alert is always emitted for auditing; enforcement is dispatched
@@ -661,8 +668,8 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				continue
 			}
 			seq := ce.alertSeq.Add(1)
-			alert.ID = fmt.Sprintf("%s-%d-%d-%d", alert.RuleID, e.Timestamp, e.PID, seq)
-			alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
+			alert.ProcessTree = processTree
 			alerts = append(alerts, alert)
 			ce.alertsGenerated.Add(1)
 		}
@@ -671,6 +678,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// Gossip IOC matching — check event against cluster-wide indicators.
 	if ce.iocMatcher != nil {
 		if iocAlert := ce.checkIOCMatch(e); iocAlert != nil {
+			iocAlert.ProcessTree = processTree
 			if ce.rateLimiter.Allow(iocAlert.RuleID) &&
 				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
 				alerts = append(alerts, *iocAlert)
@@ -681,9 +689,12 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		}
 	}
 
-	// Anomaly detection (if enabled and learning complete)
+	// Anomaly detection (if enabled and learning complete).
+	// ruleConfirmed=true suppresses EWMA baseline updates for events that
+	// rule/WASM/IOC detectors already confirmed as malicious.
 	if ce.enableAnomaly && ce.anomalyDetector != nil {
-		if result := ce.anomalyDetector.ProcessEvent(e); result != nil {
+		ruleConfirmed := len(alerts) > 0
+		if result := ce.anomalyDetector.ProcessEvent(e, ruleConfirmed); result != nil {
 			// Always report the score (even non-anomalous) so the cardinality-guarded
 			// Prometheus gauge tracks all active processes, not only anomaly triggers.
 			if ce.scoreReporter != nil {
@@ -714,7 +725,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 
 				// Create anomaly alert
 				anomalyAlert := types.Alert{
-					ID:        fmt.Sprintf("anomaly-%d-%d-%d", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
+					ID:        buildAlertID("anomaly", e.Timestamp, e.PID, ce.alertSeq.Add(1)),
 					Timestamp: time.Unix(0, int64(e.Timestamp)),
 					RuleID:    "anomaly_detection",
 					RuleName:  "Behavioral Anomaly Detected",
@@ -737,7 +748,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				}
 
 				// Attach full process tree for SOC triage.
-				anomalyAlert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+				anomalyAlert.ProcessTree = processTree
 
 				// Check per-rule and global rate limiting for anomaly alerts
 				perRuleOK := ce.rateLimiter.Allow(anomalyAlert.RuleID)
@@ -941,9 +952,16 @@ func isEnforcedAction(action string) bool {
 // tryAcquireEnforceCooldown returns true if enforcement should proceed for
 // the (ruleID, pid) pair. Successive calls within enforceCooldown return false
 // to prevent enforcement spam when the same process keeps triggering a rule.
+//
+// cooldownsMu makes the Load+compare+Store atomic so two concurrent goroutines
+// for the same (ruleID, pid) cannot both slip through and fire the action twice.
 func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32) bool {
 	key := fmt.Sprintf("%s:%d", ruleID, pid)
 	now := time.Now()
+
+	ce.cooldownsMu.Lock()
+	defer ce.cooldownsMu.Unlock()
+
 	if prev, loaded := ce.cooldowns.Load(key); loaded {
 		if prevTime, ok := prev.(time.Time); ok && now.Sub(prevTime) < ce.enforceCooldown {
 			return false
@@ -982,7 +1000,7 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 
 	seq := ce.alertSeq.Add(1)
 	alert := &types.Alert{
-		ID:        fmt.Sprintf("%s-%d-%d-%d", ruleID, e.Timestamp, e.PID, seq),
+		ID:        buildAlertID(ruleID, e.Timestamp, e.PID, seq),
 		Timestamp: time.Unix(0, int64(e.Timestamp)),
 		RuleID:    ruleID,
 		RuleName:  "Gossip IOC Match",
@@ -999,7 +1017,8 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 	if e.Enrichment != nil {
 		alert.Enrichment = *e.Enrichment
 	}
-	alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+	// ProcessTree is assigned by the caller (Ingest) from the pre-computed
+	// shared processTree to avoid an extra lineage lock acquisition here.
 	return alert
 }
 
@@ -1034,6 +1053,32 @@ func buildRemoteSpanContext(traceID, spanID string) (trace.SpanContext, error) {
 		return trace.SpanContext{}, fmt.Errorf("invalid span context")
 	}
 	return sc, nil
+}
+
+// alertIDPool reuses []byte buffers for alert ID construction, reducing
+// hot-path allocations from ~3 (fmt.Sprintf) to 1 (the final string copy).
+var alertIDPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 128)
+		return &b
+	},
+}
+
+// buildAlertID returns "<prefix>-<ts>-<pid>-<seq>" without fmt.Sprintf overhead.
+func buildAlertID(prefix string, ts uint64, pid uint32, seq uint64) string {
+	bp := alertIDPool.Get().(*[]byte)
+	b := (*bp)[:0]
+	b = append(b, prefix...)
+	b = append(b, '-')
+	b = strconv.AppendUint(b, ts, 10)
+	b = append(b, '-')
+	b = strconv.AppendUint(b, uint64(pid), 10)
+	b = append(b, '-')
+	b = strconv.AppendUint(b, seq, 10)
+	id := string(b) // copy before returning buffer to pool
+	*bp = b
+	alertIDPool.Put(bp)
+	return id
 }
 
 // formatAnomalyDescription creates a human-readable description of an anomaly.

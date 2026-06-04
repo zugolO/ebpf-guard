@@ -93,19 +93,27 @@ func NewAnomalyDetector(threshold float64, learningPeriod time.Duration, weight 
 }
 
 // ProcessEvent processes an event and returns anomaly results if detected.
+// ruleConfirmed indicates that a detection rule (YAML, WASM, or IOC) already
+// flagged this event as malicious. Confirmed events are excluded from the EWMA
+// baseline during the learning phase so attacks present at startup are not
+// normalised into the behavioural profile and later evade scoring.
 //
 // Invariant: This method must be called from a single goroutine per AnomalyDetector
 // instance. The caller (CorrelationEngine.Ingest) ensures proper serialization.
 // The profileManager.RecordEvent and calculateAnomalyScore calls are not
 // thread-safe for the same PID and require external synchronization.
-func (ad *AnomalyDetector) ProcessEvent(e types.Event) *AnomalyResult {
+func (ad *AnomalyDetector) ProcessEvent(e types.Event, ruleConfirmed bool) *AnomalyResult {
 	if !ad.IsEnabled() {
 		return nil
 	}
 
-	// During the learning phase, just fold the event into the baseline.
+	// During the learning phase, fold the event into the baseline — but skip
+	// events already confirmed malicious by rule/IOC detection so that active
+	// attacks present during startup do not get embedded in the EWMA baseline.
 	if !ad.IsLearningComplete() {
-		ad.profileManager.RecordEvent(e)
+		if !ruleConfirmed {
+			ad.profileManager.RecordEvent(e)
+		}
 		ad.learner.RecordSample()
 		return nil
 	}

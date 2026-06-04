@@ -272,60 +272,64 @@ func (s *Scanner) checkAnonymousExecRegions() {
 			continue
 		}
 
-		mapsPath := filepath.Join(procDir, pid, "maps")
-		file, err := os.Open(mapsPath)
-		if err != nil {
-			// Process might have exited, skip
+		if finding, ok := s.checkPIDAnonymousRegions(procDir, pid); ok {
+			s.findings = append(s.findings, finding)
+		}
+	}
+}
+
+// checkPIDAnonymousRegions scans /proc/<pid>/maps for a single process and
+// returns the first anonymous executable region found. Extracted into a
+// dedicated function so defer file.Close() fires before the next iteration
+// rather than accumulating open handles until checkAnonymousExecRegions returns.
+func (s *Scanner) checkPIDAnonymousRegions(procDir, pid string) (Finding, bool) {
+	mapsPath := filepath.Join(procDir, pid, "maps")
+	file, err := os.Open(mapsPath)
+	if err != nil {
+		// Process might have exited, skip
+		return Finding{}, false
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Parse maps line format:
+		// address perms offset dev inode pathname
+		// Example: 7f8b4c000000-7f8b4c021000 rw-p 00000000 00:00 0
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
 			continue
 		}
 
-		scanner := bufio.NewScanner(file)
-		lineNum := 0
-		for scanner.Scan() {
-			lineNum++
-			line := scanner.Text()
-
-			// Parse maps line format:
-			// address perms offset dev inode pathname
-			// Example: 7f8b4c000000-7f8b4c021000 rw-p 00000000 00:00 0
-			fields := strings.Fields(line)
-			if len(fields) < 5 {
-				continue
-			}
-
-			// Check permissions: rwxp means read-write-execute-private
-			// Anonymous regions have inode 0 and no pathname
-			perms := fields[1]
-			if len(perms) < 4 {
-				continue
-			}
-
-			// Check for executable permission (x) and anonymous (no pathname)
-			isExecutable := perms[2] == 'x'
-			isAnonymous := len(fields) == 5 || (len(fields) >= 6 && fields[5] == "0")
-
-			if isExecutable && isAnonymous {
-				// Get process name for context
-				commPath := filepath.Join(procDir, pid, "comm")
-				comm, _ := os.ReadFile(commPath)
-				commStr := strings.TrimSpace(string(comm))
-				if commStr == "" {
-					commStr = "unknown"
-				}
-
-				s.findings = append(s.findings, Finding{
-					Check:   "anon_exec",
-					Path:    mapsPath,
-					Details: fmt.Sprintf("PID %s (%s): anonymous executable region: %s", pid, commStr, fields[0]),
-				})
-
-				// Only report first anonymous region per process to avoid flooding
-				break
-			}
+		// Check permissions: rwxp means read-write-execute-private
+		// Anonymous regions have inode 0 and no pathname
+		perms := fields[1]
+		if len(perms) < 4 {
+			continue
 		}
 
-		file.Close()
+		// Check for executable permission (x) and anonymous (no pathname)
+		isExecutable := perms[2] == 'x'
+		isAnonymous := len(fields) == 5 || (len(fields) >= 6 && fields[5] == "0")
+
+		if isExecutable && isAnonymous {
+			commPath := filepath.Join(procDir, pid, "comm")
+			comm, _ := os.ReadFile(commPath)
+			commStr := strings.TrimSpace(string(comm))
+			if commStr == "" {
+				commStr = "unknown"
+			}
+
+			return Finding{
+				Check:   "anon_exec",
+				Path:    mapsPath,
+				Details: fmt.Sprintf("PID %s (%s): anonymous executable region: %s", pid, commStr, fields[0]),
+			}, true
+		}
 	}
+	return Finding{}, false
 }
 
 // exportMetrics exports findings as Prometheus metrics.

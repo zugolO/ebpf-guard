@@ -13,9 +13,8 @@ var runeFreqPool = sync.Pool{
 	New: func() interface{} { return make(map[rune]int, 64) },
 }
 
-// analysisCacheMaxSize is the maximum number of entries in the per-instance
-// analysis cache before it is cleared. Sized to cover a realistic burst of
-// unique DNS queries without unbounded growth.
+// analysisCacheMaxSize is the capacity of the per-instance analysis cache.
+// When the cache is full the oldest entry is evicted (FIFO), not the entire map.
 const analysisCacheMaxSize = 512
 
 // DNSEntropyCalculator computes Shannon entropy for DNS domain names.
@@ -37,8 +36,14 @@ type DNSEntropyCalculator struct {
 	// analysisCache caches recent AnalyzeDomain results to avoid recomputing
 	// entropy + n-gram scores when the same domain appears in multiple rule
 	// conditions during the same event evaluation pass.
-	cacheMu       sync.Mutex
+	// cacheEvictQ is a fixed-size ring that records insertion order so a single
+	// oldest entry can be evicted in O(1) when the cache is full, instead of
+	// discarding the entire map at once (which caused CPU spikes on each reset).
+	cacheMu      sync.Mutex
 	analysisCache map[string]DomainAnalysis
+	cacheEvictQ  [analysisCacheMaxSize]string // FIFO eviction ring
+	cacheHead    int                          // index of the oldest entry
+	cacheTail    int                          // next write slot
 }
 
 // NewDNSEntropyCalculator creates a new entropy calculator with default settings.
@@ -46,7 +51,7 @@ func NewDNSEntropyCalculator() *DNSEntropyCalculator {
 	return &DNSEntropyCalculator{
 		DGAThreshold:       3.5,
 		TunnelingMinLength: 50,
-		analysisCache:      make(map[string]DomainAnalysis, 64),
+		analysisCache:      make(map[string]DomainAnalysis, analysisCacheMaxSize),
 		SuspiciousTLDs: map[string]bool{
 			".onion": true, // Tor hidden services
 			".bit":   true, // Namecoin / Emercoin
@@ -152,12 +157,9 @@ func (c *DNSEntropyCalculator) AnalyzeDomain(domain string) DomainAnalysis {
 		c.cacheMu.Unlock()
 		return cached
 	}
-	// Evict entire cache when it exceeds the size cap to bound memory use.
-	if len(c.analysisCache) >= analysisCacheMaxSize {
-		c.analysisCache = make(map[string]DomainAnalysis, 64)
-	}
 	c.cacheMu.Unlock()
 
+	// Expensive computation runs outside the lock.
 	baseDomain := c.extractBaseDomain(domain)
 	entropy := c.CalculateShannonEntropy(baseDomain)
 	ngramScore := Score(domain)
@@ -177,7 +179,20 @@ func (c *DNSEntropyCalculator) AnalyzeDomain(domain string) DomainAnalysis {
 	}
 
 	c.cacheMu.Lock()
-	c.analysisCache[domain] = result
+	// Double-check: another goroutine may have stored this domain while we
+	// were computing. Skip the write (and eviction) if it is already present.
+	if _, exists := c.analysisCache[domain]; !exists {
+		if len(c.analysisCache) >= analysisCacheMaxSize {
+			// Evict the single oldest entry via the FIFO ring — O(1), no
+			// full-map reset, no CPU spike.
+			oldest := c.cacheEvictQ[c.cacheHead]
+			c.cacheHead = (c.cacheHead + 1) % analysisCacheMaxSize
+			delete(c.analysisCache, oldest)
+		}
+		c.cacheEvictQ[c.cacheTail] = domain
+		c.cacheTail = (c.cacheTail + 1) % analysisCacheMaxSize
+		c.analysisCache[domain] = result
+	}
 	c.cacheMu.Unlock()
 
 	return result

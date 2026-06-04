@@ -113,7 +113,7 @@ func (p *Profiler) Ingest(e types.Event) []*Anomaly {
 	var anomalies []*Anomaly
 
 	// Run EWMA-based anomaly detection
-	result := p.detector.ProcessEvent(e)
+	result := p.detector.ProcessEvent(e, false)
 	if result != nil && result.IsAnomaly {
 		contributions := make(map[string]interface{})
 		for _, c := range result.Contributions {

@@ -27,7 +27,7 @@ func BenchmarkProcessEvent(b *testing.B) {
 
 	// Record events during learning phase
 	for i := 0; i < 100; i++ {
-		ad.ProcessEvent(learningEvent)
+		ad.ProcessEvent(learningEvent, false)
 	}
 
 	// Wait for learning to complete
@@ -53,7 +53,7 @@ func BenchmarkProcessEvent(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		result := ad.ProcessEvent(event)
+		result := ad.ProcessEvent(event, false)
 		// Prevent compiler from optimizing away the result
 		if result != nil && result.PID != 1234 {
 			b.Fatal("unexpected PID")
@@ -77,7 +77,7 @@ func BenchmarkProcessEventFileAccess(b *testing.B) {
 	}
 
 	for i := 0; i < 100; i++ {
-		ad.ProcessEvent(learningEvent)
+		ad.ProcessEvent(learningEvent, false)
 	}
 
 	time.Sleep(2 * time.Millisecond)
@@ -96,7 +96,7 @@ func BenchmarkProcessEventFileAccess(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		result := ad.ProcessEvent(event)
+		result := ad.ProcessEvent(event, false)
 		if result != nil && result.PID != 1234 {
 			b.Fatal("unexpected PID")
 		}
@@ -118,7 +118,7 @@ func BenchmarkProcessEventSyscall(b *testing.B) {
 	}
 
 	for i := 0; i < 100; i++ {
-		ad.ProcessEvent(learningEvent)
+		ad.ProcessEvent(learningEvent, false)
 	}
 
 	time.Sleep(2 * time.Millisecond)
@@ -136,7 +136,7 @@ func BenchmarkProcessEventSyscall(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		result := ad.ProcessEvent(event)
+		result := ad.ProcessEvent(event, false)
 		if result != nil && result.PID != 1234 {
 			b.Fatal("unexpected PID")
 		}
@@ -185,7 +185,7 @@ func BenchmarkProcessEventParallel(b *testing.B) {
 			},
 		}
 		for i := 0; i < 10; i++ {
-			ad.ProcessEvent(learningEvent)
+			ad.ProcessEvent(learningEvent, false)
 		}
 	}
 
@@ -207,7 +207,7 @@ func BenchmarkProcessEventParallel(b *testing.B) {
 		}
 
 		for pb.Next() {
-			result := ad.ProcessEvent(event)
+			result := ad.ProcessEvent(event, false)
 			if result != nil && result.PID != pid {
 				b.Fatal("unexpected PID")
 			}

@@ -72,6 +72,12 @@ type Config struct {
 
 	// OSINT configuration — automated rule generation from threat intelligence feeds.
 	OSINT OSINTConfig `mapstructure:"osint"`
+
+	// EventLog configuration — JSONL event log for rule replay (feature C).
+	EventLog EventLogConfig `mapstructure:"event_log"`
+
+	// Canary configuration — honeypot file detection (feature D).
+	Canary CanaryConfig `mapstructure:"canary"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -442,6 +448,9 @@ type PolicyConfig struct {
 type GossipConfig struct {
 	// Enabled enables the gossip sub-system.
 	Enabled bool `mapstructure:"enabled"`
+	// NodeName is this node's identifier included in IOC and amplification
+	// messages. Defaults to the system hostname when empty.
+	NodeName string `mapstructure:"node_name"`
 	// Secret is the shared authentication token sent in X-Gossip-Secret.
 	// If empty, gossip requests are accepted without authentication.
 	Secret string `mapstructure:"secret"`
@@ -554,6 +563,32 @@ type VirusTotalConfig struct {
 	// (/api/v3/feeds/ips and /api/v3/feeds/domains), which require a
 	// VirusTotal Intelligence subscription. Set false for community-only usage.
 	EnterpriseFeeds bool `mapstructure:"enterprise_feeds"`
+}
+
+// EventLogConfig holds JSONL event log settings for rule replay.
+type EventLogConfig struct {
+	// Enabled enables writing events to the log for later replay.
+	Enabled bool `mapstructure:"enabled"`
+	// Path is the file path for the JSONL event log.
+	// Default: /var/lib/ebpf-guard/events.jsonl
+	Path string `mapstructure:"path"`
+	// MaxSizeMB is the maximum log file size in MB before rotation.
+	// Default: 100
+	MaxSizeMB int `mapstructure:"max_size_mb"`
+}
+
+// CanaryConfig holds canary trap / honeypot detection settings.
+type CanaryConfig struct {
+	// Enabled activates canary trap detection.
+	Enabled bool `mapstructure:"enabled"`
+	// AutoCreate creates the canary files at startup if they do not exist.
+	AutoCreate bool `mapstructure:"auto_create"`
+	// Files is the list of canary file paths to monitor.
+	// If empty, a built-in set of high-value reconnaissance paths is used.
+	Files []string `mapstructure:"files"`
+	// AlertSeverity is the severity for canary access alerts ("warning" or "critical").
+	// Default: critical
+	AlertSeverity string `mapstructure:"alert_severity"`
 }
 
 // CheckConfigPermissions verifies the config file is not world-writable and is
@@ -757,6 +792,7 @@ func setDefaults(v *viper.Viper) {
 
 	// Gossip defaults — disabled by default; operators opt in per node.
 	v.SetDefault("gossip.enabled", false)
+	v.SetDefault("gossip.node_name", "")
 	v.SetDefault("gossip.secret", "")
 	v.SetDefault("gossip.peers", []string{})
 	v.SetDefault("gossip.ioc_ttl", 3600)
@@ -797,6 +833,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("wasm.plugin_dir", "rules/custom")
 	v.SetDefault("wasm.memory_limit_mb", 16)
 	v.SetDefault("wasm.plugin_timeout_ms", 100)
+
+	// Event log defaults — disabled by default; operators opt in for replay.
+	v.SetDefault("event_log.enabled", false)
+	v.SetDefault("event_log.path", "/var/lib/ebpf-guard/events.jsonl")
+	v.SetDefault("event_log.max_size_mb", 100)
+
+	// Canary trap defaults — enabled by default with auto-created lure files.
+	v.SetDefault("canary.enabled", true)
+	v.SetDefault("canary.auto_create", true)
+	v.SetDefault("canary.files", []string{})
+	v.SetDefault("canary.alert_severity", "critical")
 }
 
 // Get returns the current configuration (thread-safe).

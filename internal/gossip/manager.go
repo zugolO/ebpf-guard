@@ -59,9 +59,12 @@ func DefaultConfig() Config {
 // Manager runs the gossip sub-system.
 // It implements correlator.IOCMatcher so it can be injected into the
 // correlation engine without creating an import cycle.
+// It also implements correlator.SensitivityAdjuster for cross-node alert
+// amplification (attack on node A → lowered anomaly threshold on peers).
 type Manager struct {
 	cfg       Config
 	store     *IOCStore
+	ampStore  *AmplificationStore
 	client    *gossipClient
 	discovery PeerDiscovery
 	logger    *slog.Logger
@@ -70,12 +73,18 @@ type Manager struct {
 	deltaMu sync.Mutex
 	delta   []IOC
 
+	// Accumulated amplification signals since the last push to peers.
+	ampDeltaMu sync.Mutex
+	ampDelta   []AmplificationSignal
+
 	// Prometheus metrics (unregistered — callers call RegisterMetrics).
-	iocReceived prometheus.Counter
-	matchHits   prometheus.Counter
-	pushTotal   prometheus.Counter
-	pushErrors  prometheus.Counter
-	storeSize   prometheus.Gauge
+	iocReceived        prometheus.Counter
+	matchHits          prometheus.Counter
+	pushTotal          prometheus.Counter
+	pushErrors         prometheus.Counter
+	storeSize          prometheus.Gauge
+	ampReceived        prometheus.Counter
+	ampActive          prometheus.Gauge
 }
 
 // NewManager creates a gossip Manager.
@@ -108,6 +117,7 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	return &Manager{
 		cfg:       cfg,
 		store:     NewIOCStore(cfg.MaxIOCs, cfg.IOCTTL),
+		ampStore:  newAmplificationStore(),
 		client:    newGossipClient(cfg.Secret, tlsCfg),
 		discovery: NewStaticPeerDiscovery(cfg.Peers),
 		logger:    logger,
@@ -131,6 +141,14 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		storeSize: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_gossip_store_size",
 			Help: "Current IOC store entry count.",
+		}),
+		ampReceived: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_gossip_amplifications_received_total",
+			Help: "Total cross-node alert amplification signals received from peers.",
+		}),
+		ampActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_gossip_amplifications_active",
+			Help: "Number of currently active cross-node alert amplification signals.",
 		}),
 	}, nil
 }
@@ -164,6 +182,7 @@ func buildGossipTLSConfig(cfg Config) (*tls.Config, error) {
 func (m *Manager) RegisterMetrics(reg prometheus.Registerer) {
 	for _, c := range []prometheus.Collector{
 		m.iocReceived, m.matchHits, m.pushTotal, m.pushErrors, m.storeSize,
+		m.ampReceived, m.ampActive,
 	} {
 		// Ignore already-registered errors (safe for repeated test calls).
 		_ = reg.Register(c)
@@ -295,6 +314,61 @@ func (m *Manager) Snapshot() []IOC {
 	return m.store.Snapshot()
 }
 
+// BroadcastAlert inspects a triggered alert and, for critical alerts that
+// carry a Kubernetes namespace, publishes an AmplificationSignal so peer nodes
+// temporarily lower their anomaly detection threshold for that namespace.
+// Call this for every alert the agent emits; it is a no-op for non-critical
+// or non-K8s alerts.
+func (m *Manager) BroadcastAlert(alert types.Alert) {
+	if !m.cfg.Enabled {
+		return
+	}
+	if alert.Severity != types.SeverityCritical {
+		return
+	}
+	ns := alert.Enrichment.Namespace
+	if ns == "" {
+		return
+	}
+	sig := AmplificationSignal{
+		Namespace:           ns,
+		RuleID:              alert.RuleID,
+		Severity:            string(alert.Severity),
+		Source:              m.cfg.NodeName,
+		ThresholdMultiplier: defaultThresholdMultiplier,
+		ExpiresAt:           time.Now().Add(amplificationTTLDefault),
+	}
+	m.ampDeltaMu.Lock()
+	m.ampDelta = append(m.ampDelta, sig)
+	m.ampDeltaMu.Unlock()
+}
+
+// MergeAmplificationsFromPeer stores amplification signals received from a peer.
+func (m *Manager) MergeAmplificationsFromPeer(sigs []AmplificationSignal) {
+	for _, sig := range sigs {
+		if time.Now().Before(sig.ExpiresAt) {
+			m.ampStore.Add(sig)
+		}
+	}
+	m.ampReceived.Add(float64(len(sigs)))
+	m.ampActive.Set(float64(m.ampStore.ActiveCount()))
+}
+
+// GetThresholdMultiplier implements correlator.SensitivityAdjuster.
+// Returns the lowest threshold multiplier across all active signals for the
+// given namespace. Returns 1.0 when no signal is active.
+func (m *Manager) GetThresholdMultiplier(namespace string) float64 {
+	if !m.cfg.Enabled {
+		return 1.0
+	}
+	return m.ampStore.GetThresholdMultiplier(namespace)
+}
+
+// AmplificationSnapshot returns all active amplification signals for debugging.
+func (m *Manager) AmplificationSnapshot() []AmplificationSignal {
+	return m.ampStore.Snapshot()
+}
+
 // cleanupLoop periodically removes expired IOC entries.
 func (m *Manager) cleanupLoop(ctx context.Context) {
 	// Run cleanup at half the TTL so the store stays tidy between pushes.
@@ -314,6 +388,11 @@ func (m *Manager) cleanupLoop(ctx context.Context) {
 			if removed > 0 {
 				m.logger.Debug("gossip: expired IOCs removed", slog.Int("count", removed))
 			}
+			ampRemoved := m.ampStore.CleanExpired()
+			m.ampActive.Set(float64(m.ampStore.ActiveCount()))
+			if ampRemoved > 0 {
+				m.logger.Debug("gossip: expired amplification signals removed", slog.Int("count", ampRemoved))
+			}
 		}
 	}
 }
@@ -332,31 +411,48 @@ func (m *Manager) pushLoop(ctx context.Context) {
 	}
 }
 
-// flushDelta sends all pending IOCs to each peer concurrently.
+// flushDelta sends all pending IOCs and amplification signals to each peer concurrently.
 func (m *Manager) flushDelta(ctx context.Context) {
 	m.deltaMu.Lock()
-	if len(m.delta) == 0 {
-		m.deltaMu.Unlock()
-		return
-	}
 	batch := m.delta
 	m.delta = nil
 	m.deltaMu.Unlock()
 
+	m.ampDeltaMu.Lock()
+	ampBatch := m.ampDelta
+	m.ampDelta = nil
+	m.ampDeltaMu.Unlock()
+
+	if len(batch) == 0 && len(ampBatch) == 0 {
+		return
+	}
+
 	peers := m.discovery.Peers()
 	for _, peer := range peers {
 		peer := peer
-		go func() {
-			if err := m.client.PushIOCs(ctx, peer, batch); err != nil {
-				m.pushErrors.Inc()
-				m.logger.Debug("gossip: push failed",
-					slog.String("peer", peer),
-					slog.Any("err", err),
-				)
-			} else {
-				m.pushTotal.Inc()
-			}
-		}()
+		if len(batch) > 0 {
+			go func() {
+				if err := m.client.PushIOCs(ctx, peer, batch); err != nil {
+					m.pushErrors.Inc()
+					m.logger.Debug("gossip: IOC push failed",
+						slog.String("peer", peer),
+						slog.Any("err", err),
+					)
+				} else {
+					m.pushTotal.Inc()
+				}
+			}()
+		}
+		if len(ampBatch) > 0 {
+			go func() {
+				if err := m.client.PushAmplifications(ctx, peer, ampBatch); err != nil {
+					m.logger.Debug("gossip: amplification push failed",
+						slog.String("peer", peer),
+						slog.Any("err", err),
+					)
+				}
+			}()
+		}
 	}
 }
 

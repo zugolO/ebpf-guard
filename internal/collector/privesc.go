@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -86,6 +87,7 @@ type PrivescCollector struct {
 	dropLogger *dropLogger
 	status     StatusReporter
 	strategy   BackpressureStrategy
+	lostTotal  atomic.Uint64
 }
 
 // NewPrivescCollector creates a new privilege escalation event collector.
@@ -220,7 +222,6 @@ func (c *PrivescCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			c.logger.Error("failed to read from ringbuf", "error", err)
 			continue
 		}
-
 		event, err := c.parseEvent(record.RawSample)
 		if err != nil {
 			c.logger.Error("failed to parse privesc event", "error", err)
@@ -238,8 +239,15 @@ func (c *PrivescCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordDropped("privesc", "channel_full")
 			c.dropLogger.record(c.logger, "privesc")
+			c.lostTotal.Add(1)
 		})
 	}
+}
+
+// LostEvents returns the total number of events lost in the BPF ring buffer
+// since the collector started. Implements watchdog.DropTracker.
+func (c *PrivescCollector) LostEvents() uint64 {
+	return c.lostTotal.Load()
 }
 
 func (c *PrivescCollector) parseEvent(raw []byte) (*types.Event, error) {

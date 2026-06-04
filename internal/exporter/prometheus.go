@@ -70,6 +70,17 @@ var (
 		[]string{"level"},
 	)
 
+	// BPFLostEvents counts events dropped when the collector output channel is full.
+	// Incremented by the watchdog drop-tracking loop every 10 seconds from each
+	// collector's atomic counter, which is incremented on each backpressure drop.
+	BPFLostEvents = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_bpf_lost_events_total",
+			Help: "Total number of events dropped by BPF collectors due to consumer backpressure",
+		},
+		[]string{"collector"},
+	)
+
 	// CorrelationDuration measures the latency of event correlation in seconds.
 	CorrelationDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -147,4 +158,9 @@ func RecordCorrelationDuration(duration float64) {
 // SetLearningProgress sets the learning progress gauge (0.0-1.0).
 func SetLearningProgress(progress float64) {
 	LearningProgress.Set(progress)
+}
+
+// AddBPFLost increments the BPF ring buffer lost events counter for a collector.
+func AddBPFLost(collector string, n uint64) {
+	BPFLostEvents.WithLabelValues(collector).Add(float64(n))
 }

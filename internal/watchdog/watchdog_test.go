@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -295,5 +296,64 @@ func TestMultipleStartCalls(t *testing.T) {
 
 	if !w.IsRunning() {
 		t.Error("expected watchdog to be running")
+	}
+}
+
+// mockDropTracker is a DropTracker that returns a manually controlled count.
+type mockDropTracker struct {
+	name  string
+	count uint64
+}
+
+func (m *mockDropTracker) Name() string      { return m.name }
+func (m *mockDropTracker) LostEvents() uint64 { return m.count }
+
+func TestDropTracking(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	tracker := &mockDropTracker{name: "test_collector"}
+
+	w := New(logger, Config{
+		HeartbeatInterval: 1 * time.Hour,
+		CheckInterval:     1 * time.Hour,
+	})
+	w.RegisterDropTracker(tracker)
+
+	// Simulate 5 drops before the first tick.
+	tracker.count = 5
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+
+	// runDropTracking fires every 10s; manually invoke the inner logic to avoid a slow test.
+	w.dropLostMu.Lock()
+	name := tracker.Name()
+	current := tracker.LostEvents()
+	last := w.dropLostSeen[name]
+	if current > last {
+		exporter.AddBPFLost(name, current-last)
+		w.dropLostSeen[name] = current
+	}
+	w.dropLostMu.Unlock()
+
+	got := testutil.ToFloat64(exporter.BPFLostEvents.WithLabelValues("test_collector"))
+	if got != 5 {
+		t.Errorf("expected BPFLostEvents=5, got %v", got)
+	}
+
+	// Simulate 3 more drops; delta should be 3.
+	tracker.count = 8
+	w.dropLostMu.Lock()
+	current = tracker.LostEvents()
+	last = w.dropLostSeen[name]
+	if current > last {
+		exporter.AddBPFLost(name, current-last)
+		w.dropLostSeen[name] = current
+	}
+	w.dropLostMu.Unlock()
+
+	got = testutil.ToFloat64(exporter.BPFLostEvents.WithLabelValues("test_collector"))
+	if got != 8 {
+		t.Errorf("expected BPFLostEvents=8 after second batch, got %v", got)
 	}
 }

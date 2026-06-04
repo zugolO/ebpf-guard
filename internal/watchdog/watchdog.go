@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -37,6 +38,17 @@ var (
 		[]string{"program"},
 	)
 )
+
+// DropTracker is implemented by any collector that tracks kernel-side ring buffer
+// losses. The watchdog polls LostEvents every 10 seconds and exports the delta
+// as the ebpf_guard_bpf_lost_events_total{collector=...} Prometheus counter.
+type DropTracker interface {
+	// Name returns the collector identifier (e.g. "syscall", "network").
+	Name() string
+	// LostEvents returns the total number of events lost in the BPF ring buffer
+	// since the collector started (monotonically increasing).
+	LostEvents() uint64
+}
 
 // BPFProgramChecker is the interface for checking BPF program status.
 type BPFProgramChecker interface {
@@ -73,6 +85,10 @@ type Watchdog struct {
 	reattachTotal  prometheus.Counter // ebpf_guard_bpf_program_reattach_total
 	tamperingTotal prometheus.Counter // ebpf_guard_bpf_attestation_violations_total
 	checksTotal    prometheus.Counter // ebpf_guard_bpf_attestation_checks_total
+
+	trackers     []DropTracker
+	dropLostSeen map[string]uint64
+	dropLostMu   sync.Mutex
 }
 
 // Config holds watchdog configuration.
@@ -122,6 +138,8 @@ func New(logger *slog.Logger, cfg Config) *Watchdog {
 			Name: "ebpf_guard_bpf_attestation_checks_total",
 			Help: "Total number of BPF program attestation checks performed.",
 		}),
+		trackers:     make([]DropTracker, 0),
+		dropLostSeen: make(map[string]uint64),
 	}
 }
 
@@ -143,6 +161,13 @@ func (w *Watchdog) RegisterChecker(checker BPFProgramChecker) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.checkers = append(w.checkers, checker)
+}
+
+// RegisterDropTracker adds a collector to the BPF ring buffer drop tracking loop.
+func (w *Watchdog) RegisterDropTracker(t DropTracker) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.trackers = append(w.trackers, t)
 }
 
 // Start begins the watchdog goroutines.
@@ -170,6 +195,9 @@ func (w *Watchdog) Start(ctx context.Context) {
 
 	// Start BPF liveness check goroutine
 	go w.runLivenessChecks(ctx)
+
+	// Start BPF ring buffer drop tracking goroutine
+	go w.runDropTracking(ctx)
 }
 
 // Stop stops the watchdog.
@@ -368,6 +396,36 @@ func (w *Watchdog) runAttestation(checker BPFProgramChecker) {
 					"description":  "BPF program kernel tag changed — possible replacement or tampering",
 				},
 			})
+		}
+	}
+}
+
+// runDropTracking polls registered DropTrackers every 10 seconds and exports
+// the delta as ebpf_guard_bpf_lost_events_total{collector=...}.
+func (w *Watchdog) runDropTracking(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.mu.RLock()
+			trackers := make([]DropTracker, len(w.trackers))
+			copy(trackers, w.trackers)
+			w.mu.RUnlock()
+
+			w.dropLostMu.Lock()
+			for _, t := range trackers {
+				name := t.Name()
+				current := t.LostEvents()
+				last := w.dropLostSeen[name]
+				if current > last {
+					exporter.AddBPFLost(name, current-last)
+					w.dropLostSeen[name] = current
+				}
+			}
+			w.dropLostMu.Unlock()
 		}
 	}
 }

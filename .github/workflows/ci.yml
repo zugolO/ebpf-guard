@@ -10,6 +10,11 @@ on:
 env:
   CLANG_VERSION: '15'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # Use the system-installed Go toolchain instead of downloading one via the
+  # module proxy. The downloaded toolchain is a stripped module archive that
+  # omits several compiled tools (covdata, addr2line, nm, …) and causes
+  # "go: no such tool covdata" failures during coverage runs.
+  GOTOOLCHAIN: local
 
 jobs:
   lint:
@@ -30,11 +35,15 @@ jobs:
         sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }}
         sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
 
+    - name: Install golangci-lint
+      # Build from source with the project's own Go 1.25 toolchain so the
+      # linter binary supports Go 1.25 language features. Pre-compiled
+      # release binaries (e.g. v1.64.8) were built with go1.24 and refuse
+      # to lint modules that declare go 1.25.
+      run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v6
-      with:
-        version: latest
-        args: --timeout=5m
+      run: golangci-lint run --timeout=5m
 
   test:
     name: Test

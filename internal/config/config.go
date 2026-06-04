@@ -424,6 +424,11 @@ type EnforcementConfig struct {
 	// ThrottleCleanupIntervalMinutes is how often (minutes) the stale-entry cleanup runs.
 	// Default: 5
 	ThrottleCleanupIntervalMinutes int `mapstructure:"throttle_cleanup_interval_minutes"`
+	// AuditLog is the path to an append-only JSONL audit log for enforcement actions.
+	// Each kill/block/throttle action is written as one JSON line.
+	// The file is rotated (renamed to <path>.1) when it exceeds 100 MB.
+	// Empty string disables audit logging.
+	AuditLog string `mapstructure:"audit_log"`
 }
 
 // WatchdogConfig holds watchdog and auto-tuning settings (Sprint 22.0).
@@ -783,6 +788,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("enforcement.throttle_cpu_percent", 10)
 	v.SetDefault("enforcement.throttle_max_age_minutes", 30)
 	v.SetDefault("enforcement.throttle_cleanup_interval_minutes", 5)
+	v.SetDefault("enforcement.audit_log", "")
 
 	// Watchdog defaults (Sprint 22.0)
 	v.SetDefault("watchdog.memory_pressure.enabled", true)

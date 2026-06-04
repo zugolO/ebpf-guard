@@ -77,6 +77,23 @@ notifications:
     template: ""              # Go template for request body (empty = default JSON)
     min_severity: warning     # warning | critical
 
+# Enforcement configuration
+# Controls active response actions: kill, block, throttle.
+# All enforcement is disabled by default — enable only on hardened, tested deployments.
+enforcement:
+  enabled: false
+  block_backend: log          # log | nftables | iptables | xdp
+  dry_run: false              # log actions without executing them
+  enable_block: false
+  enable_kill: false
+  enable_throttle: false
+  throttle_cpu_percent: 10    # cgroup v2 CPU limit when throttling (1-99)
+  # Append-only JSONL audit log for every kill/block/throttle action.
+  # Format: {"ts":"...","action":"kill","pid":1234,"rule":"rule_001","comm":"bash","enforced":true}
+  # Rotated to audit.jsonl.1 when the file exceeds 100 MB.
+  # Leave empty to disable audit logging.
+  audit_log: ""               # e.g. /var/log/ebpf-guard/audit.jsonl
+
 # Store configuration
 # Configure the backend for alert persistence.
 # Supported backends: memory, sqlite, opensearch

@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/internal/canary"
 	"github.com/zugolO/ebpf-guard/internal/collector"
@@ -232,6 +233,34 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// Open the append-only enforcement audit log when configured.
+	var auditCh chan enforcer.AuditEntry
+	if cfg.Enforcement.AuditLog != "" {
+		al, alErr := audit.New(cfg.Enforcement.AuditLog)
+		if alErr != nil {
+			slog.Warn("enforcer: audit log unavailable, audit disabled",
+				slog.String("path", cfg.Enforcement.AuditLog),
+				slog.Any("error", alErr))
+		} else {
+			defer al.Close()
+			auditCh = make(chan enforcer.AuditEntry, 256)
+			go func() {
+				for entry := range auditCh {
+					_ = al.Log(audit.Entry{
+						TS:       entry.Timestamp,
+						Action:   string(entry.Action),
+						PID:      entry.PID,
+						Rule:     entry.RuleID,
+						Comm:     entry.Comm,
+						Enforced: entry.Success,
+					})
+				}
+			}()
+			slog.Info("enforcer: audit log enabled",
+				slog.String("path", cfg.Enforcement.AuditLog))
+		}
+	}
+
 	// Initialize enforcer when enabled in config.
 	// Wired to the engine so rule actions (kill/block/throttle) are executed
 	// asynchronously via the engine's bounded worker pool.
@@ -246,6 +275,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			ThrottleCPUPercent:      cfg.Enforcement.ThrottleCPUPercent,
 			ThrottleMaxAge:          time.Duration(cfg.Enforcement.ThrottleMaxAgeMinutes) * time.Minute,
 			ThrottleCleanupInterval: time.Duration(cfg.Enforcement.ThrottleCleanupIntervalMinutes) * time.Minute,
+			AuditLogChannel:         auditCh,
 		}
 		if e, enfErr := enforcer.NewEnforcer(slog.Default(), enfCfg); enfErr != nil {
 			slog.Warn("enforcer: failed to initialize, enforcement disabled",

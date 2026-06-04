@@ -510,6 +510,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				ce.dedupMu.Unlock()
 
 				ce.incidentTracker.Cleanup(now)
+				ce.lineageTracker.Cleanup(now)
 			}
 		}
 	}()

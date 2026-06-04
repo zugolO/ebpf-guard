@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -111,7 +112,7 @@ func TestNewEngine_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	e, err := NewEngine(ctx, dir, logger)
+	e, err := NewEngine(ctx, dir, logger, 0)
 	require.NoError(t, err)
 	defer e.Close(ctx)
 
@@ -124,7 +125,7 @@ func TestNewEngine_MissingDir(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	// Non-existent directory should NOT return an error — just 0 plugins
-	e, err := NewEngine(ctx, "/nonexistent/plugin/path", logger)
+	e, err := NewEngine(ctx, "/nonexistent/plugin/path", logger, 0)
 	require.NoError(t, err)
 	defer e.Close(ctx)
 
@@ -136,13 +137,25 @@ func TestEngine_Evaluate_NoPlugins(t *testing.T) {
 	dir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	e, err := NewEngine(ctx, dir, logger)
+	e, err := NewEngine(ctx, dir, logger, 0)
 	require.NoError(t, err)
 	defer e.Close(ctx)
 
 	ev := buildEvent(types.EventTCPConnect)
 	alerts := e.Evaluate(ctx, ev)
 	assert.Empty(t, alerts)
+}
+
+func TestNewEngine_CustomTimeout(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	e, err := NewEngine(ctx, dir, logger, 250*time.Millisecond)
+	require.NoError(t, err)
+	defer e.Close(ctx)
+
+	assert.Equal(t, 250*time.Millisecond, e.timeout)
 }
 
 func TestEngine_Evaluate_WithRealWasmPlugin(t *testing.T) {
@@ -157,7 +170,7 @@ func TestEngine_Evaluate_WithRealWasmPlugin(t *testing.T) {
 	dir := filepath.Dir(wasmPath)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	e, err := NewEngine(ctx, dir, logger)
+	e, err := NewEngine(ctx, dir, logger, 0)
 	require.NoError(t, err)
 	defer e.Close(ctx)
 

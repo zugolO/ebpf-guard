@@ -234,40 +234,57 @@ func TestCleanComm(t *testing.T) {
 	}
 }
 
-func TestLineagePatternConditionParsed(t *testing.T) {
-	// Patterns with a Condition field must be parsed (not silently dropped by
-	// the YAML decoder) and must still fire — condition is not yet evaluated.
+func TestLineagePatternConditionSkipped(t *testing.T) {
+	// Patterns that set Condition must be skipped entirely — the field is not yet
+	// evaluated, and firing unconditionally would produce false positives.
+	// A pattern WITHOUT a condition in the same config must still fire normally.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	config := LineageConfig{
+	cfg := LineageConfig{
 		Enabled: true,
 		TTL:     5 * time.Minute,
 		Patterns: []LineagePattern{
 			{
 				Name:        "test_conditional",
-				Description: "fires unconditionally despite condition field",
+				Description: "must be skipped because Condition is set",
 				ParentComms: []string{"sshd"},
 				ChildComms:  []string{"bash"},
 				Severity:    "info",
 				Condition:   "verify_source_ip",
 			},
+			{
+				Name:        "test_unconditional",
+				Description: "must fire — no Condition set",
+				ParentComms: []string{"sshd"},
+				ChildComms:  []string{"sh"},
+				Severity:    "warning",
+			},
 		},
 	}
 
-	tracker := NewLineageTracker(config, logger)
+	tracker := NewLineageTracker(cfg, logger)
 
-	e := types.Event{
+	// The conditional pattern must not fire.
+	eConditional := types.Event{
 		Type:       types.EventSyscall,
 		PID:        1000,
 		PPID:       999,
 		Comm:       commBytes("bash"),
 		ParentComm: commBytes("sshd"),
 	}
+	matchConditional := tracker.Update(eConditional)
+	assert.Nil(t, matchConditional, "pattern with Condition must be skipped and must not fire")
 
-	match := tracker.Update(e)
-	// Pattern should still fire — Condition is parsed but not evaluated.
-	require.NotNil(t, match, "pattern with condition field must still fire unconditionally")
-	assert.Equal(t, "test_conditional", match.Pattern.Name)
-	assert.Equal(t, "verify_source_ip", match.Pattern.Condition)
+	// The unconditional pattern must still fire.
+	eUnconditional := types.Event{
+		Type:       types.EventSyscall,
+		PID:        1001,
+		PPID:       999,
+		Comm:       commBytes("sh"),
+		ParentComm: commBytes("sshd"),
+	}
+	matchUnconditional := tracker.Update(eUnconditional)
+	require.NotNil(t, matchUnconditional, "pattern without Condition must still fire")
+	assert.Equal(t, "test_unconditional", matchUnconditional.Pattern.Name)
 }
 
 func TestNewLineageTrackerDefaults(t *testing.T) {

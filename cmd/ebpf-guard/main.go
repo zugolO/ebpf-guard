@@ -106,6 +106,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 	cfg := cfgManager.Get()
 
+	if err := config.ValidateConfig(cfg); err != nil {
+		return fmt.Errorf("config validation:\n%w", err)
+	}
+
 	rules, err := correlator.LoadRulesFromFile(cfg.Rules.Path)
 	if err != nil {
 		slog.Warn("failed to load rules file, starting with empty rule set",

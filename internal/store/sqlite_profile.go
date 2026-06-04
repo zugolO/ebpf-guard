@@ -26,9 +26,14 @@ func NewSQLiteProfileStore(cfg SQLiteConfig) (*SQLiteProfileStore, error) {
 		cfg.Path = ":memory:"
 	}
 
-	db, err := sql.Open("sqlite3", cfg.Path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", cfg.Path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+
+	if err := applySQLitePragmas(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply sqlite pragmas: %w", err)
 	}
 
 	store := &SQLiteProfileStore{db: db}

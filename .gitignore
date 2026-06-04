@@ -1,6 +1,7 @@
 # ── Binaries ──────────────────────────────────────────────────────────────────
-ebpf-guard
-ebpf-guard.exe
+/ebpf-guard
+/ebpf-guard.exe
+ebpf-guard-linux-*
 *.exe
 *.test
 *.test.exe

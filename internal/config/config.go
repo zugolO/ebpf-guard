@@ -448,6 +448,9 @@ type PolicyConfig struct {
 type GossipConfig struct {
 	// Enabled enables the gossip sub-system.
 	Enabled bool `mapstructure:"enabled"`
+	// NodeName is this node's identifier included in IOC and amplification
+	// messages. Defaults to the system hostname when empty.
+	NodeName string `mapstructure:"node_name"`
 	// Secret is the shared authentication token sent in X-Gossip-Secret.
 	// If empty, gossip requests are accepted without authentication.
 	Secret string `mapstructure:"secret"`
@@ -789,6 +792,7 @@ func setDefaults(v *viper.Viper) {
 
 	// Gossip defaults — disabled by default; operators opt in per node.
 	v.SetDefault("gossip.enabled", false)
+	v.SetDefault("gossip.node_name", "")
 	v.SetDefault("gossip.secret", "")
 	v.SetDefault("gossip.peers", []string{})
 	v.SetDefault("gossip.ioc_ttl", 3600)

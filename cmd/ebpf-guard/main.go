@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/internal/canary"
 	"github.com/zugolO/ebpf-guard/internal/collector"
@@ -19,8 +20,10 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/drift"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/gossip"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/store"
+	"github.com/zugolO/ebpf-guard/internal/watchdog"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -177,7 +180,51 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 		engineCfg.LineageTracker = p.GetLineageTracker()
 	}
 
+	// Feature F: cross-node alert correlation via gossip amplification.
+	var gossipMgr *gossip.Manager
+	if cfg.Gossip.Enabled {
+		nodeName := cfg.Gossip.NodeName
+		if nodeName == "" {
+			if h, err := os.Hostname(); err == nil {
+				nodeName = h
+			}
+		}
+		gm, gErr := gossip.NewManager(gossip.Config{
+			Enabled:      true,
+			NodeName:     nodeName,
+			Secret:       cfg.Gossip.Secret,
+			Peers:        cfg.Gossip.Peers,
+			IOCTTL:       time.Duration(cfg.Gossip.IOCTTLSeconds) * time.Second,
+			MaxIOCs:      cfg.Gossip.MaxIOCs,
+			PushInterval: time.Duration(cfg.Gossip.PushIntervalSeconds) * time.Second,
+			TLSEnabled:   cfg.Gossip.TLSEnabled,
+			TLSCertFile:  cfg.Gossip.TLSCertFile,
+			TLSKeyFile:   cfg.Gossip.TLSKeyFile,
+			TLSCAFile:    cfg.Gossip.TLSCAFile,
+		}, slog.Default())
+		if gErr != nil {
+			slog.Warn("gossip: failed to initialise, cross-node correlation disabled",
+				slog.Any("error", gErr))
+		} else {
+			gossipMgr = gm
+			gossipMgr.RegisterMetrics(prometheus.DefaultRegisterer)
+			gm.Start(ctx)
+			engineCfg.IOCMatcher = gm
+			engineCfg.SensitivityAdjuster = gm
+			slog.Info("gossip: cross-node alert correlation active",
+				slog.String("node", nodeName),
+				slog.Int("peers", len(cfg.Gossip.Peers)))
+		}
+	}
+
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
+
+	// Feature E: BPF self-telemetry — per-program CPU overhead metrics.
+	bpfTelemetry := watchdog.NewBPFTelemetry(slog.Default())
+	if err := prometheus.Register(bpfTelemetry); err != nil {
+		slog.Warn("bpf_telemetry: failed to register Prometheus collector",
+			slog.Any("error", err))
+	}
 
 	alertStore, err := store.New(store.Config{
 		Backend: cfg.Store.Backend,
@@ -218,6 +265,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 	srv.SetRulesProvider(func() []correlator.Rule {
 		return engine.GetRules()
 	})
+
+	if gossipMgr != nil {
+		srv.RegisterGossipRoutes(gossip.Handler(gossipMgr))
+	}
 
 	if err := srv.Start(ctx); err != nil {
 		return fmt.Errorf("start HTTP server: %w", err)
@@ -304,6 +355,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 			if len(alerts) > 0 {
 				if err := alertStore.StoreBatch(ctx, alerts); err != nil {
 					slog.Warn("store alerts error", slog.Any("error", err))
+				}
+				// Feature F: broadcast critical alerts to peer nodes (cross-node
+				// alert amplification) and extract IOCs for gossip sharing.
+				if gossipMgr != nil {
+					for _, a := range alerts {
+						gossipMgr.BroadcastAlert(a)
+						gossipMgr.ExtractFromAlert(a)
+					}
 				}
 			}
 		}

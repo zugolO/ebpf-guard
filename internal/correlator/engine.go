@@ -58,6 +58,19 @@ type ActionExecutor interface {
 	IsDryRun() bool
 }
 
+// SensitivityAdjuster allows the gossip sub-system to signal cross-node alert
+// amplification: when a peer node fires a critical alert in namespace N, the
+// local engine lowers its anomaly detection threshold for that namespace so
+// related lateral-movement activity is caught even at lower anomaly scores.
+// Implemented by gossip.Manager; decoupled here to avoid an import cycle.
+type SensitivityAdjuster interface {
+	// GetThresholdMultiplier returns a multiplier in (0,1] for the given
+	// namespace. Values below 1.0 lower the effective anomaly threshold,
+	// increasing detection sensitivity. Returns 1.0 (no change) when no
+	// amplification signal is active for the namespace.
+	GetThresholdMultiplier(namespace string) float64
+}
+
 // CorrelationEngine correlates events and applies detection rules.
 type CorrelationEngine struct {
 	ruleEngine atomic.Pointer[RuleEngine]
@@ -116,6 +129,12 @@ type CorrelationEngine struct {
 
 	// IOC matcher (gossip integration — optional)
 	iocMatcher IOCMatcher
+
+	// sensitivityAdjuster provides cross-node alert amplification signals
+	// so the engine temporarily lowers its anomaly threshold for namespaces
+	// under active attack on a peer node (Feature F).
+	sensitivityAdjuster  SensitivityAdjuster
+	baseAnomalyThreshold float64
 
 	// WASM plugin engine for custom detection logic (optional).
 	// When set, all loaded .wasm plugins are evaluated on every event.
@@ -197,6 +216,11 @@ type CorrelationEngineConfig struct {
 	// When set, events are checked against known IOCs and produce alerts.
 	// Optional — nil disables this check entirely.
 	IOCMatcher IOCMatcher
+
+	// SensitivityAdjuster enables cross-node alert amplification (Feature F).
+	// When set, namespaces with active peer alerts get a temporarily lowered
+	// anomaly detection threshold.  Optional — nil disables amplification.
+	SensitivityAdjuster SensitivityAdjuster
 
 	// ActionExecutor is the enforcement backend (optional).
 	// When set, rules with action: kill|block|throttle call ExecuteAction
@@ -328,6 +352,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		lineageTracker:       lt,
 		feedbackManager:      config.FeedbackManager,
 		iocMatcher:           config.IOCMatcher,
+		sensitivityAdjuster:  config.SensitivityAdjuster,
+		baseAnomalyThreshold: config.AnomalyThreshold,
 		wasmEngine:           config.WasmEngine,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
@@ -664,7 +690,19 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				ce.scoreReporter(fmt.Sprintf("%d", e.PID), util.BytesToString(e.Comm[:]), result.Score)
 			}
 
-			if result.IsAnomaly {
+			// Cross-node amplification (Feature F): if a peer node fired a critical
+			// alert in the same namespace, we lower the effective anomaly threshold
+			// so related lateral-movement activity is caught at a lower score.
+			isAnomaly := result.IsAnomaly
+			if !isAnomaly && ce.sensitivityAdjuster != nil &&
+				e.Enrichment != nil && e.Enrichment.Namespace != "" {
+				multiplier := ce.sensitivityAdjuster.GetThresholdMultiplier(e.Enrichment.Namespace)
+				if multiplier < 1.0 && result.Score >= ce.baseAnomalyThreshold*multiplier {
+					isAnomaly = true
+				}
+			}
+
+			if isAnomaly {
 				// Build workload context for alert details.
 				details := map[string]interface{}{}
 				if result.Namespace != "" {

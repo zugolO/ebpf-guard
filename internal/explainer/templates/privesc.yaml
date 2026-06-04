@@ -1,0 +1,82 @@
+# Privilege escalation explanation templates
+
+templates:
+  - id: privesc_cap_gained
+    name: "Dangerous Capability Gained"
+    category: privesc
+    summary: "CRITICAL: {{.Comm}} (PID {{.PID}}) gained elevated Linux capabilities"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) gained one or more high-privilege
+      Linux capabilities.  The new capability set exceeds the expected baseline,
+      which is a common indicator of a privilege escalation exploit.
+
+      Dangerous capabilities and their impact:
+      - CAP_SYS_ADMIN: near-unlimited kernel access, container escape
+      - CAP_NET_ADMIN: network stack manipulation, ARP poisoning
+      - CAP_SYS_MODULE: load arbitrary kernel modules (rootkit)
+      - CAP_SYS_PTRACE: attach to any process, steal secrets
+      - CAP_DAC_OVERRIDE: bypass file permission checks
+      - CAP_SETUID: assume any UID including root
+
+      Parent process: {{.ParentComm}} (PPID {{.PPID}})
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "critical"
+    severity_why: |
+      Critical severity because unexpected capability gain directly enables
+      further exploitation.  CAP_SYS_ADMIN alone is sufficient for container
+      escape and full host compromise.
+    mitigations:
+      - "IMMEDIATE: Determine which capability was gained (check alert Details.caps_gained)"
+      - "Verify the process lineage: was this spawned by a legitimate parent?"
+      - "Check for SUID binaries: find / -perm -4000 -type f 2>/dev/null"
+      - "Audit recently modified binaries: find / -newer /etc/passwd -type f"
+      - "Drop capabilities from container spec: securityContext.capabilities.drop: [ALL]"
+      - "Use the principle of least privilege — add only explicitly needed capabilities"
+      - "Apply AppArmor or SELinux profiles to confine process capabilities"
+    references:
+      - "https://attack.mitre.org/techniques/T1068/"
+      - "https://attack.mitre.org/techniques/T1548/"
+      - "https://man7.org/linux/man-pages/man7/capabilities.7.html"
+    mitre:
+      tactic: "Privilege Escalation"
+      technique_id: "T1548"
+      technique: "Abuse Elevation Control Mechanism"
+      url: "https://attack.mitre.org/techniques/T1548/"
+
+  - id: privesc_cap_sys_admin
+    name: "CAP_SYS_ADMIN Capability Acquired"
+    category: privesc
+    summary: "CRITICAL: {{.Comm}} (PID {{.PID}}) acquired CAP_SYS_ADMIN"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) acquired CAP_SYS_ADMIN, the most
+      powerful Linux capability.  CAP_SYS_ADMIN permits:
+
+      - Mount arbitrary filesystems (host escape via bind-mount)
+      - Access /proc/sysrq-trigger, /dev/mem, /dev/kmem
+      - Modify kernel parameters via sysctl
+      - Create new user namespaces (enabling further escalation chains)
+      - Use ioctl on most devices
+
+      In a Kubernetes context this is equivalent to root on the host node.
+
+      Parent process: {{.ParentComm}} (PPID {{.PPID}})
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "critical"
+    severity_why: |
+      Critical severity because CAP_SYS_ADMIN is the "kitchen sink" capability —
+      it is the primary requirement for nearly every published container escape
+      technique.  No legitimate container workload requires it.
+    mitigations:
+      - "IMMEDIATE: Isolate pod {{.Pod}} — treat the node as potentially compromised"
+      - "Remove CAP_SYS_ADMIN from all container specs (it should NEVER be needed)"
+      - "Enable PodSecurityStandard 'restricted' across all namespaces"
+      - "Verify if exploit CVE matches kernel version in use"
+      - "Run containers as non-root user (runAsNonRoot: true)"
+    references:
+      - "https://attack.mitre.org/techniques/T1611/"
+      - "https://attack.mitre.org/techniques/T1068/"
+    mitre:
+      tactic: "Privilege Escalation"
+      technique_id: "T1611"
+      technique: "Escape to Host"
+      url: "https://attack.mitre.org/techniques/T1611/"

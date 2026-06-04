@@ -1,0 +1,489 @@
+// Package tui provides interactive terminal UI components for ebpf-guard.
+package tui
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/zugolO/ebpf-guard/pkg/types"
+)
+
+// ─── Styles ─────────────────────────────────────────────────────────────────
+
+var (
+	styleCritical = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	styleWarning  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	styleGood     = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	styleHeader   = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	styleBorder   = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62")).
+			Padding(0, 1)
+	styleTitleBar = lipgloss.NewStyle().
+			Background(lipgloss.Color("62")).
+			Foreground(lipgloss.Color("230")).
+			Bold(true).
+			Padding(0, 2)
+	styleKey   = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	styleValue = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+)
+
+// ─── Events / messages ──────────────────────────────────────────────────────
+
+type tickMsg time.Time
+type alertMsg types.Alert
+type eventMsg types.Event
+type statsMsg DashboardStats
+
+// kv is a key-value pair used for sorted stat rendering.
+type kv struct {
+	k string
+	v int64
+}
+
+// DashboardStats holds aggregated runtime statistics.
+type DashboardStats struct {
+	TotalEvents  int64
+	TotalAlerts  int64
+	Critical     int64
+	Warning      int64
+	RuleHits     map[string]int64 // ruleID → hit count
+	TopProcesses map[string]int64 // comm → event count
+	UpdatedAt    time.Time
+}
+
+// ─── Alert feed ─────────────────────────────────────────────────────────────
+
+// Feed is a thread-safe source of alerts and events consumed by the dashboard.
+type Feed struct {
+	mu     sync.Mutex
+	alerts []types.Alert
+	events []types.Event
+	stats  DashboardStats
+}
+
+// NewFeed creates an empty Feed.
+func NewFeed() *Feed {
+	return &Feed{
+		stats: DashboardStats{
+			RuleHits:     make(map[string]int64),
+			TopProcesses: make(map[string]int64),
+		},
+	}
+}
+
+// PushAlert adds an alert to the feed.
+func (f *Feed) PushAlert(a types.Alert) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alerts = append(f.alerts, a)
+	f.stats.TotalAlerts++
+	if a.Severity == types.SeverityCritical {
+		f.stats.Critical++
+	} else {
+		f.stats.Warning++
+	}
+	f.stats.RuleHits[a.RuleID]++
+	f.stats.UpdatedAt = time.Now()
+}
+
+// PushEvent adds an event to the feed.
+func (f *Feed) PushEvent(e types.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+	f.stats.TotalEvents++
+	comm := strings.TrimRight(string(e.Comm[:]), "\x00")
+	if comm != "" {
+		f.stats.TopProcesses[comm]++
+	}
+	f.stats.UpdatedAt = time.Now()
+}
+
+// Snapshot returns a stable copy of the current state (last N alerts and events).
+func (f *Feed) Snapshot(maxAlerts, maxEvents int) ([]types.Alert, []types.Event, DashboardStats) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	alerts := f.alerts
+	if len(alerts) > maxAlerts {
+		alerts = alerts[len(alerts)-maxAlerts:]
+	}
+	aSnap := make([]types.Alert, len(alerts))
+	copy(aSnap, alerts)
+
+	events := f.events
+	if len(events) > maxEvents {
+		events = events[len(events)-maxEvents:]
+	}
+	eSnap := make([]types.Event, len(events))
+	copy(eSnap, events)
+
+	stats := f.stats
+	stats.RuleHits = make(map[string]int64, len(f.stats.RuleHits))
+	for k, v := range f.stats.RuleHits {
+		stats.RuleHits[k] = v
+	}
+	stats.TopProcesses = make(map[string]int64, len(f.stats.TopProcesses))
+	for k, v := range f.stats.TopProcesses {
+		stats.TopProcesses[k] = v
+	}
+	return aSnap, eSnap, stats
+}
+
+// ─── Dashboard model ─────────────────────────────────────────────────────────
+
+// Tab represents a dashboard pane.
+type Tab int
+
+const (
+	TabAlerts Tab = iota
+	TabEvents
+	TabRules
+	TabStatus
+	tabCount
+)
+
+var tabNames = [tabCount]string{"Alerts", "Events", "Top Rules", "Status"}
+
+// Model is the bubbletea model for the dashboard.
+type Model struct {
+	feed      *Feed
+	activeTab Tab
+	width     int
+	height    int
+	alerts    []types.Alert
+	events    []types.Event
+	stats     DashboardStats
+	scrollTop int
+	paused    bool
+}
+
+// NewModel creates a dashboard model backed by feed.
+func NewModel(feed *Feed) Model {
+	return Model{feed: feed}
+}
+
+// Init implements tea.Model.
+func (m Model) Init() tea.Cmd {
+	return tickCmd()
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+// Update implements tea.Model.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+
+	case tickMsg:
+		if !m.paused {
+			a, e, s := m.feed.Snapshot(100, 200)
+			m.alerts = a
+			m.events = e
+			m.stats = s
+		}
+		return m, tickCmd()
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "tab", "right", "l":
+			m.activeTab = (m.activeTab + 1) % tabCount
+			m.scrollTop = 0
+		case "shift+tab", "left", "h":
+			m.activeTab = (m.activeTab + tabCount - 1) % tabCount
+			m.scrollTop = 0
+		case "1":
+			m.activeTab = TabAlerts
+			m.scrollTop = 0
+		case "2":
+			m.activeTab = TabEvents
+			m.scrollTop = 0
+		case "3":
+			m.activeTab = TabRules
+			m.scrollTop = 0
+		case "4":
+			m.activeTab = TabStatus
+			m.scrollTop = 0
+		case "p":
+			m.paused = !m.paused
+		case "up", "k":
+			if m.scrollTop > 0 {
+				m.scrollTop--
+			}
+		case "down", "j":
+			m.scrollTop++
+		case "g":
+			m.scrollTop = 0
+		}
+	}
+	return m, nil
+}
+
+// View implements tea.Model.
+func (m Model) View() string {
+	if m.width == 0 {
+		return "Loading dashboard…"
+	}
+
+	var sb strings.Builder
+
+	// ─ Title bar ─────────────────────────────────────────────────────────────
+	pauseTag := ""
+	if m.paused {
+		pauseTag = styleWarning.Render("  [PAUSED]")
+	}
+	title := styleTitleBar.Width(m.width).Render(
+		"  ebpf-guard  live security dashboard" + pauseTag,
+	)
+	sb.WriteString(title + "\n")
+
+	// ─ Tab bar ───────────────────────────────────────────────────────────────
+	tabs := make([]string, tabCount)
+	for i, name := range tabNames {
+		label := fmt.Sprintf(" %d:%s ", i+1, name)
+		if Tab(i) == m.activeTab {
+			tabs[i] = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("62")).
+				Padding(0, 1).
+				Render(label)
+		} else {
+			tabs[i] = styleDim.Padding(0, 1).Render(label)
+		}
+	}
+	sb.WriteString(strings.Join(tabs, "") + "\n\n")
+
+	// ─ Content area ──────────────────────────────────────────────────────────
+	contentHeight := m.height - 5
+	if contentHeight < 5 {
+		contentHeight = 5
+	}
+
+	var content string
+	switch m.activeTab {
+	case TabAlerts:
+		content = m.renderAlerts(contentHeight)
+	case TabEvents:
+		content = m.renderEvents(contentHeight)
+	case TabRules:
+		content = m.renderRules(contentHeight)
+	case TabStatus:
+		content = m.renderStatus(contentHeight)
+	}
+	sb.WriteString(content)
+
+	// ─ Status bar ────────────────────────────────────────────────────────────
+	updated := "–"
+	if !m.stats.UpdatedAt.IsZero() {
+		updated = m.stats.UpdatedAt.Format("15:04:05")
+	}
+	statusBar := styleDim.Render(fmt.Sprintf(
+		"  events:%d  alerts:%d  critical:%d  warning:%d  updated:%s  [q]uit [p]ause [tab]switch",
+		m.stats.TotalEvents, m.stats.TotalAlerts,
+		m.stats.Critical, m.stats.Warning,
+		updated,
+	))
+	sb.WriteString("\n" + statusBar)
+
+	return sb.String()
+}
+
+// ─── Tab renderers ──────────────────────────────────────────────────────────
+
+func (m *Model) renderAlerts(maxLines int) string {
+	if len(m.alerts) == 0 {
+		return styleGood.Render("  ✓  No alerts yet — monitoring active")
+	}
+
+	// Show most recent alerts last
+	lines := make([]string, 0, len(m.alerts))
+	for i := len(m.alerts) - 1; i >= 0; i-- {
+		a := m.alerts[i]
+		sevStyle := styleWarning
+		icon := "⚠"
+		if a.Severity == types.SeverityCritical {
+			sevStyle = styleCritical
+			icon = "☠"
+		}
+		ts := a.Timestamp.Format("15:04:05")
+		pod := ""
+		if a.Enrichment.PodName != "" {
+			pod = styleDim.Render("  pod=" + a.Enrichment.PodName)
+		}
+		line := fmt.Sprintf("  %s %s  %s  %s  pid=%-6d  %s%s",
+			styleDim.Render(ts),
+			sevStyle.Render(icon),
+			sevStyle.Render(fmt.Sprintf("%-8s", string(a.Severity))),
+			styleHeader.Render(fmt.Sprintf("%-22s", a.RuleID)),
+			a.PID,
+			styleValue.Render(a.Comm),
+			pod,
+		)
+		lines = append(lines, line)
+	}
+
+	return renderScrollable(lines, m.scrollTop, maxLines)
+}
+
+func (m *Model) renderEvents(maxLines int) string {
+	if len(m.events) == 0 {
+		return styleDim.Render("  Waiting for events…")
+	}
+
+	lines := make([]string, 0, len(m.events))
+	for i := len(m.events) - 1; i >= 0; i-- {
+		e := m.events[i]
+		comm := strings.TrimRight(string(e.Comm[:]), "\x00")
+		ts := time.Unix(0, int64(e.Timestamp)).Format("15:04:05")
+		line := fmt.Sprintf("  %s  %-12s  pid=%-7d  type=%-4d  uid=%d",
+			styleDim.Render(ts),
+			styleValue.Render(comm),
+			e.PID,
+			e.Type,
+			e.UID,
+		)
+		lines = append(lines, line)
+	}
+
+	return renderScrollable(lines, m.scrollTop, maxLines)
+}
+
+func (m *Model) renderRules(maxLines int) string {
+	if len(m.stats.RuleHits) == 0 {
+		return styleDim.Render("  No rules triggered yet")
+	}
+
+	pairs := make([]kv, 0, len(m.stats.RuleHits))
+	for k, v := range m.stats.RuleHits {
+		pairs = append(pairs, kv{k, v})
+	}
+	// Sort by hit count descending
+	for i := 0; i < len(pairs); i++ {
+		for j := i + 1; j < len(pairs); j++ {
+			if pairs[j].v > pairs[i].v {
+				pairs[i], pairs[j] = pairs[j], pairs[i]
+			}
+		}
+	}
+
+	lines := make([]string, 0, len(pairs)+1)
+	lines = append(lines, styleHeader.Render(fmt.Sprintf("  %-30s  %s", "Rule ID", "Triggers")))
+	lines = append(lines, styleDim.Render("  "+strings.Repeat("─", 45)))
+	for _, p := range pairs {
+		bar := renderBar(p.v, maxHits(pairs), 20)
+		lines = append(lines, fmt.Sprintf("  %-30s  %-6d  %s",
+			styleValue.Render(p.k), p.v, styleGood.Render(bar)))
+	}
+
+	return renderScrollable(lines, m.scrollTop, maxLines)
+}
+
+func (m *Model) renderStatus(maxLines int) string {
+	rows := []string{
+		styleHeader.Render("  Agent Status"),
+		"",
+		fmt.Sprintf("  %s  %s", styleKey.Render("Total events   :"), styleValue.Render(fmt.Sprintf("%d", m.stats.TotalEvents))),
+		fmt.Sprintf("  %s  %s", styleKey.Render("Total alerts   :"), styleValue.Render(fmt.Sprintf("%d", m.stats.TotalAlerts))),
+		fmt.Sprintf("  %s  %s", styleKey.Render("Critical alerts:"), styleCritical.Render(fmt.Sprintf("%d", m.stats.Critical))),
+		fmt.Sprintf("  %s  %s", styleKey.Render("Warning alerts :"), styleWarning.Render(fmt.Sprintf("%d", m.stats.Warning))),
+		"",
+		styleHeader.Render("  Top Processes (by event count)"),
+		styleDim.Render("  " + strings.Repeat("─", 35)),
+	}
+
+	pairs := make([]kv, 0, len(m.stats.TopProcesses))
+	for k, v := range m.stats.TopProcesses {
+		pairs = append(pairs, kv{k, v})
+	}
+	for i := 0; i < len(pairs); i++ {
+		for j := i + 1; j < len(pairs); j++ {
+			if pairs[j].v > pairs[i].v {
+				pairs[i], pairs[j] = pairs[j], pairs[i]
+			}
+		}
+	}
+	limit := 10
+	if len(pairs) < limit {
+		limit = len(pairs)
+	}
+	for _, p := range pairs[:limit] {
+		rows = append(rows, fmt.Sprintf("  %-20s  %d", styleValue.Render(p.k), p.v))
+	}
+
+	rows = append(rows, "", styleDim.Render("  Keybindings: [tab] switch panel  [j/k] scroll  [p] pause  [q] quit"))
+
+	return renderScrollable(rows, m.scrollTop, maxLines)
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+func renderScrollable(lines []string, scrollTop, maxVisible int) string {
+	if scrollTop >= len(lines) {
+		scrollTop = max(0, len(lines)-1)
+	}
+	end := scrollTop + maxVisible
+	if end > len(lines) {
+		end = len(lines)
+	}
+	visible := lines[scrollTop:end]
+	return strings.Join(visible, "\n")
+}
+
+func renderBar(val, maxVal int64, width int) string {
+	if maxVal == 0 {
+		return ""
+	}
+	filled := int(val * int64(width) / maxVal)
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func maxHits(pairs []kv) int64 {
+	var m int64
+	for _, p := range pairs {
+		if p.v > m {
+			m = p.v
+		}
+	}
+	return m
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// ─── Run ─────────────────────────────────────────────────────────────────────
+
+// Run starts the bubbletea dashboard and blocks until the user quits.
+func Run(ctx context.Context, feed *Feed) error {
+	p := tea.NewProgram(
+		NewModel(feed),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+		tea.WithContext(ctx),
+	)
+	_, err := p.Run()
+	return err
+}

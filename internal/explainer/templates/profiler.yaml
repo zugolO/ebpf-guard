@@ -1,0 +1,70 @@
+# Profiler / anomaly detection explanation templates
+
+templates:
+  - id: profiler_anomaly
+    name: "Behavioral Anomaly Detected"
+    category: profiler
+    summary: "Anomaly: {{.Comm}} (PID {{.PID}}) deviated from its baseline behavior"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) triggered an EWMA anomaly alert.
+      ebpf-guard builds a behavioral baseline for each process type over the
+      learning period and raises this alert when runtime activity diverges
+      significantly (anomaly score above threshold).
+
+      Common causes:
+      - Newly injected malicious code or library running inside a legitimate process
+      - A compromised process spawning unexpected syscalls or network connections
+      - Lateral movement using a trusted binary as a proxy (LOL-binary / living-off-the-land)
+
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "warning"
+    severity_why: |
+      Warning severity because anomaly scoring is probabilistic — it flags
+      deviation from baseline but requires human review to confirm malice.
+      Raise to critical if the anomaly coincides with other indicators.
+    mitigations:
+      - "Inspect /proc/{{.PID}}/maps for unexpected shared libraries (LD_PRELOAD injection)"
+      - "Compare the process tree: is {{.Comm}} a parent of unexpected children?"
+      - "Check network connections opened by PID {{.PID}} (ss -tnp | grep {{.PID}})"
+      - "If in Kubernetes, cordon and drain the node while investigating"
+      - "Temporarily add this process to the allowlist if the behavior is expected after a deploy"
+    references:
+      - "https://attack.mitre.org/techniques/T1055/"
+      - "https://attack.mitre.org/techniques/T1574/"
+    mitre:
+      tactic: "Defense Evasion"
+      technique_id: "T1055"
+      technique: "Process Injection"
+      url: "https://attack.mitre.org/techniques/T1055/"
+
+  - id: profiler_sequence_anomaly
+    name: "Suspicious Syscall Sequence"
+    category: profiler
+    summary: "Unusual syscall sequence detected in {{.Comm}} (PID {{.PID}})"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) executed a syscall sequence that
+      diverges from its learned profile (cosine distance above threshold).
+
+      Attackers frequently exploit trusted processes (web servers, databases) by
+      injecting shellcode or abusing built-in functionality to issue syscall
+      sequences that the process never normally performs — for example,
+      execve → socket → connect in a web worker.
+
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "warning"
+    severity_why: |
+      Warning severity because a single unusual sequence may be a false positive
+      after code updates.  Combined with other alerts it is a strong indicator of
+      in-process exploitation.
+    mitigations:
+      - "Capture a syscall trace: strace -p {{.PID}} -f -e trace=all -o /tmp/strace.txt"
+      - "Check if a recent deploy changed the binary or its dependencies"
+      - "Review eBPF sequence window size in profiler config to reduce noise"
+      - "Enable seccomp filter for this workload to whitelist known-good syscalls"
+    references:
+      - "https://attack.mitre.org/techniques/T1059/"
+    mitre:
+      tactic: "Execution"
+      technique_id: "T1059"
+      technique: "Command and Scripting Interpreter"
+      url: "https://attack.mitre.org/techniques/T1059/"

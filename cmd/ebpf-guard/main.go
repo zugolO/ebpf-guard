@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -22,7 +23,9 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/internal/gossip"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
+	"github.com/zugolO/ebpf-guard/internal/tui"
 	"github.com/zugolO/ebpf-guard/internal/watchdog"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
@@ -42,9 +45,11 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	var (
-		cfgPath  string
-		logLevel string
-		dryRun   bool
+		cfgPath          string
+		logLevel         string
+		dryRun           bool
+		simulateMode     bool
+		simulateDuration string
 	)
 
 	root := &cobra.Command{
@@ -55,13 +60,17 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		Version:      fmt.Sprintf("%s (commit %s)", Version, Commit),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgent(cfgPath, logLevel, dryRun)
+			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration)
 		},
 	}
 
 	root.PersistentFlags().StringVar(&cfgPath, "config", "config/config.yaml", "path to config file")
 	root.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
 	root.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "run without real eBPF probes (uses synthetic events)")
+	root.PersistentFlags().BoolVar(&simulateMode, "simulate", false,
+		"simulate enforcement: count what would be killed/blocked/throttled without acting")
+	root.PersistentFlags().StringVar(&simulateDuration, "simulate-duration", "",
+		"stop simulation after this duration (e.g. 24h, 30m); empty = run until Ctrl+C")
 
 	rulesCmd := newRulesCmd(&cfgPath)
 	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
@@ -72,12 +81,13 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		rulesCmd,
 		newVersionCmd(),
 		newLearnCmd(),
+		newDashboardCmd(),
 	)
 
 	return root
 }
 
-func runAgent(cfgPath, logLevel string, dryRun bool) error {
+func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration string) error {
 	setupLogger(logLevel)
 
 	slog.Info("ebpf-guard starting",
@@ -313,6 +323,27 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 	srv.SetReady(true)
 	slog.Info("ebpf-guard ready", slog.String("addr", cfg.Server.BindAddress))
 
+	// ── Simulate mode setup ──────────────────────────────────────────────────
+	var simCollector *simulate.Collector
+	if simulateMode {
+		simCollector = simulate.NewCollector()
+		fmt.Fprintln(os.Stderr, "ebpf-guard: SIMULATE mode — enforcement actions will be counted, not executed")
+		if simulateDuration != "" {
+			d, err := time.ParseDuration(simulateDuration)
+			if err != nil {
+				return fmt.Errorf("invalid --simulate-duration: %w", err)
+			}
+			go func() {
+				select {
+				case <-time.After(d):
+					slog.Info("simulate: duration elapsed, stopping")
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+		}
+	}
+
 	// Container drift detector — enabled when containers use K8s enrichment.
 	driftDetector := drift.NewDetector(drift.DetectorConfig{
 		BaselineWindow: 5 * time.Minute,
@@ -324,6 +355,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 		select {
 		case <-ctx.Done():
 			slog.Info("shutting down")
+			if simCollector != nil {
+				simCollector.PrintReport(os.Stdout)
+			}
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer shutdownCancel()
 			for _, c := range collectors {
@@ -353,6 +387,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 			}
 
 			if len(alerts) > 0 {
+				if simCollector != nil {
+					for _, a := range alerts {
+						simCollector.Record(a)
+					}
+				}
 				if err := alertStore.StoreBatch(ctx, alerts); err != nil {
 					slog.Warn("store alerts error", slog.Any("error", err))
 				}
@@ -487,7 +526,7 @@ func newStatusCmd() *cobra.Command {
 }
 
 func newRulesCmd(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "rules",
 		Short: "List loaded detection rules",
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -510,6 +549,54 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.AddCommand(newWizardCmd())
+	return cmd
+}
+
+// newWizardCmd returns the "rules wizard" subcommand.
+func newWizardCmd() *cobra.Command {
+	var outputDir string
+
+	cmd := &cobra.Command{
+		Use:   "wizard",
+		Short: "Interactively build a detection rule with a step-by-step TUI",
+		Long: `wizard walks you through a series of questions and generates a
+ready-to-use YAML rule that you can drop into your rules directory.
+
+Examples:
+  ebpf-guard rules wizard
+  ebpf-guard rules wizard --output rules/custom/`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			yaml, err := tui.RunWizard()
+			if err != nil {
+				return fmt.Errorf("wizard: %w", err)
+			}
+			if yaml == "" {
+				fmt.Println("Wizard cancelled — no rule generated.")
+				return nil
+			}
+
+			if outputDir != "" {
+				if err := os.MkdirAll(outputDir, 0o750); err != nil {
+					return fmt.Errorf("create output dir: %w", err)
+				}
+				fname := filepath.Join(outputDir, "wizard-rule.yaml")
+				if err := os.WriteFile(fname, []byte(yaml), 0o640); err != nil {
+					return fmt.Errorf("write rule file: %w", err)
+				}
+				fmt.Printf("Rule saved to %s\n\nAdd it to your rules.path and reload:\n  ebpf-guard rules\n", fname)
+			} else {
+				fmt.Println("\n── Generated Rule YAML ────────────────────────────────")
+				fmt.Println(yaml)
+				fmt.Println("────────────────────────────────────────────────────────")
+				fmt.Println("\nCopy the YAML above into your rules file, then reload the agent.")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "directory to write the generated rule YAML file")
+	return cmd
 }
 
 // newRulesTestCmd returns the "rules test" subcommand that replays historical
@@ -713,4 +800,100 @@ func runLearn(durationStr, outputDir, namespace, containerID, commFilter string,
 	fmt.Printf("  2. Copy rules to your rules directory and reload with hot-reload or restart.\n")
 	fmt.Printf("  3. Apply the seccomp profile to your container runtime.\n")
 	return nil
+}
+
+// newDashboardCmd returns the "dashboard" subcommand.
+// It starts the full agent pipeline (with optional dry-run) and renders a live
+// bubbletea TUI showing events, alerts, and rule statistics in real time.
+func newDashboardCmd() *cobra.Command {
+	var (
+		cfgPath  string
+		logLevel string
+		dryRun   bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "dashboard",
+		Short: "Interactive live TUI dashboard — events, alerts, rule stats",
+		Long: `dashboard starts the agent and renders a live terminal UI showing:
+
+  • Tab 1 – Alerts:     incoming alerts with severity and rule
+  • Tab 2 – Events:     raw kernel events (pid, comm, type)
+  • Tab 3 – Top Rules:  rules ranked by trigger count with sparkbar
+  • Tab 4 – Status:     aggregate counters and top processes
+
+Use --dry-run to run without kernel eBPF probes (synthetic events).
+
+Keybindings:
+  Tab / 1-4   switch panel
+  j/k or ↑/↓  scroll
+  p            pause live updates
+  q            quit`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			setupLogger(logLevel)
+			return runDashboard(cfgPath, dryRun)
+		},
+	}
+
+	cmd.Flags().StringVar(&cfgPath, "config", "config/config.yaml", "path to config file")
+	cmd.Flags().StringVar(&logLevel, "log-level", "warn", "log level (use warn/error to keep TUI clean)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "use synthetic events instead of real eBPF probes")
+	return cmd
+}
+
+func runDashboard(cfgPath string, dryRun bool) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	cfgManager, err := config.NewManagerSkipPermCheck(cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	cfg := cfgManager.Get()
+
+	rules, _ := correlator.LoadRulesFromFile(cfg.Rules.Path)
+
+	engineCfg := correlator.DefaultCorrelationEngineConfig()
+	engineCfg.Rules = rules
+	engineCfg.BufferSize = 4096
+	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
+
+	feed := tui.NewFeed()
+	eventCh := make(chan types.Event, 4096)
+
+	var collectors []collector.Collector
+	if dryRun {
+		collectors = []collector.Collector{
+			collector.NewSyntheticCollector(slog.Default(), 80*time.Millisecond),
+		}
+	}
+
+	for _, c := range collectors {
+		go func(c collector.Collector) {
+			if err := c.Start(ctx, eventCh); err != nil && ctx.Err() == nil {
+				slog.Error("dashboard collector error", slog.String("name", c.Name()), slog.Any("error", err))
+			}
+		}(c)
+	}
+
+	// Forward events and alerts to the TUI feed.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-eventCh:
+				if !ok {
+					return
+				}
+				feed.PushEvent(event)
+				alerts := engine.Ingest(ctx, event)
+				for _, a := range alerts {
+					feed.PushAlert(a)
+				}
+			}
+		}
+	}()
+
+	return tui.Run(ctx, feed)
 }

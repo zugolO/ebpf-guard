@@ -1,0 +1,82 @@
+# Kernel module load explanation templates
+
+templates:
+  - id: kmod_load
+    name: "Kernel Module Loaded"
+    category: kmod
+    summary: "CRITICAL: {{.Comm}} (PID {{.PID}}) loaded a kernel module"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) loaded a kernel module into the
+      running kernel.  Kernel modules execute with full ring-0 privileges and
+      can modify any kernel data structure, bypass all LSM/SELinux policies, and
+      hide their presence from userspace tools.
+
+      Malicious uses include:
+      - Rootkit installation (hiding files, processes, network sockets)
+      - Kernel keylogger deployment
+      - Hook installation to intercept credentials from SSH, sudo, PAM
+      - eBPF-based backdoors loaded as "legitimate" security tools
+      - Container escape by patching cgroup or namespace checks in the kernel
+
+      Parent process: {{.ParentComm}} (PPID {{.PPID}})
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "critical"
+    severity_why: |
+      Critical severity because kernel module code runs at ring-0 — it can
+      disable every security control on the system.  Even a signed module from
+      an unexpected process is suspicious.
+    mitigations:
+      - "IMMEDIATE: Identify the module: lsmod | head -20 and compare to baseline"
+      - "Examine the module: modinfo <module_name> to check origin and signature"
+      - "Check /proc/modules for unexpected entries"
+      - "Look for hidden modules: compare 'lsmod' to 'cat /proc/modules'"
+      - "Enable kernel module signing enforcement: module.sig_enforce=1"
+      - "Restrict module loading to root + CAP_SYS_MODULE and audit all loads"
+      - "Use Kubernetes PodSecurityStandard 'restricted' to prevent insecure pods"
+      - "If rootkit suspected: boot from clean media and forensically image disk"
+    references:
+      - "https://attack.mitre.org/techniques/T1547/006/"
+      - "https://attack.mitre.org/techniques/T1014/"
+    mitre:
+      tactic: "Persistence"
+      technique_id: "T1547.006"
+      technique: "Boot or Logon Autostart Execution: Kernel Modules and Extensions"
+      url: "https://attack.mitre.org/techniques/T1547/006/"
+
+  - id: kmod_tmpfs_load
+    name: "Kernel Module Loaded from Temporary Filesystem"
+    category: kmod
+    summary: "CRITICAL: Module loaded from /tmp or /dev/shm by {{.Comm}} (PID {{.PID}})"
+    detail: |
+      A kernel module was loaded from a memory-backed filesystem (/tmp, /dev/shm,
+      /run, or similar) by {{.Comm}} (PID {{.PID}}).
+
+      Legitimate modules are installed by package managers to /lib/modules/ and
+      loaded by system services.  Loading from a tmpfs path strongly indicates
+      an in-memory dropper: the attacker writes the module bytes directly into
+      shared memory and calls init_module / finit_module to load it without
+      touching the disk, evading file-based antivirus and integrity scanners.
+
+      This is a strong indicator of active exploitation.
+
+      Parent process: {{.ParentComm}} (PPID {{.PPID}})
+    severity: "critical"
+    severity_why: |
+      Critical severity because tmpfs-based module loading is a hallmark of
+      fileless rootkit deployment.  The module likely contains a backdoor that
+      will persist until reboot (or longer if it modifies the boot process).
+    mitigations:
+      - "IMMEDIATE: Do NOT reboot — the module exists only in memory"
+      - "Dump the module bytes from the tmpfs path before the file is removed"
+      - "Extract and analyse the module: strings, objdump -d, readelf"
+      - "Capture running system state: ps aux, netstat -tulnp, lsmod, /proc/modules"
+      - "Mount tmpfs with noexec to prevent future execution: mount -o remount,noexec /tmp"
+      - "Initiate incident response — this host may be fully compromised"
+    references:
+      - "https://attack.mitre.org/techniques/T1014/"
+      - "https://attack.mitre.org/techniques/T1547/006/"
+    mitre:
+      tactic: "Defense Evasion"
+      technique_id: "T1014"
+      technique: "Rootkit"
+      url: "https://attack.mitre.org/techniques/T1014/"

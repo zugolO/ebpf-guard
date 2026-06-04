@@ -288,19 +288,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 	defer alertStore.Close()
 
-	authToken := cfg.Auth.BearerToken
-	if cfg.Auth.Enabled && authToken == "" {
-		authToken = generateToken()
-		slog.Info("auth: generated bearer token (not shown for security)")
+	viewerToken := cfg.Auth.ViewerToken
+	adminToken := cfg.Auth.AdminToken
+	// Backward compat: bearer_token promoted to admin if new fields are not set.
+	if adminToken == "" && cfg.Auth.BearerToken != "" {
+		adminToken = cfg.Auth.BearerToken
+	}
+	if cfg.Auth.Enabled {
+		if adminToken == "" {
+			adminToken = generateToken()
+			slog.Info("auth: generated admin token (not shown for security)")
+		}
+		if viewerToken == "" {
+			viewerToken = generateToken()
+			slog.Info("auth: generated viewer token (not shown for security)")
+		}
 	}
 
-	srv := exporter.NewServerWithAuth(
+	srv := exporter.NewServerWithRBAC(
 		cfg.Server.BindAddress,
 		cfg.Server.MetricsPath,
 		cfg.Server.HealthPath,
 		cfg.Server.EnablePprof,
 		cfg.Server.EnableDebug,
-		authToken,
+		viewerToken,
+		adminToken,
 		cfg.Auth.Enabled,
 	)
 	srv.SetAlertStore(alertStore)

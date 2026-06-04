@@ -43,12 +43,18 @@ kubernetes:
   resync_period: 300
 
 # Authentication configuration
-# Bearer token auth is enabled by default for /metrics and /debug/pprof endpoints.
-# If bearer_token is empty, a random 32-byte token is generated at startup and logged.
-# To disable auth (not recommended for production), set enabled: false.
+# Two-role RBAC is enforced by default.
+#   viewer_token: read-only access — GET /alerts, GET /rules, GET /health, GET /metrics
+#   admin_token:  full access — all of the above + POST /feedback, PUT /rules, DELETE endpoints
+# Tokens are auto-generated at startup when left empty (printed once to stderr).
+# Health endpoints (/health, /health/ready, /health/live) are always public.
+# To disable auth entirely (not recommended for production) set enabled: false.
+# bearer_token is deprecated — use admin_token instead.
 auth:
   enabled: true
-  bearer_token: ""
+  viewer_token: ""   # auto-generated if empty
+  admin_token: ""    # auto-generated if empty
+  bearer_token: ""   # deprecated: promoted to admin_token if admin_token is unset
 
 # Notification configuration
 # Send security alerts to Slack, Teams, or generic webhooks.

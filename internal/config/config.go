@@ -94,11 +94,17 @@ type ServerConfig struct {
 // AuthConfig holds authentication configuration.
 type AuthConfig struct {
 	// Enabled enables Bearer token authentication for /metrics and /debug/pprof.
-	// If true and BearerToken is empty, a random token is generated at startup.
+	// If true and tokens are empty, random tokens are generated at startup.
 	Enabled bool `mapstructure:"enabled"`
-	// BearerToken is the static token to use for authentication.
-	// If empty and Enabled is true, a random 32-byte token is generated.
+	// BearerToken is deprecated — use AdminToken instead. Kept for backward compatibility.
+	// If set and AdminToken is empty, BearerToken is promoted to AdminToken.
 	BearerToken string `mapstructure:"bearer_token"`
+	// ViewerToken grants read-only access: GET /alerts, GET /rules, GET /health, GET /metrics.
+	// Auto-generated at startup if empty and Enabled is true.
+	ViewerToken string `mapstructure:"viewer_token"`
+	// AdminToken grants full access including write operations (POST /feedback, PUT /rules, DELETE).
+	// Auto-generated at startup if empty and Enabled is true.
+	AdminToken string `mapstructure:"admin_token"`
 }
 
 // NotificationsConfig holds notification backend settings.
@@ -726,6 +732,8 @@ func setDefaults(v *viper.Viper) {
 	// Auth defaults - auth is enabled by default for security
 	v.SetDefault("auth.enabled", true)
 	v.SetDefault("auth.bearer_token", "")
+	v.SetDefault("auth.viewer_token", "")
+	v.SetDefault("auth.admin_token", "")
 
 	// Notifications defaults - all disabled by default
 	v.SetDefault("notifications.slack.enabled", false)

@@ -143,19 +143,20 @@ type CorrelationEngine struct {
 	// When set, all loaded .wasm plugins are evaluated on every event.
 	wasmEngine WasmEvaluator
 
-	// Alert deduplication — sliding 5 s window keyed on (ruleID, pid, comm).
-	enableDedup         bool
-	dedupWindow         time.Duration
-	dedups              map[dedupKey]time.Time
-	dedupMu             sync.Mutex
-	alertsDedupDropped  prometheus.Counter
+	// Alert deduplication — sliding window keyed on (ruleID, pid, comm).
+	// Sharded across mapShardCount buckets to reduce lock contention on the hot path.
+	enableDedup        bool
+	dedupWindow        time.Duration
+	dedup              *shardedDedup
+	alertsDedupDropped prometheus.Counter
 
 	// Rule-based enforcement (optional)
-	actionExecutor      ActionExecutor
-	enforceCooldown     time.Duration
-	cooldowns           map[cooldownKey]time.Time // protected by cooldownsMu
-	cooldownsMu         sync.Mutex               // serialises the check-and-set to prevent duplicate enforcement
-	enforcedCounter     prometheus.Counter
+	actionExecutor  ActionExecutor
+	enforceCooldown time.Duration
+	// cooldowns is sharded across mapShardCount buckets; pid selects the shard.
+	// This reduces lock contention under enforcement bursts vs. a single mutex.
+	cooldowns       *shardedCooldowns
+	enforcedCounter prometheus.Counter
 	enforceQueue        chan enforceTask
 	enforceQueueDropped prometheus.Counter
 	// enforceWg tracks in-flight enforcement tasks for clean DrainEnforceQueue.
@@ -243,6 +244,12 @@ type CorrelationEngineConfig struct {
 	// evaluation queue. Zero → max(2, runtime.NumCPU()/2).
 	RegoWorkerCount int
 
+	// RegoQueueSize is the capacity of the async Rego evaluation channel.
+	// When the queue is full Ingest falls back to synchronous OPA evaluation,
+	// adding latency to the hot path. Increase if regoQueueDropped rises.
+	// Zero → 4096.
+	RegoQueueSize int
+
 	// Global alert rate limit — maximum alerts per second across all rules.
 	// Zero means unlimited. Default: 10000.
 	MaxAlertsPerSecond int
@@ -327,6 +334,7 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		EnableDedup:        true,
 		DedupWindow:        5 * time.Second,
 		IncidentWindow:     60 * time.Second,
+		RegoQueueSize:      4096,
 	}
 }
 
@@ -429,7 +437,11 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 			Name: "ebpf_guard_rego_eval_errors_total",
 			Help: "Rego policy evaluation errors; affected alerts pass through without MITRE enrichment.",
 		})
-		regoQueue = make(chan regoTask, 1024)
+		regoQueueSize := config.RegoQueueSize
+		if regoQueueSize <= 0 {
+			regoQueueSize = 4096
+		}
+		regoQueue = make(chan regoTask, regoQueueSize)
 	}
 
 	ce := &CorrelationEngine{
@@ -452,11 +464,11 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		wasmEngine:           config.WasmEngine,
 		enableDedup:          config.EnableDedup,
 		dedupWindow:          dedupWindow,
-		dedups:               make(map[dedupKey]time.Time),
+		dedup:                newShardedDedup(dedupWindow),
 		alertsDedupDropped:   alertsDedupDropped,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
-		cooldowns:            make(map[cooldownKey]time.Time),
+		cooldowns:            newShardedCooldowns(),
 		enforcedCounter:      enforcedCounter,
 		enforceQueue:         enforceQueue,
 		enforceQueueDropped:  enforceQueueDropped,
@@ -510,24 +522,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				return
 			case <-ticker.C:
 				now := time.Now()
-				cooldownCutoff := now.Add(-enforceCooldown)
-				ce.cooldownsMu.Lock()
-				for k, t := range ce.cooldowns {
-					if t.Before(cooldownCutoff) {
-						delete(ce.cooldowns, k)
-					}
-				}
-				ce.cooldownsMu.Unlock()
-
-				dedupCutoff := now.Add(-ce.dedupWindow)
-				ce.dedupMu.Lock()
-				for k, t := range ce.dedups {
-					if t.Before(dedupCutoff) {
-						delete(ce.dedups, k)
-					}
-				}
-				ce.dedupMu.Unlock()
-
+				ce.cooldowns.cleanup(now.Add(-enforceCooldown))
+				ce.dedup.cleanup(now.Add(-ce.dedupWindow))
 				ce.incidentTracker.Cleanup(now)
 				ce.lineageTracker.Cleanup(now)
 			}
@@ -644,25 +640,15 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 }
 
 // checkDup reports whether (ruleID, pid, comm) was seen within the dedup window.
-// It does NOT record the key; call markDedup after the alert passes all filters so
-// that rate-limit counters are not inflated by duplicates that will be dropped later.
+// Delegates to the sharded dedup map; does not record the key.
 func (ce *CorrelationEngine) checkDup(ruleID string, pid uint32, comm string) bool {
-	now := time.Now()
-	cutoff := now.Add(-ce.dedupWindow)
-	key := dedupKey{ruleID: ruleID, pid: pid, comm: comm}
-	ce.dedupMu.Lock()
-	prev, ok := ce.dedups[key]
-	ce.dedupMu.Unlock()
-	return ok && prev.After(cutoff)
+	return ce.dedup.check(ruleID, pid, comm)
 }
 
-// markDedup records that (ruleID, pid, comm) was emitted at the current time.
+// markDedup records that (ruleID, pid, comm) was emitted now.
 // Must be called only after the alert has passed all rate-limit checks.
 func (ce *CorrelationEngine) markDedup(ruleID string, pid uint32, comm string) {
-	key := dedupKey{ruleID: ruleID, pid: pid, comm: comm}
-	ce.dedupMu.Lock()
-	ce.dedups[key] = time.Now()
-	ce.dedupMu.Unlock()
+	ce.dedup.mark(ruleID, pid, comm)
 }
 
 // DrainEnforceQueue blocks until all submitted enforcement tasks have been
@@ -1217,22 +1203,10 @@ func isEnforcedAction(action string) bool {
 
 // tryAcquireEnforceCooldown returns true if enforcement should proceed for
 // the (ruleID, pid) pair. Successive calls within enforceCooldown return false
-// to prevent enforcement spam when the same process keeps triggering a rule.
-//
-// cooldownsMu makes the lookup+compare+store atomic so two concurrent goroutines
-// for the same (ruleID, pid) cannot both slip through and fire the action twice.
+// to prevent enforcement spam. Delegates to the sharded cooldowns map so
+// concurrent goroutines contend on different shards rather than a single mutex.
 func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32) bool {
-	key := cooldownKey{ruleID: ruleID, pid: pid}
-	now := time.Now()
-
-	ce.cooldownsMu.Lock()
-	defer ce.cooldownsMu.Unlock()
-
-	if prev, ok := ce.cooldowns[key]; ok && now.Sub(prev) < ce.enforceCooldown {
-		return false
-	}
-	ce.cooldowns[key] = now
-	return true
+	return ce.cooldowns.tryAcquire(ruleID, pid, ce.enforceCooldown)
 }
 
 // checkIOCMatch checks e against the gossip IOC store and returns an alert when matched.

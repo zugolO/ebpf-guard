@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +25,10 @@ import (
 // engine.Ingest path and reach Alertmanager.
 func TestAnomalyAlertReachesAlertmanager(t *testing.T) {
 	// Create mock Alertmanager server
-	var receivedAlerts []types.AlertPayload
+	var (
+		receivedMu    sync.Mutex
+		receivedAlerts []types.AlertPayload
+	)
 	alertServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -41,7 +45,9 @@ func TestAnomalyAlertReachesAlertmanager(t *testing.T) {
 			return
 		}
 
+		receivedMu.Lock()
 		receivedAlerts = append(receivedAlerts, alerts...)
+		receivedMu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer alertServer.Close()
@@ -132,13 +138,18 @@ func TestAnomalyAlertReachesAlertmanager(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify that at least one anomaly alert was received
-	require.NotEmpty(t, receivedAlerts, "expected at least one anomaly alert to reach Alertmanager")
+	receivedMu.Lock()
+	snapshot := make([]types.AlertPayload, len(receivedAlerts))
+	copy(snapshot, receivedAlerts)
+	receivedMu.Unlock()
+
+	require.NotEmpty(t, snapshot, "expected at least one anomaly alert to reach Alertmanager")
 
 	// Find anomaly alert
 	var anomalyAlert *types.AlertPayload
-	for i := range receivedAlerts {
-		if receivedAlerts[i].Labels.RuleID == "anomaly_detection" {
-			anomalyAlert = &receivedAlerts[i]
+	for i := range snapshot {
+		if snapshot[i].Labels.RuleID == "anomaly_detection" {
+			anomalyAlert = &snapshot[i]
 			break
 		}
 	}

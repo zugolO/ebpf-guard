@@ -114,24 +114,27 @@ func (p *Profiler) Ingest(e types.Event) []*Anomaly {
 
 	// Run EWMA-based anomaly detection
 	result := p.detector.ProcessEvent(e, false)
-	if result != nil && result.IsAnomaly {
-		contributions := make(map[string]interface{})
-		for _, c := range result.Contributions {
-			contributions[c.Field] = map[string]interface{}{
-				"category": c.Category,
-				"value":    c.Value,
-				"score":    c.Contribution,
+	if result != nil {
+		if result.IsAnomaly {
+			contributions := make(map[string]interface{})
+			for _, c := range result.Contributions {
+				contributions[c.Field] = map[string]interface{}{
+					"category": c.Category,
+					"value":    c.Value,
+					"score":    c.Contribution,
+				}
 			}
+			anomalies = append(anomalies, &Anomaly{
+				PID:           result.PID,
+				Comm:          result.Comm,
+				Namespace:     result.Namespace,
+				AppLabel:      result.AppLabel,
+				Score:         result.Score,
+				Contributions: contributions,
+				Type:          AnomalyTypeBehavior,
+			})
 		}
-		anomalies = append(anomalies, &Anomaly{
-			PID:           result.PID,
-			Comm:          result.Comm,
-			Namespace:     result.Namespace,
-			AppLabel:      result.AppLabel,
-			Score:         result.Score,
-			Contributions: contributions,
-			Type:          AnomalyTypeBehavior,
-		})
+		result.Release()
 	}
 
 	// Run sequence anomaly detection

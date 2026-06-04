@@ -986,6 +986,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 					}
 				}
 			}
+			result.Release()
 		}
 	}
 

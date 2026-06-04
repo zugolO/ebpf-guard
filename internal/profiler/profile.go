@@ -8,7 +8,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -47,8 +46,9 @@ type ProcessProfile struct {
 type NetworkProfile struct {
 	// Destination ports seen (EWMA of frequency)
 	DestPorts map[uint16]*EWMA
-	// Destination IPs seen (EWMA of frequency)
-	DestAddrs map[string]*EWMA
+	// Destination IPs seen (EWMA of frequency).
+	// Keyed by the raw 16-byte address so map lookups require no string allocation.
+	DestAddrs map[[16]byte]*EWMA
 	// Total connection count
 	TotalConnections uint64
 }
@@ -82,7 +82,7 @@ func NewProcessProfile(pid uint32, comm string) *ProcessProfile {
 		LastSeenAt:  now,
 		NetworkProfile: NetworkProfile{
 			DestPorts: make(map[uint16]*EWMA),
-			DestAddrs: make(map[string]*EWMA),
+			DestAddrs: make(map[[16]byte]*EWMA),
 		},
 		FileProfile: FileProfile{
 			Directories: make(map[string]*EWMA),
@@ -104,7 +104,7 @@ func NewProcessProfileForWorkload(key WorkloadKey) *ProcessProfile {
 		LastSeenAt:  now,
 		NetworkProfile: NetworkProfile{
 			DestPorts: make(map[uint16]*EWMA),
-			DestAddrs: make(map[string]*EWMA),
+			DestAddrs: make(map[[16]byte]*EWMA),
 		},
 		FileProfile: FileProfile{
 			Directories: make(map[string]*EWMA),
@@ -135,18 +135,20 @@ func (p *ProcessProfile) recordNetworkEventLocked(e *types.NetworkEvent, weight 
 	p.LastSeenAt = time.Now()
 	p.NetworkProfile.TotalConnections++
 
-	// Update destination port EWMA
-	if p.NetworkProfile.DestPorts[e.Dport] == nil {
-		p.NetworkProfile.DestPorts[e.Dport] = NewEWMA(weight)
+	// Cache map pointer to avoid a second lookup for Update.
+	portEWMA := p.NetworkProfile.DestPorts[e.Dport]
+	if portEWMA == nil {
+		portEWMA = NewEWMA(weight)
+		p.NetworkProfile.DestPorts[e.Dport] = portEWMA
 	}
-	p.NetworkProfile.DestPorts[e.Dport].Update(1.0)
+	portEWMA.Update(1.0)
 
-	// Update destination address EWMA
-	daddr := util.FormatIP16(e.Daddr, e.Family)
-	if p.NetworkProfile.DestAddrs[daddr] == nil {
-		p.NetworkProfile.DestAddrs[daddr] = NewEWMA(weight)
+	addrEWMA := p.NetworkProfile.DestAddrs[e.Daddr]
+	if addrEWMA == nil {
+		addrEWMA = NewEWMA(weight)
+		p.NetworkProfile.DestAddrs[e.Daddr] = addrEWMA
 	}
-	p.NetworkProfile.DestAddrs[daddr].Update(1.0)
+	addrEWMA.Update(1.0)
 }
 
 // RecordFileEvent updates the file profile with a new file access.
@@ -161,23 +163,26 @@ func (p *ProcessProfile) recordFileEventLocked(e *types.FileEvent, weight float6
 	p.LastSeenAt = time.Now()
 	p.FileProfile.TotalOperations++
 
-	// Extract directory from filename
 	filename := string(bytesToString(e.Filename[:]))
+
 	dir := extractDirectory(filename)
 	if dir != "" {
-		if p.FileProfile.Directories[dir] == nil {
-			p.FileProfile.Directories[dir] = NewEWMA(weight)
+		dirEWMA := p.FileProfile.Directories[dir]
+		if dirEWMA == nil {
+			dirEWMA = NewEWMA(weight)
+			p.FileProfile.Directories[dir] = dirEWMA
 		}
-		p.FileProfile.Directories[dir].Update(1.0)
+		dirEWMA.Update(1.0)
 	}
 
-	// Extract and track file extension
 	ext := extractExtension(filename)
 	if ext != "" {
-		if p.FileProfile.Extensions[ext] == nil {
-			p.FileProfile.Extensions[ext] = NewEWMA(weight)
+		extEWMA := p.FileProfile.Extensions[ext]
+		if extEWMA == nil {
+			extEWMA = NewEWMA(weight)
+			p.FileProfile.Extensions[ext] = extEWMA
 		}
-		p.FileProfile.Extensions[ext].Update(1.0)
+		extEWMA.Update(1.0)
 	}
 }
 
@@ -193,11 +198,12 @@ func (p *ProcessProfile) recordSyscallEventLocked(e *types.SyscallEvent, weight 
 	p.LastSeenAt = time.Now()
 	p.SyscallProfile.TotalSyscalls++
 
-	// Update syscall EWMA
-	if p.SyscallProfile.Syscalls[e.Nr] == nil {
-		p.SyscallProfile.Syscalls[e.Nr] = NewEWMA(weight)
+	scEWMA := p.SyscallProfile.Syscalls[e.Nr]
+	if scEWMA == nil {
+		scEWMA = NewEWMA(weight)
+		p.SyscallProfile.Syscalls[e.Nr] = scEWMA
 	}
-	p.SyscallProfile.Syscalls[e.Nr].Update(1.0)
+	scEWMA.Update(1.0)
 }
 
 // GetAnomalyScore returns the current anomaly score.

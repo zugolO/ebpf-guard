@@ -166,9 +166,82 @@ func (wpm *WorkloadProfileManager) metricsLoop(ctx context.Context) {
 
 // GetByKey returns the profile for key, or nil if not found.
 func (wpm *WorkloadProfileManager) GetByKey(key WorkloadKey) *ProcessProfile {
+	return wpm.GetByKeyStr(key.String())
+}
+
+// GetByKeyStr returns the profile for a pre-computed key string.
+// Use when the caller has already called key.String() to avoid a second allocation.
+func (wpm *WorkloadProfileManager) GetByKeyStr(ks string) *ProcessProfile {
 	wpm.mu.RLock()
 	defer wpm.mu.RUnlock()
-	return wpm.profiles[key.String()]
+	return wpm.profiles[ks]
+}
+
+// getOrCreateByKeyStr returns the profile for ks (creating it when absent) and a
+// flag indicating whether this is a newly-created profile.  A single wpm.mu.Lock
+// cycle handles the lookup, possible creation, and LRU update — avoiding the two
+// separate wpm.mu acquisitions that GetByKeyStr + RecordEventByKeyStr would require.
+func (wpm *WorkloadProfileManager) getOrCreateByKeyStr(ks string, key WorkloadKey) (p *ProcessProfile, created bool) {
+	return wpm.getOrCreateByKeyStrAt(ks, key, time.Now())
+}
+
+// getOrCreateByKeyStrAt is like getOrCreateByKeyStr but accepts a caller-supplied
+// timestamp for the LRU touch/push, eliminating an extra time.Now() syscall when
+// the caller already holds a current timestamp.
+func (wpm *WorkloadProfileManager) getOrCreateByKeyStrAt(ks string, key WorkloadKey, now time.Time) (p *ProcessProfile, created bool) {
+	wpm.mu.Lock()
+	p = wpm.profiles[ks]
+	if p == nil {
+		created = true
+		if wpm.maxKeys > 0 && len(wpm.profiles) >= wpm.maxKeys {
+			wpm.evictLRULocked()
+		}
+		p = NewProcessProfileForWorkload(key)
+		wpm.profiles[ks] = p
+		wpm.lruIndex.pushAt(&wpm.lruHeap, ks, now)
+	} else {
+		wpm.lruIndex.touchAt(&wpm.lruHeap, ks, now)
+	}
+	wpm.mu.Unlock()
+	return
+}
+
+// RecordEventByKeyStr records an event using a pre-computed profile key string and
+// the WorkloadKey (needed only when the profile does not yet exist).  Callers that
+// already hold key and ks should prefer this over RecordEvent to avoid recomputing
+// both values.
+func (wpm *WorkloadProfileManager) RecordEventByKeyStr(ks string, key WorkloadKey, e types.Event) {
+	wpm.mu.Lock()
+	p, ok := wpm.profiles[ks]
+	if !ok {
+		if wpm.maxKeys > 0 && len(wpm.profiles) >= wpm.maxKeys {
+			wpm.evictLRULocked()
+		}
+		p = NewProcessProfileForWorkload(key)
+		wpm.profiles[ks] = p
+		wpm.lruIndex.push(&wpm.lruHeap, ks)
+	} else {
+		wpm.lruIndex.touch(&wpm.lruHeap, ks)
+	}
+	wpm.mu.Unlock()
+
+	p.mu.Lock()
+	p.PID = e.PID
+	switch e.Type {
+	case types.EventTCPConnect:
+		if e.Network != nil {
+			p.recordNetworkEventLocked(e.Network, wpm.weight)
+		}
+	case types.EventFileAccess:
+		if e.File != nil {
+			p.recordFileEventLocked(e.File, wpm.weight)
+		}
+	case types.EventSyscall:
+		if e.Syscall != nil {
+			p.recordSyscallEventLocked(e.Syscall, wpm.weight)
+		}
+	}
+	p.mu.Unlock()
 }
 
 // GetOrCreateByKey returns an existing profile or creates one, evicting LRU if at capacity.

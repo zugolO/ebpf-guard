@@ -76,20 +76,30 @@ func (h *lruUint32Heap) Pop() any {
 type lruStringIndex map[string]*lruEntry
 
 func (idx lruStringIndex) push(h *lruStringHeap, key string) {
+	idx.pushAt(h, key, time.Now())
+}
+
+func (idx lruStringIndex) pushAt(h *lruStringHeap, key string, t time.Time) {
 	if idx == nil {
 		return
 	}
-	e := &lruEntry{key: key, lastAccess: time.Now()}
+	e := &lruEntry{key: key, lastAccess: t}
 	heap.Push(h, e)
 	idx[key] = e
 }
 
 func (idx lruStringIndex) touch(h *lruStringHeap, key string) {
+	idx.touchAt(h, key, time.Now())
+}
+
+// touchAt is like touch but uses a caller-supplied timestamp instead of time.Now(),
+// eliminating the vDSO syscall on the hot path when the caller already has a timestamp.
+func (idx lruStringIndex) touchAt(h *lruStringHeap, key string, t time.Time) {
 	if idx == nil {
 		return
 	}
 	if e, ok := idx[key]; ok {
-		e.lastAccess = time.Now()
+		e.lastAccess = t
 		heap.Fix(h, e.index)
 	}
 }

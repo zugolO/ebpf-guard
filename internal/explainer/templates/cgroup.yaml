@@ -1,0 +1,41 @@
+# Cgroup escape explanation templates
+
+templates:
+  - id: cgroup_escape
+    name: "Cgroup Namespace Escape"
+    category: cgroup
+    summary: "CRITICAL: {{.Comm}} (PID {{.PID}}) migrated to a different cgroup namespace"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) moved to a cgroup that differs from
+      the one assigned at exec time.  Cgroup namespaces are a fundamental
+      container isolation boundary — a process migrating outside its initial
+      cgroup may have escaped its resource limits and security policies.
+
+      This technique is used to:
+      - Escape CPU/memory restrictions and consume host resources unchecked
+      - Leave the container's cgroup to access host-level cgroup hierarchies
+      - Combine with capability escalation for full container escape
+      - Evade cgroup-based runtime security monitoring
+
+      Parent process: {{.ParentComm}} (PPID {{.PPID}})
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "critical"
+    severity_why: |
+      Critical severity because exiting the initial cgroup is rarely legitimate
+      and indicates either a container runtime bug or active exploitation of a
+      namespace-related vulnerability.
+    mitigations:
+      - "IMMEDIATE: Verify cgroup membership of PID {{.PID}}: cat /proc/{{.PID}}/cgroup"
+      - "Check if the container runtime assigned the expected cgroup at startup"
+      - "Inspect the parent container runtime (containerd/cri-o) for vulnerabilities"
+      - "Enable cgroupv2 with strict hierarchy enforcement"
+      - "Upgrade container runtime to the latest patched version"
+      - "Audit all pods on the affected node for cgroup misconfigurations"
+    references:
+      - "https://attack.mitre.org/techniques/T1611/"
+      - "https://man7.org/linux/man-pages/man7/cgroup_namespaces.7.html"
+    mitre:
+      tactic: "Privilege Escalation"
+      technique_id: "T1611"
+      technique: "Escape to Host"
+      url: "https://attack.mitre.org/techniques/T1611/"

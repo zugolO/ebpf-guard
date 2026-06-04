@@ -1,0 +1,75 @@
+# GPU / CUDA threat explanation templates
+
+templates:
+  - id: gpu_dtoh_exfil
+    name: "GPU Data Exfiltration (Device-to-Host)"
+    category: gpu
+    summary: "CRITICAL: {{.Comm}} (PID {{.PID}}) copied large GPU memory block to host"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) performed an unusually large
+      Device-to-Host (DtoH) CUDA memory copy.
+
+      GPU memory holds trained model weights, embeddings, and inference inputs/outputs.
+      A DtoH copy that exceeds normal inference batches is the primary vector for
+      exfiltrating proprietary ML model weights or sensitive inference data (PII,
+      medical records, financial data processed by AI pipelines).
+
+      Attack flow:
+      1. Attacker gains code execution inside a GPU-enabled container
+      2. Opens a raw CUDA context targeting a co-located training job
+      3. Issues cuMemcpyDtoH to pull model weights into host memory
+      4. Writes weights to a file or exfiltrates via network
+
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "critical"
+    severity_why: |
+      Critical severity because DtoH copies of this size can extract complete
+      ML model weights in a single call, resulting in immediate IP theft.
+      GPU multi-tenant environments (shared GPU nodes) amplify the risk.
+    mitigations:
+      - "IMMEDIATE: Capture a memory dump of PID {{.PID}} before it exits"
+      - "Identify which CUDA context PID {{.PID}} is attached to (nvidia-smi pmon)"
+      - "Check whether the process owns the GPU context or is accessing a foreign one"
+      - "Enable GPU MIG (Multi-Instance GPU) isolation between workloads"
+      - "Deploy NVIDIA DCGM policies to restrict cross-process GPU memory access"
+      - "Rotate model weights and encryption keys if exfiltration is confirmed"
+    references:
+      - "https://attack.mitre.org/techniques/T1005/"
+      - "https://nvd.nist.gov/vuln/detail/CVE-2023-25515"
+    mitre:
+      tactic: "Collection"
+      technique_id: "T1005"
+      technique: "Data from Local System"
+      url: "https://attack.mitre.org/techniques/T1005/"
+
+  - id: gpu_large_alloc
+    name: "Anomalous GPU Memory Allocation"
+    category: gpu
+    summary: "Suspicious GPU memory allocation by {{.Comm}} (PID {{.PID}})"
+    detail: |
+      The process {{.Comm}} (PID {{.PID}}) allocated an unusually large GPU
+      memory region.  While large allocations are normal during model loading,
+      this alert fires when the size or frequency exceeds the learned baseline.
+
+      Possible malicious uses:
+      - Pre-staging a large buffer before a DtoH copy exfiltration
+      - GPU-accelerated cryptomining (allocating scratch memory for hash kernels)
+      - Denial-of-service: exhausting GPU VRAM to starve legitimate workloads
+
+      Pod: {{.Pod}} | Namespace: {{.Namespace}}
+    severity: "warning"
+    severity_why: |
+      Warning severity because large allocations alone are common in legitimate
+      ML workloads.  Correlate with DtoH copy alerts or network activity to
+      determine if this is malicious.
+    mitigations:
+      - "Check current GPU memory usage: nvidia-smi --query-compute-apps=pid,used_memory --format=csv"
+      - "Verify the process is in its expected resource limits"
+      - "Set GPU memory limits per container via NVIDIA device plugin resource requests"
+    references:
+      - "https://attack.mitre.org/techniques/T1496/"
+    mitre:
+      tactic: "Impact"
+      technique_id: "T1496"
+      technique: "Resource Hijacking"
+      url: "https://attack.mitre.org/techniques/T1496/"

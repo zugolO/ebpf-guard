@@ -7,13 +7,16 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/internal/collector"
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/drift"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/store"
@@ -61,6 +64,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		newStatusCmd(),
 		newRulesCmd(&cfgPath),
 		newVersionCmd(),
+		newLearnCmd(),
 	)
 
 	return root
@@ -218,6 +222,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 	srv.SetReady(true)
 	slog.Info("ebpf-guard ready", slog.String("addr", cfg.Server.BindAddress))
 
+	// Container drift detector — enabled when containers use K8s enrichment.
+	driftDetector := drift.NewDetector(drift.DetectorConfig{
+		BaselineWindow: 5 * time.Minute,
+		Logger:         slog.Default(),
+	})
+	var driftSeq atomic.Uint64
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -237,6 +248,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool) error {
 				return nil
 			}
 			alerts := engine.Ingest(ctx, event)
+
+			// Run container drift detection alongside the rule engine.
+			driftAlerts := driftDetector.Ingest(event)
+			for _, da := range driftAlerts {
+				seq := driftSeq.Add(1)
+				alerts = append(alerts, drift.DriftAlertToTypes(da, seq))
+			}
+
 			if len(alerts) > 0 {
 				if err := alertStore.StoreBatch(ctx, alerts); err != nil {
 					slog.Warn("store alerts error", slog.Any("error", err))
@@ -387,4 +406,125 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// newLearnCmd returns the "learn" subcommand that observes container behaviour
+// for a fixed duration and exports a minimal YAML rule set plus a seccomp profile.
+//
+// Usage:
+//
+//	ebpf-guard learn --duration 5m --output rules/generated/
+//	ebpf-guard learn --duration 10m --namespace production --output rules/generated/
+//	ebpf-guard learn --duration 5m --dry-run --output /tmp/profile/
+func newLearnCmd() *cobra.Command {
+	var (
+		duration    string
+		outputDir   string
+		namespace   string
+		containerID string
+		commFilter  string
+		logLevel    string
+		dryRun      bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "learn",
+		Short: "Observe container behaviour and generate a minimal rule profile",
+		Long: `learn watches kernel events for --duration, builds an allowlist of observed
+syscalls, network peers, and file directories, then writes:
+
+  - autoprofile-<label>-rules.yaml   ebpf-guard allowlist rules
+  - autoprofile-<label>-seccomp.json OCI seccomp profile (SCMP_ACT_ERRNO default)
+
+Both files are placed in --output (default: rules/generated/).
+
+Examples:
+  ebpf-guard learn --duration 5m
+  ebpf-guard learn --duration 10m --namespace production --output /tmp/profiles/
+  ebpf-guard learn --duration 5m --comm nginx --dry-run`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			setupLogger(logLevel)
+			return runLearn(duration, outputDir, namespace, containerID, commFilter, dryRun)
+		},
+	}
+
+	cmd.Flags().StringVar(&duration, "duration", "5m", "observation window (e.g. 30s, 5m, 1h)")
+	cmd.Flags().StringVar(&outputDir, "output", "rules/generated", "directory for generated files")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "only observe events in this Kubernetes namespace")
+	cmd.Flags().StringVar(&containerID, "container", "", "only observe events from this container ID")
+	cmd.Flags().StringVar(&commFilter, "comm", "", "only observe processes whose comm starts with this prefix")
+	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "use synthetic events (no kernel probes required)")
+	return cmd
+}
+
+func runLearn(durationStr, outputDir, namespace, containerID, commFilter string, dryRun bool) error {
+	dur, err := time.ParseDuration(durationStr)
+	if err != nil {
+		return fmt.Errorf("invalid --duration %q: %w", durationStr, err)
+	}
+	if dur < time.Second {
+		return fmt.Errorf("--duration must be at least 1s")
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	slog.Info("ebpf-guard learn: starting",
+		slog.Duration("duration", dur),
+		slog.String("output", outputDir),
+		slog.String("namespace", namespace),
+		slog.String("container", containerID),
+		slog.String("comm", commFilter),
+		slog.Bool("dry_run", dryRun),
+	)
+
+	session := autolearn.NewSession(autolearn.SessionConfig{
+		Duration:    dur,
+		Namespace:   namespace,
+		ContainerID: containerID,
+		CommFilter:  commFilter,
+		Logger:      slog.Default(),
+	})
+
+	eventCh := make(chan types.Event, 4096)
+
+	var collectors []collector.Collector
+	if dryRun {
+		slog.Info("learn: using synthetic event generator")
+		collectors = []collector.Collector{
+			collector.NewSyntheticCollector(slog.Default(), 50*time.Millisecond),
+		}
+	}
+
+	for _, c := range collectors {
+		go func(c collector.Collector) {
+			if err := c.Start(ctx, eventCh); err != nil && ctx.Err() == nil {
+				slog.Error("learn: collector error", slog.String("name", c.Name()), slog.Any("error", err))
+			}
+		}(c)
+	}
+
+	fmt.Printf("Observing for %s — press Ctrl+C to stop early and export now.\n\n", dur)
+	snap := session.Run(ctx, eventCh)
+
+	for _, c := range collectors {
+		_ = c.Close()
+	}
+
+	fmt.Println(snap.Summary())
+
+	rulesPath, seccompPath, err := snap.ExportAll(outputDir)
+	if err != nil {
+		return fmt.Errorf("export profile: %w", err)
+	}
+
+	fmt.Printf("\nGenerated files:\n")
+	fmt.Printf("  Rules:   %s\n", rulesPath)
+	fmt.Printf("  Seccomp: %s\n", seccompPath)
+	fmt.Printf("\nNext steps:\n")
+	fmt.Printf("  1. Review and tune the generated rules.\n")
+	fmt.Printf("  2. Copy rules to your rules directory and reload with hot-reload or restart.\n")
+	fmt.Printf("  3. Apply the seccomp profile to your container runtime.\n")
+	return nil
 }

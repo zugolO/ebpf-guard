@@ -143,6 +143,13 @@ type CorrelationEngine struct {
 	// When set, all loaded .wasm plugins are evaluated on every event.
 	wasmEngine WasmEvaluator
 
+	// Alert deduplication — sliding 5 s window keyed on (ruleID, pid, comm).
+	enableDedup         bool
+	dedupWindow         time.Duration
+	dedups              map[dedupKey]time.Time
+	dedupMu             sync.Mutex
+	alertsDedupDropped  prometheus.Counter
+
 	// Rule-based enforcement (optional)
 	actionExecutor      ActionExecutor
 	enforceCooldown     time.Duration
@@ -165,6 +172,13 @@ type MetricsCallback func(duration float64)
 type cooldownKey struct {
 	ruleID string
 	pid    uint32
+}
+
+// dedupKey is the composite key for the sliding-window alert deduplication map.
+type dedupKey struct {
+	ruleID string
+	pid    uint32
+	comm   string
 }
 
 // enforceTask is a unit of work dispatched to the enforcement worker pool.
@@ -264,6 +278,15 @@ type CorrelationEngineConfig struct {
 	// external cardinality-guarded metric (e.g. exporter.SetAnomalyScoreWithGuard)
 	// can track scores without creating a circular import.  Optional — nil disables.
 	AnomalyScoreReporter func(pid, comm string, score float64)
+
+	// EnableDedup enables sliding-window alert deduplication.
+	// Duplicate (ruleID, pid, comm) alerts within DedupWindow are dropped.
+	// Default: true.
+	EnableDedup bool
+
+	// DedupWindow is the deduplication suppression window.
+	// Zero → 5 seconds.
+	DedupWindow time.Duration
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -280,6 +303,8 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		MaxAlertsPerWindow: 10,
 		MaxAlertsPerSecond: 10000,
 		BufferTTL:          10 * time.Minute,
+		EnableDedup:        true,
+		DedupWindow:        5 * time.Second,
 	}
 }
 
@@ -360,6 +385,16 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	// without consuming significant memory. Each task is ~200 bytes.
 	enforceQueue := make(chan enforceTask, 1024)
 
+	dedupWindow := config.DedupWindow
+	if dedupWindow <= 0 {
+		dedupWindow = 5 * time.Second
+	}
+
+	alertsDedupDropped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ebpf_guard_alerts_dedup_dropped_total",
+		Help: "Alerts suppressed by the sliding-window deduplication filter.",
+	})
+
 	var regoQueue chan regoTask
 	var regoQueueDropped prometheus.Counter
 	if config.EnableRegoEval && config.RegoEngine != nil {
@@ -388,6 +423,10 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		sensitivityAdjuster:  config.SensitivityAdjuster,
 		baseAnomalyThreshold: config.AnomalyThreshold,
 		wasmEngine:           config.WasmEngine,
+		enableDedup:          config.EnableDedup,
+		dedupWindow:          dedupWindow,
+		dedups:               make(map[dedupKey]time.Time),
+		alertsDedupDropped:   alertsDedupDropped,
 		actionExecutor:       config.ActionExecutor,
 		enforceCooldown:      enforceCooldown,
 		cooldowns:            make(map[cooldownKey]time.Time),
@@ -425,8 +464,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		}
 	}()
 
-	// Background goroutine that evicts expired enforcement cooldown entries.
-	// Without this the cooldowns sync.Map grows unbounded with unique (ruleID,PID) pairs.
+	// Background goroutine that evicts expired enforcement cooldown and dedup entries.
+	// Without this the maps grow unbounded with unique (ruleID,PID) pairs.
 	go func() {
 		// Check every 5× the cooldown window so entries live long enough to
 		// block repeated enforcement, but dead PIDs don't accumulate forever.
@@ -441,14 +480,24 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				cutoff := time.Now().Add(-enforceCooldown)
+				now := time.Now()
+				cooldownCutoff := now.Add(-enforceCooldown)
 				ce.cooldownsMu.Lock()
 				for k, t := range ce.cooldowns {
-					if t.Before(cutoff) {
+					if t.Before(cooldownCutoff) {
 						delete(ce.cooldowns, k)
 					}
 				}
 				ce.cooldownsMu.Unlock()
+
+				dedupCutoff := now.Add(-ce.dedupWindow)
+				ce.dedupMu.Lock()
+				for k, t := range ce.dedups {
+					if t.Before(dedupCutoff) {
+						delete(ce.dedups, k)
+					}
+				}
+				ce.dedupMu.Unlock()
 			}
 		}
 	}()
@@ -560,6 +609,32 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 	}
 }
 
+// filterDuplicates removes alerts whose (ruleID, pid, comm) key was already seen
+// within the dedup window. The first occurrence is always kept; subsequent ones
+// within the window are dropped and counted. Operates in-place on the slice.
+func (ce *CorrelationEngine) filterDuplicates(alerts []types.Alert) []types.Alert {
+	if len(alerts) == 0 {
+		return alerts
+	}
+	now := time.Now()
+	cutoff := now.Add(-ce.dedupWindow)
+
+	out := alerts[:0]
+	ce.dedupMu.Lock()
+	defer ce.dedupMu.Unlock()
+	for _, alert := range alerts {
+		key := dedupKey{ruleID: alert.RuleID, pid: alert.PID, comm: alert.Comm}
+		if prev, ok := ce.dedups[key]; ok && prev.After(cutoff) {
+			ce.alertsDedupDropped.Add(1)
+			ce.alertsDropped.Add(1)
+			continue
+		}
+		ce.dedups[key] = now
+		out = append(out, alert)
+	}
+	return out
+}
+
 // Close stops background goroutines started by the engine.
 func (ce *CorrelationEngine) Close() {
 	ce.cancelCleanup()
@@ -598,6 +673,7 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.enforceQueueDropped,
 		ce.enforcedCounter,
 		ce.regoQueueDropped,
+		ce.alertsDedupDropped,
 	} {
 		if c == nil {
 			continue
@@ -839,6 +915,12 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				}
 			}
 		}
+	}
+
+	// Sliding-window deduplication: drop repeated (ruleID, pid, comm) alerts
+	// within the configured window to suppress burst duplicates.
+	if ce.enableDedup && len(alerts) > 0 {
+		alerts = ce.filterDuplicates(alerts)
 	}
 
 	// Update span with alert count

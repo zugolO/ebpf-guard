@@ -251,6 +251,7 @@ func TestAlertIDUniqueness(t *testing.T) {
 	cfg.Rules = []Rule{rule}
 	cfg.EnableRateLimit = false // disable rate limiting so all 10k alerts pass through
 	cfg.EnableAnomaly = false
+	cfg.EnableDedup = false // this test verifies ID uniqueness, not dedup behaviour
 	engine := NewCorrelationEngineWithConfig(cfg)
 	defer engine.Close()
 
@@ -386,4 +387,88 @@ func TestCorrelationEngine_ProcessTree(t *testing.T) {
 	prev := tree[len(tree)-2]
 	assert.Equal(t, uint32(200), prev.PID, "second-to-last should be bash")
 	assert.Equal(t, "bash", prev.Comm)
+}
+
+func TestCorrelationEngine_DedupWindow(t *testing.T) {
+	comm := func(s string) [16]byte {
+		var b [16]byte
+		copy(b[:], s)
+		return b
+	}
+
+	rule := Rule{
+		ID:        "dedup_rule",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"443"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{rule}
+	cfg.EnableRateLimit = false
+	cfg.EnableAnomaly = false
+	cfg.EnableDedup = true
+	cfg.DedupWindow = 200 * time.Millisecond
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	ctx := context.Background()
+	event := types.Event{
+		Type:    types.EventTCPConnect,
+		PID:     100,
+		Comm:    comm("nginx"),
+		Network: &types.NetworkEvent{Dport: 443},
+	}
+
+	// First ingest: alert must pass through.
+	first := engine.Ingest(ctx, event)
+	require.Len(t, first, 1, "first alert must not be deduped")
+
+	// Immediate second ingest: same key within window → dropped.
+	second := engine.Ingest(ctx, event)
+	assert.Empty(t, second, "duplicate within window must be suppressed")
+
+	// Third ingest with a different PID: independent key → must pass.
+	event2 := event
+	event2.PID = 200
+	third := engine.Ingest(ctx, event2)
+	require.Len(t, third, 1, "different PID is a distinct dedup key")
+
+	// Wait for the window to expire then re-ingest the original event.
+	time.Sleep(250 * time.Millisecond)
+	after := engine.Ingest(ctx, event)
+	require.Len(t, after, 1, "alert must reappear after dedup window expires")
+}
+
+func TestCorrelationEngine_DedupDisabled(t *testing.T) {
+	rule := Rule{
+		ID:        "nodedup_rule",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"80"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{rule}
+	cfg.EnableRateLimit = false
+	cfg.EnableAnomaly = false
+	cfg.EnableDedup = false // explicitly off
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	ctx := context.Background()
+	event := types.Event{
+		Type:    types.EventTCPConnect,
+		PID:     42,
+		Network: &types.NetworkEvent{Dport: 80},
+	}
+
+	for i := 0; i < 3; i++ {
+		got := engine.Ingest(ctx, event)
+		require.Len(t, got, 1, "with dedup disabled every ingest must yield an alert (iter %d)", i)
+	}
 }

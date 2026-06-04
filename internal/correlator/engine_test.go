@@ -5,7 +5,9 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
+	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
@@ -271,6 +273,58 @@ func TestAlertIDUniqueness(t *testing.T) {
 		seen[id] = struct{}{}
 	}
 	assert.Len(t, seen, n, "all %d Alert IDs must be unique", n)
+}
+
+func TestCorrelationEngine_AsyncRegoEval(t *testing.T) {
+	rule := Rule{
+		ID:        "rego_test_rule",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"443"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	// Empty temp dir → RegoEngine has no policies; alerts pass through unchanged.
+	// This isolates the concurrency behaviour without requiring real .rego files.
+	regoDir := t.TempDir()
+	regoEng, err := policy.NewRegoEngine(policy.RegoEngineConfig{Enabled: true, RulesDir: regoDir})
+	if err != nil {
+		t.Skipf("cannot create rego engine: %v", err)
+	}
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{rule}
+	cfg.EnableRateLimit = false
+	cfg.EnableAnomaly = false
+	cfg.EnableRegoEval = true
+	cfg.RegoEngine = regoEng
+	cfg.RegoWorkerCount = 2
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	ctx := context.Background()
+	event := types.Event{
+		Type:    types.EventTCPConnect,
+		PID:     42,
+		Network: &types.NetworkEvent{Dport: 443},
+	}
+
+	// Ingest must return immediately without blocking on Rego.
+	returned := engine.Ingest(ctx, event)
+	require.Len(t, returned, 1, "Ingest must return the pre-rego alert synchronously")
+
+	// Rego worker publishes to pending asynchronously; allow up to 200 ms.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	var flushed []types.Alert
+	for time.Now().Before(deadline) {
+		flushed = engine.Flush()
+		if len(flushed) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.Len(t, flushed, 1, "async rego worker must publish alert to pending")
 }
 
 func TestCorrelationEngine_ProcessTree(t *testing.T) {

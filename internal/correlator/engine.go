@@ -94,8 +94,10 @@ type CorrelationEngine struct {
 	alertsDroppedGlobal  prometheus.Counter // ebpf_guard_alerts_dropped_total{reason="global_rate_limit"}
 
 	// Rego policy engine (post-YAML filter, Sprint 23.0)
-	regoEngine     *policy.RegoEngine
-	enableRegoEval bool
+	regoEngine      *policy.RegoEngine
+	enableRegoEval  bool
+	regoQueue       chan regoTask
+	regoQueueDropped prometheus.Counter
 
 	// Monotonic counter for unique Alert IDs — prevents collision when
 	// two alerts share the same ruleID+timestamp+pid (e.g. bursts in <1ns resolution).
@@ -173,6 +175,13 @@ type enforceTask struct {
 	alert  types.Alert
 }
 
+// regoTask is a unit of work dispatched to the async Rego evaluation pool.
+type regoTask struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	alerts []types.Alert
+}
+
 // CorrelationEngineConfig holds configuration for the correlation engine.
 type CorrelationEngineConfig struct {
 	// Rule engine configuration
@@ -199,6 +208,10 @@ type CorrelationEngineConfig struct {
 	// Rego policy engine configuration (Sprint 23.0)
 	EnableRegoEval bool
 	RegoEngine     *policy.RegoEngine
+
+	// RegoWorkerCount is the number of goroutines draining the async Rego
+	// evaluation queue. Zero → max(2, runtime.NumCPU()/2).
+	RegoWorkerCount int
 
 	// Global alert rate limit — maximum alerts per second across all rules.
 	// Zero means unlimited. Default: 10000.
@@ -347,6 +360,16 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	// without consuming significant memory. Each task is ~200 bytes.
 	enforceQueue := make(chan enforceTask, 1024)
 
+	var regoQueue chan regoTask
+	var regoQueueDropped prometheus.Counter
+	if config.EnableRegoEval && config.RegoEngine != nil {
+		regoQueueDropped = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_rego_queue_dropped_total",
+			Help: "Rego evaluation tasks dropped because the async worker queue was full.",
+		})
+		regoQueue = make(chan regoTask, 1024)
+	}
+
 	ce := &CorrelationEngine{
 		buffer:               NewShardedEventBuffer(config.BufferSize),
 		pending:              make([]types.Alert, 0),
@@ -356,6 +379,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		cancelCleanup:        cancel,
 		enableRegoEval:       config.EnableRegoEval,
 		regoEngine:           config.RegoEngine,
+		regoQueue:            regoQueue,
+		regoQueueDropped:     regoQueueDropped,
 		onCorrelate:          config.OnCorrelate,
 		lineageTracker:       lt,
 		feedbackManager:      config.FeedbackManager,
@@ -449,6 +474,21 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		}
 	}
 
+	// Start async Rego evaluation worker pool. Pool size is max(2, NumCPU/2)
+	// to avoid blocking the Ingest hot path while still bounding goroutine growth.
+	if config.EnableRegoEval && config.RegoEngine != nil {
+		regoWorkers := config.RegoWorkerCount
+		if regoWorkers <= 0 {
+			regoWorkers = runtime.NumCPU() / 2
+			if regoWorkers < 2 {
+				regoWorkers = 2
+			}
+		}
+		for i := 0; i < regoWorkers; i++ {
+			go ce.regoWorker(ctx)
+		}
+	}
+
 	// Update the gauge periodically so it reflects the live state count.
 	go ce.updateRLGaugeLoop(ctx)
 
@@ -494,6 +534,32 @@ func (ce *CorrelationEngine) enforceWorker(ctx context.Context) {
 	}
 }
 
+// regoWorker drains the async Rego evaluation queue. For each task it evaluates
+// the alerts through OPA, applies analyst suppression, then appends enriched
+// alerts to pending so downstream consumers can read them via Flush.
+func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
+	for {
+		select {
+		case task, ok := <-ce.regoQueue:
+			if !ok {
+				return
+			}
+			enriched := ce.evaluateRegoPolicies(task.ctx, task.alerts)
+			task.cancel()
+
+			if ce.feedbackManager != nil && len(enriched) > 0 {
+				enriched = ce.feedbackManager.FilterAlerts(enriched)
+			}
+
+			ce.pendingMu.Lock()
+			ce.pending = append(ce.pending, enriched...)
+			ce.pendingMu.Unlock()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // Close stops background goroutines started by the engine.
 func (ce *CorrelationEngine) Close() {
 	ce.cancelCleanup()
@@ -531,6 +597,7 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.activeRulesGauge,
 		ce.enforceQueueDropped,
 		ce.enforcedCounter,
+		ce.regoQueueDropped,
 	} {
 		if c == nil {
 			continue
@@ -779,10 +846,23 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		span.SetAttributes(attribute.Int("alerts.generated", len(alerts)))
 	}
 
-	// Rego policy evaluation (post-YAML filter, Sprint 23.0)
-	// This is called ONLY on alerts, not on raw events, for performance
+	// Rego policy evaluation (post-YAML filter, Sprint 23.0).
+	// Dispatched to the async worker pool so Ingest returns without blocking on
+	// OPA. The enriched alerts (with MITRE enrichment) land in pending via the
+	// regoWorker; feedback filtering also happens there after enrichment.
 	if ce.enableRegoEval && ce.regoEngine != nil && len(alerts) > 0 {
-		alerts = ce.evaluateRegoPolicies(ctx, alerts)
+		regoCtx, regoCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		task := regoTask{ctx: regoCtx, cancel: regoCancel, alerts: alerts}
+		select {
+		case ce.regoQueue <- task:
+			// Submitted successfully — worker appends to pending after enrichment.
+			return alerts
+		default:
+			// Queue full: cancel the context and fall through to synchronous eval.
+			regoCancel()
+			ce.regoQueueDropped.Add(1)
+			alerts = ce.evaluateRegoPolicies(ctx, alerts)
+		}
 	}
 
 	// Analyst false-positive suppression: drop alerts whose (ruleID, comm) pair

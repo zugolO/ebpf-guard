@@ -296,7 +296,7 @@ func TestAnomalyDetector(t *testing.T) {
 				Daddr: [16]byte{192, 168, 1, 1},
 			},
 		}
-		result := ad.ProcessEvent(event)
+		result := ad.ProcessEvent(event, false)
 		assert.Nil(t, result) // No results during learning
 	}
 
@@ -313,7 +313,7 @@ func TestAnomalyDetector(t *testing.T) {
 				Daddr: [16]byte{192, 168, 1, 1},
 			},
 		}
-		ad.ProcessEvent(event)
+		ad.ProcessEvent(event, false)
 	}
 
 	// Now learning should be complete
@@ -329,7 +329,7 @@ func TestAnomalyDetector(t *testing.T) {
 			Daddr: [16]byte{192, 168, 1, 1},
 		},
 	}
-	result := ad.ProcessEvent(anomalousEvent)
+	result := ad.ProcessEvent(anomalousEvent, false)
 	assert.NotNil(t, result)
 	assert.Equal(t, uint32(1234), result.PID)
 	assert.True(t, result.Score >= 0)
@@ -349,7 +349,7 @@ func TestAnomalyDetector_FileBehavior(t *testing.T) {
 				Filename: filename,
 			},
 		}
-		ad.ProcessEvent(event)
+		ad.ProcessEvent(event, false)
 	}
 
 	// Wait and ensure learning is complete
@@ -365,7 +365,7 @@ func TestAnomalyDetector_FileBehavior(t *testing.T) {
 			Filename: filename,
 		},
 	}
-	result := ad.ProcessEvent(event)
+	result := ad.ProcessEvent(event, false)
 	assert.NotNil(t, result)
 	assert.True(t, result.Score >= 0)
 }

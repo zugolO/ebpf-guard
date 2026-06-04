@@ -220,7 +220,7 @@ func TestAnomalyDetector_WorkloadSegmentation(t *testing.T) {
 
 	// Establish baseline for prod-nginx using port 80.
 	for i := 0; i < 150; i++ {
-		ad.ProcessEvent(makeProdEvent(80))
+		ad.ProcessEvent(makeProdEvent(80), false)
 	}
 
 	// Wait for learning phase to complete.
@@ -237,12 +237,12 @@ func TestAnomalyDetector_WorkloadSegmentation(t *testing.T) {
 		},
 		Network: &types.NetworkEvent{Dport: 9999, Daddr: [16]byte{10, 0, 0, 2}},
 	}
-	result := ad.ProcessEvent(devEvent)
+	result := ad.ProcessEvent(devEvent, false)
 	// The dev workload has no completed learning phase yet, so no anomaly result.
 	assert.Nil(t, result, "dev workload should not be scored against prod baseline")
 
 	// prod-nginx connecting to a new port IS anomalous compared to its own baseline.
-	anomalousResult := ad.ProcessEvent(makeProdEvent(9999))
+	anomalousResult := ad.ProcessEvent(makeProdEvent(9999), false)
 	// After learning, a new port should produce a result (possibly anomaly).
 	if anomalousResult != nil {
 		assert.Equal(t, uint32(100), anomalousResult.PID)

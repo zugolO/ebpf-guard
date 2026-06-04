@@ -586,6 +586,11 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// the most recent parent information available for this event's PID.
 	ce.lineageTracker.Track(e)
 
+	// Compute the process tree once and share it across all alerts generated
+	// by this event. Avoids acquiring the lineage read-lock once per alert
+	// (rule, WASM, anomaly, IOC) under burst conditions.
+	processTree := ce.lineageTracker.GetProcessTree(e.PID)
+
 	var alerts []types.Alert
 
 	// Evaluate against rules
@@ -620,7 +625,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		}
 
 		// Attach full process tree for SOC triage.
-		alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+		alert.ProcessTree = processTree
 
 		// Rule-based enforcement: kill / block / throttle.
 		// The alert is always emitted for auditing; enforcement is dispatched
@@ -664,7 +669,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 			}
 			seq := ce.alertSeq.Add(1)
 			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
-			alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+			alert.ProcessTree = processTree
 			alerts = append(alerts, alert)
 			ce.alertsGenerated.Add(1)
 		}
@@ -673,6 +678,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// Gossip IOC matching — check event against cluster-wide indicators.
 	if ce.iocMatcher != nil {
 		if iocAlert := ce.checkIOCMatch(e); iocAlert != nil {
+			iocAlert.ProcessTree = processTree
 			if ce.rateLimiter.Allow(iocAlert.RuleID) &&
 				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
 				alerts = append(alerts, *iocAlert)
@@ -683,9 +689,12 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		}
 	}
 
-	// Anomaly detection (if enabled and learning complete)
+	// Anomaly detection (if enabled and learning complete).
+	// ruleConfirmed=true suppresses EWMA baseline updates for events that
+	// rule/WASM/IOC detectors already confirmed as malicious.
 	if ce.enableAnomaly && ce.anomalyDetector != nil {
-		if result := ce.anomalyDetector.ProcessEvent(e); result != nil {
+		ruleConfirmed := len(alerts) > 0
+		if result := ce.anomalyDetector.ProcessEvent(e, ruleConfirmed); result != nil {
 			// Always report the score (even non-anomalous) so the cardinality-guarded
 			// Prometheus gauge tracks all active processes, not only anomaly triggers.
 			if ce.scoreReporter != nil {
@@ -739,7 +748,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				}
 
 				// Attach full process tree for SOC triage.
-				anomalyAlert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+				anomalyAlert.ProcessTree = processTree
 
 				// Check per-rule and global rate limiting for anomaly alerts
 				perRuleOK := ce.rateLimiter.Allow(anomalyAlert.RuleID)
@@ -1008,7 +1017,8 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 	if e.Enrichment != nil {
 		alert.Enrichment = *e.Enrichment
 	}
-	alert.ProcessTree = ce.lineageTracker.GetProcessTree(e.PID)
+	// ProcessTree is assigned by the caller (Ingest) from the pre-computed
+	// shared processTree to avoid an extra lineage lock acquisition here.
 	return alert
 }
 

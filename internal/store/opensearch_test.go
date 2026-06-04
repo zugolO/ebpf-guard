@@ -122,9 +122,6 @@ func TestOpenSearchStoreIntegration(t *testing.T) {
 		err := store.Store(ctx, alert)
 		assert.NoError(t, err, "failed to store alert")
 
-		// Wait for indexing
-		time.Sleep(2 * time.Second)
-
 		// Query by ID
 		retrieved, err := store.QueryByID(ctx, "test-alert-1")
 		require.NoError(t, err, "failed to query alert by ID")
@@ -163,9 +160,6 @@ func TestOpenSearchStoreIntegration(t *testing.T) {
 
 		err := store.StoreBatch(ctx, alerts)
 		assert.NoError(t, err, "failed to store batch alerts")
-
-		// Wait for indexing
-		time.Sleep(2 * time.Second)
 
 		// Query to verify
 		retrieved, err := store.QueryByID(ctx, "batch-alert-1")
@@ -207,9 +201,6 @@ func TestOpenSearchStoreIntegration(t *testing.T) {
 
 		err := store.StoreBatch(ctx, testAlerts)
 		require.NoError(t, err)
-
-		// Wait for indexing
-		time.Sleep(2 * time.Second)
 
 		// Query by severity
 		results, err := store.Query(ctx, QueryFilters{

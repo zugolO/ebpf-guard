@@ -98,12 +98,50 @@ func (sb *ShardedEventBuffer) Get(pid uint32) []types.Event {
 }
 
 // GetRecent returns the last n events for a given PID.
+// Unlike Get, it acquires the lock only once and allocates exactly n elements,
+// avoiding the full-size allocation that Get performs when rb.size >> n.
 func (sb *ShardedEventBuffer) GetRecent(pid uint32, n int) []types.Event {
-	events := sb.Get(pid)
-	if len(events) <= n {
-		return events
+	if n <= 0 {
+		return nil
 	}
-	return events[len(events)-n:]
+	shard := sb.shards[shardIndex(pid)]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	rb, exists := shard.buffers[pid]
+	if !exists || rb.size == 0 {
+		return nil
+	}
+
+	if n >= rb.size {
+		// Return all events in chronological order.
+		result := make([]types.Event, rb.size)
+		if rb.size < sb.maxSize {
+			copy(result, rb.events[:rb.size])
+		} else {
+			copied := copy(result, rb.events[rb.head:])
+			copy(result[copied:], rb.events[:rb.head])
+		}
+		return result
+	}
+
+	// n < rb.size: allocate only n elements.
+	result := make([]types.Event, n)
+	if rb.size < sb.maxSize {
+		// Buffer not yet full: events are at [0, rb.size). The last n are at [rb.size-n, rb.size).
+		copy(result, rb.events[rb.size-n:rb.size])
+	} else {
+		// Buffer full: logical order is oldest at rb.head. The last n events
+		// start at physical position (rb.head + sb.maxSize - n) % sb.maxSize.
+		start := (rb.head + sb.maxSize - n) % sb.maxSize
+		if start+n <= sb.maxSize {
+			copy(result, rb.events[start:start+n])
+		} else {
+			copied := copy(result, rb.events[start:])
+			copy(result[copied:], rb.events[:n-copied])
+		}
+	}
+	return result
 }
 
 // Remove deletes the buffer for a given PID.

@@ -122,6 +122,12 @@ func validateRule(rule *Rule) error {
 	if rule.Action == "" {
 		rule.Action = ActionAlert // Default action
 	}
+	switch rule.Action {
+	case ActionAlert, ActionDrop, ActionBlock, ActionKill, ActionThrottle:
+		// valid
+	default:
+		return fmt.Errorf("unknown action %q, valid: alert, drop, block, kill, throttle", rule.Action)
+	}
 	if rule.Severity == "" {
 		rule.Severity = "warning" // Default severity
 	}

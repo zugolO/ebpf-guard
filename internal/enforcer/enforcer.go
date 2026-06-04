@@ -113,11 +113,12 @@ type LSMBlocklistManager interface {
 
 // Enforcer performs active enforcement actions based on security alerts.
 type Enforcer struct {
-	logger    *slog.Logger
-	auditLog  chan<- AuditEntry
-	throttles map[uint32]*ThrottleState
-	mu        sync.RWMutex
-	enabled   map[ActionType]bool
+	logger      *slog.Logger
+	auditLog    chan<- AuditEntry
+	throttles   map[uint32]*ThrottleState
+	mu          sync.RWMutex
+	enabled     map[ActionType]bool
+	stopCleanup context.CancelFunc // stops the background throttle cleanup goroutine
 	// blockBackend is the network blocking backend to use
 	blockBackend BlockBackend
 	// nftablesMgr is the nftables manager (nil if not using nftables)
@@ -206,6 +207,30 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 			e.xdpMgr = xdpMgr
 		}
 	}
+
+	// Background goroutine that evicts dead-PID throttle entries.
+	// CleanupThrottles exists but was never called automatically, causing the map
+	// to grow unbounded as unique PIDs trigger throttle actions over time.
+	cleanupCtx, cancel := context.WithCancel(context.Background())
+	e.stopCleanup = cancel
+	go func() {
+		const (
+			throttleMaxAge  = 30 * time.Minute
+			cleanupInterval = 5 * time.Minute
+		)
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupCtx.Done():
+				return
+			case <-ticker.C:
+				if removed := e.CleanupThrottles(throttleMaxAge); removed > 0 {
+					e.logger.Debug("cleaned up stale throttle entries", slog.Int("removed", removed))
+				}
+			}
+		}
+	}()
 
 	return e, nil
 }
@@ -747,6 +772,10 @@ func (e *Enforcer) Cleanup() error {
 
 // Close closes the enforcer and releases resources.
 func (e *Enforcer) Close() error {
+	if e.stopCleanup != nil {
+		e.stopCleanup()
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 

@@ -20,12 +20,24 @@ type RateLimiter struct {
 	states map[string]*ruleState
 }
 
-// ruleState tracks alert history for a single rule.
+// ruleState tracks alert history for a single rule using a ring buffer.
+// The ring buffer gives amortized O(1) allow() instead of the previous O(n)
+// linear scan over a growing []time.Time slice.
 type ruleState struct {
 	mu       sync.Mutex
-	alerts   []time.Time
+	ring     []time.Time // circular buffer; cap == maxCount
+	head     int         // index of the oldest live entry
+	size     int         // number of live entries
 	window   time.Duration
 	maxCount int
+}
+
+func newRuleState(window time.Duration, maxCount int) *ruleState {
+	return &ruleState{
+		ring:     make([]time.Time, maxCount),
+		window:   window,
+		maxCount: maxCount,
+	}
 }
 
 // NewRateLimiter creates a new rate limiter with a background cleanup goroutine
@@ -71,10 +83,7 @@ func (rl *RateLimiter) Allow(ruleID string) bool {
 	rl.mu.Lock()
 	state, exists := rl.states[ruleID]
 	if !exists {
-		state = &ruleState{
-			window:   rl.window,
-			maxCount: rl.maxAlerts,
-		}
+		state = newRuleState(rl.window, rl.maxAlerts)
 		rl.states[ruleID] = state
 	}
 	rl.mu.Unlock()
@@ -83,6 +92,7 @@ func (rl *RateLimiter) Allow(ruleID string) bool {
 }
 
 // allow checks if an alert should be allowed (internal, called with state lock).
+// Amortized O(1): expired entries are evicted from the ring head one by one.
 func (rs *ruleState) allow() bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -90,23 +100,21 @@ func (rs *ruleState) allow() bool {
 	now := time.Now()
 	cutoff := now.Add(-rs.window)
 
-	// Remove old alerts outside the window.
-	// rs.alerts is always appended in time order, so the first entry >= cutoff
-	// marks where the valid window starts. Default to len (all stale).
-	validStart := len(rs.alerts)
-	for i, ts := range rs.alerts {
-		if ts.After(cutoff) || ts.Equal(cutoff) {
-			validStart = i
-			break
-		}
+	// Evict entries from the head that have left the window.
+	// Since entries are appended in chronological order the head is always
+	// the oldest, so this loop terminates in O(expired) ≈ O(1) amortized.
+	for rs.size > 0 && rs.ring[rs.head].Before(cutoff) {
+		rs.head = (rs.head + 1) % rs.maxCount
+		rs.size--
 	}
-	rs.alerts = rs.alerts[validStart:]
 
-	if len(rs.alerts) >= rs.maxCount {
+	if rs.size >= rs.maxCount {
 		return false
 	}
 
-	rs.alerts = append(rs.alerts, now)
+	tail := (rs.head + rs.size) % rs.maxCount
+	rs.ring[tail] = now
+	rs.size++
 	return true
 }
 
@@ -123,21 +131,26 @@ func (rl *RateLimiter) GetCount(ruleID string) int {
 	return state.count()
 }
 
-// count returns the current count (internal, called with state lock).
+// count returns the number of entries within the window (internal).
+// Entries are time-ordered, so we stop as soon as we hit the first recent one
+// and return the rest of the ring as in-window.
 func (rs *ruleState) count() int {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
+	if rs.size == 0 {
+		return 0
+	}
+
 	now := time.Now()
 	cutoff := now.Add(-rs.window)
 
-	count := 0
-	for _, ts := range rs.alerts {
-		if ts.After(cutoff) {
-			count++
+	for i := 0; i < rs.size; i++ {
+		if !rs.ring[(rs.head+i)%rs.maxCount].Before(cutoff) {
+			return rs.size - i
 		}
 	}
-	return count
+	return 0
 }
 
 // Reset clears all rate limiter state.
@@ -170,7 +183,7 @@ func (rl *RateLimiter) StateCount() int {
 // Fine-grained locking: snapshot the map under rl.mu, then check each
 // state under its own mutex (rl.mu released), then delete stale entries
 // under rl.mu again. This avoids holding the global map lock while
-// iterating per-state slices.
+// iterating per-state rings.
 func (rl *RateLimiter) Cleanup(maxAge time.Duration) int {
 	rl.mu.Lock()
 	snapshot := make(map[string]*ruleState, len(rl.states))
@@ -183,13 +196,9 @@ func (rl *RateLimiter) Cleanup(maxAge time.Duration) int {
 	var stale []string
 	for id, state := range snapshot {
 		state.mu.Lock()
-		hasRecent := false
-		for _, ts := range state.alerts {
-			if ts.After(cutoff) {
-				hasRecent = true
-				break
-			}
-		}
+		// The last entry in the ring is the most recent one — O(1) check.
+		hasRecent := state.size > 0 &&
+			!state.ring[(state.head+state.size-1)%state.maxCount].Before(cutoff)
 		state.mu.Unlock()
 		if !hasRecent {
 			stale = append(stale, id)
@@ -227,7 +236,7 @@ func (rl *RateLimiter) GetStats() RateLimiterStats {
 
 	for _, state := range rl.states {
 		state.mu.Lock()
-		stats.TotalAlerts += len(state.alerts)
+		stats.TotalAlerts += state.size
 		state.mu.Unlock()
 	}
 
@@ -249,6 +258,8 @@ func (rl *RateLimiter) IsEnabled() bool {
 }
 
 // UpdateConfig updates the rate limiter configuration.
+// If maxAlerts changes the ring buffer for every existing state is resized,
+// preserving as many recent entries as possible.
 func (rl *RateLimiter) UpdateConfig(window time.Duration, maxAlerts int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -259,7 +270,22 @@ func (rl *RateLimiter) UpdateConfig(window time.Duration, maxAlerts int) {
 	for _, state := range rl.states {
 		state.mu.Lock()
 		state.window = window
-		state.maxCount = maxAlerts
+		if state.maxCount != maxAlerts {
+			newRing := make([]time.Time, maxAlerts)
+			// Keep the min(maxAlerts, size) most recent entries.
+			keep := state.size
+			if keep > maxAlerts {
+				keep = maxAlerts
+			}
+			skip := state.size - keep
+			for i := 0; i < keep; i++ {
+				newRing[i] = state.ring[(state.head+skip+i)%state.maxCount]
+			}
+			state.ring = newRing
+			state.head = 0
+			state.size = keep
+			state.maxCount = maxAlerts
+		}
 		state.mu.Unlock()
 	}
 }

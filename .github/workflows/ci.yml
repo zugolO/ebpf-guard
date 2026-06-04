@@ -10,15 +10,16 @@ on:
 env:
   CLANG_VERSION: '15'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # Use the system-installed Go toolchain instead of downloading one via the
+  # module proxy. The downloaded toolchain is a stripped module archive that
+  # omits several compiled tools (covdata, addr2line, nm, …) and causes
+  # "go: no such tool covdata" failures during coverage runs.
+  GOTOOLCHAIN: local
 
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.24', '1.25']
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -26,7 +27,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -34,19 +35,19 @@ jobs:
         sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }}
         sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
 
+    - name: Install golangci-lint
+      # Build from source with the project's own Go 1.25 toolchain so the
+      # linter binary supports Go 1.25 language features. Pre-compiled
+      # release binaries (e.g. v1.64.8) were built with go1.24 and refuse
+      # to lint modules that declare go 1.25.
+      run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v6
-      with:
-        version: latest
-        args: --timeout=5m --go=1.25
+      run: golangci-lint run --timeout=5m
 
   test:
     name: Test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.24', '1.25']
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -54,7 +55,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -87,10 +88,6 @@ jobs:
   race-detector:
     name: Race Detector
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go-version: ['1.24', '1.25']
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -98,7 +95,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -125,13 +122,115 @@ jobs:
       timeout-minutes: 10
       run: go test -race ./internal/exporter/... ./internal/profiler/... -count=3 -run "Stress|Concurrent|Race" -timeout=8m
 
+  benchmark-regression:
+    name: Benchmark Regression Gate
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
+        sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Install benchstat
+      run: go install golang.org/x/perf/cmd/benchstat@latest
+
+    - name: Run benchmarks on HEAD
+      run: |
+        go test -bench=. -benchmem -count=3 -run='^$' ./internal/correlator/... | tee bench_new.txt
+
+    - name: Find baseline commit
+      id: baseline
+      run: |
+        set -e
+        if [ -n "$GITHUB_BASE_REF" ]; then
+          # Pull request: compare against the merge base of the target branch.
+          git fetch origin "$GITHUB_BASE_REF"
+          BASE=$(git merge-base HEAD "origin/$GITHUB_BASE_REF")
+        else
+          # Direct push to main/develop: compare against the parent commit.
+          BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+        fi
+        echo "sha=$BASE" >> "$GITHUB_OUTPUT"
+        echo "Baseline commit: $BASE"
+
+    - name: Checkout baseline into worktree
+      run: git worktree add /tmp/bench-base "${{ steps.baseline.outputs.sha }}"
+
+    - name: Run benchmarks on baseline
+      run: |
+        cd /tmp/bench-base
+        go mod download
+        go test -bench=. -benchmem -count=3 -run='^$' ./internal/correlator/... | tee "$GITHUB_WORKSPACE/bench_old.txt"
+
+    - name: Remove worktree
+      if: always()
+      run: git worktree remove --force /tmp/bench-base || true
+
+    - name: Compare and gate on regressions
+      run: |
+        benchstat bench_old.txt bench_new.txt | tee bench_comparison.txt
+        echo ""
+        echo "=== Regression check (threshold: 15%) ==="
+        python3 - <<'PYEOF'
+        import sys, re
+
+        THRESHOLD = 15.0
+        regressions = []
+
+        with open("bench_comparison.txt") as f:
+            for line in f:
+                m = re.search(r'\+(\d+(?:\.\d+)?)%', line)
+                if m and float(m.group(1)) > THRESHOLD:
+                    regressions.append(line.rstrip())
+
+        if regressions:
+            print(f"FAIL: {len(regressions)} benchmark(s) regressed by more than {THRESHOLD:.0f}%:")
+            for r in regressions:
+                print(f"  {r}")
+            sys.exit(1)
+
+        print(f"PASS: No benchmarks regressed by more than {THRESHOLD:.0f}%")
+        PYEOF
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: benchmark-results
+        path: |
+          bench_new.txt
+          bench_old.txt
+          bench_comparison.txt
+
   build:
     name: Build
     runs-on: ubuntu-latest
     needs: [lint, test]
     strategy:
       matrix:
-        go-version: ['1.24', '1.25']
         arch: [amd64, arm64]
     steps:
     - name: Checkout
@@ -140,7 +239,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version: '1.25'
 
     - name: Install dependencies
       run: |
@@ -164,7 +263,7 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ebpf-guard-linux-${{ matrix.arch }}-go${{ matrix.go-version }}
+        name: ebpf-guard-linux-${{ matrix.arch }}
         path: ebpf-guard-linux-${{ matrix.arch }}
 
   docker:
@@ -234,7 +333,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24'
+        go-version: '1.25'
 
     - name: Run gosec
       uses: securego/gosec@master

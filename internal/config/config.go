@@ -94,11 +94,17 @@ type ServerConfig struct {
 // AuthConfig holds authentication configuration.
 type AuthConfig struct {
 	// Enabled enables Bearer token authentication for /metrics and /debug/pprof.
-	// If true and BearerToken is empty, a random token is generated at startup.
+	// If true and tokens are empty, random tokens are generated at startup.
 	Enabled bool `mapstructure:"enabled"`
-	// BearerToken is the static token to use for authentication.
-	// If empty and Enabled is true, a random 32-byte token is generated.
+	// BearerToken is deprecated — use AdminToken instead. Kept for backward compatibility.
+	// If set and AdminToken is empty, BearerToken is promoted to AdminToken.
 	BearerToken string `mapstructure:"bearer_token"`
+	// ViewerToken grants read-only access: GET /alerts, GET /rules, GET /health, GET /metrics.
+	// Auto-generated at startup if empty and Enabled is true.
+	ViewerToken string `mapstructure:"viewer_token"`
+	// AdminToken grants full access including write operations (POST /feedback, PUT /rules, DELETE).
+	// Auto-generated at startup if empty and Enabled is true.
+	AdminToken string `mapstructure:"admin_token"`
 }
 
 // NotificationsConfig holds notification backend settings.
@@ -418,6 +424,11 @@ type EnforcementConfig struct {
 	// ThrottleCleanupIntervalMinutes is how often (minutes) the stale-entry cleanup runs.
 	// Default: 5
 	ThrottleCleanupIntervalMinutes int `mapstructure:"throttle_cleanup_interval_minutes"`
+	// AuditLog is the path to an append-only JSONL audit log for enforcement actions.
+	// Each kill/block/throttle action is written as one JSON line.
+	// The file is rotated (renamed to <path>.1) when it exceeds 100 MB.
+	// Empty string disables audit logging.
+	AuditLog string `mapstructure:"audit_log"`
 }
 
 // WatchdogConfig holds watchdog and auto-tuning settings (Sprint 22.0).
@@ -726,6 +737,8 @@ func setDefaults(v *viper.Viper) {
 	// Auth defaults - auth is enabled by default for security
 	v.SetDefault("auth.enabled", true)
 	v.SetDefault("auth.bearer_token", "")
+	v.SetDefault("auth.viewer_token", "")
+	v.SetDefault("auth.admin_token", "")
 
 	// Notifications defaults - all disabled by default
 	v.SetDefault("notifications.slack.enabled", false)
@@ -775,6 +788,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("enforcement.throttle_cpu_percent", 10)
 	v.SetDefault("enforcement.throttle_max_age_minutes", 30)
 	v.SetDefault("enforcement.throttle_cleanup_interval_minutes", 5)
+	v.SetDefault("enforcement.audit_log", "")
 
 	// Watchdog defaults (Sprint 22.0)
 	v.SetDefault("watchdog.memory_pressure.enabled", true)

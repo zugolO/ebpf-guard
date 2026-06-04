@@ -79,7 +79,18 @@ func NewServerWithOptions(bindAddress, metricsPath, healthPath string, enablePpr
 }
 
 // NewServerWithAuth creates a new HTTP server with authentication support.
+// The provided authToken is treated as an admin token; viewer access is not separately restricted.
+// For two-role RBAC use NewServerWithRBAC.
 func NewServerWithAuth(bindAddress, metricsPath, healthPath string, enablePprof, enableDebug bool, authToken string, authEnabled bool) *Server {
+	return NewServerWithRBAC(bindAddress, metricsPath, healthPath, enablePprof, enableDebug, "", authToken, authEnabled)
+}
+
+// NewServerWithRBAC creates a new HTTP server with two-role RBAC authentication:
+//   - viewerToken: grants GET access to /alerts, /rules, /health, /metrics
+//   - adminToken:  grants full access including write operations
+//
+// Pass empty strings to disable a role. Pass authEnabled=false to skip auth entirely.
+func NewServerWithRBAC(bindAddress, metricsPath, healthPath string, enablePprof, enableDebug bool, viewerToken, adminToken string, authEnabled bool) *Server {
 	if metricsPath == "" {
 		metricsPath = "/metrics"
 	}
@@ -132,11 +143,13 @@ func NewServerWithAuth(bindAddress, metricsPath, healthPath string, enablePprof,
 	// Register REST API routes
 	s.RegisterAPIRoutes(mux)
 
-	// Apply auth middleware if enabled
+	// Apply RBAC middleware if auth is enabled and at least one token is configured.
 	handler := http.Handler(mux)
-	if authEnabled && authToken != "" {
-		slog.Info("exporter/server: enabling bearer token authentication")
-		handler = BearerTokenMiddleware(authToken)(mux)
+	if authEnabled && (viewerToken != "" || adminToken != "") {
+		slog.Info("exporter/server: enabling RBAC authentication",
+			slog.Bool("viewer_role", viewerToken != ""),
+			slog.Bool("admin_role", adminToken != ""))
+		handler = RBACMiddleware(viewerToken, adminToken)(mux)
 	}
 
 	s.server = &http.Server{

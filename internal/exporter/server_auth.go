@@ -12,6 +12,14 @@ import (
 	"strings"
 )
 
+// Role represents an RBAC role for HTTP API access.
+type Role string
+
+const (
+	RoleViewer Role = "viewer"
+	RoleAdmin  Role = "admin"
+)
+
 // tokenPreview returns a short, non-sensitive prefix of a token suitable for
 // correlating log lines without disclosing the secret. Tokens are 64 hex chars,
 // so an 8-char prefix is not enough to brute-force.
@@ -73,6 +81,7 @@ func SetupAuth(authCfg AuthConfig, logger *slog.Logger) (string, bool) {
 }
 
 // BearerTokenMiddleware creates middleware that validates Bearer token.
+// Kept for backward compatibility and simple single-token use cases.
 func BearerTokenMiddleware(token string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +105,95 @@ func BearerTokenMiddleware(token string) func(http.Handler) http.Handler {
 
 			if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) != 1 {
 				http.Error(w, "Unauthorized: invalid token", http.StatusUnauthorized)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// viewerPrefixes lists URL path prefixes that viewer-role tokens may access via GET.
+var viewerPrefixes = []string{
+	"/metrics",
+	"/api/v1/alerts",
+	"/api/v1/rules",
+	"/api/v1/status",
+	"/api/v1/feedback",
+	"/api/v1/incidents",
+}
+
+// isViewerAllowed returns true when the viewer role may access the given method+path.
+// Viewers are restricted to GET requests on the read-only endpoints listed in viewerPrefixes.
+func isViewerAllowed(method, path string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return false
+	}
+	for _, prefix := range viewerPrefixes {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") || strings.HasPrefix(path, prefix+"?") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractBearerToken parses the Authorization header and returns the bearer token.
+// Returns ("", false) if the header is missing or malformed.
+func extractBearerToken(r *http.Request) (string, bool) {
+	h := r.Header.Get("Authorization")
+	if h == "" {
+		return "", false
+	}
+	parts := strings.SplitN(h, " ", 2)
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+// RBACMiddleware creates middleware that enforces two-role RBAC:
+//   - viewer: GET /alerts, GET /rules, GET /health, GET /metrics (and sub-paths)
+//   - admin:  all endpoints including write operations
+//
+// Health endpoints (/health, /health/ready, /health/live) are always public.
+// Returns 401 when no valid token is present, 403 when the token's role is insufficient.
+func RBACMiddleware(viewerToken, adminToken string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+
+			// Health probes are always public — Kubernetes needs them without auth.
+			if strings.HasPrefix(path, "/health") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			token, ok := extractBearerToken(r)
+			if !ok {
+				http.Error(w, "Unauthorized: missing or malformed Authorization header", http.StatusUnauthorized)
+				return
+			}
+
+			// Determine role by constant-time token comparison.
+			var role Role
+			if adminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1 {
+				role = RoleAdmin
+			} else if viewerToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(viewerToken)) == 1 {
+				role = RoleViewer
+			} else {
+				http.Error(w, "Unauthorized: invalid token", http.StatusUnauthorized)
+				return
+			}
+
+			// Admin may access everything.
+			if role == RoleAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Viewer is restricted to read-only endpoints.
+			if !isViewerAllowed(r.Method, path) {
+				http.Error(w, "Forbidden: viewer role does not permit this operation", http.StatusForbidden)
 				return
 			}
 

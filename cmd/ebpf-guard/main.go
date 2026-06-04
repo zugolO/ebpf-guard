@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/internal/canary"
 	"github.com/zugolO/ebpf-guard/internal/collector"
@@ -232,6 +233,34 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// Open the append-only enforcement audit log when configured.
+	var auditCh chan enforcer.AuditEntry
+	if cfg.Enforcement.AuditLog != "" {
+		al, alErr := audit.New(cfg.Enforcement.AuditLog)
+		if alErr != nil {
+			slog.Warn("enforcer: audit log unavailable, audit disabled",
+				slog.String("path", cfg.Enforcement.AuditLog),
+				slog.Any("error", alErr))
+		} else {
+			defer al.Close()
+			auditCh = make(chan enforcer.AuditEntry, 256)
+			go func() {
+				for entry := range auditCh {
+					_ = al.Log(audit.Entry{
+						TS:       entry.Timestamp,
+						Action:   string(entry.Action),
+						PID:      entry.PID,
+						Rule:     entry.RuleID,
+						Comm:     entry.Comm,
+						Enforced: entry.Success,
+					})
+				}
+			}()
+			slog.Info("enforcer: audit log enabled",
+				slog.String("path", cfg.Enforcement.AuditLog))
+		}
+	}
+
 	// Initialize enforcer when enabled in config.
 	// Wired to the engine so rule actions (kill/block/throttle) are executed
 	// asynchronously via the engine's bounded worker pool.
@@ -246,6 +275,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			ThrottleCPUPercent:      cfg.Enforcement.ThrottleCPUPercent,
 			ThrottleMaxAge:          time.Duration(cfg.Enforcement.ThrottleMaxAgeMinutes) * time.Minute,
 			ThrottleCleanupInterval: time.Duration(cfg.Enforcement.ThrottleCleanupIntervalMinutes) * time.Minute,
+			AuditLogChannel:         auditCh,
 		}
 		if e, enfErr := enforcer.NewEnforcer(slog.Default(), enfCfg); enfErr != nil {
 			slog.Warn("enforcer: failed to initialize, enforcement disabled",
@@ -288,19 +318,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 	defer alertStore.Close()
 
-	authToken := cfg.Auth.BearerToken
-	if cfg.Auth.Enabled && authToken == "" {
-		authToken = generateToken()
-		slog.Info("auth: generated bearer token (not shown for security)")
+	viewerToken := cfg.Auth.ViewerToken
+	adminToken := cfg.Auth.AdminToken
+	// Backward compat: bearer_token promoted to admin if new fields are not set.
+	if adminToken == "" && cfg.Auth.BearerToken != "" {
+		adminToken = cfg.Auth.BearerToken
+	}
+	if cfg.Auth.Enabled {
+		if adminToken == "" {
+			adminToken = generateToken()
+			slog.Info("auth: generated admin token (not shown for security)")
+		}
+		if viewerToken == "" {
+			viewerToken = generateToken()
+			slog.Info("auth: generated viewer token (not shown for security)")
+		}
 	}
 
-	srv := exporter.NewServerWithAuth(
+	srv := exporter.NewServerWithRBAC(
 		cfg.Server.BindAddress,
 		cfg.Server.MetricsPath,
 		cfg.Server.HealthPath,
 		cfg.Server.EnablePprof,
 		cfg.Server.EnableDebug,
-		authToken,
+		viewerToken,
+		adminToken,
 		cfg.Auth.Enabled,
 	)
 	srv.SetAlertStore(alertStore)

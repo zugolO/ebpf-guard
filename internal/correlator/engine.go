@@ -645,10 +645,11 @@ func (ce *CorrelationEngine) checkDup(ruleID string, pid uint32, comm string) bo
 	return ce.dedup.check(ruleID, pid, comm)
 }
 
-// markDedup records that (ruleID, pid, comm) was emitted now.
+// markDedup records that (ruleID, pid, comm) was emitted at now.
 // Must be called only after the alert has passed all rate-limit checks.
-func (ce *CorrelationEngine) markDedup(ruleID string, pid uint32, comm string) {
-	ce.dedup.mark(ruleID, pid, comm)
+// now should be captured once per Ingest call (before any lock is acquired).
+func (ce *CorrelationEngine) markDedup(ruleID string, pid uint32, comm string, now time.Time) {
+	ce.dedup.mark(ruleID, pid, comm, now)
 }
 
 // DrainEnforceQueue blocks until all submitted enforcement tasks have been
@@ -820,7 +821,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 		// Rule-based enforcement runs regardless of dedup: the action cooldown
 		// is the sole gate against enforcement spam, not the alert dedup window.
 		if ce.actionExecutor != nil && isEnforcedAction(alert.Action) {
-			if ce.tryAcquireEnforceCooldown(alert.RuleID, alert.PID) {
+			if ce.tryAcquireEnforceCooldown(alert.RuleID, alert.PID, start) {
 				alert.Enforced = true
 				ce.enforcedCounter.Inc()
 				// Detach from the per-request span context: the parent span ends
@@ -849,7 +850,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 
 		// Alert passed all filters — record in dedup window and emit.
 		if ce.enableDedup {
-			ce.markDedup(alert.RuleID, alert.PID, alert.Comm)
+			ce.markDedup(alert.RuleID, alert.PID, alert.Comm, start)
 		}
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
@@ -874,7 +875,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 				continue
 			}
 			if ce.enableDedup {
-				ce.markDedup(alert.RuleID, alert.PID, alert.Comm)
+				ce.markDedup(alert.RuleID, alert.PID, alert.Comm, start)
 			}
 			seq := ce.alertSeq.Add(1)
 			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
@@ -894,7 +895,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 			} else if ce.rateLimiter.Allow(iocAlert.RuleID) &&
 				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
 				if ce.enableDedup {
-					ce.markDedup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm)
+					ce.markDedup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm, start)
 				}
 				alerts = append(alerts, *iocAlert)
 				ce.alertsGenerated.Add(1)
@@ -974,7 +975,7 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 					globalOK := !ce.globalLimiterEnabled || ce.globalLimiter.Allow()
 					if perRuleOK && globalOK {
 						if ce.enableDedup {
-							ce.markDedup(anomalyAlert.RuleID, anomalyAlert.PID, anomalyAlert.Comm)
+							ce.markDedup(anomalyAlert.RuleID, anomalyAlert.PID, anomalyAlert.Comm, start)
 						}
 						alerts = append(alerts, anomalyAlert)
 						ce.alertsGenerated.Add(1)
@@ -1205,8 +1206,9 @@ func isEnforcedAction(action string) bool {
 // the (ruleID, pid) pair. Successive calls within enforceCooldown return false
 // to prevent enforcement spam. Delegates to the sharded cooldowns map so
 // concurrent goroutines contend on different shards rather than a single mutex.
-func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32) bool {
-	return ce.cooldowns.tryAcquire(ruleID, pid, ce.enforceCooldown)
+// now should be the single time.Now() captured at the start of Ingest().
+func (ce *CorrelationEngine) tryAcquireEnforceCooldown(ruleID string, pid uint32, now time.Time) bool {
+	return ce.cooldowns.tryAcquire(ruleID, pid, ce.enforceCooldown, now)
 }
 
 // checkIOCMatch checks e against the gossip IOC store and returns an alert when matched.

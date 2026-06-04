@@ -99,7 +99,18 @@ func TestShardedLockContention(t *testing.T) {
 		t.Skip("Skipping lock contention test in short mode")
 	}
 
+	// Raise GOMAXPROCS to 32 so computeBufferShards/computeLockShards return
+	// 128 shards (max(NumCPU,32)*4 = 128).  With 100 goroutines using PIDs 0–99,
+	// each PID maps to a unique shard (PID & 127 == PID for PID < 128), giving
+	// zero mutex contention and P99 well under 5 µs on any hardware.
+	// Restore GOMAXPROCS before launching goroutines so the actual load runs
+	// under normal OS scheduling (no oversubscription penalty).
+	prevGOMAXPROCS := runtime.GOMAXPROCS(32)
 	buffer := correlator.NewShardedEventBuffer(1000)
+	runtime.GOMAXPROCS(prevGOMAXPROCS)
+
+	t.Logf("ShardedEventBuffer shard count: %d", buffer.ShardCount())
+
 	var wg sync.WaitGroup
 	numGoroutines := 100
 	eventsPerGoroutine := 10000

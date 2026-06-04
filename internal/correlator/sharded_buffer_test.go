@@ -229,7 +229,7 @@ func TestShardedLock_Concurrent(t *testing.T) {
 				counter.Add(1)
 				sl.Unlock(pid)
 			}
-		}(uint32(i % lockShardCount)) // Use only lockShardCount different PIDs
+		}(uint32(i % 16)) // Use only 16 different PIDs to ensure shard contention
 	}
 
 	wg.Wait()

@@ -1,0 +1,131 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}
+  namespace: {{ include "ebpf-guard.namespace" . }}
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+  {{- with .Values.podAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ebpf-guard.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ebpf-guard.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "ebpf-guard.serviceAccountName" . }}
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ include "ebpf-guard.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - "--config=/etc/ebpf-guard/config.yaml"
+          ports:
+            - name: metrics
+              containerPort: {{ trimPrefix ":" .Values.config.server.bind_address | default "9090" }}
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            - name: cgroup-fs
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: proc-fs
+              mountPath: /proc
+              readOnly: true
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: config
+              mountPath: /etc/ebpf-guard/config.yaml
+              subPath: config.yaml
+            - name: rules
+              mountPath: /etc/ebpf-guard/rules.yaml
+              subPath: rules.yaml
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: cgroup-fs
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: proc-fs
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: config
+          configMap:
+            name: {{ include "ebpf-guard.fullname" . }}-config
+        - name: rules
+          configMap:
+            name: {{ include "ebpf-guard.fullname" . }}-rules
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

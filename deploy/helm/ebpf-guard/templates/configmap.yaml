@@ -1,0 +1,145 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-config
+  namespace: {{ include "ebpf-guard.namespace" . }}
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    server:
+      bind_address: {{ .Values.config.server.bind_address | quote }}
+      metrics_path: {{ .Values.config.server.metrics_path | quote }}
+      health_path: {{ .Values.config.server.health_path | quote }}
+
+    bpf:
+      map_sizes:
+        events: {{ .Values.config.bpf.map_sizes.events }}
+        processes: {{ .Values.config.bpf.map_sizes.processes }}
+        connections: {{ .Values.config.bpf.map_sizes.connections }}
+
+    rules:
+      path: {{ .Values.config.rules.path | quote }}
+      hot_reload: {{ .Values.config.rules.hot_reload }}
+      rate_limit_alerts: {{ .Values.config.rules.rate_limit_alerts }}
+      rate_limit_window: {{ .Values.config.rules.rate_limit_window }}
+      max_alerts_per_window: {{ .Values.config.rules.max_alerts_per_window }}
+
+    profiler:
+      enabled: {{ .Values.config.profiler.enabled }}
+      learning_period: {{ .Values.config.profiler.learning_period }}
+      min_learning_samples: {{ .Values.config.profiler.min_learning_samples }}
+      anomaly_threshold: {{ .Values.config.profiler.anomaly_threshold }}
+      ewma_weight: {{ .Values.config.profiler.ewma_weight }}
+      profile_ttl: {{ .Values.config.profiler.profile_ttl }}
+
+    alerting:
+      enabled: {{ .Values.config.alerting.enabled }}
+      webhook_url: {{ .Values.config.alerting.webhook_url | quote }}
+      generator_url: {{ .Values.config.alerting.generator_url | default (printf "http://%s:%d" (include "ebpf-guard.fullname" .) (.Values.service.port | int)) | quote }}
+      batch_size: {{ .Values.config.alerting.batch_size }}
+      batch_timeout: {{ .Values.config.alerting.batch_timeout }}
+      circuit_breaker_threshold: {{ .Values.config.alerting.circuit_breaker_threshold }}
+
+    kubernetes:
+      enabled: {{ .Values.config.kubernetes.enabled }}
+      kubeconfig_path: {{ .Values.config.kubernetes.kubeconfig_path | quote }}
+      resync_period: {{ .Values.config.kubernetes.resync_period }}
+
+    auth:
+      enabled: {{ .Values.config.auth.enabled }}
+      bearer_token: {{ .Values.config.auth.bearer_token | quote }}
+
+    notifications:
+      slack:
+        enabled: {{ .Values.config.notifications.slack.enabled }}
+        webhook_url: {{ .Values.config.notifications.slack.webhook_url | quote }}
+        channel: {{ .Values.config.notifications.slack.channel | quote }}
+        min_severity: {{ .Values.config.notifications.slack.min_severity }}
+      teams:
+        enabled: {{ .Values.config.notifications.teams.enabled }}
+        webhook_url: {{ .Values.config.notifications.teams.webhook_url | quote }}
+        min_severity: {{ .Values.config.notifications.teams.min_severity }}
+      webhook:
+        enabled: {{ .Values.config.notifications.webhook.enabled }}
+        url: {{ .Values.config.notifications.webhook.url | quote }}
+        headers: {{ .Values.config.notifications.webhook.headers | toYaml | nindent 10 }}
+        template: {{ .Values.config.notifications.webhook.template | quote }}
+        min_severity: {{ .Values.config.notifications.webhook.min_severity }}
+
+    store:
+      backend: {{ .Values.config.store.backend }}
+      sqlite:
+        path: {{ .Values.config.store.sqlite.path | quote }}
+      opensearch:
+        url: {{ .Values.config.store.opensearch.url | quote }}
+        index: {{ .Values.config.store.opensearch.index | quote }}
+        username: {{ .Values.config.store.opensearch.username | quote }}
+        password: {{ .Values.config.store.opensearch.password | quote }}
+        insecure_skip_verify: {{ .Values.config.store.opensearch.insecure_skip_verify }}
+
+    collectors:
+      tls:
+        enabled: {{ .Values.config.collectors.tls.enabled }}
+        scan_interval: {{ .Values.config.collectors.tls.scan_interval }}
+        max_data_size: {{ .Values.config.collectors.tls.max_data_size }}
+      dns:
+        enabled: {{ .Values.config.collectors.dns.enabled }}
+        dga_threshold: {{ .Values.config.collectors.dns.dga_threshold }}
+        tunneling_min_length: {{ .Values.config.collectors.dns.tunneling_min_length }}
+        high_frequency_threshold: {{ .Values.config.collectors.dns.high_frequency_threshold }}
+      backpressure_strategy: {{ .Values.config.collectors.backpressure_strategy }}
+      otel_tracing:
+        enabled: {{ .Values.config.collectors.otel_tracing.enabled }}
+        exporter_endpoint: {{ .Values.config.collectors.otel_tracing.exporter_endpoint | quote }}
+        service_name: {{ .Values.config.collectors.otel_tracing.service_name | quote }}
+        propagate_to_alerts: {{ .Values.config.collectors.otel_tracing.propagate_to_alerts }}
+
+    wasm:
+      enabled: {{ .Values.config.wasm.enabled }}
+      plugin_dir: {{ .Values.config.wasm.plugin_dir | quote }}
+      memory_limit_mb: {{ .Values.config.wasm.memory_limit_mb }}
+
+    gossip:
+      enabled: {{ .Values.config.gossip.enabled }}
+      secret: {{ .Values.config.gossip.secret | quote }}
+      peers: {{ .Values.config.gossip.peers | toYaml | nindent 8 }}
+      ioc_ttl: {{ .Values.config.gossip.ioc_ttl }}
+      max_iocs: {{ .Values.config.gossip.max_iocs }}
+      push_interval: {{ .Values.config.gossip.push_interval }}
+
+    osint:
+      enabled: {{ .Values.config.osint.enabled }}
+      refresh_interval: {{ .Values.config.osint.refresh_interval | quote }}
+      output_dir: {{ .Values.config.osint.output_dir | quote }}
+      max_iocs_per_rule: {{ .Values.config.osint.max_iocs_per_rule }}
+      misp:
+        enabled: {{ .Values.config.osint.misp.enabled }}
+        url: {{ .Values.config.osint.misp.url | quote }}
+        api_key: {{ .Values.config.osint.misp.api_key | quote }}
+        verify_tls: {{ .Values.config.osint.misp.verify_tls }}
+        attribute_types: {{ .Values.config.osint.misp.attribute_types | toYaml | nindent 10 }}
+        min_threat_level: {{ .Values.config.osint.misp.min_threat_level }}
+        tags: {{ .Values.config.osint.misp.tags | toYaml | nindent 10 }}
+      opencti:
+        enabled: {{ .Values.config.osint.opencti.enabled }}
+        url: {{ .Values.config.osint.opencti.url | quote }}
+        api_key: {{ .Values.config.osint.opencti.api_key | quote }}
+        verify_tls: {{ .Values.config.osint.opencti.verify_tls }}
+        confidence_min: {{ .Values.config.osint.opencti.confidence_min }}
+        tlp_markings: {{ .Values.config.osint.opencti.tlp_markings | toYaml | nindent 10 }}
+      virustotal:
+        enabled: {{ .Values.config.osint.virustotal.enabled }}
+        api_key: {{ .Values.config.osint.virustotal.api_key | quote }}
+        enterprise_feeds: {{ .Values.config.osint.virustotal.enterprise_feeds }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-rules
+  namespace: {{ include "ebpf-guard.namespace" . }}
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+data:
+  rules.yaml: |
+    {{- .Values.rules.content | nindent 4 }}

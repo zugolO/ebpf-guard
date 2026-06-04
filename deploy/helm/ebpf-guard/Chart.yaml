@@ -1,0 +1,21 @@
+apiVersion: v2
+name: ebpf-guard
+description: eBPF-based runtime security agent for Linux/Kubernetes
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ebpf
+  - security
+  - runtime-security
+  - kubernetes
+  - threat-detection
+home: https://github.com/zugolO/ebpf-guard
+sources:
+  - https://github.com/zugolO/ebpf-guard
+maintainers:
+  - name: ebpf-guard maintainers
+    url: https://github.com/zugolO/ebpf-guard
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: security

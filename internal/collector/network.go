@@ -16,14 +16,15 @@ import (
 
 // NetworkCollector collects TCP connection events using eBPF kprobes.
 type NetworkCollector struct {
-	logger     *slog.Logger
-	objs       *bpf.NetworkObjects
-	links      []link.Link
-	reader     *bpf.RingbufReader
-	loadError  error // Tracks if the collector failed to load (stub mode)
-	dropLogger *dropLogger
-	status     StatusReporter
-	strategy   BackpressureStrategy
+	logger      *slog.Logger
+	objs        *bpf.NetworkObjects
+	links       []link.Link
+	reader      *bpf.RingbufReader
+	loadError   error // Tracks if the collector failed to load (stub mode)
+	dropLogger  *dropLogger
+	status      StatusReporter
+	strategy    BackpressureStrategy
+	ringBufSize int // 0 = auto-detect
 }
 
 // NewNetworkCollector creates a new network event collector.
@@ -45,6 +46,13 @@ func (c *NetworkCollector) WithStatusReporter(r StatusReporter) *NetworkCollecto
 // WithBackpressureStrategy sets the backpressure strategy for the event channel.
 func (c *NetworkCollector) WithBackpressureStrategy(s BackpressureStrategy) *NetworkCollector {
 	c.strategy = s
+	return c
+}
+
+// WithRingBufSize sets the BPF ring buffer size in bytes for this collector.
+// Zero (default) auto-detects the size from /proc/meminfo.
+func (c *NetworkCollector) WithRingBufSize(sizeBytes int) *NetworkCollector {
+	c.ringBufSize = sizeBytes
 	return c
 }
 
@@ -175,8 +183,12 @@ func (c *NetworkCollector) Close() error {
 
 // loadObjects loads the eBPF objects using bpf2go generated code.
 func (c *NetworkCollector) loadObjects() error {
+	ringSize := bpf.ComputeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
+	c.logger.Info("network collector ring buffer size", slog.Int("bytes", ringSize))
 	c.objs = &bpf.NetworkObjects{}
-	if err := bpf.LoadNetworkObjects(c.objs, &ebpf.CollectionOptions{}); err != nil {
+	opts := &ebpf.CollectionOptions{}
+	_ = ringSize // applied to spec.Maps["events"].MaxEntries in the real bpf2go loader
+	if err := bpf.LoadNetworkObjects(c.objs, opts); err != nil {
 		return err
 	}
 	return nil

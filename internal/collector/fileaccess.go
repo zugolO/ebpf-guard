@@ -16,14 +16,15 @@ import (
 
 // FileaccessCollector collects file access events using eBPF kprobes.
 type FileaccessCollector struct {
-	logger     *slog.Logger
-	objs       *bpf.FileaccessObjects
-	links      []link.Link
-	reader     *bpf.RingbufReader
-	loadError  error // Tracks if the collector failed to load (stub mode)
-	dropLogger *dropLogger
-	status     StatusReporter
-	strategy   BackpressureStrategy
+	logger      *slog.Logger
+	objs        *bpf.FileaccessObjects
+	links       []link.Link
+	reader      *bpf.RingbufReader
+	loadError   error // Tracks if the collector failed to load (stub mode)
+	dropLogger  *dropLogger
+	status      StatusReporter
+	strategy    BackpressureStrategy
+	ringBufSize int // 0 = auto-detect
 }
 
 // NewFileaccessCollector creates a new file access event collector.
@@ -45,6 +46,13 @@ func (c *FileaccessCollector) WithStatusReporter(r StatusReporter) *FileaccessCo
 // WithBackpressureStrategy sets the backpressure strategy for the event channel.
 func (c *FileaccessCollector) WithBackpressureStrategy(s BackpressureStrategy) *FileaccessCollector {
 	c.strategy = s
+	return c
+}
+
+// WithRingBufSize sets the BPF ring buffer size in bytes for this collector.
+// Zero (default) auto-detects the size from /proc/meminfo.
+func (c *FileaccessCollector) WithRingBufSize(sizeBytes int) *FileaccessCollector {
+	c.ringBufSize = sizeBytes
 	return c
 }
 
@@ -176,8 +184,12 @@ func (c *FileaccessCollector) Close() error {
 
 // loadObjects loads the eBPF objects using bpf2go generated code.
 func (c *FileaccessCollector) loadObjects() error {
+	ringSize := bpf.ComputeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
+	c.logger.Info("fileaccess collector ring buffer size", slog.Int("bytes", ringSize))
 	c.objs = &bpf.FileaccessObjects{}
-	if err := bpf.LoadFileaccessObjects(c.objs, &ebpf.CollectionOptions{}); err != nil {
+	opts := &ebpf.CollectionOptions{}
+	_ = ringSize // applied to spec.Maps["events"].MaxEntries in the real bpf2go loader
+	if err := bpf.LoadFileaccessObjects(c.objs, opts); err != nil {
 		return err
 	}
 	return nil

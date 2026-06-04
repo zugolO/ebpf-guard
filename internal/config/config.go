@@ -269,6 +269,12 @@ type OpenSearchStoreConfig struct {
 type BPFConfig struct {
 	// MapSizes defines the size of BPF maps (number of entries)
 	MapSizes MapSizeConfig `mapstructure:"map_sizes"`
+
+	// RingBufSize is the BPF ring buffer size in bytes applied to each
+	// event ring buffer (syscall, network, file, TLS, LSM).
+	// 0 = auto-detect: 1% of MemAvailable from /proc/meminfo, clamped to [256 KB, 32 MB].
+	// Non-multiples of the page size (4096) are rounded up automatically.
+	RingBufSize int `mapstructure:"ring_buf_size"`
 }
 
 // MapSizeConfig holds BPF map size settings.
@@ -634,6 +640,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.events", 65536)
 	v.SetDefault("bpf.map_sizes.processes", 16384)
 	v.SetDefault("bpf.map_sizes.connections", 32768)
+	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
 
 	// Rules defaults
 	v.SetDefault("rules.path", "/etc/ebpf-guard/rules.yaml")

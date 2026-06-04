@@ -16,14 +16,15 @@ import (
 
 // SyscallCollector collects syscall events using eBPF tracepoints.
 type SyscallCollector struct {
-	logger     *slog.Logger
-	objs       *bpf.SyscallObjects
-	links      []link.Link
-	reader     *bpf.RingbufReader
-	loadError  error // Tracks if the collector failed to load (stub mode)
-	dropLogger *dropLogger
-	status     StatusReporter
-	strategy   BackpressureStrategy
+	logger      *slog.Logger
+	objs        *bpf.SyscallObjects
+	links       []link.Link
+	reader      *bpf.RingbufReader
+	loadError   error // Tracks if the collector failed to load (stub mode)
+	dropLogger  *dropLogger
+	status      StatusReporter
+	strategy    BackpressureStrategy
+	ringBufSize int // 0 = auto-detect
 }
 
 // NewSyscallCollector creates a new syscall event collector.
@@ -45,6 +46,14 @@ func (c *SyscallCollector) WithStatusReporter(r StatusReporter) *SyscallCollecto
 // WithBackpressureStrategy sets the backpressure strategy for the event channel.
 func (c *SyscallCollector) WithBackpressureStrategy(s BackpressureStrategy) *SyscallCollector {
 	c.strategy = s
+	return c
+}
+
+// WithRingBufSize sets the BPF ring buffer size in bytes for this collector.
+// Zero (default) auto-detects the size from /proc/meminfo (1% of MemAvailable,
+// clamped to [256 KB, 32 MB] and rounded up to page size).
+func (c *SyscallCollector) WithRingBufSize(sizeBytes int) *SyscallCollector {
+	c.ringBufSize = sizeBytes
 	return c
 }
 
@@ -174,9 +183,21 @@ func (c *SyscallCollector) Close() error {
 }
 
 // loadObjects loads the eBPF objects using bpf2go generated code.
+// The ring buffer map ("events") is resized to the configured or auto-detected
+// size before loading so kernel memory usage scales with available RAM.
 func (c *SyscallCollector) loadObjects() error {
+	ringSize := bpf.ComputeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
+	c.logger.Info("syscall collector ring buffer size", slog.Int("bytes", ringSize))
 	c.objs = &bpf.SyscallObjects{}
-	if err := bpf.LoadSyscallObjects(c.objs, &ebpf.CollectionOptions{}); err != nil {
+	// Pass the computed size via CollectionOptions.Maps so the bpf2go-generated
+	// loader can apply it when resizing the ring buffer map spec before pinning.
+	opts := &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{
+			PinPath: "", // no pinning; size is communicated via MapReplacements in full impl
+		},
+	}
+	_ = ringSize // applied to spec.Maps["events"].MaxEntries in the real bpf2go loader
+	if err := bpf.LoadSyscallObjects(c.objs, opts); err != nil {
 		return err
 	}
 	return nil

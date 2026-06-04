@@ -6,11 +6,6 @@ import (
 	"time"
 )
 
-// mapShardCount is the number of shards used by shardedCooldowns and shardedDedup.
-// Reuses lockShardCount (16) from sharded_buffer.go so the pid→shard function
-// is consistent across all sharded structures in the package.
-const mapShardCount = lockShardCount
-
 // ---------------------------------------------------------------------------
 // shardedCooldowns — enforcement cooldown map with per-shard locking
 // ---------------------------------------------------------------------------
@@ -21,15 +16,21 @@ type cooldownShard struct {
 	m  map[cooldownKey]time.Time
 }
 
-// shardedCooldowns distributes (ruleID, pid) cooldown entries across
-// mapShardCount shards keyed by pid % mapShardCount.  Under concurrent
-// enforcement bursts this reduces lock contention by ~16× vs. a single mutex.
+// shardedCooldowns distributes (ruleID, pid) cooldown entries across dynamically
+// sized shards keyed by pid & mask.  The shard count is determined by
+// computeLockShards() at construction time so it scales with the machine's core
+// count and reduces enforcement-burst lock contention automatically.
 type shardedCooldowns struct {
-	shards [mapShardCount]cooldownShard
+	shards []cooldownShard
+	mask   uint32
 }
 
 func newShardedCooldowns() *shardedCooldowns {
-	sc := &shardedCooldowns{}
+	count, mask := computeLockShards()
+	sc := &shardedCooldowns{
+		shards: make([]cooldownShard, count),
+		mask:   mask,
+	}
 	for i := range sc.shards {
 		sc.shards[i].m = make(map[cooldownKey]time.Time)
 	}
@@ -40,10 +41,10 @@ func newShardedCooldowns() *shardedCooldowns {
 // (ruleID, pid) has expired or was never set.  Returns false if the last
 // acquisition is within cooldown of now — prevents enforcement spam.
 // The check-and-set is atomic within the shard's mutex.
-func (sc *shardedCooldowns) tryAcquire(ruleID string, pid uint32, cooldown time.Duration) bool {
+// now must be captured by the caller before entering any hot-path lock.
+func (sc *shardedCooldowns) tryAcquire(ruleID string, pid uint32, cooldown time.Duration, now time.Time) bool {
 	key := cooldownKey{ruleID: ruleID, pid: pid}
-	shard := &sc.shards[shardIndex(pid)]
-	now := time.Now()
+	shard := &sc.shards[pid&sc.mask]
 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -79,17 +80,23 @@ type dedupShard struct {
 	m  map[dedupKey]time.Time
 }
 
-// shardedDedup distributes (ruleID, pid, comm) dedup entries across
-// mapShardCount shards keyed by pid % mapShardCount.
-// check and mark are split so rate-limit counters are not inflated by
-// burst duplicates (mark is called only after an alert passes rate-limiting).
+// shardedDedup distributes (ruleID, pid, comm) dedup entries across dynamically
+// sized shards keyed by pid & mask.  check and mark are split so rate-limit
+// counters are not inflated by burst duplicates (mark is called only after an
+// alert passes all rate-limit filters).
 type shardedDedup struct {
-	shards [mapShardCount]dedupShard
+	shards []dedupShard
+	mask   uint32
 	window time.Duration
 }
 
 func newShardedDedup(window time.Duration) *shardedDedup {
-	sd := &shardedDedup{window: window}
+	count, mask := computeLockShards()
+	sd := &shardedDedup{
+		window: window,
+		shards: make([]dedupShard, count),
+		mask:   mask,
+	}
 	for i := range sd.shards {
 		sd.shards[i].m = make(map[dedupKey]time.Time)
 	}
@@ -102,7 +109,7 @@ func newShardedDedup(window time.Duration) *shardedDedup {
 func (sd *shardedDedup) check(ruleID string, pid uint32, comm string) bool {
 	cutoff := time.Now().Add(-sd.window)
 	key := dedupKey{ruleID: ruleID, pid: pid, comm: comm}
-	shard := &sd.shards[shardIndex(pid)]
+	shard := &sd.shards[pid&sd.mask]
 
 	shard.mu.Lock()
 	prev, ok := shard.m[key]
@@ -111,13 +118,14 @@ func (sd *shardedDedup) check(ruleID string, pid uint32, comm string) bool {
 	return ok && prev.After(cutoff)
 }
 
-// mark records that (ruleID, pid, comm) was emitted now.
-func (sd *shardedDedup) mark(ruleID string, pid uint32, comm string) {
+// mark records that (ruleID, pid, comm) was emitted at now.
+// now must be captured by the caller before entering any hot-path lock.
+func (sd *shardedDedup) mark(ruleID string, pid uint32, comm string, now time.Time) {
 	key := dedupKey{ruleID: ruleID, pid: pid, comm: comm}
-	shard := &sd.shards[shardIndex(pid)]
+	shard := &sd.shards[pid&sd.mask]
 
 	shard.mu.Lock()
-	shard.m[key] = time.Now()
+	shard.m[key] = now
 	shard.mu.Unlock()
 }
 

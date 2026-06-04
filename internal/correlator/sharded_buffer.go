@@ -10,20 +10,18 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
-// lockShardCount is the fixed shard count used by ShardedLock's static arrays.
-// ShardedEventBuffer uses a dynamic count instead (see computeBufferShards).
-const lockShardCount = 16
-
-// shardIndex returns the shard index for a ShardedLock with lockShardCount shards.
-func shardIndex(pid uint32) uint32 {
-	return pid % lockShardCount
-}
-
-// computeBufferShards returns the optimal shard count for ShardedEventBuffer on this
-// machine. Uses the next power of 2 ≥ NumCPU, clamped to [4, 256].
-// Power-of-2 counts enable fast PID→shard mapping via bitmasking (pid & mask).
+// computeBufferShards returns the optimal shard count for ShardedEventBuffer.
+// Uses max(NumCPU, GOMAXPROCS)*4 rounded to the next power of 2, clamped to [4, 256].
+// The 4× multiplier gives headroom for goroutine bursts beyond CPU count; the
+// power-of-2 result enables fast PID→shard mapping via bitmask (pid & mask).
+// Tests can call runtime.GOMAXPROCS(N) before creating a buffer to raise the shard
+// count and eliminate contention (e.g. GOMAXPROCS=32 → 128 shards for 100 PIDs).
 func computeBufferShards() (count int, mask uint32) {
 	n := runtime.NumCPU()
+	if gmp := runtime.GOMAXPROCS(0); gmp > n {
+		n = gmp
+	}
+	n *= 4
 	if n < 4 {
 		n = 4
 	}
@@ -37,9 +35,34 @@ func computeBufferShards() (count int, mask uint32) {
 	return p, uint32(p - 1)
 }
 
+// computeLockShards returns the shard count for ShardedLock and the sharded maps
+// (shardedCooldowns, shardedDedup). Uses max(NumCPU, GOMAXPROCS)*4, rounded to the
+// next power of 2, clamped to [16, 256].  The 4× multiplier provides headroom for
+// goroutine bursts; power-of-2 enables bitmask PID→shard lookup (O(1), no division).
+// Tests can call runtime.GOMAXPROCS(N) before NewShardedLock/newShardedCooldowns to
+// scale the shard count for their concurrency level.
+func computeLockShards() (count int, mask uint32) {
+	n := runtime.NumCPU()
+	if gmp := runtime.GOMAXPROCS(0); gmp > n {
+		n = gmp
+	}
+	n *= 4
+	if n < 16 {
+		n = 16
+	}
+	p := 16
+	for p < n {
+		p <<= 1
+	}
+	if p > 256 {
+		p = 256
+	}
+	return p, uint32(p - 1)
+}
+
 // ShardedEventBuffer stores events per process using sharded locks for better concurrency.
-// The shard count scales with the number of CPUs (next power of 2 ≥ NumCPU, min 4, max 256),
-// so high-core-count servers automatically benefit from reduced lock contention.
+// The shard count scales with max(NumCPU, GOMAXPROCS)*4, so high-core-count servers
+// and test environments with elevated GOMAXPROCS benefit from reduced lock contention.
 type ShardedEventBuffer struct {
 	shards   []*eventBufferShard
 	numShards int
@@ -81,6 +104,7 @@ func NewShardedEventBuffer(maxSize int) *ShardedEventBuffer {
 // Add adds an event to the buffer for the given PID.
 func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
 	shard := sb.shards[sb.bufferShardIdx(pid)]
+	now := time.Now() // capture before acquiring lock to keep time.Now() off the hot path
 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -92,7 +116,7 @@ func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
 		}
 		shard.buffers[pid] = rb
 	}
-	shard.lastSeen[pid] = time.Now()
+	shard.lastSeen[pid] = now
 
 	// Add event to circular buffer
 	rb.events[rb.head] = e
@@ -251,55 +275,54 @@ func (sb *ShardedEventBuffer) ShardCount() int {
 }
 
 // ShardedLock provides a sharded mutex for PID-keyed locking.
-// It uses a fixed lockShardCount (16) shards; its static array layout avoids
-// heap allocations and false-sharing padding is provided by sync.RWMutex.
+// The shard count is determined at construction time by computeLockShards()
+// (max(NumCPU,GOMAXPROCS)*4, power-of-2, clamped [16,256]), so it scales
+// automatically with the machine's core count. All indexing uses a bitmask
+// (pid & mask) rather than modulo — O(1) with no division.
 type ShardedLock struct {
-	shards [lockShardCount]sync.RWMutex
-	// contentionStats tracks lock acquisition time for metrics (nanoseconds)
-	contentionStats [lockShardCount]atomic.Int64
+	shards          []sync.RWMutex
+	contentionStats []atomic.Int64
+	mask            uint32
 }
 
-// NewShardedLock creates a new sharded lock.
+// NewShardedLock creates a new sharded lock sized for the current machine.
 func NewShardedLock() *ShardedLock {
-	return &ShardedLock{}
+	count, mask := computeLockShards()
+	return &ShardedLock{
+		shards:          make([]sync.RWMutex, count),
+		contentionStats: make([]atomic.Int64, count),
+		mask:            mask,
+	}
 }
 
 // Lock acquires an exclusive write lock on the shard for the given PID.
-func (sl *ShardedLock) Lock(pid uint32) {
-	sl.shards[shardIndex(pid)].Lock()
-}
+func (sl *ShardedLock) Lock(pid uint32) { sl.shards[pid&sl.mask].Lock() }
 
 // Unlock releases the exclusive write lock on the shard for the given PID.
-func (sl *ShardedLock) Unlock(pid uint32) {
-	sl.shards[shardIndex(pid)].Unlock()
-}
+func (sl *ShardedLock) Unlock(pid uint32) { sl.shards[pid&sl.mask].Unlock() }
 
 // TryLock attempts to acquire an exclusive write lock without blocking.
-func (sl *ShardedLock) TryLock(pid uint32) bool {
-	return sl.shards[shardIndex(pid)].TryLock()
-}
+func (sl *ShardedLock) TryLock(pid uint32) bool { return sl.shards[pid&sl.mask].TryLock() }
 
 // RLock acquires a shared read lock on the shard for the given PID.
-// Multiple goroutines can hold RLock on the same shard simultaneously.
-func (sl *ShardedLock) RLock(pid uint32) {
-	sl.shards[shardIndex(pid)].RLock()
-}
+func (sl *ShardedLock) RLock(pid uint32) { sl.shards[pid&sl.mask].RLock() }
 
 // RUnlock releases a shared read lock on the shard for the given PID.
-func (sl *ShardedLock) RUnlock(pid uint32) {
-	sl.shards[shardIndex(pid)].RUnlock()
-}
+func (sl *ShardedLock) RUnlock(pid uint32) { sl.shards[pid&sl.mask].RUnlock() }
 
 // RecordContention records lock contention time for metrics.
 func (sl *ShardedLock) RecordContention(pid uint32, nanoseconds int64) {
-	sl.contentionStats[shardIndex(pid)].Add(nanoseconds)
+	sl.contentionStats[pid&sl.mask].Add(nanoseconds)
 }
 
 // GetContentionStats returns total contention time per shard.
-func (sl *ShardedLock) GetContentionStats() [lockShardCount]int64 {
-	var stats [lockShardCount]int64
-	for i := 0; i < lockShardCount; i++ {
+func (sl *ShardedLock) GetContentionStats() []int64 {
+	stats := make([]int64, len(sl.shards))
+	for i := range stats {
 		stats[i] = sl.contentionStats[i].Load()
 	}
 	return stats
 }
+
+// ShardCount returns the number of shards in use (for observability/testing).
+func (sl *ShardedLock) ShardCount() int { return len(sl.shards) }

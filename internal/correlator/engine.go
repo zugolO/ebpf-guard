@@ -174,6 +174,12 @@ type CorrelationEngine struct {
 	// incidentTracker groups alerts from the same (pid, namespace) within a
 	// sliding window into Incident records for higher-level attack correlation.
 	incidentTracker *IncidentTracker
+
+	// PID-partitioned ingest worker pool.  Each worker holds an isolated
+	// AnomalyDetector so ProcessEvent is always called from a single goroutine
+	// per instance.  IngestAsync routes events here; Ingest bypasses the pool.
+	ingestPool []*workerState
+	ingestMask uint32
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -205,6 +211,20 @@ type regoTask struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	alerts []types.Alert
+}
+
+// workerTask is an event dispatched to a PID-partitioned ingest worker.
+type workerTask struct {
+	ctx   context.Context
+	event types.Event
+}
+
+// workerState is one slot in the parallel ingest pool.  Each worker holds an
+// isolated AnomalyDetector so ProcessEvent is always called from a single
+// goroutine per instance, satisfying the detector's thread-safety invariant.
+type workerState struct {
+	ch chan workerTask
+	ad *profiler.AnomalyDetector // nil when anomaly detection is disabled
 }
 
 // CorrelationEngineConfig holds configuration for the correlation engine.
@@ -296,6 +316,12 @@ type CorrelationEngineConfig struct {
 	// WasmEngine evaluates custom WASM detection plugins on every event.
 	// When nil, WASM plugin evaluation is skipped.
 	WasmEngine WasmEvaluator
+
+	// IngestWorkerCount controls the size of the parallel ingest worker pool.
+	// Zero → max(runtime.NumCPU(), 4) rounded up to the next power of 2, capped at 64.
+	// Workers are PID-partitioned so each AnomalyDetector instance is always
+	// accessed from a single goroutine, satisfying its thread-safety invariant.
+	IngestWorkerCount int
 
 	// AnomalyScoreReporter is called after every anomaly ProcessEvent so an
 	// external cardinality-guarded metric (e.g. exporter.SetAnomalyScoreWithGuard)
@@ -567,6 +593,49 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		}
 	}
 
+	// Start PID-partitioned ingest worker pool.  Each worker gets an isolated
+	// AnomalyDetector so ProcessEvent is never called concurrently for the same
+	// detector instance.  Pool size is a power of 2 for O(1) bitmask routing.
+	{
+		n := config.IngestWorkerCount
+		if n <= 0 {
+			n = runtime.NumCPU()
+			if n < 4 {
+				n = 4
+			}
+			p := 1
+			for p < n {
+				p <<= 1
+			}
+			n = p
+		}
+		if n > 64 {
+			n = 64
+		}
+		ce.ingestMask = uint32(n - 1)
+		ce.ingestPool = make([]*workerState, n)
+		for i := range ce.ingestPool {
+			var workerAD *profiler.AnomalyDetector
+			if config.EnableAnomaly {
+				workerAD = profiler.NewAnomalyDetectorWithSamples(
+					ctx,
+					config.AnomalyThreshold,
+					config.LearningPeriod,
+					config.EWMAWeight,
+					config.MinLearningSamples,
+					config.ProfilerMaxPIDs,
+				)
+			}
+			ce.ingestPool[i] = &workerState{
+				ch: make(chan workerTask, 1024),
+				ad: workerAD,
+			}
+		}
+		for _, w := range ce.ingestPool {
+			go ce.runIngestWorker(ctx, w)
+		}
+	}
+
 	// Update the gauge periodically so it reflects the live state count.
 	go ce.updateRLGaugeLoop(ctx)
 
@@ -718,8 +787,50 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 	return nil
 }
 
-// Ingest processes a single event and may produce alerts.
+// Ingest processes a single event synchronously and may produce alerts.
+// Safe to call from a single goroutine. For parallel ingestion across multiple
+// goroutines, use IngestAsync which routes events to the PID-partitioned pool.
 func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.Alert {
+	return ce.ingestWithAD(ctx, e, ce.anomalyDetector)
+}
+
+// IngestAsync dispatches e to the PID-partitioned ingest worker for e.PID and
+// returns without waiting for processing.  The same PID always maps to the same
+// worker goroutine so each per-worker AnomalyDetector satisfies its
+// single-goroutine call invariant.  Blocks under backpressure (when the worker
+// channel is full) rather than dropping events; cancelled contexts abort the send.
+func (ce *CorrelationEngine) IngestAsync(ctx context.Context, e types.Event) {
+	if len(ce.ingestPool) == 0 {
+		ce.Ingest(ctx, e)
+		return
+	}
+	w := ce.ingestPool[e.PID&ce.ingestMask]
+	select {
+	case w.ch <- workerTask{ctx: ctx, event: e}:
+	case <-ctx.Done():
+	}
+}
+
+// runIngestWorker drains one worker channel until ctx is cancelled.
+func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState) {
+	for {
+		select {
+		case task, ok := <-w.ch:
+			if !ok {
+				return
+			}
+			ce.ingestWithAD(task.ctx, task.event, w.ad)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// ingestWithAD is the core event processing pipeline.  ad is the AnomalyDetector
+// to use — nil disables anomaly scoring.  This indirection lets the PID-partitioned
+// worker pool supply a per-worker detector without violating the single-goroutine
+// call invariant.
+func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad *profiler.AnomalyDetector) []types.Alert {
 	start := time.Now()
 
 	// Open an OTel span only when the event carries APM trace context (extracted
@@ -908,9 +1019,9 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 	// Anomaly detection (if enabled and learning complete).
 	// ruleConfirmed=true suppresses EWMA baseline updates for events that
 	// rule/WASM/IOC detectors already confirmed as malicious.
-	if ce.enableAnomaly && ce.anomalyDetector != nil {
+	if ce.enableAnomaly && ad != nil {
 		ruleConfirmed := len(alerts) > 0
-		if result := ce.anomalyDetector.ProcessEvent(e, ruleConfirmed); result != nil {
+		if result := ad.ProcessEvent(e, ruleConfirmed); result != nil {
 			// Always report the score (even non-anomalous) so the cardinality-guarded
 			// Prometheus gauge tracks all active processes, not only anomaly triggers.
 			if ce.scoreReporter != nil {

@@ -87,13 +87,50 @@ func (s *MemoryStore) removeFromByTime(id string) {
 	}
 }
 
-// StoreBatch persists multiple alerts.
+// StoreBatch persists multiple alerts in a single critical section.
+// Unlike calling Store N times, this holds the lock once, bulk-appends all
+// entries, and re-sorts byTime once at the end — O(n log n) total instead of
+// O(n²) from N individual insertSorted calls.
 func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) error {
-	for _, alert := range alerts {
-		if err := s.Store(ctx, alert); err != nil {
-			return err
-		}
+	if len(alerts) == 0 {
+		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Pre-grow byTime to avoid repeated slice reallocations during append.
+	needed := len(s.byTime) + len(alerts)
+	if cap(s.byTime) < needed {
+		grown := make([]byTimeEntry, len(s.byTime), needed)
+		copy(grown, s.byTime)
+		s.byTime = grown
+	}
+
+	for i := range alerts {
+		a := alerts[i] // local copy — do not modify caller's slice
+		if a.ID == "" {
+			s.seq++
+			a.ID = fmt.Sprintf("mem-%d", s.seq)
+		}
+		if a.Timestamp.IsZero() {
+			a.Timestamp = time.Now()
+		}
+		if _, exists := s.alerts[a.ID]; exists {
+			s.removeFromByTime(a.ID)
+		}
+		s.alerts[a.ID] = a
+		s.byTime = append(s.byTime, byTimeEntry{
+			id:        a.ID,
+			ts:        a.Timestamp,
+			severity:  a.Severity,
+			namespace: a.Enrichment.Namespace,
+		})
+	}
+
+	// Single sort instead of N insertSorted calls — O(n log n) vs O(n²).
+	sort.Slice(s.byTime, func(i, j int) bool {
+		return s.byTime[j].ts.Before(s.byTime[i].ts)
+	})
 	return nil
 }
 

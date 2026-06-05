@@ -34,11 +34,13 @@ func BenchmarkStore_Store(b *testing.B) {
 }
 
 // BenchmarkStore_StoreBatch benchmarks batch alert insertion.
+// A fresh store is created each iteration so that the sort cost is independent
+// of b.N — this gives a stable measurement of inserting a 300-alert batch into
+// an empty store, matching the acceptance criterion (≤ 5 ms/op).
 func BenchmarkStore_StoreBatch(b *testing.B) {
-	store := NewMemoryStore()
 	ctx := context.Background()
 
-	batchSize := 100
+	const batchSize = 300
 	alerts := make([]types.Alert, batchSize)
 	for i := 0; i < batchSize; i++ {
 		alerts[i] = types.Alert{
@@ -54,10 +56,14 @@ func BenchmarkStore_StoreBatch(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Modify IDs to avoid duplicates across iterations
+		b.StopTimer()
+		store := NewMemoryStore()
+		// Refresh IDs so each iteration stores unique alerts.
 		for j := range alerts {
 			alerts[j].ID = fmt.Sprintf("bench-%d-%d", i, j)
 		}
+		b.StartTimer()
+
 		if err := store.StoreBatch(ctx, alerts); err != nil {
 			b.Fatal(err)
 		}
@@ -171,34 +177,39 @@ func BenchmarkStore_Count(b *testing.B) {
 	}
 }
 
-// BenchmarkStore_Delete benchmarks alert deletion.
+// BenchmarkStore_Delete benchmarks the Delete operation in isolation.
+// Setup (StoreBatch of 1000 alerts) is performed outside the timer so that
+// alloc/op reflects only the Delete call — expected to be near zero since
+// Delete reslices byTime and deletes map keys without allocating.
 func BenchmarkStore_Delete(b *testing.B) {
 	ctx := context.Background()
 
+	// Build the setup batch once; reuse across b.N iterations.
+	const setupCount = 1000
+	setupAlerts := make([]types.Alert, setupCount)
+	for j := 0; j < setupCount; j++ {
+		setupAlerts[j] = types.Alert{
+			ID:        fmt.Sprintf("alert-%d", j),
+			Timestamp: time.Now().Add(-time.Duration(j*2) * time.Hour),
+			RuleID:    "rule-bench",
+			Severity:  types.SeverityWarning,
+			PID:       1234,
+			Comm:      "bench",
+			Message:   "Benchmark alert",
+		}
+	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Create a new store for each iteration
+		// Setup outside the timer so alloc/op measures only Delete.
+		b.StopTimer()
 		store := NewMemoryStore()
-
-		// Pre-populate
-		for j := 0; j < 1000; j++ {
-			alert := types.Alert{
-				ID:        fmt.Sprintf("alert-%d", j),
-				Timestamp: time.Now().Add(-time.Duration(j*2) * time.Hour),
-				RuleID:    "rule-bench",
-				Severity:  types.SeverityWarning,
-				PID:       1234,
-				Comm:      "bench",
-				Message:   "Benchmark alert",
-			}
-			if err := store.Store(ctx, alert); err != nil {
-				b.Fatal(err)
-			}
+		if err := store.StoreBatch(ctx, setupAlerts); err != nil {
+			b.Fatal(err)
 		}
+		b.StartTimer()
 
-		// Delete alerts older than 24 hours
-		_, err := store.Delete(ctx, 24*time.Hour)
-		if err != nil {
+		if _, err := store.Delete(ctx, 24*time.Hour); err != nil {
 			b.Fatal(err)
 		}
 	}

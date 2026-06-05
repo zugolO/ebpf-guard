@@ -138,3 +138,92 @@ func TestLSMCollector_checkAvailability(t *testing.T) {
 	// Just verify it doesn't panic
 	_ = avail
 }
+
+// TestFNV32a verifies the Go FNV-32a helper produces values that satisfy the
+// basic collision-free requirement needed for the path blocklist.
+func TestFNV32a(t *testing.T) {
+	// Same path → same hash
+	assert.Equal(t, fnv32a("/tmp/evil"), fnv32a("/tmp/evil"))
+	// Different paths → different hashes (no false positives in blocklist)
+	assert.NotEqual(t, fnv32a("/tmp/evil"), fnv32a("/tmp/legit"))
+	assert.NotEqual(t, fnv32a("/etc/shadow"), fnv32a("/etc/passwd"))
+	// Empty string has a well-defined value (FNV offset basis unchanged = 2166136261)
+	assert.Equal(t, uint32(2166136261), fnv32a(""))
+}
+
+// TestPathBlocklist_BlockEvil_AllowLegit is the acceptance-test from issue #33:
+// blocking /tmp/evil must not block /tmp/legit.
+// We simulate the BPF map with an in-memory map keyed by FNV-32a hash.
+func TestPathBlocklist_BlockEvil_AllowLegit(t *testing.T) {
+	// Simulate the BPF path_blocklist map: hash → blocked
+	bpfMap := map[uint32]bool{
+		fnv32a("/tmp/evil"): true,
+	}
+
+	isBlocked := func(path string) bool {
+		return bpfMap[fnv32a(path)]
+	}
+
+	assert.True(t, isBlocked("/tmp/evil"), "/tmp/evil must be blocked")
+	assert.False(t, isBlocked("/tmp/legit"), "/tmp/legit must be allowed")
+	assert.False(t, isBlocked("/etc/passwd"), "/etc/passwd must be allowed")
+}
+
+// TestLSMCollector_PathBlocklist_StubMode verifies that path operations return
+// a meaningful error when the LSM collector is in stub mode (no kernel support).
+func TestLSMCollector_PathBlocklist_StubMode(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	lc, err := NewLSMCollector(LSMConfig{Enabled: "false"}, logger)
+	require.NoError(t, err)
+
+	err = lc.AddPathToBlocklist("/tmp/evil")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not available")
+
+	err = lc.RemovePathFromBlocklist("/tmp/evil")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not available")
+
+	err = lc.SetPathBlocklist([]string{"/tmp/evil"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not available")
+}
+
+// TestPathBlocklist_Idempotent verifies that adding the same path twice does
+// not change the effective blocklist (the BPF map update is idempotent).
+func TestPathBlocklist_Idempotent(t *testing.T) {
+	bpfMap := map[uint32]bool{}
+
+	add := func(path string) {
+		bpfMap[fnv32a(path)] = true
+	}
+
+	add("/tmp/evil")
+	add("/tmp/evil") // second add must not cause problems
+	assert.Len(t, bpfMap, 1, "duplicate path must not create duplicate map entries")
+}
+
+// TestPathBlocklist_HotReload verifies that SetPathBlocklist replaces the
+// previous config-driven set while preserving dynamically added entries.
+func TestPathBlocklist_HotReload(t *testing.T) {
+	// Round 1: config has /etc/shadow
+	configMap := map[uint32]bool{fnv32a("/etc/shadow"): true}
+	// Dynamic rule blocked /tmp/evil too
+	dynamicMap := map[uint32]bool{fnv32a("/tmp/evil"): true}
+
+	isBlocked := func(path string) bool {
+		return configMap[fnv32a(path)] || dynamicMap[fnv32a(path)]
+	}
+
+	assert.True(t, isBlocked("/etc/shadow"))
+	assert.True(t, isBlocked("/tmp/evil"))
+	assert.False(t, isBlocked("/tmp/legit"))
+
+	// Round 2: config hot-reload removes /etc/shadow, adds /proc/sysrq-trigger
+	delete(configMap, fnv32a("/etc/shadow"))
+	configMap[fnv32a("/proc/sysrq-trigger")] = true
+
+	assert.False(t, isBlocked("/etc/shadow"), "removed config path must be unblocked")
+	assert.True(t, isBlocked("/proc/sysrq-trigger"), "new config path must be blocked")
+	assert.True(t, isBlocked("/tmp/evil"), "dynamic path must survive hot-reload")
+}

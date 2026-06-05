@@ -452,6 +452,12 @@ type EnforcementConfig struct {
 	// The file is rotated (renamed to <path>.1) when it exceeds 100 MB.
 	// Empty string disables audit logging.
 	AuditLog string `mapstructure:"audit_log"`
+	// LSMPathBlocklist is a list of absolute path globs that are always blocked
+	// via the eBPF LSM file_open hook, regardless of per-rule conditions.
+	// Requires LSM BPF support (kernel 5.9+) and block_backend = lsm.
+	// Hot-reloadable: the BPF map is updated without restart on config change.
+	// Example: ["/etc/shadow", "/proc/sysrq-trigger"]
+	LSMPathBlocklist []string `mapstructure:"lsm_path_blocklist"`
 }
 
 // WatchdogConfig holds watchdog and auto-tuning settings (Sprint 22.0).
@@ -812,6 +818,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("enforcement.throttle_max_age_minutes", 30)
 	v.SetDefault("enforcement.throttle_cleanup_interval_minutes", 5)
 	v.SetDefault("enforcement.audit_log", "")
+	v.SetDefault("enforcement.lsm_path_blocklist", []string{})
 
 	// Watchdog defaults (Sprint 22.0)
 	v.SetDefault("watchdog.memory_pressure.enabled", true)

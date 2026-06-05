@@ -154,6 +154,23 @@ int BPF_PROG(lsm_file_open, struct file *file)
 	__u8 *blocked = bpf_map_lookup_elem(&path_blocklist, &hash);
 	if (blocked && *blocked == 1) {
 		update_stat(LSM_STAT_FILE_OPEN_BLOCK);
+
+		/* Emit audit event for the blocked open */
+		struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+					sizeof(struct lsm_audit_event), 0);
+		if (ae) {
+			ae->type         = EVENT_TYPE_LSM_AUDIT;
+			ae->timestamp_ns = bpf_ktime_get_ns();
+			ae->pid          = pid;
+			ae->uid          = (__u32)bpf_get_current_uid_gid();
+			ae->target_pid   = 0;
+			ae->action       = LSM_ACTION_DENY;
+			ae->hook         = LSM_HOOK_FILE_OPEN;
+			ae->sig          = 0;
+			bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+			bpf_probe_read_kernel_str(&ae->path, sizeof(ae->path), path_buf);
+			bpf_ringbuf_submit(ae, 0);
+		}
 		return -EACCES;
 	}
 
@@ -182,8 +199,24 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 		return 0;
 	}
 
-	/* Slow path: PID is blocked */
+	/* Slow path: PID is blocked — emit audit event then deny */
 	update_stat(LSM_STAT_SOCK_CONN_BLOCK);
+
+	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+				sizeof(struct lsm_audit_event), 0);
+	if (ae) {
+		ae->type         = EVENT_TYPE_LSM_AUDIT;
+		ae->timestamp_ns = bpf_ktime_get_ns();
+		ae->pid          = pid;
+		ae->uid          = (__u32)bpf_get_current_uid_gid();
+		ae->target_pid   = 0;
+		ae->action       = LSM_ACTION_DENY;
+		ae->hook         = LSM_HOOK_SOCKET_CONNECT;
+		ae->sig          = 0;
+		bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+		__builtin_memset(&ae->path, 0, sizeof(ae->path));
+		bpf_ringbuf_submit(ae, 0);
+	}
 	return -EPERM;
 }
 
@@ -198,17 +231,24 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
 {
 	__u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-	/* Always allow but audit the action */
+	/* Always allow but emit an audit event recording who signalled whom */
 	update_stat(LSM_STAT_TASK_KILL_ALLOW);
 
-	/* TODO: Add audit logging via perf event ring buffer
-	 * struct lsm_audit_event {
-	 *     __u32 pid;
-	 *     __u32 target_pid;
-	 *     int sig;
-	 *     __u8 action;  // 0=audit, 1=block
-	 * };
-	 */
+	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+				sizeof(struct lsm_audit_event), 0);
+	if (ae) {
+		ae->type         = EVENT_TYPE_LSM_AUDIT;
+		ae->timestamp_ns = bpf_ktime_get_ns();
+		ae->pid          = pid;
+		ae->uid          = (__u32)bpf_get_current_uid_gid();
+		ae->target_pid   = (__u32)BPF_CORE_READ(target, tgid);
+		ae->action       = LSM_ACTION_AUDIT;
+		ae->hook         = LSM_HOOK_TASK_KILL;
+		ae->sig          = (__u8)sig;
+		bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+		__builtin_memset(&ae->path, 0, sizeof(ae->path));
+		bpf_ringbuf_submit(ae, 0);
+	}
 
 	return 0;
 }

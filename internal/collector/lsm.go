@@ -9,6 +9,7 @@ package collector
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,6 +36,81 @@ func fnv32a(s string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(s))
 	return h.Sum32()
+}
+
+// lsmAuditEventRaw mirrors struct lsm_audit_event from bpf/common.h.
+// The struct is __attribute__((packed)), so fields are at fixed byte offsets with no padding.
+// Layout (107 bytes total):
+//   type(4) + timestamp_ns(8) + pid(4) + target_pid(4) + uid(4) +
+//   action(1) + hook(1) + sig(1) + comm(16) + path(64)
+type lsmAuditEventRaw struct {
+	Type      uint32
+	Timestamp uint64
+	PID       uint32
+	TargetPID uint32
+	UID       uint32
+	Action    uint8
+	Hook      uint8
+	Sig       uint8
+	Comm      [16]byte
+	Path      [64]byte
+}
+
+const lsmAuditEventSize = 4 + 8 + 4 + 4 + 4 + 1 + 1 + 1 + 16 + 64 // 107 bytes
+
+var lsmHookNames = [3]string{"file_open", "socket_connect", "task_kill"}
+
+// parseLSMAuditEventRaw deserialises a raw ring-buffer record into lsmAuditEventRaw.
+func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
+	if len(raw) < lsmAuditEventSize {
+		return lsmAuditEventRaw{}, fmt.Errorf("lsm_audit_event too short: %d < %d", len(raw), lsmAuditEventSize)
+	}
+	var e lsmAuditEventRaw
+	e.Type      = binary.LittleEndian.Uint32(raw[0:4])
+	e.Timestamp = binary.LittleEndian.Uint64(raw[4:12])
+	e.PID       = binary.LittleEndian.Uint32(raw[12:16])
+	e.TargetPID = binary.LittleEndian.Uint32(raw[16:20])
+	e.UID       = binary.LittleEndian.Uint32(raw[20:24])
+	e.Action    = raw[24]
+	e.Hook      = raw[25]
+	e.Sig       = raw[26]
+	copy(e.Comm[:], raw[27:43])
+	copy(e.Path[:], raw[43:107])
+	return e, nil
+}
+
+// toAuditEntry converts a parsed LSM audit event into an audit.Entry for the JSONL log.
+func (e lsmAuditEventRaw) toAuditEntry() audit.Entry {
+	hookName := "unknown"
+	if int(e.Hook) < len(lsmHookNames) {
+		hookName = lsmHookNames[e.Hook]
+	}
+	action := "audit"
+	if e.Action == 1 { // LSM_ACTION_DENY
+		action = "deny"
+	}
+	return audit.Entry{
+		TS:        time.Now(),
+		Action:    action,
+		PID:       e.PID,
+		Rule:      "lsm_audit",
+		Comm:      nullTermString(e.Comm[:]),
+		Enforced:  e.Action == 1,
+		Hook:      hookName,
+		TargetPID: e.TargetPID,
+		Path:      nullTermString(e.Path[:]),
+		UID:       e.UID,
+	}
+}
+
+// nullTermString converts a NUL-padded byte slice to a Go string.
+func nullTermString(b []byte) string {
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i])
+		}
+	}
+	return string(b)
 }
 
 // LSMConfig holds configuration for the LSM collector.
@@ -384,6 +461,7 @@ type KmodCollector struct {
 	strategy     BackpressureStrategy
 	available    bool
 	lostTotal    atomic.Uint64
+	auditLogger  *audit.Logger // optional; routes LSM audit events out-of-band
 }
 
 // NewKmodCollector creates a new kernel-module-load and cgroup-escape collector.
@@ -414,6 +492,13 @@ func (c *KmodCollector) WithStatusReporter(r StatusReporter) *KmodCollector {
 // WithBackpressureStrategy sets the backpressure strategy.
 func (c *KmodCollector) WithBackpressureStrategy(s BackpressureStrategy) *KmodCollector {
 	c.strategy = s
+	return c
+}
+
+// WithAuditLogger wires an audit.Logger so that LSM audit events (EVENT_TYPE_LSM_AUDIT)
+// are written to the JSONL audit log instead of forwarded to the event channel.
+func (c *KmodCollector) WithAuditLogger(l *audit.Logger) *KmodCollector {
+	c.auditLogger = l
 	return c
 }
 
@@ -585,6 +670,10 @@ func (c *KmodCollector) readLoop(ctx context.Context, out chan<- types.Event, re
 			c.logger.Error("kmod: parse error", "error", err)
 			continue
 		}
+		if event == nil {
+			// Consumed inline (e.g. LSM audit event routed to audit logger).
+			continue
+		}
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			c.dropLogger.record(c.logger, "kmod")
 			c.lostTotal.Add(1)
@@ -599,6 +688,23 @@ func (c *KmodCollector) LostEvents() uint64 {
 }
 
 func (c *KmodCollector) parseKmodOrFallback(raw []byte) (*types.Event, error) {
+	if len(raw) < 4 {
+		return nil, fmt.Errorf("kmod: raw event too short (%d bytes)", len(raw))
+	}
+	evtType := binary.LittleEndian.Uint32(raw[:4])
+	if evtType == uint32(types.EventLSMAudit) {
+		// LSM audit events are routed to the audit logger, not the event channel.
+		if c.auditLogger != nil {
+			ae, err := parseLSMAuditEventRaw(raw)
+			if err != nil {
+				return nil, fmt.Errorf("kmod: lsm audit event: %w", err)
+			}
+			if logErr := c.auditLogger.Log(ae.toAuditEntry()); logErr != nil {
+				c.logger.Warn("kmod: audit log write failed", "error", logErr)
+			}
+		}
+		return nil, nil // consumed; do not forward to the event channel
+	}
 	evt, err := bpf.ParseKmodEvent(raw)
 	if err != nil {
 		return nil, err

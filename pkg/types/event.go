@@ -33,6 +33,8 @@ const (
 	EventCgroupEsc EventType = 9
 	// EventGPU indicates a CUDA/GPU memory operation (alloc, free, DtoH copy, HtoD copy).
 	EventGPU EventType = 10
+	// EventLSMAudit indicates an LSM hook audit record (file_open block, socket_connect block, task_kill).
+	EventLSMAudit EventType = 11
 )
 
 // eventTypeNames maps string names used in rule YAML to numeric EventType constants.
@@ -51,6 +53,7 @@ var eventTypeNames = map[string]EventType{
 	"kmod_load":   EventKmodLoad,
 	"cgroup_esc":  EventCgroupEsc,
 	"gpu":         EventGPU,
+	"lsm_audit":   EventLSMAudit,
 }
 
 // UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.

@@ -4,11 +4,13 @@ package collector
 
 import (
 	"context"
+	"encoding/binary"
 	"log/slog"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -201,6 +203,140 @@ func TestPathBlocklist_Idempotent(t *testing.T) {
 	add("/tmp/evil")
 	add("/tmp/evil") // second add must not cause problems
 	assert.Len(t, bpfMap, 1, "duplicate path must not create duplicate map entries")
+}
+
+// TestParseLSMAuditEventRaw verifies correct byte-level deserialisation of the
+// packed lsm_audit_event C struct into the Go lsmAuditEventRaw type.
+func TestParseLSMAuditEventRaw(t *testing.T) {
+	// Build a synthetic 107-byte record matching the packed C struct layout.
+	// type(4) + timestamp(8) + pid(4) + target_pid(4) + uid(4) +
+	// action(1) + hook(1) + sig(1) + comm(16) + path(64) = 107
+	raw := make([]byte, lsmAuditEventSize)
+	binary.LittleEndian.PutUint32(raw[0:4], 11)          // type = EVENT_TYPE_LSM_AUDIT
+	binary.LittleEndian.PutUint64(raw[4:12], 123456789)  // timestamp_ns
+	binary.LittleEndian.PutUint32(raw[12:16], 9876)      // pid
+	binary.LittleEndian.PutUint32(raw[16:20], 1111)      // target_pid
+	binary.LittleEndian.PutUint32(raw[20:24], 501)       // uid
+	raw[24] = 1                                           // action = LSM_ACTION_DENY
+	raw[25] = 0                                           // hook = LSM_HOOK_FILE_OPEN
+	raw[26] = 0                                           // sig = 0
+	copy(raw[27:43], "myprocess\x00\x00\x00\x00\x00\x00\x00") // comm (NUL-padded)
+	copy(raw[43:107], "/etc/shadow\x00")                  // path (NUL-terminated)
+
+	e, err := parseLSMAuditEventRaw(raw)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint32(11), e.Type)
+	assert.Equal(t, uint64(123456789), e.Timestamp)
+	assert.Equal(t, uint32(9876), e.PID)
+	assert.Equal(t, uint32(1111), e.TargetPID)
+	assert.Equal(t, uint32(501), e.UID)
+	assert.Equal(t, uint8(1), e.Action)   // DENY
+	assert.Equal(t, uint8(0), e.Hook)    // file_open
+	assert.Equal(t, uint8(0), e.Sig)
+	assert.Equal(t, "myprocess", nullTermString(e.Comm[:]))
+	assert.Equal(t, "/etc/shadow", nullTermString(e.Path[:]))
+}
+
+// TestParseLSMAuditEventRaw_TooShort verifies that undersized records return an error.
+func TestParseLSMAuditEventRaw_TooShort(t *testing.T) {
+	_, err := parseLSMAuditEventRaw(make([]byte, 50))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+}
+
+// TestLSMAuditEventRaw_ToAuditEntry verifies that toAuditEntry maps fields correctly.
+func TestLSMAuditEventRaw_ToAuditEntry(t *testing.T) {
+	tests := []struct {
+		name       string
+		hook       uint8
+		action     uint8
+		wantHook   string
+		wantAction string
+		wantEnf    bool
+	}{
+		{"file_open deny", 0, 1, "file_open", "deny", true},
+		{"socket_connect deny", 1, 1, "socket_connect", "deny", true},
+		{"task_kill audit", 2, 0, "task_kill", "audit", false},
+		{"unknown hook", 99, 0, "unknown", "audit", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := lsmAuditEventRaw{
+				Type:   11,
+				PID:    42,
+				Action: tt.action,
+				Hook:   tt.hook,
+			}
+			copy(e.Comm[:], "test\x00")
+			copy(e.Path[:], "/tmp/x\x00")
+
+			entry := e.toAuditEntry()
+			assert.Equal(t, tt.wantHook, entry.Hook)
+			assert.Equal(t, tt.wantAction, entry.Action)
+			assert.Equal(t, tt.wantEnf, entry.Enforced)
+			assert.Equal(t, uint32(42), entry.PID)
+			assert.Equal(t, "lsm_audit", entry.Rule)
+		})
+	}
+}
+
+// TestKmodCollector_WithAuditLogger_LSMAuditRouting verifies that when a
+// KmodCollector has an audit logger attached, parsing an EVENT_TYPE_LSM_AUDIT
+// record logs it to the audit file and returns nil (not forwarded to channel).
+func TestKmodCollector_WithAuditLogger_LSMAuditRouting(t *testing.T) {
+	path := t.TempDir() + "/audit.jsonl"
+	al, err := audit.New(path)
+	require.NoError(t, err)
+	defer al.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	c, err := NewKmodCollector(logger)
+	require.NoError(t, err)
+	c.WithAuditLogger(al)
+
+	// Build a valid lsm_audit_event raw record.
+	raw := make([]byte, lsmAuditEventSize)
+	binary.LittleEndian.PutUint32(raw[0:4], 11)    // EVENT_TYPE_LSM_AUDIT
+	binary.LittleEndian.PutUint32(raw[12:16], 777) // pid
+	binary.LittleEndian.PutUint32(raw[20:24], 0)   // uid
+	raw[24] = 1                                     // action = DENY
+	raw[25] = 0                                     // hook = file_open
+	copy(raw[27:43], "attacker\x00")
+	copy(raw[43:107], "/etc/shadow\x00")
+
+	event, parseErr := c.parseKmodOrFallback(raw)
+	require.NoError(t, parseErr)
+	assert.Nil(t, event, "LSM audit events must not be forwarded to the event channel")
+
+	// Flush and verify the audit log received the entry.
+	require.NoError(t, al.Close())
+
+	// Re-open and read.
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	var buf [4096]byte
+	n, _ := f.Read(buf[:])
+	assert.Contains(t, string(buf[:n]), `"deny"`)
+	assert.Contains(t, string(buf[:n]), `"file_open"`)
+	assert.Contains(t, string(buf[:n]), `/etc/shadow`)
+}
+
+// TestKmodCollector_WithAuditLogger_NoLogger verifies that without an audit logger
+// the LSM audit event is still consumed (returns nil) and does not panic.
+func TestKmodCollector_WithAuditLogger_NoLogger(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	c, err := NewKmodCollector(logger)
+	require.NoError(t, err)
+	// No WithAuditLogger call.
+
+	raw := make([]byte, lsmAuditEventSize)
+	binary.LittleEndian.PutUint32(raw[0:4], 11)
+
+	event, parseErr := c.parseKmodOrFallback(raw)
+	require.NoError(t, parseErr)
+	assert.Nil(t, event)
 }
 
 // TestPathBlocklist_HotReload verifies that SetPathBlocklist replaces the

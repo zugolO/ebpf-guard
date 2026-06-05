@@ -217,3 +217,73 @@ patterns:
       - zsh
     severity: warning
     reference: "https://attack.mitre.org/techniques/T1059/"
+
+  # CI/CD runner spawning shell + network tool — pipeline injection T1195.002
+  - name: cicd_runner_shell_spawn
+    description: "CI/CD runner spawning shell — potential pipeline injection T1195.002"
+    parent_comms:
+      - runner
+      - gitlab-runner
+      - gh-runner
+      - drone-runner
+      - tekton-pipeline
+      - tekton
+      - jenkins
+      - agent
+      - build-agent
+      - buildkite
+      - circleci
+      - argo
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - curl
+      - wget
+      - python
+      - python3
+      - nc
+      - netcat
+    severity: critical
+    reference: "https://attack.mitre.org/techniques/T1195/002/"
+
+  # CI/CD runner spawning network recon tools — lateral movement from pipeline
+  - name: cicd_runner_recon
+    description: "CI/CD runner spawning recon tool — potential secrets harvest or lateral movement"
+    parent_comms:
+      - runner
+      - gitlab-runner
+      - gh-runner
+      - jenkins
+      - agent
+      - buildkite
+    child_comms:
+      - nmap
+      - masscan
+      - dig
+      - nslookup
+      - env
+      - printenv
+      - id
+      - whoami
+    severity: warning
+    reference: "https://attack.mitre.org/techniques/T1195/002/"
+
+  # Kubernetes workload (kubelet/containerd-shim) spawning unexpected shell
+  - name: k8s_workload_shell
+    description: "Kubernetes workload spawning interactive shell — lateral movement T1609"
+    parent_comms:
+      - kubelet
+      - containerd-shim
+      - containerd-shim-runc-v2
+      - runc
+      - cri-o
+    child_comms:
+      - sh
+      - bash
+      - dash
+      - zsh
+      - python
+      - python3
+    severity: critical
+    reference: "https://attack.mitre.org/techniques/T1609/"

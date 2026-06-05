@@ -108,3 +108,142 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1548.001, privesc]
+
+  # ============================================================================
+  # T1548.002 — Abuse Elevation Control Mechanism: Bypass User Account Control
+  # Additional dangerous capability combinations
+  # ============================================================================
+
+  # CAP_NET_ADMIN allows full network stack manipulation: routing, iptables,
+  # interface configuration. Gaining it at runtime enables traffic interception.
+  - id: privesc_net_admin_gained
+    name: "CAP_NET_ADMIN gained at runtime"
+    description: >
+      A process gained CAP_NET_ADMIN at runtime. This capability grants full
+      control over network interfaces, routing tables, and packet filtering —
+      enabling traffic interception, ARP poisoning, and network namespace
+      manipulation (T1548.002). Legitimate containers configure this at init.
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_gained
+      values:
+        - CAP_NET_ADMIN
+    severity: warning
+    action: alert
+    tags: [mitre:T1548.002, privesc, network, lateral-movement]
+
+  # CAP_SYS_CHROOT allows chroot() to any directory — a container escape vector.
+  - id: privesc_sys_chroot_gained
+    name: "CAP_SYS_CHROOT gained at runtime"
+    description: >
+      A process gained CAP_SYS_CHROOT, allowing unrestricted chroot calls.
+      Combined with a mount or pivot_root this is a container filesystem
+      escape vector. Should never be gained at runtime in hardened deployments.
+    event_type: privesc
+    condition:
+      field: caps
+      op: caps_gained
+      values:
+        - CAP_SYS_CHROOT
+    severity: warning
+    action: alert
+    tags: [mitre:T1548.002, mitre:T1611, privesc, chroot, container-escape]
+
+  # ============================================================================
+  # T1611 — Escape to Host: Namespace Escape via setns / unshare
+  # ============================================================================
+
+  # setns(2) enters an existing namespace (pid, net, mnt, uts, ipc, user).
+  # Calling setns to join another process's namespaces (particularly the init
+  # process's network/mnt namespace) is a container escape primitive.
+  - id: privesc_setns_syscall
+    name: "Privilege Escalation: setns syscall (namespace entry)"
+    description: >
+      A process called setns(2) to enter another namespace. In containerised
+      environments, entering the host's mount or network namespace (by joining
+      PID 1's namespaces) is the core step of a T1611 container escape attempt.
+      Legitimate callers include nsenter and container runtime shims.
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["308"]   # __NR_setns (x86-64)
+    severity: critical
+    action: alert
+    tags: [mitre:T1611, mitre:T1548.002, privesc, setns, namespace-escape, container-escape]
+
+  # unshare(2) creates new namespaces for the calling process.  Creating a new
+  # user namespace (CLONE_NEWUSER) gives the process root inside it — enabling
+  # privilege escalation via nested user namespaces.
+  - id: privesc_unshare_user_ns
+    name: "Privilege Escalation: unshare syscall (new user namespace)"
+    description: >
+      A process called unshare(2) to create new namespaces. Creating a user
+      namespace (CLONE_NEWUSER) with CLONE_NEWNS allows mounting arbitrary
+      filesystems inside the new namespace and is the basis of several CVE-
+      class container escapes (CVE-2019-5736, CVE-2022-0492). Legitimate
+      use is restricted to container runtime setup only.
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["272"]   # __NR_unshare (x86-64)
+    severity: warning
+    action: alert
+    tags: [mitre:T1611, mitre:T1548.002, privesc, unshare, user-namespace, container-escape]
+
+  # ============================================================================
+  # T1548.001 — SUID Binary Abuse
+  # ============================================================================
+
+  # SUID binaries execute as their owner (often root) regardless of the caller's
+  # UID. Executing SUID binaries not in the known-good list from suspicious
+  # parent processes is a T1548.001 escalation pattern.
+  - id: privesc_suid_suspicious_path
+    name: "Privilege Escalation: SUID binary executed from suspicious path"
+    description: >
+      A SUID binary was executed from a path outside the standard system
+      directories (/usr/bin, /bin, /usr/sbin). SUID binaries in /tmp, /dev/shm,
+      /var/tmp, or user-writable directories are almost always malicious:
+      an attacker planted a SUID root helper to achieve T1548.001 escalation.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/[^/]+"
+        - "/var/tmp/[^/]+"
+        - "/dev/shm/[^/]+"
+        - "/home/[^/]+/[^/]+"
+        - "/run/user/[0-9]+/[^/]+"
+    severity: critical
+    action: alert
+    tags: [mitre:T1548.001, privesc, suid, filesystem-escape]
+
+  # ============================================================================
+  # cgroup v2 escape — writing notify_on_release (T1611)
+  # ============================================================================
+
+  # The cgroup notify_on_release file executes the release_agent script when
+  # a cgroup becomes empty. Writing to this file from inside a container (or
+  # writing to release_agent) is the root-level cgroup escape technique
+  # (CVE-2022-0492 class).
+  - id: privesc_cgroup_notify_on_release
+    name: "Privilege Escalation: cgroup notify_on_release write (T1611)"
+    description: >
+      A process wrote to a cgroup notify_on_release or release_agent file.
+      This is the core mechanism of the cgroup v1/v2 container escape: a
+      process migrates to a cgroup, enables notification, triggers an empty
+      cgroup, and the release_agent runs on the host with root privileges.
+      Corresponds to CVE-2022-0492 and related cgroup escape CVEs.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/sys/fs/cgroup/.*/notify_on_release"
+        - "/sys/fs/cgroup/.*/release_agent"
+    severity: critical
+    action: block
+    tags: [mitre:T1611, privesc, cgroup, cgroup-escape, container-escape, cve]

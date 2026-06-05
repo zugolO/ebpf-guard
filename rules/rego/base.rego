@@ -43,6 +43,18 @@ rules[rule] {
 	rule := r
 }
 
+rules[rule] {
+	some r
+	data.ebpf_guard.process_injection.rules[r]
+	rule := r
+}
+
+rules[rule] {
+	some r
+	data.ebpf_guard.k8s.rules[r]
+	rule := r
+}
+
 # Helper: Check if port is privileged (< 1024)
 is_privileged_port(port) {
 	port < 1024

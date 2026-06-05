@@ -1,0 +1,184 @@
+## Process Injection Detection Rules
+# MITRE ATT&CK: T1055 — Process Injection
+# Detects techniques used to inject code into running processes.
+# Coverage: ptrace attach, memfd fileless execution, /proc/PID/mem write,
+# LD_PRELOAD and ld.so.preload hijacking.
+
+rules:
+  # ============================================================================
+  # T1055.008 — ptrace Process Injection
+  # ============================================================================
+
+  # Any ptrace(2) call is suspicious outside of debuggers. In production
+  # containers there is rarely a legitimate reason for PTRACE_ATTACH.
+  # A SOC analyst should verify the caller's comm against the developer whitelist.
+  - id: proc_inject_ptrace
+    name: "Process Injection: ptrace syscall detected"
+    description: >
+      A process invoked ptrace(2). In production environments ptrace is only
+      expected from debuggers (gdb, strace, perf) or profilers. Any other caller
+      should be investigated as a potential T1055.008 process injection attempt.
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["101"]   # __NR_ptrace (x86-64)
+    severity: warning
+    action: alert
+    tags: [mitre-t1055, mitre-t1055.008, process-injection, lateral-movement]
+
+  # ============================================================================
+  # T1055.002 — Portable Executable Injection / Fileless via memfd
+  # ============================================================================
+
+  # memfd_create(2) creates an anonymous file in RAM. Malware uses this to stage
+  # a PE/ELF payload and execute it via /proc/self/fd/N or fexecve without
+  # touching disk — a classic fileless execution primitive.
+  - id: proc_inject_memfd_create
+    name: "Process Injection: memfd_create syscall (fileless staging)"
+    description: >
+      A process called memfd_create(2) which creates an anonymous RAM-backed
+      file. This is the first step in fileless execution (T1055.002): the
+      attacker writes a payload to the fd and executes it via fexecve or
+      /proc/self/fd/<n> without touching disk.
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["319"]   # __NR_memfd_create (x86-64)
+    severity: critical
+    action: alert
+    tags: [mitre-t1055, mitre-t1055.002, process-injection, fileless, memfd]
+
+  # fexecve(3) executes the file referenced by an open file descriptor — the
+  # canonical second step after memfd_create for fileless execution.
+  - id: proc_inject_fexecve
+    name: "Process Injection: fexecve syscall (fd-based execution)"
+    description: >
+      A process invoked fexecve(3) (execve via file descriptor, __NR_execveat
+      with AT_EMPTY_PATH). Combined with memfd_create this is the canonical
+      fileless execution chain — the payload never appears as a named file.
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["322"]   # __NR_execveat (x86-64); fexecve uses AT_EMPTY_PATH
+    severity: critical
+    action: alert
+    tags: [mitre-t1055, mitre-t1055.002, process-injection, fileless, fexecve]
+
+  # ============================================================================
+  # T1055.009 — /proc PID Memory Write
+  # ============================================================================
+
+  # Direct memory injection via /proc/<target_pid>/mem.  The BPF file-access
+  # hook catches opens of paths matching this pattern; the regex is evaluated
+  # in Go (RE2) at rule load time — not in BPF.
+  - id: proc_inject_proc_mem_write
+    name: "Process Injection: write to /proc/<pid>/mem"
+    description: >
+      A process opened /proc/<pid>/mem for writing. This is the T1055.009
+      technique: an attacker directly overwrites another process's memory
+      through the proc filesystem without calling ptrace. The caller PID
+      should differ from the target PID embedded in the path.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/proc/[0-9]+/mem"
+    severity: critical
+    action: alert
+    tags: [mitre-t1055, mitre-t1055.009, process-injection, proc-mem]
+
+  # ============================================================================
+  # T1574.006 — LD_PRELOAD / ld.so.preload Hijacking
+  # ============================================================================
+
+  # Writing to /etc/ld.so.preload causes every subsequently launched ELF binary
+  # to load the specified shared library — a persistent, system-wide hooking
+  # mechanism favoured by rootkits and credential stealers.
+  - id: proc_inject_ld_preload_file
+    name: "Process Injection: write to /etc/ld.so.preload"
+    description: >
+      A process wrote to /etc/ld.so.preload. This file is read by the dynamic
+      linker before any other shared library and forces every process to load
+      the listed .so. Modifying it is the classic T1574.006 persistence and
+      hooking primitive used by rootkits and credential stealers.
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/ld.so.preload"
+    severity: critical
+    action: alert
+    tags: [mitre-t1574, mitre-t1574.006, process-injection, ld-preload, persistence]
+
+  # The dynamic linker also respects LD_PRELOAD set via the process environment.
+  # Runtime setenv is captured at the file/proc layer: a process writing its
+  # own /proc/self/environ or passing the variable through execve arguments.
+  # This rule catches writes to any LD_PRELOAD-related config paths.
+  - id: proc_inject_ld_preload_conf
+    name: "Process Injection: modification of ld.so config directory"
+    description: >
+      A process modified a file under /etc/ld.so.conf.d/. Placing a new
+      .conf entry there affects the dynamic linker search path and can be
+      used to hijack shared library loading (T1574.006).
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/ld.so.conf.d/"
+    severity: warning
+    action: alert
+    tags: [mitre-t1574, mitre-t1574.006, process-injection, ld-preload, persistence]
+
+  # ============================================================================
+  # T1055 — /proc/PID/maps and /proc/PID/pagemap reconnaissance
+  # ============================================================================
+
+  # Reading /proc/<pid>/maps from a different process is a precursor to memory
+  # injection: the attacker locates writeable/executable regions before injecting.
+  - id: proc_inject_maps_recon
+    name: "Process Injection: /proc/<pid>/maps read (memory layout recon)"
+    description: >
+      A process read /proc/<pid>/maps. While common for debuggers, in production
+      containers reading the memory map of another process is the reconnaissance
+      step that precedes code injection — locating the target's writeable regions.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/proc/[0-9]+/maps"
+        - "/proc/[0-9]+/pagemap"
+        - "/proc/[0-9]+/smaps"
+    severity: warning
+    action: alert
+    tags: [mitre-t1055, process-injection, recon, proc-maps]
+
+  # ============================================================================
+  # Shared-object staging in /dev/shm (common fileless staging area)
+  # ============================================================================
+
+  # /dev/shm is a world-writable tmpfs. Attackers stage .so payloads there
+  # before dlopen/LD_PRELOAD injection to avoid /tmp's noexec restrictions.
+  - id: proc_inject_devshm_so
+    name: "Process Injection: shared object written to /dev/shm"
+    description: >
+      A process wrote a .so file to /dev/shm. This is a common staging step
+      for LD_PRELOAD injection or dlopen-based code injection — the attacker
+      writes the malicious library to the world-writable shared-memory
+      filesystem before loading it into the target process.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/dev/shm/.*\\.so(\\.[0-9]+)*"
+        - "/dev/shm/.*\\.so$"
+    severity: critical
+    action: alert
+    tags: [mitre-t1055, mitre-t1574.006, process-injection, devshm, fileless, staging]

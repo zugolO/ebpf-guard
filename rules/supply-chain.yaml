@@ -1,0 +1,220 @@
+## Supply Chain Attack Detection Rules
+# MITRE ATT&CK: T1195 — Supply Chain Compromise
+# Detects post-install script abuse, CI/CD pipeline injection,
+# and package manager anomalies at runtime.
+
+rules:
+  # ============================================================================
+  # T1195.001 — Compromise Software Dependencies and Development Tools
+  # CI/CD Pipeline Injection
+  # ============================================================================
+
+  # CI/CD runner processes (GitHub Actions, GitLab Runner, Drone, Tekton, etc.)
+  # spawning shells that then reach out to the network is a strong indicator
+  # of pipeline injection (T1195.002).  Covered via lineage-patterns.yaml
+  # parent-child detection; this rule catches direct network connections from
+  # runner child processes.
+  - id: supply_chain_cicd_runner_network
+    name: "Supply Chain: CI/CD runner making external network connection"
+    description: >
+      A known CI/CD runner process is making an outbound network connection.
+      While runners legitimately fetch artifacts, connections to non-standard
+      ports or uncommon destinations may indicate pipeline injection (T1195.002)
+      or secrets exfiltration from a compromised build step.
+    event_type: network
+    condition:
+      field: dport
+      op: not_in
+      values:
+        - "80"
+        - "443"
+        - "22"
+        - "8080"
+        - "8443"
+    severity: warning
+    action: alert
+    tags: [mitre-t1195, mitre-t1195.002, supply-chain, cicd, pipeline-injection]
+
+  # ============================================================================
+  # Package Manager Post-Install Script Writing to Sensitive Locations
+  # T1195.001 — malicious package post-install backdoor
+  # ============================================================================
+
+  # A post-install script writing outside the package prefix is highly suspicious.
+  # Legitimate packages write to /usr, /opt, ~/.local; writing to /etc, /tmp,
+  # /var/tmp, or /dev/shm with exec bits is a backdoor indicator.
+  - id: supply_chain_pkg_install_etc_write
+    name: "Supply Chain: package post-install script writing to /etc"
+    description: >
+      A package manager process (npm, pip, gem, cargo, apt post-install hooks)
+      or its direct child wrote to /etc. Legitimate packages do not modify /etc
+      from post-install scripts without explicit admin action — this is
+      characteristic of a T1195.001 malicious package backdoor.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/profile.d/"
+        - "/etc/cron.d/"
+        - "/etc/cron.daily/"
+        - "/etc/cron.weekly/"
+        - "/etc/systemd/system/"
+        - "/etc/init.d/"
+        - "/etc/rc.local"
+        - "/etc/ld.so.preload"
+    severity: critical
+    action: alert
+    tags: [mitre-t1195, mitre-t1195.001, supply-chain, post-install, persistence]
+
+  # Post-install script staging payload in /tmp or /var/tmp.
+  - id: supply_chain_pkg_tmp_staging
+    name: "Supply Chain: executable written to /tmp or /var/tmp"
+    description: >
+      A process wrote an executable (ELF or shell script) to /tmp or /var/tmp.
+      This staging pattern is common in malicious package post-install scripts
+      that download a second-stage payload before executing it.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/[^/]+\\.(sh|py|pl|rb|elf|out|bin|so)"
+        - "/var/tmp/[^/]+\\.(sh|py|pl|rb|elf|out|bin|so)"
+        - "/tmp/\\..*"
+        - "/var/tmp/\\..*"
+    severity: warning
+    action: alert
+    tags: [mitre-t1195, mitre-t1195.001, supply-chain, staging, tmp-exec]
+
+  # ============================================================================
+  # T1195.001 — Suspicious Package Registry DNS
+  # DNS queries to domains impersonating legitimate package registries
+  # (typosquatting) or queries to non-standard registry endpoints.
+  # ============================================================================
+
+  - id: supply_chain_suspicious_registry_dns
+    name: "Supply Chain: DNS query to suspicious package registry"
+    description: >
+      A DNS query was made to a domain that closely resembles a legitimate
+      package registry (typosquatting) or to an unconventional registry endpoint.
+      This is a T1195.001 indicator: malicious packages often pull second-stage
+      payloads from lookalike domains during post-install execution.
+    event_type: dns
+    condition:
+      field: qname
+      op: regex
+      values:
+        # Typosquats of major registries
+        - ".*npmjs\\..*\\..*"          # not npmjs.com
+        - ".*pyp[il]\\..*"             # pypi lookalikes
+        - ".*rubygems\\..*\\..*"       # rubygems lookalikes
+        - ".*pkg\\.go\\.dev\\..*"      # go module proxy lookalikes
+        - ".*crates\\.io\\..*"         # crates.io lookalikes
+    severity: critical
+    action: alert
+    tags: [mitre-t1195, mitre-t1195.001, supply-chain, typosquatting, dns]
+
+  # High-entropy DNS queries from package manager processes may indicate
+  # DGA-based C2 or data exfiltration during a compromised install.
+  - id: supply_chain_pkg_dga_dns
+    name: "Supply Chain: high-entropy DNS from package manager context"
+    description: >
+      A high-entropy DNS query (likely DGA) was observed. In conjunction with
+      package manager activity this may indicate a malicious package making
+      C2 contact via algorithmically-generated domains to evade blocklists.
+    event_type: dns
+    condition:
+      field: qname_entropy
+      op: gt
+      values: ["3.8"]
+    severity: warning
+    action: alert
+    tags: [mitre-t1195, mitre-t1071, supply-chain, dga, dns, c2]
+
+  # ============================================================================
+  # T1195.002 — Compromise Software Supply Chain
+  # Integrity violation: reading package-manager lock files immediately
+  # followed by network activity to non-standard ports.
+  # ============================================================================
+
+  - id: supply_chain_lockfile_recon
+    name: "Supply Chain: package lock file read (dependency reconnaissance)"
+    description: >
+      A process read a package lock file (package-lock.json, yarn.lock,
+      requirements.txt, Gemfile.lock, Cargo.lock, go.sum). While routine during
+      builds, unexpected reads by non-build processes may indicate a supply-chain
+      reconnaissance step to identify dependencies suitable for substitution
+      attacks (T1195.001).
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/package-lock\\.json$"
+        - ".*/yarn\\.lock$"
+        - ".*/requirements.*\\.txt$"
+        - ".*/Pipfile\\.lock$"
+        - ".*/Gemfile\\.lock$"
+        - ".*/Cargo\\.lock$"
+        - ".*/go\\.sum$"
+        - ".*/composer\\.lock$"
+    severity: info
+    action: alert
+    tags: [mitre-t1195, mitre-t1195.001, supply-chain, dependency-recon]
+
+  # ============================================================================
+  # Compiler / build tool writing outside the expected build directory
+  # Indicates a malicious Makefile or build script post-install hook
+  # ============================================================================
+
+  - id: supply_chain_build_tool_rootwrite
+    name: "Supply Chain: build tool writing to system directories"
+    description: >
+      A compiler or build tool (gcc, clang, make, cargo, maven, gradle) wrote
+      to a system directory outside the build working directory. Malicious build
+      scripts use this to install backdoors during the compilation phase —
+      a T1195.002 attack targeting the software development pipeline.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/usr/bin/"
+        - "/usr/sbin/"
+        - "/usr/lib/"
+        - "/usr/local/bin/"
+        - "/usr/local/lib/"
+        - "/bin/"
+        - "/sbin/"
+        - "/lib/"
+        - "/lib64/"
+    severity: critical
+    action: alert
+    tags: [mitre-t1195, mitre-t1195.002, supply-chain, build-tool, tampering]
+
+  # ============================================================================
+  # Container image build anomaly — Dockerfile RUN writing to cron/init dirs
+  # ============================================================================
+
+  - id: supply_chain_dockerfile_persistence
+    name: "Supply Chain: image build writing to persistence directories"
+    description: >
+      During a container image build (parent: docker build / containerd) a RUN
+      step wrote to a persistence location such as cron or init directories.
+      This is a T1195.002 supply chain attack: poisoning the container image
+      so every derived container starts with a backdoor pre-installed.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/cron.d/"
+        - "/etc/cron.daily/"
+        - "/etc/cron.weekly/"
+        - "/etc/cron.monthly/"
+        - "/etc/rc.d/"
+        - "/etc/init.d/"
+    severity: warning
+    action: alert
+    tags: [mitre-t1195, mitre-t1195.002, supply-chain, container-image, persistence]

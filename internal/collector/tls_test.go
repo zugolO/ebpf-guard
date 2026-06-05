@@ -3,6 +3,7 @@ package collector
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -343,6 +344,43 @@ func TestTLSCollectorScanInterval(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 30*time.Second, col.scanInterval)
+}
+
+// TestSyntheticTLSEventViaCollector verifies that SyntheticCollector produces TLS events
+// with the correct fields, satisfying the acceptance criterion for synthetic TLS event
+// generation without requiring a real kernel or OpenSSL installation.
+func TestSyntheticTLSEventViaCollector(t *testing.T) {
+	out := make(chan types.Event, 256)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	sc := NewSyntheticCollector(slog.Default(), 5*time.Millisecond)
+	go sc.Start(ctx, out) //nolint:errcheck
+
+	// Wait for the collector to run then drain buffered events.
+	<-ctx.Done()
+
+	var tlsEvents []types.Event
+	for {
+		select {
+		case ev := <-out:
+			if ev.Type == types.EventTLS {
+				tlsEvents = append(tlsEvents, ev)
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	require.NotEmpty(t, tlsEvents, "SyntheticCollector should produce at least one TLS event")
+	for _, ev := range tlsEvents {
+		require.NotNil(t, ev.TLS, "TLS event must have a non-nil TLS payload")
+		assert.True(t,
+			ev.TLS.Direction == types.TLSDirectionWrite || ev.TLS.Direction == types.TLSDirectionRead,
+			"direction must be Write or Read")
+		assert.NotZero(t, ev.TLS.DataLen, "DataLen must be non-zero")
+		assert.NotZero(t, ev.PID, "PID must be non-zero")
+	}
 }
 
 // TestTLSCollectorCleanupDeadPIDs verifies that dead PIDs are removed from libsslPaths.

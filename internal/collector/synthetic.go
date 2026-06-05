@@ -90,7 +90,7 @@ func (s *SyntheticCollector) generateBurst(out chan<- types.Event, count int) {
 
 // generateEvent creates a single synthetic event.
 func (s *SyntheticCollector) generateEvent() types.Event {
-	eventTypes := []types.EventType{types.EventSyscall, types.EventTCPConnect, types.EventFileAccess}
+	eventTypes := []types.EventType{types.EventSyscall, types.EventTCPConnect, types.EventFileAccess, types.EventTLS}
 	eventType := eventTypes[rand.Intn(len(eventTypes))]
 
 	baseEvent := types.Event{
@@ -109,6 +109,8 @@ func (s *SyntheticCollector) generateEvent() types.Event {
 		baseEvent.Network = s.generateNetworkEvent()
 	case types.EventFileAccess:
 		baseEvent.File = s.generateFileEvent()
+	case types.EventTLS:
+		baseEvent.TLS = s.generateTLSEvent()
 	}
 
 	return baseEvent
@@ -162,6 +164,26 @@ func (s *SyntheticCollector) generateFileEvent() *types.FileEvent {
 		Flags:    0,
 		Mode:     0644,
 		Op:       uint8(rand.Intn(3)), // 0=open, 1=read, 2=write
+	}
+}
+
+// generateTLSEvent creates a synthetic TLS event.
+func (s *SyntheticCollector) generateTLSEvent() *types.TLSEvent {
+	payloads := []string{
+		"GET / HTTP/1.1\r\nHost: example.com\r\n",
+		"POST /api/data HTTP/1.1\r\nContent-Type: application/json\r\n",
+		"HTTP/1.1 200 OK\r\nContent-Length: 42\r\n",
+		"GET /api/keys HTTP/1.1\r\nAuthorization: Basic dXNlcjpwYXNz\r\n",
+	}
+	payload := payloads[rand.Intn(len(payloads))]
+	var data [256]byte
+	copy(data[:], payload)
+
+	directions := []types.TLSDirection{types.TLSDirectionWrite, types.TLSDirectionRead}
+	return &types.TLSEvent{
+		Direction: directions[rand.Intn(len(directions))],
+		DataLen:   uint32(len(payload)),
+		Data:      data,
 	}
 }
 

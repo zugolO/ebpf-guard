@@ -8,7 +8,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -47,8 +46,9 @@ type ProcessProfile struct {
 type NetworkProfile struct {
 	// Destination ports seen (EWMA of frequency)
 	DestPorts map[uint16]*EWMA
-	// Destination IPs seen (EWMA of frequency)
-	DestAddrs map[string]*EWMA
+	// Destination IPs seen (EWMA of frequency); keyed by raw 16-byte address
+	// so map lookups in the hot path need no string allocation.
+	DestAddrs map[[16]byte]*EWMA
 	// Total connection count
 	TotalConnections uint64
 }
@@ -82,7 +82,7 @@ func NewProcessProfile(pid uint32, comm string) *ProcessProfile {
 		LastSeenAt:  now,
 		NetworkProfile: NetworkProfile{
 			DestPorts: make(map[uint16]*EWMA),
-			DestAddrs: make(map[string]*EWMA),
+			DestAddrs: make(map[[16]byte]*EWMA),
 		},
 		FileProfile: FileProfile{
 			Directories: make(map[string]*EWMA),
@@ -104,7 +104,7 @@ func NewProcessProfileForWorkload(key WorkloadKey) *ProcessProfile {
 		LastSeenAt:  now,
 		NetworkProfile: NetworkProfile{
 			DestPorts: make(map[uint16]*EWMA),
-			DestAddrs: make(map[string]*EWMA),
+			DestAddrs: make(map[[16]byte]*EWMA),
 		},
 		FileProfile: FileProfile{
 			Directories: make(map[string]*EWMA),
@@ -141,12 +141,11 @@ func (p *ProcessProfile) recordNetworkEventLocked(e *types.NetworkEvent, weight 
 	}
 	p.NetworkProfile.DestPorts[e.Dport].Update(1.0)
 
-	// Update destination address EWMA
-	daddr := util.FormatIP16(e.Daddr, e.Family)
-	if p.NetworkProfile.DestAddrs[daddr] == nil {
-		p.NetworkProfile.DestAddrs[daddr] = NewEWMA(weight)
+	// Update destination address EWMA (keyed by raw bytes — no string alloc)
+	if p.NetworkProfile.DestAddrs[e.Daddr] == nil {
+		p.NetworkProfile.DestAddrs[e.Daddr] = NewEWMA(weight)
 	}
-	p.NetworkProfile.DestAddrs[daddr].Update(1.0)
+	p.NetworkProfile.DestAddrs[e.Daddr].Update(1.0)
 }
 
 // RecordFileEvent updates the file profile with a new file access.

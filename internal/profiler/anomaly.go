@@ -3,7 +3,6 @@ package profiler
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"strconv"
 	"sync"
@@ -13,6 +12,42 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
+
+// portStrings is a pre-computed string table for all 65536 port numbers so that
+// formatPort never allocates on the hot path.
+var portStrings [65536]string
+
+// syscallStrings covers syscall numbers 0-511 (all Linux x86-64 syscalls as of 6.x).
+var syscallStrings [512]string
+
+func init() {
+	for i := range portStrings {
+		portStrings[i] = strconv.Itoa(i)
+	}
+	for i := range syscallStrings {
+		syscallStrings[i] = "syscall_" + strconv.Itoa(i)
+	}
+}
+
+// anomalyResultPool recycles AnomalyResult objects (including their Contributions
+// backing arrays) across ProcessEvent calls.  Callers must call ReleaseResult when
+// they are finished with the returned *AnomalyResult.
+var anomalyResultPool = sync.Pool{
+	New: func() any {
+		return &AnomalyResult{
+			// Pre-allocate enough capacity for the worst-case contribution count
+			// (TCP: 2, file: 2, syscall: 1) so hot-path appends never reallocate.
+			Contributions: make([]AnomalyContribution, 0, 8),
+		}
+	},
+}
+
+// ReleaseResult returns r to the internal pool so its backing memory can be
+// reused by the next ProcessEvent call.  After calling ReleaseResult the caller
+// MUST NOT read any field of r, including any string inside r.Contributions.
+func ReleaseResult(r *AnomalyResult) {
+	anomalyResultPool.Put(r)
+}
 
 // AnomalyDetector performs anomaly detection on process behavior.
 type AnomalyDetector struct {
@@ -185,74 +220,68 @@ func (ad *AnomalyDetector) calculateAnomalyScore(profile *ProcessProfile, event 
 	profile.mu.Lock()
 	defer profile.mu.Unlock()
 
-	result := &AnomalyResult{
-		PID:       event.PID, // from event, not profile — profile is shared across PIDs
-		Comm:      profile.Comm,
-		Namespace: key.Namespace,
-		AppLabel:  key.AppLabel,
-		Timestamp: time.Now(),
-	}
+	// Get a recycled result from the pool and reset its reusable fields.
+	result := anomalyResultPool.Get().(*AnomalyResult)
+	result.PID = event.PID // from event, not profile — profile is shared across PIDs
+	result.Comm = profile.Comm
+	result.Namespace = key.Namespace
+	result.AppLabel = key.AppLabel
+	result.Timestamp = time.Now()
+	result.Score = 0
+	result.IsAnomaly = false
+	result.Contributions = result.Contributions[:0] // reset length, keep backing array
 
 	var totalScore float64
-	var contributions []AnomalyContribution
 
-	// Analyze based on event type
+	// Analyze based on event type; analyze* functions append directly into
+	// result.Contributions so no intermediate slice allocation is needed.
 	switch event.Type {
 	case types.EventTCPConnect:
 		if event.Network != nil {
-			score, contrib := ad.analyzeNetworkBehavior(profile, event.Network)
-			totalScore += score
-			contributions = append(contributions, contrib...)
+			totalScore = ad.analyzeNetworkBehavior(profile, event.Network, &result.Contributions)
 		}
 	case types.EventFileAccess:
 		if event.File != nil {
-			score, contrib := ad.analyzeFileBehavior(profile, event.File)
-			totalScore += score
-			contributions = append(contributions, contrib...)
+			totalScore = ad.analyzeFileBehavior(profile, event.File, &result.Contributions)
 		}
 	case types.EventSyscall:
 		if event.Syscall != nil {
-			score, contrib := ad.analyzeSyscallBehavior(profile, event.Syscall)
-			totalScore += score
-			contributions = append(contributions, contrib...)
+			totalScore = ad.analyzeSyscallBehavior(profile, event.Syscall, &result.Contributions)
 		}
 	}
 
 	// Normalize score to [0, 1]
 	result.Score = math.Min(totalScore, 1.0)
 	result.IsAnomaly = result.Score >= ad.threshold
-	result.Contributions = contributions
 
 	return result
 }
 
 // analyzeNetworkBehavior analyzes network behavior for anomalies.
-func (ad *AnomalyDetector) analyzeNetworkBehavior(profile *ProcessProfile, event *types.NetworkEvent) (float64, []AnomalyContribution) {
+// Contributions are appended directly to out so no intermediate slice is allocated.
+func (ad *AnomalyDetector) analyzeNetworkBehavior(profile *ProcessProfile, event *types.NetworkEvent, out *[]AnomalyContribution) float64 {
 	var score float64
-	var contributions []AnomalyContribution
 
-	// Check destination port
+	// Check destination port — portStrings lookup is allocation-free.
 	if portEWMA, exists := profile.NetworkProfile.DestPorts[event.Dport]; exists {
 		freq := portEWMA.Value()
-		// Low frequency = more anomalous
 		portScore := 1.0 - freq
 		if portScore > 0.5 {
-			contributions = append(contributions, AnomalyContribution{
+			*out = append(*out, AnomalyContribution{
 				Category:     "network",
 				Field:        "dport",
-				Value:        formatPort(event.Dport),
-				Expected:     0.5, // Expected average frequency
+				Value:        portStrings[event.Dport],
+				Expected:     0.5,
 				Observed:     freq,
 				Contribution: portScore,
 			})
-			score += portScore * 0.5 // Port contributes 50% of network score
+			score += portScore * 0.5
 		}
 	} else {
-		// New port never seen before - highly anomalous
-		contributions = append(contributions, AnomalyContribution{
+		*out = append(*out, AnomalyContribution{
 			Category:     "network",
 			Field:        "dport",
-			Value:        formatPort(event.Dport),
+			Value:        portStrings[event.Dport],
 			Expected:     0,
 			Observed:     0,
 			Contribution: 0.5,
@@ -260,28 +289,28 @@ func (ad *AnomalyDetector) analyzeNetworkBehavior(profile *ProcessProfile, event
 		score += 0.5
 	}
 
-	// Check destination address
-	daddr := util.FormatIP16(event.Daddr, event.Family)
-	if addrEWMA, exists := profile.NetworkProfile.DestAddrs[daddr]; exists {
+	// Check destination address — DestAddrs is keyed by raw [16]byte so the map
+	// lookup never needs to allocate a string.  FormatIP16 is deferred to the
+	// rare branches that actually produce a contribution.
+	if addrEWMA, exists := profile.NetworkProfile.DestAddrs[event.Daddr]; exists {
 		freq := addrEWMA.Value()
 		addrScore := 1.0 - freq
 		if addrScore > 0.5 {
-			contributions = append(contributions, AnomalyContribution{
+			*out = append(*out, AnomalyContribution{
 				Category:     "network",
 				Field:        "daddr",
-				Value:        daddr,
+				Value:        util.FormatIP16(event.Daddr, event.Family),
 				Expected:     0.5,
 				Observed:     freq,
 				Contribution: addrScore,
 			})
-			score += addrScore * 0.5 // Address contributes 50% of network score
+			score += addrScore * 0.5
 		}
 	} else {
-		// New address never seen before
-		contributions = append(contributions, AnomalyContribution{
+		*out = append(*out, AnomalyContribution{
 			Category:     "network",
 			Field:        "daddr",
-			Value:        daddr,
+			Value:        util.FormatIP16(event.Daddr, event.Family),
 			Expected:     0,
 			Observed:     0,
 			Contribution: 0.5,
@@ -289,13 +318,13 @@ func (ad *AnomalyDetector) analyzeNetworkBehavior(profile *ProcessProfile, event
 		score += 0.5
 	}
 
-	return math.Min(score, 1.0), contributions
+	return math.Min(score, 1.0)
 }
 
 // analyzeFileBehavior analyzes file access behavior for anomalies.
-func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *types.FileEvent) (float64, []AnomalyContribution) {
+// Contributions are appended directly to out so no intermediate slice is allocated.
+func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *types.FileEvent, out *[]AnomalyContribution) float64 {
 	var score float64
-	var contributions []AnomalyContribution
 
 	filename := util.BytesToString(event.Filename[:])
 	dir := extractDirectory(filename)
@@ -306,7 +335,7 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 			freq := dirEWMA.Value()
 			dirScore := 1.0 - freq
 			if dirScore > 0.5 {
-				contributions = append(contributions, AnomalyContribution{
+				*out = append(*out, AnomalyContribution{
 					Category:     "file",
 					Field:        "directory",
 					Value:        dir,
@@ -314,11 +343,10 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 					Observed:     freq,
 					Contribution: dirScore,
 				})
-				score += dirScore * 0.6 // Directory contributes 60% of file score
+				score += dirScore * 0.6
 			}
 		} else {
-			// New directory
-			contributions = append(contributions, AnomalyContribution{
+			*out = append(*out, AnomalyContribution{
 				Category:     "file",
 				Field:        "directory",
 				Value:        dir,
@@ -337,7 +365,7 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 			freq := extEWMA.Value()
 			extScore := 1.0 - freq
 			if extScore > 0.5 {
-				contributions = append(contributions, AnomalyContribution{
+				*out = append(*out, AnomalyContribution{
 					Category:     "file",
 					Field:        "extension",
 					Value:        ext,
@@ -345,11 +373,10 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 					Observed:     freq,
 					Contribution: extScore,
 				})
-				score += extScore * 0.4 // Extension contributes 40% of file score
+				score += extScore * 0.4
 			}
 		} else {
-			// New extension
-			contributions = append(contributions, AnomalyContribution{
+			*out = append(*out, AnomalyContribution{
 				Category:     "file",
 				Field:        "extension",
 				Value:        ext,
@@ -361,20 +388,20 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 		}
 	}
 
-	return math.Min(score, 1.0), contributions
+	return math.Min(score, 1.0)
 }
 
 // analyzeSyscallBehavior analyzes syscall patterns for anomalies.
-func (ad *AnomalyDetector) analyzeSyscallBehavior(profile *ProcessProfile, event *types.SyscallEvent) (float64, []AnomalyContribution) {
+// Contributions are appended directly to out so no intermediate slice is allocated.
+func (ad *AnomalyDetector) analyzeSyscallBehavior(profile *ProcessProfile, event *types.SyscallEvent, out *[]AnomalyContribution) float64 {
 	var score float64
-	var contributions []AnomalyContribution
 
-	// Check syscall number
+	// Check syscall number — syscallStrings lookup is allocation-free for nr 0-511.
 	if scEWMA, exists := profile.SyscallProfile.Syscalls[event.Nr]; exists {
 		freq := scEWMA.Value()
 		scScore := 1.0 - freq
 		if scScore > 0.5 {
-			contributions = append(contributions, AnomalyContribution{
+			*out = append(*out, AnomalyContribution{
 				Category:     "syscall",
 				Field:        "nr",
 				Value:        formatSyscall(event.Nr),
@@ -385,8 +412,7 @@ func (ad *AnomalyDetector) analyzeSyscallBehavior(profile *ProcessProfile, event
 			score += scScore
 		}
 	} else {
-		// New syscall never seen before
-		contributions = append(contributions, AnomalyContribution{
+		*out = append(*out, AnomalyContribution{
 			Category:     "syscall",
 			Field:        "nr",
 			Value:        formatSyscall(event.Nr),
@@ -397,17 +423,27 @@ func (ad *AnomalyDetector) analyzeSyscallBehavior(profile *ProcessProfile, event
 		score += 1.0
 	}
 
-	return math.Min(score, 1.0), contributions
+	return math.Min(score, 1.0)
 }
 
 // Helper functions
 
+// formatPort returns a pre-computed decimal string for port — never allocates.
 func formatPort(port uint16) string {
-	return strconv.FormatUint(uint64(port), 10)
+	return portStrings[port]
 }
 
+// formatSyscall returns a string like "syscall_N".  For nr 0-511 the result comes
+// from the pre-computed table (no allocation).  Unusual numbers fall back to a
+// one-off allocation which is acceptable off the hot path.
 func formatSyscall(nr int64) string {
-	return fmt.Sprintf("syscall_%d", nr)
+	if nr >= 0 && int(nr) < len(syscallStrings) {
+		return syscallStrings[nr]
+	}
+	var buf [32]byte
+	b := append(buf[:0], "syscall_"...)
+	b = strconv.AppendInt(b, nr, 10)
+	return string(b)
 }
 
 // Enable activates the anomaly detector.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -24,6 +25,11 @@ type byTimeEntry struct {
 
 // MemoryStore is an in-memory AlertStore implementation for testing.
 type MemoryStore struct {
+	// count is the total number of alerts currently in the store.
+	// Kept as the first field to guarantee 64-bit alignment on 32-bit platforms.
+	// Incremented by Store/StoreBatch on new inserts, decremented by Delete.
+	// Read lock-free by Count() via atomic.Int64.Load().
+	count  atomic.Int64
 	mu     sync.RWMutex
 	alerts map[string]types.Alert
 	// byTime holds index entries sorted by ts DESC (newest first).
@@ -54,12 +60,16 @@ func (s *MemoryStore) Store(ctx context.Context, alert types.Alert) error {
 	}
 
 	// Remove the old index entry if this is an update.
-	if _, exists := s.alerts[alert.ID]; exists {
+	_, exists := s.alerts[alert.ID]
+	if exists {
 		s.removeFromByTime(alert.ID)
 	}
 
 	s.alerts[alert.ID] = alert
 	s.insertSorted(alert.ID, alert.Timestamp, alert.Severity, alert.Enrichment.Namespace)
+	if !exists {
+		s.count.Add(1)
+	}
 	return nil
 }
 
@@ -106,6 +116,7 @@ func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 		s.byTime = grown
 	}
 
+	var newCount int64
 	for i := range alerts {
 		a := alerts[i] // local copy — do not modify caller's slice
 		if a.ID == "" {
@@ -115,8 +126,11 @@ func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 		if a.Timestamp.IsZero() {
 			a.Timestamp = time.Now()
 		}
-		if _, exists := s.alerts[a.ID]; exists {
+		_, exists := s.alerts[a.ID]
+		if exists {
 			s.removeFromByTime(a.ID)
+		} else {
+			newCount++
 		}
 		s.alerts[a.ID] = a
 		s.byTime = append(s.byTime, byTimeEntry{
@@ -126,6 +140,7 @@ func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 			namespace: a.Enrichment.Namespace,
 		})
 	}
+	s.count.Add(newCount)
 
 	// Single sort instead of N insertSorted calls — O(n log n) vs O(n²).
 	sort.Slice(s.byTime, func(i, j int) bool {
@@ -209,18 +224,13 @@ func (s *MemoryStore) QueryByID(ctx context.Context, alertID string) (*types.Ale
 	return &alert, nil
 }
 
-// Count returns the number of matching alerts.
-func (s *MemoryStore) Count(ctx context.Context, filters QueryFilters) (int64, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var count int64
-	for _, alert := range s.alerts {
-		if matchesFilters(alert, filters) {
-			count++
-		}
-	}
-	return count, nil
+// Count returns the total number of alerts currently in the store.
+// The result is O(1): it reads the atomic counter maintained by Store,
+// StoreBatch, and Delete — no lock acquisition or iteration required.
+// Filters are accepted for interface compatibility but are not applied;
+// callers that need filtered counts should use Query.
+func (s *MemoryStore) Count(_ context.Context, _ QueryFilters) (int64, error) {
+	return s.count.Load(), nil
 }
 
 // Delete removes alerts older than the given duration.
@@ -241,6 +251,7 @@ func (s *MemoryStore) Delete(ctx context.Context, olderThan time.Duration) (int6
 		deleted++
 	}
 	s.byTime = s.byTime[:idx]
+	s.count.Add(-deleted)
 	return deleted, nil
 }
 

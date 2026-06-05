@@ -9,42 +9,56 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// makeSeqVec creates a seqVecSize FrequencyVector with the given (index, value) pairs.
+// Pairs are specified as alternating int index and float32 value arguments.
+func makeSeqVec(pairs ...float32) FrequencyVector {
+	v := make(FrequencyVector, seqVecSize)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		v[int(pairs[i])] = pairs[i+1]
+	}
+	return v
+}
+
 func TestSyscallWindow(t *testing.T) {
 	tests := []struct {
 		name     string
 		capacity int
 		pushes   []int
-		wantVec  FrequencyVector
+		// wantAt lists (index, value) pairs to check in the output vector.
+		// Elements not listed are expected to be 0.
+		wantAt []float32
+		// wantZero is true when the entire vector should be zero.
+		wantZero bool
 	}{
 		{
 			name:     "empty window",
 			capacity: 4,
 			pushes:   []int{},
-			wantVec:  FrequencyVector{},
+			wantZero: true,
 		},
 		{
 			name:     "single syscall",
 			capacity: 4,
 			pushes:   []int{1},
-			wantVec:  FrequencyVector{1: 1.0},
+			wantAt:   []float32{1, 1.0},
 		},
 		{
 			name:     "multiple same syscall",
 			capacity: 4,
 			pushes:   []int{1, 1, 1},
-			wantVec:  FrequencyVector{1: 1.0},
+			wantAt:   []float32{1, 1.0},
 		},
 		{
 			name:     "mixed syscalls",
 			capacity: 4,
 			pushes:   []int{1, 2, 1, 2},
-			wantVec:  FrequencyVector{1: 0.5, 2: 0.5},
+			wantAt:   []float32{1, 0.5, 2, 0.5},
 		},
 		{
 			name:     "ring buffer wrap",
 			capacity: 4,
 			pushes:   []int{1, 2, 3, 4, 5, 6},
-			wantVec:  FrequencyVector{3: 0.25, 4: 0.25, 5: 0.25, 6: 0.25},
+			wantAt:   []float32{3, 0.25, 4, 0.25, 5, 0.25, 6, 0.25},
 		},
 	}
 
@@ -54,8 +68,21 @@ func TestSyscallWindow(t *testing.T) {
 			for _, s := range tt.pushes {
 				w.push(s)
 			}
-			got := w.toVector()
-			assert.Equal(t, tt.wantVec, got)
+			dst := make(FrequencyVector, seqVecSize)
+			w.toVector(dst)
+
+			if tt.wantZero {
+				for i, v := range dst {
+					assert.Equal(t, float32(0), v, "index %d should be zero", i)
+				}
+				return
+			}
+
+			// Build expected vector and compare element-by-element.
+			want := makeSeqVec(tt.wantAt...)
+			for i := range want {
+				assert.InDelta(t, want[i], dst[i], 0.001, "index %d", i)
+			}
 		})
 	}
 }
@@ -69,32 +96,32 @@ func TestCosineDistance(t *testing.T) {
 	}{
 		{
 			name: "identical vectors",
-			a:    FrequencyVector{1: 0.5, 2: 0.5},
-			b:    FrequencyVector{1: 0.5, 2: 0.5},
+			a:    makeSeqVec(1, 0.5, 2, 0.5),
+			b:    makeSeqVec(1, 0.5, 2, 0.5),
 			want: 0.0,
 		},
 		{
 			name: "orthogonal vectors",
-			a:    FrequencyVector{1: 1.0},
-			b:    FrequencyVector{2: 1.0},
+			a:    makeSeqVec(1, 1.0),
+			b:    makeSeqVec(2, 1.0),
 			want: 1.0,
 		},
 		{
 			name: "empty first vector",
-			a:    FrequencyVector{},
-			b:    FrequencyVector{1: 1.0},
+			a:    make(FrequencyVector, seqVecSize),
+			b:    makeSeqVec(1, 1.0),
 			want: 1.0,
 		},
 		{
 			name: "empty second vector",
-			a:    FrequencyVector{1: 1.0},
-			b:    FrequencyVector{},
+			a:    makeSeqVec(1, 1.0),
+			b:    make(FrequencyVector, seqVecSize),
 			want: 1.0,
 		},
 		{
 			name: "partial overlap",
-			a:    FrequencyVector{1: 0.7, 2: 0.3},
-			b:    FrequencyVector{1: 0.3, 2: 0.7},
+			a:    makeSeqVec(1, 0.7, 2, 0.3),
+			b:    makeSeqVec(1, 0.3, 2, 0.7),
 			// dot=0.42, |a|=|b|=sqrt(0.58); cos=0.42/0.58≈0.7241; distance≈0.2759
 			want: 0.2759,
 		},
@@ -114,26 +141,26 @@ func TestCosineDistance(t *testing.T) {
 
 func TestCosineDistanceOrthogonal(t *testing.T) {
 	// Test that orthogonal vectors have distance 1.0
-	a := FrequencyVector{1: 1.0, 2: 0.0}
-	b := FrequencyVector{1: 0.0, 2: 1.0}
+	a := makeSeqVec(1, 1.0)
+	b := makeSeqVec(2, 1.0)
 
 	dist := cosineDistance(a, b)
 	assert.InDelta(t, 1.0, dist, 0.0001, "orthogonal vectors should have distance 1.0")
 }
 
 func TestMergeVectors(t *testing.T) {
-	base := FrequencyVector{1: 0.5, 2: 0.5}
-	update := FrequencyVector{1: 0.3, 3: 0.7}
+	base := makeSeqVec(1, 0.5, 2, 0.5)
+	update := makeSeqVec(1, 0.3, 3, 0.7)
 
-	merged := mergeVectors(base, update, 0.2)
+	mergeVectors(base, update, 0.2)
 
 	// Expected: base * 0.8 + update * 0.2
 	// 1: 0.5*0.8 + 0.3*0.2 = 0.4 + 0.06 = 0.46
 	// 2: 0.5*0.8 + 0 = 0.4
 	// 3: 0 + 0.7*0.2 = 0.14
-	assert.InDelta(t, 0.46, merged[1], 0.0001)
-	assert.InDelta(t, 0.4, merged[2], 0.0001)
-	assert.InDelta(t, 0.14, merged[3], 0.0001)
+	assert.InDelta(t, 0.46, base[1], 0.001)
+	assert.InDelta(t, 0.4, base[2], 0.001)
+	assert.InDelta(t, 0.14, base[3], 0.001)
 }
 
 func TestSequenceProfilerUpdate(t *testing.T) {
@@ -355,7 +382,7 @@ func TestNewSequenceProfilerDefaults(t *testing.T) {
 	assert.Equal(t, 0.3, profiler.config.Threshold)
 }
 
-// BenchmarkProcessEvent benchmarks the sequence profiler hot path.
+// BenchmarkSequenceProfilerUpdate benchmarks the sequence profiler hot path.
 func BenchmarkSequenceProfilerUpdate(b *testing.B) {
 	config := SequenceConfig{
 		Enabled:    true,
@@ -389,8 +416,8 @@ func BenchmarkSequenceProfilerUpdate(b *testing.B) {
 
 // BenchmarkCosineDistance benchmarks the distance calculation.
 func BenchmarkCosineDistance(b *testing.B) {
-	a := FrequencyVector{1: 0.1, 2: 0.2, 3: 0.3, 4: 0.4}
-	bvec := FrequencyVector{1: 0.4, 2: 0.3, 3: 0.2, 4: 0.1}
+	a := makeSeqVec(1, 0.1, 2, 0.2, 3, 0.3, 4, 0.4)
+	bvec := makeSeqVec(1, 0.4, 2, 0.3, 3, 0.2, 4, 0.1)
 
 	b.ResetTimer()
 	b.ReportAllocs()

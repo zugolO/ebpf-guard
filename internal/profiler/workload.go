@@ -43,11 +43,44 @@ func (k WorkloadKey) String() string {
 	return k.Comm + "|" + k.Namespace + "|" + k.AppLabel
 }
 
+// commStrCache interns process comm-name byte arrays as Go strings so that
+// WorkloadKeyFromEvent never allocates a new string for a comm it has seen before.
+// The map is keyed by the raw [16]byte array to avoid any string allocation during lookup.
+var commStrCache struct {
+	mu sync.RWMutex
+	m  map[[16]byte]string
+}
+
+func init() {
+	commStrCache.m = make(map[[16]byte]string, 64)
+}
+
+// internComm returns a deduplicated string for the comm bytes.
+// The first call for a given comm value allocates once; all subsequent calls are
+// allocation-free (hot path: RLock + map lookup, no heap activity).
+func internComm(comm [16]byte) string {
+	commStrCache.mu.RLock()
+	s, ok := commStrCache.m[comm]
+	commStrCache.mu.RUnlock()
+	if ok {
+		return s
+	}
+	commStrCache.mu.Lock()
+	defer commStrCache.mu.Unlock()
+	if s, ok = commStrCache.m[comm]; ok {
+		return s
+	}
+	s = string(bytesToString(comm[:]))
+	commStrCache.m[comm] = s
+	return s
+}
+
 // WorkloadKeyFromEvent derives a WorkloadKey from an event.
 // When Kubernetes enrichment is absent, namespace and app label are empty,
 // so all processes with the same comm share one baseline (non-K8s fallback).
+// The comm string is interned to avoid heap allocation on repeated calls.
 func WorkloadKeyFromEvent(e types.Event) WorkloadKey {
-	comm := string(bytesToString(e.Comm[:]))
+	comm := internComm(e.Comm)
 	if e.Enrichment == nil {
 		return WorkloadKey{Comm: comm}
 	}

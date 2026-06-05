@@ -13,6 +13,22 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// seqVecSize is the number of syscall slots in a dense frequency vector.
+// Linux x86-64 has ~450 syscalls; 512 covers all current numbers with headroom.
+const seqVecSize = 512
+
+// FrequencyVector is a dense normalized syscall-frequency array of length seqVecSize.
+// Index i holds the normalized frequency of syscall number i.
+type FrequencyVector []float32
+
+// seqVecPool recycles fixed-size array buffers on the hot path so that
+// SequenceProfiler.Update allocates zero bytes per call after the first baseline is built.
+// A *[seqVecSize]float32 is a pointer type and therefore fits inline in an interface{}
+// value, making Put/Get truly zero-alloc (unlike pooling a []float32 slice header).
+var seqVecPool = sync.Pool{
+	New: func() any { return new([seqVecSize]float32) },
+}
+
 // SequenceConfig holds configuration for sequence profiling.
 type SequenceConfig struct {
 	Enabled    bool
@@ -28,9 +44,6 @@ func DefaultSequenceConfig() SequenceConfig {
 		Threshold:  0.3,
 	}
 }
-
-// FrequencyVector represents syscall frequency distribution over a time window.
-type FrequencyVector map[int]float64
 
 // syscallWindow is a ring buffer of recent syscall numbers.
 type syscallWindow struct {
@@ -59,39 +72,43 @@ func (w *syscallWindow) push(syscallNr int) {
 	}
 }
 
-func (w *syscallWindow) toVector() FrequencyVector {
-	if w.size == 0 {
-		return FrequencyVector{}
+// toVector fills dst with the normalized syscall frequencies for the current window.
+// dst must have length >= seqVecSize. It is zeroed before use.
+// Syscall numbers >= seqVecSize are silently ignored (Linux x86-64 has ~450 syscalls).
+func (w *syscallWindow) toVector(dst FrequencyVector) {
+	for i := range dst {
+		dst[i] = 0
 	}
-
-	vec := make(FrequencyVector)
+	if w.size == 0 {
+		return
+	}
 	count := w.size
 	if w.full {
 		count = len(w.syscalls)
 	}
-
 	start := 0
 	if w.full {
 		start = w.head
 	}
-
 	for i := 0; i < count; i++ {
 		idx := (start + i) % len(w.syscalls)
-		vec[w.syscalls[idx]]++
+		nr := w.syscalls[idx]
+		if nr >= 0 && nr < seqVecSize {
+			dst[nr]++
+		}
 	}
-
-	// Normalize to frequencies
-	for k := range vec {
-		vec[k] /= float64(count)
+	norm := float32(count)
+	for i := range dst {
+		if dst[i] != 0 {
+			dst[i] /= norm
+		}
 	}
-
-	return vec
 }
 
-// pidSequenceState tracks sequence state for a single PID.
+// pidSequenceState tracks sequence state for a single workload key.
 type pidSequenceState struct {
 	window      *syscallWindow
-	baseline    FrequencyVector
+	baseline    *[seqVecSize]float32 // nil until first baseline is established
 	sampleCount int
 	lastUpdate  time.Time
 }
@@ -100,7 +117,7 @@ type pidSequenceState struct {
 // State is keyed by WorkloadKey so all replicas of a workload share one baseline.
 type SequenceProfiler struct {
 	config       SequenceConfig
-	states       map[string]*pidSequenceState // key: WorkloadKey.String()
+	states       map[WorkloadKey]*pidSequenceState
 	mu           sync.RWMutex
 	distance     *prometheus.GaugeVec
 	ttl          time.Duration
@@ -109,8 +126,8 @@ type SequenceProfiler struct {
 	samplingRate float64
 
 	// LRU eviction structures — O(log n) eviction via a min-heap.
-	lruHeap  lruStringHeap
-	lruIndex lruStringIndex
+	lruHeap  lruWorkloadKeyHeap
+	lruIndex lruWorkloadKeyIndex
 }
 
 // NewSequenceProfiler creates a new sequence profiler.
@@ -139,7 +156,7 @@ func newSequenceProfiler(config SequenceConfig, ttl time.Duration, maxPIDs int) 
 	}
 	return &SequenceProfiler{
 		config: config,
-		states: make(map[string]*pidSequenceState),
+		states: make(map[WorkloadKey]*pidSequenceState),
 		distance: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "ebpf_guard_profiler_sequence_distance",
 			Help: "Cosine distance between current and baseline syscall frequency vectors per workload class.",
@@ -148,7 +165,7 @@ func newSequenceProfiler(config SequenceConfig, ttl time.Duration, maxPIDs int) 
 		maxPIDs:      maxPIDs,
 		enabled:      config.Enabled,
 		samplingRate: 1.0,
-		lruIndex:     make(lruStringIndex),
+		lruIndex:     make(lruWorkloadKeyIndex),
 	}
 }
 
@@ -173,13 +190,13 @@ func (sp *SequenceProfiler) RegisterMetrics(reg prometheus.Registerer) error {
 
 // Update processes a syscall event and returns distance if anomaly detected.
 // State is keyed by workload class so all replicas train the same baseline.
+// The hot path (existing state, established baseline) performs zero heap allocations.
 func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly bool) {
 	if !sp.enabled || e.Type != types.EventSyscall || e.Syscall == nil {
 		return 0, false
 	}
 
 	key := WorkloadKeyFromEvent(e)
-	ks := key.String()
 
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
@@ -190,7 +207,7 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 		return 0, false
 	}
 
-	state, exists := sp.states[ks]
+	state, exists := sp.states[key]
 	if !exists {
 		if sp.maxPIDs > 0 && len(sp.states) >= sp.maxPIDs {
 			sp.evictLRULocked()
@@ -199,40 +216,47 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 			window:     newSyscallWindow(sp.config.WindowSize),
 			lastUpdate: time.Now(),
 		}
-		sp.states[ks] = state
-		sp.lruIndex.push(&sp.lruHeap, ks)
+		sp.states[key] = state
+		sp.lruIndex.push(&sp.lruHeap, key)
 	} else {
-		sp.lruIndex.touch(&sp.lruHeap, ks)
+		sp.lruIndex.touch(&sp.lruHeap, key)
 	}
 
 	state.window.push(int(e.Syscall.Nr))
 	state.sampleCount++
 	state.lastUpdate = time.Now()
 
-	currentVec := state.window.toVector()
-
-	// Learning phase: build baseline
+	// Learning phase: not enough samples yet to compute a meaningful vector.
 	if state.sampleCount < sp.config.WindowSize {
 		return 0, false
 	}
 
-	if len(state.baseline) == 0 {
-		state.baseline = currentVec
+	// Get a pooled scratch buffer. A *[seqVecSize]float32 pointer fits inline in
+	// interface{} so Put/Get are zero-alloc. toVector zeros the array before filling.
+	buf := seqVecPool.Get().(*[seqVecSize]float32)
+	state.window.toVector(buf[:])
+
+	if state.baseline == nil {
+		// First baseline: transfer ownership of the pooled buffer to state.
+		// The pool will allocate a fresh buffer on the next call.
+		state.baseline = buf
 		return 0, false
 	}
 
-	// Calculate cosine distance
-	distance = cosineDistance(currentVec, state.baseline)
+	// Calculate cosine distance between current window and established baseline.
+	distance = cosineDistance(buf[:], state.baseline[:])
 
 	sp.distance.WithLabelValues(key.Comm, key.Namespace, key.AppLabel).Set(distance)
 
-	// Check threshold
 	isAnomaly = distance > sp.config.Threshold
 
-	// Gradually adapt baseline for normal behavior
+	// Gradually adapt baseline for normal behavior (EWMA update in-place).
 	if !isAnomaly {
-		state.baseline = mergeVectors(state.baseline, currentVec, 0.1)
+		mergeVectors(state.baseline[:], buf[:], 0.1)
 	}
+
+	// Return the scratch buffer to the pool (baseline owns its own buffer).
+	seqVecPool.Put(buf)
 
 	return distance, isAnomaly
 }
@@ -241,7 +265,7 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 func (sp *SequenceProfiler) GetStateByKey(key WorkloadKey) (*pidSequenceState, bool) {
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()
-	state, ok := sp.states[key.String()]
+	state, ok := sp.states[key]
 	return state, ok
 }
 
@@ -251,20 +275,20 @@ func (sp *SequenceProfiler) evictLRULocked() {
 	if sp.lruHeap.Len() == 0 {
 		return
 	}
-	e := heap.Pop(&sp.lruHeap).(*lruEntry)
+	e := heap.Pop(&sp.lruHeap).(*lruWorkloadKeyEntry)
 	delete(sp.lruIndex, e.key)
 	delete(sp.states, e.key)
 }
 
-// Cleanup removes stale PID states.
+// Cleanup removes stale workload states.
 func (sp *SequenceProfiler) Cleanup(now time.Time) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	for ks, state := range sp.states {
+	for k, state := range sp.states {
 		if now.Sub(state.lastUpdate) > sp.ttl {
-			sp.lruIndex.remove(&sp.lruHeap, ks)
-			delete(sp.states, ks)
+			sp.lruIndex.remove(&sp.lruHeap, k)
+			delete(sp.states, k)
 		}
 	}
 }
@@ -313,63 +337,45 @@ func (sp *SequenceProfiler) GetSamplingRate() float64 {
 
 // cosineDistance calculates the cosine distance between two frequency vectors.
 // Returns 0.0 for identical vectors, 1.0 for orthogonal vectors.
+// Operates on dense []float32 slices — no allocation required.
 func cosineDistance(a, b FrequencyVector) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 1.0
 	}
-
-	// Calculate dot product and magnitudes
-	dotProduct := 0.0
-	normA := 0.0
-	normB := 0.0
-
-	// Iterate over union of keys
-	allKeys := make(map[int]struct{})
-	for k := range a {
-		allKeys[k] = struct{}{}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
 	}
-	for k := range b {
-		allKeys[k] = struct{}{}
-	}
-
-	for k := range allKeys {
-		va := a[k]
-		vb := b[k]
+	var dotProduct, normA, normB float64
+	for i := 0; i < n; i++ {
+		va := float64(a[i])
+		vb := float64(b[i])
 		dotProduct += va * vb
 		normA += va * va
 		normB += vb * vb
 	}
-
 	if normA == 0 || normB == 0 {
 		return 1.0
 	}
-
 	cosineSim := dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
-
-	// Clamp to [-1, 1] to handle floating point errors
 	if cosineSim > 1.0 {
 		cosineSim = 1.0
 	} else if cosineSim < -1.0 {
 		cosineSim = -1.0
 	}
-
-	// Cosine distance = 1 - cosine similarity
 	return 1.0 - cosineSim
 }
 
-// mergeVectors merges two frequency vectors with given weight for the second vector.
-func mergeVectors(base, update FrequencyVector, updateWeight float64) FrequencyVector {
-	result := make(FrequencyVector)
-
-	// Copy base
-	for k, v := range base {
-		result[k] = v * (1 - updateWeight)
+// mergeVectors updates base in-place: base[i] = base[i]*(1-w) + update[i]*w.
+// No allocation — the caller owns both slices.
+func mergeVectors(base, update FrequencyVector, w float64) {
+	bw := float32(1 - w)
+	uw := float32(w)
+	n := len(base)
+	if len(update) < n {
+		n = len(update)
 	}
-
-	// Add weighted update
-	for k, v := range update {
-		result[k] += v * updateWeight
+	for i := 0; i < n; i++ {
+		base[i] = base[i]*bw + update[i]*uw
 	}
-
-	return result
 }

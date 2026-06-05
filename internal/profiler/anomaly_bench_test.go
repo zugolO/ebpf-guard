@@ -58,6 +58,9 @@ func BenchmarkProcessEvent(b *testing.B) {
 		if result != nil && result.PID != 1234 {
 			b.Fatal("unexpected PID")
 		}
+		if result != nil {
+			ReleaseResult(result)
+		}
 	}
 }
 
@@ -100,6 +103,9 @@ func BenchmarkProcessEventFileAccess(b *testing.B) {
 		if result != nil && result.PID != 1234 {
 			b.Fatal("unexpected PID")
 		}
+		if result != nil {
+			ReleaseResult(result)
+		}
 	}
 }
 
@@ -139,6 +145,9 @@ func BenchmarkProcessEventSyscall(b *testing.B) {
 		result := ad.ProcessEvent(event, false)
 		if result != nil && result.PID != 1234 {
 			b.Fatal("unexpected PID")
+		}
+		if result != nil {
+			ReleaseResult(result)
 		}
 	}
 }
@@ -210,6 +219,9 @@ func BenchmarkProcessEventParallel(b *testing.B) {
 			result := ad.ProcessEvent(event, false)
 			if result != nil && result.PID != pid {
 				b.Fatal("unexpected PID")
+			}
+			if result != nil {
+				ReleaseResult(result)
 			}
 		}
 	})

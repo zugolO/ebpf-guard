@@ -255,3 +255,19 @@ func TestPartialFailure_ChannelFull(t *testing.T) {
 		t.Fatal("collector did not exit after context cancellation")
 	}
 }
+
+// BenchmarkEventPool measures the overhead of the pool acquire/fill/release cycle.
+// Target: 0 allocs/op once the pool is warm. Run with -benchmem to verify.
+func BenchmarkEventPool(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			e := eventPool.Get().(*types.Event)
+			e.Type = types.EventSyscall
+			e.PID = 1234
+			_ = *e // simulate sendEvent value copy
+			e.Reset()
+			eventPool.Put(e)
+		}
+	})
+}

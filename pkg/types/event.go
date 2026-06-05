@@ -350,6 +350,25 @@ type GPUEvent struct {
 	Size uint64
 }
 
+// Reset clears all pointer fields so the Event can be safely returned to a sync.Pool.
+// Scalar and fixed-size array fields need not be cleared; they are overwritten on the
+// next fill (ToTypesEvent assignment). Pointer fields must be nil'd to avoid keeping
+// the inner structs alive after the pooled Event is reused.
+func (e *Event) Reset() {
+	e.Syscall = nil
+	e.Network = nil
+	e.File = nil
+	e.TLS = nil
+	e.DNS = nil
+	e.Privesc = nil
+	e.NetClose = nil
+	e.Kmod = nil
+	e.CgroupEsc = nil
+	e.GPU = nil
+	e.TraceContext = nil
+	e.Enrichment = nil
+}
+
 // ProcessProfile represents a learned behavioral profile for a process type.
 type ProcessProfile struct {
 	Comm          string             `json:"comm"`

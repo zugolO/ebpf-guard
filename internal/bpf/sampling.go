@@ -237,6 +237,154 @@ func (rl *RateLimiter) SetSamplingRate(eventType string, rate float64) {
 	}
 }
 
+// DefaultMonitoredSyscalls returns the syscall numbers that should be monitored
+// by default: execve/execveat, ptrace, capset, setns, unshare, memfd_create,
+// mount, umount2, pivot_root, chroot, process_vm_writev, process_vm_readv,
+// perf_event_open.
+func DefaultMonitoredSyscalls() []int {
+	return []int{
+		59,  // execve
+		322, // execveat
+		101, // ptrace
+		126, // capset
+		308, // setns
+		272, // unshare
+		319, // memfd_create
+		165, // mount
+		166, // umount2
+		155, // pivot_root
+		161, // chroot
+		311, // process_vm_writev
+		310, // process_vm_readv
+		241, // perf_event_open
+	}
+}
+
+// DefaultCommDenylist returns kernel worker comm names that should be silenced
+// by default to avoid noise from high-frequency kernel threads.
+func DefaultCommDenylist() []string {
+	return []string{
+		"kworker",
+		"ksoftirqd",
+		"migration",
+		"rcu_sched",
+		"rcu_preempt",
+		"kswapd0",
+		"kswapd1",
+	}
+}
+
+// KernelFilterController manages the BPF-side content-based event filters:
+// the comm denylist, the syscall allowlist, and the global filter enable flag.
+type KernelFilterController struct {
+	commFilterMap      *ebpf.Map // comm_filter_map: key char[16], value uint8
+	syscallFilterMap   *ebpf.Map // syscall_filter_map: key uint32, value uint8
+	kernelFilterConfig *ebpf.Map // kernel_filter_config: key uint32, value uint8
+}
+
+// NewKernelFilterController creates a controller for the three filter maps.
+// All three maps must be non-nil.
+func NewKernelFilterController(commMap, syscallMap, cfgMap *ebpf.Map) (*KernelFilterController, error) {
+	if commMap == nil {
+		return nil, fmt.Errorf("bpf: comm_filter_map is nil")
+	}
+	if syscallMap == nil {
+		return nil, fmt.Errorf("bpf: syscall_filter_map is nil")
+	}
+	if cfgMap == nil {
+		return nil, fmt.Errorf("bpf: kernel_filter_config is nil")
+	}
+	return &KernelFilterController{
+		commFilterMap:      commMap,
+		syscallFilterMap:   syscallMap,
+		kernelFilterConfig: cfgMap,
+	}, nil
+}
+
+// SetCommFilter inserts or updates a comm entry in the BPF filter map.
+// pass=true allows events from that comm, pass=false drops them in the kernel.
+func (kf *KernelFilterController) SetCommFilter(comm string, pass bool) error {
+	if kf.commFilterMap == nil {
+		return fmt.Errorf("bpf: comm_filter_map is nil")
+	}
+	key := [16]byte{}
+	copy(key[:], comm)
+	var val uint8
+	if pass {
+		val = 1
+	}
+	if err := kf.commFilterMap.Update(key, val, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("bpf: set comm filter %q: %w", comm, err)
+	}
+	return nil
+}
+
+// SetSyscallFilter sets whether syscall number nr should be monitored (true)
+// or silently discarded at the kernel level (false).
+func (kf *KernelFilterController) SetSyscallFilter(nr int, monitor bool) error {
+	if nr < 0 || nr >= 512 {
+		return fmt.Errorf("bpf: syscall number %d out of range [0, 512)", nr)
+	}
+	if kf.syscallFilterMap == nil {
+		return fmt.Errorf("bpf: syscall_filter_map is nil")
+	}
+	key := uint32(nr)
+	var val uint8
+	if monitor {
+		val = 1
+	}
+	if err := kf.syscallFilterMap.Update(key, val, ebpf.UpdateExist); err != nil {
+		// ARRAY maps always have entries; fall back to UpdateAny on first use.
+		if err := kf.syscallFilterMap.Update(key, val, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("bpf: set syscall filter %d: %w", nr, err)
+		}
+	}
+	return nil
+}
+
+// Enable activates BPF-side content filtering.
+func (kf *KernelFilterController) Enable() error {
+	if kf.kernelFilterConfig == nil {
+		return fmt.Errorf("bpf: kernel_filter_config is nil")
+	}
+	key := uint32(0)
+	val := uint8(1)
+	if err := kf.kernelFilterConfig.Update(key, val, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("bpf: enable kernel filter: %w", err)
+	}
+	return nil
+}
+
+// Disable deactivates BPF-side content filtering (all events pass through).
+func (kf *KernelFilterController) Disable() error {
+	if kf.kernelFilterConfig == nil {
+		return fmt.Errorf("bpf: kernel_filter_config is nil")
+	}
+	key := uint32(0)
+	val := uint8(0)
+	if err := kf.kernelFilterConfig.Update(key, val, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("bpf: disable kernel filter: %w", err)
+	}
+	return nil
+}
+
+// LoadDefaultFilters populates the filter maps with the default monitored
+// syscall set and the default comm denylist, then enables filtering.
+// Should be called once during startup after the BPF programs are loaded.
+func (kf *KernelFilterController) LoadDefaultFilters() error {
+	for _, nr := range DefaultMonitoredSyscalls() {
+		if err := kf.SetSyscallFilter(nr, true); err != nil {
+			return err
+		}
+	}
+	for _, comm := range DefaultCommDenylist() {
+		if err := kf.SetCommFilter(comm, false); err != nil {
+			return err
+		}
+	}
+	return kf.Enable()
+}
+
 // SetSamplingRateFloat sets the sampling rate using float64 for all event types.
 // This is a convenience method for memory pressure handling.
 func (sc *SamplingController) SetSamplingRate(eventType string, rate float64) error {

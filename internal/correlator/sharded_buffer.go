@@ -241,10 +241,26 @@ func (sb *ShardedEventBuffer) CleanupExpired(ttl time.Duration) int {
 	return removed
 }
 
+// ForEachPID calls fn for every PID that has buffered events, holding each
+// shard's read lock only for the duration of that shard's iteration.
+// It performs no heap allocation and is the preferred API for high-frequency
+// callers such as watchdog checks or Prometheus scrape handlers.
+func (sb *ShardedEventBuffer) ForEachPID(fn func(pid uint32)) {
+	for i := 0; i < sb.numShards; i++ {
+		shard := sb.shards[i]
+		shard.mu.RLock()
+		for pid := range shard.buffers {
+			fn(pid)
+		}
+		shard.mu.RUnlock()
+	}
+}
+
 // PIDs returns all PIDs with buffered events.
 // Two-pass: first counts the exact total to pre-allocate a single slice,
 // then collects. This eliminates O(log n) reallocation copies that occur
 // when PIDs grow beyond the initial capacity estimate.
+// Prefer ForEachPID when a slice return value is not required.
 func (sb *ShardedEventBuffer) PIDs() []uint32 {
 	total := 0
 	for i := 0; i < sb.numShards; i++ {

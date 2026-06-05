@@ -3,6 +3,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -186,6 +188,79 @@ func TestMemoryProfileStore(t *testing.T) {
 
 	_, err = store.Load(ctx, key)
 	assert.Error(t, err)
+}
+
+// TestMemoryStore_ConcurrentStoreBatch verifies that concurrent Store and
+// StoreBatch calls do not lose data and do not race (-race detector must pass).
+func TestMemoryStore_ConcurrentStoreBatch(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	const singles = 50
+	const batchWorkers = 10
+	const batchSize = 10
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, singles+batchWorkers)
+
+	// Concurrent single-alert stores.
+	for i := 0; i < singles; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			alert := types.Alert{
+				ID:        fmt.Sprintf("single-%d", i),
+				Timestamp: time.Now(),
+				RuleID:    "rule-1",
+				Severity:  types.SeverityWarning,
+			}
+			if err := store.Store(ctx, alert); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+
+	// Concurrent batch stores.
+	for i := 0; i < batchWorkers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			batch := make([]types.Alert, batchSize)
+			for j := range batch {
+				batch[j] = types.Alert{
+					ID:        fmt.Sprintf("batch-%d-%d", i, j),
+					Timestamp: time.Now(),
+					RuleID:    "rule-2",
+					Severity:  types.SeverityCritical,
+				}
+			}
+			if err := store.StoreBatch(ctx, batch); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Error(err)
+	}
+
+	// All alerts must be present.
+	const want = singles + batchWorkers*batchSize
+	count, err := store.Count(ctx, QueryFilters{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(want), count)
+
+	// byTime must be sorted DESC (newest first).
+	store.mu.RLock()
+	for i := 1; i < len(store.byTime); i++ {
+		assert.False(t, store.byTime[i].ts.After(store.byTime[i-1].ts),
+			"byTime[%d].ts (%v) is after byTime[%d].ts (%v) — index not sorted DESC",
+			i, store.byTime[i].ts, i-1, store.byTime[i-1].ts)
+	}
+	store.mu.RUnlock()
 }
 
 func TestMatchesFilters(t *testing.T) {

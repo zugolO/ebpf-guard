@@ -234,57 +234,143 @@ func TestCleanComm(t *testing.T) {
 	}
 }
 
-func TestLineagePatternConditionSkipped(t *testing.T) {
-	// Patterns that set Condition must be skipped entirely — the field is not yet
-	// evaluated, and firing unconditionally would produce false positives.
-	// A pattern WITHOUT a condition in the same config must still fire normally.
+func TestLineageConditionFires(t *testing.T) {
+	// A pattern with a condition fires when the condition is satisfied.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	cfg := LineageConfig{
 		Enabled: true,
 		TTL:     5 * time.Minute,
 		Patterns: []LineagePattern{
 			{
-				Name:        "test_conditional",
-				Description: "must be skipped because Condition is set",
+				Name:        "root_sshd_shell",
+				Description: "sshd spawning shell as root",
 				ParentComms: []string{"sshd"},
 				ChildComms:  []string{"bash"},
-				Severity:    "info",
-				Condition:   "verify_source_ip",
-			},
-			{
-				Name:        "test_unconditional",
-				Description: "must fire — no Condition set",
-				ParentComms: []string{"sshd"},
-				ChildComms:  []string{"sh"},
-				Severity:    "warning",
+				Severity:    "critical",
+				Condition:   &LineageCondition{Field: "uid", Op: "eq", Values: []string{"0"}},
 			},
 		},
 	}
-
 	tracker := NewLineageTracker(cfg, logger)
 
-	// The conditional pattern must not fire.
-	eConditional := types.Event{
+	e := types.Event{
 		Type:       types.EventSyscall,
 		PID:        1000,
 		PPID:       999,
+		UID:        0, // root — condition satisfied
 		Comm:       commBytes("bash"),
 		ParentComm: commBytes("sshd"),
 	}
-	matchConditional := tracker.Update(eConditional)
-	assert.Nil(t, matchConditional, "pattern with Condition must be skipped and must not fire")
+	match := tracker.Update(e)
+	require.NotNil(t, match, "pattern must fire when uid condition is satisfied")
+	assert.Equal(t, "root_sshd_shell", match.Pattern.Name)
+}
 
-	// The unconditional pattern must still fire.
-	eUnconditional := types.Event{
+func TestLineageConditionBlocked(t *testing.T) {
+	// A pattern with a condition does NOT fire when the condition is not satisfied.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg := LineageConfig{
+		Enabled: true,
+		TTL:     5 * time.Minute,
+		Patterns: []LineagePattern{
+			{
+				Name:        "root_sshd_shell",
+				Description: "sshd spawning shell as root",
+				ParentComms: []string{"sshd"},
+				ChildComms:  []string{"bash"},
+				Severity:    "critical",
+				Condition:   &LineageCondition{Field: "uid", Op: "eq", Values: []string{"0"}},
+			},
+		},
+	}
+	tracker := NewLineageTracker(cfg, logger)
+
+	e := types.Event{
 		Type:       types.EventSyscall,
 		PID:        1001,
 		PPID:       999,
+		UID:        1000, // non-root — condition not satisfied
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("sshd"),
+	}
+	match := tracker.Update(e)
+	assert.Nil(t, match, "pattern must not fire when uid condition is not satisfied")
+}
+
+func TestLineageConditionInOperator(t *testing.T) {
+	// The "in" operator fires when the field value is in the allowed list.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg := LineageConfig{
+		Enabled: true,
+		TTL:     5 * time.Minute,
+		Patterns: []LineagePattern{
+			{
+				Name:        "priv_sshd_shell",
+				Description: "sshd spawning shell as privileged user",
+				ParentComms: []string{"sshd"},
+				ChildComms:  []string{"bash"},
+				Severity:    "warning",
+				Condition:   &LineageCondition{Field: "uid", Op: "in", Values: []string{"0", "1"}},
+			},
+		},
+	}
+	tracker := NewLineageTracker(cfg, logger)
+
+	// UID 1 is in the list → should fire.
+	eMatch := types.Event{
+		Type:       types.EventSyscall,
+		PID:        1000,
+		PPID:       999,
+		UID:        1,
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("sshd"),
+	}
+	match := tracker.Update(eMatch)
+	require.NotNil(t, match, "pattern must fire when uid is in values list")
+
+	// UID 500 not in list → should not fire.
+	eNoMatch := types.Event{
+		Type:       types.EventSyscall,
+		PID:        1001,
+		PPID:       999,
+		UID:        500,
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("sshd"),
+	}
+	noMatch := tracker.Update(eNoMatch)
+	assert.Nil(t, noMatch, "pattern must not fire when uid is not in values list")
+}
+
+func TestLineageNoConditionFires(t *testing.T) {
+	// A pattern without a condition fires unconditionally (existing behaviour preserved).
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg := LineageConfig{
+		Enabled: true,
+		TTL:     5 * time.Minute,
+		Patterns: []LineagePattern{
+			{
+				Name:        "unconditional",
+				Description: "always fires",
+				ParentComms: []string{"sshd"},
+				ChildComms:  []string{"sh"},
+				Severity:    "warning",
+				// Condition intentionally absent
+			},
+		},
+	}
+	tracker := NewLineageTracker(cfg, logger)
+
+	e := types.Event{
+		Type:       types.EventSyscall,
+		PID:        1001,
+		PPID:       999,
+		UID:        1000,
 		Comm:       commBytes("sh"),
 		ParentComm: commBytes("sshd"),
 	}
-	matchUnconditional := tracker.Update(eUnconditional)
-	require.NotNil(t, matchUnconditional, "pattern without Condition must still fire")
-	assert.Equal(t, "test_unconditional", matchUnconditional.Pattern.Name)
+	match := tracker.Update(e)
+	require.NotNil(t, match, "pattern without condition must always fire")
+	assert.Equal(t, "unconditional", match.Pattern.Name)
 }
 
 func TestNewLineageTrackerDefaults(t *testing.T) {

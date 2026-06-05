@@ -63,14 +63,14 @@ func WorkloadKeyFromEvent(e types.Event) WorkloadKey {
 // are trained on whole-workload behavior rather than single-process noise.
 type WorkloadProfileManager struct {
 	mu       sync.RWMutex
-	profiles map[string]*ProcessProfile // key: WorkloadKey.String()
+	profiles map[WorkloadKey]*ProcessProfile
 	weight   float64
 	ttl      time.Duration
 	maxKeys  int
 
 	// LRU eviction structures — O(log n) eviction via a min-heap.
-	lruHeap  lruStringHeap
-	lruIndex lruStringIndex
+	lruHeap  lruWorkloadKeyHeap
+	lruIndex lruWorkloadKeyIndex
 
 	evictionsTotal prometheus.Counter
 	trackedGauge   prometheus.Gauge
@@ -85,11 +85,11 @@ func NewWorkloadProfileManager(ctx context.Context, weight float64, ttl time.Dur
 		maxKeys = readSystemPIDMax()
 	}
 	wpm := &WorkloadProfileManager{
-		profiles: make(map[string]*ProcessProfile),
+		profiles: make(map[WorkloadKey]*ProcessProfile),
 		weight:   weight,
 		ttl:      ttl,
 		maxKeys:  maxKeys,
-		lruIndex: make(lruStringIndex),
+		lruIndex: make(lruWorkloadKeyIndex),
 		trackedGauge: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_workload_profiles_total",
 			Help: "Number of workload classes currently tracked by the profiler.",
@@ -168,7 +168,7 @@ func (wpm *WorkloadProfileManager) metricsLoop(ctx context.Context) {
 func (wpm *WorkloadProfileManager) GetByKey(key WorkloadKey) *ProcessProfile {
 	wpm.mu.RLock()
 	defer wpm.mu.RUnlock()
-	return wpm.profiles[key.String()]
+	return wpm.profiles[key]
 }
 
 // GetOrCreateByKey returns an existing profile or creates one, evicting LRU if at capacity.
@@ -176,17 +176,16 @@ func (wpm *WorkloadProfileManager) GetOrCreateByKey(key WorkloadKey) *ProcessPro
 	wpm.mu.Lock()
 	defer wpm.mu.Unlock()
 
-	ks := key.String()
-	if p, ok := wpm.profiles[ks]; ok {
-		wpm.lruIndex.touch(&wpm.lruHeap, ks)
+	if p, ok := wpm.profiles[key]; ok {
+		wpm.lruIndex.touch(&wpm.lruHeap, key)
 		return p
 	}
 	if wpm.maxKeys > 0 && len(wpm.profiles) >= wpm.maxKeys {
 		wpm.evictLRULocked()
 	}
 	p := NewProcessProfileForWorkload(key)
-	wpm.profiles[ks] = p
-	wpm.lruIndex.push(&wpm.lruHeap, ks)
+	wpm.profiles[key] = p
+	wpm.lruIndex.push(&wpm.lruHeap, key)
 	return p
 }
 
@@ -197,19 +196,18 @@ func (wpm *WorkloadProfileManager) GetOrCreateByKey(key WorkloadKey) *ProcessPro
 // released before the profile update runs under the per-profile mutex.
 func (wpm *WorkloadProfileManager) RecordEvent(e types.Event) {
 	key := WorkloadKeyFromEvent(e)
-	ks := key.String()
 
 	wpm.mu.Lock()
-	p, ok := wpm.profiles[ks]
+	p, ok := wpm.profiles[key]
 	if !ok {
 		if wpm.maxKeys > 0 && len(wpm.profiles) >= wpm.maxKeys {
 			wpm.evictLRULocked()
 		}
 		p = NewProcessProfileForWorkload(key)
-		wpm.profiles[ks] = p
-		wpm.lruIndex.push(&wpm.lruHeap, ks)
+		wpm.profiles[key] = p
+		wpm.lruIndex.push(&wpm.lruHeap, key)
 	} else {
-		wpm.lruIndex.touch(&wpm.lruHeap, ks)
+		wpm.lruIndex.touch(&wpm.lruHeap, key)
 	}
 	wpm.mu.Unlock()
 
@@ -237,10 +235,10 @@ func (wpm *WorkloadProfileManager) CleanupExpired() int {
 	wpm.mu.Lock()
 	defer wpm.mu.Unlock()
 	removed := 0
-	for ks, p := range wpm.profiles {
+	for k, p := range wpm.profiles {
 		if p.IsExpired(wpm.ttl) {
-			wpm.lruIndex.remove(&wpm.lruHeap, ks)
-			delete(wpm.profiles, ks)
+			wpm.lruIndex.remove(&wpm.lruHeap, k)
+			delete(wpm.profiles, k)
 			removed++
 		}
 	}
@@ -253,7 +251,7 @@ func (wpm *WorkloadProfileManager) evictLRULocked() {
 	if wpm.lruHeap.Len() == 0 {
 		return
 	}
-	e := heap.Pop(&wpm.lruHeap).(*lruEntry)
+	e := heap.Pop(&wpm.lruHeap).(*lruWorkloadKeyEntry)
 	delete(wpm.lruIndex, e.key)
 	delete(wpm.profiles, e.key)
 	if wpm.evictionsTotal != nil {
@@ -278,7 +276,7 @@ func (wpm *WorkloadProfileManager) GetAll() map[string]*ProcessProfile {
 	defer wpm.mu.RUnlock()
 	result := make(map[string]*ProcessProfile, len(wpm.profiles))
 	for k, v := range wpm.profiles {
-		result[k] = v
+		result[k.String()] = v
 	}
 	return result
 }

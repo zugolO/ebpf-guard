@@ -18,17 +18,26 @@ var parentInfoPool = sync.Pool{
 	New: func() any { return &parentInfo{} },
 }
 
+// LineageCondition defines an additional constraint that must be satisfied
+// for a lineage pattern to fire. It is evaluated against the child process
+// event after the parent/child comm lists have already matched.
+//
+// Supported fields: comm, parent_comm, uid, pid, ppid.
+// Supported ops:    in, not_in, eq (equals), neq (not_equals).
+type LineageCondition struct {
+	Field  string   `yaml:"field"`
+	Op     string   `yaml:"op"`
+	Values []string `yaml:"values"`
+}
+
 // LineagePattern defines a suspicious parent-child relationship pattern.
 type LineagePattern struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	ParentComms []string `yaml:"parent_comms"`
-	ChildComms  []string `yaml:"child_comms"`
-	Severity    string   `yaml:"severity"`
-	// Condition is reserved for future conditional evaluation (e.g. source IP
-	// verification). Currently parsed but not evaluated — patterns fire
-	// unconditionally regardless of this field's value.
-	Condition string `yaml:"condition,omitempty"`
+	Name        string            `yaml:"name"`
+	Description string            `yaml:"description"`
+	ParentComms []string          `yaml:"parent_comms"`
+	ChildComms  []string          `yaml:"child_comms"`
+	Severity    string            `yaml:"severity"`
+	Condition   *LineageCondition `yaml:"condition,omitempty"`
 }
 
 // LineageConfig holds configuration for lineage tracking.
@@ -112,23 +121,6 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 		maxDepth = 16
 	}
 
-	// Reject patterns that set the Condition field: it is not yet evaluated, so
-	// including such patterns would cause them to fire on every parent-child match
-	// regardless of the condition — a silent misconfiguration.  Operators must
-	// remove the condition field until conditional lineage evaluation is implemented.
-	var activePatterns []LineagePattern
-	for _, p := range config.Patterns {
-		if p.Condition != "" {
-			logger.Error("lineage: pattern skipped — Condition field is not yet evaluated; remove it or the pattern will never fire",
-				slog.String("pattern", p.Name),
-				slog.String("condition", p.Condition),
-			)
-			continue
-		}
-		activePatterns = append(activePatterns, p)
-	}
-	config.Patterns = activePatterns
-
 	lt := &LineageTracker{
 		config:    config,
 		logger:    logger,
@@ -196,7 +188,7 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 	lt.mu.Unlock()
 
 	// Check for pattern match
-	match := lt.checkPattern(parentComm, comm)
+	match := lt.checkPattern(e, parentComm, comm)
 	if match != nil {
 		result := LineageMatch{
 			Pattern:    *match,
@@ -350,8 +342,10 @@ func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 		return e.PPID, comm
 	}
 
-	// Fallback: read from /proc/<pid>/status
-	return lt.readParentFromProc(e.PID)
+	// e.PPID == 0 means BPF did not populate the parent PID field (common for
+	// synthetic/test events and non-exec syscall tracepoints). Skip the /proc
+	// fallback to avoid a per-event syscall; real BPF events always carry PPID.
+	return 0, ""
 }
 
 // readParentFromProc reads parent PID from /proc/<pid>/status.
@@ -395,17 +389,67 @@ func readProcComm(pid uint32) string {
 	return strings.TrimSpace(string(data))
 }
 
-// checkPattern checks if parent-child combination matches any pattern.
-func (lt *LineageTracker) checkPattern(parentComm, childComm string) *LineagePattern {
+// checkPattern checks if the parent-child combination matches any pattern,
+// including evaluating any structured condition attached to the pattern.
+func (lt *LineageTracker) checkPattern(e types.Event, parentComm, childComm string) *LineagePattern {
 	for i := range lt.config.Patterns {
 		pattern := &lt.config.Patterns[i]
 
 		if matchesAny(parentComm, pattern.ParentComms) &&
-			matchesAny(childComm, pattern.ChildComms) {
+			matchesAny(childComm, pattern.ChildComms) &&
+			evaluateLineageCondition(e, parentComm, pattern.Condition) {
 			return pattern
 		}
 	}
 	return nil
+}
+
+// evaluateLineageCondition returns true when cond is nil (unconditional) or when
+// the condition is satisfied by event e. Supported fields: comm, parent_comm,
+// uid, pid, ppid. Supported ops: in, not_in, eq, neq.
+func evaluateLineageCondition(e types.Event, parentComm string, cond *LineageCondition) bool {
+	if cond == nil {
+		return true
+	}
+
+	var value string
+	switch cond.Field {
+	case "comm":
+		value = cleanComm(e.Comm[:])
+	case "parent_comm":
+		value = parentComm
+	case "uid":
+		value = strconv.FormatUint(uint64(e.UID), 10)
+	case "pid":
+		value = strconv.FormatUint(uint64(e.PID), 10)
+	case "ppid":
+		value = strconv.FormatUint(uint64(e.PPID), 10)
+	default:
+		return false
+	}
+
+	switch strings.ToLower(cond.Op) {
+	case "in":
+		for _, v := range cond.Values {
+			if value == v {
+				return true
+			}
+		}
+		return false
+	case "not_in":
+		for _, v := range cond.Values {
+			if value == v {
+				return false
+			}
+		}
+		return true
+	case "eq", "equals":
+		return len(cond.Values) > 0 && value == cond.Values[0]
+	case "neq", "not_equals":
+		return len(cond.Values) == 0 || value != cond.Values[0]
+	default:
+		return false
+	}
 }
 
 // matchesAny checks if a string matches any pattern in the list.

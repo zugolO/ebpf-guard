@@ -178,7 +178,7 @@ func TestWorkloadProfileManager_Cleanup(t *testing.T) {
 	// concurrently with the explicit CleanupExpired call below.
 	shortTTL := 50 * time.Millisecond
 	wpm := &WorkloadProfileManager{
-		profiles: make(map[string]*ProcessProfile),
+		profiles: make(map[WorkloadKey]*ProcessProfile),
 		weight:   0.3,
 		ttl:      shortTTL,
 		maxKeys:  100,

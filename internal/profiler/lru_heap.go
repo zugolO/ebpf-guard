@@ -104,6 +104,71 @@ func (idx lruStringIndex) remove(h *lruStringHeap, key string) {
 	}
 }
 
+// lruWorkloadKeyEntry is an element in the LRU min-heap keyed by WorkloadKey.
+type lruWorkloadKeyEntry struct {
+	key        WorkloadKey
+	lastAccess time.Time
+	index      int // position in lruWorkloadKeyHeap; -1 when not in heap
+}
+
+// lruWorkloadKeyHeap is a min-heap of *lruWorkloadKeyEntry, ordered by lastAccess (oldest first).
+type lruWorkloadKeyHeap []*lruWorkloadKeyEntry
+
+func (h lruWorkloadKeyHeap) Len() int           { return len(h) }
+func (h lruWorkloadKeyHeap) Less(i, j int) bool { return h[i].lastAccess.Before(h[j].lastAccess) }
+func (h lruWorkloadKeyHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+func (h *lruWorkloadKeyHeap) Push(x any) {
+	e := x.(*lruWorkloadKeyEntry)
+	e.index = len(*h)
+	*h = append(*h, e)
+}
+func (h *lruWorkloadKeyHeap) Pop() any {
+	old := *h
+	n := len(old)
+	e := old[n-1]
+	old[n-1] = nil
+	e.index = -1
+	*h = old[:n-1]
+	return e
+}
+
+// lruWorkloadKeyIndex is the companion lookup map for lruWorkloadKeyHeap.
+// Methods are no-ops when the index is nil (LRU disabled).
+type lruWorkloadKeyIndex map[WorkloadKey]*lruWorkloadKeyEntry
+
+func (idx lruWorkloadKeyIndex) push(h *lruWorkloadKeyHeap, key WorkloadKey) {
+	if idx == nil {
+		return
+	}
+	e := &lruWorkloadKeyEntry{key: key, lastAccess: time.Now()}
+	heap.Push(h, e)
+	idx[key] = e
+}
+
+func (idx lruWorkloadKeyIndex) touch(h *lruWorkloadKeyHeap, key WorkloadKey) {
+	if idx == nil {
+		return
+	}
+	if e, ok := idx[key]; ok {
+		e.lastAccess = time.Now()
+		heap.Fix(h, e.index)
+	}
+}
+
+func (idx lruWorkloadKeyIndex) remove(h *lruWorkloadKeyHeap, key WorkloadKey) {
+	if idx == nil {
+		return
+	}
+	if e, ok := idx[key]; ok {
+		heap.Remove(h, e.index)
+		delete(idx, key)
+	}
+}
+
 // lruUint32Index is the companion lookup map for lruUint32Heap.
 // Methods are no-ops when the index is nil (LRU disabled).
 type lruUint32Index map[uint32]*lruUint32Entry

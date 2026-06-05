@@ -248,6 +248,10 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 	re.mu.RLock()
 	defer re.mu.RUnlock()
 
+	if len(re.rules) == 0 {
+		return nil
+	}
+
 	// Pre-allocate with a small capacity to avoid the nil-slice reallocation
 	// chain (1→2→4→8) on the first few matches at 10 k+ events/sec.
 	alerts := make([]types.Alert, 0, 4)

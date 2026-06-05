@@ -313,10 +313,6 @@ decisions[{"rule_id": "sensitive_file", "severity": "warning", "message": "Acces
 	input.event.file
 	contains(input.event.file.filename, "/etc/shadow")
 }
-
-contains(s, substr) {
-	contains(s, substr)
-}
 `
 	err := os.WriteFile(filepath.Join(tmpDir, "benchmark.rego"), []byte(policy), 0644)
 	require.NoError(b, err)

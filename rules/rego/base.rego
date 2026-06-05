@@ -129,28 +129,25 @@ is_container_escape_path(path) {
 	startswith(path, "/proc/self/root")
 }
 
-# Helper: Calculate Shannon entropy (approximation for DGA detection)
-# Returns entropy value between 0 and 8 (bits per character)
+# Helper: Distinct-character count as a DGA-entropy proxy.
+# True Shannon entropy requires log() which is unavailable in OPA v0.70.0.
+# Returns the number of distinct characters in s (range: 1..len(s)).
+# DGA domains tend to have broader character sets than real domain labels.
 shannon_entropy(s) = entropy {
-	chars := {c: count | some c; c := split(s, "")[_]; count := count_char(s, c)}
-	len := count(split(s, ""))
-	entropy := sum([p * log2(p) * -1 | some p; p := to_float(chars[c]) / to_float(len); some c])
-}
-
-count_char(s, c) = count {
-	arr := split(s, "")
-	count := count([1 | arr[i] == c])
+	chars := {c | c := split(s, "")[_]}
+	entropy := to_number(count(chars))
 }
 
 # Helper: Check if domain looks like DGA (high entropy, no dictionary words)
 is_dga_domain(domain) {
-	# Remove TLD for entropy calculation
 	parts := split(domain, ".")
 	count(parts) > 1
 	name := parts[0]
 	count(name) > 10
 	entropy := shannon_entropy(name)
-	entropy > 3.5
+	# Threshold: 7+ distinct characters in a 10+ char label suggests DGA.
+	# (Adjusted from original 3.5 Shannon bits to match the new proxy metric.)
+	entropy > 6
 }
 
 # Helper: Check if IP is private
@@ -290,12 +287,4 @@ to_float(x) = float {
 	float := to_number(x)
 }
 
-# Helper: Log base 2
-log2(x) = result {
-	result := log(x) / log(2)
-}
-
-# Helper: Lowercase
-lower(s) = lower {
-	lower := lower(s)
-}
+# lower() and log() are not user-defined; use OPA built-ins directly.

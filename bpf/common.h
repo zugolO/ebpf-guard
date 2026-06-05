@@ -119,6 +119,44 @@ struct {
 	__type(value, struct sampling_config);
 } sampling_config SEC(".maps");
 
+/*
+ * comm_filter_map - per-comm allowlist/denylist.
+ * key: comm string (up to 16 bytes, NUL-padded), value: 1 = pass, 0 = drop.
+ * When a comm is present with value 0, all events from that process are
+ * discarded in the kernel before reaching the ring buffer.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	__type(key, char[COMM_LEN]);
+	__type(value, __u8);
+} comm_filter_map SEC(".maps");
+
+/*
+ * syscall_filter_map - per-syscall-number monitoring switch.
+ * key: syscall number (__u32), value: 1 = monitor, 0 = ignore.
+ * When enabled and a syscall number is absent or set to 0, the event is
+ * discarded before reaching the ring buffer.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 512);
+	__type(key, __u32);
+	__type(value, __u8);
+} syscall_filter_map SEC(".maps");
+
+/*
+ * kernel_filter_config - global on/off switch for content-based filtering.
+ * key 0: enabled flag (__u8, 1 = active).
+ * Allows runtime toggling without reloading BPF programs.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u8);
+} kernel_filter_config SEC(".maps");
+
 /* Per-CPU event counters for sampling */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -200,6 +238,50 @@ static __always_inline bool should_sample(__u32 event_type, __u32 rate)
 /* Helper macro to submit event to ring buffer */
 #define submit_event(e) \
 	bpf_ringbuf_submit(e, 0)
+
+/*
+ * kernel_filter_enabled - returns true when content-based BPF filtering is on.
+ */
+static __always_inline bool kernel_filter_enabled(void)
+{
+	__u32 key = 0;
+	__u8 *val = bpf_map_lookup_elem(&kernel_filter_config, &key);
+	return val && *val;
+}
+
+/*
+ * comm_is_denied - returns true if the current task's comm is in the denylist
+ * (present in comm_filter_map with value 0).  Returns false when the comm is
+ * not in the map (pass through) or is explicitly whitelisted (value 1).
+ */
+static __always_inline bool comm_is_denied(void)
+{
+	char comm[COMM_LEN] = {};
+	__u8 *val;
+
+	bpf_get_current_comm(comm, sizeof(comm));
+	val = bpf_map_lookup_elem(&comm_filter_map, comm);
+	/* val == NULL  → not in map → pass; val != NULL && *val == 0 → deny */
+	return val && (*val == 0);
+}
+
+/*
+ * syscall_is_monitored - returns true if syscall number nr should be
+ * forwarded.  Returns true when the syscall_filter_map entry is 1, false
+ * when it is 0 or absent (absent means "not in the monitored set").
+ */
+static __always_inline bool syscall_is_monitored(__s64 nr)
+{
+	__u32 key;
+	__u8 *val;
+
+	if (nr < 0 || nr >= 512)
+		return false;
+
+	key = (__u32)nr;
+	val = bpf_map_lookup_elem(&syscall_filter_map, &key);
+	return val && (*val == 1);
+}
 
 /* Helper to get current process info */
 static __always_inline void fill_process_info(struct event *e)

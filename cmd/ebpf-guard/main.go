@@ -298,12 +298,19 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Any("error", err))
 	}
 
+	sqliteVacuumInterval, _ := time.ParseDuration(cfg.Store.SQLite.VacuumInterval)
+	if sqliteVacuumInterval <= 0 {
+		sqliteVacuumInterval = time.Hour
+	}
+
 	alertStore, err := store.New(store.Config{
 		Backend: cfg.Store.Backend,
 		SQLite: store.SQLiteConfig{
-			Path:         cfg.Store.SQLite.Path,
-			MaxOpenConns: 10,
-			MaxIdleConns: 5,
+			Path:           cfg.Store.SQLite.Path,
+			MaxOpenConns:   10,
+			MaxIdleConns:   5,
+			MaxAlerts:      cfg.Store.SQLite.MaxAlerts,
+			VacuumInterval: sqliteVacuumInterval,
 		},
 		OpenSearch: store.OpenSearchConfig{
 			Addresses:          []string{cfg.Store.OpenSearch.URL},

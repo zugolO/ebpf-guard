@@ -219,11 +219,15 @@ type workerTask struct {
 	event types.Event
 }
 
+// workerTaskPool reduces per-event allocations on the ingest hot path by
+// recycling workerTask structs rather than allocating a new one each time.
+var workerTaskPool = sync.Pool{New: func() any { return new(workerTask) }}
+
 // workerState is one slot in the parallel ingest pool.  Each worker holds an
 // isolated AnomalyDetector so ProcessEvent is always called from a single
 // goroutine per instance, satisfying the detector's thread-safety invariant.
 type workerState struct {
-	ch chan workerTask
+	ch chan *workerTask
 	ad *profiler.AnomalyDetector // nil when anomaly detection is disabled
 }
 
@@ -627,7 +631,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				)
 			}
 			ce.ingestPool[i] = &workerState{
-				ch: make(chan workerTask, 1024),
+				ch: make(chan *workerTask, 1024),
 				ad: workerAD,
 			}
 		}
@@ -805,9 +809,13 @@ func (ce *CorrelationEngine) IngestAsync(ctx context.Context, e types.Event) {
 		return
 	}
 	w := ce.ingestPool[e.PID&ce.ingestMask]
+	t := workerTaskPool.Get().(*workerTask)
+	t.ctx = ctx
+	t.event = e
 	select {
-	case w.ch <- workerTask{ctx: ctx, event: e}:
+	case w.ch <- t:
 	case <-ctx.Done():
+		workerTaskPool.Put(t)
 	}
 }
 
@@ -819,7 +827,9 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 			if !ok {
 				return
 			}
-			ce.ingestWithAD(task.ctx, task.event, w.ad)
+			tctx, ev := task.ctx, task.event
+			workerTaskPool.Put(task)
+			ce.ingestWithAD(tctx, ev, w.ad)
 		case <-ctx.Done():
 			return
 		}

@@ -342,8 +342,10 @@ func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 		return e.PPID, comm
 	}
 
-	// Fallback: read from /proc/<pid>/status
-	return lt.readParentFromProc(e.PID)
+	// e.PPID == 0 means BPF did not populate the parent PID field (common for
+	// synthetic/test events and non-exec syscall tracepoints). Skip the /proc
+	// fallback to avoid a per-event syscall; real BPF events always carry PPID.
+	return 0, ""
 }
 
 // readParentFromProc reads parent PID from /proc/<pid>/status.

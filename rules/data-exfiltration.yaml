@@ -1,0 +1,234 @@
+## Data Exfiltration Detection Rules
+# MITRE ATT&CK: T1048 — Exfiltration Over Alternative Protocol
+# Detects DNS tunneling extensions, clipboard/screen exfil vectors,
+# and covert channel indicators that complement the existing dns-threats.yaml.
+
+rules:
+  # ============================================================================
+  # T1048.001 — Exfiltration Over Symmetric Encrypted Non-C2 Protocol
+  # DNS TXT Record Exfiltration
+  # ============================================================================
+
+  # TXT queries with very long base64-like subdomains are the classic DNS
+  # tunneling exfiltration pattern — the payload is encoded in the label itself.
+  - id: exfil_dns_txt_long_label
+    name: "Data Exfil: DNS TXT query with oversized label (tunneling)"
+    description: >
+      A DNS TXT query was observed with an unusually long label component
+      (> 50 chars). DNS tunneling tools (iodine, dnscat2, dns2tcp) encode
+      data in the leftmost label and use TXT record responses to carry
+      replies. Combined with high entropy this is a strong T1048 indicator.
+    event_type: dns
+    condition:
+      field: qname_length
+      op: gt
+      values: ["60"]
+    severity: critical
+    action: alert
+    tags: [mitre-t1048, mitre-t1048.001, data-exfiltration, dns-tunnel, txt-exfil]
+
+  # Combining high entropy with TXT query type (qtype=16) is the highest-
+  # confidence indicator of active DNS tunneling exfiltration.
+  - id: exfil_dns_high_entropy_txt
+    name: "Data Exfil: high-entropy TXT DNS query (active tunneling)"
+    description: >
+      A TXT-type DNS query (qtype=16) exhibits domain entropy > 3.8.
+      This combination is the canonical signature of dnscat2, iodine, and
+      similar DNS tunneling tools encoding data in the domain name and
+      using TXT responses as a covert channel for T1048 exfiltration.
+    event_type: dns
+    condition_group:
+      operator: and
+      conditions:
+        - field: qtype
+          op: equals
+          values: ["16"]
+        - field: qname_entropy
+          op: gt
+          values: ["3.8"]
+    severity: critical
+    action: alert
+    tags: [mitre-t1048, mitre-t1048.001, data-exfiltration, dns-tunnel, txt-exfil]
+
+  # ============================================================================
+  # CNAME Chain Depth — T1071.004 covert C2 via DNS indirection
+  # ============================================================================
+
+  # A domain with many subdomain levels (depth proxy: qname_subdomain_count)
+  # may indicate CNAME-chain tunneling or fast-flux C2.  Legitimate CDNs rarely
+  # exceed 4-5 labels; depth > 8 is anomalous.
+  - id: exfil_dns_deep_subdomain
+    name: "Data Exfil: deep subdomain chain (CNAME tunnel indicator)"
+    description: >
+      A DNS query with more than 6 label components was observed. Legitimate
+      hostnames rarely exceed 4-5 labels; depth > 6 combined with high entropy
+      is a reliable CNAME-chain tunneling indicator used to exfiltrate data
+      through recursive resolvers that cache intermediate CNAME hops.
+    event_type: dns
+    condition_group:
+      operator: and
+      conditions:
+        - field: qname_subdomain_count
+          op: gt
+          values: ["6"]
+        - field: qname_entropy
+          op: gt
+          values: ["3.2"]
+    severity: critical
+    action: alert
+    tags: [mitre-t1048, mitre-t1071, mitre-t1071.004, data-exfiltration, cname-tunnel, dns]
+
+  # ============================================================================
+  # T1052 / T1041 — Exfiltration Over Physical / Alternative Medium
+  # X11 / Wayland socket access + outbound connection
+  # ============================================================================
+
+  # Accessing X11 Unix domain sockets from unexpected processes may precede
+  # screen scraping or keylogging exfiltration from graphical sessions.
+  - id: exfil_x11_socket_access
+    name: "Data Exfil: X11 socket access (screen/input exfil vector)"
+    description: >
+      A process accessed the X11 Unix domain socket (/tmp/.X11-unix/X*).
+      In containerised environments X11 socket mounting is uncommon and
+      access from non-display-server processes may indicate screen scraping,
+      clipboard reading (xclip/xdotool), or keylogging as a precursor to
+      T1056.001 input capture or T1113 screen capture exfiltration.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/\\.X11-unix/X[0-9]+"
+        - "/tmp/\\.X[0-9]+-lock"
+    severity: warning
+    action: alert
+    tags: [mitre-t1048, mitre-t1056, mitre-t1113, data-exfiltration, x11, screen-capture]
+
+  # Wayland Compositor socket access.
+  - id: exfil_wayland_socket_access
+    name: "Data Exfil: Wayland compositor socket access"
+    description: >
+      A process accessed the Wayland compositor socket (XDG_RUNTIME_DIR).
+      Similar to X11, unexpected access from non-GUI processes may indicate
+      screen capture or input injection as part of a data exfiltration chain.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/run/user/[0-9]+/wayland-[0-9]+"
+        - "/var/run/user/[0-9]+/wayland-[0-9]+"
+    severity: warning
+    action: alert
+    tags: [mitre-t1048, mitre-t1056, mitre-t1113, data-exfiltration, wayland, screen-capture]
+
+  # ============================================================================
+  # T1048.003 — Exfiltration Over Unencrypted Non-C2 Protocol
+  # Network indicators of bulk data exfiltration
+  # ============================================================================
+
+  # Connections to uncommon high-numbered ports from known data-rich processes
+  # (databases, backup agents) may indicate exfiltration over non-standard channels.
+  - id: exfil_db_nonstandard_port_connect
+    name: "Data Exfil: database process connecting to non-standard port"
+    description: >
+      A database process (mysqld, postgres, mongod, redis-server) established
+      an outbound TCP connection to a non-standard port (not 3306/5432/27017/6379).
+      Database processes should not initiate outbound connections in normal
+      operation; this pattern is indicative of T1048.003 bulk exfiltration or
+      a compromised database server relaying stolen records.
+    event_type: network
+    condition:
+      field: dport
+      op: not_in
+      values:
+        - "3306"    # MySQL replication
+        - "5432"    # PostgreSQL replication
+        - "27017"   # MongoDB replication
+        - "6379"    # Redis
+        - "6380"    # Redis TLS
+        - "443"     # HTTPS backups
+        - "80"
+    severity: critical
+    action: alert
+    tags: [mitre-t1048, mitre-t1048.003, data-exfiltration, database, lateral-movement]
+
+  # ============================================================================
+  # T1030 — Data Transfer Size Limits: large outbound connection
+  # ============================================================================
+
+  # Non-HTTP/S processes making outbound connections on high-numbered ports
+  # to external IPs are candidates for manual exfiltration or covert channels.
+  - id: exfil_outbound_high_port
+    name: "Data Exfil: outbound connection to high non-standard port"
+    description: >
+      An outbound TCP connection was observed to a high-numbered port
+      (> 10000) that is not a common application port. Attackers use
+      high-numbered ephemeral listener ports on VPS nodes to receive
+      exfiltrated data and blend into normal ephemeral-port traffic.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: gt
+          values: ["10000"]
+        - field: dport
+          op: not_in
+          values:
+            - "8443"   # HTTPS alternate
+            - "8080"   # HTTP alternate
+            - "10250"  # kubelet
+            - "10255"  # kubelet read-only
+    severity: info
+    action: alert
+    tags: [mitre-t1048, mitre-t1030, data-exfiltration, high-port, covert-channel]
+
+  # ============================================================================
+  # T1048 — Clipboard / Memory-Mapped Sensitive File Access
+  # ============================================================================
+
+  # Clipboard managers and screen capture tools reading from /dev/mem or
+  # /proc/PID/mem combined with network output are a combined exfil vector.
+  - id: exfil_clipboard_tool_network
+    name: "Data Exfil: clipboard/screenshot tool accessing sensitive paths"
+    description: >
+      A clipboard or screenshot utility (xclip, xdotool, scrot, gnome-screenshot,
+      import) accessed /proc or /dev paths indicative of memory reading. This
+      combined with network activity forms a complete T1056/T1113 + T1048
+      exfiltration chain where captured data is sent to a remote endpoint.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/proc/self/mem"
+        - "/dev/shm/"
+    severity: warning
+    action: alert
+    tags: [mitre-t1048, mitre-t1056, mitre-t1113, data-exfiltration, clipboard, memory]
+
+  # ============================================================================
+  # T1567 — Exfiltration Over Web Service
+  # SSH/SCP/SFTP bulk transfer indicators
+  # ============================================================================
+
+  # scp/sftp/rsync initiated from interactive shell sessions outside normal
+  # backup windows may indicate insider threat or compromised credential exfil.
+  - id: exfil_scp_from_container
+    name: "Data Exfil: scp/sftp initiated from container context"
+    description: >
+      An scp, sftp, or rsync process was started. In containerised environments
+      these tools are rarely needed at runtime; their presence typically indicates
+      an attacker exfiltrating data over SSH (T1048.002) or an insider threat.
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values:
+        - "22"
+        - "2222"
+        - "2022"
+    severity: info
+    action: alert
+    tags: [mitre-t1048, mitre-t1048.002, mitre-t1567, data-exfiltration, scp, sftp]

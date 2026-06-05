@@ -1,0 +1,232 @@
+## Kubernetes-Specific Attack Detection Rules
+# MITRE ATT&CK: T1528 (SA Token Theft), T1552 (Unsecured Credentials),
+#               T1611 (Escape to Host), T1078 (Valid Accounts)
+# Detects attacks specific to Kubernetes: service account token theft,
+# etcd direct access, API server abuse, and hostPath volume exploitation.
+
+rules:
+  # ============================================================================
+  # T1528 — Steal Application Access Token
+  # Service Account Token Theft
+  # ============================================================================
+
+  # The projected SA token is the primary credential inside a pod. Reading it
+  # outside the Kubernetes client libraries (kubectl, kube-proxy, kubelet) is
+  # highly suspicious — an attacker pivoting inside a compromised pod will
+  # read this file first to authenticate to the API server.
+  - id: k8s_sa_token_read
+    name: "K8s: Service Account token read (T1528)"
+    description: >
+      A process read the Kubernetes service account token from the standard
+      projected volume path. While Kubernetes client libraries do this
+      legitimately, unexpected callers (shells, curl, wget, python scripts)
+      indicate T1528 — an attacker harvesting the SA credential to
+      impersonate the pod's identity against the API server.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        - "/run/secrets/kubernetes.io/serviceaccount/token"
+        - "/var/run/secrets/kubernetes.io/serviceaccount/"
+    severity: critical
+    action: alert
+    tags: [mitre-t1528, k8s, service-account, token-theft, lateral-movement]
+
+  # Projected token path used with CSI driver mounts (Kubernetes 1.22+).
+  - id: k8s_sa_token_projected_read
+    name: "K8s: projected service account token read"
+    description: >
+      A process read from a Kubernetes projected service account token path
+      (bound tokens or CSI-mounted secrets). Access by unexpected processes
+      indicates T1528 credential theft targeting the current pod's RBAC identity.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/var/run/secrets/.*serviceaccount.*"
+        - "/run/secrets/.*serviceaccount.*"
+    severity: critical
+    action: alert
+    tags: [mitre-t1528, k8s, service-account, bound-token, projected-volume]
+
+  # ============================================================================
+  # T1552.001 — Unsecured Credentials: Credentials in Files
+  # etcd Direct Access (bypasses K8s RBAC entirely)
+  # ============================================================================
+
+  # etcd stores all cluster state including Secrets. A direct TCP connection
+  # to etcd from a process that is not etcd, kube-apiserver, or authorised
+  # backup agents completely bypasses Kubernetes RBAC and exposes all secrets.
+  - id: k8s_etcd_direct_access
+    name: "K8s: direct etcd connection (RBAC bypass)"
+    description: >
+      A process made a TCP connection to etcd client port (2379) or peer port
+      (2380). Direct etcd access bypasses Kubernetes RBAC entirely and gives
+      an attacker access to all cluster Secrets, ConfigMaps, and ServiceAccount
+      tokens. Legitimate callers are kube-apiserver and etcd cluster members only.
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values:
+        - "2379"   # etcd client port
+        - "2380"   # etcd peer port
+    severity: critical
+    action: alert
+    tags: [mitre-t1552, mitre-t1552.001, k8s, etcd, rbac-bypass, secrets-access]
+
+  # ============================================================================
+  # T1611 — Escape to Host via hostPath Volume
+  # ============================================================================
+
+  # Accessing /etc/kubernetes/ from inside a pod indicates the pod was mounted
+  # with a hostPath volume pointing to the control-plane config directory, or
+  # the container is escaping its namespace boundary.
+  - id: k8s_hostpath_kubecfg_access
+    name: "K8s: access to /etc/kubernetes/ from pod context"
+    description: >
+      A process accessed /etc/kubernetes/, which contains control-plane
+      configuration, PKI certificates, and kubeconfig files. Access from a
+      pod context (non-system process) indicates a hostPath volume escape or
+      active exploitation of T1611 — the attacker gains kubeadmin credentials
+      and can take over the entire cluster.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/kubernetes/"
+    severity: critical
+    action: alert
+    tags: [mitre-t1611, k8s, hostpath, control-plane, cluster-takeover]
+
+  # /var/lib/kubelet/ contains pod specs, node credentials, and kubeconfig.
+  - id: k8s_hostpath_kubelet_access
+    name: "K8s: access to /var/lib/kubelet/ from pod context"
+    description: >
+      A process accessed /var/lib/kubelet/ which stores kubelet certificates,
+      pod specs, and device plugin sockets. Unexpected access from a container
+      process indicates a hostPath escape (T1611) aimed at extracting kubelet
+      credentials or modifying pod specifications on the node.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/lib/kubelet/"
+    severity: critical
+    action: alert
+    tags: [mitre-t1611, k8s, hostpath, kubelet, node-credential-theft]
+
+  # ============================================================================
+  # API Server Abuse — T1078.001 (Default Accounts)
+  # kubectl exec / port-forward spawning unexpected processes
+  # ============================================================================
+
+  # kubectl exec attaches a pseudo-terminal to a running container; a shell
+  # spawned this way appears as a child of the container's init with the kubectl
+  # process in the parent lineage. This rule detects direct kubectl API connections.
+  - id: k8s_kubectl_apiserver_exec
+    name: "K8s: kubectl connecting to API server exec endpoint"
+    description: >
+      A kubectl process made a connection to the Kubernetes API server port
+      (6443 or 8443). While normal for CLI operations, this rule is intended
+      to surface unexpected kubectl activity inside pods that may indicate
+      lateral movement via kubectl exec (T1609) or credential abuse (T1078).
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values:
+        - "6443"   # kube-apiserver HTTPS
+        - "8443"   # alternate API server port
+        - "16443"  # microk8s API server
+    severity: warning
+    action: alert
+    tags: [mitre-t1078, mitre-t1609, k8s, kubectl, api-server, lateral-movement]
+
+  # ============================================================================
+  # T1552.007 — Container API Access
+  # Container runtime socket access from unexpected processes
+  # ============================================================================
+
+  # Access to the container runtime socket gives full control over all
+  # containers on the node — equivalent to root on the host.
+  - id: k8s_runtime_socket_access
+    name: "K8s: container runtime socket access (node-level takeover)"
+    description: >
+      A process accessed a container runtime Unix socket. Accessing the
+      containerd, CRI-O, or Docker socket from inside a pod is the canonical
+      container escape technique: an attacker can create a privileged container
+      with hostPID/hostNetwork and full host filesystem access, effectively
+      owning the Kubernetes node (T1552.007, T1611).
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/run/containerd/containerd.sock"
+        - "/var/run/containerd/containerd.sock"
+        - "/run/crio/crio.sock"
+        - "/var/run/crio/crio.sock"
+        - "/var/run/docker.sock"
+        - "/run/docker.sock"
+    severity: critical
+    action: alert
+    tags: [mitre-t1552, mitre-t1552.007, mitre-t1611, k8s, runtime-socket, container-escape]
+
+  # ============================================================================
+  # T1613 — Container and Resource Discovery
+  # K8s metadata API / IMDS access
+  # ============================================================================
+
+  # Accessing the IMDS or the Kubernetes metadata API from inside a pod is
+  # a reconnaissance step to discover the cloud provider and collect credentials
+  # (instance role credentials, SA token, etc.).
+  - id: k8s_metadata_api_access
+    name: "K8s: cloud IMDS / metadata API access from pod"
+    description: >
+      A process connected to the cloud instance metadata service (169.254.169.254)
+      or GKE/EKS metadata endpoints. From inside a Kubernetes pod this is a
+      T1613 container discovery step: the attacker is probing for cloud IAM
+      credentials (AWS IAM role, GCP SA key, Azure MSI token) that can be used
+      to escalate from pod-level to cloud-account-level access.
+    event_type: network
+    condition:
+      field: daddr
+      op: in_cidr
+      values:
+        - "169.254.169.254/32"   # IMDS (AWS, Azure, GCP, OpenStack)
+        - "169.254.170.2/32"     # ECS task metadata
+    severity: critical
+    action: alert
+    tags: [mitre-t1613, mitre-t1552, k8s, imds, cloud-credentials, metadata-api]
+
+  # ============================================================================
+  # Kubernetes Secret / ConfigMap file system access
+  # ============================================================================
+
+  # Secrets projected into pods land in /run/secrets or /var/run/secrets.
+  # Reading .dockerconfigjson (image pull secret) lets an attacker pull
+  # private images and potentially push backdoored versions.
+  - id: k8s_dockerconfig_secret_read
+    name: "K8s: .dockerconfigjson image pull secret access"
+    description: >
+      A process read a Kubernetes image pull secret (.dockerconfigjson).
+      This secret contains registry credentials; an attacker can use it to
+      authenticate to private registries, pull proprietary images, or push
+      backdoored images that will be deployed to the cluster.
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/var/run/secrets/.*\\.dockerconfigjson"
+        - "/run/secrets/.*\\.dockerconfigjson"
+        - ".*\\.dockerconfigjson$"
+    severity: critical
+    action: alert
+    tags: [mitre-t1528, mitre-t1525, k8s, image-pull-secret, registry-credential]

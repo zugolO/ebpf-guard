@@ -15,12 +15,16 @@ const rotateSize = 100 * 1024 * 1024 // 100 MB
 // Entry is one enforcement audit record.
 // JSON field names match the spec so consumers can rely on them without schema evolution.
 type Entry struct {
-	TS       time.Time `json:"ts"`
-	Action   string    `json:"action"`
-	PID      uint32    `json:"pid"`
-	Rule     string    `json:"rule"`
-	Comm     string    `json:"comm"`
-	Enforced bool      `json:"enforced"`
+	TS        time.Time `json:"ts"`
+	Action    string    `json:"action"`
+	PID       uint32    `json:"pid"`
+	Rule      string    `json:"rule"`
+	Comm      string    `json:"comm"`
+	Enforced  bool      `json:"enforced"`
+	Hook      string    `json:"hook,omitempty"`      // LSM hook name (lsm_audit entries)
+	TargetPID uint32    `json:"target_pid,omitempty"` // signal target PID (task_kill only)
+	Path      string    `json:"path,omitempty"`      // file path (file_open only)
+	UID       uint32    `json:"uid,omitempty"`       // effective UID of the acting process
 }
 
 // Logger writes enforcement audit entries to an append-only JSONL file.

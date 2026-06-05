@@ -33,6 +33,8 @@ const (
 	EventCgroupEsc EventType = 9
 	// EventGPU indicates a CUDA/GPU memory operation (alloc, free, DtoH copy, HtoD copy).
 	EventGPU EventType = 10
+	// EventLSMAudit indicates an LSM hook audit record (file_open block, socket_connect block, task_kill).
+	EventLSMAudit EventType = 11
 )
 
 // eventTypeNames maps string names used in rule YAML to numeric EventType constants.
@@ -51,6 +53,7 @@ var eventTypeNames = map[string]EventType{
 	"kmod_load":   EventKmodLoad,
 	"cgroup_esc":  EventCgroupEsc,
 	"gpu":         EventGPU,
+	"lsm_audit":   EventLSMAudit,
 }
 
 // UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.
@@ -348,6 +351,25 @@ type GPUEvent struct {
 	HostPtr uint64
 	// Size is the byte count for the operation (allocation size or transfer size).
 	Size uint64
+}
+
+// Reset clears all pointer fields so the Event can be safely returned to a sync.Pool.
+// Scalar and fixed-size array fields need not be cleared; they are overwritten on the
+// next fill (ToTypesEvent assignment). Pointer fields must be nil'd to avoid keeping
+// the inner structs alive after the pooled Event is reused.
+func (e *Event) Reset() {
+	e.Syscall = nil
+	e.Network = nil
+	e.File = nil
+	e.TLS = nil
+	e.DNS = nil
+	e.Privesc = nil
+	e.NetClose = nil
+	e.Kmod = nil
+	e.CgroupEsc = nil
+	e.GPU = nil
+	e.TraceContext = nil
+	e.Enrichment = nil
 }
 
 // ProcessProfile represents a learned behavioral profile for a process type.

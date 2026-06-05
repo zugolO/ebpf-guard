@@ -237,15 +237,23 @@ func TestShardedLock_Concurrent(t *testing.T) {
 }
 
 func BenchmarkShardedEventBuffer_Add(b *testing.B) {
+	const numPIDs = uint32(1000)
 	sb := NewShardedEventBuffer(100)
 	event := types.Event{Type: types.EventSyscall}
-
+	// Pre-populate all PIDs to eliminate ring-buffer slice allocation from the hot path.
+	// The benchmark measures pure Add throughput, not first-use allocation.
+	for i := uint32(1); i <= numPIDs; i++ {
+		sb.Add(i, event)
+	}
 	b.ResetTimer()
+	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		pid := uint32(1)
 		for pb.Next() {
 			sb.Add(pid, event)
-			pid++
+			if pid++; pid > numPIDs {
+				pid = 1
+			}
 		}
 	})
 }

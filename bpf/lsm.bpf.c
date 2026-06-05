@@ -14,15 +14,25 @@
 
 #include "common.h"
 
-/* LSM blocklist map: PID -> blocked path hash set indicator
- * LRU eviction ensures bounded memory usage
- */
+/* LSM blocklist map: PID -> blocked indicator (used by socket_connect hook) */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 1024);
 	__type(key, __u32);   /* PID */
 	__type(value, __u8);  /* 1 = blocked */
 } lsm_blocklist SEC(".maps");
+
+/* Per-path blocklist: FNV-32a hash of the path string -> blocked flag.
+ * Checked on every file_open.  Populated by the Go enforcer from rule
+ * conditions and from the enforcer.lsm_path_blocklist config list.
+ * Max 256 entries; rotate old entries via BPF map delete on the Go side.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	__type(key, __u32);   /* FNV-32a of path string */
+	__type(value, __u8);  /* 1 = blocked */
+} path_blocklist SEC(".maps");
 
 /* Agent whitelist: PIDs that should never be blocked (the agent itself) */
 struct {
@@ -91,6 +101,26 @@ static __always_inline void update_stat(__u32 stat_idx)
 	}
 }
 
+/* FNV-1a 32-bit hash over a null-terminated string, max PATH_HASH_MAX bytes.
+ * Must produce the same output as the Go fnv32a() in internal/collector/lsm.go.
+ * Reference: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
+ */
+#define PATH_HASH_MAX 128
+static __always_inline __u32 fnv32a(const char *str)
+{
+	__u32 hash = 2166136261u; /* FNV offset basis */
+	int i;
+	#pragma unroll
+	for (i = 0; i < PATH_HASH_MAX; i++) {
+		char c = str[i];
+		if (c == '\0')
+			break;
+		hash ^= (__u32)(unsigned char)c;
+		hash *= 16777619u; /* FNV prime */
+	}
+	return hash;
+}
+
 /* LSM hook: file_open — called before opening a file
  * 
  * Return 0 to allow, -EPERM to block
@@ -103,24 +133,49 @@ int BPF_PROG(lsm_file_open, struct file *file)
 {
 	__u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-	/* Fast path 1: Agent itself is always allowed */
+	/* Fast path: Agent itself is always allowed */
 	if (is_agent_pid(pid)) {
 		update_stat(LSM_STAT_FILE_OPEN_ALLOW);
 		return 0;
 	}
 
-	/* Fast path 2: PID not in blocklist */
-	if (!is_blocked_pid(pid)) {
+	/* Per-path blocklist check.  bpf_d_path() writes the full path into
+	 * path_buf starting at index 0 (kernel moves the string to the front).
+	 * If bpf_d_path() fails (e.g. anonymous/pipe file), skip the check and
+	 * allow — we only block named-file paths.
+	 */
+	char path_buf[PATH_HASH_MAX] = {};
+	if (bpf_d_path(&file->f_path, path_buf, sizeof(path_buf)) < 0) {
 		update_stat(LSM_STAT_FILE_OPEN_ALLOW);
 		return 0;
 	}
 
-	/* Slow path: PID is blocked — would check path here
-	 * For now, block all file access for blocked PIDs
-	 * TODO: Add per-path blocklist in future sprint
-	 */
-	update_stat(LSM_STAT_FILE_OPEN_BLOCK);
-	return -EPERM;
+	__u32 hash = fnv32a(path_buf);
+	__u8 *blocked = bpf_map_lookup_elem(&path_blocklist, &hash);
+	if (blocked && *blocked == 1) {
+		update_stat(LSM_STAT_FILE_OPEN_BLOCK);
+
+		/* Emit audit event for the blocked open */
+		struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+					sizeof(struct lsm_audit_event), 0);
+		if (ae) {
+			ae->type         = EVENT_TYPE_LSM_AUDIT;
+			ae->timestamp_ns = bpf_ktime_get_ns();
+			ae->pid          = pid;
+			ae->uid          = (__u32)bpf_get_current_uid_gid();
+			ae->target_pid   = 0;
+			ae->action       = LSM_ACTION_DENY;
+			ae->hook         = LSM_HOOK_FILE_OPEN;
+			ae->sig          = 0;
+			bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+			bpf_probe_read_kernel_str(&ae->path, sizeof(ae->path), path_buf);
+			bpf_ringbuf_submit(ae, 0);
+		}
+		return -EACCES;
+	}
+
+	update_stat(LSM_STAT_FILE_OPEN_ALLOW);
+	return 0;
 }
 
 /* LSM hook: socket_connect — called before TCP connect
@@ -144,8 +199,24 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 		return 0;
 	}
 
-	/* Slow path: PID is blocked */
+	/* Slow path: PID is blocked — emit audit event then deny */
 	update_stat(LSM_STAT_SOCK_CONN_BLOCK);
+
+	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+				sizeof(struct lsm_audit_event), 0);
+	if (ae) {
+		ae->type         = EVENT_TYPE_LSM_AUDIT;
+		ae->timestamp_ns = bpf_ktime_get_ns();
+		ae->pid          = pid;
+		ae->uid          = (__u32)bpf_get_current_uid_gid();
+		ae->target_pid   = 0;
+		ae->action       = LSM_ACTION_DENY;
+		ae->hook         = LSM_HOOK_SOCKET_CONNECT;
+		ae->sig          = 0;
+		bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+		__builtin_memset(&ae->path, 0, sizeof(ae->path));
+		bpf_ringbuf_submit(ae, 0);
+	}
 	return -EPERM;
 }
 
@@ -160,17 +231,24 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
 {
 	__u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-	/* Always allow but audit the action */
+	/* Always allow but emit an audit event recording who signalled whom */
 	update_stat(LSM_STAT_TASK_KILL_ALLOW);
 
-	/* TODO: Add audit logging via perf event ring buffer
-	 * struct lsm_audit_event {
-	 *     __u32 pid;
-	 *     __u32 target_pid;
-	 *     int sig;
-	 *     __u8 action;  // 0=audit, 1=block
-	 * };
-	 */
+	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+				sizeof(struct lsm_audit_event), 0);
+	if (ae) {
+		ae->type         = EVENT_TYPE_LSM_AUDIT;
+		ae->timestamp_ns = bpf_ktime_get_ns();
+		ae->pid          = pid;
+		ae->uid          = (__u32)bpf_get_current_uid_gid();
+		ae->target_pid   = (__u32)BPF_CORE_READ(target, tgid);
+		ae->action       = LSM_ACTION_AUDIT;
+		ae->hook         = LSM_HOOK_TASK_KILL;
+		ae->sig          = (__u8)sig;
+		bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+		__builtin_memset(&ae->path, 0, sizeof(ae->path));
+		bpf_ringbuf_submit(ae, 0);
+	}
 
 	return 0;
 }

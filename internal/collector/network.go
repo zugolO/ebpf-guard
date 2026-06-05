@@ -232,10 +232,13 @@ func (c *NetworkCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			c.logger.Error("failed to read from ringbuf", "error", err)
 			continue
 		}
-		event, err := c.parseEvent(record.RawSample)
-		if err != nil {
+
+		event := eventPool.Get().(*types.Event)
+		if err := c.parseEvent(record.RawSample, event); err != nil {
 			c.logger.Error("failed to parse event", "error", err)
 			exporter.RecordDropped("network", "parse_error")
+			event.Reset()
+			eventPool.Put(event)
 			continue
 		}
 
@@ -244,6 +247,8 @@ func (c *NetworkCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			c.dropLogger.record(c.logger, "network")
 			c.lostTotal.Add(1)
 		})
+		event.Reset()
+		eventPool.Put(event)
 	}
 }
 
@@ -253,11 +258,12 @@ func (c *NetworkCollector) LostEvents() uint64 {
 	return c.lostTotal.Load()
 }
 
-// parseEvent converts raw bytes from ring buffer to types.Event.
-// Routes to the appropriate parser based on the event type field.
-func (c *NetworkCollector) parseEvent(raw []byte) (*types.Event, error) {
+// parseEvent converts raw bytes from the ring buffer into event, routing to the
+// appropriate parser based on the event type field. event must be a pooled
+// *types.Event from eventPool; caller handles Reset() and Put() after use.
+func (c *NetworkCollector) parseEvent(raw []byte, event *types.Event) error {
 	if len(raw) < 4 {
-		return nil, fmt.Errorf("raw sample too short: %d bytes", len(raw))
+		return fmt.Errorf("raw sample too short: %d bytes", len(raw))
 	}
 	// Read event type from the first 4 bytes (little-endian uint32).
 	evtType := uint32(raw[0]) | uint32(raw[1])<<8 | uint32(raw[2])<<16 | uint32(raw[3])<<24
@@ -266,17 +272,16 @@ func (c *NetworkCollector) parseEvent(raw []byte) (*types.Event, error) {
 	case types.EventNetClose:
 		evt, err := bpf.ParseNetworkCloseEvent(raw)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		result := evt.ToTypesEvent()
-		return &result, nil
+		*event = evt.ToTypesEvent()
 	default:
 		// EventTCPConnect and any unknown network events.
 		evt, err := bpf.ParseNetworkEvent(raw)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		result := evt.ToTypesEvent()
-		return &result, nil
+		*event = evt.ToTypesEvent()
 	}
+	return nil
 }

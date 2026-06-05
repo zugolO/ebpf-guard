@@ -166,6 +166,79 @@ func TestLogger_DirectoryCreation(t *testing.T) {
 	require.Len(t, got, 1)
 }
 
+func TestLogger_LSMAuditFields(t *testing.T) {
+	l, path := newTestLogger(t)
+	defer l.Close()
+
+	require.NoError(t, l.Log(Entry{
+		TS:        time.Now(),
+		Action:    "deny",
+		PID:       1234,
+		Rule:      "lsm_audit",
+		Comm:      "curl",
+		Enforced:  true,
+		Hook:      "file_open",
+		TargetPID: 0,
+		Path:      "/etc/shadow",
+		UID:       1000,
+	}))
+	require.NoError(t, l.Log(Entry{
+		TS:        time.Now(),
+		Action:    "audit",
+		PID:       5678,
+		Rule:      "lsm_audit",
+		Comm:      "bash",
+		Enforced:  false,
+		Hook:      "task_kill",
+		TargetPID: 9999,
+		Path:      "",
+		UID:       0,
+	}))
+	require.NoError(t, l.Close())
+
+	got := readEntries(t, path)
+	require.Len(t, got, 2)
+
+	assert.Equal(t, "deny", got[0].Action)
+	assert.Equal(t, "file_open", got[0].Hook)
+	assert.Equal(t, "/etc/shadow", got[0].Path)
+	assert.Equal(t, uint32(1000), got[0].UID)
+	assert.Equal(t, uint32(0), got[0].TargetPID)
+
+	assert.Equal(t, "audit", got[1].Action)
+	assert.Equal(t, "task_kill", got[1].Hook)
+	assert.Equal(t, uint32(9999), got[1].TargetPID)
+	assert.Equal(t, "", got[1].Path)
+}
+
+func TestLogger_LSMAuditFieldNames(t *testing.T) {
+	l, path := newTestLogger(t)
+	defer l.Close()
+
+	require.NoError(t, l.Log(Entry{
+		TS:       time.Now(),
+		Action:   "deny",
+		PID:      42,
+		Rule:     "lsm_audit",
+		Comm:     "evil",
+		Enforced: true,
+		Hook:     "socket_connect",
+		UID:      500,
+	}))
+	require.NoError(t, l.Close())
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &m))
+
+	assert.Contains(t, m, "hook")
+	assert.Contains(t, m, "uid")
+	// omitempty: target_pid and path absent when zero
+	assert.NotContains(t, m, "target_pid")
+	assert.NotContains(t, m, "path")
+}
+
 func TestLogger_AppendToExisting(t *testing.T) {
 	l, path := newTestLogger(t)
 	require.NoError(t, l.Log(Entry{Action: "kill", PID: 1, Rule: "r1", Comm: "a", Enforced: true}))

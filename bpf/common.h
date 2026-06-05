@@ -19,6 +19,16 @@
 #define EVENT_TYPE_KMOD_LOAD   8  /* Kernel module load (insmod/init_module) */
 #define EVENT_TYPE_CGROUP_ESC  9  /* Process migrated to different cgroup namespace */
 #define EVENT_TYPE_GPU        10  /* CUDA/GPU memory operation (DtoH/HtoD/alloc/free) */
+#define EVENT_TYPE_LSM_AUDIT  11  /* LSM hook audit record (deny or audit-only action) */
+
+/* LSM hook identifiers — match struct lsm_audit_event.hook */
+#define LSM_HOOK_FILE_OPEN       0
+#define LSM_HOOK_SOCKET_CONNECT  1
+#define LSM_HOOK_TASK_KILL       2
+
+/* LSM audit action codes — match struct lsm_audit_event.action */
+#define LSM_ACTION_AUDIT  0  /* event allowed, audit-only */
+#define LSM_ACTION_DENY   1  /* event blocked (-EACCES/-EPERM) */
 
 /* File operation codes - must match pkg/types/event.go */
 #define FILE_OP_OPEN  0
@@ -101,6 +111,24 @@ struct cgroup_escape_event {
 	__u32 ppid;
 	__u64 init_cgroup_id; /* cgroup id recorded at exec */
 	__u64 new_cgroup_id;  /* cgroup id at migration time */
+} __attribute__((packed));
+
+/*
+ * struct lsm_audit_event - emitted by LSM hooks on enforcement / audit actions.
+ * type == EVENT_TYPE_LSM_AUDIT (11).  Sent via the lsm_events ring buffer.
+ * Emitted on every file_open block, socket_connect block, and task_kill.
+ */
+struct lsm_audit_event {
+	__u32 type;           /* EVENT_TYPE_LSM_AUDIT */
+	__u64 timestamp_ns;
+	__u32 pid;
+	__u32 target_pid;     /* signal target PID (task_kill only, 0 otherwise) */
+	__u32 uid;
+	__u8  action;         /* LSM_ACTION_AUDIT or LSM_ACTION_DENY */
+	__u8  hook;           /* LSM_HOOK_FILE_OPEN / _SOCKET_CONNECT / _TASK_KILL */
+	__u8  sig;            /* signal number (task_kill only, 0 otherwise) */
+	char  comm[16];
+	char  path[64];       /* file path (file_open only, NUL-terminated) */
 } __attribute__((packed));
 
 /* Sampling configuration - configurable per event type */

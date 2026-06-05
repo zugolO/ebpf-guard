@@ -241,11 +241,13 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			c.logger.Error("failed to read from ringbuf", "error", err)
 			continue
 		}
-		// Parse raw event into types.Event
-		event, err := c.parseEvent(record.RawSample)
-		if err != nil {
+
+		event := eventPool.Get().(*types.Event)
+		if err := c.parseEvent(record.RawSample, event); err != nil {
 			c.logger.Error("failed to parse event", "error", err)
 			exporter.RecordDropped("syscall", "parse_error")
+			event.Reset()
+			eventPool.Put(event)
 			continue
 		}
 
@@ -261,6 +263,8 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			c.dropLogger.record(c.logger, "syscall")
 			c.lostTotal.Add(1)
 		})
+		event.Reset()
+		eventPool.Put(event)
 	}
 }
 
@@ -270,12 +274,14 @@ func (c *SyscallCollector) LostEvents() uint64 {
 	return c.lostTotal.Load()
 }
 
-// parseEvent converts raw bytes from ring buffer to types.Event.
-func (c *SyscallCollector) parseEvent(raw []byte) (*types.Event, error) {
+// parseEvent converts raw bytes from the ring buffer into event, which must be
+// a pooled *types.Event obtained from eventPool. Caller is responsible for
+// Reset() and Put() after the event value has been consumed.
+func (c *SyscallCollector) parseEvent(raw []byte, event *types.Event) error {
 	evt, err := bpf.ParseSyscallEvent(raw)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	result := evt.ToTypesEvent()
-	return &result, nil
+	*event = evt.ToTypesEvent()
+	return nil
 }

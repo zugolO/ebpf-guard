@@ -107,8 +107,17 @@ const (
 // Implemented by collector.LSMCollector.
 type LSMBlocklistManager interface {
 	IsAvailable() bool
+	// PID-based methods — used by the socket_connect hook.
 	AddToBlocklist(pid uint32) error
 	RemoveFromBlocklist(pid uint32) error
+	// Path-based methods — used by the file_open hook (issue #33).
+	// Paths are normalised with filepath.Clean before hashing; the BPF hook
+	// checks the FNV-32a hash of bpf_d_path() output on every file open.
+	AddPathToBlocklist(path string) error
+	RemovePathFromBlocklist(path string) error
+	// SetPathBlocklist atomically replaces the config-driven path set and
+	// re-programs the BPF map.  Dynamically blocked paths are preserved.
+	SetPathBlocklist(paths []string) error
 }
 
 // Enforcer performs active enforcement actions based on security alerts.
@@ -447,6 +456,20 @@ func (e *Enforcer) executeLSMBlock(ctx context.Context, alert types.Alert) error
 	)
 
 	var execErr error
+
+	// Route file-access events to the per-path blocklist so a blocked process
+	// can still open files that are NOT in the blocklist (issue #33).
+	if alert.Event.Type == types.EventFileAccess {
+		if err := e.executeLSMBlockFile(ctx, alert); err != nil {
+			entry.Success = false
+			entry.Error = err.Error()
+			e.logAudit(entry)
+			return err
+		}
+		entry.Success = true
+		entry.Description = fmt.Sprintf("LSM path-blocked %s (rule %s)", extractFilePath(alert), alert.RuleID)
+		goto done
+	}
 
 	if e.dryRun {
 		entry.Success = true

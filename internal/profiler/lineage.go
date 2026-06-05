@@ -13,6 +13,11 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// parentInfoPool reduces per-event heap allocations for parentInfo structs.
+var parentInfoPool = sync.Pool{
+	New: func() any { return &parentInfo{} },
+}
+
 // LineagePattern defines a suspicious parent-child relationship pattern.
 type LineagePattern struct {
 	Name        string   `yaml:"name"`
@@ -41,7 +46,7 @@ func DefaultLineageConfig() LineageConfig {
 	return LineageConfig{
 		Enabled:  true,
 		TTL:      5 * time.Minute,
-		MaxDepth: 16,
+		MaxDepth: 8,
 		Patterns: []LineagePattern{
 			{
 				Name:        "web_shell_spawn",
@@ -87,13 +92,14 @@ type LineageMatch struct {
 
 // LineageTracker tracks process parent-child relationships and detects suspicious patterns.
 type LineageTracker struct {
-	config   LineageConfig
-	logger   *slog.Logger
-	lineage  map[uint32]*parentInfo
-	ancestry map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
-	maxDepth int
-	mu       sync.RWMutex
-	onMatch  func(LineageMatch)
+	config    LineageConfig
+	logger    *slog.Logger
+	lineage   map[uint32]*parentInfo
+	ancestry  map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
+	commCache map[uint32]string              // ppid → comm, avoids repeated /proc reads
+	maxDepth  int
+	mu        sync.RWMutex
+	onMatch   func(LineageMatch)
 }
 
 // NewLineageTracker creates a new lineage tracker.
@@ -124,12 +130,13 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 	config.Patterns = activePatterns
 
 	lt := &LineageTracker{
-		config:   config,
-		logger:   logger,
-		lineage:  make(map[uint32]*parentInfo),
-		ancestry: make(map[uint32][]types.ProcessNode),
-		maxDepth: maxDepth,
-		onMatch:  func(m LineageMatch) {}, // no-op default
+		config:    config,
+		logger:    logger,
+		lineage:   make(map[uint32]*parentInfo),
+		ancestry:  make(map[uint32][]types.ProcessNode),
+		commCache: make(map[uint32]string),
+		maxDepth:  maxDepth,
+		onMatch:   func(m LineageMatch) {}, // no-op default
 	}
 
 	return lt
@@ -153,8 +160,12 @@ func (lt *LineageTracker) Track(e types.Event) {
 		return
 	}
 	comm := cleanComm(e.Comm[:])
+	info := parentInfoPool.Get().(*parentInfo)
+	info.PPID = ppid
+	info.ParentComm = parentComm
+	info.Timestamp = time.Now()
 	lt.mu.Lock()
-	lt.lineage[e.PID] = &parentInfo{PPID: ppid, ParentComm: parentComm, Timestamp: time.Now()}
+	lt.lineage[e.PID] = info
 	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
 	lt.mu.Unlock()
 }
@@ -175,12 +186,12 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 	comm := cleanComm(e.Comm[:])
 
 	// Store lineage info and update ancestry chain under a single lock acquisition.
+	info := parentInfoPool.Get().(*parentInfo)
+	info.PPID = ppid
+	info.ParentComm = parentComm
+	info.Timestamp = time.Now()
 	lt.mu.Lock()
-	lt.lineage[e.PID] = &parentInfo{
-		PPID:       ppid,
-		ParentComm: parentComm,
-		Timestamp:  time.Now(),
-	}
+	lt.lineage[e.PID] = info
 	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
 	lt.mu.Unlock()
 
@@ -236,10 +247,15 @@ func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm, comm
 	if len(parentChain) == 0 {
 		// We haven't seen the parent's events yet; try to bootstrap from /proc.
 		parentChain = buildChainFromProc(ppid, lt.maxDepth-1)
+		// Cache so subsequent events with the same ppid skip /proc entirely.
+		if len(parentChain) > 0 {
+			lt.ancestry[ppid] = parentChain
+		}
 	}
 
 	node := types.ProcessNode{PID: pid, PPID: ppid, Comm: comm}
-	newChain := make([]types.ProcessNode, len(parentChain)+1)
+	newLen := len(parentChain) + 1
+	newChain := make([]types.ProcessNode, newLen, newLen)
 	copy(newChain, parentChain)
 	newChain[len(parentChain)] = node
 
@@ -311,16 +327,26 @@ func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 			return e.PPID, parentComm
 		}
 
-		// Otherwise reuse a parent comm cached from a previous event.
+		// Check lineage map and commCache under a single RLock.
 		lt.mu.RLock()
 		if info, ok := lt.lineage[e.PPID]; ok {
+			comm := info.ParentComm
 			lt.mu.RUnlock()
-			return e.PPID, info.ParentComm
+			return e.PPID, comm
+		}
+		if comm, ok := lt.commCache[e.PPID]; ok {
+			lt.mu.RUnlock()
+			return e.PPID, comm
 		}
 		lt.mu.RUnlock()
 
-		// Last resort: read from /proc/<ppid>/comm (parent may already be gone).
+		// Cache miss: read from /proc/<ppid>/comm and populate commCache.
 		comm := readProcComm(e.PPID)
+		if comm != "" {
+			lt.mu.Lock()
+			lt.commCache[e.PPID] = comm
+			lt.mu.Unlock()
+		}
 		return e.PPID, comm
 	}
 
@@ -421,7 +447,16 @@ func (lt *LineageTracker) Cleanup(now time.Time) {
 		if now.Sub(info.Timestamp) > lt.config.TTL {
 			delete(lt.lineage, pid)
 			delete(lt.ancestry, pid)
+			// Reset and return to pool to amortise allocations across long-lived processes.
+			info.PPID = 0
+			info.ParentComm = ""
+			parentInfoPool.Put(info)
 		}
+	}
+	// commCache is keyed by ppid and may outlive individual PID entries; clear it
+	// wholesale each Cleanup cycle so stale proc-comm mappings don't accumulate.
+	for k := range lt.commCache {
+		delete(lt.commCache, k)
 	}
 }
 

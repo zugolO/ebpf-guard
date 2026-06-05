@@ -193,11 +193,11 @@ jobs:
       run: |
         benchstat bench_old.txt bench_new.txt | tee bench_comparison.txt
         echo ""
-        echo "=== Regression check (threshold: 15%) ==="
+        echo "=== Regression check (threshold: 10%) ==="
         python3 - <<'PYEOF'
         import sys, re
 
-        THRESHOLD = 15.0
+        THRESHOLD = 10.0
         regressions = []
 
         with open("bench_comparison.txt") as f:
@@ -389,6 +389,7 @@ jobs:
       run: |
         go test -bench=BenchmarkCorrelationEngine -benchtime=10s ./e2e/...
         go test -bench=BenchmarkShardedBufferContention -benchtime=10s ./e2e/...
+        go test -bench=BenchmarkCorrelationEngineParallel -benchtime=10s ./e2e/...
 
     - name: Run profiler benchmarks (Sprint 13.2)
       run: |

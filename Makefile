@@ -1,7 +1,7 @@
 # ebpf-guard Makefile
 # Requires: go 1.23+, clang, llvm, kernel headers
 
-.PHONY: all generate build test lint clean docker helm-lint
+.PHONY: all generate build test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare
 
 # Variables
 BINARY_NAME := ebpf-guard
@@ -100,3 +100,14 @@ bench-store:
 bench:
 	@echo "Running all benchmarks..."
 	go test -bench=. -benchtime=10s -count=3 ./...
+
+# Save current benchmark results as the baseline for future comparisons
+bench-save-baseline:
+	@echo "Saving benchmark baseline..."
+	go test -bench=. -benchtime=10s -count=5 -run='^$$' ./... | tee bench-baseline.txt
+
+# Compare current benchmarks against the saved baseline using benchstat
+# Run 'make bench-save-baseline' first to create bench-baseline.txt
+bench-compare:
+	go test -bench=. -benchtime=10s -count=5 -run='^$$' ./... | tee bench-new.txt
+	benchstat bench-baseline.txt bench-new.txt

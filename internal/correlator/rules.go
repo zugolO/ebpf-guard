@@ -525,6 +525,22 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			return strconv.FormatInt(e.Syscall.Nr, 10)
 		case "ret":
 			return strconv.FormatInt(e.Syscall.Ret, 10)
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "arg0":
+			return strconv.FormatUint(e.Syscall.Args[0], 10)
+		case "arg1":
+			return strconv.FormatUint(e.Syscall.Args[1], 10)
+		case "arg2":
+			return strconv.FormatUint(e.Syscall.Args[2], 10)
+		case "arg3":
+			return strconv.FormatUint(e.Syscall.Args[3], 10)
+		case "arg4":
+			return strconv.FormatUint(e.Syscall.Args[4], 10)
+		case "arg5":
+			return strconv.FormatUint(e.Syscall.Args[5], 10)
 		}
 	case types.EventDNS:
 		if e.DNS == nil {
@@ -744,6 +760,7 @@ func (re *RuleEngine) ReferencedSyscalls() []uint32 {
 func defaultMonitoredSyscallsU32() []uint32 {
 	return []uint32{
 		59, 322, 101, 126, 308, 272, 319, 165, 166, 155, 161, 311, 310, 241,
+		321, // bpf(2) — always forward so ebpf-subversion rules fire even without an explicit rule
 	}
 }
 

@@ -24,6 +24,12 @@ var (
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
+		// Process identity — available from the base Event struct on all syscalls.
+		"uid": true, "comm": true,
+		// Raw syscall arguments (arg0 = first argument, arg1 = second, …).
+		// arg0 is the BPF command for bpf(2), the fd for read/write, etc.
+		"arg0": true, "arg1": true, "arg2": true,
+		"arg3": true, "arg4": true, "arg5": true,
 	}
 	validDNSFields = map[string]bool{
 		"qname": true, "qtype": true, "rcode": true, "direction": true,

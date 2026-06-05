@@ -17,7 +17,7 @@ func newSig(ns, source string, mult float64, ttl time.Duration) AmplificationSig
 }
 
 func TestAmplificationStore_AddAndMultiplier(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	s.Add(newSig("production", "node-1", 0.6, time.Hour))
 
 	mult := s.GetThresholdMultiplier("production")
@@ -27,14 +27,14 @@ func TestAmplificationStore_AddAndMultiplier(t *testing.T) {
 }
 
 func TestAmplificationStore_NoSignal(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	if s.GetThresholdMultiplier("staging") != 1.0 {
 		t.Error("expected 1.0 for namespace with no signal")
 	}
 }
 
 func TestAmplificationStore_EmptyNamespace(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	s.Add(newSig("production", "node-1", 0.5, time.Hour))
 	if s.GetThresholdMultiplier("") != 1.0 {
 		t.Error("expected 1.0 for empty namespace")
@@ -42,7 +42,7 @@ func TestAmplificationStore_EmptyNamespace(t *testing.T) {
 }
 
 func TestAmplificationStore_LowestMultiplier(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	s.Add(newSig("ns1", "node-a", 0.7, time.Hour))
 	s.Add(newSig("ns1", "node-b", 0.4, time.Hour))
 
@@ -53,7 +53,7 @@ func TestAmplificationStore_LowestMultiplier(t *testing.T) {
 }
 
 func TestAmplificationStore_Expired(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	s.Add(newSig("ns1", "node-1", 0.5, -time.Millisecond)) // already expired
 
 	if s.GetThresholdMultiplier("ns1") != 1.0 {
@@ -65,7 +65,7 @@ func TestAmplificationStore_Expired(t *testing.T) {
 }
 
 func TestAmplificationStore_IsAmplified(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	if s.IsAmplified("ns") {
 		t.Error("empty store: IsAmplified should be false")
 	}
@@ -76,7 +76,7 @@ func TestAmplificationStore_IsAmplified(t *testing.T) {
 }
 
 func TestAmplificationStore_CleanExpired(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	s.Add(newSig("ns1", "node-1", 0.5, -time.Millisecond)) // expired
 	s.Add(newSig("ns2", "node-2", 0.6, time.Hour))          // active
 
@@ -90,7 +90,7 @@ func TestAmplificationStore_CleanExpired(t *testing.T) {
 }
 
 func TestAmplificationStore_UpdateExisting(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	s.Add(newSig("ns", "node-1", 0.7, time.Hour))
 	s.Add(newSig("ns", "node-1", 0.5, 2*time.Hour)) // same source+namespace
 
@@ -104,7 +104,7 @@ func TestAmplificationStore_UpdateExisting(t *testing.T) {
 }
 
 func TestAmplificationStore_Snapshot(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	s.Add(newSig("ns1", "node-1", 0.6, time.Hour))
 	s.Add(newSig("ns2", "node-2", 0.7, -time.Millisecond)) // expired
 
@@ -118,7 +118,7 @@ func TestAmplificationStore_Snapshot(t *testing.T) {
 }
 
 func TestAmplificationStore_ActiveCount(t *testing.T) {
-	s := newAmplificationStore()
+	s := newAmplificationStore(deduplicationTTLDefault)
 	if s.ActiveCount() != 0 {
 		t.Error("empty store: ActiveCount should be 0")
 	}

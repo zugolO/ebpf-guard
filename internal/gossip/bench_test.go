@@ -26,7 +26,7 @@ func BenchmarkAmplificationStore_SetGet(b *testing.B) {
 	// Add — concurrent writers, each hitting a rotating namespace.
 	// Store deduplicates on source+namespace, so writers contend on Lock.
 	b.Run("Add", func(b *testing.B) {
-		store := newAmplificationStore()
+		store := newAmplificationStore(deduplicationTTLDefault)
 		expiry := time.Now().Add(time.Hour)
 		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
@@ -46,7 +46,7 @@ func BenchmarkAmplificationStore_SetGet(b *testing.B) {
 	// ActiveCount — concurrent readers on a pre-populated store.
 	// Exercises RLock + linear scan over 48 signals.
 	b.Run("ActiveCount", func(b *testing.B) {
-		store := newAmplificationStore()
+		store := newAmplificationStore(deduplicationTTLDefault)
 		expiry := time.Now().Add(time.Hour)
 		for i, ns := range namespaces {
 			for j := 0; j < 6; j++ {
@@ -68,7 +68,7 @@ func BenchmarkAmplificationStore_SetGet(b *testing.B) {
 
 	// GetThresholdMultiplier — the hot path called by the correlator on every event.
 	b.Run("GetThresholdMultiplier", func(b *testing.B) {
-		store := newAmplificationStore()
+		store := newAmplificationStore(deduplicationTTLDefault)
 		expiry := time.Now().Add(time.Hour)
 		for i, ns := range namespaces {
 			store.Add(AmplificationSignal{
@@ -91,7 +91,7 @@ func BenchmarkAmplificationStore_SetGet(b *testing.B) {
 	// Mixed_25pctWrite — 25 % Add, 75 % ActiveCount, simulating steady-state
 	// where a few nodes emit signals while the correlator polls continuously.
 	b.Run("Mixed_25pctWrite", func(b *testing.B) {
-		store := newAmplificationStore()
+		store := newAmplificationStore(deduplicationTTLDefault)
 		expiry := time.Now().Add(time.Hour)
 		for i, ns := range namespaces {
 			store.Add(AmplificationSignal{

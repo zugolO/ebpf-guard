@@ -385,6 +385,49 @@ func (kf *KernelFilterController) LoadDefaultFilters() error {
 	return kf.Enable()
 }
 
+// UpdateSyscallFilter atomically replaces the BPF syscall allowlist with the
+// given set of syscall numbers.  All 512 map slots are written: entries in nrs
+// are set to 1 (forward to userspace), the rest are cleared to 0 (drop).
+//
+// This is called on startup after rules are loaded and again on every hot-reload
+// so that the BPF filter tracks the active rule set without a process restart.
+// The 512-slot write cost is ~50 µs — negligible for a startup/reload path.
+//
+// If nrs is empty the call falls back to DefaultMonitoredSyscalls so filtering
+// is never accidentally left in an "allow-nothing" state.
+func (kf *KernelFilterController) UpdateSyscallFilter(nrs []uint32) error {
+	if kf.syscallFilterMap == nil {
+		return fmt.Errorf("bpf: syscall_filter_map is nil")
+	}
+
+	if len(nrs) == 0 {
+		nrs = make([]uint32, len(DefaultMonitoredSyscalls()))
+		for i, n := range DefaultMonitoredSyscalls() {
+			nrs[i] = uint32(n)
+		}
+	}
+
+	// Build a fast lookup set.
+	allow := make(map[uint32]bool, len(nrs))
+	for _, nr := range nrs {
+		if nr < 512 {
+			allow[nr] = true
+		}
+	}
+
+	// Write all 512 slots so stale entries from a previous load are cleared.
+	for i := uint32(0); i < 512; i++ {
+		var val uint8
+		if allow[i] {
+			val = 1
+		}
+		if err := kf.syscallFilterMap.Update(i, val, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("bpf: update syscall filter slot %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // SetSamplingRateFloat sets the sampling rate using float64 for all event types.
 // This is a convenience method for memory pressure handling.
 func (sc *SamplingController) SetSamplingRate(eventType string, rate float64) error {

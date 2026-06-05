@@ -261,6 +261,12 @@ type DNSCollectorConfig struct {
 type SQLiteStoreConfig struct {
 	// Path to the SQLite database file
 	Path string `mapstructure:"path"`
+	// MaxAlerts is the maximum number of alerts to retain. Oldest excess rows
+	// are pruned on each VacuumInterval. Zero disables pruning.
+	MaxAlerts int64 `mapstructure:"max_alerts"`
+	// VacuumInterval is how often WAL is checkpointed and excess rows pruned
+	// (Go duration string, e.g. "1h", "30m"). Zero disables background maintenance.
+	VacuumInterval string `mapstructure:"vacuum_interval"`
 }
 
 // OpenSearchStoreConfig holds OpenSearch-specific configuration.
@@ -792,6 +798,8 @@ func setDefaults(v *viper.Viper) {
 	// Store defaults
 	v.SetDefault("store.backend", "memory")
 	v.SetDefault("store.sqlite.path", "/var/lib/ebpf-guard/events.db")
+	v.SetDefault("store.sqlite.max_alerts", int64(100000))
+	v.SetDefault("store.sqlite.vacuum_interval", "1h")
 	v.SetDefault("store.opensearch.url", "")
 	v.SetDefault("store.opensearch.index", "ebpf-guard-events")
 	v.SetDefault("store.opensearch.username", "")

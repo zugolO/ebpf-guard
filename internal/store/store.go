@@ -102,6 +102,12 @@ type SQLiteConfig struct {
 	MaxOpenConns int
 	// MaxIdleConns limits the number of idle connections.
 	MaxIdleConns int
+	// MaxAlerts is the maximum number of alerts to retain; oldest excess rows
+	// are pruned each VacuumInterval. Zero disables pruning.
+	MaxAlerts int64
+	// VacuumInterval controls how often WAL checkpoint and row pruning run.
+	// Zero disables the background maintenance goroutine.
+	VacuumInterval time.Duration
 }
 
 // OpenSearchConfig defines OpenSearch-specific configuration.

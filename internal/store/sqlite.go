@@ -18,7 +18,11 @@ import (
 
 // SQLiteStore implements AlertStore using SQLite.
 type SQLiteStore struct {
-	db *sql.DB
+	db             *sql.DB
+	maxAlerts      int64
+	vacuumInterval time.Duration
+	cancel         context.CancelFunc
+	done           chan struct{}
 }
 
 // NewSQLiteStore creates a new SQLite alert store.
@@ -49,13 +53,67 @@ func NewSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("apply sqlite pragmas: %w", err)
 	}
 
-	store := &SQLiteStore{db: db}
-	if err := store.initSchema(); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &SQLiteStore{
+		db:             db,
+		maxAlerts:      cfg.MaxAlerts,
+		vacuumInterval: cfg.VacuumInterval,
+		cancel:         cancel,
+		done:           make(chan struct{}),
+	}
+	if err := s.initSchema(); err != nil {
+		cancel()
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	return store, nil
+	go s.runMaintenance(ctx)
+	return s, nil
+}
+
+// runMaintenance is the background WAL checkpoint and row-pruning loop.
+// It exits immediately when vacuumInterval is zero or the context is cancelled.
+func (s *SQLiteStore) runMaintenance(ctx context.Context) {
+	defer close(s.done)
+	if s.vacuumInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(s.vacuumInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.performMaintenance(context.Background())
+		}
+	}
+}
+
+// performMaintenance checkpoints the WAL and prunes excess alerts.
+// It is safe to call directly in tests.
+func (s *SQLiteStore) performMaintenance(ctx context.Context) {
+	s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)") //nolint:errcheck
+	if s.maxAlerts > 0 {
+		s.pruneExcess(ctx)
+	}
+}
+
+// pruneExcess deletes the oldest rows that exceed maxAlerts and reclaims space.
+func (s *SQLiteStore) pruneExcess(ctx context.Context) {
+	var count int64
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM alerts").Scan(&count); err != nil {
+		return
+	}
+	excess := count - s.maxAlerts
+	if excess <= 0 {
+		return
+	}
+	s.db.ExecContext(ctx, //nolint:errcheck
+		"DELETE FROM alerts WHERE id IN (SELECT id FROM alerts ORDER BY timestamp ASC LIMIT ?)",
+		excess,
+	)
+	s.db.ExecContext(ctx, "VACUUM") //nolint:errcheck
 }
 
 // applySQLitePragmas sets performance-tuning PRAGMAs on an open database.
@@ -370,8 +428,10 @@ func (s *SQLiteStore) Delete(ctx context.Context, olderThan time.Duration) (int6
 	return result.RowsAffected()
 }
 
-// Close closes the database connection.
+// Close stops the background maintenance goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
+	s.cancel()
+	<-s.done
 	return s.db.Close()
 }
 

@@ -15,6 +15,10 @@ const amplificationTTLDefault = 10 * time.Minute
 // sensitive during a confirmed attack on a peer node.
 const defaultThresholdMultiplier = 0.6
 
+// deduplicationTTLDefault is the default window during which a fingerprint
+// received from a peer suppresses the same alert on the local node.
+const deduplicationTTLDefault = 5 * time.Minute
+
 // AmplificationSignal is broadcast by a node when a critical alert fires.
 // Receiving nodes temporarily lower their anomaly detection threshold for
 // the same Kubernetes namespace, so related lateral-movement activity is
@@ -34,16 +38,61 @@ type AmplificationSignal struct {
 	ThresholdMultiplier float64 `json:"threshold_multiplier"`
 	// ExpiresAt is when this signal should be discarded.
 	ExpiresAt time.Time `json:"expires_at"`
+	// Fingerprint is the SHA-256 fingerprint of the originating alert
+	// (types.Alert.Fingerprint). Receiving nodes store it in their dedup seen
+	// map so that the same alert is not re-raised cluster-wide.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // AmplificationStore is a thread-safe, TTL-aware store for amplification signals.
+// It also maintains a cluster-level deduplication index: fingerprints received
+// from peer nodes are kept in seen for dedupTTL so the local correlator can
+// suppress re-raising the same alert.
 type AmplificationStore struct {
 	mu      sync.RWMutex
 	signals []AmplificationSignal
+	// seen maps alert fingerprint → expiry time for cluster deduplication.
+	seen     map[string]time.Time
+	dedupTTL time.Duration
 }
 
-func newAmplificationStore() *AmplificationStore {
-	return &AmplificationStore{}
+// newAmplificationStore creates an empty store.
+// dedupTTL controls how long a fingerprint received from a peer suppresses the
+// local alert. Pass 0 to use deduplicationTTLDefault (5 minutes).
+func newAmplificationStore(dedupTTL time.Duration) *AmplificationStore {
+	if dedupTTL <= 0 {
+		dedupTTL = deduplicationTTLDefault
+	}
+	return &AmplificationStore{
+		seen:     make(map[string]time.Time),
+		dedupTTL: dedupTTL,
+	}
+}
+
+// MarkSeen records an alert fingerprint as observed from a peer. Any
+// subsequent call to IsDuplicate within dedupTTL will return true, allowing
+// the local correlator to suppress the same alert.
+// No-op for empty fingerprints.
+func (s *AmplificationStore) MarkSeen(fingerprint string) {
+	if fingerprint == "" {
+		return
+	}
+	s.mu.Lock()
+	s.seen[fingerprint] = time.Now().Add(s.dedupTTL)
+	s.mu.Unlock()
+}
+
+// IsDuplicate returns true if fingerprint was received from a peer within
+// the dedupTTL window. A true result means the local alert should be
+// suppressed to avoid cluster-wide alert storms.
+func (s *AmplificationStore) IsDuplicate(fingerprint string) bool {
+	if fingerprint == "" {
+		return false
+	}
+	s.mu.RLock()
+	expiry, ok := s.seen[fingerprint]
+	s.mu.RUnlock()
+	return ok && time.Now().Before(expiry)
 }
 
 // Add inserts or refreshes a signal. If a signal from the same source+namespace
@@ -114,7 +163,8 @@ func (s *AmplificationStore) Snapshot() []AmplificationSignal {
 	return out
 }
 
-// CleanExpired removes all expired signals. Returns how many were removed.
+// CleanExpired removes all expired signals and expired deduplication entries.
+// Returns how many signals were removed.
 func (s *AmplificationStore) CleanExpired() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -129,5 +179,10 @@ func (s *AmplificationStore) CleanExpired() int {
 		}
 	}
 	s.signals = active
+	for fp, expiry := range s.seen {
+		if !now.Before(expiry) {
+			delete(s.seen, fp)
+		}
+	}
 	return removed
 }

@@ -44,15 +44,19 @@ type Config struct {
 	TLSKeyFile string
 	// TLSCAFile is the path to the PEM-encoded CA bundle used to verify peers.
 	TLSCAFile string
+	// DeduplicationTTL is how long a fingerprint received from a peer suppresses
+	// the same alert on the local node. Default: 5 minutes.
+	DeduplicationTTL time.Duration
 }
 
 // DefaultConfig returns a safe default configuration (gossip disabled).
 func DefaultConfig() Config {
 	return Config{
-		Enabled:      false,
-		IOCTTL:       time.Hour,
-		MaxIOCs:      100_000,
-		PushInterval: 30 * time.Second,
+		Enabled:          false,
+		IOCTTL:           time.Hour,
+		MaxIOCs:          100_000,
+		PushInterval:     30 * time.Second,
+		DeduplicationTTL: deduplicationTTLDefault,
 	}
 }
 
@@ -103,6 +107,9 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	if cfg.PushInterval <= 0 {
 		cfg.PushInterval = 30 * time.Second
 	}
+	if cfg.DeduplicationTTL <= 0 {
+		cfg.DeduplicationTTL = deduplicationTTLDefault
+	}
 
 	var tlsCfg *tls.Config
 	if cfg.TLSEnabled {
@@ -117,7 +124,7 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 	return &Manager{
 		cfg:       cfg,
 		store:     NewIOCStore(cfg.MaxIOCs, cfg.IOCTTL),
-		ampStore:  newAmplificationStore(),
+		ampStore:  newAmplificationStore(cfg.DeduplicationTTL),
 		client:    newGossipClient(cfg.Secret, tlsCfg),
 		discovery: NewStaticPeerDiscovery(cfg.Peers),
 		logger:    logger,
@@ -337,21 +344,39 @@ func (m *Manager) BroadcastAlert(alert types.Alert) {
 		Source:              m.cfg.NodeName,
 		ThresholdMultiplier: defaultThresholdMultiplier,
 		ExpiresAt:           time.Now().Add(amplificationTTLDefault),
+		Fingerprint:         alert.Fingerprint,
 	}
 	m.ampDeltaMu.Lock()
 	m.ampDelta = append(m.ampDelta, sig)
 	m.ampDeltaMu.Unlock()
 }
 
-// MergeAmplificationsFromPeer stores amplification signals received from a peer.
+// MergeAmplificationsFromPeer stores amplification signals received from a peer
+// and records their fingerprints for cluster-level deduplication.
 func (m *Manager) MergeAmplificationsFromPeer(sigs []AmplificationSignal) {
+	now := time.Now()
 	for _, sig := range sigs {
-		if time.Now().Before(sig.ExpiresAt) {
-			m.ampStore.Add(sig)
+		if !now.Before(sig.ExpiresAt) {
+			continue
 		}
+		m.ampStore.Add(sig)
+		// Record the fingerprint so IsDuplicateAlert suppresses the same alert
+		// if it fires locally on this node.
+		m.ampStore.MarkSeen(sig.Fingerprint)
 	}
 	m.ampReceived.Add(float64(len(sigs)))
 	m.ampActive.Set(float64(m.ampStore.ActiveCount()))
+}
+
+// IsDuplicateAlert returns true when the alert identified by fingerprint has
+// already been seen from another cluster node via gossip. The correlator
+// should suppress re-raising the alert in this case to avoid alert storms
+// across a 100-node cluster all reporting the same container-escape event.
+func (m *Manager) IsDuplicateAlert(fingerprint string) bool {
+	if !m.cfg.Enabled || fingerprint == "" {
+		return false
+	}
+	return m.ampStore.IsDuplicate(fingerprint)
 }
 
 // GetThresholdMultiplier implements correlator.SensitivityAdjuster.

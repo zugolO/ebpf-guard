@@ -1,0 +1,83 @@
+# eBPF Subversion Detection Rules for ebpf-guard
+#
+# Detects attempts to blind, disable, or manipulate eBPF monitoring programs
+# via the bpf(2) syscall (x86-64 nr=321).
+#
+# BPF command constants (linux/bpf.h):
+#   BPF_MAP_DELETE_ELEM = 3   — delete an element from a BPF map
+#   BPF_OBJ_PIN         = 6   — pin an object to the BPF virtual filesystem
+#   BPF_PROG_DETACH     = 9   — detach a BPF program from a cgroup/hook
+#   BPF_LINK_DETACH     = 33  — detach a BPF link (modern equivalent of PROG_DETACH)
+#
+# MITRE ATT&CK: T1562 (Impair Defenses), T1055 (Process Injection)
+
+rules:
+  # ============================================================================
+  # Rule 1 – Destructive BPF command from an unprivileged process
+  #
+  # A non-root process calling BPF_PROG_DETACH, BPF_MAP_DELETE_ELEM,
+  # BPF_OBJ_PIN, or BPF_LINK_DETACH has no legitimate use-case on a
+  # hardened node; root-level BPF management is handled exclusively by the
+  # ebpf-guard agent.  Any non-root attempt is treated as an active attempt
+  # to disable security monitoring.
+  # ============================================================================
+
+  - id: ebpf_subversion_detach_nonroot
+    name: "eBPF Subversion: Destructive BPF command from unprivileged process"
+    description: >-
+      An unprivileged process (uid > 0) invoked bpf(2) with a destructive
+      command: BPF_PROG_DETACH (9), BPF_MAP_DELETE_ELEM (3), BPF_OBJ_PIN (6),
+      or BPF_LINK_DETACH (33). These commands can detach, delete, or re-pin
+      eBPF programs and are a strong indicator of an attempt to disable
+      security monitoring (eBPF guard blinding).
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["321"]               # bpf(2) on x86-64
+        - field: arg0
+          op: in
+          values: ["3", "6", "9", "33"] # BPF_MAP_DELETE_ELEM, BPF_OBJ_PIN, BPF_PROG_DETACH, BPF_LINK_DETACH
+        - field: uid
+          op: gt
+          values: ["0"]                 # non-root only; root agent operations are expected
+    severity: critical
+    action: kill
+    tags: [ebpf-subversion, defense-evasion, monitor-tampering, mitre-t1562, mitre-t1055]
+
+  # ============================================================================
+  # Rule 2 – bpf() syscall from a process outside the allowed whitelist
+  #
+  # Only the ebpf-guard agent binary (comm="ebpf-guard") is expected to issue
+  # destructive BPF commands on a monitored node.  Any other caller — including
+  # root-owned tooling such as bpftool or a compromised container — is
+  # considered hostile when it attempts to detach or delete BPF objects.
+  # Tune the whitelist values if additional trusted BPF tools are deployed.
+  # ============================================================================
+
+  - id: ebpf_subversion_unauthorized_caller
+    name: "eBPF Subversion: Destructive bpf() syscall from unauthorized process"
+    description: >-
+      A process whose comm name is not in the trusted whitelist invoked bpf(2)
+      with a destructive command (BPF_PROG_DETACH, BPF_MAP_DELETE_ELEM,
+      BPF_OBJ_PIN, BPF_LINK_DETACH). Only the ebpf-guard agent binary is
+      expected to manage attached BPF programs; any other caller should be
+      treated as a potential defense-evasion attempt.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["321"]               # bpf(2) on x86-64
+        - field: arg0
+          op: in
+          values: ["3", "6", "9", "33"] # destructive BPF commands only
+        - field: comm
+          op: not_in
+          values: ["ebpf-guard"]        # whitelist: only the security agent is trusted
+    severity: critical
+    action: kill
+    tags: [ebpf-subversion, defense-evasion, monitor-tampering, mitre-t1562]

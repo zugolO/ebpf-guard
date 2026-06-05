@@ -179,29 +179,37 @@ func (rl *RateLimiter) StateCount() int {
 	return len(rl.states)
 }
 
+// cleanupEntry is a compact (id, state) pair used during Cleanup snapshots.
+// A slice of these is 3–4× smaller than a map[string]*ruleState with the
+// same entries because it avoids map bucket overhead.
+type cleanupEntry struct {
+	id    string
+	state *ruleState
+}
+
 // Cleanup removes state for rules that haven't had alerts recently.
-// Fine-grained locking: snapshot the map under rl.mu, then check each
-// state under its own mutex (rl.mu released), then delete stale entries
-// under rl.mu again. This avoids holding the global map lock while
-// iterating per-state rings.
+// Fine-grained locking: snapshot the map (as a flat slice) under rl.mu,
+// then check each state under its own mutex (rl.mu released), then delete
+// stale entries under rl.mu again. The slice snapshot avoids the bucket
+// overhead of a map copy (~4×) that caused 46 KB/op at 500 rules.
 func (rl *RateLimiter) Cleanup(maxAge time.Duration) int {
 	rl.mu.Lock()
-	snapshot := make(map[string]*ruleState, len(rl.states))
+	snapshot := make([]cleanupEntry, 0, len(rl.states))
 	for id, s := range rl.states {
-		snapshot[id] = s
+		snapshot = append(snapshot, cleanupEntry{id, s})
 	}
 	rl.mu.Unlock()
 
 	cutoff := time.Now().Add(-maxAge)
-	var stale []string
-	for id, state := range snapshot {
-		state.mu.Lock()
+	stale := make([]string, 0, len(snapshot))
+	for _, entry := range snapshot {
+		entry.state.mu.Lock()
 		// The last entry in the ring is the most recent one — O(1) check.
-		hasRecent := state.size > 0 &&
-			!state.ring[(state.head+state.size-1)%state.maxCount].Before(cutoff)
-		state.mu.Unlock()
+		hasRecent := entry.state.size > 0 &&
+			!entry.state.ring[(entry.state.head+entry.state.size-1)%entry.state.maxCount].Before(cutoff)
+		entry.state.mu.Unlock()
 		if !hasRecent {
-			stale = append(stale, id)
+			stale = append(stale, entry.id)
 		}
 	}
 

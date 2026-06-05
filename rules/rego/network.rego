@@ -216,18 +216,10 @@ is_dns_process(comm) {
 }
 
 # Helper: Check for SSH-like traffic patterns
-is_ssh_like_traffic(input) {
+is_ssh_like_traffic(conn) {
 	# Simplified check - in production would analyze packet patterns
-	input.event.network.dport >= 2222
-	input.event.network.dport <= 2229
+	conn.event.network.dport >= 2222
+	conn.event.network.dport <= 2229
 }
 
-# Helper: Lowercase
-lower(s) = lower {
-	lower := lower(s)
-}
-
-# Helper: Contains
-contains(s, substr) {
-	contains(s, substr)
-}
+# lower() and contains() are OPA built-ins; no wrappers needed.

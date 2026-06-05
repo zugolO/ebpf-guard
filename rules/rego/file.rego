@@ -127,7 +127,7 @@ rules[{"rule_id": "resolv_conf_modify", "severity": "warning", "message": msg, "
 # MITRE ATT&CK: T1548 - Abuse Elevation Control Mechanism
 rules[{"rule_id": "setuid_binary", "severity": "warning", "message": msg, "action": "alert", "mitre_technique": "T1548", "matched": true}] {
 	input.event.file
-	input.event.file.mode & 0o4000 != 0  # SUID bit set
+	bits.and(input.event.file.mode, 2048) != 0  # SUID bit set (0o4000 = 2048)
 	msg := sprintf("Setuid binary executed: %s by %s (pid=%d)", [input.event.file.filename, input.comm, input.pid])
 }
 
@@ -220,12 +220,4 @@ is_shell(comm) {
 	comm == "ruby"
 }
 
-# Helper: Contains
-contains(s, substr) {
-	contains(s, substr)
-}
-
-# Helper: Starts with
-startswith(s, prefix) {
-	startswith(s, prefix)
-}
+# contains() and startswith() are OPA built-ins; no wrappers needed.

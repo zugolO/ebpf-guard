@@ -400,22 +400,4 @@ is_shell(comm) {
 	comm == "ruby"
 }
 
-# Helper: Lowercase
-lower(s) = lower {
-	lower := lower(s)
-}
-
-# Helper: Contains
-contains(s, substr) {
-	contains(s, substr)
-}
-
-# Helper: Ends with
-endswith(s, suffix) {
-	endswith(s, suffix)
-}
-
-# Helper: Count
-count(s) = n {
-	n := count(split(s, ""))
-}
+# lower(), contains(), endswith(), count() are OPA built-ins; no wrappers needed.

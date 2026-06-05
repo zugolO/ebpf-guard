@@ -99,6 +99,17 @@ func (eb *EventBuffer) Clear() {
 	eb.buffers = make(map[uint32]*ringBuffer)
 }
 
+// ForEachPID calls fn for every PID that has buffered events.
+// It performs no heap allocation. Prefer this over PIDs() when a slice
+// return value is not required.
+func (eb *EventBuffer) ForEachPID(fn func(pid uint32)) {
+	eb.mu.RLock()
+	defer eb.mu.RUnlock()
+	for pid := range eb.buffers {
+		fn(pid)
+	}
+}
+
 // PIDs returns all PIDs with buffered events.
 func (eb *EventBuffer) PIDs() []uint32 {
 	eb.mu.RLock()

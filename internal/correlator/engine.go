@@ -180,6 +180,11 @@ type CorrelationEngine struct {
 	// per instance.  IngestAsync routes events here; Ingest bypasses the pool.
 	ingestPool []*workerState
 	ingestMask uint32
+
+	// syscallFilterFn is called with the updated syscall allowlist whenever rules
+	// are loaded or hot-reloaded.  Set via SetSyscallFilterUpdater so the
+	// correlator stays decoupled from the bpf package.  nil disables the hook.
+	syscallFilterFn func(nrs []uint32)
 }
 
 // MetricsCallback is a function called to record metrics.
@@ -1285,13 +1290,28 @@ type EngineStats struct {
 	BufferedPIDs    int
 }
 
+// SetSyscallFilterUpdater registers a callback that is invoked with the updated
+// BPF syscall allowlist whenever rules are loaded or hot-reloaded.
+// The callback is called synchronously from UpdateRules so implementations
+// should be fast (a BPF map batch write takes ~50 µs).
+// Pass nil to disable the hook.
+func (ce *CorrelationEngine) SetSyscallFilterUpdater(fn func(nrs []uint32)) {
+	ce.syscallFilterFn = fn
+}
+
 // UpdateRules updates the rule engine with new rules.
 // Compiled regex/CIDR/set entries from the previous engine are inherited so
 // patterns that appear in both old and new rule sets are not recompiled.
+// If a SyscallFilterUpdater is registered it is called with the new rule set's
+// referenced syscall numbers so BPF-side pre-filtering stays in sync.
 func (ce *CorrelationEngine) UpdateRules(rules []Rule) {
 	prior := ce.ruleEngine.Load()
-	ce.ruleEngine.Store(NewRuleEngineWithCache(rules, prior))
+	re := NewRuleEngineWithCache(rules, prior)
+	ce.ruleEngine.Store(re)
 	ce.activeRulesGauge.Set(float64(len(rules)))
+	if ce.syscallFilterFn != nil {
+		ce.syscallFilterFn(re.ReferencedSyscalls())
+	}
 }
 
 // GetRules returns the currently loaded rules.

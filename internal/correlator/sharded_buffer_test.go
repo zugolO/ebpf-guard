@@ -276,8 +276,24 @@ func BenchmarkEventBuffer_Add(b *testing.B) {
 	})
 }
 
-// BenchmarkPIDs measures ShardedEventBuffer.PIDs() with a populated buffer.
+// BenchmarkPIDs measures ForEachPID zero-alloc PID iteration over 10 000 entries.
+// ForEachPID is the preferred API for callers that do not need a slice (watchdog,
+// Prometheus cardinality guard, etc.). Target: 0 allocs/op.
 func BenchmarkPIDs(b *testing.B) {
+	sb := NewShardedEventBuffer(100)
+	event := types.Event{Type: types.EventSyscall}
+	for i := uint32(0); i < 10000; i++ {
+		sb.Add(i, event)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		sb.ForEachPID(func(pid uint32) { _ = pid })
+	}
+}
+
+// BenchmarkPIDsSlice measures the PIDs() slice-copy path for comparison.
+func BenchmarkPIDsSlice(b *testing.B) {
 	sb := NewShardedEventBuffer(100)
 	event := types.Event{Type: types.EventSyscall}
 	for i := uint32(0); i < 10000; i++ {

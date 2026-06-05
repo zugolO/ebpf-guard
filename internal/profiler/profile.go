@@ -420,6 +420,17 @@ func (pm *ProfileManager) CleanupExpired() int {
 	return removed
 }
 
+// ForEachPID calls fn for every tracked PID.
+// It performs no heap allocation. Prefer this over PIDs() when a slice
+// return value is not required.
+func (pm *ProfileManager) ForEachPID(fn func(pid uint32)) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	for pid := range pm.profiles {
+		fn(pid)
+	}
+}
+
 // PIDs returns all tracked PIDs.
 func (pm *ProfileManager) PIDs() []uint32 {
 	pm.mu.RLock()

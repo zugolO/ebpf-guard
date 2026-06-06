@@ -3,11 +3,14 @@ package util
 
 import (
 	"net"
+	"unsafe"
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // BytesToString converts a byte slice to a string, stopping at the first null byte.
+// The returned string is heap-allocated and owns its data — safe to store as map
+// keys or in any data structure that outlives the source slice.
 func BytesToString(b []byte) string {
 	for i, c := range b {
 		if c == 0 {
@@ -15,6 +18,26 @@ func BytesToString(b []byte) string {
 		}
 	}
 	return string(b)
+}
+
+// UnsafeBytesToString converts a byte slice to a string without copying.
+// The returned string shares the underlying memory of b and is therefore only
+// safe for transient use (comparison, map lookup, printing) within the lifetime
+// of b.  Never store the result as a map key, struct field, or goroutine-captured
+// value — use BytesToString instead for those cases.
+func UnsafeBytesToString(b []byte) string {
+	for i, c := range b {
+		if c == 0 {
+			if i == 0 {
+				return ""
+			}
+			return unsafe.String(unsafe.SliceData(b), i)
+		}
+	}
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 // FormatIP formats a byte slice as an IP address string based on address family.

@@ -15,6 +15,14 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// alertsPool recycles the backing arrays of []types.Alert slices returned by
+// Evaluate. Most calls match 0-2 rules; a capacity-4 slab covers the common
+// case without reallocation while keeping per-call heap traffic to zero on
+// the hot path (no match → put back immediately).
+var alertsPool = sync.Pool{
+	New: func() any { s := make([]types.Alert, 0, 4); return &s },
+}
+
 // RuleConditionOperator defines the comparison operation for a rule condition.
 type RuleConditionOperator string
 
@@ -267,32 +275,21 @@ func collectConditions(g *RuleConditionGroup) []RuleCondition {
 	return conds
 }
 
-// Evaluate checks an event against all rules and returns matching alerts.
-func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
+// EvaluateInto evaluates rules and calls fn for each matching alert.
+// This is the zero-alloc hot path: no slice is allocated regardless of match
+// count. Prefer this over Evaluate when the caller processes alerts inline.
+func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 	re.mu.RLock()
 	defer re.mu.RUnlock()
-
-	if len(re.rules) == 0 {
-		return nil
-	}
-
-	// Pre-allocate with a small capacity to avoid the nil-slice reallocation
-	// chain (1→2→4→8) on the first few matches at 10 k+ events/sec.
-	alerts := make([]types.Alert, 0, 4)
 
 	for _, rule := range re.rules {
 		if !re.matches(e, rule) {
 			continue
 		}
-
-		// Rule matched - check action
 		if rule.Action == ActionDrop {
-			continue // Silently drop
+			continue
 		}
-
-		// Generate alert — ID intentionally omitted; set by CorrelationEngine.Ingest
-		// with a monotonic sequence number to guarantee uniqueness.
-		alert := types.Alert{
+		fn(types.Alert{
 			Timestamp: time.Unix(0, int64(e.Timestamp)),
 			RuleID:    rule.ID,
 			RuleName:  rule.Name,
@@ -302,11 +299,60 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 			Action:    string(rule.Action),
+		})
+	}
+}
+
+// Evaluate checks an event against all rules and returns matching alerts.
+// It allocates only when at least one rule matches (lazy nil slice).
+// For the zero-alloc path, use EvaluateInto instead.
+func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	if len(re.rules) == 0 {
+		return nil
+	}
+
+	// nil until first match — avoids the 2048 B allocation on the common
+	// no-match path. alertsPool recycles backing arrays on match paths.
+	var alerts []types.Alert
+
+	for _, rule := range re.rules {
+		if !re.matches(e, rule) {
+			continue
 		}
-		alerts = append(alerts, alert)
+		if rule.Action == ActionDrop {
+			continue
+		}
+		if alerts == nil {
+			sp := alertsPool.Get().(*[]types.Alert)
+			alerts = (*sp)[:0]
+		}
+		alerts = append(alerts, types.Alert{
+			Timestamp: time.Unix(0, int64(e.Timestamp)),
+			RuleID:    rule.ID,
+			RuleName:  rule.Name,
+			Severity:  rule.Severity,
+			Message:   rule.Description,
+			PID:       e.PID,
+			Comm:      util.BytesToString(e.Comm[:]),
+			Event:     e,
+			Action:    string(rule.Action),
+		})
 	}
 
 	return alerts
+}
+
+// ReleaseAlerts returns a slice obtained from Evaluate back to the pool.
+// Call this after the caller is done reading the slice. Passing nil is safe.
+func ReleaseAlerts(s []types.Alert) {
+	if s == nil {
+		return
+	}
+	s = s[:0]
+	alertsPool.Put(&s)
 }
 
 // matches checks if an event matches a rule.

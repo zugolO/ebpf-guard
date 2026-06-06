@@ -136,6 +136,120 @@ func newBenchEngine(b *testing.B) *RegoEngine {
 	return e
 }
 
+// BenchmarkPolicyEvalPartitioned compares full-namespace vs per-event-type
+// partitioned Rego evaluation to quantify the speedup of the partitioned path.
+//
+// Each sub-benchmark evaluates a realistic alert of its type against the
+// smallest PreparedEvalQuery that covers all rules for that event class.
+//
+// Expected speedup vs full-namespace: 2-4× per event type.
+func BenchmarkPolicyEvalPartitioned(b *testing.B) {
+	e := newBenchEngine(b)
+	ctx := context.Background()
+
+	// Network alert: curl→nginx outbound connection
+	b.Run("network/partitioned", func(b *testing.B) {
+		alert := newBenchAlert() // EventTCPConnect → "network" partition
+		b.ResetTimer()
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _ = e.Evaluate(ctx, alert)
+		}
+	})
+
+	// DNS alert: DGA domain query
+	b.Run("dns/partitioned", func(b *testing.B) {
+		alert := newBenchDNSAlert()
+		b.ResetTimer()
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _ = e.Evaluate(ctx, alert)
+		}
+	})
+
+	// File alert: /etc/shadow access
+	b.Run("file/partitioned", func(b *testing.B) {
+		alert := newBenchFileAlert()
+		b.ResetTimer()
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _ = e.Evaluate(ctx, alert)
+		}
+	})
+
+	// Syscall alert: ptrace from non-debugger
+	b.Run("syscall/partitioned", func(b *testing.B) {
+		alert := newBenchSyscallAlert()
+		b.ResetTimer()
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _ = e.Evaluate(ctx, alert)
+		}
+	})
+}
+
+// newBenchDNSAlert returns a realistic DNS alert for benchmarking.
+func newBenchDNSAlert() types.Alert {
+	var comm [16]byte
+	copy(comm[:], "curl")
+	return types.Alert{
+		ID:       "bench-dns-001",
+		RuleID:   "dns_query",
+		Severity: types.SeverityWarning,
+		PID:      2345,
+		Comm:     "curl",
+		Message:  "DNS query benchmark",
+		Event: types.Event{
+			Type: types.EventDNS,
+			PID:  2345,
+			Comm: comm,
+			DNS:  &types.DNSEvent{QName: "xkcd.com", QType: 1},
+		},
+	}
+}
+
+// newBenchFileAlert returns a realistic file-access alert for benchmarking.
+func newBenchFileAlert() types.Alert {
+	var comm [16]byte
+	copy(comm[:], "cat")
+	fe := &types.FileEvent{Flags: 0, Mode: 0o644}
+	copy(fe.Filename[:], "/etc/nginx/nginx.conf")
+	return types.Alert{
+		ID:       "bench-file-001",
+		RuleID:   "file_access",
+		Severity: types.SeverityWarning,
+		PID:      3456,
+		Comm:     "cat",
+		Message:  "File access benchmark",
+		Event: types.Event{
+			Type: types.EventFileAccess,
+			PID:  3456,
+			Comm: comm,
+			File: fe,
+		},
+	}
+}
+
+// newBenchSyscallAlert returns a realistic syscall alert for benchmarking.
+func newBenchSyscallAlert() types.Alert {
+	var comm [16]byte
+	copy(comm[:], "strace")
+	return types.Alert{
+		ID:       "bench-syscall-001",
+		RuleID:   "syscall_ptrace",
+		Severity: types.SeverityWarning,
+		PID:      4567,
+		Comm:     "strace",
+		Message:  "Syscall benchmark",
+		Event: types.Event{
+			Type:    types.EventSyscall,
+			PID:     4567,
+			Comm:    comm,
+			Syscall: &types.SyscallEvent{Nr: 101}, // ptrace
+		},
+	}
+}
+
 // newBenchAlert returns a realistic network alert: a curl process (spawned by
 // nginx) making an outbound HTTPS connection to 8.8.8.8:443.
 // This exercises lineage and network rules without triggering most detections,

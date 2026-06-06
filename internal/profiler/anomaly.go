@@ -326,8 +326,11 @@ func (ad *AnomalyDetector) analyzeNetworkBehavior(profile *ProcessProfile, event
 func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *types.FileEvent, out *[]AnomalyContribution) float64 {
 	var score float64
 
-	filename := util.BytesToString(event.Filename[:])
-	dir := extractDirectory(filename)
+	// Use zero-alloc string for map lookups and comparison; only allocate a heap
+	// string when we need to store the value in an AnomalyContribution (which
+	// may outlive the event buffer).
+	filenameUnsafe := util.UnsafeBytesToString(event.Filename[:])
+	dir := extractDirectory(filenameUnsafe)
 
 	// Check directory access
 	if dir != "" {
@@ -359,7 +362,7 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 	}
 
 	// Check file extension
-	ext := extractExtension(filename)
+	ext := extractExtension(filenameUnsafe)
 	if ext != "" {
 		if extEWMA, exists := profile.FileProfile.Extensions[ext]; exists {
 			freq := extEWMA.Value()

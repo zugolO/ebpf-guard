@@ -903,9 +903,9 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 
 	var alerts []types.Alert
 
-	// Evaluate against rules
-	ruleAlerts := ce.ruleEngine.Load().Evaluate(e)
-	for _, alert := range ruleAlerts {
+	// Evaluate against rules via the zero-alloc callback path — no []Alert slice
+	// is allocated regardless of match count.
+	ce.ruleEngine.Load().EvaluateInto(e, func(alert types.Alert) {
 		// Dedup check runs before rate-limiter so burst duplicates do not inflate
 		// per-rule counters. isDup is checked, not a hard continue yet — enforcement
 		// must still fire for deduped events (dedup suppresses alerts, not actions).
@@ -915,13 +915,13 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// Per-rule rate limit check (only for non-deduped alerts).
 			if !ce.rateLimiter.Allow(alert.RuleID) {
 				ce.alertsDropped.Add(1)
-				continue
+				return
 			}
 			// Global token-bucket rate limit.
 			if ce.globalLimiterEnabled && !ce.globalLimiter.Allow() {
 				ce.alertsDropped.Add(1)
 				ce.alertsDroppedGlobal.Add(1)
-				continue
+				return
 			}
 		}
 
@@ -971,7 +971,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		if isDup {
 			ce.alertsDedupDropped.Add(1)
 			ce.alertsDropped.Add(1)
-			continue
+			return
 		}
 
 		// Alert passed all filters — record in dedup window and emit.
@@ -980,7 +980,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		}
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
-	}
+	})
 
 	// WASM plugin evaluation — run custom detection plugins.
 	if ce.wasmEngine != nil {

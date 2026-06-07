@@ -1,0 +1,198 @@
+rules:
+  # MITRE ATT&CK: T1082 — System Information Discovery
+  - id: recon_system_info
+    name: "System enumeration commands run in container"
+    description: >
+      System discovery commands were executed inside a container. While individually
+      benign, clusters of these commands indicate an attacker mapping the
+      environment after initial access.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["uname", "hostname", "hostnamectl", "dmidecode",
+                   "lscpu", "lsblk", "lspci", "lsusb", "dmesg",
+                   "sysctl", "getconf"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: info
+    action: alert
+    tags: [mitre:T1082, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1016 — System Network Configuration Discovery
+  - id: recon_network_config
+    name: "Network interface enumeration"
+    description: >
+      Network configuration discovery commands were run. Attackers enumerate
+      interfaces and routing to understand the network topology for lateral movement.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["ifconfig", "ip", "netstat", "ss", "route", "arp",
+                   "ethtool", "iwconfig", "iw", "nmcli", "networkctl"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: info
+    action: alert
+    tags: [mitre:T1016, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1049 — System Network Connections Discovery
+  - id: recon_active_connections
+    name: "Active network connections enumerated"
+    description: >
+      Tools that enumerate active connections (netstat, ss, lsof) were run.
+      This gives attackers a map of what services are listening and what
+      other hosts are connected.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["netstat", "ss", "lsof", "nmap", "masscan", "zmap",
+                   "fping", "nping"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: info
+    action: alert
+    tags: [mitre:T1049, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1087.001 — Account Discovery: Local Account
+  - id: recon_user_enum
+    name: "User account enumeration"
+    description: >
+      Commands enumerating local users, groups, or password policies were run.
+      Attackers map accounts for privilege escalation and lateral movement.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["id", "whoami", "who", "w", "last", "lastlog",
+                   "getent", "finger", "groups", "members"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: info
+    action: alert
+    tags: [mitre:T1087.001, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1083 — File and Directory Discovery
+  - id: recon_sensitive_file_find
+    name: "find command targeting sensitive file patterns"
+    description: >
+      find or locate was used with patterns matching credential or
+      key files. Attackers use these tools to quickly locate high-value files
+      across the filesystem.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["find", "locate", "mlocate", "updatedb", "fd"]
+        - field: file.path
+          op: prefix
+          values: ["/etc/", "/root/", "/home/", "/var/", "/opt/"]
+    severity: info
+    action: alert
+    tags: [mitre:T1083, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1069 — Permission Groups Discovery
+  - id: recon_sudo_privs
+    name: "sudo privilege enumeration"
+    description: >
+      sudo -l was run to enumerate allowed commands. This is typically the
+      first thing an attacker does after gaining a low-privilege shell to
+      find privilege escalation paths.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/etc/sudoers.d/", "/etc/sudoers"]
+        - field: file.op
+          op: in
+          values: ["read", "open"]
+        - field: proc.comm
+          op: not_in
+          values: ["sudo", "sudoedit", "visudo", "ansible", "puppet", "chef"]
+    severity: info
+    action: alert
+    tags: [mitre:T1069, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1057 — Process Discovery
+  - id: recon_process_enum
+    name: "Process enumeration"
+    description: >
+      Process listing tools were run. Attackers enumerate processes to
+      find security monitoring tools, identify potential targets for injection,
+      and understand what software is running.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["ps", "pstree", "top", "htop", "pgrep", "pidof",
+                   "lsof", "fuser"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: info
+    action: alert
+    tags: [mitre:T1057, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1518.001 — Software Discovery: Security Software Discovery
+  - id: recon_security_tools_enum
+    name: "Security tool discovery"
+    description: >
+      Commands targeting the detection of installed security tools were run.
+      Attackers enumerate AV, EDR, and IDS tools to find gaps or to
+      selectively disable specific products.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["find", "which", "whereis", "locate", "ls", "cat",
+                   "dpkg", "rpm", "systemctl"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: info
+    action: alert
+    tags: [mitre:T1518.001, discovery, reconnaissance]
+
+  # MITRE ATT&CK: T1046 — Network Service Discovery
+  - id: recon_port_scan_outbound
+    name: "Port scanning from container"
+    description: >
+      nmap, masscan, or zmap was executed from inside a container. Container
+      workloads should not be performing network scans — this strongly indicates
+      an attacker mapping the internal network for lateral movement targets.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nmap", "masscan", "zmap", "rustscan", "unicornscan",
+                   "angry-ip-scanner", "nbtscan", "arp-scan"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1046, discovery, reconnaissance, lateral-movement]

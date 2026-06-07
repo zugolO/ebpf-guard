@@ -1,0 +1,205 @@
+rules:
+  # MITRE ATT&CK: T1070.002 — Indicator Removal: Clear Linux or Mac System Logs
+  - id: evasion_log_clear
+    name: "System logs cleared"
+    description: >
+      A log file in /var/log was deleted, moved, or truncated to zero by a
+      non-logging process. Attackers clear logs to remove evidence of intrusion.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/var/log/"]
+        - field: file.op
+          op: in
+          values: ["unlink", "truncate", "rename"]
+        - field: proc.comm
+          op: not_in
+          values: ["logrotate", "newsyslog", "journald", "rsyslog", "syslogd",
+                   "systemd", "auditd", "fluentd", "filebeat", "vector",
+                   "promtail", "loki", "telegraf"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1070.002, defense-evasion]
+
+  # MITRE ATT&CK: T1070.006 — Timestomp
+  - id: evasion_timestamp_modify
+    name: "File timestamps modified (timestomping)"
+    description: >
+      utimes/utimensat syscall used to modify file timestamps. Attackers
+      change mtime/atime to match surrounding files and hide that a file
+      was recently dropped or modified.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["132", "280", "235"]  # utime, utimensat, utimes
+        - field: proc.comm
+          op: not_in
+          values: ["touch", "rsync", "git", "tar", "cp", "ansible",
+                   "dpkg", "rpm", "find", "make", "cmake", "ninja"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1070.006, defense-evasion]
+
+  # MITRE ATT&CK: T1222 — File and Directory Permissions Modification
+  - id: evasion_chmod_sensitive
+    name: "Permissions changed on sensitive system binary"
+    description: >
+      chmod/fchmod was called on a file in /bin, /sbin, /usr/bin, or /usr/sbin.
+      Attackers make malicious binaries world-executable or restore permissions
+      after replacement.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "zypper", "pacman",
+                   "install", "make", "cmake", "cargo", "go"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1222, defense-evasion]
+
+  # MITRE ATT&CK: T1036.003 — Masquerading: Rename System Utilities
+  - id: evasion_system_binary_replace
+    name: "System binary replaced or overwritten"
+    description: >
+      A binary in /bin, /sbin, /usr/bin, or /usr/sbin was overwritten.
+      Attackers replace system utilities with trojaned versions to establish
+      persistence and evade detection.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/local/bin/"]
+        - field: file.op
+          op: in
+          values: ["write", "create", "rename"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "zypper", "pacman",
+                   "install", "cp", "mv", "make", "cmake", "cargo", "go",
+                   "ansible", "puppet", "chef", "salt"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1036.003, defense-evasion, persistence]
+
+  # MITRE ATT&CK: T1036.005 — Match Legitimate Name or Location
+  - id: evasion_hidden_elf_in_tmp
+    name: "ELF binary written to /tmp or /dev/shm"
+    description: >
+      An ELF binary was written to a temporary or shared-memory directory.
+      Attackers stage executables in /tmp or /dev/shm to avoid writing to
+      disk in monitored locations.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/tmp/", "/dev/shm/", "/var/tmp/", "/run/user/"]
+        - field: file.path
+          op: not_suffix
+          values: [".txt", ".log", ".json", ".xml", ".yaml", ".yml",
+                   ".conf", ".cfg", ".pid", ".lock", ".sock", ".tmp"]
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1036.005, defense-evasion]
+
+  # MITRE ATT&CK: T1562.006 — Impair Defenses: Indicator Blocking
+  - id: evasion_auditd_stop
+    name: "auditd or security daemon stopped"
+    description: >
+      A security monitoring daemon (auditd, falco, osquery, sysdig) was killed
+      or stopped. This is a defense evasion technique to disable security logging
+      before carrying out the main attack.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["62", "37", "238"]  # kill, tkill, tgkill
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "zsh", "python3", "python", "perl",
+                   "systemctl", "service", "rc-service"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1562.006, defense-evasion]
+
+  # MITRE ATT&CK: T1027 — Obfuscated Files or Information
+  - id: evasion_base64_shell_decode
+    name: "Base64-decoded payload executed via shell"
+    description: >
+      A shell is reading from a pipe that includes base64 decoding and direct
+      execution. This is the classic `echo <b64> | base64 -d | bash` pattern
+      used to obfuscate payload delivery.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["base64", "openssl", "xxd", "od", "hexdump"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1027, defense-evasion]
+
+  # MITRE ATT&CK: T1070.004 — File Deletion
+  - id: evasion_self_delete
+    name: "Process deleting its own executable"
+    description: >
+      A process is deleting its own binary while running — a technique to
+      remove forensic evidence of what was executed. Malware often unlinks
+      itself after establishing persistence.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["87", "263"]   # unlink, unlinkat
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "make", "cmake",
+                   "go", "cargo", "rustc", "gcc", "clang", "install"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1070.004, defense-evasion]
+
+  # MITRE ATT&CK: T1562.004 — Impair Defenses: Disable or Modify System Firewall
+  - id: evasion_iptables_flush
+    name: "iptables/nftables rules flushed"
+    description: >
+      iptables or nftables flush commands were executed. Attackers disable
+      firewall rules to allow reverse shell connections back to their C2.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["iptables", "ip6tables", "nft", "firewall-cmd", "ufw"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1562.004, defense-evasion]

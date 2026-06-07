@@ -1,0 +1,196 @@
+rules:
+  # MITRE ATT&CK: T1021.004 — Remote Services: SSH
+  - id: lateral_ssh_from_container
+    name: "SSH client launched from container"
+    description: >
+      An SSH client was launched from inside a container. Containers should
+      not be SSH-ing to other hosts — this typically indicates an attacker
+      using a compromised container to pivot to other nodes or services.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["ssh", "sshpass", "autossh", "plink", "paramiko"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]    # execve
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.004, lateral-movement, container]
+
+  # MITRE ATT&CK: T1021.004
+  - id: lateral_ssh_keygen_new_key
+    name: "New SSH key pair generated"
+    description: >
+      ssh-keygen was used to generate a new key pair. Attackers generate
+      new keys to establish persistent access to compromised hosts and
+      to pivot without leaving password traces.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: equals
+          values: ["ssh-keygen"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.004, lateral-movement, persistence]
+
+  # MITRE ATT&CK: T1090 — Proxy
+  - id: lateral_port_forward_ssh
+    name: "SSH local/remote port forwarding"
+    description: >
+      SSH is being used for port forwarding (-L, -R, -D flags). This is a
+      classic technique for tunneling traffic through a compromised host,
+      bypassing network segmentation between environments.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: equals
+          values: ["ssh"]
+        - field: network.dport
+          op: not_in
+          values: ["22"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1090, lateral-movement, tunneling]
+
+  # MITRE ATT&CK: T1570 — Lateral Tool Transfer
+  - id: lateral_tool_transfer_wget
+    name: "Tool download from unexpected source inside cluster"
+    description: >
+      wget, curl, or fetch was used to download a binary or script from
+      an IP address inside the cluster's pod CIDR or node CIDR. Attackers
+      stage tools on one compromised pod and pull from another.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["wget", "curl", "fetch", "lwp-download", "python3",
+                   "python", "perl", "ruby", "node"]
+        - field: network.dport
+          op: in
+          values: ["80", "443", "8080", "8443", "3000", "5000", "8000"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1570, lateral-movement]
+
+  # MITRE ATT&CK: T1021.001 — Remote Desktop Protocol (via xrdp on Linux)
+  - id: lateral_rdp_connection
+    name: "RDP/xrdp connection attempt"
+    description: >
+      An outbound connection to the standard RDP port (3389) or xrdp (3389)
+      was made from inside a container or pod. Linux workloads rarely initiate
+      RDP connections; this often indicates lateral movement to Windows hosts.
+    event_type: network
+    condition:
+      field: network.dport
+      op: equals
+      values: ["3389"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.001, lateral-movement]
+
+  # MITRE ATT&CK: T1550.001 — Use Alternate Authentication Material: Application Access Token
+  - id: lateral_kubectl_exec_from_pod
+    name: "kubectl exec launched from inside a pod"
+    description: >
+      kubectl was executed from inside a pod. A compromised pod running
+      kubectl to exec into other pods is a common lateral movement path
+      in Kubernetes clusters (especially if the pod has a privileged SA).
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["kubectl", "k9s", "oc"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1550.001, lateral-movement, kubernetes]
+
+  # MITRE ATT&CK: T1563.001 — Remote Service Session Hijacking: SSH Hijacking
+  - id: lateral_ssh_agent_socket_access
+    name: "SSH agent socket accessed by unexpected process"
+    description: >
+      The SSH agent socket (SSH_AUTH_SOCK) was accessed by a process other
+      than ssh, git, or an expected tool. Agent hijacking allows an attacker
+      to use the victim's SSH credentials without extracting the private key.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/tmp/ssh-"]
+        - field: file.op
+          op: in
+          values: ["open", "connect"]
+        - field: proc.comm
+          op: not_in
+          values: ["ssh", "scp", "sftp", "git", "ansible", "rsync",
+                   "ssh-agent", "gpg-agent", "keychain"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1563.001, lateral-movement, credential-access]
+
+  # MITRE ATT&CK: T1021.006 — Windows Remote Management (or analogous netcat/socat pivoting)
+  - id: lateral_netcat_socat_pivot
+    name: "netcat / socat network pivot"
+    description: >
+      netcat or socat was used to create a network connection. These tools
+      are commonly used to create reverse shells, forward ports, and pivot
+      through compromised hosts.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nc", "ncat", "netcat", "socat", "nmap", "masscan",
+                   "tcpdump", "tshark"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.006, lateral-movement, command-and-control]
+
+  # MITRE ATT&CK: T1534 — Internal Spearphishing (via shared volumes)
+  - id: lateral_shared_volume_exec
+    name: "Executable written to shared Kubernetes volume"
+    description: >
+      An executable file was written to a path commonly used for shared
+      Kubernetes volumes (/data, /shared, /mnt). Attackers use shared volumes
+      to transfer tools or payloads from one compromised pod to another.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/data/", "/shared/", "/mnt/", "/srv/"]
+        - field: file.path
+          op: suffix
+          values: [".sh", ".py", ".pl", ".rb", ".elf", ".bin", ".so"]
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: uid
+          op: equals
+          values: ["0"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1534, lateral-movement, kubernetes]

@@ -1055,3 +1055,155 @@ func BenchmarkAlertIDGeneration(b *testing.B) {
 		_ = alerts[0].ID
 	}
 }
+
+// TestFDEnrichment verifies that fd.name and fd.name_truncated fields work
+// correctly for file access events (issue #47).
+func TestFDEnrichment(t *testing.T) {
+	writeRule := Rule{
+		ID:        "fd_001",
+		Name:      "Sensitive Write via fd",
+		EventType: types.EventFileAccess,
+		Condition: RuleCondition{
+			Field:  "fd.name",
+			Op:     OpPrefix,
+			Values: []string{"/etc/passwd"},
+		},
+		Severity: types.SeverityCritical,
+		Action:   ActionAlert,
+	}
+
+	engine := NewRuleEngine([]Rule{writeRule})
+
+	t.Run("write event with resolved fd.name fires rule", func(t *testing.T) {
+		event := types.Event{
+			Type: types.EventFileAccess,
+			File: &types.FileEvent{
+				Op:     2, // FILE_OP_WRITE
+				FDPath: "/etc/passwd",
+			},
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "fd_001", alerts[0].RuleID)
+	})
+
+	t.Run("write event with non-matching fd.name does not fire", func(t *testing.T) {
+		event := types.Event{
+			Type: types.EventFileAccess,
+			File: &types.FileEvent{
+				Op:     2, // FILE_OP_WRITE
+				FDPath: "/tmp/harmless.txt",
+			},
+		}
+		alerts := engine.Evaluate(event)
+		assert.Empty(t, alerts)
+	})
+
+	t.Run("write event with empty fd.name does not fire", func(t *testing.T) {
+		event := types.Event{
+			Type: types.EventFileAccess,
+			File: &types.FileEvent{
+				Op:     2, // FILE_OP_WRITE
+				FDPath: "",
+			},
+		}
+		alerts := engine.Evaluate(event)
+		assert.Empty(t, alerts)
+	})
+
+	t.Run("fd.name_truncated field returns correct value", func(t *testing.T) {
+		truncRule := Rule{
+			ID:        "fd_002",
+			Name:      "Truncated path",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{
+				Field:  "fd.name_truncated",
+				Op:     OpEquals,
+				Values: []string{"true"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		eng := NewRuleEngine([]Rule{truncRule})
+
+		truncEvent := types.Event{
+			Type: types.EventFileAccess,
+			File: &types.FileEvent{
+				Op:              1, // FILE_OP_READ
+				FDPath:          "/very/long/path",
+				FDPathTruncated: true,
+			},
+		}
+		alerts := eng.Evaluate(truncEvent)
+		require.Len(t, alerts, 1)
+
+		noTruncEvent := types.Event{
+			Type: types.EventFileAccess,
+			File: &types.FileEvent{
+				Op:              1,
+				FDPath:          "/short/path",
+				FDPathTruncated: false,
+			},
+		}
+		alerts = eng.Evaluate(noTruncEvent)
+		assert.Empty(t, alerts)
+	})
+
+	t.Run("open event uses fd.name same as filename", func(t *testing.T) {
+		var fname [256]byte
+		copy(fname[:], "/etc/passwd")
+		event := types.Event{
+			Type: types.EventFileAccess,
+			File: &types.FileEvent{
+				Op:       0, // FILE_OP_OPEN
+				Filename: fname,
+				FDPath:   "/etc/passwd",
+			},
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+	})
+}
+
+// TestFDEnrichmentValidation verifies that fd.name and fd.name_truncated are
+// accepted field names during rule validation for file and syscall event types.
+func TestFDEnrichmentValidation(t *testing.T) {
+	t.Run("fd.name valid for file events", func(t *testing.T) {
+		rule := &Rule{
+			ID:        "v_001",
+			Name:      "test",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{Field: "fd.name", Op: OpPrefix, Values: []string{"/etc/"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		}
+		err := validateRule(rule)
+		require.NoError(t, err)
+	})
+
+	t.Run("fd.name_truncated valid for file events", func(t *testing.T) {
+		rule := &Rule{
+			ID:        "v_002",
+			Name:      "test",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{Field: "fd.name_truncated", Op: OpEquals, Values: []string{"true"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		}
+		err := validateRule(rule)
+		require.NoError(t, err)
+	})
+
+	t.Run("fd.name valid for syscall events", func(t *testing.T) {
+		rule := &Rule{
+			ID:        "v_003",
+			Name:      "test",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{Field: "fd.name", Op: OpPrefix, Values: []string{"/etc/"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		}
+		err := validateRule(rule)
+		require.NoError(t, err)
+	})
+}

@@ -46,20 +46,36 @@ type NetworkEvent struct {
 	// No padding - C struct is packed
 }
 
-// FileaccessEvent matches the C struct event for file events
+// FileaccessEvent matches the C struct event for file events.
+// Wire layout (packed, little-endian):
+//
+//	[0  ] type              uint32  (4)
+//	[4  ] timestamp         uint64  (8)
+//	[12 ] pid               uint32  (4)
+//	[16 ] tgid              uint32  (4)
+//	[20 ] ppid              uint32  (4)
+//	[24 ] uid               uint32  (4)
+//	[28 ] comm              [16]byte (16)
+//	[44 ] parent_comm       [16]byte (16)
+//	[60 ] filename          [256]byte (256)
+//	[316] flags             int32   (4)
+//	[320] mode              uint32  (4)
+//	[324] op                uint8   (1)
+//	[325] fd_path_truncated uint8   (1)   — 1 if filename was truncated at 256 bytes
 type FileaccessEvent struct {
-	Type      uint32
-	Timestamp uint64
-	PID       uint32
-	TGID      uint32
-	UID       uint32
-	Comm      [16]byte
-	// Union payload - file specific
-	Filename [256]byte
-	Flags    int32
-	Mode     uint32
-	Op       uint8
-	// No padding - C struct is packed
+	Type           uint32
+	Timestamp      uint64
+	PID            uint32
+	TGID           uint32
+	PPID           uint32
+	UID            uint32
+	Comm           [16]byte
+	ParentComm     [16]byte
+	Filename       [256]byte
+	Flags          int32
+	Mode           uint32
+	Op             uint8
+	FDTruncated    uint8
 }
 
 // SyscallObjects contains all eBPF objects for syscall collection.
@@ -81,10 +97,17 @@ type NetworkObjects struct {
 
 // FileaccessObjects contains all eBPF objects for file access collection.
 type FileaccessObjects struct {
-	TraceOpen  *ebpf.Program `ebpf:"trace_open"`
-	TraceRead  *ebpf.Program `ebpf:"trace_read"`
-	TraceWrite *ebpf.Program `ebpf:"trace_write"`
-	Events     *ebpf.Map     `ebpf:"events"`
+	TraceOpen       *ebpf.Program `ebpf:"trace_open"`
+	TraceRead       *ebpf.Program `ebpf:"trace_read"`
+	TraceWrite      *ebpf.Program `ebpf:"trace_write"`
+	TraceClose      *ebpf.Program `ebpf:"trace_close"`
+	TraceOpenExit   *ebpf.Program `ebpf:"trace_openat_exit"`
+	TraceOpenat2Exit *ebpf.Program `ebpf:"trace_openat2_exit"`
+	Events          *ebpf.Map     `ebpf:"events"`
+	// FdPathMap is the durable fd→path LRU map (tgid<<32|fd → path+truncated).
+	// Accessible from Go for direct userspace lookups if needed.
+	FdPathMap    *ebpf.Map `ebpf:"fd_path_map"`
+	FdScratchMap *ebpf.Map `ebpf:"fd_scratch_map"`
 }
 
 // LoadSyscallObjects loads syscall eBPF objects from embedded bytecode.
@@ -142,17 +165,18 @@ func (o *NetworkObjects) Close() error {
 
 // Close closes all eBPF objects.
 func (o *FileaccessObjects) Close() error {
-	if o.TraceOpen != nil {
-		o.TraceOpen.Close()
+	for _, p := range []*ebpf.Program{
+		o.TraceOpen, o.TraceRead, o.TraceWrite,
+		o.TraceClose, o.TraceOpenExit, o.TraceOpenat2Exit,
+	} {
+		if p != nil {
+			p.Close()
+		}
 	}
-	if o.TraceRead != nil {
-		o.TraceRead.Close()
-	}
-	if o.TraceWrite != nil {
-		o.TraceWrite.Close()
-	}
-	if o.Events != nil {
-		o.Events.Close()
+	for _, m := range []*ebpf.Map{o.Events, o.FdPathMap, o.FdScratchMap} {
+		if m != nil {
+			m.Close()
+		}
 	}
 	return nil
 }
@@ -257,34 +281,30 @@ func ParseNetworkEvent(raw []byte) (*NetworkEvent, error) {
 }
 
 // ParseFileaccessEvent parses raw bytes into a FileaccessEvent.
+// Wire layout: type(4) ts(8) pid(4) tgid(4) ppid(4) uid(4) comm(16)
+// parent_comm(16) filename(256) flags(4) mode(4) op(1) fd_path_truncated(1) = 326 bytes.
 func ParseFileaccessEvent(raw []byte) (*FileaccessEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 16 + 256 + 4 + 4 + 1 // 305 bytes
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 256 + 4 + 4 + 1 + 1 // 326 bytes
 	if len(raw) < minSize {
 		return nil, fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
 
 	evt := &FileaccessEvent{}
-	offset := 0
+	off := 0
 
-	evt.Type = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.Timestamp = binary.LittleEndian.Uint64(raw[offset:])
-	offset += 8
-	evt.PID = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.TGID = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.UID = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	copy(evt.Comm[:], raw[offset:offset+16])
-	offset += 16
-	copy(evt.Filename[:], raw[offset:offset+256])
-	offset += 256
-	evt.Flags = int32(binary.LittleEndian.Uint32(raw[offset:]))
-	offset += 4
-	evt.Mode = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.Op = raw[offset]
+	evt.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	evt.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.TGID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(evt.Comm[:], raw[off:off+16]); off += 16
+	copy(evt.ParentComm[:], raw[off:off+16]); off += 16
+	copy(evt.Filename[:], raw[off:off+256]); off += 256
+	evt.Flags = int32(binary.LittleEndian.Uint32(raw[off:])); off += 4
+	evt.Mode = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	evt.Op = raw[off]; off++
+	evt.FDTruncated = raw[off]
 
 	return evt, nil
 }
@@ -327,21 +347,39 @@ func (e *NetworkEvent) ToTypesEvent() types.Event {
 }
 
 // ToTypesEvent converts a FileaccessEvent to types.Event.
+// FDPath is populated for all ops: for open events it mirrors Filename; for
+// read/write events the BPF program resolved it via the fd→path map.
 func (e *FileaccessEvent) ToTypesEvent() types.Event {
+	fdPath := nullTerminatedString(e.Filename[:])
 	return types.Event{
-		Type:      types.EventFileAccess,
-		Timestamp: e.Timestamp,
-		PID:       e.PID,
-		TGID:      e.TGID,
-		UID:       e.UID,
-		Comm:      e.Comm,
+		Type:       types.EventFileAccess,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
 		File: &types.FileEvent{
-			Filename: e.Filename,
-			Flags:    e.Flags,
-			Mode:     e.Mode,
-			Op:       e.Op,
+			Filename:        e.Filename,
+			Flags:           e.Flags,
+			Mode:            e.Mode,
+			Op:              e.Op,
+			FDPath:          fdPath,
+			FDPathTruncated: e.FDTruncated != 0,
 		},
 	}
+}
+
+// nullTerminatedString converts a byte slice to a Go string, stopping at the
+// first NUL byte. Used to convert fixed-size C string arrays.
+func nullTerminatedString(b []byte) string {
+	for i, c := range b {
+		if c == 0 {
+			return string(b[:i])
+		}
+	}
+	return string(b)
 }
 
 // PrivescObjects contains all eBPF objects for privilege escalation detection.

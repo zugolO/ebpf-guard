@@ -21,6 +21,9 @@ var (
 	}
 	validFileFields = map[string]bool{
 		"filename": true, "flags": true, "mode": true, "op": true, "directory": true, "extension": true,
+		// fd-enrichment fields (issue #47): available for all file ops; populated via BPF fd→path map.
+		"fd.name":           true, // resolved path for read/write events; same as filename for opens
+		"fd.name_truncated": true, // "true" when path exceeded 255 bytes and was truncated
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
@@ -30,6 +33,8 @@ var (
 		// arg0 is the BPF command for bpf(2), the fd for read/write, etc.
 		"arg0": true, "arg1": true, "arg2": true,
 		"arg3": true, "arg4": true, "arg5": true,
+		// fd-enrichment: resolved path for the fd in arg0 (read/write/close syscalls).
+		"fd.name": true,
 	}
 	validDNSFields = map[string]bool{
 		"qname": true, "qtype": true, "rcode": true, "direction": true,

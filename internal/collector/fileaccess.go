@@ -120,11 +120,18 @@ func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {
 	if c.objs == nil {
 		return nil
 	}
-	return map[string]*ebpf.Program{
+	progs := map[string]*ebpf.Program{
 		"trace_open":  c.objs.TraceOpen,
 		"trace_read":  c.objs.TraceRead,
 		"trace_write": c.objs.TraceWrite,
 	}
+	if c.objs.TraceClose != nil {
+		progs["trace_close"] = c.objs.TraceClose
+	}
+	if c.objs.TraceOpenExit != nil {
+		progs["trace_openat_exit"] = c.objs.TraceOpenExit
+	}
+	return progs
 }
 
 // IsAttached returns true if the BPF program is still attached.
@@ -197,31 +204,74 @@ func (c *FileaccessCollector) loadObjects() error {
 	return nil
 }
 
-// attachPrograms attaches the eBPF programs to kprobes.
+// attachPrograms attaches the eBPF programs to tracepoints/kprobes.
 func (c *FileaccessCollector) attachPrograms() error {
-	// Attach do_sys_openat2 kprobe (modern replacement for do_sys_open)
-	l1, err := link.Kprobe("do_sys_openat2", c.objs.TraceOpen, nil)
+	// Open: sys_enter_openat tracepoint
+	l1, err := link.Tracepoint("syscalls", "sys_enter_openat", c.objs.TraceOpen, nil)
 	if err != nil {
-		// Fallback to older kernel interface
-		l1, err = link.Kprobe("do_sys_open", c.objs.TraceOpen, nil)
+		// Fallback to kprobe for older kernels without tracepoint support
+		l1, err = link.Kprobe("do_sys_openat2", c.objs.TraceOpen, nil)
 		if err != nil {
-			return fmt.Errorf("attach open kprobe: %w", err)
+			l1, err = link.Kprobe("do_sys_open", c.objs.TraceOpen, nil)
+			if err != nil {
+				return fmt.Errorf("attach open tracepoint/kprobe: %w", err)
+			}
 		}
 	}
 	c.links = append(c.links, l1)
 
-	// Attach vfs_read kprobe
-	l2, err := link.Kprobe("vfs_read", c.objs.TraceRead, nil)
+	// Open exit: sys_exit_openat — needed to commit fd→path map entry
+	if c.objs.TraceOpenExit != nil {
+		lExit, err := link.Tracepoint("syscalls", "sys_exit_openat", c.objs.TraceOpenExit, nil)
+		if err != nil {
+			c.logger.Warn("failed to attach sys_exit_openat, fd enrichment partially disabled", "error", err)
+		} else {
+			c.links = append(c.links, lExit)
+		}
+	}
+
+	// openat2 exit
+	if c.objs.TraceOpenat2Exit != nil {
+		lExit2, err := link.Tracepoint("syscalls", "sys_exit_openat2", c.objs.TraceOpenat2Exit, nil)
+		if err != nil {
+			c.logger.Warn("failed to attach sys_exit_openat2", "error", err)
+		} else {
+			c.links = append(c.links, lExit2)
+		}
+	}
+
+	// Close: evicts fd_path_map entries
+	if c.objs.TraceClose != nil {
+		lClose, err := link.Tracepoint("syscalls", "sys_enter_close", c.objs.TraceClose, nil)
+		if err != nil {
+			c.logger.Warn("failed to attach sys_enter_close, fd map entries will not be evicted on close", "error", err)
+		} else {
+			c.links = append(c.links, lClose)
+		}
+	}
+
+	// Read: sys_enter_read tracepoint
+	l2, err := link.Tracepoint("syscalls", "sys_enter_read", c.objs.TraceRead, nil)
 	if err != nil {
-		c.logger.Warn("failed to attach vfs_read kprobe, continuing without read tracking", "error", err)
+		l2, err = link.Kprobe("vfs_read", c.objs.TraceRead, nil)
+		if err != nil {
+			c.logger.Warn("failed to attach read tracepoint/kprobe, continuing without read tracking", "error", err)
+		} else {
+			c.links = append(c.links, l2)
+		}
 	} else {
 		c.links = append(c.links, l2)
 	}
 
-	// Attach vfs_write kprobe
-	l3, err := link.Kprobe("vfs_write", c.objs.TraceWrite, nil)
+	// Write: sys_enter_write tracepoint
+	l3, err := link.Tracepoint("syscalls", "sys_enter_write", c.objs.TraceWrite, nil)
 	if err != nil {
-		c.logger.Warn("failed to attach vfs_write kprobe, continuing without write tracking", "error", err)
+		l3, err = link.Kprobe("vfs_write", c.objs.TraceWrite, nil)
+		if err != nil {
+			c.logger.Warn("failed to attach write tracepoint/kprobe, continuing without write tracking", "error", err)
+		} else {
+			c.links = append(c.links, l3)
+		}
 	} else {
 		c.links = append(c.links, l3)
 	}

@@ -148,6 +148,11 @@ type FileEvent struct {
 	Flags    int32 // open(2) flags
 	Mode     uint32
 	Op       uint8 // 0=open, 1=read, 2=write
+	// FDPath is the resolved file path for read/write events, populated via fd→path BPF map lookup.
+	// For open events FDPath matches Filename; for read/write events Filename would otherwise be empty.
+	FDPath string
+	// FDPathTruncated is true when the resolved path exceeded 255 bytes and was truncated.
+	FDPathTruncated bool
 }
 
 // TLSDirection indicates the direction of TLS traffic.

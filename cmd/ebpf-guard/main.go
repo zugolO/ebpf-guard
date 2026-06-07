@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/enforcer"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/internal/gossip"
+	"github.com/zugolO/ebpf-guard/internal/migration"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
@@ -695,6 +697,117 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newWizardCmd())
+	cmd.AddCommand(newRulesImportCmd())
+	return cmd
+}
+
+// newRulesImportCmd returns the "rules import" subcommand that converts rules
+// from other formats (currently Sigma) into ebpf-guard YAML.
+//
+// Usage:
+//
+//	ebpf-guard rules import --format sigma ./sigma-rules/ --out ./rules/imported/
+//	ebpf-guard rules import --format sigma rule.yml --out ./rules/imported/ --dry-run
+func newRulesImportCmd() *cobra.Command {
+	var (
+		format string
+		outDir string
+		dryRun bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "import [PATH]",
+		Short: "Import detection rules from external formats (sigma)",
+		Long: `import converts rules from other security formats into ebpf-guard YAML.
+
+Supported formats:
+  sigma   Sigma open-standard detection rules (https://sigmahq.io)
+
+The input PATH may be a single .yaml/.yml file or a directory. For directories,
+all .yaml/.yml files found directly in the directory are processed.
+
+Unknown Sigma fields are skipped with a WARN log; the rule is still imported
+if at least one condition could be mapped. Fully unsupported rules are counted
+separately and never written to the output file.
+
+Examples:
+  ebpf-guard rules import --format sigma ./sigma-rules/ --out rules/imported/
+  ebpf-guard rules import --format sigma rule.yml --dry-run`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			inputPath := args[0]
+
+			if !strings.EqualFold(format, "sigma") {
+				return fmt.Errorf("unsupported format %q — only 'sigma' is currently supported", format)
+			}
+
+			imp := migration.NewSigmaImporter()
+
+			info, err := os.Stat(inputPath)
+			if err != nil {
+				return fmt.Errorf("stat input path: %w", err)
+			}
+
+			var result *migration.SigmaImportResult
+			if info.IsDir() {
+				result, err = imp.ImportDir(inputPath)
+			} else {
+				result, err = imp.ImportFile(inputPath)
+			}
+			if err != nil {
+				return fmt.Errorf("import sigma rules: %w", err)
+			}
+
+			fmt.Printf("Sigma import summary:\n")
+			fmt.Printf("  Converted:   %d\n", result.Converted)
+			fmt.Printf("  Unsupported: %d\n", result.Unsupported)
+			fmt.Printf("  Disabled:    %d\n\n", result.Disabled)
+
+			for _, r := range result.Results {
+				switch r.Status {
+				case "converted":
+					fmt.Printf("  [OK]   %s\n", r.SourceRule)
+				case "unsupported":
+					fmt.Printf("  [SKIP] %s\n", r.SourceRule)
+					for _, reason := range r.UnsupportedReasons {
+						fmt.Printf("         - %s\n", reason)
+					}
+				case "disabled":
+					fmt.Printf("  [OFF]  %s\n", r.SourceRule)
+				}
+			}
+
+			out, err := imp.WriteOutput(result)
+			if err != nil {
+				return fmt.Errorf("serialize output: %w", err)
+			}
+
+			if dryRun {
+				fmt.Printf("\n-- dry-run: not writing files --\n\n%s\n", string(out))
+				return nil
+			}
+
+			if result.Converted == 0 {
+				fmt.Printf("\nNo rules were converted.\n")
+				return nil
+			}
+
+			if err := os.MkdirAll(outDir, 0o750); err != nil {
+				return fmt.Errorf("create output dir: %w", err)
+			}
+			outPath := filepath.Join(outDir, "sigma-imported.yaml")
+			if err := os.WriteFile(outPath, out, 0o640); err != nil {
+				return fmt.Errorf("write output file: %w", err)
+			}
+			fmt.Printf("\nWritten %d rule(s) to %s\n", result.Converted, outPath)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&format, "format", "", "source format (required: sigma)")
+	_ = cmd.MarkFlagRequired("format")
+	cmd.Flags().StringVar(&outDir, "out", "rules/imported", "output directory for converted rules")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print generated YAML without writing files")
 	return cmd
 }
 

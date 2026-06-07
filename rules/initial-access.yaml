@@ -1,0 +1,155 @@
+rules:
+  # MITRE ATT&CK: T1190 — Exploit Public-Facing Application
+  - id: initial_web_shell_write
+    name: "Web shell written to web root"
+    description: >
+      An executable script (PHP, JSP, ASPX, Python, Perl) was written to a
+      web-accessible directory. This is the definition of a web shell — a
+      remote access backdoor delivered via file upload or CVE exploitation.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/var/www/"
+            - "/srv/www/"
+            - "/usr/share/nginx/"
+            - "/opt/tomcat/"
+            - "/opt/jboss/"
+            - "/home/www/"
+            - "/var/html/"
+        - field: file.path
+          op: suffix
+          values:
+            - ".php"
+            - ".php5"
+            - ".phtml"
+            - ".phar"
+            - ".jsp"
+            - ".jspx"
+            - ".aspx"
+            - ".ashx"
+            - ".py"
+            - ".pl"
+            - ".cgi"
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "rsync", "ansible",
+                   "puppet", "chef", "salt", "git", "scp", "sftp"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1190, initial-access, web-shell]
+
+  # MITRE ATT&CK: T1566 — Phishing (download stage)
+  - id: initial_office_macro_exec
+    name: "Shell spawned by document viewer or office application"
+    description: >
+      A shell or interpreter was spawned by a document viewer, PDF reader, or
+      office application. This indicates a malicious macro or exploit payload
+      executing via a phishing document.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "zsh", "python3", "python", "perl",
+                   "ruby", "node", "powershell", "pwsh"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1566, initial-access, phishing]
+
+  # MITRE ATT&CK: T1195.002 — Supply Chain Compromise: Compromise Software Supply Chain
+  - id: initial_package_postinstall_network
+    name: "Package post-install script making network connection"
+    description: >
+      A package manager post-install script (triggered by dpkg, rpm, npm,
+      pip, gem) is making an outbound network connection. This is the primary
+      indicator of a supply-chain-compromised package downloading a second-stage
+      payload.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: not_in
+          values: ["apt", "dpkg", "rpm", "yum", "dnf", "pip", "pip3",
+                   "npm", "yarn", "gem", "cargo", "go", "gradle", "mvn"]
+        - field: network.dport
+          op: in
+          values: ["80", "443", "8080", "8443"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1195.002, initial-access, supply-chain]
+
+  # MITRE ATT&CK: T1133 — External Remote Services
+  - id: initial_vpn_unexpected_access
+    name: "VPN or tunnel process started unexpectedly"
+    description: >
+      A VPN client or tunneling tool was started by an unexpected process.
+      Attackers use VPN clients and Tor to route C2 traffic and exfiltration
+      through encrypted channels that evade network monitoring.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["openvpn", "wireguard", "wg", "tor", "proxychains",
+                   "torsocks", "proxify", "redsocks"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1133, initial-access, command-and-control]
+
+  # MITRE ATT&CK: T1078 — Valid Accounts (anomalous login time)
+  - id: initial_ssh_login_new_user
+    name: "SSH login from previously unseen source IP"
+    description: >
+      An SSH session was established from an IP address that has not connected
+      before in the EWMA baseline window. This can indicate stolen credentials
+      used from a new location or a brute-force success.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: network.dport
+          op: equals
+          values: ["22"]
+        - field: proc.comm
+          op: equals
+          values: ["sshd"]
+    severity: info
+    action: alert
+    tags: [mitre:T1078, initial-access, lateral-movement]
+
+  # MITRE ATT&CK: T1190 (Log4Shell / RCE via JNDI)
+  - id: initial_java_jndi_ldap
+    name: "Java process connecting to LDAP (possible JNDI injection)"
+    description: >
+      A Java process is connecting to an LDAP server on port 389 or 1389.
+      This is the network indicator of Log4Shell (CVE-2021-44228) and similar
+      JNDI injection vulnerabilities triggering remote class loading.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["java", "java8", "java11", "java17", "java21"]
+        - field: network.dport
+          op: in
+          values: ["389", "636", "1389", "1636"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1190, initial-access, log4shell, cve:CVE-2021-44228]

@@ -1,0 +1,216 @@
+rules:
+  # MITRE ATT&CK: T1574.001 — Hijack Execution Flow: DLL/SO Hijacking
+  - id: integrity_lib_replaced
+    name: "Shared library overwritten in system path"
+    description: >
+      A shared library (.so file) in a system library path was overwritten.
+      Attackers replace legitimate libraries with trojaned versions that execute
+      malicious code whenever the library is loaded by any process.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/lib/"
+            - "/lib64/"
+            - "/usr/lib/"
+            - "/usr/lib64/"
+            - "/usr/local/lib/"
+        - field: file.path
+          op: suffix
+          values: [".so", ".so.0", ".so.1", ".so.2", ".so.3", ".so.6"]
+        - field: file.op
+          op: in
+          values: ["write", "create", "rename"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "zypper", "pacman",
+                   "ldconfig", "install", "make", "cmake", "ninja", "cargo",
+                   "ansible", "puppet", "chef", "salt"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1574.001, defense-evasion, persistence, integrity]
+
+  # MITRE ATT&CK: T1036.004 — Masquerade Task or Service
+  - id: integrity_ld_so_preload_write
+    name: "/etc/ld.so.preload modified"
+    description: >
+      /etc/ld.so.preload was modified. This file lists libraries loaded before
+      all others for every process on the system — a classic rootkit persistence
+      and process injection mechanism.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: equals
+          values: ["/etc/ld.so.preload"]
+        - field: file.op
+          op: in
+          values: ["write", "create"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1036.004, defense-evasion, persistence, integrity]
+
+  # MITRE ATT&CK: T1014 — Rootkit
+  - id: integrity_ld_cache_write
+    name: "Dynamic linker cache or config modified"
+    description: >
+      /etc/ld.so.conf or a file in /etc/ld.so.conf.d/ was modified by a
+      non-package-manager process. Modifying the linker config redirects
+      library lookups to attacker-controlled paths.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/etc/ld.so.conf.d/", "/etc/ld.so.conf"]
+        - field: file.op
+          op: in
+          values: ["write", "create"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "ldconfig",
+                   "ansible", "puppet", "chef"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, defense-evasion, persistence, integrity]
+
+  # MITRE ATT&CK: T1014
+  - id: integrity_sysctl_security_disable
+    name: "Security-critical sysctl parameter modified"
+    description: >
+      A sysctl parameter controlling security features (ASLR, dmesg
+      restrictions, kptr restrictions, yama) was modified. Attackers disable
+      these mitigations before exploitation.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/proc/sys/kernel/randomize_va_space"
+            - "/proc/sys/kernel/kptr_restrict"
+            - "/proc/sys/kernel/dmesg_restrict"
+            - "/proc/sys/kernel/perf_event_paranoid"
+            - "/proc/sys/kernel/yama/"
+            - "/proc/sys/fs/protected_hardlinks"
+            - "/proc/sys/fs/protected_symlinks"
+            - "/proc/sys/fs/suid_dumpable"
+        - field: file.op
+          op: in
+          values: ["write"]
+        - field: proc.comm
+          op: not_in
+          values: ["sysctl", "systemd", "ansible", "puppet", "chef",
+                   "salt", "tuned", "sysfsutils"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, defense-evasion, integrity]
+
+  # MITRE ATT&CK: T1547.006 — Boot or Logon Autostart Execution: Kernel Modules
+  - id: integrity_kernel_module_from_user_path
+    name: "Kernel module loaded from user-writable path"
+    description: >
+      A kernel module was loaded from /tmp, /var/tmp, /dev/shm, /home, or
+      other user-writable paths. Legitimate kernel modules are installed to
+      /lib/modules/. Loading from user-writable paths indicates a rootkit.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/tmp/", "/var/tmp/", "/dev/shm/", "/home/", "/root/"]
+        - field: file.path
+          op: suffix
+          values: [".ko", ".ko.xz", ".ko.gz", ".ko.zst"]
+        - field: file.op
+          op: in
+          values: ["read", "open"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1547.006, persistence, integrity, rootkit]
+
+  # MITRE ATT&CK: T1601 — Modify System Image
+  - id: integrity_container_runtime_modified
+    name: "Container runtime binary modified"
+    description: >
+      The container runtime binary (containerd, dockerd, runc, crio) or its
+      configuration was modified. Attackers backdoor container runtimes to
+      intercept container operations or escape sandboxes.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/usr/bin/containerd"
+            - "/usr/bin/dockerd"
+            - "/usr/bin/docker"
+            - "/usr/bin/runc"
+            - "/usr/bin/crio"
+            - "/usr/local/bin/containerd"
+            - "/usr/local/bin/dockerd"
+            - "/etc/containerd/"
+            - "/etc/docker/"
+        - field: file.op
+          op: in
+          values: ["write", "create", "rename"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1601, defense-evasion, integrity, container]
+
+  # MITRE ATT&CK: T1542.003 — Bootkit
+  - id: integrity_grub_bootloader_write
+    name: "Bootloader configuration modified"
+    description: >
+      A bootloader configuration file (GRUB, GRUB2) was modified. Persistence
+      at the bootloader level survives OS reinstallation and is the hallmark
+      of advanced persistent threats.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/boot/grub/"
+            - "/boot/grub2/"
+            - "/boot/efi/"
+            - "/etc/grub.d/"
+            - "/etc/default/grub"
+        - field: file.op
+          op: in
+          values: ["write", "create"]
+        - field: proc.comm
+          op: not_in
+          values: ["grub-install", "grub2-install", "update-grub",
+                   "grub-mkconfig", "grub2-mkconfig", "efibootmgr",
+                   "dpkg", "rpm", "ansible", "puppet", "chef"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1542.003, persistence, integrity, bootkit]
+
+  # MITRE ATT&CK: T1014
+  - id: integrity_proc_self_exe_exec
+    name: "memfd or anonymous mapping executed (fileless ELF)"
+    description: >
+      A process executed code from an anonymous memory mapping or a memfd
+      (memory file descriptor) rather than a file on disk. This is the primary
+      technique for fileless malware on Linux — no binary ever touches the disk.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["319", "279"]  # memfd_create, memfd_secret
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, defense-evasion, execution, fileless, integrity]

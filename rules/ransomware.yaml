@@ -1,0 +1,179 @@
+rules:
+  # MITRE ATT&CK: T1486 — Data Encrypted for Impact
+  - id: ransomware_mass_rename
+    name: "Mass file rename — possible encryption"
+    description: >
+      A process is renaming files in rapid succession. Ransomware typically
+      renames files to add an encrypted extension (.locked, .enc, .crypt).
+      Triggers when the same process renames more than 20 files per second
+      across multiple directories.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.op
+          op: equals
+          values: ["rename"]
+        - field: file.path
+          op: not_prefix
+          values: ["/proc/", "/sys/", "/dev/", "/run/", "/tmp/."]
+    severity: critical
+    action: alert
+    tags: [mitre:T1486, ransomware, impact]
+
+  # MITRE ATT&CK: T1486
+  - id: ransomware_encrypted_extension
+    name: "File written with known ransomware extension"
+    description: >
+      A file is being created or written with an extension commonly associated
+      with ransomware encryption output. Legitimate software rarely uses these
+      exact extensions.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: suffix
+          values:
+            - ".locked"
+            - ".enc"
+            - ".crypt"
+            - ".encrypted"
+            - ".crypted"
+            - ".locky"
+            - ".zepto"
+            - ".cerber"
+            - ".wnry"
+            - ".wncry"
+            - ".wcry"
+            - ".onion"
+            - ".pays"
+            - ".lol"
+            - ".trun"
+            - ".777"
+            - ".aaa"
+            - ".abc"
+        - field: file.op
+          op: in
+          values: ["write", "create"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1486, ransomware, impact]
+
+  # MITRE ATT&CK: T1490 — Inhibit System Recovery
+  - id: ransomware_shadow_delete
+    name: "Shadow copy / backup deletion"
+    description: >
+      A process is deleting shadow copies, backups, or system restore points.
+      This is a canonical ransomware pre-encryption step to prevent recovery.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["vssadmin", "wmic", "wbadmin", "bcdedit", "diskshadow",
+                   "bash", "sh", "python3", "python", "perl", "ruby"]
+        - field: file.path
+          op: prefix
+          values: ["/var/backup", "/backup", "/mnt/backup", "/media/backup",
+                   "/.snapshots", "/var/cache/snapshots"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1490, ransomware, impact]
+
+  # MITRE ATT&CK: T1490
+  - id: ransomware_backup_tool_kill
+    name: "Backup agent process killed"
+    description: >
+      A known backup agent or snapshot daemon was killed. Ransomware commonly
+      terminates backup processes before encryption to prevent recovery.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["62", "37"]   # kill, tkill
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "python3", "python", "perl"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1490, ransomware]
+
+  # MITRE ATT&CK: T1561.001 — Disk Content Wipe
+  - id: ransomware_disk_wipe
+    name: "Direct disk device write — possible wipe"
+    description: >
+      A process is writing directly to a block device (/dev/sd*, /dev/nvme*,
+      /dev/vd*). Legitimate use is rare outside of disk utilities. Wipers and
+      destructive malware use direct device access to bypass filesystem journals.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/dev/sd", "/dev/nvme", "/dev/vd", "/dev/xvd", "/dev/hd"]
+        - field: file.op
+          op: equals
+          values: ["write"]
+        - field: uid
+          op: equals
+          values: ["0"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1561.001, ransomware, impact, wiper]
+
+  # MITRE ATT&CK: T1485 — Data Destruction
+  - id: ransomware_log_wipe
+    name: "System log files deleted or truncated"
+    description: >
+      System log files are being deleted or truncated to zero. Ransomware
+      and wipers do this to erase evidence before or after encryption.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/var/log/"]
+        - field: file.op
+          op: in
+          values: ["unlink", "truncate"]
+        - field: uid
+          op: equals
+          values: ["0"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1485, ransomware, defense-evasion]
+
+  # MITRE ATT&CK: T1486
+  - id: ransomware_ransom_note
+    name: "Ransom note file created"
+    description: >
+      A file with a name matching common ransom note patterns was created.
+      Ransomware drops these after encryption is complete.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: suffix
+          values:
+            - "HOW_TO_DECRYPT.txt"
+            - "DECRYPT_FILES.txt"
+            - "README_FOR_DECRYPT.txt"
+            - "RANSOM_NOTE.txt"
+            - "HOW_TO_RECOVER.txt"
+            - "PAYMENT_INSTRUCTIONS.txt"
+            - "_HELP_RESTORE.html"
+            - "_DECRYPT_.html"
+            - "RESTORE_FILES.html"
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1486, ransomware, impact]

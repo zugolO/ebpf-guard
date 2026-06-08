@@ -197,6 +197,82 @@ rules:
     action: alert
     tags: [gpu, cryptominer, shell-access, cuda]
 
+  # ── Cryptomining detection ────────────────────────────────────────────────
+
+  # Rule: Large GPU compute allocation — cryptomining burst
+  # CUDA-based cryptominers (xmrig --cuda, nbminer, t-rex) allocate large
+  # contiguous GPU buffers once at startup and keep them resident throughout
+  # mining. A single allocation > 1 GB from a process not in the known ML
+  # framework list is a strong cryptomining indicator on GPU-enabled nodes.
+  - id: gpu_large_compute_burst
+    name: "Large GPU Compute Allocation — Possible Cryptomining"
+    description: >
+      An unusually large GPU memory allocation (> 1 GB) was observed from a process
+      not in the known ML framework list. CUDA-based cryptominers allocate large
+      contiguous GPU buffers at startup to maximise hashing throughput.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_size
+          op: gt
+          values: ["1073741824"]   # > 1 GB
+        - field: comm
+          op: not_in
+          values: ["python3", "python", "torch_shm", "pt_main_thread",
+                   "tensorflow", "tritonserver", "onnxruntime", "train", "eval"]
+    severity: warning
+    action: alert
+    tags: [mitre:resource-hijacking, cryptomining, gpu, cuda]
+
+  # Rule: GPU compute access from unknown process
+  # Legitimate GPU usage in container environments is limited to ML framework
+  # worker processes. CUDA access (alloc, copy, or kernel launch) from shells,
+  # curl, wget, or unknown binaries may indicate a cryptominer, a GPU-based
+  # hash cracker, or an attacker exfiltrating GPU-resident training data.
+  - id: gpu_unknown_process
+    name: "GPU Access from Unknown Process"
+    description: >
+      GPU memory operation (alloc, copy, or kernel launch) from a process that
+      is not a known ML training framework or CUDA application. Consistent with
+      CUDA-accelerated cryptominers or GPU-based compute theft.
+    event_type: gpu
+    condition_group:
+      operator: and
+      conditions:
+        - field: gpu_op
+          op: in
+          values: ["alloc", "memcpy_htod", "memcpy_dtoh", "kernel_launch"]
+        - field: comm
+          op: not_in
+          values: ["python3", "python", "jupyter", "tensorflow", "pytorch",
+                   "torch_shm", "pt_main_thread", "tritonserver", "onnxruntime",
+                   "tf_serving", "train", "eval", "inference",
+                   "nvidia-smi", "cuda-memcheck"]
+    severity: warning
+    action: alert
+    tags: [mitre:resource-hijacking, gpu, cuda]
+
+  # Rule: Network connection to known cryptomining pool ports
+  # Stratum mining protocol uses well-known ports. A connection to these ports
+  # from a GPU-enabled host strongly indicates GPU-based cryptomining.
+  # When correlated with gpu_large_compute_burst or gpu_unknown_process alerts
+  # from the same process, this constitutes a high-confidence cryptomining chain.
+  - id: gpu_mining_pool_connect
+    name: "Connection to Known Cryptomining Pool Port"
+    description: >
+      A network connection to a well-known Stratum mining pool port was observed.
+      Combined with GPU allocation events from the same process, this is a strong
+      indicator of GPU-based cryptomining (XMRig, NBMiner, T-Rex, GMiner).
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["3333", "3334", "5555", "7777", "14444", "45560"]
+    severity: critical
+    action: alert
+    tags: [mitre:resource-hijacking, cryptomining, gpu, network]
+
 # Configuration notes:
 #
 # Enable GPU monitoring in config.yaml:

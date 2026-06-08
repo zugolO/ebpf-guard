@@ -248,6 +248,10 @@ func (ad *AnomalyDetector) calculateAnomalyScore(profile *ProcessProfile, event 
 		if event.Syscall != nil {
 			totalScore = ad.analyzeSyscallBehavior(profile, event.Syscall, &result.Contributions)
 		}
+	case types.EventGPU:
+		if event.GPU != nil {
+			totalScore = ad.analyzeGPUBehavior(profile, event.GPU, &result.Contributions)
+		}
 	}
 
 	// Normalize score to [0, 1]
@@ -383,6 +387,99 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 				Category:     "file",
 				Field:        "extension",
 				Value:        ext,
+				Expected:     0,
+				Observed:     0,
+				Contribution: 0.4,
+			})
+			score += 0.4
+		}
+	}
+
+	return math.Min(score, 1.0)
+}
+
+// gpuOpNames maps GPUOpType constants to human-readable names, matching the
+// string table in internal/correlator/rules.go getFieldValue.
+var gpuOpNames = [6]string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}
+
+// gpuOpName returns the string name for a GPU operation.
+func gpuOpName(op types.GPUOpType) string {
+	if int(op) < len(gpuOpNames) {
+		return gpuOpNames[op]
+	}
+	return strconv.FormatUint(uint64(op), 10)
+}
+
+// analyzeGPUBehavior analyzes GPU operation behavior for anomalies.
+// Contributions are appended directly to out so no intermediate slice is allocated.
+//
+// Key detection: if TotalOps == 0 (workload never used GPU during learning),
+// any GPU event scores 1.0 — this catches CPU-only workloads that suddenly
+// start using the GPU (cryptominer startup, attacker gaining CUDA access).
+func (ad *AnomalyDetector) analyzeGPUBehavior(profile *ProcessProfile, event *types.GPUEvent, out *[]AnomalyContribution) float64 {
+	if profile.GPUProfile.TotalOps == 0 {
+		*out = append(*out, AnomalyContribution{
+			Category:     "gpu",
+			Field:        "gpu_op",
+			Value:        gpuOpName(event.Op),
+			Expected:     0,
+			Observed:     0,
+			Contribution: 1.0,
+		})
+		return 1.0
+	}
+
+	var score float64
+
+	// Check GPU operation type frequency.
+	if opEWMA, exists := profile.GPUProfile.OpCounts[event.Op]; exists {
+		freq := opEWMA.Value()
+		opScore := 1.0 - freq
+		if opScore > 0.5 {
+			*out = append(*out, AnomalyContribution{
+				Category:     "gpu",
+				Field:        "gpu_op",
+				Value:        gpuOpName(event.Op),
+				Expected:     0.5,
+				Observed:     freq,
+				Contribution: opScore,
+			})
+			score += opScore * 0.6
+		}
+	} else {
+		*out = append(*out, AnomalyContribution{
+			Category:     "gpu",
+			Field:        "gpu_op",
+			Value:        gpuOpName(event.Op),
+			Expected:     0,
+			Observed:     0,
+			Contribution: 0.6,
+		})
+		score += 0.6
+	}
+
+	// Check GPU transfer size bucket frequency.
+	if event.Size > 0 {
+		bucket := gpuSizeBucket(event.Size)
+		if sizeEWMA, exists := profile.GPUProfile.AllocSizeBuckets[bucket]; exists {
+			freq := sizeEWMA.Value()
+			sizeScore := 1.0 - freq
+			if sizeScore > 0.5 {
+				*out = append(*out, AnomalyContribution{
+					Category:     "gpu",
+					Field:        "gpu_size",
+					Value:        strconv.FormatUint(event.Size, 10),
+					Expected:     0.5,
+					Observed:     freq,
+					Contribution: sizeScore,
+				})
+				score += sizeScore * 0.4
+			}
+		} else {
+			*out = append(*out, AnomalyContribution{
+				Category:     "gpu",
+				Field:        "gpu_size",
+				Value:        strconv.FormatUint(event.Size, 10),
 				Expected:     0,
 				Observed:     0,
 				Contribution: 0.4,

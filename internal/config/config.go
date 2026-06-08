@@ -328,6 +328,23 @@ type SQLiteStoreConfig struct {
 	// VacuumInterval is how often WAL is checkpointed and excess rows pruned
 	// (Go duration string, e.g. "1h", "30m"). Zero disables background maintenance.
 	VacuumInterval string `mapstructure:"vacuum_interval"`
+	// RetentionPeriod is the maximum age of alerts to retain (e.g. "7d", "168h").
+	// Alerts older than this are deleted each VacuumInterval. Zero disables age-based retention.
+	RetentionPeriod string `mapstructure:"retention_period"`
+	// Backup configures periodic SQLite database backups.
+	Backup SQLiteBackupConfig `mapstructure:"backup"`
+}
+
+// SQLiteBackupConfig holds SQLite backup configuration.
+type SQLiteBackupConfig struct {
+	// Enabled activates periodic database backups.
+	Enabled bool `mapstructure:"enabled"`
+	// Path is the destination file path for the backup copy (e.g. /backup/alerts.db).
+	// The directory must exist and be writable.
+	Path string `mapstructure:"path"`
+	// Interval controls how often a backup is created (Go duration string, e.g. "1h").
+	// Defaults to "1h" when Enabled is true.
+	Interval string `mapstructure:"interval"`
 }
 
 // OpenSearchStoreConfig holds OpenSearch-specific configuration.

@@ -184,3 +184,19 @@ func SetProfilerStateRestored(restored bool) {
 func AddBPFLost(collector string, n uint64) {
 	BPFLostEvents.WithLabelValues(collector).Add(float64(n))
 }
+
+var (
+	// GPUEventsTotal counts GPU/CUDA events by operation type.
+	GPUEventsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_gpu_events_total",
+			Help: "Total number of GPU/CUDA events processed, by operation type",
+		},
+		[]string{"op"},
+	)
+)
+
+// RecordGPUEvent increments the GPU events counter for the given operation name.
+func RecordGPUEvent(op string) {
+	GPUEventsTotal.WithLabelValues(op).Inc()
+}

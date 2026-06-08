@@ -13,17 +13,40 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	_ "github.com/mattn/go-sqlite3"
 )
 
+var (
+	storeBackupLastSuccess = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_store_backup_last_success_timestamp",
+		Help: "Unix timestamp of the last successful SQLite backup.",
+	})
+	storeBackupDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ebpf_guard_store_backup_duration_seconds",
+		Help:    "Duration of SQLite backup operations.",
+		Buckets: []float64{0.1, 0.5, 1, 5, 10, 30, 60},
+	})
+	storeSizeBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_store_size_bytes",
+		Help: "Approximate size of the SQLite alert database in bytes (page_count * page_size).",
+	})
+)
+
 // SQLiteStore implements AlertStore using SQLite.
 type SQLiteStore struct {
-	db             *sql.DB
-	maxAlerts      int64
-	vacuumInterval time.Duration
-	cancel         context.CancelFunc
-	done           chan struct{}
+	db              *sql.DB
+	maxAlerts       int64
+	vacuumInterval  time.Duration
+	retentionPeriod time.Duration
+	backupEnabled   bool
+	backupPath      string
+	backupInterval  time.Duration
+	cancel          context.CancelFunc
+	done            chan struct{}
+	backupDone      chan struct{}
 }
 
 // NewSQLiteStore creates a new SQLite alert store.
@@ -54,13 +77,23 @@ func NewSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("apply sqlite pragmas: %w", err)
 	}
 
+	backupInterval := cfg.BackupInterval
+	if cfg.BackupEnabled && backupInterval <= 0 {
+		backupInterval = time.Hour
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &SQLiteStore{
-		db:             db,
-		maxAlerts:      cfg.MaxAlerts,
-		vacuumInterval: cfg.VacuumInterval,
-		cancel:         cancel,
-		done:           make(chan struct{}),
+		db:              db,
+		maxAlerts:       cfg.MaxAlerts,
+		vacuumInterval:  cfg.VacuumInterval,
+		retentionPeriod: cfg.RetentionPeriod,
+		backupEnabled:   cfg.BackupEnabled,
+		backupPath:      cfg.BackupPath,
+		backupInterval:  backupInterval,
+		cancel:          cancel,
+		done:            make(chan struct{}),
+		backupDone:      make(chan struct{}),
 	}
 	if err := s.initSchema(); err != nil {
 		cancel()
@@ -69,6 +102,7 @@ func NewSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 	}
 
 	go s.runMaintenance(ctx)
+	go s.runBackup(ctx)
 	return s, nil
 }
 
@@ -91,13 +125,72 @@ func (s *SQLiteStore) runMaintenance(ctx context.Context) {
 	}
 }
 
-// performMaintenance checkpoints the WAL and prunes excess alerts.
-// It is safe to call directly in tests.
+// performMaintenance checkpoints the WAL, prunes excess alerts, and applies
+// age-based retention. It is safe to call directly in tests.
 func (s *SQLiteStore) performMaintenance(ctx context.Context) {
 	s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)") //nolint:errcheck
 	if s.maxAlerts > 0 {
 		s.pruneExcess(ctx)
 	}
+	if s.retentionPeriod > 0 {
+		if _, err := s.Delete(ctx, s.retentionPeriod); err != nil {
+			slog.Warn("sqlite: age-based retention failed", slog.Any("error", err))
+		}
+	}
+	s.updateSizeMetric(ctx)
+}
+
+// updateSizeMetric sets storeSizeBytes from SQLite page statistics.
+func (s *SQLiteStore) updateSizeMetric(ctx context.Context) {
+	var pageCount, pageSize int64
+	s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount)  //nolint:errcheck
+	s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize)    //nolint:errcheck
+	if pageSize > 0 {
+		storeSizeBytes.Set(float64(pageCount * pageSize))
+	}
+}
+
+// runBackup is the background periodic-backup goroutine.
+// It exits immediately if backup is disabled or the context is cancelled.
+func (s *SQLiteStore) runBackup(ctx context.Context) {
+	defer close(s.backupDone)
+	if !s.backupEnabled || s.backupPath == "" {
+		return
+	}
+	ticker := time.NewTicker(s.backupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.performBackup(ctx)
+		}
+	}
+}
+
+// performBackup creates a consistent copy of the database at backupPath using
+// SQLite's VACUUM INTO statement, which produces a defragmented, WAL-free copy
+// without blocking readers or writers. It is safe to call directly in tests.
+func (s *SQLiteStore) performBackup(ctx context.Context) {
+	if s.backupPath == "" {
+		return
+	}
+	start := time.Now()
+	_, err := s.db.ExecContext(ctx, "VACUUM INTO ?", s.backupPath)
+	elapsed := time.Since(start)
+	storeBackupDuration.Observe(elapsed.Seconds())
+	if err != nil {
+		slog.Error("sqlite: backup failed",
+			slog.String("path", s.backupPath),
+			slog.Duration("elapsed", elapsed),
+			slog.Any("error", err))
+		return
+	}
+	storeBackupLastSuccess.SetToCurrentTime()
+	slog.Info("sqlite: backup completed",
+		slog.String("path", s.backupPath),
+		slog.Duration("elapsed", elapsed))
 }
 
 // pruneExcess deletes the oldest rows that exceed maxAlerts and reclaims space.
@@ -452,10 +545,11 @@ func (s *SQLiteStore) Flush(ctx context.Context) error {
 	return err
 }
 
-// Close stops the background maintenance goroutine and closes the database.
+// Close stops the background goroutines and closes the database.
 func (s *SQLiteStore) Close() error {
 	s.cancel()
 	<-s.done
+	<-s.backupDone
 	return s.db.Close()
 }
 

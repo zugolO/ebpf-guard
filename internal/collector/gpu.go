@@ -28,6 +28,15 @@ var gpuTrackedPIDsGauge = promauto.NewGauge(prometheus.GaugeOpts{
 	Help: "Current number of PIDs tracked by the GPU collector (processes with CUDA uprobes attached).",
 })
 
+var gpuOpNames = []string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}
+
+func gpuOpName(op types.GPUOpType) string {
+	if int(op) < len(gpuOpNames) {
+		return gpuOpNames[op]
+	}
+	return "unknown"
+}
+
 // cudaLibraryPatterns lists substrings that identify CUDA libraries in /proc/[pid]/maps.
 // Ordered from most specific to least specific to reduce false positives.
 var cudaLibraryPatterns = []string{
@@ -543,6 +552,8 @@ func (c *GPUCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			exporter.RecordDropped("gpu", "parse_error")
 			continue
 		}
+
+		exporter.RecordGPUEvent(gpuOpName(event.GPU.Op))
 
 		if c.logger.Enabled(ctx, slog.LevelDebug) {
 			c.logger.Debug("GPU event",

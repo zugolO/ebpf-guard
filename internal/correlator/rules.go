@@ -154,9 +154,22 @@ type RuleSet struct {
 // qname_length, qname_digit_ratio, qname_subdomain_count, qname_is_dga) on demand.
 var globalDNSAnalyzer = NewDNSEntropyCalculator()
 
+// syscallNrStrings is a pre-computed lookup table for syscall numbers 0–511.
+// Eliminates strconv.FormatInt allocations on the hot path in getFieldValue.
+var syscallNrStrings [512]string
+
+func init() {
+	for i := range syscallNrStrings {
+		syscallNrStrings[i] = strconv.Itoa(i)
+	}
+}
+
 // RuleEngine evaluates events against rules.
 type RuleEngine struct {
 	rules []Rule
+	// byType indexes rules by event type for O(1) dispatch; avoids scanning
+	// rules of mismatching types on every event. Rebuilt on hot-reload.
+	byType map[types.EventType][]Rule
 	// compiled regex patterns for performance
 	regexCache map[string]*regexp.Regexp
 	// compiled CIDR ranges
@@ -198,7 +211,19 @@ func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 		prior.mu.RUnlock()
 	}
 	re.compilePatterns()
+	re.buildTypeIndex()
 	return re
+}
+
+// buildTypeIndex builds the byType map from re.rules. Called once at construction
+// (and thus on every hot-reload via NewRuleEngineWithCache). Not thread-safe on its
+// own — must be called before the engine is published to other goroutines.
+func (re *RuleEngine) buildTypeIndex() {
+	idx := make(map[types.EventType][]Rule, 8)
+	for _, rule := range re.rules {
+		idx[rule.EventType] = append(idx[rule.EventType], rule)
+	}
+	re.byType = idx
 }
 
 // GetRules returns a copy of the loaded rules.
@@ -259,7 +284,9 @@ func (re *RuleEngine) compileCondPtr(cond *RuleCondition) {
 
 // compileGroupPatterns recurses into a ConditionGroup, compiling each
 // RuleCondition in place (by index, not by range-copy).
+// Also normalizes Operator to lowercase once so the hot path avoids strings.ToLower.
 func (re *RuleEngine) compileGroupPatterns(g *RuleConditionGroup) {
+	g.Operator = strings.ToLower(g.Operator)
 	for i := range g.Conditions {
 		re.compileCondPtr(&g.Conditions[i])
 	}
@@ -315,8 +342,8 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 	re.mu.RLock()
 	defer re.mu.RUnlock()
 
-	for _, rule := range re.rules {
-		if !re.matches(e, rule) {
+	for _, rule := range re.byType[e.Type] {
+		if !re.matchesTyped(e, rule) {
 			continue
 		}
 		if rule.Action == ActionDrop {
@@ -351,8 +378,8 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 	// no-match path. alertsPool recycles backing arrays on match paths.
 	var alerts []types.Alert
 
-	for _, rule := range re.rules {
-		if !re.matches(e, rule) {
+	for _, rule := range re.byType[e.Type] {
+		if !re.matchesTyped(e, rule) {
 			continue
 		}
 		if rule.Action == ActionDrop {
@@ -411,13 +438,18 @@ func shouldSample(pid uint32, ts uint64, rate float64, deterministic bool) bool 
 	return rand.Float64() < rate //nolint:gosec // non-crypto, performance-sensitive
 }
 
-// matches checks if an event matches a rule.
+// matches checks if an event matches a rule (including type check).
+// Used by code that iterates re.rules directly (e.g. ReferencedSyscalls).
 func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
-	// Check event type
 	if e.Type != rule.EventType {
 		return false
 	}
+	return re.matchesTyped(e, rule)
+}
 
+// matchesTyped checks if an event matches a rule, assuming e.Type == rule.EventType.
+// Called from EvaluateInto/Evaluate which already dispatch via byType.
+func (re *RuleEngine) matchesTyped(e types.Event, rule Rule) bool {
 	// Per-rule sampling: skip condition evaluation for a fraction of events.
 	// Only active when 0 < SampleRate < 1.0.
 	// SampleRate == 0.0 (Go zero value, i.e. field absent from YAML) is treated
@@ -447,7 +479,7 @@ func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleCondition
 		return true
 	}
 
-	switch strings.ToLower(group.Operator) {
+	switch group.Operator {
 	case "or":
 		for _, cond := range group.Conditions {
 			if re.evaluateCondition(e, cond) {
@@ -667,6 +699,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		}
 		switch field {
 		case "nr":
+			if nr := e.Syscall.Nr; nr >= 0 && nr < 512 {
+				return syscallNrStrings[nr]
+			}
 			return strconv.FormatInt(e.Syscall.Nr, 10)
 		case "ret":
 			return strconv.FormatInt(e.Syscall.Ret, 10)

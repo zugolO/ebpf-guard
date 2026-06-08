@@ -4,6 +4,7 @@ package profiler
 import (
 	"container/heap"
 	"context"
+	"math/bits"
 	"sync"
 	"time"
 	"unsafe"
@@ -36,6 +37,9 @@ type ProcessProfile struct {
 
 	// Syscall behavior
 	SyscallProfile SyscallProfile
+
+	// GPU behavior
+	GPUProfile GPUProfile
 
 	// Anomaly detection state
 	AnomalyScore float64
@@ -71,6 +75,34 @@ type SyscallProfile struct {
 	TotalSyscalls uint64
 }
 
+// GPUProfile tracks GPU operation patterns for behavioral profiling.
+// A TotalOps count of 0 at scoring time means the workload was CPU-only
+// during the learning phase — any GPU event is then maximally anomalous.
+type GPUProfile struct {
+	// OpCounts tracks EWMA frequency of each GPU operation type.
+	OpCounts map[types.GPUOpType]*EWMA
+	// AllocSizeBuckets tracks EWMA frequency of size magnitude buckets
+	// (floor(log2(bytes)), index 0–63). Detects workloads that suddenly
+	// switch to unusually large transfers (e.g. cryptominer init burst).
+	AllocSizeBuckets map[uint8]*EWMA
+	// TotalOps is the total number of GPU operations recorded.
+	TotalOps uint64
+}
+
+// gpuSizeBucket returns the floor(log2(size)) bucket index for size,
+// or 0 for size==0. Used to track GPU transfer size distributions without
+// storing individual values.
+func gpuSizeBucket(size uint64) uint8 {
+	if size == 0 {
+		return 0
+	}
+	b := bits.Len64(size) - 1
+	if b > 63 {
+		b = 63
+	}
+	return uint8(b)
+}
+
 // NewProcessProfile creates a new behavioral profile for a process.
 func NewProcessProfile(pid uint32, comm string) *ProcessProfile {
 	now := time.Now()
@@ -90,6 +122,10 @@ func NewProcessProfile(pid uint32, comm string) *ProcessProfile {
 		},
 		SyscallProfile: SyscallProfile{
 			Syscalls: make(map[int64]*EWMA),
+		},
+		GPUProfile: GPUProfile{
+			OpCounts:         make(map[types.GPUOpType]*EWMA),
+			AllocSizeBuckets: make(map[uint8]*EWMA),
 		},
 	}
 }
@@ -112,6 +148,10 @@ func NewProcessProfileForWorkload(key WorkloadKey) *ProcessProfile {
 		},
 		SyscallProfile: SyscallProfile{
 			Syscalls: make(map[int64]*EWMA),
+		},
+		GPUProfile: GPUProfile{
+			OpCounts:         make(map[types.GPUOpType]*EWMA),
+			AllocSizeBuckets: make(map[uint8]*EWMA),
 		},
 	}
 }
@@ -197,6 +237,32 @@ func (p *ProcessProfile) recordSyscallEventLocked(e *types.SyscallEvent, weight 
 		p.SyscallProfile.Syscalls[e.Nr] = NewEWMA(weight)
 	}
 	p.SyscallProfile.Syscalls[e.Nr].Update(1.0)
+}
+
+// RecordGPUEvent updates the GPU profile with a new GPU operation.
+func (p *ProcessProfile) RecordGPUEvent(e *types.GPUEvent, weight float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.recordGPUEventLocked(e, weight)
+}
+
+// recordGPUEventLocked updates the GPU profile (caller must hold lock).
+func (p *ProcessProfile) recordGPUEventLocked(e *types.GPUEvent, weight float64) {
+	p.LastSeenAt = time.Now()
+	p.GPUProfile.TotalOps++
+
+	if p.GPUProfile.OpCounts[e.Op] == nil {
+		p.GPUProfile.OpCounts[e.Op] = NewEWMA(weight)
+	}
+	p.GPUProfile.OpCounts[e.Op].Update(1.0)
+
+	if e.Size > 0 {
+		bucket := gpuSizeBucket(e.Size)
+		if p.GPUProfile.AllocSizeBuckets[bucket] == nil {
+			p.GPUProfile.AllocSizeBuckets[bucket] = NewEWMA(weight)
+		}
+		p.GPUProfile.AllocSizeBuckets[bucket].Update(1.0)
+	}
 }
 
 // GetAnomalyScore returns the current anomaly score.
@@ -479,6 +545,10 @@ func (pm *ProfileManager) RecordEvent(e types.Event) {
 	case types.EventSyscall:
 		if e.Syscall != nil {
 			profile.recordSyscallEventLocked(e.Syscall, pm.weight)
+		}
+	case types.EventGPU:
+		if e.GPU != nil {
+			profile.recordGPUEventLocked(e.GPU, pm.weight)
 		}
 	}
 	profile.mu.Unlock()

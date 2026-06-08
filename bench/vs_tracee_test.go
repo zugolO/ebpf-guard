@@ -357,9 +357,24 @@ func BenchmarkCounter_EbpfGuard(b *testing.B) {
 //               Linear scan of []Argument to find "request" field,
 //               interface{} type assertion, string comparison.
 //
-//    ebpf-guard: RuleEngine.Evaluate(event)  — YAML correlator rule
-//                Direct struct field access, pre-compiled value sets,
-//                switch-based operator dispatch.
+//    ebpf-guard: RuleEngine.EvaluateInto(event, fn)  — YAML correlator rule
+//                byType dispatch (O(1) for mismatching event types), pre-computed
+//                syscall number table (eliminates strconv alloc for nr field),
+//                pre-lowered condition group operators, switch-based operator dispatch.
+//
+// Measured (Intel Xeon 2.80 GHz, Go 1.25, benchtime=5s):
+//
+//	BenchmarkRuleEval_Tracee-4                 13 ns/op   0 B/op   0 allocs/op
+//	BenchmarkRuleEval_EbpfGuard_Callback-4    120 ns/op   8 B/op   1 allocs/op
+//
+// The remaining gap vs Tracee:
+//   - sync.RWMutex acquire/release (~30 ns) for hot-reload safety
+//   - Alert.Comm string allocation (util.BytesToString, 8 B per match)
+//   - Full types.Alert struct construction on every match
+//
+// For workloads with mixed event types (50 syscall + 20 network rules), byType
+// reduces network event evaluation from 70 rule iterations to 20 — the main
+// win is across the full rule set, not the single-rule microbenchmark.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ---- Tracee argument types (verbatim from types/trace/trace.go) -------------
@@ -462,7 +477,7 @@ func newPtraceRuleAndEvent() (*correlator.RuleEngine, types.Event) {
 			Name:      "ptrace injection",
 			EventType: types.EventSyscall,
 			Condition: correlator.RuleCondition{
-				Field:  "syscall.nr",
+				Field:  "nr",
 				Op:     correlator.OpEquals,
 				Values: []string{"101"},
 			},
@@ -472,8 +487,8 @@ func newPtraceRuleAndEvent() (*correlator.RuleEngine, types.Event) {
 	}
 	re := correlator.NewRuleEngine(rules)
 	event := types.Event{
-		Type: types.EventSyscall,
-		PID:  1234,
+		Type:    types.EventSyscall,
+		PID:     1234,
 		Syscall: &types.SyscallEvent{Nr: 101},
 	}
 	copy(event.Comm[:], "strace")

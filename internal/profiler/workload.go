@@ -253,6 +253,10 @@ func (wpm *WorkloadProfileManager) RecordEvent(e types.Event) {
 		if e.Syscall != nil {
 			p.recordSyscallEventLocked(e.Syscall, wpm.weight)
 		}
+	case types.EventGPU:
+		if e.GPU != nil {
+			p.recordGPUEventLocked(e.GPU, wpm.weight)
+		}
 	}
 	p.mu.Unlock()
 }

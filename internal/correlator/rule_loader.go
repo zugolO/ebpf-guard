@@ -331,12 +331,21 @@ func validateFieldName(field string, eventType types.EventType) error {
 	return nil
 }
 
+// maxRegexPatternLen caps the length of a single regex pattern accepted in a
+// rule. Go's regexp package uses RE2 (linear-time matching), so catastrophic
+// backtracking cannot occur, but very long patterns still drive up compilation
+// time and memory usage. 1 KiB is generous for all legitimate detection rules.
+const maxRegexPatternLen = 1024
+
 // validateRegexPatterns compiles and validates all regex patterns.
 func validateRegexPatterns(patterns []string) error {
 	if len(patterns) == 0 {
 		return fmt.Errorf("regex operator requires at least one pattern")
 	}
 	for _, pattern := range patterns {
+		if len(pattern) > maxRegexPatternLen {
+			return fmt.Errorf("regex pattern exceeds maximum length of %d bytes (got %d)", maxRegexPatternLen, len(pattern))
+		}
 		if _, err := regexp.Compile(pattern); err != nil {
 			return fmt.Errorf("invalid regex pattern %q: %w", pattern, err)
 		}

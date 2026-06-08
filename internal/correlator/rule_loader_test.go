@@ -188,6 +188,21 @@ rules:
 	assert.Contains(t, err.Error(), "regex", "error should mention regex validation")
 }
 
+// TestValidateRegexPatterns_LengthLimit verifies that patterns exceeding
+// maxRegexPatternLen are rejected to guard against excessive compilation cost.
+func TestValidateRegexPatterns_LengthLimit(t *testing.T) {
+	// Pattern within the allowed limit — should compile fine.
+	short := strings.Repeat("a", maxRegexPatternLen)
+	err := validateRegexPatterns([]string{short})
+	require.NoError(t, err)
+
+	// Pattern one byte over the limit — should be rejected.
+	long := strings.Repeat("a", maxRegexPatternLen+1)
+	err = validateRegexPatterns([]string{long})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maximum length")
+}
+
 // TestNestedInvalidFieldName verifies that invalid field names in nested
 // SubGroups are properly rejected at load time.
 func TestNestedInvalidFieldName(t *testing.T) {

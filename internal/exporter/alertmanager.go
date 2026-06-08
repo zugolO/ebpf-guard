@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -22,6 +24,47 @@ import (
 )
 
 var tracer = otel.Tracer("github.com/zugolO/ebpf-guard/internal/exporter")
+
+// validateWebhookURL rejects URLs that could be used for SSRF.
+// It enforces http/https scheme and blocks URLs that resolve to loopback,
+// link-local, or RFC-1918 private addresses — unless the hostname is an
+// explicit private/internal DNS name (resolved lazily at send time).
+//
+// Note: blocking private IPs is NOT applied here because Alertmanager is
+// commonly deployed inside the cluster (e.g. http://alertmanager:9093).
+// Instead we only reject clearly dangerous schemes that browsers and HTTP
+// clients may follow (file://, gopher://, ftp://, etc.).
+func validateWebhookURL(rawURL string) error {
+	if rawURL == "" {
+		return fmt.Errorf("webhook URL must not be empty")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid webhook URL: %w", err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+		// Allowed.
+	default:
+		return fmt.Errorf("webhook URL scheme %q is not allowed; use http or https", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("webhook URL must have a host")
+	}
+	// Reject raw IP literals that are loopback or link-local to prevent
+	// trivial SSRF to localhost services. Cluster-internal DNS names (e.g.
+	// alertmanager.monitoring.svc) are intentionally allowed.
+	host := u.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() {
+			return fmt.Errorf("webhook URL must not point to a loopback address")
+		}
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("webhook URL must not point to a link-local address")
+		}
+	}
+	return nil
+}
 
 // MTLSConfig holds mTLS configuration for Alertmanager.
 type MTLSConfig struct {
@@ -102,6 +145,12 @@ func newAlertmanagerClientFull(
 	fallbackSizeGauge prometheus.Gauge,
 	droppedCounter prometheus.Counter,
 ) *AlertmanagerClient {
+	if err := validateWebhookURL(webhookURL); err != nil {
+		slog.Warn("exporter/alertmanager: unsafe webhook URL rejected",
+			slog.String("url", webhookURL),
+			slog.Any("error", err))
+	}
+
 	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
 	}

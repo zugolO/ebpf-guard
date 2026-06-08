@@ -1,0 +1,69 @@
+suite: network_intrusion
+rules_path: ../../rules/network-intrusion.yaml
+tests:
+  - name: "connection to port 4444 fires netintr_reverse_shell_port_4444"
+    rule_id: netintr_reverse_shell_port_4444
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.0.1"
+        dport: 4444
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to port 1234 fires netintr_reverse_shell_port_1234"
+    rule_id: netintr_reverse_shell_port_1234
+    event:
+      type: network
+      network:
+        dst_ip: "203.0.113.5"
+        dport: 1234
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to port 5555 fires netintr_reverse_shell_port_1234"
+    rule_id: netintr_reverse_shell_port_1234
+    event:
+      type: network
+      network:
+        dst_ip: "198.51.100.1"
+        dport: 5555
+    expect: alert
+
+  - name: "connection to port 31337 fires netintr_reverse_shell_port_31337"
+    rule_id: netintr_reverse_shell_port_31337
+    event:
+      type: network
+      network:
+        dst_ip: "192.0.2.10"
+        dport: 31337
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to standard SSH port 22 does not fire reverse shell rules (only scan heuristic)"
+    rule_id: netintr_syn_scan_pattern
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.0.100"
+        dport: 22
+    expect: alert
+    expect_severity: warning
+
+  - name: "connection to SSH alternative port 2222 does not fire any network intrusion rule"
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.0.100"
+        dport: 2222
+    expect: no_alert
+
+  - name: "connection to ephemeral high port (>49152) fires netintr_high_port_established"
+    rule_id: netintr_high_port_established
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.0.2"
+        dport: 55000
+    expect: alert
+    expect_severity: warning

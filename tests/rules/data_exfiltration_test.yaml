@@ -1,0 +1,46 @@
+suite: data_exfiltration
+rules_path: ../../rules/data-exfiltration.yaml
+tests:
+  - name: "DNS query with oversized label (>60 chars) fires exfil_dns_txt_long_label"
+    rule_id: exfil_dns_txt_long_label
+    event:
+      type: dns
+      dns:
+        qname: "aHR0cHM6Ly9leGFtcGxlLmNvbS9zZWNyZXQ.exfil.attacker.example.com"
+        qtype: 16
+    expect: alert
+    expect_severity: critical
+
+  - name: "short DNS query qname does not fire exfil_dns_txt_long_label"
+    event:
+      type: dns
+      dns:
+        qname: "example.com"
+        qtype: 16
+    expect: no_alert
+
+  - name: "high-entropy TXT query fires exfil_dns_high_entropy_txt"
+    rule_id: exfil_dns_high_entropy_txt
+    event:
+      type: dns
+      dns:
+        qname: "xJ4qW9mZpR8vKlTnFsYbUcAeHwDgOiXuNyBjPkQm.exfil.attacker.example.com"
+        qtype: 16
+    expect: alert
+    expect_severity: critical
+
+  - name: "normal A record query for google.com does not fire exfiltration rule"
+    event:
+      type: dns
+      dns:
+        qname: "google.com"
+        qtype: 1
+    expect: no_alert
+
+  - name: "normal MX record query does not fire exfiltration rule"
+    event:
+      type: dns
+      dns:
+        qname: "mail.example.com"
+        qtype: 15
+    expect: no_alert

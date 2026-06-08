@@ -55,6 +55,8 @@ var (
 	}
 	validTLSFields = map[string]bool{
 		"tls_data": true, "direction": true, "data_len": true,
+		// "data" is an alias for "tls_data" accepted in rule YAML for ergonomics.
+		"data": true,
 	}
 	// caps_gained / caps_dropped use the OpCapsGained / OpCapsDropped operators
 	// (not standard value comparison), so their only meaningful field is "caps".

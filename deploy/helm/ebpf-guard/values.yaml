@@ -91,8 +91,26 @@ extraEnv: []
 # - name: MY_VAR
 #   value: "value"
 
-# Additional init containers
+# Additional init containers (user-defined, appended after btfInit if enabled)
 initContainers: []
+
+# BTF init container — pre-fetches the BTF file for kernels without
+# /sys/kernel/btf/vmlinux (Ubuntu 18.04, Amazon Linux 2, RHEL 8.x, etc.).
+# When enabled an initContainer downloads the matching BTF file from the
+# BTF hub archive and writes it to a shared emptyDir volume that the main
+# container mounts at /var/lib/ebpf-guard/btf.
+btfInit:
+  enabled: false
+  image: curlimages/curl:8.6.0
+  # cachePath is the directory inside the container where BTF files are written.
+  cachePath: /var/lib/ebpf-guard/btf
+  resources:
+    limits:
+      cpu: 200m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 32Mi
 
 # Kubernetes Service for Prometheus scraping
 service:
@@ -174,6 +192,11 @@ config:
       events: 65536
       processes: 16384
       connections: 32768
+    # BTF CO-RE portability settings (kernels 5.4+ without /sys/kernel/btf/vmlinux)
+    btf_path: ""                              # explicit BTF file override; empty = auto-detect
+    btf_hub_enabled: true                     # download from BTF hub on first run if local BTF absent
+    btf_hub_cache: /var/lib/ebpf-guard/btf   # local cache directory for BTF hub files
+    fallback_reduced_features: false          # if true, start without LSM/TLS collectors when BTF unavailable
 
   rules:
     path: "/etc/ebpf-guard/rules.yaml"

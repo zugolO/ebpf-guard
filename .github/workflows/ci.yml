@@ -85,6 +85,47 @@ jobs:
         files: ./coverage.out
         fail_ci_if_error: false
 
+  # BTF fallback compatibility tests — verify the 3-strategy resolution logic
+  # works correctly for each scenario without requiring a real kernel change.
+  # Full kernel-level testing (5.4, 5.10) runs in the nightly VM matrix defined
+  # in .github/workflows/kernel-compat.yml using qemu/microvm runners.
+  btf-compat:
+    name: BTF Fallback (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    needs: [test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: local_btf_present
+            description: "kernel-embedded BTF available (normal kernel 5.8+)"
+          - scenario: btf_hub_cache_hit
+            description: "BTF hub cache file pre-populated (air-gapped / initContainer)"
+          - scenario: reduced_features_fallback
+            description: "no BTF available, fallback_reduced_features=true"
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run BTF fallback unit tests (${{ matrix.scenario }})
+      run: go test -v -race -run TestBTF ./internal/bpf/...
+
   race-detector:
     name: Race Detector
     runs-on: ubuntu-latest

@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/audit"
+	internalbpf "github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/internal/canary"
 	"github.com/zugolO/ebpf-guard/internal/collector"
@@ -113,6 +114,43 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if err := config.ValidateConfig(cfg); err != nil {
 		return fmt.Errorf("config validation:\n%w", err)
+	}
+
+	// ── BTF source resolution ──────────────────────────────────────────────────
+	// Detect which BTF strategy is available before loading any eBPF programs.
+	// This must run before collector initialisation so collectors that require
+	// BTF struct offsets (LSM, TLS uprobes) can be skipped gracefully.
+	if !dryRun {
+		internalbpf.RegisterBTFMetrics(prometheus.DefaultRegisterer)
+
+		kf, kfErr := internalbpf.DetectFeatures()
+		if kfErr != nil {
+			slog.Warn("kernel feature detection failed", slog.Any("error", kfErr))
+		}
+
+		btfResult, btfErr := internalbpf.ResolveBTF(internalbpf.BTFResolutionConfig{
+			BTFPath:                 cfg.BPF.BTFPath,
+			BTFHubEnabled:           cfg.BPF.BTFHubEnabled,
+			BTFHubCache:             cfg.BPF.BTFHubCache,
+			FallbackReducedFeatures: cfg.BPF.FallbackReducedFeatures,
+		})
+		if btfErr != nil {
+			return fmt.Errorf("btf resolution: %w", btfErr)
+		}
+
+		if kf != nil {
+			kf.BTFSource = btfResult.Source
+			if err := kf.CheckMinimumRequirements(cfg.BPF.FallbackReducedFeatures); err != nil {
+				return fmt.Errorf("kernel requirements not met: %w", err)
+			}
+			slog.Info("kernel features detected", slog.String("features", kf.String()),
+				slog.String("btf_source", string(btfResult.Source)))
+		}
+
+		if len(btfResult.DisabledCollectors) > 0 {
+			slog.Warn("btf: reduced feature set active — some collectors are disabled",
+				slog.Any("disabled", btfResult.DisabledCollectors))
+		}
 	}
 
 	rules, err := correlator.LoadRulesFromFile(cfg.Rules.Path)

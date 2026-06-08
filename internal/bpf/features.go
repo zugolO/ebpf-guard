@@ -20,6 +20,9 @@ type KernelFeatures struct {
 	KernelMajor     int
 	KernelMinor     int
 	KernelPatch     int
+	// BTFSource records which BTF strategy succeeded during startup.
+	// Set by ResolveBTF; empty until that call completes.
+	BTFSource BTFSource
 }
 
 // DetectFeatures probes the kernel for eBPF feature support.
@@ -54,10 +57,15 @@ func DetectFeatures() (*KernelFeatures, error) {
 }
 
 // CheckMinimumRequirements returns an error if the kernel doesn't meet
-// the minimum requirements for ebpf-guard (kernel 5.15+, BTF, ringbuf).
-func (f *KernelFeatures) CheckMinimumRequirements() error {
-	if !f.HasBTF {
-		return fmt.Errorf("kernel BTF support required: ensure kernel is compiled with CONFIG_DEBUG_INFO_BTF=y")
+// the minimum requirements for ebpf-guard.
+// When allowReducedFeatures is true the BTF check is skipped; callers must
+// rely on BTFResult.DisabledCollectors to avoid loading BTF-dependent probes.
+func (f *KernelFeatures) CheckMinimumRequirements(allowReducedFeatures bool) error {
+	if !f.HasBTF && !allowReducedFeatures {
+		return fmt.Errorf(
+			"kernel BTF support required: compile kernel with CONFIG_DEBUG_INFO_BTF=y " +
+				"or set bpf.fallback_reduced_features=true to start with reduced collectors",
+		)
 	}
 
 	if !f.HasRingbuf {
@@ -91,7 +99,7 @@ func getKernelVersion() string {
 }
 
 // IsCOReSupported checks if Compile Once - Run Everywhere (CO-RE) is supported.
-// CO-RE requires BTF and kernel version 5.2+.
+// CO-RE requires BTF to be available from any source (local, hub, or headers).
 func (f *KernelFeatures) IsCOReSupported() bool {
-	return f.HasBTF
+	return f.HasBTF || (f.BTFSource != "" && f.BTFSource != BTFSourceNone)
 }

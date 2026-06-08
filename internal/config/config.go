@@ -340,6 +340,24 @@ type BPFConfig struct {
 	// When enabled, events are dropped in the kernel before reaching the ring
 	// buffer, reducing userspace CPU overhead by 40-60% on typical workloads.
 	KernelFilter KernelFilterConfig `mapstructure:"kernel_filter"`
+
+	// BTFPath is an explicit path to an external BTF file.
+	// Leave empty to use auto-detection (local → btf_hub → headers → none).
+	BTFPath string `mapstructure:"btf_path"`
+
+	// BTFHubEnabled controls whether the BTF hub archive is used as a fallback
+	// when kernel-embedded BTF (/sys/kernel/btf/vmlinux) is unavailable.
+	// Requires outbound HTTPS access on first run; subsequent runs use the cache.
+	BTFHubEnabled bool `mapstructure:"btf_hub_enabled"`
+
+	// BTFHubCache is the local directory where BTF hub files are cached.
+	// Default: /var/lib/ebpf-guard/btf
+	BTFHubCache string `mapstructure:"btf_hub_cache"`
+
+	// FallbackReducedFeatures allows ebpf-guard to start with a reduced set of
+	// collectors (no LSM hooks, no TLS uprobes) when no BTF source is available.
+	// When false (default), startup fails if BTF cannot be resolved.
+	FallbackReducedFeatures bool `mapstructure:"fallback_reduced_features"`
 }
 
 // KernelFilterConfig controls BPF-side content-based filtering.
@@ -773,6 +791,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.connections", 32768)
 	v.SetDefault("bpf.map_sizes.fd_map_size", 65536)
 	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
+	v.SetDefault("bpf.btf_path", "")
+	v.SetDefault("bpf.btf_hub_enabled", true)
+	v.SetDefault("bpf.btf_hub_cache", "/var/lib/ebpf-guard/btf")
+	v.SetDefault("bpf.fallback_reduced_features", false)
 
 	// Rules defaults
 	v.SetDefault("rules.path", "/etc/ebpf-guard/rules.yaml")

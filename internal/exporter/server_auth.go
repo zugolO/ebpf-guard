@@ -2,6 +2,7 @@
 package exporter
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -11,6 +12,44 @@ import (
 	"os"
 	"strings"
 )
+
+// tokenScopeKey is the context key for storing the authenticated token's scope.
+type tokenScopeKey struct{}
+
+// TokenScope carries the authenticated token's role and namespace allowlist
+// through the request context. Handlers call TokenScopeFromContext to retrieve it.
+type TokenScope struct {
+	Role       Role
+	Namespaces []string // nil/empty = all namespaces
+}
+
+// TokenScopeFromContext extracts TokenScope from the request context.
+// Returns false if no scope was set (e.g. auth is disabled).
+func TokenScopeFromContext(ctx context.Context) (TokenScope, bool) {
+	scope, ok := ctx.Value(tokenScopeKey{}).(TokenScope)
+	return scope, ok
+}
+
+// AllowsNamespace returns true if the token scope permits access to ns.
+// An empty Namespaces list (or a "*" entry) means all namespaces are allowed.
+func (s TokenScope) AllowsNamespace(ns string) bool {
+	if len(s.Namespaces) == 0 {
+		return true
+	}
+	for _, n := range s.Namespaces {
+		if n == "*" || n == ns {
+			return true
+		}
+	}
+	return false
+}
+
+// NamespacedToken is a runtime token descriptor used by MultiTenantRBACMiddleware.
+type NamespacedToken struct {
+	Token      string
+	Role       Role
+	Namespaces []string // empty = all namespaces
+}
 
 // Role represents an RBAC role for HTTP API access.
 type Role string
@@ -151,6 +190,53 @@ func extractBearerToken(r *http.Request) (string, bool) {
 	return parts[1], true
 }
 
+// MultiTenantRBACMiddleware enforces namespace-scoped RBAC using a list of named tokens.
+// Each token carries its own role and namespace allowlist. The resolved TokenScope is
+// injected into the request context so downstream handlers can apply namespace filters.
+//
+// Health endpoints are always public. Returns 401 on missing/invalid token, 403 when
+// the role is insufficient for the requested operation.
+func MultiTenantRBACMiddleware(tokens []NamespacedToken) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+
+			if strings.HasPrefix(path, "/health") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			bearerToken, ok := extractBearerToken(r)
+			if !ok {
+				http.Error(w, "Unauthorized: missing or malformed Authorization header", http.StatusUnauthorized)
+				return
+			}
+
+			var matched *NamespacedToken
+			for i := range tokens {
+				if subtle.ConstantTimeCompare([]byte(bearerToken), []byte(tokens[i].Token)) == 1 {
+					matched = &tokens[i]
+					break
+				}
+			}
+			if matched == nil {
+				http.Error(w, "Unauthorized: invalid token", http.StatusUnauthorized)
+				return
+			}
+
+			scope := TokenScope{Role: matched.Role, Namespaces: matched.Namespaces}
+
+			if scope.Role != RoleAdmin && !isViewerAllowed(r.Method, path) {
+				http.Error(w, "Forbidden: viewer role does not permit this operation", http.StatusForbidden)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), tokenScopeKey{}, scope)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 // RBACMiddleware creates middleware that enforces two-role RBAC:
 //   - viewer: GET /alerts, GET /rules, GET /health, GET /metrics (and sub-paths)
 //   - admin:  all endpoints including write operations
@@ -187,7 +273,8 @@ func RBACMiddleware(viewerToken, adminToken string) func(http.Handler) http.Hand
 
 			// Admin may access everything.
 			if role == RoleAdmin {
-				next.ServeHTTP(w, r)
+				ctx := context.WithValue(r.Context(), tokenScopeKey{}, TokenScope{Role: RoleAdmin})
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 
@@ -197,7 +284,8 @@ func RBACMiddleware(viewerToken, adminToken string) func(http.Handler) http.Hand
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			ctx := context.WithValue(r.Context(), tokenScopeKey{}, TokenScope{Role: RoleViewer})
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

@@ -190,7 +190,18 @@ func (s *MemoryStore) Query(ctx context.Context, filters QueryFilters) ([]types.
 				continue
 			}
 		}
-		if filters.Namespace != "" && e.namespace != filters.Namespace {
+		if len(filters.Namespaces) > 0 {
+			found := false
+			for _, ns := range filters.Namespaces {
+				if e.namespace == ns {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		} else if filters.Namespace != "" && e.namespace != filters.Namespace {
 			continue
 		}
 
@@ -317,7 +328,18 @@ func matchesFilters(alert types.Alert, filters QueryFilters) bool {
 	if filters.PodName != "" && alert.Enrichment.PodName != filters.PodName {
 		return false
 	}
-	if filters.Namespace != "" && alert.Enrichment.Namespace != filters.Namespace {
+	if len(filters.Namespaces) > 0 {
+		found := false
+		for _, ns := range filters.Namespaces {
+			if alert.Enrichment.Namespace == ns {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	} else if filters.Namespace != "" && alert.Enrichment.Namespace != filters.Namespace {
 		return false
 	}
 	return true

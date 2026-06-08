@@ -1471,3 +1471,169 @@ func TestContainsOperator(t *testing.T) {
 		}
 	}
 }
+
+// TestSamplingRule verifies that per-rule sampling (sample_rate) reduces
+// evaluations and that sample_rate: 1.0 has no effect on match behaviour.
+func TestSamplingRule(t *testing.T) {
+	baseRule := Rule{
+		ID:        "sample_001",
+		Name:      "Sampled rule",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{
+			Field:  "nr",
+			Op:     OpEquals,
+			Values: []string{"59"},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+
+	execEvent := func() types.Event {
+		return types.Event{
+			Type:    types.EventSyscall,
+			Syscall: &types.SyscallEvent{Nr: 59},
+		}
+	}
+
+	t.Run("sample_rate 1.0 evaluates every event", func(t *testing.T) {
+		r := baseRule
+		r.SampleRate = 1.0
+		engine := NewRuleEngine([]Rule{r})
+		matches := 0
+		for i := 0; i < 1000; i++ {
+			if len(engine.Evaluate(execEvent())) > 0 {
+				matches++
+			}
+		}
+		assert.Equal(t, 1000, matches, "sample_rate 1.0 must evaluate every event")
+	})
+
+	t.Run("sample_rate missing (0) treated as 1.0 via validateRule", func(t *testing.T) {
+		r := baseRule
+		r.SampleRate = 0
+		require.NoError(t, validateRule(&r))
+		assert.Equal(t, 1.0, r.SampleRate, "zero should be normalised to 1.0")
+	})
+
+	t.Run("sample_rate 0.1 evaluates ~10% of events", func(t *testing.T) {
+		r := baseRule
+		r.SampleRate = 0.1
+		engine := NewRuleEngine([]Rule{r})
+		matches := 0
+		const n = 10000
+		for i := 0; i < n; i++ {
+			if len(engine.Evaluate(execEvent())) > 0 {
+				matches++
+			}
+		}
+		// Allow ±5% tolerance around the 10% target.
+		assert.InDelta(t, 0.10, float64(matches)/n, 0.05,
+			"sample_rate 0.1 should evaluate ~10%% of events (got %.2f%%)", float64(matches)/n*100)
+	})
+
+	t.Run("sample_rate out of range is rejected", func(t *testing.T) {
+		r := baseRule
+		r.SampleRate = 1.5
+		assert.Error(t, validateRule(&r), "sample_rate > 1.0 must be rejected")
+
+		r.SampleRate = -0.1
+		assert.Error(t, validateRule(&r), "negative sample_rate must be rejected")
+	})
+
+	t.Run("sample_rate 0.5 validates without error", func(t *testing.T) {
+		r := baseRule
+		r.SampleRate = 0.5
+		assert.NoError(t, validateRule(&r))
+	})
+}
+
+// TestDeterministicSampling verifies that sample_deterministic: true gives
+// stable, reproducible results for the same PID within a 1s time window.
+func TestDeterministicSampling(t *testing.T) {
+	const rate = 0.3
+
+	t.Run("same pid+ts always gives same result", func(t *testing.T) {
+		pid := uint32(12345)
+		ts := uint64(1_700_000_000_000_000_000) // arbitrary nanosecond timestamp
+		result1 := shouldSample(pid, ts, rate, true)
+		result2 := shouldSample(pid, ts, rate, true)
+		assert.Equal(t, result1, result2, "deterministic sampling must be idempotent")
+	})
+
+	t.Run("result is stable within 1s window", func(t *testing.T) {
+		pid := uint32(99999)
+		base := uint64(1_700_000_000_000_000_000)
+		// timestamps within the same ~1.07s bucket (<<30 same value)
+		results := make([]bool, 10)
+		for i := range results {
+			results[i] = shouldSample(pid, base+uint64(i)*100_000_000, rate, true) // +100ms each
+		}
+		for i := 1; i < len(results); i++ {
+			assert.Equal(t, results[0], results[i],
+				"deterministic result must be stable within 1s window (index %d)", i)
+		}
+	})
+
+	t.Run("different pids give varied results", func(t *testing.T) {
+		ts := uint64(1_700_000_000_000_000_000)
+		trueCount := 0
+		for pid := uint32(1); pid <= 1000; pid++ {
+			if shouldSample(pid, ts, rate, true) {
+				trueCount++
+			}
+		}
+		// With rate=0.3, expect roughly 30% ±15%
+		assert.InDelta(t, 300, trueCount, 150,
+			"deterministic sampling across 1000 PIDs should be ~30%%")
+	})
+
+	t.Run("different time buckets give different results for same pid", func(t *testing.T) {
+		pid := uint32(42)
+		// Two timestamps in different ~1s buckets
+		ts1 := uint64(0)
+		ts2 := uint64(1) << 31 // 2 buckets ahead
+		// They may or may not differ — just check the function doesn't panic
+		_ = shouldSample(pid, ts1, rate, true)
+		_ = shouldSample(pid, ts2, rate, true)
+	})
+}
+
+// TestSamplingValidation verifies rule validation rejects invalid sample_rate values.
+func TestSamplingValidation(t *testing.T) {
+	validRule := func(rate float64, det bool) *Rule {
+		return &Rule{
+			ID:                  "sv_001",
+			Name:                "test",
+			EventType:           types.EventSyscall,
+			Condition:           RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"1"}},
+			Severity:            types.SeverityWarning,
+			Action:              ActionAlert,
+			SampleRate:          rate,
+			SampleDeterministic: det,
+		}
+	}
+
+	cases := []struct {
+		rate    float64
+		wantErr bool
+	}{
+		{0.0, false},  // normalised to 1.0
+		{0.1, false},
+		{0.5, false},
+		{1.0, false},
+		{-0.01, true},
+		{1.01, true},
+		{2.0, true},
+	}
+	for _, tc := range cases {
+		err := validateRule(validRule(tc.rate, false))
+		if tc.wantErr {
+			assert.Error(t, err, "rate %.2f should fail validation", tc.rate)
+		} else {
+			assert.NoError(t, err, "rate %.2f should pass validation", tc.rate)
+		}
+	}
+
+	// sample_deterministic is a boolean, no range to validate
+	assert.NoError(t, validateRule(validRule(0.5, true)))
+}

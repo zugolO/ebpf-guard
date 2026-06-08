@@ -184,6 +184,14 @@ func validateRule(rule *Rule) error {
 		return fmt.Errorf("rule %s: condition_group has no conditions or subgroups", rule.ID)
 	}
 
+	// Normalise sample_rate: missing (0.0) → 1.0 (evaluate every event).
+	if rule.SampleRate == 0 {
+		rule.SampleRate = 1.0
+	}
+	if rule.SampleRate < 0 || rule.SampleRate > 1.0 {
+		return fmt.Errorf("rule %s: sample_rate %.4f out of range, must be in (0.0, 1.0]", rule.ID, rule.SampleRate)
+	}
+
 	// Validate conditions
 	conditions := getAllConditions(rule)
 	for _, cond := range conditions {

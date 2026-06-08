@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,6 +99,10 @@ type CorrelationEngine struct {
 	enableRegoEval  bool
 	regoQueue       chan regoTask
 	regoQueueDropped prometheus.Counter
+
+	// dnsPrefilter short-circuits Rego evaluation for benign DNS events.
+	// Initialised to DefaultDNSPrefilter() by NewCorrelationEngine.
+	dnsPrefilter *DNSPrefilter
 
 	// Monotonic counter for unique Alert IDs — prevents collision when
 	// two alerts share the same ruleID+timestamp+pid (e.g. bursts in <1ns resolution).
@@ -514,6 +519,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		cancelCleanup:        cancel,
 		enableRegoEval:       config.EnableRegoEval,
 		regoEngine:           config.RegoEngine,
+		dnsPrefilter:         DefaultDNSPrefilter(),
 		regoQueue:            regoQueue,
 		regoQueueDropped:     regoQueueDropped,
 		onCorrelate:          config.OnCorrelate,
@@ -1199,6 +1205,17 @@ func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []
 	enhancedAlerts := make([]types.Alert, 0, len(alerts))
 
 	for _, alert := range alerts {
+		// DNS pre-filter: skip Rego for benign DNS events (issue #69).
+		// ShouldEvaluate covers every dns.rego rule in Go (~1.5 µs, 0 allocs for
+		// cached domains) so no rule can fire on an event we bypass here.
+		if alert.Event.Type == types.EventDNS && alert.Event.DNS != nil {
+			comm := strings.TrimRight(string(alert.Event.Comm[:]), "\x00")
+			if !ce.dnsPrefilter.ShouldEvaluate(alert.Event.DNS, comm) {
+				enhancedAlerts = append(enhancedAlerts, alert)
+				continue
+			}
+		}
+
 		// Evaluate alert against Rego policies
 		decisions, err := ce.regoEngine.Evaluate(ctx, alert)
 		if err != nil {

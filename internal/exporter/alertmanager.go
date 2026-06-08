@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -30,6 +31,20 @@ type MTLSConfig struct {
 	CAFile   string
 }
 
+// CircuitBreakerConfig holds circuit-breaker and fallback-queue settings for
+// the Alertmanager client.
+type CircuitBreakerConfig struct {
+	// Threshold is the number of consecutive failures before opening the circuit.
+	// Zero or negative uses the default of 5.
+	Threshold int
+	// ResetTimeout is how long to wait in Open state before attempting a probe.
+	// Zero uses the default of 30s.
+	ResetTimeout time.Duration
+	// FallbackBufferSize caps the number of alerts buffered while the circuit is
+	// open.  When full, the oldest entry is evicted.  Zero uses the default of 10_000.
+	FallbackBufferSize int
+}
+
 // AlertmanagerClient sends alerts to Alertmanager webhook endpoint.
 type AlertmanagerClient struct {
 	webhookURL   string
@@ -42,24 +57,52 @@ type AlertmanagerClient struct {
 	timer  *time.Timer
 	client *http.Client
 
-	failures    int
-	threshold   int
-	lastFailure time.Time
-	cooldown    time.Duration
-	open        bool
+	cb       *CircuitBreaker
+	fallback *FallbackQueue
 
 	closed bool
 	wg     sync.WaitGroup
 }
 
-// NewAlertmanagerClient creates a new Alertmanager webhook client.
+// NewAlertmanagerClient creates a new Alertmanager webhook client with default
+// circuit-breaker settings (resetTimeout=30s, fallbackBufferSize=10_000).
 func NewAlertmanagerClient(webhookURL, generatorURL string, batchSize, batchTimeout, circuitBreakerThreshold int) *AlertmanagerClient {
 	return NewAlertmanagerClientWithMTLS(webhookURL, generatorURL, batchSize, batchTimeout, circuitBreakerThreshold, nil)
 }
 
-// NewAlertmanagerClientWithMTLS creates a new Alertmanager webhook client with optional mTLS.
+// NewAlertmanagerClientWithMTLS creates a new Alertmanager webhook client with
+// optional mTLS and default circuit-breaker settings.
 func NewAlertmanagerClientWithMTLS(webhookURL, generatorURL string, batchSize, batchTimeout, circuitBreakerThreshold int, mtls *MTLSConfig) *AlertmanagerClient {
-	client := &http.Client{
+	return newAlertmanagerClientFull(webhookURL, generatorURL, batchSize, batchTimeout,
+		CircuitBreakerConfig{Threshold: circuitBreakerThreshold}, mtls, nil, nil, nil)
+}
+
+// NewAlertmanagerClientFull creates a client with explicit circuit-breaker config
+// and optional Prometheus metrics for circuit state, fallback queue size, and
+// dropped alerts.
+func NewAlertmanagerClientFull(
+	webhookURL, generatorURL string,
+	batchSize, batchTimeout int,
+	cbCfg CircuitBreakerConfig,
+	mtls *MTLSConfig,
+	circuitStateGauge prometheus.Gauge,
+	fallbackSizeGauge prometheus.Gauge,
+	droppedCounter prometheus.Counter,
+) *AlertmanagerClient {
+	return newAlertmanagerClientFull(webhookURL, generatorURL, batchSize, batchTimeout,
+		cbCfg, mtls, circuitStateGauge, fallbackSizeGauge, droppedCounter)
+}
+
+func newAlertmanagerClientFull(
+	webhookURL, generatorURL string,
+	batchSize, batchTimeout int,
+	cbCfg CircuitBreakerConfig,
+	mtls *MTLSConfig,
+	circuitStateGauge prometheus.Gauge,
+	fallbackSizeGauge prometheus.Gauge,
+	droppedCounter prometheus.Counter,
+) *AlertmanagerClient {
+	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
 	}
 
@@ -69,7 +112,7 @@ func NewAlertmanagerClientWithMTLS(webhookURL, generatorURL string, batchSize, b
 			slog.Warn("exporter/alertmanager: failed to configure mTLS, using default transport",
 				slog.Any("error", err))
 		} else {
-			client.Transport = &http.Transport{
+			httpClient.Transport = &http.Transport{
 				TLSClientConfig: tlsConfig,
 			}
 			slog.Info("exporter/alertmanager: mTLS configured successfully")
@@ -82,9 +125,9 @@ func NewAlertmanagerClientWithMTLS(webhookURL, generatorURL string, batchSize, b
 		batchSize:    batchSize,
 		batchTimeout: time.Duration(batchTimeout) * time.Second,
 		batch:        make([]types.AlertPayload, 0, batchSize),
-		client:       client,
-		threshold:    circuitBreakerThreshold,
-		cooldown:     30 * time.Second,
+		client:       httpClient,
+		cb:           newCircuitBreaker(cbCfg.Threshold, cbCfg.ResetTimeout, circuitStateGauge, nil),
+		fallback:     newFallbackQueue(cbCfg.FallbackBufferSize, fallbackSizeGauge, droppedCounter),
 	}
 }
 
@@ -132,8 +175,18 @@ func (c *AlertmanagerClient) SendAlert(ctx context.Context, alert types.Alert) {
 	}
 
 	payload := c.alertToPayload(alert)
-	c.batch = append(c.batch, payload)
 
+	// Fast-fail: if the circuit is Open, route directly to the fallback buffer
+	// without touching the send batch.  TryRecover transitions Open→HalfOpen
+	// when the reset timeout has elapsed; a HalfOpen probe is allowed through.
+	c.cb.TryRecover(time.Now())
+	if !c.cb.Allow() {
+		c.fallback.Enqueue(payload)
+		span.SetAttributes(attribute.Bool("alert.fallback", true))
+		return
+	}
+
+	c.batch = append(c.batch, payload)
 	span.SetAttributes(attribute.Int("batch.size", len(c.batch)))
 
 	if len(c.batch) >= c.batchSize {
@@ -167,7 +220,7 @@ func (c *AlertmanagerClient) Flush() {
 }
 
 func (c *AlertmanagerClient) flushUnlocked() {
-	if len(c.batch) == 0 {
+	if len(c.batch) == 0 && c.fallback.Len() == 0 {
 		return
 	}
 
@@ -176,22 +229,34 @@ func (c *AlertmanagerClient) flushUnlocked() {
 		c.timer = nil
 	}
 
-	if c.open {
-		if time.Since(c.lastFailure) > c.cooldown {
-			c.open = false
-			c.failures = 0
-			slog.Info("exporter/alertmanager: circuit breaker closed")
-		} else {
-			slog.Warn("exporter/alertmanager: circuit breaker open, dropping alerts",
-				slog.Int("dropped", len(c.batch)))
-			c.batch = c.batch[:0]
-			return
+	// Attempt Open→HalfOpen transition if the reset timeout has elapsed.
+	c.cb.TryRecover(time.Now())
+
+	if !c.cb.Allow() {
+		// Circuit is Open: buffer current batch into the fallback queue instead
+		// of dropping it.  Memory is bounded by FallbackQueue.maxSize.
+		for _, payload := range c.batch {
+			c.fallback.Enqueue(payload)
 		}
+		c.batch = c.batch[:0]
+		slog.Warn("exporter/alertmanager: circuit open, buffering alerts in fallback queue",
+			slog.Int("fallback_size", c.fallback.Len()))
+		return
 	}
 
-	batch := make([]types.AlertPayload, len(c.batch))
-	copy(batch, c.batch)
+	// Circuit is Closed or HalfOpen: prepend any recovered fallback items so
+	// they are replayed in FIFO order before new alerts.
+	fallbackPayloads := c.fallback.DrainAll()
+
+	total := len(fallbackPayloads) + len(c.batch)
+	batch := make([]types.AlertPayload, 0, total)
+	batch = append(batch, fallbackPayloads...)
+	batch = append(batch, c.batch...)
 	c.batch = c.batch[:0]
+
+	if len(batch) == 0 {
+		return
+	}
 
 	c.wg.Add(1)
 	go func() {
@@ -258,27 +323,21 @@ func (c *AlertmanagerClient) sendBatch(alerts []types.AlertPayload) {
 }
 
 func (c *AlertmanagerClient) recordFailure() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.failures++
-	c.lastFailure = time.Now()
-
-	if c.failures >= c.threshold && !c.open {
-		c.open = true
-		slog.Warn("exporter/alertmanager: circuit breaker opened",
-			slog.Int("failures", c.failures),
-			slog.Duration("cooldown", c.cooldown))
-	}
+	c.cb.RecordFailure()
 }
 
 func (c *AlertmanagerClient) recordSuccess() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.failures > 0 {
-		c.failures = 0
+	recovered := c.cb.RecordSuccess()
+	if !recovered {
+		return
 	}
+	// Circuit just transitioned HalfOpen→Closed.
+	// The fallback queue will be drained on the next flushUnlocked call
+	// (triggered by the next SendAlert or explicit Flush).
+	// Force an immediate drain so buffered alerts are replayed without waiting.
+	c.mu.Lock()
+	c.flushUnlocked()
+	c.mu.Unlock()
 }
 
 func (c *AlertmanagerClient) alertToPayload(alert types.Alert) types.AlertPayload {

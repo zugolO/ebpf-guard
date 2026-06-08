@@ -373,12 +373,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	eventCh := make(chan types.Event, engineCfg.BufferSize)
 	engine.SetQueueDepthFn(func() int { return len(eventCh) }, func() int { return cap(eventCh) })
 
+	bpStrategy := collector.BackpressureStrategy(cfg.Collectors.BackpressureStrategy)
+	if bpStrategy == "" {
+		bpStrategy = collector.StrategyDrop
+	}
+
 	var collectors []collector.Collector
 	if dryRun {
 		slog.Info("dry-run mode: using synthetic event generator")
 		collectors = []collector.Collector{
 			collector.NewSyntheticCollector(slog.Default(), 100*time.Millisecond),
 		}
+	}
+
+	// Wire up cloud audit collectors regardless of dry-run mode.
+	if cfg.Collectors.CloudTrail.Enabled {
+		ct := collector.NewCloudTrailCollector(slog.Default(), cfg.Collectors.CloudTrail, bpStrategy)
+		collectors = append(collectors, ct)
+		slog.Info("cloudtrail: collector enabled",
+			slog.String("queue", cfg.Collectors.CloudTrail.SQSQueueURL))
+	}
+	if cfg.Collectors.GCPAudit.Enabled {
+		gcp := collector.NewGCPAuditCollector(slog.Default(), cfg.Collectors.GCPAudit, bpStrategy)
+		collectors = append(collectors, gcp)
+		slog.Info("gcp_audit: collector enabled",
+			slog.String("subscription", cfg.Collectors.GCPAudit.PubSubSubscription))
 	}
 
 	for _, c := range collectors {

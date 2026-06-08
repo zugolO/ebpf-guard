@@ -811,6 +811,32 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		}
+	case types.EventCloudAudit:
+		if e.CloudAudit == nil {
+			return ""
+		}
+		switch field {
+		case "cloud.provider":
+			return e.CloudAudit.Provider
+		case "cloud.service":
+			return e.CloudAudit.Service
+		case "cloud.action":
+			return e.CloudAudit.Action
+		case "cloud.principal":
+			return e.CloudAudit.Principal
+		case "cloud.resource":
+			return e.CloudAudit.ResourceARN
+		case "cloud.source_ip":
+			return e.CloudAudit.SourceIP
+		case "cloud.user_agent":
+			return e.CloudAudit.UserAgent
+		case "cloud.error_code":
+			return e.CloudAudit.ErrorCode
+		case "cloud.region":
+			return e.CloudAudit.Region
+		case "cloud.event_id":
+			return e.CloudAudit.EventID
+		}
 	}
 	return fieldNotFound
 }

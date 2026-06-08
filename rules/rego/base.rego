@@ -133,6 +133,11 @@ is_container_escape_path(path) {
 # True Shannon entropy requires log() which is unavailable in OPA v0.70.0.
 # Returns the number of distinct characters in s (range: 1..len(s)).
 # DGA domains tend to have broader character sets than real domain labels.
+#
+# deprecated: DNS events are now pre-filtered by DNSPrefilter in Go before
+# reaching Rego (issue #69).  This function is kept as a fallback for any
+# future Rego rule that cannot be covered by the pre-filter, but it is no
+# longer called on the hot path.
 shannon_entropy(s) = entropy {
 	chars := {c | c := split(s, "")[_]}
 	entropy := to_number(count(chars))

@@ -157,9 +157,25 @@ func BenchmarkPolicyEvalPartitioned(b *testing.B) {
 		}
 	})
 
-	// DNS alert: DGA domain query
+	// DNS alert: DGA domain query — the subset that passes the Go pre-filter
+	// (issue #69) and actually reaches Rego.  Benign DNS events never reach
+	// this point; they are short-circuited at ~1.5 µs in DNSPrefilter.ShouldEvaluate.
+	// Target for this (suspicious) path: < 100 µs/op.
 	b.Run("dns/partitioned", func(b *testing.B) {
 		alert := newBenchDNSAlert()
+		b.ResetTimer()
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _ = e.Evaluate(ctx, alert)
+		}
+	})
+
+	// DNS alert: benign domain — exercises the OPA evaluation cost on a domain
+	// that has no suspicious signals.  In production, DNSPrefilter.ShouldEvaluate
+	// would return false and this Rego call would be skipped entirely (~2 µs).
+	// Kept here to track the raw OPA cost for regression purposes.
+	b.Run("dns/benign", func(b *testing.B) {
+		alert := newBenchDNSAlertBenign()
 		b.ResetTimer()
 		b.ReportAllocs()
 		for b.Loop() {
@@ -186,6 +202,29 @@ func BenchmarkPolicyEvalPartitioned(b *testing.B) {
 			_, _ = e.Evaluate(ctx, alert)
 		}
 	})
+}
+
+// newBenchDNSAlertBenign returns a DNS alert for a clean, benign domain.
+// In production, DNSPrefilter.ShouldEvaluate returns false for this alert
+// and Rego is never called.  This benchmark measures the raw OPA cost that
+// the pre-filter avoids on the ~95% benign path.
+func newBenchDNSAlertBenign() types.Alert {
+	var comm [16]byte
+	copy(comm[:], "curl")
+	return types.Alert{
+		ID:       "bench-dns-benign-001",
+		RuleID:   "dns_query",
+		Severity: types.SeverityWarning,
+		PID:      2345,
+		Comm:     "curl",
+		Message:  "DNS query benchmark (benign)",
+		Event: types.Event{
+			Type: types.EventDNS,
+			PID:  2345,
+			Comm: comm,
+			DNS:  &types.DNSEvent{QName: "google.com", QType: 1},
+		},
+	}
 }
 
 // newBenchDNSAlert returns a realistic DNS alert for benchmarking.

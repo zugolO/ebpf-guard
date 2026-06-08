@@ -1,0 +1,432 @@
+# Rootkit Detection Rules for ebpf-guard
+# Detects kernel rootkit installation, LD_PRELOAD hijacking, and kernel subversion
+# MITRE ATT&CK: T1014, T1547.006, T1574.006, T1620
+
+rules:
+  # ============================================================================
+  # T1547.006 — Boot or Logon Autostart: Kernel Modules
+  # ============================================================================
+
+  - id: rootkit_kmod_unsigned_load
+    name: "Unsigned kernel module loaded"
+    description: "A kernel module was loaded via init_module or finit_module — only signed modules should be loaded in production."
+    event_type: kmod
+    condition:
+      field: name
+      op: not_in
+      values:
+        - "overlay"
+        - "br_netfilter"
+        - "ip_tables"
+        - "iptable_filter"
+        - "iptable_nat"
+        - "ip6_tables"
+        - "nf_conntrack"
+        - "nf_nat"
+        - "ext4"
+        - "vfat"
+        - "fat"
+        - "xfs"
+        - "btrfs"
+        - "loop"
+        - "dm_mod"
+        - "virtio_blk"
+        - "virtio_net"
+        - "virtio_pci"
+    severity: critical
+    action: alert
+    tags: [mitre:T1547.006, rootkit, kmod, kernel-module]
+
+  - id: rootkit_kmod_suspicious_name
+    name: "Kernel module with suspicious name loaded"
+    description: "A kernel module with a name matching known rootkit patterns was loaded — possible rootkit installation."
+    event_type: kmod
+    condition:
+      field: name
+      op: regex
+      values:
+        - ".*(hide|hidden|hid3|rootkit|rkit|hook|hijack|stealth|ghost|phantom|shadow|invis).*"
+        - "^(kbeast|azazel|jynx|necurs|suterusu|reptile|diamorphine|bdvl|adore|enyelkm)$"
+    severity: critical
+    action: block
+    tags: [mitre:T1014, mitre:T1547.006, rootkit, known-rootkit]
+
+  - id: rootkit_init_module_syscall
+    name: "Kernel module load via init_module syscall"
+    description: "init_module(2) or finit_module(2) syscall called — loading a kernel module into the running kernel."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["175", "313"]  # init_module, finit_module
+    severity: critical
+    action: alert
+    tags: [mitre:T1547.006, rootkit, init-module, syscall]
+
+  - id: rootkit_delete_module_syscall
+    name: "Kernel module removal via delete_module"
+    description: "delete_module syscall called — removing a kernel module. Rootkits often remove themselves after installing hooks."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["176"]  # delete_module
+    severity: warning
+    action: alert
+    tags: [mitre:T1014, rootkit, delete-module]
+
+  - id: rootkit_kmod_from_tmp
+    name: "Kernel module loaded from temporary directory"
+    description: "A .ko kernel module file was opened from /tmp or /dev/shm — staging before loading rootkit."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/[^/]+\\.ko$"
+        - "/dev/shm/[^/]+\\.ko$"
+        - "/var/tmp/[^/]+\\.ko$"
+        - "/run/[^/]+\\.ko$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1547.006, rootkit, kmod-staging]
+
+  # ============================================================================
+  # T1574.006 — Hijack Execution Flow: LD_PRELOAD
+  # ============================================================================
+
+  - id: rootkit_ld_preload_written
+    name: "/etc/ld.so.preload modified (global LD_PRELOAD hijack)"
+    description: "The system-wide LD_PRELOAD file /etc/ld.so.preload was written — global shared library injection affecting all processes."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/ld.so.preload"
+        - "/etc/ld.so.conf"
+    severity: critical
+    action: block
+    tags: [mitre:T1574.006, rootkit, ld-preload, library-injection]
+
+  - id: rootkit_ld_preload_env_set
+    name: "LD_PRELOAD environment variable set in process"
+    description: "Process launched with LD_PRELOAD environment variable — userspace rootkit or library injection."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "LD_PRELOAD=.*\\.so"
+        - "LD_PRELOAD=.*\\.so\\."
+    severity: critical
+    action: alert
+    tags: [mitre:T1574.006, rootkit, ld-preload, env-injection]
+
+  - id: rootkit_ld_library_path_suspicious
+    name: "Suspicious LD_LIBRARY_PATH set to temp directory"
+    description: "LD_LIBRARY_PATH set to /tmp or /dev/shm — loading malicious shared libraries before legitimate ones."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "LD_LIBRARY_PATH=/tmp"
+        - "LD_LIBRARY_PATH=/dev/shm"
+        - "LD_LIBRARY_PATH=/var/tmp"
+    severity: critical
+    action: alert
+    tags: [mitre:T1574.006, rootkit, ld-library-path]
+
+  - id: rootkit_shared_lib_written_to_system
+    name: "Shared library written to system library path"
+    description: "A .so file was written to /lib, /usr/lib, or /usr/local/lib — injecting malicious shared library into system paths."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/lib/[^/]+\\.so(\\.[0-9]+)*$"
+        - "/usr/lib/[^/]+\\.so(\\.[0-9]+)*$"
+        - "/usr/local/lib/[^/]+\\.so(\\.[0-9]+)*$"
+        - "/lib64/[^/]+\\.so(\\.[0-9]+)*$"
+        - "/usr/lib64/[^/]+\\.so(\\.[0-9]+)*$"
+    severity: warning
+    action: alert
+    tags: [mitre:T1574.006, rootkit, shared-library, system-lib]
+
+  # ============================================================================
+  # T1014 — Rootkit: /proc filesystem manipulation
+  # ============================================================================
+
+  - id: rootkit_proc_sysctl_write
+    name: "Kernel parameter modified via /proc/sys"
+    description: "A kernel parameter file under /proc/sys was written — modifying kernel behavior to disable security or aid rootkit."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/proc/sys/kernel/"
+        - "/proc/sys/net/ipv4/conf/"
+        - "/proc/sys/vm/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1014, rootkit, sysctl, kernel-param]
+
+  - id: rootkit_proc_modules_read
+    name: "Kernel module list read (/proc/modules)"
+    description: "/proc/modules read — enumerating loaded kernel modules, often part of rootkit installation to avoid conflicts."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/proc/modules"
+        - "/proc/kallsyms"
+        - "/proc/kcore"
+    severity: warning
+    action: alert
+    tags: [mitre:T1014, rootkit, proc-modules, discovery]
+
+  - id: rootkit_kallsyms_read
+    name: "Kernel symbol table read (/proc/kallsyms)"
+    description: "/proc/kallsyms read — resolving kernel function addresses for syscall table hooking or other kernel exploits."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/proc/kallsyms"
+        - "/boot/System.map"
+        - "/boot/System.map-linux"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, rootkit, kallsyms, syscall-hook]
+
+  - id: rootkit_kcore_access
+    name: "Access to /proc/kcore (kernel memory image)"
+    description: "/proc/kcore opened — provides access to the kernel's virtual memory space, used by rootkits to patch memory."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/proc/kcore"
+        - "/dev/mem"
+        - "/dev/kmem"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, rootkit, kcore, kernel-memory]
+
+  # ============================================================================
+  # T1620 — Reflective Code Loading
+  # ============================================================================
+
+  - id: rootkit_anonymous_exec_memory
+    name: "Executable memory mapping without backing file"
+    description: "mmap with PROT_EXEC|PROT_WRITE without a file backing — anonymous executable memory, used for shellcode and fileless rootkits."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["9"]  # mmap
+    severity: warning
+    action: alert
+    tags: [mitre:T1620, rootkit, mmap, fileless, shellcode]
+
+  - id: rootkit_userfaultfd_create
+    name: "userfaultfd created (kernel exploit primitive)"
+    description: "userfaultfd syscall used — creates a user-mode page fault handler. Used in kernel heap spray and UAF exploit chains."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["323"]  # userfaultfd
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, rootkit, userfaultfd, kernel-exploit]
+
+  - id: rootkit_perf_event_open
+    name: "perf_event_open used for kernel address read"
+    description: "perf_event_open with PERF_TYPE_RAW — can be abused to read kernel memory addresses for KASLR bypass."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["298"]  # perf_event_open
+    severity: warning
+    action: alert
+    tags: [mitre:T1014, rootkit, perf-event, kaslr-bypass]
+
+  # ============================================================================
+  # BPF-based rootkits
+  # ============================================================================
+
+  - id: rootkit_bpf_prog_load_suspicious
+    name: "BPF program loaded by non-privileged tool"
+    description: "BPF program loaded outside of known security or network tools — possible BPF rootkit."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["321"]  # bpf
+    severity: warning
+    action: alert
+    tags: [mitre:T1014, rootkit, bpf, bpf-rootkit]
+
+  - id: rootkit_bpf_map_create_suspicious
+    name: "BPF map created with large capacity"
+    description: "BPF map creation detected — BPF-based rootkits use maps to store hidden process lists or intercept system calls."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["321"]  # bpf
+    severity: warning
+    action: alert
+    tags: [mitre:T1014, rootkit, bpf-map]
+
+  # ============================================================================
+  # System call table tampering indicators
+  # ============================================================================
+
+  - id: rootkit_kexec_load
+    name: "kexec_load called (kernel replacement)"
+    description: "kexec_load or kexec_file_load syscall used — replacing the running kernel. Rootkits use this for persistent kernel backdoors."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["246", "320"]  # kexec_load, kexec_file_load
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, rootkit, kexec, kernel-replacement]
+
+  - id: rootkit_kernel_image_write
+    name: "Kernel image or vmlinuz file modified"
+    description: "The kernel image (/boot/vmlinuz*) was written — tampering with the bootable kernel for persistent root access."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/boot/vmlinuz.*"
+        - "/boot/vmlinux.*"
+        - "/boot/initrd.*"
+        - "/boot/initramfs.*"
+        - "/boot/grub/grub\\.cfg"
+        - "/boot/grub2/grub\\.cfg"
+        - "/boot/efi/.*"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, rootkit, boot-tampering, kernel-image]
+
+  # ============================================================================
+  # Hidden file and directory creation
+  # ============================================================================
+
+  - id: rootkit_hidden_dir_dev
+    name: "Hidden directory created under /dev"
+    description: "A directory was created under /dev — rootkits hide files under /dev to avoid detection in ls listings."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/dev/\\.[^/]+"
+        - "/dev/[a-z]{6,}"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, mitre:T1564.001, rootkit, hidden-dir]
+
+  - id: rootkit_hidden_proc_dir
+    name: "Hidden directory created under /proc"
+    description: "Unexpected directory creation under /proc — rootkit hiding process or kernel structures."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/proc/\\.[^/]+"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, mitre:T1564, rootkit, proc-hiding]
+
+  - id: rootkit_large_hidden_file
+    name: "Hidden file (dot-prefix) in system directory"
+    description: "A hidden file (starting with .) created in /usr/bin, /usr/sbin, or /bin — rootkit hiding tools in system directories."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/usr/bin/\\.[^/]+"
+        - "/usr/sbin/\\.[^/]+"
+        - "/bin/\\.[^/]+"
+        - "/sbin/\\.[^/]+"
+        - "/usr/local/bin/\\.[^/]+"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, mitre:T1564.001, rootkit, hidden-binary]
+
+  # ============================================================================
+  # SSH backdoor patterns
+  # ============================================================================
+
+  - id: rootkit_ssh_authorized_keys_modified
+    name: "SSH authorized_keys modified"
+    description: "SSH authorized_keys file written — adding attacker SSH key for persistent backdoor access."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/\\.ssh/authorized_keys$"
+        - "/root/\\.ssh/authorized_keys$"
+        - "/etc/ssh/authorized_keys$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1098.004, rootkit, ssh-backdoor, persistence]
+
+  - id: rootkit_sshd_config_modified
+    name: "SSH daemon configuration modified"
+    description: "sshd_config was modified — attacker disabling auth controls or adding backdoor user/key for persistent access."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/ssh/sshd_config"
+        - "/etc/ssh/sshd_config.d/backdoor.conf"
+    severity: critical
+    action: alert
+    tags: [mitre:T1098, rootkit, sshd-config, persistence]
+
+  - id: rootkit_pam_module_added
+    name: "PAM module configuration modified"
+    description: "A PAM config file was modified — attacker adding malicious PAM module for credential capture or auth bypass."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/pam.d/"
+        - "/etc/pam.conf"
+    severity: critical
+    action: alert
+    tags: [mitre:T1556.003, rootkit, pam, credential-capture]
+
+  - id: rootkit_passwd_modified
+    name: "System password database modified (/etc/passwd)"
+    description: "/etc/passwd was written — adding a new backdoor user account with UID 0 (root equivalent)."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/passwd"
+        - "/etc/shadow"
+    severity: critical
+    action: alert
+    tags: [mitre:T1136.001, rootkit, passwd, backdoor-account]

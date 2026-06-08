@@ -1,0 +1,504 @@
+# Additional MITRE ATT&CK Coverage Rules for ebpf-guard
+# Covers techniques not fully addressed in existing rule sets
+# MITRE ATT&CK: T1027, T1036, T1112, T1133, T1134, T1484, T1497, T1518, T1557, T1558
+
+rules:
+  # ============================================================================
+  # T1027 — Obfuscated Files or Information
+  # ============================================================================
+
+  - id: mitre_obfusc_base64_payload_large
+    name: "Large base64-encoded payload executed"
+    description: "Shell executed with a very large base64-encoded argument — obfuscated malware delivery or command obfuscation."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "echo [A-Za-z0-9+/]{100,}={0,2}\\s*\\|"
+        - "printf [A-Za-z0-9+/]{100,}={0,2}\\s*\\|"
+    severity: critical
+    action: alert
+    tags: [mitre:T1027, obfuscation, base64, payload]
+
+  - id: mitre_obfusc_hex_encoded_exec
+    name: "Hex-encoded command execution"
+    description: "Command execution via xxd, od, or printf with hex-encoded payload — evading string-based detection."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "xxd.*\\|.*sh"
+        - "xxd -r.*\\|"
+        - "printf.*\\\\x[0-9a-f]{2}.*\\|.*sh"
+        - "\\$'\\\\x[0-9a-f][0-9a-f]"
+    severity: critical
+    action: alert
+    tags: [mitre:T1027, obfuscation, hex-encode, evasion]
+
+  - id: mitre_obfusc_gzip_payload
+    name: "gzip-compressed payload execution"
+    description: "Compressed payload piped to decompressor and shell — packing malware to avoid signature detection."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "echo.*\\|.*base64.*\\|.*gzip"
+        - "echo.*\\|.*base64.*\\|.*gunzip"
+        - "gzip.*\\|.*base64.*\\|.*sh"
+        - "zcat.*\\|.*sh"
+        - "bzcat.*\\|.*sh"
+        - "xzcat.*\\|.*sh"
+    severity: critical
+    action: alert
+    tags: [mitre:T1027, obfuscation, compression, payload]
+
+  - id: mitre_obfusc_char_concatenation
+    name: "Character concatenation to bypass string detection"
+    description: "Command built by concatenating single characters or string segments — evading string matching rules."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "\\$\\([[:space:]]*echo[[:space:]]+.*\\$IFS.*\\)"
+        - "eval.*\\$\\(.*tr.*\\)"
+        - "\\{echo,.*\\}"
+        - "\\$\\{IFS\\}"
+    severity: warning
+    action: alert
+    tags: [mitre:T1027, obfuscation, ifs-separator, evasion]
+
+  # ============================================================================
+  # T1036 — Masquerading
+  # ============================================================================
+
+  - id: mitre_masq_legitimate_name_in_tmp
+    name: "Common legitimate process name used from /tmp"
+    description: "Process running from /tmp with the name of a legitimate system tool — masquerade as benign process."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/(sshd|nginx|apache2|httpd|java|python|node|bash|sh|ls|ps|curl|wget)$"
+        - "/dev/shm/(sshd|nginx|apache2|httpd|java|python|node|bash|sh|ls|ps)$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1036.005, masquerade, fake-binary, tmp-execution]
+
+  - id: mitre_masq_double_extension
+    name: "File with double extension (masquerading)"
+    description: "File created with double extension (e.g. report.pdf.sh) — masquerading as document to trick users or bypass filters."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*\\.(pdf|doc|docx|xls|xlsx|jpg|png|gif)\\.(sh|py|pl|rb|exe|elf|bin)$"
+        - ".*\\.(sh|py|pl|rb)\\.pdf$"
+    severity: warning
+    action: alert
+    tags: [mitre:T1036.007, masquerade, double-extension, social-engineering]
+
+  # ============================================================================
+  # T1112 — Modify Registry (Linux equiv: modify key config files)
+  # ============================================================================
+
+  - id: mitre_dbus_config_modified
+    name: "D-Bus policy configuration modified"
+    description: "D-Bus policy file modified — expanding IPC permissions for privilege escalation or persistence."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/dbus-1/system.d/"
+        - "/usr/share/dbus-1/system.d/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1112, dbus, policy-modification]
+
+  # ============================================================================
+  # T1133 — External Remote Services
+  # ============================================================================
+
+  - id: mitre_vpn_service_started
+    name: "VPN client started (potential covert access)"
+    description: "OpenVPN or WireGuard client started — establishing covert encrypted channel from compromised host."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "openvpn.*--config"
+        - "wg-quick up"
+        - "wg set.*peer"
+    severity: warning
+    action: alert
+    tags: [mitre:T1133, vpn, covert-channel, c2]
+
+  - id: mitre_ngrok_tunnel
+    name: "ngrok or similar tunnel tool started"
+    description: "ngrok, frp, chisel, or similar tunneling tool started — creating persistent reverse proxy to attacker infrastructure."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/ngrok$"
+        - ".*/frp[cs]$"
+        - ".*/chisel$"
+        - ".*/ligolo$"
+        - ".*/bore$"
+        - ".*/rathole$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1133, mitre:T1572, ngrok, tunnel, c2]
+
+  - id: mitre_ngrok_dns_query
+    name: "ngrok domain queried (tunnel established)"
+    description: "DNS query for *.ngrok.io or *.ngrok-free.app — ngrok tunnel being established for remote access."
+    event_type: dns
+    condition:
+      field: qname
+      op: suffix
+      values:
+        - ".ngrok.io"
+        - ".ngrok-free.app"
+        - ".ngrok.app"
+        - ".serveo.net"
+        - ".localhost.run"
+    severity: critical
+    action: alert
+    tags: [mitre:T1133, ngrok, tunnel, reverse-proxy]
+
+  # ============================================================================
+  # T1134 — Access Token Manipulation
+  # ============================================================================
+
+  - id: mitre_token_impersonation_su
+    name: "su command used for account switching"
+    description: "su (substitute user) executed — switching to another user account, possibly root. Monitor for unexpected use."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/bin/su"
+        - "/usr/bin/su"
+    severity: warning
+    action: alert
+    tags: [mitre:T1134, token-impersonation, su, privilege-escalation]
+
+  - id: mitre_newuidmap_newgidmap
+    name: "newuidmap/newgidmap called for user namespace"
+    description: "newuidmap or newgidmap called — setting up user namespace UID mappings, used in container escape exploits."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/usr/bin/newuidmap"
+        - "/usr/bin/newgidmap"
+        - "/bin/newuidmap"
+        - "/bin/newgidmap"
+    severity: warning
+    action: alert
+    tags: [mitre:T1134, user-namespace, uid-map]
+
+  # ============================================================================
+  # T1497 — Virtualization/Sandbox Evasion
+  # ============================================================================
+
+  - id: mitre_sandbox_detect_proc_read
+    name: "Sandbox detection via /proc enumeration"
+    description: "Process reading /proc/1/cgroup, /proc/1/environ, or /proc/uptime for container/sandbox detection."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/proc/1/cgroup"
+        - "/proc/1/environ"
+        - "/proc/uptime"
+        - "/proc/1/status"
+        - "/proc/self/cgroup"
+    severity: warning
+    action: alert
+    tags: [mitre:T1497.001, sandbox-evasion, container-detect, evasion]
+
+  - id: mitre_sandbox_detect_cpuid
+    name: "CPU virtualization detection via cpuid"
+    description: "Process calling cpuid via custom assembly — checking for hypervisor bit to detect virtual machine environments."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["135"]  # arch_prctl (used with cpuid in VMs)
+    severity: warning
+    action: alert
+    tags: [mitre:T1497.001, sandbox-evasion, vm-detection, cpuid]
+
+  - id: mitre_vm_detect_dmi_read
+    name: "VM detection via DMI/SMBIOS read"
+    description: "Process reading /sys/class/dmi or /sys/firmware — checking for virtualization vendor strings."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/sys/class/dmi/id/"
+        - "/sys/firmware/dmi/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1497.001, vm-detection, dmi, sandbox-evasion]
+
+  # ============================================================================
+  # T1518 — Software Discovery
+  # ============================================================================
+
+  - id: mitre_software_enum_dpkg
+    name: "Package manager enumeration (dpkg/rpm)"
+    description: "dpkg, rpm, or pacman listing installed packages — software inventory for vulnerability targeting."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/var/lib/dpkg/status"
+        - "/var/lib/rpm/Packages"
+        - "/var/lib/rpm/rpmdb.sqlite"
+    severity: warning
+    action: alert
+    tags: [mitre:T1518, software-discovery, dpkg, rpm]
+
+  - id: mitre_software_enum_security_tools
+    name: "Security tool discovery via /proc or filesystem"
+    description: "Process reading security tool paths — enumerating antivirus, IDS, or monitoring tools to evade."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/falco/"
+        - "/etc/osquery/"
+        - "/opt/splunk/"
+        - "/opt/elastic/"
+        - "/usr/local/bin/osquery"
+    severity: warning
+    action: alert
+    tags: [mitre:T1518.001, software-discovery, security-tool-detect]
+
+  # ============================================================================
+  # T1557 — Adversary-in-the-Middle
+  # ============================================================================
+
+  - id: mitre_arp_spoof_raw_socket
+    name: "ARP spoofing via raw socket"
+    description: "Raw socket created at link layer (AF_PACKET) — ARP spoofing tool sending crafted ARP packets."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["41"]  # socket
+    severity: warning
+    action: alert
+    tags: [mitre:T1557.002, arp-spoof, mitm, raw-socket]
+
+  - id: mitre_sslstrip_proxy
+    name: "SSL stripping proxy tool started"
+    description: "Known SSL stripping or MITM proxy tool name executed — intercepting HTTPS traffic."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*(sslstrip|mitmproxy|bettercap|ettercap|arpspoof)$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1557, sslstrip, mitm, proxy]
+
+  # ============================================================================
+  # T1558 — Steal or Forge Kerberos Tickets
+  # ============================================================================
+
+  - id: mitre_keytab_file_read
+    name: "Kerberos keytab file read"
+    description: "Kerberos keytab file read — extracting service account keys for pass-the-ticket attacks."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*\\.keytab$"
+        - "/etc/krb5\\.keytab"
+        - "/etc/krb5/krb5\\.keytab"
+        - "/var/kerberos/krb5/.*\\.keytab$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1558, kerberos, keytab, credential-access]
+
+  - id: mitre_krb5_ccache_read
+    name: "Kerberos ticket cache read"
+    description: "Kerberos credential cache read — stealing Kerberos TGT for pass-the-ticket lateral movement."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/krb5cc_[0-9]+"
+        - "/tmp/krb5cc_.*"
+        - "/run/user/[0-9]+/krb5cc"
+    severity: critical
+    action: alert
+    tags: [mitre:T1558.003, kerberos, ccache, pass-the-ticket]
+
+  # ============================================================================
+  # T1484 — Domain Policy Modification
+  # ============================================================================
+
+  - id: mitre_nsswitch_modified
+    name: "NSS configuration modified"
+    description: "/etc/nsswitch.conf modified — changing name service switch order to redirect authentication or naming."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/nsswitch.conf"
+    severity: warning
+    action: alert
+    tags: [mitre:T1484, nsswitch, nss, policy-modification]
+
+  # ============================================================================
+  # T1620 — Reflective Code Loading
+  # ============================================================================
+
+  - id: mitre_reflective_elf_load
+    name: "ELF binary loaded from anonymous fd (memfd)"
+    description: "ELF binary executed from /proc/self/fd — reflective ELF loading via memfd_create without touching disk."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/proc/self/fd/"
+        - "/proc/thread-self/fd/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1620, reflective-loading, memfd, fileless]
+
+  - id: mitre_so_injection_via_proc
+    name: "Shared library loaded from /proc path"
+    description: "Shared library dlopen'd from /proc/self/fd path — fileless library injection via memfd."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/proc/[0-9]+/fd/[0-9]+"
+        - "/proc/self/fd/[0-9]+"
+    severity: critical
+    action: alert
+    tags: [mitre:T1620, mitre:T1055, reflective-loading, fileless]
+
+  # ============================================================================
+  # T1071 — Application Layer Protocol C2
+  # ============================================================================
+
+  - id: mitre_http_c2_beacon_pattern
+    name: "HTTP C2 beacon pattern in TLS data"
+    description: "TLS stream contains HTTP headers matching C2 beacon patterns — Cobalt Strike HTTP stager or similar."
+    event_type: tls
+    condition:
+      field: tls_data
+      op: regex
+      values:
+        - "Cookie: MOID="
+        - "Cookie: SID="
+        - "__cfduid="
+        - "X-Auth-Token: [A-Za-z0-9]{32}"
+    severity: warning
+    action: alert
+    tags: [mitre:T1071.001, http-c2, beacon, cobalt-strike]
+
+  - id: mitre_dns_c2_high_frequency
+    name: "High-frequency DNS queries (C2 beacon)"
+    description: "Many DNS queries in rapid succession to similar domains — DNS C2 beacon or fast-flux domain checking."
+    event_type: dns
+    condition:
+      field: qname_subdomain_count
+      op: gt
+      values: ["3"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1071.004, dns-c2, beacon, fast-flux]
+
+  # ============================================================================
+  # T1021 — Remote Services
+  # ============================================================================
+
+  - id: mitre_ssh_agent_forward_abuse
+    name: "SSH agent socket accessed by unusual process"
+    description: "SSH_AUTH_SOCK environment used by a non-SSH process — SSH agent hijacking for lateral movement."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/ssh-[A-Za-z0-9]+/agent\\.[0-9]+"
+        - "/run/user/[0-9]+/ssh-[A-Za-z0-9]+/agent\\.[0-9]+"
+    severity: critical
+    action: alert
+    tags: [mitre:T1021.004, ssh-agent, agent-hijack, lateral-movement]
+
+  - id: mitre_winrm_port_connection
+    name: "WinRM connection from Linux host"
+    description: "Connection to TCP 5985/5986 (WinRM) from Linux — unusual lateral movement to Windows systems."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["5985", "5986"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.006, winrm, lateral-movement]
+
+  # ============================================================================
+  # T1053 — Scheduled Task/Job: at
+  # ============================================================================
+
+  - id: mitre_at_job_scheduled
+    name: "at command used to schedule persistent task"
+    description: "The at command was used to schedule a one-time task — common persistence technique to delay malicious execution."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/usr/bin/at"
+        - "/usr/bin/atrm"
+        - "/usr/bin/atq"
+        - "/var/spool/at"
+    severity: warning
+    action: alert
+    tags: [mitre:T1053.001, at-command, scheduled-task, persistence]
+
+  - id: mitre_systemd_transient_timer
+    name: "Systemd transient timer created via systemd-run"
+    description: "systemd-run used to create a transient timer — one-shot persistence without writing unit files to disk."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "systemd-run.*--on-active"
+        - "systemd-run.*--on-calendar"
+        - "systemd-run.*--timer"
+        - "systemd-run.*--on-boot"
+    severity: warning
+    action: alert
+    tags: [mitre:T1053.006, systemd-run, transient-timer, persistence]

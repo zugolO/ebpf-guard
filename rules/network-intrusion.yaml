@@ -1,0 +1,416 @@
+# Network Intrusion Detection Rules for ebpf-guard
+# Covers reverse shells, port scanning, C2 channels, and tunneling
+# MITRE ATT&CK: T1095, T1090, T1048, T1572, T1046
+
+rules:
+  # ============================================================================
+  # T1059.004 — Reverse Shell Patterns via Network
+  # ============================================================================
+
+  - id: netintr_reverse_shell_port_4444
+    name: "Outbound connection on common reverse shell port 4444"
+    description: "TCP connection to port 4444 — Metasploit default meterpreter/shell listener port."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["4444"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.004, reverse-shell, metasploit, c2]
+
+  - id: netintr_reverse_shell_port_1234
+    name: "Outbound connection on common reverse shell port 1234"
+    description: "TCP connection to port 1234 — commonly used in netcat reverse shell tutorials and malware."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["1234", "5555", "6666", "7777", "8888", "9999"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.004, reverse-shell, netcat, c2]
+
+  - id: netintr_reverse_shell_port_31337
+    name: "Outbound connection on classic hacker port 31337"
+    description: "Connection to port 31337 (elite/leet) — associated with Back Orifice and classic backdoors."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["31337", "12345", "54321"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.004, reverse-shell, backdoor, c2]
+
+  - id: netintr_high_port_established
+    name: "Non-service process connected on ephemeral high port"
+    description: "Connection established to a port > 49152 (ephemeral range) from a non-browser process — suspicious C2 or reverse shell."
+    event_type: network
+    condition:
+      field: dport
+      op: gt
+      values: ["49152"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1095, reverse-shell, c2, high-port]
+
+  # ============================================================================
+  # T1046 — Network Service Discovery (Port Scanning)
+  # ============================================================================
+
+  - id: netintr_syn_scan_pattern
+    name: "Rapid sequential TCP connections (port scan)"
+    description: "Process opening many TCP connections rapidly to different ports — network port scanning."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["21", "22", "23", "25", "53", "80", "110", "143", "443", "445", "3389", "5985", "5986"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1046, network-scan, discovery, reconnaissance]
+
+  - id: netintr_nmap_fingerprint_ports
+    name: "Connection to nmap fingerprinting ports"
+    description: "Connection to ports commonly targeted by nmap OS fingerprinting scripts — active network reconnaissance."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["7", "9", "13", "17", "19", "37", "111", "135", "139", "445", "1723", "3306", "3389"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1046, nmap, port-scan, reconnaissance]
+
+  - id: netintr_outbound_smb
+    name: "Outbound SMB connection (lateral movement indicator)"
+    description: "Outbound connection to TCP 445 (SMB) — lateral movement via pass-the-hash, SMB exploitation, or ransomware spreading."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["445", "139"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.002, network-scan, smb, lateral-movement]
+
+  # ============================================================================
+  # T1090 — Proxy-based C2
+  # ============================================================================
+
+  - id: netintr_socks_proxy_port
+    name: "SOCKS proxy connection (potential C2 tunneling)"
+    description: "Connection to standard SOCKS proxy ports 1080/1081 — tunneling C2 traffic or internal pivoting."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["1080", "1081", "1082", "3128", "8080", "8118", "8888"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1090, socks-proxy, c2-tunneling]
+
+  - id: netintr_dns_over_nonstandard_port
+    name: "DNS query on non-standard port (DNS tunneling)"
+    description: "DNS-like traffic on a port other than 53 — DNS tunneling tools like iodine/dnscat use non-standard ports."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["5353", "5354", "8053", "4443", "2053"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, dns-tunnel, c2]
+
+  # ============================================================================
+  # T1572 — Protocol Tunneling
+  # ============================================================================
+
+  - id: netintr_icmp_outbound_large
+    name: "Large ICMP packet (potential ICMP tunnel)"
+    description: "ICMP traffic with large payload — ICMP tunneling tools encode data in ping/pong packets for covert C2."
+    event_type: network
+    condition:
+      field: proto
+      op: in
+      values: ["1"]  # ICMP
+    severity: warning
+    action: alert
+    tags: [mitre:T1572, icmp-tunnel, c2]
+
+  - id: netintr_ssh_non_standard_port
+    name: "SSH connection to non-standard port"
+    description: "SSH-like connection to a port other than 22 — SSH tunneling or C2 over non-standard SSH port."
+    event_type: network
+    condition:
+      field: dport
+      op: not_in
+      values: ["22", "2222"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1572, ssh-tunnel, c2]
+
+  - id: netintr_http_on_non_web_port
+    name: "HTTP connection on non-standard port"
+    description: "Outbound HTTP/HTTPS on unusual port — HTTP C2 channel or reverse proxy for command execution."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["8443", "8888", "9090", "9443", "9999", "10443", "4433"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1572, http-c2, non-standard-port]
+
+  # ============================================================================
+  # T1048 — Exfiltration Over Alternative Protocol
+  # ============================================================================
+
+  - id: netintr_ftp_data_exfil
+    name: "FTP connection for potential data exfiltration"
+    description: "Outbound FTP connection (port 20/21) from non-FTP service — data exfiltration over FTP."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["20", "21"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.003, ftp, data-exfiltration]
+
+  - id: netintr_smtp_exfil
+    name: "SMTP connection for potential data exfiltration"
+    description: "Outbound SMTP connection from a non-mail process — email-based data exfiltration."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["25", "465", "587"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.002, smtp, data-exfiltration]
+
+  - id: netintr_large_upload_port
+    name: "Connection to common data exfiltration services"
+    description: "Outbound connection to cloud storage ports used for bulk exfiltration (S3, GCS, Azure Blob)."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["443"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048, data-exfiltration, cloud-storage]
+
+  # ============================================================================
+  # T1095 — Non-Application Layer Protocol (Raw Socket)
+  # ============================================================================
+
+  - id: netintr_raw_socket_connection
+    name: "Raw socket protocol connection"
+    description: "Connection using raw socket (proto=255 or UDP with custom data) — raw socket C2 or custom protocol tunnel."
+    event_type: network
+    condition:
+      field: proto
+      op: in
+      values: ["255", "41", "43", "47", "50", "51"]  # HOPOPT, IPv6, IPv6-Route, GRE, ESP, AH
+    severity: warning
+    action: alert
+    tags: [mitre:T1095, raw-socket, custom-protocol, c2]
+
+  - id: netintr_gre_tunnel
+    name: "GRE tunnel established"
+    description: "GRE encapsulation detected — used for VPN tunneling or C2 traffic concealment."
+    event_type: network
+    condition:
+      field: proto
+      op: in
+      values: ["47"]  # GRE
+    severity: warning
+    action: alert
+    tags: [mitre:T1572, gre-tunnel, c2]
+
+  # ============================================================================
+  # Known malware infrastructure ports
+  # ============================================================================
+
+  - id: netintr_cobalt_strike_default_port
+    name: "Outbound connection to Cobalt Strike default port"
+    description: "Connection to TCP 50050 — Cobalt Strike team server default port. May indicate active C2 beacon."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["50050"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1071, cobalt-strike, c2, red-team]
+
+  - id: netintr_covenant_default_port
+    name: "Connection to Covenant C2 default port"
+    description: "Connection to TCP 7443 — Covenant C2 framework default HTTPS listener port."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["7443"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1071, covenant-c2, c2]
+
+  - id: netintr_brute_ratel_port
+    name: "Connection to Brute Ratel C4 default port"
+    description: "Connection to TCP 443 on Brute Ratel default listener — adversary simulation C2 framework."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["53311", "8443"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1071, brute-ratel, c2]
+
+  # ============================================================================
+  # DNS-based detection
+  # ============================================================================
+
+  - id: netintr_dga_domain_query
+    name: "DGA (Domain Generation Algorithm) domain queried"
+    description: "DNS query for a domain with high DGA score — botnet or malware checking in with generated C2 domain."
+    event_type: dns
+    condition:
+      field: qname_is_dga
+      op: equals
+      values: ["true"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1568.002, dga, botnet, c2]
+
+  - id: netintr_dns_high_entropy_query
+    name: "DNS query with unusually high entropy subdomain"
+    description: "High-entropy subdomain in DNS query — possible DNS tunneling or DGA-based C2 beacon."
+    event_type: dns
+    condition:
+      field: qname_entropy
+      op: gt
+      values: ["4.0"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1048.001, mitre:T1568, dns-tunnel, high-entropy]
+
+  - id: netintr_dns_many_subdomains
+    name: "DNS query with excessive subdomain count"
+    description: "DNS query with more than 4 subdomains — DNS tunneling packing data into multiple labels."
+    event_type: dns
+    condition:
+      field: qname_subdomain_count
+      op: gt
+      values: ["4"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, dns-tunnel, subdomain-exfil]
+
+  - id: netintr_dns_long_label
+    name: "Extremely long DNS query name (tunneling)"
+    description: "DNS query name exceeding 100 characters — data encoding in DNS label for covert exfiltration."
+    event_type: dns
+    condition:
+      field: qname_length
+      op: gt
+      values: ["100"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1048.001, dns-tunnel, long-label]
+
+  - id: netintr_dns_high_digit_ratio
+    name: "DNS query with high digit ratio (tunneling indicator)"
+    description: "DNS subdomain contains many digits — hex-encoded or base32-encoded data in DNS tunnel."
+    event_type: dns
+    condition:
+      field: qname_digit_ratio
+      op: gt
+      values: ["0.4"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, dns-tunnel, encoded-data]
+
+  # ============================================================================
+  # Internal network C2 (east-west movement)
+  # ============================================================================
+
+  - id: netintr_connection_to_multicast
+    name: "Outbound connection to multicast range"
+    description: "Connection to 224.0.0.0/4 (multicast) — unusual for production workloads, possible C2 covert channel."
+    event_type: network
+    condition:
+      field: daddr
+      op: in_cidr
+      values: ["224.0.0.0/4"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1095, multicast, covert-channel]
+
+  - id: netintr_loopback_high_port
+    name: "Connection to loopback on high port (local proxy)"
+    description: "Outbound connection to 127.0.0.1 on a high port — local SOCKS proxy or C2 relay tool."
+    event_type: network
+    condition:
+      field: daddr
+      op: in
+      values: ["127.0.0.1", "::1"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1090, loopback, proxy, local-relay]
+
+  # ============================================================================
+  # Long-lived connection detection
+  # ============================================================================
+
+  - id: netintr_long_dns_session
+    name: "Extremely long-lived DNS connection (tunneling)"
+    description: "DNS TCP connection lasting more than 60 seconds — DNS-over-TCP tunnel for C2 or exfiltration."
+    event_type: net_close
+    condition:
+      field: duration_sec
+      op: gt
+      values: ["60"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, dns-tunnel, long-connection]
+
+  - id: netintr_persistent_c2_beacon
+    name: "Very long-lived outbound connection (C2 beacon)"
+    description: "Outbound TCP connection lasting over 1 hour — likely a persistent C2 beacon or data exfiltration session."
+    event_type: net_close
+    condition:
+      field: duration_sec
+      op: gt
+      values: ["3600"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1571, c2-beacon, persistent-connection]
+
+  - id: netintr_rdp_outbound
+    name: "Outbound RDP connection (lateral movement)"
+    description: "Outbound TCP 3389 (RDP) — lateral movement to Windows systems or jumping through compromised hosts."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["3389", "3388"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.001, rdp, lateral-movement]
+
+  - id: netintr_vnc_outbound
+    name: "Outbound VNC connection"
+    description: "Outbound TCP 5900-5910 (VNC) — remote desktop lateral movement or attacker C2 tunnel."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["5900", "5901", "5902", "5903", "5904", "5905"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021.005, vnc, lateral-movement]

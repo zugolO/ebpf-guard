@@ -33,6 +33,11 @@ type AlertStore interface {
 	// Delete removes alerts older than the given retention period.
 	Delete(ctx context.Context, olderThan time.Duration) (int64, error)
 
+	// Flush ensures all buffered or pending writes are durably committed.
+	// For backends that write synchronously (memory, OpenSearch) this is a no-op.
+	// For SQLite, it triggers a WAL checkpoint so data is in the main DB file.
+	Flush(ctx context.Context) error
+
 	// Close releases all resources and closes the store connection.
 	Close() error
 
@@ -212,6 +217,8 @@ func (s *InstrumentedStore) Count(ctx context.Context, filters QueryFilters) (in
 func (s *InstrumentedStore) Delete(ctx context.Context, olderThan time.Duration) (int64, error) {
 	return s.inner.Delete(ctx, olderThan)
 }
+
+func (s *InstrumentedStore) Flush(ctx context.Context) error { return s.inner.Flush(ctx) }
 
 func (s *InstrumentedStore) Close() error { return s.inner.Close() }
 

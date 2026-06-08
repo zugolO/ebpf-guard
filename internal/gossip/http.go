@@ -3,6 +3,7 @@ package gossip
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -109,9 +110,13 @@ func Handler(mgr *Manager) http.Handler {
 	mux := http.NewServeMux()
 
 	authCheck := func(w http.ResponseWriter, r *http.Request) bool {
-		if mgr.cfg.Secret != "" && r.Header.Get(gossipSecretHeader) != mgr.cfg.Secret {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return false
+		if mgr.cfg.Secret != "" {
+			got := r.Header.Get(gossipSecretHeader)
+			// Use constant-time comparison to prevent timing-based secret leakage.
+			if subtle.ConstantTimeCompare([]byte(got), []byte(mgr.cfg.Secret)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return false
+			}
 		}
 		return true
 	}

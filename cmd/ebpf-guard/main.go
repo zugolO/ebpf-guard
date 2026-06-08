@@ -408,6 +408,64 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return fmt.Errorf("start HTTP server: %w", err)
 	}
 
+	// ── Alertmanager webhook client ──────────────────────────────────────────
+	var alertmanagerClient *exporter.AlertmanagerClient
+	if cfg.Alerting.Enabled {
+		resetTimeout := time.Duration(cfg.Alerting.CircuitBreakerResetTimeout) * time.Second
+		if resetTimeout <= 0 {
+			resetTimeout = 30 * time.Second
+		}
+		alertmanagerClient = exporter.NewAlertmanagerClientFull(
+			cfg.Alerting.WebhookURL,
+			cfg.Alerting.GeneratorURL,
+			cfg.Alerting.BatchSize,
+			cfg.Alerting.BatchTimeout,
+			exporter.CircuitBreakerConfig{
+				Threshold:          cfg.Alerting.CircuitBreakerThreshold,
+				ResetTimeout:       resetTimeout,
+				FallbackBufferSize: cfg.Alerting.FallbackBufferSize,
+			},
+			nil,
+			nil, nil, nil,
+		)
+		slog.Info("alertmanager: webhook integration active",
+			slog.String("url", cfg.Alerting.WebhookURL))
+	}
+
+	// ── Notification fanout (Slack / Teams / Webhook) ────────────────────────
+	var fanout *exporter.FanoutNotifier
+	if cfg.Notifications.Slack.Enabled || cfg.Notifications.Teams.Enabled || cfg.Notifications.Webhook.Enabled {
+		fanout = exporter.NewFanoutNotifier(exporter.FanoutConfig{
+			Slack: exporter.SlackConfig{
+				Enabled:     cfg.Notifications.Slack.Enabled,
+				WebhookURL:  cfg.Notifications.Slack.WebhookURL,
+				Channel:     cfg.Notifications.Slack.Channel,
+				MinSeverity: cfg.Notifications.Slack.MinSeverity,
+			},
+			Teams: exporter.TeamsConfig{
+				Enabled:     cfg.Notifications.Teams.Enabled,
+				WebhookURL:  cfg.Notifications.Teams.WebhookURL,
+				MinSeverity: cfg.Notifications.Teams.MinSeverity,
+			},
+			Webhook: exporter.WebhookConfig{
+				Enabled: cfg.Notifications.Webhook.Enabled,
+				URL:     cfg.Notifications.Webhook.URL,
+				Headers: cfg.Notifications.Webhook.Headers,
+			},
+			FalcoOutput: cfg.Compat.FalcoOutput,
+		}, 10*time.Second, slog.Default())
+	}
+
+	// ── Shutdown duration metric ─────────────────────────────────────────────
+	shutdownDuration := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_shutdown_duration_seconds",
+		Help: "Duration of the last graceful shutdown in seconds.",
+	})
+	if err := prometheus.Register(shutdownDuration); err != nil {
+		slog.Warn("shutdown metric: failed to register",
+			slog.Any("error", err))
+	}
+
 	eventCh := make(chan types.Event, engineCfg.BufferSize)
 	engine.SetQueueDepthFn(func() int { return len(eventCh) }, func() int { return cap(eventCh) })
 
@@ -500,7 +558,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	for {
 		select {
 		case <-ctx.Done():
-			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector)
+			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration)
 			return nil
 
 		case event, ok := <-eventCh:
@@ -530,6 +588,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				if err := alertStore.StoreBatch(ctx, alerts); err != nil {
 					slog.Warn("store alerts error", slog.Any("error", err))
 				}
+				// Forward alerts to Alertmanager webhook if configured.
+				if alertmanagerClient != nil {
+					for _, a := range alerts {
+						alertmanagerClient.SendAlert(ctx, a)
+					}
+				}
+				// Fan out to Slack / Teams / webhook notifiers if configured.
+				if fanout != nil {
+					for _, a := range alerts {
+						fanout.Send(ctx, a)
+					}
+				}
 				// Feature F: broadcast critical alerts to peer nodes (cross-node
 				// alert amplification) and extract IOCs for gossip sharing.
 				if gossipMgr != nil {
@@ -544,11 +614,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 }
 
 // gracefulShutdown orchestrates an ordered, time-bounded shutdown sequence:
-//  1. Drain enforcement queue (up to 5 s) — let in-flight kill/block tasks finish.
-//  2. Flush pending alerts from the correlation engine into the store.
-//  3. Cleanup nftables/iptables chains left by the enforcer (if active).
-//  4. Close BPF programs and collectors.
-//  5. Shutdown the HTTP server.
+//  1. Stop BPF collectors so no new events enter the pipeline.
+//  2. Drain enforcement queue (up to 5 s) — let in-flight kill/block tasks finish.
+//  3. Drain the correlation engine's async Rego evaluation queue.
+//  4. Flush pending alerts from the correlation engine into the store.
+//  5. Flush the alert store (WAL checkpoint for SQLite).
+//  6. Flush pending Alertmanager webhook deliveries.
+//  7. Cleanup nftables/iptables chains left by the enforcer (if active).
+//  8. Shutdown the HTTP server.
 //
 // The entire procedure is bounded by a 30-second context.
 func gracefulShutdown(
@@ -558,7 +631,11 @@ func gracefulShutdown(
 	srv *exporter.Server,
 	enf *enforcer.Enforcer,
 	simCollector *simulate.Collector,
+	alertmanagerClient *exporter.AlertmanagerClient,
+	fanout *exporter.FanoutNotifier,
+	shutdownDuration prometheus.Gauge,
 ) {
+	start := time.Now()
 	slog.Info("graceful shutdown: starting", slog.String("budget", "30s"))
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -569,14 +646,34 @@ func gracefulShutdown(
 		simCollector.PrintReport(os.Stdout)
 	}
 
-	// Step 1: drain the enforcement worker queue so in-flight kill/block/throttle
+	// Step 1: close BPF ring-buffer readers to stop new events from entering
+	// the pipeline. This must happen before draining queues downstream.
+	slog.Info("graceful shutdown: stopping BPF collectors")
+	for _, c := range collectors {
+		if err := c.Close(); err != nil {
+			slog.Warn("graceful shutdown: collector close error",
+				slog.String("name", c.Name()), slog.Any("error", err))
+		}
+	}
+
+	// Step 2: drain the enforcement worker queue so in-flight kill/block/throttle
 	// tasks are not abandoned mid-execution. Capped at 5 s to avoid hanging.
 	drainCtx, drainCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
 	slog.Info("graceful shutdown: draining enforcement queue")
 	engine.DrainEnforceQueue(drainCtx)
 	drainCancel()
 
-	// Step 2: flush any pending alerts buffered in the correlation engine.
+	// Step 3: drain async Rego evaluation workers so every alert that was
+	// submitted for OPA enrichment lands in the engine's pending buffer.
+	regoCtx, regoCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+	slog.Info("graceful shutdown: draining Rego evaluation queue")
+	if err := engine.Drain(regoCtx); err != nil {
+		slog.Warn("graceful shutdown: Rego drain timeout, some enrichments may be missing",
+			slog.Any("error", err))
+	}
+	regoCancel()
+
+	// Step 4: flush any pending alerts buffered in the correlation engine.
 	slog.Info("graceful shutdown: flushing pending alerts")
 	if pending := engine.Flush(); len(pending) > 0 {
 		if err := alertStore.StoreBatch(shutdownCtx, pending); err != nil {
@@ -585,9 +682,46 @@ func gracefulShutdown(
 		} else {
 			slog.Info("graceful shutdown: pending alerts flushed", slog.Int("count", len(pending)))
 		}
+		// Also forward flushed alerts to alertmanager and notifiers.
+		if alertmanagerClient != nil {
+			for _, a := range pending {
+				alertmanagerClient.SendAlert(shutdownCtx, a)
+			}
+		}
+		if fanout != nil {
+			for _, a := range pending {
+				fanout.Send(shutdownCtx, a)
+			}
+		}
 	}
 
-	// Step 3: remove nftables/iptables rules the enforcer installed.
+	// Step 5: flush the alert store (SQLite WAL checkpoint; no-op for other backends).
+	slog.Info("graceful shutdown: flushing alert store")
+	if err := alertStore.Flush(shutdownCtx); err != nil {
+		slog.Warn("graceful shutdown: alert store flush error", slog.Any("error", err))
+	}
+
+	// Step 6: flush pending Alertmanager webhook deliveries and wait for all
+	// in-flight HTTP sends to complete.
+	if alertmanagerClient != nil {
+		slog.Info("graceful shutdown: flushing Alertmanager webhook")
+		if err := alertmanagerClient.FlushContext(shutdownCtx); err != nil {
+			slog.Warn("graceful shutdown: Alertmanager flush timeout",
+				slog.Any("error", err))
+		}
+	}
+
+	// Close the notification fanout so each backend can drain any internal buffers.
+	if fanout != nil {
+		slog.Info("graceful shutdown: closing notification fanout")
+		if err := fanout.Close(); err != nil {
+			slog.Warn("graceful shutdown: fanout close error", slog.Any("error", err))
+		}
+	}
+
+	engine.Close()
+
+	// Step 7: remove nftables/iptables rules the enforcer installed.
 	if enf != nil {
 		slog.Info("graceful shutdown: cleaning up enforcement chains")
 		if err := enf.Cleanup(); err != nil {
@@ -598,23 +732,17 @@ func gracefulShutdown(
 		}
 	}
 
-	// Step 4: close BPF ring-buffer readers and detach probes.
-	slog.Info("graceful shutdown: closing BPF collectors")
-	for _, c := range collectors {
-		if err := c.Close(); err != nil {
-			slog.Warn("graceful shutdown: collector close error",
-				slog.String("name", c.Name()), slog.Any("error", err))
-		}
-	}
-	engine.Close()
-
-	// Step 5: drain the HTTP server.
+	// Step 8: drain the HTTP server.
 	slog.Info("graceful shutdown: shutting down HTTP server")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("graceful shutdown: HTTP server shutdown error", slog.Any("error", err))
 	}
 
-	slog.Info("graceful shutdown: complete")
+	elapsed := time.Since(start)
+	if shutdownDuration != nil {
+		shutdownDuration.Set(elapsed.Seconds())
+	}
+	slog.Info("graceful shutdown: complete", slog.Duration("elapsed", elapsed))
 }
 
 func setupLogger(level string) {

@@ -99,6 +99,8 @@ type CorrelationEngine struct {
 	enableRegoEval  bool
 	regoQueue       chan regoTask
 	regoQueueDropped prometheus.Counter
+	// regoWg tracks in-flight rego evaluation tasks for clean Drain.
+	regoWg sync.WaitGroup
 
 	// dnsPrefilter short-circuits Rego evaluation for benign DNS events.
 	// Initialised to DefaultDNSPrefilter() by NewCorrelationEngine.
@@ -747,6 +749,7 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 			ce.pendingMu.Lock()
 			ce.pending = append(ce.pending, enriched...)
 			ce.pendingMu.Unlock()
+			ce.regoWg.Done()
 		case <-ctx.Done():
 			return
 		}
@@ -778,6 +781,23 @@ func (ce *CorrelationEngine) DrainEnforceQueue(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
+	}
+}
+
+// Drain waits for all in-flight async Rego evaluations to complete so that
+// every generated alert lands in the pending buffer before Flush is called.
+// Returns ctx.Err() if the deadline expires before the queue is empty.
+func (ce *CorrelationEngine) Drain(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		ce.regoWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -1168,12 +1188,14 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	if ce.enableRegoEval && ce.regoEngine != nil && len(alerts) > 0 {
 		regoCtx, regoCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		task := regoTask{ctx: regoCtx, cancel: regoCancel, alerts: alerts}
+		ce.regoWg.Add(1)
 		select {
 		case ce.regoQueue <- task:
 			// Submitted successfully — worker appends to pending after enrichment.
 			return alerts
 		default:
 			// Queue full: cancel the context and fall through to synchronous eval.
+			ce.regoWg.Done()
 			regoCancel()
 			ce.regoQueueDropped.Add(1)
 			alerts = ce.evaluateRegoPolicies(ctx, alerts)

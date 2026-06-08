@@ -428,6 +428,13 @@ func (s *SQLiteStore) Delete(ctx context.Context, olderThan time.Duration) (int6
 	return result.RowsAffected()
 }
 
+// Flush checkpoints the SQLite WAL so all committed writes are in the main DB
+// file and will survive a crash without replaying the WAL.
+func (s *SQLiteStore) Flush(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	return err
+}
+
 // Close stops the background maintenance goroutine and closes the database.
 func (s *SQLiteStore) Close() error {
 	s.cancel()

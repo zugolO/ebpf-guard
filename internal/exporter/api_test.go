@@ -117,6 +117,10 @@ func (m *mockAlertStore) Delete(ctx context.Context, olderThan time.Duration) (i
 	return deleted, nil
 }
 
+func (m *mockAlertStore) Flush(_ context.Context) error {
+	return nil
+}
+
 func (m *mockAlertStore) Close() error {
 	return nil
 }

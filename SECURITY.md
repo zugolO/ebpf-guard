@@ -10,38 +10,51 @@ The following versions of ebpf-guard are currently supported with security updat
 
 ## Reporting a Vulnerability
 
-We take the security of ebpf-guard seriously. If you believe you have found a security vulnerability, please report it to us as described below.
+We take the security of ebpf-guard seriously. If you believe you have found a security vulnerability, please **do not** report it through a public GitHub issue.
 
-### Please do not report security vulnerabilities through public GitHub issues.
+### Preferred: GitHub Private Vulnerability Reporting
 
-Instead, please send an email to security@ebpf-guard.io with:
+Use [GitHub's private vulnerability reporting](https://github.com/zugolO/ebpf-guard/security/advisories/new) to submit a report confidentially. This is the recommended channel because it keeps details private until a fix is available and allows coordinated disclosure directly in the repository.
+
+### Alternative: Email
+
+Send an email to **security@ebpf-guard.io** with:
 
 - A description of the vulnerability
 - Steps to reproduce the issue
 - Possible impact of the vulnerability
 - Any suggested fixes or mitigations
 
-You should receive a response within 48 hours. If for some reason you do not, please follow up via email to ensure we received your original message.
+You should receive a response within **48 hours**. If you do not, please follow up to ensure we received your original message.
 
 ## Responsible Disclosure Process
 
-1. **Initial Report**: Submit your vulnerability report via email to security@ebpf-guard.io
-2. **Acknowledgment**: We will acknowledge receipt of your vulnerability report within 48 hours
+1. **Initial Report**: Submit via GitHub private advisory or email
+2. **Acknowledgment**: Within 48 hours of receipt
 3. **Investigation**: Our security team will investigate and validate the reported vulnerability
-4. **Fix Development**: We will work on developing a fix for the validated vulnerability
-5. **Coordination**: We will coordinate with you on the disclosure timeline and credit
-6. **Disclosure**: Once the fix is released, we will publicly disclose the vulnerability with appropriate credit
+4. **Fix Development**: We will develop and test a fix
+5. **Coordination**: We will agree on a disclosure timeline and credit with the reporter
+6. **Disclosure**: Once the fix is released, the advisory is published
+
+## Patch SLA
+
+| Severity | Patch Target |
+|---|---|
+| Critical | 14 days from confirmed report |
+| High | 30 days |
+| Medium | 90 days |
+| Low | Next scheduled release |
 
 ## Disclosure Timeline
 
-We follow a 90-day disclosure timeline:
+We follow a 90-day disclosure timeline by default:
 
 - **Day 0**: Vulnerability report received
 - **Day 7**: Initial assessment completed
 - **Day 30**: Fix developed and tested
 - **Day 90**: Public disclosure (or sooner if fix is released)
 
-This timeline may be adjusted based on the severity of the vulnerability and other factors.
+This timeline may be adjusted based on the severity of the vulnerability and coordination with downstream users.
 
 ## Security Features
 
@@ -128,10 +141,38 @@ Before deploying ebpf-guard in production:
 - [ ] Configure network policies
 - [ ] Set resource limits
 
+## Threat Model & Known Risks
+
+ebpf-guard runs as a privileged DaemonSet with `CAP_BPF`, `CAP_SYS_ADMIN`, and `CAP_NET_ADMIN`. A vulnerability in the agent itself could give an attacker cluster-wide kernel access. The following areas have been reviewed:
+
+| Area | Risk | Mitigation |
+|---|---|---|
+| HTTP API auth | Bearer token timing | `crypto/subtle.ConstantTimeCompare` used on all token comparisons |
+| Rule YAML — regex | Pattern length | Regex patterns are capped at 1 KiB; Go uses RE2 (linear-time, no ReDoS) |
+| Gossip protocol secret | Timing attack | `crypto/subtle.ConstantTimeCompare` used on all secret comparisons |
+| Alertmanager webhook | SSRF | URL scheme validated; loopback and link-local addresses rejected |
+| SQLite store | SQL injection | All queries use parameterized placeholders; no dynamic SQL concatenation |
+| Alertmanager mTLS | Cert validation | Full x509 chain validation; TLS 1.2 minimum |
+| WASM plugin engine | Sandbox escape | wazero used (pure-Go, no CGo); filesystem and network access disabled |
+| OPA/Rego eval | Policy bypass | Input structs are typed Go values, not raw JSON; no user-controllable schema |
+
+An external third-party security audit is planned for the v1.0 milestone.
+
+## Automated Security Scanning
+
+The following automated security checks run on every pull request and push to `main`:
+
+- **CodeQL** — GitHub static analysis (Go, security-extended query suite)
+- **gosec** — Go security linter (SARIF results uploaded to GitHub Security tab)
+- **govulncheck** — Go vulnerability database checker (blocks on known CVEs)
+- **Trivy** — filesystem dependency scanner (SARIF results uploaded)
+- **Grype** — SBOM-based vulnerability scan (runs on release)
+
 ## Security Contacts
 
 - **Security Team**: security@ebpf-guard.io
 - **GPG Key**: [Download Public Key](https://ebpf-guard.io/security.gpg)
+- **GitHub Private Advisory**: [Report a vulnerability](https://github.com/zugolO/ebpf-guard/security/advisories/new)
 
 ## Acknowledgments
 

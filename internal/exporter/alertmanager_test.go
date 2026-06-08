@@ -320,3 +320,34 @@ func TestAlertmanagerClient_NoTraceIDWhenEmpty(t *testing.T) {
 	assert.Equal(t, "Test alert without trace", payload.Annotations.Description)
 	assert.NotContains(t, payload.Annotations.Description, "trace_id")
 }
+
+func TestValidateWebhookURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"valid http", "http://alertmanager:9093/api/v2/alerts", false},
+		{"valid https", "https://alertmanager.example.com/api/v2/alerts", false},
+		{"valid internal dns", "http://alertmanager.monitoring.svc:9093", false},
+		{"empty url", "", true},
+		{"file scheme", "file:///etc/passwd", true},
+		{"gopher scheme", "gopher://127.0.0.1", true},
+		{"ftp scheme", "ftp://internal.example.com", true},
+		{"no host", "http://", true},
+		{"loopback ipv4", "http://127.0.0.1:9093", true},
+		{"loopback ipv6", "http://[::1]:9093", true},
+		{"link-local", "http://169.254.169.254/latest/meta-data/", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateWebhookURL(tt.url)
+			if tt.wantErr {
+				assert.Error(t, err, "expected error for URL %q", tt.url)
+			} else {
+				assert.NoError(t, err, "unexpected error for URL %q", tt.url)
+			}
+		})
+	}
+}

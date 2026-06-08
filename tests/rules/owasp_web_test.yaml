@@ -1,0 +1,112 @@
+suite: owasp_web
+rules_path: ../../rules/owasp-web.yaml
+tests:
+  - name: "path traversal pattern ../../ in filename fires owasp_path_traversal"
+    rule_id: owasp_path_traversal
+    event:
+      type: file
+      file:
+        filename: "/var/www/html/../../etc/passwd"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "URL-encoded path traversal %2e%2e%2f fires owasp_path_traversal"
+    rule_id: owasp_path_traversal
+    event:
+      type: file
+      file:
+        filename: "/app/%2e%2e%2fetc/shadow"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "regular file open of non-web path does not fire any OWASP rule"
+    event:
+      type: file
+      file:
+        filename: "/opt/app/index.html"
+        op: open
+    expect: no_alert
+
+  - name: "access to /etc/shadow fires owasp_web_sensitive_file_read"
+    rule_id: owasp_web_sensitive_file_read
+    event:
+      type: file
+      file:
+        filename: "/etc/shadow"
+        op: read
+    expect: alert
+    expect_severity: critical
+
+  - name: "access to /root/.ssh/id_rsa fires owasp_web_sensitive_file_read"
+    rule_id: owasp_web_sensitive_file_read
+    event:
+      type: file
+      file:
+        filename: "/root/.ssh/id_rsa"
+        op: read
+    expect: alert
+
+  - name: "execve syscall (nr=59) fires owasp_web_shell_spawn"
+    rule_id: owasp_web_shell_spawn
+    event:
+      type: syscall
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: critical
+
+  - name: "outbound connection to cloud metadata IP fires owasp_web_metadata_access"
+    rule_id: owasp_web_metadata_access
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.254"
+        dport: 80
+    expect: alert
+    expect_severity: critical
+
+  - name: "write to /var/www/ fires owasp_web_suspicious_write"
+    rule_id: owasp_web_suspicious_write
+    event:
+      type: file
+      file:
+        filename: "/var/www/html/shell.php"
+        op: write
+    expect: alert
+
+  - name: "connection to standard HTTPS port 443 does not fire SSRF rule"
+    event:
+      type: network
+      network:
+        dst_ip: "93.184.216.34"
+        dport: 443
+    expect: no_alert
+
+  - name: "PHP file written to /uploads/ fires owasp_php_in_upload"
+    rule_id: owasp_php_in_upload
+    event:
+      type: file
+      file:
+        filename: "/uploads/backdoor.php"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "write to log file fires owasp_log_tampering"
+    rule_id: owasp_log_tampering
+    event:
+      type: file
+      file:
+        filename: "/var/log/nginx/access.log"
+        op: write
+    expect: alert
+
+  - name: "read of /tmp/app.conf does not fire any OWASP rule"
+    event:
+      type: file
+      file:
+        filename: "/tmp/app.conf"
+        op: read
+    expect: no_alert

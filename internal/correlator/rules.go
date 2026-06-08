@@ -776,7 +776,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			return ""
 		}
 		switch field {
-		case "tls_data":
+		case "tls_data", "data":
 			l := e.TLS.DataLen
 			if l > uint32(len(e.TLS.Data)) {
 				l = uint32(len(e.TLS.Data))

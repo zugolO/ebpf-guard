@@ -1,0 +1,74 @@
+suite: rootkit_detection
+rules_path: ../../rules/rootkit-detection.yaml
+tests:
+  - name: "init_module syscall (nr=175) fires rootkit_init_module_syscall"
+    rule_id: rootkit_init_module_syscall
+    event:
+      type: syscall
+      syscall:
+        nr: 175
+    expect: alert
+    expect_severity: critical
+
+  - name: "finit_module syscall (nr=313) fires rootkit_init_module_syscall"
+    rule_id: rootkit_init_module_syscall
+    event:
+      type: syscall
+      syscall:
+        nr: 313
+    expect: alert
+    expect_severity: critical
+
+  - name: "delete_module syscall (nr=176) fires rootkit_delete_module_syscall"
+    rule_id: rootkit_delete_module_syscall
+    event:
+      type: syscall
+      syscall:
+        nr: 176
+    expect: alert
+    expect_severity: warning
+
+  - name: "kernel module loaded from /tmp fires rootkit_kmod_from_tmp"
+    rule_id: rootkit_kmod_from_tmp
+    event:
+      type: file
+      file:
+        filename: "/tmp/evil.ko"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "kernel module loaded from /dev/shm fires rootkit_kmod_from_tmp"
+    rule_id: rootkit_kmod_from_tmp
+    event:
+      type: file
+      file:
+        filename: "/dev/shm/rootkit.ko"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "/etc/ld.so.preload written fires rootkit_ld_preload_written"
+    rule_id: rootkit_ld_preload_written
+    event:
+      type: file
+      file:
+        filename: "/etc/ld.so.preload"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "read syscall (nr=0) does not fire any rootkit rule"
+    event:
+      type: syscall
+      syscall:
+        nr: 0
+    expect: no_alert
+
+  - name: "read of /usr/lib/libc.so does not fire any rootkit rule"
+    event:
+      type: file
+      file:
+        filename: "/usr/lib/x86_64-linux-gnu/libc.so.6"
+        op: read
+    expect: no_alert

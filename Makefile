@@ -1,7 +1,7 @@
 # ebpf-guard Makefile
 # Requires: go 1.23+, clang, llvm, kernel headers
 
-.PHONY: all generate build test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare
+.PHONY: all generate build test test-norace rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare
 
 # Variables
 BINARY_NAME := ebpf-guard
@@ -49,6 +49,11 @@ test:
 test-norace:
 	@echo "Running tests without race detector..."
 	go test -v ./...
+
+# Run YAML rule fixture tests (no root / BPF required)
+rule-test:
+	@echo "Running rule fixture tests..."
+	go test -v -race ./tests/...
 
 # Run go vet and linting
 lint:

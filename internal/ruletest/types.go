@@ -82,6 +82,18 @@ type EventSpec struct {
 	File    *FileSpec    `yaml:"file,omitempty"`
 	DNS     *DNSSpec     `yaml:"dns,omitempty"`
 	Privesc *PrivescSpec `yaml:"privesc,omitempty"`
+	TLS     *TLSSpec     `yaml:"tls,omitempty"`
+}
+
+// TLSSpec describes a TLS plaintext inspection event payload.
+type TLSSpec struct {
+	// Data is the plaintext payload (first 256 bytes).
+	Data string `yaml:"data,omitempty"`
+	// DataLen overrides the payload length reported by the event.
+	// When omitted, len(Data) is used.
+	DataLen uint32 `yaml:"data_len,omitempty"`
+	// Direction is "write" (outbound, default) or "read" (inbound).
+	Direction string `yaml:"direction,omitempty"`
 }
 
 // SyscallSpec describes a syscall event payload.
@@ -250,8 +262,27 @@ func (s EventSpec) Build() (types.Event, error) {
 		}
 		e.Privesc = pe
 
+	case "tls":
+		e.Type = types.EventTLS
+		te := &types.TLSEvent{}
+		if s.TLS != nil {
+			copy(te.Data[:], s.TLS.Data)
+			if s.TLS.DataLen > 0 {
+				te.DataLen = s.TLS.DataLen
+			} else {
+				te.DataLen = uint32(len(s.TLS.Data))
+			}
+			switch strings.ToLower(s.TLS.Direction) {
+			case "read":
+				te.Direction = types.TLSDirectionRead
+			default:
+				te.Direction = types.TLSDirectionWrite
+			}
+		}
+		e.TLS = te
+
 	default:
-		return e, fmt.Errorf("unknown event type %q (valid: syscall, network, file, dns, privesc)", s.Type)
+		return e, fmt.Errorf("unknown event type %q (valid: syscall, network, file, dns, privesc, tls)", s.Type)
 	}
 	return e, nil
 }

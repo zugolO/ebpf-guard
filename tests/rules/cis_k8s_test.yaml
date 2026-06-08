@@ -1,0 +1,82 @@
+suite: cis_k8s
+rules_path: ../../rules/cis-k8s.yaml
+tests:
+  - name: "kubectl command fires cis_5_1_1_cluster_admin_usage"
+    rule_id: cis_5_1_1_cluster_admin_usage
+    event:
+      type: syscall
+      comm: "kubectl"
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  - name: "helm command fires cis_5_1_1_cluster_admin_usage"
+    rule_id: cis_5_1_1_cluster_admin_usage
+    event:
+      type: syscall
+      comm: "helm"
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "ordinary nginx syscall does not fire cluster-admin rule"
+    event:
+      type: syscall
+      comm: "nginx"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "access to kubelet pod secrets fires cis_5_1_3_secret_access"
+    rule_id: cis_5_1_3_secret_access
+    event:
+      type: file
+      file:
+        filename: "/var/lib/kubelet/pods/abc123/secrets/token"
+        op: open
+    expect: alert
+    expect_severity: warning
+
+  - name: "access to mounted k8s service-account token fires cis_5_1_3_secret_access"
+    rule_id: cis_5_1_3_secret_access
+    event:
+      type: file
+      file:
+        filename: "/run/secrets/kubernetes.io/serviceaccount/token"
+        op: read
+    expect: alert
+
+  - name: "read of /etc/passwd does not fire any CIS k8s rule"
+    event:
+      type: file
+      file:
+        filename: "/etc/passwd"
+        op: read
+    expect: no_alert
+
+  - name: "unshare syscall (nr=160) fires cis_5_2_1_privileged_container"
+    rule_id: cis_5_2_1_privileged_container
+    event:
+      type: syscall
+      syscall:
+        nr: 160
+    expect: alert
+    expect_severity: critical
+
+  - name: "setuid syscall (nr=105) fires cis_5_2_5_privilege_escalation"
+    rule_id: cis_5_2_5_privilege_escalation
+    event:
+      type: syscall
+      syscall:
+        nr: 105
+    expect: alert
+    expect_severity: critical
+
+  - name: "read syscall (nr=0) does not fire any CIS rule"
+    event:
+      type: syscall
+      comm: "app"
+      syscall:
+        nr: 0
+    expect: no_alert

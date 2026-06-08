@@ -1,0 +1,152 @@
+suite: aks_threats
+rules_path: ../../rules/aks-threats.yaml
+tests:
+  # ── IMDS / managed identity network rules ──────────────────────────────────
+
+  - name: "connection to 169.254.169.254 fires aks_imds_access"
+    rule_id: aks_imds_access
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.254"
+        dport: 80
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to 169.254.169.254 port 443 also fires aks_imds_access"
+    rule_id: aks_imds_access
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.254"
+        dport: 443
+    expect: alert
+    expect_severity: critical
+
+  - name: "normal cluster traffic does not fire AKS IMDS rule"
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.0.1"
+        dport: 443
+    expect: no_alert
+
+  - name: "external internet traffic does not fire AKS IMDS rule"
+    event:
+      type: network
+      network:
+        dst_ip: "104.45.16.0"
+        dport: 443
+    expect: no_alert
+
+  # ── Service principal and credential file rules ─────────────────────────────
+
+  - name: "azure.json access fires aks_service_principal_secret_access"
+    rule_id: aks_service_principal_secret_access
+    event:
+      type: file
+      file:
+        filename: "/etc/kubernetes/azure.json"
+    expect: alert
+    expect_severity: critical
+
+  - name: "azure.json.bak also fires aks_service_principal_secret_access"
+    rule_id: aks_service_principal_secret_access
+    event:
+      type: file
+      file:
+        filename: "/etc/kubernetes/azure.json.bak"
+    expect: alert
+    expect_severity: critical
+
+  # ── Workload identity token rules ──────────────────────────────────────────
+
+  - name: "AKS workload identity token read fires aks_workload_identity_token_read"
+    rule_id: aks_workload_identity_token_read
+    event:
+      type: file
+      file:
+        filename: "/var/run/secrets/azure/tokens/azure-identity-token"
+    expect: alert
+    expect_severity: critical
+
+  - name: "nested path under /var/run/secrets/azure/tokens/ fires aks_workload_identity_token_read"
+    rule_id: aks_workload_identity_token_read
+    event:
+      type: file
+      file:
+        filename: "/var/run/secrets/azure/tokens/my-identity"
+    expect: alert
+    expect_severity: critical
+
+  # ── Azure Linux Agent access rules ─────────────────────────────────────────
+
+  - name: "waagent directory access fires aks_azure_linux_agent_access"
+    rule_id: aks_azure_linux_agent_access
+    event:
+      type: file
+      file:
+        filename: "/var/lib/waagent/ovf-env.xml"
+    expect: alert
+    expect_severity: critical
+
+  - name: "waagent extension data access also fires aks_azure_linux_agent_access"
+    rule_id: aks_azure_linux_agent_access
+    event:
+      type: file
+      file:
+        filename: "/var/lib/waagent/Microsoft.Azure.Extensions.CustomScript-1.0/config/0.settings"
+    expect: alert
+    expect_severity: critical
+
+  # ── Bootstrap kubeconfig rules ─────────────────────────────────────────────
+
+  - name: "bootstrap-kubeconfig access fires aks_bootstrap_kubeconfig_access"
+    rule_id: aks_bootstrap_kubeconfig_access
+    event:
+      type: file
+      file:
+        filename: "/etc/kubernetes/bootstrap-kubeconfig"
+    expect: alert
+    expect_severity: critical
+
+  - name: "node kubeconfig access fires aks_bootstrap_kubeconfig_access"
+    rule_id: aks_bootstrap_kubeconfig_access
+    event:
+      type: file
+      file:
+        filename: "/etc/kubernetes/kubeconfig"
+    expect: alert
+    expect_severity: critical
+
+  - name: "node-kubeconfig access fires aks_bootstrap_kubeconfig_access"
+    rule_id: aks_bootstrap_kubeconfig_access
+    event:
+      type: file
+      file:
+        filename: "/etc/kubernetes/node-kubeconfig"
+    expect: alert
+    expect_severity: critical
+
+  # ── Negative cases ──────────────────────────────────────────────────────────
+
+  - name: "access to /etc/hosts does not fire any AKS rule"
+    event:
+      type: file
+      file:
+        filename: "/etc/hosts"
+    expect: no_alert
+
+  - name: "access to /etc/kubernetes/manifests/ does not fire AKS rules"
+    event:
+      type: file
+      file:
+        filename: "/etc/kubernetes/manifests/kube-apiserver.yaml"
+    expect: no_alert
+
+  - name: "access to /var/log/syslog does not fire any AKS rule"
+    event:
+      type: file
+      file:
+        filename: "/var/log/syslog"
+    expect: no_alert

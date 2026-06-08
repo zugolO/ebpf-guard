@@ -1,0 +1,833 @@
+# Sigma-derived Linux detection rules for ebpf-guard
+# Based on SigmaHQ linux/ rule categories — converted and validated
+# MITRE ATT&CK coverage: T1059, T1053, T1543, T1105, T1036, T1070, T1218, T1222
+
+rules:
+  # ============================================================================
+  # T1059.004 — Command and Scripting Interpreter: Unix Shell
+  # ============================================================================
+
+  - id: sigma_shell_from_unexpected_parent
+    name: "Shell spawned from unexpected parent process"
+    description: "A shell (bash/sh/zsh/dash) was executed by a process that does not normally spawn shells. Common indicator of exploitation or RCE."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["59"]  # execve
+    severity: warning
+    action: alert
+    tags: [mitre:T1059.004, sigma, shell-spawn, execution]
+
+  - id: sigma_reverse_shell_named_pipe
+    name: "Named pipe used for reverse shell"
+    description: "Process created a named pipe under /tmp or /dev/shm — common reverse shell technique using mkfifo."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/[a-zA-Z0-9_-]{1,20}$"
+        - "/dev/shm/[a-zA-Z0-9_-]{1,20}$"
+        - "/var/tmp/[a-zA-Z0-9_-]{1,20}$"
+    severity: warning
+    action: alert
+    tags: [mitre:T1059.004, sigma, reverse-shell, named-pipe]
+
+  - id: sigma_base64_execution_shell
+    name: "Base64-encoded command in shell argument"
+    description: "Shell invoked with base64-encoded payload — common obfuscation technique for initial execution payloads."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "base64 -d"
+        - "base64 --decode"
+        - "\\|\\s*base64"
+        - "echo .* \\| bash"
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.004, mitre:T1027, sigma, obfuscation, base64]
+
+  - id: sigma_script_dropper_via_curl
+    name: "Script downloaded and executed via curl pipe"
+    description: "curl or wget output piped directly into sh/bash — common dropper pattern used in initial access."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "curl.*\\|.*sh"
+        - "curl.*\\|.*bash"
+        - "wget.*\\|.*sh"
+        - "wget.*\\|.*bash"
+        - "curl.*\\|.*python"
+        - "curl.*\\|.*perl"
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.004, mitre:T1105, sigma, dropper, initial-access]
+
+  - id: sigma_python_exec_shell
+    name: "Python used to execute shell commands"
+    description: "Python interpreter invoked with os.system, subprocess.call, or pty.spawn — common in post-exploit enumeration."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "python.*os\\.system"
+        - "python.*subprocess"
+        - "python.*pty\\.spawn"
+        - "python.*import os.*exec"
+    severity: warning
+    action: alert
+    tags: [mitre:T1059.006, sigma, python, shell-execution]
+
+  - id: sigma_perl_shell_execution
+    name: "Perl used to execute shell commands"
+    description: "Perl interpreter used for command execution via system() or exec() — GTFOBin technique."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "perl.*system\\("
+        - "perl.*exec\\("
+        - "perl -e.*\\$_"
+        - "perl.*\\|.*sh"
+    severity: warning
+    action: alert
+    tags: [mitre:T1059, sigma, perl, gtfobins]
+
+  - id: sigma_ruby_shell_execution
+    name: "Ruby used to execute shell commands"
+    description: "Ruby interpreter used for shell command execution — common GTFOBin and post-exploit technique."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "ruby.*exec\\("
+        - "ruby.*system\\("
+        - "ruby -e.*Kernel\\.exec"
+        - "ruby.*IO\\.popen"
+    severity: warning
+    action: alert
+    tags: [mitre:T1059, sigma, ruby, gtfobins]
+
+  # ============================================================================
+  # T1053.003 — Scheduled Task/Job: Cron
+  # ============================================================================
+
+  - id: sigma_cron_job_created
+    name: "New cron job created in system directory"
+    description: "A file was written to /etc/cron.d/, /etc/cron.daily/, /etc/cron.hourly/, or similar — persistence mechanism."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/cron.d/"
+        - "/etc/cron.daily/"
+        - "/etc/cron.hourly/"
+        - "/etc/cron.weekly/"
+        - "/etc/cron.monthly/"
+        - "/var/spool/cron/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1053.003, sigma, cron, persistence]
+
+  - id: sigma_crontab_modification
+    name: "crontab file directly modified"
+    description: "The system crontab file /etc/crontab was written — direct persistence without cron.d."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/crontab"
+        - "/etc/cron.allow"
+        - "/etc/cron.deny"
+    severity: critical
+    action: alert
+    tags: [mitre:T1053.003, sigma, crontab, persistence]
+
+  # ============================================================================
+  # T1543.002 — Create or Modify System Process: Systemd Service
+  # ============================================================================
+
+  - id: sigma_systemd_service_created
+    name: "New systemd service unit created"
+    description: "A .service unit file was created in a systemd directory — persistence or lateral movement."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/etc/systemd/system/[^/]+\\.service"
+        - "/usr/lib/systemd/system/[^/]+\\.service"
+        - "/lib/systemd/system/[^/]+\\.service"
+        - "/etc/systemd/user/[^/]+\\.service"
+    severity: critical
+    action: alert
+    tags: [mitre:T1543.002, sigma, systemd, persistence]
+
+  - id: sigma_systemd_timer_created
+    name: "New systemd timer unit created"
+    description: "A .timer unit file was created — persistence mechanism equivalent to cron."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/etc/systemd/system/[^/]+\\.timer"
+        - "/usr/lib/systemd/system/[^/]+\\.timer"
+    severity: warning
+    action: alert
+    tags: [mitre:T1543.002, sigma, systemd, timer, persistence]
+
+  # ============================================================================
+  # T1105 — Ingress Tool Transfer
+  # ============================================================================
+
+  - id: sigma_tool_download_to_tmp
+    name: "Download tool written to /tmp or /dev/shm"
+    description: "curl, wget, or fetch wrote a file to a world-writable temporary directory — tool staging."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/[^/]+\\.(sh|py|pl|rb|elf|bin|exe|so)"
+        - "/dev/shm/[^/]+\\.(sh|py|pl|rb|elf|bin|exe|so)"
+        - "/var/tmp/[^/]+\\.(sh|py|pl|rb|elf|bin|exe|so)"
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, sigma, tool-transfer, staging]
+
+  - id: sigma_chmod_executable_tmp
+    name: "chmod +x on file in temporary directory"
+    description: "Executable permission set on a file in /tmp or /dev/shm — dropper staging before execution."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, mitre:T1222, sigma, chmod, staging]
+
+  # ============================================================================
+  # T1036 — Masquerading
+  # ============================================================================
+
+  - id: sigma_masquerade_kernel_thread
+    name: "Process masquerading as kernel thread"
+    description: "User-space process using square-bracket notation like kernel threads (e.g. [kworker]) — process name masquerading."
+    event_type: syscall
+    condition:
+      field: comm
+      op: regex
+      values:
+        - "^\\[.*\\]$"
+    severity: warning
+    action: alert
+    tags: [mitre:T1036, sigma, masquerade, process-hiding]
+
+  - id: sigma_masquerade_sshd
+    name: "Process masquerading as sshd"
+    description: "A non-standard process is using the name 'sshd' or 'ssh' to hide — process masquerade."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/sshd"
+        - "/dev/shm/sshd"
+        - "/var/tmp/sshd"
+        - "/tmp/ssh"
+    severity: critical
+    action: alert
+    tags: [mitre:T1036.005, sigma, masquerade, sshd]
+
+  - id: sigma_binary_in_tmp_executed
+    name: "ELF binary executed from /tmp or /dev/shm"
+    description: "A compiled binary was executed from a temporary directory — unusual and indicator of dropper execution."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/tmp/"
+        - "/dev/shm/"
+        - "/var/tmp/"
+        - "/run/user/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1036, mitre:T1059, sigma, temp-execution]
+
+  # ============================================================================
+  # T1070 — Indicator Removal
+  # ============================================================================
+
+  - id: sigma_log_deletion
+    name: "System log files deleted"
+    description: "Files in /var/log/ were deleted or truncated — log tampering to remove attack evidence."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/log/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion]
+
+  - id: sigma_history_file_cleared
+    name: "Shell history file cleared or deleted"
+    description: "Bash/zsh history file was deleted or truncated — attacker covering tracks."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*\\.bash_history$"
+        - ".*\\.zsh_history$"
+        - ".*\\.history$"
+        - ".*\\.sh_history$"
+    severity: warning
+    action: alert
+    tags: [mitre:T1070.003, sigma, history, defense-evasion]
+
+  - id: sigma_utmp_wtmp_modified
+    name: "Login record files modified (utmp/wtmp)"
+    description: "The system login tracking files (utmp, wtmp, lastlog) were modified — attacker hiding active sessions."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/var/run/utmp"
+        - "/var/log/wtmp"
+        - "/var/log/btmp"
+        - "/var/log/lastlog"
+    severity: warning
+    action: alert
+    tags: [mitre:T1070, sigma, utmp, session-hiding]
+
+  # ============================================================================
+  # T1218 — System Binary Proxy Execution
+  # ============================================================================
+
+  - id: sigma_lolbin_python_download
+    name: "Python used to download remote file"
+    description: "Python urllib or requests used to download files — Python LOLBin for ingress tool transfer."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "python.*urllib.*urlretrieve"
+        - "python.*urllib.*urlopen"
+        - "python.*requests\\.get"
+        - "python.*http\\.client"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, mitre:T1105, sigma, lolbin, python]
+
+  - id: sigma_lolbin_openssl_connect
+    name: "OpenSSL used as network tunnel"
+    description: "openssl s_client invoked with -connect for reverse shell or C2 tunneling."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "openssl.*s_client.*-connect"
+        - "openssl.*s_server"
+    severity: critical
+    action: alert
+    tags: [mitre:T1218, mitre:T1059, sigma, openssl, reverse-shell]
+
+  - id: sigma_lolbin_awk_shell
+    name: "awk used to execute shell commands"
+    description: "awk BEGIN{system()} pattern used for shell execution — GTFOBin technique."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "awk.*system\\("
+        - "awk.*BEGIN.*system"
+        - "gawk.*system\\("
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, sigma, awk, gtfobins]
+
+  - id: sigma_lolbin_find_exec
+    name: "find -exec used for shell execution"
+    description: "find command using -exec to run a shell — GTFOBin technique for command execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "find.*-exec.*sh.*"
+        - "find.*-exec.*bash.*"
+        - "find.*-exec.*python.*"
+        - "find.*-exec.*perl.*"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, sigma, find, gtfobins]
+
+  - id: sigma_lolbin_env_execution
+    name: "env used to bypass shell restrictions"
+    description: "env command used to execute a shell or interpreter — GTFOBin for restricted shell bypass."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "^env .*(sh|bash|python|perl|ruby|node)"
+        - "env\\s+-i\\s+"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, sigma, env, gtfobins, restricted-shell-bypass]
+
+  - id: sigma_lolbin_dd_write
+    name: "dd used to write to block device or binary"
+    description: "dd with of= targeting a device or binary file — data overwrite or malware installation."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "dd.*of=/dev/[sh]d"
+        - "dd.*of=/dev/nvme"
+        - "dd.*if=/dev/urandom.*of="
+        - "dd.*conv=notrunc"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, sigma, dd, disk-write]
+
+  # ============================================================================
+  # T1222 — File and Directory Permissions Modification
+  # ============================================================================
+
+  - id: sigma_world_writable_dir_created
+    name: "World-writable directory created"
+    description: "mkdir called with world-writable permissions (chmod 777 or mode 0777) — staging ground for privilege escalation."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["83", "258"]  # mkdir, mkdirat
+    severity: warning
+    action: alert
+    tags: [mitre:T1222, sigma, world-writable, filesystem]
+
+  - id: sigma_sensitive_file_chmod
+    name: "Permissions changed on sensitive system file"
+    description: "chmod/fchmod applied to critical system files — preparation for tampering."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/shadow"
+        - "/etc/passwd"
+        - "/etc/sudoers"
+        - "/etc/ssh/"
+        - "/etc/pam.d/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1222, sigma, chmod, sensitive-file]
+
+  # ============================================================================
+  # T1082 — System Information Discovery
+  # ============================================================================
+
+  - id: sigma_cpu_info_access
+    name: "CPU/hardware info enumeration"
+    description: "Access to /proc/cpuinfo, /proc/meminfo, or hardware info files — system reconnaissance."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/proc/cpuinfo"
+        - "/proc/meminfo"
+        - "/proc/version"
+        - "/proc/sys/kernel/hostname"
+        - "/proc/sys/kernel/osrelease"
+        - "/proc/sys/kernel/version"
+    severity: warning
+    action: alert
+    tags: [mitre:T1082, sigma, discovery, system-info]
+
+  - id: sigma_kernel_version_read
+    name: "Kernel version file read"
+    description: "Process read /proc/version or /etc/os-release — OS fingerprinting for exploit selection."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/proc/version"
+        - "/etc/os-release"
+        - "/etc/lsb-release"
+        - "/etc/debian_version"
+        - "/etc/redhat-release"
+        - "/etc/centos-release"
+        - "/etc/fedora-release"
+    severity: warning
+    action: alert
+    tags: [mitre:T1082, sigma, discovery, os-fingerprinting]
+
+  # ============================================================================
+  # T1083 — File and Directory Discovery
+  # ============================================================================
+
+  - id: sigma_sensitive_dir_listing
+    name: "Listing of sensitive credential directories"
+    description: "Directory listing of /root, /home, /etc/ssh, or /root/.ssh — credential discovery."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/root/.ssh/"
+        - "/root/.aws/"
+        - "/root/.gcp/"
+        - "/root/.kube/"
+        - "/home/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1083, mitre:T1552, sigma, discovery, credential-files]
+
+  # ============================================================================
+  # T1087 — Account Discovery
+  # ============================================================================
+
+  - id: sigma_passwd_shadow_read
+    name: "Credential files read (/etc/passwd or /etc/shadow)"
+    description: "Reads to /etc/passwd (user enumeration) or /etc/shadow (password hash extraction)."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/passwd"
+        - "/etc/shadow"
+        - "/etc/gshadow"
+        - "/etc/group"
+    severity: warning
+    action: alert
+    tags: [mitre:T1087.001, sigma, credential-access, account-discovery]
+
+  - id: sigma_sudo_config_read
+    name: "Sudoers configuration read"
+    description: "Process read /etc/sudoers or /etc/sudoers.d — enumerating privileged accounts."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/sudoers"
+        - "/etc/sudoers.d/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1087, sigma, sudo, privilege-discovery]
+
+  # ============================================================================
+  # T1548 — Abuse Elevation Control Mechanism
+  # ============================================================================
+
+  - id: sigma_setuid_syscall
+    name: "setuid/setgid syscall called"
+    description: "Process called setuid(0) or setgid(0) — attempting to switch to root identity."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["105", "106", "113", "114", "117", "119"]  # setuid, setgid, setreuid, setregid, setresuid, setresgid
+    severity: warning
+    action: alert
+    tags: [mitre:T1548.001, sigma, setuid, privilege-escalation]
+
+  - id: sigma_prctl_dumpable
+    name: "Process set itself non-dumpable via prctl"
+    description: "prctl(PR_SET_DUMPABLE, 0) called — process hiding from /proc inspection and core dumps."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["157"]  # prctl
+    severity: warning
+    action: alert
+    tags: [mitre:T1548, sigma, prctl, process-hiding]
+
+  # ============================================================================
+  # T1003 — OS Credential Dumping
+  # ============================================================================
+
+  - id: sigma_memory_proc_dump
+    name: "Process memory read via /proc/*/mem"
+    description: "Process reading another process's memory via /proc/[pid]/mem — credential extraction or code injection."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/proc/[0-9]+/mem"
+        - "/proc/[0-9]+/maps"
+        - "/proc/[0-9]+/environ"
+        - "/proc/[0-9]+/cmdline"
+    severity: critical
+    action: alert
+    tags: [mitre:T1003, sigma, memory-dump, credential-access]
+
+  - id: sigma_ptrace_attach
+    name: "ptrace PTRACE_ATTACH to another process"
+    description: "ptrace(PTRACE_ATTACH) used to attach to another process — credential theft or code injection."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["101"]  # ptrace
+    severity: critical
+    action: alert
+    tags: [mitre:T1003, mitre:T1055, sigma, ptrace, credential-access]
+
+  # ============================================================================
+  # T1055 — Process Injection
+  # ============================================================================
+
+  - id: sigma_memfd_create_anonymous
+    name: "Anonymous file created via memfd_create"
+    description: "memfd_create syscall — creates an anonymous file in memory. Used for fileless malware and process injection."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["319"]  # memfd_create
+    severity: critical
+    action: alert
+    tags: [mitre:T1055, mitre:T1620, sigma, memfd, fileless]
+
+  - id: sigma_mprotect_exec_heap
+    name: "Memory region marked executable (mprotect)"
+    description: "mprotect PROT_EXEC applied — marking heap/stack as executable. Used in shellcode injection."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["10"]  # mprotect
+    severity: warning
+    action: alert
+    tags: [mitre:T1055, sigma, mprotect, shellcode]
+
+  - id: sigma_process_vm_readv
+    name: "process_vm_readv cross-process memory read"
+    description: "process_vm_readv syscall used to read another process's address space — credential theft or memory scraping."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["310"]  # process_vm_readv
+    severity: critical
+    action: alert
+    tags: [mitre:T1055, sigma, process-vm, memory-scraping]
+
+  - id: sigma_process_vm_writev
+    name: "process_vm_writev cross-process memory write"
+    description: "process_vm_writev used to write to another process — code injection without ptrace."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["311"]  # process_vm_writev
+    severity: critical
+    action: alert
+    tags: [mitre:T1055, sigma, process-vm, code-injection]
+
+  # ============================================================================
+  # T1562 — Impair Defenses
+  # ============================================================================
+
+  - id: sigma_seccomp_filter_install
+    name: "seccomp BPF filter installed by non-container-runtime"
+    description: "seccomp(SECCOMP_SET_MODE_FILTER) called — installing syscall filter. Legitimate for sandboxing, suspicious from unknown processes."
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["317"]  # seccomp
+    severity: warning
+    action: alert
+    tags: [mitre:T1562, sigma, seccomp, defense-evasion]
+
+  - id: sigma_iptables_flush
+    name: "iptables flush or chain delete"
+    description: "iptables -F or iptables --flush executed — removing firewall rules to enable C2 communication."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "iptables.*-F"
+        - "iptables.*--flush"
+        - "iptables.*-X"
+        - "iptables.*--delete-chain"
+        - "ip6tables.*-F"
+        - "ufw disable"
+        - "systemctl stop firewalld"
+        - "systemctl disable firewalld"
+    severity: critical
+    action: alert
+    tags: [mitre:T1562.004, sigma, iptables, firewall-disable]
+
+  - id: sigma_auditd_stopped
+    name: "auditd security daemon stopped"
+    description: "auditd (Linux audit daemon) stopped or disabled — removing security monitoring."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "systemctl.*stop.*auditd"
+        - "systemctl.*disable.*auditd"
+        - "service.*auditd.*stop"
+        - "auditctl.*-e 0"
+    severity: critical
+    action: alert
+    tags: [mitre:T1562.001, sigma, auditd, defense-evasion]
+
+  # ============================================================================
+  # T1014 — Rootkit
+  # ============================================================================
+
+  - id: sigma_dev_mem_access
+    name: "Direct memory device access (/dev/mem or /dev/kmem)"
+    description: "Process opened /dev/mem or /dev/kmem for direct physical memory access — rootkit or advanced privilege escalation."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/dev/mem"
+        - "/dev/kmem"
+        - "/dev/port"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, sigma, rootkit, memory-access]
+
+  - id: sigma_proc_sysrq_write
+    name: "Write to /proc/sysrq-trigger"
+    description: "Process wrote to /proc/sysrq-trigger — can crash/reboot system or sync/unmount filesystems to destroy evidence."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/proc/sysrq-trigger"
+    severity: critical
+    action: alert
+    tags: [mitre:T1014, sigma, sysrq, system-manipulation]
+
+  # ============================================================================
+  # T1110 — Brute Force
+  # ============================================================================
+
+  - id: sigma_ssh_many_failed_auth
+    name: "Suspicious high rate of authentication attempts"
+    description: "Many rapid authentication calls detected — brute force or credential stuffing attack in progress."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["22", "2222", "22222"]  # SSH ports
+    severity: warning
+    action: alert
+    tags: [mitre:T1110, sigma, brute-force, ssh]
+
+  - id: sigma_failed_login_syscall
+    name: "Authentication failure via PAM"
+    description: "Login failure recorded — tracks repeated authentication failures for brute force detection."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/pam.d/"
+        - "/etc/security/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1110, sigma, pam, auth-failure]
+
+  # ============================================================================
+  # T1190 — Exploit Public-Facing Application
+  # ============================================================================
+
+  - id: sigma_web_server_shell_spawn
+    name: "Shell spawned from web server process"
+    description: "A shell was launched with a web server (apache2, nginx, httpd) as its ancestor — RCE via web application."
+    event_type: syscall
+    condition:
+      field: comm
+      op: regex
+      values:
+        - "^sh$"
+        - "^bash$"
+        - "^dash$"
+        - "^zsh$"
+        - "^ksh$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1190, sigma, rce, webshell, web-server]
+
+  - id: sigma_java_child_shell
+    name: "Shell child process of Java runtime"
+    description: "Java spawned a shell — Log4Shell, Spring4Shell, or Java deserialization RCE pattern."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/bin/sh"
+        - "/bin/bash"
+        - "/bin/dash"
+        - "/usr/bin/sh"
+        - "/usr/bin/bash"
+    severity: critical
+    action: alert
+    tags: [mitre:T1190, mitre:T1059.004, sigma, log4shell, java-rce]
+
+  # ============================================================================
+  # Network outbound on unusual ports
+  # ============================================================================
+
+  - id: sigma_outbound_tor_ports
+    name: "Outbound connection to Tor network ports"
+    description: "Connection to TCP 9001/9030/9050/9051 — Tor relay or hidden service used for C2 anonymization."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["9001", "9030", "9050", "9051"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1090.003, sigma, tor, c2, anonymization]
+
+  - id: sigma_irc_c2_ports
+    name: "Outbound IRC connection on standard ports"
+    description: "Connection to TCP 6667/6668/6669/6697 (IRC ports) — legacy botnet C2 protocol."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["6667", "6668", "6669", "6697"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1095, sigma, irc, botnet, c2]

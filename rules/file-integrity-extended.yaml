@@ -1,0 +1,411 @@
+# Extended File Integrity Monitoring Rules for ebpf-guard
+# Covers critical system file modifications, sensitive credential paths,
+# and integrity-critical configuration files
+# MITRE ATT&CK: T1565, T1070, T1546, T1098, T1543
+
+rules:
+  # ============================================================================
+  # T1565 — Data Manipulation: Stored Data Manipulation
+  # ============================================================================
+
+  - id: fim_binary_replaced_in_system_dir
+    name: "System binary replaced in /usr/bin or /bin"
+    description: "A file was written directly to /usr/bin, /usr/sbin, /bin, or /sbin — replacing a system binary with a malicious one."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "^/usr/bin/[^/]+$"
+        - "^/usr/sbin/[^/]+$"
+        - "^/bin/[^/]+$"
+        - "^/sbin/[^/]+$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1565.001, fim, binary-replacement, system-binary]
+
+  - id: fim_library_replaced
+    name: "System shared library replaced"
+    description: "A file was written to /lib or /usr/lib matching a .so pattern — replacing a shared library with a malicious one."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "^/lib/.*\\.so(\\.[0-9]+)*$"
+        - "^/usr/lib/.*\\.so(\\.[0-9]+)*$"
+        - "^/lib64/.*\\.so(\\.[0-9]+)*$"
+        - "^/usr/lib64/.*\\.so(\\.[0-9]+)*$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1565.001, fim, library-replacement]
+
+  # ============================================================================
+  # T1098 — Account Manipulation
+  # ============================================================================
+
+  - id: fim_passwd_write
+    name: "/etc/passwd written (user account modification)"
+    description: "Direct write to /etc/passwd — adding, modifying, or deleting user accounts outside normal administration."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/passwd"
+        - "/etc/passwd-"
+    severity: critical
+    action: alert
+    tags: [mitre:T1098, fim, passwd, account-manipulation]
+
+  - id: fim_shadow_write
+    name: "/etc/shadow written (password hash modification)"
+    description: "Direct write to /etc/shadow — modifying password hashes to change or disable passwords."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/shadow"
+        - "/etc/shadow-"
+        - "/etc/gshadow"
+        - "/etc/gshadow-"
+    severity: critical
+    action: alert
+    tags: [mitre:T1098, fim, shadow, credential-manipulation]
+
+  - id: fim_group_write
+    name: "/etc/group written (group membership modification)"
+    description: "/etc/group was modified — adding a user to the sudo/wheel group for privilege escalation."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/group"
+        - "/etc/group-"
+    severity: critical
+    action: alert
+    tags: [mitre:T1098, fim, group, privilege-escalation]
+
+  # ============================================================================
+  # T1546 — Event Triggered Execution
+  # ============================================================================
+
+  - id: fim_profile_modified
+    name: "Shell profile or RC file modified (backdoor persistence)"
+    description: "A shell startup file was modified — adding commands to user or global profile for persistence."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/\\.bashrc$"
+        - ".*/\\.bash_profile$"
+        - ".*/\\.bash_login$"
+        - ".*/\\.profile$"
+        - ".*/\\.zshrc$"
+        - ".*/\\.zprofile$"
+        - ".*/\\.zlogin$"
+        - "/etc/profile$"
+        - "/etc/profile\\.d/.*\\.sh$"
+        - "/etc/bash\\.bashrc$"
+        - "/etc/environment$"
+    severity: warning
+    action: alert
+    tags: [mitre:T1546.004, fim, shell-profile, persistence]
+
+  - id: fim_rc_local_modified
+    name: "/etc/rc.local modified (boot persistence)"
+    description: "/etc/rc.local written — adding commands executed at each system boot for persistent access."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/rc.local"
+        - "/etc/rc.d/rc.local"
+        - "/etc/init.d/rc.local"
+    severity: critical
+    action: alert
+    tags: [mitre:T1546, fim, rc-local, boot-persistence]
+
+  - id: fim_init_d_script_written
+    name: "SysV init script created or modified"
+    description: "A script was written to /etc/init.d/ — persistence via SysV init startup script."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/init.d/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1543, fim, init-d, persistence]
+
+  # ============================================================================
+  # T1098.004 — SSH Key Manipulation
+  # ============================================================================
+
+  - id: fim_ssh_key_written
+    name: "SSH private key file written"
+    description: "An SSH private key file was created or modified — new backdoor key added for persistent SSH access."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/\\.ssh/id_rsa$"
+        - ".*/\\.ssh/id_ecdsa$"
+        - ".*/\\.ssh/id_ed25519$"
+        - ".*/\\.ssh/id_dsa$"
+        - ".*/\\.ssh/authorized_keys$"
+        - ".*/\\.ssh/authorized_keys2$"
+        - "/etc/ssh/authorized_keys$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1098.004, fim, ssh-key, persistence]
+
+  - id: fim_ssh_known_hosts_modified
+    name: "SSH known_hosts file modified"
+    description: "known_hosts file modified — removing host fingerprints to suppress SSH warnings during lateral movement."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/\\.ssh/known_hosts$"
+        - "/etc/ssh/ssh_known_hosts$"
+    severity: warning
+    action: alert
+    tags: [mitre:T1098, fim, ssh-known-hosts, lateral-movement]
+
+  # ============================================================================
+  # T1070 — Indicator Removal
+  # ============================================================================
+
+  - id: fim_syslog_modified
+    name: "Syslog or journal configuration modified"
+    description: "System logging configuration files modified — disabling or redirecting logs to remove attack evidence."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/syslog.conf"
+        - "/etc/rsyslog.conf"
+        - "/etc/rsyslog.d/"
+        - "/etc/syslog-ng/"
+        - "/etc/logrotate.d/"
+        - "/etc/logrotate.conf"
+    severity: warning
+    action: alert
+    tags: [mitre:T1070.002, fim, syslog, log-tampering]
+
+  - id: fim_audit_rules_modified
+    name: "Linux audit rules modified"
+    description: "Audit rules file written — disabling security audit logging to evade detection."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/audit/"
+        - "/etc/audit/rules.d/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1070, fim, audit-rules, defense-evasion]
+
+  - id: fim_apparmor_profile_modified
+    name: "AppArmor profile modified or disabled"
+    description: "AppArmor profile file written — weakening or disabling mandatory access controls."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/apparmor.d/"
+        - "/etc/apparmor/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1562.001, fim, apparmor, mac-disable]
+
+  - id: fim_selinux_config_modified
+    name: "SELinux configuration modified"
+    description: "SELinux configuration files modified — disabling mandatory access controls."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/selinux/config"
+        - "/etc/selinux/targeted/booleans.conf"
+    severity: warning
+    action: alert
+    tags: [mitre:T1562.001, fim, selinux, mac-disable]
+
+  # ============================================================================
+  # Sudoers and privilege escalation paths
+  # ============================================================================
+
+  - id: fim_sudoers_written
+    name: "Sudoers file modified (privilege escalation path)"
+    description: "/etc/sudoers or /etc/sudoers.d/ written — granting sudo access for privilege escalation."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/sudoers"
+        - "/etc/sudoers.d/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1548.003, fim, sudoers, privilege-escalation]
+
+  - id: fim_polkit_policy_modified
+    name: "PolicyKit policy file modified"
+    description: "Polkit policy file written — modifying system-wide authorization policies for privilege escalation."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/usr/share/polkit-1/actions/"
+        - "/etc/polkit-1/"
+        - "/var/lib/polkit-1/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1548, fim, polkit, privilege-escalation]
+
+  # ============================================================================
+  # Network and DNS configuration tampering
+  # ============================================================================
+
+  - id: fim_hosts_file_modified
+    name: "/etc/hosts modified (DNS spoofing)"
+    description: "/etc/hosts was modified — redirecting domain names for phishing, credential theft, or update blocking."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/hosts"
+        - "/etc/hosts.allow"
+        - "/etc/hosts.deny"
+    severity: warning
+    action: alert
+    tags: [mitre:T1565.001, mitre:T1584, fim, dns-spoof, hosts-file]
+
+  - id: fim_resolv_conf_modified
+    name: "DNS resolver configuration modified"
+    description: "/etc/resolv.conf modified — changing DNS servers to attacker-controlled ones for traffic interception."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/resolv.conf"
+        - "/etc/nsswitch.conf"
+        - "/etc/systemd/resolved.conf"
+    severity: warning
+    action: alert
+    tags: [mitre:T1565.001, fim, resolv-conf, dns-hijack]
+
+  - id: fim_network_config_modified
+    name: "Network interface configuration modified"
+    description: "Network interface config files modified — changing IP addresses, routes, or proxy settings."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/network/interfaces"
+        - "/etc/netplan/"
+        - "/etc/sysconfig/network-scripts/"
+        - "/etc/NetworkManager/system-connections/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1565.001, fim, network-config, interface-tampering]
+
+  # ============================================================================
+  # Container and Kubernetes config tampering
+  # ============================================================================
+
+  - id: fim_docker_config_modified
+    name: "Docker daemon configuration modified"
+    description: "Docker daemon.json or TLS certificate modified — reconfiguring container runtime for privilege escalation."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/docker/"
+        - "/var/lib/docker/daemon.json"
+    severity: warning
+    action: alert
+    tags: [mitre:T1610, fim, docker-config, container-runtime]
+
+  - id: fim_containerd_config_modified
+    name: "containerd configuration modified"
+    description: "containerd config.toml written — reconfiguring low-level container runtime, potential privilege escalation."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/containerd/"
+        - "/var/lib/containerd/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1610, fim, containerd-config]
+
+  - id: fim_kubeconfig_written
+    name: "Kubernetes kubeconfig file written"
+    description: "A kubeconfig file was written — new Kubernetes cluster credentials added for persistent API access."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/\\.kube/config$"
+        - ".*/\\.kube/.*\\.yaml$"
+        - "/etc/kubernetes/.*\\.conf$"
+        - "/etc/kubernetes/admin\\.conf"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.001, fim, kubeconfig, kubernetes]
+
+  # ============================================================================
+  # Certificate and PKI tampering
+  # ============================================================================
+
+  - id: fim_ca_cert_modified
+    name: "System CA certificate store modified"
+    description: "CA certificate file written — adding a rogue CA to intercept TLS traffic (MITM)."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/ssl/certs/"
+        - "/usr/local/share/ca-certificates/"
+        - "/etc/ca-certificates.conf"
+        - "/etc/pki/ca-trust/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1553.004, fim, ca-cert, mitm, tls]
+
+  - id: fim_private_key_written
+    name: "Private key or certificate file written to unexpected path"
+    description: "A .pem, .key, or .crt file written outside of /etc/ssl — staging exfiltrated TLS credentials."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/tmp/.*\\.(pem|key|crt|pfx|p12|jks)$"
+        - "/dev/shm/.*\\.(pem|key|crt|pfx|p12|jks)$"
+        - "/var/tmp/.*\\.(pem|key|crt|pfx|p12|jks)$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.004, fim, private-key, credential-exfil]

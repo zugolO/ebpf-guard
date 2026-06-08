@@ -1,0 +1,520 @@
+# Living-Off-the-Land (LOLBin/GTFOBin) Detection Rules for ebpf-guard
+# Detects abuse of legitimate system tools for malicious purposes
+# MITRE ATT&CK: T1218, T1059, T1548, T1105, T1574
+
+rules:
+  # ============================================================================
+  # T1218 — System Binary Proxy Execution
+  # ============================================================================
+
+  - id: lolbin_socat_shell
+    name: "socat used to create shell listener or reverse shell"
+    description: "socat invoked with EXEC or PTY options — creating interactive shell via TCP for remote access."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "socat.*EXEC.*sh"
+        - "socat.*EXEC.*bash"
+        - "socat.*TCP.*EXEC"
+        - "socat.*PTY.*EXEC"
+        - "socat.*FILE.*EXEC"
+    severity: critical
+    action: alert
+    tags: [mitre:T1218, lolbin, socat, reverse-shell, gtfobins]
+
+  - id: lolbin_nmap_script_exec
+    name: "nmap script engine used for code execution"
+    description: "nmap --script used with custom Lua scripts — nmap NSE used for code execution or port scanning obfuscation."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "nmap.*--script.*exec"
+        - "nmap.*--script.*shell"
+        - "nmap.*-e.*"
+        - "nmap.*--script-args.*cmd"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, nmap, nse, code-execution]
+
+  - id: lolbin_strace_exec
+    name: "strace used to launch command"
+    description: "strace -e trace=none used with command — using strace as an execution proxy or to monitor/patch processes."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/usr/bin/strace"
+        - "/bin/strace"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, strace, execution-proxy]
+
+  - id: lolbin_gdb_exec
+    name: "GDB debugger used for code execution"
+    description: "GDB invoked with --batch --ex to execute commands — GTFOBin technique using debugger as execution proxy."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "gdb.*--batch.*--ex.*call system"
+        - "gdb.*-batch.*-ex.*call"
+        - "gdb.*-ex.*call system"
+        - "gdb.*--eval-command"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, gdb, gtfobins, execution-proxy]
+
+  - id: lolbin_tclsh_exec
+    name: "Tcl interpreter used for shell execution"
+    description: "tclsh or expect invoked with exec/system commands — Tcl/Expect GTFOBin for shell execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "tclsh.*exec\\s+sh"
+        - "tclsh.*exec\\s+bash"
+        - "expect.*spawn.*sh"
+        - "expect.*spawn.*bash"
+        - "expect.*-c.*exec"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, tclsh, expect, gtfobins]
+
+  - id: lolbin_busybox_shell
+    name: "BusyBox used to spawn shell"
+    description: "busybox sh or busybox ash executed — using BusyBox's built-in shell to bypass restrictions on /bin/sh."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*/busybox$"
+        - "/bin/busybox"
+        - "/usr/bin/busybox"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, busybox, shell-bypass]
+
+  - id: lolbin_dpkg_exec
+    name: "dpkg used to execute commands"
+    description: "dpkg --compare-versions or dpkg-deb used with shell payload — package manager GTFOBin."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "dpkg.*--force-script"
+        - "dpkg-deb.*--build.*--exec"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, dpkg, package-manager]
+
+  - id: lolbin_apt_pre_invoke
+    name: "APT pre/post invoke command injection"
+    description: "apt-get invoked with APT::Update::Pre-Invoke or similar hooks — package manager hook injection."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "apt.*Pre-Invoke.*sh"
+        - "apt.*Post-Invoke.*sh"
+        - "apt.*-o.*Pre-Invoke"
+        - "apt-get.*-o.*APT::Update"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, apt, hook-injection]
+
+  - id: lolbin_make_exec
+    name: "make used as execution proxy"
+    description: "GNU make invoked with --eval=run: to execute arbitrary commands — make LOLBin technique."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "make.*--eval.*run"
+        - "make.*MAKEFLAGS.*-n"
+        - "make.*-C /tmp"
+        - "make.*-C /dev/shm"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, make, gtfobins]
+
+  - id: lolbin_vim_exec
+    name: "Vim used to execute shell commands"
+    description: "vim or ex invoked with -c to execute shell commands — editor GTFOBin for command execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "vim.*-c.*:!.*sh"
+        - "vim.*-c.*:!/bin/sh"
+        - "ex.*-c.*:!.*sh"
+        - "vim.*-c.*:set.*shell"
+        - "nvim.*-c.*:!.*sh"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, vim, editor-exec, gtfobins]
+
+  - id: lolbin_less_exec
+    name: "less/more pager used for shell execution"
+    description: "less or more pager invoked to spawn a shell via the ! command — pager GTFOBin."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "less.*-e.*sh"
+        - "less.*VISUAL.*sh"
+        - "less.*LESSSECURE"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, less, pager, gtfobins]
+
+  - id: lolbin_tar_exec
+    name: "tar used to execute commands"
+    description: "tar --to-command or --checkpoint-action used with shell command — tar GTFOBin for code execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "tar.*--to-command.*sh"
+        - "tar.*--checkpoint-action=exec"
+        - "tar.*--to-command=/bin/sh"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, tar, gtfobins]
+
+  - id: lolbin_zip_exec
+    name: "zip used to execute commands (unzip -p)"
+    description: "zip or unzip used with pipe to shell — zip GTFOBin for command execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "zip.*-T.*--unzip-command"
+        - "unzip.*-p.*\\|.*sh"
+    severity: warning
+    action: alert
+    tags: [mitre:T1218, lolbin, zip, gtfobins]
+
+  # ============================================================================
+  # T1059 — Scripting Language Abuse
+  # ============================================================================
+
+  - id: lolbin_lua_exec
+    name: "Lua interpreter used for shell execution"
+    description: "Lua invoked with os.execute() for shell commands — Lua GTFOBin for command execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "lua.*os\\.execute"
+        - "lua.*io\\.popen"
+        - "lua -e.*os\\.execute"
+    severity: warning
+    action: alert
+    tags: [mitre:T1059, lolbin, lua, gtfobins]
+
+  - id: lolbin_node_exec
+    name: "Node.js used for shell command execution"
+    description: "Node.js invoked with child_process.exec or spawn — JavaScript runtime as execution proxy."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "node.*child_process.*exec"
+        - "node.*require.*child_process"
+        - "node -e.*spawn.*sh"
+        - "nodejs -e.*exec"
+    severity: warning
+    action: alert
+    tags: [mitre:T1059.007, lolbin, nodejs, gtfobins]
+
+  - id: lolbin_php_exec_oneliner
+    name: "PHP one-liner for shell execution"
+    description: "PHP -r with system/exec/shell_exec — PHP used as a shell execution proxy from command line."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "php -r.*system\\("
+        - "php -r.*exec\\("
+        - "php -r.*shell_exec\\("
+        - "php -r.*passthru\\("
+        - "php -r.*popen\\("
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.005, lolbin, php, one-liner, gtfobins]
+
+  - id: lolbin_tcpdump_write
+    name: "tcpdump writing capture to unusual location"
+    description: "tcpdump writing packet capture to /tmp or world-writable path — network sniffing for credential capture."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "tcpdump.*-w /tmp/"
+        - "tcpdump.*-w /dev/shm/"
+        - "tcpdump.*-w /var/tmp/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1040, lolbin, tcpdump, sniffing, credential-capture]
+
+  # ============================================================================
+  # T1105 — Ingress Tool Transfer via LOLBins
+  # ============================================================================
+
+  - id: lolbin_scp_download_to_tmp
+    name: "scp used to download file to /tmp"
+    description: "scp downloading file to /tmp or /dev/shm — staging attack tools via SCP rather than curl/wget."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "scp.*:/tmp/"
+        - "scp.*:/dev/shm/"
+        - "scp.*:/var/tmp/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, lolbin, scp, tool-transfer]
+
+  - id: lolbin_rsync_staging
+    name: "rsync used to transfer files from remote host"
+    description: "rsync downloading files from remote host to local temp directory — tool staging or data transfer."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "rsync.*[a-z]+@[^:]+:.*/tmp/"
+        - "rsync.*[a-z]+@[^:]+:.*/dev/shm/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, lolbin, rsync, tool-transfer]
+
+  - id: lolbin_sftp_staging
+    name: "sftp used to download tools"
+    description: "sftp batch mode used to transfer files — tool staging via SSH file transfer protocol."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "sftp.*-b.*get "
+        - "sftp.*-b.*put.*\\.sh"
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, lolbin, sftp, tool-transfer]
+
+  - id: lolbin_git_clone_to_tmp
+    name: "git clone to temporary directory"
+    description: "git clone targeting /tmp or /dev/shm — downloading attack tools or implants via git protocol."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "git clone.*/tmp/"
+        - "git clone.*/dev/shm/"
+        - "git clone.*/var/tmp/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, lolbin, git, tool-transfer]
+
+  - id: lolbin_pip_download_to_tmp
+    name: "pip download staging attack tools"
+    description: "pip download to /tmp — staging Python attack tools or malicious packages."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "pip.*download.*/tmp/"
+        - "pip.*download.*/dev/shm/"
+        - "pip3.*download.*/tmp/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, lolbin, pip, tool-transfer]
+
+  # ============================================================================
+  # T1574 — Hijack Execution Flow
+  # ============================================================================
+
+  - id: lolbin_path_hijack_indicator
+    name: "PATH variable manipulated to include temp directory"
+    description: "PATH environment variable set to include /tmp first — PATH hijacking to intercept binary execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "PATH=/tmp:"
+        - "PATH=/dev/shm:"
+        - "PATH=/var/tmp:"
+        - "export PATH=/tmp"
+    severity: critical
+    action: alert
+    tags: [mitre:T1574.007, lolbin, path-hijack, execution-flow]
+
+  - id: lolbin_ld_audit_set
+    name: "LD_AUDIT library set for audit hook injection"
+    description: "LD_AUDIT environment variable set — injecting a shared library audit hook into every process."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "LD_AUDIT=.*\\.so"
+        - "export LD_AUDIT="
+    severity: critical
+    action: alert
+    tags: [mitre:T1574.006, lolbin, ld-audit, library-injection]
+
+  # ============================================================================
+  # Specific network tools for exfiltration
+  # ============================================================================
+
+  - id: lolbin_dns_exfil_via_dig
+    name: "dig used for DNS-based exfiltration"
+    description: "dig or host encoding data in DNS query labels — DNS exfiltration using standard DNS utilities."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "dig.*\\+short.*\\$\\("
+        - "dig.*TXT.*\\|"
+        - "host.*-t TXT.*\\$\\("
+        - "nslookup.*\\$\\("
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, lolbin, dig, dns-exfil]
+
+  - id: lolbin_curl_data_exfil
+    name: "curl used to exfiltrate data via POST"
+    description: "curl with --data or --form uploading data to external server — data exfiltration via HTTP."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "curl.*--data.*@/"
+        - "curl.*-d.*@/etc/"
+        - "curl.*-F.*@/root/"
+        - "curl.*--data-binary.*@/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1048, lolbin, curl, data-exfil]
+
+  - id: lolbin_wget_post_exfil
+    name: "wget used to POST data to external server"
+    description: "wget with --post-file uploading local files — HTTP-based data exfiltration using wget."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "wget.*--post-file=/"
+        - "wget.*--post-file=/etc/"
+        - "wget.*--post-file=/root/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1048, lolbin, wget, data-exfil]
+
+  # ============================================================================
+  # Specific fileless execution patterns
+  # ============================================================================
+
+  - id: lolbin_bash_dev_tcp
+    name: "Bash /dev/tcp reverse shell"
+    description: "Bash using /dev/tcp pseudo-device for network connection — reverse shell without external tools."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "bash.*dev/tcp/"
+        - "bash.*\\$\\{.*dev/tcp"
+        - "exec.*>/dev/tcp/"
+        - "0</dev/tcp/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.004, lolbin, bash-dev-tcp, reverse-shell, fileless]
+
+  - id: lolbin_bash_dev_udp
+    name: "Bash /dev/udp reverse shell"
+    description: "Bash using /dev/udp pseudo-device for UDP data channel — reverse shell or DNS tunnel using bash built-ins."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "bash.*dev/udp/"
+        - "exec.*>/dev/udp/"
+        - "0</dev/udp/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.004, lolbin, bash-dev-udp, reverse-shell, fileless]
+
+  - id: lolbin_python_socket_shell
+    name: "Python socket-based reverse shell"
+    description: "Python one-liner using socket and os.dup2 for reverse shell — classic Python reverse shell pattern."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "python.*import socket.*os.*dup2"
+        - "python.*socket\\.connect.*dup2"
+        - "python.*\\bos\\.dup2\\(s\\.fileno"
+        - "python.*\\bsubprocess\\.call.*\\[.*sh"
+    severity: critical
+    action: alert
+    tags: [mitre:T1059.006, lolbin, python, reverse-shell]
+
+  - id: lolbin_perl_socket_shell
+    name: "Perl socket-based reverse shell"
+    description: "Perl one-liner creating socket and dup2 for reverse shell — Perl reverse shell execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "perl.*socket.*SOCK_STREAM.*exec.*sh"
+        - "perl.*IO::Socket.*exec.*sh"
+        - "perl.*use POSIX.*dup2.*exec.*sh"
+    severity: critical
+    action: alert
+    tags: [mitre:T1059, lolbin, perl, reverse-shell]
+
+  - id: lolbin_ruby_socket_shell
+    name: "Ruby socket-based reverse shell"
+    description: "Ruby creating TCP socket and spawning shell — Ruby reverse shell one-liner pattern."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "ruby.*TCPSocket.*exec.*sh"
+        - "ruby.*Socket.*new.*exec"
+        - "ruby.*require.*socket.*spawn.*sh"
+    severity: critical
+    action: alert
+    tags: [mitre:T1059, lolbin, ruby, reverse-shell]

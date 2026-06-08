@@ -773,6 +773,8 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 func newRulesImportCmd() *cobra.Command {
 	var (
 		format string
+		source string
+		dirArg string
 		outDir string
 		dryRun bool
 	)
@@ -787,6 +789,7 @@ Supported formats:
 
 The input PATH may be a single .yaml/.yml file or a directory. For directories,
 all .yaml/.yml files found directly in the directory are processed.
+Alternatively, use --dir for the input directory and --source for the format.
 
 Unknown Sigma fields are skipped with a WARN log; the rule is still imported
 if at least one condition could be mapped. Fully unsupported rules are counted
@@ -794,10 +797,28 @@ separately and never written to the output file.
 
 Examples:
   ebpf-guard rules import --format sigma ./sigma-rules/ --out rules/imported/
+  ebpf-guard rules import --source sigma --dir ./sigma-rules/ --out rules/imported/
   ebpf-guard rules import --format sigma rule.yml --dry-run`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.RangeArgs(0, 1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			inputPath := args[0]
+			// Resolve format: --source takes precedence over --format.
+			if source != "" {
+				format = source
+			}
+			if format == "" {
+				return fmt.Errorf("--format or --source is required (e.g. --source sigma)")
+			}
+
+			// Resolve input path: --dir flag or positional argument.
+			var inputPath string
+			switch {
+			case dirArg != "":
+				inputPath = dirArg
+			case len(args) == 1:
+				inputPath = args[0]
+			default:
+				return fmt.Errorf("input path is required — provide as positional argument or via --dir")
+			}
 
 			if !strings.EqualFold(format, "sigma") {
 				return fmt.Errorf("unsupported format %q — only 'sigma' is currently supported", format)
@@ -866,8 +887,9 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&format, "format", "", "source format (required: sigma)")
-	_ = cmd.MarkFlagRequired("format")
+	cmd.Flags().StringVar(&format, "format", "", "source format (sigma); alias: --source")
+	cmd.Flags().StringVar(&source, "source", "", "source format (sigma); alias: --format")
+	cmd.Flags().StringVar(&dirArg, "dir", "", "input directory containing source rule files (alternative to positional PATH)")
 	cmd.Flags().StringVar(&outDir, "out", "rules/imported", "output directory for converted rules")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print generated YAML without writing files")
 	return cmd

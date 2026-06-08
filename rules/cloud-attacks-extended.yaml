@@ -1,0 +1,344 @@
+# Extended Cloud Attack Detection Rules for ebpf-guard
+# Covers AWS, GCP, and Azure specific attack patterns
+# MITRE ATT&CK: T1078, T1530, T1580, T1537, T1552.005
+
+rules:
+  # ============================================================================
+  # T1552.005 — Unsecured Credentials: Cloud Instance Metadata API
+  # ============================================================================
+
+  - id: cloud_ext_aws_imds_v1_access
+    name: "AWS IMDSv1 metadata access (credential theft risk)"
+    description: "Process querying AWS instance metadata using IMDSv1 (no token) — vulnerable to SSRF-based credential theft."
+    event_type: network
+    condition:
+      field: daddr
+      op: in
+      values: ["169.254.169.254"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.005, aws, imds, cloud-metadata, ssrf]
+
+  - id: cloud_ext_aws_iam_assume_role_repeated
+    name: "Repeated AWS AssumeRole calls (privilege escalation)"
+    description: "Multiple AssumeRole API calls in short time — privilege escalation via IAM role chaining."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1078.004, aws, iam, assume-role, privilege-escalation]
+
+  - id: cloud_ext_aws_root_account_login
+    name: "AWS root account API access"
+    description: "AWS API call from root account — root should only be used for break-glass scenarios."
+    event_type: cloud_audit
+    condition:
+      field: cloud.principal
+      op: contains
+      values: ["root"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1078.004, aws, root-account, privilege-escalation]
+
+  - id: cloud_ext_aws_secretsmanager_access
+    name: "AWS Secrets Manager secret retrieved"
+    description: "GetSecretValue API call to AWS Secrets Manager — credential extraction from secrets store."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["GetSecretValue", "GetSecretValue", "DescribeSecret"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.001, aws, secrets-manager, credential-access]
+
+  - id: cloud_ext_aws_ssm_shell
+    name: "AWS SSM Run Command or Start Session executed"
+    description: "AWS Systems Manager used to run commands — remote code execution on EC2 instances via SSM."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["SendCommand", "StartSession", "ResumeSession"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1021, aws, ssm, remote-execution]
+
+  - id: cloud_ext_aws_ec2_snapshot_copy
+    name: "EC2 EBS snapshot copied to another account"
+    description: "EBS snapshot shared or copied to external AWS account — data exfiltration via snapshot sharing."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["ModifySnapshotAttribute", "CopySnapshot", "ShareSnapshot"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1537, aws, ebs, snapshot, data-exfiltration]
+
+  - id: cloud_ext_aws_s3_bucket_public
+    name: "S3 bucket made public"
+    description: "S3 bucket ACL or policy modified to allow public access — data exposure or exfiltration staging."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["PutBucketAcl", "PutBucketPolicy", "DeleteBucketPolicy"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1530, aws, s3, public-bucket, data-exposure]
+
+  - id: cloud_ext_aws_cloudtrail_stopped
+    name: "AWS CloudTrail logging stopped or deleted"
+    description: "CloudTrail trail stopped or deleted — removing audit logging to cover tracks."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["StopLogging", "DeleteTrail", "UpdateTrail"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1562.008, aws, cloudtrail, audit-tampering]
+
+  - id: cloud_ext_aws_guardduty_disabled
+    name: "AWS GuardDuty disabled"
+    description: "GuardDuty threat detection service disabled — removing AWS native threat detection."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["DisassociateFromMasterAccount", "DeleteDetector", "DisableOrganizationAdminAccount"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1562.001, aws, guardduty, defense-evasion]
+
+  - id: cloud_ext_aws_new_access_key
+    name: "New IAM access key created"
+    description: "New IAM access key created — backdoor credential creation for persistent AWS access."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["CreateAccessKey"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1098, aws, iam, access-key, persistence]
+
+  - id: cloud_ext_aws_iam_user_created
+    name: "New IAM user created"
+    description: "New IAM user account created — backdoor account creation for persistent AWS access."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["CreateUser", "CreateVirtualMFADevice"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1136, aws, iam, user-created, persistence]
+
+  - id: cloud_ext_aws_lambda_function_created
+    name: "Lambda function created or updated"
+    description: "AWS Lambda function created or code updated — persistence via serverless function or C2 execution."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["CreateFunction20150331", "UpdateFunctionCode20150331v2", "AddPermission20150331v2"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1583, aws, lambda, serverless, persistence]
+
+  # ============================================================================
+  # GCP-specific attacks
+  # ============================================================================
+
+  - id: cloud_ext_gcp_service_account_key
+    name: "GCP service account key created"
+    description: "New GCP service account key created — persistent credential for unauthorized access."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["google.iam.admin.v1.CreateServiceAccountKey"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1098, gcp, service-account, credential-creation]
+
+  - id: cloud_ext_gcp_project_iam_modified
+    name: "GCP project IAM policy modified"
+    description: "GCP project-level IAM bindings changed — privilege escalation or backdoor role assignment."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["SetIamPolicy", "google.iam.v1.IAMPolicy.SetIamPolicy"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1484, gcp, iam, policy-modification]
+
+  - id: cloud_ext_gcp_storage_public
+    name: "GCP Cloud Storage bucket made public"
+    description: "GCS bucket IAM policy updated to allow allUsers or allAuthenticatedUsers — public data exposure."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["storage.buckets.setIamPolicy", "storage.objects.setIamPolicy"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1530, gcp, gcs, public-bucket, data-exposure]
+
+  - id: cloud_ext_gcp_compute_metadata_access
+    name: "GCP compute engine metadata API accessed"
+    description: "Workload accessing GCP metadata server without proper scoping — SSRF or credential theft."
+    event_type: network
+    condition:
+      field: daddr
+      op: in
+      values: ["169.254.169.254", "metadata.google.internal"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.005, gcp, metadata, ssrf]
+
+  - id: cloud_ext_gcp_kubernetes_pod_exec
+    name: "kubectl exec into pod (GKE)"
+    description: "kubectl exec used to get shell in a pod — interactive shell access for lateral movement."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["io.k8s.core.v1.pods.exec"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1609, gcp, gke, kubectl-exec]
+
+  # ============================================================================
+  # Azure-specific attacks
+  # ============================================================================
+
+  - id: cloud_ext_azure_runcommand
+    name: "Azure VM Run Command executed"
+    description: "Azure RunCommand or CustomScriptExtension used on VM — remote code execution via Azure management plane."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["Microsoft.Compute/virtualMachines/runCommand/action", "Microsoft.Compute/virtualMachines/extensions/write"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1021, azure, runcommand, remote-execution]
+
+  - id: cloud_ext_azure_rbac_assignment
+    name: "Azure RBAC role assigned to principal"
+    description: "New Azure role assignment created — privilege escalation via RBAC or backdoor admin role."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["Microsoft.Authorization/roleAssignments/write"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1098, azure, rbac, role-assignment]
+
+  - id: cloud_ext_azure_keyvault_secret_access
+    name: "Azure Key Vault secret accessed"
+    description: "Azure Key Vault secret retrieved — credential extraction from managed secret store."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["SecretGet", "KeyGet", "CertificateGet"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.001, azure, keyvault, credential-access]
+
+  - id: cloud_ext_azure_storage_anonymous_access
+    name: "Azure Blob Storage anonymous access enabled"
+    description: "Azure storage container set to allow anonymous blob access — public data exposure."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["Microsoft.Storage/storageAccounts/blobServices/containers/write"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1530, azure, blob-storage, public-access]
+
+  - id: cloud_ext_azure_sentinel_disabled
+    name: "Azure Sentinel (Microsoft Defender) alert rule disabled"
+    description: "Azure Sentinel analytics rule disabled — removing cloud-native SIEM detection."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["Microsoft.SecurityInsights/alertRules/delete", "Microsoft.SecurityInsights/alertRules/write"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1562.001, azure, sentinel, defense-evasion]
+
+  # ============================================================================
+  # Multi-cloud / Kubernetes cluster attacks
+  # ============================================================================
+
+  - id: cloud_ext_k8s_cluster_admin_binding
+    name: "cluster-admin ClusterRoleBinding created"
+    description: "New ClusterRoleBinding with cluster-admin role — granting full cluster access, highest privilege."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["io.k8s.rbac.v1.clusterrolebindings.create", "io.k8s.rbac.v1.rolebindings.create"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1078, kubernetes, cluster-admin, rbac, privilege-escalation]
+
+  - id: cloud_ext_k8s_privileged_pod
+    name: "Privileged Kubernetes pod created"
+    description: "Pod created with securityContext.privileged=true or hostPID/hostNetwork=true — container escape vector."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["io.k8s.core.v1.pods.create"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1610, kubernetes, privileged-pod, container-escape]
+
+  - id: cloud_ext_k8s_secret_list
+    name: "Kubernetes secrets enumerated"
+    description: "list/get secrets API call — enumerating cluster secrets for credential access."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["io.k8s.core.v1.secrets.list", "io.k8s.core.v1.secrets.get"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1552, kubernetes, secrets, credential-access]
+
+  - id: cloud_ext_k8s_etcd_access
+    name: "etcd port accessed directly"
+    description: "Direct connection to etcd ports 2379/2380 — bypassing Kubernetes API server to read all secrets and configs."
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["2379", "2380"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1552, kubernetes, etcd, secret-access]
+
+  - id: cloud_ext_k8s_webhook_created
+    name: "Kubernetes admission webhook created"
+    description: "MutatingAdmissionWebhook or ValidatingAdmissionWebhook created — intercepting all API requests for data theft or tampering."
+    event_type: cloud_audit
+    condition:
+      field: cloud.action
+      op: in
+      values: ["io.k8s.admissionregistration.v1.mutatingwebhookconfigurations.create", "io.k8s.admissionregistration.v1.validatingwebhookconfigurations.create"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1505, kubernetes, admission-webhook, persistence]

@@ -1,0 +1,396 @@
+# Web Shell Detection Rules for ebpf-guard
+# Detects web shell installation, execution, and post-exploit behavior
+# MITRE ATT&CK: T1505.003, T1190, T1059.004
+
+rules:
+  # ============================================================================
+  # T1505.003 — Server Software Component: Web Shell
+  # ============================================================================
+
+  - id: webshell_php_in_web_root
+    name: "PHP file written to web server document root"
+    description: "A PHP file was created or modified inside the web server document root — possible web shell installation."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/var/www/html/.*\\.php$"
+        - "/var/www/.*\\.php$"
+        - "/srv/www/.*\\.php$"
+        - "/usr/share/nginx/html/.*\\.php$"
+        - "/opt/tomcat/webapps/.*\\.php$"
+        - "/htdocs/.*\\.php$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, webshell, php, web-server]
+
+  - id: webshell_jsp_in_web_root
+    name: "JSP file written to web application directory"
+    description: "A JSP file was created in a Tomcat or Java EE web application directory — JSP web shell."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/opt/tomcat/webapps/.*\\.jsp$"
+        - "/var/lib/tomcat.*/webapps/.*\\.jsp$"
+        - "/usr/share/tomcat.*/webapps/.*\\.jsp$"
+        - "/opt/jboss/.*\\.jsp$"
+        - "/opt/wildfly/.*\\.jsp$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, webshell, jsp, java, tomcat]
+
+  - id: webshell_asp_written
+    name: "ASP/ASPX file written to web directory"
+    description: "An ASP or ASPX file was written to a web root — Windows-style web shell on Linux (Mono/.NET)."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/var/www/.*\\.asp$"
+        - "/var/www/.*\\.aspx$"
+        - "/srv/www/.*\\.asp$"
+        - "/srv/www/.*\\.aspx$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, webshell, asp, aspx]
+
+  - id: webshell_script_write_via_web_process
+    name: "Script file written by web server worker process"
+    description: "apache2, nginx, or httpd worker wrote a script file — web shell dropped via file upload RCE."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*\\.(php|php5|php7|phtml|shtml|cgi|pl|py|rb|sh|jsp|jspx|asp|aspx)$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, mitre:T1190, webshell, file-upload]
+
+  # ============================================================================
+  # Web shell indicators — common filenames
+  # ============================================================================
+
+  - id: webshell_common_filename
+    name: "Known web shell filename detected in web directory"
+    description: "A file matching a known web shell name was created in a web-accessible directory."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - ".*(c99|r57|b374k|wso|alfa|indoxploit|shell|webshell|backdoor|cmd|eval|passthru|exec|cmd)\\.php$"
+        - ".*(upload|uploader|filemanager)\\.php$"
+        - ".*(phpspy|b374|bypass|bypass404)\\.php$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, webshell, known-filename]
+
+  - id: webshell_image_extension_script
+    name: "Script content hidden with image file extension"
+    description: "PHP or script code written with an image extension (.jpg, .png, .gif) — extension spoofing web shell."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/var/www/.*\\.(jpg|jpeg|png|gif|ico|bmp)\\.php$"
+        - "/var/www/.*\\.php\\.(jpg|jpeg|png|gif)$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, mitre:T1036, webshell, extension-spoof]
+
+  # ============================================================================
+  # Post-exploitation behavior from web process
+  # ============================================================================
+
+  - id: webshell_network_connection_web_proc
+    name: "Web server process making outbound connection"
+    description: "apache/nginx/httpd worker initiated outbound TCP — reverse shell or data exfiltration from compromised web server."
+    event_type: network
+    condition:
+      field: dport
+      op: not_in
+      values: ["80", "443", "8080", "8443", "53", "25", "587", "465"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, mitre:T1059.004, webshell, reverse-shell, web-process]
+
+  - id: webshell_outbound_high_port
+    name: "Web server outbound connection to high port"
+    description: "Web server process connected to a high-numbered port (>10000) — reverse shell or C2 beacon."
+    event_type: network
+    condition:
+      field: dport
+      op: gt
+      values: ["10000"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1505.003, webshell, high-port, c2]
+
+  - id: webshell_sensitive_file_read
+    name: "Web process reading sensitive system files"
+    description: "Web server worker read /etc/passwd, /etc/shadow, or SSH keys — post-exploitation credential access via web shell."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/passwd"
+        - "/etc/shadow"
+        - "/etc/gshadow"
+        - "/root/.ssh/id_rsa"
+        - "/root/.ssh/id_ecdsa"
+        - "/root/.ssh/id_ed25519"
+        - "/root/.ssh/authorized_keys"
+        - "/etc/ssh/ssh_host_rsa_key"
+        - "/etc/ssh/ssh_host_ecdsa_key"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, mitre:T1552, webshell, credential-access]
+
+  - id: webshell_crontab_modification
+    name: "Web process modified crontab (persistence)"
+    description: "Web server worker wrote to /etc/cron* — persistence via web shell after initial compromise."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/cron"
+        - "/var/spool/cron"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, mitre:T1053.003, webshell, persistence]
+
+  - id: webshell_command_injection_patterns
+    name: "Command injection pattern in process arguments"
+    description: "Process arguments contain shell metacharacter injection patterns — active command injection attack."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - ";\\s*(id|whoami|uname|cat /etc/passwd)"
+        - "\\|\\s*(id|whoami|uname -a)"
+        - "\\$\\(id\\)"
+        - "`id`"
+        - "\\$\\(whoami\\)"
+    severity: critical
+    action: alert
+    tags: [mitre:T1190, mitre:T1059.004, webshell, command-injection]
+
+  # ============================================================================
+  # PHP-specific web shell detection
+  # ============================================================================
+
+  - id: webshell_php_eval_pattern
+    name: "PHP eval() or assert() with encoded payload"
+    description: "PHP process with eval/assert + base64 decode in args — classic PHP web shell execution pattern."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "php.*eval.*base64_decode"
+        - "php.*assert.*base64"
+        - "php.*eval.*gzinflate"
+        - "php.*eval.*str_rot13"
+        - "php.*eval.*gzuncompress"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, mitre:T1027, webshell, php-eval]
+
+  - id: webshell_php_disable_functions_bypass
+    name: "PHP process calling system functions with obfuscation"
+    description: "PHP invoked with passthru, shell_exec, proc_open, or popen — dangerous PHP function execution from web context."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "php.*passthru"
+        - "php.*shell_exec"
+        - "php.*proc_open"
+        - "php.*popen"
+        - "php.*system\\("
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, webshell, php-rce]
+
+  # ============================================================================
+  # Server-side request forgery indicators
+  # ============================================================================
+
+  - id: webshell_ssrf_aws_metadata
+    name: "Web process accessing AWS metadata endpoint"
+    description: "Web server process connected to 169.254.169.254 (AWS/GCP metadata) — SSRF attack or credential theft."
+    event_type: network
+    condition:
+      field: daddr
+      op: in
+      values:
+        - "169.254.169.254"
+        - "fd00:ec2::254"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.005, mitre:T1190, webshell, ssrf, cloud-metadata]
+
+  - id: webshell_ssrf_internal_network
+    name: "Web process connecting to internal RFC1918 range (SSRF)"
+    description: "Web server process initiated connection to internal private IP range — SSRF pivoting to internal services."
+    event_type: network
+    condition:
+      field: daddr
+      op: in_cidr
+      values:
+        - "10.0.0.0/8"
+        - "172.16.0.0/12"
+        - "192.168.0.0/16"
+    severity: warning
+    action: alert
+    tags: [mitre:T1190, webshell, ssrf, internal-pivot]
+
+  # ============================================================================
+  # Webshell upload via common exploit vectors
+  # ============================================================================
+
+  - id: webshell_upload_via_image_dir
+    name: "Script written to image/upload directory"
+    description: "A script or executable was written to an uploads or images directory — file upload restriction bypass."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/uploads/.*\\.(php|jsp|py|sh|pl|rb)$"
+        - "/upload/.*\\.(php|jsp|py|sh|pl|rb)$"
+        - "/images/.*\\.(php|jsp|py|sh|pl|rb)$"
+        - "/img/.*\\.(php|jsp|py|sh|pl|rb)$"
+        - "/media/.*\\.(php|jsp|py|sh|pl|rb)$"
+        - "/files/.*\\.(php|jsp|py|sh|pl|rb)$"
+        - "/static/.*\\.(php|jsp|py|sh|pl|rb)$"
+        - "/assets/.*\\.(php|jsp|py|sh|pl|rb)$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, mitre:T1190, webshell, upload-bypass]
+
+  - id: webshell_htaccess_modification
+    name: ".htaccess file modified in web directory"
+    description: ".htaccess modification in web root — attacker reconfiguring Apache to execute scripts or add redirect."
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        - "/var/www/.*\\.htaccess$"
+        - "/srv/www/.*\\.htaccess$"
+        - "/htdocs/.*\\.htaccess$"
+    severity: critical
+    action: alert
+    tags: [mitre:T1505.003, webshell, htaccess, apache]
+
+  # ============================================================================
+  # Nginx/Apache config tampering
+  # ============================================================================
+
+  - id: webshell_nginx_config_modified
+    name: "Nginx configuration file modified"
+    description: "nginx configuration files written — attacker modifying web server configuration for persistence."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/nginx/conf.d/"
+        - "/etc/nginx/sites-enabled/"
+        - "/etc/nginx/sites-available/"
+        - "/etc/nginx/nginx.conf"
+    severity: warning
+    action: alert
+    tags: [mitre:T1505.003, webshell, nginx, config-tampering]
+
+  - id: webshell_apache_config_modified
+    name: "Apache configuration file modified"
+    description: "Apache2 configuration files written — attacker reconfiguring Apache, possibly adding malicious virtual host or module."
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/etc/apache2/conf-enabled/"
+        - "/etc/apache2/sites-enabled/"
+        - "/etc/apache2/mods-enabled/"
+        - "/etc/httpd/conf.d/"
+        - "/etc/httpd/conf/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1505.003, webshell, apache, config-tampering]
+
+  # ============================================================================
+  # DNS exfiltration from web process
+  # ============================================================================
+
+  - id: webshell_dns_exfil_long_subdomain
+    name: "Long subdomain DNS query from web server (exfiltration)"
+    description: "Web server process querying DNS with unusually long subdomain — DNS exfiltration of stolen data."
+    event_type: dns
+    condition:
+      field: qname_length
+      op: gt
+      values: ["60"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, webshell, dns-exfil, data-exfiltration]
+
+  - id: webshell_dns_high_entropy
+    name: "High-entropy DNS query from web server"
+    description: "Web server queried a high-entropy domain — DNS tunneling or DGA-based C2 from web shell."
+    event_type: dns
+    condition:
+      field: qname_entropy
+      op: gt
+      values: ["3.8"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1048.001, webshell, dns-tunnel, high-entropy]
+
+  # ============================================================================
+  # Java deserialization and RCE patterns
+  # ============================================================================
+
+  - id: webshell_java_runtime_exec
+    name: "Java Runtime.exec() spawned process"
+    description: "Java process spawned a child process via Runtime.exec() — Java deserialization or RCE attack execution."
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "java.*-jar.*[^/]+\\.jar"
+        - "java.*RuntimeExec"
+        - "java.*ProcessBuilder"
+    severity: warning
+    action: alert
+    tags: [mitre:T1190, mitre:T1059.007, webshell, java-rce, deserialization]
+
+  - id: webshell_curl_from_web_proc
+    name: "curl or wget executed by web server process"
+    description: "curl/wget launched from apache/nginx/tomcat context — C2 download or callback from exploited web application."
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/usr/bin/curl"
+        - "/usr/bin/wget"
+        - "/bin/curl"
+        - "/bin/wget"
+        - "/usr/local/bin/curl"
+    severity: critical
+    action: alert
+    tags: [mitre:T1105, mitre:T1505.003, webshell, tool-download]

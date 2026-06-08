@@ -1,0 +1,231 @@
+name: Rule Validation & MITRE Coverage
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'rules/**'
+      - '.github/workflows/rule-validation.yml'
+      - 'scripts/mitre-coverage.py'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'rules/**'
+      - '.github/workflows/rule-validation.yml'
+  schedule:
+    # Nightly at 02:00 UTC — validate rules and check SigmaHQ for new linux rules
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      run_sigma_import:
+        description: 'Pull and convert SigmaHQ linux rules'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  GOTOOLCHAIN: local
+  MINIMUM_RULE_COUNT: 500
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Schema validation — every rule file must parse cleanly and pass field checks
+  # ─────────────────────────────────────────────────────────────────────────────
+  validate-schema:
+    name: Schema Validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Validate all rule YAML files
+        run: |
+          go test -v -run TestRuleLoader ./internal/correlator/... 2>&1 | tee rule-validation.log
+          # Fail if any rule validation errors found
+          if grep -qE "FAIL|error|invalid" rule-validation.log; then
+            echo "::error::Rule validation failed — see rule-validation.log"
+            exit 1
+          fi
+
+      - name: Count rules and enforce minimum
+        run: |
+          RULE_COUNT=$(grep -c "^  - id:" rules/*.yaml | awk -F: '{sum += $2} END {print sum}')
+          echo "Total rules: ${RULE_COUNT}"
+          echo "RULE_COUNT=${RULE_COUNT}" >> "$GITHUB_ENV"
+          if [ "${RULE_COUNT}" -lt "${MINIMUM_RULE_COUNT}" ]; then
+            echo "::error::Rule count ${RULE_COUNT} is below minimum ${MINIMUM_RULE_COUNT}"
+            exit 1
+          fi
+          echo "::notice::Rule count ${RULE_COUNT} meets minimum ${MINIMUM_RULE_COUNT}"
+
+      - name: Check for duplicate rule IDs
+        run: |
+          python3 - <<'EOF'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              import subprocess
+              subprocess.run(["pip3", "install", "pyyaml", "-q"], check=True)
+              import yaml
+
+          seen = {}
+          duplicates = []
+          for path in sorted(glob.glob("rules/*.yaml")):
+              with open(path) as f:
+                  try:
+                      data = yaml.safe_load(f)
+                  except yaml.YAMLError as e:
+                      print(f"::error file={path}::YAML parse error: {e}")
+                      sys.exit(1)
+              if not data or "rules" not in data:
+                  continue
+              for rule in (data.get("rules") or []):
+                  rid = rule.get("id", "")
+                  if rid in seen:
+                      duplicates.append(f"{rid} (in {path} and {seen[rid]})")
+                  else:
+                      seen[rid] = path
+
+          if duplicates:
+              for d in duplicates:
+                  print(f"::error::Duplicate rule ID: {d}")
+              sys.exit(1)
+          print(f"No duplicate rule IDs found across {len(seen)} rules")
+          EOF
+
+      - name: Lint YAML syntax
+        run: |
+          pip3 install pyyaml --quiet
+          python3 - <<'EOF'
+          import glob, sys, yaml
+
+          errors = 0
+          for path in sorted(glob.glob("rules/*.yaml")):
+              with open(path) as f:
+                  try:
+                      yaml.safe_load(f)
+                  except yaml.YAMLError as e:
+                      print(f"::error file={path}::YAML parse error: {e}")
+                      errors += 1
+
+          if errors:
+              sys.exit(1)
+          print(f"All rule YAML files are syntactically valid")
+          EOF
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # MITRE ATT&CK coverage report
+  # ─────────────────────────────────────────────────────────────────────────────
+  mitre-coverage:
+    name: MITRE ATT&CK Coverage Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: pip3 install pyyaml --quiet
+
+      - name: Generate MITRE coverage report
+        run: python3 scripts/mitre-coverage.py --rules-dir rules/ --output mitre-coverage-report.md
+
+      - name: Display coverage summary
+        run: cat mitre-coverage-report.md
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mitre-coverage-report
+          path: mitre-coverage-report.md
+          retention-days: 30
+
+      - name: Check minimum MITRE technique coverage
+        run: |
+          TECHNIQUE_COUNT=$(python3 scripts/mitre-coverage.py --rules-dir rules/ --count-only)
+          echo "MITRE techniques covered: ${TECHNIQUE_COUNT}"
+          if [ "${TECHNIQUE_COUNT}" -lt 50 ]; then
+            echo "::warning::MITRE ATT&CK technique coverage (${TECHNIQUE_COUNT}) is below 50 — consider adding rules"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Nightly SigmaHQ linux rule import check
+  # ─────────────────────────────────────────────────────────────────────────────
+  sigma-nightly-check:
+    name: SigmaHQ Linux Rules Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || inputs.run_sigma_import == 'true'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build ebpf-guard CLI
+        run: go build -o build/ebpf-guard ./cmd/ebpf-guard/
+
+      - name: Clone SigmaHQ linux rules
+        run: |
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://github.com/SigmaHQ/sigma.git /tmp/sigma
+          cd /tmp/sigma
+          git sparse-checkout set rules/linux
+
+      - name: Run Sigma import and report conversion rate
+        run: |
+          mkdir -p rules/imported
+          ./build/ebpf-guard rules import \
+            --source sigma \
+            --dir /tmp/sigma/rules/linux/ \
+            --out rules/imported/ \
+            --dry-run 2>&1 | tee sigma-import-report.txt
+
+          CONVERTED=$(grep "Converted:" sigma-import-report.txt | awk '{print $2}')
+          UNSUPPORTED=$(grep "Unsupported:" sigma-import-report.txt | awk '{print $2}')
+          TOTAL=$((CONVERTED + UNSUPPORTED))
+          if [ "${TOTAL}" -gt 0 ]; then
+            RATE=$(echo "scale=1; ${CONVERTED} * 100 / ${TOTAL}" | bc)
+            echo "Conversion rate: ${RATE}% (${CONVERTED}/${TOTAL})"
+            echo "::notice::SigmaHQ linux rules: ${CONVERTED} converted, ${UNSUPPORTED} unsupported (${RATE}% rate)"
+          fi
+
+      - name: Upload import report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sigma-import-report
+          path: sigma-import-report.txt
+          retention-days: 7

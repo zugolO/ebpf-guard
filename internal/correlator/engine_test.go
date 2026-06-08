@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -471,4 +473,92 @@ func TestCorrelationEngine_DedupDisabled(t *testing.T) {
 		got := engine.Ingest(ctx, event)
 		require.Len(t, got, 1, "with dedup disabled every ingest must yield an alert (iter %d)", i)
 	}
+}
+
+func TestHotReloadMetrics(t *testing.T) {
+	initialRules := []Rule{
+		{
+			ID:        "rule_syscall",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{Field: "syscall_nr", Op: OpEquals, Values: []string{"59"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		},
+		{
+			ID:        "rule_network",
+			EventType: types.EventTCPConnect,
+			Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"4444"}},
+			Severity:  types.SeverityCritical,
+			Action:    ActionAlert,
+		},
+	}
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = initialRules
+	cfg.EnableRateLimit = false
+	cfg.EnableAnomaly = false
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	// Verify success counter increments on UpdateRules
+	engine.UpdateRules(initialRules)
+
+	successBefore := getCounterValue(t, engine.reloadTotal.WithLabelValues("success"))
+	engine.UpdateRules(initialRules)
+	successAfter := getCounterValue(t, engine.reloadTotal.WithLabelValues("success"))
+	assert.Equal(t, float64(1), successAfter-successBefore, "success counter should increment on each UpdateRules call")
+
+	// Verify failure counter via RecordReloadFailure
+	failBefore := getCounterValue(t, engine.reloadTotal.WithLabelValues("failure"))
+	engine.RecordReloadFailure()
+	failAfter := getCounterValue(t, engine.reloadTotal.WithLabelValues("failure"))
+	assert.Equal(t, float64(1), failAfter-failBefore, "failure counter should increment on RecordReloadFailure")
+
+	// Verify yaml_parse duration is recorded
+	engine.ObserveYAMLParseDuration(10 * time.Millisecond)
+	yamlDur := getGaugeVecValue(t, engine.reloadDuration, "yaml_parse")
+	assert.Greater(t, yamlDur, 0.0, "yaml_parse duration should be set after ObserveYAMLParseDuration")
+
+	// Verify per-event-type rules_active gauge
+	syscallActive := getGaugeVecValue(t, engine.rulesActive, "syscall")
+	networkActive := getGaugeVecValue(t, engine.rulesActive, "network")
+	assert.Equal(t, float64(1), syscallActive, "syscall rules_active should be 1")
+	assert.Equal(t, float64(1), networkActive, "network rules_active should be 1")
+
+	// Verify last reload timestamp is set
+	ts := getGaugeValue(t, engine.lastReloadTimestamp)
+	assert.Greater(t, ts, float64(0), "last reload timestamp should be set after UpdateRules")
+}
+
+// getCounterValue extracts the current float64 value from a prometheus.Counter via the Desc/Write protocol.
+func getCounterValue(t *testing.T, c interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, c.Write(m))
+	if m.Counter != nil {
+		return m.Counter.GetValue()
+	}
+	return 0
+}
+
+func getGaugeVecValue(t *testing.T, gv *prometheus.GaugeVec, label string) float64 {
+	t.Helper()
+	g, err := gv.GetMetricWithLabelValues(label)
+	require.NoError(t, err)
+	m := &dto.Metric{}
+	require.NoError(t, g.Write(m))
+	if m.Gauge != nil {
+		return m.Gauge.GetValue()
+	}
+	return 0
+}
+
+func getGaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, g.Write(m))
+	if m.Gauge != nil {
+		return m.Gauge.GetValue()
+	}
+	return 0
 }

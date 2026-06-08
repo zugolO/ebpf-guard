@@ -119,6 +119,12 @@ type CorrelationEngine struct {
 	latencyHistogram prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
 	activeRulesGauge prometheus.Gauge     // ebpf_guard_active_rules_total
 
+	// Hot-reload metrics
+	reloadTotal         *prometheus.CounterVec // ebpf_guard_rule_reload_total{status}
+	reloadDuration      *prometheus.GaugeVec   // ebpf_guard_rule_reload_duration_seconds{phase}
+	rulesActive         *prometheus.GaugeVec   // ebpf_guard_rules_active{event_type}
+	lastReloadTimestamp prometheus.Gauge        // ebpf_guard_rule_last_reload_timestamp_seconds
+
 	// Metrics callback
 	onCorrelate MetricsCallback
 
@@ -411,6 +417,26 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		Help: "Number of detection rules currently loaded in the rule engine.",
 	})
 
+	reloadTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ebpf_guard_rule_reload_total",
+		Help: "Total number of rule hot-reloads attempted.",
+	}, []string{"status"})
+
+	reloadDuration := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ebpf_guard_rule_reload_duration_seconds",
+		Help: "Time taken for each phase of the last rule hot-reload.",
+	}, []string{"phase"})
+
+	rulesActive := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ebpf_guard_rules_active",
+		Help: "Current number of active detection rules by event type.",
+	}, []string{"event_type"})
+
+	lastReloadTimestamp := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_rule_last_reload_timestamp_seconds",
+		Help: "Unix timestamp of the last successful rule hot-reload.",
+	})
+
 	maxRPS := config.MaxAlertsPerSecond
 	if maxRPS <= 0 {
 		maxRPS = 10000
@@ -513,6 +539,10 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		queueDepthGauge:      queueDepthGauge,
 		latencyHistogram:     latencyHistogram,
 		activeRulesGauge:     activeRulesGauge,
+		reloadTotal:          reloadTotal,
+		reloadDuration:       reloadDuration,
+		rulesActive:          rulesActive,
+		lastReloadTimestamp:  lastReloadTimestamp,
 		incidentTracker:      newIncidentTracker(config.IncidentWindow),
 		regoEvalErrors:       regoEvalErrors,
 	}
@@ -785,6 +815,10 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.regoQueueDropped,
 		ce.alertsDedupDropped,
 		ce.regoEvalErrors,
+		ce.reloadTotal,
+		ce.reloadDuration,
+		ce.rulesActive,
+		ce.lastReloadTimestamp,
 	} {
 		if c == nil {
 			continue
@@ -1299,6 +1333,23 @@ func (ce *CorrelationEngine) SetSyscallFilterUpdater(fn func(nrs []uint32)) {
 	ce.syscallFilterFn = fn
 }
 
+// eventTypeLabel maps EventType constants to their canonical Prometheus label strings.
+var eventTypeLabel = map[types.EventType]string{
+	types.EventSyscall:    "syscall",
+	types.EventTCPConnect: "network",
+	types.EventFileAccess: "file",
+	types.EventTLS:        "tls",
+	types.EventDNS:        "dns",
+	types.EventPrivesc:    "privesc",
+	types.EventNetClose:   "net_close",
+	types.EventKmodLoad:   "kmod",
+	types.EventCgroupEsc:  "cgroup_esc",
+	types.EventGPU:        "gpu",
+	types.EventLSMAudit:   "lsm_audit",
+	types.EventSequence:   "sequence",
+	types.EventCloudAudit: "cloud",
+}
+
 // UpdateRules updates the rule engine with new rules.
 // Compiled regex/CIDR/set entries from the previous engine are inherited so
 // patterns that appear in both old and new rule sets are not recompiled.
@@ -1306,11 +1357,57 @@ func (ce *CorrelationEngine) SetSyscallFilterUpdater(fn func(nrs []uint32)) {
 // referenced syscall numbers so BPF-side pre-filtering stays in sync.
 func (ce *CorrelationEngine) UpdateRules(rules []Rule) {
 	prior := ce.ruleEngine.Load()
+
+	t0 := time.Now()
 	re := NewRuleEngineWithCache(rules, prior)
+	if ce.reloadDuration != nil {
+		ce.reloadDuration.WithLabelValues("rego_compile").Set(time.Since(t0).Seconds())
+	}
+
+	t1 := time.Now()
 	ce.ruleEngine.Store(re)
+	if ce.reloadDuration != nil {
+		ce.reloadDuration.WithLabelValues("rule_engine_swap").Set(time.Since(t1).Seconds())
+	}
+
 	ce.activeRulesGauge.Set(float64(len(rules)))
+
+	if ce.rulesActive != nil {
+		for _, label := range eventTypeLabel {
+			ce.rulesActive.WithLabelValues(label).Set(0)
+		}
+		for evType, evRules := range re.byType {
+			if label, ok := eventTypeLabel[evType]; ok {
+				ce.rulesActive.WithLabelValues(label).Set(float64(len(evRules)))
+			}
+		}
+	}
+
+	if ce.reloadTotal != nil {
+		ce.reloadTotal.WithLabelValues("success").Inc()
+	}
+	if ce.lastReloadTimestamp != nil {
+		ce.lastReloadTimestamp.Set(float64(time.Now().Unix()))
+	}
+
 	if ce.syscallFilterFn != nil {
 		ce.syscallFilterFn(re.ReferencedSyscalls())
+	}
+}
+
+// ObserveYAMLParseDuration records the duration of the YAML rule file parsing phase.
+// Called by the hot-reload handler before invoking ReloadRules.
+func (ce *CorrelationEngine) ObserveYAMLParseDuration(d time.Duration) {
+	if ce.reloadDuration != nil {
+		ce.reloadDuration.WithLabelValues("yaml_parse").Set(d.Seconds())
+	}
+}
+
+// RecordReloadFailure increments the failure counter for rule hot-reloads.
+// Called by the hot-reload handler when rule loading or parsing fails.
+func (ce *CorrelationEngine) RecordReloadFailure() {
+	if ce.reloadTotal != nil {
+		ce.reloadTotal.WithLabelValues("failure").Inc()
 	}
 }
 

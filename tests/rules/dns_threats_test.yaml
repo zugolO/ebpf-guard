@@ -1,0 +1,39 @@
+suite: dns_threats
+rules_path: ../../rules/dns-threats.yaml
+tests:
+  - name: "query to .onion domain fires dns_suspicious_tld_onion"
+    rule_id: dns_suspicious_tld_onion
+    event:
+      type: dns
+      dns:
+        qname: "facebookcorewwwi.onion"
+        qtype: 1
+    expect: alert
+    expect_severity: warning
+
+  - name: "query to .bit domain fires dns_suspicious_tld_emercoin"
+    rule_id: dns_suspicious_tld_emercoin
+    event:
+      type: dns
+      dns:
+        qname: "example.bit"
+        qtype: 1
+    expect: alert
+    expect_severity: warning
+
+  - name: "query to .bazar domain fires dns_suspicious_tld_emercoin"
+    rule_id: dns_suspicious_tld_emercoin
+    event:
+      type: dns
+      dns:
+        qname: "target.bazar"
+        qtype: 1
+    expect: alert
+
+  - name: "query to normal domain does not fire suspicious TLD rules"
+    event:
+      type: dns
+      dns:
+        qname: "example.com"
+        qtype: 1
+    expect: no_alert

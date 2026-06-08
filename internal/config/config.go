@@ -323,6 +323,10 @@ type MapSizeConfig struct {
 	Events      int `mapstructure:"events"`
 	Processes   int `mapstructure:"processes"`
 	Connections int `mapstructure:"connections"`
+	// FdMap controls the maximum number of entries in the fd→path LRU map used
+	// for fd-enrichment (issue #47). Each entry holds 8B key + 257B value ≈ 265B.
+	// Default 65536 entries ≈ 17 MB. Set lower on memory-constrained nodes.
+	FdMap int `mapstructure:"fd_map_size"`
 }
 
 // RulesConfig holds rule engine settings.
@@ -725,6 +729,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.events", 65536)
 	v.SetDefault("bpf.map_sizes.processes", 16384)
 	v.SetDefault("bpf.map_sizes.connections", 32768)
+	v.SetDefault("bpf.map_sizes.fd_map_size", 65536)
 	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
 
 	// Rules defaults

@@ -551,6 +551,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 		switch field {
 		case "filename":
 			return util.BytesToString(e.File.Filename[:])
+		case "fd.name":
+			return e.File.FDPath
+		case "fd.name_truncated":
+			if e.File.FDPathTruncated {
+				return "true"
+			}
+			return "false"
 		case "flags":
 			return strconv.FormatInt(int64(e.File.Flags), 10)
 		case "mode":
@@ -587,6 +594,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			return strconv.FormatUint(e.Syscall.Args[4], 10)
 		case "arg5":
 			return strconv.FormatUint(e.Syscall.Args[5], 10)
+		case "fd.name":
+			// fd.name for syscall events is populated at collection time by the
+			// fileaccess collector via BPF fd_path_map lookup on arg0 (the fd).
+			if e.File != nil {
+				return e.File.FDPath
+			}
+			return ""
 		}
 	case types.EventDNS:
 		if e.DNS == nil {

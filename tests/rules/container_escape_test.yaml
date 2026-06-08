@@ -1,0 +1,73 @@
+suite: container_escape
+rules_path: ../../rules/container-escape.yaml
+tests:
+  - name: "mount syscall (nr=165) fires container_escape_mount"
+    rule_id: container_escape_mount
+    event:
+      type: syscall
+      syscall:
+        nr: 165
+    expect: alert
+    expect_severity: critical
+
+  - name: "setns syscall (nr=308) fires container_escape_nsenter"
+    rule_id: container_escape_nsenter
+    event:
+      type: syscall
+      syscall:
+        nr: 308
+    expect: alert
+    expect_severity: critical
+
+  - name: "unshare syscall (nr=272) fires container_escape_unshare_user"
+    rule_id: container_escape_unshare_user
+    event:
+      type: syscall
+      syscall:
+        nr: 272
+    expect: alert
+    expect_severity: warning
+
+  - name: "access to /host/ prefix fires container_escape_host_mount"
+    rule_id: container_escape_host_mount
+    event:
+      type: file
+      file:
+        filename: "/host/etc/passwd"
+        op: open
+    expect: alert
+
+  - name: "write to /proc/sysrq-trigger fires container_escape_sysrq_trigger"
+    rule_id: container_escape_sysrq_trigger
+    event:
+      type: file
+      file:
+        filename: "/proc/sysrq-trigger"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "access to /dev/mem fires container_escape_kmem_access"
+    rule_id: container_escape_kmem_access
+    event:
+      type: file
+      file:
+        filename: "/dev/mem"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "ordinary getpid syscall (nr=39) does not fire any escape rule"
+    event:
+      type: syscall
+      syscall:
+        nr: 39
+    expect: no_alert
+
+  - name: "reading /etc/hostname does not trigger any escape rule"
+    event:
+      type: file
+      file:
+        filename: "/etc/hostname"
+        op: read
+    expect: no_alert

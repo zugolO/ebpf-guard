@@ -77,6 +77,7 @@ struct event {
 			__s32 flags;
 			__u32 mode;
 			__u8  op;
+			__u8  fd_path_truncated; /* 1 if filename was truncated at 256 bytes */
 		} file;
 	};
 } __attribute__((packed));

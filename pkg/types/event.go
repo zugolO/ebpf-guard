@@ -35,6 +35,8 @@ const (
 	EventGPU EventType = 10
 	// EventLSMAudit indicates an LSM hook audit record (file_open block, socket_connect block, task_kill).
 	EventLSMAudit EventType = 11
+	// EventSequence is a placeholder for multi-event sequence rules (future).
+	EventSequence EventType = 12
 )
 
 // eventTypeNames maps string names used in rule YAML to numeric EventType constants.
@@ -54,6 +56,7 @@ var eventTypeNames = map[string]EventType{
 	"cgroup_esc":  EventCgroupEsc,
 	"gpu":         EventGPU,
 	"lsm_audit":   EventLSMAudit,
+	"sequence":    EventSequence,
 }
 
 // UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.
@@ -148,6 +151,11 @@ type FileEvent struct {
 	Flags    int32 // open(2) flags
 	Mode     uint32
 	Op       uint8 // 0=open, 1=read, 2=write
+	// FDPath is the resolved file path for read/write events, populated via fd→path BPF map lookup.
+	// For open events FDPath matches Filename; for read/write events Filename would otherwise be empty.
+	FDPath string
+	// FDPathTruncated is true when the resolved path exceeded 255 bytes and was truncated.
+	FDPathTruncated bool
 }
 
 // TLSDirection indicates the direction of TLS traffic.

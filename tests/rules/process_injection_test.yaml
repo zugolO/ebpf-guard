@@ -1,0 +1,61 @@
+suite: process_injection
+rules_path: ../../rules/process-injection.yaml
+tests:
+  - name: "ptrace syscall fires proc_inject_ptrace"
+    rule_id: proc_inject_ptrace
+    event:
+      type: syscall
+      syscall:
+        nr: 101
+    expect: alert
+    expect_severity: warning
+
+  - name: "memfd_create syscall fires proc_inject_memfd_create"
+    rule_id: proc_inject_memfd_create
+    event:
+      type: syscall
+      syscall:
+        nr: 319
+    expect: alert
+    expect_severity: critical
+
+  - name: "fexecve (execveat) fires proc_inject_fexecve"
+    rule_id: proc_inject_fexecve
+    event:
+      type: syscall
+      syscall:
+        nr: 322
+    expect: alert
+    expect_severity: critical
+
+  - name: "write to /proc/PID/mem fires proc_inject_proc_mem_write"
+    rule_id: proc_inject_proc_mem_write
+    event:
+      type: file
+      file:
+        filename: "/proc/1234/mem"
+        op: write
+    expect: alert
+
+  - name: "write to /etc/ld.so.preload fires proc_inject_ld_preload_file"
+    rule_id: proc_inject_ld_preload_file
+    event:
+      type: file
+      file:
+        filename: "/etc/ld.so.preload"
+        op: write
+    expect: alert
+
+  - name: "ordinary read syscall (nr=0) does not fire any injection rule"
+    event:
+      type: syscall
+      syscall:
+        nr: 0
+    expect: no_alert
+
+  - name: "stat syscall (nr=4) does not fire any injection rule"
+    event:
+      type: syscall
+      syscall:
+        nr: 4
+    expect: no_alert

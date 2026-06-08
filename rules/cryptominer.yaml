@@ -53,26 +53,26 @@ rules:
       field: qname
       op: regex
       values:
-        - "pool\.supportxmr\.com"
-        - "monerohash\.com"
-        - "xmrpool\.eu"
-        - "xmr\. nanopool\.org"
-        - "eth\. nanopool\.org"
-        - "btc\. nanopool\.org"
-        - "pool\.minexmr\.com"
-        - "moneroocean\.stream"
-        - "hashvault\.pro"
-        - "c3pool\.org"
-        - "2miners\.com"
-        - "herominers\.com"
-        - "minergate\.com"
-        - "nicehash\.com"
-        - "miningpoolhub\.com"
-        - "slushpool\.com"
-        - "antpool\.com"
-        - "f2pool\.com"
-        - "viabtc\.com"
-        - "binance\.pool"
+        - 'pool\.supportxmr\.com'
+        - 'monerohash\.com'
+        - 'xmrpool\.eu'
+        - 'xmr\.nanopool\.org'
+        - 'eth\.nanopool\.org'
+        - 'btc\.nanopool\.org'
+        - 'pool\.minexmr\.com'
+        - 'moneroocean\.stream'
+        - 'hashvault\.pro'
+        - 'c3pool\.org'
+        - '2miners\.com'
+        - 'herominers\.com'
+        - 'minergate\.com'
+        - 'nicehash\.com'
+        - 'miningpoolhub\.com'
+        - 'slushpool\.com'
+        - 'antpool\.com'
+        - 'f2pool\.com'
+        - 'viabtc\.com'
+        - 'binance\.pool'
     severity: critical
     action: alert
     tags: [cryptominer, crypto, mining, dns]
@@ -88,15 +88,15 @@ rules:
     description: "Network traffic matching Stratum mining protocol patterns"
     event_type: tls
     condition:
-      field: data
-      op: contains
+      field: tls_data
+      op: regex
       values:
-        - "mining.subscribe"
-        - "mining.authorize"
-        - "mining.notify"
-        - "mining.submit"
-        - "stratum+tcp"
-        - "stratum+ssl"
+        - 'mining\.subscribe'
+        - 'mining\.authorize'
+        - 'mining\.notify'
+        - 'mining\.submit'
+        - 'stratum\+tcp'
+        - 'stratum\+ssl'
     severity: critical
     action: alert
     tags: [cryptominer, crypto, mining, stratum, protocol]
@@ -114,7 +114,7 @@ rules:
     event_type: sequence
     condition:
       field: pattern
-      op: match
+      op: in
       values: ["high_syscall_rate_followed_by_network"]
     severity: warning
     action: alert
@@ -150,11 +150,11 @@ rules:
     event_type: file
     condition:
       field: filename
-      op: contains
+      op: regex
       values:
-        - "xmrig"
-        - "config.json"
-        - "pools.txt"
+        - 'xmrig'
+        - 'config\.json'
+        - 'pools\.txt'
     severity: critical
     action: alert
     tags: [cryptominer, xmrig, monero, mining]
@@ -170,12 +170,12 @@ rules:
     description: "Process using or transmitting cryptocurrency wallet address"
     event_type: tls
     condition:
-      field: data
+      field: tls_data
       op: regex
       values:
-        - "4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}"  # Monero address pattern
-        - "[13][a-km-zA-HJ-NP-Z1-9]{25,34}"   # Bitcoin address pattern
-        - "0x[a-fA-F0-9]{40}"                  # Ethereum address pattern
+        - '4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}'
+        - '[13][a-km-zA-HJ-NP-Z1-9]{25,34}'
+        - '0x[a-fA-F0-9]{40}'
     severity: critical
     action: alert
     tags: [cryptominer, crypto, wallet, address]

@@ -1,0 +1,171 @@
+rules:
+  # Rule 1: IAM role assumption from an unexpected source IP.
+  # High signal for credential theft or lateral movement from external infrastructure.
+  - id: cloud_001
+    name: STS AssumeRole from unknown IP
+    description: >
+      An IAM role was assumed (sts:AssumeRole) from a source IP that is not a known
+      cloud provider NAT gateway or internal CIDR range. This may indicate stolen
+      credentials being used from an attacker-controlled host.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values: ["aws"]
+        - field: cloud.action
+          op: in
+          values: ["AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML"]
+        - field: cloud.source_ip
+          op: not_in_cidr
+          values:
+            - "10.0.0.0/8"
+            - "172.16.0.0/12"
+            - "192.168.0.0/16"
+            - "169.254.0.0/16"
+    severity: warning
+    action: alert
+    tags: [cloud, aws, iam, lateral-movement, mitre:TA0008]
+
+  # Rule 2: Secrets Manager access outside business hours.
+  # Attackers who gain persistent access often exfiltrate secrets during off-hours
+  # to avoid detection by on-call teams.
+  - id: cloud_002
+    name: Secrets Manager GetSecretValue (access to sensitive credentials)
+    description: >
+      secretsmanager:GetSecretValue or equivalent secret-read action was performed.
+      This should be rare from interactive sessions — legitimate workloads use IRSA
+      or instance profiles and do not usually appear in CloudTrail with IAMUser identity.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values: ["aws"]
+        - field: cloud.action
+          op: in
+          values:
+            - "GetSecretValue"
+            - "GetParameter"
+            - "GetParameters"
+            - "GetParametersByPath"
+    severity: warning
+    action: alert
+    tags: [cloud, aws, secrets, credential-access, mitre:TA0006]
+
+  # Rule 3: Kubernetes pods/exec — interactive shell in a pod.
+  # A service account calling pods/exec is a strong signal of container escape
+  # preparation or interactive attacker access.
+  - id: cloud_003
+    name: Kubernetes pods/exec from cloud API (kubectl exec)
+    description: >
+      A cloud API call to the Kubernetes control plane used the "pods/exec" subresource.
+      This corresponds to kubectl exec — opening an interactive shell inside a running pod.
+      Legitimate automation rarely requires this; human operators should use audited bastion
+      hosts, not direct API access.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.action
+          op: contains
+          values: ["pods/exec", "pods/attach"]
+    severity: critical
+    action: alert
+    tags: [cloud, k8s, container-escape, mitre:TA0002]
+
+  # Rule 4: Access to the EC2 instance metadata service from within a container.
+  # The IMDS endpoint (169.254.169.254) provides temporary AWS credentials.
+  # Containers that reach this address may be attempting to steal node IAM role credentials.
+  - id: cloud_004
+    name: Cloud metadata API access (credential theft via IMDS)
+    description: >
+      A cloud audit event originated from the link-local metadata IP 169.254.169.254.
+      Containers reaching the EC2 Instance Metadata Service can steal the node IAM role
+      credentials and escalate to broader AWS permissions. Consider enforcing IMDSv2 and
+      blocking hop-limit overrides.
+    event_type: cloud_audit
+    condition_group:
+      operator: or
+      conditions:
+        - field: cloud.source_ip
+          op: equals
+          values: ["169.254.169.254"]
+        - field: cloud.resource
+          op: contains
+          values: ["instance-metadata", "metadata.google.internal"]
+    severity: critical
+    action: alert
+    tags: [cloud, imds, credential-access, container-escape, mitre:TA0006]
+
+  # Rule 5: IAM access key creation — persistence mechanism.
+  # Attackers who compromise an IAM principal often create a new access key
+  # as a backdoor so they retain access after the original session expires.
+  - id: cloud_005
+    name: New IAM access key created (persistence)
+    description: >
+      An IAM access key was created via CreateAccessKey. Legitimate automation
+      uses IRSA/instance profiles; long-lived access keys are a persistence vector.
+      This is especially suspicious when called by the root account or from an
+      unexpected IP.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values: ["aws"]
+        - field: cloud.action
+          op: equals
+          values: ["CreateAccessKey"]
+    severity: warning
+    action: alert
+    tags: [cloud, aws, iam, persistence, mitre:TA0003]
+
+  # Rule 6: Service account key creation in GCP — GCP persistence equivalent.
+  - id: cloud_006
+    name: GCP service account key created (persistence)
+    description: >
+      A new service account key was created in GCP. Long-lived service account keys
+      are a persistence mechanism — attackers create them to maintain access after
+      their initial session expires. Prefer Workload Identity Federation over keys.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values: ["gcp"]
+        - field: cloud.action
+          op: contains
+          values: ["CreateServiceAccountKey"]
+    severity: warning
+    action: alert
+    tags: [cloud, gcp, iam, persistence, mitre:TA0003]
+
+  # Rule 7: Denied cloud API call — may indicate credential probing.
+  # A burst of AccessDenied errors is a strong indicator of an attacker
+  # enumerating permissions with stolen or guessed credentials.
+  - id: cloud_007
+    name: Cloud API access denied (possible credential probing)
+    description: >
+      A cloud API call was denied with an access-control error. A single denial is
+      normal; repeated denials across different services (correlation via EWMA anomaly
+      scoring) indicate permission enumeration by an attacker testing the scope of
+      compromised credentials.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.error_code
+          op: in
+          values:
+            - "AccessDenied"
+            - "AccessDeniedException"
+            - "PERMISSION_DENIED"
+            - "UnauthorizedOperation"
+    severity: warning
+    action: alert
+    tags: [cloud, reconnaissance, defense-evasion, mitre:TA0007]

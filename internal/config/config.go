@@ -178,6 +178,48 @@ type CollectorsConfig struct {
 	// OTelTracing configures W3C Trace Context extraction from TLS payloads and OTel span linking.
 	// Requires collectors.tls.enabled=true to have effect.
 	OTelTracing OTelTracingConfig `mapstructure:"otel_tracing"`
+	// CloudTrail configures the AWS CloudTrail collector.
+	CloudTrail CloudTrailCollectorConfig `mapstructure:"cloudtrail"`
+	// GCPAudit configures the GCP Audit Logs collector.
+	GCPAudit GCPAuditCollectorConfig `mapstructure:"gcp_audit"`
+}
+
+// CloudTrailCollectorConfig holds AWS CloudTrail via SQS polling settings.
+// CloudTrail delivers events via CloudTrail → S3 → SNS → SQS.
+type CloudTrailCollectorConfig struct {
+	// Enabled activates the CloudTrail collector.
+	Enabled bool `mapstructure:"enabled"`
+	// SQSQueueURL is the SQS queue URL receiving CloudTrail S3 delivery notifications.
+	// Format: "https://sqs.{region}.amazonaws.com/{account-id}/{queue-name}"
+	SQSQueueURL string `mapstructure:"sqs_queue_url"`
+	// Region is the AWS region for the SQS queue (e.g. "us-east-1").
+	// If empty, it is inferred from the SQSQueueURL.
+	Region string `mapstructure:"region"`
+	// PollInterval is how often to poll SQS for new messages (Go duration string).
+	// Default: "10s"
+	PollInterval string `mapstructure:"poll_interval"`
+	// MaxMessages is the number of SQS messages to fetch per poll (1-10).
+	// Default: 10
+	MaxMessages int `mapstructure:"max_messages"`
+}
+
+// GCPAuditCollectorConfig holds GCP Audit Logs via Pub/Sub settings.
+type GCPAuditCollectorConfig struct {
+	// Enabled activates the GCP Audit Logs collector.
+	Enabled bool `mapstructure:"enabled"`
+	// PubSubSubscription is the Pub/Sub subscription resource name.
+	// Format: "projects/{project}/subscriptions/{subscription}"
+	PubSubSubscription string `mapstructure:"pubsub_subscription"`
+	// PollInterval is how often to pull messages from Pub/Sub (Go duration string).
+	// Default: "10s"
+	PollInterval string `mapstructure:"poll_interval"`
+	// MaxMessages is the maximum number of messages to pull per request.
+	// Default: 100
+	MaxMessages int `mapstructure:"max_messages"`
+	// CredentialsFile is the path to a GCP service account JSON key file.
+	// When empty, Application Default Credentials (ADC) are used:
+	// GOOGLE_APPLICATION_CREDENTIALS env var, then GCE/GKE metadata server.
+	CredentialsFile string `mapstructure:"credentials_file"`
 }
 
 // WasmConfig configures the WASM detection plugin engine.

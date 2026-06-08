@@ -37,6 +37,8 @@ const (
 	EventLSMAudit EventType = 11
 	// EventSequence is a placeholder for multi-event sequence rules (future).
 	EventSequence EventType = 12
+	// EventCloudAudit indicates a cloud control-plane audit event (AWS CloudTrail, GCP Audit Logs, Azure Activity Log).
+	EventCloudAudit EventType = 13
 )
 
 // eventTypeNames maps string names used in rule YAML to numeric EventType constants.
@@ -57,6 +59,8 @@ var eventTypeNames = map[string]EventType{
 	"gpu":         EventGPU,
 	"lsm_audit":   EventLSMAudit,
 	"sequence":    EventSequence,
+	"cloud_audit": EventCloudAudit,
+	"cloud":       EventCloudAudit,
 }
 
 // UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.
@@ -101,6 +105,9 @@ type Event struct {
 	Kmod       *KmodEvent
 	CgroupEsc  *CgroupEscapeEvent
 	GPU        *GPUEvent
+	// CloudAudit holds cloud control-plane audit data (AWS CloudTrail, GCP Audit Logs).
+	// Populated when Type == EventCloudAudit.
+	CloudAudit *CloudAuditEvent
 	// TraceContext holds OpenTelemetry trace context for distributed tracing.
 	TraceContext *TraceContext
 	// Enrichment holds Kubernetes metadata for the event.
@@ -367,6 +374,33 @@ type GPUEvent struct {
 	Size uint64
 }
 
+// CloudAuditEvent contains cloud control-plane audit data from AWS CloudTrail,
+// GCP Audit Logs, or Azure Activity Logs.
+type CloudAuditEvent struct {
+	// Provider identifies the cloud provider: "aws", "gcp", or "azure".
+	Provider string
+	// Service is the cloud service name, e.g. "iam", "ec2", "gke", "storage".
+	Service string
+	// Action is the API operation, e.g. "AssumeRole", "GetSecretValue", "pods/exec".
+	Action string
+	// Principal is the identity that performed the action (ARN, service account email, etc.).
+	Principal string
+	// ResourceARN is the target resource identifier.
+	ResourceARN string
+	// SourceIP is the client IP address that initiated the request.
+	SourceIP string
+	// UserAgent is the HTTP user-agent string from the cloud API request.
+	UserAgent string
+	// ErrorCode is non-empty when the action was denied or failed.
+	// For AWS: the error code from CloudTrail (e.g. "AccessDenied").
+	// For GCP: the gRPC status code as a string (e.g. "PERMISSION_DENIED").
+	ErrorCode string
+	// Region is the cloud region where the event occurred.
+	Region string
+	// EventID is the provider-assigned event ID used for deduplication.
+	EventID string
+}
+
 // Reset clears all pointer fields so the Event can be safely returned to a sync.Pool.
 // Scalar and fixed-size array fields need not be cleared; they are overwritten on the
 // next fill (ToTypesEvent assignment). Pointer fields must be nil'd to avoid keeping
@@ -382,6 +416,7 @@ func (e *Event) Reset() {
 	e.Kmod = nil
 	e.CgroupEsc = nil
 	e.GPU = nil
+	e.CloudAudit = nil
 	e.TraceContext = nil
 	e.Enrichment = nil
 	e.ProcArgs = ""

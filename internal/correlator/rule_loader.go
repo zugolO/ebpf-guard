@@ -98,6 +98,18 @@ var (
 		"comm":    true,
 		"uid":     true,
 	}
+	validCloudAuditFields = map[string]bool{
+		"cloud.provider":   true, // "aws" | "gcp" | "azure"
+		"cloud.service":    true, // "iam" | "ec2" | "gke" | "storage" | …
+		"cloud.action":     true, // "AssumeRole" | "GetSecretValue" | "pods/exec" | …
+		"cloud.principal":  true, // ARN or service account email
+		"cloud.resource":   true, // target resource ARN / name
+		"cloud.source_ip":  true, // client IP
+		"cloud.user_agent": true, // HTTP user-agent
+		"cloud.error_code": true, // non-empty = denied/failed
+		"cloud.region":     true, // cloud region
+		"cloud.event_id":   true, // provider event ID
+	}
 )
 
 // Ensure RuleConditionGroup has SubGroups field for recursive validation.
@@ -247,9 +259,14 @@ func validateCondition(cond *RuleCondition, eventType types.EventType) error {
 		if err := validateCIDRPatterns(cond.Values); err != nil {
 			return fmt.Errorf("CIDR validation failed for field %s: %w", cond.Field, err)
 		}
-		// CIDR only valid for IP address fields
-		if cond.Field != "daddr" && cond.Field != "saddr" {
-			return fmt.Errorf("CIDR operator %s can only be used with daddr/saddr fields, not %s", cond.Op, cond.Field)
+		// CIDR operators are valid for IP address fields.
+		validCIDRFields := map[string]bool{
+			"daddr":           true,
+			"saddr":           true,
+			"cloud.source_ip": true,
+		}
+		if !validCIDRFields[cond.Field] {
+			return fmt.Errorf("CIDR operator %s can only be used with daddr/saddr/cloud.source_ip fields, not %s", cond.Op, cond.Field)
 		}
 	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpSuffix, OpContains,
 		OpGreaterThan, OpLessThan, OpGreaterOrEqual, OpLessOrEqual,
@@ -294,6 +311,8 @@ func validateFieldName(field string, eventType types.EventType) error {
 		validFields = validLSMAuditFields
 	case types.EventSequence:
 		validFields = validSequenceFields
+	case types.EventCloudAudit:
+		validFields = validCloudAuditFields
 	default:
 		return fmt.Errorf("unknown event type: %d", eventType)
 	}

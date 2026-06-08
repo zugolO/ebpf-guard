@@ -3,6 +3,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"time"
@@ -90,7 +91,12 @@ func (s *SyntheticCollector) generateBurst(out chan<- types.Event, count int) {
 
 // generateEvent creates a single synthetic event.
 func (s *SyntheticCollector) generateEvent() types.Event {
-	eventTypes := []types.EventType{types.EventSyscall, types.EventTCPConnect, types.EventFileAccess}
+	eventTypes := []types.EventType{
+		types.EventSyscall,
+		types.EventTCPConnect,
+		types.EventFileAccess,
+		types.EventCloudAudit,
+	}
 	eventType := eventTypes[rand.Intn(len(eventTypes))]
 
 	baseEvent := types.Event{
@@ -109,9 +115,74 @@ func (s *SyntheticCollector) generateEvent() types.Event {
 		baseEvent.Network = s.generateNetworkEvent()
 	case types.EventFileAccess:
 		baseEvent.File = s.generateFileEvent()
+	case types.EventCloudAudit:
+		baseEvent.CloudAudit = s.generateCloudAuditEvent()
 	}
 
 	return baseEvent
+}
+
+// generateCloudAuditEvent creates a synthetic cloud audit event.
+func (s *SyntheticCollector) generateCloudAuditEvent() *types.CloudAuditEvent {
+	providers := []string{"aws", "gcp"}
+	provider := providers[rand.Intn(len(providers))]
+
+	type cloudAction struct {
+		service string
+		action  string
+	}
+	awsActions := []cloudAction{
+		{service: "iam", action: "AssumeRole"},
+		{service: "iam", action: "CreateAccessKey"},
+		{service: "secretsmanager", action: "GetSecretValue"},
+		{service: "sts", action: "AssumeRoleWithWebIdentity"},
+		{service: "ec2", action: "DescribeInstances"},
+		{service: "s3", action: "GetObject"},
+	}
+	gcpActions := []cloudAction{
+		{service: "iam.googleapis.com", action: "google.iam.admin.v1.CreateServiceAccountKey"},
+		{service: "container.googleapis.com", action: "v1.projects.locations.clusters.get"},
+		{service: "compute.googleapis.com", action: "v1.compute.instances.list"},
+		{service: "secretmanager.googleapis.com", action: "google.cloud.secretmanager.v1.SecretManagerService.AccessSecretVersion"},
+		{service: "k8s.io", action: "pods/exec"},
+	}
+
+	var act cloudAction
+	switch provider {
+	case "aws":
+		act = awsActions[rand.Intn(len(awsActions))]
+	case "gcp":
+		act = gcpActions[rand.Intn(len(gcpActions))]
+	}
+
+	principals := []string{
+		"arn:aws:iam::123456789:user/admin",
+		"arn:aws:sts::123456789:assumed-role/dev-role/session",
+		"sa@my-project.iam.gserviceaccount.com",
+		"user@example.com",
+	}
+	sourceIPs := []string{
+		"203.0.113.42",
+		"198.51.100.7",
+		"10.0.1.50",
+		"169.254.169.254",
+	}
+	regions := []string{"us-east-1", "eu-west-1", "us-central1", "europe-west1"}
+
+	errorCodes := []string{"", "", "", "AccessDenied", ""}
+
+	return &types.CloudAuditEvent{
+		Provider:    provider,
+		Service:     act.service,
+		Action:      act.action,
+		Principal:   principals[rand.Intn(len(principals))],
+		ResourceARN: "arn:aws:iam::123456789:role/example-role",
+		SourceIP:    sourceIPs[rand.Intn(len(sourceIPs))],
+		UserAgent:   "aws-cli/2.0 Python/3.9",
+		ErrorCode:   errorCodes[rand.Intn(len(errorCodes))],
+		Region:      regions[rand.Intn(len(regions))],
+		EventID:     fmt.Sprintf("synth-%d", rand.Intn(999999)),
+	}
 }
 
 // generateSyscallEvent creates a synthetic syscall event.

@@ -163,6 +163,11 @@ type Model struct {
 	stats     DashboardStats
 	scrollTop int
 	paused    bool
+
+	// Event cursor and rule builder state.
+	evtCursor       int              // index into m.events (0 = newest)
+	ruleBuilderOpen bool             // whether the rule builder pane is shown
+	ruleBuilder     RuleBuilderModel // active rule builder state
 }
 
 // NewModel creates a dashboard model backed by feed.
@@ -188,6 +193,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.ruleBuilderOpen {
+			rb, _ := m.ruleBuilder.Update(msg)
+			m.ruleBuilder = rb
+		}
 
 	case tickMsg:
 		if !m.paused {
@@ -199,15 +208,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case tea.KeyMsg:
+		// Delegate to rule builder when it's open.
+		if m.ruleBuilderOpen {
+			rb, result := m.ruleBuilder.Update(msg)
+			m.ruleBuilder = rb
+			switch result {
+			case RuleBuilderCancel, RuleBuilderSaved:
+				m.ruleBuilderOpen = false
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab", "right", "l":
-			m.activeTab = (m.activeTab + 1) % tabCount
-			m.scrollTop = 0
+			if m.activeTab != TabEvents {
+				m.activeTab = (m.activeTab + 1) % tabCount
+				m.scrollTop = 0
+			}
 		case "shift+tab", "left", "h":
-			m.activeTab = (m.activeTab + tabCount - 1) % tabCount
-			m.scrollTop = 0
+			if m.activeTab != TabEvents {
+				m.activeTab = (m.activeTab + tabCount - 1) % tabCount
+				m.scrollTop = 0
+			}
 		case "1":
 			m.activeTab = TabAlerts
 			m.scrollTop = 0
@@ -223,13 +247,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p":
 			m.paused = !m.paused
 		case "up", "k":
-			if m.scrollTop > 0 {
+			if m.activeTab == TabEvents {
+				if m.evtCursor > 0 {
+					m.evtCursor--
+				}
+			} else if m.scrollTop > 0 {
 				m.scrollTop--
 			}
 		case "down", "j":
-			m.scrollTop++
+			if m.activeTab == TabEvents {
+				if m.evtCursor < len(m.events)-1 {
+					m.evtCursor++
+				}
+			} else {
+				m.scrollTop++
+			}
 		case "g":
-			m.scrollTop = 0
+			if m.activeTab == TabEvents {
+				m.evtCursor = 0
+			} else {
+				m.scrollTop = 0
+			}
+		case "r", "R":
+			if m.activeTab == TabEvents && len(m.events) > 0 {
+				// Map cursor (0=newest) to actual slice index.
+				idx := len(m.events) - 1 - m.evtCursor
+				if idx < 0 {
+					idx = 0
+				}
+				selectedEvt := m.events[idx]
+				_, recentEvts, _ := m.feed.Snapshot(100, 500)
+				m.ruleBuilder = NewRuleBuilderModel(selectedEvt, recentEvts, m.width, m.height)
+				m.ruleBuilderOpen = true
+			}
 		}
 	}
 	return m, nil
@@ -239,6 +289,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Loading dashboard…"
+	}
+
+	// When rule builder is open, show it instead of the normal dashboard.
+	if m.ruleBuilderOpen {
+		return m.viewRuleBuilder()
 	}
 
 	var sb strings.Builder
@@ -294,13 +349,32 @@ func (m Model) View() string {
 	if !m.stats.UpdatedAt.IsZero() {
 		updated = m.stats.UpdatedAt.Format("15:04:05")
 	}
-	statusBar := styleDim.Render(fmt.Sprintf(
-		"  events:%d  alerts:%d  critical:%d  warning:%d  updated:%s  [q]uit [p]ause [tab]switch",
-		m.stats.TotalEvents, m.stats.TotalAlerts,
-		m.stats.Critical, m.stats.Warning,
-		updated,
-	))
+	var statusBar string
+	if m.activeTab == TabEvents && len(m.events) > 0 {
+		statusBar = styleDim.Render(fmt.Sprintf(
+			"  events:%d  alerts:%d  updated:%s  [↑/↓] select  [r] build rule  [q]uit [p]ause [tab]switch",
+			m.stats.TotalEvents, m.stats.TotalAlerts, updated,
+		))
+	} else {
+		statusBar = styleDim.Render(fmt.Sprintf(
+			"  events:%d  alerts:%d  critical:%d  warning:%d  updated:%s  [q]uit [p]ause [tab]switch",
+			m.stats.TotalEvents, m.stats.TotalAlerts,
+			m.stats.Critical, m.stats.Warning,
+			updated,
+		))
+	}
 	sb.WriteString("\n" + statusBar)
+
+	return sb.String()
+}
+
+// viewRuleBuilder renders the full-screen rule builder overlay.
+func (m Model) viewRuleBuilder() string {
+	var sb strings.Builder
+
+	title := styleTitleBar.Width(m.width).Render("  ebpf-guard  rule builder")
+	sb.WriteString(title + "\n")
+	sb.WriteString(m.ruleBuilder.View())
 
 	return sb.String()
 }
@@ -347,12 +421,26 @@ func (m *Model) renderEvents(maxLines int) string {
 		return styleDim.Render("  Waiting for events…")
 	}
 
+	// Clamp cursor to valid range.
+	if m.evtCursor >= len(m.events) {
+		m.evtCursor = len(m.events) - 1
+	}
+
 	lines := make([]string, 0, len(m.events))
+	// Display newest first (index 0 in lines = newest event = evtCursor 0).
 	for i := len(m.events) - 1; i >= 0; i-- {
+		displayIdx := len(m.events) - 1 - i // 0 = newest
 		e := m.events[i]
 		comm := strings.TrimRight(string(e.Comm[:]), "\x00")
 		ts := time.Unix(0, int64(e.Timestamp)).Format("15:04:05")
-		line := fmt.Sprintf("  %s  %-12s  pid=%-7d  type=%-4d  uid=%d",
+
+		cursor := "  "
+		if displayIdx == m.evtCursor {
+			cursor = styleCritical.Render("► ")
+		}
+
+		line := fmt.Sprintf("%s%s  %-12s  pid=%-7d  type=%-4d  uid=%d",
+			cursor,
 			styleDim.Render(ts),
 			styleValue.Render(comm),
 			e.PID,
@@ -362,7 +450,17 @@ func (m *Model) renderEvents(maxLines int) string {
 		lines = append(lines, line)
 	}
 
-	return renderScrollable(lines, m.scrollTop, maxLines)
+	// Keep the selected event visible: scroll so cursor is in view.
+	scrollTop := m.scrollTop
+	if m.evtCursor < scrollTop {
+		scrollTop = m.evtCursor
+	}
+	if m.evtCursor >= scrollTop+maxLines {
+		scrollTop = m.evtCursor - maxLines + 1
+	}
+
+	hint := styleDim.Render("  [↑/↓] or [j/k] select event  [r] build rule from selected event")
+	return renderScrollable(lines, scrollTop, maxLines) + "\n" + hint
 }
 
 func (m *Model) renderRules(maxLines int) string {

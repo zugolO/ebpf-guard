@@ -164,3 +164,117 @@ ebpf_guard_collector_up{collector="network"} == 0
 ```
 
 Set up a Prometheus alert for these to catch failed BPF attachment during upgrades.
+
+## SQLite Alert Store: Backup and Retention
+
+### Why Backup Matters
+
+The SQLite alert store writes to a single file on the node's local disk. When a DaemonSet pod is evicted, the node fails, or the persistent volume is lost, all stored alerts are permanently gone unless a backup exists. Configure backup and retention to protect historical alert data.
+
+### Retention Policy
+
+Two complementary retention controls are available:
+
+| Setting | Purpose |
+|---|---|
+| `store.sqlite.max_alerts` | Hard row cap — oldest rows pruned when count exceeds limit |
+| `store.sqlite.retention_period` | Time-based purge — alerts older than this are deleted |
+
+Both run on the same `vacuum_interval` cadence (default 1 h). Configure both for defense-in-depth:
+
+```yaml
+store:
+  backend: sqlite
+  sqlite:
+    path: /var/lib/ebpf-guard/alerts.db
+    max_alerts: 100000       # never exceed 100k rows
+    retention_period: 168h   # delete alerts older than 7 days
+    vacuum_interval: 1h      # run maintenance (WAL checkpoint + pruning) hourly
+```
+
+### Periodic Local Backup
+
+Enable automatic database backups to a second path (e.g. a different volume or a host path mounted as a separate PVC):
+
+```yaml
+store:
+  sqlite:
+    backup:
+      enabled: true
+      path: /backup/alerts.db   # destination file; directory must exist
+      interval: 1h              # how often to create a new backup
+```
+
+The backup uses SQLite's `VACUUM INTO` command, which produces a defragmented, WAL-free copy without blocking ongoing reads or writes. The destination file is overwritten on each run; use a volume with its own snapshot policy for versioned history.
+
+> **Tip**: Mount `/backup` from a separate PersistentVolumeClaim so backups survive pod eviction even if the primary data volume is lost.
+
+### Backup Metrics
+
+Monitor backup health with these Prometheus metrics:
+
+| Metric | Type | Description |
+|---|---|---|
+| `ebpf_guard_store_backup_last_success_timestamp` | Gauge | Unix timestamp of the last successful backup |
+| `ebpf_guard_store_backup_duration_seconds` | Histogram | Time taken to complete each backup |
+| `ebpf_guard_store_size_bytes` | Gauge | Approximate database size (page_count × page_size) |
+
+Example alert — fire if no successful backup in 2 hours:
+
+```yaml
+# deploy/helm/ebpf-guard/templates/prometheusrule.yaml
+- alert: SQLiteBackupStale
+  expr: |
+    time() - ebpf_guard_store_backup_last_success_timestamp > 7200
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "SQLite backup has not succeeded in 2 hours"
+    description: "Check that the backup destination path is writable and the backup volume has free space."
+```
+
+Track database growth to plan volume capacity:
+
+```promql
+ebpf_guard_store_size_bytes / 1024 / 1024
+```
+
+### Restore Procedure
+
+1. **Identify the backup file** on the node or in the backup volume:
+   ```bash
+   ls -lh /backup/alerts.db
+   ```
+
+2. **Stop the agent** to prevent writes during restore:
+   ```bash
+   kubectl delete pod -n ebpf-guard -l app.kubernetes.io/name=ebpf-guard \
+     --field-selector spec.nodeName=<node>
+   ```
+
+3. **Copy the backup over the primary database**:
+   ```bash
+   # On the node (via kubectl debug or a maintenance pod)
+   cp /backup/alerts.db /var/lib/ebpf-guard/alerts.db
+   # Remove stale WAL and SHM files if present
+   rm -f /var/lib/ebpf-guard/alerts.db-wal /var/lib/ebpf-guard/alerts.db-shm
+   ```
+
+4. **Restart the agent**. The DaemonSet controller will create a new pod automatically.
+
+5. **Verify** alert counts via the API:
+   ```bash
+   curl -H "Authorization: Bearer <token>" \
+     http://<node-ip>:9090/alerts | jq length
+   ```
+
+### WAL Mode and Crash Safety
+
+The store opens with `_journal_mode=WAL` and `_synchronous=NORMAL`. This configuration:
+
+- Allows concurrent reads during writes (no reader/writer blocking).
+- Is safe against OS crashes (WAL is replayed on next open).
+- Is **not** safe against power loss on hardware without battery-backed write cache.
+
+For power-loss safety at the cost of higher write latency, set `synchronous=FULL` in the SQLite pragma configuration.

@@ -116,6 +116,16 @@ type SQLiteConfig struct {
 	// VacuumInterval controls how often WAL checkpoint and row pruning run.
 	// Zero disables the background maintenance goroutine.
 	VacuumInterval time.Duration
+	// RetentionPeriod is the maximum age of alerts to keep. Alerts older than
+	// this are deleted each VacuumInterval. Zero disables age-based retention.
+	RetentionPeriod time.Duration
+	// BackupEnabled activates periodic database backups.
+	BackupEnabled bool
+	// BackupPath is the destination file for backup copies.
+	BackupPath string
+	// BackupInterval controls how often backups are created.
+	// Defaults to 1h when BackupEnabled is true.
+	BackupInterval time.Duration
 }
 
 // OpenSearchConfig defines OpenSearch-specific configuration.

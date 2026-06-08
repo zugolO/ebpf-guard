@@ -1,0 +1,37 @@
+name: Config Validate
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'config/**'
+      - 'deploy/helm/**'
+      - 'internal/config/**'
+      - 'cmd/ebpf-guard/main.go'
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  validate-config:
+    name: Validate example config files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build ebpf-guard (no BPF)
+        run: go build -tags nobpf -o /tmp/ebpf-guard ./cmd/ebpf-guard
+
+      - name: Validate config/config.yaml
+        run: /tmp/ebpf-guard config validate --config config/config.yaml
+
+      - name: Lint Helm chart
+        run: make helm-lint

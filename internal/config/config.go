@@ -405,6 +405,24 @@ type RulesConfig struct {
 	RateLimitWindow int `mapstructure:"rate_limit_window"`
 	// MaxAlertsPerWindow is the maximum alerts per rule per window
 	MaxAlertsPerWindow int `mapstructure:"max_alerts_per_window"`
+	// AdaptiveSampling configures CPU-load-triggered adaptive rule sampling.
+	// When enabled, warning-severity rules are automatically downsampled when
+	// CPU utilization exceeds the configured threshold.
+	AdaptiveSampling AdaptiveSamplingConfig `mapstructure:"adaptive_sampling"`
+}
+
+// AdaptiveSamplingConfig configures CPU-load-triggered adaptive rule sampling.
+type AdaptiveSamplingConfig struct {
+	// Enabled activates adaptive sampling. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// TriggerCPUPercent is the CPU utilization threshold [0, 100] that activates sampling.
+	TriggerCPUPercent float64 `mapstructure:"trigger_cpu_percent"`
+	// WarningSampleRate is applied to warning-severity rules when active (0–1).
+	WarningSampleRate float64 `mapstructure:"warning_sample_rate"`
+	// CriticalSampleRate is always 1.0 — critical rules are never downsampled.
+	CriticalSampleRate float64 `mapstructure:"critical_sample_rate"`
+	// CheckInterval controls how often CPU utilization is sampled (e.g. "5s"). Default: 5s.
+	CheckInterval string `mapstructure:"check_interval"`
 }
 
 // CorrelatorConfig holds correlator settings.

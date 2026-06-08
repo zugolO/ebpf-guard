@@ -198,6 +198,22 @@ func validateRule(rule *Rule) error {
 		return fmt.Errorf("rule %s: condition_group has no conditions or subgroups", rule.ID)
 	}
 
+	// Resolve nested sampling block (takes precedence over flat sample_rate/sample_deterministic).
+	if rule.Sampling != nil {
+		if rule.Sampling.Rate != 0 {
+			rule.SampleRate = rule.Sampling.Rate
+		}
+		switch rule.Sampling.Mode {
+		case SamplingModeHashPID:
+			rule.SampleDeterministic = true
+		case SamplingModeRandom, "":
+			// default
+		default:
+			return fmt.Errorf("rule %s: sampling.mode %q invalid, must be %q or %q",
+				rule.ID, rule.Sampling.Mode, SamplingModeRandom, SamplingModeHashPID)
+		}
+	}
+
 	// Normalise sample_rate: missing (0.0) → 1.0 (evaluate every event).
 	if rule.SampleRate == 0 {
 		rule.SampleRate = 1.0

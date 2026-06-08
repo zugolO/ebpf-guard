@@ -20,22 +20,22 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
-// Sampling metrics — only incremented when a rule has SampleRate < 1.0.
+// Sampling metrics — only incremented when a rule has effective SampleRate < 1.0.
 // Rules with SampleRate == 1.0 (default) never touch these counters.
 var (
-	ruleSamplesTotal = promauto.NewCounterVec(
+	ruleSampledTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "ebpf_guard_rule_samples_total",
+			Name: "ebpf_guard_rule_sampled_total",
 			Help: "Events that passed the per-rule sampling gate and were evaluated against the rule condition",
 		},
-		[]string{"rule_id"},
+		[]string{"rule_id", "mode"},
 	)
 	ruleSkippedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ebpf_guard_rule_skipped_total",
 			Help: "Events dropped by the per-rule sampling gate without condition evaluation",
 		},
-		[]string{"rule_id"},
+		[]string{"rule_id", "mode"},
 	)
 )
 
@@ -135,12 +135,21 @@ type Rule struct {
 	Action         RuleAction          `yaml:"action"`
 	// Tags are optional metadata for rule categorization and filtering
 	Tags []string `yaml:"tags,omitempty"`
+	// Sampling holds the nested per-rule sampling configuration.
+	// Takes precedence over the flat SampleRate/SampleDeterministic fields if set.
+	//
+	//   sampling:
+	//     rate: 0.1        # evaluate 10% of matching events
+	//     mode: hash_pid   # "random" (default) or "hash_pid"
+	Sampling *RuleSampling `yaml:"sampling,omitempty"`
 	// SampleRate controls the fraction of matching events that are evaluated.
 	// 1.0 (default) evaluates every event; 0.1 evaluates ~10%.
 	// Validated to be in (0.0, 1.0]; missing or 0 is treated as 1.0.
+	// Deprecated: prefer the nested sampling block.
 	SampleRate float64 `yaml:"sample_rate,omitempty"`
 	// SampleDeterministic uses FNV(PID || timestamp>>30) for sampling instead of
 	// a random number, ensuring the same PID is consistently sampled within ~1s windows.
+	// Deprecated: prefer sampling.mode: hash_pid.
 	SampleDeterministic bool `yaml:"sample_deterministic,omitempty"`
 }
 
@@ -177,6 +186,8 @@ type RuleEngine struct {
 	// valueSetCache maps a canonical key (sorted joined values) → set for O(1) OpIn/OpNotIn lookup.
 	// Built once in compilePatterns; never mutated after construction.
 	valueSetCache map[string]map[string]struct{}
+	// sampler manages per-rule sample rates including adaptive overrides.
+	sampler *RuleSampler
 	// mu protects the rules slice
 	mu sync.RWMutex
 }
@@ -196,6 +207,7 @@ func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 		regexCache:    make(map[string]*regexp.Regexp),
 		cidrCache:     make(map[string]*net.IPNet),
 		valueSetCache: make(map[string]map[string]struct{}),
+		sampler:       NewRuleSampler(rules),
 	}
 	if prior != nil {
 		prior.mu.RLock()
@@ -214,6 +226,10 @@ func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 	re.buildTypeIndex()
 	return re
 }
+
+// Sampler returns the RuleSampler attached to this engine. The adaptive sampler
+// can call Sampler() to obtain the target for rate overrides.
+func (re *RuleEngine) Sampler() *RuleSampler { return re.sampler }
 
 // buildTypeIndex builds the byType map from re.rules. Called once at construction
 // (and thus on every hot-reload via NewRuleEngineWithCache). Not thread-safe on its
@@ -450,17 +466,16 @@ func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
 // matchesTyped checks if an event matches a rule, assuming e.Type == rule.EventType.
 // Called from EvaluateInto/Evaluate which already dispatch via byType.
 func (re *RuleEngine) matchesTyped(e types.Event, rule Rule) bool {
-	// Per-rule sampling: skip condition evaluation for a fraction of events.
-	// Only active when 0 < SampleRate < 1.0.
-	// SampleRate == 0.0 (Go zero value, i.e. field absent from YAML) is treated
-	// as "evaluate all" to stay backward-compatible with rules that are constructed
-	// directly without going through validateRule (which normalises 0→1.0).
-	// SampleRate == 1.0: the second condition is false, so zero overhead.
-	if rule.SampleRate > 0 && rule.SampleRate < 1.0 {
-		if shouldSample(e.PID, e.Timestamp, rule.SampleRate, rule.SampleDeterministic) {
-			ruleSamplesTotal.WithLabelValues(rule.ID).Inc()
+	// Per-rule sampling gate — delegates to RuleSampler which handles both
+	// static per-rule rates and adaptive CPU-triggered overrides.
+	// HasSampling is O(1) and returns false for unsampled rules, so there is
+	// zero overhead for the common case of fully-evaluated (rate=1.0) rules.
+	if re.sampler.HasSampling(rule.ID) {
+		mode := string(re.sampler.Mode(rule.ID))
+		if re.sampler.ShouldEvaluate(rule.ID, e.PID, e.Timestamp) {
+			ruleSampledTotal.WithLabelValues(rule.ID, mode).Inc()
 		} else {
-			ruleSkippedTotal.WithLabelValues(rule.ID).Inc()
+			ruleSkippedTotal.WithLabelValues(rule.ID, mode).Inc()
 			return false
 		}
 	}

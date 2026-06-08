@@ -61,6 +61,9 @@ type QueryFilters struct {
 	PodName string
 	// Namespace filters by Kubernetes namespace (empty = all namespaces).
 	Namespace string
+	// Namespaces filters by a set of Kubernetes namespaces (OR logic).
+	// When non-empty, takes precedence over the single Namespace field.
+	Namespaces []string
 	// Limit limits the number of results (0 = no limit).
 	Limit int
 	// Offset skips the first N results (for pagination).

@@ -2,7 +2,9 @@
 package exporter
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -52,7 +54,13 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	filters := parseQueryFilters(r)
 
 	ctx := r.Context()
-	alerts, err := s.alertStore.Query(ctx, filters)
+	restricted, err := applyNamespaceScope(ctx, filters)
+	if err != nil {
+		http.Error(w, "Forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	alerts, err := s.alertStore.Query(ctx, restricted)
 	if err != nil {
 		s.logger.Error("failed to query alerts", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -228,7 +236,12 @@ func (s *Server) handleExportCEF(w http.ResponseWriter, r *http.Request) {
 	filters := parseQueryFilters(r)
 
 	ctx := r.Context()
-	alerts, err := s.alertStore.Query(ctx, filters)
+	restricted, err := applyNamespaceScope(ctx, filters)
+	if err != nil {
+		http.Error(w, "Forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	alerts, err := s.alertStore.Query(ctx, restricted)
 	if err != nil {
 		s.logger.Error("failed to query alerts for export", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -454,6 +467,42 @@ func (s *Server) SetRulesReloadHandler(fn func() error) {
 	s.rulesReloadFn = fn
 }
 
+// applyNamespaceScope restricts query filters to the namespaces allowed by the
+// token embedded in ctx. Returns an error if the caller requested a namespace
+// outside of their token's allowlist. No-op when auth is disabled (no scope).
+func applyNamespaceScope(ctx context.Context, filters store.QueryFilters) (store.QueryFilters, error) {
+	scope, ok := TokenScopeFromContext(ctx)
+	if !ok || len(scope.Namespaces) == 0 {
+		return filters, nil
+	}
+
+	if filters.Namespace != "" {
+		if !scope.AllowsNamespace(filters.Namespace) {
+			return filters, fmt.Errorf("namespace %q not in token scope", filters.Namespace)
+		}
+		return filters, nil
+	}
+
+	// No explicit namespace requested — restrict to the token's allowed set.
+	// Single namespace: inject directly into the scalar Namespace field.
+	// Multiple namespaces: populate the Namespaces slice for OR-based filtering.
+	wildcard := false
+	for _, ns := range scope.Namespaces {
+		if ns == "*" {
+			wildcard = true
+			break
+		}
+	}
+	if !wildcard {
+		if len(scope.Namespaces) == 1 {
+			filters.Namespace = scope.Namespaces[0]
+		} else {
+			filters.Namespaces = scope.Namespaces
+		}
+	}
+	return filters, nil
+}
+
 // parseQueryFilters extracts filters from HTTP query parameters.
 func parseQueryFilters(r *http.Request) store.QueryFilters {
 	filters := store.QueryFilters{}
@@ -587,6 +636,19 @@ func (s *Server) handleIncidents(w http.ResponseWriter, r *http.Request) {
 	if l := q.Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
 			limit = n
+		}
+	}
+
+	// Enforce namespace scope from the authenticated token.
+	scope, hasScopeCtx := TokenScopeFromContext(r.Context())
+	if hasScopeCtx && len(scope.Namespaces) > 0 {
+		if namespace != "" {
+			if !scope.AllowsNamespace(namespace) {
+				http.Error(w, fmt.Sprintf("Forbidden: namespace %q not in token scope", namespace), http.StatusForbidden)
+				return
+			}
+		} else if len(scope.Namespaces) == 1 && scope.Namespaces[0] != "*" {
+			namespace = scope.Namespaces[0]
 		}
 	}
 

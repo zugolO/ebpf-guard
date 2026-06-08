@@ -377,22 +377,40 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		adminToken = cfg.Auth.BearerToken
 	}
 	if cfg.Auth.Enabled {
-		if adminToken == "" {
+		if adminToken == "" && len(cfg.Auth.Tokens) == 0 {
 			adminToken = generateToken()
 			slog.Info("auth: generated admin token (not shown for security)")
 		}
-		if viewerToken == "" {
+		if viewerToken == "" && len(cfg.Auth.Tokens) == 0 {
 			viewerToken = generateToken()
 			slog.Info("auth: generated viewer token (not shown for security)")
 		}
 	}
 
-	srv := exporter.NewServerWithRBAC(
+	// Build namespace-scoped token list from config.
+	var namespacedTokens []exporter.NamespacedToken
+	for _, t := range cfg.Auth.Tokens {
+		role := exporter.RoleViewer
+		if t.Role == "admin" {
+			role = exporter.RoleAdmin
+		}
+		namespacedTokens = append(namespacedTokens, exporter.NamespacedToken{
+			Token:      t.Token,
+			Role:       role,
+			Namespaces: t.Namespaces,
+		})
+	}
+	if len(namespacedTokens) > 0 {
+		slog.Info("auth: namespace-scoped tokens configured", slog.Int("count", len(namespacedTokens)))
+	}
+
+	srv := exporter.NewServerWithMultiTenant(
 		cfg.Server.BindAddress,
 		cfg.Server.MetricsPath,
 		cfg.Server.HealthPath,
 		cfg.Server.EnablePprof,
 		cfg.Server.EnableDebug,
+		namespacedTokens,
 		viewerToken,
 		adminToken,
 		cfg.Auth.Enabled,

@@ -85,6 +85,88 @@ func NewServerWithAuth(bindAddress, metricsPath, healthPath string, enablePprof,
 	return NewServerWithRBAC(bindAddress, metricsPath, healthPath, enablePprof, enableDebug, "", authToken, authEnabled)
 }
 
+// NewServerWithMultiTenant creates a new HTTP server with namespace-scoped RBAC.
+// Each token in the tokens slice carries its own role and namespace allowlist.
+// The legacy viewerToken/adminToken are also accepted if non-empty.
+// Pass authEnabled=false to skip auth entirely.
+func NewServerWithMultiTenant(bindAddress, metricsPath, healthPath string, enablePprof, enableDebug bool, tokens []NamespacedToken, viewerToken, adminToken string, authEnabled bool) *Server {
+	if metricsPath == "" {
+		metricsPath = "/metrics"
+	}
+	if healthPath == "" {
+		healthPath = "/health"
+	}
+
+	s := &Server{
+		bindAddress:       bindAddress,
+		metricsPath:       metricsPath,
+		healthPath:        healthPath,
+		healthy:           true,
+		ready:             false,
+		startTime:         time.Now(),
+		collectorStatuses: make(map[string]CollectorStatus),
+		logger:            slog.Default(),
+	}
+
+	mux := http.NewServeMux()
+	s.mux = mux
+	mux.Handle(metricsPath, promhttp.Handler())
+	mux.HandleFunc(healthPath, s.handleHealth)
+	mux.HandleFunc(healthPath+"/ready", s.handleReady)
+	mux.HandleFunc(healthPath+"/live", s.handleLive)
+
+	if enablePprof {
+		slog.Info("exporter/server: enabling pprof endpoints at /debug/pprof")
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+		mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+		mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+		mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+		mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+		mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	}
+
+	if enableDebug {
+		slog.Info("exporter/server: enabling debug endpoints at /debug/state")
+		s.debugHandler = NewDebugHandler("dev", s)
+		mux.HandleFunc("/debug/state", s.debugHandler.ServeHTTP)
+	}
+
+	s.RegisterAPIRoutes(mux)
+
+	handler := http.Handler(mux)
+	if authEnabled {
+		// Build the combined token list from legacy tokens + namespaced tokens.
+		all := make([]NamespacedToken, 0, len(tokens)+2)
+		if adminToken != "" {
+			all = append(all, NamespacedToken{Token: adminToken, Role: RoleAdmin})
+		}
+		if viewerToken != "" {
+			all = append(all, NamespacedToken{Token: viewerToken, Role: RoleViewer})
+		}
+		all = append(all, tokens...)
+		if len(all) > 0 {
+			slog.Info("exporter/server: enabling multi-tenant RBAC",
+				slog.Int("token_count", len(all)))
+			handler = MultiTenantRBACMiddleware(all)(mux)
+		}
+	}
+
+	s.server = &http.Server{
+		Addr:         bindAddress,
+		Handler:      handler,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	return s
+}
+
 // NewServerWithRBAC creates a new HTTP server with two-role RBAC authentication:
 //   - viewerToken: grants GET access to /alerts, /rules, /health, /metrics
 //   - adminToken:  grants full access including write operations

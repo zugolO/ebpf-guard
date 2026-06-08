@@ -109,6 +109,21 @@ type AuthConfig struct {
 	// AdminToken grants full access including write operations (POST /feedback, PUT /rules, DELETE).
 	// Auto-generated at startup if empty and Enabled is true.
 	AdminToken string `mapstructure:"admin_token"`
+	// Tokens is a list of namespace-scoped bearer tokens for multi-tenant deployments.
+	// When non-empty, these are evaluated in addition to the legacy ViewerToken/AdminToken.
+	// Each token carries its own role and namespace allowlist.
+	Tokens []NamespacedTokenConfig `mapstructure:"tokens"`
+}
+
+// NamespacedTokenConfig defines a bearer token with an associated role and namespace scope.
+type NamespacedTokenConfig struct {
+	// Token is the bearer token value.
+	Token string `mapstructure:"token"`
+	// Role is "viewer" or "admin".
+	Role string `mapstructure:"role"`
+	// Namespaces lists Kubernetes namespaces this token may access.
+	// Empty slice means all namespaces (global access).
+	Namespaces []string `mapstructure:"namespaces"`
 }
 
 // NotificationsConfig holds notification backend settings.
@@ -409,6 +424,20 @@ type RulesConfig struct {
 	// When enabled, warning-severity rules are automatically downsampled when
 	// CPU utilization exceeds the configured threshold.
 	AdaptiveSampling AdaptiveSamplingConfig `mapstructure:"adaptive_sampling"`
+	// Namespaces defines per-namespace rule overrides or extensions.
+	// Each entry maps a Kubernetes label selector to an additional rules file.
+	// These are merged with (or replace) the global rules depending on Override.
+	Namespaces []NamespaceRuleConfig `mapstructure:"namespaces"`
+}
+
+// NamespaceRuleConfig maps a Kubernetes label selector to additional rule files.
+type NamespaceRuleConfig struct {
+	// Selector is a Kubernetes label selector matching namespace labels (e.g. "team=security").
+	Selector string `mapstructure:"selector"`
+	// Path is the directory or file containing extra rules for matching namespaces.
+	Path string `mapstructure:"path"`
+	// Override replaces global rules when true; merges (adds) when false.
+	Override bool `mapstructure:"override"`
 }
 
 // AdaptiveSamplingConfig configures CPU-load-triggered adaptive rule sampling.

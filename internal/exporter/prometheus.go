@@ -25,13 +25,13 @@ var (
 		[]string{"collector", "reason"},
 	)
 
-	// AlertsTotal counts generated alerts by rule and severity.
+	// AlertsTotal counts generated alerts by rule, severity, and namespace.
 	AlertsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ebpf_guard_alerts_total",
 			Help: "Total number of security alerts generated",
 		},
-		[]string{"rule_id", "severity"},
+		[]string{"rule_id", "severity", "namespace"},
 	)
 
 	// ProfilerAnomalyScore tracks anomaly scores per process.
@@ -126,9 +126,9 @@ func RecordDropped(collector, reason string) {
 	EventsDropped.WithLabelValues(collector, reason).Inc()
 }
 
-// RecordAlert increments the alerts counter.
-func RecordAlert(ruleID, severity string) {
-	AlertsTotal.WithLabelValues(ruleID, severity).Inc()
+// RecordAlert increments the alerts counter for the given rule, severity, and namespace.
+func RecordAlert(ruleID, severity, namespace string) {
+	AlertsTotal.WithLabelValues(ruleID, severity, namespace).Inc()
 }
 
 // SetBPFMapEntries sets the entry count for a BPF map.

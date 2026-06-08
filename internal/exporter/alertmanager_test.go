@@ -193,21 +193,29 @@ func TestAlertmanagerClient_alertToPayload(t *testing.T) {
 }
 
 // TestAlertmanagerClient_CircuitBreakerCooldown tests that the circuit breaker
-// recovers after the cooldown period expires.
+// recovers after the cooldown period expires when the server becomes healthy.
 func TestAlertmanagerClient_CircuitBreakerCooldown(t *testing.T) {
 	var mu sync.Mutex
+	failMode := true
 	requestCount := 0
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
+		fail := failMode
 		requestCount++
 		mu.Unlock()
-		w.WriteHeader(http.StatusServiceUnavailable)
+
+		if fail {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
 	}))
 	defer server.Close()
 
 	ctx := context.Background()
 
-	// Create client with short cooldown for testing
+	// Create client with short reset timeout for testing.
 	client := &AlertmanagerClient{
 		webhookURL:   server.URL,
 		generatorURL: "http://ebpf-guard:9090",
@@ -217,50 +225,45 @@ func TestAlertmanagerClient_CircuitBreakerCooldown(t *testing.T) {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		threshold: 2,
-		cooldown:  200 * time.Millisecond, // Short cooldown for testing
+		cb:       newCircuitBreaker(2, 200*time.Millisecond, nil, nil),
+		fallback: newFallbackQueue(100, nil, nil),
 	}
 
-	// Send alerts to trigger circuit breaker
+	// Phase 1: trigger circuit open via consecutive failures.
 	for i := 0; i < 3; i++ {
 		client.SendAlert(ctx, types.Alert{
 			RuleID:   "rule_cooldown",
-			RuleName: "Cooldown Test",
 			Severity: types.SeverityWarning,
 		})
 		client.Flush()
 		time.Sleep(50 * time.Millisecond)
 	}
+	assert.Equal(t, cbStateOpen, client.cb.State(), "circuit should be open after failures")
 
-	// Circuit should be open now
-	// Wait for cooldown period
+	// Phase 2: server recovers; wait for reset timeout to elapse.
+	mu.Lock()
+	failMode = false
+	mu.Unlock()
 	time.Sleep(250 * time.Millisecond)
 
-	// Reset request count to track new requests
+	// Phase 3: next flush transitions Open→HalfOpen and sends a probe.
 	mu.Lock()
 	requestCount = 0
 	mu.Unlock()
 
-	// Send another alert - circuit should be closed and request should go through
 	client.SendAlert(ctx, types.Alert{
 		RuleID:   "rule_cooldown",
-		RuleName: "Cooldown Test",
 		Severity: types.SeverityWarning,
 	})
 	client.Flush()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	// After cooldown, the circuit should be closed and we should see a new request
+	// Probe should succeed; circuit transitions HalfOpen→Closed.
 	mu.Lock()
 	count := requestCount
 	mu.Unlock()
-	assert.GreaterOrEqual(t, count, 1, "circuit should be closed after cooldown and allow requests")
-
-	// Verify circuit breaker state is reset
-	client.mu.Lock()
-	isOpen := client.open
-	client.mu.Unlock()
-	assert.False(t, isOpen, "circuit breaker should be closed after cooldown")
+	assert.GreaterOrEqual(t, count, 1, "circuit should allow probe after reset timeout")
+	assert.Equal(t, cbStateClosed, client.cb.State(), "circuit should be closed after successful probe")
 }
 
 // TestAlertmanagerClient_TraceIDInPayload tests that trace_id is included in the alert payload.

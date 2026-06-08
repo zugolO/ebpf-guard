@@ -479,6 +479,13 @@ type AlertingConfig struct {
 	BatchTimeout int `mapstructure:"batch_timeout"`
 	// CircuitBreakerThreshold is the number of failed sends before opening circuit
 	CircuitBreakerThreshold int `mapstructure:"circuit_breaker_threshold"`
+	// CircuitBreakerResetTimeout is seconds to wait in Open state before attempting
+	// a probe (Half-Open transition). Default: 30.
+	CircuitBreakerResetTimeout int `mapstructure:"circuit_breaker_reset_timeout"`
+	// FallbackBufferSize is the maximum number of alerts to buffer in the fallback
+	// queue while the circuit is open. Oldest entries are evicted when full.
+	// Default: 10000.
+	FallbackBufferSize int `mapstructure:"fallback_buffer_size"`
 }
 
 // KubernetesConfig holds Kubernetes integration settings.
@@ -836,6 +843,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("alerting.batch_size", 100)
 	v.SetDefault("alerting.batch_timeout", 5)
 	v.SetDefault("alerting.circuit_breaker_threshold", 5)
+	v.SetDefault("alerting.circuit_breaker_reset_timeout", 30)
+	v.SetDefault("alerting.fallback_buffer_size", 10000)
 
 	// Kubernetes defaults
 	v.SetDefault("kubernetes.enabled", true)

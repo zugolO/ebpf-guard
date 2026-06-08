@@ -1,0 +1,158 @@
+suite: eks_threats
+rules_path: ../../rules/eks-threats.yaml
+tests:
+  # ── IMDS / metadata network rules ──────────────────────────────────────────
+
+  - name: "connection to 169.254.169.254 fires eks_imds_credential_theft"
+    rule_id: eks_imds_credential_theft
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.254"
+        dport: 80
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to 169.254.169.254 port 443 also fires eks_imds_credential_theft"
+    rule_id: eks_imds_credential_theft
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.254"
+        dport: 443
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to 169.254.170.2 fires eks_fargate_task_metadata_access"
+    rule_id: eks_fargate_task_metadata_access
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.170.2"
+        dport: 80
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to external IP does not fire EKS IMDS rules"
+    event:
+      type: network
+      network:
+        dst_ip: "93.184.216.34"
+        dport: 443
+    expect: no_alert
+
+  - name: "connection to private IP does not fire EKS IMDS rules"
+    event:
+      type: network
+      network:
+        dst_ip: "10.100.0.1"
+        dport: 443
+    expect: no_alert
+
+  # ── IRSA / Pod Identity file rules ─────────────────────────────────────────
+
+  - name: "IRSA token read fires eks_irsa_token_read"
+    rule_id: eks_irsa_token_read
+    event:
+      type: file
+      file:
+        filename: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+    expect: alert
+    expect_severity: critical
+
+  - name: "nested IRSA path also fires eks_irsa_token_read"
+    rule_id: eks_irsa_token_read
+    event:
+      type: file
+      file:
+        filename: "/var/run/secrets/eks.amazonaws.com/serviceaccount/ca.crt"
+    expect: alert
+    expect_severity: critical
+
+  - name: "EKS Pod Identity token read fires eks_pod_identity_token_read"
+    rule_id: eks_pod_identity_token_read
+    event:
+      type: file
+      file:
+        filename: "/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/token"
+    expect: alert
+    expect_severity: critical
+
+  # ── Static credential file rules ───────────────────────────────────────────
+
+  - name: "AWS credentials file read fires eks_aws_credentials_file_read"
+    rule_id: eks_aws_credentials_file_read
+    event:
+      type: file
+      file:
+        filename: "/root/.aws/credentials"
+    expect: alert
+    expect_severity: warning
+
+  - name: "/.aws/credentials fires eks_aws_credentials_file_read"
+    rule_id: eks_aws_credentials_file_read
+    event:
+      type: file
+      file:
+        filename: "/.aws/credentials"
+    expect: alert
+    expect_severity: warning
+
+  - name: "AWS config file fires eks_aws_config_dir_access"
+    rule_id: eks_aws_config_dir_access
+    event:
+      type: file
+      file:
+        filename: "/root/.aws/config"
+    expect: alert
+    expect_severity: warning
+
+  - name: "AWS SSO token file fires eks_aws_config_dir_access"
+    rule_id: eks_aws_config_dir_access
+    event:
+      type: file
+      file:
+        filename: "/root/.aws/sso/cache/abc123.json"
+    expect: alert
+    expect_severity: warning
+
+  - name: "Docker config.json read fires eks_ecr_credential_helper_access"
+    rule_id: eks_ecr_credential_helper_access
+    event:
+      type: file
+      file:
+        filename: "/root/.docker/config.json"
+    expect: alert
+    expect_severity: warning
+
+  - name: "/.docker/config.json also fires eks_ecr_credential_helper_access"
+    rule_id: eks_ecr_credential_helper_access
+    event:
+      type: file
+      file:
+        filename: "/.docker/config.json"
+    expect: alert
+    expect_severity: warning
+
+  # ── Negative cases ──────────────────────────────────────────────────────────
+
+  - name: "access to /etc/hosts does not fire any EKS rule"
+    event:
+      type: file
+      file:
+        filename: "/etc/hosts"
+    expect: no_alert
+
+  - name: "access to /var/run/secrets/kubernetes.io/ does not fire EKS rules"
+    event:
+      type: file
+      file:
+        filename: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    expect: no_alert
+
+  - name: "access to /tmp/app.log does not fire EKS rules"
+    event:
+      type: file
+      file:
+        filename: "/tmp/app.log"
+    expect: no_alert

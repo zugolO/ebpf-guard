@@ -1,0 +1,190 @@
+## Azure Kubernetes Service (AKS) Attack Detection Rules
+# MITRE ATT&CK: T1552.005 (Cloud Instance Metadata API), T1552.001 (Credentials in Files),
+#               T1528 (Steal Application Access Token), T1611 (Escape to Host),
+#               T1613 (Container Discovery)
+# Detects attacks specific to AKS: Azure IMDS / managed identity token theft,
+# service principal secret access, workload identity abuse, and Azure-specific
+# credential files that expose cluster or cloud control plane access.
+
+rules:
+  # ============================================================================
+  # T1552.005 — Cloud Instance Metadata API
+  # Azure IMDS / managed identity endpoint access from pod context
+  # ============================================================================
+
+  # The Azure IMDS at 169.254.169.254/metadata/instance provides instance
+  # metadata; /metadata/identity/oauth2/token issues managed identity tokens.
+  # On AKS nodes the node system-assigned managed identity has permissions to
+  # manage the cluster's node resource group. Containers that reach this endpoint
+  # can obtain Azure AD access tokens to escalate from pod to Azure control plane.
+  - id: aks_imds_access
+    name: "AKS: Azure IMDS access — managed identity token theft"
+    description: >
+      A process connected to the Azure Instance Metadata Service (169.254.169.254).
+      On AKS nodes this endpoint issues OAuth2 tokens for the node's system-assigned
+      or user-assigned managed identity (T1552.005). The node's managed identity
+      typically has Contributor rights over the node resource group, enabling an
+      attacker to create new VMs, read Key Vault secrets, or reconfigure networking.
+      AKS Workload Identity (federated credentials) is the recommended alternative
+      that avoids exposing node-level credentials to pods.
+    event_type: network
+    condition:
+      field: daddr
+      op: equals
+      values:
+        - "169.254.169.254"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.005, aks, azure, imds, managed-identity, credential-access, cloud]
+
+  # ============================================================================
+  # T1552.001 — Unsecured Credentials: Credentials in Files
+  # AKS cluster service principal and node credential files
+  # ============================================================================
+
+  # /etc/kubernetes/azure.json is the AKS cloud-provider configuration file
+  # containing the cluster's service principal client_id and client_secret
+  # (or managed identity details). It is mounted into the kubelet and
+  # cloud-controller-manager. Accessing it from a pod via hostPath escape or
+  # container breakout exposes credentials with permissions over the entire
+  # cluster's Azure resource group.
+  - id: aks_service_principal_secret_access
+    name: "AKS: cluster service principal credential file access"
+    description: >
+      A process accessed /etc/kubernetes/azure.json, which contains the AKS
+      cluster service principal client_id and client_secret (or user-assigned
+      managed identity resource ID). Reading this file from a pod via hostPath
+      volume or container escape gives an attacker Azure AD application credentials
+      with permissions to manage the cluster's node resource group (T1552.001).
+      On newer AKS clusters this file may use managed identity instead of a
+      static secret, but the host-level credential access path is the same.
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/kubernetes/azure.json"
+        - "/etc/kubernetes/azure.json.bak"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.001, aks, azure, service-principal, credential-access, cloud]
+
+  # ============================================================================
+  # T1528 — Steal Application Access Token
+  # AKS Workload Identity / AAD pod identity projected token theft
+  # ============================================================================
+
+  # AKS Workload Identity injects an Azure AD OIDC token at
+  # /var/run/secrets/azure/tokens/. The token is exchanged for Azure AD access
+  # tokens via federated identity credentials. Unexpected readers — shells, curl,
+  # Python scripts — indicate T1528: active harvesting of the OIDC token to
+  # impersonate the pod's Azure managed identity against Azure APIs.
+  - id: aks_workload_identity_token_read
+    name: "AKS: workload identity OIDC token read (T1528)"
+    description: >
+      A process read from the AKS Workload Identity projected token path
+      (/var/run/secrets/azure/tokens/). The OIDC token here is exchanged for
+      Azure AD access tokens via federated identity credentials. Unexpected
+      access by non-application processes (shells, scripting runtimes) indicates
+      T1528 — an attacker harvesting the token to impersonate the pod's Azure
+      managed identity and call Azure Resource Manager, Key Vault, or other APIs.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/run/secrets/azure/tokens/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1528, aks, azure, workload-identity, aad, token-theft, credential-access, cloud]
+
+  # ============================================================================
+  # T1552.001 / T1611 — Escape to Host: Azure Linux Agent credential access
+  # ============================================================================
+
+  # /var/lib/waagent/ is the Azure Linux Agent (waagent) working directory.
+  # It contains the VM's provisioning configuration, installed extension data,
+  # certificates, and (on older configurations) the service principal credentials
+  # written by the AKS bootstrap process. Access from inside a pod via a
+  # hostPath volume escape indicates a container breakout or privilege escalation.
+  - id: aks_azure_linux_agent_access
+    name: "AKS: Azure Linux Agent directory access from pod context"
+    description: >
+      A process accessed the Azure Linux Agent directory (/var/lib/waagent/).
+      This directory contains the VM's Azure provisioning configuration,
+      extension data, and certificates. On AKS nodes, waagent extensions may
+      store secrets written during cluster bootstrap. Access from a pod via
+      hostPath escape or container breakout (T1611) can expose these secrets
+      and reveal the node's Azure identity configuration (T1552.001).
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/lib/waagent/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.001, mitre:T1611, aks, azure, waagent, node-credential-theft, cloud]
+
+  # ============================================================================
+  # T1552.001 — Node bootstrap / kubeconfig credential access
+  # ============================================================================
+
+  # AKS bootstrap credentials give the node's kubelet its initial identity to
+  # join the cluster. Extracting the bootstrap kubeconfig from inside a pod
+  # allows an attacker to authenticate to the API server as system:node,
+  # which can read all Secrets on pods scheduled to the current node.
+  - id: aks_bootstrap_kubeconfig_access
+    name: "AKS: bootstrap kubeconfig access from pod context"
+    description: >
+      A process accessed an AKS node bootstrap kubeconfig or node kubeconfig
+      file. These files contain the kubelet's TLS client certificate used to
+      authenticate as system:node to the Kubernetes API server. The system:node
+      RBAC role has read access to all Secrets on pods assigned to this node.
+      Extracting this credential from a pod via hostPath or container escape
+      (T1611) enables lateral movement across all pods on the node (T1552.001).
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/etc/kubernetes/bootstrap-kubeconfig"
+        - "/etc/kubernetes/kubeconfig"
+        - "/etc/kubernetes/node-kubeconfig"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.001, mitre:T1611, aks, azure, kubeconfig, node-credential-theft, cloud]
+
+  # ============================================================================
+  # T1078.004 — Valid Cloud Accounts: Managed Identity token abuse (cloud audit)
+  # ============================================================================
+
+  # An unusual or denied Azure IMDS token request recorded in Azure Activity Logs
+  # may indicate an attacker probing the managed identity endpoint or using a
+  # stolen token. The error_code field captures denied requests; empty error_code
+  # means the call succeeded (successful token issuance is also tracked).
+  - id: aks_managed_identity_token_abuse
+    name: "AKS: Azure managed identity token request — possible abuse"
+    description: >
+      A cloud audit event recorded an Azure managed identity OAuth2 token request
+      (via IMDS or managed identity endpoint). From an AKS cluster context, token
+      requests by unexpected workloads — especially those calling Azure Key Vault,
+      ARM, or Storage outside their expected scope — indicate T1078.004: an attacker
+      using a stolen or freshly acquired managed identity token to access Azure
+      resources beyond the pod's intended permissions.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values:
+            - "azure"
+        - field: cloud.action
+          op: in
+          values:
+            - "microsoft.compute/virtualmachines/extensions/read"
+            - "microsoft.managedidentity/userassignedidentities/federatedidentitycredentials/read"
+    severity: warning
+    action: alert
+    tags: [mitre:T1078.004, mitre:T1552.005, aks, azure, managed-identity, credential-access, cloud]

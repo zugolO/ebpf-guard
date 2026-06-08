@@ -1,0 +1,149 @@
+suite: gke_threats
+rules_path: ../../rules/gke-threats.yaml
+tests:
+  # ── Metadata server network rules ──────────────────────────────────────────
+
+  - name: "connection to 169.254.169.252 fires gke_metadata_server_access"
+    rule_id: gke_metadata_server_access
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.252"
+        dport: 80
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to 169.254.169.254 also fires gke_metadata_server_access"
+    rule_id: gke_metadata_server_access
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.254"
+        dport: 80
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to 169.254.169.252:988 fires gke_workload_identity_endpoint_abuse"
+    rule_id: gke_workload_identity_endpoint_abuse
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.252"
+        dport: 988
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to 169.254.169.252 on non-988 port does not fire workload identity rule"
+    event:
+      type: network
+      network:
+        dst_ip: "169.254.169.252"
+        dport: 80
+    expect: alert
+    expect_rule_id: gke_metadata_server_access
+
+  - name: "kubelet read-only port 10255 fires gke_kubelet_readonly_port_access"
+    rule_id: gke_kubelet_readonly_port_access
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.0.1"
+        dport: 10255
+    expect: alert
+    expect_severity: warning
+
+  - name: "normal HTTPS traffic does not fire GKE metadata rules"
+    event:
+      type: network
+      network:
+        dst_ip: "142.250.185.78"
+        dport: 443
+    expect: no_alert
+
+  - name: "connection to private IP on HTTPS does not fire GKE rules"
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.1.5"
+        dport: 443
+    expect: no_alert
+
+  # ── GCP credential file rules ───────────────────────────────────────────────
+
+  - name: "gcloud ADC credentials access fires gke_gcloud_credential_access"
+    rule_id: gke_gcloud_credential_access
+    event:
+      type: file
+      file:
+        filename: "/root/.config/gcloud/application_default_credentials.json"
+    expect: alert
+    expect_severity: warning
+
+  - name: "gcloud config directory access fires gke_gcloud_credential_access"
+    rule_id: gke_gcloud_credential_access
+    event:
+      type: file
+      file:
+        filename: "/root/.config/gcloud/credentials.db"
+    expect: alert
+    expect_severity: warning
+
+  - name: "GCP service account JSON key under /var/run/secrets/google/ fires gke_gcp_sa_json_key_access"
+    rule_id: gke_gcp_sa_json_key_access
+    event:
+      type: file
+      file:
+        filename: "/var/run/secrets/google/key.json"
+    expect: alert
+    expect_severity: critical
+
+  - name: "GCP credentials under /etc/gcp/ fires gke_gcp_sa_json_key_access"
+    rule_id: gke_gcp_sa_json_key_access
+    event:
+      type: file
+      file:
+        filename: "/etc/gcp/sa-credentials.json"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Cloud SQL proxy socket access fires gke_cloudsql_proxy_socket_access"
+    rule_id: gke_cloudsql_proxy_socket_access
+    event:
+      type: file
+      file:
+        filename: "/tmp/cloudsql/myproject:us-central1:mydb"
+    expect: alert
+    expect_severity: warning
+
+  - name: "/cloudsql/ path also fires gke_cloudsql_proxy_socket_access"
+    rule_id: gke_cloudsql_proxy_socket_access
+    event:
+      type: file
+      file:
+        filename: "/cloudsql/project:region:instance"
+    expect: alert
+    expect_severity: warning
+
+  # ── Negative cases ──────────────────────────────────────────────────────────
+
+  - name: "access to /etc/hosts does not fire any GKE rule"
+    event:
+      type: file
+      file:
+        filename: "/etc/hosts"
+    expect: no_alert
+
+  - name: "access to /tmp/app.json does not fire GKE SA key rule"
+    event:
+      type: file
+      file:
+        filename: "/tmp/app.json"
+    expect: no_alert
+
+  - name: "connection to kube-apiserver port 6443 does not fire GKE metadata rules"
+    event:
+      type: network
+      network:
+        dst_ip: "10.96.0.1"
+        dport: 6443
+    expect: no_alert

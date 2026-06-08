@@ -1,0 +1,214 @@
+## Google Kubernetes Engine (GKE) Attack Detection Rules
+# MITRE ATT&CK: T1552.005 (Cloud Instance Metadata API), T1552.001 (Credentials in Files),
+#               T1528 (Steal Application Access Token), T1613 (Container Discovery),
+#               T1078 (Valid Accounts)
+# Detects attacks specific to GKE: metadata server exploitation, workload identity
+# abuse, GCP service account key theft, and GKE-specific lateral movement paths.
+
+rules:
+  # ============================================================================
+  # T1552.005 — Cloud Instance Metadata API
+  # GKE metadata server access — service account token theft
+  # ============================================================================
+
+  # GKE exposes a metadata server proxy at 169.254.169.252 (the GKE-specific
+  # metadata concealment proxy) and the standard GCE IMDS at 169.254.169.254.
+  # Without Workload Identity enforced, containers can call the metadata server
+  # to obtain the node service account's OAuth2 access token and escalate to
+  # any GCP resource that service account can access.
+  - id: gke_metadata_server_access
+    name: "GKE: metadata server access — possible service account token theft"
+    description: >
+      A process connected to the GKE metadata server (169.254.169.252) or the
+      standard GCE Instance Metadata Service (169.254.169.254). Without Workload
+      Identity Federation enforced, containers can obtain the node's GCP service
+      account OAuth2 token from these endpoints and escalate from pod-level to
+      GCP project-level access (T1552.005). The metadata concealment proxy
+      (169.254.169.252) is GKE-specific and is never a legitimate destination
+      for application pods on clusters with Workload Identity enabled.
+    event_type: network
+    condition:
+      field: daddr
+      op: in_cidr
+      values:
+        - "169.254.169.252/32"
+        - "169.254.169.254/32"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.005, gke, gcp, metadata-server, credential-access, cloud]
+
+  # GKE's workload identity agent listens on port 988 of the metadata server proxy
+  # (169.254.169.252). The agent exchanges the Kubernetes service account OIDC
+  # token for a GCP access token. Direct access to this port bypasses normal
+  # application paths and may represent token theft or configuration probing.
+  - id: gke_workload_identity_endpoint_abuse
+    name: "GKE: workload identity agent port 988 — token exchange abuse"
+    description: >
+      A process connected to the GKE Workload Identity agent endpoint at
+      169.254.169.252 port 988. The agent at this undocumented port exchanges
+      Kubernetes SA tokens for GCP access tokens. Unexpected direct access —
+      outside the SDK's normal flow — is T1528: an attacker probing the token
+      exchange mechanism to obtain GCP credentials without going through the
+      standard application default credentials path.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: daddr
+          op: equals
+          values:
+            - "169.254.169.252"
+        - field: dport
+          op: equals
+          values:
+            - "988"
+    severity: critical
+    action: alert
+    tags: [mitre:T1528, mitre:T1552.005, gke, gcp, workload-identity, token-theft, cloud]
+
+  # ============================================================================
+  # T1613 — Container and Resource Discovery
+  # Kubelet unauthenticated read-only port exposure
+  # ============================================================================
+
+  # The kubelet read-only API on port 10255 exposes pod specs, container status,
+  # and node metrics without authentication. CIS GKE Benchmark 4.2.4 requires
+  # --read-only-port=0. An attacker inside a pod reaching this port can enumerate
+  # all pods on the node to identify high-value targets for lateral movement.
+  - id: gke_kubelet_readonly_port_access
+    name: "GKE: kubelet unauthenticated read-only port access (10255)"
+    description: >
+      A process made a TCP connection to port 10255 (kubelet read-only API).
+      If not disabled via --read-only-port=0 (required by CIS GKE Benchmark),
+      this port exposes pod specs, running container metadata, and node metrics
+      without authentication. From inside a pod this is T1613 — an attacker
+      enumerating all pods on the current node to identify privileged workloads,
+      service account tokens, or environment variables worth stealing.
+    event_type: network
+    condition:
+      field: dport
+      op: equals
+      values:
+        - "10255"
+    severity: warning
+    action: alert
+    tags: [mitre:T1613, gke, gcp, kubelet, reconnaissance, cis-benchmark, cloud]
+
+  # ============================================================================
+  # T1552.001 — Unsecured Credentials: Credentials in Files
+  # GCP service account key file and gcloud credential access
+  # ============================================================================
+
+  # GCP service account JSON key files contain a private key and client email
+  # that provide persistent GCP access. These files are commonly mounted as
+  # Kubernetes Secrets into pods. Unexpected access by shells or scripts
+  # indicates T1552.001 — an attacker harvesting long-lived GCP credentials
+  # that survive pod restarts and cluster re-provisioning.
+  - id: gke_gcp_sa_json_key_access
+    name: "GKE: GCP service account JSON key file access"
+    description: >
+      A process accessed a GCP service account JSON key file under a well-known
+      credential mount path (/var/run/secrets/google/, /etc/gcp/, /etc/google/).
+      These files contain the private key and service account email that grant
+      persistent GCP access. Unexpected access by non-application processes
+      (shells, curl, Python scripts) in a pod indicates T1552.001 — credential
+      theft of a long-lived GCP credential that is not time-bound.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/run/secrets/google/"
+        - "/etc/gcp/"
+        - "/etc/google/"
+        - "/run/secrets/gcp/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.001, gke, gcp, service-account-key, credential-access, cloud]
+
+  # The gcloud SDK stores OAuth2 access tokens, service account impersonation
+  # credentials, and Application Default Credentials in ~/.config/gcloud/.
+  # Access from inside a pod (via hostPath or leaked mount) gives an attacker
+  # full GCP access under the credentials of whoever configured the SDK on the node.
+  - id: gke_gcloud_credential_access
+    name: "GKE: gcloud SDK application default credentials access"
+    description: >
+      A process accessed the gcloud SDK credentials directory
+      (/root/.config/gcloud/ or /.config/gcloud/). This directory holds OAuth2
+      user account tokens, service account impersonation credentials, and
+      Application Default Credentials used by all GCP client libraries. Access
+      from an unexpected pod process indicates T1552.001 — the container is
+      reaching credentials that were mounted via hostPath or leaked from a
+      developer's CI/CD volume.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/root/.config/gcloud/"
+        - "/.config/gcloud/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.001, gke, gcp, gcloud-credentials, credential-access, cloud]
+
+  # ============================================================================
+  # T1078 — Valid Accounts: Local Accounts
+  # Cloud SQL Auth Proxy socket lateral movement
+  # ============================================================================
+
+  # The Cloud SQL Auth Proxy creates a Unix socket at /tmp/cloudsql/ or /cloudsql/
+  # that provides unauthenticated access to Cloud SQL databases for any process
+  # that can reach it. If a non-database-client process opens this socket,
+  # it may indicate lateral movement targeting connected databases.
+  - id: gke_cloudsql_proxy_socket_access
+    name: "GKE: Cloud SQL Auth Proxy socket — unexpected database access"
+    description: >
+      A process accessed the Cloud SQL Auth Proxy Unix socket at /tmp/cloudsql/
+      or /cloudsql/. The proxy provides unauthenticated SQL access to any process
+      that can open the socket — it relies on filesystem permissions and pod
+      isolation for security. Access by unexpected processes (shells, scripting
+      runtimes outside the application) is T1078 — lateral movement targeting
+      connected Cloud SQL databases to exfiltrate data.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/tmp/cloudsql/"
+        - "/cloudsql/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1078, gke, gcp, cloud-sql, database-access, lateral-movement, cloud]
+
+  # ============================================================================
+  # T1528 / T1078.004 — Cloud Account Credential Abuse
+  # GCP service account key creation (persistence via cloud audit)
+  # ============================================================================
+
+  # Creating a new service account key in GCP is a persistence mechanism:
+  # attackers with iam.serviceAccountKeys.create permission create a key as
+  # a backdoor that survives credential rotation and pod replacement.
+  - id: gke_service_account_key_creation
+    name: "GKE: GCP service account key created — persistence"
+    description: >
+      A GCP IAM call created a new service account key via CreateServiceAccountKey.
+      Long-lived service account keys are a persistence mechanism (T1528, T1078.004):
+      an attacker with sufficient IAM permissions creates a JSON key as a backdoor
+      that survives Kubernetes pod rotation and node replacement. Prefer Workload
+      Identity Federation over service account keys; alert on any key creation
+      from within a Kubernetes workload context.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values:
+            - "gcp"
+        - field: cloud.action
+          op: contains
+          values:
+            - "CreateServiceAccountKey"
+    severity: critical
+    action: alert
+    tags: [mitre:T1528, mitre:T1078.004, gke, gcp, service-account-key, persistence, cloud]

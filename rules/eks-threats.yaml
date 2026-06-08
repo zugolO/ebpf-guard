@@ -1,0 +1,213 @@
+## Amazon EKS-Specific Attack Detection Rules
+# MITRE ATT&CK: T1552.005 (Cloud Instance Metadata API), T1552.001 (Credentials in Files),
+#               T1528 (Steal Application Access Token), T1613 (Container Discovery)
+# Detects attacks specific to Amazon EKS: IMDS credential theft, IRSA / Pod Identity
+# token abuse, static AWS credential harvesting, and ECR supply-chain attacks.
+
+rules:
+  # ============================================================================
+  # T1552.005 — Cloud Instance Metadata API
+  # EC2 IMDS access from pod context
+  # ============================================================================
+
+  # The EC2 Instance Metadata Service at 169.254.169.254 issues temporary IAM
+  # credentials for the node's instance profile. IMDSv2 requires a PUT token
+  # exchange first, but this does not prevent access from within a pod on a
+  # node where the hop-limit is misconfigured (>1). Any container reaching
+  # this address is attempting to escalate from pod to AWS account-level access.
+  - id: eks_imds_credential_theft
+    name: "EKS: EC2 IMDS access — IAM role credential theft"
+    description: >
+      A process connected to the EC2 Instance Metadata Service (169.254.169.254).
+      From within a Kubernetes pod this is T1552.005: the container is attempting
+      to harvest the EC2 node IAM role credentials (access key, secret, session
+      token) and escalate from pod-level to AWS account-level access. Enforce
+      IMDSv2 and set hop-limit=1 to mitigate; this rule detects residual access.
+    event_type: network
+    condition:
+      field: daddr
+      op: equals
+      values:
+        - "169.254.169.254"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.005, eks, aws, imds, credential-access, cloud]
+
+  # ECS task metadata endpoint used on Fargate and EKS nodes running in ECS
+  # mode. The AWS_CONTAINER_CREDENTIALS_RELATIVE_URI env var contains a path
+  # under 169.254.170.2 that returns the task execution role credentials.
+  # This address is unique to AWS environments so any connection is significant.
+  - id: eks_fargate_task_metadata_access
+    name: "EKS/Fargate: ECS task metadata credential endpoint access"
+    description: >
+      A process connected to 169.254.170.2, the ECS task metadata service used
+      by AWS Fargate nodes and ECS-mode EKS workloads. The endpoint at the
+      relative URI stored in AWS_CONTAINER_CREDENTIALS_RELATIVE_URI returns
+      temporary IAM credentials for the task execution role. Direct access from
+      an unexpected process is T1552.005 — credential theft targeting the
+      Fargate task's execution role without going through the SDK.
+    event_type: network
+    condition:
+      field: daddr
+      op: equals
+      values:
+        - "169.254.170.2"
+    severity: critical
+    action: alert
+    tags: [mitre:T1552.005, eks, aws, fargate, ecs-metadata, credential-access, cloud]
+
+  # ============================================================================
+  # T1528 — Steal Application Access Token
+  # IRSA / EKS Pod Identity projected token theft
+  # ============================================================================
+
+  # EKS IRSA injects an OIDC token at this path that the AWS SDK exchanges for
+  # temporary STS credentials via AssumeRoleWithWebIdentity. Unexpected readers
+  # (shells, curl, Python one-liners) indicate active credential harvesting.
+  - id: eks_irsa_token_read
+    name: "EKS: IRSA service account token read (T1528)"
+    description: >
+      A process read the EKS IRSA (IAM Roles for Service Accounts) projected
+      OIDC token from the standard injected path. The token is exchanged for
+      AWS STS credentials via AssumeRoleWithWebIdentity. Unexpected callers
+      — shells, curl, python scripts — indicate T1528: an attacker harvesting
+      the IRSA token to impersonate the pod's IAM role against AWS APIs.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/run/secrets/eks.amazonaws.com/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1528, eks, aws, irsa, token-theft, credential-access, cloud]
+
+  # EKS Pod Identity (GA in EKS 1.29+) replaces IRSA. The Pod Identity Agent
+  # daemonset injects credentials via this path. Same threat model as IRSA —
+  # an attacker reading this token can call STS directly to get AWS creds.
+  - id: eks_pod_identity_token_read
+    name: "EKS: EKS Pod Identity token read (T1528)"
+    description: >
+      A process read from the EKS Pod Identity projected token path. EKS Pod
+      Identity is the AWS-native replacement for IRSA (EKS 1.29+); the token
+      here is exchanged for AWS credentials via the Pod Identity Agent sidecar.
+      Unexpected access — especially from interactive shells — indicates T1528:
+      an attacker harvesting the token to impersonate the pod's IAM identity.
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/var/run/secrets/pods.eks.amazonaws.com/"
+    severity: critical
+    action: alert
+    tags: [mitre:T1528, eks, aws, pod-identity, token-theft, credential-access, cloud]
+
+  # ============================================================================
+  # T1552.001 — Unsecured Credentials: Credentials in Files
+  # Static AWS credential files mounted into pods
+  # ============================================================================
+
+  # Long-lived IAM access keys in ~/.aws/credentials are a persistence mechanism
+  # and a sign of misconfigured workloads that use static credentials instead of
+  # IRSA or Pod Identity. Access from unexpected processes inside a pod indicates
+  # active harvesting of credentials that outlive the current session.
+  - id: eks_aws_credentials_file_read
+    name: "EKS: AWS static credentials file access from pod context"
+    description: >
+      A process accessed the AWS credentials file (/root/.aws/credentials or
+      /.aws/credentials). Inside a pod this indicates static AWS access keys
+      were mounted or written to the container — a long-lived credential that
+      persists across pod restarts and is a common misconfiguration in workloads
+      migrated from EC2. Access by unexpected processes is T1552.001.
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/root/.aws/credentials"
+        - "/.aws/credentials"
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.001, eks, aws, credentials-file, credential-access, cloud]
+
+  # Broader sweep of the ~/.aws/ directory — catches config, SSO tokens, and
+  # named credential profile reads that the specific credentials-file rule misses.
+  - id: eks_aws_config_dir_access
+    name: "EKS: AWS configuration directory traversal from pod context"
+    description: >
+      A process accessed the AWS configuration directory (/root/.aws/ or /.aws/).
+      This covers config files, SSO tokens, named credential profiles, and
+      assume_role configurations beyond the standard credentials file.
+      Directory traversal from unexpected processes in a pod indicates an
+      attacker enumerating all available AWS identities (T1552.001, T1087).
+    event_type: file
+    condition:
+      field: filename
+      op: prefix
+      values:
+        - "/root/.aws/"
+        - "/.aws/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.001, mitre:T1087, eks, aws, credentials-file, reconnaissance, cloud]
+
+  # ============================================================================
+  # T1525 / T1552.001 — Supply chain / ECR registry credential theft
+  # Docker credential helper config exposes ECR registry access
+  # ============================================================================
+
+  # On EKS nodes the Docker credential store config typically contains the
+  # ecr-credential-helper entry, which reveals which ECR registry the node
+  # authenticates to. Combined with IRSA/instance-role credentials this
+  # enables an attacker to push backdoored images to private ECR repos.
+  - id: eks_ecr_credential_helper_access
+    name: "EKS: Docker/ECR credential helper config access"
+    description: >
+      A process accessed /root/.docker/config.json or /.docker/config.json.
+      On EKS nodes this file typically references the amazon-ecr-credential-helper
+      and reveals the ECR registry endpoint. Combined with harvested IRSA or
+      instance-profile credentials, an attacker can authenticate to ECR and push
+      backdoored images (T1525 — implant internal image) to private repositories.
+    event_type: file
+    condition:
+      field: filename
+      op: in
+      values:
+        - "/root/.docker/config.json"
+        - "/.docker/config.json"
+    severity: warning
+    action: alert
+    tags: [mitre:T1552.001, mitre:T1525, eks, aws, ecr, container-registry, supply-chain, cloud]
+
+  # ============================================================================
+  # T1078.004 — Valid Accounts: Cloud Accounts
+  # EKS IRSA unusual AssumeRoleWithWebIdentity (cloud audit)
+  # ============================================================================
+
+  # STS calls from pods using IRSA should come from the expected AWS region and
+  # service endpoint. An unusual source IP or region indicates the OIDC token
+  # was exfiltrated and is being replayed from an attacker-controlled host.
+  - id: eks_irsa_unusual_assume_role
+    name: "EKS: IRSA AssumeRoleWithWebIdentity from unexpected source"
+    description: >
+      An IAM AssumeRoleWithWebIdentity call was detected in cloud audit logs.
+      While expected for IRSA-enabled pods, this rule flags the action for
+      correlation with T1528: an exfiltrated OIDC token being replayed from an
+      unexpected IP or from a pod that has never performed this action before.
+      Correlate with EWMA anomaly scoring for per-service-account baselines.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values:
+            - "aws"
+        - field: cloud.action
+          op: equals
+          values:
+            - "AssumeRoleWithWebIdentity"
+    severity: warning
+    action: alert
+    tags: [mitre:T1528, mitre:T1078.004, eks, aws, irsa, sts, privilege-escalation, cloud]

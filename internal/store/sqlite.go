@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -327,8 +328,16 @@ func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 		}
 
 		alert.Severity = types.Severity(severityStr)
-		json.Unmarshal(detailsJSON, &alert.Details)
-		json.Unmarshal(labelsJSON, &alert.Enrichment.Labels)
+		if len(detailsJSON) > 0 {
+			if err := json.Unmarshal(detailsJSON, &alert.Details); err != nil {
+				slog.Warn("sqlite: failed to unmarshal alert details", slog.String("alert_id", alert.ID), slog.Any("error", err))
+			}
+		}
+		if len(labelsJSON) > 0 {
+			if err := json.Unmarshal(labelsJSON, &alert.Enrichment.Labels); err != nil {
+				slog.Warn("sqlite: failed to unmarshal alert labels", slog.String("alert_id", alert.ID), slog.Any("error", err))
+			}
+		}
 
 		alerts = append(alerts, alert)
 	}
@@ -361,8 +370,16 @@ func (s *SQLiteStore) QueryByID(ctx context.Context, alertID string) (*types.Ale
 	}
 
 	alert.Severity = types.Severity(severityStr)
-	json.Unmarshal(detailsJSON, &alert.Details)
-	json.Unmarshal(labelsJSON, &alert.Enrichment.Labels)
+	if len(detailsJSON) > 0 {
+		if err := json.Unmarshal(detailsJSON, &alert.Details); err != nil {
+			slog.Warn("sqlite: failed to unmarshal alert details", slog.String("alert_id", alert.ID), slog.Any("error", err))
+		}
+	}
+	if len(labelsJSON) > 0 {
+		if err := json.Unmarshal(labelsJSON, &alert.Enrichment.Labels); err != nil {
+			slog.Warn("sqlite: failed to unmarshal alert labels", slog.String("alert_id", alert.ID), slog.Any("error", err))
+		}
+	}
 
 	return &alert, nil
 }

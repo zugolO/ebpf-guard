@@ -82,6 +82,8 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
 	rulesCmd.AddCommand(newRulesCheckCmd())
 
+	configCmd := newConfigCmd()
+
 	root.AddCommand(
 		newAlertsCmd(&cfgPath),
 		newStatusCmd(),
@@ -89,6 +91,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		newVersionCmd(),
 		newLearnCmd(),
 		newDashboardCmd(),
+		configCmd,
 	)
 
 	return root
@@ -1438,6 +1441,119 @@ Keybindings:
 	cmd.Flags().StringVar(&logLevel, "log-level", "warn", "log level (use warn/error to keep TUI clean)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "use synthetic events instead of real eBPF probes")
 	return cmd
+}
+
+// newConfigCmd returns the "config" parent subcommand with validate/migrate children.
+func newConfigCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Config file validation and migration tools",
+	}
+	cmd.AddCommand(newConfigValidateCmd())
+	cmd.AddCommand(newConfigMigrateCmd())
+	return cmd
+}
+
+// newConfigValidateCmd returns the "config validate" subcommand.
+func newConfigValidateCmd() *cobra.Command {
+	var cfgPath string
+
+	cmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate a config file for deprecated or removed fields",
+		Long: `validate reads the config file and reports:
+  - Deprecated fields that have been renamed in a newer schema version
+  - Removed fields that no longer have any effect
+
+Exit code 0 if no issues are found, 1 if issues are detected.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runConfigValidate(cfgPath)
+		},
+	}
+	cmd.Flags().StringVar(&cfgPath, "config", "config/config.yaml", "path to config file")
+	return cmd
+}
+
+// newConfigMigrateCmd returns the "config migrate" subcommand.
+func newConfigMigrateCmd() *cobra.Command {
+	var (
+		cfgPath   string
+		targetVer string
+		outPath   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "Auto-migrate a config file to a target schema version",
+		Long: `migrate applies known rename and removal transformations and writes a
+new config file compatible with the target version.
+
+The original file is not modified. Specify --out to control the output path.
+Note: YAML comments are not preserved in the migrated output.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runConfigMigrate(cfgPath, targetVer, outPath)
+		},
+	}
+	cmd.Flags().StringVar(&cfgPath, "config", "config/config.yaml", "path to config file")
+	cmd.Flags().StringVar(&targetVer, "to", "v0.2.0", "target config schema version")
+	cmd.Flags().StringVar(&outPath, "out", "", "output file path (default: <config>.migrated.yaml)")
+	return cmd
+}
+
+func runConfigValidate(cfgPath string) error {
+	issues, err := config.CheckConfigFile(cfgPath)
+	if err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
+
+	// Collect section names that have issues for grouped output.
+	issueFields := make(map[string]bool)
+	for _, iss := range issues {
+		issueFields[iss.Field] = true
+	}
+
+	// Print OK status for all top-level sections with no issues.
+	sections := []string{
+		"server", "bpf", "rules", "correlator", "profiler",
+		"exporter", "alerting", "kubernetes", "auth", "notifications",
+		"store", "collectors", "enforcement", "watchdog", "policy",
+		"compat", "gossip", "wasm", "osint", "event_log", "canary",
+	}
+	sectionHasIssue := make(map[string]bool)
+	for _, iss := range issues {
+		top := strings.SplitN(iss.Field, ".", 2)[0]
+		sectionHasIssue[top] = true
+	}
+	for _, sec := range sections {
+		if !sectionHasIssue[sec] {
+			fmt.Printf("✓ %s: OK\n", sec)
+		}
+	}
+
+	for _, iss := range issues {
+		fmt.Printf("✗ %s: %s\n", iss.Field, iss.Message)
+	}
+
+	if len(issues) == 0 {
+		fmt.Printf("\n0 issues found.\n")
+		return nil
+	}
+	fmt.Printf("\n%d issue(s) found. Run 'ebpf-guard config migrate' to auto-fix.\n", len(issues))
+	return fmt.Errorf("%d issue(s) found", len(issues))
+}
+
+func runConfigMigrate(cfgPath, targetVer, outPath string) error {
+	if outPath == "" {
+		ext := filepath.Ext(cfgPath)
+		base := strings.TrimSuffix(cfgPath, ext)
+		outPath = base + ".migrated" + ext
+	}
+	if err := config.MigrateConfigFile(cfgPath, targetVer, outPath); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	fmt.Printf("Migration complete: %s → %s\n", cfgPath, outPath)
+	fmt.Printf("Run 'ebpf-guard config validate --config %s' to verify.\n", outPath)
+	return nil
 }
 
 func runDashboard(cfgPath string, dryRun bool) error {

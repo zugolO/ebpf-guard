@@ -16,6 +16,10 @@ import (
 type Config struct {
 	mu sync.RWMutex
 
+	// ConfigVersion is the schema version of this config file (e.g. "v0.1").
+	// Used by 'ebpf-guard config validate/migrate' to detect stale fields.
+	ConfigVersion string `mapstructure:"config_version"`
+
 	// Server configuration
 	Server ServerConfig `mapstructure:"server"`
 
@@ -797,6 +801,9 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 
 // setDefaults sets default configuration values.
 func setDefaults(v *viper.Viper) {
+	// Schema version
+	v.SetDefault("config_version", "v0.1")
+
 	// Server defaults
 	v.SetDefault("server.bind_address", ":9090")
 	v.SetDefault("server.metrics_path", "/metrics")

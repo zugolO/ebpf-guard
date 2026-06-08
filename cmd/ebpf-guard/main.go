@@ -412,9 +412,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if cfg.Rules.HotReload {
 		cfgManager.OnChange(func(newCfg *config.Config) {
+			t0 := time.Now()
 			newRules, err := correlator.LoadRulesFromFile(newCfg.Rules.Path)
+			engine.ObserveYAMLParseDuration(time.Since(t0))
 			if err != nil {
 				slog.Warn("hot-reload: failed to load rules", slog.Any("error", err))
+				engine.RecordReloadFailure()
 				return
 			}
 			engine.ReloadRules(newRules)

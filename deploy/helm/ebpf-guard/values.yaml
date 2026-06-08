@@ -134,6 +134,22 @@ prometheusRule:
           annotations:
             summary: "High alert rate on {{ $labels.node }}"
             description: "ebpf-guard is generating more than 10 alerts/sec on {{ $labels.node }}."
+        - alert: RuleReloadStale
+          expr: time() - ebpf_guard_rule_last_reload_timestamp_seconds > 300
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard rules have not reloaded in 5 minutes (expected every 60s)"
+            description: "ebpf-guard on {{ $labels.node }} has not performed a successful rule hot-reload in more than 5 minutes."
+        - alert: RuleReloadFailing
+          expr: increase(ebpf_guard_rule_reload_total{status="failure"}[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard rule reload failures detected on {{ $labels.node }}"
+            description: "One or more rule hot-reload attempts have failed in the last 5 minutes on {{ $labels.node }}."
 
 # VerticalPodAutoscaler
 vpa:

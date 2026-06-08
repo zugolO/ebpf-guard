@@ -67,3 +67,100 @@ If the node is hard-killed (OOM killer, power loss) before shutdown completes, S
 During a DaemonSet rolling update, the `ebpf-guard` pod on each node receives `SIGTERM` and has `terminationGracePeriodSeconds` to complete the shutdown sequence. The new pod starts on the same node only after the old pod terminates. There is a brief window (typically < 1 s) where neither pod is running; events during this window are not captured. This is expected behaviour for eBPF-based agents.
 
 To minimise the gap, use `maxUnavailable: 0` and `maxSurge: 1` in the rolling update strategy — note this requires nodes to temporarily run two DaemonSet pods.
+
+## Zero-Downtime Upgrades: Preserving the EWMA Learning Period
+
+By default each pod restart re-enters the learning phase (`profiler.learning_period`, default 1 hour), during which anomaly detection is suppressed. On a 100-node cluster a rolling update means up to 100 h of aggregate reduced coverage.
+
+### EWMA State Persistence
+
+Enable state persistence to save the learned behavioral baseline to the node's local disk on graceful shutdown and restore it on the next start:
+
+```yaml
+# deploy/helm/ebpf-guard/values.yaml
+profilerStatePersistence:
+  enabled: true
+  hostPath: /var/lib/ebpf-guard   # directory on the node
+```
+
+Also set the matching config option in `config.yaml`:
+
+```yaml
+profiler:
+  state_persistence:
+    enabled: true
+    path: /var/lib/ebpf-guard/profiler-state.json
+```
+
+When enabled:
+
+1. On shutdown the agent writes the full EWMA profile (all workload baselines) and learning state to `/var/lib/ebpf-guard/profiler-state.json`.
+2. On startup the agent reads the state file. If it is **fresh** (age < 2 × `learning_period`), the learning phase is skipped immediately and anomaly detection resumes from the saved baseline.
+3. Stale files (age ≥ 2 × `learning_period`) are silently ignored and the agent starts fresh — this prevents a cold node from scoring against a stale baseline after a long outage.
+
+Monitor the restore outcome:
+
+```promql
+# 1 = state was loaded; 0 = fresh start (learning period will apply)
+ebpf_guard_profiler_state_restored
+```
+
+### Safe Upgrade Runbook
+
+For security-sensitive clusters where even a brief learning window is unacceptable:
+
+1. **Before the upgrade**, verify the current learning state is complete on every node:
+   ```promql
+   ebpf_guard_learning_progress == 1
+   ```
+2. **Enable state persistence** (see above) and roll out the change in a preparatory upgrade so the first restart already saves state.
+3. **Perform the upgrade**. The rolling update writes state on shutdown and restores it on startup — no learning window on restart.
+4. **After each node update**, confirm the metric:
+   ```promql
+   ebpf_guard_profiler_state_restored == 1
+   ```
+   A value of `0` after startup means the state was missing or stale; monitor `ebpf_guard_learning_progress` until it returns to `1`.
+
+### Alternative: `OnDelete` Update Strategy
+
+For the most conservative approach (security-critical clusters), switch to the `OnDelete` strategy so nodes are updated one-by-one under human supervision:
+
+```yaml
+updateStrategy:
+  type: OnDelete
+```
+
+Manual procedure per node:
+
+```bash
+# 1. Cordon the node so no new workloads schedule
+kubectl cordon <node>
+
+# 2. Wait for the learning period to complete (check metric)
+watch -n 10 kubectl exec -n ebpf-guard ds/ebpf-guard -- \
+  curl -s http://localhost:9090/metrics | grep learning_progress
+
+# 3. Delete the pod (triggers graceful shutdown + state save if persistence is enabled)
+kubectl delete pod -n ebpf-guard -l app.kubernetes.io/name=ebpf-guard \
+  --field-selector spec.nodeName=<node>
+
+# 4. The DaemonSet controller will NOT restart the pod (OnDelete strategy).
+#    Apply the new manifest:
+kubectl set image ds/ebpf-guard ebpf-guard=zugolO/ebpf-guard:<new-tag> -n ebpf-guard
+
+# 5. The new pod starts and restores state (if persistence is enabled).
+#    Uncordon when learning_progress = 1
+kubectl uncordon <node>
+```
+
+### BPF Program Continuity Metric
+
+Track whether BPF programs remain attached after an upgrade with:
+
+```promql
+# Alert when BPF programs are unexpectedly unloaded
+ebpf_guard_collector_up{collector="syscall"} == 0
+ebpf_guard_collector_up{collector="network"} == 0
+```
+
+Set up a Prometheus alert for these to catch failed BPF attachment during upgrades.

@@ -216,3 +216,17 @@ func (p *Profiler) GetSequenceProfiler() *SequenceProfiler {
 func (p *Profiler) GetLineageTracker() *LineageTracker {
 	return p.lineage
 }
+
+// SaveState serializes the EWMA learning state to path.
+// Call this during graceful shutdown to enable state restoration on the next start.
+func (p *Profiler) SaveState(path string) error {
+	return p.detector.SaveState(path)
+}
+
+// LoadState restores a previously saved EWMA learning state from path.
+// learningPeriod is the currently configured learning period used for the
+// freshness check.  Returns true if the state was valid and learning was
+// already complete, so the caller can skip the learning phase.
+func (p *Profiler) LoadState(path string, learningPeriod time.Duration) (bool, error) {
+	return p.detector.LoadState(path, learningPeriod)
+}

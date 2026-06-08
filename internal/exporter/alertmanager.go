@@ -219,6 +219,23 @@ func (c *AlertmanagerClient) Flush() {
 	c.flushUnlocked()
 }
 
+// FlushContext sends any pending alerts and blocks until all in-flight HTTP
+// sends complete or ctx expires.
+func (c *AlertmanagerClient) FlushContext(ctx context.Context) error {
+	c.Flush()
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (c *AlertmanagerClient) flushUnlocked() {
 	if len(c.batch) == 0 && c.fallback.Len() == 0 {
 		return

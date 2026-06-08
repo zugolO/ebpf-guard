@@ -255,6 +255,11 @@ func (s *MemoryStore) Delete(ctx context.Context, olderThan time.Duration) (int6
 	return deleted, nil
 }
 
+// Flush is a no-op for memory store — all writes are immediately consistent.
+func (s *MemoryStore) Flush(_ context.Context) error {
+	return nil
+}
+
 // Close is a no-op for memory store.
 func (s *MemoryStore) Close() error {
 	return nil

@@ -433,6 +433,11 @@ func (s *OpenSearchStore) Delete(ctx context.Context, olderThan time.Duration) (
 	return result.Deleted, nil
 }
 
+// Flush is a no-op for OpenSearch — each StoreBatch call is a synchronous HTTP write.
+func (s *OpenSearchStore) Flush(_ context.Context) error {
+	return nil
+}
+
 // Close is a no-op for HTTP client.
 func (s *OpenSearchStore) Close() error {
 	return nil

@@ -40,9 +40,10 @@
 #define AF_INET6  10
 
 /* Maximum lengths for string fields */
-#define COMM_LEN     16
-#define FILENAME_LEN 256
-#define KMOD_NAME_LEN 64  /* MODULE_NAME_LEN from kernel is 56; use 64 for alignment */
+#define COMM_LEN      16
+#define FILENAME_LEN  256
+#define KMOD_NAME_LEN 64   /* MODULE_NAME_LEN from kernel is 56; use 64 for alignment */
+#define PROC_ARGS_MAX 512  /* Max bytes stored for process cmdline args */
 
 /*
  * struct event - Unified event structure sent from kernel to userspace.
@@ -131,6 +132,30 @@ struct lsm_audit_event {
 	char  comm[16];
 	char  path[64];       /* file path (file_open only, NUL-terminated) */
 } __attribute__((packed));
+
+/*
+ * struct proc_args - cached process command-line arguments.
+ * Populated by the sched_process_exec tracepoint hook in syscall.bpf.c.
+ * Keyed by TGID in proc_args_map; consumed by userspace collectors when
+ * enriching file, network, and syscall events with proc.args.
+ */
+struct proc_args {
+	char args[PROC_ARGS_MAX]; /* Space-separated argv, NUL-terminated */
+	__u8 truncated;           /* 1 when original cmdline exceeded PROC_ARGS_MAX */
+	__u8 _pad[3];
+};
+
+/*
+ * proc_args_map - LRU hash of per-TGID process cmdline arguments.
+ * Written on sched_process_exec; read by userspace collector goroutines.
+ * LRU eviction keeps memory bounded without explicit cleanup.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 8192);
+	__type(key, __u32);                /* TGID */
+	__type(value, struct proc_args);
+} proc_args_map SEC(".maps");
 
 /* Sampling configuration - configurable per event type */
 struct sampling_config {

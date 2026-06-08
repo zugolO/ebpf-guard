@@ -2,7 +2,10 @@
 package correlator
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
+	"math/rand"
 	"net"
 	"regexp"
 	"sort"
@@ -11,8 +14,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
+)
+
+// Sampling metrics — only incremented when a rule has SampleRate < 1.0.
+// Rules with SampleRate == 1.0 (default) never touch these counters.
+var (
+	ruleSamplesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_rule_samples_total",
+			Help: "Events that passed the per-rule sampling gate and were evaluated against the rule condition",
+		},
+		[]string{"rule_id"},
+	)
+	ruleSkippedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_rule_skipped_total",
+			Help: "Events dropped by the per-rule sampling gate without condition evaluation",
+		},
+		[]string{"rule_id"},
+	)
 )
 
 // alertsPool recycles the backing arrays of []types.Alert slices returned by
@@ -57,6 +81,8 @@ const (
 	OpCapsDropped RuleConditionOperator = "caps_dropped"
 	// OpSuffix checks if the field value ends with any of the given suffixes.
 	OpSuffix RuleConditionOperator = "suffix"
+	// OpContains checks if the field value contains any of the given substrings.
+	OpContains RuleConditionOperator = "contains"
 )
 
 // RuleCondition defines a single condition for rule evaluation.
@@ -109,6 +135,13 @@ type Rule struct {
 	Action         RuleAction          `yaml:"action"`
 	// Tags are optional metadata for rule categorization and filtering
 	Tags []string `yaml:"tags,omitempty"`
+	// SampleRate controls the fraction of matching events that are evaluated.
+	// 1.0 (default) evaluates every event; 0.1 evaluates ~10%.
+	// Validated to be in (0.0, 1.0]; missing or 0 is treated as 1.0.
+	SampleRate float64 `yaml:"sample_rate,omitempty"`
+	// SampleDeterministic uses FNV(PID || timestamp>>30) for sampling instead of
+	// a random number, ensuring the same PID is consistently sampled within ~1s windows.
+	SampleDeterministic bool `yaml:"sample_deterministic,omitempty"`
 }
 
 // RuleSet contains all loaded rules.
@@ -355,11 +388,49 @@ func ReleaseAlerts(s []types.Alert) {
 	alertsPool.Put(&s)
 }
 
+// shouldSample reports whether an event should be evaluated against a rule
+// given the configured sample rate. Called only when rule.SampleRate < 1.0.
+//
+// deterministic=true uses FNV-1 32-bit hash of (PID || timestamp>>30) so
+// that the same PID is consistently sampled or skipped within ~1 second
+// windows (2^30 ns ≈ 1.07 s). This avoids alert storms where a single
+// hot PID is repeatedly sampled on every event.
+//
+// deterministic=false uses a uniform random draw — distribution is correct
+// over time but individual PIDs may be over- or under-represented in any
+// short window.
+func shouldSample(pid uint32, ts uint64, rate float64, deterministic bool) bool {
+	if deterministic {
+		h := fnv.New32()
+		var buf [12]byte
+		binary.LittleEndian.PutUint32(buf[:4], pid)
+		binary.LittleEndian.PutUint64(buf[4:], ts>>30)
+		h.Write(buf[:])
+		return float64(h.Sum32()%1000) < rate*1000
+	}
+	return rand.Float64() < rate //nolint:gosec // non-crypto, performance-sensitive
+}
+
 // matches checks if an event matches a rule.
 func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
 	// Check event type
 	if e.Type != rule.EventType {
 		return false
+	}
+
+	// Per-rule sampling: skip condition evaluation for a fraction of events.
+	// Only active when 0 < SampleRate < 1.0.
+	// SampleRate == 0.0 (Go zero value, i.e. field absent from YAML) is treated
+	// as "evaluate all" to stay backward-compatible with rules that are constructed
+	// directly without going through validateRule (which normalises 0→1.0).
+	// SampleRate == 1.0: the second condition is false, so zero overhead.
+	if rule.SampleRate > 0 && rule.SampleRate < 1.0 {
+		if shouldSample(e.PID, e.Timestamp, rule.SampleRate, rule.SampleDeterministic) {
+			ruleSamplesTotal.WithLabelValues(rule.ID).Inc()
+		} else {
+			ruleSkippedTotal.WithLabelValues(rule.ID).Inc()
+			return false
+		}
 	}
 
 	// Use condition group if present, otherwise use single condition
@@ -461,6 +532,13 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool 
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a >= b })
 	case OpLessOrEqual:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a <= b })
+	case OpContains:
+		for _, v := range cond.Values {
+			if strings.Contains(value, v) {
+				return true
+			}
+		}
+		return false
 	case OpInCIDR:
 		return re.matchesCIDR(value, cond.Values, true)
 	case OpNotInCIDR:
@@ -543,6 +621,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 				return "ipv6"
 			}
 			return "ipv4"
+		case "proc.args":
+			return e.ProcArgs
+		case "proc.args_truncated":
+			if e.ProcArgsTruncated {
+				return "true"
+			}
+			return "false"
 		}
 	case types.EventFileAccess:
 		if e.File == nil {
@@ -568,6 +653,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 				return ops[e.File.Op]
 			}
 			return strconv.FormatUint(uint64(e.File.Op), 10)
+		case "proc.args":
+			return e.ProcArgs
+		case "proc.args_truncated":
+			if e.ProcArgsTruncated {
+				return "true"
+			}
+			return "false"
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {
@@ -601,6 +693,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 				return e.File.FDPath
 			}
 			return ""
+		case "proc.args":
+			return e.ProcArgs
+		case "proc.args_truncated":
+			if e.ProcArgsTruncated {
+				return "true"
+			}
+			return "false"
 		}
 	case types.EventDNS:
 		if e.DNS == nil {

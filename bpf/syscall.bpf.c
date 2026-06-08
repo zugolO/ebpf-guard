@@ -1,12 +1,13 @@
 /*
  * syscall.bpf.c - eBPF program for syscall tracing via raw tracepoints.
- * Attaches to sys_enter and sys_exit tracepoints.
+ * Attaches to sys_enter, sys_exit, and sched_process_exec tracepoints.
  */
 
 #include <linux/bpf.h>
 #include <linux/ptrace.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 #include "common.h"
 
 /* Raw tracepoint argument structure for sys_enter */
@@ -109,6 +110,66 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 	}
 
 	submit_event(e);
+	return 0;
+}
+
+/*
+ * trace_sched_process_exec - populate proc_args_map on every exec.
+ *
+ * Reads argv from task_struct->mm->arg_start..arg_end (BTF CO-RE) and stores
+ * a NUL-terminated, space-joined copy in proc_args_map keyed by TGID.
+ * Requires kernel 5.15+ with BTF support; falls back to /proc/PID/cmdline
+ * in userspace when this program fails to load (see collector/syscall.go).
+ */
+SEC("tp/sched/sched_process_exec")
+int trace_sched_process_exec(void *ctx)
+{
+	struct proc_args pa = {};
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	__u32 tgid = (__u32)(pid_tgid >> 32);
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned long arg_start, arg_end;
+	long args_len, read_len;
+
+	task = (struct task_struct *)bpf_get_current_task();
+	mm = BPF_CORE_READ(task, mm);
+	if (!mm)
+		return 0;
+
+	arg_start = BPF_CORE_READ(mm, arg_start);
+	arg_end   = BPF_CORE_READ(mm, arg_end);
+	args_len  = (long)(arg_end - arg_start);
+	if (args_len <= 0)
+		return 0;
+
+	if (args_len >= PROC_ARGS_MAX) {
+		read_len = PROC_ARGS_MAX - 1;
+		pa.truncated = 1;
+	} else {
+		read_len = args_len;
+	}
+	/* Bounds check lets the verifier prove read_len is in [1, PROC_ARGS_MAX-1]. */
+	if (read_len <= 0 || read_len >= PROC_ARGS_MAX)
+		return 0;
+
+	if (bpf_probe_read_user(pa.args, (size_t)read_len, (void *)arg_start) < 0)
+		return 0;
+
+	/*
+	 * Replace NUL argument separators with spaces so the result is a single
+	 * printable string suitable for regex/contains rule matching.
+	 * Bounded loop (PROC_ARGS_MAX - 1 = 511 iterations): safe for the verifier.
+	 */
+	for (int i = 0; i < PROC_ARGS_MAX - 1; i++) {
+		if (pa.args[i] == '\0' && i < read_len - 1)
+			pa.args[i] = ' ';
+	}
+	/* Ensure NUL termination at the real end. */
+	if (read_len > 0 && read_len < PROC_ARGS_MAX)
+		pa.args[read_len] = '\0';
+
+	bpf_map_update_elem(&proc_args_map, &tgid, &pa, BPF_ANY);
 	return 0;
 }
 

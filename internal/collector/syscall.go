@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -122,8 +123,9 @@ func (c *SyscallCollector) GetPrograms() map[string]*ebpf.Program {
 		return nil
 	}
 	return map[string]*ebpf.Program{
-		"trace_sys_enter": c.objs.TraceSysEnter,
-		"trace_sys_exit":  c.objs.TraceSysExit,
+		"trace_sys_enter":           c.objs.TraceSysEnter,
+		"trace_sys_exit":            c.objs.TraceSysExit,
+		"trace_sched_process_exec":  c.objs.TraceSchedProcessExec,
 	}
 }
 
@@ -221,6 +223,19 @@ func (c *SyscallCollector) attachPrograms() error {
 	}
 	c.links = append(c.links, l2)
 
+	// Attach sched_process_exec tracepoint for proc.args enrichment.
+	// Optional: if the program is nil (kernel lacks BTF/CO-RE for this hook),
+	// the /proc fallback in readLoop handles execve events.
+	if c.objs.TraceSchedProcessExec != nil {
+		l3, err := link.Tracepoint("sched", "sched_process_exec", c.objs.TraceSchedProcessExec, nil)
+		if err != nil {
+			c.logger.Warn("sched_process_exec tracepoint unavailable, using /proc fallback for proc.args",
+				slog.Any("error", err))
+		} else {
+			c.links = append(c.links, l3)
+		}
+	}
+
 	return nil
 }
 
@@ -249,6 +264,16 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			event.Reset()
 			eventPool.Put(event)
 			continue
+		}
+
+		// Enrich proc.args for execve (nr=59) and execveat (nr=322) events.
+		// Primary path: BPF proc_args_map populated by sched_process_exec (kernel 5.15+).
+		// Fallback: /proc/PID/cmdline read in this goroutine when BPF map is absent.
+		if event.Syscall != nil && event.ProcArgs == "" {
+			nr := event.Syscall.Nr
+			if nr == 59 || nr == 322 {
+				event.ProcArgs, event.ProcArgsTruncated = readProcCmdline(event.PID)
+			}
 		}
 
 		// Debug logging (guarded to avoid allocation when debug is off)
@@ -284,4 +309,34 @@ func (c *SyscallCollector) parseEvent(raw []byte, event *types.Event) error {
 	}
 	*event = evt.ToTypesEvent()
 	return nil
+}
+
+// procArgsTruncateAt is the maximum number of bytes read from /proc/PID/cmdline.
+// Arguments exceeding this limit are truncated and ProcArgsTruncated is set to true.
+const procArgsTruncateAt = 512
+
+// readProcCmdline reads /proc/[pid]/cmdline, replaces NUL argument separators
+// with spaces, strips any trailing NUL bytes, and returns the result. If the
+// raw cmdline exceeds procArgsTruncateAt bytes the string is truncated and
+// truncated=true is returned. Returns ("", false) on any read error.
+func readProcCmdline(pid uint32) (args string, truncated bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	if len(data) > procArgsTruncateAt {
+		data = data[:procArgsTruncateAt]
+		truncated = true
+	}
+	// Strip trailing NUL bytes added by the kernel.
+	for len(data) > 0 && data[len(data)-1] == 0 {
+		data = data[:len(data)-1]
+	}
+	// Replace NUL argument separators with spaces.
+	for i, b := range data {
+		if b == 0 {
+			data[i] = ' '
+		}
+	}
+	return string(data), truncated
 }

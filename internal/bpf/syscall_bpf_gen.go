@@ -80,10 +80,14 @@ type FileaccessEvent struct {
 
 // SyscallObjects contains all eBPF objects for syscall collection.
 type SyscallObjects struct {
-	TraceSysEnter *ebpf.Program `ebpf:"trace_sys_enter"`
-	TraceSysExit  *ebpf.Program `ebpf:"trace_sys_exit"`
-	Events        *ebpf.Map     `ebpf:"events"`
-	SyscallArgs   *ebpf.Map     `ebpf:"syscall_args"`
+	TraceSysEnter         *ebpf.Program `ebpf:"trace_sys_enter"`
+	TraceSysExit          *ebpf.Program `ebpf:"trace_sys_exit"`
+	TraceSchedProcessExec *ebpf.Program `ebpf:"trace_sched_process_exec"`
+	Events                *ebpf.Map     `ebpf:"events"`
+	SyscallArgs           *ebpf.Map     `ebpf:"syscall_args"`
+	// ProcArgsMap is the per-TGID LRU cache of command-line arguments populated
+	// by the sched_process_exec hook. Accessible from Go for userspace lookups.
+	ProcArgsMap *ebpf.Map `ebpf:"proc_args_map"`
 }
 
 // NetworkObjects contains all eBPF objects for network collection.
@@ -128,17 +132,17 @@ func LoadFileaccessObjects(obj *FileaccessObjects, opts *ebpf.CollectionOptions)
 
 // Close closes all eBPF objects.
 func (o *SyscallObjects) Close() error {
-	if o.TraceSysEnter != nil {
-		o.TraceSysEnter.Close()
+	for _, p := range []*ebpf.Program{
+		o.TraceSysEnter, o.TraceSysExit, o.TraceSchedProcessExec,
+	} {
+		if p != nil {
+			p.Close()
+		}
 	}
-	if o.TraceSysExit != nil {
-		o.TraceSysExit.Close()
-	}
-	if o.Events != nil {
-		o.Events.Close()
-	}
-	if o.SyscallArgs != nil {
-		o.SyscallArgs.Close()
+	for _, m := range []*ebpf.Map{o.Events, o.SyscallArgs, o.ProcArgsMap} {
+		if m != nil {
+			m.Close()
+		}
 	}
 	return nil
 }

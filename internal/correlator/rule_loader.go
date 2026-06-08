@@ -18,12 +18,18 @@ import (
 var (
 	validNetworkFields = map[string]bool{
 		"dport": true, "sport": true, "daddr": true, "saddr": true, "proto": true, "family": true,
+		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
+		"proc.args":           true,
+		"proc.args_truncated": true,
 	}
 	validFileFields = map[string]bool{
 		"filename": true, "flags": true, "mode": true, "op": true, "directory": true, "extension": true,
 		// fd-enrichment fields (issue #47): available for all file ops; populated via BPF fd→path map.
 		"fd.name":           true, // resolved path for read/write events; same as filename for opens
 		"fd.name_truncated": true, // "true" when path exceeded 255 bytes and was truncated
+		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
+		"proc.args":           true,
+		"proc.args_truncated": true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
@@ -35,6 +41,11 @@ var (
 		"arg3": true, "arg4": true, "arg5": true,
 		// fd-enrichment: resolved path for the fd in arg0 (read/write/close syscalls).
 		"fd.name": true,
+		// proc enrichment: command-line args from /proc/PID/cmdline or BPF proc_args_map.
+		// Populated for execve (nr=59) events by the /proc fallback and for all events
+		// by the BPF sched_process_exec hook (kernel 5.15+ with BTF).
+		"proc.args":           true,
+		"proc.args_truncated": true,
 	}
 	validDNSFields = map[string]bool{
 		"qname": true, "qtype": true, "rcode": true, "direction": true,
@@ -173,6 +184,14 @@ func validateRule(rule *Rule) error {
 		return fmt.Errorf("rule %s: condition_group has no conditions or subgroups", rule.ID)
 	}
 
+	// Normalise sample_rate: missing (0.0) → 1.0 (evaluate every event).
+	if rule.SampleRate == 0 {
+		rule.SampleRate = 1.0
+	}
+	if rule.SampleRate < 0 || rule.SampleRate > 1.0 {
+		return fmt.Errorf("rule %s: sample_rate %.4f out of range, must be in (0.0, 1.0]", rule.ID, rule.SampleRate)
+	}
+
 	// Validate conditions
 	conditions := getAllConditions(rule)
 	for _, cond := range conditions {
@@ -232,7 +251,7 @@ func validateCondition(cond *RuleCondition, eventType types.EventType) error {
 		if cond.Field != "daddr" && cond.Field != "saddr" {
 			return fmt.Errorf("CIDR operator %s can only be used with daddr/saddr fields, not %s", cond.Op, cond.Field)
 		}
-	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpSuffix,
+	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpSuffix, OpContains,
 		OpGreaterThan, OpLessThan, OpGreaterOrEqual, OpLessOrEqual,
 		OpCapsGained, OpCapsDropped:
 		// These operators don't need pre-validation

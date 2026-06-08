@@ -42,8 +42,32 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or .Values.initContainers .Values.btfInit.enabled }}
+      {{- if or .Values.initContainers .Values.btfInit.enabled .Values.profilerStatePersistence.enabled }}
       initContainers:
+        {{- if .Values.profilerStatePersistence.enabled }}
+        - name: profiler-state-init
+          image: busybox:1.36
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p {{ .Values.profilerStatePersistence.hostPath }}
+              chmod 700 {{ .Values.profilerStatePersistence.hostPath }}
+              echo "profiler-state-init: state directory ready at {{ .Values.profilerStatePersistence.hostPath }}"
+          volumeMounts:
+            - name: profiler-state
+              mountPath: {{ .Values.profilerStatePersistence.hostPath }}
+          resources:
+            limits:
+              cpu: 50m
+              memory: 16Mi
+            requests:
+              cpu: 10m
+              memory: 8Mi
+        {{- end }}
         {{- if .Values.btfInit.enabled }}
         - name: btf-init
           image: {{ .Values.btfInit.image }}
@@ -129,6 +153,10 @@ spec:
               mountPath: {{ .Values.btfInit.cachePath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.profilerStatePersistence.enabled }}
+            - name: profiler-state
+              mountPath: {{ .Values.profilerStatePersistence.hostPath }}
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -168,6 +196,12 @@ spec:
         {{- if .Values.btfInit.enabled }}
         - name: btf-cache
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.profilerStatePersistence.enabled }}
+        - name: profiler-state
+          hostPath:
+            path: {{ .Values.profilerStatePersistence.hostPath }}
+            type: DirectoryOrCreate
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

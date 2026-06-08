@@ -98,6 +98,16 @@ var (
 			Help: "Progress of the behavioral learning phase (0.0-1.0)",
 		},
 	)
+
+	// ProfilerStateRestored indicates whether the EWMA profiler state was
+	// successfully loaded from disk on startup (1) or the agent started fresh (0).
+	// Use this to confirm that rolling DaemonSet updates preserve the learned baseline.
+	ProfilerStateRestored = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_profiler_state_restored",
+			Help: "1 if EWMA profiler state was loaded from disk on startup, 0 if fresh start",
+		},
+	)
 )
 
 // RecordEvent increments the events counter for the given type.
@@ -158,6 +168,16 @@ func RecordCorrelationDuration(duration float64) {
 // SetLearningProgress sets the learning progress gauge (0.0-1.0).
 func SetLearningProgress(progress float64) {
 	LearningProgress.Set(progress)
+}
+
+// SetProfilerStateRestored sets the state-restored gauge: 1 if EWMA state was
+// loaded from disk, 0 if the agent started fresh.
+func SetProfilerStateRestored(restored bool) {
+	if restored {
+		ProfilerStateRestored.Set(1)
+	} else {
+		ProfilerStateRestored.Set(0)
+	}
 }
 
 // AddBPFLost increments the BPF ring buffer lost events counter for a collector.

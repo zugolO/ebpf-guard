@@ -13,10 +13,17 @@ import (
 )
 
 const (
-	gossipPath             = "/gossip/iocs"
-	gossipAmplPath         = "/gossip/amplifications"
-	gossipSecretHeader     = "X-Gossip-Secret"
-	clientTimeout          = 10 * time.Second
+	gossipPath         = "/gossip/iocs"
+	gossipAmplPath     = "/gossip/amplifications"
+	gossipSecretHeader = "X-Gossip-Secret"
+	clientTimeout      = 10 * time.Second
+
+	// maxIOCsPerBatch caps the number of IOC entries accepted in a single POST
+	// from a peer. This prevents a malicious or misconfigured peer from exhausting
+	// memory by sending an unbounded number of entries in one request.
+	maxIOCsPerBatch  = 10_000
+	// maxAmplPerBatch caps the number of amplification signals per POST.
+	maxAmplPerBatch  = 1_000
 )
 
 // gossipClient sends IOC batches to peer agents via HTTP POST.
@@ -165,6 +172,10 @@ func handleReceiveIOCs(mgr *Manager, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+	if len(iocs) > maxIOCsPerBatch {
+		http.Error(w, "batch too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	mgr.MergeFromPeer(iocs)
 	w.WriteHeader(http.StatusNoContent)
@@ -187,6 +198,10 @@ func handleReceiveAmplifications(mgr *Manager, w http.ResponseWriter, r *http.Re
 	var sigs []AmplificationSignal
 	if err := json.Unmarshal(body, &sigs); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if len(sigs) > maxAmplPerBatch {
+		http.Error(w, "batch too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	mgr.MergeAmplificationsFromPeer(sigs)

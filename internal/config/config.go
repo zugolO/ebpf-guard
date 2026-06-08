@@ -437,6 +437,18 @@ type ProfilerConfig struct {
 	Sequence SequenceProfilerConfig `mapstructure:"sequence"`
 	// Lineage tracking configuration
 	Lineage LineageTrackerConfig `mapstructure:"lineage"`
+	// StatePersistence configures EWMA state save/restore across pod restarts.
+	StatePersistence StatePersistenceConfig `mapstructure:"state_persistence"`
+}
+
+// StatePersistenceConfig controls saving the EWMA profiler state to disk so
+// that the agent can skip the learning period after a pod restart.
+type StatePersistenceConfig struct {
+	// Enabled activates state save on shutdown and restore on startup.
+	Enabled bool `mapstructure:"enabled"`
+	// Path is the file path where the profiler state JSON is written.
+	// Defaults to /var/lib/ebpf-guard/profiler-state.json.
+	Path string `mapstructure:"path"`
 }
 
 // SequenceProfilerConfig holds syscall sequence anomaly detection settings.

@@ -21,6 +21,42 @@ const (
 	IOCTypeFingerprint IOCType = "fingerprint"
 )
 
+// maxIOCValueLen caps the byte length of an IOC Value field accepted from a
+// peer. 253 bytes covers the maximum DNS name length and is generous for IP
+// addresses and SHA-256 fingerprints.
+const maxIOCValueLen = 253
+
+// maxIOCSourceLen caps the byte length of the Source field to prevent log
+// injection via crafted peer names.
+const maxIOCSourceLen = 253
+
+// validIOCType returns true if t is one of the recognised IOC type strings.
+func validIOCType(t IOCType) bool {
+	switch t {
+	case IOCTypeIP, IOCTypeDNS, IOCTypeFingerprint:
+		return true
+	}
+	return false
+}
+
+// validateIOC returns an error when the IOC contains values that exceed safe
+// bounds or use an unrecognised type.
+func validateIOC(ioc IOC) error {
+	if !validIOCType(ioc.Type) {
+		return fmt.Errorf("unknown IOC type %q", ioc.Type)
+	}
+	if ioc.Value == "" {
+		return fmt.Errorf("IOC value must not be empty")
+	}
+	if len(ioc.Value) > maxIOCValueLen {
+		return fmt.Errorf("IOC value length %d exceeds limit %d", len(ioc.Value), maxIOCValueLen)
+	}
+	if len(ioc.Source) > maxIOCSourceLen {
+		return fmt.Errorf("IOC source length %d exceeds limit %d", len(ioc.Source), maxIOCSourceLen)
+	}
+	return nil
+}
+
 // IOC is an indicator of compromise shared between nodes.
 type IOC struct {
 	Type      IOCType   `json:"type"`
@@ -69,9 +105,10 @@ func iocKey(t IOCType, value string) string {
 }
 
 // Add inserts or refreshes an IOC. Evicts expired or LRU entries when at capacity.
-func (s *IOCStore) Add(ioc IOC) {
-	if ioc.Value == "" {
-		return
+// Returns false and discards the IOC if validation fails.
+func (s *IOCStore) Add(ioc IOC) bool {
+	if err := validateIOC(ioc); err != nil {
+		return false
 	}
 	key := iocKey(ioc.Type, ioc.Value)
 
@@ -84,7 +121,7 @@ func (s *IOCStore) Add(ioc IOC) {
 		if ioc.ExpiresAt.After(e.ioc.ExpiresAt) {
 			e.ioc = ioc
 		}
-		return
+		return true
 	}
 
 	// Make room: first try to reclaim expired slots, then evict LRU.
@@ -97,6 +134,7 @@ func (s *IOCStore) Add(ioc IOC) {
 
 	elem := s.lru.PushFront(key)
 	s.entries[key] = &iocEntry{ioc: ioc, elem: elem}
+	return true
 }
 
 // Match returns true when an IOC of the given type and value is known and not expired.

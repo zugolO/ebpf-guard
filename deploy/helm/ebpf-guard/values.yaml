@@ -94,6 +94,17 @@ extraEnv: []
 # Additional init containers (user-defined, appended after btfInit if enabled)
 initContainers: []
 
+# Profiler state persistence — saves the EWMA behavioral baseline to disk on
+# graceful shutdown so the learning period can be skipped on pod restart.
+# Requires the host path /var/lib/ebpf-guard/ to be writable by root.
+profilerStatePersistence:
+  # enabled toggles state save/restore.  Set to true for production clusters
+  # where rolling DaemonSet updates should not incur a new learning window.
+  enabled: false
+  # hostPath is the directory on the node where the state file is stored.
+  # The file name is "profiler-state.json" within this directory.
+  hostPath: /var/lib/ebpf-guard
+
 # BTF init container — pre-fetches the BTF file for kernels without
 # /sys/kernel/btf/vmlinux (Ubuntu 18.04, Amazon Linux 2, RHEL 8.x, etc.).
 # When enabled an initContainer downloads the matching BTF file from the

@@ -1,0 +1,49 @@
+suite: privesc
+rules_path: ../../rules/privesc.yaml
+tests:
+  - name: "gaining CAP_SYS_ADMIN fires privesc_sys_admin_gained"
+    rule_id: privesc_sys_admin_gained
+    event:
+      type: privesc
+      privesc:
+        caps_gained:
+          - CAP_SYS_ADMIN
+    expect: alert
+    expect_severity: critical
+
+  - name: "gaining CAP_SYS_MODULE fires privesc_sys_module_gained"
+    rule_id: privesc_sys_module_gained
+    event:
+      type: privesc
+      privesc:
+        caps_gained:
+          - CAP_SYS_MODULE
+    expect: alert
+    expect_severity: critical
+
+  - name: "gaining CAP_SYS_PTRACE fires privesc_sys_ptrace_gained"
+    rule_id: privesc_sys_ptrace_gained
+    event:
+      type: privesc
+      privesc:
+        caps_gained:
+          - CAP_SYS_PTRACE
+    expect: alert
+    expect_severity: critical
+
+  - name: "gaining CAP_NET_RAW fires privesc_net_raw_gained"
+    rule_id: privesc_net_raw_gained
+    event:
+      type: privesc
+      privesc:
+        caps_gained:
+          - CAP_NET_RAW
+    expect: alert
+
+  - name: "no cap change does not fire any privesc rule"
+    event:
+      type: privesc
+      privesc:
+        old_caps: 0
+        new_caps: 0
+    expect: no_alert

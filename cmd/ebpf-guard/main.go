@@ -27,6 +27,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/gossip"
 	"github.com/zugolO/ebpf-guard/internal/migration"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/internal/tui"
@@ -78,6 +79,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 
 	rulesCmd := newRulesCmd(&cfgPath)
 	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
+	rulesCmd.AddCommand(newRulesCheckCmd())
 
 	root.AddCommand(
 		newAlertsCmd(&cfgPath),
@@ -936,6 +938,135 @@ Examples:
 	cmd.Flags().StringVar(&replayWindow, "replay", "24h", "time window to replay (e.g. 1h, 24h, 7d)")
 	cmd.Flags().StringVar(&eventsLog, "events-log", "", "path to event log (default: from config)")
 	cmd.Flags().IntVar(&sampleLimit, "limit", 20, "maximum number of sample alerts to display")
+	return cmd
+}
+
+// newRulesCheckCmd returns the "rules check" subcommand that runs declarative
+// YAML unit tests for detection rules without requiring a real kernel or agent.
+//
+// Usage:
+//
+//	ebpf-guard rules check ./tests/rules/
+//	ebpf-guard rules check ./tests/rules/ --rules ./rules/
+//	ebpf-guard rules check ./tests/rules/ --junit results.xml
+//	ebpf-guard rules check ./tests/rules/ --watch
+func newRulesCheckCmd() *cobra.Command {
+	var (
+		rulesDir  string
+		junitOut  string
+		watchMode bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "check [PATH]",
+		Short: "Run declarative YAML unit tests for detection rules",
+		Long: `check discovers *_test.yaml files under PATH (or the given file), runs each
+synthetic event through the rule engine, and reports pass/fail in TAP v13 format.
+
+Each test suite YAML specifies a rules_path pointing to the rule file(s) to load.
+You can also supply a global --rules directory that is merged with per-suite rules.
+
+Output is TAP v13 on stdout. Use --junit to additionally write JUnit XML for CI.
+Exit code is 0 when all tests pass, 1 when any test fails.
+
+Examples:
+  ebpf-guard rules check ./tests/rules/
+  ebpf-guard rules check ./tests/rules/ --rules ./rules/
+  ebpf-guard rules check ./tests/rules/ --junit results.xml
+  ebpf-guard rules check ./tests/rules/process_inject_test.yaml
+  ebpf-guard rules check ./tests/rules/ --watch`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			testPath := args[0]
+
+			runner := &ruletest.Runner{RulesDir: rulesDir}
+
+			runOnce := func() (ruletest.Summary, error) {
+				tap := ruletest.NewTAPWriter(os.Stdout)
+				sum, err := runner.RunPath(testPath, tap)
+				if err != nil {
+					return sum, err
+				}
+				fmt.Fprintf(os.Stdout, "\n# %d/%d passed", sum.Passed, sum.Total)
+				if sum.Failed > 0 {
+					fmt.Fprintf(os.Stdout, ", %d failed", sum.Failed)
+				}
+				fmt.Fprintln(os.Stdout)
+				return sum, nil
+			}
+
+			if watchMode {
+				watchDirs := []string{testPath}
+				if rulesDir != "" {
+					watchDirs = append(watchDirs, rulesDir)
+				}
+				// Run once immediately, then re-run on changes.
+				_, _ = runOnce()
+				return ruletest.Watch(watchDirs, func() { _, _ = runOnce() })
+			}
+
+			// Collect results for optional JUnit output.
+			var allResults []ruletest.Result
+			if junitOut != "" {
+				// Run with result collection via a capturing tap writer.
+				var buf strings.Builder
+				tap := ruletest.NewTAPWriter(&buf)
+				sum, err := runner.RunPath(testPath, tap)
+				if err != nil {
+					return err
+				}
+				fmt.Print(buf.String())
+				fmt.Fprintf(os.Stdout, "\n# %d/%d passed", sum.Passed, sum.Total)
+				if sum.Failed > 0 {
+					fmt.Fprintf(os.Stdout, ", %d failed", sum.Failed)
+				}
+				fmt.Fprintln(os.Stdout)
+
+				// Re-run to collect Result structs for JUnit (runner doesn't expose them directly).
+				files, err := ruletest.Discover(testPath)
+				if err != nil {
+					return err
+				}
+				for _, f := range files {
+					suite, rulesPath, lerr := ruletest.LoadSuite(f)
+					if lerr != nil {
+						return lerr
+					}
+					eng, berr := runner.BuildEngine(rulesPath)
+					if berr != nil {
+						return berr
+					}
+					allResults = append(allResults, ruletest.RunSuite(suite, eng)...)
+				}
+				f, ferr := os.Create(junitOut)
+				if ferr != nil {
+					return fmt.Errorf("create junit file: %w", ferr)
+				}
+				defer f.Close()
+				if err := ruletest.WriteJUnit(f, allResults); err != nil {
+					return fmt.Errorf("write junit: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "JUnit XML written to %s\n", junitOut)
+				if sum.Failed > 0 {
+					return fmt.Errorf("%d test(s) failed", sum.Failed)
+				}
+				return nil
+			}
+
+			sum, err := runOnce()
+			if err != nil {
+				return err
+			}
+			if sum.Failed > 0 {
+				return fmt.Errorf("%d test(s) failed", sum.Failed)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&rulesDir, "rules", "", "directory of rule YAML files to merge with per-suite rules_path")
+	cmd.Flags().StringVar(&junitOut, "junit", "", "write JUnit XML results to this file")
+	cmd.Flags().BoolVar(&watchMode, "watch", false, "re-run tests on file changes (Ctrl+C to stop)")
 	return cmd
 }
 

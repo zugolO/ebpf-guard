@@ -62,6 +62,31 @@ var (
 		"comm":         true, // process name (allows filtering by process)
 		"uid":          true, // user ID (allows filtering non-root access)
 	}
+	validCgroupEscFields = map[string]bool{
+		"new_cgroup_id": true,
+		"old_cgroup_id": true,
+		"cgroup_path":   true,
+		"comm":          true,
+		"uid":           true,
+	}
+	validKmodFields = map[string]bool{
+		"name":        true,
+		"filename":    true,
+		"comm":        true,
+		"uid":         true,
+		"fingerprint": true,
+	}
+	validLSMAuditFields = map[string]bool{
+		"hook":     true,
+		"comm":     true,
+		"uid":      true,
+		"decision": true,
+	}
+	validSequenceFields = map[string]bool{
+		"pattern": true,
+		"comm":    true,
+		"uid":     true,
+	}
 )
 
 // Ensure RuleConditionGroup has SubGroups field for recursive validation.
@@ -242,6 +267,14 @@ func validateFieldName(field string, eventType types.EventType) error {
 		validFields = validNetCloseFields
 	case types.EventGPU:
 		validFields = validGPUFields
+	case types.EventCgroupEsc:
+		validFields = validCgroupEscFields
+	case types.EventKmodLoad:
+		validFields = validKmodFields
+	case types.EventLSMAudit:
+		validFields = validLSMAuditFields
+	case types.EventSequence:
+		validFields = validSequenceFields
 	default:
 		return fmt.Errorf("unknown event type: %d", eventType)
 	}

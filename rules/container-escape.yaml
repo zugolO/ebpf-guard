@@ -363,7 +363,7 @@ rules:
     event_type: cgroup_esc
     condition:
       field: new_cgroup_id
-      op: neq
+      op: not_equals
       values: ["0"]  # any migration where new_cgroup_id != 0 was already filtered BPF-side
     severity: critical
     action: alert
@@ -378,7 +378,7 @@ rules:
     event_type: cgroup_esc
     condition:
       field: new_cgroup_id
-      op: eq
+      op: equals
       values: ["1"]
     severity: critical
     action: block

@@ -35,6 +35,8 @@ const (
 	EventGPU EventType = 10
 	// EventLSMAudit indicates an LSM hook audit record (file_open block, socket_connect block, task_kill).
 	EventLSMAudit EventType = 11
+	// EventSequence is a placeholder for multi-event sequence rules (future).
+	EventSequence EventType = 12
 )
 
 // eventTypeNames maps string names used in rule YAML to numeric EventType constants.
@@ -54,6 +56,7 @@ var eventTypeNames = map[string]EventType{
 	"cgroup_esc":  EventCgroupEsc,
 	"gpu":         EventGPU,
 	"lsm_audit":   EventLSMAudit,
+	"sequence":    EventSequence,
 }
 
 // UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.

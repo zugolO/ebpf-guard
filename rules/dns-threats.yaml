@@ -95,7 +95,7 @@ rules:
     event_type: dns
     condition:
       field: qtype
-      op: eq
+      op: equals
       values: ["16"]
     severity: warning
     action: alert
@@ -109,7 +109,7 @@ rules:
     event_type: dns
     condition:
       field: qtype
-      op: eq
+      op: equals
       values: ["255"]
     severity: warning
     action: alert
@@ -123,7 +123,7 @@ rules:
     event_type: dns
     condition:
       field: rcode
-      op: eq
+      op: equals
       values: ["3"]
     severity: warning
     action: alert
@@ -137,7 +137,7 @@ rules:
     event_type: dns
     condition:
       field: qtype
-      op: eq
+      op: equals
       values: ["12"]
     severity: info
     action: alert

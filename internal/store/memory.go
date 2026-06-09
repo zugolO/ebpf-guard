@@ -36,14 +36,27 @@ type MemoryStore struct {
 	// insertSorted maintains this invariant on every write; binary search on
 	// entry.ts (no map lookup) narrows time-range queries to O(log n).
 	byTime []byTimeEntry
-	seq    int64
+	// bySev holds per-severity index entries sorted by ts DESC (newest first).
+	// Used as a fast path in Query when only a single severity is requested
+	// with no time-range filter, halving the iteration compared with byTime.
+	bySev map[types.Severity][]byTimeEntry
+	seq   int64
+	// queryPool recycles backing arrays for Query result slices.
+	// Callers that want zero-alloc behaviour must call Release when done.
+	queryPool sync.Pool
 }
 
 // NewMemoryStore creates a new in-memory alert store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
+	s := &MemoryStore{
 		alerts: make(map[string]types.Alert),
+		bySev:  make(map[types.Severity][]byTimeEntry),
 	}
+	s.queryPool.New = func() any {
+		buf := make([]types.Alert, 0, 64)
+		return &buf
+	}
+	return s
 }
 
 // Store persists a single alert.
@@ -60,38 +73,54 @@ func (s *MemoryStore) Store(ctx context.Context, alert types.Alert) error {
 	}
 
 	// Remove the old index entry if this is an update.
-	_, exists := s.alerts[alert.ID]
-	if exists {
-		s.removeFromByTime(alert.ID)
+	if old, exists := s.alerts[alert.ID]; exists {
+		s.removeFromIndexes(alert.ID, old.Severity)
+	} else {
+		s.count.Add(1)
 	}
 
 	s.alerts[alert.ID] = alert
 	s.insertSorted(alert.ID, alert.Timestamp, alert.Severity, alert.Enrichment.Namespace)
-	if !exists {
-		s.count.Add(1)
-	}
 	return nil
 }
 
-// insertSorted inserts an entry into byTime maintaining DESC timestamp order.
-// Binary search uses entry.ts directly — no map lookup needed.
-// Caller must hold s.mu write lock.
+// insertSorted inserts an entry into byTime and the corresponding bySev bucket,
+// maintaining DESC timestamp order in both. Binary search uses entry.ts directly
+// — no map lookup needed. Caller must hold s.mu write lock.
 func (s *MemoryStore) insertSorted(id string, ts time.Time, sev types.Severity, ns string) {
+	e := byTimeEntry{id: id, ts: ts, severity: sev, namespace: ns}
+
 	pos := sort.Search(len(s.byTime), func(i int) bool {
 		return s.byTime[i].ts.Before(ts)
 	})
 	s.byTime = append(s.byTime, byTimeEntry{})
 	copy(s.byTime[pos+1:], s.byTime[pos:])
-	s.byTime[pos] = byTimeEntry{id: id, ts: ts, severity: sev, namespace: ns}
+	s.byTime[pos] = e
+
+	bucket := s.bySev[sev]
+	bpos := sort.Search(len(bucket), func(i int) bool {
+		return bucket[i].ts.Before(ts)
+	})
+	bucket = append(bucket, byTimeEntry{})
+	copy(bucket[bpos+1:], bucket[bpos:])
+	bucket[bpos] = e
+	s.bySev[sev] = bucket
 }
 
-// removeFromByTime removes the entry for id from byTime.  Called only on
-// updates (rare); linear scan is acceptable on a hot-path miss.
+// removeFromIndexes removes the entry for id from byTime and from the bySev
+// bucket for sev. Called only on updates (rare); linear scan is acceptable.
 // Caller must hold s.mu write lock.
-func (s *MemoryStore) removeFromByTime(id string) {
+func (s *MemoryStore) removeFromIndexes(id string, sev types.Severity) {
 	for i := range s.byTime {
 		if s.byTime[i].id == id {
 			s.byTime = append(s.byTime[:i], s.byTime[i+1:]...)
+			break
+		}
+	}
+	bucket := s.bySev[sev]
+	for i := range bucket {
+		if bucket[i].id == id {
+			s.bySev[sev] = append(bucket[:i], bucket[i+1:]...)
 			return
 		}
 	}
@@ -126,19 +155,20 @@ func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 		if a.Timestamp.IsZero() {
 			a.Timestamp = time.Now()
 		}
-		_, exists := s.alerts[a.ID]
-		if exists {
-			s.removeFromByTime(a.ID)
+		if old, exists := s.alerts[a.ID]; exists {
+			s.removeFromIndexes(a.ID, old.Severity)
 		} else {
 			newCount++
 		}
 		s.alerts[a.ID] = a
-		s.byTime = append(s.byTime, byTimeEntry{
+		e := byTimeEntry{
 			id:        a.ID,
 			ts:        a.Timestamp,
 			severity:  a.Severity,
 			namespace: a.Enrichment.Namespace,
-		})
+		}
+		s.byTime = append(s.byTime, e)
+		s.bySev[a.Severity] = append(s.bySev[a.Severity], e)
 	}
 	s.count.Add(newCount)
 
@@ -146,20 +176,74 @@ func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 	sort.Slice(s.byTime, func(i, j int) bool {
 		return s.byTime[j].ts.Before(s.byTime[i].ts)
 	})
+	for sev := range s.bySev {
+		bucket := s.bySev[sev]
+		sort.Slice(bucket, func(i, j int) bool {
+			return bucket[j].ts.Before(bucket[i].ts)
+		})
+		s.bySev[sev] = bucket
+	}
 	return nil
 }
 
 // Query retrieves alerts matching the filters.
-// byTime is kept sorted DESC, so time-range narrowing is O(log n) (using
-// entry.ts with no map lookup) and results are already in newest-first order.
-// The scan loop pre-filters on the cached severity and namespace fields before
-// doing the expensive 488-byte Alert map lookup, so only O(limit) full lookups
-// are needed on queries that use those filters.
+// Fast path: when exactly one severity is requested with no time-range filter,
+// the bySev bucket is iterated directly (already sorted DESC) — O(n/k) where
+// k = number of distinct severities, instead of O(n) over all alerts.
+// Standard path: byTime is kept sorted DESC, so time-range narrowing is O(log n)
+// (using entry.ts with no map lookup) and results are already in newest-first
+// order. The scan loop pre-filters on the cached severity and namespace fields
+// before doing the expensive 488-byte Alert map lookup.
+// Callers that want zero-alloc behaviour should call Release(results) when done.
 func (s *MemoryStore) Query(ctx context.Context, filters QueryFilters) ([]types.Alert, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Binary-search entry.ts directly — no map lookup needed.
+	rp := s.queryPool.Get().(*[]types.Alert)
+	results := (*rp)[:0]
+
+	skipped := 0
+
+	// Fast path: single-severity query with no time-range filter.
+	// bySev[sev] is already sorted DESC by ts, so results are ordered correctly.
+	if filters.Since.IsZero() && filters.Until.IsZero() && len(filters.Severity) == 1 {
+		bucket := s.bySev[filters.Severity[0]]
+		for i := range bucket {
+			e := &bucket[i]
+
+			if len(filters.Namespaces) > 0 {
+				found := false
+				for _, ns := range filters.Namespaces {
+					if e.namespace == ns {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+			} else if filters.Namespace != "" && e.namespace != filters.Namespace {
+				continue
+			}
+
+			alert := s.alerts[e.id]
+			if !matchesFilters(alert, filters) {
+				continue
+			}
+			if skipped < filters.Offset {
+				skipped++
+				continue
+			}
+			results = append(results, alert)
+			if filters.Limit > 0 && len(results) >= filters.Limit {
+				break
+			}
+		}
+		*rp = results
+		return results, nil
+	}
+
+	// Standard path: binary-search entry.ts directly — no map lookup needed.
 	start, end := 0, len(s.byTime)
 	if !filters.Until.IsZero() {
 		start = sort.Search(len(s.byTime), func(i int) bool {
@@ -172,8 +256,6 @@ func (s *MemoryStore) Query(ctx context.Context, filters QueryFilters) ([]types.
 		})
 	}
 
-	var results []types.Alert
-	skipped := 0
 	for i := start; i < end; i++ {
 		e := &s.byTime[i]
 
@@ -220,7 +302,20 @@ func (s *MemoryStore) Query(ctx context.Context, filters QueryFilters) ([]types.
 			break
 		}
 	}
+	*rp = results
 	return results, nil
+}
+
+// Release returns a result slice obtained from Query back to the pool so its
+// backing array can be reused on the next Query call. The slice must not be
+// read or written after Release returns. Callers that need to retain results
+// past the point of Release should copy the slice first.
+func (s *MemoryStore) Release(results []types.Alert) {
+	if cap(results) == 0 {
+		return
+	}
+	buf := results[:0]
+	s.queryPool.Put(&buf)
 }
 
 // QueryByID retrieves a single alert by ID.
@@ -246,7 +341,8 @@ func (s *MemoryStore) Count(_ context.Context, _ QueryFilters) (int64, error) {
 
 // Delete removes alerts older than the given duration.
 // byTime is sorted DESC so old alerts cluster at the tail — O(log n) to find
-// the cut point, then O(k) to remove the k expired entries.
+// the cut point, then O(k) to remove the k expired entries and O(n) to rebuild
+// the bySev severity buckets from the surviving entries.
 func (s *MemoryStore) Delete(ctx context.Context, olderThan time.Duration) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -263,6 +359,15 @@ func (s *MemoryStore) Delete(ctx context.Context, olderThan time.Duration) (int6
 	}
 	s.byTime = s.byTime[:idx]
 	s.count.Add(-deleted)
+
+	// Rebuild bySev from surviving byTime entries in one O(n) pass.
+	for sev := range s.bySev {
+		s.bySev[sev] = s.bySev[sev][:0]
+	}
+	for i := range s.byTime {
+		e := &s.byTime[i]
+		s.bySev[e.severity] = append(s.bySev[e.severity], *e)
+	}
 	return deleted, nil
 }
 

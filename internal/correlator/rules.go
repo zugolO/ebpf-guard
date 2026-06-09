@@ -85,6 +85,71 @@ const (
 	OpContains RuleConditionOperator = "contains"
 )
 
+// condOpCode is a precomputed numeric code for a RuleConditionOperator.
+// Replaces string switch statements with integer switch in the hot path,
+// turning ~10 ns string comparisons into ~2 ns jump-table dispatch.
+type condOpCode uint8
+
+const (
+	condOpUnknown    condOpCode = iota
+	condOpIn                    // "in"
+	condOpNotIn                 // "not_in"
+	condOpEquals                // "equals"
+	condOpNotEquals             // "not_equals"
+	condOpPrefix                // "prefix"
+	condOpSuffix                // "suffix"
+	condOpContains              // "contains"
+	condOpRegex                 // "regex"
+	condOpGT                    // "gt"
+	condOpLT                    // "lt"
+	condOpGTE                   // "gte"
+	condOpLTE                   // "lte"
+	condOpInCIDR                // "in_cidr"
+	condOpNotInCIDR             // "not_in_cidr"
+	condOpCapsGained            // "caps_gained"
+	condOpCapsDropped           // "caps_dropped"
+)
+
+// opCodeOf converts a RuleConditionOperator string to its numeric code.
+// Called once at rule load time; the result is cached in RuleCondition.opCode.
+func opCodeOf(op RuleConditionOperator) condOpCode {
+	switch op {
+	case OpIn:
+		return condOpIn
+	case OpNotIn:
+		return condOpNotIn
+	case OpEquals:
+		return condOpEquals
+	case OpNotEquals:
+		return condOpNotEquals
+	case OpPrefix:
+		return condOpPrefix
+	case OpSuffix:
+		return condOpSuffix
+	case OpContains:
+		return condOpContains
+	case OpRegex:
+		return condOpRegex
+	case OpGreaterThan:
+		return condOpGT
+	case OpLessThan:
+		return condOpLT
+	case OpGreaterOrEqual:
+		return condOpGTE
+	case OpLessOrEqual:
+		return condOpLTE
+	case OpInCIDR:
+		return condOpInCIDR
+	case OpNotInCIDR:
+		return condOpNotInCIDR
+	case OpCapsGained:
+		return condOpCapsGained
+	case OpCapsDropped:
+		return condOpCapsDropped
+	}
+	return condOpUnknown
+}
+
 // RuleCondition defines a single condition for rule evaluation.
 type RuleCondition struct {
 	Field  string                `yaml:"field"`
@@ -93,6 +158,13 @@ type RuleCondition struct {
 	// setKey is the pre-computed valueSetCache key for OpIn/OpNotIn conditions.
 	// Populated by RuleEngine.compilePatterns; never serialized.
 	setKey string
+	// valueSet is a direct pointer to the pre-built membership set for OpIn/OpNotIn.
+	// Eliminates the re.valueSetCache[key] map lookup on the hot path: one
+	// map lookup instead of two. Set by compileCondPtr; never serialized.
+	valueSet map[string]struct{}
+	// opCode is the precomputed numeric code for Op. evaluateCondition switches
+	// on this integer (jump-table, ~2 ns) instead of Op string (~10 ns).
+	opCode condOpCode
 }
 
 // RuleConditionGroup allows combining multiple conditions with AND/OR logic.
@@ -127,6 +199,12 @@ type Rule struct {
 	Name        string          `yaml:"name"`
 	Description string          `yaml:"description"`
 	EventType   types.EventType `yaml:"event_type"`
+	// skipSampler is precomputed at load time: true when SampleRate is absent
+	// or ≥ 1.0 (i.e. no static sampling configured). matchesTyped tests this
+	// flag before acquiring the sampler lock, reducing lock traffic for the
+	// overwhelmingly common case of fully-evaluated (rate=1.0) rules.
+	// Not serialized; set by RuleEngine.buildTypeIndex.
+	skipSampler bool
 	// Condition is a single condition (for simple rules)
 	Condition RuleCondition `yaml:"condition"`
 	// ConditionGroup allows complex AND/OR logic (takes precedence over Condition)
@@ -173,12 +251,18 @@ func init() {
 	}
 }
 
+// byTypeSize is the fixed size of the byType array. EventType values are 1–13;
+// 24 leaves headroom for future event types without resizing.
+const byTypeSize = 24
+
 // RuleEngine evaluates events against rules.
 type RuleEngine struct {
 	rules []Rule
-	// byType indexes rules by event type for O(1) dispatch; avoids scanning
-	// rules of mismatching types on every event. Rebuilt on hot-reload.
-	byType map[types.EventType][]Rule
+	// byType indexes rules by event type for O(1) array dispatch.
+	// EventType values are 1–13; index 0 is unused. Array access avoids the
+	// hash/compare overhead of a map lookup on the hot path.
+	// Rebuilt on hot-reload via buildTypeIndex.
+	byType [byTypeSize][]Rule
 	// compiled regex patterns for performance
 	regexCache map[string]*regexp.Regexp
 	// compiled CIDR ranges
@@ -231,15 +315,22 @@ func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 // can call Sampler() to obtain the target for rate overrides.
 func (re *RuleEngine) Sampler() *RuleSampler { return re.sampler }
 
-// buildTypeIndex builds the byType map from re.rules. Called once at construction
-// (and thus on every hot-reload via NewRuleEngineWithCache). Not thread-safe on its
-// own — must be called before the engine is published to other goroutines.
+// buildTypeIndex builds the byType array from re.rules and precomputes per-rule
+// hot-path flags. Called once at construction (and thus on every hot-reload via
+// NewRuleEngineWithCache). Not thread-safe on its own — must be called before
+// the engine is published to other goroutines.
 func (re *RuleEngine) buildTypeIndex() {
-	idx := make(map[types.EventType][]Rule, 8)
-	for _, rule := range re.rules {
-		idx[rule.EventType] = append(idx[rule.EventType], rule)
+	for i := range re.rules {
+		r := &re.rules[i]
+		// Precompute whether this rule needs sampler access on every event.
+		// A rule with no configured rate (or rate ≥ 1.0) can skip the three
+		// RLock acquisitions in HasSampling+Mode+ShouldEvaluate when no adaptive
+		// override is active, reducing hot-path lock traffic to zero.
+		r.skipSampler = r.SampleRate <= 0 || r.SampleRate >= 1.0
+		if t := int(r.EventType); t > 0 && t < byTypeSize {
+			re.byType[t] = append(re.byType[t], *r)
+		}
 	}
-	re.byType = idx
 }
 
 // GetRules returns a copy of the loaded rules.
@@ -295,7 +386,13 @@ func (re *RuleEngine) compileCondPtr(cond *RuleCondition) {
 			}
 			re.valueSetCache[key] = set
 		}
+		// Store direct pointer so evaluateCondition avoids the valueSetCache
+		// map lookup on the hot path (one lookup instead of two).
+		cond.valueSet = re.valueSetCache[key]
 	}
+	// Precompute the numeric opcode so evaluateCondition uses an integer switch
+	// (jump table, ~2 ns) instead of switching on the Op string (~10 ns).
+	cond.opCode = opCodeOf(cond.Op)
 }
 
 // compileGroupPatterns recurses into a ConditionGroup, compiling each
@@ -354,11 +451,19 @@ func collectConditions(g *RuleConditionGroup) []RuleCondition {
 // EvaluateInto evaluates rules and calls fn for each matching alert.
 // This is the zero-alloc hot path: no slice is allocated regardless of match
 // count. Prefer this over Evaluate when the caller processes alerts inline.
+//
+// No lock is acquired: re.byType and all condition caches are written exactly
+// once during construction (NewRuleEngineWithCache) before the engine is
+// published, so they are safe to read concurrently without synchronisation.
+// re.sampler has its own internal lock for adaptive-rate updates.
 func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
-	re.mu.RLock()
-	defer re.mu.RUnlock()
-
-	for _, rule := range re.byType[e.Type] {
+	t := int(e.Type)
+	if uint(t) >= byTypeSize {
+		return
+	}
+	rules := re.byType[t]
+	for i := range rules {
+		rule := &rules[i] // pointer avoids copying the ~300-byte Rule struct
 		if !re.matchesTyped(e, rule) {
 			continue
 		}
@@ -382,11 +487,11 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 // Evaluate checks an event against all rules and returns matching alerts.
 // It allocates only when at least one rule matches (lazy nil slice).
 // For the zero-alloc path, use EvaluateInto instead.
+//
+// No lock is acquired: see EvaluateInto for the reasoning.
 func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
-	re.mu.RLock()
-	defer re.mu.RUnlock()
-
-	if len(re.rules) == 0 {
+	t := int(e.Type)
+	if uint(t) >= byTypeSize {
 		return nil
 	}
 
@@ -394,7 +499,9 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 	// no-match path. alertsPool recycles backing arrays on match paths.
 	var alerts []types.Alert
 
-	for _, rule := range re.byType[e.Type] {
+	rules := re.byType[t]
+	for i := range rules {
+		rule := &rules[i]
 		if !re.matchesTyped(e, rule) {
 			continue
 		}
@@ -460,32 +567,35 @@ func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
 	if e.Type != rule.EventType {
 		return false
 	}
-	return re.matchesTyped(e, rule)
+	return re.matchesTyped(e, &rule)
 }
 
 // matchesTyped checks if an event matches a rule, assuming e.Type == rule.EventType.
+// Takes *Rule to avoid copying the ~300-byte Rule struct on the hot path.
 // Called from EvaluateInto/Evaluate which already dispatch via byType.
-func (re *RuleEngine) matchesTyped(e types.Event, rule Rule) bool {
-	// Per-rule sampling gate — delegates to RuleSampler which handles both
-	// static per-rule rates and adaptive CPU-triggered overrides.
-	// HasSampling is O(1) and returns false for unsampled rules, so there is
-	// zero overhead for the common case of fully-evaluated (rate=1.0) rules.
-	if re.sampler.HasSampling(rule.ID) {
-		mode := string(re.sampler.Mode(rule.ID))
-		if re.sampler.ShouldEvaluate(rule.ID, e.PID, e.Timestamp) {
+func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
+	// Per-rule sampling gate.
+	// Fast path: rule.skipSampler (precomputed at load time) is true when no
+	// static rate is configured, and entryCount is 0 when no adaptive override
+	// is active. In the common no-sampling case both are satisfied and we skip
+	// all three RLock/map-lookup/RUnlock cycles (HasSampling+Mode+ShouldEvaluate).
+	// CheckSampling collapses those three calls into one lock acquisition.
+	if !rule.skipSampler || re.sampler.entryCount.Load() > 0 {
+		if active, skip, mode := re.sampler.CheckSampling(rule.ID, e.PID, e.Timestamp); active {
+			if skip {
+				ruleSkippedTotal.WithLabelValues(rule.ID, mode).Inc()
+				return false
+			}
 			ruleSampledTotal.WithLabelValues(rule.ID, mode).Inc()
-		} else {
-			ruleSkippedTotal.WithLabelValues(rule.ID, mode).Inc()
-			return false
 		}
 	}
 
-	// Use condition group if present, otherwise use single condition
+	// Use condition group if present, otherwise use single condition.
 	if rule.ConditionGroup != nil {
 		return re.evaluateConditionGroup(e, rule.ConditionGroup)
 	}
 
-	return re.evaluateCondition(e, rule.Condition)
+	return re.evaluateCondition(e, &rule.Condition)
 }
 
 // evaluateConditionGroup evaluates a group of conditions with AND/OR logic, recursing into SubGroups.
@@ -496,8 +606,8 @@ func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleCondition
 
 	switch group.Operator {
 	case "or":
-		for _, cond := range group.Conditions {
-			if re.evaluateCondition(e, cond) {
+		for i := range group.Conditions {
+			if re.evaluateCondition(e, &group.Conditions[i]) {
 				return true
 			}
 		}
@@ -508,8 +618,8 @@ func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleCondition
 		}
 		return false
 	default: // "and" or ""
-		for _, cond := range group.Conditions {
-			if !re.evaluateCondition(e, cond) {
+		for i := range group.Conditions {
+			if !re.evaluateCondition(e, &group.Conditions[i]) {
 				return false
 			}
 		}
@@ -528,13 +638,16 @@ func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleCondition
 const fieldNotFound = "\x00__field_not_found__"
 
 // evaluateCondition evaluates a single condition against an event.
-func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool {
+// Takes *RuleCondition to avoid copying the ~80-byte struct on the hot path.
+// Switches on cond.opCode (precomputed integer) instead of cond.Op (string)
+// for jump-table dispatch (~2 ns vs ~10 ns for string switch).
+func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition) bool {
 	// caps_gained / caps_dropped operate directly on the Privesc struct —
 	// they don't go through getFieldValue.
-	switch cond.Op {
-	case OpCapsGained:
+	switch cond.opCode {
+	case condOpCapsGained:
 		return re.matchesCaps(e, cond.Values, true)
-	case OpCapsDropped:
+	case condOpCapsDropped:
 		return re.matchesCaps(e, cond.Values, false)
 	}
 
@@ -546,49 +659,78 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond RuleCondition) bool 
 	if value == fieldNotFound {
 		return false
 	}
-	if value == "" && cond.Op != OpEquals && cond.Op != OpNotEquals && cond.Op != OpNotIn {
+	code := cond.opCode
+	if value == "" && code != condOpEquals && code != condOpNotEquals && code != condOpNotIn {
 		return false
 	}
 
-	// Evaluate condition
-	switch cond.Op {
-	case OpIn:
+	// Evaluate condition using precomputed integer opcode for jump-table dispatch.
+	switch code {
+	case condOpIn:
+		// Small sets (≤ 8 elements): linear scan over the Values slice is faster
+		// than a map lookup due to cache locality and no hash computation.
+		// For most rules the condition set is tiny (2–5 syscall numbers, etc.).
+		if len(cond.Values) <= 8 {
+			for _, v := range cond.Values {
+				if v == value {
+					return true
+				}
+			}
+			return false
+		}
+		// Large sets: use the pre-built map for O(1) lookup.
+		if cond.valueSet != nil {
+			_, found := cond.valueSet[value]
+			return found
+		}
 		return re.inSetLookup(cond.setKey, value)
-	case OpNotIn:
+	case condOpNotIn:
+		if len(cond.Values) <= 8 {
+			for _, v := range cond.Values {
+				if v == value {
+					return false
+				}
+			}
+			return true
+		}
+		if cond.valueSet != nil {
+			_, found := cond.valueSet[value]
+			return !found
+		}
 		return !re.inSetLookup(cond.setKey, value)
-	case OpEquals:
+	case condOpEquals:
 		return len(cond.Values) > 0 && value == cond.Values[0]
-	case OpNotEquals:
+	case condOpNotEquals:
 		return len(cond.Values) == 0 || value != cond.Values[0]
-	case OpPrefix:
+	case condOpPrefix:
 		return hasPrefix(cond.Values, value)
-	case OpSuffix:
+	case condOpSuffix:
 		for _, sfx := range cond.Values {
 			if strings.HasSuffix(value, sfx) {
 				return true
 			}
 		}
 		return false
-	case OpRegex:
+	case condOpRegex:
 		return re.matchesRegex(cond.Values, value)
-	case OpGreaterThan:
+	case condOpGT:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a > b })
-	case OpLessThan:
+	case condOpLT:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a < b })
-	case OpGreaterOrEqual:
+	case condOpGTE:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a >= b })
-	case OpLessOrEqual:
+	case condOpLTE:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a <= b })
-	case OpContains:
+	case condOpContains:
 		for _, v := range cond.Values {
 			if strings.Contains(value, v) {
 				return true
 			}
 		}
 		return false
-	case OpInCIDR:
+	case condOpInCIDR:
 		return re.matchesCIDR(value, cond.Values, true)
-	case OpNotInCIDR:
+	case condOpNotInCIDR:
 		return re.matchesCIDR(value, cond.Values, false)
 	default:
 		return false

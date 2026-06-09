@@ -264,7 +264,7 @@ type Alert struct {
 	// Ordered from oldest known ancestor to the process that fired the alert.
 	// Populated by CorrelationEngine when a LineageTracker is configured.
 	ProcessTree ProcessTree `json:"process_tree,omitempty"`
-	// Fingerprint is a SHA-256 hash for tamper detection (optional)
+	// Fingerprint is an xxHash64 hash (16 hex chars) for tamper detection (optional)
 	Fingerprint string `json:"fingerprint,omitempty"`
 	// Action is the enforcement action declared by the matching rule
 	// (e.g. "kill", "block", "throttle"). Empty string means "alert only".

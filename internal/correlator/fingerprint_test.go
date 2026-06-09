@@ -4,12 +4,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 func TestFingerprintGenerator_Generate(t *testing.T) {
-	config := FingerprintConfig{Enabled: true, Algorithm: "sha256"}
+	config := FingerprintConfig{Enabled: true, Algorithm: "xxhash"}
 	fg := NewFingerprintGenerator(config)
 
 	alert := types.Alert{
@@ -29,7 +29,7 @@ func TestFingerprintGenerator_Generate(t *testing.T) {
 	// Generate fingerprint
 	fp := fg.Generate(alert)
 	assert.NotEmpty(t, fp)
-	assert.Len(t, fp, 64) // SHA-256 hex string is 64 characters
+	assert.Len(t, fp, 16) // xxHash64 hex string is 16 characters
 
 	// Same alert should produce same fingerprint
 	fp2 := fg.Generate(alert)
@@ -57,7 +57,7 @@ func TestFingerprintGenerator_Disabled(t *testing.T) {
 }
 
 func TestFingerprintGenerator_Verify(t *testing.T) {
-	config := FingerprintConfig{Enabled: true, Algorithm: "sha256"}
+	config := FingerprintConfig{Enabled: true, Algorithm: "xxhash"}
 	fg := NewFingerprintGenerator(config)
 
 	alert := types.Alert{
@@ -93,6 +93,34 @@ func TestGenerateID(t *testing.T) {
 	// Different inputs should produce different ID
 	assert.NotEqual(t, id1, id3)
 
-	// ID should be 32 characters (16 bytes hex encoded)
-	assert.Len(t, id1, 32)
+	// ID should be 16 characters (xxHash64 hex encoded)
+	assert.Len(t, id1, 16)
+}
+
+func BenchmarkGenerateID(b *testing.B) {
+	ts := time.Now()
+	for i := 0; i < b.N; i++ {
+		GenerateID(ts, "rule-001", 1234)
+	}
+}
+
+func BenchmarkFingerprintGenerator_Generate(b *testing.B) {
+	fg := NewFingerprintGenerator(DefaultFingerprintConfig())
+	alert := types.Alert{
+		ID:        "bench-id",
+		Timestamp: time.Now(),
+		RuleID:    "rule-001",
+		Severity:  types.SeverityCritical,
+		PID:       1234,
+		Comm:      "bench-proc",
+		Message:   "benchmark alert message",
+		Enrichment: types.EnrichmentInfo{
+			PodName:   "bench-pod",
+			Namespace: "default",
+		},
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		fg.Generate(alert)
+	}
 }

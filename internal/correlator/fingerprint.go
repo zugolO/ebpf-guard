@@ -2,26 +2,26 @@
 package correlator
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"time"
 
+	xxhash "github.com/cespare/xxhash/v2"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // FingerprintConfig holds configuration for alert fingerprinting.
 type FingerprintConfig struct {
 	Enabled   bool
-	Algorithm string // "sha256" (default)
+	Algorithm string // "xxhash" (default)
 }
 
 // DefaultFingerprintConfig returns the default fingerprint configuration.
 func DefaultFingerprintConfig() FingerprintConfig {
 	return FingerprintConfig{
 		Enabled:   true,
-		Algorithm: "sha256",
+		Algorithm: "xxhash",
 	}
 }
 
@@ -39,6 +39,7 @@ func NewFingerprintGenerator(config FingerprintConfig) *FingerprintGenerator {
 
 // Generate creates a fingerprint for the given alert.
 // The fingerprint is a hash of critical alert fields for tamper detection.
+// Returns a 16-character hex string (xxHash64).
 func (fg *FingerprintGenerator) Generate(alert types.Alert) string {
 	if !fg.config.Enabled {
 		return ""
@@ -73,8 +74,7 @@ func (fg *FingerprintGenerator) Generate(alert types.Alert) string {
 		return fg.fallbackHash(data)
 	}
 
-	hash := sha256.Sum256(jsonBytes)
-	return hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%016x", xxhash.Sum64(jsonBytes))
 }
 
 // fallbackHash creates a simple hash without JSON marshaling.
@@ -92,8 +92,7 @@ func (fg *FingerprintGenerator) fallbackHash(data struct {
 	str := fmt.Sprintf("%s|%d|%s|%s|%d|%s|%s|%s|%s",
 		data.ID, data.Timestamp, data.RuleID, data.Severity,
 		data.PID, data.Comm, data.Message, data.Pod, data.Namespace)
-	hash := sha256.Sum256([]byte(str))
-	return hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%016x", xxhash.Sum64([]byte(str)))
 }
 
 // Verify checks if the alert's fingerprint matches its content.
@@ -107,8 +106,14 @@ func (fg *FingerprintGenerator) Verify(alert types.Alert) bool {
 }
 
 // GenerateID creates a unique alert ID based on timestamp and content.
+// Fields are written directly to the hasher to avoid intermediate string allocations.
+// Returns a 16-character hex string (xxHash64).
 func GenerateID(timestamp time.Time, ruleID string, pid uint32) string {
-	data := fmt.Sprintf("%d:%s:%d", timestamp.UnixNano(), ruleID, pid)
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:16]) // Use first 16 bytes for shorter ID
+	h := xxhash.New()
+	var tmp [12]byte
+	binary.LittleEndian.PutUint64(tmp[:8], uint64(timestamp.UnixNano()))
+	binary.LittleEndian.PutUint32(tmp[8:], pid)
+	h.Write(tmp[:])
+	h.WriteString(ruleID) //nolint:errcheck
+	return fmt.Sprintf("%016x", h.Sum64())
 }

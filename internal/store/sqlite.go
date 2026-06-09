@@ -231,7 +231,7 @@ func applySQLitePragmas(db *sql.DB) error {
 	return nil
 }
 
-// initSchema creates the alerts table if it doesn't exist.
+// initSchema creates the alerts table if it doesn't exist, then applies migrations.
 func (s *SQLiteStore) initSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS alerts (
@@ -259,8 +259,71 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_alerts_timestamp_rule ON alerts(timestamp, rule_id);
 	`
 
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.applyMigrations()
+}
+
+// applyMigrations creates a schema_migrations table and runs any pending migrations.
+// Migrations are idempotent: already-applied versions are skipped.
+func (s *SQLiteStore) applyMigrations() error {
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version     INTEGER PRIMARY KEY,
+			applied_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+			description TEXT NOT NULL
+		)
+	`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	var current int
+	s.db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&current) //nolint:errcheck
+
+	type migration struct {
+		version int
+		desc    string
+		fn      func(*sql.Tx) error
+	}
+
+	migrations := []migration{
+		{
+			version: 1,
+			desc:    "switch alert ID format from SHA-256 (32 chars) to xxHash64 (16 chars)",
+			// No data migration: existing records keep their pre-upgrade IDs.
+			// New alerts generated after this version use 16-char xxHash64 IDs.
+			fn: func(tx *sql.Tx) error { return nil },
+		},
+	}
+
+	for _, m := range migrations {
+		if m.version <= current {
+			continue
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %d: %w", m.version, err)
+		}
+		if err := m.fn(tx); err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("migration %d: %w", m.version, err)
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+			m.version, m.desc,
+		); err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("record migration %d: %w", m.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %w", m.version, err)
+		}
+		slog.Info("sqlite: applied migration",
+			slog.Int("version", m.version),
+			slog.String("description", m.desc))
+	}
+	return nil
 }
 
 // Store persists a single alert.

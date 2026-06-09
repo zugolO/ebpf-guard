@@ -257,6 +257,7 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_alerts_pid ON alerts(pid);
 	CREATE INDEX IF NOT EXISTS idx_alerts_namespace ON alerts(namespace);
 	CREATE INDEX IF NOT EXISTS idx_alerts_timestamp_rule ON alerts(timestamp, rule_id);
+	CREATE INDEX IF NOT EXISTS idx_alerts_severity_ts ON alerts(severity, timestamp DESC);
 	`
 
 	_, err := s.db.Exec(schema)

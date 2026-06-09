@@ -24,6 +24,7 @@ func BenchmarkStore_Store(b *testing.B) {
 		Message:   "Benchmark alert",
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		alert.ID = fmt.Sprintf("bench-%d", i)
@@ -54,6 +55,7 @@ func BenchmarkStore_StoreBatch(b *testing.B) {
 		}
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
@@ -70,7 +72,11 @@ func BenchmarkStore_StoreBatch(b *testing.B) {
 	}
 }
 
-// BenchmarkStore_Query benchmarks alert querying.
+// BenchmarkStore_Query benchmarks alert querying with time+severity+namespace filters.
+//
+// Target: < 30 µs/op, < 1 KB allocs/op (pool warmed after first iteration).
+// The benchmark calls store.Release so the backing array is returned to the
+// queryPool and reused on subsequent iterations.
 func BenchmarkStore_Query(b *testing.B) {
 	store := NewMemoryStore()
 	ctx := context.Background()
@@ -102,12 +108,57 @@ func BenchmarkStore_Query(b *testing.B) {
 		Limit:     100,
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := store.Query(ctx, filters)
+		results, err := store.Query(ctx, filters)
 		if err != nil {
 			b.Fatal(err)
 		}
+		store.Release(results)
+	}
+}
+
+// BenchmarkStore_QueryBySev benchmarks the severity-bucket fast path.
+// No time-range filter is set so Query routes through bySev directly,
+// iterating only the warning-severity entries instead of all 10k.
+//
+// Target: < 15 µs/op, < 1 KB allocs/op.
+func BenchmarkStore_QueryBySev(b *testing.B) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	for i := 0; i < 10000; i++ {
+		alert := types.Alert{
+			ID:        fmt.Sprintf("alert-%d", i),
+			Timestamp: time.Now().Add(-time.Duration(i) * time.Second),
+			RuleID:    fmt.Sprintf("rule-%d", i%10),
+			Severity:  []types.Severity{types.SeverityWarning, types.SeverityCritical}[i%2],
+			PID:       uint32(i % 100),
+			Comm:      fmt.Sprintf("proc-%d", i%20),
+			Message:   fmt.Sprintf("Alert message %d", i),
+			Enrichment: types.EnrichmentInfo{
+				Namespace: fmt.Sprintf("ns-%d", i%5),
+			},
+		}
+		if err := store.Store(ctx, alert); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	filters := QueryFilters{
+		Severity: []types.Severity{types.SeverityWarning},
+		Limit:    100,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := store.Query(ctx, filters)
+		if err != nil {
+			b.Fatal(err)
+		}
+		store.Release(results)
 	}
 }
 
@@ -132,6 +183,7 @@ func BenchmarkStore_QueryByID(b *testing.B) {
 		}
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		id := fmt.Sprintf("alert-%d", i%10000)
@@ -168,6 +220,7 @@ func BenchmarkStore_Count(b *testing.B) {
 		Severity: []types.Severity{types.SeverityWarning},
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, err := store.Count(ctx, filters)
@@ -199,6 +252,7 @@ func BenchmarkStore_Delete(b *testing.B) {
 		}
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Setup outside the timer so alloc/op measures only Delete.
@@ -241,6 +295,7 @@ func BenchmarkMatchesFilters(b *testing.B) {
 		Namespace: "default",
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = matchesFilters(alert, filters)

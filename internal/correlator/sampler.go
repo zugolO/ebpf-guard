@@ -56,8 +56,9 @@ func (e *ruleEntry) effective() float64 {
 // Rules with rate ≥ 1.0 are not stored; ShouldEvaluate returns true immediately.
 // Thread-safe.
 type RuleSampler struct {
-	mu      sync.RWMutex
-	entries map[string]*ruleEntry // only rules with rate < 1.0 are stored
+	mu         sync.RWMutex
+	entries    map[string]*ruleEntry // only rules with rate < 1.0 are stored
+	entryCount atomic.Int32          // len(entries); read lock-free by matchesTyped
 }
 
 // NewRuleSampler creates a RuleSampler from the loaded rule set.
@@ -83,10 +84,37 @@ func NewRuleSampler(rules []Rule) *RuleSampler {
 			mode:     mode,
 		}
 	}
+	s.entryCount.Store(int32(len(s.entries)))
 	return s
 }
 
+// CheckSampling is a single-lock replacement for the HasSampling + Mode + ShouldEvaluate
+// triple call that matchesTyped previously made. Returns active=false for rules not in
+// entries (no sampling configured). When active=true, skip=true means the event should
+// be dropped by the sampling gate; skip=false means it was sampled and should be evaluated.
+func (s *RuleSampler) CheckSampling(ruleID string, pid uint32, ts uint64) (active, skip bool, mode string) {
+	s.mu.RLock()
+	e, ok := s.entries[ruleID]
+	if !ok {
+		s.mu.RUnlock()
+		return false, false, ""
+	}
+	rate := e.effective()
+	det := e.mode == SamplingModeHashPID
+	modeStr := string(e.mode)
+	s.mu.RUnlock()
+
+	if rate <= 0 || rate >= 1.0 {
+		return false, false, ""
+	}
+	if shouldSample(pid, ts, rate, det) {
+		return true, false, modeStr // sampled — evaluate the event
+	}
+	return true, true, modeStr // not sampled — drop the event
+}
+
 // ShouldEvaluate returns true if the event should be evaluated against the rule.
+// For rules with effective rate ≥ 1.0 this is always true with zero map-lookup overhead.
 // For rules with effective rate ≥ 1.0 this is always true with zero map-lookup overhead.
 func (s *RuleSampler) ShouldEvaluate(ruleID string, pid uint32, ts uint64) bool {
 	s.mu.RLock()
@@ -135,6 +163,7 @@ func (s *RuleSampler) Mode(ruleID string) SamplingMode {
 // Only rules already tracked (base rate < 1.0) or newly added via the override path are affected.
 func (s *RuleSampler) setAdaptiveRate(ruleID string, rate float64) {
 	s.mu.Lock()
+	prev := len(s.entries)
 	if e, ok := s.entries[ruleID]; ok {
 		e.adaptiveRate = rate
 	} else if rate > 0 && rate < 1.0 {
@@ -145,20 +174,29 @@ func (s *RuleSampler) setAdaptiveRate(ruleID string, rate float64) {
 			mode:         SamplingModeRandom,
 		}
 	}
+	curr := len(s.entries)
 	s.mu.Unlock()
+	if curr != prev {
+		s.entryCount.Store(int32(curr))
+	}
 }
 
 // clearAdaptiveRate removes the adaptive override for a rule, restoring base rate behaviour.
 // If the base rate was 1.0, the entry is deleted entirely.
 func (s *RuleSampler) clearAdaptiveRate(ruleID string) {
 	s.mu.Lock()
+	prev := len(s.entries)
 	if e, ok := s.entries[ruleID]; ok {
 		e.adaptiveRate = 0
 		if e.baseRate >= 1.0 {
 			delete(s.entries, ruleID)
 		}
 	}
+	curr := len(s.entries)
 	s.mu.Unlock()
+	if curr != prev {
+		s.entryCount.Store(int32(curr))
+	}
 }
 
 // AdaptiveSamplingConfig configures CPU-load-triggered adaptive sampling.

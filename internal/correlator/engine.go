@@ -1493,7 +1493,7 @@ func (ce *CorrelationEngine) UpdateRules(rules []Rule) {
 			ce.rulesActive.WithLabelValues(label).Set(0)
 		}
 		for evType, evRules := range re.byType {
-			if label, ok := eventTypeLabel[evType]; ok {
+			if label, ok := eventTypeLabel[types.EventType(evType)]; ok {
 				ce.rulesActive.WithLabelValues(label).Set(float64(len(evRules)))
 			}
 		}

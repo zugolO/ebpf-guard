@@ -18,6 +18,14 @@ var parentInfoPool = sync.Pool{
 	New: func() any { return &parentInfo{} },
 }
 
+// chainSlice wraps a pooled ProcessNode slice. Storing a *chainSlice in
+// sync.Pool costs zero allocations when boxing into interface{} because a
+// pointer (8 bytes) fits inline in the interface word, unlike a raw slice
+// header (24 bytes) which would require a heap allocation on every Put.
+type chainSlice struct {
+	nodes []types.ProcessNode
+}
+
 // LineageCondition defines an additional constraint that must be satisfied
 // for a lineage pattern to fire. It is evaluated against the child process
 // event after the parent/child comm lists have already matched.
@@ -101,14 +109,16 @@ type LineageMatch struct {
 
 // LineageTracker tracks process parent-child relationships and detects suspicious patterns.
 type LineageTracker struct {
-	config    LineageConfig
-	logger    *slog.Logger
-	lineage   map[uint32]*parentInfo
-	ancestry  map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
-	commCache map[uint32]string              // ppid → comm, avoids repeated /proc reads
-	maxDepth  int
-	mu        sync.RWMutex
-	onMatch   func(LineageMatch)
+	config     LineageConfig
+	logger     *slog.Logger
+	lineage    map[uint32]*parentInfo
+	ancestry   map[uint32]*chainSlice  // PID → pooled ancestor chain (root → PID)
+	commCache  map[uint32]string       // ppid → comm, avoids repeated /proc reads
+	commIntern map[[16]byte]string     // raw comm bytes → interned string (eliminates per-event string allocs)
+	maxDepth   int
+	chainPool  sync.Pool // items are *chainSlice pre-allocated to maxDepth capacity
+	mu         sync.RWMutex
+	onMatch    func(LineageMatch)
 }
 
 // NewLineageTracker creates a new lineage tracker.
@@ -122,13 +132,17 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 	}
 
 	lt := &LineageTracker{
-		config:    config,
-		logger:    logger,
-		lineage:   make(map[uint32]*parentInfo),
-		ancestry:  make(map[uint32][]types.ProcessNode),
-		commCache: make(map[uint32]string),
-		maxDepth:  maxDepth,
-		onMatch:   func(m LineageMatch) {}, // no-op default
+		config:     config,
+		logger:     logger,
+		lineage:    make(map[uint32]*parentInfo),
+		ancestry:   make(map[uint32]*chainSlice),
+		commCache:  make(map[uint32]string),
+		commIntern: make(map[[16]byte]string, 64),
+		maxDepth:   maxDepth,
+		onMatch:    func(m LineageMatch) {}, // no-op default
+	}
+	lt.chainPool.New = func() any {
+		return &chainSlice{nodes: make([]types.ProcessNode, 0, maxDepth)}
 	}
 
 	return lt
@@ -151,14 +165,18 @@ func (lt *LineageTracker) Track(e types.Event) {
 	if ppid == 0 {
 		return
 	}
-	comm := cleanComm(e.Comm[:])
 	info := parentInfoPool.Get().(*parentInfo)
 	info.PPID = ppid
 	info.ParentComm = parentComm
 	info.Timestamp = time.Now()
 	lt.mu.Lock()
+	if old := lt.lineage[e.PID]; old != nil {
+		old.PPID = 0
+		old.ParentComm = ""
+		parentInfoPool.Put(old)
+	}
 	lt.lineage[e.PID] = info
-	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
+	lt.buildAncestryLocked(e.PID, ppid, parentComm, e.Comm)
 	lt.mu.Unlock()
 }
 
@@ -175,16 +193,20 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 		return nil
 	}
 
-	comm := cleanComm(e.Comm[:])
-
 	// Store lineage info and update ancestry chain under a single lock acquisition.
 	info := parentInfoPool.Get().(*parentInfo)
 	info.PPID = ppid
 	info.ParentComm = parentComm
 	info.Timestamp = time.Now()
 	lt.mu.Lock()
+	// Return the previous parentInfo for this PID to the pool before replacing it.
+	if old := lt.lineage[e.PID]; old != nil {
+		old.PPID = 0
+		old.ParentComm = ""
+		parentInfoPool.Put(old)
+	}
 	lt.lineage[e.PID] = info
-	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
+	comm := lt.buildAncestryLocked(e.PID, ppid, parentComm, e.Comm)
 	lt.mu.Unlock()
 
 	// Check for pattern match
@@ -224,45 +246,77 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 func (lt *LineageTracker) GetProcessTree(pid uint32) types.ProcessTree {
 	lt.mu.RLock()
 	defer lt.mu.RUnlock()
-	chain := lt.ancestry[pid]
-	if len(chain) == 0 {
+	entry := lt.ancestry[pid]
+	if entry == nil || len(entry.nodes) == 0 {
 		return nil
 	}
-	result := make(types.ProcessTree, len(chain))
-	copy(result, chain)
+	result := make(types.ProcessTree, len(entry.nodes))
+	copy(result, entry.nodes)
 	return result
 }
 
-// buildAncestryLocked extends the ancestry chain for pid. Must be called with lt.mu held for writing.
-func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm, comm string) {
-	parentChain := lt.ancestry[ppid]
-	if len(parentChain) == 0 {
+// buildAncestryLocked extends the ancestry chain for pid. Must be called with
+// lt.mu held for writing. Returns the interned comm string for pid.
+func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm string, rawComm [16]byte) string {
+	comm := lt.internCommLocked(rawComm)
+
+	// Locate the parent's existing chain.
+	var parentNodes []types.ProcessNode
+	if parentEntry := lt.ancestry[ppid]; parentEntry != nil {
+		parentNodes = parentEntry.nodes
+	} else {
 		// We haven't seen the parent's events yet; try to bootstrap from /proc.
-		parentChain = buildChainFromProc(ppid, lt.maxDepth-1)
-		// Cache so subsequent events with the same ppid skip /proc entirely.
-		if len(parentChain) > 0 {
-			lt.ancestry[ppid] = parentChain
+		parentNodes = buildChainFromProc(ppid, lt.maxDepth-1)
+		if len(parentNodes) > 0 {
+			// Wrap in a chainSlice so the ancestry map is type-consistent.
+			// This entry has a smaller-than-maxDepth cap so it will not be
+			// returned to the pool on eviction.
+			lt.ancestry[ppid] = &chainSlice{nodes: parentNodes}
 		}
 	}
 
-	node := types.ProcessNode{PID: pid, PPID: ppid, Comm: comm}
-	newLen := len(parentChain) + 1
-	newChain := make([]types.ProcessNode, newLen, newLen)
-	copy(newChain, parentChain)
-	newChain[len(parentChain)] = node
+	// Get a pre-allocated *chainSlice from the pool (0 alloc when warm).
+	entry := lt.chainPool.Get().(*chainSlice)
+	entry.nodes = entry.nodes[:0]
+
+	// Copy parent entries, trimmed so the combined chain stays within maxDepth.
+	start := 0
+	if len(parentNodes) >= lt.maxDepth {
+		start = len(parentNodes) - lt.maxDepth + 1
+	}
+	entry.nodes = append(entry.nodes, parentNodes[start:]...)
+	entry.nodes = append(entry.nodes, types.ProcessNode{PID: pid, PPID: ppid, Comm: comm})
 
 	// Ensure the parent node's Comm is set correctly (may have been set to "" by /proc miss).
-	if len(newChain) >= 2 {
-		parent := &newChain[len(newChain)-2]
+	if len(entry.nodes) >= 2 {
+		parent := &entry.nodes[len(entry.nodes)-2]
 		if parent.PID == ppid && parent.Comm == "" {
 			parent.Comm = parentComm
 		}
 	}
 
-	if len(newChain) > lt.maxDepth {
-		newChain = newChain[len(newChain)-lt.maxDepth:]
+	// Return the old chain entry to the pool before replacing it.
+	// Only pool-sourced entries (cap >= maxDepth) are eligible; /proc-bootstrapped
+	// entries have a smaller cap and are left for the GC.
+	if old, ok := lt.ancestry[pid]; ok && cap(old.nodes) >= lt.maxDepth {
+		old.nodes = old.nodes[:0]
+		lt.chainPool.Put(old)
 	}
-	lt.ancestry[pid] = newChain
+
+	lt.ancestry[pid] = entry
+	return comm
+}
+
+// internCommLocked returns the interned string for the given raw comm bytes,
+// caching the result so subsequent calls with the same bytes cost 0 allocs.
+// Must be called with lt.mu held for writing.
+func (lt *LineageTracker) internCommLocked(raw [16]byte) string {
+	if s, ok := lt.commIntern[raw]; ok {
+		return s
+	}
+	s := cleanComm(raw[:])
+	lt.commIntern[raw] = s
+	return s
 }
 
 // buildChainFromProc walks /proc to reconstruct up to maxDepth ancestors for pid.
@@ -482,7 +536,8 @@ func cleanComm(comm []byte) string {
 	return string(comm)
 }
 
-// Cleanup removes stale lineage and ancestry entries.
+// Cleanup removes stale lineage and ancestry entries, returning pooled objects
+// to their respective pools.
 func (lt *LineageTracker) Cleanup(now time.Time) {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
@@ -490,7 +545,15 @@ func (lt *LineageTracker) Cleanup(now time.Time) {
 	for pid, info := range lt.lineage {
 		if now.Sub(info.Timestamp) > lt.config.TTL {
 			delete(lt.lineage, pid)
-			delete(lt.ancestry, pid)
+			if entry, ok := lt.ancestry[pid]; ok {
+				delete(lt.ancestry, pid)
+				// Return pool-sourced entries (cap >= maxDepth) for reuse;
+				// /proc-bootstrapped entries have smaller cap and are GC'd.
+				if cap(entry.nodes) >= lt.maxDepth {
+					entry.nodes = entry.nodes[:0]
+					lt.chainPool.Put(entry)
+				}
+			}
 			// Reset and return to pool to amortise allocations across long-lived processes.
 			info.PPID = 0
 			info.ParentComm = ""

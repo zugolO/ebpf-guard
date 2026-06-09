@@ -529,7 +529,8 @@ func TestLineageTrackerTrackDoesNotFireCallback(t *testing.T) {
 	assert.False(t, fired, "Track must not invoke the match callback")
 }
 
-// BenchmarkLineageTrackerUpdate benchmarks the lineage tracker hot path.
+// BenchmarkLineageTrackerUpdate benchmarks the lineage tracker with ever-increasing PIDs
+// (simulates a burst of short-lived processes, worst-case for pool reuse).
 func BenchmarkLineageTrackerUpdate(b *testing.B) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	config := DefaultLineageConfig()
@@ -548,5 +549,32 @@ func BenchmarkLineageTrackerUpdate(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		tracker.Update(e)
 		e.PID++ // Vary PID to avoid map collision
+	}
+}
+
+// BenchmarkLineageTrackerUpdate_ZeroAlloc benchmarks the hot path with a fixed PID
+// so that the chainPool and parentInfoPool stay warm. This represents a long-running
+// container where the same process is updated repeatedly (e.g. a supervisor loop).
+// Target: 0 allocs/op after pool warm-up.
+func BenchmarkLineageTrackerUpdate_ZeroAlloc(b *testing.B) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	config := DefaultLineageConfig()
+	tracker := NewLineageTracker(config, logger)
+
+	e := types.Event{
+		Type: types.EventSyscall,
+		PID:  1234,
+		PPID: 1,
+		Comm: commBytes("bash"),
+	}
+
+	// Warm-up: one Update so ancestry[1234] exists and pools are primed for the next call.
+	tracker.Update(e)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		tracker.Update(e)
 	}
 }

@@ -253,8 +253,12 @@ type Alert struct {
 	TraceID    string                 `json:"trace_id,omitempty"`
 	// SpanID is the parent APM span ID extracted from the W3C traceparent header.
 	// Set when the alert was triggered for a request carrying OTel trace context.
-	SpanID     string                 `json:"span_id,omitempty"`
-	Enrichment EnrichmentInfo         `json:"enrichment,omitempty"`
+	SpanID string `json:"span_id,omitempty"`
+	// TraceContext carries the full structured trace context including the extraction
+	// source. When set, TraceID and SpanID above mirror TraceContext.TraceID and
+	// TraceContext.SpanID for backward compatibility.
+	TraceContext *TraceContext   `json:"trace_context,omitempty"`
+	Enrichment   EnrichmentInfo `json:"enrichment,omitempty"`
 	Event      Event                  `json:"-"` // the triggering event (not serialized to store)
 	// ProcessTree holds the full ancestor chain for the triggering process.
 	// Ordered from oldest known ancestor to the process that fired the alert.
@@ -273,13 +277,18 @@ type Alert struct {
 // Fields follow W3C Trace Context spec (https://www.w3.org/TR/trace-context/).
 type TraceContext struct {
 	// TraceID is the 32-hex-char trace identifier from the traceparent header.
-	TraceID string
+	TraceID string `json:"trace_id,omitempty"`
 	// SpanID is the 16-hex-char parent span identifier from the traceparent header.
-	SpanID string
+	SpanID string `json:"span_id,omitempty"`
 	// TraceFlags is the 2-hex-char flags byte from the traceparent header (e.g. "01" = sampled).
-	TraceFlags string
+	TraceFlags string `json:"trace_flags,omitempty"`
 	// TraceState is the optional tracestate header value carrying vendor-specific trace metadata.
-	TraceState string
+	TraceState string `json:"trace_state,omitempty"`
+	// Source identifies how the trace context was obtained:
+	// "tls_header" — extracted from a W3C traceparent HTTP/gRPC header via TLS uprobe,
+	// "environ"    — extracted from /proc/PID/environ (OTel, Datadog, or Jaeger env vars),
+	// "otel_sdk"   — injected directly by the OTel SDK (future).
+	Source string `json:"source,omitempty"`
 }
 
 // AlertPayload is the JSON structure sent to Alertmanager.

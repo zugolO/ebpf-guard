@@ -507,6 +507,39 @@ type ProfilerConfig struct {
 	Lineage LineageTrackerConfig `mapstructure:"lineage"`
 	// StatePersistence configures EWMA state save/restore across pod restarts.
 	StatePersistence StatePersistenceConfig `mapstructure:"state_persistence"`
+	// SyscallAllowlist configures deny-unknown (allowlist) mode for syscalls.
+	SyscallAllowlist SyscallAllowlistConfig `mapstructure:"syscall_allowlist"`
+}
+
+// SyscallAllowlistConfig configures the deny-unknown syscall allowlist mode.
+// During the learning phase the agent records every unique syscall number per
+// workload; after the learning period it alerts (or blocks/kills) on any
+// syscall that was never observed.
+type SyscallAllowlistConfig struct {
+	// Enabled activates allowlist mode.
+	Enabled bool `mapstructure:"enabled"`
+	// Mode is the initial mode: "learning" or "enforcing".
+	// The profiler auto-transitions to enforcing after LearningPeriod.
+	Mode string `mapstructure:"mode"`
+	// EnforcingAction is the action taken on violations: "alert", "block", or "kill".
+	EnforcingAction string `mapstructure:"enforcing_action"`
+	// PerWorkload separates allowlists per (comm, namespace, app_label) tuple.
+	PerWorkload bool `mapstructure:"per_workload"`
+	// LearningPeriod is the duration in seconds to record syscalls before enforcing.
+	LearningPeriod int `mapstructure:"learning_period"`
+	// MinSamples is the minimum number of syscall events required before learning completes.
+	MinSamples int `mapstructure:"min_samples"`
+	// SparseThreshold is the minimum number of unique syscalls a profile must
+	// contain; profiles below this value generate a sparse-profile alert.
+	SparseThreshold int `mapstructure:"sparse_threshold"`
+	// GlobalAllow lists syscall numbers that are always permitted (never alerted).
+	GlobalAllow []int `mapstructure:"global_allow"`
+	// GlobalDeny lists syscall numbers that always generate alerts regardless of
+	// the learned profile (e.g. ptrace=101, process_vm_readv=310).
+	GlobalDeny []int `mapstructure:"global_deny"`
+	// PersistPath is the file path for JSON state persistence across restarts.
+	// Empty string disables persistence.
+	PersistPath string `mapstructure:"persist_path"`
 }
 
 // StatePersistenceConfig controls saving the EWMA profiler state to disk so

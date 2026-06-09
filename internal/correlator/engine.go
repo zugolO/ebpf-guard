@@ -990,10 +990,18 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		seq := ce.alertSeq.Add(1)
 		alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
 
-		// Propagate W3C Trace Context from event to alert for APM correlation.
+		// Propagate trace context to the alert for APM correlation.
+		// Prefer the TLS-uprobe-extracted header context; fall back to /proc environ.
 		if e.TraceContext != nil {
 			alert.TraceID = e.TraceContext.TraceID
 			alert.SpanID = e.TraceContext.SpanID
+			tc := *e.TraceContext
+			tc.Source = "tls_header"
+			alert.TraceContext = &tc
+		} else if tc := extractTraceContext(e.PID); tc != nil {
+			alert.TraceID = tc.TraceID
+			alert.SpanID = tc.SpanID
+			alert.TraceContext = tc
 		}
 
 		// Carry Kubernetes enrichment from the event onto the alert.
@@ -1139,9 +1147,17 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					Event:     e,
 				}
 
-				// Add trace context from event if present
+				// Propagate trace context to anomaly alert for APM correlation.
 				if e.TraceContext != nil {
 					anomalyAlert.TraceID = e.TraceContext.TraceID
+					anomalyAlert.SpanID = e.TraceContext.SpanID
+					tc := *e.TraceContext
+					tc.Source = "tls_header"
+					anomalyAlert.TraceContext = &tc
+				} else if tc := extractTraceContext(e.PID); tc != nil {
+					anomalyAlert.TraceID = tc.TraceID
+					anomalyAlert.SpanID = tc.SpanID
+					anomalyAlert.TraceContext = tc
 				}
 
 				// Carry Kubernetes enrichment from the event onto the alert.
@@ -1530,6 +1546,13 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 	if e.TraceContext != nil {
 		alert.TraceID = e.TraceContext.TraceID
 		alert.SpanID = e.TraceContext.SpanID
+		tc := *e.TraceContext
+		tc.Source = "tls_header"
+		alert.TraceContext = &tc
+	} else if tc := extractTraceContext(e.PID); tc != nil {
+		alert.TraceID = tc.TraceID
+		alert.SpanID = tc.SpanID
+		alert.TraceContext = tc
 	}
 	if e.Enrichment != nil {
 		alert.Enrichment = *e.Enrichment

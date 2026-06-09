@@ -175,6 +175,10 @@ type CorrelationEngine struct {
 	// enforceWg tracks in-flight enforcement tasks for clean DrainEnforceQueue.
 	enforceWg sync.WaitGroup
 
+	// allowlistProfiler detects unknown syscalls after the learning phase.
+	// nil disables allowlist enforcement.
+	allowlistProfiler *profiler.SyscallAllowlistProfiler
+
 	// regoEvalErrors counts Rego evaluation failures so degraded-enrichment
 	// is observable via Prometheus rather than silently swallowed.
 	regoEvalErrors prometheus.Counter
@@ -362,6 +366,13 @@ type CorrelationEngineConfig struct {
 	// IncidentWindow is the sliding time window for grouping alerts from the
 	// same (pid, namespace) into an Incident. Zero → 60 seconds.
 	IncidentWindow time.Duration
+
+	// AllowlistProfiler enables deny-unknown syscall enforcement.
+	// When set, every syscall event is checked against the learned allowlist
+	// and generates an alert (or enforced action) when unknown.
+	// Created externally (e.g. in main) so the learning phase can start
+	// before the correlation engine is fully initialised.
+	AllowlistProfiler *profiler.SyscallAllowlistProfiler
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -553,6 +564,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		lastReloadTimestamp:  lastReloadTimestamp,
 		incidentTracker:      newIncidentTracker(config.IncidentWindow),
 		regoEvalErrors:       regoEvalErrors,
+		allowlistProfiler:    config.AllowlistProfiler,
 	}
 
 	ce.ruleEngine.Store(NewRuleEngine(config.Rules))
@@ -1188,6 +1200,55 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 						}
 					}
 				}
+			}
+		}
+	}
+
+	// Syscall allowlist enforcement: record event during learning, check in enforcing.
+	// Record runs unconditionally so the profile accumulates even while other
+	// detectors are active; Check returns nil during the learning phase.
+	if ce.allowlistProfiler != nil && e.Type == types.EventSyscall {
+		ce.allowlistProfiler.Record(e)
+		if v := ce.allowlistProfiler.Check(e); v != nil {
+			msg := fmt.Sprintf("Unknown syscall %d not in learned allowlist for workload %s", v.SyscallNr, v.WorkloadKey.String())
+			if v.Source == "global_deny" {
+				msg = fmt.Sprintf("Syscall %d matches global deny list for workload %s", v.SyscallNr, v.WorkloadKey.String())
+			}
+			seq := ce.alertSeq.Add(1)
+			allowlistAlert := types.Alert{
+				ID:        buildAlertID("auto_allowlist_violation", e.Timestamp, e.PID, seq),
+				Timestamp: time.Unix(0, int64(e.Timestamp)),
+				RuleID:    "auto_allowlist_violation",
+				RuleName:  "Syscall Allowlist Violation",
+				Message:   msg,
+				Severity:  types.SeverityWarning,
+				PID:       e.PID,
+				Comm:      util.BytesToString(e.Comm[:]),
+				Details: map[string]interface{}{
+					"syscall_nr":  v.SyscallNr,
+					"source":      v.Source,
+					"workload":    v.WorkloadKey.String(),
+					"action":      string(v.Action),
+				},
+				Event:       e,
+				ProcessTree: processTree,
+				Action:      string(v.Action),
+			}
+			if e.Enrichment != nil {
+				allowlistAlert.Enrichment = *e.Enrichment
+			}
+			if ce.enableDedup && ce.checkDup(allowlistAlert.RuleID, allowlistAlert.PID, allowlistAlert.Comm) {
+				ce.alertsDedupDropped.Add(1)
+				ce.alertsDropped.Add(1)
+			} else if ce.rateLimiter.Allow(allowlistAlert.RuleID) &&
+				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
+				if ce.enableDedup {
+					ce.markDedup(allowlistAlert.RuleID, allowlistAlert.PID, allowlistAlert.Comm, start)
+				}
+				alerts = append(alerts, allowlistAlert)
+				ce.alertsGenerated.Add(1)
+			} else {
+				ce.alertsDropped.Add(1)
 			}
 		}
 	}

@@ -1,0 +1,76 @@
+{{- if .Values.admissionWebhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-admission
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+  {{- if .Values.admissionWebhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ include "ebpf-guard.namespace" . }}/{{ include "ebpf-guard.fullname" . }}-admission-cert
+  {{- end }}
+webhooks:
+  - name: pods.admission.ebpf-guard.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.admissionWebhook.failurePolicy | default "Ignore" }}
+    timeoutSeconds: {{ .Values.admissionWebhook.timeoutSeconds | default 5 }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
+    {{- with .Values.admissionWebhook.namespaceSelector }}
+    namespaceSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.admissionWebhook.objectSelector }}
+    objectSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    clientConfig:
+      {{- if .Values.admissionWebhook.caBundle }}
+      caBundle: {{ .Values.admissionWebhook.caBundle | b64enc }}
+      {{- end }}
+      service:
+        name: {{ include "ebpf-guard.fullname" . }}-admission
+        namespace: {{ include "ebpf-guard.namespace" . }}
+        path: {{ .Values.admissionWebhook.webhookPath | default "/admission" }}
+        port: {{ .Values.admissionWebhook.port | default 8443 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-admission
+  namespace: {{ include "ebpf-guard.namespace" . }}
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "ebpf-guard.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: {{ .Values.admissionWebhook.port | default 8443 }}
+      targetPort: webhook
+      protocol: TCP
+{{- if .Values.admissionWebhook.certManager.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-admission-cert
+  namespace: {{ include "ebpf-guard.namespace" . }}
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "ebpf-guard.fullname" . }}-admission-tls
+  dnsNames:
+    - {{ include "ebpf-guard.fullname" . }}-admission
+    - {{ include "ebpf-guard.fullname" . }}-admission.{{ include "ebpf-guard.namespace" . }}.svc
+    - {{ include "ebpf-guard.fullname" . }}-admission.{{ include "ebpf-guard.namespace" . }}.svc.cluster.local
+  issuerRef:
+    name: {{ .Values.admissionWebhook.certManager.issuerName | default "selfsigned-issuer" }}
+    kind: {{ .Values.admissionWebhook.certManager.issuerKind | default "ClusterIssuer" }}
+{{- end }}
+{{- end }}

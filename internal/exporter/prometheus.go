@@ -108,6 +108,15 @@ var (
 			Help: "1 if EWMA profiler state was loaded from disk on startup, 0 if fresh start",
 		},
 	)
+
+	// RuleChecksumValid indicates whether the last rule checksum verification
+	// passed (1) or failed (0). Only meaningful when rules.verify_checksums is true.
+	RuleChecksumValid = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_rules_checksum_valid",
+			Help: "1 if rule file checksums were verified successfully, 0 if verification failed or was not run",
+		},
+	)
 )
 
 // RecordEvent increments the events counter for the given type.
@@ -177,6 +186,16 @@ func SetProfilerStateRestored(restored bool) {
 		ProfilerStateRestored.Set(1)
 	} else {
 		ProfilerStateRestored.Set(0)
+	}
+}
+
+// SetRuleChecksumValid sets the checksum validation gauge: 1 if verification
+// passed, 0 if it failed or was not performed.
+func SetRuleChecksumValid(valid bool) {
+	if valid {
+		RuleChecksumValid.Set(1)
+	} else {
+		RuleChecksumValid.Set(0)
 	}
 }
 

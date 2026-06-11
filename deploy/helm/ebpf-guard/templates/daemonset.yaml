@@ -116,6 +116,11 @@ spec:
             - name: metrics
               containerPort: {{ trimPrefix ":" .Values.config.server.bind_address | default "9090" }}
               protocol: TCP
+            {{- if .Values.admissionWebhook.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.admissionWebhook.port | default 8443 }}
+              protocol: TCP
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

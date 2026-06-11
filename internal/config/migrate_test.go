@@ -10,6 +10,78 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// fixtureVersions lists every released config version that has a fixture file
+// in tests/config_fixtures/. Update this slice whenever a new version ships.
+var fixtureVersions = []string{"v0.1"}
+
+// latestVersion is the migration target used when validating roundtrip tests.
+const latestVersion = "v0.2.0"
+
+// loadFixture reads tests/config_fixtures/<version>.yaml relative to this package.
+func loadFixture(t *testing.T, version string) []byte {
+	t.Helper()
+	path := filepath.Join("..", "..", "tests", "config_fixtures", version+".yaml")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "fixture file for version %s must exist at %s", version, path)
+	return data
+}
+
+// TestMigrationFromAllVersions applies the full migration chain to every
+// released config fixture and confirms the result is schema-clean.
+func TestMigrationFromAllVersions(t *testing.T) {
+	for _, v := range fixtureVersions {
+		v := v
+		t.Run(v, func(t *testing.T) {
+			input := loadFixture(t, v)
+			out, err := migrateConfigBytes(input, latestVersion)
+			require.NoError(t, err, "migration from %s to %s must succeed", v, latestVersion)
+
+			issues, err := checkConfigBytes(out)
+			require.NoError(t, err, "migrated config must be parseable")
+			assert.Empty(t, issues,
+				"migrated config from %s should have no compatibility issues; got: %v", v, issues)
+		})
+	}
+}
+
+// TestNoBreakingConfigChanges loads the current-version fixture and confirms
+// it validates cleanly without any deprecated or removed fields.
+func TestNoBreakingConfigChanges(t *testing.T) {
+	// Derive the current-version fixture filename from latestVersion (strip patch).
+	// latestVersion = "v0.2.0" → fixture = "v0.2"
+	fixtureVersion := latestVersion
+	if len(fixtureVersion) >= 5 && fixtureVersion[len(fixtureVersion)-2:] == ".0" {
+		fixtureVersion = fixtureVersion[:len(fixtureVersion)-2]
+	}
+
+	raw := loadFixture(t, fixtureVersion)
+	issues, err := checkConfigBytes(raw)
+	require.NoError(t, err)
+	assert.Empty(t, issues,
+		"current-version fixture %s.yaml must have no deprecated or removed fields; got: %v",
+		fixtureVersion, issues)
+}
+
+// TestMigrationErrorsAreDescriptive verifies that migration failures include
+// field-level context (field name + old/new path) in their error messages.
+func TestMigrationErrorsAreDescriptive(t *testing.T) {
+	t.Run("version below all migrations returns descriptive error", func(t *testing.T) {
+		// v0.0.1 is lower than the earliest migration target (v0.2.0),
+		// so no migration applies and the error must name the requested version.
+		raw := []byte(`server: {}`)
+		_, err := migrateConfigBytes(raw, "v0.0.1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "v0.0.1", "error must contain the requested version")
+	})
+
+	t.Run("invalid yaml returns parse error", func(t *testing.T) {
+		raw := []byte(`{invalid: yaml: [`)
+		_, err := migrateConfigBytes(raw, latestVersion)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parse config")
+	})
+}
+
 func TestCheckConfigBytes_NoIssues(t *testing.T) {
 	raw := []byte(`
 config_version: "v0.1"

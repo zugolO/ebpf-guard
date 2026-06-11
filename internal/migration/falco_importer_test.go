@@ -151,6 +151,200 @@ func TestFalcoImporter_WriteOutput(t *testing.T) {
 	assert.Contains(t, string(out), "severity: warning")
 }
 
+// TestFalcoImporter_ProcFields verifies mapping of proc.* fields added in issue #111.
+func TestFalcoImporter_ProcFields(t *testing.T) {
+	cases := []struct {
+		name      string
+		condition string
+		wantField string
+		wantOp    string
+	}{
+		{"proc.pname eq", `proc.pname = "sshd"`, "parent_comm", "eq"},
+		{"proc.cmdline eq", `proc.cmdline = "bash -c evil"`, "cmdline", "eq"},
+		{"proc.pcmdline eq", `proc.pcmdline = "sh -c evil"`, "parent_cmdline", "eq"},
+		{"proc.args contains", `proc.args contains "--exploit"`, "args", "contains"},
+		{"proc.exe eq", `proc.exe = "/bin/sh"`, "exe_path", "eq"},
+		{"proc.exepath eq", `proc.exepath = "/usr/bin/python"`, "exe_path", "eq"},
+		{"proc.vpid eq", `proc.vpid = "1"`, "pid", "eq"},
+		{"proc.pvpid eq", `proc.pvpid = "0"`, "ppid", "eq"},
+		{"proc.sid eq", `proc.sid = "42"`, "session_id", "eq"},
+		{"proc.sname eq", `proc.sname = "pts0"`, "session_name", "eq"},
+		{"proc.tty eq", `proc.tty = "1"`, "tty", "eq"},
+		{"proc.loginuid eq", `proc.loginuid = "1000"`, "loginuid", "eq"},
+	}
+
+	imp := NewFalcoImporter()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte("- rule: Test\n  desc: d\n  condition: " + tc.condition + "\n  output: o\n  priority: WARNING\n")
+			result, err := imp.Import(input)
+			require.NoError(t, err)
+			require.Len(t, result.Results, 1)
+			r := result.Results[0]
+			assert.Equal(t, "converted", r.Status, "condition %q should convert; reasons: %v", tc.condition, r.UnsupportedReasons)
+			assert.Equal(t, tc.wantField, r.Converted.Condition["field"])
+			assert.Equal(t, tc.wantOp, r.Converted.Condition["op"])
+		})
+	}
+}
+
+// TestFalcoImporter_FdFields verifies mapping of fd.* fields added in issue #111.
+func TestFalcoImporter_FdFields(t *testing.T) {
+	cases := []struct {
+		name      string
+		condition string
+		wantField string
+		wantOp    string
+	}{
+		{"fd.directory eq", `fd.directory = "/etc"`, "dir", "eq"},
+		{"fd.filename eq", `fd.filename = "shadow"`, "filename", "eq"},
+		{"fd.typechar eq", `fd.typechar = "f"`, "fd_type", "eq"},
+		{"fd.type eq", `fd.type = "file"`, "fd_type", "eq"},
+		{"fd.proto eq", `fd.proto = "tcp"`, "protocol", "eq"},
+		{"fd.sport eq", `fd.sport = 1234`, "dst_port", "eq"},
+	}
+
+	imp := NewFalcoImporter()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte("- rule: Test\n  desc: d\n  condition: " + tc.condition + "\n  output: o\n  priority: WARNING\n")
+			result, err := imp.Import(input)
+			require.NoError(t, err)
+			require.Len(t, result.Results, 1)
+			r := result.Results[0]
+			assert.Equal(t, "converted", r.Status, "condition %q should convert; reasons: %v", tc.condition, r.UnsupportedReasons)
+			assert.Equal(t, tc.wantField, r.Converted.Condition["field"])
+		})
+	}
+}
+
+// TestFalcoImporter_UserGroupFields verifies mapping of user.* and group.* fields.
+func TestFalcoImporter_UserGroupFields(t *testing.T) {
+	cases := []struct {
+		name      string
+		condition string
+		wantField string
+	}{
+		{"user.uid eq", `user.uid = "0"`, "uid"},
+		{"user.gid eq", `user.gid = "0"`, "gid"},
+		{"user.loginuid eq", `user.loginuid = "1000"`, "loginuid"},
+		{"user.loginname eq", `user.loginname = "root"`, "loginname"},
+		{"group.name eq", `group.name = "docker"`, "group_name"},
+		{"group.gid eq", `group.gid = "999"`, "group_gid"},
+	}
+
+	imp := NewFalcoImporter()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte("- rule: Test\n  desc: d\n  condition: " + tc.condition + "\n  output: o\n  priority: WARNING\n")
+			result, err := imp.Import(input)
+			require.NoError(t, err)
+			require.Len(t, result.Results, 1)
+			r := result.Results[0]
+			assert.Equal(t, "converted", r.Status, "condition %q should convert; reasons: %v", tc.condition, r.UnsupportedReasons)
+			assert.Equal(t, tc.wantField, r.Converted.Condition["field"])
+		})
+	}
+}
+
+// TestFalcoImporter_ContainerK8sFields verifies mapping of container.* and k8s.* fields.
+func TestFalcoImporter_ContainerK8sFields(t *testing.T) {
+	cases := []struct {
+		name      string
+		condition string
+		wantField string
+		wantValue string
+	}{
+		{"container.name eq", `container.name = "nginx"`, "container_name", "nginx"},
+		{"container.image eq", `container.image = "alpine"`, "container_image", "alpine"},
+		{"container.image.id eq", `container.image.id = "sha256:abc"`, "container_image_id", "sha256:abc"},
+		{"container.privileged true", `container.privileged = true`, "container_privileged", "true"},
+		{"container.privileged false", `container.privileged = false`, "container_privileged", "false"},
+		{"k8s.pod.name eq", `k8s.pod.name = "my-pod"`, "pod_name", "my-pod"},
+		{"k8s.ns.name eq", `k8s.ns.name = "production"`, "namespace", "production"},
+	}
+
+	imp := NewFalcoImporter()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte("- rule: Test\n  desc: d\n  condition: " + tc.condition + "\n  output: o\n  priority: WARNING\n")
+			result, err := imp.Import(input)
+			require.NoError(t, err)
+			require.Len(t, result.Results, 1)
+			r := result.Results[0]
+			assert.Equal(t, "converted", r.Status, "condition %q should convert; reasons: %v", tc.condition, r.UnsupportedReasons)
+			assert.Equal(t, tc.wantField, r.Converted.Condition["field"])
+			if tc.wantValue != "" {
+				vals, _ := r.Converted.Condition["values"].([]string)
+				assert.Contains(t, vals, tc.wantValue)
+			}
+		})
+	}
+}
+
+// TestFalcoImporter_IpCidrFields verifies fd.sip/fd.dip/fd.net CIDR mapping.
+func TestFalcoImporter_IpCidrFields(t *testing.T) {
+	cases := []struct {
+		name      string
+		condition string
+	}{
+		{"fd.sip cidr", `fd.sip = "10.0.0.0/8"`},
+		{"fd.dip cidr", `fd.dip = "192.168.1.0/24"`},
+		{"fd.net cidr", `fd.net = "172.16.0.0/12"`},
+	}
+
+	imp := NewFalcoImporter()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte("- rule: Test\n  desc: d\n  condition: " + tc.condition + "\n  output: o\n  priority: WARNING\n")
+			result, err := imp.Import(input)
+			require.NoError(t, err)
+			require.Len(t, result.Results, 1)
+			r := result.Results[0]
+			assert.Equal(t, "converted", r.Status, "condition %q should convert; reasons: %v", tc.condition, r.UnsupportedReasons)
+			assert.Equal(t, "remote_ip", r.Converted.Condition["field"])
+			assert.Equal(t, "in_cidr", r.Converted.Condition["op"])
+		})
+	}
+}
+
+// TestFalcoImporter_SyscallEvtFields verifies syscall.type and evt.dir mapping.
+func TestFalcoImporter_SyscallEvtFields(t *testing.T) {
+	imp := NewFalcoImporter()
+
+	t.Run("syscall.type", func(t *testing.T) {
+		input := []byte("- rule: Test\n  desc: d\n  condition: syscall.type = open\n  output: o\n  priority: WARNING\n")
+		result, err := imp.Import(input)
+		require.NoError(t, err)
+		r := result.Results[0]
+		assert.Equal(t, "converted", r.Status)
+		assert.Equal(t, "syscall_name", r.Converted.Condition["field"])
+	})
+
+	t.Run("evt.dir", func(t *testing.T) {
+		input := []byte("- rule: Test\n  desc: d\n  condition: evt.dir = \">\"\n  output: o\n  priority: WARNING\n")
+		result, err := imp.Import(input)
+		require.NoError(t, err)
+		r := result.Results[0]
+		assert.Equal(t, "converted", r.Status)
+		assert.Equal(t, "evt_dir", r.Converted.Condition["field"])
+	})
+}
+
+// TestFalcoImporter_UnmappedFieldEmitsWarn verifies that an unknown Falco field
+// causes the rule to be marked unsupported with a non-empty reason (WARN is
+// emitted to the log rather than silently dropped).
+func TestFalcoImporter_UnmappedFieldEmitsWarn(t *testing.T) {
+	input := []byte("- rule: Weird\n  desc: d\n  condition: proc.unknown_field = \"value\"\n  output: o\n  priority: WARNING\n")
+	imp := NewFalcoImporter()
+	result, err := imp.Import(input)
+	require.NoError(t, err)
+	require.Len(t, result.Results, 1)
+	r := result.Results[0]
+	assert.Equal(t, "unsupported", r.Status)
+	assert.NotEmpty(t, r.UnsupportedReasons, "unmapped field must produce a non-empty reason (not silently dropped)")
+}
+
 func TestMapPriority(t *testing.T) {
 	cases := []struct{ input, want string }{
 		{"CRITICAL", "critical"},

@@ -3,11 +3,63 @@ package migration
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// falcoMapping pairs a Falco field prefix with the ebpf-guard field name it maps to.
+// Order matters: more-specific prefixes (e.g. "container.image.id") must appear before
+// their shorter siblings ("container.image") so the first match wins.
+type falcoMapping struct {
+	falcoPrefix string
+	ebpfField   string
+}
+
+var falcoFieldMappings = []falcoMapping{
+	// Process fields
+	{"proc.exepath", "exe_path"},
+	{"proc.exe", "exe_path"},
+	{"proc.pcmdline", "parent_cmdline"},
+	{"proc.cmdline", "cmdline"},
+	{"proc.pname", "parent_comm"},
+	{"proc.name", "comm"},
+	{"proc.args", "args"},
+	{"proc.env", "env"},
+	{"proc.pvpid", "ppid"},
+	{"proc.vpid", "pid"},
+	{"proc.sid", "session_id"},
+	{"proc.sname", "session_name"},
+	{"proc.tty", "tty"},
+	{"proc.loginuid", "loginuid"},
+	// File/FD fields (non-name/non-port/non-IP handled elsewhere)
+	{"fd.directory", "dir"},
+	{"fd.filename", "filename"},
+	{"fd.typechar", "fd_type"},
+	{"fd.type", "fd_type"},
+	{"fd.proto", "protocol"},
+	// User / group fields
+	{"user.loginname", "loginname"},
+	{"user.loginuid", "loginuid"},
+	{"user.name", "username"},
+	{"user.uid", "uid"},
+	{"user.gid", "gid"},
+	{"group.name", "group_name"},
+	{"group.gid", "group_gid"},
+	// Container fields — image.id before image to avoid short-circuit
+	{"container.image.id", "container_image_id"},
+	{"container.image", "container_image"},
+	{"container.name", "container_name"},
+	// Kubernetes fields
+	{"k8s.pod.name", "pod_name"},
+	{"k8s.ns.name", "namespace"},
+	// Syscall / event fields
+	{"syscall.type", "syscall_name"},
+	{"evt.dir", "evt_dir"},
+	{"evt.num", "evt_num"},
+}
 
 // FalcoRule represents a single rule from a Falco rules YAML file.
 type FalcoRule struct {
@@ -259,18 +311,22 @@ func detectEventType(cond string) string {
 func mapAtom(atom string) (map[string]interface{}, string) {
 	atom = strings.TrimSpace(atom)
 
-	// Skip macro references (no '=' or 'contains')
+	// Skip bare macro references (no operator present).
 	if !strings.Contains(atom, "=") && !strings.Contains(atom, " contains ") &&
-		!strings.Contains(atom, " in ") && !strings.Contains(atom, " startswith ") {
+		!strings.Contains(atom, " in ") && !strings.Contains(atom, " startswith ") &&
+		!strings.Contains(atom, " glob ") {
 		return nil, fmt.Sprintf("unsupported atom (macro reference or complex expr): %q", atom)
 	}
+
+	// --- Special-cased fields with non-generic semantics ---
 
 	// evt.type = execve / evt.type in (...)
 	if strings.HasPrefix(atom, "evt.type") {
 		return mapEvtType(atom)
 	}
 
-	// fd.name contains "..."
+	// fd.name contains/startswith — kept separate because fd.name uses a sub-string
+	// match rather than the generic equality/in-list pattern.
 	if strings.Contains(atom, "fd.name contains") {
 		val := extractQuoted(atom)
 		if val == "" {
@@ -278,8 +334,6 @@ func mapAtom(atom string) (map[string]interface{}, string) {
 		}
 		return map[string]interface{}{"field": "file_path", "op": "contains", "values": []string{val}}, ""
 	}
-
-	// fd.name startswith "..."
 	if strings.Contains(atom, "fd.name startswith") {
 		val := extractQuoted(atom)
 		if val == "" {
@@ -287,48 +341,126 @@ func mapAtom(atom string) (map[string]interface{}, string) {
 		}
 		return map[string]interface{}{"field": "file_path", "op": "prefix", "values": []string{val}}, ""
 	}
-
-	// proc.name = "..." or proc.name in (...)
-	if strings.HasPrefix(atom, "proc.name") {
-		return mapProcName(atom)
+	// fd.name equality — still a file path field
+	if strings.HasPrefix(atom, "fd.name") {
+		return mapGenericField(atom, "fd.name", "file_path")
 	}
 
-	// container.id != host
-	if strings.Contains(atom, "container.id") {
+	// container.id != host — idiomatic Falco "running inside a container" check
+	if strings.HasPrefix(atom, "container.id") {
 		if strings.Contains(atom, "!= host") || strings.Contains(atom, "!=host") {
 			return map[string]interface{}{"field": "in_container", "op": "eq", "values": []string{"true"}}, ""
 		}
-		return nil, fmt.Sprintf("unsupported container.id expression: %q", atom)
+		return nil, warnUnsupported(fmt.Sprintf("unsupported container.id expression: %q", atom))
 	}
 
-	// fd.sport / fd.dport
-	if strings.Contains(atom, "fd.sport") || strings.Contains(atom, "fd.dport") {
+	// container.privileged = true/false — boolean field
+	if strings.HasPrefix(atom, "container.privileged") {
+		val := "true"
+		if strings.Contains(atom, "= false") || strings.Contains(atom, "=false") {
+			val = "false"
+		}
+		return map[string]interface{}{"field": "container_privileged", "op": "eq", "values": []string{val}}, ""
+	}
+
+	// fd.sport / fd.dport — numeric port fields
+	if strings.HasPrefix(atom, "fd.sport") || strings.HasPrefix(atom, "fd.dport") {
 		return mapPort(atom)
 	}
 
-	// fd.sip / fd.dip
-	if strings.Contains(atom, "fd.sip") || strings.Contains(atom, "fd.dip") {
-		val := extractQuoted(atom)
-		if val == "" {
-			return nil, fmt.Sprintf("could not extract IP from: %q", atom)
-		}
-		return map[string]interface{}{"field": "remote_ip", "op": "in_cidr", "values": []string{val}}, ""
-	}
-
-	// user.name
-	if strings.Contains(atom, "user.name") {
+	// fd.sip / fd.dip / fd.net / fd.cnet / fd.snet — IP or CIDR fields
+	if strings.HasPrefix(atom, "fd.sip") || strings.HasPrefix(atom, "fd.dip") ||
+		strings.HasPrefix(atom, "fd.net") || strings.HasPrefix(atom, "fd.cnet") ||
+		strings.HasPrefix(atom, "fd.snet") {
 		val := extractQuoted(atom)
 		if val == "" {
 			vals := extractInList(atom)
 			if len(vals) == 0 {
-				return nil, fmt.Sprintf("could not extract user from: %q", atom)
+				return nil, warnUnsupported(fmt.Sprintf("could not extract IP/CIDR from: %q", atom))
 			}
-			return map[string]interface{}{"field": "username", "op": "in", "values": vals}, ""
+			return map[string]interface{}{"field": "remote_ip", "op": "in_cidr", "values": vals}, ""
 		}
-		return map[string]interface{}{"field": "username", "op": "eq", "values": []string{val}}, ""
+		return map[string]interface{}{"field": "remote_ip", "op": "in_cidr", "values": []string{val}}, ""
 	}
 
-	return nil, fmt.Sprintf("unsupported Falco filter expression: %q", atom)
+	// --- Generic field lookup via falcoFieldMappings ---
+	for _, m := range falcoFieldMappings {
+		if strings.HasPrefix(atom, m.falcoPrefix) {
+			return mapGenericField(atom, m.falcoPrefix, m.ebpfField)
+		}
+	}
+
+	return nil, warnUnsupported(fmt.Sprintf("unsupported Falco filter expression: %q", atom))
+}
+
+// warnUnsupported logs a WARN message and returns the reason string unchanged,
+// satisfying the requirement that unmapped fields emit a warning rather than
+// being silently dropped.
+func warnUnsupported(reason string) string {
+	log.Printf("WARN falco-import: %s", reason)
+	return reason
+}
+
+// mapGenericField handles the common equality / inequality / in-list / contains /
+// startswith patterns for a Falco field that maps directly to an ebpf-guard field.
+func mapGenericField(atom, falcoField, ebpfField string) (map[string]interface{}, string) {
+	// in / not in list
+	if strings.Contains(atom, " in ") {
+		vals := extractInList(atom)
+		if len(vals) == 0 {
+			return nil, fmt.Sprintf("could not extract list from: %q", atom)
+		}
+		op := "in"
+		if strings.Contains(atom, "not in") {
+			op = "not_in"
+		}
+		return map[string]interface{}{"field": ebpfField, "op": op, "values": vals}, ""
+	}
+	// contains
+	if strings.Contains(atom, " contains ") {
+		val := extractQuoted(atom)
+		if val == "" {
+			parts := strings.SplitN(atom, " contains ", 2)
+			if len(parts) == 2 {
+				val = strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+			}
+		}
+		if val == "" {
+			return nil, fmt.Sprintf("could not extract value from: %q", atom)
+		}
+		return map[string]interface{}{"field": ebpfField, "op": "contains", "values": []string{val}}, ""
+	}
+	// startswith
+	if strings.Contains(atom, " startswith ") {
+		val := extractQuoted(atom)
+		if val == "" {
+			parts := strings.SplitN(atom, " startswith ", 2)
+			if len(parts) == 2 {
+				val = strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+			}
+		}
+		if val == "" {
+			return nil, fmt.Sprintf("could not extract value from: %q", atom)
+		}
+		return map[string]interface{}{"field": ebpfField, "op": "prefix", "values": []string{val}}, ""
+	}
+	// equality / inequality (must come after "in" check because "!=" contains "=")
+	if strings.Contains(atom, "=") {
+		op := "eq"
+		eqIdx := strings.Index(atom, "=")
+		if eqIdx > 0 && atom[eqIdx-1] == '!' {
+			op = "neq"
+		}
+		val := extractQuoted(atom)
+		if val == "" {
+			val = strings.Trim(strings.TrimSpace(atom[eqIdx+1:]), `"'`)
+		}
+		if val == "" {
+			return nil, fmt.Sprintf("could not extract value from: %q", atom)
+		}
+		return map[string]interface{}{"field": ebpfField, "op": op, "values": []string{val}}, ""
+	}
+	return nil, fmt.Sprintf("unsupported expression for field %q: %q", falcoField, atom)
 }
 
 func mapEvtType(atom string) (map[string]interface{}, string) {
@@ -351,41 +483,6 @@ func mapEvtType(atom string) (map[string]interface{}, string) {
 		}
 	}
 	return nil, fmt.Sprintf("unsupported evt.type expression: %q", atom)
-}
-
-func mapProcName(atom string) (map[string]interface{}, string) {
-	// proc.name in (nginx, apache2)
-	if strings.Contains(atom, " in ") {
-		vals := extractInList(atom)
-		if len(vals) == 0 {
-			return nil, fmt.Sprintf("could not extract proc list from: %q", atom)
-		}
-		op := "in"
-		if strings.Contains(atom, "not in") {
-			op = "not_in"
-		}
-		return map[string]interface{}{"field": "comm", "op": op, "values": vals}, ""
-	}
-	// proc.name = "nginx"
-	if strings.Contains(atom, "=") {
-		val := extractQuoted(atom)
-		if val == "" {
-			// unquoted value
-			parts := strings.SplitN(atom, "=", 2)
-			if len(parts) == 2 {
-				val = strings.TrimSpace(parts[1])
-			}
-		}
-		if val == "" {
-			return nil, fmt.Sprintf("could not extract proc.name value from: %q", atom)
-		}
-		op := "eq"
-		if strings.Contains(atom, "!=") {
-			op = "neq"
-		}
-		return map[string]interface{}{"field": "comm", "op": op, "values": []string{val}}, ""
-	}
-	return nil, fmt.Sprintf("unsupported proc.name expression: %q", atom)
 }
 
 func mapPort(atom string) (map[string]interface{}, string) {

@@ -1,0 +1,43 @@
+# ebpf-guard v0.2.0 config snapshot — used by TestNoBreakingConfigChanges.
+# This is the current schema: profiler.ewma.weight and alerting.alertmanager.url.
+config_version: "v0.2.0"
+
+server:
+  bind_address: ":9090"
+  metrics_path: "/metrics"
+  health_path: "/health"
+
+bpf:
+  map_sizes:
+    events: 65536
+    processes: 16384
+    connections: 32768
+
+rules:
+  path: "/etc/ebpf-guard/rules.yaml"
+  hot_reload: true
+  rate_limit_alerts: true
+  rate_limit_window: 60
+  max_alerts_per_window: 10
+
+profiler:
+  enabled: true
+  learning_period: 3600
+  min_learning_samples: 100
+  anomaly_threshold: 0.8
+  ewma:
+    weight: 0.3
+  profile_ttl: 86400
+
+alerting:
+  enabled: false
+  alertmanager:
+    url: ""
+  generator_url: "http://ebpf-guard:9090"
+  batch_size: 100
+  batch_timeout: 5
+
+kubernetes:
+  enabled: false
+  kubeconfig_path: ""
+  resync_period: 300

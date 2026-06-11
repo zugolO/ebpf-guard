@@ -213,19 +213,116 @@ This is compatible with:
 
 ---
 
+---
+
+## Config schema migration
+
+ebpf-guard config files carry a `config_version` field. When upgrading to a
+new release, run the built-in migrator to update your config in-place:
+
+```bash
+# Preview changes (dry-run)
+ebpf-guard config migrate --config config/config.yaml --target v0.2.0 --dry-run
+
+# Apply migration
+ebpf-guard config migrate --config config/config.yaml --target v0.2.0 \
+  --output config/config.yaml
+```
+
+### Per-version migration notes
+
+#### v0.1 → v0.2.0
+
+| Old field | New field | Notes |
+|---|---|---|
+| `profiler.ewma_weight` | `profiler.ewma.weight` | EWMA settings moved under `profiler.ewma.*` |
+| `alerting.webhook_url` | `alerting.alertmanager.url` | Field removed; use the nested Alertmanager block |
+
+### Release checklist
+
+When shipping a new release that changes the config schema:
+
+1. Add a new `Migration` entry in `internal/config/migrations.go`
+2. Create a config snapshot at `tests/config_fixtures/v<new-version>.yaml`
+3. Update `fixtureVersions` in `internal/config/migrate_test.go`
+4. Verify `TestMigrationFromAllVersions` passes locally
+5. Update this document with per-version migration notes
+
+---
+
 ## Rule conversion reference
 
-| Falco condition | ebpf-guard condition |
+### Process fields
+
+| Falco condition | ebpf-guard field | Notes |
+|---|---|---|
+| `proc.name = "bash"` | `comm` | Process name |
+| `proc.name in (nginx, apache2)` | `comm` | In-list match |
+| `proc.pname = "sshd"` | `parent_comm` | Parent process name |
+| `proc.cmdline = "bash -c ..."` | `cmdline` | Full command line |
+| `proc.pcmdline = "sh -c ..."` | `parent_cmdline` | Parent command line |
+| `proc.args contains "--exploit"` | `args` | Command arguments |
+| `proc.exe = "/bin/sh"` | `exe_path` | Executable path |
+| `proc.exepath = "/usr/bin/python"` | `exe_path` | Alias for proc.exe |
+| `proc.env = "LD_PRELOAD=..."` | `env` | Process environment |
+| `proc.vpid = "1"` | `pid` | Virtual PID |
+| `proc.pvpid = "0"` | `ppid` | Parent virtual PID |
+| `proc.sid = "42"` | `session_id` | Session ID |
+| `proc.sname = "pts0"` | `session_name` | Session name |
+| `proc.tty = "1"` | `tty` | TTY number |
+| `proc.loginuid = "1000"` | `loginuid` | Login UID |
+
+### File / FD fields
+
+| Falco condition | ebpf-guard field | Notes |
+|---|---|---|
+| `fd.name contains "/etc/passwd"` | `file_path` | Substring match |
+| `fd.name startswith "/proc"` | `file_path` | Prefix match |
+| `fd.name = "/etc/shadow"` | `file_path` | Exact match |
+| `fd.directory = "/etc"` | `dir` | Directory part of path |
+| `fd.filename = "shadow"` | `filename` | Filename without directory |
+| `fd.typechar = "f"` | `fd_type` | FD type character |
+| `fd.type = "file"` | `fd_type` | FD type string |
+| `fd.proto = "tcp"` | `protocol` | Network protocol |
+| `fd.sport = 1234` | `dst_port` | Source port |
+| `fd.dport = 4444` | `dst_port` | Destination port |
+| `fd.sip = "10.0.0.0/8"` | `remote_ip` | Source IP / CIDR |
+| `fd.dip = "192.168.1.0/24"` | `remote_ip` | Destination IP / CIDR |
+| `fd.net = "172.16.0.0/12"` | `remote_ip` | Network CIDR |
+
+### User / group fields
+
+| Falco condition | ebpf-guard field |
 |---|---|
-| `evt.type = execve` | `field: syscall_name`, `op: eq`, `values: [execve]` |
-| `evt.type in (open, openat)` | `field: syscall_name`, `op: in`, `values: [open, openat]` |
-| `fd.name contains "/etc/passwd"` | `field: file_path`, `op: contains`, `values: [/etc/passwd]` |
-| `fd.name startswith "/proc"` | `field: file_path`, `op: prefix`, `values: [/proc]` |
-| `proc.name in (nginx, apache2)` | `field: comm`, `op: in`, `values: [nginx, apache2]` |
-| `proc.name = "bash"` | `field: comm`, `op: eq`, `values: [bash]` |
-| `container.id != host` | `field: in_container`, `op: eq`, `values: ["true"]` |
-| `fd.dport = 4444` | `field: dst_port`, `op: eq`, `values: ["4444"]` |
-| `fd.sip in (192.168.1.0/24)` | `field: remote_ip`, `op: in_cidr`, `values: [192.168.1.0/24]` |
+| `user.name = "root"` | `username` |
+| `user.uid = "0"` | `uid` |
+| `user.gid = "0"` | `gid` |
+| `user.loginuid = "1000"` | `loginuid` |
+| `user.loginname = "admin"` | `loginname` |
+| `group.name = "docker"` | `group_name` |
+| `group.gid = "999"` | `group_gid` |
+
+### Container / Kubernetes fields
+
+| Falco condition | ebpf-guard field |
+|---|---|
+| `container.id != host` | `in_container` (special: `op: eq, values: [true]`) |
+| `container.name = "nginx"` | `container_name` |
+| `container.image = "alpine"` | `container_image` |
+| `container.image.id = "sha256:..."` | `container_image_id` |
+| `container.privileged = true` | `container_privileged` |
+| `k8s.pod.name = "my-pod"` | `pod_name` |
+| `k8s.ns.name = "production"` | `namespace` |
+
+### Syscall / event fields
+
+| Falco condition | ebpf-guard field |
+|---|---|
+| `evt.type = execve` | `syscall_name` |
+| `evt.type in (open, openat)` | `syscall_name` |
+| `syscall.type = open` | `syscall_name` |
+| `evt.dir = ">"` | `evt_dir` |
+| `evt.num = "42"` | `evt_num` |
 
 ### Priority → Severity mapping
 

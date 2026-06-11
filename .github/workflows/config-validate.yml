@@ -33,5 +33,8 @@ jobs:
       - name: Validate config/config.yaml
         run: /tmp/ebpf-guard config validate --config config/config.yaml
 
+      - name: Test config migrations
+        run: go test -v -run "TestMigration|TestNoBreaking" ./internal/config/...
+
       - name: Lint Helm chart
         run: make helm-lint

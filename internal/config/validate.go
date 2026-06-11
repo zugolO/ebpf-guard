@@ -100,6 +100,9 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Collectors.DNS.DGAThreshold < 0 {
 		add(fmt.Errorf("collectors.dns.dga_threshold: must be >= 0, got %.2f", cfg.Collectors.DNS.DGAThreshold))
 	}
+	if s := cfg.Collectors.StartupPolicy; s != "" {
+		add(validateOneOf("collectors.startup_policy", s, []string{"fail-open", "fail-closed"}))
+	}
 
 	// ── Notifications ────────────────────────────────────────────────────────
 	if cfg.Notifications.Slack.Enabled {

@@ -189,6 +189,29 @@ prometheusRule:
           annotations:
             summary: "ebpf-guard rule reload failures detected on {{ $labels.node }}"
             description: "One or more rule hot-reload attempts have failed in the last 5 minutes on {{ $labels.node }}."
+        # Issue #102: memory pressure profiler degradation alerts
+        - alert: EbpfGuardMemoryPressure
+          expr: ebpf_guard_memory_pressure_level > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard profiler degraded due to memory pressure on {{ $labels.node }}"
+            description: >-
+              ebpf-guard memory pressure level is {{ $value }} on {{ $labels.node }}
+              (1=sequence_profiling_disabled, 2=all_profiling_disabled).
+              Free memory has fallen below the configured threshold.
+        # Issue #103: collector failure alerts
+        - alert: EbpfGuardCollectorDown
+          expr: ebpf_guard_collector_up == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ebpf-guard collector {{ $labels.collector }} is down on {{ $labels.node }}"
+            description: >-
+              The ebpf-guard collector '{{ $labels.collector }}' on {{ $labels.node }} has failed.
+              The agent is running with reduced event coverage. Check logs for the root cause.
 
 # VerticalPodAutoscaler
 vpa:

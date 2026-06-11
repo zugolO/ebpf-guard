@@ -488,3 +488,75 @@ The host directory is created as `DirectoryOrCreate`. Configure your log shipper
 ### Retention
 
 The audit log is rotated (renamed to `<path>.1`) when it reaches `max_size_mb`. Only one rotation backup is kept. For longer retention, configure your log shipper to forward entries to a central store before the `.1` file is overwritten, or mount a larger host path and increase `max_size_mb`.
+
+## Memory Pressure Auto-Tuning
+
+ebpf-guard monitors `/proc/meminfo` and automatically downgrades profiling when free RAM falls below configurable thresholds. There are three pressure levels:
+
+| Level | Value | Condition | Effect |
+|---|---|---|---|
+| Normal | 0 | free RAM ≥ `disable_sequence_threshold` | All profiling active |
+| Sequence disabled | 1 | free RAM < `disable_sequence_threshold` | Sequence profiler paused; EWMA anomaly detection still active |
+| All disabled | 2 | free RAM < `disable_all_threshold` | All profiling paused; BPF sampling reduced to 10% |
+
+Profiling is restored when free RAM recovers above `recovery_threshold`.
+
+### Configuration
+
+```yaml
+watchdog:
+  memory_pressure:
+    enabled: true
+    check_interval: 5           # seconds between /proc/meminfo reads
+    disable_sequence_threshold: 10.0  # % free RAM: disable sequence profiler (level 1)
+    disable_all_threshold: 5.0        # % free RAM: disable all profiling (level 2)
+    recovery_threshold: 20.0          # % free RAM: restore full profiling
+```
+
+`disable_sequence_threshold` defaults to the legacy `low_memory_threshold` value (10%) if unset.
+
+### Observability
+
+The `ebpf_guard_memory_pressure_level` Prometheus gauge tracks the current pressure state:
+
+```promql
+ebpf_guard_memory_pressure_level
+```
+
+A PrometheusRule alert `EbpfGuardMemoryPressure` fires when `ebpf_guard_memory_pressure_level > 0` for more than 5 minutes (see `deploy/helm/ebpf-guard/values.yaml`).
+
+A `WARN` log entry is emitted on every level transition (both degradation and recovery).
+
+## Collector Startup Policy
+
+By default ebpf-guard continues running even if a collector fails to start, logging an error and operating with reduced event coverage (fail-open). For mission-critical deployments use `fail-closed` to ensure the agent exits rather than silently losing coverage.
+
+### Configuration
+
+```yaml
+collectors:
+  startup_policy: "fail-open"   # fail-open (default) | fail-closed
+  required:                     # MUST start when startup_policy=fail-closed
+    - syscall
+    - network
+  optional:                     # graceful degradation always allowed
+    - tls
+    - dns
+    - lsm
+```
+
+When `startup_policy: fail-closed`, if any collector listed under `required` returns an error before the shutdown context is cancelled, the agent calls `cancel()` and triggers a graceful shutdown, exiting with a non-zero code.
+
+### Readiness Probe
+
+`GET /health/ready` returns `503` if any **required** collector is unhealthy. Optional collectors may fail without affecting readiness. When no `required` list is configured, all registered collectors are treated as required (previous behaviour).
+
+### Observability
+
+`ebpf_guard_collector_up{collector="<name>"}` is `1` when the collector is running and `0` after it fails:
+
+```promql
+ebpf_guard_collector_up
+```
+
+A PrometheusRule alert `EbpfGuardCollectorDown` fires when any collector gauge is `0` for more than 1 minute (see `deploy/helm/ebpf-guard/values.yaml`).

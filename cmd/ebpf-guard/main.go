@@ -271,6 +271,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		p := profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
 		engineCfg.LineageTracker = p.GetLineageTracker()
+
+		if cfg.Watchdog.MemoryPressure.Enabled {
+			memCfg := watchdog.MemoryConfig{
+				Enabled:                  true,
+				CheckInterval:            time.Duration(cfg.Watchdog.MemoryPressure.CheckInterval) * time.Second,
+				LowMemoryThreshold:       cfg.Watchdog.MemoryPressure.LowMemoryThreshold,
+				RecoveryThreshold:        cfg.Watchdog.MemoryPressure.RecoveryThreshold,
+				DisableSequenceThreshold: cfg.Watchdog.MemoryPressure.DisableSequenceThreshold,
+				DisableAllThreshold:      cfg.Watchdog.MemoryPressure.DisableAllThreshold,
+			}
+			seqProfilers := []watchdog.ControllableProfiler{p.GetSequenceProfiler()}
+			memWatcher := watchdog.NewMemoryPressureWatcherWithSequence(
+				memCfg, slog.Default(), seqProfilers, nil, nil,
+			)
+			if err := memWatcher.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+				slog.Warn("memory pressure: failed to register metrics", slog.Any("error", err))
+			}
+			go memWatcher.Start(ctx)
+		}
 	}
 
 	// Feature F: cross-node alert correlation via gossip amplification.
@@ -558,14 +577,50 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.String("subscription", cfg.Collectors.GCPAudit.PubSubSubscription))
 	}
 
+	// Build the required-collector set from config and tell the HTTP server.
+	requiredSet := make(map[string]bool, len(cfg.Collectors.Required))
+	for _, name := range cfg.Collectors.Required {
+		requiredSet[name] = true
+	}
+	if len(cfg.Collectors.Required) > 0 {
+		srv.SetRequiredCollectors(cfg.Collectors.Required)
+	}
+
+	// startupErrCh carries the first error from each collector that exits before
+	// the context is cancelled — used for fail-closed detection.
+	startupErrCh := make(chan struct {
+		name string
+		err  error
+	}, len(collectors))
+
 	for _, c := range collectors {
+		exporter.SetCollectorUp(c.Name(), true)
 		srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: true})
 		go func(c collector.Collector) {
 			if err := c.Start(ctx, eventCh); err != nil && ctx.Err() == nil {
 				slog.Error("collector error", slog.String("name", c.Name()), slog.Any("error", err))
+				exporter.SetCollectorUp(c.Name(), false)
 				srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false, Error: err.Error()})
+				startupErrCh <- struct {
+					name string
+					err  error
+				}{c.Name(), err}
 			}
 		}(c)
+	}
+
+	// fail-closed: if a required collector fails before the context is done, abort.
+	if cfg.Collectors.StartupPolicy == "fail-closed" && len(requiredSet) > 0 {
+		go func() {
+			for se := range startupErrCh {
+				if requiredSet[se.name] {
+					slog.Error("fail-closed: required collector failed, aborting",
+						slog.String("collector", se.name),
+						slog.Any("error", se.err))
+					cancel()
+				}
+			}
+		}()
 	}
 
 	if cfg.Rules.HotReload {

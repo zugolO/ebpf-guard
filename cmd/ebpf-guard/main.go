@@ -166,6 +166,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Info("rules loaded", slog.Int("count", len(rules)))
 	}
 
+	// Audit log for rule changes and config hot-reloads.
+	var rulesAuditLog *audit.RulesLogger
+	if cfg.Audit.Enabled {
+		rl, rlErr := audit.NewRulesLogger(cfg.Audit.Path, cfg.Audit.MaxSizeMB, cfg.Audit.IncludeRuleDiffs)
+		if rlErr != nil {
+			slog.Warn("audit log: failed to open, rule-change auditing disabled",
+				slog.String("path", cfg.Audit.Path),
+				slog.Any("error", rlErr))
+		} else {
+			rulesAuditLog = rl
+			defer rulesAuditLog.Close()
+			ruleIDs := ruleIDsFrom(rules)
+			if logErr := rulesAuditLog.LogRulesLoaded(cfg.Rules.Path, ruleIDs); logErr != nil {
+				slog.Warn("audit log: failed to write rules_loaded entry", slog.Any("error", logErr))
+			}
+		}
+	}
+
 	// Feature D: canary trap / honeypot detection.
 	if cfg.Canary.Enabled {
 		cm := canary.New(canary.Config{
@@ -538,7 +556,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if cfg.Rules.HotReload {
 		cfgManager.OnChange(func(newCfg *config.Config) {
-			oldCount := len(engine.GetRules())
+			oldRules := engine.GetRules()
+			oldCount := len(oldRules)
 
 			// Phase 1: parse and fully validate in isolation — no swap yet.
 			t0 := time.Now()
@@ -564,6 +583,20 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Info("hot-reload applied",
 				slog.Int("rules_count", len(newRules)),
 				slog.Int("old_count", oldCount))
+
+			if rulesAuditLog != nil {
+				if logErr := rulesAuditLog.LogRulesReloaded(
+					"fsnotify",
+					newCfg.Rules.Path,
+					ruleIDsFrom(oldRules),
+					ruleIDsFrom(newRules),
+				); logErr != nil {
+					slog.Warn("audit log: failed to write rules_reloaded entry", slog.Any("error", logErr))
+				}
+				if logErr := rulesAuditLog.LogConfigReloaded(newCfg.Rules.Path); logErr != nil {
+					slog.Warn("audit log: failed to write config_reloaded entry", slog.Any("error", logErr))
+				}
+			}
 		})
 		if err := cfgManager.Watch(); err != nil {
 			slog.Warn("hot-reload watch failed", slog.Any("error", err))
@@ -1654,4 +1687,13 @@ func runDashboard(cfgPath string, dryRun bool) error {
 	}()
 
 	return tui.Run(ctx, feed)
+}
+
+// ruleIDsFrom extracts the ID field from each rule.
+func ruleIDsFrom(rules []correlator.Rule) []string {
+	ids := make([]string, len(rules))
+	for i, r := range rules {
+		ids[i] = r.ID
+	}
+	return ids
 }

@@ -82,6 +82,9 @@ type Config struct {
 
 	// Canary configuration — honeypot file detection (feature D).
 	Canary CanaryConfig `mapstructure:"canary"`
+
+	// Audit configuration — append-only JSONL audit log for rule and config changes.
+	Audit AuditConfig `mapstructure:"audit"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -841,6 +844,22 @@ type CanaryConfig struct {
 	AlertSeverity string `mapstructure:"alert_severity"`
 }
 
+// AuditConfig holds settings for the rule-change and config-reload audit log.
+type AuditConfig struct {
+	// Enabled activates the audit log.
+	Enabled bool `mapstructure:"enabled"`
+	// Path is the file path for the append-only JSONL audit log.
+	// Default: /var/log/ebpf-guard/audit.jsonl
+	Path string `mapstructure:"path"`
+	// MaxSizeMB is the maximum log file size in MB before rotation.
+	// Default: 100
+	MaxSizeMB int `mapstructure:"max_size_mb"`
+	// IncludeRuleDiffs enables logging the full old_rule_ids / new_rule_ids lists
+	// in addition to counts. Disable for very large rule sets to reduce log volume.
+	// Default: true
+	IncludeRuleDiffs bool `mapstructure:"include_rule_diffs"`
+}
+
 // CheckConfigPermissions verifies the config file is not world-writable and is
 // owned by root (uid 0) or the current process UID. Returns an error if the
 // check fails; callers should treat this as a fatal startup error.
@@ -1111,6 +1130,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("canary.auto_create", true)
 	v.SetDefault("canary.files", []string{})
 	v.SetDefault("canary.alert_severity", "critical")
+
+	// Audit log defaults — disabled by default; operators opt in.
+	v.SetDefault("audit.enabled", false)
+	v.SetDefault("audit.path", "/var/log/ebpf-guard/audit.jsonl")
+	v.SetDefault("audit.max_size_mb", 100)
+	v.SetDefault("audit.include_rule_diffs", true)
 }
 
 // Get returns the current configuration (thread-safe).

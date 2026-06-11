@@ -398,3 +398,67 @@ returning plaintext values for legacy rows (a `DEBUG` log entry is emitted per r
 
 To fully migrate legacy data, follow the key rotation procedure above treating the
 "old key" as absent (step 4 reads plaintext, writes encrypted).
+
+## Audit Log
+
+ebpf-guard writes an **append-only JSONL audit log** for every rule-set change and config hot-reload. This provides a tamper-evident record for forensic investigations ("were the detection rules modified before the incident?") and compliance audits.
+
+### Events Logged
+
+| `event` value      | When emitted |
+|--------------------|--------------|
+| `rules_loaded`     | Agent startup — initial rule-file load |
+| `rules_reloaded`   | Hot-reload triggered by fsnotify (rule file changed on disk) |
+| `config_reloaded`  | Config file changed and hot-reloaded |
+
+### Log Format
+
+Each line is a JSON object:
+
+```json
+{
+  "timestamp":      "2026-06-09T12:34:56Z",
+  "event":          "rules_reloaded",
+  "source":         "fsnotify",
+  "rules_file":     "/etc/ebpf-guard/rules/owasp-web.yaml",
+  "rules_added":    3,
+  "rules_removed":  1,
+  "rules_modified": 2,
+  "old_rule_ids":   ["rule_042", "rule_043"],
+  "new_rule_ids":   ["rule_042", "rule_043", "rule_044", "rule_045"],
+  "checksum_before": "sha256:abc...",
+  "checksum_after":  "sha256:def..."
+}
+```
+
+`old_rule_ids` and `new_rule_ids` are omitted when `include_rule_diffs: false`.
+
+### Configuration
+
+```yaml
+audit:
+  enabled: true
+  path: "/var/log/ebpf-guard/audit.jsonl"
+  max_size_mb: 100          # rotate to audit.jsonl.1 at this size
+  include_rule_diffs: true  # log full rule-ID lists in addition to counts
+```
+
+### Kubernetes / Helm
+
+Enable the audit log by setting `auditLog.enabled: true` in your Helm values. The chart will:
+
+1. Mount a `hostPath` volume at `auditLog.hostDir` (default: `/var/log/ebpf-guard`) on each node.
+2. Inject `audit.enabled: true` and `audit.path: <hostDir>/audit.jsonl` into the agent ConfigMap.
+
+```yaml
+# values.yaml
+auditLog:
+  enabled: true
+  hostDir: /var/log/ebpf-guard
+```
+
+The host directory is created as `DirectoryOrCreate`. Configure your log shipper (Fluentd, Vector, Filebeat) to tail `*.jsonl` files from that directory for SIEM ingestion.
+
+### Retention
+
+The audit log is rotated (renamed to `<path>.1`) when it reaches `max_size_mb`. Only one rotation backup is kept. For longer retention, configure your log shipper to forward entries to a central store before the `.1` file is overwritten, or mount a larger host path and increase `max_size_mb`.

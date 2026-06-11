@@ -166,6 +166,10 @@ spec:
             - name: profiler-state
               mountPath: {{ .Values.profilerStatePersistence.hostPath }}
             {{- end }}
+            {{- if .Values.auditLog.enabled }}
+            - name: audit-log
+              mountPath: {{ .Values.auditLog.hostDir }}
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -210,6 +214,12 @@ spec:
         - name: profiler-state
           hostPath:
             path: {{ .Values.profilerStatePersistence.hostPath }}
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if .Values.auditLog.enabled }}
+        - name: audit-log
+          hostPath:
+            path: {{ .Values.auditLog.hostDir }}
             type: DirectoryOrCreate
         {{- end }}
         {{- with .Values.extraVolumes }}

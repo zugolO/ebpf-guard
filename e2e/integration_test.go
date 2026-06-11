@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"testing"
 	"time"
 
@@ -28,9 +27,8 @@ type IntegrationTestSuite struct {
 
 // SetupSuite initializes the test environment.
 func (s *IntegrationTestSuite) SetupSuite() {
-	// Skip if not running in CI or explicitly enabled
-	if os.Getenv("RUN_E2E_TESTS") != "1" {
-		s.T().Skip("Skipping e2e tests. Set RUN_E2E_TESTS=1 to enable.")
+	if testing.Short() {
+		s.T().Skip("skipping integration tests in -short mode")
 	}
 
 	s.ctx, s.cancel = context.WithTimeout(context.Background(), 10*time.Minute)

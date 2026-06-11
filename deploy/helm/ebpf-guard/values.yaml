@@ -105,6 +105,16 @@ profilerStatePersistence:
   # The file name is "profiler-state.json" within this directory.
   hostPath: /var/lib/ebpf-guard
 
+# Audit log for rule changes and config hot-reloads.
+# When enabled the container mounts hostDir on the node so audit JSONL files
+# are written to the host filesystem and can be ingested by log shippers (e.g.
+# Fluentd, Vector, Filebeat) into a SIEM.
+auditLog:
+  # enabled mounts the host directory and passes the audit.path config to the agent.
+  enabled: false
+  # hostDir is the directory on the node where audit JSONL files are stored.
+  hostDir: /var/log/ebpf-guard
+
 # BTF init container — pre-fetches the BTF file for kernels without
 # /sys/kernel/btf/vmlinux (Ubuntu 18.04, Amazon Linux 2, RHEL 8.x, etc.).
 # When enabled an initContainer downloads the matching BTF file from the

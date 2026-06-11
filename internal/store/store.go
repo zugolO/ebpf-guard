@@ -126,6 +126,16 @@ type SQLiteConfig struct {
 	// BackupInterval controls how often backups are created.
 	// Defaults to 1h when BackupEnabled is true.
 	BackupInterval time.Duration
+	// EncryptionEnabled enables AES-256-GCM column-level encryption for
+	// sensitive alert fields (message, details, labels).
+	EncryptionEnabled bool
+	// EncryptionKeyEnv is the name of the environment variable holding the
+	// hex- or base64-encoded 32-byte AES-256 key. Takes precedence over
+	// EncryptionKeyFile when both are set.
+	EncryptionKeyEnv string
+	// EncryptionKeyFile is the path to a file containing the hex- or
+	// base64-encoded 32-byte AES-256 key (e.g. a Kubernetes secret mount).
+	EncryptionKeyFile string
 }
 
 // OpenSearchConfig defines OpenSearch-specific configuration.

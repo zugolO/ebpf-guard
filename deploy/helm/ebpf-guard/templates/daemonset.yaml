@@ -126,9 +126,18 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.extraEnv }}
+          {{- if or .Values.extraEnv .Values.config.store.sqlite.encryption.keySecretRef }}
           env:
+            {{- with .Values.config.store.sqlite.encryption.keySecretRef }}
+            - name: EBPF_GUARD_DB_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           volumeMounts:
             - name: bpf-fs

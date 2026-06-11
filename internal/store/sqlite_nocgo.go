@@ -39,6 +39,9 @@ func (s *SQLiteStore) Delete(ctx context.Context, olderThan time.Duration) (int6
 // Close is a stub method.
 func (s *SQLiteStore) Close() error { return nil }
 
+// Flush is a stub method.
+func (s *SQLiteStore) Flush(ctx context.Context) error { return ErrNoCGO }
+
 // Healthy is a stub method.
 func (s *SQLiteStore) Healthy(ctx context.Context) bool { return false }
 

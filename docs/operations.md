@@ -278,3 +278,123 @@ The store opens with `_journal_mode=WAL` and `_synchronous=NORMAL`. This configu
 - Is **not** safe against power loss on hardware without battery-backed write cache.
 
 For power-loss safety at the cost of higher write latency, set `synchronous=FULL` in the SQLite pragma configuration.
+
+---
+
+## Encryption at Rest (SQLite)
+
+ebpf-guard supports AES-256-GCM column-level encryption for sensitive alert fields
+(`message`, `details`, `labels`). Indexable metadata (`severity`, `timestamp`,
+`rule_id`, `pid`, `namespace`) is stored in plaintext so queries remain efficient.
+
+### Enabling Encryption
+
+Add the following to your `config.yaml`:
+
+```yaml
+store:
+  backend: sqlite
+  sqlite:
+    path: /var/lib/ebpf-guard/events.db
+    encryption:
+      enabled: true
+      key_env: "EBPF_GUARD_DB_KEY"   # or key_file: /run/secrets/db-key
+```
+
+The key must be a **64-character hex string** (or a base64 string that decodes to
+exactly 32 bytes):
+
+```bash
+# Generate a new key (requires openssl)
+openssl rand -hex 32
+# Example output: a3f1c2...  (64 hex chars)
+```
+
+**Never hard-code the key in config files.** Use one of:
+- `key_env` — an environment variable set outside the config (systemd unit, pod spec)
+- `key_file` — a file readable only by the agent user (e.g. a Kubernetes Secret mount)
+
+### Kubernetes Secret (Helm)
+
+Create a Secret and reference it via `keySecretRef` in `values.yaml`:
+
+```bash
+kubectl create secret generic ebpf-guard-db-key \
+  --namespace ebpf-guard \
+  --from-literal=encryption-key=$(openssl rand -hex 32)
+```
+
+```yaml
+# values.yaml
+config:
+  store:
+    sqlite:
+      encryption:
+        enabled: true
+        key_env: EBPF_GUARD_DB_KEY
+        keySecretRef:
+          name: ebpf-guard-db-key
+          key: encryption-key
+```
+
+The Helm chart injects the secret value as the `EBPF_GUARD_DB_KEY` environment variable
+in each DaemonSet pod automatically.
+
+### Startup Behaviour
+
+| Configuration | Startup log |
+|---|---|
+| Encryption enabled, key loaded | `INFO sqlite: column-level AES-256-GCM encryption enabled` |
+| Encryption **disabled** | `WARN sqlite: encryption at rest is disabled — alert data … stored in plaintext` |
+| Key misconfigured | Fatal error — agent exits rather than starting with broken encryption |
+
+### Key Rotation Procedure
+
+Rotating the encryption key requires a full re-encryption of the database because
+AES-GCM is not key-agnostic. Perform rotation during a maintenance window:
+
+1. **Provision the new key** in your secret manager / Kubernetes Secret but do **not**
+   yet update the agent configuration.
+
+2. **Take a plaintext backup** while the old key is still active:
+   ```bash
+   # On the node
+   sqlite3 /var/lib/ebpf-guard/events.db "VACUUM INTO '/tmp/alerts-plaintext.db'"
+   ```
+
+3. **Stop the agent** to prevent writes during migration:
+   ```bash
+   kubectl delete pod -n ebpf-guard -l app.kubernetes.io/name=ebpf-guard \
+     --field-selector spec.nodeName=<node>
+   ```
+
+4. **Re-encrypt the backup** with the new key using the provided migration script:
+   ```bash
+   EBPF_GUARD_OLD_KEY=<old-hex-key> \
+   EBPF_GUARD_NEW_KEY=<new-hex-key> \
+   ebpf-guard store reencrypt \
+     --input  /tmp/alerts-plaintext.db \
+     --output /var/lib/ebpf-guard/events.db
+   ```
+   > **Note:** The `store reencrypt` subcommand is planned for v1.1. Until then,
+   > delete and recreate the database — historical alerts will be lost — or use
+   > SQLite's `.dump` / `.read` with a manual re-insertion script.
+
+5. **Update the secret** so the new key is active and **restart the agent**.
+
+6. **Verify** a sample alert is readable:
+   ```bash
+   curl -H "Authorization: Bearer <token>" \
+     http://<node-ip>:9090/alerts?limit=1 | jq .
+   ```
+
+7. **Revoke / delete the old key** from your secret manager.
+
+### Migration: Plaintext → Encrypted
+
+Rows written before encryption was enabled are stored in plaintext. When the agent
+starts with encryption enabled it will decrypt new rows normally and fall back to
+returning plaintext values for legacy rows (a `DEBUG` log entry is emitted per row).
+
+To fully migrate legacy data, follow the key rotation procedure above treating the
+"old key" as absent (step 4 reads plaintext, writes encrypted).

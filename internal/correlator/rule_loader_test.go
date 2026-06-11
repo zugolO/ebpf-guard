@@ -601,6 +601,66 @@ func TestEvaluateConditionEmptyLegitValue(t *testing.T) {
 	assert.Len(t, alerts, 1, "rule for dport==0 must match event with Dport=0")
 }
 
+// TestValidateFull_DuplicateIDs verifies that ValidateFull rejects a rule set
+// containing duplicate rule IDs and accepts one with all unique IDs.
+func TestValidateFull_DuplicateIDs(t *testing.T) {
+	base := Rule{
+		Name:      "Test Rule",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"80"}},
+		Severity:  "warning",
+		Action:    ActionAlert,
+	}
+
+	makeRule := func(id string) Rule {
+		r := base
+		r.ID = id
+		return r
+	}
+
+	t.Run("unique IDs pass", func(t *testing.T) {
+		rules := []Rule{makeRule("rule_a"), makeRule("rule_b"), makeRule("rule_c")}
+		require.NoError(t, ValidateFull(rules))
+	})
+
+	t.Run("duplicate ID rejected", func(t *testing.T) {
+		rules := []Rule{makeRule("rule_dup"), makeRule("rule_ok"), makeRule("rule_dup")}
+		err := ValidateFull(rules)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate rule ID")
+		assert.Contains(t, err.Error(), "rule_dup")
+	})
+
+	t.Run("multiple duplicates reported in one error", func(t *testing.T) {
+		rules := []Rule{
+			makeRule("rule_x"), makeRule("rule_y"),
+			makeRule("rule_x"), makeRule("rule_y"),
+		}
+		err := ValidateFull(rules)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rule_x")
+		assert.Contains(t, err.Error(), "rule_y")
+	})
+
+	t.Run("empty set passes", func(t *testing.T) {
+		require.NoError(t, ValidateFull(nil))
+	})
+}
+
+// TestValidateFull_IndividualRuleErrors verifies that ValidateFull reports
+// per-rule validation errors (e.g. invalid operator) in addition to set-level checks.
+func TestValidateFull_IndividualRuleErrors(t *testing.T) {
+	rules := []Rule{
+		{
+			ID: "bad_op", Name: "Bad Op", EventType: types.EventTCPConnect,
+			Condition: RuleCondition{Field: "dport", Op: "bogus_op", Values: []string{"80"}},
+		},
+	}
+	err := ValidateFull(rules)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad_op")
+}
+
 // filterRulesByTag is a helper function to filter rules by a specific tag.
 func filterRulesByTag(rules []Rule, tag string) []Rule {
 	if tag == "" {

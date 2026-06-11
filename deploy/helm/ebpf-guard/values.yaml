@@ -225,6 +225,32 @@ prometheusRule:
               ({{ $value | humanizePercentage }}). Events may be dropped. Consider increasing
               bpf.event_queue_depth or bpf.max_concurrent_events, or investigate a burst
               source generating excessive events.
+        # Issue #113: Kubernetes enricher health alerts
+        - alert: EbpfGuardK8sEnricherStale
+          expr: time() - ebpf_guard_k8s_enricher_last_sync_timestamp_seconds > 600
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard K8s enricher has not synced for >10 minutes on {{ $labels.node }}"
+            description: >-
+              The Kubernetes pod watcher on {{ $labels.node }} has not received any data
+              from the API server for more than 10 minutes. Pod metadata enrichment may be
+              stale, causing detection rules that match on namespace/labels to use outdated
+              data. Check API server connectivity and watch permissions.
+        - alert: EbpfGuardK8sEnricherHighMissRate
+          expr: rate(ebpf_guard_k8s_enricher_miss_total[5m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard K8s enricher miss rate is high on {{ $labels.node }}"
+            description: >-
+              The Kubernetes enricher on {{ $labels.node }} is failing to find pod metadata
+              for more than 10 events/second over the last 5 minutes. This usually means
+              processes are running outside containers, the pod watcher cache is lagging, or
+              container IDs cannot be extracted from cgroups. Alerts from these events will
+              lack namespace/label enrichment.
 
 # VerticalPodAutoscaler
 vpa:

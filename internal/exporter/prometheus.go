@@ -252,3 +252,43 @@ var (
 func RecordGPUEvent(op string) {
 	GPUEventsTotal.WithLabelValues(op).Inc()
 }
+
+// ── Kubernetes enricher metrics ───────────────────────────────────────────────
+
+var (
+	// K8sEnricherCachePods tracks the number of unique pods in the watcher cache.
+	K8sEnricherCachePods = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_k8s_enricher_cache_pods",
+			Help: "Number of unique pods currently tracked in the Kubernetes enricher cache",
+		},
+		[]string{"node"},
+	)
+
+	// K8sEnricherCacheStaleness tracks seconds elapsed since the last watcher sync.
+	K8sEnricherCacheStaleness = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_k8s_enricher_cache_staleness_seconds",
+			Help: "Seconds elapsed since the Kubernetes enricher last received data from the API server",
+		},
+		[]string{"node"},
+	)
+
+	// K8sEnricherLastSync records the Unix timestamp of the last successful watcher sync.
+	K8sEnricherLastSync = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_k8s_enricher_last_sync_timestamp_seconds",
+			Help: "Unix timestamp of the last successful Kubernetes enricher sync",
+		},
+		[]string{"node"},
+	)
+
+	// K8sEnricherMissTotal counts enrichment lookups that found no matching pod.
+	K8sEnricherMissTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_k8s_enricher_miss_total",
+			Help: "Total number of event enrichment lookups that found no matching pod in the cache",
+		},
+		[]string{"node"},
+	)
+)

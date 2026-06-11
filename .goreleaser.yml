@@ -1,0 +1,114 @@
+version: 2
+
+project_name: ebpf-guard
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ebpf-guard
+    main: ./cmd/ebpf-guard
+    binary: ebpf-guard
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - config/config.yaml
+      - rules/*.yaml
+
+checksum:
+  name_template: "checksums.txt"
+
+signs:
+  - artifacts: checksum
+    args:
+      - --batch
+      - --local-user
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - --output
+      - "${signature}"
+      - --detach-sign
+      - "${artifact}"
+
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.spdx.sbom"
+    args: ["$artifact", "--file", "$document", "--output", "spdx-json"]
+
+changelog:
+  use: github
+  sort: asc
+  abbrev: 0
+  groups:
+    - title: "Breaking Changes"
+      regexp: '^.*?(breaking|Breaking).*$'
+      order: 0
+    - title: "Security Fixes"
+      regexp: '^.*(security|fix.*CVE|CVE-).*$'
+      order: 1
+    - title: "New Features"
+      regexp: '^feat(\(.+\))?\!?:'
+      order: 2
+    - title: "Performance"
+      regexp: '^perf(\(.+\))?\!?:'
+      order: 3
+    - title: "Bug Fixes"
+      regexp: '^fix(\(.+\))?\!?:'
+      order: 4
+    - title: "CI / Ops"
+      regexp: '^(ci|ops|build)(\(.+\))?\!?:'
+      order: 5
+    - title: "Other"
+      order: 999
+  filters:
+    exclude:
+      - "^Merge pull request"
+      - "^Merge branch"
+      - "^chore"
+
+release:
+  github:
+    owner: zugolO
+    name: ebpf-guard
+  name_template: "v{{.Version}}"
+  header: |
+    ## ebpf-guard v{{.Version}}
+
+    See [CHANGELOG.md](https://github.com/zugolO/ebpf-guard/blob/main/CHANGELOG.md) for the full version history.
+
+    **Install:**
+    ```bash
+    curl -sSfL https://github.com/zugolO/ebpf-guard/releases/download/v{{.Version}}/ebpf-guard_{{.Version}}_linux_amd64.tar.gz | tar -xz
+    sudo mv ebpf-guard /usr/local/bin/
+    ```
+  footer: |
+    **Full Changelog**: https://github.com/zugolO/ebpf-guard/compare/{{.PreviousTag}}...v{{.Version}}
+
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    output: true
+    args:
+      - "sign"
+      - "${artifact}"
+      - "--yes"

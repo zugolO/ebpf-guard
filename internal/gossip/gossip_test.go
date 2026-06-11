@@ -2,7 +2,15 @@ package gossip
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -608,4 +616,230 @@ func TestManager_PushLoop(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.NotEmpty(t, received, "push loop should have sent IOCs to peer")
+}
+
+// ---------------------------------------------------------------------------
+// Secret rotation window tests (issue #116)
+// ---------------------------------------------------------------------------
+
+// TestHTTP_RotationWindow_AcceptsBothSecrets verifies that during a rotation
+// window both the new secret and the previous secret are accepted.
+func TestHTTP_RotationWindow_AcceptsBothSecrets(t *testing.T) {
+	cfg := Config{
+		Enabled:           true,
+		NodeName:          "node-rotate",
+		Secret:            "new-secret",
+		SecretPrevious:    "old-secret",
+		SecretRotationTTL: 5 * time.Minute,
+		IOCTTL:            time.Hour,
+		MaxIOCs:           100,
+		PushInterval:      time.Hour,
+	}
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
+	handler := Handler(m)
+
+	iocs := []IOC{{Type: IOCTypeIP, Value: "1.2.3.4", ExpiresAt: time.Now().Add(time.Hour)}}
+	body, _ := json.Marshal(iocs)
+
+	// New secret must be accepted.
+	req := httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
+	req.Header.Set(gossipSecretHeader, "new-secret")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNoContent, w.Code, "new secret must be accepted")
+
+	// Old secret must also be accepted within the rotation window.
+	req = httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
+	req.Header.Set(gossipSecretHeader, "old-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNoContent, w.Code, "old secret must be accepted within rotation window")
+
+	// An unknown secret must still be rejected.
+	req = httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
+	req.Header.Set(gossipSecretHeader, "unknown-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "unknown secret must be rejected")
+}
+
+// TestHTTP_RotationWindow_RejectsOldSecretAfterExpiry verifies that once the
+// rotation window expires the previous secret is no longer accepted.
+func TestHTTP_RotationWindow_RejectsOldSecretAfterExpiry(t *testing.T) {
+	cfg := Config{
+		Enabled:           true,
+		NodeName:          "node-expired",
+		Secret:            "new-secret",
+		SecretPrevious:    "old-secret",
+		SecretRotationTTL: 10 * time.Millisecond, // expires almost immediately
+		IOCTTL:            time.Hour,
+		MaxIOCs:           100,
+		PushInterval:      time.Hour,
+	}
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
+	handler := Handler(m)
+
+	// Wait for the rotation window to close.
+	time.Sleep(20 * time.Millisecond)
+
+	iocs := []IOC{{Type: IOCTypeIP, Value: "5.6.7.8", ExpiresAt: time.Now().Add(time.Hour)}}
+	body, _ := json.Marshal(iocs)
+
+	// Old secret must now be rejected.
+	req := httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
+	req.Header.Set(gossipSecretHeader, "old-secret")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "old secret must be rejected after rotation window expires")
+
+	// New secret must still work.
+	req = httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
+	req.Header.Set(gossipSecretHeader, "new-secret")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNoContent, w.Code, "new secret must still be accepted after window expires")
+}
+
+// TestHTTP_RotationWindow_NoWindowWhenTTLZero verifies that setting
+// SecretPrevious without a positive SecretRotationTTL does not open a window.
+func TestHTTP_RotationWindow_NoWindowWhenTTLZero(t *testing.T) {
+	cfg := Config{
+		Enabled:           true,
+		NodeName:          "node-no-window",
+		Secret:            "new-secret",
+		SecretPrevious:    "old-secret",
+		SecretRotationTTL: 0, // explicitly disabled
+		IOCTTL:            time.Hour,
+		MaxIOCs:           100,
+		PushInterval:      time.Hour,
+	}
+	m, err := NewManager(cfg, nil)
+	require.NoError(t, err)
+	handler := Handler(m)
+
+	iocs := []IOC{{Type: IOCTypeIP, Value: "9.9.9.9", ExpiresAt: time.Now().Add(time.Hour)}}
+	body, _ := json.Marshal(iocs)
+
+	// Old secret must be rejected because SecretRotationTTL=0 means no window.
+	req := httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
+	req.Header.Set(gossipSecretHeader, "old-secret")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "old secret must not be accepted when rotation TTL is zero")
+}
+
+// ---------------------------------------------------------------------------
+// mTLS integration test (issue #116)
+// ---------------------------------------------------------------------------
+
+// TestGossipClient_mTLS verifies that a gossipClient with a mutual TLS
+// configuration can push IOCs to an HTTPS server that requires client certs.
+func TestGossipClient_mTLS(t *testing.T) {
+	// Generate a self-signed CA + server cert + client cert in memory.
+	ca, caKey := mustGenCA(t)
+	serverCert, serverKey := mustGenCert(t, ca, caKey, "server")
+	clientCert, clientKey := mustGenCert(t, ca, caKey, "client")
+
+	// Build a CA pool trusted by both sides.
+	caPool := x509.NewCertPool()
+	caPool.AddCert(ca)
+
+	// Server TLS: require and verify client certs.
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{
+			{Certificate: [][]byte{serverCert.Raw}, PrivateKey: serverKey},
+		},
+		ClientCAs:  caPool,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		MinVersion: tls.VersionTLS13,
+	}
+
+	// Start an HTTPS test server.
+	var received []IOC
+	var mu sync.Mutex
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var iocs []IOC
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&iocs))
+		mu.Lock()
+		received = append(received, iocs...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.TLS = serverTLS
+	srv.StartTLS()
+	defer srv.Close()
+
+	// Build client TLS: present client cert, trust the CA.
+	clientTLSCfg := &tls.Config{
+		Certificates: []tls.Certificate{
+			{Certificate: [][]byte{clientCert.Raw}, PrivateKey: clientKey},
+		},
+		RootCAs:    caPool,
+		MinVersion: tls.VersionTLS13,
+	}
+
+	c := newGossipClient("", clientTLSCfg)
+	iocs := []IOC{
+		{Type: IOCTypeIP, Value: "10.20.30.40", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	err := c.PushIOCs(context.Background(), srv.URL, iocs)
+	require.NoError(t, err, "mTLS push must succeed")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, received, 1)
+	assert.Equal(t, "10.20.30.40", received[0].Value)
+}
+
+// ---------------------------------------------------------------------------
+// TLS cert helpers
+// ---------------------------------------------------------------------------
+
+// mustGenCA generates an in-memory self-signed CA certificate and returns the
+// parsed cert and its private key.
+func mustGenCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		NotAfter:              time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	return cert, key
+}
+
+// mustGenCert generates a leaf certificate signed by ca/caKey and returns the
+// parsed cert and its private key.
+func mustGenCert(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, cn string) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: cn},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	return cert, key
 }

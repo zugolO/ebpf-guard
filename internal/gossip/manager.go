@@ -26,6 +26,14 @@ type Config struct {
 	// Secret is the shared authentication token used between peers.
 	// Requests without a matching X-Gossip-Secret header are rejected.
 	Secret string
+	// SecretPrevious is the old shared secret accepted during a rotation window.
+	// Peers still using the old secret are allowed to connect until
+	// SecretRotationTTL elapses from the time this Manager was created.
+	// Clear this field (and restart) once all nodes have adopted the new Secret.
+	SecretPrevious string
+	// SecretRotationTTL is how long SecretPrevious remains valid after startup.
+	// Default: 5 minutes. Zero disables the rotation window.
+	SecretRotationTTL time.Duration
 	// Peers is the list of peer base URLs.
 	// Use https:// URLs when TLSEnabled=true, e.g. "https://10.0.0.2:9090".
 	Peers []string
@@ -52,11 +60,12 @@ type Config struct {
 // DefaultConfig returns a safe default configuration (gossip disabled).
 func DefaultConfig() Config {
 	return Config{
-		Enabled:          false,
-		IOCTTL:           time.Hour,
-		MaxIOCs:          100_000,
-		PushInterval:     30 * time.Second,
-		DeduplicationTTL: deduplicationTTLDefault,
+		Enabled:           false,
+		IOCTTL:            time.Hour,
+		MaxIOCs:           100_000,
+		PushInterval:      30 * time.Second,
+		DeduplicationTTL:  deduplicationTTLDefault,
+		SecretRotationTTL: 5 * time.Minute,
 	}
 }
 
@@ -66,12 +75,13 @@ func DefaultConfig() Config {
 // It also implements correlator.SensitivityAdjuster for cross-node alert
 // amplification (attack on node A → lowered anomaly threshold on peers).
 type Manager struct {
-	cfg       Config
-	store     *IOCStore
-	ampStore  *AmplificationStore
-	client    *gossipClient
-	discovery PeerDiscovery
-	logger    *slog.Logger
+	cfg                    Config
+	secretRotationDeadline time.Time // zero means no rotation window active
+	store                  *IOCStore
+	ampStore               *AmplificationStore
+	client                 *gossipClient
+	discovery              PeerDiscovery
+	logger                 *slog.Logger
 
 	// Accumulated IOCs since the last push to peers.
 	deltaMu sync.Mutex
@@ -121,9 +131,17 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		logger.Info("gossip: mTLS configured for peer connections")
 	}
 
+	var rotationDeadline time.Time
+	if cfg.SecretPrevious != "" && cfg.SecretRotationTTL > 0 {
+		rotationDeadline = time.Now().Add(cfg.SecretRotationTTL)
+		logger.Info("gossip: secret rotation window active",
+			slog.Duration("ttl", cfg.SecretRotationTTL))
+	}
+
 	return &Manager{
-		cfg:       cfg,
-		store:     NewIOCStore(cfg.MaxIOCs, cfg.IOCTTL),
+		cfg:                    cfg,
+		secretRotationDeadline: rotationDeadline,
+		store:                  NewIOCStore(cfg.MaxIOCs, cfg.IOCTTL),
 		ampStore:  newAmplificationStore(cfg.DeduplicationTTL),
 		client:    newGossipClient(cfg.Secret, tlsCfg),
 		discovery: NewStaticPeerDiscovery(cfg.Peers),
@@ -180,7 +198,7 @@ func buildGossipTLSConfig(cfg Config) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      pool,
-		MinVersion:   tls.VersionTLS12,
+		MinVersion:   tls.VersionTLS13,
 	}, nil
 }
 

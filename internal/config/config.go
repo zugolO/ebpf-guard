@@ -753,6 +753,13 @@ type GossipConfig struct {
 	// Secret is the shared authentication token sent in X-Gossip-Secret.
 	// If empty, gossip requests are accepted without authentication.
 	Secret string `mapstructure:"secret"`
+	// SecretPrevious is the old shared secret accepted during a rolling rotation.
+	// Peers still using the old secret are allowed to connect until
+	// SecretRotationTTL elapses from startup. Clear once all nodes use the new Secret.
+	SecretPrevious string `mapstructure:"secret_previous"`
+	// SecretRotationTTL is how long SecretPrevious remains valid after startup.
+	// Default: 5m. Zero disables the rotation window even if SecretPrevious is set.
+	SecretRotationTTL time.Duration `mapstructure:"secret_rotation_ttl"`
 	// Peers is the list of peer base URLs to push IOCs to.
 	// With TLS enabled use https:// URLs, e.g. "https://10.0.0.2:9090".
 	Peers []string `mapstructure:"peers"`
@@ -1141,6 +1148,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gossip.enabled", false)
 	v.SetDefault("gossip.node_name", "")
 	v.SetDefault("gossip.secret", "")
+	v.SetDefault("gossip.secret_previous", "")
+	v.SetDefault("gossip.secret_rotation_ttl", 5*time.Minute)
 	v.SetDefault("gossip.peers", []string{})
 	v.SetDefault("gossip.ioc_ttl", 3600)
 	v.SetDefault("gossip.max_iocs", 100_000)

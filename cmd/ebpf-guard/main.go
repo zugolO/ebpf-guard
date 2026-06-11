@@ -306,17 +306,19 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 		}
 		gm, gErr := gossip.NewManager(gossip.Config{
-			Enabled:      true,
-			NodeName:     nodeName,
-			Secret:       cfg.Gossip.Secret,
-			Peers:        cfg.Gossip.Peers,
-			IOCTTL:       time.Duration(cfg.Gossip.IOCTTLSeconds) * time.Second,
-			MaxIOCs:      cfg.Gossip.MaxIOCs,
-			PushInterval: time.Duration(cfg.Gossip.PushIntervalSeconds) * time.Second,
-			TLSEnabled:   cfg.Gossip.TLSEnabled,
-			TLSCertFile:  cfg.Gossip.TLSCertFile,
-			TLSKeyFile:   cfg.Gossip.TLSKeyFile,
-			TLSCAFile:    cfg.Gossip.TLSCAFile,
+			Enabled:           true,
+			NodeName:          nodeName,
+			Secret:            cfg.Gossip.Secret,
+			SecretPrevious:    cfg.Gossip.SecretPrevious,
+			SecretRotationTTL: cfg.Gossip.SecretRotationTTL,
+			Peers:             cfg.Gossip.Peers,
+			IOCTTL:            time.Duration(cfg.Gossip.IOCTTLSeconds) * time.Second,
+			MaxIOCs:           cfg.Gossip.MaxIOCs,
+			PushInterval:      time.Duration(cfg.Gossip.PushIntervalSeconds) * time.Second,
+			TLSEnabled:        cfg.Gossip.TLSEnabled,
+			TLSCertFile:       cfg.Gossip.TLSCertFile,
+			TLSKeyFile:        cfg.Gossip.TLSKeyFile,
+			TLSCAFile:         cfg.Gossip.TLSCAFile,
 		}, slog.Default())
 		if gErr != nil {
 			slog.Warn("gossip: failed to initialise, cross-node correlation disabled",

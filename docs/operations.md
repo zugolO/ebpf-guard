@@ -560,3 +560,176 @@ ebpf_guard_collector_up
 ```
 
 A PrometheusRule alert `EbpfGuardCollectorDown` fires when any collector gauge is `0` for more than 1 minute (see `deploy/helm/ebpf-guard/values.yaml`).
+
+## Gossip Secret Rotation
+
+The gossip protocol uses a shared secret (`gossip.secret`) to authenticate peer
+messages via the `X-Gossip-Secret` HTTP header. ebpf-guard supports **zero-downtime
+secret rotation** through a dual-secret transition window: for a configurable period
+after a config change, the agent accepts **both** the new and the old secret so that
+a rolling restart can be completed without gossip partitions.
+
+### Configuration Reference
+
+```yaml
+gossip:
+  enabled: true
+  secret: "new-strong-secret-here"       # active secret (all nodes migrate to this)
+  secret_previous: "old-secret-here"     # accepted during rotation window only
+  secret_rotation_ttl: 5m               # how long the old secret stays valid (default 5m)
+  tls:
+    enabled: true
+    cert_file: "/etc/ebpf-guard/gossip-cert.pem"
+    key_file:  "/etc/ebpf-guard/gossip-key.pem"
+    ca_file:   "/etc/ebpf-guard/gossip-ca.pem"
+```
+
+### Rotation Procedure
+
+**Step 1 — Prepare the new secret.**
+
+Generate a cryptographically strong secret:
+
+```bash
+openssl rand -hex 32
+# example output: a3f8c2e1d4b7...
+```
+
+For Kubernetes, store it as a Secret:
+
+```bash
+kubectl create secret generic ebpf-guard-gossip \
+  --from-literal=secret=<new-secret> \
+  --from-literal=secret_previous=<old-secret> \
+  --namespace ebpf-guard \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+**Step 2 — Update config with both secrets and apply a rolling restart.**
+
+Set `gossip.secret` to the new value and `gossip.secret_previous` to the current
+(old) value. Set `gossip.secret_rotation_ttl` to cover the time needed to complete
+the rolling restart — for a 100-node cluster at 30 s/pod, allow at least 60 m:
+
+```yaml
+gossip:
+  secret: "<new-secret>"
+  secret_previous: "<old-secret>"
+  secret_rotation_ttl: 60m
+```
+
+With the Helm chart:
+
+```bash
+helm upgrade ebpf-guard deploy/helm/ebpf-guard \
+  --set gossip.secret=<new-secret> \
+  --set gossip.secret_previous=<old-secret> \
+  --set gossip.secret_rotation_ttl=60m \
+  --namespace ebpf-guard
+```
+
+During the rolling restart, nodes running the old config authenticate with
+`<old-secret>` and nodes that have already restarted with the new config
+authenticate with `<new-secret>`. Both are accepted by all peers because
+`secret_previous` is configured and the rotation window is active.
+
+**Step 3 — Verify all nodes have adopted the new config.**
+
+Watch the DaemonSet rollout:
+
+```bash
+kubectl rollout status daemonset/ebpf-guard -n ebpf-guard --timeout=10m
+```
+
+Check that all pods are running the new image / config:
+
+```bash
+kubectl get pods -n ebpf-guard -o wide
+```
+
+**Step 4 — Remove the old secret.**
+
+Once every node has restarted and the rotation window has safely closed, clear
+`secret_previous` and do a final rolling restart:
+
+```yaml
+gossip:
+  secret: "<new-secret>"
+  secret_previous: ""          # empty = rotation window disabled
+  secret_rotation_ttl: 5m     # back to default
+```
+
+```bash
+helm upgrade ebpf-guard deploy/helm/ebpf-guard \
+  --set gossip.secret=<new-secret> \
+  --set gossip.secret_previous="" \
+  --namespace ebpf-guard
+kubectl rollout restart daemonset/ebpf-guard -n ebpf-guard
+```
+
+**Step 5 — Verify gossip health.**
+
+Check that all nodes are exchanging IOCs after the rotation:
+
+```promql
+# Gossip push errors should be zero after rotation completes
+rate(ebpf_guard_gossip_push_errors_total[5m])
+
+# IOC store should be non-zero if peers are sharing data
+ebpf_guard_gossip_store_size
+```
+
+If `gossip_push_errors_total` spikes during the rollout, verify that
+`secret_rotation_ttl` is longer than the time to complete the rolling restart,
+and that `secret_previous` matches what pre-rotation nodes are sending.
+
+### Gossip Partition Detection During Rotation
+
+A gossip partition occurs when some nodes stop accepting messages from others —
+typically because a secret mismatch falls outside the rotation window. Indicators:
+
+| Signal | Meaning |
+|---|---|
+| `rate(ebpf_guard_gossip_push_errors_total[5m]) > 0` | Push failures — peers rejecting messages |
+| `ebpf_guard_gossip_store_size` flat across nodes | IOC sharing has stopped |
+| `ebpf_guard_gossip_iocs_received_total` not increasing | No new IOCs arriving from peers |
+
+**Recovery:** If a partition is detected mid-rotation, extend the rotation window
+by increasing `secret_rotation_ttl` and restarting the stalled nodes. Never set
+`secret_previous` to empty until `gossip_push_errors_total` is consistently zero
+across all nodes.
+
+### mTLS Setup
+
+In addition to secret authentication, the gossip transport can be protected by
+mutual TLS (TLS 1.3, client certificate verification). Use mTLS in multi-tenant
+or internet-facing environments where network-level isolation is insufficient.
+
+**Generate certs (example using cfssl):**
+
+```bash
+# CA
+cfssl gencert -initca ca-csr.json | cfssljson -bare ca
+
+# Per-node cert (repeat for each node)
+cfssl gencert -ca=ca.pem -ca-key=ca-key.pem \
+  -config=ca-config.json -profile=gossip node-csr.json | cfssljson -bare node
+```
+
+**Config:**
+
+```yaml
+gossip:
+  enabled: true
+  tls_enabled: true
+  tls_cert_file: "/etc/ebpf-guard/gossip-cert.pem"
+  tls_key_file:  "/etc/ebpf-guard/gossip-key.pem"
+  tls_ca_file:   "/etc/ebpf-guard/gossip-ca.pem"
+  peers:
+    - "https://10.0.0.2:9090"
+    - "https://10.0.0.3:9090"
+```
+
+All three TLS fields (`tls_cert_file`, `tls_key_file`, `tls_ca_file`) are required
+when `tls_enabled: true`; the agent exits with a clear error if any are missing.
+TLS 1.3 is enforced; TLS 1.2 connections are rejected.

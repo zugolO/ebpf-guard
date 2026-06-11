@@ -53,11 +53,21 @@ jobs:
           go test -bench=. -benchmem -count=6 -run='^$' ${{ env.BENCH_PKGS }} \
             | tee bench-baseline.txt
 
+      - name: Compute baseline coverage
+        run: |
+          go test -short -coverprofile=coverage-baseline.out ./... 2>/dev/null || true
+          go tool cover -func=coverage-baseline.out \
+            | awk '/^total:/{printf "%.1f\n", $3+0}' \
+            > coverage-baseline.txt
+          echo "Baseline coverage: $(cat coverage-baseline.txt)%"
+
       - name: Upload baseline artifact
         uses: actions/upload-artifact@v4
         with:
           name: bench-baseline
-          path: bench-baseline.txt
+          path: |
+            bench-baseline.txt
+            coverage-baseline.txt
           # Keep baseline for 90 days; overwrite any artifact from a previous run.
           retention-days: 90
           overwrite: true
@@ -112,6 +122,34 @@ jobs:
         run: |
           go test -bench=. -benchmem -count=6 -run='^$' ${{ env.BENCH_PKGS }} \
             | tee bench-pr.txt
+
+      - name: Compute PR coverage
+        run: |
+          go test -short -coverprofile=coverage-pr.out ./... 2>/dev/null || true
+          go tool cover -func=coverage-pr.out \
+            | awk '/^total:/{printf "%.1f\n", $3+0}' \
+            > coverage-pr.txt
+          echo "PR coverage: $(cat coverage-pr.txt)%"
+
+      - name: Compute coverage delta
+        id: coverage
+        run: |
+          pr_cov=$(cat coverage-pr.txt 2>/dev/null || echo "")
+          base_cov=$(cat coverage-baseline.txt 2>/dev/null || echo "")
+
+          if [ -z "$pr_cov" ]; then
+            echo "coverage_line=⚪ Coverage: _not available_" >> "$GITHUB_OUTPUT"
+          elif [ -z "$base_cov" ]; then
+            echo "coverage_line=📊 Coverage: **${pr_cov}%** (no baseline)" >> "$GITHUB_OUTPUT"
+          else
+            delta=$(awk "BEGIN{printf \"%.1f\", $pr_cov - $base_cov}")
+            if awk "BEGIN{exit !($delta >= 0)}"; then
+              arrow="▲"
+            else
+              arrow="▼"
+            fi
+            echo "coverage_line=📊 Coverage: **${pr_cov}%** (${arrow}${delta}% vs main ${base_cov}%)" >> "$GITHUB_OUTPUT"
+          fi
 
       # Produce bench-diff.txt and bench-regressions.txt; exit 1 on regression.
       - name: Compare and enforce threshold
@@ -212,6 +250,8 @@ jobs:
               '',
               status,
               '',
+              '${{ steps.coverage.outputs.coverage_line }}',
+              '',
               diffSection,
               regressSection,
               '',
@@ -254,4 +294,6 @@ jobs:
             bench-baseline.txt
             bench-diff.txt
             bench-regressions.txt
+            coverage-pr.txt
+            coverage-baseline.txt
           retention-days: 30

@@ -47,6 +47,9 @@ type SQLiteStore struct {
 	cancel          context.CancelFunc
 	done            chan struct{}
 	backupDone      chan struct{}
+	// encKey is the AES-256-GCM key used for column-level encryption of
+	// sensitive fields (message, details, labels). nil means no encryption.
+	encKey []byte
 }
 
 // NewSQLiteStore creates a new SQLite alert store.
@@ -95,6 +98,23 @@ func NewSQLiteStore(cfg SQLiteConfig) (*SQLiteStore, error) {
 		done:            make(chan struct{}),
 		backupDone:      make(chan struct{}),
 	}
+
+	if cfg.EncryptionEnabled {
+		key, err := loadEncryptionKey(cfg.EncryptionKeyEnv, cfg.EncryptionKeyFile)
+		if err != nil {
+			cancel()
+			db.Close()
+			return nil, fmt.Errorf("load encryption key: %w", err)
+		}
+		s.encKey = key
+		slog.Info("sqlite: column-level AES-256-GCM encryption enabled",
+			slog.String("path", cfg.Path))
+	} else {
+		slog.Warn("sqlite: encryption at rest is disabled — alert data (message, details, labels) is stored in plaintext",
+			slog.String("path", cfg.Path),
+			slog.String("docs", "set store.sqlite.encryption.enabled=true and configure key_env or key_file"))
+	}
+
 	if err := s.initSchema(); err != nil {
 		cancel()
 		db.Close()
@@ -270,19 +290,33 @@ func (s *SQLiteStore) Store(ctx context.Context, alert types.Alert) error {
 	if err != nil {
 		return fmt.Errorf("marshal labels: %w", err)
 	}
-
 	detailsJSON, err := json.Marshal(alert.Details)
 	if err != nil {
 		return fmt.Errorf("marshal details: %w", err)
+	}
+
+	message := alert.Message
+	storedDetails := string(detailsJSON)
+	storedLabels := string(labelsJSON)
+
+	if s.encKey != nil {
+		if message, err = encryptColumn(s.encKey, []byte(alert.Message)); err != nil {
+			return fmt.Errorf("encrypt message: %w", err)
+		}
+		if storedDetails, err = encryptColumn(s.encKey, detailsJSON); err != nil {
+			return fmt.Errorf("encrypt details: %w", err)
+		}
+		if storedLabels, err = encryptColumn(s.encKey, labelsJSON); err != nil {
+			return fmt.Errorf("encrypt labels: %w", err)
+		}
 	}
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO alerts (id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, alert.ID, alert.Timestamp, alert.RuleID, string(alert.Severity), alert.PID, alert.Comm,
-		alert.Message, detailsJSON, alert.TraceID, alert.Enrichment.PodName,
-		alert.Enrichment.Namespace, alert.Enrichment.ContainerID, labelsJSON)
-
+		message, storedDetails, alert.TraceID, alert.Enrichment.PodName,
+		alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels)
 	if err != nil {
 		return fmt.Errorf("insert alert: %w", err)
 	}
@@ -316,10 +350,26 @@ func (s *SQLiteStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 			return fmt.Errorf("marshal details for alert %s: %w", alert.ID, err)
 		}
 
+		message := alert.Message
+		storedDetails := string(detailsJSON)
+		storedLabels := string(labelsJSON)
+
+		if s.encKey != nil {
+			if message, err = encryptColumn(s.encKey, []byte(alert.Message)); err != nil {
+				return fmt.Errorf("encrypt message for alert %s: %w", alert.ID, err)
+			}
+			if storedDetails, err = encryptColumn(s.encKey, detailsJSON); err != nil {
+				return fmt.Errorf("encrypt details for alert %s: %w", alert.ID, err)
+			}
+			if storedLabels, err = encryptColumn(s.encKey, labelsJSON); err != nil {
+				return fmt.Errorf("encrypt labels for alert %s: %w", alert.ID, err)
+			}
+		}
+
 		if _, err = stmt.ExecContext(ctx, alert.ID, alert.Timestamp, alert.RuleID,
-			string(alert.Severity), alert.PID, alert.Comm, alert.Message,
-			detailsJSON, alert.TraceID, alert.Enrichment.PodName,
-			alert.Enrichment.Namespace, alert.Enrichment.ContainerID, labelsJSON); err != nil {
+			string(alert.Severity), alert.PID, alert.Comm, message,
+			storedDetails, alert.TraceID, alert.Enrichment.PodName,
+			alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels); err != nil {
 			return fmt.Errorf("insert alert: %w", err)
 		}
 	}
@@ -402,6 +452,38 @@ func (s *SQLiteStore) buildQuery(filters QueryFilters) (string, []interface{}) {
 	return query, args
 }
 
+// decryptFields decrypts the sensitive columns of a scanned alert row when
+// column-level encryption is active. If a column fails decryption (e.g. it was
+// written before encryption was enabled) the original value is kept and a debug
+// message is logged so mixed plaintext/encrypted databases degrade gracefully.
+func (s *SQLiteStore) decryptFields(alertID string, message *string, detailsJSON, labelsJSON *[]byte) {
+	if s.encKey == nil {
+		return
+	}
+	if plain, err := decryptColumn(s.encKey, *message); err == nil {
+		*message = string(plain)
+	} else {
+		slog.Debug("sqlite: message decryption failed, treating as plaintext",
+			slog.String("alert_id", alertID), slog.Any("error", err))
+	}
+	if len(*detailsJSON) > 0 {
+		if plain, err := decryptColumn(s.encKey, string(*detailsJSON)); err == nil {
+			*detailsJSON = plain
+		} else {
+			slog.Debug("sqlite: details decryption failed, treating as plaintext",
+				slog.String("alert_id", alertID), slog.Any("error", err))
+		}
+	}
+	if len(*labelsJSON) > 0 {
+		if plain, err := decryptColumn(s.encKey, string(*labelsJSON)); err == nil {
+			*labelsJSON = plain
+		} else {
+			slog.Debug("sqlite: labels decryption failed, treating as plaintext",
+				slog.String("alert_id", alertID), slog.Any("error", err))
+		}
+	}
+}
+
 // scanAlerts scans SQL rows into Alert structs.
 func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 	var alerts []types.Alert
@@ -420,6 +502,8 @@ func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 		if err != nil {
 			return nil, fmt.Errorf("scan alert: %w", err)
 		}
+
+		s.decryptFields(alert.ID, &alert.Message, &detailsJSON, &labelsJSON)
 
 		alert.Severity = types.Severity(severityStr)
 		if len(detailsJSON) > 0 {
@@ -462,6 +546,8 @@ func (s *SQLiteStore) QueryByID(ctx context.Context, alertID string) (*types.Ale
 	if err != nil {
 		return nil, fmt.Errorf("scan alert: %w", err)
 	}
+
+	s.decryptFields(alert.ID, &alert.Message, &detailsJSON, &labelsJSON)
 
 	alert.Severity = types.Severity(severityStr)
 	if len(detailsJSON) > 0 {

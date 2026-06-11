@@ -262,6 +262,15 @@ config:
     backend: memory  # memory | sqlite | opensearch
     sqlite:
       path: /var/lib/ebpf-guard/events.db
+      encryption:
+        enabled: false
+        # key_env: EBPF_GUARD_DB_KEY      # env var holding 64-char hex or base64 key
+        # key_file: /run/secrets/db-key   # file path (e.g. Kubernetes Secret mount)
+        # keySecretRef injects the key from a Kubernetes Secret as the env var
+        # EBPF_GUARD_DB_KEY, which you must also set as key_env above.
+        # keySecretRef:
+        #   name: ebpf-guard-db-key       # Secret name in the same namespace
+        #   key: encryption-key           # key inside the Secret
     opensearch:
       url: ""
       index: ebpf-guard-events

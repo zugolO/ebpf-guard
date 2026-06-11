@@ -318,6 +318,20 @@ type DNSCollectorConfig struct {
 	DGAWhitelist []string `mapstructure:"dga_whitelist"`
 }
 
+// SQLiteEncryptionConfig holds column-level encryption settings for the SQLite store.
+type SQLiteEncryptionConfig struct {
+	// Enabled activates AES-256-GCM column-level encryption for sensitive alert
+	// fields (message, details, labels). A startup WARN is emitted when false.
+	Enabled bool `mapstructure:"enabled"`
+	// KeyEnv is the name of the environment variable holding the encryption key.
+	// The key must be a 64-char hex string or a base64 string that decodes to
+	// exactly 32 bytes. Takes precedence over KeyFile when both are set.
+	KeyEnv string `mapstructure:"key_env"`
+	// KeyFile is the path to a file containing the encryption key (e.g. a
+	// Kubernetes Secret mounted at /run/secrets/db-key).
+	KeyFile string `mapstructure:"key_file"`
+}
+
 // SQLiteStoreConfig holds SQLite-specific configuration.
 type SQLiteStoreConfig struct {
 	// Path to the SQLite database file
@@ -333,6 +347,8 @@ type SQLiteStoreConfig struct {
 	RetentionPeriod string `mapstructure:"retention_period"`
 	// Backup configures periodic SQLite database backups.
 	Backup SQLiteBackupConfig `mapstructure:"backup"`
+	// Encryption configures AES-256-GCM column-level encryption at rest.
+	Encryption SQLiteEncryptionConfig `mapstructure:"encryption"`
 }
 
 // SQLiteBackupConfig holds SQLite backup configuration.

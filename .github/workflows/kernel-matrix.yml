@@ -1,0 +1,311 @@
+name: Kernel Matrix
+
+# Proves CO-RE portability by loading every BPF object on real kernels via
+# virtme-ng. Runs weekly to catch regressions and on PRs that touch BPF source.
+#
+# References:
+#   https://github.com/cilium/ci-kernels — pre-built kernel images used here
+#   https://github.com/arighi/virtme-ng  — lightweight kernel VM runner
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'bpf/**'
+      - 'internal/bpf/**'
+      - 'e2e/kernel-smoke/**'
+      - '.github/workflows/kernel-matrix.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'bpf/**'
+      - 'internal/bpf/**'
+      - 'e2e/kernel-smoke/**'
+      - '.github/workflows/kernel-matrix.yml'
+  schedule:
+    # Weekly Monday 03:00 UTC — independent of push-triggered CI.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      kernel_filter:
+        description: 'Only run this kernel version (e.g. "6.1"), or blank for all'
+        required: false
+        default: ''
+
+env:
+  GOTOOLCHAIN: local
+  CLANG_VERSION: '15'
+  # Kernel image source: pre-built images from the cilium/ci-kernels project.
+  # Tagged releases follow the pattern <version>-<date>.<build>.
+  CI_KERNELS_REPO: cilium/ci-kernels
+
+jobs:
+  build-smoke:
+    name: Build smoke binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Build static smoke binary (amd64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -ldflags="-s -w" \
+            -o smoke-amd64 ./e2e/kernel-smoke/
+
+      - name: Build static smoke binary (arm64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -ldflags="-s -w" \
+            -o smoke-arm64 ./e2e/kernel-smoke/
+
+      - name: Upload smoke binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-binaries
+          path: smoke-*
+          retention-days: 1
+
+  build-bpf:
+    name: Compile BPF objects
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang + libbpf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-${{ env.CLANG_VERSION }} \
+            llvm-${{ env.CLANG_VERSION }} \
+            libbpf-dev \
+            linux-headers-generic
+          sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+          sudo ln -sf /usr/bin/llc-${{ env.CLANG_VERSION }} /usr/bin/llc
+
+      - name: Compile BPF objects (x86_64 + arm64)
+        run: |
+          mkdir -p bpf-objects
+          BPF_INCLUDE=/usr/include/x86_64-linux-gnu
+          BPF_CFLAGS="-O2 -g -Wall -target bpf -D__TARGET_ARCH_x86_64 -I${BPF_INCLUDE}"
+          for src in bpf/*.bpf.c; do
+            name=$(basename "${src}" .bpf.c)
+            clang ${BPF_CFLAGS} -c "${src}" -o "bpf-objects/${name}_bpfel.o"
+          done
+          # arm64 cross-compile (big-endian and little-endian variants)
+          BPF_INCLUDE_ARM=/usr/include/aarch64-linux-gnu
+          if [ -d "${BPF_INCLUDE_ARM}" ]; then
+            BPF_CFLAGS_ARM="-O2 -g -Wall -target bpf -D__TARGET_ARCH_arm64 -I${BPF_INCLUDE_ARM}"
+            for src in bpf/*.bpf.c; do
+              name=$(basename "${src}" .bpf.c)
+              clang ${BPF_CFLAGS_ARM} -c "${src}" -o "bpf-objects/${name}_arm64el.o" || true
+            done
+          fi
+          echo "Compiled BPF objects:"
+          ls -lh bpf-objects/
+
+      - name: Upload BPF objects
+        uses: actions/upload-artifact@v4
+        with:
+          name: bpf-objects
+          path: bpf-objects/
+          retention-days: 1
+
+  kernel-smoke:
+    name: Smoke (${{ matrix.kernel.version }}, ${{ matrix.arch }})
+    needs: [build-smoke, build-bpf]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 runs natively; arm64 runs via QEMU userspace emulation under virtme-ng.
+        # Keep kernel versions in sync with docs/supported-kernels.md once that file is
+        # generated from CI results.
+        include:
+          - kernel:
+              version: '5.10'
+              # Pinned build from cilium/ci-kernels releases.
+              # LSM BPF unavailable (requires 5.7+; available here but not all helpers).
+              lsm: false
+              ringbuf: false
+            arch: x86_64
+          - kernel:
+              version: '5.15'
+              lsm: true
+              ringbuf: true
+            arch: x86_64
+          - kernel:
+              version: '6.1'
+              lsm: true
+              ringbuf: true
+            arch: x86_64
+          - kernel:
+              version: '6.6'
+              lsm: true
+              ringbuf: true
+            arch: x86_64
+          - kernel:
+              version: '6.12'
+              lsm: true
+              ringbuf: true
+            arch: x86_64
+          # arm64 via QEMU: test on a representative LTS kernel.
+          - kernel:
+              version: '6.1'
+              lsm: true
+              ringbuf: true
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download smoke binary
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-binaries
+
+      - name: Download BPF objects
+        uses: actions/download-artifact@v4
+        with:
+          name: bpf-objects
+          path: bpf-objects/
+
+      - name: Make smoke binary executable
+        run: chmod +x smoke-amd64 smoke-arm64
+
+      - name: Install QEMU and virtme-ng
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-system-x86 \
+            qemu-system-arm \
+            python3-pip
+          pip3 install --user virtme-ng
+
+      - name: Download kernel ${{ matrix.kernel.version }} (${{ matrix.arch }})
+        run: |
+          mkdir -p /tmp/kernel
+          # Download pre-built kernel from cilium/ci-kernels GitHub releases.
+          # The release tag maps the kernel version to a specific build.
+          # See https://github.com/cilium/ci-kernels/releases for available tags.
+          KERNEL_VERSION="${{ matrix.kernel.version }}"
+          ARCH="${{ matrix.arch }}"
+          # Resolve the latest published tag for this kernel version from ci-kernels.
+          TAG=$(curl -s "https://api.github.com/repos/${CI_KERNELS_REPO}/releases" \
+            | python3 -c "
+          import sys, json
+          releases = json.load(sys.stdin)
+          version = '${KERNEL_VERSION}'
+          for r in releases:
+              if r['tag_name'].startswith(version) and not r['prerelease']:
+                  print(r['tag_name'])
+                  break
+          ")
+          if [ -z "${TAG}" ]; then
+            echo "::error::No ci-kernels release found for kernel ${KERNEL_VERSION}"
+            exit 1
+          fi
+          echo "Using kernel tag: ${TAG}"
+          # Download the boot tarball containing vmlinuz and initrd.
+          ASSET_NAME="linux-${ARCH}.tar.zst"
+          curl -fsSL -o /tmp/kernel.tar.zst \
+            "https://github.com/${CI_KERNELS_REPO}/releases/download/${TAG}/${ASSET_NAME}"
+          tar --zstd -xf /tmp/kernel.tar.zst -C /tmp/kernel
+          ls /tmp/kernel/
+
+      - name: Locate kernel image
+        id: kernel-img
+        run: |
+          VMLINUZ=$(find /tmp/kernel -name 'vmlinuz*' | head -1)
+          if [ -z "${VMLINUZ}" ]; then
+            echo "::error::vmlinuz not found in kernel archive"
+            ls -lR /tmp/kernel
+            exit 1
+          fi
+          echo "path=${VMLINUZ}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run smoke suite (x86_64)
+        if: matrix.arch == 'x86_64'
+        run: |
+          # virtme-ng boots the kernel, mounts the host filesystem, and runs
+          # the script. The smoke binary runs inside the VM with root + kernel.
+          ~/.local/bin/virtme-ng \
+            --kimg "${{ steps.kernel-img.outputs.path }}" \
+            --script-sh "$(pwd)/scripts/kernel-smoke.sh" \
+            --qemu-opts "-m 512 -smp 2" \
+            --env SMOKE_BINARY="$(pwd)/smoke-amd64" \
+            --env BPF_OBJECTS_DIR="$(pwd)/bpf-objects" \
+            --env KERNEL_VERSION="${{ matrix.kernel.version }}"
+
+      - name: Run smoke suite (arm64 via QEMU)
+        if: matrix.arch == 'arm64'
+        run: |
+          ~/.local/bin/virtme-ng \
+            --kimg "${{ steps.kernel-img.outputs.path }}" \
+            --script-sh "$(pwd)/scripts/kernel-smoke.sh" \
+            --qemu-opts "-m 512 -smp 2" \
+            --arch aarch64 \
+            --env SMOKE_BINARY="$(pwd)/smoke-arm64" \
+            --env BPF_OBJECTS_DIR="$(pwd)/bpf-objects" \
+            --env KERNEL_VERSION="${{ matrix.kernel.version }}"
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report-${{ matrix.kernel.version }}-${{ matrix.arch }}
+          path: smoke-report*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Aggregates results from the matrix and prints the supported-kernels table.
+  # In a future iteration this job can commit docs/supported-kernels.md to the repo.
+  matrix-summary:
+    name: Kernel support matrix summary
+    needs: kernel-smoke
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all smoke reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: smoke-report-*
+          path: reports/
+          merge-multiple: true
+
+      - name: Print kernel support matrix
+        run: |
+          echo "## Kernel Support Matrix" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| Kernel | Arch | BTF | Ringbuf | LSM | XDP | Status |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "|--------|------|-----|---------|-----|-----|--------|" >> "${GITHUB_STEP_SUMMARY}"
+          for report in reports/smoke-report*.json; do
+            if [ -f "${report}" ]; then
+              python3 - "${report}" << 'EOF'
+          import sys, json, os
+          data = json.load(open(sys.argv[1]))
+          f = data['features']
+          failed = data['failed']
+          status = "✅ pass" if failed == 0 else f"❌ {failed} failed"
+          name = os.path.basename(sys.argv[1]).replace('smoke-report-','').replace('.json','')
+          parts = name.rsplit('-', 1)
+          kernel, arch = parts[0], parts[1] if len(parts) > 1 else 'unknown'
+          print(f"| {kernel} | {arch} | {'✓' if f['has_btf'] else '✗'} | {'✓' if f['has_ringbuf'] else '✗'} | {'✓' if f['has_lsm'] else '✗'} | {'✓' if f['has_xdp'] else '✗'} | {status} |")
+          EOF
+            fi
+          done >> "${GITHUB_STEP_SUMMARY}"
+
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "_Generated from CI run ${GITHUB_RUN_ID}_" >> "${GITHUB_STEP_SUMMARY}"

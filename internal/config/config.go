@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -96,6 +97,12 @@ type ServerConfig struct {
 	EnablePprof bool `mapstructure:"enable_pprof"`
 	// EnableDebug enables debug endpoints at /debug/state
 	EnableDebug bool `mapstructure:"enable_debug"`
+	// ShutdownTimeout is the total time budget for graceful shutdown. Valid range: [5s, 300s]. Default: 30s.
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	// ShutdownDrainEnforcement caps the time spent draining the enforcement queue during shutdown. Default: 5s.
+	ShutdownDrainEnforcement time.Duration `mapstructure:"shutdown_drain_enforcement"`
+	// ShutdownDrainRego caps the time spent draining async Rego evaluation workers during shutdown. Default: 5s.
+	ShutdownDrainRego time.Duration `mapstructure:"shutdown_drain_rego"`
 }
 
 // AuthConfig holds authentication configuration.
@@ -942,6 +949,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.health_path", "/health")
 	v.SetDefault("server.enable_pprof", false)
 	v.SetDefault("server.enable_debug", false)
+	v.SetDefault("server.shutdown_timeout", "30s")
+	v.SetDefault("server.shutdown_drain_enforcement", "5s")
+	v.SetDefault("server.shutdown_drain_rego", "5s")
 
 	// BPF defaults
 	v.SetDefault("bpf.map_sizes.events", 65536)

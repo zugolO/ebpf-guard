@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"time"
 	"net"
 	"net/url"
 	"strings"
@@ -29,6 +30,9 @@ func ValidateConfig(cfg *Config) error {
 	// ── Server ───────────────────────────────────────────────────────────────
 	if cfg.Server.BindAddress != "" {
 		add(validateBindAddress("server.bind_address", cfg.Server.BindAddress))
+	}
+	if t := cfg.Server.ShutdownTimeout; t != 0 && (t < 5*time.Second || t > 300*time.Second) {
+		add(fmt.Errorf("server.shutdown_timeout: must be in [5s, 300s], got %s", t))
 	}
 
 	// ── Profiler ─────────────────────────────────────────────────────────────

@@ -16,16 +16,42 @@ ebpf-guard performs an ordered, time-bounded shutdown when it receives `SIGTERM`
 8. **Cleanup enforcement chains** — nftables / iptables rules installed by the enforcer are removed.
 9. **Shutdown HTTP server** — in-flight API requests are drained.
 
-The entire procedure has a **30-second budget**. Individual steps that exceed their sub-budget are logged as warnings but do not block the overall shutdown.
+The total budget and per-step drain caps are configurable. Individual steps that exceed their sub-budget are logged as warnings but do not block the overall shutdown.
+
+### Configuring the Shutdown Timeout
+
+Set the shutdown budget in `config/config.yaml`:
+
+```yaml
+server:
+  shutdown_timeout: 30s           # total budget; valid range [5s, 300s], default 30s
+  shutdown_drain_enforcement: 5s  # enforcer queue drain cap, default 5s
+  shutdown_drain_rego: 5s         # OPA evaluation drain cap, default 5s
+```
+
+Override at runtime with the `--shutdown-timeout` flag (takes precedence over config):
+
+```bash
+ebpf-guard --shutdown-timeout 60s --config config/config.yaml
+```
+
+The flag accepts standard Go duration strings: `30s`, `2m`, `90s`, etc.
 
 ### Kubernetes: `terminationGracePeriodSeconds`
 
-The default Kubernetes `terminationGracePeriodSeconds` is 30 s, which matches the shutdown budget.  For deployments with high alert rates or slow Alertmanager endpoints, increase this to 60 s to give the flush steps more headroom:
+The default Kubernetes `terminationGracePeriodSeconds` is 30 s, which matches the default shutdown budget.  For deployments with high alert rates or slow Alertmanager endpoints, increase both values together:
 
 ```yaml
 # deploy/helm/ebpf-guard/values.yaml
 daemonset:
   terminationGracePeriodSeconds: 60
+```
+
+And in `config/config.yaml`:
+
+```yaml
+server:
+  shutdown_timeout: 55s  # leave a 5 s margin before Kubernetes force-kills the pod
 ```
 
 Or directly in the DaemonSet spec:
@@ -37,7 +63,7 @@ spec:
       terminationGracePeriodSeconds: 60
 ```
 
-> **Recommendation**: set `terminationGracePeriodSeconds` to at least **30 s** (default) and increase to **60 s** if Alertmanager webhook latency regularly exceeds 5 s.
+> **Recommendation**: set `terminationGracePeriodSeconds` to at least **30 s** (default) and increase to **60 s** if Alertmanager webhook latency regularly exceeds 5 s. Always set `server.shutdown_timeout` to at least 5 s less than `terminationGracePeriodSeconds` to avoid a hard kill mid-shutdown.
 
 ### Shutdown Metric
 

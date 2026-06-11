@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // baseConfig returns a minimal valid Config so individual tests only need
@@ -253,5 +254,37 @@ func TestValidateConfig_MultipleErrors(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message missing field %q: %s", want, msg)
 		}
+	}
+}
+
+func TestValidateConfig_ShutdownTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		wantErr bool
+	}{
+		{"zero (uses default)", 0, false},
+		{"minimum boundary 5s", 5 * time.Second, false},
+		{"typical 30s", 30 * time.Second, false},
+		{"maximum boundary 300s", 300 * time.Second, false},
+		{"too short 4s", 4 * time.Second, true},
+		{"too long 301s", 301 * time.Second, true},
+		{"negative", -1 * time.Second, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Server.ShutdownTimeout = tt.timeout
+			err := ValidateConfig(cfg)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for %s, got nil", tt.timeout)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for %s: %v", tt.timeout, err)
+			}
+			if tt.wantErr && err != nil && !strings.Contains(err.Error(), "server.shutdown_timeout") {
+				t.Errorf("error does not mention server.shutdown_timeout: %v", err)
+			}
+		})
 	}
 }

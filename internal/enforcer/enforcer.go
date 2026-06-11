@@ -72,6 +72,10 @@ const (
 	// ActionLSMBlock uses LSM BPF for pre-execution blocking (Sprint 22.0).
 	// Falls back to nftables if LSM is unavailable.
 	ActionLSMBlock ActionType = "lsm_block"
+	// ActionNetworkPolicy generates a Kubernetes NetworkPolicy for the affected pod.
+	// In "suggest" mode the YAML is sent via the notification channel.
+	// In "apply" mode it is applied directly via the Kubernetes API.
+	ActionNetworkPolicy ActionType = "networkpolicy"
 )
 
 // AuditEntry records an enforcement action for audit purposes.
@@ -138,6 +142,8 @@ type Enforcer struct {
 	xdpMgr *XDPManager
 	// lsmManager is the LSM blocklist manager (nil if not using LSM)
 	lsmManager LSMBlocklistManager
+	// networkPolicyMgr handles networkpolicy action enforcement (nil if disabled)
+	networkPolicyMgr *NetworkPolicyManager
 	// dryRun mode logs actions without enforcement
 	dryRun bool
 	// throttleCPUPercent is the CPU limit applied when throttling (1-99).
@@ -178,6 +184,8 @@ type Config struct {
 	AuditLogChannel chan<- AuditEntry
 	// LSMManager is the LSM blocklist manager for pre-execution blocking (optional)
 	LSMManager LSMBlocklistManager
+	// NetworkPolicy configures the networkpolicy action type (optional)
+	NetworkPolicy NetworkPolicyCfg
 	// ThrottleCPUPercent is the CPU limit (1-99) applied when throttling via cgroup v2. Default: 10.
 	ThrottleCPUPercent int
 	// ThrottleMaxAge is how long a throttle entry is kept after last use. Default: 30m.
@@ -212,9 +220,10 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 		throttleMaxAge:          maxAge,
 		throttleCleanupInterval: cleanupInterval,
 		enabled: map[ActionType]bool{
-			ActionBlock:    cfg.EnableBlock,
-			ActionKill:     cfg.EnableKill,
-			ActionThrottle: cfg.EnableThrottle,
+			ActionBlock:         cfg.EnableBlock,
+			ActionKill:          cfg.EnableKill,
+			ActionThrottle:      cfg.EnableThrottle,
+			ActionNetworkPolicy: cfg.NetworkPolicy.Enabled,
 		},
 		actionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ebpf_guard_enforcement_actions_total",
@@ -224,6 +233,11 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 			Name: "ebpf_guard_audit_log_dropped_total",
 			Help: "Total audit log entries dropped due to a full channel.",
 		}),
+	}
+
+	// Initialise the NetworkPolicy manager if enabled.
+	if cfg.NetworkPolicy.Enabled {
+		e.networkPolicyMgr = NewNetworkPolicyManager(logger, cfg.NetworkPolicy)
 	}
 
 	// Initialise the configured block backend.
@@ -302,6 +316,8 @@ func (e *Enforcer) Execute(ctx context.Context, action ActionType, alert types.A
 		return e.executeKill(ctx, alert)
 	case ActionThrottle:
 		return e.executeThrottle(ctx, alert)
+	case ActionNetworkPolicy:
+		return e.executeNetworkPolicy(ctx, alert)
 	default:
 		return fmt.Errorf("enforcer: unknown action type: %s", action)
 	}
@@ -518,6 +534,22 @@ done:
 		e.actionsTotal.WithLabelValues("lsm_block").Inc()
 	}
 	return execErr
+}
+
+// executeNetworkPolicy generates (and optionally applies) a Kubernetes NetworkPolicy.
+func (e *Enforcer) executeNetworkPolicy(ctx context.Context, alert types.Alert) error {
+	if e.networkPolicyMgr == nil {
+		e.logger.Warn("networkpolicy action triggered but manager not initialised; skipping",
+			slog.String("rule_id", alert.RuleID))
+		return nil
+	}
+	if err := e.networkPolicyMgr.Execute(ctx, alert); err != nil {
+		return fmt.Errorf("enforcer/networkpolicy: %w", err)
+	}
+	if e.actionsTotal != nil {
+		e.actionsTotal.WithLabelValues("networkpolicy").Inc()
+	}
+	return nil
 }
 
 // executeKill sends SIGKILL to the offending process.
@@ -784,6 +816,8 @@ func ParseActionType(s string) (ActionType, error) {
 		return ActionThrottle, nil
 	case "log":
 		return ActionLog, nil
+	case "networkpolicy":
+		return ActionNetworkPolicy, nil
 	default:
 		return "", fmt.Errorf("unknown action type: %s", s)
 	}
@@ -866,6 +900,9 @@ func (e *Enforcer) Close() error {
 		if err := e.xdpMgr.Close(); err != nil {
 			return err
 		}
+	}
+	if e.networkPolicyMgr != nil {
+		e.networkPolicyMgr.Close()
 	}
 	return nil
 }

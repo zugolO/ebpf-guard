@@ -62,6 +62,9 @@ type Server struct {
 
 	// incidentTracker exposes the engine's incident grouping state (optional).
 	incidentTracker *correlator.IncidentTracker
+
+	// bpfReloader is called by POST /api/v1/bpf/reload (optional, admin-only).
+	bpfReloader func(ctx context.Context) error
 }
 
 // NewServer creates a new HTTP server for metrics and health.
@@ -532,6 +535,15 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("unhealthy\n"))
 	}
+}
+
+// SetBPFReloader registers the function called by POST /api/v1/bpf/reload.
+// The function is called with the request context; it should complete within
+// a few seconds and return an error on failure. Admin role required.
+func (s *Server) SetBPFReloader(fn func(ctx context.Context) error) {
+	s.mu.Lock()
+	s.bpfReloader = fn
+	s.mu.Unlock()
 }
 
 // HealthStatus represents the health check response.

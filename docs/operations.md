@@ -733,3 +733,88 @@ gossip:
 All three TLS fields (`tls_cert_file`, `tls_key_file`, `tls_ca_file`) are required
 when `tls_enabled: true`; the agent exits with a clear error if any are missing.
 TLS 1.3 is enforced; TLS 1.2 connections are rejected.
+
+---
+
+## eBPF Live Program Update (issue #118)
+
+ebpf-guard supports **in-place eBPF program replacement** without restarting the agent.
+This eliminates the 5–30 s monitoring gap that a rolling DaemonSet restart would cause
+and preserves in-memory EWMA behavioral profiles.
+
+### How it works
+
+1. The new `.o` BPF object file is loaded into the kernel verifier (no attachment yet).
+2. New programs are pinned to `/sys/fs/bpf/ebpf-guard/pending/` for observability.
+3. In-flight ring-buffer events are drained (≤100 ms pause).
+4. Each registered program link is atomically replaced via `link.Update()` — no
+   detach/reattach; no monitoring gap beyond the drain window.
+5. If any link update fails, already-swapped programs are rolled back to the previous
+   collection.
+6. The old collection is released.
+
+### Configuration
+
+```yaml
+bpf:
+  live_update:
+    enabled: false          # opt-in; off by default
+    watch_path: ""          # directory of .o files to watch (fsnotify); empty = API only
+    pending_pin_dir: ""     # bpffs staging dir; default /sys/fs/bpf/ebpf-guard/pending
+```
+
+### API trigger
+
+```
+POST /api/v1/bpf/reload
+Authorization: Bearer <admin-token>
+```
+
+Response:
+
+```json
+{ "status": "ok", "duration_ms": 42 }
+```
+
+On failure:
+
+```json
+{ "status": "error", "error": "kernel verifier rejected: ..." }
+```
+
+The endpoint requires the **admin** role. Viewer tokens receive `403 Forbidden`.
+
+### File-watch trigger
+
+Set `watch_path` to a directory containing `.o` BPF object files. When any file in
+that directory is written or created, the live updater reloads it automatically using
+the same atomic swap mechanism as the API trigger.
+
+```yaml
+bpf:
+  live_update:
+    enabled: true
+    watch_path: /etc/ebpf-guard/bpf
+```
+
+### Metrics
+
+| Metric | Type | Description |
+|---|---|---|
+| `ebpf_guard_bpf_live_updates_total` | Counter | Successful live replacements |
+| `ebpf_guard_bpf_live_update_errors_total` | Counter | Failed replacements (rollback attempted) |
+
+### Limitations
+
+- Requires `cilium/ebpf` link types that support `Update()` (tracepoints, kprobes,
+  raw tracepoints). XDP links attached via `link.XDP` also support it.
+- Map schema changes are not supported by live update — only program logic changes.
+  If a map schema changes, a full restart is required.
+- The feature is opt-in (`enabled: false` by default) because it requires write access
+  to `/sys/fs/bpf` and is still experimental on some kernel versions.
+
+### Rollback behaviour
+
+If `link.Update()` fails for any program, all successfully swapped programs in that
+batch are restored to the previous versions. The error is returned to the API caller
+and counted in `ebpf_guard_bpf_live_update_errors_total`.

@@ -453,6 +453,22 @@ type BPFConfig struct {
 	// OverflowPolicy controls what happens to events when the queue is full.
 	// Valid values: "drop" (default), "block", "sample".
 	OverflowPolicy string `mapstructure:"overflow_policy"`
+
+	// LiveUpdate configures in-place eBPF program replacement without agent restart.
+	LiveUpdate LiveUpdateBPFConfig `mapstructure:"live_update"`
+}
+
+// LiveUpdateBPFConfig configures the eBPF live program update feature.
+type LiveUpdateBPFConfig struct {
+	// Enabled activates live eBPF program updates. Off by default; opt-in.
+	Enabled bool `mapstructure:"enabled"`
+	// WatchPath is a directory of .o BPF object files to watch for changes.
+	// When a file changes, the live updater reloads it automatically (fsnotify).
+	// Empty disables file watching; reload is still available via the API.
+	WatchPath string `mapstructure:"watch_path"`
+	// PendingPinDir is the bpffs directory used to stage new programs before
+	// atomic replacement. Defaults to /sys/fs/bpf/ebpf-guard/pending.
+	PendingPinDir string `mapstructure:"pending_pin_dir"`
 }
 
 // KernelFilterConfig controls BPF-side content-based filtering.
@@ -711,6 +727,23 @@ type EnforcementConfig struct {
 	// socket_connect blocks, task_kill records) to the audit log.
 	// Has no effect when audit_log is empty.
 	AuditLSMEvents bool `mapstructure:"audit_lsm_events"`
+	// NetworkPolicy configures automatic Kubernetes NetworkPolicy generation and application.
+	NetworkPolicy NetworkPolicyEnforcementConfig `mapstructure:"networkpolicy"`
+}
+
+// NetworkPolicyEnforcementConfig configures the networkpolicy enforcement action.
+type NetworkPolicyEnforcementConfig struct {
+	// Enabled activates the networkpolicy action type in the rule engine.
+	Enabled bool `mapstructure:"enabled"`
+	// Mode is "suggest" (default) or "apply".
+	// suggest: generate the policy YAML and send it via the notification channel.
+	// apply: apply directly via the Kubernetes API (requires networkpolicies write RBAC).
+	Mode string `mapstructure:"mode"`
+	// AutoCleanupAfter is how long applied policies are kept before automatic removal.
+	// Format: Go duration string, e.g. "1h". Zero disables auto-cleanup.
+	AutoCleanupAfter string `mapstructure:"auto_cleanup_after"`
+	// DryRun generates and logs policies without sending or applying them.
+	DryRun bool `mapstructure:"dry_run"`
 }
 
 // WatchdogConfig holds watchdog and auto-tuning settings (Sprint 22.0).

@@ -132,6 +132,14 @@ data:
         enabled: {{ .Values.config.osint.virustotal.enabled }}
         api_key: {{ .Values.config.osint.virustotal.api_key | quote }}
         enterprise_feeds: {{ .Values.config.osint.virustotal.enterprise_feeds }}
+
+    audit:
+      enabled: {{ .Values.auditLog.enabled }}
+      {{- if .Values.auditLog.enabled }}
+      path: {{ printf "%s/audit.jsonl" .Values.auditLog.hostDir | quote }}
+      max_size_mb: 100
+      include_rule_diffs: true
+      {{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

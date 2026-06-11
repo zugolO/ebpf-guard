@@ -515,6 +515,12 @@ INFO  security posture: mTLS=enabled auth=generated apparmor=enforce seccomp=ena
 
 ---
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full version history including breaking changes, security fixes, and migration notes.
+
+---
+
 ## License
 
 Apache 2.0

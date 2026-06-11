@@ -51,11 +51,12 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	var (
-		cfgPath          string
-		logLevel         string
-		dryRun           bool
-		simulateMode     bool
+		cfgPath         string
+		logLevel        string
+		dryRun          bool
+		simulateMode    bool
 		simulateDuration string
+		shutdownTimeout string
 	)
 
 	root := &cobra.Command{
@@ -66,7 +67,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		Version:      fmt.Sprintf("%s (commit %s)", Version, Commit),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration)
+			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration, shutdownTimeout)
 		},
 	}
 
@@ -77,6 +78,8 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		"simulate enforcement: count what would be killed/blocked/throttled without acting")
 	root.PersistentFlags().StringVar(&simulateDuration, "simulate-duration", "",
 		"stop simulation after this duration (e.g. 24h, 30m); empty = run until Ctrl+C")
+	root.PersistentFlags().StringVar(&shutdownTimeout, "shutdown-timeout", "",
+		"graceful shutdown timeout, overrides config (e.g. 60s, 2m); valid range [5s, 300s]")
 
 	rulesCmd := newRulesCmd(&cfgPath)
 	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
@@ -97,7 +100,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 	return root
 }
 
-func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration string) error {
+func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string) error {
 	setupLogger(logLevel)
 
 	slog.Info("ebpf-guard starting",
@@ -114,6 +117,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return fmt.Errorf("load config: %w", err)
 	}
 	cfg := cfgManager.Get()
+
+	if shutdownTimeoutFlag != "" {
+		d, err := time.ParseDuration(shutdownTimeoutFlag)
+		if err != nil {
+			return fmt.Errorf("invalid --shutdown-timeout: %w", err)
+		}
+		if d < 5*time.Second || d > 300*time.Second {
+			return fmt.Errorf("--shutdown-timeout %s out of range: must be in [5s, 300s]", d)
+		}
+		cfg.Server.ShutdownTimeout = d
+	}
 
 	if err := config.ValidateConfig(cfg); err != nil {
 		return fmt.Errorf("config validation:\n%w", err)
@@ -257,6 +271,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		p := profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
 		engineCfg.LineageTracker = p.GetLineageTracker()
+
+		if cfg.Watchdog.MemoryPressure.Enabled {
+			memCfg := watchdog.MemoryConfig{
+				Enabled:                  true,
+				CheckInterval:            time.Duration(cfg.Watchdog.MemoryPressure.CheckInterval) * time.Second,
+				LowMemoryThreshold:       cfg.Watchdog.MemoryPressure.LowMemoryThreshold,
+				RecoveryThreshold:        cfg.Watchdog.MemoryPressure.RecoveryThreshold,
+				DisableSequenceThreshold: cfg.Watchdog.MemoryPressure.DisableSequenceThreshold,
+				DisableAllThreshold:      cfg.Watchdog.MemoryPressure.DisableAllThreshold,
+			}
+			seqProfilers := []watchdog.ControllableProfiler{p.GetSequenceProfiler()}
+			memWatcher := watchdog.NewMemoryPressureWatcherWithSequence(
+				memCfg, slog.Default(), seqProfilers, nil, nil,
+			)
+			if err := memWatcher.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+				slog.Warn("memory pressure: failed to register metrics", slog.Any("error", err))
+			}
+			go memWatcher.Start(ctx)
+		}
 	}
 
 	// Feature F: cross-node alert correlation via gossip amplification.
@@ -544,14 +577,50 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.String("subscription", cfg.Collectors.GCPAudit.PubSubSubscription))
 	}
 
+	// Build the required-collector set from config and tell the HTTP server.
+	requiredSet := make(map[string]bool, len(cfg.Collectors.Required))
+	for _, name := range cfg.Collectors.Required {
+		requiredSet[name] = true
+	}
+	if len(cfg.Collectors.Required) > 0 {
+		srv.SetRequiredCollectors(cfg.Collectors.Required)
+	}
+
+	// startupErrCh carries the first error from each collector that exits before
+	// the context is cancelled — used for fail-closed detection.
+	startupErrCh := make(chan struct {
+		name string
+		err  error
+	}, len(collectors))
+
 	for _, c := range collectors {
+		exporter.SetCollectorUp(c.Name(), true)
 		srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: true})
 		go func(c collector.Collector) {
 			if err := c.Start(ctx, eventCh); err != nil && ctx.Err() == nil {
 				slog.Error("collector error", slog.String("name", c.Name()), slog.Any("error", err))
+				exporter.SetCollectorUp(c.Name(), false)
 				srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false, Error: err.Error()})
+				startupErrCh <- struct {
+					name string
+					err  error
+				}{c.Name(), err}
 			}
 		}(c)
+	}
+
+	// fail-closed: if a required collector fails before the context is done, abort.
+	if cfg.Collectors.StartupPolicy == "fail-closed" && len(requiredSet) > 0 {
+		go func() {
+			for se := range startupErrCh {
+				if requiredSet[se.name] {
+					slog.Error("fail-closed: required collector failed, aborting",
+						slog.String("collector", se.name),
+						slog.Any("error", se.err))
+					cancel()
+				}
+			}
+		}()
 	}
 
 	if cfg.Rules.HotReload {
@@ -637,7 +706,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	for {
 		select {
 		case <-ctx.Done():
-			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration)
+			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration,
+				cfg.Server.ShutdownTimeout, cfg.Server.ShutdownDrainEnforcement, cfg.Server.ShutdownDrainRego)
 			return nil
 
 		case event, ok := <-eventCh:
@@ -713,11 +783,22 @@ func gracefulShutdown(
 	alertmanagerClient *exporter.AlertmanagerClient,
 	fanout *exporter.FanoutNotifier,
 	shutdownDuration prometheus.Gauge,
+	totalTimeout, drainEnforcementTimeout, drainRegoTimeout time.Duration,
 ) {
-	start := time.Now()
-	slog.Info("graceful shutdown: starting", slog.String("budget", "30s"))
+	if totalTimeout <= 0 {
+		totalTimeout = 30 * time.Second
+	}
+	if drainEnforcementTimeout <= 0 {
+		drainEnforcementTimeout = 5 * time.Second
+	}
+	if drainRegoTimeout <= 0 {
+		drainRegoTimeout = 5 * time.Second
+	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	start := time.Now()
+	slog.Info("graceful shutdown: starting", slog.String("budget", totalTimeout.String()))
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), totalTimeout)
 	defer shutdownCancel()
 
 	// Print simulation report before anything else so it's always visible.
@@ -736,15 +817,15 @@ func gracefulShutdown(
 	}
 
 	// Step 2: drain the enforcement worker queue so in-flight kill/block/throttle
-	// tasks are not abandoned mid-execution. Capped at 5 s to avoid hanging.
-	drainCtx, drainCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+	// tasks are not abandoned mid-execution.
+	drainCtx, drainCancel := context.WithTimeout(shutdownCtx, drainEnforcementTimeout)
 	slog.Info("graceful shutdown: draining enforcement queue")
 	engine.DrainEnforceQueue(drainCtx)
 	drainCancel()
 
 	// Step 3: drain async Rego evaluation workers so every alert that was
 	// submitted for OPA enrichment lands in the engine's pending buffer.
-	regoCtx, regoCancel := context.WithTimeout(shutdownCtx, 5*time.Second)
+	regoCtx, regoCancel := context.WithTimeout(shutdownCtx, drainRegoTimeout)
 	slog.Info("graceful shutdown: draining Rego evaluation queue")
 	if err := engine.Drain(regoCtx); err != nil {
 		slog.Warn("graceful shutdown: Rego drain timeout, some enrichments may be missing",

@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -96,6 +97,12 @@ type ServerConfig struct {
 	EnablePprof bool `mapstructure:"enable_pprof"`
 	// EnableDebug enables debug endpoints at /debug/state
 	EnableDebug bool `mapstructure:"enable_debug"`
+	// ShutdownTimeout is the total time budget for graceful shutdown. Valid range: [5s, 300s]. Default: 30s.
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	// ShutdownDrainEnforcement caps the time spent draining the enforcement queue during shutdown. Default: 5s.
+	ShutdownDrainEnforcement time.Duration `mapstructure:"shutdown_drain_enforcement"`
+	// ShutdownDrainRego caps the time spent draining async Rego evaluation workers during shutdown. Default: 5s.
+	ShutdownDrainRego time.Duration `mapstructure:"shutdown_drain_rego"`
 }
 
 // AuthConfig holds authentication configuration.
@@ -204,6 +211,16 @@ type CollectorsConfig struct {
 	CloudTrail CloudTrailCollectorConfig `mapstructure:"cloudtrail"`
 	// GCPAudit configures the GCP Audit Logs collector.
 	GCPAudit GCPAuditCollectorConfig `mapstructure:"gcp_audit"`
+	// StartupPolicy controls agent behaviour when a collector fails to start.
+	// "fail-open"  (default) — log the error and continue with reduced coverage.
+	// "fail-closed"          — exit with a non-zero code if any Required collector fails.
+	StartupPolicy string `mapstructure:"startup_policy"`
+	// Required lists collector names that MUST start successfully when StartupPolicy
+	// is "fail-closed". The agent exits if any of these fail.
+	Required []string `mapstructure:"required"`
+	// Optional lists collector names for which startup failures are always tolerated
+	// regardless of StartupPolicy.
+	Optional []string `mapstructure:"optional"`
 }
 
 // CloudTrailCollectorConfig holds AWS CloudTrail via SQS polling settings.
@@ -685,10 +702,16 @@ type MemoryPressureConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// CheckInterval is the interval for checking memory pressure (seconds)
 	CheckInterval int `mapstructure:"check_interval"`
-	// LowMemoryThreshold is the available memory % to trigger low-memory mode
+	// LowMemoryThreshold is the available memory % to trigger low-memory mode (deprecated: use DisableSequenceThreshold)
 	LowMemoryThreshold float64 `mapstructure:"low_memory_threshold"`
 	// RecoveryThreshold is the available memory % to recover normal mode
 	RecoveryThreshold float64 `mapstructure:"recovery_threshold"`
+	// DisableSequenceThreshold is the available memory % below which sequence profiling is disabled (level 1).
+	// Default: 10.0 (10% free RAM). Falls back to LowMemoryThreshold when zero.
+	DisableSequenceThreshold float64 `mapstructure:"disable_sequence_threshold"`
+	// DisableAllThreshold is the available memory % below which all profiling is disabled (level 2).
+	// Must be less than DisableSequenceThreshold. Default: 5.0 (5% free RAM).
+	DisableAllThreshold float64 `mapstructure:"disable_all_threshold"`
 }
 
 // PolicyConfig holds policy-as-code settings (Sprint 23.0).
@@ -942,6 +965,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.health_path", "/health")
 	v.SetDefault("server.enable_pprof", false)
 	v.SetDefault("server.enable_debug", false)
+	v.SetDefault("server.shutdown_timeout", "30s")
+	v.SetDefault("server.shutdown_drain_enforcement", "5s")
+	v.SetDefault("server.shutdown_drain_rego", "5s")
 
 	// BPF defaults
 	v.SetDefault("bpf.map_sizes.events", 65536)
@@ -1046,6 +1072,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.dns.tunneling_min_length", 50)
 	v.SetDefault("collectors.dns.high_frequency_threshold", 100)
 	v.SetDefault("collectors.dns.dga_whitelist", []string{})
+	v.SetDefault("collectors.startup_policy", "fail-open")
+	v.SetDefault("collectors.required", []string{})
+	v.SetDefault("collectors.optional", []string{})
 
 	// Enforcement defaults
 	v.SetDefault("enforcement.enabled", false)
@@ -1067,6 +1096,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("watchdog.memory_pressure.check_interval", 5)
 	v.SetDefault("watchdog.memory_pressure.low_memory_threshold", 10.0)
 	v.SetDefault("watchdog.memory_pressure.recovery_threshold", 20.0)
+	v.SetDefault("watchdog.memory_pressure.disable_sequence_threshold", 10.0)
+	v.SetDefault("watchdog.memory_pressure.disable_all_threshold", 5.0)
 
 	// Policy defaults (Sprint 23.0)
 	v.SetDefault("policy.rego.enabled", true)

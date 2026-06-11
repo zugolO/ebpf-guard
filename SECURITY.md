@@ -156,7 +156,58 @@ ebpf-guard runs as a privileged DaemonSet with `CAP_BPF`, `CAP_SYS_ADMIN`, and `
 | WASM plugin engine | Sandbox escape | wazero used (pure-Go, no CGo); filesystem and network access disabled |
 | OPA/Rego eval | Policy bypass | Input structs are typed Go values, not raw JSON; no user-controllable schema |
 
-An external third-party security audit is planned for the v1.0 milestone.
+An external third-party security audit is planned for the v1.0 milestone. See [Pre-Audit Checklist](#pre-audit-checklist-v10) below for current status.
+
+## Pre-Audit Checklist (v1.0)
+
+ebpf-guard runs as a privileged DaemonSet with `CAP_BPF + CAP_SYS_ADMIN + CAP_NET_ADMIN`. Before commissioning an external audit the following internal gates must pass.
+
+### Internal Preparation
+
+- [ ] `govulncheck ./...` exits clean (zero findings)
+- [ ] `trivy fs --severity HIGH,CRITICAL .` exits clean (zero findings)
+- [ ] Threat model document prepared and reviewed
+- [ ] Audit scope document defined
+
+### Audit Scope
+
+The external audit must cover at minimum:
+
+**Attack Surface**
+- HTTP API authentication bypass (bearer token, RBAC)
+- mTLS Alertmanager client certificate validation
+- WASM plugin sandbox escape (wazero capabilities)
+- OPA/Rego input injection
+- Gossip protocol message forgery
+
+**Privilege Escalation Paths**
+- BPF map poisoning from userspace
+- Ring buffer overflow handling
+- nftables netlink privilege escalation
+- XDP program injection
+
+**Dependency Audit**
+- `github.com/open-policy-agent/opa` — supply chain
+- `github.com/tetratelabs/wazero` — sandbox completeness
+- `github.com/google/nftables` — netlink attack surface
+- `github.com/cilium/ebpf` — BPF verifier bypass risks
+
+**Cryptographic Review**
+- Alert fingerprinting (SHA-256 collision resistance for dedup)
+- Token generation entropy (32-byte random — verify source)
+- TLS configuration completeness
+
+### Acceptance Criteria
+
+- [ ] Audit engagement confirmed (firm + timeline)
+- [ ] Internal preparation checklist above completed
+- [ ] Audit report published (or summary with finding counts)
+- [ ] All Critical/High findings resolved before v1.0 tag
+- [ ] `SECURITY.md` updated with audit completion date and auditor
+
+### Recommended Auditors
+
+Trail of Bits, NCC Group, Cure53, or a CNCF-affiliated security firm.
 
 ## Automated Security Scanning
 

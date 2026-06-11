@@ -97,6 +97,8 @@ func TestMemoryPressureWatcher_DefaultConfig(t *testing.T) {
 	assert.Equal(t, 5*time.Second, config.CheckInterval)
 	assert.Equal(t, 10.0, config.LowMemoryThreshold)
 	assert.Equal(t, 20.0, config.RecoveryThreshold)
+	assert.Equal(t, 10.0, config.DisableSequenceThreshold)
+	assert.Equal(t, 5.0, config.DisableAllThreshold)
 }
 
 func TestMemoryPressureWatcher_New(t *testing.T) {
@@ -108,8 +110,8 @@ func TestMemoryPressureWatcher_New(t *testing.T) {
 	watcher := NewMemoryPressureWatcher(config, logger, []ControllableProfiler{profiler}, bpfCtrl)
 	require.NotNil(t, watcher)
 	assert.NotNil(t, watcher.logger)
-	assert.Equal(t, 10.0, watcher.lowMemoryThreshold)
-	assert.Equal(t, 20.0, watcher.recoveryThreshold)
+	assert.Equal(t, 10.0, watcher.getLowMemoryThreshold())
+	assert.Equal(t, 20.0, watcher.getRecoveryThreshold())
 	assert.False(t, watcher.IsLowMemory())
 }
 
@@ -122,13 +124,76 @@ func TestMemoryPressureWatcher_RegisterMetrics(t *testing.T) {
 	err := watcher.RegisterMetrics(reg)
 	require.NoError(t, err)
 
-	// Verify both metrics are registered. Gather() returns families sorted by
-	// name, so "mode" precedes "ratio".
+	// Verify all three metrics are registered. Gather() returns families sorted by name.
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	require.Len(t, families, 2)
-	assert.Equal(t, "ebpf_guard_memory_pressure_mode", *families[0].Name)
-	assert.Equal(t, "ebpf_guard_memory_pressure_ratio", *families[1].Name)
+	require.Len(t, families, 3)
+	assert.Equal(t, "ebpf_guard_memory_pressure_level", *families[0].Name)
+	assert.Equal(t, "ebpf_guard_memory_pressure_mode", *families[1].Name)
+	assert.Equal(t, "ebpf_guard_memory_pressure_ratio", *families[2].Name)
+}
+
+func TestMemoryPressureWatcher_PressureLevel_Gauge(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	config := MemoryConfig{
+		Enabled:                  true,
+		CheckInterval:            100 * time.Millisecond,
+		DisableSequenceThreshold: 30.0,
+		DisableAllThreshold:      10.0,
+		RecoveryThreshold:        50.0,
+	}
+	seqP := newMockProfiler()
+	allP := newMockProfiler()
+	watcher := NewMemoryPressureWatcherWithSequence(config, nil, []ControllableProfiler{seqP}, []ControllableProfiler{allP}, nil)
+	require.NoError(t, watcher.RegisterMetrics(reg))
+
+	// Initial state: level 0
+	assert.Equal(t, 0, watcher.PressureLevel())
+	assert.False(t, watcher.IsLowMemory())
+
+	// Trigger level 1 (sequence disabled)
+	watcher.mu.Lock()
+	watcher.enterSequenceDisabledMode()
+	watcher.setState(pressureLevelSequenceDisabled)
+	watcher.mu.Unlock()
+
+	assert.Equal(t, 1, watcher.PressureLevel())
+	assert.True(t, watcher.IsLowMemory())
+	assert.False(t, seqP.IsEnabled())
+	assert.True(t, allP.IsEnabled()) // allP not yet touched
+
+	// Escalate to level 2 (all disabled)
+	watcher.mu.Lock()
+	watcher.enterAllDisabledMode()
+	watcher.setState(pressureLevelAllDisabled)
+	watcher.mu.Unlock()
+
+	assert.Equal(t, 2, watcher.PressureLevel())
+	assert.False(t, allP.IsEnabled())
+
+	// Recover
+	watcher.mu.Lock()
+	watcher.recoverNormalMode()
+	watcher.setState(pressureLevelNormal)
+	watcher.mu.Unlock()
+
+	assert.Equal(t, 0, watcher.PressureLevel())
+	assert.True(t, seqP.IsEnabled())
+	assert.True(t, allP.IsEnabled())
+}
+
+func TestMemoryPressureWatcher_BackCompatSingleList(t *testing.T) {
+	// NewMemoryPressureWatcher (single list) should disable the profiler at level 2.
+	config := DefaultMemoryConfig()
+	p := newMockProfiler()
+	watcher := NewMemoryPressureWatcher(config, nil, []ControllableProfiler{p}, nil)
+
+	watcher.mu.Lock()
+	watcher.enterAllDisabledMode() // same as old enterLowMemoryMode
+	watcher.mu.Unlock()
+
+	assert.False(t, p.IsEnabled())
+	assert.Equal(t, 0.1, p.GetSamplingRate())
 }
 
 func TestMemoryPressureWatcher_LowMemoryMode(t *testing.T) {
@@ -150,7 +215,7 @@ func TestMemoryPressureWatcher_LowMemoryMode(t *testing.T) {
 	assert.Equal(t, 1.0, profiler.GetSamplingRate())
 
 	// Simulate entering low memory mode
-	watcher.enterLowMemoryMode()
+	watcher.enterAllDisabledMode()
 
 	// Profiler should be disabled and sampling rate reduced
 	assert.False(t, profiler.IsEnabled())
@@ -170,7 +235,7 @@ func TestMemoryPressureWatcher_RecoverNormalMode(t *testing.T) {
 	watcher := NewMemoryPressureWatcher(config, nil, []ControllableProfiler{profiler}, bpfCtrl)
 
 	// Enter low memory mode first
-	watcher.enterLowMemoryMode()
+	watcher.enterAllDisabledMode()
 	assert.False(t, profiler.IsEnabled())
 
 	// Recover normal mode
@@ -194,7 +259,7 @@ func TestMemoryPressureWatcher_MultipleProfilers(t *testing.T) {
 	watcher := NewMemoryPressureWatcher(config, nil, []ControllableProfiler{profiler1, profiler2}, nil)
 
 	// Enter low memory mode
-	watcher.enterLowMemoryMode()
+	watcher.enterAllDisabledMode()
 
 	// Both profilers should be disabled
 	assert.False(t, profiler1.IsEnabled())

@@ -36,10 +36,11 @@ type Server struct {
 	logger      *slog.Logger
 
 	// Health state
-	healthy           bool
-	ready             bool
-	startTime         time.Time
-	collectorStatuses map[string]CollectorStatus
+	healthy            bool
+	ready              bool
+	startTime          time.Time
+	collectorStatuses  map[string]CollectorStatus
+	requiredCollectors map[string]bool // names that must be healthy for /health/ready → 200
 
 	// Debug handler (optional)
 	debugHandler *DebugHandler
@@ -322,6 +323,20 @@ func (s *Server) SetCollectorStatus(status CollectorStatus) {
 	s.collectorStatuses[status.Name] = status
 }
 
+// SetRequiredCollectors declares which collectors must be healthy for the
+// /health/ready endpoint to return 200. Call before Start.
+func (s *Server) SetRequiredCollectors(names []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requiredCollectors = make(map[string]bool, len(names))
+	for _, n := range names {
+		s.requiredCollectors[n] = true
+	}
+}
+
+// SetRequired is an alias for SetRequiredCollectors.
+func (s *Server) SetRequired(names []string) { s.SetRequiredCollectors(names) }
+
 // SetAlertStore sets the alert store for REST API access.
 func (s *Server) SetAlertStore(st store.AlertStore) {
 	s.mu.Lock()
@@ -440,6 +455,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReady handles the /health/ready endpoint (readiness probe).
+// Returns 503 only if a required collector is unhealthy or the store is unhealthy.
+// Optional collectors may be unhealthy without affecting readiness.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	ready := s.ready
@@ -448,27 +465,30 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		statuses = append(statuses, status)
 	}
 	alertStore := s.alertStore
+	required := s.requiredCollectors
 	s.mu.RUnlock()
-	
-	// Check if all collectors are healthy
-	allHealthy := true
-	var failedCollectors []string
+
+	// When no required set is configured, all registered collectors are required
+	// (preserves the previous behaviour).
+	var failedRequired []string
 	for _, status := range statuses {
-		if !status.Healthy {
-			allHealthy = false
-			failedCollectors = append(failedCollectors, status.Name)
+		if status.Healthy {
+			continue
+		}
+		if len(required) == 0 || required[status.Name] {
+			failedRequired = append(failedRequired, status.Name)
 		}
 	}
-	
-	// Check store health if configured
+
+	// Check store health if configured.
 	storeHealthy := true
 	if alertStore != nil {
 		storeHealthy = alertStore.Healthy(r.Context())
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
-	
-	if ready && allHealthy && storeHealthy {
+
+	if ready && len(failedRequired) == 0 && storeHealthy {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":     "ready",
@@ -478,14 +498,19 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		response := map[string]interface{}{
-			"status": "not ready",
+			"status":     "not ready",
+			"collectors": statuses,
 		}
 		if !ready {
 			response["reason"] = "server not ready"
 		}
-		if !allHealthy {
-			response["failed_collectors"] = failedCollectors
-			response["collectors"] = statuses
+		if len(failedRequired) > 0 {
+			// "failed_collectors" keeps backward compat; "failed_required_collectors"
+			// disambiguates when a required list is explicitly configured.
+			response["failed_collectors"] = failedRequired
+			if len(required) > 0 {
+				response["failed_required_collectors"] = failedRequired
+			}
 		}
 		if !storeHealthy {
 			response["store"] = "unhealthy"

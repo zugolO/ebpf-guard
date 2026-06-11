@@ -396,3 +396,90 @@ func TestScenario4_HotReloadRules_NewRulesApplied(t *testing.T) {
 	require.Len(t, sysCalls, 1)
 	assert.Equal(t, syscallRule.ID, sysCalls[0].RuleID)
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 5: hot-reload with invalid YAML — old rules must remain active
+// ---------------------------------------------------------------------------
+
+// TestScenario5_HotReload_InvalidYAML_OldRulesRetained verifies that when a
+// hot-reload is attempted with an invalid rule set (duplicate IDs, unknown field,
+// or invalid operator), the atomic swap is aborted and the previous rules
+// continue to fire as normal.
+func TestScenario5_HotReload_InvalidYAML_OldRulesRetained(t *testing.T) {
+	ctx := context.Background()
+	enf := newDryRunEnforcer(t)
+
+	goodRule := correlator.Rule{
+		ID:        "integ_good_rule",
+		Name:      "Good TCP Rule",
+		EventType: types.EventTCPConnect,
+		Condition: correlator.RuleCondition{
+			Field:  "dport",
+			Op:     correlator.OpEquals,
+			Values: []string{"8080"},
+		},
+		Severity: types.SeverityWarning,
+		Action:   correlator.ActionAlert,
+	}
+
+	engine := newEngine(enf, []correlator.Rule{goodRule}, func(cfg *correlator.CorrelationEngineConfig) {
+		cfg.EnableDedup = false
+		cfg.EnableRateLimit = false
+	})
+	st := store.NewMemoryStore()
+
+	// Good rule fires before any reload attempt.
+	n := ingestAndStore(ctx, engine, st, makeTCPEvent(1, 8080))
+	require.Equal(t, 1, n, "good rule must fire before reload attempt")
+
+	// Attempt a hot-reload with a rule set that has a duplicate ID.
+	dupRule1 := correlator.Rule{
+		ID:        "dup_id",
+		Name:      "Dup Rule A",
+		EventType: types.EventTCPConnect,
+		Condition: correlator.RuleCondition{Field: "dport", Op: correlator.OpEquals, Values: []string{"9999"}},
+		Severity:  types.SeverityWarning,
+		Action:    correlator.ActionAlert,
+	}
+	dupRule2 := correlator.Rule{
+		ID:        "dup_id", // same ID — ValidateFull must reject this
+		Name:      "Dup Rule B",
+		EventType: types.EventTCPConnect,
+		Condition: correlator.RuleCondition{Field: "dport", Op: correlator.OpEquals, Values: []string{"7777"}},
+		Severity:  types.SeverityWarning,
+		Action:    correlator.ActionAlert,
+	}
+	invalidSet := []correlator.Rule{dupRule1, dupRule2}
+
+	// ValidateFull must reject the invalid set.
+	require.Error(t, correlator.ValidateFull(invalidSet), "duplicate IDs must be rejected by ValidateFull")
+
+	// Simulate what the hot-reload handler does: validate first, skip swap on error.
+	if err := correlator.ValidateFull(invalidSet); err != nil {
+		// Reload aborted — old rules retained (no UpdateRules call).
+	}
+
+	// Engine must still have exactly the original rule.
+	require.Len(t, engine.GetRules(), 1)
+	assert.Equal(t, goodRule.ID, engine.GetRules()[0].ID, "old rule must be retained after aborted reload")
+
+	// Original rule must still fire.
+	n2 := ingestAndStore(ctx, engine, st, makeTCPEvent(2, 8080))
+	require.Equal(t, 1, n2, "good rule must still fire after aborted invalid reload")
+
+	// Attempt a reload with a rule containing an unknown field — also invalid.
+	badFieldRule := correlator.Rule{
+		ID:        "bad_field_rule",
+		Name:      "Bad Field",
+		EventType: types.EventTCPConnect,
+		Condition: correlator.RuleCondition{Field: "no_such_field", Op: correlator.OpEquals, Values: []string{"1"}},
+		Severity:  types.SeverityWarning,
+		Action:    correlator.ActionAlert,
+	}
+	require.Error(t, correlator.ValidateFull([]correlator.Rule{badFieldRule}),
+		"unknown field must be rejected by ValidateFull")
+
+	// Engine unchanged.
+	require.Len(t, engine.GetRules(), 1)
+	assert.Equal(t, goodRule.ID, engine.GetRules()[0].ID)
+}

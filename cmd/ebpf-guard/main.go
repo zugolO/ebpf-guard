@@ -535,16 +535,32 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if cfg.Rules.HotReload {
 		cfgManager.OnChange(func(newCfg *config.Config) {
+			oldCount := len(engine.GetRules())
+
+			// Phase 1: parse and fully validate in isolation — no swap yet.
 			t0 := time.Now()
 			newRules, err := correlator.LoadRulesFromFile(newCfg.Rules.Path)
 			engine.ObserveYAMLParseDuration(time.Since(t0))
 			if err != nil {
-				slog.Warn("hot-reload: failed to load rules", slog.Any("error", err))
+				slog.Error("hot-reload aborted: validation failed",
+					slog.Any("error", err),
+					slog.Int("old_count", oldCount))
 				engine.RecordReloadFailure()
 				return
 			}
+			if err := correlator.ValidateFull(newRules); err != nil {
+				slog.Error("hot-reload aborted: full validation failed",
+					slog.Any("error", err),
+					slog.Int("old_count", oldCount))
+				engine.RecordReloadFailure()
+				return
+			}
+
+			// Phase 2: atomic swap — only reached after full validation.
 			engine.ReloadRules(newRules)
-			slog.Info("hot-reload: rules updated", slog.Int("count", len(newRules)))
+			slog.Info("hot-reload applied",
+				slog.Int("rules_count", len(newRules)),
+				slog.Int("old_count", oldCount))
 		})
 		if err := cfgManager.Watch(); err != nil {
 			slog.Warn("hot-reload watch failed", slog.Any("error", err))

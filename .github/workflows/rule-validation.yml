@@ -64,6 +64,23 @@ jobs:
             exit 1
           fi
 
+      - name: ValidateFull — duplicate IDs and partial-invalid reload
+        run: |
+          go test -v -run 'TestValidateFull' ./internal/correlator/... 2>&1 | tee validatefull.log
+          if grep -q "^FAIL" validatefull.log; then
+            echo "::error::ValidateFull tests failed — see validatefull.log"
+            exit 1
+          fi
+
+      - name: Integration — hot-reload invalid YAML retains old rules
+        run: |
+          go test -v -tags=integration -run 'TestScenario5_HotReload_InvalidYAML_OldRulesRetained' \
+            ./internal/integration/... 2>&1 | tee hotreload-invalid.log
+          if grep -q "^FAIL" hotreload-invalid.log; then
+            echo "::error::Hot-reload invalid-YAML retention test failed — see hotreload-invalid.log"
+            exit 1
+          fi
+
       - name: Count rules and enforce minimum
         run: |
           RULE_COUNT=$(grep -c "^  - id:" rules/*.yaml | awk -F: '{sum += $2} END {print sum}')

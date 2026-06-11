@@ -117,6 +117,35 @@ var (
 // Ensure RuleConditionGroup has SubGroups field for recursive validation.
 // This is defined in rules.go but we need to reference it here.
 
+// ValidateFull performs full pre-swap validation of a rule set.
+// It validates each rule individually (field names, operators, regex/CIDR patterns,
+// sample_rate range) and then checks the set as a whole for duplicate rule IDs.
+// All errors are collected so the caller sees every problem in one pass.
+func ValidateFull(rules []Rule) error {
+	var errs []string
+
+	seen := make(map[string]int, len(rules))
+	for i := range rules {
+		rule := &rules[i]
+		if err := validateRule(rule); err != nil {
+			errs = append(errs, fmt.Sprintf("rule %d (%s): %v", i, rule.ID, err))
+		}
+		if rule.ID != "" {
+			if prev, dup := seen[rule.ID]; dup {
+				errs = append(errs, fmt.Sprintf("duplicate rule ID %q at indices %d and %d", rule.ID, prev, i))
+			} else {
+				seen[rule.ID] = i
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("correlator: rule set validation failed (%d error(s)): %s",
+			len(errs), strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 // LoadRulesFromFile loads rules from a YAML file with full validation.
 func LoadRulesFromFile(path string) ([]Rule, error) {
 	data, err := os.ReadFile(path)
@@ -129,11 +158,8 @@ func LoadRulesFromFile(path string) ([]Rule, error) {
 		return nil, fmt.Errorf("correlator: unmarshal rules: %w", err)
 	}
 
-	// Validate rules
-	for i, rule := range ruleSet.Rules {
-		if err := validateRule(&rule); err != nil {
-			return nil, fmt.Errorf("correlator: validate rule %d (%s): %w", i, rule.ID, err)
-		}
+	if err := ValidateFull(ruleSet.Rules); err != nil {
+		return nil, err
 	}
 
 	return ruleSet.Rules, nil

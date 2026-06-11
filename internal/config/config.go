@@ -86,6 +86,9 @@ type Config struct {
 
 	// Audit configuration — append-only JSONL audit log for rule and config changes.
 	Audit AuditConfig `mapstructure:"audit"`
+
+	// AdmissionWebhook configures the Kubernetes ValidatingAdmissionWebhook server.
+	AdmissionWebhook AdmissionWebhookConfig `mapstructure:"admission_webhook"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -520,6 +523,13 @@ type RulesConfig struct {
 	// Each entry maps a Kubernetes label selector to an additional rules file.
 	// These are merged with (or replace) the global rules depending on Override.
 	Namespaces []NamespaceRuleConfig `mapstructure:"namespaces"`
+	// VerifyChecksums enables SHA-256 integrity verification of rule files at
+	// startup and on hot-reload. When enabled, each rule file is verified against
+	// the checksum file before loading. Startup aborts if a mismatch is detected.
+	VerifyChecksums bool `mapstructure:"verify_checksums"`
+	// ChecksumFile is the path to the SHA-256 checksum file (sha256sum format).
+	// Defaults to <rules_dir>/checksums.sha256.
+	ChecksumFile string `mapstructure:"checksum_file"`
 }
 
 // NamespaceRuleConfig maps a Kubernetes label selector to additional rule files.
@@ -953,6 +963,38 @@ type AuditConfig struct {
 	IncludeRuleDiffs bool `mapstructure:"include_rule_diffs"`
 }
 
+// AdmissionWebhookConfig configures the optional Kubernetes ValidatingAdmissionWebhook.
+// When enabled, ebpf-guard serves a webhook endpoint that kube-apiserver calls
+// before admitting pods, evaluating pod specs against the same Rego policies
+// used for runtime enforcement.
+type AdmissionWebhookConfig struct {
+	// Enabled activates the admission webhook server. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// BindAddress is the listen address for the webhook HTTPS server.
+	// Default: ":8443"
+	BindAddress string `mapstructure:"bind_address"`
+	// Mode controls webhook enforcement. "warn" annotates pods and allows them;
+	// "enforce" denies pods that violate policies. Default: "warn".
+	Mode string `mapstructure:"mode"`
+	// FailurePolicy controls kube-apiserver behaviour when the webhook is
+	// unavailable: "Ignore" allows pods through (safe default), "Fail" blocks.
+	// Default: "Ignore"
+	FailurePolicy string `mapstructure:"failure_policy"`
+	// TLSCertFile is the path to the PEM-encoded TLS certificate file.
+	// Required when Enabled is true (unless TLSAutoGenerate is set).
+	TLSCertFile string `mapstructure:"tls_cert_file"`
+	// TLSKeyFile is the path to the PEM-encoded private key file.
+	// Required when Enabled is true (unless TLSAutoGenerate is set).
+	TLSKeyFile string `mapstructure:"tls_key_file"`
+	// TLSAutoGenerate generates a self-signed certificate on startup when
+	// TLSCertFile and TLSKeyFile are empty. Suitable for development; use
+	// cert-manager in production.
+	TLSAutoGenerate bool `mapstructure:"tls_auto_generate"`
+	// WebhookPath is the URL path kube-apiserver sends admission requests to.
+	// Default: "/admission"
+	WebhookPath string `mapstructure:"webhook_path"`
+}
+
 // CheckConfigPermissions verifies the config file is not world-writable and is
 // owned by root (uid 0) or the current process UID. Returns an error if the
 // check fails; callers should treat this as a fatal startup error.
@@ -1241,6 +1283,20 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("audit.path", "/var/log/ebpf-guard/audit.jsonl")
 	v.SetDefault("audit.max_size_mb", 100)
 	v.SetDefault("audit.include_rule_diffs", true)
+
+	// Rule checksum verification defaults (issue #119) — opt-in.
+	v.SetDefault("rules.verify_checksums", false)
+	v.SetDefault("rules.checksum_file", "")
+
+	// Admission webhook defaults (issue #120) — disabled by default; opt-in.
+	v.SetDefault("admission_webhook.enabled", false)
+	v.SetDefault("admission_webhook.bind_address", ":8443")
+	v.SetDefault("admission_webhook.mode", "warn")
+	v.SetDefault("admission_webhook.failure_policy", "Ignore")
+	v.SetDefault("admission_webhook.tls_cert_file", "")
+	v.SetDefault("admission_webhook.tls_key_file", "")
+	v.SetDefault("admission_webhook.tls_auto_generate", false)
+	v.SetDefault("admission_webhook.webhook_path", "/admission")
 }
 
 // Get returns the current configuration (thread-safe).

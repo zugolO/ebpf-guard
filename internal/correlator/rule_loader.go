@@ -167,6 +167,20 @@ func LoadRulesFromFile(path string) ([]Rule, error) {
 
 // LoadRulesFromDir loads all .yaml/.yml files from a directory.
 func LoadRulesFromDir(dir string) ([]Rule, error) {
+	return LoadRulesFromDirWithChecksums(dir, false, "")
+}
+
+// LoadRulesFromDirWithChecksums loads all .yaml/.yml rule files from a
+// directory, optionally verifying their SHA-256 checksums first.
+// When verifyChecksums is true and checksumFile is empty, it defaults to
+// <dir>/checksums.sha256. Returns an error if any checksum fails.
+func LoadRulesFromDirWithChecksums(dir string, verifyChecksums bool, checksumFile string) ([]Rule, error) {
+	if verifyChecksums {
+		if err := VerifyRuleChecksums(dir, checksumFile); err != nil {
+			return nil, err
+		}
+	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("correlator: read rules directory: %w", err)

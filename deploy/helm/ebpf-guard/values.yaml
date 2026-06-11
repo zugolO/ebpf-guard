@@ -475,6 +475,38 @@ bpfLiveUpdate:
   # pendingPinDir is the bpffs path used to stage new programs before swapping.
   pendingPinDir: /sys/fs/bpf/ebpf-guard/pending
 
+# Admission webhook — Kubernetes ValidatingAdmissionWebhook for pre-deploy policy
+# enforcement. Evaluates pod specs against Rego policies before admission.
+# Requires cert-manager or a manually-provisioned TLS certificate.
+admissionWebhook:
+  # enabled activates the ValidatingAdmissionWebhook resources. Default: false.
+  enabled: false
+  # mode: "warn" allows pods but annotates warnings; "enforce" denies violating pods.
+  mode: "warn"
+  # failurePolicy: "Ignore" allows pods when the webhook is unavailable (safe default).
+  failurePolicy: "Ignore"
+  # port is the HTTPS port the webhook server listens on.
+  port: 8443
+  # webhookPath is the URL path kube-apiserver sends requests to.
+  webhookPath: "/admission"
+  # timeoutSeconds is the timeout for the webhook call (1-30). Default: 5.
+  timeoutSeconds: 5
+  # caBundle is the base64-encoded CA certificate used to verify the webhook TLS.
+  # Leave empty when using cert-manager (caBundle is injected automatically).
+  caBundle: ""
+  # namespaceSelector restricts which namespaces the webhook applies to.
+  # To opt namespaces in, label them: kubectl label ns <name> ebpf-guard/admission=enabled
+  namespaceSelector:
+    matchLabels:
+      ebpf-guard/admission: "enabled"
+  # objectSelector optionally restricts which pods are sent to the webhook.
+  objectSelector: {}
+  # certManager configures automatic TLS provisioning via cert-manager.
+  certManager:
+    enabled: false
+    issuerName: "selfsigned-issuer"
+    issuerKind: "ClusterIssuer"
+
 # Grafana dashboard ConfigMap (loaded by Grafana sidecar if enabled)
 grafana:
   dashboard:

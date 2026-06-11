@@ -117,15 +117,24 @@ func Handler(mgr *Manager) http.Handler {
 	mux := http.NewServeMux()
 
 	authCheck := func(w http.ResponseWriter, r *http.Request) bool {
-		if mgr.cfg.Secret != "" {
-			got := r.Header.Get(gossipSecretHeader)
-			// Use constant-time comparison to prevent timing-based secret leakage.
-			if subtle.ConstantTimeCompare([]byte(got), []byte(mgr.cfg.Secret)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return false
-			}
+		if mgr.cfg.Secret == "" {
+			return true
 		}
-		return true
+		got := r.Header.Get(gossipSecretHeader)
+		// Primary secret check — constant-time to prevent timing side-channels.
+		if subtle.ConstantTimeCompare([]byte(got), []byte(mgr.cfg.Secret)) == 1 {
+			return true
+		}
+		// During a rotation window, also accept the previous secret so peers
+		// running the old config can still connect while being rolled over.
+		if mgr.cfg.SecretPrevious != "" &&
+			!mgr.secretRotationDeadline.IsZero() &&
+			time.Now().Before(mgr.secretRotationDeadline) &&
+			subtle.ConstantTimeCompare([]byte(got), []byte(mgr.cfg.SecretPrevious)) == 1 {
+			return true
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
 	}
 
 	mux.HandleFunc(gossipPath, func(w http.ResponseWriter, r *http.Request) {

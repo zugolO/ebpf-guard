@@ -141,6 +141,14 @@ func ValidateConfig(cfg *Config) error {
 		if cfg.Gossip.TLSKeyFile == "" {
 			add(fmt.Errorf("gossip.tls_key_file: required when gossip.tls_enabled is true"))
 		}
+		if cfg.Gossip.TLSCAFile == "" {
+			add(fmt.Errorf("gossip.tls_ca_file: required when gossip.tls_enabled is true"))
+		}
+	}
+	if cfg.Gossip.Enabled && cfg.Gossip.SecretPrevious != "" {
+		if cfg.Gossip.SecretRotationTTL <= 0 {
+			add(fmt.Errorf("gossip.secret_rotation_ttl: must be > 0 when gossip.secret_previous is set"))
+		}
 	}
 	for i, peer := range cfg.Gossip.Peers {
 		add(validateHTTPURL(fmt.Sprintf("gossip.peers[%d]", i), peer))

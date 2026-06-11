@@ -753,6 +753,13 @@ type GossipConfig struct {
 	// Secret is the shared authentication token sent in X-Gossip-Secret.
 	// If empty, gossip requests are accepted without authentication.
 	Secret string `mapstructure:"secret"`
+	// SecretPrevious is the old shared secret accepted during a rolling rotation.
+	// Peers still using the old secret are allowed to connect until
+	// SecretRotationTTL elapses from startup. Clear once all nodes use the new Secret.
+	SecretPrevious string `mapstructure:"secret_previous"`
+	// SecretRotationTTL is how long SecretPrevious remains valid after startup.
+	// Default: 5m. Zero disables the rotation window even if SecretPrevious is set.
+	SecretRotationTTL time.Duration `mapstructure:"secret_rotation_ttl"`
 	// Peers is the list of peer base URLs to push IOCs to.
 	// With TLS enabled use https:// URLs, e.g. "https://10.0.0.2:9090".
 	Peers []string `mapstructure:"peers"`
@@ -888,6 +895,13 @@ type CanaryConfig struct {
 	// AlertSeverity is the severity for canary access alerts ("warning" or "critical").
 	// Default: critical
 	AlertSeverity string `mapstructure:"alert_severity"`
+	// VerifyInterval is how often canary file integrity is checked after creation.
+	// Default: 60s
+	VerifyInterval time.Duration `mapstructure:"verify_interval"`
+	// AlertOnTamper controls whether an alert is emitted when a canary file is
+	// found missing or modified during periodic verification.
+	// Default: true
+	AlertOnTamper bool `mapstructure:"alert_on_tamper"`
 }
 
 // AuditConfig holds settings for the rule-change and config-reload audit log.
@@ -1134,6 +1148,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gossip.enabled", false)
 	v.SetDefault("gossip.node_name", "")
 	v.SetDefault("gossip.secret", "")
+	v.SetDefault("gossip.secret_previous", "")
+	v.SetDefault("gossip.secret_rotation_ttl", 5*time.Minute)
 	v.SetDefault("gossip.peers", []string{})
 	v.SetDefault("gossip.ioc_ttl", 3600)
 	v.SetDefault("gossip.max_iocs", 100_000)
@@ -1184,6 +1200,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("canary.auto_create", true)
 	v.SetDefault("canary.files", []string{})
 	v.SetDefault("canary.alert_severity", "critical")
+	v.SetDefault("canary.verify_interval", 60*time.Second)
+	v.SetDefault("canary.alert_on_tamper", true)
 
 	// Audit log defaults — disabled by default; operators opt in.
 	v.SetDefault("audit.enabled", false)

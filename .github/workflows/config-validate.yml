@@ -33,6 +33,21 @@ jobs:
       - name: Validate config/config.yaml
         run: /tmp/ebpf-guard config validate --config config/config.yaml
 
+      - name: Reject invalid store.backend (issue #114)
+        run: |
+          cat > /tmp/invalid-backend.yaml <<'EOF'
+          store:
+            backend: sqllite
+          EOF
+          if /tmp/ebpf-guard config validate --config /tmp/invalid-backend.yaml; then
+            echo "ERROR: expected non-zero exit for invalid store.backend" >&2
+            exit 1
+          fi
+          echo "OK: invalid store.backend correctly rejected"
+
+      - name: Reject out-of-range sample_rate in rules (issue #114)
+        run: go test -v -run "TestValidateRule_SampleRate" ./internal/correlator/...
+
       - name: Test config migrations
         run: go test -v -run "TestMigration|TestNoBreaking" ./internal/config/...
 

@@ -186,6 +186,58 @@ func AddBPFLost(collector string, n uint64) {
 }
 
 var (
+	// EventQueueDepth tracks the current number of events waiting in the
+	// in-process channel between collectors and the correlation engine.
+	EventQueueDepth = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_event_queue_depth",
+			Help: "Current number of events buffered in the correlation engine input queue",
+		},
+	)
+
+	// EventQueueCapacity tracks the maximum capacity of the event queue channel.
+	EventQueueCapacity = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_event_queue_capacity",
+			Help: "Maximum capacity of the correlation engine input queue",
+		},
+	)
+
+	// EventQueueOverflow counts events dropped because the queue was full.
+	EventQueueOverflow = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_event_queue_dropped_total",
+			Help: "Total number of events dropped due to event queue overflow",
+		},
+	)
+
+	// GoroutinePoolActive tracks the number of goroutines actively processing
+	// events in the bounded worker pool.
+	GoroutinePoolActive = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_goroutine_pool_active",
+			Help: "Number of goroutines currently processing events in the worker pool",
+		},
+	)
+)
+
+// RecordQueueDepth updates the event queue depth and capacity gauges.
+func RecordQueueDepth(depth, capacity int) {
+	EventQueueDepth.Set(float64(depth))
+	EventQueueCapacity.Set(float64(capacity))
+}
+
+// RecordQueueOverflow increments the overflow counter (event dropped due to full queue).
+func RecordQueueOverflow() {
+	EventQueueOverflow.Inc()
+}
+
+// SetGoroutinePoolActive sets the active worker count gauge.
+func SetGoroutinePoolActive(n int64) {
+	GoroutinePoolActive.Set(float64(n))
+}
+
+var (
 	// GPUEventsTotal counts GPU/CUDA events by operation type.
 	GPUEventsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

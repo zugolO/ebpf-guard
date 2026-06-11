@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -32,10 +35,30 @@ func NewOpenSearchStore(cfg OpenSearchConfig) (*OpenSearchStore, error) {
 		cfg.IndexPrefix = "ebpf-guard"
 	}
 
+	if cfg.InsecureSkipVerify {
+		slog.Warn("opensearch: InsecureSkipVerify is enabled — TLS certificate verification is disabled; do not use in production")
+	}
+
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // user-controlled flag, warned above
+		ServerName:         cfg.TLSServerName,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	if cfg.CACert != "" {
+		pemData, err := os.ReadFile(cfg.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("opensearch: read CA cert %s: %w", cfg.CACert, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemData) {
+			return nil, fmt.Errorf("opensearch: no valid certificates found in %s", cfg.CACert)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: cfg.InsecureSkipVerify,
-		},
+		TLSClientConfig: tlsCfg,
 	}
 
 	client := &http.Client{

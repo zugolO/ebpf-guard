@@ -393,8 +393,16 @@ type OpenSearchStoreConfig struct {
 	Username string `mapstructure:"username"`
 	// Password for basic authentication (or reference to Secret)
 	Password string `mapstructure:"password"`
-	// InsecureSkipVerify disables TLS certificate verification
+	// InsecureSkipVerify disables TLS certificate verification.
+	// A warning is emitted at startup when this is true.
 	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
+	// CACert is the path to a PEM-encoded CA certificate file used to verify
+	// the OpenSearch server certificate. Leave empty to use the system CA pool.
+	CACert string `mapstructure:"ca_cert"`
+	// TLSServerName overrides the SNI hostname sent during the TLS handshake.
+	// Useful when connecting via IP to a cluster with a DNS-based certificate
+	// (e.g. "opensearch.monitoring.svc.cluster.local").
+	TLSServerName string `mapstructure:"server_name"`
 }
 
 // BPFConfig holds eBPF-specific settings.
@@ -430,6 +438,21 @@ type BPFConfig struct {
 	// collectors (no LSM hooks, no TLS uprobes) when no BTF source is available.
 	// When false (default), startup fails if BTF cannot be resolved.
 	FallbackReducedFeatures bool `mapstructure:"fallback_reduced_features"`
+
+	// MaxConcurrentEvents is the maximum number of events that may be processed
+	// concurrently by the correlation engine worker pool. Zero disables the pool
+	// cap (legacy behaviour). Recommended: 4096.
+	MaxConcurrentEvents int `mapstructure:"max_concurrent_events"`
+
+	// EventQueueDepth is the size of the in-process event channel between
+	// collectors and the correlation engine. When the channel is full, the
+	// OverflowPolicy is applied. Defaults to the correlator.buffer_size when
+	// unset. Recommended: 65536.
+	EventQueueDepth int `mapstructure:"event_queue_depth"`
+
+	// OverflowPolicy controls what happens to events when the queue is full.
+	// Valid values: "drop" (default), "block", "sample".
+	OverflowPolicy string `mapstructure:"overflow_policy"`
 }
 
 // KernelFilterConfig controls BPF-side content-based filtering.

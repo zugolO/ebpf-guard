@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sync/semaphore"
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	internalbpf "github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
@@ -422,6 +423,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			Username:           cfg.Store.OpenSearch.Username,
 			Password:           cfg.Store.OpenSearch.Password,
 			InsecureSkipVerify: cfg.Store.OpenSearch.InsecureSkipVerify,
+			CACert:             cfg.Store.OpenSearch.CACert,
+			TLSServerName:      cfg.Store.OpenSearch.TLSServerName,
 		},
 		RetentionPeriod: 7 * 24 * time.Hour,
 	})
@@ -547,13 +550,38 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Any("error", err))
 	}
 
-	eventCh := make(chan types.Event, engineCfg.BufferSize)
+	// Determine event queue depth: prefer the explicit BPF config, fall back to
+	// the correlator buffer size so existing deployments keep the same behaviour.
+	eventQueueDepth := cfg.BPF.EventQueueDepth
+	if eventQueueDepth <= 0 {
+		eventQueueDepth = engineCfg.BufferSize
+	}
+	eventCh := make(chan types.Event, eventQueueDepth)
 	engine.SetQueueDepthFn(func() int { return len(eventCh) }, func() int { return cap(eventCh) })
+	exporter.RecordQueueDepth(0, eventQueueDepth)
 
+	// Determine overflow policy: BPF config takes precedence over the collector
+	// backpressure_strategy for the worker-pool overflow path.
+	overflowPolicy := cfg.BPF.OverflowPolicy
 	bpStrategy := collector.BackpressureStrategy(cfg.Collectors.BackpressureStrategy)
+	if overflowPolicy == "" {
+		overflowPolicy = string(bpStrategy)
+	}
 	if bpStrategy == "" {
 		bpStrategy = collector.StrategyDrop
 	}
+
+	// Bounded worker pool: cap concurrent event-processing goroutines.
+	maxConcurrent := int64(cfg.BPF.MaxConcurrentEvents)
+	if maxConcurrent <= 0 {
+		maxConcurrent = 4096
+	}
+	workerSem := semaphore.NewWeighted(maxConcurrent)
+
+	slog.Info("event pipeline configured",
+		slog.Int("queue_depth", eventQueueDepth),
+		slog.Int64("max_concurrent_events", maxConcurrent),
+		slog.String("overflow_policy", overflowPolicy))
 
 	var collectors []collector.Collector
 	if dryRun {
@@ -703,9 +731,29 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	})
 	var driftSeq atomic.Uint64
 
+	// Background: refresh queue depth gauge every second.
+	var activeWorkers atomic.Int64
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				exporter.RecordQueueDepth(len(eventCh), cap(eventCh))
+				exporter.SetGoroutinePoolActive(activeWorkers.Load())
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
+			// Wait for all in-flight dispatch goroutines to finish before shutdown.
+			if aerr := workerSem.Acquire(ctx, maxConcurrent); aerr != nil {
+				slog.Debug("shutdown: worker pool drain interrupted", slog.Any("error", aerr))
+			}
 			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration,
 				cfg.Server.ShutdownTimeout, cfg.Server.ShutdownDrainEnforcement, cfg.Server.ShutdownDrainRego)
 			return nil
@@ -719,6 +767,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					slog.Debug("event log: write error", slog.Any("error", wErr))
 				}
 			}
+
+			// engine.Ingest is single-goroutine safe; call it here before dispatch.
 			alerts := engine.Ingest(ctx, event)
 
 			// Run container drift detection alongside the rule engine.
@@ -728,36 +778,55 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				alerts = append(alerts, drift.DriftAlertToTypes(da, seq))
 			}
 
-			if len(alerts) > 0 {
+			if len(alerts) == 0 {
+				continue
+			}
+
+			// Dispatch alert I/O (store + forward) in a bounded goroutine pool to
+			// prevent unbounded goroutine growth under burst alert rates.
+			if !workerSem.TryAcquire(1) {
+				// Pool is saturated; drop this dispatch and record the overflow.
+				exporter.RecordQueueOverflow()
+				continue
+			}
+			n := activeWorkers.Add(1)
+			exporter.SetGoroutinePoolActive(n)
+
+			go func(dispatched []types.Alert) {
+				defer func() {
+					workerSem.Release(1)
+					exporter.SetGoroutinePoolActive(activeWorkers.Add(-1))
+				}()
+
 				if simCollector != nil {
-					for _, a := range alerts {
+					for _, a := range dispatched {
 						simCollector.Record(a)
 					}
 				}
-				if err := alertStore.StoreBatch(ctx, alerts); err != nil {
+				if err := alertStore.StoreBatch(ctx, dispatched); err != nil {
 					slog.Warn("store alerts error", slog.Any("error", err))
 				}
 				// Forward alerts to Alertmanager webhook if configured.
 				if alertmanagerClient != nil {
-					for _, a := range alerts {
+					for _, a := range dispatched {
 						alertmanagerClient.SendAlert(ctx, a)
 					}
 				}
 				// Fan out to Slack / Teams / webhook notifiers if configured.
 				if fanout != nil {
-					for _, a := range alerts {
+					for _, a := range dispatched {
 						fanout.Send(ctx, a)
 					}
 				}
 				// Feature F: broadcast critical alerts to peer nodes (cross-node
 				// alert amplification) and extract IOCs for gossip sharing.
 				if gossipMgr != nil {
-					for _, a := range alerts {
+					for _, a := range dispatched {
 						gossipMgr.BroadcastAlert(a)
 						gossipMgr.ExtractFromAlert(a)
 					}
 				}
-			}
+			}(alerts)
 		}
 	}
 }

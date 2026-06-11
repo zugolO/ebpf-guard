@@ -149,7 +149,15 @@ type OpenSearchConfig struct {
 	// IndexPrefix is prepended to all index names.
 	IndexPrefix string
 	// InsecureSkipVerify disables TLS certificate verification.
+	// When true, a warning is emitted at startup.
 	InsecureSkipVerify bool
+	// CACert is the path to a PEM-encoded CA certificate file used to verify
+	// the OpenSearch server certificate.
+	CACert string
+	// TLSServerName overrides the SNI hostname sent during the TLS handshake.
+	// Use when the server certificate's SAN does not match the address (e.g.
+	// when connecting via IP to a cluster with a DNS-based certificate).
+	TLSServerName string
 }
 
 // New creates a new AlertStore based on the configuration.

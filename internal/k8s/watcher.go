@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +31,10 @@ type Watcher struct {
 	// podCache maps container ID -> PodInfo
 	mu       sync.RWMutex
 	podCache map[string]*PodInfo
+
+	// lastSyncAt is the UnixNano timestamp of the last successful cache sync or
+	// pod event. Zero means the watcher has never completed its initial sync.
+	lastSyncAt atomic.Int64
 }
 
 // PodInfo contains Kubernetes metadata for a pod.
@@ -136,6 +141,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 		return fmt.Errorf("k8s/watcher: cache sync timeout")
 	}
 
+	w.lastSyncAt.Store(time.Now().UnixNano())
 	w.logger.Info("pod watcher cache synced")
 
 	// Wait for context cancellation
@@ -231,6 +237,7 @@ func (w *Watcher) onPodAdd(obj interface{}) {
 
 	w.logger.Debug("pod added", "name", pod.Name, "namespace", pod.Namespace)
 	w.updatePodCache(pod)
+	w.touchSyncAt()
 }
 
 // onPodUpdate handles pod update events.
@@ -243,6 +250,7 @@ func (w *Watcher) onPodUpdate(oldObj, newObj interface{}) {
 
 	w.logger.Debug("pod updated", "name", newPod.Name, "namespace", newPod.Namespace)
 	w.updatePodCache(newPod)
+	w.touchSyncAt()
 }
 
 // onPodDelete handles pod deletion events.
@@ -264,6 +272,33 @@ func (w *Watcher) onPodDelete(obj interface{}) {
 
 	w.logger.Debug("pod deleted", "name", pod.Name, "namespace", pod.Namespace)
 	w.removePodFromCache(pod)
+	w.touchSyncAt()
+}
+
+// touchSyncAt records the current time as the last successful sync.
+// Called on every pod add/update/delete to track informer liveness.
+func (w *Watcher) touchSyncAt() {
+	w.lastSyncAt.Store(time.Now().UnixNano())
+}
+
+// LastSyncAt returns the time of the last successful cache sync or pod event.
+// Returns the zero time if the watcher has never synced.
+func (w *Watcher) LastSyncAt() time.Time {
+	ns := w.lastSyncAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// HasSynced returns true if the watcher completed its initial cache sync.
+func (w *Watcher) HasSynced() bool {
+	return w.lastSyncAt.Load() != 0
+}
+
+// CachePodCount returns the number of unique pods in the watcher cache.
+func (w *Watcher) CachePodCount() int {
+	return len(w.GetAllPods())
 }
 
 // updatePodCache updates the cache with pod information.

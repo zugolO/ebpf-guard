@@ -318,6 +318,58 @@ DEBUG alert sent successfully notifier=slack rule_id=rule_001
 WARN failed to send alert notifier=teams rule_id=rule_001 error=...
 ```
 
+## Alertmanager Circuit Breaker
+
+The Alertmanager client includes a built-in circuit breaker that protects the agent from cascading failures when Alertmanager is unavailable. Alerts are buffered rather than dropped during outages and replayed automatically on recovery.
+
+### State Machine
+
+```
+Closed ──[N consecutive failures]──▶ Open ──[reset_timeout]──▶ HalfOpen
+  ▲                                                                  │
+  └───────────────[probe succeeds]──────────────────────────────────┘
+         (probe fails → back to Open with reset_timeout restarted)
+```
+
+| State    | Behaviour                                                        |
+|----------|------------------------------------------------------------------|
+| Closed   | Alerts sent normally; failures counted                           |
+| Open     | Alerts routed to in-memory fallback buffer; AM not contacted     |
+| HalfOpen | One probe alert sent; success → Closed + fallback drained        |
+
+### Configuration
+
+```yaml
+alerting:
+  alertmanager:
+    circuit_breaker:
+      threshold: 5           # open after 5 consecutive failures (default)
+      reset_timeout: 30s     # probe attempt after 30s in Open state (default)
+      fallback_buffer: 10000 # buffer up to 10 000 alerts while open (default)
+```
+
+Lower values give faster detection of outages; higher values tolerate brief
+transient errors without opening the circuit.
+
+### Observability
+
+| Metric | Description |
+|--------|-------------|
+| `ebpf_guard_alertmanager_circuit_state` | Current state: 0=Closed, 1=Open, 2=HalfOpen |
+| `ebpf_guard_alertmanager_fallback_queue_size` | Alerts currently buffered in the fallback queue |
+| `ebpf_guard_alertmanager_dropped_total` | Alerts evicted from the fallback buffer when it was full |
+
+### Behaviour During Outage
+
+- Alerts are buffered in an in-memory FIFO queue bounded by `fallback_buffer`.
+- When the buffer is full the **oldest** alert is evicted (drop-oldest policy), so
+  the most recent alerts are always preserved.
+- On recovery the entire buffer is drained and delivered to Alertmanager in FIFO
+  order before new alerts, ensuring no ordering inversion.
+- After the `reset_timeout` one probe alert is sent. If it succeeds the circuit
+  closes and the full fallback is drained immediately; if it fails the timeout
+  restarts.
+
 ## Migration from Alertmanager
 
 If you're currently using only Alertmanager, you can add notification backends alongside it:

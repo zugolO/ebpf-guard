@@ -178,6 +178,66 @@ kubectl delete namespace ebpf-guard
 kubectl delete -f deploy/manifests/
 ```
 
+## Kubernetes Enricher Health Monitoring
+
+The Kubernetes pod watcher that enriches events with pod metadata exposes four
+Prometheus metrics. Monitor these to detect stale enrichment data before it
+causes detection rules to evaluate against outdated namespace/label values.
+
+### Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `ebpf_guard_k8s_enricher_cache_pods{node}` | Gauge | Unique pods currently tracked in the cache |
+| `ebpf_guard_k8s_enricher_cache_staleness_seconds{node}` | Gauge | Seconds since the last successful sync |
+| `ebpf_guard_k8s_enricher_last_sync_timestamp_seconds{node}` | Gauge | Unix timestamp of the last sync |
+| `ebpf_guard_k8s_enricher_miss_total{node}` | Counter | Enrichment lookups with no matching pod |
+
+The `node` label is set to the Kubernetes node name (`KUBERNETES_NODE_NAME` env var).
+
+### Readiness Gate
+
+`GET /health/ready` returns `503` when the enricher cache is stale
+(last sync older than `2 × kubernetes.resync_period`). This prevents the agent
+being treated as ready if it cannot enrich events with fresh metadata.
+
+```bash
+curl http://localhost:9090/health/ready
+# {"status":"not ready","reason":"k8s enricher cache stale: last sync 12m3s ago (threshold 10m0s)"}
+```
+
+### Built-in Alerts (Helm)
+
+Enable `prometheusRule.enabled: true` in your Helm values to get two enricher
+alerts out of the box:
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| `EbpfGuardK8sEnricherStale` | No sync for >10 min | warning |
+| `EbpfGuardK8sEnricherHighMissRate` | >10 misses/sec for 5 min | warning |
+
+### Wiring Metrics (programmatic)
+
+When using ebpf-guard as a library, pass enricher metrics at construction time:
+
+```go
+import (
+    "github.com/zugolO/ebpf-guard/internal/k8s"
+    "github.com/zugolO/ebpf-guard/internal/exporter"
+)
+
+node := os.Getenv("KUBERNETES_NODE_NAME")
+enricher, _ := k8s.NewEnricher(k8s.EnricherConfig{
+    ResyncPeriod: 5 * time.Minute,
+    Metrics: k8s.EnricherMetrics{
+        CachePods:      exporter.K8sEnricherCachePods.WithLabelValues(node),
+        CacheStaleness: exporter.K8sEnricherCacheStaleness.WithLabelValues(node),
+        LastSync:       exporter.K8sEnricherLastSync.WithLabelValues(node),
+        MissTotal:      exporter.K8sEnricherMissTotal.WithLabelValues(node),
+    },
+}, logger)
+```
+
 ## Security Considerations
 
 - ebpf-guard requires `privileged: true` to load eBPF programs

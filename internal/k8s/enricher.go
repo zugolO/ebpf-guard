@@ -6,20 +6,42 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// EnricherMetrics holds optional Prometheus instruments wired in by the caller.
+// Any nil field is silently ignored.
+type EnricherMetrics struct {
+	// CachePods tracks the current number of unique pods in the watcher cache.
+	CachePods prometheus.Gauge
+	// CacheStaleness tracks how many seconds have elapsed since the last watcher sync.
+	CacheStaleness prometheus.Gauge
+	// LastSync records the Unix timestamp (seconds) of the last watcher sync.
+	LastSync prometheus.Gauge
+	// MissTotal counts enrichment lookups that found no matching pod.
+	MissTotal prometheus.Counter
+}
+
 // Enricher provides Kubernetes metadata enrichment for security events and alerts.
 type Enricher struct {
-	watcher *Watcher
-	logger  *slog.Logger
-	
+	watcher      *Watcher
+	logger       *slog.Logger
+	resyncPeriod time.Duration
+
 	// enrichmentCache caches enrichment results to reduce cgroup reads
-	mu             sync.RWMutex
+	mu              sync.RWMutex
 	enrichmentCache map[uint32]*EnrichmentInfo
-	cacheTTL       time.Duration
+	cacheTTL        time.Duration
+
+	// missCount is the number of enrichment lookups that found no pod.
+	// Exported to a Prometheus counter via the metrics update loop.
+	missCount atomic.Int64
+
+	metrics EnricherMetrics
 }
 
 // EnrichmentInfo contains Kubernetes metadata attached to events/alerts.
@@ -39,6 +61,9 @@ type EnricherConfig struct {
 	KubeconfigPath string
 	ResyncPeriod   time.Duration
 	CacheTTL       time.Duration
+	// Metrics provides optional Prometheus instruments for observability.
+	// All fields are optional — nil values are silently skipped.
+	Metrics EnricherMetrics
 }
 
 // NewEnricher creates a new Kubernetes metadata enricher.
@@ -58,11 +83,18 @@ func NewEnricher(config EnricherConfig, logger *slog.Logger) (*Enricher, error) 
 		cacheTTL = 30 * time.Second
 	}
 
+	resyncPeriod := config.ResyncPeriod
+	if resyncPeriod == 0 {
+		resyncPeriod = 300 * time.Second
+	}
+
 	return &Enricher{
 		watcher:         watcher,
 		logger:          logger.With("component", "k8s_enricher"),
 		enrichmentCache: make(map[uint32]*EnrichmentInfo),
 		cacheTTL:        cacheTTL,
+		resyncPeriod:    resyncPeriod,
+		metrics:         config.Metrics,
 	}, nil
 }
 
@@ -79,11 +111,70 @@ func (e *Enricher) Start(ctx context.Context) error {
 		e.cacheCleanupLoop(cleanupCtx)
 	}()
 
+	if e.hasMetrics() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.metricsUpdateLoop(cleanupCtx)
+		}()
+	}
+
 	// watcher.Start blocks until ctx is cancelled.
 	err := e.watcher.Start(ctx)
-	cancel()  // signal cleanup goroutine to stop
-	wg.Wait() // wait for it to exit before returning
+	cancel()  // signal goroutines to stop
+	wg.Wait() // wait for them to exit before returning
 	return err
+}
+
+// hasMetrics returns true if any Prometheus metric is configured.
+func (e *Enricher) hasMetrics() bool {
+	return e.metrics.CachePods != nil ||
+		e.metrics.CacheStaleness != nil ||
+		e.metrics.LastSync != nil ||
+		e.metrics.MissTotal != nil
+}
+
+// metricsUpdateLoop periodically refreshes gauge metrics from the watcher.
+func (e *Enricher) metricsUpdateLoop(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.updateMetrics()
+		}
+	}
+}
+
+// updateMetrics pushes current enricher state to Prometheus.
+func (e *Enricher) updateMetrics() {
+	// Always drain accumulated miss count regardless of watcher state.
+	if e.metrics.MissTotal != nil {
+		if n := e.missCount.Swap(0); n > 0 {
+			e.metrics.MissTotal.Add(float64(n))
+		}
+	}
+
+	if e.watcher == nil {
+		return
+	}
+
+	if e.metrics.CachePods != nil {
+		e.metrics.CachePods.Set(float64(e.watcher.CachePodCount()))
+	}
+
+	lastSync := e.watcher.LastSyncAt()
+	if !lastSync.IsZero() {
+		if e.metrics.LastSync != nil {
+			e.metrics.LastSync.Set(float64(lastSync.Unix()))
+		}
+		if e.metrics.CacheStaleness != nil {
+			e.metrics.CacheStaleness.Set(time.Since(lastSync).Seconds())
+		}
+	}
 }
 
 // Stop stops the enricher.
@@ -137,9 +228,14 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 	}
 	e.mu.RUnlock()
 
-	// Lookup pod info from watcher
+	// Lookup pod info from watcher (nil watcher = enricher not yet started)
+	if e.watcher == nil {
+		e.missCount.Add(1)
+		return nil
+	}
 	podInfo, ok := e.watcher.GetPodInfoByPID(pid)
 	if !ok {
+		e.missCount.Add(1)
 		return nil
 	}
 
@@ -231,16 +327,29 @@ func (e *Enricher) GetCachedPodCount() int {
 	return len(e.watcher.GetAllPods())
 }
 
-// IsHealthy returns true if the enricher is healthy (watcher has synced).
+// IsHealthy returns true if the enricher's watcher exists and has completed its
+// initial cache sync.
 func (e *Enricher) IsHealthy() bool {
-	// The watcher is healthy if it exists
-	return e.watcher != nil
+	return e.watcher != nil && e.watcher.HasSynced()
 }
 
 // ReadyCheck implements the health check interface for the HTTP server.
+// Returns an error when:
+//   - the watcher has not completed its initial sync yet, or
+//   - the last sync is older than 2× the configured resync period (cache stale).
 func (e *Enricher) ReadyCheck() error {
-	if !e.IsHealthy() {
-		return fmt.Errorf("k8s enricher not ready")
+	if e.watcher == nil {
+		return fmt.Errorf("k8s enricher not ready: watcher not initialised")
+	}
+	lastSync := e.watcher.LastSyncAt()
+	if lastSync.IsZero() {
+		return fmt.Errorf("k8s enricher not ready: initial cache sync not completed")
+	}
+	staleness := time.Since(lastSync)
+	maxStaleness := 2 * e.resyncPeriod
+	if staleness > maxStaleness {
+		return fmt.Errorf("k8s enricher cache stale: last sync %v ago (threshold %v)",
+			staleness.Round(time.Second), maxStaleness)
 	}
 	return nil
 }

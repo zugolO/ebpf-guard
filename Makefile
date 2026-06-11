@@ -27,6 +27,12 @@ BPF_CFLAGS := -O2 -g -Wall -Werror -target bpf -D$(BPF_ARCH_DEF) -I$(BPF_INCLUDE
 # Default target
 all: generate build
 
+# Validate the OpenAPI spec and check that it is well-formed YAML.
+# Requires python3 (for yaml parsing) — no extra tools needed.
+api-docs:
+	@echo "Validating api/openapi.yaml..."
+	@python3 -c "import yaml,sys; s=yaml.safe_load(open('api/openapi.yaml')); assert s.get('openapi','').startswith('3.'); assert 'paths' in s; assert 'components' in s; print('OK — %d paths, %d schemas' % (len(s['paths']),len(s['components']['schemas'])))"
+
 # Generate Go bindings from eBPF C code using bpf2go
 # This requires clang and kernel headers to be installed
 generate:

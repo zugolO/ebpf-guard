@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	apispec "github.com/zugolO/ebpf-guard/api"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
@@ -37,6 +38,10 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// Incident endpoints
 	mux.HandleFunc("/api/v1/incidents", s.handleIncidents)
 	mux.HandleFunc("/api/v1/incidents/", s.handleIncidentByID)
+
+	// Swagger UI — served without auth so API consumers can explore the spec.
+	mux.HandleFunc("/api/docs", handleAPIDocs)
+	mux.HandleFunc("/api/openapi.yaml", handleOpenAPISpec)
 }
 
 // handleAlerts handles GET /api/v1/alerts with query parameter filters.
@@ -686,4 +691,40 @@ func (s *Server) handleIncidentByID(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(inc)
+}
+
+// handleAPIDocs serves an interactive Swagger UI page for the ebpf-guard API.
+// The spec is loaded from /api/openapi.yaml on the same origin.
+func handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ebpf-guard API</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+  SwaggerUIBundle({
+    url: "/api/openapi.yaml",
+    dom_id: "#swagger-ui",
+    presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+    layout: "BaseLayout",
+    deepLinking: true,
+  });
+</script>
+</body>
+</html>`)
+}
+
+// handleOpenAPISpec serves the raw OpenAPI 3.0 YAML specification.
+// The spec is embedded at build time so it is always in sync with the binary.
+func handleOpenAPISpec(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Write(apispec.OpenAPISpec) //nolint:errcheck
 }

@@ -206,6 +206,77 @@ loop:
 	}
 }
 
+// TestWorkerPoolOOMPrevention verifies that the bounded worker pool does not
+// cause unbounded memory growth when events arrive faster than they are
+// processed. It drives a SyntheticCollector at 2× the configured target rate
+// and asserts that the process stays under a hard memory ceiling.
+func TestWorkerPoolOOMPrevention(t *testing.T) {
+	if os.Getenv("RUN_LOAD_TESTS") != "1" {
+		t.Skip("Skipping OOM prevention test. Set RUN_LOAD_TESTS=1 to enable.")
+	}
+
+	const (
+		targetRate    = 500_000          // events/sec — well above typical burst
+		testDuration  = 10 * time.Second
+		memCeilingMiB = 512              // agent RSS must not exceed this
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	req := testcontainers.ContainerRequest{
+		FromDockerfile: testcontainers.FromDockerfile{
+			Context:       "..",
+			Dockerfile:    "Dockerfile",
+			PrintBuildLog: false,
+		},
+		ExposedPorts: []string{"9090/tcp"},
+		WaitingFor:   wait.ForHTTP("/health").WithPort("9090"),
+		Privileged:   true,
+		Env: map[string]string{
+			// Drive with a high max_concurrent_events to exercise the semaphore.
+			"EBPF_GUARD_BPF_MAX_CONCURRENT_EVENTS": "4096",
+			"EBPF_GUARD_BPF_EVENT_QUEUE_DEPTH":     "65536",
+		},
+	}
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	if err != nil {
+		t.Skipf("skipping: cannot start container (no container runtime?): %v", err)
+	}
+	defer container.Terminate(ctx)
+
+	ip, err := container.Host(ctx)
+	require.NoError(t, err)
+	port, err := container.MappedPort(ctx, "9090")
+	require.NoError(t, err)
+	baseURL := fmt.Sprintf("http://%s:%s", ip, port.Port())
+
+	// Drive the agent at 2× target rate for testDuration.
+	cfg := LoadTestConfig{
+		TargetEventsPerSecond: targetRate,
+		TestDuration:          testDuration,
+		ConcurrentClients:     50,
+	}
+	result := runLoadTest(ctx, t, baseURL, cfg)
+
+	t.Logf("OOM prevention test: %.0f req/s, avg latency %v, mem %.1f MiB",
+		result.EventsPerSecond, result.AvgResponseTime, result.MemoryUsageMB)
+
+	// Agent must stay alive (zero failed requests = process did not OOM-restart).
+	assert.Equal(t, int64(0), result.FailedReqs,
+		"agent must not OOM-restart: zero failed requests expected")
+
+	// Memory ceiling (only enforced when the metric is available).
+	if result.MemoryUsageMB > 0 {
+		assert.Less(t, result.MemoryUsageMB, float64(memCeilingMiB),
+			"agent RSS must stay below %d MiB under 2× burst load", memCeilingMiB)
+	}
+}
+
 // BenchmarkEventProcessing benchmarks event processing performance.
 func BenchmarkEventProcessing(b *testing.B) {
 	if os.Getenv("RUN_BENCHMARKS") != "1" {

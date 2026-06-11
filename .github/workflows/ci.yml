@@ -20,6 +20,22 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
+  api-spec:
+    name: OpenAPI Spec Validation
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Validate api/openapi.yaml structure
+      run: make api-docs
+
+    - name: Verify spec is committed (diff check)
+      run: |
+        # Ensure the spec file is tracked by git (not accidentally excluded).
+        git ls-files --error-unmatch api/openapi.yaml
+        echo "api/openapi.yaml is tracked in git ✓"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -86,7 +102,9 @@ jobs:
       uses: codecov/codecov-action@v4
       with:
         files: ./coverage.out
-        fail_ci_if_error: false
+        fail_ci_if_error: true
+        threshold: 2%
+        fail_ci_if_coverage_drops: true
 
   # BTF fallback compatibility tests — verify the 3-strategy resolution logic
   # works correctly for each scenario without requiring a real kernel change.

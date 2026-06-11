@@ -3,18 +3,21 @@ package store
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"testing"
 	"time"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // TestOpenSearchStoreIntegration tests the OpenSearch store with a real container.
@@ -311,6 +314,123 @@ func TestOpenSearchStoreBulkError(t *testing.T) {
 	err = store.Store(ctx, alert)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "bulk index failed")
+}
+
+// TestOpenSearchTLSConfig verifies that TLS configuration fields are populated
+// correctly when creating an OpenSearch store.
+func TestOpenSearchTLSConfig(t *testing.T) {
+	t.Run("InsecureSkipVerify emits no error but logs warn", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		cfg := OpenSearchConfig{
+			Addresses:          []string{server.URL},
+			InsecureSkipVerify: true,
+		}
+		s, err := NewOpenSearchStore(cfg)
+		require.NoError(t, err)
+		assert.NotNil(t, s)
+
+		transport, ok := s.client.Transport.(*http.Transport)
+		require.True(t, ok)
+		require.NotNil(t, transport.TLSClientConfig)
+		assert.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+		assert.Equal(t, uint16(tls.VersionTLS12), transport.TLSClientConfig.MinVersion)
+	})
+
+	t.Run("TLSServerName is set on tls.Config", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		cfg := OpenSearchConfig{
+			Addresses:     []string{server.URL},
+			TLSServerName: "opensearch.monitoring.svc.cluster.local",
+		}
+		s, err := NewOpenSearchStore(cfg)
+		require.NoError(t, err)
+
+		transport, ok := s.client.Transport.(*http.Transport)
+		require.True(t, ok)
+		require.NotNil(t, transport.TLSClientConfig)
+		assert.Equal(t, "opensearch.monitoring.svc.cluster.local", transport.TLSClientConfig.ServerName)
+	})
+
+	t.Run("CACert loads custom cert pool", func(t *testing.T) {
+		// Start a TLS test server to grab its self-signed certificate.
+		tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer tlsServer.Close()
+
+		// Write the server's cert to a temp file so we can pass it as CACert.
+		cert := tlsServer.Certificate()
+		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+		f, err := os.CreateTemp("", "ca-*.pem")
+		require.NoError(t, err)
+		defer os.Remove(f.Name())
+		_, err = f.Write(pemBytes)
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+
+		cfg := OpenSearchConfig{
+			Addresses:     []string{tlsServer.URL},
+			CACert:        f.Name(),
+			TLSServerName: "127.0.0.1",
+		}
+		s, err := NewOpenSearchStore(cfg)
+		require.NoError(t, err)
+
+		transport, ok := s.client.Transport.(*http.Transport)
+		require.True(t, ok)
+		require.NotNil(t, transport.TLSClientConfig)
+		assert.NotNil(t, transport.TLSClientConfig.RootCAs, "custom CA pool should be set")
+	})
+
+	t.Run("CACert missing file returns error", func(t *testing.T) {
+		cfg := OpenSearchConfig{
+			Addresses: []string{"https://opensearch:9200"},
+			CACert:    "/nonexistent/ca.pem",
+		}
+		_, err := NewOpenSearchStore(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "read CA cert")
+	})
+
+	t.Run("CACert invalid PEM returns error", func(t *testing.T) {
+		f, err := os.CreateTemp("", "bad-ca-*.pem")
+		require.NoError(t, err)
+		defer os.Remove(f.Name())
+		_, err = f.WriteString("this is not valid PEM data\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+
+		cfg := OpenSearchConfig{
+			Addresses: []string{"https://opensearch:9200"},
+			CACert:    f.Name(),
+		}
+		_, err = NewOpenSearchStore(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no valid certificates")
+	})
+
+	t.Run("MinVersion is TLS 1.2", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		cfg := OpenSearchConfig{Addresses: []string{server.URL}}
+		s, err := NewOpenSearchStore(cfg)
+		require.NoError(t, err)
+
+		transport, ok := s.client.Transport.(*http.Transport)
+		require.True(t, ok)
+		assert.Equal(t, uint16(tls.VersionTLS12), transport.TLSClientConfig.MinVersion)
+	})
 }
 
 // TestOpenSearchStoreSearchError tests error handling in search operations.

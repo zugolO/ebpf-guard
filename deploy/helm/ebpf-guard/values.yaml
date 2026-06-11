@@ -212,6 +212,19 @@ prometheusRule:
             description: >-
               The ebpf-guard collector '{{ $labels.collector }}' on {{ $labels.node }} has failed.
               The agent is running with reduced event coverage. Check logs for the root cause.
+        # Issue #105: event queue saturation alert
+        - alert: EbpfGuardEventQueueSaturated
+          expr: ebpf_guard_event_queue_depth / ebpf_guard_event_queue_capacity > 0.9
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard event queue is saturated on {{ $labels.node }}"
+            description: >-
+              The ebpf-guard event queue on {{ $labels.node }} is more than 90% full
+              ({{ $value | humanizePercentage }}). Events may be dropped. Consider increasing
+              bpf.event_queue_depth or bpf.max_concurrent_events, or investigate a burst
+              source generating excessive events.
 
 # VerticalPodAutoscaler
 vpa:

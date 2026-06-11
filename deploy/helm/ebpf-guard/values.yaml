@@ -449,6 +449,32 @@ rules:
         severity: critical
         action: alert
 
+# Enforcement settings — configure how ebpf-guard responds to threats.
+enforcement:
+  # networkpolicy controls automatic Kubernetes NetworkPolicy generation.
+  networkpolicy:
+    # enabled activates the networkpolicy action type and adds networkpolicies
+    # write permission to the ClusterRole when true.
+    enabled: false
+    # mode: "suggest" sends the YAML via the notification channel for human review;
+    # "apply" creates the policy directly via the Kubernetes API.
+    mode: "suggest"
+    # auto_cleanup_after removes applied policies after this duration (e.g. "1h").
+    # Empty or "0s" disables auto-cleanup.
+    auto_cleanup_after: "1h"
+    # dry_run generates and logs the YAML without sending or applying it.
+    dry_run: false
+
+# BPF live program update — enables in-place eBPF replacement without restart.
+bpfLiveUpdate:
+  # enabled activates the live-update subsystem and the POST /api/v1/bpf/reload endpoint.
+  enabled: false
+  # watchPath is a host directory of .o files to watch for changes (fsnotify).
+  # Empty disables file watching; reload is still available via the API.
+  watchPath: ""
+  # pendingPinDir is the bpffs path used to stage new programs before swapping.
+  pendingPinDir: /sys/fs/bpf/ebpf-guard/pending
+
 # Grafana dashboard ConfigMap (loaded by Grafana sidecar if enabled)
 grafana:
   dashboard:

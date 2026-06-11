@@ -292,8 +292,89 @@ nft add rule inet ebpf-guard output skuid 1000 drop
 
 ebpf-guard handles this migration automatically when you set `block_backend: nftables`.
 
+---
+
+## `networkpolicy` — Auto-Generated Kubernetes NetworkPolicy (issue #117)
+
+When a rule fires with `action: networkpolicy`, ebpf-guard generates a Kubernetes
+`NetworkPolicy` isolating the affected pod and either sends it for review or applies
+it directly via the Kubernetes API.
+
+### Rule syntax
+
+```yaml
+rules:
+  - id: crypto_c2_detected
+    event_type: network
+    condition:
+      field: "dst_ip"
+      op: "in"
+      values: ["@mining_pools"]
+    severity: critical
+    action: networkpolicy
+```
+
+### Modes
+
+| Mode | Behaviour |
+|---|---|
+| `suggest` (default) | Generates the YAML and sends it via Slack/Teams/webhook for human review |
+| `apply` | Applies the policy directly via the Kubernetes API |
+
+### Generated policy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ebpf-guard-quarantine-<pod>-<namespace>-<alertID[:8]>
+  namespace: <namespace>
+  annotations:
+    ebpf-guard/alert-id: "<alertID>"
+    ebpf-guard/rule-id: "<ruleID>"
+spec:
+  podSelector:
+    matchLabels: <pod-labels>   # from K8s enricher; falls back to kubernetes.io/pod-name
+  policyTypes: [Egress]
+  egress: []                    # deny all egress
+```
+
+### Configuration
+
+```yaml
+enforcer:
+  networkpolicy:
+    enabled: true
+    mode: "suggest"           # suggest | apply
+    auto_cleanup_after: "1h"  # delete applied policies after TTL (0 disables)
+    dry_run: false
+```
+
+### RBAC (apply mode)
+
+In `apply` mode the agent needs `networkpolicies` write permission. Enable it in the
+Helm chart values:
+
+```yaml
+enforcement:
+  networkpolicy:
+    enabled: true   # adds networkpolicies create/delete to the ClusterRole
+```
+
+The agent validates at startup that the `networkpolicies` write RBAC is available when
+`mode: apply` is configured; it exits with a clear error if the permission is missing.
+
+### Auto-cleanup
+
+When `auto_cleanup_after` is non-zero and `mode: apply`, a background goroutine deletes
+policies older than the TTL. After an agent restart, policies already in the cluster
+must be cleaned up manually if the TTL elapsed during downtime.
+
+---
+
 ## References
 
 - [nftables documentation](https://wiki.nftables.org/)
 - [cgroup v2 documentation](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)
 - [Linux capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html)
+- [Kubernetes NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)

@@ -39,6 +39,9 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/incidents", s.handleIncidents)
 	mux.HandleFunc("/api/v1/incidents/", s.handleIncidentByID)
 
+	// BPF live-update endpoint (admin-only)
+	mux.HandleFunc("/api/v1/bpf/reload", s.handleBPFReload)
+
 	// Swagger UI — served without auth so API consumers can explore the spec.
 	mux.HandleFunc("/api/docs", handleAPIDocs)
 	mux.HandleFunc("/api/openapi.yaml", handleOpenAPISpec)
@@ -727,4 +730,51 @@ func handleOpenAPISpec(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Write(apispec.OpenAPISpec) //nolint:errcheck
+}
+
+// handleBPFReload triggers a live eBPF program replacement.
+//
+//	POST /api/v1/bpf/reload
+//	Authorization: Bearer <admin-token>
+//
+// Response: {"status":"ok","programs_updated":N,"duration_ms":M}
+// The endpoint is admin-only; viewers receive 403.
+func (s *Server) handleBPFReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Require admin role when auth is enabled.
+	if scope, ok := TokenScopeFromContext(r.Context()); ok && scope.Role != RoleAdmin {
+		http.Error(w, "Forbidden: admin role required", http.StatusForbidden)
+		return
+	}
+
+	s.mu.RLock()
+	reloader := s.bpfReloader
+	s.mu.RUnlock()
+
+	if reloader == nil {
+		http.Error(w, "BPF live update not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	start := time.Now()
+	if err := reloader(r.Context()); err != nil {
+		s.logger.Error("BPF live reload failed", slog.Any("error", err))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "error",
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "ok",
+		"duration_ms": time.Since(start).Milliseconds(),
+	})
 }

@@ -225,6 +225,19 @@ prometheusRule:
               ({{ $value | humanizePercentage }}). Events may be dropped. Consider increasing
               bpf.event_queue_depth or bpf.max_concurrent_events, or investigate a burst
               source generating excessive events.
+        # Issue #115: canary file integrity alerts
+        - alert: EbpfGuardCanaryFileTampered
+          expr: ebpf_guard_canary_files_intact == 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Canary file tampered or deleted on {{ $labels.node }}"
+            description: >-
+              The ebpf-guard canary file '{{ $labels.path }}' on {{ $labels.node }}
+              is missing or its content has changed. This is a high-confidence indicator
+              of attacker activity — no legitimate process should touch canary files.
+              Investigate immediately.
         # Issue #113: Kubernetes enricher health alerts
         - alert: EbpfGuardK8sEnricherStale
           expr: time() - ebpf_guard_k8s_enricher_last_sync_timestamp_seconds > 600

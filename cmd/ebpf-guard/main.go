@@ -200,18 +200,21 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 
 	// Feature D: canary trap / honeypot detection.
+	var canaryManager *canary.Manager
 	if cfg.Canary.Enabled {
-		cm := canary.New(canary.Config{
-			Enabled:       true,
-			AutoCreate:    cfg.Canary.AutoCreate,
-			Files:         cfg.Canary.Files,
-			AlertSeverity: cfg.Canary.AlertSeverity,
+		canaryManager = canary.New(canary.Config{
+			Enabled:        true,
+			AutoCreate:     cfg.Canary.AutoCreate,
+			Files:          cfg.Canary.Files,
+			AlertSeverity:  cfg.Canary.AlertSeverity,
+			VerifyInterval: cfg.Canary.VerifyInterval,
+			AlertOnTamper:  cfg.Canary.AlertOnTamper,
 		})
-		cm.Setup()
-		canaryRules := cm.Rules()
+		canaryManager.Setup()
+		canaryRules := canaryManager.Rules()
 		rules = append(rules, canaryRules...)
 		slog.Info("canary: traps armed",
-			slog.Int("files", len(cm.Paths())),
+			slog.Int("files", len(canaryManager.Paths())),
 			slog.Int("rules", len(canaryRules)))
 	}
 
@@ -697,6 +700,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		})
 		if err := cfgManager.Watch(); err != nil {
 			slog.Warn("hot-reload watch failed", slog.Any("error", err))
+		}
+	}
+
+	// Start canary periodic verification loop (issue #115).
+	if canaryManager != nil {
+		canaryAlertFn := func(a types.Alert) {
+			if err := alertStore.StoreBatch(ctx, []types.Alert{a}); err != nil {
+				slog.Warn("canary: store tamper alert error", slog.Any("error", err))
+			}
+			if alertmanagerClient != nil {
+				alertmanagerClient.SendAlert(ctx, a)
+			}
+			if fanout != nil {
+				fanout.Send(ctx, a)
+			}
+		}
+		if err := canaryManager.Start(ctx, canaryAlertFn); err != nil {
+			slog.Warn("canary: failed to start verification loop", slog.Any("error", err))
 		}
 	}
 
@@ -1727,15 +1748,18 @@ Note: YAML comments are not preserved in the migrated output.`,
 }
 
 func runConfigValidate(cfgPath string) error {
+	// Phase 1: check for deprecated / renamed / removed fields.
 	issues, err := config.CheckConfigFile(cfgPath)
 	if err != nil {
 		return fmt.Errorf("validate: %w", err)
 	}
 
-	// Collect section names that have issues for grouped output.
-	issueFields := make(map[string]bool)
-	for _, iss := range issues {
-		issueFields[iss.Field] = true
+	// Phase 2: full structural validation (store backend, sample_rate bounds, etc.).
+	var validationErr error
+	if cfgMgr, loadErr := config.NewManagerSkipPermCheck(cfgPath); loadErr != nil {
+		validationErr = fmt.Errorf("load config for validation: %w", loadErr)
+	} else {
+		validationErr = config.ValidateConfig(cfgMgr.Get())
 	}
 
 	// Print OK status for all top-level sections with no issues.
@@ -1760,12 +1784,18 @@ func runConfigValidate(cfgPath string) error {
 		fmt.Printf("✗ %s: %s\n", iss.Field, iss.Message)
 	}
 
-	if len(issues) == 0 {
+	totalIssues := len(issues)
+	if validationErr != nil {
+		fmt.Printf("✗ validation: %s\n", validationErr)
+		totalIssues++
+	}
+
+	if totalIssues == 0 {
 		fmt.Printf("\n0 issues found.\n")
 		return nil
 	}
-	fmt.Printf("\n%d issue(s) found. Run 'ebpf-guard config migrate' to auto-fix.\n", len(issues))
-	return fmt.Errorf("%d issue(s) found", len(issues))
+	fmt.Printf("\n%d issue(s) found. Run 'ebpf-guard config migrate' to auto-fix.\n", totalIssues)
+	return fmt.Errorf("%d issue(s) found", totalIssues)
 }
 
 func runConfigMigrate(cfgPath, targetVer, outPath string) error {

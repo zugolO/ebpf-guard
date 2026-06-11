@@ -1,9 +1,12 @@
 package canary
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -118,5 +121,198 @@ func TestRules_Tags(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'canary' tag, got %v", tags)
+	}
+}
+
+// TestVerify_DetectsDeletedFile verifies that deleting a canary file causes
+// an alert to be emitted within 2× the verify interval.
+func TestVerify_DetectsDeletedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trap.canary")
+
+	interval := 50 * time.Millisecond
+	m := New(Config{
+		Enabled:        true,
+		AutoCreate:     true,
+		Files:          []string{path},
+		AlertSeverity:  "critical",
+		VerifyInterval: interval,
+		AlertOnTamper:  true,
+	})
+	m.Setup()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("canary file not created: %v", err)
+	}
+
+	var mu sync.Mutex
+	var alerts []types.Alert
+	alertFn := func(a types.Alert) {
+		mu.Lock()
+		alerts = append(alerts, a)
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Start(ctx, alertFn); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Delete the canary file to trigger tampering detection.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * interval * 2)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(alerts)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alerts) == 0 {
+		t.Fatal("expected alert for deleted canary file, got none within 2× interval")
+	}
+	a := alerts[0]
+	if a.RuleID != "canary_tampered" {
+		t.Errorf("expected rule_id canary_tampered, got %q", a.RuleID)
+	}
+	if string(a.Severity) != "critical" {
+		t.Errorf("expected severity critical, got %q", a.Severity)
+	}
+}
+
+// TestVerify_DetectsModifiedFile verifies that modifying a canary file's
+// content causes an alert within 2× the verify interval.
+func TestVerify_DetectsModifiedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.canary")
+
+	interval := 50 * time.Millisecond
+	m := New(Config{
+		Enabled:        true,
+		AutoCreate:     true,
+		Files:          []string{path},
+		AlertSeverity:  "critical",
+		VerifyInterval: interval,
+		AlertOnTamper:  true,
+	})
+	m.Setup()
+
+	var mu sync.Mutex
+	var alerts []types.Alert
+	alertFn := func(a types.Alert) {
+		mu.Lock()
+		alerts = append(alerts, a)
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Start(ctx, alertFn); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Overwrite content to trigger hash mismatch.
+	if err := os.WriteFile(path, []byte("attacker was here\n"), 0400); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * interval * 2)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(alerts)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alerts) == 0 {
+		t.Fatal("expected alert for modified canary file, got none within 2× interval")
+	}
+}
+
+// TestVerify_NoAlertWhenIntact verifies that an unmodified canary file
+// produces no tamper alerts.
+func TestVerify_NoAlertWhenIntact(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "intact.canary")
+
+	interval := 30 * time.Millisecond
+	m := New(Config{
+		Enabled:        true,
+		AutoCreate:     true,
+		Files:          []string{path},
+		AlertSeverity:  "critical",
+		VerifyInterval: interval,
+		AlertOnTamper:  true,
+	})
+	m.Setup()
+
+	var mu sync.Mutex
+	var alerts []types.Alert
+	alertFn := func(a types.Alert) {
+		mu.Lock()
+		alerts = append(alerts, a)
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := m.Start(ctx, alertFn); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait for 3 verification cycles with no modification.
+	time.Sleep(interval * 3)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alerts) != 0 {
+		t.Errorf("expected no tamper alerts for intact file, got %d", len(alerts))
+	}
+}
+
+// TestVerify_AlertOnTamperFalse verifies that no alert callback is invoked
+// when AlertOnTamper is false, even if the file is deleted.
+func TestVerify_AlertOnTamperFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "noalert.canary")
+
+	interval := 30 * time.Millisecond
+	m := New(Config{
+		Enabled:        true,
+		AutoCreate:     true,
+		Files:          []string{path},
+		AlertSeverity:  "critical",
+		VerifyInterval: interval,
+		AlertOnTamper:  false,
+	})
+	m.Setup()
+
+	var called bool
+	alertFn := func(_ types.Alert) { called = true }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_ = m.Start(ctx, alertFn)
+
+	// Delete the file — should NOT trigger alert callback.
+	_ = os.Remove(path)
+	time.Sleep(interval * 3)
+
+	if called {
+		t.Error("expected no alert when AlertOnTamper=false, but alertFn was called")
 	}
 }

@@ -661,6 +661,58 @@ func TestValidateFull_IndividualRuleErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "bad_op")
 }
 
+// TestValidateRule_SampleRate tests that sample_rate values outside [0.0, 1.0]
+// are rejected at load time and that valid values (including 0.0 normalised to 1.0)
+// are accepted.
+func TestValidateRule_SampleRate(t *testing.T) {
+	makeYAML := func(sampleRate string) string {
+		return `rules:
+  - id: sr_test
+    name: "Sample Rate Test"
+    event_type: 2
+    condition:
+      field: dport
+      op: equals
+      values: ["80"]
+    severity: warning
+    action: alert
+    sample_rate: ` + sampleRate + "\n"
+	}
+
+	tests := []struct {
+		name       string
+		rate       string
+		wantErr    bool
+		errContain string
+	}{
+		{"valid 1.0", "1.0", false, ""},
+		{"valid 0.5", "0.5", false, ""},
+		{"valid 0.01", "0.01", false, ""},
+		{"zero normalised to 1.0", "0.0", false, ""},
+		{"negative rejected", "-0.1", true, "sample_rate"},
+		{"above 1.0 rejected", "1.1", true, "sample_rate"},
+		{"above 2.0 rejected", "2.0", true, "sample_rate"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			ruleFile := filepath.Join(tmpDir, "sr.yaml")
+			require.NoError(t, os.WriteFile(ruleFile, []byte(makeYAML(tt.rate)), 0644))
+
+			_, err := LoadRulesFromFile(ruleFile)
+			if tt.wantErr {
+				require.Error(t, err, "expected error for sample_rate=%s", tt.rate)
+				if tt.errContain != "" {
+					assert.Contains(t, err.Error(), tt.errContain)
+				}
+			} else {
+				require.NoError(t, err, "unexpected error for sample_rate=%s", tt.rate)
+			}
+		})
+	}
+}
+
 // filterRulesByTag is a helper function to filter rules by a specific tag.
 func filterRulesByTag(rules []Rule, tag string) []Rule {
 	if tag == "" {

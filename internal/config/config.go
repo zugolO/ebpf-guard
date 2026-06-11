@@ -888,6 +888,13 @@ type CanaryConfig struct {
 	// AlertSeverity is the severity for canary access alerts ("warning" or "critical").
 	// Default: critical
 	AlertSeverity string `mapstructure:"alert_severity"`
+	// VerifyInterval is how often canary file integrity is checked after creation.
+	// Default: 60s
+	VerifyInterval time.Duration `mapstructure:"verify_interval"`
+	// AlertOnTamper controls whether an alert is emitted when a canary file is
+	// found missing or modified during periodic verification.
+	// Default: true
+	AlertOnTamper bool `mapstructure:"alert_on_tamper"`
 }
 
 // AuditConfig holds settings for the rule-change and config-reload audit log.
@@ -1184,6 +1191,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("canary.auto_create", true)
 	v.SetDefault("canary.files", []string{})
 	v.SetDefault("canary.alert_severity", "critical")
+	v.SetDefault("canary.verify_interval", 60*time.Second)
+	v.SetDefault("canary.alert_on_tamper", true)
 
 	// Audit log defaults — disabled by default; operators opt in.
 	v.SetDefault("audit.enabled", false)

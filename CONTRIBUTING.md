@@ -289,6 +289,33 @@ git push --force-with-lease
 - Include race detector tests for concurrent code
 - Add integration tests for new collectors
 
+#### E2E Tests
+
+The `e2e/` directory contains end-to-end and integration tests split into two tiers:
+
+| Tier | Tests | When it runs |
+|------|-------|--------------|
+| **Fast** | `TestIntegration*`, `TestContention*`, `TestAnomaly*` | Every PR and push |
+| **Load** | `TestLoad*`, `TestPerformance*`, `TestSustained*` | Nightly (scheduled) |
+
+**Running fast E2E tests locally** (requires Docker):
+
+```bash
+go test -v -timeout=8m ./e2e/... -run "TestIntegration|TestContention|TestAnomaly"
+```
+
+**Running all E2E tests locally**:
+
+```bash
+go test -v -timeout=30m ./e2e/...
+```
+
+The fast E2E suite runs without the `-short` flag; to skip it in local unit-test runs pass `-short`:
+
+```bash
+go test -short ./...
+```
+
 ### Example Test Structure
 
 ```go

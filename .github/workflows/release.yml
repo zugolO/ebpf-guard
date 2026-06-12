@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 env:
-  GO_VERSION: '1.25'
+  GO_VERSION: '1.24.4'
   CLANG_VERSION: '15'
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}

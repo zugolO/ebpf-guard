@@ -323,30 +323,40 @@ func TestAlertmanagerClient_NoTraceIDWhenEmpty(t *testing.T) {
 
 func TestValidateWebhookURL(t *testing.T) {
 	tests := []struct {
-		name    string
-		url     string
-		wantErr bool
+		name       string
+		url        string
+		strictSSRF bool
+		wantErr    bool
 	}{
-		{"valid http", "http://alertmanager:9093/api/v2/alerts", false},
-		{"valid https", "https://alertmanager.example.com/api/v2/alerts", false},
-		{"valid internal dns", "http://alertmanager.monitoring.svc:9093", false},
-		{"empty url", "", true},
-		{"file scheme", "file:///etc/passwd", true},
-		{"gopher scheme", "gopher://127.0.0.1", true},
-		{"ftp scheme", "ftp://internal.example.com", true},
-		{"no host", "http://", true},
-		{"loopback ipv4", "http://127.0.0.1:9093", true},
-		{"loopback ipv6", "http://[::1]:9093", true},
-		{"link-local", "http://169.254.169.254/latest/meta-data/", true},
+		{"valid http", "http://alertmanager:9093/api/v2/alerts", false, false},
+		{"valid https", "https://alertmanager.example.com/api/v2/alerts", false, false},
+		{"valid internal dns", "http://alertmanager.monitoring.svc:9093", false, false},
+		{"empty url", "", false, true},
+		{"file scheme", "file:///etc/passwd", false, true},
+		{"gopher scheme", "gopher://127.0.0.1", false, true},
+		{"ftp scheme", "ftp://internal.example.com", false, true},
+		{"no host", "http://", false, true},
+		{"loopback ipv4", "http://127.0.0.1:9093", false, true},
+		{"loopback ipv6", "http://[::1]:9093", false, true},
+		{"link-local", "http://169.254.169.254/latest/meta-data/", false, true},
+		// Private IPs allowed in non-strict mode (in-cluster Alertmanager)
+		{"private ip non-strict", "http://10.96.0.1:9093", false, false},
+		{"private ip 172 non-strict", "http://172.20.0.5:9093", false, false},
+		// Private IPs blocked in strict mode
+		{"private ip strict 10/8", "http://10.96.0.1:9093", true, true},
+		{"private ip strict 172/12", "http://172.20.0.5:9093", true, true},
+		{"private ip strict 192.168/16", "http://192.168.1.100:9093", true, true},
+		// Public IPs always allowed
+		{"public ip strict", "https://1.2.3.4:9093", true, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateWebhookURL(tt.url)
+			err := validateWebhookURL(tt.url, tt.strictSSRF)
 			if tt.wantErr {
-				assert.Error(t, err, "expected error for URL %q", tt.url)
+				assert.Error(t, err, "expected error for URL %q (strict=%v)", tt.url, tt.strictSSRF)
 			} else {
-				assert.NoError(t, err, "unexpected error for URL %q", tt.url)
+				assert.NoError(t, err, "unexpected error for URL %q (strict=%v)", tt.url, tt.strictSSRF)
 			}
 		})
 	}

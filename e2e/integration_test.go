@@ -265,7 +265,7 @@ func TestBPFSampling_CardinalityLimiting(t *testing.T) {
 		Name:      "Sampling Test",
 		EventType: types.EventSyscall,
 		Condition: correlator.RuleCondition{
-			Field:  "syscall_nr",
+			Field:  "nr",
 			Op:     correlator.OpEquals,
 			Values: []string{"59"}, // execve
 		},

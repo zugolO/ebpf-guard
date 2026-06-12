@@ -580,7 +580,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if resetTimeout <= 0 {
 			resetTimeout = 30 * time.Second
 		}
-		alertmanagerClient = exporter.NewAlertmanagerClientFull(
+		alertmanagerClient = exporter.NewAlertmanagerClientFullWithOptions(
 			cfg.Alerting.WebhookURL,
 			cfg.Alerting.GeneratorURL,
 			cfg.Alerting.BatchSize,
@@ -592,6 +592,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			},
 			nil,
 			nil, nil, nil,
+			cfg.Alerting.StrictSSRF,
 		)
 		slog.Info("alertmanager: webhook integration active",
 			slog.String("url", cfg.Alerting.WebhookURL))
@@ -758,10 +759,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.String("subscription", cfg.Collectors.GCPAudit.PubSubSubscription))
 	}
 	if cfg.Collectors.IOUring.Enabled {
-		ioc := collector.NewIOUringCollector(slog.Default())
-		ioc = ioc.WithBackpressureStrategy(bpStrategy)
-		collectors = append(collectors, ioc)
-		slog.Info("iouring: collector enabled")
+		ioc, iocErr := collector.NewIOUringCollector(slog.Default())
+		if iocErr != nil {
+			slog.Warn("iouring: collector creation failed, skipping", slog.Any("error", iocErr))
+		} else {
+			ioc = ioc.WithBackpressureStrategy(bpStrategy)
+			collectors = append(collectors, ioc)
+			slog.Info("iouring: collector enabled")
+		}
 	}
 	if cfg.Collectors.BPFMonitor.Enabled {
 		bmc, bmErr := collector.NewBPFMonitorCollector(slog.Default())

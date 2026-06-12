@@ -46,6 +46,10 @@ func TestShouldEscalate_Webshell(t *testing.T) {
 	alert := types.Alert{
 		RuleID:   "webshell_php_in_webroot",
 		Severity: types.SeverityCritical,
+		ProcessTree: types.ProcessTree{
+			{PID: 1000, PPID: 1, Comm: "nginx"},
+			{PID: 1001, PPID: 1000, Comm: "php-fpm"},
+		},
 	}
 	assert.True(t, m.shouldEscalate(alert))
 }
@@ -66,15 +70,36 @@ func TestShouldEscalate_ReverseShell(t *testing.T) {
 		"container_escape_attempt",
 	}
 
+	// Reverse-shell / webshell rules require lineage confirmation: shouldEscalate
+	// only authorises the kill when the correlation engine recorded a process tree.
+	lineage := types.ProcessTree{
+		{PID: 1000, PPID: 1, Comm: "nginx"},
+		{PID: 1001, PPID: 1000, Comm: "bash"},
+	}
+
 	for _, ruleID := range tests {
 		t.Run(ruleID, func(t *testing.T) {
 			alert := types.Alert{
-				RuleID:   ruleID,
-				Severity: types.SeverityCritical,
+				RuleID:      ruleID,
+				Severity:    types.SeverityCritical,
+				ProcessTree: lineage,
 			}
 			assert.True(t, m.shouldEscalate(alert))
 		})
 	}
+}
+
+func TestShouldEscalate_ReverseShellWithoutLineage(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	m := New(cfg, slog.Default())
+
+	// Without a process tree, lineage-required rules must not escalate.
+	alert := types.Alert{
+		RuleID:   "c2_reverse_shell_standard_ports",
+		Severity: types.SeverityCritical,
+	}
+	assert.False(t, m.shouldEscalate(alert))
 }
 
 func TestShouldEscalate_WarningNotEscalated(t *testing.T) {
@@ -204,6 +229,10 @@ func TestProcessAlerts_DryRunDoesNotExecute(t *testing.T) {
 			Severity: types.SeverityCritical,
 			PID:      5678,
 			Comm:     "php-fpm",
+			ProcessTree: types.ProcessTree{
+				{PID: 1000, PPID: 1, Comm: "nginx"},
+				{PID: 5678, PPID: 1000, Comm: "php-fpm"},
+			},
 		},
 	}
 

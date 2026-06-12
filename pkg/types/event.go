@@ -120,15 +120,20 @@ type Event struct {
 	ProcArgsTruncated bool
 }
 
-// EnrichmentInfo contains Kubernetes metadata attached to events/alerts.
+// EnrichmentInfo contains Kubernetes and container runtime metadata attached to events/alerts.
 type EnrichmentInfo struct {
-	PodName     string            `json:"pod_name,omitempty"`
-	Namespace   string            `json:"namespace,omitempty"`
-	PodUID      string            `json:"pod_uid,omitempty"`
-	NodeName    string            `json:"node_name,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
-	ContainerID string            `json:"container_id,omitempty"`
+	PodName        string            `json:"pod_name,omitempty"`
+	Namespace      string            `json:"namespace,omitempty"`
+	PodUID         string            `json:"pod_uid,omitempty"`
+	NodeName       string            `json:"node_name,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
+	Annotations    map[string]string `json:"annotations,omitempty"`
+	ContainerID    string            `json:"container_id,omitempty"`
+	ContainerName  string            `json:"container_name,omitempty"`
+	ContainerImage string            `json:"container_image,omitempty"`
+	// RuntimeSource identifies which enrichment path populated this struct:
+	// "k8s", "docker", "containerd", or "crio".
+	RuntimeSource string `json:"runtime_source,omitempty"`
 }
 
 // SyscallEvent contains syscall tracepoint data.

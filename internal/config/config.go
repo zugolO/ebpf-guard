@@ -89,6 +89,9 @@ type Config struct {
 
 	// AdmissionWebhook configures the Kubernetes ValidatingAdmissionWebhook server.
 	AdmissionWebhook AdmissionWebhookConfig `mapstructure:"admission_webhook"`
+
+	// Runtime configures container runtime enrichment (CRI/Docker) for non-Kubernetes hosts.
+	Runtime RuntimeConfig `mapstructure:"runtime"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -694,6 +697,23 @@ type KubernetesConfig struct {
 	KubeconfigPath string `mapstructure:"kubeconfig_path"`
 	// ResyncPeriod is the informer resync period in seconds
 	ResyncPeriod int `mapstructure:"resync_period"`
+}
+
+// RuntimeConfig holds container runtime enrichment settings (issue #123).
+// Enrichment via CRI or Docker sockets works on non-Kubernetes hosts where
+// the k8s API is unavailable. On K8s hosts both enrichers can run together.
+type RuntimeConfig struct {
+	// Enrichment controls the runtime enrichment mode.
+	// auto  — try CRI first (/run/containerd/containerd.sock, /run/crio/crio.sock),
+	//         fall back to Docker (/var/run/docker.sock).
+	// cri   — use CRI socket only.
+	// docker — use Docker socket only.
+	// off   — disable runtime enrichment (default).
+	Enrichment string `mapstructure:"enrichment"`
+	// SocketPath overrides the auto-detected runtime socket path.
+	SocketPath string `mapstructure:"socket_path"`
+	// CacheTTL is the container metadata cache lifetime (Go duration string). Default: "30s".
+	CacheTTL string `mapstructure:"cache_ttl"`
 }
 
 // EnforcementConfig holds enforcement settings.

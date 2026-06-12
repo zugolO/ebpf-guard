@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/semaphore"
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	internalbpf "github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/attacker"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/internal/canary"
 	"github.com/zugolO/ebpf-guard/internal/collector"
@@ -30,6 +31,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/migration"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
+	"github.com/zugolO/ebpf-guard/internal/runtime"
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/internal/tui"
@@ -96,6 +98,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		newLearnCmd(),
 		newDashboardCmd(),
 		configCmd,
+		newAttackSimCmd(&cfgPath),
 	)
 
 	return root
@@ -747,6 +750,39 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// ── Container runtime enricher (issue #123) ─────────────────────────────
+	// Works on non-Kubernetes hosts and complements the K8s enricher.
+	var runtimeEnricher *runtime.Enricher
+	if cfg.Runtime.Enrichment != "" && cfg.Runtime.Enrichment != "off" {
+		cacheTTL, _ := time.ParseDuration(cfg.Runtime.CacheTTL)
+		reCfg := runtime.EnricherConfig{
+			Mode:       cfg.Runtime.Enrichment,
+			SocketPath: cfg.Runtime.SocketPath,
+			CacheTTL:   cacheTTL,
+			Metrics: runtime.EnricherMetrics{
+				CacheSize: prometheus.NewGauge(prometheus.GaugeOpts{
+					Name: "ebpf_guard_runtime_cache_size",
+					Help: "Number of container entries in the runtime enrichment cache.",
+				}),
+				MissTotal: prometheus.NewCounter(prometheus.CounterOpts{
+					Name: "ebpf_guard_runtime_enrichment_misses_total",
+					Help: "Total enrichment lookups that found no container metadata.",
+				}),
+			},
+		}
+		if re, reErr := runtime.NewEnricher(reCfg, slog.Default()); reErr != nil {
+			slog.Warn("runtime enricher: unavailable, container metadata will not be added",
+				slog.String("mode", cfg.Runtime.Enrichment),
+				slog.Any("error", reErr))
+		} else {
+			runtimeEnricher = re
+			runtimeEnricher.Start(ctx)
+			defer func() { _ = runtimeEnricher.Stop() }()
+			slog.Info("runtime enricher active",
+				slog.String("source", runtimeEnricher.Source()))
+		}
+	}
+
 	// Container drift detector — enabled when containers use K8s enrichment.
 	driftDetector := drift.NewDetector(drift.DetectorConfig{
 		BaselineWindow: 5 * time.Minute,
@@ -789,6 +825,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				if wErr := eventLog.Write(event); wErr != nil {
 					slog.Debug("event log: write error", slog.Any("error", wErr))
 				}
+			}
+
+			// Enrich with container runtime metadata before rule evaluation so
+			// conditions on container fields (name, image) can match.
+			if runtimeEnricher != nil {
+				runtimeEnricher.EnrichEvent(&event)
 			}
 
 			// engine.Ingest is single-goroutine safe; call it here before dispatch.
@@ -1878,4 +1920,135 @@ func ruleIDsFrom(rules []correlator.Rule) []string {
 		ids[i] = r.ID
 	}
 	return ids
+}
+
+// newAttackSimCmd returns the "attack-sim" subcommand (issue #124).
+//
+// Usage:
+//
+//	ebpf-guard attack-sim                            # list all scenarios
+//	ebpf-guard attack-sim --run-all                  # synthetic run against loaded rules
+//	ebpf-guard attack-sim --scenario container-escape-ptrace
+//	ebpf-guard attack-sim --verify --agent http://localhost:8080 --token TOKEN --timeout 30s
+func newAttackSimCmd(cfgPath *string) *cobra.Command {
+	var (
+		listOnly    bool
+		runAll      bool
+		scenarioID  string
+		verifyMode  bool
+		agentAddr   string
+		bearerToken string
+		timeoutStr  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "attack-sim",
+		Short: "Simulate attacks and verify detections fire",
+		Long: `attack-sim reproduces the behaviors detected by the built-in rule sets using
+safe synthetic events — no real malicious payloads, no outbound network traffic.
+
+Modes:
+  --list          Print all available scenarios and exit.
+  --run-all       Feed every scenario through a local correlation engine loaded
+                  from the configured rules file. Reports PASS/FAIL per scenario.
+  --scenario ID   Run a single scenario (use --list to see IDs).
+  --verify        Poll a live agent's /alerts API after running a scenario and
+                  assert the expected rule fired (requires --agent).
+
+Examples:
+  ebpf-guard attack-sim --list
+  ebpf-guard attack-sim --run-all
+  ebpf-guard attack-sim --scenario dga-dns-query
+  ebpf-guard attack-sim --scenario sensitive-file-read --verify \
+    --agent http://localhost:8080 --token mytoken --timeout 30s`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			setupLogger("info")
+			runner := attacker.NewRunner(nil, slog.Default())
+
+			if listOnly {
+				fmt.Printf("%-40s  %-12s  %s\n", "ID", "MITRE", "Name")
+				fmt.Println(strings.Repeat("-", 72))
+				for _, s := range runner.Scenarios() {
+					fmt.Printf("%-40s  %-12s  %s\n", s.ID, s.MITRETech, s.Name)
+				}
+				return nil
+			}
+
+			cfgManager, err := config.NewManagerSkipPermCheck(*cfgPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			rulesPath := cfgManager.Get().Rules.Path
+
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			if verifyMode {
+				if agentAddr == "" {
+					return fmt.Errorf("--verify requires --agent (e.g. --agent http://localhost:8080)")
+				}
+				if scenarioID == "" {
+					return fmt.Errorf("--verify requires --scenario ID")
+				}
+				timeout := 30 * time.Second
+				if timeoutStr != "" {
+					timeout, err = time.ParseDuration(timeoutStr)
+					if err != nil {
+						return fmt.Errorf("invalid --timeout: %w", err)
+					}
+				}
+				result, err := runner.Verify(ctx, scenarioID, agentAddr, bearerToken, timeout)
+				if err != nil {
+					return fmt.Errorf("verify: %w", err)
+				}
+				attacker.PrintResults([]attacker.ScenarioResult{result}, os.Stdout)
+				if !result.Passed {
+					return fmt.Errorf("scenario %q FAILED: missing rules %v", scenarioID, result.Missing)
+				}
+				return nil
+			}
+
+			var results []attacker.ScenarioResult
+			if runAll {
+				results, err = runner.RunSynthetic(ctx, rulesPath)
+				if err != nil {
+					return fmt.Errorf("run-all: %w", err)
+				}
+			} else if scenarioID != "" {
+				result, err := runner.RunScenarioSynthetic(ctx, scenarioID, rulesPath)
+				if err != nil {
+					return err
+				}
+				results = []attacker.ScenarioResult{result}
+			} else {
+				// Default: list scenarios.
+				fmt.Printf("%-40s  %-12s  %s\n", "ID", "MITRE", "Name")
+				fmt.Println(strings.Repeat("-", 72))
+				for _, s := range runner.Scenarios() {
+					fmt.Printf("%-40s  %-12s  %s\n", s.ID, s.MITRETech, s.Name)
+				}
+				fmt.Println("\nUse --run-all to test all scenarios, or --scenario ID for one.")
+				return nil
+			}
+
+			attacker.PrintResults(results, os.Stdout)
+
+			// Return non-zero exit code when any scenario failed.
+			for _, r := range results {
+				if !r.Passed {
+					return fmt.Errorf("one or more scenarios FAILED")
+				}
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&listOnly, "list", false, "list all available scenarios and exit")
+	cmd.Flags().BoolVar(&runAll, "run-all", false, "run all scenarios through local rule engine")
+	cmd.Flags().StringVar(&scenarioID, "scenario", "", "run a single scenario by ID")
+	cmd.Flags().BoolVar(&verifyMode, "verify", false, "poll live agent API to confirm alert fired")
+	cmd.Flags().StringVar(&agentAddr, "agent", "http://localhost:8080", "agent HTTP address for --verify mode")
+	cmd.Flags().StringVar(&bearerToken, "token", "", "bearer token for the agent API")
+	cmd.Flags().StringVar(&timeoutStr, "timeout", "30s", "how long to wait for alerts in --verify mode")
+	return cmd
 }

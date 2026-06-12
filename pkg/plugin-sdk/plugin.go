@@ -158,8 +158,8 @@ type KmodEvent struct {
 	FromTmpfs bool   `json:"from_tmpfs"`
 }
 
-// CgroupEscEvent holds cgroup namespace escape fields.
-type CgroupEscEvent struct {
+// CgroupEscapeEvent holds cgroup namespace escape fields.
+type CgroupEscapeEvent struct {
 	InitCgroupID uint64 `json:"init_cgroup_id"`
 	NewCgroupID  uint64 `json:"new_cgroup_id"`
 }
@@ -199,7 +199,7 @@ type Event struct {
 	Syscall    *SyscallEvent `json:"syscall,omitempty"`
 	Privesc    *PrivescEvent `json:"privesc,omitempty"`
 	Kmod       *KmodEvent    `json:"kmod,omitempty"`
-	CgroupEsc  *CgroupEscEvent `json:"cgroup_esc,omitempty"`
+	CgroupEsc  *CgroupEscapeEvent `json:"cgroup_esc,omitempty"`
 	NetClose   *NetCloseEvent `json:"net_close,omitempty"`
 	GPU        *GPUEvent     `json:"gpu,omitempty"`
 }

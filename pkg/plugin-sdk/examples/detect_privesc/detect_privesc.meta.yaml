@@ -1,0 +1,6 @@
+id: detect_privesc_001
+name: "CAP_SYS_ADMIN acquisition detector"
+description: "Fires when a process gains CAP_SYS_ADMIN — a common container-escape prerequisite"
+severity: critical
+action: alert
+tags: [privesc, container-escape, mitre:T1611]

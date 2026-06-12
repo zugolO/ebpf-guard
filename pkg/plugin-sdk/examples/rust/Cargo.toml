@@ -1,0 +1,17 @@
+[package]
+name    = "detect-dns-dga"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"   # minimise binary size
+lto       = true
+codegen-units = 1
+panic     = "abort"
+
+[dependencies]
+# No external crates required — everything is stdlib / core.
+# Add serde_json_core if you need typed deserialization without std.

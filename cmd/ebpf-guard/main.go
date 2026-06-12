@@ -36,6 +36,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/internal/tui"
 	"github.com/zugolO/ebpf-guard/internal/watchdog"
+	"github.com/zugolO/ebpf-guard/internal/wasm"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -99,6 +100,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		newDashboardCmd(),
 		configCmd,
 		newAttackSimCmd(&cfgPath),
+		newPluginsCmd(),
 	)
 
 	return root
@@ -2093,4 +2095,125 @@ Examples:
 	cmd.Flags().StringVar(&bearerToken, "token", "", "bearer token for the agent API")
 	cmd.Flags().StringVar(&timeoutStr, "timeout", "30s", "how long to wait for alerts in --verify mode")
 	return cmd
+}
+
+// newPluginsCmd returns the "plugins" parent command with "validate" as a subcommand.
+//
+// Usage:
+//
+//	ebpf-guard plugins validate ./rules/custom/my-plugin.wasm
+//	ebpf-guard plugins validate ./rules/custom/ --dry-run
+func newPluginsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "plugins",
+		Short: "Manage and inspect WASM detection plugins",
+	}
+	cmd.AddCommand(newPluginsValidateCmd())
+	return cmd
+}
+
+func newPluginsValidateCmd() *cobra.Command {
+	var (
+		dryRun     bool
+		syntheticN int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "validate [PATH]",
+		Short: "Check WASM plugin ABI compliance and optionally dry-run against synthetic events",
+		Long: `validate loads one or more .wasm plugin files, checks their exported ABI symbols,
+and reports any missing required or recommended exports.
+
+If --dry-run is set (the default), a small set of synthetic events covering every
+event type is fed through each plugin so you can confirm your detector fires.
+
+PATH may be a single .wasm file or a directory of .wasm files.
+
+Examples:
+  ebpf-guard plugins validate rules/custom/my-plugin.wasm
+  ebpf-guard plugins validate rules/custom/ --dry-run
+  ebpf-guard plugins validate rules/custom/ --no-dry-run`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := args[0]
+			ctx := cmd.Context()
+			logger := slog.Default()
+
+			var syntheticEvents []types.Event
+			if dryRun {
+				syntheticEvents = buildSyntheticEvents(syntheticN)
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				return fmt.Errorf("stat %s: %w", path, err)
+			}
+
+			var paths []string
+			if info.IsDir() {
+				entries, err := os.ReadDir(path)
+				if err != nil {
+					return fmt.Errorf("readdir %s: %w", path, err)
+				}
+				for _, e := range entries {
+					if !e.IsDir() && strings.HasSuffix(e.Name(), ".wasm") {
+						paths = append(paths, filepath.Join(path, e.Name()))
+					}
+				}
+				if len(paths) == 0 {
+					fmt.Println("no .wasm files found in", path)
+					return nil
+				}
+			} else {
+				paths = []string{path}
+			}
+
+			var anyFailed bool
+			for _, p := range paths {
+				res := wasm.ValidatePlugin(ctx, p, syntheticEvents, logger)
+				fmt.Print(wasm.FormatValidationResult(res))
+				if !res.OK {
+					anyFailed = true
+				}
+			}
+
+			if anyFailed {
+				return fmt.Errorf("one or more plugins failed ABI validation")
+			}
+			fmt.Printf("\nAll %d plugin(s) passed ABI validation.\n", len(paths))
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&dryRun, "dry-run", true, "run each plugin against synthetic events after ABI check")
+	cmd.Flags().IntVar(&syntheticN, "events", 1, "number of synthetic events per type to generate for dry-run")
+	return cmd
+}
+
+// buildSyntheticEvents generates one representative event per EventType for dry-run validation.
+func buildSyntheticEvents(perType int) []types.Event {
+	if perType <= 0 {
+		perType = 1
+	}
+	var comm [16]byte
+	copy(comm[:], "test")
+
+	var events []types.Event
+	for i := 0; i < perType; i++ {
+		events = append(events,
+			types.Event{Type: types.EventSyscall, PID: 1, Comm: comm,
+				Syscall: &types.SyscallEvent{Nr: 59}},
+			types.Event{Type: types.EventTCPConnect, PID: 2, Comm: comm,
+				Network: &types.NetworkEvent{Dport: 4444, Family: types.AFInet}},
+			types.Event{Type: types.EventFileAccess, PID: 3, Comm: comm,
+				File: &types.FileEvent{}},
+			types.Event{Type: types.EventDNS, PID: 4, Comm: comm,
+				DNS: &types.DNSEvent{QName: "xkzpqwerty.evil.com"}},
+			types.Event{Type: types.EventPrivesc, PID: 5, Comm: comm,
+				Privesc: &types.PrivescEvent{OldCaps: 0, NewCaps: 1 << 21}},
+			types.Event{Type: types.EventKmodLoad, PID: 6, Comm: comm,
+				Kmod: &types.KmodEvent{ModName: "evil.ko", FromTmpfs: true}},
+		)
+	}
+	return events
 }

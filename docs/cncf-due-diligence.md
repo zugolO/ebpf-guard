@@ -75,6 +75,9 @@ Unlike competing solutions tied to specific vendors:
 
 ## Comparison with Existing Projects
 
+For a detailed decision tree and feature matrix comparing ebpf-guard against
+Falco, Tetragon, and KubeArmor, see [docs/choosing.md](choosing.md).
+
 ### Falco
 
 | Aspect | Falco | ebpf-guard |
@@ -226,20 +229,24 @@ See [SECURITY.md](../SECURITY.md) for our security policy and vulnerability disc
 
 ## Production Users
 
-*This section will be populated as the project gains production users.*
+ebpf-guard is actively seeking early adopters.  See [ADOPTERS.md](../ADOPTERS.md)
+for the current list and instructions on how to add your organization.
 
 ### Current Status
 
-ebpf-guard is currently in active development and seeking early adopters.
+The project is production-ready for evaluation deployments.  The API and rule
+schema are stable at v1.  Breaking changes are announced via the GitHub
+Discussions and the upgrade guide (`docs/upgrade-guide.md`).
 
 ### Interested Parties
 
-- Organizations evaluating runtime security tools
-- Kubernetes platform teams
+- Organizations evaluating runtime security tools for Kubernetes
+- Platform engineering teams seeking eBPF-based observability without Cilium
+- Security teams needing TLS plaintext inspection without MITM proxies
 
 ### Case Studies
 
-*Pending first production deployments.*
+*See [ADOPTERS.md](../ADOPTERS.md) — open a PR to add your entry.*
 
 ---
 

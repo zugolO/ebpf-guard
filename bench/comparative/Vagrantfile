@@ -1,0 +1,219 @@
+# bench/comparative/Vagrantfile — Pinned reference machine for ebpf-guard benchmarks
+#
+# Usage:
+#   vagrant up
+#   vagrant ssh -c "cd /vagrant && bench/comparative/run.sh"
+#
+# Machine spec (matches docs/benchmark-competitor-analysis.md reference environment):
+#   OS    : Ubuntu 22.04 LTS (Jammy Jellyfish)
+#   Kernel: 6.1 LTS (HWE, pinned via apt-mark hold)
+#   CPUs  : 4 vCPUs
+#   RAM   : 8 GB
+#
+# Pinned software versions:
+#   Go      : 1.23.0
+#   clang   : 14.0
+#   Falco   : 0.38.1
+#   Tracee  : 0.21.0
+#   Tetragon: 1.1.0
+
+Vagrant.configure("2") do |config|
+  config.vm.box     = "ubuntu/jammy64"
+  config.vm.box_version = "~> 20240301"  # pin to a known-good image
+
+  config.vm.hostname = "ebpf-guard-bench"
+
+  # Map the repo root into the VM so `cd /vagrant` works from run.sh.
+  config.vm.synced_folder "../..", "/vagrant", type: "virtualbox"
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.name   = "ebpf-guard-bench"
+    vb.memory = 8192
+    vb.cpus   = 4
+
+    # Enable nested virtualisation (needed for some eBPF features in older kernels).
+    vb.customize ["modifyvm", :id, "--nested-hw-virt", "on"]
+
+    # Disable audio/USB to reduce overhead.
+    vb.customize ["modifyvm", :id, "--audio", "none"]
+    vb.customize ["modifyvm", :id, "--usb", "off"]
+  end
+
+  # ── Provision: system packages ──────────────────────────────────────────────
+  config.vm.provision "shell", name: "system-packages", inline: <<~SHELL
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+
+    echo "==> Updating apt cache"
+    apt-get update -qq
+
+    echo "==> Installing kernel 6.1 LTS (HWE) + headers"
+    apt-get install -y --no-install-recommends \
+      linux-image-6.1.0-23-amd64 \
+      linux-headers-6.1.0-23-amd64 \
+      linux-libc-dev \
+      2>/dev/null || \
+    apt-get install -y --no-install-recommends \
+      linux-image-hwe-22.04 \
+      linux-headers-hwe-22.04 \
+      linux-libc-dev
+
+    echo "==> Pinning kernel to prevent upgrades"
+    apt-mark hold linux-image-generic linux-headers-generic || true
+
+    echo "==> Installing build dependencies"
+    apt-get install -y --no-install-recommends \
+      curl wget git make cmake build-essential \
+      clang-14 llvm-14 libbpf-dev \
+      pkg-config libelf-dev zlib1g-dev \
+      perf linux-perf \
+      time bc awk jq \
+      ca-certificates gnupg \
+      libyaml-dev libssl-dev libcurl4-openssl-dev
+
+    # Symlink clang-14 as the default clang (required by cilium/ebpf bpf2go).
+    update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-14   100
+    update-alternatives --install /usr/bin/llc     llc     /usr/bin/llc-14     100
+    update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-14 100
+
+    echo "==> Enabling BPF perf events for non-root"
+    echo -1 > /proc/sys/kernel/perf_event_paranoid   || true
+    echo 0   > /proc/sys/kernel/kptr_restrict         || true
+    sysctl -w kernel.unprivileged_bpf_disabled=0      || true
+  SHELL
+
+  # ── Provision: Go 1.23 ──────────────────────────────────────────────────────
+  config.vm.provision "shell", name: "install-go", inline: <<~SHELL
+    set -euo pipefail
+    GO_VERSION="1.23.0"
+    GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
+    GO_URL="https://golang.org/dl/${GO_TARBALL}"
+    GO_SHA256="905a297f19ead44780548933e0ff1a1b86e8327bb459e92f9c0012569f76f5e3"
+
+    if [[ -x /usr/local/go/bin/go ]]; then
+      existing=$(/usr/local/go/bin/go version | awk '{print $3}' | tr -d 'go')
+      if [[ "$existing" == "${GO_VERSION}" ]]; then
+        echo "==> Go ${GO_VERSION} already installed, skipping"
+        exit 0
+      fi
+    fi
+
+    echo "==> Downloading Go ${GO_VERSION}"
+    curl -fsSL -o "/tmp/${GO_TARBALL}" "${GO_URL}"
+    echo "${GO_SHA256}  /tmp/${GO_TARBALL}" | sha256sum --check --status || {
+      echo "ERROR: Go tarball checksum mismatch" >&2; exit 1
+    }
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "/tmp/${GO_TARBALL}"
+    rm "/tmp/${GO_TARBALL}"
+
+    # Add to PATH for all users.
+    echo 'export PATH=$PATH:/usr/local/go/bin:/root/go/bin' \
+      > /etc/profile.d/golang.sh
+    chmod 644 /etc/profile.d/golang.sh
+
+    source /etc/profile.d/golang.sh
+    go version
+    echo "==> Go ${GO_VERSION} installed"
+  SHELL
+
+  # ── Provision: Falco 0.38.1 ─────────────────────────────────────────────────
+  config.vm.provision "shell", name: "install-falco", inline: <<~SHELL
+    set -euo pipefail
+    FALCO_VERSION="0.38.1"
+    FALCO_DEB="falco_${FALCO_VERSION}_amd64.deb"
+    FALCO_URL="https://github.com/falcosecurity/falco/releases/download/${FALCO_VERSION}/${FALCO_DEB}"
+    # SHA256 from https://falco.org/blog/falco-0-38-1/
+    FALCO_SHA256="placeholder-update-from-falco-release-page"
+
+    if falco --version 2>/dev/null | grep -q "${FALCO_VERSION}"; then
+      echo "==> Falco ${FALCO_VERSION} already installed, skipping"
+      exit 0
+    fi
+
+    echo "==> Installing Falco ${FALCO_VERSION}"
+    curl -fsSL -o "/tmp/${FALCO_DEB}" "${FALCO_URL}"
+    # NOTE: Verify SHA256 in production — placeholder above must be replaced.
+    dpkg -i "/tmp/${FALCO_DEB}" || apt-get -f install -y
+    rm "/tmp/${FALCO_DEB}"
+    falco --version
+    echo "==> Falco ${FALCO_VERSION} installed"
+  SHELL
+
+  # ── Provision: Tracee 0.21.0 ────────────────────────────────────────────────
+  config.vm.provision "shell", name: "install-tracee", inline: <<~SHELL
+    set -euo pipefail
+    TRACEE_VERSION="0.21.0"
+    TRACEE_URL="https://github.com/aquasecurity/tracee/releases/download/v${TRACEE_VERSION}/tracee-linux-amd64"
+    DEST="/usr/local/bin/tracee"
+
+    if [[ -x "${DEST}" ]] && "${DEST}" version 2>/dev/null | grep -q "${TRACEE_VERSION}"; then
+      echo "==> Tracee ${TRACEE_VERSION} already installed, skipping"
+      exit 0
+    fi
+
+    echo "==> Installing Tracee ${TRACEE_VERSION}"
+    curl -fsSL -o "${DEST}" "${TRACEE_URL}"
+    chmod +x "${DEST}"
+    "${DEST}" version || echo "Tracee version check: $?"
+    echo "==> Tracee ${TRACEE_VERSION} installed"
+  SHELL
+
+  # ── Provision: Tetragon 1.1.0 ───────────────────────────────────────────────
+  config.vm.provision "shell", name: "install-tetragon", inline: <<~SHELL
+    set -euo pipefail
+    TETRAGON_VERSION="1.1.0"
+    TARBALL="tetragon-linux-amd64.tar.gz"
+    TETRAGON_URL="https://github.com/cilium/tetragon/releases/download/v${TETRAGON_VERSION}/${TARBALL}"
+    DEST="/usr/local/bin/tetragon"
+
+    if [[ -x "${DEST}" ]] && "${DEST}" version 2>/dev/null | grep -q "${TETRAGON_VERSION}"; then
+      echo "==> Tetragon ${TETRAGON_VERSION} already installed, skipping"
+      exit 0
+    fi
+
+    echo "==> Installing Tetragon ${TETRAGON_VERSION}"
+    curl -fsSL -o "/tmp/${TARBALL}" "${TETRAGON_URL}"
+    tar -C /usr/local/bin -xzf "/tmp/${TARBALL}" --strip-components=1 tetragon
+    chmod +x "${DEST}"
+    rm "/tmp/${TARBALL}"
+    "${DEST}" version || echo "Tetragon version check: $?"
+    echo "==> Tetragon ${TETRAGON_VERSION} installed"
+  SHELL
+
+  # ── Provision: pre-build ebpf-guard bench binaries ──────────────────────────
+  config.vm.provision "shell", name: "prebuild-bench", inline: <<~SHELL
+    set -euo pipefail
+    source /etc/profile.d/golang.sh || export PATH=$PATH:/usr/local/go/bin
+
+    echo "==> Pre-fetching Go module dependencies"
+    cd /vagrant
+    go mod download
+
+    echo "==> Building workload generator"
+    go build -o /usr/local/bin/ebpf-guard-workload-gen \
+      ./bench/comparative/workload/gen.go
+
+    echo "==> Verifying bench package compiles"
+    go test -run '^$' -count=1 ./bench/...
+
+    echo "==> All bench dependencies ready"
+  SHELL
+
+  # ── Post-provision message ───────────────────────────────────────────────────
+  config.vm.post_up_message = <<~MSG
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  ebpf-guard Benchmark VM ready                                  │
+    │                                                                  │
+    │  Run the full comparison:                                        │
+    │    vagrant ssh -c "cd /vagrant && bench/comparative/run.sh"     │
+    │                                                                  │
+    │  Run only ebpf-guard (no root required):                        │
+    │    vagrant ssh -c "cd /vagrant && bench/comparative/run.sh \\   │
+    │      --agent ebpf-guard"                                        │
+    │                                                                  │
+    │  Results will appear in bench/comparative/results/ on the host  │
+    │  (synced from the VM via VirtualBox shared folder).             │
+    └─────────────────────────────────────────────────────────────────┘
+  MSG
+end

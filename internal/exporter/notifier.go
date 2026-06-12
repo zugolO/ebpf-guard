@@ -33,10 +33,13 @@ type FanoutNotifier struct {
 
 // FanoutConfig holds configuration for all notification backends.
 type FanoutConfig struct {
-	Slack       SlackConfig   `mapstructure:"slack"`
-	Teams       TeamsConfig   `mapstructure:"teams"`
-	Webhook     WebhookConfig `mapstructure:"webhook"`
-	FalcoOutput bool          `mapstructure:"falco_output"` // emit Falco-compatible JSON for the webhook notifier
+	Slack       SlackConfig     `mapstructure:"slack"`
+	Teams       TeamsConfig     `mapstructure:"teams"`
+	Webhook     WebhookConfig   `mapstructure:"webhook"`
+	OTLP        OTLPConfig      `mapstructure:"otlp"`
+	Kafka       KafkaConfig     `mapstructure:"kafka"`
+	SyslogCEF   SyslogCEFConfig `mapstructure:"syslog_cef"`
+	FalcoOutput bool            `mapstructure:"falco_output"` // emit Falco-compatible JSON for the webhook notifier
 }
 
 // NewFanoutNotifier creates a new fanout notifier with the given configuration.
@@ -68,6 +71,28 @@ func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Log
 		f.notifiers = append(f.notifiers, webhookNotifier)
 		logger.Info("exporter/notifier: Webhook notifier enabled",
 			slog.String("url", cfg.Webhook.URL))
+	}
+
+	// Initialize OTLP log notifier if enabled
+	if otlpNotifier := NewOTLPNotifier(cfg.OTLP, logger); otlpNotifier.Enabled() {
+		f.notifiers = append(f.notifiers, otlpNotifier)
+		logger.Info("exporter/notifier: OTLP notifier enabled",
+			slog.String("endpoint", cfg.OTLP.Endpoint))
+	}
+
+	// Initialize Kafka notifier if enabled
+	if kafkaNotifier := NewKafkaNotifier(cfg.Kafka, logger); kafkaNotifier.Enabled() {
+		f.notifiers = append(f.notifiers, kafkaNotifier)
+		logger.Info("exporter/notifier: Kafka notifier enabled",
+			slog.String("topic", cfg.Kafka.Topic))
+	}
+
+	// Initialize syslog/CEF notifier if enabled
+	if syslogNotifier := NewSyslogCEFNotifier(cfg.SyslogCEF, logger); syslogNotifier.Enabled() {
+		f.notifiers = append(f.notifiers, syslogNotifier)
+		logger.Info("exporter/notifier: Syslog/CEF notifier enabled",
+			slog.String("address", cfg.SyslogCEF.Address),
+			slog.String("format", cfg.SyslogCEF.Format))
 	}
 
 	if len(f.notifiers) == 0 {

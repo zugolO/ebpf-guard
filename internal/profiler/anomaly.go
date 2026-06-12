@@ -70,6 +70,13 @@ type AnomalyDetector struct {
 	// Controllable state for memory pressure handling
 	enabled      bool
 	samplingRate float64
+
+	// samplingCorrections maps event type strings to inverse sampling factors
+	// (1.0 / samplingRate) set by the ring-buffer adaptive load controller.
+	// When BPF-side sampling is at 25%, the correction factor is 4.0 so each
+	// sampled event is weighted as if 4 events were observed, keeping EWMA
+	// baselines unbiased. A nil map means no corrections are active.
+	samplingCorrections map[string]float64
 }
 
 // AnomalyResult contains the result of anomaly detection.
@@ -152,7 +159,18 @@ func (ad *AnomalyDetector) ProcessEvent(e types.Event, ruleConfirmed bool) *Anom
 		if !ruleConfirmed {
 			ad.profileManager.RecordEvent(e)
 		}
-		ad.learner.RecordSample()
+		// Apply BPF sampling correction: if the ring-buffer adaptive sampler is
+		// dropping N-1 out of every N events, count each seen event as N samples
+		// so the minimum-sample gate and the learning-period timer both reflect
+		// the true event rate rather than the sampled rate.
+		factor := ad.SamplingCorrectionFactor(eventTypeSamplingKey(e.Type))
+		n := int(math.Round(factor))
+		if n < 1 {
+			n = 1
+		}
+		for i := 0; i < n; i++ {
+			ad.learner.RecordSample()
+		}
 		return nil
 	}
 
@@ -586,4 +604,65 @@ func (ad *AnomalyDetector) GetSamplingRate() float64 {
 	ad.mu.RLock()
 	defer ad.mu.RUnlock()
 	return ad.samplingRate
+}
+
+// SetSamplingCorrections stores per-event-type inverse sampling factors supplied
+// by the ring-buffer adaptive load controller. The factor for event type T is
+// 1.0 / bpfSamplingRate(T); passing nil or an empty map clears all corrections.
+//
+// Effect: during the learning phase, each RecordSample() call is counted
+// factor times so the learned baseline reflects the true event rate even when
+// BPF is down-sampling. This keeps anomaly thresholds from drifting low and
+// avoids false positives when sampling is later restored.
+func (ad *AnomalyDetector) SetSamplingCorrections(corrections map[string]float64) {
+	ad.mu.Lock()
+	defer ad.mu.Unlock()
+	if len(corrections) == 0 {
+		ad.samplingCorrections = nil
+		return
+	}
+	m := make(map[string]float64, len(corrections))
+	for k, v := range corrections {
+		if v > 1.0 {
+			m[k] = v
+		}
+	}
+	if len(m) == 0 {
+		ad.samplingCorrections = nil
+	} else {
+		ad.samplingCorrections = m
+	}
+}
+
+// SamplingCorrectionFactor returns the EWMA correction factor for the given
+// event type. Returns 1.0 when no correction is set (full sampling or unknown type).
+func (ad *AnomalyDetector) SamplingCorrectionFactor(eventType string) float64 {
+	ad.mu.RLock()
+	defer ad.mu.RUnlock()
+	if ad.samplingCorrections == nil {
+		return 1.0
+	}
+	if f, ok := ad.samplingCorrections[eventType]; ok {
+		return f
+	}
+	return 1.0
+}
+
+// eventTypeSamplingKey maps an EventType to the string key used in the
+// samplingCorrections map (matching the keys used by RingBufLoadController).
+func eventTypeSamplingKey(et types.EventType) string {
+	switch et {
+	case types.EventSyscall:
+		return "syscall"
+	case types.EventTCPConnect, types.EventNetClose:
+		return "network"
+	case types.EventFileAccess:
+		return "file"
+	case types.EventDNS:
+		return "dns"
+	case types.EventTLS:
+		return "tls"
+	default:
+		return ""
+	}
 }

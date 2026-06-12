@@ -8,6 +8,7 @@ Thank you for your interest in contributing to ebpf-guard! This document provide
 - [Getting Started](#getting-started)
 - [Development Workflow](#development-workflow)
 - [Pull Request Process](#pull-request-process)
+- [Contributing Detection Rules](#contributing-detection-rules)
 - [Commit Message Guidelines](#commit-message-guidelines)
 - [Developer Certificate of Origin (DCO)](#developer-certificate-of-origin-dco)
 - [Coding Standards](#coding-standards)
@@ -137,6 +138,129 @@ Before submitting a PR, ensure:
 2. Address review comments by pushing additional commits
 3. Once approved, a maintainer will merge your PR
 4. Squash merges are used to keep history clean
+
+## Contributing Detection Rules
+
+Detection rules are the highest-leverage contributions to ebpf-guard. A single
+well-crafted rule that reliably fires on a real attack technique and has a low
+false-positive rate is worth far more than dozens of noisy rules.
+
+### Required fields for every rule
+
+```yaml
+rules:
+  - id: category_descriptive_name       # snake_case, globally unique
+    name: "Short human-readable label"  # ≤80 chars, present tense
+    description: >
+      One or two sentences explaining WHAT the rule detects, WHY it is
+      suspicious, and WHAT attackers do that triggers it. Reference the
+      MITRE ATT&CK technique ID in the description.
+    event_type: syscall | network | file | dns | tls | privesc | kmod
+    condition:                          # or condition_group: for AND/OR logic
+      field: ...
+      op: ...
+      values: [...]
+    severity: warning | critical
+    action: alert
+    tags: [mitre:T1234.001, tactic-name, category]
+```
+
+### Field naming convention
+
+| Rule category | ID prefix | File |
+|---|---|---|
+| Persistence | `persist_` | `rules/persistence[-extended].yaml` |
+| Privilege escalation | `privesc_` | `rules/privesc.yaml` |
+| Credential access | `cred_` | `rules/credential-access.yaml` |
+| Defense evasion | `evasion_` | `rules/defense-evasion.yaml` |
+| Lateral movement | `lateral_` | `rules/lateral-movement.yaml` |
+| Exfiltration | `exfil_` | `rules/exfiltration[-extended].yaml` |
+| Kubernetes | `k8s_` | `rules/k8s-attacks.yaml` |
+
+### MITRE ATT&CK tagging
+
+Every rule **must** include at least one `mitre:TXXX` or `mitre:TXXX.XXX` tag.
+Use the format `mitre:T1234` (capital T, no spaces). Sub-techniques use the
+format `mitre:T1234.001`. Both the parent technique and the sub-technique may be
+listed. Browse the coverage matrix at [docs/coverage.md](docs/coverage.md) to see
+which techniques still have gaps.
+
+### Severity rationale
+
+- **critical** — direct evidence of compromise or imminent harm (container
+  escape, kernel module load from tmpfs, cleartext credential read by unexpected
+  process, service account token theft).
+- **warning** — suspicious but may have legitimate explanations; requires
+  operator review (cron modification, new SSH key generated, large DNS query
+  volume).
+
+When in doubt, use `warning` and add a `description` note explaining when a
+false positive might occur.
+
+### False-positive guidance
+
+Include in `description` the processes or conditions that legitimately trigger
+the rule, and reflect them in `not_in` / `not_prefix` / `not_suffix` condition
+clauses. The `proc.comm` allowlist is the first defence against FP noise.
+
+```yaml
+    # Example: allowlisting package managers prevents FP on system updates
+    - field: proc.comm
+      op: not_in
+      values: ["dpkg", "rpm", "apt", "yum", "dnf", "ansible", "puppet"]
+```
+
+### Required: simulation scenario
+
+Every new rule **must** ship with at least one test in `tests/rules/`. The test
+file name should match the rule file (e.g. `tests/rules/persistence_test.yaml`).
+
+```yaml
+suite: my_new_rules
+rules_path: ../../rules/my-rules.yaml
+tests:
+  - name: "rule fires on the expected event"
+    rule_id: my_rule_id
+    event:
+      type: file
+      file:
+        path: "/etc/systemd/system/evil.service"
+        op: create
+    expect: alert
+    expect_severity: warning
+
+  - name: "dpkg does not trigger the rule"
+    rule_id: my_rule_id
+    event:
+      type: file
+      file:
+        path: "/etc/systemd/system/legit.service"
+        op: create
+      proc:
+        comm: dpkg
+    expect: no_alert
+```
+
+Run rule tests without a kernel:
+
+```bash
+./build/ebpf-guard rules check ./tests/rules/ --rules ./rules/
+```
+
+Syntax validation runs automatically in CI via `.github/workflows/rule-validation.yml`.
+
+### PR checklist for rule contributions
+
+- [ ] Rule ID is globally unique (check with `grep -r "id: my_rule_id" rules/`)
+- [ ] `description` explains the attack technique and why this event is suspicious
+- [ ] `tags` includes at least one `mitre:TXXX` tag
+- [ ] `severity` is justified (critical vs warning — see above)
+- [ ] `proc.comm not_in` list covers common legitimate callers
+- [ ] At least one positive and one negative test case in `tests/rules/`
+- [ ] `make test` passes with the new rule
+- [ ] MITRE coverage matrix is up to date: `python3 scripts/mitre-coverage.py --rules-dir rules/ --output docs/coverage.md`
+
+---
 
 ## Commit Message Guidelines
 

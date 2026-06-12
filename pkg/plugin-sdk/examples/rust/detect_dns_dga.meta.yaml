@@ -1,0 +1,6 @@
+id: detect_dns_dga_001
+name: "DNS DGA detector (Rust)"
+description: "Fires when a DNS query label has Shannon entropy > 3.5 bits/char over 12 chars — characteristic of DGA traffic"
+severity: warning
+action: alert
+tags: [dns, dga, c2, mitre:T1568.002]

@@ -150,6 +150,76 @@ type NotificationsConfig struct {
 	Teams TeamsNotificationConfig `mapstructure:"teams"`
 	// Webhook configuration
 	Webhook WebhookNotificationConfig `mapstructure:"webhook"`
+	// OTLP log exporter configuration
+	OTLP OTLPNotificationConfig `mapstructure:"otlp"`
+	// Kafka producer configuration
+	Kafka KafkaNotificationConfig `mapstructure:"kafka"`
+	// Syslog/CEF configuration
+	SyslogCEF SyslogCEFNotificationConfig `mapstructure:"syslog_cef"`
+}
+
+// OTLPNotificationConfig holds OTLP log exporter settings.
+type OTLPNotificationConfig struct {
+	// Enabled enables OTLP log exports
+	Enabled bool `mapstructure:"enabled"`
+	// Endpoint is the OTLP HTTP endpoint (e.g. "http://otel-collector:4318")
+	Endpoint string `mapstructure:"endpoint"`
+	// TLSEnabled upgrades to HTTPS and validates the server certificate
+	TLSEnabled bool `mapstructure:"tls_enabled"`
+	// CACert is the path to a PEM CA bundle for server verification
+	CACert string `mapstructure:"ca_cert"`
+	// ClientCert and ClientKey enable mTLS
+	ClientCert string `mapstructure:"client_cert"`
+	ClientKey  string `mapstructure:"client_key"`
+	// Headers are additional HTTP headers sent with each request (e.g. API keys)
+	Headers map[string]string `mapstructure:"headers"`
+	// MinSeverity filters alerts by severity ("warning" or "critical")
+	MinSeverity string `mapstructure:"min_severity"`
+}
+
+// KafkaNotificationConfig holds Kafka producer settings.
+type KafkaNotificationConfig struct {
+	// Enabled enables Kafka alert publishing
+	Enabled bool `mapstructure:"enabled"`
+	// Brokers is the list of Kafka broker addresses (e.g. ["kafka:9092"])
+	Brokers []string `mapstructure:"brokers"`
+	// Topic is the destination Kafka topic
+	Topic string `mapstructure:"topic"`
+	// Payload selects the message format: "json" (default) or "falco"
+	Payload string `mapstructure:"payload"`
+	// SASLEnabled enables SASL/PLAIN authentication
+	SASLEnabled  bool   `mapstructure:"sasl_enabled"`
+	SASLUsername string `mapstructure:"sasl_username"`
+	SASLPassword string `mapstructure:"sasl_password"`
+	// TLSEnabled enables TLS transport security
+	TLSEnabled bool   `mapstructure:"tls_enabled"`
+	CACert     string `mapstructure:"ca_cert"`
+	ClientCert string `mapstructure:"client_cert"`
+	ClientKey  string `mapstructure:"client_key"`
+	// MinSeverity filters alerts by severity ("warning" or "critical")
+	MinSeverity string `mapstructure:"min_severity"`
+}
+
+// SyslogCEFNotificationConfig holds syslog RFC 5424 / CEF settings.
+type SyslogCEFNotificationConfig struct {
+	// Enabled enables syslog/CEF alert delivery
+	Enabled bool `mapstructure:"enabled"`
+	// Network is the transport protocol: "tcp" (default), "tcp+tls", or "udp"
+	Network string `mapstructure:"network"`
+	// Address is the syslog server address (e.g. "siem.corp:514")
+	Address string `mapstructure:"address"`
+	// Format selects the wire format: "rfc5424" (default) or "cef"
+	Format string `mapstructure:"format"`
+	// AppName is the syslog APP-NAME field (default "ebpf-guard")
+	AppName string `mapstructure:"app_name"`
+	// Facility is the syslog facility number (1=user, 16=local0 … 23=local7)
+	Facility int `mapstructure:"facility"`
+	// TLS certificate paths (used when Network == "tcp+tls")
+	CACert     string `mapstructure:"ca_cert"`
+	ClientCert string `mapstructure:"client_cert"`
+	ClientKey  string `mapstructure:"client_key"`
+	// MinSeverity filters alerts by severity ("warning" or "critical")
+	MinSeverity string `mapstructure:"min_severity"`
 }
 
 // SlackNotificationConfig holds Slack webhook settings.

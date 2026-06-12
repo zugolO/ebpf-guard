@@ -524,9 +524,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.String("url", cfg.Alerting.WebhookURL))
 	}
 
-	// ── Notification fanout (Slack / Teams / Webhook) ────────────────────────
+	// ── Notification fanout (Slack / Teams / Webhook / OTLP / Kafka / Syslog) ─
 	var fanout *exporter.FanoutNotifier
-	if cfg.Notifications.Slack.Enabled || cfg.Notifications.Teams.Enabled || cfg.Notifications.Webhook.Enabled {
+	notifEnabled := cfg.Notifications.Slack.Enabled ||
+		cfg.Notifications.Teams.Enabled ||
+		cfg.Notifications.Webhook.Enabled ||
+		cfg.Notifications.OTLP.Enabled ||
+		cfg.Notifications.Kafka.Enabled ||
+		cfg.Notifications.SyslogCEF.Enabled
+	if notifEnabled {
 		fanout = exporter.NewFanoutNotifier(exporter.FanoutConfig{
 			Slack: exporter.SlackConfig{
 				Enabled:     cfg.Notifications.Slack.Enabled,
@@ -543,6 +549,42 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				Enabled: cfg.Notifications.Webhook.Enabled,
 				URL:     cfg.Notifications.Webhook.URL,
 				Headers: cfg.Notifications.Webhook.Headers,
+			},
+			OTLP: exporter.OTLPConfig{
+				Enabled:     cfg.Notifications.OTLP.Enabled,
+				Endpoint:    cfg.Notifications.OTLP.Endpoint,
+				TLSEnabled:  cfg.Notifications.OTLP.TLSEnabled,
+				CACert:      cfg.Notifications.OTLP.CACert,
+				ClientCert:  cfg.Notifications.OTLP.ClientCert,
+				ClientKey:   cfg.Notifications.OTLP.ClientKey,
+				Headers:     cfg.Notifications.OTLP.Headers,
+				MinSeverity: cfg.Notifications.OTLP.MinSeverity,
+			},
+			Kafka: exporter.KafkaConfig{
+				Enabled:      cfg.Notifications.Kafka.Enabled,
+				Brokers:      cfg.Notifications.Kafka.Brokers,
+				Topic:        cfg.Notifications.Kafka.Topic,
+				Payload:      cfg.Notifications.Kafka.Payload,
+				SASLEnabled:  cfg.Notifications.Kafka.SASLEnabled,
+				SASLUsername: cfg.Notifications.Kafka.SASLUsername,
+				SASLPassword: cfg.Notifications.Kafka.SASLPassword,
+				TLSEnabled:   cfg.Notifications.Kafka.TLSEnabled,
+				CACert:       cfg.Notifications.Kafka.CACert,
+				ClientCert:   cfg.Notifications.Kafka.ClientCert,
+				ClientKey:    cfg.Notifications.Kafka.ClientKey,
+				MinSeverity:  cfg.Notifications.Kafka.MinSeverity,
+			},
+			SyslogCEF: exporter.SyslogCEFConfig{
+				Enabled:     cfg.Notifications.SyslogCEF.Enabled,
+				Network:     cfg.Notifications.SyslogCEF.Network,
+				Address:     cfg.Notifications.SyslogCEF.Address,
+				Format:      cfg.Notifications.SyslogCEF.Format,
+				AppName:     cfg.Notifications.SyslogCEF.AppName,
+				Facility:    cfg.Notifications.SyslogCEF.Facility,
+				CACert:      cfg.Notifications.SyslogCEF.CACert,
+				ClientCert:  cfg.Notifications.SyslogCEF.ClientCert,
+				ClientKey:   cfg.Notifications.SyslogCEF.ClientKey,
+				MinSeverity: cfg.Notifications.SyslogCEF.MinSeverity,
 			},
 			FalcoOutput: cfg.Compat.FalcoOutput,
 		}, 10*time.Second, slog.Default())

@@ -1,0 +1,177 @@
+rules:
+  # MITRE ATT&CK: T1565.001 — Data Manipulation: Stored Data Manipulation
+  # Direct database file modification (SQLite, MySQL data dirs, PostgreSQL data)
+  - id: collection_direct_db_file_access
+    name: "Direct access to database data files by non-database process"
+    description: >
+      A process that is not a database engine (mysqld, postgres, mongod, etc.)
+      opened or read database data files directly. Attackers with filesystem
+      access bypass the database access controls to read raw data, modify
+      records, or exfiltrate database contents without leaving SQL audit
+      trails. Covers SQLite, MySQL/MariaDB, PostgreSQL, MongoDB, Redis,
+      and etcd data directories.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/var/lib/mysql/"
+            - "/var/lib/postgresql/"
+            - "/var/lib/mongodb/"
+            - "/var/lib/redis/"
+            - "/var/lib/etcd/"
+            - "/data/db/"
+            - "/var/lib/sqlite/"
+        - field: file.op
+          op: in
+          values: ["open", "read"]
+        - field: proc.comm
+          op: not_in
+          values: ["mysqld", "mariadbd", "postgres", "postmaster",
+                   "mongod", "mongos", "redis-server", "etcd",
+                   "sqlite3", "journalctl", "rsync", "rclone",
+                   "systemd-tmpfiles", "updatedb", "locate"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1565.001, collection, data-manipulation, database]
+
+  # MITRE ATT&CK: T1009 — Binary Padding (stealth technique)
+  # Appending zero bytes to binaries to change hash while preserving execution.
+  - id: defense_evasion_binary_truncate_pad
+    name: "Binary file padded with zero bytes (hash evasion)"
+    description: >
+      truncate, dd, or fallocate was used to extend a binary file, adding
+      zero bytes (padding). Attackers pad malware binaries to change their
+      SHA-256 hash while keeping the executable code intact, evading
+      hash-based detection and integrity checks. Covers /usr/bin, /usr/sbin,
+      and /usr/local/bin paths.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["truncate", "dd", "fallocate"]
+        - field: file.path
+          op: prefix
+          values: ["/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/",
+                   "/usr/local/bin/", "/usr/local/sbin/"]
+        - field: file.op
+          op: in
+          values: ["write", "truncate"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1009, defense-evasion, binary-padding, hash-evasion]
+
+  # MITRE ATT&CK: T1114.002 — Email Collection: Local Email Collection
+  # Accessing local mail spools.
+  - id: collection_local_mail_spool_access
+    name: "Local mail spool accessed by unexpected process"
+    description: >
+      A process that is not a mail server or mail client accessed files in
+      /var/mail, /var/spool/mail, or /var/spool/postfix. Attackers read
+      local mail spools to collect credentials sent via email, password
+      reset tokens, or other sensitive information delivered to system
+      mailboxes (cron output, monitoring alerts, password resets).
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/var/mail/"
+            - "/var/spool/mail/"
+            - "/var/spool/postfix/"
+        - field: file.op
+          op: in
+          values: ["open", "read"]
+        - field: proc.comm
+          op: not_in
+          values: ["postfix", "dovecot", "exim4", "sendmail",
+                   "mutt", "neomutt", "mail", "mailx", "procmail"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1114.002, collection, email-collection, credential-access]
+
+  # MITRE ATT&CK: T1542.001 — Pre-OS Boot: System Firmware (Linux efibootmgr abuse)
+  - id: persistence_efi_boot_entry_modified
+    name: "EFI boot entry modified (efibootmgr) by unexpected process"
+    description: >
+      efibootmgr was used to create or modify EFI boot entries. Attackers with
+      root access can add malicious boot entries that load a compromised kernel
+      or initramfs, establishing persistence that survives OS reinstallation.
+      Covers T1542.001 (Pre-OS Boot) applied to Linux UEFI systems.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["efibootmgr", "bcfg"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1542.001, persistence, pre-os-boot, efi, uefi]
+
+  # MITRE ATT&CK: T1105 — Ingress Tool Transfer (already partially covered)
+  # Specific: curl/wget piping directly to shell execution.
+  - id: c2_ingress_piped_to_shell
+    name: "Downloaded content piped directly to shell (curl | sh)"
+    description: >
+      curl or wget was used in a pipeline that feeds downloaded content
+      directly to a shell interpreter (curl | bash, wget -O- | sh).
+      This is the most common ingress tool transfer pattern: attackers
+      download a script and execute it immediately without writing to disk,
+      evading file-based antivirus. Covers T1105 with T1059.004 chain.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "zsh", "dash", "python3", "python",
+                   "perl", "ruby"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1105, command-and-control, ingress-tool-transfer,
+           mitre:T1059.004]
+
+  # MITRE ATT&CK: T1216 — System Script Proxy Execution
+  # Abusing system-installed scripts (update-motd, logrotate hooks, etc.)
+  - id: execution_motd_hook_exec
+    name: "Suspicious executable in MOTD update directory"
+    description: >
+      An executable was created or modified under /etc/update-motd.d/ by a
+      non-system process. The Message of the Day (MOTD) scripts run on every
+      SSH login; attackers place malicious scripts there to execute on every
+      user connection, blending their activity with legitimate system banners.
+      Covers T1216 (System Script Proxy Execution) and T1546.004 (.bashrc
+      / .profile modification variant).
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/etc/update-motd.d/"]
+        - field: file.path
+          op: suffix
+          values: [".sh", ".py", ".pl", ".rb"]
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "ansible",
+                   "puppet", "chef", "salt"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1216, execution, persistence, motd, script-proxy]

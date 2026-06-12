@@ -153,3 +153,85 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1190, initial-access, log4shell, cve:CVE-2021-44228]
+
+  # MITRE ATT&CK: T1189 — Drive-by Compromise
+  # Occurs when a user visits a malicious website that exploits the browser
+  # to download and execute malware without user interaction.
+  - id: initial_driveby_browser_download_exec
+    name: "Browser process spawned command interpreter after network download"
+    description: >
+      A web browser (Chrome, Firefox, Edge) spawned a command interpreter
+      (bash, sh, python, etc.). This is the hallmark of a drive-by compromise:
+      malicious JavaScript in a compromised or weaponized website exploits a
+      browser vulnerability and drops a second-stage payload that executes a
+      shell or script. This rule fires on the execve of the interpreter by the
+      browser process.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "zsh", "python3", "python", "perl",
+                   "ruby", "node", "php", "lua"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]    # execve
+    severity: critical
+    action: alert
+    tags: [mitre:T1189, initial-access, drive-by-compromise]
+
+  # MITRE ATT&CK: T1204.001 — User Execution: Malicious Link
+  # User clicks a malicious link that downloads and executes malware.
+  - id: initial_email_link_download_exec
+    name: "Email client spawned script process after opening attachment or link"
+    description: >
+      An email client (Thunderbird, Evolution, mutt, neomutt) spawned a command
+      interpreter or scripting engine. This indicates a user clicked a malicious
+      link or opened a weaponized attachment that executed code. Common in
+      spearphishing campaigns targeting developers and platform engineers.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["bash", "sh", "zsh", "python3", "python", "perl",
+                   "ruby", "node", "wget", "curl"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]    # execve
+    severity: critical
+    action: alert
+    tags: [mitre:T1204.001, initial-access, phishing, email]
+
+  # MITRE ATT&CK: T1199 — Trusted Relationship
+  # Exploits trust between interconnected systems. On Linux/K8s, this is
+  # commonly VPN trust, SSO federation, or CI/CD pipeline trust exploitation.
+  - id: initial_trusted_api_pivot
+    name: "Web server accessing internal management API (trusted-relationship pivot)"
+    description: >
+      A web-facing process (nginx, apache, node, caddy) made a connection to an
+      internal management API or infrastructure endpoint. This can indicate an
+      attacker exploiting a trusted relationship between the web tier and internal
+      services — using the web server as a pivot to reach Kubernetes API servers,
+      HashiCorp Vault, internal databases, or CI/CD runners that trust connections
+      from the web subnet. This is T1199 (Trusted Relationship) applied to
+      Kubernetes/Linux environments.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "node", "nodejs",
+                   "python3", "python", "ruby", "php-fpm", "php",
+                   "caddy", "traefik", "envoy"]
+        - field: network.dport
+          op: in
+          values: ["6443", "8200", "8201", "5432", "3306", "27017",
+                   "6379", "9090", "3000", "4000", "5601", "9200",
+                   "2379", "2380", "10250", "10255"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1199, initial-access, trusted-relationship, kubernetes]

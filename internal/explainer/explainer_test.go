@@ -417,3 +417,344 @@ func BenchmarkExplain(b *testing.B) {
 		}
 	}
 }
+
+func TestExplainPlain_StylePlain(t *testing.T) {
+	e := &Explainer{
+		templates: map[string]*TemplateDefinition{
+			"test_rule": {
+				ID:          "test_rule",
+				Name:        "Test Plain Rule",
+				Category:    "test",
+				Summary:     "Technical summary for {{.Comm}}",
+				Detail:      "Technical detail for PID {{.PID}}",
+				Severity:    "{{.Severity}}",
+				SeverityWhy: "Because it's serious",
+				Mitigations: []string{"Mitigation 1", "Mitigation 2"},
+				References:  []string{"https://ref.example.com"},
+				MITRE: MITREInfo{
+					Tactic:      "Execution",
+					TechniqueID: "T1059",
+					Technique:   "Command and Scripting Interpreter",
+					URL:         "https://attack.mitre.org/techniques/T1059/",
+				},
+				Plain: &PlainTemplateDefinition{
+					WhatHappened: "Someone ran {{.Comm}} (PID {{.PID}}) on your server.",
+					WhyItMatters: "This could mean your {{.Pod}} pod was exploited.",
+					WhatToDo:     "Restart pod {{.Pod}} and check logs for {{.Comm}}.",
+				},
+			},
+		},
+		funcs:        templateFuncs(),
+		defaultStyle: StylePlain,
+	}
+
+	alert := types.Alert{
+		ID:       "alert-789",
+		RuleID:   "test_rule",
+		RuleName: "Test Plain Rule",
+		Severity: types.SeverityCritical,
+		PID:      9999,
+		Comm:     "bash",
+		Message:  "Suspicious shell detected",
+		Enrichment: types.EnrichmentInfo{
+			PodName:   "web-app",
+			Namespace: "prod",
+		},
+	}
+
+	explanation, err := e.Explain(alert)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+
+	if explanation.Style != StylePlain {
+		t.Errorf("Style = %q, want %q", explanation.Style, StylePlain)
+	}
+	if explanation.Plain == nil {
+		t.Fatal("Plain explanation should be populated")
+	}
+
+	if explanation.Plain.WhatHappened != "Someone ran bash (PID 9999) on your server." {
+		t.Errorf("WhatHappened = %q", explanation.Plain.WhatHappened)
+	}
+	if explanation.Plain.WhyItMatters != "This could mean your web-app pod was exploited." {
+		t.Errorf("WhyItMatters = %q", explanation.Plain.WhyItMatters)
+	}
+	if explanation.Plain.WhatToDo != "Restart pod web-app and check logs for bash." {
+		t.Errorf("WhatToDo = %q", explanation.Plain.WhatToDo)
+	}
+
+	// Technical fields should be empty in StylePlain
+	if explanation.Summary != "" {
+		t.Errorf("Summary should be empty in plain mode, got %q", explanation.Summary)
+	}
+	if explanation.Detail != "" {
+		t.Errorf("Detail should be empty in plain mode, got %q", explanation.Detail)
+	}
+
+	// MITRE should still be available as details
+	if explanation.MITRE.TechniqueID != "T1059" {
+		t.Errorf("MITRE TechniqueID = %q, want T1059", explanation.MITRE.TechniqueID)
+	}
+}
+
+func TestExplainPlain_StyleTechnical(t *testing.T) {
+	e := &Explainer{
+		templates: map[string]*TemplateDefinition{
+			"test_rule": {
+				ID:          "test_rule",
+				Name:        "Test Rule",
+				Category:    "test",
+				Summary:     "Process {{.Comm}} triggered {{.RuleID}}",
+				Detail:      "PID {{.PID}}: {{.Message}}",
+				Severity:    "{{.Severity}}",
+				SeverityWhy: "Test severity",
+				Plain: &PlainTemplateDefinition{
+					WhatHappened: "Plain what: {{.Comm}}",
+					WhyItMatters: "Plain why: {{.Comm}}",
+					WhatToDo:     "Plain todo: {{.Comm}}",
+				},
+			},
+		},
+		funcs:        templateFuncs(),
+		defaultStyle: StyleTechnical,
+	}
+
+	alert := types.Alert{
+		RuleID:   "test_rule",
+		RuleName: "Test Rule",
+		Severity: types.SeverityWarning,
+		PID:      1234,
+		Comm:     "nginx",
+		Message:  "Test message",
+	}
+
+	explanation, err := e.Explain(alert)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+
+	if explanation.Style != StyleTechnical {
+		t.Errorf("Style = %q, want %q", explanation.Style, StyleTechnical)
+	}
+	if explanation.Plain != nil {
+		t.Errorf("Plain explanation should be nil in technical mode")
+	}
+	if explanation.Summary != "Process nginx triggered test_rule" {
+		t.Errorf("Summary = %q", explanation.Summary)
+	}
+	if !strings.Contains(explanation.Detail, "Test message") {
+		t.Errorf("Detail should contain 'Test message', got %q", explanation.Detail)
+	}
+}
+
+func TestExplainPlain_StyleFull(t *testing.T) {
+	e := &Explainer{
+		templates: map[string]*TemplateDefinition{
+			"test_rule": {
+				ID:          "test_rule",
+				Name:        "Full Rule",
+				Category:    "test",
+				Summary:     "Technical: {{.Comm}} PID {{.PID}}",
+				Detail:      "Technical detail: {{.Message}}",
+				Severity:    "{{.Severity}}",
+				SeverityWhy: "Because reasons",
+				Plain: &PlainTemplateDefinition{
+					WhatHappened: "Plain: {{.Comm}} (PID {{.PID}}) did something.",
+					WhyItMatters: "Plain: This is important for {{.Comm}}.",
+					WhatToDo:     "Plain: Restart {{.Pod}} and check {{.Comm}}.",
+				},
+			},
+		},
+		funcs:        templateFuncs(),
+		defaultStyle: StyleFull,
+	}
+
+	alert := types.Alert{
+		RuleID:   "test_rule",
+		RuleName: "Full Rule",
+		Severity: types.SeverityCritical,
+		PID:      4321,
+		Comm:     "python",
+		Message:  "Full test message",
+		Enrichment: types.EnrichmentInfo{
+			PodName:   "ml-worker",
+			Namespace: "default",
+		},
+	}
+
+	explanation, err := e.Explain(alert)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+
+	if explanation.Style != StyleFull {
+		t.Errorf("Style = %q, want %q", explanation.Style, StyleFull)
+	}
+
+	// Both styles should be populated
+	if explanation.Summary != "Technical: python PID 4321" {
+		t.Errorf("Summary = %q", explanation.Summary)
+	}
+	if explanation.Plain == nil {
+		t.Fatal("Plain should be populated in full mode")
+	}
+	if explanation.Plain.WhatHappened != "Plain: python (PID 4321) did something." {
+		t.Errorf("WhatHappened = %q", explanation.Plain.WhatHappened)
+	}
+	if explanation.Plain.WhatToDo != "Plain: Restart ml-worker and check python." {
+		t.Errorf("WhatToDo = %q", explanation.Plain.WhatToDo)
+	}
+}
+
+func TestExplainPlain_DefaultStyle(t *testing.T) {
+	e := &Explainer{
+		templates: map[string]*TemplateDefinition{
+			"test_rule": {
+				ID:          "test_rule",
+				Name:        "Test",
+				Category:    "test",
+				Summary:     "Sum: {{.Comm}}",
+				Detail:      "Det: {{.Comm}}",
+				Severity:    "{{.Severity}}",
+				SeverityWhy: "Reason",
+			},
+		},
+		funcs: templateFuncs(),
+	}
+	e.SetDefaultStyle(StylePlain)
+
+	if e.DefaultStyle() != StylePlain {
+		t.Errorf("DefaultStyle = %q, want %q", e.DefaultStyle(), StylePlain)
+	}
+	e.SetDefaultStyle(StyleTechnical)
+	if e.DefaultStyle() != StyleTechnical {
+		t.Errorf("DefaultStyle = %q, want %q", e.DefaultStyle(), StyleTechnical)
+	}
+
+	alert := types.Alert{
+		RuleID:   "test_rule",
+		RuleName: "Test",
+		Severity: types.SeverityWarning,
+		Comm:     "curl",
+	}
+
+	explanation, err := e.Explain(alert)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+	if explanation.Style != StyleTechnical {
+		t.Errorf("Style = %q, want %q", explanation.Style, StyleTechnical)
+	}
+	if explanation.Summary == "" {
+		t.Error("Summary should not be empty")
+	}
+}
+
+func TestExplainPlain_NoPlainTemplate(t *testing.T) {
+	e := &Explainer{
+		templates: map[string]*TemplateDefinition{
+			"test_rule": {
+				ID:          "test_rule",
+				Name:        "No Plain Rule",
+				Category:    "test",
+				Summary:     "Sum: {{.Comm}}",
+				Detail:      "Det: PID {{.PID}}",
+				Severity:    "{{.Severity}}",
+				SeverityWhy: "Because",
+				MITRE: MITREInfo{
+					Tactic:      "Discovery",
+					TechniqueID: "T1083",
+				},
+			},
+		},
+		funcs:        templateFuncs(),
+		defaultStyle: StylePlain,
+	}
+
+	alert := types.Alert{
+		RuleID:   "test_rule",
+		RuleName: "No Plain Rule",
+		Severity: types.SeverityWarning,
+		PID:      5555,
+		Comm:     "myapp",
+		Message:  "Alert message here",
+	}
+
+	explanation, err := e.Explain(alert)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+
+	if explanation.Plain == nil {
+		t.Fatal("Should generate fallback plain explanation")
+	}
+	if !strings.Contains(explanation.Plain.WhatHappened, "myapp") {
+		t.Errorf("WhatHappened should contain 'myapp', got %q", explanation.Plain.WhatHappened)
+	}
+	if !strings.Contains(explanation.Plain.WhatHappened, "5555") {
+		t.Errorf("WhatHappened should contain '5555', got %q", explanation.Plain.WhatHappened)
+	}
+	if !strings.Contains(explanation.Plain.WhyItMatters, "malicious") {
+		t.Errorf("WhyItMatters should mention malicious, got %q", explanation.Plain.WhyItMatters)
+	}
+	if !strings.Contains(explanation.Plain.WhatToDo, "allowlist") {
+		t.Errorf("WhatToDo should mention allowlist, got %q", explanation.Plain.WhatToDo)
+	}
+}
+
+func TestSetDefaultStyle_Invalid(t *testing.T) {
+	e := &Explainer{
+		templates:    map[string]*TemplateDefinition{},
+		funcs:        templateFuncs(),
+		defaultStyle: StyleTechnical,
+	}
+
+	e.SetDefaultStyle("invalid-style")
+	if e.DefaultStyle() != StyleTechnical {
+		t.Errorf("Invalid style should not change default, got %q", e.DefaultStyle())
+	}
+
+	e.SetDefaultStyle("plain")
+	if e.DefaultStyle() != StylePlain {
+		t.Errorf("Expected plain, got %q", e.DefaultStyle())
+	}
+
+	e.SetDefaultStyle("full")
+	if e.DefaultStyle() != StyleFull {
+		t.Errorf("Expected full, got %q", e.DefaultStyle())
+	}
+}
+
+func TestBuildDefaultPlain(t *testing.T) {
+	e := &Explainer{funcs: templateFuncs()}
+
+	data := TemplateData{
+		RuleName: "Test Rule Alert",
+		PID:      7777,
+		Comm:     "suspicious-binary",
+		Message:  "Critical security event detected",
+	}
+
+	plain := e.buildDefaultPlain(data, &TemplateDefinition{})
+
+	if !strings.Contains(plain.WhatHappened, "suspicious-binary") {
+		t.Errorf("WhatHappened should contain 'suspicious-binary', got %q", plain.WhatHappened)
+	}
+	if !strings.Contains(plain.WhatHappened, "7777") {
+		t.Errorf("WhatHappened should contain '7777', got %q", plain.WhatHappened)
+	}
+	if !strings.Contains(plain.WhatHappened, "Test Rule Alert") {
+		t.Errorf("WhatHappened should contain rule name, got %q", plain.WhatHappened)
+	}
+	if !strings.Contains(plain.WhatHappened, "Critical security event detected") {
+		t.Errorf("WhatHappened should contain message, got %q", plain.WhatHappened)
+	}
+	if plain.WhyItMatters == "" {
+		t.Error("WhyItMatters should not be empty")
+	}
+	if !strings.Contains(plain.WhatToDo, "allowlist") {
+		t.Errorf("WhatToDo should mention allowlist, got %q", plain.WhatToDo)
+	}
+}
+

@@ -34,6 +34,10 @@ templates:
       technique_id: "T1552"
       technique: "Unsecured Credentials"
       url: "https://attack.mitre.org/techniques/T1552/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) sent a username and password in an HTTP header over TLS."
+      why_it_matters: "While the connection is encrypted, credentials in HTTP headers can be logged by proxies, stored in browser history, or leaked through referrer headers. This is not a secure way to handle authentication."
+      what_to_do: "1. Migrate from HTTP Basic Auth to token-based authentication (JWT, OAuth).\n2. Check if your proxy or load balancer is logging these headers.\n3. Rotate the credentials that were transmitted.\n4. Use API keys or bearer tokens instead of username/password pairs."
 
   - id: tls_suspicious_user_agent
     name: "Suspicious User-Agent in TLS Traffic"
@@ -68,6 +72,10 @@ templates:
       technique_id: "T1071"
       technique: "Application Layer Protocol"
       url: "https://attack.mitre.org/techniques/T1071/001/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) made an HTTPS request identifying itself as a command-line tool (curl, wget) rather than a browser."
+      why_it_matters: "Command-line HTTP tools are often used by attackers to download malware, exfiltrate data, or probe your systems. Legitimate web applications rarely use curl/wget for their primary operations."
+      what_to_do: "1. Verify what the request was doing — check the destination URL.\n2. If this is part of a legitimate automation script, add it to your allowlist.\n3. Check for data exfiltration patterns (large outbound transfers).\n4. Consider filtering command-line User-Agent strings at your API gateway."
 
   - id: tls_data_exfil_pattern
     name: "Potential Data Exfiltration in TLS"
@@ -104,3 +112,7 @@ templates:
       technique_id: "T1041"
       technique: "Exfiltration Over C2 Channel"
       url: "https://attack.mitre.org/techniques/T1041/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) sent data over the network that looks like sensitive information (system files, database records, credentials)."
+      why_it_matters: "This is a strong sign of data theft. An attacker with access to your server is sending your data to an external destination. The content matches patterns found in configuration files, /etc/passwd, or database exports."
+      what_to_do: "1. Isolate the pod immediately to stop data loss.\n2. Identify what data was being sent and to where.\n3. Check what data the process had access to.\n4. Review access logs for signs of how the attacker got in.\n5. Implement Data Loss Prevention (DLP) controls."

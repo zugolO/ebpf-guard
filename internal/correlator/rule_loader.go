@@ -21,31 +21,47 @@ var (
 		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
 		"proc.args":           true,
 		"proc.args_truncated": true,
+		// Aliases: dot-prefixed names used in rule YAML files for readability.
+		"network.dport": true, "network.sport": true,
+		"network.daddr": true, "network.saddr": true, "network.proto": true,
+		"proc.comm": true, "uid": true,
 	}
 	validFileFields = map[string]bool{
 		"filename": true, "flags": true, "mode": true, "op": true, "directory": true, "extension": true,
 		// fd-enrichment fields (issue #47): available for all file ops; populated via BPF fd→path map.
-		"fd.name":           true, // resolved path for read/write events; same as filename for opens
-		"fd.name_truncated": true, // "true" when path exceeded 255 bytes and was truncated
+		"fd.name":           true,
+		"fd.name_truncated": true,
 		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
 		"proc.args":           true,
 		"proc.args_truncated": true,
+		// Aliases: dot-prefixed names used in rule YAML files for readability.
+		"file.path":           true,
+		"file.op":             true,
+		"file.flags":          true,
+		"file.mode":           true,
+		"file.directory":      true,
+		"file.extension":      true,
+		"proc.comm":           true,
+		"uid":                 true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
 		// Process identity — available from the base Event struct on all syscalls.
 		"uid": true, "comm": true,
 		// Raw syscall arguments (arg0 = first argument, arg1 = second, …).
-		// arg0 is the BPF command for bpf(2), the fd for read/write, etc.
 		"arg0": true, "arg1": true, "arg2": true,
 		"arg3": true, "arg4": true, "arg5": true,
 		// fd-enrichment: resolved path for the fd in arg0 (read/write/close syscalls).
 		"fd.name": true,
-		// proc enrichment: command-line args from /proc/PID/cmdline or BPF proc_args_map.
-		// Populated for execve (nr=59) events by the /proc fallback and for all events
-		// by the BPF sched_process_exec hook (kernel 5.15+ with BTF).
+		// proc enrichment
 		"proc.args":           true,
 		"proc.args_truncated": true,
+		// Aliases: dot-prefixed names used in rule YAML files for readability.
+		"syscall.nr":   true,
+		"syscall.ret":  true,
+		"syscall.arg0": true, "syscall.arg1": true, "syscall.arg2": true,
+		"syscall.arg3": true, "syscall.arg4": true, "syscall.arg5": true,
+		"proc.comm": true,
 	}
 	validDNSFields = map[string]bool{
 		"qname": true, "qtype": true, "rcode": true, "direction": true,
@@ -57,6 +73,10 @@ var (
 		"tls_data": true, "direction": true, "data_len": true,
 		// "data" is an alias for "tls_data" accepted in rule YAML for ergonomics.
 		"data": true,
+		// JA3/JA4 TLS fingerprint fields — computed from ClientHello handshake.
+		"ja3":  true,
+		"ja4":  true,
+		"ja3s": true,
 	}
 	// caps_gained / caps_dropped use the OpCapsGained / OpCapsDropped operators
 	// (not standard value comparison), so their only meaningful field is "caps".
@@ -100,6 +120,14 @@ var (
 		"comm":    true,
 		"uid":     true,
 	}
+	validIOUringFields = map[string]bool{
+		"op":        true, // "setup" or "enter"
+		"flags":     true, // IORING_SETUP_* / IORING_ENTER_* flags as uint32 string
+		"fd":        true, // io_uring instance fd
+		"to_submit": true, // number of SQEs to submit
+		"comm":      true,
+		"uid":       true,
+	}
 	validCloudAuditFields = map[string]bool{
 		"cloud.provider":   true, // "aws" | "gcp" | "azure"
 		"cloud.service":    true, // "iam" | "ec2" | "gke" | "storage" | …
@@ -111,6 +139,15 @@ var (
 		"cloud.error_code": true, // non-empty = denied/failed
 		"cloud.region":     true, // cloud region
 		"cloud.event_id":   true, // provider event ID
+	}
+	validBpfProgramFields = map[string]bool{
+		"cmd":       true, // bpf command: "PROG_LOAD" or "MAP_CREATE"
+		"cmd_nr":    true, // numeric bpf command: 5 for PROG_LOAD, 0 for MAP_CREATE
+		"prog_type": true, // BPF program type name (e.g. "XDP", "KPROBE", "SCHED_CLS")
+		"prog_type_nr": true, // numeric BPF program type
+		"ret":       true, // return value: >=0 = fd, <0 = error
+		"uid":       true,
+		"comm":      true,
 	}
 )
 
@@ -168,6 +205,30 @@ func LoadRulesFromFile(path string) ([]Rule, error) {
 // LoadRulesFromDir loads all .yaml/.yml files from a directory.
 func LoadRulesFromDir(dir string) ([]Rule, error) {
 	return LoadRulesFromDirWithChecksums(dir, false, "")
+}
+
+// LoadRulesFromEmbedded loads rules from a map of filename → YAML content,
+// performing full validation on the combined set. This is used by the
+// zero-config mode where rules are embedded in the binary via Go embed.
+// Unknown files (without .yaml/.yml extension) are silently skipped.
+func LoadRulesFromEmbedded(files map[string][]byte) ([]Rule, error) {
+	var allRules []Rule
+	for name, data := range files {
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+		var ruleSet RuleSet
+		if err := yaml.Unmarshal(data, &ruleSet); err != nil {
+			return nil, fmt.Errorf("correlator: unmarshal rules from %s: %w", name, err)
+		}
+		allRules = append(allRules, ruleSet.Rules...)
+	}
+
+	if err := ValidateFull(allRules); err != nil {
+		return nil, err
+	}
+	return allRules, nil
 }
 
 // LoadRulesFromDirWithChecksums loads all .yaml/.yml rule files from a
@@ -369,8 +430,12 @@ func validateFieldName(field string, eventType types.EventType) error {
 		validFields = validLSMAuditFields
 	case types.EventSequence:
 		validFields = validSequenceFields
+	case types.EventIOUring:
+		validFields = validIOUringFields
 	case types.EventCloudAudit:
 		validFields = validCloudAuditFields
+	case types.EventBPFProgram:
+		validFields = validBpfProgramFields
 	default:
 		return fmt.Errorf("unknown event type: %d", eventType)
 	}

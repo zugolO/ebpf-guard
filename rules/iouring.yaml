@@ -1,0 +1,99 @@
+# io_uring activity monitoring rules
+#
+# io_uring bypasses traditional syscall tracepoints (openat, connect, etc.),
+# making it a blind spot for tracepoint-based security agents. These rules
+# alert on unexpected io_uring usage by processes outside an allowlist.
+#
+# Reference: #154 — io_uring activity monitoring
+
+rules:
+  - id: iouring_unexpected_setup
+    name: "Unexpected io_uring_setup call"
+    description: >
+      A process outside the io_uring allowlist called io_uring_setup.
+      io_uring allows async file and network I/O without issuing the
+      traditional syscalls that tracepoint-based agents observe.
+      Malware may use io_uring to hide file exfiltration or C2 traffic.
+    event_type: iouring
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["setup"]
+        - field: comm
+          op: not_in
+          values:
+            - postgres
+            - mysql
+            - mariadbd
+            - mongod
+            - redis-server
+            - nginx
+            - envoy
+            - containerd
+            - dockerd
+            - ebpf-guard
+    severity: warning
+    action: alert
+    tags: [T1562.001, defense-evasion]
+
+  - id: iouring_unexpected_enter
+    name: "Unexpected io_uring_enter call"
+    description: >
+      A process outside the io_uring allowlist called io_uring_enter,
+      meaning it is actively submitting I/O operations through the
+      io_uring interface. This is a stronger signal than setup alone.
+    event_type: iouring
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["enter"]
+        - field: comm
+          op: not_in
+          values:
+            - postgres
+            - mysql
+            - mariadbd
+            - mongod
+            - redis-server
+            - nginx
+            - envoy
+            - containerd
+            - dockerd
+            - ebpf-guard
+        - field: to_submit
+          op: gt
+          values: ["0"]
+    severity: critical
+    action: alert
+    tags: [T1562.001, T1059, defense-evasion]
+
+  - id: iouring_high_volume_submit
+    name: "High-volume io_uring submission"
+    description: >
+      A process submitted a large batch of io_uring operations
+      (>32 SQEs at once) from outside the allowlist. May indicate
+      bulk data exfiltration or a cryptominer using io_uring for I/O.
+    event_type: iouring
+    condition_group:
+      operator: and
+      conditions:
+        - field: to_submit
+          op: gt
+          values: ["32"]
+        - field: comm
+          op: not_in
+          values:
+            - postgres
+            - mysql
+            - mariadbd
+            - mongod
+            - redis-server
+            - nginx
+            - envoy
+    severity: warning
+    action: alert
+    tags: [T1048, exfiltration]

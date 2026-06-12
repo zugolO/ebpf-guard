@@ -38,6 +38,10 @@ templates:
       technique_id: "T1087"
       technique: "Account Discovery"
       url: "https://attack.mitre.org/techniques/T1087/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) read /etc/passwd, which lists all user accounts on the system."
+      why_it_matters: "Attackers read /etc/passwd to find user accounts, identify privileged users, and plan their next move. While many legitimate tools read this file, it's suspicious when web servers or application processes do it."
+      what_to_do: "1. Check if {{.Comm}} legitimately needs user information.\n2. Look for other reconnaissance activity (file listing, config reading).\n3. If your application doesn't need user info, investigate for compromise.\n4. Run containers as non-root to limit information exposure."
 
   - id: file_etc_shadow_read
     name: "Critical File Read: /etc/shadow"
@@ -77,6 +81,10 @@ templates:
       technique_id: "T1003"
       technique: "OS Credential Dumping"
       url: "https://attack.mitre.org/techniques/T1003/008/"
+    plain:
+      what_happened: "CRITICAL: Process {{.Comm}} (PID {{.PID}}) read /etc/shadow — the file containing all user password hashes."
+      why_it_matters: "Reading /etc/shadow is almost never legitimate. An attacker is likely harvesting password hashes to crack them offline and gain access to user accounts across your system. This is a strong sign of active compromise."
+      what_to_do: "1. Isolate pod {{.Pod}} immediately.\n2. Force password rotation for ALL system accounts.\n3. Check if password hashes were exfiltrated (look for network transfers after the file read).\n4. Audit all processes running as root.\n5. Rotate Kubernetes service account tokens."
 
   - id: file_proc_self_environ
     name: "Process Environment Access"
@@ -113,6 +121,10 @@ templates:
       technique_id: "T1552"
       technique: "Unsecured Credentials"
       url: "https://attack.mitre.org/techniques/T1552/001/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) read its own environment variables — which often contain secrets."
+      why_it_matters: "Environment variables frequently contain database passwords, API keys, and cloud credentials. An attacker reading these can steal access to your databases, cloud accounts, and internal services."
+      what_to_do: "1. Review what secrets might be exposed via environment variables.\n2. Switch to a secrets manager (Kubernetes Secrets with encryption, HashiCorp Vault) instead of env vars.\n3. Rotate any credentials that may have been exposed.\n4. Monitor for suspicious network activity from this process."
 
   - id: file_path_traversal
     name: "Path Traversal Attempt"
@@ -151,6 +163,10 @@ templates:
       technique_id: "T1083"
       technique: "File and Directory Discovery"
       url: "https://attack.mitre.org/techniques/T1083/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) tried to access files outside its intended directory using '../' path tricks."
+      why_it_matters: "Path traversal attacks let an attacker read ANY file on your server (config files, source code, /etc/shadow) or write files to unauthorized locations. This is one of the most common web vulnerabilities."
+      what_to_do: "1. Review the file path that was accessed.\n2. Check your application code for path traversal vulnerabilities.\n3. Sanitize user input: reject paths containing '../' and use path canonicalization.\n4. Use chroot or containers to limit filesystem access."
 
   - id: file_sensitive_write
     name: "Sensitive Directory Write"

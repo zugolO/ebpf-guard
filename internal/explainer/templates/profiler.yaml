@@ -36,6 +36,10 @@ templates:
       technique_id: "T1055"
       technique: "Process Injection"
       url: "https://attack.mitre.org/techniques/T1055/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) deviated from its learned behavioral baseline — ebpf-guard detected unusual activity."
+      why_it_matters: "When a trusted process starts behaving differently, it may have been compromised. Attackers exploit legitimate processes (web servers, databases) by injecting malicious code that performs actions the process never normally does."
+      what_to_do: "1. Check /proc/{{.PID}}/maps for unexpected shared libraries (code injection).\n2. Look at the process tree — has {{.Comm}} spawned unexpected child processes?\n3. Check network connections from PID {{.PID}}.\n4. If this started after a new deployment, it may be a false positive — allowlist the new behavior."
 
   - id: profiler_sequence_anomaly
     name: "Suspicious Syscall Sequence"
@@ -68,3 +72,7 @@ templates:
       technique_id: "T1059"
       technique: "Command and Scripting Interpreter"
       url: "https://attack.mitre.org/techniques/T1059/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) executed an unusual sequence of system calls that doesn't match its normal behavior pattern."
+      why_it_matters: "Exploited processes often perform actions the legitimate software never would — like a web worker suddenly making network connections or executing other programs. This pattern is a strong indicator of in-process exploitation."
+      what_to_do: "1. Capture a system call trace: strace -p {{.PID}} to see what's happening.\n2. Check if a recent code deploy changed the binary or its dependencies.\n3. Review eBPF sequence window settings in profiler config to reduce noise.\n4. Enable seccomp filtering to block unexpected system calls for this workload."

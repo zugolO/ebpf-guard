@@ -1,0 +1,267 @@
+#!/bin/sh
+# ebpf-guard one-command installer
+# Usage: curl -fsSL https://get.ebpf-guard.io | sh
+#
+# Detects OS/arch, downloads the correct signed binary from GitHub Releases,
+# verifies the SHA-256 checksum, installs a systemd unit, and starts the
+# service with embedded defaults.
+#
+# The checksum below is pinned at release time. Run `make checksums` to update.
+
+set -e
+
+# ── Pinned SHA-256 checksums (replace in release workflow) ──────────────────
+# Format: <file>  SHA256(<file>)
+# These are updated by `make checksums` during the release process.
+CHECKSUM_linux_amd64="CHANGEME_linux_amd64_CHANGEME"
+CHECKSUM_linux_arm64="CHANGEME_linux_arm64_CHANGEME"
+
+# ── Configuration ────────────────────────────────────────────────────────────
+REPO="zugolO/ebpf-guard"
+BINARY="ebpf-guard"
+INSTALL_DIR="/usr/local/bin"
+CONFIG_DIR="/etc/ebpf-guard"
+SERVICE_FILE="/etc/systemd/system/ebpf-guard.service"
+
+# ── Colour output ────────────────────────────────────────────────────────────
+BOLD=""; RED=""; GREEN=""; YELLOW=""; RESET=""
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+	BOLD="$(tput bold)"; RED="$(tput setaf 1)"; GREEN="$(tput setaf 2)"
+	YELLOW="$(tput setaf 3)"; RESET="$(tput sgr0)"
+fi
+
+info()  { printf "%s==>%s %s\n" "$GREEN" "$RESET" "$*"; }
+warn()  { printf "%s⚠ %s%s\n" "$YELLOW" "$*" "$RESET"; }
+error() { printf "%s✗ %s%s\n" "$RED" "$*" "$RESET"; exit 1; }
+
+# ── Detect OS ────────────────────────────────────────────────────────────────
+detect_os() {
+	if [ -f /etc/os-release ]; then
+		. /etc/os-release
+		case "$ID" in
+			ubuntu|debian|linuxmint|pop|elementary|zorin) echo "debian" ;;
+			rhel|centos|fedora|rocky|almalinux|ol|amzn)   echo "rhel" ;;
+			*) warn "unsupported OS: $ID (trying generic Linux)" ; echo "linux" ;;
+		esac
+	else
+		warn "cannot detect OS, trying generic Linux"
+		echo "linux"
+	fi
+}
+
+# ── Detect architecture ──────────────────────────────────────────────────────
+detect_arch() {
+	case "$(uname -m)" in
+		x86_64|amd64)  echo "amd64" ;;
+		aarch64|arm64) echo "arm64" ;;
+		*)             error "unsupported architecture: $(uname -m). ebpf-guard requires x86_64 or aarch64." ;;
+	esac
+}
+
+# ── Check prerequisites ──────────────────────────────────────────────────────
+check_prereqs() {
+	info "Checking prerequisites..."
+
+	if [ "$(id -u)" -ne 0 ]; then
+		error "this installer must run as root (needed for systemd unit + eBPF)"
+	fi
+
+	# Kernel version check: 5.15+ required for BPF ring buffer and CO-RE.
+	kernel_major=$(uname -r | cut -d. -f1)
+	kernel_minor=$(uname -r | cut -d. -f2)
+	if [ "$kernel_major" -lt 5 ] || { [ "$kernel_major" -eq 5 ] && [ "$kernel_minor" -lt 15 ]; }; then
+		warn "kernel $(uname -r) is older than 5.15 — some features may be unavailable"
+	fi
+
+	# Systemd check
+	if ! command -v systemctl >/dev/null 2>&1; then
+		warn "systemd not found — service will not auto-start"
+		WILL_SVC=false
+	else
+		WILL_SVC=true
+	fi
+}
+
+# ── Get latest release tag ───────────────────────────────────────────────────
+get_latest_tag() {
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+			| grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+	elif command -v wget >/dev/null 2>&1; then
+		wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+			| grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+	else
+		error "neither curl nor wget found — cannot download binary"
+	fi
+}
+
+# ── Download binary ──────────────────────────────────────────────────────────
+download_binary() {
+	local arch="$1"
+	local tag="$2"
+	local filename="${BINARY}-${tag}-linux-${arch}"
+	local url="https://github.com/${REPO}/releases/download/${tag}/${filename}"
+
+	info "Downloading ebpf-guard ${tag} for linux/${arch}..."
+	info "  ${url}"
+
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL -o "${INSTALL_DIR}/${BINARY}" "$url"
+	else
+		wget -q -O "${INSTALL_DIR}/${BINARY}" "$url"
+	fi
+
+	chmod 755 "${INSTALL_DIR}/${BINARY}"
+}
+
+# ── Verify checksum ──────────────────────────────────────────────────────────
+verify_checksum() {
+	local arch="$1"
+	local expected=""
+
+	case "$arch" in
+		amd64) expected="$CHECKSUM_linux_amd64" ;;
+		arm64) expected="$CHECKSUM_linux_arm64" ;;
+	esac
+
+	# Skip verification when checksums haven't been baked in (dev builds).
+	if [ "$expected" = "CHANGEME_linux_${arch}_CHANGEME" ]; then
+		warn "checksum not pinned — skipping verification (this is a dev build)"
+		return 0
+	fi
+
+	info "Verifying checksum..."
+	local actual
+	if command -v sha256sum >/dev/null 2>&1; then
+		actual=$(sha256sum "${INSTALL_DIR}/${BINARY}" | cut -d' ' -f1)
+	elif command -v shasum >/dev/null 2>&1; then
+		actual=$(shasum -a 256 "${INSTALL_DIR}/${BINARY}" | cut -d' ' -f1)
+	else
+		warn "no sha256sum/shasum found — skipping checksum verification"
+		return 0
+	fi
+
+	if [ "$actual" != "$expected" ]; then
+		rm -f "${INSTALL_DIR}/${BINARY}"
+		error "checksum mismatch!\n  expected: ${expected}\n  got:      ${actual}\n  The binary may have been tampered with. Refusing to install."
+	fi
+	info "Checksum verified ✓"
+}
+
+# ── Install systemd unit ─────────────────────────────────────────────────────
+install_systemd_unit() {
+	info "Installing systemd service..."
+
+	mkdir -p "$CONFIG_DIR"
+
+	cat > "$SERVICE_FILE" <<'SERVICEOF'
+[Unit]
+Description=ebpf-guard — eBPF runtime security agent
+Documentation=https://github.com/zugolO/ebpf-guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ebpf-guard --zero-config
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+CPUQuota=50%
+MemoryHigh=512M
+MemoryMax=1G
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ebpf-guard /var/log/ebpf-guard
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallFilter=@system-service @network-io ~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+SERVICEOF
+
+	systemctl daemon-reload
+	systemctl enable ebpf-guard
+	info "Systemd unit installed and enabled"
+}
+
+# ── Start service ────────────────────────────────────────────────────────────
+start_service() {
+	info "Starting ebpf-guard..."
+	systemctl start ebpf-guard
+	sleep 2
+	if systemctl is-active --quiet ebpf-guard; then
+		info "ebpf-guard is running ✓"
+	else
+		warn "ebpf-guard may not have started — check: journalctl -u ebpf-guard -n 50"
+	fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+main() {
+	printf "%s\n" "${BOLD}"
+	printf "╔══════════════════════════════════════════╗\n"
+	printf "║  ebpf-guard one-command installer       ║\n"
+	printf "║  Runtime security in under 60 seconds   ║\n"
+	printf "╚══════════════════════════════════════════╝\n"
+	printf "%s\n" "${RESET}"
+
+	OS=$(detect_os)
+	ARCH=$(detect_arch)
+	info "Detected: ${OS}, ${ARCH}, kernel $(uname -r)"
+
+	check_prereqs
+
+	# Resolve latest release tag
+	TAG=$(get_latest_tag)
+	if [ -z "$TAG" ]; then
+		warn "could not fetch latest release tag — using default download URL"
+		TAG="latest"
+		DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY}-linux-${ARCH}"
+		info "Downloading ${DOWNLOAD_URL}"
+		if command -v curl >/dev/null 2>&1; then
+			curl -fsSL -L -o "${INSTALL_DIR}/${BINARY}" "$DOWNLOAD_URL"
+		else
+			wget -q -O "${INSTALL_DIR}/${BINARY}" "$DOWNLOAD_URL"
+		fi
+		chmod 755 "${INSTALL_DIR}/${BINARY}"
+	else
+		download_binary "$ARCH" "$TAG"
+	fi
+
+	verify_checksum "$ARCH"
+
+	if [ "$WILL_SVC" = true ]; then
+		install_systemd_unit
+		start_service
+	fi
+
+	# ── Done ─────────────────────────────────────────────────────────────
+	printf "\n%s╔══════════════════════════════════════════╗%s\n" "$GREEN" "$RESET"
+	printf "%s║  ebpf-guard installed successfully!     ║%s\n" "$GREEN" "$RESET"
+	printf "%s╚══════════════════════════════════════════╝%s\n" "$GREEN" "$RESET"
+	printf "\n"
+	printf "  Binary:   %s\n" "${INSTALL_DIR}/${BINARY}"
+	printf "  Config:   embedded (--zero-config)\n"
+	printf "  Rules:    built-in (~570 detection rules)\n"
+	printf "  Metrics:  http://localhost:9090/metrics\n"
+	printf "  Health:   http://localhost:9090/health\n"
+	printf "\n"
+	printf "  View logs:\n"
+	printf "    journalctl -u ebpf-guard -f\n"
+	printf "\n"
+	printf "  To connect Alertmanager, Discord, or Telegram:\n"
+	printf "    Create %s/config.yaml and restart without --zero-config\n" "$CONFIG_DIR"
+	printf "    Docs: https://github.com/zugolO/ebpf-guard\n"
+	printf "\n"
+}
+
+main "$@"

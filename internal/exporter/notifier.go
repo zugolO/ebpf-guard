@@ -39,6 +39,8 @@ type FanoutConfig struct {
 	OTLP        OTLPConfig      `mapstructure:"otlp"`
 	Kafka       KafkaConfig     `mapstructure:"kafka"`
 	SyslogCEF   SyslogCEFConfig `mapstructure:"syslog_cef"`
+	Discord     DiscordConfig   `mapstructure:"discord"`
+	Telegram    TelegramConfig  `mapstructure:"telegram"`
 	FalcoOutput bool            `mapstructure:"falco_output"` // emit Falco-compatible JSON for the webhook notifier
 }
 
@@ -93,6 +95,19 @@ func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Log
 		logger.Info("exporter/notifier: Syslog/CEF notifier enabled",
 			slog.String("address", cfg.SyslogCEF.Address),
 			slog.String("format", cfg.SyslogCEF.Format))
+	}
+
+	// Initialize Discord notifier if enabled
+	if discordNotifier := NewDiscordNotifier(cfg.Discord, logger); discordNotifier.Enabled() {
+		f.notifiers = append(f.notifiers, discordNotifier)
+		logger.Info("exporter/notifier: Discord notifier enabled")
+	}
+
+	// Initialize Telegram notifier if enabled
+	if telegramNotifier := NewTelegramNotifier(cfg.Telegram, logger); telegramNotifier.Enabled() {
+		f.notifiers = append(f.notifiers, telegramNotifier)
+		logger.Info("exporter/notifier: Telegram notifier enabled",
+			slog.String("chat_id", cfg.Telegram.ChatID))
 	}
 
 	if len(f.notifiers) == 0 {

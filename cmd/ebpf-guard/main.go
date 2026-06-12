@@ -25,14 +25,17 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/drift"
+	rulesembed "github.com/zugolO/ebpf-guard/rules"
 	"github.com/zugolO/ebpf-guard/internal/enforcer"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/internal/gossip"
+	"github.com/zugolO/ebpf-guard/internal/hidden"
 	"github.com/zugolO/ebpf-guard/internal/migration"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
 	"github.com/zugolO/ebpf-guard/internal/simulate"
+	"github.com/zugolO/ebpf-guard/internal/simple"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/internal/tui"
 	"github.com/zugolO/ebpf-guard/internal/watchdog"
@@ -55,12 +58,14 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	var (
-		cfgPath         string
-		logLevel        string
-		dryRun          bool
-		simulateMode    bool
+		cfgPath          string
+		logLevel         string
+		dryRun           bool
+		simulateMode     bool
 		simulateDuration string
-		shutdownTimeout string
+		shutdownTimeout  string
+		zeroConfig       bool
+		enableSimple     bool
 	)
 
 	root := &cobra.Command{
@@ -71,7 +76,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		Version:      fmt.Sprintf("%s (commit %s)", Version, Commit),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration, shutdownTimeout)
+			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration, shutdownTimeout, zeroConfig, enableSimple)
 		},
 	}
 
@@ -84,6 +89,10 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		"stop simulation after this duration (e.g. 24h, 30m); empty = run until Ctrl+C")
 	root.PersistentFlags().StringVar(&shutdownTimeout, "shutdown-timeout", "",
 		"graceful shutdown timeout, overrides config (e.g. 60s, 2m); valid range [5s, 300s]")
+	root.PersistentFlags().BoolVar(&zeroConfig, "zero-config", false,
+		"run without a config file: uses embedded defaults and built-in rules (one-command deployment)")
+	root.PersistentFlags().BoolVar(&enableSimple, "simple", false,
+		"enable simple mode: auto-kill cryptominers, webshells, and reverse shells with safety rails")
 
 	rulesCmd := newRulesCmd(&cfgPath)
 	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
@@ -106,23 +115,70 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 	return root
 }
 
-func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string) error {
+func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string, zeroConfig bool, enableSimple bool) error {
 	setupLogger(logLevel)
 
 	slog.Info("ebpf-guard starting",
 		slog.String("version", Version),
 		slog.String("commit", Commit),
 		slog.Bool("dry_run", dryRun),
+		slog.Bool("zero_config", zeroConfig),
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cfgManager, err := config.NewManagerSkipPermCheck(cfgPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+	// ── Config loading: embedded defaults or config file ──────────────────────
+	var cfgManager *config.Manager
+	var cfg *config.Config
+	var rules []correlator.Rule
+
+	if zeroConfig {
+		slog.Info("zero-config mode: using embedded defaults and built-in rules")
+		cfgManager = config.NewZeroConfigManager()
+		cfg = cfgManager.Get()
+
+		// Load all built-in rules from the embedded filesystem.
+		embeddedFiles, embErr := rulesembed.LoadAll()
+		if embErr != nil {
+			slog.Warn("failed to load embedded rules, starting with empty rule set",
+				slog.Any("error", embErr))
+		} else {
+			var ruleErr error
+			rules, ruleErr = correlator.LoadRulesFromEmbedded(embeddedFiles)
+			if ruleErr != nil {
+				slog.Warn("failed to parse embedded rules, starting with empty rule set",
+					slog.Any("error", ruleErr))
+				rules = nil
+			} else {
+				slog.Info("embedded rules loaded",
+					slog.Int("count", len(rules)),
+					slog.Int("files", len(embeddedFiles)),
+				)
+			}
+		}
+
+		// Print friendly first-run summary.
+		printZeroConfigBanner(cfg)
+	} else {
+		var err error
+		cfgManager, err = config.NewManagerSkipPermCheck(cfgPath)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		cfg = cfgManager.Get()
+
+		// Load rules from file or directory (config defaults to rules/ dir)
+		rules, err = loadRules(cfg.Rules.Path)
+		if err != nil {
+			slog.Warn("failed to load rules file, starting with empty rule set",
+				slog.String("path", cfg.Rules.Path),
+				slog.Any("error", err))
+			rules = nil
+		} else {
+			slog.Info("rules loaded", slog.Int("count", len(rules)))
+		}
 	}
-	cfg := cfgManager.Get()
 
 	if shutdownTimeoutFlag != "" {
 		d, err := time.ParseDuration(shutdownTimeoutFlag)
@@ -176,16 +232,6 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
-	rules, err := correlator.LoadRulesFromFile(cfg.Rules.Path)
-	if err != nil {
-		slog.Warn("failed to load rules file, starting with empty rule set",
-			slog.String("path", cfg.Rules.Path),
-			slog.Any("error", err))
-		rules = nil
-	} else {
-		slog.Info("rules loaded", slog.Int("count", len(rules)))
-	}
-
 	// Audit log for rule changes and config hot-reloads.
 	var rulesAuditLog *audit.RulesLogger
 	if cfg.Audit.Enabled {
@@ -221,6 +267,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Info("canary: traps armed",
 			slog.Int("files", len(canaryManager.Paths())),
 			slog.Int("rules", len(canaryRules)))
+	}
+
+	// Feature E: hidden process detection via BPF iter/task vs /proc diff.
+	var hiddenDetector *hidden.Detector
+	if cfg.HiddenProcess.Enabled {
+		hiddenDetector = hidden.New(slog.Default(), hidden.Config{
+			Enabled:        true,
+			CheckInterval:  cfg.HiddenProcess.CheckInterval,
+			AlertSeverity:  cfg.HiddenProcess.AlertSeverity,
+		})
+		slog.Info("hidden: detector initialised",
+			slog.Duration("interval", cfg.HiddenProcess.CheckInterval))
 	}
 
 	// Feature C: event log for rule replay.
@@ -371,13 +429,16 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// Initialize enforcer when enabled in config.
 	// Wired to the engine so rule actions (kill/block/throttle) are executed
 	// asynchronously via the engine's bounded worker pool.
+	// In simple mode, enforcement and kill are force-enabled regardless of config.
 	var enf *enforcer.Enforcer
-	if cfg.Enforcement.Enabled {
+	forceEnforce := enableSimple || cfg.SimpleMode.Enabled
+	if cfg.Enforcement.Enabled || forceEnforce {
+		enableKill := cfg.Enforcement.EnableKill || forceEnforce
 		enfCfg := enforcer.Config{
 			DryRun:                  cfg.Enforcement.DryRun,
 			BlockBackend:            enforcer.BlockBackend(cfg.Enforcement.BlockBackend),
 			EnableBlock:             cfg.Enforcement.EnableBlock,
-			EnableKill:              cfg.Enforcement.EnableKill,
+			EnableKill:              enableKill,
 			EnableThrottle:          cfg.Enforcement.EnableThrottle,
 			ThrottleCPUPercent:      cfg.Enforcement.ThrottleCPUPercent,
 			ThrottleMaxAge:          time.Duration(cfg.Enforcement.ThrottleMaxAgeMinutes) * time.Minute,
@@ -502,6 +563,16 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return fmt.Errorf("start HTTP server: %w", err)
 	}
 
+	// ── Setup alert explainer ────────────────────────────────────────────────
+	// Wired to the REST API so GET /api/v1/alerts/{id}/explain returns
+	// human-readable explanations with MITRE ATT&CK mappings.
+	// In simple mode, the default style is "plain" for non-security users.
+	srv.SetupExplainer("") // Uses embedded default templates (empty dir = fallback to defaults)
+	if enableSimple || cfg.SimpleMode.Enabled {
+		srv.SetExplainerStyle("plain")
+		slog.Info("explainer: plain-language mode active (simple mode)")
+	}
+
 	// ── Alertmanager webhook client ──────────────────────────────────────────
 	var alertmanagerClient *exporter.AlertmanagerClient
 	if cfg.Alerting.Enabled {
@@ -533,7 +604,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		cfg.Notifications.Webhook.Enabled ||
 		cfg.Notifications.OTLP.Enabled ||
 		cfg.Notifications.Kafka.Enabled ||
-		cfg.Notifications.SyslogCEF.Enabled
+		cfg.Notifications.SyslogCEF.Enabled ||
+		cfg.Notifications.Discord.Enabled ||
+		cfg.Notifications.Telegram.Enabled
 	if notifEnabled {
 		fanout = exporter.NewFanoutNotifier(exporter.FanoutConfig{
 			Slack: exporter.SlackConfig{
@@ -588,8 +661,36 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				ClientKey:   cfg.Notifications.SyslogCEF.ClientKey,
 				MinSeverity: cfg.Notifications.SyslogCEF.MinSeverity,
 			},
+			Discord: exporter.DiscordConfig{
+				Enabled:     cfg.Notifications.Discord.Enabled,
+				WebhookURL:  cfg.Notifications.Discord.WebhookURL,
+				MinSeverity: cfg.Notifications.Discord.MinSeverity,
+			},
+			Telegram: exporter.TelegramConfig{
+				Enabled:     cfg.Notifications.Telegram.Enabled,
+				BotToken:    cfg.Notifications.Telegram.BotToken,
+				ChatID:      cfg.Notifications.Telegram.ChatID,
+				MinSeverity: cfg.Notifications.Telegram.MinSeverity,
+			},
 			FalcoOutput: cfg.Compat.FalcoOutput,
 		}, 10*time.Second, slog.Default())
+	}
+
+	// ── Simple mode: auto-enforce for indie developers ─────────────────────
+	var simpleEngine *simple.Mode
+	if enableSimple || cfg.SimpleMode.Enabled {
+		scfg := simple.Config{
+			Enabled:           true,
+			DryRun:            cfg.SimpleMode.DryRun,
+			DryRunDuration:    parseDuration(cfg.SimpleMode.DryRunDuration, 24*time.Hour),
+			MaxKillsPerMinute: cfg.SimpleMode.MaxKillsPerMinute,
+			AllowlistPIDs:     cfg.SimpleMode.AllowlistPIDs,
+			AllowlistComms:    cfg.SimpleMode.AllowlistComms,
+		}
+		simpleEngine = simple.New(scfg, slog.Default())
+		slog.Info("simple mode: auto-enforcement enabled",
+			slog.Bool("dry_run", simpleEngine.IsDryRun()),
+			slog.Int("max_kills_per_minute", scfg.MaxKillsPerMinute))
 	}
 
 	// ── Shutdown duration metric ─────────────────────────────────────────────
@@ -656,6 +757,32 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Info("gcp_audit: collector enabled",
 			slog.String("subscription", cfg.Collectors.GCPAudit.PubSubSubscription))
 	}
+	if cfg.Collectors.IOUring.Enabled {
+		ioc := collector.NewIOUringCollector(slog.Default())
+		ioc = ioc.WithBackpressureStrategy(bpStrategy)
+		collectors = append(collectors, ioc)
+		slog.Info("iouring: collector enabled")
+	}
+	if cfg.Collectors.BPFMonitor.Enabled {
+		bmc, bmErr := collector.NewBPFMonitorCollector(slog.Default())
+		if bmErr != nil {
+			slog.Warn("bpf_monitor: collector creation failed, skipping", slog.Any("error", bmErr))
+		} else {
+			bmc = bmc.WithBackpressureStrategy(bpStrategy)
+			collectors = append(collectors, bmc)
+			slog.Info("bpf_monitor: collector enabled")
+		}
+	}
+	if cfg.Collectors.TLSFingerprint.Enabled {
+		tfc, tfErr := collector.NewTLSFingerprintCollector(slog.Default())
+		if tfErr != nil {
+			slog.Warn("tls_fingerprint: collector creation failed, skipping", slog.Any("error", tfErr))
+		} else {
+			tfc = tfc.WithBackpressureStrategy(bpStrategy)
+			collectors = append(collectors, tfc)
+			slog.Info("tls_fingerprint: collector enabled")
+		}
+	}
 
 	// Build the required-collector set from config and tell the HTTP server.
 	requiredSet := make(map[string]bool, len(cfg.Collectors.Required))
@@ -711,7 +838,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 			// Phase 1: parse and fully validate in isolation — no swap yet.
 			t0 := time.Now()
-			newRules, err := correlator.LoadRulesFromFile(newCfg.Rules.Path)
+			newRules, err := loadRules(newCfg.Rules.Path)
 			engine.ObserveYAMLParseDuration(time.Since(t0))
 			if err != nil {
 				slog.Error("hot-reload aborted: validation failed",
@@ -768,6 +895,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		if err := canaryManager.Start(ctx, canaryAlertFn); err != nil {
 			slog.Warn("canary: failed to start verification loop", slog.Any("error", err))
+		}
+	}
+
+	// Start hidden process detection loop (issue #155).
+	if hiddenDetector != nil {
+		hiddenAlertFn := func(a types.Alert) {
+			if err := alertStore.StoreBatch(ctx, []types.Alert{a}); err != nil {
+				slog.Warn("hidden: store alert error", slog.Any("error", err))
+			}
+			if alertmanagerClient != nil {
+				alertmanagerClient.SendAlert(ctx, a)
+			}
+			if fanout != nil {
+				fanout.Send(ctx, a)
+			}
+		}
+		if err := hiddenDetector.Start(ctx, hiddenAlertFn); err != nil {
+			slog.Warn("hidden: failed to start detection loop", slog.Any("error", err))
 		}
 	}
 
@@ -829,12 +974,59 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
-	// Container drift detector — enabled when containers use K8s enrichment.
-	driftDetector := drift.NewDetector(drift.DetectorConfig{
-		BaselineWindow: 5 * time.Minute,
-		Logger:         slog.Default(),
-	})
+	// Container drift detector — when enabled, compares runtime behaviour against
+	// per-container baselines. In ImageManifest mode, the baseline is pre-seeded
+	// from the container image layers via overlayfs lowerdir walk.
+	var driftDetector *drift.Detector
 	var driftSeq atomic.Uint64
+	if cfg.Drift.Enabled {
+		baselineWindow, _ := time.ParseDuration(cfg.Drift.BaselineWindow)
+		if baselineWindow <= 0 {
+			baselineWindow = 5 * time.Minute
+		}
+		allowlistExec := make(map[string]struct{}, len(cfg.Drift.AllowlistExec))
+		for _, p := range cfg.Drift.AllowlistExec {
+			allowlistExec[p] = struct{}{}
+		}
+		driftDetector = drift.NewDetector(drift.DetectorConfig{
+			BaselineWindow: baselineWindow,
+			Logger:         slog.Default(),
+			ImageManifest:  cfg.Drift.ImageManifest,
+			EnforceMode:    cfg.Drift.EnforceMode,
+			AllowlistExec:  allowlistExec,
+		})
+		slog.Info("drift: detector enabled",
+			slog.Duration("baseline_window", baselineWindow),
+			slog.Bool("image_manifest", cfg.Drift.ImageManifest),
+			slog.String("enforce_mode", cfg.Drift.EnforceMode),
+			slog.Int("allowlist_exec", len(allowlistExec)),
+		)
+
+		// Periodic purge of stale container baselines.
+		purgeInterval, _ := time.ParseDuration(cfg.Drift.PurgeInterval)
+		if purgeInterval <= 0 {
+			purgeInterval = 10 * time.Minute
+		}
+		purgeTTL, _ := time.ParseDuration(cfg.Drift.PurgeTTL)
+		if purgeTTL <= 0 {
+			purgeTTL = 30 * time.Minute
+		}
+		go func() {
+			ticker := time.NewTicker(purgeInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					removed := driftDetector.PurgeStale(purgeTTL)
+					if removed > 0 {
+						slog.Debug("drift: purged stale baselines", slog.Int("removed", removed))
+					}
+				}
+			}
+		}()
+	}
 
 	// Background: refresh queue depth gauge every second.
 	var activeWorkers atomic.Int64
@@ -882,12 +1074,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			// engine.Ingest is single-goroutine safe; call it here before dispatch.
 			alerts := engine.Ingest(ctx, event)
 
-			// Run container drift detection alongside the rule engine.
+		// Run container drift detection alongside the rule engine.
+		if driftDetector != nil {
 			driftAlerts := driftDetector.Ingest(event)
 			for _, da := range driftAlerts {
 				seq := driftSeq.Add(1)
-				alerts = append(alerts, drift.DriftAlertToTypes(da, seq))
+				alerts = append(alerts, drift.DriftAlertToTypes(da, seq, cfg.Drift.EnforceMode))
 			}
+		}
 
 			if len(alerts) == 0 {
 				continue
@@ -908,6 +1102,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					workerSem.Release(1)
 					exporter.SetGoroutinePoolActive(activeWorkers.Add(-1))
 				}()
+
+				// Simple mode: auto-enforce high-confidence threats.
+				if simpleEngine != nil && enf != nil {
+					simpleEngine.ProcessAlerts(dispatched, enf)
+				}
 
 				if simCollector != nil {
 					for _, a := range dispatched {
@@ -1217,7 +1416,7 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 			}
 			cfg := cfgManager.Get()
 
-			rules, err := correlator.LoadRulesFromFile(cfg.Rules.Path)
+			rules, err := loadRules(cfg.Rules.Path)
 			if err != nil {
 				return fmt.Errorf("load rules: %w", err)
 			}
@@ -1916,7 +2115,7 @@ func runDashboard(cfgPath string, dryRun bool) error {
 	}
 	cfg := cfgManager.Get()
 
-	rules, _ := correlator.LoadRulesFromFile(cfg.Rules.Path)
+	rules, _ := loadRules(cfg.Rules.Path)
 
 	engineCfg := correlator.DefaultCorrelationEngineConfig()
 	engineCfg.Rules = rules
@@ -2222,4 +2421,79 @@ func buildSyntheticEvents(perType int) []types.Event {
 		)
 	}
 	return events
+}
+
+// printZeroConfigBanner prints a human-friendly first-run summary to stderr
+// so that users running `curl | sh` or `docker run` immediately see what is
+// being monitored and where alerts go.
+func printZeroConfigBanner(cfg *config.Config) {
+	addr := cfg.Server.BindAddress
+	if addr == "" {
+		addr = ":9090"
+	}
+	adminToken := cfg.Auth.AdminToken
+	if adminToken == "" && len(cfg.Auth.Tokens) > 0 {
+		adminToken = cfg.Auth.Tokens[0].Token
+	}
+
+	fmt.Fprintf(os.Stderr, `
+╔══════════════════════════════════════════════════════════════╗
+║           ebpf-guard %s — ready                            ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  Zero-config mode — embedded defaults active.                ║
+║  No config file or rules directory needed.                   ║
+║                                                              ║
+║  What is being monitored:                                    ║
+║    • Syscalls (exec, privesc, container escape)              ║
+║    • Network connections (C2, data exfil)                    ║
+║    • File access (sensitive files, binaries)                 ║
+║    • Process lineage (web shell, reverse shell)              ║
+║                                                              ║
+║  Where alerts go:                                            ║
+║    • Metrics:  http://localhost%s%s                         ║
+║    • Health:   http://localhost%s%s                         ║
+║    • Store:    in-memory (restart = data lost)               ║
+║                                                              ║
+`, Version,
+		addr, cfg.Server.MetricsPath,
+		addr, cfg.Server.HealthPath,
+	)
+
+	if adminToken != "" {
+		fmt.Fprintf(os.Stderr, "║  Auth token (admin): %s... (save this!)                 ║\n",
+			adminToken[:min(12, len(adminToken))])
+	}
+	fmt.Fprintf(os.Stderr, `║                                                              ║
+║  To add Alertmanager, Discord, or Telegram:                   ║
+║    Create a config file and run without --zero-config         ║
+║    See: https://github.com/zugolO/ebpf-guard                  ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+`)
+}
+
+// parseDuration parses a duration string or returns the default on failure.
+func parseDuration(s string, defaultDur time.Duration) time.Duration {
+	if s == "" || s == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return defaultDur
+	}
+	return d
+}
+
+// loadRules loads rules from a file or directory path.
+func loadRules(path string) ([]correlator.Rule, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat rules path: %w", err)
+	}
+	if info.IsDir() {
+		return correlator.LoadRulesFromDir(path)
+	}
+	return correlator.LoadRulesFromFile(path)
 }

@@ -42,6 +42,10 @@ templates:
       technique_id: "T1547.006"
       technique: "Boot or Logon Autostart Execution: Kernel Modules and Extensions"
       url: "https://attack.mitre.org/techniques/T1547/006/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) loaded a kernel module — code that runs with the highest possible system privileges."
+      why_it_matters: "Kernel modules run at the deepest level of the operating system and can hide from all security tools. Malicious kernel modules (rootkits) can hide files, processes, and network connections, steal passwords, and disable security controls. Even a 'signed' module from an unexpected process is dangerous."
+      what_to_do: "1. Immediately identify the module: run lsmod to see what was loaded.\n2. Check /proc/modules for unexpected entries.\n3. Enable kernel module signing enforcement: add module.sig_enforce=1 to kernel boot params.\n4. If a rootkit is suspected, boot from clean media and forensically image the disk.\n5. Restrict module loading to trusted system processes only."
 
   - id: kmod_tmpfs_load
     name: "Kernel Module Loaded from Temporary Filesystem"
@@ -80,3 +84,7 @@ templates:
       technique_id: "T1014"
       technique: "Rootkit"
       url: "https://attack.mitre.org/techniques/T1014/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) loaded a kernel module from /tmp or /dev/shm — a memory-only filesystem that leaves no traces on disk."
+      why_it_matters: "Loading a kernel module from a temporary filesystem is a hallmark of fileless rootkit deployment. The attacker avoids writing anything to disk so antivirus and file scanners can't detect it. The module exists only in memory and can persist until the machine is rebooted."
+      what_to_do: "1. Do NOT reboot — the module lives only in memory and rebooting destroys evidence.\n2. Dump the module from the tmpfs path for analysis.\n3. Capture the current system state: running processes, network connections, loaded modules.\n4. Mount /tmp with noexec to prevent this in the future.\n5. Initiate incident response — the host may be fully compromised."

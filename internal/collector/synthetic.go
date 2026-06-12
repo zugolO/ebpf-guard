@@ -96,6 +96,7 @@ func (s *SyntheticCollector) generateEvent() types.Event {
 		types.EventTCPConnect,
 		types.EventFileAccess,
 		types.EventCloudAudit,
+		types.EventIOUring,
 	}
 	eventType := eventTypes[rand.Intn(len(eventTypes))]
 
@@ -117,6 +118,8 @@ func (s *SyntheticCollector) generateEvent() types.Event {
 		baseEvent.File = s.generateFileEvent()
 	case types.EventCloudAudit:
 		baseEvent.CloudAudit = s.generateCloudAuditEvent()
+	case types.EventIOUring:
+		baseEvent.IOUring = s.generateIOUringEvent()
 	}
 
 	return baseEvent
@@ -244,4 +247,14 @@ func (s *SyntheticCollector) randomComm() string {
 		"bash", "sh", "ssh", "systemd",
 	}
 	return comms[rand.Intn(len(comms))]
+}
+
+// generateIOUringEvent creates a synthetic io_uring event.
+func (s *SyntheticCollector) generateIOUringEvent() *types.IOUringEvent {
+	return &types.IOUringEvent{
+		Op:       uint8(rand.Intn(2)),          // 0=setup, 1=enter
+		Flags:    uint32(rand.Intn(1000)),
+		Fd:       int32(rand.Intn(1000) + 3),   // fd >= 3
+		ToSubmit: uint32(rand.Intn(64) + 1),
+	}
 }

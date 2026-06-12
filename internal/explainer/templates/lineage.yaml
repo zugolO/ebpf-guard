@@ -36,6 +36,10 @@ templates:
       technique_id: "T1190"
       technique: "Exploit Public-Facing Application"
       url: "https://attack.mitre.org/techniques/T1190/"
+    plain:
+      what_happened: "An interactive shell was started from your {{.Comm}} web process (PID {{.PID}})."
+      why_it_matters: "Web servers should not spawn shells. This usually means your application was exploited — an attacker found a way to run commands on your server, typically through an unpatched vulnerability in your web app, a file upload flaw, or a command injection bug."
+      what_to_do: "1. Restart the container or pod {{.Pod}} immediately to evict the attacker.\n2. Check your web server access logs for unusual requests around the alert time.\n3. Look for new or modified files in your web directories (suspicious .php, .jsp, or .asp files).\n4. Update your web framework and dependencies to the latest versions.\n5. If this was a false positive (e.g. a cron job), add the process to your allowlist."
 
   - id: lineage_shell_network_tool
     name: "Shell Spawned Network Tool"
@@ -73,6 +77,10 @@ templates:
       technique_id: "T1046"
       technique: "Network Service Scanning"
       url: "https://attack.mitre.org/techniques/T1046/"
+    plain:
+      what_happened: "A shell process spawned {{.Comm}} (PID {{.PID}}), a network tool often used by attackers for reconnaissance or data exfiltration."
+      why_it_matters: "After an attacker gains shell access, they typically run network tools like curl, wget, or nc to download payloads, scan your network, or exfiltrate data. This is the second stage of an attack."
+      what_to_do: "1. Check what the tool was doing: inspect /proc/{{.PID}}/cmdline.\n2. Look for outbound network connections from pod {{.Pod}}.\n3. If the shell parent is a web server, your app was likely exploited — restart and audit immediately.\n4. Consider network egress policies to limit outbound access."
 
   - id: lineage_shell_interpreter
     name: "Shell Spawned Script Interpreter"
@@ -108,6 +116,10 @@ templates:
       technique_id: "T1059"
       technique: "Command and Scripting Interpreter"
       url: "https://attack.mitre.org/techniques/T1059/"
+    plain:
+      what_happened: "A shell spawned a script interpreter ({{.Comm}}, PID {{.PID}}) — commonly Python, Ruby, or Perl."
+      why_it_matters: "Attackers use script interpreters to run exploits, reverse shells, or cryptominers with more capabilities than a basic shell. Python reverse shells are especially common."
+      what_to_do: "1. Check the script being executed: cat /proc/{{.PID}}/cmdline.\n2. If this is part of a legitimate deployment, add it to your allowlist.\n3. Check for outgoing network connections from this process.\n4. Look for cryptocurrency mining processes or unusual CPU usage."
 
   - id: lineage_chain_suspicious
     name: "Suspicious Process Chain"
@@ -140,3 +152,7 @@ templates:
       technique_id: "T1204"
       technique: "User Execution"
       url: "https://attack.mitre.org/techniques/T1204/"
+    plain:
+      what_happened: "An unusual process chain was detected: {{.ParentComm}} started {{.Comm}} (PID {{.PID}}). This parent-child relationship is uncommon."
+      why_it_matters: "Attackers often chain multiple processes together — each step may look innocent alone, but the full path reveals malicious intent. This needs inspection."
+      what_to_do: "1. Look at the full process tree: run ps auxf to see all ancestors.\n2. Check if the parent process {{.ParentComm}} was itself started by something unexpected.\n3. If this is a normal part of your application, add these processes to your allowlist.\n4. Check for other suspicious activity on the system around the same time."

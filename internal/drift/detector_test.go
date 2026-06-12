@@ -193,7 +193,7 @@ func TestDriftAlertToTypes(t *testing.T) {
 		Comm:        "nginx",
 	}
 
-	alert := DriftAlertToTypes(da, 1)
+	alert := DriftAlertToTypes(da, 1, "")
 	if alert.RuleID == "" {
 		t.Error("expected non-empty RuleID")
 	}

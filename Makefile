@@ -122,3 +122,31 @@ bench-save-baseline:
 bench-compare:
 	go test -bench=. -benchtime=10s -count=5 -run='^$$' ./... | tee bench-new.txt
 	benchstat bench-baseline.txt bench-new.txt
+
+# ── Release targets ────────────────────────────────────────────────────────
+
+# Build release binaries for all supported architectures.
+release: generate
+	@echo "Building release binaries..."
+	@mkdir -p build
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+		-ldflags="-w -s -X main.Version=$$(git describe --tags --always || echo 'dev') -X main.Commit=$$(git rev-parse --short HEAD || echo 'unknown')" \
+		-o build/ebpf-guard-linux-amd64 ./cmd/ebpf-guard
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+		-ldflags="-w -s -X main.Version=$$(git describe --tags --always || echo 'dev') -X main.Commit=$$(git rev-parse --short HEAD || echo 'unknown')" \
+		-o build/ebpf-guard-linux-arm64 ./cmd/ebpf-guard
+	@echo "Release binaries built in build/"
+
+# Update the SHA-256 checksums in scripts/install.sh for the current build.
+checksums:
+	@echo "Computing checksums for install.sh..."
+	@for arch in amd64 arm64; do \
+		bin="build/ebpf-guard-linux-$$arch"; \
+		if [ -f "$$bin" ]; then \
+			sha=$$(sha256sum "$$bin" | cut -d' ' -f1); \
+			sed -i "s/CHECKSUM_linux_$$arch=.*/CHECKSUM_linux_$$arch=\"$$sha\"/" scripts/install.sh; \
+			echo "  $$arch: $$sha"; \
+		else \
+			echo "  $$arch: binary not found — run 'make release' first"; \
+		fi; \
+	done

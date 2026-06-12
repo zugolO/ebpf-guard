@@ -38,13 +38,22 @@ type DriftAlert struct {
 
 // Detector maintains per-container baselines and emits DriftAlerts when
 // post-baseline events deviate from observed normal behaviour.
+//
+// In ImageManifest mode, the Detector snapshots the container image's
+// executable files on first encounter and uses that as the baseline for
+// exec-path drift detection. Drift alerts carry an enforcement action
+// when EnforceMode is configured.
 type Detector struct {
 	mu        sync.RWMutex
 	baselines map[string]*ContainerBaseline // keyed by container ID
 
-	window time.Duration // baseline learning window per container
+	window        time.Duration // baseline learning window per container
+	imageManifest bool          // enable image manifest pre-seeding
+	enforceMode   string        // "", "kill", "block"
+	allowlistExec map[string]struct{}
 
-	logger *slog.Logger
+	snapshotter *ImageSnapshotter
+	logger      *slog.Logger
 
 	// Prometheus metrics
 	driftTotal      *prometheus.CounterVec // drift_detected_total{type, namespace}
@@ -59,6 +68,23 @@ type DetectorConfig struct {
 	BaselineWindow time.Duration
 	// Logger is the structured logger to use.
 	Logger *slog.Logger
+	// ImageManifest enables pre-seeding the ExecPaths baseline from the container
+	// image at startup via overlayfs lowerdir walk. When enabled, any binary that
+	// was NOT present in the image layers triggers a critical drift alert on first
+	// execution, even during the learning window.
+	// Default: false.
+	ImageManifest bool
+	// EnforceMode sets the enforcement action on drift alerts:
+	//   ""       — alert only (default)
+	//   "kill"   — add ActionKill to drift alerts (SIGKILL the process)
+	//   "block"  — add ActionBlock to drift alerts (block network via TC/XDP)
+	EnforceMode string
+	// AllowlistExec is a set of executable paths (or directory prefixes) that are
+	// exempt from drift detection. Useful for JIT compilers, package managers,
+	// and other legitimate runtime-generated binaries.
+	//
+	// For example: "/usr/lib/jvm/" (Java JIT), "/tmp/", "/var/cache/apt/"
+	AllowlistExec map[string]struct{}
 }
 
 // NewDetector creates a Detector with the given configuration.
@@ -72,10 +98,19 @@ func NewDetector(cfg DetectorConfig) *Detector {
 		logger = slog.Default()
 	}
 
+	allowlist := cfg.AllowlistExec
+	if allowlist == nil {
+		allowlist = make(map[string]struct{})
+	}
+
 	d := &Detector{
-		baselines: make(map[string]*ContainerBaseline),
-		window:    window,
-		logger:    logger,
+		baselines:     make(map[string]*ContainerBaseline),
+		window:        window,
+		imageManifest: cfg.ImageManifest,
+		enforceMode:   cfg.EnforceMode,
+		allowlistExec: allowlist,
+		snapshotter:   NewImageSnapshotter(logger),
+		logger:        logger,
 		driftTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ebpf_guard_drift_detected_total",
 			Help: "Total container drift events detected, partitioned by type and namespace.",
@@ -116,6 +151,10 @@ func (d *Detector) Ingest(e types.Event) []DriftAlert {
 
 	bl := d.getOrCreate(cid, ns, pod)
 
+	// In image manifest mode, snapshot the image on first encounter to
+	// pre-seed the ExecPaths baseline from the container's overlayfs layers.
+	d.snapshotImageForContainer(bl, e)
+
 	// Try to lock the baseline if the window has expired.
 	locked := bl.tryLock()
 
@@ -130,6 +169,7 @@ func (d *Detector) Ingest(e types.Event) []DriftAlert {
 }
 
 // getOrCreate returns an existing baseline for containerID or creates a new one.
+// In ImageManifest mode, triggers an overlayfs snapshot on first encounter.
 func (d *Detector) getOrCreate(cid, namespace, podName string) *ContainerBaseline {
 	d.mu.RLock()
 	if bl, ok := d.baselines[cid]; ok {
@@ -152,8 +192,38 @@ func (d *Detector) getOrCreate(cid, namespace, podName string) *ContainerBaselin
 		slog.String("namespace", namespace),
 		slog.String("pod", podName),
 		slog.Duration("window", d.window),
+		slog.Bool("image_manifest", d.imageManifest),
 	)
 	return bl
+}
+
+// snapshotImageForContainer triggers an overlayfs image manifest snapshot
+// for the given container and preseeds the baseline. In image manifest mode,
+// the ExecPaths baseline is immediately locked for exec-drift detection.
+func (d *Detector) snapshotImageForContainer(bl *ContainerBaseline, e types.Event) {
+	if !d.imageManifest {
+		return
+	}
+	if bl.ImageSnapshotted {
+		return
+	}
+
+	manifest := d.snapshotter.SnapshotFromPID(bl.ContainerID, e.PID)
+	if manifest.Error != nil {
+		d.logger.Debug("drift: image manifest snapshot unavailable",
+			slog.String("container_id", bl.ContainerID),
+			slog.Any("error", manifest.Error))
+		return
+	}
+
+	added := bl.PreseedFromManifest(manifest)
+	if added > 0 {
+		d.logger.Info("drift: image manifest pre-seeded baseline",
+			slog.String("container_id", bl.ContainerID),
+			slog.Int("exec_paths_added", added),
+			slog.Int("total_manifest_paths", len(manifest.ExecPaths)),
+		)
+	}
 }
 
 // record folds an event into the baseline (called during learning phase).
@@ -221,12 +291,18 @@ func (d *Detector) checkDrift(bl *ContainerBaseline, e types.Event, comm string)
 			if path == "" {
 				break
 			}
-			if isExecPath(path) && !bl.hasExecPath(path) {
-				alerts = append(alerts, d.makeDriftAlert(bl, e, comm,
-					DriftNewExec,
-					fmt.Sprintf("new binary executed: %s (not in baseline)", path),
-					types.SeverityCritical,
-				))
+			if isExecPath(path) {
+				// Skip allowlisted paths (JIT, package managers, etc.).
+				if isAllowed(path, d.allowlistExec) {
+					break
+				}
+				if !bl.hasExecPath(path) {
+					alerts = append(alerts, d.makeDriftAlert(bl, e, comm,
+						DriftNewExec,
+						fmt.Sprintf("new binary executed: %s (not in baseline)", path),
+						types.SeverityCritical,
+					))
+				}
 			} else if isLibPath(path) && !bl.hasLibrary(path) {
 				alerts = append(alerts, d.makeDriftAlert(bl, e, comm,
 					DriftNewLibrary,
@@ -338,7 +414,9 @@ func (d *Detector) AllStats() []BaselineStats {
 }
 
 // DriftAlertToTypes converts a DriftAlert to a types.Alert for store/export.
-func DriftAlertToTypes(da DriftAlert, seq uint64) types.Alert {
+// When enforceAction is non-empty ("kill" or "block"), the resulting Alert
+// carries that action for downstream enforcement.
+func DriftAlertToTypes(da DriftAlert, seq uint64, enforceAction string) types.Alert {
 	details := map[string]interface{}{
 		"drift_type":   string(da.DriftType),
 		"detail":       da.Detail,
@@ -355,6 +433,7 @@ func DriftAlertToTypes(da DriftAlert, seq uint64) types.Alert {
 		Comm:      da.Comm,
 		Message:   da.Detail,
 		Details:   details,
+		Action:    enforceAction,
 		Enrichment: types.EnrichmentInfo{
 			ContainerID: da.ContainerID,
 			Namespace:   da.Namespace,

@@ -39,3 +39,7 @@ templates:
       technique_id: "T1611"
       technique: "Escape to Host"
       url: "https://attack.mitre.org/techniques/T1611/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) moved out of its assigned container resource group (cgroup) — a container escape attempt through namespace manipulation."
+      why_it_matters: "Cgroups control what resources (CPU, memory) a container can use. Escaping the cgroup means the process can consume unlimited host resources, bypass security monitoring, or gain access to host-level control structures. This is rarely accidental."
+      what_to_do: "1. Check cgroup membership of PID {{.PID}}: cat /proc/{{.PID}}/cgroup.\n2. Verify the container runtime assigned the correct cgroup at startup.\n3. Enable cgroup v2 with strict hierarchy enforcement.\n4. Upgrade your container runtime (containerd, cri-o) to the latest version.\n5. Audit all pods on the affected node for cgroup misconfigurations."

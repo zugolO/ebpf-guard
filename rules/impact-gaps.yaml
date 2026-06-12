@@ -1,0 +1,110 @@
+rules:
+  # MITRE ATT&CK: T1489 — Service Stop
+  # Adversaries stop or disable systemd services to disable security tools,
+  # logging, or monitoring.
+  - id: impact_systemd_service_disabled
+    name: "systemd service stopped or disabled by unexpected process"
+    description: >
+      systemctl was used to stop, disable, or mask a systemd service from a
+      process context that is not a known system administration tool or
+      interactive user session. Attackers disable security services (auditd,
+      falco, ebpf-guard) or logging (journald, rsyslog) to hide their
+      activity. Also covers T1562.001 (Impair Defenses: Disable or Modify
+      Tools).
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["systemctl", "service"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+        - field: uid
+          op: equals
+          values: ["0"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1489, impact, defense-evasion, service-stop, mitre:T1562.001]
+
+  # MITRE ATT&CK: T1485 — Data Destruction (via file removal on Linux)
+  # Covers rm -rf of critical directories, shred, dd overwrite.
+  - id: impact_mass_file_deletion_critical
+    name: "Mass deletion of files in critical system directories"
+    description: >
+      rm or shred was executed targeting critical system directories
+      (/etc, /var/log, /boot, /lib). This is classic data destruction
+      or anti-forensics: attackers delete logs, configuration, and system
+      binaries to cover their tracks or to render the system inoperable
+      (ransomware without encryption — "wiper" style).
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/etc/"
+            - "/var/log/"
+            - "/boot/"
+            - "/lib/modules/"
+            - "/usr/lib/systemd/"
+        - field: file.op
+          op: in
+          values: ["unlink", "rmdir"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1485, impact, data-destruction, anti-forensics]
+
+  # MITRE ATT&CK: T1498 — Network Denial of Service (Linux fork bomb / resource exhaustion)
+  - id: impact_fork_bomb_pattern
+    name: "Rapid process spawn pattern consistent with fork bomb or resource exhaustion attack"
+    description: >
+      A process is spawning children at an abnormally high rate (> 50 new
+      processes in a 10-second window). This matches fork-bomb patterns
+      (:(){ :|:& };:), resource exhaustion attacks, or crypto-mining worms
+      that self-replicate. Can also be triggered by misconfigured process
+      supervisors, but the volume is typically much higher than normal
+      application behaviour.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["56", "57"]    # clone, fork
+        - field: uid
+          op: not_in
+          values: ["0"]    # non-root fork bombs are rarer but more suspicious
+    severity: warning
+    action: alert
+    tags: [mitre:T1498, impact, denial-of-service, fork-bomb]
+
+  # MITRE ATT&CK: T1561.001 — Disk Wipe: Disk Structure Wipe
+  # dd if=/dev/zero of=/dev/sda, mkfs on mounted devices, wipefs.
+  - id: impact_raw_disk_write_from_container
+    name: "Raw disk device write (dd, mkfs, wipefs) from an unexpected process"
+    description: >
+      dd, mkfs, or wipefs was executed targeting a block device (/dev/sd*,
+      /dev/nvme*, /dev/xvd*, /dev/vd*). Raw disk writes destroy filesystems
+      and partition tables — a classic disk-wipe attack. From inside a
+      container this indicates either improper device mounting or successful
+      container escape.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/dev/sd"
+            - "/dev/nvme"
+            - "/dev/xvd"
+            - "/dev/vd"
+        - field: file.op
+          op: in
+          values: ["write", "open"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1561.001, impact, disk-wipe, container-escape]

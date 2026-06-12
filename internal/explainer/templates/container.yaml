@@ -39,6 +39,10 @@ templates:
       technique_id: "T1611"
       technique: "Escape to Host"
       url: "https://attack.mitre.org/techniques/T1611/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) inside container {{.Pod}} tried to use the 'mount' system call — a common container escape technique."
+      why_it_matters: "Mount operations inside containers can give an attacker access to the host machine's filesystem. This is one of the most serious container security violations. An attacker could modify system files, install backdoors, or take control of the entire host."
+      what_to_do: "1. Stop and isolate pod {{.Pod}} immediately.\n2. Check if the container has unnecessary privileged capabilities (CAP_SYS_ADMIN).\n3. Run containers with read-only root filesystem (readOnlyRootFilesystem: true).\n4. Audit the host machine for unauthorized changes."
 
   - id: container_nsenter_escape
     name: "Container Escape via nsenter"
@@ -76,6 +80,10 @@ templates:
       technique_id: "T1611"
       technique: "Escape to Host"
       url: "https://attack.mitre.org/techniques/T1611/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) in pod {{.Pod}} used nsenter — a tool that can break out of container isolation."
+      why_it_matters: "nsenter lets a process escape its container and access the host system directly. An attacker with this access can see all other containers, modify host files, and take complete control of the machine."
+      what_to_do: "1. Immediately isolate the pod and investigate.\n2. Review why the container has access to nsenter (check securityContext and seccomp profiles).\n3. Apply a strict seccomp profile that blocks nsenter.\n4. Check other containers on the same host for similar compromise."
 
   - id: container_sysrq_trigger
     name: "Write to sysrq-trigger"
@@ -112,6 +120,10 @@ templates:
       technique_id: "T1529"
       technique: "System Shutdown/Reboot"
       url: "https://attack.mitre.org/techniques/T1529/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) wrote to /proc/sysrq-trigger — a kernel interface that should never be accessible from inside a container."
+      why_it_matters: "Access to sysrq-trigger means the container's isolation has completely failed. An attacker can shut down your machine, trigger kernel crashes, or dump system memory. This indicates a severe security breach."
+      what_to_do: "1. Emergency: check host integrity and isolate the affected node.\n2. Audit your container runtime configuration — this path should always be blocked.\n3. Check for signs of host-level compromise.\n4. Consider rebuilding the host if compromise is confirmed."
 
   - id: container_dev_mem_access
     name: "Access to /dev/mem or /dev/kmem"
@@ -147,3 +159,7 @@ templates:
       technique_id: "T1068"
       technique: "Exploitation for Privilege Escalation"
       url: "https://attack.mitre.org/techniques/T1068/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) tried to access /dev/mem or /dev/kmem — direct physical memory access from inside a container."
+      why_it_matters: "Direct memory access lets an attacker read and modify anything in RAM — passwords, encryption keys, kernel code. This bypasses ALL security controls and means the container has kernel-level access."
+      what_to_do: "1. Isolate the pod immediately and investigate for rootkits.\n2. Check your container runtime security configuration.\n3. Audit all containers on the affected host.\n4. Consider rebuilding the host if any evidence of tampering is found."

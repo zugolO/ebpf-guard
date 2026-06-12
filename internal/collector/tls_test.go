@@ -348,7 +348,11 @@ func TestTLSCollectorScanInterval(t *testing.T) {
 // TestTLSCollectorCleanupDeadPIDs verifies that dead PIDs are removed from libsslPaths.
 // It pre-populates the map with a mix of living and non-existent PIDs, then runs
 // cleanupDeadPIDs and confirms only live PIDs remain.
+// Requires Linux because it checks /proc/<pid> for liveness.
 func TestTLSCollectorCleanupDeadPIDs(t *testing.T) {
+	if _, err := os.Stat("/proc/1"); os.IsNotExist(err) {
+		t.Skip("skipping: /proc not available (non-Linux)")
+	}
 	col, err := NewTLSCollector(slog.Default(), false)
 	require.NoError(t, err)
 

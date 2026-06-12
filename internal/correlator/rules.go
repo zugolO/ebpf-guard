@@ -251,7 +251,7 @@ func init() {
 	}
 }
 
-// byTypeSize is the fixed size of the byType array. EventType values are 1–13;
+// byTypeSize is the fixed size of the byType array. EventType values are 1–14;
 // 24 leaves headroom for future event types without resizing.
 const byTypeSize = 24
 
@@ -274,6 +274,17 @@ type RuleEngine struct {
 	sampler *RuleSampler
 	// mu protects the rules slice
 	mu sync.RWMutex
+	// compilePatternsError records any error encountered during compilePatterns.
+	// Rules are validated before reaching NewRuleEngineWithCache, so this should
+	// be nil in production; it is a defence-in-depth check so compile failures
+	// cannot silently drop patterns from the cache.
+	compilePatternsError error
+}
+
+// CompileErrors returns any pattern compilation error from the last compilePatterns call.
+// Returns nil when all patterns compiled successfully.
+func (re *RuleEngine) CompileErrors() error {
+	return re.compilePatternsError
 }
 
 // NewRuleEngine creates a new rule engine with the given rules.
@@ -283,8 +294,12 @@ func NewRuleEngine(rules []Rule) *RuleEngine {
 
 // NewRuleEngineWithCache creates a RuleEngine and inherits compiled patterns from a
 // prior engine so that unchanged regex/CIDR/set entries are not recompiled on hot-reload.
-// Pass nil prior for the initial load. Stale entries (patterns no longer referenced by
-// any rule) are harmless — they remain in the cache but are never evaluated.
+// Pass nil prior for the initial load.
+//
+// Unlike the old behaviour (which blindly copied ALL entries from the prior cache),
+// this method first scans the new rules to collect which patterns are actually
+// referenced, then selectively copies only those entries. This prevents stale
+// entries from removed rules from accumulating indefinitely across repeated reloads.
 func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 	re := &RuleEngine{
 		rules:         rules,
@@ -294,21 +309,89 @@ func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 		sampler:       NewRuleSampler(rules),
 	}
 	if prior != nil {
-		prior.mu.RLock()
-		for k, v := range prior.regexCache {
-			re.regexCache[k] = v
-		}
-		for k, v := range prior.cidrCache {
-			re.cidrCache[k] = v
-		}
-		for k, v := range prior.valueSetCache {
-			re.valueSetCache[k] = v
-		}
-		prior.mu.RUnlock()
+		re.inheritCache(prior, rules)
 	}
-	re.compilePatterns()
+	if err := re.compilePatterns(); err != nil {
+		re.compilePatternsError = err
+	}
 	re.buildTypeIndex()
 	return re
+}
+
+// inheritCache selectively copies compiled entries from the prior engine that are
+// still referenced by the new rule set. Stale entries (patterns from removed rules)
+// are left behind in the prior engine to be garbage-collected.
+func (re *RuleEngine) inheritCache(prior *RuleEngine, rules []Rule) {
+	neededRe, neededCIDR, neededSets := collectRequiredPatterns(rules)
+
+	prior.mu.RLock()
+	defer prior.mu.RUnlock()
+
+	for k := range neededRe {
+		if v, ok := prior.regexCache[k]; ok {
+			re.regexCache[k] = v
+		}
+	}
+	for k := range neededCIDR {
+		if v, ok := prior.cidrCache[k]; ok {
+			re.cidrCache[k] = v
+		}
+	}
+	for k := range neededSets {
+		if v, ok := prior.valueSetCache[k]; ok {
+			re.valueSetCache[k] = v
+		}
+	}
+}
+
+// collectRequiredPatterns walks all rules and returns the set of regex patterns,
+// CIDR strings, and value-set keys that are referenced by any condition. These
+// are the only entries that should be inherited from a prior engine's cache.
+func collectRequiredPatterns(rules []Rule) (regexPats, cidrPats, setKeys map[string]struct{}) {
+	regexPats = make(map[string]struct{})
+	cidrPats = make(map[string]struct{})
+	setKeys = make(map[string]struct{})
+
+	for i := range rules {
+		conds := extractAllRuleConditions(&rules[i])
+		for _, cond := range conds {
+			switch cond.Op {
+			case OpRegex:
+				for _, p := range cond.Values {
+					regexPats[p] = struct{}{}
+				}
+			case OpInCIDR, OpNotInCIDR:
+				for _, c := range cond.Values {
+					cidrPats[c] = struct{}{}
+				}
+			case OpIn, OpNotIn:
+				setKeys[valueSetKey(cond.Values)] = struct{}{}
+			}
+		}
+	}
+	return
+}
+
+// extractAllRuleConditions returns all RuleCondition entries from a rule,
+// traversing both the top-level Condition and any ConditionGroup/subgroups.
+func extractAllRuleConditions(rule *Rule) []RuleCondition {
+	if rule.ConditionGroup != nil {
+		return extractGroupConditions(rule.ConditionGroup)
+	}
+	return []RuleCondition{rule.Condition}
+}
+
+// extractGroupConditions recursively collects conditions from a group and its subgroups.
+func extractGroupConditions(g *RuleConditionGroup) []RuleCondition {
+	if g == nil {
+		return nil
+	}
+	conds := make([]RuleCondition, 0, len(g.Conditions))
+	conds = append(conds, g.Conditions...)
+	for i := range g.SubGroups {
+		conds = append(conds, extractGroupConditions(&g.SubGroups[i])...)
+	}
+	return conds
 }
 
 // Sampler returns the RuleSampler attached to this engine. The adaptive sampler
@@ -346,34 +429,50 @@ func (re *RuleEngine) GetRules() []Rule {
 // compilePatterns pre-compiles regex, CIDR, and OpIn/OpNotIn value sets for
 // performance. It uses index-based (pointer) access so that setKey is written
 // into the actual RuleCondition structs stored in re.rules, not into copies.
-func (re *RuleEngine) compilePatterns() {
+// Returns an error if any regex or CIDR pattern fails to compile; callers should
+// check CompileErrors() on the returned engine.
+func (re *RuleEngine) compilePatterns() error {
+	var errs []error
 	for i := range re.rules {
-		re.compileCondPtr(&re.rules[i].Condition)
+		if err := re.compileCondPtr(&re.rules[i].Condition); err != nil {
+			errs = append(errs, err)
+		}
 		if re.rules[i].ConditionGroup != nil {
-			re.compileGroupPatterns(re.rules[i].ConditionGroup)
+			if err := re.compileGroupPatterns(re.rules[i].ConditionGroup); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
+	if len(errs) > 0 {
+		return fmt.Errorf("compilePatterns: %d error(s): %v", len(errs), errs)
+	}
+	return nil
 }
 
 // compileCondPtr compiles a single condition and, for OpIn/OpNotIn, writes the
 // pre-computed cache key back into cond.setKey so the evaluation hot path can
 // look up the set without calling the expensive valueSetKey function.
-func (re *RuleEngine) compileCondPtr(cond *RuleCondition) {
+// Returns an error if a regex pattern or CIDR range fails to compile.
+func (re *RuleEngine) compileCondPtr(cond *RuleCondition) error {
 	switch cond.Op {
 	case OpRegex:
 		for _, pattern := range cond.Values {
 			if _, exists := re.regexCache[pattern]; !exists {
-				if compiled, err := regexp.Compile(pattern); err == nil {
-					re.regexCache[pattern] = compiled
+				compiled, err := regexp.Compile(pattern)
+				if err != nil {
+					return fmt.Errorf("rule compile: invalid regex pattern %q: %w", pattern, err)
 				}
+				re.regexCache[pattern] = compiled
 			}
 		}
 	case OpInCIDR, OpNotInCIDR:
 		for _, cidr := range cond.Values {
 			if _, exists := re.cidrCache[cidr]; !exists {
-				if _, ipnet, err := net.ParseCIDR(cidr); err == nil {
-					re.cidrCache[cidr] = ipnet
+				_, ipnet, err := net.ParseCIDR(cidr)
+				if err != nil {
+					return fmt.Errorf("rule compile: invalid CIDR range %q: %w", cidr, err)
 				}
+				re.cidrCache[cidr] = ipnet
 			}
 		}
 	case OpIn, OpNotIn:
@@ -393,19 +492,25 @@ func (re *RuleEngine) compileCondPtr(cond *RuleCondition) {
 	// Precompute the numeric opcode so evaluateCondition uses an integer switch
 	// (jump table, ~2 ns) instead of switching on the Op string (~10 ns).
 	cond.opCode = opCodeOf(cond.Op)
+	return nil
 }
 
 // compileGroupPatterns recurses into a ConditionGroup, compiling each
 // RuleCondition in place (by index, not by range-copy).
 // Also normalizes Operator to lowercase once so the hot path avoids strings.ToLower.
-func (re *RuleEngine) compileGroupPatterns(g *RuleConditionGroup) {
+func (re *RuleEngine) compileGroupPatterns(g *RuleConditionGroup) error {
 	g.Operator = strings.ToLower(g.Operator)
 	for i := range g.Conditions {
-		re.compileCondPtr(&g.Conditions[i])
+		if err := re.compileCondPtr(&g.Conditions[i]); err != nil {
+			return err
+		}
 	}
 	for i := range g.SubGroups {
-		re.compileGroupPatterns(&g.SubGroups[i])
+		if err := re.compileGroupPatterns(&g.SubGroups[i]); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // valueSetKey returns a stable cache key for a values slice.
@@ -805,7 +910,64 @@ func capNameToBit(name string) (uint, bool) {
 // (qname_entropy, qname_dga_score, qname_digit_ratio, qname_subdomain_count,
 // qname_is_dga) all reuse the same DomainAnalysis without recomputing entropy,
 // n-gram scores, and digit ratio for the same QName.
+// normaliseFieldName maps dotted-name aliases used in rule YAML files to their
+// canonical single-word field names expected by getFieldValue.
+// Aliases: file.path→filename, file.op→op, proc.comm→comm, network.dport→dport,
+// syscall.nr→nr, etc.
+func normaliseFieldName(field string) string {
+	switch field {
+	case "file.path":
+		return "filename"
+	case "file.op":
+		return "op"
+	case "file.flags":
+		return "flags"
+	case "file.mode":
+		return "mode"
+	case "file.directory":
+		return "directory"
+	case "file.extension":
+		return "extension"
+	case "proc.comm":
+		return "comm"
+	case "network.dport":
+		return "dport"
+	case "network.sport":
+		return "sport"
+	case "network.daddr":
+		return "daddr"
+	case "network.saddr":
+		return "saddr"
+	case "network.proto":
+		return "proto"
+	case "network.family":
+		return "family"
+	case "syscall.nr":
+		return "nr"
+	case "syscall.ret":
+		return "ret"
+	case "syscall.arg0":
+		return "arg0"
+	case "syscall.arg1":
+		return "arg1"
+	case "syscall.arg2":
+		return "arg2"
+	case "syscall.arg3":
+		return "arg3"
+	case "syscall.arg4":
+		return "arg4"
+	case "syscall.arg5":
+		return "arg5"
+	default:
+		return field
+	}
+}
+
 func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *DomainAnalysis) string {
+	// Normalise dotted-name aliases (file.path → filename, proc.comm → comm, etc.)
+	// to the canonical field names expected by the rest of getFieldValue.
+	field = normaliseFieldName(field)
+
 	switch e.Type {
 	case types.EventTCPConnect:
 		if e.Network == nil {
@@ -834,6 +996,10 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 				return "true"
 			}
 			return "false"
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
 		}
 	case types.EventFileAccess:
 		if e.File == nil {
@@ -859,6 +1025,18 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 				return ops[e.File.Op]
 			}
 			return strconv.FormatUint(uint64(e.File.Op), 10)
+		case "directory":
+			p := util.BytesToString(e.File.Filename[:])
+			if idx := strings.LastIndexByte(p, '/'); idx >= 0 {
+				return p[:idx]
+			}
+			return "/"
+		case "extension":
+			p := util.BytesToString(e.File.Filename[:])
+			if idx := strings.LastIndexByte(p, '.'); idx >= 0 {
+				return p[idx:]
+			}
+			return ""
 		case "proc.args":
 			return e.ProcArgs
 		case "proc.args_truncated":
@@ -866,6 +1044,10 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 				return "true"
 			}
 			return "false"
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {
@@ -977,6 +1159,12 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return strconv.FormatUint(uint64(e.TLS.Direction), 10)
 		case "data_len":
 			return strconv.FormatUint(uint64(e.TLS.DataLen), 10)
+		case "ja3":
+			return e.TLS.JA3
+		case "ja4":
+			return e.TLS.JA4
+		case "ja3s":
+			return e.TLS.JA3S
 		}
 	case types.EventPrivesc:
 		// caps_gained / caps_dropped are handled before getFieldValue.
@@ -1062,6 +1250,47 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return e.CloudAudit.Region
 		case "cloud.event_id":
 			return e.CloudAudit.EventID
+		}
+	case types.EventIOUring:
+		if e.IOUring == nil {
+			return ""
+		}
+		switch field {
+		case "op":
+			if e.IOUring.Op == 0 {
+				return "setup"
+			}
+			return "enter"
+		case "flags":
+			return strconv.FormatUint(uint64(e.IOUring.Flags), 10)
+		case "fd":
+			return strconv.FormatInt(int64(e.IOUring.Fd), 10)
+		case "to_submit":
+			return strconv.FormatUint(uint64(e.IOUring.ToSubmit), 10)
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
+		}
+	case types.EventBPFProgram:
+		if e.BPFProgram == nil {
+			return ""
+		}
+		switch field {
+		case "cmd":
+			return types.BPFCmdName(e.BPFProgram.Cmd)
+		case "cmd_nr":
+			return strconv.FormatUint(uint64(e.BPFProgram.Cmd), 10)
+		case "prog_type":
+			return types.BPFProgTypeName(e.BPFProgram.ProgType)
+		case "prog_type_nr":
+			return strconv.FormatUint(uint64(e.BPFProgram.ProgType), 10)
+		case "ret":
+			return strconv.FormatInt(int64(e.BPFProgram.Ret), 10)
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
+		case "comm":
+			return util.BytesToString(e.Comm[:])
 		}
 	}
 	return fieldNotFound

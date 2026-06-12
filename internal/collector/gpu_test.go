@@ -189,7 +189,11 @@ func TestGPUCollectorGetAttachedPIDs(t *testing.T) {
 }
 
 // TestGPUCollectorCleanupDeadPIDs verifies that stale PID entries are pruned.
+// Requires Linux because it checks /proc/<pid> for liveness.
 func TestGPUCollectorCleanupDeadPIDs(t *testing.T) {
+	if _, err := os.Stat("/proc/1"); os.IsNotExist(err) {
+		t.Skip("skipping: /proc not available (non-Linux)")
+	}
 	col, err := NewGPUCollector(slog.Default(), false)
 	require.NoError(t, err)
 

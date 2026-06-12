@@ -768,3 +768,340 @@ func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
 		},
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 37.0: io_uring Activity Monitoring
+// ---------------------------------------------------------------------------
+
+// IouringObjects contains all eBPF objects for io_uring collection.
+type IouringObjects struct {
+	TraceIOUringSetup *ebpf.Program `ebpf:"trace_io_uring_setup"`
+	TraceIOUringEnter *ebpf.Program `ebpf:"trace_io_uring_enter"`
+	IOUringEvents     *ebpf.Map     `ebpf:"iouring_events"`
+}
+
+// Close closes all eBPF objects.
+func (o *IouringObjects) Close() error {
+	for _, p := range []*ebpf.Program{
+		o.TraceIOUringSetup, o.TraceIOUringEnter,
+	} {
+		if p != nil {
+			p.Close()
+		}
+	}
+	if o.IOUringEvents != nil {
+		o.IOUringEvents.Close()
+	}
+	return nil
+}
+
+// LoadIouringObjects loads io_uring eBPF objects from embedded bytecode.
+func LoadIouringObjects(obj *IouringObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// IOUringRawEvent is the wire-format event for EVENT_TYPE_IO_URING.
+// Wire layout (packed, little-endian):
+//
+//	[0 ] type        uint32   (4)
+//	[4 ] timestamp   uint64   (8)
+//	[12] pid         uint32   (4)
+//	[16] tgid        uint32   (4)
+//	[20] ppid        uint32   (4)
+//	[24] uid         uint32   (4)
+//	[28] comm        [16]byte (16)
+//	[44] parent_comm [16]byte (16)
+//	[60] op          uint8    (1)
+//	[61] flags       uint32   (4)
+//	[65] fd          int32    (4)
+//	[69] to_submit   uint32   (4)
+//
+// Total: 73 bytes
+type IOUringRawEvent struct {
+	Type       uint32
+	Timestamp  uint64
+	PID        uint32
+	TGID       uint32
+	PPID       uint32
+	UID        uint32
+	Comm       [16]byte
+	ParentComm [16]byte
+	Op         uint8
+	Flags      uint32
+	Fd         int32
+	ToSubmit   uint32
+}
+
+// ParseIOUringEvent parses a raw ring-buffer sample for EVENT_TYPE_IO_URING.
+func ParseIOUringEvent(raw []byte) (*IOUringRawEvent, error) {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 1 + 4 + 4 + 4 // 73 bytes
+	if len(raw) < minSize {
+		return nil, fmt.Errorf("iouring raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	e := &IOUringRawEvent{}
+	off := 0
+	e.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	e.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.TGID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(e.Comm[:], raw[off:off+16]); off += 16
+	copy(e.ParentComm[:], raw[off:off+16]); off += 16
+	e.Op = raw[off]; off++
+	e.Flags = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.Fd = int32(binary.LittleEndian.Uint32(raw[off:])); off += 4
+	e.ToSubmit = binary.LittleEndian.Uint32(raw[off:])
+	return e, nil
+}
+
+// ToTypesEvent converts an IOUringRawEvent to types.Event.
+func (e *IOUringRawEvent) ToTypesEvent() types.Event {
+	return types.Event{
+		Type:       types.EventIOUring,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
+		IOUring: &types.IOUringEvent{
+			Op:       e.Op,
+			Flags:    e.Flags,
+			Fd:       e.Fd,
+			ToSubmit: e.ToSubmit,
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 38: bpf() syscall monitoring (BPF_PROG_LOAD / BPF_MAP_CREATE)
+// ---------------------------------------------------------------------------
+
+// BpfMonitorObjects contains all eBPF objects for bpf() syscall monitoring.
+type BpfMonitorObjects struct {
+	TraceBpfEnter     *ebpf.Program `ebpf:"trace_bpf_enter"`
+	TraceBpfExit      *ebpf.Program `ebpf:"trace_bpf_exit"`
+	BpfmonitorEvents  *ebpf.Map     `ebpf:"bpfmonitor_events"`
+	BpfEntryMap       *ebpf.Map     `ebpf:"bpf_entry_map"`
+}
+
+// Close closes all eBPF objects.
+func (o *BpfMonitorObjects) Close() error {
+	for _, p := range []*ebpf.Program{
+		o.TraceBpfEnter, o.TraceBpfExit,
+	} {
+		if p != nil {
+			p.Close()
+		}
+	}
+	if o.BpfmonitorEvents != nil {
+		o.BpfmonitorEvents.Close()
+	}
+	if o.BpfEntryMap != nil {
+		o.BpfEntryMap.Close()
+	}
+	return nil
+}
+
+// LoadBpfMonitorObjects loads bpf monitor eBPF objects from embedded bytecode.
+func LoadBpfMonitorObjects(obj *BpfMonitorObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// BpfMonitorRawEvent is the wire-format event for EVENT_TYPE_BPF_PROGRAM.
+// Wire layout (packed, little-endian):
+//
+//	[0 ] type        uint32   (4)
+//	[4 ] timestamp   uint64   (8)
+//	[12] pid         uint32   (4)
+//	[16] tgid        uint32   (4)
+//	[20] ppid        uint32   (4)
+//	[24] uid         uint32   (4)
+//	[28] comm        [16]byte (16)
+//	[44] parent_comm [16]byte (16)
+//	[60] cmd         uint32   (4)
+//	[64] prog_type   uint32   (4)
+//	[68] ret         int32    (4)
+//
+// Total: 72 bytes
+type BpfMonitorRawEvent struct {
+	Type       uint32
+	Timestamp  uint64
+	PID        uint32
+	TGID       uint32
+	PPID       uint32
+	UID        uint32
+	Comm       [16]byte
+	ParentComm [16]byte
+	Cmd        uint32
+	ProgType   uint32
+	Ret        int32
+}
+
+// ParseBpfMonitorEvent parses a raw ring-buffer sample for EVENT_TYPE_BPF_PROGRAM.
+func ParseBpfMonitorEvent(raw []byte) (*BpfMonitorRawEvent, error) {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 4 + 4 + 4 // 72 bytes
+	if len(raw) < minSize {
+		return nil, fmt.Errorf("bpf_monitor raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	e := &BpfMonitorRawEvent{}
+	off := 0
+	e.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	e.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.TGID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(e.Comm[:], raw[off:off+16]); off += 16
+	copy(e.ParentComm[:], raw[off:off+16]); off += 16
+	e.Cmd = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.ProgType = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.Ret = int32(binary.LittleEndian.Uint32(raw[off:]))
+	return e, nil
+}
+
+// ToTypesEvent converts a BpfMonitorRawEvent to types.Event.
+func (e *BpfMonitorRawEvent) ToTypesEvent() types.Event {
+	return types.Event{
+		Type:       types.EventBPFProgram,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
+		BPFProgram: &types.BPFProgramEvent{
+			Cmd:      e.Cmd,
+			ProgType: e.ProgType,
+			Ret:      e.Ret,
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 37.0: Hidden Process Detection (bpf_iter/task)
+// ---------------------------------------------------------------------------
+
+// HiddenProcessObjects contains the BPF task iterator program.
+type HiddenProcessObjects struct {
+	DumpTask *ebpf.Program `ebpf:"dump_task"`
+}
+
+// Close closes the BPF program.
+func (o *HiddenProcessObjects) Close() error {
+	if o.DumpTask != nil {
+		return o.DumpTask.Close()
+	}
+	return nil
+}
+
+// LoadHiddenProcessObjects loads hidden process BPF objects from embedded bytecode.
+func LoadHiddenProcessObjects(obj *HiddenProcessObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 38: TLS ClientHello capture for JA3/JA4 fingerprinting
+// ---------------------------------------------------------------------------
+
+// TlsClientHelloObjects contains all eBPF objects for TLS ClientHello capture.
+type TlsClientHelloObjects struct {
+	TraceSendto             *ebpf.Program `ebpf:"trace_sendto"`
+	TlsClienthelloEvents    *ebpf.Map     `ebpf:"tls_clienthello_events"`
+}
+
+// Close closes all eBPF objects.
+func (o *TlsClientHelloObjects) Close() error {
+	if o.TraceSendto != nil {
+		o.TraceSendto.Close()
+	}
+	if o.TlsClienthelloEvents != nil {
+		o.TlsClienthelloEvents.Close()
+	}
+	return nil
+}
+
+// LoadTlsClientHelloObjects loads TLS ClientHello eBPF objects from embedded bytecode.
+func LoadTlsClientHelloObjects(obj *TlsClientHelloObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// TlsClientHelloRawEvent is the wire-format event for captured ClientHello data.
+// Wire layout (packed, little-endian):
+//
+//	[0  ] type          uint32    (4)
+//	[4  ] timestamp     uint64    (8)
+//	[12 ] pid           uint32    (4)
+//	[16 ] tgid          uint32    (4)
+//	[20 ] ppid          uint32    (4)
+//	[24 ] uid           uint32    (4)
+//	[28 ] comm          [16]byte  (16)
+//	[44 ] parent_comm   [16]byte  (16)
+//	[60 ] dport         uint16    (2)
+//	[62 ] captured_len  uint16    (2)
+//	[64 ] original_len  uint32    (4)
+//	[68 ] data          [512]byte (512)
+//
+// Total: 580 bytes
+type TlsClientHelloRawEvent struct {
+	Type        uint32
+	Timestamp   uint64
+	PID         uint32
+	TGID        uint32
+	PPID        uint32
+	UID         uint32
+	Comm        [16]byte
+	ParentComm  [16]byte
+	Dport       uint16
+	CapturedLen uint16
+	OriginalLen uint32
+	Data        [512]byte
+}
+
+// ParseTlsClientHelloEvent parses a raw ring-buffer sample for a ClientHello event.
+func ParseTlsClientHelloEvent(raw []byte) (*TlsClientHelloRawEvent, error) {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 2 + 2 + 4 + 1 // 69 bytes min
+	if len(raw) < minSize {
+		return nil, fmt.Errorf("tls_clienthello raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	e := &TlsClientHelloRawEvent{}
+	off := 0
+	e.Type = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.Timestamp = binary.LittleEndian.Uint64(raw[off:]); off += 8
+	e.PID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.TGID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.PPID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	e.UID = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	copy(e.Comm[:], raw[off:off+16]); off += 16
+	copy(e.ParentComm[:], raw[off:off+16]); off += 16
+	e.Dport = binary.BigEndian.Uint16(raw[off:]); off += 2 // network byte order
+	e.CapturedLen = binary.LittleEndian.Uint16(raw[off:]); off += 2
+	e.OriginalLen = binary.LittleEndian.Uint32(raw[off:]); off += 4
+	if e.CapturedLen > 512 {
+		e.CapturedLen = 512
+	}
+	copy(e.Data[:], raw[off:off+int(e.CapturedLen)])
+	return e, nil
+}
+
+// ToTypesEvent converts a TlsClientHelloRawEvent to types.Event.
+// The JA3/JA4/JA3S fields are left empty here; they are computed by the
+// collector after parsing to avoid circular imports from the ja3 package.
+func (e *TlsClientHelloRawEvent) ToTypesEvent() types.Event {
+	return types.Event{
+		Type:       types.EventTLS,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
+		TLS: &types.TLSEvent{
+			DataLen: e.OriginalLen,
+		},
+	}
+}

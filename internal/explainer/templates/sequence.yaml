@@ -35,3 +35,7 @@ templates:
       technique_id: "T1059"
       technique: "Command and Scripting Interpreter"
       url: "https://attack.mitre.org/techniques/T1059/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) started behaving unusually — the pattern of system calls it makes changed significantly from its normal baseline."
+      why_it_matters: "When a process suddenly starts doing things it never did before (new types of system calls), it can mean the process was compromised. Attackers often inject code into legitimate processes to hide their activity."
+      what_to_do: "1. Check if you recently updated or deployed a new version of {{.Comm}} (legitimate changes can trigger this).\n2. Look for signs of compromise: unusual network connections, new child processes.\n3. If behavior is expected after a deploy, the system will re-learn the new baseline.\n4. Enable seccomp filtering to restrict which system calls this process can make."

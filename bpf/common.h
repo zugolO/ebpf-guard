@@ -20,6 +20,8 @@
 #define EVENT_TYPE_CGROUP_ESC  9  /* Process migrated to different cgroup namespace */
 #define EVENT_TYPE_GPU        10  /* CUDA/GPU memory operation (DtoH/HtoD/alloc/free) */
 #define EVENT_TYPE_LSM_AUDIT  11  /* LSM hook audit record (deny or audit-only action) */
+#define EVENT_TYPE_IO_URING   14  /* io_uring activity (setup/enter) */
+#define EVENT_TYPE_BPF_PROGRAM 15 /* bpf() syscall: BPF_PROG_LOAD / BPF_MAP_CREATE */
 
 /* LSM hook identifiers — match struct lsm_audit_event.hook */
 #define LSM_HOOK_FILE_OPEN       0

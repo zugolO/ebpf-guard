@@ -42,6 +42,10 @@ templates:
       technique_id: "T1548"
       technique: "Abuse Elevation Control Mechanism"
       url: "https://attack.mitre.org/techniques/T1548/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) gained elevated Linux capabilities beyond its normal permissions — a privilege escalation attempt."
+      why_it_matters: "Linux capabilities control what a process can do at the kernel level. Gaining extra capabilities (especially CAP_SYS_ADMIN) lets an attacker break out of containers, load rootkits, or take full control of the system."
+      what_to_do: "1. Check which capability was gained (look at the alert details).\n2. Verify the process lineage — was it started by a legitimate parent?\n3. Drop ALL capabilities from your container config and add back only what's needed.\n4. Run containers as non-root (runAsNonRoot: true).\n5. Apply AppArmor or SELinux profiles."
 
   - id: privesc_cap_sys_admin
     name: "CAP_SYS_ADMIN Capability Acquired"
@@ -80,3 +84,7 @@ templates:
       technique_id: "T1611"
       technique: "Escape to Host"
       url: "https://attack.mitre.org/techniques/T1611/"
+    plain:
+      what_happened: "CRITICAL: Process {{.Comm}} (PID {{.PID}}) acquired CAP_SYS_ADMIN — effectively root-level kernel access."
+      why_it_matters: "CAP_SYS_ADMIN is the most powerful Linux capability. It allows mounting filesystems, accessing kernel memory, and breaking out of containers. No legitimate container workload should ever need this capability. This is the equivalent of giving an attacker the keys to your entire machine."
+      what_to_do: "1. Isolate pod {{.Pod}} immediately — treat the node as compromised.\n2. Remove CAP_SYS_ADMIN from ALL container specs (it should NEVER be there).\n3. Enable PodSecurityStandard 'restricted' to block privileged containers.\n4. Run containers as non-root.\n5. Check if there's a known CVE matching your kernel version."

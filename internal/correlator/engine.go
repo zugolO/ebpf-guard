@@ -97,8 +97,9 @@ type CorrelationEngine struct {
 	// Rego policy engine (post-YAML filter, Sprint 23.0)
 	regoEngine      *policy.RegoEngine
 	enableRegoEval  bool
-	regoQueue       chan regoTask
-	regoQueueDropped prometheus.Counter
+	regoQueue         chan regoTask
+	regoQueueDropped  prometheus.Counter
+	regoQueueGauge    prometheus.Gauge // ebpf_guard_rego_queue_occupancy
 	// regoWg tracks in-flight rego evaluation tasks for clean Drain.
 	regoWg sync.WaitGroup
 
@@ -176,6 +177,7 @@ type CorrelationEngine struct {
 	enforcedCounter prometheus.Counter
 	enforceQueue        chan enforceTask
 	enforceQueueDropped prometheus.Counter
+	enforceQueueGauge   prometheus.Gauge // ebpf_guard_enforcement_queue_occupancy
 	// enforceWg tracks in-flight enforcement tasks for clean DrainEnforceQueue.
 	enforceWg sync.WaitGroup
 
@@ -347,6 +349,11 @@ type CorrelationEngineConfig struct {
 	// enforcement queue. Zero → max(2, runtime.NumCPU()).
 	EnforceWorkerCount int
 
+	// EnforceQueueSize is the capacity of the async enforcement action channel.
+	// When the queue is full enforcement actions are dropped.
+	// Zero → 4096.
+	EnforceQueueSize int
+
 	// WasmEngine evaluates custom WASM detection plugins on every event.
 	// When nil, WASM plugin evaluation is skipped.
 	WasmEngine WasmEvaluator
@@ -402,6 +409,7 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		DedupWindow:        5 * time.Second,
 		IncidentWindow:     60 * time.Second,
 		RegoQueueSize:      4096,
+		EnforceQueueSize:   4096,
 	}
 }
 
@@ -495,6 +503,10 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		Name: "ebpf_guard_enforcement_queue_dropped_total",
 		Help: "Enforcement actions dropped because the enforcement queue was full.",
 	})
+	enforceQueueGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_enforcement_queue_occupancy",
+		Help: "Current number of enforcement tasks waiting in the worker queue.",
+	})
 
 	lt := config.LineageTracker
 	if lt == nil {
@@ -508,9 +520,13 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 			enforceWorkers = 2
 		}
 	}
-	// Queue depth: 1024 gives burst capacity for typical enforcement spikes
-	// without consuming significant memory. Each task is ~200 bytes.
-	enforceQueue := make(chan enforceTask, 1024)
+	// Queue depth: default 4096 gives ~400ms burst capacity for enforcement spikes.
+	// Each task is ~200 bytes.
+	enforceQueueSize := config.EnforceQueueSize
+	if enforceQueueSize <= 0 {
+		enforceQueueSize = 4096
+	}
+	enforceQueue := make(chan enforceTask, enforceQueueSize)
 
 	dedupWindow := config.DedupWindow
 	if dedupWindow <= 0 {
@@ -524,11 +540,16 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 
 	var regoQueue chan regoTask
 	var regoQueueDropped prometheus.Counter
+	var regoQueueGauge prometheus.Gauge
 	var regoEvalErrors prometheus.Counter
 	if config.EnableRegoEval && config.RegoEngine != nil {
 		regoQueueDropped = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ebpf_guard_rego_queue_dropped_total",
 			Help: "Rego evaluation tasks dropped because the async worker queue was full.",
+		})
+		regoQueueGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_rego_queue_occupancy",
+			Help: "Current number of Rego evaluation tasks waiting in the async worker queue.",
 		})
 		regoEvalErrors = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ebpf_guard_rego_eval_errors_total",
@@ -553,6 +574,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		dnsPrefilter:         DefaultDNSPrefilter(),
 		regoQueue:            regoQueue,
 		regoQueueDropped:     regoQueueDropped,
+		regoQueueGauge:       regoQueueGauge,
 		onCorrelate:          config.OnCorrelate,
 		lineageTracker:       lt,
 		feedbackManager:      config.FeedbackManager,
@@ -570,6 +592,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		enforcedCounter:      enforcedCounter,
 		enforceQueue:         enforceQueue,
 		enforceQueueDropped:  enforceQueueDropped,
+		enforceQueueGauge:    enforceQueueGauge,
 		globalLimiter:        globalLimiter,
 		globalLimiterEnabled: globalLimiterEnabled,
 		alertsDroppedGlobal:  alertsDroppedGlobal,
@@ -735,7 +758,10 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	return ce
 }
 
-// updateRLGaugeLoop refreshes the ratelimiter states gauge and queue depth gauge every 30 seconds.
+// updateRLGaugeLoop refreshes the ratelimiter states gauge, queue depth gauge,
+// rego/enforce queue occupancy gauges, and cooldown/dedup entry gauges every
+// 30 seconds. Triggers early eviction of expired cooldown and dedup entries at
+// 80% capacity to prevent the maps from growing to the hard cap between ticks.
 func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -749,6 +775,12 @@ func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
 
 			cooldownSize := ce.cooldowns.Size()
 			ce.cooldownEntriesGauge.Set(float64(cooldownSize))
+			// High-water-mark early eviction at 80%: trigger cleanup immediately
+			// instead of waiting for the next tick. Prevents the map from growing
+			// to the hard cap between interval-based cleanup cycles.
+			if cooldownSize >= int64(MaxCooldownEntries*4/5) {
+				go ce.cooldowns.cleanup(time.Now().Add(-ce.enforceCooldown))
+			}
 			if cooldownSize >= int64(MaxCooldownEntries*9/10) {
 				slog.Warn("correlator: cooldown map near capacity",
 					"entries", cooldownSize, "limit", MaxCooldownEntries)
@@ -756,9 +788,28 @@ func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
 
 			dedupSize := ce.dedup.Size()
 			ce.dedupEntriesGauge.Set(float64(dedupSize))
+			if dedupSize >= int64(MaxDedupEntries*4/5) {
+				go ce.dedup.cleanup(time.Now().Add(-ce.dedupWindow))
+			}
 			if dedupSize >= int64(MaxDedupEntries*9/10) {
 				slog.Warn("correlator: dedup map near capacity",
 					"entries", dedupSize, "limit", MaxDedupEntries)
+			}
+
+			if ce.regoQueue != nil && ce.regoQueueGauge != nil {
+				qLen := len(ce.regoQueue)
+				qCap := cap(ce.regoQueue)
+				ce.regoQueueGauge.Set(float64(qLen))
+				if qCap > 0 && qLen >= qCap*9/10 {
+					slog.Warn("correlator: rego queue near capacity",
+						"occupancy", qLen, "capacity", qCap,
+					)
+				}
+			}
+
+			if ce.enforceQueue != nil && ce.enforceQueueGauge != nil {
+				eLen := len(ce.enforceQueue)
+				ce.enforceQueueGauge.Set(float64(eLen))
 			}
 		}
 	}
@@ -937,8 +988,10 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.cooldownEntriesGauge,
 		ce.dedupEntriesGauge,
 		ce.enforceQueueDropped,
+		ce.enforceQueueGauge,
 		ce.enforcedCounter,
 		ce.regoQueueDropped,
+		ce.regoQueueGauge,
 		ce.alertsDedupDropped,
 		ce.regoEvalErrors,
 		ce.reloadTotal,

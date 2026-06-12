@@ -83,6 +83,8 @@ type Config struct {
 
 	// Canary configuration — honeypot file detection (feature D).
 	Canary CanaryConfig `mapstructure:"canary"`
+	// HiddenProcess configures hidden process detection via BPF task iterator.
+	HiddenProcess HiddenProcessConfig `mapstructure:"hidden_process"`
 
 	// Audit configuration — append-only JSONL audit log for rule and config changes.
 	Audit AuditConfig `mapstructure:"audit"`
@@ -92,6 +94,12 @@ type Config struct {
 
 	// Runtime configures container runtime enrichment (CRI/Docker) for non-Kubernetes hosts.
 	Runtime RuntimeConfig `mapstructure:"runtime"`
+
+	// Drift configures container drift detection against image manifest baselines.
+	Drift DriftConfig `mapstructure:"drift"`
+
+	// SimpleMode configures simple-mode auto-enforcement for indie developers.
+	SimpleMode SimpleModeConfig `mapstructure:"simple_mode"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -156,6 +164,10 @@ type NotificationsConfig struct {
 	Kafka KafkaNotificationConfig `mapstructure:"kafka"`
 	// Syslog/CEF configuration
 	SyslogCEF SyslogCEFNotificationConfig `mapstructure:"syslog_cef"`
+	// Discord webhook configuration
+	Discord DiscordNotificationConfig `mapstructure:"discord"`
+	// Telegram Bot API configuration
+	Telegram TelegramNotificationConfig `mapstructure:"telegram"`
 }
 
 // OTLPNotificationConfig holds OTLP log exporter settings.
@@ -258,6 +270,28 @@ type WebhookNotificationConfig struct {
 	MinSeverity string `mapstructure:"min_severity"`
 }
 
+// DiscordNotificationConfig holds Discord webhook notification settings.
+type DiscordNotificationConfig struct {
+	// Enabled enables Discord notifications
+	Enabled bool `mapstructure:"enabled"`
+	// WebhookURL is the Discord webhook URL
+	WebhookURL string `mapstructure:"webhook_url"`
+	// MinSeverity filters alerts by severity ("warning" or "critical")
+	MinSeverity string `mapstructure:"min_severity"`
+}
+
+// TelegramNotificationConfig holds Telegram Bot API notification settings.
+type TelegramNotificationConfig struct {
+	// Enabled enables Telegram notifications
+	Enabled bool `mapstructure:"enabled"`
+	// BotToken is the Telegram Bot API token (from @BotFather)
+	BotToken string `mapstructure:"bot_token"`
+	// ChatID is the target chat ID (user, group, or channel)
+	ChatID string `mapstructure:"chat_id"`
+	// MinSeverity filters alerts by severity ("warning" or "critical")
+	MinSeverity string `mapstructure:"min_severity"`
+}
+
 // StoreConfig holds storage backend configuration.
 type StoreConfig struct {
 	// Backend specifies the storage backend: "memory", "sqlite", "opensearch"
@@ -287,6 +321,12 @@ type CollectorsConfig struct {
 	CloudTrail CloudTrailCollectorConfig `mapstructure:"cloudtrail"`
 	// GCPAudit configures the GCP Audit Logs collector.
 	GCPAudit GCPAuditCollectorConfig `mapstructure:"gcp_audit"`
+	// IOUring configures the io_uring activity monitoring collector.
+	IOUring IOUringCollectorConfig `mapstructure:"iouring"`
+	// BPFMonitor configures the bpf() syscall monitoring collector.
+	BPFMonitor BPFMonitorCollectorConfig `mapstructure:"bpf_monitor"`
+	// TLSFingerprint configures the TLS ClientHello JA3/JA4 fingerprinting collector.
+	TLSFingerprint TLSFingerprintCollectorConfig `mapstructure:"tls_fingerprint"`
 	// StartupPolicy controls agent behaviour when a collector fails to start.
 	// "fail-open"  (default) — log the error and continue with reduced coverage.
 	// "fail-closed"          — exit with a non-zero code if any Required collector fails.
@@ -412,6 +452,42 @@ type DNSCollectorConfig struct {
 	// Use to suppress false positives on CDN or internal naming patterns.
 	// Example: ["clarity", "akamaiedge", "r2", "azureedge", "trafficmanager"]
 	DGAWhitelist []string `mapstructure:"dga_whitelist"`
+}
+
+// IOUringCollectorConfig holds io_uring monitoring settings.
+type IOUringCollectorConfig struct {
+	// Enabled enables io_uring activity monitoring via kprobes.
+	// When enabled, kprobes are attached to io_uring_setup and io_uring_enter
+	// to detect processes using the io_uring interface. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+}
+
+// BPFMonitorCollectorConfig holds bpf() syscall monitoring settings.
+type BPFMonitorCollectorConfig struct {
+	// Enabled enables bpf() syscall monitoring via kprobe/kretprobe on
+	// __x64_sys_bpf. Captures BPF_PROG_LOAD and BPF_MAP_CREATE calls to
+	// detect malicious eBPF program loading by rootkits. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+}
+
+// TLSFingerprintCollectorConfig holds TLS ClientHello fingerprinting settings.
+type TLSFingerprintCollectorConfig struct {
+	// Enabled enables TLS ClientHello capture via kprobe on __x64_sys_sendto.
+	// Computes JA3/JA4 fingerprints for C2 framework detection. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+}
+
+// HiddenProcessConfig holds hidden process detection settings.
+type HiddenProcessConfig struct {
+	// Enabled activates periodic hidden process detection via BPF iter/task
+	// diffed against /proc. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// CheckInterval is the interval between kernel-vs-proc comparisons.
+	// Default: "60s"
+	CheckInterval time.Duration `mapstructure:"check_interval"`
+	// AlertSeverity is the severity applied to hidden process alerts.
+	// Valid: "critical", "warning". Default: "critical".
+	AlertSeverity string `mapstructure:"alert_severity"`
 }
 
 // SQLiteEncryptionConfig holds column-level encryption settings for the SQLite store.
@@ -826,6 +902,51 @@ type RuntimeConfig struct {
 	CacheTTL string `mapstructure:"cache_ttl"`
 }
 
+// DriftConfig holds container drift detection settings.
+type DriftConfig struct {
+	// Enabled enables container drift detection against baselines.
+	// When true, the Detector is created and runs on every event.
+	// Default: false (created but no ImageManifest).
+	Enabled bool `mapstructure:"enabled"`
+	// BaselineWindow is how long to observe a new container before locking
+	// the baseline. Default: "5m".
+	BaselineWindow string `mapstructure:"baseline_window"`
+	// ImageManifest enables pre-seeding the ExecPaths baseline from the
+	// container image layers via overlayfs lowerdir walk. Default: false.
+	ImageManifest bool `mapstructure:"image_manifest"`
+	// EnforceMode sets the enforcement action for drift alerts:
+	//   ""       — alert only (default)
+	//   "kill"   — SIGKILL the offending process
+	//   "block"  — block network access (nftables/iptables/XDP)
+	EnforceMode string `mapstructure:"enforce_mode"`
+	// AllowlistExec is a list of executable paths or directory prefixes that
+	// are exempt from drift detection.
+	AllowlistExec []string `mapstructure:"allowlist_exec"`
+	// PurgeInterval is how often stale baselines are purged. Default: "10m".
+	PurgeInterval string `mapstructure:"purge_interval"`
+	// PurgeTTL is the time after which an unseen baseline is stale. Default: "30m".
+	PurgeTTL string `mapstructure:"purge_ttl"`
+}
+
+// SimpleModeConfig holds simple-mode auto-enforcement settings.
+type SimpleModeConfig struct {
+	// Enabled enables simple mode — auto-enforce kills for high-confidence
+	// cryptominer, webshell, and reverse shell detections.
+	Enabled bool `mapstructure:"enabled"`
+	// DryRun toggles dry-run mode (log but don't kill). Overridden by DryRunDuration.
+	DryRun bool `mapstructure:"dry_run"`
+	// DryRunDuration is the initial dry-run period after startup.
+	// Default: "24h". The first 24 hours after startup, actions are logged but
+	// not executed. Set to "0" to skip the dry-run window.
+	DryRunDuration string `mapstructure:"dry_run_duration"`
+	// MaxKillsPerMinute caps the global kill rate. Default: 1.
+	MaxKillsPerMinute int `mapstructure:"max_kills_per_minute"`
+	// AllowlistPIDs lists PIDs that must never be killed (e.g., [1]).
+	AllowlistPIDs []uint32 `mapstructure:"allowlist_pids"`
+	// AllowlistComms lists process names that must never be killed.
+	AllowlistComms []string `mapstructure:"allowlist_comms"`
+}
+
 // EnforcementConfig holds enforcement settings.
 type EnforcementConfig struct {
 	// Enabled enables enforcement actions
@@ -1196,6 +1317,34 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 	return m, nil
 }
 
+// NewZeroConfigManager creates a Manager with all defaults set and no config
+// file required. Used by `ebpf-guard --zero-config` for one-command deployments
+// where no config file or rules directory exists on disk.
+func NewZeroConfigManager() *Manager {
+	v := viper.New()
+	v.SetConfigType("yaml")
+	setDefaults(v)
+	// Override specific defaults for zero-config mode:
+	// - Server on port 9090 with auth token auto-generated
+	// - Memory store (no disk required)
+	// - All collectors disabled by default (no BPF unless --privileged)
+	// - Kubernetes disabled (no K8s config available)
+	// - Rules loaded from embedded filesystem (handled by main.go)
+
+	var cfg Config
+	_ = v.Unmarshal(&cfg)
+
+	// Force K8s off in zero-config mode — there's no kubeconfig.
+	cfg.Kubernetes.Enabled = false
+	// Enable auth with auto-generated tokens.
+	cfg.Auth.Enabled = true
+
+	return &Manager{
+		viper:  v,
+		config: &cfg,
+	}
+}
+
 // setDefaults sets default configuration values.
 func setDefaults(v *viper.Viper) {
 	// Schema version
@@ -1223,7 +1372,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.fallback_reduced_features", false)
 
 	// Rules defaults
-	v.SetDefault("rules.path", "/etc/ebpf-guard/rules.yaml")
+	v.SetDefault("rules.path", "rules/")
 	v.SetDefault("rules.hot_reload", true)
 	v.SetDefault("rules.rate_limit_alerts", true)
 	v.SetDefault("rules.rate_limit_window", 60)
@@ -1292,6 +1441,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("notifications.webhook.template", "")
 	v.SetDefault("notifications.webhook.min_severity", "warning")
 
+	v.SetDefault("notifications.discord.enabled", false)
+	v.SetDefault("notifications.discord.webhook_url", "")
+	v.SetDefault("notifications.discord.min_severity", "warning")
+
+	v.SetDefault("notifications.telegram.enabled", false)
+	v.SetDefault("notifications.telegram.bot_token", "")
+	v.SetDefault("notifications.telegram.chat_id", "")
+	v.SetDefault("notifications.telegram.min_severity", "warning")
+
 	// Store defaults
 	v.SetDefault("store.backend", "memory")
 	v.SetDefault("store.sqlite.path", "/var/lib/ebpf-guard/events.db")
@@ -1314,6 +1472,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.dns.tunneling_min_length", 50)
 	v.SetDefault("collectors.dns.high_frequency_threshold", 100)
 	v.SetDefault("collectors.dns.dga_whitelist", []string{})
+	v.SetDefault("collectors.iouring.enabled", false)
+	v.SetDefault("collectors.bpf_monitor.enabled", false)
+	v.SetDefault("collectors.tls_fingerprint.enabled", false)
 	v.SetDefault("collectors.startup_policy", "fail-open")
 	v.SetDefault("collectors.required", []string{})
 	v.SetDefault("collectors.optional", []string{})
@@ -1407,6 +1568,28 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("canary.alert_severity", "critical")
 	v.SetDefault("canary.verify_interval", 60*time.Second)
 	v.SetDefault("canary.alert_on_tamper", true)
+
+	// Hidden process detection defaults — disabled by default; operators opt in.
+	v.SetDefault("hidden_process.enabled", false)
+	v.SetDefault("hidden_process.check_interval", 60*time.Second)
+	v.SetDefault("hidden_process.alert_severity", "critical")
+
+	// Drift detection defaults — disabled by default; enabled for image-manifest mode.
+	v.SetDefault("drift.enabled", false)
+	v.SetDefault("drift.baseline_window", "5m")
+	v.SetDefault("drift.image_manifest", false)
+	v.SetDefault("drift.enforce_mode", "")
+	v.SetDefault("drift.allowlist_exec", []string{"/usr/lib/jvm/", "/usr/lib/jvm/", "/usr/lib/gcc/", "/usr/lib/llvm-", "/tmp/", "/var/cache/", "/var/tmp/"})
+	v.SetDefault("drift.purge_interval", "10m")
+	v.SetDefault("drift.purge_ttl", "30m")
+
+	// Simple mode defaults — disabled by default; enabled via --simple flag.
+	v.SetDefault("simple_mode.enabled", false)
+	v.SetDefault("simple_mode.dry_run", false)
+	v.SetDefault("simple_mode.dry_run_duration", "24h")
+	v.SetDefault("simple_mode.max_kills_per_minute", 1)
+	v.SetDefault("simple_mode.allowlist_pids", []uint32{1})
+	v.SetDefault("simple_mode.allowlist_comms", []string{"systemd", "init", "kubelet", "containerd"})
 
 	// Audit log defaults — disabled by default; operators opt in.
 	v.SetDefault("audit.enabled", false)

@@ -13,7 +13,7 @@ bpf:
     connections: 32768
 
 rules:
-  path: "/etc/ebpf-guard/rules.yaml"
+  path: "rules/"               # Directory of rule files (all .yaml loaded automatically)
   hot_reload: true
   rate_limit_alerts: true
   rate_limit_window: 60
@@ -77,6 +77,15 @@ notifications:
       Authorization: ""
     template: ""              # Go template for request body (empty = default JSON)
     min_severity: warning     # warning | critical
+  discord:
+    enabled: false
+    webhook_url: ""           # Discord webhook URL
+    min_severity: warning     # warning | critical
+  telegram:
+    enabled: false
+    bot_token: ""             # Telegram Bot API token (from @BotFather)
+    chat_id: ""               # Target chat ID (user, group, or channel)
+    min_severity: critical    # warning | critical — recommend critical-only for Telegram
 
 # Enforcement configuration
 # Controls active response actions: kill, block, throttle.
@@ -123,6 +132,12 @@ collectors:
     tunneling_min_length: 50    # Domain length above this → tunneling suspicion
     high_frequency_threshold: 100  # DNS queries/min above this → alert
   backpressure_strategy: drop   # drop | block | sample
+  iouring:
+    enabled: false               # Monitor io_uring activity (setup/enter) via kprobes
+  bpf_monitor:
+    enabled: false               # Monitor bpf() syscall (BPF_PROG_LOAD/BPF_MAP_CREATE) via kprobes
+  tls_fingerprint:
+    enabled: false               # Capture TLS ClientHello for JA3/JA4 C2 detection via kprobes
   otel_tracing:
     # When enabled, ebpf-guard scans TLS plaintext headers for the W3C "traceparent"
     # header and propagates the extracted trace_id/span_id to security alerts.
@@ -213,3 +228,39 @@ osint:
     enabled: false
     api_key: ""                   # VirusTotal API key
     enterprise_feeds: false       # Requires VirusTotal Intelligence subscription
+
+# Container drift detection — compare runtime behaviour against image manifest baselines.
+# When image_manifest is enabled, ebpf-guard walks the container's overlayfs lowerdir
+# at startup to build a set of all executable files present in the image. Any binary
+# executed later that was NOT in the image triggers a critical drift alert.
+drift:
+  enabled: false                    # Enable drift detection
+  baseline_window: 5m               # Learning window before baseline locks
+  image_manifest: false             # Pre-seed ExecPaths from image layers via overlayfs walk
+  enforce_mode: ""                  # "" = alert only; "kill" = SIGKILL; "block" = network drop
+  allowlist_exec:                   # Executable paths exempt from drift detection
+    - "/usr/lib/jvm/"               # Java JIT
+    - "/usr/lib/gcc/"               # GCC intermediate binaries
+    - "/usr/lib/llvm-"              # LLVM/clang compiled artifacts
+    - "/tmp/"                       # Temporary build artifacts
+    - "/var/cache/"                 # Package manager caches
+    - "/var/tmp/"                   # System temp directory
+  purge_interval: 10m               # How often to purge stale baselines
+  purge_ttl: 30m                    # Unseen baseline TTL
+
+# Simple mode — auto-enforcement for indie developers.
+# Enabled via --simple flag or by setting simple_mode.enabled: true.
+# Kills cryptominer, webshell, and reverse shell processes automatically
+# with multiple safety rails. First 24 hours are dry-run by default.
+simple_mode:
+  enabled: false                     # Enable simple mode auto-enforcement
+  dry_run: false                     # Dry-run only (log without killing)
+  dry_run_duration: "24h"            # Initial dry-run window after startup
+  max_kills_per_minute: 1            # Global kill rate cap
+  allowlist_pids:                    # Never kill these PIDs
+    - 1                              # init/systemd
+  allowlist_comms:                   # Never kill these process names
+    - systemd
+    - init
+    - kubelet
+    - containerd

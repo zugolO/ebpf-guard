@@ -250,6 +250,20 @@ helm install ebpf-guard deploy/helm/ebpf-guard \
   -f deploy/helm/ebpf-guard/values-secure.yaml
 ```
 
+### Which deployment guide do I need?
+
+| I want to... | Use this guide |
+|---|---|
+| Protect a single VPS (Hetzner, DigitalOcean, OVH, Linode) | [VPS guide](docs/platforms/vps.md) — 5 min, systemd install |
+| Protect all containers on Coolify / CapRover / Dokploy | [PaaS guide](docs/platforms/coolify-caprover.md) — 10 min, runs alongside your PaaS |
+| Run experimental sidecar on Fly.io | [Shared platform guide](docs/platforms/paas-limitations.md) — Firecracker VM notes |
+| Understand limitations on Railway / Render / Heroku | [Shared platform guide](docs/platforms/paas-limitations.md) — what works, what doesn't |
+| Deploy to Kubernetes (GKE, EKS, AKS) | Helm section above + [deployment docs](docs/deployment.md) |
+| Try before installing (20-second test drive with synthetic events) | `docker run --rm -it ghcr.io/zugolo/ebpf-guard --dry-run` covers key attacks in one chunk |
+| Install with one command (curl \| sh) | `curl -fsSL https://get.ebpf-guard.io \| sh` — auto-detects arch/kernel, installs systemd, starts monitoring |
+
+
+
 ---
 
 ## Configuration

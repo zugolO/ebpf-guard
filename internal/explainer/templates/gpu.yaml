@@ -41,6 +41,10 @@ templates:
       technique_id: "T1005"
       technique: "Data from Local System"
       url: "https://attack.mitre.org/techniques/T1005/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) copied a large block of data from GPU memory to the host — possible theft of trained AI model weights or sensitive inference data."
+      why_it_matters: "GPU memory holds your trained machine learning models, which can be worth millions. A large GPU-to-host copy can extract complete model weights in a single operation. In multi-tenant GPU environments, one tenant can steal another's proprietary model."
+      what_to_do: "1. Capture a memory dump of PID {{.PID}} before it exits.\n2. Identify which GPU context the process is using (nvidia-smi pmon).\n3. Enable GPU MIG (Multi-Instance GPU) isolation between workloads.\n4. Deploy NVIDIA DCGM policies to restrict cross-process GPU memory access.\n5. Rotate model weights and encryption keys if exfiltration is confirmed."
 
   - id: gpu_large_alloc
     name: "Anomalous GPU Memory Allocation"
@@ -73,3 +77,7 @@ templates:
       technique_id: "T1496"
       technique: "Resource Hijacking"
       url: "https://attack.mitre.org/techniques/T1496/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) allocated an unusually large amount of GPU memory."
+      why_it_matters: "While large GPU allocations are normal during model loading, unexpected allocations can be preparation for exfiltration (staging a buffer for data theft) or GPU-accelerated cryptomining."
+      what_to_do: "1. Check current GPU memory usage: nvidia-smi.\n2. Verify the process is within its expected resource limits.\n3. Correlate with other GPU alerts (especially DtoH copies or network activity).\n4. Set GPU memory limits per container via the NVIDIA device plugin."

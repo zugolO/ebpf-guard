@@ -37,6 +37,10 @@ templates:
       technique_id: "T1568"
       technique: "Dynamic Resolution"
       url: "https://attack.mitre.org/techniques/T1568/002/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) queried a randomly-generated domain name — a technique called DGA (Domain Generation Algorithm) used by malware."
+      why_it_matters: "Malware uses DGA to generate thousands of random domain names to find its command server. This makes it nearly impossible to block with static blacklists. If you see DGA domains, there's likely malware actively running on your system."
+      what_to_do: "1. Isolate pod {{.Pod}} and investigate process {{.PID}} for malware.\n2. Check DNS query logs for other random-looking domains.\n3. Use a DNS security service that detects DGA patterns.\n4. Look for other signs of malware infection on the system."
 
   - id: dns_tunneling
     name: "DNS Tunneling Detected"
@@ -74,6 +78,10 @@ templates:
       technique_id: "T1071"
       technique: "Application Layer Protocol"
       url: "https://attack.mitre.org/techniques/T1071/004/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) made a DNS query with an unusually long name — likely DNS tunneling to smuggle data past your firewall."
+      why_it_matters: "DNS tunneling encodes stolen data inside DNS queries, which most firewalls allow through. Attackers use this to exfiltrate data or maintain command channels in restricted networks. Think of it as hiding stolen goods inside innocuous-looking packages."
+      what_to_do: "1. Investigate process {{.PID}} and its parent processes.\n2. Check DNS query logs for data patterns encoded in long subdomains.\n3. Implement DNS query length limits at your resolver.\n4. Use a DNS security service that detects tunneling patterns.\n5. Consider network isolation for the affected pod."
 
   - id: dns_suspicious_tld
     name: "Suspicious TLD Query"
@@ -109,6 +117,10 @@ templates:
       technique_id: "T1568"
       technique: "Dynamic Resolution"
       url: "https://attack.mitre.org/techniques/T1568/002/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) queried a domain with a suspicious top-level domain (.onion, .bit, .bazar, etc.) often used for malware."
+      why_it_matters: "These non-standard TLDs are commonly used for malware command and control because they're harder to take down and not monitored by traditional security tools. They provide anonymous, censorship-resistant communication channels."
+      what_to_do: "1. Check why {{.Comm}} needs to access these domains.\n2. Look for other suspicious activity from PID {{.PID}}.\n3. Consider DNS filtering to block queries to these TLDs.\n4. Review application configuration and dependencies."
 
   - id: dns_txt_tunneling
     name: "TXT Record Tunneling"
@@ -138,3 +150,7 @@ templates:
       technique_id: "T1071"
       technique: "Application Layer Protocol"
       url: "https://attack.mitre.org/techniques/T1071/004/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}), which is not a mail server, queried a DNS TXT record — a technique sometimes used to hide data in DNS."
+      why_it_matters: "DNS TXT records can contain more data than regular DNS queries, making them useful for data exfiltration or command channels. Non-mail processes have few legitimate reasons to query TXT records."
+      what_to_do: "1. Check the content of the TXT record response if logged.\n2. Investigate what {{.Comm}} is doing with DNS.\n3. Look for other indicators of DNS tunneling.\n4. Monitor for patterns of repeated TXT queries."

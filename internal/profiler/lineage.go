@@ -89,6 +89,14 @@ type parentInfo struct {
 	Timestamp  time.Time
 }
 
+// procEntry caches a /proc lookup result for a PID, avoiding repeated reads.
+// Both comm and ppid are populated by readProcStatus in a single syscall.
+type procEntry struct {
+	comm      string
+	ppid      uint32
+	timestamp time.Time
+}
+
 // LineageMatch represents a detected suspicious lineage pattern.
 type LineageMatch struct {
 	Pattern    LineagePattern
@@ -105,7 +113,7 @@ type LineageTracker struct {
 	logger    *slog.Logger
 	lineage   map[uint32]*parentInfo
 	ancestry  map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
-	commCache map[uint32]string              // ppid → comm, avoids repeated /proc reads
+	procCache map[uint32]*procEntry // pid → (comm, ppid, ts), avoids repeated /proc reads
 	maxDepth  int
 	mu        sync.RWMutex
 	onMatch   func(LineageMatch)
@@ -126,7 +134,7 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 		logger:    logger,
 		lineage:   make(map[uint32]*parentInfo),
 		ancestry:  make(map[uint32][]types.ProcessNode),
-		commCache: make(map[uint32]string),
+		procCache: make(map[uint32]*procEntry),
 		maxDepth:  maxDepth,
 		onMatch:   func(m LineageMatch) {}, // no-op default
 	}
@@ -158,6 +166,11 @@ func (lt *LineageTracker) Track(e types.Event) {
 	info.Timestamp = time.Now()
 	lt.mu.Lock()
 	lt.lineage[e.PID] = info
+	// Eagerly cache BPF-provided comm+ppid so buildChainFromProc avoids
+	// /proc reads when this process becomes a parent in later chain builds.
+	if comm != "" || ppid > 0 {
+		lt.procCache[e.PID] = &procEntry{comm: comm, ppid: ppid, timestamp: info.Timestamp}
+	}
 	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
 	lt.mu.Unlock()
 }
@@ -184,6 +197,11 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 	info.Timestamp = time.Now()
 	lt.mu.Lock()
 	lt.lineage[e.PID] = info
+	// Eagerly cache BPF-provided comm+ppid so buildChainFromProc avoids
+	// /proc reads when this process becomes a parent in later chain builds.
+	if comm != "" || ppid > 0 {
+		lt.procCache[e.PID] = &procEntry{comm: comm, ppid: ppid, timestamp: info.Timestamp}
+	}
 	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
 	lt.mu.Unlock()
 
@@ -238,7 +256,7 @@ func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm, comm
 	parentChain := lt.ancestry[ppid]
 	if len(parentChain) == 0 {
 		// We haven't seen the parent's events yet; try to bootstrap from /proc.
-		parentChain = buildChainFromProc(ppid, lt.maxDepth-1)
+		parentChain = lt.buildChainFromProc(ppid, lt.maxDepth-1)
 		// Cache so subsequent events with the same ppid skip /proc entirely.
 		if len(parentChain) > 0 {
 			lt.ancestry[ppid] = parentChain
@@ -266,16 +284,37 @@ func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm, comm
 }
 
 // buildChainFromProc walks /proc to reconstruct up to maxDepth ancestors for pid.
-// Results are ordered from oldest ancestor to pid.
-func buildChainFromProc(pid uint32, maxDepth int) []types.ProcessNode {
+// Must be called with lt.mu held for writing. Results are ordered from oldest
+// ancestor to pid.  Per-process /proc results are cached in lt.procCache so that
+// subsequent chain builds (for different children of the same subtree) avoid
+// repeated syscalls.
+//
+// Uses readProcStatus to fetch both comm and ppid in a single /proc read,
+// halving the number of /proc syscalls per ancestor compared to separate
+// readProcComm + readProcPPID calls.
+func (lt *LineageTracker) buildChainFromProc(pid uint32, maxDepth int) []types.ProcessNode {
 	if maxDepth <= 0 {
 		return nil
 	}
 	var chain []types.ProcessNode
 	cur := pid
 	for len(chain) < maxDepth && cur > 1 {
-		comm := readProcComm(cur)
-		ppid := readProcPPID(cur)
+		entry, ok := lt.procCache[cur]
+		var comm string
+		var ppid uint32
+		if ok && entry.comm != "" && entry.ppid > 0 {
+			comm = entry.comm
+			ppid = entry.ppid
+		} else {
+			comm, ppid = readProcStatus(cur)
+			if ok {
+				entry.comm = comm
+				entry.ppid = ppid
+				entry.timestamp = time.Now()
+			} else if comm != "" || ppid > 0 {
+				lt.procCache[cur] = &procEntry{comm: comm, ppid: ppid, timestamp: time.Now()}
+			}
+		}
 		chain = append([]types.ProcessNode{{PID: cur, PPID: ppid, Comm: comm}}, chain...)
 		if ppid == 0 || ppid == cur {
 			break
@@ -285,25 +324,34 @@ func buildChainFromProc(pid uint32, maxDepth int) []types.ProcessNode {
 	return chain
 }
 
-// readProcPPID reads the parent PID for a process from /proc/<pid>/status.
-func readProcPPID(pid uint32) uint32 {
+// readProcStatus reads the process name and parent PID from /proc/<pid>/status
+// in a single syscall, replacing the separate readProcComm + readProcPPID calls
+// that previously required two /proc reads per level.
+func readProcStatus(pid uint32) (comm string, ppid uint32) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
-		return 0
+		return "", 0
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "PPid:") {
+		if strings.HasPrefix(line, "Name:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				comm = fields[1]
+			}
+		} else if strings.HasPrefix(line, "PPid:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				v, err := strconv.ParseUint(fields[1], 10, 32)
 				if err == nil {
-					return uint32(v)
+					ppid = uint32(v)
 				}
 			}
+		}
+		if comm != "" && ppid > 0 {
 			break
 		}
 	}
-	return 0
+	return comm, ppid
 }
 
 // getParentInfo extracts parent PID and comm from event or /proc.
@@ -319,24 +367,25 @@ func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 			return e.PPID, parentComm
 		}
 
-		// Check lineage map and commCache under a single RLock.
+		// Check lineage map and procCache under a single RLock.
 		lt.mu.RLock()
 		if info, ok := lt.lineage[e.PPID]; ok {
 			comm := info.ParentComm
 			lt.mu.RUnlock()
 			return e.PPID, comm
 		}
-		if comm, ok := lt.commCache[e.PPID]; ok {
+		if entry, ok := lt.procCache[e.PPID]; ok && entry.comm != "" {
+			comm := entry.comm
 			lt.mu.RUnlock()
 			return e.PPID, comm
 		}
 		lt.mu.RUnlock()
 
-		// Cache miss: read from /proc/<ppid>/comm and populate commCache.
-		comm := readProcComm(e.PPID)
-		if comm != "" {
+		// Cache miss: read /proc/<ppid>/status (single syscall for comm+ppid).
+		comm, grandPPID := readProcStatus(e.PPID)
+		if comm != "" || grandPPID > 0 {
 			lt.mu.Lock()
-			lt.commCache[e.PPID] = comm
+			lt.procCache[e.PPID] = &procEntry{comm: comm, ppid: grandPPID, timestamp: time.Now()}
 			lt.mu.Unlock()
 		}
 		return e.PPID, comm
@@ -346,47 +395,6 @@ func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 	// synthetic/test events and non-exec syscall tracepoints). Skip the /proc
 	// fallback to avoid a per-event syscall; real BPF events always carry PPID.
 	return 0, ""
-}
-
-// readParentFromProc reads parent PID from /proc/<pid>/status.
-func (lt *LineageTracker) readParentFromProc(pid uint32) (uint32, string) {
-	statusPath := fmt.Sprintf("/proc/%d/status", pid)
-	data, err := os.ReadFile(statusPath)
-	if err != nil {
-		return 0, ""
-	}
-
-	var ppid uint32
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "PPid:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				ppid64, err := strconv.ParseUint(fields[1], 10, 32)
-				if err == nil {
-					ppid = uint32(ppid64)
-				}
-			}
-			break
-		}
-	}
-
-	if ppid == 0 {
-		return 0, ""
-	}
-
-	comm := readProcComm(ppid)
-	return ppid, comm
-}
-
-// readProcComm reads process name from /proc/<pid>/comm.
-func readProcComm(pid uint32) string {
-	commPath := fmt.Sprintf("/proc/%d/comm", pid)
-	data, err := os.ReadFile(commPath)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
 }
 
 // checkPattern checks if the parent-child combination matches any pattern,
@@ -497,10 +505,12 @@ func (lt *LineageTracker) Cleanup(now time.Time) {
 			parentInfoPool.Put(info)
 		}
 	}
-	// commCache is keyed by ppid and may outlive individual PID entries; clear it
-	// wholesale each Cleanup cycle so stale proc-comm mappings don't accumulate.
-	for k := range lt.commCache {
-		delete(lt.commCache, k)
+	// Evict procCache entries older than TTL rather than clearing wholesale.
+	cutoff := now.Add(-lt.config.TTL)
+	for pid, entry := range lt.procCache {
+		if entry.timestamp.Before(cutoff) {
+			delete(lt.procCache, pid)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@
 package drift
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -10,6 +11,11 @@ import (
 // ContainerBaseline holds observed behaviour during the initial baseline window.
 // While Locked is false the baseline is still being built; once the window expires
 // all subsequent deviations are reported as drift.
+//
+// When ImageManifest mode is enabled via DetectorConfig.ImageManifest, the
+// ExecPaths set is pre-seeded from the container image on first encounter
+// (via overlayfs lowerdir walk). This catches binaries that were present in the
+// image but haven't executed yet during the learning window.
 type ContainerBaseline struct {
 	mu sync.RWMutex
 
@@ -23,13 +29,20 @@ type ContainerBaseline struct {
 	BaselineExpiry time.Time // when the window closes
 	Locked         bool      // true after baseline window elapsed
 
+	// Whether the image manifest has been snapshotted for this container.
+	ImageSnapshotted bool
+
 	// Allowed behaviour sets (populated during baseline window)
 	Syscalls     map[int64]struct{}
-	ExecPaths    map[string]struct{} // executable paths seen
+	ExecPaths    map[string]struct{} // executable paths seen or from image manifest
 	Libraries    map[string]struct{} // .so paths opened
 	DestPorts    map[uint16]struct{} // outbound TCP ports
 	DestIPs      map[string]struct{} // outbound TCP IPs
 	FileDirs     map[string]struct{} // directories accessed
+
+	// ImageExecPaths holds the count of executable paths loaded from the image
+	// manifest snapshot. Always <= len(ExecPaths).
+	ImageExecPaths int
 
 	// Counters (populated during drift phase)
 	DriftCount uint64
@@ -167,31 +180,79 @@ func (b *ContainerBaseline) Stats() BaselineStats {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return BaselineStats{
-		ContainerID: b.ContainerID,
-		Namespace:   b.Namespace,
-		PodName:     b.PodName,
-		Locked:      b.Locked,
-		DriftCount:  b.DriftCount,
-		Syscalls:    len(b.Syscalls),
-		ExecPaths:   len(b.ExecPaths),
-		Libraries:   len(b.Libraries),
-		DestPorts:   len(b.DestPorts),
-		DestIPs:     len(b.DestIPs),
-		FileDirs:    len(b.FileDirs),
+		ContainerID:     b.ContainerID,
+		Namespace:       b.Namespace,
+		PodName:         b.PodName,
+		Locked:          b.Locked,
+		DriftCount:      b.DriftCount,
+		Syscalls:        len(b.Syscalls),
+		ExecPaths:       len(b.ExecPaths),
+		ImageExecPaths:  b.ImageExecPaths,
+		Libraries:       len(b.Libraries),
+		DestPorts:       len(b.DestPorts),
+		DestIPs:         len(b.DestIPs),
+		FileDirs:        len(b.FileDirs),
 	}
+}
+
+// PreseedFromManifest loads executable paths from an ImageManifest into
+// the baseline's ExecPaths set. Call this once per container. It is safe
+// to call multiple times; subsequent calls are no-ops.
+//
+// Returns the number of paths added.
+func (b *ContainerBaseline) PreseedFromManifest(manifest *ImageManifest) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.ImageSnapshotted {
+		return 0
+	}
+
+	if manifest == nil || manifest.Error != nil {
+		return 0
+	}
+
+	added := 0
+	for path := range manifest.ExecPaths {
+		if _, exists := b.ExecPaths[path]; !exists {
+			b.ExecPaths[path] = struct{}{}
+			added++
+		}
+	}
+	b.ImageExecPaths = len(manifest.ExecPaths)
+	b.ImageSnapshotted = true
+	return added
+}
+
+// isAllowed checks whether a path is in the provided allowlist.
+func isAllowed(path string, allowlist map[string]struct{}) bool {
+	if allowlist == nil {
+		return false
+	}
+	if _, ok := allowlist[path]; ok {
+		return true
+	}
+	// Check if any allowlist prefix matches.
+	for prefix := range allowlist {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // BaselineStats is a read-only snapshot of baseline counts.
 type BaselineStats struct {
-	ContainerID string
-	Namespace   string
-	PodName     string
-	Locked      bool
-	DriftCount  uint64
-	Syscalls    int
-	ExecPaths   int
-	Libraries   int
-	DestPorts   int
-	DestIPs     int
-	FileDirs    int
+	ContainerID    string
+	Namespace      string
+	PodName        string
+	Locked         bool
+	DriftCount     uint64
+	Syscalls       int
+	ExecPaths      int
+	ImageExecPaths int // number of exec paths loaded from image manifest
+	Libraries      int
+	DestPorts      int
+	DestIPs        int
+	FileDirs       int
 }

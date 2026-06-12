@@ -39,7 +39,47 @@ const (
 	EventSequence EventType = 12
 	// EventCloudAudit indicates a cloud control-plane audit event (AWS CloudTrail, GCP Audit Logs, Azure Activity Log).
 	EventCloudAudit EventType = 13
+	// EventIOUring indicates an io_uring activity event (setup or enter).
+	EventIOUring EventType = 14
+	// EventBPFProgram indicates a bpf() syscall event: BPF_PROG_LOAD or BPF_MAP_CREATE.
+	EventBPFProgram EventType = 15
 )
+
+// BPFProgType maps numeric BPF program types to human-readable strings.
+var bpfProgTypeNames = map[uint32]string{
+	0:  "SOCKET_FILTER",
+	3:  "SCHED_CLS",
+	4:  "SCHED_ACT",
+	5:  "TRACEPOINT",
+	6:  "XDP",
+	8:  "CGROUP_SKB",
+	11: "SK_MSG",
+	15: "KPROBE",
+	17: "CGROUP_SOCK_ADDR",
+	26: "LSM",
+	28: "STRUCT_OPS",
+	31: "SK_LOOKUP",
+}
+
+// BPFCmdName returns the human-readable name for a bpf() command number.
+func BPFCmdName(cmd uint32) string {
+	switch cmd {
+	case 0:
+		return "MAP_CREATE"
+	case 5:
+		return "PROG_LOAD"
+	default:
+		return fmt.Sprintf("BPF_CMD_%d", cmd)
+	}
+}
+
+// BPFProgTypeName returns the human-readable name for a BPF program type.
+func BPFProgTypeName(t uint32) string {
+	if name, ok := bpfProgTypeNames[t]; ok {
+		return name
+	}
+	return fmt.Sprintf("UNKNOWN_%d", t)
+}
 
 // eventTypeNames maps string names used in rule YAML to numeric EventType constants.
 // Kept lowercase; matching is case-insensitive.
@@ -61,6 +101,11 @@ var eventTypeNames = map[string]EventType{
 	"sequence":    EventSequence,
 	"cloud_audit": EventCloudAudit,
 	"cloud":       EventCloudAudit,
+	"iouring":       EventIOUring,
+	"io_uring":      EventIOUring,
+	"bpf_program":   EventBPFProgram,
+	"bpf_prog_load": EventBPFProgram,
+	"bpf":           EventBPFProgram,
 }
 
 // UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.
@@ -108,6 +153,12 @@ type Event struct {
 	// CloudAudit holds cloud control-plane audit data (AWS CloudTrail, GCP Audit Logs).
 	// Populated when Type == EventCloudAudit.
 	CloudAudit *CloudAuditEvent
+	// IOUring holds io_uring activity data (setup/enter).
+	// Populated when Type == EventIOUring.
+	IOUring *IOUringEvent
+	// BPFProgram holds bpf() syscall monitoring data (BPF_PROG_LOAD / BPF_MAP_CREATE).
+	// Populated when Type == EventBPFProgram.
+	BPFProgram *BPFProgramEvent
 	// TraceContext holds OpenTelemetry trace context for distributed tracing.
 	TraceContext *TraceContext
 	// Enrichment holds Kubernetes metadata for the event.
@@ -194,6 +245,15 @@ type TLSEvent struct {
 	DataLen uint32
 	// Data contains the captured plaintext (first 256 bytes).
 	Data [256]byte
+	// JA3 is the JA3 TLS client fingerprint hash (MD5 hex) computed from the
+	// TLS ClientHello handshake message.
+	JA3 string
+	// JA4 is the JA4 TLS fingerprint (structured hash) computed from the
+	// ClientHello.  Successor to JA3, more resistant to evasions.
+	JA4 string
+	// JA3S is the JA3S server-side fingerprint hash (MD5 hex) computed from the
+	// TLS ServerHello handshake message.
+	JA3S string
 }
 
 // DNSDirection indicates the direction of DNS traffic.
@@ -388,6 +448,34 @@ type GPUEvent struct {
 	Size uint64
 }
 
+// IOUringEvent contains io_uring activity data captured via kprobes
+// on io_uring_setup and io_uring_enter. io_uring bypasses traditional
+// syscall tracepoints (openat, connect, etc.), making it a blind spot
+// for tracepoint-based security agents.
+type IOUringEvent struct {
+	// Op identifies the io_uring syscall: 0=setup, 1=enter.
+	Op uint8
+	// Flags from io_uring_setup or io_uring_enter (IORING_SETUP_* / IORING_ENTER_*).
+	Flags uint32
+	// Fd is the io_uring instance file descriptor (-1 for setup before return).
+	Fd int32
+	// ToSubmit is the number of submission queue entries to submit (enter only).
+	ToSubmit uint32
+}
+
+// BPFProgramEvent contains data from monitoring the bpf() syscall.
+// Emitted by the BPFMonitorCollector via kprobe/kretprobe on __x64_sys_bpf
+// for BPF_PROG_LOAD (cmd=5) and BPF_MAP_CREATE (cmd=0) commands.
+type BPFProgramEvent struct {
+	// Cmd is the bpf() command number: 0=BPF_MAP_CREATE, 5=BPF_PROG_LOAD.
+	Cmd uint32
+	// ProgType is the BPF program type for BPF_PROG_LOAD,
+	// or the map type for BPF_MAP_CREATE.
+	ProgType uint32
+	// Ret is the return value of the bpf() syscall: fd on success, negative errno on failure.
+	Ret int32
+}
+
 // CloudAuditEvent contains cloud control-plane audit data from AWS CloudTrail,
 // GCP Audit Logs, or Azure Activity Logs.
 type CloudAuditEvent struct {
@@ -431,6 +519,8 @@ func (e *Event) Reset() {
 	e.CgroupEsc = nil
 	e.GPU = nil
 	e.CloudAudit = nil
+	e.IOUring = nil
+	e.BPFProgram = nil
 	e.TraceContext = nil
 	e.Enrichment = nil
 	e.ProcArgs = ""

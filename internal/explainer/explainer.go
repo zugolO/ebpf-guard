@@ -26,6 +26,40 @@ type Explanation struct {
 	Mitigations []string  `json:"mitigations" yaml:"mitigations"`
 	References  []string  `json:"references" yaml:"references"`
 	MITRE       MITREInfo `json:"mitre" yaml:"mitre"`
+	// Plain provides a non-technical explanation designed for developers without
+	// security backgrounds. Populated when Style is StylePlain or StyleFull.
+	Plain *PlainExplanation `json:"plain,omitempty" yaml:"plain,omitempty"`
+	// Style indicates which explanation style was requested.
+	Style ExplanationStyle `json:"style" yaml:"style"`
+}
+
+// ExplanationStyle selects between plain (non-technical) and technical explanation modes.
+type ExplanationStyle string
+
+const (
+	// StylePlain returns a non-technical, phone-readable explanation with three
+	// sections: what happened, why it matters, and what to do now.
+	StylePlain ExplanationStyle = "plain"
+	// StyleTechnical returns the traditional SOC-oriented explanation with
+	// MITRE ATT&CK references, forensic commands, and tactical mitigations.
+	StyleTechnical ExplanationStyle = "technical"
+	// StyleFull returns both plain and technical explanations combined.
+	StyleFull ExplanationStyle = "full"
+)
+
+// PlainExplanation provides a non-technical explanation designed for developers
+// without security backgrounds. Each section is a complete, self-contained message
+// suitable for reading on a phone.
+type PlainExplanation struct {
+	// WhatHappened describes the incident in plain language (e.g. "Someone started
+	// an interactive shell from your Node web process.").
+	WhatHappened string `json:"what_happened" yaml:"what_happened"`
+	// WhyItMatters explains why this is a security concern in terms a non-expert
+	// can understand (e.g. "This usually means your app was exploited...").
+	WhyItMatters string `json:"why_it_matters" yaml:"why_it_matters"`
+	// WhatToDo provides concrete, actionable steps the user can take
+	// (e.g. "Restart the container and check for an unpatched dependency.").
+	WhatToDo string `json:"what_to_do" yaml:"what_to_do"`
 }
 
 // MITREInfo contains MITRE ATT&CK mapping information.
@@ -64,6 +98,15 @@ type TemplateDefinition struct {
 	Mitigations []string  `yaml:"mitigations"`
 	References  []string  `yaml:"references"`
 	MITRE       MITREInfo `yaml:"mitre"`
+	// Plain contains the non-technical explanation sections for indie-developer UX.
+	Plain *PlainTemplateDefinition `yaml:"plain,omitempty"`
+}
+
+// PlainTemplateDefinition holds the three-section plain-language explanation.
+type PlainTemplateDefinition struct {
+	WhatHappened string `yaml:"what_happened"`
+	WhyItMatters string `yaml:"why_it_matters"`
+	WhatToDo     string `yaml:"what_to_do"`
 }
 
 // TemplateFile represents a YAML file containing multiple templates.
@@ -73,8 +116,9 @@ type TemplateFile struct {
 
 // Explainer generates human-readable explanations for alerts.
 type Explainer struct {
-	templates map[string]*TemplateDefinition
-	funcs     template.FuncMap
+	templates    map[string]*TemplateDefinition
+	funcs        template.FuncMap
+	defaultStyle ExplanationStyle
 }
 
 // New creates a new Explainer with templates loaded from the given directory.
@@ -199,11 +243,44 @@ func (e *Explainer) loadDefaultTemplates() error {
 		e.templates[tmpl.ID] = &tmplCopy
 	}
 
+	e.defaultStyle = StyleTechnical
 	return nil
 }
 
-// Explain generates an explanation for the given alert.
+// SetDefaultStyle sets the default explanation style.
+// Valid styles are "plain", "technical", or "full".
+// When an explanation is generated via Explain(), this style is used.
+// In simple mode, the caller should set this to StylePlain.
+func (e *Explainer) SetDefaultStyle(style ExplanationStyle) {
+	switch style {
+	case StylePlain, StyleTechnical, StyleFull:
+		e.defaultStyle = style
+	default:
+		// Invalid style — silently keep current
+	}
+}
+
+// DefaultStyle returns the current default explanation style.
+func (e *Explainer) DefaultStyle() ExplanationStyle {
+	return e.defaultStyle
+}
+
+// Explain generates an explanation for the given alert using the default style.
+// Falls back to StyleTechnical when no default style has been explicitly set.
 func (e *Explainer) Explain(alert types.Alert) (*Explanation, error) {
+	style := e.defaultStyle
+	if style == "" {
+		style = StyleTechnical
+	}
+	return e.ExplainWithStyle(alert, style)
+}
+
+// ExplainWithStyle generates an explanation in the requested style.
+// An empty style defaults to StyleTechnical for backward compatibility.
+func (e *Explainer) ExplainWithStyle(alert types.Alert, style ExplanationStyle) (*Explanation, error) {
+	if style == "" {
+		style = StyleTechnical
+	}
 	// Find template by rule ID, fallback to default
 	tmpl := e.findTemplate(alert.RuleID)
 	if tmpl == nil {
@@ -233,51 +310,87 @@ func (e *Explainer) Explain(alert types.Alert) (*Explanation, error) {
 	data.Pod = alert.Enrichment.PodName
 	data.Namespace = alert.Enrichment.Namespace
 
-	// Render templates
 	explanation := &Explanation{
 		MITRE: tmpl.MITRE,
+		Style: style,
 	}
 
 	var err error
-	explanation.Summary, err = e.render(tmpl.Summary, data)
-	if err != nil {
-		return nil, fmt.Errorf("render summary: %w", err)
-	}
 
-	explanation.Detail, err = e.render(tmpl.Detail, data)
-	if err != nil {
-		return nil, fmt.Errorf("render detail: %w", err)
-	}
-
-	explanation.Severity, err = e.render(tmpl.Severity, data)
-	if err != nil {
-		return nil, fmt.Errorf("render severity: %w", err)
-	}
-
-	explanation.SeverityWhy, err = e.render(tmpl.SeverityWhy, data)
-	if err != nil {
-		return nil, fmt.Errorf("render severity_why: %w", err)
-	}
-
-	// Render mitigations
-	explanation.Mitigations = make([]string, len(tmpl.Mitigations))
-	for i, m := range tmpl.Mitigations {
-		explanation.Mitigations[i], err = e.render(m, data)
+	// Always fill technical fields (needed for StyleTechnical, StyleFull, and details).
+	// StylePlain also populates these so consumers can access technical context via the
+	// Detail/Mitigations/References fields even when the primary display is plain-language.
+	if style == StyleTechnical || style == StyleFull || style == StylePlain {
+		explanation.Summary, err = e.render(tmpl.Summary, data)
 		if err != nil {
-			return nil, fmt.Errorf("render mitigation %d: %w", i, err)
+			return nil, fmt.Errorf("render summary: %w", err)
+		}
+		explanation.Detail, err = e.render(tmpl.Detail, data)
+		if err != nil {
+			return nil, fmt.Errorf("render detail: %w", err)
+		}
+		explanation.Severity, err = e.render(tmpl.Severity, data)
+		if err != nil {
+			return nil, fmt.Errorf("render severity: %w", err)
+		}
+		explanation.SeverityWhy, err = e.render(tmpl.SeverityWhy, data)
+		if err != nil {
+			return nil, fmt.Errorf("render severity_why: %w", err)
+		}
+
+		explanation.Mitigations = make([]string, len(tmpl.Mitigations))
+		for i, m := range tmpl.Mitigations {
+			explanation.Mitigations[i], err = e.render(m, data)
+			if err != nil {
+				return nil, fmt.Errorf("render mitigation %d: %w", i, err)
+			}
+		}
+
+		explanation.References = make([]string, len(tmpl.References))
+		for i, r := range tmpl.References {
+			explanation.References[i], err = e.render(r, data)
+			if err != nil {
+				return nil, fmt.Errorf("render reference %d: %w", i, err)
+			}
 		}
 	}
 
-	// Render references
-	explanation.References = make([]string, len(tmpl.References))
-	for i, r := range tmpl.References {
-		explanation.References[i], err = e.render(r, data)
+	// Fill plain explanation if requested and template has plain fields
+	if (style == StylePlain || style == StyleFull) && tmpl.Plain != nil {
+		explanation.Plain = &PlainExplanation{}
+
+		explanation.Plain.WhatHappened, err = e.render(tmpl.Plain.WhatHappened, data)
 		if err != nil {
-			return nil, fmt.Errorf("render reference %d: %w", i, err)
+			return nil, fmt.Errorf("render what_happened: %w", err)
 		}
+		explanation.Plain.WhyItMatters, err = e.render(tmpl.Plain.WhyItMatters, data)
+		if err != nil {
+			return nil, fmt.Errorf("render why_it_matters: %w", err)
+		}
+		explanation.Plain.WhatToDo, err = e.render(tmpl.Plain.WhatToDo, data)
+		if err != nil {
+			return nil, fmt.Errorf("render what_to_do: %w", err)
+		}
+	} else if style == StylePlain && tmpl.Plain == nil {
+		explanation.Plain = e.buildDefaultPlain(data, tmpl)
 	}
 
 	return explanation, nil
+}
+
+// buildDefaultPlain creates a fallback plain explanation from technical template data
+// when no explicit plain template exists.
+func (e *Explainer) buildDefaultPlain(data TemplateData, tmpl *TemplateDefinition) *PlainExplanation {
+	return &PlainExplanation{
+		WhatHappened: fmt.Sprintf("A security alert was triggered for process %s (PID %d) matching rule \"%s\". %s",
+			data.Comm, data.PID, data.RuleName, data.Message),
+		WhyItMatters: "This activity was flagged as potentially malicious by ebpf-guard's detection rules. " +
+			"Unexpected process behaviour often indicates an application exploit, malware, or unauthorized access.",
+		WhatToDo: fmt.Sprintf("1. Restart the affected container or process.\n"+
+			"2. Check logs for %s around the time of the alert.\n"+
+			"3. If this is a false positive, add \"%s\" to the allowlist.",
+			data.Comm, data.Comm),
+	}
 }
 
 // findTemplate finds the best matching template for a rule ID.

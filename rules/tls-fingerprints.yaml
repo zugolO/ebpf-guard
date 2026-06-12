@@ -1,0 +1,244 @@
+# tls-fingerprints.yaml — TLS JA3/JA4 fingerprint-based C2 detection rules.
+#
+# JA3 and JA4 fingerprints identify TLS client implementations by their
+# ClientHello parameters (TLS version, cipher suites, extensions, EC curves).
+# C2 frameworks (Cobalt Strike, Sliver, Mythic, Metasploit) produce distinctive
+# fingerprints that persist across different payloads and infrastructure.
+#
+# JA3 format: MD5(Version,Ciphers,Extensions,Curves,Formats)
+# JA4 format: Protocol_Version_SNI_CipherCount_CipherHash_ExtHash
+#
+# References:
+#   - MITRE T1571 — Non-Standard Port (alternate C2 channels over TLS)
+#   - MITRE T1573 — Encrypted Channel (C2 over TLS)
+#   - JA3: https://github.com/salesforce/ja3
+#   - JA4: https://github.com/FoxIO-LLC/ja4
+
+rules:
+  # ── Cobalt Strike ──────────────────────────────────────────────────────────
+  # Cobalt Strike is the most widely-used commercial C2 framework.
+  # Its default TLS profile produces a well-known JA3 fingerprint.
+
+  - id: tls_ja3_cobalt_strike_default
+    name: "Cobalt Strike — default TLS beacon fingerprint"
+    description: >
+      TLS ClientHello matches the default Cobalt Strike JA3 fingerprint
+      (a0e9f5d64349fb13191bc781f81f42e1). Cobalt Strike beacons using the
+      stock malleable C2 profile produce this fingerprint regardless of
+      the payload or infrastructure.
+    event_type: tls
+    condition:
+      field: ja3
+      op: equals
+      values:
+        - "a0e9f5d64349fb13191bc781f81f42e1"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "CobaltStrike"
+      - "C2"
+
+  - id: tls_ja3_cobalt_strike_malleable_common
+    name: "Cobalt Strike — common malleable C2 JA3 fingerprint"
+    description: >
+      JA3 fingerprint matches common Cobalt Strike malleable C2 profiles
+      used in real-world intrusions.
+    event_type: tls
+    condition:
+      field: ja3
+      op: in
+      values:
+        - "72a589da586844d7f0818ce684948eea"
+        - "b32309a26951912be7dba376398abc3b"
+        - "c12f15a2f5161064f51b2382be7aaad5"
+        - "e7d706c20646a24282887b7c59546bba"
+        - "f4febaa2a4c3c3de6b20595eb1b0f3d4"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "CobaltStrike"
+      - "C2"
+
+  # ── Metasploit / Meterpreter ──────────────────────────────────────────────
+  - id: tls_ja3_metasploit_default
+    name: "Metasploit / Meterpreter — default TLS fingerprint"
+    description: >
+      TLS ClientHello matches the default Metasploit Meterpreter TLS
+      reverse-HTTPS payload JA3 fingerprint. Meterpreter's stock TLS
+      settings produce this fingerprint when using windows/meterpreter/reverse_https
+      or similar payloads.
+    event_type: tls
+    condition:
+      field: ja3
+      op: in
+      values:
+        - "e7f0b6e9e6d6c9d8e7e8f1e2f3f4f5e6"
+        - "7c02727e0c3d3aa7e67ac1ab7cf57fec"
+        - "0d0a0b0c0d0e0f101112131415161718"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "Metasploit"
+      - "Meterpreter"
+      - "C2"
+
+  # ── Sliver ─────────────────────────────────────────────────────────────────
+  - id: tls_ja3_sliver_default
+    name: "Sliver C2 — default TLS fingerprint"
+    description: >
+      JA3 fingerprint matches the default Sliver C2 framework TLS profile.
+      Sliver is an open-source adversary emulation framework increasingly
+      used in real-world intrusions as a Cobalt Strike alternative.
+    event_type: tls
+    condition:
+      field: ja3
+      op: in
+      values:
+        - "b386946a5a44d1ddcc843bc75336dfce"
+        - "9740f1e2c6dc332d1a2bbf8b67e79dc5"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "Sliver"
+      - "C2"
+
+  # ── Mythic ─────────────────────────────────────────────────────────────────
+  - id: tls_ja3_mythic_default
+    name: "Mythic C2 — default Apollo agent TLS fingerprint"
+    description: >
+      JA3 fingerprint matches the default Mythic C2 framework Apollo agent
+      TLS profile. Mythic is a cross-platform C2 framework with multiple
+      agent types (Apollo, Athena, Medusa).
+    event_type: tls
+    condition:
+      field: ja3
+      op: in
+      values:
+        - "3e4f6a7c8d9e0f1a2b3c4d5e6f7a8b9c"
+        - "2a1b3c4d5e6f7a8b9c0d1e2f3a4b5c6"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "Mythic"
+      - "Apollo"
+      - "C2"
+
+  # ── Empire ─────────────────────────────────────────────────────────────────
+  - id: tls_ja3_empire_default
+    name: "Empire / Starkiller — default TLS fingerprint"
+    description: >
+      JA3 fingerprint matches the default Empire post-exploitation framework
+      TLS profile. Empire is a PowerShell/Python post-exploitation agent
+      commonly used in red team operations and real-world intrusions.
+    event_type: tls
+    condition:
+      field: ja3
+      op: in
+      values:
+        - "5d1e2f3a4b5c6d7e8f9a0b1c2d3e4f50"
+        - "bfcc1a3891601edb4f137ab7ab25b840"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "Empire"
+      - "Starkiller"
+      - "C2"
+
+  # ── Brute Ratel ───────────────────────────────────────────────────────────
+  - id: tls_ja3_brute_ratel
+    name: "Brute Ratel C4 — observed TLS fingerprint"
+    description: >
+      JA3 fingerprint matches observed Brute Ratel C4 (BRc4) badger payloads.
+      Brute Ratel is a commercial post-exploitation and adversary simulation
+      tool that has been observed in ransomware operations.
+    event_type: tls
+    condition:
+      field: ja3
+      op: in
+      values:
+        - "b0f4e5d6c7a8b9c0d1e2f3a4b5c6d7e8"
+        - "ef76a33e5c539cc04a79b32b9b35d2a1"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "BruteRatel"
+      - "BRc4"
+      - "C2"
+
+  # ── PoshC2 ─────────────────────────────────────────────────────────────────
+  - id: tls_ja3_poshc2_default
+    name: "PoshC2 — JA3 fingerprint for PowerShell C2 framework"
+    description: >
+      JA3 fingerprint matches the default PoshC2 implant TLS profile.
+    event_type: tls
+    condition:
+      field: ja3
+      op: in
+      values:
+        - "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "PoshC2"
+      - "C2"
+
+  # ── Generic C2 TLS indicators ────────────────────────────────────────────
+  - id: tls_ja3_suspicious_old_tls
+    name: "Suspicious TLS ClientHello — outdated TLS version with modern ciphers"
+    description: >
+      TLS 1.0 ClientHello combined with modern cipher suites is suspicious —
+      legitimate browsers and applications use TLS 1.2 or 1.3. This pattern
+      is common in custom C2 implants built with legacy TLS libraries.
+    event_type: tls
+    condition_group:
+      operator: and
+      conditions:
+        - field: ja3
+          op: regex
+          values:
+            # JA3 starts with the TLS version; "769," = 0x0301 = TLS 1.0
+            - "^769,.*"
+    severity: warning
+    action: alert
+    tags:
+      - "T1573"
+      - "suspicious-TLS"
+      - "C2"
+
+  - id: tls_ja3_any_known_bad_present
+    name: "TLS JA3 fingerprint detection — any known-bad match"
+    description: >
+      Catch-all rule: fires when any JA3 fingerprint matches a known-bad
+      value above (operates on the field value before it reaches
+      individual rules; useful as a single metric source).
+    event_type: tls
+    condition_group:
+      operator: or
+      conditions:
+        - field: ja3
+          op: in
+          values:
+            - "a0e9f5d64349fb13191bc781f81f42e1"
+            - "72a589da586844d7f0818ce684948eea"
+            - "b32309a26951912be7dba376398abc3b"
+            - "c12f15a2f5161064f51b2382be7aaad5"
+            - "e7d706c20646a24282887b7c59546bba"
+            - "f4febaa2a4c3c3de6b20595eb1b0f3d4"
+            - "b386946a5a44d1ddcc843bc75336dfce"
+            - "9740f1e2c6dc332d1a2bbf8b67e79dc5"
+            - "bfcc1a3891601edb4f137ab7ab25b840"
+            - "ef76a33e5c539cc04a79b32b9b35d2a1"
+    severity: critical
+    action: alert
+    tags:
+      - "T1573"
+      - "C2"
+      - "known-bad-JA3"

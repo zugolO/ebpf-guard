@@ -1,0 +1,164 @@
+# drift-rules.yaml — Container drift detection rules for ebpf-guard.
+#
+# Drift is detected at the correlator level by the internal/drift Detector,
+# which maintains per-container baselines of normal behaviour. This rule set
+# covers drift scenarios that persist beyond the baseline window and
+# complements the real-time drift alert generation in main.go.
+#
+# In ImageManifest mode (config: drift.image_manifest=true), the ExecPaths
+# baseline is pre-seeded from the container image layers via overlayfs walk.
+# Any binary NOT present in the image triggers a critical alert instantly.
+#
+# References:
+#   - MITRE T1204.002 — User Execution: Malicious File
+#   - MITRE T1059 — Command and Scripting Interpreter
+#   - MITRE T1505.003 — Server Software Component: Web Shell
+
+rules:
+  # ── New binary execution drift ─────────────────────────────────────────────
+  - id: drift_new_exec_critical
+    name: "Container drift — new binary executed"
+    description: >
+      A binary was executed inside a container that was not present during
+      the baseline learning window (or not in the image manifest). This is
+      the #1 highest-signal runtime indicator for dropped payloads,
+      webshells, and cryptominers.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: equals
+          values: ["open"]
+        - field: filename
+          op: prefix
+          values:
+            - "/bin/"
+            - "/sbin/"
+            - "/usr/bin/"
+            - "/usr/sbin/"
+            - "/usr/local/bin/"
+        - field: filename
+          op: not_in
+          # Allowlist of system utilities that may be legitimately deployed post-start:
+          # - dpkg/rpm package managers (apt operations in running containers)
+          # - curl/wget (runtime downloads in debugging sessions)
+          # These are noisy in dev; uncomment to suppress:
+          # - "/usr/bin/dpkg"
+          # - "/usr/bin/apt"
+          # - "/usr/bin/curl"
+          # - "/usr/bin/wget"
+          values: []
+    severity: critical
+    action: alert
+    tags:
+      - "T1204.002"
+      - "drift"
+      - "payload-drop"
+
+  # ── New library loaded drift ──────────────────────────────────────────────
+  - id: drift_new_library_in_system_dir
+    name: "Container drift — new shared library in system path"
+    description: >
+      A shared library was loaded from a system library path that was not
+      observed during baseline. This could indicate an LD_PRELOAD rootkit
+      or a malicious library injection.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: equals
+          values: ["open"]
+        - field: filename
+          op: prefix
+          values:
+            - "/lib/"
+            - "/usr/lib/"
+        - field: filename
+          op: suffix
+          values: [".so"]
+    severity: warning
+    action: alert
+    tags:
+      - "T1574.006"
+      - "drift"
+      - "library-injection"
+
+  # ── New directory access drift ─────────────────────────────────────────────
+  - id: drift_new_file_dir_sensitive
+    name: "Container drift — access to new sensitive directory"
+    description: >
+      A file was accessed in a directory outside the container baseline,
+      and that directory is security-sensitive (/root, /home, /etc/cron, /var/spool/cron).
+      May indicate a process escaping its intended scope.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: equals
+          values: ["open"]
+        - field: filename
+          op: prefix
+          values:
+            - "/root/"
+            - "/home/"
+            - "/var/spool/cron/"
+            - "/etc/cron.d/"
+            - "/etc/systemd/system/"
+    severity: warning
+    action: alert
+    tags:
+      - "T1543.002"
+      - "drift"
+      - "privilege-escalation"
+
+  # ── New network peer drift ─────────────────────────────────────────────────
+  - id: drift_new_network_common_c2_ports
+    name: "Container drift — outbound connection to unusual port"
+    description: >
+      A new outbound TCP connection was established to a port not seen during
+      baseline that is commonly used by C2 frameworks (4444, 8080, 8443, 31337).
+    event_type: network
+    condition:
+      field: dport
+      op: in
+      values: ["4444", "8080", "8443", "31337", "1337", "5555", "6666", "7777", "8888", "9999"]
+    severity: warning
+    action: alert
+    tags:
+      - "T1571"
+      - "drift"
+      - "C2"
+
+  # ── Syscall drift for dangerous syscalls ──────────────────────────────────
+  - id: drift_dangerous_syscall
+    name: "Container drift — dangerous new syscall observed"
+    description: >
+      A system call that is commonly used for privilege escalation or
+      container escape was observed after the baseline window, when it
+      was NOT observed during the learning period.
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values:
+        - "ptrace"
+        - "mount"
+        - "umount2"
+        - "pivot_root"
+        - "unshare"
+        - "setns"
+        - "kexec_load"
+        - "perf_event_open"
+        - "bpf"
+        - "add_key"
+        - "request_key"
+    severity: critical
+    action: alert
+    tags:
+      - "T1611"
+      - "drift"
+      - "container-escape"
+      - "privilege-escalation"

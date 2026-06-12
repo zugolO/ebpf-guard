@@ -1,0 +1,163 @@
+# bpf-rootkit.yaml — BPF subsystem rootkit detection rules for ebpf-guard.
+#
+# eBPF-based rootkits (TripleCross, ebpfkit, boopkit) load their own BPF
+# programs to hide network traffic, processes, and file activity from
+# userspace security tools. This rule set detects unauthorized BPF program
+# loads and suspicious BPF map creation by processes outside the allowlist.
+#
+# References:
+#   - MITRE T1055.012 — Process Injection: eBPF
+#   - MITRE T1562.001 — Impair Defenses: Disable or Modify Tools
+#   - MITRE T1027 — Obfuscated Files or Information
+
+rules:
+  # ── Critical: unauthorized BPF program loads ───────────────────────────────
+  - id: bpf_prog_load_unauthorized
+    name: "Unauthorized BPF program load"
+    description: >
+      A process loaded a BPF program but is not in the known-good allowlist
+      (cilium, systemd, etc.). This may indicate an eBPF rootkit being deployed.
+      XDP, TC, and kprobe program types are the primary rootkit vectors.
+    event_type: bpf_program
+    condition_group:
+      operator: and
+      conditions:
+        - field: cmd_nr
+          op: equals
+          values: ["5"]
+        - field: comm
+          op: not_in
+          values:
+            - "ebpf-guard"
+            - "cilium-agent"
+            - "cilium-operator"
+            - "systemd"
+            - "systemd-journal"
+            - "systemd-udevd"
+            - "calico-node"
+            - "flanneld"
+            - "k3s"
+            - "containerd"
+        - field: ret
+          op: gte
+          values: ["0"]
+    severity: critical
+    action: alert
+    tags:
+      - "T1055.012"
+      - "eBPF-rootkit"
+      - "TripleCross"
+      - "ebpfkit"
+
+  # ── XDP/TC program loads from unexpected sources ─────────────────────────
+  - id: bpf_xdp_tc_unauthorized
+    name: "Unauthorized XDP/TC/act BPF program load"
+    description: >
+      A process loaded an XDP, SCHEd_CLS, or SCHED_ACT BPF program —
+      the types most commonly abused by rootkits to hide network traffic.
+      Unexpected XDP/TC loads from non-networking processes are a strong
+      indicator of compromise.
+    event_type: bpf_program
+    condition_group:
+      operator: and
+      conditions:
+        - field: cmd_nr
+          op: equals
+          values: ["5"]
+        - field: prog_type
+          op: in
+          values:
+            - "XDP"
+            - "SCHED_CLS"
+            - "SCHED_ACT"
+        - field: comm
+          op: not_in
+          values:
+            - "ebpf-guard"
+            - "cilium-agent"
+            - "cilium-operator"
+            - "calico-node"
+            - "flanneld"
+            - "kube-proxy"
+            - "systemd"
+            - "systemd-udevd"
+        - field: ret
+          op: gte
+          values: ["0"]
+    severity: critical
+    action: alert
+    tags:
+      - "T1562.001"
+      - "eBPF-rootkit"
+      - "boopkit"
+
+  # ── Kprobe loads from unexpected sources ─────────────────────────────────
+  - id: bpf_kprobe_unauthorized
+    name: "Unauthorized kprobe BPF program load"
+    description: >
+      A non-system process loaded a kprobe-type BPF program — commonly used
+      by rootkits to hook kernel functions for syscall hooking and data exfiltration.
+    event_type: bpf_program
+    condition_group:
+      operator: and
+      conditions:
+        - field: cmd_nr
+          op: equals
+          values: ["5"]
+        - field: prog_type
+          op: equals
+          values: ["KPROBE"]
+        - field: comm
+          op: not_in
+          values:
+            - "ebpf-guard"
+            - "systemd-udevd"
+            - "bpftrace"
+        - field: ret
+          op: gte
+          values: ["0"]
+    severity: critical
+    action: alert
+    tags:
+      - "T1055.012"
+      - "eBPF-rootkit"
+      - "syscall-hooking"
+
+  # ── Generic: any bpf() activity by unexpected processes ─────────────────
+  - id: bpf_activity_unexpected_process
+    name: "BPF syscall from unexpected process"
+    description: >
+      A process not in the known-BPF-loaders allowlist issued the bpf()
+      syscall. This could be a rootkit or post-exploitation tool loading
+      BPF programs or creating BPF maps to persist in the kernel.
+    event_type: bpf_program
+    condition_group:
+      operator: and
+      conditions:
+        - field: comm
+          op: not_in
+          values:
+            - "ebpf-guard"
+            - "cilium-agent"
+            - "cilium-operator"
+            - "systemd"
+            - "systemd-journal"
+            - "systemd-udevd"
+            - "calico-node"
+            - "flanneld"
+            - "k3s"
+            - "containerd"
+            - "kube-proxy"
+            - "bpftool"
+            - "bpftrace"
+            - "parca-agent"
+            - "kubectl-node-shell"
+        - field: ret
+          op: gte
+          values: ["0"]
+    severity: warning
+    action: alert
+    tags:
+      - "T1027"
+      - "eBPF-rootkit"
+      - "detection-evasion"

@@ -33,6 +33,10 @@ templates:
       technique_id: "T1071"
       technique: "Application Layer Protocol"
       url: "https://attack.mitre.org/techniques/T1071/"
+    plain:
+      what_happened: "Process {{.Comm}} (PID {{.PID}}) made an outbound network connection to an unexpected destination."
+      why_it_matters: "Unexpected outbound connections can mean an attacker is communicating with a command server (C2), exfiltrating data, or scanning your internal network. Application processes should generally only connect to known services."
+      what_to_do: "1. Check the destination IP and port — is it a known service?\n2. Look at the process command line: cat /proc/{{.PID}}/cmdline.\n3. If this is expected behavior (e.g. a microservice calling an API), add the destination to your allowlist.\n4. Consider egress network policies to restrict outbound traffic."
 
   - id: network_ssrf_attempt
     name: "Potential SSRF Attempt"
@@ -69,3 +73,7 @@ templates:
       technique_id: "T1195"
       technique: "Supply Chain Compromise"
       url: "https://attack.mitre.org/techniques/T1195/"
+    plain:
+      what_happened: "Your web application ({{.Comm}}, PID {{.PID}}) made a request to an internal service — a potential Server-Side Request Forgery (SSRF) attack."
+      why_it_matters: "SSRF tricks your server into making requests to internal services that should not be accessible from outside. Attackers use this to read cloud metadata (AWS credentials), access internal APIs, or scan your private network."
+      what_to_do: "1. Review the URL or IP that was accessed.\n2. Check your application code for SSRF vulnerabilities (unsanitized user input used in HTTP requests).\n3. Block access to cloud metadata endpoints (169.254.169.254) from your application.\n4. Use network policies to isolate your application from internal services."

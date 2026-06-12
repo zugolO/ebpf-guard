@@ -12,6 +12,9 @@ import (
 // TestReadProcCmdline exercises readProcCmdline using the test process's own
 // /proc/self/cmdline so no mocking is needed.
 func TestReadProcCmdline(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); os.IsNotExist(err) {
+		t.Skip("skipping: /proc not available (non-Linux)")
+	}
 	t.Run("reads own cmdline", func(t *testing.T) {
 		pid := uint32(os.Getpid())
 		args, truncated := readProcCmdline(pid)

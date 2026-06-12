@@ -374,6 +374,32 @@ func (s *Server) SetExplainer(e *explainer.Explainer) {
 	s.alertExplainer = e
 }
 
+// SetExplainerStyle sets the default explanation style on the configured explainer.
+// Valid styles: "plain" (non-technical, three-section format for developers) or
+// "technical" (traditional MITRE/SOC-oriented). Has no effect if no explainer
+// has been configured via SetExplainer or SetupExplainer.
+func (s *Server) SetExplainerStyle(style string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.alertExplainer == nil {
+		return
+	}
+	switch style {
+	case "plain":
+		s.alertExplainer.SetDefaultStyle(explainer.StylePlain)
+	case "technical":
+		s.alertExplainer.SetDefaultStyle(explainer.StyleTechnical)
+	case "full":
+		s.alertExplainer.SetDefaultStyle(explainer.StyleFull)
+	default:
+		s.logger.Warn("exporter/server: unknown explainer style, keeping current",
+			slog.String("style", style))
+		return
+	}
+	s.logger.Info("exporter/server: explainer style set",
+		slog.String("style", style))
+}
+
 // SetupExplainer creates an Explainer from templatesDir and wires it to the server.
 // If templatesDir is empty or missing, the explainer falls back to built-in templates.
 // Call before Start to enable GET /api/v1/alerts/{id}/explain.

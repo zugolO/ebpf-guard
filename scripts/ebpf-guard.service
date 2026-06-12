@@ -1,0 +1,31 @@
+[Unit]
+Description=ebpf-guard — eBPF runtime security agent for Linux
+Documentation=https://github.com/zugolO/ebpf-guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ebpf-guard --zero-config
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+CPUQuota=50%
+MemoryHigh=512M
+MemoryMax=1G
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ebpf-guard /var/log/ebpf-guard
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallFilter=@system-service @network-io ~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -34,6 +34,9 @@ type SequenceConfig struct {
 	Enabled    bool
 	WindowSize int
 	Threshold  float64
+	// Markov enables first-order Markov chain transition modeling alongside
+	// the frequency-vector cosine distance. Captures syscall ordering anomalies.
+	Markov MarkovConfig
 }
 
 // DefaultSequenceConfig returns default sequence profiling configuration.
@@ -111,6 +114,17 @@ type pidSequenceState struct {
 	baseline    *[seqVecSize]float32 // nil until first baseline is established
 	sampleCount int
 	lastUpdate  time.Time
+
+	// Markov chain transition model — captures syscall ordering (A → B).
+	// Populated during learning, scored during detection alongside cosine distance.
+	markov *MarkovChain
+
+	// Previous syscall for Markov transition recording.
+	prevSyscall    int64
+	prevSyscallSet bool
+
+	// Scratch buffer for Markov window scoring (reusable, zero-alloc after init).
+	markovScratch []int64
 }
 
 // SequenceProfiler detects anomalies in syscall sequences using frequency vectors.
@@ -120,6 +134,7 @@ type SequenceProfiler struct {
 	states       map[WorkloadKey]*pidSequenceState
 	mu           sync.RWMutex
 	distance     *prometheus.GaugeVec
+	markovScore  *prometheus.GaugeVec // Markov transition anomaly score
 	ttl          time.Duration
 	maxPIDs      int
 	enabled      bool
@@ -154,12 +169,22 @@ func newSequenceProfiler(config SequenceConfig, ttl time.Duration, maxPIDs int) 
 	if config.Threshold <= 0 {
 		config.Threshold = 0.3
 	}
+	if config.Markov.MaxUniqueSyscalls <= 0 {
+		config.Markov.MaxUniqueSyscalls = 64
+	}
+	if config.Markov.FloorProbability >= 0 {
+		config.Markov.FloorProbability = -3.0
+	}
 	return &SequenceProfiler{
 		config: config,
 		states: make(map[WorkloadKey]*pidSequenceState),
 		distance: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "ebpf_guard_profiler_sequence_distance",
 			Help: "Cosine distance between current and baseline syscall frequency vectors per workload class.",
+		}, []string{"comm", "namespace", "app"}),
+		markovScore: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "ebpf_guard_profiler_sequence_markov_score",
+			Help: "Markov-chain transition anomaly score per workload class. 0=normal, 1=extremely unlikely transitions.",
 		}, []string{"comm", "namespace", "app"}),
 		ttl:          ttl,
 		maxPIDs:      maxPIDs,
@@ -185,7 +210,12 @@ func (sp *SequenceProfiler) cleanupLoop(ctx context.Context) {
 
 // RegisterMetrics registers Prometheus metrics.
 func (sp *SequenceProfiler) RegisterMetrics(reg prometheus.Registerer) error {
-	return reg.Register(sp.distance)
+	for _, c := range []prometheus.Collector{sp.distance, sp.markovScore} {
+		if err := reg.Register(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Update processes a syscall event and returns distance if anomaly detected.
@@ -215,6 +245,7 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 		state = &pidSequenceState{
 			window:     newSyscallWindow(sp.config.WindowSize),
 			lastUpdate: time.Now(),
+			markov:     NewMarkovChain(sp.config.Markov),
 		}
 		sp.states[key] = state
 		sp.lruIndex.push(&sp.lruHeap, key)
@@ -222,7 +253,15 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 		sp.lruIndex.touch(&sp.lruHeap, key)
 	}
 
-	state.window.push(int(e.Syscall.Nr))
+	// Record Markov transition before pushing to window (from previous syscall).
+	currSyscall := e.Syscall.Nr
+	if state.prevSyscallSet && state.markov != nil {
+		state.markov.RecordTransition(state.prevSyscall, currSyscall)
+	}
+	state.prevSyscall = currSyscall
+	state.prevSyscallSet = true
+
+	state.window.push(int(currSyscall))
 	state.sampleCount++
 	state.lastUpdate = time.Now()
 
@@ -240,15 +279,55 @@ func (sp *SequenceProfiler) Update(e types.Event) (distance float64, isAnomaly b
 		// First baseline: transfer ownership of the pooled buffer to state.
 		// The pool will allocate a fresh buffer on the next call.
 		state.baseline = buf
+		// Finalize Markov chain at the same time as the frequency baseline.
+		if state.markov != nil {
+			state.markov.Finalize()
+		}
 		return 0, false
 	}
 
 	// Calculate cosine distance between current window and established baseline.
-	distance = cosineDistance(buf[:], state.baseline[:])
+	cosineDist := cosineDistance(buf[:], state.baseline[:])
 
-	sp.distance.WithLabelValues(key.Comm, key.Namespace, key.AppLabel).Set(distance)
+	sp.distance.WithLabelValues(key.Comm, key.Namespace, key.AppLabel).Set(cosineDist)
+
+	// Compute Markov transition score when enabled.
+	markovScore := 0.0
+	if sp.config.Markov.Enabled && state.markov != nil && state.markov.IsFinalized() {
+		// Build an int64 window from the ring buffer, reusing scratch buffer.
+		count := state.window.size
+		if state.window.full {
+			count = len(state.window.syscalls)
+		}
+		if cap(state.markovScratch) < count {
+			state.markovScratch = make([]int64, count)
+		} else {
+			state.markovScratch = state.markovScratch[:count]
+		}
+		start := 0
+		if state.window.full {
+			start = state.window.head
+		}
+		for i := 0; i < count; i++ {
+			idx := (start + i) % len(state.window.syscalls)
+			state.markovScratch[i] = int64(state.window.syscalls[idx])
+		}
+		markovScore, _, _ = state.markov.ScoreWindow(state.markovScratch)
+
+		sp.markovScore.WithLabelValues(key.Comm, key.Namespace, key.AppLabel).Set(markovScore)
+	}
+
+	// Combined score: use the maximum of cosine distance and Markov score.
+	// This catches both frequency anomalies (cosine) and ordering anomalies (Markov).
+	distance = cosineDist
+	if markovScore > distance {
+		distance = markovScore
+	}
 
 	isAnomaly = distance > sp.config.Threshold
+
+	// Record the combined distance metric for observability.
+	// The Prometheus gauge reports the cosine distance; Markov score is folded in.
 
 	// Gradually adapt baseline for normal behavior (EWMA update in-place).
 	if !isAnomaly {

@@ -488,7 +488,7 @@ type BPFConfig struct {
 
 	// RingBufSize is the BPF ring buffer size in bytes applied to each
 	// event ring buffer (syscall, network, file, TLS, LSM).
-	// 0 = auto-detect: 1% of MemAvailable from /proc/meminfo, clamped to [256 KB, 32 MB].
+	// 0 = auto-detect: 1% of MemAvailable from /proc/meminfo, clamped to [4 MB, 32 MB].
 	// Non-multiples of the page size (4096) are rounded up automatically.
 	RingBufSize int `mapstructure:"ring_buf_size"`
 

@@ -24,10 +24,17 @@ struct sys_exit_args {
 	long ret;
 };
 
-/* Map to store syscall entry args for matching with exit */
+/* Map to store syscall entry args for matching with exit.
+ * LRU eviction ensures the map does not overflow under burst workloads,
+ * dropping the oldest unfinished entry (least-used PID) rather than rejecting
+ * new inserts with -E2BIG. 32K entries accommodates high-concurrency nodes.
+ * Map-full drops (when all entries are in use) are tracked via
+ * map_full_counters[MAP_FULL_IDX_SYSCALL_ARGS] and exported as
+ * ebpf_guard_bpf_map_full_total{map_name="syscall_args"}.
+ */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 10240);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 32768);
 	__type(key, __u64);   /* pid_tgid */
 	__type(value, struct sys_enter_args);
 } syscall_args SEC(".maps");

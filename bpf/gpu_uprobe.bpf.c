@@ -64,10 +64,10 @@ struct gpu_event {
 	__u64 size;      /* Bytes allocated, freed, or transferred        */
 } __attribute__((packed));
 
-/* Ring buffer for GPU events (256KB — sufficient for ~3000 events/s burst) */
+/* Ring buffer for GPU events (4MB — sufficient for ~50000 events/s burst) */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024);
+	__uint(max_entries, 4 * 1024 * 1024); /* 4MB ring buffer */
 } gpu_events SEC(".maps");
 
 /*

@@ -9,7 +9,7 @@ import (
 
 const (
 	// ringBufMinBytes is the smallest valid BPF ring buffer (kernel enforced minimum).
-	ringBufMinBytes = 256 * 1024 // 256 KB
+	ringBufMinBytes = 4 * 1024 * 1024 // 4 MB
 	// ringBufMaxBytes caps memory usage per ring buffer in constrained environments.
 	ringBufMaxBytes = 32 * 1024 * 1024 // 32 MB
 	// ringBufPageSize is the required alignment (BPF ring buffers must be page-aligned).
@@ -31,7 +31,7 @@ type RingBufSizeConfig struct {
 //   - cfg.SizeBytes (rounded to page size) when explicitly set
 //   - cfg.MemFractionPct % of MemAvailable from /proc/meminfo otherwise
 //
-// The result is always in [256 KB, 32 MB] and a multiple of 4096, matching
+// The result is always in [4 MB, 32 MB] and a multiple of 4096, matching
 // the kernel's BPF_MAP_TYPE_RINGBUF alignment constraints.
 func ComputeRingBufSize(cfg RingBufSizeConfig) int {
 	if cfg.SizeBytes > 0 {

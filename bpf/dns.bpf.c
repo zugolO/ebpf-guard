@@ -70,7 +70,7 @@ struct dns_event {
 /* Ring buffer for DNS events */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024); /* 256KB ring buffer */
+	__uint(max_entries, 4 * 1024 * 1024); /* 4MB ring buffer */
 } dns_events SEC(".maps");
 
 /* Helper: check if this is a DNS packet (UDP port 53) */

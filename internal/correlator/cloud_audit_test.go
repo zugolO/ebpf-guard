@@ -44,7 +44,7 @@ func TestCloudAuditFieldExtraction(t *testing.T) {
 		{"cloud.event_id", "event-001"},
 	}
 	for _, tt := range tests {
-		got := re.getFieldValue(event, tt.field)
+		got := re.getFieldValue(event, tt.field, nil)
 		assert.Equal(t, tt.want, got, "field=%q", tt.field)
 	}
 }
@@ -55,7 +55,7 @@ func TestCloudAuditNilPayload(t *testing.T) {
 		Type:       types.EventCloudAudit,
 		CloudAudit: nil,
 	}
-	got := re.getFieldValue(event, "cloud.action")
+	got := re.getFieldValue(event, "cloud.action", nil)
 	assert.Equal(t, "", got)
 }
 
@@ -65,7 +65,7 @@ func TestCloudAuditUnknownField(t *testing.T) {
 		Type:       types.EventCloudAudit,
 		CloudAudit: &types.CloudAuditEvent{Action: "AssumeRole"},
 	}
-	got := re.getFieldValue(event, "cloud.nonexistent")
+	got := re.getFieldValue(event, "cloud.nonexistent", nil)
 	assert.Equal(t, fieldNotFound, got)
 }
 

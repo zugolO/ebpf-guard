@@ -13,12 +13,12 @@ func TestComputeRingBufSize_Explicit(t *testing.T) {
 		input int
 		want  int
 	}{
-		// 4096 < ringBufMinBytes (256 KB), so it clamps to the minimum.
+		// 4096 < ringBufMinBytes (4 MB), so it clamps to the minimum.
 		{"below min", 4096, ringBufMinBytes},
 		{"exact min", ringBufMinBytes, ringBufMinBytes},
-		{"already aligned", 1 * 1024 * 1024, 1 * 1024 * 1024},
-		// 300*1024+1 = 307201; next page = ceil(307201/4096)*4096 = 76*4096 = 311296
-		{"not page aligned", 300*1024 + 1, 76 * 4096},
+		{"already aligned", 5 * 1024 * 1024, 5 * 1024 * 1024},
+		// 6*1024*1024+1 = 6291457; next page = ceil(6291457/4096)*4096 = 1537*4096 = 6295552
+		{"not page aligned", 6*1024*1024 + 1, 1537 * 4096},
 		{"max clamp", 64 * 1024 * 1024, ringBufMaxBytes},
 		{"at max", ringBufMaxBytes, ringBufMaxBytes},
 	}
@@ -71,7 +71,7 @@ func TestClampRingBuf(t *testing.T) {
 	assert.Equal(t, ringBufMinBytes, clampRingBuf(0))
 	assert.Equal(t, ringBufMinBytes, clampRingBuf(ringBufMinBytes-1))
 	assert.Equal(t, ringBufMinBytes, clampRingBuf(ringBufMinBytes))
-	assert.Equal(t, 1*1024*1024, clampRingBuf(1*1024*1024))
+	assert.Equal(t, 5*1024*1024, clampRingBuf(5*1024*1024))
 	assert.Equal(t, ringBufMaxBytes, clampRingBuf(ringBufMaxBytes))
 	assert.Equal(t, ringBufMaxBytes, clampRingBuf(ringBufMaxBytes+1))
 }

@@ -54,7 +54,7 @@ func (c *SyscallCollector) WithBackpressureStrategy(s BackpressureStrategy) *Sys
 
 // WithRingBufSize sets the BPF ring buffer size in bytes for this collector.
 // Zero (default) auto-detects the size from /proc/meminfo (1% of MemAvailable,
-// clamped to [256 KB, 32 MB] and rounded up to page size).
+// clamped to [4 MB, 32 MB] and rounded up to page size).
 func (c *SyscallCollector) WithRingBufSize(sizeBytes int) *SyscallCollector {
 	c.ringBufSize = sizeBytes
 	return c

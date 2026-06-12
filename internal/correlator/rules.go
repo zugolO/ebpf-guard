@@ -590,16 +590,29 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 		}
 	}
 
-	// Use condition group if present, otherwise use single condition.
-	if rule.ConditionGroup != nil {
-		return re.evaluateConditionGroup(e, rule.ConditionGroup)
+	// Lazily compute DNS analysis once per rule evaluation so that multiple
+	// enriched DNS fields (qname_entropy, qname_dga_score, qname_digit_ratio,
+	// qname_subdomain_count, qname_is_dga) all share the same DomainAnalysis
+	// result instead of calling AnalyzeDomain up to 5 times per event.
+	var dnsAnalysis *DomainAnalysis
+	if e.Type == types.EventDNS && e.DNS != nil {
+		a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+		dnsAnalysis = &a
 	}
 
-	return re.evaluateCondition(e, &rule.Condition)
+	// Use condition group if present, otherwise use single condition.
+	if rule.ConditionGroup != nil {
+		return re.evaluateConditionGroup(e, rule.ConditionGroup, dnsAnalysis)
+	}
+
+	return re.evaluateCondition(e, &rule.Condition, dnsAnalysis)
 }
 
 // evaluateConditionGroup evaluates a group of conditions with AND/OR logic, recursing into SubGroups.
-func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleConditionGroup) bool {
+// dnsAnalysis is precomputed by matchesTyped when the event type is DNS — it is nil for all
+// other event types and passed through to evaluateCondition / getFieldValue to avoid calling
+// AnalyzeDomain multiple times for the same QName in different enriched DNS fields.
+func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleConditionGroup, dnsAnalysis *DomainAnalysis) bool {
 	if len(group.Conditions) == 0 && len(group.SubGroups) == 0 {
 		return true
 	}
@@ -607,24 +620,24 @@ func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleCondition
 	switch group.Operator {
 	case "or":
 		for i := range group.Conditions {
-			if re.evaluateCondition(e, &group.Conditions[i]) {
+			if re.evaluateCondition(e, &group.Conditions[i], dnsAnalysis) {
 				return true
 			}
 		}
 		for i := range group.SubGroups {
-			if re.evaluateConditionGroup(e, &group.SubGroups[i]) {
+			if re.evaluateConditionGroup(e, &group.SubGroups[i], dnsAnalysis) {
 				return true
 			}
 		}
 		return false
 	default: // "and" or ""
 		for i := range group.Conditions {
-			if !re.evaluateCondition(e, &group.Conditions[i]) {
+			if !re.evaluateCondition(e, &group.Conditions[i], dnsAnalysis) {
 				return false
 			}
 		}
 		for i := range group.SubGroups {
-			if !re.evaluateConditionGroup(e, &group.SubGroups[i]) {
+			if !re.evaluateConditionGroup(e, &group.SubGroups[i], dnsAnalysis) {
 				return false
 			}
 		}
@@ -641,7 +654,8 @@ const fieldNotFound = "\x00__field_not_found__"
 // Takes *RuleCondition to avoid copying the ~80-byte struct on the hot path.
 // Switches on cond.opCode (precomputed integer) instead of cond.Op (string)
 // for jump-table dispatch (~2 ns vs ~10 ns for string switch).
-func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition) bool {
+// dnsAnalysis is precomputed by matchesTyped for DNS events — nil for other types.
+func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsAnalysis *DomainAnalysis) bool {
 	// caps_gained / caps_dropped operate directly on the Privesc struct —
 	// they don't go through getFieldValue.
 	switch cond.opCode {
@@ -655,7 +669,7 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition) bool
 	// fieldNotFound means the field name is unknown for this event type —
 	// treat as no-match for all operators (rule is misconfigured but was
 	// already rejected at load time via validateFieldName).
-	value := re.getFieldValue(e, cond.Field)
+	value := re.getFieldValue(e, cond.Field, dnsAnalysis)
 	if value == fieldNotFound {
 		return false
 	}
@@ -786,9 +800,12 @@ func capNameToBit(name string) (uint, bool) {
 // getFieldValue extracts a field value from an event based on field name.
 // Returns fieldNotFound if the field name is not valid for the event type.
 // Hot path: uses strconv instead of fmt.Sprintf for numeric fields to avoid
-// interface boxing allocations. DNS enriched fields are computed at most once
-// per call via a lazy local variable.
-func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
+// interface boxing allocations. dnsAnalysis is precomputed once per rule
+// evaluation (in matchesTyped) so that multiple enriched DNS fields
+// (qname_entropy, qname_dga_score, qname_digit_ratio, qname_subdomain_count,
+// qname_is_dga) all reuse the same DomainAnalysis without recomputing entropy,
+// n-gram scores, and digit ratio for the same QName.
+func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *DomainAnalysis) string {
 	switch e.Type {
 	case types.EventTCPConnect:
 		if e.Network == nil {
@@ -908,21 +925,38 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string) string {
 			return strconv.FormatUint(uint64(e.DNS.Direction), 10)
 		case "qname_length":
 			return strconv.Itoa(len(e.DNS.QName))
-		// ── Enriched DNS fields — AnalyzeDomain is called lazily and at most once ──
+		// ── Enriched DNS fields — use precomputed DomainAnalysis from matchesTyped ──
 		case "qname_entropy":
+			if dnsAnalysis != nil {
+				return strconv.FormatFloat(dnsAnalysis.Entropy, 'f', 4, 64)
+			}
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
 			return strconv.FormatFloat(a.Entropy, 'f', 4, 64)
 		case "qname_dga_score":
+			if dnsAnalysis != nil {
+				return strconv.FormatFloat(dnsAnalysis.NgramScore, 'f', 4, 64)
+			}
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
 			return strconv.FormatFloat(a.NgramScore, 'f', 4, 64)
 		case "qname_digit_ratio":
+			if dnsAnalysis != nil {
+				return strconv.FormatFloat(dnsAnalysis.DigitRatio, 'f', 4, 64)
+			}
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
 			return strconv.FormatFloat(a.DigitRatio, 'f', 4, 64)
 		case "qname_subdomain_count":
+			if dnsAnalysis != nil {
+				return strconv.Itoa(dnsAnalysis.SubdomainCount)
+			}
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
 			return strconv.Itoa(a.SubdomainCount)
 		case "qname_is_dga":
-			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			var a DomainAnalysis
+			if dnsAnalysis != nil {
+				a = *dnsAnalysis
+			} else {
+				a = globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			}
 			if a.IsDGA || a.NgramScore >= DefaultNgramDGADetector().threshold {
 				return "true"
 			}

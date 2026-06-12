@@ -253,7 +253,7 @@ static __always_inline void record_map_full(__u32 map_idx)
 /* BPF map definitions using BTF-enabled maps (kernel 5.15+) */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024); /* 256KB ring buffer */
+	__uint(max_entries, 4 * 1024 * 1024); /* 4MB ring buffer */
 } events SEC(".maps");
 
 /* Helper: check if event should be sampled based on rate */

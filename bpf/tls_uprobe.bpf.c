@@ -58,7 +58,7 @@ struct tls_event {
 /* Ring buffer for TLS events */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024); /* 256KB ring buffer */
+	__uint(max_entries, 4 * 1024 * 1024); /* 4MB ring buffer */
 } tls_events SEC(".maps");
 
 /* 

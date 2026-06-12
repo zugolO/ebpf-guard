@@ -14,12 +14,14 @@ env:
 permissions:
   contents: write
   packages: write
-  id-token: write  # Required for cosign keyless signing
+  id-token: write  # Required for cosign keyless signing and SLSA provenance
 
 jobs:
   build:
     name: Build Release Artifacts
     runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
     strategy:
       matrix:
         include:
@@ -43,6 +45,11 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
         sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.3'
 
     - name: Set up QEMU
       if: matrix.arch == 'arm64'
@@ -68,12 +75,42 @@ jobs:
       run: |
         sha256sum ebpf-guard-${{ matrix.os }}-${{ matrix.arch }} > ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.sha256
 
-    - name: Generate SBOM for binary
+    - name: Sign binary with cosign
+      env:
+        COSIGN_EXPERIMENTAL: "1"
+      run: |
+        cosign sign-blob --yes \
+          --bundle ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.cosign.bundle \
+          ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}
+
+    - name: Generate SBOM for binary (SPDX)
       uses: anchore/sbom-action@v0
       with:
         path: .
         output-file: ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.spdx.json
         format: spdx-json
+
+    - name: Generate SBOM for binary (CycloneDX)
+      uses: anchore/sbom-action@v0
+      with:
+        path: .
+        output-file: ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.cyclonedx.json
+        format: cyclonedx-json
+
+    - name: Sign SBOM with cosign
+      env:
+        COSIGN_EXPERIMENTAL: "1"
+      run: |
+        cosign sign-blob --yes \
+          --bundle ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.spdx.json.cosign.bundle \
+          ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.spdx.json
+
+    - name: Compute artifact hashes for SLSA provenance
+      id: hash
+      run: |
+        BINARY="ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}"
+        HASH=$(sha256sum "${BINARY}" | base64 -w0)
+        echo "hashes=${BINARY}:${HASH}" >> $GITHUB_OUTPUT
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -82,7 +119,10 @@ jobs:
         path: |
           ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}
           ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.sha256
+          ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.cosign.bundle
           ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.spdx.json
+          ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.spdx.json.cosign.bundle
+          ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.cyclonedx.json
 
   docker:
     name: Build and Push Docker Image
@@ -145,6 +185,21 @@ jobs:
         done
         cosign sign --yes ${images}
 
+  provenance:
+    name: Generate SLSA L3 Provenance
+    needs: [build]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    # slsa-github-generator must run in a separate job — it calls back to the
+    # workflow via the OIDC token and cannot share a job with artifact uploads.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.hashes }}"
+      upload-assets: true
+      provenance-name: ebpf-guard.intoto.jsonl
+
   helm:
     name: Package and Push Helm Chart
     runs-on: ubuntu-latest
@@ -187,7 +242,7 @@ jobs:
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, docker, helm]
+    needs: [build, docker, helm, provenance]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -218,16 +273,40 @@ jobs:
           ## Docker Images
           - `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
 
-          ## Verification
-          Verify the container image signature:
+          ## Supply Chain Security
+
+          ### Verify container image (cosign keyless)
           ```bash
           cosign verify ghcr.io/${{ github.repository }}:${{ github.ref_name }} \
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
           ```
 
+          ### Verify binary (cosign keyless)
+          ```bash
+          # Download binary and bundle
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ebpf-guard-linux-amd64
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ebpf-guard-linux-amd64.cosign.bundle
+
+          cosign verify-blob \
+            --bundle ebpf-guard-linux-amd64.cosign.bundle \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            ebpf-guard-linux-amd64
+          ```
+
+          ### Verify SLSA L3 provenance
+          ```bash
+          # Install slsa-verifier: https://github.com/slsa-framework/slsa-verifier
+          slsa-verifier verify-artifact ebpf-guard-linux-amd64 \
+            --provenance-path ebpf-guard.intoto.jsonl \
+            --source-uri github.com/${{ github.repository }} \
+            --source-tag ${{ github.ref_name }}
+          ```
+
           ## SBOM
-          Software Bill of Materials (SPDX format) is attached to this release.
+          Software Bill of Materials (SPDX and CycloneDX formats) are attached to this release.
+          SBOM files are also signed — verify with `cosign verify-blob` using the `.cosign.bundle` file.
 
           ## Helm Chart
           ```bash
@@ -236,9 +315,15 @@ jobs:
         files: |
           artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64
           artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64.sha256
+          artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64.cosign.bundle
           artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64.spdx.json
+          artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64.spdx.json.cosign.bundle
+          artifacts/ebpf-guard-linux-amd64/ebpf-guard-linux-amd64.cyclonedx.json
           artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64
           artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.sha256
+          artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.cosign.bundle
           artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.spdx.json
+          artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.spdx.json.cosign.bundle
+          artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.cyclonedx.json
         draft: false
         prerelease: ${{ contains(github.ref_name, '-') }}

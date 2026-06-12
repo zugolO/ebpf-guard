@@ -86,7 +86,8 @@ int BPF_KPROBE(trace_tcp_connect, struct sock *sk)
 		return 0;
 
 	/* Store connect timestamp for duration calculation in tcp_close. */
-	bpf_map_update_elem(&conn_start_map, &sk_ptr, &ts, BPF_ANY);
+	if (bpf_map_update_elem(&conn_start_map, &sk_ptr, &ts, BPF_NOEXIST) == -E2BIG)
+		record_map_full(MAP_FULL_IDX_CONN_START);
 
 	/* Reserve space in ring buffer with sampling */
 	e = reserve_event_with_sampling(EVENT_TYPE_TCP_CONNECT, 0);
@@ -142,7 +143,8 @@ store_meta:;
 		meta.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
 		meta.dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
 	}
-	bpf_map_update_elem(&conn_meta_map, &sk_ptr, &meta, BPF_ANY);
+	if (bpf_map_update_elem(&conn_meta_map, &sk_ptr, &meta, BPF_NOEXIST) == -E2BIG)
+		record_map_full(MAP_FULL_IDX_CONN_META);
 
 	return 0;
 }

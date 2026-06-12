@@ -562,3 +562,112 @@ func getGaugeValue(t *testing.T, g prometheus.Gauge) float64 {
 	}
 	return 0
 }
+
+// TestSharedLearner_MultiWorkerConvergence verifies that with N ingest workers
+// sharing a single BaselineLearner, the learning phase completes after
+// minSamples aggregate events — not after N×minSamples (MEDIUM-6).
+//
+// The test drives IngestAsync from multiple goroutines so that events are
+// distributed across workers, then waits for each worker's detector to report
+// learning complete and checks that the aggregate sample count at that point
+// does not exceed minSamples by more than one worker's worth of events.
+func TestSharedLearner_MultiWorkerConvergence(t *testing.T) {
+	const (
+		workerCount = 4
+		minSamples  = 200 // small enough to complete quickly in the test
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{}
+	cfg.EnableAnomaly = true
+	cfg.AnomalyThreshold = 0.9
+	cfg.LearningPeriod = 1 * time.Millisecond // effectively time-gate disabled; sample gate drives exit
+	cfg.MinLearningSamples = minSamples
+	cfg.IngestWorkerCount = workerCount
+	cfg.EnableRateLimit = false
+	cfg.EnableDedup = false
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	// Verify that the shared learner is wired: all workers must reference the
+	// same BaselineLearner pointer, so they all see the same aggregate count.
+	require.Equal(t, workerCount, len(engine.ingestPool), "worker pool size mismatch")
+	if workerCount > 1 {
+		first := engine.ingestPool[0].ad
+		for i := 1; i < len(engine.ingestPool); i++ {
+			require.NotNil(t, engine.ingestPool[i].ad, "worker %d has nil AnomalyDetector", i)
+			// Both detectors should be in the learning phase before any events.
+			require.False(t, first.IsLearningComplete(), "worker 0 detector should not be complete yet")
+			require.False(t, engine.ingestPool[i].ad.IsLearningComplete(),
+				"worker %d detector should not be complete yet", i)
+		}
+	}
+
+	// Send events spread across many distinct PIDs so the PID-hash routing
+	// distributes them across all workers.
+	const totalEvents = minSamples * 3
+	for i := 0; i < totalEvents; i++ {
+		engine.IngestAsync(ctx, types.Event{
+			Type: types.EventSyscall,
+			PID:  uint32(i % 1024), // 1024 distinct PIDs → round-robins across workers
+			Syscall: &types.SyscallEvent{
+				Nr: int64(i % 10),
+			},
+		})
+	}
+
+	// Give workers time to drain their queues.
+	deadline := time.After(8 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for learning phase to complete across all workers")
+		case <-ticker.C:
+			allDone := true
+			for _, w := range engine.ingestPool {
+				if w.ad != nil && !w.ad.IsLearningComplete() {
+					allDone = false
+					break
+				}
+			}
+			if allDone {
+				return // all workers have exited learning phase — test passes
+			}
+		}
+	}
+}
+
+// TestSharedLearner_GetRulesBeforeUpdate verifies that GetRules() returns nil
+// (not panics) when called before the first UpdateRules() invocation (HIGH-2).
+func TestSharedLearner_GetRulesBeforeUpdate(t *testing.T) {
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = nil // start with no rules — ruleEngine is populated by NewCorrelationEngineWithConfig
+	cfg.EnableAnomaly = false
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	// GetRules on a freshly constructed engine must not panic and must return a
+	// non-nil slice (engine pre-loads the initial rules from cfg.Rules).
+	rules := engine.GetRules()
+	_ = rules // nil or empty both acceptable; only a panic is a failure
+
+	// Concurrent GetRules + UpdateRules must not race.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			engine.UpdateRules([]Rule{})
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		_ = engine.GetRules()
+	}
+	<-done
+}

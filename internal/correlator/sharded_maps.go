@@ -3,8 +3,17 @@ package correlator
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// MaxCooldownEntries is the hard cap on total entries across all cooldown shards.
+// Under a pod storm each unique (ruleID, PID) pair adds one entry; without this
+// cap the map grows unboundedly and can reach 100MB+ before the cleanup ticker fires.
+const MaxCooldownEntries = 1_000_000
+
+// MaxDedupEntries is the hard cap on total entries across all dedup shards.
+const MaxDedupEntries = 1_000_000
 
 // ---------------------------------------------------------------------------
 // shardedCooldowns — enforcement cooldown map with per-shard locking
@@ -23,6 +32,7 @@ type cooldownShard struct {
 type shardedCooldowns struct {
 	shards []cooldownShard
 	mask   uint32
+	total  atomic.Int64 // total entries across all shards (approximate, for metrics)
 }
 
 func newShardedCooldowns() *shardedCooldowns {
@@ -37,10 +47,14 @@ func newShardedCooldowns() *shardedCooldowns {
 	return sc
 }
 
+// Size returns the approximate total number of entries across all shards.
+func (sc *shardedCooldowns) Size() int64 { return sc.total.Load() }
+
 // tryAcquire returns true and records the timestamp when the cooldown for
 // (ruleID, pid) has expired or was never set.  Returns false if the last
 // acquisition is within cooldown of now — prevents enforcement spam.
-// The check-and-set is atomic within the shard's mutex.
+// When the total entry count reaches MaxCooldownEntries, the oldest entry in the
+// target shard is evicted (FIFO within the shard) to keep memory bounded.
 // now must be captured by the caller before entering any hot-path lock.
 func (sc *shardedCooldowns) tryAcquire(ruleID string, pid uint32, cooldown time.Duration, now time.Time) bool {
 	key := cooldownKey{ruleID: ruleID, pid: pid}
@@ -52,6 +66,27 @@ func (sc *shardedCooldowns) tryAcquire(ruleID string, pid uint32, cooldown time.
 	if prev, ok := shard.m[key]; ok && now.Sub(prev) < cooldown {
 		return false
 	}
+
+	isNew := !func() bool { _, ok := shard.m[key]; return ok }()
+	if isNew && sc.total.Load() >= MaxCooldownEntries {
+		// Evict the oldest entry in this shard to stay within the global cap.
+		var oldest cooldownKey
+		var oldestTime time.Time
+		first := true
+		for k, t := range shard.m {
+			if first || t.Before(oldestTime) {
+				oldest, oldestTime, first = k, t, false
+			}
+		}
+		if !first {
+			delete(shard.m, oldest)
+			sc.total.Add(-1)
+		}
+	}
+
+	if isNew {
+		sc.total.Add(1)
+	}
 	shard.m[key] = now
 	return true
 }
@@ -60,13 +95,19 @@ func (sc *shardedCooldowns) tryAcquire(ruleID string, pid uint32, cooldown time.
 // Each shard is locked independently so cleanup does not block Ingest.
 func (sc *shardedCooldowns) cleanup(cutoff time.Time) {
 	for i := range sc.shards {
-		sc.shards[i].mu.Lock()
-		for k, t := range sc.shards[i].m {
+		shard := &sc.shards[i]
+		shard.mu.Lock()
+		removed := 0
+		for k, t := range shard.m {
 			if t.Before(cutoff) {
-				delete(sc.shards[i].m, k)
+				delete(shard.m, k)
+				removed++
 			}
 		}
-		sc.shards[i].mu.Unlock()
+		shard.mu.Unlock()
+		if removed > 0 {
+			sc.total.Add(-int64(removed))
+		}
 	}
 }
 
@@ -88,6 +129,7 @@ type shardedDedup struct {
 	shards []dedupShard
 	mask   uint32
 	window time.Duration
+	total  atomic.Int64 // total entries across all shards (approximate, for metrics)
 }
 
 func newShardedDedup(window time.Duration) *shardedDedup {
@@ -102,6 +144,9 @@ func newShardedDedup(window time.Duration) *shardedDedup {
 	}
 	return sd
 }
+
+// Size returns the approximate total number of entries across all shards.
+func (sd *shardedDedup) Size() int64 { return sd.total.Load() }
 
 // check reports whether (ruleID, pid, comm) was recorded within the window.
 // It is read-only: it does not update the map.  Call mark after the alert
@@ -119,12 +164,33 @@ func (sd *shardedDedup) check(ruleID string, pid uint32, comm string) bool {
 }
 
 // mark records that (ruleID, pid, comm) was emitted at now.
+// When the total entry count reaches MaxDedupEntries, the oldest entry in the
+// target shard is evicted (FIFO within the shard) to keep memory bounded.
 // now must be captured by the caller before entering any hot-path lock.
 func (sd *shardedDedup) mark(ruleID string, pid uint32, comm string, now time.Time) {
 	key := dedupKey{ruleID: ruleID, pid: pid, comm: comm}
 	shard := &sd.shards[pid&sd.mask]
 
 	shard.mu.Lock()
+	_, exists := shard.m[key]
+	if !exists && sd.total.Load() >= MaxDedupEntries {
+		// Evict the oldest entry in this shard to stay within the global cap.
+		var oldest dedupKey
+		var oldestTime time.Time
+		first := true
+		for k, t := range shard.m {
+			if first || t.Before(oldestTime) {
+				oldest, oldestTime, first = k, t, false
+			}
+		}
+		if !first {
+			delete(shard.m, oldest)
+			sd.total.Add(-1)
+		}
+	}
+	if !exists {
+		sd.total.Add(1)
+	}
 	shard.m[key] = now
 	shard.mu.Unlock()
 }
@@ -132,12 +198,18 @@ func (sd *shardedDedup) mark(ruleID string, pid uint32, comm string, now time.Ti
 // cleanup removes entries older than the window.
 func (sd *shardedDedup) cleanup(cutoff time.Time) {
 	for i := range sd.shards {
-		sd.shards[i].mu.Lock()
-		for k, t := range sd.shards[i].m {
+		shard := &sd.shards[i]
+		shard.mu.Lock()
+		removed := 0
+		for k, t := range shard.m {
 			if t.Before(cutoff) {
-				delete(sd.shards[i].m, k)
+				delete(shard.m, k)
+				removed++
 			}
 		}
-		sd.shards[i].mu.Unlock()
+		shard.mu.Unlock()
+		if removed > 0 {
+			sd.total.Add(-int64(removed))
+		}
 	}
 }

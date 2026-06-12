@@ -564,6 +564,14 @@ func formatSyscall(nr int64) string {
 	return string(b)
 }
 
+// FlushProfiles purges all in-memory workload profiles from the profile manager,
+// releasing EWMA allocations back to the GC. Call this during worker teardown
+// (after the processing loop exits) so per-worker LRU memory is freed promptly
+// rather than waiting for the next GC cycle.
+func (ad *AnomalyDetector) FlushProfiles() {
+	ad.profileManager.Flush()
+}
+
 // Enable activates the anomaly detector.
 func (ad *AnomalyDetector) Enable() {
 	ad.mu.Lock()
@@ -604,6 +612,19 @@ func (ad *AnomalyDetector) GetSamplingRate() float64 {
 	ad.mu.RLock()
 	defer ad.mu.RUnlock()
 	return ad.samplingRate
+}
+
+// SetSharedLearner replaces the per-detector BaselineLearner with a shared one.
+// All AnomalyDetector instances that share the same learner will transition out
+// of the learning phase simultaneously, based on the aggregate sample count across
+// all workers rather than per-worker counts.
+//
+// Must be called before ProcessEvent is first invoked. Not safe to call concurrently
+// with ProcessEvent.
+func (ad *AnomalyDetector) SetSharedLearner(learner *BaselineLearner) {
+	ad.learner = learner
+	// Reset the cached atomic flag so IsLearningComplete re-checks the shared learner.
+	ad.learningComplete.Store(false)
 }
 
 // SetSamplingCorrections stores per-event-type inverse sampling factors supplied

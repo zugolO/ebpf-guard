@@ -697,6 +697,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					slog.Error("fail-closed: required collector failed, aborting",
 						slog.String("collector", se.name),
 						slog.Any("error", se.err))
+					srv.SetBPFAttached(false)
 					cancel()
 				}
 			}
@@ -771,6 +772,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 
 	srv.SetReady(true)
+	srv.SetBPFAttached(!dryRun)
 	slog.Info("ebpf-guard ready", slog.String("addr", cfg.Server.BindAddress))
 
 	// ── Simulate mode setup ──────────────────────────────────────────────────
@@ -975,6 +977,10 @@ func gracefulShutdown(
 
 	start := time.Now()
 	slog.Info("graceful shutdown: starting", slog.String("budget", totalTimeout.String()))
+
+	// Signal Kubernetes to stop routing traffic immediately so no new requests
+	// arrive during drain. Must happen before any blocking drain steps.
+	srv.SetReady(false)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), totalTimeout)
 	defer shutdownCancel()

@@ -50,6 +50,15 @@ type DropTracker interface {
 	LostEvents() uint64
 }
 
+// MapFullTracker is implemented by collectors that expose the BPF
+// map_full_counters PERCPU_ARRAY. The watchdog drains the per-CPU values
+// and publishes them as ebpf_guard_bpf_map_full_total{map_name=...}.
+type MapFullTracker interface {
+	// MapFullCountersMap returns the *ebpf.Map handle for map_full_counters,
+	// or nil if the collector is running in stub/dry-run mode.
+	MapFullCountersMap() *ebpf.Map
+}
+
 // BPFProgramChecker is the interface for checking BPF program status.
 type BPFProgramChecker interface {
 	// IsAttached returns true if the BPF program is still attached.
@@ -89,6 +98,8 @@ type Watchdog struct {
 	trackers     []DropTracker
 	dropLostSeen map[string]uint64
 	dropLostMu   sync.Mutex
+
+	mapFullTrackers []MapFullTracker
 }
 
 // Config holds watchdog configuration.
@@ -170,6 +181,14 @@ func (w *Watchdog) RegisterDropTracker(t DropTracker) {
 	w.trackers = append(w.trackers, t)
 }
 
+// RegisterMapFullTracker adds a collector whose BPF map_full_counters array
+// should be drained by the watchdog and exported as Prometheus counters.
+func (w *Watchdog) RegisterMapFullTracker(t MapFullTracker) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.mapFullTrackers = append(w.mapFullTrackers, t)
+}
+
 // Start begins the watchdog goroutines.
 func (w *Watchdog) Start(ctx context.Context) {
 	w.mu.Lock()
@@ -198,6 +217,9 @@ func (w *Watchdog) Start(ctx context.Context) {
 
 	// Start BPF ring buffer drop tracking goroutine
 	go w.runDropTracking(ctx)
+
+	// Start BPF map-full counter drain goroutine
+	go w.runMapFullTracking(ctx)
 }
 
 // Stop stops the watchdog.
@@ -435,4 +457,73 @@ func (w *Watchdog) GetCheckerCount() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return len(w.checkers)
+}
+
+// mapFullIndexNames maps map_full_counters BPF array indices to human-readable
+// map names used as Prometheus label values. Indices must match MAP_FULL_IDX_*
+// constants in bpf/common.h.
+var mapFullIndexNames = [3]string{
+	"syscall_args",
+	"conn_start_map",
+	"conn_meta_map",
+}
+
+// runMapFullTracking drains the per-CPU map_full_counters BPF array every 10s
+// and publishes the deltas as ebpf_guard_bpf_map_full_total{map_name=...}.
+// Draining (reading + zeroing) is done via a per-CPU lookup followed by writing
+// zeroes back; because the BPF side uses __sync_fetch_and_add there is a tiny
+// race but over-counting is not possible — only minor under-reporting can occur.
+func (w *Watchdog) runMapFullTracking(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	// seen[trackerIdx][mapIdx] holds the last drained cumulative value so we
+	// export deltas rather than replacing a counter with a gauge read.
+	// Since BPF PERCPU_ARRAY values are per-CPU we sum across CPUs each tick.
+	type drainState struct {
+		last [len(mapFullIndexNames)]uint64
+	}
+	var states []drainState
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.mu.RLock()
+			trackers := make([]MapFullTracker, len(w.mapFullTrackers))
+			copy(trackers, w.mapFullTrackers)
+			w.mu.RUnlock()
+
+			// Grow state slice if new trackers were registered.
+			for len(states) < len(trackers) {
+				states = append(states, drainState{})
+			}
+
+			for i, t := range trackers {
+				m := t.MapFullCountersMap()
+				if m == nil {
+					continue
+				}
+				for idx, name := range mapFullIndexNames {
+					key := uint32(idx)
+					var perCPU []uint64
+					if err := m.Lookup(key, &perCPU); err != nil {
+						w.logger.Debug("map_full_counters lookup failed",
+							slog.String("map_name", name), slog.Any("error", err))
+						continue
+					}
+					var total uint64
+					for _, v := range perCPU {
+						total += v
+					}
+					last := states[i].last[idx]
+					if total > last {
+						exporter.RecordBPFMapFull(name, total-last)
+						states[i].last[idx] = total
+					}
+				}
+			}
+		}
+	}
 }

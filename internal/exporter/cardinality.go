@@ -5,6 +5,7 @@ import (
 	"container/heap"
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -163,6 +164,62 @@ func (g *AnomalyScoreGuard) Size() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return len(g.entries)
+}
+
+// CardinalityLimiter provides generic cardinality limiting for CounterVec/GaugeVec metrics.
+// When the number of unique label combinations exceeds maxSeries, excess labels are
+// collapsed into "other" to prevent unbounded metric cardinality.
+type CardinalityLimiter struct {
+	mu        sync.RWMutex
+	series    map[string]bool // Tracks seen label combinations
+	maxSeries int
+}
+
+// NewCardinalityLimiter creates a new cardinality limiter with the given max series count.
+func NewCardinalityLimiter(maxSeries int) *CardinalityLimiter {
+	if maxSeries <= 0 {
+		maxSeries = 1000 // Conservative default
+	}
+	return &CardinalityLimiter{
+		series:    make(map[string]bool),
+		maxSeries: maxSeries,
+	}
+}
+
+// Normalize returns the labels, potentially modified to enforce cardinality limits.
+// If the series would exceed maxSeries, high-cardinality labels are replaced with "other".
+// labelKey specifies which label index to collapse (for EventsTotal: 1 for pod, 2 for namespace).
+func (cl *CardinalityLimiter) Normalize(labels []string, labelKey int) []string {
+	key := strings.Join(labels, "|")
+
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	// Check if we've already seen this series
+	if cl.series[key] {
+		return labels // Seen before; pass through unchanged
+	}
+
+	// Check if adding this series would exceed the limit
+	if len(cl.series) >= cl.maxSeries {
+		// Collapse the specified label to "other"
+		labels = append([]string{}, labels...) // Copy to avoid modifying caller's slice
+		if labelKey < len(labels) {
+			labels[labelKey] = "other"
+		}
+		key = strings.Join(labels, "|")
+	}
+
+	// Mark this series as seen
+	cl.series[key] = true
+	return labels
+}
+
+// Size returns the current number of tracked series.
+func (cl *CardinalityLimiter) Size() int {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
+	return len(cl.series)
 }
 
 // globalGuard is the singleton cardinality guard instance.

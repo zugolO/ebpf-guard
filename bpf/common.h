@@ -219,6 +219,37 @@ struct {
 	__type(value, __u64);
 } event_counters SEC(".maps");
 
+/*
+ * map_full_counters - per-CPU counters incremented when a BPF map insert fails
+ * because the map is at capacity.  Indexed by map ID:
+ *   0 = syscall_args   1 = conn_start_map   2 = conn_meta_map
+ * Userspace drains these counters and exports them as
+ * ebpf_guard_bpf_map_full_total{map_name}.
+ */
+#define MAP_FULL_IDX_SYSCALL_ARGS  0
+#define MAP_FULL_IDX_CONN_START    1
+#define MAP_FULL_IDX_CONN_META     2
+#define MAP_FULL_IDX_COUNT         3
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, MAP_FULL_IDX_COUNT);
+	__type(key, __u32);
+	__type(value, __u64);
+} map_full_counters SEC(".maps");
+
+/*
+ * record_map_full - increment the per-CPU map-full counter for map_idx.
+ * Call this whenever bpf_map_update_elem returns -E2BIG or -ENOMEM,
+ * indicating that a bounded map is at capacity and the insert was dropped.
+ */
+static __always_inline void record_map_full(__u32 map_idx)
+{
+	__u64 *cnt = bpf_map_lookup_elem(&map_full_counters, &map_idx);
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
 /* BPF map definitions using BTF-enabled maps (kernel 5.15+) */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);

@@ -126,6 +126,10 @@ type CorrelationEngine struct {
 	latencyHistogram prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
 	activeRulesGauge prometheus.Gauge     // ebpf_guard_active_rules_total
 
+	// Map size metrics — updated by updateRLGaugeLoop.
+	cooldownEntriesGauge prometheus.Gauge // ebpf_guard_cooldown_entries_total
+	dedupEntriesGauge    prometheus.Gauge // ebpf_guard_dedup_entries_total
+
 	// Hot-reload metrics
 	reloadTotal         *prometheus.CounterVec // ebpf_guard_rule_reload_total{status}
 	reloadDuration      *prometheus.GaugeVec   // ebpf_guard_rule_reload_duration_seconds{phase}
@@ -174,6 +178,10 @@ type CorrelationEngine struct {
 	enforceQueueDropped prometheus.Counter
 	// enforceWg tracks in-flight enforcement tasks for clean DrainEnforceQueue.
 	enforceWg sync.WaitGroup
+
+	// ingestWg tracks in-flight ingest worker tasks for clean shutdown.
+	// Incremented before queueing to ingestPool, decremented after processing.
+	ingestWg sync.WaitGroup
 
 	// allowlistProfiler detects unknown syscalls after the learning phase.
 	// nil disables allowlist enforcement.
@@ -435,6 +443,16 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		Help: "Number of detection rules currently loaded in the rule engine.",
 	})
 
+	cooldownEntriesGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_cooldown_entries_total",
+		Help: "Current number of entries in the enforcement cooldown map.",
+	})
+
+	dedupEntriesGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_dedup_entries_total",
+		Help: "Current number of entries in the alert deduplication map.",
+	})
+
 	reloadTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ebpf_guard_rule_reload_total",
 		Help: "Total number of rule hot-reloads attempted.",
@@ -558,6 +576,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		queueDepthGauge:      queueDepthGauge,
 		latencyHistogram:     latencyHistogram,
 		activeRulesGauge:     activeRulesGauge,
+		cooldownEntriesGauge: cooldownEntriesGauge,
+		dedupEntriesGauge:    dedupEntriesGauge,
 		reloadTotal:          reloadTotal,
 		reloadDuration:       reloadDuration,
 		rulesActive:          rulesActive,
@@ -673,6 +693,18 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		}
 		ce.ingestMask = uint32(n - 1)
 		ce.ingestPool = make([]*workerState, n)
+
+		// One shared BaselineLearner across all workers so the learning phase gates
+		// on the aggregate event rate (total across all workers) rather than each
+		// worker independently needing minSamples. With N workers and PID hashing,
+		// each worker sees ~1/N of traffic; without sharing, N workers each need
+		// minSamples before transitioning — effectively requiring N×minSamples total
+		// events to exit the learning phase.
+		var sharedLearner *profiler.BaselineLearner
+		if config.EnableAnomaly {
+			sharedLearner = profiler.NewBaselineLearner(config.LearningPeriod, config.MinLearningSamples)
+		}
+
 		for i := range ce.ingestPool {
 			var workerAD *profiler.AnomalyDetector
 			if config.EnableAnomaly {
@@ -684,6 +716,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 					config.MinLearningSamples,
 					config.ProfilerMaxPIDs,
 				)
+				workerAD.SetSharedLearner(sharedLearner)
 			}
 			ce.ingestPool[i] = &workerState{
 				ch: make(chan *workerTask, 1024),
@@ -691,6 +724,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 			}
 		}
 		for _, w := range ce.ingestPool {
+			ce.ingestWg.Add(1)
 			go ce.runIngestWorker(ctx, w)
 		}
 	}
@@ -712,6 +746,20 @@ func (ce *CorrelationEngine) updateRLGaugeLoop(ctx context.Context) {
 		case <-ticker.C:
 			ce.rlStatesGauge.Set(float64(ce.rateLimiter.StateCount()))
 			ce.queueDepthGauge.Set(ce.QueueDepth())
+
+			cooldownSize := ce.cooldowns.Size()
+			ce.cooldownEntriesGauge.Set(float64(cooldownSize))
+			if cooldownSize >= int64(MaxCooldownEntries*9/10) {
+				slog.Warn("correlator: cooldown map near capacity",
+					"entries", cooldownSize, "limit", MaxCooldownEntries)
+			}
+
+			dedupSize := ce.dedup.Size()
+			ce.dedupEntriesGauge.Set(float64(dedupSize))
+			if dedupSize >= int64(MaxDedupEntries*9/10) {
+				slog.Warn("correlator: dedup map near capacity",
+					"entries", dedupSize, "limit", MaxDedupEntries)
+			}
 		}
 	}
 }
@@ -813,9 +861,47 @@ func (ce *CorrelationEngine) Drain(ctx context.Context) error {
 	}
 }
 
-// Close stops background goroutines started by the engine.
+// Close stops background goroutines started by the engine and waits for graceful shutdown.
+// It attempts to drain pending work with a 5-second timeout to prevent hangs.
+// Returns without error even if workers don't finish within the timeout.
 func (ce *CorrelationEngine) Close() {
+	// Signal all background goroutines to stop via context cancellation.
 	ce.cancelCleanup()
+
+	// Close all worker channels to unblock waiting readers.
+	// Must happen AFTER cancelCleanup so workers have a chance to exit
+	// before we slam the channel close.
+	close(ce.enforceQueue)
+	if ce.regoQueue != nil {
+		close(ce.regoQueue)
+	}
+	for _, w := range ce.ingestPool {
+		close(w.ch)
+	}
+
+	// Wait for all workers to finish with a timeout.
+	// Use a separate context to avoid depending on the now-cancelled cleanup context.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	// Create a single done channel for all three WaitGroups.
+	done := make(chan struct{})
+	go func() {
+		ce.enforceWg.Wait()
+		ce.regoWg.Wait()
+		ce.ingestWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All workers finished cleanly
+	case <-shutdownCtx.Done():
+		// Timeout expired; workers may still be draining, but we proceed.
+		// This is acceptable because channels are closed, so goroutines won't
+		// deadlock indefinitely.
+		slog.Warn("correlator: graceful shutdown timeout; some workers may still be running")
+	}
 }
 
 // SetQueueDepthFn wires len/cap closures for the shared event channel so that
@@ -848,6 +934,8 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.queueDepthGauge,
 		ce.latencyHistogram,
 		ce.activeRulesGauge,
+		ce.cooldownEntriesGauge,
+		ce.dedupEntriesGauge,
 		ce.enforceQueueDropped,
 		ce.enforcedCounter,
 		ce.regoQueueDropped,
@@ -898,6 +986,14 @@ func (ce *CorrelationEngine) IngestAsync(ctx context.Context, e types.Event) {
 
 // runIngestWorker drains one worker channel until ctx is cancelled.
 func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState) {
+	defer func() {
+		// Release per-worker LRU profile memory promptly so it is not held until
+		// the next GC cycle after the goroutine exits.
+		if w.ad != nil {
+			w.ad.FlushProfiles()
+		}
+		ce.ingestWg.Done()
+	}()
 	for {
 		select {
 		case task, ok := <-w.ch:
@@ -977,7 +1073,11 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 
 	// Evaluate against rules via the zero-alloc callback path — no []Alert slice
 	// is allocated regardless of match count.
-	ce.ruleEngine.Load().EvaluateInto(e, func(alert types.Alert) {
+	// Load the rule engine snapshot once to avoid nil pointer dereference if
+	// hot-reload occurs between Load() and EvaluateInto() call.
+	rulesSnapshot := ce.ruleEngine.Load()
+	if rulesSnapshot != nil {
+		rulesSnapshot.EvaluateInto(e, func(alert types.Alert) {
 		// Dedup check runs before rate-limiter so burst duplicates do not inflate
 		// per-rule counters. isDup is checked, not a hard continue yet — enforcement
 		// must still fire for deduped events (dedup suppresses alerts, not actions).
@@ -1060,7 +1160,8 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		}
 		alerts = append(alerts, alert)
 		ce.alertsGenerated.Add(1)
-	})
+		})
+	}
 
 	// WASM plugin evaluation — run custom detection plugins.
 	if ce.wasmEngine != nil {
@@ -1449,6 +1550,22 @@ func (ce *CorrelationEngine) SetSyscallFilterUpdater(fn func(nrs []uint32)) {
 	ce.syscallFilterFn = fn
 }
 
+// SetSamplingCorrections propagates per-event-type inverse sampling factors
+// (1.0 / bpfSamplingRate) to every AnomalyDetector in the engine — both the
+// top-level detector (used by Ingest) and each per-worker detector (used by
+// IngestAsync). Call this whenever the ring-buffer adaptive load controller
+// changes its sampling rates so EWMA baselines stay unbiased.
+func (ce *CorrelationEngine) SetSamplingCorrections(corrections map[string]float64) {
+	if ce.anomalyDetector != nil {
+		ce.anomalyDetector.SetSamplingCorrections(corrections)
+	}
+	for _, w := range ce.ingestPool {
+		if w != nil && w.ad != nil {
+			w.ad.SetSamplingCorrections(corrections)
+		}
+	}
+}
+
 // eventTypeLabel maps EventType constants to their canonical Prometheus label strings.
 var eventTypeLabel = map[types.EventType]string{
 	types.EventSyscall:    "syscall",
@@ -1528,8 +1645,13 @@ func (ce *CorrelationEngine) RecordReloadFailure() {
 }
 
 // GetRules returns the currently loaded rules.
+// Returns nil if no rules have been loaded yet (before the first UpdateRules call).
 func (ce *CorrelationEngine) GetRules() []Rule {
-	return ce.ruleEngine.Load().GetRules()
+	snap := ce.ruleEngine.Load()
+	if snap == nil {
+		return nil
+	}
+	return snap.GetRules()
 }
 
 // ReloadRules reloads the rules in the rule engine.

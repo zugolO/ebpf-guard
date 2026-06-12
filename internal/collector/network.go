@@ -258,6 +258,15 @@ func (c *NetworkCollector) LostEvents() uint64 {
 	return c.lostTotal.Load()
 }
 
+// MapFullCountersMap returns the BPF map_full_counters PERCPU_ARRAY, or nil
+// in stub/dry-run mode. Implements watchdog.MapFullTracker.
+func (c *NetworkCollector) MapFullCountersMap() *ebpf.Map {
+	if c.objs == nil {
+		return nil
+	}
+	return c.objs.MapFullCounters
+}
+
 // parseEvent converts raw bytes from the ring buffer into event, routing to the
 // appropriate parser based on the event type field. event must be a pooled
 // *types.Event from eventPool; caller handles Reset() and Put() after use.

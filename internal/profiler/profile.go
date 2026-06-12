@@ -469,6 +469,21 @@ func (pm *ProfileManager) GetAll() map[uint32]*ProcessProfile {
 	return result
 }
 
+// Flush removes all profiles and resets the LRU structures, releasing their memory.
+// Intended for use during worker teardown — not safe to call concurrently with
+// RecordEvent or GetOrCreate.
+func (pm *ProfileManager) Flush() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.profiles = make(map[uint32]*ProcessProfile)
+	// Nil out each heap entry so the GC can collect the lruUint32Entry objects.
+	for i := range pm.lruHeap {
+		pm.lruHeap[i] = nil
+	}
+	pm.lruHeap = pm.lruHeap[:0]
+	pm.lruIndex = make(lruUint32Index)
+}
+
 // CleanupExpired removes expired profiles.
 func (pm *ProfileManager) CleanupExpired() int {
 	pm.mu.Lock()

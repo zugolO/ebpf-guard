@@ -88,6 +88,9 @@ type SyscallObjects struct {
 	// ProcArgsMap is the per-TGID LRU cache of command-line arguments populated
 	// by the sched_process_exec hook. Accessible from Go for userspace lookups.
 	ProcArgsMap *ebpf.Map `ebpf:"proc_args_map"`
+	// MapFullCounters is the PERCPU_ARRAY drained by the watchdog to export
+	// ebpf_guard_bpf_map_full_total. Shared across all BPF programs via common.h.
+	MapFullCounters *ebpf.Map `ebpf:"map_full_counters"`
 }
 
 // NetworkObjects contains all eBPF objects for network collection.
@@ -97,6 +100,7 @@ type NetworkObjects struct {
 	Events          *ebpf.Map     `ebpf:"events"`
 	ConnStartMap    *ebpf.Map     `ebpf:"conn_start_map"`
 	ConnMetaMap     *ebpf.Map     `ebpf:"conn_meta_map"`
+	MapFullCounters *ebpf.Map     `ebpf:"map_full_counters"`
 }
 
 // FileaccessObjects contains all eBPF objects for file access collection.
@@ -139,7 +143,7 @@ func (o *SyscallObjects) Close() error {
 			p.Close()
 		}
 	}
-	for _, m := range []*ebpf.Map{o.Events, o.SyscallArgs, o.ProcArgsMap} {
+	for _, m := range []*ebpf.Map{o.Events, o.SyscallArgs, o.ProcArgsMap, o.MapFullCounters} {
 		if m != nil {
 			m.Close()
 		}
@@ -163,6 +167,9 @@ func (o *NetworkObjects) Close() error {
 	}
 	if o.ConnMetaMap != nil {
 		o.ConnMetaMap.Close()
+	}
+	if o.MapFullCounters != nil {
+		o.MapFullCounters.Close()
 	}
 	return nil
 }

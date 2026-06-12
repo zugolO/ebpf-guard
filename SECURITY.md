@@ -58,51 +58,77 @@ This timeline may be adjusted based on the severity of the vulnerability and coo
 
 ## Security Features
 
-### Authentication
+### Authentication & Authorization
 
-- Bearer token authentication for `/metrics` and pprof endpoints
-- mTLS support for Alertmanager webhook
+- Bearer token authentication for all HTTP endpoints (`/metrics`, `/alerts`, `/rules`, `/debug/pprof`)
+- mTLS support for Alertmanager webhook (client certificate + CA bundle; TLS 1.2 minimum)
+- RBAC ClusterRole with read-only pod/namespace access; `networkpolicies` write only when enforcement enabled
+- Bearer token auto-generated from 32 cryptographically random bytes at startup if not configured
 
-### Authorization
+### Data Integrity
 
-- RBAC integration for Kubernetes environments
-- Pod Security Standards compliance
+- SHA-256 fingerprint on every alert payload (tamper detection + deduplication)
+- SQLite AES-256 encryption for alert persistence (opt-in via `store.sqlite.encryption`)
+- Webhook header validation (RFC 7230 token syntax + CR/LF injection prevention)
+- Mining pool CIDR blocklist skips RFC-1918 ranges to prevent accidental cluster traffic blocking
 
-### Data Protection
+### Runtime Hardening
 
-- Alert fingerprinting (SHA-256) for tamper detection
-- Encrypted storage for sensitive configuration
+- AppArmor enforce-mode profile ships in `deploy/security/apparmor-profile`
+- Custom seccomp profile in `deploy/security/seccomp-profile.json` (~60 allowed syscalls)
+- Minimum capabilities: `CAP_BPF` + `CAP_SYS_ADMIN` + `CAP_IPC_LOCK` + `CAP_PERFMON`
+- `privileged: false` supported — use explicit capability list in `values-secure.yaml`
+- Config file world-writable check at startup (agent refuses to start if `o+w` bit set)
+- Enforcement safety: PID range [1–4194304] and UID range [0–65535] validated before kill/block
+- `comm` field sanitized (invalid UTF-8 + control chars hex-escaped) before any log write
+- Global alert rate limiter (token bucket) prevents flood attacks on downstream consumers
 
-### Runtime Security
+### Observability & Integrity
 
-- AppArmor profile (enforce mode)
-- Seccomp profile enabled by default
-- Minimal container privileges
+- Startup integrity scan: LD_PRELOAD check, cron dir scan, root shell config check, anonymous executable memory scan
+- BPF program liveness check + auto-reattach via watchdog
+- `EbpfGuardDown` Prometheus alert fires if heartbeat stalls for >2 minutes
+- BPF map fullness exported as `ebpf_guard_bpf_map_full_total{map_name}` (no silent data loss)
+- Audit log for all rule changes and config hot-reloads (JSONL on host filesystem)
+
+### Supply Chain Security
+
+- Container images signed with cosign keyless signing (Sigstore Fulcio CA, no stored private keys)
+- Release binaries signed with `cosign sign-blob` + `.cosign.bundle` attached to GitHub release
+- SLSA L3 provenance generated via `slsa-github-generator` and attached to every tagged release
+- SPDX and CycloneDX SBOMs generated and signed for each binary and the container image
+- SBOM vulnerability scanning with Grype on every release; CodeQL + govulncheck + Trivy on every PR
 
 ## Security Hardening
 
-### Kubernetes Deployment
+Use the bundled hardened values file for a production-ready deployment:
+
+```bash
+helm install ebpf-guard ./deploy/helm/ebpf-guard \
+  -f deploy/helm/ebpf-guard/values-secure.yaml \
+  --namespace ebpf-guard \
+  --create-namespace
+```
+
+Key settings applied by `values-secure.yaml`:
 
 ```yaml
-# Enable security features in values.yaml
 securityContext:
   privileged: false
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
   capabilities:
-    drop:
-      - ALL
-    add:
-      - SYS_ADMIN
-      - SYS_RESOURCE
-      - IPC_LOCK
-      - BPF
-      - PERFMON
+    drop: [ALL]
+    add: [SYS_ADMIN, BPF, PERFMON, IPC_LOCK, NET_ADMIN]
 
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 65534
   seccompProfile:
     type: RuntimeDefault
 ```
+
+See [docs/security.md](docs/security.md) for the full operator security guide,
+including AppArmor setup, NetworkPolicy, RBAC, and supply-chain verification.
 
 ### Alertmanager mTLS
 
@@ -128,18 +154,36 @@ server:
 
 ## Security Checklist
 
-Before deploying ebpf-guard in production:
+Before deploying ebpf-guard in production (see [docs/security.md](docs/security.md) for full details):
 
-- [ ] Enable AppArmor in enforce mode
-- [ ] Enable seccomp profile
-- [ ] Configure mTLS for Alertmanager
-- [ ] Enable Bearer token auth for metrics
-- [ ] Use Kubernetes Secrets for sensitive data
-- [ ] Run as non-root user
-- [ ] Drop unnecessary capabilities
-- [ ] Enable audit logging
-- [ ] Configure network policies
-- [ ] Set resource limits
+**Authentication**
+- [ ] Bearer token auth enabled and token injected from a Kubernetes Secret
+- [ ] mTLS configured for Alertmanager webhook
+
+**Container hardening**
+- [ ] AppArmor enforce-mode profile loaded on all nodes
+- [ ] Seccomp profile applied (`RuntimeDefault` or custom)
+- [ ] `capabilities.drop: [ALL]` with explicit `add` list (no `privileged: true`)
+- [ ] `readOnlyRootFilesystem: true`
+
+**Network**
+- [ ] NetworkPolicy applied (restrict ingress to Prometheus; egress to Alertmanager + K8s API)
+- [ ] Alertmanager webhook URL uses HTTPS
+
+**Config & secrets**
+- [ ] Config file permissions: `0640`, owned by root
+- [ ] All tokens, API keys, DB keys in Kubernetes Secrets (not ConfigMaps)
+- [ ] SQLite encryption enabled if storing alerts
+
+**Observability**
+- [ ] ServiceMonitor and PrometheusRule enabled
+- [ ] `EbpfGuardDown`, `EbpfGuardMemoryPressure`, `EbpfGuardCollectorDown` alerts routed to on-call
+- [ ] Audit log enabled and ingested by SIEM
+
+**Supply chain**
+- [ ] Image pulled by digest or specific tag (not `:latest`)
+- [ ] Container image signature verified with `cosign verify`
+- [ ] SLSA L3 provenance verified with `slsa-verifier` for release binaries
 
 ## Threat Model & Known Risks
 

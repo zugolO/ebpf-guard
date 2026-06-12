@@ -1,5 +1,16 @@
 # Production hardened values for ebpf-guard.
 # Usage: helm install ebpf-guard ./deploy/helm/ebpf-guard -f values-secure.yaml
+#
+# Security hardening applied vs. defaults:
+#   - image.pullPolicy: Always (no stale cached image)
+#   - priorityClassName: system-node-critical
+#   - podSecurityContext: seccompProfile RuntimeDefault + runAsNonRoot (capabilities grant access)
+#   - securityContext: drop ALL, add only the required capabilities, readOnlyRootFilesystem
+#   - AppArmor annotation: uncomment if the profile is loaded on cluster nodes
+#   - nodeSelector: Linux only
+#   - Profiler persistence: enabled (avoids re-learning on restart)
+#   - Audit log: enabled (ingested by SIEM log shipper)
+#   - serviceMonitor + prometheusRule + VPA: enabled
 
 image:
   pullPolicy: Always
@@ -15,11 +26,42 @@ resources:
 priorityClassName: system-node-critical
 
 podAnnotations:
-  seccomp.security.alpha.kubernetes.io/pod: runtime/default
+  # Uncomment after loading the AppArmor profile on each node:
+  # container.apparmor.security.beta.kubernetes.io/ebpf-guard: localhost/ebpf-guard
+
+# Pod-level security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 0  # root UID required for CAP_BPF — capabilities take effect at runtime
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security context
+securityContext:
+  privileged: false  # drop broad privilege; use explicit capabilities instead
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - SYS_ADMIN   # BPF on kernels < 5.8; BTF; cgroup
+      - BPF         # BPF program loading (kernel 5.8+)
+      - PERFMON     # BPF perf events (kernel 5.8+)
+      - IPC_LOCK    # BPF map memory locking
+      - NET_ADMIN   # nftables enforcement — remove if using LSM enforcement only
 
 # Restrict to Linux nodes only
 nodeSelector:
   kubernetes.io/os: linux
+
+profilerStatePersistence:
+  enabled: true
+  hostPath: /var/lib/ebpf-guard
+
+auditLog:
+  enabled: true
+  hostDir: /var/log/ebpf-guard
 
 serviceMonitor:
   enabled: true

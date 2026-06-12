@@ -55,7 +55,44 @@ ebpf-guard intercepts kernel events in real time using eBPF programs, builds beh
 - **Performance targets** — 250 000 events/sec sustained (measured: 297 024 ev/s on Intel Xeon 2.80 GHz / 4 vCPU), < 100 MB heap, < 5 % CPU idle on a 4-core node; `BenchmarkProcessEvent` 538–735 ns/op, `BenchmarkCorrelationEngineParallel` ~1.4 µs/op.
 - **Distroless container** — multi-stage build produces a minimal image with no shell.
 - **AppArmor + seccomp** — enforce-mode profiles ship with the Helm chart.
-- **SLSA 3 releases** — cosign-signed images, SPDX + CycloneDX SBOM on every tagged release.
+- **SLSA 3 releases** — cosign-signed images + binaries, SPDX + CycloneDX SBOM, SLSA L3 provenance on every tagged release.
+
+---
+
+## Supply Chain Security
+
+All release artifacts are signed with [cosign](https://github.com/sigstore/cosign)
+keyless signing via Sigstore's public Fulcio CA. No private keys are stored
+in the repository.
+
+### Verify container image
+
+```bash
+cosign verify ghcr.io/zugolO/ebpf-guard:v0.1.0 \
+  --certificate-identity-regexp="https://github.com/zugolO/ebpf-guard/" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+```
+
+### Verify binary (cosign)
+
+```bash
+cosign verify-blob \
+  --bundle ebpf-guard-linux-amd64.cosign.bundle \
+  --certificate-identity-regexp="https://github.com/zugolO/ebpf-guard/" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+  ebpf-guard-linux-amd64
+```
+
+### Verify SLSA L3 provenance
+
+```bash
+slsa-verifier verify-artifact ebpf-guard-linux-amd64 \
+  --provenance-path ebpf-guard.intoto.jsonl \
+  --source-uri github.com/zugolO/ebpf-guard \
+  --source-tag v0.1.0
+```
+
+Full verification instructions and SBOM signing: [docs/security.md](docs/security.md#supply-chain-security--cosign--slsa).
 
 ---
 

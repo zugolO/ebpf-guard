@@ -3,10 +3,12 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Ensure ringbuf.Reader implements SetDeadline method
@@ -37,10 +39,12 @@ func DefaultBatchConfig() BatchConfig {
 
 // BatchReader wraps a ringbuf.Reader with batching capabilities.
 type BatchReader struct {
-	reader  *ringbuf.Reader
-	config  BatchConfig
-	logger  *slog.Logger
-	metrics *BatchMetrics
+	reader     *ringbuf.Reader
+	config     BatchConfig
+	logger     *slog.Logger
+	metrics    *BatchMetrics
+	errCounter *prometheus.CounterVec // ebpf_guard_batch_reader_errors_total{collector,reason}
+	collector  string                 // label value identifying which ring buffer this reader serves
 }
 
 // BatchMetrics tracks batch reading performance.
@@ -54,13 +58,27 @@ type BatchMetrics struct {
 }
 
 // NewBatchReader creates a new batch reader.
-func NewBatchReader(reader *ringbuf.Reader, config BatchConfig, logger *slog.Logger) *BatchReader {
+// collector names the ring buffer source (e.g. "syscall", "network") and is used
+// as the label value in the errors metric.
+func NewBatchReader(reader *ringbuf.Reader, config BatchConfig, logger *slog.Logger, collector string) *BatchReader {
+	errCounter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ebpf_guard_batch_reader_errors_total",
+		Help: "Total non-timeout errors encountered while reading from the BPF ring buffer, by collector and reason",
+	}, []string{"collector", "reason"})
 	return &BatchReader{
-		reader:  reader,
-		config:  config,
-		logger:  logger,
-		metrics: &BatchMetrics{},
+		reader:     reader,
+		config:     config,
+		logger:     logger,
+		metrics:    &BatchMetrics{},
+		errCounter: errCounter,
+		collector:  collector,
 	}
+}
+
+// RegisterMetrics registers the BatchReader's error counter with the given registerer.
+// Call this once after creating the reader to make the metric visible in Prometheus.
+func (b *BatchReader) RegisterMetrics(reg prometheus.Registerer) error {
+	return reg.Register(b.errCounter)
 }
 
 // ReadBatch reads a batch of events from the ring buffer.
@@ -95,6 +113,7 @@ func (b *BatchReader) ReadBatch(ctx context.Context) ([]ringbuf.Record, error) {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return batch, ctxErr
 			}
+			b.recordError(err)
 			return batch, err
 		}
 
@@ -148,6 +167,47 @@ func (b *BatchReader) updateMetrics(batchSize int, waitTime time.Duration) {
 // GetMetrics returns current batch metrics.
 func (b *BatchReader) GetMetrics() BatchMetrics {
 	return *b.metrics
+}
+
+// recordError increments the error counter and logs the error at Error level.
+// Errors caused by a closed ring buffer (ringbuf.ErrClosed) are recorded with
+// reason "closed" and logged at Debug level since they are expected during shutdown.
+func (b *BatchReader) recordError(err error) {
+	reason := "unknown"
+	level := slog.LevelError
+	switch {
+	case errors.Is(err, ringbuf.ErrClosed):
+		reason = "closed"
+		level = slog.LevelDebug
+	case errors.Is(err, context.Canceled):
+		reason = "context_canceled"
+		level = slog.LevelDebug
+	default:
+		reason = errorReason(err)
+	}
+	b.errCounter.WithLabelValues(b.collector, reason).Inc()
+	b.logger.Log(context.Background(), level, "batch reader error",
+		"collector", b.collector,
+		"reason", reason,
+		"error", err,
+	)
+}
+
+// errorReason maps an error to a short label-safe string for use in Prometheus.
+func errorReason(err error) string {
+	if err == nil {
+		return "none"
+	}
+	// Use the error type name as a short discriminator where possible.
+	var perr interface{ Permission() bool }
+	if errors.As(err, &perr) && perr.Permission() {
+		return "permission"
+	}
+	var terr interface{ Timeout() bool }
+	if errors.As(err, &terr) && terr.Timeout() {
+		return "timeout"
+	}
+	return "io_error"
 }
 
 // Note: EventBatcher and BufferedCollector have been removed as they were

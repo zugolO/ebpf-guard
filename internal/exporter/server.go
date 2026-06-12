@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
+	"runtime"
 	"sync"
 	"time"
 
@@ -65,6 +66,9 @@ type Server struct {
 
 	// bpfReloader is called by POST /api/v1/bpf/reload (optional, admin-only).
 	bpfReloader func(ctx context.Context) error
+
+	// bpfAttached reports whether eBPF programs are successfully loaded and attached.
+	bpfAttached bool
 }
 
 // NewServer creates a new HTTP server for metrics and health.
@@ -546,23 +550,52 @@ func (s *Server) SetBPFReloader(fn func(ctx context.Context) error) {
 	s.mu.Unlock()
 }
 
+// SetBPFAttached records whether eBPF programs are successfully attached to the kernel.
+// Called by main after collectors start (true) or when a required collector fails (false).
+func (s *Server) SetBPFAttached(attached bool) {
+	s.mu.Lock()
+	s.bpfAttached = attached
+	s.mu.Unlock()
+}
+
 // HealthStatus represents the health check response.
 type HealthStatus struct {
-	Healthy   bool          `json:"healthy"`
-	Ready     bool          `json:"ready"`
-	Uptime    time.Duration `json:"uptime"`
-	Timestamp time.Time     `json:"timestamp"`
+	Healthy     bool          `json:"healthy"`
+	Ready       bool          `json:"ready"`
+	Uptime      time.Duration `json:"uptime"`
+	Timestamp   time.Time     `json:"timestamp"`
+	Goroutines  int           `json:"goroutines"`
+	MemoryMB    float64       `json:"memory_mb"`
+	RulesLoaded bool          `json:"rules_loaded"`
+	BPFAttached bool          `json:"bpf_attached"`
 }
 
 // getHealthStatus returns the current health status.
 func (s *Server) getHealthStatus() HealthStatus {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	
+	healthy := s.healthy
+	ready := s.ready
+	startTime := s.startTime
+	bpfAttached := s.bpfAttached
+	rulesProviderFn := s.rulesProviderFn
+	s.mu.RUnlock()
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	rulesLoaded := false
+	if rulesProviderFn != nil {
+		rulesLoaded = len(rulesProviderFn()) > 0
+	}
+
 	return HealthStatus{
-		Healthy:   s.healthy,
-		Ready:     s.ready,
-		Uptime:    time.Since(s.startTime),
-		Timestamp: time.Now(),
+		Healthy:     healthy,
+		Ready:       ready,
+		Uptime:      time.Since(startTime),
+		Timestamp:   time.Now(),
+		Goroutines:  runtime.NumGoroutine(),
+		MemoryMB:    float64(memStats.Alloc) / (1024 * 1024),
+		RulesLoaded: rulesLoaded,
+		BPFAttached: bpfAttached,
 	}
 }

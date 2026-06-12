@@ -71,9 +71,11 @@ type ShardedEventBuffer struct {
 }
 
 // eventBufferShard is a single shard of the sharded buffer.
+// buffers stores ringBuffer by value to eliminate pointer indirection and reduce
+// GC pressure — each PID entry is a flat struct rather than a heap allocation.
 type eventBufferShard struct {
 	mu       sync.RWMutex
-	buffers  map[uint32]*ringBuffer
+	buffers  map[uint32]ringBuffer
 	lastSeen map[uint32]time.Time
 }
 
@@ -94,7 +96,7 @@ func NewShardedEventBuffer(maxSize int) *ShardedEventBuffer {
 	}
 	for i := 0; i < numShards; i++ {
 		sb.shards[i] = &eventBufferShard{
-			buffers:  make(map[uint32]*ringBuffer),
+			buffers:  make(map[uint32]ringBuffer),
 			lastSeen: make(map[uint32]time.Time),
 		}
 	}
@@ -109,12 +111,9 @@ func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	rb, exists := shard.buffers[pid]
-	if !exists {
-		rb = &ringBuffer{
-			events: make([]types.Event, sb.maxSize),
-		}
-		shard.buffers[pid] = rb
+	rb := shard.buffers[pid]
+	if rb.events == nil {
+		rb.events = make([]types.Event, sb.maxSize)
 	}
 	shard.lastSeen[pid] = now
 
@@ -124,6 +123,7 @@ func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
 	if rb.size < sb.maxSize {
 		rb.size++
 	}
+	shard.buffers[pid] = rb
 }
 
 // Get returns all events for a given PID.
@@ -133,8 +133,8 @@ func (sb *ShardedEventBuffer) Get(pid uint32) []types.Event {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	rb, exists := shard.buffers[pid]
-	if !exists || rb.size == 0 {
+	rb := shard.buffers[pid]
+	if rb.events == nil || rb.size == 0 {
 		return nil
 	}
 
@@ -164,8 +164,8 @@ func (sb *ShardedEventBuffer) GetRecent(pid uint32, n int) []types.Event {
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 
-	rb, exists := shard.buffers[pid]
-	if !exists || rb.size == 0 {
+	rb := shard.buffers[pid]
+	if rb.events == nil || rb.size == 0 {
 		return nil
 	}
 
@@ -215,7 +215,7 @@ func (sb *ShardedEventBuffer) Clear() {
 	for i := 0; i < sb.numShards; i++ {
 		shard := sb.shards[i]
 		shard.mu.Lock()
-		shard.buffers = make(map[uint32]*ringBuffer)
+		shard.buffers = make(map[uint32]ringBuffer)
 		shard.lastSeen = make(map[uint32]time.Time)
 		shard.mu.Unlock()
 	}

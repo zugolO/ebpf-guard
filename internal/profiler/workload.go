@@ -318,3 +318,17 @@ func (wpm *WorkloadProfileManager) Len() int {
 	defer wpm.mu.RUnlock()
 	return len(wpm.profiles)
 }
+
+// Flush removes all profiles and resets LRU structures, releasing their memory.
+// Intended for use during worker teardown — not safe to call concurrently with
+// RecordEvent or GetOrCreateByKey.
+func (wpm *WorkloadProfileManager) Flush() {
+	wpm.mu.Lock()
+	defer wpm.mu.Unlock()
+	wpm.profiles = make(map[WorkloadKey]*ProcessProfile)
+	for i := range wpm.lruHeap {
+		wpm.lruHeap[i] = nil
+	}
+	wpm.lruHeap = wpm.lruHeap[:0]
+	wpm.lruIndex = make(lruWorkloadKeyIndex)
+}

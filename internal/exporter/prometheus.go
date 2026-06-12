@@ -6,6 +6,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Global cardinality limiters for high-cardinality metrics.
+// EventsTotal: limit pod (index 1) cardinality to prevent Prometheus OOM.
+// AlertsTotal: limit namespace (index 2) cardinality.
+var (
+	eventsCardinalityLimiter = NewCardinalityLimiter(5000)  // 5K pod × 50 event types = conservative
+	alertsCardinalityLimiter = NewCardinalityLimiter(10000) // 1K rule IDs × 10 namespaces
+)
+
 var (
 	// EventsTotal counts all events by type and metadata.
 	EventsTotal = promauto.NewCounterVec(
@@ -117,6 +125,17 @@ var (
 			Help: "1 if rule file checksums were verified successfully, 0 if verification failed or was not run",
 		},
 	)
+
+	// BPFMapFull counts BPF map insert failures due to the map being at capacity.
+	// Drained from the per-CPU map_full_counters BPF array by the watchdog loop.
+	// A non-zero value means events are being silently dropped at the kernel level.
+	BPFMapFull = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_bpf_map_full_total",
+			Help: "Total BPF map insert failures due to map capacity limit, by map name",
+		},
+		[]string{"map_name"},
+	)
 )
 
 // RecordEvent increments the events counter for the given type.
@@ -126,8 +145,12 @@ func RecordEvent(eventType string) {
 }
 
 // RecordEventWithLabels increments the events counter with proper K8s metadata.
+// Pod and namespace labels are cardinality-limited to prevent Prometheus OOM.
 func RecordEventWithLabels(eventType, podName, namespace string) {
-	EventsTotal.WithLabelValues(eventType, podName, namespace).Inc()
+	labels := []string{eventType, podName, namespace}
+	// Collapse pod name to "other" if cardinality limit exceeded
+	labels = eventsCardinalityLimiter.Normalize(labels, 1)
+	EventsTotal.WithLabelValues(labels[0], labels[1], labels[2]).Inc()
 }
 
 // RecordDropped increments the dropped events counter with reason.
@@ -136,13 +159,25 @@ func RecordDropped(collector, reason string) {
 }
 
 // RecordAlert increments the alerts counter for the given rule, severity, and namespace.
+// Namespace label is cardinality-limited to prevent Prometheus OOM.
 func RecordAlert(ruleID, severity, namespace string) {
-	AlertsTotal.WithLabelValues(ruleID, severity, namespace).Inc()
+	labels := []string{ruleID, severity, namespace}
+	// Collapse namespace to "other" if cardinality limit exceeded
+	labels = alertsCardinalityLimiter.Normalize(labels, 2)
+	AlertsTotal.WithLabelValues(labels[0], labels[1], labels[2]).Inc()
 }
 
 // SetBPFMapEntries sets the entry count for a BPF map.
 func SetBPFMapEntries(mapName string, count float64) {
 	BPFMapEntries.WithLabelValues(mapName).Set(count)
+}
+
+// RecordBPFMapFull increments the map-full counter by delta for the given map name.
+// Called by the watchdog/collector drain loop after reading map_full_counters from BPF.
+func RecordBPFMapFull(mapName string, delta uint64) {
+	if delta > 0 {
+		BPFMapFull.WithLabelValues(mapName).Add(float64(delta))
+	}
 }
 
 // SetCollectorUp sets the collector up/down status (1 = up, 0 = down/stub).
@@ -271,6 +306,7 @@ var (
 func RecordGPUEvent(op string) {
 	GPUEventsTotal.WithLabelValues(op).Inc()
 }
+
 
 // ── Kubernetes enricher metrics ───────────────────────────────────────────────
 

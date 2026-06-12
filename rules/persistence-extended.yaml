@@ -1,0 +1,289 @@
+rules:
+  # MITRE ATT&CK: T1543.002 — Systemd Timer (persistence via timer unit)
+  - id: persist_systemd_timer_created
+    name: "Systemd timer unit created for persistence"
+    description: >
+      A systemd .timer unit file was written outside of package management.
+      Attackers use timer units alongside service units to schedule malicious
+      commands at fixed intervals (equivalent to cron but harder to spot).
+      Unlike service units, timers are often overlooked in manual audits.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: regex
+          values:
+            - ".+\\.timer$"
+        - field: file.path
+          op: prefix
+          values:
+            - "/etc/systemd/system/"
+            - "/usr/local/lib/systemd/system/"
+            - "/run/systemd/system/"
+            - "/home/"
+            - "/root/"
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "zypper", "pacman",
+                   "systemctl", "ansible", "puppet", "chef", "salt"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1543.002, persistence, systemd]
+
+  # MITRE ATT&CK: T1543.002 — Systemd service enabled via symlink
+  - id: persist_systemd_wants_symlink
+    name: "Systemd service enabled via wants/ symlink"
+    description: >
+      A symlink was created inside a systemd .wants/ directory, which is how
+      systemctl enable works. Creating .wants/ symlinks directly bypasses
+      systemctl and leaves no audit trail in the journal.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["88"]   # symlink
+        - field: proc.comm
+          op: not_in
+          values: ["systemctl", "dpkg", "rpm", "apt", "yum", "dnf",
+                   "ansible", "puppet", "chef", "salt", "update-rc.d"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1543.002, persistence, systemd]
+
+  # MITRE ATT&CK: T1546.004 — /etc/profile.d/ modification
+  - id: persist_profile_d_write
+    name: "Shell profile drop-in written to /etc/profile.d/"
+    description: >
+      A file was created or modified in /etc/profile.d/. Scripts in this
+      directory are sourced for every interactive login shell. Attackers
+      place backdoors here for system-wide persistence that runs as every
+      user who logs in, including root.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/etc/profile.d/"]
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "zypper", "pacman",
+                   "ansible", "puppet", "chef", "salt", "install"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1546.004, persistence]
+
+  # MITRE ATT&CK: T1546.004 — /etc/environment modification
+  - id: persist_etc_environment_write
+    name: "/etc/environment modified"
+    description: >
+      /etc/environment sets global environment variables for all processes.
+      Attackers modify it to set LD_PRELOAD, PATH hijacking, or proxy
+      settings that redirect traffic or inject malicious libraries.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: equals
+          values: ["/etc/environment"]
+        - field: file.op
+          op: in
+          values: ["write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "ansible", "puppet", "chef", "salt",
+                   "update-locale", "locale-gen"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1546.004, persistence, defense-evasion]
+
+  # MITRE ATT&CK: T1176 — Browser Extension / XDG Autostart
+  - id: persist_xdg_autostart_write
+    name: "XDG autostart entry created"
+    description: >
+      A .desktop file was created in an XDG autostart directory. These entries
+      launch applications automatically on GUI session start. On non-GUI servers
+      this is almost never legitimate, indicating an attacker adding user-level
+      persistence for when a desktop session is opened.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/etc/xdg/autostart/"
+            - "/home/"
+        - field: file.path
+          op: suffix
+          values: [".desktop"]
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "gnome-session", "kde-session",
+                   "xdg-utils", "update-desktop-database"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1176, persistence, xdg-autostart]
+
+  # MITRE ATT&CK: T1554 — Compromise Client Software Binary (git hooks)
+  - id: persist_git_hook_write
+    name: "Git hook script written"
+    description: >
+      A git hook script was created or modified in a .git/hooks/ directory.
+      Attackers plant malicious git hooks (post-checkout, post-merge,
+      pre-commit) in shared repositories to execute code on every developer
+      machine that clones or pulls, achieving supply-chain-style persistence.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: suffix
+          values:
+            - "/.git/hooks/pre-commit"
+            - "/.git/hooks/post-commit"
+            - "/.git/hooks/post-merge"
+            - "/.git/hooks/post-checkout"
+            - "/.git/hooks/pre-push"
+            - "/.git/hooks/prepare-commit-msg"
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["git", "pre-commit", "lefthook", "husky", "overcommit"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1554, persistence, supply-chain]
+
+  # MITRE ATT&CK: T1037.002 — Logon Script (login script in /etc/profile)
+  - id: persist_etc_profile_write
+    name: "/etc/profile modified"
+    description: >
+      /etc/profile is executed for all login shells. Modification by a
+      non-package-manager process indicates an attacker installing a global
+      login persistence hook (T1037) that runs for every user at login.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: equals
+          values: ["/etc/profile"]
+        - field: file.op
+          op: in
+          values: ["write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "ansible", "puppet",
+                   "chef", "salt"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1037.002, persistence]
+
+  # MITRE ATT&CK: T1505.003 — Server Software Component: Web Shell (via Apache conf)
+  - id: persist_apache_conf_write
+    name: "Apache/nginx configuration file modified"
+    description: >
+      An Apache or nginx configuration file was modified by a non-service
+      process. Attackers add rewrite rules, CGI handlers, or module loads
+      to web server configs to create persistent access via web shells or
+      to redirect traffic to attacker-controlled infrastructure.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/etc/apache2/"
+            - "/etc/httpd/"
+            - "/etc/nginx/"
+            - "/usr/local/etc/nginx/"
+        - field: file.path
+          op: suffix
+          values: [".conf", ".load"]
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "a2enmod", "a2ensite",
+                   "a2dismod", "nginx", "apachectl", "ansible", "puppet",
+                   "chef", "salt"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1505.003, persistence, web-server]
+
+  # MITRE ATT&CK: T1098.004 — Account Manipulation: SSH config modification
+  - id: persist_sshd_config_write
+    name: "SSH daemon configuration modified"
+    description: >
+      sshd_config or an sshd_config.d drop-in was modified by a non-package
+      process. Attackers change sshd config to enable PermitRootLogin,
+      disable PasswordAuthentication restrictions, add authorized_keys paths,
+      or enable GatewayPorts for reverse tunnel persistence.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/etc/ssh/sshd_config"
+            - "/etc/ssh/sshd_config.d/"
+        - field: file.op
+          op: in
+          values: ["write", "create"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "ansible", "puppet",
+                   "chef", "salt", "sshd"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1098.004, persistence, credential-access]
+
+  # MITRE ATT&CK: T1053.006 — Scheduled Task/Job: Systemd path unit
+  - id: persist_systemd_path_unit
+    name: "Systemd path unit created (inotify-based trigger)"
+    description: >
+      A systemd .path unit was created. Path units watch filesystem paths
+      with inotify and activate an associated service when the path appears
+      or changes. Attackers use path units to trigger payload execution when
+      a bait file is created, creating a stealthy triggered persistence.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: regex
+          values: [".+\\.path$"]
+        - field: file.path
+          op: prefix
+          values:
+            - "/etc/systemd/system/"
+            - "/usr/local/lib/systemd/system/"
+            - "/run/systemd/system/"
+        - field: file.op
+          op: in
+          values: ["create", "write"]
+        - field: proc.comm
+          op: not_in
+          values: ["dpkg", "rpm", "apt", "yum", "dnf", "ansible",
+                   "puppet", "chef", "salt", "systemctl"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1053.006, persistence, systemd]

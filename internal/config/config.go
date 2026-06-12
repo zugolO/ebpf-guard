@@ -532,6 +532,46 @@ type BPFConfig struct {
 
 	// LiveUpdate configures in-place eBPF program replacement without agent restart.
 	LiveUpdate LiveUpdateBPFConfig `mapstructure:"live_update"`
+
+	// AdaptiveLoad configures ring-buffer-load-based adaptive sampling.
+	// When enabled, the agent automatically reduces BPF sample rates for
+	// high-volume event types (syscall, file) when the event-processing
+	// channel is filling up, preventing silent kernel-side ring buffer drops
+	// while keeping security-critical types (network, LSM, privesc) intact.
+	AdaptiveLoad AdaptiveLoadConfig `mapstructure:"adaptive_load"`
+}
+
+// AdaptiveLoadConfig configures ring-buffer-load-based adaptive BPF sampling.
+type AdaptiveLoadConfig struct {
+	// Enabled activates the ring-buffer load controller. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// CheckInterval is how often the event channel depth is sampled. Default: 2s.
+	CheckInterval string `mapstructure:"check_interval"`
+	// DegradedThreshold is the channel fill ratio [0.0–1.0] that triggers the
+	// Degraded state (syscall+file rates reduced). Default: 0.50.
+	DegradedThreshold float64 `mapstructure:"degraded_threshold"`
+	// CriticalThreshold triggers the Critical state (all rates reduced). Default: 0.80.
+	CriticalThreshold float64 `mapstructure:"critical_threshold"`
+	// RecoveryThreshold is the fill ratio below which Normal state is restored.
+	// Must be lower than DegradedThreshold for hysteresis. Default: 0.30.
+	RecoveryThreshold float64 `mapstructure:"recovery_threshold"`
+	// SyscallDegradedRate is the syscall sampling rate in Degraded state. Default: 0.25.
+	SyscallDegradedRate float64 `mapstructure:"syscall_degraded_rate"`
+	// SyscallCriticalRate is the syscall sampling rate in Critical state. Default: 0.10.
+	SyscallCriticalRate float64 `mapstructure:"syscall_critical_rate"`
+	// FileDegradedRate is the file-event sampling rate in Degraded state. Default: 0.50.
+	FileDegradedRate float64 `mapstructure:"file_degraded_rate"`
+	// FileCriticalRate is the file-event sampling rate in Critical state. Default: 0.25.
+	FileCriticalRate float64 `mapstructure:"file_critical_rate"`
+	// NetworkCriticalRate is the network-event sampling rate in Critical state. Default: 0.50.
+	// Network events are reduced last (lower volume, higher security value).
+	NetworkCriticalRate float64 `mapstructure:"network_critical_rate"`
+	// MinSyscallRate is the absolute floor for syscall sampling. Default: 0.05.
+	MinSyscallRate float64 `mapstructure:"min_syscall_rate"`
+	// MinFileRate is the absolute floor for file sampling. Default: 0.10.
+	MinFileRate float64 `mapstructure:"min_file_rate"`
+	// MinNetworkRate is the absolute floor for network sampling. Default: 0.25.
+	MinNetworkRate float64 `mapstructure:"min_network_rate"`
 }
 
 // LiveUpdateBPFConfig configures the eBPF live program update feature.

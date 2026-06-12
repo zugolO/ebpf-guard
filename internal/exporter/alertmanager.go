@@ -25,16 +25,33 @@ import (
 
 var tracer = otel.Tracer("github.com/zugolO/ebpf-guard/internal/exporter")
 
+// privateRanges lists RFC-1918 and other private IPv4/IPv6 ranges that are
+// blocked when strict SSRF prevention is enabled.
+var privateRanges []*net.IPNet
+
+func init() {
+	cidrs := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",  // RFC 6598 shared address space
+		"169.254.0.0/16", // link-local (IPv4)
+		"fc00::/7",       // unique local (IPv6)
+		"fe80::/10",      // link-local (IPv6)
+	}
+	for _, c := range cidrs {
+		_, ipNet, _ := net.ParseCIDR(c)
+		privateRanges = append(privateRanges, ipNet)
+	}
+}
+
 // validateWebhookURL rejects URLs that could be used for SSRF.
-// It enforces http/https scheme and blocks URLs that resolve to loopback,
-// link-local, or RFC-1918 private addresses — unless the hostname is an
-// explicit private/internal DNS name (resolved lazily at send time).
+// It enforces http/https scheme and blocks loopback and link-local addresses.
 //
-// Note: blocking private IPs is NOT applied here because Alertmanager is
-// commonly deployed inside the cluster (e.g. http://alertmanager:9093).
-// Instead we only reject clearly dangerous schemes that browsers and HTTP
-// clients may follow (file://, gopher://, ftp://, etc.).
-func validateWebhookURL(rawURL string) error {
+// When strictSSRF is true it also blocks RFC-1918 private IP ranges.
+// Set strictSSRF=false for in-cluster Alertmanager deployments (e.g.
+// http://alertmanager:9093) where the target is a cluster-internal service.
+func validateWebhookURL(rawURL string, strictSSRF bool) error {
 	if rawURL == "" {
 		return fmt.Errorf("webhook URL must not be empty")
 	}
@@ -52,8 +69,7 @@ func validateWebhookURL(rawURL string) error {
 		return fmt.Errorf("webhook URL must have a host")
 	}
 	// Reject raw IP literals that are loopback or link-local to prevent
-	// trivial SSRF to localhost services. Cluster-internal DNS names (e.g.
-	// alertmanager.monitoring.svc) are intentionally allowed.
+	// trivial SSRF to localhost services.
 	host := u.Hostname()
 	if ip := net.ParseIP(host); ip != nil {
 		if ip.IsLoopback() {
@@ -61,6 +77,15 @@ func validateWebhookURL(rawURL string) error {
 		}
 		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 			return fmt.Errorf("webhook URL must not point to a link-local address")
+		}
+		// In strict mode also block RFC-1918 private ranges so the agent cannot
+		// be used to reach internal services that happen to bind on private IPs.
+		if strictSSRF {
+			for _, cidr := range privateRanges {
+				if cidr.Contains(ip) {
+					return fmt.Errorf("webhook URL points to a private IP %s (blocked by strict SSRF prevention)", ip)
+				}
+			}
 		}
 	}
 	return nil
@@ -109,6 +134,7 @@ type AlertmanagerClient struct {
 
 // NewAlertmanagerClient creates a new Alertmanager webhook client with default
 // circuit-breaker settings (resetTimeout=30s, fallbackBufferSize=10_000).
+// strictSSRF=false allows in-cluster private IPs; set true for external targets.
 func NewAlertmanagerClient(webhookURL, generatorURL string, batchSize, batchTimeout, circuitBreakerThreshold int) *AlertmanagerClient {
 	return NewAlertmanagerClientWithMTLS(webhookURL, generatorURL, batchSize, batchTimeout, circuitBreakerThreshold, nil)
 }
@@ -117,7 +143,7 @@ func NewAlertmanagerClient(webhookURL, generatorURL string, batchSize, batchTime
 // optional mTLS and default circuit-breaker settings.
 func NewAlertmanagerClientWithMTLS(webhookURL, generatorURL string, batchSize, batchTimeout, circuitBreakerThreshold int, mtls *MTLSConfig) *AlertmanagerClient {
 	return newAlertmanagerClientFull(webhookURL, generatorURL, batchSize, batchTimeout,
-		CircuitBreakerConfig{Threshold: circuitBreakerThreshold}, mtls, nil, nil, nil)
+		CircuitBreakerConfig{Threshold: circuitBreakerThreshold}, mtls, nil, nil, nil, false)
 }
 
 // NewAlertmanagerClientFull creates a client with explicit circuit-breaker config
@@ -133,7 +159,23 @@ func NewAlertmanagerClientFull(
 	droppedCounter prometheus.Counter,
 ) *AlertmanagerClient {
 	return newAlertmanagerClientFull(webhookURL, generatorURL, batchSize, batchTimeout,
-		cbCfg, mtls, circuitStateGauge, fallbackSizeGauge, droppedCounter)
+		cbCfg, mtls, circuitStateGauge, fallbackSizeGauge, droppedCounter, false)
+}
+
+// NewAlertmanagerClientFullWithOptions creates a client with full options including
+// strict SSRF prevention control. Use this when the webhook target is external.
+func NewAlertmanagerClientFullWithOptions(
+	webhookURL, generatorURL string,
+	batchSize, batchTimeout int,
+	cbCfg CircuitBreakerConfig,
+	mtls *MTLSConfig,
+	circuitStateGauge prometheus.Gauge,
+	fallbackSizeGauge prometheus.Gauge,
+	droppedCounter prometheus.Counter,
+	strictSSRF bool,
+) *AlertmanagerClient {
+	return newAlertmanagerClientFull(webhookURL, generatorURL, batchSize, batchTimeout,
+		cbCfg, mtls, circuitStateGauge, fallbackSizeGauge, droppedCounter, strictSSRF)
 }
 
 func newAlertmanagerClientFull(
@@ -144,8 +186,9 @@ func newAlertmanagerClientFull(
 	circuitStateGauge prometheus.Gauge,
 	fallbackSizeGauge prometheus.Gauge,
 	droppedCounter prometheus.Counter,
+	strictSSRF bool,
 ) *AlertmanagerClient {
-	if err := validateWebhookURL(webhookURL); err != nil {
+	if err := validateWebhookURL(webhookURL, strictSSRF); err != nil {
 		slog.Warn("exporter/alertmanager: unsafe webhook URL rejected",
 			slog.String("url", webhookURL),
 			slog.Any("error", err))

@@ -873,6 +873,12 @@ type AlertingConfig struct {
 	// queue while the circuit is open. Oldest entries are evicted when full.
 	// Default: 10000.
 	FallbackBufferSize int `mapstructure:"fallback_buffer_size"`
+	// StrictSSRF enables strict SSRF prevention for the webhook URL by also
+	// blocking RFC-1918 private IP ranges (10/8, 172.16/12, 192.168/16).
+	// Disable when Alertmanager is deployed inside the cluster and its service
+	// IP is in a private range (the default for in-cluster deployments).
+	// Default: false — safe for Kubernetes; set true for external webhook targets.
+	StrictSSRF bool `mapstructure:"strict_ssrf"`
 }
 
 // KubernetesConfig holds Kubernetes integration settings.
@@ -1309,6 +1315,10 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 		return nil, fmt.Errorf("config: unmarshal config: %w", err)
 	}
 
+	// Apply env-var overrides for secrets so they don't have to be stored
+	// in plaintext config files or Kubernetes ConfigMaps.
+	applyEnvOverrides(&cfg)
+
 	m := &Manager{
 		viper:  v,
 		config: &cfg,
@@ -1342,6 +1352,48 @@ func NewZeroConfigManager() *Manager {
 	return &Manager{
 		viper:  v,
 		config: &cfg,
+	}
+}
+
+// applyEnvOverrides applies environment-variable overrides for secrets so that
+// sensitive credentials never need to be written to config files or ConfigMaps.
+//
+// Supported env vars (all prefixed with EBPF_GUARD_):
+//
+//	EBPF_GUARD_OPENSEARCH_USERNAME   — OpenSearch basic-auth username
+//	EBPF_GUARD_OPENSEARCH_PASSWORD   — OpenSearch basic-auth password
+//	EBPF_GUARD_SLACK_WEBHOOK_URL     — Slack Incoming Webhook URL
+//	EBPF_GUARD_TEAMS_WEBHOOK_URL     — Microsoft Teams Incoming Webhook URL
+//	EBPF_GUARD_DISCORD_WEBHOOK_URL   — Discord webhook URL
+//	EBPF_GUARD_TELEGRAM_BOT_TOKEN    — Telegram Bot API token
+//	EBPF_GUARD_TELEGRAM_CHAT_ID      — Telegram target chat ID
+//	EBPF_GUARD_ALERTMANAGER_WEBHOOK  — Alertmanager webhook URL
+//
+// An env var always overrides the config-file value when non-empty.
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("EBPF_GUARD_OPENSEARCH_USERNAME"); v != "" {
+		cfg.Store.OpenSearch.Username = v
+	}
+	if v := os.Getenv("EBPF_GUARD_OPENSEARCH_PASSWORD"); v != "" {
+		cfg.Store.OpenSearch.Password = v
+	}
+	if v := os.Getenv("EBPF_GUARD_SLACK_WEBHOOK_URL"); v != "" {
+		cfg.Notifications.Slack.WebhookURL = v
+	}
+	if v := os.Getenv("EBPF_GUARD_TEAMS_WEBHOOK_URL"); v != "" {
+		cfg.Notifications.Teams.WebhookURL = v
+	}
+	if v := os.Getenv("EBPF_GUARD_DISCORD_WEBHOOK_URL"); v != "" {
+		cfg.Notifications.Discord.WebhookURL = v
+	}
+	if v := os.Getenv("EBPF_GUARD_TELEGRAM_BOT_TOKEN"); v != "" {
+		cfg.Notifications.Telegram.BotToken = v
+	}
+	if v := os.Getenv("EBPF_GUARD_TELEGRAM_CHAT_ID"); v != "" {
+		cfg.Notifications.Telegram.ChatID = v
+	}
+	if v := os.Getenv("EBPF_GUARD_ALERTMANAGER_WEBHOOK"); v != "" {
+		cfg.Alerting.WebhookURL = v
 	}
 }
 

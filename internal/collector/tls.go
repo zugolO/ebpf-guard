@@ -557,6 +557,13 @@ func (c *TLSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 						slog.String("trace_flags", tc.TraceFlags))
 				}
 			}
+			// Mask sensitive HTTP headers (Authorization, Cookie, Set-Cookie, X-Api-Key,
+			// X-Auth-Token) in the captured plaintext before the event propagates to
+			// rules, alerts, and the store. The BPF-captured buffer may contain raw
+			// HTTP/1.1 or gRPC header frames that include bearer tokens and session
+			// cookies. We overwrite the value bytes in-place so no secret ever leaves
+			// this function.
+			maskSensitiveHeaders(event.TLS.Data[:capturedLen])
 		}
 
 		// Debug logging
@@ -633,4 +640,62 @@ func (c *TLSCollector) DetachFromPID(pid uint32) error {
 	// Note: In a full implementation, we would track which links belong to which PID
 	// and close only those. For now, we don't support selective detachment.
 	return nil
+}
+
+// sensitiveHeaderPrefixes lists HTTP header names whose values must be masked
+// in TLS-captured plaintext before the data is forwarded to rules or stored.
+// Matching is case-insensitive on the ASCII header name portion.
+var sensitiveHeaderPrefixes = [][]byte{
+	[]byte("authorization:"),
+	[]byte("cookie:"),
+	[]byte("set-cookie:"),
+	[]byte("x-api-key:"),
+	[]byte("x-auth-token:"),
+	[]byte("x-amz-security-token:"),
+	[]byte("proxy-authorization:"),
+}
+
+// maskSensitiveHeaders overwrites the value portion of sensitive HTTP headers
+// found in buf with asterisks ('*'). The buffer is modified in-place so that
+// credentials never propagate beyond the TLS collector into rules, alerts, or
+// the store.
+//
+// Only HTTP/1.x header format (header-name ":" SP value CRLF) is handled.
+// Binary TLS records that don't contain HTTP headers are left unchanged.
+func maskSensitiveHeaders(buf []byte) {
+	// Work line by line (split on LF; CR is handled naturally).
+	start := 0
+	for i, b := range buf {
+		if b != '\n' {
+			continue
+		}
+		line := buf[start:i]
+		// Strip trailing CR if present.
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		for _, prefix := range sensitiveHeaderPrefixes {
+			if len(line) <= len(prefix) {
+				continue
+			}
+			// Case-insensitive compare of the header-name portion.
+			headerPart := make([]byte, len(prefix))
+			copy(headerPart, line[:len(prefix)])
+			for j := range headerPart {
+				if headerPart[j] >= 'A' && headerPart[j] <= 'Z' {
+					headerPart[j] += 32
+				}
+			}
+			if string(headerPart) == string(prefix) {
+				// Overwrite everything after the colon (including leading space).
+				for k := start + len(prefix); k < i; k++ {
+					if buf[k] != '\r' {
+						buf[k] = '*'
+					}
+				}
+				break
+			}
+		}
+		start = i + 1
+	}
 }

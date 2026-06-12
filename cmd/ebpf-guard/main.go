@@ -580,7 +580,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if resetTimeout <= 0 {
 			resetTimeout = 30 * time.Second
 		}
-		alertmanagerClient = exporter.NewAlertmanagerClientFull(
+		alertmanagerClient = exporter.NewAlertmanagerClientFullWithOptions(
 			cfg.Alerting.WebhookURL,
 			cfg.Alerting.GeneratorURL,
 			cfg.Alerting.BatchSize,
@@ -592,6 +592,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			},
 			nil,
 			nil, nil, nil,
+			cfg.Alerting.StrictSSRF,
 		)
 		slog.Info("alertmanager: webhook integration active",
 			slog.String("url", cfg.Alerting.WebhookURL))

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -553,6 +554,17 @@ func (e *Enforcer) executeNetworkPolicy(ctx context.Context, alert types.Alert) 
 }
 
 // executeKill sends SIGKILL to the offending process.
+//
+// PID-reuse race prevention: Linux reuses PIDs immediately after a process
+// exits. Between ValidatePID and SIGKILL the original process may have died
+// and the PID been given to an unrelated process. We mitigate this by:
+//  1. Re-reading /proc/<pid>/comm after ValidatePID and comparing with the
+//     BPF-captured comm. A mismatch means the PID was reused — abort.
+//  2. Keeping the window between verification and kill as short as possible.
+//
+// Full race-freedom would require pidfd_open + pidfd_send_signal (Linux 5.3+).
+// That is tracked as a future improvement; the /proc check reduces the window
+// from "unbounded" to "single kernel round-trip" which covers the common case.
 func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
 	if err := validateEvent(alert.Event); err != nil {
 		e.logger.Warn("kill rejected: invalid event", "error", err)
@@ -580,8 +592,26 @@ func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
 		return fmt.Errorf("enforcer/kill: %w", err)
 	}
 
-	// Send SIGKILL to the process
+	// Guard against PID reuse: re-read /proc/<pid>/comm and confirm it still
+	// matches the comm from the BPF event. If the process died and its PID was
+	// recycled by the kernel, the new process will have a different comm and we
+	// abort rather than kill an unrelated process.
 	pid := int(alert.Event.PID)
+	if comm != "" {
+		if err := verifyPIDComm(uint32(pid), comm); err != nil {
+			entry.Success = false
+			entry.Error = fmt.Sprintf("pid reuse detected: %v", err)
+			e.logAudit(entry)
+			e.logger.Warn("kill aborted: PID comm mismatch, possible PID reuse",
+				"rule_id", alert.RuleID,
+				"pid", pid,
+				"expected_comm", comm,
+				"error", err)
+			return fmt.Errorf("enforcer/kill: %w", err)
+		}
+	}
+
+	// Send SIGKILL to the process
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		entry.Success = false
@@ -921,6 +951,22 @@ func ValidatePID(pid uint32) error {
 	procPath := fmt.Sprintf("/proc/%d", pid)
 	if _, err := os.Stat(procPath); err != nil {
 		return fmt.Errorf("process %d not found: %w", pid, err)
+	}
+	return nil
+}
+
+// verifyPIDComm reads /proc/<pid>/comm and checks it matches expectedComm.
+// Returns an error if the PID no longer exists or has a different comm,
+// indicating that the PID was recycled by the kernel after the BPF event fired.
+func verifyPIDComm(pid uint32, expectedComm string) error {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return fmt.Errorf("process %d vanished before kill: %w", pid, err)
+	}
+	// /proc/<pid>/comm is a newline-terminated string, trim it.
+	currentComm := sanitizeComm(strings.TrimRight(string(data), "\n"))
+	if currentComm != expectedComm {
+		return fmt.Errorf("process %d comm changed: expected %q got %q (PID reuse detected)", pid, expectedComm, currentComm)
 	}
 	return nil
 }

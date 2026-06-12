@@ -484,12 +484,14 @@ func TestExplainPlain_StylePlain(t *testing.T) {
 		t.Errorf("WhatToDo = %q", explanation.Plain.WhatToDo)
 	}
 
-	// Technical fields should be empty in StylePlain
-	if explanation.Summary != "" {
-		t.Errorf("Summary should be empty in plain mode, got %q", explanation.Summary)
+	// Technical fields remain populated in StylePlain: issue #163 layers the plain
+	// explanation on top of the technical detail rather than removing it, so consumers
+	// can still surface MITRE/technical context behind a "details" field.
+	if explanation.Summary != "Technical summary for bash" {
+		t.Errorf("Summary = %q, want technical summary preserved in plain mode", explanation.Summary)
 	}
-	if explanation.Detail != "" {
-		t.Errorf("Detail should be empty in plain mode, got %q", explanation.Detail)
+	if explanation.Detail != "Technical detail for PID 9999" {
+		t.Errorf("Detail = %q, want technical detail preserved in plain mode", explanation.Detail)
 	}
 
 	// MITRE should still be available as details

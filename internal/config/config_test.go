@@ -37,7 +37,7 @@ func TestNewManager_Defaults(t *testing.T) {
 	assert.Equal(t, 32768, cfg.BPF.MapSizes.Connections)
 
 	// Check rules defaults
-	assert.Equal(t, "/etc/ebpf-guard/rules.yaml", cfg.Rules.Path)
+	assert.Equal(t, "rules/", cfg.Rules.Path)
 	assert.True(t, cfg.Rules.HotReload)
 	assert.True(t, cfg.Rules.RateLimitAlerts)
 	assert.Equal(t, 60, cfg.Rules.RateLimitWindow)

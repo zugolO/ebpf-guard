@@ -88,6 +88,8 @@ const (
 	OpCapsDropped RuleConditionOperator = "caps_dropped"
 	// OpSuffix checks if the field value ends with any of the given suffixes.
 	OpSuffix RuleConditionOperator = "suffix"
+	// OpNotSuffix checks if the field value does not end with any of the given suffixes.
+	OpNotSuffix RuleConditionOperator = "not_suffix"
 	// OpContains checks if the field value contains any of the given substrings.
 	OpContains RuleConditionOperator = "contains"
 )
@@ -105,6 +107,7 @@ const (
 	condOpNotEquals             // "not_equals"
 	condOpPrefix                // "prefix"
 	condOpSuffix                // "suffix"
+	condOpNotSuffix             // "not_suffix"
 	condOpContains              // "contains"
 	condOpRegex                 // "regex"
 	condOpGT                    // "gt"
@@ -133,6 +136,8 @@ func opCodeOf(op RuleConditionOperator) condOpCode {
 		return condOpPrefix
 	case OpSuffix:
 		return condOpSuffix
+	case OpNotSuffix:
+		return condOpNotSuffix
 	case OpContains:
 		return condOpContains
 	case OpRegex:
@@ -840,6 +845,13 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsA
 			}
 		}
 		return false
+	case condOpNotSuffix:
+		for _, sfx := range cond.Values {
+			if strings.HasSuffix(value, sfx) {
+				return false
+			}
+		}
+		return true
 	case condOpRegex:
 		return re.matchesRegex(cond.Values, value)
 	case condOpGT:

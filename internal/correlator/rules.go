@@ -68,6 +68,8 @@ const (
 	OpNotEquals RuleConditionOperator = "not_equals"
 	// OpPrefix checks if field starts with any of the prefixes.
 	OpPrefix RuleConditionOperator = "prefix"
+	// OpNotPrefix checks if field does not start with any of the given prefixes.
+	OpNotPrefix RuleConditionOperator = "not_prefix"
 	// OpRegex checks if field matches a regex pattern.
 	OpRegex RuleConditionOperator = "regex"
 	// OpGreaterThan checks if numeric field is greater than value.
@@ -106,6 +108,7 @@ const (
 	condOpEquals                // "equals"
 	condOpNotEquals             // "not_equals"
 	condOpPrefix                // "prefix"
+	condOpNotPrefix             // "not_prefix"
 	condOpSuffix                // "suffix"
 	condOpNotSuffix             // "not_suffix"
 	condOpContains              // "contains"
@@ -134,6 +137,8 @@ func opCodeOf(op RuleConditionOperator) condOpCode {
 		return condOpNotEquals
 	case OpPrefix:
 		return condOpPrefix
+	case OpNotPrefix:
+		return condOpNotPrefix
 	case OpSuffix:
 		return condOpSuffix
 	case OpNotSuffix:
@@ -838,6 +843,8 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsA
 		return len(cond.Values) == 0 || value != cond.Values[0]
 	case condOpPrefix:
 		return hasPrefix(cond.Values, value)
+	case condOpNotPrefix:
+		return !hasPrefix(cond.Values, value)
 	case condOpSuffix:
 		for _, sfx := range cond.Values {
 			if strings.HasSuffix(value, sfx) {

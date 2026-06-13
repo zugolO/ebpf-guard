@@ -74,7 +74,7 @@ rules:
           op: in
           values: ["vssadmin", "wmic", "wbadmin", "bcdedit", "diskshadow",
                    "bash", "sh", "python3", "python", "perl", "ruby"]
-        - field: file.path
+        - field: fd.name
           op: prefix
           values: ["/var/backup", "/backup", "/mnt/backup", "/media/backup",
                    "/.snapshots", "/var/cache/snapshots"]

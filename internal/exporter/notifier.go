@@ -42,10 +42,16 @@ type FanoutConfig struct {
 	Discord     DiscordConfig   `mapstructure:"discord"`
 	Telegram    TelegramConfig  `mapstructure:"telegram"`
 	FalcoOutput bool            `mapstructure:"falco_output"` // emit Falco-compatible JSON for the webhook notifier
+	// StrictSSRF enables strict SSRF prevention for all HTTP-based notifiers
+	// by blocking RFC-1918 private IP ranges in addition to the default
+	// loopback and link-local address blocking.
+	// Set false for in-cluster services; true for external targets.
+	StrictSSRF bool `mapstructure:"strict_ssrf"`
 }
 
 // NewFanoutNotifier creates a new fanout notifier with the given configuration.
-func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Logger) *FanoutNotifier {
+// Returns an error if any notifier has a security-critical misconfiguration (e.g. credentials over plaintext).
+func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Logger) (*FanoutNotifier, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Second
 	}
@@ -56,34 +62,42 @@ func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Log
 	}
 
 	// Initialize Slack notifier if enabled
-	if slackNotifier := NewSlackNotifier(cfg.Slack, logger); slackNotifier.Enabled() {
+	if slackNotifier := NewSlackNotifier(cfg.Slack, logger, cfg.StrictSSRF); slackNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, slackNotifier)
 		logger.Info("exporter/notifier: Slack notifier enabled",
 			slog.String("channel", cfg.Slack.Channel))
 	}
 
 	// Initialize Teams notifier if enabled
-	if teamsNotifier := NewTeamsNotifier(cfg.Teams, logger); teamsNotifier.Enabled() {
+	if teamsNotifier := NewTeamsNotifier(cfg.Teams, logger, cfg.StrictSSRF); teamsNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, teamsNotifier)
 		logger.Info("exporter/notifier: Teams notifier enabled")
 	}
 
 	// Initialize generic webhook notifier if enabled
-	if webhookNotifier := NewGenericWebhookNotifierWithCompat(cfg.Webhook, logger, cfg.FalcoOutput); webhookNotifier.Enabled() {
+	if webhookNotifier := NewGenericWebhookNotifierWithCompat(cfg.Webhook, logger, cfg.FalcoOutput, cfg.StrictSSRF); webhookNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, webhookNotifier)
 		logger.Info("exporter/notifier: Webhook notifier enabled",
 			slog.String("url", cfg.Webhook.URL))
 	}
 
 	// Initialize OTLP log notifier if enabled
-	if otlpNotifier := NewOTLPNotifier(cfg.OTLP, logger); otlpNotifier.Enabled() {
+	otlpNotifier, err := NewOTLPNotifier(cfg.OTLP, logger, cfg.StrictSSRF)
+	if err != nil {
+		return nil, fmt.Errorf("exporter/notifier: OTLP misconfigured: %w", err)
+	}
+	if otlpNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, otlpNotifier)
 		logger.Info("exporter/notifier: OTLP notifier enabled",
 			slog.String("endpoint", cfg.OTLP.Endpoint))
 	}
 
 	// Initialize Kafka notifier if enabled
-	if kafkaNotifier := NewKafkaNotifier(cfg.Kafka, logger); kafkaNotifier.Enabled() {
+	kafkaNotifier, err := NewKafkaNotifier(cfg.Kafka, logger)
+	if err != nil {
+		return nil, fmt.Errorf("exporter/notifier: Kafka misconfigured: %w", err)
+	}
+	if kafkaNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, kafkaNotifier)
 		logger.Info("exporter/notifier: Kafka notifier enabled",
 			slog.String("topic", cfg.Kafka.Topic))
@@ -98,13 +112,13 @@ func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Log
 	}
 
 	// Initialize Discord notifier if enabled
-	if discordNotifier := NewDiscordNotifier(cfg.Discord, logger); discordNotifier.Enabled() {
+	if discordNotifier := NewDiscordNotifier(cfg.Discord, logger, cfg.StrictSSRF); discordNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, discordNotifier)
 		logger.Info("exporter/notifier: Discord notifier enabled")
 	}
 
 	// Initialize Telegram notifier if enabled
-	if telegramNotifier := NewTelegramNotifier(cfg.Telegram, logger); telegramNotifier.Enabled() {
+	if telegramNotifier := NewTelegramNotifier(cfg.Telegram, logger, cfg.StrictSSRF); telegramNotifier.Enabled() {
 		f.notifiers = append(f.notifiers, telegramNotifier)
 		logger.Info("exporter/notifier: Telegram notifier enabled",
 			slog.String("chat_id", cfg.Telegram.ChatID))
@@ -117,7 +131,7 @@ func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Log
 			slog.Int("backends", len(f.notifiers)))
 	}
 
-	return f
+	return f, nil
 }
 
 // Send dispatches an alert to all configured notifiers in parallel.

@@ -1,6 +1,33 @@
 # ebpf-guard: Benchmark Report & Competitor Analysis
 
-Measured on **Intel Xeon 2.80 GHz / 4 vCPU, Go 1.25, Linux 6.18, OPA 0.70**.  
+## ⚠️ Measurement methodology notice
+
+This document contains two categories of numbers that are **not directly comparable**:
+
+| Category | How measured | What it reflects |
+|---|---|---|
+| **Algorithm-only** | `go test -bench=. -benchmem` inside the same Go process | Pure algorithm cost — no kernel, no IPC, no scheduling jitter |
+| **End-to-end** | Agent binary running against real kernel events from a workload generator | Real-world CPU%, RSS, and event drop rate under load |
+
+All numbers in sections 1–4 are **algorithm-only** microbenchmarks unless explicitly marked as **end-to-end**.  
+Sections 2.4 / 2.5 competitive claims (throughput 297k ev/s, memory 44 MB) are also algorithm-only unless a raw CSV file in `bench/comparative/results/` backs them up.
+
+To produce end-to-end numbers on your hardware:
+
+```bash
+# Automated (reference VM: Ubuntu 22.04, kernel 6.1, 4 vCPU, 8 GB)
+vagrant up && vagrant ssh -c "cd /vagrant && sudo bench/comparative/run.sh --sweep"
+
+# Manual (Linux host with Falco/Tetragon/Tracee installed)
+sudo bench/comparative/run.sh --sweep
+```
+
+See [bench/comparative/results/README.md](../bench/comparative/results/README.md) for output format and hardware spec.
+
+---
+
+Reference environment for algorithm-only benchmarks:  
+**Intel Xeon 2.80 GHz / 4 vCPU, Go 1.25, Linux 6.18, OPA 0.70**.  
 All numbers from `go test -bench=. -benchmem -benchtime=3s` unless noted.
 
 ---
@@ -86,10 +113,18 @@ Key wins:
 
 ---
 
-## 2. Honest Head-to-Head: ebpf-guard vs Tracee (same binary, same machine)
+## 2. Algorithm-only Head-to-Head: ebpf-guard vs Tracee
 
-All numbers from `go test -bench=. -benchmem -benchtime=5s ./bench/` run on this machine.  
-Tracee algorithms are reproduced verbatim in `bench/vs_tracee_test.go` — no separate process, no scheduling noise.
+> **Measurement type: algorithm-only.**  
+> Tracee's detection algorithms are reproduced verbatim in `bench/vs_tracee_test.go` and run
+> inside the same Go process — no separate agent binary, no kernel events, no IPC.
+> This eliminates OS scheduling noise and allows apples-to-apples algorithm comparison,
+> but does **not** represent end-to-end overhead on a running system.  
+> For end-to-end comparison, run `bench/comparative/run.sh --sweep`.
+
+All numbers from `go test -bench=. -benchmem -benchtime=5s ./bench/` on the reference machine.
+
+> **Note:** Results vary with hardware and Go version. The numbers below are from the last documented run (see source comments in `bench/vs_tracee_test.go`). Run `make bench` to reproduce on your machine.
 
 ### 2.1 Measured Results (Intel Xeon 2.80 GHz, 4 vCPU, Go 1.25)
 
@@ -100,7 +135,7 @@ Tracee algorithms are reproduced verbatim in `bench/vs_tracee_test.go` — no se
 | **String interning (unique.Make)** | **19.1 ns, 0B** | 20.7 ns, 0B | **ebpf-guard** | **1.08×** |
 | **String interning (old map+RWMutex)** | 66.7 ns, 0B | 20.7 ns, 0B | Tracee | 3.2× |
 | **Atomic counter** | **7.58 ns, 0B** | 7.73 ns, 0B | **TIED** | — |
-| **Rule eval (callback/EvaluateInto)** | **50.0 ns, 0B** | 13.2 ns, 0B | Tracee | 3.8× |
+| **Rule eval (callback/EvaluateInto)** | 120 ns, 8 B, 1 alloc | 13.2 ns, 0B | Tracee | 9.2× |
 | **Rule eval (legacy Evaluate)** | 54.8 ns, 0B | 13.2 ns, 0B | Tracee | 4.2× |
 | **Path filter (18 patterns)** | **24.7 ns, 0B** | 45.6 ns, 0B | **ebpf-guard** | **1.8×** |
 | **Comm→string (safe, alloc)** | 23.5 ns, 5B | 9.2 ns, 0B | Tracee | 2.6× |
@@ -110,7 +145,7 @@ Tracee algorithms are reproduced verbatim in `bench/vs_tracee_test.go` — no se
 
 **Event buffer gap (3×)**: Tracee's `BucketCache` stores a `uint32` per PID (tiny payload) behind a single global `sync.RWMutex`. ebpf-guard's `ShardedEventBuffer` stores a full `types.Event` struct (512 bytes) with 128-shard locking. For the same payload size, ebpf-guard would be faster due to sharded locking — the gap is an apple-to-oranges payload comparison, not a locking regression.
 
-**Rule eval gap (3.8×)**: The remaining gap after optimization (was 129× before). Tracee's `codeInjection.OnEvent` is 8 lines of Go with a linear `[]Argument` scan and a string comparison. ebpf-guard's `RuleEngine` supports 12 operators, CIDR range checks, regex, AND/OR condition groups, pre-compiled value sets, and 40+ field paths — necessarily more work per event. The no-match path now allocates 0 bytes (was 2048B). 
+**Rule eval gap (9.2×)**: The remaining gap after optimization (was 131.8× before). Tracee's `codeInjection.OnEvent` is 8 lines of Go with a linear `[]Argument` scan and a string comparison. ebpf-guard's `RuleEngine` supports 12 operators, CIDR range checks, regex, AND/OR condition groups, pre-compiled value sets, and 40+ field paths — necessarily more work per event. The callback path allocates 8 bytes (1 alloc for Comm string interning); the legacy Evaluate path allocates 0 bytes (was 2048B). 
 
 **String interning win**: After migrating `internComm` from `map[[16]byte]string + sync.RWMutex` to Go 1.23+ `unique.Make`, ebpf-guard now **beats Tracee** by 8% on this benchmark (19.1 ns vs 20.7 ns).
 
@@ -133,9 +168,13 @@ Tracee algorithms are reproduced verbatim in `bench/vs_tracee_test.go` — no se
 
 ### 2.4 Where ebpf-guard Wins
 
-**Throughput**: 297k ev/s vs Falco's ~50k — **6× faster**. The 16-shard PID-keyed ring buffer with zero-alloc event ingestion is the primary driver. Falco's Lua-based evaluation adds per-event GC pressure.
+> ⚠️ Throughput and memory numbers below are **algorithm-only** unless a dated CSV in
+> `bench/comparative/results/` provides end-to-end backing data.  
+> Run `bench/comparative/run.sh --sweep` to produce end-to-end numbers on your hardware.
 
-**Memory footprint**: 44 MB peak vs 350–500 MB for Falco. The EWMA profiler uses O(processes × features) space rather than full event logs. The cardinality guard prevents Prometheus label explosion.
+**Throughput** *(algorithm-only)*: 297k ev/s sustained in the in-process benchmark vs Falco's estimated ~50k ev/s. The 16-shard PID-keyed ring buffer with zero-alloc event ingestion is the primary driver. End-to-end measurement pending (see F-6 in ISSUES.md).
+
+**Memory footprint** *(algorithm-only)*: 44 MB peak heap in the microbenchmark vs 350–500 MB reported for Falco in published benchmarks. The EWMA profiler uses O(processes × features) space rather than full event logs. The cardinality guard prevents Prometheus label explosion.
 
 **Zero-alloc hot path**: `ShardedEventBuffer.Add` allocates 0 bytes per event. `RuleEngine.EvaluateInto` now allocates 0 bytes per call (was 2048B). `internComm` now allocates 0 bytes on the hot path.
 
@@ -196,7 +235,7 @@ full          all 7 modules                            EventTLS, EventGPU, Event
 
 **Fix 2 — Callback path**: Added `EvaluateInto(e types.Event, fn func(types.Alert))` — the zero-alloc hot path that calls `fn` for each matching alert without building a slice. Updated `CorrelationEngine.Ingest()` to use this path.
 
-**Result**: 1714 ns / 2048B → **50 ns / 0B** (**34× speedup**). Gap vs Tracee: 129× → 3.8×.
+**Result**: 1714 ns / 2048B → **120 ns / 8 B / 1 alloc** (**14.3× speedup**). Gap vs Tracee: 131.8× → 9.2×.
 
 ### 3.5 String Interning: unique.Make (Go 1.23+)
 
@@ -214,7 +253,7 @@ full          all 7 modules                            EventTLS, EventGPU, Event
 |---|---|---|---|
 | OPA eval (dns) | 370 µs | < 200 µs | Replace `shannon_entropy` string-split with byte-walk in a Rego helper; or move DGA detection to Go (pre-filter before Rego) |
 | OPA allocs | ~1500/call | < 500/call | OPA v1.x partial eval (track upstream OPA roadmap) |
-| Rule eval vs Tracee | 50 ns vs 13 ns | < 20 ns | Pre-sort rules by event type; break early on type mismatch; avoid `time.Unix` call on no-match |
+| Rule eval vs Tracee | 120 ns vs 13 ns | < 20 ns | Pre-sort rules by event type; break early on type mismatch; avoid `time.Unix` call on no-match |
 | Event buffer vs Tracee | 255 ns vs 99 ns | < 120 ns | Profile shard hash cost; consider smaller Event struct (pointer to Syscall/Network fields) |
 | Store_Query | 84 µs, 130 KB | < 30 µs, 0 alloc | Replace linear scan with segment tree or btree index on Timestamp; pool result slices |
 | LineageTracker_Update | 1,534 ns, 3 allocs | 0 alloc | Pre-allocate chain nodes in a `sync.Pool` |
@@ -244,4 +283,38 @@ The following gaps exist relative to the most mature competitor (Falco) that sho
 
 ---
 
-*Updated 2026-06-06. Run `go test -bench=. -benchmem -benchtime=5s ./bench/` for live numbers, or `make bench` for the full suite.*
+---
+
+## 6. Reproducing benchmarks
+
+### Algorithm-only (no root, any Linux/macOS)
+
+```bash
+# Full microbenchmark suite
+make bench
+# or directly:
+go test -bench=. -benchmem -benchtime=5s ./bench/...
+```
+
+### End-to-end (requires Linux + root + competitor tools)
+
+```bash
+# Single run at default intensity (~10k ev/s)
+sudo bench/comparative/run.sh --agent ebpf-guard
+
+# Full sweep across 1k / 10k / 100k events/sec for all agents
+sudo bench/comparative/run.sh --sweep
+
+# Reference VM (automated, reproducible environment)
+vagrant up
+vagrant ssh -c "cd /vagrant && sudo bench/comparative/run.sh --sweep"
+```
+
+Raw results (CSV + Markdown) are written to `bench/comparative/results/`.  
+See [bench/comparative/results/README.md](../bench/comparative/results/README.md) for output schema,
+hardware spec, and instructions for committing results.
+
+---
+
+*Updated 2026-06-13. Algorithm-only numbers: `go test -bench=. -benchmem -benchtime=5s ./bench/...`.  
+End-to-end numbers: `bench/comparative/run.sh --sweep` on the reference VM.*

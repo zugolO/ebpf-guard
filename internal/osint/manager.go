@@ -54,7 +54,7 @@ func NewManager(cfg config.OSINTConfig) (*Manager, error) {
 			attrTypes,
 			cfg.MISP.MinThreatLevel,
 			cfg.MISP.Tags,
-			cfg.MISP.VerifyTLS,
+			cfg.MISP.InsecureSkipVerify,
 		))
 	}
 
@@ -67,7 +67,7 @@ func NewManager(cfg config.OSINTConfig) (*Manager, error) {
 			cfg.OpenCTI.APIKey,
 			cfg.OpenCTI.ConfidenceMin,
 			cfg.OpenCTI.TLPMarkings,
-			cfg.OpenCTI.VerifyTLS,
+			cfg.OpenCTI.InsecureSkipVerify,
 		))
 	}
 

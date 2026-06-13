@@ -129,6 +129,9 @@ func (p *Plugin) Evaluate(ctx context.Context, eventJSON []byte) (EvalResult, er
 	if err != nil {
 		return EvalResult{}, fmt.Errorf("plugin %q malloc(%d): %w", p.meta.ID, len(eventJSON), err)
 	}
+	if len(allocResults) == 0 {
+		return EvalResult{}, fmt.Errorf("plugin %q: malloc returned no results", p.meta.ID)
+	}
 	ptr := uint32(allocResults[0])
 	if !mem.Write(ptr, eventJSON) {
 		return EvalResult{}, fmt.Errorf("plugin %q: write to linear memory failed (ptr=%d, len=%d)", p.meta.ID, ptr, len(eventJSON))
@@ -144,6 +147,10 @@ func (p *Plugin) Evaluate(ctx context.Context, eventJSON []byte) (EvalResult, er
 
 	if evalErr != nil {
 		return EvalResult{}, fmt.Errorf("plugin %q evaluate: %w", p.meta.ID, evalErr)
+	}
+
+	if len(evalResults) == 0 {
+		return EvalResult{}, fmt.Errorf("plugin %q: evaluate returned no results", p.meta.ID)
 	}
 
 	if evalResults[0] == 0 {
@@ -164,7 +171,7 @@ func (p *Plugin) readAlert(ctx context.Context, mod api.Module) EvalResult {
 	mem := mod.Memory()
 
 	if sevFn := mod.ExportedFunction("alert_severity"); sevFn != nil {
-		if sevResults, err := sevFn.Call(ctx); err == nil {
+		if sevResults, err := sevFn.Call(ctx); err == nil && len(sevResults) > 0 {
 			if sevResults[0] == 1 {
 				result.Severity = types.SeverityCritical
 			} else {
@@ -178,7 +185,7 @@ func (p *Plugin) readAlert(ctx context.Context, mod api.Module) EvalResult {
 	if msgPtrFn != nil && msgLenFn != nil {
 		ptrRes, perr := msgPtrFn.Call(ctx)
 		lenRes, lerr := msgLenFn.Call(ctx)
-		if perr == nil && lerr == nil {
+		if perr == nil && lerr == nil && len(ptrRes) > 0 && len(lenRes) > 0 {
 			msgPtr := uint32(ptrRes[0])
 			msgLen := uint32(lenRes[0])
 			if msgLen > 0 && msgLen <= maxMessageLen {

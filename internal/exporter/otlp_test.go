@@ -37,12 +37,14 @@ func makeTestAlert() types.Alert {
 }
 
 func TestOTLPNotifier_Disabled(t *testing.T) {
-	n := NewOTLPNotifier(OTLPConfig{Enabled: false}, slog.Default())
+	n, err := NewOTLPNotifier(OTLPConfig{Enabled: false}, slog.Default(), false)
+	require.NoError(t, err)
 	assert.False(t, n.Enabled())
 }
 
 func TestOTLPNotifier_MissingEndpoint(t *testing.T) {
-	n := NewOTLPNotifier(OTLPConfig{Enabled: true, Endpoint: ""}, slog.Default())
+	n, err := NewOTLPNotifier(OTLPConfig{Enabled: true, Endpoint: ""}, slog.Default(), false)
+	require.NoError(t, err)
 	assert.False(t, n.Enabled())
 }
 
@@ -57,14 +59,15 @@ func TestOTLPNotifier_Send(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewOTLPNotifier(OTLPConfig{
+	n, err := NewOTLPNotifier(OTLPConfig{
 		Enabled:  true,
 		Endpoint: srv.URL,
-	}, slog.Default())
+	}, slog.Default(), false)
+	require.NoError(t, err)
 	require.True(t, n.Enabled())
 
 	alert := makeTestAlert()
-	err := n.Send(context.Background(), alert)
+	err = n.Send(context.Background(), alert)
 	require.NoError(t, err)
 	require.NotNil(t, received)
 
@@ -93,16 +96,17 @@ func TestOTLPNotifier_MinSeverityFilter(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewOTLPNotifier(OTLPConfig{
+	n, err := NewOTLPNotifier(OTLPConfig{
 		Enabled:     true,
 		Endpoint:    srv.URL,
 		MinSeverity: "critical",
-	}, slog.Default())
+	}, slog.Default(), false)
+	require.NoError(t, err)
 
 	// warning alert should be filtered out
 	alert := makeTestAlert()
 	alert.Severity = types.SeverityWarning
-	err := n.Send(context.Background(), alert)
+	err = n.Send(context.Background(), alert)
 	require.NoError(t, err)
 	assert.False(t, called, "warning alert should not be sent when min_severity=critical")
 }
@@ -113,12 +117,13 @@ func TestOTLPNotifier_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewOTLPNotifier(OTLPConfig{
+	n, err := NewOTLPNotifier(OTLPConfig{
 		Enabled:  true,
 		Endpoint: srv.URL,
-	}, slog.Default())
+	}, slog.Default(), false)
+	require.NoError(t, err)
 
-	err := n.Send(context.Background(), makeTestAlert())
+	err = n.Send(context.Background(), makeTestAlert())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "502")
 }
@@ -131,11 +136,12 @@ func TestOTLPNotifier_CustomHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewOTLPNotifier(OTLPConfig{
+	n, err := NewOTLPNotifier(OTLPConfig{
 		Enabled:  true,
 		Endpoint: srv.URL,
 		Headers:  map[string]string{"X-Api-Key": "secret"},
-	}, slog.Default())
+	}, slog.Default(), false)
+	require.NoError(t, err)
 
 	require.NoError(t, n.Send(context.Background(), makeTestAlert()))
 	assert.Equal(t, "secret", gotHeader)
@@ -149,7 +155,8 @@ func TestOTLPNotifier_Close(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewOTLPNotifier(OTLPConfig{Enabled: true, Endpoint: srv.URL}, slog.Default())
+	n, err := NewOTLPNotifier(OTLPConfig{Enabled: true, Endpoint: srv.URL}, slog.Default(), false)
+	require.NoError(t, err)
 	require.NoError(t, n.Close())
 
 	// Send after close should be a no-op
@@ -160,4 +167,24 @@ func TestOTLPNotifier_Close(t *testing.T) {
 func TestOTLPSeverityNumbers(t *testing.T) {
 	assert.Equal(t, 21, otlpSeverityNumber(types.SeverityCritical))
 	assert.Equal(t, 13, otlpSeverityNumber(types.SeverityWarning))
+}
+
+func TestOTLPNotifier_CACertNotFound(t *testing.T) {
+	_, err := NewOTLPNotifier(OTLPConfig{
+		Enabled:  true,
+		Endpoint: "https://otel-collector:4318",
+		CACert:   "/nonexistent/ca.pem",
+	}, slog.Default(), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read CA cert")
+}
+
+func TestOTLPNotifier_TLSWithoutHTTPS(t *testing.T) {
+	_, err := NewOTLPNotifier(OTLPConfig{
+		Enabled:    true,
+		Endpoint:   "http://otel-collector:4318",
+		TLSEnabled: true,
+	}, slog.Default(), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tls_enabled=true requires https://")
 }

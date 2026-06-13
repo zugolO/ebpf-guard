@@ -52,9 +52,9 @@ type mispAttribute struct {
 }
 
 // NewMISPClient creates a MISP REST API client.
-func NewMISPClient(url, apiKey string, attributeTypes []string, minThreatLevel int, tags []string, verifyTLS bool) *MISPClient {
+func NewMISPClient(url, apiKey string, attributeTypes []string, minThreatLevel int, tags []string, insecureSkipVerify bool) *MISPClient {
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: !verifyTLS}, //nolint:gosec
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify}, //nolint:gosec
 	}
 	return &MISPClient{
 		url:            strings.TrimRight(url, "/"),

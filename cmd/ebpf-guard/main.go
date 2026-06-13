@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -335,6 +337,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				TTL:      time.Duration(cfg.Profiler.Lineage.TTL) * time.Second,
 				MaxDepth: cfg.Profiler.Lineage.MaxDepth,
 			},
+			Allowlist: profiler.SyscallAllowlistConfig{
+				Enabled:         cfg.Profiler.SyscallAllowlist.Enabled,
+				Mode:            cfg.Profiler.SyscallAllowlist.Mode,
+				EnforcingAction: cfg.Profiler.SyscallAllowlist.EnforcingAction,
+				PerWorkload:     cfg.Profiler.SyscallAllowlist.PerWorkload,
+				LearningPeriod:  cfg.Profiler.SyscallAllowlist.LearningPeriod,
+				MinSamples:      cfg.Profiler.SyscallAllowlist.MinSamples,
+				SparseThreshold: cfg.Profiler.SyscallAllowlist.SparseThreshold,
+				GlobalAllow:     cfg.Profiler.SyscallAllowlist.GlobalAllow,
+				GlobalDeny:      cfg.Profiler.SyscallAllowlist.GlobalDeny,
+				PersistPath:     cfg.Profiler.SyscallAllowlist.PersistPath,
+			},
 		}
 		p := profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
 		engineCfg.LineageTracker = p.GetLineageTracker()
@@ -512,12 +526,27 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 	if cfg.Auth.Enabled {
 		if adminToken == "" && len(cfg.Auth.Tokens) == 0 {
-			adminToken = generateToken()
-			slog.Info("auth: generated admin token (not shown for security)")
+			t, err := generateToken()
+			if err != nil {
+				return fmt.Errorf("auth: generate admin token: %w", err)
+			}
+			adminToken = t
+			slog.Info("auth: generated admin token — save this, it will not be shown again",
+				slog.String("token", adminToken))
 		}
 		if viewerToken == "" && len(cfg.Auth.Tokens) == 0 {
-			viewerToken = generateToken()
-			slog.Info("auth: generated viewer token (not shown for security)")
+			t, err := generateToken()
+			if err != nil {
+				return fmt.Errorf("auth: generate viewer token: %w", err)
+			}
+			viewerToken = t
+			slog.Info("auth: generated viewer token — save this, it will not be shown again",
+				slog.String("token", viewerToken))
+		}
+		// Write auto-generated tokens to /run/ebpf-guard/token so operators
+		// can retrieve them without restarting the agent with explicit config.
+		if err := writeTokenFile(adminToken, viewerToken); err != nil {
+			slog.Warn("auth: cannot write token file", "error", err)
 		}
 	}
 
@@ -549,6 +578,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		adminToken,
 		cfg.Auth.Enabled,
 	)
+	srv.SetCORSAllowedOrigins(cfg.Server.CORSAllowedOrigins)
 	srv.SetAlertStore(alertStore)
 	srv.SetRulesProvider(func() []correlator.Rule {
 		return engine.GetRules()
@@ -609,7 +639,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		cfg.Notifications.Discord.Enabled ||
 		cfg.Notifications.Telegram.Enabled
 	if notifEnabled {
-		fanout = exporter.NewFanoutNotifier(exporter.FanoutConfig{
+		var fanoutErr error
+		fanout, fanoutErr = exporter.NewFanoutNotifier(exporter.FanoutConfig{
 			Slack: exporter.SlackConfig{
 				Enabled:     cfg.Notifications.Slack.Enabled,
 				WebhookURL:  cfg.Notifications.Slack.WebhookURL,
@@ -674,7 +705,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				MinSeverity: cfg.Notifications.Telegram.MinSeverity,
 			},
 			FalcoOutput: cfg.Compat.FalcoOutput,
+			StrictSSRF:  cfg.Notifications.StrictSSRF,
 		}, 10*time.Second, slog.Default())
+		if fanoutErr != nil {
+			return fmt.Errorf("notifications: %w", fanoutErr)
+		}
 	}
 
 	// ── Simple mode: auto-enforce for indie developers ─────────────────────
@@ -757,6 +792,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		collectors = append(collectors, gcp)
 		slog.Info("gcp_audit: collector enabled",
 			slog.String("subscription", cfg.Collectors.GCPAudit.PubSubSubscription))
+	}
+	if cfg.Collectors.AzureMonitor.Enabled {
+		az := collector.NewAzureMonitorCollector(slog.Default(), cfg.Collectors.AzureMonitor, bpStrategy)
+		collectors = append(collectors, az)
+		slog.Info("azure_monitor: collector enabled",
+			slog.String("subscription", cfg.Collectors.AzureMonitor.SubscriptionID))
 	}
 	if cfg.Collectors.IOUring.Enabled {
 		ioc, iocErr := collector.NewIOUringCollector(slog.Default())
@@ -1308,18 +1349,38 @@ func setupLogger(level string) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
 }
 
-func generateToken() string {
-	b := make([]byte, 16)
-	// Use /dev/urandom directly — crypto/rand pulls in more dependencies.
-	f, err := os.Open("/dev/urandom")
-	if err != nil {
-		return "insecure-fallback-change-me"
+func generateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("cannot generate auth token: %w", err)
 	}
-	defer f.Close()
-	if _, err := f.Read(b); err != nil {
-		return "insecure-fallback-change-me"
+	return hex.EncodeToString(b), nil
+}
+
+// writeTokenFile writes auto-generated tokens to /run/ebpf-guard/token
+// with mode 0600, so operators can retrieve the credentials.
+// If no tokens are auto-generated (both are empty), this is a no-op.
+func writeTokenFile(adminToken, viewerToken string) error {
+	if adminToken == "" && viewerToken == "" {
+		return nil
 	}
-	return fmt.Sprintf("%x", b)
+	tokenDir := "/run/ebpf-guard"
+	tokenPath := tokenDir + "/token"
+	if err := os.MkdirAll(tokenDir, 0700); err != nil {
+		return fmt.Errorf("create %s: %w", tokenDir, err)
+	}
+	var content string
+	if adminToken != "" {
+		content += "admin=" + adminToken + "\n"
+	}
+	if viewerToken != "" {
+		content += "viewer=" + viewerToken + "\n"
+	}
+	if err := os.WriteFile(tokenPath, []byte(content), 0600); err != nil {
+		return fmt.Errorf("write %s: %w", tokenPath, err)
+	}
+	slog.Info("auth: tokens written to file", "path", tokenPath)
+	return nil
 }
 
 func newVersionCmd() *cobra.Command {
@@ -1457,24 +1518,27 @@ func newRulesImportCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "import [PATH]",
-		Short: "Import detection rules from external formats (sigma)",
+		Short: "Import detection rules from external formats (sigma, ecs)",
 		Long: `import converts rules from other security formats into ebpf-guard YAML.
 
 Supported formats:
   sigma   Sigma open-standard detection rules (https://sigmahq.io)
+  ecs     Elastic Common Schema-based detection rules (Elastic Security)
 
 The input PATH may be a single .yaml/.yml file or a directory. For directories,
 all .yaml/.yml files found directly in the directory are processed.
 Alternatively, use --dir for the input directory and --source for the format.
 
-Unknown Sigma fields are skipped with a WARN log; the rule is still imported
+Unknown fields are skipped with a WARN log; the rule is still imported
 if at least one condition could be mapped. Fully unsupported rules are counted
 separately and never written to the output file.
 
 Examples:
   ebpf-guard rules import --format sigma ./sigma-rules/ --out rules/imported/
   ebpf-guard rules import --source sigma --dir ./sigma-rules/ --out rules/imported/
-  ebpf-guard rules import --format sigma rule.yml --dry-run`,
+  ebpf-guard rules import --format sigma rule.yml --dry-run
+  ebpf-guard rules import --format ecs ./elastic-rules/ --out rules/imported/
+  ebpf-guard rules import --format ecs rule.yml --dry-run`,
 		Args: cobra.RangeArgs(0, 1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Resolve format: --source takes precedence over --format.
@@ -1496,16 +1560,20 @@ Examples:
 				return fmt.Errorf("input path is required — provide as positional argument or via --dir")
 			}
 
-			if !strings.EqualFold(format, "sigma") {
-				return fmt.Errorf("unsupported format %q — only 'sigma' is currently supported", format)
+			if !strings.EqualFold(format, "sigma") && !strings.EqualFold(format, "ecs") {
+				return fmt.Errorf("unsupported format %q — only 'sigma' and 'ecs' are currently supported", format)
 			}
-
-			imp := migration.NewSigmaImporter()
 
 			info, err := os.Stat(inputPath)
 			if err != nil {
 				return fmt.Errorf("stat input path: %w", err)
 			}
+
+			if strings.EqualFold(format, "ecs") {
+				return runECSImport(inputPath, info, outDir, dryRun)
+			}
+
+			imp := migration.NewSigmaImporter()
 
 			var result *migration.SigmaImportResult
 			if info.IsDir() {
@@ -1563,12 +1631,72 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&format, "format", "", "source format (sigma); alias: --source")
-	cmd.Flags().StringVar(&source, "source", "", "source format (sigma); alias: --format")
+	cmd.Flags().StringVar(&format, "format", "", "source format (sigma, ecs); alias: --source")
+	cmd.Flags().StringVar(&source, "source", "", "source format (sigma, ecs); alias: --format")
 	cmd.Flags().StringVar(&dirArg, "dir", "", "input directory containing source rule files (alternative to positional PATH)")
 	cmd.Flags().StringVar(&outDir, "out", "rules/imported", "output directory for converted rules")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print generated YAML without writing files")
 	return cmd
+}
+
+// runECSImport handles the ECS import logic for the rules import subcommand.
+func runECSImport(inputPath string, info os.FileInfo, outDir string, dryRun bool) error {
+	imp := migration.NewECSImporter()
+
+	var result *migration.ECSImportResult
+	var err error
+	if info.IsDir() {
+		result, err = imp.ImportDir(inputPath)
+	} else {
+		result, err = imp.ImportFile(inputPath)
+	}
+	if err != nil {
+		return fmt.Errorf("import ecs rules: %w", err)
+	}
+
+	fmt.Printf("ECS import summary:\n")
+	fmt.Printf("  Converted:   %d\n", result.Converted)
+	fmt.Printf("  Unsupported: %d\n", result.Unsupported)
+	fmt.Printf("  Disabled:    %d\n\n", result.Disabled)
+
+	for _, r := range result.Results {
+		switch r.Status {
+		case "converted":
+			fmt.Printf("  [OK]   %s\n", r.SourceRule)
+		case "unsupported":
+			fmt.Printf("  [SKIP] %s\n", r.SourceRule)
+			for _, reason := range r.UnsupportedReasons {
+				fmt.Printf("         - %s\n", reason)
+			}
+		case "disabled":
+			fmt.Printf("  [OFF]  %s\n", r.SourceRule)
+		}
+	}
+
+	out, err := imp.WriteOutput(result)
+	if err != nil {
+		return fmt.Errorf("serialize output: %w", err)
+	}
+
+	if dryRun {
+		fmt.Printf("\n-- dry-run: not writing files --\n\n%s\n", string(out))
+		return nil
+	}
+
+	if result.Converted == 0 {
+		fmt.Printf("\nNo rules were converted.\n")
+		return nil
+	}
+
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	outPath := filepath.Join(outDir, "ecs-imported.yaml")
+	if err := os.WriteFile(outPath, out, 0o640); err != nil {
+		return fmt.Errorf("write output file: %w", err)
+	}
+	fmt.Printf("\nWritten %d rule(s) to %s\n", result.Converted, outPath)
+	return nil
 }
 
 // newWizardCmd returns the "rules wizard" subcommand.

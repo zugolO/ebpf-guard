@@ -13,6 +13,7 @@ import (
 
 	apispec "github.com/zugolO/ebpf-guard/api"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/exporter/swaggerui"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -43,8 +44,10 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/bpf/reload", s.handleBPFReload)
 
 	// Swagger UI — served without auth so API consumers can explore the spec.
-	mux.HandleFunc("/api/docs", handleAPIDocs)
-	mux.HandleFunc("/api/openapi.yaml", handleOpenAPISpec)
+	// Assets are embedded at build time to eliminate the unpkg.com CDN dependency.
+	mux.Handle("/swaggerui/", swaggerui.Handler())
+	mux.HandleFunc("/api/docs", s.handleAPIDocs)
+	mux.HandleFunc("/api/openapi.yaml", s.handleOpenAPISpec)
 }
 
 // handleAlerts handles GET /api/v1/alerts with query parameter filters.
@@ -697,20 +700,30 @@ func (s *Server) handleIncidentByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAPIDocs serves an interactive Swagger UI page for the ebpf-guard API.
-// The spec is loaded from /api/openapi.yaml on the same origin.
-func handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
+// Assets are embedded at build time (swaggerui/ directory) — no CDN dependency.
+// Content-Security-Policy restricts scripts and connections to same origin.
+func (s *Server) handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; "+
+			"script-src 'self'; "+
+			"connect-src 'self'; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; "+
+			"font-src 'self'; "+
+			"frame-ancestors 'none'; "+
+			"base-uri 'self'")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>ebpf-guard API</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <link rel="stylesheet" href="/swaggerui/swagger-ui.css">
 </head>
 <body>
 <div id="swagger-ui"></div>
-<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script src="/swaggerui/swagger-ui-bundle.js"></script>
 <script>
   SwaggerUIBundle({
     url: "/api/openapi.yaml",
@@ -726,9 +739,31 @@ func handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
 
 // handleOpenAPISpec serves the raw OpenAPI 3.0 YAML specification.
 // The spec is embedded at build time so it is always in sync with the binary.
-func handleOpenAPISpec(w http.ResponseWriter, _ *http.Request) {
+// CORS is restricted to the configured allowlist (default: "*" for backward compat).
+func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	origin := r.Header.Get("Origin")
+	s.mu.RLock()
+	origins := s.corsAllowedOrigins
+	s.mu.RUnlock()
+
+	if len(origins) > 0 && origin != "" {
+		for _, allowed := range origins {
+			if allowed == "*" {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				break
+			}
+			if allowed == origin {
+				// Reflect the specific origin and add Vary: Origin to prevent
+				// proxy cache poisoning when responses differ by origin.
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				break
+			}
+		}
+	}
+
 	w.Write(apispec.OpenAPISpec) //nolint:errcheck
 }
 

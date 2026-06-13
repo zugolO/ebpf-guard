@@ -29,9 +29,21 @@ type DiscordNotifier struct {
 }
 
 // NewDiscordNotifier creates a new Discord notifier.
-func NewDiscordNotifier(cfg DiscordConfig, logger *slog.Logger) *DiscordNotifier {
+// strictSSRF enables blocking of RFC-1918 private IP ranges in addition to the
+// default loopback and link-local address blocking.
+func NewDiscordNotifier(cfg DiscordConfig, logger *slog.Logger, strictSSRF bool) *DiscordNotifier {
 	if !cfg.Enabled || cfg.WebhookURL == "" {
 		return &DiscordNotifier{config: cfg, logger: logger}
+	}
+
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	if err := ValidateWebhookURL(cfg.WebhookURL, strictSSRF); err != nil {
+		logger.Warn("exporter/discord: unsafe webhook URL",
+			slog.String("url", cfg.WebhookURL),
+			slog.Any("error", err))
 	}
 
 	minSev := types.SeverityWarning
@@ -50,6 +62,23 @@ func NewDiscordNotifier(cfg DiscordConfig, logger *slog.Logger) *DiscordNotifier
 // Name returns the notifier identifier.
 func (d *DiscordNotifier) Name() string {
 	return "discord"
+}
+
+// escapeDiscordMarkdown escapes Discord markdown formatting characters
+// in user-supplied strings to prevent spoofing (masked links, fake bold,
+// and other cosmetic injection) in security alert embeds.
+func escapeDiscordMarkdown(s string) string {
+	r := strings.NewReplacer(
+		`\`, `\\`,
+		`*`, `\*`,
+		`_`, `\_`,
+		`~`, `\~`,
+		"`", "\\`",
+		`>`, `\>`,
+		`[`, `\[`,
+		`]`, `\]`,
+	)
+	return r.Replace(s)
 }
 
 // Enabled returns true if the notifier is configured and ready.
@@ -82,7 +111,7 @@ func (d *DiscordNotifier) Send(ctx context.Context, alert types.Alert) error {
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send discord request: %w", err)
+		return fmt.Errorf("send discord request: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 
@@ -127,9 +156,9 @@ func (d *DiscordNotifier) buildPayload(alert types.Alert) DiscordWebhookPayload 
 	}
 
 	fields := []DiscordEmbedField{
-		{Name: "Rule ID", Value: alert.RuleID, Inline: true},
+		{Name: "Rule ID", Value: escapeDiscordMarkdown(alert.RuleID), Inline: true},
 		{Name: "Severity", Value: string(alert.Severity), Inline: true},
-		{Name: "Process", Value: fmt.Sprintf("%s (PID: %d)", alert.Comm, alert.PID), Inline: true},
+		{Name: "Process", Value: fmt.Sprintf("%s (PID: %d)", escapeDiscordMarkdown(alert.Comm), alert.PID), Inline: true},
 		{Name: "Time", Value: alert.Timestamp.Format(time.RFC3339), Inline: true},
 	}
 
@@ -143,7 +172,7 @@ func (d *DiscordNotifier) buildPayload(alert types.Alert) DiscordWebhookPayload 
 	if len(alert.ProcessTree) > 0 {
 		var parts []string
 		for _, node := range alert.ProcessTree {
-			parts = append(parts, fmt.Sprintf("%s (PID %d)", node.Comm, node.PID))
+			parts = append(parts, fmt.Sprintf("%s (PID %d)", escapeDiscordMarkdown(node.Comm), node.PID))
 		}
 		fields = append(fields, DiscordEmbedField{Name: "Process Tree", Value: strings.Join(parts, " → "), Inline: false})
 	}
@@ -156,8 +185,8 @@ func (d *DiscordNotifier) buildPayload(alert types.Alert) DiscordWebhookPayload 
 	return DiscordWebhookPayload{
 		Embeds: []DiscordEmbed{
 			{
-				Title:       fmt.Sprintf("Security Alert: %s", alert.RuleName),
-				Description: alert.Message,
+				Title:       fmt.Sprintf("Security Alert: %s", escapeDiscordMarkdown(alert.RuleName)),
+				Description: escapeDiscordMarkdown(alert.Message),
 				Color:       color,
 				Timestamp:   alert.Timestamp.Format(time.RFC3339),
 				Fields:      fields,

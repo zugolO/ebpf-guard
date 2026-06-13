@@ -22,9 +22,9 @@ type OpenCTIClient struct {
 }
 
 // NewOpenCTIClient creates an OpenCTI GraphQL API client.
-func NewOpenCTIClient(url, apiKey string, confidenceMin int, tlpMarkings []string, verifyTLS bool) *OpenCTIClient {
+func NewOpenCTIClient(url, apiKey string, confidenceMin int, tlpMarkings []string, insecureSkipVerify bool) *OpenCTIClient {
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: !verifyTLS}, //nolint:gosec
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify}, //nolint:gosec
 	}
 	return &OpenCTIClient{
 		url:           strings.TrimRight(url, "/") + "/graphql",

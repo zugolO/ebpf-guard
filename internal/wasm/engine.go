@@ -57,7 +57,8 @@ func NewEngine(ctx context.Context, dir string, logger *slog.Logger, timeout tim
 	}
 
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
-		WithMemoryLimitPages(256)) // 256 pages = 16 MB per instance
+		WithMemoryLimitPages(256).          // 256 pages = 16 MB per instance
+		WithCloseOnContextDone(true))       // honor caller context deadlines
 
 	e := &Engine{
 		rt:      rt,

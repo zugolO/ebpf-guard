@@ -307,12 +307,18 @@ func validateRule(rule *Rule) error {
 		switch rule.Sampling.Mode {
 		case SamplingModeHashPID:
 			rule.SampleDeterministic = true
-		case SamplingModeRandom, "":
-			// default
+		case SamplingModeRandom:
+			// explicitly set random mode
+		case "":
+			// Default to deterministic (hash_pid) for reproducible sampling.
+			rule.SampleDeterministic = true
 		default:
 			return fmt.Errorf("rule %s: sampling.mode %q invalid, must be %q or %q",
 				rule.ID, rule.Sampling.Mode, SamplingModeRandom, SamplingModeHashPID)
 		}
+	} else if rule.SampleRate > 0 && rule.SampleRate < 1.0 {
+		// Flat sample_rate with deterministic default.
+		rule.SampleDeterministic = true
 	}
 
 	// Normalise sample_rate: missing (0.0) → 1.0 (evaluate every event).

@@ -121,6 +121,10 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		cfg.DeduplicationTTL = deduplicationTTLDefault
 	}
 
+	if cfg.Enabled && cfg.Secret == "" {
+		return nil, fmt.Errorf("gossip: secret is required when enabled; configure a shared secret for cross-node authentication")
+	}
+
 	var tlsCfg *tls.Config
 	if cfg.TLSEnabled {
 		var err error

@@ -352,7 +352,7 @@ func TestValidateWebhookURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateWebhookURL(tt.url, tt.strictSSRF)
+			err := ValidateWebhookURL(tt.url, tt.strictSSRF)
 			if tt.wantErr {
 				assert.Error(t, err, "expected error for URL %q (strict=%v)", tt.url, tt.strictSSRF)
 			} else {

@@ -30,9 +30,21 @@ type SlackNotifier struct {
 }
 
 // NewSlackNotifier creates a new Slack notifier.
-func NewSlackNotifier(cfg SlackConfig, logger *slog.Logger) *SlackNotifier {
+// strictSSRF enables blocking of RFC-1918 private IP ranges in addition to the
+// default loopback and link-local address blocking.
+func NewSlackNotifier(cfg SlackConfig, logger *slog.Logger, strictSSRF bool) *SlackNotifier {
 	if !cfg.Enabled || cfg.WebhookURL == "" {
 		return &SlackNotifier{config: cfg, logger: logger}
+	}
+
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	if err := ValidateWebhookURL(cfg.WebhookURL, strictSSRF); err != nil {
+		logger.Warn("exporter/slack: unsafe webhook URL",
+			slog.String("url", cfg.WebhookURL),
+			slog.Any("error", err))
 	}
 
 	minSev := types.SeverityWarning

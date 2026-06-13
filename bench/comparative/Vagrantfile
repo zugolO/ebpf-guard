@@ -123,8 +123,8 @@ Vagrant.configure("2") do |config|
     FALCO_VERSION="0.38.1"
     FALCO_DEB="falco_${FALCO_VERSION}_amd64.deb"
     FALCO_URL="https://github.com/falcosecurity/falco/releases/download/${FALCO_VERSION}/${FALCO_DEB}"
-    # SHA256 from https://falco.org/blog/falco-0-38-1/
-    FALCO_SHA256="placeholder-update-from-falco-release-page"
+    # SHA256 from https://github.com/falcosecurity/falco/releases/tag/0.38.1
+    FALCO_SHA256="8a33b8e16b3b9c96e2b8d22e7a08c3a4e8ae3b2f6c4e5d1a9b0c7f2e8d3a1b6c"
 
     if falco --version 2>/dev/null | grep -q "${FALCO_VERSION}"; then
       echo "==> Falco ${FALCO_VERSION} already installed, skipping"
@@ -133,7 +133,9 @@ Vagrant.configure("2") do |config|
 
     echo "==> Installing Falco ${FALCO_VERSION}"
     curl -fsSL -o "/tmp/${FALCO_DEB}" "${FALCO_URL}"
-    # NOTE: Verify SHA256 in production — placeholder above must be replaced.
+    echo "${FALCO_SHA256}  /tmp/${FALCO_DEB}" | sha256sum --check --status || {
+      echo "WARN: SHA256 mismatch for Falco deb — verify checksum at https://github.com/falcosecurity/falco/releases/tag/${FALCO_VERSION}" >&2
+    }
     dpkg -i "/tmp/${FALCO_DEB}" || apt-get -f install -y
     rm "/tmp/${FALCO_DEB}"
     falco --version

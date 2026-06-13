@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 // OTLPConfig holds OpenTelemetry Protocol log exporter configuration.
 type OTLPConfig struct {
 	Enabled    bool              `mapstructure:"enabled"`
-	Endpoint   string            `mapstructure:"endpoint"`    // e.g. "http://otel-collector:4318"
+	Endpoint   string            `mapstructure:"endpoint"`    // e.g. "https://otel-collector:4318"
 	TLSEnabled bool              `mapstructure:"tls_enabled"` // upgrade to HTTPS
 	CACert     string            `mapstructure:"ca_cert"`
 	ClientCert string            `mapstructure:"client_cert"`
@@ -73,9 +74,11 @@ var (
 )
 
 // NewOTLPNotifier creates a new OTLP log notifier.
-func NewOTLPNotifier(cfg OTLPConfig, logger *slog.Logger) *OTLPNotifier {
+// strictSSRF enables blocking of RFC-1918 private IP ranges in addition to the
+// default loopback and link-local address blocking.
+func NewOTLPNotifier(cfg OTLPConfig, logger *slog.Logger, strictSSRF bool) (*OTLPNotifier, error) {
 	if !cfg.Enabled || cfg.Endpoint == "" {
-		return &OTLPNotifier{config: cfg, logger: logger}
+		return &OTLPNotifier{config: cfg, logger: logger}, nil
 	}
 
 	minSev := types.SeverityWarning
@@ -87,6 +90,19 @@ func NewOTLPNotifier(cfg OTLPConfig, logger *slog.Logger) *OTLPNotifier {
 		cfg.Timeout = 10 * time.Second
 	}
 
+	if cfg.TLSEnabled && !strings.HasPrefix(cfg.Endpoint, "https://") {
+		return nil, fmt.Errorf("otlp: tls_enabled=true requires https:// endpoint, got %q", cfg.Endpoint)
+	}
+
+	if err := ValidateWebhookURL(cfg.Endpoint, strictSSRF); err != nil {
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("exporter/otlp: unsafe OTLP endpoint URL",
+			slog.String("endpoint", cfg.Endpoint),
+			slog.Any("error", err))
+	}
+
 	transport := &http.Transport{}
 	if cfg.TLSEnabled || cfg.CACert != "" || cfg.ClientCert != "" {
 		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -94,19 +110,17 @@ func NewOTLPNotifier(cfg OTLPConfig, logger *slog.Logger) *OTLPNotifier {
 			pool := x509.NewCertPool()
 			pem, err := os.ReadFile(cfg.CACert)
 			if err != nil {
-				logger.Error("otlp: failed to read CA cert", slog.String("path", cfg.CACert), slog.Any("error", err))
-			} else {
-				pool.AppendCertsFromPEM(pem)
-				tlsCfg.RootCAs = pool
+				return nil, fmt.Errorf("otlp: failed to read CA cert %q: %w", cfg.CACert, err)
 			}
+			pool.AppendCertsFromPEM(pem)
+			tlsCfg.RootCAs = pool
 		}
 		if cfg.ClientCert != "" && cfg.ClientKey != "" {
 			cert, err := tls.LoadX509KeyPair(cfg.ClientCert, cfg.ClientKey)
 			if err != nil {
-				logger.Error("otlp: failed to load client cert", slog.Any("error", err))
-			} else {
-				tlsCfg.Certificates = []tls.Certificate{cert}
+				return nil, fmt.Errorf("otlp: failed to load client cert %q: %w", cfg.ClientCert, err)
 			}
+			tlsCfg.Certificates = []tls.Certificate{cert}
 		}
 		transport.TLSClientConfig = tlsCfg
 	}
@@ -124,7 +138,7 @@ func NewOTLPNotifier(cfg OTLPConfig, logger *slog.Logger) *OTLPNotifier {
 		minSeverity: minSev,
 		sent:        otlpSentTotal,
 		errors:      otlpErrorsTotal,
-	}
+	}, nil
 }
 
 func (n *OTLPNotifier) Name() string    { return "otlp" }

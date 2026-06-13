@@ -195,7 +195,7 @@ func TestVTClient_FetchEnterpriseMode_MockServer(t *testing.T) {
 // --- MISP client tests ---
 
 func TestMISPClient_Constructor(t *testing.T) {
-	c := NewMISPClient("https://misp.test", "apikey", []string{"ip-dst"}, 2, nil, true)
+	c := NewMISPClient("https://misp.test", "apikey", []string{"ip-dst"}, 2, nil, false)
 	if c == nil {
 		t.Fatal("expected non-nil client")
 	}
@@ -205,7 +205,7 @@ func TestMISPClient_Constructor(t *testing.T) {
 }
 
 func TestMISPClient_URLTrailingSlashStripped(t *testing.T) {
-	c := NewMISPClient("https://misp.test/", "key", nil, 0, nil, false)
+	c := NewMISPClient("https://misp.test/", "key", nil, 0, nil, true)
 	if c.url != "https://misp.test" {
 		t.Errorf("expected trailing slash stripped, got %q", c.url)
 	}
@@ -232,7 +232,7 @@ func TestMISPClient_Fetch_MockServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewMISPClient(srv.URL, "testkey", []string{"ip-dst", "domain"}, 0, nil, false)
+	c := NewMISPClient(srv.URL, "testkey", []string{"ip-dst", "domain"}, 0, nil, true)
 	result, err := c.Fetch(time.Time{})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -251,7 +251,7 @@ func TestMISPClient_Fetch_HTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewMISPClient(srv.URL, "key", nil, 0, nil, false)
+	c := NewMISPClient(srv.URL, "key", nil, 0, nil, true)
 	_, err := c.Fetch(time.Time{})
 	if err == nil {
 		t.Error("expected error on HTTP 500")
@@ -265,7 +265,7 @@ func TestMISPClient_Fetch_InvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewMISPClient(srv.URL, "key", nil, 0, nil, false)
+	c := NewMISPClient(srv.URL, "key", nil, 0, nil, true)
 	_, err := c.Fetch(time.Time{})
 	if err == nil {
 		t.Error("expected error on invalid JSON response")
@@ -282,7 +282,7 @@ func TestMISPClient_Fetch_EmptyResult(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewMISPClient(srv.URL, "key", nil, 0, nil, false)
+	c := NewMISPClient(srv.URL, "key", nil, 0, nil, true)
 	result, err := c.Fetch(time.Time{})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -295,7 +295,7 @@ func TestMISPClient_Fetch_EmptyResult(t *testing.T) {
 // --- OpenCTI client tests ---
 
 func TestOpenCTIClient_Constructor(t *testing.T) {
-	c := NewOpenCTIClient("https://opencti.test", "apikey", 50, []string{"TLP:GREEN"}, true)
+	c := NewOpenCTIClient("https://opencti.test", "apikey", 50, []string{"TLP:GREEN"}, false)
 	if c == nil {
 		t.Fatal("expected non-nil client")
 	}
@@ -305,21 +305,21 @@ func TestOpenCTIClient_Constructor(t *testing.T) {
 }
 
 func TestOpenCTIClient_URLHasGraphQLSuffix(t *testing.T) {
-	c := NewOpenCTIClient("https://opencti.test", "key", 0, nil, false)
+	c := NewOpenCTIClient("https://opencti.test", "key", 0, nil, true)
 	if c.url != "https://opencti.test/graphql" {
 		t.Errorf("expected /graphql suffix, got %q", c.url)
 	}
 }
 
 func TestOpenCTIClient_URLTrailingSlashStripped(t *testing.T) {
-	c := NewOpenCTIClient("https://opencti.test/", "key", 0, nil, false)
+	c := NewOpenCTIClient("https://opencti.test/", "key", 0, nil, true)
 	if c.url != "https://opencti.test/graphql" {
 		t.Errorf("expected trailing slash + /graphql, got %q", c.url)
 	}
 }
 
 func TestOpenCTIClient_MatchesTLP_NoMarkings_AllowsAll(t *testing.T) {
-	c := NewOpenCTIClient("https://x", "k", 0, nil, false)
+	c := NewOpenCTIClient("https://x", "k", 0, nil, true)
 	ind := openCTIIndicator{}
 	if !c.matchesTLP(ind) {
 		t.Error("expected matchesTLP=true when no TLP filter configured")
@@ -327,7 +327,7 @@ func TestOpenCTIClient_MatchesTLP_NoMarkings_AllowsAll(t *testing.T) {
 }
 
 func TestOpenCTIClient_MatchesTLP_Matching(t *testing.T) {
-	c := NewOpenCTIClient("https://x", "k", 0, []string{"TLP:GREEN", "TLP:WHITE"}, false)
+	c := NewOpenCTIClient("https://x", "k", 0, []string{"TLP:GREEN", "TLP:WHITE"}, true)
 	var ind openCTIIndicator
 	ind.ObjectMarking.Edges = []struct {
 		Node struct {
@@ -346,7 +346,7 @@ func TestOpenCTIClient_MatchesTLP_Matching(t *testing.T) {
 }
 
 func TestOpenCTIClient_MatchesTLP_NotMatching(t *testing.T) {
-	c := NewOpenCTIClient("https://x", "k", 0, []string{"TLP:GREEN"}, false)
+	c := NewOpenCTIClient("https://x", "k", 0, []string{"TLP:GREEN"}, true)
 	var ind openCTIIndicator
 	ind.ObjectMarking.Edges = []struct {
 		Node struct {
@@ -365,7 +365,7 @@ func TestOpenCTIClient_MatchesTLP_NotMatching(t *testing.T) {
 }
 
 func TestOpenCTIClient_MatchesTLP_CaseInsensitive(t *testing.T) {
-	c := NewOpenCTIClient("https://x", "k", 0, []string{"tlp:green"}, false)
+	c := NewOpenCTIClient("https://x", "k", 0, []string{"tlp:green"}, true)
 	var ind openCTIIndicator
 	ind.ObjectMarking.Edges = []struct {
 		Node struct {

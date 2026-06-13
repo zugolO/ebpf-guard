@@ -100,6 +100,12 @@ type Config struct {
 
 	// SimpleMode configures simple-mode auto-enforcement for indie developers.
 	SimpleMode SimpleModeConfig `mapstructure:"simple_mode"`
+
+	// StrictConfig enables strict config file security checks at startup.
+	// When true, the agent refuses to start if the config file is readable by
+	// group or world (mode 0644, 0640, etc.). When false (default), a warning
+	// is logged but startup proceeds.
+	StrictConfig bool `mapstructure:"strict_config"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -117,6 +123,11 @@ type ServerConfig struct {
 	ShutdownDrainEnforcement time.Duration `mapstructure:"shutdown_drain_enforcement"`
 	// ShutdownDrainRego caps the time spent draining async Rego evaluation workers during shutdown. Default: 5s.
 	ShutdownDrainRego time.Duration `mapstructure:"shutdown_drain_rego"`
+	// CORSAllowedOrigins lists the origins allowed to access the OpenAPI spec via CORS.
+	// Include "*" to allow any origin (backward-compatible default).
+	// An empty list means same-origin only (no CORS header).
+	// Example: ["https://docs.mydomain.com", "https://dev.mydomain.com"]
+	CORSAllowedOrigins []string `mapstructure:"cors_allowed_origins"`
 }
 
 // AuthConfig holds authentication configuration.
@@ -168,13 +179,18 @@ type NotificationsConfig struct {
 	Discord DiscordNotificationConfig `mapstructure:"discord"`
 	// Telegram Bot API configuration
 	Telegram TelegramNotificationConfig `mapstructure:"telegram"`
+	// StrictSSRF enables strict SSRF prevention for all HTTP-based notifiers
+	// by blocking RFC-1918 private IP ranges (10/8, 172.16/12, 192.168/16).
+	// Disable when targets are cluster-internal services.
+	// Default: false — safe for Kubernetes; set true for external targets.
+	StrictSSRF bool `mapstructure:"strict_ssrf"`
 }
 
 // OTLPNotificationConfig holds OTLP log exporter settings.
 type OTLPNotificationConfig struct {
 	// Enabled enables OTLP log exports
 	Enabled bool `mapstructure:"enabled"`
-	// Endpoint is the OTLP HTTP endpoint (e.g. "http://otel-collector:4318")
+	// Endpoint is the OTLP HTTP endpoint (e.g. "https://otel-collector:4318")
 	Endpoint string `mapstructure:"endpoint"`
 	// TLSEnabled upgrades to HTTPS and validates the server certificate
 	TLSEnabled bool `mapstructure:"tls_enabled"`
@@ -321,6 +337,8 @@ type CollectorsConfig struct {
 	CloudTrail CloudTrailCollectorConfig `mapstructure:"cloudtrail"`
 	// GCPAudit configures the GCP Audit Logs collector.
 	GCPAudit GCPAuditCollectorConfig `mapstructure:"gcp_audit"`
+	// AzureMonitor configures the Azure Activity Log collector.
+	AzureMonitor AzureMonitorCollectorConfig `mapstructure:"azure_monitor"`
 	// IOUring configures the io_uring activity monitoring collector.
 	IOUring IOUringCollectorConfig `mapstructure:"iouring"`
 	// BPFMonitor configures the bpf() syscall monitoring collector.
@@ -375,6 +393,28 @@ type GCPAuditCollectorConfig struct {
 	// When empty, Application Default Credentials (ADC) are used:
 	// GOOGLE_APPLICATION_CREDENTIALS env var, then GCE/GKE metadata server.
 	CredentialsFile string `mapstructure:"credentials_file"`
+}
+
+// AzureMonitorCollectorConfig holds Azure Activity Log via Azure Monitor REST API settings.
+// The collector polls the Azure Management API with OAuth2 client-credentials authentication.
+type AzureMonitorCollectorConfig struct {
+	// Enabled activates the Azure Activity Log collector.
+	Enabled bool `mapstructure:"enabled"`
+	// SubscriptionID is the Azure subscription ID to collect activity logs from.
+	// Format: UUID (e.g. "00000000-1111-2222-3333-444444444444")
+	SubscriptionID string `mapstructure:"subscription_id"`
+	// TenantID is the Azure AD tenant ID for OAuth2 authentication.
+	TenantID string `mapstructure:"tenant_id"`
+	// ClientID is the Azure AD application (service principal) client ID.
+	ClientID string `mapstructure:"client_id"`
+	// ClientSecret is the Azure AD application client secret.
+	ClientSecret string `mapstructure:"client_secret"`
+	// PollInterval is how often to poll the Activity Log API (Go duration string).
+	// Default: "60s"
+	PollInterval string `mapstructure:"poll_interval"`
+	// MaxEvents is the maximum number of events to fetch per poll.
+	// Default: 100
+	MaxEvents int `mapstructure:"max_events"`
 }
 
 // WasmConfig configures the WASM detection plugin engine.
@@ -795,7 +835,7 @@ type SyscallAllowlistConfig struct {
 	// Mode is the initial mode: "learning" or "enforcing".
 	// The profiler auto-transitions to enforcing after LearningPeriod.
 	Mode string `mapstructure:"mode"`
-	// EnforcingAction is the action taken on violations: "alert", "block", or "kill".
+	// EnforcingAction is the action taken on violations: "alert", "block", "kill", or "audit".
 	EnforcingAction string `mapstructure:"enforcing_action"`
 	// PerWorkload separates allowlists per (comm, namespace, app_label) tuple.
 	PerWorkload bool `mapstructure:"per_workload"`
@@ -1129,8 +1169,9 @@ type MISPConfig struct {
 	URL string `mapstructure:"url"`
 	// APIKey is the MISP automation key (found in MISP → My Profile → Auth key).
 	APIKey string `mapstructure:"api_key"`
-	// VerifyTLS controls whether the MISP server's TLS certificate is verified.
-	VerifyTLS bool `mapstructure:"verify_tls"`
+	// InsecureSkipVerify controls whether the MISP server's TLS certificate is verified.
+	// Default false means the certificate is verified.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
 	// AttributeTypes restricts which MISP attribute types are fetched.
 	// Defaults to ["ip-dst", "ip-src", "domain", "hostname"].
 	AttributeTypes []string `mapstructure:"attribute_types"`
@@ -1149,8 +1190,9 @@ type OpenCTIConfig struct {
 	URL string `mapstructure:"url"`
 	// APIKey is the OpenCTI API token.
 	APIKey string `mapstructure:"api_key"`
-	// VerifyTLS controls whether the OpenCTI server's TLS certificate is verified.
-	VerifyTLS bool `mapstructure:"verify_tls"`
+	// InsecureSkipVerify controls whether the OpenCTI server's TLS certificate is verified.
+	// Default false means the certificate is verified.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
 	// ConfidenceMin is the minimum indicator confidence score (0–100) to include.
 	ConfidenceMin int `mapstructure:"confidence_min"`
 	// TLPMarkings filters indicators to those with any of the listed TLP markings.
@@ -1271,6 +1313,49 @@ func CheckConfigPermissions(path string, skipCheck bool) error {
 	return nil
 }
 
+// CheckConfigReadPermissions verifies the config file is not readable by group
+// or world. Config files often contain secrets (passwords, webhook URLs, API
+// tokens) and should be mode 0600 (owner-only).
+//
+// When strict is true the check is fatal — the agent refuses to start.
+// When strict is false a warning is logged and startup continues.
+func CheckConfigReadPermissions(path string, strict bool) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("config: stat %s: %w", path, err)
+	}
+	mode := info.Mode()
+	masked := mode & 0o044
+	if masked != 0 {
+		msg := fmt.Sprintf(
+			"config: %s is readable by %s (mode %o) — consider chmod 0600 %s",
+			path,
+			modeWho(masked),
+			mode,
+			path,
+		)
+		if strict {
+			return fmt.Errorf("%s", msg)
+		}
+		slog.Warn(msg, "path", path, "mode", fmt.Sprintf("%o", mode))
+	}
+	return nil
+}
+
+// modeWho returns a human-readable description of which permission bits are set.
+func modeWho(masked os.FileMode) string {
+	switch masked {
+	case 0o004:
+		return "world"
+	case 0o040:
+		return "group"
+	case 0o044:
+		return "group and world"
+	default:
+		return fmt.Sprintf("mask 0%o", masked)
+	}
+}
+
 // Manager handles configuration loading and hot-reload.
 type Manager struct {
 	viper    *viper.Viper
@@ -1318,6 +1403,12 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 	// Apply env-var overrides for secrets so they don't have to be stored
 	// in plaintext config files or Kubernetes ConfigMaps.
 	applyEnvOverrides(&cfg)
+
+	// Post-load security check: warn or fail if the config file is readable
+	// by group or world, depending on the strict_config setting.
+	if err := CheckConfigReadPermissions(configPath, cfg.StrictConfig); err != nil {
+		return nil, err
+	}
 
 	m := &Manager{
 		viper:  v,
@@ -1411,6 +1502,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.shutdown_timeout", "30s")
 	v.SetDefault("server.shutdown_drain_enforcement", "5s")
 	v.SetDefault("server.shutdown_drain_rego", "5s")
+	v.SetDefault("server.cors_allowed_origins", []string{"*"})
 
 	// BPF defaults
 	v.SetDefault("bpf.map_sizes.events", 65536)
@@ -1527,6 +1619,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.iouring.enabled", false)
 	v.SetDefault("collectors.bpf_monitor.enabled", false)
 	v.SetDefault("collectors.tls_fingerprint.enabled", false)
+	v.SetDefault("collectors.cloudtrail.enabled", false)
+	v.SetDefault("collectors.gcp_audit.enabled", false)
+	v.SetDefault("collectors.azure_monitor.enabled", false)
 	v.SetDefault("collectors.startup_policy", "fail-open")
 	v.SetDefault("collectors.required", []string{})
 	v.SetDefault("collectors.optional", []string{})
@@ -1586,7 +1681,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("osint.misp.enabled", false)
 	v.SetDefault("osint.misp.url", "")
 	v.SetDefault("osint.misp.api_key", "")
-	v.SetDefault("osint.misp.verify_tls", true)
+	v.SetDefault("osint.misp.insecure_skip_verify", false)
 	v.SetDefault("osint.misp.attribute_types", []string{"ip-dst", "ip-src", "domain", "hostname"})
 	v.SetDefault("osint.misp.min_threat_level", 3)
 	v.SetDefault("osint.misp.tags", []string{})
@@ -1594,7 +1689,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("osint.opencti.enabled", false)
 	v.SetDefault("osint.opencti.url", "")
 	v.SetDefault("osint.opencti.api_key", "")
-	v.SetDefault("osint.opencti.verify_tls", true)
+	v.SetDefault("osint.opencti.insecure_skip_verify", false)
 	v.SetDefault("osint.opencti.confidence_min", 50)
 	v.SetDefault("osint.opencti.tlp_markings", []string{})
 

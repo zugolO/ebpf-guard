@@ -69,6 +69,10 @@ type Server struct {
 
 	// bpfAttached reports whether eBPF programs are successfully loaded and attached.
 	bpfAttached bool
+
+	// corsAllowedOrigins specifies which origins may access the OpenAPI spec via CORS.
+	// An empty list means same-origin only. Contains ["*"] by default.
+	corsAllowedOrigins []string
 }
 
 // NewServer creates a new HTTP server for metrics and health.
@@ -581,6 +585,15 @@ func (s *Server) SetBPFReloader(fn func(ctx context.Context) error) {
 func (s *Server) SetBPFAttached(attached bool) {
 	s.mu.Lock()
 	s.bpfAttached = attached
+	s.mu.Unlock()
+}
+
+// SetCORSAllowedOrigins configures the CORS allowlist for the OpenAPI spec
+// endpoint (/api/openapi.yaml). An empty list means same-origin only (no CORS
+// header). Include "*" to allow any origin (backward-compatible default).
+func (s *Server) SetCORSAllowedOrigins(origins []string) {
+	s.mu.Lock()
+	s.corsAllowedOrigins = origins
 	s.mu.Unlock()
 }
 

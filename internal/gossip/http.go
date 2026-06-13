@@ -117,9 +117,6 @@ func Handler(mgr *Manager) http.Handler {
 	mux := http.NewServeMux()
 
 	authCheck := func(w http.ResponseWriter, r *http.Request) bool {
-		if mgr.cfg.Secret == "" {
-			return true
-		}
 		got := r.Header.Get(gossipSecretHeader)
 		// Primary secret check — constant-time to prevent timing side-channels.
 		if subtle.ConstantTimeCompare([]byte(got), []byte(mgr.cfg.Secret)) == 1 {

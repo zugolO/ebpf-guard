@@ -17,7 +17,7 @@ func TestWebhookBuildPayloadNoEnrichment(t *testing.T) {
 		Enabled: true,
 		URL:     "http://example.com/hook",
 	}
-	notifier := NewGenericWebhookNotifier(cfg, nil)
+	notifier := NewGenericWebhookNotifier(cfg, nil, false)
 
 	alert := types.Alert{
 		ID:        "test-id",
@@ -47,7 +47,7 @@ func TestWebhookBuildPayloadWithEnrichmentFalco(t *testing.T) {
 		Enabled: true,
 		URL:     "http://example.com/hook",
 	}
-	notifier := NewGenericWebhookNotifierWithCompat(cfg, nil, true)
+	notifier := NewGenericWebhookNotifierWithCompat(cfg, nil, true, false)
 
 	alert := types.Alert{
 		ID:        "test-id",
@@ -128,7 +128,7 @@ func TestNewGenericWebhookNotifier_InvalidHeaders_Disabled(t *testing.T) {
 			"X-Inject": "bad\r\nvalue",
 		},
 	}
-	notifier := NewGenericWebhookNotifier(cfg, nil)
+	notifier := NewGenericWebhookNotifier(cfg, nil, false)
 	// Notifier must be disabled when headers are invalid.
 	assert.False(t, notifier.Enabled())
 }

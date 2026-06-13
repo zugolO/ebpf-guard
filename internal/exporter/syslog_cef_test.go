@@ -169,16 +169,68 @@ func TestFormatRFC5424_Escaping(t *testing.T) {
 	assert.Contains(t, msg, `a\"b\]c\\d`)
 }
 
+func TestFormatRFC5424_InjectionPrevention(t *testing.T) {
+	n := &SyslogCEFNotifier{
+		config:  SyslogCEFConfig{Facility: 1},
+		appName: "ebpf-guard",
+	}
+	alert := makeTestAlert()
+	alert.Message = "real alert\n<190>1 2026-01-01T00:00:00Z fakehost ebpf-guard - - - CRITICAL: fake alert"
+	msg := n.formatRFC5424(alert)
+	// No raw newlines — injection prevented.
+	assert.NotContains(t, msg, "\n")
+	// Message body is sanitized but complete: the \n becomes a space,
+	// so both parts of the original text appear on a single line.
+	assert.Contains(t, msg, "real alert")
+}
+
+func TestEscapeSD_InjectionPrevention(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"newline in middle", "process\nname"},
+		{"newline at start", "\nmalicious_sd"},
+		{"carriage return", "proc\rname"},
+		{"other control chars", "proc\x00\x01\x02name"},
+		{"newline in pod name", "evil-pod\n[malicious@1 inject=\"true\"]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := escapeSD(tt.input)
+			assert.NotContains(t, result, "\n")
+			assert.NotContains(t, result, "\r")
+			for _, c := range result {
+				assert.True(t, c >= 0x20 || c == '\t', "unexpected control char 0x%02x in result", c)
+			}
+		})
+	}
+}
+
 func TestFormatCEF_Escaping(t *testing.T) {
 	n := &SyslogCEFNotifier{config: SyslogCEFConfig{}}
 	alert := makeTestAlert()
 	// Message contains a real newline and an equals sign.
 	alert.Message = "cmd=rm\nend"
 	msg := n.formatCEF(alert)
-	// Newline must be escaped; equals must be escaped.
-	assert.Contains(t, msg, `cmd\=rm\nend`)
+	// Equals must be escaped; newline is stripped to space by sanitizeLogField.
+	assert.Contains(t, msg, `cmd\=rm end`)
 	// No raw newlines in the output.
 	assert.NotContains(t, msg, "\n")
+}
+
+func TestFormatCEF_HeaderInjectionPrevention(t *testing.T) {
+	n := &SyslogCEFNotifier{config: SyslogCEFConfig{}}
+	alert := makeTestAlert()
+	alert.RuleID = "rule\nid\rwith\ncrlf"
+	alert.RuleName = "name\ninjected"
+	msg := n.formatCEF(alert)
+	// No raw newlines or CR anywhere in output.
+	assert.NotContains(t, msg, "\n")
+	assert.NotContains(t, msg, "\r")
+	// Escaped sequences should appear in header portion.
+	assert.Contains(t, msg, `\n`)
+	assert.Contains(t, msg, `\r`)
 }
 
 func TestSyslogSeverityMapping(t *testing.T) {
@@ -189,4 +241,19 @@ func TestSyslogSeverityMapping(t *testing.T) {
 func TestCEFSeverityMapping(t *testing.T) {
 	assert.Equal(t, 10, cefSeverity(types.SeverityCritical))
 	assert.Equal(t, 4, cefSeverity(types.SeverityWarning))
+}
+
+func TestEscapeCEFHeader_NewlinePrevention(t *testing.T) {
+	input := "rule\nwith\rcrlf\nheader"
+	result := escapeCEFHeader(input)
+	assert.NotContains(t, result, "\n", "raw newline must be escaped")
+	assert.NotContains(t, result, "\r", "raw carriage return must be escaped")
+	assert.Contains(t, result, `\n`, "newline must become literal backslash-n")
+	assert.Contains(t, result, `\r`, "CR must become literal backslash-r")
+}
+
+func TestEscapeCEFHeader_PipeAndBackslash(t *testing.T) {
+	input := `pipe|and\backslash`
+	result := escapeCEFHeader(input)
+	assert.Equal(t, `pipe\|and\\backslash`, result)
 }

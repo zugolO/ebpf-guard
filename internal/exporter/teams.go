@@ -29,9 +29,21 @@ type TeamsNotifier struct {
 }
 
 // NewTeamsNotifier creates a new Teams notifier.
-func NewTeamsNotifier(cfg TeamsConfig, logger *slog.Logger) *TeamsNotifier {
+// strictSSRF enables blocking of RFC-1918 private IP ranges in addition to the
+// default loopback and link-local address blocking.
+func NewTeamsNotifier(cfg TeamsConfig, logger *slog.Logger, strictSSRF bool) *TeamsNotifier {
 	if !cfg.Enabled || cfg.WebhookURL == "" {
 		return &TeamsNotifier{config: cfg, logger: logger}
+	}
+
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	if err := ValidateWebhookURL(cfg.WebhookURL, strictSSRF); err != nil {
+		logger.Warn("exporter/teams: unsafe webhook URL",
+			slog.String("url", cfg.WebhookURL),
+			slog.Any("error", err))
 	}
 
 	minSev := types.SeverityWarning
@@ -83,7 +95,7 @@ func (t *TeamsNotifier) Send(ctx context.Context, alert types.Alert) error {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send teams request: %w", err)
+		return fmt.Errorf("send teams request: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 

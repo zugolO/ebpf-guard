@@ -235,6 +235,10 @@ func syslogSeverity(s types.Severity) int {
 // STRUCTURED-DATA: [ebpf-guard@50000 rule="..." pid="..." ...]
 // MSG: human-readable alert message
 func (n *SyslogCEFNotifier) formatRFC5424(alert types.Alert) string {
+	alert.Message = sanitizeLogField(alert.Message)
+	alert.Comm = sanitizeLogField(alert.Comm)
+	alert.RuleName = sanitizeLogField(alert.RuleName)
+
 	pri := n.config.Facility*8 + syslogSeverity(alert.Severity)
 	hostname, _ := os.Hostname()
 	if hostname == "" {
@@ -266,12 +270,39 @@ func (n *SyslogCEFNotifier) formatRFC5424(alert types.Alert) string {
 		pri, ts, hostname, n.appName, sd, alert.Message)
 }
 
-// escapeSD escapes RFC 5424 structured-data param-value characters.
+// sanitizeLogField strips control characters from a log field to prevent
+// syslog injection via embedded \n, \r, and other non-printable characters.
+func sanitizeLogField(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// escapeSD escapes RFC 5424 structured-data param-value characters
+// and strips control characters (including \n, \r) to prevent
+// syslog structured-data injection.
 func escapeSD(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, `]`, `\]`)
-	return s
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\', '"', ']':
+			b.WriteRune('\\')
+			b.WriteRune(r)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r < 0x20 {
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ─── CEF formatting ───────────────────────────────────────────────────────────
@@ -289,6 +320,10 @@ func cefSeverity(s types.Severity) int {
 // formatCEF builds a CEF:0 (ArcSight Common Event Format) message.
 // Format: CEF:Version|Device Vendor|Device Product|Device Version|Signature ID|Name|Severity|Extension
 func (n *SyslogCEFNotifier) formatCEF(alert types.Alert) string {
+	alert.Message = sanitizeLogField(alert.Message)
+	alert.Comm = sanitizeLogField(alert.Comm)
+	alert.RuleName = sanitizeLogField(alert.RuleName)
+
 	name := alert.RuleName
 	if name == "" {
 		name = alert.RuleID
@@ -327,10 +362,12 @@ func (n *SyslogCEFNotifier) formatCEF(alert types.Alert) string {
 		ext.String())
 }
 
-// escapeCEFHeader escapes pipe and backslash in CEF header fields.
+// escapeCEFHeader escapes pipe, backslash, and newlines in CEF header fields.
 func escapeCEFHeader(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `|`, `\|`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
 	return s
 }
 

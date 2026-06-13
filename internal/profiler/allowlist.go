@@ -27,9 +27,12 @@ const (
 type AllowlistAction string
 
 const (
-	AllowlistActionAlert    AllowlistAction = "alert"
-	AllowlistActionBlock    AllowlistAction = "block"
-	AllowlistActionKill     AllowlistAction = "kill"
+	AllowlistActionAlert AllowlistAction = "alert"
+	AllowlistActionBlock AllowlistAction = "block"
+	AllowlistActionKill  AllowlistAction = "kill"
+	// AllowlistActionAudit logs violations without generating alerts.
+	// Useful for initial tuning before switching to enforcing mode.
+	AllowlistActionAudit AllowlistAction = "audit"
 )
 
 // SyscallAllowlistConfig holds configuration for the syscall allowlist profiler.
@@ -39,7 +42,7 @@ type SyscallAllowlistConfig struct {
 	// Mode sets the initial operating mode ("learning" or "enforcing").
 	// After LearningPeriod the profiler auto-switches to enforcing regardless.
 	Mode string `mapstructure:"mode"`
-	// EnforcingAction is the action triggered for unknown syscalls: "alert", "block", or "kill".
+	// EnforcingAction is the action triggered for unknown syscalls: "alert", "block", "kill", or "audit".
 	EnforcingAction string `mapstructure:"enforcing_action"`
 	// PerWorkload separates allowlists per (comm, namespace, app_label) tuple.
 	// When false a single global allowlist is maintained.

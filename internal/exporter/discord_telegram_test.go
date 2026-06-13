@@ -3,10 +3,13 @@ package exporter
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -30,7 +33,7 @@ func TestDiscordNotifierSend(t *testing.T) {
 		WebhookURL:  server.URL,
 		MinSeverity: "warning",
 	}
-	notifier := NewDiscordNotifier(config, logger)
+	notifier := NewDiscordNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:       "test-001",
@@ -64,7 +67,7 @@ func TestDiscordNotifierSend(t *testing.T) {
 
 	require.Len(t, embed.Fields, 5) // Rule ID, Severity, Process, Time, Process Tree
 	assert.Equal(t, "Rule ID", embed.Fields[0].Name)
-	assert.Equal(t, "rule_001", embed.Fields[0].Value)
+	assert.Equal(t, "rule\\_001", embed.Fields[0].Value)
 	assert.Equal(t, "Severity", embed.Fields[1].Name)
 	assert.Equal(t, "critical", embed.Fields[1].Value)
 
@@ -87,7 +90,7 @@ func TestDiscordNotifierSeverityFilter(t *testing.T) {
 		WebhookURL:  server.URL,
 		MinSeverity: "critical",
 	}
-	notifier := NewDiscordNotifier(config, logger)
+	notifier := NewDiscordNotifier(config, logger, false)
 
 	ctx := context.Background()
 
@@ -118,7 +121,7 @@ func TestDiscordNotifierDisabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := DiscordConfig{Enabled: false}
-	notifier := NewDiscordNotifier(config, logger)
+	notifier := NewDiscordNotifier(config, logger, false)
 	assert.False(t, notifier.Enabled())
 	assert.Equal(t, "discord", notifier.Name())
 
@@ -132,7 +135,7 @@ func TestDiscordNotifierNoWebhookURL(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := DiscordConfig{Enabled: true, WebhookURL: ""}
-	notifier := NewDiscordNotifier(config, logger)
+	notifier := NewDiscordNotifier(config, logger, false)
 	assert.False(t, notifier.Enabled())
 }
 
@@ -148,7 +151,7 @@ func TestDiscordNotifierServerError(t *testing.T) {
 		Enabled:    true,
 		WebhookURL: server.URL,
 	}
-	notifier := NewDiscordNotifier(config, logger)
+	notifier := NewDiscordNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:        "test-001",
@@ -178,7 +181,7 @@ func TestDiscordNotifierWarningEmbedColor(t *testing.T) {
 		WebhookURL:  server.URL,
 		MinSeverity: "warning",
 	}
-	notifier := NewDiscordNotifier(config, logger)
+	notifier := NewDiscordNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:        "test-001",
@@ -214,7 +217,7 @@ func TestDiscordNotifierProcessTree(t *testing.T) {
 		Enabled:    true,
 		WebhookURL: server.URL,
 	}
-	notifier := NewDiscordNotifier(config, logger)
+	notifier := NewDiscordNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:          "test-001",
@@ -269,6 +272,88 @@ func TestDiscordNotifierProcessTree(t *testing.T) {
 	assert.True(t, foundNS)
 }
 
+func TestDiscordNotifier_MarkdownEscaping(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var receivedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	config := DiscordConfig{
+		Enabled:    true,
+		WebhookURL: server.URL,
+	}
+	notifier := NewDiscordNotifier(config, logger, false)
+
+	alert := types.Alert{
+		ID:       "test-001",
+		RuleID:   "rule_001",
+		RuleName: "[Click here](https://phishing.example)",
+		Severity: types.SeverityCritical,
+		Message:  "Suspicious process: *important* _warning_ ~ignore~ `cmd`",
+		PID:      5678,
+		Comm:     "**evil**proc",
+		Timestamp: time.Now(),
+		ProcessTree: types.ProcessTree{
+			{PID: 1, PPID: 0, Comm: "*systemd*"},
+			{PID: 5678, PPID: 1, Comm: "**evil**proc"},
+		},
+	}
+
+	err := notifier.Send(context.Background(), alert)
+	require.NoError(t, err)
+
+	var payload DiscordWebhookPayload
+	err = json.Unmarshal(receivedBody, &payload)
+	require.NoError(t, err)
+
+	require.Len(t, payload.Embeds, 1)
+	embed := payload.Embeds[0]
+
+	assert.Contains(t, embed.Title, `\[Click here\](https://phishing.example)`)
+
+	assert.Contains(t, embed.Description, `\*important\*`)
+	assert.Contains(t, embed.Description, `\_warning\_`)
+	assert.Contains(t, embed.Description, `\~ignore\~`)
+	assert.Contains(t, embed.Description, "\\\x60cmd\\\x60")
+
+	foundProc := false
+	for _, field := range embed.Fields {
+		if field.Name == "Process" {
+			foundProc = true
+			assert.Contains(t, field.Value, `\*\*evil\*\*proc`)
+		}
+	}
+	assert.True(t, foundProc, "Process field should be present")
+}
+
+func TestEscapeDiscordMarkdown(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"normal text", "normal text"},
+		{"*bold*", `\*bold\*`},
+		{"_italic_", `\_italic\_`},
+		{"~strike~", `\~strike\~`},
+		{"\x60code\x60", "\\\x60code\\\x60"},
+		{"> quote", `\> quote`},
+		{"[link](url)", `\[link\](url)`},
+		{"back\\slash", `back\\slash`},
+		{"mix*_~\x60>[]", "mix\\*\\_\\~\\\x60\\>\\[\\]"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := escapeDiscordMarkdown(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestTelegramNotifierSend(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -285,7 +370,7 @@ func TestTelegramNotifierSend(t *testing.T) {
 		ChatID:      "test-chat-id",
 		MinSeverity: "warning",
 	}
-	notifier := NewTelegramNotifier(config, logger)
+	notifier := NewTelegramNotifier(config, logger, false)
 	notifier.apiBase = server.URL
 
 	alert := types.Alert{
@@ -336,7 +421,7 @@ func TestTelegramNotifierSeverityFilter(t *testing.T) {
 		ChatID:      "12345",
 		MinSeverity: "critical",
 	}
-	notifier := NewTelegramNotifier(config, logger)
+	notifier := NewTelegramNotifier(config, logger, false)
 	notifier.apiBase = server.URL
 
 	ctx := context.Background()
@@ -368,7 +453,7 @@ func TestTelegramNotifierDisabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := TelegramConfig{Enabled: false}
-	notifier := NewTelegramNotifier(config, logger)
+	notifier := NewTelegramNotifier(config, logger, false)
 	assert.False(t, notifier.Enabled())
 	assert.Equal(t, "telegram", notifier.Name())
 
@@ -382,7 +467,7 @@ func TestTelegramNotifierMissingToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := TelegramConfig{Enabled: true, BotToken: "", ChatID: "12345"}
-	notifier := NewTelegramNotifier(config, logger)
+	notifier := NewTelegramNotifier(config, logger, false)
 	assert.False(t, notifier.Enabled())
 }
 
@@ -390,7 +475,7 @@ func TestTelegramNotifierMissingChatID(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	config := TelegramConfig{Enabled: true, BotToken: "test-token", ChatID: ""}
-	notifier := NewTelegramNotifier(config, logger)
+	notifier := NewTelegramNotifier(config, logger, false)
 	assert.False(t, notifier.Enabled())
 }
 
@@ -408,7 +493,7 @@ func TestTelegramNotifierServerError(t *testing.T) {
 		ChatID:      "12345",
 		MinSeverity: "warning",
 	}
-	notifier := NewTelegramNotifier(config, logger)
+	notifier := NewTelegramNotifier(config, logger, false)
 	notifier.apiBase = server.URL
 
 	alert := types.Alert{
@@ -433,7 +518,7 @@ func TestTelegramMarkdownV2Escape(t *testing.T) {
 		{"test*star", "test\\*star"},
 		{"[link](url)", "\\[link\\]\\(url\\)"},
 		{"~strike~", "\\~strike\\~"},
-		{"`code`", "\\`code\\`"},
+		{"\x60code\x60", "\\\x60code\\\x60"},
 		{"a>b", "a\\>b"},
 		{"#header", "\\#header"},
 		{"a+b=c", "a\\+b\\=c"},
@@ -467,7 +552,8 @@ func TestFanoutNotifierDiscordTelegram(t *testing.T) {
 		Discord:  DiscordConfig{Enabled: true, WebhookURL: discordServer.URL},
 		Telegram: TelegramConfig{Enabled: true, BotToken: "token", ChatID: "chat"},
 	}
-	notifier := NewFanoutNotifier(config, 5*time.Second, logger)
+	notifier, err := NewFanoutNotifier(config, 5*time.Second, logger)
+	require.NoError(t, err)
 	// Override telegram API base for test
 	for _, n := range notifier.notifiers {
 		if tn, ok := n.(*TelegramNotifier); ok {
@@ -487,4 +573,70 @@ func TestFanoutNotifierDiscordTelegram(t *testing.T) {
 	}
 	notifier.Send(context.Background(), alert)
 	time.Sleep(100 * time.Millisecond)
+}
+
+func TestRedactURLError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "url.Error with secret in URL",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://api.telegram.org/bot12345:AAHsecret_token/sendMessage",
+				Err: fmt.Errorf("connection refused"),
+			},
+		},
+		{
+			name: "url.Error with Discord webhook",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://discord.com/api/webhooks/secret/token",
+				Err: fmt.Errorf("timeout"),
+			},
+		},
+		{
+			name: "url.Error redacted before wrapping",
+			err: func() error {
+				raw := &url.Error{
+					Op:  "Post",
+					URL: "https://outlook.office.com/webhook/teams-secret",
+					Err: fmt.Errorf("dns error"),
+				}
+				return fmt.Errorf("request failed: %w", redactURLError(raw))
+			}(),
+		},
+		{
+			name: "non-url error passes through",
+			err:  fmt.Errorf("context deadline exceeded"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := redactURLError(tt.err)
+			assert.NotNil(t, result)
+
+			errStr := result.Error()
+			assert.NotContains(t, errStr, "bot12345")
+			assert.NotContains(t, errStr, "webhooks/secret")
+			assert.NotContains(t, errStr, "teams-secret")
+
+			var urlErr *url.Error
+			if errors.As(result, &urlErr) {
+				assert.Equal(t, "[redacted]", urlErr.URL)
+			}
+		})
+	}
+}
+
+func TestRedactURLError_SideEffect(t *testing.T) {
+	original := &url.Error{
+		Op:  "Post",
+		URL: "https://api.telegram.org/botSECRET/sendMessage",
+		Err: fmt.Errorf("timeout"),
+	}
+	_ = redactURLError(original)
+	assert.Equal(t, "[redacted]", original.URL)
 }

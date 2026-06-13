@@ -28,14 +28,14 @@ var (
 			Name: "ebpf_guard_rule_sampled_total",
 			Help: "Events that passed the per-rule sampling gate and were evaluated against the rule condition",
 		},
-		[]string{"rule_id", "mode"},
+		[]string{"rule_id", "mode", "sample_rate"},
 	)
 	ruleSkippedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ebpf_guard_rule_skipped_total",
 			Help: "Events dropped by the per-rule sampling gate without condition evaluation",
 		},
-		[]string{"rule_id", "mode"},
+		[]string{"rule_id", "mode", "sample_rate"},
 	)
 )
 
@@ -686,12 +686,12 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 	// all three RLock/map-lookup/RUnlock cycles (HasSampling+Mode+ShouldEvaluate).
 	// CheckSampling collapses those three calls into one lock acquisition.
 	if !rule.skipSampler || re.sampler.entryCount.Load() > 0 {
-		if active, skip, mode := re.sampler.CheckSampling(rule.ID, e.PID, e.Timestamp); active {
+		if active, skip, mode, rateStr := re.sampler.CheckSampling(rule.ID, e.PID, e.Timestamp); active {
 			if skip {
-				ruleSkippedTotal.WithLabelValues(rule.ID, mode).Inc()
+				ruleSkippedTotal.WithLabelValues(rule.ID, mode, rateStr).Inc()
 				return false
 			}
-			ruleSampledTotal.WithLabelValues(rule.ID, mode).Inc()
+			ruleSampledTotal.WithLabelValues(rule.ID, mode, rateStr).Inc()
 		}
 	}
 

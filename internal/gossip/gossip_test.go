@@ -216,6 +216,7 @@ func newTestManager(peers ...string) *Manager {
 	cfg := Config{
 		Enabled:      true,
 		NodeName:     "test-node",
+		Secret:       "test-secret",
 		IOCTTL:       time.Hour,
 		MaxIOCs:      1000,
 		PushInterval: time.Hour, // long interval so pushLoop doesn't fire in tests
@@ -259,6 +260,15 @@ func TestManager_DisabledMatchAlwaysFalse(t *testing.T) {
 	m.store.Add(IOC{Type: IOCTypeIP, Value: "1.2.3.4", ExpiresAt: time.Now().Add(time.Hour)})
 
 	assert.False(t, m.MatchIP("1.2.3.4"), "disabled manager must not match")
+}
+
+func TestNewManager_RejectsEnabledWithoutSecret(t *testing.T) {
+	cfg := Config{
+		Enabled: true,
+	}
+	_, err := NewManager(cfg, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secret is required")
 }
 
 func TestManager_ExtractFromAlert_TCPConnect(t *testing.T) {
@@ -394,6 +404,7 @@ func TestHTTP_ReceiveIOCs(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(gossipSecretHeader, "test-secret")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -408,6 +419,7 @@ func TestHTTP_SnapshotIOCs(t *testing.T) {
 
 	handler := Handler(m)
 	req := httptest.NewRequest(http.MethodGet, "/gossip/iocs", nil)
+	req.Header.Set(gossipSecretHeader, "test-secret")
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -418,6 +430,21 @@ func TestHTTP_SnapshotIOCs(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&iocs))
 	require.Len(t, iocs, 1)
 	assert.Equal(t, "11.22.33.44", iocs[0].Value)
+}
+
+func TestHTTP_AuthRejectsMissingSecret(t *testing.T) {
+	m := newTestManager()
+	handler := Handler(m)
+
+	iocs := []IOC{{Type: IOCTypeIP, Value: "9.9.9.9", ExpiresAt: time.Now().Add(time.Hour)}}
+	body, _ := json.Marshal(iocs)
+
+	req := httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "requests without X-Gossip-Secret must be rejected when a secret is configured")
 }
 
 func TestHTTP_AuthEnforced(t *testing.T) {
@@ -462,6 +489,7 @@ func TestHTTP_InvalidJSON(t *testing.T) {
 	handler := Handler(m)
 
 	req := httptest.NewRequest(http.MethodPost, "/gossip/iocs", strings.NewReader("not json"))
+	req.Header.Set(gossipSecretHeader, "test-secret")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -473,6 +501,7 @@ func TestHTTP_MethodNotAllowed(t *testing.T) {
 	handler := Handler(m)
 
 	req := httptest.NewRequest(http.MethodDelete, "/gossip/iocs", nil)
+	req.Header.Set(gossipSecretHeader, "test-secret")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -546,6 +575,7 @@ func TestManager_CleanupLoop(t *testing.T) {
 	cfg := Config{
 		Enabled:      true,
 		NodeName:     "node-1",
+		Secret:       "test-secret",
 		IOCTTL:       2 * time.Second,
 		MaxIOCs:      100,
 		PushInterval: time.Hour,
@@ -590,6 +620,7 @@ func TestManager_PushLoop(t *testing.T) {
 	cfg := Config{
 		Enabled:      true,
 		NodeName:     "node-1",
+		Secret:       "test-secret",
 		IOCTTL:       time.Hour,
 		MaxIOCs:      100,
 		PushInterval: 50 * time.Millisecond, // fast for test

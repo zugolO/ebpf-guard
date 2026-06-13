@@ -402,3 +402,220 @@ func TestHelperFunctions(t *testing.T) {
 	assert.Equal(t, "syscall_300", formatSyscall(300))
 	assert.Equal(t, "syscall_450", formatSyscall(450))
 }
+
+// TestProfilerAllowlist_DisabledDoesNotAffectIngest verifies that when
+// allowlist is disabled, Ingest behaves as before (only behavior/sequence/lineage).
+func TestProfilerAllowlist_DisabledDoesNotAffectIngest(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+		Sequence:   SequenceConfig{Enabled: false},
+		Lineage:    LineageConfig{Enabled: false},
+		Allowlist:  SyscallAllowlistConfig{Enabled: false},
+	}
+	p := NewProfiler(cfg, nil)
+	e := makeSyscallEvent(59)
+
+	anomalies := p.Ingest(e)
+	assert.Nil(t, anomalies) // no anomaly during learning with disabled allowlist
+}
+
+// TestProfilerAllowlist_LearningPhaseNoAlerts verifies that during learning
+// the allowlist records syscalls but does not generate alerts.
+func TestProfilerAllowlist_LearningPhaseNoAlerts(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+		Sequence:   SequenceConfig{Enabled: false},
+		Lineage:    LineageConfig{Enabled: false},
+		Allowlist: SyscallAllowlistConfig{
+			Enabled:         true,
+			Mode:            "learning",
+			EnforcingAction: "alert",
+			PerWorkload:     true,
+			LearningPeriod:  3600,
+			MinSamples:      100,
+		},
+	}
+	p := NewProfiler(cfg, nil)
+	e := makeSyscallEvent(59)
+
+	anomalies := p.Ingest(e)
+	assert.Nil(t, anomalies, "no anomaly during learning phase")
+
+	allowlistProf := p.GetAllowlistProfiler()
+	v := allowlistProf.Check(e)
+	assert.Nil(t, v, "Check returns nil during learning")
+}
+
+// TestProfilerAllowlist_EnforcingViolation verifies that after learning
+// completes, unknown syscalls produce AnomalyTypeAllowlist anomalies.
+func TestProfilerAllowlist_EnforcingViolation(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+		Sequence:   SequenceConfig{Enabled: false},
+		Lineage:    LineageConfig{Enabled: false},
+		Allowlist: SyscallAllowlistConfig{
+			Enabled:         true,
+			Mode:            "enforcing",
+			EnforcingAction: "alert",
+			PerWorkload:     true,
+			LearningPeriod:  0, // immediate
+			MinSamples:      1,
+		},
+	}
+	p := NewProfiler(cfg, nil)
+
+	// Feed known syscalls to build baseline.
+	p.Ingest(makeSyscallEvent(1))
+	p.Ingest(makeSyscallEvent(3))
+	p.Ingest(makeSyscallEvent(5))
+
+	// Unknown syscall should trigger anomaly.
+	anomalies := p.Ingest(makeSyscallEvent(99))
+	assert.NotNil(t, anomalies)
+	assert.Equal(t, 1, len(anomalies))
+	assert.Equal(t, AnomalyTypeAllowlist, anomalies[0].Type)
+	assert.Equal(t, "alert", anomalies[0].Contributions["action"])
+	assert.Equal(t, "unknown", anomalies[0].Contributions["source"])
+}
+
+// TestProfilerAllowlist_GlobalDeny verifies that global_deny syscalls
+// always produce violations regardless of learning.
+func TestProfilerAllowlist_GlobalDeny(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+		Sequence:   SequenceConfig{Enabled: false},
+		Lineage:    LineageConfig{Enabled: false},
+		Allowlist: SyscallAllowlistConfig{
+			Enabled:         true,
+			Mode:            "enforcing",
+			EnforcingAction: "alert",
+			PerWorkload:     true,
+			LearningPeriod:  0,
+			MinSamples:      1,
+			GlobalDeny:      []int{101}, // ptrace
+		},
+	}
+	p := NewProfiler(cfg, nil)
+
+	anomalies := p.Ingest(makeSyscallEvent(101))
+	assert.NotNil(t, anomalies)
+	assert.Equal(t, 1, len(anomalies))
+	assert.Equal(t, AnomalyTypeAllowlist, anomalies[0].Type)
+	assert.Equal(t, "global_deny", anomalies[0].Contributions["source"])
+	assert.Equal(t, 1.0, anomalies[0].Score)
+}
+
+// TestProfilerAllowlist_AuditModeNoAlert verifies that audit mode logs
+// violations but does not return them as anomalies.
+func TestProfilerAllowlist_AuditModeNoAlert(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+		Sequence:   SequenceConfig{Enabled: false},
+		Lineage:    LineageConfig{Enabled: false},
+		Allowlist: SyscallAllowlistConfig{
+			Enabled:         true,
+			Mode:            "enforcing",
+			EnforcingAction: "audit",
+			PerWorkload:     true,
+			LearningPeriod:  0,
+			MinSamples:      1,
+			GlobalDeny:      []int{101},
+		},
+	}
+	p := NewProfiler(cfg, nil)
+
+	anomalies := p.Ingest(makeSyscallEvent(101))
+	assert.Nil(t, anomalies, "audit mode must not return anomalies")
+}
+
+// TestProfilerAllowlist_CombinedScore verifies weighted score integration:
+// when both EWMA anomaly and allowlist violation fire for the same event,
+// a single boosted AnomalyTypeAllowlist anomaly is returned with combined score.
+func TestProfilerAllowlist_CombinedScore(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.8,
+		Weight:     0.3,
+		TTLSeconds: 600,
+		Sequence:   SequenceConfig{Enabled: false},
+		Lineage:    LineageConfig{Enabled: false},
+		Allowlist: SyscallAllowlistConfig{
+			Enabled:         true,
+			Mode:            "enforcing",
+			EnforcingAction: "alert",
+			PerWorkload:     true,
+			LearningPeriod:  0,
+			MinSamples:      1,
+		},
+	}
+	p := NewProfiler(cfg, nil)
+
+	// Feed known syscalls so allowlist has a baseline.
+	p.Ingest(makeSyscallEvent(1))
+	p.Ingest(makeSyscallEvent(3))
+	p.Ingest(makeSyscallEvent(5))
+
+	// An unknown syscall without EWMA anomaly:
+	// produces a standalone allowlist anomaly with score 0.8.
+	anomalies := p.Ingest(makeSyscallEvent(99))
+	assert.NotNil(t, anomalies)
+	assert.Equal(t, 1, len(anomalies))
+	assert.Equal(t, AnomalyTypeAllowlist, anomalies[0].Type)
+	assert.InDelta(t, 0.8, anomalies[0].Score, 0.01)
+
+	// Global deny syscall gets score 1.0 regardless of EWMA.
+	cfg.Allowlist.GlobalDeny = []int{101}
+	cfg.Allowlist.LearningPeriod = 0
+	cfg.Allowlist.MinSamples = 1
+	p2 := NewProfiler(cfg, nil)
+	p2.Ingest(makeSyscallEvent(1))
+	anomalies = p2.Ingest(makeSyscallEvent(101))
+	assert.NotNil(t, anomalies)
+	assert.Equal(t, 1, len(anomalies))
+	assert.Equal(t, AnomalyTypeAllowlist, anomalies[0].Type)
+	assert.InDelta(t, 1.0, anomalies[0].Score, 0.01)
+	assert.Equal(t, "global_deny", anomalies[0].Contributions["source"])
+}
+
+// TestProfilerAllowlist_GetAllowlistProfiler verifies the accessor method.
+func TestProfilerAllowlist_GetAllowlistProfiler(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+		Sequence:   SequenceConfig{Enabled: false},
+		Lineage:    LineageConfig{Enabled: false},
+		Allowlist: SyscallAllowlistConfig{
+			Enabled:         true,
+			Mode:            "learning",
+			EnforcingAction: "alert",
+			PerWorkload:     true,
+			LearningPeriod:  3600,
+			MinSamples:      100,
+		},
+	}
+	p := NewProfiler(cfg, nil)
+	ap := p.GetAllowlistProfiler()
+	assert.NotNil(t, ap)
+}
+
+// TestProfilerConfig_AllowlistDefault verifies the default allowlist config.
+func TestProfilerConfig_AllowlistDefault(t *testing.T) {
+	def := DefaultSyscallAllowlistConfig()
+	assert.False(t, def.Enabled)
+	assert.Equal(t, string(AllowlistModeLearning), def.Mode)
+	assert.Equal(t, string(AllowlistActionAlert), def.EnforcingAction)
+	assert.True(t, def.PerWorkload)
+	assert.Equal(t, 3600, def.LearningPeriod)
+	assert.Equal(t, 100, def.MinSamples)
+	assert.Equal(t, 10, def.SparseThreshold)
+}

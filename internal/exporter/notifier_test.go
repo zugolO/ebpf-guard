@@ -72,7 +72,8 @@ func TestNewFanoutNotifier(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			notifier := NewFanoutNotifier(tt.config, 5*time.Second, logger)
+			notifier, err := NewFanoutNotifier(tt.config, 5*time.Second, logger)
+			require.NoError(t, err)
 			assert.Len(t, notifier.NotifierNames(), tt.expected)
 		})
 	}
@@ -121,7 +122,8 @@ func TestFanoutNotifierSend(t *testing.T) {
 		Webhook: WebhookConfig{Enabled: true, URL: webhookServer.URL, MinSeverity: "warning"},
 	}
 
-	notifier := NewFanoutNotifier(config, 5*time.Second, logger)
+	notifier, err := NewFanoutNotifier(config, 5*time.Second, logger)
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		ID:       "test-001",
@@ -160,7 +162,7 @@ func TestSlackNotifierSeverityFilter(t *testing.T) {
 		WebhookURL:  server.URL,
 		MinSeverity: "critical",
 	}
-	notifier := NewSlackNotifier(config, logger)
+	notifier := NewSlackNotifier(config, logger, false)
 
 	ctx := context.Background()
 
@@ -206,7 +208,7 @@ func TestTeamsNotifierSeverityFilter(t *testing.T) {
 		WebhookURL:  server.URL,
 		MinSeverity: "critical",
 	}
-	notifier := NewTeamsNotifier(config, logger)
+	notifier := NewTeamsNotifier(config, logger, false)
 
 	ctx := context.Background()
 
@@ -254,7 +256,7 @@ func TestWebhookNotifierCustomTemplate(t *testing.T) {
 		URL:      server.URL,
 		Template: customTemplate,
 	}
-	notifier := NewGenericWebhookNotifier(config, logger)
+	notifier := NewGenericWebhookNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:       "test-001",
@@ -291,7 +293,7 @@ func TestWebhookNotifierDefaultTemplate(t *testing.T) {
 		URL:     server.URL,
 		// Template is empty, should use default
 	}
-	notifier := NewGenericWebhookNotifier(config, logger)
+	notifier := NewGenericWebhookNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:          "test-001",
@@ -340,7 +342,7 @@ func TestWebhookNotifierCustomHeaders(t *testing.T) {
 			"X-Event-Source":   "ebpf-guard",
 		},
 	}
-	notifier := NewGenericWebhookNotifier(config, logger)
+	notifier := NewGenericWebhookNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:        "test-001",
@@ -372,7 +374,7 @@ func TestNotifierServerError(t *testing.T) {
 		Enabled:    true,
 		WebhookURL: server.URL,
 	}
-	notifier := NewSlackNotifier(config, logger)
+	notifier := NewSlackNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:        "test-001",
@@ -403,7 +405,7 @@ func TestNotifierTimeout(t *testing.T) {
 		Enabled:    true,
 		WebhookURL: server.URL,
 	}
-	notifier := NewSlackNotifier(config, logger)
+	notifier := NewSlackNotifier(config, logger, false)
 
 	alert := types.Alert{
 		ID:        "test-001",
@@ -467,16 +469,18 @@ func TestFanoutNotifierClose(t *testing.T) {
 	config := FanoutConfig{
 		Slack: SlackConfig{Enabled: true, WebhookURL: "https://hooks.slack.com/test"},
 	}
-	notifier := NewFanoutNotifier(config, 5*time.Second, logger)
+	notifier, err := NewFanoutNotifier(config, 5*time.Second, logger)
+	require.NoError(t, err)
 
-	err := notifier.Close()
+	err = notifier.Close()
 	assert.NoError(t, err)
 }
 
 func TestFanoutNotifierSendNoBackends(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	notifier := NewFanoutNotifier(FanoutConfig{}, 5*time.Second, logger)
+	notifier, err := NewFanoutNotifier(FanoutConfig{}, 5*time.Second, logger)
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		ID:        "test-001",
@@ -505,7 +509,8 @@ func TestFanoutNotifierConcurrentSend(t *testing.T) {
 	config := FanoutConfig{
 		Slack: SlackConfig{Enabled: true, WebhookURL: server.URL},
 	}
-	notifier := NewFanoutNotifier(config, 5*time.Second, logger)
+	notifier, err := NewFanoutNotifier(config, 5*time.Second, logger)
+	require.NoError(t, err)
 
 	alert := types.Alert{
 		ID:        "test-001",

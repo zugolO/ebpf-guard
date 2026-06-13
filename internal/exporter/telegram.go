@@ -31,9 +31,21 @@ type TelegramNotifier struct {
 }
 
 // NewTelegramNotifier creates a new Telegram notifier.
-func NewTelegramNotifier(cfg TelegramConfig, logger *slog.Logger) *TelegramNotifier {
+// strictSSRF enables blocking of RFC-1918 private IP ranges in addition to the
+// default loopback and link-local address blocking.
+func NewTelegramNotifier(cfg TelegramConfig, logger *slog.Logger, strictSSRF bool) *TelegramNotifier {
 	if !cfg.Enabled || cfg.BotToken == "" || cfg.ChatID == "" {
 		return &TelegramNotifier{config: cfg, logger: logger}
+	}
+
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	apiBase := fmt.Sprintf("https://api.telegram.org/bot%s", cfg.BotToken)
+	if err := ValidateWebhookURL(apiBase, strictSSRF); err != nil {
+		logger.Warn("exporter/telegram: unsafe API base URL",
+			slog.Any("error", err))
 	}
 
 	minSev := types.SeverityWarning
@@ -46,7 +58,7 @@ func NewTelegramNotifier(cfg TelegramConfig, logger *slog.Logger) *TelegramNotif
 		client:      &http.Client{Timeout: 10 * time.Second},
 		logger:      logger,
 		minSeverity: minSev,
-		apiBase:     fmt.Sprintf("https://api.telegram.org/bot%s", cfg.BotToken),
+		apiBase:     apiBase,
 	}
 }
 
@@ -93,7 +105,7 @@ func (t *TelegramNotifier) Send(ctx context.Context, alert types.Alert) error {
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send telegram request: %w", err)
+		return fmt.Errorf("send telegram request: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 

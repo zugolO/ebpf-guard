@@ -156,6 +156,7 @@ type Enforcer struct {
 
 	actionsTotal *prometheus.CounterVec // ebpf_guard_enforcement_actions_total{action}
 	auditDropped prometheus.Counter     // ebpf_guard_audit_log_dropped_total
+	pidfdUsed    prometheus.Counter     // ebpf_guard_enforcer_kill_pidfd_used_total
 }
 
 // ThrottleState tracks rate limiting state for a process.
@@ -234,6 +235,10 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 			Name: "ebpf_guard_audit_log_dropped_total",
 			Help: "Total audit log entries dropped due to a full channel.",
 		}),
+		pidfdUsed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "enforcer_kill_pidfd_used_total",
+			Help: "Total number of process kills performed via pidfd (Linux 5.1+).",
+		}),
 	}
 
 	// Initialise the NetworkPolicy manager if enabled.
@@ -291,7 +296,7 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 
 // RegisterMetrics registers the Enforcer's Prometheus metrics with the given registerer.
 func (e *Enforcer) RegisterMetrics(reg prometheus.Registerer) error {
-	for _, c := range []prometheus.Collector{e.actionsTotal, e.auditDropped} {
+	for _, c := range []prometheus.Collector{e.actionsTotal, e.auditDropped, e.pidfdUsed} {
 		if c == nil {
 			continue
 		}
@@ -549,94 +554,6 @@ func (e *Enforcer) executeNetworkPolicy(ctx context.Context, alert types.Alert) 
 	}
 	if e.actionsTotal != nil {
 		e.actionsTotal.WithLabelValues("networkpolicy").Inc()
-	}
-	return nil
-}
-
-// executeKill sends SIGKILL to the offending process.
-//
-// PID-reuse race prevention: Linux reuses PIDs immediately after a process
-// exits. Between ValidatePID and SIGKILL the original process may have died
-// and the PID been given to an unrelated process. We mitigate this by:
-//  1. Re-reading /proc/<pid>/comm after ValidatePID and comparing with the
-//     BPF-captured comm. A mismatch means the PID was reused — abort.
-//  2. Keeping the window between verification and kill as short as possible.
-//
-// Full race-freedom would require pidfd_open + pidfd_send_signal (Linux 5.3+).
-// That is tracked as a future improvement; the /proc check reduces the window
-// from "unbounded" to "single kernel round-trip" which covers the common case.
-func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
-	if err := validateEvent(alert.Event); err != nil {
-		e.logger.Warn("kill rejected: invalid event", "error", err)
-		return err
-	}
-
-	comm := sanitizeComm(string(bytesToString(alert.Event.Comm[:])))
-	entry := AuditEntry{
-		Timestamp:   time.Now(),
-		Action:      ActionKill,
-		RuleID:      alert.RuleID,
-		PID:         alert.Event.PID,
-		TGID:        alert.Event.TGID,
-		Comm:        comm,
-		UID:         alert.Event.UID,
-		Description: fmt.Sprintf("SIGKILL sent to PID %d", alert.Event.PID),
-		EventType:   alert.Event.Type,
-	}
-
-	// Validate PID before attempting kill
-	if err := ValidatePID(alert.Event.PID); err != nil {
-		entry.Success = false
-		entry.Error = err.Error()
-		e.logAudit(entry)
-		return fmt.Errorf("enforcer/kill: %w", err)
-	}
-
-	// Guard against PID reuse: re-read /proc/<pid>/comm and confirm it still
-	// matches the comm from the BPF event. If the process died and its PID was
-	// recycled by the kernel, the new process will have a different comm and we
-	// abort rather than kill an unrelated process.
-	pid := int(alert.Event.PID)
-	if comm != "" {
-		if err := verifyPIDComm(uint32(pid), comm); err != nil {
-			entry.Success = false
-			entry.Error = fmt.Sprintf("pid reuse detected: %v", err)
-			e.logAudit(entry)
-			e.logger.Warn("kill aborted: PID comm mismatch, possible PID reuse",
-				"rule_id", alert.RuleID,
-				"pid", pid,
-				"expected_comm", comm,
-				"error", err)
-			return fmt.Errorf("enforcer/kill: %w", err)
-		}
-	}
-
-	// Send SIGKILL to the process
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		entry.Success = false
-		entry.Error = fmt.Sprintf("find process: %v", err)
-		e.logAudit(entry)
-		return fmt.Errorf("enforcer/kill: find process %d: %w", pid, err)
-	}
-
-	if err := process.Signal(syscall.SIGKILL); err != nil {
-		entry.Success = false
-		entry.Error = fmt.Sprintf("send SIGKILL: %v", err)
-		e.logAudit(entry)
-		return fmt.Errorf("enforcer/kill: send SIGKILL to %d: %w", pid, err)
-	}
-
-	e.logger.Warn("KILL action executed",
-		"rule_id", alert.RuleID,
-		"pid", pid,
-		"comm", comm,
-	)
-
-	entry.Success = true
-	e.logAudit(entry)
-	if e.actionsTotal != nil {
-		e.actionsTotal.WithLabelValues("kill").Inc()
 	}
 	return nil
 }

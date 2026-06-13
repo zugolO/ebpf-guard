@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -65,14 +66,18 @@ var (
 )
 
 // NewKafkaNotifier creates a new Kafka notifier.
-func NewKafkaNotifier(cfg KafkaConfig, logger *slog.Logger) *KafkaNotifier {
+func NewKafkaNotifier(cfg KafkaConfig, logger *slog.Logger) (*KafkaNotifier, error) {
 	if !cfg.Enabled || len(cfg.Brokers) == 0 || cfg.Topic == "" {
-		return &KafkaNotifier{config: cfg, logger: logger}
+		return &KafkaNotifier{config: cfg, logger: logger}, nil
 	}
 
 	minSev := types.SeverityWarning
 	if cfg.MinSeverity == "critical" {
 		minSev = types.SeverityCritical
+	}
+
+	if cfg.SASLEnabled && !cfg.TLSEnabled {
+		return nil, errors.New("kafka: SASL PLAIN requires tls_enabled: true to avoid credential exposure")
 	}
 
 	saramaCfg := sarama.NewConfig()
@@ -90,19 +95,17 @@ func NewKafkaNotifier(cfg KafkaConfig, logger *slog.Logger) *KafkaNotifier {
 			pool := x509.NewCertPool()
 			pem, err := os.ReadFile(cfg.CACert)
 			if err != nil {
-				logger.Error("kafka: failed to read CA cert", slog.Any("error", err))
-			} else {
-				pool.AppendCertsFromPEM(pem)
-				tlsCfg.RootCAs = pool
+				return nil, fmt.Errorf("kafka: failed to read CA cert %q: %w", cfg.CACert, err)
 			}
+			pool.AppendCertsFromPEM(pem)
+			tlsCfg.RootCAs = pool
 		}
 		if cfg.ClientCert != "" && cfg.ClientKey != "" {
 			cert, err := tls.LoadX509KeyPair(cfg.ClientCert, cfg.ClientKey)
 			if err != nil {
-				logger.Error("kafka: failed to load client cert", slog.Any("error", err))
-			} else {
-				tlsCfg.Certificates = []tls.Certificate{cert}
+				return nil, fmt.Errorf("kafka: failed to load client cert %q: %w", cfg.ClientCert, err)
 			}
+			tlsCfg.Certificates = []tls.Certificate{cert}
 		}
 		saramaCfg.Net.TLS.Enable = true
 		saramaCfg.Net.TLS.Config = tlsCfg
@@ -118,7 +121,7 @@ func NewKafkaNotifier(cfg KafkaConfig, logger *slog.Logger) *KafkaNotifier {
 	producer, err := sarama.NewSyncProducer(cfg.Brokers, saramaCfg)
 	if err != nil {
 		logger.Error("kafka: failed to create producer", slog.Any("error", err))
-		return &KafkaNotifier{config: cfg, logger: logger}
+		return &KafkaNotifier{config: cfg, logger: logger}, nil
 	}
 
 	return &KafkaNotifier{
@@ -129,7 +132,7 @@ func NewKafkaNotifier(cfg KafkaConfig, logger *slog.Logger) *KafkaNotifier {
 		useFalco:    cfg.Payload == "falco",
 		sent:        kafkaSentTotal,
 		errors:      kafkaErrorsTotal,
-	}
+	}, nil
 }
 
 func (n *KafkaNotifier) Name() string  { return "kafka" }

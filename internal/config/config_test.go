@@ -11,6 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func writeConfigAtomic(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp := path + ".tmp"
+	require.NoError(t, os.WriteFile(tmp, data, 0644))
+	require.NoError(t, os.Rename(tmp, path))
+}
+
 func TestNewManager_Defaults(t *testing.T) {
 	// Create temp config file
 	tmpDir := t.TempDir()
@@ -132,14 +139,11 @@ server:
 	err = mgr.Watch()
 	require.NoError(t, err)
 
-	// Modify config file
-	err = os.WriteFile(configPath, []byte(`
+	writeConfigAtomic(t, configPath, []byte(`
 server:
   bind_address: ":8080"
-`), 0644)
-	require.NoError(t, err)
+`))
 
-	// Wait for callback
 	select {
 	case cfg := <-changeCh:
 		assert.Equal(t, ":8080", cfg.Server.BindAddress)
@@ -183,13 +187,11 @@ server:
 	err = mgr.Watch()
 	require.NoError(t, err)
 
-	// First change: modify bind_address
-	err = os.WriteFile(configPath, []byte(`
+	writeConfigAtomic(t, configPath, []byte(`
 server:
   bind_address: ":8080"
   metrics_path: "/metrics"
-`), 0644)
-	require.NoError(t, err)
+`))
 
 	// Wait for first callback
 	select {
@@ -203,13 +205,11 @@ server:
 	// Verify manager state updated
 	assert.Equal(t, ":8080", mgr.Get().Server.BindAddress)
 
-	// Second change: modify metrics_path
-	err = os.WriteFile(configPath, []byte(`
+	writeConfigAtomic(t, configPath, []byte(`
 server:
   bind_address: ":8080"
   metrics_path: "/prometheus"
-`), 0644)
-	require.NoError(t, err)
+`))
 
 	// Wait for second callback
 	select {
@@ -250,15 +250,12 @@ server:
 	err = mgr.Watch()
 	require.NoError(t, err)
 
-	// Write config with invalid values (negative port in string field is valid YAML but semantically wrong)
-	// Viper's Unmarshal will succeed but may produce unexpected results
-	err = os.WriteFile(configPath, []byte(`
+	writeConfigAtomic(t, configPath, []byte(`
 server:
   bind_address: ":8080"
 profiler:
   enabled: "not_a_boolean"
-`), 0644)
-	require.NoError(t, err)
+`))
 
 	// Viper may or may not call callback depending on how it handles the error
 	// The important thing is that the manager doesn't panic

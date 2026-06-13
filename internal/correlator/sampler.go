@@ -3,6 +3,7 @@ package correlator
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -92,12 +93,13 @@ func NewRuleSampler(rules []Rule) *RuleSampler {
 // triple call that matchesTyped previously made. Returns active=false for rules not in
 // entries (no sampling configured). When active=true, skip=true means the event should
 // be dropped by the sampling gate; skip=false means it was sampled and should be evaluated.
-func (s *RuleSampler) CheckSampling(ruleID string, pid uint32, ts uint64) (active, skip bool, mode string) {
+// rateStr is the effective sample rate formatted as a string (e.g. "0.10") for metric labels.
+func (s *RuleSampler) CheckSampling(ruleID string, pid uint32, ts uint64) (active, skip bool, mode, rateStr string) {
 	s.mu.RLock()
 	e, ok := s.entries[ruleID]
 	if !ok {
 		s.mu.RUnlock()
-		return false, false, ""
+		return false, false, "", ""
 	}
 	rate := e.effective()
 	det := e.mode == SamplingModeHashPID
@@ -105,12 +107,12 @@ func (s *RuleSampler) CheckSampling(ruleID string, pid uint32, ts uint64) (activ
 	s.mu.RUnlock()
 
 	if rate <= 0 || rate >= 1.0 {
-		return false, false, ""
+		return false, false, "", ""
 	}
 	if shouldSample(pid, ts, rate, det) {
-		return true, false, modeStr // sampled — evaluate the event
+		return true, false, modeStr, fmtRate(rate) // sampled — evaluate the event
 	}
-	return true, true, modeStr // not sampled — drop the event
+	return true, true, modeStr, fmtRate(rate) // not sampled — drop the event
 }
 
 // ShouldEvaluate returns true if the event should be evaluated against the rule.
@@ -197,6 +199,12 @@ func (s *RuleSampler) clearAdaptiveRate(ruleID string) {
 	if curr != prev {
 		s.entryCount.Store(int32(curr))
 	}
+}
+
+// fmtRate formats a float64 sample rate as a string suitable for Prometheus metric labels.
+// Formats with up to 4 decimal places, trimming trailing zeros (e.g. 0.1 → "0.1", 1.0 → "1").
+func fmtRate(rate float64) string {
+	return strconv.FormatFloat(rate, 'f', -1, 64)
 }
 
 // AdaptiveSamplingConfig configures CPU-load-triggered adaptive sampling.

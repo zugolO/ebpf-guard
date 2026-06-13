@@ -71,15 +71,15 @@ type GenericWebhookNotifier struct {
 // defaultWebhookTemplate is the default JSON template for webhook payloads.
 const defaultWebhookTemplate = `{
   "alert": {
-    "id": "{{.ID}}",
-    "rule_id": "{{.RuleID}}",
-    "rule_name": "{{.RuleName}}",
-    "severity": "{{.Severity}}",
+    "id": {{.ID | json}},
+    "rule_id": {{.RuleID | json}},
+    "rule_name": {{.RuleName | json}},
+    "severity": {{.Severity | json}},
     "message": {{.Message | json}},
-    "timestamp": "{{.Timestamp}}",
+    "timestamp": {{.Timestamp | json}},
     "pid": {{.PID}},
-    "comm": "{{.Comm}}",
-    "fingerprint": "{{.Fingerprint}}"
+    "comm": {{.Comm | json}},
+    "fingerprint": {{.Fingerprint | json}}
   },
   "source": "ebpf-guard",
   "version": "1.0"
@@ -104,14 +104,16 @@ type WebhookTemplateData struct {
 
 // NewGenericWebhookNotifier creates a new generic webhook notifier.
 // Use NewGenericWebhookNotifierWithCompat to enable Falco-compatible output.
-func NewGenericWebhookNotifier(cfg WebhookConfig, logger *slog.Logger) *GenericWebhookNotifier {
-	return NewGenericWebhookNotifierWithCompat(cfg, logger, false)
+func NewGenericWebhookNotifier(cfg WebhookConfig, logger *slog.Logger, strictSSRF bool) *GenericWebhookNotifier {
+	return NewGenericWebhookNotifierWithCompat(cfg, logger, false, strictSSRF)
 }
 
 // NewGenericWebhookNotifierWithCompat creates a webhook notifier with optional Falco-compatible output.
 // When falcoOutput is true the payload uses the Falco JSON schema regardless of any custom template.
 // Returns an error if any custom header name or value is invalid (RFC 7230 / header-injection check).
-func NewGenericWebhookNotifierWithCompat(cfg WebhookConfig, logger *slog.Logger, falcoOutput bool) *GenericWebhookNotifier {
+// strictSSRF enables blocking of RFC-1918 private IP ranges in addition to the default loopback and
+// link-local address blocking.
+func NewGenericWebhookNotifierWithCompat(cfg WebhookConfig, logger *slog.Logger, falcoOutput bool, strictSSRF bool) *GenericWebhookNotifier {
 	// Guard against a nil logger: callers may not wire one, and the
 	// invalid-headers path below logs, which would otherwise nil-panic.
 	if logger == nil {
@@ -120,6 +122,12 @@ func NewGenericWebhookNotifierWithCompat(cfg WebhookConfig, logger *slog.Logger,
 
 	if !cfg.Enabled || cfg.URL == "" {
 		return &GenericWebhookNotifier{config: cfg, logger: logger}
+	}
+
+	if err := ValidateWebhookURL(cfg.URL, strictSSRF); err != nil {
+		logger.Warn("exporter/webhook: unsafe webhook URL",
+			slog.String("url", cfg.URL),
+			slog.Any("error", err))
 	}
 
 	if err := validateHeaders(cfg.Headers); err != nil {

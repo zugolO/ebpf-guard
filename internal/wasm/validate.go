@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -47,7 +48,8 @@ func ValidatePlugin(ctx context.Context, path string, syntheticEvents []types.Ev
 	res.Meta = meta
 
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
-		WithMemoryLimitPages(256))
+		WithMemoryLimitPages(256).
+		WithCloseOnContextDone(true))
 	defer rt.Close(ctx) //nolint:errcheck
 
 	compiled, err := rt.CompileModule(ctx, wasmBytes)
@@ -57,11 +59,18 @@ func ValidatePlugin(ctx context.Context, path string, syntheticEvents []types.Ev
 	}
 	defer compiled.Close(ctx) //nolint:errcheck
 
-	// Inspect exported function names.
+	// Inspect exported function names and signatures.
 	exports := compiled.ExportedFunctions()
 	exportSet := make(map[string]bool, len(exports))
-	for name := range exports {
+	for name, def := range exports {
 		exportSet[name] = true
+		// Validate required function signatures.
+		switch name {
+		case "malloc":
+			checkFuncSignature(&res, "malloc", def, []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32})
+		case "evaluate":
+			checkFuncSignature(&res, "evaluate", def, []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32})
+		}
 	}
 
 	for _, req := range requiredExports {
@@ -144,4 +153,34 @@ func FormatValidationResult(r ValidationResult) string {
 		fmt.Fprintf(&sb, "      dry-run: no alerts fired against synthetic events\n")
 	}
 	return sb.String()
+}
+
+// checkFuncSignature validates a WASM function's parameter and result types
+// against expected signatures. Errors are appended to res.Errors.
+func checkFuncSignature(res *ValidationResult, name string, def api.FunctionDefinition, wantParams, wantResults []api.ValueType) {
+	gotParams := def.ParamTypes()
+	gotResults := def.ResultTypes()
+
+	if !valueTypesEqual(gotParams, wantParams) {
+		res.Errors = append(res.Errors, fmt.Sprintf(
+			"%s: wrong params: want %v, got %v",
+			name, wantParams, gotParams))
+	}
+	if !valueTypesEqual(gotResults, wantResults) {
+		res.Errors = append(res.Errors, fmt.Sprintf(
+			"%s: wrong results: want %v, got %v",
+			name, wantResults, gotResults))
+	}
+}
+
+func valueTypesEqual(a, b []api.ValueType) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

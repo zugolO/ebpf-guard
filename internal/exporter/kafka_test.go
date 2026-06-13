@@ -6,33 +6,49 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 func TestKafkaNotifier_Disabled(t *testing.T) {
-	n := NewKafkaNotifier(KafkaConfig{Enabled: false}, slog.Default())
+	n, err := NewKafkaNotifier(KafkaConfig{Enabled: false}, slog.Default())
+	require.NoError(t, err)
 	assert.False(t, n.Enabled())
 }
 
 func TestKafkaNotifier_NoBrokers(t *testing.T) {
-	n := NewKafkaNotifier(KafkaConfig{Enabled: true, Brokers: nil, Topic: "alerts"}, slog.Default())
+	n, err := NewKafkaNotifier(KafkaConfig{Enabled: true, Brokers: nil, Topic: "alerts"}, slog.Default())
+	require.NoError(t, err)
 	assert.False(t, n.Enabled())
 }
 
 func TestKafkaNotifier_NoTopic(t *testing.T) {
-	n := NewKafkaNotifier(KafkaConfig{Enabled: true, Brokers: []string{"kafka:9092"}, Topic: ""}, slog.Default())
+	n, err := NewKafkaNotifier(KafkaConfig{Enabled: true, Brokers: []string{"kafka:9092"}, Topic: ""}, slog.Default())
+	require.NoError(t, err)
 	assert.False(t, n.Enabled())
 }
 
 func TestKafkaNotifier_UnreachableBroker(t *testing.T) {
 	// Connecting to an unreachable broker should produce a disabled notifier (error logged).
-	n := NewKafkaNotifier(KafkaConfig{
+	n, err := NewKafkaNotifier(KafkaConfig{
 		Enabled: true,
 		Brokers: []string{"127.0.0.1:19092"}, // nothing listening here
 		Topic:   "alerts",
 	}, slog.Default())
+	require.NoError(t, err)
 	// Notifier should be disabled (producer failed to init)
 	assert.False(t, n.Enabled())
+}
+
+func TestKafkaNotifier_SASLWithoutTLS(t *testing.T) {
+	_, err := NewKafkaNotifier(KafkaConfig{
+		Enabled:     true,
+		Brokers:     []string{"kafka:9092"},
+		Topic:       "alerts",
+		SASLEnabled: true,
+	}, slog.Default())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tls_enabled: true")
 }
 
 func TestKafkaNotifier_Name(t *testing.T) {
@@ -69,4 +85,15 @@ func TestKafkaNotifier_CloseTwice(t *testing.T) {
 	n := &KafkaNotifier{config: KafkaConfig{}}
 	assert.NoError(t, n.Close())
 	assert.NoError(t, n.Close()) // second close must be idempotent
+}
+
+func TestKafkaNotifier_CACertNotFound(t *testing.T) {
+	_, err := NewKafkaNotifier(KafkaConfig{
+		Enabled: true,
+		Brokers: []string{"kafka:9092"},
+		Topic:   "alerts",
+		CACert:  "/nonexistent/ca.pem",
+	}, slog.Default())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read CA cert")
 }

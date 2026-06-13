@@ -778,6 +778,62 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		collectors = []collector.Collector{
 			collector.NewSyntheticCollector(slog.Default(), 100*time.Millisecond),
 		}
+	} else {
+		// Core eBPF ring-buffer collectors.
+		if sc, scErr := collector.NewSyscallCollector(slog.Default()); scErr != nil {
+			slog.Warn("syscall: collector creation failed", slog.Any("error", scErr))
+		} else {
+			collectors = append(collectors, sc.WithBackpressureStrategy(bpStrategy))
+			slog.Info("syscall: collector enabled")
+		}
+
+		if nc, ncErr := collector.NewNetworkCollector(slog.Default()); ncErr != nil {
+			slog.Warn("network: collector creation failed", slog.Any("error", ncErr))
+		} else {
+			collectors = append(collectors, nc.WithBackpressureStrategy(bpStrategy))
+			slog.Info("network: collector enabled")
+		}
+
+		if fc, fcErr := collector.NewFileaccessCollector(slog.Default()); fcErr != nil {
+			slog.Warn("fileaccess: collector creation failed", slog.Any("error", fcErr))
+		} else {
+			collectors = append(collectors, fc.WithBackpressureStrategy(bpStrategy))
+			slog.Info("fileaccess: collector enabled")
+		}
+
+		if dc, dcErr := collector.NewDNSCollector(cfg.Collectors.DNS.Enabled); dcErr != nil {
+			slog.Warn("dns: collector creation failed", slog.Any("error", dcErr))
+		} else {
+			collectors = append(collectors, dc.WithBackpressureStrategy(bpStrategy))
+			slog.Info("dns: collector enabled", slog.Bool("enabled", cfg.Collectors.DNS.Enabled))
+		}
+
+		if cfg.Collectors.TLS.Enabled {
+			if tc, tcErr := collector.NewTLSCollector(slog.Default(), true); tcErr != nil {
+				slog.Warn("tls: collector creation failed", slog.Any("error", tcErr))
+			} else {
+				collectors = append(collectors, tc.WithBackpressureStrategy(bpStrategy))
+				slog.Info("tls: collector enabled")
+			}
+		}
+
+		lsmCfg := collector.LSMConfig{Enabled: "auto"}
+		if cfg.Enforcement.BlockBackend == "lsm" {
+			lsmCfg.Enabled = "true"
+		}
+		if lc, lcErr := collector.NewLSMCollector(lsmCfg, slog.Default()); lcErr != nil {
+			slog.Warn("lsm: collector creation failed (kernel 5.7+ required)", slog.Any("error", lcErr))
+		} else {
+			collectors = append(collectors, lc)
+			slog.Info("lsm: collector enabled")
+		}
+
+		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {
+			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
+		} else {
+			collectors = append(collectors, kc.WithBackpressureStrategy(bpStrategy))
+			slog.Info("kmod: collector enabled")
+		}
 	}
 
 	// Wire up cloud audit collectors regardless of dry-run mode.

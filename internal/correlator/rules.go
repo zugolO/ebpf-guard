@@ -128,9 +128,9 @@ func opCodeOf(op RuleConditionOperator) condOpCode {
 		return condOpIn
 	case OpNotIn:
 		return condOpNotIn
-	case OpEquals:
+	case OpEquals, "eq":
 		return condOpEquals
-	case OpNotEquals:
+	case OpNotEquals, "neq":
 		return condOpNotEquals
 	case OpPrefix:
 		return condOpPrefix

@@ -112,6 +112,8 @@ var (
 		"comm":        true,
 		"uid":         true,
 		"fingerprint": true,
+		"from_tmpfs":  true,
+		"parent_comm": true,
 	}
 	validLSMAuditFields = map[string]bool{
 		"hook":     true,

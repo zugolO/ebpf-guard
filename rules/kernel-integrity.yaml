@@ -14,19 +14,18 @@ rules:
     name: "Kernel Integrity: Module load from unexpected parent"
     description: "A kernel module was loaded by a process whose parent is not modprobe, kmod, or depmod. This is a strong indicator of a rootkit or kernel implant."
     event_type: kmod
-    condition:
-      condition_group:
-        op: AND
-        conditions:
-          - field: parent_comm
-            op: not_in
-            values:
-              - "modprobe"
-              - "kmod"
-              - "depmod"
-              - "insmod"
-              - "systemd"
-              - "udevadm"
+    condition_group:
+      operator: and
+      conditions:
+        - field: parent_comm
+          op: not_in
+          values:
+            - "modprobe"
+            - "kmod"
+            - "depmod"
+            - "insmod"
+            - "systemd"
+            - "udevadm"
     severity: critical
     action: alert
     tags: [kernel-integrity, rootkit, kmod, mitre-t1547]
@@ -79,7 +78,7 @@ rules:
     description: "A kernel module with a suspicious name was loaded. Rootkits often use hidden (dot-prefixed), random hex, or numeric module names."
     event_type: kmod
     condition:
-      field: mod_name
+      field: name
       op: regex
       values:
         - "^\\..*"          # dot-prefixed (hidden)

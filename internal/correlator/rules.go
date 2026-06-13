@@ -1273,6 +1273,29 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "cloud.event_id":
 			return e.CloudAudit.EventID
 		}
+	case types.EventKmodLoad:
+		if e.Kmod == nil {
+			return ""
+		}
+		switch field {
+		case "name":
+			return e.Kmod.ModName
+		case "filename":
+			return e.Kmod.ModName
+		case "from_tmpfs":
+			if e.Kmod.FromTmpfs {
+				return "true"
+			}
+			return "false"
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "parent_comm":
+			return util.BytesToString(e.ParentComm[:])
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
+		case "fingerprint":
+			return ""
+		}
 	case types.EventIOUring:
 		if e.IOUring == nil {
 			return ""

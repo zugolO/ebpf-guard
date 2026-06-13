@@ -33,12 +33,26 @@ api-docs:
 	@echo "Validating api/openapi.yaml..."
 	@python3 -c "import yaml,sys; s=yaml.safe_load(open('api/openapi.yaml')); assert s.get('openapi','').startswith('3.'); assert 'paths' in s; assert 'components' in s; print('OK — %d paths, %d schemas' % (len(s['paths']),len(s['components']['schemas'])))"
 
-# Generate Go bindings from eBPF C code using bpf2go
-# This requires clang and kernel headers to be installed
+# Generate Go bindings from eBPF C code using bpf2go.
+#
+# Prerequisites (on the compilation host):
+#   - clang 14+          : apt-get install clang llvm
+#   - libbpf-dev         : apt-get install libbpf-dev
+#   - linux kernel BTF   : /sys/kernel/btf/vmlinux must exist
+#   - bpftool            : apt-get install linux-tools-generic
+#   - bpf2go             : go install github.com/cilium/ebpf/cmd/bpf2go@latest
+#
+# vmlinux.h is regenerated automatically from the running kernel's BTF data.
+# Commit the updated vmlinux.h to the repository so builds work without BTF.
 generate:
 	@echo "Generating eBPF bindings with bpf2go..."
 	@which clang > /dev/null 2>&1 || (echo "Error: clang not found. Install clang and llvm." && exit 1)
-	go generate ./...
+	@which bpftool > /dev/null 2>&1 || (echo "Error: bpftool not found. Install linux-tools-generic." && exit 1)
+	@test -f /sys/kernel/btf/vmlinux || (echo "Error: /sys/kernel/btf/vmlinux not found. Kernel must have CONFIG_DEBUG_INFO_BTF=y." && exit 1)
+	@echo "  Regenerating bpf/vmlinux.h from running kernel BTF..."
+	@bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
+	@echo "  Running go generate (bpf2go)..."
+	GOPACKAGE=bpf go generate ./internal/bpf/...
 
 # Build the main binary (core only — no OPA, Kafka, or TUI)
 build:

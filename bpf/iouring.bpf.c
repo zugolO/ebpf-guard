@@ -10,7 +10,7 @@
  * Target: Linux kernel 5.15+
  */
 #include "common.h"
-#include <linux/bpf.h>
+/* linux/bpf.h superseded by vmlinux.h included via common.h */
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 

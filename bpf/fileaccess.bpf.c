@@ -11,10 +11,8 @@
  *         Scratch map sized to max in-flight opens (4096 entries).
  */
 
-#include <linux/bpf.h>
-#include <linux/ptrace.h>
-#include <linux/fs.h>
-#include <linux/dcache.h>
+/* linux/ headers are superseded by vmlinux.h (included via common.h)
+ * when doing CO-RE compilation. Do not re-add them here. */
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "common.h"

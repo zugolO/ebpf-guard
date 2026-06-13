@@ -4,12 +4,9 @@
 // Maps updated from Go via cilium/ebpf (key-value Put/Delete).
 // Stats map exposed for Prometheus scraping.
 
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/ipv6.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
+/* linux/ headers are superseded by vmlinux.h when doing CO-RE compilation.
+ * Include vmlinux.h directly since xdp_block.bpf.c does not use common.h. */
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 

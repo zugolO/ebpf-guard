@@ -4,11 +4,8 @@
  * Supports IPv4 and IPv6 dual-stack.
  */
 
-#include <linux/bpf.h>
-#include <linux/ptrace.h>
-#include <linux/tcp.h>
-#include <linux/inet.h>
-#include <net/sock.h>
+/* linux/ and net/ headers are superseded by vmlinux.h (included via common.h)
+ * when doing CO-RE compilation. Do not re-add them here. */
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>

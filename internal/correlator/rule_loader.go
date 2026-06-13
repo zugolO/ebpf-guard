@@ -393,7 +393,7 @@ func validateCondition(cond *RuleCondition, eventType types.EventType) error {
 		if !validCIDRFields[cond.Field] {
 			return fmt.Errorf("CIDR operator %s can only be used with daddr/saddr/cloud.source_ip fields, not %s", cond.Op, cond.Field)
 		}
-	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpSuffix, OpContains,
+	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpSuffix, OpNotSuffix, OpContains,
 		OpGreaterThan, OpLessThan, OpGreaterOrEqual, OpLessOrEqual,
 		OpCapsGained, OpCapsDropped:
 		// These operators don't need pre-validation

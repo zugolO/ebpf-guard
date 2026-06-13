@@ -1,3 +1,5 @@
+//go:build tui
+
 // Package tui provides interactive terminal UI components for ebpf-guard.
 package tui
 

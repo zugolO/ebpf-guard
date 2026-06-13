@@ -34,6 +34,21 @@ import (
 //
 //    ebpf-guard: Pre-compiled RuleCondition tree; field enum, operator enum.
 //                O(1) field lookup; regex compiled at load time.
+//
+//    Comparison tiers (benchmark names self-document which is which):
+//      - BenchmarkFalcoRuleEval           — Falco single-rule match (0 allocs)
+//      - BenchmarkEbpfGuardRuleEval_NoMatch — ebpf-guard single-rule no-match (0 allocs)
+//        ↑ These are comparable: both measure pure matching cost, 0 allocs.
+//
+//      - BenchmarkEbpfGuardRuleEval      — ebpf-guard single-rule match
+//        including types.Alert construction (allocates Comm string). Not
+//        directly comparable to Falco's match-only benchmark; included to
+//        show the match/no-match gap (the cost of alert emission).
+//
+//      - BenchmarkFalcoEventDispatch     — Falco 18-rule dispatch (0 allocs)
+//      - BenchmarkEbpfGuardEventDispatch — ebpf-guard 18-rule dispatch (0 allocs
+//        on no-match, allocs proportional to match count)
+//        ↑ These are comparable: both measure full rule-set evaluation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ---- Falco field extractor model (verbatim from libs/engine) ----------------
@@ -293,10 +308,32 @@ func BenchmarkFalcoRuleEval(b *testing.B) {
 }
 
 // BenchmarkEbpfGuardRuleEval measures a single-rule evaluation using
-// ebpf-guard's pre-compiled condition tree (zero-alloc EvaluateInto path).
+// ebpf-guard's EvaluateInto on a matching event. Includes types.Alert
+// construction (1 alloc from Comm string copy). For the pure matching cost
+// (0 allocs), see BenchmarkEbpfGuardRuleEval_NoMatch.
 func BenchmarkEbpfGuardRuleEval(b *testing.B) {
 	re := makeEbpfGuardFalcoRuleSet()
 	evt := makeEbpfGuardFalcoEvent()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		re.EvaluateInto(evt, func(a types.Alert) { _ = a })
+	}
+}
+
+// BenchmarkEbpfGuardRuleEval_NoMatch measures a single-rule evaluation using
+// ebpf-guard's EvaluateInto on a non-matching event: event type matches rules
+// but condition values do not. This is the 0-alloc no-match hot path and the
+// fair comparison point against BenchmarkFalcoRuleEval (both measure pure
+// matching cost without alert generation).
+func BenchmarkEbpfGuardRuleEval_NoMatch(b *testing.B) {
+	re := makeEbpfGuardFalcoRuleSet()
+	evt := types.Event{
+		Type:    types.EventSyscall,
+		PID:     1,
+		Syscall: &types.SyscallEvent{Nr: 1},
+	}
+	copy(evt.Comm[:], "idle")
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -318,10 +355,30 @@ func BenchmarkFalcoEventDispatch(b *testing.B) {
 }
 
 // BenchmarkEbpfGuardEventDispatch measures the full rule engine evaluation
-// across all 18 rules for one event (zero-alloc callback path).
+// across all 18 rules for a matching event using the zero-alloc callback path.
+// Allocations are proportional to match count (Comm string per alert).
 func BenchmarkEbpfGuardEventDispatch(b *testing.B) {
 	re := makeEbpfGuardFalcoRuleSet()
 	evt := makeEbpfGuardFalcoEvent()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		re.EvaluateInto(evt, func(a types.Alert) { _ = a })
+	}
+}
+
+// BenchmarkEbpfGuardEventDispatch_NoMatch measures full 18-rule evaluation on
+// a non-matching event — the 0-alloc no-match path for the full rule set.
+// Compare against BenchmarkFalcoEventDispatch: both measure full dispatch loop
+// without alert generation.
+func BenchmarkEbpfGuardEventDispatch_NoMatch(b *testing.B) {
+	re := makeEbpfGuardFalcoRuleSet()
+	evt := types.Event{
+		Type:    types.EventSyscall,
+		PID:     1,
+		Syscall: &types.SyscallEvent{Nr: 1},
+	}
+	copy(evt.Comm[:], "idle")
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

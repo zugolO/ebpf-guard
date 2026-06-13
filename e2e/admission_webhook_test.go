@@ -1,3 +1,5 @@
+//go:build rego
+
 package e2e
 
 import (

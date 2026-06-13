@@ -1,0 +1,30 @@
+# Tracee benchmark policy — minimal signature set for comparative benchmarks.
+# Matches the signature set used in bench/vs_tracee_test.go.
+# See: https://aquasecurity.github.io/tracee/latest/docs/events/
+
+apiVersion: tracee.aquasecurity.com/v1beta1
+kind: Policy
+metadata:
+  name: bench-policy
+spec:
+  scope:
+    - global
+  rules:
+    - event: ptrace
+      filters:
+        - args.request=PTRACE_POKETEXT
+        - args.request=PTRACE_POKEDATA
+
+    - event: execve
+      filters:
+        - args.pathname=/bin/bash
+        - args.pathname=/bin/sh
+
+    - event: openat
+      filters:
+        - args.pathname=/etc/shadow
+        - args.pathname=/etc/passwd
+
+    - event: connect
+      filters:
+        - args.addr!=127.0.0.1

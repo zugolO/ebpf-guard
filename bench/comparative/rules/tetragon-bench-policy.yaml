@@ -1,0 +1,66 @@
+# Tetragon TracingPolicy — minimal policy set for comparative benchmarks.
+# Matches the 5-policy set used in bench/vs_tetragon_test.go.
+# See: https://tetragon.io/docs/concepts/tracing-policy/
+
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: bench-ptrace-code-injection
+spec:
+  kprobes:
+    - call: "sys_ptrace"
+      syscall: true
+      args:
+        - index: 0
+          type: int
+      returnArg:
+        index: 0
+        type: int
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Equal"
+              values: ["101"]
+
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: bench-setns-escape
+spec:
+  kprobes:
+    - call: "sys_setns"
+      syscall: true
+      args:
+        - index: 0
+          type: int
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Equal"
+              values: ["308"]
+
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: bench-kernel-module-load
+spec:
+  kprobes:
+    - call: "sys_init_module"
+      syscall: true
+      args:
+        - index: 0
+          type: int
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Equal"
+              values: ["175"]
+    - call: "sys_finit_module"
+      syscall: true
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Equal"
+              values: ["313"]

@@ -1,3 +1,5 @@
+//go:build kafka
+
 // Package exporter provides a Kafka producer for alert fanout.
 package exporter
 

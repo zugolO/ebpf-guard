@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unique"
 	"unsafe"
@@ -88,20 +89,61 @@ func WorkloadKeyFromEvent(e types.Event) WorkloadKey {
 // WorkloadProfileManager manages behavioral profiles keyed by WorkloadKey.
 // Multiple PIDs in the same workload share one ProcessProfile, so baselines
 // are trained on whole-workload behavior rather than single-process noise.
+//
+// Profiles are sharded across 16 buckets by a FNV-1a hash of the workload key.
+// This eliminates the central mutex bottleneck: GetByKey and RecordEvent acquire
+// only their target shard's lock, allowing all N ingest workers to operate on
+// disjoint workload classes without contention (P1-3 in AUDIT-PERF-2026-06-13).
 type WorkloadProfileManager struct {
-	mu       sync.RWMutex
-	profiles map[WorkloadKey]*ProcessProfile
-	weight   float64
-	ttl      time.Duration
-	maxKeys  int
+	shards  [workloadShardCount]*workloadShard
+	weight  float64
+	ttl     time.Duration
+	maxKeys int
 
-	// LRU eviction structures — O(log n) eviction via a min-heap.
-	lruHeap  lruWorkloadKeyHeap
-	lruIndex lruWorkloadKeyIndex
+	// entryCount tracks the total number of profiles across all shards.
+	// Used with atomic operations to enforce the global maxKeys limit
+	// while per-shard locks handle the LRU heaps independently.
+	entryCount atomic.Int64
 
 	evictionsTotal prometheus.Counter
 	trackedGauge   prometheus.Gauge
 	memBytesGauge  prometheus.Gauge
+}
+
+const workloadShardCount = 16
+
+type workloadShard struct {
+	mu       sync.RWMutex
+	profiles map[WorkloadKey]*ProcessProfile
+	lruHeap  lruWorkloadKeyHeap
+	lruIndex lruWorkloadKeyIndex
+	maxKeys  int
+}
+
+// hashWorkloadKey returns an FNV-1a 32-bit hash of the workload key, zero-allocation.
+func hashWorkloadKey(key WorkloadKey) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(key.Comm); i++ {
+		h ^= uint32(key.Comm[i])
+		h *= 16777619
+	}
+	h ^= uint32('|')
+	h *= 16777619
+	for i := 0; i < len(key.Namespace); i++ {
+		h ^= uint32(key.Namespace[i])
+		h *= 16777619
+	}
+	h ^= uint32('|')
+	h *= 16777619
+	for i := 0; i < len(key.AppLabel); i++ {
+		h ^= uint32(key.AppLabel[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func (wpm *WorkloadProfileManager) shardFor(key WorkloadKey) *workloadShard {
+	return wpm.shards[int(hashWorkloadKey(key))%workloadShardCount]
 }
 
 // NewWorkloadProfileManager creates a WorkloadProfileManager whose background
@@ -111,12 +153,14 @@ func NewWorkloadProfileManager(ctx context.Context, weight float64, ttl time.Dur
 	if maxKeys <= 0 {
 		maxKeys = readSystemPIDMax()
 	}
+	perShardMax := maxKeys / workloadShardCount
+	if perShardMax < 1 {
+		perShardMax = 1
+	}
 	wpm := &WorkloadProfileManager{
-		profiles: make(map[WorkloadKey]*ProcessProfile),
-		weight:   weight,
-		ttl:      ttl,
-		maxKeys:  maxKeys,
-		lruIndex: make(lruWorkloadKeyIndex),
+		weight:  weight,
+		ttl:     ttl,
+		maxKeys: maxKeys,
 		trackedGauge: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_workload_profiles_total",
 			Help: "Number of workload classes currently tracked by the profiler.",
@@ -129,6 +173,13 @@ func NewWorkloadProfileManager(ctx context.Context, weight float64, ttl time.Dur
 			Name: "ebpf_guard_workload_profiler_memory_bytes",
 			Help: "Estimated memory used by workload behavioral profiles.",
 		}),
+	}
+	for i := range wpm.shards {
+		wpm.shards[i] = &workloadShard{
+			profiles: make(map[WorkloadKey]*ProcessProfile),
+			lruIndex: make(lruWorkloadKeyIndex),
+			maxKeys:  perShardMax,
+		}
 	}
 	go wpm.cleanupLoop(ctx)
 	go wpm.metricsLoop(ctx)
@@ -177,9 +228,12 @@ func (wpm *WorkloadProfileManager) metricsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			wpm.mu.RLock()
-			n := len(wpm.profiles)
-			wpm.mu.RUnlock()
+			n := 0
+			for i := range wpm.shards {
+				wpm.shards[i].mu.RLock()
+				n += len(wpm.shards[i].profiles)
+				wpm.shards[i].mu.RUnlock()
+			}
 			if wpm.trackedGauge != nil {
 				wpm.trackedGauge.Set(float64(n))
 			}
@@ -193,50 +247,56 @@ func (wpm *WorkloadProfileManager) metricsLoop(ctx context.Context) {
 
 // GetByKey returns the profile for key, or nil if not found.
 func (wpm *WorkloadProfileManager) GetByKey(key WorkloadKey) *ProcessProfile {
-	wpm.mu.RLock()
-	defer wpm.mu.RUnlock()
-	return wpm.profiles[key]
+	sh := wpm.shardFor(key)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	return sh.profiles[key]
 }
 
 // GetOrCreateByKey returns an existing profile or creates one, evicting LRU if at capacity.
 func (wpm *WorkloadProfileManager) GetOrCreateByKey(key WorkloadKey) *ProcessProfile {
-	wpm.mu.Lock()
-	defer wpm.mu.Unlock()
+	wpm.evictIfOverCapacity()
 
-	if p, ok := wpm.profiles[key]; ok {
-		wpm.lruIndex.touch(&wpm.lruHeap, key)
+	sh := wpm.shardFor(key)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	if p, ok := sh.profiles[key]; ok {
+		sh.lruIndex.touch(&sh.lruHeap, key)
 		return p
 	}
-	if wpm.maxKeys > 0 && len(wpm.profiles) >= wpm.maxKeys {
-		wpm.evictLRULocked()
-	}
 	p := NewProcessProfileForWorkload(key)
-	wpm.profiles[key] = p
-	wpm.lruIndex.push(&wpm.lruHeap, key)
+	sh.profiles[key] = p
+	sh.lruIndex.push(&sh.lruHeap, key)
+	wpm.entryCount.Add(1)
 	return p
 }
 
 // RecordEvent records an event into the workload profile derived from the event's
 // enrichment. PID is updated on the profile for last-seen context in alerts.
 //
-// Two-phase locking: the map lock is held only for the lookup/create, then
+// Two-phase locking: the shard lock is held only for the lookup/create, then
 // released before the profile update runs under the per-profile mutex.
+// This avoids holding the shard lock across the (potentially slower) EWMA update.
 func (wpm *WorkloadProfileManager) RecordEvent(e types.Event) {
 	key := WorkloadKeyFromEvent(e)
+	sh := wpm.shardFor(key)
 
-	wpm.mu.Lock()
-	p, ok := wpm.profiles[key]
+	// Evict BEFORE acquiring shard lock to avoid RWMutex reentrancy:
+	// evictIfOverCapacity takes RLock on all shards, including this one.
+	wpm.evictIfOverCapacity()
+
+	sh.mu.Lock()
+	p, ok := sh.profiles[key]
 	if !ok {
-		if wpm.maxKeys > 0 && len(wpm.profiles) >= wpm.maxKeys {
-			wpm.evictLRULocked()
-		}
 		p = NewProcessProfileForWorkload(key)
-		wpm.profiles[key] = p
-		wpm.lruIndex.push(&wpm.lruHeap, key)
+		sh.profiles[key] = p
+		sh.lruIndex.push(&sh.lruHeap, key)
+		wpm.entryCount.Add(1)
 	} else {
-		wpm.lruIndex.touch(&wpm.lruHeap, key)
+		sh.lruIndex.touch(&sh.lruHeap, key)
 	}
-	wpm.mu.Unlock()
+	sh.mu.Unlock()
 
 	p.mu.Lock()
 	p.PID = e.PID // last-seen PID for alert context
@@ -261,30 +321,76 @@ func (wpm *WorkloadProfileManager) RecordEvent(e types.Event) {
 	p.mu.Unlock()
 }
 
+// evictIfOverCapacity evicts the globally-oldest LRU entry when the total entry
+// count has reached maxKeys. Scans all shards for the oldest access time to ensure
+// true LRU ordering across shards. Best-effort: if no shard has any entries
+// the insert proceeds without eviction.
+func (wpm *WorkloadProfileManager) evictIfOverCapacity() {
+	if wpm.maxKeys <= 0 || wpm.entryCount.Load() < int64(wpm.maxKeys) {
+		return
+	}
+	var oldestShard int
+	var oldestTime time.Time
+	found := false
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.RLock()
+		if sh.lruHeap.Len() > 0 {
+			t := sh.lruHeap[0].lastAccess
+			if !found || t.Before(oldestTime) {
+				oldestTime = t
+				oldestShard = i
+				found = true
+			}
+		}
+		sh.mu.RUnlock()
+	}
+	if !found {
+		return
+	}
+	sh := wpm.shards[oldestShard]
+	sh.mu.Lock()
+	if sh.lruHeap.Len() > 0 && sh.lruHeap[0].lastAccess.Equal(oldestTime) {
+		e := heap.Pop(&sh.lruHeap).(*lruWorkloadKeyEntry)
+		delete(sh.lruIndex, e.key)
+		delete(sh.profiles, e.key)
+		wpm.entryCount.Add(-1)
+		if wpm.evictionsTotal != nil {
+			wpm.evictionsTotal.Inc()
+		}
+	}
+	sh.mu.Unlock()
+}
+
 // CleanupExpired removes workload profiles that have not been updated within TTL.
 func (wpm *WorkloadProfileManager) CleanupExpired() int {
-	wpm.mu.Lock()
-	defer wpm.mu.Unlock()
 	removed := 0
-	for k, p := range wpm.profiles {
-		if p.IsExpired(wpm.ttl) {
-			wpm.lruIndex.remove(&wpm.lruHeap, k)
-			delete(wpm.profiles, k)
-			removed++
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.Lock()
+		for k, p := range sh.profiles {
+			if p.IsExpired(wpm.ttl) {
+				sh.lruIndex.remove(&sh.lruHeap, k)
+				delete(sh.profiles, k)
+				wpm.entryCount.Add(-1)
+				removed++
+			}
 		}
+		sh.mu.Unlock()
 	}
 	return removed
 }
 
 // evictLRULocked removes the workload profile with the oldest last-access time.
-// Caller must hold wpm.mu write lock. O(log n) via the min-heap.
-func (wpm *WorkloadProfileManager) evictLRULocked() {
-	if wpm.lruHeap.Len() == 0 {
+// Caller must hold sh.mu write lock. O(log n) via the min-heap.
+func (sh *workloadShard) evictLRULocked(wpm *WorkloadProfileManager) {
+	if sh.lruHeap.Len() == 0 {
 		return
 	}
-	e := heap.Pop(&wpm.lruHeap).(*lruWorkloadKeyEntry)
-	delete(wpm.lruIndex, e.key)
-	delete(wpm.profiles, e.key)
+	e := heap.Pop(&sh.lruHeap).(*lruWorkloadKeyEntry)
+	delete(sh.lruIndex, e.key)
+	delete(sh.profiles, e.key)
+	wpm.entryCount.Add(-1)
 	if wpm.evictionsTotal != nil {
 		wpm.evictionsTotal.Inc()
 	}
@@ -292,43 +398,58 @@ func (wpm *WorkloadProfileManager) evictLRULocked() {
 
 // Keys returns all currently tracked workload keys.
 func (wpm *WorkloadProfileManager) Keys() []WorkloadKey {
-	wpm.mu.RLock()
-	defer wpm.mu.RUnlock()
-	keys := make([]WorkloadKey, 0, len(wpm.profiles))
-	for _, p := range wpm.profiles {
-		keys = append(keys, p.WorkloadKey)
+	keys := make([]WorkloadKey, 0, wpm.Len())
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.RLock()
+		for _, p := range sh.profiles {
+			keys = append(keys, p.WorkloadKey)
+		}
+		sh.mu.RUnlock()
 	}
 	return keys
 }
 
 // GetAll returns a copy of all workload profiles keyed by WorkloadKey.String().
 func (wpm *WorkloadProfileManager) GetAll() map[string]*ProcessProfile {
-	wpm.mu.RLock()
-	defer wpm.mu.RUnlock()
-	result := make(map[string]*ProcessProfile, len(wpm.profiles))
-	for k, v := range wpm.profiles {
-		result[k.String()] = v
+	result := make(map[string]*ProcessProfile, wpm.Len())
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.RLock()
+		for k, v := range sh.profiles {
+			result[k.String()] = v
+		}
+		sh.mu.RUnlock()
 	}
 	return result
 }
 
 // Len returns the number of tracked workload profiles.
 func (wpm *WorkloadProfileManager) Len() int {
-	wpm.mu.RLock()
-	defer wpm.mu.RUnlock()
-	return len(wpm.profiles)
+	n := 0
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.RLock()
+		n += len(sh.profiles)
+		sh.mu.RUnlock()
+	}
+	return n
 }
 
 // Flush removes all profiles and resets LRU structures, releasing their memory.
 // Intended for use during worker teardown — not safe to call concurrently with
 // RecordEvent or GetOrCreateByKey.
 func (wpm *WorkloadProfileManager) Flush() {
-	wpm.mu.Lock()
-	defer wpm.mu.Unlock()
-	wpm.profiles = make(map[WorkloadKey]*ProcessProfile)
-	for i := range wpm.lruHeap {
-		wpm.lruHeap[i] = nil
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.Lock()
+		sh.profiles = make(map[WorkloadKey]*ProcessProfile)
+		for j := range sh.lruHeap {
+			sh.lruHeap[j] = nil
+		}
+		sh.lruHeap = sh.lruHeap[:0]
+		sh.lruIndex = make(lruWorkloadKeyIndex)
+		sh.mu.Unlock()
 	}
-	wpm.lruHeap = wpm.lruHeap[:0]
-	wpm.lruIndex = make(lruWorkloadKeyIndex)
+	wpm.entryCount.Store(0)
 }

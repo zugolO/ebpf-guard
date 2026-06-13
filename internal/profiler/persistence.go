@@ -274,18 +274,20 @@ func (ad *AnomalyDetector) SaveState(path string) error {
 	learningPeriod := ad.learningPeriod
 	ad.mu.RUnlock()
 
-	// Snapshot profiles: first collect pointers under the manager lock, then
-	// snapshot each profile under its own lock (correct lock ordering).
-	ad.profileManager.mu.RLock()
+	// Snapshot profiles: collect pointers by iterating shards under each shard's lock.
 	type keyedProfile struct {
 		key  WorkloadKey
 		prof *ProcessProfile
 	}
-	pairs := make([]keyedProfile, 0, len(ad.profileManager.profiles))
-	for k, p := range ad.profileManager.profiles {
-		pairs = append(pairs, keyedProfile{key: k, prof: p})
+	var pairs []keyedProfile
+	for i := range ad.profileManager.shards {
+		sh := ad.profileManager.shards[i]
+		sh.mu.RLock()
+		for k, p := range sh.profiles {
+			pairs = append(pairs, keyedProfile{key: k, prof: p})
+		}
+		sh.mu.RUnlock()
 	}
-	ad.profileManager.mu.RUnlock()
 
 	profiles := make(map[string]persistedProfile, len(pairs))
 	for _, kp := range pairs {
@@ -357,19 +359,21 @@ func (ad *AnomalyDetector) LoadState(path string, learningPeriod time.Duration) 
 		ad.learningComplete.Store(true)
 	}
 
-	// Restore workload profiles.
+	// Restore workload profiles into the sharded profile manager.
 	if len(state.Profiles) > 0 {
-		ad.profileManager.mu.Lock()
 		for keyStr, pp := range state.Profiles {
 			key := workloadKeyFromString(keyStr)
-			if _, exists := ad.profileManager.profiles[key]; exists {
+			sh := ad.profileManager.shardFor(key)
+			sh.mu.Lock()
+			if _, exists := sh.profiles[key]; exists {
+				sh.mu.Unlock()
 				continue // skip — already populated by events arriving during startup
 			}
 			profile := restoreProfile(pp, key, ad.profileManager.weight)
-			ad.profileManager.profiles[key] = profile
-			ad.profileManager.lruIndex.push(&ad.profileManager.lruHeap, key)
+			sh.profiles[key] = profile
+			sh.lruIndex.push(&sh.lruHeap, key)
+			sh.mu.Unlock()
 		}
-		ad.profileManager.mu.Unlock()
 	}
 
 	return state.LearningComplete, nil

@@ -174,14 +174,22 @@ func TestWorkloadProfileManager_LRUEviction(t *testing.T) {
 }
 
 func TestWorkloadProfileManager_Cleanup(t *testing.T) {
-	// Build without background goroutines to avoid the cleanup loop running
-	// concurrently with the explicit CleanupExpired call below.
 	shortTTL := 50 * time.Millisecond
 	wpm := &WorkloadProfileManager{
-		profiles: make(map[WorkloadKey]*ProcessProfile),
-		weight:   0.3,
-		ttl:      shortTTL,
-		maxKeys:  100,
+		weight:  0.3,
+		ttl:     shortTTL,
+		maxKeys: 100,
+	}
+	perShardMax := 100 / workloadShardCount
+	if perShardMax < 1 {
+		perShardMax = 1
+	}
+	for i := range wpm.shards {
+		wpm.shards[i] = &workloadShard{
+			profiles: make(map[WorkloadKey]*ProcessProfile),
+			lruIndex: make(lruWorkloadKeyIndex),
+			maxKeys:  perShardMax,
+		}
 	}
 
 	e := types.Event{

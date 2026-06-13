@@ -46,6 +46,10 @@
 #                         and 10 (~100k ev/s) for full load-scaling report.
 #   --seed                Workload RNG seed (default: 42)
 #   --output-dir          Results directory (default: bench/comparative/results)
+#   --ci                  CI mode: runs algorithm-only benchmarks (no root needed).
+#                         Skips external agent runs (falco/tetragon/tracee need a
+#                         Linux VM with kernel 5.15+). Captures env info and produces
+#                         valid CSV/MD output with N/A markers for external agents.
 #   --help                Show this message
 #
 # EXAMPLE
@@ -80,6 +84,7 @@ AGENT=""
 WORKLOAD_DURATION="60s"
 INTENSITY=5
 SWEEP=false
+CI=false
 SEED=42
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -94,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --workload-duration) WORKLOAD_DURATION="$2"; shift 2 ;;
     --intensity)         INTENSITY="$2";         shift 2 ;;
     --sweep)             SWEEP=true;             shift   ;;
+    --ci)                CI=true;                shift   ;;
     --seed)              SEED="$2";              shift 2 ;;
     --output-dir)        OUTPUT_DIR="$2";        shift 2 ;;
     --help)
@@ -165,6 +171,10 @@ parse_workload_json() {
 WORKLOAD_GEN_BIN="/tmp/ebpf-guard-workload-gen-${TIMESTAMP}"
 
 build_workload_gen() {
+  if [[ "$CI" == "true" ]]; then
+    log "CI mode: skipping workload generator build (not needed for algorithm-only)"
+    return 0
+  fi
   log "Building workload generator..."
   go build -o "${WORKLOAD_GEN_BIN}" \
     "${REPO_ROOT}/bench/comparative/workload/gen.go" 2>&1 || \
@@ -195,7 +205,48 @@ run_workload() {
   fi
 }
 
-# ─── CSV / Markdown output helpers ────────────────────────────────────────────
+# capture_env — write system environment info to a file for reproducibility.
+# Args: <output-dir> <timestamp>
+capture_env() {
+  local outdir="$1" ts="$2"
+  local envfile="${outdir}/env-${ts}.txt"
+  {
+    echo "=== ebpf-guard Comparative Benchmark Environment ==="
+    echo "Timestamp (UTC) : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Timestamp (local): $(date +%Y-%m-%dT%H:%M:%S%z)"
+    echo ""
+    echo "--- OS ---"
+    uname -a 2>/dev/null || echo "N/A (not Linux)"
+    echo ""
+    echo "--- CPU ---"
+    lscpu 2>/dev/null | head -20 || (sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "N/A")
+    echo ""
+    echo "--- Memory ---"
+    free -h 2>/dev/null || (vm_stat 2>/dev/null || echo "N/A")
+    echo ""
+    echo "--- Go ---"
+    go version 2>/dev/null || echo "N/A"
+    echo ""
+    echo "--- Kernel BTF ---"
+    wc -c /sys/kernel/btf/vmlinux 2>/dev/null || echo "N/A (not Linux or no BTF)"
+    echo ""
+    echo "--- Competitor versions ---"
+    falco --version 2>/dev/null | head -1 || echo "Falco: not installed"
+    tetragon version 2>/dev/null | head -1 || echo "Tetragon: not installed"
+    tracee version 2>/dev/null | head -1 || echo "Tracee: not installed"
+    echo ""
+    echo "--- ebpf-guard version ---"
+    git -C "${REPO_ROOT}" describe --always --dirty 2>/dev/null || echo "N/A"
+    echo ""
+    echo "--- CI mode ---"
+    if [[ "$CI" == "true" ]]; then
+      echo "yes — algorithm-only benchmarks, external agents skipped"
+    else
+      echo "no — full end-to-end run"
+    fi
+  } > "$envfile"
+  log "Environment info written to ${envfile}"
+}
 CSV_FILE="${OUTPUT_DIR}/results-${TIMESTAMP}.csv"
 MD_FILE="${OUTPUT_DIR}/results-${TIMESTAMP}.md"
 
@@ -233,9 +284,15 @@ run_ebpf_guard() {
   log "NOTE: These are microbenchmarks — NOT end-to-end measurements."
   log "      No kernel events, no inter-process overhead."
 
+  local benchtime="30s"
+  if [[ "$CI" == "true" ]]; then
+    benchtime="1s"
+    log "CI mode: reduced benchtime to ${benchtime}"
+  fi
+
   local bench_output
   bench_output=$(go test -bench=. -benchmem \
-    -benchtime=30s \
+    -benchtime="${benchtime}" \
     -count=1 \
     "${REPO_ROOT}/bench/..." 2>&1) || {
     warn "ebpf-guard benchmarks failed — check go test output"
@@ -243,27 +300,36 @@ run_ebpf_guard() {
     return
   }
 
-  log "ebpf-guard benchmark output:"
-  echo "$bench_output"
+  log "ebpf-guard benchmark output (first 60 lines):"
+  echo "$bench_output" | head -60
+  echo "  ... (full output in ${OUTPUT_DIR}/ebpf-guard-${TIMESTAMP}.txt)"
 
   # Write raw output alongside results.
   echo "$bench_output" > "${OUTPUT_DIR}/ebpf-guard-${TIMESTAMP}.txt"
 
-  # Parse key benchmark lines.
+  # Parse key benchmark lines — prefer _NoMatch variants for fair comparison.
   local rule_eval_ns path_filter_ns buffer_add_ns profiler_ns
-  rule_eval_ns=$(echo "$bench_output" | grep -E 'BenchmarkRuleEval_EbpfGuard_Callback\b' | \
-    awk '{print $3}' | head -1 | tr -d 'ns/op' || echo "N/A")
+  # _NoMatch is the fair comparison point (0 allocs, pure matching cost).
+  rule_eval_ns=$(echo "$bench_output" | grep -E 'BenchmarkRuleEval_EbpfGuard_NoMatch\b' | \
+    awk '{print $3}' | head -1 | tr -d '\r' | sed 's/ns\/op//' || echo "N/A")
+  if [[ "$rule_eval_ns" == "N/A" ]]; then
+    # Fallback to Callback variant if _NoMatch wasn't run.
+    rule_eval_ns=$(echo "$bench_output" | grep -E 'BenchmarkRuleEval_EbpfGuard_Callback\b' | \
+      awk '{print $3}' | head -1 | tr -d '\r' | sed 's/ns\/op//' || echo "N/A")
+  fi
   path_filter_ns=$(echo "$bench_output" | grep -E 'BenchmarkPathFilter_EbpfGuard\b' | \
-    awk '{print $3}' | head -1 | tr -d 'ns/op' || echo "N/A")
-  buffer_add_ns=$(echo "$bench_output" | grep -E 'BenchmarkShardedEventBuffer_Add\b' | \
-    awk '{print $3}' | head -1 | tr -d 'ns/op' || echo "N/A")
+    awk '{print $3}' | head -1 | tr -d '\r' | sed 's/ns\/op//' || echo "N/A")
+  buffer_add_ns=$(echo "$bench_output" | grep -E 'BenchmarkEbpfGuardEventBuffer\b' | \
+    awk '{print $3}' | head -1 | tr -d '\r' | sed 's/ns\/op//' || echo "N/A")
   profiler_ns=$(echo "$bench_output" | grep -E 'BenchmarkProcessEvent.*syscall\b' | \
-    awk '{print $3}' | head -1 | tr -d 'ns/op' || echo "N/A")
+    awk '{print $3}' | head -1 | tr -d '\r' | sed 's/ns\/op//' || echo "N/A")
 
   # Estimate throughput from rule eval ns/op (single-threaded, best case).
   local eps="N/A"
   if [[ "$rule_eval_ns" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-    eps=$(echo "scale=0; 1000000000 / ${rule_eval_ns}" | bc 2>/dev/null || echo "N/A")
+    eps=$(echo "scale=0; 1000000000 / ${rule_eval_ns}" | bc 2>/dev/null || \
+      awk "BEGIN {printf \"%.0f\", 1000000000 / ${rule_eval_ns}}" 2>/dev/null || \
+      echo "N/A")
   fi
 
   append_result "ebpf-guard" "algorithm-only" "single-thread" \
@@ -423,38 +489,74 @@ run_sweep() {
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
+  local mode_desc
+  if [[ "$CI" == "true" ]]; then
+    mode_desc="CI (algorithm-only)"
+  elif [[ "$SWEEP" == "true" ]]; then
+    mode_desc="sweep (1k/10k/100k ev/s)"
+  else
+    mode_desc="single intensity=${INTENSITY}"
+  fi
+
   log "════════════════════════════════════════════════════════════════"
   log "  ebpf-guard Comparative Benchmark Harness"
   log "  Timestamp  : ${TIMESTAMP}"
-  log "  Mode       : $( [[ "$SWEEP" == "true" ]] && echo "sweep (1k/10k/100k ev/s)" || echo "single intensity=${INTENSITY}" )"
+  log "  Mode       : ${mode_desc}"
   log "  Duration   : ${WORKLOAD_DURATION} per intensity level"
   log "  Seed       : ${SEED}"
   log "  Output     : ${OUTPUT_DIR}"
   log ""
-  log "  METHODOLOGY"
-  log "  ─────────────────────────────────────────────────────────────"
-  log "  ebpf-guard numbers are in-process algorithm-only benchmarks."
-  log "  External agent numbers are end-to-end with real kernel events."
-  log "  These two classes are NOT directly comparable — see results"
-  log "  CSV column 'Measurement Type' for disambiguation."
+  if [[ "$CI" == "true" ]]; then
+    log "  CI MODE — algorithm-only benchmarks. No root required."
+    log "  External agent e2e runs (falco/tetragon/tracee) are SKIPPED."
+    log "  To run full e2e: sudo bench/comparative/run.sh --sweep"
+    log "  on a Linux VM (see bench/comparative/INSTALL.md)."
+  else
+    log "  METHODOLOGY"
+    log "  ─────────────────────────────────────────────────────────────"
+    log "  ebpf-guard numbers are in-process algorithm-only benchmarks."
+    log "  External agent numbers are end-to-end with real kernel events."
+    log "  These two classes are NOT directly comparable — see results"
+    log "  CSV column 'Measurement Type' for disambiguation."
+  fi
   log ""
   log "  Pinned versions: Falco ${FALCO_VERSION}, Tetragon ${TETRAGON_VERSION}, Tracee ${TRACEE_VERSION}."
   log "════════════════════════════════════════════════════════════════"
 
   # Check for required tools.
-  for tool in go bc awk jq; do
-    command -v "$tool" >/dev/null 2>&1 || die "Required tool not found: $tool"
-  done
-
-  if ! command -v /usr/bin/time >/dev/null 2>&1; then
-    warn "/usr/bin/time not found — external agent CPU/RSS measurements will be unavailable"
-    warn "Install with: apt-get install time"
+  if [[ "$CI" == "true" ]]; then
+    # CI mode: only go is strictly required.
+    command -v go >/dev/null 2>&1 || die "Required tool not found: go"
+    for tool in bc awk jq; do
+      command -v "$tool" >/dev/null 2>&1 || warn "Optional tool not found: $tool (some metrics will be N/A)"
+    done
+  else
+    for tool in go bc awk jq; do
+      command -v "$tool" >/dev/null 2>&1 || die "Required tool not found: $tool"
+    done
+    if ! command -v /usr/bin/time >/dev/null 2>&1; then
+      warn "/usr/bin/time not found — external agent CPU/RSS measurements will be unavailable"
+      warn "Install with: apt-get install time"
+    fi
   fi
 
   init_output
+  capture_env "${OUTPUT_DIR}" "${TIMESTAMP}"
   build_workload_gen
 
-  if [[ "$SWEEP" == "true" ]]; then
+  if [[ "$CI" == "true" ]]; then
+    # CI mode: algorithm-only benchmarks for ebpf-guard.
+    # Notify that external agents need a Linux VM.
+    run_ebpf_guard
+
+    local ci_note="CI: needs Linux VM with kernel 5.15+ — see bench/comparative/INSTALL.md"
+    # Mark all sweep levels for external agents as skipped.
+    for label in "${SWEEP_LABELS[@]}"; do
+      append_result "Falco ${FALCO_VERSION}"  "end-to-end" "${label}" "N/A" "N/A" "N/A" "N/A" "N/A" "${ci_note}"
+      append_result "Tetragon ${TETRAGON_VERSION}" "end-to-end" "${label}" "N/A" "N/A" "N/A" "N/A" "N/A" "${ci_note}"
+      append_result "Tracee ${TRACEE_VERSION}" "end-to-end" "${label}" "N/A" "N/A" "N/A" "N/A" "N/A" "${ci_note}"
+    done
+  elif [[ "$SWEEP" == "true" ]]; then
     # Sweep mode: run each agent at all three intensity levels.
     if [[ -z "$AGENT" ]] || [[ "$AGENT" == "ebpf-guard" ]]; then run_ebpf_guard; fi
     if [[ -z "$AGENT" ]] || [[ "$AGENT" == "falco"      ]]; then run_sweep do_falco;     fi
@@ -473,6 +575,7 @@ main() {
   log "  Results written to:"
   log "    CSV: ${CSV_FILE}"
   log "    MD:  ${MD_FILE}"
+  log "    Env: ${OUTPUT_DIR}/env-${TIMESTAMP}.txt"
   log ""
   cat "$MD_FILE"
   log "════════════════════════════════════════════════════════════════"

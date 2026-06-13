@@ -67,16 +67,26 @@ type AnomalyDetector struct {
 	learningStartTime time.Time
 	learningComplete  atomic.Bool
 
-	// Controllable state for memory pressure handling
-	enabled      bool
+	// Controllable state for memory pressure handling.
+	// enabled uses atomic.Bool for lock-free reads on the hot path —
+	// IsEnabled() is called on every ProcessEvent (100k+ ev/s).
+	enabled atomic.Bool
+
+	// samplingRate uses mu for writes (rare); reads are also behind mu but
+	// only called on cold paths (admin API).
 	samplingRate float64
 
 	// samplingCorrections maps event type strings to inverse sampling factors
 	// (1.0 / samplingRate) set by the ring-buffer adaptive load controller.
 	// When BPF-side sampling is at 25%, the correction factor is 4.0 so each
 	// sampled event is weighted as if 4 events were observed, keeping EWMA
-	// baselines unbiased. A nil map means no corrections are active.
-	samplingCorrections map[string]float64
+	// baselines unbiased. A nil pointer means no corrections are active.
+	//
+	// Stored behind atomic.Pointer for lock-free reads: SamplingCorrectionFactor
+	// is called per-event during the learning phase, and the map changes rarely
+	// (only when the adaptive load controller adjusts rates). Copy-on-write
+	// semantics eliminate the per-event RLock acquisition.
+	samplingCorrections atomic.Pointer[map[string]float64]
 }
 
 // AnomalyResult contains the result of anomaly detection.
@@ -125,9 +135,9 @@ func NewAnomalyDetectorWithSamples(ctx context.Context, threshold float64, learn
 		learner:           NewBaselineLearner(learningPeriod, minSamples),
 		profileManager:    NewWorkloadProfileManager(ctx, weight, 24*time.Hour, maxPIDs),
 		learningStartTime: time.Now(),
-		enabled:           true,
 		samplingRate:      1.0,
 	}
+	ad.enabled.Store(true)
 	return ad
 }
 
@@ -574,23 +584,18 @@ func (ad *AnomalyDetector) FlushProfiles() {
 
 // Enable activates the anomaly detector.
 func (ad *AnomalyDetector) Enable() {
-	ad.mu.Lock()
-	defer ad.mu.Unlock()
-	ad.enabled = true
+	ad.enabled.Store(true)
 }
 
 // Disable deactivates the anomaly detector.
 func (ad *AnomalyDetector) Disable() {
-	ad.mu.Lock()
-	defer ad.mu.Unlock()
-	ad.enabled = false
+	ad.enabled.Store(false)
 }
 
 // IsEnabled returns true if the anomaly detector is currently active.
+// Uses atomic.Bool for lock-free reads — called on every ProcessEvent.
 func (ad *AnomalyDetector) IsEnabled() bool {
-	ad.mu.RLock()
-	defer ad.mu.RUnlock()
-	return ad.enabled
+	return ad.enabled.Load()
 }
 
 // SetSamplingRate adjusts the anomaly detector's sampling rate.
@@ -635,11 +640,12 @@ func (ad *AnomalyDetector) SetSharedLearner(learner *BaselineLearner) {
 // factor times so the learned baseline reflects the true event rate even when
 // BPF is down-sampling. This keeps anomaly thresholds from drifting low and
 // avoids false positives when sampling is later restored.
+//
+// Copy-on-write semantics via atomic.Pointer: a new map is allocated and stored
+// atomically so concurrent SamplingCorrectionFactor calls never block.
 func (ad *AnomalyDetector) SetSamplingCorrections(corrections map[string]float64) {
-	ad.mu.Lock()
-	defer ad.mu.Unlock()
 	if len(corrections) == 0 {
-		ad.samplingCorrections = nil
+		ad.samplingCorrections.Store(nil)
 		return
 	}
 	m := make(map[string]float64, len(corrections))
@@ -649,21 +655,21 @@ func (ad *AnomalyDetector) SetSamplingCorrections(corrections map[string]float64
 		}
 	}
 	if len(m) == 0 {
-		ad.samplingCorrections = nil
+		ad.samplingCorrections.Store(nil)
 	} else {
-		ad.samplingCorrections = m
+		ad.samplingCorrections.Store(&m)
 	}
 }
 
 // SamplingCorrectionFactor returns the EWMA correction factor for the given
 // event type. Returns 1.0 when no correction is set (full sampling or unknown type).
+// Lock-free read via atomic.Pointer — called per-event during the learning phase.
 func (ad *AnomalyDetector) SamplingCorrectionFactor(eventType string) float64 {
-	ad.mu.RLock()
-	defer ad.mu.RUnlock()
-	if ad.samplingCorrections == nil {
+	corrections := ad.samplingCorrections.Load()
+	if corrections == nil {
 		return 1.0
 	}
-	if f, ok := ad.samplingCorrections[eventType]; ok {
+	if f, ok := (*corrections)[eventType]; ok {
 		return f
 	}
 	return 1.0

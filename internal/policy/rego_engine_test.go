@@ -1,3 +1,5 @@
+//go:build rego
+
 // Package policy provides tests for the Rego/OPA policy engine.
 package policy
 

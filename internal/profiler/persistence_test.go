@@ -146,9 +146,7 @@ func TestSaveState_ProfilesRoundTrip(t *testing.T) {
 
 	// Verify the port 443 EWMA was restored.
 	key := WorkloadKeyFromEvent(netEvent)
-	ad2.profileManager.mu.RLock()
-	p := ad2.profileManager.profiles[key]
-	ad2.profileManager.mu.RUnlock()
+	p := ad2.profileManager.GetByKey(key)
 	if p == nil {
 		t.Fatal("workload profile not restored")
 	}

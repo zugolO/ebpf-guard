@@ -4,6 +4,7 @@ package correlator
 import (
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"hash/fnv"
 	"math/rand"
 	"net"
@@ -45,6 +46,12 @@ var (
 // the hot path (no match → put back immediately).
 var alertsPool = sync.Pool{
 	New: func() any { s := make([]types.Alert, 0, 4); return &s },
+}
+
+// fnvHasherPool recycles fnv.New32() hashers used by shouldSample on the
+// deterministic code path (active only when rule.SampleRate < 1.0).
+var fnvHasherPool = sync.Pool{
+	New: func() any { return fnv.New32() },
 }
 
 // RuleConditionOperator defines the comparison operation for a rule condition.
@@ -656,12 +663,15 @@ func ReleaseAlerts(s []types.Alert) {
 // short window.
 func shouldSample(pid uint32, ts uint64, rate float64, deterministic bool) bool {
 	if deterministic {
-		h := fnv.New32()
+		h := fnvHasherPool.Get().(hash.Hash32)
 		var buf [12]byte
 		binary.LittleEndian.PutUint32(buf[:4], pid)
 		binary.LittleEndian.PutUint64(buf[4:], ts>>30)
 		h.Write(buf[:])
-		return float64(h.Sum32()%1000) < rate*1000
+		result := float64(h.Sum32()%1000) < rate*1000
+		h.Reset()
+		fnvHasherPool.Put(h)
+		return result
 	}
 	return rand.Float64() < rate //nolint:gosec // non-crypto, performance-sensitive
 }
@@ -1176,7 +1186,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return util.BytesToString(e.Comm[:])
 		case "caps":
 			if e.Privesc != nil {
-				return fmt.Sprintf("0x%x", e.Privesc.NewCaps)
+				return "0x" + strconv.FormatUint(e.Privesc.NewCaps, 16)
 			}
 			return "0x0"
 		}
@@ -1217,9 +1227,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "gpu_size":
 			return strconv.FormatUint(e.GPU.Size, 10)
 		case "gpu_dev_ptr":
-			return fmt.Sprintf("0x%x", e.GPU.DevPtr)
+			return "0x" + strconv.FormatUint(e.GPU.DevPtr, 16)
 		case "gpu_host_ptr":
-			return fmt.Sprintf("0x%x", e.GPU.HostPtr)
+			return "0x" + strconv.FormatUint(e.GPU.HostPtr, 16)
 		case "comm":
 			return util.BytesToString(e.Comm[:])
 		case "uid":

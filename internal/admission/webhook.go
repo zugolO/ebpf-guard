@@ -1,3 +1,5 @@
+//go:build rego
+
 // Package admission implements a Kubernetes ValidatingAdmissionWebhook server
 // that evaluates pod specs against the same Rego policies used for runtime
 // enforcement, providing a pre-deploy enforcement layer.

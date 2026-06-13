@@ -1,7 +1,7 @@
 # ebpf-guard Makefile
 # Requires: go 1.23+, clang, llvm, kernel headers
 
-.PHONY: all generate build test test-norace rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare
+.PHONY: all generate build build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare
 
 # Variables
 BINARY_NAME := ebpf-guard
@@ -40,11 +40,35 @@ generate:
 	@which clang > /dev/null 2>&1 || (echo "Error: clang not found. Install clang and llvm." && exit 1)
 	go generate ./...
 
-# Build the main binary
+# Build the main binary (core only — no OPA, Kafka, or TUI)
 build:
-	@echo "Building $(BINARY_NAME)..."
+	@echo "Building $(BINARY_NAME) (core)..."
 	mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
+
+# Build with all optional subsystems enabled
+build-full:
+	@echo "Building $(BINARY_NAME) (core + rego + kafka + tui)..."
+	mkdir -p $(BUILD_DIR)
+	go build -tags rego,kafka,tui -o $(BUILD_DIR)/$(BINARY_NAME)-full ./cmd/ebpf-guard
+
+# Build with OPA/Rego policy engine only
+build-rego:
+	@echo "Building $(BINARY_NAME) (core + rego)..."
+	mkdir -p $(BUILD_DIR)
+	go build -tags rego -o $(BUILD_DIR)/$(BINARY_NAME)-rego ./cmd/ebpf-guard
+
+# Build with Kafka exporter only
+build-kafka:
+	@echo "Building $(BINARY_NAME) (core + kafka)..."
+	mkdir -p $(BUILD_DIR)
+	go build -tags kafka -o $(BUILD_DIR)/$(BINARY_NAME)-kafka ./cmd/ebpf-guard
+
+# Build with TUI only
+build-tui:
+	@echo "Building $(BINARY_NAME) (core + tui)..."
+	mkdir -p $(BUILD_DIR)
+	go build -tags tui -o $(BUILD_DIR)/$(BINARY_NAME)-tui ./cmd/ebpf-guard
 
 # Run all tests with race detector
 test:
@@ -55,6 +79,11 @@ test:
 test-norace:
 	@echo "Running tests without race detector..."
 	go test -v ./...
+
+# Run all tests including optional subsystems (rego, kafka, tui)
+test-full:
+	@echo "Running tests with all build tags..."
+	go test -v -race -tags rego,kafka,tui ./...
 
 # Run YAML rule fixture tests (no root / BPF required)
 rule-test:

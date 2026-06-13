@@ -1,0 +1,38 @@
+# Falco benchmark rules — minimal ruleset for comparative benchmarks.
+# Matches the 18-rule set used in bench/vs_falco_test.go.
+# See: https://falco.org/docs/rules/
+
+- rule: Container escape via ptrace
+  desc: Detect ptrace attach attempts inside containers
+  condition: evt.type=ptrace and proc.name!=gdb
+  output: "ptrace attach detected (proc=%proc.name pid=%proc.pid)"
+  priority: CRITICAL
+  tags: [container, escape, benchmark]
+
+- rule: Shell spawned in container
+  desc: Detect shell execution inside containers
+  condition: proc.name in (bash, sh, zsh, dash) and container.id != host
+  output: "shell spawned in container (proc=%proc.name)"
+  priority: WARNING
+  tags: [container, shell, benchmark]
+
+- rule: Write below etc
+  desc: Detect file writes below /etc
+  condition: (evt.type=open or evt.type=openat) and fd.name startswith /etc/ and evt.arg.flags contains O_WRONLY
+  output: "write to /etc detected (file=%fd.name)"
+  priority: WARNING
+  tags: [file, benchmark]
+
+- rule: Outbound connection
+  desc: Detect outbound TCP connections
+  condition: evt.type=connect and fd.sip != 127.0.0.1
+  output: "outbound connection (dest=%fd.sip:%fd.sport)"
+  priority: WARNING
+  tags: [network, benchmark]
+
+- rule: Sensitive mount
+  desc: Detect suspicious mount operations
+  condition: evt.type=mount and evt.arg.dev contains /proc
+  output: "sensitive mount detected"
+  priority: WARNING
+  tags: [mount, benchmark]

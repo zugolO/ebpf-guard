@@ -33,12 +33,13 @@
 //     We simulate this as: one string-parsed policy condition evaluated against
 //     a struct-valued event, to benchmark the per-event "should emit?" decision.
 //
-// Measured (Intel Xeon 2.80 GHz, Go 1.25, benchtime=5s):
+// Comparison tiers:
+//   - BenchmarkTetragonPolicyEval           — Tetragon CEL match (string allocs)
+//   - BenchmarkEbpfGuardPolicyEval_NoMatch  — ebpf-guard no-match (0 allocs)
+//     ↑ Fair comparison: both measure pure policy/rule matching cost.
 //
-//	BenchmarkTetragonPolicyEval-4       ~350 ns/op   64 B/op   2 allocs/op
-//	BenchmarkEbpfGuardPolicyEval-4      ~120 ns/op    8 B/op   1 allocs/op
-//	BenchmarkTetragonEventStream-4      ~480 ns/op  128 B/op   2 allocs/op
-//	BenchmarkEbpfGuardEventBuffer-4      ~80 ns/op    0 B/op   0 allocs/op
+//   - BenchmarkEbpfGuardPolicyEval          — ebpf-guard match with Alert
+//     construction (1 alloc for Comm string). Shows the match/no-match gap.
 //
 // Run:
 //
@@ -327,6 +328,25 @@ func BenchmarkEbpfGuardPolicyEval(b *testing.B) {
 	}
 }
 
+// BenchmarkEbpfGuardPolicyEval_NoMatch measures ebpf-guard's EvaluateInto on
+// a non-matching event: event type matches rule set but syscall nr (59) does
+// not match any TP rule. This is the 0-alloc no-match hot path and the fair
+// comparison point against BenchmarkTetragonPolicyEval.
+func BenchmarkEbpfGuardPolicyEval_NoMatch(b *testing.B) {
+	re, _ := newEbpfGuardTetragonEquivRuleSet()
+	event := types.Event{
+		Type:    types.EventSyscall,
+		PID:     1234,
+		Syscall: &types.SyscallEvent{Nr: 59},
+	}
+	copy(event.Comm[:], "idle")
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		re.EvaluateInto(event, func(a types.Alert) { _ = a })
+	}
+}
+
 // BenchmarkTetragonEventStream benchmarks Tetragon's buffered-channel dispatch:
 // allocate a proto event struct, send to a buffered channel, receive and decode.
 // Source: pkg/sensors/tracing/kprobe.go handleEvent + pkg/server/server.go
@@ -385,7 +405,8 @@ func BenchmarkTetragonTracingPolicyMatch(b *testing.B) {
 }
 
 // BenchmarkEbpfGuardTracingPolicyMatch benchmarks ebpf-guard's full rule set
-// evaluation as the equivalent of Tetragon's multi-policy match loop.
+// evaluation for a matching event as the equivalent of Tetragon's multi-policy
+// match loop. Allocations are proportional to match count (Comm per alert).
 // Source: internal/correlator/rules.go EvaluateInto()
 func BenchmarkEbpfGuardTracingPolicyMatch(b *testing.B) {
 	re, event := newEbpfGuardTetragonEquivRuleSet()
@@ -399,4 +420,24 @@ func BenchmarkEbpfGuardTracingPolicyMatch(b *testing.B) {
 		})
 	}
 	_ = matched
+}
+
+// BenchmarkEbpfGuardTracingPolicyMatch_NoMatch benchmarks the full 5-rule set
+// evaluation on a non-matching event — the 0-alloc no-match path. The fair
+// comparison against BenchmarkTetragonTracingPolicyMatch (both measure full
+// policy/rule set evaluation without alert generation).
+func BenchmarkEbpfGuardTracingPolicyMatch_NoMatch(b *testing.B) {
+	re, _ := newEbpfGuardTetragonEquivRuleSet()
+	event := types.Event{
+		Type:    types.EventSyscall,
+		PID:     1234,
+		Syscall: &types.SyscallEvent{Nr: 59},
+	}
+	copy(event.Comm[:], "idle")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		re.EvaluateInto(event, func(a types.Alert) {})
+	}
 }

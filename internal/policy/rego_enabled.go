@@ -1,3 +1,5 @@
+//go:build rego
+
 // Package policy provides Rego/OPA policy-as-code evaluation for alerts.
 package policy
 

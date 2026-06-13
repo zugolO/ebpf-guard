@@ -31,6 +31,10 @@ var seqVecPool = sync.Pool{
 
 // SequenceConfig holds configuration for sequence profiling.
 type SequenceConfig struct {
+	// Enabled controls whether sequence profiling is active. When false, Update()
+	// is a no-op. Sequence profiling is heavy (~1.9 µs/op for Update, ~0.65 µs
+	// for CosineDistance) and should be gated behind sampling or only enabled
+	// for suspicious processes in high-throughput deployments.
 	Enabled    bool
 	WindowSize int
 	Threshold  float64

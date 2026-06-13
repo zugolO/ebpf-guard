@@ -364,6 +364,12 @@ type CorrelationEngineConfig struct {
 	// accessed from a single goroutine, satisfying its thread-safety invariant.
 	IngestWorkerCount int
 
+	// IngestWorkerBufferSize controls the capacity of each per-worker ingest
+	// channel. Default 1024. Increase when a single hot PID saturates its
+	// dedicated worker under burst load (P1-6 in AUDIT-PERF-2026-06-13).
+	// Zero uses the default of 1024.
+	IngestWorkerBufferSize int
+
 	// AnomalyScoreReporter is called after every anomaly ProcessEvent so an
 	// external cardinality-guarded metric (e.g. exporter.SetAnomalyScoreWithGuard)
 	// can track scores without creating a circular import.  Optional — nil disables.
@@ -728,6 +734,11 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 			sharedLearner = profiler.NewBaselineLearner(config.LearningPeriod, config.MinLearningSamples)
 		}
 
+		ingestBufSize := config.IngestWorkerBufferSize
+		if ingestBufSize <= 0 {
+			ingestBufSize = 1024
+		}
+
 		for i := range ce.ingestPool {
 			var workerAD *profiler.AnomalyDetector
 			if config.EnableAnomaly {
@@ -742,7 +753,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				workerAD.SetSharedLearner(sharedLearner)
 			}
 			ce.ingestPool[i] = &workerState{
-				ch: make(chan *workerTask, 1024),
+				ch: make(chan *workerTask, ingestBufSize),
 				ad: workerAD,
 			}
 		}
@@ -840,14 +851,40 @@ func (ce *CorrelationEngine) enforceWorker(ctx context.Context) {
 	}
 }
 
+// localFlushBatch is the per-worker buffer threshold before flushing to ce.pending.
+// Small enough to bound memory, large enough to amortize the pendingMu lock cost
+// across ~64 events rather than acquiring it per-event (P1-4).
+const localFlushBatch = 64
+
+// localFlushInterval is the maximum time a worker holds alerts before flushing.
+const localFlushInterval = 100 * time.Millisecond
+
+// flushPending appends buf's contents to ce.pending under the central lock and
+// resets buf. Must be called when len(*buf) > 0.
+func (ce *CorrelationEngine) flushPending(buf *[]types.Alert) {
+	if len(*buf) == 0 {
+		return
+	}
+	ce.pendingMu.Lock()
+	ce.pending = append(ce.pending, *buf...)
+	ce.pendingMu.Unlock()
+	*buf = (*buf)[:0]
+}
+
 // regoWorker drains the async Rego evaluation queue. For each task it evaluates
-// the alerts through OPA, applies analyst suppression, then appends enriched
-// alerts to pending so downstream consumers can read them via Flush.
+// the alerts through OPA, applies analyst suppression, then accumulates enriched
+// alerts in a local buffer flushed to pending periodically. Per-worker buffering
+// replaces the central pendingMu per-task acquisition (P1-4).
 func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
+	var localPending []types.Alert
+	flushTicker := time.NewTicker(localFlushInterval)
+	defer flushTicker.Stop()
+
 	for {
 		select {
 		case task, ok := <-ce.regoQueue:
 			if !ok {
+				ce.flushPending(&localPending)
 				return
 			}
 			enriched := ce.evaluateRegoPolicies(task.ctx, task.alerts)
@@ -857,11 +894,15 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 				enriched = ce.feedbackManager.FilterAlerts(enriched)
 			}
 
-			ce.pendingMu.Lock()
-			ce.pending = append(ce.pending, enriched...)
-			ce.pendingMu.Unlock()
+			localPending = append(localPending, enriched...)
+			if len(localPending) >= localFlushBatch {
+				ce.flushPending(&localPending)
+			}
 			ce.regoWg.Done()
+		case <-flushTicker.C:
+			ce.flushPending(&localPending)
 		case <-ctx.Done():
+			ce.flushPending(&localPending)
 			return
 		}
 	}
@@ -1013,7 +1054,14 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 // Safe to call from a single goroutine. For parallel ingestion across multiple
 // goroutines, use IngestAsync which routes events to the PID-partitioned pool.
 func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.Alert {
-	return ce.ingestWithAD(ctx, e, ce.anomalyDetector)
+	alerts, regoQueued := ce.ingestWithAD(ctx, e, ce.anomalyDetector)
+	if len(alerts) > 0 && !regoQueued {
+		// Not rego-queued: caller is responsible for storing to pending.
+		ce.pendingMu.Lock()
+		ce.pending = append(ce.pending, alerts...)
+		ce.pendingMu.Unlock()
+	}
+	return alerts
 }
 
 // IngestAsync dispatches e to the PID-partitioned ingest worker for e.PID and
@@ -1038,6 +1086,8 @@ func (ce *CorrelationEngine) IngestAsync(ctx context.Context, e types.Event) {
 }
 
 // runIngestWorker drains one worker channel until ctx is cancelled.
+// Accumulates alerts in a local buffer and flushes to ce.pending periodically,
+// replacing the per-event pendingMu acquisition (P1-4).
 func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState) {
 	defer func() {
 		// Release per-worker LRU profile memory promptly so it is not held until
@@ -1047,16 +1097,31 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 		}
 		ce.ingestWg.Done()
 	}()
+
+	var localPending []types.Alert
+	flushTicker := time.NewTicker(localFlushInterval)
+	defer flushTicker.Stop()
+
 	for {
 		select {
 		case task, ok := <-w.ch:
 			if !ok {
+				ce.flushPending(&localPending)
 				return
 			}
 			tctx, ev := task.ctx, task.event
 			workerTaskPool.Put(task)
-			ce.ingestWithAD(tctx, ev, w.ad)
+			alerts, regoQueued := ce.ingestWithAD(tctx, ev, w.ad)
+			if len(alerts) > 0 && !regoQueued {
+				localPending = append(localPending, alerts...)
+				if len(localPending) >= localFlushBatch {
+					ce.flushPending(&localPending)
+				}
+			}
+		case <-flushTicker.C:
+			ce.flushPending(&localPending)
 		case <-ctx.Done():
+			ce.flushPending(&localPending)
 			return
 		}
 	}
@@ -1066,7 +1131,11 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 // to use — nil disables anomaly scoring.  This indirection lets the PID-partitioned
 // worker pool supply a per-worker detector without violating the single-goroutine
 // call invariant.
-func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad *profiler.AnomalyDetector) []types.Alert {
+//
+// Returns (alerts, regoQueued). When regoQueued is true, the alerts have been
+// dispatched to the async Rego evaluation queue; the caller MUST NOT buffer them
+// locally because the regoWorker will publish enriched versions to pending.
+func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad *profiler.AnomalyDetector) ([]types.Alert, bool) {
 	start := time.Now()
 
 	// Open an OTel span only when the event carries APM trace context (extracted
@@ -1274,7 +1343,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// Always report the score (even non-anomalous) so the cardinality-guarded
 			// Prometheus gauge tracks all active processes, not only anomaly triggers.
 			if ce.scoreReporter != nil {
-				ce.scoreReporter(fmt.Sprintf("%d", e.PID), util.BytesToString(e.Comm[:]), result.Score)
+				ce.scoreReporter(strconv.FormatUint(uint64(e.PID), 10), util.BytesToString(e.Comm[:]), result.Score)
 			}
 
 			// Cross-node amplification (Feature F): if a peer node fired a critical
@@ -1290,8 +1359,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			}
 
 			if isAnomaly {
-				// Build workload context for alert details.
-				details := map[string]interface{}{}
+				details := getDetailsMap()
 				if result.Namespace != "" {
 					details["namespace"] = result.Namespace
 				}
@@ -1368,6 +1436,11 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			if v.Source == "global_deny" {
 				msg = fmt.Sprintf("Syscall %d matches global deny list for workload %s", v.SyscallNr, v.WorkloadKey.String())
 			}
+			details := getDetailsMap()
+			details["syscall_nr"] = v.SyscallNr
+			details["source"] = v.Source
+			details["workload"] = v.WorkloadKey.String()
+			details["action"] = string(v.Action)
 			seq := ce.alertSeq.Add(1)
 			allowlistAlert := types.Alert{
 				ID:        buildAlertID("auto_allowlist_violation", e.Timestamp, e.PID, seq),
@@ -1378,12 +1451,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 				Severity:  types.SeverityWarning,
 				PID:       e.PID,
 				Comm:      util.BytesToString(e.Comm[:]),
-				Details: map[string]interface{}{
-					"syscall_nr":  v.SyscallNr,
-					"source":      v.Source,
-					"workload":    v.WorkloadKey.String(),
-					"action":      string(v.Action),
-				},
+				Details:   details,
 				Event:       e,
 				ProcessTree: processTree,
 				Action:      string(v.Action),
@@ -1422,14 +1490,18 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		ce.regoWg.Add(1)
 		select {
 		case ce.regoQueue <- task:
-			// Submitted successfully — worker appends to pending after enrichment.
-			return alerts
+			// Submitted successfully — regoWorker enriches and appends to pending.
+			// Return regoQueued=true so callers do NOT double-buffer (P1-4).
+			return alerts, true
 		default:
-			// Queue full: cancel the context and fall through to synchronous eval.
+			// Queue full — drop the Rego evaluation rather than blocking the
+			// event-processing goroutine with synchronous OPA eval (P1-5).
+			// Alerts pass through without MITRE enrichment; the regoQueueDropped
+			// metric signals operators to increase RegoWorkerCount or RegoQueueSize.
 			ce.regoWg.Done()
 			regoCancel()
 			ce.regoQueueDropped.Add(1)
-			alerts = ce.evaluateRegoPolicies(ctx, alerts)
+			// Fall through — alerts are returned to caller for direct buffering.
 		}
 	}
 
@@ -1439,17 +1511,15 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		alerts = ce.feedbackManager.FilterAlerts(alerts)
 	}
 
-	// Store alerts
-	ce.pendingMu.Lock()
-	ce.pending = append(ce.pending, alerts...)
-	ce.pendingMu.Unlock()
-
 	// Group alerts into incidents.
 	for i := range alerts {
 		ce.incidentTracker.Add(alerts[i])
 	}
 
-	return alerts
+	// Return alerts to caller for per-worker buffered flush (P1-4).
+	// The central pendingMu is acquired once per localFlushBatch alerts
+	// instead of once per event/alert.
+	return alerts, false
 }
 
 // evaluateRegoPolicies evaluates alerts against Rego policies.
@@ -1500,7 +1570,7 @@ func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []
 			enhancedAlert.Message = decision.Message
 		}
 		if enhancedAlert.Details == nil {
-			enhancedAlert.Details = make(map[string]interface{})
+			enhancedAlert.Details = getDetailsMap()
 		}
 		enhancedAlert.Details["rego_action"] = decision.Action
 		enhancedAlert.Details["mitre_technique"] = decision.MitreTechnique
@@ -1840,6 +1910,13 @@ var alertIDPool = sync.Pool{
 	},
 }
 
+// getDetailsMap returns a small pre-sized map for Alert.Details.
+// Alert structs outlive the engine and are passed to external consumers,
+// making pool-based recycling unsafe without a reference-counting scheme.
+func getDetailsMap() map[string]interface{} {
+	return make(map[string]interface{}, 4)
+}
+
 // buildAlertID returns "<prefix>-<ts>-<pid>-<seq>" without fmt.Sprintf overhead.
 func buildAlertID(prefix string, ts uint64, pid uint32, seq uint64) string {
 	bp := alertIDPool.Get().(*[]byte)
@@ -1859,15 +1936,19 @@ func buildAlertID(prefix string, ts uint64, pid uint32, seq uint64) string {
 
 // formatAnomalyDescription creates a human-readable description of an anomaly.
 func formatAnomalyDescription(result *profiler.AnomalyResult) string {
-	desc := "Anomalous behavior detected"
-	if len(result.Contributions) > 0 {
-		desc += ": "
-		for i, contrib := range result.Contributions {
-			if i > 0 {
-				desc += ", "
-			}
-			desc += contrib.Field + "=" + contrib.Value
-		}
+	if len(result.Contributions) == 0 {
+		return "Anomalous behavior detected"
 	}
-	return desc
+	var b strings.Builder
+	b.Grow(28 + len(result.Contributions)*32)
+	b.WriteString("Anomalous behavior detected: ")
+	for i, contrib := range result.Contributions {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(contrib.Field)
+		b.WriteByte('=')
+		b.WriteString(contrib.Value)
+	}
+	return b.String()
 }

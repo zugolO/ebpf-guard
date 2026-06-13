@@ -36,9 +36,50 @@ jobs:
         git ls-files --error-unmatch api/openapi.yaml
         echo "api/openapi.yaml is tracked in git ✓"
 
+  # compile is the first gate — catches broken commits before they reach main.
+  # go build ./... (not just ./cmd/ebpf-guard) ensures every package compiles,
+  # including internal/enforcer, internal/profiler, etc. This would have caught
+  # the unused-import regression (P0-1 in AUDIT-PERF-2026-06-13.md).
+  #
+  # IMPORTANT — branch protection setup (GitHub repo Settings → Branches):
+  #   1. Add a branch protection rule for the "main" branch.
+  #   2. Enable "Require status checks to pass before merging".
+  #   3. Search for and select "Compile" as a required status check.
+  #   4. Repeat for "Lint", "Test", and "Rule Fixture Tests".
+  # This ensures no non-compiling or non-vetting commit can land on main.
+  compile:
+    name: Compile
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24.4'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Build all packages
+      run: go build ./...
+
+    - name: Run go vet
+      run: go vet ./...
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: [compile]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -67,6 +108,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: [compile]
     steps:
     - name: Checkout
       uses: actions/checkout@v4

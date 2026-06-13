@@ -1,0 +1,38 @@
+goos: windows
+goarch: amd64
+pkg: github.com/zugolO/ebpf-guard/bench
+cpu: 11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz
+BenchmarkFalcoRuleEval-8                         	15837720	        15.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEbpfGuardRuleEval-8                     	  564254	       459.9 ns/op	      40 B/op	      10 allocs/op
+BenchmarkEbpfGuardRuleEval_NoMatch-8             	  887442	       320.5 ns/op	      24 B/op	       6 allocs/op
+BenchmarkFalcoEventDispatch-8                    	  821860	       297.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEbpfGuardEventDispatch-8                	  558841	       466.6 ns/op	      40 B/op	      10 allocs/op
+BenchmarkEbpfGuardEventDispatch_NoMatch-8        	  787113	       310.7 ns/op	      24 B/op	       6 allocs/op
+BenchmarkFalcoFieldLookup-8                      	11876601	        20.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFalcoStringMatch-8                      	59795200	         3.838 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTetragonPolicyEval-8                    	 1894573	       126.1 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEbpfGuardPolicyEval-8                   	 1904937	       126.3 ns/op	       3 B/op	       1 allocs/op
+BenchmarkEbpfGuardPolicyEval_NoMatch-8           	 3155826	        76.16 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTetragonEventStream-8                   	 2659989	        94.89 ns/op	      64 B/op	       1 allocs/op
+BenchmarkEbpfGuardEventBuffer-8                  	 4742492	        51.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTetragonTracingPolicyMatch-8            	 1821142	       131.8 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEbpfGuardTracingPolicyMatch-8           	 1839648	       133.5 ns/op	       3 B/op	       1 allocs/op
+BenchmarkEbpfGuardTracingPolicyMatch_NoMatch-8   	 3122946	        75.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEventBuffer_Tracee_Drop-8               	 3507548	        67.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEventBuffer_Tracee_Write-8              	 2992100	        79.56 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEventBuffer_EbpfGuard-8                 	 6006907	        41.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIntern_Tracee-8                         	29407800	         8.661 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIntern_EbpfGuard-8                      	 5406585	        44.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIntern_EbpfGuard_Unique-8               	21733867	         9.527 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCounter_Tracee-8                        	43694356	         5.398 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCounter_EbpfGuard-8                     	50032311	         5.044 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRuleEval_Tracee-8                       	26350460	         9.431 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRuleEval_EbpfGuard_NoMatch-8            	10357729	        22.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRuleEval_EbpfGuard_Callback-8           	 3251450	        72.21 ns/op	       8 B/op	       1 allocs/op
+BenchmarkPathFilter_Tracee-8                     	14026474	        17.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPathFilter_EbpfGuard-8                  	30527359	         8.544 ns/op	       0 B/op	       0 allocs/op
+BenchmarkComm2String_Tracee-8                    	34427358	         7.093 ns/op	       0 B/op	       0 allocs/op
+BenchmarkComm2String_EbpfGuard_Safe-8            	13338223	        16.72 ns/op	       5 B/op	       1 allocs/op
+BenchmarkComm2String_EbpfGuard_Unsafe-8          	99837763	         2.343 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/zugolO/ebpf-guard/bench	10.670s

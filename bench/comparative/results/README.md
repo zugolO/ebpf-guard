@@ -5,15 +5,35 @@ This directory contains raw CSV and Markdown outputs from `bench/comparative/run
 ## File naming
 
 ```
-results-YYYYMMDD-HHMMSS.csv   — machine-readable results table
-results-YYYYMMDD-HHMMSS.md    — human-readable Markdown table
-ebpf-guard-YYYYMMDD-HHMMSS.txt — raw `go test -bench` output for ebpf-guard
+results-YYYYMMDD-HHMMSS.csv      — machine-readable results table
+results-YYYYMMDD-HHMMSS.md       — human-readable Markdown table
+ebpf-guard-YYYYMMDD-HHMMSS.txt   — raw `go test -bench` output for ebpf-guard
+env-YYYYMMDD-HHMMSS.txt          — system environment info (OS, CPU, Go version, etc.)
 <tool>-time-i<N>-YYYYMMDD-HHMMSS.txt — raw `/usr/bin/time -v` output per agent per intensity
 ```
 
+Results can be generated from:
+- `bench/comparative/ci.ps1` (Windows/CI, PowerShell) — algorithm-only, no root
+- `bench/comparative/run.sh --ci` (Linux/CI, bash) — algorithm-only, no root
+- `bench/comparative/run.sh --sweep` (Linux VM, requires root) — full end-to-end
+
 ## Reproducing results
 
-### Automated (recommended)
+### CI (any platform — no root needed)
+
+```bash
+# Windows / cross-platform CI (PowerShell):
+# Runs algorithm-only benchmarks, produces valid CSV/MD with N/A for external agents.
+pwsh -File bench/comparative/ci.ps1
+
+# Linux CI (bash):
+# Same as above, using the run.sh --ci flag.
+bench/comparative/run.sh --ci
+```
+
+Both produce identically-formatted CSV/MD output in this directory. External agent rows (Falco, Tetragon, Tracee) are marked `N/A — needs Linux VM`.
+
+### Automated (recommended for full e2e)
 
 ```bash
 # Provision the reference VM (Ubuntu 22.04, kernel 6.1, 4 vCPU, 8 GB RAM)

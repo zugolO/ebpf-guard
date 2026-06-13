@@ -1,0 +1,31 @@
+=== ebpf-guard Comparative Benchmark Environment ===
+Timestamp (UTC) : 2026-06-13T13:59:11Z
+Timestamp (local): 2026-06-13T16:59:11+03:00
+
+--- OS ---
+WindowsProductName OsVersion  OsArchitecture
+------------------ ---------  --------------
+Windows 10 Home    10.0.26200 64-разрядная
+
+--- CPU ---
+Name                                           NumberOfCores NumberOfLogicalProcessors MaxClockSpeed
+----                                           ------------- ------------------------- -------------
+11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz             4                         8          2419
+
+--- Memory ---
+Total: 15.8 GB, Free: 6.9 GB
+
+--- Go ---
+go version go1.25.5 windows/amd64
+
+--- ebpf-guard version ---
+bd12c03-dirty
+
+--- CI mode ---
+yes — algorithm-only benchmarks, external agents skipped
+
+--- Competitor versions ---
+Falco 0.38.1: not installed (needs Linux)
+Tetragon 1.1.0: not installed (needs Linux)
+Tracee 0.21.0: not installed (needs Linux)
+

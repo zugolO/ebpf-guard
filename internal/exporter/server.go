@@ -275,27 +275,19 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	go StartAnomalyScoreCleanup(ctx, AnomalyScoreEvictionInterval, 30*time.Minute)
-	
-	errCh := make(chan error, 1)
-	
+
 	go func() {
 		slog.Info("exporter/server: starting HTTP server",
 			slog.String("address", s.bindAddress),
 			slog.String("metrics", s.metricsPath),
 			slog.String("health", s.healthPath))
-		
+
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("exporter/server: HTTP server error: %w", err)
+			slog.Error("exporter/server: HTTP server error", slog.Any("error", err))
 		}
 	}()
-	
-	// Wait for context cancellation or server error
-	select {
-	case <-ctx.Done():
-		return s.Shutdown(context.Background())
-	case err := <-errCh:
-		return err
-	}
+
+	return nil
 }
 
 // Shutdown gracefully shuts down the HTTP server.

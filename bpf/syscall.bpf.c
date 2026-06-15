@@ -69,10 +69,22 @@ int trace_sys_enter(struct sys_enter_args *ctx)
 	/* Copy syscall arguments */
 	bpf_probe_read_kernel(&e->syscall.args, sizeof(e->syscall.args), &ctx->args);
 
-	/* Store args for exit matching; track map-full events for observability */
+	/* Store args for exit matching.  bpf_map_update_elem requires fp/stack
+	 * pointer for value; the raw context pointer (type=ctx) is rejected by
+	 * the verifier, so copy the needed fields to a stack variable first. */
 	pid_tgid = bpf_get_current_pid_tgid();
-	if (bpf_map_update_elem(&syscall_args, &pid_tgid, ctx, BPF_NOEXIST) == -E2BIG)
-		record_map_full(MAP_FULL_IDX_SYSCALL_ARGS);
+	{
+		struct sys_enter_args entry_copy = {};
+		entry_copy.syscall_nr = ctx->syscall_nr;
+		entry_copy.args[0] = ctx->args[0];
+		entry_copy.args[1] = ctx->args[1];
+		entry_copy.args[2] = ctx->args[2];
+		entry_copy.args[3] = ctx->args[3];
+		entry_copy.args[4] = ctx->args[4];
+		entry_copy.args[5] = ctx->args[5];
+		if (bpf_map_update_elem(&syscall_args, &pid_tgid, &entry_copy, BPF_NOEXIST) == -E2BIG)
+			record_map_full(MAP_FULL_IDX_SYSCALL_ARGS);
+	}
 
 	submit_event(e);
 	return 0;

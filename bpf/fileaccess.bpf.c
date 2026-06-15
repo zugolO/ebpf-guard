@@ -123,14 +123,16 @@ int BPF_PROG(trace_open, int dfd, const char *filename, int flags, umode_t mode)
 
 /*
  * Tracepoint for sys_exit_openat — commit scratch→fd_path_map using the returned fd.
+ * Uses raw context (struct trace_event_raw_sys_exit) to avoid BPF_PROG context
+ * access rejection that occurs with single-argument sys_exit typed tracepoints.
  */
 SEC("tp/syscalls/sys_exit_openat")
-int BPF_PROG(trace_open_exit, long ret)
+int trace_open_exit(struct trace_event_raw_sys_exit *ctx)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
 
-	fd_commit(tgid, ret);
+	fd_commit(tgid, ctx->ret);
 	return 0;
 }
 
@@ -164,14 +166,15 @@ int BPF_PROG(trace_openat2_enter, int dfd, const char *filename, struct open_how
 
 /*
  * Tracepoint for sys_exit_openat2 — commit scratch→fd_path_map.
+ * Uses raw context struct for the same reason as trace_open_exit.
  */
 SEC("tp/syscalls/sys_exit_openat2")
-int BPF_PROG(trace_openat2_exit, long ret)
+int trace_openat2_exit(struct trace_event_raw_sys_exit *ctx)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
 
-	fd_commit(tgid, ret);
+	fd_commit(tgid, ctx->ret);
 	return 0;
 }
 

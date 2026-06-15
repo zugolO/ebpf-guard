@@ -99,7 +99,7 @@ static __always_inline void enrich_from_fd(struct event *e, __u32 tgid, __u32 fd
  * Tracepoint for sys_enter_openat — capture filename into scratch map.
  */
 SEC("tp/syscalls/sys_enter_openat")
-int BPF_PROG(trace_openat_enter, int dfd, const char *filename, int flags, umode_t mode)
+int BPF_PROG(trace_open, int dfd, const char *filename, int flags, umode_t mode)
 {
 	struct event *e;
 
@@ -125,7 +125,7 @@ int BPF_PROG(trace_openat_enter, int dfd, const char *filename, int flags, umode
  * Tracepoint for sys_exit_openat — commit scratch→fd_path_map using the returned fd.
  */
 SEC("tp/syscalls/sys_exit_openat")
-int BPF_PROG(trace_openat_exit, long ret)
+int BPF_PROG(trace_open_exit, long ret)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
@@ -179,7 +179,7 @@ int BPF_PROG(trace_openat2_exit, long ret)
  * Tracepoint for sys_enter_close — evict fd_path_map entry on close(2).
  */
 SEC("tp/syscalls/sys_enter_close")
-int BPF_PROG(trace_close_enter, unsigned int fd)
+int BPF_PROG(trace_close, unsigned int fd)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
@@ -193,7 +193,7 @@ int BPF_PROG(trace_close_enter, unsigned int fd)
  * Tracepoint for sys_enter_read — emit event with fd-resolved filename.
  */
 SEC("tp/syscalls/sys_enter_read")
-int BPF_PROG(trace_read_enter, unsigned int fd, char *buf, size_t count)
+int BPF_PROG(trace_read, unsigned int fd, char *buf, size_t count)
 {
 	struct event *e;
 	__u64 pid_tgid;
@@ -223,7 +223,7 @@ int BPF_PROG(trace_read_enter, unsigned int fd, char *buf, size_t count)
  * Tracepoint for sys_enter_write — emit event with fd-resolved filename.
  */
 SEC("tp/syscalls/sys_enter_write")
-int BPF_PROG(trace_write_enter, unsigned int fd, const char *buf, size_t count)
+int BPF_PROG(trace_write, unsigned int fd, const char *buf, size_t count)
 {
 	struct event *e;
 	__u64 pid_tgid;

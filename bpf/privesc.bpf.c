@@ -69,7 +69,7 @@ static __always_inline void emit_privesc(__u32 pid, __u64 old_caps, __u64 new_ca
  * We read the effective word from the header.
  */
 SEC("tracepoint/syscalls/sys_enter_capset")
-int tracepoint__sys_enter_capset(struct trace_event_raw_sys_enter *ctx)
+int trace_capset(struct trace_event_raw_sys_enter *ctx)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 pid = (__u32)(pid_tgid >> 32);
@@ -99,7 +99,7 @@ int tracepoint__sys_enter_capset(struct trace_event_raw_sys_enter *ctx)
  * Argument: struct cred *new  (the new credentials to commit)
  */
 SEC("kprobe/commit_creds")
-int BPF_KPROBE(kprobe__commit_creds, struct cred *new_cred)
+int BPF_KPROBE(trace_commit_creds, struct cred *new_cred)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 pid = (__u32)(pid_tgid >> 32);

@@ -44,6 +44,9 @@ func (s *IntegrationTestSuite) SetupSuite() {
 			CheckDuplicate: true,
 		},
 	})
+	if err != nil {
+		s.T().Skipf("skipping integration tests: Docker unavailable (%v)", err)
+	}
 	require.NoError(s.T(), err)
 	s.network = network
 }

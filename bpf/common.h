@@ -6,7 +6,13 @@
 #ifndef __EBPF_GUARD_COMMON_H
 #define __EBPF_GUARD_COMMON_H
 
-#include <linux/types.h>
+/* vmlinux.h provides all kernel type definitions for CO-RE compilation.
+ * Files that already include vmlinux.h directly (lsm.bpf.c, cgroup.bpf.c)
+ * will hit the include guard below and skip this inclusion. */
+#ifndef __VMLINUX_H__
+#include "vmlinux.h"
+#define __VMLINUX_H__
+#endif
 
 /* Event type identifiers - must match pkg/types/event.go */
 #define EVENT_TYPE_SYSCALL     1

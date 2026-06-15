@@ -11,11 +11,11 @@
  * - May miss data if buffer spans multiple SSL_write/SSL_read calls
  */
 
-#include <linux/bpf.h>
-#include <linux/ptrace.h>
+/* linux/ headers are superseded by vmlinux.h (included via common.h)
+ * when doing CO-RE compilation. Do not re-add them here. */
+#include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
-#include "common.h"
 
 /* TLS-specific event type */
 #define EVENT_TYPE_TLS 4

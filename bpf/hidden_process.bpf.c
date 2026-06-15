@@ -10,7 +10,9 @@
  *
  * Target: Linux kernel 5.8+
  */
-#include <linux/bpf.h>
+/* linux/bpf.h superseded by vmlinux.h; include it directly since this file
+ * does not include common.h (it has no custom struct event usage). */
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 

@@ -8,13 +8,8 @@
  * - DNS wire format parsing happens only for DNS traffic (hundreds/sec, not thousands)
  */
 
-#include <linux/types.h>
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/ipv6.h>
-#include <linux/udp.h>
-#include <linux/in.h>
+/* linux/ headers are superseded by vmlinux.h (included via common.h)
+ * when doing CO-RE compilation. Do not re-add them here. */
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>

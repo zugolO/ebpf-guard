@@ -10,10 +10,8 @@
  * old_caps / new_caps are stored as uint64 bitmasks (Linux eff cap word 0).
  */
 
-#include <linux/bpf.h>
-#include <linux/ptrace.h>
-#include <linux/capability.h>
-#include <linux/cred.h>
+/* linux/ headers are superseded by vmlinux.h (included via common.h)
+ * when doing CO-RE compilation. Do not re-add them here. */
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>

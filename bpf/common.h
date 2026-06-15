@@ -14,6 +14,9 @@
 #define __VMLINUX_H__
 #endif
 
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_core_read.h>
+
 /* Event type identifiers - must match pkg/types/event.go */
 #define EVENT_TYPE_SYSCALL     1
 #define EVENT_TYPE_TCP_CONNECT 2

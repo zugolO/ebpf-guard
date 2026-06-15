@@ -213,7 +213,7 @@ int trace_ssl_read_ret(struct pt_regs *ctx)
  * We need this to read the decrypted data on return.
  */
 struct ssl_read_ctx {
-	void *buf;
+	__u64 buf; /* userspace pointer stored as u64 to avoid bpf2go pointer limitation */
 	int num;
 };
 
@@ -232,13 +232,13 @@ int trace_ssl_read_entry(struct pt_regs *ctx)
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	
 #if defined(__TARGET_ARCH_x86_64)
-	read_ctx.buf = (void *)PT_REGS_PARM2(ctx);
+	read_ctx.buf = (__u64)PT_REGS_PARM2(ctx);
 	read_ctx.num = (int)PT_REGS_PARM3(ctx);
 #elif defined(__TARGET_ARCH_arm64)
-	read_ctx.buf = (void *)PT_REGS_PARM2(ctx);
+	read_ctx.buf = (__u64)PT_REGS_PARM2(ctx);
 	read_ctx.num = (int)PT_REGS_PARM3(ctx);
 #else
-	read_ctx.buf = (void *)ctx->si;
+	read_ctx.buf = (__u64)ctx->si;
 	read_ctx.num = (int)ctx->dx;
 #endif
 	
@@ -294,7 +294,7 @@ int trace_ssl_read_ret_full(struct pt_regs *ctx)
 	
 	/* Read decrypted data from userspace buffer */
 	if (read_ctx->buf && data_len > 0) {
-		long err = bpf_probe_read_user(&e->data, data_len, read_ctx->buf);
+		long err = bpf_probe_read_user(&e->data, data_len, (void *)read_ctx->buf);
 		if (err < 0) {
 			e->captured_len = 0;
 		}

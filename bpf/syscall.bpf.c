@@ -5,10 +5,10 @@
 
 /* linux/bpf.h and linux/ptrace.h are superseded by vmlinux.h (included via
  * common.h) when doing CO-RE compilation. Do not re-add them here. */
+#include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
-#include "common.h"
 
 /* Raw tracepoint argument structure for sys_enter */
 struct sys_enter_args {

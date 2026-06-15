@@ -10,6 +10,13 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+#ifndef ETH_P_IP
+#define ETH_P_IP  0x0800
+#endif
+#ifndef ETH_P_IPV6
+#define ETH_P_IPV6 0x86DD
+#endif
+
 // Blocked destination IPs — 16-byte key covers both IPv4 (first 4 bytes) and
 // IPv6 (all 16 bytes) in network byte order.
 struct {

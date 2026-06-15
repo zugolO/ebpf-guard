@@ -30,9 +30,19 @@ type KernelFeatures struct {
 func DetectFeatures() (*KernelFeatures, error) {
 	f := &KernelFeatures{}
 
-	// Detect BTF support via MapFlags
-	if err := features.HaveMapFlag(features.MapFlags(0)); err == nil {
-		f.HasBTF = true
+	// Detect BTF support: prefer cilium/ebpf probe, fall back to vmlinux file presence.
+	if err := features.HaveMapType(ebpf.Hash); err == nil {
+		// If BPF maps work at all, BTF may still be absent — check vmlinux directly.
+		if _, statErr := os.Stat("/sys/kernel/btf/vmlinux"); statErr == nil {
+			f.HasBTF = true
+		}
+	}
+	// Also accept BTF when vmlinux is present even if the map probe fails (e.g. inside
+	// some container runtimes that restrict bpf() syscall probing).
+	if !f.HasBTF {
+		if _, statErr := os.Stat("/sys/kernel/btf/vmlinux"); statErr == nil {
+			f.HasBTF = true
+		}
 	}
 
 	// Detect ring buffer support (kernel 5.8+)

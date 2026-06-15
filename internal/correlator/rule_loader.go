@@ -68,6 +68,8 @@ var (
 		// Enriched fields computed on demand from qname
 		"qname_length": true, "qname_entropy": true, "qname_dga_score": true,
 		"qname_digit_ratio": true, "qname_subdomain_count": true, "qname_is_dga": true,
+		// Process context — available on all event types via Event.Comm
+		"proc.comm": true, "comm": true,
 	}
 	validTLSFields = map[string]bool{
 		"tls_data": true, "direction": true, "data_len": true,
@@ -77,6 +79,8 @@ var (
 		"ja3":  true,
 		"ja4":  true,
 		"ja3s": true,
+		// Process context — available on all event types via Event.Comm
+		"proc.comm": true, "comm": true,
 	}
 	// caps_gained / caps_dropped use the OpCapsGained / OpCapsDropped operators
 	// (not standard value comparison), so their only meaningful field is "caps".
@@ -108,6 +112,8 @@ var (
 		"comm":        true,
 		"uid":         true,
 		"fingerprint": true,
+		"from_tmpfs":  true,
+		"parent_comm": true,
 	}
 	validLSMAuditFields = map[string]bool{
 		"hook":     true,
@@ -393,7 +399,7 @@ func validateCondition(cond *RuleCondition, eventType types.EventType) error {
 		if !validCIDRFields[cond.Field] {
 			return fmt.Errorf("CIDR operator %s can only be used with daddr/saddr/cloud.source_ip fields, not %s", cond.Op, cond.Field)
 		}
-	case OpIn, OpNotIn, OpEquals, OpNotEquals, OpPrefix, OpSuffix, OpContains,
+	case OpIn, OpNotIn, OpEquals, OpNotEquals, "eq", "neq", OpPrefix, OpNotPrefix, OpSuffix, OpNotSuffix, OpContains,
 		OpGreaterThan, OpLessThan, OpGreaterOrEqual, OpLessOrEqual,
 		OpCapsGained, OpCapsDropped:
 		// These operators don't need pre-validation

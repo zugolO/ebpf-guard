@@ -68,6 +68,8 @@ const (
 	OpNotEquals RuleConditionOperator = "not_equals"
 	// OpPrefix checks if field starts with any of the prefixes.
 	OpPrefix RuleConditionOperator = "prefix"
+	// OpNotPrefix checks if field does not start with any of the given prefixes.
+	OpNotPrefix RuleConditionOperator = "not_prefix"
 	// OpRegex checks if field matches a regex pattern.
 	OpRegex RuleConditionOperator = "regex"
 	// OpGreaterThan checks if numeric field is greater than value.
@@ -88,6 +90,8 @@ const (
 	OpCapsDropped RuleConditionOperator = "caps_dropped"
 	// OpSuffix checks if the field value ends with any of the given suffixes.
 	OpSuffix RuleConditionOperator = "suffix"
+	// OpNotSuffix checks if the field value does not end with any of the given suffixes.
+	OpNotSuffix RuleConditionOperator = "not_suffix"
 	// OpContains checks if the field value contains any of the given substrings.
 	OpContains RuleConditionOperator = "contains"
 )
@@ -104,7 +108,9 @@ const (
 	condOpEquals                // "equals"
 	condOpNotEquals             // "not_equals"
 	condOpPrefix                // "prefix"
+	condOpNotPrefix             // "not_prefix"
 	condOpSuffix                // "suffix"
+	condOpNotSuffix             // "not_suffix"
 	condOpContains              // "contains"
 	condOpRegex                 // "regex"
 	condOpGT                    // "gt"
@@ -125,14 +131,18 @@ func opCodeOf(op RuleConditionOperator) condOpCode {
 		return condOpIn
 	case OpNotIn:
 		return condOpNotIn
-	case OpEquals:
+	case OpEquals, "eq":
 		return condOpEquals
-	case OpNotEquals:
+	case OpNotEquals, "neq":
 		return condOpNotEquals
 	case OpPrefix:
 		return condOpPrefix
+	case OpNotPrefix:
+		return condOpNotPrefix
 	case OpSuffix:
 		return condOpSuffix
+	case OpNotSuffix:
+		return condOpNotSuffix
 	case OpContains:
 		return condOpContains
 	case OpRegex:
@@ -833,6 +843,8 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsA
 		return len(cond.Values) == 0 || value != cond.Values[0]
 	case condOpPrefix:
 		return hasPrefix(cond.Values, value)
+	case condOpNotPrefix:
+		return !hasPrefix(cond.Values, value)
 	case condOpSuffix:
 		for _, sfx := range cond.Values {
 			if strings.HasSuffix(value, sfx) {
@@ -840,6 +852,13 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsA
 			}
 		}
 		return false
+	case condOpNotSuffix:
+		for _, sfx := range cond.Values {
+			if strings.HasSuffix(value, sfx) {
+				return false
+			}
+		}
+		return true
 	case condOpRegex:
 		return re.matchesRegex(cond.Values, value)
 	case condOpGT:
@@ -1260,6 +1279,29 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return e.CloudAudit.Region
 		case "cloud.event_id":
 			return e.CloudAudit.EventID
+		}
+	case types.EventKmodLoad:
+		if e.Kmod == nil {
+			return ""
+		}
+		switch field {
+		case "name":
+			return e.Kmod.ModName
+		case "filename":
+			return e.Kmod.ModName
+		case "from_tmpfs":
+			if e.Kmod.FromTmpfs {
+				return "true"
+			}
+			return "false"
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "parent_comm":
+			return util.BytesToString(e.ParentComm[:])
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
+		case "fingerprint":
+			return ""
 		}
 	case types.EventIOUring:
 		if e.IOUring == nil {

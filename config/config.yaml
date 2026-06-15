@@ -12,6 +12,20 @@ bpf:
     processes: 16384
     connections: 32768
 
+  # In-process event channel size. Recommended ≥ 65536 to absorb syscall bursts.
+  event_queue_depth: 65536
+  max_concurrent_events: 4096
+  overflow_policy: drop
+
+  # Adaptive ring-buffer load controller: automatically reduces BPF sampling
+  # rates for high-volume syscall/file events when the event channel starts
+  # filling up, preventing silent kernel-side ring-buffer drops.
+  adaptive_load:
+    enabled: true
+    check_interval: "2s"
+    degraded_threshold: 0.50   # >50% queue full → reduce syscall/file rates
+    critical_threshold: 0.80   # >80% queue full → further reduce all rates
+
 rules:
   path: "rules/"               # Directory of rule files (all .yaml loaded automatically)
   hot_reload: true

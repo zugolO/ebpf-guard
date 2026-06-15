@@ -67,8 +67,8 @@ func LoadSyscallObjects(obj *SyscallObjects, opts *ebpf.CollectionOptions) error
 
 // NetworkObjects contains all eBPF objects for network collection.
 type NetworkObjects struct {
-	TraceTCPConnect *ebpf.Program `ebpf:"trace_tcp_connect"`
-	TraceTCPClose   *ebpf.Program `ebpf:"trace_tcp_close"`
+	TraceTcpConnect *ebpf.Program `ebpf:"trace_tcp_connect"`
+	TraceTcpClose   *ebpf.Program `ebpf:"trace_tcp_close"`
 	Events          *ebpf.Map     `ebpf:"events"`
 	ConnStartMap    *ebpf.Map     `ebpf:"conn_start_map"`
 	ConnMetaMap     *ebpf.Map     `ebpf:"conn_meta_map"`
@@ -77,11 +77,11 @@ type NetworkObjects struct {
 
 // Close closes all eBPF objects.
 func (o *NetworkObjects) Close() error {
-	if o.TraceTCPConnect != nil {
-		o.TraceTCPConnect.Close()
+	if o.TraceTcpConnect != nil {
+		o.TraceTcpConnect.Close()
 	}
-	if o.TraceTCPClose != nil {
-		o.TraceTCPClose.Close()
+	if o.TraceTcpClose != nil {
+		o.TraceTcpClose.Close()
 	}
 	if o.Events != nil {
 		o.Events.Close()
@@ -108,18 +108,19 @@ func LoadNetworkObjects(obj *NetworkObjects, opts *ebpf.CollectionOptions) error
 // ---------------------------------------------------------------------------
 
 // FileaccessObjects contains all eBPF objects for file access collection.
+// Field names and ebpf tags must match the BPF program/map names in fileaccess.bpf.c.
+// After `make generate`, bpf2go produces the real struct; this stub keeps the
+// build valid when clang is unavailable.
 type FileaccessObjects struct {
 	TraceOpen        *ebpf.Program `ebpf:"trace_open"`
 	TraceRead        *ebpf.Program `ebpf:"trace_read"`
 	TraceWrite       *ebpf.Program `ebpf:"trace_write"`
 	TraceClose       *ebpf.Program `ebpf:"trace_close"`
-	TraceOpenExit    *ebpf.Program `ebpf:"trace_openat_exit"`
+	TraceOpenExit    *ebpf.Program `ebpf:"trace_open_exit"`
 	TraceOpenat2Exit *ebpf.Program `ebpf:"trace_openat2_exit"`
 	Events           *ebpf.Map     `ebpf:"events"`
-	// FdPathMap is the durable fd→path LRU map (tgid<<32|fd → path+truncated).
-	// Accessible from Go for direct userspace lookups if needed.
-	FdPathMap    *ebpf.Map `ebpf:"fd_path_map"`
-	FdScratchMap *ebpf.Map `ebpf:"fd_scratch_map"`
+	FdPathMap        *ebpf.Map     `ebpf:"fd_path_map"`
+	FdScratchMap     *ebpf.Map     `ebpf:"fd_scratch_map"`
 }
 
 // Close closes all eBPF objects.
@@ -251,22 +252,22 @@ func LoadCgroupObjects(obj *CgroupObjects, opts *ebpf.CollectionOptions) error {
 
 // IouringObjects contains all eBPF objects for io_uring collection.
 type IouringObjects struct {
-	TraceIOUringSetup *ebpf.Program `ebpf:"trace_io_uring_setup"`
-	TraceIOUringEnter *ebpf.Program `ebpf:"trace_io_uring_enter"`
-	IOUringEvents     *ebpf.Map     `ebpf:"iouring_events"`
+	TraceIoUringSetup *ebpf.Program `ebpf:"trace_io_uring_setup"`
+	TraceIoUringEnter *ebpf.Program `ebpf:"trace_io_uring_enter"`
+	IouringEvents     *ebpf.Map     `ebpf:"iouring_events"`
 }
 
 // Close closes all eBPF objects.
 func (o *IouringObjects) Close() error {
 	for _, p := range []*ebpf.Program{
-		o.TraceIOUringSetup, o.TraceIOUringEnter,
+		o.TraceIoUringSetup, o.TraceIoUringEnter,
 	} {
 		if p != nil {
 			p.Close()
 		}
 	}
-	if o.IOUringEvents != nil {
-		o.IOUringEvents.Close()
+	if o.IouringEvents != nil {
+		o.IouringEvents.Close()
 	}
 	return nil
 }
@@ -330,6 +331,37 @@ func (o *HiddenProcessObjects) Close() error {
 
 // LoadHiddenProcessObjects loads hidden process BPF objects from embedded bytecode.
 func LoadHiddenProcessObjects(obj *HiddenProcessObjects, opts *ebpf.CollectionOptions) error {
+	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
+}
+
+// ---------------------------------------------------------------------------
+// DNS
+// ---------------------------------------------------------------------------
+
+// DNSObjects contains all eBPF objects for DNS monitoring.
+// The BPF programs attach to sys_enter_sendmsg and sys_enter_sendto tracepoints
+// and write events into the dedicated dns_events ring buffer.
+type DNSObjects struct {
+	TraceSendmsg *ebpf.Program `ebpf:"trace_sendmsg"`
+	TraceSendto  *ebpf.Program `ebpf:"trace_sendto"`
+	DnsEvents    *ebpf.Map     `ebpf:"dns_events"`
+}
+
+// Close closes all eBPF objects.
+func (o *DNSObjects) Close() error {
+	for _, p := range []*ebpf.Program{o.TraceSendmsg, o.TraceSendto} {
+		if p != nil {
+			p.Close()
+		}
+	}
+	if o.DnsEvents != nil {
+		o.DnsEvents.Close()
+	}
+	return nil
+}
+
+// LoadDNSObjects loads DNS eBPF objects from embedded bytecode.
+func LoadDNSObjects(obj *DNSObjects, opts *ebpf.CollectionOptions) error {
 	return fmt.Errorf("bpf2go generated code not available: run 'make generate' with clang installed")
 }
 

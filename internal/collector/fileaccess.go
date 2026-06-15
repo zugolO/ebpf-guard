@@ -129,7 +129,7 @@ func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {
 		progs["trace_close"] = c.objs.TraceClose
 	}
 	if c.objs.TraceOpenExit != nil {
-		progs["trace_openat_exit"] = c.objs.TraceOpenExit
+		progs["trace_open_exit"] = c.objs.TraceOpenExit
 	}
 	return progs
 }

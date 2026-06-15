@@ -9,6 +9,12 @@
  *
  * Memory: LRU fd_path_map at 65536 entries × (8B key + 257B value) ≈ 17 MB.
  *         Scratch map sized to max in-flight opens (4096 entries).
+ *
+ * All programs use raw tracepoint context (struct trace_event_raw_sys_enter /
+ * struct trace_event_raw_sys_exit) instead of the BPF_PROG macro.  BPF_PROG
+ * relies on CO-RE rewriting of per-syscall BTF struct access; when those structs
+ * are absent from kernel BTF (e.g. trace_event_raw_sys_enter_read on 5.15) the
+ * verifier rejects the program with "invalid bpf_context access off=0 size=8".
  */
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
@@ -97,10 +103,14 @@ static __always_inline void enrich_from_fd(struct event *e, __u32 tgid, __u32 fd
 
 /*
  * Tracepoint for sys_enter_openat — capture filename into scratch map.
+ * args[0]=dfd, args[1]=filename, args[2]=flags, args[3]=mode.
  */
 SEC("tp/syscalls/sys_enter_openat")
-int BPF_PROG(trace_open, int dfd, const char *filename, int flags, umode_t mode)
+int trace_open(struct trace_event_raw_sys_enter *ctx)
 {
+	const char *filename = (const char *)ctx->args[1];
+	int flags = (int)ctx->args[2];
+	umode_t mode = (umode_t)ctx->args[3];
 	struct event *e;
 
 	scratch_store(filename);
@@ -123,8 +133,6 @@ int BPF_PROG(trace_open, int dfd, const char *filename, int flags, umode_t mode)
 
 /*
  * Tracepoint for sys_exit_openat — commit scratch→fd_path_map using the returned fd.
- * Uses raw context (struct trace_event_raw_sys_exit) to avoid BPF_PROG context
- * access rejection that occurs with single-argument sys_exit typed tracepoints.
  */
 SEC("tp/syscalls/sys_exit_openat")
 int trace_open_exit(struct trace_event_raw_sys_exit *ctx)
@@ -137,36 +145,7 @@ int trace_open_exit(struct trace_event_raw_sys_exit *ctx)
 }
 
 /*
- * Tracepoint for sys_enter_openat2 — capture filename into scratch map.
- */
-SEC("tp/syscalls/sys_enter_openat2")
-int BPF_PROG(trace_openat2_enter, int dfd, const char *filename, struct open_how *how, size_t size)
-{
-	struct event *e;
-
-	scratch_store(filename);
-
-	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
-	if (!e)
-		return 0;
-
-	fill_process_info(e);
-	e->type = EVENT_TYPE_FILE_ACCESS;
-	e->file.op = FILE_OP_OPEN;
-
-	__u64 flags = BPF_CORE_READ(how, flags);
-	e->file.flags = (__s32)flags;
-	e->file.mode = BPF_CORE_READ(how, mode);
-	bpf_probe_read_user_str(&e->file.filename, sizeof(e->file.filename), filename);
-	e->file.fd_path_truncated = 0;
-
-	submit_event(e);
-	return 0;
-}
-
-/*
  * Tracepoint for sys_exit_openat2 — commit scratch→fd_path_map.
- * Uses raw context struct for the same reason as trace_open_exit.
  */
 SEC("tp/syscalls/sys_exit_openat2")
 int trace_openat2_exit(struct trace_event_raw_sys_exit *ctx)
@@ -180,16 +159,14 @@ int trace_openat2_exit(struct trace_event_raw_sys_exit *ctx)
 
 /*
  * Tracepoint for sys_enter_close — evict fd_path_map entry on close(2).
- * Uses raw context (struct trace_event_raw_sys_enter) instead of BPF_PROG
- * to avoid "invalid bpf_context access off=0 size=8" verifier rejection
- * that occurs when BPF_PROG tries to extract a single unsigned int arg.
+ * args[0] = fd.
  */
 SEC("tp/syscalls/sys_enter_close")
 int trace_close(struct trace_event_raw_sys_enter *ctx)
 {
+	unsigned int fd = (unsigned int)ctx->args[0];
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
-	unsigned int fd = (unsigned int)ctx->args[0];
 	__u64 map_key = ((__u64)tgid << 32) | (__u64)fd;
 
 	bpf_map_delete_elem(&fd_path_map, &map_key);
@@ -198,10 +175,13 @@ int trace_close(struct trace_event_raw_sys_enter *ctx)
 
 /*
  * Tracepoint for sys_enter_read — emit event with fd-resolved filename.
+ * args[0]=fd.  Raw context avoids "invalid bpf_context access off=0 size=8"
+ * that BPF_PROG causes on kernels lacking trace_event_raw_sys_enter_read BTF.
  */
 SEC("tp/syscalls/sys_enter_read")
-int BPF_PROG(trace_read, unsigned int fd, char *buf, size_t count)
+int trace_read(struct trace_event_raw_sys_enter *ctx)
 {
+	unsigned int fd = (unsigned int)ctx->args[0];
 	struct event *e;
 	__u64 pid_tgid;
 	__u32 tgid;
@@ -228,10 +208,12 @@ int BPF_PROG(trace_read, unsigned int fd, char *buf, size_t count)
 
 /*
  * Tracepoint for sys_enter_write — emit event with fd-resolved filename.
+ * args[0]=fd.
  */
 SEC("tp/syscalls/sys_enter_write")
-int BPF_PROG(trace_write, unsigned int fd, const char *buf, size_t count)
+int trace_write(struct trace_event_raw_sys_enter *ctx)
 {
+	unsigned int fd = (unsigned int)ctx->args[0];
 	struct event *e;
 	__u64 pid_tgid;
 	__u32 tgid;

@@ -183,18 +183,9 @@ int trace_sched_process_exec(void *ctx)
 	if (bpf_probe_read_user(pa->args, (size_t)read_len, (void *)arg_start) < 0)
 		return 0;
 
-	/*
-	 * Replace NUL argument separators with spaces so the result is a single
-	 * printable string suitable for regex/contains rule matching.
-	 * Bounded loop (PROC_ARGS_MAX - 1 = 511 iterations): safe for the verifier.
-	 */
-	for (int i = 0; i < PROC_ARGS_MAX - 1; i++) {
-		if (pa->args[i] == '\0' && i < read_len - 1)
-			pa->args[i] = ' ';
-	}
-	/* Ensure NUL termination at the real end. */
-	if (read_len > 0 && read_len < PROC_ARGS_MAX)
-		pa->args[read_len] = '\0';
+	/* NUL bytes between argv entries are replaced by userspace when reading
+	 * proc_args_map; the 511-iteration unrolled loop caused the verifier to
+	 * reject the program as too large (>1M instructions processed). */
 
 	bpf_map_update_elem(&proc_args_map, &tgid, pa, BPF_ANY);
 	return 0;

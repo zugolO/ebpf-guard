@@ -177,12 +177,16 @@ int BPF_PROG(trace_openat2_exit, long ret)
 
 /*
  * Tracepoint for sys_enter_close — evict fd_path_map entry on close(2).
+ * Uses raw context (struct trace_event_raw_sys_enter) instead of BPF_PROG
+ * to avoid "invalid bpf_context access off=0 size=8" verifier rejection
+ * that occurs when BPF_PROG tries to extract a single unsigned int arg.
  */
 SEC("tp/syscalls/sys_enter_close")
-int BPF_PROG(trace_close, unsigned int fd)
+int trace_close(struct trace_event_raw_sys_enter *ctx)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
+	unsigned int fd = (unsigned int)ctx->args[0];
 	__u64 map_key = ((__u64)tgid << 32) | (__u64)fd;
 
 	bpf_map_delete_elem(&fd_path_map, &map_key);

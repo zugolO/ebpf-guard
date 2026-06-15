@@ -111,10 +111,10 @@ int BPF_KPROBE(kprobe__commit_creds, struct cred *new_cred)
 	/* Read new effective capability set (word 0 covers caps 0–63). */
 	BPF_CORE_READ_INTO(&eff, new_cred, cap_effective);
 #if defined(__KERNEL_CAP_T_DEFINED) || 1
-	/* kernel_cap_t has a single __u32 val[] array on 64-bit kernels.
-	 * cap_effective.val[0] holds bits 0-31, val[1] holds 32-63. */
-	new_caps = ((__u64)BPF_CORE_READ(new_cred, cap_effective.val[1]) << 32) |
-	            (__u64)BPF_CORE_READ(new_cred, cap_effective.val[0]);
+	/* kernel_cap_t has a __u32 cap[] array on 64-bit kernels.
+	 * cap_effective.cap[0] holds bits 0-31, cap[1] holds 32-63. */
+	new_caps = ((__u64)BPF_CORE_READ(new_cred, cap_effective.cap[1]) << 32) |
+	            (__u64)BPF_CORE_READ(new_cred, cap_effective.cap[0]);
 #endif
 
 	stored = bpf_map_lookup_elem(&pid_caps, &pid);

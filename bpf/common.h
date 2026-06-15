@@ -17,6 +17,16 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 
+/* Kernel address-space annotation — not available in BPF context */
+#ifndef __user
+#define __user
+#endif
+
+/* errno values used in BPF programs */
+#ifndef E2BIG
+#define E2BIG 7
+#endif
+
 /* Event type identifiers - must match pkg/types/event.go */
 #define EVENT_TYPE_SYSCALL     1
 #define EVENT_TYPE_TCP_CONNECT 2

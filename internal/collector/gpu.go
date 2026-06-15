@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -374,7 +375,7 @@ func (c *GPUCollector) scanAndAttach() {
 		}
 
 		pid, err := strconv.ParseUint(entry.Name(), 10, 32)
-		if err != nil {
+		if err != nil || pid > math.MaxInt32 {
 			continue
 		}
 

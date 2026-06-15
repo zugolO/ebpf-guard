@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -910,12 +911,18 @@ func GetProcessStartTime(pid uint32) (time.Time, error) {
 	}
 
 	// Field 22 is starttime (0-indexed: 21)
-	starttime, err := strconv.ParseUint(fields[21], 10, 64)
+	starttime, err := strconv.ParseUint(fields[21], 10, 63)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse starttime: %w", err)
 	}
 
 	// Convert to time.Time (approximate - would need boot time for exact)
-	// For audit purposes, relative time is sufficient
-	return time.Unix(0, int64(starttime)*10000000), nil // Rough approximation
+	// For audit purposes, relative time is sufficient.
+	// Capped to 63 bits above so int64 cast is safe; guard against multiplication overflow.
+	const maxNsec = int64(math.MaxInt64) / 10_000_000
+	ticks := int64(starttime)
+	if ticks > maxNsec {
+		ticks = maxNsec
+	}
+	return time.Unix(0, ticks*10_000_000), nil
 }

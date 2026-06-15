@@ -68,6 +68,8 @@ var (
 		// Enriched fields computed on demand from qname
 		"qname_length": true, "qname_entropy": true, "qname_dga_score": true,
 		"qname_digit_ratio": true, "qname_subdomain_count": true, "qname_is_dga": true,
+		// Alias: "dns.qname" is accepted as a more explicit form of "qname"
+		"dns.qname": true,
 		// Process context — available on all event types via Event.Comm
 		"proc.comm": true, "comm": true,
 	}

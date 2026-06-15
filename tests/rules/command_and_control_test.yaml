@@ -1,0 +1,49 @@
+suite: command_and_control
+rules_path: ../../rules/command-and-control.yaml
+tests:
+  - name: "pastebin.com query fires c2_paste_site_access via dns.qname alias"
+    rule_id: c2_paste_site_access
+    event:
+      type: dns
+      dns:
+        qname: "pastebin.com"
+        qtype: 1
+    expect: alert
+    expect_severity: warning
+
+  - name: "hastebin.com query fires c2_paste_site_access"
+    rule_id: c2_paste_site_access
+    event:
+      type: dns
+      dns:
+        qname: "hastebin.com"
+        qtype: 1
+    expect: alert
+
+  - name: "github.com DNS query does not fire dead-drop rule"
+    event:
+      type: dns
+      dns:
+        qname: "github.com"
+        qtype: 1
+    expect: no_alert
+
+  - name: "reverse shell bash outbound fires c2_reverse_shell_standard_ports"
+    rule_id: c2_reverse_shell_standard_ports
+    event:
+      type: network
+      comm: "bash"
+      network:
+        dport: 4444
+        daddr: "10.0.0.1"
+    expect: alert
+    expect_severity: critical
+
+  - name: "curl outbound does not fire reverse shell rule"
+    event:
+      type: network
+      comm: "curl"
+      network:
+        dport: 443
+        daddr: "8.8.8.8"
+    expect: no_alert

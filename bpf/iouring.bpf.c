@@ -13,6 +13,7 @@
 /* linux/bpf.h superseded by vmlinux.h included via common.h */
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 
 /* Dedicated ring buffer for io_uring events — separate from the shared
  * events map so that the io_uring_event struct can have its own layout
@@ -86,12 +87,20 @@ int BPF_KPROBE(trace_io_uring_setup, unsigned int entries,
 	return 0;
 }
 
-/* io_uring_enter(fd, to_submit, min_complete, flags, argp, argsz) — kprobe */
+/* io_uring_enter(fd, to_submit, min_complete, flags, argp, argsz) — kprobe.
+ * libbpf 0.5 BPF_KPROBE supports at most 5 typed args; read pt_regs directly.
+ * On x86_64 __x64_sys_* wrappers, PARM1 is a pointer to the inner pt_regs
+ * holding the actual syscall arguments: di=fd, si=to_submit, r10=flags. */
 SEC("kprobe/__x64_sys_io_uring_enter")
-int BPF_KPROBE(trace_io_uring_enter, unsigned int fd, u32 to_submit,
-	       u32 min_complete, u32 flags, const void __user *argp, size_t argsz)
+int trace_io_uring_enter(struct pt_regs *ctx)
 {
+	struct pt_regs *inner = (struct pt_regs *)PT_REGS_PARM1(ctx);
+	unsigned long fd_raw = 0, to_submit_raw = 0, flags_raw = 0;
 	struct io_uring_event *evt;
+
+	bpf_probe_read_kernel(&fd_raw,        sizeof(fd_raw),        &inner->di);
+	bpf_probe_read_kernel(&to_submit_raw, sizeof(to_submit_raw), &inner->si);
+	bpf_probe_read_kernel(&flags_raw,     sizeof(flags_raw),     &inner->r10);
 
 	evt = bpf_ringbuf_reserve(&iouring_events, sizeof(*evt), 0);
 	if (!evt)
@@ -117,10 +126,10 @@ int BPF_KPROBE(trace_io_uring_enter, unsigned int fd, u32 to_submit,
 		}
 	}
 
-	evt->op        = 1;       /* io_uring_enter */
-	evt->flags     = flags;
-	evt->fd        = (__s32)fd;
-	evt->to_submit = to_submit;
+	evt->op        = 1;
+	evt->flags     = (__u32)flags_raw;
+	evt->fd        = (__s32)(unsigned int)fd_raw;
+	evt->to_submit = (__u32)to_submit_raw;
 
 	bpf_ringbuf_submit(evt, 0);
 	return 0;

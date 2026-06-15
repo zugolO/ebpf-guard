@@ -122,6 +122,18 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 }
 
 /*
+ * proc_args_scratch - per-CPU scratchpad for trace_sched_process_exec.
+ * struct proc_args is 516 bytes, exceeding the 512-byte BPF stack limit,
+ * so we use a per-CPU array as scratch space instead of a stack variable.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct proc_args);
+} proc_args_scratch SEC(".maps");
+
+/*
  * trace_sched_process_exec - populate proc_args_map on every exec.
  *
  * Reads argv from task_struct->mm->arg_start..arg_end (BTF CO-RE) and stores
@@ -132,13 +144,20 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 SEC("tp/sched/sched_process_exec")
 int trace_sched_process_exec(void *ctx)
 {
-	struct proc_args pa = {};
+	__u32 scratch_key = 0;
+	struct proc_args *pa;
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
 	struct task_struct *task;
 	struct mm_struct *mm;
 	unsigned long arg_start, arg_end;
 	long args_len, read_len;
+
+	pa = bpf_map_lookup_elem(&proc_args_scratch, &scratch_key);
+	if (!pa)
+		return 0;
+
+	__builtin_memset(pa, 0, sizeof(*pa));
 
 	task = (struct task_struct *)bpf_get_current_task();
 	mm = BPF_CORE_READ(task, mm);
@@ -153,7 +172,7 @@ int trace_sched_process_exec(void *ctx)
 
 	if (args_len >= PROC_ARGS_MAX) {
 		read_len = PROC_ARGS_MAX - 1;
-		pa.truncated = 1;
+		pa->truncated = 1;
 	} else {
 		read_len = args_len;
 	}
@@ -161,7 +180,7 @@ int trace_sched_process_exec(void *ctx)
 	if (read_len <= 0 || read_len >= PROC_ARGS_MAX)
 		return 0;
 
-	if (bpf_probe_read_user(pa.args, (size_t)read_len, (void *)arg_start) < 0)
+	if (bpf_probe_read_user(pa->args, (size_t)read_len, (void *)arg_start) < 0)
 		return 0;
 
 	/*
@@ -170,14 +189,14 @@ int trace_sched_process_exec(void *ctx)
 	 * Bounded loop (PROC_ARGS_MAX - 1 = 511 iterations): safe for the verifier.
 	 */
 	for (int i = 0; i < PROC_ARGS_MAX - 1; i++) {
-		if (pa.args[i] == '\0' && i < read_len - 1)
-			pa.args[i] = ' ';
+		if (pa->args[i] == '\0' && i < read_len - 1)
+			pa->args[i] = ' ';
 	}
 	/* Ensure NUL termination at the real end. */
 	if (read_len > 0 && read_len < PROC_ARGS_MAX)
-		pa.args[read_len] = '\0';
+		pa->args[read_len] = '\0';
 
-	bpf_map_update_elem(&proc_args_map, &tgid, &pa, BPF_ANY);
+	bpf_map_update_elem(&proc_args_map, &tgid, pa, BPF_ANY);
 	return 0;
 }
 

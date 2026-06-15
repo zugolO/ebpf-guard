@@ -13,9 +13,9 @@
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
  * when doing CO-RE compilation. Do not re-add them here. */
+#include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
-#include "common.h"
 
 /* Value stored in both scratch and fd→path maps. */
 struct fd_path {

@@ -14,6 +14,13 @@
 
 #include "common.h"
 
+#ifndef EACCES
+#define EACCES 13
+#endif
+#ifndef EPERM
+#define EPERM 1
+#endif
+
 /* LSM blocklist map: PID -> blocked indicator (used by socket_connect hook) */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);

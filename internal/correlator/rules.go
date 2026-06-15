@@ -1126,7 +1126,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return ""
 		}
 		switch field {
-		case "qname":
+		case "qname", "dns.qname":
 			return e.DNS.QName
 		case "qtype":
 			return strconv.FormatUint(uint64(e.DNS.QType), 10)

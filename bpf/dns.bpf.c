@@ -51,6 +51,16 @@ struct dns_event {
 	
 	/* DNS-specific fields */
 	__u8  qname[DNS_MAX_NAME_LEN]; /* Query name (domain) */
+	/* decode_dns_name's masked writes into qname are bounded against the
+	 * mask (DNS_MAX_NAME_LEN-1) rather than the precise remaining space,
+	 * so the verifier's worst case for the bulk label copy can land up to
+	 * (DNS_MAX_NAME_LEN-1) + 63 bytes past the start of qname — beyond
+	 * qname's own 128 bytes, but still inside the struct as long as this
+	 * padding exists. The copy never actually reaches this far in
+	 * practice (real DNS names are far shorter), and qtype/rcode below
+	 * are written afterward regardless, so this is just verifier
+	 * headroom, not live data. */
+	__u8  _qname_overflow_guard[32];
 	__u16 qtype;                   /* Query type (A, AAAA, TXT, etc.) */
 	__u16 rcode;                   /* Response code (0 = success) */
 	__u8  direction;               /* 0 = query (outbound), 1 = response (inbound) */

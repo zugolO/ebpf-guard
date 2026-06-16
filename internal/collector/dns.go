@@ -192,7 +192,7 @@ func (c *DNSCollector) LostEvents() uint64 {
 // parseEvent parses a raw ring buffer record into a types.Event.
 func (c *DNSCollector) parseEvent(raw []byte) *types.Event {
 	// 4+8+4+4+4+16+128+2+2+1+1+1 = 175 bytes minimum (no response IPs)
-	if len(raw) < 175 {
+	if len(raw) < 207 {
 		return nil
 	}
 
@@ -236,6 +236,9 @@ func (c *DNSCollector) parseEvent(raw []byte) *types.Event {
 	}
 	qname := string(raw[offset : offset+qnameLen])
 	offset += 128
+
+	// _qname_overflow_guard (32 bytes) - verifier headroom padding, not data
+	offset += 32
 
 	// qtype (2 bytes)
 	qtype := binary.LittleEndian.Uint16(raw[offset:])

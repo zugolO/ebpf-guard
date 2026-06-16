@@ -132,7 +132,11 @@ struct {
  * track their exact value rather than just a range; two visits to the loop
  * head with different exact values are never recognized as the same state,
  * so without this the verifier re-explores the rest of the loop from
- * scratch on every iteration instead of pruning. This only works in
+ * scratch on every iteration instead of pruning. The loop counter i is the
+ * same story: it feeds the buf[i & mask] address computation too, so it
+ * gets marked precise and increments by 1 every visit — without barrier_var
+ * on it as well, the loop head state never matches across iterations no
+ * matter what's done to the other two variables. This only works in
  * combination with hoisting bpf_probe_read_user() out of the loop above —
  * a helper call inside the loop body hands back a fresh scalar ID on every
  * visit regardless of barrier_var, which independently defeats pruning. */
@@ -196,6 +200,7 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 
 		barrier_var(dst_offset);
 		barrier_var(label_remaining);
+		barrier_var(i);
 	}
 
 	/* Null terminate (masked for the same reason as the dot-separator write

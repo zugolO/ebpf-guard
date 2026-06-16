@@ -134,22 +134,17 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 			dst[dst_offset++] = '.';
 		}
 
-		/* Copy the whole label in one read, clamped to remaining dst space
-		 * (clamp chain keeps copy_len <= 63 so the verifier can bound the
-		 * dynamic-size probe_read_user call). */
-		{
-			int copy_len = label_len;
-			int remaining = max_len - 1 - dst_offset;
-			if (remaining < 0)
-				remaining = 0;
-			if (copy_len > remaining)
-				copy_len = remaining;
-			if (copy_len > 63)
-				copy_len = 63;
-			if (copy_len > 0 &&
-			    bpf_probe_read_user(dst + dst_offset, copy_len, src + src_offset + 1) == 0) {
-				dst_offset += copy_len;
-			}
+		/* Bail out (no write) if the label wouldn't fit, rather than
+		 * clamping copy_len down to fit. The verifier can't correlate a
+		 * clamped copy_len with dst_offset across unrolled iterations, so
+		 * it conservatively assumes both can be at their independent max
+		 * at once, putting the write past the end of dst. A hard
+		 * pre-check keeps the bound on dst_offset + label_len provable. */
+		if (dst_offset + label_len > max_len - 1)
+			break;
+
+		if (bpf_probe_read_user(dst + dst_offset, label_len, src + src_offset + 1) == 0) {
+			dst_offset += label_len;
 		}
 
 		src_offset += label_len + 1;

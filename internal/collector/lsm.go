@@ -509,22 +509,23 @@ func (c *KmodCollector) Name() string { return "kmod" }
 func (c *KmodCollector) IsHealthy() bool { return c.loadError == nil }
 
 // Start attaches eBPF programs and begins forwarding events. Blocks until ctx is cancelled.
+//
+// There is no tracepoint-based fallback for kernel-module-load detection:
+// bpf/lsm.bpf.c only defines LSM-type programs (SEC("lsm/...")), and the
+// compiled "Kmod" object bundles all of them together, so even attempting to
+// load it on a kernel without BPF LSM support (no CONFIG_BPF_LSM / lsm=bpf)
+// fails outright — there is nothing to fall back to. When LSM is unavailable,
+// skip kmod load detection entirely rather than logging a misleading error.
 func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	c.logger.Info("starting kmod collector", "lsm_available", c.available)
 
 	if c.available {
 		if err := c.loadKmod(); err != nil {
-			c.logger.Warn("kmod: LSM load failed, falling back to tracepoint", "error", err)
+			c.logger.Warn("kmod: LSM load failed, kernel module load detection disabled", "error", err)
 			c.available = false
 		}
-	}
-
-	if !c.available {
-		if err := c.loadFallback(); err != nil {
-			c.loadError = err
-			c.status.SetUp("kmod", false)
-			return fmt.Errorf("collector/kmod: fallback load failed: %w", err)
-		}
+	} else {
+		c.logger.Info("kmod: LSM BPF unavailable, kernel module load detection disabled (no tracepoint fallback exists)")
 	}
 
 	if err := c.loadCgroup(); err != nil {
@@ -604,26 +605,6 @@ func (c *KmodCollector) loadKmod() error {
 	reader, err := bpf.NewRingbufReader(c.kmodObjs.LsmEvents)
 	if err != nil {
 		return fmt.Errorf("kmod ringbuf reader: %w", err)
-	}
-	c.kmodReader = reader
-	return nil
-}
-
-// loadFallback attaches the sys_enter_init_module tracepoint (kernel < 5.7 fallback).
-func (c *KmodCollector) loadFallback() error {
-	c.kmodObjs = &bpf.KmodObjects{}
-	if err := bpf.LoadKmodObjects(c.kmodObjs, &ebpf.CollectionOptions{}); err != nil {
-		return err
-	}
-	l, err := link.Tracepoint("syscalls", "sys_enter_init_module", c.kmodObjs.LsmKernelModuleRequest, nil)
-	if err != nil {
-		return fmt.Errorf("attach sys_enter_init_module: %w", err)
-	}
-	c.kmodLinks = append(c.kmodLinks, l)
-
-	reader, err := bpf.NewRingbufReader(c.kmodObjs.LsmEvents)
-	if err != nil {
-		return fmt.Errorf("kmod fallback ringbuf reader: %w", err)
 	}
 	c.kmodReader = reader
 	return nil

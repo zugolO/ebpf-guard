@@ -267,6 +267,15 @@ func (c *NetworkCollector) MapFullCountersMap() *ebpf.Map {
 	return c.objs.MapFullCounters
 }
 
+// SamplingConfigMap returns the sampling_config BPF map backing this
+// collector's static sample-rate filter, or nil in stub mode.
+func (c *NetworkCollector) SamplingConfigMap() *ebpf.Map {
+	if c.objs == nil {
+		return nil
+	}
+	return c.objs.SamplingConfig
+}
+
 // parseEvent converts raw bytes from the ring buffer into event, routing to the
 // appropriate parser based on the event type field. event must be a pooled
 // *types.Event from eventPool; caller handles Reset() and Put() after use.

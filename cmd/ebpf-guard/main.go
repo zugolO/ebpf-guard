@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/spf13/cobra"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/semaphore"
@@ -783,14 +784,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if sc, scErr := collector.NewSyscallCollector(slog.Default()); scErr != nil {
 			slog.Warn("syscall: collector creation failed", slog.Any("error", scErr))
 		} else {
-			if cfg.BPF.KernelFilter.Enabled {
-				sc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
-					if name != "syscall" || !up {
-						return
-					}
+			sc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
+				if name != "syscall" || !up {
+					return
+				}
+				if cfg.BPF.KernelFilter.Enabled {
 					enableKernelFilter(sc, cfg.BPF.KernelFilter)
-				}))
-			}
+				}
+				if cfg.BPF.Sampling.Enabled {
+					enableSampling("syscall", sc.SamplingConfigMap(), cfg.BPF.Sampling)
+				}
+			}))
 			collectors = append(collectors, sc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("syscall: collector enabled")
 		}
@@ -798,6 +802,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if nc, ncErr := collector.NewNetworkCollector(slog.Default()); ncErr != nil {
 			slog.Warn("network: collector creation failed", slog.Any("error", ncErr))
 		} else {
+			if cfg.BPF.Sampling.Enabled {
+				nc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
+					if name != "network" || !up {
+						return
+					}
+					enableSampling("network", nc.SamplingConfigMap(), cfg.BPF.Sampling)
+				}))
+			}
 			collectors = append(collectors, nc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("network: collector enabled")
 		}
@@ -805,6 +817,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if fc, fcErr := collector.NewFileaccessCollector(slog.Default()); fcErr != nil {
 			slog.Warn("fileaccess: collector creation failed", slog.Any("error", fcErr))
 		} else {
+			if cfg.BPF.Sampling.Enabled {
+				fc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
+					if name != "fileaccess" || !up {
+						return
+					}
+					enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling)
+				}))
+			}
 			collectors = append(collectors, fc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("fileaccess: collector enabled")
 		}
@@ -1301,6 +1321,39 @@ func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterCo
 	slog.Info("kernel_filter: enabled BPF-side syscall/comm filtering",
 		slog.Int("monitored_syscalls", len(nrs)),
 		slog.Int("comm_denylist", len(denylist)))
+}
+
+// enableSampling applies the configured static BPF-side sample rate to the
+// given collector's sampling_config map and turns sampling on. Each compiled
+// BPF object (syscall, network, fileaccess) has its own independent copy of
+// this map — only the rate field relevant to that program's event type has
+// any effect there, so it's safe to write the same full rate set to all
+// three. Without this, sys_enter_read/sys_enter_write fire on every syscall
+// system-wide and flood the event channel within seconds.
+func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig) {
+	ctrl, err := internalbpf.NewSamplingController(configMap)
+	if err != nil {
+		slog.Warn("sampling: map unavailable, events forwarded unsampled",
+			slog.String("collector", name), slog.Any("error", err))
+		return
+	}
+
+	cfg := internalbpf.SamplingConfig{
+		SyscallRate: sc.SyscallRate,
+		NetworkRate: sc.NetworkRate,
+		FileRate:    sc.FileRate,
+		Enabled:     1,
+	}
+	if err := ctrl.UpdateConfig(cfg); err != nil {
+		slog.Error("sampling: failed to apply BPF-side sample rate",
+			slog.String("collector", name), slog.Any("error", err))
+		return
+	}
+	slog.Info("sampling: enabled BPF-side static sample rate",
+		slog.String("collector", name),
+		slog.Uint64("syscall_rate", uint64(sc.SyscallRate)),
+		slog.Uint64("network_rate", uint64(sc.NetworkRate)),
+		slog.Uint64("file_rate", uint64(sc.FileRate)))
 }
 
 // The entire procedure is bounded by a 30-second context.

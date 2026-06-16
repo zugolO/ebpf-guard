@@ -43,6 +43,10 @@ type SyscallObjects struct {
 	CommFilterMap      *ebpf.Map `ebpf:"comm_filter_map"`
 	SyscallFilterMap   *ebpf.Map `ebpf:"syscall_filter_map"`
 	KernelFilterConfig *ebpf.Map `ebpf:"kernel_filter_config"`
+	// SamplingConfig backs the BPF-side static sample-rate filter (see
+	// bpf.SamplingController). Shared map definition in common.h, but each
+	// compiled BPF object gets its own independent copy.
+	SamplingConfig *ebpf.Map `ebpf:"sampling_config"`
 }
 
 // Close closes all eBPF objects.
@@ -57,6 +61,7 @@ func (o *SyscallObjects) Close() error {
 	for _, m := range []*ebpf.Map{
 		o.Events, o.SyscallArgs, o.ProcArgsMap, o.MapFullCounters,
 		o.CommFilterMap, o.SyscallFilterMap, o.KernelFilterConfig,
+		o.SamplingConfig,
 	} {
 		if m != nil {
 			m.Close()
@@ -83,6 +88,7 @@ type NetworkObjects struct {
 	ConnStartMap    *ebpf.Map     `ebpf:"conn_start_map"`
 	ConnMetaMap     *ebpf.Map     `ebpf:"conn_meta_map"`
 	MapFullCounters *ebpf.Map     `ebpf:"map_full_counters"`
+	SamplingConfig  *ebpf.Map     `ebpf:"sampling_config"`
 }
 
 // Close closes all eBPF objects.
@@ -104,6 +110,9 @@ func (o *NetworkObjects) Close() error {
 	}
 	if o.MapFullCounters != nil {
 		o.MapFullCounters.Close()
+	}
+	if o.SamplingConfig != nil {
+		o.SamplingConfig.Close()
 	}
 	return nil
 }
@@ -131,6 +140,7 @@ type FileaccessObjects struct {
 	Events           *ebpf.Map     `ebpf:"events"`
 	FdPathMap        *ebpf.Map     `ebpf:"fd_path_map"`
 	FdScratchMap     *ebpf.Map     `ebpf:"fd_scratch_map"`
+	SamplingConfig   *ebpf.Map     `ebpf:"sampling_config"`
 }
 
 // Close closes all eBPF objects.
@@ -143,7 +153,7 @@ func (o *FileaccessObjects) Close() error {
 			p.Close()
 		}
 	}
-	for _, m := range []*ebpf.Map{o.Events, o.FdPathMap, o.FdScratchMap} {
+	for _, m := range []*ebpf.Map{o.Events, o.FdPathMap, o.FdScratchMap, o.SamplingConfig} {
 		if m != nil {
 			m.Close()
 		}

@@ -160,60 +160,11 @@ int trace_ssl_write(struct pt_regs *ctx)
 }
 
 /*
- * uprobe/SSL_read - Intercept inbound TLS data after decryption.
- * 
- * Signature: int SSL_read(SSL *ssl, void *buf, int num)
- * Arguments (x86_64): rdi=ssl, rsi=buf, rdx=num
- * 
- * Note: SSL_read is probed on return (uretprobe) to capture the actual
- * decrypted data, not the empty buffer passed in.
- */
-SEC("uretprobe/SSL_read")
-int trace_ssl_read_ret(struct pt_regs *ctx)
-{
-	struct tls_event *e;
-	void *buf;
-	int ret;
-	size_t data_len;
-	
-	/* Get return value - this is the actual bytes read/decrypted */
-	ret = PT_REGS_RC(ctx);
-	if (ret <= 0) {
-		/* No data read or error */
-		return 0;
-	}
-	
-	/* Reserve space in ring buffer */
-	e = bpf_ringbuf_reserve(&tls_events, sizeof(struct tls_event), 0);
-	if (!e)
-		return 0;
-	
-	/* Fill process info */
-	fill_tls_process_info(e);
-	e->type = EVENT_TYPE_TLS;
-	e->direction = TLS_DIR_READ;
-	e->has_conn_info = 0;
-	e->data_len = ret;
-	
-	/* 
-	 * For SSL_read uretprobe, we need to get the buffer pointer.
-	 * This is stored in a map by the entry probe since it's not available on return.
-	 * For simplicity, we capture without the actual data on uretprobe.
-	 * Full implementation would use a map to store buf pointer from entry.
-	 */
-	e->captured_len = 0;
-	__builtin_memset(&e->data, 0, sizeof(e->data));
-	
-	bpf_ringbuf_submit(e, 0);
-	return 0;
-}
-
-/*
  * uprobe/SSL_read (entry) - Store buffer pointer for uretprobe.
  * We need this to read the decrypted data on return.
  */
 struct ssl_read_ctx {
-	void *buf;
+	__u64 buf; /* userspace pointer stored as u64 to avoid bpf2go pointer limitation */
 	int num;
 };
 
@@ -232,13 +183,13 @@ int trace_ssl_read_entry(struct pt_regs *ctx)
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	
 #if defined(__TARGET_ARCH_x86_64)
-	read_ctx.buf = (void *)PT_REGS_PARM2(ctx);
+	read_ctx.buf = (__u64)PT_REGS_PARM2(ctx);
 	read_ctx.num = (int)PT_REGS_PARM3(ctx);
 #elif defined(__TARGET_ARCH_arm64)
-	read_ctx.buf = (void *)PT_REGS_PARM2(ctx);
+	read_ctx.buf = (__u64)PT_REGS_PARM2(ctx);
 	read_ctx.num = (int)PT_REGS_PARM3(ctx);
 #else
-	read_ctx.buf = (void *)ctx->si;
+	read_ctx.buf = (__u64)ctx->si;
 	read_ctx.num = (int)ctx->dx;
 #endif
 	
@@ -294,7 +245,7 @@ int trace_ssl_read_ret_full(struct pt_regs *ctx)
 	
 	/* Read decrypted data from userspace buffer */
 	if (read_ctx->buf && data_len > 0) {
-		long err = bpf_probe_read_user(&e->data, data_len, read_ctx->buf);
+		long err = bpf_probe_read_user(&e->data, data_len, (void *)read_ctx->buf);
 		if (err < 0) {
 			e->captured_len = 0;
 		}

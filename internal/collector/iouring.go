@@ -84,7 +84,7 @@ func (c *IOUringCollector) Start(ctx context.Context, out chan<- types.Event) er
 		return fmt.Errorf("collector/iouring: attach programs: %w", err)
 	}
 
-	reader, err := ringbuf.NewReader(c.objs.IOUringEvents)
+	reader, err := ringbuf.NewReader(c.objs.IouringEvents)
 	if err != nil {
 		c.loadError = err
 		c.status.SetUp("iouring", false)
@@ -118,8 +118,8 @@ func (c *IOUringCollector) GetPrograms() map[string]*ebpf.Program {
 		return nil
 	}
 	return map[string]*ebpf.Program{
-		"trace_io_uring_setup": c.objs.TraceIOUringSetup,
-		"trace_io_uring_enter": c.objs.TraceIOUringEnter,
+		"trace_io_uring_setup": c.objs.TraceIoUringSetup,
+		"trace_io_uring_enter": c.objs.TraceIoUringEnter,
 	}
 }
 
@@ -186,13 +186,13 @@ func (c *IOUringCollector) loadObjects() error {
 
 // attachPrograms attaches kprobes to io_uring syscalls.
 func (c *IOUringCollector) attachPrograms() error {
-	lnk, err := link.Kprobe("__x64_sys_io_uring_setup", c.objs.TraceIOUringSetup, nil)
+	lnk, err := link.Kprobe("__x64_sys_io_uring_setup", c.objs.TraceIoUringSetup, nil)
 	if err != nil {
 		return fmt.Errorf("attach kprobe io_uring_setup: %w", err)
 	}
 	c.links = append(c.links, lnk)
 
-	lnk, err = link.Kprobe("__x64_sys_io_uring_enter", c.objs.TraceIOUringEnter, nil)
+	lnk, err = link.Kprobe("__x64_sys_io_uring_enter", c.objs.TraceIoUringEnter, nil)
 	if err != nil {
 		return fmt.Errorf("attach kprobe io_uring_enter: %w", err)
 	}

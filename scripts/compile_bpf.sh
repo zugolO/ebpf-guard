@@ -31,7 +31,7 @@ BPFTOOL="${BPFTOOL:-bpftool}"
 UNAME_M="$(uname -m)"
 case "${UNAME_M}" in
   aarch64) BPF_ARCH="arm64"; BPF_ARCH_DEF="__TARGET_ARCH_arm64"; SYS_INCLUDE="/usr/include/aarch64-linux-gnu" ;;
-  *)       BPF_ARCH="x86";   BPF_ARCH_DEF="__TARGET_ARCH_x86_64"; SYS_INCLUDE="/usr/include/x86_64-linux-gnu" ;;
+  *)       BPF_ARCH="x86";   BPF_ARCH_DEF="__TARGET_ARCH_x86"; SYS_INCLUDE="/usr/include/x86_64-linux-gnu" ;;
 esac
 
 CFLAGS="-O2 -g -Wall -target bpf -D${BPF_ARCH_DEF} -I${BPF_DIR} -I/usr/include -I${SYS_INCLUDE}"

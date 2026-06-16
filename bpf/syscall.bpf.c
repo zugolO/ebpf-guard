@@ -69,10 +69,22 @@ int trace_sys_enter(struct sys_enter_args *ctx)
 	/* Copy syscall arguments */
 	bpf_probe_read_kernel(&e->syscall.args, sizeof(e->syscall.args), &ctx->args);
 
-	/* Store args for exit matching; track map-full events for observability */
+	/* Store args for exit matching.  bpf_map_update_elem requires fp/stack
+	 * pointer for value; the raw context pointer (type=ctx) is rejected by
+	 * the verifier, so copy the needed fields to a stack variable first. */
 	pid_tgid = bpf_get_current_pid_tgid();
-	if (bpf_map_update_elem(&syscall_args, &pid_tgid, ctx, BPF_NOEXIST) == -E2BIG)
-		record_map_full(MAP_FULL_IDX_SYSCALL_ARGS);
+	{
+		struct sys_enter_args entry_copy = {};
+		entry_copy.syscall_nr = ctx->syscall_nr;
+		entry_copy.args[0] = ctx->args[0];
+		entry_copy.args[1] = ctx->args[1];
+		entry_copy.args[2] = ctx->args[2];
+		entry_copy.args[3] = ctx->args[3];
+		entry_copy.args[4] = ctx->args[4];
+		entry_copy.args[5] = ctx->args[5];
+		if (bpf_map_update_elem(&syscall_args, &pid_tgid, &entry_copy, BPF_NOEXIST) == -E2BIG)
+			record_map_full(MAP_FULL_IDX_SYSCALL_ARGS);
+	}
 
 	submit_event(e);
 	return 0;
@@ -122,6 +134,18 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 }
 
 /*
+ * proc_args_scratch - per-CPU scratchpad for trace_sched_process_exec.
+ * struct proc_args is 516 bytes, exceeding the 512-byte BPF stack limit,
+ * so we use a per-CPU array as scratch space instead of a stack variable.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct proc_args);
+} proc_args_scratch SEC(".maps");
+
+/*
  * trace_sched_process_exec - populate proc_args_map on every exec.
  *
  * Reads argv from task_struct->mm->arg_start..arg_end (BTF CO-RE) and stores
@@ -132,13 +156,20 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 SEC("tp/sched/sched_process_exec")
 int trace_sched_process_exec(void *ctx)
 {
-	struct proc_args pa = {};
+	__u32 scratch_key = 0;
+	struct proc_args *pa;
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 tgid = (__u32)(pid_tgid >> 32);
 	struct task_struct *task;
 	struct mm_struct *mm;
 	unsigned long arg_start, arg_end;
 	long args_len, read_len;
+
+	pa = bpf_map_lookup_elem(&proc_args_scratch, &scratch_key);
+	if (!pa)
+		return 0;
+
+	__builtin_memset(pa, 0, sizeof(*pa));
 
 	task = (struct task_struct *)bpf_get_current_task();
 	mm = BPF_CORE_READ(task, mm);
@@ -153,7 +184,7 @@ int trace_sched_process_exec(void *ctx)
 
 	if (args_len >= PROC_ARGS_MAX) {
 		read_len = PROC_ARGS_MAX - 1;
-		pa.truncated = 1;
+		pa->truncated = 1;
 	} else {
 		read_len = args_len;
 	}
@@ -161,23 +192,14 @@ int trace_sched_process_exec(void *ctx)
 	if (read_len <= 0 || read_len >= PROC_ARGS_MAX)
 		return 0;
 
-	if (bpf_probe_read_user(pa.args, (size_t)read_len, (void *)arg_start) < 0)
+	if (bpf_probe_read_user(pa->args, (size_t)read_len, (void *)arg_start) < 0)
 		return 0;
 
-	/*
-	 * Replace NUL argument separators with spaces so the result is a single
-	 * printable string suitable for regex/contains rule matching.
-	 * Bounded loop (PROC_ARGS_MAX - 1 = 511 iterations): safe for the verifier.
-	 */
-	for (int i = 0; i < PROC_ARGS_MAX - 1; i++) {
-		if (pa.args[i] == '\0' && i < read_len - 1)
-			pa.args[i] = ' ';
-	}
-	/* Ensure NUL termination at the real end. */
-	if (read_len > 0 && read_len < PROC_ARGS_MAX)
-		pa.args[read_len] = '\0';
+	/* NUL bytes between argv entries are replaced by userspace when reading
+	 * proc_args_map; the 511-iteration unrolled loop caused the verifier to
+	 * reject the program as too large (>1M instructions processed). */
 
-	bpf_map_update_elem(&proc_args_map, &tgid, &pa, BPF_ANY);
+	bpf_map_update_elem(&proc_args_map, &tgid, pa, BPF_ANY);
 	return 0;
 }
 

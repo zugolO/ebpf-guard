@@ -103,12 +103,23 @@ static __always_inline void fill_ch_process_info(struct tls_clienthello_event *e
  * the event to the tls_clienthello_events ring buffer.
  */
 SEC("kprobe/__x64_sys_sendto")
-int BPF_KPROBE(trace_sendto, int fd, void __user *buf, size_t len,
-	       int flags, struct sockaddr __user *addr, int addrlen)
+int trace_sendto(struct pt_regs *ctx)
 {
+	/* libbpf 0.5 BPF_KPROBE supports at most 5 typed args; read pt_regs directly.
+	 * On x86_64, __x64_sys_sendto(const struct pt_regs *regs): inner regs hold
+	 * the actual syscall args: si=buff, dx=len. */
+	struct pt_regs *inner = (struct pt_regs *)PT_REGS_PARM1(ctx);
+	unsigned long buf_raw = 0, len_raw = 0;
+	void *buf;
+	__u64 len;
 	struct tls_clienthello_event *e;
 	__u8 peek[6];
 	__u32 cap_len;
+
+	bpf_probe_read_kernel(&buf_raw, sizeof(buf_raw), &inner->si);
+	bpf_probe_read_kernel(&len_raw, sizeof(len_raw), &inner->dx);
+	buf = (void *)buf_raw;
+	len = (__u64)len_raw;
 
 	/* Minimum size check: need at least a TLS record header (5 bytes)
 	 * plus the handshake header (4 bytes) + handshake type (1 byte) */

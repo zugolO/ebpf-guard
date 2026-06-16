@@ -136,10 +136,10 @@ func (m *XDPManager) BlockIP(ctx context.Context, ip net.IP) error {
 		return nil
 	}
 
-	if m.loaded && m.objs != nil && m.objs.XdpBlockedIPs != nil {
+	if m.loaded && m.objs != nil && m.objs.XdpBlockedIps != nil {
 		key := ipToKey(ip)
 		val := uint8(1)
-		if err := m.objs.XdpBlockedIPs.Put(key, val); err != nil {
+		if err := m.objs.XdpBlockedIps.Put(key, val); err != nil {
 			return fmt.Errorf("xdp: block IP %s in BPF map: %w", canonical, err)
 		}
 	} else {
@@ -162,9 +162,9 @@ func (m *XDPManager) UnblockIP(ctx context.Context, ip net.IP) error {
 		return nil
 	}
 
-	if m.loaded && m.objs != nil && m.objs.XdpBlockedIPs != nil {
+	if m.loaded && m.objs != nil && m.objs.XdpBlockedIps != nil {
 		key := ipToKey(ip)
-		if err := m.objs.XdpBlockedIPs.Delete(key); err != nil && !isMapKeyNotFound(err) {
+		if err := m.objs.XdpBlockedIps.Delete(key); err != nil && !isMapKeyNotFound(err) {
 			return fmt.Errorf("xdp: unblock IP %s in BPF map: %w", canonical, err)
 		}
 	}

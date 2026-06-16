@@ -14,6 +14,19 @@
 #define __VMLINUX_H__
 #endif
 
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_core_read.h>
+
+/* Kernel address-space annotation — not available in BPF context */
+#ifndef __user
+#define __user
+#endif
+
+/* errno values used in BPF programs */
+#ifndef E2BIG
+#define E2BIG 7
+#endif
+
 /* Event type identifiers - must match pkg/types/event.go */
 #define EVENT_TYPE_SYSCALL     1
 #define EVENT_TYPE_TCP_CONNECT 2
@@ -381,27 +394,18 @@ static __always_inline void fill_process_info(struct event *e)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u64 uid_gid = bpf_get_current_uid_gid();
-	struct task_struct *task;
-	struct task_struct *parent;
-	
+
 	e->pid = (__u32)(pid_tgid >> 32);
 	e->tgid = (__u32)pid_tgid;
 	e->uid = (__u32)uid_gid;
-	
+	/* ppid/parent_comm are enriched in userspace via /proc to avoid
+	 * BPF verifier issues with pointer-chasing through task_struct
+	 * across complex code paths on kernel 5.15. */
+	e->ppid = 0;
+	__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));
+
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->timestamp = bpf_ktime_get_ns();
-	
-	/* Get parent process info via current task */
-	task = (struct task_struct *)bpf_get_current_task();
-	parent = task->real_parent;
-	if (parent) {
-		e->ppid = parent->tgid;
-		bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), 
-			&parent->comm);
-	} else {
-		e->ppid = 0;
-		__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));
-	}
 }
 
 #endif /* __EBPF_GUARD_COMMON_H */

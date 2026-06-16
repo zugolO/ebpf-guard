@@ -69,7 +69,7 @@ static __always_inline void emit_privesc(__u32 pid, __u64 old_caps, __u64 new_ca
  * We read the effective word from the header.
  */
 SEC("tracepoint/syscalls/sys_enter_capset")
-int tracepoint__sys_enter_capset(struct trace_event_raw_sys_enter *ctx)
+int trace_capset(struct trace_event_raw_sys_enter *ctx)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 pid = (__u32)(pid_tgid >> 32);
@@ -99,7 +99,7 @@ int tracepoint__sys_enter_capset(struct trace_event_raw_sys_enter *ctx)
  * Argument: struct cred *new  (the new credentials to commit)
  */
 SEC("kprobe/commit_creds")
-int BPF_KPROBE(kprobe__commit_creds, struct cred *new_cred)
+int BPF_KPROBE(trace_commit_creds, struct cred *new_cred)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u32 pid = (__u32)(pid_tgid >> 32);
@@ -111,10 +111,10 @@ int BPF_KPROBE(kprobe__commit_creds, struct cred *new_cred)
 	/* Read new effective capability set (word 0 covers caps 0–63). */
 	BPF_CORE_READ_INTO(&eff, new_cred, cap_effective);
 #if defined(__KERNEL_CAP_T_DEFINED) || 1
-	/* kernel_cap_t has a single __u32 val[] array on 64-bit kernels.
-	 * cap_effective.val[0] holds bits 0-31, val[1] holds 32-63. */
-	new_caps = ((__u64)BPF_CORE_READ(new_cred, cap_effective.val[1]) << 32) |
-	            (__u64)BPF_CORE_READ(new_cred, cap_effective.val[0]);
+	/* kernel_cap_t has a __u32 cap[] array on 64-bit kernels.
+	 * cap_effective.cap[0] holds bits 0-31, cap[1] holds 32-63. */
+	new_caps = ((__u64)BPF_CORE_READ(new_cred, cap_effective.cap[1]) << 32) |
+	            (__u64)BPF_CORE_READ(new_cred, cap_effective.cap[0]);
 #endif
 
 	stored = bpf_map_lookup_elem(&pid_caps, &pid);

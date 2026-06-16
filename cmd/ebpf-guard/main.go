@@ -783,6 +783,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if sc, scErr := collector.NewSyscallCollector(slog.Default()); scErr != nil {
 			slog.Warn("syscall: collector creation failed", slog.Any("error", scErr))
 		} else {
+			if cfg.BPF.KernelFilter.Enabled {
+				sc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
+					if name != "syscall" || !up {
+						return
+					}
+					enableKernelFilter(sc, cfg.BPF.KernelFilter)
+				}))
+			}
 			collectors = append(collectors, sc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("syscall: collector enabled")
 		}
@@ -1253,6 +1261,48 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 //  7. Cleanup nftables/iptables chains left by the enforcer (if active).
 //  8. Shutdown the HTTP server.
 //
+// enableKernelFilter populates the syscall collector's BPF-side content
+// filter (comm denylist + syscall allowlist) and turns it on. Without this,
+// raw_syscalls/sys_enter and sys_exit forward every syscall on the host to
+// the ring buffer — on a busy node that overwhelms the event channel within
+// seconds. Called once the collector reports its BPF maps are loaded.
+func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterConfig) {
+	commMap, syscallMap, cfgMap := sc.KernelFilterMaps()
+	kf, err := internalbpf.NewKernelFilterController(commMap, syscallMap, cfgMap)
+	if err != nil {
+		slog.Warn("kernel_filter: maps unavailable, syscalls forwarded unfiltered", slog.Any("error", err))
+		return
+	}
+
+	nrs := fc.MonitoredSyscalls
+	if len(nrs) == 0 {
+		nrs = internalbpf.DefaultMonitoredSyscalls()
+	}
+	for _, nr := range nrs {
+		if err := kf.SetSyscallFilter(nr, true); err != nil {
+			slog.Warn("kernel_filter: set syscall filter failed", slog.Int("nr", nr), slog.Any("error", err))
+		}
+	}
+
+	denylist := fc.CommDenylist
+	if len(denylist) == 0 {
+		denylist = internalbpf.DefaultCommDenylist()
+	}
+	for _, comm := range denylist {
+		if err := kf.SetCommFilter(comm, false); err != nil {
+			slog.Warn("kernel_filter: set comm filter failed", slog.String("comm", comm), slog.Any("error", err))
+		}
+	}
+
+	if err := kf.Enable(); err != nil {
+		slog.Error("kernel_filter: failed to enable BPF-side filtering", slog.Any("error", err))
+		return
+	}
+	slog.Info("kernel_filter: enabled BPF-side syscall/comm filtering",
+		slog.Int("monitored_syscalls", len(nrs)),
+		slog.Int("comm_denylist", len(denylist)))
+}
+
 // The entire procedure is bounded by a 30-second context.
 func gracefulShutdown(
 	engine *correlator.CorrelationEngine,

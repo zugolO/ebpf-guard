@@ -121,8 +121,8 @@ func (c *NetworkCollector) GetPrograms() map[string]*ebpf.Program {
 		return nil
 	}
 	return map[string]*ebpf.Program{
-		"trace_tcp_connect": c.objs.TraceTCPConnect,
-		"trace_tcp_close":   c.objs.TraceTCPClose,
+		"trace_tcp_connect": c.objs.TraceTcpConnect,
+		"trace_tcp_close":   c.objs.TraceTcpClose,
 	}
 }
 
@@ -199,14 +199,14 @@ func (c *NetworkCollector) loadObjects() error {
 // attachPrograms attaches the eBPF programs to kprobes.
 func (c *NetworkCollector) attachPrograms() error {
 	// Attach tcp_connect kprobe.
-	l1, err := link.Kprobe("tcp_connect", c.objs.TraceTCPConnect, nil)
+	l1, err := link.Kprobe("tcp_connect", c.objs.TraceTcpConnect, nil)
 	if err != nil {
 		return fmt.Errorf("attach tcp_connect kprobe: %w", err)
 	}
 	c.links = append(c.links, l1)
 
 	// Attach tcp_close kprobe for connection duration tracking.
-	l2, err := link.Kprobe("tcp_close", c.objs.TraceTCPClose, nil)
+	l2, err := link.Kprobe("tcp_close", c.objs.TraceTcpClose, nil)
 	if err != nil {
 		return fmt.Errorf("attach tcp_close kprobe: %w", err)
 	}

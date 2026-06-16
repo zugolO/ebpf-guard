@@ -19,9 +19,9 @@ type XDPStats struct {
 type XDPObjects struct {
 	// XdpBlockFn is the XDP program attached to the network interface.
 	XdpBlockFn *ebpf.Program `ebpf:"xdp_block_fn"`
-	// XdpBlockedIPs is an LRU hash map keyed by 16-byte IP address (network byte order).
+	// XdpBlockedIps is an LRU hash map keyed by 16-byte IP address (network byte order).
 	// IPv4 addresses occupy the first 4 bytes; IPv6 uses all 16.
-	XdpBlockedIPs *ebpf.Map `ebpf:"xdp_blocked_ips"`
+	XdpBlockedIps *ebpf.Map `ebpf:"xdp_blocked_ips"`
 	// XdpBlockedPorts is an LRU hash map keyed by destination port (host byte order).
 	XdpBlockedPorts *ebpf.Map `ebpf:"xdp_blocked_ports"`
 	// XdpStatsMap is a single-entry array map holding drop/pass counters.
@@ -39,8 +39,8 @@ func (o *XDPObjects) Close() error {
 	if o.XdpBlockFn != nil {
 		o.XdpBlockFn.Close()
 	}
-	if o.XdpBlockedIPs != nil {
-		o.XdpBlockedIPs.Close()
+	if o.XdpBlockedIps != nil {
+		o.XdpBlockedIps.Close()
 	}
 	if o.XdpBlockedPorts != nil {
 		o.XdpBlockedPorts.Close()

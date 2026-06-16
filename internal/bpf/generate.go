@@ -45,5 +45,5 @@ package bpf
 //go:generate /root/go/bin/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" HiddenProcess ../../bpf/hidden_process.bpf.c
 //go:generate /root/go/bin/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" TlsClientHello ../../bpf/tls_clienthello.bpf.c
 //go:generate /root/go/bin/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" TlsUprobe ../../bpf/tls_uprobe.bpf.c
-//go:generate /root/go/bin/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" XdpBlock ../../bpf/xdp_block.bpf.c
+//go:generate /root/go/bin/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" XDP ../../bpf/xdp_block.bpf.c
 //go:generate /root/go/bin/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" GpuUprobe ../../bpf/gpu_uprobe.bpf.c

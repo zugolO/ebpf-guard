@@ -152,22 +152,41 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 }
 
 // attachTracepoints attaches eBPF programs to tracepoints.
+//
+// sendmsg/sendto cover callers that pass an explicit destination address.
+// connect/close/write/writev/read/recvfrom cover the glibc/`dig` pattern of
+// connect()ing a UDP socket once and then using plain read()/write() on it,
+// which carries no destination address for BPF to filter on (see the
+// dns_socket_map comment in dns.bpf.c).
 func (c *DNSCollector) attachTracepoints() ([]link.Link, error) {
+	specs := []struct {
+		category string
+		name     string
+		prog     *ebpf.Program
+	}{
+		{"syscalls", "sys_enter_sendmsg", c.objs.TraceSendmsg},
+		{"syscalls", "sys_enter_sendto", c.objs.TraceSendto},
+		{"syscalls", "sys_enter_connect", c.objs.TraceConnect},
+		{"syscalls", "sys_enter_close", c.objs.TraceClose},
+		{"syscalls", "sys_enter_write", c.objs.TraceWrite},
+		{"syscalls", "sys_enter_writev", c.objs.TraceWritev},
+		{"syscalls", "sys_enter_read", c.objs.TraceReadEnter},
+		{"syscalls", "sys_exit_read", c.objs.TraceReadExit},
+		{"syscalls", "sys_enter_recvfrom", c.objs.TraceRecvfromEnter},
+		{"syscalls", "sys_exit_recvfrom", c.objs.TraceRecvfromExit},
+	}
+
 	var links []link.Link
-
-	// Attach to sys_enter_sendmsg
-	l1, err := link.Tracepoint("syscalls", "sys_enter_sendmsg", c.objs.TraceSendmsg, nil)
-	if err != nil {
-		return nil, fmt.Errorf("attach sendmsg tracepoint: %w", err)
+	for _, s := range specs {
+		l, err := link.Tracepoint(s.category, s.name, s.prog, nil)
+		if err != nil {
+			for _, prev := range links {
+				prev.Close()
+			}
+			return nil, fmt.Errorf("attach %s tracepoint: %w", s.name, err)
+		}
+		links = append(links, l)
 	}
-	links = append(links, l1)
-
-	// Attach to sys_enter_sendto
-	l2, err := link.Tracepoint("syscalls", "sys_enter_sendto", c.objs.TraceSendto, nil)
-	if err != nil {
-		return nil, fmt.Errorf("attach sendto tracepoint: %w", err)
-	}
-	links = append(links, l2)
 
 	return links, nil
 }

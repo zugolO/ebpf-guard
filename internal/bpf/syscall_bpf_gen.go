@@ -359,23 +359,43 @@ func LoadHiddenProcessObjects(obj *HiddenProcessObjects, opts *ebpf.CollectionOp
 // ---------------------------------------------------------------------------
 
 // DNSObjects contains all eBPF objects for DNS monitoring.
-// The BPF programs attach to sys_enter_sendmsg and sys_enter_sendto tracepoints
-// and write events into the dedicated dns_events ring buffer.
+// The BPF programs attach to sys_enter_sendmsg/sys_enter_sendto (explicit
+// destination address) as well as sys_enter_connect, sys_enter_close,
+// sys_enter_write, sys_enter_writev, sys_enter_read/sys_exit_read, and
+// sys_enter_recvfrom/sys_exit_recvfrom (connected-UDP-socket I/O, the path
+// taken by glibc/`dig`), and write events into the dedicated dns_events
+// ring buffer.
 type DNSObjects struct {
-	TraceSendmsg *ebpf.Program `ebpf:"trace_sendmsg"`
-	TraceSendto  *ebpf.Program `ebpf:"trace_sendto"`
-	DnsEvents    *ebpf.Map     `ebpf:"dns_events"`
+	TraceSendmsg       *ebpf.Program `ebpf:"trace_sendmsg"`
+	TraceSendto        *ebpf.Program `ebpf:"trace_sendto"`
+	TraceConnect       *ebpf.Program `ebpf:"trace_connect"`
+	TraceClose         *ebpf.Program `ebpf:"trace_close"`
+	TraceWrite         *ebpf.Program `ebpf:"trace_write"`
+	TraceWritev        *ebpf.Program `ebpf:"trace_writev"`
+	TraceReadEnter     *ebpf.Program `ebpf:"trace_read_enter"`
+	TraceReadExit      *ebpf.Program `ebpf:"trace_read_exit"`
+	TraceRecvfromEnter *ebpf.Program `ebpf:"trace_recvfrom_enter"`
+	TraceRecvfromExit  *ebpf.Program `ebpf:"trace_recvfrom_exit"`
+	DnsEvents          *ebpf.Map     `ebpf:"dns_events"`
+	DnsSocketMap       *ebpf.Map     `ebpf:"dns_socket_map"`
+	DnsPendingIo       *ebpf.Map     `ebpf:"dns_pending_io"`
 }
 
 // Close closes all eBPF objects.
 func (o *DNSObjects) Close() error {
-	for _, p := range []*ebpf.Program{o.TraceSendmsg, o.TraceSendto} {
+	for _, p := range []*ebpf.Program{
+		o.TraceSendmsg, o.TraceSendto, o.TraceConnect, o.TraceClose,
+		o.TraceWrite, o.TraceWritev, o.TraceReadEnter, o.TraceReadExit,
+		o.TraceRecvfromEnter, o.TraceRecvfromExit,
+	} {
 		if p != nil {
 			p.Close()
 		}
 	}
-	if o.DnsEvents != nil {
-		o.DnsEvents.Close()
+	for _, m := range []*ebpf.Map{o.DnsEvents, o.DnsSocketMap, o.DnsPendingIo} {
+		if m != nil {
+			m.Close()
+		}
 	}
 	return nil
 }

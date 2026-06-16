@@ -15,15 +15,19 @@
  * hand it to userspace, which can parse arbitrary-complexity DNS messages
  * (including compression pointers) without any verifier constraints.
  *
- * Capture paths: many resolvers (glibc, BIND's `dig`) call connect() once
- * on a UDP socket and then use write()/read() rather than
- * sendto()/sendmsg()/recvfrom() — those plain I/O syscalls carry no
- * destination address, so they're invisible to address-based filtering.
- * trace_connect records connect()ed-to-port-53 fds in dns_socket_map;
- * trace_write, trace_writev, trace_read_enter/exit, and
- * trace_recvfrom_enter/exit consult that map to recognize DNS traffic on
- * those fds. trace_sendmsg/trace_sendto are kept for callers that do pass
- * an explicit destination address.
+ * Capture paths: glibc's stub resolver (and therefore `dig`, and anything
+ * else linked against it) calls connect() once on a UDP socket and then
+ * sends/receives via sendmmsg()/recvmsg() with msg_name=NULL, relying on
+ * the already-connected destination rather than passing an address each
+ * time (confirmed by strace against real glibc/dig — see commit history).
+ * Some other resolvers instead use plain write()/read(). Either way,
+ * those syscalls carry no destination address, so they're invisible to
+ * address-based filtering. trace_connect records connect()ed-to-port-53
+ * fds in dns_socket_map; trace_sendmmsg, trace_write, trace_writev,
+ * trace_recvmsg_enter/exit, trace_read_enter/exit, and
+ * trace_recvfrom_enter/exit all consult that map to recognize DNS traffic
+ * on those fds. trace_sendmsg/trace_sendto are kept for callers that do
+ * pass an explicit destination address.
  */
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
@@ -384,6 +388,104 @@ int trace_recvfrom_exit(struct trace_event_raw_sys_exit *ctx)
 	return 0;
 }
 
+/* Tracepoint for sendmmsg() on a connected DNS socket (outbound query).
+ * This is the path glibc's stub resolver (and therefore `dig`) actually
+ * takes in practice: connect() once, then sendmmsg() with msg_name=NULL,
+ * relying on the connected destination rather than passing an address —
+ * so the address-based filtering in trace_sendmsg/trace_sendto never
+ * sees it. struct mmsghdr is { struct user_msghdr msg_hdr; unsigned int
+ * msg_len; }, i.e. msg_hdr is its first member at offset 0, so the
+ * mmsghdr pointer can be read as a plain user_msghdr* to get at the
+ * first message's iovec — only the first of the vlen messages is
+ * inspected, matching the existing single-iovec handling elsewhere in
+ * this file. */
+SEC("tracepoint/syscalls/sys_enter_sendmmsg")
+int trace_sendmmsg(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	struct user_msghdr *msg;
+	struct iovec *iov;
+	void *data;
+	long data_len;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	msg = (struct user_msghdr *)ctx->args[1];
+	if (!msg)
+		return 0;
+
+	bpf_probe_read_user(&iov, sizeof(iov), &msg->msg_iov);
+	if (!iov)
+		return 0;
+
+	bpf_probe_read_user(&data, sizeof(data), &iov->iov_base);
+	bpf_probe_read_user(&data_len, sizeof(data_len), &iov->iov_len);
+
+	if (!data || data_len < 12)
+		return 0;
+
+	emit_dns_raw_event(data, (__u32)data_len, 0 /* query */);
+	return 0;
+}
+
+/* Tracepoint for recvmsg() entry on a connected DNS socket: stash the
+ * first iovec's destination buffer pointer, same enter/exit split as
+ * read()/recvfrom() above — the kernel only fills msg_iov[0].iov_base
+ * by the time the syscall returns, not at entry. */
+SEC("tracepoint/syscalls/sys_enter_recvmsg")
+int trace_recvmsg_enter(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	struct user_msghdr *msg;
+	struct iovec *iov;
+	void *data;
+	struct dns_pending_io io;
+	__u64 pid_tgid;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	msg = (struct user_msghdr *)ctx->args[1];
+	if (!msg)
+		return 0;
+
+	bpf_probe_read_user(&iov, sizeof(iov), &msg->msg_iov);
+	if (!iov)
+		return 0;
+
+	bpf_probe_read_user(&data, sizeof(data), &iov->iov_base);
+	if (!data)
+		return 0;
+
+	__builtin_memset(&io, 0, sizeof(io));
+	io.buf = (__u64)data;
+	io.fd = fd;
+	pid_tgid = bpf_get_current_pid_tgid();
+	bpf_map_update_elem(&dns_pending_io, &pid_tgid, &io, BPF_ANY);
+	return 0;
+}
+
+/* Tracepoint for recvmsg() exit: ctx->ret is the number of bytes received
+ * into the buffer captured at entry. */
+SEC("tracepoint/syscalls/sys_exit_recvmsg")
+int trace_recvmsg_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	struct dns_pending_io *io;
+	long ret = ctx->ret;
+
+	io = bpf_map_lookup_elem(&dns_pending_io, &pid_tgid);
+	if (!io)
+		return 0;
+
+	if (ret >= 12 && io->buf)
+		emit_dns_raw_event((void *)io->buf, (__u32)ret, 1 /* response */);
+
+	bpf_map_delete_elem(&dns_pending_io, &pid_tgid);
+	return 0;
+}
+
 /* Tracepoint for UDP sendmsg (outbound DNS queries) */
 SEC("tracepoint/syscalls/sys_enter_sendmsg")
 int trace_sendmsg(struct trace_event_raw_sys_enter *ctx)
@@ -451,12 +553,5 @@ int trace_sendto(struct trace_event_raw_sys_enter *ctx)
 	emit_dns_raw_event(buf, (__u32)len, 0 /* query */);
 	return 0;
 }
-
-/* Note: inbound DNS responses on a connect()ed UDP socket are handled by
- * trace_read_enter/trace_read_exit and trace_recvfrom_enter/
- * trace_recvfrom_exit above. recvmsg() is not separately handled — no
- * resolver implementation observed in practice uses recvmsg() for a
- * connected UDP socket reply; add a sys_enter_recvmsg/sys_exit_recvmsg
- * pair analogous to read/recvfrom above if that's ever seen. */
 
 char _license[] SEC("license") = "GPL";

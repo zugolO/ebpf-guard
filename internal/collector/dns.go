@@ -154,10 +154,11 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 // attachTracepoints attaches eBPF programs to tracepoints.
 //
 // sendmsg/sendto cover callers that pass an explicit destination address.
-// connect/close/write/writev/read/recvfrom cover the glibc/`dig` pattern of
-// connect()ing a UDP socket once and then using plain read()/write() on it,
-// which carries no destination address for BPF to filter on (see the
-// dns_socket_map comment in dns.bpf.c).
+// connect/close plus sendmmsg/recvmsg/write/writev/read/recvfrom cover the
+// glibc stub resolver pattern (confirmed via strace against real `dig`):
+// connect() a UDP socket once, then sendmmsg()/recvmsg() (or plain
+// write()/read()) on it with no destination address in the syscall args
+// for BPF to filter on (see the dns_socket_map comment in dns.bpf.c).
 func (c *DNSCollector) attachTracepoints() ([]link.Link, error) {
 	specs := []struct {
 		category string
@@ -168,8 +169,11 @@ func (c *DNSCollector) attachTracepoints() ([]link.Link, error) {
 		{"syscalls", "sys_enter_sendto", c.objs.TraceSendto},
 		{"syscalls", "sys_enter_connect", c.objs.TraceConnect},
 		{"syscalls", "sys_enter_close", c.objs.TraceClose},
+		{"syscalls", "sys_enter_sendmmsg", c.objs.TraceSendmmsg},
 		{"syscalls", "sys_enter_write", c.objs.TraceWrite},
 		{"syscalls", "sys_enter_writev", c.objs.TraceWritev},
+		{"syscalls", "sys_enter_recvmsg", c.objs.TraceRecvmsgEnter},
+		{"syscalls", "sys_exit_recvmsg", c.objs.TraceRecvmsgExit},
 		{"syscalls", "sys_enter_read", c.objs.TraceReadEnter},
 		{"syscalls", "sys_exit_read", c.objs.TraceReadExit},
 		{"syscalls", "sys_enter_recvfrom", c.objs.TraceRecvfromEnter},

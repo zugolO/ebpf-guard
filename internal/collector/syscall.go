@@ -318,6 +318,15 @@ func (c *SyscallCollector) KernelFilterMaps() (comm, syscall, cfg *ebpf.Map) {
 	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig
 }
 
+// SamplingConfigMap returns the sampling_config BPF map backing this
+// collector's static sample-rate filter, or nil in stub mode.
+func (c *SyscallCollector) SamplingConfigMap() *ebpf.Map {
+	if c.objs == nil {
+		return nil
+	}
+	return c.objs.SamplingConfig
+}
+
 // parseEvent converts raw bytes from the ring buffer into event, which must be
 // a pooled *types.Event obtained from eventPool. Caller is responsible for
 // Reset() and Put() after the event value has been consumed.

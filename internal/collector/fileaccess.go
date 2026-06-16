@@ -114,6 +114,15 @@ func (c *FileaccessCollector) LoadError() error {
 	return c.loadError
 }
 
+// SamplingConfigMap returns the sampling_config BPF map backing this
+// collector's static sample-rate filter, or nil in stub mode.
+func (c *FileaccessCollector) SamplingConfigMap() *ebpf.Map {
+	if c.objs == nil {
+		return nil
+	}
+	return c.objs.SamplingConfig
+}
+
 // GetPrograms returns the loaded BPF programs for attestation.
 // Implements watchdog.BPFProgramProvider interface.
 func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {

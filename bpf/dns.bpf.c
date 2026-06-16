@@ -92,195 +92,78 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 	return port == __builtin_bswap16(DNS_PORT);
 }
 
-/* Helper: decode DNS name from wire format */
+/* Helper: decode DNS name from wire format.
+ * Each label is read with a single bulk bpf_probe_read_user call instead of
+ * a byte-by-byte unrolled loop — the previous nested #pragma unroll (32
+ * outer x 63 inner iterations, each issuing its own probe_read call) pushed
+ * the verifier past 1M processed instructions on trace_sendmsg. */
 static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
 {
 	int src_offset = 0;
 	int dst_offset = 0;
 	__u8 label_len;
-	int i;
 	int iterations = 0;
-	const int max_iterations = 32; /* Prevent infinite loops */
-	
+	const int max_iterations = 16; /* DNS names rarely exceed a handful of labels */
+
 	#pragma unroll
 	for (iterations = 0; iterations < max_iterations; iterations++) {
 		/* Read label length */
-		bpf_probe_read_user(&label_len, sizeof(label_len), src + src_offset);
-		
+		if (bpf_probe_read_user(&label_len, sizeof(label_len), src + src_offset))
+			break;
+
 		/* End of name (null label) */
 		if (label_len == 0) {
 			src_offset++;
 			break;
 		}
-		
+
 		/* Check for compression pointer (0xC0) - skip compressed names */
 		if ((label_len & 0xC0) == 0xC0) {
 			/* Compression pointer - we don't follow it, just skip */
 			src_offset += 2;
 			break;
 		}
-		
+
 		/* Check bounds */
 		if (label_len > 63 || src_offset + label_len + 1 > 512) {
 			break;
 		}
-		
+
 		/* Add dot separator if not first label */
 		if (dst_offset > 0 && dst_offset < max_len - 1) {
 			dst[dst_offset++] = '.';
 		}
-		
-		/* Copy label content */
-		#pragma unroll
-		for (i = 0; i < 63; i++) {
-			if (i >= label_len)
-				break;
-			if (dst_offset >= max_len - 1)
-				break;
-			
-			__u8 ch;
-			bpf_probe_read_user(&ch, sizeof(ch), src + src_offset + 1 + i);
-			dst[dst_offset++] = ch;
+
+		/* Copy the whole label in one read, clamped to remaining dst space
+		 * (clamp chain keeps copy_len <= 63 so the verifier can bound the
+		 * dynamic-size probe_read_user call). */
+		{
+			int copy_len = label_len;
+			int remaining = max_len - 1 - dst_offset;
+			if (remaining < 0)
+				remaining = 0;
+			if (copy_len > remaining)
+				copy_len = remaining;
+			if (copy_len > 63)
+				copy_len = 63;
+			if (copy_len > 0 &&
+			    bpf_probe_read_user(dst + dst_offset, copy_len, src + src_offset + 1) == 0) {
+				dst_offset += copy_len;
+			}
 		}
-		
+
 		src_offset += label_len + 1;
-		
+
 		/* Safety check for offset overflow */
 		if (src_offset > 512)
 			break;
 	}
-	
+
 	/* Null terminate */
 	if (dst_offset < max_len)
 		dst[dst_offset] = '\0';
-	
-	return dst_offset;
-}
 
-/* Helper: parse DNS response and extract IP addresses */
-static __always_inline void parse_dns_response(const __u8 *data, int data_len,
-						       struct dns_event *evt)
-{
-	/* Skip DNS header (12 bytes) and query section */
-	/* DNS header format:
-	 * 2 bytes: Transaction ID
-	 * 2 bytes: Flags
-	 * 2 bytes: Questions
-	 * 2 bytes: Answer RRs
-	 * 2 bytes: Authority RRs
-	 * 2 bytes: Additional RRs
-	 */
-	
-	__u16 flags;
-	__u16 qdcount;
-	__u16 ancount;
-	int offset = 0;
-	int i, j;
-	
-	if (data_len < 12)
-		return;
-	
-	/* Read flags to determine if this is a response */
-	bpf_probe_read_user(&flags, sizeof(flags), data + 2);
-	flags = __builtin_bswap16(flags);
-	
-	/* Check QR bit - must be 1 for response */
-	if ((flags & DNS_FLAG_QR_RESPONSE) == 0)
-		return;
-	
-	evt->rcode = flags & DNS_FLAG_RCODE_MASK;
-	evt->direction = 1; /* Response */
-	
-	/* Read question count */
-	bpf_probe_read_user(&qdcount, sizeof(qdcount), data + 4);
-	qdcount = __builtin_bswap16(qdcount);
-	
-	/* Read answer count */
-	bpf_probe_read_user(&ancount, sizeof(ancount), data + 6);
-	ancount = __builtin_bswap16(ancount);
-	
-	/* Skip header */
-	offset = 12;
-	
-	/* Skip query section (we already parsed qname in the caller) */
-	/* Query section: qname (variable) + qtype (2) + qclass (2) */
-	/* For simplicity, we assume the qname was parsed separately */
-	/* Just skip past it by looking for null label or compression pointer */
-	#pragma unroll
-	for (i = 0; i < 256 && offset < data_len; i++) {
-		__u8 b;
-		bpf_probe_read_user(&b, sizeof(b), data + offset);
-		
-		if (b == 0) {
-			offset += 5; /* null + qtype (2) + qclass (2) */
-			break;
-		}
-		if ((b & 0xC0) == 0xC0) {
-			offset += 6; /* compression ptr (2) + qtype (2) + qclass (2) */
-			break;
-		}
-		offset += b + 1;
-	}
-	
-	/* Parse answer RRs to extract IP addresses */
-	evt->response_count = 0;
-	
-	#pragma unroll
-	for (i = 0; i < DNS_MAX_RESPONSE_IPS && i < ancount; i++) {
-		__u16 rr_type;
-		__u16 rr_rdlength;
-		__u32 rr_ttl;
-		int name_skip = 0;
-		
-		if (offset >= data_len)
-			break;
-		
-		/* Skip name (variable length) */
-		#pragma unroll
-		for (j = 0; j < 256 && offset + name_skip < data_len; j++) {
-			__u8 b;
-			bpf_probe_read_user(&b, sizeof(b), data + offset + name_skip);
-			
-			if (b == 0) {
-				name_skip++;
-				break;
-			}
-			if ((b & 0xC0) == 0xC0) {
-				name_skip += 2;
-				break;
-			}
-			name_skip += b + 1;
-		}
-		
-		offset += name_skip;
-		
-		if (offset + 10 > data_len)
-			break;
-		
-		/* Read type */
-		bpf_probe_read_user(&rr_type, sizeof(rr_type), data + offset);
-		rr_type = __builtin_bswap16(rr_type);
-		
-		/* Read TTL (skip 2 bytes for class) */
-		bpf_probe_read_user(&rr_ttl, sizeof(rr_ttl), data + offset + 4);
-		rr_ttl = __builtin_bswap32(rr_ttl);
-		
-		/* Read rdlength */
-		bpf_probe_read_user(&rr_rdlength, sizeof(rr_rdlength), data + offset + 8);
-		rr_rdlength = __builtin_bswap16(rr_rdlength);
-		
-		offset += 10; /* type (2) + class (2) + ttl (4) + rdlength (2) */
-		
-		/* Extract A record (IPv4) */
-		if (rr_type == DNS_QTYPE_A && rr_rdlength == 4 && 
-		    offset + 4 <= data_len && evt->response_count < DNS_MAX_RESPONSE_IPS) {
-			__u32 ip;
-			bpf_probe_read_user(&ip, sizeof(ip), data + offset);
-			evt->response_ips[evt->response_count++] = ip;
-		}
-		
-		offset += rr_rdlength;
-	}
+	return dst_offset;
 }
 
 /* Helper: fill process info into dns_event */

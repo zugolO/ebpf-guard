@@ -655,6 +655,28 @@ type BPFConfig struct {
 	// channel is filling up, preventing silent kernel-side ring buffer drops
 	// while keeping security-critical types (network, LSM, privesc) intact.
 	AdaptiveLoad AdaptiveLoadConfig `mapstructure:"adaptive_load"`
+
+	// Sampling configures the static (non-adaptive) BPF-side base sample
+	// rate, applied unconditionally regardless of channel load. Every
+	// sys_enter_read/sys_enter_write syscall on the host emits an event by
+	// default — at typical workloads this is orders of magnitude higher
+	// volume than the syscall allowlist filter, so file events need a base
+	// rate well below 1.0 even under normal load.
+	Sampling SamplingConfig `mapstructure:"sampling"`
+}
+
+// SamplingConfig configures the BPF-side static sampling rates (1 in N events).
+type SamplingConfig struct {
+	// Enabled activates BPF-side sampling. Default: true.
+	Enabled bool `mapstructure:"enabled"`
+	// SyscallRate samples 1 in N syscall events. 1 = all events. Default: 1.
+	SyscallRate uint32 `mapstructure:"syscall_rate"`
+	// NetworkRate samples 1 in N network events. 1 = all events. Default: 1.
+	NetworkRate uint32 `mapstructure:"network_rate"`
+	// FileRate samples 1 in N file-access events (open/read/write). Reads and
+	// writes fire on every syscall system-wide, so the default is well below
+	// 1 to avoid flooding the event channel. Default: 50.
+	FileRate uint32 `mapstructure:"file_rate"`
 }
 
 // AdaptiveLoadConfig configures ring-buffer-load-based adaptive BPF sampling.
@@ -1511,6 +1533,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.fd_map_size", 65536)
 	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
 	v.SetDefault("bpf.kernel_filter.enabled", true)
+	v.SetDefault("bpf.sampling.enabled", true)
+	v.SetDefault("bpf.sampling.syscall_rate", 1)
+	v.SetDefault("bpf.sampling.network_rate", 1)
+	v.SetDefault("bpf.sampling.file_rate", 50)
 	v.SetDefault("bpf.btf_path", "")
 	v.SetDefault("bpf.btf_hub_enabled", true)
 	v.SetDefault("bpf.btf_hub_cache", "/var/lib/ebpf-guard/btf")

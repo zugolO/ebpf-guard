@@ -4,12 +4,15 @@ package collector
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -94,7 +97,21 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	slog.Info("dns: starting collector")
 
 	objs := &bpf.DNSObjects{}
-	if err := bpf.LoadDNSObjects(objs, nil); err != nil {
+	opts := &ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel: ebpf.LogLevelInstruction,
+			LogSize:  64 * 1024 * 1024,
+		},
+	}
+	if err := bpf.LoadDNSObjects(objs, opts); err != nil {
+		var verr *ebpf.VerifierError
+		if errors.As(err, &verr) {
+			if werr := os.WriteFile("/tmp/dns_verifier.log", []byte(fmt.Sprintf("%+v", verr)), 0644); werr != nil {
+				slog.Error("dns: failed to write verifier log", slog.Any("error", werr))
+			} else {
+				slog.Error("dns: wrote full verifier log to /tmp/dns_verifier.log")
+			}
+		}
 		return fmt.Errorf("dns: load objects: %w", err)
 	}
 	c.objs = objs

@@ -18,6 +18,17 @@
 /* DNS event type - must match pkg/types/event.go */
 #define EVENT_TYPE_DNS 5
 
+/* Forces the compiler/verifier to forget any exact (precise) value tracked
+ * for var and fall back to whatever range its last mask established. Used
+ * at the end of decode_dns_name's loop body: the verifier's loop-pruning
+ * needs to recognize two visits to the loop head as equivalent states, but
+ * an exact/precise scalar (set once it feeds pointer arithmetic) requires
+ * byte-for-byte equality to match — which a data-dependent loop never
+ * produces — so without this, every iteration is treated as a brand new
+ * state and the per-iteration path count compounds until the verifier
+ * exhausts its 1M instruction budget. */
+#define barrier_var(var) asm volatile("" : "=r"(var) : "0"(var))
+
 /* DNS constants */
 #define DNS_PORT 53
 #define DNS_MAX_NAME_LEN 128
@@ -103,16 +114,18 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 }
 
 /* Helper: decode DNS name from wire format.
- * A loop nested inside another loop (label loop wrapping a byte-copy loop)
- * makes the verifier re-walk the inner loop's full state space once per
- * outer iteration without pruning — observed directly via verifier log:
- * fresh scalar IDs on every outer pass meant no two states were ever
- * recognized as equivalent, so the explore cost multiplied instead of
- * staying flat. That's what pushed trace_sendmsg past 1M processed
- * instructions even with neither loop unrolled. The fix is to not nest
- * loops at all: this is a single flat loop over wire bytes, reading one
- * byte at a time and tracking how many bytes are left in the current
- * label in a plain counter. */
+ * This is a single flat loop over wire bytes (no nested loops — see git
+ * history for why a nested version blew the verifier's instruction
+ * budget). Even flattened, the loop didn't converge: dst_offset,
+ * label_remaining and src_offset all feed pointer arithmetic, which makes
+ * the verifier track their *exact* value ("precise") rather than just a
+ * range. Two visits to the loop head with different exact values are
+ * never recognized as the same state, so pruning never kicks in and the
+ * verifier re-explores the remaining iterations from scratch every time —
+ * exhausting the 1M instruction budget well before the loop's 192-iteration
+ * bound is reached. barrier_var() on each loop-carried variable at the end
+ * of the body forces the verifier to discard the exact value and keep only
+ * the range from the preceding mask, which is enough for pruning to work. */
 static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
 {
 	int src_offset = 0;
@@ -144,8 +157,7 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 			}
 
 			/* Add dot separator if not first label. Masked at the write
-			 * site: dst_offset is carried across the loop's backedge,
-			 * and a power-of-two mask is a bound the verifier can always
+			 * site: a power-of-two mask is a bound the verifier can always
 			 * prove directly from the instruction itself, regardless of
 			 * what range it manages to track for the variable carrying it. */
 			if (dst_offset > 0 && dst_offset < max_len - 1) {
@@ -153,17 +165,21 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
 			}
 
-			label_remaining = b;
-			src_offset++;
+			label_remaining = b & 0x3F;
+			src_offset = (src_offset + 1) & 0x1FF;
 		} else {
 			/* b is a label data byte */
 			if (dst_offset < max_len - 1) {
 				dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = b;
 				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
 			}
-			label_remaining--;
-			src_offset++;
+			label_remaining = (label_remaining - 1) & 0x3F;
+			src_offset = (src_offset + 1) & 0x1FF;
 		}
+
+		barrier_var(dst_offset);
+		barrier_var(label_remaining);
+		barrier_var(src_offset);
 	}
 
 	/* Null terminate (masked for the same reason as the dot-separator write

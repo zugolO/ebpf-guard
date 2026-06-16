@@ -97,13 +97,11 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	slog.Info("dns: starting collector")
 
 	objs := &bpf.DNSObjects{}
-	opts := &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{
-			LogLevel: ebpf.LogLevelInstruction,
-			LogSize:  64 * 1024 * 1024,
-		},
-	}
-	if err := bpf.LoadDNSObjects(objs, opts); err != nil {
+	if err := bpf.LoadDNSObjects(objs, nil); err != nil {
+		// The default Error() string only includes the last line or two of
+		// the verifier log. %+v with no width prints every line the kernel
+		// returned, which is what we need to see what's actually pushing
+		// trace_sendmsg past the instruction limit.
 		var verr *ebpf.VerifierError
 		if errors.As(err, &verr) {
 			if werr := os.WriteFile("/tmp/dns_verifier.log", []byte(fmt.Sprintf("%+v", verr)), 0644); werr != nil {

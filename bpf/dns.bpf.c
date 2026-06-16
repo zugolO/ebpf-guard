@@ -182,7 +182,10 @@ struct {
  * which syscall it was.
  */
 struct dns_pending_io {
-	void  *buf;
+	__u64 buf; /* user-space buffer pointer, as a plain integer: bpf2go
+		    * can't generate a Go binding for a struct field typed
+		    * as a BTF pointer, so this is stored/read as __u64 and
+		    * cast to/from void* at the call sites below. */
 	__u32 fd;
 };
 
@@ -305,7 +308,7 @@ int trace_read_enter(struct trace_event_raw_sys_enter *ctx)
 	if (!is_dns_socket_fd(fd))
 		return 0;
 
-	io.buf = (void *)ctx->args[1];
+	io.buf = ctx->args[1];
 	io.fd = fd;
 	pid_tgid = bpf_get_current_pid_tgid();
 	bpf_map_update_elem(&dns_pending_io, &pid_tgid, &io, BPF_ANY);
@@ -327,7 +330,7 @@ int trace_read_exit(struct trace_event_raw_sys_exit *ctx)
 		return 0;
 
 	if (ret >= 12 && io->buf)
-		emit_dns_raw_event(io->buf, (__u32)ret, 1 /* response */);
+		emit_dns_raw_event((void *)io->buf, (__u32)ret, 1 /* response */);
 
 	bpf_map_delete_elem(&dns_pending_io, &pid_tgid);
 	return 0;
@@ -345,7 +348,7 @@ int trace_recvfrom_enter(struct trace_event_raw_sys_enter *ctx)
 	if (!is_dns_socket_fd(fd))
 		return 0;
 
-	io.buf = (void *)ctx->args[1];
+	io.buf = ctx->args[1];
 	io.fd = fd;
 	pid_tgid = bpf_get_current_pid_tgid();
 	bpf_map_update_elem(&dns_pending_io, &pid_tgid, &io, BPF_ANY);
@@ -366,7 +369,7 @@ int trace_recvfrom_exit(struct trace_event_raw_sys_exit *ctx)
 		return 0;
 
 	if (ret >= 12 && io->buf)
-		emit_dns_raw_event(io->buf, (__u32)ret, 1 /* response */);
+		emit_dns_raw_event((void *)io->buf, (__u32)ret, 1 /* response */);
 
 	bpf_map_delete_elem(&dns_pending_io, &pid_tgid);
 	return 0;

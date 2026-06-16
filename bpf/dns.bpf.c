@@ -103,104 +103,67 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 }
 
 /* Helper: decode DNS name from wire format.
- * Each label is read with a single bulk bpf_probe_read_user call instead of
- * a byte-by-byte unrolled loop — the previous nested #pragma unroll (32
- * outer x 63 inner iterations, each issuing its own probe_read call) pushed
- * the verifier past 1M processed instructions on trace_sendmsg. */
+ * A loop nested inside another loop (label loop wrapping a byte-copy loop)
+ * makes the verifier re-walk the inner loop's full state space once per
+ * outer iteration without pruning — observed directly via verifier log:
+ * fresh scalar IDs on every outer pass meant no two states were ever
+ * recognized as equivalent, so the explore cost multiplied instead of
+ * staying flat. That's what pushed trace_sendmsg past 1M processed
+ * instructions even with neither loop unrolled. The fix is to not nest
+ * loops at all: this is a single flat loop over wire bytes, reading one
+ * byte at a time and tracking how many bytes are left in the current
+ * label in a plain counter. */
 static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
 {
 	int src_offset = 0;
 	int dst_offset = 0;
-	__u8 label_len;
-	int iterations = 0;
-	const int max_iterations = 16; /* DNS names rarely exceed a handful of labels */
+	int label_remaining = 0;
+	__u8 b;
+	int i;
+	const int max_total = 192; /* generous bound on total wire bytes scanned */
 
-	/* No #pragma unroll: unrolling this outer loop duplicates the inner
-	 * byte-copy loop 16x, and each copy gets verified separately with its
-	 * own slowly-widening bound walk (observed directly: umax climbing
-	 * one-by-one across hundreds of states per copy) — that's what was
-	 * pushing the total past the verifier's 1M processed-instruction
-	 * limit. Left as a real bounded loop, the whole function is verified
-	 * once instead of 16 times. */
-	for (iterations = 0; iterations < max_iterations; iterations++) {
-		/* Read label length */
-		if (bpf_probe_read_user(&label_len, sizeof(label_len), src + src_offset))
+	for (i = 0; i < max_total; i++) {
+		if (bpf_probe_read_user(&b, sizeof(b), src + src_offset))
 			break;
 
-		/* End of name (null label) */
-		if (label_len == 0) {
-			src_offset++;
-			break;
-		}
-
-		/* Check for compression pointer (0xC0) - skip compressed names */
-		if ((label_len & 0xC0) == 0xC0) {
-			/* Compression pointer - we don't follow it, just skip */
-			src_offset += 2;
-			break;
-		}
-
-		/* Check bounds */
-		if (label_len > 63 || src_offset + label_len + 1 > 512) {
-			break;
-		}
-
-		/* Add dot separator if not first label. Masked at the write site:
-		 * dst_offset is carried across the loop's backedge (this compiles
-		 * to a real backward jump, not a full unroll), and the verifier
-		 * doesn't reliably keep range info pinned to a stack-spilled
-		 * variable across that backedge — a power-of-two mask is a bound
-		 * it can always prove directly from the instruction itself. */
-		if (dst_offset > 0 && dst_offset < max_len - 1) {
-			dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
-			dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
-		}
-
-		if (dst_offset + label_len > max_len - 1)
-			break;
-
-		/* Read the label into a fixed-size local buffer with a constant
-		 * read length (64, not label_len) instead of bulk-copying
-		 * label_len bytes directly into dst at a variable offset.
-		 * bpf_probe_read_user(dst + dst_offset, label_len, ...) requires
-		 * the verifier to prove dst_offset + label_len stays in bounds
-		 * for a single dynamic-size helper call, and it can't: label_len
-		 * gets spilled to the stack across the loop's backedge and
-		 * reloads with its narrow [0,63] bound lost on re-verification
-		 * (observed umax_value=255 on reload despite masking right
-		 * before the spill). Splitting into "read a constant-size
-		 * window" + "copy at most label_len bytes with a compile-time
-		 * bounded, individually-masked byte loop" sidesteps that: every
-		 * write here is the same single-byte-masked-offset pattern
-		 * already proven to verify cleanly for the dot/null-terminator
-		 * writes above. */
-		{
-			__u8 label_buf[64] = {0};
-			int j;
-
-			/* No #pragma unroll here: with the outer label loop already
-			 * unrolled 16x, unrolling this 63-iteration copy too multiplies
-			 * out past the verifier's 1M processed-instruction limit (seen
-			 * directly: "BPF program is too large. Processed 1000001 insn").
-			 * Left as a real bounded loop instead — kernel 5.15's verifier
-			 * proves termination/bounds for a simple counted loop like this
-			 * without needing to unroll it, at a fraction of the instruction
-			 * cost. */
-			if (bpf_probe_read_user(label_buf, sizeof(label_buf), src + src_offset + 1) == 0) {
-				for (j = 0; j < 63; j++) {
-					if (j >= label_len)
-						break;
-					dst[(dst_offset + j) & (DNS_MAX_NAME_LEN - 1)] = label_buf[j];
-				}
-				dst_offset = (dst_offset + label_len) & (DNS_MAX_NAME_LEN - 1);
+		if (label_remaining == 0) {
+			/* b is a label-length byte */
+			if (b == 0) {
+				src_offset++;
+				break;
 			}
+
+			if ((b & 0xC0) == 0xC0) {
+				/* Compression pointer - we don't follow it, just stop. */
+				src_offset += 2;
+				break;
+			}
+
+			if (b > 63) {
+				break;
+			}
+
+			/* Add dot separator if not first label. Masked at the write
+			 * site: dst_offset is carried across the loop's backedge,
+			 * and a power-of-two mask is a bound the verifier can always
+			 * prove directly from the instruction itself, regardless of
+			 * what range it manages to track for the variable carrying it. */
+			if (dst_offset > 0 && dst_offset < max_len - 1) {
+				dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
+				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
+			}
+
+			label_remaining = b;
+			src_offset++;
+		} else {
+			/* b is a label data byte */
+			if (dst_offset < max_len - 1) {
+				dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = b;
+				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
+			}
+			label_remaining--;
+			src_offset++;
 		}
-
-		src_offset += label_len + 1;
-
-		/* Safety check for offset overflow */
-		if (src_offset > 512)
-			break;
 	}
 
 	/* Null terminate (masked for the same reason as the dot-separator write

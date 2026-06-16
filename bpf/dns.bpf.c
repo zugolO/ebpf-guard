@@ -35,6 +35,19 @@
  * userspace still gets the header and as much of the message as fits. */
 #define DNS_MAX_PAYLOAD 256
 
+/* Power-of-two-minus-one mask used to bound the read size passed to
+ * bpf_probe_read_user() in emit_dns_raw_event(). cap_len is computed from a
+ * syscall argument that was already checked (>= 12) earlier in the calling
+ * tracepoint, but that check doesn't reliably survive: across an inlined
+ * call this large (it spans fill_dns_process_info(), which itself calls
+ * bpf_get_current_pid_tgid/uid_gid/comm), the compiler can rematerialize
+ * cap_len by reloading the raw ctx->args[] value instead of reusing the
+ * already-bounds-checked register — which throws away everything the
+ * verifier knew about it, including that it's non-negative. `cap_len &=
+ * DNS_CAPTURE_LEN_MASK` reasserts a hard bound the verifier can prove from
+ * this single instruction, independent of cap_len's prior history. */
+#define DNS_CAPTURE_LEN_MASK 0xFF
+
 /* Raw DNS event structure - emitted to ring buffer.
  * Carries the unparsed UDP payload; all DNS wire-format decoding (QNAME,
  * QTYPE, RCODE, answer records, compression pointers) happens in
@@ -97,9 +110,7 @@ static __always_inline void fill_dns_process_info(struct dns_event *e)
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 }
 
-/* Helper: reserve a dns_event, fill in process info + payload, and submit.
- * cap_len must already be clamped to DNS_MAX_PAYLOAD by the caller so the
- * verifier can bound the dynamic-size bpf_probe_read_user call below. */
+/* Helper: reserve a dns_event, fill in process info + payload, and submit. */
 static __always_inline void emit_dns_raw_event(void *data, __u32 cap_len, __u8 direction)
 {
 	struct dns_event *evt;
@@ -111,8 +122,10 @@ static __always_inline void emit_dns_raw_event(void *data, __u32 cap_len, __u8 d
 	fill_dns_process_info(evt);
 	evt->direction = direction;
 
-	if (cap_len > DNS_MAX_PAYLOAD)
-		cap_len = DNS_MAX_PAYLOAD;
+	/* Re-bound cap_len immediately before the dynamic-size read: see the
+	 * DNS_CAPTURE_LEN_MASK comment above for why the verifier can't be
+	 * trusted to remember cap_len's earlier history at this point. */
+	cap_len &= DNS_CAPTURE_LEN_MASK;
 
 	if (bpf_probe_read_user(evt->payload, cap_len, data)) {
 		bpf_ringbuf_discard(evt, 0);

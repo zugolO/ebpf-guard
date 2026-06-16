@@ -172,8 +172,15 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 			__u8 label_buf[64] = {0};
 			int j;
 
+			/* No #pragma unroll here: with the outer label loop already
+			 * unrolled 16x, unrolling this 63-iteration copy too multiplies
+			 * out past the verifier's 1M processed-instruction limit (seen
+			 * directly: "BPF program is too large. Processed 1000001 insn").
+			 * Left as a real bounded loop instead — kernel 5.15's verifier
+			 * proves termination/bounds for a simple counted loop like this
+			 * without needing to unroll it, at a fraction of the instruction
+			 * cost. */
 			if (bpf_probe_read_user(label_buf, sizeof(label_buf), src + src_offset + 1) == 0) {
-				#pragma unroll
 				for (j = 0; j < 63; j++) {
 					if (j >= label_len)
 						break;

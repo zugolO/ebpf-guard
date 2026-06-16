@@ -832,6 +832,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if dc, dcErr := collector.NewDNSCollector(cfg.Collectors.DNS.Enabled); dcErr != nil {
 			slog.Warn("dns: collector creation failed", slog.Any("error", dcErr))
 		} else {
+			if err := dc.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+				slog.Warn("dns: register metrics failed", slog.Any("error", err))
+			}
 			collectors = append(collectors, dc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("dns: collector enabled", slog.Bool("enabled", cfg.Collectors.DNS.Enabled))
 		}

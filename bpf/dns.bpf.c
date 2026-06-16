@@ -20,9 +20,10 @@
  * sendto()/sendmsg()/recvfrom() — those plain I/O syscalls carry no
  * destination address, so they're invisible to address-based filtering.
  * trace_connect records connect()ed-to-port-53 fds in dns_socket_map;
- * trace_write/trace_writev/trace_read_*/trace_recvfrom_* consult that map
- * to recognize DNS traffic on those fds. trace_sendmsg/trace_sendto are
- * kept for callers that do pass an explicit destination address.
+ * trace_write, trace_writev, trace_read_enter/exit, and
+ * trace_recvfrom_enter/exit consult that map to recognize DNS traffic on
+ * those fds. trace_sendmsg/trace_sendto are kept for callers that do pass
+ * an explicit destination address.
  */
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)

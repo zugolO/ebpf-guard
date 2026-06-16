@@ -2,6 +2,8 @@ package collector
 
 import (
 	"encoding/binary"
+	"net"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -101,71 +103,77 @@ func TestRcodeToString(t *testing.T) {
 	}
 }
 
+// encodeDNSName encodes a dotted domain name into DNS wire format
+// (length-prefixed labels, null-terminated). No compression.
+func encodeDNSName(name string) []byte {
+	var buf []byte
+	for _, label := range strings.Split(name, ".") {
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, label...)
+	}
+	return append(buf, 0)
+}
+
+// buildMockRawEvent builds a raw ring buffer record matching struct
+// dns_event in dns.bpf.c: a fixed header followed by a raw DNS wire-format
+// payload (what the BPF side actually captures post-redesign).
+func buildMockRawEvent(direction types.DNSDirection, payload []byte) []byte {
+	header := make([]byte, dnsRawEventFixedLen)
+	offset := 0
+
+	binary.LittleEndian.PutUint32(header[offset:], 5) // EVENT_TYPE_DNS
+	offset += 4
+	binary.LittleEndian.PutUint64(header[offset:], 1234567890)
+	offset += 8
+	binary.LittleEndian.PutUint32(header[offset:], 1234) // pid
+	offset += 4
+	binary.LittleEndian.PutUint32(header[offset:], 1234) // tgid
+	offset += 4
+	binary.LittleEndian.PutUint32(header[offset:], 1000) // uid
+	offset += 4
+	copy(header[offset:], "curl\x00")
+	offset += 16
+	header[offset] = byte(direction)
+	offset += 1
+	binary.LittleEndian.PutUint16(header[offset:], uint16(len(payload)))
+
+	return append(header, payload...)
+}
+
+// buildDNSResponsePayload builds a raw DNS response message: header +
+// question (qname/A) + one A-record answer pointing back at the question
+// name via a compression pointer.
+func buildDNSResponsePayload(qname string, ip net.IP) []byte {
+	qnameWire := encodeDNSName(qname)
+
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint16(payload[2:4], 0x8180) // QR=1 (response), RCODE=0
+	binary.BigEndian.PutUint16(payload[4:6], 1)       // QDCOUNT
+	binary.BigEndian.PutUint16(payload[6:8], 1)       // ANCOUNT
+
+	questionStart := len(payload)
+	payload = append(payload, qnameWire...)
+	payload = binary.BigEndian.AppendUint16(payload, 1) // QTYPE A
+	payload = binary.BigEndian.AppendUint16(payload, 1) // QCLASS IN
+
+	// Answer: name = compression pointer back to the question's qname.
+	ptr := uint16(0xC000) | uint16(questionStart)
+	payload = binary.BigEndian.AppendUint16(payload, ptr)
+	payload = binary.BigEndian.AppendUint16(payload, 1)     // TYPE A
+	payload = binary.BigEndian.AppendUint16(payload, 1)     // CLASS IN
+	payload = binary.BigEndian.AppendUint32(payload, 300)   // TTL
+	payload = binary.BigEndian.AppendUint16(payload, 4)     // RDLENGTH
+	payload = append(payload, ip.To4()...)
+
+	return payload
+}
+
 func TestParseEvent(t *testing.T) {
 	collector := &DNSCollector{enabled: true}
 
-	// Build a mock dns_event structure
-	// This matches the layout in dns.bpf.c
-	buildMockEvent := func() []byte {
-		buf := make([]byte, 256)
-		offset := 0
+	respPayload := buildDNSResponsePayload("example.com", net.IPv4(93, 184, 216, 34))
+	raw := buildMockRawEvent(types.DNSDirectionResponse, respPayload)
 
-		// type (4 bytes) = EVENT_TYPE_DNS (5)
-		binary.LittleEndian.PutUint32(buf[offset:], 5)
-		offset += 4
-
-		// timestamp (8 bytes)
-		binary.LittleEndian.PutUint64(buf[offset:], 1234567890)
-		offset += 8
-
-		// pid (4 bytes)
-		binary.LittleEndian.PutUint32(buf[offset:], 1234)
-		offset += 4
-
-		// tgid (4 bytes)
-		binary.LittleEndian.PutUint32(buf[offset:], 1234)
-		offset += 4
-
-		// uid (4 bytes)
-		binary.LittleEndian.PutUint32(buf[offset:], 1000)
-		offset += 4
-
-		// comm (16 bytes)
-		copy(buf[offset:], "curl\x00")
-		offset += 16
-
-		// qname (128 bytes)
-		copy(buf[offset:], "example.com")
-		offset += 128
-
-		// qtype (2 bytes) = A (1)
-		binary.LittleEndian.PutUint16(buf[offset:], 1)
-		offset += 2
-
-		// rcode (2 bytes) = NOERROR (0)
-		binary.LittleEndian.PutUint16(buf[offset:], 0)
-		offset += 2
-
-		// direction (1 byte) = query (0)
-		buf[offset] = 0
-		offset += 1
-
-		// qname_len (1 byte)
-		buf[offset] = 11
-		offset += 1
-
-		// response_count (1 byte) = 1
-		buf[offset] = 1
-		offset += 1
-
-		// response_ips (4 bytes each) = 93.184.216.34 (example.com)
-		// Stored in network byte order (big-endian): 0x5DB8D822
-		binary.BigEndian.PutUint32(buf[offset:], 0x5DB8D822)
-
-		return buf
-	}
-
-	raw := buildMockEvent()
 	event := collector.parseEvent(raw)
 
 	require.NotNil(t, event)
@@ -176,9 +184,30 @@ func TestParseEvent(t *testing.T) {
 	assert.Equal(t, "example.com", event.DNS.QName)
 	assert.Equal(t, uint16(1), event.DNS.QType)
 	assert.Equal(t, uint16(0), event.DNS.RCode)
-	assert.Equal(t, types.DNSDirectionQuery, event.DNS.Direction)
+	assert.Equal(t, types.DNSDirectionResponse, event.DNS.Direction)
 	assert.Len(t, event.DNS.ResponseIPs, 1)
 	assert.Equal(t, "93.184.216.34", event.DNS.ResponseIPs[0])
+}
+
+func TestParseEvent_Query(t *testing.T) {
+	collector := &DNSCollector{enabled: true}
+
+	qnameWire := encodeDNSName("example.com")
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint16(payload[2:4], 0x0100) // QR=0 (query)
+	binary.BigEndian.PutUint16(payload[4:6], 1)       // QDCOUNT
+	payload = append(payload, qnameWire...)
+	payload = binary.BigEndian.AppendUint16(payload, 1) // QTYPE A
+	payload = binary.BigEndian.AppendUint16(payload, 1) // QCLASS IN
+
+	raw := buildMockRawEvent(types.DNSDirectionQuery, payload)
+	event := collector.parseEvent(raw)
+
+	require.NotNil(t, event)
+	assert.Equal(t, "example.com", event.DNS.QName)
+	assert.Equal(t, uint16(1), event.DNS.QType)
+	assert.Equal(t, types.DNSDirectionQuery, event.DNS.Direction)
+	assert.Empty(t, event.DNS.ResponseIPs)
 }
 
 func TestParseEvent_InvalidType(t *testing.T) {

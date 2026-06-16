@@ -5,7 +5,15 @@
  * Performance constraints:
  * - Early filtering in BPF: only UDP packets to/from port 53 pass through
  * - All other traffic is dropped with return 0 before any processing
- * - DNS wire format parsing happens only for DNS traffic (hundreds/sec, not thousands)
+ *
+ * Design note: this program does NOT parse the DNS wire format in-kernel.
+ * Earlier revisions decoded QNAME (including compression-pointer chasing)
+ * inside trace_sendmsg, which repeatedly hit the verifier's instruction
+ * limit and required increasingly fragile workarounds (per-CPU scratch
+ * maps, barrier_var() pruning hints, masked writes). None of that is
+ * necessary: the kernel side only needs to grab the raw UDP payload and
+ * hand it to userspace, which can parse arbitrary-complexity DNS messages
+ * (including compression pointers) without any verifier constraints.
  */
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
@@ -20,27 +28,17 @@
 
 /* DNS constants */
 #define DNS_PORT 53
-#define DNS_MAX_NAME_LEN 128
-#define DNS_MAX_RESPONSE_IPS 8
 
-/* DNS header flags */
-#define DNS_FLAG_QR_RESPONSE 0x8000  /* Query/Response: 1 = response */
-#define DNS_FLAG_OPCODE_MASK 0x7800  /* Opcode mask */
-#define DNS_FLAG_RCODE_MASK 0x000f   /* Response code mask */
+/* Maximum number of raw payload bytes captured per packet. Large enough for
+ * the overwhelming majority of DNS queries/responses (most are well under
+ * 256 bytes); anything larger is truncated rather than dropped, so
+ * userspace still gets the header and as much of the message as fits. */
+#define DNS_MAX_PAYLOAD 256
 
-/* DNS QTYPE values */
-#define DNS_QTYPE_A     1
-#define DNS_QTYPE_NS    2
-#define DNS_QTYPE_CNAME 5
-#define DNS_QTYPE_SOA   6
-#define DNS_QTYPE_PTR   12
-#define DNS_QTYPE_MX    15
-#define DNS_QTYPE_TXT   16
-#define DNS_QTYPE_AAAA  28
-#define DNS_QTYPE_SRV   33
-#define DNS_QTYPE_ANY   255
-
-/* DNS event structure - emitted to ring buffer */
+/* Raw DNS event structure - emitted to ring buffer.
+ * Carries the unparsed UDP payload; all DNS wire-format decoding (QNAME,
+ * QTYPE, RCODE, answer records, compression pointers) happens in
+ * internal/collector/dns.go. */
 struct dns_event {
 	__u32 type;                    /* EVENT_TYPE_DNS */
 	__u64 timestamp;
@@ -48,27 +46,9 @@ struct dns_event {
 	__u32 tgid;
 	__u32 uid;
 	__u8  comm[COMM_LEN];
-	
-	/* DNS-specific fields */
-	__u8  qname[DNS_MAX_NAME_LEN]; /* Query name (domain) */
-	/* decode_dns_name's masked writes into qname are bounded against the
-	 * mask (DNS_MAX_NAME_LEN-1) rather than the precise remaining space,
-	 * so the verifier's worst case for the bulk label copy can land up to
-	 * (DNS_MAX_NAME_LEN-1) + 63 bytes past the start of qname — beyond
-	 * qname's own 128 bytes, but still inside the struct as long as this
-	 * padding exists. The copy never actually reaches this far in
-	 * practice (real DNS names are far shorter), and qtype/rcode below
-	 * are written afterward regardless, so this is just verifier
-	 * headroom, not live data. */
-	__u8  _qname_overflow_guard[32];
-	__u16 qtype;                   /* Query type (A, AAAA, TXT, etc.) */
-	__u16 rcode;                   /* Response code (0 = success) */
-	__u8  direction;               /* 0 = query (outbound), 1 = response (inbound) */
-	__u8  qname_len;               /* Actual length of qname */
-	
-	/* Response data (only valid for inbound responses) */
-	__u8  response_count;          /* Number of response IPs (0-8) */
-	__u32 response_ips[DNS_MAX_RESPONSE_IPS]; /* Response IPv4 addresses */
+	__u8  direction;                  /* 0 = query (outbound), 1 = response (inbound) */
+	__u16 payload_len;                /* Number of valid bytes in payload (<= DNS_MAX_PAYLOAD) */
+	__u8  payload[DNS_MAX_PAYLOAD];   /* Raw UDP payload, starting at the DNS header */
 } __attribute__((packed));
 
 /* Ring buffer for DNS events */
@@ -102,207 +82,84 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 	return port == __builtin_bswap16(DNS_PORT);
 }
 
-/* Wire-byte scratch buffer for decode_dns_name. Read once in bulk before the
- * loop instead of one bpf_probe_read_user() call per iteration: a helper
- * call inside the loop body hands back a fresh scalar ID on every visit,
- * which previously defeated state-pruning across the loop's backedge (see
- * git history).
- *
- * The buffer itself lives in a per-CPU array map rather than on the BPF
- * stack: 192 bytes inlined into trace_sendmsg's frame on top of its other
- * locals blows the 512-byte BPF stack limit ("Looks like the BPF stack
- * limit of 512 bytes is exceeded"). A single-element per-CPU array gives
- * each CPU its own scratch slot with no stack cost and no contention. */
-#define DNS_WIRE_SCRATCH_LEN 192
-
-struct dns_wire_scratch {
-	__u8 buf[DNS_WIRE_SCRATCH_LEN];
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, struct dns_wire_scratch);
-} dns_wire_scratch SEC(".maps");
-
-/* Forces the verifier to forget any exact ("precise") value tracked for var
- * and fall back to whatever range its preceding mask established. dst_offset
- * and label_remaining feed pointer arithmetic, which makes the verifier
- * track their exact value rather than just a range; two visits to the loop
- * head with different exact values are never recognized as the same state,
- * so without this the verifier re-explores the rest of the loop from
- * scratch on every iteration instead of pruning. The loop counter i is the
- * same story: it feeds the buf[i & mask] address computation too, so it
- * gets marked precise and increments by 1 every visit — without barrier_var
- * on it as well, the loop head state never matches across iterations no
- * matter what's done to the other two variables. This only works in
- * combination with hoisting bpf_probe_read_user() out of the loop above —
- * a helper call inside the loop body hands back a fresh scalar ID on every
- * visit regardless of barrier_var, which independently defeats pruning. */
-#define barrier_var(var) asm volatile("" : "=r"(var) : "0"(var))
-
-/* Helper: decode DNS name from wire format.
- * Deliberately NOT #pragma unroll: unrolling turns this into straight-line
- * code where dst_offset/label_remaining diverge on every copy (no backedge
- * to prune), so the verifier walks the shared suffix after every forward
- * branch separately — same exponential blowup as the loop case, just
- * without a loop. A real bounded loop lets pruning collapse the explored
- * suffix once the loop-head state repeats. */
-static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
-{
-	__u32 zero = 0;
-	struct dns_wire_scratch *scratch;
-	int dst_offset = 0;
-	int label_remaining = 0;
-	int i;
-
-	scratch = bpf_map_lookup_elem(&dns_wire_scratch, &zero);
-	if (!scratch)
-		return 0;
-
-	if (bpf_probe_read_user(scratch->buf, sizeof(scratch->buf), src))
-		return 0;
-
-	for (i = 0; i < DNS_WIRE_SCRATCH_LEN; i++) {
-		__u8 b = scratch->buf[i & (DNS_WIRE_SCRATCH_LEN - 1)];
-
-		if (label_remaining == 0) {
-			/* b is a label-length byte */
-			if (b == 0)
-				break;
-
-			if ((b & 0xC0) == 0xC0) {
-				/* Compression pointer - we don't follow it, just stop. */
-				break;
-			}
-
-			if (b > 63)
-				break;
-
-			/* Add dot separator if not first label. Masked at the write
-			 * site: a power-of-two mask is a bound the verifier can always
-			 * prove directly from the instruction itself. */
-			if (dst_offset > 0 && dst_offset < max_len - 1) {
-				dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
-				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
-			}
-
-			label_remaining = b & 0x3F;
-		} else {
-			/* b is a label data byte */
-			if (dst_offset < max_len - 1) {
-				dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = b;
-				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
-			}
-			label_remaining = (label_remaining - 1) & 0x3F;
-		}
-
-		barrier_var(dst_offset);
-		barrier_var(label_remaining);
-		barrier_var(i);
-	}
-
-	/* Null terminate (masked for the same reason as the dot-separator write
-	 * above — see comment there). */
-	if (dst_offset >= max_len)
-		dst_offset = max_len - 1;
-	dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '\0';
-
-	return dst_offset;
-}
-
 /* Helper: fill process info into dns_event */
 static __always_inline void fill_dns_process_info(struct dns_event *e)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u64 uid_gid = bpf_get_current_uid_gid();
-	
+
 	e->pid = (__u32)(pid_tgid >> 32);
 	e->tgid = (__u32)pid_tgid;
 	e->uid = (__u32)uid_gid;
 	e->type = EVENT_TYPE_DNS;
 	e->timestamp = bpf_ktime_get_ns();
-	
+
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+}
+
+/* Helper: reserve a dns_event, fill in process info + payload, and submit.
+ * cap_len must already be clamped to DNS_MAX_PAYLOAD by the caller so the
+ * verifier can bound the dynamic-size bpf_probe_read_user call below. */
+static __always_inline void emit_dns_raw_event(void *data, __u32 cap_len, __u8 direction)
+{
+	struct dns_event *evt;
+
+	evt = bpf_ringbuf_reserve(&dns_events, sizeof(*evt), 0);
+	if (!evt)
+		return;
+
+	fill_dns_process_info(evt);
+	evt->direction = direction;
+
+	if (cap_len > DNS_MAX_PAYLOAD)
+		cap_len = DNS_MAX_PAYLOAD;
+
+	if (bpf_probe_read_user(evt->payload, cap_len, data)) {
+		bpf_ringbuf_discard(evt, 0);
+		return;
+	}
+
+	evt->payload_len = (__u16)cap_len;
+	bpf_ringbuf_submit(evt, 0);
 }
 
 /* Tracepoint for UDP sendmsg (outbound DNS queries) */
 SEC("tracepoint/syscalls/sys_enter_sendmsg")
 int trace_sendmsg(struct trace_event_raw_sys_enter *ctx)
 {
-	struct dns_event *evt;
 	struct user_msghdr *msg;
 	struct sockaddr *addr;
 	struct iovec *iov;
 	void *data;
 	int data_len;
-	
+
 	/* Get message header from syscall argument */
 	msg = (struct user_msghdr *)ctx->args[1];
 	if (!msg)
 		return 0;
-	
+
 	/* Get destination address */
 	bpf_probe_read_user(&addr, sizeof(addr), &msg->msg_name);
 	if (!addr)
 		return 0;
-	
+
 	/* EARLY FILTER: Only process DNS packets (UDP port 53) */
 	if (!is_dns_packet(addr, true))
 		return 0;
-	
+
 	/* Get IO vector */
 	bpf_probe_read_user(&iov, sizeof(iov), &msg->msg_iov);
 	if (!iov)
 		return 0;
-	
+
 	/* Get first iov entry data and length */
 	bpf_probe_read_user(&data, sizeof(data), &iov->iov_base);
 	bpf_probe_read_user(&data_len, sizeof(data_len), &iov->iov_len);
-	
+
 	if (!data || data_len < 12)  /* Minimum DNS header size */
 		return 0;
-	
-	/* Reserve event in ring buffer */
-	evt = bpf_ringbuf_reserve(&dns_events, sizeof(*evt), 0);
-	if (!evt)
-		return 0;
-	
-	/* Fill process info */
-	fill_dns_process_info(evt);
-	evt->direction = 0; /* Query (outbound) */
-	evt->response_count = 0;
-	
-	/* Parse DNS query from data */
-	/* DNS query format after header:
-	 * - QNAME (variable length, encoded)
-	 * - QTYPE (2 bytes)
-	 * - QCLASS (2 bytes)
-	 */
-	
-	/* Skip DNS header (12 bytes) and decode QNAME */
-	evt->qname_len = decode_dns_name(data + 12, evt->qname, DNS_MAX_NAME_LEN);
-	
-	/* Read QTYPE (after QNAME) - approximate position */
-	/* For simplicity, we read from a fixed offset after typical QNAME length */
-	if (data_len > 14) {
-		__u16 qtype;
-		/* Try to read QTYPE from various offsets based on common domain lengths */
-		int qtype_offset = 12 + evt->qname_len + 1; /* header + qname + null */
-		if (qtype_offset + 2 <= data_len && qtype_offset < 512) {
-			bpf_probe_read_user(&qtype, sizeof(qtype), data + qtype_offset);
-			evt->qtype = __builtin_bswap16(qtype);
-		} else {
-			evt->qtype = 0;
-		}
-	} else {
-		evt->qtype = 0;
-	}
-	
-	evt->rcode = 0; /* No response code for queries */
-	
-	bpf_ringbuf_submit(evt, 0);
+
+	emit_dns_raw_event(data, (__u32)data_len, 0 /* query */);
 	return 0;
 }
 
@@ -310,57 +167,27 @@ int trace_sendmsg(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_enter_sendto")
 int trace_sendto(struct trace_event_raw_sys_enter *ctx)
 {
-	struct dns_event *evt;
 	struct sockaddr *addr;
 	void *buf;
 	int len;
-	
+
 	/* Get destination address from syscall argument */
 	addr = (struct sockaddr *)ctx->args[4];
 	if (!addr)
 		return 0;
-	
+
 	/* EARLY FILTER: Only process DNS packets (UDP port 53) */
 	if (!is_dns_packet(addr, true))
 		return 0;
-	
+
 	/* Get buffer and length */
 	buf = (void *)ctx->args[1];
 	len = (int)ctx->args[2];
-	
+
 	if (!buf || len < 12)
 		return 0;
-	
-	/* Reserve event in ring buffer */
-	evt = bpf_ringbuf_reserve(&dns_events, sizeof(*evt), 0);
-	if (!evt)
-		return 0;
-	
-	/* Fill process info */
-	fill_dns_process_info(evt);
-	evt->direction = 0; /* Query (outbound) */
-	evt->response_count = 0;
-	
-	/* Parse DNS query */
-	evt->qname_len = decode_dns_name(buf + 12, evt->qname, DNS_MAX_NAME_LEN);
-	
-	/* Read QTYPE */
-	if (len > 14) {
-		__u16 qtype;
-		int qtype_offset = 12 + evt->qname_len + 1;
-		if (qtype_offset + 2 <= len && qtype_offset < 512) {
-			bpf_probe_read_user(&qtype, sizeof(qtype), buf + qtype_offset);
-			evt->qtype = __builtin_bswap16(qtype);
-		} else {
-			evt->qtype = 0;
-		}
-	} else {
-		evt->qtype = 0;
-	}
-	
-	evt->rcode = 0;
-	
-	bpf_ringbuf_submit(evt, 0);
+
+	emit_dns_raw_event(buf, (__u32)len, 0 /* query */);
 	return 0;
 }
 
@@ -373,21 +200,25 @@ int trace_recvmsg(struct trace_event_raw_sys_exit *ctx)
 	struct sockaddr *addr;
 	struct iovec *iov;
 	void *data;
-	int data_len;
 	long ret;
-	
+
 	/* Check return value - must be successful */
 	ret = ctx->ret;
 	if (ret < 12)  /* Minimum DNS header size */
 		return 0;
-	
+
 	/* Get message header from syscall argument (stored in probe) */
 	/* Note: for sys_exit, we need to read the msg header from user space */
 	/* This is a simplified version - in production, you'd use a kprobe on udp_recvmsg */
-	
+
 	/* For now, we skip detailed response parsing in tracepoint due to complexity */
 	/* Full implementation would use kprobe on udp_recvmsg or skb tracepoint */
-	
+	(void)evt;
+	(void)msg;
+	(void)addr;
+	(void)iov;
+	(void)data;
+
 	return 0;
 }
 

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +22,22 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
+
+// dnsRawEventFixedLen is the size of struct dns_event in dns.bpf.c up to
+// (but not including) the variable-meaningful payload bytes: type(4) +
+// timestamp(8) + pid(4) + tgid(4) + uid(4) + comm(16) + direction(1) +
+// payload_len(2) = 43. The struct is packed, so there is no padding.
+const dnsRawEventFixedLen = 4 + 8 + 4 + 4 + 4 + 16 + 1 + 2
+
+// dnsMaxPayload mirrors DNS_MAX_PAYLOAD in dns.bpf.c — the kernel side
+// always reserves this many payload bytes in the ring buffer record,
+// truncating longer messages rather than dropping them.
+const dnsMaxPayload = 256
+
+// dnsMaxNameJumps bounds compression-pointer chasing in decodeDNSName so a
+// crafted or corrupted message can't cause an infinite loop. There is no
+// BPF verifier here — this is a plain userspace safety limit.
+const dnsMaxNameJumps = 32
 
 // DNSCollector collects DNS events via eBPF tracepoints.
 type DNSCollector struct {
@@ -205,14 +222,18 @@ func (c *DNSCollector) LostEvents() uint64 {
 }
 
 // parseEvent parses a raw ring buffer record into a types.Event.
+//
+// The BPF side (dns.bpf.c) no longer decodes the DNS wire format — it just
+// captures the raw UDP payload, so all QNAME/QTYPE/RCODE/answer parsing,
+// including compression-pointer chasing, happens here where there's no
+// verifier instruction budget to fight.
 func (c *DNSCollector) parseEvent(raw []byte) *types.Event {
-	// 4+8+4+4+4+16+128+32(pad)+2+2+1+1+1 = 207 bytes minimum (no response IPs)
-	if len(raw) < 207 {
+	if len(raw) < dnsRawEventFixedLen {
 		return nil
 	}
 
-	// Parse dns_event structure from BPF
-	// Layout matches struct dns_event in dns.bpf.c
+	// Parse the fixed dns_event header. Layout matches struct dns_event in
+	// dns.bpf.c.
 	offset := 0
 
 	// type (4 bytes)
@@ -244,44 +265,22 @@ func (c *DNSCollector) parseEvent(raw []byte) *types.Event {
 	copy(comm[:], raw[offset:])
 	offset += 16
 
-	// qname (128 bytes)
-	qnameLen := 0
-	for i := 0; i < 128 && raw[offset+i] != 0; i++ {
-		qnameLen++
-	}
-	qname := string(raw[offset : offset+qnameLen])
-	offset += 128
-
-	// _qname_overflow_guard (32 bytes) - verifier headroom padding, not data
-	offset += 32
-
-	// qtype (2 bytes)
-	qtype := binary.LittleEndian.Uint16(raw[offset:])
-	offset += 2
-
-	// rcode (2 bytes)
-	rcode := binary.LittleEndian.Uint16(raw[offset:])
-	offset += 2
-
 	// direction (1 byte)
 	direction := types.DNSDirection(raw[offset])
 	offset += 1
 
-	// qname_len (1 byte) - skip, we calculated it
-	offset += 1
+	// payload_len (2 bytes)
+	payloadLen := binary.LittleEndian.Uint16(raw[offset:])
+	offset += 2
 
-	// response_count (1 byte)
-	responseCount := raw[offset]
-	offset += 1
+	if int(payloadLen) > dnsMaxPayload || offset+int(payloadLen) > len(raw) {
+		return nil
+	}
+	payload := raw[offset : offset+int(payloadLen)]
 
-	// Parse response IPs — stored in network byte order (big-endian) by BPF.
-	var responseIPs []string
-	for i := 0; i < int(responseCount) && i < 8; i++ {
-		if offset+4 <= len(raw) {
-			ip := binary.BigEndian.Uint32(raw[offset:])
-			responseIPs = append(responseIPs, intToIPv4(ip))
-			offset += 4
-		}
+	msg, ok := parseDNSWireMessage(payload)
+	if !ok {
+		return nil
 	}
 
 	return &types.Event{
@@ -292,13 +291,155 @@ func (c *DNSCollector) parseEvent(raw []byte) *types.Event {
 		UID:       uid,
 		Comm:      comm,
 		DNS: &types.DNSEvent{
-			QName:       qname,
-			QType:       qtype,
-			RCode:       rcode,
+			QName:       msg.qname,
+			QType:       msg.qtype,
+			RCode:       msg.rcode,
 			Direction:   direction,
-			ResponseIPs: responseIPs,
+			ResponseIPs: msg.responseIPs,
 		},
 	}
+}
+
+// dnsWireMessage holds the fields the rest of the system cares about,
+// decoded from a raw DNS message captured by the BPF side.
+type dnsWireMessage struct {
+	qname       string
+	qtype       uint16
+	rcode       uint16
+	responseIPs []string
+}
+
+// parseDNSWireMessage decodes a raw DNS message (header + question, and
+// answer records for responses) per RFC 1035. Unlike the in-kernel decoder
+// it replaces, this correctly follows compression pointers in QNAME/answer
+// names since there's no verifier-imposed bound on loop complexity here.
+func parseDNSWireMessage(payload []byte) (dnsWireMessage, bool) {
+	var msg dnsWireMessage
+
+	if len(payload) < 12 {
+		return msg, false
+	}
+
+	flags := binary.BigEndian.Uint16(payload[2:4])
+	isResponse := flags&0x8000 != 0
+	msg.rcode = flags & 0x000f
+
+	qdCount := binary.BigEndian.Uint16(payload[4:6])
+	anCount := binary.BigEndian.Uint16(payload[6:8])
+	if qdCount == 0 {
+		return msg, false
+	}
+
+	pos := 12
+	qname, pos, ok := decodeDNSName(payload, pos)
+	if !ok {
+		return msg, false
+	}
+	msg.qname = qname
+
+	if pos+4 > len(payload) {
+		// Got the name but not QTYPE/QCLASS; still useful to the caller.
+		return msg, true
+	}
+	msg.qtype = binary.BigEndian.Uint16(payload[pos : pos+2])
+	pos += 4 // QTYPE (2) + QCLASS (2)
+
+	if isResponse {
+		msg.responseIPs = decodeDNSAnswerIPs(payload, pos, anCount)
+	}
+
+	return msg, true
+}
+
+// decodeDNSAnswerIPs walks anCount answer records starting at pos and
+// returns the A-record (IPv4) addresses found.
+func decodeDNSAnswerIPs(payload []byte, pos int, anCount uint16) []string {
+	var ips []string
+
+	for i := 0; i < int(anCount); i++ {
+		var ok bool
+		_, pos, ok = decodeDNSName(payload, pos)
+		if !ok {
+			break
+		}
+
+		// TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes.
+		if pos+10 > len(payload) {
+			break
+		}
+		rtype := binary.BigEndian.Uint16(payload[pos : pos+2])
+		rdlen := int(binary.BigEndian.Uint16(payload[pos+8 : pos+10]))
+		pos += 10
+
+		if pos+rdlen > len(payload) {
+			break
+		}
+		if rtype == 1 && rdlen == 4 { // A record
+			ips = append(ips, net.IPv4(payload[pos], payload[pos+1], payload[pos+2], payload[pos+3]).String())
+		}
+		pos += rdlen
+	}
+
+	return ips
+}
+
+// decodeDNSName decodes a (possibly compressed) domain name starting at
+// pos in payload, returning the dotted name and the position immediately
+// after the name in the *original* stream (i.e. after a compression
+// pointer, not after whatever it points to). jumps are capped at
+// dnsMaxNameJumps to guarantee termination on malformed input.
+func decodeDNSName(payload []byte, pos int) (string, int, bool) {
+	var sb strings.Builder
+	endPos := -1
+	jumps := 0
+
+	for {
+		if pos < 0 || pos >= len(payload) {
+			return "", 0, false
+		}
+
+		b := payload[pos]
+
+		if b == 0 {
+			pos++
+			if endPos == -1 {
+				endPos = pos
+			}
+			break
+		}
+
+		if b&0xC0 == 0xC0 {
+			if pos+1 >= len(payload) {
+				return "", 0, false
+			}
+			if endPos == -1 {
+				endPos = pos + 2
+			}
+			jumps++
+			if jumps > dnsMaxNameJumps {
+				return "", 0, false
+			}
+			ptr := int(binary.BigEndian.Uint16(payload[pos:pos+2]) & 0x3FFF)
+			pos = ptr
+			continue
+		}
+
+		labelLen := int(b)
+		pos++
+		if pos+labelLen > len(payload) {
+			return "", 0, false
+		}
+		if sb.Len() > 0 {
+			sb.WriteByte('.')
+		}
+		sb.Write(payload[pos : pos+labelLen])
+		pos += labelLen
+	}
+
+	if endPos == -1 {
+		endPos = pos
+	}
+	return sb.String(), endPos, true
 }
 
 // intToIPv4 converts a uint32 IP in network byte order (big-endian, as stored by BPF)

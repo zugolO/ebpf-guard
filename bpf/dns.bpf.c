@@ -129,9 +129,15 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 			break;
 		}
 
-		/* Add dot separator if not first label */
+		/* Add dot separator if not first label.
+		 * dst_offset is masked at the write site (not just bounds-checked)
+		 * because the verifier loses precise tracking of its accumulated
+		 * range across the 16 unrolled iterations; a power-of-two mask is
+		 * a bound it can always prove regardless of range-tracking
+		 * precision elsewhere in the loop. */
 		if (dst_offset > 0 && dst_offset < max_len - 1) {
-			dst[dst_offset++] = '.';
+			dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
+			dst_offset++;
 		}
 
 		/* Bail out (no write) if the label wouldn't fit, rather than
@@ -154,9 +160,11 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 			break;
 	}
 
-	/* Null terminate */
-	if (dst_offset < max_len)
-		dst[dst_offset] = '\0';
+	/* Null terminate (masked for the same reason as the dot-separator write
+	 * above — see comment there). */
+	if (dst_offset >= max_len)
+		dst_offset = max_len - 1;
+	dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '\0';
 
 	return dst_offset;
 }

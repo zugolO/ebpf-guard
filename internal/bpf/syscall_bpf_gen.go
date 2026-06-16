@@ -36,6 +36,13 @@ type SyscallObjects struct {
 	// MapFullCounters is the PERCPU_ARRAY drained by the watchdog to export
 	// ebpf_guard_bpf_map_full_total. Shared across all BPF programs via common.h.
 	MapFullCounters *ebpf.Map `ebpf:"map_full_counters"`
+	// CommFilterMap, SyscallFilterMap, and KernelFilterConfig back the
+	// BPF-side content filter (see bpf.KernelFilterController). Without
+	// these wired up and enabled, every raw syscall on the host is
+	// forwarded to userspace unfiltered.
+	CommFilterMap      *ebpf.Map `ebpf:"comm_filter_map"`
+	SyscallFilterMap   *ebpf.Map `ebpf:"syscall_filter_map"`
+	KernelFilterConfig *ebpf.Map `ebpf:"kernel_filter_config"`
 }
 
 // Close closes all eBPF objects.
@@ -47,7 +54,10 @@ func (o *SyscallObjects) Close() error {
 			p.Close()
 		}
 	}
-	for _, m := range []*ebpf.Map{o.Events, o.SyscallArgs, o.ProcArgsMap, o.MapFullCounters} {
+	for _, m := range []*ebpf.Map{
+		o.Events, o.SyscallArgs, o.ProcArgsMap, o.MapFullCounters,
+		o.CommFilterMap, o.SyscallFilterMap, o.KernelFilterConfig,
+	} {
 		if m != nil {
 			m.Close()
 		}

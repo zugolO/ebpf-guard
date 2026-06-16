@@ -160,55 +160,6 @@ int trace_ssl_write(struct pt_regs *ctx)
 }
 
 /*
- * uprobe/SSL_read - Intercept inbound TLS data after decryption.
- * 
- * Signature: int SSL_read(SSL *ssl, void *buf, int num)
- * Arguments (x86_64): rdi=ssl, rsi=buf, rdx=num
- * 
- * Note: SSL_read is probed on return (uretprobe) to capture the actual
- * decrypted data, not the empty buffer passed in.
- */
-SEC("uretprobe/SSL_read")
-int trace_ssl_read_ret(struct pt_regs *ctx)
-{
-	struct tls_event *e;
-	void *buf;
-	int ret;
-	size_t data_len;
-	
-	/* Get return value - this is the actual bytes read/decrypted */
-	ret = PT_REGS_RC(ctx);
-	if (ret <= 0) {
-		/* No data read or error */
-		return 0;
-	}
-	
-	/* Reserve space in ring buffer */
-	e = bpf_ringbuf_reserve(&tls_events, sizeof(struct tls_event), 0);
-	if (!e)
-		return 0;
-	
-	/* Fill process info */
-	fill_tls_process_info(e);
-	e->type = EVENT_TYPE_TLS;
-	e->direction = TLS_DIR_READ;
-	e->has_conn_info = 0;
-	e->data_len = ret;
-	
-	/* 
-	 * For SSL_read uretprobe, we need to get the buffer pointer.
-	 * This is stored in a map by the entry probe since it's not available on return.
-	 * For simplicity, we capture without the actual data on uretprobe.
-	 * Full implementation would use a map to store buf pointer from entry.
-	 */
-	e->captured_len = 0;
-	__builtin_memset(&e->data, 0, sizeof(e->data));
-	
-	bpf_ringbuf_submit(e, 0);
-	return 0;
-}
-
-/*
  * uprobe/SSL_read (entry) - Store buffer pointer for uretprobe.
  * We need this to read the decrypted data on return.
  */

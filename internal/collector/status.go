@@ -13,3 +13,8 @@ type StatusReporter interface {
 type NoopStatusReporter struct{}
 
 func (NoopStatusReporter) SetUp(_ string, _ bool) {}
+
+// StatusReporterFunc adapts a function to the StatusReporter interface.
+type StatusReporterFunc func(name string, up bool)
+
+func (f StatusReporterFunc) SetUp(name string, up bool) { f(name, up) }

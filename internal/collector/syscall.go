@@ -308,6 +308,16 @@ func (c *SyscallCollector) MapFullCountersMap() *ebpf.Map {
 	return c.objs.MapFullCounters
 }
 
+// KernelFilterMaps returns the comm_filter_map, syscall_filter_map, and
+// kernel_filter_config BPF maps backing this collector's content filter, or
+// nil maps if the collector has not loaded (stub mode).
+func (c *SyscallCollector) KernelFilterMaps() (comm, syscall, cfg *ebpf.Map) {
+	if c.objs == nil {
+		return nil, nil, nil
+	}
+	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig
+}
+
 // parseEvent converts raw bytes from the ring buffer into event, which must be
 // a pooled *types.Event obtained from eventPool. Caller is responsible for
 // Reset() and Put() after the event value has been consumed.

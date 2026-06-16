@@ -1510,6 +1510,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.connections", 32768)
 	v.SetDefault("bpf.map_sizes.fd_map_size", 65536)
 	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
+	v.SetDefault("bpf.kernel_filter.enabled", true)
 	v.SetDefault("bpf.btf_path", "")
 	v.SetDefault("bpf.btf_hub_enabled", true)
 	v.SetDefault("bpf.btf_hub_cache", "/var/lib/ebpf-guard/btf")

@@ -67,26 +67,27 @@ struct {
 	__uint(max_entries, 4 * 1024 * 1024); /* 4MB ring buffer */
 } dns_events SEC(".maps");
 
-/* Helper: check if this is a DNS packet (UDP port 53) */
+/* Helper: check if this is a DNS packet (UDP port 53).
+ * addr is a user-space pointer (read out of msg->msg_name); every field
+ * access must go through bpf_probe_read_user — a direct dereference here
+ * triggers "invalid mem access 'inv'" because the verifier cannot treat a
+ * value loaded from user memory as a trusted kernel pointer. */
 static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outbound)
 {
-	struct sockaddr_in *sin;
+	struct sockaddr_in *sin = (struct sockaddr_in *)addr;
+	__u16 family;
 	__u16 port;
-	
+
 	/* Only handle AF_INET for now (IPv4 DNS) */
-	if (addr->sa_family != AF_INET)
+	if (bpf_probe_read_user(&family, sizeof(family), &addr->sa_family))
 		return false;
-	
-	sin = (struct sockaddr_in *)addr;
-	
-	if (is_outbound) {
-		/* Outbound: check dport == 53 */
-		bpf_probe_read_kernel(&port, sizeof(port), &sin->sin_port);
-	} else {
-		/* Inbound: check sport == 53 */
-		bpf_probe_read_kernel(&port, sizeof(port), &sin->sin_port);
-	}
-	
+	if (family != AF_INET)
+		return false;
+
+	/* sin_port is at the same offset for both inbound and outbound use. */
+	if (bpf_probe_read_user(&port, sizeof(port), &sin->sin_port))
+		return false;
+
 	/* port is in network byte order */
 	return port == __builtin_bswap16(DNS_PORT);
 }

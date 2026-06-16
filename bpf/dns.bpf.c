@@ -5,7 +5,29 @@
  * Performance constraints:
  * - Early filtering in BPF: only UDP packets to/from port 53 pass through
  * - All other traffic is dropped with return 0 before any processing
- * - DNS wire format parsing happens only for DNS traffic (hundreds/sec, not thousands)
+ *
+ * Design note: this program does NOT parse the DNS wire format in-kernel.
+ * Earlier revisions decoded QNAME (including compression-pointer chasing)
+ * inside trace_sendmsg, which repeatedly hit the verifier's instruction
+ * limit and required increasingly fragile workarounds (per-CPU scratch
+ * maps, barrier_var() pruning hints, masked writes). None of that is
+ * necessary: the kernel side only needs to grab the raw UDP payload and
+ * hand it to userspace, which can parse arbitrary-complexity DNS messages
+ * (including compression pointers) without any verifier constraints.
+ *
+ * Capture paths: glibc's stub resolver (and therefore `dig`, and anything
+ * else linked against it) calls connect() once on a UDP socket and then
+ * sends/receives via sendmmsg()/recvmsg() with msg_name=NULL, relying on
+ * the already-connected destination rather than passing an address each
+ * time (confirmed by strace against real glibc/dig — see commit history).
+ * Some other resolvers instead use plain write()/read(). Either way,
+ * those syscalls carry no destination address, so they're invisible to
+ * address-based filtering. trace_connect records connect()ed-to-port-53
+ * fds in dns_socket_map; trace_sendmmsg, trace_write, trace_writev,
+ * trace_recvmsg_enter/exit, trace_read_enter/exit, and
+ * trace_recvfrom_enter/exit all consult that map to recognize DNS traffic
+ * on those fds. trace_sendmsg/trace_sendto are kept for callers that do
+ * pass an explicit destination address.
  */
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
@@ -20,27 +42,30 @@
 
 /* DNS constants */
 #define DNS_PORT 53
-#define DNS_MAX_NAME_LEN 128
-#define DNS_MAX_RESPONSE_IPS 8
 
-/* DNS header flags */
-#define DNS_FLAG_QR_RESPONSE 0x8000  /* Query/Response: 1 = response */
-#define DNS_FLAG_OPCODE_MASK 0x7800  /* Opcode mask */
-#define DNS_FLAG_RCODE_MASK 0x000f   /* Response code mask */
+/* Maximum number of raw payload bytes captured per packet. Large enough for
+ * the overwhelming majority of DNS queries/responses (most are well under
+ * 256 bytes); anything larger is truncated rather than dropped, so
+ * userspace still gets the header and as much of the message as fits. */
+#define DNS_MAX_PAYLOAD 256
 
-/* DNS QTYPE values */
-#define DNS_QTYPE_A     1
-#define DNS_QTYPE_NS    2
-#define DNS_QTYPE_CNAME 5
-#define DNS_QTYPE_SOA   6
-#define DNS_QTYPE_PTR   12
-#define DNS_QTYPE_MX    15
-#define DNS_QTYPE_TXT   16
-#define DNS_QTYPE_AAAA  28
-#define DNS_QTYPE_SRV   33
-#define DNS_QTYPE_ANY   255
+/* Power-of-two-minus-one mask used to bound the read size passed to
+ * bpf_probe_read_user() in emit_dns_raw_event(). cap_len is computed from a
+ * syscall argument that was already checked (>= 12) earlier in the calling
+ * tracepoint, but that check doesn't reliably survive: across an inlined
+ * call this large (it spans fill_dns_process_info(), which itself calls
+ * bpf_get_current_pid_tgid/uid_gid/comm), the compiler can rematerialize
+ * cap_len by reloading the raw ctx->args[] value instead of reusing the
+ * already-bounds-checked register — which throws away everything the
+ * verifier knew about it, including that it's non-negative. `cap_len &=
+ * DNS_CAPTURE_LEN_MASK` reasserts a hard bound the verifier can prove from
+ * this single instruction, independent of cap_len's prior history. */
+#define DNS_CAPTURE_LEN_MASK 0xFF
 
-/* DNS event structure - emitted to ring buffer */
+/* Raw DNS event structure - emitted to ring buffer.
+ * Carries the unparsed UDP payload; all DNS wire-format decoding (QNAME,
+ * QTYPE, RCODE, answer records, compression pointers) happens in
+ * internal/collector/dns.go. */
 struct dns_event {
 	__u32 type;                    /* EVENT_TYPE_DNS */
 	__u64 timestamp;
@@ -48,17 +73,9 @@ struct dns_event {
 	__u32 tgid;
 	__u32 uid;
 	__u8  comm[COMM_LEN];
-	
-	/* DNS-specific fields */
-	__u8  qname[DNS_MAX_NAME_LEN]; /* Query name (domain) */
-	__u16 qtype;                   /* Query type (A, AAAA, TXT, etc.) */
-	__u16 rcode;                   /* Response code (0 = success) */
-	__u8  direction;               /* 0 = query (outbound), 1 = response (inbound) */
-	__u8  qname_len;               /* Actual length of qname */
-	
-	/* Response data (only valid for inbound responses) */
-	__u8  response_count;          /* Number of response IPs (0-8) */
-	__u32 response_ips[DNS_MAX_RESPONSE_IPS]; /* Response IPv4 addresses */
+	__u8  direction;                  /* 0 = query (outbound), 1 = response (inbound) */
+	__u16 payload_len;                /* Number of valid bytes in payload (<= DNS_MAX_PAYLOAD) */
+	__u8  payload[DNS_MAX_PAYLOAD];   /* Raw UDP payload, starting at the DNS header */
 } __attribute__((packed));
 
 /* Ring buffer for DNS events */
@@ -92,171 +109,420 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 	return port == __builtin_bswap16(DNS_PORT);
 }
 
-/* Helper: decode DNS name from wire format.
- * Each label is read with a single bulk bpf_probe_read_user call instead of
- * a byte-by-byte unrolled loop — the previous nested #pragma unroll (32
- * outer x 63 inner iterations, each issuing its own probe_read call) pushed
- * the verifier past 1M processed instructions on trace_sendmsg. */
-static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
-{
-	int src_offset = 0;
-	int dst_offset = 0;
-	__u8 label_len;
-	int iterations = 0;
-	const int max_iterations = 16; /* DNS names rarely exceed a handful of labels */
-
-	#pragma unroll
-	for (iterations = 0; iterations < max_iterations; iterations++) {
-		/* Read label length */
-		if (bpf_probe_read_user(&label_len, sizeof(label_len), src + src_offset))
-			break;
-
-		/* End of name (null label) */
-		if (label_len == 0) {
-			src_offset++;
-			break;
-		}
-
-		/* Check for compression pointer (0xC0) - skip compressed names */
-		if ((label_len & 0xC0) == 0xC0) {
-			/* Compression pointer - we don't follow it, just skip */
-			src_offset += 2;
-			break;
-		}
-
-		/* Check bounds */
-		if (label_len > 63 || src_offset + label_len + 1 > 512) {
-			break;
-		}
-
-		/* Add dot separator if not first label */
-		if (dst_offset > 0 && dst_offset < max_len - 1) {
-			dst[dst_offset++] = '.';
-		}
-
-		/* Copy the whole label in one read, clamped to remaining dst space
-		 * (clamp chain keeps copy_len <= 63 so the verifier can bound the
-		 * dynamic-size probe_read_user call). */
-		{
-			int copy_len = label_len;
-			int remaining = max_len - 1 - dst_offset;
-			if (remaining < 0)
-				remaining = 0;
-			if (copy_len > remaining)
-				copy_len = remaining;
-			if (copy_len > 63)
-				copy_len = 63;
-			if (copy_len > 0 &&
-			    bpf_probe_read_user(dst + dst_offset, copy_len, src + src_offset + 1) == 0) {
-				dst_offset += copy_len;
-			}
-		}
-
-		src_offset += label_len + 1;
-
-		/* Safety check for offset overflow */
-		if (src_offset > 512)
-			break;
-	}
-
-	/* Null terminate */
-	if (dst_offset < max_len)
-		dst[dst_offset] = '\0';
-
-	return dst_offset;
-}
-
 /* Helper: fill process info into dns_event */
 static __always_inline void fill_dns_process_info(struct dns_event *e)
 {
 	__u64 pid_tgid = bpf_get_current_pid_tgid();
 	__u64 uid_gid = bpf_get_current_uid_gid();
-	
+
 	e->pid = (__u32)(pid_tgid >> 32);
 	e->tgid = (__u32)pid_tgid;
 	e->uid = (__u32)uid_gid;
 	e->type = EVENT_TYPE_DNS;
 	e->timestamp = bpf_ktime_get_ns();
-	
+
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+}
+
+/* Helper: reserve a dns_event, fill in process info + payload, and submit. */
+static __always_inline void emit_dns_raw_event(void *data, __u32 cap_len, __u8 direction)
+{
+	struct dns_event *evt;
+
+	evt = bpf_ringbuf_reserve(&dns_events, sizeof(*evt), 0);
+	if (!evt)
+		return;
+
+	fill_dns_process_info(evt);
+	evt->direction = direction;
+
+	/* Re-bound cap_len immediately before the dynamic-size read: see the
+	 * DNS_CAPTURE_LEN_MASK comment above for why the verifier can't be
+	 * trusted to remember cap_len's earlier history at this point. */
+	cap_len &= DNS_CAPTURE_LEN_MASK;
+
+	if (bpf_probe_read_user(evt->payload, cap_len, data)) {
+		bpf_ringbuf_discard(evt, 0);
+		return;
+	}
+
+	evt->payload_len = (__u16)cap_len;
+	bpf_ringbuf_submit(evt, 0);
+}
+
+/*
+ * dns_socket_key - composite key identifying a UDP socket fd within a
+ * thread group. fd alone is not unique across processes (each process has
+ * its own fd namespace), so pid_tgid must be part of the key.
+ */
+struct dns_socket_key {
+	__u64 pid_tgid;
+	__u32 fd;
+};
+
+/*
+ * dns_socket_map - tracks fds that were connect()ed to UDP port 53.
+ * Populated by trace_connect, consulted by trace_write/trace_writev (for
+ * outbound queries sent via write()/writev() on an already-connected
+ * socket — the common glibc/dig pattern) and trace_recvfrom_enter/
+ * trace_read_enter (for inbound responses arriving via read()/recvfrom()).
+ * LRU so a missed close() doesn't leak entries forever.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 8192);
+	__type(key, struct dns_socket_key);
+	__type(value, __u8);
+} dns_socket_map SEC(".maps");
+
+/*
+ * dns_pending_io - per-thread scratch recording the destination buffer of
+ * an in-flight read()/recvfrom() on a DNS socket, captured at syscall
+ * entry (where the buffer pointer is known) and consumed at syscall exit
+ * (where the kernel has actually filled the buffer and the return value
+ * tells us how many bytes are valid). A thread can only be inside one
+ * syscall at a time, so pid_tgid alone is a safe key shared by both
+ * read() and recvfrom() — the matching enter/exit pair always agrees on
+ * which syscall it was.
+ */
+struct dns_pending_io {
+	__u64 buf; /* user-space buffer pointer, as a plain integer: bpf2go
+		    * can't generate a Go binding for a struct field typed
+		    * as a BTF pointer, so this is stored/read as __u64 and
+		    * cast to/from void* at the call sites below. */
+	__u32 fd;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u64);   /* pid_tgid */
+	__type(value, struct dns_pending_io);
+} dns_pending_io SEC(".maps");
+
+/* Helper: is fd (in the current thread group) a tracked DNS socket?
+ * struct dns_socket_key has 4 bytes of trailing padding after .fd (to
+ * align to its __u64 member); a designated initializer doesn't zero that
+ * padding, and the verifier rejects passing a struct with uninitialized
+ * stack bytes as a map key. __builtin_memset first to be explicit. */
+static __always_inline bool is_dns_socket_fd(__u32 fd)
+{
+	struct dns_socket_key key;
+
+	__builtin_memset(&key, 0, sizeof(key));
+	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.fd = fd;
+	return bpf_map_lookup_elem(&dns_socket_map, &key) != NULL;
+}
+
+/* Tracepoint for connect() — records fds connect()ed to UDP port 53 so
+ * later write()/writev()/read()/recvfrom() calls on them can be recognized
+ * as DNS traffic even though those syscalls carry no destination address. */
+SEC("tracepoint/syscalls/sys_enter_connect")
+int trace_connect(struct trace_event_raw_sys_enter *ctx)
+{
+	struct sockaddr *addr;
+	struct dns_socket_key key;
+	__u8 val = 1;
+
+	addr = (struct sockaddr *)ctx->args[1];
+	if (!addr)
+		return 0;
+
+	if (!is_dns_packet(addr, true))
+		return 0;
+
+	__builtin_memset(&key, 0, sizeof(key));
+	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.fd = (__u32)ctx->args[0];
+	bpf_map_update_elem(&dns_socket_map, &key, &val, BPF_ANY);
+	return 0;
+}
+
+/* Tracepoint for close() — drop the fd from dns_socket_map. Not strictly
+ * required since dns_socket_map is LRU, but it keeps the map accurate
+ * immediately rather than waiting for eviction, and avoids a stale fd
+ * number (reused by a later, unrelated socket) being misclassified. */
+SEC("tracepoint/syscalls/sys_enter_close")
+int trace_close(struct trace_event_raw_sys_enter *ctx)
+{
+	struct dns_socket_key key;
+
+	__builtin_memset(&key, 0, sizeof(key));
+	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.fd = (__u32)ctx->args[0];
+	bpf_map_delete_elem(&dns_socket_map, &key);
+	return 0;
+}
+
+/* Tracepoint for write() on a connected DNS socket (outbound query). This
+ * is the path glibc's resolver and `dig` actually take: connect() once,
+ * then write() the query with no destination argument. */
+SEC("tracepoint/syscalls/sys_enter_write")
+int trace_write(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	void *buf;
+	long len;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	buf = (void *)ctx->args[1];
+	len = (long)ctx->args[2];
+	if (!buf || len < 12)
+		return 0;
+
+	emit_dns_raw_event(buf, (__u32)len, 0 /* query */);
+	return 0;
+}
+
+/* Tracepoint for writev() on a connected DNS socket (outbound query).
+ * Only the first iovec is inspected, matching the existing sendmsg
+ * handling above — DNS queries are small enough to fit in one iovec in
+ * every resolver implementation observed in practice. */
+SEC("tracepoint/syscalls/sys_enter_writev")
+int trace_writev(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	struct iovec *iov;
+	void *data;
+	long data_len;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	iov = (struct iovec *)ctx->args[1];
+	if (!iov)
+		return 0;
+
+	bpf_probe_read_user(&data, sizeof(data), &iov->iov_base);
+	bpf_probe_read_user(&data_len, sizeof(data_len), &iov->iov_len);
+
+	if (!data || data_len < 12)
+		return 0;
+
+	emit_dns_raw_event(data, (__u32)data_len, 0 /* query */);
+	return 0;
+}
+
+/* Tracepoint for read() entry on a connected DNS socket: stash the
+ * destination buffer pointer so trace_read_exit can capture the payload
+ * once the kernel has actually filled it. */
+SEC("tracepoint/syscalls/sys_enter_read")
+int trace_read_enter(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	struct dns_pending_io io;
+	__u64 pid_tgid;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	__builtin_memset(&io, 0, sizeof(io));
+	io.buf = ctx->args[1];
+	io.fd = fd;
+	pid_tgid = bpf_get_current_pid_tgid();
+	bpf_map_update_elem(&dns_pending_io, &pid_tgid, &io, BPF_ANY);
+	return 0;
+}
+
+/* Tracepoint for read() exit: ctx->ret is the number of bytes the kernel
+ * actually wrote into the buffer captured at entry — that's the inbound
+ * DNS response (or as much of it as fit in the caller's buffer). */
+SEC("tracepoint/syscalls/sys_exit_read")
+int trace_read_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	struct dns_pending_io *io;
+	long ret = ctx->ret;
+
+	io = bpf_map_lookup_elem(&dns_pending_io, &pid_tgid);
+	if (!io)
+		return 0;
+
+	if (ret >= 12 && io->buf)
+		emit_dns_raw_event((void *)io->buf, (__u32)ret, 1 /* response */);
+
+	bpf_map_delete_elem(&dns_pending_io, &pid_tgid);
+	return 0;
+}
+
+/* Tracepoint for recvfrom() entry on a connected DNS socket — same
+ * stash-at-entry / read-at-exit pattern as read() above. */
+SEC("tracepoint/syscalls/sys_enter_recvfrom")
+int trace_recvfrom_enter(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	struct dns_pending_io io;
+	__u64 pid_tgid;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	__builtin_memset(&io, 0, sizeof(io));
+	io.buf = ctx->args[1];
+	io.fd = fd;
+	pid_tgid = bpf_get_current_pid_tgid();
+	bpf_map_update_elem(&dns_pending_io, &pid_tgid, &io, BPF_ANY);
+	return 0;
+}
+
+/* Tracepoint for recvfrom() exit: ctx->ret is the number of bytes
+ * received into the buffer captured at entry. */
+SEC("tracepoint/syscalls/sys_exit_recvfrom")
+int trace_recvfrom_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	struct dns_pending_io *io;
+	long ret = ctx->ret;
+
+	io = bpf_map_lookup_elem(&dns_pending_io, &pid_tgid);
+	if (!io)
+		return 0;
+
+	if (ret >= 12 && io->buf)
+		emit_dns_raw_event((void *)io->buf, (__u32)ret, 1 /* response */);
+
+	bpf_map_delete_elem(&dns_pending_io, &pid_tgid);
+	return 0;
+}
+
+/* Tracepoint for sendmmsg() on a connected DNS socket (outbound query).
+ * This is the path glibc's stub resolver (and therefore `dig`) actually
+ * takes in practice: connect() once, then sendmmsg() with msg_name=NULL,
+ * relying on the connected destination rather than passing an address —
+ * so the address-based filtering in trace_sendmsg/trace_sendto never
+ * sees it. struct mmsghdr is { struct user_msghdr msg_hdr; unsigned int
+ * msg_len; }, i.e. msg_hdr is its first member at offset 0, so the
+ * mmsghdr pointer can be read as a plain user_msghdr* to get at the
+ * first message's iovec — only the first of the vlen messages is
+ * inspected, matching the existing single-iovec handling elsewhere in
+ * this file. */
+SEC("tracepoint/syscalls/sys_enter_sendmmsg")
+int trace_sendmmsg(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	struct user_msghdr *msg;
+	struct iovec *iov;
+	void *data;
+	long data_len;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	msg = (struct user_msghdr *)ctx->args[1];
+	if (!msg)
+		return 0;
+
+	bpf_probe_read_user(&iov, sizeof(iov), &msg->msg_iov);
+	if (!iov)
+		return 0;
+
+	bpf_probe_read_user(&data, sizeof(data), &iov->iov_base);
+	bpf_probe_read_user(&data_len, sizeof(data_len), &iov->iov_len);
+
+	if (!data || data_len < 12)
+		return 0;
+
+	emit_dns_raw_event(data, (__u32)data_len, 0 /* query */);
+	return 0;
+}
+
+/* Tracepoint for recvmsg() entry on a connected DNS socket: stash the
+ * first iovec's destination buffer pointer, same enter/exit split as
+ * read()/recvfrom() above — the kernel only fills msg_iov[0].iov_base
+ * by the time the syscall returns, not at entry. */
+SEC("tracepoint/syscalls/sys_enter_recvmsg")
+int trace_recvmsg_enter(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 fd = (__u32)ctx->args[0];
+	struct user_msghdr *msg;
+	struct iovec *iov;
+	void *data;
+	struct dns_pending_io io;
+	__u64 pid_tgid;
+
+	if (!is_dns_socket_fd(fd))
+		return 0;
+
+	msg = (struct user_msghdr *)ctx->args[1];
+	if (!msg)
+		return 0;
+
+	bpf_probe_read_user(&iov, sizeof(iov), &msg->msg_iov);
+	if (!iov)
+		return 0;
+
+	bpf_probe_read_user(&data, sizeof(data), &iov->iov_base);
+	if (!data)
+		return 0;
+
+	__builtin_memset(&io, 0, sizeof(io));
+	io.buf = (__u64)data;
+	io.fd = fd;
+	pid_tgid = bpf_get_current_pid_tgid();
+	bpf_map_update_elem(&dns_pending_io, &pid_tgid, &io, BPF_ANY);
+	return 0;
+}
+
+/* Tracepoint for recvmsg() exit: ctx->ret is the number of bytes received
+ * into the buffer captured at entry. */
+SEC("tracepoint/syscalls/sys_exit_recvmsg")
+int trace_recvmsg_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	struct dns_pending_io *io;
+	long ret = ctx->ret;
+
+	io = bpf_map_lookup_elem(&dns_pending_io, &pid_tgid);
+	if (!io)
+		return 0;
+
+	if (ret >= 12 && io->buf)
+		emit_dns_raw_event((void *)io->buf, (__u32)ret, 1 /* response */);
+
+	bpf_map_delete_elem(&dns_pending_io, &pid_tgid);
+	return 0;
 }
 
 /* Tracepoint for UDP sendmsg (outbound DNS queries) */
 SEC("tracepoint/syscalls/sys_enter_sendmsg")
 int trace_sendmsg(struct trace_event_raw_sys_enter *ctx)
 {
-	struct dns_event *evt;
 	struct user_msghdr *msg;
 	struct sockaddr *addr;
 	struct iovec *iov;
 	void *data;
 	int data_len;
-	
+
 	/* Get message header from syscall argument */
 	msg = (struct user_msghdr *)ctx->args[1];
 	if (!msg)
 		return 0;
-	
+
 	/* Get destination address */
 	bpf_probe_read_user(&addr, sizeof(addr), &msg->msg_name);
 	if (!addr)
 		return 0;
-	
+
 	/* EARLY FILTER: Only process DNS packets (UDP port 53) */
 	if (!is_dns_packet(addr, true))
 		return 0;
-	
+
 	/* Get IO vector */
 	bpf_probe_read_user(&iov, sizeof(iov), &msg->msg_iov);
 	if (!iov)
 		return 0;
-	
+
 	/* Get first iov entry data and length */
 	bpf_probe_read_user(&data, sizeof(data), &iov->iov_base);
 	bpf_probe_read_user(&data_len, sizeof(data_len), &iov->iov_len);
-	
+
 	if (!data || data_len < 12)  /* Minimum DNS header size */
 		return 0;
-	
-	/* Reserve event in ring buffer */
-	evt = bpf_ringbuf_reserve(&dns_events, sizeof(*evt), 0);
-	if (!evt)
-		return 0;
-	
-	/* Fill process info */
-	fill_dns_process_info(evt);
-	evt->direction = 0; /* Query (outbound) */
-	evt->response_count = 0;
-	
-	/* Parse DNS query from data */
-	/* DNS query format after header:
-	 * - QNAME (variable length, encoded)
-	 * - QTYPE (2 bytes)
-	 * - QCLASS (2 bytes)
-	 */
-	
-	/* Skip DNS header (12 bytes) and decode QNAME */
-	evt->qname_len = decode_dns_name(data + 12, evt->qname, DNS_MAX_NAME_LEN);
-	
-	/* Read QTYPE (after QNAME) - approximate position */
-	/* For simplicity, we read from a fixed offset after typical QNAME length */
-	if (data_len > 14) {
-		__u16 qtype;
-		/* Try to read QTYPE from various offsets based on common domain lengths */
-		int qtype_offset = 12 + evt->qname_len + 1; /* header + qname + null */
-		if (qtype_offset + 2 <= data_len && qtype_offset < 512) {
-			bpf_probe_read_user(&qtype, sizeof(qtype), data + qtype_offset);
-			evt->qtype = __builtin_bswap16(qtype);
-		} else {
-			evt->qtype = 0;
-		}
-	} else {
-		evt->qtype = 0;
-	}
-	
-	evt->rcode = 0; /* No response code for queries */
-	
-	bpf_ringbuf_submit(evt, 0);
+
+	emit_dns_raw_event(data, (__u32)data_len, 0 /* query */);
 	return 0;
 }
 
@@ -264,88 +530,28 @@ int trace_sendmsg(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_enter_sendto")
 int trace_sendto(struct trace_event_raw_sys_enter *ctx)
 {
-	struct dns_event *evt;
 	struct sockaddr *addr;
 	void *buf;
 	int len;
-	
+
 	/* Get destination address from syscall argument */
 	addr = (struct sockaddr *)ctx->args[4];
 	if (!addr)
 		return 0;
-	
+
 	/* EARLY FILTER: Only process DNS packets (UDP port 53) */
 	if (!is_dns_packet(addr, true))
 		return 0;
-	
+
 	/* Get buffer and length */
 	buf = (void *)ctx->args[1];
 	len = (int)ctx->args[2];
-	
+
 	if (!buf || len < 12)
 		return 0;
-	
-	/* Reserve event in ring buffer */
-	evt = bpf_ringbuf_reserve(&dns_events, sizeof(*evt), 0);
-	if (!evt)
-		return 0;
-	
-	/* Fill process info */
-	fill_dns_process_info(evt);
-	evt->direction = 0; /* Query (outbound) */
-	evt->response_count = 0;
-	
-	/* Parse DNS query */
-	evt->qname_len = decode_dns_name(buf + 12, evt->qname, DNS_MAX_NAME_LEN);
-	
-	/* Read QTYPE */
-	if (len > 14) {
-		__u16 qtype;
-		int qtype_offset = 12 + evt->qname_len + 1;
-		if (qtype_offset + 2 <= len && qtype_offset < 512) {
-			bpf_probe_read_user(&qtype, sizeof(qtype), buf + qtype_offset);
-			evt->qtype = __builtin_bswap16(qtype);
-		} else {
-			evt->qtype = 0;
-		}
-	} else {
-		evt->qtype = 0;
-	}
-	
-	evt->rcode = 0;
-	
-	bpf_ringbuf_submit(evt, 0);
+
+	emit_dns_raw_event(buf, (__u32)len, 0 /* query */);
 	return 0;
 }
-
-/* Tracepoint for UDP recvmsg (inbound DNS responses) */
-SEC("tracepoint/syscalls/sys_exit_recvmsg")
-int trace_recvmsg(struct trace_event_raw_sys_exit *ctx)
-{
-	struct dns_event *evt;
-	struct user_msghdr *msg;
-	struct sockaddr *addr;
-	struct iovec *iov;
-	void *data;
-	int data_len;
-	long ret;
-	
-	/* Check return value - must be successful */
-	ret = ctx->ret;
-	if (ret < 12)  /* Minimum DNS header size */
-		return 0;
-	
-	/* Get message header from syscall argument (stored in probe) */
-	/* Note: for sys_exit, we need to read the msg header from user space */
-	/* This is a simplified version - in production, you'd use a kprobe on udp_recvmsg */
-	
-	/* For now, we skip detailed response parsing in tracepoint due to complexity */
-	/* Full implementation would use kprobe on udp_recvmsg or skb tracepoint */
-	
-	return 0;
-}
-
-/* Alternative: kprobe on udp_rcv for kernel-space packet inspection */
-/* This provides access to the skb without userspace pointer complexity */
 
 char _license[] SEC("license") = "GPL";

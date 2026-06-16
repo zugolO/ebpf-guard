@@ -130,14 +130,22 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 		}
 
 		/* Add dot separator if not first label.
-		 * dst_offset is masked at the write site (not just bounds-checked)
-		 * because the verifier loses precise tracking of its accumulated
-		 * range across the 16 unrolled iterations; a power-of-two mask is
-		 * a bound it can always prove regardless of range-tracking
-		 * precision elsewhere in the loop. */
+		 *
+		 * dst_offset is re-masked to [0, DNS_MAX_NAME_LEN) immediately
+		 * after every increment, not just at the point of use. Masking
+		 * only at the write site isn't enough: dst_offset is carried
+		 * across the loop's backedge (this is an unrolled loop, but it
+		 * still compiles to a real backward jump), and the verifier
+		 * tracks its accumulated range going into the next iteration. If
+		 * the range isn't pinned down right after each increment, that
+		 * range keeps growing across iterations (observed umax_value=255
+		 * for an 8-bit field after only two iterations) regardless of
+		 * bounds checks earlier in the same iteration. A power-of-two
+		 * mask is the one bound the verifier can always prove directly
+		 * from the instruction, with no range inference required. */
 		if (dst_offset > 0 && dst_offset < max_len - 1) {
 			dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
-			dst_offset++;
+			dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
 		}
 
 		/* Bail out (no write) if the label wouldn't fit, rather than
@@ -150,7 +158,7 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 			break;
 
 		if (bpf_probe_read_user(dst + dst_offset, label_len, src + src_offset + 1) == 0) {
-			dst_offset += label_len;
+			dst_offset = (dst_offset + label_len) & (DNS_MAX_NAME_LEN - 1);
 		}
 
 		src_offset += label_len + 1;

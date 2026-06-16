@@ -18,17 +18,6 @@
 /* DNS event type - must match pkg/types/event.go */
 #define EVENT_TYPE_DNS 5
 
-/* Forces the compiler/verifier to forget any exact (precise) value tracked
- * for var and fall back to whatever range its last mask established. Used
- * at the end of decode_dns_name's loop body: the verifier's loop-pruning
- * needs to recognize two visits to the loop head as equivalent states, but
- * an exact/precise scalar (set once it feeds pointer arithmetic) requires
- * byte-for-byte equality to match — which a data-dependent loop never
- * produces — so without this, every iteration is treated as a brand new
- * state and the per-iteration path count compounds until the verifier
- * exhausts its 1M instruction budget. */
-#define barrier_var(var) asm volatile("" : "=r"(var) : "0"(var))
-
 /* DNS constants */
 #define DNS_PORT 53
 #define DNS_MAX_NAME_LEN 128
@@ -113,60 +102,53 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 	return port == __builtin_bswap16(DNS_PORT);
 }
 
-/* Helper: decode DNS name from wire format.
- * This is a single flat loop over wire bytes (no nested loops — see git
- * history for why a nested version blew the verifier's instruction
- * budget). Even flattened, the loop didn't converge: dst_offset,
- * label_remaining and src_offset all feed pointer arithmetic, which makes
- * the verifier track their *exact* value ("precise") rather than just a
- * range. Two visits to the loop head with different exact values are
- * never recognized as the same state, so pruning never kicks in and the
- * verifier re-explores the remaining iterations from scratch every time —
- * exhausting the 1M instruction budget well before the loop's 192-iteration
- * bound is reached. barrier_var() on each loop-carried variable at the end
- * of the body forces the verifier to discard the exact value and keep only
- * the range from the preceding mask, which is enough for pruning to work. */
+/* Wire-byte scratch buffer for decode_dns_name. Read once in bulk before the
+ * loop instead of one bpf_probe_read_user() call per iteration: a helper
+ * call inside the loop body hands back a fresh scalar ID on every visit,
+ * which is what defeated state-pruning in every previous attempt (see git
+ * history). With the read hoisted out, the loop only ever touches a local
+ * array with masked indices — there's nothing left for the verifier to
+ * treat as imprecise-but-unbounded, so it can fully unroll the fixed
+ * 192-iteration walk without exploding past the 1M instruction budget. */
+#define DNS_WIRE_SCRATCH_LEN 192
+
+/* Helper: decode DNS name from wire format. */
 static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
 {
-	int src_offset = 0;
+	__u8 buf[DNS_WIRE_SCRATCH_LEN];
 	int dst_offset = 0;
 	int label_remaining = 0;
-	__u8 b;
 	int i;
-	const int max_total = 192; /* generous bound on total wire bytes scanned */
 
-	for (i = 0; i < max_total; i++) {
-		if (bpf_probe_read_user(&b, sizeof(b), src + src_offset))
-			break;
+	if (bpf_probe_read_user(buf, sizeof(buf), src))
+		return 0;
+
+#pragma unroll
+	for (i = 0; i < DNS_WIRE_SCRATCH_LEN; i++) {
+		__u8 b = buf[i & (DNS_WIRE_SCRATCH_LEN - 1)];
 
 		if (label_remaining == 0) {
 			/* b is a label-length byte */
-			if (b == 0) {
-				src_offset++;
+			if (b == 0)
 				break;
-			}
 
 			if ((b & 0xC0) == 0xC0) {
 				/* Compression pointer - we don't follow it, just stop. */
-				src_offset += 2;
 				break;
 			}
 
-			if (b > 63) {
+			if (b > 63)
 				break;
-			}
 
 			/* Add dot separator if not first label. Masked at the write
 			 * site: a power-of-two mask is a bound the verifier can always
-			 * prove directly from the instruction itself, regardless of
-			 * what range it manages to track for the variable carrying it. */
+			 * prove directly from the instruction itself. */
 			if (dst_offset > 0 && dst_offset < max_len - 1) {
 				dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
 				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
 			}
 
 			label_remaining = b & 0x3F;
-			src_offset = (src_offset + 1) & 0x1FF;
 		} else {
 			/* b is a label data byte */
 			if (dst_offset < max_len - 1) {
@@ -174,12 +156,7 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 				dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
 			}
 			label_remaining = (label_remaining - 1) & 0x3F;
-			src_offset = (src_offset + 1) & 0x1FF;
 		}
-
-		barrier_var(dst_offset);
-		barrier_var(label_remaining);
-		barrier_var(src_offset);
 	}
 
 	/* Null terminate (masked for the same reason as the dot-separator write

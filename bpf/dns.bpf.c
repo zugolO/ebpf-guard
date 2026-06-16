@@ -109,23 +109,45 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
  * history). With the read hoisted out, the loop only ever touches a local
  * array with masked indices — there's nothing left for the verifier to
  * treat as imprecise-but-unbounded, so it can fully unroll the fixed
- * 192-iteration walk without exploding past the 1M instruction budget. */
+ * 192-iteration walk without exploding past the 1M instruction budget.
+ *
+ * The buffer itself lives in a per-CPU array map rather than on the BPF
+ * stack: 192 bytes inlined into trace_sendmsg's frame on top of its other
+ * locals blows the 512-byte BPF stack limit ("Looks like the BPF stack
+ * limit of 512 bytes is exceeded"). A single-element per-CPU array gives
+ * each CPU its own scratch slot with no stack cost and no contention. */
 #define DNS_WIRE_SCRATCH_LEN 192
+
+struct dns_wire_scratch {
+	__u8 buf[DNS_WIRE_SCRATCH_LEN];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct dns_wire_scratch);
+} dns_wire_scratch SEC(".maps");
 
 /* Helper: decode DNS name from wire format. */
 static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
 {
-	__u8 buf[DNS_WIRE_SCRATCH_LEN];
+	__u32 zero = 0;
+	struct dns_wire_scratch *scratch;
 	int dst_offset = 0;
 	int label_remaining = 0;
 	int i;
 
-	if (bpf_probe_read_user(buf, sizeof(buf), src))
+	scratch = bpf_map_lookup_elem(&dns_wire_scratch, &zero);
+	if (!scratch)
+		return 0;
+
+	if (bpf_probe_read_user(scratch->buf, sizeof(scratch->buf), src))
 		return 0;
 
 #pragma unroll
 	for (i = 0; i < DNS_WIRE_SCRATCH_LEN; i++) {
-		__u8 b = buf[i & (DNS_WIRE_SCRATCH_LEN - 1)];
+		__u8 b = scratch->buf[i & (DNS_WIRE_SCRATCH_LEN - 1)];
 
 		if (label_remaining == 0) {
 			/* b is a label-length byte */

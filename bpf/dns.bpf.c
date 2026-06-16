@@ -115,7 +115,13 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 	int iterations = 0;
 	const int max_iterations = 16; /* DNS names rarely exceed a handful of labels */
 
-	#pragma unroll
+	/* No #pragma unroll: unrolling this outer loop duplicates the inner
+	 * byte-copy loop 16x, and each copy gets verified separately with its
+	 * own slowly-widening bound walk (observed directly: umax climbing
+	 * one-by-one across hundreds of states per copy) — that's what was
+	 * pushing the total past the verifier's 1M processed-instruction
+	 * limit. Left as a real bounded loop, the whole function is verified
+	 * once instead of 16 times. */
 	for (iterations = 0; iterations < max_iterations; iterations++) {
 		/* Read label length */
 		if (bpf_probe_read_user(&label_len, sizeof(label_len), src + src_offset))

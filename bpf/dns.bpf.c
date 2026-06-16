@@ -15,15 +15,6 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
-/* Forces the compiler to forget any range it has inferred for `var`,
- * forcing it to materialize the value through a register round-trip. Plain
- * "x &= mask" masks can get optimized away by LLVM if it believes (correctly,
- * by its own range analysis, but more optimistically than what the kernel
- * verifier accepts) that x is already within range — silently discarding the
- * exact safety net we added. This is the standard trick used in kernel/
- * iproute2 BPF samples to defeat that. */
-#define barrier_var(var) asm volatile("" : "=r"(var) : "0"(var))
-
 /* DNS event type - must match pkg/types/event.go */
 #define EVENT_TYPE_DNS 5
 
@@ -147,63 +138,49 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 		if (label_len > 63 || src_offset + label_len + 1 > 512) {
 			break;
 		}
-		/* Re-assert the bound with an explicit mask, for the same reason
-		 * dst_offset is masked below: label_len is read fresh each
-		 * iteration of what compiles to a real loop (not a full unroll),
-		 * and the verifier doesn't reliably keep the range from the
-		 * comparison above pinned to [0,63] across iterations.
-		 *
-		 * barrier_var() goes BEFORE the mask, not after: it forces the
-		 * compiler to discard what it currently believes about
-		 * label_len's range, so the following AND can't be elided as
-		 * "redundant" — eliding it would carry forward the wide,
-		 * loop-imprecise range instead of the narrow masked one. A
-		 * barrier placed after the mask would erase the narrow range we
-		 * just established instead (that's the size=255 bug this
-		 * comment is here to prevent regressing). */
-		barrier_var(label_len);
-		label_len &= 0x3F;
 
-		/* Add dot separator if not first label.
-		 *
-		 * dst_offset is re-masked to [0, DNS_MAX_NAME_LEN) immediately
-		 * after every increment, not just at the point of use. Masking
-		 * only at the write site isn't enough: dst_offset is carried
-		 * across the loop's backedge (this is an unrolled loop, but it
-		 * still compiles to a real backward jump), and the verifier
-		 * tracks its accumulated range going into the next iteration. If
-		 * the range isn't pinned down right after each increment, that
-		 * range keeps growing across iterations (observed umax_value=255
-		 * for an 8-bit field after only two iterations) regardless of
-		 * bounds checks earlier in the same iteration. A power-of-two
-		 * mask is the one bound the verifier can always prove directly
-		 * from the instruction, with no range inference required. */
+		/* Add dot separator if not first label. Masked at the write site:
+		 * dst_offset is carried across the loop's backedge (this compiles
+		 * to a real backward jump, not a full unroll), and the verifier
+		 * doesn't reliably keep range info pinned to a stack-spilled
+		 * variable across that backedge — a power-of-two mask is a bound
+		 * it can always prove directly from the instruction itself. */
 		if (dst_offset > 0 && dst_offset < max_len - 1) {
-			barrier_var(dst_offset);
 			dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
 			dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
 		}
 
-		/* Bail out (no write) if the label wouldn't fit, rather than
-		 * clamping copy_len down to fit. The verifier can't correlate a
-		 * clamped copy_len with dst_offset across unrolled iterations, so
-		 * it conservatively assumes both can be at their independent max
-		 * at once, putting the write past the end of dst. A hard
-		 * pre-check keeps the bound on dst_offset + label_len provable. */
 		if (dst_offset + label_len > max_len - 1)
 			break;
 
-		/* Re-mask immediately before the call, defensively: the branch
-		 * above can itself widen the range the verifier associates with
-		 * dst_offset on the taken-vs-not-taken paths, even though
-		 * dst_offset's actual value hasn't changed since the last mask.
-		 * barrier before the mask, not after — see the comment on
-		 * label_len above. */
-		barrier_var(dst_offset);
-		dst_offset &= (DNS_MAX_NAME_LEN - 1);
+		/* Read the label into a fixed-size local buffer with a constant
+		 * read length (64, not label_len) instead of bulk-copying
+		 * label_len bytes directly into dst at a variable offset.
+		 * bpf_probe_read_user(dst + dst_offset, label_len, ...) requires
+		 * the verifier to prove dst_offset + label_len stays in bounds
+		 * for a single dynamic-size helper call, and it can't: label_len
+		 * gets spilled to the stack across the loop's backedge and
+		 * reloads with its narrow [0,63] bound lost on re-verification
+		 * (observed umax_value=255 on reload despite masking right
+		 * before the spill). Splitting into "read a constant-size
+		 * window" + "copy at most label_len bytes with a compile-time
+		 * bounded, individually-masked byte loop" sidesteps that: every
+		 * write here is the same single-byte-masked-offset pattern
+		 * already proven to verify cleanly for the dot/null-terminator
+		 * writes above. */
+		{
+			__u8 label_buf[64] = {0};
+			int j;
 
-		if (bpf_probe_read_user(dst + dst_offset, label_len, src + src_offset + 1) == 0) {
-			dst_offset = (dst_offset + label_len) & (DNS_MAX_NAME_LEN - 1);
+			if (bpf_probe_read_user(label_buf, sizeof(label_buf), src + src_offset + 1) == 0) {
+				#pragma unroll
+				for (j = 0; j < 63; j++) {
+					if (j >= label_len)
+						break;
+					dst[(dst_offset + j) & (DNS_MAX_NAME_LEN - 1)] = label_buf[j];
+				}
+				dst_offset = (dst_offset + label_len) & (DNS_MAX_NAME_LEN - 1);
+			}
 		}
 
 		src_offset += label_len + 1;

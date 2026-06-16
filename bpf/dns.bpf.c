@@ -105,11 +105,8 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 /* Wire-byte scratch buffer for decode_dns_name. Read once in bulk before the
  * loop instead of one bpf_probe_read_user() call per iteration: a helper
  * call inside the loop body hands back a fresh scalar ID on every visit,
- * which is what defeated state-pruning in every previous attempt (see git
- * history). With the read hoisted out, the loop only ever touches a local
- * array with masked indices — there's nothing left for the verifier to
- * treat as imprecise-but-unbounded, so it can fully unroll the fixed
- * 192-iteration walk without exploding past the 1M instruction budget.
+ * which previously defeated state-pruning across the loop's backedge (see
+ * git history).
  *
  * The buffer itself lives in a per-CPU array map rather than on the BPF
  * stack: 192 bytes inlined into trace_sendmsg's frame on top of its other
@@ -129,7 +126,25 @@ struct {
 	__type(value, struct dns_wire_scratch);
 } dns_wire_scratch SEC(".maps");
 
-/* Helper: decode DNS name from wire format. */
+/* Forces the verifier to forget any exact ("precise") value tracked for var
+ * and fall back to whatever range its preceding mask established. dst_offset
+ * and label_remaining feed pointer arithmetic, which makes the verifier
+ * track their exact value rather than just a range; two visits to the loop
+ * head with different exact values are never recognized as the same state,
+ * so without this the verifier re-explores the rest of the loop from
+ * scratch on every iteration instead of pruning. This only works in
+ * combination with hoisting bpf_probe_read_user() out of the loop above —
+ * a helper call inside the loop body hands back a fresh scalar ID on every
+ * visit regardless of barrier_var, which independently defeats pruning. */
+#define barrier_var(var) asm volatile("" : "=r"(var) : "0"(var))
+
+/* Helper: decode DNS name from wire format.
+ * Deliberately NOT #pragma unroll: unrolling turns this into straight-line
+ * code where dst_offset/label_remaining diverge on every copy (no backedge
+ * to prune), so the verifier walks the shared suffix after every forward
+ * branch separately — same exponential blowup as the loop case, just
+ * without a loop. A real bounded loop lets pruning collapse the explored
+ * suffix once the loop-head state repeats. */
 static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_len)
 {
 	__u32 zero = 0;
@@ -145,7 +160,6 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 	if (bpf_probe_read_user(scratch->buf, sizeof(scratch->buf), src))
 		return 0;
 
-#pragma unroll
 	for (i = 0; i < DNS_WIRE_SCRATCH_LEN; i++) {
 		__u8 b = scratch->buf[i & (DNS_WIRE_SCRATCH_LEN - 1)];
 
@@ -179,6 +193,9 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 			}
 			label_remaining = (label_remaining - 1) & 0x3F;
 		}
+
+		barrier_var(dst_offset);
+		barrier_var(label_remaining);
 	}
 
 	/* Null terminate (masked for the same reason as the dot-separator write

@@ -53,6 +53,8 @@ generate:
 	@bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
 	@echo "  Running go generate (bpf2go)..."
 	GOPACKAGE=bpf go generate ./internal/bpf/...
+	@echo "  Removing stub bindings now superseded by generated files..."
+	@rm -f internal/bpf/syscall_bpf_gen.go internal/bpf/xdp_bpf_gen.go
 
 # Build the main binary (core only — no OPA, Kafka, or TUI)
 build:

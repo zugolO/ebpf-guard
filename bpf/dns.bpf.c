@@ -15,6 +15,15 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
+/* Forces the compiler to forget any range it has inferred for `var`,
+ * forcing it to materialize the value through a register round-trip. Plain
+ * "x &= mask" masks can get optimized away by LLVM if it believes (correctly,
+ * by its own range analysis, but more optimistically than what the kernel
+ * verifier accepts) that x is already within range — silently discarding the
+ * exact safety net we added. This is the standard trick used in kernel/
+ * iproute2 BPF samples to defeat that. */
+#define barrier_var(var) asm volatile("" : "=r"(var) : "0"(var))
+
 /* DNS event type - must match pkg/types/event.go */
 #define EVENT_TYPE_DNS 5
 
@@ -144,6 +153,7 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 		 * and the verifier doesn't reliably keep the range from the
 		 * comparison above pinned to [0,63] across iterations. */
 		label_len &= 0x3F;
+		barrier_var(label_len);
 
 		/* Add dot separator if not first label.
 		 *
@@ -162,6 +172,7 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 		if (dst_offset > 0 && dst_offset < max_len - 1) {
 			dst[dst_offset & (DNS_MAX_NAME_LEN - 1)] = '.';
 			dst_offset = (dst_offset + 1) & (DNS_MAX_NAME_LEN - 1);
+			barrier_var(dst_offset);
 		}
 
 		/* Bail out (no write) if the label wouldn't fit, rather than
@@ -178,9 +189,11 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 		 * dst_offset on the taken-vs-not-taken paths, even though
 		 * dst_offset's actual value hasn't changed since the last mask. */
 		dst_offset &= (DNS_MAX_NAME_LEN - 1);
+		barrier_var(dst_offset);
 
 		if (bpf_probe_read_user(dst + dst_offset, label_len, src + src_offset + 1) == 0) {
 			dst_offset = (dst_offset + label_len) & (DNS_MAX_NAME_LEN - 1);
+			barrier_var(dst_offset);
 		}
 
 		src_offset += label_len + 1;

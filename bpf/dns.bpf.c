@@ -138,6 +138,12 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 		if (label_len > 63 || src_offset + label_len + 1 > 512) {
 			break;
 		}
+		/* Re-assert the bound with an explicit mask, for the same reason
+		 * dst_offset is masked below: label_len is read fresh each
+		 * iteration of what compiles to a real loop (not a full unroll),
+		 * and the verifier doesn't reliably keep the range from the
+		 * comparison above pinned to [0,63] across iterations. */
+		label_len &= 0x3F;
 
 		/* Add dot separator if not first label.
 		 *
@@ -166,6 +172,12 @@ static __always_inline int decode_dns_name(const __u8 *src, __u8 *dst, int max_l
 		 * pre-check keeps the bound on dst_offset + label_len provable. */
 		if (dst_offset + label_len > max_len - 1)
 			break;
+
+		/* Re-mask immediately before the call, defensively: the branch
+		 * above can itself widen the range the verifier associates with
+		 * dst_offset on the taken-vs-not-taken paths, even though
+		 * dst_offset's actual value hasn't changed since the last mask. */
+		dst_offset &= (DNS_MAX_NAME_LEN - 1);
 
 		if (bpf_probe_read_user(dst + dst_offset, label_len, src + src_offset + 1) == 0) {
 			dst_offset = (dst_offset + label_len) & (DNS_MAX_NAME_LEN - 1);

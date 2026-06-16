@@ -191,7 +191,7 @@ func (c *DNSCollector) LostEvents() uint64 {
 
 // parseEvent parses a raw ring buffer record into a types.Event.
 func (c *DNSCollector) parseEvent(raw []byte) *types.Event {
-	// 4+8+4+4+4+16+128+2+2+1+1+1 = 175 bytes minimum (no response IPs)
+	// 4+8+4+4+4+16+128+32(pad)+2+2+1+1+1 = 207 bytes minimum (no response IPs)
 	if len(raw) < 207 {
 		return nil
 	}

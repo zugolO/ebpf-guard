@@ -196,13 +196,18 @@ struct {
 	__type(value, struct dns_pending_io);
 } dns_pending_io SEC(".maps");
 
-/* Helper: is fd (in the current thread group) a tracked DNS socket? */
+/* Helper: is fd (in the current thread group) a tracked DNS socket?
+ * struct dns_socket_key has 4 bytes of trailing padding after .fd (to
+ * align to its __u64 member); a designated initializer doesn't zero that
+ * padding, and the verifier rejects passing a struct with uninitialized
+ * stack bytes as a map key. __builtin_memset first to be explicit. */
 static __always_inline bool is_dns_socket_fd(__u32 fd)
 {
-	struct dns_socket_key key = {
-		.pid_tgid = bpf_get_current_pid_tgid(),
-		.fd = fd,
-	};
+	struct dns_socket_key key;
+
+	__builtin_memset(&key, 0, sizeof(key));
+	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.fd = fd;
 	return bpf_map_lookup_elem(&dns_socket_map, &key) != NULL;
 }
 
@@ -223,6 +228,7 @@ int trace_connect(struct trace_event_raw_sys_enter *ctx)
 	if (!is_dns_packet(addr, true))
 		return 0;
 
+	__builtin_memset(&key, 0, sizeof(key));
 	key.pid_tgid = bpf_get_current_pid_tgid();
 	key.fd = (__u32)ctx->args[0];
 	bpf_map_update_elem(&dns_socket_map, &key, &val, BPF_ANY);
@@ -236,10 +242,11 @@ int trace_connect(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_enter_close")
 int trace_close(struct trace_event_raw_sys_enter *ctx)
 {
-	struct dns_socket_key key = {
-		.pid_tgid = bpf_get_current_pid_tgid(),
-		.fd = (__u32)ctx->args[0],
-	};
+	struct dns_socket_key key;
+
+	__builtin_memset(&key, 0, sizeof(key));
+	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.fd = (__u32)ctx->args[0];
 	bpf_map_delete_elem(&dns_socket_map, &key);
 	return 0;
 }
@@ -308,6 +315,7 @@ int trace_read_enter(struct trace_event_raw_sys_enter *ctx)
 	if (!is_dns_socket_fd(fd))
 		return 0;
 
+	__builtin_memset(&io, 0, sizeof(io));
 	io.buf = ctx->args[1];
 	io.fd = fd;
 	pid_tgid = bpf_get_current_pid_tgid();
@@ -348,6 +356,7 @@ int trace_recvfrom_enter(struct trace_event_raw_sys_enter *ctx)
 	if (!is_dns_socket_fd(fd))
 		return 0;
 
+	__builtin_memset(&io, 0, sizeof(io));
 	io.buf = ctx->args[1];
 	io.fd = fd;
 	pid_tgid = bpf_get_current_pid_tgid();

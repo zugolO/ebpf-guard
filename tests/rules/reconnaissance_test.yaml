@@ -1,0 +1,122 @@
+suite: reconnaissance
+rules_path: ../../rules/reconnaissance.yaml
+tests:
+  # ── System info discovery ──────────────────────────────────────────────────
+  - name: "uname execve fires recon_system_info"
+    rule_id: recon_system_info
+    event:
+      type: syscall
+      comm: uname
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "lscpu execve fires recon_system_info"
+    rule_id: recon_system_info
+    event:
+      type: syscall
+      comm: lscpu
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "dmidecode execve fires recon_system_info"
+    rule_id: recon_system_info
+    event:
+      type: syscall
+      comm: dmidecode
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── Network config discovery ───────────────────────────────────────────────
+  - name: "ifconfig execve fires recon_network_config"
+    rule_id: recon_network_config
+    event:
+      type: syscall
+      comm: ifconfig
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "ip command execve fires recon_network_config"
+    rule_id: recon_network_config
+    event:
+      type: syscall
+      comm: ip
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "nmcli execve fires recon_network_config"
+    rule_id: recon_network_config
+    event:
+      type: syscall
+      comm: nmcli
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── Active connections ─────────────────────────────────────────────────────
+  - name: "netstat execve fires recon_active_connections"
+    rule_id: recon_active_connections
+    event:
+      type: syscall
+      comm: netstat
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "ss execve fires recon_active_connections"
+    rule_id: recon_active_connections
+    event:
+      type: syscall
+      comm: ss
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "nmap execve fires recon_active_connections"
+    rule_id: recon_active_connections
+    event:
+      type: syscall
+      comm: nmap
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── User account enumeration ───────────────────────────────────────────────
+  - name: "id execve fires recon_user_enum"
+    rule_id: recon_user_enum
+    event:
+      type: syscall
+      comm: id
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "whoami execve fires recon_user_enum"
+    rule_id: recon_user_enum
+    event:
+      type: syscall
+      comm: whoami
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "cat syscall (nr=0 = read) does not fire any recon rule"
+    event:
+      type: syscall
+      comm: cat
+      syscall:
+        nr: 0
+    expect: no_alert
+
+  - name: "nginx execve does not fire recon rules (not a recon tool)"
+    event:
+      type: syscall
+      comm: nginx
+      syscall:
+        nr: 59
+    expect: no_alert

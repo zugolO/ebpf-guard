@@ -1,0 +1,118 @@
+suite: file_integrity_extended
+rules_path: ../../rules/file-integrity-extended.yaml
+tests:
+  # ── System binary replacement ──────────────────────────────────────────────
+  - name: "file written directly to /usr/bin/ fires fim_binary_replaced_in_system_dir"
+    rule_id: fim_binary_replaced_in_system_dir
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/usr/bin/ls"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "file written to /bin/ fires fim_binary_replaced_in_system_dir"
+    rule_id: fim_binary_replaced_in_system_dir
+    event:
+      type: file
+      comm: backdoor
+      file:
+        filename: "/bin/sudo"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "file written to /usr/sbin/ fires fim_binary_replaced_in_system_dir"
+    rule_id: fim_binary_replaced_in_system_dir
+    event:
+      type: file
+      comm: rootkit
+      file:
+        filename: "/usr/sbin/sshd"
+        op: create
+    expect: alert
+
+  - name: "subdirectory under /usr/bin/ does not fire (regex requires single component)"
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/usr/bin/subdir/binary"
+        op: write
+    expect: no_alert
+
+  # ── Library replacement ────────────────────────────────────────────────────
+  - name: "file matching .so pattern in /lib/ fires fim_library_replaced"
+    rule_id: fim_library_replaced
+    event:
+      type: file
+      comm: implant
+      file:
+        filename: "/lib/x86_64-linux-gnu/libc.so.6"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: ".so in /usr/lib/ fires fim_library_replaced"
+    rule_id: fim_library_replaced
+    event:
+      type: file
+      comm: rootkit
+      file:
+        filename: "/usr/lib/x86_64-linux-gnu/libssl.so.1.1"
+        op: write
+    expect: alert
+
+  - name: ".so in /lib64/ fires fim_library_replaced"
+    rule_id: fim_library_replaced
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/lib64/libpthread.so.0"
+        op: write
+    expect: alert
+
+  # ── /etc/passwd write ──────────────────────────────────────────────────────
+  - name: "writing /etc/passwd fires fim_passwd_write"
+    rule_id: fim_passwd_write
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/etc/passwd"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "writing /etc/passwd- fires fim_passwd_write"
+    rule_id: fim_passwd_write
+    event:
+      type: file
+      comm: backdoor
+      file:
+        filename: "/etc/passwd-"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "reading from /usr/share/ does not fire binary replacement rule"
+    event:
+      type: file
+      comm: ldd
+      file:
+        filename: "/usr/share/doc/coreutils/ls.1.gz"
+        op: read
+    expect: no_alert
+
+  - name: "reading /etc/hostname does not fire passwd write rule"
+    event:
+      type: file
+      comm: login
+      file:
+        filename: "/etc/hostname"
+        op: read
+    expect: no_alert

@@ -72,17 +72,22 @@ func (tc TestCase) effectiveExpectRuleID() string {
 
 // EventSpec describes a synthetic event in YAML.
 type EventSpec struct {
-	Type    string       `yaml:"type"`
-	PID     uint32       `yaml:"pid,omitempty"`
-	TGID    uint32       `yaml:"tgid,omitempty"`
-	UID     uint32       `yaml:"uid,omitempty"`
-	Comm    string       `yaml:"comm,omitempty"`
-	Syscall *SyscallSpec `yaml:"syscall,omitempty"`
-	Network *NetworkSpec `yaml:"network,omitempty"`
-	File    *FileSpec    `yaml:"file,omitempty"`
-	DNS     *DNSSpec     `yaml:"dns,omitempty"`
-	Privesc *PrivescSpec `yaml:"privesc,omitempty"`
-	TLS     *TLSSpec     `yaml:"tls,omitempty"`
+	Type       string          `yaml:"type"`
+	PID        uint32          `yaml:"pid,omitempty"`
+	TGID       uint32          `yaml:"tgid,omitempty"`
+	UID        uint32          `yaml:"uid,omitempty"`
+	Comm       string          `yaml:"comm,omitempty"`
+	ProcArgs   string          `yaml:"proc_args,omitempty"`
+	ParentComm string          `yaml:"parent_comm,omitempty"`
+	Syscall    *SyscallSpec    `yaml:"syscall,omitempty"`
+	Network    *NetworkSpec    `yaml:"network,omitempty"`
+	File       *FileSpec       `yaml:"file,omitempty"`
+	DNS        *DNSSpec        `yaml:"dns,omitempty"`
+	Privesc    *PrivescSpec    `yaml:"privesc,omitempty"`
+	TLS        *TLSSpec        `yaml:"tls,omitempty"`
+	BPFProgram *BPFProgramSpec `yaml:"bpf_program,omitempty"`
+	IOUring    *IOUringSpec    `yaml:"iouring,omitempty"`
+	Kmod       *KmodSpec       `yaml:"kmod,omitempty"`
 }
 
 // TLSSpec describes a TLS plaintext inspection event payload.
@@ -94,6 +99,57 @@ type TLSSpec struct {
 	DataLen uint32 `yaml:"data_len,omitempty"`
 	// Direction is "write" (outbound, default) or "read" (inbound).
 	Direction string `yaml:"direction,omitempty"`
+	// JA3 / JA4 / JA3S are TLS fingerprint hashes for C2 detection tests.
+	JA3  string `yaml:"ja3,omitempty"`
+	JA4  string `yaml:"ja4,omitempty"`
+	JA3S string `yaml:"ja3s,omitempty"`
+}
+
+// BPFProgramSpec describes a BPF program event (bpf() syscall monitor).
+type BPFProgramSpec struct {
+	// CmdNr is the raw bpf() command number (5 = BPF_PROG_LOAD).
+	CmdNr uint32 `yaml:"cmd_nr"`
+	// ProgType is the BPF program type name: "XDP", "SCHED_CLS", "KPROBE", etc.
+	// When set, it is resolved to the numeric type via bpfProgTypeByName.
+	ProgType string `yaml:"prog_type,omitempty"`
+	// Ret is the return value from bpf() — ≥0 means success (fd returned).
+	Ret int32 `yaml:"ret,omitempty"`
+}
+
+// IOUringSpec describes an io_uring event (io_uring_setup / io_uring_enter).
+type IOUringSpec struct {
+	// Op is "setup" or "enter".
+	Op string `yaml:"op"`
+	// Flags are the flags passed to io_uring_setup or io_uring_enter.
+	Flags uint32 `yaml:"flags,omitempty"`
+	// Fd is the io_uring fd (io_uring_enter only).
+	Fd int32 `yaml:"fd,omitempty"`
+	// ToSubmit is the number of SQEs submitted (io_uring_enter only).
+	ToSubmit uint32 `yaml:"to_submit,omitempty"`
+}
+
+// KmodSpec describes a kernel module load event.
+type KmodSpec struct {
+	// Name is the module name (e.g. "rootkit").
+	Name string `yaml:"name,omitempty"`
+	// FromTmpfs is true when the module was loaded from /tmp or /dev/shm.
+	FromTmpfs bool `yaml:"from_tmpfs,omitempty"`
+}
+
+// bpfProgTypeByName maps BPF program type names to their numeric values.
+var bpfProgTypeByName = map[string]uint32{
+	"SOCKET_FILTER":    0,
+	"SCHED_CLS":        3,
+	"SCHED_ACT":        4,
+	"TRACEPOINT":       5,
+	"XDP":              6,
+	"CGROUP_SKB":       8,
+	"SK_MSG":           11,
+	"KPROBE":           15,
+	"CGROUP_SOCK_ADDR": 17,
+	"LSM":              26,
+	"STRUCT_OPS":       28,
+	"SK_LOOKUP":        31,
 }
 
 // SyscallSpec describes a syscall event payload.
@@ -159,6 +215,12 @@ func (s EventSpec) Build() (types.Event, error) {
 	if s.Comm != "" {
 		copy(e.Comm[:], s.Comm)
 	}
+	if s.ParentComm != "" {
+		copy(e.ParentComm[:], s.ParentComm)
+	}
+	if s.ProcArgs != "" {
+		e.ProcArgs = s.ProcArgs
+	}
 
 	switch strings.ToLower(s.Type) {
 	case "syscall":
@@ -222,6 +284,16 @@ func (s EventSpec) Build() (types.Event, error) {
 				fe.Op = 1
 			case "write":
 				fe.Op = 2
+			case "create":
+				fe.Op = 3
+			case "rename":
+				fe.Op = 4
+			case "unlink":
+				fe.Op = 5
+			case "truncate":
+				fe.Op = 6
+			case "connect":
+				fe.Op = 7
 			default: // "open" or empty
 				fe.Op = 0
 			}
@@ -278,11 +350,55 @@ func (s EventSpec) Build() (types.Event, error) {
 			default:
 				te.Direction = types.TLSDirectionWrite
 			}
+			te.JA3 = s.TLS.JA3
+			te.JA4 = s.TLS.JA4
+			te.JA3S = s.TLS.JA3S
 		}
 		e.TLS = te
 
+	case "bpf_program", "bpf_prog_load", "bpf":
+		e.Type = types.EventBPFProgram
+		bp := &types.BPFProgramEvent{}
+		if s.BPFProgram != nil {
+			bp.Cmd = s.BPFProgram.CmdNr
+			bp.Ret = s.BPFProgram.Ret
+			if s.BPFProgram.ProgType != "" {
+				if n, ok := bpfProgTypeByName[strings.ToUpper(s.BPFProgram.ProgType)]; ok {
+					bp.ProgType = n
+				} else {
+					return e, fmt.Errorf("unknown BPF prog_type %q", s.BPFProgram.ProgType)
+				}
+			}
+		}
+		e.BPFProgram = bp
+
+	case "iouring", "io_uring":
+		e.Type = types.EventIOUring
+		io := &types.IOUringEvent{}
+		if s.IOUring != nil {
+			switch strings.ToLower(s.IOUring.Op) {
+			case "enter":
+				io.Op = 1
+			default: // "setup"
+				io.Op = 0
+			}
+			io.Flags = s.IOUring.Flags
+			io.Fd = s.IOUring.Fd
+			io.ToSubmit = s.IOUring.ToSubmit
+		}
+		e.IOUring = io
+
+	case "kmod", "kmod_load":
+		e.Type = types.EventKmodLoad
+		km := &types.KmodEvent{}
+		if s.Kmod != nil {
+			km.ModName = s.Kmod.Name
+			km.FromTmpfs = s.Kmod.FromTmpfs
+		}
+		e.Kmod = km
+
 	default:
-		return e, fmt.Errorf("unknown event type %q (valid: syscall, network, file, dns, privesc, tls)", s.Type)
+		return e, fmt.Errorf("unknown event type %q (valid: syscall, network, file, dns, privesc, tls, bpf_program, iouring, kmod)", s.Type)
 	}
 	return e, nil
 }

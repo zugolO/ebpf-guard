@@ -1,0 +1,117 @@
+suite: ebpf_subversion
+rules_path: ../../rules/ebpf-subversion.yaml
+tests:
+  # ── BPF_PROG_DETACH from non-root ──────────────────────────────────────────
+  - name: "non-root calling bpf() BPF_PROG_DETACH fires ebpf_subversion_detach_nonroot"
+    rule_id: ebpf_subversion_detach_nonroot
+    event:
+      type: syscall
+      uid: 1000
+      comm: attacker
+      syscall:
+        nr: 321
+        args: [9, 0, 0, 0, 0, 0]
+    expect: alert
+    expect_severity: critical
+
+  - name: "non-root calling bpf() BPF_MAP_DELETE_ELEM fires ebpf_subversion_detach_nonroot"
+    rule_id: ebpf_subversion_detach_nonroot
+    event:
+      type: syscall
+      uid: 500
+      comm: exploit
+      syscall:
+        nr: 321
+        args: [3, 0, 0, 0, 0, 0]
+    expect: alert
+    expect_severity: critical
+
+  - name: "non-root calling bpf() BPF_OBJ_PIN fires ebpf_subversion_detach_nonroot"
+    rule_id: ebpf_subversion_detach_nonroot
+    event:
+      type: syscall
+      uid: 999
+      comm: implant
+      syscall:
+        nr: 321
+        args: [6, 0, 0, 0, 0, 0]
+    expect: alert
+    expect_severity: critical
+
+  - name: "non-root calling bpf() BPF_LINK_DETACH fires ebpf_subversion_detach_nonroot"
+    rule_id: ebpf_subversion_detach_nonroot
+    event:
+      type: syscall
+      uid: 1001
+      comm: rootkit
+      syscall:
+        nr: 321
+        args: [33, 0, 0, 0, 0, 0]
+    expect: alert
+    expect_severity: critical
+
+  - name: "root calling bpf() BPF_PROG_DETACH does not fire non-root rule"
+    event:
+      type: syscall
+      uid: 0
+      comm: ebpf-guard
+      syscall:
+        nr: 321
+        args: [9, 0, 0, 0, 0, 0]
+    expect: no_alert
+
+  # ── Unauthorized caller ────────────────────────────────────────────────────
+  - name: "bpftool calling bpf() BPF_PROG_DETACH fires ebpf_subversion_unauthorized_caller"
+    rule_id: ebpf_subversion_unauthorized_caller
+    event:
+      type: syscall
+      uid: 0
+      comm: bpftool
+      syscall:
+        nr: 321
+        args: [9, 0, 0, 0, 0, 0]
+    expect: alert
+    expect_severity: critical
+
+  - name: "unknown process calling bpf() BPF_MAP_DELETE_ELEM fires ebpf_subversion_unauthorized_caller"
+    rule_id: ebpf_subversion_unauthorized_caller
+    event:
+      type: syscall
+      uid: 0
+      comm: unknown
+      syscall:
+        nr: 321
+        args: [3, 0, 0, 0, 0, 0]
+    expect: alert
+    expect_severity: critical
+
+  - name: "ebpf-guard itself calling bpf() does not fire unauthorized rule"
+    event:
+      type: syscall
+      uid: 0
+      comm: ebpf-guard
+      syscall:
+        nr: 321
+        args: [9, 0, 0, 0, 0, 0]
+    expect: no_alert
+
+  # ── Negative: different syscall ────────────────────────────────────────────
+  - name: "read syscall (nr=0) does not fire any eBPF subversion rule"
+    event:
+      type: syscall
+      uid: 1000
+      comm: attacker
+      syscall:
+        nr: 0
+        args: [3, 0, 0, 0, 0, 0]
+    expect: no_alert
+
+  - name: "bpf() with BPF_PROG_LOAD (cmd=5) does not fire detach rules"
+    event:
+      type: syscall
+      uid: 1000
+      comm: attacker
+      syscall:
+        nr: 321
+        args: [5, 0, 0, 0, 0, 0]
+    expect: no_alert

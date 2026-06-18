@@ -1,0 +1,146 @@
+suite: iouring
+rules_path: ../../rules/iouring.yaml
+tests:
+  # ── Unexpected io_uring_setup ──────────────────────────────────────────────
+  - name: "unknown process calling io_uring_setup fires iouring_unexpected_setup"
+    rule_id: iouring_unexpected_setup
+    event:
+      type: iouring
+      comm: malware
+      iouring:
+        op: setup
+    expect: alert
+    expect_severity: warning
+
+  - name: "bash calling io_uring_setup fires iouring_unexpected_setup"
+    rule_id: iouring_unexpected_setup
+    event:
+      type: iouring
+      comm: bash
+      iouring:
+        op: setup
+    expect: alert
+    expect_severity: warning
+
+  - name: "python3 calling io_uring_setup fires iouring_unexpected_setup"
+    rule_id: iouring_unexpected_setup
+    event:
+      type: iouring
+      comm: python3
+      iouring:
+        op: setup
+    expect: alert
+
+  - name: "nginx calling io_uring_setup does not fire (allowlisted)"
+    event:
+      type: iouring
+      comm: nginx
+      iouring:
+        op: setup
+    expect: no_alert
+
+  - name: "postgres calling io_uring_setup does not fire (allowlisted)"
+    event:
+      type: iouring
+      comm: postgres
+      iouring:
+        op: setup
+    expect: no_alert
+
+  - name: "containerd calling io_uring_setup does not fire (allowlisted)"
+    event:
+      type: iouring
+      comm: containerd
+      iouring:
+        op: setup
+    expect: no_alert
+
+  # ── Unexpected io_uring_enter ──────────────────────────────────────────────
+  - name: "unknown process calling io_uring_enter with submissions fires iouring_unexpected_enter"
+    rule_id: iouring_unexpected_enter
+    event:
+      type: iouring
+      comm: rootkit
+      iouring:
+        op: enter
+        to_submit: 5
+    expect: alert
+    expect_severity: critical
+
+  - name: "curl calling io_uring_enter with submissions fires iouring_unexpected_enter"
+    rule_id: iouring_unexpected_enter
+    event:
+      type: iouring
+      comm: curl
+      iouring:
+        op: enter
+        to_submit: 1
+    expect: alert
+    expect_severity: critical
+
+  - name: "io_uring_enter with to_submit=0 does not fire iouring_unexpected_enter"
+    event:
+      type: iouring
+      comm: malware
+      iouring:
+        op: enter
+        to_submit: 0
+    expect: no_alert
+
+  - name: "mysql calling io_uring_enter does not fire (allowlisted)"
+    event:
+      type: iouring
+      comm: mysql
+      iouring:
+        op: enter
+        to_submit: 10
+    expect: no_alert
+
+  - name: "redis-server calling io_uring_enter does not fire (allowlisted)"
+    event:
+      type: iouring
+      comm: redis-server
+      iouring:
+        op: enter
+        to_submit: 3
+    expect: no_alert
+
+  # ── High-volume io_uring submission ───────────────────────────────────────
+  - name: "unknown process submitting 33 SQEs fires iouring_high_volume_submit"
+    rule_id: iouring_high_volume_submit
+    event:
+      type: iouring
+      comm: exfiltrator
+      iouring:
+        op: enter
+        to_submit: 33
+    expect: alert
+    expect_severity: warning
+
+  - name: "submitting 100 SQEs fires iouring_high_volume_submit"
+    rule_id: iouring_high_volume_submit
+    event:
+      type: iouring
+      comm: miner
+      iouring:
+        op: enter
+        to_submit: 100
+    expect: alert
+
+  - name: "submitting 32 SQEs does not fire high-volume rule (boundary)"
+    event:
+      type: iouring
+      comm: postgres
+      iouring:
+        op: enter
+        to_submit: 32
+    expect: no_alert
+
+  - name: "postgres submitting 100 SQEs does not fire (allowlisted)"
+    event:
+      type: iouring
+      comm: postgres
+      iouring:
+        op: enter
+        to_submit: 100
+    expect: no_alert

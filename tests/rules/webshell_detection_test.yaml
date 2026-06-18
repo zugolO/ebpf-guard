@@ -1,0 +1,152 @@
+suite: webshell_detection
+rules_path: ../../rules/webshell-detection.yaml
+tests:
+  # ── PHP in web root ────────────────────────────────────────────────────────
+  - name: "PHP file in /var/www/html/ fires webshell_php_in_web_root"
+    rule_id: webshell_php_in_web_root
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/var/www/html/shell.php"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "PHP file in /var/www/ fires webshell_php_in_web_root"
+    rule_id: webshell_php_in_web_root
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/var/www/uploads/c99.php"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "PHP file in /srv/www/ fires webshell_php_in_web_root"
+    rule_id: webshell_php_in_web_root
+    event:
+      type: file
+      comm: wget
+      file:
+        filename: "/srv/www/app/r57.php"
+        op: write
+    expect: alert
+
+  - name: "PHP file in /usr/share/nginx/html/ fires webshell_php_in_web_root"
+    rule_id: webshell_php_in_web_root
+    event:
+      type: file
+      comm: nc
+      file:
+        filename: "/usr/share/nginx/html/backdoor.php"
+        op: create
+    expect: alert
+
+  # ── JSP in web app dir ────────────────────────────────────────────────────
+  - name: "JSP file in Tomcat webapps fires webshell_jsp_in_web_root"
+    rule_id: webshell_jsp_in_web_root
+    event:
+      type: file
+      comm: java
+      file:
+        filename: "/opt/tomcat/webapps/ROOT/cmd.jsp"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "JSP file in JBoss fires webshell_jsp_in_web_root"
+    rule_id: webshell_jsp_in_web_root
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/opt/jboss/standalone/deployments/evil.jsp"
+        op: create
+    expect: alert
+
+  # ── ASP/ASPX on Linux ────────────────────────────────────────────────────
+  - name: "ASPX file in /var/www/ fires webshell_asp_written"
+    rule_id: webshell_asp_written
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/var/www/html/shell.aspx"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "ASP file in /srv/www/ fires webshell_asp_written"
+    rule_id: webshell_asp_written
+    event:
+      type: file
+      comm: wget
+      file:
+        filename: "/srv/www/app/backdoor.asp"
+        op: write
+    expect: alert
+
+  # ── Script file via web process ───────────────────────────────────────────
+  - name: "any .sh file creation fires webshell_script_write_via_web_process"
+    rule_id: webshell_script_write_via_web_process
+    event:
+      type: file
+      comm: apache2
+      file:
+        filename: "/var/www/html/run.sh"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: ".phtml file creation fires webshell_script_write_via_web_process"
+    rule_id: webshell_script_write_via_web_process
+    event:
+      type: file
+      comm: nginx
+      file:
+        filename: "/var/www/html/info.phtml"
+        op: write
+    expect: alert
+
+  - name: ".cgi file creation fires webshell_script_write_via_web_process"
+    rule_id: webshell_script_write_via_web_process
+    event:
+      type: file
+      comm: httpd
+      file:
+        filename: "/var/www/cgi-bin/evil.cgi"
+        op: create
+    expect: alert
+
+  # ── Common web shell filenames ────────────────────────────────────────────
+  - name: "known web shell filename fires webshell_common_filename"
+    rule_id: webshell_common_filename
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/var/www/html/c99.php"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  # ── Negative cases ────────────────────────────────────────────────────────
+  - name: "writing a CSS file does not fire any webshell rule"
+    event:
+      type: file
+      comm: nginx
+      file:
+        filename: "/var/www/html/style.css"
+        op: write
+    expect: no_alert
+
+  - name: "writing a JS file does not fire any webshell rule"
+    event:
+      type: file
+      comm: node
+      file:
+        filename: "/var/www/html/app.js"
+        op: write
+    expect: no_alert

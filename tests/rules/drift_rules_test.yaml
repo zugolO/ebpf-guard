@@ -1,0 +1,64 @@
+suite: drift_rules
+rules_path: ../../rules/drift-rules.yaml
+tests:
+  # ── New binary execution drift ─────────────────────────────────────────────
+  - name: "opening /usr/bin/nmap fires drift_new_exec_critical"
+    rule_id: drift_new_exec_critical
+    event:
+      type: file
+      comm: nmap
+      file:
+        filename: "/usr/bin/nmap"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "opening /bin/nc fires drift_new_exec_critical"
+    rule_id: drift_new_exec_critical
+    event:
+      type: file
+      comm: nc
+      file:
+        filename: "/bin/nc"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "opening /usr/sbin/tcpdump fires drift_new_exec_critical"
+    rule_id: drift_new_exec_critical
+    event:
+      type: file
+      comm: tcpdump
+      file:
+        filename: "/usr/sbin/tcpdump"
+        op: open
+    expect: alert
+
+  - name: "opening /usr/local/bin/evil fires drift_new_exec_critical"
+    rule_id: drift_new_exec_critical
+    event:
+      type: file
+      comm: evil
+      file:
+        filename: "/usr/local/bin/evil"
+        op: open
+    expect: alert
+
+  # ── Negative: not in system bin paths ─────────────────────────────────────
+  - name: "opening /tmp/evil does not fire drift_new_exec_critical"
+    event:
+      type: file
+      comm: evil
+      file:
+        filename: "/tmp/evil"
+        op: open
+    expect: no_alert
+
+  - name: "writing to /usr/bin/ does not fire exec drift rule (not open)"
+    event:
+      type: file
+      comm: dpkg
+      file:
+        filename: "/usr/bin/vim"
+        op: write
+    expect: no_alert

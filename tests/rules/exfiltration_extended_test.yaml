@@ -1,0 +1,90 @@
+suite: exfiltration_extended
+rules_path: ../../rules/exfiltration-extended.yaml
+tests:
+  # ── Large HTTP POST to non-standard port ──────────────────────────────────
+  - name: "connection to port 4444 fires exfil_large_http_post"
+    rule_id: exfil_large_http_post
+    event:
+      type: network
+      comm: malware
+      network:
+        dst_ip: "1.2.3.4"
+        dport: 4444
+    expect: alert
+
+  - name: "connection to port 31337 fires exfil_large_http_post (elite port)"
+    rule_id: exfil_large_http_post
+    event:
+      type: network
+      comm: implant
+      network:
+        dst_ip: "185.220.101.2"
+        dport: 31337
+    expect: alert
+
+  - name: "connection to port 8080 fires exfil_large_http_post"
+    rule_id: exfil_large_http_post
+    event:
+      type: network
+      comm: exfiltrator
+      network:
+        dst_ip: "192.168.1.200"
+        dport: 8080
+    expect: alert
+
+  - name: "connection to port 1337 fires exfil_large_http_post"
+    rule_id: exfil_large_http_post
+    event:
+      type: network
+      comm: beacon
+      network:
+        dst_ip: "10.0.0.5"
+        dport: 1337
+    expect: alert
+
+  - name: "connection to port 6666 fires exfil_large_http_post"
+    rule_id: exfil_large_http_post
+    event:
+      type: network
+      comm: c2client
+      network:
+        dst_ip: "185.220.101.1"
+        dport: 6666
+    expect: alert
+
+  - name: "HTTPS to port 443 does not fire exfil rule"
+    event:
+      type: network
+      comm: curl
+      network:
+        dst_ip: "93.184.216.34"
+        dport: 443
+    expect: no_alert
+
+  - name: "connection to port 80 does not fire exfil rule"
+    event:
+      type: network
+      comm: wget
+      network:
+        dst_ip: "93.184.216.34"
+        dport: 80
+    expect: no_alert
+
+  - name: "SSH to port 22 does not fire exfil rule"
+    event:
+      type: network
+      comm: ssh
+      network:
+        dst_ip: "10.0.0.5"
+        dport: 22
+    expect: no_alert
+
+  # ── Negative DNS case ────────────────────────────────────────────────────
+  - name: "short DNS query does not fire high-entropy exfil rule"
+    event:
+      type: dns
+      comm: curl
+      dns:
+        qname: "api.example.com"
+        qtype: 1
+    expect: no_alert

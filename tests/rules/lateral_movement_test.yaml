@@ -1,0 +1,214 @@
+suite: lateral_movement
+rules_path: ../../rules/lateral-movement.yaml
+tests:
+  # ── SSH from container ─────────────────────────────────────────────────────
+  - name: "ssh execve (nr=59) fires lateral_ssh_from_container"
+    rule_id: lateral_ssh_from_container
+    event:
+      type: syscall
+      comm: ssh
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  - name: "sshpass execve fires lateral_ssh_from_container"
+    rule_id: lateral_ssh_from_container
+    event:
+      type: syscall
+      comm: sshpass
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── SSH keygen ─────────────────────────────────────────────────────────────
+  - name: "ssh-keygen execve fires lateral_ssh_keygen_new_key"
+    rule_id: lateral_ssh_keygen_new_key
+    event:
+      type: syscall
+      comm: ssh-keygen
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  # ── SSH port forwarding ────────────────────────────────────────────────────
+  - name: "ssh connecting to port 8080 fires lateral_port_forward_ssh"
+    rule_id: lateral_port_forward_ssh
+    event:
+      type: network
+      comm: ssh
+      network:
+        dst_ip: "10.0.0.5"
+        dport: 8080
+    expect: alert
+    expect_severity: warning
+
+  - name: "ssh connecting to port 22 does not fire port-forward rule"
+    event:
+      type: network
+      comm: ssh
+      network:
+        dst_ip: "10.0.0.5"
+        dport: 22
+    expect: no_alert
+
+  # ── Tool transfer (wget/curl) ──────────────────────────────────────────────
+  - name: "wget connecting to port 8080 fires lateral_tool_transfer_wget"
+    rule_id: lateral_tool_transfer_wget
+    event:
+      type: network
+      comm: wget
+      network:
+        dst_ip: "10.100.0.5"
+        dport: 8080
+    expect: alert
+    expect_severity: warning
+
+  - name: "curl connecting to port 443 fires lateral_tool_transfer_wget"
+    rule_id: lateral_tool_transfer_wget
+    event:
+      type: network
+      comm: curl
+      network:
+        dst_ip: "10.0.1.5"
+        dport: 443
+    expect: alert
+
+  # ── RDP connection ─────────────────────────────────────────────────────────
+  - name: "outbound connection to port 3389 fires lateral_rdp_connection"
+    rule_id: lateral_rdp_connection
+    event:
+      type: network
+      network:
+        dst_ip: "192.168.1.10"
+        dport: 3389
+    expect: alert
+    expect_severity: warning
+
+  - name: "outbound HTTPS (port 443) does not fire RDP rule"
+    event:
+      type: network
+      network:
+        dst_ip: "93.184.216.34"
+        dport: 443
+    expect: no_alert
+
+  # ── kubectl exec from pod ──────────────────────────────────────────────────
+  - name: "kubectl execve from pod fires lateral_kubectl_exec_from_pod"
+    rule_id: lateral_kubectl_exec_from_pod
+    event:
+      type: syscall
+      comm: kubectl
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: critical
+
+  - name: "k9s execve fires lateral_kubectl_exec_from_pod"
+    rule_id: lateral_kubectl_exec_from_pod
+    event:
+      type: syscall
+      comm: k9s
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── SSH agent socket access ────────────────────────────────────────────────
+  - name: "unexpected process opening SSH agent socket fires lateral_ssh_agent_socket_access"
+    rule_id: lateral_ssh_agent_socket_access
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/tmp/ssh-AbCdEf123/agent.12345"
+        op: open
+    expect: alert
+    expect_severity: warning
+
+  - name: "ssh itself opening SSH agent socket does not fire"
+    event:
+      type: file
+      comm: ssh
+      file:
+        filename: "/tmp/ssh-AbCdEf123/agent.12345"
+        op: open
+    expect: no_alert
+
+  # ── netcat / socat pivot ───────────────────────────────────────────────────
+  - name: "nc execve fires lateral_netcat_socat_pivot"
+    rule_id: lateral_netcat_socat_pivot
+    event:
+      type: syscall
+      comm: nc
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  - name: "socat execve fires lateral_netcat_socat_pivot"
+    rule_id: lateral_netcat_socat_pivot
+    event:
+      type: syscall
+      comm: socat
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "nmap execve fires lateral_netcat_socat_pivot"
+    rule_id: lateral_netcat_socat_pivot
+    event:
+      type: syscall
+      comm: nmap
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── Shared volume exec ─────────────────────────────────────────────────────
+  - name: "ELF binary written to /shared/ by root fires lateral_shared_volume_exec"
+    rule_id: lateral_shared_volume_exec
+    event:
+      type: file
+      uid: 0
+      file:
+        filename: "/shared/payload.elf"
+        op: write
+    expect: alert
+    expect_severity: warning
+
+  - name: "shell script written to /mnt/ by root fires lateral_shared_volume_exec"
+    rule_id: lateral_shared_volume_exec
+    event:
+      type: file
+      uid: 0
+      file:
+        filename: "/mnt/tools/pivot.sh"
+        op: write
+    expect: alert
+
+  - name: "ELF written to /shared/ by non-root does not fire (uid check)"
+    event:
+      type: file
+      uid: 1000
+      file:
+        filename: "/shared/payload.elf"
+        op: write
+    expect: no_alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "normal ls execve does not fire any lateral movement rule"
+    event:
+      type: syscall
+      comm: ls
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "HTTPS connection to port 443 does not fire lateral movement rules"
+    event:
+      type: network
+      comm: cat
+      network:
+        dst_ip: "93.184.216.34"
+        dport: 443
+    expect: no_alert

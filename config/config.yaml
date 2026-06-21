@@ -18,6 +18,43 @@ bpf:
   max_concurrent_events: 1024
   overflow_policy: drop
 
+  # BPF-side sampling rates (1 in N events captured).
+  # file_rate=1 ensures every file open/read/write is visible to the rule engine
+  # during integration testing. On high-throughput production nodes raise file_rate
+  # back to 50 to reduce ring-buffer pressure.
+  sampling:
+    enabled: true
+    syscall_rate: 1
+    network_rate: 1
+    file_rate: 1
+
+  # BPF-side kernel filter: only emit events for the listed syscall numbers.
+  # Extends the built-in defaults (execve, ptrace, capset, setns, memfd_create,
+  # mount, etc.) with syscalls needed by ransomware and persistence detection rules:
+  #   82  = rename(2)    — ransomware_mass_rename
+  #   87  = unlink(2)    — ransomware_backup_delete
+  #  263  = unlinkat(2)  — ransomware_backup_delete (used by 'find -delete')
+  kernel_filter:
+    enabled: true
+    monitored_syscalls:
+      - 59   # execve
+      - 322  # execveat
+      - 101  # ptrace
+      - 126  # capset
+      - 308  # setns
+      - 272  # unshare
+      - 319  # memfd_create
+      - 165  # mount
+      - 166  # umount2
+      - 155  # pivot_root
+      - 161  # chroot
+      - 311  # process_vm_writev
+      - 310  # process_vm_readv
+      - 241  # perf_event_open
+      - 82   # rename
+      - 87   # unlink
+      - 263  # unlinkat
+
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling
   # rates for high-volume syscall/file events when the event channel starts
   # filling up, preventing silent kernel-side ring-buffer drops.

@@ -33,15 +33,16 @@ type FanoutNotifier struct {
 
 // FanoutConfig holds configuration for all notification backends.
 type FanoutConfig struct {
-	Slack       SlackConfig     `mapstructure:"slack"`
-	Teams       TeamsConfig     `mapstructure:"teams"`
-	Webhook     WebhookConfig   `mapstructure:"webhook"`
-	OTLP        OTLPConfig      `mapstructure:"otlp"`
-	Kafka       KafkaConfig     `mapstructure:"kafka"`
-	SyslogCEF   SyslogCEFConfig `mapstructure:"syslog_cef"`
-	Discord     DiscordConfig   `mapstructure:"discord"`
-	Telegram    TelegramConfig  `mapstructure:"telegram"`
-	FalcoOutput bool            `mapstructure:"falco_output"` // emit Falco-compatible JSON for the webhook notifier
+	Slack       SlackConfig      `mapstructure:"slack"`
+	Teams       TeamsConfig      `mapstructure:"teams"`
+	Webhook     WebhookConfig    `mapstructure:"webhook"`
+	OTLP        OTLPConfig       `mapstructure:"otlp"`
+	Kafka       KafkaConfig      `mapstructure:"kafka"`
+	SyslogCEF   SyslogCEFConfig  `mapstructure:"syslog_cef"`
+	Discord     DiscordConfig    `mapstructure:"discord"`
+	Telegram    TelegramConfig   `mapstructure:"telegram"`
+	UnixSocket  UnixSocketConfig `mapstructure:"unix_socket"`
+	FalcoOutput bool             `mapstructure:"falco_output"` // emit Falco-compatible JSON for the webhook notifier
 	// StrictSSRF enables strict SSRF prevention for all HTTP-based notifiers
 	// by blocking RFC-1918 private IP ranges in addition to the default
 	// loopback and link-local address blocking.
@@ -122,6 +123,13 @@ func NewFanoutNotifier(cfg FanoutConfig, timeout time.Duration, logger *slog.Log
 		f.notifiers = append(f.notifiers, telegramNotifier)
 		logger.Info("exporter/notifier: Telegram notifier enabled",
 			slog.String("chat_id", cfg.Telegram.ChatID))
+	}
+
+	// Initialize Unix socket notifier if enabled
+	if socketNotifier := NewUnixSocketNotifier(cfg.UnixSocket, logger); socketNotifier.Enabled() {
+		f.notifiers = append(f.notifiers, socketNotifier)
+		logger.Info("exporter/notifier: Unix socket notifier enabled",
+			slog.String("path", cfg.UnixSocket.Path))
 	}
 
 	if len(f.notifiers) == 0 {

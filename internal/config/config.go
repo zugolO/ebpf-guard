@@ -318,10 +318,24 @@ type TelegramNotificationConfig struct {
 	MinSeverity string `mapstructure:"min_severity"`
 }
 
+// MemoryStoreConfig holds in-memory store configuration.
+type MemoryStoreConfig struct {
+	// MaxAlerts is the maximum number of alerts to retain in memory.
+	// When the cap is reached the oldest alerts are evicted to bound RSS.
+	// Zero disables the cap (unbounded growth — not recommended for long-running VPS deployments).
+	MaxAlerts int64 `mapstructure:"max_alerts"`
+	// RetentionPeriod is the maximum age of alerts to retain (Go duration string, e.g. "24h", "6h").
+	// A background goroutine evicts alerts older than this every RetentionPeriod/4.
+	// Zero disables age-based eviction.
+	RetentionPeriod string `mapstructure:"retention_period"`
+}
+
 // StoreConfig holds storage backend configuration.
 type StoreConfig struct {
 	// Backend specifies the storage backend: "memory", "sqlite", "opensearch"
 	Backend string `mapstructure:"backend"`
+	// Memory configuration
+	Memory MemoryStoreConfig `mapstructure:"memory"`
 	// SQLite configuration
 	SQLite SQLiteStoreConfig `mapstructure:"sqlite"`
 	// OpenSearch configuration
@@ -1633,6 +1647,8 @@ func setDefaults(v *viper.Viper) {
 
 	// Store defaults
 	v.SetDefault("store.backend", "memory")
+	v.SetDefault("store.memory.max_alerts", int64(10000))
+	v.SetDefault("store.memory.retention_period", "6h")
 	v.SetDefault("store.sqlite.path", "/var/lib/ebpf-guard/events.db")
 	v.SetDefault("store.sqlite.max_alerts", int64(100000))
 	v.SetDefault("store.sqlite.vacuum_interval", "1h")

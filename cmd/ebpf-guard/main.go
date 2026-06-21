@@ -643,7 +643,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		cfg.Notifications.Kafka.Enabled ||
 		cfg.Notifications.SyslogCEF.Enabled ||
 		cfg.Notifications.Discord.Enabled ||
-		cfg.Notifications.Telegram.Enabled
+		cfg.Notifications.Telegram.Enabled ||
+		cfg.Notifications.UnixSocket.Enabled
 	if notifEnabled {
 		var fanoutErr error
 		fanout, fanoutErr = exporter.NewFanoutNotifier(exporter.FanoutConfig{

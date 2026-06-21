@@ -342,12 +342,27 @@ type StoreConfig struct {
 	OpenSearch OpenSearchStoreConfig `mapstructure:"opensearch"`
 }
 
+// FileOpsConfig controls which file-access operations are collected.
+// Disabling read/write tracking dramatically reduces event volume on busy hosts
+// while preserving open(2) visibility for sensitive-path detection.
+type FileOpsConfig struct {
+	// TrackOpen enables sys_enter_openat hooks. Default: true.
+	TrackOpen bool `mapstructure:"track_open"`
+	// TrackRead enables sys_enter_read hooks. Default: false (very high volume).
+	TrackRead bool `mapstructure:"track_read"`
+	// TrackWrite enables sys_enter_write hooks. Default: false (very high volume).
+	TrackWrite bool `mapstructure:"track_write"`
+}
+
 // CollectorsConfig holds per-collector settings.
 type CollectorsConfig struct {
 	// TLS collector configuration
 	TLS TLSCollectorConfig `mapstructure:"tls"`
 	// DNS collector configuration
 	DNS DNSCollectorConfig `mapstructure:"dns"`
+	// FileOps controls which file operation types are collected.
+	// Disabling read/write hooks reduces event volume by 10-50x on typical hosts.
+	FileOps FileOpsConfig `mapstructure:"file_ops"`
 	// BackpressureStrategy controls what happens when the event channel is full.
 	// Valid values: "drop" (default), "block", "sample".
 	//   drop   — silently discard the event and increment the drop counter.
@@ -1672,6 +1687,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.iouring.enabled", false)
 	v.SetDefault("collectors.bpf_monitor.enabled", false)
 	v.SetDefault("collectors.tls_fingerprint.enabled", false)
+	v.SetDefault("collectors.file_ops.track_open", true)
+	v.SetDefault("collectors.file_ops.track_read", false)
+	v.SetDefault("collectors.file_ops.track_write", false)
 	v.SetDefault("collectors.cloudtrail.enabled", false)
 	v.SetDefault("collectors.gcp_audit.enabled", false)
 	v.SetDefault("collectors.azure_monitor.enabled", false)

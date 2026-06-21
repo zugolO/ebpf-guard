@@ -827,6 +827,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if fc, fcErr := collector.NewFileaccessCollector(slog.Default()); fcErr != nil {
 			slog.Warn("fileaccess: collector creation failed", slog.Any("error", fcErr))
 		} else {
+			fo := cfg.Collectors.FileOps
+			fc.WithFileOps(fo.TrackOpen, fo.TrackRead, fo.TrackWrite)
 			if cfg.BPF.Sampling.Enabled {
 				fc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
 					if name != "fileaccess" || !up {
@@ -836,7 +838,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				}))
 			}
 			collectors = append(collectors, fc.WithBackpressureStrategy(bpStrategy))
-			slog.Info("fileaccess: collector enabled")
+			slog.Info("fileaccess: collector enabled",
+				slog.Bool("track_open", fo.TrackOpen),
+				slog.Bool("track_read", fo.TrackRead),
+				slog.Bool("track_write", fo.TrackWrite),
+			)
 		}
 
 		if dc, dcErr := collector.NewDNSCollector(cfg.Collectors.DNS.Enabled); dcErr != nil {

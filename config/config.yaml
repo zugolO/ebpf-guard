@@ -198,6 +198,10 @@ collectors:
     dga_threshold: 3.5          # Shannon entropy bits/char; above this → DGA suspicion
     tunneling_min_length: 50    # Domain length above this → tunneling suspicion
     high_frequency_threshold: 100  # DNS queries/min above this → alert
+  file_ops:
+    track_open: true    # sys_enter_openat — low volume, needed for sensitive-path detection
+    track_read: false   # sys_enter_read   — very high volume (100K+/s on busy hosts); enable only if needed
+    track_write: false  # sys_enter_write  — very high volume; enable only if needed
   backpressure_strategy: drop   # drop | block | sample
   iouring:
     enabled: false               # Monitor io_uring activity (setup/enter) via kprobes

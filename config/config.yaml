@@ -8,13 +8,14 @@ server:
 
 bpf:
   map_sizes:
-    events: 65536
-    processes: 16384
-    connections: 32768
+    events: 16384
+    processes: 4096
+    connections: 8192
 
-  # In-process event channel size. Recommended ≥ 65536 to absorb syscall bursts.
-  event_queue_depth: 65536
-  max_concurrent_events: 4096
+  # In-process event channel size. 16384 is sufficient for most VPS workloads;
+  # increase to 65536 on high-throughput servers if drops are observed.
+  event_queue_depth: 16384
+  max_concurrent_events: 1024
   overflow_policy: drop
 
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling
@@ -42,7 +43,13 @@ profiler:
   min_learning_samples: 100
   anomaly_threshold: 0.8
   ewma_weight: 0.3
-  profile_ttl: 86400
+  # profile_ttl: how long an idle PID's behavioral profile stays in memory.
+  # 3600s (1h) is a good default for VPS; raise to 86400 on busy servers.
+  profile_ttl: 3600
+  # max_tracked_pids: caps simultaneous in-memory PID profiles (default 0 =
+  # auto-detect from /proc/sys/kernel/pid_max, which can be millions on modern
+  # kernels). Setting an explicit limit prevents unbounded RSS growth on VPS.
+  max_tracked_pids: 1024
 
 alerting:
   enabled: false
@@ -123,6 +130,12 @@ enforcement:
 # Supported backends: memory, sqlite, opensearch
 store:
   backend: memory             # memory | sqlite | opensearch
+  memory:
+    # Max alerts to keep in memory. Oldest are evicted when this is exceeded.
+    # Prevents unbounded RSS growth on long-running VPS deployments.
+    max_alerts: 10000
+    # Age-based eviction: alerts older than this are purged every 90 minutes.
+    retention_period: "6h"
   sqlite:
     path: /var/lib/ebpf-guard/events.db
   opensearch:

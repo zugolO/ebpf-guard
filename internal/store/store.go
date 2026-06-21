@@ -92,6 +92,8 @@ type ProfileStore interface {
 type Config struct {
 	// Backend specifies the storage backend type: "sqlite", "opensearch", "memory".
 	Backend string
+	// Memory specific configuration (only used when Backend == "memory").
+	Memory MemoryStoreOptions
 	// SQLite specific configuration.
 	SQLite SQLiteConfig
 	// OpenSearch specific configuration.
@@ -162,6 +164,12 @@ type OpenSearchConfig struct {
 
 // New creates a new AlertStore based on the configuration.
 func New(cfg Config) (AlertStore, error) {
+	return NewWithContext(context.Background(), cfg)
+}
+
+// NewWithContext creates a new AlertStore; for the memory backend it starts
+// a background retention goroutine that exits when ctx is cancelled.
+func NewWithContext(ctx context.Context, cfg Config) (AlertStore, error) {
 	switch cfg.Backend {
 	case "sqlite":
 		store, err := NewSQLiteStore(cfg.SQLite)
@@ -172,7 +180,11 @@ func New(cfg Config) (AlertStore, error) {
 	case "opensearch":
 		return NewOpenSearchStore(cfg.OpenSearch)
 	case "memory":
-		return NewMemoryStore(), nil
+		opts := MemoryStoreOptions{
+			MaxAlerts:       cfg.Memory.MaxAlerts,
+			RetentionPeriod: cfg.Memory.RetentionPeriod,
+		}
+		return NewMemoryStoreWithContext(ctx, opts), nil
 	default:
 		return nil, fmt.Errorf("unknown store backend: %s", cfg.Backend)
 	}

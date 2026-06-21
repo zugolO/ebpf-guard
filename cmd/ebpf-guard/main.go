@@ -487,9 +487,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 	sqliteRetentionPeriod, _ := time.ParseDuration(cfg.Store.SQLite.RetentionPeriod)
 	sqliteBackupInterval, _ := time.ParseDuration(cfg.Store.SQLite.Backup.Interval)
+	memRetentionPeriod, _ := time.ParseDuration(cfg.Store.Memory.RetentionPeriod)
 
-	alertStore, err := store.New(store.Config{
+	alertStore, err := store.NewWithContext(ctx, store.Config{
 		Backend: cfg.Store.Backend,
+		Memory: store.MemoryStoreOptions{
+			MaxAlerts:       cfg.Store.Memory.MaxAlerts,
+			RetentionPeriod: memRetentionPeriod,
+		},
 		SQLite: store.SQLiteConfig{
 			Path:              cfg.Store.SQLite.Path,
 			MaxOpenConns:      10,

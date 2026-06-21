@@ -705,6 +705,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				ChatID:      cfg.Notifications.Telegram.ChatID,
 				MinSeverity: cfg.Notifications.Telegram.MinSeverity,
 			},
+			UnixSocket: exporter.UnixSocketConfig{
+				Enabled: cfg.Notifications.UnixSocket.Enabled,
+				Path:    cfg.Notifications.UnixSocket.Path,
+			},
 			FalcoOutput: cfg.Compat.FalcoOutput,
 			StrictSSRF:  cfg.Notifications.StrictSSRF,
 		}, 10*time.Second, slog.Default())

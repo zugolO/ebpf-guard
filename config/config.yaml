@@ -100,6 +100,9 @@ notifications:
     bot_token: ""             # Telegram Bot API token (from @BotFather)
     chat_id: ""               # Target chat ID (user, group, or channel)
     min_severity: critical    # warning | critical — recommend critical-only for Telegram
+  unix_socket:
+    enabled: true
+    path: /run/ebpf-guard/alerts.sock
 
 # Enforcement configuration
 # Controls active response actions: kill, block, throttle.

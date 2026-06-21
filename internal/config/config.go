@@ -179,11 +179,21 @@ type NotificationsConfig struct {
 	Discord DiscordNotificationConfig `mapstructure:"discord"`
 	// Telegram Bot API configuration
 	Telegram TelegramNotificationConfig `mapstructure:"telegram"`
+	// UnixSocket streams alerts as JSON lines to a Unix domain socket.
+	UnixSocket UnixSocketNotificationConfig `mapstructure:"unix_socket"`
 	// StrictSSRF enables strict SSRF prevention for all HTTP-based notifiers
 	// by blocking RFC-1918 private IP ranges (10/8, 172.16/12, 192.168/16).
 	// Disable when targets are cluster-internal services.
 	// Default: false — safe for Kubernetes; set true for external targets.
 	StrictSSRF bool `mapstructure:"strict_ssrf"`
+}
+
+// UnixSocketNotificationConfig configures the Unix domain socket alert stream.
+type UnixSocketNotificationConfig struct {
+	// Enabled activates the Unix socket notifier.
+	Enabled bool `mapstructure:"enabled"`
+	// Path is the filesystem path for the Unix domain socket.
+	Path string `mapstructure:"path"`
 }
 
 // OTLPNotificationConfig holds OTLP log exporter settings.

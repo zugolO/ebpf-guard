@@ -2,7 +2,7 @@
 config_version: "v0.1"
 
 server:
-  bind_address: ":9090"
+  bind_address: ":19090"
   metrics_path: "/metrics"
   health_path: "/health"
 
@@ -28,11 +28,11 @@ bpf:
     critical_threshold: 0.80   # >80% queue full → further reduce all rates
 
 rules:
-  path: "rules/"               # Directory of rule files (all .yaml loaded automatically)
+  path: "/opt/ebpf-guard/rules/"  # Directory of rule files (all .yaml loaded automatically)
   hot_reload: true
   rate_limit_alerts: true
   rate_limit_window: 60
-  max_alerts_per_window: 10
+  max_alerts_per_window: 100
 
 profiler:
   enabled: true
@@ -54,7 +54,7 @@ profiler:
 alerting:
   enabled: false
   webhook_url: ""
-  generator_url: "http://ebpf-guard:9090"
+  generator_url: "http://ebpf-guard:19090"
   batch_size: 100
   batch_timeout: 5
   circuit_breaker_threshold: 5

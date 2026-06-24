@@ -36,6 +36,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/migration"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
+	"github.com/zugolO/ebpf-guard/internal/k8s"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/simple"
@@ -1074,6 +1075,33 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// ── Kubernetes pod enricher ─────────────────────────────────────────────
+	// Adds full pod metadata (namespace, labels, annotations, pod name) from the
+	// API server. Scoped to this node via NODE_NAME to bound memory. Runs first
+	// in the enrichment chain so the runtime enricher only fills container fields.
+	// No-ops gracefully off-cluster (NewEnricher returns an error).
+	var k8sEnricher *k8s.Enricher
+	if cfg.Kubernetes.Enabled {
+		ke, keErr := k8s.NewEnricher(k8s.EnricherConfig{
+			KubeconfigPath: cfg.Kubernetes.KubeconfigPath,
+			ResyncPeriod:   time.Duration(cfg.Kubernetes.ResyncPeriod) * time.Second,
+			NodeName:       os.Getenv("NODE_NAME"),
+		}, slog.Default())
+		if keErr != nil {
+			slog.Warn("k8s enricher: unavailable, pod metadata will not be added",
+				slog.Any("error", keErr))
+		} else {
+			k8sEnricher = ke
+			go func() {
+				if err := k8sEnricher.Start(ctx); err != nil {
+					slog.Warn("k8s enricher stopped", slog.Any("error", err))
+				}
+			}()
+			defer func() { _ = k8sEnricher.Stop() }()
+			slog.Info("k8s enricher active (pod metadata enrichment)")
+		}
+	}
+
 	// ── Container runtime enricher (issue #123) ─────────────────────────────
 	// Works on non-Kubernetes hosts and complements the K8s enricher.
 	var runtimeEnricher *runtime.Enricher
@@ -1198,8 +1226,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				}
 			}
 
-			// Enrich with container runtime metadata before rule evaluation so
-			// conditions on container fields (name, image) can match.
+			// Enrich before rule evaluation so conditions on pod/container fields
+			// can match. K8s pod metadata first (namespace, labels, pod name),
+			// then the runtime enricher fills container fields (name, image) and
+			// any node-local pod identity the k8s enricher could not resolve.
+			if k8sEnricher != nil {
+				k8sEnricher.EnrichEvent(&event)
+			}
 			if runtimeEnricher != nil {
 				runtimeEnricher.EnrichEvent(&event)
 			}

@@ -80,6 +80,44 @@ func TestEnrichEvent_PopulatesFields(t *testing.T) {
 	}
 }
 
+func TestEnrichEvent_PopulatesPodIdentityFromOCIAnnotations(t *testing.T) {
+	const containerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	stub := &stubClient{
+		containers: map[string]*ContainerInfo{
+			containerID: {
+				ContainerID:   containerID,
+				ContainerName: "web",
+				Image:         "nginx:latest",
+				// CRI/OCI spec annotations carry pod identity node-locally.
+				Labels: map[string]string{
+					"io.kubernetes.pod.namespace": "production",
+					"io.kubernetes.pod.name":      "web-7d9f",
+					"io.kubernetes.pod.uid":       "abc-123-uid",
+				},
+				CachedAt: time.Now(),
+			},
+		},
+	}
+	e := newTestEnricher(t, stub)
+	e.pidCache[2222] = containerID
+
+	event := &types.Event{PID: 2222}
+	e.EnrichEvent(event)
+
+	if event.Enrichment == nil {
+		t.Fatal("enrichment is nil")
+	}
+	if event.Enrichment.Namespace != "production" {
+		t.Errorf("Namespace = %q, want production", event.Enrichment.Namespace)
+	}
+	if event.Enrichment.PodName != "web-7d9f" {
+		t.Errorf("PodName = %q, want web-7d9f", event.Enrichment.PodName)
+	}
+	if event.Enrichment.PodUID != "abc-123-uid" {
+		t.Errorf("PodUID = %q, want abc-123-uid", event.Enrichment.PodUID)
+	}
+}
+
 func TestEnrichEvent_CachesResults(t *testing.T) {
 	const containerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
 	stub := &stubClient{

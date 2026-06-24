@@ -162,6 +162,21 @@ func applyTo(dst *types.EnrichmentInfo, src *ContainerInfo, source string) {
 	if dst.RuntimeSource == "" {
 		dst.RuntimeSource = source
 	}
+	// Kubernetes pod identity is carried in the OCI spec annotations
+	// (io.kubernetes.pod.*) that the CRI client already collected into
+	// src.Labels. Populate it node-locally — no API server required — but never
+	// overwrite richer values the k8s enricher may have set earlier in the chain.
+	if len(src.Labels) > 0 {
+		if dst.Namespace == "" {
+			dst.Namespace = src.Labels["io.kubernetes.pod.namespace"]
+		}
+		if dst.PodName == "" {
+			dst.PodName = src.Labels["io.kubernetes.pod.name"]
+		}
+		if dst.PodUID == "" {
+			dst.PodUID = src.Labels["io.kubernetes.pod.uid"]
+		}
+	}
 }
 
 // lookupByPID resolves a PID to a ContainerInfo via cgroup → runtime lookup.

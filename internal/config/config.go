@@ -1602,6 +1602,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("kubernetes.kubeconfig_path", "")
 	v.SetDefault("kubernetes.resync_period", 300)
 
+	// Container runtime enrichment. "auto" probes CRI then Docker and adds
+	// container name/image plus node-local pod identity (namespace/pod/uid from
+	// OCI annotations). Gracefully no-ops when no runtime socket is present.
+	v.SetDefault("runtime.enrichment", "auto")
+
 	// Auth defaults - auth is enabled by default for security
 	v.SetDefault("auth.enabled", true)
 	v.SetDefault("auth.bearer_token", "")

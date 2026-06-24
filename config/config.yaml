@@ -64,9 +64,21 @@ alerting:
   circuit_breaker_threshold: 5
 
 kubernetes:
-  enabled: true
+  enabled: true               # Start the API-server pod watcher for full pod
+                              # labels/annotations enrichment (scoped to this
+                              # node via NODE_NAME when set). Disable on non-K8s
+                              # hosts to avoid API-server connection attempts.
   kubeconfig_path: ""
   resync_period: 300
+
+# Container runtime enrichment (CRI/Docker), node-local — no API server.
+# Adds container name/image and pod identity (namespace/pod/uid) from OCI
+# annotations. Complements the kubernetes enricher; runs on non-K8s hosts too.
+#   auto | cri | docker | off
+runtime:
+  enrichment: auto
+  socket_path: ""             # override auto-detected runtime socket
+  cache_ttl: 30s
 
 # Authentication configuration
 # Two-role RBAC is enforced by default.

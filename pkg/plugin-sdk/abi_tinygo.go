@@ -1,4 +1,4 @@
-//go:build tinygo
+//go:build tinygo && wasm
 
 package pluginsdk
 
@@ -28,6 +28,11 @@ var (
 
 //export malloc
 func pluginMalloc(size uint32) uintptr {
+	if size == 0 {
+		// Avoid &buf[0] panicking on an empty slice; a zero-length
+		// allocation has no valid address for the host to write into.
+		return 0
+	}
 	buf := make([]byte, size)
 	return uintptr(unsafe.Pointer(&buf[0]))
 }

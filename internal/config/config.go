@@ -867,8 +867,12 @@ type ProfilerConfig struct {
 	MinLearningSamples uint64 `mapstructure:"min_learning_samples"`
 	// AnomalyThreshold is the score threshold for generating alerts (0.0-1.0)
 	AnomalyThreshold float64 `mapstructure:"anomaly_threshold"`
-	// EWMAWeight is the weight for Exponentially Weighted Moving Average (0.0-1.0)
+	// EWMAWeight is the weight for Exponentially Weighted Moving Average (0.0-1.0).
+	// Deprecated: set profiler.ewma.weight instead (see EWMA). Retained for
+	// backward compatibility; the nested value takes precedence when set.
 	EWMAWeight float64 `mapstructure:"ewma_weight"`
+	// EWMA groups Exponentially Weighted Moving Average settings (since v0.2.0).
+	EWMA EWMASettings `mapstructure:"ewma"`
 	// ProfileTTL is the time-to-live for process profiles in seconds (default 86400 = 24h).
 	// Profiles not seen within this window are evicted by the background cleanup goroutine.
 	ProfileTTL int `mapstructure:"profile_ttl"`
@@ -884,6 +888,14 @@ type ProfilerConfig struct {
 	StatePersistence StatePersistenceConfig `mapstructure:"state_persistence"`
 	// SyscallAllowlist configures deny-unknown (allowlist) mode for syscalls.
 	SyscallAllowlist SyscallAllowlistConfig `mapstructure:"syscall_allowlist"`
+}
+
+// EWMASettings groups Exponentially Weighted Moving Average tuning under
+// profiler.ewma.* (the v0.2.0 schema replacing the flat profiler.ewma_weight).
+type EWMASettings struct {
+	// Weight is the EWMA weight (0.0-1.0). Takes precedence over the legacy
+	// profiler.ewma_weight when set.
+	Weight float64 `mapstructure:"weight"`
 }
 
 // SyscallAllowlistConfig configures the deny-unknown syscall allowlist mode.
@@ -957,8 +969,12 @@ type ExporterConfig struct {
 type AlertingConfig struct {
 	// Enabled enables Alertmanager webhook integration
 	Enabled bool `mapstructure:"enabled"`
-	// WebhookURL is the Alertmanager webhook endpoint
+	// WebhookURL is the Alertmanager webhook endpoint.
+	// Deprecated: set alerting.alertmanager.url instead (see Alertmanager).
+	// Retained for backward compatibility; the nested value takes precedence.
 	WebhookURL string `mapstructure:"webhook_url"`
+	// Alertmanager groups Alertmanager endpoint settings (since v0.2.0).
+	Alertmanager AlertmanagerSettings `mapstructure:"alertmanager"`
 	// GeneratorURL is the URL shown in alerts
 	GeneratorURL string `mapstructure:"generator_url"`
 	// BatchSize is the number of alerts to batch before sending
@@ -980,6 +996,14 @@ type AlertingConfig struct {
 	// IP is in a private range (the default for in-cluster deployments).
 	// Default: false — safe for Kubernetes; set true for external webhook targets.
 	StrictSSRF bool `mapstructure:"strict_ssrf"`
+}
+
+// AlertmanagerSettings groups the Alertmanager endpoint under
+// alerting.alertmanager.* (the v0.2.0 schema replacing alerting.webhook_url).
+type AlertmanagerSettings struct {
+	// URL is the Alertmanager webhook endpoint. Takes precedence over the
+	// legacy alerting.webhook_url when set.
+	URL string `mapstructure:"url"`
 }
 
 // KubernetesConfig holds Kubernetes integration settings.
@@ -1461,6 +1485,9 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 		return nil, fmt.Errorf("config: unmarshal config: %w", err)
 	}
 
+	// Map the v0.2.0 nested keys onto their legacy fields that consumers read.
+	normalizeSchemaAliases(&cfg)
+
 	// Apply env-var overrides for secrets so they don't have to be stored
 	// in plaintext config files or Kubernetes ConfigMaps.
 	applyEnvOverrides(&cfg)
@@ -1521,6 +1548,19 @@ func NewZeroConfigManager() *Manager {
 //	EBPF_GUARD_TELEGRAM_CHAT_ID      — Telegram target chat ID
 //	EBPF_GUARD_ALERTMANAGER_WEBHOOK  — Alertmanager webhook URL
 //
+// normalizeSchemaAliases maps the v0.2.0 nested config keys onto the legacy
+// flat fields that the rest of the codebase reads, so a value set under the new
+// schema (profiler.ewma.weight, alerting.alertmanager.url) actually takes
+// effect. The nested value wins when set; the legacy keys remain accepted.
+func normalizeSchemaAliases(cfg *Config) {
+	if cfg.Profiler.EWMA.Weight != 0 {
+		cfg.Profiler.EWMAWeight = cfg.Profiler.EWMA.Weight
+	}
+	if cfg.Alerting.Alertmanager.URL != "" {
+		cfg.Alerting.WebhookURL = cfg.Alerting.Alertmanager.URL
+	}
+}
+
 // An env var always overrides the config-file value when non-empty.
 func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("EBPF_GUARD_OPENSEARCH_USERNAME"); v != "" {
@@ -1874,6 +1914,7 @@ func (m *Manager) Watch() error {
 			slog.Warn("config: hot-reload rejected, keeping previous config", slog.Any("error", err))
 			return
 		}
+		normalizeSchemaAliases(&newConfig)
 
 		// viper.WatchConfig commonly fires OnConfigChange more than once for a
 		// single write (WRITE+CHMOD, atomic-rename saves, etc.). Skip callbacks

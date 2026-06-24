@@ -43,6 +43,17 @@ profiler:
   anomaly_threshold: 0.8
   ewma_weight: 0.3
   profile_ttl: 86400
+  # Max distinct workload classes / PIDs profiled at once. Bounds profiler
+  # memory; LRU eviction drops the coldest profiles when exceeded.
+  # 0 = auto-detect from /proc/sys/kernel/pid_max (can be millions — not recommended).
+  max_tracked_pids: 4096
+
+# Correlator tuning
+correlator:
+  # Per-PID forensic event ring buffer depth (NOT the detection hot path — rules
+  # evaluate per-event). Grows lazily up to this size. ~208 B/event, so 256 ≈
+  # 53 KB per active PID. Raise for deeper per-process history at the cost of RAM.
+  buffer_size: 256
 
 alerting:
   enabled: false

@@ -308,7 +308,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	engineCfg.Rules = rules
 	engineCfg.BufferSize = cfg.Correlator.BufferSize
 	if engineCfg.BufferSize <= 0 {
-		engineCfg.BufferSize = 10000
+		engineCfg.BufferSize = 256
 	}
 	engineCfg.EnableAnomaly = cfg.Profiler.Enabled
 	engineCfg.AnomalyThreshold = cfg.Profiler.AnomalyThreshold

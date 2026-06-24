@@ -410,7 +410,7 @@ func DefaultCorrelationEngineConfig() CorrelationEngineConfig {
 		RateLimitWindow:    time.Minute,
 		MaxAlertsPerWindow: 10,
 		MaxAlertsPerSecond: 10000,
-		BufferTTL:          10 * time.Minute,
+		BufferTTL:          2 * time.Minute,
 		EnableDedup:        true,
 		DedupWindow:        5 * time.Second,
 		IncidentWindow:     60 * time.Second,
@@ -624,10 +624,16 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	// Background goroutine that evicts stale per-PID event buffers.
 	bufferTTL := config.BufferTTL
 	if bufferTTL <= 0 {
-		bufferTTL = 10 * time.Minute
+		bufferTTL = 2 * time.Minute
+	}
+	// Sweep at half the TTL so idle PID buffers are reclaimed promptly without
+	// excessive cleanup churn. Clamped to a 30s floor.
+	bufferSweep := bufferTTL / 2
+	if bufferSweep < 30*time.Second {
+		bufferSweep = 30 * time.Second
 	}
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(bufferSweep)
 		defer ticker.Stop()
 		for {
 			select {

@@ -13,6 +13,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// maxProfileMapEntries caps the number of distinct keys learned per unbounded
+// per-profile map (destination addresses, directories, file extensions). These
+// are keyed by attacker-influenceable values (IPs, paths) and would otherwise
+// grow without limit — e.g. a process scanning thousands of hosts inflates
+// DestAddrs forever. Once a map is at capacity, new keys are ignored; the
+// already-learned high-frequency keys (the meaningful baseline) are retained,
+// so detection of the common case is unaffected while memory stays bounded.
+const maxProfileMapEntries = 256
+
 // ProcessProfile tracks the behavioral baseline for a workload or process.
 type ProcessProfile struct {
 	// mu guards all mutable fields on this profile.
@@ -181,11 +190,15 @@ func (p *ProcessProfile) recordNetworkEventLocked(e *types.NetworkEvent, weight 
 	}
 	p.NetworkProfile.DestPorts[e.Dport].Update(1.0)
 
-	// Update destination address EWMA (keyed by raw bytes — no string alloc)
-	if p.NetworkProfile.DestAddrs[e.Daddr] == nil {
-		p.NetworkProfile.DestAddrs[e.Daddr] = NewEWMA(weight)
+	// Update destination address EWMA (keyed by raw bytes — no string alloc).
+	// Cap distinct addresses to bound memory against IP-scanning workloads.
+	if ewma := p.NetworkProfile.DestAddrs[e.Daddr]; ewma != nil {
+		ewma.Update(1.0)
+	} else if len(p.NetworkProfile.DestAddrs) < maxProfileMapEntries {
+		ewma = NewEWMA(weight)
+		ewma.Update(1.0)
+		p.NetworkProfile.DestAddrs[e.Daddr] = ewma
 	}
-	p.NetworkProfile.DestAddrs[e.Daddr].Update(1.0)
 }
 
 // RecordFileEvent updates the file profile with a new file access.
@@ -204,19 +217,25 @@ func (p *ProcessProfile) recordFileEventLocked(e *types.FileEvent, weight float6
 	filename := string(bytesToString(e.Filename[:]))
 	dir := extractDirectory(filename)
 	if dir != "" {
-		if p.FileProfile.Directories[dir] == nil {
-			p.FileProfile.Directories[dir] = NewEWMA(weight)
+		if ewma := p.FileProfile.Directories[dir]; ewma != nil {
+			ewma.Update(1.0)
+		} else if len(p.FileProfile.Directories) < maxProfileMapEntries {
+			ewma = NewEWMA(weight)
+			ewma.Update(1.0)
+			p.FileProfile.Directories[dir] = ewma
 		}
-		p.FileProfile.Directories[dir].Update(1.0)
 	}
 
 	// Extract and track file extension
 	ext := extractExtension(filename)
 	if ext != "" {
-		if p.FileProfile.Extensions[ext] == nil {
-			p.FileProfile.Extensions[ext] = NewEWMA(weight)
+		if ewma := p.FileProfile.Extensions[ext]; ewma != nil {
+			ewma.Update(1.0)
+		} else if len(p.FileProfile.Extensions) < maxProfileMapEntries {
+			ewma = NewEWMA(weight)
+			ewma.Update(1.0)
+			p.FileProfile.Extensions[ext] = ewma
 		}
-		p.FileProfile.Extensions[ext].Update(1.0)
 	}
 }
 

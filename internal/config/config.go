@@ -1532,6 +1532,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.connections", 32768)
 	v.SetDefault("bpf.map_sizes.fd_map_size", 65536)
 	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
+	// Event channel depth. Set explicitly so lowering correlator.buffer_size
+	// (the per-PID forensic ring buffer) never shrinks the ingest channel, which
+	// would increase drops under burst.
+	v.SetDefault("bpf.event_queue_depth", 65536)
 	v.SetDefault("bpf.kernel_filter.enabled", true)
 	v.SetDefault("bpf.sampling.enabled", true)
 	v.SetDefault("bpf.sampling.syscall_rate", 1)
@@ -1550,7 +1554,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rules.max_alerts_per_window", 10)
 
 	// Correlator defaults
-	v.SetDefault("correlator.buffer_size", 10000)
+	// Per-PID forensic event ring buffer depth. This buffer is not on the
+	// detection hot path (rules evaluate per-event); it only retains recent
+	// per-process history. 256 events × ~208 B ≈ 53 KB/PID keeps memory bounded.
+	v.SetDefault("correlator.buffer_size", 256)
 	v.SetDefault("correlator.max_alerts_per_second", 10000)
 
 	// Profiler defaults
@@ -1560,7 +1567,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiler.anomaly_threshold", 0.8)
 	v.SetDefault("profiler.ewma_weight", 0.3)
 	v.SetDefault("profiler.profile_ttl", 86400)
-	v.SetDefault("profiler.max_tracked_pids", 0) // 0 = auto-detect from /proc/sys/kernel/pid_max
+	// Max distinct workload classes / PIDs tracked at once. A single node rarely
+	// runs more than a few thousand distinct (comm,namespace,app) workloads;
+	// 4096 bounds profiler memory while LRU eviction handles the cold tail.
+	// Previously 0 = auto-detect from /proc/sys/kernel/pid_max, which on modern
+	// kernels is up to 4194304 — effectively unbounded.
+	v.SetDefault("profiler.max_tracked_pids", 4096)
 
 	// Sequence profiler defaults
 	v.SetDefault("profiler.sequence.enabled", true)

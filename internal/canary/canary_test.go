@@ -220,8 +220,14 @@ func TestVerify_DetectsModifiedFile(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Overwrite content to trigger hash mismatch.
-	if err := os.WriteFile(path, []byte("attacker was here\n"), 0400); err != nil {
+	// Overwrite content to trigger hash mismatch. The trap installs the canary
+	// read-only, so flip the write bit first — otherwise the overwrite fails
+	// with EACCES when the test runs as a non-root user (e.g. on CI runners);
+	// root ignores the mode, which is why this only surfaced outside of root.
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("attacker was here\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 

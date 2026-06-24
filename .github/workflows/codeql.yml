@@ -34,6 +34,12 @@ jobs:
         # Use the security-extended query suite for broader coverage.
         queries: security-extended
 
+    # Generate the bpf2go bindings before the build trace — they are not
+    # committed, so autobuild's `go build` would otherwise fail with
+    # undefined: bpf.*Objects.
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Autobuild
       uses: github/codeql-action/autobuild@v3
 

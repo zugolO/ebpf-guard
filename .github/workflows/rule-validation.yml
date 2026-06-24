@@ -55,6 +55,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Generate eBPF bindings
+        uses: ./.github/actions/setup-ebpf
+
       - name: Validate all rule YAML files
         run: |
           go test -v -run TestRuleLoader ./internal/correlator/... 2>&1 | tee rule-validation.log
@@ -211,6 +214,9 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Generate eBPF bindings
+        uses: ./.github/actions/setup-ebpf
 
       - name: Build ebpf-guard CLI
         run: go build -o build/ebpf-guard ./cmd/ebpf-guard/

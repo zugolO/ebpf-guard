@@ -27,8 +27,11 @@ jobs:
         with:
           go-version: '1.25.x'
 
-      - name: Build ebpf-guard (no BPF)
-        run: go build -tags nobpf -o /tmp/ebpf-guard ./cmd/ebpf-guard
+      - name: Generate eBPF bindings
+        uses: ./.github/actions/setup-ebpf
+
+      - name: Build ebpf-guard
+        run: go build -o /tmp/ebpf-guard ./cmd/ebpf-guard
 
       - name: Validate config/config.yaml
         run: /tmp/ebpf-guard config validate --config config/config.yaml

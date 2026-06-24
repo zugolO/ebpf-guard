@@ -20,6 +20,12 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// e2eAuthToken is a fixed admin bearer token injected into the agent
+// container via EBPF_GUARD_AUTH_TOKEN so authenticated endpoints (e.g.
+// /metrics) can be exercised with a known credential. Zero-config mode
+// otherwise generates a random token at startup.
+const e2eAuthToken = "e2e-integration-test-token"
+
 // IntegrationTestSuite provides end-to-end testing infrastructure.
 type IntegrationTestSuite struct {
 	suite.Suite
@@ -72,6 +78,7 @@ func (s *IntegrationTestSuite) TestHealthEndpoint() {
 			PrintBuildLog: true,
 		},
 		ExposedPorts: []string{"9090/tcp"},
+		Env:          map[string]string{"EBPF_GUARD_AUTH_TOKEN": e2eAuthToken},
 		WaitingFor:   wait.ForHTTP("/health").WithPort("9090").WithStartupTimeout(30 * time.Second),
 		Networks:     []string{"ebpf-guard-test"},
 		Privileged:   true, // Required for eBPF
@@ -113,7 +120,12 @@ func (s *IntegrationTestSuite) TestMetricsEndpoint() {
 	require.NoError(s.T(), err)
 
 	url := fmt.Sprintf("http://%s:%s/metrics", ip, port.Port())
-	resp, err := http.Get(url)
+	// /metrics requires a bearer token when auth is enabled (the default in
+	// zero-config mode); use the fixed token injected into the container.
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	require.NoError(s.T(), err)
+	req.Header.Set("Authorization", "Bearer "+e2eAuthToken)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(s.T(), err)
 	defer resp.Body.Close()
 

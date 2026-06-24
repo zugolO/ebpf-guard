@@ -69,7 +69,7 @@ jobs:
 
     - name: Scan SBOM for vulnerabilities
       id: scan
-      uses: anchore/scan-action@v3
+      uses: anchore/scan-action@v6
       with:
         sbom: ebpf-guard.spdx.json
         fail-build: false

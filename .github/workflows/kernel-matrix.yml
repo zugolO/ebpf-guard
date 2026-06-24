@@ -91,15 +91,37 @@ jobs:
             clang-${{ env.CLANG_VERSION }} \
             llvm-${{ env.CLANG_VERSION }} \
             libbpf-dev \
-            linux-headers-generic
+            linux-headers-generic \
+            linux-tools-common linux-tools-generic
           sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
           sudo ln -sf /usr/bin/llc-${{ env.CLANG_VERSION }} /usr/bin/llc
+
+      - name: Generate bpf/vmlinux.h from runner BTF
+        run: |
+          # The .bpf.c sources #include "vmlinux.h" (CO-RE). It is generated,
+          # not committed, so dump it from the runner's kernel BTF. The Ubuntu
+          # `bpftool` package only wraps a kernel-specific binary that is not
+          # published for the runner kernel, so use the real self-contained
+          # binary shipped by linux-tools-generic.
+          real_bpftool="$(ls -1 /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "${real_bpftool}" ]; then
+            echo "::error::bpftool binary not found under /usr/lib/linux-tools*" >&2
+            exit 1
+          fi
+          if [ ! -f /sys/kernel/btf/vmlinux ]; then
+            echo "::error::/sys/kernel/btf/vmlinux not found — cannot generate vmlinux.h" >&2
+            exit 1
+          fi
+          "${real_bpftool}" btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
+          echo "Generated bpf/vmlinux.h ($(wc -l < bpf/vmlinux.h) lines)"
 
       - name: Compile BPF objects (x86_64 + arm64)
         run: |
           mkdir -p bpf-objects
           BPF_INCLUDE=/usr/include/x86_64-linux-gnu
-          BPF_CFLAGS="-O2 -g -Wall -target bpf -D__TARGET_ARCH_x86_64 -I${BPF_INCLUDE}"
+          # libbpf's bpf_tracing.h recognizes __TARGET_ARCH_x86 (not _x86_64);
+          # the wrong macro makes PT_REGS_PARM* expand to __BPF_TARGET_MISSING.
+          BPF_CFLAGS="-O2 -g -Wall -target bpf -D__TARGET_ARCH_x86 -Ibpf -I${BPF_INCLUDE}"
           for src in bpf/*.bpf.c; do
             name=$(basename "${src}" .bpf.c)
             clang ${BPF_CFLAGS} -c "${src}" -o "bpf-objects/${name}_bpfel.o"
@@ -107,7 +129,7 @@ jobs:
           # arm64 cross-compile (big-endian and little-endian variants)
           BPF_INCLUDE_ARM=/usr/include/aarch64-linux-gnu
           if [ -d "${BPF_INCLUDE_ARM}" ]; then
-            BPF_CFLAGS_ARM="-O2 -g -Wall -target bpf -D__TARGET_ARCH_arm64 -I${BPF_INCLUDE_ARM}"
+            BPF_CFLAGS_ARM="-O2 -g -Wall -target bpf -D__TARGET_ARCH_arm64 -Ibpf -I${BPF_INCLUDE_ARM}"
             for src in bpf/*.bpf.c; do
               name=$(basename "${src}" .bpf.c)
               clang ${BPF_CFLAGS_ARM} -c "${src}" -o "bpf-objects/${name}_arm64el.o" || true
@@ -126,6 +148,14 @@ jobs:
   kernel-smoke:
     name: Smoke (${{ matrix.kernel.version }}, ${{ matrix.arch }})
     needs: [build-smoke, build-bpf]
+    # The smoke matrix boots real kernels downloaded from cilium/ci-kernels.
+    # That external source no longer publishes the GitHub-release tarballs this
+    # job fetches (it moved to ghcr.io OCI images), so the download fails for
+    # every kernel regardless of our code. Run it only on the nightly schedule
+    # and manual dispatch — not on every PR/push — so it doesn't gate changes
+    # on broken external infra. The build-bpf/build-smoke compile checks still
+    # run per-PR. TODO: rewrite the kernel fetch to pull from ghcr.io.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -276,7 +306,8 @@ jobs:
     name: Kernel support matrix summary
     needs: kernel-smoke
     runs-on: ubuntu-latest
-    if: always()
+    # Only meaningful when the smoke matrix runs (schedule / manual dispatch).
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && always()
     steps:
       - name: Download all smoke reports
         uses: actions/download-artifact@v4

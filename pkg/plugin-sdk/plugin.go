@@ -73,11 +73,6 @@
 // Keep per-plugin logic O(1) to stay within the performance budget.
 package pluginsdk
 
-import (
-	"encoding/json"
-	"unsafe"
-)
-
 // ABIVersion is the ABI version this SDK implements.
 // Export this as a WASM global i32 named "ebpf_guard_abi_version" in your plugin.
 const ABIVersion = 1
@@ -234,72 +229,11 @@ type HandlerFunc func(event *Event) *Alert
 
 func (f HandlerFunc) Match(event *Event) *Alert { return f(event) }
 
-// module-level state written by evaluate(), read by alert_* exports.
-var (
-	registeredHandler Handler
-	lastAlert         *Alert
-	alertBuf          []byte
-)
+// registeredHandler is the global plugin handler, set via Register and invoked
+// from the WASM ABI evaluate export (see abi_tinygo.go).
+var registeredHandler Handler
 
 // Register sets the global plugin handler.  Call this from init().
 func Register(h Handler) {
 	registeredHandler = h
-}
-
-// ── WASM ABI exports ─────────────────────────────────────────────────────────
-// These functions are exported to the host under the standard ABI.
-// TinyGo will export them automatically when they are package-level functions
-// in main (or called from exported functions in main).
-
-//export malloc
-func pluginMalloc(size uint32) uintptr {
-	buf := make([]byte, size)
-	return uintptr(unsafe.Pointer(&buf[0]))
-}
-
-//export free
-func pluginFree(_ uintptr) {}
-
-//export evaluate
-func pluginEvaluate(ptr uintptr, length uint32) int32 {
-	if registeredHandler == nil {
-		return 0
-	}
-	data := unsafe.Slice((*byte)(unsafe.Pointer(ptr)), length)
-
-	var event Event
-	if err := json.Unmarshal(data, &event); err != nil {
-		return 0
-	}
-
-	alert := registeredHandler.Match(&event)
-	if alert == nil {
-		lastAlert = nil
-		alertBuf = nil
-		return 0
-	}
-	lastAlert = alert
-	alertBuf = []byte(alert.Message)
-	return 1
-}
-
-//export alert_severity
-func pluginAlertSeverity() int32 {
-	if lastAlert == nil {
-		return 0
-	}
-	return int32(lastAlert.Severity)
-}
-
-//export alert_message_ptr
-func pluginAlertMessagePtr() uintptr {
-	if len(alertBuf) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&alertBuf[0]))
-}
-
-//export alert_message_len
-func pluginAlertMessageLen() uint32 {
-	return uint32(len(alertBuf))
 }

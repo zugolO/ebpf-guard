@@ -1,0 +1,94 @@
+suite: supply_chain
+rules_path: ../../rules/supply-chain.yaml
+tests:
+  # ── CI/CD runner network ───────────────────────────────────────────────────
+  - name: "CI runner connecting to non-standard port fires supply_chain_cicd_runner_network"
+    rule_id: supply_chain_cicd_runner_network
+    event:
+      type: network
+      comm: runner
+      network:
+        dst_ip: "1.2.3.4"
+        dport: 4444
+    expect: alert
+    expect_severity: warning
+
+  - name: "CI runner on port 9999 fires supply_chain_cicd_runner_network"
+    rule_id: supply_chain_cicd_runner_network
+    event:
+      type: network
+      network:
+        dst_ip: "10.0.0.99"
+        dport: 9999
+    expect: alert
+
+  - name: "CI runner connecting to HTTPS (443) does not fire"
+    event:
+      type: network
+      network:
+        dst_ip: "140.82.112.4"
+        dport: 443
+    expect: no_alert
+
+  - name: "CI runner connecting to HTTP (80) does not fire"
+    event:
+      type: network
+      network:
+        dst_ip: "151.101.0.63"
+        dport: 80
+    expect: no_alert
+
+  # ── Package install writing to /etc ────────────────────────────────────────
+  - name: "writing to /etc/profile.d/ fires supply_chain_pkg_install_etc_write"
+    rule_id: supply_chain_pkg_install_etc_write
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/etc/profile.d/evil_hook.sh"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "writing to /etc/cron.d/ fires supply_chain_pkg_install_etc_write"
+    rule_id: supply_chain_pkg_install_etc_write
+    event:
+      type: file
+      comm: npm
+      file:
+        filename: "/etc/cron.d/malicious_pkg"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "writing to /etc/systemd/system/ fires supply_chain_pkg_install_etc_write"
+    rule_id: supply_chain_pkg_install_etc_write
+    event:
+      type: file
+      comm: pip
+      file:
+        filename: "/etc/systemd/system/backdoor.service"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "writing to /etc/ld.so.preload fires supply_chain_pkg_install_etc_write"
+    rule_id: supply_chain_pkg_install_etc_write
+    event:
+      type: file
+      comm: gem
+      file:
+        filename: "/etc/ld.so.preload"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "writing to ~/.local/lib does not fire supply chain rules"
+    event:
+      type: file
+      comm: pip
+      file:
+        filename: "/home/user/.local/lib/python3.11/site-packages/requests/__init__.py"
+        op: create
+    expect: no_alert

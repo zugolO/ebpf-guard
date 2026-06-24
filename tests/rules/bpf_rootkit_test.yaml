@@ -1,0 +1,118 @@
+suite: bpf_rootkit
+rules_path: ../../rules/bpf-rootkit.yaml
+tests:
+  # ── Unauthorized BPF program load ──────────────────────────────────────────
+  - name: "unknown process loading BPF program fires bpf_prog_load_unauthorized"
+    rule_id: bpf_prog_load_unauthorized
+    event:
+      type: bpf_program
+      comm: malware
+      bpf_program:
+        cmd_nr: 5
+        ret: 3
+    expect: alert
+    expect_severity: critical
+
+  - name: "rootkit process loading BPF program fires bpf_prog_load_unauthorized"
+    rule_id: bpf_prog_load_unauthorized
+    event:
+      type: bpf_program
+      comm: rootkit
+      bpf_program:
+        cmd_nr: 5
+        ret: 5
+    expect: alert
+    expect_severity: critical
+
+  - name: "failed BPF load (ret<0) does not fire bpf_prog_load_unauthorized"
+    event:
+      type: bpf_program
+      comm: malware
+      bpf_program:
+        cmd_nr: 5
+        ret: -1
+    expect: no_alert
+
+  - name: "ebpf-guard loading BPF program does not fire (allowlisted)"
+    event:
+      type: bpf_program
+      comm: ebpf-guard
+      bpf_program:
+        cmd_nr: 5
+        ret: 3
+    expect: no_alert
+
+  - name: "cilium-agent loading BPF program does not fire (allowlisted)"
+    event:
+      type: bpf_program
+      comm: cilium-agent
+      bpf_program:
+        cmd_nr: 5
+        ret: 7
+    expect: no_alert
+
+  - name: "systemd loading BPF program does not fire (allowlisted)"
+    event:
+      type: bpf_program
+      comm: systemd
+      bpf_program:
+        cmd_nr: 5
+        ret: 4
+    expect: no_alert
+
+  # ── XDP/TC unauthorized load ───────────────────────────────────────────────
+  - name: "unknown process loading XDP program fires bpf_xdp_tc_unauthorized"
+    rule_id: bpf_xdp_tc_unauthorized
+    event:
+      type: bpf_program
+      comm: rootkit
+      bpf_program:
+        cmd_nr: 5
+        prog_type: XDP
+        ret: 3
+    expect: alert
+    expect_severity: critical
+
+  - name: "unknown process loading SCHED_CLS program fires bpf_xdp_tc_unauthorized"
+    rule_id: bpf_xdp_tc_unauthorized
+    event:
+      type: bpf_program
+      comm: implant
+      bpf_program:
+        cmd_nr: 5
+        prog_type: SCHED_CLS
+        ret: 5
+    expect: alert
+    expect_severity: critical
+
+  - name: "unknown process loading SCHED_ACT program fires bpf_xdp_tc_unauthorized"
+    rule_id: bpf_xdp_tc_unauthorized
+    event:
+      type: bpf_program
+      comm: evasion
+      bpf_program:
+        cmd_nr: 5
+        prog_type: SCHED_ACT
+        ret: 6
+    expect: alert
+    expect_severity: critical
+
+  - name: "cilium loading XDP program does not fire (allowlisted)"
+    event:
+      type: bpf_program
+      comm: cilium-agent
+      bpf_program:
+        cmd_nr: 5
+        prog_type: XDP
+        ret: 3
+    expect: no_alert
+
+  # ── Negative: MAP_CREATE is not PROG_LOAD ──────────────────────────────────
+  - name: "BPF MAP_CREATE (cmd_nr=0) by ebpf-guard does not fire prog_load rules"
+    event:
+      type: bpf_program
+      comm: ebpf-guard
+      bpf_program:
+        cmd_nr: 0
+        ret: 3
+    expect: no_alert

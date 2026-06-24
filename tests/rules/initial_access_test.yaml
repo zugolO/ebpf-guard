@@ -1,0 +1,131 @@
+suite: initial_access
+rules_path: ../../rules/initial-access.yaml
+tests:
+  # ── Web shell written to web root ──────────────────────────────────────────
+  - name: "PHP file written to /var/www/ fires initial_web_shell_write"
+    rule_id: initial_web_shell_write
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/var/www/html/shell.php"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "JSP file written to /opt/tomcat/ fires initial_web_shell_write"
+    rule_id: initial_web_shell_write
+    event:
+      type: file
+      comm: java
+      file:
+        filename: "/opt/tomcat/webapps/ROOT/cmd.jsp"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "PHP5 file written to /srv/www/ fires initial_web_shell_write"
+    rule_id: initial_web_shell_write
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/srv/www/site/backdoor.php5"
+        op: create
+    expect: alert
+
+  - name: "Phar written to /var/www/ fires initial_web_shell_write"
+    rule_id: initial_web_shell_write
+    event:
+      type: file
+      comm: wget
+      file:
+        filename: "/var/www/html/evil.phar"
+        op: write
+    expect: alert
+
+  - name: "rsync writing PHP to web root does not fire (allowlisted deploy)"
+    event:
+      type: file
+      comm: rsync
+      file:
+        filename: "/var/www/html/index.php"
+        op: create
+    expect: no_alert
+
+  - name: "git writing PHP to web root does not fire (allowlisted)"
+    event:
+      type: file
+      comm: git
+      file:
+        filename: "/var/www/html/app.php"
+        op: write
+    expect: no_alert
+
+  # ── Office macro / document execution ─────────────────────────────────────
+  - name: "bash spawned via execve fires initial_office_macro_exec"
+    rule_id: initial_office_macro_exec
+    event:
+      type: syscall
+      comm: bash
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  - name: "python3 spawned via execve fires initial_office_macro_exec"
+    rule_id: initial_office_macro_exec
+    event:
+      type: syscall
+      comm: python3
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "perl spawned via execve fires initial_office_macro_exec"
+    rule_id: initial_office_macro_exec
+    event:
+      type: syscall
+      comm: perl
+      syscall:
+        nr: 59
+    expect: alert
+
+  # ── Package post-install network ───────────────────────────────────────────
+  - name: "unexpected process connecting to port 80 fires initial_package_postinstall_network"
+    rule_id: initial_package_postinstall_network
+    event:
+      type: network
+      comm: make
+      network:
+        dst_ip: "1.2.3.4"
+        dport: 80
+    expect: alert
+
+  - name: "unexpected process connecting to port 443 fires initial_package_postinstall_network"
+    rule_id: initial_package_postinstall_network
+    event:
+      type: network
+      comm: make
+      network:
+        dst_ip: "1.2.3.5"
+        dport: 443
+    expect: alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "writing a CSS file to web root does not fire web shell rule"
+    event:
+      type: file
+      comm: scp
+      file:
+        filename: "/var/www/html/style.css"
+        op: create
+    expect: no_alert
+
+  - name: "read syscall (nr=0) does not fire macro exec rule"
+    event:
+      type: syscall
+      comm: bash
+      syscall:
+        nr: 0
+    expect: no_alert

@@ -1,0 +1,117 @@
+suite: runtime_integrity
+rules_path: ../../rules/runtime-integrity.yaml
+tests:
+  # ── Shared library replacement ─────────────────────────────────────────────
+  - name: "write to .so in /lib/ by non-pkg-manager fires integrity_lib_replaced"
+    rule_id: integrity_lib_replaced
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/lib/x86_64-linux-gnu/libc.so.6"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "write to .so in /usr/lib/ fires integrity_lib_replaced"
+    rule_id: integrity_lib_replaced
+    event:
+      type: file
+      comm: backdoor
+      file:
+        filename: "/usr/lib/x86_64-linux-gnu/libssl.so.1"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "write to .so.6 in /lib64/ fires integrity_lib_replaced"
+    rule_id: integrity_lib_replaced
+    event:
+      type: file
+      comm: rootkit
+      file:
+        filename: "/lib64/libstdc++.so.6"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "dpkg writing .so does not fire (package manager)"
+    event:
+      type: file
+      comm: dpkg
+      file:
+        filename: "/usr/lib/x86_64-linux-gnu/libcrypto.so.3"
+        op: write
+    expect: no_alert
+
+  - name: "ldconfig writing .so does not fire (allowlisted)"
+    event:
+      type: file
+      comm: ldconfig
+      file:
+        filename: "/lib/x86_64-linux-gnu/libz.so.1"
+        op: create
+    expect: no_alert
+
+  # ── /etc/ld.so.preload modification ───────────────────────────────────────
+  - name: "write to /etc/ld.so.preload fires integrity_ld_so_preload_write"
+    rule_id: integrity_ld_so_preload_write
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/etc/ld.so.preload"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "create /etc/ld.so.preload fires integrity_ld_so_preload_write"
+    rule_id: integrity_ld_so_preload_write
+    event:
+      type: file
+      comm: rootkit
+      file:
+        filename: "/etc/ld.so.preload"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  # ── Dynamic linker cache write ────────────────────────────────────────────
+  - name: "write to /etc/ld.so.conf.d/ fires integrity_ld_cache_write"
+    rule_id: integrity_ld_cache_write
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/etc/ld.so.conf.d/evil.conf"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "ldconfig writing ld.so.conf.d does not fire (allowlisted)"
+    event:
+      type: file
+      comm: ldconfig
+      file:
+        filename: "/etc/ld.so.conf.d/ldconfig.conf"
+        op: write
+    expect: no_alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "reading a .so file does not fire library replacement rule"
+    event:
+      type: file
+      comm: ldd
+      file:
+        filename: "/lib/x86_64-linux-gnu/libc.so.6"
+        op: read
+    expect: no_alert
+
+  - name: "writing to /tmp/lib does not fire library replacement rule"
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/tmp/libevil.so"
+        op: write
+    expect: no_alert

@@ -1,0 +1,71 @@
+suite: collection_evasion_gaps
+rules_path: ../../rules/collection-and-evasion-gaps.yaml
+tests:
+  # ── Direct database file access ───────────────────────────────────────────
+  - name: "non-db process reading /var/lib/mysql/ fires collection_direct_db_file_access"
+    rule_id: collection_direct_db_file_access
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/var/lib/mysql/users.ibd"
+        op: read
+    expect: alert
+
+  - name: "non-db process reading /var/lib/postgresql/ fires collection_direct_db_file_access"
+    rule_id: collection_direct_db_file_access
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/var/lib/postgresql/14/main/base/16384/1259"
+        op: open
+    expect: alert
+
+  - name: "non-db process reading /var/lib/mongodb/ fires collection_direct_db_file_access"
+    rule_id: collection_direct_db_file_access
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/var/lib/mongodb/admin.bson"
+        op: read
+    expect: alert
+
+  - name: "non-db process reading /var/lib/etcd/ fires collection_direct_db_file_access"
+    rule_id: collection_direct_db_file_access
+    event:
+      type: file
+      comm: nc
+      file:
+        filename: "/var/lib/etcd/member/wal/0000000000000000-0000000000000000.wal"
+        op: open
+    expect: alert
+
+  - name: "non-db process reading /data/db/ fires collection_direct_db_file_access"
+    rule_id: collection_direct_db_file_access
+    event:
+      type: file
+      comm: implant
+      file:
+        filename: "/data/db/collections/0.bson"
+        op: read
+    expect: alert
+
+  - name: "writing to /var/lib/mysql/ does not fire (only open/read triggers)"
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/var/lib/mysql/evil.ibd"
+        op: write
+    expect: no_alert
+
+  - name: "reading /var/log/nginx/ does not fire db access rule"
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/var/log/nginx/access.log"
+        op: read
+    expect: no_alert

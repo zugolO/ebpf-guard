@@ -1,0 +1,85 @@
+suite: kernel_integrity
+rules_path: ../../rules/kernel-integrity.yaml
+tests:
+  # ── Module load from unexpected parent ────────────────────────────────────
+  - name: "kmod loaded from unexpected parent fires kmod_unexpected_parent"
+    rule_id: kmod_unexpected_parent
+    event:
+      type: kmod
+      comm: insmod
+      parent_comm: bash
+      kmod:
+        name: rootkit
+    expect: alert
+    expect_severity: critical
+
+  - name: "kmod loaded with python3 parent fires kmod_unexpected_parent"
+    rule_id: kmod_unexpected_parent
+    event:
+      type: kmod
+      comm: insmod
+      parent_comm: python3
+      kmod:
+        name: evil.ko
+    expect: alert
+    expect_severity: critical
+
+  - name: "kmod loaded from malware parent fires kmod_unexpected_parent"
+    rule_id: kmod_unexpected_parent
+    event:
+      type: kmod
+      parent_comm: malware
+      kmod:
+        name: implant
+    expect: alert
+    expect_severity: critical
+
+  - name: "kmod loaded from modprobe parent does not fire (allowlisted)"
+    event:
+      type: kmod
+      comm: modprobe
+      parent_comm: modprobe
+      kmod:
+        name: veth
+    expect: no_alert
+
+  - name: "kmod loaded from systemd parent does not fire (allowlisted)"
+    event:
+      type: kmod
+      comm: modprobe
+      parent_comm: systemd
+      kmod:
+        name: ip_tables
+    expect: no_alert
+
+  - name: "kmod loaded from udevadm parent does not fire (allowlisted)"
+    event:
+      type: kmod
+      comm: modprobe
+      parent_comm: udevadm
+      kmod:
+        name: usb_storage
+    expect: no_alert
+
+  # ── Module load from /tmp or /dev/shm ─────────────────────────────────────
+  - name: "module loaded from tmpfs fires kmod_load_from_tmpfs"
+    rule_id: kmod_load_from_tmpfs
+    event:
+      type: kmod
+      comm: insmod
+      parent_comm: bash
+      kmod:
+        name: rootkit
+        from_tmpfs: true
+    expect: alert
+    expect_severity: critical
+
+  - name: "module not from tmpfs does not fire kmod_load_from_tmpfs"
+    event:
+      type: kmod
+      comm: modprobe
+      parent_comm: systemd
+      kmod:
+        name: evil
+        from_tmpfs: false
+    expect: no_alert

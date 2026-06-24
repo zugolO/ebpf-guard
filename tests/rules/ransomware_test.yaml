@@ -1,0 +1,115 @@
+suite: ransomware
+rules_path: ../../rules/ransomware.yaml
+tests:
+  # ── Mass file rename (encryption pattern) ─────────────────────────────────
+  - name: "renaming a file fires ransomware_mass_rename"
+    rule_id: ransomware_mass_rename
+    event:
+      type: file
+      comm: encryptor
+      file:
+        filename: "/home/user/documents/report.docx"
+        op: rename
+    expect: alert
+    expect_severity: critical
+
+  - name: "rename in /tmp/.tmp (excluded path) does not fire"
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/tmp/.ransom_tmp"
+        op: rename
+    expect: no_alert
+
+  # ── Ransomware file extensions ─────────────────────────────────────────────
+  - name: "creating .locked file fires ransomware_encrypted_extension"
+    rule_id: ransomware_encrypted_extension
+    event:
+      type: file
+      comm: encryptor
+      file:
+        filename: "/home/user/docs/resume.pdf.locked"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "writing .enc file fires ransomware_encrypted_extension"
+    rule_id: ransomware_encrypted_extension
+    event:
+      type: file
+      comm: crypt
+      file:
+        filename: "/home/user/photos/vacation.jpg.enc"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "creating .crypt file fires ransomware_encrypted_extension"
+    rule_id: ransomware_encrypted_extension
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/var/data/db.sqlite.crypt"
+        op: create
+    expect: alert
+
+  - name: "writing .wncry file (WannaCry) fires ransomware_encrypted_extension"
+    rule_id: ransomware_encrypted_extension
+    event:
+      type: file
+      comm: wcry
+      file:
+        filename: "/home/user/important.docx.wncry"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "writing .locky file fires ransomware_encrypted_extension"
+    rule_id: ransomware_encrypted_extension
+    event:
+      type: file
+      comm: locker
+      file:
+        filename: "/etc/config.locky"
+        op: write
+    expect: alert
+
+  - name: "writing .encrypted extension fires ransomware_encrypted_extension"
+    rule_id: ransomware_encrypted_extension
+    event:
+      type: file
+      comm: encryptor
+      file:
+        filename: "/home/admin/data.tar.encrypted"
+        op: create
+    expect: alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "writing a normal .pdf file does not fire any ransomware rule"
+    event:
+      type: file
+      comm: libreoffice
+      file:
+        filename: "/home/user/report.pdf"
+        op: write
+    expect: no_alert
+
+  - name: "writing a normal .txt file does not fire any ransomware rule"
+    event:
+      type: file
+      comm: vim
+      file:
+        filename: "/home/user/notes.txt"
+        op: write
+    expect: no_alert
+
+  - name: "renaming in /proc/ does not fire mass rename rule (excluded)"
+    event:
+      type: file
+      comm: kernel
+      file:
+        filename: "/proc/self/fd/rename"
+        op: rename
+    expect: no_alert

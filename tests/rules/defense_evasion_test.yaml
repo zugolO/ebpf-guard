@@ -1,0 +1,187 @@
+suite: defense_evasion
+rules_path: ../../rules/defense-evasion.yaml
+tests:
+  # ── Log clearing ───────────────────────────────────────────────────────────
+  - name: "unlink on /var/log/ by non-logging process fires evasion_log_clear"
+    rule_id: evasion_log_clear
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/var/log/auth.log"
+        op: unlink
+    expect: alert
+    expect_severity: warning
+
+  - name: "truncating /var/log/syslog fires evasion_log_clear"
+    rule_id: evasion_log_clear
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/var/log/syslog"
+        op: truncate
+    expect: alert
+
+  - name: "logrotate unlinking /var/log/ does not fire (allowlisted)"
+    event:
+      type: file
+      comm: logrotate
+      file:
+        filename: "/var/log/nginx/access.log.1"
+        op: unlink
+    expect: no_alert
+
+  # ── Timestomping ───────────────────────────────────────────────────────────
+  - name: "utimensat (nr=280) fires evasion_timestamp_modify"
+    rule_id: evasion_timestamp_modify
+    event:
+      type: syscall
+      comm: malware
+      syscall:
+        nr: 280
+    expect: alert
+    expect_severity: warning
+
+  - name: "utime (nr=132) fires evasion_timestamp_modify"
+    rule_id: evasion_timestamp_modify
+    event:
+      type: syscall
+      comm: implant
+      syscall:
+        nr: 132
+    expect: alert
+
+  - name: "utimes (nr=235) fires evasion_timestamp_modify"
+    rule_id: evasion_timestamp_modify
+    event:
+      type: syscall
+      comm: stealth
+      syscall:
+        nr: 235
+    expect: alert
+
+  - name: "rsync calling utimensat does not fire (allowlisted)"
+    event:
+      type: syscall
+      comm: rsync
+      syscall:
+        nr: 280
+    expect: no_alert
+
+  - name: "git calling utimensat does not fire (allowlisted)"
+    event:
+      type: syscall
+      comm: git
+      syscall:
+        nr: 280
+    expect: no_alert
+
+  # ── chmod on sensitive binaries ────────────────────────────────────────────
+  - name: "chmod (nr=90) fires evasion_chmod_sensitive"
+    rule_id: evasion_chmod_sensitive
+    event:
+      type: syscall
+      comm: malware
+      syscall:
+        nr: 90
+    expect: alert
+    expect_severity: warning
+
+  - name: "fchmod (nr=91) fires evasion_chmod_sensitive"
+    rule_id: evasion_chmod_sensitive
+    event:
+      type: syscall
+      comm: implant
+      syscall:
+        nr: 91
+    expect: alert
+
+  - name: "fchmodat (nr=268) fires evasion_chmod_sensitive"
+    rule_id: evasion_chmod_sensitive
+    event:
+      type: syscall
+      comm: shell
+      syscall:
+        nr: 268
+    expect: alert
+
+  - name: "dpkg calling chmod does not fire (package manager allowlisted)"
+    event:
+      type: syscall
+      comm: dpkg
+      syscall:
+        nr: 90
+    expect: no_alert
+
+  # ── System binary replacement ──────────────────────────────────────────────
+  - name: "write to /usr/bin/ by non-pkg-manager fires evasion_system_binary_replace"
+    rule_id: evasion_system_binary_replace
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/usr/bin/ls"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "create in /bin/ fires evasion_system_binary_replace"
+    rule_id: evasion_system_binary_replace
+    event:
+      type: file
+      comm: backdoor
+      file:
+        filename: "/bin/sudo"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  - name: "apt writing to /usr/bin/ does not fire (package manager)"
+    event:
+      type: file
+      comm: apt
+      file:
+        filename: "/usr/bin/vim"
+        op: create
+    expect: no_alert
+
+  # ── ELF in /tmp ────────────────────────────────────────────────────────────
+  - name: "ELF binary written to /tmp fires evasion_hidden_elf_in_tmp"
+    rule_id: evasion_hidden_elf_in_tmp
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/tmp/.hidden_payload"
+        op: create
+    expect: alert
+    expect_severity: warning
+
+  - name: "ELF written to /dev/shm fires evasion_hidden_elf_in_tmp"
+    rule_id: evasion_hidden_elf_in_tmp
+    event:
+      type: file
+      comm: wget
+      file:
+        filename: "/dev/shm/loader"
+        op: write
+    expect: alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "read syscall (nr=0) does not fire any evasion rule"
+    event:
+      type: syscall
+      comm: cat
+      syscall:
+        nr: 0
+    expect: no_alert
+
+  - name: "writing to /tmp/legit.txt does not fire ELF-in-tmp rule"
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/tmp/legit.txt"
+        op: write
+    expect: no_alert

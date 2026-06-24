@@ -1,0 +1,116 @@
+suite: persistence
+rules_path: ../../rules/persistence.yaml
+tests:
+  # ── Systemd service creation ───────────────────────────────────────────────
+  - name: "new service unit in /etc/systemd/system/ fires persistence_systemd_new_service"
+    rule_id: persistence_systemd_new_service
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/etc/systemd/system/backdoor.service"
+        op: create
+    expect: alert
+    expect_severity: warning
+
+  - name: "writing to run/systemd/system/ fires persistence_systemd_new_service"
+    rule_id: persistence_systemd_new_service
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/run/systemd/system/exfil.service"
+        op: write
+    expect: alert
+
+  - name: "dpkg writing to /etc/systemd/system/ does not fire (package install)"
+    event:
+      type: file
+      comm: dpkg
+      file:
+        filename: "/etc/systemd/system/nginx.service"
+        op: create
+    expect: no_alert
+
+  # ── Cron jobs ──────────────────────────────────────────────────────────────
+  - name: "writing to /etc/cron.d/ fires persistence_cron_write"
+    rule_id: persistence_cron_write
+    event:
+      type: file
+      comm: sh
+      file:
+        filename: "/etc/cron.d/c2-beacon"
+        op: create
+    expect: alert
+    expect_severity: warning
+
+  - name: "writing to /var/spool/cron/ fires persistence_cron_write"
+    rule_id: persistence_cron_write
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/var/spool/cron/crontabs/root"
+        op: write
+    expect: alert
+
+  - name: "crontab writing to /var/spool/cron/ does not fire"
+    event:
+      type: file
+      comm: crontab
+      file:
+        filename: "/var/spool/cron/crontabs/user"
+        op: write
+    expect: no_alert
+
+  - name: "writing to /etc/cron.hourly/ fires persistence_cron_write"
+    rule_id: persistence_cron_write
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/etc/cron.hourly/miner"
+        op: create
+    expect: alert
+
+  # ── SSH authorized_keys ────────────────────────────────────────────────────
+  - name: "writing to ~/.ssh/authorized_keys fires persistence_ssh_authorized_keys"
+    rule_id: persistence_ssh_authorized_keys
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/root/.ssh/authorized_keys"
+        op: write
+    expect: alert
+    expect_severity: critical
+
+  - name: "creating authorized_keys2 fires persistence_ssh_authorized_keys"
+    rule_id: persistence_ssh_authorized_keys
+    event:
+      type: file
+      comm: nc
+      file:
+        filename: "/home/ubuntu/.ssh/authorized_keys2"
+        op: create
+    expect: alert
+    expect_severity: critical
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "writing to /var/log/ does not fire persistence rules"
+    event:
+      type: file
+      comm: nginx
+      file:
+        filename: "/var/log/nginx/access.log"
+        op: write
+    expect: no_alert
+
+  - name: "reading /etc/cron.d/ does not fire (read, not write)"
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/etc/cron.d/config"
+        op: read
+    expect: no_alert

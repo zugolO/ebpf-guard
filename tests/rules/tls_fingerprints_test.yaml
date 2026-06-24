@@ -1,0 +1,29 @@
+suite: tls_fingerprints
+rules_path: ../../rules/tls-fingerprints.yaml
+tests:
+  # ── Cobalt Strike ──────────────────────────────────────────────────────────
+  - name: "Cobalt Strike default JA3 fingerprint fires tls_ja3_cobalt_strike_default"
+    rule_id: tls_ja3_cobalt_strike_default
+    event:
+      type: tls
+      comm: beacon
+      tls:
+        ja3: "a0e9f5d64349fb13191bc781f81f42e1"
+    expect: alert
+    expect_severity: critical
+
+  - name: "random JA3 does not fire Cobalt Strike rule"
+    event:
+      type: tls
+      comm: curl
+      tls:
+        ja3: "d41d8cd98f00b204e9800998ecf8427e"
+    expect: no_alert
+
+  - name: "empty JA3 does not fire Cobalt Strike rule"
+    event:
+      type: tls
+      comm: openssl
+      tls:
+        data: "GET / HTTP/1.1"
+    expect: no_alert

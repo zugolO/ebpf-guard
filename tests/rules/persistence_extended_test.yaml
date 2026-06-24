@@ -1,0 +1,134 @@
+suite: persistence_extended
+rules_path: ../../rules/persistence-extended.yaml
+tests:
+  # ── Systemd timer unit ────────────────────────────────────────────────────
+  - name: "timer unit written to /etc/systemd/system/ fires persist_systemd_timer_created"
+    rule_id: persist_systemd_timer_created
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/etc/systemd/system/exfil.timer"
+        op: create
+    expect: alert
+    expect_severity: warning
+
+  - name: "timer unit written to /root/ fires persist_systemd_timer_created"
+    rule_id: persist_systemd_timer_created
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/root/.config/systemd/user/beacon.timer"
+        op: write
+    expect: alert
+
+  - name: "apt writing a .timer file does not fire (allowlisted)"
+    event:
+      type: file
+      comm: apt
+      file:
+        filename: "/etc/systemd/system/apt-daily.timer"
+        op: create
+    expect: no_alert
+
+  # ── Systemd symlink (symlink syscall = 88) ─────────────────────────────────
+  - name: "symlink syscall (nr=88) by unexpected process fires persist_systemd_wants_symlink"
+    rule_id: persist_systemd_wants_symlink
+    event:
+      type: syscall
+      comm: malware
+      syscall:
+        nr: 88
+    expect: alert
+    expect_severity: warning
+
+  - name: "symlink syscall by python3 fires persist_systemd_wants_symlink"
+    rule_id: persist_systemd_wants_symlink
+    event:
+      type: syscall
+      comm: python3
+      syscall:
+        nr: 88
+    expect: alert
+
+  - name: "systemctl creating symlink does not fire (allowlisted)"
+    event:
+      type: syscall
+      comm: systemctl
+      syscall:
+        nr: 88
+    expect: no_alert
+
+  # ── /etc/profile.d/ write ──────────────────────────────────────────────────
+  - name: "writing to /etc/profile.d/ fires persist_profile_d_write"
+    rule_id: persist_profile_d_write
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/etc/profile.d/evil_hook.sh"
+        op: create
+    expect: alert
+    expect_severity: warning
+
+  - name: "dpkg writing to /etc/profile.d/ does not fire (allowlisted)"
+    event:
+      type: file
+      comm: dpkg
+      file:
+        filename: "/etc/profile.d/bash_completion.sh"
+        op: create
+    expect: no_alert
+
+  # ── /etc/environment modification ─────────────────────────────────────────
+  - name: "writing /etc/environment fires persist_etc_environment_write"
+    rule_id: persist_etc_environment_write
+    event:
+      type: file
+      comm: malware
+      file:
+        filename: "/etc/environment"
+        op: write
+    expect: alert
+    expect_severity: warning
+
+  - name: "writing /etc/environment fires persist_etc_environment_write (2)"
+    rule_id: persist_etc_environment_write
+    event:
+      type: file
+      comm: python3
+      file:
+        filename: "/etc/environment"
+        op: write
+    expect: alert
+
+  # ── /etc/profile modification ─────────────────────────────────────────────
+  - name: "writing /etc/profile fires persist_etc_profile_write"
+    rule_id: persist_etc_profile_write
+    event:
+      type: file
+      comm: nc
+      file:
+        filename: "/etc/profile"
+        op: write
+    expect: alert
+    expect_severity: warning
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "reading /etc/profile does not fire persistence rule"
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/etc/profile"
+        op: read
+    expect: no_alert
+
+  - name: "write syscall (nr=1) does not fire symlink persistence rule"
+    event:
+      type: syscall
+      comm: malware
+      syscall:
+        nr: 1
+    expect: no_alert

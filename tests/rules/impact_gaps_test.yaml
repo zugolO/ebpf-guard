@@ -1,0 +1,43 @@
+suite: impact_gaps
+rules_path: ../../rules/impact-gaps.yaml
+tests:
+  # ── systemd service stop/disable ──────────────────────────────────────────
+  - name: "root running systemctl via execve fires impact_systemd_service_disabled"
+    rule_id: impact_systemd_service_disabled
+    event:
+      type: syscall
+      uid: 0
+      comm: systemctl
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: critical
+
+  - name: "root running service command fires impact_systemd_service_disabled"
+    rule_id: impact_systemd_service_disabled
+    event:
+      type: syscall
+      uid: 0
+      comm: service
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: critical
+
+  - name: "non-root running systemctl does not fire impact rule (uid check)"
+    event:
+      type: syscall
+      uid: 1000
+      comm: systemctl
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "root running ls does not fire service stop rule"
+    event:
+      type: syscall
+      uid: 0
+      comm: ls
+      syscall:
+        nr: 59
+    expect: no_alert

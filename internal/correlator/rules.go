@@ -1049,7 +1049,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "mode":
 			return strconv.FormatUint(uint64(e.File.Mode), 10)
 		case "op":
-			ops := []string{"open", "read", "write"}
+			ops := []string{"open", "read", "write", "create", "rename", "unlink", "truncate", "connect"}
 			if int(e.File.Op) < len(ops) {
 				return ops[e.File.Op]
 			}

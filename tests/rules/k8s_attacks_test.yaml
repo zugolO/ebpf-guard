@@ -1,0 +1,87 @@
+suite: k8s_attacks
+rules_path: ../../rules/k8s-attacks.yaml
+tests:
+  # ── Service account token theft ────────────────────────────────────────────
+  - name: "reading K8s SA token fires k8s_sa_token_read"
+    rule_id: k8s_sa_token_read
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        op: read
+    expect: alert
+    expect_severity: critical
+
+  - name: "opening K8s SA token directory fires k8s_sa_token_read"
+    rule_id: k8s_sa_token_read
+    event:
+      type: file
+      comm: bash
+      file:
+        filename: "/run/secrets/kubernetes.io/serviceaccount/token"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "reading projected SA token fires k8s_sa_token_projected_read"
+    rule_id: k8s_sa_token_projected_read
+    event:
+      type: file
+      comm: wget
+      file:
+        filename: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+        op: read
+    expect: alert
+    expect_severity: critical
+
+  # ── etcd direct access ─────────────────────────────────────────────────────
+  - name: "connection to etcd port 2379 fires k8s_etcd_direct_access"
+    rule_id: k8s_etcd_direct_access
+    event:
+      type: network
+      comm: malware
+      network:
+        dst_ip: "10.0.0.1"
+        dport: 2379
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to etcd peer port 2380 fires k8s_etcd_direct_access"
+    rule_id: k8s_etcd_direct_access
+    event:
+      type: network
+      comm: etcdctl
+      network:
+        dst_ip: "10.0.0.2"
+        dport: 2380
+    expect: alert
+    expect_severity: critical
+
+  - name: "connection to HTTPS port 443 does not fire etcd rule"
+    event:
+      type: network
+      comm: kubectl
+      network:
+        dst_ip: "10.0.0.1"
+        dport: 443
+    expect: no_alert
+
+  # ── Negative cases ─────────────────────────────────────────────────────────
+  - name: "reading /etc/resolv.conf does not fire any K8s rule"
+    event:
+      type: file
+      comm: curl
+      file:
+        filename: "/etc/resolv.conf"
+        op: read
+    expect: no_alert
+
+  - name: "normal HTTPS connection does not fire K8s attack rules"
+    event:
+      type: network
+      comm: kubectl
+      network:
+        dst_ip: "10.0.0.1"
+        dport: 443
+    expect: no_alert

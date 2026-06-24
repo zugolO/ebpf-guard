@@ -230,7 +230,10 @@ type HandlerFunc func(event *Event) *Alert
 func (f HandlerFunc) Match(event *Event) *Alert { return f(event) }
 
 // registeredHandler is the global plugin handler, set via Register and invoked
-// from the WASM ABI evaluate export (see abi_tinygo.go).
+// from the WASM ABI evaluate export (see abi_tinygo.go). It is only read in the
+// tinygo build, so the host build sees it as write-only.
+//
+//nolint:unused // read by the WASM ABI exports under the tinygo build tag
 var registeredHandler Handler
 
 // Register sets the global plugin handler.  Call this from init().

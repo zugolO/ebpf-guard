@@ -156,19 +156,7 @@ jobs:
     - name: Run tests
       # -short skips long-running e2e/performance tests that have their own
       # dedicated job and require hardware not available on shared CI runners.
-      run: |
-        set -o pipefail
-        go test -v -race -short -coverprofile=coverage.out ./... 2>&1 | tee /tmp/test-output.log
-
-    - name: Show test failures (temporary diagnostic)
-      if: always()
-      # The per-test PASS spam and application logs bury the failing package in
-      # the middle of the job log; surface just the failures at the end.
-      run: |
-        echo "===== failing packages ====="
-        grep -E '^(FAIL|--- FAIL|.*\[build failed\])' /tmp/test-output.log || echo "(none)"
-        echo "===== failure detail ====="
-        grep -B2 -A30 -E '^--- FAIL:|^panic:|WARNING: DATA RACE' /tmp/test-output.log | head -150 || true
+      run: go test -v -race -short -coverprofile=coverage.out ./...
 
     - name: Upload coverage
       uses: codecov/codecov-action@v4

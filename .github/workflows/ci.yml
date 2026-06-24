@@ -70,6 +70,9 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Build all packages
       run: go build ./...
 

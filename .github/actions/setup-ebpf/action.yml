@@ -1,0 +1,44 @@
+name: "Setup eBPF toolchain"
+description: >-
+  Installs clang/llvm, libbpf and bpftool, then runs `make generate` to produce
+  the bpf2go bindings (bpf.*Objects) and bpf/vmlinux.h from the runner's kernel
+  BTF. Required before any `go build`/`go test` because the generated bindings
+  are not committed to the repository.
+
+runs:
+  using: composite
+  steps:
+    - name: Install eBPF build toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        # clang/llvm for bpf2go, libbpf headers, kernel headers for asm/types.
+        sudo apt-get install -y clang llvm libbpf-dev linux-headers-"$(uname -r)" || \
+          sudo apt-get install -y clang llvm libbpf-dev
+
+        # bpftool is needed to dump kernel BTF into bpf/vmlinux.h.
+        # Ubuntu 24.04 ships a standalone `bpftool` package; fall back to the
+        # versioned binary shipped in linux-tools-* for other runner images.
+        if ! command -v bpftool >/dev/null 2>&1; then
+          sudo apt-get install -y bpftool || true
+        fi
+        if ! command -v bpftool >/dev/null 2>&1; then
+          sudo apt-get install -y "linux-tools-$(uname -r)" linux-tools-generic || true
+          bt="$(ls -d /usr/lib/linux-tools/*/bpftool 2>/dev/null | tail -1 || true)"
+          [ -n "${bt}" ] && sudo ln -sf "${bt}" /usr/local/bin/bpftool || true
+        fi
+        bpftool version
+        clang --version | head -1
+
+    - name: Verify kernel BTF is available
+      shell: bash
+      run: |
+        if [ ! -f /sys/kernel/btf/vmlinux ]; then
+          echo "::error::/sys/kernel/btf/vmlinux not found on this runner — cannot generate vmlinux.h" >&2
+          exit 1
+        fi
+
+    - name: Generate eBPF bindings (make generate)
+      shell: bash
+      run: make generate

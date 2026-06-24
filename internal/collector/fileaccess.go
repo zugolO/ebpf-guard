@@ -27,16 +27,34 @@ type FileaccessCollector struct {
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
 	lostTotal   atomic.Uint64
+
+	trackOpen  bool // attach sys_enter_openat hooks
+	trackRead  bool // attach sys_enter_read hooks (high volume)
+	trackWrite bool // attach sys_enter_write hooks (high volume)
 }
 
 // NewFileaccessCollector creates a new file access event collector.
+// By default only open(2) hooks are enabled; read/write hooks are opt-in via WithFileOps.
 func NewFileaccessCollector(logger *slog.Logger) (*FileaccessCollector, error) {
 	return &FileaccessCollector{
 		logger:     logger.With("collector", "fileaccess"),
 		dropLogger: newDropLogger(5 * time.Second),
 		status:     NoopStatusReporter{},
 		strategy:   StrategyDrop,
+		trackOpen:  true,
+		trackRead:  false,
+		trackWrite: false,
 	}, nil
+}
+
+// WithFileOps configures which file operation hooks are attached.
+// Disabling read/write hooks reduces event volume by 10-50x on busy hosts.
+// trackOpen should almost always remain true for sensitive-path detection.
+func (c *FileaccessCollector) WithFileOps(trackOpen, trackRead, trackWrite bool) *FileaccessCollector {
+	c.trackOpen = trackOpen
+	c.trackRead = trackRead
+	c.trackWrite = trackWrite
+	return c
 }
 
 // WithStatusReporter sets the StatusReporter used to signal up/down state.
@@ -214,77 +232,78 @@ func (c *FileaccessCollector) loadObjects() error {
 }
 
 // attachPrograms attaches the eBPF programs to tracepoints/kprobes.
+// Which hooks are attached is controlled by trackOpen/trackRead/trackWrite.
 func (c *FileaccessCollector) attachPrograms() error {
-	// Open: sys_enter_openat tracepoint
-	l1, err := link.Tracepoint("syscalls", "sys_enter_openat", c.objs.TraceOpen, nil)
-	if err != nil {
-		// Fallback to kprobe for older kernels without tracepoint support
-		l1, err = link.Kprobe("do_sys_openat2", c.objs.TraceOpen, nil)
+	if c.trackOpen {
+		l1, err := link.Tracepoint("syscalls", "sys_enter_openat", c.objs.TraceOpen, nil)
 		if err != nil {
-			l1, err = link.Kprobe("do_sys_open", c.objs.TraceOpen, nil)
+			l1, err = link.Kprobe("do_sys_openat2", c.objs.TraceOpen, nil)
 			if err != nil {
-				return fmt.Errorf("attach open tracepoint/kprobe: %w", err)
+				l1, err = link.Kprobe("do_sys_open", c.objs.TraceOpen, nil)
+				if err != nil {
+					return fmt.Errorf("attach open tracepoint/kprobe: %w", err)
+				}
+			}
+		}
+		c.links = append(c.links, l1)
+
+		// fd→path enrichment: sys_exit hooks commit scratch→fd_path_map
+		if c.objs.TraceOpenExit != nil {
+			if lExit, err := link.Tracepoint("syscalls", "sys_exit_openat", c.objs.TraceOpenExit, nil); err != nil {
+				c.logger.Warn("failed to attach sys_exit_openat, fd enrichment partially disabled", "error", err)
+			} else {
+				c.links = append(c.links, lExit)
+			}
+		}
+		if c.objs.TraceOpenat2Exit != nil {
+			if lExit2, err := link.Tracepoint("syscalls", "sys_exit_openat2", c.objs.TraceOpenat2Exit, nil); err != nil {
+				c.logger.Warn("failed to attach sys_exit_openat2", "error", err)
+			} else {
+				c.links = append(c.links, lExit2)
+			}
+		}
+		if c.objs.TraceClose != nil {
+			if lClose, err := link.Tracepoint("syscalls", "sys_enter_close", c.objs.TraceClose, nil); err != nil {
+				c.logger.Warn("failed to attach sys_enter_close, fd map entries will not be evicted on close", "error", err)
+			} else {
+				c.links = append(c.links, lClose)
 			}
 		}
 	}
-	c.links = append(c.links, l1)
 
-	// Open exit: sys_exit_openat — needed to commit fd→path map entry
-	if c.objs.TraceOpenExit != nil {
-		lExit, err := link.Tracepoint("syscalls", "sys_exit_openat", c.objs.TraceOpenExit, nil)
+	if c.trackRead {
+		l2, err := link.Tracepoint("syscalls", "sys_enter_read", c.objs.TraceRead, nil)
 		if err != nil {
-			c.logger.Warn("failed to attach sys_exit_openat, fd enrichment partially disabled", "error", err)
-		} else {
-			c.links = append(c.links, lExit)
-		}
-	}
-
-	// openat2 exit
-	if c.objs.TraceOpenat2Exit != nil {
-		lExit2, err := link.Tracepoint("syscalls", "sys_exit_openat2", c.objs.TraceOpenat2Exit, nil)
-		if err != nil {
-			c.logger.Warn("failed to attach sys_exit_openat2", "error", err)
-		} else {
-			c.links = append(c.links, lExit2)
-		}
-	}
-
-	// Close: evicts fd_path_map entries
-	if c.objs.TraceClose != nil {
-		lClose, err := link.Tracepoint("syscalls", "sys_enter_close", c.objs.TraceClose, nil)
-		if err != nil {
-			c.logger.Warn("failed to attach sys_enter_close, fd map entries will not be evicted on close", "error", err)
-		} else {
-			c.links = append(c.links, lClose)
-		}
-	}
-
-	// Read: sys_enter_read tracepoint
-	l2, err := link.Tracepoint("syscalls", "sys_enter_read", c.objs.TraceRead, nil)
-	if err != nil {
-		l2, err = link.Kprobe("vfs_read", c.objs.TraceRead, nil)
-		if err != nil {
-			c.logger.Warn("failed to attach read tracepoint/kprobe, continuing without read tracking", "error", err)
+			l2, err = link.Kprobe("vfs_read", c.objs.TraceRead, nil)
+			if err != nil {
+				c.logger.Warn("failed to attach read tracepoint/kprobe, continuing without read tracking", "error", err)
+			} else {
+				c.links = append(c.links, l2)
+			}
 		} else {
 			c.links = append(c.links, l2)
 		}
-	} else {
-		c.links = append(c.links, l2)
 	}
 
-	// Write: sys_enter_write tracepoint
-	l3, err := link.Tracepoint("syscalls", "sys_enter_write", c.objs.TraceWrite, nil)
-	if err != nil {
-		l3, err = link.Kprobe("vfs_write", c.objs.TraceWrite, nil)
+	if c.trackWrite {
+		l3, err := link.Tracepoint("syscalls", "sys_enter_write", c.objs.TraceWrite, nil)
 		if err != nil {
-			c.logger.Warn("failed to attach write tracepoint/kprobe, continuing without write tracking", "error", err)
+			l3, err = link.Kprobe("vfs_write", c.objs.TraceWrite, nil)
+			if err != nil {
+				c.logger.Warn("failed to attach write tracepoint/kprobe, continuing without write tracking", "error", err)
+			} else {
+				c.links = append(c.links, l3)
+			}
 		} else {
 			c.links = append(c.links, l3)
 		}
-	} else {
-		c.links = append(c.links, l3)
 	}
 
+	c.logger.Info("fileaccess hooks attached",
+		slog.Bool("open", c.trackOpen),
+		slog.Bool("read", c.trackRead),
+		slog.Bool("write", c.trackWrite),
+	)
 	return nil
 }
 

@@ -267,6 +267,26 @@ rules:
     action: alert
     tags: [mitre:T1036, mitre:T1059, sigma, temp-execution]
 
+  # Syscall-based companion: detects processes whose argv[0] starts with /tmp/,
+  # catching execution even when no subsequent file opens happen in /tmp.
+  - id: exec_from_tmp
+    name: "Process executed from /tmp or /dev/shm"
+    description: >
+      A process is running whose argv[0] (executable path) begins with /tmp/,
+      /dev/shm/, or /var/tmp/. This catches dropper execution even for static
+      binaries that open no files after exec.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: prefix
+      values:
+        - "/tmp/"
+        - "/dev/shm/"
+        - "/var/tmp/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1036, mitre:T1059, sigma, temp-execution]
+
   # ============================================================================
   # T1070 — Indicator Removal
   # ============================================================================
@@ -396,8 +416,8 @@ rules:
     tags: [mitre:T1218, sigma, env, gtfobins, restricted-shell-bypass]
 
   - id: sigma_lolbin_dd_write
-    name: "dd used to write to block device or binary"
-    description: "dd with of= targeting a device or binary file — data overwrite or malware installation."
+    name: "dd used to read from or write to block device"
+    description: "dd targeting a raw block device for input or output — disk imaging, data exfiltration, or malware installation."
     event_type: syscall
     condition:
       field: proc.args
@@ -407,9 +427,12 @@ rules:
         - "dd.*of=/dev/nvme"
         - "dd.*if=/dev/urandom.*of="
         - "dd.*conv=notrunc"
+        - "dd.*if=/dev/[sh]d"
+        - "dd.*if=/dev/nvme"
+        - "dd.*if=/dev/[sh]d.*of="
     severity: warning
     action: alert
-    tags: [mitre:T1218, sigma, dd, disk-write]
+    tags: [mitre:T1218, mitre:T1005, sigma, dd, disk-read, disk-write]
 
   # ============================================================================
   # T1222 — File and Directory Permissions Modification

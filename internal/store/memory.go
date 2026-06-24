@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,17 @@ type byTimeEntry struct {
 	ts        time.Time
 	severity  types.Severity // pod severity — cached for pre-filtering
 	namespace string         // pod namespace — cached for pre-filtering
+}
+
+// MemoryStoreOptions configures optional caps and retention for MemoryStore.
+type MemoryStoreOptions struct {
+	// MaxAlerts is the upper bound on stored alerts. When the store exceeds
+	// this count the oldest entries are evicted on each write. Zero = no cap.
+	MaxAlerts int64
+	// RetentionPeriod is the maximum age of retained alerts. A background
+	// goroutine (started by NewMemoryStoreWithContext) evicts older alerts
+	// periodically. Zero disables age-based eviction.
+	RetentionPeriod time.Duration
 }
 
 // MemoryStore is an in-memory AlertStore implementation for testing.
@@ -44,19 +56,77 @@ type MemoryStore struct {
 	// queryPool recycles backing arrays for Query result slices.
 	// Callers that want zero-alloc behaviour must call Release when done.
 	queryPool sync.Pool
+	opts      MemoryStoreOptions
 }
 
-// NewMemoryStore creates a new in-memory alert store.
+// NewMemoryStore creates a new in-memory alert store with no size cap.
 func NewMemoryStore() *MemoryStore {
+	return newMemoryStore(MemoryStoreOptions{})
+}
+
+// NewMemoryStoreWithContext creates a memory store with optional caps and a
+// background retention goroutine that exits when ctx is cancelled.
+func NewMemoryStoreWithContext(ctx context.Context, opts MemoryStoreOptions) *MemoryStore {
+	s := newMemoryStore(opts)
+	if opts.RetentionPeriod > 0 {
+		go s.retentionLoop(ctx, opts.RetentionPeriod)
+	}
+	return s
+}
+
+func newMemoryStore(opts MemoryStoreOptions) *MemoryStore {
 	s := &MemoryStore{
 		alerts: make(map[string]types.Alert),
 		bySev:  make(map[types.Severity][]byTimeEntry),
+		opts:   opts,
 	}
 	s.queryPool.New = func() any {
 		buf := make([]types.Alert, 0, 64)
 		return &buf
 	}
 	return s
+}
+
+// retentionLoop periodically evicts alerts older than retention until ctx is done.
+func (s *MemoryStore) retentionLoop(ctx context.Context, retention time.Duration) {
+	ticker := time.NewTicker(retention / 4)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if deleted, err := s.Delete(ctx, retention); err == nil && deleted > 0 {
+				slog.Debug("memory store: retention eviction", "deleted", deleted)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// evictOldestLocked removes the oldest (tail of byTime, which is sorted DESC)
+// entries until the store is at or below maxAlerts. Caller must hold s.mu write lock.
+func (s *MemoryStore) evictOldestLocked() {
+	max := s.opts.MaxAlerts
+	if max <= 0 || int64(len(s.alerts)) <= max {
+		return
+	}
+	// byTime is sorted DESC (newest first); oldest alerts are at the tail.
+	excess := int64(len(s.alerts)) - max
+	tail := s.byTime[int64(len(s.byTime))-excess:]
+	for _, e := range tail {
+		delete(s.alerts, e.id)
+	}
+	s.byTime = s.byTime[:int64(len(s.byTime))-excess]
+	s.count.Add(-excess)
+
+	// Rebuild bySev from the surviving byTime entries.
+	for sev := range s.bySev {
+		s.bySev[sev] = s.bySev[sev][:0]
+	}
+	for i := range s.byTime {
+		e := &s.byTime[i]
+		s.bySev[e.severity] = append(s.bySev[e.severity], *e)
+	}
 }
 
 // Store persists a single alert.
@@ -81,6 +151,7 @@ func (s *MemoryStore) Store(ctx context.Context, alert types.Alert) error {
 
 	s.alerts[alert.ID] = alert
 	s.insertSorted(alert.ID, alert.Timestamp, alert.Severity, alert.Enrichment.Namespace)
+	s.evictOldestLocked()
 	return nil
 }
 
@@ -183,6 +254,7 @@ func (s *MemoryStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 		})
 		s.bySev[sev] = bucket
 	}
+	s.evictOldestLocked()
 	return nil
 }
 

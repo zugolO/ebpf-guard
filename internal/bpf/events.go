@@ -29,14 +29,32 @@ type SyscallEvent struct {
 	Args [6]uint64
 }
 
-// NetworkEvent matches the C struct event for network events
+// NetworkEvent matches the C struct event for network events.
+// Wire layout (packed, little-endian):
+//
+//	[0  ] type         uint32   (4)
+//	[4  ] timestamp    uint64   (8)
+//	[12 ] pid          uint32   (4)
+//	[16 ] tgid         uint32   (4)
+//	[20 ] ppid         uint32   (4)
+//	[24 ] uid          uint32   (4)
+//	[28 ] comm         [16]byte (16)
+//	[44 ] parent_comm  [16]byte (16)
+//	[60 ] saddr        [16]byte (16)
+//	[76 ] daddr        [16]byte (16)
+//	[92 ] sport        uint16   (2)
+//	[94 ] dport        uint16   (2)
+//	[96 ] proto        uint8    (1)
+//	[97 ] family       uint8    (1)
 type NetworkEvent struct {
-	Type      uint32
-	Timestamp uint64
-	PID       uint32
-	TGID      uint32
-	UID       uint32
-	Comm      [16]byte
+	Type       uint32
+	Timestamp  uint64
+	PID        uint32
+	TGID       uint32
+	PPID       uint32
+	UID        uint32
+	Comm       [16]byte
+	ParentComm [16]byte
 	// Union payload - network specific
 	Saddr  [16]byte
 	Daddr  [16]byte
@@ -44,7 +62,6 @@ type NetworkEvent struct {
 	Dport  uint16
 	Proto  uint8
 	Family uint8 // Address family: 2=AF_INET, 10=AF_INET6
-	// No padding - C struct is packed
 }
 
 // FileaccessEvent matches the C struct event for file events.
@@ -329,7 +346,7 @@ func ParseSyscallEvent(raw []byte) (*SyscallEvent, error) {
 
 // ParseNetworkEvent parses raw bytes into a NetworkEvent.
 func ParseNetworkEvent(raw []byte) (*NetworkEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 16 + 16 + 16 + 2 + 2 + 1 + 1 // 78 bytes
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 16 + 16 + 2 + 2 + 1 + 1 // 98 bytes
 	if len(raw) < minSize {
 		return nil, fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
@@ -345,9 +362,13 @@ func ParseNetworkEvent(raw []byte) (*NetworkEvent, error) {
 	offset += 4
 	evt.TGID = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
+	evt.PPID = binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
 	evt.UID = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
 	copy(evt.Comm[:], raw[offset:offset+16])
+	offset += 16
+	copy(evt.ParentComm[:], raw[offset:offset+16])
 	offset += 16
 	copy(evt.Saddr[:], raw[offset:offset+16])
 	offset += 16
@@ -690,12 +711,14 @@ func (e *SyscallEvent) ToTypesEvent() types.Event {
 // ToTypesEvent converts a NetworkEvent to types.Event.
 func (e *NetworkEvent) ToTypesEvent() types.Event {
 	return types.Event{
-		Type:      types.EventTCPConnect,
-		Timestamp: e.Timestamp,
-		PID:       e.PID,
-		TGID:      e.TGID,
-		UID:       e.UID,
-		Comm:      e.Comm,
+		Type:       types.EventTCPConnect,
+		Timestamp:  e.Timestamp,
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
 		Network: &types.NetworkEvent{
 			Saddr:  e.Saddr,
 			Daddr:  e.Daddr,

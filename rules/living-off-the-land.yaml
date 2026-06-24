@@ -518,3 +518,77 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1059, lolbin, ruby, reverse-shell]
+
+  # ============================================================================
+  # wget payload download to /tmp
+  # ============================================================================
+
+  - id: lolbin_wget_download_tmp
+    name: "wget used to download payload to /tmp or /dev/shm"
+    description: >
+      wget downloading a file directly into a temporary directory.
+      Attackers stage payloads in /tmp or /dev/shm to avoid monitored paths.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "wget.*-O\\s*/tmp/"
+        - "wget.*-O\\s*/dev/shm/"
+        - "wget.*-O\\s*/var/tmp/"
+        - "wget.*--output-document[= ]/tmp/"
+        - "wget.*--output-document[= ]/dev/shm/"
+        - "wget.*-[qQ].*-O\\s*/tmp/"
+    severity: warning
+    action: alert
+    tags: [mitre:T1105, lolbin, wget, download, staging]
+
+  # ============================================================================
+  # Bash interactive shell — post-exploitation foothold
+  # ============================================================================
+
+  - id: lolbin_bash_interactive_shell
+    name: "Bash launched in interactive mode — possible post-exploitation shell"
+    description: >
+      bash was started with the -i (interactive) flag. While sometimes legitimate,
+      this pattern is commonly used after gaining code execution to establish an
+      interactive shell session for further commands.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "bash\\s+-i\\b"
+        - "bash\\s+--interactive\\b"
+        - "/bin/bash\\s+-i\\b"
+        - "/usr/bin/bash\\s+-i\\b"
+    severity: warning
+    action: alert
+    tags: [mitre:T1059.004, lolbin, bash, interactive-shell]
+
+  # ============================================================================
+  # find used for sensitive file reconnaissance
+  # ============================================================================
+
+  - id: lolbin_find_sensitive_recon
+    name: "find used to search for sensitive keys, certs, or credentials"
+    description: >
+      The find command is searching for private key files, certificate files, or
+      known sensitive filenames (shadow, passwd). Attackers use find to locate
+      credentials across the filesystem as part of T1083 file discovery.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "find.*-name.*\\.key"
+        - "find.*-name.*\\.pem"
+        - "find.*-name.*\\.p12"
+        - "find.*-name.*\\.pfx"
+        - "find.*-name.*shadow"
+        - "find.*-name.*passwd"
+        - "find.*\\.ssh.*-name"
+        - "find.*/etc.*-name.*\\.(key|pem|crt)"
+    severity: warning
+    action: alert
+    tags: [mitre:T1083, lolbin, find, sensitive-files, reconnaissance]

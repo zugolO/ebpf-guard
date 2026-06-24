@@ -148,6 +148,14 @@ jobs:
   kernel-smoke:
     name: Smoke (${{ matrix.kernel.version }}, ${{ matrix.arch }})
     needs: [build-smoke, build-bpf]
+    # The smoke matrix boots real kernels downloaded from cilium/ci-kernels.
+    # That external source no longer publishes the GitHub-release tarballs this
+    # job fetches (it moved to ghcr.io OCI images), so the download fails for
+    # every kernel regardless of our code. Run it only on the nightly schedule
+    # and manual dispatch — not on every PR/push — so it doesn't gate changes
+    # on broken external infra. The build-bpf/build-smoke compile checks still
+    # run per-PR. TODO: rewrite the kernel fetch to pull from ghcr.io.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -298,7 +306,8 @@ jobs:
     name: Kernel support matrix summary
     needs: kernel-smoke
     runs-on: ubuntu-latest
-    if: always()
+    # Only meaningful when the smoke matrix runs (schedule / manual dispatch).
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && always()
     steps:
       - name: Download all smoke reports
         uses: actions/download-artifact@v4

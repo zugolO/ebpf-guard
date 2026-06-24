@@ -10,6 +10,11 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// initialRingCapacity is the starting capacity of a per-PID event ring buffer.
+// The buffer grows by doubling from here up to maxSize, so short-lived
+// processes that emit only a few events never allocate the full window.
+const initialRingCapacity = 8
+
 // computeBufferShards returns the optimal shard count for ShardedEventBuffer.
 // Uses max(NumCPU, GOMAXPROCS)*4 rounded to the next power of 2, clamped to [4, 256].
 // The 4× multiplier gives headroom for goroutine bursts beyond CPU count; the
@@ -112,16 +117,36 @@ func (sb *ShardedEventBuffer) Add(pid uint32, e types.Event) {
 	defer shard.mu.Unlock()
 
 	rb := shard.buffers[pid]
-	if rb.events == nil {
-		rb.events = make([]types.Event, sb.maxSize)
-	}
 	shard.lastSeen[pid] = now
 
-	// Add event to circular buffer
-	rb.events[rb.head] = e
-	rb.head = (rb.head + 1) % sb.maxSize
+	// Grow the backing array lazily instead of allocating the full maxSize up
+	// front. Most processes emit only a handful of events, so allocating the
+	// entire per-PID buffer (maxSize × sizeof(Event)) on the first event wastes
+	// memory at scale. We start small and double up to maxSize, after which the
+	// buffer behaves as a fixed-size circular buffer.
 	if rb.size < sb.maxSize {
+		// Fill phase: events are stored linearly in [0, size). head == size.
+		if rb.size == len(rb.events) {
+			newCap := len(rb.events) * 2
+			if newCap < initialRingCapacity {
+				newCap = initialRingCapacity
+			}
+			if newCap > sb.maxSize {
+				newCap = sb.maxSize
+			}
+			grown := make([]types.Event, newCap)
+			copy(grown, rb.events)
+			rb.events = grown
+		}
+		rb.events[rb.size] = e
 		rb.size++
+		// Once the buffer reaches maxSize, head wraps to 0 and subsequent adds
+		// follow the circular path below.
+		rb.head = rb.size % sb.maxSize
+	} else {
+		// Full: overwrite the oldest entry (circular buffer).
+		rb.events[rb.head] = e
+		rb.head = (rb.head + 1) % sb.maxSize
 	}
 	shard.buffers[pid] = rb
 }

@@ -83,10 +83,18 @@ profiler:
   # profile_ttl: how long an idle PID's behavioral profile stays in memory.
   # 3600s (1h) is a good default for VPS; raise to 86400 on busy servers.
   profile_ttl: 3600
-  # max_tracked_pids: caps simultaneous in-memory PID profiles (default 0 =
-  # auto-detect from /proc/sys/kernel/pid_max, which can be millions on modern
-  # kernels). Setting an explicit limit prevents unbounded RSS growth on VPS.
+  # max_tracked_pids: caps simultaneous in-memory PID profiles, preventing
+  # unbounded RSS growth. LRU eviction drops the coldest profiles when exceeded.
+  # The code default is 4096 when unset; 0 = auto-detect from
+  # /proc/sys/kernel/pid_max (can be millions on modern kernels — not advised).
   max_tracked_pids: 1024
+
+# Correlator tuning
+correlator:
+  # Per-PID forensic event ring buffer depth (NOT the detection hot path — rules
+  # evaluate per-event). Grows lazily up to this size. ~208 B/event, so 256 ≈
+  # 53 KB per active PID. Raise for deeper per-process history at the cost of RAM.
+  buffer_size: 256
 
 alerting:
   enabled: false
@@ -97,9 +105,21 @@ alerting:
   circuit_breaker_threshold: 5
 
 kubernetes:
-  enabled: true
+  enabled: true               # Start the API-server pod watcher for full pod
+                              # labels/annotations enrichment (scoped to this
+                              # node via NODE_NAME when set). Disable on non-K8s
+                              # hosts to avoid API-server connection attempts.
   kubeconfig_path: ""
   resync_period: 300
+
+# Container runtime enrichment (CRI/Docker), node-local — no API server.
+# Adds container name/image and pod identity (namespace/pod/uid) from OCI
+# annotations. Complements the kubernetes enricher; runs on non-K8s hosts too.
+#   auto | cri | docker | off
+runtime:
+  enrichment: auto
+  socket_path: ""             # override auto-detected runtime socket
+  cache_ttl: 30s
 
 # Authentication configuration
 # Two-role RBAC is enforced by default.

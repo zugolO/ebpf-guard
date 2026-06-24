@@ -57,7 +57,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Cache Go modules
       uses: actions/cache@v4
@@ -69,6 +69,9 @@ jobs:
 
     - name: Download dependencies
       run: go mod download
+
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
 
     - name: Build all packages
       run: go build ./...
@@ -87,7 +90,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Install dependencies
       run: |
@@ -96,10 +99,10 @@ jobs:
         sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
 
     - name: Install golangci-lint
-      # Build from source with the project's own Go 1.24 toolchain so the
-      # linter binary supports Go 1.24 language features. Pre-compiled
+      # Build from source with the project's own Go 1.25 toolchain so the
+      # linter binary supports Go 1.25 language features. Pre-compiled
       # release binaries may be built with an older toolchain and refuse
-      # to lint modules that declare go 1.24.
+      # to lint modules that declare go 1.25.
       run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
     - name: Run golangci-lint
@@ -116,7 +119,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Install dependencies
       run: |
@@ -173,7 +176,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Cache Go modules
       uses: actions/cache@v4
@@ -200,7 +203,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Cache Go modules
       uses: actions/cache@v4
@@ -238,7 +241,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Install dependencies
       run: |
@@ -278,7 +281,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Install dependencies
       run: |
@@ -382,7 +385,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Install dependencies
       run: |
@@ -476,7 +479,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Run gosec
       uses: securego/gosec@master
@@ -502,7 +505,7 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        go-version: ['1.24.4']
+        go-version: ['1.25.x']
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -573,7 +576,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Cache Go modules
       uses: actions/cache@v4
@@ -608,7 +611,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Cache Go modules
       uses: actions/cache@v4
@@ -638,7 +641,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.4'
+        go-version: '1.25.x'
 
     - name: Cache Go modules
       uses: actions/cache@v4

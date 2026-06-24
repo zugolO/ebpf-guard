@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -323,6 +324,9 @@ func (w *MemoryPressureWatcher) enterSequenceDisabledMode() {
 		w.normalRates[key] = p.GetSamplingRate()
 		p.Disable()
 	}
+	// Return the heap freed by disabled profilers to the OS so RSS actually
+	// drops under pressure rather than being retained by the Go runtime.
+	debug.FreeOSMemory()
 }
 
 // enterAllDisabledMode disables all profilers and reduces BPF sampling (level 2).
@@ -347,6 +351,8 @@ func (w *MemoryPressureWatcher) enterAllDisabledMode() {
 		w.bpfController.SetSamplingRate("network", 0.1)
 		w.bpfController.SetSamplingRate("file", 0.1)
 	}
+	// Return freed heap to the OS so RSS drops under deep memory pressure.
+	debug.FreeOSMemory()
 }
 
 // recoverNormalMode restores all profilers and BPF sampling to pre-pressure state.

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -52,6 +54,12 @@ type PodInfo struct {
 type WatcherConfig struct {
 	KubeconfigPath string
 	ResyncPeriod   time.Duration
+	// NodeName scopes the pod informer to a single node via a
+	// spec.nodeName field selector. When set (or when the NODE_NAME env var is
+	// present), the informer caches only pods scheduled on this node instead of
+	// every pod in the cluster, which keeps memory and API-server watch traffic
+	// bounded on large clusters. Empty = watch all pods (legacy behaviour).
+	NodeName string
 }
 
 // NewWatcher creates a new pod lifecycle watcher.
@@ -68,12 +76,27 @@ func NewWatcher(config WatcherConfig, logger *slog.Logger) (*Watcher, error) {
 		podCache: make(map[string]*PodInfo),
 	}
 
-	// Create informer factory
-	factory := informers.NewSharedInformerFactoryWithOptions(
-		client,
-		config.ResyncPeriod,
-		informers.WithNamespace(""), // Watch all namespaces
-	)
+	// Resolve the node name: explicit config wins, otherwise fall back to the
+	// NODE_NAME env var (injected via the downward API in the Helm DaemonSet).
+	nodeName := config.NodeName
+	if nodeName == "" {
+		nodeName = os.Getenv("NODE_NAME")
+	}
+
+	// Build informer factory options. Scope to this node when known so the
+	// cache holds only on-node pods rather than the whole cluster.
+	opts := []informers.SharedInformerOption{
+		informers.WithNamespace(""), // all namespaces
+	}
+	if nodeName != "" {
+		opts = append(opts, informers.WithTweakListOptions(func(lo *metav1.ListOptions) {
+			lo.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
+		}))
+		w.logger.Info("pod watcher scoped to node", "node", nodeName)
+	} else {
+		w.logger.Warn("pod watcher node name unknown; watching all cluster pods (set NODE_NAME for lower memory)")
+	}
+	factory := informers.NewSharedInformerFactoryWithOptions(client, config.ResyncPeriod, opts...)
 
 	// Create pod informer
 	w.informer = factory.Core().V1().Pods().Informer()

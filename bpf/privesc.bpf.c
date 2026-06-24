@@ -106,16 +106,17 @@ int BPF_KPROBE(trace_commit_creds, struct cred *new_cred)
 	__u64 *stored;
 	__u64 old_caps = 0;
 	__u64 new_caps = 0;
-	kernel_cap_t eff;
 
-	/* Read new effective capability set (word 0 covers caps 0–63). */
-	BPF_CORE_READ_INTO(&eff, new_cred, cap_effective);
-#if defined(__KERNEL_CAP_T_DEFINED) || 1
-	/* kernel_cap_t has a __u32 cap[] array on 64-bit kernels.
-	 * cap_effective.cap[0] holds bits 0-31, cap[1] holds 32-63. */
-	new_caps = ((__u64)BPF_CORE_READ(new_cred, cap_effective.cap[1]) << 32) |
-	            (__u64)BPF_CORE_READ(new_cred, cap_effective.cap[0]);
-#endif
+	/* Read the new effective capability set (caps 0–63).
+	 *
+	 * kernel_cap_t is 8 bytes on all supported kernels, but its layout changed
+	 * in Linux 6.3: pre-6.3 it is `struct { __u32 cap[2]; }` (cap[0]=low 32 bits,
+	 * cap[1]=high 32 bits); 6.3+ it is `struct { __u64 val; }`. On little-endian
+	 * both layouts are byte-identical, so we read the whole cap_effective field
+	 * as a u64 instead of referencing the inner member. This is CO-RE portable —
+	 * it compiles against any kernel BTF (the inner `.cap`/`.val` field names do
+	 * not, since only one exists for a given kernel version). */
+	BPF_CORE_READ_INTO(&new_caps, new_cred, cap_effective);
 
 	stored = bpf_map_lookup_elem(&pid_caps, &pid);
 	if (stored)

@@ -23,6 +23,12 @@ resources:
     cpu: 200m
     memory: 256Mi
 
+# Soft Go memory limit derived from the 512Mi cap above (~460MiB at 90%).
+gomemlimit:
+  enabled: true
+  percent: 90
+  override: ""
+
 priorityClassName: system-node-critical
 
 podAnnotations:

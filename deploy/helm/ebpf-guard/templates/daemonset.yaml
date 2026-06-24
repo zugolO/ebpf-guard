@@ -131,8 +131,22 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or .Values.extraEnv .Values.config.store.sqlite.encryption.keySecretRef }}
           env:
+            # NODE_NAME lets the agent scope its Kubernetes pod watch to this
+            # node (lower memory + API-server load on large clusters).
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- if .Values.gomemlimit.enabled }}
+            {{- $gomemlimit := .Values.gomemlimit.override | default (include "ebpf-guard.gomemlimit" .) }}
+            {{- if $gomemlimit }}
+            # Soft memory limit for the Go runtime: GC keeps RSS under the cgroup
+            # limit. Computed from resources.limits.memory unless overridden.
+            - name: GOMEMLIMIT
+              value: {{ $gomemlimit | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.config.store.sqlite.encryption.keySecretRef }}
             - name: EBPF_GUARD_DB_KEY
               valueFrom:
@@ -143,7 +157,6 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- end }}
           volumeMounts:
             - name: bpf-fs
               mountPath: /sys/fs/bpf

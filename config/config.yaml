@@ -79,7 +79,9 @@ profiler:
   # node receives its first burst of traffic right before the timer fires.
   min_learning_samples: 100
   anomaly_threshold: 0.8
-  ewma_weight: 0.3
+  # EWMA settings are grouped under profiler.ewma.* (since v0.2.0).
+  ewma:
+    weight: 0.3
   # profile_ttl: how long an idle PID's behavioral profile stays in memory.
   # 3600s (1h) is a good default for VPS; raise to 86400 on busy servers.
   profile_ttl: 3600
@@ -98,7 +100,9 @@ correlator:
 
 alerting:
   enabled: false
-  webhook_url: ""
+  # Alertmanager webhook endpoint (since v0.2.0; replaces alerting.webhook_url).
+  alertmanager:
+    url: ""
   generator_url: "http://ebpf-guard:19090"
   batch_size: 100
   batch_timeout: 5

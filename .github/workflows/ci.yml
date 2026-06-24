@@ -395,7 +395,10 @@ jobs:
     needs: [lint, test]
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        # amd64 only: the BPF CO-RE bindings are generated from the x86_64
+        # runner's kernel BTF, and arm64 bindings would require arm64 BTF that
+        # the runner does not provide. arm64 runtime support is deferred.
+        arch: [amd64]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -410,10 +413,6 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y clang-${{ env.CLANG_VERSION }} llvm-${{ env.CLANG_VERSION }} libbpf-dev
         sudo ln -sf /usr/bin/clang-${{ env.CLANG_VERSION }} /usr/bin/clang
-
-    - name: Set up QEMU
-      if: matrix.arch == 'arm64'
-      uses: docker/setup-qemu-action@v3
 
     - name: Generate eBPF bindings
       uses: ./.github/actions/setup-ebpf
@@ -451,7 +450,8 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         context: .
-        platforms: linux/amd64,linux/arm64
+        # amd64 only — arm64 BPF bindings need arm64 BTF unavailable in CI.
+        platforms: linux/amd64
         push: false
         tags: ebpf-guard:test
         cache-from: type=gha

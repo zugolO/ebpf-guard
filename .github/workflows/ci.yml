@@ -461,8 +461,17 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.x'
+
+    # The Dockerfile builder runs `go build`, but the bpf2go bindings are not
+    # committed and can't be generated inside the build sandbox (no kernel BTF
+    # under /sys there). Generate them on the host first; the Dockerfile's
+    # `COPY . .` then carries the *_bpfel.go and *_bpfel.o into the build.
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3

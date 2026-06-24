@@ -31,6 +31,13 @@ COPY --from=builder /build/ebpf-guard /usr/local/bin/ebpf-guard
 # Expose metrics port (9090 is the zero-config default)
 EXPOSE 9090
 
+# Go runtime soft memory limit. Default "off" keeps the runtime unbounded so
+# bare/non-cgroup runs are not constrained. In Kubernetes the Helm chart sets
+# GOMEMLIMIT from resources.limits.memory; for standalone Docker runs you can
+# override it to keep RSS under a ceiling, e.g.:
+#   docker run -e GOMEMLIMIT=230MiB ...
+ENV GOMEMLIMIT=off
+
 # Health check — probe the /health endpoint
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/ebpf-guard", "status"] || exit 1

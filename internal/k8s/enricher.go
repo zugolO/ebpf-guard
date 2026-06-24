@@ -61,6 +61,9 @@ type EnricherConfig struct {
 	KubeconfigPath string
 	ResyncPeriod   time.Duration
 	CacheTTL       time.Duration
+	// NodeName scopes pod watching to a single node. Empty falls back to the
+	// NODE_NAME env var, then to watching all cluster pods.
+	NodeName string
 	// Metrics provides optional Prometheus instruments for observability.
 	// All fields are optional — nil values are silently skipped.
 	Metrics EnricherMetrics
@@ -71,6 +74,7 @@ func NewEnricher(config EnricherConfig, logger *slog.Logger) (*Enricher, error) 
 	watcherConfig := WatcherConfig{
 		KubeconfigPath: config.KubeconfigPath,
 		ResyncPeriod:   config.ResyncPeriod,
+		NodeName:       config.NodeName,
 	}
 
 	watcher, err := NewWatcher(watcherConfig, logger)

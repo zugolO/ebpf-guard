@@ -58,6 +58,17 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# Go runtime soft memory limit (GOMEMLIMIT).
+# When enabled and resources.limits.memory is set, the DaemonSet gets a
+# GOMEMLIMIT env var computed as `percent` of the memory limit, so the Go GC
+# keeps RSS under the cgroup limit and avoids OOM-kills under high event rates.
+# If resources.limits.memory is unset, GOMEMLIMIT is NOT injected (the runtime
+# stays unbounded). Set `override` to pin an explicit value (e.g. "230MiB").
+gomemlimit:
+  enabled: true
+  percent: 90
+  override: ""
+
 # Liveness and readiness probes
 livenessProbe:
   httpGet:

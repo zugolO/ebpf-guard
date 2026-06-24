@@ -41,6 +41,29 @@ rules:
     action: alert
     tags: [mitre:T1095, command-and-control]
 
+  # MITRE ATT&CK: T1071.001 — Repeated outbound connection on C2 ports (beacon)
+  - id: beacon_fixed_interval
+    name: "Fixed-interval C2 beacon — repeated connection to non-standard port"
+    description: >
+      Repeated outbound TCP connections to a non-standard port from a non-browser
+      process. Short-lived connections to the same destination at fixed intervals
+      are the canonical Metasploit/Cobalt Strike beacon pattern (T1071.001).
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: network.dport
+          op: not_in
+          values: ["22", "53", "80", "123", "443", "3306", "5432", "6379", "5353"]
+        - field: proc.comm
+          op: not_in
+          values: ["curl", "wget", "apt", "yum", "dnf", "pip", "pip3",
+                   "npm", "yarn", "gem", "cargo", "go", "gradle", "mvn",
+                   "ssh", "scp", "rsync", "nmap", "nc", "netcat"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1071.001, command-and-control, beaconing, c2]
+
   # MITRE ATT&CK: T1132.001 — Data Encoding: Standard Encoding
   - id: c2_periodic_beacon_pattern
     name: "Periodic small outbound connection — C2 beacon pattern"

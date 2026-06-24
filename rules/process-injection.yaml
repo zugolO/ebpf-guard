@@ -182,3 +182,34 @@ rules:
     severity: critical
     action: alert
     tags: [mitre-t1055, mitre-t1574.006, process-injection, devshm, fileless, staging]
+
+  # ============================================================================
+  # T1055.008 — ptrace PTRACE_ATTACH (specific request type)
+  # ============================================================================
+
+  # Detects the specific PTRACE_ATTACH request (request=16) which attaches a
+  # debugger to a running process. PTRACE_TRACEME (0) and peekdata requests are
+  # excluded by targeting request=16 specifically.
+  - id: ptrace_attach
+    name: "PTRACE_ATTACH detected — process attachment for injection or credential dump"
+    description: >
+      A process called ptrace(PTRACE_ATTACH, pid) to attach to a running process.
+      Outside of debuggers (gdb, strace), this is almost always T1055.008 process
+      injection or T1003.007 credential scraping (reading /proc/<pid>/mem after attach).
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["101"]   # __NR_ptrace (x86-64)
+        - field: arg0
+          op: in
+          values: ["16"]    # PTRACE_ATTACH
+        - field: proc.comm
+          op: not_in
+          values: ["gdb", "strace", "ltrace", "perf", "gdbserver", "rr",
+                   "lldb", "valgrind", "ddd"]
+    severity: critical
+    action: alert
+    tags: [mitre:T1055.008, mitre:T1003.007, credential-access, process-injection]

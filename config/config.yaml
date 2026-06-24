@@ -2,20 +2,58 @@
 config_version: "v0.1"
 
 server:
-  bind_address: ":9090"
+  bind_address: ":19090"
   metrics_path: "/metrics"
   health_path: "/health"
 
 bpf:
   map_sizes:
-    events: 65536
-    processes: 16384
-    connections: 32768
+    events: 16384
+    processes: 4096
+    connections: 8192
 
-  # In-process event channel size. Recommended ≥ 65536 to absorb syscall bursts.
-  event_queue_depth: 65536
-  max_concurrent_events: 4096
+  # In-process event channel size. 16384 is sufficient for most VPS workloads;
+  # increase to 65536 on high-throughput servers if drops are observed.
+  event_queue_depth: 16384
+  max_concurrent_events: 1024
   overflow_policy: drop
+
+  # BPF-side sampling rates (1 in N events captured).
+  # file_rate=1 ensures every file open/read/write is visible to the rule engine
+  # during integration testing. On high-throughput production nodes raise file_rate
+  # back to 50 to reduce ring-buffer pressure.
+  sampling:
+    enabled: true
+    syscall_rate: 1
+    network_rate: 1
+    file_rate: 1
+
+  # BPF-side kernel filter: only emit events for the listed syscall numbers.
+  # Extends the built-in defaults (execve, ptrace, capset, setns, memfd_create,
+  # mount, etc.) with syscalls needed by ransomware and persistence detection rules:
+  #   82  = rename(2)    — ransomware_mass_rename
+  #   87  = unlink(2)    — ransomware_backup_delete
+  #  263  = unlinkat(2)  — ransomware_backup_delete (used by 'find -delete')
+  kernel_filter:
+    enabled: true
+    monitored_syscalls:
+      - 59   # execve
+      - 322  # execveat
+      - 101  # ptrace
+      - 126  # capset
+      - 308  # setns
+      - 272  # unshare
+      - 319  # memfd_create
+      - 165  # mount
+      - 166  # umount2
+      - 155  # pivot_root
+      - 161  # chroot
+      - 311  # process_vm_writev
+      - 310  # process_vm_readv
+      - 241  # perf_event_open
+      - 82   # rename
+      - 87   # unlink
+      - 263  # unlinkat
 
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling
   # rates for high-volume syscall/file events when the event channel starts
@@ -27,11 +65,11 @@ bpf:
     critical_threshold: 0.80   # >80% queue full → further reduce all rates
 
 rules:
-  path: "rules/"               # Directory of rule files (all .yaml loaded automatically)
+  path: "/opt/ebpf-guard/rules/"  # Directory of rule files (all .yaml loaded automatically)
   hot_reload: true
   rate_limit_alerts: true
   rate_limit_window: 60
-  max_alerts_per_window: 10
+  max_alerts_per_window: 100
 
 profiler:
   enabled: true
@@ -42,11 +80,14 @@ profiler:
   min_learning_samples: 100
   anomaly_threshold: 0.8
   ewma_weight: 0.3
-  profile_ttl: 86400
-  # Max distinct workload classes / PIDs profiled at once. Bounds profiler
-  # memory; LRU eviction drops the coldest profiles when exceeded.
-  # 0 = auto-detect from /proc/sys/kernel/pid_max (can be millions — not recommended).
-  max_tracked_pids: 4096
+  # profile_ttl: how long an idle PID's behavioral profile stays in memory.
+  # 3600s (1h) is a good default for VPS; raise to 86400 on busy servers.
+  profile_ttl: 3600
+  # max_tracked_pids: caps simultaneous in-memory PID profiles, preventing
+  # unbounded RSS growth. LRU eviction drops the coldest profiles when exceeded.
+  # The code default is 4096 when unset; 0 = auto-detect from
+  # /proc/sys/kernel/pid_max (can be millions on modern kernels — not advised).
+  max_tracked_pids: 1024
 
 # Correlator tuning
 correlator:
@@ -58,7 +99,7 @@ correlator:
 alerting:
   enabled: false
   webhook_url: ""
-  generator_url: "http://ebpf-guard:9090"
+  generator_url: "http://ebpf-guard:19090"
   batch_size: 100
   batch_timeout: 5
   circuit_breaker_threshold: 5
@@ -123,6 +164,9 @@ notifications:
     bot_token: ""             # Telegram Bot API token (from @BotFather)
     chat_id: ""               # Target chat ID (user, group, or channel)
     min_severity: critical    # warning | critical — recommend critical-only for Telegram
+  unix_socket:
+    enabled: true
+    path: /run/ebpf-guard/alerts.sock
 
 # Enforcement configuration
 # Controls active response actions: kill, block, throttle.
@@ -146,6 +190,12 @@ enforcement:
 # Supported backends: memory, sqlite, opensearch
 store:
   backend: memory             # memory | sqlite | opensearch
+  memory:
+    # Max alerts to keep in memory. Oldest are evicted when this is exceeded.
+    # Prevents unbounded RSS growth on long-running VPS deployments.
+    max_alerts: 10000
+    # Age-based eviction: alerts older than this are purged every 90 minutes.
+    retention_period: "6h"
   sqlite:
     path: /var/lib/ebpf-guard/events.db
   opensearch:
@@ -168,6 +218,10 @@ collectors:
     dga_threshold: 3.5          # Shannon entropy bits/char; above this → DGA suspicion
     tunneling_min_length: 50    # Domain length above this → tunneling suspicion
     high_frequency_threshold: 100  # DNS queries/min above this → alert
+  file_ops:
+    track_open: true    # sys_enter_openat — low volume, needed for sensitive-path detection
+    track_read: false   # sys_enter_read   — very high volume (100K+/s on busy hosts); enable only if needed
+    track_write: false  # sys_enter_write  — very high volume; enable only if needed
   backpressure_strategy: drop   # drop | block | sample
   iouring:
     enabled: false               # Monitor io_uring activity (setup/enter) via kprobes

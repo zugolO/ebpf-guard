@@ -179,11 +179,21 @@ type NotificationsConfig struct {
 	Discord DiscordNotificationConfig `mapstructure:"discord"`
 	// Telegram Bot API configuration
 	Telegram TelegramNotificationConfig `mapstructure:"telegram"`
+	// UnixSocket streams alerts as JSON lines to a Unix domain socket.
+	UnixSocket UnixSocketNotificationConfig `mapstructure:"unix_socket"`
 	// StrictSSRF enables strict SSRF prevention for all HTTP-based notifiers
 	// by blocking RFC-1918 private IP ranges (10/8, 172.16/12, 192.168/16).
 	// Disable when targets are cluster-internal services.
 	// Default: false — safe for Kubernetes; set true for external targets.
 	StrictSSRF bool `mapstructure:"strict_ssrf"`
+}
+
+// UnixSocketNotificationConfig configures the Unix domain socket alert stream.
+type UnixSocketNotificationConfig struct {
+	// Enabled activates the Unix socket notifier.
+	Enabled bool `mapstructure:"enabled"`
+	// Path is the filesystem path for the Unix domain socket.
+	Path string `mapstructure:"path"`
 }
 
 // OTLPNotificationConfig holds OTLP log exporter settings.
@@ -308,14 +318,40 @@ type TelegramNotificationConfig struct {
 	MinSeverity string `mapstructure:"min_severity"`
 }
 
+// MemoryStoreConfig holds in-memory store configuration.
+type MemoryStoreConfig struct {
+	// MaxAlerts is the maximum number of alerts to retain in memory.
+	// When the cap is reached the oldest alerts are evicted to bound RSS.
+	// Zero disables the cap (unbounded growth — not recommended for long-running VPS deployments).
+	MaxAlerts int64 `mapstructure:"max_alerts"`
+	// RetentionPeriod is the maximum age of alerts to retain (Go duration string, e.g. "24h", "6h").
+	// A background goroutine evicts alerts older than this every RetentionPeriod/4.
+	// Zero disables age-based eviction.
+	RetentionPeriod string `mapstructure:"retention_period"`
+}
+
 // StoreConfig holds storage backend configuration.
 type StoreConfig struct {
 	// Backend specifies the storage backend: "memory", "sqlite", "opensearch"
 	Backend string `mapstructure:"backend"`
+	// Memory configuration
+	Memory MemoryStoreConfig `mapstructure:"memory"`
 	// SQLite configuration
 	SQLite SQLiteStoreConfig `mapstructure:"sqlite"`
 	// OpenSearch configuration
 	OpenSearch OpenSearchStoreConfig `mapstructure:"opensearch"`
+}
+
+// FileOpsConfig controls which file-access operations are collected.
+// Disabling read/write tracking dramatically reduces event volume on busy hosts
+// while preserving open(2) visibility for sensitive-path detection.
+type FileOpsConfig struct {
+	// TrackOpen enables sys_enter_openat hooks. Default: true.
+	TrackOpen bool `mapstructure:"track_open"`
+	// TrackRead enables sys_enter_read hooks. Default: false (very high volume).
+	TrackRead bool `mapstructure:"track_read"`
+	// TrackWrite enables sys_enter_write hooks. Default: false (very high volume).
+	TrackWrite bool `mapstructure:"track_write"`
 }
 
 // CollectorsConfig holds per-collector settings.
@@ -324,6 +360,9 @@ type CollectorsConfig struct {
 	TLS TLSCollectorConfig `mapstructure:"tls"`
 	// DNS collector configuration
 	DNS DNSCollectorConfig `mapstructure:"dns"`
+	// FileOps controls which file operation types are collected.
+	// Disabling read/write hooks reduces event volume by 10-50x on typical hosts.
+	FileOps FileOpsConfig `mapstructure:"file_ops"`
 	// BackpressureStrategy controls what happens when the event channel is full.
 	// Valid values: "drop" (default), "block", "sample".
 	//   drop   — silently discard the event and increment the drop counter.
@@ -1640,6 +1679,8 @@ func setDefaults(v *viper.Viper) {
 
 	// Store defaults
 	v.SetDefault("store.backend", "memory")
+	v.SetDefault("store.memory.max_alerts", int64(10000))
+	v.SetDefault("store.memory.retention_period", "6h")
 	v.SetDefault("store.sqlite.path", "/var/lib/ebpf-guard/events.db")
 	v.SetDefault("store.sqlite.max_alerts", int64(100000))
 	v.SetDefault("store.sqlite.vacuum_interval", "1h")
@@ -1663,6 +1704,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.iouring.enabled", false)
 	v.SetDefault("collectors.bpf_monitor.enabled", false)
 	v.SetDefault("collectors.tls_fingerprint.enabled", false)
+	v.SetDefault("collectors.file_ops.track_open", true)
+	v.SetDefault("collectors.file_ops.track_read", false)
+	v.SetDefault("collectors.file_ops.track_write", false)
 	v.SetDefault("collectors.cloudtrail.enabled", false)
 	v.SetDefault("collectors.gcp_audit.enabled", false)
 	v.SetDefault("collectors.azure_monitor.enabled", false)

@@ -488,9 +488,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 	sqliteRetentionPeriod, _ := time.ParseDuration(cfg.Store.SQLite.RetentionPeriod)
 	sqliteBackupInterval, _ := time.ParseDuration(cfg.Store.SQLite.Backup.Interval)
+	memRetentionPeriod, _ := time.ParseDuration(cfg.Store.Memory.RetentionPeriod)
 
-	alertStore, err := store.New(store.Config{
+	alertStore, err := store.NewWithContext(ctx, store.Config{
 		Backend: cfg.Store.Backend,
+		Memory: store.MemoryStoreOptions{
+			MaxAlerts:       cfg.Store.Memory.MaxAlerts,
+			RetentionPeriod: memRetentionPeriod,
+		},
 		SQLite: store.SQLiteConfig{
 			Path:              cfg.Store.SQLite.Path,
 			MaxOpenConns:      10,
@@ -639,7 +644,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		cfg.Notifications.Kafka.Enabled ||
 		cfg.Notifications.SyslogCEF.Enabled ||
 		cfg.Notifications.Discord.Enabled ||
-		cfg.Notifications.Telegram.Enabled
+		cfg.Notifications.Telegram.Enabled ||
+		cfg.Notifications.UnixSocket.Enabled
 	if notifEnabled {
 		var fanoutErr error
 		fanout, fanoutErr = exporter.NewFanoutNotifier(exporter.FanoutConfig{
@@ -705,6 +711,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				BotToken:    cfg.Notifications.Telegram.BotToken,
 				ChatID:      cfg.Notifications.Telegram.ChatID,
 				MinSeverity: cfg.Notifications.Telegram.MinSeverity,
+			},
+			UnixSocket: exporter.UnixSocketConfig{
+				Enabled: cfg.Notifications.UnixSocket.Enabled,
+				Path:    cfg.Notifications.UnixSocket.Path,
 			},
 			FalcoOutput: cfg.Compat.FalcoOutput,
 			StrictSSRF:  cfg.Notifications.StrictSSRF,
@@ -818,6 +828,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if fc, fcErr := collector.NewFileaccessCollector(slog.Default()); fcErr != nil {
 			slog.Warn("fileaccess: collector creation failed", slog.Any("error", fcErr))
 		} else {
+			fo := cfg.Collectors.FileOps
+			fc.WithFileOps(fo.TrackOpen, fo.TrackRead, fo.TrackWrite)
 			if cfg.BPF.Sampling.Enabled {
 				fc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
 					if name != "fileaccess" || !up {
@@ -827,7 +839,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				}))
 			}
 			collectors = append(collectors, fc.WithBackpressureStrategy(bpStrategy))
-			slog.Info("fileaccess: collector enabled")
+			slog.Info("fileaccess: collector enabled",
+				slog.Bool("track_open", fo.TrackOpen),
+				slog.Bool("track_read", fo.TrackRead),
+				slog.Bool("track_write", fo.TrackWrite),
+			)
 		}
 
 		if dc, dcErr := collector.NewDNSCollector(cfg.Collectors.DNS.Enabled); dcErr != nil {

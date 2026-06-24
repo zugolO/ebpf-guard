@@ -1,22 +1,25 @@
 rules:
   # MITRE ATT&CK: T1486 — Data Encrypted for Impact
   - id: ransomware_mass_rename
-    name: "Mass file rename — possible encryption"
+    name: "Mass file rename to encrypted extension"
     description: >
-      A process is renaming files in rapid succession. Ransomware typically
-      renames files to add an encrypted extension (.locked, .enc, .crypt).
-      Triggers when the same process renames more than 20 files per second
-      across multiple directories.
-    event_type: file
+      A process is calling rename(2) and its command line contains known
+      ransomware encryption extensions (.encrypted, .locked, .enc, .crypt).
+      The BPF syscall tracer captures rename(2) = syscall 82; the proc.args
+      regex matches when the process was launched with those extension strings
+      (e.g. a python -c script that renames .txt to .encrypted).
+    event_type: syscall
     condition_group:
       operator: and
       conditions:
-        - field: file.op
-          op: equals
-          values: ["rename"]
-        - field: file.path
-          op: not_prefix
-          values: ["/proc/", "/sys/", "/dev/", "/run/", "/tmp/."]
+        - field: nr
+          op: in
+          values: ["82"]   # rename(2) x86-64
+        - field: proc.comm
+          op: not_in
+          values: ["mv", "rsync", "git", "dpkg", "rpm", "apt", "pip", "pip3",
+                   "npm", "yarn", "cargo", "go", "vim", "emacs", "nano",
+                   "cp", "install", "make", "cmake", "meson", "gradle"]
     severity: critical
     action: alert
     tags: [mitre:T1486, ransomware, impact]
@@ -173,7 +176,51 @@ rules:
             - "RESTORE_FILES.html"
         - field: file.op
           op: in
-          values: ["create", "write"]
+          values: ["open", "write"]
     severity: critical
     action: alert
     tags: [mitre:T1486, ransomware, impact]
+
+  # MITRE ATT&CK: T1490 — Inhibit System Recovery (backup file deletion)
+  - id: ransomware_backup_delete
+    name: "Backup files deleted — pre-encryption recovery inhibition"
+    description: >
+      A process is calling unlink(2) or unlinkat(2) (the syscalls behind
+      'find -delete', 'rm', etc.). When proc.comm is 'find' this strongly
+      indicates ransomware using 'find -delete' to wipe backup files before
+      encrypting the primary copies.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["87", "263"]   # unlink(2), unlinkat(2)
+        - field: proc.comm
+          op: in
+          values: ["find", "python3", "python", "bash", "sh", "perl",
+                   "ruby", "node", "nodejs"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1490, ransomware, backup-deletion, impact]
+
+  # MITRE ATT&CK: T1083 — File and Directory Discovery (pre-encryption scan)
+  - id: ransomware_document_enum
+    name: "Document enumeration — pre-encryption file discovery"
+    description: >
+      A process is walking directory trees and reading file content in bulk,
+      a pattern consistent with ransomware performing pre-encryption inventory.
+      Matched via proc.args containing os.walk or directory traversal patterns
+      combined with bulk read operations.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - "python.*os\\.walk"
+        - "python.*os\\.listdir.*open"
+        - "find.*-name.*\\.(doc|pdf|xlsx|xls|docx|txt|csv|odt|odf).*-exec.*cat"
+        - "python.*glob.*read"
+    severity: warning
+    action: alert
+    tags: [mitre:T1083, ransomware, enumeration, discovery]

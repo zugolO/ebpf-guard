@@ -1527,6 +1527,13 @@ func NewZeroConfigManager() *Manager {
 	cfg.Kubernetes.Enabled = false
 	// Enable auth with auto-generated tokens.
 	cfg.Auth.Enabled = true
+	// Allow a fixed admin bearer token to be injected via env so containerized
+	// zero-config deployments (and e2e tests) can authenticate with a known
+	// value instead of the random token generated at startup. The viewer token
+	// is still auto-generated.
+	if tok := os.Getenv("EBPF_GUARD_AUTH_TOKEN"); tok != "" {
+		cfg.Auth.AdminToken = tok
+	}
 
 	return &Manager{
 		viper:  v,

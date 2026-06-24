@@ -18,17 +18,20 @@ runs:
           sudo apt-get install -y clang llvm libbpf-dev
 
         # bpftool is needed to dump kernel BTF into bpf/vmlinux.h.
-        # Ubuntu 24.04 ships a standalone `bpftool` package; fall back to the
-        # versioned binary shipped in linux-tools-* for other runner images.
-        if ! command -v bpftool >/dev/null 2>&1; then
-          sudo apt-get install -y bpftool || true
+        # NOTE: the Ubuntu `bpftool` package is only a wrapper that execs a
+        # kernel-specific binary (linux-tools-<kver>), which is not published for
+        # the runner's azure kernel — the wrapper then exits non-zero. So install
+        # linux-tools-generic and use its real, self-contained binary directly;
+        # `bpftool btf dump` reads /sys/kernel/btf/vmlinux and is version-tolerant.
+        sudo apt-get install -y linux-tools-common linux-tools-generic || true
+        real_bpftool="$(ls -1 /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool 2>/dev/null | sort -V | tail -1 || true)"
+        if [ -z "${real_bpftool}" ]; then
+          echo "::error::bpftool binary not found under /usr/lib/linux-tools* after installing linux-tools-generic" >&2
+          exit 1
         fi
-        if ! command -v bpftool >/dev/null 2>&1; then
-          sudo apt-get install -y "linux-tools-$(uname -r)" linux-tools-generic || true
-          bt="$(ls -d /usr/lib/linux-tools/*/bpftool 2>/dev/null | tail -1 || true)"
-          [ -n "${bt}" ] && sudo ln -sf "${bt}" /usr/local/bin/bpftool || true
-        fi
-        bpftool version
+        sudo ln -sf "${real_bpftool}" /usr/local/bin/bpftool
+        echo "Using bpftool: ${real_bpftool}"
+        /usr/local/bin/bpftool version
         clang --version | head -1
 
     - name: Verify kernel BTF is available

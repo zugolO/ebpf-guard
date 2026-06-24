@@ -25,7 +25,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.4'
+          go-version: '1.25.x'
 
       - name: Build ebpf-guard (no BPF)
         run: go build -tags nobpf -o /tmp/ebpf-guard ./cmd/ebpf-guard

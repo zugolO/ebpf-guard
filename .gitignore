@@ -21,6 +21,7 @@ internal/bpf/*_bpf.go
 internal/bpf/*_bpfel.go
 internal/bpf/*_bpfeb.go
 internal/bpf/*_x86_bpfel.go
+internal/bpf/*_arm64_bpfel.go
 internal/bpf/*_arm64_bpfeb.go
 vmlinux.h
 

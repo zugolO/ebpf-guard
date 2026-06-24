@@ -105,6 +105,9 @@ jobs:
       # to lint modules that declare go 1.25.
       run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Run golangci-lint
       run: golangci-lint run --timeout=5m
 
@@ -137,6 +140,9 @@ jobs:
 
     - name: Download dependencies
       run: go mod download
+
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
 
     - name: Run tests
       # -short skips long-running e2e/performance tests that have their own
@@ -189,6 +195,9 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Run BTF fallback unit tests (${{ matrix.scenario }})
       run: go test -v -race -run TestBTF ./internal/bpf/...
 
@@ -215,6 +224,9 @@ jobs:
 
     - name: Download dependencies
       run: go mod download
+
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
 
     - name: Run rule fixture tests
       run: go test -v -race ./tests/... -timeout 5m
@@ -260,6 +272,9 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Run race detector tests
       timeout-minutes: 15
       run: go test -race ./internal/exporter/... ./internal/profiler/... -count=2 -timeout=10m
@@ -299,6 +314,9 @@ jobs:
 
     - name: Download dependencies
       run: go mod download
+
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
 
     - name: Install benchstat
       run: go install golang.org/x/perf/cmd/benchstat@latest
@@ -397,6 +415,9 @@ jobs:
       if: matrix.arch == 'arm64'
       uses: docker/setup-qemu-action@v3
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Build binary
       env:
         GOOS: linux
@@ -481,6 +502,9 @@ jobs:
       with:
         go-version: '1.25.x'
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Run gosec
       uses: securego/gosec@master
       with:
@@ -531,6 +555,9 @@ jobs:
 
     - name: Download dependencies
       run: go mod download
+
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
 
     - name: Run performance tests
       run: |
@@ -589,6 +616,9 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Run fast E2E tests
       timeout-minutes: 10
       run: |
@@ -624,6 +654,9 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
+
     - name: Run load / performance E2E tests
       timeout-minutes: 35
       run: |
@@ -653,6 +686,9 @@ jobs:
 
     - name: Download dependencies
       run: go mod download
+
+    - name: Generate eBPF bindings
+      uses: ./.github/actions/setup-ebpf
 
     - name: Run WASM conformance tests
       run: go test -v -run TestWASMConformance ./internal/wasm/... -timeout 60s

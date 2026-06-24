@@ -34,17 +34,17 @@ package bpf
 //   -I../../bpf    find common.h and vmlinux.h
 //   -I/usr/include system headers (bpf/bpf_helpers.h etc.)
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Syscall ../../bpf/syscall.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Network ../../bpf/network.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Fileaccess ../../bpf/fileaccess.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Privesc ../../bpf/privesc.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" DNS ../../bpf/dns.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Iouring ../../bpf/iouring.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" BpfMonitor ../../bpf/bpf_monitor.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Kmod ../../bpf/lsm.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Cgroup ../../bpf/cgroup.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" HiddenProcess ../../bpf/hidden_process.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" TlsClientHello ../../bpf/tls_clienthello.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" TlsUprobe ../../bpf/tls_uprobe.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" XDP ../../bpf/xdp_block.bpf.c
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" GpuUprobe ../../bpf/gpu_uprobe.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Syscall ../../bpf/syscall.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Network ../../bpf/network.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Fileaccess ../../bpf/fileaccess.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Privesc ../../bpf/privesc.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" DNS ../../bpf/dns.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Iouring ../../bpf/iouring.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" BpfMonitor ../../bpf/bpf_monitor.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Kmod ../../bpf/lsm.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" Cgroup ../../bpf/cgroup.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" HiddenProcess ../../bpf/hidden_process.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" TlsClientHello ../../bpf/tls_clienthello.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" TlsUprobe ../../bpf/tls_uprobe.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" XDP ../../bpf/xdp_block.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64,arm64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" GpuUprobe ../../bpf/gpu_uprobe.bpf.c

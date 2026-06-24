@@ -119,7 +119,9 @@ jobs:
         run: |
           mkdir -p bpf-objects
           BPF_INCLUDE=/usr/include/x86_64-linux-gnu
-          BPF_CFLAGS="-O2 -g -Wall -target bpf -D__TARGET_ARCH_x86_64 -Ibpf -I${BPF_INCLUDE}"
+          # libbpf's bpf_tracing.h recognizes __TARGET_ARCH_x86 (not _x86_64);
+          # the wrong macro makes PT_REGS_PARM* expand to __BPF_TARGET_MISSING.
+          BPF_CFLAGS="-O2 -g -Wall -target bpf -D__TARGET_ARCH_x86 -Ibpf -I${BPF_INCLUDE}"
           for src in bpf/*.bpf.c; do
             name=$(basename "${src}" .bpf.c)
             clang ${BPF_CFLAGS} -c "${src}" -o "bpf-objects/${name}_bpfel.o"

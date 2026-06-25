@@ -30,23 +30,45 @@ ebpf-guard intercepts kernel events in real time using eBPF programs, builds beh
 ## Key Features
 
 - **Kernel-space event collection** — syscall tracing, TCP connect hooks, file open/read/write, DNS packet parsing, and TLS uprobe inspection via eBPF ring buffers. No polling, no `/proc` scraping.
+- **io_uring monitoring** — kprobes on `io_uring_setup`/`io_uring_enter` close the blind spot that io_uring creates for tracepoint-based agents.
+- **Privilege escalation detection** — tracks Linux capability changes (`setuid`, `setcap`, `capset`) and emits enriched events with old/new capability bitmasks and human-readable names.
+- **GPU operation monitoring** — CUDA uprobes (`cuMemAlloc`, `cuMemFree`, `cuMemcpy*`, `cuLaunchKernel`) detect unauthorized GPU workloads (illicit model serving, GPU cryptomining).
+- **Cloud audit log collection** — AWS CloudTrail (via SQS+S3), GCP Cloud Audit Logs (via Pub/Sub), and Azure Monitor Activity Log; normalized to the same `types.Event` pipeline as eBPF events.
+- **JA3 / JA4 TLS fingerprinting** — socket-level kprobe captures TLS ClientHello; computes JA3, JA3S, and JA4 fingerprints for C2 framework detection (Cobalt Strike, Sliver, Mythic, etc.).
+- **W3C Trace Context extraction** — parses `traceparent`/`tracestate` headers from TLS plaintext so security alerts can be correlated with distributed traces in your observability stack.
 - **Behavioral profiling** — per-process EWMA baseline + syscall sequence frequency vectors (cosine distance); anomaly scores emitted as Prometheus gauges.
 - **Process lineage tracking** — detects attack chains like `nginx → bash → curl → python3`; configurable patterns in `rules/lineage-patterns.yaml`.
+- **Container drift detection** — captures a per-container behavioral baseline at startup; any new executable, network peer, or file path appearing after the baseline window is flagged as drift.
+- **Hidden process detection** — compares the kernel task list (BPF `iter/task`, kernel 5.8+) against `/proc` enumeration; any PID present in the kernel but absent from `/proc` indicates a rootkit.
+- **Canary / honeypot files** — synthetic lure files at attacker-probed paths (e.g. `/etc/shadow.canary`); any access generates a high-confidence critical alert.
+- **OSINT feed enrichment** — fetches threat-intel feeds (IP/domain blocklists) on a configurable schedule and auto-generates correlator rules that are hot-reloaded without restart.
+- **Auto-learn mode** — observe process behavior for a configurable window, then export as ebpf-guard YAML rules or a `seccomp` JSON profile (`ebpf-guard autolearn`).
+- **Cross-node gossip protocol** — agents share IOCs (IPs, domains, file hashes) over a lightweight HTTP gossip ring; receiving a signal lowers the anomaly threshold on all peer nodes for the affected namespace.
+- **Kubernetes Admission Webhook** — `ValidatingAdmissionWebhook` server evaluates pod specs against the same Rego policies used at runtime, blocking non-compliant workloads before scheduling (build tag: `rego`).
+- **WASM detection plugins** — custom detection logic written in any language that compiles to WebAssembly; plugins are hot-loaded from `rules/custom/*.wasm` and run in a sandboxed wazero runtime with a 100 ms deadline per call. See [docs/wasm-plugins.md](docs/wasm-plugins.md).
 - **Rule-based detection** — YAML rules with hot-reload; supports field matching, regex, CIDR, nested condition groups. Rego/OPA engine for post-filter policy enrichment.
+- **Sigma rule import** — `sigma2ebpfguard` standalone binary converts Sigma open-standard detection rules to ebpf-guard YAML (`process_creation`, `network_connection`, `file_event`, `dns_query` logsources; all Sigma modifiers supported).
 - **DNS monitoring** — BPF socket filter for DNS packets; DGA detection via Shannon entropy, DNS tunneling detection, C2 TLD rules.
 - **TLS inspection** — uprobes on `SSL_write`/`SSL_read` capture plaintext before encryption (opt-in, requires `CAP_SYS_PTRACE`).
 - **eBPF LSM enforcement** — kernel 5.7+ `lsm/bpf_file_open` and `lsm/bpf_socket_connect` hooks block operations *before* they execute; automatic fallback to nftables on older kernels.
 - **nftables enforcement** — `google/nftables` netlink-based network blocking (no fork/exec); `CAP_NET_ADMIN` required.
+- **Simulate mode** — `--simulate` flag runs the full enforcement pipeline but prints what would have been blocked/killed instead of executing any action; safe to run in production for policy evaluation.
 - **Cryptominer detection** — outbound mining pool port/IP matching in BPF map; xmrig/minerd process name detection; DNS TXT query detection.
 - **Alert fingerprinting** — SHA-256 fingerprint per alert for tamper detection and deduplication.
 - **Alert explanation** — `ebpf-guard explain <fingerprint>` returns human-readable summary, mitigations, and MITRE ATT&CK mapping.
+- **Attack simulation** — built-in MITRE ATT&CK scenario runner (`ebpf-guard simulate --scenario <id>`) generates synthetic events that should trigger known rules; used as detection smoke tests.
+- **Analyst feedback** — `POST /alerts/<id>/feedback` marks an alert as a false positive; the `(rule_id, comm)` pair is suppressed immediately and persisted across restarts.
 - **Falco rule import** — convert Falco rules to ebpf-guard format (`ebpf-guard rules import --from falco`); emit Falco-compatible JSON output and metric aliases.
 - **Kubernetes enrichment** — every alert is annotated with pod name and namespace from the K8s API.
+- **Container runtime enrichment** — for non-Kubernetes environments, attaches container name, image, and labels via CRI (containerd/CRI-O) or Docker socket.
 - **mTLS to Alertmanager** — optional client certificate + CA bundle for secure alert delivery.
 - **Notification fanout** — Slack, Microsoft Teams, generic webhook (PagerDuty/Discord/SIEM) with parallel delivery.
 - **Alert persistence** — pluggable store: in-memory, SQLite, or OpenSearch.
-- **CLI subcommands** — `ebpf-guard alerts`, `status`, `rules list/reload/test/eval/import`, `explain`.
+- **Append-only audit log** — every enforcement action (kill, block, throttle) and rule reload is written to a rotating JSONL audit log for compliance and forensics.
+- **CLI subcommands** — `ebpf-guard alerts`, `status`, `rules list/reload/test/eval/import`, `explain`, `autolearn`, `simulate`.
+- **Interactive TUI** — `ebpf-guard tui` opens a live terminal dashboard (real-time alerts, top anomalous PIDs, event rate graphs) and a step-by-step rule wizard (build tag: `tui`).
 - **Bearer token auth** — `/metrics` and `/debug/pprof` are protected by default; token is auto-generated at startup if not configured.
+- **OpenAPI 3.0 spec** — embedded at `api/openapi.yaml`; served at `GET /api/openapi.yaml` for integration with API gateways and generated clients.
 - **BPF-side sampling** — configurable per-event-type drop rate in kernel space to cap overhead on high-traffic nodes.
 - **Memory pressure auto-tuning** — automatically disables sequence profiling and reduces sampling when available RAM < 10%.
 - **Startup integrity scan** — checks `/etc/ld.so.preload`, cron dirs, root shell configs, and anonymous executable memory regions for pre-existing compromise.
@@ -154,21 +176,39 @@ Full verification instructions and SBOM signing: [docs/security.md](docs/securit
 
 | Package | Role |
 |---|---|
-| `bpf/*.bpf.c` | eBPF C programs: syscall, network, file, DNS, TLS uprobe, LSM hooks |
+| `bpf/*.bpf.c` | eBPF C programs: syscall, network, file, DNS, TLS uprobe, LSM hooks, io_uring, GPU uprobes, TLS ClientHello |
 | `internal/bpf` | eBPF loader, feature detection, BPF map limits, per-type sampling config |
-| `internal/collector` | Ring-buffer readers for syscall, network, file, DNS, TLS, LSM events |
+| `internal/collector` | Ring-buffer readers for syscall, network, file, DNS, TLS, LSM, io_uring, GPU, privesc, cloud audit (CloudTrail / GCP / Azure) events |
 | `internal/correlator` | YAML rule engine with 16-shard PID buffer, alert fingerprinting, rate limiting, DNS entropy, mining pool detection |
 | `internal/profiler` | Per-process EWMA baseline, syscall SequenceProfiler (cosine distance), LineageTracker (attack chains) |
+| `internal/drift` | Container drift detection — baseline vs. runtime behavioral comparison |
+| `internal/hidden` | Hidden process detection via BPF `iter/task` vs `/proc` comparison (rootkit indicator) |
+| `internal/canary` | Canary/honeypot file monitoring — file-access alerts with periodic tamper verification |
+| `internal/autolearn` | Auto-learn mode — observes process behavior and exports as YAML rules or seccomp JSON profile |
+| `internal/gossip` | Cross-node IOC gossip protocol — shares IPs/domains/hashes and amplifies anomaly sensitivity on peer nodes |
+| `internal/osint` | OSINT feed manager — fetches threat-intel blocklists and generates correlator rules with hot-reload |
+| `internal/feedback` | Analyst false-positive feedback — suppresses `(rule_id, comm)` pairs; persisted to disk |
+| `internal/audit` | Append-only rotating JSONL audit log for enforcement actions and rule reloads |
+| `internal/simulate` | Simulate mode — enforcement dry-run that reports blocked actions without executing them |
+| `internal/wasm` | WebAssembly detection plugin engine (wazero); sandboxed, 100 ms deadline, hot-reloaded from `rules/custom/` |
+| `internal/admission` | Kubernetes `ValidatingAdmissionWebhook` — pre-deploy Rego policy enforcement (build tag: `rego`) |
 | `internal/policy` | Rego/OPA embedded engine — post-filter policy enrichment and MITRE mapping |
 | `internal/exporter` | Prometheus metrics, Alertmanager client (mTLS), cardinality guard, Slack/Teams/webhook notifiers, Falco-compat output |
 | `internal/enforcer` | Response actions: kill, throttle, nftables block (`google/nftables`), LSM block |
+| `internal/runtime` | Container metadata enricher via CRI (containerd/CRI-O) or Docker socket — for non-Kubernetes environments |
+| `internal/ja3` | JA3 / JA3S / JA4 TLS ClientHello fingerprint computation |
 | `internal/migration` | Falco rule importer — converts Falco YAML condition syntax to ebpf-guard format |
+| `internal/ruletest` | Rule test framework with TAP v13 and JUnit XML output (`ebpf-guard rules test`) |
+| `internal/tui` | Interactive terminal dashboard and rule-builder wizard (build tag: `tui`) |
+| `internal/attacker` | Built-in MITRE ATT&CK attack simulation scenarios for end-to-end detection smoke tests |
 | `internal/explainer` | Alert explanation engine with Go templates and MITRE ATT&CK references |
 | `internal/watchdog` | Heartbeat gauge, BPF program liveness checker, memory pressure auto-tuning |
 | `internal/integrity` | Startup integrity scan: LD_PRELOAD, cron, bashrc, anonymous executable regions |
-| `internal/k8s` | Pod watcher and metadata enricher |
+| `internal/k8s` | Pod watcher and Kubernetes metadata enricher |
 | `internal/store` | Pluggable alert store: memory, SQLite, OpenSearch |
 | `internal/config` | Viper-based YAML config with hot-reload |
+| `api/` | Embedded OpenAPI 3.0 specification (`api/openapi.yaml`); served at `GET /api/openapi.yaml` |
+| `cmd/sigma2ebpfguard` | Standalone Sigma rule converter binary |
 | `rules/` | Built-in rule sets: CIS k8s, OWASP web, container escape, cryptominer, DNS threats, TLS patterns, lineage patterns |
 | `rules/rego/` | Rego policy rules with OPA unit tests |
 | `deploy/helm/` | Helm chart: DaemonSet, Secret, PDB, ServiceMonitor, VPA, PrometheusRule, Grafana dashboard |
@@ -434,6 +474,10 @@ See [docs/rules.md](docs/rules.md) for the full Rego authoring guide.
 | `ebpf_guard_integrity_findings_total` | Gauge | Startup integrity scan findings by check type |
 | `ebpf_guard_memory_pressure_mode` | Gauge | Current memory pressure mode (low/normal) |
 | `ebpf_guard_tls_tracked_pids_total` | Gauge | Number of PIDs with TLS uprobes attached |
+| `ebpf_guard_gpu_tracked_pids_total` | Gauge | Number of PIDs with GPU CUDA uprobes attached |
+| `ebpf_guard_wasm_plugins_loaded` | Gauge | WASM detection plugins currently loaded |
+| `ebpf_guard_wasm_plugin_evaluations_total` | Counter | WASM plugin evaluation calls, labeled by plugin_id and result |
+| `ebpf_guard_wasm_plugin_latency_seconds` | Histogram | WASM plugin evaluation latency per plugin_id |
 | `ebpf_guard_ratelimiter_states_total` | Gauge | Number of active rate limiter state entries |
 | `ebpf_guard_bpf_map_entries` | Gauge | Current BPF map entry count per map |
 
@@ -469,11 +513,41 @@ ebpf-guard explain --all --output markdown
 # List/reload/test rules
 ebpf-guard rules list
 ebpf-guard rules reload
-ebpf-guard rules test                          # runs OPA unit tests
+ebpf-guard rules test                          # runs OPA unit tests (TAP/JUnit XML output)
 ebpf-guard rules eval --input event.json       # test rules against event
 ebpf-guard rules mitre-coverage                # MITRE ATT&CK coverage table
 ebpf-guard rules import --from falco rules.yaml
+
+# Observe behavior and export as rules or seccomp profile
+ebpf-guard autolearn --pid 1234 --duration 5m --output rules/learned.yaml
+ebpf-guard autolearn --comm nginx --duration 10m --seccomp output/nginx-seccomp.json
+
+# Run built-in MITRE ATT&CK detection smoke tests
+ebpf-guard simulate --list                     # list available scenarios
+ebpf-guard simulate --scenario privesc_setuid  # trigger a single scenario
+ebpf-guard simulate --all                      # run all scenarios
+
+# Interactive terminal dashboard and rule builder (requires build tag: tui)
+ebpf-guard tui
+ebpf-guard tui wizard                          # step-by-step rule creation wizard
 ```
+
+### Sigma rule converter
+
+`sigma2ebpfguard` is a standalone binary for batch-converting [Sigma](https://sigmahq.io) rules:
+
+```bash
+# Convert a directory of Sigma rules
+sigma2ebpfguard ./sigma-rules/ --out ./rules/imported/
+
+# Validate a single rule without writing output
+sigma2ebpfguard rule.yml --validate
+
+# Preview conversions without writing files
+sigma2ebpfguard --dir ./sigma-rules/ --dry-run
+```
+
+Supported logsource categories: `process_creation`, `network_connection`, `file_event`, `dns_query`. Rules with unsupported syntax are emitted with `status: unsupported` and a conversion hint.
 
 Full reference: [docs/cli.md](docs/cli.md)
 
@@ -510,8 +584,21 @@ See [docs/notifications.md](docs/notifications.md).
 - Responsible disclosure: see [SECURITY.md](SECURITY.md)
 - Lock ordering reference: [docs/lock-ordering.md](docs/lock-ordering.md)
 - TLS inspection: [docs/tls-inspection.md](docs/tls-inspection.md)
+- JA3/JA4 TLS fingerprinting: [docs/tls-inspection.md](docs/tls-inspection.md)
 - LSM enforcement: [docs/lsm-enforcement.md](docs/lsm-enforcement.md)
 - Enforcement (nftables/kill/throttle): [docs/enforcement.md](docs/enforcement.md)
+- Privilege escalation detection: [docs/privesc-detection.md](docs/privesc-detection.md)
+- Hidden process / rootkit detection: [docs/operations.md](docs/operations.md)
+- Canary file configuration: [docs/canary.md](docs/canary.md)
+- Container drift detection: [docs/drift.md](docs/drift.md)
+- WASM detection plugins: [docs/wasm-plugins.md](docs/wasm-plugins.md)
+- Kubernetes Admission Webhook: [docs/deployment.md](docs/deployment.md)
+- OSINT feed enrichment: [docs/integrations.md](docs/integrations.md)
+- Cross-node gossip: [docs/gossip.md](docs/gossip.md)
+- Analyst feedback: [docs/feedback.md](docs/feedback.md)
+- Multi-tenant / allowlist mode: [docs/multi-tenant.md](docs/multi-tenant.md), [docs/allowlist-mode.md](docs/allowlist-mode.md)
+- Performance tuning: [docs/performance-tuning.md](docs/performance-tuning.md)
+- Rule authoring guide: [docs/rule-authoring-guide.md](docs/rule-authoring-guide.md)
 
 At startup the agent logs a single security posture line:
 

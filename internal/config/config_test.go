@@ -272,3 +272,28 @@ profiler:
 	// Manager should still be in a valid state
 	assert.NotNil(t, mgr.Get())
 }
+
+// TestNewZeroConfigManager_Defaults verifies the zero-config overrides:
+// K8s off, auth on, and — critically — that the core collectors are declared
+// as the readiness-required set. Without this, /health/ready gates on every
+// registered collector, so an optional / kernel-gated collector that fails to
+// attach flips readiness to 503 (the e2e TestReadyEndpoint flake this fixes).
+func TestNewZeroConfigManager_Defaults(t *testing.T) {
+	mgr := NewZeroConfigManager()
+	cfg := mgr.Get()
+	require.NotNil(t, cfg)
+
+	assert.False(t, cfg.Kubernetes.Enabled, "k8s must be off in zero-config")
+	assert.True(t, cfg.Auth.Enabled, "auth must be on in zero-config")
+	assert.Equal(t, []string{"syscall", "network", "fileaccess"}, cfg.Collectors.Required,
+		"zero-config must gate readiness on the core collectors only")
+	// fail-open keeps optional collector failures from aborting startup.
+	assert.NotEqual(t, "fail-closed", cfg.Collectors.StartupPolicy)
+}
+
+// TestNewZeroConfigManager_AuthTokenFromEnv verifies the admin token override.
+func TestNewZeroConfigManager_AuthTokenFromEnv(t *testing.T) {
+	t.Setenv("EBPF_GUARD_AUTH_TOKEN", "fixed-test-token")
+	cfg := NewZeroConfigManager().Get()
+	assert.Equal(t, "fixed-test-token", cfg.Auth.AdminToken)
+}

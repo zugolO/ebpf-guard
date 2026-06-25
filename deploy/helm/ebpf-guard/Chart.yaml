@@ -2,8 +2,8 @@ apiVersion: v2
 name: ebpf-guard
 description: eBPF-based runtime security agent for Linux/Kubernetes
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.10.0-alpha"
 keywords:
   - ebpf
   - security

@@ -11,9 +11,18 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.10.0-alpha] - 2026-06-25
+
 ### Added
 - CHANGELOG tracking with GoReleaser auto-generation (this file)
 - Expanded test coverage for `osint/`, `drift/`, and `autolearn/` modules
+- Wire-format unit tests for the `internal/bpf` ring-buffer parsers (`ParsePrivescEvent`, `ParseIOUringEvent`, `ParseBpfMonitorEvent`, `ParseKmodEvent`, `ParseCgroupEscapeEvent`, `ParseTlsClientHelloEvent`) and the `pkg/types` helpers
+- Kernel-independent event parsing split into testable `*_parse.go` files (network, TLS, DNS) so the kernel-only collector glue is codecov-ignored while the decode logic is unit-tested
+
+### Fixed
+- GoReleaser `ldflags` now inject the correct `main.Version`/`main.Commit`/`main.BuildTime` symbols, so release binaries report the git tag instead of the fallback version
 
 ---
 

@@ -12,4 +12,4 @@ resources:
 
 commonLabels:
   app.kubernetes.io/name: ebpf-guard
-  app.kubernetes.io/version: "0.1.0"
+  app.kubernetes.io/version: "0.10.0-alpha"

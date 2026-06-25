@@ -1,0 +1,18 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 2%
+    patch:
+      default:
+        target: auto
+        threshold: 2%
+
+ignore:
+  # bpf2go-generated Go bindings — not testable without a real kernel
+  - "**/*_bpfel.go"
+  - "**/*_bpfeb.go"
+  - "**/*_gen.go"
+  # vendored or auto-generated OpenAPI spec stubs
+  - "api/gen/**"

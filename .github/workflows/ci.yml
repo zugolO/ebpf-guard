@@ -175,10 +175,9 @@ jobs:
     - name: Upload coverage
       uses: codecov/codecov-action@v4
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         files: ./coverage.out
         fail_ci_if_error: true
-        threshold: 2%
-        fail_ci_if_coverage_drops: true
 
   # BTF fallback compatibility tests — verify the 3-strategy resolution logic
   # works correctly for each scenario without requiring a real kernel change.

@@ -156,14 +156,19 @@ jobs:
     - name: Run tests
       # -short skips long-running e2e/performance tests that have their own
       # dedicated job and require hardware not available on shared CI runners.
-      run: go test -v -race -short -coverprofile=coverage.out ./...
+      #
+      # -coverpkg=./... measures coverage across ALL packages, not just each
+      # package against its own tests. Without it, code exercised only through
+      # another package's tests (e.g. via integration helpers) is reported as
+      # uncovered, which structurally caps and understates the Codecov number.
+      run: go test -v -race -short -coverpkg=./... -coverprofile=coverage.out ./...
 
     - name: Run tests with build tags (rego, tui)
       # Packages behind build tags are excluded from the main run above.
       # Re-run them explicitly so their coverage is captured separately and
       # merged into the final report sent to Codecov.
       run: |
-        go test -v -race -short -tags "rego" \
+        go test -v -race -short -tags "rego" -coverpkg=./... \
           -coverprofile=coverage-rego.out \
           ./internal/admission/... ./internal/policy/... \
           || true
@@ -603,19 +608,23 @@ jobs:
         go test -v ./e2e/... -run "TestPerformanceRegression|TestShardedLockContention|TestMemoryProfileAtLoad" -timeout 10m
 
     - name: Run benchmarks
+      # -run='^$' restricts the run to benchmarks only. Without it `go test`
+      # also executes the package's Test* functions — including e2e tests like
+      # TestIntegration that require a real kernel (tracefs/eBPF attach) and fail
+      # on shared CI runners, turning this informational job red for no reason.
       run: |
-        go test -bench=BenchmarkCorrelationEngine -benchtime=10s ./e2e/...
-        go test -bench=BenchmarkShardedBufferContention -benchtime=10s ./e2e/...
-        go test -bench=BenchmarkCorrelationEngineParallel -benchtime=10s ./e2e/...
+        go test -run='^$' -bench=BenchmarkCorrelationEngine -benchtime=10s ./e2e/...
+        go test -run='^$' -bench=BenchmarkShardedBufferContention -benchtime=10s ./e2e/...
+        go test -run='^$' -bench=BenchmarkCorrelationEngineParallel -benchtime=10s ./e2e/...
 
     - name: Run profiler benchmarks (Sprint 13.2)
       run: |
         echo "=== ProcessEvent Benchmark (target p99 < 10µs) ==="
-        go test -bench=BenchmarkProcessEvent -benchtime=5s ./internal/profiler/...
+        go test -run='^$' -bench=BenchmarkProcessEvent -benchtime=5s ./internal/profiler/...
         echo "=== IsLearningComplete Benchmark (atomic.Bool fast path) ==="
-        go test -bench=BenchmarkIsLearningComplete -benchtime=5s ./internal/profiler/...
+        go test -run='^$' -bench=BenchmarkIsLearningComplete -benchtime=5s ./internal/profiler/...
         echo "=== Parallel Processing Benchmark ==="
-        go test -bench=BenchmarkProcessEventParallel -benchtime=5s ./internal/profiler/...
+        go test -run='^$' -bench=BenchmarkProcessEventParallel -benchtime=5s ./internal/profiler/...
 
     - name: Upload performance results
       uses: actions/upload-artifact@v4

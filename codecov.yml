@@ -2,12 +2,52 @@ coverage:
   status:
     project:
       default:
+        # auto = compare against the base commit instead of an absolute number.
+        # A large share of the codebase (collectors, bpf attach paths) only runs
+        # on a real kernel and cannot be exercised on shared CI runners, so an
+        # absolute target like 80% would be permanently red. Gate on regressions
+        # instead: fail only if overall coverage drops more than the threshold.
         target: auto
         threshold: 2%
     patch:
       default:
         target: auto
+        threshold: 5%
+
+comment:
+  layout: "reach,diff,flags,components"
+  behavior: default
+
+# Per-package components for at-a-glance breakdown in the Codecov UI.
+# informational: true keeps them from blocking PRs while we burn coverage up.
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
         threshold: 2%
+        informational: true
+  individual_components:
+    - component_id: correlator
+      name: "correlator"
+      paths:
+        - internal/correlator/**
+    - component_id: enforcer
+      name: "enforcer"
+      paths:
+        - internal/enforcer/**
+    - component_id: exporter
+      name: "exporter"
+      paths:
+        - internal/exporter/**
+    - component_id: store
+      name: "store"
+      paths:
+        - internal/store/**
+    - component_id: profiler
+      name: "profiler"
+      paths:
+        - internal/profiler/**
 
 ignore:
   # bpf2go-generated Go bindings — not testable without a real kernel

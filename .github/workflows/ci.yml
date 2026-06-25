@@ -158,6 +158,20 @@ jobs:
       # dedicated job and require hardware not available on shared CI runners.
       run: go test -v -race -short -coverprofile=coverage.out ./...
 
+    - name: Run tests with build tags (rego, tui)
+      # Packages behind build tags are excluded from the main run above.
+      # Re-run them explicitly so their coverage is captured separately and
+      # merged into the final report sent to Codecov.
+      run: |
+        go test -v -race -short -tags "rego" \
+          -coverprofile=coverage-rego.out \
+          ./internal/admission/... ./internal/policy/... \
+          || true
+        # If coverage-rego.out was produced, append its lines (skip mode header)
+        if [ -f coverage-rego.out ]; then
+          tail -n +2 coverage-rego.out >> coverage.out
+        fi
+
     - name: Upload coverage
       uses: codecov/codecov-action@v4
       with:

@@ -109,12 +109,10 @@ func buildDNSResponsePayload(qname string, ip net.IP) []byte {
 }
 
 func TestParseEvent(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
 	respPayload := buildDNSResponsePayload("example.com", net.IPv4(93, 184, 216, 34))
 	raw := buildMockRawEvent(types.DNSDirectionResponse, respPayload)
 
-	event := collector.parseEvent(raw)
+	event := decodeDNSEvent(raw)
 
 	require.NotNil(t, event)
 	assert.Equal(t, types.EventDNS, event.Type)
@@ -130,8 +128,6 @@ func TestParseEvent(t *testing.T) {
 }
 
 func TestParseEvent_Query(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
 	qnameWire := encodeDNSName("example.com")
 	payload := make([]byte, 12)
 	binary.BigEndian.PutUint16(payload[2:4], 0x0100) // QR=0 (query)
@@ -141,7 +137,7 @@ func TestParseEvent_Query(t *testing.T) {
 	payload = binary.BigEndian.AppendUint16(payload, 1) // QCLASS IN
 
 	raw := buildMockRawEvent(types.DNSDirectionQuery, payload)
-	event := collector.parseEvent(raw)
+	event := decodeDNSEvent(raw)
 
 	require.NotNil(t, event)
 	assert.Equal(t, "example.com", event.DNS.QName)
@@ -151,20 +147,16 @@ func TestParseEvent_Query(t *testing.T) {
 }
 
 func TestParseEvent_InvalidType(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
 	// Build a mock event with wrong type
 	buf := make([]byte, 32)
 	binary.LittleEndian.PutUint32(buf, 99) // Wrong type
 
-	event := collector.parseEvent(buf)
+	event := decodeDNSEvent(buf)
 	assert.Nil(t, event)
 }
 
 func TestParseEvent_TooShort(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
-	event := collector.parseEvent([]byte{1, 2, 3}) // Too short
+	event := decodeDNSEvent([]byte{1, 2, 3}) // Too short
 	assert.Nil(t, event)
 }
 

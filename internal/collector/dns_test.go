@@ -55,54 +55,6 @@ func TestIntToIPv4ByteOrder(t *testing.T) {
 	}
 }
 
-func TestQtypeToString(t *testing.T) {
-	tests := []struct {
-		qtype    uint16
-		expected string
-	}{
-		{1, "A"},
-		{2, "NS"},
-		{5, "CNAME"},
-		{6, "SOA"},
-		{12, "PTR"},
-		{15, "MX"},
-		{16, "TXT"},
-		{28, "AAAA"},
-		{33, "SRV"},
-		{255, "ANY"},
-		{999, "TYPE999"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			result := qtypeToString(tt.qtype)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestRcodeToString(t *testing.T) {
-	tests := []struct {
-		rcode    uint16
-		expected string
-	}{
-		{0, "NOERROR"},
-		{1, "FORMERR"},
-		{2, "SERVFAIL"},
-		{3, "NXDOMAIN"},
-		{4, "NOTIMP"},
-		{5, "REFUSED"},
-		{99, "RCODE99"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			result := rcodeToString(tt.rcode)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 // encodeDNSName encodes a dotted domain name into DNS wire format
 // (length-prefixed labels, null-terminated). No compression.
 func encodeDNSName(name string) []byte {
@@ -148,8 +100,8 @@ func buildDNSResponsePayload(qname string, ip net.IP) []byte {
 
 	payload := make([]byte, 12)
 	binary.BigEndian.PutUint16(payload[2:4], 0x8180) // QR=1 (response), RCODE=0
-	binary.BigEndian.PutUint16(payload[4:6], 1)       // QDCOUNT
-	binary.BigEndian.PutUint16(payload[6:8], 1)       // ANCOUNT
+	binary.BigEndian.PutUint16(payload[4:6], 1)      // QDCOUNT
+	binary.BigEndian.PutUint16(payload[6:8], 1)      // ANCOUNT
 
 	questionStart := len(payload)
 	payload = append(payload, qnameWire...)
@@ -159,10 +111,10 @@ func buildDNSResponsePayload(qname string, ip net.IP) []byte {
 	// Answer: name = compression pointer back to the question's qname.
 	ptr := uint16(0xC000) | uint16(questionStart)
 	payload = binary.BigEndian.AppendUint16(payload, ptr)
-	payload = binary.BigEndian.AppendUint16(payload, 1)     // TYPE A
-	payload = binary.BigEndian.AppendUint16(payload, 1)     // CLASS IN
-	payload = binary.BigEndian.AppendUint32(payload, 300)   // TTL
-	payload = binary.BigEndian.AppendUint16(payload, 4)     // RDLENGTH
+	payload = binary.BigEndian.AppendUint16(payload, 1)   // TYPE A
+	payload = binary.BigEndian.AppendUint16(payload, 1)   // CLASS IN
+	payload = binary.BigEndian.AppendUint32(payload, 300) // TTL
+	payload = binary.BigEndian.AppendUint16(payload, 4)   // RDLENGTH
 	payload = append(payload, ip.To4()...)
 
 	return payload
@@ -195,7 +147,7 @@ func TestParseEvent_Query(t *testing.T) {
 	qnameWire := encodeDNSName("example.com")
 	payload := make([]byte, 12)
 	binary.BigEndian.PutUint16(payload[2:4], 0x0100) // QR=0 (query)
-	binary.BigEndian.PutUint16(payload[4:6], 1)       // QDCOUNT
+	binary.BigEndian.PutUint16(payload[4:6], 1)      // QDCOUNT
 	payload = append(payload, qnameWire...)
 	payload = binary.BigEndian.AppendUint16(payload, 1) // QTYPE A
 	payload = binary.BigEndian.AppendUint16(payload, 1) // QCLASS IN

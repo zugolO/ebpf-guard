@@ -24,6 +24,7 @@ func (realFeatureProber) FileExists(path string) bool {
 }
 
 func (realFeatureProber) ReadFile(path string) ([]byte, error) {
+	// #nosec G304 -- path is an internal constant (e.g. /proc, /sys), never user input
 	return os.ReadFile(path)
 }
 

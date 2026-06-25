@@ -57,10 +57,10 @@ ignore:
   # vendored or auto-generated OpenAPI spec stubs
   - "api/gen/**"
   # kernel-only collector files — require a real eBPF-capable kernel to load
+  # (network.go and tlsfingerprint.go are intentionally NOT ignored: their
+  # constructors and lifecycle helpers are exercised by unit tests)
   - "internal/collector/bpfmonitor.go"
   - "internal/collector/fileaccess.go"
-  - "internal/collector/network.go"
   - "internal/collector/privesc.go"
   - "internal/collector/iouring.go"
-  - "internal/collector/tlsfingerprint.go"
   - "internal/bpf/features.go"

@@ -9,57 +9,27 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/ringbuf"
-	bpfpkg "github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bpfpkg "github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // --- fake syscallLoader ---
 
+// fakeErrLoader returns err from Load. A zero-value fakeErrLoader (err == nil)
+// simulates a successful load that leaves objs empty but non-nil.
 type fakeErrLoader struct{ err error }
 
 func (f fakeErrLoader) Load(_ *bpfpkg.SyscallObjects, _ *ebpf.CollectionOptions) error {
 	return f.err
 }
 
-// --- fake ringbufOpener / reader ---
-
-type fakeRingbufReader struct {
-	records []ringbuf.Record
-	idx     int
-	closed  bool
-}
-
-func (r *fakeRingbufReader) Read() (ringbuf.Record, error) {
-	if r.idx >= len(r.records) {
-		return ringbuf.Record{}, errors.New("EOF")
-	}
-	rec := r.records[r.idx]
-	r.idx++
-	return rec, nil
-}
-
-func (r *fakeRingbufReader) Close() error {
-	r.closed = true
-	return nil
-}
-
-type fakeRingbufOpener struct {
-	reader ringbufReader
-	err    error
-}
-
-func (o *fakeRingbufOpener) NewReader(_ *ebpf.Map) (ringbufReader, error) {
-	if o.err != nil {
-		return nil, o.err
-	}
-	return o.reader, nil
-}
-
 // --- fake linkAttacher ---
 
+// fakeLinkAttacher always fails: when err is set it returns it, otherwise it
+// returns a generic error. It never returns a real link.Link because that
+// interface has unexported methods and cannot be implemented outside cilium/ebpf.
 type fakeLinkAttacher struct {
 	err error
 }
@@ -102,6 +72,24 @@ func TestSyscallCollector_LoadError_WhenLoaderFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "load eBPF objects")
 
 	// After a failed load, the collector must not be considered healthy.
+	assert.False(t, c.IsHealthy())
+}
+
+func TestSyscallCollector_AttachError_WhenAttacherFails(t *testing.T) {
+	c := newTestSyscallCollector(t)
+	// Load succeeds (objs becomes non-nil but empty) so Start proceeds to attach.
+	c.loader = fakeErrLoader{}
+	c.attacher = &fakeLinkAttacher{err: errors.New("simulated attach failure")}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately so Start doesn't block
+
+	out := make(chan types.Event, 1)
+	err := c.Start(ctx, out)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attach programs")
+
+	// A failed attach must leave the collector unhealthy.
 	assert.False(t, c.IsHealthy())
 }
 

@@ -1,7 +1,6 @@
 package bpf
 
 import (
-	"errors"
 	"fmt"
 	"runtime"
 	"testing"
@@ -12,8 +11,7 @@ import (
 
 // fakeProber is a test double for FeatureProber.
 type fakeProber struct {
-	files   map[string][]byte // path → content (nil entry means file absent)
-	httpErr error
+	files map[string][]byte // path → content (nil entry means file absent)
 }
 
 func (f *fakeProber) FileExists(path string) bool {
@@ -29,18 +27,11 @@ func (f *fakeProber) ReadFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-func (f *fakeProber) HTTPGet(_ string) ([]byte, error) {
-	if f.httpErr != nil {
-		return nil, f.httpErr
-	}
-	return []byte("ok"), nil
-}
-
 func TestDetectFeatures_BTFAvailable(t *testing.T) {
 	prober := &fakeProber{
 		files: map[string][]byte{
-			"/sys/kernel/btf/vmlinux":   []byte("fake-btf"),
-			"/proc/version_signature":   []byte("Ubuntu 5.15.0-generic"),
+			"/sys/kernel/btf/vmlinux": []byte("fake-btf"),
+			"/proc/version_signature": []byte("Ubuntu 5.15.0-generic"),
 		},
 	}
 
@@ -95,19 +86,4 @@ func TestDetectFeatures_VersionSignatureAbsent(t *testing.T) {
 	require.NoError(t, err)
 	// Fall-back is runtime.GOOS + "/" + runtime.GOARCH.
 	assert.Equal(t, runtime.GOOS+"/"+runtime.GOARCH, f.KernelVersion)
-}
-
-func TestDetectFeatures_BTFHub_NetworkError(t *testing.T) {
-	// HTTPGet returning an error must not cause detectFeaturesWithProber to
-	// fail — HTTP is not used in the detection path itself, only in BTF hub
-	// resolution.  This verifies graceful behaviour when the prober is wired
-	// with a failing HTTP backend.
-	prober := &fakeProber{
-		files:   map[string][]byte{},
-		httpErr: errors.New("network unreachable"),
-	}
-
-	f, err := detectFeaturesWithProber(prober)
-	require.NoError(t, err, "network error must not propagate from detectFeaturesWithProber")
-	assert.NotNil(t, f)
 }

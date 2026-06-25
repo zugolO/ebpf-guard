@@ -3,7 +3,6 @@ package collector
 import (
 	"encoding/binary"
 	"net"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -53,17 +52,6 @@ func TestIntToIPv4ByteOrder(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-// encodeDNSName encodes a dotted domain name into DNS wire format
-// (length-prefixed labels, null-terminated). No compression.
-func encodeDNSName(name string) []byte {
-	var buf []byte
-	for _, label := range strings.Split(name, ".") {
-		buf = append(buf, byte(len(label)))
-		buf = append(buf, label...)
-	}
-	return append(buf, 0)
 }
 
 // buildMockRawEvent builds a raw ring buffer record matching struct

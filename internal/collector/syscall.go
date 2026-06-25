@@ -21,13 +21,17 @@ type SyscallCollector struct {
 	logger      *slog.Logger
 	objs        *bpf.SyscallObjects
 	links       []link.Link
-	reader      *bpf.RingbufReader
+	reader      ringbufReader
 	loadError   error // Tracks if the collector failed to load (stub mode)
 	dropLogger  *dropLogger
 	status      StatusReporter
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
 	lostTotal   atomic.Uint64
+	// injectable dependencies — set to production defaults in NewSyscallCollector.
+	loader   syscallLoader
+	opener   ringbufOpener
+	attacher linkAttacher
 }
 
 // NewSyscallCollector creates a new syscall event collector.
@@ -37,6 +41,9 @@ func NewSyscallCollector(logger *slog.Logger) (*SyscallCollector, error) {
 		dropLogger: newDropLogger(5 * time.Second),
 		status:     NoopStatusReporter{},
 		strategy:   StrategyDrop,
+		loader:     defaultSyscallLoader{},
+		opener:     defaultRingbufOpener{},
+		attacher:   defaultLinkAttacher{},
 	}, nil
 }
 
@@ -86,7 +93,7 @@ func (c *SyscallCollector) Start(ctx context.Context, out chan<- types.Event) er
 	}
 
 	// Create ring buffer reader
-	reader, err := bpf.NewRingbufReader(c.objs.Events)
+	reader, err := c.opener.NewReader(c.objs.Events)
 	if err != nil {
 		c.loadError = err
 		c.status.SetUp("syscall", false)
@@ -201,7 +208,7 @@ func (c *SyscallCollector) loadObjects() error {
 		},
 	}
 	_ = ringSize // applied to spec.Maps["events"].MaxEntries in the real bpf2go loader
-	if err := bpf.LoadSyscallObjects(c.objs, opts); err != nil {
+	if err := c.loader.Load(c.objs, opts); err != nil {
 		return err
 	}
 	return nil
@@ -210,14 +217,14 @@ func (c *SyscallCollector) loadObjects() error {
 // attachPrograms attaches the eBPF programs to tracepoints.
 func (c *SyscallCollector) attachPrograms() error {
 	// Attach sys_enter tracepoint
-	l1, err := link.Tracepoint("raw_syscalls", "sys_enter", c.objs.TraceSysEnter, nil)
+	l1, err := c.attacher.Tracepoint("raw_syscalls", "sys_enter", c.objs.TraceSysEnter, nil)
 	if err != nil {
 		return fmt.Errorf("attach sys_enter: %w", err)
 	}
 	c.links = append(c.links, l1)
 
 	// Attach sys_exit tracepoint
-	l2, err := link.Tracepoint("raw_syscalls", "sys_exit", c.objs.TraceSysExit, nil)
+	l2, err := c.attacher.Tracepoint("raw_syscalls", "sys_exit", c.objs.TraceSysExit, nil)
 	if err != nil {
 		return fmt.Errorf("attach sys_exit: %w", err)
 	}
@@ -227,7 +234,7 @@ func (c *SyscallCollector) attachPrograms() error {
 	// Optional: if the program is nil (kernel lacks BTF/CO-RE for this hook),
 	// the /proc fallback in readLoop handles execve events.
 	if c.objs.TraceSchedProcessExec != nil {
-		l3, err := link.Tracepoint("sched", "sched_process_exec", c.objs.TraceSchedProcessExec, nil)
+		l3, err := c.attacher.Tracepoint("sched", "sched_process_exec", c.objs.TraceSchedProcessExec, nil)
 		if err != nil {
 			c.logger.Warn("sched_process_exec tracepoint unavailable, using /proc fallback for proc.args",
 				slog.Any("error", err))

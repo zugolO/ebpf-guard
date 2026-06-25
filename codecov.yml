@@ -56,11 +56,14 @@ ignore:
   - "**/*_gen.go"
   # vendored or auto-generated OpenAPI spec stubs
   - "api/gen/**"
-  # kernel-only collector files — require a real eBPF-capable kernel to load
-  # (network.go and tlsfingerprint.go are intentionally NOT ignored: their
-  # constructors and lifecycle helpers are exercised by unit tests)
+  # kernel-only collector glue — load/attach/readLoop paths require a real
+  # eBPF-capable kernel and cannot run on CI. The kernel-independent decoding
+  # logic has been split out into *_parse.go files (network_parse.go,
+  # tlsfingerprint_parse.go), which are NOT ignored and are unit-tested.
   - "internal/collector/bpfmonitor.go"
   - "internal/collector/fileaccess.go"
   - "internal/collector/privesc.go"
   - "internal/collector/iouring.go"
+  - "internal/collector/network.go"
+  - "internal/collector/tlsfingerprint.go"
   - "internal/bpf/features.go"

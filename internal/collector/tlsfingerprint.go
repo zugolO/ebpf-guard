@@ -13,7 +13,6 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
-	"github.com/zugolO/ebpf-guard/internal/ja3"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -213,22 +212,11 @@ func (c *TLSFingerprintCollector) readLoop(ctx context.Context, out chan<- types
 			continue
 		}
 
-		rawEvt, err := bpf.ParseTlsClientHelloEvent(record.RawSample)
+		event, err := decodeTLSClientHello(record.RawSample)
 		if err != nil {
 			c.logger.Error("failed to parse tlsfingerprint event", "error", err)
 			exporter.RecordDropped("tlsfingerprint", "parse_error")
 			continue
-		}
-
-		event := rawEvt.ToTypesEvent()
-
-		// Compute JA3 and JA4 from the captured ClientHello data.
-		chData := rawEvt.Data[:rawEvt.CapturedLen]
-		if ja3Hash, ja3Err := ja3.ComputeJA3(chData); ja3Err == nil {
-			event.TLS.JA3 = ja3Hash
-		}
-		if ja4Hash, ja4Err := ja3.ComputeJA4(chData); ja4Err == nil {
-			event.TLS.JA4 = ja4Hash
 		}
 
 		if c.logger.Enabled(ctx, slog.LevelDebug) {

@@ -6,8 +6,7 @@ binaries that implement a small, stable ABI; the host (wazero) isolates each
 invocation in its own linear-memory instance so a buggy or malicious plugin
 cannot affect the agent process.
 
-This is a meaningful differentiator: Falco plugins are native C/Go (no
-sandbox), Tetragon and Tracee have no comparable extension point.
+Plugins run in full isolation: a buggy or malicious plugin cannot crash the agent.
 
 ---
 

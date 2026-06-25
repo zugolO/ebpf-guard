@@ -4,7 +4,7 @@ This document describes the eBPF LSM (Linux Security Module) enforcement feature
 
 ## Overview
 
-Traditional kprobe-based enforcement (used by Falco, Tetragon) can only react to events after they happen. LSM BPF hooks allow ebpf-guard to:
+Traditional kprobe-based enforcement can only react to events after they happen. LSM BPF hooks allow ebpf-guard to:
 
 1. **Block file access** before the file is opened (`lsm/bpf_file_open`)
 2. **Block network connections** before they are established (`lsm/bpf_socket_connect`)

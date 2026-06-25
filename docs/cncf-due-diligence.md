@@ -58,9 +58,9 @@ ebpf-guard contributes to the observability ecosystem:
 
 ### 3. Vendor Neutrality
 
-Unlike competing solutions tied to specific vendors:
-- No Cilium dependency (unlike Tetragon)
-- No kernel module (unlike Falco's kernel module option)
+ebpf-guard is vendor-neutral:
+- No CNI dependency — works standalone
+- No kernel module required
 - Works with any Kubernetes distribution
 - Works with any CNI
 
@@ -72,55 +72,6 @@ Unlike competing solutions tied to specific vendors:
 - SPDX/CycloneDX SBOMs
 
 ---
-
-## Comparison with Existing Projects
-
-For a detailed decision tree and feature matrix comparing ebpf-guard against
-Falco, Tetragon, and KubeArmor, see [docs/choosing.md](choosing.md).
-
-### Falco
-
-| Aspect | Falco | ebpf-guard |
-|--------|-------|------------|
-| Kernel access | Kernel module or eBPF | eBPF only |
-| Runtime | Userspace daemon in C++ | Go |
-| Rules | YAML with Lua conditions | YAML with Go conditions |
-| Overhead | Higher (kernel module) | Lower (eBPF only) |
-| Dependencies | Kernel headers | CO-RE (no headers) |
-| Kubernetes | Via sidecar | Native integration |
-
-**Key differentiator**: ebpf-guard is simpler to deploy (no kernel headers, no module compilation) and lighter at runtime.
-
-### Tetragon
-
-| Aspect | Tetragon | ebpf-guard |
-|--------|----------|------------|
-| CNI dependency | Cilium required | None |
-| Focus | Network security | Process behavior |
-| Runtime | Cilium ecosystem | Standalone |
-| Overhead | Low (Cilium datapath) | Low (dedicated eBPF) |
-
-**Key differentiator**: ebpf-guard works without Cilium, making it suitable for environments using other CNIs (Calico, Flannel, etc.).
-
-### KubeArmor
-
-| Aspect | KubeArmor | ebpf-guard |
-|--------|-----------|------------|
-| Approach | Policy-based enforcement | Behavioral anomaly detection |
-| Use case | Compliance, hardening | Threat detection |
-| Learning | Static policies | Dynamic baseline learning |
-
-**Key differentiator**: ebpf-guard focuses on detecting unknown threats through behavioral analysis, while KubeArmor enforces known-good policies.
-
-### Tracee
-
-| Aspect | Tracee | ebpf-guard |
-|--------|--------|------------|
-| Focus | Forensics, event streaming | Real-time alerting |
-| Output | Events to various sinks | Alerts + metrics |
-| Profiling | Signature-based | Behavioral baseline |
-
-**Key differentiator**: ebpf-guard includes built-in behavioral profiling and anomaly detection, not just event collection.
 
 ---
 

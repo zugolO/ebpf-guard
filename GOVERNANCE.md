@@ -182,5 +182,4 @@ Currently, all discussion happens asynchronously via GitHub. We may establish re
 
 This governance model is inspired by:
 - [CNCF Project Governance](https://github.com/cncf/project-template/blob/main/GOVERNANCE-maintainer.md)
-- [Falco Governance](https://github.com/falcosecurity/falco/blob/master/GOVERNANCE.md)
 - [Kubernetes Governance](https://github.com/kubernetes/community/blob/master/governance.md)

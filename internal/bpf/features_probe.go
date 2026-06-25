@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"time"
 )
 
 // FeatureProber abstracts OS and network operations used during kernel feature
@@ -35,7 +36,8 @@ func (realFeatureProber) ReadFile(path string) ([]byte, error) {
 }
 
 func (realFeatureProber) HTTPGet(url string) ([]byte, error) {
-	resp, err := http.Get(url) //nolint:noctx
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}

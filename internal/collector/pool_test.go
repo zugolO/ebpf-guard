@@ -16,14 +16,15 @@ func TestEventPool_GetReturnsNonNil(t *testing.T) {
 }
 
 func TestEventPool_PutAndGet_ReuseObject(t *testing.T) {
-	// Get an event, mark it, put it back, then retrieve it again.
-	// sync.Pool may not always return the exact same object (e.g. under GC
-	// pressure), but on a single goroutine without GC interference this
-	// reliably exercises the put→get path.
+	// Get an event, mark it, reset it, put it back, then retrieve it again.
 	evt := eventPool.Get().(*types.Event)
 	require.NotNil(t, evt)
 
 	evt.PID = 12345
+	evt.Reset()
+	// Reset must clear all fields.
+	assert.Equal(t, uint32(0), evt.PID, "Reset() must clear PID")
+
 	eventPool.Put(evt)
 
 	evt2 := eventPool.Get().(*types.Event)

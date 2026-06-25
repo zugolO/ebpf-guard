@@ -204,5 +204,3 @@ These figures are from the reproducible benchmark harness (`make bench`):
 Tested on a 4-core VM (c5.xlarge, 4 GB RAM, kernel 6.1).  Your results will
 vary with event mix, rule count, and WASM plugin load.
 
-For a reproducible benchmark comparing ebpf-guard overhead against Falco and
-Tetragon, see `docs/benchmark-competitor-analysis.md`.

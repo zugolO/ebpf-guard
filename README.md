@@ -17,12 +17,11 @@ ebpf-guard intercepts kernel events in real time using eBPF programs, builds beh
 
 | Problem | Solution |
 |---|---|
-| You need runtime threat detection but Falco is too complex to operate | Single binary, one YAML config, runs as a DaemonSet |
-| Tetragon requires the full Cilium stack | ebpf-guard has zero CNI dependency |
+| You need runtime threat detection with minimal operational overhead | Single binary, one YAML config, runs as a DaemonSet |
+| You want zero CNI dependency | ebpf-guard is a standalone agent with no networking stack requirements |
 | You already have Prometheus + Alertmanager | Native integration: Prometheus metrics + Alertmanager webhook |
 | Your team needs CIS Kubernetes compliance rules out of the box | `rules/cis-k8s.yaml`, `rules/owasp-web.yaml`, `rules/container-escape.yaml` ship with the agent |
 | You need to prove an alert was not tampered with | SHA-256 fingerprint on every alert payload |
-| Your SIEM expects Falco JSON | `compat.falco_output: true` — transparent drop-in replacement |
 | You want to understand what an alert means | `ebpf-guard explain <fingerprint>` — MITRE ATT&CK mapped explanations |
 | You can't see inside HTTPS traffic | TLS uprobe inspection (opt-in) — plaintext captured before encryption |
 
@@ -41,7 +40,7 @@ ebpf-guard intercepts kernel events in real time using eBPF programs, builds beh
 - **Cryptominer detection** — outbound mining pool port/IP matching in BPF map; xmrig/minerd process name detection; DNS TXT query detection.
 - **Alert fingerprinting** — SHA-256 fingerprint per alert for tamper detection and deduplication.
 - **Alert explanation** — `ebpf-guard explain <fingerprint>` returns human-readable summary, mitigations, and MITRE ATT&CK mapping.
-- **Falco compatibility** — import Falco rules (`ebpf-guard rules import --from falco`), emit Falco JSON output, expose Falco/Tetragon metric aliases.
+- **Falco rule import** — convert Falco rules to ebpf-guard format (`ebpf-guard rules import --from falco`); emit Falco-compatible JSON output and metric aliases.
 - **Kubernetes enrichment** — every alert is annotated with pod name and namespace from the K8s API.
 - **mTLS to Alertmanager** — optional client certificate + CA bundle for secure alert delivery.
 - **Notification fanout** — Slack, Microsoft Teams, generic webhook (PagerDuty/Discord/SIEM) with parallel delivery.
@@ -110,20 +109,6 @@ Full verification instructions and SBOM signing: [docs/security.md](docs/securit
 | `BenchmarkShardedBufferContention` | ~15 µs/op | 128-shard buffer under parallel writes |
 | Sustained throughput (`TestPerformanceRegression`) | **297 024 ev/s** | 4 producers, nil rules, 60 s run |
 | Peak heap memory | **44 MB** | At 297 024 ev/s sustained load |
-
-### Comparison with peer tools
-
-| Metric | ebpf-guard | Falco (eBPF) | Tetragon | Tracee |
-|---|---|---|---|---|
-| Sustained throughput¹ | >250 k ev/s | ~50 k ev/s | ~100 k ev/s | ~60 k ev/s |
-| Heap memory (typical) | <50 MB | ~400 MB | ~600 MB | ~250 MB |
-| Kernel module required | No | No | No | No |
-| CNI/stack dependency | None | None | Cilium (required) | None |
-| In-kernel enforcement | LSM + nftables | nftables only | nftables + BPF | nftables only |
-| MITRE ATT&CK mapping | Yes (built-in) | Partial (plugins) | Yes | Partial |
-| Falco-compatible output | Yes (native) | — | No | No |
-
-¹ Throughput figures for peer tools are approximate and sourced from publicly available community benchmarks on comparable hardware. ebpf-guard numbers are from `TestPerformanceRegression` on Intel Xeon 2.80 GHz / 4 vCPU.
 
 ---
 
@@ -414,7 +399,7 @@ Conditions can be nested with `AND`/`OR` groups (`condition_group.sub_groups`).
 ebpf-guard rules import --from falco /etc/falco/rules.d/*.yaml --output rules/imported.yaml
 ```
 
-Converts Falco condition syntax (`evt.type`, `fd.name`, `proc.name`) to ebpf-guard YAML. Rules with unsupported syntax are emitted with `status: unsupported` and a hint. See [docs/migration.md](docs/migration.md).
+Converts Falco condition syntax (`evt.type`, `fd.name`, `proc.name`) to ebpf-guard YAML. Rules with unsupported syntax are emitted with `status: unsupported` and a hint.
 
 ### Rego/OPA rules
 
@@ -517,20 +502,6 @@ notifications:
 See [docs/notifications.md](docs/notifications.md).
 
 ---
-
-## Falco Migration
-
-Switch from Falco to ebpf-guard in under 10 minutes:
-
-```bash
-# 1. Import existing Falco rules
-ebpf-guard rules import --from falco /etc/falco/rules.d/*.yaml --output rules/imported.yaml
-
-# 2. Deploy with Falco compatibility mode
-helm install ebpf-guard deploy/helm/ebpf-guard --set migration.from=falco
-```
-
-This automatically enables Falco JSON output, Falco metric aliases, and matching DaemonSet tolerations. See [docs/migration.md](docs/migration.md).
 
 ---
 

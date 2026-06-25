@@ -496,28 +496,10 @@ require.NoError(t, os.Rename(tmp, configPath))
 
 ---
 
-### T-2 · Расхождение цифр в `docs/benchmark-competitor-analysis.md`
-
-**Файл:** `docs/benchmark-competitor-analysis.md`, секция 2.1
-
-**Проблема.**
-Документ утверждает:
-> `RuleEval_Callback (EvaluateInto)`: ebpf-guard **50.0 ns, 0B**
-
-Реальный прогон `go test -bench=BenchmarkRuleEval_EbpfGuard_Callback ./bench/`:
-```
-BenchmarkRuleEval_EbpfGuard_Callback-4   10649504   110.2 ns/op   8 B/op   1 allocs/op
-```
-
-Разрыв с Tracee (13 ns) в документе заявлен 3.8×, реальный — 8.5×. Документ
-написан на более быстром железе или более старой версии кода, что создаёт
-неверные ожидания.
+### T-2 · Benchmark regression test в CI
 
 **Задача.**
-1. Прогнать `make bench` на эталонной машине (или в CI).
-2. Обновить таблицу реальными цифрами.
-3. Обновить комментарий про gap vs Tracee.
-4. Рассмотреть добавление benchmark-regression теста в CI (сравнение с baseline ±10%).
+Рассмотреть добавление benchmark-regression теста в CI (сравнение с baseline ±10%) для `BenchmarkRuleEval_EbpfGuard_Callback` и других ключевых бенчмарков.
 
 ---
 
@@ -544,12 +526,9 @@ BenchmarkRuleEval_EbpfGuard_Callback-4   10649504   110.2 ns/op   8 B/op   1 all
 ### F-2 · Импорт правил из форматов Sigma и Elastic ECS
 
 **Контекст.**
-Falco-мигратор (`internal/migration/`) закрывает совместимость с одной экосистемой.
 Sigma — промышленный стандарт переносимых правил детекции с 3000+ community-правил
 под Linux, Windows и облачные среды. Elastic ECS покрывает ещё один крупный корпус.
-
-Разрыв в количестве правил (50 встроенных против 3000+ у Falco) — основная слабость
-ebpf-guard в позиционировании.
+Поддержка этих форматов расширит экосистему детекций ebpf-guard.
 
 **Задача.**
 1. **Sigma-конвертер** (`cmd/sigma2ebpfguard`):
@@ -565,7 +544,6 @@ ebpf-guard в позиционировании.
 ### F-3 · Коннекторы облачных аудит-логов (AWS CloudTrail, GCP, Azure)
 
 **Контекст.**
-Falco поддерживает CloudTrail, GCP Audit Logs и Azure Monitor через плагины.
 ebpf-guard видит только kernel-level события. Атаки на control plane (IAM,
 RBAC, service account, node-pool escapes) остаются невидимыми.
 
@@ -587,8 +565,7 @@ Cloud-события проходят через тот же YAML + OPA пайп
 
 **Контекст.**
 При высокой нагрузке все правила оцениваются на каждом событии с полной частотой.
-У Falco есть priority-based sampling. Инфраструктура `ShouldSample` /
-`DeterministicSample` уже есть в `internal/correlator/`.
+Инфраструктура `ShouldSample` / `DeterministicSample` уже есть в `internal/correlator/`.
 
 **Задача.**
 Добавить поле `sample_rate` (float, 0.0–1.0, дефолт 1.0) в DSL правил:
@@ -623,28 +600,6 @@ novel-атаки без заранее написанного правила.
 
 ---
 
-### F-6 · Реальный end-to-end бенчмарк vs Falco / Tetragon на одном железе
-
-**Контекст.**
-Все performance-claims в `docs/benchmark-competitor-analysis.md` основаны на
-in-process алгоритмических микробенчмарках (`bench/vs_*_test.go`) — не на
-реальных side-by-side измерениях. Инфраструктура `bench/comparative/run.sh` +
-Vagrantfile готова, но результаты не опубликованы.
-
-Это единственное изменение, которое больше всего повысит доверие со стороны
-security-инженеров, оценивающих инструмент.
-
-**Задача.**
-1. Прогнать `bench/comparative/run.sh` на выделенном bare-metal или крупной VM
-   (≥8 vCPU, ≥16 GB RAM) с Falco 0.38.1, Tetragon 1.1.0, Tracee 0.21.0.
-2. Опубликовать raw CSV в `bench/comparative/results/`.
-3. Обновить `docs/benchmark-competitor-analysis.md` реальными цифрами:
-   - CPU overhead % при 1k/10k/100k событий/сек.
-   - RSS каждого агента под нагрузкой.
-   - Drop rate при пиковой нагрузке.
-   - Чёткое разграничение: какие числа algorithm-only, какие end-to-end.
-4. Добавить методологический раздел для воспроизводимости результатов.
-
 ---
 
 ## Сводная таблица
@@ -671,13 +626,12 @@ security-инженеров, оценивающих инструмент.
 | HD-4 | 🟣 Hardening | Security | XS (30 мин) | `internal/config/` |
 | HD-5 | 🟣 Hardening | Security | S (2 ч) | `api.go:731` |
 | T-1 | 🔵 Тест | Quality | XS (30 мин) | `config/config_test.go:217` |
-| T-2 | 🔵 Docs | Quality | S (2 ч) | `docs/benchmark-competitor-analysis.md` |
+| T-2 | 🔵 Тест | Quality | XS (30 мин) | `bench/` |
 | F-1 | 🟢 Feature | Correctness | M (1 д) | `internal/enforcer/kill.go` |
 | F-2 | 🟢 Feature | Ecosystem | L (1–2 нед) | `internal/migration/` |
 | F-3 | 🟢 Feature | Ecosystem | L (2–3 нед) | `internal/collector/` |
 | F-4 | 🟢 Feature | Performance | M (2–3 д) | `internal/correlator/` |
 | F-5 | 🟢 Feature | Detection | M (3–5 д) | `internal/profiler/` |
-| F-6 | 🟢 Benchmark | Credibility | M (2–3 д) | `bench/comparative/` |
 
-**Итого:** 5 HIGH · 4 MEDIUM · 5 LOW · 5 Hardening · 2 Тест/Docs · 6 Feature  
+**Итого:** 5 HIGH · 4 MEDIUM · 5 LOW · 5 Hardening · 2 Тест/Docs · 5 Feature  
 **Быстрые победы (< 1 ч каждая):** H-3, L-2, L-3, L-4, T-1, HD-4 — закрывают реальные уязвимости за один рабочий день.

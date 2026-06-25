@@ -27,7 +27,7 @@ type ringbufOpener interface {
 
 // linkAttacher abstracts attaching eBPF programs to kernel tracepoints.
 type linkAttacher interface {
-	Tracepoint(group, name string, prog *ebpf.Program, opts *link.Options) (link.Link, error)
+	Tracepoint(group, name string, prog *ebpf.Program, opts *link.TracepointOptions) (link.Link, error)
 }
 
 // --- production implementations ---
@@ -49,6 +49,6 @@ func (defaultRingbufOpener) NewReader(rb *ebpf.Map) (ringbufReader, error) {
 // defaultLinkAttacher calls the real link.Tracepoint.
 type defaultLinkAttacher struct{}
 
-func (defaultLinkAttacher) Tracepoint(group, name string, prog *ebpf.Program, opts *link.Options) (link.Link, error) {
+func (defaultLinkAttacher) Tracepoint(group, name string, prog *ebpf.Program, opts *link.TracepointOptions) (link.Link, error) {
 	return link.Tracepoint(group, name, prog, opts)
 }

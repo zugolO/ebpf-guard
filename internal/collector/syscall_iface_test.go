@@ -34,7 +34,7 @@ type fakeLinkAttacher struct {
 	err error
 }
 
-func (a *fakeLinkAttacher) Tracepoint(_ string, _ string, _ *ebpf.Program, _ *link.Options) (link.Link, error) {
+func (a *fakeLinkAttacher) Tracepoint(_ string, _ string, _ *ebpf.Program, _ *link.TracepointOptions) (link.Link, error) {
 	if a.err != nil {
 		return nil, a.err
 	}

@@ -155,7 +155,9 @@ func parseClientHelloHandshake(data []byte, recVersion uint16) (*ClientHelloFiel
 
 		switch extType {
 		case 0: // server_name (SNI)
-			if len(extData) >= 5 && binary.BigEndian.Uint16(extData[:2]) == 0 {
+			// extData layout: server_name_list length (2) | name_type (1) |
+			// host_name length (2) | host_name. name_type 0 = host_name.
+			if len(extData) >= 5 && extData[2] == 0 {
 				nameLen := int(binary.BigEndian.Uint16(extData[3:5]))
 				if 5+nameLen <= len(extData) {
 					h.SNI = string(extData[5 : 5+nameLen])

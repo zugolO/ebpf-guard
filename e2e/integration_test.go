@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"sync/atomic"
@@ -146,11 +147,39 @@ func (s *IntegrationTestSuite) TestReadyEndpoint() {
 	require.NoError(s.T(), err)
 
 	url := fmt.Sprintf("http://%s:%s/health/ready", ip, port.Port())
-	resp, err := http.Get(url)
-	require.NoError(s.T(), err)
-	defer resp.Body.Close()
 
-	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+	// Readiness is eventually-consistent: collectors attach asynchronously after
+	// the HTTP server binds, so poll for up to 30s rather than asserting on a
+	// single request. On the final failure, dump the agent's container logs and
+	// the readiness response body so CI shows *why* the agent never became ready
+	// (e.g. which collector failed to attach on the runner's kernel).
+	deadline := time.Now().Add(30 * time.Second)
+	var (
+		lastStatus int
+		lastBody   string
+	)
+	for {
+		resp, err := http.Get(url)
+		require.NoError(s.T(), err)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		lastStatus, lastBody = resp.StatusCode, string(body)
+		if lastStatus == http.StatusOK || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if lastStatus != http.StatusOK {
+		if logs, lerr := s.container.Logs(s.ctx); lerr == nil {
+			if logBytes, rerr := io.ReadAll(logs); rerr == nil {
+				s.T().Logf("agent container logs:\n%s", string(logBytes))
+			}
+			logs.Close()
+		}
+		s.T().Logf("/health/ready body: %s", lastBody)
+	}
+	assert.Equal(s.T(), http.StatusOK, lastStatus)
 }
 
 // TestLiveEndpoint verifies the liveness probe.
@@ -204,10 +233,10 @@ func TestIntegration(t *testing.T) {
 // true event rate (MEDIUM-7, step 1 and 4).
 func TestBPFSampling_CorrectedSampleCount(t *testing.T) {
 	const (
-		samplingRate   = 0.25 // BPF drops 3 out of every 4 events
-		correction     = 1.0 / samplingRate // 4.0 — passed to SetSamplingCorrections
-		minSamples     = 100
-		eventsToSend   = 30 // at 4× correction each counts as 4 → 120 total, exceeds gate
+		samplingRate = 0.25               // BPF drops 3 out of every 4 events
+		correction   = 1.0 / samplingRate // 4.0 — passed to SetSamplingCorrections
+		minSamples   = 100
+		eventsToSend = 30 // at 4× correction each counts as 4 → 120 total, exceeds gate
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -238,8 +267,8 @@ func TestBPFSampling_CorrectedSampleCount(t *testing.T) {
 	// as `correction` samples so totalVirtualSamples = eventsToSend * correction.
 	for i := 0; i < eventsToSend; i++ {
 		engine.Ingest(ctx, types.Event{
-			Type: types.EventSyscall,
-			PID:  1,
+			Type:    types.EventSyscall,
+			PID:     1,
 			Syscall: &types.SyscallEvent{Nr: int64(i % 5)},
 		})
 	}
@@ -321,8 +350,8 @@ func TestBPFSampling_CardinalityLimiting(t *testing.T) {
 			defer func() { doneCh <- struct{}{} }()
 			for pid := range pidCh {
 				ev := types.Event{
-					Type: types.EventSyscall,
-					PID:  pid,
+					Type:    types.EventSyscall,
+					PID:     pid,
 					Syscall: &types.SyscallEvent{Nr: 59},
 				}
 				alerts := engine.Ingest(ctx, ev)

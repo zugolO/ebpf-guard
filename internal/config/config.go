@@ -1525,6 +1525,15 @@ func NewZeroConfigManager() *Manager {
 
 	// Force K8s off in zero-config mode — there's no kubeconfig.
 	cfg.Kubernetes.Enabled = false
+	// Gate /health/ready on the core collectors only. Without an explicit
+	// required set, handleReady treats *every* registered collector as required,
+	// so an optional / kernel-gated collector that cannot attach on a given
+	// kernel (e.g. on a CI runner) flips readiness to 503 even though the agent
+	// is collecting fine. Declaring the core collectors keeps readiness
+	// deterministic: it reflects whether core telemetry is up, while optional
+	// collectors may be unavailable without blocking readiness. StartupPolicy
+	// stays "fail-open", so this only affects readiness — it never aborts startup.
+	cfg.Collectors.Required = []string{"syscall", "network", "fileaccess"}
 	// Enable auth with auto-generated tokens.
 	cfg.Auth.Enabled = true
 	// Allow a fixed admin bearer token to be injected via env so containerized

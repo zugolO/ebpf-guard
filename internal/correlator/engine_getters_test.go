@@ -22,11 +22,12 @@ func TestEngineGettersAndLifecycle(t *testing.T) {
 	assert.NotNil(t, ce.GetRateLimiter())
 	assert.NotNil(t, ce.IncidentTracker())
 
-	// With no anomaly detector configured, learning is considered complete.
-	if ce.GetAnomalyDetector() == nil {
-		assert.True(t, ce.IsLearningComplete())
-		assert.Equal(t, 1.0, ce.LearningProgress())
-	}
+	// Learning-state accessors are exercised regardless of whether an anomaly
+	// detector is configured (the default config enables one).
+	_ = ce.IsLearningComplete()
+	prog := ce.LearningProgress()
+	assert.GreaterOrEqual(t, prog, 0.0)
+	assert.LessOrEqual(t, prog, 1.0)
 
 	// Ingest a benign event so the engine counters advance.
 	var comm [16]byte

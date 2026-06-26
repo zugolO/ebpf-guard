@@ -76,3 +76,14 @@ func TestDecodeNetworkEvent_TruncatedBody(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "too small")
 }
+
+func TestDecodeNetworkEvent_NetCloseTruncated(t *testing.T) {
+	// Routes into the net_close branch but is too small for the close parser,
+	// covering that branch's error return.
+	raw := make([]byte, 10)
+	binary.LittleEndian.PutUint32(raw[0:], uint32(types.EventNetClose))
+
+	_, err := decodeNetworkEvent(raw)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too small")
+}

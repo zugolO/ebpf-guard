@@ -1,9 +1,12 @@
 package collector
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // TestSyscallCollector_NilObjsAccessors covers the objs==nil branch of every
@@ -35,4 +38,25 @@ func TestSyscallCollector_Builders(t *testing.T) {
 	assert.Same(t, c, c.WithBackpressureStrategy(StrategyDrop))
 	assert.Same(t, c, c.WithRingBufSize(8*1024*1024))
 	assert.Equal(t, 8*1024*1024, c.ringBufSize)
+}
+
+// TestSyscallCollector_ParseEvent covers parseEvent's error path (raw too short
+// for the syscall wire format) and its success path (a minimal valid sample is
+// decoded into the supplied event).
+func TestSyscallCollector_ParseEvent(t *testing.T) {
+	c := newTestSyscallCollector(t)
+
+	t.Run("too short returns error", func(t *testing.T) {
+		var evt types.Event
+		require.Error(t, c.parseEvent([]byte{1, 2, 3}, &evt))
+	})
+
+	t.Run("valid sample is decoded", func(t *testing.T) {
+		// 104 bytes is the minimum syscall sample size; a zeroed buffer with the
+		// event-type field set parses successfully.
+		raw := make([]byte, 104)
+		binary.LittleEndian.PutUint32(raw[0:], uint32(types.EventSyscall))
+		var evt types.Event
+		require.NoError(t, c.parseEvent(raw, &evt))
+	})
 }

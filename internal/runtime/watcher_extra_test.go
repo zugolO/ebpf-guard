@@ -87,9 +87,23 @@ func TestNewCRIClient(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "containerd", c.runtimeType)
 
-	// Empty path with no sockets present in this environment → error.
+	// An empty path triggers auto-detection of the well-known CRI sockets.
+	// Whether that succeeds depends on the host (CI runners ship a real
+	// containerd socket), so assert against what is actually present rather
+	// than assuming the sockets are absent.
 	_, err = newCRIClient("")
-	require.Error(t, err)
+	socketPresent := false
+	for _, p := range criSocketPaths {
+		if _, statErr := os.Stat(p); statErr == nil {
+			socketPresent = true
+			break
+		}
+	}
+	if socketPresent {
+		require.NoError(t, err)
+	} else {
+		require.Error(t, err)
+	}
 }
 
 func TestAutoDetect_SocketOverride(t *testing.T) {

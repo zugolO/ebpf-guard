@@ -113,12 +113,16 @@ type criClient struct {
 	stateDir    string
 }
 
+// criSocketPaths lists the well-known CRI socket locations probed during
+// auto-detection when no explicit socket path is configured.
+var criSocketPaths = []string{
+	"/run/containerd/containerd.sock",
+	"/run/crio/crio.sock",
+}
+
 func newCRIClient(socketPath string) (*criClient, error) {
 	if socketPath == "" {
-		for _, path := range []string{
-			"/run/containerd/containerd.sock",
-			"/run/crio/crio.sock",
-		} {
+		for _, path := range criSocketPaths {
 			if _, err := os.Stat(path); err == nil {
 				socketPath = path
 				break
@@ -126,7 +130,7 @@ func newCRIClient(socketPath string) (*criClient, error) {
 		}
 	}
 	if socketPath == "" {
-		return nil, fmt.Errorf("no CRI socket found (tried /run/containerd/containerd.sock, /run/crio/crio.sock)")
+		return nil, fmt.Errorf("no CRI socket found (tried %s)", strings.Join(criSocketPaths, ", "))
 	}
 
 	rt, stateDir := "containerd", "/run/containerd/io.containerd.runtime.v2.task"

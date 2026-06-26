@@ -18,6 +18,7 @@ func decodeNetworkEvent(raw []byte) (types.Event, error) {
 	// Read event type from the first 4 bytes (little-endian uint32).
 	evtType := uint32(raw[0]) | uint32(raw[1])<<8 | uint32(raw[2])<<16 | uint32(raw[3])<<24
 
+	//nolint:exhaustive // only net_close needs special handling; the default branch covers tcp_connect and every other event type.
 	switch types.EventType(evtType) {
 	case types.EventNetClose:
 		evt, err := bpf.ParseNetworkCloseEvent(raw)

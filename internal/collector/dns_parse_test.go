@@ -53,7 +53,9 @@ func buildDNSResponseWithA(name string, ip [4]byte) []byte {
 	q = appendBE16(q, 1) // QTYPE A
 	q = appendBE16(q, 1) // QCLASS IN
 
-	msg := append(hdr, q...)
+	msg := make([]byte, 0, len(hdr)+len(q))
+	msg = append(msg, hdr...)
+	msg = append(msg, q...)
 
 	// Answer: name is a compression pointer to offset 12 (the question QNAME).
 	var ans []byte

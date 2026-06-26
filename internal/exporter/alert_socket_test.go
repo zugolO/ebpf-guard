@@ -61,6 +61,16 @@ func TestUnixSocketNotifier_StreamsAlert(t *testing.T) {
 	assert.False(t, n.Enabled())
 }
 
+func TestUnixSocketNotifier_EnabledWithoutPath(t *testing.T) {
+	// Enabled is requested but no path is configured: the notifier must stay
+	// disabled rather than attempt to bind an empty socket path.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	n := NewUnixSocketNotifier(UnixSocketConfig{Enabled: true, Path: ""}, logger)
+	assert.False(t, n.Enabled())
+	require.NoError(t, n.Send(context.Background(), types.Alert{ID: "x"}))
+	require.NoError(t, n.Close())
+}
+
 func TestUnixSocketNotifier_ListenError(t *testing.T) {
 	// A path inside a non-existent directory cannot be bound; the notifier
 	// must downgrade to disabled rather than panic.

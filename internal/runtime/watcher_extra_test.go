@@ -106,6 +106,21 @@ func TestNewCRIClient(t *testing.T) {
 	}
 }
 
+func TestNewCRIClient_NoSocket(t *testing.T) {
+	// Override the probe list with paths that cannot exist so auto-detection
+	// deterministically fails regardless of what the host runtime provides.
+	orig := criSocketPaths
+	criSocketPaths = []string{
+		filepath.Join(t.TempDir(), "absent-containerd.sock"),
+		filepath.Join(t.TempDir(), "absent-crio.sock"),
+	}
+	t.Cleanup(func() { criSocketPaths = orig })
+
+	_, err := newCRIClient("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no CRI socket found")
+}
+
 func TestAutoDetect_SocketOverride(t *testing.T) {
 	// A crio socket override yields a CRI client of the crio type.
 	c, name, err := autoDetect("/run/crio/crio.sock")

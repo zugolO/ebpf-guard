@@ -20,10 +20,14 @@ func TestEventPool_PutAndGet_ReuseObject(t *testing.T) {
 	evt := eventPool.Get().(*types.Event)
 	require.NotNil(t, evt)
 
-	evt.PID = 12345
+	// Reset nils pointer fields and clears ProcArgs so a pooled Event doesn't
+	// retain inner structs. Scalar fields (PID, etc.) are intentionally NOT
+	// cleared — they are overwritten on the next fill (see types.Event.Reset).
+	evt.DNS = &types.DNSEvent{}
+	evt.ProcArgs = "marked"
 	evt.Reset()
-	// Reset must clear all fields.
-	assert.Equal(t, uint32(0), evt.PID, "Reset() must clear PID")
+	assert.Nil(t, evt.DNS, "Reset() must nil pointer fields")
+	assert.Empty(t, evt.ProcArgs, "Reset() must clear ProcArgs")
 
 	eventPool.Put(evt)
 

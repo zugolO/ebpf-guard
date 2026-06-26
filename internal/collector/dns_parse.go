@@ -252,12 +252,9 @@ func decodeDNSName(payload []byte, pos int) (string, int, bool) {
 // intToIPv4 converts a uint32 IP in network byte order (big-endian, as stored by BPF)
 // to dotted-decimal notation.
 func intToIPv4(ip uint32) string {
-	return net.IPv4(
-		byte(ip>>24),
-		byte(ip>>16),
-		byte(ip>>8),
-		byte(ip),
-	).String()
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], ip)
+	return net.IP(b[:]).String()
 }
 
 // qtypeToString converts DNS QTYPE to string.

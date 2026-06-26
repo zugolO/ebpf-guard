@@ -153,12 +153,6 @@ jobs:
     - name: Generate eBPF bindings
       uses: ./.github/actions/setup-ebpf
 
-    # TEMP DIAGNOSTIC (revert before merge): run only the collector tests so the
-    # failing test's name + Error Trace land at the end of the log, where the
-    # logs API tail can reach them. Remove this step once the failure is fixed.
-    - name: TEMP DIAGNOSTIC collector tests only
-      run: go test -v -race -short ./internal/collector/...
-
     - name: Run tests
       # -short skips long-running e2e/performance tests that have their own
       # dedicated job and require hardware not available on shared CI runners.

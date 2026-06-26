@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
@@ -22,7 +23,7 @@ type UnixSocketConfig struct {
 // Multiple clients may connect simultaneously; alerts are broadcast to all.
 type UnixSocketNotifier struct {
 	path     string
-	enabled  bool
+	enabled  atomic.Bool
 	listener net.Listener
 	mu       sync.RWMutex
 	conns    map[net.Conn]struct{}
@@ -32,12 +33,12 @@ type UnixSocketNotifier struct {
 // NewUnixSocketNotifier creates and starts a Unix domain socket alert streamer.
 func NewUnixSocketNotifier(cfg UnixSocketConfig, logger *slog.Logger) *UnixSocketNotifier {
 	n := &UnixSocketNotifier{
-		path:    cfg.Path,
-		enabled: cfg.Enabled && cfg.Path != "",
-		conns:   make(map[net.Conn]struct{}),
-		logger:  logger,
+		path:   cfg.Path,
+		conns:  make(map[net.Conn]struct{}),
+		logger: logger,
 	}
-	if !n.enabled {
+	n.enabled.Store(cfg.Enabled && cfg.Path != "")
+	if !n.enabled.Load() {
 		return n
 	}
 
@@ -49,7 +50,7 @@ func NewUnixSocketNotifier(cfg UnixSocketConfig, logger *slog.Logger) *UnixSocke
 		logger.Error("alert_socket: failed to listen on socket",
 			slog.String("path", cfg.Path),
 			slog.Any("error", err))
-		n.enabled = false
+		n.enabled.Store(false)
 		return n
 	}
 	os.Chmod(cfg.Path, 0660)
@@ -62,12 +63,12 @@ func NewUnixSocketNotifier(cfg UnixSocketConfig, logger *slog.Logger) *UnixSocke
 }
 
 func (u *UnixSocketNotifier) Name() string  { return "unix_socket" }
-func (u *UnixSocketNotifier) Enabled() bool { return u.enabled }
+func (u *UnixSocketNotifier) Enabled() bool { return u.enabled.Load() }
 
 // Send marshals the alert to JSON and writes it as a newline-terminated line
 // to every currently-connected client.
 func (u *UnixSocketNotifier) Send(_ context.Context, alert types.Alert) error {
-	if !u.enabled {
+	if !u.enabled.Load() {
 		return nil
 	}
 	data, err := json.Marshal(alert)
@@ -93,7 +94,7 @@ func (u *UnixSocketNotifier) Send(_ context.Context, alert types.Alert) error {
 
 // Close stops accepting new connections and closes all active ones.
 func (u *UnixSocketNotifier) Close() error {
-	u.enabled = false
+	u.enabled.Store(false)
 	if u.listener != nil {
 		u.listener.Close()
 	}
@@ -109,7 +110,7 @@ func (u *UnixSocketNotifier) acceptLoop() {
 	for {
 		conn, err := u.listener.Accept()
 		if err != nil {
-			if u.enabled {
+			if u.enabled.Load() {
 				u.logger.Warn("alert_socket: accept error", slog.Any("error", err))
 			}
 			return

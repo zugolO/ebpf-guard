@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	bpfpkg "github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -27,6 +28,30 @@ func TestSyscallCollector_NilObjsAccessors(t *testing.T) {
 
 	assert.NoError(t, c.LoadError(), "no load attempted yet")
 	assert.Equal(t, uint64(0), c.LostEvents(), "no events lost before start")
+}
+
+// TestSyscallCollector_LoadedObjsAccessors covers the objs!=nil branch of the
+// accessors. A zero-value SyscallObjects is non-nil but carries nil program/map
+// handles, so each accessor takes its loaded path without needing a real kernel.
+func TestSyscallCollector_LoadedObjsAccessors(t *testing.T) {
+	c := newTestSyscallCollector(t)
+	c.objs = &bpfpkg.SyscallObjects{}
+
+	progs := c.GetPrograms()
+	require.NotNil(t, progs, "GetPrograms must return the program map once loaded")
+	assert.Contains(t, progs, "trace_sys_enter")
+
+	// Maps come straight off the (empty) objs, so they are nil but the loaded
+	// branch executes without panicking.
+	assert.Nil(t, c.MapFullCountersMap())
+	assert.Nil(t, c.SamplingConfigMap())
+	comm, syscall, cfg := c.KernelFilterMaps()
+	assert.Nil(t, comm)
+	assert.Nil(t, syscall)
+	assert.Nil(t, cfg)
+
+	// With objs set and no load error, the collector reports healthy.
+	assert.True(t, c.IsHealthy())
 }
 
 // TestSyscallCollector_Builders verifies the fluent configuration setters return

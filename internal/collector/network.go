@@ -276,30 +276,15 @@ func (c *NetworkCollector) SamplingConfigMap() *ebpf.Map {
 	return c.objs.SamplingConfig
 }
 
-// parseEvent converts raw bytes from the ring buffer into event, routing to the
-// appropriate parser based on the event type field. event must be a pooled
-// *types.Event from eventPool; caller handles Reset() and Put() after use.
+// parseEvent converts raw bytes from the ring buffer into event, delegating to
+// the kernel-independent decodeNetworkEvent for routing and decoding. event
+// must be a pooled *types.Event from eventPool; caller handles Reset() and
+// Put() after use.
 func (c *NetworkCollector) parseEvent(raw []byte, event *types.Event) error {
-	if len(raw) < 4 {
-		return fmt.Errorf("raw sample too short: %d bytes", len(raw))
+	evt, err := decodeNetworkEvent(raw)
+	if err != nil {
+		return err
 	}
-	// Read event type from the first 4 bytes (little-endian uint32).
-	evtType := uint32(raw[0]) | uint32(raw[1])<<8 | uint32(raw[2])<<16 | uint32(raw[3])<<24
-
-	switch types.EventType(evtType) {
-	case types.EventNetClose:
-		evt, err := bpf.ParseNetworkCloseEvent(raw)
-		if err != nil {
-			return err
-		}
-		*event = evt.ToTypesEvent()
-	default:
-		// EventTCPConnect and any unknown network events.
-		evt, err := bpf.ParseNetworkEvent(raw)
-		if err != nil {
-			return err
-		}
-		*event = evt.ToTypesEvent()
-	}
+	*event = evt
 	return nil
 }

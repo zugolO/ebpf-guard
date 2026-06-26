@@ -47,9 +47,11 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
-// Build-time variables set via ldflags.
+// Build-time variables set via ldflags. Version is the fallback reported by
+// `go run`/`go build` and untagged builds; release builds override it with the
+// git tag (see Makefile and .goreleaser.yml).
 var (
-	Version   = "dev"
+	Version   = "0.10.0-alpha"
 	Commit    = "unknown"
 	BuildTime = ""
 )

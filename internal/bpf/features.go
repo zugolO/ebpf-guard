@@ -3,8 +3,6 @@ package bpf
 
 import (
 	"fmt"
-	"os"
-	"runtime"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/features"
@@ -28,43 +26,18 @@ type KernelFeatures struct {
 // DetectFeatures probes the kernel for eBPF feature support.
 // Returns an error if the kernel doesn't meet minimum requirements.
 func DetectFeatures() (*KernelFeatures, error) {
-	f := &KernelFeatures{}
-
-	// Detect BTF support: prefer cilium/ebpf probe, fall back to vmlinux file presence.
-	if err := features.HaveMapType(ebpf.Hash); err == nil {
-		// If BPF maps work at all, BTF may still be absent — check vmlinux directly.
-		if _, statErr := os.Stat("/sys/kernel/btf/vmlinux"); statErr == nil {
-			f.HasBTF = true
-		}
-	}
-	// Also accept BTF when vmlinux is present even if the map probe fails (e.g. inside
-	// some container runtimes that restrict bpf() syscall probing).
-	if !f.HasBTF {
-		if _, statErr := os.Stat("/sys/kernel/btf/vmlinux"); statErr == nil {
-			f.HasBTF = true
-		}
-	}
-
-	// Detect ring buffer support (kernel 5.8+)
-	if err := features.HaveMapType(ebpf.RingBuf); err == nil {
-		f.HasRingbuf = true
-	}
-
-	// Detect kprobe support
-	if err := features.HaveProgramType(ebpf.Kprobe); err == nil {
-		f.HasKprobe = true
-	}
-
-	// Detect tracepoint support
-	if err := features.HaveProgramType(ebpf.TracePoint); err == nil {
-		f.HasTracepoint = true
-	}
-
-	// Get kernel version from uname
-	f.KernelVersion = getKernelVersion()
-
-	return f, nil
+	return detectFeaturesWithProber(realFeatureProber{})
 }
+
+// haveMapTypeRingBuf delegates to the cilium/ebpf features probe.
+// Indirected through a package-level var so tests on non-BPF hosts can stub it.
+var haveMapTypeRingBuf = func() error { return features.HaveMapType(ebpf.RingBuf) }
+
+// haveProgramTypeKprobe delegates to the cilium/ebpf features probe.
+var haveProgramTypeKprobe = func() error { return features.HaveProgramType(ebpf.Kprobe) }
+
+// haveProgramTypeTracepoint delegates to the cilium/ebpf features probe.
+var haveProgramTypeTracepoint = func() error { return features.HaveProgramType(ebpf.TracePoint) }
 
 // CheckMinimumRequirements returns an error if the kernel doesn't meet
 // the minimum requirements for ebpf-guard.
@@ -95,17 +68,6 @@ func (f *KernelFeatures) String() string {
 		"Kernel: %s, BTF: %v, Ringbuf: %v, Kprobe: %v, Tracepoint: %v",
 		f.KernelVersion, f.HasBTF, f.HasRingbuf, f.HasKprobe, f.HasTracepoint,
 	)
-}
-
-// getKernelVersion returns the kernel version string.
-func getKernelVersion() string {
-	// Try to read from /proc/version_signature first (Ubuntu)
-	if data, err := os.ReadFile("/proc/version_signature"); err == nil {
-		return string(data)
-	}
-
-	// Fall back to uname via Go runtime
-	return runtime.GOOS + "/" + runtime.GOARCH
 }
 
 // IsCOReSupported checks if Compile Once - Run Everywhere (CO-RE) is supported.

@@ -3,7 +3,6 @@ package collector
 import (
 	"encoding/binary"
 	"net"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,65 +54,6 @@ func TestIntToIPv4ByteOrder(t *testing.T) {
 	}
 }
 
-func TestQtypeToString(t *testing.T) {
-	tests := []struct {
-		qtype    uint16
-		expected string
-	}{
-		{1, "A"},
-		{2, "NS"},
-		{5, "CNAME"},
-		{6, "SOA"},
-		{12, "PTR"},
-		{15, "MX"},
-		{16, "TXT"},
-		{28, "AAAA"},
-		{33, "SRV"},
-		{255, "ANY"},
-		{999, "TYPE999"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			result := qtypeToString(tt.qtype)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestRcodeToString(t *testing.T) {
-	tests := []struct {
-		rcode    uint16
-		expected string
-	}{
-		{0, "NOERROR"},
-		{1, "FORMERR"},
-		{2, "SERVFAIL"},
-		{3, "NXDOMAIN"},
-		{4, "NOTIMP"},
-		{5, "REFUSED"},
-		{99, "RCODE99"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			result := rcodeToString(tt.rcode)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-// encodeDNSName encodes a dotted domain name into DNS wire format
-// (length-prefixed labels, null-terminated). No compression.
-func encodeDNSName(name string) []byte {
-	var buf []byte
-	for _, label := range strings.Split(name, ".") {
-		buf = append(buf, byte(len(label)))
-		buf = append(buf, label...)
-	}
-	return append(buf, 0)
-}
-
 // buildMockRawEvent builds a raw ring buffer record matching struct
 // dns_event in dns.bpf.c: a fixed header followed by a raw DNS wire-format
 // payload (what the BPF side actually captures post-redesign).
@@ -148,8 +88,8 @@ func buildDNSResponsePayload(qname string, ip net.IP) []byte {
 
 	payload := make([]byte, 12)
 	binary.BigEndian.PutUint16(payload[2:4], 0x8180) // QR=1 (response), RCODE=0
-	binary.BigEndian.PutUint16(payload[4:6], 1)       // QDCOUNT
-	binary.BigEndian.PutUint16(payload[6:8], 1)       // ANCOUNT
+	binary.BigEndian.PutUint16(payload[4:6], 1)      // QDCOUNT
+	binary.BigEndian.PutUint16(payload[6:8], 1)      // ANCOUNT
 
 	questionStart := len(payload)
 	payload = append(payload, qnameWire...)
@@ -159,22 +99,20 @@ func buildDNSResponsePayload(qname string, ip net.IP) []byte {
 	// Answer: name = compression pointer back to the question's qname.
 	ptr := uint16(0xC000) | uint16(questionStart)
 	payload = binary.BigEndian.AppendUint16(payload, ptr)
-	payload = binary.BigEndian.AppendUint16(payload, 1)     // TYPE A
-	payload = binary.BigEndian.AppendUint16(payload, 1)     // CLASS IN
-	payload = binary.BigEndian.AppendUint32(payload, 300)   // TTL
-	payload = binary.BigEndian.AppendUint16(payload, 4)     // RDLENGTH
+	payload = binary.BigEndian.AppendUint16(payload, 1)   // TYPE A
+	payload = binary.BigEndian.AppendUint16(payload, 1)   // CLASS IN
+	payload = binary.BigEndian.AppendUint32(payload, 300) // TTL
+	payload = binary.BigEndian.AppendUint16(payload, 4)   // RDLENGTH
 	payload = append(payload, ip.To4()...)
 
 	return payload
 }
 
 func TestParseEvent(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
 	respPayload := buildDNSResponsePayload("example.com", net.IPv4(93, 184, 216, 34))
 	raw := buildMockRawEvent(types.DNSDirectionResponse, respPayload)
 
-	event := collector.parseEvent(raw)
+	event := decodeDNSEvent(raw)
 
 	require.NotNil(t, event)
 	assert.Equal(t, types.EventDNS, event.Type)
@@ -190,18 +128,16 @@ func TestParseEvent(t *testing.T) {
 }
 
 func TestParseEvent_Query(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
 	qnameWire := encodeDNSName("example.com")
 	payload := make([]byte, 12)
 	binary.BigEndian.PutUint16(payload[2:4], 0x0100) // QR=0 (query)
-	binary.BigEndian.PutUint16(payload[4:6], 1)       // QDCOUNT
+	binary.BigEndian.PutUint16(payload[4:6], 1)      // QDCOUNT
 	payload = append(payload, qnameWire...)
 	payload = binary.BigEndian.AppendUint16(payload, 1) // QTYPE A
 	payload = binary.BigEndian.AppendUint16(payload, 1) // QCLASS IN
 
 	raw := buildMockRawEvent(types.DNSDirectionQuery, payload)
-	event := collector.parseEvent(raw)
+	event := decodeDNSEvent(raw)
 
 	require.NotNil(t, event)
 	assert.Equal(t, "example.com", event.DNS.QName)
@@ -211,20 +147,16 @@ func TestParseEvent_Query(t *testing.T) {
 }
 
 func TestParseEvent_InvalidType(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
 	// Build a mock event with wrong type
 	buf := make([]byte, 32)
 	binary.LittleEndian.PutUint32(buf, 99) // Wrong type
 
-	event := collector.parseEvent(buf)
+	event := decodeDNSEvent(buf)
 	assert.Nil(t, event)
 }
 
 func TestParseEvent_TooShort(t *testing.T) {
-	collector := &DNSCollector{enabled: true}
-
-	event := collector.parseEvent([]byte{1, 2, 3}) // Too short
+	event := decodeDNSEvent([]byte{1, 2, 3}) // Too short
 	assert.Nil(t, event)
 }
 

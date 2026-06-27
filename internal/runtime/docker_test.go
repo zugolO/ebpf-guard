@@ -147,14 +147,20 @@ func TestNewEnricher_CRIMode_NoSocket(t *testing.T) {
 }
 
 // TestNewEnricher_AutoMode_NoRuntime exercises the auto-detect error path.
+// Both Docker and CRI socket paths are redirected to absent files so the test
+// is deterministic even on CI runners where /var/run/docker.sock exists.
 func TestNewEnricher_AutoMode_NoRuntime(t *testing.T) {
-	// Override CRI socket probe paths to ensure auto-detection finds nothing.
-	orig := criSocketPaths
+	origCRI := criSocketPaths
+	origDocker := defaultDockerSocketPath
 	criSocketPaths = []string{
 		filepath.Join(t.TempDir(), "absent-containerd.sock"),
 		filepath.Join(t.TempDir(), "absent-crio.sock"),
 	}
-	t.Cleanup(func() { criSocketPaths = orig })
+	defaultDockerSocketPath = filepath.Join(t.TempDir(), "absent-docker.sock")
+	t.Cleanup(func() {
+		criSocketPaths = origCRI
+		defaultDockerSocketPath = origDocker
+	})
 
 	_, err := NewEnricher(EnricherConfig{Mode: "auto"}, newTestLogger())
 	require.Error(t, err)

@@ -30,6 +30,10 @@ type ContainerInfo struct {
 
 // ── Docker client ─────────────────────────────────────────────────────────────
 
+// defaultDockerSocketPath is the Docker socket used when no explicit path is
+// configured. Declared as a variable so tests can substitute an absent path.
+var defaultDockerSocketPath = "/var/run/docker.sock"
+
 // dockerClient queries the Docker Engine REST API over its Unix socket.
 // Uses only stdlib net/http; does not require the moby SDK.
 type dockerClient struct {
@@ -39,7 +43,7 @@ type dockerClient struct {
 
 func newDockerClient(socketPath string) (*dockerClient, error) {
 	if socketPath == "" {
-		socketPath = "/var/run/docker.sock"
+		socketPath = defaultDockerSocketPath
 	}
 	if _, err := os.Stat(socketPath); err != nil {
 		return nil, fmt.Errorf("docker socket not found at %s: %w", socketPath, err)

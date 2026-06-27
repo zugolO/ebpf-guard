@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -77,4 +78,18 @@ func TestParseCgroupContent(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestExtractContainerID_CurrentProcess(t *testing.T) {
+	pid := uint32(os.Getpid())
+	// The test runner is not a container; expect ("", nil) — no error, no ID.
+	id, err := extractContainerID(pid)
+	require.NoError(t, err)
+	assert.Equal(t, "", id)
+}
+
+func TestExtractContainerID_NonexistentPID(t *testing.T) {
+	// PID 0 has no /proc entry; expect an os.Open error.
+	_, err := extractContainerID(0)
+	require.Error(t, err)
 }

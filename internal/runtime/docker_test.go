@@ -116,3 +116,46 @@ func TestAutoDetect_DockerSocketOverride(t *testing.T) {
 	assert.Equal(t, "docker", source)
 	assert.NotNil(t, client)
 }
+
+// TestNewEnricher_DockerMode exercises NewEnricher with mode="docker" using a
+// fake unix-socket server so the socket-exists check passes.
+func TestNewEnricher_DockerMode(t *testing.T) {
+	socketPath := newFakeDockerServer(t, http.NotFoundHandler())
+	e, err := NewEnricher(EnricherConfig{
+		Mode:       "docker",
+		SocketPath: socketPath,
+	}, newTestLogger())
+	require.NoError(t, err)
+	assert.Equal(t, "docker", e.Source())
+	require.NoError(t, e.Stop())
+}
+
+// TestNewEnricher_CRIMode_NoSocket exercises the error path when no CRI socket exists.
+// newCRIClient only probes existence when no explicit path is given, so we override
+// criSocketPaths to nonexistent paths and omit SocketPath to trigger the error.
+func TestNewEnricher_CRIMode_NoSocket(t *testing.T) {
+	orig := criSocketPaths
+	criSocketPaths = []string{
+		filepath.Join(t.TempDir(), "absent-containerd.sock"),
+		filepath.Join(t.TempDir(), "absent-crio.sock"),
+	}
+	t.Cleanup(func() { criSocketPaths = orig })
+
+	_, err := NewEnricher(EnricherConfig{Mode: "cri"}, newTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "runtime/cri")
+}
+
+// TestNewEnricher_AutoMode_NoRuntime exercises the auto-detect error path.
+func TestNewEnricher_AutoMode_NoRuntime(t *testing.T) {
+	// Override CRI socket probe paths to ensure auto-detection finds nothing.
+	orig := criSocketPaths
+	criSocketPaths = []string{
+		filepath.Join(t.TempDir(), "absent-containerd.sock"),
+		filepath.Join(t.TempDir(), "absent-crio.sock"),
+	}
+	t.Cleanup(func() { criSocketPaths = orig })
+
+	_, err := NewEnricher(EnricherConfig{Mode: "auto"}, newTestLogger())
+	require.Error(t, err)
+}

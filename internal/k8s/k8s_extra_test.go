@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -544,4 +545,20 @@ func TestEnricher_EnrichEvent_FromCache(t *testing.T) {
 
 	require.NotNil(t, event.Enrichment)
 	assert.Equal(t, "event-pod", event.Enrichment.PodName)
+}
+
+// ── NewWatcher / NewEnricher error paths ─────────────────────────────────────
+
+func TestNewWatcher_InvalidKubeconfig(t *testing.T) {
+	badKubeconfig := filepath.Join(t.TempDir(), "nonexistent.kubeconfig")
+	_, err := NewWatcher(WatcherConfig{KubeconfigPath: badKubeconfig}, k8sQuietLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "k8s/watcher")
+}
+
+func TestNewEnricher_InvalidKubeconfig(t *testing.T) {
+	badKubeconfig := filepath.Join(t.TempDir(), "nonexistent.kubeconfig")
+	_, err := NewEnricher(EnricherConfig{KubeconfigPath: badKubeconfig}, k8sQuietLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "k8s/enricher")
 }

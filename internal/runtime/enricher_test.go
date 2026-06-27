@@ -7,6 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -249,4 +253,144 @@ func TestCacheSize(t *testing.T) {
 // newTestLogger returns a no-op slog.Logger for use in tests.
 func newTestLogger() *slog.Logger {
 	return slog.Default()
+}
+
+// ── min helper ───────────────────────────────────────────────────────────────
+
+func TestMin(t *testing.T) {
+	assert.Equal(t, 0, min(0, 5))
+	assert.Equal(t, 0, min(5, 0))
+	assert.Equal(t, 3, min(3, 3))
+	assert.Equal(t, 1, min(1, 100))
+	assert.Equal(t, 1, min(100, 1))
+}
+
+// ── newEnricherWithClient ────────────────────────────────────────────────────
+
+func TestNewEnricherWithClient_SetsSource(t *testing.T) {
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "containerd", EnricherConfig{}, newTestLogger())
+	assert.Equal(t, "containerd", e.Source())
+}
+
+func TestNewEnricherWithClient_DefaultCacheTTL(t *testing.T) {
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "docker", EnricherConfig{CacheTTL: 0}, newTestLogger())
+	assert.Equal(t, 30*time.Second, e.cacheTTL)
+}
+
+func TestNewEnricherWithClient_CustomCacheTTL(t *testing.T) {
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "docker", EnricherConfig{CacheTTL: 5 * time.Minute}, newTestLogger())
+	assert.Equal(t, 5*time.Minute, e.cacheTTL)
+}
+
+// ── NewEnricher (mode=off) ───────────────────────────────────────────────────
+
+func TestNewEnricher_ModeOff_ReturnsError(t *testing.T) {
+	_, err := NewEnricher(EnricherConfig{Mode: "off"}, newTestLogger())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disabled")
+}
+
+func TestNewEnricher_EmptyMode_ReturnsError(t *testing.T) {
+	_, err := NewEnricher(EnricherConfig{Mode: ""}, newTestLogger())
+	require.Error(t, err)
+}
+
+// ── Source ───────────────────────────────────────────────────────────────────
+
+func TestSource(t *testing.T) {
+	for _, src := range []string{"docker", "containerd", "crio"} {
+		e := newEnricherWithClient(&stubClient{containers: map[string]*ContainerInfo{}}, src, EnricherConfig{}, newTestLogger())
+		assert.Equal(t, src, e.Source())
+	}
+}
+
+// ── Start / Stop ─────────────────────────────────────────────────────────────
+
+func TestEnricher_StartStop(t *testing.T) {
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "docker", EnricherConfig{}, newTestLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	e.Start(ctx)
+	cancel()
+
+	// Allow goroutines time to exit; cleanupLoop uses e.cacheTTL ticker.
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, e.Stop())
+}
+
+func TestEnricher_StartStop_WithMetrics(t *testing.T) {
+	cacheSize := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_rt_cache_size"})
+	missTotal := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_rt_miss_total"})
+
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "docker", EnricherConfig{
+		Metrics: EnricherMetrics{CacheSize: cacheSize, MissTotal: missTotal},
+	}, newTestLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	e.Start(ctx) // starts both cleanupLoop and metricsLoop
+	cancel()
+
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, e.Stop())
+}
+
+// ── updateMetrics ────────────────────────────────────────────────────────────
+
+func readGaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, g.Write(m))
+	return m.GetGauge().GetValue()
+}
+
+func readCounterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	require.NoError(t, c.Write(m))
+	return m.GetCounter().GetValue()
+}
+
+func TestUpdateMetrics_DrainsMissCount(t *testing.T) {
+	missTotal := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_rt_miss_drain"})
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "docker", EnricherConfig{
+		Metrics: EnricherMetrics{MissTotal: missTotal},
+	}, newTestLogger())
+
+	e.missCount.Add(7)
+	e.updateMetrics()
+
+	assert.Equal(t, int64(0), e.missCount.Load(), "missCount should be drained")
+	assert.Equal(t, float64(7), readCounterValue(t, missTotal))
+
+	// Second call must not double-count.
+	e.updateMetrics()
+	assert.Equal(t, float64(7), readCounterValue(t, missTotal))
+}
+
+func TestUpdateMetrics_ReportsCacheSize(t *testing.T) {
+	cacheSize := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_rt_cache_size2"})
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "docker", EnricherConfig{
+		Metrics: EnricherMetrics{CacheSize: cacheSize},
+	}, newTestLogger())
+
+	e.containerCache["a"] = &ContainerInfo{}
+	e.containerCache["b"] = &ContainerInfo{}
+	e.updateMetrics()
+
+	assert.Equal(t, float64(2), readGaugeValue(t, cacheSize))
+}
+
+func TestUpdateMetrics_NilMetricsNoOp(t *testing.T) {
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newEnricherWithClient(stub, "docker", EnricherConfig{}, newTestLogger())
+	e.missCount.Add(3)
+	// Must not panic with nil metrics.
+	e.updateMetrics()
 }

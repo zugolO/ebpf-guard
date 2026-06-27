@@ -82,6 +82,13 @@ func NewEnricher(config EnricherConfig, logger *slog.Logger) (*Enricher, error) 
 		return nil, fmt.Errorf("k8s/enricher: create watcher: %w", err)
 	}
 
+	return newEnricherWithWatcher(watcher, config, logger), nil
+}
+
+// newEnricherWithWatcher builds an Enricher from a pre-built Watcher.
+// Extracted from NewEnricher so tests can inject a test watcher without
+// requiring a real kubeconfig.
+func newEnricherWithWatcher(watcher *Watcher, config EnricherConfig, logger *slog.Logger) *Enricher {
 	cacheTTL := config.CacheTTL
 	if cacheTTL == 0 {
 		cacheTTL = 30 * time.Second
@@ -99,7 +106,7 @@ func NewEnricher(config EnricherConfig, logger *slog.Logger) (*Enricher, error) 
 		cacheTTL:        cacheTTL,
 		resyncPeriod:    resyncPeriod,
 		metrics:         config.Metrics,
-	}, nil
+	}
 }
 
 // Start begins the enricher and its watcher.

@@ -84,11 +84,16 @@ func NewEnricher(cfg EnricherConfig, logger *slog.Logger) (*Enricher, error) {
 		return nil, fmt.Errorf("runtime enricher: %w", err)
 	}
 
+	return newEnricherWithClient(client, source, cfg, logger), nil
+}
+
+// newEnricherWithClient constructs an Enricher from an already-resolved
+// RuntimeClient. Used by NewEnricher and directly by tests with stub clients.
+func newEnricherWithClient(client RuntimeClient, source string, cfg EnricherConfig, logger *slog.Logger) *Enricher {
 	cacheTTL := cfg.CacheTTL
 	if cacheTTL <= 0 {
 		cacheTTL = 30 * time.Second
 	}
-
 	return &Enricher{
 		client:         client,
 		source:         source,
@@ -97,7 +102,7 @@ func NewEnricher(cfg EnricherConfig, logger *slog.Logger) (*Enricher, error) {
 		metrics:        cfg.Metrics,
 		pidCache:       make(map[uint32]string),
 		containerCache: make(map[string]*ContainerInfo),
-	}, nil
+	}
 }
 
 // Start runs background cache-cleanup and metrics loops until ctx is cancelled.
@@ -255,6 +260,21 @@ func (e *Enricher) cleanupLoop(ctx context.Context) {
 	}
 }
 
+// updateMetrics pushes the current miss count and cache size to Prometheus.
+func (e *Enricher) updateMetrics() {
+	if e.metrics.MissTotal != nil {
+		if n := e.missCount.Swap(0); n > 0 {
+			e.metrics.MissTotal.Add(float64(n))
+		}
+	}
+	if e.metrics.CacheSize != nil {
+		e.containerMu.RLock()
+		size := len(e.containerCache)
+		e.containerMu.RUnlock()
+		e.metrics.CacheSize.Set(float64(size))
+	}
+}
+
 // metricsLoop pushes Prometheus gauges every 15 s.
 func (e *Enricher) metricsLoop(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
@@ -264,17 +284,7 @@ func (e *Enricher) metricsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if e.metrics.MissTotal != nil {
-				if n := e.missCount.Swap(0); n > 0 {
-					e.metrics.MissTotal.Add(float64(n))
-				}
-			}
-			if e.metrics.CacheSize != nil {
-				e.containerMu.RLock()
-				size := len(e.containerCache)
-				e.containerMu.RUnlock()
-				e.metrics.CacheSize.Set(float64(size))
-			}
+			e.updateMetrics()
 		}
 	}
 }

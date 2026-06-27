@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -202,6 +203,77 @@ func TestDriftAlertToTypes(t *testing.T) {
 	}
 	if alert.Enrichment.ContainerID != "abc123" {
 		t.Errorf("expected container ID in enrichment")
+	}
+}
+
+func TestDetectorRegisterMetrics(t *testing.T) {
+	d := NewDetector(DetectorConfig{BaselineWindow: time.Second})
+	reg := prometheus.NewRegistry()
+	err := d.RegisterMetrics(reg)
+	if err != nil {
+		t.Fatalf("RegisterMetrics returned error: %v", err)
+	}
+
+	// Registering again on the same registry must fail (already registered).
+	err = d.RegisterMetrics(reg)
+	if err == nil {
+		t.Error("expected error when re-registering metrics on the same registry")
+	}
+}
+
+func TestDetectorAllStats_Empty(t *testing.T) {
+	d := NewDetector(DetectorConfig{BaselineWindow: time.Second})
+	stats := d.AllStats()
+	if stats == nil {
+		t.Error("AllStats should return non-nil slice for empty detector")
+	}
+	if len(stats) != 0 {
+		t.Errorf("expected 0 stats, got %d", len(stats))
+	}
+}
+
+func TestDetectorAllStats_MultipleContainers(t *testing.T) {
+	d := NewDetector(DetectorConfig{BaselineWindow: 10 * time.Millisecond})
+
+	// Create baselines for three containers during their learning window.
+	d.Ingest(makeSyscallEvent(0, "cA"))
+	d.Ingest(makeSyscallEvent(1, "cB"))
+	d.Ingest(makeSyscallEvent(2, "cC"))
+
+	stats := d.AllStats()
+	if len(stats) != 3 {
+		t.Errorf("expected 3 baseline stats, got %d", len(stats))
+	}
+
+	// Verify each container has a corresponding stat entry.
+	ids := make(map[string]bool)
+	for _, s := range stats {
+		ids[s.ContainerID] = true
+	}
+	for _, cid := range []string{"cA", "cB", "cC"} {
+		if !ids[cid] {
+			t.Errorf("container %q not found in AllStats output", cid)
+		}
+	}
+}
+
+func TestDriftTypeName(t *testing.T) {
+	tests := []struct {
+		dt   DriftType
+		want string
+	}{
+		{DriftNewSyscall, "New Syscall"},
+		{DriftNewExec, "New Binary Executed"},
+		{DriftNewLibrary, "New Library Loaded"},
+		{DriftNewNetwork, "New Network Peer"},
+		{DriftNewFileDir, "New File Directory"},
+		{DriftType("unknown"), "unknown"},
+	}
+	for _, tt := range tests {
+		got := driftTypeName(tt.dt)
+		if got != tt.want {
+			t.Errorf("driftTypeName(%q) = %q, want %q", tt.dt, got, tt.want)
+		}
 	}
 }
 

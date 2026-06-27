@@ -4,6 +4,7 @@ package runtime
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -16,16 +17,11 @@ import (
 //	containerd: "0::/system.slice/containerd-abc123...64chars.scope"
 var containerIDRe = regexp.MustCompile(`\b([a-f0-9]{64})\b`)
 
-// extractContainerID reads /proc/[pid]/cgroup and returns the container ID.
-// Returns ("", nil) when the process is not inside a container cgroup.
-func extractContainerID(pid uint32) (string, error) {
-	f, err := os.Open(fmt.Sprintf("/proc/%d/cgroup", pid))
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
+// parseCgroupContent scans cgroup lines from r looking for a container ID.
+// Extracted from extractContainerID so the regex logic can be unit-tested
+// without touching /proc.
+func parseCgroupContent(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 		// Only inspect lines that reference a container runtime namespace.
@@ -40,4 +36,15 @@ func extractContainerID(pid uint32) (string, error) {
 		}
 	}
 	return "", scanner.Err()
+}
+
+// extractContainerID reads /proc/[pid]/cgroup and returns the container ID.
+// Returns ("", nil) when the process is not inside a container cgroup.
+func extractContainerID(pid uint32) (string, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return parseCgroupContent(f)
 }

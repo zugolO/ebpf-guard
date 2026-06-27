@@ -68,7 +68,13 @@ func NewWatcher(config WatcherConfig, logger *slog.Logger) (*Watcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("k8s/watcher: create client: %w", err)
 	}
+	return newWatcherWithClient(client, config, logger)
+}
 
+// newWatcherWithClient builds a Watcher from a pre-built kubernetes.Interface.
+// Extracted from NewWatcher so tests can inject a fake clientset without needing
+// a real kubeconfig or cluster.
+func newWatcherWithClient(client kubernetes.Interface, config WatcherConfig, logger *slog.Logger) (*Watcher, error) {
 	w := &Watcher{
 		client:   client,
 		stopCh:   make(chan struct{}),

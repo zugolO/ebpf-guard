@@ -1,6 +1,7 @@
 package drift
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -410,5 +411,138 @@ func TestBaseline_ExpirySetCorrectly(t *testing.T) {
 	if bl.BaselineExpiry.Before(minExpiry) || bl.BaselineExpiry.After(maxExpiry) {
 		t.Errorf("BaselineExpiry %v is not within expected range [%v, %v]",
 			bl.BaselineExpiry, minExpiry, maxExpiry)
+	}
+}
+
+// ── PreseedFromManifest ───────────────────────────────────────────────────────
+
+func TestPreseedFromManifest_AddsNewPaths(t *testing.T) {
+	bl := newTestBaseline(time.Minute)
+
+	manifest := &ImageManifest{
+		ContainerID: "test-cid",
+		ExecPaths: map[string]struct{}{
+			"/bin/sh":        {},
+			"/usr/bin/curl":  {},
+			"/usr/bin/nginx": {},
+		},
+	}
+
+	added := bl.PreseedFromManifest(manifest)
+	if added != 3 {
+		t.Errorf("expected 3 paths added, got %d", added)
+	}
+	if !bl.hasExecPath("/bin/sh") {
+		t.Error("/bin/sh should be in ExecPaths after preseed")
+	}
+	if !bl.hasExecPath("/usr/bin/curl") {
+		t.Error("/usr/bin/curl should be in ExecPaths after preseed")
+	}
+	if bl.ImageExecPaths != 3 {
+		t.Errorf("ImageExecPaths = %d, want 3", bl.ImageExecPaths)
+	}
+	if !bl.ImageSnapshotted {
+		t.Error("ImageSnapshotted should be true after preseed")
+	}
+}
+
+func TestPreseedFromManifest_IdempotentSecondCall(t *testing.T) {
+	bl := newTestBaseline(time.Minute)
+	manifest := &ImageManifest{
+		ExecPaths: map[string]struct{}{"/bin/sh": {}},
+	}
+
+	first := bl.PreseedFromManifest(manifest)
+	second := bl.PreseedFromManifest(manifest)
+
+	if first != 1 {
+		t.Errorf("first preseed: want 1 added, got %d", first)
+	}
+	if second != 0 {
+		t.Errorf("second preseed should be no-op, got %d added", second)
+	}
+}
+
+func TestPreseedFromManifest_NilManifestNoOp(t *testing.T) {
+	bl := newTestBaseline(time.Minute)
+	added := bl.PreseedFromManifest(nil)
+	if added != 0 {
+		t.Errorf("nil manifest: expected 0 added, got %d", added)
+	}
+	if bl.ImageSnapshotted {
+		t.Error("nil manifest should not set ImageSnapshotted")
+	}
+}
+
+func TestPreseedFromManifest_ManifestWithError_NoOp(t *testing.T) {
+	bl := newTestBaseline(time.Minute)
+	manifest := &ImageManifest{
+		Error: fmt.Errorf("overlay lookup failed"),
+		ExecPaths: map[string]struct{}{
+			"/bin/sh": {},
+		},
+	}
+	added := bl.PreseedFromManifest(manifest)
+	if added != 0 {
+		t.Errorf("errored manifest: expected 0 added, got %d", added)
+	}
+}
+
+func TestPreseedFromManifest_SkipsExistingPaths(t *testing.T) {
+	bl := newTestBaseline(time.Minute)
+	// Pre-populate one path via the normal recording path.
+	bl.recordExecPath("/usr/bin/nginx")
+
+	manifest := &ImageManifest{
+		ExecPaths: map[string]struct{}{
+			"/usr/bin/nginx": {}, // already present
+			"/usr/bin/curl":  {}, // new
+		},
+	}
+
+	added := bl.PreseedFromManifest(manifest)
+	if added != 1 {
+		t.Errorf("expected 1 new path added, got %d", added)
+	}
+}
+
+// ── isAllowed ─────────────────────────────────────────────────────────────────
+
+func TestIsAllowed_ExactMatch(t *testing.T) {
+	al := map[string]struct{}{
+		"/tmp/jit-binary": {},
+	}
+	if !isAllowed("/tmp/jit-binary", al) {
+		t.Error("exact match should be allowed")
+	}
+}
+
+func TestIsAllowed_PrefixMatch(t *testing.T) {
+	al := map[string]struct{}{
+		"/usr/lib/jvm/": {},
+	}
+	if !isAllowed("/usr/lib/jvm/java-17-openjdk/bin/java", al) {
+		t.Error("prefix match should be allowed")
+	}
+}
+
+func TestIsAllowed_NoMatch(t *testing.T) {
+	al := map[string]struct{}{
+		"/usr/lib/jvm/": {},
+	}
+	if isAllowed("/usr/bin/curl", al) {
+		t.Error("/usr/bin/curl should not match /usr/lib/jvm/ prefix")
+	}
+}
+
+func TestIsAllowed_NilAllowlist(t *testing.T) {
+	if isAllowed("/usr/bin/curl", nil) {
+		t.Error("nil allowlist should never allow")
+	}
+}
+
+func TestIsAllowed_EmptyAllowlist(t *testing.T) {
+	if isAllowed("/usr/bin/sh", map[string]struct{}{}) {
+		t.Error("empty allowlist should not allow anything")
 	}
 }

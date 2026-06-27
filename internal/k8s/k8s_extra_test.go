@@ -314,13 +314,6 @@ func TestEnricher_CacheCleanupLoop_ImmediateCancel(t *testing.T) {
 
 // ── Enricher: metricsUpdateLoop ──────────────────────────────────────────────
 
-func k8sReadGauge(t *testing.T, g prometheus.Gauge) float64 {
-	t.Helper()
-	m := &dto.Metric{}
-	require.NoError(t, g.Write(m))
-	return m.GetGauge().GetValue()
-}
-
 func k8sReadCounter(t *testing.T, c prometheus.Counter) float64 {
 	t.Helper()
 	m := &dto.Metric{}

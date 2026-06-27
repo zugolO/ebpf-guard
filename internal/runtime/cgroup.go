@@ -45,6 +45,6 @@ func extractContainerID(pid uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return parseCgroupContent(f)
 }

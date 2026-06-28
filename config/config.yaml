@@ -91,6 +91,30 @@ profiler:
   # /proc/sys/kernel/pid_max (can be millions on modern kernels — not advised).
   max_tracked_pids: 1024
 
+# Watchdog: auto-tuning under resource pressure. Both watchers degrade the
+# agent gracefully and recover automatically; all fields below are optional and
+# shown with their defaults.
+watchdog:
+  # memory_pressure: disable profilers / cut BPF sampling when free RAM is low.
+  memory_pressure:
+    enabled: true
+    check_interval: 5            # seconds between samples
+    disable_sequence_threshold: 10.0  # free RAM %: disable sequence profiling (L1)
+    disable_all_threshold: 5.0        # free RAM %: disable all profiling (L2)
+    recovery_threshold: 20.0          # free RAM %: recover to normal
+  # cpu_pressure: adaptively shed the noisiest collectors when the agent's own
+  # CPU usage (as a % of total VPS CPU) exceeds the budget. File monitoring is
+  # shed first (L1); syscall + network are added if CPU stays high (L2).
+  # Sampling is restored once usage drops below recovery_threshold (hysteresis).
+  cpu_pressure:
+    enabled: true
+    check_interval: 5            # seconds between CPU samples
+    cpu_limit_percent: 15.0      # target CPU budget; seeds thresholds below
+    file_shed_threshold: 15.0    # CPU %: reduce file sampling (L1)
+    all_shed_threshold: 25.0     # CPU %: also reduce syscall/network (L2)
+    recovery_threshold: 9.0      # CPU %: step back one level
+    window_size: 3               # samples averaged into the sliding window
+
 # Correlator tuning
 correlator:
   # Per-PID forensic event ring buffer depth (NOT the detection hot path — rules

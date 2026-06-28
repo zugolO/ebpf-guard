@@ -26,9 +26,9 @@ func baseConfig() *Config {
 		Alerting:    AlertingConfig{Enabled: false},
 		Enforcement: EnforcementConfig{Enabled: false, BlockBackend: "log"},
 		Watchdog: WatchdogConfig{MemoryPressure: MemoryPressureConfig{
-			Enabled:             false,
-			LowMemoryThreshold:  10,
-			RecoveryThreshold:   20,
+			Enabled:            false,
+			LowMemoryThreshold: 10,
+			RecoveryThreshold:  20,
 		}},
 		Canary: CanaryConfig{AlertSeverity: "critical"},
 	}
@@ -236,6 +236,66 @@ func TestValidateConfig_WatchdogThresholds(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "low_memory_threshold") {
 		t.Errorf("error does not mention low_memory_threshold: %v", err)
+	}
+}
+
+func TestValidateConfig_CPUPressure(t *testing.T) {
+	valid := CPUPressureConfig{
+		Enabled:           true,
+		CheckInterval:     5,
+		CPULimitPercent:   15,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        3,
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(c *CPUPressureConfig)
+		wantErr string // substring expected in the error; "" means no error
+	}{
+		{"valid", func(c *CPUPressureConfig) {}, ""},
+		{"disabled skips validation", func(c *CPUPressureConfig) {
+			c.Enabled = false
+			c.FileShedThreshold = 200 // out of range but ignored when disabled
+		}, ""},
+		{"cpu_limit out of range", func(c *CPUPressureConfig) { c.CPULimitPercent = 150 }, "cpu_limit_percent"},
+		{"file_shed negative", func(c *CPUPressureConfig) { c.FileShedThreshold = -1 }, "file_shed_threshold"},
+		{"all_shed out of range", func(c *CPUPressureConfig) { c.AllShedThreshold = 101 }, "all_shed_threshold"},
+		{"recovery out of range", func(c *CPUPressureConfig) { c.RecoveryThreshold = 101 }, "recovery_threshold"},
+		{"file_shed above all_shed", func(c *CPUPressureConfig) {
+			c.FileShedThreshold = 30
+			c.AllShedThreshold = 25
+		}, "must be <= all_shed_threshold"},
+		{"recovery above file_shed", func(c *CPUPressureConfig) {
+			c.RecoveryThreshold = 20
+			c.FileShedThreshold = 15
+		}, "must be less than file_shed_threshold"},
+		{"negative window", func(c *CPUPressureConfig) { c.WindowSize = -1 }, "window_size"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cp := valid
+			tt.mutate(&cp)
+			cfg.Watchdog.CPUPressure = cp
+
+			err := ValidateConfig(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 

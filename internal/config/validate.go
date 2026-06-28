@@ -3,10 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
-	"time"
 	"net"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // ValidateConfig checks the loaded configuration for invalid values and
@@ -89,6 +89,30 @@ func ValidateConfig(cfg *Config) error {
 		if lo > 0 && hi > 0 && lo >= hi {
 			add(fmt.Errorf("watchdog.memory_pressure.low_memory_threshold (%.2f) must be less than recovery_threshold (%.2f)",
 				lo, hi))
+		}
+	}
+	if cfg.Watchdog.CPUPressure.Enabled {
+		cp := cfg.Watchdog.CPUPressure
+		for name, v := range map[string]float64{
+			"cpu_limit_percent":   cp.CPULimitPercent,
+			"file_shed_threshold": cp.FileShedThreshold,
+			"all_shed_threshold":  cp.AllShedThreshold,
+			"recovery_threshold":  cp.RecoveryThreshold,
+		} {
+			if v < 0 || v > 100 {
+				add(fmt.Errorf("watchdog.cpu_pressure.%s: must be in [0, 100], got %.2f", name, v))
+			}
+		}
+		if cp.FileShedThreshold > 0 && cp.AllShedThreshold > 0 && cp.FileShedThreshold > cp.AllShedThreshold {
+			add(fmt.Errorf("watchdog.cpu_pressure.file_shed_threshold (%.2f) must be <= all_shed_threshold (%.2f)",
+				cp.FileShedThreshold, cp.AllShedThreshold))
+		}
+		if cp.RecoveryThreshold > 0 && cp.FileShedThreshold > 0 && cp.RecoveryThreshold >= cp.FileShedThreshold {
+			add(fmt.Errorf("watchdog.cpu_pressure.recovery_threshold (%.2f) must be less than file_shed_threshold (%.2f)",
+				cp.RecoveryThreshold, cp.FileShedThreshold))
+		}
+		if cp.WindowSize < 0 {
+			add(fmt.Errorf("watchdog.cpu_pressure.window_size: must be >= 0, got %d", cp.WindowSize))
 		}
 	}
 

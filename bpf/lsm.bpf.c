@@ -11,6 +11,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
 
 #include "common.h"
 
@@ -198,6 +199,68 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 	if (is_agent_pid(pid)) {
 		update_stat(LSM_STAT_SOCK_CONN_ALLOW);
 		return 0;
+	}
+
+	/* In-kernel IP/subnet/port blocklist — block before PID check so that
+	 * any process (not just PID-blocked ones) is prevented from connecting
+	 * to known-malicious destinations. */
+	{
+		__u16 sa_family = 0;
+		int ip_blocked = 0;
+		bpf_probe_read_kernel(&sa_family, sizeof(sa_family), &addr->sa_family);
+
+		if (sa_family == AF_INET) {
+			struct sockaddr_in sin = {};
+			bpf_probe_read_kernel(&sin, sizeof(sin), addr);
+
+			struct lpm_key_v4 blk = {};
+			blk.prefixlen = 32;
+			copy_ipv4_addr(blk.addr, sin.sin_addr.s_addr);
+			if (bpf_map_lookup_elem(&net_block_ipv4, &blk))
+				ip_blocked = 1;
+
+			if (!ip_blocked) {
+				__u16 dport = bpf_ntohs(sin.sin_port);
+				if (bpf_map_lookup_elem(&net_block_ports, &dport))
+					ip_blocked = 1;
+			}
+		} else if (sa_family == AF_INET6) {
+			struct sockaddr_in6 sin6 = {};
+			bpf_probe_read_kernel(&sin6, sizeof(sin6), addr);
+
+			struct lpm_key_v6 blk = {};
+			blk.prefixlen = 128;
+			bpf_probe_read_kernel(blk.addr, 16, &sin6.sin6_addr);
+			if (bpf_map_lookup_elem(&net_block_ipv6, &blk))
+				ip_blocked = 1;
+
+			if (!ip_blocked) {
+				__u16 dport = bpf_ntohs(sin6.sin6_port);
+				if (bpf_map_lookup_elem(&net_block_ports, &dport))
+					ip_blocked = 1;
+			}
+		}
+
+		if (ip_blocked) {
+			update_stat(LSM_STAT_SOCK_CONN_BLOCK);
+			record_net_drop();
+			struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+						sizeof(struct lsm_audit_event), 0);
+			if (ae) {
+				ae->type         = EVENT_TYPE_LSM_AUDIT;
+				ae->timestamp_ns = bpf_ktime_get_ns();
+				ae->pid          = pid;
+				ae->uid          = (__u32)bpf_get_current_uid_gid();
+				ae->target_pid   = 0;
+				ae->action       = LSM_ACTION_DENY;
+				ae->hook         = LSM_HOOK_SOCKET_CONNECT;
+				ae->sig          = 0;
+				bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+				__builtin_memset(&ae->path, 0, sizeof(ae->path));
+				bpf_ringbuf_submit(ae, 0);
+			}
+			return -EPERM;
+		}
 	}
 
 	/* Fast path 2: PID not in blocklist */

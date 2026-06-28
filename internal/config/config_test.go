@@ -297,3 +297,107 @@ func TestNewZeroConfigManager_AuthTokenFromEnv(t *testing.T) {
 	cfg := NewZeroConfigManager().Get()
 	assert.Equal(t, "fixed-test-token", cfg.Auth.AdminToken)
 }
+
+// TestNetworkBlocklistConfig_Defaults verifies that the network blocklist
+// starts empty when no config is provided.
+func TestNetworkBlocklistConfig_Defaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(""), 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	assert.Empty(t, cfg.Enforcement.NetworkBlocklist.Subnets,
+		"network_blocklist.subnets should default to empty")
+	assert.Empty(t, cfg.Enforcement.NetworkBlocklist.Ports,
+		"network_blocklist.ports should default to empty")
+}
+
+// TestNetworkBlocklistConfig_FromYAML verifies that subnets and ports are
+// loaded correctly from a YAML config file.
+func TestNetworkBlocklistConfig_FromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yaml := []byte(`
+enforcement:
+  network_blocklist:
+    subnets:
+      - "10.0.0.0/8"
+      - "192.168.0.0/16"
+      - "2001:db8::/32"
+    ports:
+      - 4444
+      - 6666
+`)
+	require.NoError(t, os.WriteFile(configPath, yaml, 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	bl := cfg.Enforcement.NetworkBlocklist
+
+	require.Len(t, bl.Subnets, 3)
+	assert.Equal(t, "10.0.0.0/8", bl.Subnets[0])
+	assert.Equal(t, "192.168.0.0/16", bl.Subnets[1])
+	assert.Equal(t, "2001:db8::/32", bl.Subnets[2])
+
+	require.Len(t, bl.Ports, 2)
+	assert.Equal(t, uint16(4444), bl.Ports[0])
+	assert.Equal(t, uint16(6666), bl.Ports[1])
+}
+
+// TestNetworkBlocklistConfig_EmptySubnets ensures partial config (only ports)
+// works correctly.
+func TestNetworkBlocklistConfig_EmptySubnets(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yaml := []byte(`
+enforcement:
+  network_blocklist:
+    ports:
+      - 1337
+`)
+	require.NoError(t, os.WriteFile(configPath, yaml, 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	bl := cfg.Enforcement.NetworkBlocklist
+	assert.Empty(t, bl.Subnets)
+	require.Len(t, bl.Ports, 1)
+	assert.Equal(t, uint16(1337), bl.Ports[0])
+}
+
+// TestNetworkBlocklistConfig_EmptyPorts ensures partial config (only subnets)
+// works correctly.
+func TestNetworkBlocklistConfig_EmptyPorts(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yaml := []byte(`
+enforcement:
+  network_blocklist:
+    subnets:
+      - "172.16.0.0/12"
+`)
+	require.NoError(t, os.WriteFile(configPath, yaml, 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	bl := cfg.Enforcement.NetworkBlocklist
+	require.Len(t, bl.Subnets, 1)
+	assert.Equal(t, "172.16.0.0/12", bl.Subnets[0])
+	assert.Empty(t, bl.Ports)
+}

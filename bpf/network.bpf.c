@@ -45,26 +45,6 @@ struct {
 } conn_meta_map SEC(".maps");
 
 /*
- * Helper to copy IPv4 address into 16-byte buffer (first 4 bytes)
- */
-static __always_inline void copy_ipv4_addr(__u8 *dst, __u32 src)
-{
-	dst[0] = (__u8)(src & 0xFF);
-	dst[1] = (__u8)((src >> 8) & 0xFF);
-	dst[2] = (__u8)((src >> 16) & 0xFF);
-	dst[3] = (__u8)((src >> 24) & 0xFF);
-}
-
-/*
- * Helper to copy IPv6 address from skc_v6_daddr/skc_v6_rcv_saddr
- */
-static __always_inline void copy_ipv6_addr(__u8 *dst, struct in6_addr *src)
-{
-	/* Use bpf_probe_read_kernel to safely read the IPv6 address */
-	bpf_probe_read_kernel(dst, 16, src);
-}
-
-/*
  * tcp_connect kprobe - captures outbound TCP connection attempts.
  * Also stores the connect timestamp and tuple for duration tracking in tcp_close.
  */
@@ -82,6 +62,34 @@ int BPF_KPROBE(trace_tcp_connect, struct sock *sk)
 	/* Only handle IPv4 and IPv6 */
 	if (family != AF_INET && family != AF_INET6)
 		return 0;
+
+	/* In-kernel network blocklist check: drop connections to blocked
+	 * IP/subnets/ports without emitting events to the ring buffer. */
+	if (family == AF_INET) {
+		__u32 daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+		struct lpm_key_v4 blk = {};
+		blk.prefixlen = 32;
+		copy_ipv4_addr(blk.addr, daddr);
+		if (bpf_map_lookup_elem(&net_block_ipv4, &blk)) {
+			record_net_drop();
+			return 0;
+		}
+	} else {
+		struct lpm_key_v6 blk = {};
+		blk.prefixlen = 128;
+		copy_ipv6_addr(blk.addr, &sk->__sk_common.skc_v6_daddr);
+		if (bpf_map_lookup_elem(&net_block_ipv6, &blk)) {
+			record_net_drop();
+			return 0;
+		}
+	}
+	{
+		__u16 dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+		if (bpf_map_lookup_elem(&net_block_ports, &dport)) {
+			record_net_drop();
+			return 0;
+		}
+	}
 
 	/* Store connect timestamp for duration calculation in tcp_close. */
 	if (bpf_map_update_elem(&conn_start_map, &sk_ptr, &ts, BPF_NOEXIST) == -E2BIG)

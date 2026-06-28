@@ -254,19 +254,25 @@ func parseSubnetKeys(cidr string) (*IPv4LPMKey, *IPv6LPMKey, error) {
 	ones, bits := ipnet.Mask.Size()
 	switch bits {
 	case 32:
+		if ones < 0 || ones > 32 {
+			return nil, nil, fmt.Errorf("CIDR %q: prefix length %d out of range for IPv4", cidr, ones)
+		}
 		ip4 := ipnet.IP.To4()
 		if ip4 == nil {
 			return nil, nil, fmt.Errorf("CIDR %q: failed to convert to IPv4", cidr)
 		}
-		k := &IPv4LPMKey{PrefixLen: uint32(ones)}
+		k := &IPv4LPMKey{PrefixLen: uint32(ones)} //nolint:gosec
 		copy(k.Addr[:], ip4)
 		return k, nil, nil
 	case 128:
+		if ones < 0 || ones > 128 {
+			return nil, nil, fmt.Errorf("CIDR %q: prefix length %d out of range for IPv6", cidr, ones)
+		}
 		ip6 := ipnet.IP.To16()
 		if ip6 == nil {
 			return nil, nil, fmt.Errorf("CIDR %q: failed to convert to IPv6", cidr)
 		}
-		k := &IPv6LPMKey{PrefixLen: uint32(ones)}
+		k := &IPv6LPMKey{PrefixLen: uint32(ones)} //nolint:gosec
 		copy(k.Addr[:], ip6)
 		return nil, k, nil
 	default:

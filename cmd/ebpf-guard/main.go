@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -330,7 +329,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// SamplingControllers. It is shared by the collectors' status reporters
 	// (which register each controller as its collector comes up) and the CPU
 	// pressure watcher (which adjusts rates under load).
-	samplingMux := newSamplingMux()
+	samplingMux := watchdog.NewMultiBPFController(slog.Default())
 
 	if cfg.Profiler.Enabled {
 		profCfg := profiler.ProfilerConfig{
@@ -1416,7 +1415,7 @@ func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterCo
 // any effect there, so it's safe to write the same full rate set to all
 // three. Without this, sys_enter_read/sys_enter_write fire on every syscall
 // system-wide and flood the event channel within seconds.
-func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig, mux *samplingMux, eventType string) {
+func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig, mux *watchdog.MultiBPFController, eventType string) {
 	ctrl, err := internalbpf.NewSamplingController(configMap)
 	if err != nil {
 		slog.Warn("sampling: map unavailable, events forwarded unsampled",
@@ -1438,50 +1437,13 @@ func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig, 
 	// Expose this controller to the CPU pressure watcher so it can adaptively
 	// reduce this collector's sampling rate under load.
 	if mux != nil {
-		mux.register(eventType, ctrl)
+		mux.Register(eventType, ctrl)
 	}
 	slog.Info("sampling: enabled BPF-side static sample rate",
 		slog.String("collector", name),
 		slog.Uint64("syscall_rate", uint64(sc.SyscallRate)),
 		slog.Uint64("network_rate", uint64(sc.NetworkRate)),
 		slog.Uint64("file_rate", uint64(sc.FileRate)))
-}
-
-// samplingMux fans watchdog SetSamplingRate calls out to the per-collector BPF
-// SamplingControllers. Each collector owns an independent sampling_config map,
-// so a rate change for an event type is routed to that collector's controller.
-// It implements watchdog.BPFSamplingController and is safe for concurrent use.
-type samplingMux struct {
-	mu          sync.Mutex
-	controllers map[string]*internalbpf.SamplingController // keyed by event type
-}
-
-func newSamplingMux() *samplingMux {
-	return &samplingMux{controllers: make(map[string]*internalbpf.SamplingController)}
-}
-
-// register associates a controller with an event type ("syscall", "network",
-// "file"). Called from collector status reporters as each collector comes up.
-func (m *samplingMux) register(eventType string, ctrl *internalbpf.SamplingController) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.controllers[eventType] = ctrl
-}
-
-// SetSamplingRate implements watchdog.BPFSamplingController.
-func (m *samplingMux) SetSamplingRate(eventType string, rate float64) {
-	m.mu.Lock()
-	ctrl := m.controllers[eventType]
-	m.mu.Unlock()
-	if ctrl == nil {
-		return
-	}
-	if err := ctrl.SetSamplingRate(eventType, rate); err != nil {
-		slog.Warn("cpu pressure: failed to adjust sampling rate",
-			slog.String("event_type", eventType),
-			slog.Float64("rate", rate),
-			slog.Any("error", err))
-	}
 }
 
 // The entire procedure is bounded by a 30-second context.

@@ -4,6 +4,7 @@ package watchdog
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -224,6 +225,75 @@ func TestCPUWatcher_StartStop(t *testing.T) {
 	<-done
 }
 
+func TestCPUWatcher_DirectRecoverFromL1(t *testing.T) {
+	bpf := newMockBPFController()
+	cfg := CPUConfig{
+		CheckInterval:     time.Second,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        1,
+	}
+	w, fc := newTestWatcher(t, cfg, bpf)
+	w.checkCPU()
+
+	// Trip to level 1.
+	fc.stepFor(16, time.Second)
+	w.checkCPU()
+	require.Equal(t, cpuLevelFileShed, w.PressureLevel())
+	require.Equal(t, 0.1, bpf.GetSamplingRate("file"))
+
+	// Drop straight below recovery from level 1 → back to normal, file restored.
+	fc.stepFor(3, time.Second)
+	w.checkCPU()
+	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
+	assert.Equal(t, 1.0, bpf.GetSamplingRate("file"))
+}
+
+func TestCPUWatcher_SamplerErrorIsHandled(t *testing.T) {
+	cfg := CPUConfig{CheckInterval: time.Second, WindowSize: 1}
+	w, _ := newTestWatcher(t, cfg, nil)
+	w.cpuTimeFn = func() (float64, error) { return 0, errors.New("read failed") }
+
+	// Must not panic and must not establish a baseline on error.
+	assert.NotPanics(t, w.checkCPU)
+	assert.False(t, w.haveLast)
+	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
+}
+
+func TestCPUWatcher_NonPositiveWallDeltaSkipped(t *testing.T) {
+	cfg := CPUConfig{CheckInterval: time.Second, FileShedThreshold: 15, AllShedThreshold: 25, RecoveryThreshold: 9, WindowSize: 1}
+	w, fc := newTestWatcher(t, cfg, nil)
+	w.checkCPU() // prime at t0
+
+	// Advance CPU but not wall time: wallDelta == 0, sample is ignored.
+	fc.cpu += 100
+	w.checkCPU()
+	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
+	assert.Nil(t, w.window)
+}
+
+func TestCPUWatcher_CounterResetClampedToZero(t *testing.T) {
+	cfg := CPUConfig{CheckInterval: time.Second, FileShedThreshold: 15, AllShedThreshold: 25, RecoveryThreshold: 9, WindowSize: 1}
+	w, fc := newTestWatcher(t, cfg, nil)
+	w.checkCPU()
+
+	// A decreasing CPU counter (should never happen, but guard against it)
+	// must clamp to 0% rather than produce a negative reading.
+	fc.now = fc.now.Add(time.Second)
+	fc.cpu = -50
+	w.checkCPU()
+	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
+}
+
+func TestCPUWatcher_RegisterMetricsDuplicateErrors(t *testing.T) {
+	w := NewCPUPressureWatcher(DefaultCPUConfig(), nil, nil)
+	reg := prometheus.NewRegistry()
+	require.NoError(t, w.RegisterMetrics(reg))
+	// Re-registering the same collectors must surface an error.
+	assert.Error(t, w.RegisterMetrics(reg))
+}
+
 func TestReadProcSelfCPUSeconds(t *testing.T) {
 	v, err := readProcSelfCPUSeconds()
 	if err != nil {
@@ -240,4 +310,30 @@ func TestReadProcSelfCPUSeconds(t *testing.T) {
 	v2, err := readProcSelfCPUSeconds()
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, v2, v)
+}
+
+func TestParseProcStatCPUSeconds(t *testing.T) {
+	// Synthetic stat line. Fields 1–2 are pid and comm; the comm deliberately
+	// contains spaces and a ')' to exercise the last-paren split. After the
+	// comm: state(3)..stime(15). utime=200, stime=100 ticks → 3.0s at 100 Hz.
+	line := "1234 (weird )name) S 1 1 1 0 -1 0 10 0 0 0 200 100 0 0 20 0 1 0 999 0 0\n"
+	got, err := parseProcStatCPUSeconds(line)
+	require.NoError(t, err)
+	assert.InDelta(t, 3.0, got, 0.0001)
+}
+
+func TestParseProcStatCPUSeconds_Malformed(t *testing.T) {
+	cases := map[string]string{
+		"no closing paren":    "1234 (proc S 1 1",
+		"nothing after paren": "1234 (proc)",
+		"too few fields":      "1234 (proc) S 1 1 1",
+		"non-numeric utime":   "1234 (proc) S 1 1 1 0 -1 0 10 0 0 0 xx 100 0 0 20 0 1 0 999 0 0",
+		"non-numeric stime":   "1234 (proc) S 1 1 1 0 -1 0 10 0 0 0 200 yy 0 0 20 0 1 0 999 0 0",
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseProcStatCPUSeconds(line)
+			assert.Error(t, err)
+		})
+	}
 }

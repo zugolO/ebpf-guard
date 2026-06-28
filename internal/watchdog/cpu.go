@@ -10,7 +10,6 @@
 package watchdog
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
@@ -350,21 +349,19 @@ func (w *CPUPressureWatcher) IsThrottling() bool {
 // readProcSelfCPUSeconds returns this process's cumulative CPU time (utime +
 // stime) in seconds, read from /proc/self/stat.
 func readProcSelfCPUSeconds() (float64, error) {
-	f, err := os.Open("/proc/self/stat")
+	// /proc/self/stat is a single short line; read it whole rather than
+	// streaming so there is no file handle to close on the read path.
+	data, err := os.ReadFile("/proc/self/stat")
 	if err != nil {
-		return 0, fmt.Errorf("open /proc/self/stat: %w", err)
+		return 0, fmt.Errorf("read /proc/self/stat: %w", err)
 	}
-	defer f.Close()
+	return parseProcStatCPUSeconds(string(data))
+}
 
-	scanner := bufio.NewScanner(f)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return 0, fmt.Errorf("read /proc/self/stat: %w", err)
-		}
-		return 0, fmt.Errorf("empty /proc/self/stat")
-	}
-	line := scanner.Text()
-
+// parseProcStatCPUSeconds extracts utime+stime (in seconds) from the contents
+// of a /proc/<pid>/stat line. Split out from the file read so the field-parsing
+// logic can be unit-tested without a live /proc.
+func parseProcStatCPUSeconds(line string) (float64, error) {
 	// The comm field (2) is wrapped in parentheses and may itself contain
 	// spaces or ')'. Fields after the last ')' are fixed-position, so split
 	// there. utime is field 14 and stime field 15 (1-indexed); relative to

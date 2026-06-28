@@ -389,6 +389,90 @@ static __always_inline bool syscall_is_monitored(__s64 nr)
 	return val && (*val == 1);
 }
 
+/*
+ * Network blocklist maps — in-kernel IP/subnet/port blocking.
+ *
+ * net_block_ipv4 / net_block_ipv6: LPM TRIE for IPv4/IPv6 subnets.
+ * Lookup key: { prefixlen = 32/128 (full host bits), addr = destination IP }.
+ * The trie performs longest-prefix-match: subnets are inserted with their
+ * prefix length; individual host lookups use prefixlen = 32/128.
+ *
+ * net_block_ports: HASH of destination TCP ports in host byte order.
+ *
+ * BPF_F_NO_PREALLOC is required for LPM_TRIE.
+ */
+
+/* LPM key types — layout must match Go structs IPv4LPMKey / IPv6LPMKey */
+struct lpm_key_v4 {
+	__u32 prefixlen;  /* significant prefix bits (0-32) */
+	__u8  addr[4];    /* IPv4 address in network byte order */
+};
+
+struct lpm_key_v6 {
+	__u32 prefixlen;  /* significant prefix bits (0-128) */
+	__u8  addr[16];   /* IPv6 address in network byte order */
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 4096);
+	__type(key, struct lpm_key_v4);
+	__type(value, __u8);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} net_block_ipv4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 4096);
+	__type(key, struct lpm_key_v6);
+	__type(value, __u8);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} net_block_ipv6 SEC(".maps");
+
+/* Destination ports to block (host byte order). */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, __u16);
+	__type(value, __u8);
+} net_block_ports SEC(".maps");
+
+/*
+ * net_block_counters — per-CPU drop counter for in-kernel network blocks.
+ * Index 0: total connections dropped by the IP/subnet/port blocklist.
+ * Userspace sums across CPUs and exports as ebpf_guard_net_block_total.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} net_block_counters SEC(".maps");
+
+/* Copy IPv4 address from a __u32 (network byte order) into a 4-byte buffer. */
+static __always_inline void copy_ipv4_addr(__u8 *dst, __u32 src)
+{
+	dst[0] = (__u8)(src & 0xFF);
+	dst[1] = (__u8)((src >> 8) & 0xFF);
+	dst[2] = (__u8)((src >> 16) & 0xFF);
+	dst[3] = (__u8)((src >> 24) & 0xFF);
+}
+
+/* Copy IPv6 address from a struct in6_addr pointer. */
+static __always_inline void copy_ipv6_addr(__u8 *dst, struct in6_addr *src)
+{
+	bpf_probe_read_kernel(dst, 16, src);
+}
+
+/* Increment the in-kernel network block drop counter (per-CPU). */
+static __always_inline void record_net_drop(void)
+{
+	__u32 idx = 0;
+	__u64 *cnt = bpf_map_lookup_elem(&net_block_counters, &idx);
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
 /* Helper to get current process info */
 static __always_inline void fill_process_info(struct event *e)
 {

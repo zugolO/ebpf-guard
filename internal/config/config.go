@@ -1119,8 +1119,30 @@ type EnforcementConfig struct {
 	// socket_connect blocks, task_kill records) to the audit log.
 	// Has no effect when audit_log is empty.
 	AuditLSMEvents bool `mapstructure:"audit_lsm_events"`
+	// NetworkBlocklist configures in-kernel network connection blocking via BPF
+	// LPM trie maps.  Connections to matching subnets or ports are dropped in the
+	// kernel without reaching user-space (kprobe path) or are denied with EPERM
+	// (LSM socket_connect path, kernel 5.9+).
+	// Hot-reloadable: the BPF maps are updated without restart on config change.
+	// Example:
+	//   subnets: ["10.0.0.0/8", "2001:db8::/32"]
+	//   ports:   [4444, 6666]
+	NetworkBlocklist NetworkBlocklistConfig `mapstructure:"network_blocklist"`
 	// NetworkPolicy configures automatic Kubernetes NetworkPolicy generation and application.
 	NetworkPolicy NetworkPolicyEnforcementConfig `mapstructure:"networkpolicy"`
+}
+
+// NetworkBlocklistConfig holds the in-kernel network blocklist configuration.
+// Subnets and Ports entries are loaded into BPF LPM trie / hash maps at
+// startup and on hot-reload.
+type NetworkBlocklistConfig struct {
+	// Subnets is a list of CIDR notation subnets to block (IPv4 and IPv6).
+	// Both host addresses (/32, /128) and subnets (/8, /24, /32 …) are supported.
+	// Examples: ["10.0.0.0/8", "192.168.1.0/24", "2001:db8::/32"]
+	Subnets []string `mapstructure:"subnets" yaml:"subnets"`
+	// Ports is a list of destination TCP ports to block.
+	// Examples: [4444, 6666, 1337]
+	Ports []uint16 `mapstructure:"ports" yaml:"ports"`
 }
 
 // NetworkPolicyEnforcementConfig configures the networkpolicy enforcement action.
@@ -1813,6 +1835,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("enforcement.audit_log", "")
 	v.SetDefault("enforcement.lsm_path_blocklist", []string{})
 	v.SetDefault("enforcement.audit_lsm_events", true)
+	v.SetDefault("enforcement.network_blocklist.subnets", []string{})
+	v.SetDefault("enforcement.network_blocklist.ports", []uint16{})
 
 	// Watchdog defaults (Sprint 22.0)
 	v.SetDefault("watchdog.memory_pressure.enabled", true)

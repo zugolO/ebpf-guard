@@ -172,6 +172,39 @@ func (w *CPUPressureWatcher) RegisterMetrics(reg prometheus.Registerer) error {
 	return nil
 }
 
+// SetupCPUPressureWatcher constructs a CPU pressure watcher from cfg, registers
+// its Prometheus metrics on reg, and starts it on ctx in a background
+// goroutine. It returns nil when cfg.Enabled is false. A metric-registration
+// error is logged rather than returned so a duplicate registration cannot abort
+// agent startup. Wiring lives here (rather than in package main) so it is
+// unit-testable without a live eBPF kernel.
+func SetupCPUPressureWatcher(
+	ctx context.Context,
+	cfg CPUConfig,
+	logger *slog.Logger,
+	mux BPFSamplingController,
+	reg prometheus.Registerer,
+) *CPUPressureWatcher {
+	if !cfg.Enabled {
+		return nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	w := NewCPUPressureWatcher(cfg, logger, mux)
+	if reg != nil {
+		if err := w.RegisterMetrics(reg); err != nil {
+			logger.Warn("cpu pressure: failed to register metrics", slog.Any("error", err))
+		}
+	}
+	go w.Start(ctx)
+	logger.Info("cpu pressure: adaptive load shedding enabled",
+		slog.Float64("file_shed_threshold", w.fileShedThreshold),
+		slog.Float64("all_shed_threshold", w.allShedThreshold),
+		slog.Float64("recovery_threshold", w.recoveryThreshold))
+	return w
+}
+
 // Start begins monitoring CPU pressure until the context is cancelled.
 func (w *CPUPressureWatcher) Start(ctx context.Context) {
 	ticker := time.NewTicker(w.checkInterval)

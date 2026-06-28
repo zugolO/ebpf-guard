@@ -312,6 +312,79 @@ func TestReadProcSelfCPUSeconds(t *testing.T) {
 	assert.GreaterOrEqual(t, v2, v)
 }
 
+func TestCPUWatcher_DefaultSeedingFromZeroConfig(t *testing.T) {
+	// An all-zero config must be filled in with safe defaults.
+	w := NewCPUPressureWatcher(CPUConfig{}, nil, nil)
+	assert.Equal(t, 5*time.Second, w.checkInterval)
+	assert.Equal(t, 3, w.windowSize)
+	assert.Equal(t, 15.0, w.fileShedThreshold)
+	assert.InDelta(t, 25.0, w.allShedThreshold, 0.001)
+	assert.InDelta(t, 9.0, w.recoveryThreshold, 0.001)
+	assert.GreaterOrEqual(t, w.numCPU, 1)
+}
+
+func TestCPUWatcher_ShedIsIdempotent(t *testing.T) {
+	bpf := newMockBPFController()
+	w := NewCPUPressureWatcher(DefaultCPUConfig(), nil, bpf)
+
+	w.shed("file")
+	// A second shed of the same type must not overwrite the saved normal rate
+	// nor re-issue the controller call with a stale value.
+	bpf.SetSamplingRate("file", 0.5) // simulate external change
+	w.shed("file")
+	assert.Equal(t, 0.5, bpf.GetSamplingRate("file")) // untouched by the 2nd shed
+
+	// Recovery still restores to the saved normal rate (1.0).
+	w.recoverNormalMode()
+	assert.Equal(t, 1.0, bpf.GetSamplingRate("file"))
+}
+
+func TestSetupCPUPressureWatcher_Disabled(t *testing.T) {
+	cfg := DefaultCPUConfig()
+	cfg.Enabled = false
+	reg := prometheus.NewRegistry()
+	w := SetupCPUPressureWatcher(context.Background(), cfg, nil, nil, reg)
+	assert.Nil(t, w)
+	// Nothing should have been registered.
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	assert.Empty(t, families)
+}
+
+func TestSetupCPUPressureWatcher_EnabledRegistersAndRuns(t *testing.T) {
+	cfg := DefaultCPUConfig()
+	cfg.CheckInterval = 20 * time.Millisecond
+	reg := prometheus.NewRegistry()
+	bpf := newMockBPFController()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w := SetupCPUPressureWatcher(ctx, cfg, nil, bpf, reg)
+	require.NotNil(t, w)
+
+	// Metrics registered.
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	assert.Len(t, families, 2)
+
+	// Let the background goroutine tick at least once, then stop it cleanly.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+}
+
+func TestSetupCPUPressureWatcher_DuplicateRegistrationLogged(t *testing.T) {
+	cfg := DefaultCPUConfig()
+	reg := prometheus.NewRegistry()
+	// Pre-register a colliding metric so RegisterMetrics fails inside Setup.
+	clash := prometheus.NewGauge(prometheus.GaugeOpts{Name: "ebpf_guard_cpu_pressure_level"})
+	require.NoError(t, reg.Register(clash))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Must not panic despite the registration error; watcher is still returned.
+	w := SetupCPUPressureWatcher(ctx, cfg, nil, nil, reg)
+	assert.NotNil(t, w)
+}
+
 func TestParseProcStatCPUSeconds(t *testing.T) {
 	// Synthetic stat line. Fields 1–2 are pid and comm; the comm deliberately
 	// contains spaces and a ')' to exercise the last-paren split. After the

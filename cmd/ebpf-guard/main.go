@@ -386,27 +386,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// CPU pressure auto-tuning: adaptively shed noisy collectors (file first,
 	// then syscall/network) when the agent's own CPU usage exceeds the budget,
 	// restoring them once the spike subsides. Independent of the profiler.
-	if cfg.Watchdog.CPUPressure.Enabled {
-		cp := cfg.Watchdog.CPUPressure
-		cpuCfg := watchdog.CPUConfig{
-			Enabled:           true,
-			CheckInterval:     time.Duration(cp.CheckInterval) * time.Second,
-			CPULimitPercent:   cp.CPULimitPercent,
-			FileShedThreshold: cp.FileShedThreshold,
-			AllShedThreshold:  cp.AllShedThreshold,
-			RecoveryThreshold: cp.RecoveryThreshold,
-			WindowSize:        cp.WindowSize,
-		}
-		cpuWatcher := watchdog.NewCPUPressureWatcher(cpuCfg, slog.Default(), samplingMux)
-		if err := cpuWatcher.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
-			slog.Warn("cpu pressure: failed to register metrics", slog.Any("error", err))
-		}
-		go cpuWatcher.Start(ctx)
-		slog.Info("cpu pressure: adaptive load shedding enabled",
-			slog.Float64("file_shed_threshold", cpuCfg.FileShedThreshold),
-			slog.Float64("all_shed_threshold", cpuCfg.AllShedThreshold),
-			slog.Float64("recovery_threshold", cpuCfg.RecoveryThreshold))
-	}
+	// The construction/registration/start wiring lives in watchdog so it can be
+	// unit-tested; here we only map config fields.
+	cp := cfg.Watchdog.CPUPressure
+	watchdog.SetupCPUPressureWatcher(ctx, watchdog.CPUConfig{
+		Enabled:           cp.Enabled,
+		CheckInterval:     time.Duration(cp.CheckInterval) * time.Second,
+		CPULimitPercent:   cp.CPULimitPercent,
+		FileShedThreshold: cp.FileShedThreshold,
+		AllShedThreshold:  cp.AllShedThreshold,
+		RecoveryThreshold: cp.RecoveryThreshold,
+		WindowSize:        cp.WindowSize,
+	}, slog.Default(), samplingMux, prometheus.DefaultRegisterer)
 
 	// Feature F: cross-node alert correlation via gossip amplification.
 	var gossipMgr *gossip.Manager

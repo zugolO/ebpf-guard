@@ -330,6 +330,19 @@ type MemoryStoreConfig struct {
 	RetentionPeriod string `mapstructure:"retention_period"`
 }
 
+// StoreBatchingConfig holds async-batching configuration for alert writes.
+type StoreBatchingConfig struct {
+	// BatchSize is the number of alerts that trigger an immediate flush.
+	// Zero disables batching (writes are synchronous). Default: 0 (disabled).
+	BatchSize int `mapstructure:"batch_size"`
+	// FlushInterval is the maximum time an alert waits before being flushed,
+	// regardless of batch size. Parsed as a duration string (e.g. "500ms").
+	FlushInterval string `mapstructure:"flush_interval"`
+	// MaxBuffer is the upper bound on queued alerts before alerts are dropped.
+	// Default: 10 × batch_size.
+	MaxBuffer int `mapstructure:"max_buffer"`
+}
+
 // StoreConfig holds storage backend configuration.
 type StoreConfig struct {
 	// Backend specifies the storage backend: "memory", "sqlite", "opensearch"
@@ -340,6 +353,9 @@ type StoreConfig struct {
 	SQLite SQLiteStoreConfig `mapstructure:"sqlite"`
 	// OpenSearch configuration
 	OpenSearch OpenSearchStoreConfig `mapstructure:"opensearch"`
+	// Batching configures async write batching. When batch_size > 0 alerts are
+	// buffered and written in groups, reducing per-write overhead under burst load.
+	Batching StoreBatchingConfig `mapstructure:"batching"`
 }
 
 // FileOpsConfig controls which file-access operations are collected.
@@ -1796,6 +1812,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("store.opensearch.username", "")
 	v.SetDefault("store.opensearch.password", "")
 	v.SetDefault("store.opensearch.insecure_skip_verify", false)
+	v.SetDefault("store.batching.batch_size", 0)
+	v.SetDefault("store.batching.flush_interval", "500ms")
+	v.SetDefault("store.batching.max_buffer", 0)
 
 	// Collectors defaults
 	v.SetDefault("collectors.tls.enabled", false)

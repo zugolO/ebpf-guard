@@ -514,6 +514,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	sqliteBackupInterval, _ := time.ParseDuration(cfg.Store.SQLite.Backup.Interval)
 	memRetentionPeriod, _ := time.ParseDuration(cfg.Store.Memory.RetentionPeriod)
 
+	batchFlushInterval, _ := time.ParseDuration(cfg.Store.Batching.FlushInterval)
+
 	alertStore, err := store.NewWithContext(ctx, store.Config{
 		Backend: cfg.Store.Backend,
 		Memory: store.MemoryStoreOptions{
@@ -543,6 +545,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			TLSServerName:      cfg.Store.OpenSearch.TLSServerName,
 		},
 		RetentionPeriod: 7 * 24 * time.Hour,
+		Batching: store.BatchingStoreConfig{
+			BatchSize:     cfg.Store.Batching.BatchSize,
+			FlushInterval: batchFlushInterval,
+			MaxBuffer:     cfg.Store.Batching.MaxBuffer,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("init alert store: %w", err)

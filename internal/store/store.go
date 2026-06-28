@@ -102,6 +102,10 @@ type Config struct {
 	RetentionPeriod time.Duration
 	// FlushInterval defines how often to flush profiles to disk.
 	FlushInterval time.Duration
+	// Batching configures the async-batching decorator. When BatchSize > 0 the
+	// returned store is wrapped in a BatchingStore that buffers writes and
+	// flushes them in groups via StoreBatch, reducing per-write disk pressure.
+	Batching BatchingStoreConfig
 }
 
 // SQLiteConfig defines SQLite-specific configuration.
@@ -169,25 +173,36 @@ func New(cfg Config) (AlertStore, error) {
 
 // NewWithContext creates a new AlertStore; for the memory backend it starts
 // a background retention goroutine that exits when ctx is cancelled.
+// When cfg.Batching.BatchSize > 0 the store is wrapped in a BatchingStore.
 func NewWithContext(ctx context.Context, cfg Config) (AlertStore, error) {
+	var inner AlertStore
+	var err error
+
 	switch cfg.Backend {
 	case "sqlite":
-		store, err := NewSQLiteStore(cfg.SQLite)
+		inner, err = NewSQLiteStore(cfg.SQLite)
 		if err != nil {
 			return nil, fmt.Errorf("sqlite store: %w", err)
 		}
-		return store, nil
 	case "opensearch":
-		return NewOpenSearchStore(cfg.OpenSearch)
+		inner, err = NewOpenSearchStore(cfg.OpenSearch)
+		if err != nil {
+			return nil, err
+		}
 	case "memory":
 		opts := MemoryStoreOptions{
 			MaxAlerts:       cfg.Memory.MaxAlerts,
 			RetentionPeriod: cfg.Memory.RetentionPeriod,
 		}
-		return NewMemoryStoreWithContext(ctx, opts), nil
+		inner = NewMemoryStoreWithContext(ctx, opts)
 	default:
 		return nil, fmt.Errorf("unknown store backend: %s", cfg.Backend)
 	}
+
+	if cfg.Batching.BatchSize > 0 {
+		return NewBatchingStore(inner, cfg.Batching), nil
+	}
+	return inner, nil
 }
 
 // InstrumentedStore wraps an AlertStore with Prometheus metrics.

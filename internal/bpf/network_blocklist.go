@@ -8,6 +8,14 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+// bpfMap is the subset of *ebpf.Map operations used here.
+// Extracted as an interface so unit tests can inject in-memory fakes.
+type bpfMap interface {
+	Update(key, value interface{}, flags ebpf.MapUpdateFlags) error
+	Delete(key interface{}) error
+	Lookup(key, valueOut interface{}) error
+}
+
 // IPv4LPMKey is the BPF key for net_block_ipv4 (BPF_MAP_TYPE_LPM_TRIE).
 // Layout must match C struct lpm_key_v4 in bpf/common.h exactly.
 type IPv4LPMKey struct {
@@ -43,9 +51,9 @@ type NetworkBlocklistConfig struct {
 // SetBlocklist replaces the current config-driven entries atomically,
 // enabling hot-reload on config change.
 type NetworkBlocklistController struct {
-	ipv4Map  *ebpf.Map
-	ipv6Map  *ebpf.Map
-	portsMap *ebpf.Map
+	ipv4Map  bpfMap
+	ipv6Map  bpfMap
+	portsMap bpfMap
 
 	// Track config-loaded keys so hot-reload can remove stale entries.
 	configIPv4Keys []IPv4LPMKey
@@ -227,7 +235,7 @@ func (n *NetworkBlocklistController) RemovePort(port uint16) error {
 // ReadNetBlockDropCount reads and sums the per-CPU drop counter from the
 // net_block_counters BPF PERCPU_ARRAY map. Returns the total number of
 // connections dropped in-kernel since agent start (or last reset).
-func ReadNetBlockDropCount(countersMap *ebpf.Map) (uint64, error) {
+func ReadNetBlockDropCount(countersMap bpfMap) (uint64, error) {
 	if countersMap == nil {
 		return 0, fmt.Errorf("bpf: net_block_counters map is nil")
 	}

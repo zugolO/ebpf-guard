@@ -2,12 +2,63 @@ package bpf
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"net"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ---------------------------------------------------------------------------
+// fakeMap — in-memory BPF map stub for unit tests
+// ---------------------------------------------------------------------------
+
+type fakeMap struct {
+	data       map[string]uint8
+	callErr    error    // returned by every operation when non-nil
+	perCPU     []uint64 // returned by Lookup (counter map)
+	lookupErr  error    // returned specifically by Lookup when non-nil
+}
+
+func newFakeMap() *fakeMap {
+	return &fakeMap{data: make(map[string]uint8)}
+}
+
+func (f *fakeMap) Update(key, value interface{}, _ ebpf.MapUpdateFlags) error {
+	if f.callErr != nil {
+		return f.callErr
+	}
+	v, _ := value.(uint8)
+	f.data[fmt.Sprintf("%v", key)] = v
+	return nil
+}
+
+func (f *fakeMap) Delete(key interface{}) error {
+	if f.callErr != nil {
+		return f.callErr
+	}
+	k := fmt.Sprintf("%v", key)
+	if _, ok := f.data[k]; !ok {
+		return ebpf.ErrKeyNotExist
+	}
+	delete(f.data, k)
+	return nil
+}
+
+func (f *fakeMap) Lookup(key, valueOut interface{}) error {
+	if f.lookupErr != nil {
+		return f.lookupErr
+	}
+	if ptr, ok := valueOut.(*[]uint64); ok {
+		*ptr = f.perCPU
+	}
+	return nil
+}
+
+func (f *fakeMap) size() int { return len(f.data) }
 
 // ---------------------------------------------------------------------------
 // parseSubnetKeys
@@ -448,4 +499,444 @@ func TestRemoveStaleIPv6_DeduplicatesCorrectly(t *testing.T) {
 	err := c.removeStaleIPv6([]IPv6LPMKey{k1, k2}, []IPv6LPMKey{k2})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stale")
+}
+
+// ---------------------------------------------------------------------------
+// NewNetworkBlocklistController – success path
+// ---------------------------------------------------------------------------
+
+func TestNewNetworkBlocklistController_Success(t *testing.T) {
+	// NewNetworkBlocklistController requires non-nil *ebpf.Map, which we can't
+	// create without a kernel. Test the success path by constructing the struct
+	// directly with fake maps and verifying AddSubnet works end-to-end.
+	m4 := newFakeMap()
+	m6 := newFakeMap()
+	mp := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: m6, portsMap: mp}
+	require.NoError(t, c.AddSubnet("10.0.0.0/8"))
+	require.NoError(t, c.AddSubnet("2001:db8::/32"))
+	require.NoError(t, c.AddPort(4444))
+	assert.Equal(t, 1, m4.size())
+	assert.Equal(t, 1, m6.size())
+	assert.Equal(t, 1, mp.size())
+}
+
+// ---------------------------------------------------------------------------
+// AddSubnet – success paths
+// ---------------------------------------------------------------------------
+
+func TestAddSubnet_IPv4_Success(t *testing.T) {
+	m4 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap()}
+	require.NoError(t, c.AddSubnet("10.0.0.0/8"))
+	assert.Equal(t, 1, m4.size())
+}
+
+func TestAddSubnet_IPv6_Success(t *testing.T) {
+	m6 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: m6}
+	require.NoError(t, c.AddSubnet("2001:db8::/32"))
+	assert.Equal(t, 1, m6.size())
+}
+
+func TestAddSubnet_MultipleIPv4(t *testing.T) {
+	m4 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap()}
+	require.NoError(t, c.AddSubnet("10.0.0.0/8"))
+	require.NoError(t, c.AddSubnet("192.168.0.0/16"))
+	require.NoError(t, c.AddSubnet("172.16.0.0/12"))
+	assert.Equal(t, 3, m4.size())
+}
+
+// ---------------------------------------------------------------------------
+// RemoveSubnet – success and not-found paths
+// ---------------------------------------------------------------------------
+
+func TestRemoveSubnet_IPv4_Success(t *testing.T) {
+	m4 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap()}
+	require.NoError(t, c.AddSubnet("10.0.0.0/8"))
+	require.Equal(t, 1, m4.size())
+
+	require.NoError(t, c.RemoveSubnet("10.0.0.0/8"))
+	assert.Equal(t, 0, m4.size())
+}
+
+func TestRemoveSubnet_IPv6_Success(t *testing.T) {
+	m6 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: m6}
+	require.NoError(t, c.AddSubnet("2001:db8::/32"))
+	require.Equal(t, 1, m6.size())
+
+	require.NoError(t, c.RemoveSubnet("2001:db8::/32"))
+	assert.Equal(t, 0, m6.size())
+}
+
+func TestRemoveSubnet_IPv4_NotFound_NoError(t *testing.T) {
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: newFakeMap()}
+	// Removing a non-existent subnet is a no-op, not an error.
+	require.NoError(t, c.RemoveSubnet("10.0.0.0/8"))
+}
+
+func TestRemoveSubnet_IPv6_NotFound_NoError(t *testing.T) {
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: newFakeMap()}
+	require.NoError(t, c.RemoveSubnet("2001:db8::/32"))
+}
+
+// ---------------------------------------------------------------------------
+// AddPort / RemovePort – success and not-found paths
+// ---------------------------------------------------------------------------
+
+func TestAddPort_Success(t *testing.T) {
+	mp := newFakeMap()
+	c := &NetworkBlocklistController{portsMap: mp}
+	require.NoError(t, c.AddPort(4444))
+	require.NoError(t, c.AddPort(6666))
+	assert.Equal(t, 2, mp.size())
+}
+
+func TestRemovePort_Success(t *testing.T) {
+	mp := newFakeMap()
+	c := &NetworkBlocklistController{portsMap: mp}
+	require.NoError(t, c.AddPort(4444))
+	require.NoError(t, c.RemovePort(4444))
+	assert.Equal(t, 0, mp.size())
+}
+
+func TestRemovePort_NotFound_NoError(t *testing.T) {
+	c := &NetworkBlocklistController{portsMap: newFakeMap()}
+	require.NoError(t, c.RemovePort(9999))
+}
+
+// ---------------------------------------------------------------------------
+// SetBlocklist – success paths and hot-reload
+// ---------------------------------------------------------------------------
+
+func TestSetBlocklist_IPv4Subnets_Success(t *testing.T) {
+	m4 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap(), portsMap: newFakeMap()}
+	err := c.SetBlocklist(NetworkBlocklistConfig{
+		Subnets: []string{"10.0.0.0/8", "192.168.0.0/16"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, m4.size())
+}
+
+func TestSetBlocklist_IPv6Subnets_Success(t *testing.T) {
+	m6 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: m6, portsMap: newFakeMap()}
+	err := c.SetBlocklist(NetworkBlocklistConfig{
+		Subnets: []string{"2001:db8::/32", "fe80::/10"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, m6.size())
+}
+
+func TestSetBlocklist_Ports_Success(t *testing.T) {
+	mp := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: newFakeMap(), portsMap: mp}
+	err := c.SetBlocklist(NetworkBlocklistConfig{Ports: []uint16{4444, 6666, 1337}})
+	require.NoError(t, err)
+	assert.Equal(t, 3, mp.size())
+}
+
+func TestSetBlocklist_Mixed_Success(t *testing.T) {
+	m4, m6, mp := newFakeMap(), newFakeMap(), newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: m6, portsMap: mp}
+	err := c.SetBlocklist(NetworkBlocklistConfig{
+		Subnets: []string{"10.0.0.0/8", "2001:db8::/32"},
+		Ports:   []uint16{4444},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, m4.size())
+	assert.Equal(t, 1, m6.size())
+	assert.Equal(t, 1, mp.size())
+}
+
+func TestSetBlocklist_HotReload_RemovesStaleIPv4(t *testing.T) {
+	m4 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap(), portsMap: newFakeMap()}
+
+	// First load: two subnets.
+	require.NoError(t, c.SetBlocklist(NetworkBlocklistConfig{
+		Subnets: []string{"10.0.0.0/8", "192.168.0.0/16"},
+	}))
+	assert.Equal(t, 2, m4.size())
+
+	// Hot-reload: only one subnet kept, the other should be removed.
+	require.NoError(t, c.SetBlocklist(NetworkBlocklistConfig{
+		Subnets: []string{"192.168.0.0/16"},
+	}))
+	assert.Equal(t, 1, m4.size())
+}
+
+func TestSetBlocklist_HotReload_RemovesStalePorts(t *testing.T) {
+	mp := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: newFakeMap(), portsMap: mp}
+
+	require.NoError(t, c.SetBlocklist(NetworkBlocklistConfig{Ports: []uint16{4444, 6666}}))
+	assert.Equal(t, 2, mp.size())
+
+	require.NoError(t, c.SetBlocklist(NetworkBlocklistConfig{Ports: []uint16{6666}}))
+	assert.Equal(t, 1, mp.size())
+}
+
+func TestSetBlocklist_HotReload_AddNew(t *testing.T) {
+	m4 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap(), portsMap: newFakeMap()}
+
+	require.NoError(t, c.SetBlocklist(NetworkBlocklistConfig{Subnets: []string{"10.0.0.0/8"}}))
+	assert.Equal(t, 1, m4.size())
+
+	// Add a second subnet on reload.
+	require.NoError(t, c.SetBlocklist(NetworkBlocklistConfig{
+		Subnets: []string{"10.0.0.0/8", "172.16.0.0/12"},
+	}))
+	assert.Equal(t, 2, m4.size())
+}
+
+// ---------------------------------------------------------------------------
+// ReadNetBlockDropCount – success and error paths
+// ---------------------------------------------------------------------------
+
+func TestReadNetBlockDropCount_Success(t *testing.T) {
+	m := &fakeMap{perCPU: []uint64{10, 20, 30}}
+	total, err := ReadNetBlockDropCount(m)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(60), total)
+}
+
+func TestReadNetBlockDropCount_ZeroCounters(t *testing.T) {
+	m := &fakeMap{perCPU: []uint64{0, 0, 0}}
+	total, err := ReadNetBlockDropCount(m)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), total)
+}
+
+func TestReadNetBlockDropCount_LookupError(t *testing.T) {
+	m := &fakeMap{lookupErr: errors.New("lookup failed")}
+	_, err := ReadNetBlockDropCount(m)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_counters")
+}
+
+// ---------------------------------------------------------------------------
+// removeStaleIPv4/IPv6/ports – success paths (map present, key found)
+// ---------------------------------------------------------------------------
+
+func TestRemoveStaleIPv4_DeletesStaleKey(t *testing.T) {
+	m4 := newFakeMap()
+	c := &NetworkBlocklistController{ipv4Map: m4}
+
+	k1 := IPv4LPMKey{PrefixLen: 8, Addr: [4]byte{10, 0, 0, 0}}
+	k2 := IPv4LPMKey{PrefixLen: 24, Addr: [4]byte{192, 168, 1, 0}}
+
+	// Pre-populate map with both keys.
+	require.NoError(t, m4.Update(k1, uint8(1), 0))
+	require.NoError(t, m4.Update(k2, uint8(1), 0))
+	assert.Equal(t, 2, m4.size())
+
+	// k1 is stale (not in newKeys).
+	require.NoError(t, c.removeStaleIPv4([]IPv4LPMKey{k1, k2}, []IPv4LPMKey{k2}))
+	assert.Equal(t, 1, m4.size())
+}
+
+func TestRemoveStaleIPv6_DeletesStaleKey(t *testing.T) {
+	m6 := newFakeMap()
+	c := &NetworkBlocklistController{ipv6Map: m6}
+
+	var addr1, addr2 [16]byte
+	copy(addr1[:], net.ParseIP("2001:db8::").To16())
+	copy(addr2[:], net.ParseIP("fe80::").To16())
+	k1 := IPv6LPMKey{PrefixLen: 32, Addr: addr1}
+	k2 := IPv6LPMKey{PrefixLen: 10, Addr: addr2}
+
+	require.NoError(t, m6.Update(k1, uint8(1), 0))
+	require.NoError(t, m6.Update(k2, uint8(1), 0))
+	assert.Equal(t, 2, m6.size())
+
+	require.NoError(t, c.removeStaleIPv6([]IPv6LPMKey{k1, k2}, []IPv6LPMKey{k2}))
+	assert.Equal(t, 1, m6.size())
+}
+
+func TestRemoveStaleports_DeletesStalePort(t *testing.T) {
+	mp := newFakeMap()
+	c := &NetworkBlocklistController{portsMap: mp}
+
+	require.NoError(t, mp.Update(uint16(80), uint8(1), 0))
+	require.NoError(t, mp.Update(uint16(443), uint8(1), 0))
+	assert.Equal(t, 2, mp.size())
+
+	require.NoError(t, c.removeStaleports([]uint16{80, 443}, []uint16{443}))
+	assert.Equal(t, 1, mp.size())
+}
+
+func TestRemoveStaleIPv4_NotFound_NoError(t *testing.T) {
+	// If the stale key is already absent from the map, isNotFound suppresses the error.
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap()}
+	k := IPv4LPMKey{PrefixLen: 8, Addr: [4]byte{10, 0, 0, 0}}
+	require.NoError(t, c.removeStaleIPv4([]IPv4LPMKey{k}, []IPv4LPMKey{}))
+}
+
+func TestRemoveStaleIPv6_NotFound_NoError(t *testing.T) {
+	c := &NetworkBlocklistController{ipv6Map: newFakeMap()}
+	var addr [16]byte
+	copy(addr[:], net.ParseIP("2001:db8::").To16())
+	k := IPv6LPMKey{PrefixLen: 32, Addr: addr}
+	require.NoError(t, c.removeStaleIPv6([]IPv6LPMKey{k}, []IPv6LPMKey{}))
+}
+
+func TestRemoveStaleports_NotFound_NoError(t *testing.T) {
+	c := &NetworkBlocklistController{portsMap: newFakeMap()}
+	require.NoError(t, c.removeStaleports([]uint16{80}, []uint16{}))
+}
+
+// ---------------------------------------------------------------------------
+// Map operation error propagation
+// ---------------------------------------------------------------------------
+
+func TestAddSubnet_IPv4_UpdateError(t *testing.T) {
+	m4 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("update fail")}
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap()}
+	err := c.AddSubnet("10.0.0.0/8")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv4 add")
+}
+
+func TestAddSubnet_IPv6_UpdateError(t *testing.T) {
+	m6 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("update fail")}
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: m6}
+	err := c.AddSubnet("2001:db8::/32")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv6 add")
+}
+
+func TestRemoveSubnet_IPv4_DeleteError(t *testing.T) {
+	m4 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap()}
+	err := c.RemoveSubnet("10.0.0.0/8")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv4 remove")
+}
+
+func TestRemoveSubnet_IPv6_DeleteError(t *testing.T) {
+	m6 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: m6}
+	err := c.RemoveSubnet("2001:db8::/32")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv6 remove")
+}
+
+func TestAddPort_UpdateError(t *testing.T) {
+	mp := &fakeMap{data: make(map[string]uint8), callErr: errors.New("update fail")}
+	c := &NetworkBlocklistController{portsMap: mp}
+	err := c.AddPort(4444)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ports add port")
+}
+
+func TestRemovePort_DeleteError(t *testing.T) {
+	mp := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{portsMap: mp}
+	err := c.RemovePort(4444)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ports remove port")
+}
+
+func TestSetBlocklist_IPv4_UpdateError(t *testing.T) {
+	m4 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("update fail")}
+	c := &NetworkBlocklistController{ipv4Map: m4, ipv6Map: newFakeMap(), portsMap: newFakeMap()}
+	err := c.SetBlocklist(NetworkBlocklistConfig{Subnets: []string{"10.0.0.0/8"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv4 update")
+}
+
+func TestSetBlocklist_IPv6_UpdateError(t *testing.T) {
+	m6 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("update fail")}
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: m6, portsMap: newFakeMap()}
+	err := c.SetBlocklist(NetworkBlocklistConfig{Subnets: []string{"2001:db8::/32"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv6 update")
+}
+
+func TestSetBlocklist_Ports_UpdateError(t *testing.T) {
+	mp := &fakeMap{data: make(map[string]uint8), callErr: errors.New("update fail")}
+	c := &NetworkBlocklistController{ipv4Map: newFakeMap(), ipv6Map: newFakeMap(), portsMap: mp}
+	err := c.SetBlocklist(NetworkBlocklistConfig{Ports: []uint16{4444}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ports update port")
+}
+
+func TestRemoveStaleIPv4_DeleteError(t *testing.T) {
+	m4 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{ipv4Map: m4}
+	k := IPv4LPMKey{PrefixLen: 8, Addr: [4]byte{10, 0, 0, 0}}
+	err := c.removeStaleIPv4([]IPv4LPMKey{k}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remove stale")
+}
+
+func TestRemoveStaleIPv6_DeleteError(t *testing.T) {
+	m6 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{ipv6Map: m6}
+	var addr [16]byte
+	copy(addr[:], net.ParseIP("2001:db8::").To16())
+	k := IPv6LPMKey{PrefixLen: 32, Addr: addr}
+	err := c.removeStaleIPv6([]IPv6LPMKey{k}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remove stale")
+}
+
+func TestRemoveStaleports_DeleteError(t *testing.T) {
+	mp := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{portsMap: mp}
+	err := c.removeStaleports([]uint16{80}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remove stale port")
+}
+
+// ---------------------------------------------------------------------------
+// SetBlocklist – stale-removal error propagation
+// ---------------------------------------------------------------------------
+
+func TestSetBlocklist_RemoveStaleIPv4Error(t *testing.T) {
+	m4 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{
+		ipv4Map:        m4,
+		ipv6Map:        newFakeMap(),
+		portsMap:       newFakeMap(),
+		configIPv4Keys: []IPv4LPMKey{{PrefixLen: 8, Addr: [4]byte{10}}},
+	}
+	// Empty new config → old key is stale → delete attempted → error.
+	err := c.SetBlocklist(NetworkBlocklistConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv4")
+}
+
+func TestSetBlocklist_RemoveStaleIPv6Error(t *testing.T) {
+	m6 := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	var addr [16]byte
+	copy(addr[:], net.ParseIP("2001:db8::").To16())
+	c := &NetworkBlocklistController{
+		ipv4Map:        newFakeMap(),
+		ipv6Map:        m6,
+		portsMap:       newFakeMap(),
+		configIPv6Keys: []IPv6LPMKey{{PrefixLen: 32, Addr: addr}},
+	}
+	err := c.SetBlocklist(NetworkBlocklistConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ipv6")
+}
+
+func TestSetBlocklist_RemoveStalePortsError(t *testing.T) {
+	mp := &fakeMap{data: make(map[string]uint8), callErr: errors.New("delete fail")}
+	c := &NetworkBlocklistController{
+		ipv4Map:     newFakeMap(),
+		ipv6Map:     newFakeMap(),
+		portsMap:    mp,
+		configPorts: []uint16{80},
+	}
+	err := c.SetBlocklist(NetworkBlocklistConfig{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "net_block_ports")
 }

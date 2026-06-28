@@ -2,6 +2,7 @@ package bpf
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 
@@ -351,8 +352,8 @@ func (n *NetworkBlocklistController) removeStaleports(old, newPorts []uint16) er
 
 // isNotFound reports whether err indicates a BPF map key-not-found condition.
 func isNotFound(err error) bool {
-	return err != nil && (err.Error() == "key does not exist" ||
-		err == ebpf.ErrKeyNotExist)
+	return err != nil && (errors.Is(err, ebpf.ErrKeyNotExist) ||
+		err.Error() == "key does not exist")
 }
 
 // IPv4LPMKeyBytes serialises an IPv4LPMKey to a byte slice in the same layout

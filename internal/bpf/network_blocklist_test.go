@@ -367,14 +367,14 @@ func TestIsNotFound_NilError(t *testing.T) {
 }
 
 func TestIsNotFound_ErrKeyNotExist(t *testing.T) {
-	assert.True(t, isNotFound(ebpfErrKeyNotExist()))
-}
-
-// ebpfErrKeyNotExist returns a sentinel error that matches the key-not-exist
-// check in isNotFound without importing ebpf in the test package (it's
-// already imported in the production file).
-func ebpfErrKeyNotExist() error {
-	return ebpfNotFoundErr{}
+	// Exact sentinel matches via errors.Is.
+	assert.True(t, isNotFound(ebpf.ErrKeyNotExist))
+	// Wrapped sentinel also matches.
+	assert.True(t, isNotFound(fmt.Errorf("wrapped: %w", ebpf.ErrKeyNotExist)))
+	// String-only match (legacy path).
+	assert.True(t, isNotFound(ebpfNotFoundErr{}))
+	// Unrelated error does not match.
+	assert.False(t, isNotFound(errors.New("something else")))
 }
 
 type ebpfNotFoundErr struct{}

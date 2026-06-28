@@ -1142,6 +1142,8 @@ type NetworkPolicyEnforcementConfig struct {
 type WatchdogConfig struct {
 	// MemoryPressure enables automatic profiling downgrade on memory pressure
 	MemoryPressure MemoryPressureConfig `mapstructure:"memory_pressure"`
+	// CPUPressure enables adaptive load shedding of noisy collectors on CPU pressure
+	CPUPressure CPUPressureConfig `mapstructure:"cpu_pressure"`
 }
 
 // MemoryPressureConfig holds memory pressure auto-tuning settings.
@@ -1160,6 +1162,33 @@ type MemoryPressureConfig struct {
 	// DisableAllThreshold is the available memory % below which all profiling is disabled (level 2).
 	// Must be less than DisableSequenceThreshold. Default: 5.0 (5% free RAM).
 	DisableAllThreshold float64 `mapstructure:"disable_all_threshold"`
+}
+
+// CPUPressureConfig holds CPU pressure auto-tuning settings.
+//
+// When the agent's own CPU usage (as a percentage of total VPS CPU) exceeds the
+// thresholds, the watchdog adaptively reduces BPF-side sampling of the noisiest
+// collectors — file first (level 1), then syscall/network (level 2) — and
+// restores them once usage drops back below the recovery threshold.
+type CPUPressureConfig struct {
+	// Enabled enables CPU pressure monitoring.
+	Enabled bool `mapstructure:"enabled"`
+	// CheckInterval is the interval for sampling CPU usage (seconds).
+	CheckInterval int `mapstructure:"check_interval"`
+	// CPULimitPercent is the target CPU budget (% of total VPS CPU). It seeds
+	// the level thresholds when those are left at zero. Default: 15.0.
+	CPULimitPercent float64 `mapstructure:"cpu_limit_percent"`
+	// FileShedThreshold is the CPU % above which file sampling is reduced (level 1).
+	// Defaults to CPULimitPercent.
+	FileShedThreshold float64 `mapstructure:"file_shed_threshold"`
+	// AllShedThreshold is the CPU % above which syscall/network are also reduced (level 2).
+	// Defaults to ~1.67x FileShedThreshold.
+	AllShedThreshold float64 `mapstructure:"all_shed_threshold"`
+	// RecoveryThreshold is the CPU % below which the watcher steps back one level (hysteresis).
+	// Defaults to 0.6x FileShedThreshold.
+	RecoveryThreshold float64 `mapstructure:"recovery_threshold"`
+	// WindowSize is the number of samples averaged into the sliding window. Default: 3.
+	WindowSize int `mapstructure:"window_size"`
 }
 
 // PolicyConfig holds policy-as-code settings (Sprint 23.0).
@@ -1792,6 +1821,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("watchdog.memory_pressure.recovery_threshold", 20.0)
 	v.SetDefault("watchdog.memory_pressure.disable_sequence_threshold", 10.0)
 	v.SetDefault("watchdog.memory_pressure.disable_all_threshold", 5.0)
+	v.SetDefault("watchdog.cpu_pressure.enabled", true)
+	v.SetDefault("watchdog.cpu_pressure.check_interval", 5)
+	v.SetDefault("watchdog.cpu_pressure.cpu_limit_percent", 15.0)
+	v.SetDefault("watchdog.cpu_pressure.file_shed_threshold", 15.0)
+	v.SetDefault("watchdog.cpu_pressure.all_shed_threshold", 25.0)
+	v.SetDefault("watchdog.cpu_pressure.recovery_threshold", 9.0)
+	v.SetDefault("watchdog.cpu_pressure.window_size", 3)
 
 	// Policy defaults (Sprint 23.0)
 	v.SetDefault("policy.rego.enabled", true)

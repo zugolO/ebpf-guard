@@ -212,6 +212,18 @@ prometheusRule:
               ebpf-guard memory pressure level is {{ $value }} on {{ $labels.node }}
               (1=sequence_profiling_disabled, 2=all_profiling_disabled).
               Free memory has fallen below the configured threshold.
+        # Issue #211: CPU pressure load-shedding alerts
+        - alert: EbpfGuardCPUPressure
+          expr: ebpf_guard_cpu_pressure_level > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard shedding collectors due to CPU pressure on {{ $labels.node }}"
+            description: >-
+              ebpf-guard CPU pressure level is {{ $value }} on {{ $labels.node }}
+              (1=file_sampling_reduced, 2=all_noisy_sampling_reduced).
+              Agent CPU usage has exceeded the configured budget.
         # Issue #103: collector failure alerts
         - alert: EbpfGuardCollectorDown
           expr: ebpf_guard_collector_up == 0

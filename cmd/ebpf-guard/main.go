@@ -11,40 +11,41 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
-	"github.com/spf13/cobra"
 	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/sync/semaphore"
-	"github.com/zugolO/ebpf-guard/internal/audit"
-	internalbpf "github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/spf13/cobra"
 	"github.com/zugolO/ebpf-guard/internal/attacker"
+	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
+	internalbpf "github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/canary"
 	"github.com/zugolO/ebpf-guard/internal/collector"
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/drift"
-	rulesembed "github.com/zugolO/ebpf-guard/rules"
 	"github.com/zugolO/ebpf-guard/internal/enforcer"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/internal/gossip"
 	"github.com/zugolO/ebpf-guard/internal/hidden"
+	"github.com/zugolO/ebpf-guard/internal/k8s"
 	"github.com/zugolO/ebpf-guard/internal/migration"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
-	"github.com/zugolO/ebpf-guard/internal/k8s"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
-	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/simple"
+	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/internal/tui"
-	"github.com/zugolO/ebpf-guard/internal/watchdog"
 	"github.com/zugolO/ebpf-guard/internal/wasm"
+	"github.com/zugolO/ebpf-guard/internal/watchdog"
 	"github.com/zugolO/ebpf-guard/pkg/types"
+	rulesembed "github.com/zugolO/ebpf-guard/rules"
+	"golang.org/x/sync/semaphore"
 )
 
 // Build-time variables set via ldflags. Version is the fallback reported by
@@ -279,9 +280,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	var hiddenDetector *hidden.Detector
 	if cfg.HiddenProcess.Enabled {
 		hiddenDetector = hidden.New(slog.Default(), hidden.Config{
-			Enabled:        true,
-			CheckInterval:  cfg.HiddenProcess.CheckInterval,
-			AlertSeverity:  cfg.HiddenProcess.AlertSeverity,
+			Enabled:       true,
+			CheckInterval: cfg.HiddenProcess.CheckInterval,
+			AlertSeverity: cfg.HiddenProcess.AlertSeverity,
 		})
 		slog.Info("hidden: detector initialised",
 			slog.Duration("interval", cfg.HiddenProcess.CheckInterval))
@@ -324,6 +325,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	if cfg.Correlator.MaxAlertsPerSecond > 0 {
 		engineCfg.MaxAlertsPerSecond = cfg.Correlator.MaxAlertsPerSecond
 	}
+
+	// samplingMux fans BPF-side sampling changes out to the per-collector
+	// SamplingControllers. It is shared by the collectors' status reporters
+	// (which register each controller as its collector comes up) and the CPU
+	// pressure watcher (which adjusts rates under load).
+	samplingMux := newSamplingMux()
 
 	if cfg.Profiler.Enabled {
 		profCfg := profiler.ProfilerConfig{
@@ -375,6 +382,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 			go memWatcher.Start(ctx)
 		}
+	}
+
+	// CPU pressure auto-tuning: adaptively shed noisy collectors (file first,
+	// then syscall/network) when the agent's own CPU usage exceeds the budget,
+	// restoring them once the spike subsides. Independent of the profiler.
+	if cfg.Watchdog.CPUPressure.Enabled {
+		cp := cfg.Watchdog.CPUPressure
+		cpuCfg := watchdog.CPUConfig{
+			Enabled:           true,
+			CheckInterval:     time.Duration(cp.CheckInterval) * time.Second,
+			CPULimitPercent:   cp.CPULimitPercent,
+			FileShedThreshold: cp.FileShedThreshold,
+			AllShedThreshold:  cp.AllShedThreshold,
+			RecoveryThreshold: cp.RecoveryThreshold,
+			WindowSize:        cp.WindowSize,
+		}
+		cpuWatcher := watchdog.NewCPUPressureWatcher(cpuCfg, slog.Default(), samplingMux)
+		if err := cpuWatcher.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+			slog.Warn("cpu pressure: failed to register metrics", slog.Any("error", err))
+		}
+		go cpuWatcher.Start(ctx)
+		slog.Info("cpu pressure: adaptive load shedding enabled",
+			slog.Float64("file_shed_threshold", cpuCfg.FileShedThreshold),
+			slog.Float64("all_shed_threshold", cpuCfg.AllShedThreshold),
+			slog.Float64("recovery_threshold", cpuCfg.RecoveryThreshold))
 	}
 
 	// Feature F: cross-node alert correlation via gossip amplification.
@@ -805,7 +837,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					enableKernelFilter(sc, cfg.BPF.KernelFilter)
 				}
 				if cfg.BPF.Sampling.Enabled {
-					enableSampling("syscall", sc.SamplingConfigMap(), cfg.BPF.Sampling)
+					enableSampling("syscall", sc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "syscall")
 				}
 			}))
 			collectors = append(collectors, sc.WithBackpressureStrategy(bpStrategy))
@@ -820,7 +852,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					if name != "network" || !up {
 						return
 					}
-					enableSampling("network", nc.SamplingConfigMap(), cfg.BPF.Sampling)
+					enableSampling("network", nc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "network")
 				}))
 			}
 			collectors = append(collectors, nc.WithBackpressureStrategy(bpStrategy))
@@ -837,7 +869,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					if name != "fileaccess" || !up {
 						return
 					}
-					enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling)
+					enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "file")
 				}))
 			}
 			collectors = append(collectors, fc.WithBackpressureStrategy(bpStrategy))
@@ -1258,14 +1290,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			// engine.Ingest is single-goroutine safe; call it here before dispatch.
 			alerts := engine.Ingest(ctx, event)
 
-		// Run container drift detection alongside the rule engine.
-		if driftDetector != nil {
-			driftAlerts := driftDetector.Ingest(event)
-			for _, da := range driftAlerts {
-				seq := driftSeq.Add(1)
-				alerts = append(alerts, drift.DriftAlertToTypes(da, seq, cfg.Drift.EnforceMode))
+			// Run container drift detection alongside the rule engine.
+			if driftDetector != nil {
+				driftAlerts := driftDetector.Ingest(event)
+				for _, da := range driftAlerts {
+					seq := driftSeq.Add(1)
+					alerts = append(alerts, drift.DriftAlertToTypes(da, seq, cfg.Drift.EnforceMode))
+				}
 			}
-		}
 
 			if len(alerts) == 0 {
 				continue
@@ -1384,7 +1416,7 @@ func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterCo
 // any effect there, so it's safe to write the same full rate set to all
 // three. Without this, sys_enter_read/sys_enter_write fire on every syscall
 // system-wide and flood the event channel within seconds.
-func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig) {
+func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig, mux *samplingMux, eventType string) {
 	ctrl, err := internalbpf.NewSamplingController(configMap)
 	if err != nil {
 		slog.Warn("sampling: map unavailable, events forwarded unsampled",
@@ -1403,11 +1435,53 @@ func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig) 
 			slog.String("collector", name), slog.Any("error", err))
 		return
 	}
+	// Expose this controller to the CPU pressure watcher so it can adaptively
+	// reduce this collector's sampling rate under load.
+	if mux != nil {
+		mux.register(eventType, ctrl)
+	}
 	slog.Info("sampling: enabled BPF-side static sample rate",
 		slog.String("collector", name),
 		slog.Uint64("syscall_rate", uint64(sc.SyscallRate)),
 		slog.Uint64("network_rate", uint64(sc.NetworkRate)),
 		slog.Uint64("file_rate", uint64(sc.FileRate)))
+}
+
+// samplingMux fans watchdog SetSamplingRate calls out to the per-collector BPF
+// SamplingControllers. Each collector owns an independent sampling_config map,
+// so a rate change for an event type is routed to that collector's controller.
+// It implements watchdog.BPFSamplingController and is safe for concurrent use.
+type samplingMux struct {
+	mu          sync.Mutex
+	controllers map[string]*internalbpf.SamplingController // keyed by event type
+}
+
+func newSamplingMux() *samplingMux {
+	return &samplingMux{controllers: make(map[string]*internalbpf.SamplingController)}
+}
+
+// register associates a controller with an event type ("syscall", "network",
+// "file"). Called from collector status reporters as each collector comes up.
+func (m *samplingMux) register(eventType string, ctrl *internalbpf.SamplingController) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.controllers[eventType] = ctrl
+}
+
+// SetSamplingRate implements watchdog.BPFSamplingController.
+func (m *samplingMux) SetSamplingRate(eventType string, rate float64) {
+	m.mu.Lock()
+	ctrl := m.controllers[eventType]
+	m.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+	if err := ctrl.SetSamplingRate(eventType, rate); err != nil {
+		slog.Warn("cpu pressure: failed to adjust sampling rate",
+			slog.String("event_type", eventType),
+			slog.Float64("rate", rate),
+			slog.Any("error", err))
+	}
 }
 
 // The entire procedure is bounded by a 30-second context.
@@ -1967,10 +2041,10 @@ Examples:
 //	ebpf-guard rules test --rule rules/cryptominer.yaml --replay 1h --limit 50
 func newRulesTestCmd(cfgPath *string) *cobra.Command {
 	var (
-		ruleFile    string
+		ruleFile     string
 		replayWindow string
-		eventsLog   string
-		sampleLimit int
+		eventsLog    string
+		sampleLimit  int
 	)
 
 	cmd := &cobra.Command{

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -250,12 +251,14 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 		return nil
 	}
 
-	// Create enrichment info
+	// Create enrichment info. Intern high-repetition strings (namespace, node
+	// name) so events sharing the same metadata share the same string pointer,
+	// reducing GC pressure on long-running DaemonSet deployments.
 	info := &EnrichmentInfo{
 		PodName:     podInfo.Name,
-		Namespace:   podInfo.Namespace,
+		Namespace:   util.InternString(podInfo.Namespace),
 		PodUID:      podInfo.UID,
-		NodeName:    podInfo.NodeName,
+		NodeName:    util.InternString(podInfo.NodeName),
 		Labels:      copyMap(podInfo.Labels),
 		Annotations: copyMap(podInfo.Annotations),
 		CachedAt:    time.Now(),

@@ -1349,7 +1349,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// Always report the score (even non-anomalous) so the cardinality-guarded
 			// Prometheus gauge tracks all active processes, not only anomaly triggers.
 			if ce.scoreReporter != nil {
-				ce.scoreReporter(strconv.FormatUint(uint64(e.PID), 10), util.BytesToString(e.Comm[:]), result.Score)
+				ce.scoreReporter(strconv.FormatUint(uint64(e.PID), 10), util.InternBytes(e.Comm[:]), result.Score)
 			}
 
 			// Cross-node amplification (Feature F): if a peer node fired a critical
@@ -1382,7 +1382,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					Message:   formatAnomalyDescription(result),
 					Severity:  types.SeverityWarning,
 					PID:       e.PID,
-					Comm:      util.BytesToString(e.Comm[:]),
+					Comm:      util.InternBytes(e.Comm[:]),
 					Details:   details,
 					Event:     e,
 				}
@@ -1456,7 +1456,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 				Message:   msg,
 				Severity:  types.SeverityWarning,
 				PID:       e.PID,
-				Comm:      util.BytesToString(e.Comm[:]),
+				Comm:      util.InternBytes(e.Comm[:]),
 				Details:   details,
 				Event:       e,
 				ProcessTree: processTree,
@@ -1538,7 +1538,7 @@ func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []
 		// ShouldEvaluate covers every dns.rego rule in Go (~1.5 µs, 0 allocs for
 		// cached domains) so no rule can fire on an event we bypass here.
 		if alert.Event.Type == types.EventDNS && alert.Event.DNS != nil {
-			comm := strings.TrimRight(string(alert.Event.Comm[:]), "\x00")
+			comm := util.InternBytes(alert.Event.Comm[:])
 			if !ce.dnsPrefilter.ShouldEvaluate(alert.Event.DNS, comm) {
 				enhancedAlerts = append(enhancedAlerts, alert)
 				continue
@@ -1852,7 +1852,7 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 		Message:   "Event matched a cluster-wide IOC: " + indicator,
 		Severity:  types.SeverityCritical,
 		PID:       e.PID,
-		Comm:      util.BytesToString(e.Comm[:]),
+		Comm:      util.InternBytes(e.Comm[:]),
 		Event:     e,
 	}
 	if e.TraceContext != nil {

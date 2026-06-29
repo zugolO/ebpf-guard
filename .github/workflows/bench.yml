@@ -2,11 +2,15 @@ name: Benchmarks
 
 # Save baseline on every push to main.
 # Compare on every PR and block if any benchmark regresses by >+15% (p<0.05).
+# Refresh default.pgo on a weekly schedule so the profile stays representative.
 on:
   pull_request:
     branches: [main, develop]
   push:
     branches: [main]
+  schedule:
+    # Weekly on Monday at 03:00 UTC — refresh PGO profile after hot-path changes accumulate.
+    - cron: '0 3 * * 1'
 
 env:
   GOTOOLCHAIN: local
@@ -315,3 +319,57 @@ jobs:
             coverage-pr.txt
             coverage-baseline.txt
           retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Weekly: regenerate default.pgo from the hot-path benchmarks and upload it
+  # as an artifact so maintainers can download and commit it.  Running on a
+  # schedule keeps the profile representative as the hot path evolves.
+  #
+  # The job does NOT auto-commit because writes to the default branch require
+  # a PAT or the repository's branch protection to allow Actions writes.
+  # Instead it uploads default.pgo as an artifact; a maintainer can then run
+  # 'make pgo-update && git commit default.pgo' after reviewing the diff.
+  # ─────────────────────────────────────────────────────────────────────────────
+  pgo-refresh:
+    if: github.event_name == 'schedule'
+    name: Refresh PGO Profile
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Capture hot-path CPU profiles and merge into default.pgo
+        run: bash scripts/pgo-update.sh default.pgo
+
+      - name: Verify merged profile is valid
+        run: go tool pprof -top default.pgo | head -15
+
+      - name: Show size delta vs committed profile
+        run: |
+          committed=$(git show HEAD:default.pgo 2>/dev/null | wc -c || echo 0)
+          fresh=$(wc -c < default.pgo)
+          echo "Committed: ${committed} bytes  →  Fresh: ${fresh} bytes"
+
+      - name: Upload refreshed default.pgo
+        uses: actions/upload-artifact@v4
+        with:
+          name: default-pgo-refreshed
+          path: default.pgo
+          retention-days: 14
+          overwrite: true

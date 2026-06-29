@@ -1,7 +1,7 @@
 # ebpf-guard Makefile
 # Requires: go 1.23+, clang, llvm, kernel headers
 
-.PHONY: all generate build build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare
+.PHONY: all generate build build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare pgo-profile pgo-update build-pgo
 
 # Variables
 BINARY_NAME := ebpf-guard
@@ -56,11 +56,18 @@ generate:
 	@echo "  Removing stub bindings now superseded by generated files..."
 	@rm -f internal/bpf/syscall_bpf_gen.go internal/bpf/xdp_bpf_gen.go
 
-# Build the main binary (core only — no OPA, Kafka, or TUI)
+# Build the main binary (core only — no OPA, Kafka, or TUI).
+# PGO is applied automatically when default.pgo exists in the module root.
 build:
 	@echo "Building $(BINARY_NAME) (core)..."
 	mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
+	go build -pgo=auto -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
+
+# Build with explicit PGO (same as build; useful for scripting / CI)
+build-pgo:
+	@echo "Building $(BINARY_NAME) with PGO..."
+	mkdir -p $(BUILD_DIR)
+	go build -pgo=auto -v -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
 
 # Build with all optional subsystems enabled
 build-full:
@@ -167,6 +174,22 @@ bench-save-baseline:
 bench-compare:
 	go test -bench=. -benchtime=10s -count=5 -run='^$$' ./... | tee bench-new.txt
 	benchstat bench-baseline.txt bench-new.txt
+
+# ── PGO targets ────────────────────────────────────────────────────────────
+
+# Regenerate default.pgo from hot-path benchmarks (correlator + profiler).
+# The profile is committed to the repo root and picked up by 'go build' automatically.
+# Re-run after significant changes to RuleEngine.EvaluateInto or EWMA scoring.
+pgo-profile:
+	@echo "Regenerating default.pgo from hot-path benchmarks..."
+	BENCH_TIME=2s bash scripts/pgo-update.sh default.pgo
+	@echo "Done. Review with: go tool pprof -top default.pgo"
+
+# Alias: regenerate and confirm the profile is valid.
+pgo-update: pgo-profile
+	@go tool pprof -top default.pgo 2>/dev/null | head -10
+	@echo ""
+	@echo "Profile updated. Commit default.pgo to keep PGO active in CI builds."
 
 # ── Release targets ────────────────────────────────────────────────────────
 

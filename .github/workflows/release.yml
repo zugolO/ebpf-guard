@@ -59,7 +59,7 @@ jobs:
       id: get_version
       run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-    - name: Build binary
+    - name: Build binary (with PGO)
       env:
         GOOS: ${{ matrix.os }}
         GOARCH: ${{ matrix.arch }}
@@ -69,7 +69,10 @@ jobs:
           -X main.Commit=${{ github.sha }}
           -X main.BuildTime=${{ github.event.head_commit.timestamp }}
       run: |
-        go build -ldflags "$LDFLAGS" -o ebpf-guard-${{ matrix.os }}-${{ matrix.arch }} ./cmd/ebpf-guard
+        # -pgo=auto picks up default.pgo from the module root automatically.
+        # The profile is committed to the repo and targets the hot path
+        # (RuleEngine.EvaluateInto + EWMA scoring). Refresh with 'make pgo-update'.
+        go build -pgo=auto -ldflags "$LDFLAGS" -o ebpf-guard-${{ matrix.os }}-${{ matrix.arch }} ./cmd/ebpf-guard
 
     - name: Create checksum
       run: |

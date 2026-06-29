@@ -11,6 +11,7 @@
 package bpf
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/cilium/ebpf"
@@ -38,19 +39,20 @@ type XDPObjects struct {
 
 // Close releases all BPF resources held by the objects.
 func (o *XDPObjects) Close() error {
+	var errs []error
 	if o.XdpBlockedIps != nil {
-		o.XdpBlockedIps.Close()
+		errs = append(errs, o.XdpBlockedIps.Close())
 	}
 	if o.XdpBlockedPorts != nil {
-		o.XdpBlockedPorts.Close()
+		errs = append(errs, o.XdpBlockedPorts.Close())
 	}
 	if o.XdpStatsMap != nil {
-		o.XdpStatsMap.Close()
+		errs = append(errs, o.XdpStatsMap.Close())
 	}
 	if o.XdpBlockFn != nil {
-		o.XdpBlockFn.Close()
+		errs = append(errs, o.XdpBlockFn.Close())
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // LoadXDPObjects loads the XDP BPF program and maps.

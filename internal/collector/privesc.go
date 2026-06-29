@@ -251,10 +251,10 @@ func (c *PrivescCollector) LostEvents() uint64 {
 }
 
 func (c *PrivescCollector) parseEvent(raw []byte) (*types.Event, error) {
-	evt, err := bpf.ParsePrivescEvent(raw)
-	if err != nil {
+	var pe bpf.PrivescRawEvent
+	if err := bpf.ParsePrivescEventInto(raw, &pe); err != nil {
 		return nil, err
 	}
-	result := evt.ToTypesEvent()
+	result := pe.ToTypesEvent()
 	return &result, nil
 }

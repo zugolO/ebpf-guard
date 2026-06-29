@@ -353,10 +353,10 @@ func (c *FileaccessCollector) LostEvents() uint64 {
 // parseEvent converts raw bytes from the ring buffer into event, which must be
 // a pooled *types.Event from eventPool. Caller handles Reset() and Put() after use.
 func (c *FileaccessCollector) parseEvent(raw []byte, event *types.Event) error {
-	evt, err := bpf.ParseFileaccessEvent(raw)
-	if err != nil {
+	var fe bpf.FileaccessEvent
+	if err := bpf.ParseFileaccessEventInto(raw, &fe); err != nil {
 		return err
 	}
-	*event = evt.ToTypesEvent()
+	*event = fe.ToTypesEvent()
 	return nil
 }

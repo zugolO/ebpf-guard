@@ -21,17 +21,17 @@ func decodeNetworkEvent(raw []byte) (types.Event, error) {
 	//nolint:exhaustive // only net_close needs special handling; the default branch covers tcp_connect and every other event type.
 	switch types.EventType(evtType) {
 	case types.EventNetClose:
-		evt, err := bpf.ParseNetworkCloseEvent(raw)
-		if err != nil {
+		var nc bpf.NetworkCloseRawEvent
+		if err := bpf.ParseNetworkCloseEventInto(raw, &nc); err != nil {
 			return types.Event{}, err
 		}
-		return evt.ToTypesEvent(), nil
+		return nc.ToTypesEvent(), nil
 	default:
 		// EventTCPConnect and any unknown network events.
-		evt, err := bpf.ParseNetworkEvent(raw)
-		if err != nil {
+		var ne bpf.NetworkEvent
+		if err := bpf.ParseNetworkEventInto(raw, &ne); err != nil {
 			return types.Event{}, err
 		}
-		return evt.ToTypesEvent(), nil
+		return ne.ToTypesEvent(), nil
 	}
 }

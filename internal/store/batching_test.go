@@ -316,6 +316,125 @@ func TestBatchingStore_DefaultConfig(t *testing.T) {
 	assert.Equal(t, 1000, out.MaxBuffer)
 }
 
+// TestBatchingStore_Query_Delegates verifies that Query is forwarded to the inner store.
+func TestBatchingStore_Query_Delegates(t *testing.T) {
+	ctx := context.Background()
+	inner := NewMemoryStore()
+	require.NoError(t, inner.Store(ctx, makeAlert("q1")))
+	require.NoError(t, inner.Store(ctx, makeAlert("q2")))
+
+	bs := NewBatchingStore(inner, BatchingStoreConfig{BatchSize: 10, FlushInterval: time.Second, MaxBuffer: 50})
+	defer bs.Close()
+
+	results, err := bs.Query(ctx, QueryFilters{})
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+}
+
+// TestBatchingStore_Delete_Delegates verifies that Delete is forwarded to the inner store.
+func TestBatchingStore_Delete_Delegates(t *testing.T) {
+	ctx := context.Background()
+	inner := NewMemoryStore()
+	old := makeAlert("old")
+	old.Timestamp = time.Now().Add(-48 * time.Hour)
+	require.NoError(t, inner.Store(ctx, old))
+	require.NoError(t, inner.Store(ctx, makeAlert("new")))
+
+	bs := NewBatchingStore(inner, BatchingStoreConfig{BatchSize: 10, FlushInterval: time.Second, MaxBuffer: 50})
+	defer bs.Close()
+
+	deleted, err := bs.Delete(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+}
+
+// TestBatchingStore_StoreBatch_Overflow verifies that overflow drops are counted
+// when StoreBatch itself fills the queue.
+func TestBatchingStore_StoreBatch_Overflow(t *testing.T) {
+	blockCh := make(chan struct{})
+	var flushes atomic.Int32
+	blocking := &blockedStore{
+		MemoryStore: NewMemoryStore(),
+		block:       blockCh,
+		flushCount:  &flushes,
+	}
+
+	bs := NewBatchingStore(blocking, BatchingStoreConfig{
+		BatchSize:     5,
+		FlushInterval: 10 * time.Second,
+		MaxBuffer:     5, // very small
+	})
+
+	ctx := context.Background()
+	// First batch of 5 fills the queue; second triggers overflow drops.
+	alerts := make([]types.Alert, 15)
+	for i := range alerts {
+		alerts[i] = makeAlert(fmt.Sprintf("sb%d", i))
+	}
+	_ = bs.StoreBatch(ctx, alerts)
+
+	assert.Greater(t, bs.DroppedTotal(), int64(0))
+
+	close(blockCh)
+	bs.Close() //nolint:errcheck
+}
+
+// TestBatchingStore_Flush_InnerError verifies that an inner Flush error is propagated.
+func TestBatchingStore_Flush_InnerError(t *testing.T) {
+	es := &errorStore{MemoryStore: NewMemoryStore(), failFlush: true}
+	bs := NewBatchingStore(es, BatchingStoreConfig{BatchSize: 100, FlushInterval: time.Second, MaxBuffer: 50})
+	defer bs.Close()
+
+	err := bs.Flush(context.Background())
+	assert.Error(t, err)
+}
+
+// TestBatchingStore_DrainQueue_Error verifies that a StoreBatch error during
+// drainQueue is propagated back from Flush.
+func TestBatchingStore_DrainQueue_Error(t *testing.T) {
+	es := &errorStore{MemoryStore: NewMemoryStore(), failBatch: true}
+	bs := NewBatchingStore(es, BatchingStoreConfig{BatchSize: 100, FlushInterval: time.Second, MaxBuffer: 50})
+	defer bs.Close()
+
+	ctx := context.Background()
+	require.NoError(t, bs.Store(ctx, makeAlert("drain-err")))
+
+	err := bs.Flush(ctx)
+	assert.Error(t, err)
+}
+
+// TestNewWithContext_BatchingWraps verifies that NewWithContext wraps the inner
+// store in a BatchingStore when BatchSize > 0.
+func TestNewWithContext_BatchingWraps(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewWithContext(ctx, Config{
+		Backend: "memory",
+		Memory:  MemoryStoreOptions{MaxAlerts: 100},
+		Batching: BatchingStoreConfig{
+			BatchSize:     10,
+			FlushInterval: 50 * time.Millisecond,
+			MaxBuffer:     100,
+		},
+	})
+	require.NoError(t, err)
+	defer s.Close()
+
+	_, ok := s.(*BatchingStore)
+	assert.True(t, ok, "expected *BatchingStore when BatchSize > 0")
+}
+
+// TestNewWithContext_NoBatchingByDefault verifies that a zero BatchSize keeps
+// the raw backend without wrapping.
+func TestNewWithContext_NoBatchingByDefault(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewWithContext(ctx, Config{Backend: "memory"})
+	require.NoError(t, err)
+	defer s.Close()
+
+	_, ok := s.(*BatchingStore)
+	assert.False(t, ok, "expected no BatchingStore when BatchSize == 0")
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 // blockedStore is an AlertStore whose StoreBatch blocks until block is closed.
@@ -329,4 +448,25 @@ func (b *blockedStore) StoreBatch(ctx context.Context, alerts []types.Alert) err
 	<-b.block
 	b.flushCount.Add(1)
 	return b.MemoryStore.StoreBatch(ctx, alerts)
+}
+
+// errorStore is an AlertStore that returns errors for configured operations.
+type errorStore struct {
+	*MemoryStore
+	failBatch bool
+	failFlush bool
+}
+
+func (e *errorStore) StoreBatch(ctx context.Context, alerts []types.Alert) error {
+	if e.failBatch {
+		return fmt.Errorf("batch error")
+	}
+	return e.MemoryStore.StoreBatch(ctx, alerts)
+}
+
+func (e *errorStore) Flush(ctx context.Context) error {
+	if e.failFlush {
+		return fmt.Errorf("flush error")
+	}
+	return e.MemoryStore.Flush(ctx)
 }

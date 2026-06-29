@@ -3,6 +3,8 @@ package store
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -39,6 +41,38 @@ func TestNew_Backends(t *testing.T) {
 		_, err := New(Config{Backend: "bogus"})
 		require.Error(t, err)
 	})
+}
+
+// invalidSQLitePath returns a path that SQLite cannot open as a database file:
+// a sub-path of a regular file (not a directory). Works both with CGO enabled
+// (sqlite3 cannot create a file inside a file) and without CGO (NewSQLiteStore
+// returns ErrNoCGO before touching the filesystem).
+func invalidSQLitePath(t *testing.T) string {
+	t.Helper()
+	notADir := filepath.Join(t.TempDir(), "notadir")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o600))
+	return filepath.Join(notADir, "child.db")
+}
+
+// TestNewWithContext_SQLiteError verifies that a SQLite open failure is wrapped
+// and propagated from NewWithContext.
+func TestNewWithContext_SQLiteError(t *testing.T) {
+	ctx := context.Background()
+	_, err := NewWithContext(ctx, Config{
+		Backend: "sqlite",
+		SQLite:  SQLiteConfig{Path: invalidSQLitePath(t)},
+	})
+	require.Error(t, err)
+}
+
+// TestNewProfileStore_SQLiteError verifies that a SQLite open failure is wrapped
+// and propagated from NewProfileStore.
+func TestNewProfileStore_SQLiteError(t *testing.T) {
+	_, err := NewProfileStore(Config{
+		Backend: "sqlite",
+		SQLite:  SQLiteConfig{Path: invalidSQLitePath(t)},
+	})
+	require.Error(t, err)
 }
 
 func TestNewWithContext_MemoryRetention(t *testing.T) {

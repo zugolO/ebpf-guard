@@ -4,7 +4,15 @@ package exporter
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/zugolO/ebpf-guard/internal/util"
 )
+
+func init() {
+	// Register the process-wide string interner as a Prometheus collector so
+	// ebpf_guard_interner_hits_total, _misses_total, and _size are scraped.
+	prometheus.MustRegister(util.DefaultInterner)
+}
 
 // Global cardinality limiters for high-cardinality metrics.
 // EventsTotal: limit pod (index 1) cardinality to prevent Prometheus OOM.

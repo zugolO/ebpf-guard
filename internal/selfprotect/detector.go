@@ -143,7 +143,7 @@ func NewAgentAllowlist() *AgentAllowlist {
 	a := &AgentAllowlist{
 		pids: make(map[uint32]struct{}),
 	}
-	a.pids[uint32(os.Getpid())] = struct{}{} //nolint:gosec // pid fits in uint32
+	a.pids[uint32(os.Getpid())] = struct{}{} /* #nosec G115 -- Linux PIDs always fit in uint32 (max 4194304) */
 	return a
 }
 
@@ -298,13 +298,9 @@ func (d *Detector) ProcessEvent(e types.Event) *types.Alert {
 	return alert
 }
 
-// generateAlertID produces a stable, unique alert ID from the event timestamp and PID.
+// generateAlertID produces a unique alert ID from the event PID and current time.
 func generateAlertID(e types.Event) string {
-	ts := e.Timestamp
-	if ts == 0 {
-		ts = uint64(time.Now().UnixNano()) //nolint:gosec // monotonic, not crypto
-	}
-	return fmt.Sprintf("sp-%d-%d", e.PID, ts)
+	return fmt.Sprintf("sp-%d-%d", e.PID, time.Now().UnixNano())
 }
 
 // commToString converts a null-terminated [16]byte comm field to a Go string.

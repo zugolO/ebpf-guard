@@ -144,7 +144,7 @@ func TestOwnedObjects_Concurrent(t *testing.T) {
 
 func TestAgentAllowlist_SelfPIDPreseeded(t *testing.T) {
 	a := NewAgentAllowlist()
-	selfPID := uint32(os.Getpid()) //nolint:gosec
+	selfPID := uint32(os.Getpid()) /* #nosec G115 -- Linux PIDs always fit in uint32 */
 	assert.True(t, a.IsPIDAllowed(selfPID), "own PID must be pre-seeded")
 	assert.Equal(t, 1, a.Count())
 }
@@ -317,7 +317,7 @@ func TestDetector_ProcessEvent_OwnPID_Allowed(t *testing.T) {
 	d := NewDetector(Config{Enabled: true}, sink)
 
 	// Use our own PID — should never be flagged as tampering.
-	selfPID := uint32(os.Getpid()) //nolint:gosec
+	selfPID := uint32(os.Getpid()) /* #nosec G115 -- Linux PIDs always fit in uint32 */
 	alert := d.ProcessEvent(mkBPFEvent(selfPID, types.BPFCmdProgDetach, 0))
 
 	assert.Nil(t, alert, "agent's own PID must not generate a tamper alert")

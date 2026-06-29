@@ -59,6 +59,7 @@ func Validate(path string) error {
 	}
 
 	// Ask 'go tool pprof -top' to parse the file; exit 0 means valid.
+	// #nosec G204 — path is an internal file path controlled by this package, never user input.
 	cmd := exec.Command("go", "tool", "pprof", "-top", path)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -77,6 +78,7 @@ func Merge(dst string, inputs []string) error {
 	}
 
 	args := append([]string{"tool", "pprof", "-proto"}, inputs...)
+	// #nosec G204 — inputs are temp file paths created by CapturePackage, never user input.
 	cmd := exec.Command("go", args...)
 
 	out, err := cmd.Output()
@@ -87,7 +89,8 @@ func Merge(dst string, inputs []string) error {
 		return errors.New("pprof merge produced empty output")
 	}
 
-	if err := os.WriteFile(dst, out, 0o644); err != nil {
+	// 0o600: pgo profile is a build artifact read only by the Go toolchain.
+	if err := os.WriteFile(dst, out, 0o600); err != nil {
 		return fmt.Errorf("writing merged profile: %w", err)
 	}
 	return nil
@@ -106,6 +109,7 @@ func CapturePackage(dir, pkg, benchFilter, out string) error {
 		"-cpuprofile=" + out,
 		pkg,
 	}
+	// #nosec G204 — args are a fixed go-test command; pkg/out/benchFilter are internal values.
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
 	var stderr strings.Builder
@@ -124,16 +128,14 @@ func CapturePackage(dir, pkg, benchFilter, out string) error {
 // Partial failures (one package fails) are logged but do not abort; at least
 // one valid profile is required for the merge to succeed.
 func Update(moduleRoot string, pkgs []string, benchFilter string) error {
-	var (
-		profiles []string
-		errs     []string
-	)
+	profiles := make([]string, 0, len(pkgs))
+	errs := make([]string, 0, len(pkgs))
 
 	tmpDir, err := os.MkdirTemp("", "ebpf-guard-pgo-*")
 	if err != nil {
 		return fmt.Errorf("creating temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	for i, pkg := range pkgs {
 		safe := strings.NewReplacer("/", "_", ".", "_").Replace(pkg)

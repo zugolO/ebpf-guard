@@ -10,14 +10,15 @@ import (
 
 // KernelFeatures holds detected kernel capabilities.
 type KernelFeatures struct {
-	HasBTF          bool
-	HasRingbuf      bool
-	HasKprobe       bool
-	HasTracepoint   bool
-	KernelVersion   string
-	KernelMajor     int
-	KernelMinor     int
-	KernelPatch     int
+	HasBTF         bool
+	HasRingbuf     bool
+	HasKprobe      bool
+	HasTracepoint  bool
+	HasBatchMapOps bool // BPF_MAP_LOOKUP_BATCH / UPDATE_BATCH syscalls (kernel 5.6+)
+	KernelVersion  string
+	KernelMajor    int
+	KernelMinor    int
+	KernelPatch    int
 	// BTFSource records which BTF strategy succeeded during startup.
 	// Set by ResolveBTF; empty until that call completes.
 	BTFSource BTFSource
@@ -38,6 +39,13 @@ var haveProgramTypeKprobe = func() error { return features.HaveProgramType(ebpf.
 
 // haveProgramTypeTracepoint delegates to the cilium/ebpf features probe.
 var haveProgramTypeTracepoint = func() error { return features.HaveProgramType(ebpf.TracePoint) }
+
+// haveBatchMapOps reports whether the kernel supports BPF batch map operations.
+// Kernel 5.6+ added BPF_MAP_LOOKUP_BATCH and BPF_MAP_UPDATE_BATCH.
+// Declared as a function var so tests can stub it without a real kernel.
+var haveBatchMapOps = func(major, minor int) bool {
+	return major > 5 || (major == 5 && minor >= 6)
+}
 
 // CheckMinimumRequirements returns an error if the kernel doesn't meet
 // the minimum requirements for ebpf-guard.
@@ -65,8 +73,8 @@ func (f *KernelFeatures) CheckMinimumRequirements(allowReducedFeatures bool) err
 // String returns a human-readable summary of detected features.
 func (f *KernelFeatures) String() string {
 	return fmt.Sprintf(
-		"Kernel: %s, BTF: %v, Ringbuf: %v, Kprobe: %v, Tracepoint: %v",
-		f.KernelVersion, f.HasBTF, f.HasRingbuf, f.HasKprobe, f.HasTracepoint,
+		"Kernel: %s, BTF: %v, Ringbuf: %v, Kprobe: %v, Tracepoint: %v, BatchMapOps: %v",
+		f.KernelVersion, f.HasBTF, f.HasRingbuf, f.HasKprobe, f.HasTracepoint, f.HasBatchMapOps,
 	)
 }
 

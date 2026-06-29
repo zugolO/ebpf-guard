@@ -2,7 +2,9 @@ package bpf
 
 import (
 	"os"
+	"regexp"
 	"runtime"
+	"strconv"
 )
 
 // FeatureProber abstracts OS operations used during kernel feature detection.
@@ -66,5 +68,32 @@ func detectFeaturesWithProber(prober FeatureProber) (*KernelFeatures, error) {
 		f.KernelVersion = runtime.GOOS + "/" + runtime.GOARCH
 	}
 
+	// /proc/sys/kernel/osrelease gives a clean "major.minor.patch-extra" string
+	// and is preferred for version number parsing.  Fall back to version_signature.
+	if data, err := prober.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		f.KernelMajor, f.KernelMinor, f.KernelPatch = parseKernelVersion(string(data))
+	} else {
+		f.KernelMajor, f.KernelMinor, f.KernelPatch = parseKernelVersion(f.KernelVersion)
+	}
+	f.HasBatchMapOps = haveBatchMapOps(f.KernelMajor, f.KernelMinor)
+
 	return f, nil
+}
+
+// kernelVersionRE matches the first "major.minor[.patch]" triplet in a string.
+var kernelVersionRE = regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?`)
+
+// parseKernelVersion extracts (major, minor, patch) from a kernel version string
+// such as "5.15.0-100-generic" or "Ubuntu 5.15.0 #110".
+func parseKernelVersion(s string) (major, minor, patch int) {
+	m := kernelVersionRE.FindStringSubmatch(s)
+	if len(m) < 3 {
+		return 0, 0, 0
+	}
+	major, _ = strconv.Atoi(m[1])
+	minor, _ = strconv.Atoi(m[2])
+	if len(m) >= 4 && m[3] != "" {
+		patch, _ = strconv.Atoi(m[3])
+	}
+	return
 }

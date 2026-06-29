@@ -1,3 +1,4 @@
+// Package bpf tests for batch map operations and feature detection.
 package bpf
 
 import (

@@ -13,13 +13,35 @@ func TestBPFCmdName(t *testing.T) {
 		cmd  uint32
 		want string
 	}{
-		{0, "MAP_CREATE"},
-		{5, "PROG_LOAD"},
+		{BPFCmdMapCreate, "MAP_CREATE"},
+		{BPFCmdMapLookup, "MAP_LOOKUP_ELEM"},
+		{BPFCmdMapUpdate, "MAP_UPDATE_ELEM"},
+		{BPFCmdMapDelete, "MAP_DELETE_ELEM"},
+		{BPFCmdMapGetNextKey, "MAP_GET_NEXT_KEY"},
+		{BPFCmdProgLoad, "PROG_LOAD"},
+		{BPFCmdObjPin, "OBJ_PIN"},
+		{BPFCmdObjGet, "OBJ_GET"},
+		{BPFCmdProgAttach, "PROG_ATTACH"},
+		{BPFCmdProgDetach, "PROG_DETACH"},
 		{99, "BPF_CMD_99"},
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, BPFCmdName(tc.cmd), "cmd=%d", tc.cmd)
 	}
+}
+
+func TestBPFCmdConstants(t *testing.T) {
+	// Verify the command numbers match the kernel's bpf_cmd enum.
+	assert.Equal(t, uint32(0), BPFCmdMapCreate)
+	assert.Equal(t, uint32(1), BPFCmdMapLookup)
+	assert.Equal(t, uint32(2), BPFCmdMapUpdate)
+	assert.Equal(t, uint32(3), BPFCmdMapDelete)
+	assert.Equal(t, uint32(4), BPFCmdMapGetNextKey)
+	assert.Equal(t, uint32(5), BPFCmdProgLoad)
+	assert.Equal(t, uint32(6), BPFCmdObjPin)
+	assert.Equal(t, uint32(7), BPFCmdObjGet)
+	assert.Equal(t, uint32(8), BPFCmdProgAttach)
+	assert.Equal(t, uint32(9), BPFCmdProgDetach)
 }
 
 func TestBPFProgTypeName(t *testing.T) {

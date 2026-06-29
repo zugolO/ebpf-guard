@@ -106,6 +106,11 @@ type Config struct {
 	// group or world (mode 0644, 0640, etc.). When false (default), a warning
 	// is logged but startup proceeds.
 	StrictConfig bool `mapstructure:"strict_config"`
+
+	// SelfProtection configures BPF anti-tampering detection (issue #220).
+	// Detects and optionally blocks attempts by external processes to detach
+	// or modify our BPF programs/maps. Graceful no-op on kernel < 5.7.
+	SelfProtection SelfProtectionConfig `mapstructure:"self_protection"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -1108,6 +1113,36 @@ type SimpleModeConfig struct {
 	AllowlistPIDs []uint32 `mapstructure:"allowlist_pids"`
 	// AllowlistComms lists process names that must never be killed.
 	AllowlistComms []string `mapstructure:"allowlist_comms"`
+}
+
+// SelfProtectionConfig holds anti-tampering self-protection settings (issue #220).
+// Monitors BPF operations targeting our programs and maps, generating Critical
+// alerts when an external process attempts detach or modification.
+// Graceful no-op on kernel < 5.7 or when CONFIG_BPF_LSM is absent.
+type SelfProtectionConfig struct {
+	// Enabled activates BPF anti-tampering detection.
+	// Default: false
+	Enabled bool `mapstructure:"enabled"`
+
+	// EnforceMode enables blocking of tampering attempts via the LSM bpf hook
+	// (-EPERM returned to the caller). Requires kernel 5.7+ with CONFIG_BPF_LSM=y.
+	// When false (default), tampering is detected and alerted but not blocked
+	// (alert-first mode, analogous to enforcer.dry_run = true).
+	EnforceMode bool `mapstructure:"enforce_mode"`
+
+	// ExtraAgentPIDs lists additional PIDs that are part of the agent or its
+	// upgrade/restart process. These are added to the allowlist and are never
+	// treated as tampering. The current process PID is always included automatically.
+	ExtraAgentPIDs []uint32 `mapstructure:"extra_agent_pids"`
+
+	// PinBasePath is the bpffs directory where the agent pins its BPF objects.
+	// Used to scope ownership checks to our own programs/maps.
+	// Default: /sys/fs/bpf/ebpf-guard
+	PinBasePath string `mapstructure:"pin_base_path"`
+
+	// AlertSeverity is the severity level for tampering alerts.
+	// Valid values: "critical" (default), "warning".
+	AlertSeverity string `mapstructure:"alert_severity"`
 }
 
 // EnforcementConfig holds enforcement settings.

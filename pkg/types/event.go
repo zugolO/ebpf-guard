@@ -61,13 +61,43 @@ var bpfProgTypeNames = map[uint32]string{
 	31: "SK_LOOKUP",
 }
 
+// BPF command numbers for the bpf(2) syscall.
+const (
+	BPFCmdMapCreate    uint32 = 0
+	BPFCmdMapLookup    uint32 = 1
+	BPFCmdMapUpdate    uint32 = 2
+	BPFCmdMapDelete    uint32 = 3
+	BPFCmdMapGetNextKey uint32 = 4
+	BPFCmdProgLoad     uint32 = 5
+	BPFCmdObjPin       uint32 = 6
+	BPFCmdObjGet       uint32 = 7
+	BPFCmdProgAttach   uint32 = 8
+	BPFCmdProgDetach   uint32 = 9
+)
+
 // BPFCmdName returns the human-readable name for a bpf() command number.
 func BPFCmdName(cmd uint32) string {
 	switch cmd {
-	case 0:
+	case BPFCmdMapCreate:
 		return "MAP_CREATE"
-	case 5:
+	case BPFCmdMapLookup:
+		return "MAP_LOOKUP_ELEM"
+	case BPFCmdMapUpdate:
+		return "MAP_UPDATE_ELEM"
+	case BPFCmdMapDelete:
+		return "MAP_DELETE_ELEM"
+	case BPFCmdMapGetNextKey:
+		return "MAP_GET_NEXT_KEY"
+	case BPFCmdProgLoad:
 		return "PROG_LOAD"
+	case BPFCmdObjPin:
+		return "OBJ_PIN"
+	case BPFCmdObjGet:
+		return "OBJ_GET"
+	case BPFCmdProgAttach:
+		return "PROG_ATTACH"
+	case BPFCmdProgDetach:
+		return "PROG_DETACH"
 	default:
 		return fmt.Sprintf("BPF_CMD_%d", cmd)
 	}

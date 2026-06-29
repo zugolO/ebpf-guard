@@ -159,7 +159,7 @@ func TestInternerPrometheusCollector(t *testing.T) {
 	descCh := make(chan *prometheus.Desc, 8)
 	si.Describe(descCh)
 	close(descCh)
-	var descs []*prometheus.Desc
+	descs := make([]*prometheus.Desc, 0, 3)
 	for d := range descCh {
 		descs = append(descs, d)
 	}

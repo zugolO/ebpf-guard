@@ -305,6 +305,11 @@ config:
     bind_address: ":9090"
     metrics_path: "/metrics"
     health_path: "/health"
+    # enable_pprof exposes Go pprof endpoints at /debug/pprof (default: false).
+    # These endpoints are protected by admin-token RBAC, but they reveal heap and
+    # goroutine details — only enable during active profiling sessions and disable
+    # again once done. See docs/pprof.md for usage instructions.
+    enable_pprof: false
 
   bpf:
     map_sizes:

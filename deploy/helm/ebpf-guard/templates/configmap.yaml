@@ -11,6 +11,7 @@ data:
       bind_address: {{ .Values.config.server.bind_address | quote }}
       metrics_path: {{ .Values.config.server.metrics_path | quote }}
       health_path: {{ .Values.config.server.health_path | quote }}
+      enable_pprof: {{ .Values.config.server.enable_pprof | default false }}
 
     bpf:
       map_sizes:

@@ -401,3 +401,64 @@ enforcement:
 	assert.Equal(t, "172.16.0.0/12", bl.Subnets[0])
 	assert.Empty(t, bl.Ports)
 }
+
+func TestKernelFilterConfig_DefaultDaemonDenylist(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	require.NoError(t, os.WriteFile(configPath, []byte(""), 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	// Default: daemon denylist is active (not disabled).
+	assert.False(t, cfg.BPF.KernelFilter.DisableDefaultDaemonDenylist)
+	// Default: noisy_daemon_denylist override is empty (use built-in).
+	assert.Empty(t, cfg.BPF.KernelFilter.NoisyDaemonDenylist)
+}
+
+func TestKernelFilterConfig_DisableDefaultDaemonDenylist(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yaml := []byte(`
+bpf:
+  kernel_filter:
+    disable_default_daemon_denylist: true
+`)
+	require.NoError(t, os.WriteFile(configPath, yaml, 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	assert.True(t, cfg.BPF.KernelFilter.DisableDefaultDaemonDenylist)
+	assert.Empty(t, cfg.BPF.KernelFilter.NoisyDaemonDenylist)
+}
+
+func TestKernelFilterConfig_NoisyDaemonDenylistOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yaml := []byte(`
+bpf:
+  kernel_filter:
+    noisy_daemon_denylist:
+      - mylogd
+      - myagent
+`)
+	require.NoError(t, os.WriteFile(configPath, yaml, 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	assert.False(t, cfg.BPF.KernelFilter.DisableDefaultDaemonDenylist)
+	require.Len(t, cfg.BPF.KernelFilter.NoisyDaemonDenylist, 2)
+	assert.Equal(t, "mylogd", cfg.BPF.KernelFilter.NoisyDaemonDenylist[0])
+	assert.Equal(t, "myagent", cfg.BPF.KernelFilter.NoisyDaemonDenylist[1])
+}

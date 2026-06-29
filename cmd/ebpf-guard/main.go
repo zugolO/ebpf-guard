@@ -1387,10 +1387,7 @@ func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterCo
 		}
 	}
 
-	denylist := fc.CommDenylist
-	if len(denylist) == 0 {
-		denylist = internalbpf.DefaultCommDenylist()
-	}
+	denylist := internalbpf.BuildCommDenylist(fc.CommDenylist, fc.NoisyDaemonDenylist, fc.DisableDefaultDaemonDenylist)
 	for _, comm := range denylist {
 		if err := kf.SetCommFilter(comm, false); err != nil {
 			slog.Warn("kernel_filter: set comm filter failed", slog.String("comm", comm), slog.Any("error", err))
@@ -1403,7 +1400,8 @@ func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterCo
 	}
 	slog.Info("kernel_filter: enabled BPF-side syscall/comm filtering",
 		slog.Int("monitored_syscalls", len(nrs)),
-		slog.Int("comm_denylist", len(denylist)))
+		slog.Int("comm_denylist", len(denylist)),
+		slog.Bool("daemon_denylist_disabled", fc.DisableDefaultDaemonDenylist))
 }
 
 // enableSampling applies the configured static BPF-side sample rate to the

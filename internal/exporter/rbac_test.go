@@ -209,6 +209,132 @@ func TestNewServerWithRBAC_Integration(t *testing.T) {
 	assert.NotEqual(t, http.StatusForbidden, adminStatus)
 }
 
+// --- pprof auth enforcement ---
+
+// TestPprofRequiresAdminToken verifies that /debug/pprof endpoints are gated
+// behind RBAC: no token → 401, viewer token → 403, admin token → 200.
+// This is the acceptance-criteria check for issue #217.
+func TestPprofRequiresAdminToken(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	addr := listener.Addr().String()
+	// enablePprof=true so the routes are registered.
+	srv := NewServerWithRBAC(addr, "/metrics", "/health", true, false,
+		testViewerToken, testAdminToken, true)
+	srv.SetReady(true)
+	go srv.server.Serve(listener)
+	time.Sleep(30 * time.Millisecond)
+
+	base := "http://" + addr
+	client := &http.Client{}
+
+	do := func(path, token string) int {
+		req, _ := http.NewRequest(http.MethodGet, base+path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	pprofPaths := []string{
+		"/debug/pprof/",
+		"/debug/pprof/heap",
+		"/debug/pprof/goroutine",
+		"/debug/pprof/allocs",
+	}
+
+	for _, path := range pprofPaths {
+		// No token → 401.
+		assert.Equal(t, http.StatusUnauthorized, do(path, ""),
+			"pprof %s must be 401 without token", path)
+
+		// Viewer token → 403 (pprof is admin-only).
+		assert.Equal(t, http.StatusForbidden, do(path, testViewerToken),
+			"pprof %s must be 403 with viewer token", path)
+
+		// Admin token → 200.
+		assert.Equal(t, http.StatusOK, do(path, testAdminToken),
+			"pprof %s must be 200 with admin token", path)
+	}
+}
+
+// TestPprofDisabledReturns404 verifies that /debug/pprof routes return 404
+// when pprof is not enabled, even with a valid admin token.
+func TestPprofDisabledReturns404(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	addr := listener.Addr().String()
+	// enablePprof=false — routes are not registered.
+	srv := NewServerWithRBAC(addr, "/metrics", "/health", false, false,
+		testViewerToken, testAdminToken, true)
+	srv.SetReady(true)
+	go srv.server.Serve(listener)
+	time.Sleep(30 * time.Millisecond)
+
+	base := "http://" + addr
+	client := &http.Client{}
+
+	do := func(path, token string) int {
+		req, _ := http.NewRequest(http.MethodGet, base+path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Admin can authenticate fine, but pprof routes should not exist.
+	assert.Equal(t, http.StatusNotFound, do("/debug/pprof/", testAdminToken),
+		"pprof index must 404 when pprof is disabled")
+	assert.Equal(t, http.StatusNotFound, do("/debug/pprof/heap", testAdminToken),
+		"pprof heap must 404 when pprof is disabled")
+}
+
+// TestRBACMiddleware_PprofIsAdminOnly verifies the middleware logic directly
+// without a real HTTP server: /debug/pprof paths are not in viewerPrefixes.
+func TestRBACMiddleware_PprofIsAdminOnly(t *testing.T) {
+	mw := RBACMiddleware(testViewerToken, testAdminToken)(okHandler)
+
+	pprofPaths := []string{
+		"/debug/pprof/",
+		"/debug/pprof/heap",
+		"/debug/pprof/goroutine",
+		"/debug/pprof/profile",
+		"/debug/pprof/allocs",
+		"/debug/pprof/block",
+		"/debug/pprof/mutex",
+	}
+
+	for _, path := range pprofPaths {
+		// Viewer must be forbidden on any pprof path.
+		w := httptest.NewRecorder()
+		mw.ServeHTTP(w, rbacRequest(http.MethodGet, path, testViewerToken))
+		assert.Equal(t, http.StatusForbidden, w.Code,
+			"viewer must be forbidden on %s", path)
+
+		// Admin must be allowed.
+		w = httptest.NewRecorder()
+		mw.ServeHTTP(w, rbacRequest(http.MethodGet, path, testAdminToken))
+		assert.Equal(t, http.StatusOK, w.Code,
+			"admin must be allowed on %s", path)
+
+		// No token → unauthorized.
+		w = httptest.NewRecorder()
+		mw.ServeHTTP(w, rbacRequest(http.MethodGet, path, ""))
+		assert.Equal(t, http.StatusUnauthorized, w.Code,
+			"unauthenticated must be 401 on %s", path)
+	}
+}
+
 // --- Backward compat: NewServerWithAuth still works as admin-only ---
 
 func TestNewServerWithAuth_BackwardCompat(t *testing.T) {

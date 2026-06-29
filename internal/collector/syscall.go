@@ -338,11 +338,11 @@ func (c *SyscallCollector) SamplingConfigMap() *ebpf.Map {
 // a pooled *types.Event obtained from eventPool. Caller is responsible for
 // Reset() and Put() after the event value has been consumed.
 func (c *SyscallCollector) parseEvent(raw []byte, event *types.Event) error {
-	evt, err := bpf.ParseSyscallEvent(raw)
-	if err != nil {
+	var se bpf.SyscallEvent
+	if err := bpf.ParseSyscallEventInto(raw, &se); err != nil {
 		return err
 	}
-	*event = evt.ToTypesEvent()
+	*event = se.ToTypesEvent()
 	return nil
 }
 

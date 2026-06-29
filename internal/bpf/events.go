@@ -309,157 +309,177 @@ func (r *RingbufReader) Read() (ringbuf.Record, error) {
 // Parse functions
 // -----------------------------------------------------------------------
 
-// ParseSyscallEvent parses raw bytes into a SyscallEvent.
-// Uses manual parsing to match packed C struct layout.
-func ParseSyscallEvent(raw []byte) (*SyscallEvent, error) {
+// ParseSyscallEventInto parses raw bytes into an existing SyscallEvent,
+// avoiding a heap allocation on the hot path. Prefer this over ParseSyscallEvent
+// when the caller can provide a stack-allocated or pooled struct.
+func ParseSyscallEventInto(raw []byte, out *SyscallEvent) error {
 	const minSize = 4 + 8 + 4 + 4 + 4 + 16 + 8 + 8 + 48 // 104 bytes
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-
-	evt := &SyscallEvent{}
 	offset := 0
-
-	evt.Type = binary.LittleEndian.Uint32(raw[offset:])
+	out.Type = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
-	evt.Timestamp = binary.LittleEndian.Uint64(raw[offset:])
+	out.Timestamp = binary.LittleEndian.Uint64(raw[offset:])
 	offset += 8
-	evt.PID = binary.LittleEndian.Uint32(raw[offset:])
+	out.PID = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
-	evt.TGID = binary.LittleEndian.Uint32(raw[offset:])
+	out.TGID = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
-	evt.UID = binary.LittleEndian.Uint32(raw[offset:])
+	out.UID = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
-	copy(evt.Comm[:], raw[offset:offset+16])
+	copy(out.Comm[:], raw[offset:offset+16])
 	offset += 16
-	evt.Nr = int64(binary.LittleEndian.Uint64(raw[offset:]))
+	out.Nr = int64(binary.LittleEndian.Uint64(raw[offset:]))  /* #nosec G115 */
 	offset += 8
-	evt.Ret = int64(binary.LittleEndian.Uint64(raw[offset:]))
+	out.Ret = int64(binary.LittleEndian.Uint64(raw[offset:])) /* #nosec G115 */
 	offset += 8
 	for i := 0; i < 6; i++ {
-		evt.Args[i] = binary.LittleEndian.Uint64(raw[offset:])
+		out.Args[i] = binary.LittleEndian.Uint64(raw[offset:])
 		offset += 8
 	}
+	return nil
+}
 
-	return evt, nil
+// ParseSyscallEvent parses raw bytes into a SyscallEvent.
+// Uses manual parsing to match packed C struct layout.
+// For the allocation-free hot path, use ParseSyscallEventInto instead.
+func ParseSyscallEvent(raw []byte) (*SyscallEvent, error) {
+	out := new(SyscallEvent)
+	return out, ParseSyscallEventInto(raw, out)
+}
+
+// ParseNetworkEventInto parses raw bytes into an existing NetworkEvent,
+// avoiding a heap allocation on the hot path.
+func ParseNetworkEventInto(raw []byte, out *NetworkEvent) error {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 16 + 16 + 2 + 2 + 1 + 1 // 98 bytes
+	if len(raw) < minSize {
+		return fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	offset := 0
+	out.Type = binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
+	out.Timestamp = binary.LittleEndian.Uint64(raw[offset:])
+	offset += 8
+	out.PID = binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
+	out.TGID = binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
+	out.PPID = binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
+	out.UID = binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
+	copy(out.Comm[:], raw[offset:offset+16])
+	offset += 16
+	copy(out.ParentComm[:], raw[offset:offset+16])
+	offset += 16
+	copy(out.Saddr[:], raw[offset:offset+16])
+	offset += 16
+	copy(out.Daddr[:], raw[offset:offset+16])
+	offset += 16
+	out.Sport = binary.LittleEndian.Uint16(raw[offset:])
+	offset += 2
+	out.Dport = binary.LittleEndian.Uint16(raw[offset:])
+	offset += 2
+	out.Proto = raw[offset]
+	offset++
+	out.Family = raw[offset]
+	return nil
 }
 
 // ParseNetworkEvent parses raw bytes into a NetworkEvent.
+// For the allocation-free hot path, use ParseNetworkEventInto instead.
 func ParseNetworkEvent(raw []byte) (*NetworkEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 16 + 16 + 2 + 2 + 1 + 1 // 98 bytes
+	out := new(NetworkEvent)
+	return out, ParseNetworkEventInto(raw, out)
+}
+
+// ParseFileaccessEventInto parses raw bytes into an existing FileaccessEvent,
+// avoiding a heap allocation on the hot path.
+// Wire layout: type(4) ts(8) pid(4) tgid(4) ppid(4) uid(4) comm(16)
+// parent_comm(16) filename(256) flags(4) mode(4) op(1) fd_path_truncated(1) = 326 bytes.
+func ParseFileaccessEventInto(raw []byte, out *FileaccessEvent) error {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 256 + 4 + 4 + 1 + 1 // 326 bytes
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-
-	evt := &NetworkEvent{}
-	offset := 0
-
-	evt.Type = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.Timestamp = binary.LittleEndian.Uint64(raw[offset:])
-	offset += 8
-	evt.PID = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.TGID = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.PPID = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	evt.UID = binary.LittleEndian.Uint32(raw[offset:])
-	offset += 4
-	copy(evt.Comm[:], raw[offset:offset+16])
-	offset += 16
-	copy(evt.ParentComm[:], raw[offset:offset+16])
-	offset += 16
-	copy(evt.Saddr[:], raw[offset:offset+16])
-	offset += 16
-	copy(evt.Daddr[:], raw[offset:offset+16])
-	offset += 16
-	evt.Sport = binary.LittleEndian.Uint16(raw[offset:])
-	offset += 2
-	evt.Dport = binary.LittleEndian.Uint16(raw[offset:])
-	offset += 2
-	evt.Proto = raw[offset]
-	offset += 1
-	evt.Family = raw[offset]
-
-	return evt, nil
+	off := 0
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	off += 8
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.TGID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	copy(out.Comm[:], raw[off:off+16])
+	off += 16
+	copy(out.ParentComm[:], raw[off:off+16])
+	off += 16
+	copy(out.Filename[:], raw[off:off+256])
+	off += 256
+	out.Flags = int32(binary.LittleEndian.Uint32(raw[off:])) /* #nosec G115 */
+	off += 4
+	out.Mode = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.Op = raw[off]
+	off++
+	out.FDTruncated = raw[off]
+	return nil
 }
 
 // ParseFileaccessEvent parses raw bytes into a FileaccessEvent.
-// Wire layout: type(4) ts(8) pid(4) tgid(4) ppid(4) uid(4) comm(16)
-// parent_comm(16) filename(256) flags(4) mode(4) op(1) fd_path_truncated(1) = 326 bytes.
+// For the allocation-free hot path, use ParseFileaccessEventInto instead.
 func ParseFileaccessEvent(raw []byte) (*FileaccessEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 256 + 4 + 4 + 1 + 1 // 326 bytes
-	if len(raw) < minSize {
-		return nil, fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
-	}
-
-	evt := &FileaccessEvent{}
-	off := 0
-
-	evt.Type = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	evt.Timestamp = binary.LittleEndian.Uint64(raw[off:])
-	off += 8
-	evt.PID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	evt.TGID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	evt.PPID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	evt.UID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	copy(evt.Comm[:], raw[off:off+16])
-	off += 16
-	copy(evt.ParentComm[:], raw[off:off+16])
-	off += 16
-	copy(evt.Filename[:], raw[off:off+256])
-	off += 256
-	evt.Flags = int32(binary.LittleEndian.Uint32(raw[off:]))
-	off += 4
-	evt.Mode = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	evt.Op = raw[off]
-	off++
-	evt.FDTruncated = raw[off]
-
-	return evt, nil
+	out := new(FileaccessEvent)
+	return out, ParseFileaccessEventInto(raw, out)
 }
 
-// ParsePrivescEvent parses a raw ring-buffer sample into a PrivescRawEvent.
+// ParsePrivescEventInto parses a raw ring-buffer sample into an existing PrivescRawEvent,
+// avoiding a heap allocation on the hot path.
 // Wire layout (packed): type(4) ts(8) pid(4) tgid(4) ppid(4) uid(4) comm(16)
 //
 //	parent_comm(16) nr(8) ret(8) args[0](8)=old_caps args[1](8)=new_caps ...
-func ParsePrivescEvent(raw []byte) (*PrivescRawEvent, error) {
+func ParsePrivescEventInto(raw []byte, out *PrivescRawEvent) error {
 	// header: 4+8+4+4+4+4+16+16 = 60 bytes; then syscall union: 8+8+8+8 = 32 bytes minimum
 	const minSize = 60 + 8 + 8 + 8 + 8
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("privesc raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("privesc raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-	evt := &PrivescRawEvent{}
 	off := 0
-	evt.Type = binary.LittleEndian.Uint32(raw[off:])
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
 	off += 8
-	evt.PID = binary.LittleEndian.Uint32(raw[off:])
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.TGID = binary.LittleEndian.Uint32(raw[off:])
+	out.TGID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.PPID = binary.LittleEndian.Uint32(raw[off:])
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.UID = binary.LittleEndian.Uint32(raw[off:])
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	copy(evt.Comm[:], raw[off:off+16])
+	copy(out.Comm[:], raw[off:off+16])
 	off += 16
-	copy(evt.ParentComm[:], raw[off:off+16])
+	copy(out.ParentComm[:], raw[off:off+16])
 	off += 16
 	// skip nr(8) and ret(8)
 	off += 16
-	evt.OldCaps = binary.LittleEndian.Uint64(raw[off:])
+	out.OldCaps = binary.LittleEndian.Uint64(raw[off:])
 	off += 8
-	evt.NewCaps = binary.LittleEndian.Uint64(raw[off:])
-	return evt, nil
+	out.NewCaps = binary.LittleEndian.Uint64(raw[off:])
+	return nil
+}
+
+// ParsePrivescEvent parses a raw ring-buffer sample into a PrivescRawEvent.
+// For the allocation-free hot path, use ParsePrivescEventInto instead.
+func ParsePrivescEvent(raw []byte) (*PrivescRawEvent, error) {
+	out := new(PrivescRawEvent)
+	return out, ParsePrivescEventInto(raw, out)
 }
 
 // ParseNetworkCloseEvent parses a raw ring-buffer sample for EVENT_NET_CLOSE.
@@ -486,205 +506,248 @@ func ParsePrivescEvent(raw []byte) (*PrivescRawEvent, error) {
 //
 // We read the network fields first (saddr starts at 60), then read
 // duration_ns from offset 60+8+8 = 76 (args[0] in the syscall layout).
-func ParseNetworkCloseEvent(raw []byte) (*NetworkCloseRawEvent, error) {
+// ParseNetworkCloseEventInto parses a raw ring-buffer sample into an existing
+// NetworkCloseRawEvent, avoiding a heap allocation on the hot path.
+func ParseNetworkCloseEventInto(raw []byte, out *NetworkCloseRawEvent) error {
 	const networkUnionOffset = 60
 	const durationOffset = networkUnionOffset + 8 + 8 // skip nr + ret
 	const minSize = durationOffset + 8
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("net_close raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("net_close raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-	evt := &NetworkCloseRawEvent{}
 	off := 0
-	evt.Type = binary.LittleEndian.Uint32(raw[off:])
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
 	off += 8
-	evt.PID = binary.LittleEndian.Uint32(raw[off:])
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.TGID = binary.LittleEndian.Uint32(raw[off:])
+	out.TGID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.PPID = binary.LittleEndian.Uint32(raw[off:])
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	evt.UID = binary.LittleEndian.Uint32(raw[off:])
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	copy(evt.Comm[:], raw[off:off+16])
+	copy(out.Comm[:], raw[off:off+16])
 	off += 16
-	copy(evt.ParentComm[:], raw[off:off+16])
+	copy(out.ParentComm[:], raw[off:off+16])
 	off += 16
 	// off == 60 == networkUnionOffset
-	copy(evt.Saddr[:], raw[off:off+16])
+	copy(out.Saddr[:], raw[off:off+16])
 	off += 16
-	copy(evt.Daddr[:], raw[off:off+16])
+	copy(out.Daddr[:], raw[off:off+16])
 	off += 16
-	evt.Sport = binary.LittleEndian.Uint16(raw[off:])
+	out.Sport = binary.LittleEndian.Uint16(raw[off:])
 	off += 2
-	evt.Dport = binary.LittleEndian.Uint16(raw[off:])
+	out.Dport = binary.LittleEndian.Uint16(raw[off:])
 	off += 2
-	evt.Proto = raw[off]
+	out.Proto = raw[off]
 	off++
-	evt.Family = raw[off]
+	out.Family = raw[off]
 	// Read duration_ns from syscall union args[0] offset.
-	evt.DurationNs = binary.LittleEndian.Uint64(raw[durationOffset:])
-	return evt, nil
+	out.DurationNs = binary.LittleEndian.Uint64(raw[durationOffset:])
+	return nil
+}
+
+// ParseNetworkCloseEvent parses a raw ring-buffer sample for EVENT_NET_CLOSE.
+// For the allocation-free hot path, use ParseNetworkCloseEventInto instead.
+func ParseNetworkCloseEvent(raw []byte) (*NetworkCloseRawEvent, error) {
+	out := new(NetworkCloseRawEvent)
+	return out, ParseNetworkCloseEventInto(raw, out)
+}
+
+// ParseKmodEventInto parses a raw ring-buffer sample into an existing KmodRawEvent,
+// avoiding a heap allocation on the hot path.
+func ParseKmodEventInto(raw []byte, out *KmodRawEvent) error {
+	const minSize = 4 + 8 + 4 + 4 + 16 + 16 + 4 + 64 + 1 // 121 bytes
+	if len(raw) < minSize {
+		return fmt.Errorf("kmod raw sample too small: %d bytes (need %d)", len(raw), minSize)
+	}
+	off := 0
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	off += 8
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	copy(out.Comm[:], raw[off:off+16])
+	off += 16
+	copy(out.ParentComm[:], raw[off:off+16])
+	off += 16
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	copy(out.ModName[:], raw[off:off+64])
+	off += 64
+	out.FromTmpfs = raw[off]
+	return nil
 }
 
 // ParseKmodEvent parses a raw ring-buffer sample for EVENT_TYPE_KMOD_LOAD.
+// For the allocation-free hot path, use ParseKmodEventInto instead.
 func ParseKmodEvent(raw []byte) (*KmodRawEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 16 + 16 + 4 + 64 + 1 // 121 bytes
+	out := new(KmodRawEvent)
+	return out, ParseKmodEventInto(raw, out)
+}
+
+// ParseCgroupEscapeEventInto parses a raw ring-buffer sample into an existing
+// CgroupEscapeRawEvent, avoiding a heap allocation on the hot path.
+func ParseCgroupEscapeEventInto(raw []byte, out *CgroupEscapeRawEvent) error {
+	const minSize = 4 + 8 + 4 + 4 + 16 + 16 + 4 + 8 + 8 // 72 bytes
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("kmod raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("cgroup_esc raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-	e := &KmodRawEvent{}
 	off := 0
-	e.Type = binary.LittleEndian.Uint32(raw[off:])
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
 	off += 8
-	e.PID = binary.LittleEndian.Uint32(raw[off:])
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.UID = binary.LittleEndian.Uint32(raw[off:])
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	copy(e.Comm[:], raw[off:off+16])
+	copy(out.Comm[:], raw[off:off+16])
 	off += 16
-	copy(e.ParentComm[:], raw[off:off+16])
+	copy(out.ParentComm[:], raw[off:off+16])
 	off += 16
-	e.PPID = binary.LittleEndian.Uint32(raw[off:])
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	copy(e.ModName[:], raw[off:off+64])
-	off += 64
-	e.FromTmpfs = raw[off]
-	return e, nil
+	out.InitCgroupID = binary.LittleEndian.Uint64(raw[off:])
+	off += 8
+	out.NewCgroupID = binary.LittleEndian.Uint64(raw[off:])
+	return nil
 }
 
 // ParseCgroupEscapeEvent parses a raw ring-buffer sample for EVENT_TYPE_CGROUP_ESC.
+// For the allocation-free hot path, use ParseCgroupEscapeEventInto instead.
 func ParseCgroupEscapeEvent(raw []byte) (*CgroupEscapeRawEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 16 + 16 + 4 + 8 + 8 // 72 bytes
+	out := new(CgroupEscapeRawEvent)
+	return out, ParseCgroupEscapeEventInto(raw, out)
+}
+
+// ParseIOUringEventInto parses a raw ring-buffer sample into an existing IOUringRawEvent,
+// avoiding a heap allocation on the hot path.
+func ParseIOUringEventInto(raw []byte, out *IOUringRawEvent) error {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 1 + 4 + 4 + 4 // 73 bytes
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("cgroup_esc raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("iouring raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-	e := &CgroupEscapeRawEvent{}
 	off := 0
-	e.Type = binary.LittleEndian.Uint32(raw[off:])
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
 	off += 8
-	e.PID = binary.LittleEndian.Uint32(raw[off:])
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.UID = binary.LittleEndian.Uint32(raw[off:])
+	out.TGID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	copy(e.Comm[:], raw[off:off+16])
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
+	off += 4
+	copy(out.Comm[:], raw[off:off+16])
 	off += 16
-	copy(e.ParentComm[:], raw[off:off+16])
+	copy(out.ParentComm[:], raw[off:off+16])
 	off += 16
-	e.PPID = binary.LittleEndian.Uint32(raw[off:])
+	out.Op = raw[off]
+	off++
+	out.Flags = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.InitCgroupID = binary.LittleEndian.Uint64(raw[off:])
-	off += 8
-	e.NewCgroupID = binary.LittleEndian.Uint64(raw[off:])
-	return e, nil
+	out.Fd = int32(binary.LittleEndian.Uint32(raw[off:])) /* #nosec G115 */
+	off += 4
+	out.ToSubmit = binary.LittleEndian.Uint32(raw[off:])
+	return nil
 }
 
 // ParseIOUringEvent parses a raw ring-buffer sample for EVENT_TYPE_IO_URING.
+// For the allocation-free hot path, use ParseIOUringEventInto instead.
 func ParseIOUringEvent(raw []byte) (*IOUringRawEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 1 + 4 + 4 + 4 // 73 bytes
+	out := new(IOUringRawEvent)
+	return out, ParseIOUringEventInto(raw, out)
+}
+
+// ParseBpfMonitorEventInto parses a raw ring-buffer sample into an existing
+// BpfMonitorRawEvent, avoiding a heap allocation on the hot path.
+func ParseBpfMonitorEventInto(raw []byte, out *BpfMonitorRawEvent) error {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 4 + 4 + 4 // 72 bytes
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("iouring raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("bpf_monitor raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-	e := &IOUringRawEvent{}
 	off := 0
-	e.Type = binary.LittleEndian.Uint32(raw[off:])
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
 	off += 8
-	e.PID = binary.LittleEndian.Uint32(raw[off:])
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.TGID = binary.LittleEndian.Uint32(raw[off:])
+	out.TGID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.PPID = binary.LittleEndian.Uint32(raw[off:])
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.UID = binary.LittleEndian.Uint32(raw[off:])
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	copy(e.Comm[:], raw[off:off+16])
+	copy(out.Comm[:], raw[off:off+16])
 	off += 16
-	copy(e.ParentComm[:], raw[off:off+16])
+	copy(out.ParentComm[:], raw[off:off+16])
 	off += 16
-	e.Op = raw[off]
-	off++
-	e.Flags = binary.LittleEndian.Uint32(raw[off:])
+	out.Cmd = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.Fd = int32(binary.LittleEndian.Uint32(raw[off:]))
+	out.ProgType = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.ToSubmit = binary.LittleEndian.Uint32(raw[off:])
-	return e, nil
+	out.Ret = int32(binary.LittleEndian.Uint32(raw[off:])) /* #nosec G115 */
+	return nil
 }
 
 // ParseBpfMonitorEvent parses a raw ring-buffer sample for EVENT_TYPE_BPF_PROGRAM.
+// For the allocation-free hot path, use ParseBpfMonitorEventInto instead.
 func ParseBpfMonitorEvent(raw []byte) (*BpfMonitorRawEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 4 + 4 + 4 // 72 bytes
+	out := new(BpfMonitorRawEvent)
+	return out, ParseBpfMonitorEventInto(raw, out)
+}
+
+// ParseTlsClientHelloEventInto parses a raw ring-buffer sample into an existing
+// TlsClientHelloRawEvent, avoiding a heap allocation on the hot path.
+func ParseTlsClientHelloEventInto(raw []byte, out *TlsClientHelloRawEvent) error {
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 2 + 2 + 4 + 1 // 69 bytes min
 	if len(raw) < minSize {
-		return nil, fmt.Errorf("bpf_monitor raw sample too small: %d bytes (need %d)", len(raw), minSize)
+		return fmt.Errorf("tls_clienthello raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
-	e := &BpfMonitorRawEvent{}
 	off := 0
-	e.Type = binary.LittleEndian.Uint32(raw[off:])
+	out.Type = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.Timestamp = binary.LittleEndian.Uint64(raw[off:])
+	out.Timestamp = binary.LittleEndian.Uint64(raw[off:])
 	off += 8
-	e.PID = binary.LittleEndian.Uint32(raw[off:])
+	out.PID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.TGID = binary.LittleEndian.Uint32(raw[off:])
+	out.TGID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.PPID = binary.LittleEndian.Uint32(raw[off:])
+	out.PPID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.UID = binary.LittleEndian.Uint32(raw[off:])
+	out.UID = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	copy(e.Comm[:], raw[off:off+16])
+	copy(out.Comm[:], raw[off:off+16])
 	off += 16
-	copy(e.ParentComm[:], raw[off:off+16])
+	copy(out.ParentComm[:], raw[off:off+16])
 	off += 16
-	e.Cmd = binary.LittleEndian.Uint32(raw[off:])
+	out.Dport = binary.BigEndian.Uint16(raw[off:])
+	off += 2 // network byte order
+	out.CapturedLen = binary.LittleEndian.Uint16(raw[off:])
+	off += 2
+	out.OriginalLen = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	e.ProgType = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	e.Ret = int32(binary.LittleEndian.Uint32(raw[off:]))
-	return e, nil
+	if out.CapturedLen > 512 {
+		out.CapturedLen = 512
+	}
+	copy(out.Data[:], raw[off:off+int(out.CapturedLen)])
+	return nil
 }
 
 // ParseTlsClientHelloEvent parses a raw ring-buffer sample for a ClientHello event.
+// For the allocation-free hot path, use ParseTlsClientHelloEventInto instead.
 func ParseTlsClientHelloEvent(raw []byte) (*TlsClientHelloRawEvent, error) {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 2 + 2 + 4 + 1 // 69 bytes min
-	if len(raw) < minSize {
-		return nil, fmt.Errorf("tls_clienthello raw sample too small: %d bytes (need %d)", len(raw), minSize)
-	}
-	e := &TlsClientHelloRawEvent{}
-	off := 0
-	e.Type = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	e.Timestamp = binary.LittleEndian.Uint64(raw[off:])
-	off += 8
-	e.PID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	e.TGID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	e.PPID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	e.UID = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	copy(e.Comm[:], raw[off:off+16])
-	off += 16
-	copy(e.ParentComm[:], raw[off:off+16])
-	off += 16
-	e.Dport = binary.BigEndian.Uint16(raw[off:])
-	off += 2 // network byte order
-	e.CapturedLen = binary.LittleEndian.Uint16(raw[off:])
-	off += 2
-	e.OriginalLen = binary.LittleEndian.Uint32(raw[off:])
-	off += 4
-	if e.CapturedLen > 512 {
-		e.CapturedLen = 512
-	}
-	copy(e.Data[:], raw[off:off+int(e.CapturedLen)])
-	return e, nil
+	out := new(TlsClientHelloRawEvent)
+	return out, ParseTlsClientHelloEventInto(raw, out)
 }
 
 // -----------------------------------------------------------------------

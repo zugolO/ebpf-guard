@@ -14,8 +14,8 @@ import (
 // The function has no kernel dependencies — it only decodes bytes and runs the
 // pure-Go ja3 hashing — so it is unit-tested directly without a running probe.
 func decodeTLSClientHello(raw []byte) (types.Event, error) {
-	rawEvt, err := bpf.ParseTlsClientHelloEvent(raw)
-	if err != nil {
+	var rawEvt bpf.TlsClientHelloRawEvent
+	if err := bpf.ParseTlsClientHelloEventInto(raw, &rawEvt); err != nil {
 		return types.Event{}, err
 	}
 

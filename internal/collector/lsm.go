@@ -686,19 +686,19 @@ func (c *KmodCollector) parseKmodOrFallback(raw []byte) (*types.Event, error) {
 		}
 		return nil, nil // consumed; do not forward to the event channel
 	}
-	evt, err := bpf.ParseKmodEvent(raw)
-	if err != nil {
+	var ke bpf.KmodRawEvent
+	if err := bpf.ParseKmodEventInto(raw, &ke); err != nil {
 		return nil, err
 	}
-	result := evt.ToTypesEvent()
+	result := ke.ToTypesEvent()
 	return &result, nil
 }
 
 func (c *KmodCollector) parseCgroupEsc(raw []byte) (*types.Event, error) {
-	evt, err := bpf.ParseCgroupEscapeEvent(raw)
-	if err != nil {
+	var ce bpf.CgroupEscapeRawEvent
+	if err := bpf.ParseCgroupEscapeEventInto(raw, &ce); err != nil {
 		return nil, err
 	}
-	result := evt.ToTypesEvent()
+	result := ce.ToTypesEvent()
 	return &result, nil
 }

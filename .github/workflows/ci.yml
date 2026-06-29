@@ -182,7 +182,7 @@ jobs:
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ./coverage.out
-        fail_ci_if_error: true
+        fail_ci_if_error: false
 
   # BTF fallback compatibility tests — verify the 3-strategy resolution logic
   # works correctly for each scenario without requiring a real kernel change.

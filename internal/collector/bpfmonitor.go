@@ -247,10 +247,10 @@ func (c *BPFMonitorCollector) readLoop(ctx context.Context, out chan<- types.Eve
 
 // parseEvent converts raw bytes from the ring buffer into event.
 func (c *BPFMonitorCollector) parseEvent(raw []byte, event *types.Event) error {
-	evt, err := bpf.ParseBpfMonitorEvent(raw)
-	if err != nil {
+	var bm bpf.BpfMonitorRawEvent
+	if err := bpf.ParseBpfMonitorEventInto(raw, &bm); err != nil {
 		return err
 	}
-	*event = evt.ToTypesEvent()
+	*event = bm.ToTypesEvent()
 	return nil
 }

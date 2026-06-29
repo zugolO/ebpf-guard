@@ -12,6 +12,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ---------------------------------------------------------------------------
+// ReadStats — returns zeros when BPF is not loaded (dry-run / stub mode)
+// ---------------------------------------------------------------------------
+
+func TestXDPManager_ReadStats_NotLoaded(t *testing.T) {
+	m := newTestXDPManager(t)
+	agg, err := m.ReadStats()
+	require.NoError(t, err, "ReadStats must not error in dry-run mode")
+	assert.Equal(t, uint64(0), agg.Dropped, "dropped must be zero when BPF is not loaded")
+	assert.Equal(t, uint64(0), agg.Passed, "passed must be zero when BPF is not loaded")
+}
+
+func TestXDPManager_ReadStats_AfterClose(t *testing.T) {
+	m := newTestXDPManager(t)
+	require.NoError(t, m.Close())
+	agg, err := m.ReadStats()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), agg.Dropped)
+	assert.Equal(t, uint64(0), agg.Passed)
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stdout, nil))
 }

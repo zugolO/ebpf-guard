@@ -248,10 +248,10 @@ func (c *IOUringCollector) readLoop(ctx context.Context, out chan<- types.Event)
 
 // parseEvent converts raw bytes from the ring buffer into event.
 func (c *IOUringCollector) parseEvent(raw []byte, event *types.Event) error {
-	evt, err := bpf.ParseIOUringEvent(raw)
-	if err != nil {
+	var ie bpf.IOUringRawEvent
+	if err := bpf.ParseIOUringEventInto(raw, &ie); err != nil {
 		return err
 	}
-	*event = evt.ToTypesEvent()
+	*event = ie.ToTypesEvent()
 	return nil
 }

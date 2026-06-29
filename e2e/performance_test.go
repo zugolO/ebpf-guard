@@ -424,19 +424,22 @@ func BenchmarkCorrelationEngine(b *testing.B) {
 }
 
 // BenchmarkShardedBufferContention benchmarks sharded buffer under contention.
+// PIDs cycle through a bounded window (256) so the shard maps stay bounded and
+// don't grow to OOM under the 10s benchtime window.
 func BenchmarkShardedBufferContention(b *testing.B) {
 	buffer := correlator.NewShardedEventBuffer(1000)
 
 	b.RunParallel(func(pb *testing.PB) {
-		pid := uint32(1)
+		var i uint32
 		for pb.Next() {
+			pid := (i & 0xFF) + 1 // cycle through PIDs 1-256
 			event := types.Event{
 				Type:      types.EventSyscall,
 				PID:       pid,
 				Timestamp: uint64(time.Now().UnixNano()),
 			}
 			buffer.Add(pid, event)
-			pid++
+			i++
 		}
 	})
 }

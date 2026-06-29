@@ -34,14 +34,16 @@ struct {
     __type(value, __u8);
 } xdp_blocked_ports SEC(".maps");
 
-// Per-CPU stats (indexed by 0).
+// Per-CPU drop/pass counters.  Each CPU core writes to its own slot,
+// eliminating cache-line contention at high packet rates on multi-core nodes.
+// Userspace sums across all CPUs when reading for Prometheus export.
 struct xdp_stats {
     __u64 dropped;
     __u64 passed;
 };
 
 struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __type(key, __u32);
     __type(value, struct xdp_stats);
@@ -51,14 +53,14 @@ static __always_inline void record_drop(void) {
     __u32 key = 0;
     struct xdp_stats *s = bpf_map_lookup_elem(&xdp_stats_map, &key);
     if (s)
-        __sync_fetch_and_add(&s->dropped, 1);
+        s->dropped++;
 }
 
 static __always_inline void record_pass(void) {
     __u32 key = 0;
     struct xdp_stats *s = bpf_map_lookup_elem(&xdp_stats_map, &key);
     if (s)
-        __sync_fetch_and_add(&s->passed, 1);
+        s->passed++;
 }
 
 SEC("xdp")

@@ -262,6 +262,18 @@ func (m *XDPManager) IsLoaded() bool {
 	return m.loaded
 }
 
+// ReadStats returns the aggregated XDP packet drop/pass counters summed across
+// all CPU cores.  Returns zero values when the BPF program is not loaded
+// (dry-run mode or failed attachment).
+func (m *XDPManager) ReadStats() (bpf.XDPAggregate, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.loaded || m.objs == nil || m.objs.XdpStatsMap == nil {
+		return bpf.XDPAggregate{}, nil
+	}
+	return bpf.ReadXDPStats(m.objs.XdpStatsMap)
+}
+
 // RegisterMetrics registers XDP Prometheus metrics with the given registerer.
 func (m *XDPManager) RegisterMetrics(reg prometheus.Registerer) error {
 	for _, c := range []prometheus.Collector{m.droppedTotal, m.blockedIPsGauge, m.blockedPortsGauge} {

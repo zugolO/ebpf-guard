@@ -330,9 +330,9 @@ func ParseSyscallEventInto(raw []byte, out *SyscallEvent) error {
 	offset += 4
 	copy(out.Comm[:], raw[offset:offset+16])
 	offset += 16
-	out.Nr = int64(binary.LittleEndian.Uint64(raw[offset:]))
+	out.Nr = int64(binary.LittleEndian.Uint64(raw[offset:]))  /* #nosec G115 */
 	offset += 8
-	out.Ret = int64(binary.LittleEndian.Uint64(raw[offset:]))
+	out.Ret = int64(binary.LittleEndian.Uint64(raw[offset:])) /* #nosec G115 */
 	offset += 8
 	for i := 0; i < 6; i++ {
 		out.Args[i] = binary.LittleEndian.Uint64(raw[offset:])
@@ -422,7 +422,7 @@ func ParseFileaccessEventInto(raw []byte, out *FileaccessEvent) error {
 	off += 16
 	copy(out.Filename[:], raw[off:off+256])
 	off += 256
-	out.Flags = int32(binary.LittleEndian.Uint32(raw[off:]))
+	out.Flags = int32(binary.LittleEndian.Uint32(raw[off:])) /* #nosec G115 */
 	off += 4
 	out.Mode = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
@@ -654,7 +654,7 @@ func ParseIOUringEventInto(raw []byte, out *IOUringRawEvent) error {
 	off++
 	out.Flags = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	out.Fd = int32(binary.LittleEndian.Uint32(raw[off:]))
+	out.Fd = int32(binary.LittleEndian.Uint32(raw[off:])) /* #nosec G115 */
 	off += 4
 	out.ToSubmit = binary.LittleEndian.Uint32(raw[off:])
 	return nil
@@ -695,7 +695,7 @@ func ParseBpfMonitorEventInto(raw []byte, out *BpfMonitorRawEvent) error {
 	off += 4
 	out.ProgType = binary.LittleEndian.Uint32(raw[off:])
 	off += 4
-	out.Ret = int32(binary.LittleEndian.Uint32(raw[off:]))
+	out.Ret = int32(binary.LittleEndian.Uint32(raw[off:])) /* #nosec G115 */
 	return nil
 }
 

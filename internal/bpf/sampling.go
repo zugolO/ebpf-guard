@@ -2,6 +2,7 @@
 package bpf
 
 import (
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -31,6 +32,7 @@ func DefaultSamplingConfig() SamplingConfig {
 type SamplingController struct {
 	configMap *ebpf.Map
 	config    atomic.Value // stores SamplingConfig
+	hasBatch  bool
 }
 
 // NewSamplingController creates a new sampling controller.
@@ -60,6 +62,12 @@ func (sc *SamplingController) UpdateConfig(cfg SamplingConfig) error {
 // GetConfig returns the current sampling configuration.
 func (sc *SamplingController) GetConfig() SamplingConfig {
 	return sc.config.Load().(SamplingConfig)
+}
+
+// SetBatchMode enables or disables batch map operations in GetStats.
+// Call with KernelFeatures.HasBatchMapOps after constructing.
+func (sc *SamplingController) SetBatchMode(enabled bool) {
+	sc.hasBatch = enabled
 }
 
 // SetSyscallRate sets the sampling rate for syscall events.
@@ -110,23 +118,65 @@ type SamplingStats struct {
 	FileEvents    uint64
 }
 
-// GetStats retrieves event counter statistics from BPF.
-// Note: This resets the per-CPU counters.
+// getStatsBatchFn and getStatsSequentialFn are package-level vars so tests can
+// inject fakes to exercise the fallback path without a real kernel.
+var getStatsBatchFn = getStatsBatch
+var getStatsSequentialFn = getStatsSequential
+
+// GetStats retrieves event counter statistics from BPF and resets the counters.
+// When batch map operations are enabled (SetBatchMode(true)), a single
+// BatchLookupAndDelete syscall is used instead of one syscall per counter.
+// On failure the batch path falls back to per-element reads automatically.
 func (sc *SamplingController) GetStats(countersMap *ebpf.Map) (SamplingStats, error) {
-	var stats SamplingStats
-
 	if countersMap == nil {
-		return stats, fmt.Errorf("bpf: counters map is nil")
+		return SamplingStats{}, fmt.Errorf("bpf: counters map is nil")
 	}
+	if sc.hasBatch {
+		if stats, err := getStatsBatchFn(countersMap); err == nil {
+			return stats, nil
+		}
+		// Fall through to per-element on any batch error.
+	}
+	return getStatsSequentialFn(countersMap)
+}
 
-	// Read and reset counters for each event type
+// getStatsBatch reads all three event counters in one BatchLookupAndDelete syscall.
+// Returns an error if the batch call itself fails (callers should fall back to
+// getStatsSequential in that case).
+func getStatsBatch(m *ebpf.Map) (SamplingStats, error) {
+	var cursor ebpf.MapBatchCursor
+	keys := make([]uint32, 3)
+	values := make([]uint64, 3)
+	n, err := m.BatchLookupAndDelete(&cursor, keys, values, nil)
+	// ErrKeyNotExist is the normal "end-of-map" sentinel from cilium/ebpf; it
+	// means all entries were consumed, not a real error.
+	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return SamplingStats{}, fmt.Errorf("bpf: batch stats read: %w", err)
+	}
+	var stats SamplingStats
+	for i := 0; i < n; i++ {
+		switch keys[i] {
+		case 0:
+			stats.SyscallEvents = values[i]
+		case 1:
+			stats.NetworkEvents = values[i]
+		case 2:
+			stats.FileEvents = values[i]
+		}
+	}
+	return stats, nil
+}
+
+// getStatsSequential reads the three event counters one at a time (one syscall
+// per entry). Used as the fallback when batch operations are unavailable.
+func getStatsSequential(m *ebpf.Map) (SamplingStats, error) {
+	var stats SamplingStats
 	for i := uint32(0); i < 3; i++ {
 		var count uint64
-		if err := countersMap.LookupAndDelete(i, &count); err != nil {
-			// Counter might not exist yet, that's ok
+		if err := m.LookupAndDelete(i, &count); err != nil {
+			// Counter might not exist yet; skip silently.
 			continue
 		}
-
 		switch i {
 		case 0:
 			stats.SyscallEvents = count
@@ -136,7 +186,6 @@ func (sc *SamplingController) GetStats(countersMap *ebpf.Map) (SamplingStats, er
 			stats.FileEvents = count
 		}
 	}
-
 	return stats, nil
 }
 
@@ -329,6 +378,7 @@ type KernelFilterController struct {
 	commFilterMap      *ebpf.Map // comm_filter_map: key char[16], value uint8
 	syscallFilterMap   *ebpf.Map // syscall_filter_map: key uint32, value uint8
 	kernelFilterConfig *ebpf.Map // kernel_filter_config: key uint32, value uint8
+	hasBatch           bool
 }
 
 // NewKernelFilterController creates a controller for the three filter maps.
@@ -366,6 +416,12 @@ func (kf *KernelFilterController) SetCommFilter(comm string, pass bool) error {
 		return fmt.Errorf("bpf: set comm filter %q: %w", comm, err)
 	}
 	return nil
+}
+
+// SetBatchMode enables or disables batch map operations in UpdateSyscallFilter.
+// Call with KernelFeatures.HasBatchMapOps after constructing.
+func (kf *KernelFilterController) SetBatchMode(enabled bool) {
+	kf.hasBatch = enabled
 }
 
 // SetSyscallFilter sets whether syscall number nr should be monitored (true)
@@ -438,9 +494,12 @@ func (kf *KernelFilterController) LoadDefaultFilters() error {
 // given set of syscall numbers.  All 512 map slots are written: entries in nrs
 // are set to 1 (forward to userspace), the rest are cleared to 0 (drop).
 //
+// On kernels 5.6+ (HasBatchMapOps) all 512 slots are written in a single
+// BatchUpdate syscall.  On older kernels the per-element path is used; batch
+// errors also fall back to the per-element path automatically.
+//
 // This is called on startup after rules are loaded and again on every hot-reload
 // so that the BPF filter tracks the active rule set without a process restart.
-// The 512-slot write cost is ~50 µs — negligible for a startup/reload path.
 //
 // If nrs is empty the call falls back to DefaultMonitoredSyscalls so filtering
 // is never accidentally left in an "allow-nothing" state.
@@ -464,7 +523,39 @@ func (kf *KernelFilterController) UpdateSyscallFilter(nrs []uint32) error {
 		}
 	}
 
-	// Write all 512 slots so stale entries from a previous load are cleared.
+	if kf.hasBatch {
+		if err := updateSyscallFilterBatchFn(kf, allow); err == nil {
+			return nil
+		}
+		// Fall through to per-element on any batch error.
+	}
+	return kf.updateSyscallFilterSequential(allow)
+}
+
+// updateSyscallFilterBatchFn is a package-level var so tests can inject a fake
+// to exercise the fallback path without a real kernel or BPF map.
+var updateSyscallFilterBatchFn = (*KernelFilterController).updateSyscallFilterBatch
+
+// updateSyscallFilterBatch writes all 512 syscall filter slots in one
+// BatchUpdate syscall (kernel 5.6+).
+func (kf *KernelFilterController) updateSyscallFilterBatch(allow map[uint32]bool) error {
+	keys := make([]uint32, 512)
+	values := make([]uint8, 512)
+	for i := uint32(0); i < 512; i++ {
+		keys[i] = i
+		if allow[i] {
+			values[i] = 1
+		}
+	}
+	_, err := kf.syscallFilterMap.BatchUpdate(keys, values, &ebpf.BatchOptions{
+		ElemFlags: uint64(ebpf.UpdateAny),
+	})
+	return err
+}
+
+// updateSyscallFilterSequential writes all 512 syscall filter slots one at a
+// time (one syscall per slot). Used on older kernels or as a batch fallback.
+func (kf *KernelFilterController) updateSyscallFilterSequential(allow map[uint32]bool) error {
 	for i := uint32(0); i < 512; i++ {
 		var val uint8
 		if allow[i] {

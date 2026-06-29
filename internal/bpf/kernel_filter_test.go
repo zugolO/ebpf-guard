@@ -113,3 +113,76 @@ func TestKernelFilterController_EnableDisable_NilMap(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "kernel_filter_config")
 }
+
+func TestDefaultNoisyDaemonDenylist(t *testing.T) {
+	list := DefaultNoisyDaemonDenylist()
+	assert.NotEmpty(t, list, "default noisy daemon denylist must not be empty")
+
+	// All entries must fit in 15 chars (kernel TASK_COMM_LEN - 1).
+	for _, c := range list {
+		assert.LessOrEqualf(t, len(c), 15,
+			"comm %q exceeds 15 chars and will be silently truncated by the kernel", c)
+	}
+
+	// Spot-check that the key daemons from the issue are present.
+	must := []string{"systemd-journal", "rsyslogd", "node_exporter"}
+	set := make(map[string]bool, len(list))
+	for _, c := range list {
+		set[c] = true
+	}
+	for _, c := range must {
+		assert.True(t, set[c], "expected daemon %q in default noisy daemon denylist", c)
+	}
+}
+
+func TestBuildCommDenylist_Defaults(t *testing.T) {
+	// No overrides: should get kernel threads + daemons.
+	merged := BuildCommDenylist(nil, nil, false)
+	assert.NotEmpty(t, merged)
+
+	kernelThreads := DefaultCommDenylist()
+	daemons := DefaultNoisyDaemonDenylist()
+	assert.Len(t, merged, len(kernelThreads)+len(daemons))
+
+	set := make(map[string]bool, len(merged))
+	for _, c := range merged {
+		set[c] = true
+	}
+	for _, c := range kernelThreads {
+		assert.True(t, set[c], "expected kernel thread %q in merged list", c)
+	}
+	for _, c := range daemons {
+		assert.True(t, set[c], "expected daemon %q in merged list", c)
+	}
+}
+
+func TestBuildCommDenylist_DisableDaemons(t *testing.T) {
+	merged := BuildCommDenylist(nil, nil, true)
+	// Daemon list is disabled: only kernel threads expected.
+	assert.Equal(t, DefaultCommDenylist(), merged)
+}
+
+func TestBuildCommDenylist_CustomKernelThreads(t *testing.T) {
+	custom := []string{"mykworker", "myrcu"}
+	merged := BuildCommDenylist(custom, nil, false)
+	// Custom kernel-thread list + default daemons.
+	assert.Len(t, merged, len(custom)+len(DefaultNoisyDaemonDenylist()))
+	assert.Equal(t, custom[0], merged[0])
+	assert.Equal(t, custom[1], merged[1])
+}
+
+func TestBuildCommDenylist_CustomDaemons(t *testing.T) {
+	customDaemons := []string{"mylogger", "myagent"}
+	merged := BuildCommDenylist(nil, customDaemons, false)
+	// Default kernel threads + custom daemon list.
+	assert.Len(t, merged, len(DefaultCommDenylist())+len(customDaemons))
+	// Custom daemons must appear at the tail.
+	tail := merged[len(DefaultCommDenylist()):]
+	assert.Equal(t, customDaemons, tail)
+}
+
+func TestBuildCommDenylist_CustomDaemonsWithDisable(t *testing.T) {
+	// disableDaemons=true wins even if a custom daemon list is supplied.
+	merged := BuildCommDenylist(nil, []string{"mylogger"}, true)
+	assert.Equal(t, DefaultCommDenylist(), merged)
+}

@@ -796,6 +796,22 @@ type KernelFilterConfig struct {
 	// should be silently dropped at the kernel level.  An empty slice means
 	// "use built-in defaults" (kworker, ksoftirqd, migration, rcu_sched, ...).
 	CommDenylist []string `mapstructure:"comm_denylist"`
+
+	// DisableDefaultDaemonDenylist disables the built-in list of noisy
+	// user-space monitoring daemons (journald, rsyslog, node_exporter, etc.)
+	// that are silently dropped at the kernel level by default.
+	// Set to true if you need full visibility into those daemons' activity,
+	// or if you are running under a threat model where comm-name spoofing is a
+	// concern and you prefer not to have any process invisibly filtered.
+	// Default: false (daemon denylist is active).
+	DisableDefaultDaemonDenylist bool `mapstructure:"disable_default_daemon_denylist"`
+
+	// NoisyDaemonDenylist overrides the built-in user-space daemon denylist.
+	// When non-empty, this list replaces DefaultNoisyDaemonDenylist().
+	// Has no effect when DisableDefaultDaemonDenylist is true.
+	// Each entry must be at most 15 characters (kernel TASK_COMM_LEN - 1).
+	// SECURITY NOTE: comm names can be spoofed via prctl(PR_SET_NAME).
+	NoisyDaemonDenylist []string `mapstructure:"noisy_daemon_denylist"`
 }
 
 // MapSizeConfig holds BPF map size settings.
@@ -1699,6 +1715,8 @@ func setDefaults(v *viper.Viper) {
 	// would increase drops under burst.
 	v.SetDefault("bpf.event_queue_depth", 65536)
 	v.SetDefault("bpf.kernel_filter.enabled", true)
+	v.SetDefault("bpf.kernel_filter.disable_default_daemon_denylist", false)
+	v.SetDefault("bpf.kernel_filter.noisy_daemon_denylist", []string{})
 	v.SetDefault("bpf.sampling.enabled", true)
 	v.SetDefault("bpf.sampling.syscall_rate", 1)
 	v.SetDefault("bpf.sampling.network_rate", 1)

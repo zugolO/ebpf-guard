@@ -274,6 +274,55 @@ func DefaultCommDenylist() []string {
 	}
 }
 
+// DefaultNoisyDaemonDenylist returns well-known user-space monitoring and
+// logging daemons that generate high syscall volume but are unlikely to be
+// involved in security incidents under normal operation.
+//
+// SECURITY NOTE: Linux comm names are not a security boundary — any process
+// can call prctl(PR_SET_NAME, ...) to adopt an arbitrary name. An attacker
+// running as a sufficiently privileged user can spoof any name in this list
+// and have their events silently dropped at the kernel level. Use this list
+// conservatively and review it periodically alongside your threat model.
+// It can be disabled via bpf.kernel_filter.disable_default_daemon_denylist.
+func DefaultNoisyDaemonDenylist() []string {
+	return []string{
+		"systemd-journal", // systemd journal daemon (journald)
+		"rsyslogd",        // rsyslog system logger
+		"syslogd",         // classic BSD syslog
+		"node_exporter",   // Prometheus node exporter
+		"telegraf",        // Telegraf metrics collection agent
+		"filebeat",        // Elastic Filebeat log shipper
+		"fluentd",         // Fluentd log aggregator
+		"fluent-bit",      // Fluent Bit lightweight log forwarder
+	}
+}
+
+// BuildCommDenylist merges the kernel-thread denylist and the optional noisy
+// daemon denylist into a single slice for loading into comm_filter_map.
+//
+// kernelThreads defaults to DefaultCommDenylist() when empty.
+// If disableDaemons is true the daemon list is omitted entirely.
+// daemons defaults to DefaultNoisyDaemonDenylist() when nil/empty AND
+// disableDaemons is false.
+//
+// Duplicates between the two lists are silently kept — BPF map updates are
+// idempotent so writing the same key twice is harmless.
+func BuildCommDenylist(kernelThreads []string, daemons []string, disableDaemons bool) []string {
+	if len(kernelThreads) == 0 {
+		kernelThreads = DefaultCommDenylist()
+	}
+	if disableDaemons {
+		return kernelThreads
+	}
+	if len(daemons) == 0 {
+		daemons = DefaultNoisyDaemonDenylist()
+	}
+	merged := make([]string, 0, len(kernelThreads)+len(daemons))
+	merged = append(merged, kernelThreads...)
+	merged = append(merged, daemons...)
+	return merged
+}
+
 // KernelFilterController manages the BPF-side content-based event filters:
 // the comm denylist, the syscall allowlist, and the global filter enable flag.
 type KernelFilterController struct {

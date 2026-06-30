@@ -207,7 +207,7 @@ func (ks *KernelSyncer) buildDesiredSet(results []FeedResult) (map[string]struct
 				} else {
 					cidr = ip.String() + "/128"
 				}
-			default:
+			case IoCTypeDomain, IoCTypeURL:
 				continue // domain / URL handled by YAML rules
 			}
 

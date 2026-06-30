@@ -157,7 +157,7 @@ func (m *Manager) sync(ctx context.Context) {
 
 	state := m.loadState()
 
-	var successfulResults []FeedResult
+	successfulResults := make([]FeedResult, 0, len(m.clients))
 
 	for _, client := range m.clients {
 		select {

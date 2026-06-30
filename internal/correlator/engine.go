@@ -77,8 +77,11 @@ type SensitivityAdjuster interface {
 type CorrelationEngine struct {
 	ruleEngine atomic.Pointer[RuleEngine]
 	buffer     *ShardedEventBuffer // Uses sharded locks for better concurrency
-	pending    []types.Alert
-	pendingMu  sync.Mutex // Protects pending alerts slice
+	// enableEventBuffer gates the per-event buffer.Add on the hot path. When
+	// false (default) events are not copied into the per-PID ring buffer.
+	enableEventBuffer bool
+	pending           []types.Alert
+	pendingMu         sync.Mutex // Protects pending alerts slice
 
 	// Anomaly detection
 	anomalyDetector *profiler.AnomalyDetector
@@ -270,6 +273,14 @@ type CorrelationEngineConfig struct {
 
 	// Buffer configuration
 	BufferSize int
+
+	// EnableEventBuffer controls whether every ingested event is copied into the
+	// per-PID ShardedEventBuffer. The buffer is only read back via GetEvents /
+	// GetBuffer, which have no production consumer today, so it defaults to false
+	// to keep the per-event hot path free of a shard-lock + Event-struct copy.
+	// Set to true if an external consumer (e.g. an event-replay API) needs the
+	// recent per-PID event history.
+	EnableEventBuffer bool
 
 	// Anomaly detection configuration
 	EnableAnomaly    bool
@@ -570,6 +581,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 
 	ce := &CorrelationEngine{
 		buffer:               NewShardedEventBuffer(config.BufferSize),
+		enableEventBuffer:    config.EnableEventBuffer,
 		pending:              make([]types.Alert, 0),
 		enableAnomaly:        config.EnableAnomaly,
 		rateLimiter:          NewRateLimiterWithContext(ctx, config.RateLimitWindow, config.MaxAlertsPerWindow, config.EnableRateLimit),
@@ -632,18 +644,23 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	if bufferSweep < 30*time.Second {
 		bufferSweep = 30 * time.Second
 	}
-	go func() {
-		ticker := time.NewTicker(bufferSweep)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				ce.buffer.CleanupExpired(bufferTTL)
+	// Only run the eviction sweep when the per-PID event buffer is actually
+	// populated; with EnableEventBuffer=false the buffer stays empty so the
+	// goroutine would just wake up to do nothing.
+	if config.EnableEventBuffer {
+		go func() {
+			ticker := time.NewTicker(bufferSweep)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					ce.buffer.CleanupExpired(bufferTTL)
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	// Background goroutine that evicts expired enforcement cooldown and dedup entries.
 	// Without this the maps grow unbounded with unique (ruleID,PID) pairs.
@@ -1185,8 +1202,12 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 
 	ce.processedEvents.Add(1)
 
-	// Add event to per-process buffer
-	ce.buffer.Add(e.PID, e)
+	// Add event to per-process buffer. Gated: the buffer has no production
+	// reader today, so by default we skip the shard lock + Event-struct copy on
+	// every event. Enable via EnableEventBuffer when a consumer needs it.
+	if ce.enableEventBuffer {
+		ce.buffer.Add(e.PID, e)
+	}
 
 	// Update ancestry chain so every subsequent GetProcessTree call reflects
 	// the most recent parent information available for this event's PID.

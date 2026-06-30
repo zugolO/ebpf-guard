@@ -175,7 +175,9 @@ func TestCorrelationEngine_Flush(t *testing.T) {
 }
 
 func TestCorrelationEngine_Buffer(t *testing.T) {
-	engine := NewCorrelationEngine(nil)
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.EnableEventBuffer = true
+	engine := NewCorrelationEngineWithConfig(cfg)
 	ctx := context.Background()
 
 	// Add events for different PIDs

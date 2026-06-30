@@ -207,6 +207,77 @@ func TestCorrelationEngine_Buffer(t *testing.T) {
 	assert.Empty(t, pid3Events)
 }
 
+// TestPreAlertContext_AttachedOnMatch verifies that when EnableEventBuffer is true,
+// alerts carry a PreAlertContext slice with the recent per-PID events that preceded
+// the triggering event. This is the temporal attack-chain context feature.
+func TestPreAlertContext_AttachedOnMatch(t *testing.T) {
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.EnableEventBuffer = true
+	cfg.EnableAnomaly = false
+	cfg.EnableDedup = false
+	cfg.Rules = []Rule{
+		newSyscallRule("pre_ctx_rule", OpIn, []string{"1"}), // matches nr=1
+	}
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+	ctx := context.Background()
+
+	const pid = uint32(42)
+	// Send 5 background events (nr=99, no match) to seed the buffer.
+	for i := range 5 {
+		engine.Ingest(ctx, types.Event{
+			Type:    types.EventSyscall,
+			PID:     pid,
+			Timestamp: uint64(i + 1),
+			Syscall: &types.SyscallEvent{Nr: 99},
+		})
+	}
+
+	// Send the triggering event (nr=1, matches the rule).
+	alerts := engine.Ingest(ctx, types.Event{
+		Type:    types.EventSyscall,
+		PID:     pid,
+		Timestamp: uint64(100),
+		Syscall: &types.SyscallEvent{Nr: 1},
+	})
+	require.Len(t, alerts, 1, "expected one alert from rule match")
+
+	// PreAlertContext must be populated with the 5 background events + the trigger.
+	ctx6 := alerts[0].PreAlertContext
+	require.NotEmpty(t, ctx6, "PreAlertContext must be non-empty when EnableEventBuffer=true")
+	// The triggering event (ts=100) is the most recent — it's included.
+	last := ctx6[len(ctx6)-1]
+	assert.Equal(t, uint64(100), last.Timestamp, "last PreAlertContext event must be the trigger")
+	// All events in the context must belong to the same PID.
+	for _, ev := range ctx6 {
+		assert.Equal(t, pid, ev.PID)
+	}
+}
+
+// TestPreAlertContext_DisabledByDefault verifies that PreAlertContext is nil when
+// EnableEventBuffer is false (the production default). This guards the hot path.
+func TestPreAlertContext_DisabledByDefault(t *testing.T) {
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.EnableEventBuffer = false
+	cfg.EnableAnomaly = false
+	cfg.EnableDedup = false
+	cfg.Rules = []Rule{
+		newSyscallRule("pre_ctx_disabled", OpIn, []string{"1"}),
+	}
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+	ctx := context.Background()
+
+	alerts := engine.Ingest(ctx, types.Event{
+		Type:    types.EventSyscall,
+		PID:     1,
+		Timestamp: 1,
+		Syscall: &types.SyscallEvent{Nr: 1},
+	})
+	require.Len(t, alerts, 1)
+	assert.Nil(t, alerts[0].PreAlertContext, "PreAlertContext must be nil when buffer is disabled")
+}
+
 func TestCorrelationEngine_Ingest_WithTraceContext(t *testing.T) {
 	rules := []Rule{
 		{

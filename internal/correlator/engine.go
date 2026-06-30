@@ -885,6 +885,12 @@ func (ce *CorrelationEngine) enforceWorker(ctx context.Context) {
 // across ~64 events rather than acquiring it per-event (P1-4).
 const localFlushBatch = 64
 
+// preAlertContextWindow is the number of recent per-PID events attached to each
+// alert as PreAlertContext when EnableEventBuffer is true. 20 events covers roughly
+// a 5–30 second attack window at typical event rates and is enough to reconstruct
+// a kill chain (DNS→TCP→file write→execve) without blowing up alert size.
+const preAlertContextWindow = 20
+
 // localFlushInterval is the maximum time a worker holds alerts before flushing.
 const localFlushInterval = 100 * time.Millisecond
 
@@ -1292,6 +1298,14 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		// Attach full process tree for SOC triage.
 		alert.ProcessTree = getProcessTree()
 
+		// Attach the most-recent pre-alert events for this PID when the per-PID
+		// buffer is enabled. The current event is already in the buffer (added at
+		// the top of ingestWithAD), so GetRecent returns the temporal context
+		// leading up to and including the trigger event — the attack kill chain.
+		if ce.enableEventBuffer {
+			alert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+		}
+
 		// Rule-based enforcement runs regardless of dedup: the action cooldown
 		// is the sole gate against enforcement spam, not the alert dedup window.
 		if ce.actionExecutor != nil && isEnforcedAction(alert.Action) {
@@ -1355,6 +1369,9 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			seq := ce.alertSeq.Add(1)
 			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
 			alert.ProcessTree = getProcessTree()
+			if ce.enableEventBuffer {
+				alert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+			}
 			alerts = append(alerts, alert)
 			ce.alertsGenerated.Add(1)
 		}
@@ -1364,6 +1381,9 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	if ce.iocMatcher != nil {
 		if iocAlert := ce.checkIOCMatch(e); iocAlert != nil {
 			iocAlert.ProcessTree = getProcessTree()
+			if ce.enableEventBuffer {
+				iocAlert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+			}
 			if ce.enableDedup && ce.checkDup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm) {
 				ce.alertsDedupDropped.Add(1)
 				ce.alertsDropped.Add(1)
@@ -1447,6 +1467,9 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 
 				// Attach full process tree for SOC triage.
 				anomalyAlert.ProcessTree = getProcessTree()
+				if ce.enableEventBuffer {
+					anomalyAlert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+				}
 
 				// Dedup check before rate-limiter (same ordering as rule/WASM/IOC paths).
 				if ce.enableDedup && ce.checkDup(anomalyAlert.RuleID, anomalyAlert.PID, anomalyAlert.Comm) {
@@ -1488,19 +1511,24 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			details["workload"] = v.WorkloadKey.String()
 			details["action"] = string(v.Action)
 			seq := ce.alertSeq.Add(1)
+			var allowlistPreCtx []types.Event
+			if ce.enableEventBuffer {
+				allowlistPreCtx = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+			}
 			allowlistAlert := types.Alert{
-				ID:        buildAlertID("auto_allowlist_violation", e.Timestamp, e.PID, seq),
-				Timestamp: time.Unix(0, int64(e.Timestamp)),
-				RuleID:    "auto_allowlist_violation",
-				RuleName:  "Syscall Allowlist Violation",
-				Message:   msg,
-				Severity:  types.SeverityWarning,
-				PID:       e.PID,
-				Comm:      util.InternBytes(e.Comm[:]),
-				Details:   details,
-				Event:       e,
-				ProcessTree: getProcessTree(),
-				Action:      string(v.Action),
+				ID:              buildAlertID("auto_allowlist_violation", e.Timestamp, e.PID, seq),
+				Timestamp:       time.Unix(0, int64(e.Timestamp)),
+				RuleID:          "auto_allowlist_violation",
+				RuleName:        "Syscall Allowlist Violation",
+				Message:         msg,
+				Severity:        types.SeverityWarning,
+				PID:             e.PID,
+				Comm:            util.InternBytes(e.Comm[:]),
+				Details:         details,
+				Event:           e,
+				ProcessTree:     getProcessTree(),
+				Action:          string(v.Action),
+				PreAlertContext: allowlistPreCtx,
 			}
 			if e.Enrichment != nil {
 				allowlistAlert.Enrichment = *e.Enrichment

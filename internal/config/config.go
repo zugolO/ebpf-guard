@@ -1356,6 +1356,15 @@ type OSINTConfig struct {
 	// MaxIoCsPerRule caps how many indicator values appear in a single rule's
 	// condition list. Larger batches reduce file count but may slow evaluation.
 	MaxIoCsPerRule int `mapstructure:"max_iocs_per_rule"`
+	// SyncToKernelMaps enables loading IP/CIDR IoCs directly into kernel BPF
+	// blocklist maps (requires kernel blocklist maps from #179). Domain and
+	// URL IoCs continue through the YAML/detection-rule path regardless.
+	// Gracefully degrades to a no-op if the kernel maps are unavailable.
+	SyncToKernelMaps bool `mapstructure:"sync_to_kernel_maps"`
+	// MaxKernelEntries caps the total number of IP/CIDR entries loaded into
+	// the kernel maps at one time. IoCs are prioritised by ThreatScore.
+	// Default: 100 000. 0 means use the default.
+	MaxKernelEntries int `mapstructure:"max_kernel_entries"`
 	// MISP holds settings for a MISP threat sharing platform instance.
 	MISP MISPConfig `mapstructure:"misp"`
 	// OpenCTI holds settings for an OpenCTI threat intelligence platform.

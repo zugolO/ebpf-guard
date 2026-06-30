@@ -19,11 +19,12 @@ const stateFileName = ".osint_state.json"
 // It runs periodic syncs and writes generated YAML rules to OutputDir so
 // the correlator's hot-reload watcher picks them up automatically.
 type Manager struct {
-	mu        sync.Mutex // serialises sync() calls from Run ticker and explicit Sync()
-	clients   []Client
-	generator *Generator
-	cfg       config.OSINTConfig
-	statePath string
+	mu            sync.Mutex // serialises sync() calls from Run ticker and explicit Sync()
+	clients       []Client
+	generator     *Generator
+	cfg           config.OSINTConfig
+	statePath     string
+	kernelSyncer  *KernelSyncer // optional; nil means no kernel map sync
 }
 
 // NewManager creates an OSINT Manager from the provided config.
@@ -98,6 +99,17 @@ func NewManager(cfg config.OSINTConfig) (*Manager, error) {
 	}, nil
 }
 
+// WithKernelSyncer attaches a KernelSyncer so that each feed sync also loads
+// IP/CIDR IoCs into kernel BPF maps. Call before Run(). Passing nil is a
+// no-op (kernel sync remains disabled).
+func (m *Manager) WithKernelSyncer(ks *KernelSyncer) *Manager {
+	if m == nil {
+		return m
+	}
+	m.kernelSyncer = ks
+	return m
+}
+
 // Run starts the OSINT sync loop. It performs an initial sync immediately,
 // then repeats at the configured interval. Blocks until ctx is cancelled.
 func (m *Manager) Run(ctx context.Context) error {
@@ -145,6 +157,8 @@ func (m *Manager) sync(ctx context.Context) {
 
 	state := m.loadState()
 
+	var successfulResults []FeedResult
+
 	for _, client := range m.clients {
 		select {
 		case <-ctx.Done():
@@ -175,6 +189,17 @@ func (m *Manager) sync(ctx context.Context) {
 		state.LastSync[src] = result.FetchedAt
 		for k, v := range fileMap {
 			state.RuleFiles[k] = v
+		}
+		successfulResults = append(successfulResults, result)
+	}
+
+	// Load IP/CIDR IoCs into kernel maps after all feeds are fetched.
+	if m.kernelSyncer != nil && len(successfulResults) > 0 {
+		n, err := m.kernelSyncer.SyncToKernel(successfulResults)
+		if err != nil {
+			slog.Warn("osint: kernel map sync partial failure", slog.Any("error", err), slog.Int("active", n))
+		} else {
+			slog.Info("osint: kernel map sync complete", slog.Int("active", n))
 		}
 	}
 

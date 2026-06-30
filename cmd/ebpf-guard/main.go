@@ -33,6 +33,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/hidden"
 	"github.com/zugolO/ebpf-guard/internal/k8s"
 	"github.com/zugolO/ebpf-guard/internal/migration"
+	"github.com/zugolO/ebpf-guard/internal/osint"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
@@ -435,6 +436,43 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Info("gossip: cross-node alert correlation active",
 				slog.String("node", nodeName),
 				slog.Int("peers", len(cfg.Gossip.Peers)))
+		}
+	}
+
+	// ── OSINT threat-intel feed sync ──────────────────────────────────────────
+	// Fetches IoCs from configured MISP/OpenCTI/VirusTotal sources, generates
+	// YAML rules into OutputDir (picked up by the hot-reload watcher), and
+	// optionally loads IP/CIDR IoCs directly into kernel BPF blocklist maps.
+	// Runs behind the osint.enabled flag; graceful no-op if disabled or if
+	// kernel maps are unavailable (SyncToKernelMaps requires #179).
+	if cfg.OSINT.Enabled {
+		osintMgr, osintErr := osint.NewManager(cfg.OSINT)
+		if osintErr != nil {
+			slog.Warn("osint: failed to initialise manager, OSINT sync disabled",
+				slog.Any("error", osintErr))
+		} else if osintMgr != nil {
+			if cfg.OSINT.SyncToKernelMaps {
+				ksCfg := osint.KernelSyncerConfig{
+					Updater:    nil, // wired when kernel blocklist maps are available (#179)
+					MaxEntries: cfg.OSINT.MaxKernelEntries,
+					Registerer: prometheus.DefaultRegisterer,
+				}
+				if ks, ksErr := osint.NewKernelSyncer(ksCfg); ksErr != nil {
+					slog.Warn("osint: kernel syncer init failed, kernel map sync disabled",
+						slog.Any("error", ksErr))
+				} else {
+					osintMgr.WithKernelSyncer(ks)
+					slog.Info("osint: kernel map sync enabled (no-op until blocklist maps are available)")
+				}
+			}
+			go func() {
+				if err := osintMgr.Run(ctx); err != nil {
+					slog.Error("osint: manager exited with error", slog.Any("error", err))
+				}
+			}()
+			slog.Info("osint: feed sync active",
+				slog.String("output_dir", cfg.OSINT.OutputDir),
+				slog.Bool("kernel_sync", cfg.OSINT.SyncToKernelMaps))
 		}
 	}
 

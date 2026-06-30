@@ -52,6 +52,12 @@ type BatchingStore struct {
 	closed chan struct{}
 	wg     sync.WaitGroup
 
+	// flushReqCh is used by Flush() to request a synchronous drain through the
+	// flushLoop goroutine, which is the only reader of the queue channel.
+	// Routing through flushLoop avoids the race where drainQueue competes with
+	// flushLoop for items already dequeued into flushLoop's local batch.
+	flushReqCh chan chan error
+
 	// dropped counts alerts discarded because the queue was full.
 	dropped prometheus.Counter
 	// droppedTotal is a raw atomic used when no Prometheus counter is set.
@@ -65,10 +71,11 @@ type BatchingStore struct {
 func NewBatchingStore(inner AlertStore, cfg BatchingStoreConfig) *BatchingStore {
 	c := cfg.withDefaults()
 	s := &BatchingStore{
-		inner:  inner,
-		cfg:    c,
-		queue:  make(chan types.Alert, c.MaxBuffer),
-		closed: make(chan struct{}),
+		inner:      inner,
+		cfg:        c,
+		queue:      make(chan types.Alert, c.MaxBuffer),
+		closed:     make(chan struct{}),
+		flushReqCh: make(chan chan error, 1),
 	}
 	s.wg.Add(1)
 	go s.flushLoop()
@@ -118,13 +125,33 @@ func (s *BatchingStore) StoreBatch(_ context.Context, alerts []types.Alert) erro
 	return nil
 }
 
-// Flush drains the internal queue and calls the inner store's StoreBatch, then
-// calls Flush on the inner store to ensure durability.
+// Flush synchronously drains the internal queue and calls the inner store's
+// StoreBatch and Flush to ensure durability.
+//
+// The request is routed through flushLoop, which is the sole reader of the
+// queue channel. This avoids a race where drainQueue and flushLoop compete for
+// the same channel items when flushLoop has already dequeued alerts into its
+// in-memory batch but not yet written them to the inner store.
 func (s *BatchingStore) Flush(ctx context.Context) error {
-	if err := s.drainQueue(ctx); err != nil {
-		return err
+	resp := make(chan error, 1)
+	select {
+	case s.flushReqCh <- resp:
+		// flushLoop will drain its batch + the queue and respond.
+	case <-s.closed:
+		// flushLoop has already stopped; drain directly — no competing reader.
+		if err := s.drainQueue(ctx); err != nil {
+			return err
+		}
+		return s.inner.Flush(ctx)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return s.inner.Flush(ctx)
+	select {
+	case err := <-resp:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // drainQueue reads all currently queued alerts (non-blocking) and writes them
@@ -208,6 +235,34 @@ func (s *BatchingStore) flushLoop() {
 
 		case <-ticker.C:
 			flush()
+
+		case respCh := <-s.flushReqCh:
+			// Synchronous flush requested by Flush(). We are the only goroutine
+			// reading from s.queue, so after we drain both our in-memory batch
+			// and the channel, the caller is guaranteed to see all alerts.
+			var err error
+			if len(batch) > 0 {
+				err = s.inner.StoreBatch(context.Background(), batch)
+				batch = batch[:0]
+			}
+			// Drain the queue channel.
+			for draining := true; draining; {
+				select {
+				case a := <-s.queue:
+					batch = append(batch, a)
+				default:
+					draining = false
+				}
+			}
+			if err == nil && len(batch) > 0 {
+				err = s.inner.StoreBatch(context.Background(), batch)
+			}
+			batch = batch[:0]
+			ticker.Reset(s.cfg.FlushInterval)
+			if err == nil {
+				err = s.inner.Flush(context.Background())
+			}
+			respCh <- err
 
 		case <-s.closed:
 			// Drain remaining queued alerts before stopping.

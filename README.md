@@ -2,7 +2,10 @@
 
 [![CI](https://github.com/zugolO/ebpf-guard/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zugolO/ebpf-guard/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/zugolO/ebpf-guard/branch/main/graph/badge.svg)](https://codecov.io/gh/zugolO/ebpf-guard)
+[![CodeQL](https://github.com/zugolO/ebpf-guard/actions/workflows/codeql.yml/badge.svg)](https://github.com/zugolO/ebpf-guard/actions/workflows/codeql.yml)
 [![Release](https://img.shields.io/github/v/release/zugolO/ebpf-guard?include_prereleases&sort=semver)](https://github.com/zugolO/ebpf-guard/releases)
+[![cosign verified](https://img.shields.io/badge/supply--chain-cosign%20signed-blue?logo=sigstore)](https://github.com/zugolO/ebpf-guard/releases)
+[![SBOM](https://img.shields.io/badge/SBOM-SPDX%20%2B%20CycloneDX-blue)](SBOM.md)
 [![Go Version](https://img.shields.io/badge/go-1.23-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev/spec/v1.0/levels)
@@ -10,6 +13,66 @@
 **Lightweight eBPF-based runtime security agent for Linux and Kubernetes.**
 
 ebpf-guard intercepts kernel events in real time using eBPF programs, builds behavioral process profiles, detects anomalies, and forwards security alerts to Alertmanager — all without a kernel module and without a heavy dependency like Cilium.
+
+---
+
+## Trust & Verify
+
+Running any security daemon as root is a trust decision. ebpf-guard's supply-chain artifacts let you verify the release before you run anything:
+
+```bash
+# Verify the container image (keyless Sigstore — no stored private keys)
+cosign verify ghcr.io/zugolO/ebpf-guard:v0.1.0 \
+  --certificate-identity-regexp="https://github.com/zugolO/ebpf-guard/" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+```
+
+Every tagged release ships: **cosign-signed image + binary** · **SLSA L3 provenance** · **SPDX + CycloneDX SBOM** · **CodeQL + govulncheck + Trivy scans**.
+
+| Document | What you'll find |
+|---|---|
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting, security hardening guide, threat model |
+| [GOVERNANCE.md](GOVERNANCE.md) | Decision-making process, maintainer path, CNCF alignment |
+| [CNCF Due Diligence](docs/cncf-due-diligence.md) | Full supply-chain, architecture, and security questionnaire |
+| [SBOM.md](SBOM.md) | How to download, verify, and scan the Bill of Materials |
+
+Full verification steps (binary + SLSA provenance): [docs/security.md](docs/security.md#supply-chain-security--cosign--slsa).
+
+---
+
+## 60-Second Quickstart
+
+### Try it now — no kernel, no root
+
+```bash
+docker run --rm -it ghcr.io/zugolO/ebpf-guard:latest --dry-run
+```
+
+`--dry-run` replays synthetic events through the full detection pipeline — no eBPF, no root required. You'll see rule matches and MITRE-mapped alerts in your terminal within seconds.
+
+### Kubernetes (Helm)
+
+```bash
+# Add the Helm repo and install
+helm install ebpf-guard oci://ghcr.io/zugolO/charts/ebpf-guard \
+  --namespace ebpf-guard --create-namespace
+
+# Hardened preset (Bearer auth + mTLS + AppArmor + seccomp)
+helm install ebpf-guard oci://ghcr.io/zugolO/charts/ebpf-guard \
+  --namespace ebpf-guard --create-namespace \
+  -f deploy/helm/ebpf-guard/values-secure.yaml
+```
+
+### See your first alerts
+
+| Interface | How to reach it |
+|---|---|
+| Live terminal dashboard | `ebpf-guard tui` — real-time alert stream, top anomalous PIDs, event rate graphs |
+| Grafana | Import `deploy/grafana/dashboard.json`; configure Prometheus to scrape `:9090/metrics` |
+| JSON stream | `ebpf-guard alerts --output json --follow` |
+| HTTP API | `curl -H "Authorization: Bearer $TOKEN" http://localhost:9090/alerts` |
+
+> **Root is required for production use.** eBPF programs are loaded via `CAP_BPF` + `CAP_SYS_ADMIN`. See [Why root?](#why-root) in the Requirements section below for the full rationale.
 
 ---
 
@@ -228,9 +291,20 @@ Full verification instructions and SBOM signing: [docs/security.md](docs/securit
 | Kubernetes | 1.26 | For Helm deploy |
 | Helm | 3.x | |
 
-**Optional capabilities:**
-- `CAP_NET_ADMIN` — required for nftables enforcement
-- `CAP_SYS_PTRACE` — required for TLS uprobe inspection
+### Why root? <a name="why-root"></a>
+
+ebpf-guard needs a small, fixed set of Linux capabilities. Here is exactly what each one does and why it cannot be avoided:
+
+| Capability | Used for | Why unavoidable |
+|---|---|---|
+| `CAP_BPF` | Loading and attaching eBPF programs to tracepoints and kprobes | The kernel refuses `bpf(BPF_PROG_LOAD, …)` without it; there is no unprivileged equivalent for tracing programs |
+| `CAP_SYS_ADMIN` | Accessing BTF type information and pinning BPF maps to `/sys/fs/bpf/` | Required by the kernel for perf_event and ring-buffer setup on Linux < 5.8; also needed for BPF iterator programs (hidden-process detection) |
+| `CAP_PERFMON` | Attaching perf-event-based probes (kernel 5.8+; replaces the `CAP_SYS_ADMIN` requirement for perf) | Kernels ≥ 5.8 split perf access out of `CAP_SYS_ADMIN` into this capability |
+| `CAP_IPC_LOCK` | Locking ring-buffer memory to prevent it from being swapped | Required by `mmap(MAP_LOCKED)` on the BPF ring buffer; prevents event loss under memory pressure |
+| `CAP_NET_ADMIN` *(optional)* | nftables network enforcement (blocking IPs) | Required only when `enforcer.block_backend: nftables`; omit for alert-only deployments |
+| `CAP_SYS_PTRACE` *(optional)* | Attaching uprobes to OpenSSL/BoringSSL for TLS inspection | Required only when `collectors.tls.enabled: true`; omit for deployments that don't need plaintext TLS capture |
+
+The agent runs **without** `CAP_SYS_MODULE` (no kernel module), `CAP_NET_RAW` (no raw sockets), `privileged: true`, or any Cilium/CNI dependency. The hardened Helm values (`values-secure.yaml`) set `capabilities.drop: [ALL]` and add only the capabilities above.
 
 The agent does **not** require a kernel module, `CAP_SYS_MODULE`, or Cilium.
 

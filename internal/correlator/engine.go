@@ -1517,7 +1517,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			}
 			allowlistAlert := types.Alert{
 				ID:              buildAlertID("auto_allowlist_violation", e.Timestamp, e.PID, seq),
-				Timestamp:       time.Unix(0, int64(e.Timestamp)), //nolint:gosec // nanosecond unix timestamp; int64 overflows in year 2262
+				Timestamp:       time.Unix(0, int64(e.Timestamp)), /* #nosec G115 -- nanosecond unix timestamp; int64 safe until year 2262 */
 				RuleID:          "auto_allowlist_violation",
 				RuleName:        "Syscall Allowlist Violation",
 				Message:         msg,

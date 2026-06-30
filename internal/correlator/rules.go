@@ -262,6 +262,14 @@ var globalDNSAnalyzer = NewDNSEntropyCalculator()
 // Eliminates strconv.FormatInt allocations on the hot path in getFieldValue.
 var syscallNrStrings [512]string
 
+// fileOpNames maps FileEvent.Op to a human-readable name. Package-level array
+// avoids the []string{...} literal allocation that would otherwise occur on
+// every file-access rule evaluation (once per file event × rules with op field).
+var fileOpNames = [3]string{"open", "read", "write"}
+
+// gpuOpNames maps GPUEvent.Op to a human-readable name.
+var gpuOpNames = [6]string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}
+
 func init() {
 	for i := range syscallNrStrings {
 		syscallNrStrings[i] = strconv.Itoa(i)
@@ -1049,9 +1057,8 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "mode":
 			return strconv.FormatUint(uint64(e.File.Mode), 10)
 		case "op":
-			ops := []string{"open", "read", "write"}
-			if int(e.File.Op) < len(ops) {
-				return ops[e.File.Op]
+			if int(e.File.Op) < len(fileOpNames) {
+				return fileOpNames[e.File.Op]
 			}
 			return strconv.FormatUint(uint64(e.File.Op), 10)
 		case "directory":
@@ -1238,9 +1245,8 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		}
 		switch field {
 		case "gpu_op":
-			ops := []string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}
-			if int(e.GPU.Op) < len(ops) {
-				return ops[e.GPU.Op]
+			if int(e.GPU.Op) < len(gpuOpNames) {
+				return gpuOpNames[e.GPU.Op]
 			}
 			return strconv.FormatUint(uint64(e.GPU.Op), 10)
 		case "gpu_size":

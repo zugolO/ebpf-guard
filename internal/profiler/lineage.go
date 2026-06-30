@@ -111,16 +111,35 @@ type LineageMatch struct {
 	Timestamp  time.Time
 }
 
-// LineageTracker tracks process parent-child relationships and detects suspicious patterns.
-type LineageTracker struct {
-	config    LineageConfig
-	logger    *slog.Logger
+// lineageShardCount is the number of PID-keyed shards the tracker is split into.
+// A single global mutex previously serialised every per-event Track call across
+// the entire PID-partitioned ingest worker pool, negating its parallelism.
+// Sharding by PID lets independent PIDs proceed concurrently. Must be a power of
+// two so lineageShardMask can select a shard with a bitmask.
+const lineageShardCount = 16
+const lineageShardMask = lineageShardCount - 1
+
+// lineageShard holds the lineage/ancestry/procCache maps for a subset of PIDs,
+// guarded by its own RWMutex.
+type lineageShard struct {
+	mu        sync.RWMutex
 	lineage   map[uint32]*parentInfo
 	ancestry  map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
-	procCache map[uint32]*procEntry // pid → (comm, ppid, ts), avoids repeated /proc reads
-	maxDepth  int
-	mu        sync.RWMutex
-	onMatch   func(LineageMatch)
+	procCache map[uint32]*procEntry          // pid → (comm, ppid, ts), avoids repeated /proc reads
+}
+
+// LineageTracker tracks process parent-child relationships and detects suspicious patterns.
+type LineageTracker struct {
+	config   LineageConfig
+	logger   *slog.Logger
+	shards   [lineageShardCount]*lineageShard
+	maxDepth int
+	onMatch  func(LineageMatch)
+}
+
+// shardFor returns the shard owning pid.
+func (lt *LineageTracker) shardFor(pid uint32) *lineageShard {
+	return lt.shards[pid&lineageShardMask]
 }
 
 // NewLineageTracker creates a new lineage tracker.
@@ -134,13 +153,17 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 	}
 
 	lt := &LineageTracker{
-		config:    config,
-		logger:    logger,
-		lineage:   make(map[uint32]*parentInfo),
-		ancestry:  make(map[uint32][]types.ProcessNode),
-		procCache: make(map[uint32]*procEntry),
-		maxDepth:  maxDepth,
-		onMatch:   func(m LineageMatch) {}, // no-op default
+		config:   config,
+		logger:   logger,
+		maxDepth: maxDepth,
+		onMatch:  func(m LineageMatch) {}, // no-op default
+	}
+	for i := range lt.shards {
+		lt.shards[i] = &lineageShard{
+			lineage:   make(map[uint32]*parentInfo),
+			ancestry:  make(map[uint32][]types.ProcessNode),
+			procCache: make(map[uint32]*procEntry),
+		}
 	}
 
 	return lt
@@ -169,19 +192,28 @@ func (lt *LineageTracker) Track(e types.Event) {
 		return
 	}
 	comm := cleanComm(e.Comm[:])
+	lt.store(e.PID, ppid, parentComm, comm)
+}
+
+// store records lineage/procCache for pid and (re)builds its ancestry chain.
+// Shared by Track and Update.
+func (lt *LineageTracker) store(pid, ppid uint32, parentComm, comm string) {
 	info := parentInfoPool.Get().(*parentInfo)
 	info.PPID = ppid
 	info.ParentComm = parentComm
 	info.Timestamp = time.Now()
-	lt.mu.Lock()
-	lt.lineage[e.PID] = info
+
+	s := lt.shardFor(pid)
+	s.mu.Lock()
+	s.lineage[pid] = info
 	// Eagerly cache BPF-provided comm+ppid so buildChainFromProc avoids
 	// /proc reads when this process becomes a parent in later chain builds.
 	if comm != "" || ppid > 0 {
-		lt.procCache[e.PID] = &procEntry{comm: comm, ppid: ppid, timestamp: info.Timestamp}
+		s.procCache[pid] = &procEntry{comm: comm, ppid: ppid, timestamp: info.Timestamp}
 	}
-	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
-	lt.mu.Unlock()
+	s.mu.Unlock()
+
+	lt.buildAncestry(pid, ppid, parentComm, comm)
 }
 
 // Update processes an event, updates lineage information, and returns a match if
@@ -199,20 +231,8 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 
 	comm := cleanComm(e.Comm[:])
 
-	// Store lineage info and update ancestry chain under a single lock acquisition.
-	info := parentInfoPool.Get().(*parentInfo)
-	info.PPID = ppid
-	info.ParentComm = parentComm
-	info.Timestamp = time.Now()
-	lt.mu.Lock()
-	lt.lineage[e.PID] = info
-	// Eagerly cache BPF-provided comm+ppid so buildChainFromProc avoids
-	// /proc reads when this process becomes a parent in later chain builds.
-	if comm != "" || ppid > 0 {
-		lt.procCache[e.PID] = &procEntry{comm: comm, ppid: ppid, timestamp: info.Timestamp}
-	}
-	lt.buildAncestryLocked(e.PID, ppid, parentComm, comm)
-	lt.mu.Unlock()
+	// Store lineage info and update the ancestry chain (sharded by PID).
+	lt.store(e.PID, ppid, parentComm, comm)
 
 	// Check for pattern match
 	match := lt.checkPattern(e, parentComm, comm)
@@ -249,26 +269,42 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 // oldest known ancestor to pid itself.  Returns nil if no ancestry has been
 // recorded for the PID.
 func (lt *LineageTracker) GetProcessTree(pid uint32) types.ProcessTree {
-	lt.mu.RLock()
-	defer lt.mu.RUnlock()
-	chain := lt.ancestry[pid]
+	s := lt.shardFor(pid)
+	s.mu.RLock()
+	chain := s.ancestry[pid]
 	if len(chain) == 0 {
+		s.mu.RUnlock()
 		return nil
 	}
 	result := make(types.ProcessTree, len(chain))
 	copy(result, chain)
+	s.mu.RUnlock()
 	return result
 }
 
-// buildAncestryLocked extends the ancestry chain for pid. Must be called with lt.mu held for writing.
-func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm, comm string) {
-	parentChain := lt.ancestry[ppid]
+// buildAncestry extends the ancestry chain for pid. It is deadlock-free under
+// sharding: it reads (and may bootstrap) the parent's chain in the parent's
+// shard, releases that lock, then writes pid's chain in pid's shard — the two
+// shard locks are never held simultaneously.
+func (lt *LineageTracker) buildAncestry(pid, ppid uint32, parentComm, comm string) {
+	ps := lt.shardFor(ppid)
+	ps.mu.RLock()
+	parentChain := ps.ancestry[ppid]
+	ps.mu.RUnlock()
+
 	if len(parentChain) == 0 {
 		// We haven't seen the parent's events yet; try to bootstrap from /proc.
 		parentChain = lt.buildChainFromProc(ppid, lt.maxDepth-1)
 		// Cache so subsequent events with the same ppid skip /proc entirely.
 		if len(parentChain) > 0 {
-			lt.ancestry[ppid] = parentChain
+			ps.mu.Lock()
+			// Re-check: another goroutine may have built the chain meanwhile.
+			if existing := ps.ancestry[ppid]; len(existing) == 0 {
+				ps.ancestry[ppid] = parentChain
+			} else {
+				parentChain = existing
+			}
+			ps.mu.Unlock()
 		}
 	}
 
@@ -289,14 +325,21 @@ func (lt *LineageTracker) buildAncestryLocked(pid, ppid uint32, parentComm, comm
 	if len(newChain) > lt.maxDepth {
 		newChain = newChain[len(newChain)-lt.maxDepth:]
 	}
-	lt.ancestry[pid] = newChain
+
+	s := lt.shardFor(pid)
+	s.mu.Lock()
+	s.ancestry[pid] = newChain
+	s.mu.Unlock()
 }
 
 // buildChainFromProc walks /proc to reconstruct up to maxDepth ancestors for pid.
-// Must be called with lt.mu held for writing. Results are ordered from oldest
-// ancestor to pid.  Per-process /proc results are cached in lt.procCache so that
-// subsequent chain builds (for different children of the same subtree) avoid
-// repeated syscalls.
+// Results are ordered from oldest ancestor to pid.  Per-process /proc results are
+// cached in the owning shard's procCache so that subsequent chain builds (for
+// different children of the same subtree) avoid repeated syscalls.
+//
+// Locking: each ancestor's procCache entry is read/written under that PID's own
+// shard lock, acquired and released per iteration. The lock is never held across
+// the readProcStatus syscall, so a slow /proc read cannot block other PIDs.
 //
 // Uses readProcStatus to fetch both comm and ppid in a single /proc read,
 // halving the number of /proc syscalls per ancestor compared to separate
@@ -308,20 +351,31 @@ func (lt *LineageTracker) buildChainFromProc(pid uint32, maxDepth int) []types.P
 	var chain []types.ProcessNode
 	cur := pid
 	for len(chain) < maxDepth && cur > 1 {
-		entry, ok := lt.procCache[cur]
+		s := lt.shardFor(cur)
+		s.mu.RLock()
+		entry, ok := s.procCache[cur]
 		var comm string
 		var ppid uint32
-		if ok && entry.comm != "" && entry.ppid > 0 {
+		cached := ok && entry.comm != "" && entry.ppid > 0
+		if cached {
 			comm = entry.comm
 			ppid = entry.ppid
-		} else {
+		}
+		s.mu.RUnlock()
+
+		if !cached {
+			// Read /proc without holding any shard lock.
 			comm, ppid = readProcStatus(cur)
-			if ok {
-				entry.comm = comm
-				entry.ppid = ppid
-				entry.timestamp = time.Now()
-			} else if comm != "" || ppid > 0 {
-				lt.procCache[cur] = &procEntry{comm: comm, ppid: ppid, timestamp: time.Now()}
+			if comm != "" || ppid > 0 {
+				s.mu.Lock()
+				if e2, ok2 := s.procCache[cur]; ok2 {
+					e2.comm = comm
+					e2.ppid = ppid
+					e2.timestamp = time.Now()
+				} else {
+					s.procCache[cur] = &procEntry{comm: comm, ppid: ppid, timestamp: time.Now()}
+				}
+				s.mu.Unlock()
 			}
 		}
 		chain = append([]types.ProcessNode{{PID: cur, PPID: ppid, Comm: comm}}, chain...)
@@ -376,26 +430,27 @@ func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
 			return e.PPID, parentComm
 		}
 
-		// Check lineage map and procCache under a single RLock.
-		lt.mu.RLock()
-		if info, ok := lt.lineage[e.PPID]; ok {
+		// Check lineage map and procCache under a single RLock on the ppid shard.
+		ps := lt.shardFor(e.PPID)
+		ps.mu.RLock()
+		if info, ok := ps.lineage[e.PPID]; ok {
 			comm := info.ParentComm
-			lt.mu.RUnlock()
+			ps.mu.RUnlock()
 			return e.PPID, comm
 		}
-		if entry, ok := lt.procCache[e.PPID]; ok && entry.comm != "" {
+		if entry, ok := ps.procCache[e.PPID]; ok && entry.comm != "" {
 			comm := entry.comm
-			lt.mu.RUnlock()
+			ps.mu.RUnlock()
 			return e.PPID, comm
 		}
-		lt.mu.RUnlock()
+		ps.mu.RUnlock()
 
 		// Cache miss: read /proc/<ppid>/status (single syscall for comm+ppid).
 		comm, grandPPID := readProcStatus(e.PPID)
 		if comm != "" || grandPPID > 0 {
-			lt.mu.Lock()
-			lt.procCache[e.PPID] = &procEntry{comm: comm, ppid: grandPPID, timestamp: time.Now()}
-			lt.mu.Unlock()
+			ps.mu.Lock()
+			ps.procCache[e.PPID] = &procEntry{comm: comm, ppid: grandPPID, timestamp: time.Now()}
+			ps.mu.Unlock()
 		}
 		return e.PPID, comm
 	}
@@ -499,41 +554,47 @@ func cleanComm(comm []byte) string {
 	return string(comm)
 }
 
-// Cleanup removes stale lineage and ancestry entries.
+// Cleanup removes stale lineage and ancestry entries across all shards.
 func (lt *LineageTracker) Cleanup(now time.Time) {
-	lt.mu.Lock()
-	defer lt.mu.Unlock()
-
-	for pid, info := range lt.lineage {
-		if now.Sub(info.Timestamp) > lt.config.TTL {
-			delete(lt.lineage, pid)
-			delete(lt.ancestry, pid)
-			// Reset and return to pool to amortise allocations across long-lived processes.
-			info.PPID = 0
-			info.ParentComm = ""
-			parentInfoPool.Put(info)
-		}
-	}
-	// Evict procCache entries older than TTL rather than clearing wholesale.
 	cutoff := now.Add(-lt.config.TTL)
-	for pid, entry := range lt.procCache {
-		if entry.timestamp.Before(cutoff) {
-			delete(lt.procCache, pid)
+	for _, s := range lt.shards {
+		s.mu.Lock()
+		for pid, info := range s.lineage {
+			if now.Sub(info.Timestamp) > lt.config.TTL {
+				delete(s.lineage, pid)
+				delete(s.ancestry, pid)
+				// Reset and return to pool to amortise allocations across long-lived processes.
+				info.PPID = 0
+				info.ParentComm = ""
+				parentInfoPool.Put(info)
+			}
 		}
+		// Evict procCache entries older than TTL rather than clearing wholesale.
+		for pid, entry := range s.procCache {
+			if entry.timestamp.Before(cutoff) {
+				delete(s.procCache, pid)
+			}
+		}
+		s.mu.Unlock()
 	}
 }
 
 // GetLineage returns the parent info for a PID (for testing).
 func (lt *LineageTracker) GetLineage(pid uint32) (*parentInfo, bool) {
-	lt.mu.RLock()
-	defer lt.mu.RUnlock()
-	info, ok := lt.lineage[pid]
+	s := lt.shardFor(pid)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	info, ok := s.lineage[pid]
 	return info, ok
 }
 
-// Size returns the number of tracked processes.
+// Size returns the number of tracked processes across all shards.
 func (lt *LineageTracker) Size() int {
-	lt.mu.RLock()
-	defer lt.mu.RUnlock()
-	return len(lt.lineage)
+	n := 0
+	for _, s := range lt.shards {
+		s.mu.RLock()
+		n += len(s.lineage)
+		s.mu.RUnlock()
+	}
+	return n
 }

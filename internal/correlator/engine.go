@@ -77,8 +77,11 @@ type SensitivityAdjuster interface {
 type CorrelationEngine struct {
 	ruleEngine atomic.Pointer[RuleEngine]
 	buffer     *ShardedEventBuffer // Uses sharded locks for better concurrency
-	pending    []types.Alert
-	pendingMu  sync.Mutex // Protects pending alerts slice
+	// enableEventBuffer gates the per-event buffer.Add on the hot path. When
+	// false (default) events are not copied into the per-PID ring buffer.
+	enableEventBuffer bool
+	pending           []types.Alert
+	pendingMu         sync.Mutex // Protects pending alerts slice
 
 	// Anomaly detection
 	anomalyDetector *profiler.AnomalyDetector
@@ -208,6 +211,10 @@ type CorrelationEngine struct {
 	ingestPool []*workerState
 	ingestMask uint32
 
+	// traceCtxCache memoises /proc/<pid>/environ trace-context lookups (including
+	// negative results) so the alert path does not re-read /proc on every alert.
+	traceCtxCache *traceContextCache
+
 	// syscallFilterFn is called with the updated syscall allowlist whenever rules
 	// are loaded or hot-reloaded.  Set via SetSyscallFilterUpdater so the
 	// correlator stays decoupled from the bpf package.  nil disables the hook.
@@ -270,6 +277,14 @@ type CorrelationEngineConfig struct {
 
 	// Buffer configuration
 	BufferSize int
+
+	// EnableEventBuffer controls whether every ingested event is copied into the
+	// per-PID ShardedEventBuffer. The buffer is only read back via GetEvents /
+	// GetBuffer, which have no production consumer today, so it defaults to false
+	// to keep the per-event hot path free of a shard-lock + Event-struct copy.
+	// Set to true if an external consumer (e.g. an event-replay API) needs the
+	// recent per-PID event history.
+	EnableEventBuffer bool
 
 	// Anomaly detection configuration
 	EnableAnomaly    bool
@@ -570,6 +585,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 
 	ce := &CorrelationEngine{
 		buffer:               NewShardedEventBuffer(config.BufferSize),
+		enableEventBuffer:    config.EnableEventBuffer,
+		traceCtxCache:        newTraceContextCache(),
 		pending:              make([]types.Alert, 0),
 		enableAnomaly:        config.EnableAnomaly,
 		rateLimiter:          NewRateLimiterWithContext(ctx, config.RateLimitWindow, config.MaxAlertsPerWindow, config.EnableRateLimit),
@@ -632,18 +649,23 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	if bufferSweep < 30*time.Second {
 		bufferSweep = 30 * time.Second
 	}
-	go func() {
-		ticker := time.NewTicker(bufferSweep)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				ce.buffer.CleanupExpired(bufferTTL)
+	// Only run the eviction sweep when the per-PID event buffer is actually
+	// populated; with EnableEventBuffer=false the buffer stays empty so the
+	// goroutine would just wake up to do nothing.
+	if config.EnableEventBuffer {
+		go func() {
+			ticker := time.NewTicker(bufferSweep)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					ce.buffer.CleanupExpired(bufferTTL)
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	// Background goroutine that evicts expired enforcement cooldown and dedup entries.
 	// Without this the maps grow unbounded with unique (ruleID,PID) pairs.
@@ -666,6 +688,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				ce.dedup.cleanup(now.Add(-ce.dedupWindow))
 				ce.incidentTracker.Cleanup(now)
 				ce.lineageTracker.Cleanup(now)
+				ce.traceCtxCache.cleanup(now)
 			}
 		}
 	}()
@@ -861,6 +884,12 @@ func (ce *CorrelationEngine) enforceWorker(ctx context.Context) {
 // Small enough to bound memory, large enough to amortize the pendingMu lock cost
 // across ~64 events rather than acquiring it per-event (P1-4).
 const localFlushBatch = 64
+
+// preAlertContextWindow is the number of recent per-PID events attached to each
+// alert as PreAlertContext when EnableEventBuffer is true. 20 events covers roughly
+// a 5–30 second attack window at typical event rates and is enough to reconstruct
+// a kill chain (DNS→TCP→file write→execve) without blowing up alert size.
+const preAlertContextWindow = 20
 
 // localFlushInterval is the maximum time a worker holds alerts before flushing.
 const localFlushInterval = 100 * time.Millisecond
@@ -1185,17 +1214,34 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 
 	ce.processedEvents.Add(1)
 
-	// Add event to per-process buffer
-	ce.buffer.Add(e.PID, e)
+	// Add event to per-process buffer. Gated: the buffer has no production
+	// reader today, so by default we skip the shard lock + Event-struct copy on
+	// every event. Enable via EnableEventBuffer when a consumer needs it.
+	if ce.enableEventBuffer {
+		ce.buffer.Add(e.PID, e)
+	}
 
 	// Update ancestry chain so every subsequent GetProcessTree call reflects
 	// the most recent parent information available for this event's PID.
 	ce.lineageTracker.Track(e)
 
-	// Compute the process tree once and share it across all alerts generated
-	// by this event. Avoids acquiring the lineage read-lock once per alert
-	// (rule, WASM, anomaly, IOC) under burst conditions.
-	processTree := ce.lineageTracker.GetProcessTree(e.PID)
+	// Lazily compute the process tree the first time an alert actually needs it,
+	// then share that result across all alerts generated by this event. The vast
+	// majority of events produce no alert, so deferring the lineage read-lock and
+	// slice allocation until first use keeps them off the no-alert hot path while
+	// still acquiring the lock at most once per event under burst conditions.
+	// ingestWithAD runs single-goroutine per call, so no synchronisation is needed.
+	var (
+		processTreeVal    types.ProcessTree
+		processTreeCached bool
+	)
+	getProcessTree := func() types.ProcessTree {
+		if !processTreeCached {
+			processTreeVal = ce.lineageTracker.GetProcessTree(e.PID)
+			processTreeCached = true
+		}
+		return processTreeVal
+	}
 
 	var alerts []types.Alert
 
@@ -1238,7 +1284,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			tc := *e.TraceContext
 			tc.Source = "tls_header"
 			alert.TraceContext = &tc
-		} else if tc := extractTraceContext(e.PID); tc != nil {
+		} else if tc := ce.traceCtxCache.lookup(e.PID, start); tc != nil {
 			alert.TraceID = tc.TraceID
 			alert.SpanID = tc.SpanID
 			alert.TraceContext = tc
@@ -1250,7 +1296,15 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		}
 
 		// Attach full process tree for SOC triage.
-		alert.ProcessTree = processTree
+		alert.ProcessTree = getProcessTree()
+
+		// Attach the most-recent pre-alert events for this PID when the per-PID
+		// buffer is enabled. The current event is already in the buffer (added at
+		// the top of ingestWithAD), so GetRecent returns the temporal context
+		// leading up to and including the trigger event — the attack kill chain.
+		if ce.enableEventBuffer {
+			alert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+		}
 
 		// Rule-based enforcement runs regardless of dedup: the action cooldown
 		// is the sole gate against enforcement spam, not the alert dedup window.
@@ -1314,7 +1368,10 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			}
 			seq := ce.alertSeq.Add(1)
 			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
-			alert.ProcessTree = processTree
+			alert.ProcessTree = getProcessTree()
+			if ce.enableEventBuffer {
+				alert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+			}
 			alerts = append(alerts, alert)
 			ce.alertsGenerated.Add(1)
 		}
@@ -1323,7 +1380,10 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	// Gossip IOC matching — check event against cluster-wide indicators.
 	if ce.iocMatcher != nil {
 		if iocAlert := ce.checkIOCMatch(e); iocAlert != nil {
-			iocAlert.ProcessTree = processTree
+			iocAlert.ProcessTree = getProcessTree()
+			if ce.enableEventBuffer {
+				iocAlert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+			}
 			if ce.enableDedup && ce.checkDup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm) {
 				ce.alertsDedupDropped.Add(1)
 				ce.alertsDropped.Add(1)
@@ -1394,7 +1454,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					tc := *e.TraceContext
 					tc.Source = "tls_header"
 					anomalyAlert.TraceContext = &tc
-				} else if tc := extractTraceContext(e.PID); tc != nil {
+				} else if tc := ce.traceCtxCache.lookup(e.PID, start); tc != nil {
 					anomalyAlert.TraceID = tc.TraceID
 					anomalyAlert.SpanID = tc.SpanID
 					anomalyAlert.TraceContext = tc
@@ -1406,7 +1466,10 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 				}
 
 				// Attach full process tree for SOC triage.
-				anomalyAlert.ProcessTree = processTree
+				anomalyAlert.ProcessTree = getProcessTree()
+				if ce.enableEventBuffer {
+					anomalyAlert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+				}
 
 				// Dedup check before rate-limiter (same ordering as rule/WASM/IOC paths).
 				if ce.enableDedup && ce.checkDup(anomalyAlert.RuleID, anomalyAlert.PID, anomalyAlert.Comm) {
@@ -1448,19 +1511,24 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			details["workload"] = v.WorkloadKey.String()
 			details["action"] = string(v.Action)
 			seq := ce.alertSeq.Add(1)
+			var allowlistPreCtx []types.Event
+			if ce.enableEventBuffer {
+				allowlistPreCtx = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+			}
 			allowlistAlert := types.Alert{
-				ID:        buildAlertID("auto_allowlist_violation", e.Timestamp, e.PID, seq),
-				Timestamp: time.Unix(0, int64(e.Timestamp)),
-				RuleID:    "auto_allowlist_violation",
-				RuleName:  "Syscall Allowlist Violation",
-				Message:   msg,
-				Severity:  types.SeverityWarning,
-				PID:       e.PID,
-				Comm:      util.InternBytes(e.Comm[:]),
-				Details:   details,
-				Event:       e,
-				ProcessTree: processTree,
-				Action:      string(v.Action),
+				ID:              buildAlertID("auto_allowlist_violation", e.Timestamp, e.PID, seq),
+				Timestamp:       time.Unix(0, int64(e.Timestamp)), /* #nosec G115 -- nanosecond unix timestamp; int64 safe until year 2262 */
+				RuleID:          "auto_allowlist_violation",
+				RuleName:        "Syscall Allowlist Violation",
+				Message:         msg,
+				Severity:        types.SeverityWarning,
+				PID:             e.PID,
+				Comm:            util.InternBytes(e.Comm[:]),
+				Details:         details,
+				Event:           e,
+				ProcessTree:     getProcessTree(),
+				Action:          string(v.Action),
+				PreAlertContext: allowlistPreCtx,
 			}
 			if e.Enrichment != nil {
 				allowlistAlert.Enrichment = *e.Enrichment
@@ -1861,7 +1929,7 @@ func (ce *CorrelationEngine) checkIOCMatch(e types.Event) *types.Alert {
 		tc := *e.TraceContext
 		tc.Source = "tls_header"
 		alert.TraceContext = &tc
-	} else if tc := extractTraceContext(e.PID); tc != nil {
+	} else if tc := ce.traceCtxCache.lookup(e.PID, time.Now()); tc != nil {
 		alert.TraceID = tc.TraceID
 		alert.SpanID = tc.SpanID
 		alert.TraceContext = tc

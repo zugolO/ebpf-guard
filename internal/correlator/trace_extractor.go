@@ -4,9 +4,76 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
+
+// traceContextTTL bounds how long a /proc/<pid>/environ lookup result is reused.
+// A process's environment is immutable after exec, so the only staleness risk is
+// PID reuse; a short TTL caps that window while still eliminating the repeated
+// /proc read on every alert for the same PID.
+const traceContextTTL = 30 * time.Second
+
+// traceContextCache memoises extractTraceContext results per PID, including
+// negative results. Most kernel events carry no trace context, so without the
+// negative cache every alert would re-read /proc/<pid>/environ and rebuild a map
+// only to find nothing. The cache turns that into one read per PID per TTL.
+type traceContextCache struct {
+	mu      sync.RWMutex
+	entries map[uint32]traceCacheEntry
+}
+
+type traceCacheEntry struct {
+	tc      *types.TraceContext // nil = looked up, found nothing (negative cache)
+	expires time.Time
+}
+
+func newTraceContextCache() *traceContextCache {
+	return &traceContextCache{entries: make(map[uint32]traceCacheEntry)}
+}
+
+// lookup returns the trace context for pid, reading /proc only on a cache miss
+// or after the cached entry has expired. A fresh copy is returned on every call
+// so callers may mutate the result (e.g. set Source) without corrupting the
+// cached entry shared by other alerts.
+func (c *traceContextCache) lookup(pid uint32, now time.Time) *types.TraceContext {
+	c.mu.RLock()
+	e, ok := c.entries[pid]
+	c.mu.RUnlock()
+	if ok && now.Before(e.expires) {
+		return cloneTraceContext(e.tc)
+	}
+
+	tc := extractTraceContext(pid)
+
+	c.mu.Lock()
+	c.entries[pid] = traceCacheEntry{tc: tc, expires: now.Add(traceContextTTL)}
+	c.mu.Unlock()
+	return cloneTraceContext(tc)
+}
+
+// cloneTraceContext returns a shallow copy of tc, or nil when tc is nil.
+func cloneTraceContext(tc *types.TraceContext) *types.TraceContext {
+	if tc == nil {
+		return nil
+	}
+	cp := *tc
+	return &cp
+}
+
+// cleanup evicts entries that expired at or before now. Called from the engine's
+// periodic cleanup goroutine so the map does not grow unbounded with dead PIDs.
+func (c *traceContextCache) cleanup(now time.Time) {
+	c.mu.Lock()
+	for pid, e := range c.entries {
+		if !now.Before(e.expires) {
+			delete(c.entries, pid)
+		}
+	}
+	c.mu.Unlock()
+}
 
 // extractTraceContext reads /proc/<pid>/environ and extracts distributed-trace
 // identifiers using the following conventions (in priority order):

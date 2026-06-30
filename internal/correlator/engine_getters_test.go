@@ -14,6 +14,7 @@ import (
 
 func TestEngineGettersAndLifecycle(t *testing.T) {
 	cfg := DefaultCorrelationEngineConfig()
+	cfg.EnableEventBuffer = true // exercise GetEvents/GetBuffer accessors
 	ce := NewCorrelationEngineWithConfig(cfg)
 	ctx := context.Background()
 

@@ -366,6 +366,11 @@ type Alert struct {
 	Action string `json:"action,omitempty"`
 	// Enforced is true when the rule action was executed by the enforcer.
 	Enforced bool `json:"enforced,omitempty"`
+	// PreAlertContext holds the most-recent events observed for the triggering PID
+	// in the seconds before this alert fired. Only populated when the engine is
+	// configured with EnableEventBuffer=true. Provides temporal attack-chain context
+	// (e.g. DNS→TCP→file write→execve) for SOC triage without a separate API query.
+	PreAlertContext []Event `json:"pre_alert_context,omitempty"`
 }
 
 // TraceContext holds OpenTelemetry trace context for propagation.

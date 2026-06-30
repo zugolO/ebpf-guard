@@ -48,6 +48,30 @@ func BenchmarkIngest_NoMatch_Syscall(b *testing.B) {
 	}
 }
 
+// BenchmarkIngest_Match_Syscall measures the alert-producing path: a syscall
+// event that matches a rule and carries no embedded TraceContext, so the alert
+// enrichment hits the /proc/<pid>/environ trace-context lookup. A bounded PID
+// set makes the per-PID trace-context cache effective across iterations.
+func BenchmarkIngest_Match_Syscall(b *testing.B) {
+	engine := benchEngine()
+	defer engine.Close()
+	ctx := context.Background()
+	now := uint64(time.Now().UnixNano())
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ev := types.Event{
+			Type:      types.EventSyscall,
+			PID:       uint32(i&63) + 1, // 64 distinct PIDs → cache hits dominate
+			PPID:      1,
+			Timestamp: now,
+			Syscall:   &types.SyscallEvent{Nr: 1}, // in {1,2,3} → matches → alert
+		}
+		engine.Ingest(ctx, ev)
+	}
+}
+
 // BenchmarkIngest_Parallel_NoMatch measures the parallel async ingest path,
 // where the PID-partitioned worker pool is supposed to scale across cores.
 // A global lock anywhere on the per-event path (e.g. lineage Track) shows up

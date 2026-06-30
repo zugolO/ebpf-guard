@@ -270,20 +270,6 @@ func BenchmarkShardedEventBuffer_AddSamePID(b *testing.B) {
 	})
 }
 
-func BenchmarkEventBuffer_Add(b *testing.B) {
-	eb := NewEventBuffer(100)
-	event := types.Event{Type: types.EventSyscall}
-
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		pid := uint32(1)
-		for pb.Next() {
-			eb.Add(pid, event)
-			pid++
-		}
-	})
-}
-
 // BenchmarkPIDs measures ForEachPID zero-alloc PID iteration over 10 000 entries.
 // ForEachPID is the preferred API for callers that do not need a slice (watchdog,
 // Prometheus cardinality guard, etc.). Target: 0 allocs/op.

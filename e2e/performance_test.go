@@ -231,6 +231,7 @@ func runPerformanceTest(t *testing.T, config PerformanceTestConfig) PerformanceR
 	t.Helper()
 
 	engine := correlator.NewCorrelationEngine(nil)
+	defer engine.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), config.TestDuration)
 	defer cancel()
 
@@ -389,7 +390,9 @@ func calculateP99(values []int64) int64 {
 // newTestEngine returns a zero-rule CorrelationEngine suitable for benchmarks.
 func newTestEngine(tb testing.TB) *correlator.CorrelationEngine {
 	tb.Helper()
-	return correlator.NewCorrelationEngine(nil)
+	engine := correlator.NewCorrelationEngine(nil)
+	tb.Cleanup(engine.Close)
+	return engine
 }
 
 // makeTestEvent returns a minimal syscall event for the given PID.
@@ -408,6 +411,7 @@ func BenchmarkCorrelationEngine(b *testing.B) {
 	for _, rate := range rates {
 		b.Run(fmt.Sprintf("%d_events_per_sec", rate), func(b *testing.B) {
 			engine := correlator.NewCorrelationEngine(nil)
+			defer engine.Close()
 			ctx := context.Background()
 
 			b.ResetTimer()

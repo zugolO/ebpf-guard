@@ -15,6 +15,14 @@ import (
 // processes that emit only a few events never allocate the full window.
 const initialRingCapacity = 8
 
+// ringBuffer is a circular buffer of events for a single PID, growable up to
+// the shard's maxSize.
+type ringBuffer struct {
+	events []types.Event
+	head   int
+	size   int
+}
+
 // computeBufferShards returns the optimal shard count for ShardedEventBuffer.
 // Uses max(NumCPU, GOMAXPROCS)*4 rounded to the next power of 2, clamped to [4, 256].
 // The 4× multiplier gives headroom for goroutine bursts beyond CPU count; the

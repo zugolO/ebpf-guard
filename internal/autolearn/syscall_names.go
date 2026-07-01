@@ -377,3 +377,18 @@ func SyscallName(nr int64) string {
 	}
 	return fmt.Sprintf("syscall_%d", nr)
 }
+
+// syscallNrs is the reverse of syscallNames (name -> x86_64 syscall number).
+var syscallNrs = func() map[string]int64 {
+	m := make(map[string]int64, len(syscallNames))
+	for nr, n := range syscallNames {
+		m[n] = nr
+	}
+	return m
+}()
+
+// SyscallNr returns the x86_64 syscall number for a syscall name (e.g. "execve" -> 59).
+func SyscallNr(name string) (int64, bool) {
+	nr, ok := syscallNrs[name]
+	return nr, ok
+}

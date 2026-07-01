@@ -3,63 +3,13 @@ package migration
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
-
-// falcoMapping pairs a Falco field prefix with the ebpf-guard field name it maps to.
-// Order matters: more-specific prefixes (e.g. "container.image.id") must appear before
-// their shorter siblings ("container.image") so the first match wins.
-type falcoMapping struct {
-	falcoPrefix string
-	ebpfField   string
-}
-
-var falcoFieldMappings = []falcoMapping{
-	// Process fields
-	{"proc.exepath", "exe_path"},
-	{"proc.exe", "exe_path"},
-	{"proc.pcmdline", "parent_cmdline"},
-	{"proc.cmdline", "cmdline"},
-	{"proc.pname", "parent_comm"},
-	{"proc.name", "comm"},
-	{"proc.args", "args"},
-	{"proc.env", "env"},
-	{"proc.pvpid", "ppid"},
-	{"proc.vpid", "pid"},
-	{"proc.sid", "session_id"},
-	{"proc.sname", "session_name"},
-	{"proc.tty", "tty"},
-	{"proc.loginuid", "loginuid"},
-	// File/FD fields (non-name/non-port/non-IP handled elsewhere)
-	{"fd.directory", "dir"},
-	{"fd.filename", "filename"},
-	{"fd.typechar", "fd_type"},
-	{"fd.type", "fd_type"},
-	{"fd.proto", "protocol"},
-	// User / group fields
-	{"user.loginname", "loginname"},
-	{"user.loginuid", "loginuid"},
-	{"user.name", "username"},
-	{"user.uid", "uid"},
-	{"user.gid", "gid"},
-	{"group.name", "group_name"},
-	{"group.gid", "group_gid"},
-	// Container fields — image.id before image to avoid short-circuit
-	{"container.image.id", "container_image_id"},
-	{"container.image", "container_image"},
-	{"container.name", "container_name"},
-	// Kubernetes fields
-	{"k8s.pod.name", "pod_name"},
-	{"k8s.ns.name", "namespace"},
-	// Syscall / event fields
-	{"syscall.type", "syscall_name"},
-	{"evt.dir", "evt_dir"},
-	{"evt.num", "evt_num"},
-}
 
 // FalcoRule represents a single rule from a Falco rules YAML file.
 type FalcoRule struct {
@@ -76,40 +26,66 @@ type FalcoRule struct {
 // Falco files are lists of heterogeneous items (rules, macros, lists).
 type FalcoDocument []map[string]interface{}
 
+// FalcoCondition is a single field condition in an ebpf-guard rule.
+type FalcoCondition struct {
+	Field  string   `yaml:"field"`
+	Op     string   `yaml:"op"`
+	Values []string `yaml:"values"`
+}
+
+// FalcoConditionGroup combines multiple conditions with AND/OR logic.
+type FalcoConditionGroup struct {
+	Operator   string                `yaml:"operator"`
+	Conditions []FalcoCondition      `yaml:"conditions,omitempty"`
+	SubGroups  []FalcoConditionGroup `yaml:"subgroups,omitempty"`
+}
+
 // ConvertedRule is an ebpf-guard rule produced by conversion.
 type ConvertedRule struct {
-	ID          string                 `yaml:"id"`
-	Name        string                 `yaml:"name"`
-	Description string                 `yaml:"description,omitempty"`
-	EventType   string                 `yaml:"event_type"`
-	Condition   map[string]interface{} `yaml:"condition,omitempty"`
-	Severity    string                 `yaml:"severity"`
-	Action      string                 `yaml:"action"`
-	Tags        []string               `yaml:"tags,omitempty"`
+	ID             string               `yaml:"id"`
+	Name           string               `yaml:"name"`
+	Description    string               `yaml:"description,omitempty"`
+	EventType      string               `yaml:"event_type"`
+	Condition      *FalcoCondition      `yaml:"condition,omitempty"`
+	ConditionGroup *FalcoConditionGroup `yaml:"condition_group,omitempty"`
+	Severity       string               `yaml:"severity"`
+	Action         string               `yaml:"action"`
+	Tags           []string             `yaml:"tags,omitempty"`
 }
 
 // ConversionResult holds the result of converting one Falco rule.
 type ConversionResult struct {
-	SourceRule  string
-	Converted   *ConvertedRule
-	Status      string // "converted" | "unsupported" | "disabled"
+	SourceRule         string
+	Converted          *ConvertedRule
+	Status             string // "converted" | "unsupported" | "disabled"
 	UnsupportedReasons []string
 }
 
 // ImportResult is the full result of importing a Falco rules file.
 type ImportResult struct {
-	Results   []ConversionResult
-	Converted int
+	Results     []ConversionResult
+	Converted   int
 	Unsupported int
-	Disabled  int
+	Disabled    int
 }
 
 // FalcoImporter converts Falco rules YAML to ebpf-guard correlator YAML.
-type FalcoImporter struct{}
+//
+// It supports the boolean-expression subset of the Falco condition language
+// (and/or/not, parentheses), expands macro: blocks referenced as bare
+// identifiers, resolves list: blocks referenced inside in (...) clauses, and
+// maps Falco field names to the exact field names accepted by
+// internal/correlator/rule_loader.go for each ebpf-guard event type. Fields
+// or expressions with no ebpf-guard equivalent are dropped with a WARN log
+// and recorded in UnsupportedReasons; a rule only becomes "unsupported" when
+// none of its clauses could be converted.
+type FalcoImporter struct {
+	logger *slog.Logger
+}
 
 // NewFalcoImporter creates a new FalcoImporter.
 func NewFalcoImporter() *FalcoImporter {
-	return &FalcoImporter{}
+	return &FalcoImporter{logger: slog.Default()}
 }
 
 // ImportFile reads a Falco rules file and converts all rules.
@@ -118,32 +94,78 @@ func (f *FalcoImporter) ImportFile(path string) (*ImportResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read falco rules file: %w", err)
 	}
-	return f.Import(data)
+	idx := 0
+	return f.importWithIdx(data, &idx)
+}
+
+// ImportDir converts all .yml/.yaml Falco files found directly in dir.
+func (f *FalcoImporter) ImportDir(dir string) (*ImportResult, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read falco rules directory: %w", err)
+	}
+
+	combined := &ImportResult{}
+	idx := 0
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			f.logger.Warn("falco: skipping unreadable file",
+				slog.String("path", path), slog.Any("error", err))
+			continue
+		}
+		result, err := f.importWithIdx(data, &idx)
+		if err != nil {
+			f.logger.Warn("falco: skipping unparseable file",
+				slog.String("path", path), slog.Any("error", err))
+			continue
+		}
+		combined.Results = append(combined.Results, result.Results...)
+		combined.Converted += result.Converted
+		combined.Unsupported += result.Unsupported
+		combined.Disabled += result.Disabled
+	}
+	return combined, nil
 }
 
 // Import converts Falco rules YAML bytes to ebpf-guard rules.
 func (f *FalcoImporter) Import(data []byte) (*ImportResult, error) {
+	idx := 0
+	return f.importWithIdx(data, &idx)
+}
+
+func (f *FalcoImporter) importWithIdx(data []byte, idx *int) (*ImportResult, error) {
 	var doc FalcoDocument
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse falco rules YAML: %w", err)
 	}
 
+	macros, lists := collectMacrosAndLists(doc)
+
 	result := &ImportResult{}
-	ruleIdx := 0
 
 	for _, item := range doc {
-		// Only process items that have a "rule" key
+		// Only process items that have a "rule" key.
 		ruleName, ok := item["rule"].(string)
 		if !ok || ruleName == "" {
 			continue
 		}
 
 		fr := FalcoRule{
-			Rule:     ruleName,
-			Desc:     stringField(item, "desc"),
+			Rule:      ruleName,
+			Desc:      stringField(item, "desc"),
 			Condition: stringField(item, "condition"),
-			Output:   stringField(item, "output"),
-			Priority: stringField(item, "priority"),
+			Output:    stringField(item, "output"),
+			Priority:  stringField(item, "priority"),
 		}
 
 		if tags, ok := item["tags"].([]interface{}); ok {
@@ -158,8 +180,8 @@ func (f *FalcoImporter) Import(data []byte) (*ImportResult, error) {
 			fr.Enabled = &enabled
 		}
 
-		ruleIdx++
-		cr := f.convertRule(ruleIdx, fr)
+		*idx++
+		cr := f.convertRule(*idx, fr, macros, lists)
 		switch cr.Status {
 		case "converted":
 			result.Converted++
@@ -191,42 +213,89 @@ func (f *FalcoImporter) WriteOutput(result *ImportResult) ([]byte, error) {
 	return yaml.Marshal(out)
 }
 
+// collectMacrosAndLists separates macro: and list: items out of a parsed
+// Falco document. Macro bodies are kept as raw (unexpanded) condition
+// strings; expandMacros resolves nested macro references recursively.
+func collectMacrosAndLists(doc FalcoDocument) (macros map[string]string, lists map[string][]string) {
+	macros = make(map[string]string)
+	lists = make(map[string][]string)
+
+	for _, item := range doc {
+		if name, ok := item["macro"].(string); ok && name != "" {
+			macros[name] = stringField(item, "condition")
+			continue
+		}
+		if name, ok := item["list"].(string); ok && name != "" {
+			var items []string
+			if raw, ok := item["items"].([]interface{}); ok {
+				for _, v := range raw {
+					switch s := v.(type) {
+					case string:
+						items = append(items, s)
+					case int:
+						items = append(items, fmt.Sprintf("%d", s))
+					}
+				}
+			}
+			lists[name] = items
+		}
+	}
+	return macros, lists
+}
+
 // convertRule converts a single Falco rule to an ebpf-guard rule.
-func (f *FalcoImporter) convertRule(idx int, fr FalcoRule) ConversionResult {
+func (f *FalcoImporter) convertRule(idx int, fr FalcoRule, macros map[string]string, lists map[string][]string) ConversionResult {
 	cr := ConversionResult{SourceRule: fr.Rule}
 
-	// Handle disabled rules
+	// Handle disabled rules.
 	if fr.Enabled != nil && !*fr.Enabled {
 		cr.Status = "disabled"
 		return cr
 	}
 
+	if strings.TrimSpace(fr.Condition) == "" {
+		cr.Status = "unsupported"
+		cr.UnsupportedReasons = []string{"empty condition"}
+		return cr
+	}
+
+	expanded := expandMacros(fr.Condition, macros)
+	eventType := detectEventType(expanded)
+
+	node, reasons := parseExpr(expanded, eventType, lists)
+
 	rule := &ConvertedRule{
 		ID:          fmt.Sprintf("falco_imported_%03d", idx),
 		Name:        fr.Rule,
 		Description: fr.Desc,
+		EventType:   eventType,
 		Severity:    mapPriority(fr.Priority),
 		Action:      "alert",
 		Tags:        fr.Tags,
 	}
 
-	// Parse condition to determine event type and conditions
-	eventType, condition, unsupported := parseCondition(fr.Condition)
-	if len(unsupported) > 0 {
+	if node == nil {
+		if len(reasons) == 0 {
+			reasons = []string{"could not parse condition: " + fr.Condition}
+		}
 		cr.Status = "unsupported"
-		cr.UnsupportedReasons = unsupported
-		cr.SourceRule = fr.Rule
-		// Still attach partial result for documentation
-		rule.EventType = eventType
-		rule.Condition = condition
-		cr.Converted = rule
+		cr.UnsupportedReasons = reasons
 		return cr
 	}
 
-	rule.EventType = eventType
-	rule.Condition = condition
+	for _, r := range reasons {
+		f.logger.Warn("falco-import: " + r)
+	}
+
+	if node.single != nil {
+		rule.Condition = node.single
+	} else {
+		rule.ConditionGroup = node.group
+	}
+
 	cr.Converted = rule
 	cr.Status = "converted"
+	cr.UnsupportedReasons = reasons
 	return cr
 }
 
@@ -238,325 +307,6 @@ func mapPriority(priority string) string {
 	default:
 		return "warning"
 	}
-}
-
-// parseCondition converts a Falco condition string into an ebpf-guard condition map.
-// Returns (eventType, condition, unsupportedReasons).
-func parseCondition(condition string) (string, map[string]interface{}, []string) {
-	if condition == "" {
-		return "syscall", nil, []string{"empty condition"}
-	}
-
-	cond := strings.TrimSpace(condition)
-	var unsupported []string
-
-	// Detect event type from condition tokens
-	eventType := detectEventType(cond)
-
-	// Build condition map by parsing well-known Falco filter expressions.
-	// We parse a flat AND-list of known atoms; complex boolean logic is unsupported.
-	atoms := splitTopLevelAnd(cond)
-	if len(atoms) == 0 {
-		return eventType, nil, []string{"could not parse condition: " + condition}
-	}
-
-	var conditions []map[string]interface{}
-	for _, atom := range atoms {
-		mapped, reason := mapAtom(strings.TrimSpace(atom))
-		if reason != "" {
-			unsupported = append(unsupported, reason)
-		} else if mapped != nil {
-			conditions = append(conditions, mapped)
-		}
-	}
-
-	if len(unsupported) > 0 {
-		return eventType, nil, unsupported
-	}
-
-	var result map[string]interface{}
-	if len(conditions) == 1 {
-		result = conditions[0]
-	} else if len(conditions) > 1 {
-		result = map[string]interface{}{
-			"operator":   "AND",
-			"conditions": conditions,
-		}
-	}
-
-	return eventType, result, nil
-}
-
-// detectEventType guesses the ebpf-guard event_type from Falco condition tokens.
-func detectEventType(cond string) string {
-	lower := strings.ToLower(cond)
-	switch {
-	case strings.Contains(lower, "fd.") || strings.Contains(lower, "open") ||
-		strings.Contains(lower, "read") || strings.Contains(lower, "write") ||
-		strings.Contains(lower, "fd.name"):
-		return "file"
-	case strings.Contains(lower, "inbound") || strings.Contains(lower, "outbound") ||
-		strings.Contains(lower, "fd.sip") || strings.Contains(lower, "fd.dip") ||
-		strings.Contains(lower, "fd.sport") || strings.Contains(lower, "fd.dport") ||
-		strings.Contains(lower, "connection"):
-		return "network"
-	case strings.Contains(lower, "evt.type = execve") || strings.Contains(lower, "evt.type=execve"):
-		return "syscall"
-	default:
-		return "syscall"
-	}
-}
-
-// mapAtom converts a single Falco filter atom to an ebpf-guard condition map.
-func mapAtom(atom string) (map[string]interface{}, string) {
-	atom = strings.TrimSpace(atom)
-
-	// Skip bare macro references (no operator present).
-	if !strings.Contains(atom, "=") && !strings.Contains(atom, " contains ") &&
-		!strings.Contains(atom, " in ") && !strings.Contains(atom, " startswith ") &&
-		!strings.Contains(atom, " glob ") {
-		return nil, fmt.Sprintf("unsupported atom (macro reference or complex expr): %q", atom)
-	}
-
-	// --- Special-cased fields with non-generic semantics ---
-
-	// evt.type = execve / evt.type in (...)
-	if strings.HasPrefix(atom, "evt.type") {
-		return mapEvtType(atom)
-	}
-
-	// fd.name contains/startswith — kept separate because fd.name uses a sub-string
-	// match rather than the generic equality/in-list pattern.
-	if strings.Contains(atom, "fd.name contains") {
-		val := extractQuoted(atom)
-		if val == "" {
-			return nil, fmt.Sprintf("could not extract value from: %q", atom)
-		}
-		return map[string]interface{}{"field": "file_path", "op": "contains", "values": []string{val}}, ""
-	}
-	if strings.Contains(atom, "fd.name startswith") {
-		val := extractQuoted(atom)
-		if val == "" {
-			return nil, fmt.Sprintf("could not extract value from: %q", atom)
-		}
-		return map[string]interface{}{"field": "file_path", "op": "prefix", "values": []string{val}}, ""
-	}
-	// fd.name equality — still a file path field
-	if strings.HasPrefix(atom, "fd.name") {
-		return mapGenericField(atom, "fd.name", "file_path")
-	}
-
-	// container.id != host — idiomatic Falco "running inside a container" check
-	if strings.HasPrefix(atom, "container.id") {
-		if strings.Contains(atom, "!= host") || strings.Contains(atom, "!=host") {
-			return map[string]interface{}{"field": "in_container", "op": "eq", "values": []string{"true"}}, ""
-		}
-		return nil, warnUnsupported(fmt.Sprintf("unsupported container.id expression: %q", atom))
-	}
-
-	// container.privileged = true/false — boolean field
-	if strings.HasPrefix(atom, "container.privileged") {
-		val := "true"
-		if strings.Contains(atom, "= false") || strings.Contains(atom, "=false") {
-			val = "false"
-		}
-		return map[string]interface{}{"field": "container_privileged", "op": "eq", "values": []string{val}}, ""
-	}
-
-	// fd.sport / fd.dport — numeric port fields
-	if strings.HasPrefix(atom, "fd.sport") || strings.HasPrefix(atom, "fd.dport") {
-		return mapPort(atom)
-	}
-
-	// fd.sip / fd.dip / fd.net / fd.cnet / fd.snet — IP or CIDR fields
-	if strings.HasPrefix(atom, "fd.sip") || strings.HasPrefix(atom, "fd.dip") ||
-		strings.HasPrefix(atom, "fd.net") || strings.HasPrefix(atom, "fd.cnet") ||
-		strings.HasPrefix(atom, "fd.snet") {
-		val := extractQuoted(atom)
-		if val == "" {
-			vals := extractInList(atom)
-			if len(vals) == 0 {
-				return nil, warnUnsupported(fmt.Sprintf("could not extract IP/CIDR from: %q", atom))
-			}
-			return map[string]interface{}{"field": "remote_ip", "op": "in_cidr", "values": vals}, ""
-		}
-		return map[string]interface{}{"field": "remote_ip", "op": "in_cidr", "values": []string{val}}, ""
-	}
-
-	// --- Generic field lookup via falcoFieldMappings ---
-	for _, m := range falcoFieldMappings {
-		if strings.HasPrefix(atom, m.falcoPrefix) {
-			return mapGenericField(atom, m.falcoPrefix, m.ebpfField)
-		}
-	}
-
-	return nil, warnUnsupported(fmt.Sprintf("unsupported Falco filter expression: %q", atom))
-}
-
-// warnUnsupported logs a WARN message and returns the reason string unchanged,
-// satisfying the requirement that unmapped fields emit a warning rather than
-// being silently dropped.
-func warnUnsupported(reason string) string {
-	log.Printf("WARN falco-import: %s", reason)
-	return reason
-}
-
-// mapGenericField handles the common equality / inequality / in-list / contains /
-// startswith patterns for a Falco field that maps directly to an ebpf-guard field.
-func mapGenericField(atom, falcoField, ebpfField string) (map[string]interface{}, string) {
-	// in / not in list
-	if strings.Contains(atom, " in ") {
-		vals := extractInList(atom)
-		if len(vals) == 0 {
-			return nil, fmt.Sprintf("could not extract list from: %q", atom)
-		}
-		op := "in"
-		if strings.Contains(atom, "not in") {
-			op = "not_in"
-		}
-		return map[string]interface{}{"field": ebpfField, "op": op, "values": vals}, ""
-	}
-	// contains
-	if strings.Contains(atom, " contains ") {
-		val := extractQuoted(atom)
-		if val == "" {
-			parts := strings.SplitN(atom, " contains ", 2)
-			if len(parts) == 2 {
-				val = strings.Trim(strings.TrimSpace(parts[1]), `"'`)
-			}
-		}
-		if val == "" {
-			return nil, fmt.Sprintf("could not extract value from: %q", atom)
-		}
-		return map[string]interface{}{"field": ebpfField, "op": "contains", "values": []string{val}}, ""
-	}
-	// startswith
-	if strings.Contains(atom, " startswith ") {
-		val := extractQuoted(atom)
-		if val == "" {
-			parts := strings.SplitN(atom, " startswith ", 2)
-			if len(parts) == 2 {
-				val = strings.Trim(strings.TrimSpace(parts[1]), `"'`)
-			}
-		}
-		if val == "" {
-			return nil, fmt.Sprintf("could not extract value from: %q", atom)
-		}
-		return map[string]interface{}{"field": ebpfField, "op": "prefix", "values": []string{val}}, ""
-	}
-	// equality / inequality (must come after "in" check because "!=" contains "=")
-	if strings.Contains(atom, "=") {
-		op := "eq"
-		eqIdx := strings.Index(atom, "=")
-		if eqIdx > 0 && atom[eqIdx-1] == '!' {
-			op = "neq"
-		}
-		val := extractQuoted(atom)
-		if val == "" {
-			val = strings.Trim(strings.TrimSpace(atom[eqIdx+1:]), `"'`)
-		}
-		if val == "" {
-			return nil, fmt.Sprintf("could not extract value from: %q", atom)
-		}
-		return map[string]interface{}{"field": ebpfField, "op": op, "values": []string{val}}, ""
-	}
-	return nil, fmt.Sprintf("unsupported expression for field %q: %q", falcoField, atom)
-}
-
-func mapEvtType(atom string) (map[string]interface{}, string) {
-	// evt.type in (open, openat, ...)
-	if strings.Contains(atom, " in ") {
-		vals := extractInList(atom)
-		if len(vals) > 0 {
-			return map[string]interface{}{"field": "syscall_name", "op": "in", "values": vals}, ""
-		}
-	}
-	// evt.type = open / evt.type = execve  (single equality)
-	if strings.Contains(atom, "=") {
-		parts := strings.SplitN(atom, "=", 2)
-		if len(parts) == 2 {
-			val := strings.TrimSpace(parts[1])
-			val = strings.Trim(val, `"' `)
-			if val != "" {
-				return map[string]interface{}{"field": "syscall_name", "op": "eq", "values": []string{val}}, ""
-			}
-		}
-	}
-	return nil, fmt.Sprintf("unsupported evt.type expression: %q", atom)
-}
-
-func mapPort(atom string) (map[string]interface{}, string) {
-	vals := extractInList(atom)
-	if len(vals) > 0 {
-		return map[string]interface{}{"field": "dst_port", "op": "in", "values": vals}, ""
-	}
-	// single value
-	parts := strings.SplitN(atom, "=", 2)
-	if len(parts) == 2 {
-		val := strings.TrimSpace(parts[1])
-		val = strings.Trim(val, `"'`)
-		return map[string]interface{}{"field": "dst_port", "op": "eq", "values": []string{val}}, ""
-	}
-	return nil, fmt.Sprintf("unsupported port expression: %q", atom)
-}
-
-// splitTopLevelAnd splits a Falco condition on top-level " and " tokens,
-// not splitting inside parentheses.
-func splitTopLevelAnd(cond string) []string {
-	var parts []string
-	depth := 0
-	start := 0
-
-	lower := strings.ToLower(cond)
-	for i := 0; i < len(lower); i++ {
-		switch lower[i] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-		}
-		if depth == 0 && i+5 <= len(lower) && lower[i:i+5] == " and " {
-			parts = append(parts, strings.TrimSpace(cond[start:i]))
-			start = i + 5
-			i += 4
-		}
-	}
-	if start < len(cond) {
-		parts = append(parts, strings.TrimSpace(cond[start:]))
-	}
-	return parts
-}
-
-// extractQuoted extracts the first double-quoted string value from an expression.
-func extractQuoted(s string) string {
-	start := strings.Index(s, `"`)
-	if start == -1 {
-		return ""
-	}
-	end := strings.Index(s[start+1:], `"`)
-	if end == -1 {
-		return ""
-	}
-	return s[start+1 : start+1+end]
-}
-
-// extractInList extracts values from a Falco "in (a, b, c)" expression.
-func extractInList(s string) []string {
-	start := strings.Index(s, "(")
-	end := strings.LastIndex(s, ")")
-	if start == -1 || end == -1 || end <= start {
-		return nil
-	}
-	inner := s[start+1 : end]
-	var vals []string
-	for _, v := range strings.Split(inner, ",") {
-		v = strings.TrimSpace(v)
-		v = strings.Trim(v, `"'`)
-		if v != "" {
-			vals = append(vals, v)
-		}
-	}
-	return vals
 }
 
 func stringField(m map[string]interface{}, key string) string {

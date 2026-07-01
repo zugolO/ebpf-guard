@@ -1801,12 +1801,14 @@ func newRulesImportCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "import [PATH]",
-		Short: "Import detection rules from external formats (sigma, ecs)",
+		Short: "Import detection rules from external formats (sigma, ecs, falco)",
 		Long: `import converts rules from other security formats into ebpf-guard YAML.
 
 Supported formats:
   sigma   Sigma open-standard detection rules (https://sigmahq.io)
   ecs     Elastic Common Schema-based detection rules (Elastic Security)
+  falco   Falco detection rules (https://falco.org / falcosecurity/rules),
+          including and/or/not boolean logic, macro: and list: expansion
 
 The input PATH may be a single .yaml/.yml file or a directory. For directories,
 all .yaml/.yml files found directly in the directory are processed.
@@ -1821,7 +1823,9 @@ Examples:
   ebpf-guard rules import --source sigma --dir ./sigma-rules/ --out rules/imported/
   ebpf-guard rules import --format sigma rule.yml --dry-run
   ebpf-guard rules import --format ecs ./elastic-rules/ --out rules/imported/
-  ebpf-guard rules import --format ecs rule.yml --dry-run`,
+  ebpf-guard rules import --format ecs rule.yml --dry-run
+  ebpf-guard rules import --format falco ./falco-rules/ --out rules/imported/
+  ebpf-guard rules import --format falco rule.yaml --dry-run`,
 		Args: cobra.RangeArgs(0, 1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Resolve format: --source takes precedence over --format.
@@ -1843,8 +1847,8 @@ Examples:
 				return fmt.Errorf("input path is required — provide as positional argument or via --dir")
 			}
 
-			if !strings.EqualFold(format, "sigma") && !strings.EqualFold(format, "ecs") {
-				return fmt.Errorf("unsupported format %q — only 'sigma' and 'ecs' are currently supported", format)
+			if !strings.EqualFold(format, "sigma") && !strings.EqualFold(format, "ecs") && !strings.EqualFold(format, "falco") {
+				return fmt.Errorf("unsupported format %q — only 'sigma', 'ecs' and 'falco' are currently supported", format)
 			}
 
 			info, err := os.Stat(inputPath)
@@ -1854,6 +1858,10 @@ Examples:
 
 			if strings.EqualFold(format, "ecs") {
 				return runECSImport(inputPath, info, outDir, dryRun)
+			}
+
+			if strings.EqualFold(format, "falco") {
+				return runFalcoImport(inputPath, info, outDir, dryRun)
 			}
 
 			imp := migration.NewSigmaImporter()
@@ -1914,12 +1922,72 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&format, "format", "", "source format (sigma, ecs); alias: --source")
-	cmd.Flags().StringVar(&source, "source", "", "source format (sigma, ecs); alias: --format")
+	cmd.Flags().StringVar(&format, "format", "", "source format (sigma, ecs, falco); alias: --source")
+	cmd.Flags().StringVar(&source, "source", "", "source format (sigma, ecs, falco); alias: --format")
 	cmd.Flags().StringVar(&dirArg, "dir", "", "input directory containing source rule files (alternative to positional PATH)")
 	cmd.Flags().StringVar(&outDir, "out", "rules/imported", "output directory for converted rules")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print generated YAML without writing files")
 	return cmd
+}
+
+// runFalcoImport handles the Falco import logic for the rules import subcommand.
+func runFalcoImport(inputPath string, info os.FileInfo, outDir string, dryRun bool) error {
+	imp := migration.NewFalcoImporter()
+
+	var result *migration.ImportResult
+	var err error
+	if info.IsDir() {
+		result, err = imp.ImportDir(inputPath)
+	} else {
+		result, err = imp.ImportFile(inputPath)
+	}
+	if err != nil {
+		return fmt.Errorf("import falco rules: %w", err)
+	}
+
+	fmt.Printf("Falco import summary:\n")
+	fmt.Printf("  Converted:   %d\n", result.Converted)
+	fmt.Printf("  Unsupported: %d\n", result.Unsupported)
+	fmt.Printf("  Disabled:    %d\n\n", result.Disabled)
+
+	for _, r := range result.Results {
+		switch r.Status {
+		case "converted":
+			fmt.Printf("  [OK]   %s\n", r.SourceRule)
+		case "unsupported":
+			fmt.Printf("  [SKIP] %s\n", r.SourceRule)
+			for _, reason := range r.UnsupportedReasons {
+				fmt.Printf("         - %s\n", reason)
+			}
+		case "disabled":
+			fmt.Printf("  [OFF]  %s\n", r.SourceRule)
+		}
+	}
+
+	out, err := imp.WriteOutput(result)
+	if err != nil {
+		return fmt.Errorf("serialize output: %w", err)
+	}
+
+	if dryRun {
+		fmt.Printf("\n-- dry-run: not writing files --\n\n%s\n", string(out))
+		return nil
+	}
+
+	if result.Converted == 0 {
+		fmt.Printf("\nNo rules were converted.\n")
+		return nil
+	}
+
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	outPath := filepath.Join(outDir, "falco-imported.yaml")
+	if err := os.WriteFile(outPath, out, 0o600); err != nil {
+		return fmt.Errorf("write output file: %w", err)
+	}
+	fmt.Printf("\nWritten %d rule(s) to %s\n", result.Converted, outPath)
+	return nil
 }
 
 // runECSImport handles the ECS import logic for the rules import subcommand.

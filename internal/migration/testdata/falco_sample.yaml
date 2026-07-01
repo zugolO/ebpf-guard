@@ -1,0 +1,66 @@
+# A representative sample of the kind of macro/list/boolean-logic patterns
+# found in real falcosecurity/rules files, used to exercise the Falco
+# importer's boolean parser, macro/list expansion, and field reconciliation
+# end-to-end (see TestFalcoImporter_RoundTrip_RealisticSample).
+
+- macro: spawned_process
+  condition: evt.type = execve
+
+- macro: container
+  condition: container.id != host
+
+- macro: open_write
+  condition: evt.type in (open, openat, openat2)
+
+- list: shell_binaries
+  items: [bash, sh, dash, zsh, ash]
+
+- macro: shell_procs
+  condition: proc.name in (shell_binaries)
+
+- list: bin_dirs
+  items: [/bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin]
+
+# Only spawned_process/container/shell_procs are mappable; proc.tty and the
+# container macro have no ebpf-guard equivalent and are dropped, but the
+# rule still converts on the surviving clauses.
+- rule: Terminal shell in container
+  desc: A shell was spawned inside a container by a non-terminal process
+  condition: >
+    spawned_process and container and shell_procs
+    and proc.tty != 0
+  output: "Shell spawned in container (user=%user.name shell=%proc.name)"
+  priority: NOTICE
+  tags: [container, shell, mitre_execution]
+
+- rule: Write below binary dir
+  desc: A binary directory was written to
+  condition: open_write and fd.directory in (bin_dirs)
+  output: "File below a known binary directory opened for writing (file=%fd.name)"
+  priority: ERROR
+  tags: [filesystem, mitre_persistence]
+
+- rule: Outbound connection to mining pool
+  desc: Outbound connection to a well-known cryptomining port
+  condition: evt.type = connect and fd.dport in (3333, 4444, 5555)
+  output: "Outbound connection to suspected mining pool (dport=%fd.dport)"
+  priority: CRITICAL
+  tags: [network, mitre_impact, cryptomining]
+
+- rule: Read sensitive credential file
+  desc: A process read a well-known credential file
+  condition: >
+    evt.type = open and
+    (fd.name startswith "/etc/shadow" or fd.name startswith "/etc/gshadow")
+  output: "Sensitive credential file opened (file=%fd.name proc=%proc.name)"
+  priority: CRITICAL
+  tags: [filesystem, mitre_credential_access]
+
+# Entirely unsupported: no ebpf-guard field exposes k8s pod metadata to rule
+# conditions yet, so this rule has nothing left to convert.
+- rule: Unexpected Kubernetes pod
+  desc: process ran in an unexpected pod
+  condition: k8s.pod.name != ""
+  output: "Unexpected pod (pod=%k8s.pod.name)"
+  priority: WARNING
+  tags: [k8s]

@@ -90,7 +90,7 @@ func NewFalcoImporter() *FalcoImporter {
 
 // ImportFile reads a Falco rules file and converts all rules.
 func (f *FalcoImporter) ImportFile(path string) (*ImportResult, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is supplied directly by the CLI operator
 	if err != nil {
 		return nil, fmt.Errorf("read falco rules file: %w", err)
 	}
@@ -117,7 +117,7 @@ func (f *FalcoImporter) ImportDir(dir string) (*ImportResult, error) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) // #nosec G304 -- dir is supplied directly by the CLI operator; entry.Name() comes from ReadDir on that same dir
 		if err != nil {
 			f.logger.Warn("falco: skipping unreadable file",
 				slog.String("path", path), slog.Any("error", err))

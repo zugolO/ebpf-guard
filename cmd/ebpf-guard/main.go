@@ -1983,7 +1983,7 @@ func runFalcoImport(inputPath string, info os.FileInfo, outDir string, dryRun bo
 		return fmt.Errorf("create output dir: %w", err)
 	}
 	outPath := filepath.Join(outDir, "falco-imported.yaml")
-	if err := os.WriteFile(outPath, out, 0o640); err != nil {
+	if err := os.WriteFile(outPath, out, 0o600); err != nil {
 		return fmt.Errorf("write output file: %w", err)
 	}
 	fmt.Printf("\nWritten %d rule(s) to %s\n", result.Converted, outPath)

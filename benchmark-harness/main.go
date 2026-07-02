@@ -146,8 +146,8 @@ func main() {
 		e := types.Event{
 			Type:      types.EventSyscall,
 			Timestamp: uint64(time.Now().UnixNano()),
-			PID:       uint32(i % 8192),
-			TGID:      uint32(i % 8192),
+			PID:       uint32(i % 8192), /* #nosec G115 -- i%8192 is always in [0,8191] */
+			TGID:      uint32(i % 8192), /* #nosec G115 -- i%8192 is always in [0,8191] */
 			UID:       1000,
 		}
 		copy(e.Comm[:], "worker")

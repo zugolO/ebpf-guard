@@ -550,3 +550,29 @@ func BenchmarkLineageTrackerUpdate(b *testing.B) {
 		e.PID++ // Vary PID to avoid map collision
 	}
 }
+
+// BenchmarkLineageTrackerUpdateSteadyState benchmarks the common case of a
+// long-lived process emitting repeated events with the same PID/PPID/comm.
+// This should hit the store() fast path: no allocation, single shard lock.
+func BenchmarkLineageTrackerUpdateSteadyState(b *testing.B) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	config := DefaultLineageConfig()
+	tracker := NewLineageTracker(config, logger)
+
+	e := types.Event{
+		Type:       types.EventSyscall,
+		PID:        1234,
+		PPID:       1,
+		Comm:       commBytes("bash"),
+		ParentComm: commBytes("init"),
+	}
+
+	tracker.Update(e) // warm up: first call always builds ancestry
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		tracker.Update(e)
+	}
+}

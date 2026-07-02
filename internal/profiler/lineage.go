@@ -179,10 +179,14 @@ func (lt *LineageTracker) SetMatchHandler(handler func(LineageMatch)) {
 // CorrelationEngine calls this on every event so that GetProcessTree can later
 // return the full ancestor chain when enriching alerts.
 //
-// Performance: ~2.3 µs/op, 442 B, 4 allocs (via BenchmarkLineageTrackerUpdate).
-// Callers should gate this behind config.Enabled and ppid>0 checks. For
-// high-throughput deployments where process tree enrichment is not required,
-// set LineageConfig.Enabled=false to eliminate this per-event cost entirely.
+// Performance: steady state (PID/PPID/comm unchanged since the last call, the
+// overwhelmingly common case for a long-lived process) is a single shard lock
+// plus a comparison — no allocation. A changed PPID/comm triggers a full
+// ancestry rebuild, priced at ~2.3 µs/op, 442 B, 4 allocs (via
+// BenchmarkLineageTrackerUpdate). Callers should gate this behind
+// config.Enabled and ppid>0 checks. For high-throughput deployments where
+// process tree enrichment is not required, set LineageConfig.Enabled=false to
+// eliminate this per-event cost entirely.
 func (lt *LineageTracker) Track(e types.Event) {
 	if !lt.config.Enabled {
 		return
@@ -197,19 +201,52 @@ func (lt *LineageTracker) Track(e types.Event) {
 
 // store records lineage/procCache for pid and (re)builds its ancestry chain.
 // Shared by Track and Update.
+//
+// Steady state fast path: a long-lived process emits a stream of events with
+// the same PID/PPID/comm on every call. When the recorded lineage and the
+// last ancestry node already match, only the timestamp is refreshed (for TTL
+// purposes) under a single lock — no allocation, no ancestry rebuild.
 func (lt *LineageTracker) store(pid, ppid uint32, parentComm, comm string) {
+	now := time.Now()
+	s := lt.shardFor(pid)
+
+	s.mu.Lock()
+	if info, ok := s.lineage[pid]; ok && info.PPID == ppid && info.ParentComm == parentComm {
+		if chain := s.ancestry[pid]; len(chain) > 0 {
+			if last := chain[len(chain)-1]; last.PID == pid && last.PPID == ppid && last.Comm == comm {
+				info.Timestamp = now
+				if entry, ok := s.procCache[pid]; ok {
+					entry.comm, entry.ppid, entry.timestamp = comm, ppid, now
+				} else if comm != "" || ppid > 0 {
+					s.procCache[pid] = &procEntry{comm: comm, ppid: ppid, timestamp: now}
+				}
+				s.mu.Unlock()
+				return
+			}
+		}
+	}
+	s.mu.Unlock()
+
 	info := parentInfoPool.Get().(*parentInfo)
 	info.PPID = ppid
 	info.ParentComm = parentComm
-	info.Timestamp = time.Now()
+	info.Timestamp = now
 
-	s := lt.shardFor(pid)
 	s.mu.Lock()
+	if old := s.lineage[pid]; old != nil && old != info {
+		// Return the displaced entry to the pool instead of leaking it to GC;
+		// only Cleanup used to do this, so hot PIDs bypassed the pool entirely.
+		old.PPID = 0
+		old.ParentComm = ""
+		parentInfoPool.Put(old)
+	}
 	s.lineage[pid] = info
 	// Eagerly cache BPF-provided comm+ppid so buildChainFromProc avoids
 	// /proc reads when this process becomes a parent in later chain builds.
-	if comm != "" || ppid > 0 {
-		s.procCache[pid] = &procEntry{comm: comm, ppid: ppid, timestamp: info.Timestamp}
+	if entry, ok := s.procCache[pid]; ok {
+		entry.comm, entry.ppid, entry.timestamp = comm, ppid, now
+	} else if comm != "" || ppid > 0 {
+		s.procCache[pid] = &procEntry{comm: comm, ppid: ppid, timestamp: now}
 	}
 	s.mu.Unlock()
 

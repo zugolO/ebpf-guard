@@ -324,6 +324,56 @@ func TestCorrelationEngine_ConcurrentEnforcement(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Close() shutdown ordering (regression for #247)
+// ---------------------------------------------------------------------------
+
+// TestCorrelationEngine_CloseDoesNotPanicWithPendingEnforcement is a regression
+// test for a shutdown race: Close() used to close enforceQueue/regoQueue
+// immediately after cancelling the context, while an ingest worker could still
+// be mid-ingestWithAD and attempt `case ce.enforceQueue <- task:`. Sending on a
+// closed channel panics even inside a `select` with a `default` branch. Close()
+// must fully drain the ingest worker pool before closing the downstream queues.
+func TestCorrelationEngine_CloseDoesNotPanicWithPendingEnforcement(t *testing.T) {
+	exec := &mockExecutor{}
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{ruleWithAction("r_kill", ActionKill)}
+	cfg.ActionExecutor = exec
+	cfg.EnableAnomaly = false
+	cfg.EnableRateLimit = false
+	cfg.EnforcementCooldown = time.Nanosecond // effectively no cooldown suppression
+	cfg.IngestWorkerCount = 2
+
+	// Close() cancels ctx before draining, so enforceWorker/regoWorker (which
+	// also select on ctx.Done()) tend to exit almost immediately regardless of
+	// load — any enforcement task still in flight then blocks Close()'s
+	// internal enforceWg.Wait() until its own 5s timeout. That's a separate,
+	// pre-existing, non-panic characteristic of Close() (unchanged by this
+	// fix); keep the iteration count small so this regression test doesn't
+	// pay that 5s tax on every one of many iterations.
+	const eventsPerIter = 10
+	const iterations = 3
+	for iter := 0; iter < iterations; iter++ {
+		ce := NewCorrelationEngineWithConfig(cfg)
+
+		// Queue up a burst of kill-rule events across many PIDs (unique PIDs so
+		// the enforcement cooldown never suppresses a send to enforceQueue).
+		// IngestAsync is synchronous with respect to the caller (only the
+		// channel send blocks), so once this loop returns there may still be
+		// queued/in-flight tasks for the ingest workers to process concurrently
+		// with the Close() call below.
+		for i := 0; i < eventsPerIter; i++ {
+			ce.IngestAsync(context.Background(), syscallEvent(uint32(iter*eventsPerIter+i), 99))
+		}
+
+		// A regression here panics inside the background ingest worker
+		// goroutine (not this one), which crashes the test binary outright —
+		// there is no recoverable assertion for a cross-goroutine panic, so
+		// simply reaching the end of the loop is the pass condition.
+		ce.Close()
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ActionExecutor interface satisfaction (compile-time check)
 // ---------------------------------------------------------------------------
 

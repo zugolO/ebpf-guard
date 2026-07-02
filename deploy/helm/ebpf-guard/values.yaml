@@ -177,7 +177,11 @@ prometheusRule:
             summary: "ebpf-guard agent is down on {{ $labels.node }}"
             description: "No heartbeat received from ebpf-guard for more than 2 minutes."
         - alert: EbpfGuardHighAlertRate
-          expr: rate(ebpf_guard_alerts_total[5m]) > 10
+          # Aggregate per node before thresholding: ebpf_guard_alerts_total now
+          # carries pod/node labels, so a bare rate() would evaluate per
+          # (rule_id, severity, namespace, pod, node) series and a node emitting
+          # >10 alerts/sec spread across many pods would never cross the threshold.
+          expr: sum by (node) (rate(ebpf_guard_alerts_total[5m])) > 10
           for: 5m
           labels:
             severity: warning

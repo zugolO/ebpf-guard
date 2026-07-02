@@ -95,7 +95,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(time() - ebpf_guard_heartbeat_timestamp_seconds < 60) or vector(0)",
+          "expr": "count(time() - ebpf_guard_heartbeat_timestamp_seconds{node=~\"$node\"} < 60) or vector(0)",
           "legendFormat": "",
           "range": true,
           "refId": "A"
@@ -163,7 +163,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(time() - ebpf_guard_heartbeat_timestamp_seconds >= 60) or vector(0)",
+          "expr": "count(time() - ebpf_guard_heartbeat_timestamp_seconds{node=~\"$node\"} >= 60) or vector(0)",
           "legendFormat": "",
           "range": true,
           "refId": "A"
@@ -1112,7 +1112,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "time() - ebpf_guard_heartbeat_timestamp_seconds",
+          "expr": "time() - ebpf_guard_heartbeat_timestamp_seconds{node=~\"$node\"}",
           "legendFormat": "__auto",
           "range": false,
           "refId": "A",

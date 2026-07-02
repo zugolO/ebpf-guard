@@ -41,6 +41,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/internal/tui"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/internal/wasm"
 	"github.com/zugolO/ebpf-guard/internal/watchdog"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -1301,12 +1302,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// alerts to a node even when Kubernetes enrichment is disabled (bare-metal/VM
 	// fleets). Prefers per-event Enrichment.NodeName (set by the k8s enricher) and
 	// falls back to this agent's own node identity.
-	metricsNodeName := os.Getenv("NODE_NAME")
-	if metricsNodeName == "" {
-		if h, hErr := os.Hostname(); hErr == nil {
-			metricsNodeName = h
-		}
-	}
+	metricsNodeName := resolveMetricsNodeName()
 
 	// dispatchAlerts fans a batch of alerts out to every configured sink: the
 	// simple-mode auto-enforcer, attack-simulation collector, alert store,
@@ -2552,7 +2548,7 @@ Keybindings:
 		RunE: func(_ *cobra.Command, _ []string) error {
 			setupLogger(logLevel)
 			if fleet != "" {
-				endpoints := splitAndTrim(fleet)
+				endpoints := util.SplitAndTrim(fleet, ",")
 				if len(endpoints) == 0 {
 					return fmt.Errorf("--fleet requires at least one endpoint")
 				}
@@ -2571,17 +2567,31 @@ Keybindings:
 	return cmd
 }
 
-// splitAndTrim splits a comma-separated list and drops empty/whitespace-only entries.
-func splitAndTrim(s string) []string {
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
+// resolveMetricsNodeName determines this agent's own node identity for the
+// "node" label on ebpf_guard_events_total / ebpf_guard_alerts_total, used only
+// as a fallback when an event/alert carries no Kubernetes-enriched NodeName.
+//
+// It prefers the NODE_NAME env var (set from the DaemonSet's downward API). It
+// deliberately does NOT fall back to os.Hostname() when running inside
+// Kubernetes: there the hostname is the pod name, not the node, so using it
+// would mislabel every series with a per-pod value and inflate cardinality.
+// Off-cluster (bare-metal/VM) the hostname is the correct node identity.
+func resolveMetricsNodeName() string {
+	if n := os.Getenv("NODE_NAME"); n != "" {
+		return n
 	}
-	return out
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		// In-cluster without NODE_NAME: the hostname is the pod name, which is
+		// wrong for the node label. Leave it empty rather than mislabel.
+		slog.Warn("metrics: running in Kubernetes without NODE_NAME set; " +
+			"the 'node' metric label will be empty. Set NODE_NAME via the " +
+			"downward API (fieldRef: spec.nodeName) to populate it.")
+		return ""
+	}
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return ""
 }
 
 // runFleetDashboard starts the fleet-mode TUI: no local collectors or

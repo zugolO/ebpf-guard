@@ -29,3 +29,19 @@ func TestNewCardinalityLimiter_Default(t *testing.T) {
 	cl := NewCardinalityLimiter(0) // non-positive → conservative default
 	assert.Equal(t, 0, cl.Size())
 }
+
+// TestCardinalityLimiter_CollapsesAllHighCardinalityLabels verifies the guard
+// collapses every high-cardinality dimension (not just one) once the limit is
+// exceeded, so namespace/pod/node can't individually blow up the series count.
+func TestCardinalityLimiter_CollapsesMultipleLabels(t *testing.T) {
+	cl := NewCardinalityLimiter(1)
+
+	// First series is admitted verbatim.
+	first := cl.Normalize([]string{"rule", "warning", "ns-a", "pod-a", "node-a"}, 2, 3, 4)
+	assert.Equal(t, []string{"rule", "warning", "ns-a", "pod-a", "node-a"}, first)
+
+	// The next distinct series exceeds the cap: namespace(2), pod(3), and node(4)
+	// all collapse to "other" while rule_id(0)/severity(1) are preserved.
+	over := cl.Normalize([]string{"rule", "warning", "ns-b", "pod-b", "node-b"}, 2, 3, 4)
+	assert.Equal(t, []string{"rule", "warning", "other", "other", "other"}, over)
+}

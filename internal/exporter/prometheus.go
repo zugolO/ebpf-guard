@@ -156,51 +156,31 @@ func RecordEvent(eventType string) {
 }
 
 // RecordEventWithLabels increments the events counter with proper K8s metadata.
-// Pod is cardinality-limited to prevent Prometheus OOM; namespace and node are
-// low-cardinality (bounded by cluster size) and are not collapsed.
+// Under normal operation all of pod/namespace/node are recorded verbatim; if the
+// series count ever exceeds the cardinality limit (e.g. pod churn, or a node
+// label misconfigured to a per-pod value) pod, namespace, and node all collapse
+// to "other" so total series stay bounded by the event type alone.
 func RecordEventWithLabels(eventType, podName, namespace, node string) {
 	labels := []string{eventType, podName, namespace, node}
-	// Collapse pod name to "other" if cardinality limit exceeded
-	labels = eventsCardinalityLimiter.Normalize(labels, 1)
+	// Collapse pod(1)/namespace(2)/node(3) to "other" if the limit is exceeded.
+	labels = eventsCardinalityLimiter.Normalize(labels, 1, 2, 3)
 	EventsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3]).Inc()
 }
 
 // EventTypeLabel converts an EventType to the short string used as the
-// "type" label on ebpf_guard_events_total (e.g. "syscall", "network", "file").
-// Kept low-cardinality: unmapped types collapse to "other".
+// "type" label on ebpf_guard_events_total. Both TCP connect and close collapse
+// to "network" so the metric groups connection lifecycle under one label; every
+// other type defers to the canonical types.EventType.String() name, and any
+// unmapped type collapses to "other" to stay low-cardinality.
 func EventTypeLabel(t types.EventType) string {
 	switch t {
-	case types.EventSyscall:
-		return "syscall"
 	case types.EventTCPConnect, types.EventNetClose:
 		return "network"
-	case types.EventFileAccess:
-		return "file"
-	case types.EventTLS:
-		return "tls"
-	case types.EventDNS:
-		return "dns"
-	case types.EventPrivesc:
-		return "privesc"
-	case types.EventKmodLoad:
-		return "kmod"
-	case types.EventCgroupEsc:
-		return "cgroup_esc"
-	case types.EventGPU:
-		return "gpu"
-	case types.EventLSMAudit:
-		return "lsm_audit"
-	case types.EventSequence:
-		return "sequence"
-	case types.EventCloudAudit:
-		return "cloud_audit"
-	case types.EventIOUring:
-		return "io_uring"
-	case types.EventBPFProgram:
-		return "bpf_program"
-	default:
-		return "other"
 	}
+	if name := t.String(); name != "unknown" {
+		return name
+	}
+	return "other"
 }
 
 // RecordDropped increments the dropped events counter with reason.
@@ -209,12 +189,14 @@ func RecordDropped(collector, reason string) {
 }
 
 // RecordAlert increments the alerts counter for the given rule, severity,
-// namespace, pod, and node. Pod is cardinality-limited to prevent Prometheus
-// OOM; the other labels are low-cardinality and are not collapsed.
+// namespace, pod, and node. Under normal operation all labels are recorded
+// verbatim; if the series count exceeds the cardinality limit, namespace, pod,
+// and node all collapse to "other" so total series stay bounded by
+// rule_id × severity (rule_id and severity are inherently low-cardinality).
 func RecordAlert(ruleID, severity, namespace, podName, node string) {
 	labels := []string{ruleID, severity, namespace, podName, node}
-	// Collapse pod name to "other" if cardinality limit exceeded
-	labels = alertsCardinalityLimiter.Normalize(labels, 3)
+	// Collapse namespace(2)/pod(3)/node(4) to "other" if the limit is exceeded.
+	labels = alertsCardinalityLimiter.Normalize(labels, 2, 3, 4)
 	AlertsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3], labels[4]).Inc()
 }
 

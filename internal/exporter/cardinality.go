@@ -187,25 +187,41 @@ func NewCardinalityLimiter(maxSeries int) *CardinalityLimiter {
 }
 
 // Normalize returns the labels, potentially modified to enforce cardinality limits.
-// If the series would exceed maxSeries, high-cardinality labels are replaced with "other".
-// labelKey specifies which label index to collapse (for EventsTotal: 1 for pod, 2 for namespace).
-func (cl *CardinalityLimiter) Normalize(labels []string, labelKey int) []string {
+// If the series would exceed maxSeries, the high-cardinality label indices given
+// by labelKeys are all replaced with "other" (e.g. for AlertsTotal: namespace,
+// pod, and node), which bounds the total series count to the product of the
+// remaining low-cardinality labels. Collapsing every high-cardinality dimension
+// — not just one — is what makes the guard a hard ceiling even when several
+// labels churn or are misconfigured.
+func (cl *CardinalityLimiter) Normalize(labels []string, labelKeys ...int) []string {
 	key := strings.Join(labels, "|")
+
+	// Fast path: a series we've already admitted is by far the common case on
+	// the per-event hot path. Take only a read lock and avoid mutating anything.
+	cl.mu.RLock()
+	seen := cl.series[key]
+	cl.mu.RUnlock()
+	if seen {
+		return labels // Seen before; pass through unchanged
+	}
 
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 
-	// Check if we've already seen this series
+	// Re-check under the write lock: another goroutine may have admitted this
+	// exact series between the RUnlock above and acquiring the write lock.
 	if cl.series[key] {
-		return labels // Seen before; pass through unchanged
+		return labels
 	}
 
 	// Check if adding this series would exceed the limit
 	if len(cl.series) >= cl.maxSeries {
-		// Collapse the specified label to "other"
+		// Collapse every high-cardinality label to "other".
 		labels = append([]string{}, labels...) // Copy to avoid modifying caller's slice
-		if labelKey < len(labels) {
-			labels[labelKey] = "other"
+		for _, k := range labelKeys {
+			if k >= 0 && k < len(labels) {
+				labels[k] = "other"
+			}
 		}
 		key = strings.Join(labels, "|")
 	}

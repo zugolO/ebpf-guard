@@ -5,7 +5,21 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
+
+// TestEventTypeLabel checks the metric "type" label mapping: TCP connect/close
+// both group under "network", mapped types use their canonical name, and an
+// unmapped value collapses to "other".
+func TestEventTypeLabel(t *testing.T) {
+	assert.Equal(t, "network", EventTypeLabel(types.EventTCPConnect))
+	assert.Equal(t, "network", EventTypeLabel(types.EventNetClose))
+	assert.Equal(t, "syscall", EventTypeLabel(types.EventSyscall))
+	assert.Equal(t, "dns", EventTypeLabel(types.EventDNS))
+	assert.Equal(t, "bpf_program", EventTypeLabel(types.EventBPFProgram))
+	assert.Equal(t, "other", EventTypeLabel(types.EventType(9999)))
+}
 
 // TestMetricRecorders exercises the package-level metric helper functions.
 // They mutate global promauto collectors, so we only assert that they run and,

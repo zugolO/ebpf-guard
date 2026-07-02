@@ -46,17 +46,21 @@ can aggregate and drill down across the whole cluster from Prometheus alone.
 | `ebpf_guard_k8s_enricher_cache_pods` | ✓ | – | – | – |
 
 `ebpf_guard_heartbeat_timestamp_seconds` (used by the `EbpfGuardAgentDown` alert
-and the fleet dashboard's "agents up/down" panel) has no explicit `node`/`pod`
-labels — one time series per agent is expected, so the fleet dashboard attributes
-it to a node/pod via the `instance` label that Prometheus attaches automatically
-at scrape time (populated from Kubernetes service discovery when the
-ServiceMonitor scrapes one target per DaemonSet pod).
+and the fleet dashboard's "agents up/down" panel) carries a `node` label so the
+dashboard can scope liveness by the `$node` template variable; one time series
+per agent is expected. The `node` value comes from the agent's `NODE_NAME`
+(downward API `spec.nodeName`), falling back to hostname off-cluster.
 
-**Cardinality guard:** `pod` is the only label collapsed to `"other"` once its
-series count would exceed the configured limit (`ebpf_guard_events_total`:
-5,000 series; `ebpf_guard_alerts_total`: 10,000 series) — see
-`internal/exporter/cardinality.go`. `node` and `namespace` are bounded by
-cluster size and are never collapsed.
+**Cardinality guard:** under normal operation all labels are recorded verbatim.
+If a metric's series count would exceed the configured limit
+(`ebpf_guard_events_total`: 5,000 series; `ebpf_guard_alerts_total`: 10,000
+series), the high-cardinality labels all collapse to `"other"` — `pod`,
+`namespace`, and `node` for both counters — so total series stay bounded by the
+low-cardinality labels alone (event `type`, or `rule_id`×`severity`). This is a
+safety ceiling: in a well-configured cluster `namespace`/`node` are bounded by
+cluster size and the collapse never triggers, but a misconfigured `node` label
+(e.g. a per-pod value) can no longer blow up Prometheus. See
+`internal/exporter/cardinality.go`.
 
 ## Metrics
 

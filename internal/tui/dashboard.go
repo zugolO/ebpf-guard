@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -72,6 +73,10 @@ type Feed struct {
 	// agents tracks per-endpoint health in fleet mode (--fleet), keyed by
 	// endpoint URL. Empty in single-agent mode.
 	agents map[string]AgentStatus
+	// agentsSorted caches the sorted snapshot so the dashboard's frequent ticks
+	// don't re-allocate and re-sort on every frame; rebuilt only when agentsDirty.
+	agentsSorted []AgentStatus
+	agentsDirty  bool
 }
 
 // NewFeed creates an empty Feed.
@@ -152,19 +157,26 @@ func (f *Feed) SetAgentStatus(s AgentStatus) {
 		f.agents = make(map[string]AgentStatus)
 	}
 	f.agents[s.Endpoint] = s
+	f.agentsDirty = true
 }
 
 // AgentStatuses returns a stable, sorted-by-endpoint snapshot of known fleet
-// agent statuses. Empty when the dashboard is not running in fleet mode.
+// agent statuses. Empty when the dashboard is not running in fleet mode. The
+// sorted slice is cached and only rebuilt after a SetAgentStatus, so the
+// dashboard's per-frame tick doesn't re-sort when nothing has changed.
 func (f *Feed) AgentStatuses() []AgentStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]AgentStatus, 0, len(f.agents))
-	for _, s := range f.agents {
-		out = append(out, s)
+	if f.agentsDirty || f.agentsSorted == nil {
+		out := make([]AgentStatus, 0, len(f.agents))
+		for _, s := range f.agents {
+			out = append(out, s)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Endpoint < out[j].Endpoint })
+		f.agentsSorted = out
+		f.agentsDirty = false
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Endpoint < out[j].Endpoint })
-	return out
+	return f.agentsSorted
 }
 
 // ─── Dashboard model ─────────────────────────────────────────────────────────
@@ -614,28 +626,18 @@ func (m *Model) renderFleet(maxLines int) string {
 		}
 		row := fmt.Sprintf("  %s  %-28s  %-20s  %-8d  %s",
 			statusIcon,
-			styleValue.Render(truncate(a.Endpoint, 28)),
-			styleValue.Render(truncate(a.NodeName, 20)),
+			styleValue.Render(util.Truncate(a.Endpoint, 28)),
+			styleValue.Render(util.Truncate(a.NodeName, 20)),
 			a.AlertCount,
 			styleDim.Render(lastSeen),
 		)
 		lines = append(lines, row)
 		if !a.Healthy && a.LastError != "" {
-			lines = append(lines, styleCritical.Render("      "+truncate(a.LastError, 90)))
+			lines = append(lines, styleCritical.Render("      "+util.Truncate(a.LastError, 90)))
 		}
 	}
 
 	return renderScrollable(lines, m.scrollTop, maxLines)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	if n <= 1 {
-		return s[:n]
-	}
-	return s[:n-1] + "…"
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

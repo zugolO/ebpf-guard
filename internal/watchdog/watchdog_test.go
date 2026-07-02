@@ -116,6 +116,7 @@ func TestHeartbeatUpdates(t *testing.T) {
 	w := New(logger, Config{
 		HeartbeatInterval: 50 * time.Millisecond,
 		CheckInterval:     1 * time.Hour, // Don't run liveness checks
+		NodeName:          "test-node",
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,7 +141,7 @@ func TestHeartbeatUpdates(t *testing.T) {
 func getHeartbeatValue() float64 {
 	// Read the actual gauge value rather than re-sampling the clock, so the
 	// test verifies that runHeartbeat advances the metric.
-	return testutil.ToFloat64(HeartbeatTimestamp)
+	return testutil.ToFloat64(HeartbeatTimestamp.WithLabelValues("test-node"))
 }
 
 func TestCheckProgramAttached(t *testing.T) {

@@ -128,3 +128,17 @@ func TestEvent_Reset(t *testing.T) {
 	assert.Empty(t, e.ProcArgs)
 	assert.False(t, e.ProcArgsTruncated)
 }
+
+func TestEventTypeString(t *testing.T) {
+	assert.Equal(t, "syscall", EventSyscall.String())
+	assert.Equal(t, "tcp_connect", EventTCPConnect.String())
+	assert.Equal(t, "net_close", EventNetClose.String())
+	assert.Equal(t, "bpf_program", EventBPFProgram.String())
+	assert.Equal(t, "unknown", EventType(9999).String())
+
+	// Every declared EventType must have a canonical (non-"unknown") name so a
+	// new type can't silently fall through to a placeholder label.
+	for et := EventSyscall; et <= EventBPFProgram; et++ {
+		assert.NotEqual(t, "unknown", et.String(), "EventType %d needs a canonical name", et)
+	}
+}

@@ -30,9 +30,14 @@ var tracer = otel.Tracer("github.com/zugolO/ebpf-guard/internal/correlator")
 
 // Engine defines the interface for event correlation engines.
 type Engine interface {
-	// Ingest processes a single event and may produce alerts.
+	// Ingest processes a single event synchronously and returns any alerts it
+	// produced. Suitable for tests and tools; production ingestion should use
+	// IngestAsync + periodic Flush instead (see CorrelationEngine.IngestAsync).
 	Ingest(ctx context.Context, e types.Event) []types.Alert
-	// Flush returns and resets pending state (for testing).
+	// Flush returns and resets pending alerts accumulated via IngestAsync (and
+	// via the async Rego evaluation path). Production callers must poll this
+	// periodically to drain alerts and dispatch them to storage/notifiers —
+	// pending is otherwise unbounded for the life of the engine.
 	Flush() []types.Alert
 }
 
@@ -210,6 +215,11 @@ type CorrelationEngine struct {
 	// per instance.  IngestAsync routes events here; Ingest bypasses the pool.
 	ingestPool []*workerState
 	ingestMask uint32
+	// closeIngestOnce guards closing the ingest worker channels so both
+	// DrainIngestPool (called during graceful shutdown, before the final
+	// Flush) and Close (final cleanup) can safely request the close without
+	// a double-close panic.
+	closeIngestOnce sync.Once
 
 	// traceCtxCache memoises /proc/<pid>/environ trace-context lookups (including
 	// negative results) so the alert path does not re-read /proc on every alert.
@@ -758,9 +768,18 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		// each worker sees ~1/N of traffic; without sharing, N workers each need
 		// minSamples before transitioning — effectively requiring N×minSamples total
 		// events to exit the learning phase.
+		//
+		// ce.anomalyDetector (used by the single-goroutine Ingest path) is also
+		// switched onto this same learner so learning-phase behavior is identical
+		// regardless of whether a caller uses Ingest or IngestAsync — otherwise the
+		// two paths would silently diverge (Ingest gating on its own solo sample
+		// count instead of the aggregate).
 		var sharedLearner *profiler.BaselineLearner
 		if config.EnableAnomaly {
 			sharedLearner = profiler.NewBaselineLearner(config.LearningPeriod, config.MinLearningSamples)
+			if ce.anomalyDetector != nil {
+				ce.anomalyDetector.SetSharedLearner(sharedLearner)
+			}
 		}
 
 		ingestBufSize := config.IngestWorkerBufferSize
@@ -988,6 +1007,42 @@ func (ce *CorrelationEngine) Drain(ctx context.Context) error {
 	}
 }
 
+// closeIngestChannels closes every ingest worker channel exactly once. Safe to
+// call from both DrainIngestPool (a graceful-shutdown step that must run
+// before the final Flush) and Close (final cleanup) without risking a
+// double-close panic.
+func (ce *CorrelationEngine) closeIngestChannels() {
+	ce.closeIngestOnce.Do(func() {
+		for _, w := range ce.ingestPool {
+			close(w.ch)
+		}
+	})
+}
+
+// DrainIngestPool closes the PID-partitioned ingest worker channels and blocks
+// until every worker has finished processing its already-queued events (and
+// flushed any resulting alerts to pending), or until ctx expires.
+//
+// Production callers that dispatch events via IngestAsync must call this
+// before the final Flush at shutdown: otherwise events already queued in a
+// worker's channel when collectors stop would still be processed after the
+// shutdown sequence's Flush+store step, and their alerts would never reach
+// the store (Close, which used to be the only place this drain happened,
+// runs after that step).
+func (ce *CorrelationEngine) DrainIngestPool(ctx context.Context) {
+	ce.closeIngestChannels()
+	done := make(chan struct{})
+	go func() {
+		ce.ingestWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("correlator: DrainIngestPool timed out waiting for ingest workers")
+	}
+}
+
 // Close stops background goroutines started by the engine and waits for graceful shutdown.
 // It attempts to drain pending work with a 5-second timeout to prevent hangs.
 // Returns without error even if workers don't finish within the timeout.
@@ -999,15 +1054,14 @@ func (ce *CorrelationEngine) Close() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
-	// Close the per-worker ingest channels and wait for every ingest worker to
-	// drain and exit BEFORE touching enforceQueue/regoQueue. An ingest worker
-	// mid-ingestWithAD can still attempt `case ce.enforceQueue <- task:` (or
-	// regoQueue) via a non-blocking select — sending on a closed channel panics
-	// even inside a `select` with a `default` branch, so those queues must not
-	// be closed while any ingest worker could still be running.
-	for _, w := range ce.ingestPool {
-		close(w.ch)
-	}
+	// Close the per-worker ingest channels (a no-op if DrainIngestPool already
+	// did this) and wait for every ingest worker to drain and exit BEFORE
+	// touching enforceQueue/regoQueue. An ingest worker mid-ingestWithAD can
+	// still attempt `case ce.enforceQueue <- task:` (or regoQueue) via a
+	// non-blocking select — sending on a closed channel panics even inside a
+	// `select` with a `default` branch, so those queues must not be closed
+	// while any ingest worker could still be running.
+	ce.closeIngestChannels()
 	ingestDone := make(chan struct{})
 	go func() {
 		ce.ingestWg.Wait()
@@ -1103,13 +1157,22 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 	return nil
 }
 
-// Ingest processes a single event synchronously and may produce alerts.
-// Safe to call from a single goroutine. For parallel ingestion across multiple
-// goroutines, use IngestAsync which routes events to the PID-partitioned pool.
+// Ingest processes a single event synchronously and returns any alerts it
+// produced. Safe to call from a single goroutine.
+//
+// Ingest is a convenience API for tests and single-threaded tools: it both
+// returns the alerts AND buffers a copy into pending (mirroring IngestAsync's
+// delivery mechanism), so Flush() also observes whatever Ingest produced.
+// Production code must pick exactly one delivery path — dispatching the
+// return value here AND separately draining Flush() double-delivers every
+// alert. For production ingestion, use IngestAsync (which does not return
+// alerts) together with a periodic Flush() to drain and dispatch pending.
 func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.Alert {
 	alerts, regoQueued := ce.ingestWithAD(ctx, e, ce.anomalyDetector)
 	if len(alerts) > 0 && !regoQueued {
-		// Not rego-queued: caller is responsible for storing to pending.
+		// Not rego-queued: the alerts aren't already headed to pending via the
+		// regoWorker, so buffer them here as well so Flush() stays consistent
+		// for callers relying on it (see doc comment above).
 		ce.pendingMu.Lock()
 		ce.pending = append(ce.pending, alerts...)
 		ce.pendingMu.Unlock()
@@ -1698,7 +1761,10 @@ func selectMostSevereDecision(decisions []policy.PolicyDecision) policy.PolicyDe
 	return decisions[0]
 }
 
-// Flush returns and resets pending alerts.
+// Flush returns and resets pending alerts. Production callers using
+// IngestAsync must call this periodically (and dispatch the result) rather
+// than only at shutdown — pending grows for the lifetime of the engine
+// otherwise, since nothing else drains it.
 func (ce *CorrelationEngine) Flush() []types.Alert {
 	ce.pendingMu.Lock()
 	defer ce.pendingMu.Unlock()

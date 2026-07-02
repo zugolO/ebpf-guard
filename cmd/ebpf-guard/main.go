@@ -57,6 +57,12 @@ var (
 	BuildTime = ""
 )
 
+// pendingFlushInterval controls how often the production event loop drains
+// alerts the correlation engine buffered via IngestAsync (see engine.Flush).
+// Matches the correlator package's internal per-worker local flush cadence so
+// alerts don't sit needlessly long on top of that existing batching delay.
+const pendingFlushInterval = 100 * time.Millisecond
+
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
 		os.Exit(1)
@@ -1290,6 +1296,84 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}()
 
+	// dispatchAlerts fans a batch of alerts out to every configured sink: the
+	// simple-mode auto-enforcer, attack-simulation collector, alert store,
+	// Alertmanager webhook, notification fanout, and cross-node gossip.
+	dispatchAlerts := func(dispatched []types.Alert) {
+		// Simple mode: auto-enforce high-confidence threats.
+		if simpleEngine != nil && enf != nil {
+			simpleEngine.ProcessAlerts(dispatched, enf)
+		}
+		if simCollector != nil {
+			for _, a := range dispatched {
+				simCollector.Record(a)
+			}
+		}
+		if err := alertStore.StoreBatch(ctx, dispatched); err != nil {
+			slog.Warn("store alerts error", slog.Any("error", err))
+		}
+		// Forward alerts to Alertmanager webhook if configured.
+		if alertmanagerClient != nil {
+			for _, a := range dispatched {
+				alertmanagerClient.SendAlert(ctx, a)
+			}
+		}
+		// Fan out to Slack / Teams / webhook notifiers if configured.
+		if fanout != nil {
+			for _, a := range dispatched {
+				fanout.Send(ctx, a)
+			}
+		}
+		// Feature F: broadcast critical alerts to peer nodes (cross-node
+		// alert amplification) and extract IOCs for gossip sharing.
+		if gossipMgr != nil {
+			for _, a := range dispatched {
+				gossipMgr.BroadcastAlert(a)
+				gossipMgr.ExtractFromAlert(a)
+			}
+		}
+	}
+
+	// dispatchAsync runs dispatchAlerts in a bounded goroutine pool to prevent
+	// unbounded goroutine growth under burst alert rates; drops (and records)
+	// the batch if the pool is saturated.
+	dispatchAsync := func(dispatched []types.Alert) {
+		if len(dispatched) == 0 {
+			return
+		}
+		if !workerSem.TryAcquire(1) {
+			exporter.RecordQueueOverflow()
+			return
+		}
+		n := activeWorkers.Add(1)
+		exporter.SetGoroutinePoolActive(n)
+		go func(a []types.Alert) {
+			defer func() {
+				workerSem.Release(1)
+				exporter.SetGoroutinePoolActive(activeWorkers.Add(-1))
+			}()
+			dispatchAlerts(a)
+		}(dispatched)
+	}
+
+	// Background: periodically drain alerts the correlation engine accumulated
+	// via IngestAsync (rule matches, anomaly detection, Rego enrichment) and
+	// dispatch them. Without this, engine.pending would only ever be drained
+	// once at shutdown — growing unboundedly for the life of the process and
+	// re-storing every alert a second time on the way out.
+	go func() {
+		ticker := time.NewTicker(pendingFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				dispatchAsync(engine.Flush())
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1322,85 +1406,42 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				runtimeEnricher.EnrichEvent(&event)
 			}
 
-			// engine.Ingest is single-goroutine safe; call it here before dispatch.
-			alerts := engine.Ingest(ctx, event)
+			// Route to the PID-partitioned ingest worker pool so rule evaluation,
+			// lineage tracking, and anomaly scoring are spread across goroutines
+			// instead of serializing on this one. Resulting alerts land in
+			// engine.pending and are drained by the periodic flush above — do
+			// NOT also dispatch a return value here, or every alert double-fires.
+			engine.IngestAsync(ctx, event)
 
-			// Run container drift detection alongside the rule engine.
+			// Drift detection runs independently of the correlation engine's
+			// pending buffer, so its alerts are dispatched immediately.
 			if driftDetector != nil {
 				driftAlerts := driftDetector.Ingest(event)
-				for _, da := range driftAlerts {
-					seq := driftSeq.Add(1)
-					alerts = append(alerts, drift.DriftAlertToTypes(da, seq, cfg.Drift.EnforceMode))
+				if len(driftAlerts) > 0 {
+					alerts := make([]types.Alert, 0, len(driftAlerts))
+					for _, da := range driftAlerts {
+						seq := driftSeq.Add(1)
+						alerts = append(alerts, drift.DriftAlertToTypes(da, seq, cfg.Drift.EnforceMode))
+					}
+					dispatchAsync(alerts)
 				}
 			}
-
-			if len(alerts) == 0 {
-				continue
-			}
-
-			// Dispatch alert I/O (store + forward) in a bounded goroutine pool to
-			// prevent unbounded goroutine growth under burst alert rates.
-			if !workerSem.TryAcquire(1) {
-				// Pool is saturated; drop this dispatch and record the overflow.
-				exporter.RecordQueueOverflow()
-				continue
-			}
-			n := activeWorkers.Add(1)
-			exporter.SetGoroutinePoolActive(n)
-
-			go func(dispatched []types.Alert) {
-				defer func() {
-					workerSem.Release(1)
-					exporter.SetGoroutinePoolActive(activeWorkers.Add(-1))
-				}()
-
-				// Simple mode: auto-enforce high-confidence threats.
-				if simpleEngine != nil && enf != nil {
-					simpleEngine.ProcessAlerts(dispatched, enf)
-				}
-
-				if simCollector != nil {
-					for _, a := range dispatched {
-						simCollector.Record(a)
-					}
-				}
-				if err := alertStore.StoreBatch(ctx, dispatched); err != nil {
-					slog.Warn("store alerts error", slog.Any("error", err))
-				}
-				// Forward alerts to Alertmanager webhook if configured.
-				if alertmanagerClient != nil {
-					for _, a := range dispatched {
-						alertmanagerClient.SendAlert(ctx, a)
-					}
-				}
-				// Fan out to Slack / Teams / webhook notifiers if configured.
-				if fanout != nil {
-					for _, a := range dispatched {
-						fanout.Send(ctx, a)
-					}
-				}
-				// Feature F: broadcast critical alerts to peer nodes (cross-node
-				// alert amplification) and extract IOCs for gossip sharing.
-				if gossipMgr != nil {
-					for _, a := range dispatched {
-						gossipMgr.BroadcastAlert(a)
-						gossipMgr.ExtractFromAlert(a)
-					}
-				}
-			}(alerts)
 		}
 	}
 }
 
 // gracefulShutdown orchestrates an ordered, time-bounded shutdown sequence:
 //  1. Stop BPF collectors so no new events enter the pipeline.
-//  2. Drain enforcement queue (up to 5 s) — let in-flight kill/block tasks finish.
-//  3. Drain the correlation engine's async Rego evaluation queue.
-//  4. Flush pending alerts from the correlation engine into the store.
-//  5. Flush the alert store (WAL checkpoint for SQLite).
-//  6. Flush pending Alertmanager webhook deliveries.
-//  7. Cleanup nftables/iptables chains left by the enforcer (if active).
-//  8. Shutdown the HTTP server.
+//  2. Drain the PID-partitioned ingest worker pool so every event already
+//     queued via IngestAsync finishes processing (and its alerts land in
+//     pending) before anything downstream is drained or flushed.
+//  3. Drain enforcement queue (up to 5 s) — let in-flight kill/block tasks finish.
+//  4. Drain the correlation engine's async Rego evaluation queue.
+//  5. Flush pending alerts from the correlation engine into the store.
+//  6. Flush the alert store (WAL checkpoint for SQLite).
+//  7. Flush pending Alertmanager webhook deliveries.
+//  8. Cleanup nftables/iptables chains left by the enforcer (if active).
+//  9. Shutdown the HTTP server.
 //
 // enableKernelFilter populates the syscall collector's BPF-side content
 // filter (comm denylist + syscall allowlist) and turns it on. Without this,
@@ -1528,14 +1569,24 @@ func gracefulShutdown(
 		}
 	}
 
-	// Step 2: drain the enforcement worker queue so in-flight kill/block/throttle
+	// Step 2: drain the PID-partitioned ingest worker pool. Events dispatched
+	// via IngestAsync before collectors stopped may still be queued in a
+	// worker's channel; wait for them to finish processing so their alerts
+	// (and any enforcement/Rego tasks they submit) exist before the queues
+	// below are drained. Skipping this would let those events surface only
+	// after Close() runs much later — past the point where anything flushes
+	// pending to the store again.
+	slog.Info("graceful shutdown: draining ingest worker pool")
+	engine.DrainIngestPool(shutdownCtx)
+
+	// Step 3: drain the enforcement worker queue so in-flight kill/block/throttle
 	// tasks are not abandoned mid-execution.
 	drainCtx, drainCancel := context.WithTimeout(shutdownCtx, drainEnforcementTimeout)
 	slog.Info("graceful shutdown: draining enforcement queue")
 	engine.DrainEnforceQueue(drainCtx)
 	drainCancel()
 
-	// Step 3: drain async Rego evaluation workers so every alert that was
+	// Step 4: drain async Rego evaluation workers so every alert that was
 	// submitted for OPA enrichment lands in the engine's pending buffer.
 	regoCtx, regoCancel := context.WithTimeout(shutdownCtx, drainRegoTimeout)
 	slog.Info("graceful shutdown: draining Rego evaluation queue")
@@ -1545,7 +1596,7 @@ func gracefulShutdown(
 	}
 	regoCancel()
 
-	// Step 4: flush any pending alerts buffered in the correlation engine.
+	// Step 5: flush any pending alerts buffered in the correlation engine.
 	slog.Info("graceful shutdown: flushing pending alerts")
 	if pending := engine.Flush(); len(pending) > 0 {
 		if err := alertStore.StoreBatch(shutdownCtx, pending); err != nil {
@@ -1567,13 +1618,13 @@ func gracefulShutdown(
 		}
 	}
 
-	// Step 5: flush the alert store (SQLite WAL checkpoint; no-op for other backends).
+	// Step 6: flush the alert store (SQLite WAL checkpoint; no-op for other backends).
 	slog.Info("graceful shutdown: flushing alert store")
 	if err := alertStore.Flush(shutdownCtx); err != nil {
 		slog.Warn("graceful shutdown: alert store flush error", slog.Any("error", err))
 	}
 
-	// Step 6: flush pending Alertmanager webhook deliveries and wait for all
+	// Step 7: flush pending Alertmanager webhook deliveries and wait for all
 	// in-flight HTTP sends to complete.
 	if alertmanagerClient != nil {
 		slog.Info("graceful shutdown: flushing Alertmanager webhook")
@@ -1593,7 +1644,7 @@ func gracefulShutdown(
 
 	engine.Close()
 
-	// Step 7: remove nftables/iptables rules the enforcer installed.
+	// Step 8: remove nftables/iptables rules the enforcer installed.
 	if enf != nil {
 		slog.Info("graceful shutdown: cleaning up enforcement chains")
 		if err := enf.Cleanup(); err != nil {
@@ -1604,7 +1655,7 @@ func gracefulShutdown(
 		}
 	}
 
-	// Step 8: drain the HTTP server.
+	// Step 9: drain the HTTP server.
 	slog.Info("graceful shutdown: shutting down HTTP server")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("graceful shutdown: HTTP server shutdown error", slog.Any("error", err))

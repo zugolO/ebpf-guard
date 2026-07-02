@@ -995,28 +995,46 @@ func (ce *CorrelationEngine) Close() {
 	// Signal all background goroutines to stop via context cancellation.
 	ce.cancelCleanup()
 
-	// Close all worker channels to unblock waiting readers.
-	// Must happen AFTER cancelCleanup so workers have a chance to exit
-	// before we slam the channel close.
-	close(ce.enforceQueue)
-	if ce.regoQueue != nil {
-		close(ce.regoQueue)
-	}
-	for _, w := range ce.ingestPool {
-		close(w.ch)
-	}
-
-	// Wait for all workers to finish with a timeout.
 	// Use a separate context to avoid depending on the now-cancelled cleanup context.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
-	// Create a single done channel for all three WaitGroups.
+	// Close the per-worker ingest channels and wait for every ingest worker to
+	// drain and exit BEFORE touching enforceQueue/regoQueue. An ingest worker
+	// mid-ingestWithAD can still attempt `case ce.enforceQueue <- task:` (or
+	// regoQueue) via a non-blocking select — sending on a closed channel panics
+	// even inside a `select` with a `default` branch, so those queues must not
+	// be closed while any ingest worker could still be running.
+	for _, w := range ce.ingestPool {
+		close(w.ch)
+	}
+	ingestDone := make(chan struct{})
+	go func() {
+		ce.ingestWg.Wait()
+		close(ingestDone)
+	}()
+	select {
+	case <-ingestDone:
+		// All ingest workers finished cleanly; safe to close downstream queues.
+	case <-shutdownCtx.Done():
+		// An ingest worker is still running and may still send to
+		// enforceQueue/regoQueue. Leave those queues open rather than risk a
+		// send-on-closed-channel panic; the process is shutting down anyway.
+		slog.Warn("correlator: graceful shutdown timeout waiting for ingest workers; enforce/rego queues left open")
+		return
+	}
+
+	// Now that no ingest worker is running, it is safe to close the downstream
+	// queues and wait for their workers to finish.
+	close(ce.enforceQueue)
+	if ce.regoQueue != nil {
+		close(ce.regoQueue)
+	}
+
 	done := make(chan struct{})
 	go func() {
 		ce.enforceWg.Wait()
 		ce.regoWg.Wait()
-		ce.ingestWg.Wait()
 		close(done)
 	}()
 
@@ -1492,6 +1510,11 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					}
 				}
 			}
+
+			// All uses of result (score reporter, isAnomaly derivation, alert
+			// fields copied by value above) are complete; return it to the pool
+			// so the next ProcessEvent call can reuse its backing memory.
+			profiler.ReleaseResult(result)
 		}
 	}
 

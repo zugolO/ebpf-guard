@@ -57,6 +57,7 @@ func TestBuiltinScenarios_EventsAreValid(t *testing.T) {
 			assert.NotZero(t, e.PID, "event PID must be non-zero")
 
 			// Type-specific payload must be non-nil
+			//nolint:exhaustive // only event types produced by built-in scenarios need payload checks; other types have no scenario here.
 			switch e.Type {
 			case types.EventSyscall:
 				assert.NotNil(t, e.Syscall, "Syscall payload must be set")

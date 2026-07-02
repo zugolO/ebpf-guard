@@ -38,19 +38,27 @@ api-docs:
 # Prerequisites (on the compilation host):
 #   - clang 14+          : apt-get install clang llvm
 #   - libbpf-dev         : apt-get install libbpf-dev
-#   - linux kernel BTF   : /sys/kernel/btf/vmlinux must exist
-#   - bpftool            : apt-get install linux-tools-generic
 #   - bpf2go             : go install github.com/cilium/ebpf/cmd/bpf2go@latest
 #
-# vmlinux.h is regenerated automatically from the running kernel's BTF data.
-# Commit the updated vmlinux.h to the repository so builds work without BTF.
+# Optional (only for regenerating bpf/vmlinux.h from the running kernel):
+#   - linux kernel BTF   : /sys/kernel/btf/vmlinux
+#   - bpftool            : apt-get install linux-tools-generic
+#
+# When the running kernel exposes BTF, vmlinux.h is regenerated from it and
+# the updated header should be committed so builds keep working without BTF.
+# Without kernel BTF, the committed bpf/vmlinux.h is used as-is (CO-RE
+# relocates field offsets against the target kernel at program load time).
 generate:
 	@echo "Generating eBPF bindings with bpf2go..."
 	@which clang > /dev/null 2>&1 || (echo "Error: clang not found. Install clang and llvm." && exit 1)
-	@which bpftool > /dev/null 2>&1 || (echo "Error: bpftool not found. Install linux-tools-generic." && exit 1)
-	@test -f /sys/kernel/btf/vmlinux || (echo "Error: /sys/kernel/btf/vmlinux not found. Kernel must have CONFIG_DEBUG_INFO_BTF=y." && exit 1)
-	@echo "  Regenerating bpf/vmlinux.h from running kernel BTF..."
-	@bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h
+	@if test -f /sys/kernel/btf/vmlinux; then \
+		which bpftool > /dev/null 2>&1 || (echo "Error: bpftool not found. Install linux-tools-generic." && exit 1); \
+		echo "  Regenerating bpf/vmlinux.h from running kernel BTF..."; \
+		bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/vmlinux.h; \
+	else \
+		test -f bpf/vmlinux.h || (echo "Error: no kernel BTF (/sys/kernel/btf/vmlinux) and no committed bpf/vmlinux.h." && exit 1); \
+		echo "  No kernel BTF — using committed bpf/vmlinux.h"; \
+	fi
 	@echo "  Running go generate (bpf2go)..."
 	GOPACKAGE=bpf go generate ./internal/bpf/...
 	@echo "  Removing stub bindings now superseded by generated files..."

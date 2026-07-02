@@ -25,6 +25,9 @@ internal/bpf/*_x86_bpfel.go
 internal/bpf/*_arm64_bpfel.go
 internal/bpf/*_arm64_bpfeb.go
 vmlinux.h
+# The pregenerated BTF header IS committed so fresh clones can run
+# `make generate` without a BTF-enabled kernel (see Makefile `generate`).
+!bpf/vmlinux.h
 
 # ── Go toolchain ───────────────────────────────────────────────────────────────
 vendor/

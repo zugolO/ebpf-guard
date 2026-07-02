@@ -143,6 +143,12 @@ synthetic collector (~10 ev/s), memory store, canary files, watchdog.
 
 ## 5. Bugs found during this pass
 
+> **Update:** all three bugs below were fixed in follow-up commits on this
+> branch — scenario rule IDs updated (plus a drift-guard test against the
+> embedded rule sets), verify/demo polling moved to `/api/v1/alerts` with a
+> duration-format `since`, and `bpf/vmlinux.h` committed with `make generate`
+> falling back to it when the kernel exposes no BTF.
+
 1. **`attack-sim` expects rule IDs that no longer exist.** Scenario
    expectations reference `container_escape_ptrace`, `cryptominer_pool_connect`,
    `dns_dga_query`, `ldpreload_injection`, `kmod_from_tmpfs` — none exist in

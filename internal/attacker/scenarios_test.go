@@ -1,11 +1,14 @@
 package attacker
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/pkg/types"
+	rulesembed "github.com/zugolO/ebpf-guard/rules"
 )
 
 // TestBuiltinScenarios_AllPresent verifies that BuiltinScenarios returns a non-empty
@@ -85,6 +88,47 @@ func TestBuiltinScenarios_EventsAreIndependent(t *testing.T) {
 			assert.NotZero(t, e2.Type)
 			// Type must be the same
 			assert.Equal(t, e1.Type, e2.Type)
+		})
+	}
+}
+
+// TestBuiltinScenarios_DetectedByEmbeddedRules guards against rule-ID drift:
+// every scenario's expected RuleIDs must actually fire when its event is fed
+// through a correlation engine loaded with the embedded built-in rule sets.
+// This is the same code path as `attack-sim --run-all` with default rules.
+func TestBuiltinScenarios_DetectedByEmbeddedRules(t *testing.T) {
+	files, err := rulesembed.LoadAll()
+	require.NoError(t, err)
+	rules, err := correlator.LoadRulesFromEmbedded(files)
+	require.NoError(t, err)
+	require.NotEmpty(t, rules)
+
+	knownIDs := make(map[string]bool, len(rules))
+	for _, r := range rules {
+		knownIDs[r.ID] = true
+	}
+
+	cfg := correlator.DefaultCorrelationEngineConfig()
+	cfg.Rules = rules
+	engine := correlator.NewCorrelationEngineWithConfig(cfg)
+
+	for _, s := range BuiltinScenarios() {
+		s := s
+		t.Run(s.ID, func(t *testing.T) {
+			for _, id := range s.RuleIDs {
+				assert.True(t, knownIDs[id],
+					"expected rule %q does not exist in the embedded rule sets (stale ID?)", id)
+			}
+
+			alerts := engine.Ingest(context.Background(), s.Event())
+			fired := make(map[string]bool, len(alerts))
+			for _, a := range alerts {
+				fired[a.RuleID] = true
+			}
+			for _, id := range s.RuleIDs {
+				assert.True(t, fired[id],
+					"expected rule %q did not fire for scenario %s", id, s.ID)
+			}
 		})
 	}
 }

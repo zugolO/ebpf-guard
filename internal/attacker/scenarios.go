@@ -82,7 +82,7 @@ func containerEscapePtrace() Scenario {
 		ID:          "container-escape-ptrace",
 		Name:        "Container Escape via ptrace",
 		Description: "SYS_ptrace(PTRACE_ATTACH) targeting PID 1 — escapes the container PID namespace.",
-		RuleIDs:     []string{"container_escape_ptrace"},
+		RuleIDs:     []string{"proc_inject_ptrace"},
 		MITRETech:   "T1611",
 		Event: func() types.Event {
 			return types.Event{
@@ -92,7 +92,7 @@ func containerEscapePtrace() Scenario {
 				TGID:      99990,
 				Comm:      comm("escape-probe"),
 				Syscall: &types.SyscallEvent{
-					Nr:   101,                             // SYS_ptrace
+					Nr:   101, // SYS_ptrace
 					Args: [6]uint64{0 /*PTRACE_ATTACH*/, 1 /*target PID 1*/, 0, 0, 0, 0},
 				},
 			}
@@ -105,7 +105,7 @@ func cryptominerPoolConnect() Scenario {
 		ID:          "cryptominer-pool-connect",
 		Name:        "Cryptominer Pool Connection",
 		Description: "TCP connect to port 3333 (Stratum mining protocol), sinkholed to 127.0.0.1.",
-		RuleIDs:     []string{"cryptominer_pool_connect"},
+		RuleIDs:     []string{"cryptominer_pool_ports"},
 		MITRETech:   "T1496",
 		Event: func() types.Event {
 			return types.Event{
@@ -130,7 +130,7 @@ func dgaDNSQuery() Scenario {
 		ID:          "dga-dns-query",
 		Name:        "DGA-style DNS Query",
 		Description: "DNS A-record query with a high-entropy domain label matching the DGA pattern.",
-		RuleIDs:     []string{"dns_dga_query"},
+		RuleIDs:     []string{"dns_dga_high_entropy"},
 		MITRETech:   "T1568.002",
 		Event: func() types.Event {
 			return types.Event{
@@ -154,7 +154,7 @@ func ldpreloadDrop() Scenario {
 		ID:          "ldpreload-drop",
 		Name:        "LD_PRELOAD Injection",
 		Description: "Open /etc/ld.so.preload for writing — drops a shared-library injection hook.",
-		RuleIDs:     []string{"ldpreload_injection"},
+		RuleIDs:     []string{"proc_inject_ld_preload_file"},
 		MITRETech:   "T1574.006",
 		Event: func() types.Event {
 			return types.Event{
@@ -224,7 +224,7 @@ func kmodLoad() Scenario {
 		ID:          "kmod-load",
 		Name:        "Kernel Module Load",
 		Description: "Loads a kernel module from /tmp (common rootkit delivery vector).",
-		RuleIDs:     []string{"kmod_from_tmpfs"},
+		RuleIDs:     []string{"kmod_load_from_tmpfs"},
 		MITRETech:   "T1547.006",
 		Event: func() types.Event {
 			return types.Event{

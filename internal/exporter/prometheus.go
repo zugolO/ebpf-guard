@@ -190,6 +190,8 @@ func EventTypeLabel(t types.EventType) string {
 		return "gpu"
 	case types.EventLSMAudit:
 		return "lsm_audit"
+	case types.EventSequence:
+		return "sequence"
 	case types.EventCloudAudit:
 		return "cloud_audit"
 	case types.EventIOUring:

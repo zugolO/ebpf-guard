@@ -2736,7 +2736,7 @@ Modes:
   --run-all       Feed every scenario through a local correlation engine loaded
                   from the configured rules file. Reports PASS/FAIL per scenario.
   --scenario ID   Run a single scenario (use --list to see IDs).
-  --verify        Poll a live agent's /alerts API after running a scenario and
+  --verify        Poll a live agent's /api/v1/alerts API after running a scenario and
                   assert the expected rule fired (requires --agent).
 
 Examples:

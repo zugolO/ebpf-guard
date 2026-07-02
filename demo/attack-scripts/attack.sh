@@ -38,7 +38,7 @@ wait_target() {
 }
 
 alerts_count() {
-    curl -sf -H "Authorization: Bearer $TOKEN" "http://$GUARD/alerts" 2>/dev/null \
+    curl -sf -H "Authorization: Bearer $TOKEN" "http://$GUARD/api/v1/alerts" 2>/dev/null \
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else d.get('total',0))" 2>/dev/null || echo "?"
 }
 
@@ -46,7 +46,7 @@ sep
 echo -e "${BLD}ebpf-guard Demo Attack Suite${RST}"
 echo "  Target :  http://$TARGET"
 echo "  Guard  :  http://$GUARD"
-[[ -n "$TOKEN" ]] && echo "  Token  :  ${TOKEN:0:16}..." || warn "No token — /alerts check will be skipped"
+[[ -n "$TOKEN" ]] && echo "  Token  :  ${TOKEN:0:16}..." || warn "No token — /api/v1/alerts check will be skipped"
 sep
 
 wait_target
@@ -128,7 +128,7 @@ echo ""
 
 if [[ -n "$TOKEN" ]]; then
     echo -e "${BLD}Recent alerts:${RST}"
-    curl -sf -H "Authorization: Bearer $TOKEN" "http://$GUARD/alerts" 2>/dev/null \
+    curl -sf -H "Authorization: Bearer $TOKEN" "http://$GUARD/api/v1/alerts" 2>/dev/null \
         | python3 -c "
 import sys, json
 alerts = json.load(sys.stdin)
@@ -139,8 +139,8 @@ for a in alerts[-10:]:
     rule = a.get('rule_id', a.get('id','?'))
     msg = a.get('message', a.get('description',''))[:80]
     print(f'  [{sev}] {rule}: {msg}')
-" 2>/dev/null || echo "  (check manually: curl -H 'Authorization: Bearer \$TOKEN' http://$GUARD/alerts)"
+" 2>/dev/null || echo "  (check manually: curl -H 'Authorization: Bearer \$TOKEN' http://$GUARD/api/v1/alerts)"
 fi
 
 echo ""
-echo -e "${GRN}${BLD}Done.${RST} Full alerts: curl -H 'Authorization: Bearer \$TOKEN' http://$GUARD/alerts | python3 -m json.tool"
+echo -e "${GRN}${BLD}Done.${RST} Full alerts: curl -H 'Authorization: Bearer \$TOKEN' http://$GUARD/api/v1/alerts | python3 -m json.tool"

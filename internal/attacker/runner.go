@@ -124,8 +124,8 @@ func (r *Runner) runOne(ctx context.Context, sc Scenario, engine *correlator.Cor
 	return result
 }
 
-// Verify runs a scenario by ID and polls a live agent's alerts HTTP API to
-// confirm all expected rules fired. baseURL is the agent address (e.g.
+// Verify runs a scenario by ID and polls a live agent's /api/v1/alerts HTTP
+// API to confirm all expected rules fired. baseURL is the agent address (e.g.
 // "http://localhost:8080"). token is the bearer token (may be empty).
 // The call blocks until all expected rules are observed or timeout elapses.
 func (r *Runner) Verify(ctx context.Context, id, baseURL, token string, timeout time.Duration) (ScenarioResult, error) {
@@ -195,7 +195,11 @@ func (r *Runner) Verify(ctx context.Context, id, baseURL, token string, timeout 
 }
 
 func (r *Runner) pollAlerts(ctx context.Context, baseURL, token string, since time.Time) ([]types.Alert, error) {
-	url := strings.TrimRight(baseURL, "/") + "/alerts?since=" + since.UTC().Format(time.RFC3339)
+	// The API's "since" filter takes a Go duration (alerts newer than now-d),
+	// so convert the absolute start time to an elapsed window with a small
+	// buffer for clock skew between this process and the agent.
+	window := time.Since(since) + 5*time.Second
+	url := strings.TrimRight(baseURL, "/") + "/api/v1/alerts?since=" + window.String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

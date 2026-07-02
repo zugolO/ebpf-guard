@@ -71,6 +71,39 @@ serviceMonitor:
 
 See `deploy/helm/ebpf-guard/values.yaml` for all options.
 
+### Grafana Dashboards
+
+Two dashboards ship in `deploy/grafana/` / `deploy/helm/ebpf-guard/dashboards/`: a single-node
+dashboard for debugging one agent, and a fleet-wide dashboard that aggregates alerts, events, and
+anomalies across every node/pod in the DaemonSet, driven entirely by Prometheus (no per-agent
+scraping by hand). See [deploy/grafana/README.md](../deploy/grafana/README.md) for panel details.
+
+Enable one or both as provisioned ConfigMaps (picked up by a Grafana sidecar that discovers
+dashboards by label, e.g. `sidecar.dashboards.enabled=true` on the `grafana` chart):
+
+```yaml
+# values.yaml
+grafana:
+  dashboard:
+    enabled: true       # single-node dashboard
+  fleetDashboard:
+    enabled: true        # fleet-wide dashboard
+```
+
+```bash
+helm upgrade --install ebpf-guard ./deploy/helm/ebpf-guard \
+  --set grafana.dashboard.enabled=true \
+  --set grafana.fleetDashboard.enabled=true
+```
+
+Each is its own ConfigMap (`<release>-grafana-dashboard` / `<release>-grafana-fleet-dashboard`),
+so either can be enabled independently. The fleet dashboard requires the `node` label on
+`ebpf_guard_events_total` / `ebpf_guard_alerts_total` (present by default) — see
+[docs/metrics.md](metrics.md#fleet-label-reference) for the full fleet label reference.
+
+For a fleet-wide **terminal** view instead of (or alongside) Grafana, see `ebpf-guard dashboard
+--fleet` in [docs/cli.md](cli.md#ebpf-guard-dashboard).
+
 ### Custom Rules
 
 Add custom detection rules via Helm values:

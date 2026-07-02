@@ -542,3 +542,12 @@ grafana:
     namespace: ""  # Defaults to release namespace
     label: grafana_dashboard
     labelValue: "1"
+  # Fleet-wide dashboard: aggregates alerts/events/anomalies across every node
+  # and pod in the DaemonSet, driven entirely by Prometheus (node/namespace/pod
+  # labels on ebpf_guard_events_total / ebpf_guard_alerts_total). Ships alongside
+  # the single-node dashboard above rather than replacing it.
+  fleetDashboard:
+    enabled: false
+    namespace: ""  # Defaults to release namespace
+    label: grafana_dashboard
+    labelValue: "1"

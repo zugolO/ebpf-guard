@@ -53,3 +53,17 @@ func Run(_ context.Context, _ *Feed) error {
 func RunWizard() (string, error) {
 	return "", fmt.Errorf("tui: interactive wizard not compiled in — build with -tags tui")
 }
+
+// FleetConfig is a stub mirroring the real fleet dashboard configuration
+// (see fleet.go, built with -tags tui) so callers compile either way.
+type FleetConfig struct {
+	Endpoints    []string
+	Token        string
+	PollInterval time.Duration
+}
+
+// RunFleet is a stub that returns an error indicating TUI is not compiled in.
+// Use -tags tui to build with the fleet-mode dashboard (`dashboard --fleet`).
+func RunFleet(_ context.Context, _ *Feed, _ FleetConfig) error {
+	return fmt.Errorf("tui: fleet dashboard not compiled in — build with -tags tui")
+}

@@ -1,0 +1,13 @@
+{{- if .Values.grafana.fleetDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-grafana-fleet-dashboard
+  namespace: {{ .Values.grafana.fleetDashboard.namespace | default (include "ebpf-guard.namespace" .) }}
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+    {{ .Values.grafana.fleetDashboard.label }}: {{ .Values.grafana.fleetDashboard.labelValue | quote }}
+data:
+  ebpf-guard-fleet-dashboard.json: |-
+    {{- .Files.Get "dashboards/ebpf-guard-fleet-dashboard.json" | nindent 4 }}
+{{- end }}

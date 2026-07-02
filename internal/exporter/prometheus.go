@@ -6,6 +6,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/zugolO/ebpf-guard/internal/util"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 func init() {
@@ -29,7 +30,7 @@ var (
 			Name: "ebpf_guard_events_total",
 			Help: "Total number of kernel events processed",
 		},
-		[]string{"type", "pod", "namespace"},
+		[]string{"type", "pod", "namespace", "node"},
 	)
 
 	// EventsDropped counts dropped events by collector and reason.
@@ -41,13 +42,15 @@ var (
 		[]string{"collector", "reason"},
 	)
 
-	// AlertsTotal counts generated alerts by rule, severity, and namespace.
+	// AlertsTotal counts generated alerts by rule, severity, namespace, pod, and node.
+	// Pod and node are required for the fleet-wide Grafana dashboard to attribute
+	// alerts to a specific pod/node without relying on Prometheus scrape relabeling.
 	AlertsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ebpf_guard_alerts_total",
 			Help: "Total number of security alerts generated",
 		},
-		[]string{"rule_id", "severity", "namespace"},
+		[]string{"rule_id", "severity", "namespace", "pod", "node"},
 	)
 
 	// ProfilerAnomalyScore tracks anomaly scores per process.
@@ -147,18 +150,55 @@ var (
 )
 
 // RecordEvent increments the events counter for the given type.
-// Deprecated: Use RecordEventWithLabels to provide proper pod/namespace labels.
+// Deprecated: Use RecordEventWithLabels to provide proper pod/namespace/node labels.
 func RecordEvent(eventType string) {
-	EventsTotal.WithLabelValues(eventType, "", "").Inc()
+	EventsTotal.WithLabelValues(eventType, "", "", "").Inc()
 }
 
 // RecordEventWithLabels increments the events counter with proper K8s metadata.
-// Pod and namespace labels are cardinality-limited to prevent Prometheus OOM.
-func RecordEventWithLabels(eventType, podName, namespace string) {
-	labels := []string{eventType, podName, namespace}
+// Pod is cardinality-limited to prevent Prometheus OOM; namespace and node are
+// low-cardinality (bounded by cluster size) and are not collapsed.
+func RecordEventWithLabels(eventType, podName, namespace, node string) {
+	labels := []string{eventType, podName, namespace, node}
 	// Collapse pod name to "other" if cardinality limit exceeded
 	labels = eventsCardinalityLimiter.Normalize(labels, 1)
-	EventsTotal.WithLabelValues(labels[0], labels[1], labels[2]).Inc()
+	EventsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3]).Inc()
+}
+
+// EventTypeLabel converts an EventType to the short string used as the
+// "type" label on ebpf_guard_events_total (e.g. "syscall", "network", "file").
+// Kept low-cardinality: unmapped types collapse to "other".
+func EventTypeLabel(t types.EventType) string {
+	switch t {
+	case types.EventSyscall:
+		return "syscall"
+	case types.EventTCPConnect, types.EventNetClose:
+		return "network"
+	case types.EventFileAccess:
+		return "file"
+	case types.EventTLS:
+		return "tls"
+	case types.EventDNS:
+		return "dns"
+	case types.EventPrivesc:
+		return "privesc"
+	case types.EventKmodLoad:
+		return "kmod"
+	case types.EventCgroupEsc:
+		return "cgroup_esc"
+	case types.EventGPU:
+		return "gpu"
+	case types.EventLSMAudit:
+		return "lsm_audit"
+	case types.EventCloudAudit:
+		return "cloud_audit"
+	case types.EventIOUring:
+		return "io_uring"
+	case types.EventBPFProgram:
+		return "bpf_program"
+	default:
+		return "other"
+	}
 }
 
 // RecordDropped increments the dropped events counter with reason.
@@ -166,13 +206,14 @@ func RecordDropped(collector, reason string) {
 	EventsDropped.WithLabelValues(collector, reason).Inc()
 }
 
-// RecordAlert increments the alerts counter for the given rule, severity, and namespace.
-// Namespace label is cardinality-limited to prevent Prometheus OOM.
-func RecordAlert(ruleID, severity, namespace string) {
-	labels := []string{ruleID, severity, namespace}
-	// Collapse namespace to "other" if cardinality limit exceeded
-	labels = alertsCardinalityLimiter.Normalize(labels, 2)
-	AlertsTotal.WithLabelValues(labels[0], labels[1], labels[2]).Inc()
+// RecordAlert increments the alerts counter for the given rule, severity,
+// namespace, pod, and node. Pod is cardinality-limited to prevent Prometheus
+// OOM; the other labels are low-cardinality and are not collapsed.
+func RecordAlert(ruleID, severity, namespace, podName, node string) {
+	labels := []string{ruleID, severity, namespace, podName, node}
+	// Collapse pod name to "other" if cardinality limit exceeded
+	labels = alertsCardinalityLimiter.Normalize(labels, 3)
+	AlertsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3], labels[4]).Inc()
 }
 
 // SetBPFMapEntries sets the entry count for a BPF map.

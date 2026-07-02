@@ -11,7 +11,7 @@ import (
 // They mutate global promauto collectors, so we only assert that they run and,
 // where convenient, that the underlying collector advanced.
 func TestMetricRecorders(t *testing.T) {
-	RecordEventWithLabels("syscall", "pod-x", "ns-x")
+	RecordEventWithLabels("syscall", "pod-x", "ns-x", "node-x")
 	RecordBPFMapFull("events", 3)
 	RecordBPFMapFull("events", 0) // delta 0 → no-op branch
 	RecordCorrelationDuration(0.002)

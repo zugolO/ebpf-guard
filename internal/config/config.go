@@ -111,6 +111,11 @@ type Config struct {
 	// Detects and optionally blocks attempts by external processes to detach
 	// or modify our BPF programs/maps. Graceful no-op on kernel < 5.7.
 	SelfProtection SelfProtectionConfig `mapstructure:"self_protection"`
+
+	// AISandbox configures the AI-agent containment profile (issue #255) —
+	// the deny-by-default, allow-known-good usage profile that constrains what
+	// an autonomous AI/coding agent may do at runtime.
+	AISandbox AISandboxConfig `mapstructure:"ai_sandbox"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -1145,6 +1150,94 @@ type SelfProtectionConfig struct {
 	AlertSeverity string `mapstructure:"alert_severity"`
 }
 
+// AISandboxConfig configures the AI-agent containment profile (issue #255).
+//
+// ebpf-guard has two usage profiles over one engine: the default deny-known-bad
+// threat-detection profile, and this deny-by-default, allow-known-good profile
+// that constrains what a designated autonomous AI/coding agent process tree may
+// do at runtime (exec / file / network). This section holds the positive policy
+// MODEL and target selection; the semantic detection ruleset lives in
+// rules/ai-agent.yaml (RulesPath).
+//
+// Enforcement primitives (cgroup-scoped LSM allow maps, the bprm_check_security
+// exec hook, and the `ebpf-guard run` wrapper) are delivered by follow-up
+// sub-issues of #255. On kernels without BPF LSM support (< 5.7 or no
+// CONFIG_BPF_LSM), enforce mode gracefully degrades to audit-only with a clear
+// startup log; egress may still be constrained via the nftables fallback.
+type AISandboxConfig struct {
+	// Enabled activates AI-agent sandbox evaluation. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+
+	// Mode is the enforcement posture: "audit" (log violations only) or
+	// "enforce" (deny with -EPERM). audit-first is the safe default so an
+	// over-broad profile never bricks the agent. Default: "audit".
+	Mode string `mapstructure:"mode"`
+
+	// RulesPath is the semantic containment ruleset applied to sandboxed
+	// agents (cred-path reads, curl|sh pipelines, unexpected egress, ...).
+	// Default: "rules/ai-agent.yaml".
+	RulesPath string `mapstructure:"rules_path"`
+
+	// Selector chooses which processes fall under a sandbox profile.
+	Selector AISandboxSelector `mapstructure:"selector"`
+
+	// Profiles is the set of named containment profiles. The selector picks
+	// exactly one profile per sandboxed target by name.
+	Profiles []AISandboxProfile `mapstructure:"profiles"`
+}
+
+// AISandboxSelector chooses which processes are placed under a sandbox profile.
+type AISandboxSelector struct {
+	// KubeLabel is the pod label whose value names the profile to apply
+	// (e.g. "ebpf-guard.io/sandbox-profile"). The Kubernetes enricher resolves
+	// the matching pod's cgroup subtree. Empty disables label-based targeting.
+	KubeLabel string `mapstructure:"kube_label"`
+
+	// Comms lists process comm names treated as sandbox entry points for local
+	// agents launched outside Kubernetes (e.g. via `ebpf-guard run`). When a
+	// matching process starts, its process tree inherits the DefaultProfile.
+	Comms []string `mapstructure:"comms"`
+
+	// DefaultProfile is the profile name applied to Comms-matched processes and
+	// as a fallback when a pod carries no recognised KubeLabel value.
+	DefaultProfile string `mapstructure:"default_profile"`
+}
+
+// AISandboxProfile is a positive (allow) policy for a sandboxed agent process
+// tree: deny-by-default, allow only what is listed. An empty allow list for a
+// dimension means "deny everything in that dimension" when Mode is "enforce".
+type AISandboxProfile struct {
+	// Name identifies the profile; referenced by the selector label value or
+	// DefaultProfile. Must be unique and non-empty.
+	Name string `mapstructure:"name"`
+
+	// AllowedExec lists absolute path prefixes the agent may exec. In enforce
+	// mode a downloaded/unknown binary outside these prefixes is denied at exec.
+	AllowedExec []string `mapstructure:"allowed_exec"`
+
+	// AllowedReadPaths lists path prefixes the agent may open for reading.
+	AllowedReadPaths []string `mapstructure:"allowed_read_paths"`
+
+	// AllowedWritePaths lists path prefixes the agent may open for writing.
+	AllowedWritePaths []string `mapstructure:"allowed_write_paths"`
+
+	// DeniedPaths lists path prefixes that are always denied even when covered
+	// by an allow entry — defence-in-depth for secrets (~/.ssh, ~/.aws, .env).
+	DeniedPaths []string `mapstructure:"denied_paths"`
+
+	// AllowedEgressCIDRs lists destination CIDRs the agent may connect to.
+	// Each entry must parse as a CIDR (e.g. "10.0.0.0/8", "93.184.216.0/24").
+	AllowedEgressCIDRs []string `mapstructure:"allowed_egress_cidrs"`
+
+	// AllowedEgressPorts lists destination TCP/UDP ports the agent may connect
+	// to. Empty means all ports are permitted (constrain via CIDR/domain).
+	AllowedEgressPorts []uint16 `mapstructure:"allowed_egress_ports"`
+
+	// AllowedDomains lists DNS domain suffixes the agent may resolve and reach
+	// (e.g. "github.com", "pypi.org"). A leading dot is optional.
+	AllowedDomains []string `mapstructure:"allowed_domains"`
+}
+
 // EnforcementConfig holds enforcement settings.
 type EnforcementConfig struct {
 	// Enabled enables enforcement actions
@@ -2042,6 +2135,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("admission_webhook.tls_key_file", "")
 	v.SetDefault("admission_webhook.tls_auto_generate", false)
 	v.SetDefault("admission_webhook.webhook_path", "/admission")
+
+	// AI-agent sandbox defaults (issue #255) — disabled by default; audit-first
+	// so an over-broad profile can never brick the agent it wraps.
+	v.SetDefault("ai_sandbox.enabled", false)
+	v.SetDefault("ai_sandbox.mode", "audit")
+	v.SetDefault("ai_sandbox.rules_path", "rules/ai-agent.yaml")
+	v.SetDefault("ai_sandbox.selector.kube_label", "ebpf-guard.io/sandbox-profile")
+	v.SetDefault("ai_sandbox.selector.comms", []string{})
+	v.SetDefault("ai_sandbox.selector.default_profile", "")
+	v.SetDefault("ai_sandbox.profiles", []AISandboxProfile{})
 }
 
 // Get returns the current configuration (thread-safe).

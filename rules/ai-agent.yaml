@@ -1,0 +1,285 @@
+# AI-Agent Containment Rules for ebpf-guard (issue #255)
+#
+# ebpf-guard's second usage profile: constraining what an autonomous AI/coding
+# agent (Claude Code, Aider, Cursor, an in-cluster agent Pod, ...) is allowed to
+# do at runtime. These rules are expressed in *agent* terms — credential reads,
+# curl|sh pipelines, package-manager installs, egress to cloud metadata, secret
+# env dumps — rather than generic threat-detection terms.
+#
+# They complement (do not replace) the positive allow-policy enforced in the
+# kernel via the `ai_sandbox` config section. Rules here fire as detections/audit
+# signals; the config-driven cgroup allow-lists perform the deny-by-default
+# enforcement. Load these alongside your base rules and pair with
+# `ai_sandbox.enabled: true`.
+#
+# Severity is deliberately conservative (mostly `warning`, `action: alert`) so
+# they are safe to enable in audit-first mode over a real agent workload before
+# switching the sandbox to `enforce`.
+
+rules:
+  # ==========================================================================
+  # Credential & secret access — the highest-value target for a prompt-injected
+  # or over-eager agent. MITRE ATT&CK T1552 (Unsecured Credentials).
+  # ==========================================================================
+
+  - id: ai_agent_read_ssh_keys
+    name: "AI Agent: read of SSH private key material"
+    description: >
+      A sandboxed agent process opened a file under ~/.ssh. Agents rarely need
+      raw private keys; a read here is a classic exfiltration or lateral-movement
+      setup step.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: contains
+          values: ["/.ssh/"]
+        - field: file.op
+          op: in
+          values: ["read", "open"]
+    severity: critical
+    action: alert
+    tags: [ai-agent, sandbox, credential-access, mitre:T1552.004]
+
+  - id: ai_agent_read_cloud_credentials
+    name: "AI Agent: read of cloud credential files"
+    description: >
+      A sandboxed agent read AWS/GCP/Azure credential material. These grant
+      control-plane access and are a prime exfiltration target for an agent that
+      has been steered off-task.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: suffix
+          values:
+            - "/.aws/credentials"
+            - "/.aws/config"
+            - "/.config/gcloud/credentials.db"
+            - "/.config/gcloud/access_tokens.db"
+            - "/.azure/accessTokens.json"
+            - "/.azure/azureProfile.json"
+        - field: file.op
+          op: in
+          values: ["read", "open"]
+    severity: critical
+    action: alert
+    tags: [ai-agent, sandbox, credential-access, cloud, mitre:T1552.001]
+
+  - id: ai_agent_read_dotenv_secrets
+    name: "AI Agent: read of .env / secret files"
+    description: >
+      A sandboxed agent opened a dotenv, kubeconfig, npmrc, pypirc, netrc, or
+      git-credentials file. These commonly hold API tokens and registry
+      credentials.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: suffix
+          values:
+            - "/.env"
+            - "/.env.local"
+            - "/.env.production"
+            - "/.kube/config"
+            - "/.npmrc"
+            - "/.pypirc"
+            - "/.netrc"
+            - "/.git-credentials"
+            - "/.docker/config.json"
+        - field: file.op
+          op: in
+          values: ["read", "open"]
+    severity: warning
+    action: alert
+    tags: [ai-agent, sandbox, credential-access, secrets, mitre:T1552.001]
+
+  - id: ai_agent_read_proc_environ
+    name: "AI Agent: read of /proc/<pid>/environ (secret env dump)"
+    description: >
+      A sandboxed agent read a process environment block from /proc. Environment
+      variables frequently carry API keys and tokens; dumping another process's
+      environ is a secret-harvesting technique.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values: ["/proc/"]
+        - field: file.path
+          op: suffix
+          values: ["/environ"]
+    severity: warning
+    action: alert
+    tags: [ai-agent, sandbox, credential-access, mitre:T1552.001]
+
+  # ==========================================================================
+  # Remote code execution pipelines — `curl | sh`, `wget | bash`, and
+  # package-manager installs pulling arbitrary code. MITRE T1105 / T1059.
+  # ==========================================================================
+
+  - id: ai_agent_pipe_to_shell
+    name: "AI Agent: curl|sh / wget|bash remote-code pipeline"
+    description: >
+      A sandboxed agent invoked a shell whose command line fetches and pipes a
+      remote payload directly into an interpreter (curl ... | sh, wget ... |
+      bash). This is the canonical unreviewed-remote-code pattern.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: comm
+          op: in
+          values: ["sh", "bash", "dash", "zsh"]
+        - field: proc.args
+          op: regex
+          values: ['(?i)(curl|wget)\s+[^|]*\|\s*(sudo\s+)?(ba)?sh']
+    severity: critical
+    action: alert
+    tags: [ai-agent, sandbox, remote-code, mitre:T1105, mitre:T1059.004]
+
+  - id: ai_agent_package_install
+    name: "AI Agent: package-manager install pulling remote code"
+    description: >
+      A sandboxed agent ran a package manager install command (pip, npm, gem,
+      cargo, go get, apt). Uncontrolled installs are a supply-chain and
+      arbitrary-code-execution vector inside an agent sandbox.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - '(?i)\b(pip3?|pipx)\s+install\b'
+        - '(?i)\bnpm\s+(install|i|exec)\b'
+        - '(?i)\bnpx\s+'
+        - '(?i)\bgem\s+install\b'
+        - '(?i)\bcargo\s+install\b'
+        - '(?i)\bgo\s+(get|install)\b'
+        - '(?i)\bapt(-get)?\s+install\b'
+    severity: warning
+    action: alert
+    tags: [ai-agent, sandbox, supply-chain, mitre:T1059]
+
+  # ==========================================================================
+  # Persistence & self-modification — an agent writing to shell rc files, cron,
+  # or authorized_keys to survive past its task. MITRE T1547 / T1053 / T1098.
+  # ==========================================================================
+
+  - id: ai_agent_write_persistence_paths
+    name: "AI Agent: write to persistence / autostart paths"
+    description: >
+      A sandboxed agent wrote to a shell startup file, cron directory, systemd
+      unit, or SSH authorized_keys. Legitimate coding tasks rarely touch these;
+      writes here indicate an attempt to persist beyond the sandboxed task.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: suffix
+          values:
+            - "/.bashrc"
+            - "/.bash_profile"
+            - "/.profile"
+            - "/.zshrc"
+            - "/.ssh/authorized_keys"
+        - field: file.op
+          op: in
+          values: ["write", "open"]
+    severity: critical
+    action: alert
+    tags: [ai-agent, sandbox, persistence, mitre:T1547.001, mitre:T1098.004]
+
+  - id: ai_agent_write_cron_systemd
+    name: "AI Agent: write to cron / systemd unit directories"
+    description: >
+      A sandboxed agent wrote into a cron or systemd unit directory — a
+      scheduled-task persistence vector.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.path
+          op: prefix
+          values:
+            - "/etc/cron.d/"
+            - "/etc/cron.daily/"
+            - "/etc/cron.hourly/"
+            - "/var/spool/cron/"
+            - "/etc/systemd/system/"
+            - "/etc/systemd/user/"
+        - field: file.op
+          op: in
+          values: ["write", "open"]
+    severity: critical
+    action: alert
+    tags: [ai-agent, sandbox, persistence, mitre:T1053.003, mitre:T1543.002]
+
+  # ==========================================================================
+  # Egress control — connections an agent has no business making. The positive
+  # allow-list lives in ai_sandbox config; these rules flag well-known abuse
+  # destinations regardless of profile. MITRE T1552.005 / T1071.
+  # ==========================================================================
+
+  - id: ai_agent_egress_cloud_metadata
+    name: "AI Agent: connection to cloud instance metadata service (SSRF)"
+    description: >
+      A sandboxed agent connected to the link-local cloud metadata endpoint
+      (169.254.169.254). Agents reaching the metadata service can harvest
+      instance role credentials — a common prompt-injection SSRF objective.
+    event_type: network
+    condition:
+      field: daddr
+      op: in
+      values: ["169.254.169.254"]
+    severity: critical
+    action: alert
+    tags: [ai-agent, sandbox, credential-access, ssrf, mitre:T1552.005]
+
+  - id: ai_agent_git_push_ssh
+    name: "AI Agent: git push over SSH to a remote"
+    description: >
+      A sandboxed agent's git process opened an outbound SSH connection
+      (port 22) — typically a `git push` to a remote. In a contained agent this
+      should match an allow-listed remote; flag for review otherwise.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["git", "ssh", "git-remote-http"]
+        - field: dport
+          op: in
+          values: ["22"]
+    severity: warning
+    action: alert
+    tags: [ai-agent, sandbox, exfiltration, mitre:T1567]
+
+  # ==========================================================================
+  # Reverse / bind shells — an agent spawning an interactive shell back to a
+  # remote is a strong compromise signal. MITRE T1059 / T1071.
+  # ==========================================================================
+
+  - id: ai_agent_reverse_shell_tooling
+    name: "AI Agent: reverse-shell tooling invocation"
+    description: >
+      A sandboxed agent invoked netcat/socat/ncat with a shell redirection, or a
+      language one-liner opening a socket to a shell — the canonical reverse-shell
+      construction.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: regex
+      values:
+        - '(?i)\b(nc|ncat|netcat)\b.*\b-e\b'
+        - '(?i)\bsocat\b.*\bexec'
+        - '(?i)(bash|sh)\s+-i\b.*/dev/tcp/'
+        - '(?i)/dev/tcp/[0-9]'
+    severity: critical
+    action: alert
+    tags: [ai-agent, sandbox, reverse-shell, mitre:T1059.004]

@@ -184,6 +184,33 @@ func ValidateConfig(cfg *Config) error {
 			[]string{"warning", "critical"}))
 	}
 
+	// ── AI sandbox (issue #255) ──────────────────────────────────────────────
+	if cfg.AISandbox.Enabled {
+		add(validateOneOf("ai_sandbox.mode", cfg.AISandbox.Mode,
+			[]string{"audit", "enforce"}))
+		if len(cfg.AISandbox.Profiles) == 0 {
+			add(fmt.Errorf("ai_sandbox.profiles: at least one profile is required when ai_sandbox.enabled is true"))
+		}
+		seen := make(map[string]bool, len(cfg.AISandbox.Profiles))
+		for i, p := range cfg.AISandbox.Profiles {
+			if p.Name == "" {
+				add(fmt.Errorf("ai_sandbox.profiles[%d].name: must not be empty", i))
+			} else if seen[p.Name] {
+				add(fmt.Errorf("ai_sandbox.profiles[%d].name: duplicate profile name %q", i, p.Name))
+			}
+			seen[p.Name] = true
+			for j, c := range p.AllowedEgressCIDRs {
+				if _, _, err := net.ParseCIDR(c); err != nil {
+					add(fmt.Errorf("ai_sandbox.profiles[%d].allowed_egress_cidrs[%d]: invalid CIDR %q: %w", i, j, c, err))
+				}
+			}
+		}
+		// A referenced default_profile must resolve to a defined profile.
+		if dp := cfg.AISandbox.Selector.DefaultProfile; dp != "" && !seen[dp] {
+			add(fmt.Errorf("ai_sandbox.selector.default_profile: %q does not match any defined profile", dp))
+		}
+	}
+
 	return errors.Join(errs...)
 }
 

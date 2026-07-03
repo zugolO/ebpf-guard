@@ -128,6 +128,15 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 	}
 	defer func() { _ = mgr.UnregisterCgroup(cg.ID()) }()
 
+	// DNS-pinned egress (item 6): resolve the profile's allowed_domains and keep
+	// their A/AAAA records programmed as egress allow entries for the lifetime of
+	// the wrapped command. Started only when a profile lists domains.
+	if pinner, ok := sandbox.NewDNSPinner(aiCfg, mgr, nil, logger); ok {
+		pinCtx, stopPin := context.WithCancel(context.Background())
+		defer stopPin()
+		go pinner.Run(pinCtx)
+	}
+
 	logger.Info("sandbox active",
 		"profile", profileName,
 		"mode", mgr.Mode(),

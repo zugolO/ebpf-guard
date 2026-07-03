@@ -61,6 +61,89 @@ func (p *Policy) PathAllowed(profile, absPath string, want uint8) bool {
 	return pathAllowed(cp.pathLookup(), absPath, want)
 }
 
+// EscapePrimitive names a kernel-contained sandbox-escape vector — a syscall or
+// action a contained agent has no legitimate need for. Each maps to an LSM hook
+// in bpf/lsm.bpf.c that denies it for a sandboxed task in enforce mode.
+type EscapePrimitive string
+
+const (
+	// EscapeSignalProtected: signalling a protected PID (lsm_task_kill) — e.g.
+	// killing the agent supervisor or the ebpf-guard process.
+	EscapeSignalProtected EscapePrimitive = "kill"
+	// EscapeBPF: the bpf() syscall (lsm_sandbox_bpf) — tampering with the guard's
+	// own maps/links (map-write).
+	EscapeBPF EscapePrimitive = "map-write"
+	// EscapeMount: mount(2)/remount (lsm_sandbox_mount) — remapping the
+	// filesystem view to break out of the cgroup/namespace boundary.
+	EscapeMount EscapePrimitive = "cgroup-escape"
+	// EscapePtrace: ptrace attach (lsm_sandbox_ptrace) — injecting into another
+	// process.
+	EscapePtrace EscapePrimitive = "ptrace"
+	// EscapeModuleLoad: kernel module load (lsm_kernel_module_request) — ring-0
+	// code execution.
+	EscapeModuleLoad EscapePrimitive = "module-load"
+)
+
+// EscapeContained reports whether a sandboxed task's use of the given escape
+// primitive is denied under this policy. It mirrors sandbox_escape_decide() in
+// bpf/lsm.bpf.c: escape primitives are denied for any sandboxed task in enforce
+// mode and audited (allowed) in audit mode. The primitive argument is accepted
+// so callers and future policy can distinguish vectors even though the current
+// decision is uniform across them.
+func (p *Policy) EscapeContained(EscapePrimitive) bool {
+	return p.Mode == ModeEnforce
+}
+
+// ExecAllowed reports whether the named profile permits execing absPath when the
+// binary's content digest is digest. It layers hash pinning on top of the path
+// allow-list (issue #255 / #225):
+//
+//   - The path must be covered by an allowed_exec prefix (exec access bit).
+//   - If the path is hash-pinned, the digest must match one of its pins —
+//     identity wins over location, so a swapped/rebuilt binary at a pinned path
+//     is denied even though the path is allowed.
+//   - An unpinned allowed path is permitted regardless of digest (prefix trust).
+//
+// This mirrors the intended bprm_check decision; the in-kernel digest lookup is
+// delivered by #225 against the same sandbox_exec_pins rows.
+func (p *Policy) ExecAllowed(profile, absPath string, digest [32]byte) bool {
+	cp, ok := p.byName[profile]
+	if !ok {
+		return false
+	}
+	if !pathAllowed(cp.pathLookup(), absPath, accessExec) {
+		return false
+	}
+	norm := normalizePrefix(absPath)
+	if norm == "" {
+		return false
+	}
+	if _, pinned := cp.pinnedPaths[fnv32a(norm)]; !pinned {
+		return true // path allowed and not pinned — trust the prefix
+	}
+	for _, e := range cp.execPins {
+		if e.PathFN == fnv32a(norm) && e.Key.Sha256 == digest {
+			return true
+		}
+	}
+	return false
+}
+
+// ExecPathPinned reports whether the profile hash-pins the given exec path.
+// Callers use it to decide whether a digest must be supplied to ExecAllowed.
+func (p *Policy) ExecPathPinned(profile, absPath string) bool {
+	cp, ok := p.byName[profile]
+	if !ok {
+		return false
+	}
+	norm := normalizePrefix(absPath)
+	if norm == "" {
+		return false
+	}
+	_, pinned := cp.pinnedPaths[fnv32a(norm)]
+	return pinned
+}
+
 // EgressAllowed reports whether the named profile permits an outbound
 // connection to ip:port. Loopback is always allowed (matching the kernel
 // fast-path); otherwise the address must fall inside an allowed CIDR and, when

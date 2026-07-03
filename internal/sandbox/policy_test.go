@@ -249,6 +249,9 @@ func keyStr(k interface{}) string {
 		return string(v.Data[:]) + string(rune(v.PrefixLen))
 	case CIDRv6Entry:
 		return string(v.Data[:]) + string(rune(v.PrefixLen))
+	case ExecPinKey:
+		return string([]byte{byte(v.ProfileID), byte(v.ProfileID >> 8),
+			byte(v.ProfileID >> 16), byte(v.ProfileID >> 24)}) + string(v.Sha256[:])
 	default:
 		return ""
 	}

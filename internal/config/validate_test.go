@@ -123,6 +123,107 @@ func TestValidateConfig_AISandbox(t *testing.T) {
 			t.Fatalf("expected dangling default_profile error, got: %v", err)
 		}
 	})
+
+	t.Run("writable exec prefix rejected", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/work/bin"},
+				AllowedWritePaths: []string{"/work"}, // /work/bin is under a writable dir
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "overlaps writable path") {
+			t.Fatalf("expected writable-exec overlap error, got: %v", err)
+		}
+	})
+
+	t.Run("exec prefix equal to write prefix rejected", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/opt/app/"},
+				AllowedWritePaths: []string{"/opt/app"},
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "overlaps writable path") {
+			t.Fatalf("expected overlap error for equal prefixes, got: %v", err)
+		}
+	})
+
+	t.Run("disjoint exec and write prefixes allowed", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/usr/bin", "/workspace"}, // note: /workspace not writable
+				AllowedWritePaths: []string{"/workspace/out"},
+			}}}
+		// /workspace is an ancestor of the writable /workspace/out -> overlap.
+		if err := ValidateConfig(cfg); err == nil {
+			t.Fatal("expected overlap: exec /workspace is an ancestor of writable /workspace/out")
+		}
+	})
+
+	t.Run("sibling prefixes not treated as overlap", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/usr/bin"},
+				AllowedWritePaths: []string{"/usr/binaries"}, // shares a string prefix, different dir
+			}}}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("siblings /usr/bin and /usr/binaries must not overlap, got: %v", err)
+		}
+	})
+
+	t.Run("valid exec pin", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:        "a",
+				AllowedExec: []string{"/usr/bin"},
+				AllowedExecPins: []AISandboxExecPin{{
+					Path:   "/usr/bin/python3",
+					Sha256: strings.Repeat("ab", 32),
+				}},
+			}}}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("expected valid exec pin, got: %v", err)
+		}
+	})
+
+	t.Run("exec pin not under allowed_exec", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:        "a",
+				AllowedExec: []string{"/usr/bin"},
+				AllowedExecPins: []AISandboxExecPin{{
+					Path:   "/opt/tool",
+					Sha256: strings.Repeat("ab", 32),
+				}},
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "not covered by any allowed_exec") {
+			t.Fatalf("expected coverage error, got: %v", err)
+		}
+	})
+
+	t.Run("exec pin bad digest", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:        "a",
+				AllowedExec: []string{"/usr/bin"},
+				AllowedExecPins: []AISandboxExecPin{{
+					Path:   "/usr/bin/python3",
+					Sha256: "not-a-digest",
+				}},
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "hex SHA-256") {
+			t.Fatalf("expected sha256 error, got: %v", err)
+		}
+	})
 }
 
 func TestValidateConfig_StoreBackend(t *testing.T) {

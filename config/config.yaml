@@ -398,6 +398,7 @@ ai_sandbox:
   enabled: false                       # Enable AI-agent sandbox evaluation
   mode: audit                          # audit (log only) | enforce (deny -EPERM)
   rules_path: rules/ai-agent/ai-agent.yaml      # Semantic containment ruleset
+  dns_refresh_interval: 60s            # Re-resolve allowed_domains → egress allow-list (0 disables)
   selector:
     kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name
     comms: []                          # Local entry-point comms (e.g. ["claude", "aider"])
@@ -405,16 +406,19 @@ ai_sandbox:
   profiles:                            # Positive allow-policies, keyed by name
     - name: ai-agent
       allowed_exec:                    # Absolute path prefixes the agent may exec
-        - "/usr/bin/"
-        - "/bin/"
-        - "/usr/local/bin/"
+        - "/usr/bin/"                  # (must NOT overlap allowed_write_paths, or
+        - "/bin/"                      #  the profile is rejected at load — a
+        - "/usr/local/bin/"            #  writable+executable dir defeats exec control)
+      allowed_exec_pins:               # Pin trusted binaries to a content hash (#225)
+        # - path:   "/usr/bin/python3"
+        #   sha256: "<64-hex SHA-256 of the trusted build>"
       allowed_read_paths:              # Path prefixes openable for read
         - "/workspace/"
         - "/usr/"
         - "/lib/"
         - "/etc/ssl/"
-      allowed_write_paths:             # Path prefixes openable for write
-        - "/workspace/"
+      allowed_write_paths:             # Path prefixes openable for write (keep
+        - "/workspace/scratch/"        #  these OUT of allowed_exec — never writable+exec)
         - "/tmp/"
       denied_paths:                    # Always denied (defence-in-depth)
         - "/root/.ssh/"

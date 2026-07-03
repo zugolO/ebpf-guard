@@ -2870,6 +2870,7 @@ func newAttackSimCmd(cfgPath *string) *cobra.Command {
 		bearerToken string
 		timeoutStr  string
 		aiAgentMode bool
+		containment bool
 	)
 
 	cmd := &cobra.Command{
@@ -2885,15 +2886,48 @@ Modes:
   --scenario ID   Run a single scenario (use --list to see IDs).
   --verify        Poll a live agent's /api/v1/alerts API after running a scenario and
                   assert the expected rule fired (requires --agent).
+  --ai-agent      Use the AI-agent misbehaviour detection scenarios (ai_sandbox ruleset).
+  --containment   Run the AI-agent containment acceptance harness: assert the
+                  deny-by-default ai_sandbox policy contains each escape vector
+                  (kill, map-write, cgroup-escape, dropped-binary exec).
 
 Examples:
   ebpf-guard attack-sim --list
   ebpf-guard attack-sim --run-all
   ebpf-guard attack-sim --scenario dga-dns-query
+  ebpf-guard attack-sim --containment
   ebpf-guard attack-sim --scenario sensitive-file-read --verify \
     --agent http://localhost:8080 --token mytoken --timeout 30s`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			setupLogger("info")
+
+			// Containment acceptance harness (issue #255, sub-task 7): assert the
+			// deny-by-default ai_sandbox policy contains each escape vector (kill,
+			// map-write, cgroup-escape, dropped-binary exec). Evaluated against the
+			// userspace policy oracle, so no kernel or config file is needed.
+			if containment {
+				scenarios := attacker.ContainmentScenarios()
+				if listOnly {
+					fmt.Printf("%-30s  %-20s  %s\n", "ID", "VECTOR", "Name")
+					fmt.Println(strings.Repeat("-", 78))
+					for _, s := range scenarios {
+						fmt.Printf("%-30s  %-20s  %s\n", s.ID, s.Vector, s.Name)
+					}
+					return nil
+				}
+				results, err := attacker.RunContainment(scenarios)
+				if err != nil {
+					return fmt.Errorf("containment: %w", err)
+				}
+				attacker.PrintContainmentResults(results, os.Stdout)
+				for _, r := range results {
+					if !r.Passed {
+						return fmt.Errorf("one or more containment vectors NOT contained")
+					}
+				}
+				return nil
+			}
+
 			var runner *attacker.Runner
 			if aiAgentMode {
 				runner = attacker.NewRunner(attacker.AIAgentScenarios(), slog.Default())
@@ -2986,6 +3020,7 @@ Examples:
 
 	cmd.Flags().BoolVar(&listOnly, "list", false, "list all available scenarios and exit")
 	cmd.Flags().BoolVar(&aiAgentMode, "ai-agent", false, "use the AI-agent misbehavior scenarios against ai_sandbox.rules_path")
+	cmd.Flags().BoolVar(&containment, "containment", false, "run the AI-agent containment acceptance harness (kill, map-write, cgroup-escape, dropped-binary exec)")
 	cmd.Flags().BoolVar(&runAll, "run-all", false, "run all scenarios through local rule engine")
 	cmd.Flags().StringVar(&scenarioID, "scenario", "", "run a single scenario by ID")
 	cmd.Flags().BoolVar(&verifyMode, "verify", false, "poll live agent API to confirm alert fired")

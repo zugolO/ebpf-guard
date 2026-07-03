@@ -1184,6 +1184,12 @@ type AISandboxConfig struct {
 	// Profiles is the set of named containment profiles. The selector picks
 	// exactly one profile per sandboxed target by name.
 	Profiles []AISandboxProfile `mapstructure:"profiles"`
+
+	// DNSRefreshInterval is how often profiles' allowed_domains are re-resolved
+	// and their A/AAAA records reprogrammed into the egress allow-list (DNS-pinned
+	// egress). 0 disables DNS pinning and leaves egress to the static
+	// allowed_egress_cidrs only. Default: 60s when any profile lists domains.
+	DNSRefreshInterval time.Duration `mapstructure:"dns_refresh_interval"`
 }
 
 // AISandboxSelector chooses which processes are placed under a sandbox profile.
@@ -1213,7 +1219,22 @@ type AISandboxProfile struct {
 
 	// AllowedExec lists absolute path prefixes the agent may exec. In enforce
 	// mode a downloaded/unknown binary outside these prefixes is denied at exec.
+	//
+	// Prefix matching alone cannot tell a legitimate binary from a malicious one
+	// dropped at the same path (a "dropped-binary exec"). Two mechanisms harden
+	// this: ValidateConfig rejects a profile whose allowed_exec prefix is also
+	// writable (a binary could then be swapped in place), and AllowedExecPins
+	// pins named binaries to a content hash.
 	AllowedExec []string `mapstructure:"allowed_exec"`
+
+	// AllowedExecPins pins specific exec paths to a content hash (issue #255,
+	// stitched with the #225 cosign exec allow-list). A pinned path may exec only
+	// when the binary's SHA-256 matches; a rebuilt or swapped binary at that path
+	// is denied even though the path is covered by AllowedExec. The #225 verifier
+	// populates these from cosign/Sigstore attestations; they may also be set
+	// statically to pin trusted interpreters/tools. Pinned paths must be absolute
+	// files (not prefixes) and must fall under an AllowedExec prefix.
+	AllowedExecPins []AISandboxExecPin `mapstructure:"allowed_exec_pins"`
 
 	// AllowedReadPaths lists path prefixes the agent may open for reading.
 	AllowedReadPaths []string `mapstructure:"allowed_read_paths"`
@@ -1234,8 +1255,25 @@ type AISandboxProfile struct {
 	AllowedEgressPorts []uint16 `mapstructure:"allowed_egress_ports"`
 
 	// AllowedDomains lists DNS domain suffixes the agent may resolve and reach
-	// (e.g. "github.com", "pypi.org"). A leading dot is optional.
+	// (e.g. "github.com", "pypi.org"). A leading dot is optional. When DNS-pinned
+	// egress is active the resolver programs each domain's current A/AAAA records
+	// as /32 (or /128) entries into the profile's egress allow-list and refreshes
+	// them on the record TTL.
 	AllowedDomains []string `mapstructure:"allowed_domains"`
+}
+
+// AISandboxExecPin pins a single exec path to a content hash for a sandbox
+// profile (issue #255 / #225). Identity, not location, decides: the binary at
+// Path may exec only when its SHA-256 equals Sha256, closing the dropped-binary
+// gap that plain path-prefix allow-lists leave open.
+type AISandboxExecPin struct {
+	// Path is the absolute path of the pinned binary (an exact file, not a
+	// prefix). It must fall under one of the profile's allowed_exec prefixes.
+	Path string `mapstructure:"path"`
+
+	// Sha256 is the hex-encoded (64-char) SHA-256 of the binary's contents that
+	// is permitted to exec at Path. A mismatch is denied in enforce mode.
+	Sha256 string `mapstructure:"sha256"`
 }
 
 // EnforcementConfig holds enforcement settings.
@@ -2145,6 +2183,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ai_sandbox.selector.comms", []string{})
 	v.SetDefault("ai_sandbox.selector.default_profile", "")
 	v.SetDefault("ai_sandbox.profiles", []AISandboxProfile{})
+	v.SetDefault("ai_sandbox.dns_refresh_interval", 60*time.Second)
 }
 
 // Get returns the current configuration (thread-safe).

@@ -18,6 +18,26 @@ func writeConfigAtomic(t *testing.T, path string, data []byte) {
 	require.NoError(t, os.Rename(tmp, path))
 }
 
+// TestShippedConfigLoadsAndValidates loads the repository's example
+// config/config.yaml and asserts it parses and passes ValidateConfig. This
+// locks the ai_sandbox example (exec pins, dns_refresh_interval, and the
+// writable-exec rule) against regressions in the shipped sample.
+func TestShippedConfigLoadsAndValidates(t *testing.T) {
+	path := filepath.Join("..", "..", "config", "config.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("shipped config not found at %s: %v", path, err)
+	}
+	m, err := NewManagerSkipPermCheck(path)
+	require.NoError(t, err)
+	require.NoError(t, ValidateConfig(m.Get()))
+
+	c := m.Get()
+	if c.AISandbox.DNSRefreshInterval != 60*time.Second {
+		t.Errorf("dns_refresh_interval = %s, want 60s", c.AISandbox.DNSRefreshInterval)
+	}
+	require.NotEmpty(t, c.AISandbox.Profiles)
+}
+
 func TestNewManager_Defaults(t *testing.T) {
 	// Create temp config file
 	tmpDir := t.TempDir()

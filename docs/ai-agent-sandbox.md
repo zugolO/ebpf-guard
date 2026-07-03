@@ -140,6 +140,7 @@ ai_sandbox:
   enabled: true
   mode: audit            # audit (log only) | enforce (deny with -EPERM)
   rules_path: rules/ai-agent/ai-agent.yaml
+  dns_refresh_interval: 60s   # re-resolve allowed_domains → egress allow-list; 0 disables
   selector:
     kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name
     comms: ["claude", "aider"]                    # Local entry-point comm names
@@ -148,8 +149,11 @@ ai_sandbox:
     - name: ai-agent
       allowed_exec:       [/usr/bin/, /bin/, /usr/local/bin/]
       allowed_read_paths: [/workspace/, /usr/, /lib/, /etc/ssl/]
-      allowed_write_paths:[/workspace/, /tmp/]
+      allowed_write_paths:[/workspace/scratch/, /tmp/]   # NOT under an allowed_exec prefix
       denied_paths:       [/root/.ssh/, /home/, /.aws/, /.config/gcloud/]
+      allowed_exec_pins:                                 # hash-pin trusted binaries (issue #225)
+        - path:   /usr/bin/python3
+          sha256: 9b74c9897bac770ffc029102a200c5de... # 64-hex SHA-256 of the trusted binary
       allowed_egress_cidrs:[140.82.112.0/20, 151.101.0.0/16]
       allowed_egress_ports:[443]
       allowed_domains:    [github.com, pypi.org, registry.npmjs.org]
@@ -159,11 +163,12 @@ ai_sandbox:
 
 | Field | Meaning |
 |---|---|
-| `allowed_exec` | Absolute path prefixes the agent may `exec`. In enforce mode a downloaded/unknown binary outside these prefixes is denied at `exec`. |
+| `allowed_exec` | Absolute path prefixes the agent may `exec`. In enforce mode a downloaded/unknown binary outside these prefixes is denied at `exec`. A prefix that is **also writable** is rejected at load time (see [Exec pinning](#exec-pinning-and-the-writable-exec-rule)). |
+| `allowed_exec_pins` | Per-binary hash pins: `{path, sha256}`. A pinned path may exec only when the binary's SHA-256 matches, so a swapped/rebuilt binary at that path is denied even though the path is allowed. Shares the allow-hash map with the #225 cosign exec allow-list. |
 | `allowed_read_paths` / `allowed_write_paths` | Path prefixes openable for read / write. Everything else is denied in enforce mode. |
 | `denied_paths` | Always denied, even if covered by an allow entry — defence-in-depth for secret directories. |
 | `allowed_egress_cidrs` / `allowed_egress_ports` | Destination CIDRs / ports the agent may connect to. Empty ports = any port. |
-| `allowed_domains` | DNS domain suffixes the agent may resolve and reach. |
+| `allowed_domains` | DNS names the agent may reach. Resolved to A/AAAA records and programmed as egress allow entries — see [DNS-pinned egress](#dns-pinned-egress). |
 
 ### Target selection
 
@@ -198,6 +203,89 @@ risk of a deny-by-default sandbox: **over-blocking that bricks the agent**.
 Per-profile scoping and a break-glass path (disable the profile / relabel the
 Pod) keep an incorrect policy recoverable.
 
+## Exec pinning and the writable-exec rule
+
+`allowed_exec` is a **path-prefix** allow-list. Prefixes alone cannot tell a
+legitimate binary from a malicious one dropped at the same path, so agent exec
+containment layers two extra defences.
+
+### Reject writable + executable locations
+
+If a location is both writable and executable, the agent can write a binary
+there and run it — plain path allow-listing is defeated. `ValidateConfig`
+therefore **rejects a profile whose `allowed_exec` prefix overlaps an
+`allowed_write_paths` prefix** (either is a path-ancestor of the other, or they
+are equal). Keep exec locations read-only and give the agent a separate,
+non-executable scratch dir to write to:
+
+```yaml
+allowed_exec:        [/usr/bin/, /bin/]          # read-only system binaries
+allowed_write_paths: [/workspace/scratch/, /tmp/] # writable, never under an exec prefix
+```
+
+A profile like `allowed_exec: [/work]` + `allowed_write_paths: [/work]` fails to
+load with a clear error.
+
+### Hash-pinned binaries (`allowed_exec_pins`, stitched with #225)
+
+For binaries whose identity matters — an interpreter, a package manager, a
+release artifact — pin them to a content hash:
+
+```yaml
+allowed_exec_pins:
+  - path:   /usr/bin/python3
+    sha256: <64-hex SHA-256 of the trusted build>
+```
+
+A pinned path may exec **only** when the running binary's SHA-256 matches the
+pin; a swapped or rebuilt binary at that path is denied even though the path is
+covered by `allowed_exec`. This is the same allowed-hash map that the #225
+cosign/Sigstore exec allow-list populates from CI/CD attestations — the config
+form here lets you pin statically, and #225's verifier writes the same
+`sandbox_exec_pins` rows dynamically from verified signatures. The in-kernel
+digest lookup at `bprm_check` (via the inode+ctime cache) is delivered by #225;
+the userspace audit path and the containment harness evaluate the pins today.
+
+### Interpreter caveat
+
+**Exec control binds the *binary*, not what it interprets.** Pinning
+`/usr/bin/python3` (or allowing `/bin/bash`, `/usr/bin/node`, …) still lets the
+agent run `python3 evil.py`, `bash -c '…'`, `node -e '…'` — the interpreter is
+the allowed binary and the script is just data it reads. Do **not** rely on
+`allowed_exec` / `allowed_exec_pins` alone to stop malicious *code*; constrain
+interpreters through the other dimensions:
+
+- **file policy** — deny reads/writes outside the workspace so a dropped script
+  has nowhere to live and nothing sensitive to read;
+- **egress policy** — `allowed_egress_cidrs` / `allowed_domains` so an
+  interpreted payload cannot exfiltrate or fetch a second stage;
+- **the semantic ruleset** — `rules/ai-agent/ai-agent.yaml` flags `curl|sh`,
+  reverse shells, and cloud-metadata SSRF regardless of which binary ran them.
+
+## DNS-pinned egress
+
+In-kernel egress enforcement is CIDR/port based, but the addresses behind names
+like `github.com` or `pypi.org` rotate across CDN fronts, so a static
+`allowed_egress_cidrs` cannot express "let the agent reach github.com". The
+**DNS pinner** closes the gap: for every profile that lists `allowed_domains`,
+ebpf-guard periodically resolves each name and programs its current A/AAAA
+records as single-host (`/32`, `/128`) egress allow entries scoped to that
+profile, pruning addresses that drop out of DNS.
+
+- Controlled by `ai_sandbox.dns_refresh_interval` (default `60s`; `0` disables
+  DNS pinning and leaves egress to the static `allowed_egress_cidrs` only).
+- Deny-by-default is preserved: only names the operator listed are resolved, and
+  only their resolved addresses are opened — never a wildcard.
+- **Fail-safe:** a transient resolution failure reuses the last-known addresses
+  for that domain rather than tearing a working allow-list down.
+
+> **Not a boundary against DNS control.** DNS-pinned egress is an allow-list
+> convenience, not a defence against an attacker who controls the resolver or
+> the authoritative zone: if they can make an allowed name resolve to an
+> attacker-controlled address, that address is pinned. Pair it with
+> `allowed_egress_ports` and the semantic egress rules, and prefer static CIDRs
+> for the highest-trust destinations.
+
 ## How kernel enforcement works
 
 When a cgroup is registered under a profile (by `ebpf-guard run`, or by the K8s
@@ -209,10 +297,13 @@ label controller resolving a labelled Pod's cgroup subtree), the LSM hooks in
   `denied_paths` prefix always wins. Deny-by-default: anything unlisted is
   refused.
 - **bprm_check_security** — the exec'd binary path must match an `allowed_exec`
-  prefix, so a downloaded/unknown binary is denied at exec.
+  prefix, so a downloaded/unknown binary is denied at exec. `allowed_exec_pins`
+  additionally binds a path to a content hash via the `sandbox_exec_pins` map
+  (see [Exec pinning](#exec-pinning-and-the-writable-exec-rule)).
 - **socket_connect** — the destination must fall inside an
-  `allowed_egress_cidrs` entry (loopback is always allowed) and, when the
-  profile lists `allowed_egress_ports`, match a listed port.
+  `allowed_egress_cidrs` entry **or a DNS-pinned host entry** derived from
+  `allowed_domains` (loopback is always allowed) and, when the profile lists
+  `allowed_egress_ports`, match a listed port.
 
 Path matching uses the same FNV-1a prefix walk in kernel and userspace, so a
 prefix like `/workspace` allows `/workspace/**` but not a sibling
@@ -259,10 +350,12 @@ failing the whole sandbox.
 > writes to `/sys/fs/bpf` and `/sys/kernel/security`, so a sandboxed task cannot
 > reach pinned objects through the filesystem either.
 
-> **Egress note.** In-kernel egress enforcement is CIDR/port based.
-> `allowed_domains` is applied by the semantic ruleset (detection), not the
-> kernel allow-maps — in `enforce` mode, allow the resolver and the resolved
-> CIDRs, or keep DNS-based allow-listing to audit mode.
+> **Egress note.** In-kernel egress enforcement is CIDR/port based. Named
+> destinations in `allowed_domains` are handled by [DNS-pinned
+> egress](#dns-pinned-egress): the resolver programs their current A/AAAA
+> records into the same kernel allow-maps, so `enforce` mode reaches them
+> without hand-maintaining CIDRs. The semantic ruleset still surfaces egress
+> abuse (metadata SSRF, `git push` over SSH) independently.
 
 ## Semantic ruleset (`rules/ai-agent/ai-agent.yaml`)
 
@@ -302,13 +395,16 @@ the nftables fallback. `mode: enforce` also downgrades to audit-only for any
 ## Status (issue #255 sub-tasks)
 
 1. ✅ cgroup-scoped positive policy maps in LSM (file/socket allow semantics).
-2. ✅ exec control via `bprm_check_security` (shares the allowed-exec map with #225).
+2. ✅ exec control via `bprm_check_security` (shares the allowed-exec map with
+   #225), plus hash-pinned `allowed_exec_pins` and the writable-exec rejection.
 3. ✅ `ebpf-guard run` wrapper for local agents.
 4. ✅ Kubernetes targeting by label.
 5. ✅ `rules/ai-agent/ai-agent.yaml` + `ai_sandbox` config.
 6. ✅ Docs + positioning — this page.
-7. ✅ Verification harness — agent-misbehavior scenarios in `internal/attacker`
-   (`attack-sim --ai-agent`).
+7. ✅ Verification harness — agent-misbehavior detection scenarios
+   (`attack-sim --ai-agent`) **and** the containment acceptance harness
+   (`attack-sim --containment`) covering each escape vector: kill, map-write,
+   cgroup-escape, dropped-binary exec.
 
 ### In-kernel self-protection (session 2)
 
@@ -319,3 +415,22 @@ the nftables fallback. `mode: enforce` also downgrades to audit-only for any
 - ✅ **Tamper protection** — the in-kernel `bpf()` deny stops a sandboxed process
   from detaching the sandbox LSM links or rewriting the `sandbox_*` maps; the
   baseline `denied_paths` block the pinned-object filesystem path in parallel.
+
+### Deeper containment + verification (session 3)
+
+- ✅ **Hash/signature-pinned exec** — `allowed_exec_pins` binds a path to a
+  content hash via the `sandbox_exec_pins` map, shared with the #225 cosign exec
+  allow-list; the writable-exec rejection blocks the drop-and-swap gap at config
+  load; the interpreter caveat is documented above.
+- ✅ **DNS-pinned egress** — `allowed_domains` are resolved and their A/AAAA
+  records programmed into the egress allow-maps, refreshed on
+  `dns_refresh_interval`, fail-safe on lookup errors.
+- ✅ **Containment acceptance harness** — `attack-sim --containment` asserts the
+  reference enforce profile denies every escape vector (and still allows the
+  benign control), evaluated against the userspace policy oracle so it runs in
+  CI without a kernel:
+
+  ```bash
+  ebpf-guard attack-sim --containment          # run the acceptance harness
+  ebpf-guard attack-sim --containment --list   # list the vectors
+  ```

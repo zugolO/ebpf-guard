@@ -14,6 +14,7 @@ package sandbox
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"path"
@@ -58,15 +59,39 @@ type CIDRv6Entry struct {
 	Data      [20]byte // profile_id big-endian + IPv6 network address
 }
 
+// ExecPinEntry is one hash-pinned exec binary, scoped to a profile (issue #255,
+// stitched with #225). The key packs the profile id and the SHA-256 so the same
+// digest may be pinned differently per profile; the value carries the pinned
+// path's FNV hash so the kernel bprm hook (delivered by #225) can confirm the
+// digest was pinned *for the path being executed*, not merely present.
+type ExecPinEntry struct {
+	Key    ExecPinKey // {profile_id, sha256}
+	PathFN uint32     // fnv32a(normalised path) — path identity for the pin
+	Path   string     // normalised absolute path, retained for logging/tests
+}
+
+// ExecPinKey is the sandbox_exec_pins map key: a profile id followed by the
+// 32-byte binary digest. Fixed-layout so it maps 1:1 onto the C struct.
+type ExecPinKey struct {
+	ProfileID uint32
+	Sha256    [32]byte
+}
+
 // compiledProfile is the encoded form of one AISandboxProfile.
 type compiledProfile struct {
-	id     uint32
-	name   string
-	flags  uint8
-	paths  []PathEntry
-	cidrv4 []CIDRv4Entry
-	cidrv6 []CIDRv6Entry
-	ports  []uint16
+	id       uint32
+	name     string
+	flags    uint8
+	paths    []PathEntry
+	cidrv4   []CIDRv4Entry
+	cidrv6   []CIDRv6Entry
+	ports    []uint16
+	execPins []ExecPinEntry
+	// pinnedPaths is the set of exec paths that carry at least one hash pin, by
+	// fnv32a(path). An exec of a pinned path is allowed only when the running
+	// binary's digest matches one of its pins (identity), even though the path is
+	// covered by an allowed_exec prefix.
+	pinnedPaths map[uint32]struct{}
 }
 
 // Policy is the fully compiled ai_sandbox configuration: a stable name→id
@@ -124,6 +149,12 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 		if len(prof.AllowedEgressPorts) > 0 {
 			cp.flags |= flagPortsFilter
 			cp.ports = append(cp.ports, prof.AllowedEgressPorts...)
+		}
+
+		for _, pin := range prof.AllowedExecPins {
+			if err := cp.addExecPin(pin.Path, pin.Sha256); err != nil {
+				return nil, fmt.Errorf("profile %q: %w", prof.Name, err)
+			}
 		}
 
 		p.byName[prof.Name] = cp
@@ -213,6 +244,78 @@ func (cp *compiledProfile) addCIDR(cidr string) error {
 	copy(e.Data[4:20], v6)
 	cp.cidrv6 = append(cp.cidrv6, e)
 	return nil
+}
+
+// addExecPin records a hash-pinned exec entry. The path is normalised the same
+// way allowed_exec prefixes are; a bad path or malformed digest is a compile
+// error so the operator sees it at startup rather than silently losing the pin.
+func (cp *compiledProfile) addExecPin(execPath, sha256hex string) error {
+	norm := normalizePrefix(execPath)
+	if norm == "" {
+		return fmt.Errorf("exec pin path must be absolute, got %q", execPath)
+	}
+	digest, err := decodeSHA256(sha256hex)
+	if err != nil {
+		return fmt.Errorf("exec pin %q: %w", execPath, err)
+	}
+	pathFN := fnv32a(norm)
+	cp.execPins = append(cp.execPins, ExecPinEntry{
+		Key:    ExecPinKey{ProfileID: cp.id, Sha256: digest},
+		PathFN: pathFN,
+		Path:   norm,
+	})
+	if cp.pinnedPaths == nil {
+		cp.pinnedPaths = make(map[uint32]struct{})
+	}
+	cp.pinnedPaths[pathFN] = struct{}{}
+	return nil
+}
+
+// decodeSHA256 parses a 64-char hex SHA-256 into raw bytes.
+func decodeSHA256(s string) ([32]byte, error) {
+	var out [32]byte
+	if len(s) != 64 {
+		return out, fmt.Errorf("sha256 must be 64 hex chars, got %d", len(s))
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return out, fmt.Errorf("sha256 not valid hex: %w", err)
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
+// hostCIDRv4 builds a single-host (/32) egress LPM entry pinning ip to a
+// profile, matching addCIDR's encoding. Returns ok=false when ip is not IPv4.
+func hostCIDRv4(profileID uint32, ip net.IP) (CIDRv4Entry, bool) {
+	v4 := ip.To4()
+	if v4 == nil {
+		return CIDRv4Entry{}, false
+	}
+	var e CIDRv4Entry
+	e.PrefixLen = 32 + 32 // full profile id + full IPv4 host
+	binary.BigEndian.PutUint32(e.Data[0:4], profileID)
+	copy(e.Data[4:8], v4)
+	return e, true
+}
+
+// hostCIDRv6 builds a single-host (/128) egress LPM entry pinning ip to a
+// profile. Returns ok=false when ip is not representable as IPv6.
+func hostCIDRv6(profileID uint32, ip net.IP) (CIDRv6Entry, bool) {
+	// An IPv4 address must be pinned as v4, not as a v4-mapped v6, so the
+	// socket_connect hook (which keys v4 and v6 separately) can find it.
+	if ip.To4() != nil {
+		return CIDRv6Entry{}, false
+	}
+	v6 := ip.To16()
+	if v6 == nil {
+		return CIDRv6Entry{}, false
+	}
+	var e CIDRv6Entry
+	e.PrefixLen = 32 + 128
+	binary.BigEndian.PutUint32(e.Data[0:4], profileID)
+	copy(e.Data[4:20], v6)
+	return e, true
 }
 
 // portKey packs a profile id and destination port the way the socket_connect

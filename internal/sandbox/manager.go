@@ -3,7 +3,9 @@ package sandbox
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -31,6 +33,7 @@ type Maps struct {
 	NetV6      bpfMap // sandbox_net_v6:         LPM CIDRv6Entry -> u8
 	Ports      bpfMap // sandbox_ports:          u64 -> u8
 	Protected  bpfMap // sandbox_protected_pids: u32 tgid -> u8 (self-protection)
+	ExecPins   bpfMap // sandbox_exec_pins:      {u32 profile, u8[32] sha256} -> u32 path fnv (#225)
 }
 
 // Manager installs the compiled ai_sandbox policy into the kernel and tracks
@@ -49,6 +52,11 @@ type Manager struct {
 	registered map[uint64]uint32   // cgroup id -> profile id
 	protected  map[uint32]struct{} // tgids protected from sandboxed signals (item 1)
 	kernelMode bool                // true when BPF LSM enforcement is wired
+
+	// dynEgress tracks the DNS-pinned egress rows currently installed per
+	// profile id, keyed by IP string, so a refresh can diff and prune stale
+	// entries without touching the static allowed_egress_cidrs rows (item 6).
+	dynEgress map[uint32]map[string]net.IP
 
 	// enforcementUnsafe latches true once a target is found that could tamper
 	// with the enforcer (item 7). While set, KernelEnforced reports false: we
@@ -73,6 +81,7 @@ func New(cfg config.AISandboxConfig, logger *slog.Logger) (*Manager, error) {
 		cfg:        cfg,
 		registered: make(map[uint64]uint32),
 		protected:  make(map[uint32]struct{}),
+		dynEgress:  make(map[uint32]map[string]net.IP),
 	}, nil
 }
 
@@ -179,6 +188,7 @@ func (m *Manager) Load() error {
 		NetV6:      objs.SandboxNetV6,
 		Ports:      objs.SandboxPorts,
 		Protected:  objs.SandboxProtectedPids,
+		ExecPins:   objs.SandboxExecPins,
 	}
 
 	// Attach the positive-policy hooks. bprm_check_security may be absent on
@@ -349,6 +359,118 @@ func (m *Manager) UnprotectPID(pid uint32) error {
 	return nil
 }
 
+// SetDomainEgress installs the DNS-pinned egress set for a profile: the given
+// IPs become /32 (or /128) allow entries scoped to that profile, and any IP that
+// was previously pinned but is absent from ips is removed (item 6). The static
+// allowed_egress_cidrs rows are never touched. Loopback and unspecified
+// addresses are skipped (loopback is always allowed by the hook fast-path).
+//
+// Safe before or after Load; in audit-only mode it records the intended set so
+// Policy-based auditing stays consistent, without kernel writes. Idempotent: an
+// unchanged set produces no map operations.
+func (m *Manager) SetDomainEgress(profileName string, ips []net.IP) error {
+	id, ok := m.policy.ProfileID(profileName)
+	if !ok {
+		return fmt.Errorf("sandbox: unknown profile %q", profileName)
+	}
+
+	// Normalise/dedupe the desired set.
+	desired := make(map[string]net.IP, len(ips))
+	for _, ip := range ips {
+		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+			continue
+		}
+		desired[ip.String()] = ip
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	current := m.dynEgress[id]
+	if current == nil {
+		current = make(map[string]net.IP)
+	}
+
+	// Additions: in desired, not yet installed.
+	var added, removed int
+	for k, ip := range desired {
+		if _, exists := current[k]; exists {
+			continue
+		}
+		if err := m.addDynEgressLocked(id, ip); err != nil {
+			return fmt.Errorf("sandbox: pin egress %s for %q: %w", k, profileName, err)
+		}
+		current[k] = ip
+		added++
+	}
+	// Removals: installed, no longer desired.
+	for k, ip := range current {
+		if _, keep := desired[k]; keep {
+			continue
+		}
+		if err := m.delDynEgressLocked(id, ip); err != nil {
+			m.logger.Warn("sandbox: unpin egress", "ip", k, "profile", profileName, "error", err)
+		}
+		delete(current, k)
+		removed++
+	}
+	m.dynEgress[id] = current
+
+	if added > 0 || removed > 0 {
+		m.logger.Info("ai_sandbox: DNS-pinned egress updated",
+			"profile", profileName, "added", added, "removed", removed, "total", len(current))
+	}
+	return nil
+}
+
+// DomainEgressIPs returns the sorted IP strings currently pinned for a profile.
+// Exposed for status/debugging and tests.
+func (m *Manager) DomainEgressIPs(profileName string) []string {
+	id, ok := m.policy.ProfileID(profileName)
+	if !ok {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur := m.dynEgress[id]
+	out := make([]string, 0, len(cur))
+	for k := range cur {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// addDynEgressLocked programs one host IP into the profile's egress maps. Caller
+// holds m.mu. No-op on kernel maps in audit-only mode.
+func (m *Manager) addDynEgressLocked(profileID uint32, ip net.IP) error {
+	if m.maps == nil {
+		return nil // audit-only: tracked in dynEgress only
+	}
+	if e, ok := hostCIDRv4(profileID, ip); ok {
+		return m.maps.NetV4.Update(e, uint8(1), ebpf.UpdateAny)
+	}
+	if e, ok := hostCIDRv6(profileID, ip); ok {
+		return m.maps.NetV6.Update(e, uint8(1), ebpf.UpdateAny)
+	}
+	return fmt.Errorf("unrecognised IP %v", ip)
+}
+
+// delDynEgressLocked removes one host IP from the profile's egress maps. Caller
+// holds m.mu.
+func (m *Manager) delDynEgressLocked(profileID uint32, ip net.IP) error {
+	if m.maps == nil {
+		return nil
+	}
+	if e, ok := hostCIDRv4(profileID, ip); ok {
+		return m.maps.NetV4.Delete(e)
+	}
+	if e, ok := hostCIDRv6(profileID, ip); ok {
+		return m.maps.NetV6.Delete(e)
+	}
+	return fmt.Errorf("unrecognised IP %v", ip)
+}
+
 // setActiveCountLocked writes the number of registered cgroups into
 // sandbox_state[0], the fast-path gate read by every hook.
 func (m *Manager) setActiveCountLocked() error {
@@ -404,6 +526,16 @@ func writePolicy(maps Maps, p *Policy) error {
 		for _, pt := range cp.ports {
 			if err := maps.Ports.Update(portKey(cp.id, pt), one, ebpf.UpdateAny); err != nil {
 				return fmt.Errorf("egress port %d (profile %s): %w", pt, cp.name, err)
+			}
+		}
+		// Hash-pinned exec entries (issue #255 / #225). The map may be absent on
+		// an older generated object; skip rather than fail so the rest of the
+		// policy still installs.
+		if maps.ExecPins != nil {
+			for i := range cp.execPins {
+				if err := maps.ExecPins.Update(cp.execPins[i].Key, cp.execPins[i].PathFN, ebpf.UpdateAny); err != nil {
+					return fmt.Errorf("exec pin %q (profile %s): %w", cp.execPins[i].Path, cp.name, err)
+				}
 			}
 		}
 	}

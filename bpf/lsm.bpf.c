@@ -203,6 +203,26 @@ struct {
 	__type(value, __u8);
 } sandbox_ports SEC(".maps");
 
+/* Hash-pinned exec allow-list, scoped per profile (issue #255, stitched with
+ * #225's cosign exec allow-list). Key: {profile_id, sha256(binary)}. Value: the
+ * fnv32a hash of the pinned path, so a digest is only honoured for the exact
+ * path it was pinned to. Populated from userspace: statically from
+ * allowed_exec_pins, or dynamically by the #225 verifier from cosign/Sigstore
+ * attestations. The bprm_check hook consults it when the exec path is pinned;
+ * the in-kernel binary-digest lookup itself is delivered by #225 (inode+ctime
+ * cache), so today this map is the shared contract both features write to. */
+struct sbx_exec_pin_key {
+	__u32 profile_id;
+	__u8  sha256[32];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct sbx_exec_pin_key);
+	__type(value, __u32); /* fnv32a(pinned path) */
+} sandbox_exec_pins SEC(".maps");
+
 /* Resolve the current task to a sandbox registration, walking cgroup
  * ancestors so that processes in child cgroups of a registered subtree
  * (e.g. containers inside a pod slice) are matched too.
@@ -697,7 +717,15 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
  * deny-by-default. Non-sandboxed processes cost one array lookup.
  *
  * Shares the allowed-exec map mechanism intended for #225 (cosign exec
- * allowlist): the SBX_ALLOW_EXEC bit in sandbox_path_policy.
+ * allowlist): the SBX_ALLOW_EXEC bit in sandbox_path_policy, plus the
+ * sandbox_exec_pins hash allow-list for identity-pinned binaries.
+ *
+ * Caveats (documented in docs/ai-agent-sandbox.md):
+ *   - Prefix/pin control binds the *binary*, not the script it runs: pinning
+ *     /usr/bin/python3 still lets the agent run `python3 evil.py`. Constrain
+ *     interpreters via file-read policy + egress, not exec alone.
+ *   - Digest verification of the exec'd binary against sandbox_exec_pins is the
+ *     #225 follow-up (inode+ctime cache); here we enforce the path allow-list.
  */
 SEC("lsm/bprm_check_security")
 int BPF_PROG(lsm_bprm_check, struct linux_binprm *bprm)

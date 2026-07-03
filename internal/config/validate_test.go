@@ -40,6 +40,91 @@ func TestValidateConfig_Valid(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_AISandbox(t *testing.T) {
+	validProfile := AISandboxProfile{
+		Name:               "ai-agent",
+		AllowedExec:        []string{"/usr/bin/"},
+		AllowedReadPaths:   []string{"/workspace/"},
+		AllowedEgressCIDRs: []string{"140.82.112.0/20"},
+		AllowedEgressPorts: []uint16{443},
+		AllowedDomains:     []string{"github.com"},
+	}
+
+	t.Run("disabled skips validation", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: false, Mode: "nonsense"}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("disabled sandbox should not be validated, got: %v", err)
+		}
+	})
+
+	t.Run("valid enforce profile", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{
+			Enabled:  true,
+			Mode:     "enforce",
+			Profiles: []AISandboxProfile{validProfile},
+			Selector: AISandboxSelector{DefaultProfile: "ai-agent"},
+		}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("expected valid, got: %v", err)
+		}
+	})
+
+	t.Run("invalid mode", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "block", Profiles: []AISandboxProfile{validProfile}}
+		if err := ValidateConfig(cfg); err == nil {
+			t.Fatal("expected error for invalid mode")
+		}
+	})
+
+	t.Run("no profiles", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit"}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "at least one profile") {
+			t.Fatalf("expected missing-profile error, got: %v", err)
+		}
+	})
+
+	t.Run("empty profile name", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: ""}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "must not be empty") {
+			t.Fatalf("expected empty-name error, got: %v", err)
+		}
+	})
+
+	t.Run("duplicate profile name", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: "a"}, {Name: "a"}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "duplicate profile name") {
+			t.Fatalf("expected duplicate-name error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid egress CIDR", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: "a", AllowedEgressCIDRs: []string{"not-a-cidr"}}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "invalid CIDR") {
+			t.Fatalf("expected invalid-CIDR error, got: %v", err)
+		}
+	})
+
+	t.Run("dangling default_profile", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: "a"}},
+			Selector: AISandboxSelector{DefaultProfile: "missing"}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "does not match any defined profile") {
+			t.Fatalf("expected dangling default_profile error, got: %v", err)
+		}
+	})
+}
+
 func TestValidateConfig_StoreBackend(t *testing.T) {
 	tests := []struct {
 		backend string

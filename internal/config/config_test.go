@@ -70,6 +70,13 @@ func TestNewManager_Defaults(t *testing.T) {
 	assert.True(t, cfg.Kubernetes.Enabled)
 	assert.Equal(t, "", cfg.Kubernetes.KubeconfigPath)
 	assert.Equal(t, 300, cfg.Kubernetes.ResyncPeriod)
+
+	// Check AI sandbox defaults (issue #255) — disabled, audit-first.
+	assert.False(t, cfg.AISandbox.Enabled)
+	assert.Equal(t, "audit", cfg.AISandbox.Mode)
+	assert.Equal(t, "rules/ai-agent.yaml", cfg.AISandbox.RulesPath)
+	assert.Equal(t, "ebpf-guard.io/sandbox-profile", cfg.AISandbox.Selector.KubeLabel)
+	assert.Empty(t, cfg.AISandbox.Profiles)
 }
 
 func TestNewManager_CustomValues(t *testing.T) {

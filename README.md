@@ -87,6 +87,28 @@ helm install ebpf-guard oci://ghcr.io/zugolO/charts/ebpf-guard \
 | You need to prove an alert was not tampered with | SHA-256 fingerprint on every alert payload |
 | You want to understand what an alert means | `ebpf-guard explain <fingerprint>` — MITRE ATT&CK mapped explanations |
 | You can't see inside HTTPS traffic | TLS uprobe inspection (opt-in) — plaintext captured before encryption |
+| You run autonomous AI/coding agents and need to bound their blast radius | **AI-agent sandbox** — kernel-enforced, deny-by-default policy over an agent's exec/file/network (`ai_sandbox`) |
+
+---
+
+## ebpf-guard for AI agents
+
+Running an autonomous AI/coding agent (Claude Code, Aider, an in-cluster agent
+Pod)? A prompt-injected or over-eager agent can read `~/.ssh`, `curl … | sh` an
+unreviewed payload, hit the cloud metadata service, or `git push` to a strange
+remote — all within its normal permissions. Wrapper-level guardrails are
+bypassable; ebpf-guard enforces the policy **in the kernel, below the agent**.
+
+It's the *same engine, inverted*: the default profile detects known-bad; the
+`ai_sandbox` profile is **allow-known-good, deny-by-default**, scoped to the
+agent's cgroup/process-tree. Start in audit mode, confirm the allow-lists cover
+your agent's real work, then flip to enforce. Ships today with the
+`rules/ai-agent.yaml` semantic ruleset (credential reads, remote-code pipelines,
+persistence, egress abuse) and the `ai_sandbox` config section.
+
+→ **[docs/ai-agent-sandbox.md](docs/ai-agent-sandbox.md)** — threat model,
+profile authoring, audit vs. enforce, kernel requirements, and how it differs
+from microVM isolation.
 
 ---
 

@@ -73,7 +73,7 @@ func NewDNSPinner(cfg config.AISandboxConfig, prog egressProgrammer, resolver Re
 	if cfg.DNSRefreshInterval <= 0 {
 		return nil, false
 	}
-	var targets []profileDomains
+	targets := make([]profileDomains, 0, len(cfg.Profiles))
 	for _, p := range cfg.Profiles {
 		domains := normalizeDomains(p.AllowedDomains)
 		if len(domains) == 0 {
@@ -98,7 +98,7 @@ func NewDNSPinner(cfg config.AISandboxConfig, prog egressProgrammer, resolver Re
 // configured domain list. Empty entries are dropped.
 func normalizeDomains(in []string) []string {
 	seen := make(map[string]struct{}, len(in))
-	var out []string
+	out := make([]string, 0, len(in))
 	for _, d := range in {
 		d = strings.ToLower(strings.TrimSpace(d))
 		d = strings.TrimPrefix(d, ".")

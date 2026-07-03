@@ -217,11 +217,12 @@ func ValidateConfig(cfg *Config) error {
 			pinSeen := make(map[string]bool, len(p.AllowedExecPins))
 			for j, pin := range p.AllowedExecPins {
 				where := fmt.Sprintf("ai_sandbox.profiles[%d].allowed_exec_pins[%d]", i, j)
-				if !strings.HasPrefix(pin.Path, "/") {
+				switch {
+				case !strings.HasPrefix(pin.Path, "/"):
 					add(fmt.Errorf("%s.path: must be an absolute path, got %q", where, pin.Path))
-				} else if pinSeen[pin.Path] {
+				case pinSeen[pin.Path]:
 					add(fmt.Errorf("%s.path: duplicate pinned path %q", where, pin.Path))
-				} else if !execCoveredByPrefix(pin.Path, p.AllowedExec) {
+				case !execCoveredByPrefix(pin.Path, p.AllowedExec):
 					add(fmt.Errorf("%s.path: %q is not covered by any allowed_exec prefix", where, pin.Path))
 				}
 				pinSeen[pin.Path] = true

@@ -244,7 +244,7 @@ func (m *Manager) Load() error {
 	}
 
 	// Protect the agent process from a sandboxed task signalling it (item 1).
-	if err := m.protectLocked(uint32(os.Getpid())); err != nil {
+	if err := m.protectLocked(uint32(os.Getpid())); err != nil { // #nosec G115 -- os.Getpid() is bounded well under uint32 (Linux pid_max caps at 2^22)
 		m.logger.Warn("ai_sandbox: could not self-protect agent PID", "error", err)
 	}
 
@@ -319,7 +319,7 @@ func (m *Manager) ProtectPID(pid uint32) error {
 // exposed so a supervisor can re-assert protection (e.g. after a fork of a
 // worker that must also survive a contained agent).
 func (m *Manager) ProtectSelf() error {
-	return m.ProtectPID(uint32(os.Getpid()))
+	return m.ProtectPID(uint32(os.Getpid())) // #nosec G115 -- os.Getpid() is bounded well under uint32 (Linux pid_max caps at 2^22)
 }
 
 // protectLocked records pid as protected and, when the kernel maps are live,

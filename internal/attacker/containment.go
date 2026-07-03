@@ -224,18 +224,18 @@ func PrintContainmentResults(results []ContainmentResult, w io.Writer) {
 			failed++
 		}
 	}
-	fmt.Fprintf(w, "\n=== AI-Agent Containment Acceptance ===\n")
-	fmt.Fprintf(w, "Vectors: %d  Contained: %d  Failed: %d\n\n", len(results), passed, failed)
+	fmt.Fprintf(w, "\n=== AI-Agent Containment Acceptance ===\n")                              //nolint:errcheck
+	fmt.Fprintf(w, "Vectors: %d  Contained: %d  Failed: %d\n\n", len(results), passed, failed) //nolint:errcheck
 	for _, r := range results {
 		status := "PASS"
 		if !r.Passed {
 			status = "FAIL"
 		}
-		fmt.Fprintf(w, "[%s] %-28s  vector=%-20s  mitre=%s\n", status, r.Scenario.ID, r.Scenario.Vector, r.Scenario.MITRETech)
-		fmt.Fprintf(w, "       contained: %v — %s\n", r.Contained, r.ContainDetail)
+		fmt.Fprintf(w, "[%s] %-28s  vector=%-20s  mitre=%s\n", status, r.Scenario.ID, r.Scenario.Vector, r.Scenario.MITRETech) //nolint:errcheck
+		fmt.Fprintf(w, "       contained: %v — %s\n", r.Contained, r.ContainDetail)                                            //nolint:errcheck
 		if r.BenignChecked {
-			fmt.Fprintf(w, "       benign allowed: %v — %s\n", r.BenignOK, r.BenignDetail)
+			fmt.Fprintf(w, "       benign allowed: %v — %s\n", r.BenignOK, r.BenignDetail) //nolint:errcheck
 		}
 	}
-	fmt.Fprintln(w)
+	fmt.Fprintln(w) //nolint:errcheck
 }

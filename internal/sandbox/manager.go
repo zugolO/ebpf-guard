@@ -22,14 +22,15 @@ type bpfMap interface {
 	Delete(key interface{}) error
 }
 
-// Maps groups the six BPF maps that back the AI-agent sandbox.
+// Maps groups the BPF maps that back the AI-agent sandbox.
 type Maps struct {
-	State      bpfMap // sandbox_state:       u32 -> u64 (active cgroup count)
-	Cgroups    bpfMap // sandbox_cgroups:     u64 cgroup_id -> packed value
-	PathPolicy bpfMap // sandbox_path_policy: u64 -> u8 access bits
-	NetV4      bpfMap // sandbox_net_v4:      LPM CIDRv4Entry -> u8
-	NetV6      bpfMap // sandbox_net_v6:      LPM CIDRv6Entry -> u8
-	Ports      bpfMap // sandbox_ports:       u64 -> u8
+	State      bpfMap // sandbox_state:          u32 -> u64 (active cgroup count)
+	Cgroups    bpfMap // sandbox_cgroups:        u64 cgroup_id -> packed value
+	PathPolicy bpfMap // sandbox_path_policy:    u64 -> u8 access bits
+	NetV4      bpfMap // sandbox_net_v4:         LPM CIDRv4Entry -> u8
+	NetV6      bpfMap // sandbox_net_v6:         LPM CIDRv6Entry -> u8
+	Ports      bpfMap // sandbox_ports:          u64 -> u8
+	Protected  bpfMap // sandbox_protected_pids: u32 tgid -> u8 (self-protection)
 }
 
 // Manager installs the compiled ai_sandbox policy into the kernel and tracks
@@ -45,8 +46,9 @@ type Manager struct {
 	maps       *Maps
 	objs       *bpf.KmodObjects
 	links      []link.Link
-	registered map[uint64]uint32 // cgroup id -> profile id
-	kernelMode bool              // true when BPF LSM enforcement is wired
+	registered map[uint64]uint32   // cgroup id -> profile id
+	protected  map[uint32]struct{} // tgids protected from sandboxed signals (item 1)
+	kernelMode bool                // true when BPF LSM enforcement is wired
 
 	// enforcementUnsafe latches true once a target is found that could tamper
 	// with the enforcer (item 7). While set, KernelEnforced reports false: we
@@ -70,6 +72,7 @@ func New(cfg config.AISandboxConfig, logger *slog.Logger) (*Manager, error) {
 		policy:     pol,
 		cfg:        cfg,
 		registered: make(map[uint64]uint32),
+		protected:  make(map[uint32]struct{}),
 	}, nil
 }
 
@@ -175,6 +178,7 @@ func (m *Manager) Load() error {
 		NetV4:      objs.SandboxNetV4,
 		NetV6:      objs.SandboxNetV6,
 		Ports:      objs.SandboxPorts,
+		Protected:  objs.SandboxProtectedPids,
 	}
 
 	// Attach the positive-policy hooks. bprm_check_security may be absent on
@@ -199,12 +203,39 @@ func (m *Manager) Load() error {
 		m.links = append(m.links, bc)
 	}
 
+	// Self-protection + escape-primitive hooks (issue #255, session 2). These
+	// only act on tasks inside a sandboxed cgroup, so attaching them is safe on
+	// any host. Each is best-effort: a kernel missing one hook must not defeat
+	// the others, so failures downgrade that dimension with a warning.
+	for _, h := range []struct {
+		name string
+		prog *ebpf.Program
+	}{
+		{"task_kill", objs.LsmTaskKill},
+		{"bpf", objs.LsmSandboxBpf},
+		{"ptrace", objs.LsmSandboxPtrace},
+		{"mount", objs.LsmSandboxMount},
+	} {
+		l, aerr := link.AttachLSM(link.LSMOptions{Program: h.prog})
+		if aerr != nil {
+			m.logger.Warn("ai_sandbox: escape-primitive hook unavailable; that dimension is not contained",
+				"hook", h.name, "error", aerr)
+			continue
+		}
+		m.links = append(m.links, l)
+	}
+
 	if err := writePolicy(*m.maps, m.policy); err != nil {
 		m.closeLocked()
 		return fmt.Errorf("sandbox: install policy: %w", err)
 	}
 	if err := m.setActiveCountLocked(); err != nil {
 		m.logger.Warn("sandbox: init active count", "error", err)
+	}
+
+	// Protect the agent process from a sandboxed task signalling it (item 1).
+	if err := m.protectLocked(uint32(os.Getpid())); err != nil {
+		m.logger.Warn("ai_sandbox: could not self-protect agent PID", "error", err)
 	}
 
 	m.kernelMode = true
@@ -260,6 +291,61 @@ func (m *Manager) UnregisterCgroup(cgroupID uint64) error {
 		m.logger.Warn("sandbox: update active count", "error", err)
 	}
 	m.logger.Info("sandbox: cgroup unregistered", "cgroup_id", cgroupID)
+	return nil
+}
+
+// ProtectPID marks a tgid as protected from signals sent by sandboxed tasks
+// (issue #255, session 2, item 1). The lsm_task_kill hook denies a signal to a
+// protected PID when — and only when — the sender is inside a sandboxed cgroup,
+// so protecting a PID never affects ordinary host signalling. Safe before or
+// after Load; in audit-only mode it records intent without kernel state.
+func (m *Manager) ProtectPID(pid uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.protectLocked(pid)
+}
+
+// ProtectSelf protects the agent's own process. Called automatically by Load;
+// exposed so a supervisor can re-assert protection (e.g. after a fork of a
+// worker that must also survive a contained agent).
+func (m *Manager) ProtectSelf() error {
+	return m.ProtectPID(uint32(os.Getpid()))
+}
+
+// protectLocked records pid as protected and, when the kernel maps are live,
+// installs it into sandbox_protected_pids. Caller must hold m.mu.
+func (m *Manager) protectLocked(pid uint32) error {
+	if pid == 0 {
+		return fmt.Errorf("sandbox: refusing to protect pid 0")
+	}
+	m.protected[pid] = struct{}{}
+	if m.maps == nil || m.maps.Protected == nil {
+		return nil // audit-only
+	}
+	if err := m.maps.Protected.Update(pid, uint8(1), ebpf.UpdateAny); err != nil {
+		delete(m.protected, pid)
+		return fmt.Errorf("sandbox: protect pid %d: %w", pid, err)
+	}
+	m.logger.Info("ai_sandbox: PID protected from sandboxed signals", "pid", pid)
+	return nil
+}
+
+// UnprotectPID removes a tgid from the self-protection set (e.g. a worker that
+// has exited). No-op for a PID that was never protected.
+func (m *Manager) UnprotectPID(pid uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.protected[pid]; !ok {
+		return nil
+	}
+	delete(m.protected, pid)
+	if m.maps == nil || m.maps.Protected == nil {
+		return nil
+	}
+	if err := m.maps.Protected.Delete(pid); err != nil {
+		m.logger.Warn("sandbox: unprotect pid", "pid", pid, "error", err)
+	}
 	return nil
 }
 

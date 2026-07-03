@@ -103,6 +103,79 @@ func TestManager_GuardTargetAuditNeverDowngrades(t *testing.T) {
 	}
 }
 
+func TestManager_ProtectPIDWritesMap(t *testing.T) {
+	m, err := New(aiCfg("enforce", config.AISandboxProfile{Name: "agent"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected := newFakeMap()
+	m.maps = &Maps{
+		State:      newFakeMap(),
+		Cgroups:    newFakeMap(),
+		PathPolicy: newFakeMap(),
+		NetV4:      newFakeMap(),
+		NetV6:      newFakeMap(),
+		Ports:      newFakeMap(),
+		Protected:  protected,
+	}
+
+	if err := m.ProtectPID(4242); err != nil {
+		t.Fatalf("protect: %v", err)
+	}
+	if len(protected.data) != 1 {
+		t.Errorf("protected map rows = %d, want 1", len(protected.data))
+	}
+	if _, ok := m.protected[4242]; !ok {
+		t.Error("pid 4242 should be tracked as protected")
+	}
+
+	// Idempotent: protecting again does not add a second row.
+	if err := m.ProtectPID(4242); err != nil {
+		t.Fatalf("re-protect: %v", err)
+	}
+	if len(protected.data) != 1 {
+		t.Errorf("protected map rows after re-protect = %d, want 1", len(protected.data))
+	}
+
+	if err := m.UnprotectPID(4242); err != nil {
+		t.Fatalf("unprotect: %v", err)
+	}
+	if len(protected.data) != 0 {
+		t.Errorf("protected map rows after unprotect = %d, want 0", len(protected.data))
+	}
+	if _, ok := m.protected[4242]; ok {
+		t.Error("pid 4242 should be untracked after unprotect")
+	}
+}
+
+func TestManager_ProtectPIDAuditOnly(t *testing.T) {
+	m, err := New(aiCfg("audit", config.AISandboxProfile{Name: "agent"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No maps → records intent without touching the kernel.
+	if err := m.ProtectPID(7); err != nil {
+		t.Fatalf("protect (audit-only): %v", err)
+	}
+	if _, ok := m.protected[7]; !ok {
+		t.Error("audit-only protect should still track intent")
+	}
+}
+
+func TestManager_ProtectPIDRejectsZero(t *testing.T) {
+	m, _ := New(aiCfg("enforce", config.AISandboxProfile{Name: "agent"}), nil)
+	if err := m.ProtectPID(0); err == nil {
+		t.Fatal("protecting pid 0 must error")
+	}
+}
+
+func TestManager_UnprotectUnknownPIDNoop(t *testing.T) {
+	m, _ := New(aiCfg("enforce", config.AISandboxProfile{Name: "agent"}), nil)
+	if err := m.UnprotectPID(999); err != nil {
+		t.Fatalf("unprotecting an unknown pid should be a no-op, got %v", err)
+	}
+}
+
 func TestCgroupValuePacking(t *testing.T) {
 	v := cgroupValue(3, flagPortsFilter, ModeEnforce)
 	if got := uint32(v >> 32); got != 3 {

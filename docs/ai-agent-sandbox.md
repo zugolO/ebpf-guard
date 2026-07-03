@@ -219,6 +219,46 @@ prefix like `/workspace` allows `/workspace/**` but not a sibling
 `/workspaceX`. Every decision is emitted as an `ai_sandbox` audit event
 (`sandbox_audit` in audit mode, `sandbox_deny` in enforce mode).
 
+### In-kernel self-protection and escape-primitive containment
+
+The allow-maps constrain what an agent may *reach*; a second set of hooks
+constrains what a sandboxed task may do to *break out* or to *disarm the guard
+itself*. These act only on tasks inside a sandboxed cgroup, so they never touch
+ordinary host processes — the agent (which is never sandboxed) keeps full use of
+`bpf()`, `ptrace`, and the rest.
+
+- **task_kill** — a signal from a sandboxed task to a **protected PID** (the
+  ebpf-guard agent and its worker tree, registered in `sandbox_protected_pids`)
+  is denied. A contained agent cannot `kill -9` the process that constrains it.
+  The agent auto-protects itself at load; `Manager.ProtectPID` adds workers.
+- **bpf** — the `bpf()` syscall is denied to a sandboxed task. This is the
+  **kernel-side lock on the guard's own state (tamper protection):** a contained
+  process cannot `BPF_PROG_DETACH` the sandbox LSM links or
+  `BPF_MAP_UPDATE`/`BPF_MAP_DELETE` the `sandbox_*` maps to widen its own policy.
+  (The kernel already gates `bpf()` behind `CAP_BPF`; this closes the case of a
+  sandboxed workload that was handed that capability.)
+- **ptrace** (`ptrace_access_check`) — a sandboxed task attaching to or reading
+  another process (`PTRACE_ATTACH`, `PTRACE_SEIZE`, `process_vm_readv`) is
+  denied, blocking code injection into a neighbour that is outside the sandbox.
+- **mount** (`sb_mount`) — `mount(2)` from a sandboxed task is denied, so it
+  cannot remap its filesystem view (bind mounts, procfs remounts, overlay
+  escapes) to reach around the `file_open` allow-list.
+- **kernel-module load** — a sandboxed task that triggers a module load
+  (`request_module`) is denied, cutting off the ring-0 escape.
+
+Each fires the same `ai_sandbox` audit event (`sandbox_audit` / `sandbox_deny`)
+under the `bpf`, `ptrace`, `mount`, `module`, and `task_kill` hook labels, and
+follows the profile's `mode`: audited in `audit`, denied with `-EPERM` in
+`enforce`. Every hook is best-effort at attach time — a kernel missing one (e.g.
+no `lsm/sb_mount`) logs a warning and leaves the others active rather than
+failing the whole sandbox.
+
+> **Not covered in-kernel.** `setns(2)` / `unshare(2)` have no stable BPF LSM
+> hook; namespace/cgroup migration is caught instead by the existing
+> `cgroup_attach_task` escape detector (audit). `denied_paths` already blocks
+> writes to `/sys/fs/bpf` and `/sys/kernel/security`, so a sandboxed task cannot
+> reach pinned objects through the filesystem either.
+
 > **Egress note.** In-kernel egress enforcement is CIDR/port based.
 > `allowed_domains` is applied by the semantic ruleset (detection), not the
 > kernel allow-maps — in `enforce` mode, allow the resolver and the resolved
@@ -249,6 +289,7 @@ observability independently of enforcement.
 | Capability | Requirement |
 |---|---|
 | File / exec / socket **enforcement** (LSM) | Kernel 5.7+ with `CONFIG_BPF_LSM=y` and BTF |
+| Self-protection + escape hooks (`task_kill`, `bpf`, `ptrace`, `sb_mount`) | Kernel 5.7+ with `CONFIG_BPF_LSM=y`; each attaches best-effort |
 | Egress **enforcement** fallback | nftables (covers network only, not exec/file) |
 | Semantic **detection** ruleset | Works on any supported kernel |
 
@@ -268,3 +309,13 @@ the nftables fallback. `mode: enforce` also downgrades to audit-only for any
 6. ✅ Docs + positioning — this page.
 7. ✅ Verification harness — agent-misbehavior scenarios in `internal/attacker`
    (`attack-sim --ai-agent`).
+
+### In-kernel self-protection (session 2)
+
+- ✅ **Self-protection** — `task_kill` denies a sandboxed task from signalling
+  the agent's protected PID tree (`sandbox_protected_pids`).
+- ✅ **Escape-primitive containment** — `bpf`, `ptrace_access_check`, `sb_mount`,
+  and kernel-module-load hooks deny the break-out syscalls for sandboxed cgroups.
+- ✅ **Tamper protection** — the in-kernel `bpf()` deny stops a sandboxed process
+  from detaching the sandbox LSM links or rewriting the `sandbox_*` maps; the
+  baseline `denied_paths` block the pinned-object filesystem path in parallel.

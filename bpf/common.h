@@ -42,11 +42,18 @@
 #define EVENT_TYPE_IO_URING   14  /* io_uring activity (setup/enter) */
 #define EVENT_TYPE_BPF_PROGRAM 15 /* bpf() syscall: BPF_PROG_LOAD / BPF_MAP_CREATE */
 
-/* LSM hook identifiers — match struct lsm_audit_event.hook */
+/* LSM hook identifiers — match struct lsm_audit_event.hook and the
+ * lsmHookNames table in internal/collector/lsm.go */
 #define LSM_HOOK_FILE_OPEN       0
 #define LSM_HOOK_SOCKET_CONNECT  1
 #define LSM_HOOK_TASK_KILL       2
 #define LSM_HOOK_BPRM_CHECK      3
+/* Sprint 34.0 (issue #255, session 2) — in-kernel self-protection and
+ * escape-primitive containment for sandboxed cgroups. */
+#define LSM_HOOK_BPF             4  /* bpf() syscall from a sandboxed task */
+#define LSM_HOOK_PTRACE          5  /* ptrace of another task by a sandboxed task */
+#define LSM_HOOK_MOUNT           6  /* mount(2) by a sandboxed task */
+#define LSM_HOOK_MODULE          7  /* kernel module load by a sandboxed task */
 
 /* LSM audit action codes — match struct lsm_audit_event.action */
 #define LSM_ACTION_AUDIT         0  /* event allowed, audit-only */

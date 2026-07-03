@@ -23,10 +23,10 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // fnv32a returns the FNV-1a 32-bit hash of s. This must produce the same
@@ -41,8 +41,9 @@ func fnv32a(s string) uint32 {
 // lsmAuditEventRaw mirrors struct lsm_audit_event from bpf/common.h.
 // The struct is __attribute__((packed)), so fields are at fixed byte offsets with no padding.
 // Layout (107 bytes total):
-//   type(4) + timestamp_ns(8) + pid(4) + target_pid(4) + uid(4) +
-//   action(1) + hook(1) + sig(1) + comm(16) + path(64)
+//
+//	type(4) + timestamp_ns(8) + pid(4) + target_pid(4) + uid(4) +
+//	action(1) + hook(1) + sig(1) + comm(16) + path(64)
 type lsmAuditEventRaw struct {
 	Type      uint32
 	Timestamp uint64
@@ -58,7 +59,10 @@ type lsmAuditEventRaw struct {
 
 const lsmAuditEventSize = 4 + 8 + 4 + 4 + 4 + 1 + 1 + 1 + 16 + 64 // 107 bytes
 
-var lsmHookNames = [4]string{"file_open", "socket_connect", "task_kill", "bprm_check"}
+var lsmHookNames = [8]string{
+	"file_open", "socket_connect", "task_kill", "bprm_check",
+	"bpf", "ptrace", "mount", "module",
+}
 
 // parseLSMAuditEventRaw deserialises a raw ring-buffer record into lsmAuditEventRaw.
 func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
@@ -66,14 +70,14 @@ func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
 		return lsmAuditEventRaw{}, fmt.Errorf("lsm_audit_event too short: %d < %d", len(raw), lsmAuditEventSize)
 	}
 	var e lsmAuditEventRaw
-	e.Type      = binary.LittleEndian.Uint32(raw[0:4])
+	e.Type = binary.LittleEndian.Uint32(raw[0:4])
 	e.Timestamp = binary.LittleEndian.Uint64(raw[4:12])
-	e.PID       = binary.LittleEndian.Uint32(raw[12:16])
+	e.PID = binary.LittleEndian.Uint32(raw[12:16])
 	e.TargetPID = binary.LittleEndian.Uint32(raw[16:20])
-	e.UID       = binary.LittleEndian.Uint32(raw[20:24])
-	e.Action    = raw[24]
-	e.Hook      = raw[25]
-	e.Sig       = raw[26]
+	e.UID = binary.LittleEndian.Uint32(raw[20:24])
+	e.Action = raw[24]
+	e.Hook = raw[25]
+	e.Sig = raw[26]
 	copy(e.Comm[:], raw[27:43])
 	copy(e.Path[:], raw[43:107])
 	return e, nil

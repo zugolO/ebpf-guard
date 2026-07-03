@@ -53,10 +53,24 @@ struct {
 	__type(value, __u8);  /* 1 = whitelisted */
 } lsm_agent_whitelist SEC(".maps");
 
+/* Sandbox self-protection (issue #255, session 2, item 1).
+ * PIDs (tgids) that a sandboxed task must not be able to signal — the
+ * ebpf-guard agent and its worker tree. Populated by internal/sandbox
+ * (Manager.ProtectPID). Distinct from lsm_agent_whitelist, which exempts the
+ * agent as a *sender*; this map protects the agent as a *target*. Consulted by
+ * lsm_task_kill only when the sender is inside a sandboxed cgroup, so an empty
+ * map (or no active sandbox) costs nothing on the ordinary signalling path. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 64);
+	__type(key, __u32);   /* protected tgid */
+	__type(value, __u8);  /* 1 = protected */
+} sandbox_protected_pids SEC(".maps");
+
 /* LSM action stats: hook type -> count */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 8);
+	__uint(max_entries, 16);
 	__type(key, __u32);   /* stat index */
 	__type(value, __u64); /* count */
 } lsm_stats SEC(".maps");
@@ -70,6 +84,11 @@ struct {
 #define LSM_STAT_TASK_KILL_BLOCK  5
 #define LSM_STAT_KMOD_LOAD        6
 #define LSM_STAT_CGROUP_ESC       7
+/* session 2 — escape-primitive containment for sandboxed cgroups */
+#define LSM_STAT_SBX_BPF_BLOCK    8
+#define LSM_STAT_SBX_PTRACE_BLOCK 9
+#define LSM_STAT_SBX_MOUNT_BLOCK  10
+#define LSM_STAT_SBX_MODULE_BLOCK 11
 
 /* Ring buffer for kmod / cgroup-escape events (separate from syscall ring buffer
  * in common.h to avoid contention on the hot syscall path). */
@@ -599,16 +618,54 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 
 /* LSM hook: task_kill — called before sending signal
  *
- * Return 0 to allow, -EPERM to block
- * This hook is audit-only by default (always allows)
+ * Return 0 to allow, -EPERM to block.
+ *
+ * Self-protection (issue #255, session 2, item 1): when the *sender* is inside
+ * a sandboxed cgroup and the *target* is a protected ebpf-guard PID, the signal
+ * is denied in enforce mode (audited in audit mode). This stops a contained
+ * agent from killing the guard that constrains it. All other signalling is
+ * audit-only (always allowed), preserving the prior behaviour.
  */
 SEC("lsm/bpf_task_kill")
 int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *info,
 	     int sig, const struct cred *cred)
 {
-	__u32 pid = bpf_get_current_pid_tgid() >> 32;
+	__u32 pid        = bpf_get_current_pid_tgid() >> 32;
+	__u32 target_tgid = (__u32)BPF_CORE_READ(target, tgid);
 
-	/* Always allow but emit an audit event recording who signalled whom */
+	/* Self-protection: only relevant when a sandbox is active and the sender
+	 * is inside it. Fast-path gate (one array lookup) short-circuits the host. */
+	__u64 sbx = sandbox_lookup_current();
+	if (sbx) {
+		__u8 *prot = bpf_map_lookup_elem(&sandbox_protected_pids, &target_tgid);
+		if (prot && *prot == 1 && target_tgid != pid) {
+			__u8 mode = (__u8)(sbx & 0xFF);
+			__u8 act = (mode == SANDBOX_MODE_ENFORCE) ?
+				LSM_ACTION_SANDBOX_DENY : LSM_ACTION_SANDBOX_AUDIT;
+
+			struct lsm_audit_event *dae = bpf_ringbuf_reserve(&lsm_events,
+						sizeof(struct lsm_audit_event), 0);
+			if (dae) {
+				dae->type         = EVENT_TYPE_LSM_AUDIT;
+				dae->timestamp_ns = bpf_ktime_get_ns();
+				dae->pid          = pid;
+				dae->uid          = (__u32)bpf_get_current_uid_gid();
+				dae->target_pid   = target_tgid;
+				dae->action       = act;
+				dae->hook         = LSM_HOOK_TASK_KILL;
+				dae->sig          = (__u8)sig;
+				bpf_get_current_comm(&dae->comm, sizeof(dae->comm));
+				__builtin_memset(&dae->path, 0, sizeof(dae->path));
+				bpf_ringbuf_submit(dae, 0);
+			}
+			if (mode == SANDBOX_MODE_ENFORCE) {
+				update_stat(LSM_STAT_TASK_KILL_BLOCK);
+				return -EPERM;
+			}
+		}
+	}
+
+	/* Otherwise allow but emit an audit event recording who signalled whom */
 	update_stat(LSM_STAT_TASK_KILL_ALLOW);
 
 	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
@@ -618,7 +675,7 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
 		ae->timestamp_ns = bpf_ktime_get_ns();
 		ae->pid          = pid;
 		ae->uid          = (__u32)bpf_get_current_uid_gid();
-		ae->target_pid   = (__u32)BPF_CORE_READ(target, tgid);
+		ae->target_pid   = target_tgid;
 		ae->action       = LSM_ACTION_AUDIT;
 		ae->hook         = LSM_HOOK_TASK_KILL;
 		ae->sig          = (__u8)sig;
@@ -669,6 +726,91 @@ int BPF_PROG(lsm_bprm_check, struct linux_binprm *bprm)
 }
 
 /* -------------------------------------------------------------------------
+ * Escape-primitive containment (issue #255, session 2, item 3).
+ *
+ * A sandboxed AI agent has no legitimate need for the syscalls that break out
+ * of a boundary: bpf() (tamper with the guard's own maps/links — item 2),
+ * ptrace (inject into another process), mount (remap the filesystem view), and
+ * kernel-module load (ring-0 code). Each hook is a no-op unless the caller is
+ * inside a sandboxed cgroup; then it audits and, in enforce mode, denies. The
+ * agent itself is never sandboxed, so its own bpf()/ptrace use is unaffected.
+ * -------------------------------------------------------------------------
+ */
+
+/* Emit a bare sandbox-escape audit record (no path/addr payload). */
+static __always_inline void sandbox_emit_escape(__u8 hook, __u8 action, __u32 profile_id)
+{
+	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+				sizeof(struct lsm_audit_event), 0);
+	if (!ae)
+		return;
+	ae->type         = EVENT_TYPE_LSM_AUDIT;
+	ae->timestamp_ns = bpf_ktime_get_ns();
+	ae->pid          = bpf_get_current_pid_tgid() >> 32;
+	ae->uid          = (__u32)bpf_get_current_uid_gid();
+	ae->target_pid   = profile_id;
+	ae->action       = action;
+	ae->hook         = hook;
+	ae->sig          = 0;
+	bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+	__builtin_memset(&ae->path, 0, sizeof(ae->path));
+	bpf_ringbuf_submit(ae, 0);
+}
+
+/* Common gate: returns the packed sandbox value when the current task is
+ * sandboxed AND, in enforce mode, records the block stat. Emits the audit
+ * event regardless. Returns 1 to deny (enforce), 0 to allow. */
+static __always_inline int sandbox_escape_decide(__u8 hook, __u32 block_stat)
+{
+	__u64 sbx = sandbox_lookup_current();
+	if (!sbx)
+		return 0;
+	__u32 profile_id = (__u32)(sbx >> 32);
+	__u8  mode       = (__u8)(sbx & 0xFF);
+	__u8  act = (mode == SANDBOX_MODE_ENFORCE) ?
+		LSM_ACTION_SANDBOX_DENY : LSM_ACTION_SANDBOX_AUDIT;
+	sandbox_emit_escape(hook, act, profile_id);
+	if (mode == SANDBOX_MODE_ENFORCE) {
+		update_stat(block_stat);
+		return 1;
+	}
+	return 0;
+}
+
+/* LSM hook: bpf — gates the bpf() syscall. Denying it for a sandboxed task is
+ * also the kernel-side lock on self-protection (item 2): a contained process
+ * cannot BPF_PROG_DETACH our LSM links or BPF_MAP_UPDATE/DELETE the sandbox_*
+ * maps that constrain it. */
+SEC("lsm/bpf")
+int BPF_PROG(lsm_sandbox_bpf, int cmd, union bpf_attr *attr, unsigned int size)
+{
+	if (sandbox_escape_decide(LSM_HOOK_BPF, LSM_STAT_SBX_BPF_BLOCK))
+		return -EPERM;
+	return 0;
+}
+
+/* LSM hook: ptrace_access_check — a sandboxed task attaching to / inspecting
+ * another process (PTRACE_ATTACH, PTRACE_SEIZE, process_vm_readv, ...). */
+SEC("lsm/ptrace_access_check")
+int BPF_PROG(lsm_sandbox_ptrace, struct task_struct *child, unsigned int mode)
+{
+	if (sandbox_escape_decide(LSM_HOOK_PTRACE, LSM_STAT_SBX_PTRACE_BLOCK))
+		return -EPERM;
+	return 0;
+}
+
+/* LSM hook: sb_mount — a sandboxed task calling mount(2) to remap its
+ * filesystem view (bind mounts, procfs remounts, overlay escapes). */
+SEC("lsm/sb_mount")
+int BPF_PROG(lsm_sandbox_mount, const char *dev_name, const struct path *path,
+	     const char *type, unsigned long flags, void *data)
+{
+	if (sandbox_escape_decide(LSM_HOOK_MOUNT, LSM_STAT_SBX_MOUNT_BLOCK))
+		return -EPERM;
+	return 0;
+}
+
+/* -------------------------------------------------------------------------
  * Sprint 33.0: Kernel Module Load Detection
  * -------------------------------------------------------------------------
  *
@@ -680,6 +822,11 @@ SEC("lsm/kernel_module_request")
 int BPF_PROG(lsm_kernel_module_request, char *kmod_name)
 {
 	struct kmod_event *e;
+
+	/* Escape-primitive containment: a sandboxed task triggering a module
+	 * load is denied in enforce mode (issue #255, session 2, item 3). */
+	if (sandbox_escape_decide(LSM_HOOK_MODULE, LSM_STAT_SBX_MODULE_BLOCK))
+		return -EPERM;
 
 	update_stat(LSM_STAT_KMOD_LOAD);
 

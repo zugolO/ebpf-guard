@@ -133,8 +133,8 @@ config:
         # /sys/kernel/security are denied automatically (baseline); list your
         # own secret dirs here for defence-in-depth.
         denied_paths:        [/root/.ssh/, /home/, /.aws/, /.config/gcloud/]
-        allowed_egress_cidrs:[140.82.112.0/20, 151.101.0.0/16]
-        allowed_egress_ports:[443]
+        allowed_egress_cidrs: [140.82.112.0/20, 151.101.0.0/16]
+        allowed_egress_ports: [443]
         allowed_domains:     [github.com, pypi.org, registry.npmjs.org]
 
 # ─────────────────────────────────────────────────────────────────────────────

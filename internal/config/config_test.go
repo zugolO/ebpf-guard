@@ -74,7 +74,7 @@ func TestNewManager_Defaults(t *testing.T) {
 	// Check AI sandbox defaults (issue #255) — disabled, audit-first.
 	assert.False(t, cfg.AISandbox.Enabled)
 	assert.Equal(t, "audit", cfg.AISandbox.Mode)
-	assert.Equal(t, "rules/ai-agent.yaml", cfg.AISandbox.RulesPath)
+	assert.Equal(t, "rules/ai-agent/ai-agent.yaml", cfg.AISandbox.RulesPath)
 	assert.Equal(t, "ebpf-guard.io/sandbox-profile", cfg.AISandbox.Selector.KubeLabel)
 	assert.Empty(t, cfg.AISandbox.Profiles)
 }

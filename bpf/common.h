@@ -46,10 +46,13 @@
 #define LSM_HOOK_FILE_OPEN       0
 #define LSM_HOOK_SOCKET_CONNECT  1
 #define LSM_HOOK_TASK_KILL       2
+#define LSM_HOOK_BPRM_CHECK      3
 
 /* LSM audit action codes — match struct lsm_audit_event.action */
-#define LSM_ACTION_AUDIT  0  /* event allowed, audit-only */
-#define LSM_ACTION_DENY   1  /* event blocked (-EACCES/-EPERM) */
+#define LSM_ACTION_AUDIT         0  /* event allowed, audit-only */
+#define LSM_ACTION_DENY          1  /* event blocked (-EACCES/-EPERM) */
+#define LSM_ACTION_SANDBOX_AUDIT 2  /* ai_sandbox violation, audit mode (allowed) */
+#define LSM_ACTION_SANDBOX_DENY  3  /* ai_sandbox violation, enforce mode (blocked) */
 
 /* File operation codes - must match pkg/types/event.go */
 #define FILE_OP_OPEN  0

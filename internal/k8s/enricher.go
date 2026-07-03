@@ -195,6 +195,10 @@ func (e *Enricher) Stop() error {
 	return e.watcher.Stop()
 }
 
+// Watcher returns the underlying pod Watcher so callers (e.g. the ai_sandbox
+// label controller) can subscribe to pod lifecycle events.
+func (e *Enricher) Watcher() *Watcher { return e.watcher }
+
 // EnrichEvent adds Kubernetes metadata to an event.
 func (e *Enricher) EnrichEvent(event *types.Event) {
 	if event == nil {

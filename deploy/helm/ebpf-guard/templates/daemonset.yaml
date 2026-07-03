@@ -175,6 +175,11 @@ spec:
             - name: rules
               mountPath: /etc/ebpf-guard/rules.yaml
               subPath: rules.yaml
+            {{- if .Values.aiSandbox.enabled }}
+            - name: rules
+              mountPath: /etc/ebpf-guard/ai-agent.yaml
+              subPath: ai-agent.yaml
+            {{- end }}
             {{- if .Values.btfInit.enabled }}
             - name: btf-cache
               mountPath: {{ .Values.btfInit.cachePath }}

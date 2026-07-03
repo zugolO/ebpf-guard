@@ -37,6 +37,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
+	"github.com/zugolO/ebpf-guard/internal/sandbox"
 	"github.com/zugolO/ebpf-guard/internal/simple"
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
@@ -124,6 +125,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		configCmd,
 		newAttackSimCmd(&cfgPath),
 		newPluginsCmd(),
+		newRunCmd(&cfgPath),
 	)
 
 	return root
@@ -191,6 +193,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			rules = nil
 		} else {
 			slog.Info("rules loaded", slog.Int("count", len(rules)))
+		}
+
+		// AI-agent semantic ruleset (issue #255). Kept out of the default rules
+		// directory so it only activates when ai_sandbox is enabled; loaded here
+		// from ai_sandbox.rules_path and merged in, skipping duplicate IDs.
+		if cfg.AISandbox.Enabled && cfg.AISandbox.RulesPath != "" {
+			aiRules, aiErr := correlator.LoadRulesFromFile(cfg.AISandbox.RulesPath)
+			if aiErr != nil {
+				slog.Warn("ai_sandbox: failed to load semantic ruleset",
+					slog.String("path", cfg.AISandbox.RulesPath), slog.Any("error", aiErr))
+			} else {
+				seen := make(map[string]bool, len(rules))
+				for _, r := range rules {
+					seen[r.ID] = true
+				}
+				added := 0
+				for _, r := range aiRules {
+					if !seen[r.ID] {
+						rules = append(rules, r)
+						added++
+					}
+				}
+				slog.Info("ai_sandbox: semantic ruleset loaded",
+					slog.String("path", cfg.AISandbox.RulesPath), slog.Int("rules", added))
+			}
 		}
 	}
 
@@ -1191,6 +1218,34 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}()
 			defer func() { _ = k8sEnricher.Stop() }()
 			slog.Info("k8s enricher active (pod metadata enrichment)")
+		}
+	}
+
+	// ── AI-agent sandbox (issue #255) ───────────────────────────────────────
+	// Deny-by-default allow-known-good policy for a designated agent process
+	// tree, enforced in the kernel via the LSM allow maps. Disabled by default;
+	// audit-first. In Kubernetes it targets pods by the configured label; the
+	// `ebpf-guard run` wrapper covers local agents.
+	if cfg.AISandbox.Enabled {
+		sbxMgr, sbxErr := sandbox.New(cfg.AISandbox, slog.Default())
+		if sbxErr != nil {
+			slog.Error("ai_sandbox: invalid configuration", slog.Any("error", sbxErr))
+			return sbxErr
+		}
+		if err := sbxMgr.Load(); err != nil {
+			slog.Warn("ai_sandbox: kernel enforcement unavailable, continuing in audit-only mode",
+				slog.Any("error", err))
+		}
+		defer func() { _ = sbxMgr.Close() }()
+		slog.Info("ai_sandbox active",
+			slog.String("mode", sbxMgr.Mode()),
+			slog.Bool("kernel_enforced", sbxMgr.KernelEnforced()),
+			slog.Int("profiles", len(cfg.AISandbox.Profiles)))
+
+		if label := cfg.AISandbox.Selector.KubeLabel; label != "" && k8sEnricher != nil {
+			ctrl := k8s.NewSandboxController(label, sbxMgr, nil, slog.Default())
+			ctrl.Register(k8sEnricher.Watcher())
+			slog.Info("ai_sandbox: k8s label targeting enabled", slog.String("label", label))
 		}
 	}
 
@@ -2814,6 +2869,7 @@ func newAttackSimCmd(cfgPath *string) *cobra.Command {
 		agentAddr   string
 		bearerToken string
 		timeoutStr  string
+		aiAgentMode bool
 	)
 
 	cmd := &cobra.Command{
@@ -2838,7 +2894,12 @@ Examples:
     --agent http://localhost:8080 --token mytoken --timeout 30s`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			setupLogger("info")
-			runner := attacker.NewRunner(nil, slog.Default())
+			var runner *attacker.Runner
+			if aiAgentMode {
+				runner = attacker.NewRunner(attacker.AIAgentScenarios(), slog.Default())
+			} else {
+				runner = attacker.NewRunner(nil, slog.Default())
+			}
 
 			if listOnly {
 				fmt.Printf("%-40s  %-12s  %s\n", "ID", "MITRE", "Name")
@@ -2854,6 +2915,11 @@ Examples:
 				return fmt.Errorf("load config: %w", err)
 			}
 			rulesPath := cfgManager.Get().Rules.Path
+			if aiAgentMode {
+				// The ai-agent ruleset lives outside the default rules directory;
+				// point the engine at ai_sandbox.rules_path for these scenarios.
+				rulesPath = cfgManager.Get().AISandbox.RulesPath
+			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
@@ -2919,6 +2985,7 @@ Examples:
 	}
 
 	cmd.Flags().BoolVar(&listOnly, "list", false, "list all available scenarios and exit")
+	cmd.Flags().BoolVar(&aiAgentMode, "ai-agent", false, "use the AI-agent misbehavior scenarios against ai_sandbox.rules_path")
 	cmd.Flags().BoolVar(&runAll, "run-all", false, "run all scenarios through local rule engine")
 	cmd.Flags().StringVar(&scenarioID, "scenario", "", "run a single scenario by ID")
 	cmd.Flags().BoolVar(&verifyMode, "verify", false, "poll live agent API to confirm alert fired")

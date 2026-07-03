@@ -1157,7 +1157,7 @@ type SelfProtectionConfig struct {
 // that constrains what a designated autonomous AI/coding agent process tree may
 // do at runtime (exec / file / network). This section holds the positive policy
 // MODEL and target selection; the semantic detection ruleset lives in
-// rules/ai-agent.yaml (RulesPath).
+// rules/ai-agent/ai-agent.yaml (RulesPath).
 //
 // Enforcement primitives (cgroup-scoped LSM allow maps, the bprm_check_security
 // exec hook, and the `ebpf-guard run` wrapper) are delivered by follow-up
@@ -1175,7 +1175,7 @@ type AISandboxConfig struct {
 
 	// RulesPath is the semantic containment ruleset applied to sandboxed
 	// agents (cred-path reads, curl|sh pipelines, unexpected egress, ...).
-	// Default: "rules/ai-agent.yaml".
+	// Default: "rules/ai-agent/ai-agent.yaml".
 	RulesPath string `mapstructure:"rules_path"`
 
 	// Selector chooses which processes fall under a sandbox profile.
@@ -2140,7 +2140,7 @@ func setDefaults(v *viper.Viper) {
 	// so an over-broad profile can never brick the agent it wraps.
 	v.SetDefault("ai_sandbox.enabled", false)
 	v.SetDefault("ai_sandbox.mode", "audit")
-	v.SetDefault("ai_sandbox.rules_path", "rules/ai-agent.yaml")
+	v.SetDefault("ai_sandbox.rules_path", "rules/ai-agent/ai-agent.yaml")
 	v.SetDefault("ai_sandbox.selector.kube_label", "ebpf-guard.io/sandbox-profile")
 	v.SetDefault("ai_sandbox.selector.comms", []string{})
 	v.SetDefault("ai_sandbox.selector.default_profile", "")

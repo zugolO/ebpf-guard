@@ -37,6 +37,65 @@ type Watcher struct {
 	// lastSyncAt is the UnixNano timestamp of the last successful cache sync or
 	// pod event. Zero means the watcher has never completed its initial sync.
 	lastSyncAt atomic.Int64
+
+	// podHandlers are optional subscribers notified on every pod add/update/
+	// delete. Used by the ai_sandbox label controller to react to labelled pods.
+	handlerMu   sync.RWMutex
+	podHandlers []PodEventHandler
+}
+
+// PodEvent identifies the kind of pod lifecycle change delivered to handlers.
+type PodEvent int
+
+const (
+	PodAdded PodEvent = iota
+	PodUpdated
+	PodDeleted
+)
+
+// PodEventHandler is invoked (synchronously, off the informer goroutine's
+// handler call) for each pod lifecycle event with a snapshot PodInfo.
+type PodEventHandler func(evt PodEvent, info *PodInfo)
+
+// AddPodEventHandler registers h to receive pod lifecycle events. Safe to call
+// before Start; handlers must not block for long.
+func (w *Watcher) AddPodEventHandler(h PodEventHandler) {
+	w.handlerMu.Lock()
+	defer w.handlerMu.Unlock()
+	w.podHandlers = append(w.podHandlers, h)
+}
+
+func (w *Watcher) notifyHandlers(evt PodEvent, info *PodInfo) {
+	w.handlerMu.RLock()
+	handlers := w.podHandlers
+	w.handlerMu.RUnlock()
+	for _, h := range handlers {
+		h(evt, info)
+	}
+}
+
+// podInfoFromPod builds a PodInfo snapshot (labels, annotations, container IDs)
+// from a corev1.Pod, matching what updatePodCache stores.
+func podInfoFromPod(pod *corev1.Pod) *PodInfo {
+	info := &PodInfo{
+		Name:        pod.Name,
+		Namespace:   pod.Namespace,
+		UID:         string(pod.UID),
+		Labels:      copyMap(pod.Labels),
+		Annotations: copyMap(pod.Annotations),
+		NodeName:    pod.Spec.NodeName,
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cid := normalizeContainerID(cs.ContainerID); cid != "" {
+			info.ContainerIDs = append(info.ContainerIDs, cid)
+		}
+	}
+	for _, is := range pod.Status.InitContainerStatuses {
+		if cid := normalizeContainerID(is.ContainerID); cid != "" {
+			info.ContainerIDs = append(info.ContainerIDs, cid)
+		}
+	}
+	return info
 }
 
 // PodInfo contains Kubernetes metadata for a pod.
@@ -266,6 +325,7 @@ func (w *Watcher) onPodAdd(obj interface{}) {
 
 	w.logger.Debug("pod added", "name", pod.Name, "namespace", pod.Namespace)
 	w.updatePodCache(pod)
+	w.notifyHandlers(PodAdded, podInfoFromPod(pod))
 	w.touchSyncAt()
 }
 
@@ -279,6 +339,7 @@ func (w *Watcher) onPodUpdate(oldObj, newObj interface{}) {
 
 	w.logger.Debug("pod updated", "name", newPod.Name, "namespace", newPod.Namespace)
 	w.updatePodCache(newPod)
+	w.notifyHandlers(PodUpdated, podInfoFromPod(newPod))
 	w.touchSyncAt()
 }
 
@@ -301,6 +362,7 @@ func (w *Watcher) onPodDelete(obj interface{}) {
 
 	w.logger.Debug("pod deleted", "name", pod.Name, "namespace", pod.Namespace)
 	w.removePodFromCache(pod)
+	w.notifyHandlers(PodDeleted, podInfoFromPod(pod))
 	w.touchSyncAt()
 }
 

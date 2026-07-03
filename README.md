@@ -101,10 +101,15 @@ bypassable; ebpf-guard enforces the policy **in the kernel, below the agent**.
 
 It's the *same engine, inverted*: the default profile detects known-bad; the
 `ai_sandbox` profile is **allow-known-good, deny-by-default**, scoped to the
-agent's cgroup/process-tree. Start in audit mode, confirm the allow-lists cover
-your agent's real work, then flip to enforce. Ships today with the
-`rules/ai-agent.yaml` semantic ruleset (credential reads, remote-code pipelines,
-persistence, egress abuse) and the `ai_sandbox` config section.
+agent's cgroup/process-tree and enforced in the kernel via BPF LSM hooks
+(`file_open`, `bprm_check_security`, `socket_connect`). Wrap a local agent with
+`ebpf-guard run --profile ai-agent -- <cmd>`, or target Kubernetes Pods by the
+`ebpf-guard.io/sandbox-profile` label. Start in audit mode, confirm the
+allow-lists cover your agent's real work, then flip to enforce; on kernels
+without BPF LSM it degrades to userspace audit-only. Ships with the
+`rules/ai-agent/ai-agent.yaml` semantic ruleset (credential reads, remote-code
+pipelines, persistence, egress abuse) and `attack-sim --ai-agent` verification
+scenarios.
 
 → **[docs/ai-agent-sandbox.md](docs/ai-agent-sandbox.md)** — threat model,
 profile authoring, audit vs. enforce, kernel requirements, and how it differs

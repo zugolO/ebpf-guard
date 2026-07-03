@@ -6,12 +6,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -68,6 +70,13 @@ type Feed struct {
 	alerts []types.Alert
 	events []types.Event
 	stats  DashboardStats
+	// agents tracks per-endpoint health in fleet mode (--fleet), keyed by
+	// endpoint URL. Empty in single-agent mode.
+	agents map[string]AgentStatus
+	// agentsSorted caches the sorted snapshot so the dashboard's frequent ticks
+	// don't re-allocate and re-sort on every frame; rebuilt only when agentsDirty.
+	agentsSorted []AgentStatus
+	agentsDirty  bool
 }
 
 // NewFeed creates an empty Feed.
@@ -139,6 +148,37 @@ func (f *Feed) Snapshot(maxAlerts, maxEvents int) ([]types.Alert, []types.Event,
 	return aSnap, eSnap, stats
 }
 
+// SetAgentStatus records (or updates) the health of one fleet agent. Used by
+// the --fleet client-side fan-out poller; a no-op concept in single-agent mode.
+func (f *Feed) SetAgentStatus(s AgentStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.agents == nil {
+		f.agents = make(map[string]AgentStatus)
+	}
+	f.agents[s.Endpoint] = s
+	f.agentsDirty = true
+}
+
+// AgentStatuses returns a stable, sorted-by-endpoint snapshot of known fleet
+// agent statuses. Empty when the dashboard is not running in fleet mode. The
+// sorted slice is cached and only rebuilt after a SetAgentStatus, so the
+// dashboard's per-frame tick doesn't re-sort when nothing has changed.
+func (f *Feed) AgentStatuses() []AgentStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.agentsDirty || f.agentsSorted == nil {
+		out := make([]AgentStatus, 0, len(f.agents))
+		for _, s := range f.agents {
+			out = append(out, s)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Endpoint < out[j].Endpoint })
+		f.agentsSorted = out
+		f.agentsDirty = false
+	}
+	return f.agentsSorted
+}
+
 // ─── Dashboard model ─────────────────────────────────────────────────────────
 
 // Tab represents a dashboard pane.
@@ -149,10 +189,11 @@ const (
 	TabEvents
 	TabRules
 	TabStatus
+	TabFleet
 	tabCount
 )
 
-var tabNames = [tabCount]string{"Alerts", "Events", "Top Rules", "Status"}
+var tabNames = [tabCount]string{"Alerts", "Events", "Top Rules", "Status", "Fleet"}
 
 // Model is the bubbletea model for the dashboard.
 type Model struct {
@@ -163,6 +204,7 @@ type Model struct {
 	alerts    []types.Alert
 	events    []types.Event
 	stats     DashboardStats
+	agents    []AgentStatus
 	scrollTop int
 	paused    bool
 
@@ -206,6 +248,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.alerts = a
 			m.events = e
 			m.stats = s
+			m.agents = m.feed.AgentStatuses()
 		}
 		return m, tickCmd()
 
@@ -245,6 +288,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollTop = 0
 		case "4":
 			m.activeTab = TabStatus
+			m.scrollTop = 0
+		case "5":
+			m.activeTab = TabFleet
 			m.scrollTop = 0
 		case "p":
 			m.paused = !m.paused
@@ -343,6 +389,8 @@ func (m Model) View() string {
 		content = m.renderRules(contentHeight)
 	case TabStatus:
 		content = m.renderStatus(contentHeight)
+	case TabFleet:
+		content = m.renderFleet(contentHeight)
 	}
 	sb.WriteString(content)
 
@@ -399,9 +447,12 @@ func (m *Model) renderAlerts(maxLines int) string {
 			icon = "☠"
 		}
 		ts := a.Timestamp.Format("15:04:05")
-		pod := ""
+		loc := ""
 		if a.Enrichment.PodName != "" {
-			pod = styleDim.Render("  pod=" + a.Enrichment.PodName)
+			loc += styleDim.Render("  pod=" + a.Enrichment.PodName)
+		}
+		if a.Enrichment.NodeName != "" {
+			loc += styleDim.Render("  node=" + a.Enrichment.NodeName)
 		}
 		line := fmt.Sprintf("  %s %s  %s  %s  pid=%-6d  %s%s",
 			styleDim.Render(ts),
@@ -410,7 +461,7 @@ func (m *Model) renderAlerts(maxLines int) string {
 			styleHeader.Render(fmt.Sprintf("%-22s", a.RuleID)),
 			a.PID,
 			styleValue.Render(a.Comm),
-			pod,
+			loc,
 		)
 		lines = append(lines, line)
 	}
@@ -530,6 +581,63 @@ func (m *Model) renderStatus(maxLines int) string {
 	rows = append(rows, "", styleDim.Render("  Keybindings: [tab] switch panel  [j/k] scroll  [p] pause  [q] quit"))
 
 	return renderScrollable(rows, m.scrollTop, maxLines)
+}
+
+// renderFleet shows per-agent health for --fleet mode: one row per configured
+// endpoint with up/down status, node attribution, last-seen time, and how
+// many distinct alerts have been observed from it so far.
+func (m *Model) renderFleet(maxLines int) string {
+	if len(m.agents) == 0 {
+		return styleDim.Render("  Not running in fleet mode — start with `dashboard --fleet <endpoints>`")
+	}
+
+	up, down := 0, 0
+	for _, a := range m.agents {
+		if a.Healthy {
+			up++
+		} else {
+			down++
+		}
+	}
+
+	summaryStyle := styleGood
+	if down > 0 {
+		summaryStyle = styleCritical
+	}
+	lines := []string{
+		styleHeader.Render("  Fleet Agents"),
+		"",
+		fmt.Sprintf("  %s  %s / %d up",
+			styleKey.Render("Status:"), summaryStyle.Render(fmt.Sprintf("%d", up)), len(m.agents)),
+		"",
+		fmt.Sprintf("  %-8s  %-28s  %-20s  %-8s  %s",
+			"STATUS", "ENDPOINT", "NODE", "ALERTS", "LAST SEEN"),
+		styleDim.Render("  " + strings.Repeat("─", 78)),
+	}
+
+	for _, a := range m.agents {
+		statusIcon := styleGood.Render("● up  ")
+		if !a.Healthy {
+			statusIcon = styleCritical.Render("● down")
+		}
+		lastSeen := "–"
+		if !a.LastSeen.IsZero() {
+			lastSeen = a.LastSeen.Format("15:04:05")
+		}
+		row := fmt.Sprintf("  %s  %-28s  %-20s  %-8d  %s",
+			statusIcon,
+			styleValue.Render(util.Truncate(a.Endpoint, 28)),
+			styleValue.Render(util.Truncate(a.NodeName, 20)),
+			a.AlertCount,
+			styleDim.Render(lastSeen),
+		)
+		lines = append(lines, row)
+		if !a.Healthy && a.LastError != "" {
+			lines = append(lines, styleCritical.Render("      "+util.Truncate(a.LastError, 90)))
+		}
+	}
+
+	return renderScrollable(lines, m.scrollTop, maxLines)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -23,10 +23,10 @@ func TestRecordEvent(t *testing.T) {
 	RecordEvent("network")
 
 	// Verify counts
-	syscallCount := testutil.ToFloat64(EventsTotal.WithLabelValues("syscall", "", ""))
+	syscallCount := testutil.ToFloat64(EventsTotal.WithLabelValues("syscall", "", "", ""))
 	assert.Equal(t, 2.0, syscallCount)
 
-	networkCount := testutil.ToFloat64(EventsTotal.WithLabelValues("network", "", ""))
+	networkCount := testutil.ToFloat64(EventsTotal.WithLabelValues("network", "", "", ""))
 	assert.Equal(t, 1.0, networkCount)
 }
 
@@ -47,14 +47,14 @@ func TestRecordDropped(t *testing.T) {
 func TestRecordAlert(t *testing.T) {
 	AlertsTotal.Reset()
 
-	RecordAlert("rule_001", "warning", "team-a")
-	RecordAlert("rule_001", "warning", "team-a")
-	RecordAlert("rule_002", "critical", "team-b")
+	RecordAlert("rule_001", "warning", "team-a", "pod-a", "node-1")
+	RecordAlert("rule_001", "warning", "team-a", "pod-a", "node-1")
+	RecordAlert("rule_002", "critical", "team-b", "pod-b", "node-2")
 
-	rule1Count := testutil.ToFloat64(AlertsTotal.WithLabelValues("rule_001", "warning", "team-a"))
+	rule1Count := testutil.ToFloat64(AlertsTotal.WithLabelValues("rule_001", "warning", "team-a", "pod-a", "node-1"))
 	assert.Equal(t, 2.0, rule1Count)
 
-	rule2Count := testutil.ToFloat64(AlertsTotal.WithLabelValues("rule_002", "critical", "team-b"))
+	rule2Count := testutil.ToFloat64(AlertsTotal.WithLabelValues("rule_002", "critical", "team-b", "pod-b", "node-2"))
 	assert.Equal(t, 1.0, rule2Count)
 }
 
@@ -145,7 +145,7 @@ func TestCardinalityRegression_AlertsTotal(t *testing.T) {
 		if i%10 == 0 {
 			severity = "critical"
 		}
-		RecordAlert(ruleID, severity, "")
+		RecordAlert(ruleID, severity, "", "", "")
 	}
 
 	// Collect all metrics
@@ -243,16 +243,16 @@ func TestMetricDocumentation(t *testing.T) {
 	// Record test values
 	RecordEvent("test")
 	RecordDropped("test", "channel_full")
-	RecordAlert("test", "warning", "")
+	RecordAlert("test", "warning", "", "", "")
 	SetAnomalyScoreWithGuard("1", "test", 0.5)
 	SetBPFMapEntries("test", 100)
 	SetCollectorUp("test", true)
 	RecordLogLine("INFO")
 
 	// Verify metrics were recorded (proving they are properly registered)
-	assert.Equal(t, 1.0, testutil.ToFloat64(EventsTotal.WithLabelValues("test", "", "")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(EventsTotal.WithLabelValues("test", "", "", "")))
 	assert.Equal(t, 1.0, testutil.ToFloat64(EventsDropped.WithLabelValues("test", "channel_full")))
-	assert.Equal(t, 1.0, testutil.ToFloat64(AlertsTotal.WithLabelValues("test", "warning", "")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(AlertsTotal.WithLabelValues("test", "warning", "", "", "")))
 	assert.Equal(t, 0.5, testutil.ToFloat64(ProfilerAnomalyScore.WithLabelValues("1", "test")))
 	assert.Equal(t, 100.0, testutil.ToFloat64(BPFMapEntries.WithLabelValues("test")))
 	assert.Equal(t, 1.0, testutil.ToFloat64(CollectorUp.WithLabelValues("test")))

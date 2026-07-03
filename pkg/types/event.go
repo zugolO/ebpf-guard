@@ -45,6 +45,38 @@ const (
 	EventBPFProgram EventType = 15
 )
 
+// eventTypeCanonical maps each EventType to its single canonical lowercase
+// name. It is the one source of truth for turning an EventType into a string
+// label (metrics, logs, UIs); consumers should call EventType.String() rather
+// than hand-maintaining their own switch, so adding a new EventType here makes
+// every consumer pick up its label automatically.
+var eventTypeCanonical = map[EventType]string{
+	EventSyscall:    "syscall",
+	EventTCPConnect: "tcp_connect",
+	EventFileAccess: "file",
+	EventTLS:        "tls",
+	EventDNS:        "dns",
+	EventPrivesc:    "privesc",
+	EventNetClose:   "net_close",
+	EventKmodLoad:   "kmod",
+	EventCgroupEsc:  "cgroup_esc",
+	EventGPU:        "gpu",
+	EventLSMAudit:   "lsm_audit",
+	EventSequence:   "sequence",
+	EventCloudAudit: "cloud_audit",
+	EventIOUring:    "io_uring",
+	EventBPFProgram: "bpf_program",
+}
+
+// String returns the canonical lowercase name of the event type, or "unknown"
+// for an unmapped value.
+func (et EventType) String() string {
+	if s, ok := eventTypeCanonical[et]; ok {
+		return s
+	}
+	return "unknown"
+}
+
 // BPFProgType maps numeric BPF program types to human-readable strings.
 var bpfProgTypeNames = map[uint32]string{
 	0:  "SOCKET_FILTER",

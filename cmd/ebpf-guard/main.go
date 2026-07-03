@@ -41,6 +41,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/internal/tui"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/internal/wasm"
 	"github.com/zugolO/ebpf-guard/internal/watchdog"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -1296,10 +1297,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}()
 
+	// metricsNodeName labels the ebpf_guard_events_total / ebpf_guard_alerts_total
+	// node dimension so the fleet-wide Grafana dashboard can attribute events and
+	// alerts to a node even when Kubernetes enrichment is disabled (bare-metal/VM
+	// fleets). Prefers per-event Enrichment.NodeName (set by the k8s enricher) and
+	// falls back to this agent's own node identity.
+	metricsNodeName := resolveMetricsNodeName()
+
 	// dispatchAlerts fans a batch of alerts out to every configured sink: the
 	// simple-mode auto-enforcer, attack-simulation collector, alert store,
 	// Alertmanager webhook, notification fanout, and cross-node gossip.
 	dispatchAlerts := func(dispatched []types.Alert) {
+		for _, a := range dispatched {
+			podName, namespace, node := a.Enrichment.PodName, a.Enrichment.Namespace, a.Enrichment.NodeName
+			if node == "" {
+				node = metricsNodeName
+			}
+			exporter.RecordAlert(a.RuleID, string(a.Severity), namespace, podName, node)
+		}
 		// Simple mode: auto-enforce high-confidence threats.
 		if simpleEngine != nil && enf != nil {
 			simpleEngine.ProcessAlerts(dispatched, enf)
@@ -1405,6 +1420,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			if runtimeEnricher != nil {
 				runtimeEnricher.EnrichEvent(&event)
 			}
+
+			// Fleet-wide event metric: type/pod/namespace/node so the Grafana fleet
+			// dashboard can aggregate events/sec across the whole cluster, not just
+			// this agent's own scrape target.
+			var evtPod, evtNamespace, evtNode string
+			if event.Enrichment != nil {
+				evtPod, evtNamespace, evtNode = event.Enrichment.PodName, event.Enrichment.Namespace, event.Enrichment.NodeName
+			}
+			if evtNode == "" {
+				evtNode = metricsNodeName
+			}
+			exporter.RecordEventWithLabels(exporter.EventTypeLabel(event.Type), evtPod, evtNamespace, evtNode)
 
 			// Route to the PID-partitioned ingest worker pool so rule evaluation,
 			// lineage tracking, and anomaly scoring are spread across goroutines
@@ -2484,9 +2511,12 @@ func runLearn(durationStr, outputDir, namespace, containerID, commFilter string,
 // bubbletea TUI showing events, alerts, and rule statistics in real time.
 func newDashboardCmd() *cobra.Command {
 	var (
-		cfgPath  string
-		logLevel string
-		dryRun   bool
+		cfgPath       string
+		logLevel      string
+		dryRun        bool
+		fleet         string
+		fleetToken    string
+		fleetInterval time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -2498,16 +2528,32 @@ func newDashboardCmd() *cobra.Command {
   • Tab 2 – Events:     raw kernel events (pid, comm, type)
   • Tab 3 – Top Rules:  rules ranked by trigger count with sparkbar
   • Tab 4 – Status:     aggregate counters and top processes
+  • Tab 5 – Fleet:      per-agent health (fleet mode only)
 
 Use --dry-run to run without kernel eBPF probes (synthetic events).
 
+Fleet mode (--fleet) turns the dashboard into a client-side fan-out viewer:
+instead of running local collectors, it polls the REST API of every agent
+endpoint given and merges their alert streams into one view, tagging each
+alert with its source node/pod so an operator gets a single pane across the
+whole DaemonSet without a central aggregation service.
+
+  ebpf-guard dashboard --fleet http://node-a:9090,http://node-b:9090 --fleet-token "$TOKEN"
+
 Keybindings:
-  Tab / 1-4   switch panel
+  Tab / 1-5   switch panel
   j/k or ↑/↓  scroll
   p            pause live updates
   q            quit`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			setupLogger(logLevel)
+			if fleet != "" {
+				endpoints := util.SplitAndTrim(fleet, ",")
+				if len(endpoints) == 0 {
+					return fmt.Errorf("--fleet requires at least one endpoint")
+				}
+				return runFleetDashboard(endpoints, fleetToken, fleetInterval)
+			}
 			return runDashboard(cfgPath, dryRun)
 		},
 	}
@@ -2515,7 +2561,52 @@ Keybindings:
 	cmd.Flags().StringVar(&cfgPath, "config", "config/config.yaml", "path to config file")
 	cmd.Flags().StringVar(&logLevel, "log-level", "warn", "log level (use warn/error to keep TUI clean)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "use synthetic events instead of real eBPF probes")
+	cmd.Flags().StringVar(&fleet, "fleet", "", "comma-separated list of agent base URLs to fan out to (e.g. http://node-a:9090,http://node-b:9090); enables fleet mode")
+	cmd.Flags().StringVar(&fleetToken, "fleet-token", os.Getenv("EBPF_GUARD_TOKEN"), "bearer token used to authenticate against every fleet agent (default: $EBPF_GUARD_TOKEN)")
+	cmd.Flags().DurationVar(&fleetInterval, "fleet-interval", 3*time.Second, "how often to poll each fleet agent for new alerts and health")
 	return cmd
+}
+
+// resolveMetricsNodeName determines this agent's own node identity for the
+// "node" label on ebpf_guard_events_total / ebpf_guard_alerts_total, used only
+// as a fallback when an event/alert carries no Kubernetes-enriched NodeName.
+//
+// It prefers the NODE_NAME env var (set from the DaemonSet's downward API). It
+// deliberately does NOT fall back to os.Hostname() when running inside
+// Kubernetes: there the hostname is the pod name, not the node, so using it
+// would mislabel every series with a per-pod value and inflate cardinality.
+// Off-cluster (bare-metal/VM) the hostname is the correct node identity.
+func resolveMetricsNodeName() string {
+	if n := os.Getenv("NODE_NAME"); n != "" {
+		return n
+	}
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		// In-cluster without NODE_NAME: the hostname is the pod name, which is
+		// wrong for the node label. Leave it empty rather than mislabel.
+		slog.Warn("metrics: running in Kubernetes without NODE_NAME set; " +
+			"the 'node' metric label will be empty. Set NODE_NAME via the " +
+			"downward API (fieldRef: spec.nodeName) to populate it.")
+		return ""
+	}
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return ""
+}
+
+// runFleetDashboard starts the fleet-mode TUI: no local collectors or
+// correlation engine, just a client-side fan-out poller reading every
+// endpoint's REST API and merging alerts into one live dashboard.
+func runFleetDashboard(endpoints []string, token string, interval time.Duration) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	feed := tui.NewFeed()
+	return tui.RunFleet(ctx, feed, tui.FleetConfig{
+		Endpoints:    endpoints,
+		Token:        token,
+		PollInterval: interval,
+	})
 }
 
 // newConfigCmd returns the "config" parent subcommand with validate/migrate children.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -19,13 +20,15 @@ import (
 )
 
 var (
-	// HeartbeatTimestamp is the Unix timestamp of the last heartbeat.
-	// Used by Prometheus alert rule EbpfGuardAgentDown to detect agent death.
-	HeartbeatTimestamp = promauto.NewGauge(
+	// HeartbeatTimestamp is the Unix timestamp of the last heartbeat, labeled by
+	// node so fleet dashboards and the EbpfGuardAgentDown alert rule can attribute
+	// liveness to a specific node (and scope by the $node template variable).
+	HeartbeatTimestamp = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ebpf_guard_heartbeat_timestamp_seconds",
 			Help: "Unix timestamp of the last agent heartbeat",
 		},
+		[]string{"node"},
 	)
 
 	// BPFProgramsLoaded indicates whether each BPF program is loaded and attached.
@@ -85,6 +88,7 @@ type Watchdog struct {
 	checkers          []BPFProgramChecker
 	heartbeatInterval time.Duration
 	checkInterval     time.Duration
+	nodeName          string
 	alertFunc         func(types.Alert)
 	mu                sync.RWMutex
 	running           bool
@@ -108,6 +112,9 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	// CheckInterval is how often to check BPF program liveness.
 	CheckInterval time.Duration
+	// NodeName labels the heartbeat metric. When empty it is resolved from the
+	// NODE_NAME env var, so the fleet dashboard can attribute liveness per node.
+	NodeName string
 	// AlertFunc is called when a critical issue is detected.
 	AlertFunc func(types.Alert)
 }
@@ -129,12 +136,17 @@ func New(logger *slog.Logger, cfg Config) *Watchdog {
 	if cfg.CheckInterval == 0 {
 		cfg.CheckInterval = DefaultConfig().CheckInterval
 	}
+	nodeName := cfg.NodeName
+	if nodeName == "" {
+		nodeName = os.Getenv("NODE_NAME")
+	}
 
 	return &Watchdog{
 		logger:            logger,
 		checkers:          make([]BPFProgramChecker, 0),
 		heartbeatInterval: cfg.HeartbeatInterval,
 		checkInterval:     cfg.CheckInterval,
+		nodeName:          nodeName,
 		alertFunc:         cfg.AlertFunc,
 		attestor:          bpf.NewAttestor(),
 		reattachTotal: prometheus.NewCounter(prometheus.CounterOpts{
@@ -250,7 +262,7 @@ func (w *Watchdog) runHeartbeat(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Update immediately on start
-	HeartbeatTimestamp.Set(nowSeconds())
+	HeartbeatTimestamp.WithLabelValues(w.nodeName).Set(nowSeconds())
 
 	for {
 		select {
@@ -258,7 +270,7 @@ func (w *Watchdog) runHeartbeat(ctx context.Context) {
 			w.logger.Debug("heartbeat stopped")
 			return
 		case <-ticker.C:
-			HeartbeatTimestamp.Set(nowSeconds())
+			HeartbeatTimestamp.WithLabelValues(w.nodeName).Set(nowSeconds())
 			w.logger.Debug("heartbeat updated")
 		}
 	}

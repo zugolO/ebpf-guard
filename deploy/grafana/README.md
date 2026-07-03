@@ -1,10 +1,18 @@
-# Grafana Dashboard for eBPF Guard
+# Grafana Dashboards for eBPF Guard
 
-This directory contains the official Grafana dashboard for monitoring eBPF Guard runtime security metrics.
+This directory contains the official Grafana dashboards for monitoring eBPF Guard runtime security metrics.
 
-## Dashboard Overview
+| File | Scope | Use when |
+|------|-------|----------|
+| `ebpf-guard-dashboard.json` | Single agent / single node | Debugging one agent, or a single-node install |
+| `ebpf-guard-fleet-dashboard.json` | Whole fleet (all nodes/pods) | DaemonSet deployments — one pane for the whole cluster |
 
-The dashboard provides comprehensive visibility into:
+Both dashboards read from the same Prometheus metrics and can be installed side by side; the fleet
+dashboard does not replace the single-node one.
+
+## Single-Node Dashboard Overview
+
+The single-node dashboard (`ebpf-guard-dashboard.json`) provides comprehensive visibility into:
 
 - **Events/sec by type** — syscall, network, and file access event rates
 - **Top 10 processes by anomaly score** — bar gauge showing highest-risk processes
@@ -12,32 +20,53 @@ The dashboard provides comprehensive visibility into:
 - **System health** — BPF map utilization, dropped events (backpressure indicator), memory usage
 - **Learning progress** — count of PIDs in learning vs monitoring phases
 
+## Fleet Dashboard Overview
+
+The fleet dashboard (`ebpf-guard-fleet-dashboard.json`) aggregates across every agent Prometheus
+scrapes — no per-agent scraping or manual dashboard-per-node setup required:
+
+- **Fleet Summary** — agents up/down (from `ebpf_guard_heartbeat_timestamp_seconds`), total/critical
+  alerts, fleet-wide alert rate, events/sec across nodes
+- **Top-N Across the Fleet** — noisiest rules, most anomalous PIDs cross-fleet (keyed by Prometheus's
+  `instance` label so the same PID number on two different nodes doesn't collide), top talkers by
+  pod and by node
+- **Agent Health & Drill-Down** — per-agent heartbeat age (up/down at a glance), an alerts table
+  filterable by the `$namespace` / `$node` / `$pod` template variables, and a per-node event-rate
+  timeseries for drilling into a single node or pod
+
+It requires the `node` label added to `ebpf_guard_events_total` / `ebpf_guard_alerts_total` — see
+[docs/metrics.md](../../docs/metrics.md#fleet-label-reference) for the full label reference.
+
 ## Import Methods
 
 ### Method 1: Grafana UI (Manual)
 
 1. Open your Grafana instance
 2. Navigate to **Dashboards → Import**
-3. Upload `ebpf-guard-dashboard.json` or paste the JSON content
+3. Upload `ebpf-guard-dashboard.json` (single-node) or `ebpf-guard-fleet-dashboard.json` (fleet), or paste the JSON content
 4. Select your Prometheus data source
 5. Click **Import**
 
 ### Method 2: Kubernetes ConfigMap (Recommended)
 
-If using the eBPF Guard Helm chart with Grafana provisioning enabled:
+If using the eBPF Guard Helm chart with a Grafana sidecar that discovers dashboards by label
+(e.g. the `grafana` chart's `sidecar.dashboards.enabled=true`):
 
 ```bash
-# Enable Grafana provisioning in values.yaml
-grafana:
-  provisioning:
-    enabled: true
-
-# Install/upgrade the chart
+# Enable the single-node dashboard ConfigMap
 helm upgrade --install ebpf-guard ./deploy/helm/ebpf-guard \
-  --set grafana.provisioning.enabled=true
+  --set grafana.dashboard.enabled=true
+
+# Also enable the fleet-wide dashboard ConfigMap (independent toggle — ship both)
+helm upgrade --install ebpf-guard ./deploy/helm/ebpf-guard \
+  --set grafana.dashboard.enabled=true \
+  --set grafana.fleetDashboard.enabled=true
 ```
 
-The dashboard will be automatically provisioned via ConfigMap.
+Each dashboard is provisioned as its own ConfigMap (`<release>-grafana-dashboard` and
+`<release>-grafana-fleet-dashboard`), labeled `grafana_dashboard: "1"` by default so the sidecar
+picks both up automatically. See `grafana.dashboard.*` and `grafana.fleetDashboard.*` in
+`deploy/helm/ebpf-guard/values.yaml` to change the namespace or label.
 
 ### Method 3: Manual ConfigMap Creation
 
@@ -72,13 +101,22 @@ spec:
 
 ## Dashboard Variables
 
-The dashboard includes the following template variables:
+The single-node dashboard includes:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `datasource` | Prometheus data source | First available |
 | `namespace` | Kubernetes namespace filter | All |
 | `pod` | Pod name filter | All |
+
+The fleet dashboard adds a `node` variable and chains the others to it:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `datasource` | Prometheus data source | First available |
+| `node` | Kubernetes node filter | All |
+| `namespace` | Kubernetes namespace filter, scoped to `$node` | All |
+| `pod` | Pod name filter, scoped to `$node`/`$namespace` | All |
 
 ## Key Metrics Reference
 

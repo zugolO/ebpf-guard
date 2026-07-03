@@ -30,6 +30,38 @@ scrape_configs:
     #   credentials_file: /etc/prometheus/ebpf-guard-token
 ```
 
+## Fleet Label Reference
+
+In a DaemonSet deployment every node runs its own agent instance. The metrics below
+carry `node` / `namespace` / `pod` labels directly (rather than relying on
+Prometheus scrape-time relabeling) so a single fleet-wide Grafana dashboard —
+see [deploy/grafana/ebpf-guard-fleet-dashboard.json](../deploy/grafana/ebpf-guard-fleet-dashboard.json) —
+can aggregate and drill down across the whole cluster from Prometheus alone.
+
+| Metric | `node` | `namespace` | `pod` | `rule_id` |
+|--------|:------:|:-----------:|:-----:|:---------:|
+| `ebpf_guard_events_total` | ✓ | ✓ | ✓ | – |
+| `ebpf_guard_alerts_total` | ✓ | ✓ | ✓ | ✓ |
+| `ebpf_guard_heartbeat_timestamp_seconds` | – | – | – | – |
+| `ebpf_guard_k8s_enricher_cache_pods` | ✓ | – | – | – |
+
+`ebpf_guard_heartbeat_timestamp_seconds` (used by the `EbpfGuardAgentDown` alert
+and the fleet dashboard's "agents up/down" panel) carries a `node` label so the
+dashboard can scope liveness by the `$node` template variable; one time series
+per agent is expected. The `node` value comes from the agent's `NODE_NAME`
+(downward API `spec.nodeName`), falling back to hostname off-cluster.
+
+**Cardinality guard:** under normal operation all labels are recorded verbatim.
+If a metric's series count would exceed the configured limit
+(`ebpf_guard_events_total`: 5,000 series; `ebpf_guard_alerts_total`: 10,000
+series), the high-cardinality labels all collapse to `"other"` — `pod`,
+`namespace`, and `node` for both counters — so total series stay bounded by the
+low-cardinality labels alone (event `type`, or `rule_id`×`severity`). This is a
+safety ceiling: in a well-configured cluster `namespace`/`node` are bounded by
+cluster size and the collapse never triggers, but a misconfigured `node` label
+(e.g. a per-pod value) can no longer blow up Prometheus. See
+`internal/exporter/cardinality.go`.
+
 ## Metrics
 
 ### Event Metrics
@@ -39,7 +71,7 @@ scrape_configs:
 | Attribute | Value |
 |-----------|-------|
 | **Type** | Counter |
-| **Labels** | `type` (syscall\|network\|file), `pod`, `namespace` |
+| **Labels** | `type` (syscall\|network\|file\|tls\|dns\|...), `pod`, `namespace`, `node` |
 | **Description** | Total number of kernel events processed |
 
 **Example:**
@@ -76,7 +108,7 @@ sum by (collector) (ebpf_guard_events_dropped_total)
 | Attribute | Value |
 |-----------|-------|
 | **Type** | Counter |
-| **Labels** | `rule_id`, `severity` (warning\|critical) |
+| **Labels** | `rule_id`, `severity` (warning\|critical), `namespace`, `pod`, `node` |
 | **Description** | Total number of security alerts generated |
 
 **Example Alert:**

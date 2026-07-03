@@ -2,14 +2,12 @@ package attacker
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
-	"strings"
 	"time"
 
+	"github.com/zugolO/ebpf-guard/internal/apiclient"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
@@ -199,35 +197,7 @@ func (r *Runner) pollAlerts(ctx context.Context, baseURL, token string, since ti
 	// so convert the absolute start time to an elapsed window with a small
 	// buffer for clock skew between this process and the agent.
 	window := time.Since(since) + 5*time.Second
-	url := strings.TrimRight(baseURL, "/") + "/api/v1/alerts?since=" + window.String()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("alerts API returned HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB
-	if err != nil {
-		return nil, err
-	}
-
-	var alerts []types.Alert
-	if err := json.Unmarshal(body, &alerts); err != nil {
-		return nil, fmt.Errorf("decode alerts: %w", err)
-	}
-	return alerts, nil
+	return apiclient.New(baseURL, token).FetchAlerts(ctx, apiclient.AlertQuery{Since: window})
 }
 
 func (r *Runner) findByID(id string) (Scenario, bool) {

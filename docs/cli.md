@@ -397,6 +397,85 @@ ebpf-guard rules reload --token "my-token"
 
 ---
 
+### `ebpf-guard dashboard`
+
+Interactive live terminal UI (bubbletea) showing events, alerts, and rule statistics in real time.
+Requires a build with `-tags tui` (`make build` includes it by default; see `make generate`/`Makefile`
+for build tags). Falls back to a clear error ("not compiled in — build with -tags tui") otherwise.
+
+```bash
+ebpf-guard dashboard [flags]
+```
+
+#### Flags
+
+```
+      --config string           Path to config file (default "config/config.yaml")
+      --dry-run                 Use synthetic events instead of real eBPF probes
+      --fleet string            Comma-separated list of agent base URLs to fan out to; enables fleet mode
+      --fleet-token string      Bearer token for every fleet agent (default: $EBPF_GUARD_TOKEN)
+      --fleet-interval duration How often to poll each fleet agent (default 3s)
+      --log-level string        Log level (default "warn", to keep the TUI clean)
+  -h, --help                    Help for dashboard
+```
+
+#### Single-agent mode (default)
+
+Runs the full local agent pipeline (collectors + correlation engine) and renders alerts/events as
+they're generated on this node:
+
+```bash
+# Live view of this agent, real eBPF probes
+sudo ebpf-guard dashboard
+
+# Live view without a kernel, using synthetic events
+ebpf-guard dashboard --dry-run
+```
+
+#### Fleet mode (`--fleet`)
+
+Fleet mode turns the dashboard into a client-side fan-out viewer: instead of running local
+collectors, it polls the `/api/v1/alerts` REST API of every agent endpoint given (once per
+`--fleet-interval`) and merges their alert streams into a single live view, tagging each alert
+with its source node/pod so an operator gets one pane across the whole DaemonSet without standing
+up a separate aggregation service.
+
+```bash
+# Fan out across two agents
+ebpf-guard dashboard --fleet http://node-a:9090,http://node-b:9090
+
+# With auth (agents share one bearer token in fleet mode)
+export EBPF_GUARD_TOKEN="my-secret-token"
+ebpf-guard dashboard --fleet http://node-a:9090,http://node-b:9090,http://node-c:9090
+
+# Poll less/more aggressively (default 3s)
+ebpf-guard dashboard --fleet http://node-a:9090,http://node-b:9090 --fleet-interval 5s
+```
+
+In a Kubernetes cluster, resolve one endpoint per DaemonSet pod (e.g. via `kubectl get pods -o
+wide -l app=ebpf-guard` and each pod's IP:port, or a headless Service that returns one A record
+per pod) and pass the resulting list to `--fleet`.
+
+Fleet mode adds a fifth tab, **Fleet**, listing every configured agent with its up/down status
+(derived from whether the last poll succeeded), attributed node, how many distinct alerts have
+been observed from it, and when it was last seen — so a dead or unreachable agent is visible
+immediately rather than silently missing from the merged alert stream. The **Alerts** tab shows
+`pod=` and `node=` next to every alert so its origin is unambiguous when multiple agents are
+merged into one view.
+
+Fleet mode does not require Kubernetes enrichment on the remote agents: alerts without pod/node
+metadata are attributed to the polled endpoint's `host:port` instead, so it also works against a
+handful of bare-metal/VM agents.
+
+**Keybindings:**
+
+```
+Tab / 1-5   switch panel (Alerts, Events, Top Rules, Status, Fleet)
+j/k or ↑/↓  scroll
+p           pause live updates
+q           quit
+```
+
 ## Environment Variables
 
 The CLI respects the following environment variables:

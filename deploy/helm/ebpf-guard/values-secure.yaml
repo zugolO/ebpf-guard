@@ -112,6 +112,63 @@ config:
     enabled: true
     memory_limit_mb: 32
 
+  # AI-agent sandbox (issue #255/#259). Deny-by-default containment for a
+  # designated agent Pod, targeted by label. Start in audit; only switch to
+  # enforce AFTER the agent workload is hardened as shown in the reference
+  # block at the bottom of this file — enforce downgrades itself to audit for
+  # any target that is privileged enough to tamper with the enforcer.
+  ai_sandbox:
+    enabled: true
+    mode: audit            # audit first; flip to enforce once the agent Pod is cap-dropped
+    rules_path: /etc/ebpf-guard/rules/ai-agent/ai-agent.yaml
+    selector:
+      kube_label: "ebpf-guard.io/sandbox-profile"
+      default_profile: "ai-agent"
+    profiles:
+      - name: ai-agent
+        allowed_exec:        [/usr/bin/, /bin/, /usr/local/bin/]
+        allowed_read_paths:  [/workspace/, /usr/, /lib/, /etc/ssl/]
+        allowed_write_paths: [/workspace/, /tmp/]
+        # ebpf-guard's own config/rules/binary/socket, /sys/fs/bpf and
+        # /sys/kernel/security are denied automatically (baseline); list your
+        # own secret dirs here for defence-in-depth.
+        denied_paths:        [/root/.ssh/, /home/, /.aws/, /.config/gcloud/]
+        allowed_egress_cidrs:[140.82.112.0/20, 151.101.0.0/16]
+        allowed_egress_ports:[443]
+        allowed_domains:     [github.com, pypi.org, registry.npmjs.org]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REFERENCE — hardened securityContext for the SANDBOXED AGENT workload.
+#
+# This is NOT part of the ebpf-guard chart; it belongs on YOUR agent Pod (the
+# thing being sandboxed). ebpf-guard's in-kernel enforcement is only a real
+# boundary if the agent cannot tamper with it, so the agent workload MUST be
+# unprivileged. If it carries CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE or can write
+# /sys/fs/bpf or /sys/fs/cgroup, ebpf-guard refuses to report kernel_enforced
+# and downgrades that target to audit-only.
+#
+# apiVersion: v1
+# kind: Pod
+# metadata:
+#   name: coding-agent
+#   labels:
+#     ebpf-guard.io/sandbox-profile: ai-agent   # <- selects the profile above
+# spec:
+#   securityContext:
+#     runAsNonRoot: true
+#     seccompProfile:
+#       type: RuntimeDefault
+#   containers:
+#     - name: agent
+#       image: your/agent:latest
+#       securityContext:
+#         allowPrivilegeEscalation: false
+#         readOnlyRootFilesystem: true
+#         capabilities:
+#           drop: ["ALL"]        # in particular NO BPF / SYS_ADMIN / SYS_PTRACE
+#       # Do NOT mount /sys/fs/bpf or /sys/fs/cgroup writable into this Pod.
+# ─────────────────────────────────────────────────────────────────────────────
+
 extraVolumeMounts:
   - name: varlib
     mountPath: /var/lib/ebpf-guard

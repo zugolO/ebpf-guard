@@ -72,6 +72,37 @@ func TestManager_RegisterWritesMaps(t *testing.T) {
 	}
 }
 
+func TestManager_GuardTargetDowngradesEnforce(t *testing.T) {
+	m, err := New(aiCfg("enforce", config.AISandboxProfile{Name: "agent"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a live kernel enforcement session so KernelEnforced would be true
+	// were the target safe.
+	m.kernelMode = true
+	if !m.KernelEnforced() {
+		t.Fatal("precondition: enforce+kernelMode should report enforced")
+	}
+	// A privileged target must latch enforcement-unsafe and flip KernelEnforced.
+	safety := EnforcementSafety{Safe: false, Reasons: []string{"target holds CAP_BPF"}}
+	m.applyGuard(safety) // test seam mirroring GuardTarget's decision
+	if m.KernelEnforced() {
+		t.Error("KernelEnforced must be false once a target is enforcement-unsafe")
+	}
+	unsafe, reasons := m.EnforcementUnsafe()
+	if !unsafe || len(reasons) != 1 {
+		t.Errorf("EnforcementUnsafe = (%v, %v), want (true, 1 reason)", unsafe, reasons)
+	}
+}
+
+func TestManager_GuardTargetAuditNeverDowngrades(t *testing.T) {
+	m, _ := New(aiCfg("audit", config.AISandboxProfile{Name: "agent"}), nil)
+	m.applyGuard(EnforcementSafety{Safe: false, Reasons: []string{"target holds CAP_BPF"}})
+	if unsafe, _ := m.EnforcementUnsafe(); unsafe {
+		t.Error("audit mode has nothing to enforce; it must not latch unsafe")
+	}
+}
+
 func TestCgroupValuePacking(t *testing.T) {
 	v := cgroupValue(3, flagPortsFilter, ModeEnforce)
 	if got := uint32(v >> 32); got != 3 {

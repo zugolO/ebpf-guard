@@ -92,6 +92,21 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 		}
 	}()
 
+	// Item 7 (issue #259): the child inherits this process's capabilities, so
+	// if we carry CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE (or bpffs/cgroupfs is
+	// writable) the sandboxed child could detach the LSM hooks or rewrite the
+	// sandbox maps — enforcement would be a lie. Assess before claiming it and
+	// fail closed: GuardTarget latches audit-only so KernelEnforced()==false.
+	if enforce {
+		if safety := mgr.GuardTarget(os.Getpid()); !safety.Safe {
+			logger.Warn("ai_sandbox: --enforce downgraded to audit-only — the sandboxed "+
+				"process would inherit privileges that can defeat enforcement",
+				"reasons", safety.Reasons,
+				"remediation", "launch the agent unprivileged: drop CAP_BPF/CAP_SYS_ADMIN/"+
+					"CAP_SYS_PTRACE and deny write access to /sys/fs/bpf and /sys/fs/cgroup")
+		}
+	}
+
 	if !mgr.KernelEnforced() && enforce {
 		logger.Warn("kernel enforcement unavailable; --enforce degraded to audit-only " +
 			"(requires kernel 5.7+ with CONFIG_BPF_LSM)")

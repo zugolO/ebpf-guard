@@ -105,7 +105,14 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 			cp.addPath(pfx, accessWrite)
 		}
 		// Denied paths win over any allow: OR the deny bit onto the same key.
+		// The operator's explicit denies come first, then an always-on baseline
+		// (item 7 / #259) protecting ebpf-guard's own files and the kernel
+		// tamper surfaces, so a sandboxed agent can't weaken its own enforcer
+		// even when a profile forgets to list them.
 		for _, pfx := range prof.DeniedPaths {
+			cp.addPath(pfx, accessDeny)
+		}
+		for _, pfx := range baselineDeniedPaths(cfg) {
 			cp.addPath(pfx, accessDeny)
 		}
 
@@ -123,6 +130,36 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 		p.profiles = append(p.profiles, cp)
 	}
 	return p, nil
+}
+
+// baselineDeniedPathPrefixes are the well-known locations of ebpf-guard's own
+// state and the kernel interfaces that back enforcement. A sandboxed agent that
+// could write these could rewrite its own rules/config or unpin the LSM
+// maps/links and defeat the sandbox, so they are denied for every profile
+// regardless of what the profile allows (item 7 / issue #259). Only absolute
+// prefixes take effect; relative/dev entries are ignored by normalizePrefix.
+var baselineDeniedPathPrefixes = []string{
+	"/etc/ebpf-guard",           // config + rules (hot-reloaded via fsnotify)
+	"/var/lib/ebpf-guard",       // alert store / persistent state
+	"/run/ebpf-guard",           // control socket
+	"/var/run/ebpf-guard",       // control socket (legacy path)
+	"/usr/local/bin/ebpf-guard", // installed binary
+	"/usr/bin/ebpf-guard",       // installed binary (distro path)
+	"/sys/fs/bpf",               // pinned BPF maps/links
+	"/sys/kernel/security",      // securityfs — LSM state
+}
+
+// baselineDeniedPaths returns the baseline deny prefixes plus the directory of
+// the configured rules_path, so a non-standard rules location is protected too.
+func baselineDeniedPaths(cfg config.AISandboxConfig) []string {
+	out := make([]string, 0, len(baselineDeniedPathPrefixes)+1)
+	out = append(out, baselineDeniedPathPrefixes...)
+	if rp := strings.TrimSpace(cfg.RulesPath); rp != "" {
+		if dir := path.Dir(rp); dir != "" && dir != "." {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // normalizePrefix canonicalises a configured path prefix to the exact string

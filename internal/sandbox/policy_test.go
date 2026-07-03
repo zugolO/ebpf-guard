@@ -38,6 +38,64 @@ func TestCompile_ProfileIDsAndModes(t *testing.T) {
 	}
 }
 
+// pathAccess returns the access bits compiled for prefix in the first profile,
+// or (0,false) if no row keyed on that prefix exists.
+func pathAccess(p *Policy, prefix string) (uint8, bool) {
+	norm := normalizePrefix(prefix)
+	cp := p.profiles[0]
+	key := (uint64(cp.id) << 32) | uint64(fnv32a(norm))
+	for _, pe := range cp.paths {
+		if pe.Key == key {
+			return pe.Access, true
+		}
+	}
+	return 0, false
+}
+
+func TestCompile_BaselineDeniedPaths(t *testing.T) {
+	cfg := aiCfg("enforce", config.AISandboxProfile{Name: "agent"})
+	cfg.RulesPath = "/opt/eg/rules/ai-agent.yaml"
+	pol, err := Compile(cfg)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	// ebpf-guard's own state and the kernel tamper surfaces must be denied for
+	// every profile even though the profile declared no denied_paths.
+	for _, pfx := range []string{"/etc/ebpf-guard", "/sys/fs/bpf", "/sys/kernel/security"} {
+		acc, ok := pathAccess(pol, pfx)
+		if !ok {
+			t.Errorf("baseline deny missing for %s", pfx)
+			continue
+		}
+		if acc&accessDeny == 0 {
+			t.Errorf("%s access = %#b, want deny bit set", pfx, acc)
+		}
+	}
+	// The directory of a non-standard rules_path is protected too.
+	if acc, ok := pathAccess(pol, "/opt/eg/rules"); !ok || acc&accessDeny == 0 {
+		t.Errorf("rules_path dir not baseline-denied: acc=%#b ok=%v", acc, ok)
+	}
+}
+
+func TestCompile_BaselineDenyOverridesAllow(t *testing.T) {
+	// Even if an operator allow-lists read of ebpf-guard's config dir, the
+	// baseline deny bit is OR'd onto the same key so the deny still wins.
+	pol, err := Compile(aiCfg("enforce", config.AISandboxProfile{
+		Name:             "agent",
+		AllowedReadPaths: []string{"/etc/ebpf-guard"},
+	}))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	acc, ok := pathAccess(pol, "/etc/ebpf-guard")
+	if !ok {
+		t.Fatal("expected a row for /etc/ebpf-guard")
+	}
+	if acc&accessDeny == 0 {
+		t.Errorf("deny bit not set on allow-listed baseline path: %#b", acc)
+	}
+}
+
 func TestNormalizePrefix(t *testing.T) {
 	cases := map[string]string{
 		"/usr/bin/":       "/usr/bin",
@@ -205,6 +263,18 @@ func (f *fakeMap) Delete(key interface{}) error {
 	return nil
 }
 
+// countNormalized returns how many of the given prefixes yield a distinct,
+// absolute map row (mirroring addPath's normalize + dedup).
+func countNormalized(prefixes []string) int {
+	seen := map[string]struct{}{}
+	for _, p := range prefixes {
+		if n := normalizePrefix(p); n != "" {
+			seen[n] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
 func TestWritePolicy_PopulatesAllMaps(t *testing.T) {
 	pol, err := Compile(aiCfg("enforce", config.AISandboxProfile{
 		Name:               "agent",
@@ -227,8 +297,12 @@ func TestWritePolicy_PopulatesAllMaps(t *testing.T) {
 	if err := writePolicy(maps, pol); err != nil {
 		t.Fatalf("writePolicy: %v", err)
 	}
-	if n := len(maps.PathPolicy.(*fakeMap).data); n != 2 {
-		t.Errorf("path policy rows = %d, want 2", n)
+	// Two explicit allow rows (/workspace, /usr/bin) plus the always-on baseline
+	// deny rows that protect ebpf-guard's own files (item 7). Neither explicit
+	// path overlaps a baseline prefix, so the counts add.
+	wantPaths := 2 + countNormalized(baselineDeniedPaths(config.AISandboxConfig{}))
+	if n := len(maps.PathPolicy.(*fakeMap).data); n != wantPaths {
+		t.Errorf("path policy rows = %d, want %d", n, wantPaths)
 	}
 	if n := len(maps.NetV4.(*fakeMap).data); n != 1 {
 		t.Errorf("v4 rows = %d, want 1", n)

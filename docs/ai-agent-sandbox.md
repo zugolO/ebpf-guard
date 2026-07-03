@@ -45,10 +45,21 @@ policy over exec / file / network** for a designated agent process tree.
 ## What is *not* covered
 
 This is syscall/file/network policy enforcement — **complementary to, not a
-replacement for, VM-level isolation** (gVisor, Firecracker, Kata/microVMs). If
-your threat model requires a hard kernel boundary, run the agent in a microVM
-*and* apply an `ai_sandbox` profile inside it for defence-in-depth. There is no
-in-kernel LLM/prompt inspection.
+replacement for, VM-level isolation** (gVisor, Firecracker, Kata/microVMs). There
+is no in-kernel LLM/prompt inspection.
+
+**Why a microVM stays optional, not built-in.** A microVM is a *different class*
+of isolation (a separate or interposed kernel). ebpf-guard runs LSM hooks in the
+**host** kernel, so it cannot *become* a microVM — the two are complementary
+axes, not substitutes. Bundling one would also break ebpf-guard's positioning
+(no kernel module, single binary / DaemonSet) and force a runtime/privilege
+change that is an operator's deployment decision. For the semi-trusted,
+**unprivileged** agent threat model above, in-kernel enforcement — with the
+self-protection prerequisites in the next section — is intended to be a
+sufficient boundary on its own. A microVM remains a documented, **optional**
+defence-in-depth tier for the residual risk in-kernel LSM cannot cover (a kernel
+0-day, or an agent you deliberately granted root / `CAP_BPF`): for that paranoid
+tier, run the agent in a microVM *and* apply an `ai_sandbox` profile inside it.
 
 ## Threat model
 
@@ -57,6 +68,67 @@ instructions may be attacker-influenced (prompt injection via a fetched web
 page, a poisoned dependency, a malicious repository). The sandbox constrains the
 *blast radius* of the agent's process tree — it does not attempt to decide
 whether a given instruction was "really" from you.
+
+## Hard prerequisites — the sandboxed workload must be unprivileged
+
+ebpf-guard enforces the policy with LSM hooks **in the host kernel**. That
+boundary only holds if the sandboxed workload cannot reach the enforcer. A
+process that holds `CAP_BPF`, `CAP_SYS_ADMIN`, or `CAP_SYS_PTRACE`, or that can
+write `/sys/fs/bpf` or `/sys/fs/cgroup`, can detach the LSM links, rewrite the
+`sandbox_*` maps, move itself out of its cgroup, or `SIGKILL` the agent — and so
+defeat enforcement entirely. **For such a workload `enforce` is a false sense of
+security, not a boundary.**
+
+Therefore, running an agent under `mode: enforce` has a hard prerequisite:
+
+- **Drop** `CAP_BPF`, `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE` (and ideally all caps
+  the agent does not genuinely need) from the sandboxed workload.
+- **Do not** give the workload write access to `/sys/fs/bpf` or
+  `/sys/fs/cgroup` (no bpffs/cgroupfs mounts writable inside its namespaces).
+- Prefer `readOnlyRootFilesystem` and `allowPrivilegeEscalation: false`.
+
+In Kubernetes this posture is set by the Pod `securityContext` at admission —
+see `deploy/helm/ebpf-guard/values-secure.yaml` for a hardened, cap-dropped
+agent-workload example.
+
+### Fail-closed: ebpf-guard never claims enforcement it cannot back
+
+ebpf-guard checks this posture instead of trusting it. At sandbox registration
+(and, for the `run` wrapper, before launching the child) it assesses the
+target's effective capabilities. If the target is privileged enough to tamper
+with the enforcer, ebpf-guard **refuses to claim enforcement**: it emits a loud
+warning with the specific reason, downgrades that target to audit-only, and
+reports `kernel_enforced=false` (never a silent "enforced"). If the target's
+capability set cannot even be read, it fails closed the same way.
+
+```text
+WARN ai_sandbox: --enforce downgraded to audit-only — the sandboxed process
+  would inherit privileges that can defeat enforcement
+  reasons="[target holds CAP_BPF]"
+  remediation="launch the agent unprivileged: drop CAP_BPF/CAP_SYS_ADMIN/
+  CAP_SYS_PTRACE and deny write access to /sys/fs/bpf and /sys/fs/cgroup"
+```
+
+> Because the `ebpf-guard run` child inherits the wrapper's capabilities, a
+> `sudo ebpf-guard run --enforce` where those caps are **not** dropped for the
+> child will correctly downgrade to audit. This is the intended signal, not a
+> bug: enforcement is only genuine once the agent runs unprivileged.
+
+### ebpf-guard's own files are denied by default
+
+Independently of any profile, every compiled profile denies a **baseline** set
+of paths so a sandboxed agent cannot weaken its own enforcer by editing
+ebpf-guard's hot-reloaded config/rules, its binary, its control socket, or the
+kernel tamper surfaces:
+
+`/etc/ebpf-guard`, `/var/lib/ebpf-guard`, `/run/ebpf-guard`,
+`/var/run/ebpf-guard`, the installed `ebpf-guard` binary, `/sys/fs/bpf`,
+`/sys/kernel/security`, and the directory of the configured `rules_path`.
+
+These are OR'd in on top of the profile's own `denied_paths`, and a deny always
+wins over an allow — so listing one of them under `allowed_read_paths` cannot
+re-open it. Add your own secrets (`~/.ssh`, cloud creds, `.env`) to the
+profile's `denied_paths` for defence-in-depth.
 
 ## Configuration
 
@@ -182,7 +254,9 @@ observability independently of enforcement.
 
 On an unsupported kernel, `mode: enforce` degrades to audit-only with a clear
 startup log rather than failing closed, and egress may still be constrained via
-the nftables fallback.
+the nftables fallback. `mode: enforce` also downgrades to audit-only for any
+**privileged target** that could tamper with the enforcer — see
+[Hard prerequisites](#hard-prerequisites--the-sandboxed-workload-must-be-unprivileged).
 
 ## Status (issue #255 sub-tasks)
 

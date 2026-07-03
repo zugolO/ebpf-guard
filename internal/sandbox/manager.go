@@ -47,6 +47,12 @@ type Manager struct {
 	links      []link.Link
 	registered map[uint64]uint32 // cgroup id -> profile id
 	kernelMode bool              // true when BPF LSM enforcement is wired
+
+	// enforcementUnsafe latches true once a target is found that could tamper
+	// with the enforcer (item 7). While set, KernelEnforced reports false: we
+	// never claim enforcement for a workload that can defeat it.
+	enforcementUnsafe bool
+	unsafeReasons     []string
 }
 
 // New compiles the ai_sandbox config and returns a Manager. It does not touch
@@ -78,12 +84,57 @@ func (m *Manager) Mode() string {
 	return "audit"
 }
 
-// KernelEnforced reports whether BPF LSM enforcement is actually active. False
-// means the manager is running audit-only (unsupported kernel or Load skipped).
+// KernelEnforced reports whether BPF LSM enforcement is actually active AND
+// trustworthy. False means the manager is running audit-only — either because
+// the kernel lacks BPF LSM / Load was skipped, or because a sandboxed target was
+// found privileged enough to tamper with the enforcer (item 7). It must never
+// return true for a workload that can defeat enforcement.
 func (m *Manager) KernelEnforced() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.kernelMode && m.policy.Mode == ModeEnforce
+	return m.kernelMode && m.policy.Mode == ModeEnforce && !m.enforcementUnsafe
+}
+
+// EnforcementUnsafe reports whether enforcement has been downgraded because a
+// target could tamper with the enforcer, along with the reasons. Surfaced in
+// logs and status so operators see why an enforce profile is not enforcing.
+func (m *Manager) EnforcementUnsafe() (bool, []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.enforcementUnsafe, append([]string(nil), m.unsafeReasons...)
+}
+
+// GuardTarget assesses a candidate enforce target (pid, or a proxy for the tree
+// it heads) and, in enforce mode, latches enforcement-unsafe when the target
+// could tamper with the enforcer. It returns the assessment so callers can warn
+// with the specific reasons. In audit mode it assesses but never downgrades
+// (there is nothing to weaken). Safe to call before or after Load.
+func (m *Manager) GuardTarget(pid int) EnforcementSafety {
+	safety := AssessProcess(pid)
+	m.applyGuard(safety)
+	return safety
+}
+
+// applyGuard latches enforcement-unsafe from an assessment. In enforce mode an
+// unsafe verdict downgrades to audit-only exactly once (idempotent); in audit
+// mode there is nothing to weaken so it is a no-op. Kept separate from process
+// probing so the latch logic is unit-testable without a real /proc target.
+func (m *Manager) applyGuard(safety EnforcementSafety) {
+	if safety.Safe || m.policy.Mode != ModeEnforce {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.enforcementUnsafe {
+		return
+	}
+	m.enforcementUnsafe = true
+	m.unsafeReasons = safety.Reasons
+	m.logger.Warn("ai_sandbox: enforce is UNSAFE for this target — it can tamper with the "+
+		"enforcer; refusing to claim kernel enforcement, downgrading to audit-only",
+		"reasons", safety.Reasons,
+		"remediation", "run the agent without CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE and "+
+			"without write access to /sys/fs/bpf or /sys/fs/cgroup")
 }
 
 // lsmAvailable reports whether the running kernel exposes BPF LSM.

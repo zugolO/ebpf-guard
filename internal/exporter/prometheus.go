@@ -170,17 +170,21 @@ func RecordEventWithLabels(eventType, podName, namespace, node string) {
 // EventTypeLabel converts an EventType to the short string used as the
 // "type" label on ebpf_guard_events_total. Both TCP connect and close collapse
 // to "network" so the metric groups connection lifecycle under one label; every
-// other type defers to the canonical types.EventType.String() name, and any
-// unmapped type collapses to "other" to stay low-cardinality.
+// other type defers to the canonical types.EventType.String() name. The switch
+// enumerates every EventType explicitly (rather than a bare default) so the
+// exhaustive linter catches new event types that need a label decision here.
 func EventTypeLabel(t types.EventType) string {
 	switch t {
 	case types.EventTCPConnect, types.EventNetClose:
 		return "network"
+	case types.EventSyscall, types.EventFileAccess, types.EventTLS, types.EventDNS,
+		types.EventPrivesc, types.EventKmodLoad, types.EventCgroupEsc, types.EventGPU,
+		types.EventLSMAudit, types.EventSequence, types.EventCloudAudit, types.EventIOUring,
+		types.EventBPFProgram:
+		return t.String()
+	default:
+		return "other"
 	}
-	if name := t.String(); name != "unknown" {
-		return name
-	}
-	return "other"
 }
 
 // RecordDropped increments the dropped events counter with reason.

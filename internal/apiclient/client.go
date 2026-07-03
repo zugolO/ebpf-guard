@@ -94,7 +94,7 @@ func (c *Client) FetchAlerts(ctx context.Context, q AlertQuery) ([]types.Alert, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("alerts API returned HTTP %d", resp.StatusCode)
 	}

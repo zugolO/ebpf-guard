@@ -389,7 +389,7 @@ simple_mode:
 # autonomous AI/coding agent (Claude Code, Aider, an in-cluster agent Pod, ...).
 # The same collector → correlator → enforcer → LSM pipeline, run with an
 # inverted, positive (allow-known-good) policy scoped to the agent's process
-# tree / cgroup. Pair with the rules/ai-agent.yaml semantic detection ruleset.
+# tree / cgroup. Pair with the rules/ai-agent/ai-agent.yaml semantic detection ruleset.
 #
 # audit-first: leave mode "audit" until you have confirmed the allow-lists cover
 # your agent's legitimate work, then switch to "enforce". On kernels without BPF
@@ -397,7 +397,7 @@ simple_mode:
 ai_sandbox:
   enabled: false                       # Enable AI-agent sandbox evaluation
   mode: audit                          # audit (log only) | enforce (deny -EPERM)
-  rules_path: rules/ai-agent.yaml      # Semantic containment ruleset
+  rules_path: rules/ai-agent/ai-agent.yaml      # Semantic containment ruleset
   selector:
     kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name
     comms: []                          # Local entry-point comms (e.g. ["claude", "aider"])

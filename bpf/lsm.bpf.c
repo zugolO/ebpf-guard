@@ -22,6 +22,9 @@
 #define EPERM 1
 #endif
 
+/* Max path bytes hashed by fnv32a() / sandbox_path_allowed() */
+#define PATH_HASH_MAX 128
+
 /* LSM blocklist map: PID -> blocked indicator (used by socket_connect hook) */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -86,6 +89,197 @@ struct {
 	__type(value, __u64);
 } pid_initial_cgroup SEC(".maps");
 
+/* -------------------------------------------------------------------------
+ * AI-agent sandbox (issue #255) — cgroup-scoped positive (allow) policy.
+ *
+ * Direction is inverted vs. the blocklists above: a cgroup registered in
+ * sandbox_cgroups is deny-by-default and may only exec / open / connect to
+ * what its profile allow-lists. Maps are populated by internal/sandbox.
+ * -------------------------------------------------------------------------
+ */
+
+#define SANDBOX_MODE_AUDIT   0
+#define SANDBOX_MODE_ENFORCE 1
+
+/* Profile flag bits (bits 8-15 of the sandbox_cgroups value) */
+#define SBX_F_PORTS_FILTER  (1 << 0)  /* profile lists egress ports (empty = all allowed) */
+
+/* Access bits for sandbox_path_policy values */
+#define SBX_ALLOW_READ  (1 << 0)
+#define SBX_ALLOW_WRITE (1 << 1)
+#define SBX_ALLOW_EXEC  (1 << 2)
+#define SBX_DENY        (1 << 3)  /* denied_paths override — beats any allow */
+
+/* file->f_mode bits (include/linux/fs.h) */
+#define SBX_FMODE_WRITE 0x2
+#define SBX_FMODE_EXEC  0x20
+
+/* Max cgroup ancestor levels walked when matching a task to a sandbox.
+ * Kubernetes pod cgroups sit at depth ~5-7; 12 covers nested slices. */
+#define SBX_MAX_CGROUP_LEVELS 12
+
+/* sandbox_state[0]: number of registered sandboxed cgroups. Fast-path gate so
+ * the hooks cost one array lookup for every process on the host when no
+ * sandbox is active. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} sandbox_state SEC(".maps");
+
+/* Registered sandbox targets: cgroup_id -> (profile_id << 32 | flags << 8 | mode). */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, __u64);   /* cgroup id */
+	__type(value, __u64); /* packed profile_id / flags / mode */
+} sandbox_cgroups SEC(".maps");
+
+/* Positive path policy: (profile_id << 32 | fnv32a(prefix)) -> access bitmask.
+ * Prefixes are normalised (no trailing slash) on the Go side; the hooks check
+ * the hash of every '/'-boundary prefix of the path plus the full path. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u64);
+	__type(value, __u8);
+} sandbox_path_policy SEC(".maps");
+
+/* Allowed egress CIDRs, scoped per profile. Key data starts with the 4-byte
+ * big-endian profile id (always fully matched: prefixlen = 32 + cidr bits)
+ * followed by the destination address. */
+struct sbx_lpm_key_v4 {
+	__u32 prefixlen;   /* 32 (profile) + 0-32 (cidr) */
+	__u8  data[8];     /* profile_id BE + IPv4 address */
+};
+
+struct sbx_lpm_key_v6 {
+	__u32 prefixlen;   /* 32 (profile) + 0-128 (cidr) */
+	__u8  data[20];    /* profile_id BE + IPv6 address */
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 4096);
+	__type(key, struct sbx_lpm_key_v4);
+	__type(value, __u8);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} sandbox_net_v4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 4096);
+	__type(key, struct sbx_lpm_key_v6);
+	__type(value, __u8);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} sandbox_net_v6 SEC(".maps");
+
+/* Allowed egress ports: (profile_id << 16 | port) -> 1. Consulted only when
+ * the profile carries SBX_F_PORTS_FILTER. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u64);
+	__type(value, __u8);
+} sandbox_ports SEC(".maps");
+
+/* Resolve the current task to a sandbox registration, walking cgroup
+ * ancestors so that processes in child cgroups of a registered subtree
+ * (e.g. containers inside a pod slice) are matched too.
+ * Returns the packed sandbox_cgroups value, or 0 when not sandboxed. */
+static __always_inline __u64 sandbox_lookup_current(void)
+{
+	__u32 zero = 0;
+	__u64 *active = bpf_map_lookup_elem(&sandbox_state, &zero);
+	if (!active || *active == 0)
+		return 0;
+
+	__u64 id = bpf_get_current_cgroup_id();
+	__u64 *val = bpf_map_lookup_elem(&sandbox_cgroups, &id);
+	if (val)
+		return *val;
+
+	int level;
+	for (level = 1; level < SBX_MAX_CGROUP_LEVELS; level++) {
+		__u64 aid = bpf_get_current_ancestor_cgroup_id(level);
+		if (aid == 0 || aid == id)
+			break; /* walked past the task's own level */
+		val = bpf_map_lookup_elem(&sandbox_cgroups, &aid);
+		if (val)
+			return *val;
+	}
+	return 0;
+}
+
+/* Check an absolute path against the profile's positive policy.
+ * Computes a rolling FNV-1a hash and consults sandbox_path_policy at every
+ * '/' boundary plus the full path, so configured prefixes match any depth.
+ * A SBX_DENY entry on any boundary wins over any allow.
+ * Returns 1 when some boundary carries one of the `want` access bits. */
+static __always_inline int sandbox_path_allowed(__u32 profile_id, const char *path, __u8 want)
+{
+	__u32 hash = 2166136261u; /* FNV offset basis */
+	__u64 base = ((__u64)profile_id) << 32;
+	int allowed = 0;
+	int i;
+
+	if (path[0] != '/')
+		return 0; /* relative / unresolvable — deny-by-default */
+
+	for (i = 0; i < PATH_HASH_MAX; i++) {
+		char c = path[i];
+		int boundary = (c == '\0') || (c == '/' && i > 0);
+		if (boundary) {
+			__u64 key = base | (__u64)hash;
+			__u8 *ent = bpf_map_lookup_elem(&sandbox_path_policy, &key);
+			if (ent) {
+				if (*ent & SBX_DENY)
+					return 0;
+				if (*ent & want)
+					allowed = 1;
+			}
+		}
+		if (c == '\0')
+			return allowed;
+		hash ^= (__u32)(unsigned char)c;
+		hash *= 16777619u; /* FNV prime */
+	}
+	return allowed;
+}
+
+/* Emit a sandbox violation audit event. profile_id travels in target_pid
+ * (unused by these hooks); for socket_connect the destination is packed into
+ * path[] as port(2, BE) + address bytes with sig = address family. */
+static __always_inline void sandbox_emit(__u8 hook, __u8 action, __u32 profile_id,
+					 const char *path_str, __u8 family,
+					 const __u8 *addr, int addr_len, __u16 dport)
+{
+	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
+				sizeof(struct lsm_audit_event), 0);
+	if (!ae)
+		return;
+
+	ae->type         = EVENT_TYPE_LSM_AUDIT;
+	ae->timestamp_ns = bpf_ktime_get_ns();
+	ae->pid          = bpf_get_current_pid_tgid() >> 32;
+	ae->uid          = (__u32)bpf_get_current_uid_gid();
+	ae->target_pid   = profile_id;
+	ae->action       = action;
+	ae->hook         = hook;
+	ae->sig          = family;
+	bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
+	__builtin_memset(&ae->path, 0, sizeof(ae->path));
+	if (path_str) {
+		bpf_probe_read_kernel_str(&ae->path, sizeof(ae->path), path_str);
+	} else if (addr && addr_len > 0 && addr_len <= 16) {
+		ae->path[0] = (char)(dport >> 8);
+		ae->path[1] = (char)(dport & 0xFF);
+		bpf_probe_read_kernel(&ae->path[2], addr_len & 0x1F, addr);
+	}
+	bpf_ringbuf_submit(ae, 0);
+}
+
 /* Helper to check if PID is the agent itself */
 static __always_inline bool is_agent_pid(__u32 pid)
 {
@@ -113,7 +307,6 @@ static __always_inline void update_stat(__u32 stat_idx)
  * Must produce the same output as the Go fnv32a() in internal/collector/lsm.go.
  * Reference: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
  */
-#define PATH_HASH_MAX 128
 static __always_inline __u32 fnv32a(const char *str)
 {
 	__u32 hash = 2166136261u; /* FNV offset basis */
@@ -156,6 +349,34 @@ int BPF_PROG(lsm_file_open, struct file *file)
 	if (bpf_d_path(&file->f_path, path_buf, sizeof(path_buf)) < 0) {
 		update_stat(LSM_STAT_FILE_OPEN_ALLOW);
 		return 0;
+	}
+
+	/* AI-agent sandbox: positive policy for sandboxed cgroups (issue #255).
+	 * Runs before the blocklist — a sandboxed process is deny-by-default. */
+	__u64 sbx = sandbox_lookup_current();
+	if (sbx) {
+		__u32 profile_id = (__u32)(sbx >> 32);
+		__u8  mode       = (__u8)(sbx & 0xFF);
+		__u32 fmode      = BPF_CORE_READ(file, f_mode);
+		__u8  want;
+
+		if (fmode & SBX_FMODE_EXEC)
+			want = SBX_ALLOW_EXEC | SBX_ALLOW_READ;
+		else if (fmode & SBX_FMODE_WRITE)
+			want = SBX_ALLOW_WRITE;
+		else
+			want = SBX_ALLOW_READ;
+
+		if (!sandbox_path_allowed(profile_id, path_buf, want)) {
+			__u8 act = (mode == SANDBOX_MODE_ENFORCE) ?
+				LSM_ACTION_SANDBOX_DENY : LSM_ACTION_SANDBOX_AUDIT;
+			sandbox_emit(LSM_HOOK_FILE_OPEN, act, profile_id,
+				     path_buf, 0, NULL, 0, 0);
+			if (mode == SANDBOX_MODE_ENFORCE) {
+				update_stat(LSM_STAT_FILE_OPEN_BLOCK);
+				return -EACCES;
+			}
+		}
 	}
 
 	__u32 hash = fnv32a(path_buf);
@@ -263,6 +484,92 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 		}
 	}
 
+	/* AI-agent sandbox: positive egress policy for sandboxed cgroups
+	 * (issue #255). Loopback is always allowed so a sandboxed agent can
+	 * reach local tooling (language servers, the ebpf-guard API) even
+	 * under an empty CIDR list; everything else must match the profile's
+	 * allowed_egress_cidrs (and ports, when the profile lists any). */
+	__u64 sbx = sandbox_lookup_current();
+	if (sbx) {
+		__u32 profile_id = (__u32)(sbx >> 32);
+		__u8  flags      = (__u8)((sbx >> 8) & 0xFF);
+		__u8  mode       = (__u8)(sbx & 0xFF);
+		__u16 sa_family  = 0;
+		int   violation  = 0;
+		__u8  addr_bytes[16] = {};
+		int   addr_len   = 0;
+		__u16 dport      = 0;
+
+		bpf_probe_read_kernel(&sa_family, sizeof(sa_family), &addr->sa_family);
+
+		if (sa_family == AF_INET) {
+			struct sockaddr_in sin = {};
+			bpf_probe_read_kernel(&sin, sizeof(sin), addr);
+			dport = bpf_ntohs(sin.sin_port);
+			copy_ipv4_addr(addr_bytes, sin.sin_addr.s_addr);
+			addr_len = 4;
+
+			if (addr_bytes[0] != 127) { /* loopback always allowed */
+				struct sbx_lpm_key_v4 k = {};
+				k.prefixlen = 32 + 32;
+				k.data[0] = (__u8)(profile_id >> 24);
+				k.data[1] = (__u8)(profile_id >> 16);
+				k.data[2] = (__u8)(profile_id >> 8);
+				k.data[3] = (__u8)profile_id;
+				__builtin_memcpy(&k.data[4], addr_bytes, 4);
+				if (!bpf_map_lookup_elem(&sandbox_net_v4, &k))
+					violation = 1;
+			}
+		} else if (sa_family == AF_INET6) {
+			struct sockaddr_in6 sin6 = {};
+			bpf_probe_read_kernel(&sin6, sizeof(sin6), addr);
+			dport = bpf_ntohs(sin6.sin6_port);
+			bpf_probe_read_kernel(addr_bytes, 16, &sin6.sin6_addr);
+			addr_len = 16;
+
+			/* ::1 loopback always allowed */
+			int is_loopback = 1;
+			int i;
+			#pragma unroll
+			for (i = 0; i < 15; i++) {
+				if (addr_bytes[i] != 0)
+					is_loopback = 0;
+			}
+			if (addr_bytes[15] != 1)
+				is_loopback = 0;
+
+			if (!is_loopback) {
+				struct sbx_lpm_key_v6 k = {};
+				k.prefixlen = 32 + 128;
+				k.data[0] = (__u8)(profile_id >> 24);
+				k.data[1] = (__u8)(profile_id >> 16);
+				k.data[2] = (__u8)(profile_id >> 8);
+				k.data[3] = (__u8)profile_id;
+				__builtin_memcpy(&k.data[4], addr_bytes, 16);
+				if (!bpf_map_lookup_elem(&sandbox_net_v6, &k))
+					violation = 1;
+			}
+		}
+
+		if (!violation && addr_len > 0 && (flags & SBX_F_PORTS_FILTER)) {
+			__u64 pkey = (((__u64)profile_id) << 16) | dport;
+			if (!bpf_map_lookup_elem(&sandbox_ports, &pkey))
+				violation = 1;
+		}
+
+		if (violation) {
+			__u8 act = (mode == SANDBOX_MODE_ENFORCE) ?
+				LSM_ACTION_SANDBOX_DENY : LSM_ACTION_SANDBOX_AUDIT;
+			sandbox_emit(LSM_HOOK_SOCKET_CONNECT, act, profile_id,
+				     NULL, (__u8)sa_family, addr_bytes, addr_len, dport);
+			if (mode == SANDBOX_MODE_ENFORCE) {
+				update_stat(LSM_STAT_SOCK_CONN_BLOCK);
+				record_net_drop();
+				return -EPERM;
+			}
+		}
+	}
+
 	/* Fast path 2: PID not in blocklist */
 	if (!is_blocked_pid(pid)) {
 		update_stat(LSM_STAT_SOCK_CONN_ALLOW);
@@ -320,6 +627,44 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
 		bpf_ringbuf_submit(ae, 0);
 	}
 
+	return 0;
+}
+
+/* LSM hook: bprm_check_security — called at the final stage of execve
+ * before the new program image is committed (issue #255, sub-task 2).
+ *
+ * For sandboxed cgroups only: the exec path must fall under one of the
+ * profile's allowed_exec prefixes. bprm->filename is the path being
+ * executed as resolved by do_execve; a relative filename (execve of
+ * "./x") cannot be prefix-matched and is treated as a violation —
+ * deny-by-default. Non-sandboxed processes cost one array lookup.
+ *
+ * Shares the allowed-exec map mechanism intended for #225 (cosign exec
+ * allowlist): the SBX_ALLOW_EXEC bit in sandbox_path_policy.
+ */
+SEC("lsm/bprm_check_security")
+int BPF_PROG(lsm_bprm_check, struct linux_binprm *bprm)
+{
+	__u64 sbx = sandbox_lookup_current();
+	if (!sbx)
+		return 0;
+
+	__u32 profile_id = (__u32)(sbx >> 32);
+	__u8  mode       = (__u8)(sbx & 0xFF);
+
+	char path_buf[PATH_HASH_MAX] = {};
+	const char *filename = BPF_CORE_READ(bprm, filename);
+	if (filename)
+		bpf_probe_read_kernel_str(path_buf, sizeof(path_buf), filename);
+
+	if (!sandbox_path_allowed(profile_id, path_buf, SBX_ALLOW_EXEC)) {
+		__u8 act = (mode == SANDBOX_MODE_ENFORCE) ?
+			LSM_ACTION_SANDBOX_DENY : LSM_ACTION_SANDBOX_AUDIT;
+		sandbox_emit(LSM_HOOK_BPRM_CHECK, act, profile_id,
+			     path_buf, 0, NULL, 0, 0);
+		if (mode == SANDBOX_MODE_ENFORCE)
+			return -EPERM;
+	}
 	return 0;
 }
 

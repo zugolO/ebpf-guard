@@ -7,6 +7,10 @@ import (
 
 func TestValidateAllRuleFiles(t *testing.T) {
 	files, _ := filepath.Glob("../../rules/*.yaml")
+	// Sub-directory rulesets that are loaded on demand rather than from the
+	// default rules directory (e.g. the ai_sandbox semantic ruleset).
+	sub, _ := filepath.Glob("../../rules/ai-agent/*.yaml")
+	files = append(files, sub...)
 	if len(files) == 0 {
 		t.Fatal("no rule files found")
 	}

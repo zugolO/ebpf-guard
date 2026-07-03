@@ -58,7 +58,7 @@ type lsmAuditEventRaw struct {
 
 const lsmAuditEventSize = 4 + 8 + 4 + 4 + 4 + 1 + 1 + 1 + 16 + 64 // 107 bytes
 
-var lsmHookNames = [3]string{"file_open", "socket_connect", "task_kill"}
+var lsmHookNames = [4]string{"file_open", "socket_connect", "task_kill", "bprm_check"}
 
 // parseLSMAuditEventRaw deserialises a raw ring-buffer record into lsmAuditEventRaw.
 func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
@@ -85,17 +85,26 @@ func (e lsmAuditEventRaw) toAuditEntry() audit.Entry {
 	if int(e.Hook) < len(lsmHookNames) {
 		hookName = lsmHookNames[e.Hook]
 	}
+	// Action codes match LSM_ACTION_* in bpf/common.h:
+	//   0 audit-only, 1 deny, 2 ai_sandbox audit, 3 ai_sandbox deny.
 	action := "audit"
-	if e.Action == 1 { // LSM_ACTION_DENY
-		action = "deny"
+	rule := "lsm_audit"
+	enforced := false
+	switch e.Action {
+	case 1:
+		action, enforced = "deny", true
+	case 2:
+		action, rule = "sandbox_audit", "ai_sandbox"
+	case 3:
+		action, rule, enforced = "sandbox_deny", "ai_sandbox", true
 	}
 	return audit.Entry{
 		TS:        time.Now(),
 		Action:    action,
 		PID:       e.PID,
-		Rule:      "lsm_audit",
+		Rule:      rule,
 		Comm:      nullTermString(e.Comm[:]),
-		Enforced:  e.Action == 1,
+		Enforced:  enforced,
 		Hook:      hookName,
 		TargetPID: e.TargetPID,
 		Path:      nullTermString(e.Path[:]),

@@ -1,9 +1,11 @@
 # ebpf-guard for AI Agents — Kernel-Level Sandboxing of Autonomous Agents
 
-> Status: foundational config + ruleset (issue #255). Kernel enforcement
-> primitives (cgroup-scoped LSM allow maps, the `bprm_check_security` exec hook,
-> and the `ebpf-guard run` wrapper) land in follow-up sub-issues. This page
-> documents the policy model and the semantic ruleset that ship today.
+> Status: kernel enforcement implemented (issue #255). The cgroup-scoped LSM
+> allow maps, the `bprm_check_security` exec hook, the `ebpf-guard run` wrapper,
+> and Kubernetes label targeting all ship now. On kernels without BPF LSM
+> (< 5.7 / no `CONFIG_BPF_LSM`) the same policy runs in userspace audit-only
+> mode. This page documents the policy model, kernel enforcement, and the
+> semantic ruleset.
 
 ## Why
 
@@ -65,7 +67,7 @@ selected. See `config/config.yaml` for a fully commented example.
 ai_sandbox:
   enabled: true
   mode: audit            # audit (log only) | enforce (deny with -EPERM)
-  rules_path: rules/ai-agent.yaml
+  rules_path: rules/ai-agent/ai-agent.yaml
   selector:
     kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name
     comms: ["claude", "aider"]                    # Local entry-point comm names
@@ -96,10 +98,21 @@ ai_sandbox:
 - **Kubernetes** — label a Pod `ebpf-guard.io/sandbox-profile: ai-agent`; the
   K8s enricher resolves that Pod's cgroup subtree and applies the named profile
   to just those processes.
-- **Local** — list the agent's entry-point `comm` names under `selector.comms`;
-  matching process trees inherit `default_profile`. (The dedicated
-  `ebpf-guard run --profile ai-agent -- <cmd>` wrapper, which creates a fresh
-  cgroup per launch, is tracked as a follow-up.)
+- **Local** — wrap the agent with `ebpf-guard run`, which creates a fresh
+  cgroup per launch, installs the profile for that cgroup ID, and execs the
+  child inside it (via `CLONE_INTO_CGROUP`) so it is under policy before it
+  runs a single instruction:
+
+  ```bash
+  # audit-only: log what would be blocked
+  ebpf-guard run --profile ai-agent -- claude
+
+  # enforce: deny with -EPERM
+  ebpf-guard run --profile ai-agent --enforce -- bash
+  ```
+
+  The `selector.comms` / `default_profile` fields name the profile the wrapper
+  applies when `--profile` is omitted.
 
 ## Audit vs. enforce
 
@@ -113,9 +126,35 @@ risk of a deny-by-default sandbox: **over-blocking that bricks the agent**.
 Per-profile scoping and a break-glass path (disable the profile / relabel the
 Pod) keep an incorrect policy recoverable.
 
-## Semantic ruleset (`rules/ai-agent.yaml`)
+## How kernel enforcement works
 
-Even in `audit` mode, `rules/ai-agent.yaml` gives you high-signal detections
+When a cgroup is registered under a profile (by `ebpf-guard run`, or by the K8s
+label controller resolving a labelled Pod's cgroup subtree), the LSM hooks in
+`bpf/lsm.bpf.c` consult per-cgroup allow maps:
+
+- **file_open** — the opened path must match an `allowed_read_paths` /
+  `allowed_write_paths` prefix (write vs. read chosen from the file mode); a
+  `denied_paths` prefix always wins. Deny-by-default: anything unlisted is
+  refused.
+- **bprm_check_security** — the exec'd binary path must match an `allowed_exec`
+  prefix, so a downloaded/unknown binary is denied at exec.
+- **socket_connect** — the destination must fall inside an
+  `allowed_egress_cidrs` entry (loopback is always allowed) and, when the
+  profile lists `allowed_egress_ports`, match a listed port.
+
+Path matching uses the same FNV-1a prefix walk in kernel and userspace, so a
+prefix like `/workspace` allows `/workspace/**` but not a sibling
+`/workspaceX`. Every decision is emitted as an `ai_sandbox` audit event
+(`sandbox_audit` in audit mode, `sandbox_deny` in enforce mode).
+
+> **Egress note.** In-kernel egress enforcement is CIDR/port based.
+> `allowed_domains` is applied by the semantic ruleset (detection), not the
+> kernel allow-maps — in `enforce` mode, allow the resolver and the resolved
+> CIDRs, or keep DNS-based allow-listing to audit mode.
+
+## Semantic ruleset (`rules/ai-agent/ai-agent.yaml`)
+
+Even in `audit` mode, the ruleset gives you high-signal detections
 expressed in agent terms, tagged `ai-agent` + `sandbox` for easy filtering:
 
 - credential/secret reads — `~/.ssh`, cloud creds, `.env`, kubeconfig,
@@ -125,9 +164,13 @@ expressed in agent terms, tagged `ai-agent` + `sandbox` for easy filtering:
 - egress abuse — cloud metadata SSRF, `git push` over SSH;
 - reverse-/bind-shell tooling.
 
-These load like any other rule set (they respect hot-reload and rate limiting)
-and can be used **independently of kernel enforcement** — useful on kernels
-without BPF LSM, where they still provide agent-aware observability.
+This ruleset lives at `rules/ai-agent/ai-agent.yaml` — deliberately **outside**
+the default rules directory so it never fires unless you opt in. It is loaded on
+demand from `ai_sandbox.rules_path` when `ai_sandbox.enabled: true`. The
+detections themselves are process-wide (not gated on cgroup membership); the
+kernel allow-maps do the cgroup-scoped enforcement while these rules surface the
+attempts. On kernels without BPF LSM they still provide agent-aware
+observability independently of enforcement.
 
 ## Kernel requirements
 
@@ -141,12 +184,13 @@ On an unsupported kernel, `mode: enforce` degrades to audit-only with a clear
 startup log rather than failing closed, and egress may still be constrained via
 the nftables fallback.
 
-## Roadmap (issue #255 sub-tasks)
+## Status (issue #255 sub-tasks)
 
-1. cgroup-scoped positive policy maps in LSM (file/socket allow semantics).
-2. exec control via `bprm_check_security` (shares the allowed-exec map with #225).
-3. `ebpf-guard run` wrapper for local agents.
-4. Kubernetes targeting by label.
-5. **`rules/ai-agent.yaml` + `ai_sandbox` config — delivered here.**
-6. Docs + positioning — this page.
-7. Verification harness — agent-misbehavior scenarios in `internal/attacker`.
+1. ✅ cgroup-scoped positive policy maps in LSM (file/socket allow semantics).
+2. ✅ exec control via `bprm_check_security` (shares the allowed-exec map with #225).
+3. ✅ `ebpf-guard run` wrapper for local agents.
+4. ✅ Kubernetes targeting by label.
+5. ✅ `rules/ai-agent/ai-agent.yaml` + `ai_sandbox` config.
+6. ✅ Docs + positioning — this page.
+7. ✅ Verification harness — agent-misbehavior scenarios in `internal/attacker`
+   (`attack-sim --ai-agent`).

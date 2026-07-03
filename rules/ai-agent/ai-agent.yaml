@@ -8,9 +8,16 @@
 #
 # They complement (do not replace) the positive allow-policy enforced in the
 # kernel via the `ai_sandbox` config section. Rules here fire as detections/audit
-# signals; the config-driven cgroup allow-lists perform the deny-by-default
-# enforcement. Load these alongside your base rules and pair with
-# `ai_sandbox.enabled: true`.
+# signals for ANY process on the host; the config-driven cgroup allow-lists in
+# bpf/lsm.bpf.c perform the actual deny-by-default enforcement, scoped to the
+# agent's cgroup subtree.
+#
+# Scoping note: this file is loaded on demand from `ai_sandbox.rules_path` only
+# when `ai_sandbox.enabled: true` — it is NOT part of the default rules
+# directory, so it never fires unless you have opted into the agent profile.
+# The detections themselves are process-wide (they are not gated on cgroup
+# membership); pair them with an `ai_sandbox` profile so the kernel allow-maps
+# constrain the agent while these rules surface the attempts.
 #
 # Severity is deliberately conservative (mostly `warning`, `action: alert`) so
 # they are safe to enable in audit-first mode over a real agent workload before
@@ -125,19 +132,16 @@ rules:
   - id: ai_agent_pipe_to_shell
     name: "AI Agent: curl|sh / wget|bash remote-code pipeline"
     description: >
-      A sandboxed agent invoked a shell whose command line fetches and pipes a
-      remote payload directly into an interpreter (curl ... | sh, wget ... |
-      bash). This is the canonical unreviewed-remote-code pattern.
+      A process fetched a remote payload and piped it directly into an
+      interpreter (curl ... | sh, wget ... | bash). This is the canonical
+      unreviewed-remote-code pattern. Matched on the full command line
+      regardless of which binary is running it, so a direct `curl … | sh`
+      invocation is caught, not only a wrapping shell.
     event_type: syscall
-    condition_group:
-      operator: and
-      conditions:
-        - field: comm
-          op: in
-          values: ["sh", "bash", "dash", "zsh"]
-        - field: proc.args
-          op: regex
-          values: ['(?i)(curl|wget)\s+[^|]*\|\s*(sudo\s+)?(ba)?sh']
+    condition:
+      field: proc.args
+      op: regex
+      values: ['(?i)(curl|wget)\s+[^|]*\|\s*(sudo\s+)?(ba)?sh\b']
     severity: critical
     action: alert
     tags: [ai-agent, sandbox, remote-code, mitre:T1105, mitre:T1059.004]
@@ -276,7 +280,7 @@ rules:
       field: proc.args
       op: regex
       values:
-        - '(?i)\b(nc|ncat|netcat)\b.*\b-e\b'
+        - '(?i)\b(nc|ncat|netcat)\b.*\s-e\b'
         - '(?i)\bsocat\b.*\bexec'
         - '(?i)(bash|sh)\s+-i\b.*/dev/tcp/'
         - '(?i)/dev/tcp/[0-9]'

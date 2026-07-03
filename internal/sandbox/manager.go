@@ -235,7 +235,9 @@ func (m *Manager) closeLocked() {
 	}
 	m.links = nil
 	if m.objs != nil {
-		m.objs.Close()
+		if err := m.objs.Close(); err != nil {
+			m.logger.Warn("sandbox: close bpf objects", "error", err)
+		}
 		m.objs = nil
 	}
 	m.maps = nil

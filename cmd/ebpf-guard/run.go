@@ -86,7 +86,11 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 	if err := mgr.Load(); err != nil {
 		return fmt.Errorf("load sandbox: %w", err)
 	}
-	defer mgr.Close()
+	defer func() {
+		if err := mgr.Close(); err != nil {
+			logger.Warn("close sandbox manager", "error", err)
+		}
+	}()
 
 	if !mgr.KernelEnforced() && enforce {
 		logger.Warn("kernel enforcement unavailable; --enforce degraded to audit-only " +
@@ -122,17 +126,37 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 // execInCgroup starts args placed directly into the cgroup at clone time via
 // CLONE_INTO_CGROUP (Linux 5.7+), so the child is under policy before it runs
 // a single instruction. It forwards signals and the child's exit code.
+//
+// os.Exit is called here, outside runChild, so that runChild's deferred
+// cleanup (closing the cgroup dir FD, stopping the signal context) always
+// runs before the process exits.
 func execInCgroup(cg *sandbox.Cgroup, args []string) error {
+	code, err := runChild(cg, args)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		os.Exit(code)
+	}
+	return nil
+}
+
+// runChild runs args inside cg and returns the child's exit code (0 on
+// success or a non-exit-error failure, which is returned as err instead).
+func runChild(cg *sandbox.Cgroup, args []string) (int, error) {
 	cgFD, err := os.Open(cg.Path())
 	if err != nil {
-		return fmt.Errorf("open cgroup dir: %w", err)
+		return 0, fmt.Errorf("open cgroup dir: %w", err)
 	}
-	defer cgFD.Close()
+	defer func() { _ = cgFD.Close() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	child := exec.CommandContext(ctx, args[0], args[1:]...)
+	// args[0]/args[1:] are the operator-supplied COMMAND for `ebpf-guard run`
+	// to execute inside the sandbox; running an arbitrary command is the
+	// purpose of this wrapper, not an injection risk.
+	child := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec G204
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 	child.SysProcAttr = &syscall.SysProcAttr{
 		UseCgroupFD: true,
@@ -142,9 +166,9 @@ func execInCgroup(cg *sandbox.Cgroup, args []string) error {
 	if err := child.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			os.Exit(exitErr.ExitCode())
+			return exitErr.ExitCode(), nil
 		}
-		return fmt.Errorf("run %q: %w", args[0], err)
+		return 0, fmt.Errorf("run %q: %w", args[0], err)
 	}
-	return nil
+	return 0, nil
 }

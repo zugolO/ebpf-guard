@@ -12,7 +12,7 @@ import "net"
 func (cp *compiledProfile) pathLookup() map[uint32]uint8 {
 	m := make(map[uint32]uint8, len(cp.paths))
 	for _, e := range cp.paths {
-		m[uint32(e.Key)] |= e.Access
+		m[uint32(e.Key)] |= e.Access // #nosec G115 -- intentional: keep the low 32 bits (the fnv32a hash), discard the profile-id bits packed into the high 32
 	}
 	return m
 }

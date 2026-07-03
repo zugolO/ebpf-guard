@@ -160,7 +160,7 @@ func (cp *compiledProfile) addCIDR(cidr string) error {
 	ones, _ := ipnet.Mask.Size()
 	if v4 := ipnet.IP.To4(); v4 != nil {
 		var e CIDRv4Entry
-		e.PrefixLen = 32 + uint32(ones)
+		e.PrefixLen = 32 + uint32(ones) // #nosec G115 -- ones is a net.IPMask.Size() prefix length, bounded to 0..32
 		binary.BigEndian.PutUint32(e.Data[0:4], cp.id)
 		copy(e.Data[4:8], v4)
 		cp.cidrv4 = append(cp.cidrv4, e)
@@ -171,7 +171,7 @@ func (cp *compiledProfile) addCIDR(cidr string) error {
 		return fmt.Errorf("unrecognised IP in CIDR %q", cidr)
 	}
 	var e CIDRv6Entry
-	e.PrefixLen = 32 + uint32(ones)
+	e.PrefixLen = 32 + uint32(ones) // #nosec G115 -- ones is a net.IPMask.Size() prefix length, bounded to 0..128
 	binary.BigEndian.PutUint32(e.Data[0:4], cp.id)
 	copy(e.Data[4:20], v6)
 	cp.cidrv6 = append(cp.cidrv6, e)

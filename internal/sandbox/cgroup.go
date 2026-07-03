@@ -27,11 +27,11 @@ func NewCgroup(name string) (*Cgroup, error) {
 		return nil, fmt.Errorf("cgroup v2 not mounted at %s: %w", cgroupRoot, err)
 	}
 	parent := filepath.Join(cgroupRoot, "ebpf-guard.sandbox")
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return nil, fmt.Errorf("create sandbox parent cgroup: %w", err)
 	}
 	dir := filepath.Join(parent, name)
-	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
+	if err := os.Mkdir(dir, 0o750); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("create cgroup %s: %w", dir, err)
 	}
 	id, err := cgroupInode(dir)
@@ -60,7 +60,7 @@ func (c *Cgroup) Path() string { return c.path }
 // AddPID moves a process into the cgroup by writing to cgroup.procs.
 func (c *Cgroup) AddPID(pid int) error {
 	procs := filepath.Join(c.path, "cgroup.procs")
-	if err := os.WriteFile(procs, []byte(strconv.Itoa(pid)), 0o644); err != nil {
+	if err := os.WriteFile(procs, []byte(strconv.Itoa(pid)), 0o600); err != nil {
 		return fmt.Errorf("add pid %d to cgroup: %w", pid, err)
 	}
 	return nil

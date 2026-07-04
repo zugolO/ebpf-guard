@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"log/slog"
+	"net"
 	"os"
 	"testing"
 	"time"
@@ -279,6 +280,56 @@ func TestLSMAuditEventRaw_ToAuditEntry(t *testing.T) {
 			assert.Equal(t, "lsm_audit", entry.Rule)
 		})
 	}
+}
+
+// TestLSMAuditEventRaw_ToAuditEntry_SandboxSocketConnect verifies that an
+// ai_sandbox socket_connect violation's packed port+address path[] decodes to
+// a readable "ip:port" string instead of nullTermString's garbled bytes
+// (issue #266, item 2).
+func TestLSMAuditEventRaw_ToAuditEntry_SandboxSocketConnect(t *testing.T) {
+	t.Run("IPv4 sandbox audit", func(t *testing.T) {
+		e := lsmAuditEventRaw{
+			PID:    42,
+			Action: lsmActionSandboxAudit,
+			Hook:   lsmHookSocketConnect,
+			Sig:    2, // AF_INET
+		}
+		binary.BigEndian.PutUint16(e.Path[0:2], 443)
+		copy(e.Path[2:6], []byte{93, 184, 216, 34})
+
+		entry := e.toAuditEntry()
+		assert.Equal(t, "sandbox_audit", entry.Action)
+		assert.Equal(t, "ai_sandbox", entry.Rule)
+		assert.Equal(t, "93.184.216.34:443", entry.Path)
+	})
+
+	t.Run("IPv6 sandbox deny", func(t *testing.T) {
+		e := lsmAuditEventRaw{
+			PID:    42,
+			Action: lsmActionSandboxDeny,
+			Hook:   lsmHookSocketConnect,
+			Sig:    10, // AF_INET6
+		}
+		binary.BigEndian.PutUint16(e.Path[0:2], 8080)
+		copy(e.Path[2:18], net.ParseIP("2001:db8::1").To16())
+
+		entry := e.toAuditEntry()
+		assert.Equal(t, "sandbox_deny", entry.Action)
+		assert.True(t, entry.Enforced)
+		assert.Equal(t, "[2001:db8::1]:8080", entry.Path)
+	})
+
+	t.Run("non-sandbox socket_connect deny keeps path decoding as text", func(t *testing.T) {
+		e := lsmAuditEventRaw{
+			PID:    42,
+			Action: 1, // plain LSM_ACTION_DENY, not ai_sandbox
+			Hook:   lsmHookSocketConnect,
+		}
+
+		entry := e.toAuditEntry()
+		assert.Equal(t, "deny", entry.Action)
+		assert.Equal(t, "", entry.Path) // zeroed path, no sandbox decoding applied
+	})
 }
 
 // TestKmodCollector_WithAuditLogger_LSMAuditRouting verifies that when a

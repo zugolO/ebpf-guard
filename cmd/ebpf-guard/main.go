@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -67,6 +68,10 @@ const pendingFlushInterval = 100 * time.Millisecond
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var ec *exitCodeError
+		if errors.As(err, &ec) {
+			os.Exit(ec.code)
+		}
 		os.Exit(1)
 	}
 }
@@ -1201,6 +1206,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// API server. Scoped to this node via NODE_NAME to bound memory. Runs first
 	// in the enrichment chain so the runtime enricher only fills container fields.
 	// No-ops gracefully off-cluster (NewEnricher returns an error).
+	// Start is deferred until after the ai_sandbox block below has a chance to
+	// register the sandbox controller's pod-event handler (issue #266, item 3):
+	// registering after Start risks missing PodAdded events for pods already
+	// present at startup, which fire as soon as the informer's initial List
+	// completes and aren't redelivered until the next ResyncPeriod (default 300s).
 	var k8sEnricher *k8s.Enricher
 	if cfg.Kubernetes.Enabled {
 		ke, keErr := k8s.NewEnricher(k8s.EnricherConfig{
@@ -1213,13 +1223,6 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Any("error", keErr))
 		} else {
 			k8sEnricher = ke
-			go func() {
-				if err := k8sEnricher.Start(ctx); err != nil {
-					slog.Warn("k8s enricher stopped", slog.Any("error", err))
-				}
-			}()
-			defer func() { _ = k8sEnricher.Stop() }()
-			slog.Info("k8s enricher active (pod metadata enrichment)")
 		}
 	}
 
@@ -1267,6 +1270,19 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			go pinner.Run(ctx)
 			slog.Info("ai_sandbox: DNS-pinned egress active")
 		}
+	}
+
+	// Now that any sandbox controller has registered its pod-event handler,
+	// start the informer so its initial List/Watch is delivered to every
+	// subscriber instead of only the ones registered before this point.
+	if k8sEnricher != nil {
+		go func() {
+			if err := k8sEnricher.Start(ctx); err != nil {
+				slog.Warn("k8s enricher stopped", slog.Any("error", err))
+			}
+		}()
+		defer func() { _ = k8sEnricher.Stop() }()
+		slog.Info("k8s enricher active (pod metadata enrichment)")
 	}
 
 	// ── Container runtime enricher (issue #123) ─────────────────────────────

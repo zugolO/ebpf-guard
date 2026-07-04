@@ -7,11 +7,15 @@ import "net"
 // back two things: the userspace-audit fallback when BPF LSM is unavailable,
 // and the unit tests that pin the kernel/userspace encoding contract.
 
-// pathLookup indexes a profile's path policy by the FNV-1a hash of the prefix,
-// mirroring the sandbox_path_policy map key (minus the profile id high bits).
-func (cp *compiledProfile) pathLookup() map[uint32]uint8 {
-	m := make(map[uint32]uint8, len(cp.paths))
-	for _, e := range cp.paths {
+// buildPathLookup indexes a profile's path policy by the FNV-1a hash of the
+// prefix, mirroring the sandbox_path_policy map key (minus the profile id high
+// bits). Called once per profile at Compile() time and cached on
+// compiledProfile.lookup — paths never changes afterward, so recomputing it on
+// every PathAllowed/ExecAllowed call (once per file/exec event in the
+// userspace audit fallback) would be wasted allocation.
+func buildPathLookup(paths []PathEntry) map[uint32]uint8 {
+	m := make(map[uint32]uint8, len(paths))
+	for _, e := range paths {
 		m[uint32(e.Key)] |= e.Access // #nosec G115 -- intentional: keep the low 32 bits (the fnv32a hash), discard the profile-id bits packed into the high 32
 	}
 	return m
@@ -58,7 +62,7 @@ func (p *Policy) PathAllowed(profile, absPath string, want uint8) bool {
 	if !ok {
 		return false
 	}
-	return pathAllowed(cp.pathLookup(), absPath, want)
+	return pathAllowed(cp.lookup, absPath, want)
 }
 
 // EscapePrimitive names a kernel-contained sandbox-escape vector — a syscall or
@@ -111,7 +115,7 @@ func (p *Policy) ExecAllowed(profile, absPath string, digest [32]byte) bool {
 	if !ok {
 		return false
 	}
-	if !pathAllowed(cp.pathLookup(), absPath, accessExec) {
+	if !pathAllowed(cp.lookup, absPath, accessExec) {
 		return false
 	}
 	norm := normalizePrefix(absPath)

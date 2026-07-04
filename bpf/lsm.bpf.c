@@ -686,6 +686,11 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
 				update_stat(LSM_STAT_TASK_KILL_BLOCK);
 				return -EPERM;
 			}
+			/* Audit mode: already recorded via the sandbox-specific event
+			 * above — return here so the unconditional audit event below
+			 * isn't also emitted for the same signal. */
+			update_stat(LSM_STAT_TASK_KILL_ALLOW);
+			return 0;
 		}
 	}
 

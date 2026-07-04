@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +66,15 @@ var lsmHookNames = [8]string{
 	"bpf", "ptrace", "mount", "module",
 }
 
+// LSM_HOOK_SOCKET_CONNECT and the ai_sandbox action codes, mirroring
+// bpf/common.h. Duplicated here (rather than imported) because these are C
+// #defines with no Go binding.
+const (
+	lsmHookSocketConnect  = 1
+	lsmActionSandboxAudit = 2
+	lsmActionSandboxDeny  = 3
+)
+
 // parseLSMAuditEventRaw deserialises a raw ring-buffer record into lsmAuditEventRaw.
 func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
 	if len(raw) < lsmAuditEventSize {
@@ -102,6 +113,14 @@ func (e lsmAuditEventRaw) toAuditEntry() audit.Entry {
 	case 3:
 		action, rule, enforced = "sandbox_deny", "ai_sandbox", true
 	}
+	path := nullTermString(e.Path[:])
+	if e.Hook == lsmHookSocketConnect && (e.Action == lsmActionSandboxAudit || e.Action == lsmActionSandboxDeny) {
+		// sandbox_emit() packs socket_connect violations as port(2, BE) + raw
+		// address bytes rather than a path string (see bpf/lsm.bpf.c); decode
+		// that instead of null-terminating it as text.
+		path = decodeSandboxAddr(e.Sig, e.Path[:])
+	}
+
 	return audit.Entry{
 		TS:        time.Now(),
 		Action:    action,
@@ -111,9 +130,38 @@ func (e lsmAuditEventRaw) toAuditEntry() audit.Entry {
 		Enforced:  enforced,
 		Hook:      hookName,
 		TargetPID: e.TargetPID,
-		Path:      nullTermString(e.Path[:]),
+		Path:      path,
 		UID:       e.UID,
 	}
+}
+
+// decodeSandboxAddr decodes an ai_sandbox socket_connect violation's packed
+// path[] field — port(2, BE) followed by raw address bytes, family given by
+// the event's sig byte — into a "host:port" string. Returns "" for an
+// unrecognised family or a short buffer.
+func decodeSandboxAddr(family uint8, path []byte) string {
+	const (
+		afINET  = 2
+		afINET6 = 10
+	)
+	if len(path) < 2 {
+		return ""
+	}
+	port := binary.BigEndian.Uint16(path[:2])
+	var addrLen int
+	switch family {
+	case afINET:
+		addrLen = 4
+	case afINET6:
+		addrLen = 16
+	default:
+		return ""
+	}
+	if len(path) < 2+addrLen {
+		return ""
+	}
+	ip := net.IP(path[2 : 2+addrLen])
+	return net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
 }
 
 // nullTermString converts a NUL-padded byte slice to a Go string.

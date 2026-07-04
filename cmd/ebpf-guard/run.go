@@ -37,7 +37,15 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 			"  ebpf-guard run --profile ai-agent --enforce -- bash -c 'cat ~/.ssh/id_rsa'",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSandboxed(*cfgPath, profileName, enforce, auditLog, args)
+			err := runSandboxed(*cfgPath, profileName, enforce, auditLog, args)
+			// A non-zero *exitCodeError just mirrors the wrapped command's own
+			// exit code (already visible via its inherited stdout/stderr) — not
+			// an ebpf-guard error, so don't let cobra print "Error: ..." for it.
+			var ec *exitCodeError
+			if errors.As(err, &ec) {
+				cmd.SilenceErrors = true
+			}
+			return err
 		},
 	}
 
@@ -152,25 +160,37 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 		"cgroup_id", cg.ID(),
 		"command", args[0])
 
-	return execInCgroup(cg, args)
-}
-
-// execInCgroup starts args placed directly into the cgroup at clone time via
-// CLONE_INTO_CGROUP (Linux 5.7+), so the child is under policy before it runs
-// a single instruction. It forwards signals and the child's exit code.
-//
-// os.Exit is called here, outside runChild, so that runChild's deferred
-// cleanup (closing the cgroup dir FD, stopping the signal context) always
-// runs before the process exits.
-func execInCgroup(cg *sandbox.Cgroup, args []string) error {
-	code, err := runChild(cg, args)
+	code, err := execInCgroup(cg, args)
 	if err != nil {
 		return err
 	}
 	if code != 0 {
-		os.Exit(code)
+		// Returned rather than os.Exit'd here: os.Exit skips every deferred
+		// call on the goroutine's stack, including cg.Remove(), UnregisterCgroup,
+		// mgr.Close(), and stopping the DNS pinner registered earlier in this
+		// function. Propagating an error lets those run via the normal return/
+		// unwind path; main() turns *exitCodeError back into the precise
+		// os.Exit(code) once nothing more needs to unwind.
+		return &exitCodeError{code: code}
 	}
 	return nil
+}
+
+// exitCodeError carries a wrapped command's exit code through cobra's
+// RunE → Execute() error return so the code can reach os.Exit in main()
+// without an os.Exit call short-circuiting deferred cleanup along the way.
+type exitCodeError struct{ code int }
+
+func (e *exitCodeError) Error() string {
+	return fmt.Sprintf("command exited with status %d", e.code)
+}
+
+// execInCgroup starts args placed directly into the cgroup at clone time via
+// CLONE_INTO_CGROUP (Linux 5.7+), so the child is under policy before it runs
+// a single instruction. It forwards signals and returns the child's exit code
+// for the caller to act on after its own cleanup has run.
+func execInCgroup(cg *sandbox.Cgroup, args []string) (int, error) {
+	return runChild(cg, args)
 }
 
 // runChild runs args inside cg and returns the child's exit code (0 on

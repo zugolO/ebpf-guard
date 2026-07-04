@@ -92,6 +92,10 @@ type compiledProfile struct {
 	// binary's digest matches one of its pins (identity), even though the path is
 	// covered by an allowed_exec prefix.
 	pinnedPaths map[uint32]struct{}
+	// lookup caches buildPathLookup(paths)'s result. paths is only ever
+	// appended to during Compile(), so this is built once it settles rather
+	// than rebuilt on every PathAllowed/ExecAllowed call.
+	lookup map[uint32]uint8
 }
 
 // Policy is the fully compiled ai_sandbox configuration: a stable name→id
@@ -157,6 +161,7 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 			}
 		}
 
+		cp.lookup = buildPathLookup(cp.paths)
 		p.byName[prof.Name] = cp
 		p.profiles = append(p.profiles, cp)
 	}

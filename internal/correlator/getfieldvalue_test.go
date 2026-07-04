@@ -97,6 +97,15 @@ func TestGetFieldValue(t *testing.T) {
 		// BPF program
 		{"bpf cmd_nr", types.Event{Type: types.EventBPFProgram, BPFProgram: &types.BPFProgramEvent{Cmd: 5}}, "cmd_nr", "5"},
 		{"bpf ret", types.Event{Type: types.EventBPFProgram, BPFProgram: &types.BPFProgramEvent{Ret: -13}}, "ret", "-13"},
+
+		// LSM audit (ai_sandbox decisions — issue #268)
+		{"lsm decision deny", types.Event{Type: types.EventLSMAudit, LSMAudit: &types.LSMAuditEvent{Decision: "sandbox_deny"}}, "decision", "sandbox_deny"},
+		{"lsm hook", types.Event{Type: types.EventLSMAudit, LSMAudit: &types.LSMAuditEvent{Hook: "file_open"}}, "hook", "file_open"},
+		{"lsm path", types.Event{Type: types.EventLSMAudit, LSMAudit: &types.LSMAuditEvent{Path: "/etc/shadow"}}, "path", "/etc/shadow"},
+		{"lsm target_pid", types.Event{Type: types.EventLSMAudit, LSMAudit: &types.LSMAuditEvent{TargetPID: 99}}, "target_pid", "99"},
+		{"lsm comm", types.Event{Type: types.EventLSMAudit, Comm: mkComm("claude"), LSMAudit: &types.LSMAuditEvent{}}, "comm", "claude"},
+		{"lsm uid", types.Event{Type: types.EventLSMAudit, UID: 1000, LSMAudit: &types.LSMAuditEvent{}}, "uid", "1000"},
+		{"lsm nil", types.Event{Type: types.EventLSMAudit}, "decision", ""},
 	}
 
 	for _, tc := range cases {

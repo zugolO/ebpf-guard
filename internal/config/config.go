@@ -1190,6 +1190,13 @@ type AISandboxConfig struct {
 	// egress). 0 disables DNS pinning and leaves egress to the static
 	// allowed_egress_cidrs only. Default: 60s when any profile lists domains.
 	DNSRefreshInterval time.Duration `mapstructure:"dns_refresh_interval"`
+
+	// AuditLog is the path to a dedicated append-only JSONL sink for ai_sandbox
+	// decisions (sandbox_audit / sandbox_deny), independent of
+	// enforcement.audit_log (issue #268). Empty means no dedicated file: sandbox
+	// decisions still surface through the correlator (/api/v1/alerts) and
+	// Prometheus, and are written to enforcement.audit_log if that is configured.
+	AuditLog string `mapstructure:"audit_log"`
 }
 
 // AISandboxSelector chooses which processes are placed under a sandbox profile.
@@ -2184,6 +2191,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ai_sandbox.selector.default_profile", "")
 	v.SetDefault("ai_sandbox.profiles", []AISandboxProfile{})
 	v.SetDefault("ai_sandbox.dns_refresh_interval", 60*time.Second)
+	v.SetDefault("ai_sandbox.audit_log", "")
 }
 
 // Get returns the current configuration (thread-safe).

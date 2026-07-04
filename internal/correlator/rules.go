@@ -1309,6 +1309,24 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "fingerprint":
 			return ""
 		}
+	case types.EventLSMAudit:
+		if e.LSMAudit == nil {
+			return ""
+		}
+		switch field {
+		case "hook":
+			return e.LSMAudit.Hook
+		case "decision":
+			return e.LSMAudit.Decision
+		case "path":
+			return e.LSMAudit.Path
+		case "target_pid":
+			return strconv.FormatUint(uint64(e.LSMAudit.TargetPID), 10)
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		case "uid":
+			return strconv.FormatUint(uint64(e.UID), 10)
+		}
 	case types.EventIOUring:
 		if e.IOUring == nil {
 			return ""

@@ -221,6 +221,10 @@ type Event struct {
 	// BPFProgram holds bpf() syscall monitoring data (BPF_PROG_LOAD / BPF_MAP_CREATE).
 	// Populated when Type == EventBPFProgram.
 	BPFProgram *BPFProgramEvent
+	// LSMAudit holds an LSM-hook audit record (ai_sandbox sandbox_audit/sandbox_deny
+	// decisions, plus enforcer file_open / socket_connect / task_kill blocks).
+	// Populated when Type == EventLSMAudit.
+	LSMAudit *LSMAuditEvent
 	// TraceContext holds OpenTelemetry trace context for distributed tracing.
 	TraceContext *TraceContext
 	// Enrichment holds Kubernetes metadata for the event.
@@ -543,6 +547,31 @@ type BPFProgramEvent struct {
 	Ret int32
 }
 
+// LSMAuditEvent contains an LSM-hook audit record decoded from the lsm_events
+// ring buffer written by bpf/lsm.bpf.c. The ai_sandbox hooks emit one of these
+// for every would-be-denied (audit mode) or denied (enforce mode) action inside
+// a sandboxed cgroup, so a populated LSMAuditEvent is always a policy violation.
+type LSMAuditEvent struct {
+	// Hook is the LSM hook that produced the record: "file_open",
+	// "socket_connect", "task_kill", "bprm_check", "bpf", "ptrace", "mount",
+	// or "module".
+	Hook string
+	// Decision is the action the hook took, matched by the "decision" rule field:
+	// "sandbox_audit" (ai_sandbox would-be-deny), "sandbox_deny" (ai_sandbox deny),
+	// "audit" (enforcer log-only), or "deny" (enforcer block).
+	Decision string
+	// Enforced is true when the action was actually denied (-EPERM) rather than
+	// only logged.
+	Enforced bool
+	// Path is the file path for file_open records, or a decoded "host:port" for
+	// socket_connect records. Empty for hooks that carry no path.
+	Path string
+	// TargetPID is the signalled task for task_kill records. For ai_sandbox
+	// records it instead carries the matched profile ID (the BPF hook reuses the
+	// field), so treat it as opaque outside task_kill.
+	TargetPID uint32
+}
+
 // CloudAuditEvent contains cloud control-plane audit data from AWS CloudTrail,
 // GCP Audit Logs, or Azure Activity Logs.
 type CloudAuditEvent struct {
@@ -588,6 +617,7 @@ func (e *Event) Reset() {
 	e.CloudAudit = nil
 	e.IOUring = nil
 	e.BPFProgram = nil
+	e.LSMAudit = nil
 	e.TraceContext = nil
 	e.Enrichment = nil
 	e.ProcArgs = ""

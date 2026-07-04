@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,7 +11,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/spf13/cobra"
+	"github.com/zugolO/ebpf-guard/internal/audit"
+	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/collector"
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/sandbox"
 )
@@ -144,6 +149,33 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 	}
 	defer func() { _ = mgr.UnregisterCgroup(cg.ID()) }()
 
+	// Drain the sandbox lsm_events ring buffer and record every sandbox_audit /
+	// sandbox_deny decision the LSM hooks emit. Without this the documented
+	// audit-first flow produced no output at all and --audit-log was dead
+	// (issue #268). Best-effort: on an audit-only kernel LSMEvents() is nil and
+	// there is nothing to drain.
+	if evMap := mgr.LSMEvents(); evMap != nil {
+		writeEntry, closeSink, sinkErr := openAuditSink(auditLog, logger)
+		if sinkErr != nil {
+			return fmt.Errorf("open audit sink: %w", sinkErr)
+		}
+		defer closeSink()
+
+		reader, rErr := bpf.NewRingbufReader(evMap)
+		if rErr != nil {
+			return fmt.Errorf("open sandbox audit reader: %w", rErr)
+		}
+		drainCtx, stopDrain := context.WithCancel(context.Background())
+		defer func() {
+			stopDrain()
+			_ = reader.Close()
+		}()
+		go drainSandboxAudit(drainCtx, reader, writeEntry, logger)
+	} else if auditLog != "" {
+		logger.Warn("ai_sandbox: --audit-log has no effect without kernel LSM enforcement "+
+			"(audit-only mode); no lsm_events to drain", "audit_log", auditLog)
+	}
+
 	// DNS-pinned egress (item 6): resolve the profile's allowed_domains and keep
 	// their A/AAAA records programmed as egress allow entries for the lifetime of
 	// the wrapped command. Started only when a profile lists domains.
@@ -175,6 +207,61 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 		return &exitCodeError{code: code}
 	}
 	return nil
+}
+
+// openAuditSink returns a writer for sandbox audit records. When path is
+// non-empty it appends JSONL to that file via the shared audit.Logger (with
+// rotation); otherwise it writes JSON lines to stderr — the documented default
+// for `ebpf-guard run` (issue #268). The returned close function flushes/closes
+// the underlying file (a no-op for stderr).
+func openAuditSink(path string, logger *slog.Logger) (write func(audit.Entry), closeFn func(), err error) {
+	if path == "" {
+		enc := json.NewEncoder(os.Stderr)
+		return func(e audit.Entry) {
+			if encErr := enc.Encode(e); encErr != nil {
+				logger.Warn("sandbox audit: write to stderr failed", "error", encErr)
+			}
+		}, func() {}, nil
+	}
+	al, alErr := audit.New(path)
+	if alErr != nil {
+		return nil, nil, alErr
+	}
+	return func(e audit.Entry) {
+			if logErr := al.Log(e); logErr != nil {
+				logger.Warn("sandbox audit: write to log failed", "path", path, "error", logErr)
+			}
+		}, func() {
+			if cErr := al.Close(); cErr != nil {
+				logger.Warn("sandbox audit: close log failed", "path", path, "error", cErr)
+			}
+		}, nil
+}
+
+// drainSandboxAudit reads the sandbox lsm_events ring buffer, decodes each
+// sandbox_audit / sandbox_deny record, and hands it to write. It returns when
+// the reader is closed or ctx is cancelled (both happen when the wrapped command
+// exits).
+func drainSandboxAudit(ctx context.Context, reader *bpf.RingbufReader, write func(audit.Entry), logger *slog.Logger) {
+	for {
+		rec, err := reader.Read()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
+			logger.Warn("sandbox audit: ring read error", "error", err)
+			continue
+		}
+		entry, sandbox, ok, decErr := collector.DecodeLSMAuditRecord(rec.RawSample)
+		if decErr != nil {
+			logger.Warn("sandbox audit: decode error", "error", decErr)
+			continue
+		}
+		if !ok || !sandbox {
+			continue // enforcer LSM audit events are handled by the daemon, not here
+		}
+		write(entry)
+	}
 }
 
 // exitCodeError carries a wrapped command's exit code through cobra's

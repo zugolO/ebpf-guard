@@ -118,10 +118,12 @@ var (
 		"parent_comm": true,
 	}
 	validLSMAuditFields = map[string]bool{
-		"hook":     true,
-		"comm":     true,
-		"uid":      true,
-		"decision": true,
+		"hook":       true,
+		"comm":       true,
+		"uid":        true,
+		"decision":   true,
+		"path":       true,
+		"target_pid": true,
 	}
 	validSequenceFields = map[string]bool{
 		"pattern": true,

@@ -14,9 +14,121 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// buildSandboxAuditRaw builds a synthetic lsm_audit_event ring-buffer record for
+// an ai_sandbox decision, used by the issue #268 forwarding tests.
+func buildSandboxAuditRaw(action, hook uint8, pid, uid uint32, comm, path string) []byte {
+	raw := make([]byte, lsmAuditEventSize)
+	binary.LittleEndian.PutUint32(raw[0:4], uint32(types.EventLSMAudit))
+	binary.LittleEndian.PutUint32(raw[12:16], pid)
+	binary.LittleEndian.PutUint32(raw[20:24], uid)
+	raw[24] = action
+	raw[25] = hook
+	copy(raw[27:43], comm)
+	copy(raw[43:107], path)
+	return raw
+}
+
+// TestKmodCollector_SandboxEvent_Forwarded verifies that ai_sandbox decisions are
+// forwarded through the event channel (not dropped) even when no audit logger is
+// configured, and that the Prometheus counter is bumped (issue #268).
+func TestKmodCollector_SandboxEvent_Forwarded(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	c, err := NewKmodCollector(logger)
+	require.NoError(t, err)
+	// Deliberately no audit sink of any kind.
+
+	raw := buildSandboxAuditRaw(lsmActionSandboxDeny, 0 /* file_open */, 4242, 0, "agent\x00", "/etc/shadow\x00")
+	event, parseErr := c.parseKmodOrFallback(raw)
+	require.NoError(t, parseErr)
+	require.NotNil(t, event, "sandbox decisions must be forwarded to the event channel")
+	assert.Equal(t, types.EventLSMAudit, event.Type)
+	require.NotNil(t, event.LSMAudit)
+	assert.Equal(t, "sandbox_deny", event.LSMAudit.Decision)
+	assert.Equal(t, "file_open", event.LSMAudit.Hook)
+	assert.True(t, event.LSMAudit.Enforced)
+	assert.Equal(t, "/etc/shadow", event.LSMAudit.Path)
+	assert.Equal(t, uint32(4242), event.PID)
+	assert.Equal(t, "agent", nullTermString(event.Comm[:]))
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(c.sandboxEvents.WithLabelValues("file_open", "sandbox_deny")))
+}
+
+// TestKmodCollector_SandboxEvent_DedicatedSink verifies that a dedicated sandbox
+// sink receives the record independent of the enforcement audit logger, while
+// the event is still forwarded (issue #268).
+func TestKmodCollector_SandboxEvent_DedicatedSink(t *testing.T) {
+	path := t.TempDir() + "/sandbox-audit.jsonl"
+	sal, err := audit.New(path)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	c, err := NewKmodCollector(logger)
+	require.NoError(t, err)
+	c.WithSandboxAudit(sal) // no enforcement audit logger set
+
+	raw := buildSandboxAuditRaw(lsmActionSandboxAudit, 0, 55, 1000, "aider\x00", "/root/.ssh/id_rsa\x00")
+	event, parseErr := c.parseKmodOrFallback(raw)
+	require.NoError(t, parseErr)
+	require.NotNil(t, event, "sandbox decision must still be forwarded when a dedicated sink is set")
+
+	require.NoError(t, sal.Close())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"sandbox_audit"`)
+	assert.Contains(t, string(data), `/root/.ssh/id_rsa`)
+	assert.Contains(t, string(data), `"ai_sandbox"`)
+}
+
+// TestKmodCollector_NonSandboxAuditNotForwarded verifies enforcer LSM audit
+// events (action deny/audit) keep their out-of-band routing and are not pushed
+// onto the event channel (issue #268 preserves prior behaviour).
+func TestKmodCollector_NonSandboxAuditNotForwarded(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	c, err := NewKmodCollector(logger)
+	require.NoError(t, err)
+
+	raw := buildSandboxAuditRaw(1 /* LSM_ACTION_DENY */, 0, 9, 0, "sh\x00", "/etc/shadow\x00")
+	event, parseErr := c.parseKmodOrFallback(raw)
+	require.NoError(t, parseErr)
+	assert.Nil(t, event, "enforcer LSM audit events must not be forwarded to the event channel")
+	assert.Equal(t, 0.0, testutil.ToFloat64(c.sandboxEvents.WithLabelValues("file_open", "deny")))
+}
+
+// TestDecodeLSMAuditRecord verifies the exported decoder used by `ebpf-guard run`.
+func TestDecodeLSMAuditRecord(t *testing.T) {
+	t.Run("sandbox deny", func(t *testing.T) {
+		raw := buildSandboxAuditRaw(lsmActionSandboxDeny, 0, 7, 0, "claude\x00", "/etc/shadow\x00")
+		entry, sandbox, ok, err := DecodeLSMAuditRecord(raw)
+		require.NoError(t, err)
+		assert.True(t, ok)
+		assert.True(t, sandbox)
+		assert.Equal(t, "sandbox_deny", entry.Action)
+		assert.True(t, entry.Enforced)
+	})
+	t.Run("enforcer audit is not sandbox", func(t *testing.T) {
+		raw := buildSandboxAuditRaw(0 /* audit */, 0, 7, 0, "sh\x00", "/x\x00")
+		_, sandbox, ok, err := DecodeLSMAuditRecord(raw)
+		require.NoError(t, err)
+		assert.True(t, ok)
+		assert.False(t, sandbox)
+	})
+	t.Run("non-lsm record", func(t *testing.T) {
+		raw := make([]byte, lsmAuditEventSize)
+		binary.LittleEndian.PutUint32(raw[0:4], uint32(types.EventKmodLoad))
+		_, _, ok, err := DecodeLSMAuditRecord(raw)
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+	t.Run("too short", func(t *testing.T) {
+		_, _, _, err := DecodeLSMAuditRecord([]byte{1, 2})
+		require.Error(t, err)
+	})
+}
 
 func TestLSMConfig_Default(t *testing.T) {
 	config := DefaultLSMConfig()

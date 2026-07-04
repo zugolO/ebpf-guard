@@ -971,10 +971,30 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Info("lsm: collector enabled")
 		}
 
+		// Dedicated ai_sandbox audit sink, independent of enforcement.audit_log
+		// (issue #268): when configured, sandbox_audit/sandbox_deny records are
+		// written here even if no enforcement audit log is set. Regardless of this
+		// sink, sandbox decisions are forwarded through the correlator so they
+		// reach /api/v1/alerts and Prometheus.
+		var sandboxAuditLogger *audit.Logger
+		if cfg.AISandbox.Enabled && cfg.AISandbox.AuditLog != "" {
+			if sal, salErr := audit.New(cfg.AISandbox.AuditLog); salErr != nil {
+				slog.Warn("ai_sandbox: dedicated audit log unavailable; sandbox decisions still surface via /alerts and Prometheus",
+					slog.String("path", cfg.AISandbox.AuditLog), slog.Any("error", salErr))
+			} else {
+				defer sal.Close()
+				sandboxAuditLogger = sal
+			}
+		}
+
 		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {
 			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
 		} else {
 			kc.WithAuditLogger(auditLogger)
+			kc.WithSandboxAudit(sandboxAuditLogger)
+			if mErr := kc.RegisterMetrics(prometheus.DefaultRegisterer); mErr != nil {
+				slog.Warn("kmod: register metrics failed", slog.Any("error", mErr))
+			}
 			kmodCollector = kc
 			collectors = append(collectors, kc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("kmod: collector enabled")

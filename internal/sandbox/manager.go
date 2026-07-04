@@ -96,6 +96,19 @@ func New(cfg config.AISandboxConfig, logger *slog.Logger) (*Manager, error) {
 // Policy returns the compiled policy for userspace evaluation.
 func (m *Manager) Policy() *Policy { return m.policy }
 
+// LSMEvents returns the sandbox lsm_events ring-buffer map, or nil in
+// audit-only mode (no kernel objects loaded). The `ebpf-guard run` wrapper opens
+// a RingbufReader on it to drain and record sandbox_audit/sandbox_deny decisions
+// that the attached LSM hooks emit (issue #268). Only valid after Load.
+func (m *Manager) LSMEvents() *ebpf.Map {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.objs == nil {
+		return nil
+	}
+	return m.objs.LsmEvents
+}
+
 // Mode returns "enforce" or "audit" as configured.
 func (m *Manager) Mode() string {
 	if m.policy.Mode == ModeEnforce {

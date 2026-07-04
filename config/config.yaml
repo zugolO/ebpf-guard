@@ -398,6 +398,7 @@ ai_sandbox:
   enabled: false                       # Enable AI-agent sandbox evaluation
   mode: audit                          # audit (log only) | enforce (deny -EPERM)
   rules_path: rules/ai-agent/ai-agent.yaml      # Semantic containment ruleset
+  audit_log: ""                        # Dedicated JSONL sink for sandbox_audit/sandbox_deny (empty: still via /alerts + Prometheus)
   dns_refresh_interval: 60s            # Re-resolve allowed_domains → egress allow-list (0 disables)
   selector:
     kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name

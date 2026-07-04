@@ -106,6 +106,95 @@ func TestDNSPinner_FailedLookupReusesCache(t *testing.T) {
 	}
 }
 
+// rotatingResolver returns a different subset of a fixed record set on each
+// call, mimicking a large domain that round-robins its A records per query.
+type rotatingResolver struct {
+	replies [][]net.IP
+	n       int
+}
+
+func (r *rotatingResolver) LookupIP(_ context.Context, _, _ string) ([]net.IP, error) {
+	idx := r.n
+	if idx >= len(r.replies) {
+		idx = len(r.replies) - 1 // clamp: keep returning the final reply
+	}
+	r.n++
+	return r.replies[idx], nil
+}
+
+func TestDNSPinner_RoundRobinKeepsLiveIPsUntilTTL(t *testing.T) {
+	cfg := config.AISandboxConfig{
+		Mode:               "enforce",
+		DNSRefreshInterval: time.Second,
+		DNSPinTTL:          3 * time.Second,
+		Profiles: []config.AISandboxProfile{{
+			Name:           "agent",
+			AllowedDomains: []string{"github.com"},
+		}},
+	}
+	// Two replies each expose a rotating pair; A is only ever in the first.
+	res := &rotatingResolver{replies: [][]net.IP{
+		ipset("140.82.112.3", "140.82.113.4"), // {A, B}
+		ipset("140.82.113.4", "140.82.114.5"), // {B, C} — A absent
+	}}
+	prog := &recordingProgrammer{}
+	pinner, ok := NewDNSPinner(cfg, prog, res, nil)
+	if !ok {
+		t.Fatal("expected a pinner")
+	}
+	// Drive a deterministic clock so TTL expiry is exact.
+	base := time.Unix(0, 0)
+	clock := base
+	pinner.now = func() time.Time { return clock }
+
+	// Refresh 1 at t=0: pins {A, B}.
+	pinner.RefreshOnce(context.Background())
+	if got := mustIPStrings(prog.last["agent"]); len(got) != 2 {
+		t.Fatalf("refresh 1: want 2 pins {A,B}, got %v", got)
+	}
+
+	// Refresh 2 at t=1s: reply is {B, C}; A dropped out of the reply but is still
+	// within its TTL, so the union must stay {A, B, C} — no transient eviction.
+	clock = base.Add(time.Second)
+	pinner.RefreshOnce(context.Background())
+	got := mustIPStrings(prog.last["agent"])
+	if len(got) != 3 {
+		t.Fatalf("refresh 2: round-robin must keep live A, want 3 pins {A,B,C}, got %v", got)
+	}
+	if !containsIP(got, "140.82.112.3") {
+		t.Fatalf("refresh 2: still-live A (140.82.112.3) was wrongly evicted, got %v", got)
+	}
+
+	// Refresh 3 well past A's TTL (t=5s > 0+3s): A finally expires. B and C were
+	// re-observed at t=1s so they remain live.
+	clock = base.Add(5 * time.Second)
+	pinner.RefreshOnce(context.Background())
+	got = mustIPStrings(prog.last["agent"])
+	if containsIP(got, "140.82.112.3") {
+		t.Fatalf("refresh 3: A should have expired by TTL, got %v", got)
+	}
+	if !containsIP(got, "140.82.113.4") || !containsIP(got, "140.82.114.5") {
+		t.Fatalf("refresh 3: re-observed B and C must stay live, got %v", got)
+	}
+}
+
+func mustIPStrings(ips []net.IP) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+func containsIP(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestNewDNSPinner_DisabledCases(t *testing.T) {
 	withDomains := config.AISandboxProfile{Name: "a", AllowedDomains: []string{"x.com"}}
 

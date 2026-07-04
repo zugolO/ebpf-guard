@@ -1191,6 +1191,15 @@ type AISandboxConfig struct {
 	// allowed_egress_cidrs only. Default: 60s when any profile lists domains.
 	DNSRefreshInterval time.Duration `mapstructure:"dns_refresh_interval"`
 
+	// DNSPinTTL is how long a resolved address stays pinned after it was last
+	// seen in a DNS reply. Large domains (github.com, CDNs, API endpoints) return
+	// a rotating subset of their A/AAAA records per query, so an address that is
+	// still live routinely drops out of the very next reply. Pinning a union of
+	// recently-seen addresses and evicting them on this TTL — rather than on
+	// absence from the latest reply — stops egress to an allowed_domains host from
+	// flapping across refreshes. 0 derives a default of 4×DNSRefreshInterval.
+	DNSPinTTL time.Duration `mapstructure:"dns_pin_ttl"`
+
 	// AuditLog is the path to a dedicated append-only JSONL sink for ai_sandbox
 	// decisions (sandbox_audit / sandbox_deny), independent of
 	// enforcement.audit_log (issue #268). Empty means no dedicated file: sandbox

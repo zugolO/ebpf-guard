@@ -182,7 +182,13 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 	if pinner, ok := sandbox.NewDNSPinner(aiCfg, mgr, nil, logger); ok {
 		pinCtx, stopPin := context.WithCancel(context.Background())
 		defer stopPin()
-		go pinner.Run(pinCtx)
+		// Program the initial allow-list synchronously, before the child is
+		// exec'd below. A child that connects to an allowed_domains host
+		// immediately must find its sandbox_net_v4/v6 entries already in place;
+		// resolving in the background would race the first connection and yield a
+		// transient -EPERM in enforce mode until the pinner caught up (issue #269).
+		pinner.RefreshOnce(pinCtx)
+		go pinner.RefreshLoop(pinCtx)
 	}
 
 	logger.Info("sandbox active",

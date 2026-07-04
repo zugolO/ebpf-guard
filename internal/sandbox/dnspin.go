@@ -44,20 +44,35 @@ type profileDomains struct {
 	domains []string
 }
 
+// pinnedIP is one address held in a profile's egress union, with the wall-clock
+// time it expires (last-seen + DNSPinTTL).
+type pinnedIP struct {
+	ip      net.IP
+	expires time.Time
+}
+
 // DNSPinner resolves allowed_domains and keeps each profile's egress allow-list
 // in sync with their current records.
 type DNSPinner struct {
 	prog     egressProgrammer
 	resolver Resolver
 	interval time.Duration
+	ttl      time.Duration
 	targets  []profileDomains
 	logger   *slog.Logger
+	now      func() time.Time // injectable clock; time.Now in production
 
 	mu sync.Mutex
 	// lastIPs caches the most recent successful resolution per domain so a
 	// transient lookup failure reuses the last-known addresses instead of
 	// tearing a working allow-list down (fail-safe).
 	lastIPs map[string][]net.IP
+	// pinned is the per-profile union of recently-resolved addresses keyed by
+	// ip.String(), each carrying a TTL. Round-robin domains rotate which subset
+	// of their A/AAAA records a single reply returns, so an address is evicted
+	// only when its TTL elapses — never merely because it was absent from the
+	// latest reply (issue #269).
+	pinned map[string]map[string]pinnedIP
 }
 
 // NewDNSPinner builds a pinner from the ai_sandbox config. It returns (nil,
@@ -72,6 +87,12 @@ func NewDNSPinner(cfg config.AISandboxConfig, prog egressProgrammer, resolver Re
 	}
 	if cfg.DNSRefreshInterval <= 0 {
 		return nil, false
+	}
+	ttl := cfg.DNSPinTTL
+	if ttl <= 0 {
+		// Keep an address pinned across several missed/rotated replies before
+		// evicting it, so round-robin subsets don't flap the allow-list.
+		ttl = 4 * cfg.DNSRefreshInterval
 	}
 	targets := make([]profileDomains, 0, len(cfg.Profiles))
 	for _, p := range cfg.Profiles {
@@ -88,9 +109,12 @@ func NewDNSPinner(cfg config.AISandboxConfig, prog egressProgrammer, resolver Re
 		prog:     prog,
 		resolver: resolver,
 		interval: cfg.DNSRefreshInterval,
+		ttl:      ttl,
 		targets:  targets,
 		logger:   logger.With("component", "ai_sandbox_dnspin"),
+		now:      time.Now,
 		lastIPs:  make(map[string][]net.IP),
+		pinned:   make(map[string]map[string]pinnedIP),
 	}, true
 }
 
@@ -117,8 +141,21 @@ func normalizeDomains(in []string) []string {
 
 // Run programs the initial set immediately, then refreshes every interval until
 // ctx is cancelled. Blocking; run it in its own goroutine.
+//
+// Callers that must guarantee the allow-list is programmed before some later
+// step (e.g. exec'ing a sandboxed child that connects immediately) should call
+// RefreshOnce synchronously first and then start RefreshLoop in a goroutine,
+// rather than Run, to avoid racing the initial resolution (issue #269).
 func (d *DNSPinner) Run(ctx context.Context) {
 	d.RefreshOnce(ctx)
+	d.RefreshLoop(ctx)
+}
+
+// RefreshLoop refreshes every interval until ctx is cancelled, without an
+// initial refresh. Blocking; run it in its own goroutine. Pair it with a prior
+// synchronous RefreshOnce when the initial set must be programmed before the
+// caller proceeds.
+func (d *DNSPinner) RefreshLoop(ctx context.Context) {
 	t := time.NewTicker(d.interval)
 	defer t.Stop()
 	for {
@@ -149,21 +186,27 @@ func (d *DNSPinner) RefreshOnce(ctx context.Context) int {
 	return total
 }
 
-// resolveAll resolves all of a profile's domains into a deduped IP slice.
-// Domains are cached per name (keyed by "profile\x00domain"): a successful
+// resolveAll resolves all of a profile's domains and returns the current live
+// union of pinned addresses (deduped by ip.String()).
+//
+// Each resolved address refreshes its TTL in the profile's pin set; addresses
+// are evicted only once their TTL elapses. This deliberately does NOT prune an
+// address just because it was missing from the latest reply: large domains
+// round-robin a rotating subset of their A/AAAA records per query, so a
+// still-live address routinely drops out of a single response and must not be
+// evicted while other queries keep re-observing it (issue #269).
+//
+// Domains are also cached per name (keyed by "profile\x00domain"): a successful
 // lookup refreshes the cache, a failed one reuses the last-known addresses so a
 // transient DNS blip does not prune a working allow-list.
 func (d *DNSPinner) resolveAll(ctx context.Context, t profileDomains) []net.IP {
-	seen := make(map[string]struct{})
-	var ips []net.IP
+	fresh := make(map[string]net.IP)
 	add := func(list []net.IP) {
 		for _, ip := range list {
-			k := ip.String()
-			if _, ok := seen[k]; ok {
+			if ip == nil {
 				continue
 			}
-			seen[k] = struct{}{}
-			ips = append(ips, ip)
+			fresh[ip.String()] = ip
 		}
 	}
 	for _, name := range t.domains {
@@ -182,6 +225,36 @@ func (d *DNSPinner) resolveAll(ctx context.Context, t profileDomains) []net.IP {
 		d.lastIPs[cacheKey] = got
 		d.mu.Unlock()
 		add(got)
+	}
+
+	now := d.now()
+	expiry := now.Add(d.ttl)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	pins := d.pinned[t.profile]
+	if pins == nil {
+		pins = make(map[string]pinnedIP)
+		d.pinned[t.profile] = pins
+	}
+	// Union: (re)pin every address seen this round and extend its TTL.
+	for k, ip := range fresh {
+		pins[k] = pinnedIP{ip: ip, expires: expiry}
+	}
+	// Evict only TTL-expired entries, then return the remaining live union.
+	var expired int
+	ips := make([]net.IP, 0, len(pins))
+	for k, p := range pins {
+		if !now.Before(p.expires) {
+			delete(pins, k)
+			expired++
+			continue
+		}
+		ips = append(ips, p.ip)
+	}
+	if expired > 0 {
+		d.logger.Debug("ai_sandbox: expired DNS-pinned addresses",
+			"profile", t.profile, "expired", expired, "live", len(ips))
 	}
 	return ips
 }

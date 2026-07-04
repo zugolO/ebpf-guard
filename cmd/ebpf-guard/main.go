@@ -982,7 +982,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Warn("ai_sandbox: dedicated audit log unavailable; sandbox decisions still surface via /alerts and Prometheus",
 					slog.String("path", cfg.AISandbox.AuditLog), slog.Any("error", salErr))
 			} else {
-				defer sal.Close()
+				defer func() { _ = sal.Close() }()
 				sandboxAuditLogger = sal
 			}
 		}

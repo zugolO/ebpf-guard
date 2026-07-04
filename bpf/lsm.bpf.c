@@ -535,6 +535,7 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 		__u8  mode       = (__u8)(sbx & 0xFF);
 		__u16 sa_family  = 0;
 		int   violation  = 0;
+		int   is_loopback = 0;
 		__u8  addr_bytes[16] = {};
 		int   addr_len   = 0;
 		__u16 dport      = 0;
@@ -548,7 +549,10 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 			copy_ipv4_addr(addr_bytes, sin.sin_addr.s_addr);
 			addr_len = 4;
 
-			if (addr_bytes[0] != 127) { /* loopback always allowed */
+			/* 127.0.0.0/8 loopback always allowed */
+			is_loopback = (addr_bytes[0] == 127);
+
+			if (!is_loopback) {
 				struct sbx_lpm_key_v4 k = {};
 				k.prefixlen = 32 + 32;
 				k.data[0] = (__u8)(profile_id >> 24);
@@ -567,7 +571,7 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 			addr_len = 16;
 
 			/* ::1 loopback always allowed */
-			int is_loopback = 1;
+			is_loopback = 1;
 			int i;
 			#pragma unroll
 			for (i = 0; i < 15; i++) {
@@ -590,7 +594,7 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 			}
 		}
 
-		if (!violation && addr_len > 0 && (flags & SBX_F_PORTS_FILTER)) {
+		if (!violation && !is_loopback && addr_len > 0 && (flags & SBX_F_PORTS_FILTER)) {
 			__u64 pkey = (((__u64)profile_id) << 16) | dport;
 			if (!bpf_map_lookup_elem(&sandbox_ports, &pkey))
 				violation = 1;

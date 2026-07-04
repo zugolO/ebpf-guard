@@ -29,8 +29,8 @@ func TestRunContainment_AllVectorsContained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunContainment: %v", err)
 	}
-	if len(results) != 4 {
-		t.Fatalf("expected 4 vectors, got %d", len(results))
+	if len(results) != 6 {
+		t.Fatalf("expected 6 vectors, got %d", len(results))
 	}
 	vectors := map[string]bool{}
 	for _, r := range results {
@@ -39,7 +39,10 @@ func TestRunContainment_AllVectorsContained(t *testing.T) {
 			t.Errorf("vector %q not contained: %s", r.Scenario.Vector, r.ContainDetail)
 		}
 	}
-	for _, want := range []string{"kill", "map-write", "cgroup-escape", "dropped-binary-exec"} {
+	for _, want := range []string{
+		"kill", "map-write", "cgroup-escape", "dropped-binary-exec",
+		"long-path-bypass", "dotdot-exec",
+	} {
 		if !vectors[want] {
 			t.Errorf("missing containment vector %q", want)
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/config"
@@ -97,6 +98,8 @@ func ContainmentScenarios() []ContainmentScenario {
 		containMapWrite(),
 		containCgroupEscape(),
 		containDroppedBinaryExec(),
+		containLongPathBypass(),
+		containDotDotExec(),
 	}
 }
 
@@ -168,6 +171,57 @@ func containDroppedBinaryExec() ContainmentScenario {
 			// The genuine pinned interpreter (matching digest) must still run.
 			ok := pol.ExecAllowed(containmentProfile, "/usr/bin/python3", genuine)
 			return ok, "genuine /usr/bin/python3 (matching pin) is allowed"
+		},
+	}
+}
+
+func containLongPathBypass() ContainmentScenario {
+	// A path whose canonical form exceeds the kernel's 128-byte resolve buffer.
+	// Pre-fix, bpf_d_path returned -ENAMETOOLONG and lsm_file_open allowed the
+	// open before the sandbox check ever ran, so any >127-byte path bypassed
+	// deny-by-default. The fix treats an unresolvable path as a violation
+	// (issue #267 item 1). Placed under an allowed read prefix so the length —
+	// not a missing allow rule — is what denies it, proving the fix.
+	longPath := "/workspace/" + strings.Repeat("a", 130)
+	return ContainmentScenario{
+		ID:          "contain-long-path-bypass",
+		Name:        "Containment: over-long (unresolvable) path read",
+		Vector:      "long-path-bypass",
+		Description: "A sandboxed agent reads via a path too long for the kernel to resolve (>127 bytes); deny-by-default must treat the unresolvable path as a violation, not an implicit allow.",
+		MITRETech:   "T1083",
+		Attempt: func(pol *sandbox.Policy) (bool, string) {
+			denied := !pol.ReadAllowed(containmentProfile, longPath)
+			return denied, "an unresolvable/over-long path is denied even under an allowed prefix"
+		},
+		Benign: func(pol *sandbox.Policy) (bool, string) {
+			ok := pol.ReadAllowed(containmentProfile, "/workspace/main.go")
+			return ok, "a normal-length read under /workspace is still allowed"
+		},
+	}
+}
+
+func containDotDotExec() ContainmentScenario {
+	// execve("/usr/bin/../../workspace/scratch/x") — the raw argument
+	// prefix-matches the allowed /usr/bin while the kernel resolves and runs
+	// /workspace/scratch/x. The exec gate rejects any `..` traversal before
+	// prefix matching (issue #267 item 3).
+	payload := sha256.Sum256([]byte("malicious-payload"))
+	genuine := sha256.Sum256([]byte("the-real-python3"))
+	return ContainmentScenario{
+		ID:          "contain-dotdot-exec",
+		Name:        "Containment: `..`-traversal exec",
+		Vector:      "dotdot-exec",
+		Description: "A sandboxed agent execs `/usr/bin/../../workspace/scratch/x` so the uncanonicalized argument prefix-matches the allowed /usr/bin while the kernel runs a dropped binary.",
+		MITRETech:   "T1105",
+		Attempt: func(pol *sandbox.Policy) (bool, string) {
+			denied := !pol.ExecAllowed(containmentProfile, "/usr/bin/../../workspace/scratch/x", payload)
+			return denied, "a `..` traversal in the exec path is rejected before prefix matching"
+		},
+		Benign: func(pol *sandbox.Policy) (bool, string) {
+			// A genuine, traversal-free exec under an allowed prefix still runs
+			// (the pinned interpreter with its matching digest).
+			ok := pol.ExecAllowed(containmentProfile, "/usr/bin/python3", genuine)
+			return ok, "a genuine exec under an allowed prefix (matching pin) is permitted"
 		},
 	}
 }

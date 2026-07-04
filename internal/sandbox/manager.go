@@ -54,6 +54,13 @@ type Manager struct {
 	protected  map[uint32]struct{} // tgids protected from sandboxed signals (item 1)
 	kernelMode bool                // true when BPF LSM enforcement is wired
 
+	// execHookAttached is true only when the bprm_check_security exec-control
+	// hook actually attached. When it fails to attach we must not claim
+	// kernel-enforced exec: the file_open hook still gates exec against the
+	// resolved path, but the dedicated exec gate is absent, so KernelEnforced
+	// reports false rather than overstate coverage (issue #267 item 2).
+	execHookAttached bool
+
 	// dynEgress tracks the DNS-pinned egress rows currently installed per
 	// profile id, keyed by IP string, so a refresh can diff and prune stale
 	// entries without touching the static allowed_egress_cidrs rows (item 6).
@@ -98,14 +105,29 @@ func (m *Manager) Mode() string {
 }
 
 // KernelEnforced reports whether BPF LSM enforcement is actually active AND
-// trustworthy. False means the manager is running audit-only — either because
-// the kernel lacks BPF LSM / Load was skipped, or because a sandboxed target was
-// found privileged enough to tamper with the enforcer (item 7). It must never
-// return true for a workload that can defeat enforcement.
+// trustworthy. False means the manager is running audit-only — because the
+// kernel lacks BPF LSM / Load was skipped, because a sandboxed target was found
+// privileged enough to tamper with the enforcer (item 7), or because the
+// exec-control hook did not attach so exec cannot be fully enforced (issue #267
+// item 2). It must never return true for a workload that can defeat enforcement.
 func (m *Manager) KernelEnforced() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.kernelMode && m.policy.Mode == ModeEnforce && !m.enforcementUnsafe
+	return m.kernelMode && m.execHookAttached &&
+		m.policy.Mode == ModeEnforce && !m.enforcementUnsafe
+}
+
+// ExecEnforced reports whether the dedicated exec-control hook
+// (bprm_check_security) is attached in an enforce-mode kernel session. It is
+// the exec dimension of KernelEnforced, exposed separately so an operator can
+// tell a missing exec hook (KernelEnforced=false, ExecEnforced=false) apart
+// from an unsafe-target downgrade (KernelEnforced=false, ExecEnforced=true) —
+// issue #267 item 2. It deliberately ignores the enforcement-unsafe latch,
+// which it isolates.
+func (m *Manager) ExecEnforced() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.kernelMode && m.execHookAttached && m.policy.Mode == ModeEnforce
 }
 
 // EnforcementUnsafe reports whether enforcement has been downgraded because a
@@ -225,9 +247,16 @@ func (m *Manager) Load(sharedObjs *bpf.KmodObjects) error {
 	m.links = append(m.links, sc)
 
 	if bc, berrr := link.AttachLSM(link.LSMOptions{Program: objs.LsmBprmCheck}); berrr != nil {
-		m.logger.Warn("bprm_check_security hook unavailable; exec allow-list not enforced", "error", berrr)
+		// The dedicated exec gate is absent. file_open still enforces the exec
+		// allow-list against the resolved path, but we must not report full
+		// kernel enforcement: KernelEnforced() stays false so the operator is
+		// never shown kernel_enforced=true while exec control is degraded
+		// (issue #267 item 2).
+		m.logger.Warn("ai_sandbox: bprm_check_security hook unavailable; dedicated exec gate "+
+			"not enforced (file_open backstop only) — kernel_enforced downgraded", "error", berrr)
 	} else {
 		m.links = append(m.links, bc)
+		m.execHookAttached = true
 	}
 
 	// Self-protection + escape-primitive hooks (issue #255, session 2). These
@@ -519,6 +548,7 @@ func (m *Manager) closeLocked() {
 	m.ownsObjs = false
 	m.maps = nil
 	m.kernelMode = false
+	m.execHookAttached = false
 }
 
 // writePolicy installs every profile's path / CIDR / port rows into the maps.

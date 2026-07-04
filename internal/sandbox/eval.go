@@ -1,6 +1,30 @@
 package sandbox
 
-import "net"
+import (
+	"net"
+	"strings"
+)
+
+// pathHashMax is the byte window the kernel resolves and hashes (PATH_HASH_MAX
+// in bpf/lsm.bpf.c). bpf_d_path() writes the canonical path plus a NUL into a
+// buffer of this size, so a path needing more than pathHashMax-1 bytes returns
+// -ENAMETOOLONG. For a deny-by-default sandbox that unresolvable path is a
+// violation, not an implicit allow (issue #267 item 1).
+const pathHashMax = 128
+
+// hasDotDotComponent reports whether p contains a ".." path component. Mirrors
+// path_has_dotdot() in bpf/lsm.bpf.c: the bprm_check exec gate matches the raw,
+// uncanonicalized execve argument, so a `..` traversal must be rejected before
+// prefix matching — otherwise `/usr/bin/../../x` prefix-matches the allowed
+// `/usr/bin` while the kernel executes /x (issue #267 item 3).
+func hasDotDotComponent(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
 
 // Userspace policy evaluation. These functions reproduce, in Go, exactly what
 // the BPF hooks in bpf/lsm.bpf.c decide from the same encoded map rows. They
@@ -29,11 +53,17 @@ func pathAllowed(lookup map[uint32]uint8, p string, want uint8) bool {
 	if len(p) == 0 || p[0] != '/' {
 		return false // relative / unresolvable — deny-by-default
 	}
+	if len(p) >= pathHashMax {
+		// Too long for the kernel to resolve (bpf_d_path -ENAMETOOLONG); a
+		// sandboxed task treats it as a violation, not an allow (issue #267
+		// item 1).
+		return false
+	}
 	const offset = 2166136261
 	const prime = 16777619
 	h := uint32(offset)
 	allowed := false
-	for i := 0; i <= len(p) && i < 128; i++ {
+	for i := 0; i <= len(p) && i < pathHashMax; i++ {
 		atEnd := i == len(p)
 		boundary := atEnd || (p[i] == '/' && i > 0)
 		if boundary {
@@ -63,6 +93,18 @@ func (p *Policy) PathAllowed(profile, absPath string, want uint8) bool {
 		return false
 	}
 	return pathAllowed(cp.lookup, absPath, want)
+}
+
+// ReadAllowed reports whether the named profile permits reading absPath. Thin
+// wrapper over PathAllowed for the read dimension, mirroring the file_open hook.
+func (p *Policy) ReadAllowed(profile, absPath string) bool {
+	return p.PathAllowed(profile, absPath, accessRead)
+}
+
+// WriteAllowed reports whether the named profile permits writing absPath. Thin
+// wrapper over PathAllowed for the write dimension, mirroring the file_open hook.
+func (p *Policy) WriteAllowed(profile, absPath string) bool {
+	return p.PathAllowed(profile, absPath, accessWrite)
 }
 
 // EscapePrimitive names a kernel-contained sandbox-escape vector — a syscall or
@@ -114,6 +156,9 @@ func (p *Policy) ExecAllowed(profile, absPath string, digest [32]byte) bool {
 	cp, ok := p.byName[profile]
 	if !ok {
 		return false
+	}
+	if hasDotDotComponent(absPath) {
+		return false // uncanonicalized `..` traversal — deny (issue #267 item 3)
 	}
 	if !pathAllowed(cp.lookup, absPath, accessExec) {
 		return false

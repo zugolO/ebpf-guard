@@ -78,10 +78,12 @@ func TestManager_GuardTargetDowngradesEnforce(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate a live kernel enforcement session so KernelEnforced would be true
-	// were the target safe.
+	// were the target safe. Both the LSM programs and the exec-control hook are
+	// attached (issue #267 item 2: exec hook is required for a full claim).
 	m.kernelMode = true
+	m.execHookAttached = true
 	if !m.KernelEnforced() {
-		t.Fatal("precondition: enforce+kernelMode should report enforced")
+		t.Fatal("precondition: enforce+kernelMode+execHook should report enforced")
 	}
 	// A privileged target must latch enforcement-unsafe and flip KernelEnforced.
 	safety := EnforcementSafety{Safe: false, Reasons: []string{"target holds CAP_BPF"}}
@@ -92,6 +94,32 @@ func TestManager_GuardTargetDowngradesEnforce(t *testing.T) {
 	unsafe, reasons := m.EnforcementUnsafe()
 	if !unsafe || len(reasons) != 1 {
 		t.Errorf("EnforcementUnsafe = (%v, %v), want (true, 1 reason)", unsafe, reasons)
+	}
+}
+
+func TestManager_ExecHookDowngradesKernelEnforced(t *testing.T) {
+	m, err := New(aiCfg("enforce", config.AISandboxProfile{Name: "agent"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A live enforce session whose bprm_check exec hook failed to attach: the
+	// operator must not be shown kernel_enforced=true while exec control is
+	// backstopped only by file_open (issue #267 item 2).
+	m.kernelMode = true
+	m.execHookAttached = false
+	if m.KernelEnforced() {
+		t.Error("KernelEnforced must be false when the exec-control hook is unattached")
+	}
+	if m.ExecEnforced() {
+		t.Error("ExecEnforced must be false when the exec-control hook is unattached")
+	}
+	// Once the exec hook attaches, both report enforced.
+	m.execHookAttached = true
+	if !m.KernelEnforced() {
+		t.Error("KernelEnforced should be true once the exec-control hook attaches")
+	}
+	if !m.ExecEnforced() {
+		t.Error("ExecEnforced should be true once the exec-control hook attaches")
 	}
 }
 

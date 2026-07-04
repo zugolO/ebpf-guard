@@ -157,6 +157,7 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 		"profile", profileName,
 		"mode", mgr.Mode(),
 		"kernel_enforced", mgr.KernelEnforced(),
+		"exec_enforced", mgr.ExecEnforced(),
 		"cgroup_id", cg.ID(),
 		"command", args[0])
 

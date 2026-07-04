@@ -287,6 +287,31 @@ static __always_inline int sandbox_path_allowed(__u32 profile_id, const char *pa
 	return allowed;
 }
 
+/* Reject a path that contains a `..` component. Used by the bprm_check hook,
+ * where the string being matched is bprm->filename — the raw, uncanonicalized
+ * execve argument — and bpf_d_path() is not permitted to canonicalize it: a
+ * `..` traversal (`/usr/bin/../../workspace/x`) would otherwise prefix-match an
+ * allowed directory while the kernel resolves the binary elsewhere (issue #267
+ * item 3). Returns 1 when any '/'-delimited component is exactly "..". */
+static __always_inline int path_has_dotdot(const char *path)
+{
+	int i;
+	#pragma unroll
+	for (i = 0; i < PATH_HASH_MAX - 2; i++) {
+		char c = path[i];
+		if (c == '\0')
+			break;
+		/* Start of a component: index 0, or the byte just after a '/'. */
+		if ((i == 0 || path[i - 1] == '/') &&
+		    path[i] == '.' && path[i + 1] == '.') {
+			char after = path[i + 2];
+			if (after == '/' || after == '\0')
+				return 1;
+		}
+	}
+	return 0;
+}
+
 /* Emit a sandbox violation audit event. profile_id travels in target_pid
  * (unused by these hooks); for socket_connect the destination is packed into
  * path[] as port(2, BE) + address bytes with sig = address family. */
@@ -379,43 +404,56 @@ int BPF_PROG(lsm_file_open, struct file *file)
 		return 0;
 	}
 
-	/* Per-path blocklist check.  bpf_d_path() writes the full path into
-	 * path_buf starting at index 0 (kernel moves the string to the front).
-	 * If bpf_d_path() fails (e.g. anonymous/pipe file), skip the check and
-	 * allow — we only block named-file paths.
+	/* Resolve the file's canonical path.  bpf_d_path() writes the full path
+	 * into path_buf starting at index 0 (kernel moves the string to the
+	 * front) and returns < 0 on failure — an anonymous/pipe file, or
+	 * -ENAMETOOLONG when the canonical path is longer than path_buf.
 	 */
 	char path_buf[PATH_HASH_MAX] = {};
-	if (bpf_d_path(&file->f_path, path_buf, sizeof(path_buf)) < 0) {
-		update_stat(LSM_STAT_FILE_OPEN_ALLOW);
-		return 0;
-	}
+	long dret = bpf_d_path(&file->f_path, path_buf, sizeof(path_buf));
 
 	/* AI-agent sandbox: positive policy for sandboxed cgroups (issue #255).
-	 * Runs before the blocklist — a sandboxed process is deny-by-default. */
+	 * Evaluated BEFORE the d_path-failure early return below — a sandboxed
+	 * task is deny-by-default, so a path we cannot resolve (unresolvable or
+	 * too long, e.g. deep node_modules/site-packages trees) is itself a
+	 * violation, never an implicit allow (issue #267 item 1). Access bits are
+	 * matched exactly: an exec-open requires SBX_ALLOW_EXEC — a merely
+	 * read-allowed prefix must not also grant execute (issue #267 item 2). */
 	__u64 sbx = sandbox_lookup_current();
 	if (sbx) {
 		__u32 profile_id = (__u32)(sbx >> 32);
 		__u8  mode       = (__u8)(sbx & 0xFF);
 		__u32 fmode      = BPF_CORE_READ(file, f_mode);
 		__u8  want;
+		int   allowed;
 
 		if (fmode & SBX_FMODE_EXEC)
-			want = SBX_ALLOW_EXEC | SBX_ALLOW_READ;
+			want = SBX_ALLOW_EXEC;
 		else if (fmode & SBX_FMODE_WRITE)
 			want = SBX_ALLOW_WRITE;
 		else
 			want = SBX_ALLOW_READ;
 
-		if (!sandbox_path_allowed(profile_id, path_buf, want)) {
+		allowed = (dret >= 0) &&
+			  sandbox_path_allowed(profile_id, path_buf, want);
+		if (!allowed) {
 			__u8 act = (mode == SANDBOX_MODE_ENFORCE) ?
 				LSM_ACTION_SANDBOX_DENY : LSM_ACTION_SANDBOX_AUDIT;
 			sandbox_emit(LSM_HOOK_FILE_OPEN, act, profile_id,
-				     path_buf, 0, NULL, 0, 0);
+				     (dret >= 0) ? path_buf : NULL, 0, NULL, 0, 0);
 			if (mode == SANDBOX_MODE_ENFORCE) {
 				update_stat(LSM_STAT_FILE_OPEN_BLOCK);
 				return -EACCES;
 			}
 		}
+	}
+
+	/* Per-path blocklist applies to named files only.  With no resolvable
+	 * path there is nothing to hash, so a non-sandboxed task keeps the prior
+	 * allow-on-failure behaviour. */
+	if (dret < 0) {
+		update_stat(LSM_STAT_FILE_OPEN_ALLOW);
+		return 0;
 	}
 
 	__u32 hash = fnv32a(path_buf);
@@ -720,10 +758,14 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
  * before the new program image is committed (issue #255, sub-task 2).
  *
  * For sandboxed cgroups only: the exec path must fall under one of the
- * profile's allowed_exec prefixes. bprm->filename is the path being
- * executed as resolved by do_execve; a relative filename (execve of
- * "./x") cannot be prefix-matched and is treated as a violation —
- * deny-by-default. Non-sandboxed processes cost one array lookup.
+ * profile's allowed_exec prefixes. bprm->filename is the raw execve
+ * argument (not a canonical path); a relative filename (execve of "./x")
+ * cannot be prefix-matched and is treated as a violation, and any `..`
+ * traversal is rejected so it cannot escape an allowed prefix (issue #267
+ * item 3) — deny-by-default. The file_open hook enforces the same exec
+ * allow-list against the fully resolved path, so it is the canonical-path
+ * backstop when this hook cannot canonicalize. Non-sandboxed processes cost
+ * one array lookup.
  *
  * Shares the allowed-exec map mechanism intended for #225 (cosign exec
  * allowlist): the SBX_ALLOW_EXEC bit in sandbox_path_policy, plus the
@@ -751,7 +793,16 @@ int BPF_PROG(lsm_bprm_check, struct linux_binprm *bprm)
 	if (filename)
 		bpf_probe_read_kernel_str(path_buf, sizeof(path_buf), filename);
 
-	if (!sandbox_path_allowed(profile_id, path_buf, SBX_ALLOW_EXEC)) {
+	/* bprm->filename is the raw execve argument, not a canonical path, and
+	 * bpf_d_path() is not permitted on this hook. A `..` component would let
+	 * `/usr/bin/../../workspace/x` prefix-match the allowed `/usr/bin` while
+	 * the kernel executes /workspace/x (issue #267 item 3), so any traversal
+	 * is rejected outright — a legitimate exec target never needs one. The
+	 * file_open hook, which sees the resolved path with FMODE_EXEC set, is
+	 * the canonical-path backstop for exec control. */
+	int denied = path_has_dotdot(path_buf) ||
+		     !sandbox_path_allowed(profile_id, path_buf, SBX_ALLOW_EXEC);
+	if (denied) {
 		__u8 act = (mode == SANDBOX_MODE_ENFORCE) ?
 			LSM_ACTION_SANDBOX_DENY : LSM_ACTION_SANDBOX_AUDIT;
 		sandbox_emit(LSM_HOOK_BPRM_CHECK, act, profile_id,

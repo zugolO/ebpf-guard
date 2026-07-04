@@ -1255,6 +1255,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Info("ai_sandbox active",
 			slog.String("mode", sbxMgr.Mode()),
 			slog.Bool("kernel_enforced", sbxMgr.KernelEnforced()),
+			slog.Bool("exec_enforced", sbxMgr.ExecEnforced()),
 			slog.Int("profiles", len(cfg.AISandbox.Profiles)))
 
 		if label := cfg.AISandbox.Selector.KubeLabel; label != "" && k8sEnricher != nil {

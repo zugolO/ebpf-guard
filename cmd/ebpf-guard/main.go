@@ -184,8 +184,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		cfg = cfgManager.Get()
 
-		// Load rules from file or directory (config defaults to rules/ dir)
-		rules, err = loadRules(cfg.Rules.Path)
+		// Load rules from file or directory (config defaults to rules/ dir), plus
+		// the ai_sandbox semantic ruleset when enabled (issue #255). Shared with
+		// the hot-reload handler below so a reload can never silently drop the
+		// ai_agent_* rules (issue #261).
+		rules, err = loadRulesWithAISandbox(cfg)
 		if err != nil {
 			slog.Warn("failed to load rules file, starting with empty rule set",
 				slog.String("path", cfg.Rules.Path),
@@ -193,31 +196,6 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			rules = nil
 		} else {
 			slog.Info("rules loaded", slog.Int("count", len(rules)))
-		}
-
-		// AI-agent semantic ruleset (issue #255). Kept out of the default rules
-		// directory so it only activates when ai_sandbox is enabled; loaded here
-		// from ai_sandbox.rules_path and merged in, skipping duplicate IDs.
-		if cfg.AISandbox.Enabled && cfg.AISandbox.RulesPath != "" {
-			aiRules, aiErr := correlator.LoadRulesFromFile(cfg.AISandbox.RulesPath)
-			if aiErr != nil {
-				slog.Warn("ai_sandbox: failed to load semantic ruleset",
-					slog.String("path", cfg.AISandbox.RulesPath), slog.Any("error", aiErr))
-			} else {
-				seen := make(map[string]bool, len(rules))
-				for _, r := range rules {
-					seen[r.ID] = true
-				}
-				added := 0
-				for _, r := range aiRules {
-					if !seen[r.ID] {
-						rules = append(rules, r)
-						added++
-					}
-				}
-				slog.Info("ai_sandbox: semantic ruleset loaded",
-					slog.String("path", cfg.AISandbox.RulesPath), slog.Int("rules", added))
-			}
 		}
 	}
 
@@ -1112,8 +1090,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			oldCount := len(oldRules)
 
 			// Phase 1: parse and fully validate in isolation — no swap yet.
+			// Uses the same loadRulesWithAISandbox helper as startup so a
+			// reload never drops the ai_agent_* rules (issue #261).
 			t0 := time.Now()
-			newRules, err := loadRules(newCfg.Rules.Path)
+			newRules, err := loadRulesWithAISandbox(newCfg)
 			engine.ObserveYAMLParseDuration(time.Since(t0))
 			if err != nil {
 				slog.Error("hot-reload aborted: validation failed",
@@ -3256,4 +3236,42 @@ func loadRules(path string) ([]correlator.Rule, error) {
 		return correlator.LoadRulesFromDir(path)
 	}
 	return correlator.LoadRulesFromFile(path)
+}
+
+// loadRulesWithAISandbox loads the base rule set from cfg.Rules.Path and, when
+// ai_sandbox is enabled, merges in its semantic ruleset from
+// cfg.AISandbox.RulesPath, skipping any rule ID already present in the base
+// set. Kept out of the default rules directory (issue #255) so it only
+// activates when ai_sandbox is enabled. Shared between startup and the
+// hot-reload handler so a reload can never silently drop the ai_agent_* rules
+// (issue #261) — a failure to load the AI ruleset only warns and falls back
+// to the base set, it never fails the whole load.
+func loadRulesWithAISandbox(cfg *config.Config) ([]correlator.Rule, error) {
+	rules, err := loadRules(cfg.Rules.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.AISandbox.Enabled && cfg.AISandbox.RulesPath != "" {
+		aiRules, aiErr := correlator.LoadRulesFromFile(cfg.AISandbox.RulesPath)
+		if aiErr != nil {
+			slog.Warn("ai_sandbox: failed to load semantic ruleset",
+				slog.String("path", cfg.AISandbox.RulesPath), slog.Any("error", aiErr))
+		} else {
+			seen := make(map[string]bool, len(rules))
+			for _, r := range rules {
+				seen[r.ID] = true
+			}
+			added := 0
+			for _, r := range aiRules {
+				if !seen[r.ID] {
+					rules = append(rules, r)
+					added++
+				}
+			}
+			slog.Info("ai_sandbox: semantic ruleset loaded",
+				slog.String("path", cfg.AISandbox.RulesPath), slog.Int("rules", added))
+		}
+	}
+	return rules, nil
 }

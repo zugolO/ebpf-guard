@@ -521,6 +521,36 @@ func (c *KmodCollector) Name() string { return "kmod" }
 // IsHealthy returns true if the collector loaded without error.
 func (c *KmodCollector) IsHealthy() bool { return c.loadError == nil }
 
+// Load performs the eBPF load/attach for kernel-module-load detection ahead of
+// Start, so callers that need the resulting *bpf.KmodObjects up front (the
+// ai_sandbox Manager — issue #260) can share this one load instead of issuing
+// a second, independent LoadKmodObjects call against the same lsm.bpf.c
+// object. Idempotent: a no-op if already loaded or LSM is unavailable. Start
+// calls this itself, so it is safe to leave unloaded here and let Start do it.
+func (c *KmodCollector) Load() error {
+	if !c.available || c.kmodObjs != nil {
+		return nil
+	}
+	if err := c.loadKmod(); err != nil {
+		c.available = false
+		// loadKmod assigns c.kmodObjs before it can fail, so a failed load
+		// still leaves a non-nil but unusable object; clear it so Objects()
+		// correctly reports "nothing loaded" rather than a broken pointer.
+		c.kmodObjs = nil
+		return err
+	}
+	return nil
+}
+
+// Objects returns the loaded *bpf.KmodObjects, or nil if LSM is unavailable or
+// nothing has loaded it yet (call Load or Start first). Exposed so the
+// ai_sandbox Manager can attach its own programs against this same object
+// instead of loading a second, independent copy whose maps and lsm_events
+// ring buffer nobody else reads (issue #260).
+func (c *KmodCollector) Objects() *bpf.KmodObjects {
+	return c.kmodObjs
+}
+
 // Start attaches eBPF programs and begins forwarding events. Blocks until ctx is cancelled.
 //
 // There is no tracepoint-based fallback for kernel-module-load detection:
@@ -532,12 +562,15 @@ func (c *KmodCollector) IsHealthy() bool { return c.loadError == nil }
 func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	c.logger.Info("starting kmod collector", "lsm_available", c.available)
 
-	if c.available {
+	switch {
+	case c.available && c.kmodObjs != nil:
+		c.logger.Info("kmod: using LSM objects pre-loaded via Load (shared with ai_sandbox)")
+	case c.available:
 		if err := c.loadKmod(); err != nil {
 			c.logger.Warn("kmod: LSM load failed, kernel module load detection disabled", "error", err)
 			c.available = false
 		}
-	} else {
+	default:
 		c.logger.Info("kmod: LSM BPF unavailable, kernel module load detection disabled (no tracepoint fallback exists)")
 	}
 

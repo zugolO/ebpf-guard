@@ -83,7 +83,7 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 		return fmt.Errorf("profile %q not defined in ai_sandbox.profiles", profileName)
 	}
 
-	if err := mgr.Load(); err != nil {
+	if err := mgr.Load(nil); err != nil {
 		return fmt.Errorf("load sandbox: %w", err)
 	}
 	defer func() {

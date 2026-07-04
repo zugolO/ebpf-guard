@@ -510,8 +510,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
-	// Open the append-only enforcement audit log when configured.
+	// Open the append-only enforcement audit log when configured. Also shared
+	// with the kmod collector below to log LSM audit events (including
+	// ai_sandbox sandbox_audit/sandbox_deny records — issue #260), since it is
+	// the same append-only JSONL sink.
 	var auditCh chan enforcer.AuditEntry
+	var auditLogger *audit.Logger
 	if cfg.Enforcement.AuditLog != "" {
 		al, alErr := audit.New(cfg.Enforcement.AuditLog)
 		if alErr != nil {
@@ -520,6 +524,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Any("error", alErr))
 		} else {
 			defer al.Close()
+			auditLogger = al
 			auditCh = make(chan enforcer.AuditEntry, 256)
 			go func() {
 				for entry := range auditCh {
@@ -888,6 +893,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.String("overflow_policy", overflowPolicy))
 
 	var collectors []collector.Collector
+	// Hoisted out of the collector-construction block below so the ai_sandbox
+	// wiring further down can share its already-loaded *bpf.KmodObjects
+	// instead of loading a second, independent copy of lsm.bpf.c (issue #260).
+	var kmodCollector *collector.KmodCollector
 	if dryRun {
 		slog.Info("dry-run mode: using synthetic event generator")
 		collectors = []collector.Collector{
@@ -982,8 +991,21 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {
 			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
 		} else {
+			kc.WithAuditLogger(auditLogger)
+			kmodCollector = kc
 			collectors = append(collectors, kc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("kmod: collector enabled")
+		}
+	}
+
+	// ai_sandbox and the kmod collector both attach programs compiled from the
+	// same bpf/lsm.bpf.c object; load it once, here, before either the
+	// collectors below or ai_sandbox's Manager.Load attach anything, so both
+	// share one set of maps and one lsm_events ring buffer (issue #260).
+	if cfg.AISandbox.Enabled && kmodCollector != nil {
+		if err := kmodCollector.Load(); err != nil {
+			slog.Warn("kmod: pre-load for ai_sandbox failed; sandbox will load its own LSM objects",
+				slog.Any("error", err))
 		}
 	}
 
@@ -1232,7 +1254,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Error("ai_sandbox: invalid configuration", slog.Any("error", sbxErr))
 			return sbxErr
 		}
-		if err := sbxMgr.Load(); err != nil {
+		// Attach against the kmod collector's already-loaded LSM objects when
+		// available, so the two share one set of sandbox_state/sandbox_cgroups
+		// maps and one lsm_events ring buffer instead of two independent,
+		// unsynchronised copies (issue #260). Falls back to loading its own
+		// when the kmod collector is disabled/unavailable (dry-run has no
+		// collectors at all, so kmodCollector is nil there too).
+		var sharedLSMObjs *internalbpf.KmodObjects
+		if kmodCollector != nil {
+			sharedLSMObjs = kmodCollector.Objects()
+		}
+		if err := sbxMgr.Load(sharedLSMObjs); err != nil {
 			slog.Warn("ai_sandbox: kernel enforcement unavailable, continuing in audit-only mode",
 				slog.Any("error", err))
 		}

@@ -48,6 +48,7 @@ type Manager struct {
 	mu         sync.Mutex
 	maps       *Maps
 	objs       *bpf.KmodObjects
+	ownsObjs   bool // true when Load loaded objs itself and must Close it
 	links      []link.Link
 	registered map[uint64]uint32   // cgroup id -> profile id
 	protected  map[uint32]struct{} // tgids protected from sandboxed signals (item 1)
@@ -161,7 +162,20 @@ func lsmAvailable() bool {
 // Load attaches the sandbox LSM hooks and installs the profile allow-lists. On
 // a kernel without BPF LSM it logs and returns nil, leaving the manager in
 // audit-only mode (Policy evaluation still works for userspace auditing).
-func (m *Manager) Load() error {
+//
+// sharedObjs, when non-nil, is an already-loaded *bpf.KmodObjects to attach
+// against instead of loading a second copy. bpf/lsm.bpf.c compiles into one
+// object bundling both the sandbox hooks (file_open, socket_connect, ...) and
+// the kernel-module-load hooks; loading it twice (once here, once in
+// collector.KmodCollector) produces two independent copies of sandbox_state /
+// sandbox_cgroups and two separate lsm_events ring buffers, so cgroup
+// registration and policy writes never reach the copy the collector's hooks
+// consult, and nothing ever reads the copy this Manager's hooks write into
+// (issue #260). Callers that also run a KmodCollector must load it there
+// first and pass collector.KmodCollector.Objects() here. Pass nil for a
+// standalone Manager with no collector (e.g. the `ebpf-guard run` wrapper);
+// Load then owns the load and its Close.
+func (m *Manager) Load(sharedObjs *bpf.KmodObjects) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -171,13 +185,16 @@ func (m *Manager) Load() error {
 		return nil
 	}
 
-	if err := rlimit.RemoveMemlock(); err != nil {
-		return fmt.Errorf("sandbox: remove memlock: %w", err)
-	}
-
-	objs := &bpf.KmodObjects{}
-	if err := bpf.LoadKmodObjects(objs, &ebpf.CollectionOptions{}); err != nil {
-		return fmt.Errorf("sandbox: load LSM objects: %w", err)
+	objs := sharedObjs
+	if objs == nil {
+		if err := rlimit.RemoveMemlock(); err != nil {
+			return fmt.Errorf("sandbox: remove memlock: %w", err)
+		}
+		objs = &bpf.KmodObjects{}
+		if err := bpf.LoadKmodObjects(objs, &ebpf.CollectionOptions{}); err != nil {
+			return fmt.Errorf("sandbox: load LSM objects: %w", err)
+		}
+		m.ownsObjs = true
 	}
 	m.objs = objs
 	m.maps = &Maps{
@@ -493,12 +510,13 @@ func (m *Manager) closeLocked() {
 		_ = l.Close()
 	}
 	m.links = nil
-	if m.objs != nil {
+	if m.objs != nil && m.ownsObjs {
 		if err := m.objs.Close(); err != nil {
 			m.logger.Warn("sandbox: close bpf objects", "error", err)
 		}
-		m.objs = nil
 	}
+	m.objs = nil
+	m.ownsObjs = false
 	m.maps = nil
 	m.kernelMode = false
 }

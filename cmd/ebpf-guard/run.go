@@ -70,7 +70,15 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 	if profileName == "" {
 		return errors.New("no profile: pass --profile or set ai_sandbox.selector.default_profile")
 	}
-	if err := config.ValidateConfig(cfg); err != nil {
+	// Validate the config run is actually about to load — aiCfg carries the
+	// enabled/mode overrides above, but cfg (shared with the Manager) does not.
+	// Swap it in for validation, then restore: config.Config has an embedded
+	// mutex, so it can't be value-copied to validate a modified clone instead.
+	origAISandbox := cfg.AISandbox
+	cfg.AISandbox = aiCfg
+	err = config.ValidateConfig(cfg)
+	cfg.AISandbox = origAISandbox
+	if err != nil {
 		return fmt.Errorf("invalid ai_sandbox config: %w", err)
 	}
 

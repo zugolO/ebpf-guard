@@ -112,30 +112,34 @@ config:
     enabled: true
     memory_limit_mb: 32
 
-  # AI-agent sandbox (issue #255/#259). Deny-by-default containment for a
-  # designated agent Pod, targeted by label. Start in audit; only switch to
-  # enforce AFTER the agent workload is hardened as shown in the reference
-  # block at the bottom of this file — enforce downgrades itself to audit for
-  # any target that is privileged enough to tamper with the enforcer.
-  ai_sandbox:
-    enabled: true
-    mode: audit            # audit first; flip to enforce once the agent Pod is cap-dropped
-    rules_path: /etc/ebpf-guard/rules/ai-agent/ai-agent.yaml
-    selector:
-      kube_label: "ebpf-guard.io/sandbox-profile"
-      default_profile: "ai-agent"
-    profiles:
-      - name: ai-agent
-        allowed_exec:        [/usr/bin/, /bin/, /usr/local/bin/]
-        allowed_read_paths:  [/workspace/, /usr/, /lib/, /etc/ssl/]
-        allowed_write_paths: [/workspace/, /tmp/]
-        # ebpf-guard's own config/rules/binary/socket, /sys/fs/bpf and
-        # /sys/kernel/security are denied automatically (baseline); list your
-        # own secret dirs here for defence-in-depth.
-        denied_paths:        [/root/.ssh/, /home/, /.aws/, /.config/gcloud/]
-        allowed_egress_cidrs: [140.82.112.0/20, 151.101.0.0/16]
-        allowed_egress_ports: [443]
-        allowed_domains:     [github.com, pypi.org, registry.npmjs.org]
+# AI-agent sandbox (issue #255/#259). Deny-by-default containment for a
+# designated agent Pod, targeted by label. Start in audit; only switch to
+# enforce AFTER the agent workload is hardened as shown in the reference
+# block at the bottom of this file — enforce downgrades itself to audit for
+# any target that is privileged enough to tamper with the enforcer.
+#
+# NOTE: this is a top-level key (matching values.yaml's schema), not nested
+# under `config:` — templates/configmap.yaml renders it from
+# .Values.aiSandbox.*, not .Values.config.ai_sandbox.*.
+aiSandbox:
+  enabled: true
+  mode: audit            # audit first; flip to enforce once the agent Pod is cap-dropped
+  rulesPath: /etc/ebpf-guard/ai-agent.yaml
+  selector:
+    kubeLabel: "ebpf-guard.io/sandbox-profile"
+    defaultProfile: "ai-agent"
+  profiles:
+    - name: ai-agent
+      allowed_exec:        [/usr/bin/, /bin/, /usr/local/bin/]
+      allowed_read_paths:  [/workspace/, /usr/, /lib/, /etc/ssl/]
+      allowed_write_paths: [/workspace/, /tmp/]
+      # ebpf-guard's own config/rules/binary/socket, /sys/fs/bpf and
+      # /sys/kernel/security are denied automatically (baseline); list your
+      # own secret dirs here for defence-in-depth.
+      denied_paths:        [/root/.ssh/, /home/, /.aws/, /.config/gcloud/]
+      allowed_egress_cidrs: [140.82.112.0/20, 151.101.0.0/16]
+      allowed_egress_ports: [443]
+      allowed_domains:     [github.com, pypi.org, registry.npmjs.org]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REFERENCE — hardened securityContext for the SANDBOXED AGENT workload.

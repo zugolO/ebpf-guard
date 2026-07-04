@@ -1259,6 +1259,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			ctrl.Register(k8sEnricher.Watcher())
 			slog.Info("ai_sandbox: k8s label targeting enabled", slog.String("label", label))
 		}
+
+		// DNS-pinned egress (issue #264): `ebpf-guard run` starts this today, but
+		// the main agent path — including K8s label targeting above — did not,
+		// so allowed_domains had no effect outside the local `run` wrapper.
+		if pinner, ok := sandbox.NewDNSPinner(cfg.AISandbox, sbxMgr, nil, slog.Default()); ok {
+			go pinner.Run(ctx)
+			slog.Info("ai_sandbox: DNS-pinned egress active")
+		}
 	}
 
 	// ── Container runtime enricher (issue #123) ─────────────────────────────

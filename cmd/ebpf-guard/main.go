@@ -1282,6 +1282,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			ctrl := k8s.NewSandboxController(label, sbxMgr, nil, slog.Default())
 			ctrl.Register(k8sEnricher.Watcher())
 			slog.Info("ai_sandbox: k8s label targeting enabled", slog.String("label", label))
+			// Informer-driven targeting attaches the profile only after a pod's
+			// cgroups resolve, so a labelled pod runs unsandboxed for the first
+			// moments of its life (entrypoint/init). Surface the gap up front;
+			// per-pod windows are logged as they occur (issue #277 P1).
+			slog.Warn("ai_sandbox: pods have an unenforced startup window before their cgroups are " +
+				"registered — the image entrypoint/init runs outside the sandbox; gate the workload " +
+				"behind an init/readiness delay (see docs/ai-agent-sandbox.md#kubernetes-the-unenforced-startup-window)")
 		}
 
 		// DNS-pinned egress (issue #264): `ebpf-guard run` starts this today, but

@@ -90,6 +90,7 @@ struct {
 #define LSM_STAT_SBX_MOUNT_BLOCK  10
 #define LSM_STAT_SBX_MODULE_BLOCK 11
 #define LSM_STAT_SBX_URING_BLOCK  12  /* io_uring escape primitive denied (issue #277 P0) */
+#define LSM_STAT_SBX_LINK_BLOCK   13  /* hardlink creation denied (issue #277 P1) */
 
 /* Ring buffer for kmod / cgroup-escape events (separate from syscall ring buffer
  * in common.h to avoid contention on the hot syscall path). */
@@ -1061,6 +1062,39 @@ SEC("lsm/uring_cmd")
 int BPF_PROG(lsm_sandbox_uring_cmd, struct io_uring_cmd *ioucmd)
 {
 	if (sandbox_escape_decide(LSM_HOOK_URING, LSM_STAT_SBX_URING_BLOCK))
+		return -EPERM;
+	return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Hardlink read-bypass containment (issue #277 P1 — inode aliasing).
+ *
+ * The file_open allow-list keys on the canonical path bpf_d_path() reports at
+ * open. A sandboxed task can subvert that: link() a file it can DAC-read but the
+ * profile means to keep out of reach (e.g. a secret under a non-allowed prefix)
+ * into one of its readable prefixes, then open the new name — bpf_d_path() now
+ * returns the *allowed* path, so the read passes the allow-list. Deny-by-default
+ * already blocks the write side, but this read path is the classic fapolicyd-
+ * class inode-aliasing gap the positive path policy cannot see, because the two
+ * names share one inode and only the alias is in policy.
+ *
+ * Resolving the source dentry's true path in-kernel to compare it against the
+ * read policy is not something bpf_d_path() can do here (it needs a trusted
+ * struct path, not a bare old_dentry), so we close the primitive itself: a
+ * sandboxed task has no legitimate need to create hardlinks, so hardlink
+ * creation is denied wholesale in enforce mode (audited in audit mode), exactly
+ * like the bpf/ptrace/mount/uring escape primitives. This hook fires only for
+ * hardlinks — symlink creation goes through inode_symlink, and a symlink open
+ * re-resolves to the target's real path so d_path already reports the
+ * out-of-policy destination and the allow-list catches it — so no legitimate
+ * symlink/rename/copy flow is affected.
+ * -------------------------------------------------------------------------
+ */
+SEC("lsm/inode_link")
+int BPF_PROG(lsm_sandbox_link, struct dentry *old_dentry, struct inode *dir,
+	     struct dentry *new_dentry)
+{
+	if (sandbox_escape_decide(LSM_HOOK_LINK, LSM_STAT_SBX_LINK_BLOCK))
 		return -EPERM;
 	return 0;
 }

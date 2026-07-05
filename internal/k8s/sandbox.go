@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // CgroupRegistrar is the subset of *sandbox.Manager the controller needs. Kept
@@ -33,8 +34,22 @@ type SandboxController struct {
 	resolver CgroupResolver
 	logger   *slog.Logger
 
+	// now is the clock used to measure the unenforced startup window; a field so
+	// tests can pin it. Defaults to time.Now.
+	now func() time.Time
+
 	mu      sync.Mutex
 	tracked map[string][]uint64 // pod UID -> registered cgroup IDs
+
+	// Unenforced-window accounting (issue #277 P1). A pod's containers run from
+	// the moment the kubelet starts them (image entrypoint, init) but the
+	// sandbox profile only attaches once the pod informer fires and the
+	// container cgroups resolve — so there is a window in which the workload is
+	// live but unsandboxed. Post-hoc cgroup labeling cannot close it; we surface
+	// it instead so operators can size the mitigation (init delay / readiness
+	// gate) and know it is non-zero. See docs/ai-agent-sandbox.md.
+	lateRegistrations int           // pods sandboxed after their containers had already started
+	maxWindow         time.Duration // largest observed start→enforce gap
 }
 
 // NewSandboxController creates a controller that applies profiles named by the
@@ -51,6 +66,7 @@ func NewSandboxController(labelKey string, reg CgroupRegistrar, resolver CgroupR
 		reg:      reg,
 		resolver: resolver,
 		logger:   logger.With("component", "ai_sandbox_k8s"),
+		now:      time.Now,
 		tracked:  make(map[string][]uint64),
 	}
 }
@@ -108,6 +124,49 @@ func (c *SandboxController) apply(info *PodInfo, profile string) {
 	c.mu.Unlock()
 	c.logger.Info("pod placed under ai_sandbox profile",
 		"pod", info.Name, "namespace", info.Namespace, "profile", profile, "cgroups", len(ids))
+	c.recordEnforcementWindow(info, profile)
+}
+
+// recordEnforcementWindow measures and surfaces the unenforced startup window
+// for a pod we just placed under a profile (issue #277 P1). StartTime is when
+// the kubelet began the pod's containers; the difference to now is how long the
+// workload ran unsandboxed before enforcement attached. This is a real gap that
+// post-hoc cgroup registration cannot close — it is intrinsic to informer-driven
+// targeting — so we make it visible (warn + accounting) rather than pretend the
+// pod was contained from birth. A zero/absent StartTime (kubelet has not set it,
+// or a synthetic PodInfo) is skipped: there is nothing to measure.
+func (c *SandboxController) recordEnforcementWindow(info *PodInfo, profile string) {
+	if info.StartTime.IsZero() {
+		return
+	}
+	window := c.now().Sub(info.StartTime)
+	if window <= 0 {
+		return // started at/after enforcement — no observable unenforced window
+	}
+	c.mu.Lock()
+	c.lateRegistrations++
+	if window > c.maxWindow {
+		c.maxWindow = window
+	}
+	c.mu.Unlock()
+	c.logger.Warn("ai_sandbox: pod ran unsandboxed before enforcement attached — "+
+		"its containers started before the informer could register their cgroups; "+
+		"the image entrypoint/init ran outside the sandbox for this window",
+		"pod", info.Name, "namespace", info.Namespace, "profile", profile,
+		"unenforced_window", window.Round(time.Millisecond).String(),
+		"mitigation", "gate the workload behind an init container / readiness delay, or "+
+			"pre-register the cgroup at admission time (a CRI/OCI hook); see "+
+			"docs/ai-agent-sandbox.md#kubernetes-the-unenforced-startup-window")
+}
+
+// UnenforcedWindowStats reports how many pods were sandboxed only after their
+// containers had already started, and the largest observed start→enforce gap.
+// Exposed for status/metrics so an operator can see the unenforced startup
+// window is non-zero and size the mitigation (issue #277 P1).
+func (c *SandboxController) UnenforcedWindowStats() (lateRegistrations int, maxWindow time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lateRegistrations, c.maxWindow
 }
 
 // release unregisters all cgroups previously tracked for a pod UID.

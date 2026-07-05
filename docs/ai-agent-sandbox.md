@@ -351,10 +351,26 @@ ordinary host processes — the agent (which is never sandboxed) keeps full use 
   device passthrough (e.g. NVMe). These hooks require kernel 5.19+/6.0+; where
   they are absent, enforce mode refuses to claim containment unless io_uring is
   disabled system-wide — see [Kernel requirements](#kernel-requirements).
+- **hardlink** (`inode_link`) — hardlink creation by a sandboxed task is denied
+  (issue #277 P1). This closes an inode-aliasing **read** bypass: an agent can
+  `link()` a file it can DAC-read but the profile keeps out of policy into one of
+  its readable prefixes, and `bpf_d_path()` then reports the *allowed* alias at
+  open, so the read slips past the path allow-list — the classic fapolicyd-class
+  gap that deny-by-default (which only covers the write side) does not catch,
+  because both names share one inode and only the alias is in policy. Resolving
+  the source dentry's real path in-kernel to compare it against the read policy
+  is not something `bpf_d_path()` can do from this hook, so the primitive itself
+  is denied, exactly like the other escape primitives above. Only hardlinks are
+  affected: symlink creation goes through `inode_symlink`, and a symlink open
+  re-resolves to the target's real path so `d_path` already reports the
+  out-of-policy destination — no legitimate symlink/rename/copy flow is touched.
+  Note a sandboxed workload that relies on hardlinking (some package managers,
+  e.g. `pnpm`'s content-addressable store) will see `link()` denied in `enforce`;
+  it is audited-only in `audit`, so you can observe the impact before enforcing.
 
 Each fires the same `ai_sandbox` audit event (`sandbox_audit` / `sandbox_deny`)
-under the `bpf`, `ptrace`, `mount`, `module`, `uring`, and `task_kill` hook
-labels, and follows the profile's `mode`: audited in `audit`, denied with
+under the `bpf`, `ptrace`, `mount`, `module`, `uring`, `link`, and `task_kill`
+hook labels, and follows the profile's `mode`: audited in `audit`, denied with
 `-EPERM` in `enforce`. Every hook is best-effort at attach time — a kernel
 missing one (e.g. no `lsm/sb_mount`) logs a warning and leaves the others active
 rather than failing the whole sandbox.
@@ -397,7 +413,7 @@ observability independently of enforcement.
 | Capability | Requirement |
 |---|---|
 | File / exec / socket **enforcement** (LSM) | Kernel 5.7+ with `CONFIG_BPF_LSM=y` and BTF |
-| Self-protection + escape hooks (`task_kill`, `bpf`, `ptrace`, `sb_mount`) | Kernel 5.7+ with `CONFIG_BPF_LSM=y`; each attaches best-effort |
+| Self-protection + escape hooks (`task_kill`, `bpf`, `ptrace`, `sb_mount`, `inode_link`) | Kernel 5.7+ with `CONFIG_BPF_LSM=y`; each attaches best-effort |
 | **io_uring** escape hooks (`uring_cmd`, `uring_override_creds`, `uring_sqpoll`) | Kernel 5.19+/6.0+ with `CONFIG_BPF_LSM=y`. **Hard prerequisite for `enforce`** unless io_uring is disabled — see below |
 | Egress **enforcement** fallback | nftables (covers network only, not exec/file) |
 | Semantic **detection** ruleset | Works on any supported kernel |
@@ -432,6 +448,48 @@ startup log rather than failing closed, and egress may still be constrained via
 the nftables fallback. `mode: enforce` also downgrades to audit-only for any
 **privileged target** that could tamper with the enforcer — see
 [Hard prerequisites](#hard-prerequisites--the-sandboxed-workload-must-be-unprivileged).
+
+## Kubernetes: the unenforced startup window
+
+Kubernetes targeting is informer-driven (see [Target selection](#target-selection)):
+`SandboxController` registers a pod's container cgroups under its profile only
+**after** the pod informer delivers the pod and `resolveContainerCgroupIDs`
+finds its cgroup directories. Those events fire once the kubelet has already
+**started the containers** — so between a labelled pod's containers starting
+(image entrypoint, init) and enforcement attaching, the workload runs **live but
+unsandboxed**. This is a genuine gap, not a bug you can patch away in the
+controller: post-hoc cgroup labeling cannot retroactively contain what already
+ran, and the informer cannot observe a container before it exists.
+
+ebpf-guard **surfaces** the window rather than pretending it is closed:
+
+- On startup, when K8s label targeting is enabled, a warning is logged noting the
+  window exists.
+- Each time a pod is placed under a profile after its containers had already
+  started, a warning records the measured `unenforced_window` (from
+  `pod.Status.StartTime` to enforcement) and the mitigation.
+- `SandboxController.UnenforcedWindowStats()` exposes the count of such late
+  registrations and the largest observed window for status/metrics.
+
+**Mitigations** (defence in depth — the boundary is still cgroup/LSM once
+attached):
+
+1. **Delay the workload past the window.** Gate the agent container behind an
+   init container or a readiness/startup probe that holds real work until the
+   sandbox is known to be attached, so the entrypoint does nothing sensitive
+   during the gap.
+2. **Pre-register the cgroup at admission time.** The robust fix is out-of-band
+   of the informer: a CRI/OCI `createRuntime`/`prestart` hook (or an
+   admission-time cgroup pre-registration) that places the cgroup under the
+   profile *before* the container's first instruction runs. This is the only
+   approach that closes — rather than shrinks — the window.
+3. **Pin the label at admission (issue #277 P2).** A `ValidatingAdmissionPolicy`
+   / webhook that forces the sandbox label per namespace both removes the
+   opt-out and lets the admission stage drive pre-registration.
+
+Until admission-time pre-registration lands, treat the startup window as part of
+the threat model for short-lived or fast-acting workloads and size mitigation 1
+accordingly.
 
 ## Status (issue #255 sub-tasks)
 
@@ -483,3 +541,13 @@ the nftables fallback. `mode: enforce` also downgrades to audit-only for any
   cgroups, and `enforce` refuses to claim containment (downgrades to audit-only,
   `kernel_enforced=false`) when io_uring is reachable on a kernel that lacks those
   hooks. See [io_uring is a hard prerequisite for `enforce`](#io_uring-is-a-hard-prerequisite-for-enforce).
+- ✅ **P1 — hardlink read-bypass (inode aliasing)** — the `inode_link` LSM hook
+  denies hardlink creation for sandboxed tasks, closing the read path where an
+  aliased inode is opened via an in-policy name. See
+  [In-kernel self-protection and escape-primitive containment](#in-kernel-self-protection-and-escape-primitive-containment)
+  and the `contain-hardlink-alias` vector in `attack-sim --containment`.
+- ✅ **P1 — Kubernetes unenforced startup window** — surfaced (startup warning,
+  per-pod `unenforced_window` measurement, `UnenforcedWindowStats`) with the
+  mitigations documented. See
+  [Kubernetes: the unenforced startup window](#kubernetes-the-unenforced-startup-window).
+- ⏳ **P2 — label trust / `ebpf-guard run` defense-in-depth** — not yet started.

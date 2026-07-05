@@ -61,9 +61,9 @@ type lsmAuditEventRaw struct {
 
 const lsmAuditEventSize = 4 + 8 + 4 + 4 + 4 + 1 + 1 + 1 + 16 + 64 // 107 bytes
 
-var lsmHookNames = [9]string{
+var lsmHookNames = [10]string{
 	"file_open", "socket_connect", "task_kill", "bprm_check",
-	"bpf", "ptrace", "mount", "module", "uring",
+	"bpf", "ptrace", "mount", "module", "uring", "link",
 }
 
 // LSM_HOOK_SOCKET_CONNECT and the ai_sandbox action codes, mirroring

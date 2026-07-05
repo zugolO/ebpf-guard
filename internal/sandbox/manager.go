@@ -312,6 +312,7 @@ func (m *Manager) Load(sharedObjs *bpf.KmodObjects) error {
 		{"bpf", objs.LsmSandboxBpf, false},
 		{"ptrace", objs.LsmSandboxPtrace, false},
 		{"mount", objs.LsmSandboxMount, false},
+		{"inode_link", objs.LsmSandboxLink, false},
 		{"uring_override_creds", objs.LsmSandboxUringCreds, true},
 		{"uring_sqpoll", objs.LsmSandboxUringSqpoll, true},
 		{"uring_cmd", objs.LsmSandboxUringCmd, true},

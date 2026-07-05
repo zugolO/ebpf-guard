@@ -3,6 +3,7 @@ package k8s
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 type fakeRegistrar struct {
@@ -106,6 +107,53 @@ func TestSandboxController_LabelRemovalUnregisters(t *testing.T) {
 	})
 	if len(reg.registered) != 0 {
 		t.Fatalf("label removal should unregister, got %v", reg.registered)
+	}
+}
+
+func TestSandboxController_UnenforcedWindowRecorded(t *testing.T) {
+	reg := newFakeRegistrar()
+	res := staticResolver(map[string][]uint64{"cid-1": {100}})
+	c := NewSandboxController("ebpf-guard.io/sandbox-profile", reg, res, nil)
+	// Pin the clock 3s after the pod started so the window is deterministic.
+	start := time.Unix(1000, 0)
+	c.now = func() time.Time { return start.Add(3 * time.Second) }
+
+	c.OnPodEvent(PodAdded, &PodInfo{
+		UID:          "pod-uid-win",
+		Name:         "agent",
+		Labels:       map[string]string{"ebpf-guard.io/sandbox-profile": "ai-agent"},
+		ContainerIDs: []string{"cid-1"},
+		StartTime:    start,
+	})
+
+	late, max := c.UnenforcedWindowStats()
+	if late != 1 {
+		t.Fatalf("expected 1 late registration, got %d", late)
+	}
+	if max != 3*time.Second {
+		t.Fatalf("expected max window 3s, got %s", max)
+	}
+}
+
+func TestSandboxController_NoWindowWhenStartTimeUnset(t *testing.T) {
+	reg := newFakeRegistrar()
+	res := staticResolver(map[string][]uint64{"cid-1": {100}})
+	c := NewSandboxController("ebpf-guard.io/sandbox-profile", reg, res, nil)
+
+	// No StartTime → nothing to measure, so no late registration is recorded
+	// even though the pod is placed under the profile.
+	c.OnPodEvent(PodAdded, &PodInfo{
+		UID:          "pod-uid-nowin",
+		Name:         "agent",
+		Labels:       map[string]string{"ebpf-guard.io/sandbox-profile": "ai-agent"},
+		ContainerIDs: []string{"cid-1"},
+	})
+
+	if reg.registered[100] != "ai-agent" {
+		t.Fatalf("pod should still be registered, got %v", reg.registered)
+	}
+	if late, max := c.UnenforcedWindowStats(); late != 0 || max != 0 {
+		t.Fatalf("expected no window recorded, got late=%d max=%s", late, max)
 	}
 }
 

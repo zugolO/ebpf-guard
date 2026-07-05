@@ -96,6 +96,9 @@ func podInfoFromPod(pod *corev1.Pod) *PodInfo {
 		Annotations: copyMap(pod.Annotations),
 		NodeName:    pod.Spec.NodeName,
 	}
+	if pod.Status.StartTime != nil {
+		info.StartTime = pod.Status.StartTime.Time
+	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cid := normalizeContainerID(cs.ContainerID); cid != "" {
 			info.ContainerIDs = append(info.ContainerIDs, cid)
@@ -118,6 +121,12 @@ type PodInfo struct {
 	Annotations map[string]string
 	ContainerIDs []string
 	NodeName    string
+	// StartTime is pod.Status.StartTime — when the kubelet began the pod's
+	// containers. Zero until the kubelet sets it. The SandboxController uses it
+	// to measure the unenforced startup window: the gap between a pod's
+	// containers starting and its cgroups being placed under the sandbox
+	// profile (issue #277 P1).
+	StartTime time.Time
 }
 
 // WatcherConfig holds configuration for the pod watcher.
@@ -418,6 +427,9 @@ func (w *Watcher) updatePodCache(pod *corev1.Pod) {
 		Labels:      copyMap(pod.Labels),
 		Annotations: copyMap(pod.Annotations),
 		NodeName:    pod.Spec.NodeName,
+	}
+	if pod.Status.StartTime != nil {
+		info.StartTime = pod.Status.StartTime.Time
 	}
 
 	// Extract container IDs

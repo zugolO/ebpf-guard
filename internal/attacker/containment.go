@@ -97,6 +97,7 @@ func ContainmentScenarios() []ContainmentScenario {
 		containKillSupervisor(),
 		containMapWrite(),
 		containCgroupEscape(),
+		containHardlinkAlias(),
 		containDroppedBinaryExec(),
 		containLongPathBypass(),
 		containDotDotExec(),
@@ -141,6 +142,20 @@ func containCgroupEscape() ContainmentScenario {
 		Attempt: func(pol *sandbox.Policy) (bool, string) {
 			ok := pol.EscapeContained()
 			return ok, "lsm_sandbox_mount denies mount(2) for a sandboxed task"
+		},
+	}
+}
+
+func containHardlinkAlias() ContainmentScenario {
+	return ContainmentScenario{
+		ID:          "contain-hardlink-alias",
+		Name:        "Containment: hardlink inode-aliasing read-bypass",
+		Vector:      "hardlink-alias",
+		Description: "A sandboxed agent link()s a file it can DAC-read but the profile keeps out of policy into a readable prefix, so the canonical path bpf_d_path reports at open is the allowed alias and the read passes the allow-list.",
+		MITRETech:   "T1083",
+		Attempt: func(pol *sandbox.Policy) (bool, string) {
+			ok := pol.EscapeContained()
+			return ok, "lsm_sandbox_link denies hardlink creation for a sandboxed task, closing the inode-aliasing read path"
 		},
 	}
 }

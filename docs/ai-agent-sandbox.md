@@ -340,13 +340,24 @@ ordinary host processes — the agent (which is never sandboxed) keeps full use 
   escapes) to reach around the `file_open` allow-list.
 - **kernel-module load** — a sandboxed task that triggers a module load
   (`request_module`) is denied, cutting off the ring-0 escape.
+- **io_uring** (`uring_cmd`, `uring_override_creds`, `uring_sqpoll`) — the
+  io_uring escape primitives are denied (issue #277 P0). io_uring lets a task
+  submit `openat`/`connect`/`read`/`write` through a ring — and, under
+  `IORING_SETUP_SQPOLL`, have a **kernel worker thread** execute them, in a task
+  context whose cgroup can differ from the submitter's — which sidesteps the
+  cgroup-scoped `file_open`/`socket_connect` allow-lists. Denying `uring_sqpoll`
+  removes the kernel-thread submission path, `uring_override_creds` removes the
+  personality/credential swap, and `uring_cmd` removes `IORING_OP_URING_CMD`
+  device passthrough (e.g. NVMe). These hooks require kernel 5.19+/6.0+; where
+  they are absent, enforce mode refuses to claim containment unless io_uring is
+  disabled system-wide — see [Kernel requirements](#kernel-requirements).
 
 Each fires the same `ai_sandbox` audit event (`sandbox_audit` / `sandbox_deny`)
-under the `bpf`, `ptrace`, `mount`, `module`, and `task_kill` hook labels, and
-follows the profile's `mode`: audited in `audit`, denied with `-EPERM` in
-`enforce`. Every hook is best-effort at attach time — a kernel missing one (e.g.
-no `lsm/sb_mount`) logs a warning and leaves the others active rather than
-failing the whole sandbox.
+under the `bpf`, `ptrace`, `mount`, `module`, `uring`, and `task_kill` hook
+labels, and follows the profile's `mode`: audited in `audit`, denied with
+`-EPERM` in `enforce`. Every hook is best-effort at attach time — a kernel
+missing one (e.g. no `lsm/sb_mount`) logs a warning and leaves the others active
+rather than failing the whole sandbox.
 
 > **Not covered in-kernel.** `setns(2)` / `unshare(2)` have no stable BPF LSM
 > hook; namespace/cgroup migration is caught instead by the existing
@@ -387,8 +398,34 @@ observability independently of enforcement.
 |---|---|
 | File / exec / socket **enforcement** (LSM) | Kernel 5.7+ with `CONFIG_BPF_LSM=y` and BTF |
 | Self-protection + escape hooks (`task_kill`, `bpf`, `ptrace`, `sb_mount`) | Kernel 5.7+ with `CONFIG_BPF_LSM=y`; each attaches best-effort |
+| **io_uring** escape hooks (`uring_cmd`, `uring_override_creds`, `uring_sqpoll`) | Kernel 5.19+/6.0+ with `CONFIG_BPF_LSM=y`. **Hard prerequisite for `enforce`** unless io_uring is disabled — see below |
 | Egress **enforcement** fallback | nftables (covers network only, not exec/file) |
 | Semantic **detection** ruleset | Works on any supported kernel |
+
+### io_uring is a hard prerequisite for `enforce`
+
+io_uring is the single biggest bypass of an LSM-based sandbox: a task can drive
+`openat`/`connect`/`uring_cmd` — and, via `IORING_SETUP_SQPOLL`, from a kernel
+worker thread — **around** the cgroup-scoped `file_open`/`socket_connect` checks.
+ebpf-guard closes this two ways, and `enforce` requires **one of them**:
+
+1. **io_uring LSM hooks attach** (kernel 5.19+/6.0+ with `CONFIG_BPF_LSM=y`). The
+   `uring_cmd`/`uring_override_creds`/`uring_sqpoll` hooks above deny the escape
+   primitives for sandboxed tasks; the file/socket allow-lists then hold because
+   io_uring's `openat`/`connect` still traverse the VFS-layer LSM hooks.
+2. **io_uring is disabled for the workload** via the `kernel.io_uring_disabled`
+   sysctl (`=2` disables it for everyone; `=1` disables it for non-`CAP_SYS_ADMIN`
+   tasks, which is sufficient because a `CAP_SYS_ADMIN` agent is already refused
+   enforcement as a tamper-capable target). Set it on the node, or per-pod via a
+   `securityContext` `sysctls` entry / the container runtime.
+
+If **neither** holds — the kernel lacks the io_uring LSM hooks *and* io_uring is
+reachable — `mode: enforce` **downgrades to audit-only** with a clear startup log
+(`kernel_enforced=false`), the same fail-closed posture used for a privileged
+target. ebpf-guard detects io_uring reachability at load via
+`kernel.io_uring_disabled` and never advertises a boundary an agent can step
+around. Remediation is logged: set `kernel.io_uring_disabled=2`, or run on a
+kernel 5.19+/6.0+ with `CONFIG_BPF_LSM=y`.
 
 On an unsupported kernel, `mode: enforce` degrades to audit-only with a clear
 startup log rather than failing closed, and egress may still be constrained via
@@ -438,3 +475,11 @@ the nftables fallback. `mode: enforce` also downgrades to audit-only for any
   ebpf-guard attack-sim --containment          # run the acceptance harness
   ebpf-guard attack-sim --containment --list   # list the vectors
   ```
+
+### Tamper-proof enforce hardening (issue #277)
+
+- ✅ **P0 — io_uring escape vector** — the `uring_cmd`, `uring_override_creds`,
+  and `uring_sqpoll` LSM hooks deny io_uring's escape primitives for sandboxed
+  cgroups, and `enforce` refuses to claim containment (downgrades to audit-only,
+  `kernel_enforced=false`) when io_uring is reachable on a kernel that lacks those
+  hooks. See [io_uring is a hard prerequisite for `enforce`](#io_uring-is-a-hard-prerequisite-for-enforce).

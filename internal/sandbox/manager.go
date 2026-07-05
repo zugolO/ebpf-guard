@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -174,16 +175,35 @@ func (m *Manager) applyGuard(safety EnforcementSafety) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.enforcementUnsafe {
+	if m.markUnsafeLocked(safety.Reasons...) == 0 {
 		return
 	}
-	m.enforcementUnsafe = true
-	m.unsafeReasons = safety.Reasons
 	m.logger.Warn("ai_sandbox: enforce is UNSAFE for this target — it can tamper with the "+
 		"enforcer; refusing to claim kernel enforcement, downgrading to audit-only",
 		"reasons", safety.Reasons,
 		"remediation", "run the agent without CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE and "+
 			"without write access to /sys/fs/bpf or /sys/fs/cgroup")
+}
+
+// markUnsafeLocked latches enforcement-unsafe and appends any not-yet-recorded
+// reasons, returning how many were newly added. Caller holds m.mu. Reasons
+// accumulate (deduplicated) rather than overwrite, so a target that is unsafe
+// for more than one cause — a privileged process AND an uncontained io_uring
+// escape vector (issue #277 P0) — surfaces every distinct reason to the
+// operator regardless of the order the checks run in.
+func (m *Manager) markUnsafeLocked(reasons ...string) int {
+	added := 0
+	for _, r := range reasons {
+		if slices.Contains(m.unsafeReasons, r) {
+			continue
+		}
+		m.unsafeReasons = append(m.unsafeReasons, r)
+		added++
+	}
+	if added > 0 {
+		m.enforcementUnsafe = true
+	}
+	return added
 }
 
 // lsmAvailable reports whether the running kernel exposes BPF LSM.
@@ -274,19 +294,31 @@ func (m *Manager) Load(sharedObjs *bpf.KmodObjects) error {
 		m.execHookAttached = true
 	}
 
-	// Self-protection + escape-primitive hooks (issue #255, session 2). These
-	// only act on tasks inside a sandboxed cgroup, so attaching them is safe on
-	// any host. Each is best-effort: a kernel missing one hook must not defeat
-	// the others, so failures downgrade that dimension with a warning.
+	// Self-protection + escape-primitive hooks (issue #255, session 2; the
+	// io_uring trio is issue #277 P0). These only act on tasks inside a
+	// sandboxed cgroup, so attaching them is safe on any host. Each is
+	// best-effort: a kernel missing one hook must not defeat the others, so
+	// failures downgrade that dimension with a warning. The io_uring hooks
+	// (uring_*, 5.19/6.0+) are tracked separately because a gap there is a
+	// policy-bypass vector, not just a missing detection: see the enforce-safety
+	// gate below.
+	uringWanted, uringAttached := 0, 0
 	for _, h := range []struct {
-		name string
-		prog *ebpf.Program
+		name  string
+		prog  *ebpf.Program
+		uring bool
 	}{
-		{"task_kill", objs.LsmTaskKill},
-		{"bpf", objs.LsmSandboxBpf},
-		{"ptrace", objs.LsmSandboxPtrace},
-		{"mount", objs.LsmSandboxMount},
+		{"task_kill", objs.LsmTaskKill, false},
+		{"bpf", objs.LsmSandboxBpf, false},
+		{"ptrace", objs.LsmSandboxPtrace, false},
+		{"mount", objs.LsmSandboxMount, false},
+		{"uring_override_creds", objs.LsmSandboxUringCreds, true},
+		{"uring_sqpoll", objs.LsmSandboxUringSqpoll, true},
+		{"uring_cmd", objs.LsmSandboxUringCmd, true},
 	} {
+		if h.uring {
+			uringWanted++
+		}
 		l, aerr := link.AttachLSM(link.LSMOptions{Program: h.prog})
 		if aerr != nil {
 			m.logger.Warn("ai_sandbox: escape-primitive hook unavailable; that dimension is not contained",
@@ -294,6 +326,32 @@ func (m *Manager) Load(sharedObjs *bpf.KmodObjects) error {
 			continue
 		}
 		m.links = append(m.links, l)
+		if h.uring {
+			uringAttached++
+		}
+	}
+	// io_uring escape-vector gate (issue #277 P0). io_uring lets a sandboxed task
+	// drive openat/connect/uring_cmd — and, via SQPOLL, from a kernel worker
+	// thread whose cgroup context differs — around the cgroup-scoped file/egress
+	// LSM checks. The uring_* hooks above contain those primitives; where the
+	// kernel lacks them, the only robust closure is to disable io_uring for the
+	// workload (kernel.io_uring_disabled). In enforce mode, if io_uring is
+	// reachable AND uncontained, refuse to claim kernel enforcement rather than
+	// advertise a boundary an agent can step around.
+	uringContained := uringWanted > 0 && uringAttached == uringWanted
+	if m.policy.Mode == ModeEnforce && !uringContained && ioUringExposed() {
+		reason := "io_uring is reachable (kernel.io_uring_disabled is not 1 or 2) and this " +
+			"kernel lacks the io_uring LSM hooks (uring_cmd/override_creds/sqpoll, 5.19/6.0+) " +
+			"to contain it: a sandboxed task can drive openat/connect/uring_cmd around the " +
+			"file and egress allow-lists via io_uring"
+		if m.markUnsafeLocked(reason) > 0 {
+			m.logger.Warn("ai_sandbox: enforce is UNSAFE — io_uring escape vector is not contained; "+
+				"refusing to claim kernel enforcement, downgrading to audit-only",
+				"reason", reason,
+				"remediation", "set sysctl kernel.io_uring_disabled=2 for the workload (or its "+
+					"container runtime / pod securityContext), or run on a kernel 5.19+/6.0+ with "+
+					"CONFIG_BPF_LSM so the io_uring LSM hooks attach")
+		}
 	}
 
 	if err := writePolicy(*m.maps, m.policy); err != nil {

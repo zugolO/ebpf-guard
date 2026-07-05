@@ -54,6 +54,7 @@
 #define LSM_HOOK_PTRACE          5  /* ptrace of another task by a sandboxed task */
 #define LSM_HOOK_MOUNT           6  /* mount(2) by a sandboxed task */
 #define LSM_HOOK_MODULE          7  /* kernel module load by a sandboxed task */
+#define LSM_HOOK_URING           8  /* io_uring escape primitive by a sandboxed task (issue #277 P0) */
 
 /* LSM audit action codes — match struct lsm_audit_event.action */
 #define LSM_ACTION_AUDIT         0  /* event allowed, audit-only */

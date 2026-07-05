@@ -89,6 +89,7 @@ struct {
 #define LSM_STAT_SBX_PTRACE_BLOCK 9
 #define LSM_STAT_SBX_MOUNT_BLOCK  10
 #define LSM_STAT_SBX_MODULE_BLOCK 11
+#define LSM_STAT_SBX_URING_BLOCK  12  /* io_uring escape primitive denied (issue #277 P0) */
 
 /* Ring buffer for kmod / cgroup-escape events (separate from syscall ring buffer
  * in common.h to avoid contention on the hot syscall path). */
@@ -1007,6 +1008,59 @@ int BPF_PROG(lsm_sandbox_mount, const char *dev_name, const struct path *path,
 	     const char *type, unsigned long flags, void *data)
 {
 	if (sandbox_escape_decide(LSM_HOOK_MOUNT, LSM_STAT_SBX_MOUNT_BLOCK))
+		return -EPERM;
+	return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * io_uring escape-vector containment (issue #277 P0).
+ *
+ * io_uring lets a task submit openat/connect/read/write — and, under
+ * IORING_SETUP_SQPOLL, have them executed from a kernel worker thread — which
+ * on several kernels sidesteps the file/socket LSM checks the sandbox relies
+ * on. The kernel exposes three io_uring-specific LSM hooks (5.19/6.0+):
+ *   uring_override_creds — io_uring running ops under a registered personality
+ *                          (a different cred set) — a credential-swap primitive;
+ *   uring_sqpoll         — creating the SQPOLL submission kernel thread, whose
+ *                          `current` differs from the submitting task and can
+ *                          evade the cgroup-scoped sandbox_lookup_current();
+ *   uring_cmd            — IORING_OP_URING_CMD device passthrough (e.g. NVMe),
+ *                          a direct path to hardware outside the file model.
+ * A sandboxed AI agent has no legitimate need for any of them, so each is
+ * denied in enforce mode (audited in audit mode) exactly like the bpf/ptrace/
+ * mount escape primitives above. Where these hooks are unavailable (older
+ * kernels), the Go Manager refuses to claim enforcement unless io_uring is
+ * disabled system-wide (kernel.io_uring_disabled) — see internal/sandbox.
+ * -------------------------------------------------------------------------
+ */
+
+/* LSM hook: uring_override_creds — a sandboxed task driving io_uring to run
+ * submissions under a registered personality's credentials. */
+SEC("lsm/uring_override_creds")
+int BPF_PROG(lsm_sandbox_uring_creds, const struct cred *new)
+{
+	if (sandbox_escape_decide(LSM_HOOK_URING, LSM_STAT_SBX_URING_BLOCK))
+		return -EPERM;
+	return 0;
+}
+
+/* LSM hook: uring_sqpoll — a sandboxed task creating an SQPOLL kernel thread to
+ * submit io_uring work outside its own task context (and thus outside the
+ * cgroup match the sandbox hooks key on). */
+SEC("lsm/uring_sqpoll")
+int BPF_PROG(lsm_sandbox_uring_sqpoll)
+{
+	if (sandbox_escape_decide(LSM_HOOK_URING, LSM_STAT_SBX_URING_BLOCK))
+		return -EPERM;
+	return 0;
+}
+
+/* LSM hook: uring_cmd — a sandboxed task issuing IORING_OP_URING_CMD device
+ * passthrough (kernel 6.0+). */
+SEC("lsm/uring_cmd")
+int BPF_PROG(lsm_sandbox_uring_cmd, struct io_uring_cmd *ioucmd)
+{
+	if (sandbox_escape_decide(LSM_HOOK_URING, LSM_STAT_SBX_URING_BLOCK))
 		return -EPERM;
 	return 0;
 }

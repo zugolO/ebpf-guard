@@ -61,7 +61,7 @@ func TestContainment_AuditModeNotContained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if pol.EscapeContained(sandbox.EscapeBPF) {
+	if pol.EscapeContained() {
 		t.Error("audit mode must not report bpf() as contained")
 	}
 }

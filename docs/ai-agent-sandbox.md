@@ -143,7 +143,6 @@ ai_sandbox:
   dns_refresh_interval: 60s   # re-resolve allowed_domains → egress allow-list; 0 disables
   selector:
     kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name
-    comms: ["claude", "aider"]                    # Local entry-point comm names
     default_profile: "ai-agent"
   profiles:
     - name: ai-agent
@@ -188,8 +187,8 @@ ai_sandbox:
   ebpf-guard run --profile ai-agent --enforce -- bash
   ```
 
-  The `selector.comms` / `default_profile` fields name the profile the wrapper
-  applies when `--profile` is omitted.
+  The `selector.default_profile` field names the profile the wrapper applies
+  when `--profile` is omitted.
 
 ## Audit vs. enforce
 

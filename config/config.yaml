@@ -403,8 +403,7 @@ ai_sandbox:
   dns_pin_ttl: 0s                      # Keep a resolved IP pinned this long after last seen (0: 4×dns_refresh_interval); stops round-robin A records from flapping egress
   selector:
     kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name
-    comms: []                          # Local entry-point comms (e.g. ["claude", "aider"])
-    default_profile: ""                # Profile for comms-matched / unlabelled targets
+    default_profile: ""                # Profile for `ebpf-guard run` / unlabelled targets
   profiles:                            # Positive allow-policies, keyed by name
     - name: ai-agent
       allowed_exec:                    # Absolute path prefixes the agent may exec

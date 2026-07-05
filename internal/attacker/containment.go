@@ -111,7 +111,7 @@ func containKillSupervisor() ContainmentScenario {
 		Description: "A sandboxed agent sends SIGKILL to the ebpf-guard/supervisor process to disable its own containment.",
 		MITRETech:   "T1562.001",
 		Attempt: func(pol *sandbox.Policy) (bool, string) {
-			ok := pol.EscapeContained(sandbox.EscapeSignalProtected)
+			ok := pol.EscapeContained()
 			return ok, "lsm_task_kill denies a sandboxed task signalling a protected PID"
 		},
 	}
@@ -125,7 +125,7 @@ func containMapWrite() ContainmentScenario {
 		Description: "A sandboxed agent calls bpf() to update/delete the sandbox_* maps or detach the LSM links that constrain it.",
 		MITRETech:   "T1562.001",
 		Attempt: func(pol *sandbox.Policy) (bool, string) {
-			ok := pol.EscapeContained(sandbox.EscapeBPF)
+			ok := pol.EscapeContained()
 			return ok, "lsm_sandbox_bpf denies the bpf() syscall for a sandboxed task"
 		},
 	}
@@ -139,7 +139,7 @@ func containCgroupEscape() ContainmentScenario {
 		Description: "A sandboxed agent calls mount(2) to remap its filesystem view and break out of the cgroup boundary.",
 		MITRETech:   "T1611",
 		Attempt: func(pol *sandbox.Policy) (bool, string) {
-			ok := pol.EscapeContained(sandbox.EscapeMount)
+			ok := pol.EscapeContained()
 			return ok, "lsm_sandbox_mount denies mount(2) for a sandboxed task"
 		},
 	}

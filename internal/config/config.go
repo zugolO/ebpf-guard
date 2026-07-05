@@ -1215,13 +1215,9 @@ type AISandboxSelector struct {
 	// the matching pod's cgroup subtree. Empty disables label-based targeting.
 	KubeLabel string `mapstructure:"kube_label"`
 
-	// Comms lists process comm names treated as sandbox entry points for local
-	// agents launched outside Kubernetes (e.g. via `ebpf-guard run`). When a
-	// matching process starts, its process tree inherits the DefaultProfile.
-	Comms []string `mapstructure:"comms"`
-
-	// DefaultProfile is the profile name applied to Comms-matched processes and
-	// as a fallback when a pod carries no recognised KubeLabel value.
+	// DefaultProfile is the profile name applied via `ebpf-guard run` when
+	// --profile is omitted, and as a fallback when a pod carries no recognised
+	// KubeLabel value.
 	DefaultProfile string `mapstructure:"default_profile"`
 }
 
@@ -2196,7 +2192,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("ai_sandbox.mode", "audit")
 	v.SetDefault("ai_sandbox.rules_path", "rules/ai-agent/ai-agent.yaml")
 	v.SetDefault("ai_sandbox.selector.kube_label", "ebpf-guard.io/sandbox-profile")
-	v.SetDefault("ai_sandbox.selector.comms", []string{})
 	v.SetDefault("ai_sandbox.selector.default_profile", "")
 	v.SetDefault("ai_sandbox.profiles", []AISandboxProfile{})
 	v.SetDefault("ai_sandbox.dns_refresh_interval", 60*time.Second)

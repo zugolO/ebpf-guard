@@ -122,21 +122,16 @@ const (
 	// EscapeMount: mount(2)/remount (lsm_sandbox_mount) — remapping the
 	// filesystem view to break out of the cgroup/namespace boundary.
 	EscapeMount EscapePrimitive = "cgroup-escape"
-	// EscapePtrace: ptrace attach (lsm_sandbox_ptrace) — injecting into another
-	// process.
-	EscapePtrace EscapePrimitive = "ptrace"
-	// EscapeModuleLoad: kernel module load (lsm_kernel_module_request) — ring-0
-	// code execution.
-	EscapeModuleLoad EscapePrimitive = "module-load"
 )
 
-// EscapeContained reports whether a sandboxed task's use of the given escape
-// primitive is denied under this policy. It mirrors sandbox_escape_decide() in
-// bpf/lsm.bpf.c: escape primitives are denied for any sandboxed task in enforce
-// mode and audited (allowed) in audit mode. The primitive argument is accepted
-// so callers and future policy can distinguish vectors even though the current
-// decision is uniform across them.
-func (p *Policy) EscapeContained(EscapePrimitive) bool {
+// EscapeContained reports whether a sandboxed task's escape attempts are
+// denied under this policy. It mirrors sandbox_escape_decide() in
+// bpf/lsm.bpf.c: escape primitives are denied for any sandboxed task in
+// enforce mode and audited (allowed) in audit mode. The decision is currently
+// uniform across all escape vectors (kill/map-write/mount all gate on Mode
+// alone), so this takes no argument — an EscapePrimitive parameter would imply
+// per-vector coverage the policy doesn't have (issue #270).
+func (p *Policy) EscapeContained() bool {
 	return p.Mode == ModeEnforce
 }
 

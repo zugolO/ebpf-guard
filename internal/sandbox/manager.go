@@ -29,7 +29,7 @@ type Maps struct {
 	State      bpfMap // sandbox_state:          u32 -> u64 (active cgroup count)
 	Cgroups    bpfMap // sandbox_cgroups:        u64 cgroup_id -> packed value
 	PathPolicy bpfMap // sandbox_path_policy:    u64 -> u8 access bits
-	HashSecret bpfMap // sandbox_hash_secret:    u32(0) -> u64 per-boot salt (issue #274)
+	HashSecret bpfMap // sandbox_hash_secret:    u32(0) -> 128-bit per-boot SipHash key (issue #276 item 3)
 	NetV4      bpfMap // sandbox_net_v4:         LPM CIDRv4Entry -> u8
 	NetV6      bpfMap // sandbox_net_v6:         LPM CIDRv6Entry -> u8
 	Ports      bpfMap // sandbox_ports:          u64 -> u8
@@ -572,19 +572,19 @@ func (m *Manager) closeLocked() {
 // writePolicy installs every profile's path / CIDR / port rows into the maps.
 // Split out from Manager so it can be unit-tested against in-memory fakes.
 func writePolicy(maps Maps, p *Policy) error {
-	// Install the path-policy hash secret before any path row, so a reader
+	// Install the path-policy SipHash key before any path row, so a reader
 	// racing the initial policy load never sees allow-list rows keyed on a
-	// hash it could compute itself (issue #274 item 1).
+	// hash it could compute itself (issue #274 item 1 / #276 item 3).
 	//
 	// The map's absence (older/mismatched generated object) must not silently
-	// degrade an enforce policy to unsalted keys — that is the original
+	// degrade an enforce policy to an unkeyed hash — that is the original
 	// forgeable state. Refuse to install an enforce policy in that case
 	// (issue #276 item 2); audit mode has no enforcement claim to protect, so
 	// it still degrades best-effort, matching the ExecPins pattern below.
 	if maps.HashSecret == nil {
 		if p.Mode == ModeEnforce {
 			return fmt.Errorf("path policy hash secret: sandbox_hash_secret map absent; " +
-				"refusing to enforce an unsalted (forgeable) path allow-list")
+				"refusing to enforce an unkeyed (forgeable) path allow-list")
 		}
 	} else if err := maps.HashSecret.Update(uint32(0), p.secret, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("path policy hash secret: %w", err)

@@ -3,6 +3,8 @@ package sandbox
 import (
 	"net"
 	"strings"
+
+	"github.com/zugolO/ebpf-guard/internal/util"
 )
 
 // pathHashMax is the byte window the kernel resolves and hashes (PATH_HASH_MAX
@@ -31,27 +33,27 @@ func hasDotDotComponent(p string) bool {
 // back two things: the userspace-audit fallback when BPF LSM is unavailable,
 // and the unit tests that pin the kernel/userspace encoding contract.
 
-// buildPathLookup indexes a profile's path policy by the FNV-1a hash of the
-// prefix, mirroring the sandbox_path_policy map key (minus the profile id high
-// bits). Called once per profile at Compile() time and cached on
-// compiledProfile.lookup — paths never changes afterward, so recomputing it on
-// every PathAllowed/ExecAllowed call (once per file/exec event in the
-// userspace audit fallback) would be wasted allocation.
-func buildPathLookup(paths []PathEntry) map[uint32]uint8 {
-	m := make(map[uint32]uint8, len(paths))
+// buildPathLookup indexes a profile's path policy by the full 64-bit SipHash of
+// the prefix (profile id already folded into the PRF key), mirroring the
+// sandbox_path_policy map key. Called once per profile at Compile() time and
+// cached on compiledProfile.lookup — paths never changes afterward, so
+// recomputing it on every PathAllowed/ExecAllowed call (once per file/exec event
+// in the userspace audit fallback) would be wasted allocation.
+func buildPathLookup(paths []PathEntry) map[uint64]uint8 {
+	m := make(map[uint64]uint8, len(paths))
 	for _, e := range paths {
-		m[uint32(e.Key)] |= e.Access // #nosec G115 -- intentional: keep the low 32 bits (the fnv32a hash), discard the profile-id bits packed into the high 32
+		m[e.Key] |= e.Access
 	}
 	return m
 }
 
-// pathAllowed replays sandbox_path_allowed(): a rolling, secret-salted FNV-1a
-// hash over the absolute path, consulted at every '/' boundary and at the
-// end. A deny bit on any boundary wins; otherwise the path is allowed if some
-// boundary carries one of the wanted access bits. secret must be the same
-// value the lookup keys were built with (util.SaltedFNV32aPath) — see issue
-// #274 item 1 for why the hash is keyed rather than plain FNV-1a.
-func pathAllowed(lookup map[uint32]uint8, p string, want uint8, secret uint64) bool {
+// pathAllowed replays sandbox_path_allowed(): SipHash-2-4 of every '/'-boundary
+// prefix of the absolute path (and the full path), consulted against the
+// profile's lookup. A deny bit on any boundary wins; otherwise the path is
+// allowed if some boundary carries one of the wanted access bits. The key must
+// fold in the same profileID and use the same secret the lookup rows were built
+// with (see pathKey) — issue #276 item 3 for why the hash is a keyed PRF.
+func pathAllowed(lookup map[uint64]uint8, profileID uint32, p string, want uint8, secret util.SipHashKey) bool {
 	if len(p) == 0 || p[0] != '/' {
 		return false // relative / unresolvable — deny-by-default
 	}
@@ -61,28 +63,25 @@ func pathAllowed(lookup map[uint32]uint8, p string, want uint8, secret uint64) b
 		// item 1).
 		return false
 	}
-	const offset = 2166136261
-	const prime = 16777619
-	h := uint32(offset) ^ uint32(secret) ^ uint32(secret>>32) // #nosec G115 -- intentional 64-to-32-bit fold of the random secret, not a bounds-dependent conversion
 	allowed := false
-	for i := 0; i <= len(p) && i < pathHashMax; i++ {
-		atEnd := i == len(p)
-		boundary := atEnd || (p[i] == '/' && i > 0)
-		if boundary {
-			if bits, ok := lookup[h]; ok {
-				if bits&accessDeny != 0 {
-					return false
-				}
-				if bits&want != 0 {
-					allowed = true
-				}
-			}
+	for i := 1; i <= len(p); i++ {
+		// A boundary prefix is p[0:i] when i == len(p) (the full path) or when
+		// p[i] starts a new component ('/', i>0). SipHash is not a rolling hash,
+		// so each boundary re-hashes its prefix; the kernel side streams the same
+		// prefixes incrementally, producing identical values.
+		if i != len(p) && p[i] != '/' {
+			continue
 		}
-		if atEnd {
-			break
+		bits, ok := lookup[pathKey(profileID, p[:i], secret)]
+		if !ok {
+			continue
 		}
-		h ^= uint32(p[i])
-		h *= prime
+		if bits&accessDeny != 0 {
+			return false
+		}
+		if bits&want != 0 {
+			allowed = true
+		}
 	}
 	return allowed
 }
@@ -94,7 +93,7 @@ func (p *Policy) PathAllowed(profile, absPath string, want uint8) bool {
 	if !ok {
 		return false
 	}
-	return pathAllowed(cp.lookup, absPath, want, p.secret)
+	return pathAllowed(cp.lookup, cp.id, absPath, want, p.secret)
 }
 
 // ReadAllowed reports whether the named profile permits reading absPath. Thin
@@ -157,7 +156,7 @@ func (p *Policy) ExecAllowed(profile, absPath string, digest [32]byte) bool {
 	if hasDotDotComponent(absPath) {
 		return false // uncanonicalized `..` traversal — deny (issue #267 item 3)
 	}
-	if !pathAllowed(cp.lookup, absPath, accessExec, p.secret) {
+	if !pathAllowed(cp.lookup, cp.id, absPath, accessExec, p.secret) {
 		return false
 	}
 	norm := normalizePrefix(absPath)

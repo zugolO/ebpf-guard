@@ -159,14 +159,16 @@ struct {
 	__type(value, __u64); /* packed profile_id / flags / mode */
 } sandbox_cgroups SEC(".maps");
 
-/* Positive path policy: (profile_id << 32 | salted_hash(prefix)) -> access
- * bitmask. Prefixes are normalised (no trailing slash) on the Go side; the
- * hooks check the hash of every '/'-boundary prefix of the path plus the full
- * path. The hash is keyed by sandbox_hash_secret (issue #274 item 1): plain
- * FNV-1a is an invertible bijection, so keying an allow-list on its raw output
- * lets a sandboxed agent forge a path component whose hash collides with an
- * allowed prefix and bypass containment entirely. Salting the seed with a
- * secret the agent never observes removes that ability. */
+/* Positive path policy: SipHash-2-4(prefix) -> access bitmask. Prefixes are
+ * normalised (no trailing slash) on the Go side; the hooks check the hash of
+ * every '/'-boundary prefix of the path plus the full path. The hash is a keyed
+ * PRF: SipHash-2-4 keyed by sandbox_hash_secret with the profile id folded into
+ * the key (issue #276 item 3), so the full 64-bit map key already scopes the row
+ * to its profile. Earlier revisions keyed on FNV-1a (plain, then secret-salted):
+ * FNV-1a's round is an invertible bijection, so a single observed (path, hash)
+ * pair let an agent recover the seed and forge a colliding path component. A
+ * keyed PRF's key is not recoverable from its outputs, closing that forge even
+ * if a stored hash ever leaks (issue #274 item 1 was the salted-FNV interim). */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 16384);
@@ -174,25 +176,31 @@ struct {
 	__type(value, __u8);
 } sandbox_path_policy SEC(".maps");
 
-/* Per-boot random secret salting the sandbox_path_policy hash (issue #274
- * item 1). Single entry, key 0. Populated once by internal/sandbox
- * (Manager.Load, via crypto/rand) before any policy row is installed, and
- * never written to nor readable by a sandboxed workload: BPF map reads/writes
- * require the bpf() syscall, which lsm_sandbox_bpf already denies for every
- * task inside a registered sandbox cgroup. A zero-value secret (map not yet
- * populated) degrades to the unsalted seed rather than failing closed, but
- * that window cannot be reached in enforce mode: writePolicy() (manager.go)
- * now refuses to install ANY path row when this map is absent/unwritten and
- * the policy is enforce, and no cgroup is registered before writePolicy()
- * returns (issue #276 item 2). LOCK: do not reorder RegisterCgroup /
- * sandbox_cgroups population ahead of the writePolicy() call in Load() —
- * doing so would reopen the unsalted window this comment documents as
- * closed. */
+/* 128-bit SipHash key for sandbox_path_policy (k0 then k1). Its byte layout is
+ * the contract with util.SipHashKey on the Go side. */
+struct sbx_siphash_key {
+	__u64 k0;
+	__u64 k1;
+};
+
+/* Per-boot random SipHash key for the sandbox_path_policy hash (issue #276
+ * item 3, replacing the #274 item 1 salted-FNV seed). Single entry, key 0.
+ * Populated once by internal/sandbox (Manager.Load, via crypto/rand) before any
+ * policy row is installed, and never written to nor readable by a sandboxed
+ * workload: BPF map reads/writes require the bpf() syscall, which
+ * lsm_sandbox_bpf already denies for every task inside a registered sandbox
+ * cgroup. A zero-value key (map not yet populated) degrades to an unkeyed hash
+ * rather than failing closed, but that window cannot be reached in enforce mode:
+ * writePolicy() (manager.go) refuses to install ANY path row when this map is
+ * absent/unwritten and the policy is enforce, and no cgroup is registered before
+ * writePolicy() returns (issue #276 item 2). LOCK: do not reorder RegisterCgroup
+ * / sandbox_cgroups population ahead of the writePolicy() call in Load() — doing
+ * so would reopen the unkeyed window this comment documents as closed. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
-	__type(value, __u64);
+	__type(value, struct sbx_siphash_key);
 } sandbox_hash_secret SEC(".maps");
 
 /* Allowed egress CIDRs, scoped per profile. Key data starts with the 4-byte
@@ -281,29 +289,54 @@ static __always_inline __u64 sandbox_lookup_current(void)
 	return 0;
 }
 
-/* Returns the salted FNV-1a seed for the sandbox_path_policy hash: the offset
- * basis XORed with the per-boot secret's two 32-bit halves. Must match the
- * seed computation in Go's util.SaltedFNV32aPath byte-for-byte (issue #274
- * item 1). */
-static __always_inline __u32 sandbox_hash_seed(void)
+/* SipHash-2-4 primitives (issue #276 item 3). Must produce identical output to
+ * siphash24Core() in internal/util/pathhash.go. */
+#define SBX_ROTL64(x, b) (__u64)(((x) << (b)) | ((x) >> (64 - (b))))
+#define SBX_SIPROUND(v0, v1, v2, v3)                              \
+	do {                                                     \
+		v0 += v1; v1 = SBX_ROTL64(v1, 13); v1 ^= v0;     \
+		v0 = SBX_ROTL64(v0, 32);                         \
+		v2 += v3; v3 = SBX_ROTL64(v3, 16); v3 ^= v2;     \
+		v0 += v3; v3 = SBX_ROTL64(v3, 21); v3 ^= v0;     \
+		v2 += v1; v1 = SBX_ROTL64(v1, 17); v1 ^= v2;     \
+		v2 = SBX_ROTL64(v2, 32);                         \
+	} while (0)
+
+/* Returns the per-boot SipHash key for the sandbox_path_policy hash, with the
+ * profile id folded into k0 so each profile keys an independent PRF (matching
+ * pathKey() in internal/sandbox/policy.go). A missing/zero map entry yields an
+ * unkeyed hash — safe only because writePolicy() refuses enforce without the
+ * key installed (issue #276 item 2). */
+static __always_inline struct sbx_siphash_key sandbox_siphash_key(__u32 profile_id)
 {
 	__u32 zero = 0;
-	__u64 *secret = bpf_map_lookup_elem(&sandbox_hash_secret, &zero);
-	__u32 seed = 2166136261u; /* FNV offset basis */
+	struct sbx_siphash_key k = {};
+	struct sbx_siphash_key *secret = bpf_map_lookup_elem(&sandbox_hash_secret, &zero);
 	if (secret)
-		seed ^= (__u32)(*secret) ^ (__u32)(*secret >> 32);
-	return seed;
+		k = *secret;
+	k.k0 ^= (__u64)profile_id;
+	return k;
 }
 
-/* Check an absolute path against the profile's positive policy.
- * Computes a rolling, secret-salted FNV-1a hash and consults
- * sandbox_path_policy at every '/' boundary plus the full path, so configured
- * prefixes match any depth. A SBX_DENY entry on any boundary wins over any
- * allow. Returns 1 when some boundary carries one of the `want` access bits. */
+/* Check an absolute path against the profile's positive policy. Streams
+ * SipHash-2-4 over the path, finalizing a copy of the state at every '/'
+ * boundary plus the full path so configured prefixes match at any depth, and
+ * consults sandbox_path_policy with each prefix's 64-bit MAC. A SBX_DENY entry
+ * on any boundary wins over any allow. Returns 1 when some boundary carries one
+ * of the `want` access bits.
+ *
+ * The streaming here reproduces the one-shot SipHash of each prefix exactly:
+ * full 8-byte blocks are absorbed into (v0..v3) once, and each boundary of
+ * length L finalizes a copy with the L%8 pending tail bytes plus the length byte
+ * — identical to util.SipHash24Path(path[:L]). */
 static __always_inline int sandbox_path_allowed(__u32 profile_id, const char *path, __u8 want)
 {
-	__u32 hash = sandbox_hash_seed();
-	__u64 base = ((__u64)profile_id) << 32;
+	struct sbx_siphash_key k = sandbox_siphash_key(profile_id);
+	__u64 v0 = k.k0 ^ 0x736f6d6570736575ULL;
+	__u64 v1 = k.k1 ^ 0x646f72616e646f6dULL;
+	__u64 v2 = k.k0 ^ 0x6c7967656e657261ULL;
+	__u64 v3 = k.k1 ^ 0x7465646279746573ULL;
+	__u64 m = 0; /* current partial 8-byte block, little-endian */
 	int allowed = 0;
 	int i;
 
@@ -314,7 +347,20 @@ static __always_inline int sandbox_path_allowed(__u32 profile_id, const char *pa
 		char c = path[i];
 		int boundary = (c == '\0') || (c == '/' && i > 0);
 		if (boundary) {
-			__u64 key = base | (__u64)hash;
+			/* Finalize SipHash of path[0:i] (i bytes) on a copy. m holds
+			 * the i%8 pending bytes; the top byte carries the length. */
+			__u64 b = ((__u64)((__u32)i & 0xff) << 56) | m;
+			__u64 f0 = v0, f1 = v1, f2 = v2, f3 = v3;
+			f3 ^= b;
+			SBX_SIPROUND(f0, f1, f2, f3);
+			SBX_SIPROUND(f0, f1, f2, f3);
+			f0 ^= b;
+			f2 ^= 0xff;
+			SBX_SIPROUND(f0, f1, f2, f3);
+			SBX_SIPROUND(f0, f1, f2, f3);
+			SBX_SIPROUND(f0, f1, f2, f3);
+			SBX_SIPROUND(f0, f1, f2, f3);
+			__u64 key = f0 ^ f1 ^ f2 ^ f3;
 			__u8 *ent = bpf_map_lookup_elem(&sandbox_path_policy, &key);
 			if (ent) {
 				if (*ent & SBX_DENY)
@@ -325,8 +371,16 @@ static __always_inline int sandbox_path_allowed(__u32 profile_id, const char *pa
 		}
 		if (c == '\0')
 			return allowed;
-		hash ^= (__u32)(unsigned char)c;
-		hash *= 16777619u; /* FNV prime */
+		/* Absorb path[i] into the partial block; flush a full 8-byte block. */
+		unsigned int pos = (unsigned int)i & 7u;
+		m |= (__u64)(unsigned char)c << (8u * pos);
+		if (pos == 7u) {
+			v3 ^= m;
+			SBX_SIPROUND(v0, v1, v2, v3);
+			SBX_SIPROUND(v0, v1, v2, v3);
+			v0 ^= m;
+			m = 0;
+		}
 	}
 	return allowed;
 }

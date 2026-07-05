@@ -49,7 +49,7 @@ const (
 
 // PathEntry is one (profile, path-prefix) row of the positive path policy.
 type PathEntry struct {
-	Key    uint64 // profile_id<<32 | fnv32a(prefix)
+	Key    uint64 // SipHash24Path(prefix, secret keyed by profile id) — issue #276 item 3
 	Access uint8  // accessRead|accessWrite|accessExec|accessDeny
 	Prefix string // normalised prefix, retained for logging/tests
 }
@@ -110,7 +110,7 @@ type compiledProfile struct {
 	// lookup caches buildPathLookup(paths)'s result. paths is only ever
 	// appended to during Compile(), so this is built once it settles rather
 	// than rebuilt on every PathAllowed/ExecAllowed call.
-	lookup map[uint32]uint8
+	lookup map[uint64]uint8
 }
 
 // Policy is the fully compiled ai_sandbox configuration: a stable name→id
@@ -121,29 +121,43 @@ type Policy struct {
 	byName         map[string]*compiledProfile
 	profiles       []*compiledProfile
 	defaultProfile string
-	// secret is a per-process-startup random value salting every
-	// sandbox_path_policy hash (issue #274 item 1). Generated once in
-	// Compile() via crypto/rand and installed into the sandbox_hash_secret BPF
-	// map by Manager.Load before any policy row is written, so a sandboxed
-	// workload never observes it and cannot forge a colliding path component.
-	secret uint64
+	// secret is a per-process-startup random 128-bit SipHash key for every
+	// sandbox_path_policy hash (issue #276 item 3, replacing the #274 item 1
+	// salted FNV-1a). Generated once in Compile() via crypto/rand and installed
+	// into the sandbox_hash_secret BPF map by Manager.Load before any policy row
+	// is written, so a sandboxed workload never observes it; because SipHash is a
+	// keyed PRF the key stays unrecoverable even if a stored hash ever leaks.
+	secret util.SipHashKey
 }
 
-// HashSecret returns the per-boot secret salting this policy's path-policy
+// HashSecret returns the per-boot SipHash key for this policy's path-policy
 // hashes, for Manager.Load to install into the sandbox_hash_secret BPF map.
-func (p *Policy) HashSecret() uint64 { return p.secret }
+func (p *Policy) HashSecret() util.SipHashKey { return p.secret }
 
-// randomHashSecret returns a cryptographically random 64-bit salt. It fails
-// closed: if the OS CSPRNG is unavailable, it returns an error instead of a
-// fixed fallback constant. A fixed fallback would be a public value, making
-// the salt predictable and the sandbox_path_policy allow-list forgeable again
+// randomHashSecret returns a cryptographically random 128-bit SipHash key. It
+// fails closed: if the OS CSPRNG is unavailable, it returns an error instead of
+// a fixed fallback constant. A fixed fallback would be a public value, making
+// the key predictable and the sandbox_path_policy allow-list forgeable again
 // while enforcement is still reported as active (issue #276 item 1).
-func randomHashSecret() (uint64, error) {
-	var buf [8]byte
+func randomHashSecret() (util.SipHashKey, error) {
+	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return 0, fmt.Errorf("sandbox: generate path-policy hash secret: %w", err)
+		return util.SipHashKey{}, fmt.Errorf("sandbox: generate path-policy hash secret: %w", err)
 	}
-	return binary.LittleEndian.Uint64(buf[:]), nil
+	return util.SipHashKey{
+		K0: binary.LittleEndian.Uint64(buf[0:8]),
+		K1: binary.LittleEndian.Uint64(buf[8:16]),
+	}, nil
+}
+
+// pathKey derives the sandbox_path_policy map key for a normalised prefix under
+// a profile: SipHash-2-4 of the prefix, keyed by the per-boot secret with the
+// profile id folded into K0 so each profile gets an independent PRF (and the map
+// key is the full 64-bit hash, not a 32-bit hash packed beside the profile id).
+// Must match sandbox_path_allowed() in bpf/lsm.bpf.c byte-for-byte.
+func pathKey(profileID uint32, prefix string, secret util.SipHashKey) uint64 {
+	k := util.SipHashKey{K0: secret.K0 ^ uint64(profileID), K1: secret.K1}
+	return util.SipHash24Path(prefix, k)
 }
 
 // Compile translates the ai_sandbox config into map-ready rows. Profile IDs are
@@ -286,15 +300,16 @@ func normalizePrefix(s string) string {
 	return c
 }
 
-func (cp *compiledProfile) addPath(prefix string, access uint8, secret uint64) {
+func (cp *compiledProfile) addPath(prefix string, access uint8, secret util.SipHashKey) {
 	norm := normalizePrefix(prefix)
 	if norm == "" {
 		return
 	}
-	// Salted hash (issue #274 item 1): keying the allow-list on plain fnv32a
-	// let a sandboxed agent forge a colliding path component, since FNV-1a's
-	// round is an invertible bijection. See util.SaltedFNV32aPath.
-	key := (uint64(cp.id) << 32) | uint64(util.SaltedFNV32aPath(norm, secret))
+	// Keyed-PRF hash (issue #276 item 3): keying the allow-list on plain (or even
+	// secret-salted) FNV-1a let a sandboxed agent forge a colliding path
+	// component, since FNV-1a's round is an invertible bijection. SipHash-2-4 is
+	// a keyed PRF whose key is unrecoverable from its outputs. See pathKey.
+	key := pathKey(cp.id, norm, secret)
 	// Merge access bits when the same prefix appears for multiple dimensions.
 	for i := range cp.paths {
 		if cp.paths[i].Key == key {

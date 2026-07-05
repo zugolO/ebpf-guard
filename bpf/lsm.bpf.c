@@ -121,7 +121,11 @@ struct {
 #define SANDBOX_MODE_ENFORCE 1
 
 /* Profile flag bits (bits 8-15 of the sandbox_cgroups value) */
-#define SBX_F_PORTS_FILTER  (1 << 0)  /* profile lists egress ports (empty = all allowed) */
+#define SBX_F_PORTS_FILTER    (1 << 0)  /* profile lists egress ports (empty = all allowed) */
+#define SBX_F_ALLOW_LOOPBACK  (1 << 1)  /* profile opts in to unrestricted 127.0.0.0/8 / ::1 egress
+					 * (issue #274 item 3) — otherwise loopback is a
+					 * normal destination, subject to the same CIDR/port
+					 * allow-list as any other address. */
 
 /* Access bits for sandbox_path_policy values */
 #define SBX_ALLOW_READ  (1 << 0)
@@ -596,10 +600,13 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 	}
 
 	/* AI-agent sandbox: positive egress policy for sandboxed cgroups
-	 * (issue #255). Loopback is always allowed so a sandboxed agent can
-	 * reach local tooling (language servers, the ebpf-guard API) even
-	 * under an empty CIDR list; everything else must match the profile's
-	 * allowed_egress_cidrs (and ports, when the profile lists any). */
+	 * (issue #255). Loopback is treated as a normal destination — it must
+	 * match the profile's allowed_egress_cidrs (and ports, when the
+	 * profile lists any) like any other address — unless the profile
+	 * explicitly opts in via SBX_F_ALLOW_LOOPBACK, in which case
+	 * 127.0.0.0/8 / ::1 are always allowed (issue #274 item 3: a blanket
+	 * loopback exemption over-exposes every localhost-bound service on
+	 * the node, e.g. under `ebpf-guard run`'s cgroup-only isolation). */
 	__u64 sbx = sandbox_lookup_current();
 	if (sbx) {
 		__u32 profile_id = (__u32)(sbx >> 32);
@@ -621,8 +628,11 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 			copy_ipv4_addr(addr_bytes, sin.sin_addr.s_addr);
 			addr_len = 4;
 
-			/* 127.0.0.0/8 loopback always allowed */
-			is_loopback = (addr_bytes[0] == 127);
+			/* 127.0.0.0/8 is only unconditionally allowed when the profile
+			 * opts in via SBX_F_ALLOW_LOOPBACK (issue #274 item 3); otherwise
+			 * it falls through to the normal CIDR check below like any other
+			 * destination. */
+			is_loopback = (addr_bytes[0] == 127) && (flags & SBX_F_ALLOW_LOOPBACK);
 
 			if (!is_loopback) {
 				struct sbx_lpm_key_v4 k = {};
@@ -642,8 +652,10 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 			bpf_probe_read_kernel(addr_bytes, 16, &sin6.sin6_addr);
 			addr_len = 16;
 
-			/* ::1 loopback always allowed */
-			is_loopback = 1;
+			/* ::1 is only unconditionally allowed when the profile opts in
+			 * via SBX_F_ALLOW_LOOPBACK (issue #274 item 3); otherwise it
+			 * falls through to the normal CIDR check below. */
+			is_loopback = (flags & SBX_F_ALLOW_LOOPBACK) ? 1 : 0;
 			int i;
 			#pragma unroll
 			for (i = 0; i < 15; i++) {
@@ -664,6 +676,13 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 				if (!bpf_map_lookup_elem(&sandbox_net_v6, &k))
 					violation = 1;
 			}
+		} else {
+			/* Non-INET family (e.g. AF_UNIX) has no IP/port for the
+			 * egress CIDR/port policy to match against, and connects
+			 * on it traverse neither this INET path nor bpf_file_open.
+			 * Deny by default under an active sandbox rather than
+			 * allowing by omission (issue #274 item 2). */
+			violation = 1;
 		}
 
 		if (!violation && !is_loopback && addr_len > 0 && (flags & SBX_F_PORTS_FILTER)) {

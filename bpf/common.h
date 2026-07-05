@@ -69,6 +69,11 @@
 /* Address family codes - must match pkg/types/event.go */
 #define AF_INET   2
 #define AF_INET6  10
+/* AF_UNIX is not modeled by the sandbox egress CIDR/port policy (no IP/port
+ * to match against); referenced so sandboxed connects on this (and any other
+ * unmodeled) family are denied by default instead of allowed by omission
+ * (issue #274 item 2). */
+#define AF_UNIX   1
 
 /* Maximum lengths for string fields */
 #define COMM_LEN      16

@@ -156,6 +156,7 @@ ai_sandbox:
       allowed_egress_cidrs:[140.82.112.0/20, 151.101.0.0/16]
       allowed_egress_ports:[443]
       allowed_domains:    [github.com, pypi.org, registry.npmjs.org]
+      allow_loopback:     false  # opt-in only; see Profile fields below
 ```
 
 ### Profile fields
@@ -168,6 +169,7 @@ ai_sandbox:
 | `denied_paths` | Always denied, even if covered by an allow entry — defence-in-depth for secret directories. |
 | `allowed_egress_cidrs` / `allowed_egress_ports` | Destination CIDRs / ports the agent may connect to. Empty ports = any port. |
 | `allowed_domains` | DNS names the agent may reach. Resolved to A/AAAA records and programmed as egress allow entries — see [DNS-pinned egress](#dns-pinned-egress). |
+| `allow_loopback` | Default `false`. When unset, `127.0.0.0/8` / `::1` are treated as normal destinations and must match `allowed_egress_cidrs` (and `allowed_egress_ports`, if set) like any other address. Set `true` only if the agent genuinely needs unrestricted access to every localhost-bound service on the node — `ebpf-guard run` isolates the child by cgroup only, so it shares the host's loopback (issue #274 item 3). |
 
 ### Target selection
 
@@ -301,8 +303,11 @@ label controller resolving a labelled Pod's cgroup subtree), the LSM hooks in
   (see [Exec pinning](#exec-pinning-and-the-writable-exec-rule)).
 - **socket_connect** — the destination must fall inside an
   `allowed_egress_cidrs` entry **or a DNS-pinned host entry** derived from
-  `allowed_domains` (loopback is always allowed) and, when the profile lists
-  `allowed_egress_ports`, match a listed port.
+  `allowed_domains` (loopback is treated the same as any other destination
+  unless the profile sets `allow_loopback: true`) and, when the profile lists
+  `allowed_egress_ports`, match a listed port. Any address family other than
+  `AF_INET`/`AF_INET6` (e.g. `AF_UNIX`) is denied outright under an active
+  sandbox — it has no IP/port for this policy to match against.
 
 Path matching uses the same FNV-1a prefix walk in kernel and userspace, so a
 prefix like `/workspace` allows `/workspace/**` but not a sibling

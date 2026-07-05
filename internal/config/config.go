@@ -1272,6 +1272,15 @@ type AISandboxProfile struct {
 	// as /32 (or /128) entries into the profile's egress allow-list and refreshes
 	// them on the record TTL.
 	AllowedDomains []string `mapstructure:"allowed_domains"`
+
+	// AllowLoopback opts this profile in to unrestricted 127.0.0.0/8 / ::1
+	// egress. Defaults to false: loopback is a normal destination that must
+	// match AllowedEgressCIDRs (and AllowedEgressPorts, if set) like any other
+	// address. A blanket loopback exemption over-exposes every localhost-bound
+	// service on the node — e.g. `ebpf-guard run` isolates the child only by
+	// cgroup, sharing the host's loopback — so it must be explicitly requested
+	// (issue #274 item 3).
+	AllowLoopback bool `mapstructure:"allow_loopback"`
 }
 
 // AISandboxExecPin pins a single exec path to a content hash for a sandbox

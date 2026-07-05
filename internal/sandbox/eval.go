@@ -191,15 +191,17 @@ func (p *Policy) ExecPathPinned(profile, absPath string) bool {
 }
 
 // EgressAllowed reports whether the named profile permits an outbound
-// connection to ip:port. Loopback is always allowed (matching the kernel
-// fast-path); otherwise the address must fall inside an allowed CIDR and, when
-// the profile filters ports, the port must be listed.
+// connection to ip:port. Loopback is only unconditionally allowed when the
+// profile opts in via AllowLoopback (matching the kernel's SBX_F_ALLOW_LOOPBACK
+// gate, issue #274 item 3); otherwise it is treated like any other address and
+// must fall inside an allowed CIDR and, when the profile filters ports, the
+// port must be listed.
 func (p *Policy) EgressAllowed(profile string, ip net.IP, port uint16) bool {
 	cp, ok := p.byName[profile]
 	if !ok {
 		return false
 	}
-	if ip.IsLoopback() {
+	if ip.IsLoopback() && cp.flags&flagAllowLoopback != 0 {
 		return true
 	}
 	if !cp.cidrContains(ip) {

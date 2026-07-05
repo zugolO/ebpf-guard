@@ -180,10 +180,37 @@ func TestEgressAllowed(t *testing.T) {
 		{"140.82.113.4", 443, true}, // github, allowed port
 		{"140.82.113.4", 80, false}, // in CIDR, wrong port
 		{"8.8.8.8", 443, false},     // outside CIDR
-		{"127.0.0.1", 9999, true},   // loopback always allowed
-		{"::1", 1234, true},         // ipv6 loopback
+		{"127.0.0.1", 9999, false},  // loopback: no allow_loopback, outside CIDR (issue #274 item 3)
+		{"::1", 1234, false},        // ipv6 loopback: same, denied by default
 		{"2606:50c0::1", 443, true}, // ipv6 CIDR
 		{"2001:4860:4860::8888", 443, false},
+	}
+	for _, tt := range tests {
+		ip := net.ParseIP(tt.ip)
+		if got := pol.EgressAllowed("agent", ip, tt.port); got != tt.ok {
+			t.Errorf("EgressAllowed(%s:%d) = %v, want %v", tt.ip, tt.port, got, tt.ok)
+		}
+	}
+}
+
+func TestEgressAllowed_LoopbackOptIn(t *testing.T) {
+	pol, err := Compile(aiCfg("enforce", config.AISandboxProfile{
+		Name:               "agent",
+		AllowedEgressCIDRs: []string{"140.82.112.0/20"},
+		AllowedEgressPorts: []uint16{443},
+		AllowLoopback:      true,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		ip   string
+		port uint16
+		ok   bool
+	}{
+		{"127.0.0.1", 9999, true}, // allow_loopback bypasses CIDR/port checks
+		{"::1", 1234, true},
+		{"8.8.8.8", 443, false}, // still outside CIDR, not loopback
 	}
 	for _, tt := range tests {
 		ip := net.ParseIP(tt.ip)

@@ -34,7 +34,10 @@ const (
 )
 
 // Profile flag bits — must match SBX_F_* in bpf/lsm.bpf.c.
-const flagPortsFilter uint8 = 1 << 0
+const (
+	flagPortsFilter   uint8 = 1 << 0
+	flagAllowLoopback uint8 = 1 << 1
+)
 
 // Path access bits — must match SBX_ALLOW_* / SBX_DENY in bpf/lsm.bpf.c.
 const (
@@ -187,6 +190,9 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 		if len(prof.AllowedEgressPorts) > 0 {
 			cp.flags |= flagPortsFilter
 			cp.ports = append(cp.ports, prof.AllowedEgressPorts...)
+		}
+		if prof.AllowLoopback {
+			cp.flags |= flagAllowLoopback
 		}
 
 		for _, pin := range prof.AllowedExecPins {

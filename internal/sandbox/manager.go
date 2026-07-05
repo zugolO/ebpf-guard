@@ -424,7 +424,10 @@ func (m *Manager) UnprotectPID(pid uint32) error {
 // IPs become /32 (or /128) allow entries scoped to that profile, and any IP that
 // was previously pinned but is absent from ips is removed (item 6). The static
 // allowed_egress_cidrs rows are never touched. Loopback and unspecified
-// addresses are skipped (loopback is always allowed by the hook fast-path).
+// addresses are skipped: loopback egress is governed by the profile's
+// allow_loopback flag (SBX_F_ALLOW_LOOPBACK), not by dynamic CIDR rows
+// (issue #274 item 3), and an unspecified address is never a valid connect
+// target.
 //
 // Safe before or after Load; in audit-only mode it records the intended set so
 // Policy-based auditing stays consistent, without kernel writes. Idempotent: an

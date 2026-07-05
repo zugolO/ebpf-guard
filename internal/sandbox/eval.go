@@ -63,7 +63,7 @@ func pathAllowed(lookup map[uint32]uint8, p string, want uint8, secret uint64) b
 	}
 	const offset = 2166136261
 	const prime = 16777619
-	h := uint32(offset) ^ uint32(secret) ^ uint32(secret>>32)
+	h := uint32(offset) ^ uint32(secret) ^ uint32(secret>>32) // #nosec G115 -- intentional 64-to-32-bit fold of the random secret, not a bounds-dependent conversion
 	allowed := false
 	for i := 0; i <= len(p) && i < pathHashMax; i++ {
 		atEnd := i == len(p)

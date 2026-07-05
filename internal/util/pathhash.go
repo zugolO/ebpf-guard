@@ -53,7 +53,7 @@ func FNV32aPath(s string) uint32 {
 func SaltedFNV32aPath(s string, secret uint64) uint32 {
 	const offsetBasis = 2166136261
 	const prime = 16777619
-	h := uint32(offsetBasis) ^ uint32(secret) ^ uint32(secret>>32)
+	h := uint32(offsetBasis) ^ uint32(secret) ^ uint32(secret>>32) // #nosec G115 -- intentional 64-to-32-bit fold of the random secret, not a bounds-dependent conversion
 	for i := 0; i < len(s) && i < PathHashMax; i++ {
 		c := s[i]
 		if c == 0 {

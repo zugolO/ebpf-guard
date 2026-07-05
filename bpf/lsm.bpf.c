@@ -180,8 +180,14 @@ struct {
  * never written to nor readable by a sandboxed workload: BPF map reads/writes
  * require the bpf() syscall, which lsm_sandbox_bpf already denies for every
  * task inside a registered sandbox cgroup. A zero-value secret (map not yet
- * populated) degrades to the unsalted seed rather than failing closed, since
- * this map is only ever consulted for cgroups already in sandbox_cgroups. */
+ * populated) degrades to the unsalted seed rather than failing closed, but
+ * that window cannot be reached in enforce mode: writePolicy() (manager.go)
+ * now refuses to install ANY path row when this map is absent/unwritten and
+ * the policy is enforce, and no cgroup is registered before writePolicy()
+ * returns (issue #276 item 2). LOCK: do not reorder RegisterCgroup /
+ * sandbox_cgroups population ahead of the writePolicy() call in Load() —
+ * doing so would reopen the unsalted window this comment documents as
+ * closed. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);

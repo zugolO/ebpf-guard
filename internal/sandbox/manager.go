@@ -574,13 +574,20 @@ func (m *Manager) closeLocked() {
 func writePolicy(maps Maps, p *Policy) error {
 	// Install the path-policy hash secret before any path row, so a reader
 	// racing the initial policy load never sees allow-list rows keyed on a
-	// hash it could compute itself (issue #274 item 1). Best-effort against an
-	// older generated object missing the map, matching the ExecPins pattern
-	// below — the rest of the policy still installs (unsalted, degraded).
-	if maps.HashSecret != nil {
-		if err := maps.HashSecret.Update(uint32(0), p.secret, ebpf.UpdateAny); err != nil {
-			return fmt.Errorf("path policy hash secret: %w", err)
+	// hash it could compute itself (issue #274 item 1).
+	//
+	// The map's absence (older/mismatched generated object) must not silently
+	// degrade an enforce policy to unsalted keys — that is the original
+	// forgeable state. Refuse to install an enforce policy in that case
+	// (issue #276 item 2); audit mode has no enforcement claim to protect, so
+	// it still degrades best-effort, matching the ExecPins pattern below.
+	if maps.HashSecret == nil {
+		if p.Mode == ModeEnforce {
+			return fmt.Errorf("path policy hash secret: sandbox_hash_secret map absent; " +
+				"refusing to enforce an unsalted (forgeable) path allow-list")
 		}
+	} else if err := maps.HashSecret.Update(uint32(0), p.secret, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("path policy hash secret: %w", err)
 	}
 	one := uint8(1)
 	for _, cp := range p.profiles {

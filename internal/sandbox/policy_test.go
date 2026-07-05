@@ -306,6 +306,58 @@ func countNormalized(prefixes []string) int {
 	return len(seen)
 }
 
+// A missing sandbox_hash_secret map must refuse to install an enforce policy
+// rather than silently degrade to unsalted (forgeable) path keys (issue #276
+// item 2).
+func TestWritePolicy_NilHashSecretRefusesEnforce(t *testing.T) {
+	pol, err := Compile(aiCfg("enforce", config.AISandboxProfile{
+		Name:             "agent",
+		AllowedReadPaths: []string{"/workspace"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	maps := Maps{
+		State:      newFakeMap(),
+		Cgroups:    newFakeMap(),
+		PathPolicy: newFakeMap(),
+		HashSecret: nil, // absent/mismatched generated object
+		NetV4:      newFakeMap(),
+		NetV6:      newFakeMap(),
+		Ports:      newFakeMap(),
+	}
+	if err := writePolicy(maps, pol); err == nil {
+		t.Fatal("writePolicy must refuse an enforce policy with no hash-secret map")
+	}
+	if n := len(maps.PathPolicy.(*fakeMap).data); n != 0 {
+		t.Errorf("path policy rows = %d, want 0 (must not install unsalted rows)", n)
+	}
+}
+
+// The same missing map in audit mode has no enforcement claim to protect, so
+// it still degrades best-effort (matching the ExecPins tolerance pattern).
+func TestWritePolicy_NilHashSecretToleratedInAudit(t *testing.T) {
+	pol, err := Compile(aiCfg("audit", config.AISandboxProfile{
+		Name:             "agent",
+		AllowedReadPaths: []string{"/workspace"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	maps := Maps{
+		State:      newFakeMap(),
+		Cgroups:    newFakeMap(),
+		PathPolicy: newFakeMap(),
+		HashSecret: nil,
+		NetV4:      newFakeMap(),
+		NetV6:      newFakeMap(),
+		Ports:      newFakeMap(),
+	}
+	if err := writePolicy(maps, pol); err != nil {
+		t.Fatalf("writePolicy with nil HashSecret in audit mode must be tolerated, got: %v", err)
+	}
+}
+
 func TestWritePolicy_PopulatesAllMaps(t *testing.T) {
 	pol, err := Compile(aiCfg("enforce", config.AISandboxProfile{
 		Name:               "agent",
@@ -321,6 +373,7 @@ func TestWritePolicy_PopulatesAllMaps(t *testing.T) {
 		State:      newFakeMap(),
 		Cgroups:    newFakeMap(),
 		PathPolicy: newFakeMap(),
+		HashSecret: newFakeMap(),
 		NetV4:      newFakeMap(),
 		NetV6:      newFakeMap(),
 		Ports:      newFakeMap(),

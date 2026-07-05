@@ -133,15 +133,17 @@ type Policy struct {
 // hashes, for Manager.Load to install into the sandbox_hash_secret BPF map.
 func (p *Policy) HashSecret() uint64 { return p.secret }
 
-// randomHashSecret returns a cryptographically random 64-bit salt. Falls back
-// to a fixed non-zero value only if the OS CSPRNG is unavailable (should never
-// happen on a real target) so Compile never fails outright over this.
-func randomHashSecret() uint64 {
+// randomHashSecret returns a cryptographically random 64-bit salt. It fails
+// closed: if the OS CSPRNG is unavailable, it returns an error instead of a
+// fixed fallback constant. A fixed fallback would be a public value, making
+// the salt predictable and the sandbox_path_policy allow-list forgeable again
+// while enforcement is still reported as active (issue #276 item 1).
+func randomHashSecret() (uint64, error) {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return 0x9e3779b97f4a7c15 // arbitrary non-zero fallback constant
+		return 0, fmt.Errorf("sandbox: generate path-policy hash secret: %w", err)
 	}
-	return binary.LittleEndian.Uint64(buf[:])
+	return binary.LittleEndian.Uint64(buf[:]), nil
 }
 
 // Compile translates the ai_sandbox config into map-ready rows. Profile IDs are
@@ -151,11 +153,17 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 	if cfg.Mode == "enforce" {
 		mode = ModeEnforce
 	}
+	secret, err := randomHashSecret()
+	if err != nil {
+		// Fail closed: never enter enforce (or audit) with a policy whose
+		// path-hash salt is unknown/predictable (issue #276 item 1).
+		return nil, fmt.Errorf("sandbox: compile policy: %w", err)
+	}
 	p := &Policy{
 		Mode:           mode,
 		byName:         make(map[string]*compiledProfile, len(cfg.Profiles)),
 		defaultProfile: cfg.Selector.DefaultProfile,
-		secret:         randomHashSecret(),
+		secret:         secret,
 	}
 	for i, prof := range cfg.Profiles {
 		id := uint32(i + 1)

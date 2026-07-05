@@ -610,6 +610,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 			Action:    string(rule.Action),
+			Details:   lsmAuditDetails(e),
 		})
 	}
 }
@@ -652,10 +653,40 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 			Action:    string(rule.Action),
+			Details:   lsmAuditDetails(e),
 		})
 	}
 
 	return alerts
+}
+
+// lsmAuditDetails returns an Alert.Details map describing an ai_sandbox/LSM
+// audit decision (hook, decision, path, enforced, profile id) so operators can
+// see *what* was denied/audited from the alert alone — including over the
+// JSON API and fleet-mode polling, where the unserialized Event field
+// (json:"-") is not available. Returns nil for any other event type so the
+// common hot path allocates nothing.
+func lsmAuditDetails(e types.Event) map[string]interface{} {
+	if e.Type != types.EventLSMAudit || e.LSMAudit == nil {
+		return nil
+	}
+	a := e.LSMAudit
+	d := getDetailsMap()
+	d["hook"] = a.Hook
+	d["decision"] = a.Decision
+	d["enforced"] = a.Enforced
+	if a.Path != "" {
+		d["path"] = a.Path
+	}
+	// TargetPID carries the matched ai_sandbox profile id for sandbox_audit /
+	// sandbox_deny decisions (see types.LSMAuditEvent doc); expose it as
+	// profile_id so the TUI/API don't misread it as a signalled task pid.
+	if a.Decision == "sandbox_audit" || a.Decision == "sandbox_deny" {
+		d["profile_id"] = a.TargetPID
+	} else {
+		d["target_pid"] = a.TargetPID
+	}
+	return d
 }
 
 // ReleaseAlerts returns a slice obtained from Evaluate back to the pool.

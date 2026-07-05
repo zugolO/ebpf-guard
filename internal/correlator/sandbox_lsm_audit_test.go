@@ -48,6 +48,16 @@ func TestAIAgentSandboxLSMAuditRules(t *testing.T) {
 		require.Contains(t, ids, "ai_agent_sandbox_deny", "sandbox_deny must fire ai_agent_sandbox_deny")
 		assert.Equal(t, types.SeverityCritical, ids["ai_agent_sandbox_deny"])
 		assert.NotContains(t, ids, "ai_agent_sandbox_audit", "a deny must not also fire the audit-only rule")
+
+		for _, a := range alerts {
+			if a.RuleID == "ai_agent_sandbox_deny" {
+				require.NotNil(t, a.Details, "Details must be populated so the TUI/API can surface hook+path (issue #273)")
+				assert.Equal(t, "file_open", a.Details["hook"])
+				assert.Equal(t, "sandbox_deny", a.Details["decision"])
+				assert.Equal(t, "/etc/shadow", a.Details["path"])
+				assert.Equal(t, true, a.Details["enforced"])
+			}
+		}
 	})
 
 	t.Run("sandbox_audit fires warning", func(t *testing.T) {
@@ -56,5 +66,15 @@ func TestAIAgentSandboxLSMAuditRules(t *testing.T) {
 		require.Contains(t, ids, "ai_agent_sandbox_audit", "sandbox_audit must fire ai_agent_sandbox_audit")
 		assert.Equal(t, types.SeverityWarning, ids["ai_agent_sandbox_audit"])
 		assert.NotContains(t, ids, "ai_agent_sandbox_deny")
+
+		for _, a := range alerts {
+			if a.RuleID == "ai_agent_sandbox_audit" {
+				require.NotNil(t, a.Details)
+				assert.Equal(t, "socket_connect", a.Details["hook"])
+				assert.Equal(t, "sandbox_audit", a.Details["decision"])
+				assert.Equal(t, "169.254.169.254:80", a.Details["path"])
+				assert.Equal(t, false, a.Details["enforced"])
+			}
+		}
 	})
 }

@@ -155,15 +155,35 @@ struct {
 	__type(value, __u64); /* packed profile_id / flags / mode */
 } sandbox_cgroups SEC(".maps");
 
-/* Positive path policy: (profile_id << 32 | fnv32a(prefix)) -> access bitmask.
- * Prefixes are normalised (no trailing slash) on the Go side; the hooks check
- * the hash of every '/'-boundary prefix of the path plus the full path. */
+/* Positive path policy: (profile_id << 32 | salted_hash(prefix)) -> access
+ * bitmask. Prefixes are normalised (no trailing slash) on the Go side; the
+ * hooks check the hash of every '/'-boundary prefix of the path plus the full
+ * path. The hash is keyed by sandbox_hash_secret (issue #274 item 1): plain
+ * FNV-1a is an invertible bijection, so keying an allow-list on its raw output
+ * lets a sandboxed agent forge a path component whose hash collides with an
+ * allowed prefix and bypass containment entirely. Salting the seed with a
+ * secret the agent never observes removes that ability. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 16384);
 	__type(key, __u64);
 	__type(value, __u8);
 } sandbox_path_policy SEC(".maps");
+
+/* Per-boot random secret salting the sandbox_path_policy hash (issue #274
+ * item 1). Single entry, key 0. Populated once by internal/sandbox
+ * (Manager.Load, via crypto/rand) before any policy row is installed, and
+ * never written to nor readable by a sandboxed workload: BPF map reads/writes
+ * require the bpf() syscall, which lsm_sandbox_bpf already denies for every
+ * task inside a registered sandbox cgroup. A zero-value secret (map not yet
+ * populated) degrades to the unsalted seed rather than failing closed, since
+ * this map is only ever consulted for cgroups already in sandbox_cgroups. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} sandbox_hash_secret SEC(".maps");
 
 /* Allowed egress CIDRs, scoped per profile. Key data starts with the 4-byte
  * big-endian profile id (always fully matched: prefixlen = 32 + cidr bits)
@@ -251,14 +271,28 @@ static __always_inline __u64 sandbox_lookup_current(void)
 	return 0;
 }
 
+/* Returns the salted FNV-1a seed for the sandbox_path_policy hash: the offset
+ * basis XORed with the per-boot secret's two 32-bit halves. Must match the
+ * seed computation in Go's util.SaltedFNV32aPath byte-for-byte (issue #274
+ * item 1). */
+static __always_inline __u32 sandbox_hash_seed(void)
+{
+	__u32 zero = 0;
+	__u64 *secret = bpf_map_lookup_elem(&sandbox_hash_secret, &zero);
+	__u32 seed = 2166136261u; /* FNV offset basis */
+	if (secret)
+		seed ^= (__u32)(*secret) ^ (__u32)(*secret >> 32);
+	return seed;
+}
+
 /* Check an absolute path against the profile's positive policy.
- * Computes a rolling FNV-1a hash and consults sandbox_path_policy at every
- * '/' boundary plus the full path, so configured prefixes match any depth.
- * A SBX_DENY entry on any boundary wins over any allow.
- * Returns 1 when some boundary carries one of the `want` access bits. */
+ * Computes a rolling, secret-salted FNV-1a hash and consults
+ * sandbox_path_policy at every '/' boundary plus the full path, so configured
+ * prefixes match any depth. A SBX_DENY entry on any boundary wins over any
+ * allow. Returns 1 when some boundary carries one of the `want` access bits. */
 static __always_inline int sandbox_path_allowed(__u32 profile_id, const char *path, __u8 want)
 {
-	__u32 hash = 2166136261u; /* FNV offset basis */
+	__u32 hash = sandbox_hash_seed();
 	__u64 base = ((__u64)profile_id) << 32;
 	int allowed = 0;
 	int i;

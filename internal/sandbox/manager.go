@@ -29,6 +29,7 @@ type Maps struct {
 	State      bpfMap // sandbox_state:          u32 -> u64 (active cgroup count)
 	Cgroups    bpfMap // sandbox_cgroups:        u64 cgroup_id -> packed value
 	PathPolicy bpfMap // sandbox_path_policy:    u64 -> u8 access bits
+	HashSecret bpfMap // sandbox_hash_secret:    u32(0) -> u64 per-boot salt (issue #274)
 	NetV4      bpfMap // sandbox_net_v4:         LPM CIDRv4Entry -> u8
 	NetV6      bpfMap // sandbox_net_v6:         LPM CIDRv6Entry -> u8
 	Ports      bpfMap // sandbox_ports:          u64 -> u8
@@ -236,6 +237,7 @@ func (m *Manager) Load(sharedObjs *bpf.KmodObjects) error {
 		State:      objs.SandboxState,
 		Cgroups:    objs.SandboxCgroups,
 		PathPolicy: objs.SandboxPathPolicy,
+		HashSecret: objs.SandboxHashSecret,
 		NetV4:      objs.SandboxNetV4,
 		NetV6:      objs.SandboxNetV6,
 		Ports:      objs.SandboxPorts,
@@ -567,6 +569,16 @@ func (m *Manager) closeLocked() {
 // writePolicy installs every profile's path / CIDR / port rows into the maps.
 // Split out from Manager so it can be unit-tested against in-memory fakes.
 func writePolicy(maps Maps, p *Policy) error {
+	// Install the path-policy hash secret before any path row, so a reader
+	// racing the initial policy load never sees allow-list rows keyed on a
+	// hash it could compute itself (issue #274 item 1). Best-effort against an
+	// older generated object missing the map, matching the ExecPins pattern
+	// below — the rest of the policy still installs (unsalted, degraded).
+	if maps.HashSecret != nil {
+		if err := maps.HashSecret.Update(uint32(0), p.secret, ebpf.UpdateAny); err != nil {
+			return fmt.Errorf("path policy hash secret: %w", err)
+		}
+	}
 	one := uint8(1)
 	for _, cp := range p.profiles {
 		for _, pe := range cp.paths {

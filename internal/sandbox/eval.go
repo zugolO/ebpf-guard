@@ -45,11 +45,13 @@ func buildPathLookup(paths []PathEntry) map[uint32]uint8 {
 	return m
 }
 
-// pathAllowed replays sandbox_path_allowed(): a rolling FNV-1a hash over the
-// absolute path, consulted at every '/' boundary and at the end. A deny bit on
-// any boundary wins; otherwise the path is allowed if some boundary carries one
-// of the wanted access bits.
-func pathAllowed(lookup map[uint32]uint8, p string, want uint8) bool {
+// pathAllowed replays sandbox_path_allowed(): a rolling, secret-salted FNV-1a
+// hash over the absolute path, consulted at every '/' boundary and at the
+// end. A deny bit on any boundary wins; otherwise the path is allowed if some
+// boundary carries one of the wanted access bits. secret must be the same
+// value the lookup keys were built with (util.SaltedFNV32aPath) — see issue
+// #274 item 1 for why the hash is keyed rather than plain FNV-1a.
+func pathAllowed(lookup map[uint32]uint8, p string, want uint8, secret uint64) bool {
 	if len(p) == 0 || p[0] != '/' {
 		return false // relative / unresolvable — deny-by-default
 	}
@@ -61,7 +63,7 @@ func pathAllowed(lookup map[uint32]uint8, p string, want uint8) bool {
 	}
 	const offset = 2166136261
 	const prime = 16777619
-	h := uint32(offset)
+	h := uint32(offset) ^ uint32(secret) ^ uint32(secret>>32)
 	allowed := false
 	for i := 0; i <= len(p) && i < pathHashMax; i++ {
 		atEnd := i == len(p)
@@ -92,7 +94,7 @@ func (p *Policy) PathAllowed(profile, absPath string, want uint8) bool {
 	if !ok {
 		return false
 	}
-	return pathAllowed(cp.lookup, absPath, want)
+	return pathAllowed(cp.lookup, absPath, want, p.secret)
 }
 
 // ReadAllowed reports whether the named profile permits reading absPath. Thin
@@ -155,7 +157,7 @@ func (p *Policy) ExecAllowed(profile, absPath string, digest [32]byte) bool {
 	if hasDotDotComponent(absPath) {
 		return false // uncanonicalized `..` traversal — deny (issue #267 item 3)
 	}
-	if !pathAllowed(cp.lookup, absPath, accessExec) {
+	if !pathAllowed(cp.lookup, absPath, accessExec, p.secret) {
 		return false
 	}
 	norm := normalizePrefix(absPath)

@@ -31,3 +31,36 @@ func FNV32aPath(s string) uint32 {
 	}
 	return h
 }
+
+// SaltedFNV32aPath is a keyed variant of FNV32aPath: the offset basis is XORed
+// with an unpredictable per-boot secret before the rolling hash begins. It
+// backs the `sandbox_path_policy` allow-list only (issue #274 item 1) — never
+// the plain FNV32aPath uses (path_blocklist / exec-pin path identity), which
+// don't gate a deny-by-default boundary the same way.
+//
+// FNV-1a's round `h = (h ^ b) * prime` is an invertible bijection mod 2^32
+// (the prime is odd), so a sandboxed agent that knows the algorithm and a
+// target hash value can construct an arbitrary byte sequence colliding with
+// it — that's the forgeable-hash bypass. Salting with a secret the workload
+// never observes (the secret lives only in a BPF map gated by the same
+// bpf()-syscall denial that already protects the sandbox's own maps) removes
+// the attacker's ability to compute H_secret(anything) at all, since the
+// secret is an unknown input to the function, not just an unknown output.
+//
+// Must stay byte-for-byte compatible with the salted seed computation in
+// sandbox_path_allowed() in bpf/lsm.bpf.c: seed = offsetBasis ^ uint32(secret)
+// ^ uint32(secret>>32).
+func SaltedFNV32aPath(s string, secret uint64) uint32 {
+	const offsetBasis = 2166136261
+	const prime = 16777619
+	h := uint32(offsetBasis) ^ uint32(secret) ^ uint32(secret>>32)
+	for i := 0; i < len(s) && i < PathHashMax; i++ {
+		c := s[i]
+		if c == 0 {
+			break
+		}
+		h ^= uint32(c)
+		h *= prime
+	}
+	return h
+}

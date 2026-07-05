@@ -6,6 +6,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/zugolO/ebpf-guard/internal/config"
+	"github.com/zugolO/ebpf-guard/internal/util"
 )
 
 func aiCfg(mode string, profiles ...config.AISandboxProfile) config.AISandboxConfig {
@@ -43,7 +44,7 @@ func TestCompile_ProfileIDsAndModes(t *testing.T) {
 func pathAccess(p *Policy, prefix string) (uint8, bool) {
 	norm := normalizePrefix(prefix)
 	cp := p.profiles[0]
-	key := (uint64(cp.id) << 32) | uint64(fnv32a(norm))
+	key := (uint64(cp.id) << 32) | uint64(util.SaltedFNV32aPath(norm, p.secret))
 	for _, pe := range cp.paths {
 		if pe.Key == key {
 			return pe.Access, true

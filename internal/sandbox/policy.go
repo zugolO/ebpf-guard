@@ -13,6 +13,7 @@
 package sandbox
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -117,6 +118,27 @@ type Policy struct {
 	byName         map[string]*compiledProfile
 	profiles       []*compiledProfile
 	defaultProfile string
+	// secret is a per-process-startup random value salting every
+	// sandbox_path_policy hash (issue #274 item 1). Generated once in
+	// Compile() via crypto/rand and installed into the sandbox_hash_secret BPF
+	// map by Manager.Load before any policy row is written, so a sandboxed
+	// workload never observes it and cannot forge a colliding path component.
+	secret uint64
+}
+
+// HashSecret returns the per-boot secret salting this policy's path-policy
+// hashes, for Manager.Load to install into the sandbox_hash_secret BPF map.
+func (p *Policy) HashSecret() uint64 { return p.secret }
+
+// randomHashSecret returns a cryptographically random 64-bit salt. Falls back
+// to a fixed non-zero value only if the OS CSPRNG is unavailable (should never
+// happen on a real target) so Compile never fails outright over this.
+func randomHashSecret() uint64 {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return 0x9e3779b97f4a7c15 // arbitrary non-zero fallback constant
+	}
+	return binary.LittleEndian.Uint64(buf[:])
 }
 
 // Compile translates the ai_sandbox config into map-ready rows. Profile IDs are
@@ -130,19 +152,20 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 		Mode:           mode,
 		byName:         make(map[string]*compiledProfile, len(cfg.Profiles)),
 		defaultProfile: cfg.Selector.DefaultProfile,
+		secret:         randomHashSecret(),
 	}
 	for i, prof := range cfg.Profiles {
 		id := uint32(i + 1)
 		cp := &compiledProfile{id: id, name: prof.Name}
 
 		for _, pfx := range prof.AllowedExec {
-			cp.addPath(pfx, accessExec|accessRead)
+			cp.addPath(pfx, accessExec|accessRead, p.secret)
 		}
 		for _, pfx := range prof.AllowedReadPaths {
-			cp.addPath(pfx, accessRead)
+			cp.addPath(pfx, accessRead, p.secret)
 		}
 		for _, pfx := range prof.AllowedWritePaths {
-			cp.addPath(pfx, accessWrite)
+			cp.addPath(pfx, accessWrite, p.secret)
 		}
 		// Denied paths win over any allow: OR the deny bit onto the same key.
 		// The operator's explicit denies come first, then an always-on baseline
@@ -150,10 +173,10 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 		// tamper surfaces, so a sandboxed agent can't weaken its own enforcer
 		// even when a profile forgets to list them.
 		for _, pfx := range prof.DeniedPaths {
-			cp.addPath(pfx, accessDeny)
+			cp.addPath(pfx, accessDeny, p.secret)
 		}
 		for _, pfx := range baselineDeniedPaths(cfg) {
-			cp.addPath(pfx, accessDeny)
+			cp.addPath(pfx, accessDeny, p.secret)
 		}
 
 		for _, c := range prof.AllowedEgressCIDRs {
@@ -249,12 +272,15 @@ func normalizePrefix(s string) string {
 	return c
 }
 
-func (cp *compiledProfile) addPath(prefix string, access uint8) {
+func (cp *compiledProfile) addPath(prefix string, access uint8, secret uint64) {
 	norm := normalizePrefix(prefix)
 	if norm == "" {
 		return
 	}
-	key := (uint64(cp.id) << 32) | uint64(fnv32a(norm))
+	// Salted hash (issue #274 item 1): keying the allow-list on plain fnv32a
+	// let a sandboxed agent forge a colliding path component, since FNV-1a's
+	// round is an invertible bijection. See util.SaltedFNV32aPath.
+	key := (uint64(cp.id) << 32) | uint64(util.SaltedFNV32aPath(norm, secret))
 	// Merge access bits when the same prefix appears for multiple dimensions.
 	for i := range cp.paths {
 		if cp.paths[i].Key == key {

@@ -30,6 +30,7 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 		profileName string
 		enforce     bool
 		auditLog    string
+		hardening   childHardening
 	)
 
 	cmd := &cobra.Command{
@@ -37,12 +38,16 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 		Short: "Run a command inside an AI-agent sandbox profile",
 		Long: "Wrap COMMAND in a deny-by-default ai_sandbox profile scoped to a fresh cgroup.\n" +
 			"The child (and any process it spawns) may only exec / read / write / connect to\n" +
-			"what the profile allow-lists. Defaults to audit mode; pass --enforce to deny.",
+			"what the profile allow-lists. Defaults to audit mode; pass --enforce to deny.\n\n" +
+			"Defence in depth: on top of the cgroup/LSM sandbox the child also runs with\n" +
+			"PR_SET_NO_NEW_PRIVS and a default seccomp filter (denies io_uring/module-load/\n" +
+			"kexec), and can optionally be placed in a private network/mount namespace.",
 		Example: "  ebpf-guard run --profile ai-agent -- claude\n" +
-			"  ebpf-guard run --profile ai-agent --enforce -- bash -c 'cat ~/.ssh/id_rsa'",
+			"  ebpf-guard run --profile ai-agent --enforce -- bash -c 'cat ~/.ssh/id_rsa'\n" +
+			"  ebpf-guard run --profile ai-agent --unshare-net -- ./build.sh",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			err := runSandboxed(*cfgPath, profileName, enforce, auditLog, args)
+			err := runSandboxed(*cfgPath, profileName, enforce, auditLog, hardening, args)
 			// A non-zero *exitCodeError just mirrors the wrapped command's own
 			// exit code (already visible via its inherited stdout/stderr) — not
 			// an ebpf-guard error, so don't let cobra print "Error: ..." for it.
@@ -57,10 +62,59 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&profileName, "profile", "", "ai_sandbox profile to apply (default: selector.default_profile)")
 	cmd.Flags().BoolVar(&enforce, "enforce", false, "deny violations (-EPERM) instead of audit-only logging")
 	cmd.Flags().StringVar(&auditLog, "audit-log", "", "path to write sandbox audit events (default: stderr)")
+	cmd.Flags().BoolVar(&hardening.noNewPrivs, "no-new-privs", true, "set PR_SET_NO_NEW_PRIVS on the child (blocks setuid privilege re-gain)")
+	cmd.Flags().BoolVar(&hardening.seccomp, "seccomp", true, "apply a default seccomp filter to the child (denies io_uring/module-load/kexec)")
+	cmd.Flags().BoolVar(&hardening.unshareNet, "unshare-net", false, "run the child in a private network namespace (isolates loopback; blocks all egress — requires privilege)")
+	cmd.Flags().BoolVar(&hardening.unshareMount, "unshare-mount", false, "run the child in a private mount namespace (requires privilege)")
 	return cmd
 }
 
-func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, args []string) error {
+// childHardening carries the defence-in-depth boundaries `ebpf-guard run` layers
+// around the wrapped command in addition to the cgroup/LSM sandbox (issue #277
+// P2). no_new_privs and seccomp are applied by the in-process trampoline
+// (sandbox_child.go); the namespaces are requested at clone time.
+type childHardening struct {
+	noNewPrivs   bool
+	seccomp      bool
+	unshareNet   bool
+	unshareMount bool
+}
+
+// needsTrampoline reports whether the child must be re-exec'd through the
+// hidden trampoline command to install no_new_privs / seccomp. Namespaces alone
+// are set at clone time and need no trampoline.
+func (h childHardening) needsTrampoline() bool { return h.noNewPrivs || h.seccomp }
+
+// cloneFlags returns the CLONE_* namespace flags to place on the child.
+func (h childHardening) cloneFlags() uintptr {
+	var f uintptr
+	if h.unshareNet {
+		f |= syscall.CLONE_NEWNET
+	}
+	if h.unshareMount {
+		f |= syscall.CLONE_NEWNS
+	}
+	return f
+}
+
+// childExecTarget returns the executable and argv to run: either the command
+// directly, or the /proc/self/exe trampoline wrapping it when no_new_privs or
+// seccomp is requested. self is the path to this binary (/proc/self/exe).
+func childExecTarget(self string, args []string, h childHardening) (name string, argv []string) {
+	if !h.needsTrampoline() {
+		return args[0], args[1:]
+	}
+	trampoline := []string{
+		sandboxChildCmdName,
+		fmt.Sprintf("--no-new-privs=%t", h.noNewPrivs),
+		fmt.Sprintf("--seccomp=%t", h.seccomp),
+		"--",
+	}
+	trampoline = append(trampoline, args...)
+	return self, trampoline
+}
+
+func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, hardening childHardening, args []string) error {
 	cfgManager, err := config.NewManagerSkipPermCheck(cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -191,15 +245,28 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ar
 		go pinner.RefreshLoop(pinCtx)
 	}
 
+	// Defence-in-depth boundaries layered on top of the cgroup/LSM sandbox
+	// (issue #277 P2). seccomp needs a supported arch; warn and continue with the
+	// other boundaries rather than failing the run if it is unavailable.
+	if hardening.seccomp && !seccompArchSupported {
+		logger.Warn("ai_sandbox: default seccomp filter unavailable on this architecture; " +
+			"continuing without it (no_new_privs, cgroup/LSM sandbox, and namespaces still apply)")
+		hardening.seccomp = false
+	}
+
 	logger.Info("sandbox active",
 		"profile", profileName,
 		"mode", mgr.Mode(),
 		"kernel_enforced", mgr.KernelEnforced(),
 		"exec_enforced", mgr.ExecEnforced(),
 		"cgroup_id", cg.ID(),
+		"no_new_privs", hardening.noNewPrivs,
+		"seccomp", hardening.seccomp,
+		"unshare_net", hardening.unshareNet,
+		"unshare_mount", hardening.unshareMount,
 		"command", args[0])
 
-	code, err := execInCgroup(cg, args)
+	code, err := execInCgroup(cg, args, hardening)
 	if err != nil {
 		return err
 	}
@@ -282,14 +349,15 @@ func (e *exitCodeError) Error() string {
 // execInCgroup starts args placed directly into the cgroup at clone time via
 // CLONE_INTO_CGROUP (Linux 5.7+), so the child is under policy before it runs
 // a single instruction. It forwards signals and returns the child's exit code
-// for the caller to act on after its own cleanup has run.
-func execInCgroup(cg *sandbox.Cgroup, args []string) (int, error) {
-	return runChild(cg, args)
+// for the caller to act on after its own cleanup has run. h adds the
+// defence-in-depth boundaries (no_new_privs, seccomp, namespaces).
+func execInCgroup(cg *sandbox.Cgroup, args []string, h childHardening) (int, error) {
+	return runChild(cg, args, h)
 }
 
 // runChild runs args inside cg and returns the child's exit code (0 on
 // success or a non-exit-error failure, which is returned as err instead).
-func runChild(cg *sandbox.Cgroup, args []string) (int, error) {
+func runChild(cg *sandbox.Cgroup, args []string, h childHardening) (int, error) {
 	cgFD, err := os.Open(cg.Path())
 	if err != nil {
 		return 0, fmt.Errorf("open cgroup dir: %w", err)
@@ -299,14 +367,21 @@ func runChild(cg *sandbox.Cgroup, args []string) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// args[0]/args[1:] are the operator-supplied COMMAND for `ebpf-guard run`
-	// to execute inside the sandbox; running an arbitrary command is the
-	// purpose of this wrapper, not an injection risk.
-	child := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec G204
+	// When no_new_privs / seccomp are requested the command is wrapped in the
+	// /proc/self/exe trampoline, which installs them and execve's the target
+	// (keeping the PID, so signal forwarding below still reaches it). Namespaces
+	// are requested via Cloneflags and inherited across that execve.
+	name, cmdArgs := childExecTarget("/proc/self/exe", args, h)
+
+	// name/cmdArgs are the operator-supplied COMMAND for `ebpf-guard run`
+	// to execute inside the sandbox (or the trampoline wrapping it); running an
+	// arbitrary command is the purpose of this wrapper, not an injection risk.
+	child := exec.CommandContext(ctx, name, cmdArgs...) // #nosec G204
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 	child.SysProcAttr = &syscall.SysProcAttr{
 		UseCgroupFD: true,
 		CgroupFD:    int(cgFD.Fd()),
+		Cloneflags:  h.cloneFlags(),
 	}
 
 	if err := child.Run(); err != nil {

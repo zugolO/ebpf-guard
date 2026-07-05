@@ -141,6 +141,25 @@ aiSandbox:
       allowed_egress_ports: [443]
       allowed_domains:     [github.com, pypi.org, registry.npmjs.org]
 
+# Mandatory sandbox targeting at admission (issue #277 P2 — label trust). The
+# sandbox label is otherwise workload-controlled: a pod could omit it (no
+# sandbox) or name a weaker profile (downgrade). This native ValidatingAdmission
+# Policy forces the label and pins/allow-lists the profile per namespace, so a
+# workload cannot dodge or downgrade its own containment. The hardened profile
+# turns it on and denies violators. Requires Kubernetes 1.30+.
+#
+# Opt namespaces in:  kubectl label ns <ns> ebpf-guard.io/sandbox=enforced
+# Pin a profile:      kubectl annotate ns <ns> ebpf-guard.io/sandbox-profile-pin=ai-agent
+sandboxAdmissionPolicy:
+  enabled: true
+  labelKey: "ebpf-guard.io/sandbox-profile"
+  validationActions:
+    - Deny
+  failurePolicy: "Fail"
+  namespaceSelector:
+    matchLabels:
+      ebpf-guard.io/sandbox: "enforced"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # REFERENCE — hardened securityContext for the SANDBOXED AGENT workload.
 #

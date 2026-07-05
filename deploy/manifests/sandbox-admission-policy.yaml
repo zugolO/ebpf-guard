@@ -1,0 +1,71 @@
+# ai_sandbox label trust — mandatory sandbox targeting at admission (issue #277 P2).
+#
+# Targeting an AI-agent workload by the `ebpf-guard.io/sandbox-profile` pod label
+# is advisory: the workload author owns that label, so a pod can omit it (run
+# unsandboxed) or name a weaker profile (downgrade its own containment). This
+# native Kubernetes ValidatingAdmissionPolicy closes both gaps — no webhook
+# server, no TLS, no ebpf-guard component in the request path.
+#
+# Requires Kubernetes 1.30+ (ValidatingAdmissionPolicy GA). This file is NOT in
+# kustomization.yaml by default; apply it explicitly, then opt namespaces in:
+#
+#   kubectl apply -f deploy/manifests/sandbox-admission-policy.yaml
+#   kubectl label ns <ns> ebpf-guard.io/sandbox=enforced
+#
+# Optionally pin or allow-list profiles per namespace:
+#
+#   kubectl annotate ns <ns> ebpf-guard.io/sandbox-profile-pin=ai-agent-strict
+#   kubectl annotate ns <ns> ebpf-guard.io/sandbox-allowed-profiles=ai-agent,ai-agent-strict
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ebpf-guard-sandbox-label
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: labels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: nsAnnotations
+      expression: "(has(namespaceObject.metadata) && has(namespaceObject.metadata.annotations)) ? namespaceObject.metadata.annotations : {}"
+    - name: profile
+      expression: "'ebpf-guard.io/sandbox-profile' in variables.labels ? variables.labels['ebpf-guard.io/sandbox-profile'] : ''"
+    - name: pinned
+      expression: "'ebpf-guard.io/sandbox-profile-pin' in variables.nsAnnotations ? variables.nsAnnotations['ebpf-guard.io/sandbox-profile-pin'] : ''"
+    - name: allowed
+      expression: "'ebpf-guard.io/sandbox-allowed-profiles' in variables.nsAnnotations ? variables.nsAnnotations['ebpf-guard.io/sandbox-allowed-profiles'] : ''"
+  validations:
+    # Remove the opt-out: the sandbox label must be present and non-empty.
+    - expression: "'ebpf-guard.io/sandbox-profile' in variables.labels && variables.profile != ''"
+      message: "pod is missing the mandatory ai_sandbox label ebpf-guard.io/sandbox-profile; a sandboxed namespace may not opt out of containment"
+      reason: Forbidden
+    # Remove the downgrade: if the namespace pins a profile, match it exactly.
+    - expression: "variables.pinned == '' || variables.profile == variables.pinned"
+      messageExpression: "'ai_sandbox profile ' + variables.profile + ' is not permitted: this namespace pins ' + variables.pinned + ' (workloads may not downgrade their own containment)'"
+      reason: Forbidden
+    # Enforce the allow-list: if the namespace lists profiles, match one of them.
+    - expression: "variables.allowed == '' || variables.profile in variables.allowed.split(',')"
+      messageExpression: "'ai_sandbox profile ' + variables.profile + ' is not in this namespace allowed set (' + variables.allowed + ')'"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ebpf-guard-sandbox-label
+  labels:
+    app.kubernetes.io/name: ebpf-guard
+spec:
+  policyName: ebpf-guard-sandbox-label
+  validationActions:
+    - Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        ebpf-guard.io/sandbox: "enforced"

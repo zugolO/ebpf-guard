@@ -131,6 +131,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		newAttackSimCmd(&cfgPath),
 		newPluginsCmd(),
 		newRunCmd(&cfgPath),
+		newSandboxChildCmd(),
 	)
 
 	return root

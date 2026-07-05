@@ -905,6 +905,46 @@ admissionWebhook:
     issuerName: "selfsigned-issuer"
     issuerKind: "ClusterIssuer"
 
+# sandboxAdmissionPolicy makes the ai_sandbox label a MANDATORY control at
+# admission time (issue #277 P2 — label trust). Targeting an agent by the
+# `ebpf-guard.io/sandbox-profile` pod label is only advisory otherwise: the
+# workload author owns that label, so a pod can omit it (no sandbox) or name a
+# weaker profile (downgrade). This native Kubernetes ValidatingAdmissionPolicy
+# (no webhook server, no TLS) forces the label to be present and — where a
+# namespace pins or allow-lists profiles — pins the value, so a workload cannot
+# dodge or downgrade its own containment. Requires Kubernetes 1.30+ (VAP GA).
+#
+# Opt a namespace in:            kubectl label ns <ns> ebpf-guard.io/sandbox=enforced
+# Pin a namespace to a profile:  kubectl annotate ns <ns> ebpf-guard.io/sandbox-profile-pin=ai-agent-strict
+# Allow a set (comma-separated): kubectl annotate ns <ns> ebpf-guard.io/sandbox-allowed-profiles=ai-agent,ai-agent-strict
+sandboxAdmissionPolicy:
+  # enabled creates the ValidatingAdmissionPolicy + binding. Default: false.
+  enabled: false
+  # labelKey is the pod label whose presence is mandatory and whose value is
+  # pinned. Must match ai_sandbox.selector.kube_label.
+  labelKey: "ebpf-guard.io/sandbox-profile"
+  # validationActions: how the API server acts on a violating pod.
+  #   [Deny]  — reject the pod (mandatory control; the default).
+  #   [Warn]  — admit but return a warning (dry-run / roll-out).
+  #   [Audit] — admit but annotate the audit log.
+  validationActions:
+    - Deny
+  # failurePolicy when the policy itself errors: "Fail" (fail-closed, default) or
+  # "Ignore". A mandatory control should fail closed.
+  failurePolicy: "Fail"
+  # namespaceSelector opts namespaces in. Only namespaces carrying this label are
+  # subject to the mandatory-label rule, so system namespaces are unaffected.
+  namespaceSelector:
+    matchLabels:
+      ebpf-guard.io/sandbox: "enforced"
+  # objectSelector optionally narrows which pods in an opted-in namespace the
+  # policy applies to (e.g. only pods labelled app=agent). Empty = all pods.
+  objectSelector: {}
+  # pinAnnotation / allowedAnnotation are the namespace annotations the policy
+  # reads to pin a single profile or allow-list a set for that namespace.
+  pinAnnotation: "ebpf-guard.io/sandbox-profile-pin"
+  allowedAnnotation: "ebpf-guard.io/sandbox-allowed-profiles"
+
 # Grafana dashboard ConfigMap (loaded by Grafana sidecar if enabled)
 grafana:
   dashboard:

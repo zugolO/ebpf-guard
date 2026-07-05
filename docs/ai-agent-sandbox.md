@@ -192,6 +192,35 @@ ai_sandbox:
   The `selector.default_profile` field names the profile the wrapper applies
   when `--profile` is omitted.
 
+### `ebpf-guard run` defence-in-depth (issue #277 P2)
+
+The cgroup/LSM sandbox is one boundary. Because a single boundary bypass should
+not collapse the whole containment, `ebpf-guard run` layers cheap,
+well-understood kernel boundaries around the child in addition to it:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--no-new-privs` | `true` | Sets `PR_SET_NO_NEW_PRIVS` on the child before exec, so it can never regain privileges through a setuid/setgid binary or file capabilities. |
+| `--seccomp` | `true` | Installs a default seccomp filter that denies `io_uring_setup/enter/register`, kernel module load/unload, and `kexec_load` with `-EPERM`, and kills any syscall issued under a non-native ABI. The io_uring denial is a second, kernel-version-independent lever against the [io_uring bypass](#io_uring-is-a-hard-prerequisite-for-enforce). |
+| `--unshare-net` | `false` | Runs the child in a private network namespace. This isolates it from the host's loopback (the clean fix for the loopback exposure in #274 item 3) but also removes all egress, so enable it only for workloads that do not need the network. Requires privilege. |
+| `--unshare-mount` | `false` | Runs the child in a private mount namespace so its mounts do not affect the host. Requires privilege. |
+
+`no_new_privs` and the seccomp filter are installed between fork and exec (via a
+hidden `/proc/self/exe` re-exec trampoline, since `os/exec` cannot run code
+there); both are preserved across `execve`, so they bound the wrapped command
+itself, and the child keeps its PID so signal forwarding is unaffected.
+`no_new_privs` also lets the seccomp filter install without privilege, so the
+default hardening applies even when the agent is run unprivileged. These
+boundaries are independent of `--enforce`: they apply in audit mode too.
+
+```bash
+# default hardening (no_new_privs + seccomp) is automatic:
+ebpf-guard run --profile ai-agent -- claude
+
+# add network isolation for an offline build step:
+ebpf-guard run --profile ai-agent --unshare-net -- ./build.sh
+```
+
 ## Audit vs. enforce
 
 **Start in `audit`.** Audit mode evaluates every rule and policy decision and
@@ -484,12 +513,57 @@ attached):
    profile *before* the container's first instruction runs. This is the only
    approach that closes — rather than shrinks — the window.
 3. **Pin the label at admission (issue #277 P2).** A `ValidatingAdmissionPolicy`
-   / webhook that forces the sandbox label per namespace both removes the
-   opt-out and lets the admission stage drive pre-registration.
+   that forces the sandbox label per namespace both removes the opt-out and lets
+   the admission stage drive pre-registration — see the next section.
 
 Until admission-time pre-registration lands, treat the startup window as part of
 the threat model for short-lived or fast-acting workloads and size mitigation 1
 accordingly.
+
+## Kubernetes: mandatory sandbox targeting (label trust, issue #277 P2)
+
+[Target selection](#target-selection) picks a profile from the
+`ebpf-guard.io/sandbox-profile` pod label. That value is owned by the **workload
+author**, so for a *mandatory* control it is only advisory: a pod can
+
+- **opt out** by omitting the label (no profile attaches), or
+- **downgrade** by naming a more permissive profile than the namespace intends.
+
+ebpf-guard ships a native Kubernetes **`ValidatingAdmissionPolicy`** that closes
+both gaps at admission time — no webhook server, no TLS, and no ebpf-guard
+component in the request path (Kubernetes 1.30+, VAP GA). It is delivered as a
+Helm template (`sandboxAdmissionPolicy.enabled`, on by default in
+`values-secure.yaml`) and as a standalone manifest
+(`deploy/manifests/sandbox-admission-policy.yaml`). The policy:
+
+1. **Removes the opt-out** — rejects a pod in an opted-in namespace that is
+   missing the sandbox label (or sets it empty).
+2. **Removes the downgrade** — when a namespace **pins** a profile
+   (`ebpf-guard.io/sandbox-profile-pin` annotation), the label value must equal
+   it exactly; when a namespace **allow-lists** profiles
+   (`ebpf-guard.io/sandbox-allowed-profiles`, comma-separated), the value must be
+   one of them.
+
+Namespaces opt in — so system namespaces are unaffected — and the binding's
+`validationActions` choose `Deny` (reject, the mandatory-control default),
+`Warn`, or `Audit` for a staged roll-out. The policy `failurePolicy` is `Fail`
+so the control is fail-closed.
+
+```bash
+# Enforce mandatory, pinned sandboxing in the "agents" namespace:
+kubectl label      ns agents ebpf-guard.io/sandbox=enforced
+kubectl annotate   ns agents ebpf-guard.io/sandbox-profile-pin=ai-agent
+
+# A pod with no label, or ebpf-guard.io/sandbox-profile: some-weaker-profile,
+# is now rejected at admission; only ...sandbox-profile: ai-agent is admitted.
+```
+
+This makes targeting mandatory but does not by itself close the
+[unenforced startup window](#kubernetes-the-unenforced-startup-window) above:
+forcing the label guarantees a profile *will* attach and gives an admission hook
+the anchor to pre-register the cgroup, but the informer still attaches the
+profile a moment after the container starts. Combine it with mitigation 1/2 for
+short-lived workloads.
 
 ## Status (issue #255 sub-tasks)
 
@@ -550,4 +624,12 @@ accordingly.
   per-pod `unenforced_window` measurement, `UnenforcedWindowStats`) with the
   mitigations documented. See
   [Kubernetes: the unenforced startup window](#kubernetes-the-unenforced-startup-window).
-- ⏳ **P2 — label trust / `ebpf-guard run` defense-in-depth** — not yet started.
+- ✅ **P2 — label trust** — a native `ValidatingAdmissionPolicy` makes the
+  sandbox label mandatory and pins/allow-lists the profile per namespace, so a
+  workload cannot opt out or downgrade its own containment. See
+  [Kubernetes: mandatory sandbox targeting](#kubernetes-mandatory-sandbox-targeting-label-trust-issue-277-p2).
+- ✅ **P2 — `ebpf-guard run` defense-in-depth** — the wrapper adds
+  `PR_SET_NO_NEW_PRIVS` and a default seccomp filter (denies io_uring / module
+  load / kexec) around the child by default, plus optional private network/mount
+  namespaces, so bypassing the cgroup/LSM boundary does not collapse containment.
+  See [`ebpf-guard run` defence-in-depth](#ebpf-guard-run-defence-in-depth-issue-277-p2).

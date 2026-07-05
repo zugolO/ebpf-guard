@@ -17,10 +17,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/zugolO/ebpf-guard/internal/config"
+	"github.com/zugolO/ebpf-guard/internal/util"
 )
 
 // Enforcement mode codes — must match SANDBOX_MODE_* in bpf/lsm.bpf.c.
@@ -174,26 +177,55 @@ func Compile(cfg config.AISandboxConfig) (*Policy, error) {
 // maps/links and defeat the sandbox, so they are denied for every profile
 // regardless of what the profile allows (item 7 / issue #259). Only absolute
 // prefixes take effect; relative/dev entries are ignored by normalizePrefix.
+//
+// The installed-binary entries are a fallback for when the running
+// executable's own path cannot be resolved (see selfExecutablePath); normally
+// baselineDeniedPaths derives the actual deployed path instead, so a
+// non-standard install location (/opt/..., ~/go/bin, a container path) is
+// still protected (issue #271).
 var baselineDeniedPathPrefixes = []string{
 	"/etc/ebpf-guard",           // config + rules (hot-reloaded via fsnotify)
 	"/var/lib/ebpf-guard",       // alert store / persistent state
 	"/run/ebpf-guard",           // control socket
 	"/var/run/ebpf-guard",       // control socket (legacy path)
-	"/usr/local/bin/ebpf-guard", // installed binary
+	"/usr/local/bin/ebpf-guard", // installed binary (common default)
 	"/usr/bin/ebpf-guard",       // installed binary (distro path)
 	"/sys/fs/bpf",               // pinned BPF maps/links
 	"/sys/kernel/security",      // securityfs — LSM state
 }
 
+// selfExecutablePath resolves the path of the running ebpf-guard binary
+// itself, following symlinks, so baselineDeniedPaths can protect wherever it
+// actually lives rather than guessing common install locations. It is a
+// package var so tests can stub it. Returns "" when the executable path
+// cannot be resolved.
+var selfExecutablePath = func() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return exe
+	}
+	return resolved
+}
+
 // baselineDeniedPaths returns the baseline deny prefixes plus the directory of
-// the configured rules_path, so a non-standard rules location is protected too.
+// the configured rules_path, so a non-standard rules location is protected too,
+// plus the actual path of the running binary (whatever the install location —
+// /opt/..., ~/go/bin, a container path — not just the two hardcoded guesses in
+// baselineDeniedPathPrefixes).
 func baselineDeniedPaths(cfg config.AISandboxConfig) []string {
-	out := make([]string, 0, len(baselineDeniedPathPrefixes)+1)
+	out := make([]string, 0, len(baselineDeniedPathPrefixes)+2)
 	out = append(out, baselineDeniedPathPrefixes...)
 	if rp := strings.TrimSpace(cfg.RulesPath); rp != "" {
 		if dir := path.Dir(rp); dir != "" && dir != "." {
 			out = append(out, dir)
 		}
+	}
+	if self := selfExecutablePath(); self != "" {
+		out = append(out, self)
 	}
 	return out
 }
@@ -226,28 +258,23 @@ func (cp *compiledProfile) addPath(prefix string, access uint8) {
 }
 
 func (cp *compiledProfile) addCIDR(cidr string) error {
-	_, ipnet, err := net.ParseCIDR(cidr)
+	addr, err := util.ParseCIDR(cidr)
 	if err != nil {
-		return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+		return err
 	}
-	ones, _ := ipnet.Mask.Size()
-	if v4 := ipnet.IP.To4(); v4 != nil {
-		var e CIDRv4Entry
-		e.PrefixLen = 32 + uint32(ones) // #nosec G115 -- ones is a net.IPMask.Size() prefix length, bounded to 0..32
+	if addr.IsIPv6 {
+		var e CIDRv6Entry
+		e.PrefixLen = 32 + uint32(addr.PrefixLen) // #nosec G115 -- addr.PrefixLen is util.ParseCIDR-validated, bounded to 0..128
 		binary.BigEndian.PutUint32(e.Data[0:4], cp.id)
-		copy(e.Data[4:8], v4)
-		cp.cidrv4 = append(cp.cidrv4, e)
+		copy(e.Data[4:20], addr.IPv6[:])
+		cp.cidrv6 = append(cp.cidrv6, e)
 		return nil
 	}
-	v6 := ipnet.IP.To16()
-	if v6 == nil {
-		return fmt.Errorf("unrecognised IP in CIDR %q", cidr)
-	}
-	var e CIDRv6Entry
-	e.PrefixLen = 32 + uint32(ones) // #nosec G115 -- ones is a net.IPMask.Size() prefix length, bounded to 0..128
+	var e CIDRv4Entry
+	e.PrefixLen = 32 + uint32(addr.PrefixLen) // #nosec G115 -- addr.PrefixLen is util.ParseCIDR-validated, bounded to 0..32
 	binary.BigEndian.PutUint32(e.Data[0:4], cp.id)
-	copy(e.Data[4:20], v6)
-	cp.cidrv6 = append(cp.cidrv6, e)
+	copy(e.Data[4:8], addr.IPv4[:])
+	cp.cidrv4 = append(cp.cidrv4, e)
 	return nil
 }
 
@@ -344,14 +371,10 @@ func (p *Policy) ProfileID(name string) (uint32, bool) {
 }
 
 // fnv32a is the FNV-1a 32-bit hash, matching fnv32a()/sandbox_path_allowed()
-// in bpf/lsm.bpf.c over the first 128 bytes of the string.
+// in bpf/lsm.bpf.c over the first 128 bytes of the string. Delegates to the
+// single shared implementation in internal/util so this and
+// internal/collector never diverge from each other or from the kernel
+// (issue #271).
 func fnv32a(s string) uint32 {
-	const offset = 2166136261
-	const prime = 16777619
-	h := uint32(offset)
-	for i := 0; i < len(s) && i < 128; i++ {
-		h ^= uint32(s[i])
-		h *= prime
-	}
-	return h
+	return util.FNV32aPath(s)
 }

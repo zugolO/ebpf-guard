@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/zugolO/ebpf-guard/internal/util"
 )
 
 // Privilege / anti-tamper assessment (issue #259, item 7).
@@ -23,23 +25,21 @@ import (
 // privileged target and downgrades that target to audit-only with an explicit
 // reason (see Manager.GuardTarget / KernelEnforced).
 
-// Linux capability bit positions (see <linux/capability.h>). Only the ones that
-// let a workload tamper with the enforcer are listed here.
+// dangerousCapBits are the tamper-relevant capability bit positions: holding
+// any of these lets a workload detach the LSM links, rewrite the sandbox_*
+// maps, or move itself out of its cgroup, defeating enforcement.
 const (
 	capSysPtrace = 19 // CAP_SYS_PTRACE — attach to / manipulate the agent process
 	capSysAdmin  = 21 // CAP_SYS_ADMIN — bpf(), mount, setns, cgroup moves, ...
 	capBPF       = 39 // CAP_BPF — load BPF, write maps, detach links (5.8+)
 )
 
-// dangerousCaps maps each tamper-relevant capability bit to its name for logs.
-var dangerousCaps = []struct {
-	bit  uint
-	name string
-}{
-	{capBPF, "CAP_BPF"},
-	{capSysAdmin, "CAP_SYS_ADMIN"},
-	{capSysPtrace, "CAP_SYS_PTRACE"},
-}
+// dangerousCapMask is the bitmask of dangerousCapBits, used to filter
+// util.CapsToNames's full capability-name table down to just the
+// tamper-relevant subset, instead of keeping a second, private name table
+// that could drift from it. util.CapsToNames also backs collector.CapsToNames,
+// so all three call sites share one table (issue #271).
+var dangerousCapMask = uint64(1)<<capBPF | uint64(1)<<capSysAdmin | uint64(1)<<capSysPtrace
 
 // tamperMounts are kernel interfaces that, if writable from inside the sandbox,
 // let the workload undo enforcement (unpin maps/links, edit its own cgroup).
@@ -81,11 +81,10 @@ func assessCaps(pid int) []string {
 // capReasons returns a human-readable reason for each tamper-relevant capability
 // present in the given effective capability bitmask.
 func capReasons(capEff uint64) []string {
-	var reasons []string
-	for _, c := range dangerousCaps {
-		if capEff&(uint64(1)<<c.bit) != 0 {
-			reasons = append(reasons, "target holds "+c.name)
-		}
+	names := util.CapsToNames(capEff & dangerousCapMask)
+	reasons := make([]string, 0, len(names))
+	for _, name := range names {
+		reasons = append(reasons, "target holds "+name)
 	}
 	return reasons
 }

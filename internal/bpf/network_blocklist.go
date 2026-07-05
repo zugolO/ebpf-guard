@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 
 	"github.com/cilium/ebpf"
+	"github.com/zugolO/ebpf-guard/internal/util"
 )
 
 // bpfMap is the subset of *ebpf.Map operations used here.
@@ -254,39 +254,21 @@ func ReadNetBlockDropCount(countersMap bpfMap) (uint64, error) {
 
 // parseSubnetKeys parses a CIDR notation string and returns the corresponding
 // IPv4LPMKey or IPv6LPMKey (the other is nil). Returns an error for invalid
-// or unsupported CIDR formats.
+// or unsupported CIDR formats. Address-family resolution and prefix-length
+// validation are shared with internal/sandbox via util.ParseCIDR (issue #271).
 func parseSubnetKeys(cidr string) (*IPv4LPMKey, *IPv6LPMKey, error) {
-	_, ipnet, err := net.ParseCIDR(cidr)
+	addr, err := util.ParseCIDR(cidr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+		return nil, nil, err
 	}
-	ones, bits := ipnet.Mask.Size()
-	switch bits {
-	case 32:
-		if ones < 0 || ones > 32 {
-			return nil, nil, fmt.Errorf("CIDR %q: prefix length %d out of range for IPv4", cidr, ones)
-		}
-		ip4 := ipnet.IP.To4()
-		if ip4 == nil {
-			return nil, nil, fmt.Errorf("CIDR %q: failed to convert to IPv4", cidr)
-		}
-		k := &IPv4LPMKey{PrefixLen: uint32(ones)} //nolint:gosec
-		copy(k.Addr[:], ip4)
-		return k, nil, nil
-	case 128:
-		if ones < 0 || ones > 128 {
-			return nil, nil, fmt.Errorf("CIDR %q: prefix length %d out of range for IPv6", cidr, ones)
-		}
-		ip6 := ipnet.IP.To16()
-		if ip6 == nil {
-			return nil, nil, fmt.Errorf("CIDR %q: failed to convert to IPv6", cidr)
-		}
-		k := &IPv6LPMKey{PrefixLen: uint32(ones)} //nolint:gosec
-		copy(k.Addr[:], ip6)
+	if addr.IsIPv6 {
+		k := &IPv6LPMKey{PrefixLen: uint32(addr.PrefixLen)} //nolint:gosec
+		copy(k.Addr[:], addr.IPv6[:])
 		return nil, k, nil
-	default:
-		return nil, nil, fmt.Errorf("CIDR %q: unsupported address family (bits=%d)", cidr, bits)
 	}
+	k := &IPv4LPMKey{PrefixLen: uint32(addr.PrefixLen)} //nolint:gosec
+	copy(k.Addr[:], addr.IPv4[:])
+	return k, nil, nil
 }
 
 // removeStaleIPv4 deletes old IPv4 LPM keys that are absent from newKeys.

@@ -149,6 +149,7 @@ data:
       selector:
         kube_label: {{ .Values.aiSandbox.selector.kubeLabel | quote }}
         default_profile: {{ .Values.aiSandbox.selector.defaultProfile | quote }}
+      dns_refresh_interval: {{ .Values.aiSandbox.dnsRefreshInterval | quote }}
       profiles: {{ .Values.aiSandbox.profiles | toYaml | nindent 8 }}
 ---
 apiVersion: v1

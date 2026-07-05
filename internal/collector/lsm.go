@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"net"
 	"os"
@@ -28,16 +27,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
-// fnv32a returns the FNV-1a 32-bit hash of s. This must produce the same
-// output as the fnv32a() BPF helper in bpf/lsm.bpf.c so that paths added
-// via AddPathToBlocklist map correctly to what the kernel checks.
+// fnv32a returns the FNV-1a 32-bit hash of s, matching the fnv32a() BPF helper
+// in bpf/lsm.bpf.c, so that paths added via AddPathToBlocklist map correctly to
+// what the kernel checks. Delegates to the single shared implementation in
+// internal/util so this and internal/sandbox never diverge from each other or
+// from the kernel (issue #271).
 func fnv32a(s string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	return h.Sum32()
+	return util.FNV32aPath(s)
 }
 
 // lsmAuditEventRaw mirrors struct lsm_audit_event from bpf/common.h.

@@ -774,6 +774,47 @@ rules:
         severity: critical
         action: alert
         tags: [ai-agent, sandbox, reverse-shell, mitre:T1059.004]
+
+      # ==========================================================================
+      # Kernel-enforced sandbox decisions (issue #268). The ai_sandbox LSM hooks in
+      # bpf/lsm.bpf.c emit an lsm_audit record for every action a sandboxed cgroup
+      # took outside its positive allow-list — a would-be-deny in audit mode, an
+      # actual -EPERM deny in enforce mode. These rules surface those kernel
+      # decisions as alerts so they reach /api/v1/alerts and Prometheus regardless of
+      # whether a dedicated audit log is configured. Because the hook only fires on a
+      # policy violation, every match is already a signal (not routine allow traffic).
+      # ==========================================================================
+
+      - id: ai_agent_sandbox_deny
+        name: "AI Agent: sandbox policy DENY (kernel-enforced)"
+        description: >
+          The ai_sandbox LSM hooks denied an action (-EPERM) taken by a sandboxed
+          agent cgroup outside its allow-list: an exec/read/write of a disallowed
+          path, or egress to a disallowed host/port. This is a hard containment
+          boundary being hit.
+        event_type: lsm_audit
+        condition:
+          field: decision
+          op: eq
+          values: ["sandbox_deny"]
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, containment, kernel-enforced]
+
+      - id: ai_agent_sandbox_audit
+        name: "AI Agent: sandbox policy violation (audit mode)"
+        description: >
+          The ai_sandbox LSM hooks observed an action a sandboxed agent cgroup took
+          outside its allow-list while running in audit mode — it would have been
+          denied under enforce. Review these before switching the profile to enforce.
+        event_type: lsm_audit
+        condition:
+          field: decision
+          op: eq
+          values: ["sandbox_audit"]
+        severity: warning
+        action: alert
+        tags: [ai-agent, sandbox, containment, audit]
 # AI-agent sandbox (issue #255) — deny-by-default, allow-known-good policy for a
 # designated agent process tree, enforced in the kernel via BPF LSM allow maps.
 # Disabled and audit-first by default. When enabled with a kubeLabel, pods
@@ -790,6 +831,10 @@ aiSandbox:
     # Pods labelled with this key get the profile named by the label's value.
     kubeLabel: "ebpf-guard.io/sandbox-profile"
     defaultProfile: ""
+  # dnsRefreshInterval is how often profiles' allowed_domains are re-resolved
+  # into the egress CIDR allow-list (config: ai_sandbox.dns_refresh_interval).
+  # "0s" disables re-resolution.
+  dnsRefreshInterval: 60s
   # profiles is a list of named allow-lists. Example:
   # profiles:
   #   - name: ai-agent

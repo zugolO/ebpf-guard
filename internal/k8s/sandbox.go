@@ -126,6 +126,20 @@ func (c *SandboxController) release(uid string) {
 	}
 }
 
+// nonPodCgroupSlices are top-level cgroupfs subtrees that never contain
+// container/pod cgroups under any of the common driver layouts. Kubernetes
+// containers always live under kubepods(.slice); pruning these well-known
+// sibling slices avoids a full recursive walk of the entire host cgroup tree
+// (which can hold thousands of entries) for every container lookup (issue
+// #272). Unrecognised top-level entries are still walked, so this is
+// conservative rather than an exhaustive allow-list.
+var nonPodCgroupSlices = map[string]bool{
+	"init.scope":    true,
+	"system.slice":  true,
+	"user.slice":    true,
+	"machine.slice": true,
+}
+
 // resolveContainerCgroupIDs finds the cgroup v2 directories belonging to a
 // container and returns their inode numbers (== kernel cgroup IDs). It matches
 // on the container ID substring in the cgroup path, which covers the common
@@ -139,6 +153,11 @@ func resolveContainerCgroupIDs(containerID string) ([]uint64, error) {
 	err := filepath.WalkDir(cgroupRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || !d.IsDir() {
 			return nil
+		}
+		// Prune known non-pod slices right at the top level instead of
+		// descending into them (they can hold most of a busy host's cgroups).
+		if rel, relErr := filepath.Rel(cgroupRoot, path); relErr == nil && nonPodCgroupSlices[rel] {
+			return fs.SkipDir
 		}
 		if !strings.Contains(filepath.Base(path), containerID) {
 			return nil

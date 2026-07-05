@@ -219,15 +219,12 @@ func (p *Policy) EgressAllowed(profile string, ip net.IP, port uint16) bool {
 }
 
 // cidrContains reports whether ip is inside any of the profile's allowed CIDRs.
+// Uses the cidrv4Nets/cidrv6Nets slices precomputed once in addCIDR rather than
+// rebuilding a net.IPNet from the raw map row on every call (issue #272).
 func (cp *compiledProfile) cidrContains(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
-		for _, e := range cp.cidrv4 {
-			maskBits := int(e.PrefixLen) - 32 // strip the 32 profile-id bits
-			if maskBits < 0 || maskBits > 32 {
-				continue
-			}
-			net4 := net.IPNet{IP: net.IP(e.Data[4:8]), Mask: net.CIDRMask(maskBits, 32)}
-			if net4.Contains(v4) {
+		for _, n := range cp.cidrv4Nets {
+			if n.Contains(v4) {
 				return true
 			}
 		}
@@ -237,13 +234,8 @@ func (cp *compiledProfile) cidrContains(ip net.IP) bool {
 	if v6 == nil {
 		return false
 	}
-	for _, e := range cp.cidrv6 {
-		maskBits := int(e.PrefixLen) - 32
-		if maskBits < 0 || maskBits > 128 {
-			continue
-		}
-		net6 := net.IPNet{IP: net.IP(e.Data[4:20]), Mask: net.CIDRMask(maskBits, 128)}
-		if net6.Contains(v6) {
+	for _, n := range cp.cidrv6Nets {
+		if n.Contains(v6) {
 			return true
 		}
 	}

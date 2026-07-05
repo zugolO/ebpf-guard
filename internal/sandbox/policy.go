@@ -90,6 +90,14 @@ type compiledProfile struct {
 	cidrv6   []CIDRv6Entry
 	ports    []uint16
 	execPins []ExecPinEntry
+	// cidrv4Nets/cidrv6Nets cache the *net.IPNet form of cidrv4/cidrv6, built
+	// once in addCIDR. cidrContains is on the egress hot path (one call per
+	// outbound connect in the userspace-audit fallback), so rebuilding
+	// net.IPNet{IP, Mask: net.CIDRMask(...)} from the raw map row on every call
+	// would allocate O(#CIDRs) per connection instead of doing it once at
+	// compile time (issue #272).
+	cidrv4Nets []*net.IPNet
+	cidrv6Nets []*net.IPNet
 	// pinnedPaths is the set of exec paths that carry at least one hash pin, by
 	// fnv32a(path). An exec of a pinned path is allowed only when the running
 	// binary's digest matches one of its pins (identity), even though the path is
@@ -268,6 +276,10 @@ func (cp *compiledProfile) addCIDR(cidr string) error {
 		binary.BigEndian.PutUint32(e.Data[0:4], cp.id)
 		copy(e.Data[4:20], addr.IPv6[:])
 		cp.cidrv6 = append(cp.cidrv6, e)
+		cp.cidrv6Nets = append(cp.cidrv6Nets, &net.IPNet{
+			IP:   net.IP(e.Data[4:20]),
+			Mask: net.CIDRMask(addr.PrefixLen, 128),
+		})
 		return nil
 	}
 	var e CIDRv4Entry
@@ -275,6 +287,10 @@ func (cp *compiledProfile) addCIDR(cidr string) error {
 	binary.BigEndian.PutUint32(e.Data[0:4], cp.id)
 	copy(e.Data[4:8], addr.IPv4[:])
 	cp.cidrv4 = append(cp.cidrv4, e)
+	cp.cidrv4Nets = append(cp.cidrv4Nets, &net.IPNet{
+		IP:   net.IP(e.Data[4:8]),
+		Mask: net.CIDRMask(addr.PrefixLen, 32),
+	})
 	return nil
 }
 

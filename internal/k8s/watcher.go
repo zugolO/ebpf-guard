@@ -74,6 +74,17 @@ func (w *Watcher) notifyHandlers(evt PodEvent, info *PodInfo) {
 	}
 }
 
+// hasPodHandlers reports whether any PodEventHandler is registered. Callers use
+// this to skip building a PodInfo snapshot (copyMap of labels/annotations +
+// ContainerIDs slice) when nothing would consume it — with ai_sandbox off
+// (the default), onPodUpdate fires on every status heartbeat cluster-wide, so
+// this avoids continuous discarded allocation (issue #272).
+func (w *Watcher) hasPodHandlers() bool {
+	w.handlerMu.RLock()
+	defer w.handlerMu.RUnlock()
+	return len(w.podHandlers) > 0
+}
+
 // podInfoFromPod builds a PodInfo snapshot (labels, annotations, container IDs)
 // from a corev1.Pod, matching what updatePodCache stores.
 func podInfoFromPod(pod *corev1.Pod) *PodInfo {
@@ -325,7 +336,9 @@ func (w *Watcher) onPodAdd(obj interface{}) {
 
 	w.logger.Debug("pod added", "name", pod.Name, "namespace", pod.Namespace)
 	w.updatePodCache(pod)
-	w.notifyHandlers(PodAdded, podInfoFromPod(pod))
+	if w.hasPodHandlers() {
+		w.notifyHandlers(PodAdded, podInfoFromPod(pod))
+	}
 	w.touchSyncAt()
 }
 
@@ -339,7 +352,9 @@ func (w *Watcher) onPodUpdate(oldObj, newObj interface{}) {
 
 	w.logger.Debug("pod updated", "name", newPod.Name, "namespace", newPod.Namespace)
 	w.updatePodCache(newPod)
-	w.notifyHandlers(PodUpdated, podInfoFromPod(newPod))
+	if w.hasPodHandlers() {
+		w.notifyHandlers(PodUpdated, podInfoFromPod(newPod))
+	}
 	w.touchSyncAt()
 }
 
@@ -362,7 +377,9 @@ func (w *Watcher) onPodDelete(obj interface{}) {
 
 	w.logger.Debug("pod deleted", "name", pod.Name, "namespace", pod.Namespace)
 	w.removePodFromCache(pod)
-	w.notifyHandlers(PodDeleted, podInfoFromPod(pod))
+	if w.hasPodHandlers() {
+		w.notifyHandlers(PodDeleted, podInfoFromPod(pod))
+	}
 	w.touchSyncAt()
 }
 

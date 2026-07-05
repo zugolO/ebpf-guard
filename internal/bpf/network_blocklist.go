@@ -262,11 +262,11 @@ func parseSubnetKeys(cidr string) (*IPv4LPMKey, *IPv6LPMKey, error) {
 		return nil, nil, err
 	}
 	if addr.IsIPv6 {
-		k := &IPv6LPMKey{PrefixLen: uint32(addr.PrefixLen)} //nolint:gosec
+		k := &IPv6LPMKey{PrefixLen: uint32(addr.PrefixLen)} // #nosec G115 -- util.ParseCIDR validates PrefixLen to 0..128 for IPv6
 		copy(k.Addr[:], addr.IPv6[:])
 		return nil, k, nil
 	}
-	k := &IPv4LPMKey{PrefixLen: uint32(addr.PrefixLen)} //nolint:gosec
+	k := &IPv4LPMKey{PrefixLen: uint32(addr.PrefixLen)} // #nosec G115 -- util.ParseCIDR validates PrefixLen to 0..32 for IPv4
 	copy(k.Addr[:], addr.IPv4[:])
 	return k, nil, nil
 }

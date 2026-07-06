@@ -176,6 +176,19 @@ jobs:
         if [ -f coverage-rego.out ]; then
           tail -n +2 coverage-rego.out >> coverage.out
         fi
+        # The `tui` build tag is unrelated to `rego`, so run it as a separate
+        # invocation (mixing them in one -tags value would just OR them
+        # together). This is the only place internal/tui's coverage is captured
+        # — the default run above builds the //go:build !tui stub, so the real
+        # Bubble Tea TUI is never exercised there.
+        go test -v -race -short -tags "tui" -coverpkg=./... \
+          -coverprofile=coverage-tui.out \
+          ./internal/tui/... \
+          || true
+        # If coverage-tui.out was produced, append its lines (skip mode header)
+        if [ -f coverage-tui.out ]; then
+          tail -n +2 coverage-tui.out >> coverage.out
+        fi
 
     - name: Restore stub bindings deleted by `make generate`
       # `make generate` deletes committed stub files (e.g.

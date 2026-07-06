@@ -177,6 +177,24 @@ jobs:
           tail -n +2 coverage-rego.out >> coverage.out
         fi
 
+    - name: Restore stub bindings deleted by `make generate`
+      # `make generate` deletes committed stub files (e.g.
+      # internal/bpf/xdp_bpf_gen.go) once bpf2go has emitted the real bindings,
+      # to avoid duplicate-symbol conflicts. The Codecov CLI builds its file
+      # "network" from `git ls-files`, which still lists those tracked stubs,
+      # then crashes with FileNotFoundError when it tries to read a file that is
+      # no longer on disk — aborting the ENTIRE upload (silently, because
+      # fail_ci_if_error is false). Restore any tracked-but-deleted files on
+      # disk so the CLI can read them; they are excluded from the report anyway
+      # via the `ignore:` list in codecov.yml (**/*_gen.go).
+      run: |
+        deleted="$(git ls-files --deleted)"
+        if [ -n "$deleted" ]; then
+          echo "Restoring tracked files deleted by make generate:"
+          echo "$deleted"
+          git checkout -- $deleted
+        fi
+
     - name: Upload coverage
       uses: codecov/codecov-action@v4
       with:

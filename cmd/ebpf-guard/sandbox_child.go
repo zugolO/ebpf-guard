@@ -88,7 +88,10 @@ func sandboxChildExec(h childHardening, args []string) error {
 		}
 	}
 
-	if err := syscall.Exec(path, args, os.Environ()); err != nil {
+	// args[0]/args[1:] are the operator-supplied COMMAND for `ebpf-guard run`
+	// to exec inside the sandbox; that is this trampoline's entire purpose,
+	// not an injection risk.
+	if err := syscall.Exec(path, args, os.Environ()); err != nil { // #nosec G204
 		return fmt.Errorf("exec %q: %w", path, err)
 	}
 	return nil // unreachable on success
@@ -109,13 +112,15 @@ func applyDefaultSeccomp() error {
 	}
 	filter := defaultSeccompFilter()
 	prog := &unix.SockFprog{
-		Len:    uint16(len(filter)),
+		Len:    uint16(len(filter)), // #nosec G115 -- filter is our fixed, small denylist program, always far under uint16/BPF_MAXINSNS
 		Filter: &filter[0],
 	}
+	// unix has no SockFprog-taking wrapper for SYS_SECCOMP with TSYNC, so this
+	// goes through the raw syscall; prog outlives the call on our stack frame.
 	if _, _, errno := unix.Syscall(unix.SYS_SECCOMP,
 		uintptr(unix.SECCOMP_SET_MODE_FILTER),
 		uintptr(unix.SECCOMP_FILTER_FLAG_TSYNC),
-		uintptr(unsafe.Pointer(prog))); errno != 0 {
+		uintptr(unsafe.Pointer(prog))); errno != 0 { // #nosec G103 -- required to pass a *SockFprog to SYS_SECCOMP directly; prog is stack-local and outlives the call
 		return errno
 	}
 	return nil
@@ -166,7 +171,7 @@ func defaultSeccompFilter() []unix.SockFilter {
 	for _, nr := range denied {
 		filter = append(filter,
 			// nr == denied → fall through to the EPERM return; else skip it.
-			unix.SockFilter{Code: bpfJeqK, K: uint32(nr), Jt: 0, Jf: 1},
+			unix.SockFilter{Code: bpfJeqK, K: uint32(nr), Jt: 0, Jf: 1}, // #nosec G115 -- nr is one of the small, fixed unix.SYS_* constants in deniedSyscalls
 			unix.SockFilter{Code: bpfRetK, K: seccompRetDenyEPERM},
 		)
 	}

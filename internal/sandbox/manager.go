@@ -165,6 +165,19 @@ func (m *Manager) GuardTarget(pid int) EnforcementSafety {
 	return safety
 }
 
+// GuardChildAfterCapDrop is GuardTarget for the `ebpf-guard run` wrapper, whose
+// sandboxed child is exec'd with dropMask capabilities removed (applyCapDrop in
+// the trampoline). It assesses the child's post-drop credentials rather than the
+// guard's own — the guard necessarily holds CAP_BPF to attach the LSM programs,
+// so assessing the guard would force every `run --enforce` to downgrade even
+// though the child that actually runs the workload is unprivileged. Latches
+// enforcement-unsafe only when the child would still retain a tamper capability.
+func (m *Manager) GuardChildAfterCapDrop(pid int, dropMask uint64) EnforcementSafety {
+	safety := AssessProcessAfterCapDrop(pid, dropMask)
+	m.applyGuard(safety)
+	return safety
+}
+
 // applyGuard latches enforcement-unsafe from an assessment. In enforce mode an
 // unsafe verdict downgrades to audit-only exactly once (idempotent); in audit
 // mode there is nothing to weaken so it is a no-op. Kept separate from process
@@ -281,14 +294,14 @@ func (m *Manager) Load(sharedObjs *bpf.KmodObjects) error {
 	}
 	m.links = append(m.links, sc)
 
-	if bc, berrr := link.AttachLSM(link.LSMOptions{Program: objs.LsmBprmCheck}); berrr != nil {
+	if bc, bcErr := link.AttachLSM(link.LSMOptions{Program: objs.LsmBprmCheck}); bcErr != nil {
 		// The dedicated exec gate is absent. file_open still enforces the exec
 		// allow-list against the resolved path, but we must not report full
 		// kernel enforcement: KernelEnforced() stays false so the operator is
 		// never shown kernel_enforced=true while exec control is degraded
 		// (issue #267 item 2).
 		m.logger.Warn("ai_sandbox: bprm_check_security hook unavailable; dedicated exec gate "+
-			"not enforced (file_open backstop only) — kernel_enforced downgraded", "error", berrr)
+			"not enforced (file_open backstop only) — kernel_enforced downgraded", "error", bcErr)
 	} else {
 		m.links = append(m.links, bc)
 		m.execHookAttached = true

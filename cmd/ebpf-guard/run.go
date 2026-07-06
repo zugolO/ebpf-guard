@@ -64,6 +64,7 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVar(&auditLog, "audit-log", "", "path to write sandbox audit events (default: stderr)")
 	cmd.Flags().BoolVar(&hardening.noNewPrivs, "no-new-privs", true, "set PR_SET_NO_NEW_PRIVS on the child (blocks setuid privilege re-gain)")
 	cmd.Flags().BoolVar(&hardening.seccomp, "seccomp", true, "apply a default seccomp filter to the child (denies io_uring/module-load/kexec)")
+	cmd.Flags().BoolVar(&hardening.dropCaps, "drop-caps", true, "drop CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE from the child so it cannot tamper with the enforcer (required for --enforce to hold)")
 	cmd.Flags().BoolVar(&hardening.unshareNet, "unshare-net", false, "run the child in a private network namespace (isolates loopback; blocks all egress — requires privilege)")
 	cmd.Flags().BoolVar(&hardening.unshareMount, "unshare-mount", false, "run the child in a private mount namespace (requires privilege)")
 	return cmd
@@ -71,19 +72,21 @@ func newRunCmd(cfgPath *string) *cobra.Command {
 
 // childHardening carries the defence-in-depth boundaries `ebpf-guard run` layers
 // around the wrapped command in addition to the cgroup/LSM sandbox (issue #277
-// P2). no_new_privs and seccomp are applied by the in-process trampoline
-// (sandbox_child.go); the namespaces are requested at clone time.
+// P2). no_new_privs, seccomp, and the tamper-capability drop are applied by the
+// in-process trampoline (sandbox_child.go); the namespaces are requested at
+// clone time.
 type childHardening struct {
 	noNewPrivs   bool
 	seccomp      bool
+	dropCaps     bool
 	unshareNet   bool
 	unshareMount bool
 }
 
 // needsTrampoline reports whether the child must be re-exec'd through the
-// hidden trampoline command to install no_new_privs / seccomp. Namespaces alone
-// are set at clone time and need no trampoline.
-func (h childHardening) needsTrampoline() bool { return h.noNewPrivs || h.seccomp }
+// hidden trampoline command to install no_new_privs / seccomp / cap-drop.
+// Namespaces alone are set at clone time and need no trampoline.
+func (h childHardening) needsTrampoline() bool { return h.noNewPrivs || h.seccomp || h.dropCaps }
 
 // cloneFlags returns the CLONE_* namespace flags to place on the child.
 func (h childHardening) cloneFlags() uintptr {
@@ -98,8 +101,9 @@ func (h childHardening) cloneFlags() uintptr {
 }
 
 // childExecTarget returns the executable and argv to run: either the command
-// directly, or the /proc/self/exe trampoline wrapping it when no_new_privs or
-// seccomp is requested. self is the path to this binary (/proc/self/exe).
+// directly, or the /proc/self/exe trampoline wrapping it when no_new_privs,
+// seccomp, or the cap-drop is requested. self is the path to this binary
+// (/proc/self/exe).
 func childExecTarget(self string, args []string, h childHardening) (name string, argv []string) {
 	if !h.needsTrampoline() {
 		return args[0], args[1:]
@@ -108,6 +112,7 @@ func childExecTarget(self string, args []string, h childHardening) (name string,
 		sandboxChildCmdName,
 		fmt.Sprintf("--no-new-privs=%t", h.noNewPrivs),
 		fmt.Sprintf("--seccomp=%t", h.seccomp),
+		fmt.Sprintf("--drop-caps=%t", h.dropCaps),
 		"--",
 	}
 	trampoline = append(trampoline, args...)
@@ -167,18 +172,32 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ha
 		}
 	}()
 
-	// Item 7 (issue #259): the child inherits this process's capabilities, so
-	// if we carry CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE (or bpffs/cgroupfs is
-	// writable) the sandboxed child could detach the LSM hooks or rewrite the
-	// sandbox maps — enforcement would be a lie. Assess before claiming it and
-	// fail closed: GuardTarget latches audit-only so KernelEnforced()==false.
+	// Item 7 (issue #259): the sandboxed child would inherit this process's
+	// capabilities, and if it kept CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE it could
+	// detach the LSM hooks or rewrite the sandbox maps — enforcement would be a
+	// lie. The trampoline drops exactly those caps before exec (childHardening.
+	// dropCaps → applyCapDrop), so we assess the child's *post-drop* credentials
+	// rather than this guard's — the guard necessarily holds CAP_BPF to attach
+	// the programs, which would otherwise force every enforce run to downgrade.
+	// With --drop-caps disabled the child really does inherit them, so fall back
+	// to assessing the guard directly. Either way GuardChild/GuardTarget latches
+	// audit-only when unsafe so KernelEnforced()==false. Fail closed.
 	if enforce {
-		if safety := mgr.GuardTarget(os.Getpid()); !safety.Safe {
+		var safety sandbox.EnforcementSafety
+		if hardening.dropCaps {
+			safety = mgr.GuardChildAfterCapDrop(os.Getpid(), sandbox.DangerousCapMask())
+		} else {
+			safety = mgr.GuardTarget(os.Getpid())
+		}
+		if !safety.Safe {
+			remediation := "launch the agent unprivileged: drop CAP_BPF/CAP_SYS_ADMIN/" +
+				"CAP_SYS_PTRACE and deny write access to /sys/fs/bpf and /sys/fs/cgroup"
+			if !hardening.dropCaps {
+				remediation = "keep --drop-caps enabled (it removes these caps from the child), or " + remediation
+			}
 			logger.Warn("ai_sandbox: --enforce downgraded to audit-only — the sandboxed "+
-				"process would inherit privileges that can defeat enforcement",
-				"reasons", safety.Reasons,
-				"remediation", "launch the agent unprivileged: drop CAP_BPF/CAP_SYS_ADMIN/"+
-					"CAP_SYS_PTRACE and deny write access to /sys/fs/bpf and /sys/fs/cgroup")
+				"process would retain privileges that can defeat enforcement",
+				"reasons", safety.Reasons, "remediation", remediation)
 		}
 	}
 
@@ -262,6 +281,7 @@ func runSandboxed(cfgPath, profileName string, enforce bool, auditLog string, ha
 		"cgroup_id", cg.ID(),
 		"no_new_privs", hardening.noNewPrivs,
 		"seccomp", hardening.seccomp,
+		"drop_caps", hardening.dropCaps,
 		"unshare_net", hardening.unshareNet,
 		"unshare_mount", hardening.unshareMount,
 		"command", args[0])

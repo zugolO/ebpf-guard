@@ -108,30 +108,14 @@ func (p *Policy) WriteAllowed(profile, absPath string) bool {
 	return p.PathAllowed(profile, absPath, accessWrite)
 }
 
-// EscapePrimitive names a kernel-contained sandbox-escape vector — a syscall or
-// action a contained agent has no legitimate need for. Each maps to an LSM hook
-// in bpf/lsm.bpf.c that denies it for a sandboxed task in enforce mode.
-type EscapePrimitive string
-
-const (
-	// EscapeSignalProtected: signalling a protected PID (lsm_task_kill) — e.g.
-	// killing the agent supervisor or the ebpf-guard process.
-	EscapeSignalProtected EscapePrimitive = "kill"
-	// EscapeBPF: the bpf() syscall (lsm_sandbox_bpf) — tampering with the guard's
-	// own maps/links (map-write).
-	EscapeBPF EscapePrimitive = "map-write"
-	// EscapeMount: mount(2)/remount (lsm_sandbox_mount) — remapping the
-	// filesystem view to break out of the cgroup/namespace boundary.
-	EscapeMount EscapePrimitive = "cgroup-escape"
-)
-
 // EscapeContained reports whether a sandboxed task's escape attempts are
 // denied under this policy. It mirrors sandbox_escape_decide() in
-// bpf/lsm.bpf.c: escape primitives are denied for any sandboxed task in
+// bpf/lsm.bpf.c: escape primitives (signalling a protected PID, the bpf()
+// syscall, mount, ptrace, io_uring) are denied for any sandboxed task in
 // enforce mode and audited (allowed) in audit mode. The decision is currently
-// uniform across all escape vectors (kill/map-write/mount all gate on Mode
-// alone), so this takes no argument — an EscapePrimitive parameter would imply
-// per-vector coverage the policy doesn't have (issue #270).
+// uniform across all escape vectors (they all gate on Mode alone), so this
+// takes no argument — a per-vector parameter would imply coverage the policy
+// doesn't have (issue #270).
 func (p *Policy) EscapeContained() bool {
 	return p.Mode == ModeEnforce
 }

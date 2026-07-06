@@ -29,7 +29,7 @@ func TestChildExecTarget(t *testing.T) {
 		if name != "/proc/self/exe" {
 			t.Fatalf("name = %q, want /proc/self/exe", name)
 		}
-		want := []string{sandboxChildCmdName, "--no-new-privs=true", "--seccomp=false", "--", "bash", "-c", "echo hi"}
+		want := []string{sandboxChildCmdName, "--no-new-privs=true", "--seccomp=false", "--drop-caps=false", "--", "bash", "-c", "echo hi"}
 		if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
 			t.Fatalf("argv = %v, want %v", argv, want)
 		}
@@ -40,8 +40,19 @@ func TestChildExecTarget(t *testing.T) {
 		if name != "/proc/self/exe" {
 			t.Fatalf("name = %q, want /proc/self/exe", name)
 		}
-		if argv[0] != sandboxChildCmdName || argv[1] != "--no-new-privs=false" || argv[2] != "--seccomp=true" {
+		if argv[0] != sandboxChildCmdName || argv[1] != "--no-new-privs=false" || argv[2] != "--seccomp=true" || argv[3] != "--drop-caps=false" {
 			t.Fatalf("unexpected trampoline argv: %v", argv)
+		}
+	})
+
+	t.Run("drop-caps alone routes through trampoline", func(t *testing.T) {
+		name, argv := childExecTarget("/proc/self/exe", cmd, childHardening{dropCaps: true})
+		if name != "/proc/self/exe" {
+			t.Fatalf("name = %q, want /proc/self/exe", name)
+		}
+		want := []string{sandboxChildCmdName, "--no-new-privs=false", "--seccomp=false", "--drop-caps=true", "--", "bash", "-c", "echo hi"}
+		if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("argv = %v, want %v", argv, want)
 		}
 	})
 }
@@ -68,9 +79,9 @@ func TestDefaultSeccompFilter(t *testing.T) {
 	}
 	filter := defaultSeccompFilter()
 
-	// 3 arch-check instructions + 1 load-nr + 2 per denied syscall + 1 default allow.
+	// 3 arch-check instructions + 3 load-nr/x32-guard + 2 per denied syscall + 1 default allow.
 	denied := deniedSyscalls()
-	if want := 5 + len(denied)*2; len(filter) != want {
+	if want := 7 + len(denied)*2; len(filter) != want {
 		t.Fatalf("filter length = %d, want %d", len(filter), want)
 	}
 
@@ -80,6 +91,18 @@ func TestDefaultSeccompFilter(t *testing.T) {
 	}
 	if filter[2].K != seccompRetKillProcess {
 		t.Fatalf("arch mismatch action = %#x, want kill-process %#x", filter[2].K, seccompRetKillProcess)
+	}
+	// After loading the syscall number (instr 3), an x32-flagged number is killed
+	// before the denylist so it cannot slip a denied call under the shared audit
+	// arch (instr 4 = JGE x32 bit, instr 5 = kill).
+	if filter[3].K != seccompDataNROffset {
+		t.Fatalf("instr 3 loads offset %d, want nr offset %d", filter[3].K, seccompDataNROffset)
+	}
+	if filter[4].K != x32SyscallBit {
+		t.Fatalf("x32 guard comparand = %#x, want %#x", filter[4].K, x32SyscallBit)
+	}
+	if filter[5].K != seccompRetKillProcess {
+		t.Fatalf("x32 guard action = %#x, want kill-process %#x", filter[5].K, seccompRetKillProcess)
 	}
 	// Last instruction is the default allow.
 	if last := filter[len(filter)-1]; last.K != seccompRetAllow {

@@ -205,6 +205,20 @@ func ValidateConfig(cfg *Config) error {
 					add(fmt.Errorf("ai_sandbox.profiles[%d].allowed_egress_cidrs[%d]: invalid CIDR %q: %w", i, j, c, err))
 				}
 			}
+			// Port 0 is not a connectable destination; a 0 here is almost always a
+			// mis-indented YAML entry that would silently widen nothing.
+			for j, port := range p.AllowedEgressPorts {
+				if port == 0 {
+					add(fmt.Errorf("ai_sandbox.profiles[%d].allowed_egress_ports[%d]: port must be in [1, 65535], got 0", i, j))
+				}
+			}
+			// allowed_domains feed the DNS pinner; an empty/whitespace entry
+			// resolves to nothing and just hides a config typo.
+			for j, d := range p.AllowedDomains {
+				if strings.TrimSpace(d) == "" {
+					add(fmt.Errorf("ai_sandbox.profiles[%d].allowed_domains[%d]: must not be empty", i, j))
+				}
+			}
 			// A prefix that is both executable and writable defeats exec
 			// containment: the agent can drop a binary there and run it. Reject
 			// any allowed_exec prefix that overlaps a writable prefix.

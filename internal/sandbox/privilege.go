@@ -41,6 +41,18 @@ const (
 // so all three call sites share one table (issue #271).
 var dangerousCapMask = uint64(1)<<capBPF | uint64(1)<<capSysAdmin | uint64(1)<<capSysPtrace
 
+// DangerousCapMask is the bitmask of the tamper-relevant capabilities
+// (CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE). The `ebpf-guard run` wrapper drops
+// exactly these from the sandboxed child before exec and passes the same mask to
+// AssessProcessAfterCapDrop so the enforce-safety verdict reflects the child's
+// post-drop credentials rather than the privileged parent's.
+func DangerousCapMask() uint64 { return dangerousCapMask }
+
+// TamperCapBits returns the capability bit numbers the run wrapper drops from
+// the sandboxed child. Kept as the single source of truth alongside
+// dangerousCapMask so the drop set and the assessment set can never diverge.
+func TamperCapBits() []uint { return []uint{capSysPtrace, capSysAdmin, capBPF} }
+
 // tamperMounts are kernel interfaces that, if writable from inside the sandbox,
 // let the workload undo enforcement (unpin maps/links, edit its own cgroup).
 var tamperMounts = []string{"/sys/fs/bpf", "/sys/fs/cgroup"}
@@ -60,6 +72,36 @@ type EnforcementSafety struct {
 func AssessProcess(pid int) EnforcementSafety {
 	reasons := assessCaps(pid)
 	reasons = append(reasons, assessTamperMounts(accessWritable)...)
+	return EnforcementSafety{Safe: len(reasons) == 0, Reasons: reasons}
+}
+
+// AssessProcessAfterCapDrop evaluates enforce-safety for a child that the run
+// wrapper will exec with dropMask capabilities removed (see TamperCapBits /
+// applyCapDrop in cmd/ebpf-guard). It reads pid's current effective caps but
+// masks off dropMask before judging them, so a guard that must itself hold
+// CAP_BPF to load the LSM programs does not force every `run --enforce` to
+// downgrade — what matters is what the *child* will retain, not what the parent
+// holds while attaching.
+//
+// Unlike AssessProcess it does not probe tamper-mount writability: that check is
+// about the parent's filesystem access, and a cap-dropped sandboxed child cannot
+// reach the enforcer through those mounts anyway — it has no CAP_BPF/CAP_SYS_ADMIN
+// to call bpf()/mount(), and the mandatory file_open hook denies opening
+// /sys/fs/bpf and /sys/fs/cgroup for any sandboxed task via the always-on
+// baseline deny paths (see baselineDeniedPathPrefixes). It still fails closed on
+// an unreadable/unparseable status.
+func AssessProcessAfterCapDrop(pid int, dropMask uint64) EnforcementSafety {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return EnforcementSafety{Reasons: []string{
+			fmt.Sprintf("cannot read /proc/%d/status to verify capabilities: %v", pid, err)}}
+	}
+	capEff, ok := parseCapEff(string(data))
+	if !ok {
+		return EnforcementSafety{Reasons: []string{
+			fmt.Sprintf("cannot parse CapEff from /proc/%d/status", pid)}}
+	}
+	reasons := capReasons(capEff &^ dropMask)
 	return EnforcementSafety{Safe: len(reasons) == 0, Reasons: reasons}
 }
 

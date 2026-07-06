@@ -95,24 +95,31 @@ agent-workload example.
 
 ebpf-guard checks this posture instead of trusting it. At sandbox registration
 (and, for the `run` wrapper, before launching the child) it assesses the
-target's effective capabilities. If the target is privileged enough to tamper
-with the enforcer, ebpf-guard **refuses to claim enforcement**: it emits a loud
-warning with the specific reason, downgrades that target to audit-only, and
-reports `kernel_enforced=false` (never a silent "enforced"). If the target's
-capability set cannot even be read, it fails closed the same way.
+effective capabilities the sandboxed workload will actually run with. If that is
+privileged enough to tamper with the enforcer, ebpf-guard **refuses to claim
+enforcement**: it emits a loud warning with the specific reason, downgrades that
+target to audit-only, and reports `kernel_enforced=false` (never a silent
+"enforced"). If the capability set cannot even be read, it fails closed the same
+way.
 
 ```text
 WARN ai_sandbox: --enforce downgraded to audit-only — the sandboxed process
-  would inherit privileges that can defeat enforcement
+  would retain privileges that can defeat enforcement
   reasons="[target holds CAP_BPF]"
-  remediation="launch the agent unprivileged: drop CAP_BPF/CAP_SYS_ADMIN/
-  CAP_SYS_PTRACE and deny write access to /sys/fs/bpf and /sys/fs/cgroup"
+  remediation="keep --drop-caps enabled (it removes these caps from the child),
+  or launch the agent unprivileged: drop CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE
+  and deny write access to /sys/fs/bpf and /sys/fs/cgroup"
 ```
 
-> Because the `ebpf-guard run` child inherits the wrapper's capabilities, a
-> `sudo ebpf-guard run --enforce` where those caps are **not** dropped for the
-> child will correctly downgrade to audit. This is the intended signal, not a
-> bug: enforcement is only genuine once the agent runs unprivileged.
+> The `ebpf-guard run` child would otherwise inherit the wrapper's capabilities.
+> To make `--enforce` genuine rather than self-downgrading, the wrapper drops
+> `CAP_BPF`/`CAP_SYS_ADMIN`/`CAP_SYS_PTRACE` from the child before exec by
+> default (`--drop-caps`, on by default), and the enforce-safety check assesses
+> the child's **post-drop** credentials — not the guard's own, which must hold
+> `CAP_BPF` to attach the LSM programs. Only if you pass `--drop-caps=false`
+> does the child keep those caps, in which case the run correctly downgrades to
+> audit. In Kubernetes the target is a separate, unprivileged workload Pod, so
+> the same assessment applies to its containers, not to the DaemonSet.
 
 ### ebpf-guard's own files are denied by default
 
@@ -201,20 +208,22 @@ well-understood kernel boundaries around the child in addition to it:
 | Flag | Default | Effect |
 |---|---|---|
 | `--no-new-privs` | `true` | Sets `PR_SET_NO_NEW_PRIVS` on the child before exec, so it can never regain privileges through a setuid/setgid binary or file capabilities. |
-| `--seccomp` | `true` | Installs a default seccomp filter that denies `io_uring_setup/enter/register`, kernel module load/unload, and `kexec_load` with `-EPERM`, and kills any syscall issued under a non-native ABI. The io_uring denial is a second, kernel-version-independent lever against the [io_uring bypass](#io_uring-is-a-hard-prerequisite-for-enforce). |
+| `--drop-caps` | `true` | Drops `CAP_BPF`/`CAP_SYS_ADMIN`/`CAP_SYS_PTRACE` from the child (effective, permitted, inheritable, and bounding sets) before exec, so a child that would otherwise inherit the privileged wrapper's caps cannot detach the LSM links, rewrite the sandbox maps, or ptrace the guard. This is what lets `--enforce` be genuine instead of self-downgrading (see [fail-closed](#fail-closed-ebpf-guard-never-claims-enforcement-it-cannot-back)); disable it only if the wrapped command legitimately needs one of those caps. |
+| `--seccomp` | `true` | Installs a default seccomp filter that denies `io_uring_setup/enter/register`, kernel module load/unload, and `kexec_load` with `-EPERM`, kills any syscall issued under a non-native ABI, and kills any `x32`-flagged syscall number (the x32 ABI shares the 64-bit audit arch, so an arch check alone would let it slip a denied call through). The io_uring denial is a second, kernel-version-independent lever against the [io_uring bypass](#io_uring-is-a-hard-prerequisite-for-enforce). |
 | `--unshare-net` | `false` | Runs the child in a private network namespace. This isolates it from the host's loopback (the clean fix for the loopback exposure in #274 item 3) but also removes all egress, so enable it only for workloads that do not need the network. Requires privilege. |
 | `--unshare-mount` | `false` | Runs the child in a private mount namespace so its mounts do not affect the host. Requires privilege. |
 
-`no_new_privs` and the seccomp filter are installed between fork and exec (via a
-hidden `/proc/self/exe` re-exec trampoline, since `os/exec` cannot run code
-there); both are preserved across `execve`, so they bound the wrapped command
-itself, and the child keeps its PID so signal forwarding is unaffected.
+`no_new_privs`, the capability drop, and the seccomp filter are installed
+between fork and exec (via a hidden `/proc/self/exe` re-exec trampoline, since
+`os/exec` cannot run code there); all are preserved across `execve`, so they
+bound the wrapped command itself, and the child keeps its PID so signal
+forwarding is unaffected.
 `no_new_privs` also lets the seccomp filter install without privilege, so the
 default hardening applies even when the agent is run unprivileged. These
 boundaries are independent of `--enforce`: they apply in audit mode too.
 
 ```bash
-# default hardening (no_new_privs + seccomp) is automatic:
+# default hardening (no_new_privs + drop-caps + seccomp) is automatic:
 ebpf-guard run --profile ai-agent -- claude
 
 # add network isolation for an offline build step:

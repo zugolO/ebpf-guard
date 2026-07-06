@@ -79,6 +79,52 @@ func TestAssessProcess_UnreadablePidFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAssessProcessAfterCapDrop_ReducesTamperCaps(t *testing.T) {
+	// A target holding every tamper cap is unsafe under AssessProcess but safe
+	// once those caps are masked off — which is exactly what the run wrapper's
+	// child-side applyCapDrop removes before exec.
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		t.Skipf("cannot read own status: %v", err)
+	}
+	capEff, ok := parseCapEff(string(data))
+	if !ok {
+		t.Skip("own status has no CapEff line")
+	}
+	// The post-drop verdict must match a direct read of (own caps &^ dropMask):
+	// with the tamper caps masked, only a *residual* dangerous cap could remain,
+	// and TamperCapBits covers the whole dangerousCapMask, so it is always safe.
+	reduced := capEff &^ DangerousCapMask()
+	want := len(capReasons(reduced)) == 0
+	if !want {
+		t.Fatalf("masking DangerousCapMask should clear every dangerous cap, residual=%#x", reduced&dangerousCapMask)
+	}
+	if got := AssessProcessAfterCapDrop(os.Getpid(), DangerousCapMask()).Safe; got != want {
+		t.Errorf("AssessProcessAfterCapDrop(self).Safe = %v, want %v", got, want)
+	}
+}
+
+func TestAssessProcessAfterCapDrop_UnreadablePidFailsClosed(t *testing.T) {
+	res := AssessProcessAfterCapDrop(1<<30, DangerousCapMask())
+	if res.Safe {
+		t.Error("an unreadable target must be treated as unsafe (fail closed)")
+	}
+	if len(res.Reasons) == 0 {
+		t.Error("expected a reason explaining why the target could not be verified")
+	}
+}
+
+func TestTamperCapBitsCoverMask(t *testing.T) {
+	var m uint64
+	for _, b := range TamperCapBits() {
+		m |= uint64(1) << b
+	}
+	if m != DangerousCapMask() {
+		t.Errorf("TamperCapBits mask = %#x, want DangerousCapMask %#x — the drop set and the "+
+			"assessment set must stay identical", m, DangerousCapMask())
+	}
+}
+
 func TestAssessProcess_SelfMatchesOwnCaps(t *testing.T) {
 	restore := accessWritable
 	accessWritable = func(string) bool { return false }

@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
+
+	"github.com/zugolO/ebpf-guard/internal/sandbox"
 )
 
 // sandboxChildCmdName is the hidden subcommand `ebpf-guard run` re-execs itself
@@ -46,6 +48,7 @@ func newSandboxChildCmd() *cobra.Command {
 	var (
 		noNewPrivs bool
 		seccompOn  bool
+		dropCaps   bool
 	)
 	cmd := &cobra.Command{
 		Use:    sandboxChildCmdName + " [flags] -- COMMAND [ARGS...]",
@@ -55,11 +58,12 @@ func newSandboxChildCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return sandboxChildExec(childHardening{noNewPrivs: noNewPrivs, seccomp: seccompOn}, args)
+			return sandboxChildExec(childHardening{noNewPrivs: noNewPrivs, seccomp: seccompOn, dropCaps: dropCaps}, args)
 		},
 	}
 	cmd.Flags().BoolVar(&noNewPrivs, "no-new-privs", true, "set PR_SET_NO_NEW_PRIVS before exec")
 	cmd.Flags().BoolVar(&seccompOn, "seccomp", true, "install the default seccomp filter before exec")
+	cmd.Flags().BoolVar(&dropCaps, "drop-caps", true, "drop CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE before exec")
 	return cmd
 }
 
@@ -82,6 +86,15 @@ func sandboxChildExec(h childHardening, args []string) error {
 			return fmt.Errorf("set no_new_privs: %w", err)
 		}
 	}
+	// Drop the tamper-relevant capabilities before seccomp/exec. Fail closed: a
+	// child that kept CAP_BPF/CAP_SYS_ADMIN/CAP_SYS_PTRACE could defeat the very
+	// enforcement `--enforce` promises, so a failed drop must abort the run
+	// rather than exec a still-privileged workload.
+	if h.dropCaps {
+		if err := applyCapDrop(); err != nil {
+			return fmt.Errorf("drop tamper capabilities: %w", err)
+		}
+	}
 	if h.seccomp {
 		if err := applyDefaultSeccomp(); err != nil {
 			return fmt.Errorf("install seccomp filter: %w", err)
@@ -102,6 +115,48 @@ func sandboxChildExec(h childHardening, args []string) error {
 // permitted for unprivileged processes and is inherited across execve and fork.
 func applyNoNewPrivs() error {
 	return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+}
+
+// applyCapDrop removes the tamper-relevant capabilities (CAP_BPF, CAP_SYS_ADMIN,
+// CAP_SYS_PTRACE — sandbox.TamperCapBits) from the child before it execs the
+// wrapped command. Without this the sandboxed agent inherits the guard's full
+// privileges and could detach the LSM links, rewrite the sandbox_* maps, or
+// ptrace the guard — defeating the enforcement `--enforce` claims (issue #259
+// item 7). The run wrapper assesses the child against the same set
+// (sandbox.AssessProcessAfterCapDrop) so enforce is no longer force-downgraded
+// merely because the guard itself must hold CAP_BPF to attach the programs.
+//
+// Each capability is cleared from the effective, permitted, and inheritable sets
+// via capset — a permitted-set drop is irrevocable for the process and survives
+// execve — and from the bounding set via PR_CAPBSET_DROP so it cannot be
+// re-acquired through a file-capability execve. The capset drop is the hard
+// guarantee and its failure is fatal; the bounding-set drop is best-effort
+// (it needs CAP_SETPCAP, which a root guard has but a minimal one may not).
+func applyCapDrop() error {
+	drop := sandbox.TamperCapBits()
+
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3, Pid: 0} // pid 0 == self
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &data[0]); err != nil {
+		return fmt.Errorf("capget: %w", err)
+	}
+	for _, c := range drop {
+		word := c >> 5 // 32 capability bits per CapUserData word
+		bit := uint32(1) << (c & 31)
+		data[word].Effective &^= bit
+		data[word].Permitted &^= bit
+		data[word].Inheritable &^= bit
+	}
+	if err := unix.Capset(&hdr, &data[0]); err != nil {
+		return fmt.Errorf("capset: %w", err)
+	}
+	// Bounding-set drop: prevents re-gaining the cap via a setuid/file-cap
+	// execve. Best-effort — the permitted-set clear above already removes it
+	// from this process tree regardless.
+	for _, c := range drop {
+		_ = unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(c), 0, 0, 0)
+	}
+	return nil
 }
 
 // applyDefaultSeccomp installs defaultSeccompFilter for every thread of the
@@ -148,18 +203,28 @@ func deniedSyscalls() []int {
 	}
 }
 
+// x32SyscallBit is __X32_SYSCALL_BIT: on x86_64 the x32 ABI shares
+// AUDIT_ARCH_X86_64 with the 64-bit ABI but OR's this bit into every syscall
+// number, so an arch-equality check alone does not separate them. A number-based
+// denylist could then be evaded by issuing the same call under x32
+// (e.g. io_uring_setup as 0x40000000|425). We reject any number carrying this
+// bit outright. On non-x86_64 arches no native syscall number reaches this
+// value, so the guard is a harmless no-op there.
+const x32SyscallBit = uint32(0x40000000)
+
 // defaultSeccompFilter assembles the classic-BPF seccomp program: reject any
-// syscall issued under a non-native ABI (closes the x86 compat / x32 route where
-// a number means a different call than the one filtered), deny each denylist
+// syscall issued under a non-native ABI (closes the i386 compat route), reject
+// x32 numbers (the x32 ABI shares the native audit arch), deny each denylist
 // entry with -EPERM, and allow everything else.
 func defaultSeccompFilter() []unix.SockFilter {
 	const (
 		bpfLdW  = unix.BPF_LD | unix.BPF_W | unix.BPF_ABS
 		bpfJeqK = unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K
+		bpfJgeK = unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K
 		bpfRetK = unix.BPF_RET | unix.BPF_K
 	)
 	denied := deniedSyscalls()
-	filter := make([]unix.SockFilter, 0, len(denied)*2+4)
+	filter := make([]unix.SockFilter, 0, len(denied)*2+6)
 
 	// Load arch; if it is not the native ABI, kill the process.
 	filter = append(filter,
@@ -168,8 +233,13 @@ func defaultSeccompFilter() []unix.SockFilter {
 		unix.SockFilter{Code: bpfRetK, K: seccompRetKillProcess},
 	)
 
-	// Load the syscall number and deny each denylist entry with -EPERM.
-	filter = append(filter, unix.SockFilter{Code: bpfLdW, K: seccompDataNROffset})
+	// Load the syscall number. Reject any x32-flagged number (native audit arch
+	// but a different call table) before the number-based denylist below.
+	filter = append(filter,
+		unix.SockFilter{Code: bpfLdW, K: seccompDataNROffset},
+		unix.SockFilter{Code: bpfJgeK, K: x32SyscallBit, Jt: 0, Jf: 1},
+		unix.SockFilter{Code: bpfRetK, K: seccompRetKillProcess},
+	)
 	for _, nr := range denied {
 		filter = append(filter,
 			// nr == denied → fall through to the EPERM return; else skip it.

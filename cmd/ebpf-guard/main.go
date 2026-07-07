@@ -1721,7 +1721,7 @@ func generateToken() (string, error) {
 // tokenFileDir is the directory writeTokenFile writes the generated-token
 // file into. It is a var (not a const) so tests can point it at a temp
 // directory instead of the real /run/ebpf-guard.
-var tokenFileDir = "/run/ebpf-guard"
+var tokenFileDir = "/run/ebpf-guard" // #nosec G101 -- filesystem directory path for the token file, not a credential value
 
 // writeTokenFile writes auto-generated tokens to <tokenFileDir>/token
 // with mode 0600, so operators can retrieve the credentials.

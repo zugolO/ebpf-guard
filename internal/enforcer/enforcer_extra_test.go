@@ -129,6 +129,7 @@ func TestExecute_UnknownActionType(t *testing.T) {
 // NOTE: nftables uses a process-global "ebpf-guard" table (the table name is
 // not parameterised), so nft-backed tests are intentionally NOT parallel.
 func TestExecuteBlock_NFTablesReal(t *testing.T) {
+	requireRoot(t)
 	e, err := NewEnforcer(testLogger(), Config{
 		EnableBlock:  true,
 		BlockBackend: BlockBackendNFTables,
@@ -148,6 +149,7 @@ func TestExecuteBlock_NFTablesReal(t *testing.T) {
 }
 
 func TestExecuteBlock_IPTablesReal(t *testing.T) {
+	requireRoot(t)
 	t.Parallel()
 
 	e, err := NewEnforcer(testLogger(), Config{EnableBlock: true, BlockBackend: BlockBackendLog})
@@ -170,6 +172,7 @@ func TestExecuteBlock_IPTablesReal(t *testing.T) {
 // registers cleanup that removes the chain.
 func newTestIPTables(t *testing.T) *IPTablesManager {
 	t.Helper()
+	requireRoot(t)
 	chain := "EGT-" + sanitizeChain(t.Name())
 	ipt, err := NewIPTablesManager(testLogger(), IPTablesConfig{ChainName: chain})
 	require.NoError(t, err)
@@ -256,6 +259,7 @@ func TestExecuteLSMBlock_FileEventNoManager(t *testing.T) {
 
 // nft fallback: LSM available but AddToBlocklist fails -> nftables blocks UID.
 func TestExecuteLSMBlock_NFTablesFallbackOnLSMError(t *testing.T) {
+	requireRoot(t)
 	f := newFakeLSM(true)
 	f.addErr = fmt.Errorf("bpf map insert failed")
 
@@ -281,6 +285,7 @@ func TestExecuteLSMBlock_NFTablesFallbackOnLSMError(t *testing.T) {
 
 // iptables fallback: LSM unavailable -> iptables blocks UID.
 func TestExecuteLSMBlock_IPTablesFallbackWhenUnavailable(t *testing.T) {
+	requireRoot(t)
 	t.Parallel()
 	f := newFakeLSM(false) // unavailable
 
@@ -357,6 +362,7 @@ func cgroupWritePath(t *testing.T, e *Enforcer) string {
 // (/sys/fs/cgroup/.../cpu.max). These tests are NOT parallel and clean up any
 // file they may create so they never overlap or leak state.
 func TestExecuteThrottle_WritesCgroupCPUMax(t *testing.T) {
+	requireRoot(t)
 	e, err := NewEnforcer(testLogger(), Config{EnableThrottle: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = e.Close() })
@@ -406,6 +412,7 @@ func TestFindCgroupPath(t *testing.T) {
 }
 
 func TestApplyCgroupThrottle(t *testing.T) {
+	requireRoot(t)
 	e, err := NewEnforcer(testLogger(), Config{ThrottleCPUPercent: 25})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = e.Close() })
@@ -493,6 +500,7 @@ func TestLogAudit_DropsWhenChannelFull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCleanup_ClearsBlockedState(t *testing.T) {
+	requireRoot(t)
 	t.Parallel()
 	e, err := NewEnforcer(testLogger(), Config{})
 	require.NoError(t, err)
@@ -508,6 +516,7 @@ func TestCleanup_ClearsBlockedState(t *testing.T) {
 }
 
 func TestClose_StopsGoroutineAndClosesManagers(t *testing.T) {
+	requireRoot(t)
 	t.Parallel()
 	e, err := NewEnforcer(testLogger(), Config{})
 	require.NoError(t, err)

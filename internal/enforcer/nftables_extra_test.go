@@ -59,6 +59,7 @@ func nftListTable(t *testing.T, name string) string {
 
 func newRealNFTManager(t *testing.T) (*NFTablesManager, string) {
 	t.Helper()
+	requireRoot(t)
 	name := uniqueNFTTable(t)
 	mgr, err := NewNFTablesManager(testLogger(), NFTablesConfig{TableName: name})
 	if err != nil {
@@ -80,6 +81,7 @@ func TestNFTablesManager_RealMode_CreatesTableAndChain(t *testing.T) {
 }
 
 func TestNFTablesManager_RealMode_InitializeIdempotent(t *testing.T) {
+	requireRoot(t)
 	name := uniqueNFTTable(t)
 	mgr1, err := NewNFTablesManager(testLogger(), NFTablesConfig{TableName: name})
 	if err != nil {
@@ -222,6 +224,7 @@ func TestNFTablesManager_RealMode_UnblockIP_OnlyRemovesMatch(t *testing.T) {
 }
 
 func TestNFTablesManager_RealMode_Cleanup(t *testing.T) {
+	requireRoot(t)
 	name := uniqueNFTTable(t)
 	mgr, err := NewNFTablesManager(testLogger(), NFTablesConfig{TableName: name})
 	if err != nil {

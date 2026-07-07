@@ -40,6 +40,18 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stdout, nil))
 }
 
+// requireRoot skips the calling test when it is not running as root. Tests that
+// program real kernel state (nftables/iptables netlink, cgroup cpu.max writes)
+// need CAP_NET_ADMIN / write access under /sys/fs/cgroup, which shared CI
+// runners execute without — there the operations fail with EPERM. Locally (or
+// in a privileged container) these still run and provide the real coverage.
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Getuid() != 0 {
+		t.Skip("test programs real kernel state (netfilter/cgroup) and requires root")
+	}
+}
+
 func newTestXDPManager(t *testing.T) *XDPManager {
 	t.Helper()
 	// DryRun + empty interface → in-memory log-only mode (no BPF required).

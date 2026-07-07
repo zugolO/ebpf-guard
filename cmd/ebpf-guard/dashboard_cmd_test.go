@@ -236,7 +236,7 @@ func TestPluginsValidateCmd_FailingPlugin(t *testing.T) {
 	// condition ValidatePlugin actually fails on (OK=false); fixtures like
 	// no_memory.wasm/malloc_bad_ptr.wasm are ABI-compliant but misbehave at
 	// dry-run time, which only produces log warnings, not a failed result.
-	pluginPath := filepath.Join("..", "..", "internal", "wasm", "testdata", "missing_exports.wasm")
+	pluginPath := filepath.Join("..", "..", "internal", "wasm", "testdata", "invalid", "missing_exports.wasm")
 	if _, err := os.Stat(pluginPath); err != nil {
 		t.Skipf("wasm testdata not available: %v", err)
 	}

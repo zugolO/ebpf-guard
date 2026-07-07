@@ -76,7 +76,7 @@ func TestPluginEvaluate_MissingRequiredExports(t *testing.T) {
 	rt := wazero.NewRuntime(ctx)
 	defer rt.Close(ctx)
 
-	p := loadFixturePlugin(t, ctx, rt, "missing_exports.wasm")
+	p := loadFixturePlugin(t, ctx, rt, filepath.Join("invalid", "missing_exports.wasm"))
 	defer p.Close(ctx)
 
 	_, err := p.Evaluate(ctx, []byte(`{}`))
@@ -102,7 +102,7 @@ func TestPluginEvaluate_EvaluateReturnsNoResults(t *testing.T) {
 	rt := wazero.NewRuntime(ctx)
 	defer rt.Close(ctx)
 
-	p := loadFixturePlugin(t, ctx, rt, "evaluate_no_result.wasm")
+	p := loadFixturePlugin(t, ctx, rt, filepath.Join("invalid", "evaluate_no_result.wasm"))
 	defer p.Close(ctx)
 
 	_, err := p.Evaluate(ctx, []byte(`{}`))
@@ -115,12 +115,15 @@ func TestPluginEvaluate_EvaluateReturnsNoResults(t *testing.T) {
 // fixture, confirming the documented "a buggy plugin cannot halt the
 // pipeline" guarantee end to end.
 func TestEngineEvaluate_HostilePluginsDoNotCrashPipeline(t *testing.T) {
+	// Relative paths under testdata/. The two ABI-invalid fixtures live in
+	// testdata/invalid/ so the plugins-validate conformance job (which scans
+	// testdata/ non-recursively) does not treat them as example plugins.
 	fixtures := []string{
 		"no_memory.wasm",
 		"malloc_bad_ptr.wasm",
-		"missing_exports.wasm",
+		filepath.Join("invalid", "missing_exports.wasm"),
 		"evaluate_traps.wasm",
-		"evaluate_no_result.wasm",
+		filepath.Join("invalid", "evaluate_no_result.wasm"),
 	}
 
 	ctx := context.Background()
@@ -132,7 +135,8 @@ func TestEngineEvaluate_HostilePluginsDoNotCrashPipeline(t *testing.T) {
 		}
 		data, err := os.ReadFile(src)
 		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(dir, f), data, 0o644))
+		// Stage flat (by basename) so the Engine loads them from one dir.
+		require.NoError(t, os.WriteFile(filepath.Join(dir, filepath.Base(f)), data, 0o644))
 	}
 
 	e, err := NewEngine(ctx, dir, testLogger(), 0)
@@ -238,4 +242,12 @@ func TestLoadPlugin_InvalidManifestPropagates(t *testing.T) {
 	_, err = loadPlugin(ctx, rt, wasmPath, testLogger())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "load meta")
+}
+
+// TestIsNilMemory_BareNilInterface covers the plain mem==nil branch of
+// isNilMemory. The typed-nil (boxed *MemoryInstance) branch is already
+// exercised by the no_memory.wasm fixture via Plugin.Evaluate; this pins the
+// untyped-nil short-circuit that guards the reflect call below it.
+func TestIsNilMemory_BareNilInterface(t *testing.T) {
+	assert.True(t, isNilMemory(nil), "a nil api.Memory must be reported as nil")
 }

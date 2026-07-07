@@ -35,9 +35,9 @@ func TestValidatePlugin_InvalidWasmBytes(t *testing.T) {
 }
 
 func TestValidatePlugin_MissingRequiredExports(t *testing.T) {
-	path := filepath.Join("testdata", "missing_exports.wasm")
+	path := filepath.Join("testdata", "invalid", "missing_exports.wasm")
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Skip("testdata/missing_exports.wasm not present")
+		t.Skip("testdata/invalid/missing_exports.wasm not present")
 	}
 
 	res := ValidatePlugin(context.Background(), path, nil, testLogger())
@@ -132,9 +132,9 @@ func TestCheckFuncSignature_MismatchRecordsErrors(t *testing.T) {
 	// Real function definitions come from a compiled module; reuse the
 	// evaluate export from evaluate_no_result.wasm, which deliberately
 	// returns no results (mismatching the required (i32,i32)->i32 shape).
-	path := filepath.Join("testdata", "evaluate_no_result.wasm")
+	path := filepath.Join("testdata", "invalid", "evaluate_no_result.wasm")
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Skip("testdata/evaluate_no_result.wasm not present")
+		t.Skip("testdata/invalid/evaluate_no_result.wasm not present")
 	}
 
 	res := ValidatePlugin(context.Background(), path, nil, testLogger())

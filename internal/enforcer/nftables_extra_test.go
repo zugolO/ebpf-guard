@@ -472,3 +472,42 @@ func TestNFTablesManager_RealMode_AddRemoveCgroupDropRule(t *testing.T) {
 		t.Errorf("expected drop rule to be removed, got:\n%s", out)
 	}
 }
+
+// TestNFTablesManager_isIPRule_MatchesByAddressWidth exercises isIPRule as pure
+// logic — no netlink, so it runs unprivileged on CI (unlike the RealMode tests
+// above). It covers each branch: non-Cmp exprs skipped, IPv4/IPv6 payload
+// matching, the address-family-mismatch path (a 4-byte IPv4 payload compared
+// against an IPv6 query, where ip.To4() is nil), and the unknown-width default.
+func TestNFTablesManager_isIPRule_MatchesByAddressWidth(t *testing.T) {
+	t.Parallel()
+	m := &NFTablesManager{}
+
+	ipv4Rule := &nftables.Rule{Exprs: []expr.Any{
+		&expr.Payload{}, // non-Cmp expr must be skipped, not matched
+		&expr.Cmp{Data: net.ParseIP("10.1.2.3").To4()},
+	}}
+	ipv6Rule := &nftables.Rule{Exprs: []expr.Any{
+		&expr.Cmp{Data: net.ParseIP("2001:db8::1").To16()},
+	}}
+	oddWidthRule := &nftables.Rule{Exprs: []expr.Any{
+		&expr.Cmp{Data: []byte{1, 2, 3}}, // neither 4 nor 16 bytes -> default branch
+	}}
+
+	if !m.isIPRule(ipv4Rule, net.ParseIP("10.1.2.3")) {
+		t.Error("IPv4 rule should match its own address")
+	}
+	if m.isIPRule(ipv4Rule, net.ParseIP("10.9.9.9")) {
+		t.Error("IPv4 rule must not match a different address")
+	}
+	if !m.isIPRule(ipv6Rule, net.ParseIP("2001:db8::1")) {
+		t.Error("IPv6 rule should match its own address")
+	}
+	// 4-byte payload vs an IPv6-only query: ip.To4() is nil -> candidate==nil path.
+	if m.isIPRule(ipv4Rule, net.ParseIP("2001:db8::1")) {
+		t.Error("IPv4-width rule must not match an IPv6 query")
+	}
+	// Unknown payload width -> default branch, never matches.
+	if m.isIPRule(oddWidthRule, net.ParseIP("10.1.2.3")) {
+		t.Error("rule with non-IP payload width must not match")
+	}
+}

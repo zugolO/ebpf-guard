@@ -2,12 +2,15 @@ package enforcer
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
 	"sync"
 	"testing"
 
+	"github.com/cilium/ebpf"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -241,4 +244,125 @@ func TestXDPManager_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// loadBPF — graceful degradation when the BPF object is a compile-time stub
+// ---------------------------------------------------------------------------
+
+// TestXDPManager_LoadBPF_StubDegradesToLogOnly exercises loadBPF() itself.
+//
+// In this build internal/bpf.LoadXDPObjects is a hand-written stub that ALWAYS
+// returns an error (no `make generate` / clang toolchain here), so constructing
+// a manager with DryRun=false and a real interface ("lo") drives loadBPF() into
+// its very first failure branch: LoadXDPObjects errors → warn logged → the
+// method returns with loaded==false. The interface-lookup-failure and
+// XDP-attach-failure branches inside loadBPF are UNREACHABLE without a real
+// compiled BPF object and are a documented coverage ceiling (needs the BPF
+// toolchain, out of scope here).
+//
+// The behavioural contract we assert is graceful degradation: the manager is
+// still fully usable in log-only mode.
+func TestXDPManager_LoadBPF_StubDegradesToLogOnly(t *testing.T) {
+	m, err := NewXDPManager(testLogger(), XDPConfig{DryRun: false, Interface: "lo"})
+	require.NoError(t, err, "constructor must not fail even when BPF load fails")
+
+	// loadBPF was invoked (DryRun=false + non-empty Interface) but the stub
+	// LoadXDPObjects failed, so the program must NOT be reported as loaded.
+	assert.False(t, m.IsLoaded(), "stub BPF load must degrade to log-only (loaded=false)")
+	require.Nil(t, m.objs, "objs must remain nil after failed load")
+	require.Nil(t, m.xdpLink, "xdpLink must remain nil after failed load")
+
+	// Log-only mode must still track blocks in memory.
+	require.NoError(t, m.BlockIP(context.Background(), net.ParseIP("203.0.113.7")))
+	require.NoError(t, m.BlockPort(context.Background(), 4444))
+	assert.Contains(t, m.GetBlockedIPs(), "203.0.113.7")
+	assert.Contains(t, m.GetBlockedPorts(), uint16(4444))
+
+	// ReadStats returns zero values because nothing is loaded.
+	agg, err := m.ReadStats()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), agg.Dropped)
+
+	require.NoError(t, m.Close())
+}
+
+// ---------------------------------------------------------------------------
+// RegisterMetrics — real Prometheus registration and duplicate detection
+// ---------------------------------------------------------------------------
+
+func TestXDPManager_RegisterMetrics_Success(t *testing.T) {
+	m := newTestXDPManager(t)
+	reg := prometheus.NewRegistry()
+	require.NoError(t, m.RegisterMetrics(reg))
+
+	// All three collectors must actually be present in the registry.
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	names := make(map[string]bool)
+	for _, mf := range mfs {
+		names[mf.GetName()] = true
+	}
+	assert.True(t, names["ebpf_guard_xdp_dropped_total"], "dropped_total must be registered")
+	assert.True(t, names["ebpf_guard_xdp_blocked_ips"], "blocked_ips gauge must be registered")
+	assert.True(t, names["ebpf_guard_xdp_blocked_ports"], "blocked_ports gauge must be registered")
+}
+
+func TestXDPManager_RegisterMetrics_DuplicateFails(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	m1 := newTestXDPManager(t)
+	require.NoError(t, m1.RegisterMetrics(reg), "first registration must succeed")
+
+	// A second manager exposes collectors with identical metric names; a shared
+	// registry must reject the duplicate with a real AlreadyRegisteredError.
+	m2 := newTestXDPManager(t)
+	err := m2.RegisterMetrics(reg)
+	require.Error(t, err, "duplicate metric registration must fail")
+
+	var are prometheus.AlreadyRegisteredError
+	assert.True(t, errors.As(err, &are),
+		"error must be a Prometheus AlreadyRegisteredError, got %T: %v", err, err)
+}
+
+// ---------------------------------------------------------------------------
+// isMapKeyNotFound — exact error-classification unit test
+// ---------------------------------------------------------------------------
+
+func TestIsMapKeyNotFound(t *testing.T) {
+	assert.True(t, isMapKeyNotFound(ebpf.ErrKeyNotExist),
+		"ErrKeyNotExist must be classified as key-not-found")
+	assert.True(t, isMapKeyNotFound(fmtWrap(ebpf.ErrKeyNotExist)),
+		"a wrapped ErrKeyNotExist must still be classified as key-not-found")
+	assert.False(t, isMapKeyNotFound(errors.New("some other error")),
+		"unrelated errors must not be classified as key-not-found")
+	assert.False(t, isMapKeyNotFound(nil), "nil must not be classified as key-not-found")
+}
+
+// fmtWrap wraps an error so we can assert errors.Is traversal in isMapKeyNotFound.
+func fmtWrap(err error) error {
+	return errWrapper{err}
+}
+
+type errWrapper struct{ err error }
+
+func (e errWrapper) Error() string { return "wrapped: " + e.err.Error() }
+func (e errWrapper) Unwrap() error { return e.err }
+
+// ---------------------------------------------------------------------------
+// Close — idempotency on a never-loaded manager (objs/xdpLink nil)
+// ---------------------------------------------------------------------------
+
+func TestXDPManager_Close_Idempotent_NeverLoaded(t *testing.T) {
+	m := newTestXDPManager(t)
+	require.Nil(t, m.objs)
+	require.Nil(t, m.xdpLink)
+
+	// First close on a never-loaded manager is a clean no-op.
+	require.NoError(t, m.Close())
+	assert.False(t, m.IsLoaded())
+
+	// Second close must not panic on already-nil fields and must return nil.
+	require.NoError(t, m.Close())
+	assert.False(t, m.IsLoaded())
 }

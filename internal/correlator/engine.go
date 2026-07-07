@@ -994,6 +994,14 @@ func (ce *CorrelationEngine) DrainEnforceQueue(ctx context.Context) {
 // every generated alert lands in the pending buffer before Flush is called.
 // Returns ctx.Err() if the deadline expires before the queue is empty.
 func (ce *CorrelationEngine) Drain(ctx context.Context) error {
+	// Fast path: an already-expired context must always report its own error,
+	// never a false "success". Without this check, an empty regoWg makes done
+	// close near-instantly, racing ctx.Done() in the select below — both ready
+	// at once is a coin flip, so a caller that cancels before calling Drain
+	// could non-deterministically get a nil error.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	done := make(chan struct{})
 	go func() {
 		ce.regoWg.Wait()

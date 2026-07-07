@@ -112,7 +112,7 @@ func TestEventSpec_Build_SyscallMissingBlock(t *testing.T) {
 
 func TestEventSpec_Build_BadIP(t *testing.T) {
 	spec := EventSpec{
-		Type: "network",
+		Type:    "network",
 		Network: &NetworkSpec{DstIP: "not-an-ip", Dport: 80},
 	}
 	_, err := spec.Build()
@@ -347,6 +347,51 @@ func TestTAPWriter(t *testing.T) {
 // JUnit XML output
 // ─────────────────────────────────────────────────────────────────────────────
 
+func TestTAPWriter_FailureWithError(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewTAPWriter(&buf)
+	w.Plan(1)
+	w.WriteResult(Result{Suite: "demo", Name: "bad spec", Passed: false, Error: "build event: boom"})
+
+	out := buf.String()
+	assert.Contains(t, out, "not ok 1 - demo: bad spec")
+	assert.Contains(t, out, "# error: build event: boom")
+}
+
+func TestTAPWriter_FailureWithMatchedIDs(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewTAPWriter(&buf)
+	w.Plan(1)
+	w.WriteResult(Result{
+		Suite: "demo", Name: "unexpected alert", Passed: false,
+		Expected: ExpectNoAlert, Got: ExpectAlert, MatchedIDs: []string{"rule_a", "rule_b"},
+	})
+
+	out := buf.String()
+	assert.Contains(t, out, "# matched rules: rule_a, rule_b")
+}
+
+func TestWriteJUnit_FailureWithError(t *testing.T) {
+	results := []Result{
+		{Suite: "demo", Name: "bad spec", Passed: false, Error: "build event: boom"},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, WriteJUnit(&buf, results))
+	assert.Contains(t, buf.String(), "build event: boom")
+}
+
+func TestWriteJUnit_FailureWithMatchedIDs(t *testing.T) {
+	results := []Result{
+		{
+			Suite: "demo", Name: "unexpected alert", Passed: false,
+			Expected: ExpectNoAlert, Got: ExpectAlert, MatchedIDs: []string{"rule_a", "rule_b"},
+		},
+	}
+	var buf bytes.Buffer
+	require.NoError(t, WriteJUnit(&buf, results))
+	assert.Contains(t, buf.String(), "matched rules: rule_a, rule_b")
+}
+
 func TestWriteJUnit(t *testing.T) {
 	results := []Result{
 		{Suite: "demo", Name: "passes", Passed: true, Expected: ExpectAlert, Got: ExpectAlert},
@@ -383,10 +428,10 @@ func TestRunner_RealRuleEngine(t *testing.T) {
 				ExpectRuleID: "proc_inject_ptrace",
 			},
 			{
-				Name:         "memfd_create fires",
-				Event:        EventSpec{Type: "syscall", Syscall: &SyscallSpec{NR: 319}},
-				Expect:       ExpectAlert,
-				ExpectRuleID: "proc_inject_memfd_create",
+				Name:           "memfd_create fires",
+				Event:          EventSpec{Type: "syscall", Syscall: &SyscallSpec{NR: 319}},
+				Expect:         ExpectAlert,
+				ExpectRuleID:   "proc_inject_memfd_create",
 				ExpectSeverity: "critical",
 			},
 			{

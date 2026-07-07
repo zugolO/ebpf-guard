@@ -27,6 +27,23 @@ var (
 	)
 )
 
+// These are overridden in tests to point at fixture directories instead of
+// real system paths.
+var (
+	ldPreloadPath = "/etc/ld.so.preload"
+	cronDirs      = []string{
+		"/etc/cron.d",
+		"/etc/cron.daily",
+		"/etc/cron.hourly",
+		"/etc/cron.weekly",
+		"/etc/cron.monthly",
+		"/var/spool/cron",
+		"/var/spool/cron/crontabs",
+	}
+	rootHomeDir = "/root"
+	procRootDir = "/proc"
+)
+
 // Finding represents a single integrity check finding.
 type Finding struct {
 	Check   string
@@ -110,7 +127,7 @@ func (s *Scanner) Scan() []Finding {
 
 // checkLDPreload checks /etc/ld.so.preload for entries (LD_PRELOAD hijack technique).
 func (s *Scanner) checkLDPreload() {
-	const path = "/etc/ld.so.preload"
+	path := ldPreloadPath
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -146,16 +163,6 @@ func (s *Scanner) checkLDPreload() {
 
 // checkCronDirs checks cron directories for recently modified files.
 func (s *Scanner) checkCronDirs() {
-	cronDirs := []string{
-		"/etc/cron.d",
-		"/etc/cron.daily",
-		"/etc/cron.hourly",
-		"/etc/cron.weekly",
-		"/etc/cron.monthly",
-		"/var/spool/cron",
-		"/var/spool/cron/crontabs",
-	}
-
 	cutoff := time.Now().Add(-s.checkWindow)
 
 	for _, dir := range cronDirs {
@@ -194,7 +201,7 @@ func (s *Scanner) checkCronDirs() {
 
 // checkRootShellConfigs checks root's shell config files for recent modifications.
 func (s *Scanner) checkRootShellConfigs() {
-	rootHome := "/root"
+	rootHome := rootHomeDir
 
 	// Check if we're running as root or can access /root
 	if _, err := os.Stat(rootHome); err != nil {
@@ -253,7 +260,7 @@ func (s *Scanner) checkRootShellConfigs() {
 // checkAnonymousExecRegions checks /proc/*/maps for anonymous executable regions.
 // These can indicate shellcode injection or memory-resident malware.
 func (s *Scanner) checkAnonymousExecRegions() {
-	procDir := "/proc"
+	procDir := procRootDir
 
 	entries, err := os.ReadDir(procDir)
 	if err != nil {

@@ -5,6 +5,7 @@ package drift
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -59,6 +60,21 @@ func (s *ImageSnapshotter) SnapshotFromPID(containerID string, pid uint32) *Imag
 		return m
 	}
 
+	s.walkLowerDirs(m, lowerDirs)
+
+	s.logger.Info("drift: image manifest snapshot complete",
+		slog.String("container_id", containerID),
+		slog.Int("exec_paths", len(m.ExecPaths)),
+		slog.Int("total_files", m.TotalFiles),
+	)
+	return m
+}
+
+// walkLowerDirs walks each overlayfs lower directory, recording every regular,
+// non-symlink file with an executable bit set into m.ExecPaths. Split out from
+// SnapshotFromPID so the walk itself can be exercised with real temp
+// directories in tests, independent of the container's mount namespace.
+func (s *ImageSnapshotter) walkLowerDirs(m *ImageManifest, lowerDirs []string) {
 	for _, dir := range lowerDirs {
 		walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
@@ -86,13 +102,6 @@ func (s *ImageSnapshotter) SnapshotFromPID(containerID string, pid uint32) *Imag
 				slog.Any("error", walkErr))
 		}
 	}
-
-	s.logger.Info("drift: image manifest snapshot complete",
-		slog.String("container_id", containerID),
-		slog.Int("exec_paths", len(m.ExecPaths)),
-		slog.Int("total_files", m.TotalFiles),
-	)
-	return m
 }
 
 // readOverlayLowerDirs reads /proc/[pid]/mountinfo and extracts the lowerdir
@@ -104,11 +113,18 @@ func readOverlayLowerDirs(pid uint32) ([]string, error) {
 		return nil, err
 	}
 	defer mi.Close()
+	return parseOverlayLowerDirs(mi)
+}
 
+// parseOverlayLowerDirs scans mountinfo content for overlay mounts and
+// returns their deduplicated, existing lowerdir paths. Split out from
+// readOverlayLowerDirs so the parsing logic can be tested against synthetic
+// mountinfo content instead of requiring a real overlayfs mount.
+func parseOverlayLowerDirs(mountinfo io.Reader) ([]string, error) {
 	seen := make(map[string]struct{})
 	var dirs []string
 
-	scanner := bufio.NewScanner(mi)
+	scanner := bufio.NewScanner(mountinfo)
 	for scanner.Scan() {
 		line := scanner.Text()
 		dir, ok := extractOverlayLowerDir(line)
@@ -140,50 +156,36 @@ func readOverlayLowerDirs(pid uint32) ([]string, error) {
 // extractOverlayLowerDir parses a mountinfo line and returns the lowerdir
 // value if it is an overlay filesystem mount.
 //
-// mountinfo format (7.2.5 procfs manpage):
+// mountinfo format (procfs(5)):
 //
-//	36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,noatime
-//	   (1)(2)(3)  (4)   (5)  (6)    (7)    (8) (9)  (10)        (11)
+//	36 35 98:0 / /mnt rw,noatime master:1 - ext3 /dev/root rw,noatime
+//	(1)(2) (3) (4)(5)     (6)      (7)   (8)(9)     (10)       (11)
 //
-// We look for filesystem type "overlay" at field 9 (the separator is "-" at field 7).
+// Fields 7+ are zero or more optional fields, terminated by a literal "-"
+// separator token. The lowerdir= option lives in the super options, i.e. the
+// third token after the separator (fs type, mount source, super options) —
+// NOT in the pre-separator mount options field (which only carries VFS-level
+// flags like "rw,relatime" for overlay mounts).
 func extractOverlayLowerDir(line string) (string, bool) {
-	const (
-		fieldMountOptions = 6 // 6th field (1-indexed: 5→index 4)
-		sepField          = 7 // separator " - " field
-		fsTypeField       = 8 // filesystem type after separator
-	)
+	fields := strings.Fields(line)
 
-	// Find separator " - ".
-	sepIdx := 0
-	dashCount := 0
-	for i, ch := range line {
-		if ch == ' ' {
-			dashCount++
-			if dashCount == sepField-1 {
-				sepIdx = i
-				break
-			}
+	sepIdx := -1
+	for i, f := range fields {
+		if f == "-" {
+			sepIdx = i
+			break
 		}
 	}
-	if sepIdx == 0 || sepIdx+4 >= len(line) {
+	// Need at least "- fstype source superopts" after the separator.
+	if sepIdx < 0 || sepIdx+3 >= len(fields) {
+		return "", false
+	}
+	if fields[sepIdx+1] != "overlay" {
 		return "", false
 	}
 
-	// After the separator, the next space-delimited token is the fs type.
-	afterSep := line[sepIdx+1:]
-	parts := strings.Fields(afterSep)
-	if len(parts) < 2 || parts[0] != "-" || parts[1] != "overlay" {
-		return "", false
-	}
-
-	// Parse mount options from the 6th field.
-	fields := strings.Fields(line[:sepIdx])
-	if len(fields) < fieldMountOptions-2 {
-		return "", false
-	}
-
-	opts := fields[len(fields)-3] // mount options are field 6
-	for _, opt := range strings.Split(opts, ",") {
+	superOpts := fields[sepIdx+3]
+	for _, opt := range strings.Split(superOpts, ",") {
 		if strings.HasPrefix(opt, "lowerdir=") {
 			return strings.TrimPrefix(opt, "lowerdir="), true
 		}

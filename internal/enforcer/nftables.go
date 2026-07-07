@@ -39,6 +39,8 @@ type NFTablesManager struct {
 	mu sync.RWMutex
 	// dryRun mode logs actions without applying rules
 	dryRun bool
+	// tableName is the configured nftables table name (default: "ebpf-guard").
+	tableName string
 }
 
 // NFTablesConfig configures the nftables manager.
@@ -62,6 +64,7 @@ func NewNFTablesManager(logger *slog.Logger, cfg NFTablesConfig) (*NFTablesManag
 		blockedIPs:     make(map[string]struct{}),
 		blockedCgroups: make(map[uint64]string),
 		dryRun:         cfg.DryRun,
+		tableName:      cfg.TableName,
 	}
 
 	if m.dryRun {
@@ -98,7 +101,7 @@ func (m *NFTablesManager) initialize() error {
 
 	var existingTable *nftables.Table
 	for _, t := range tables {
-		if t.Name == "ebpf-guard" && t.Family == nftables.TableFamilyINet {
+		if t.Name == m.tableName && t.Family == nftables.TableFamilyINet {
 			existingTable = t
 			break
 		}
@@ -121,7 +124,7 @@ func (m *NFTablesManager) initialize() error {
 		// Create new inet table (works for both IPv4 and IPv6)
 		m.table = m.conn.AddTable(&nftables.Table{
 			Family: nftables.TableFamilyINet,
-			Name:   "ebpf-guard",
+			Name:   m.tableName,
 		})
 
 		// Create output chain
@@ -627,21 +630,39 @@ func (m *NFTablesManager) isUIDRule(rule *nftables.Rule, uid uint32) bool {
 }
 
 // isIPRule checks if a rule matches a specific IP.
+// The rule's payload data is stored in the narrowest form for its address
+// family (4 bytes for IPv4, 16 for IPv6 — see BlockIP), while net.ParseIP
+// always returns a 16-byte slice for dotted-decimal input. ip is normalised
+// to the same width as cmp.Data before comparing, otherwise an IPv4 rule's
+// 4-byte payload would never match ip's 16-byte form and UnblockIP would
+// silently fail to find (and thus never delete) the kernel-side rule.
 func (m *NFTablesManager) isIPRule(rule *nftables.Rule, ip net.IP) bool {
 	for _, e := range rule.Exprs {
-		if cmp, ok := e.(*expr.Cmp); ok {
-			if len(cmp.Data) == len(ip) {
-				match := true
-				for i := range cmp.Data {
-					if cmp.Data[i] != ip[i] {
-						match = false
-						break
-					}
-				}
-				if match {
-					return true
-				}
+		cmp, ok := e.(*expr.Cmp)
+		if !ok {
+			continue
+		}
+		var candidate net.IP
+		switch len(cmp.Data) {
+		case net.IPv4len:
+			candidate = ip.To4()
+		case net.IPv6len:
+			candidate = ip.To16()
+		default:
+			continue
+		}
+		if candidate == nil {
+			continue
+		}
+		match := true
+		for i := range cmp.Data {
+			if cmp.Data[i] != candidate[i] {
+				match = false
+				break
 			}
+		}
+		if match {
+			return true
 		}
 	}
 	return false

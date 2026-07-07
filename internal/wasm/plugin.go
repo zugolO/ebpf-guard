@@ -49,6 +49,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 
@@ -112,7 +113,7 @@ func (p *Plugin) Evaluate(ctx context.Context, eventJSON []byte) (EvalResult, er
 	defer mod.Close(ctx)
 
 	mem := mod.Memory()
-	if mem == nil {
+	if isNilMemory(mem) {
 		return EvalResult{}, fmt.Errorf("plugin %q: no exported memory", p.meta.ID)
 	}
 
@@ -158,6 +159,20 @@ func (p *Plugin) Evaluate(ctx context.Context, eventJSON []byte) (EvalResult, er
 	}
 
 	return p.readAlert(ctx, mod), nil
+}
+
+// isNilMemory reports whether mem is unset. A module with no memory section
+// yields a typed-nil *wasm.MemoryInstance from mod.Memory(); boxed into the
+// api.Memory interface, that value compares unequal to a bare nil (the
+// interface itself has a concrete type), so a plain "mem == nil" check never
+// fires and a subsequent mem.Write/Read call panics. reflect catches the
+// nil pointer regardless of interface boxing.
+func isNilMemory(mem api.Memory) bool {
+	if mem == nil {
+		return true
+	}
+	v := reflect.ValueOf(mem)
+	return v.Kind() == reflect.Ptr && v.IsNil()
 }
 
 // readAlert reads the alert severity and message from the plugin's linear memory.

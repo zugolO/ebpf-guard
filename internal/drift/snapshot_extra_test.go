@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSplitLowerDirs(t *testing.T) {
@@ -24,10 +25,18 @@ func TestExtractOverlayLowerDir(t *testing.T) {
 	_, ok = extractOverlayLowerDir("not a mountinfo line")
 	assert.False(t, ok)
 
-	// Overlay mount whose 6th field carries the lowerdir option.
+	// Real overlay mount, no optional fields (as observed from an actual
+	// kernel mount): lowerdir lives in the super options, after the
+	// "- overlay overlay" separator/fstype/source triplet.
 	dir, ok := extractOverlayLowerDir(
-		"36 35 0:50 / /merged rw,lowerdir=/l1:/l2 shared:1 master:2 - overlay overlay rw")
-	if ok {
-		assert.Equal(t, "/l1:/l2", dir)
-	}
+		"46 37 0:36 / /merged rw,relatime - overlay overlay rw,lowerdir=/l1:/l2,upperdir=/u,workdir=/w")
+	require.True(t, ok)
+	assert.Equal(t, "/l1:/l2", dir)
+
+	// Real overlay mount WITH optional peer-group fields (common for
+	// shared/slave propagation, e.g. under Docker's overlay2 driver).
+	dir, ok = extractOverlayLowerDir(
+		"46 37 0:36 / /merged rw,relatime shared:1 master:2 - overlay overlay rw,lowerdir=/a:/b,upperdir=/u,workdir=/w")
+	require.True(t, ok)
+	assert.Equal(t, "/a:/b", dir)
 }

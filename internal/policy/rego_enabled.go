@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/open-policy-agent/opa/rego"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // PolicyDecision represents the result of evaluating an alert against Rego policies.
@@ -255,7 +255,7 @@ func (re *RegoEngine) Evaluate(ctx context.Context, alert types.Alert) ([]Policy
 		return nil, fmt.Errorf("rego eval: %w", err)
 	}
 
-	if fn, ok := re.evalDuration.Load().(DurationObserver); ok {
+	if fn, ok := re.evalDuration.Load().(DurationObserver); ok && fn != nil {
 		fn(time.Since(start))
 	}
 
@@ -304,15 +304,15 @@ func (re *RegoEngine) Evaluate(ctx context.Context, alert types.Alert) ([]Policy
 // alertToInput converts an Alert to a map for Rego input.
 func alertToInput(alert types.Alert) map[string]interface{} {
 	return map[string]interface{}{
-		"id":       alert.ID,
-		"rule_id":  alert.RuleID,
+		"id":        alert.ID,
+		"rule_id":   alert.RuleID,
 		"rule_name": alert.RuleName,
-		"severity": string(alert.Severity),
-		"pid":      alert.PID,
-		"comm":     alert.Comm,
-		"message":  alert.Message,
-		"details":  alert.Details,
-		"trace_id": alert.TraceID,
+		"severity":  string(alert.Severity),
+		"pid":       alert.PID,
+		"comm":      alert.Comm,
+		"message":   alert.Message,
+		"details":   alert.Details,
+		"trace_id":  alert.TraceID,
 		"enrichment": map[string]interface{}{
 			"pod_name":     alert.Enrichment.PodName,
 			"namespace":    alert.Enrichment.Namespace,

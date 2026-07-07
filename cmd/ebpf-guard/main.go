@@ -1718,14 +1718,19 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// writeTokenFile writes auto-generated tokens to /run/ebpf-guard/token
+// tokenFileDir is the directory writeTokenFile writes the generated-token
+// file into. It is a var (not a const) so tests can point it at a temp
+// directory instead of the real /run/ebpf-guard.
+var tokenFileDir = "/run/ebpf-guard"
+
+// writeTokenFile writes auto-generated tokens to <tokenFileDir>/token
 // with mode 0600, so operators can retrieve the credentials.
 // If no tokens are auto-generated (both are empty), this is a no-op.
 func writeTokenFile(adminToken, viewerToken string) error {
 	if adminToken == "" && viewerToken == "" {
 		return nil
 	}
-	tokenDir := "/run/ebpf-guard"
+	tokenDir := tokenFileDir
 	tokenPath := tokenDir + "/token"
 	if err := os.MkdirAll(tokenDir, 0700); err != nil {
 		return fmt.Errorf("create %s: %w", tokenDir, err)
@@ -2485,6 +2490,13 @@ func runLearn(durationStr, outputDir, namespace, containerID, commFilter string,
 	fmt.Printf("Observing for %s — press Ctrl+C to stop early and export now.\n\n", dur)
 	snap := session.Run(ctx, eventCh)
 
+	// session.Run returns on its own deadline timer without cancelling ctx,
+	// so collectors' Start loops (which only exit on ctx.Done()) are still
+	// running here. Cancel before Close(): SyntheticCollector.Close blocks on
+	// its internal "stopped" channel, which only closes once Start observes
+	// ctx.Done() — without this, Close() (and thus the whole command) would
+	// hang forever after "session complete".
+	cancel()
 	for _, c := range collectors {
 		_ = c.Close()
 	}

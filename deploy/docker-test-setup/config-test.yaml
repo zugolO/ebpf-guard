@@ -37,7 +37,7 @@ enforcement:
   audit_log: "/var/log/ebpf-guard/audit.jsonl"
 
 alerting:
-  enabled: true
+  enabled: false
   alertmanager:
     url: ""
 

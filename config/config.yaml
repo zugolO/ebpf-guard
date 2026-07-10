@@ -383,3 +383,54 @@ simple_mode:
     - init
     - kubelet
     - containerd
+
+# ── AI-agent sandbox (issue #255) ───────────────────────────────────────────
+# ebpf-guard's second usage profile: deny-by-default containment of an
+# autonomous AI/coding agent (Claude Code, Aider, an in-cluster agent Pod, ...).
+# The same collector → correlator → enforcer → LSM pipeline, run with an
+# inverted, positive (allow-known-good) policy scoped to the agent's process
+# tree / cgroup. Pair with the rules/ai-agent/ai-agent.yaml semantic detection ruleset.
+#
+# audit-first: leave mode "audit" until you have confirmed the allow-lists cover
+# your agent's legitimate work, then switch to "enforce". On kernels without BPF
+# LSM (< 5.7 / no CONFIG_BPF_LSM) enforce degrades to audit with a startup log.
+ai_sandbox:
+  enabled: false                       # Enable AI-agent sandbox evaluation
+  mode: audit                          # audit (log only) | enforce (deny -EPERM)
+  rules_path: rules/ai-agent/ai-agent.yaml      # Semantic containment ruleset
+  audit_log: ""                        # Dedicated JSONL sink for sandbox_audit/sandbox_deny (empty: still via /alerts + Prometheus)
+  dns_refresh_interval: 60s            # Re-resolve allowed_domains → egress allow-list (0 disables)
+  dns_pin_ttl: 0s                      # Keep a resolved IP pinned this long after last seen (0: 4×dns_refresh_interval); stops round-robin A records from flapping egress
+  selector:
+    kube_label: "ebpf-guard.io/sandbox-profile"  # Pod label → profile name
+    default_profile: ""                # Profile for `ebpf-guard run` / unlabelled targets
+  profiles:                            # Positive allow-policies, keyed by name
+    - name: ai-agent
+      allowed_exec:                    # Absolute path prefixes the agent may exec
+        - "/usr/bin/"                  # (must NOT overlap allowed_write_paths, or
+        - "/bin/"                      #  the profile is rejected at load — a
+        - "/usr/local/bin/"            #  writable+executable dir defeats exec control)
+      allowed_exec_pins:               # Pin trusted binaries to a content hash (#225)
+        # - path:   "/usr/bin/python3"
+        #   sha256: "<64-hex SHA-256 of the trusted build>"
+      allowed_read_paths:              # Path prefixes openable for read
+        - "/workspace/"
+        - "/usr/"
+        - "/lib/"
+        - "/etc/ssl/"
+      allowed_write_paths:             # Path prefixes openable for write (keep
+        - "/workspace/scratch/"        #  these OUT of allowed_exec — never writable+exec)
+        - "/tmp/"
+      denied_paths:                    # Always denied (defence-in-depth)
+        - "/root/.ssh/"
+        - "/home/"
+        - "/.aws/"
+        - "/.config/gcloud/"
+      allowed_egress_cidrs:            # Destination CIDRs the agent may reach
+        - "140.82.112.0/20"            # github.com
+        - "151.101.0.0/16"            # pypi / fastly
+      allowed_egress_ports: [443]      # Destination ports ([] = any)
+      allowed_domains:                 # DNS suffixes the agent may resolve
+        - "github.com"
+        - "pypi.org"
+        - "registry.npmjs.org"

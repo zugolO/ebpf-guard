@@ -40,6 +40,192 @@ func TestValidateConfig_Valid(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_AISandbox(t *testing.T) {
+	validProfile := AISandboxProfile{
+		Name:               "ai-agent",
+		AllowedExec:        []string{"/usr/bin/"},
+		AllowedReadPaths:   []string{"/workspace/"},
+		AllowedEgressCIDRs: []string{"140.82.112.0/20"},
+		AllowedEgressPorts: []uint16{443},
+		AllowedDomains:     []string{"github.com"},
+	}
+
+	t.Run("disabled skips validation", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: false, Mode: "nonsense"}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("disabled sandbox should not be validated, got: %v", err)
+		}
+	})
+
+	t.Run("valid enforce profile", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{
+			Enabled:  true,
+			Mode:     "enforce",
+			Profiles: []AISandboxProfile{validProfile},
+			Selector: AISandboxSelector{DefaultProfile: "ai-agent"},
+		}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("expected valid, got: %v", err)
+		}
+	})
+
+	t.Run("invalid mode", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "block", Profiles: []AISandboxProfile{validProfile}}
+		if err := ValidateConfig(cfg); err == nil {
+			t.Fatal("expected error for invalid mode")
+		}
+	})
+
+	t.Run("no profiles", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit"}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "at least one profile") {
+			t.Fatalf("expected missing-profile error, got: %v", err)
+		}
+	})
+
+	t.Run("empty profile name", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: ""}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "must not be empty") {
+			t.Fatalf("expected empty-name error, got: %v", err)
+		}
+	})
+
+	t.Run("duplicate profile name", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: "a"}, {Name: "a"}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "duplicate profile name") {
+			t.Fatalf("expected duplicate-name error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid egress CIDR", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: "a", AllowedEgressCIDRs: []string{"not-a-cidr"}}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "invalid CIDR") {
+			t.Fatalf("expected invalid-CIDR error, got: %v", err)
+		}
+	})
+
+	t.Run("dangling default_profile", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "audit",
+			Profiles: []AISandboxProfile{{Name: "a"}},
+			Selector: AISandboxSelector{DefaultProfile: "missing"}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "does not match any defined profile") {
+			t.Fatalf("expected dangling default_profile error, got: %v", err)
+		}
+	})
+
+	t.Run("writable exec prefix rejected", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/work/bin"},
+				AllowedWritePaths: []string{"/work"}, // /work/bin is under a writable dir
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "overlaps writable path") {
+			t.Fatalf("expected writable-exec overlap error, got: %v", err)
+		}
+	})
+
+	t.Run("exec prefix equal to write prefix rejected", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/opt/app/"},
+				AllowedWritePaths: []string{"/opt/app"},
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "overlaps writable path") {
+			t.Fatalf("expected overlap error for equal prefixes, got: %v", err)
+		}
+	})
+
+	t.Run("disjoint exec and write prefixes allowed", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/usr/bin", "/workspace"}, // note: /workspace not writable
+				AllowedWritePaths: []string{"/workspace/out"},
+			}}}
+		// /workspace is an ancestor of the writable /workspace/out -> overlap.
+		if err := ValidateConfig(cfg); err == nil {
+			t.Fatal("expected overlap: exec /workspace is an ancestor of writable /workspace/out")
+		}
+	})
+
+	t.Run("sibling prefixes not treated as overlap", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:              "a",
+				AllowedExec:       []string{"/usr/bin"},
+				AllowedWritePaths: []string{"/usr/binaries"}, // shares a string prefix, different dir
+			}}}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("siblings /usr/bin and /usr/binaries must not overlap, got: %v", err)
+		}
+	})
+
+	t.Run("valid exec pin", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:        "a",
+				AllowedExec: []string{"/usr/bin"},
+				AllowedExecPins: []AISandboxExecPin{{
+					Path:   "/usr/bin/python3",
+					Sha256: strings.Repeat("ab", 32),
+				}},
+			}}}
+		if err := ValidateConfig(cfg); err != nil {
+			t.Fatalf("expected valid exec pin, got: %v", err)
+		}
+	})
+
+	t.Run("exec pin not under allowed_exec", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:        "a",
+				AllowedExec: []string{"/usr/bin"},
+				AllowedExecPins: []AISandboxExecPin{{
+					Path:   "/opt/tool",
+					Sha256: strings.Repeat("ab", 32),
+				}},
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "not covered by any allowed_exec") {
+			t.Fatalf("expected coverage error, got: %v", err)
+		}
+	})
+
+	t.Run("exec pin bad digest", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.AISandbox = AISandboxConfig{Enabled: true, Mode: "enforce",
+			Profiles: []AISandboxProfile{{
+				Name:        "a",
+				AllowedExec: []string{"/usr/bin"},
+				AllowedExecPins: []AISandboxExecPin{{
+					Path:   "/usr/bin/python3",
+					Sha256: "not-a-digest",
+				}},
+			}}}
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "hex SHA-256") {
+			t.Fatalf("expected sha256 error, got: %v", err)
+		}
+	})
+}
+
 func TestValidateConfig_StoreBackend(t *testing.T) {
 	tests := []struct {
 		backend string

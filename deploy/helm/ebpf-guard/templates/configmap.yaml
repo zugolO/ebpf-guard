@@ -141,6 +141,16 @@ data:
       max_size_mb: 100
       include_rule_diffs: true
       {{- end }}
+
+    ai_sandbox:
+      enabled: {{ .Values.aiSandbox.enabled }}
+      mode: {{ .Values.aiSandbox.mode | quote }}
+      rules_path: {{ .Values.aiSandbox.rulesPath | quote }}
+      selector:
+        kube_label: {{ .Values.aiSandbox.selector.kubeLabel | quote }}
+        default_profile: {{ .Values.aiSandbox.selector.defaultProfile | quote }}
+      dns_refresh_interval: {{ .Values.aiSandbox.dnsRefreshInterval | quote }}
+      profiles: {{ .Values.aiSandbox.profiles | toYaml | nindent 8 }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -152,3 +162,7 @@ metadata:
 data:
   rules.yaml: |
     {{- .Values.rules.content | nindent 4 }}
+  {{- if .Values.aiSandbox.enabled }}
+  ai-agent.yaml: |
+    {{- .Values.rules.aiAgentContent | nindent 4 }}
+  {{- end }}

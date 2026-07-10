@@ -42,14 +42,26 @@
 #define EVENT_TYPE_IO_URING   14  /* io_uring activity (setup/enter) */
 #define EVENT_TYPE_BPF_PROGRAM 15 /* bpf() syscall: BPF_PROG_LOAD / BPF_MAP_CREATE */
 
-/* LSM hook identifiers — match struct lsm_audit_event.hook */
+/* LSM hook identifiers — match struct lsm_audit_event.hook and the
+ * lsmHookNames table in internal/collector/lsm.go */
 #define LSM_HOOK_FILE_OPEN       0
 #define LSM_HOOK_SOCKET_CONNECT  1
 #define LSM_HOOK_TASK_KILL       2
+#define LSM_HOOK_BPRM_CHECK      3
+/* Sprint 34.0 (issue #255, session 2) — in-kernel self-protection and
+ * escape-primitive containment for sandboxed cgroups. */
+#define LSM_HOOK_BPF             4  /* bpf() syscall from a sandboxed task */
+#define LSM_HOOK_PTRACE          5  /* ptrace of another task by a sandboxed task */
+#define LSM_HOOK_MOUNT           6  /* mount(2) by a sandboxed task */
+#define LSM_HOOK_MODULE          7  /* kernel module load by a sandboxed task */
+#define LSM_HOOK_URING           8  /* io_uring escape primitive by a sandboxed task (issue #277 P0) */
+#define LSM_HOOK_LINK            9  /* hardlink creation by a sandboxed task (issue #277 P1) */
 
 /* LSM audit action codes — match struct lsm_audit_event.action */
-#define LSM_ACTION_AUDIT  0  /* event allowed, audit-only */
-#define LSM_ACTION_DENY   1  /* event blocked (-EACCES/-EPERM) */
+#define LSM_ACTION_AUDIT         0  /* event allowed, audit-only */
+#define LSM_ACTION_DENY          1  /* event blocked (-EACCES/-EPERM) */
+#define LSM_ACTION_SANDBOX_AUDIT 2  /* ai_sandbox violation, audit mode (allowed) */
+#define LSM_ACTION_SANDBOX_DENY  3  /* ai_sandbox violation, enforce mode (blocked) */
 
 /* File operation codes - must match pkg/types/event.go */
 #define FILE_OP_OPEN  0
@@ -59,6 +71,11 @@
 /* Address family codes - must match pkg/types/event.go */
 #define AF_INET   2
 #define AF_INET6  10
+/* AF_UNIX is not modeled by the sandbox egress CIDR/port policy (no IP/port
+ * to match against); referenced so sandboxed connects on this (and any other
+ * unmodeled) family are denied by default instead of allowed by omission
+ * (issue #274 item 2). */
+#define AF_UNIX   1
 
 /* Maximum lengths for string fields */
 #define COMM_LEN      16

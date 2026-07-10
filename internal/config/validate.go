@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -184,6 +185,72 @@ func ValidateConfig(cfg *Config) error {
 			[]string{"warning", "critical"}))
 	}
 
+	// ── AI sandbox (issue #255) ──────────────────────────────────────────────
+	if cfg.AISandbox.Enabled {
+		add(validateOneOf("ai_sandbox.mode", cfg.AISandbox.Mode,
+			[]string{"audit", "enforce"}))
+		if len(cfg.AISandbox.Profiles) == 0 {
+			add(fmt.Errorf("ai_sandbox.profiles: at least one profile is required when ai_sandbox.enabled is true"))
+		}
+		seen := make(map[string]bool, len(cfg.AISandbox.Profiles))
+		for i, p := range cfg.AISandbox.Profiles {
+			if p.Name == "" {
+				add(fmt.Errorf("ai_sandbox.profiles[%d].name: must not be empty", i))
+			} else if seen[p.Name] {
+				add(fmt.Errorf("ai_sandbox.profiles[%d].name: duplicate profile name %q", i, p.Name))
+			}
+			seen[p.Name] = true
+			for j, c := range p.AllowedEgressCIDRs {
+				if _, _, err := net.ParseCIDR(c); err != nil {
+					add(fmt.Errorf("ai_sandbox.profiles[%d].allowed_egress_cidrs[%d]: invalid CIDR %q: %w", i, j, c, err))
+				}
+			}
+			// Port 0 is not a connectable destination; a 0 here is almost always a
+			// mis-indented YAML entry that would silently widen nothing.
+			for j, port := range p.AllowedEgressPorts {
+				if port == 0 {
+					add(fmt.Errorf("ai_sandbox.profiles[%d].allowed_egress_ports[%d]: port must be in [1, 65535], got 0", i, j))
+				}
+			}
+			// allowed_domains feed the DNS pinner; an empty/whitespace entry
+			// resolves to nothing and just hides a config typo.
+			for j, d := range p.AllowedDomains {
+				if strings.TrimSpace(d) == "" {
+					add(fmt.Errorf("ai_sandbox.profiles[%d].allowed_domains[%d]: must not be empty", i, j))
+				}
+			}
+			// A prefix that is both executable and writable defeats exec
+			// containment: the agent can drop a binary there and run it. Reject
+			// any allowed_exec prefix that overlaps a writable prefix.
+			for _, e := range prefixOverlaps(p.AllowedExec, p.AllowedWritePaths) {
+				add(fmt.Errorf("ai_sandbox.profiles[%d] (%q): allowed_exec %q overlaps writable path %q — "+
+					"a writable+executable location lets the agent drop and run a binary; "+
+					"make the exec location read-only or narrow the write path", i, p.Name, e.exec, e.write))
+			}
+			// Validate hash-pinned exec entries (issue #255 / #225).
+			pinSeen := make(map[string]bool, len(p.AllowedExecPins))
+			for j, pin := range p.AllowedExecPins {
+				where := fmt.Sprintf("ai_sandbox.profiles[%d].allowed_exec_pins[%d]", i, j)
+				switch {
+				case !strings.HasPrefix(pin.Path, "/"):
+					add(fmt.Errorf("%s.path: must be an absolute path, got %q", where, pin.Path))
+				case pinSeen[pin.Path]:
+					add(fmt.Errorf("%s.path: duplicate pinned path %q", where, pin.Path))
+				case !execCoveredByPrefix(pin.Path, p.AllowedExec):
+					add(fmt.Errorf("%s.path: %q is not covered by any allowed_exec prefix", where, pin.Path))
+				}
+				pinSeen[pin.Path] = true
+				if !isHexSHA256(pin.Sha256) {
+					add(fmt.Errorf("%s.sha256: must be a 64-character hex SHA-256, got %q", where, pin.Sha256))
+				}
+			}
+		}
+		// A referenced default_profile must resolve to a defined profile.
+		if dp := cfg.AISandbox.Selector.DefaultProfile; dp != "" && !seen[dp] {
+			add(fmt.Errorf("ai_sandbox.selector.default_profile: %q does not match any defined profile", dp))
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -216,6 +283,100 @@ func validateHTTPURL(field, rawURL string) error {
 		return fmt.Errorf("%s: URL scheme must be http or https, got %q", field, u.Scheme)
 	}
 	return nil
+}
+
+// execWriteOverlap records one overlapping (allowed_exec, allowed_write) pair.
+type execWriteOverlap struct{ exec, write string }
+
+// prefixOverlaps returns every (exec, write) pair whose path prefixes overlap —
+// i.e. one is a path-prefix of the other. Such a pair means a location is both
+// writable and executable, which lets a sandboxed agent write a binary and then
+// run it, defeating exec containment. Only absolute prefixes are considered;
+// relative/empty entries are ignored (they never take effect in the policy).
+func prefixOverlaps(execs, writes []string) []execWriteOverlap {
+	var out []execWriteOverlap
+	for _, e := range execs {
+		en := normalizePathPrefix(e)
+		if en == "" {
+			continue
+		}
+		for _, w := range writes {
+			wn := normalizePathPrefix(w)
+			if wn == "" {
+				continue
+			}
+			if pathPrefixOverlap(en, wn) {
+				out = append(out, execWriteOverlap{exec: e, write: w})
+			}
+		}
+	}
+	return out
+}
+
+// pathPrefixOverlap reports whether prefixes a and b overlap in the path tree:
+// they are equal, or one is an ancestor directory of the other. Both must be
+// normalised (absolute, cleaned, no trailing slash except root).
+func pathPrefixOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return isPathAncestor(a, b) || isPathAncestor(b, a)
+}
+
+// isPathAncestor reports whether ancestor is a proper path-prefix directory of p
+// (e.g. "/work" is an ancestor of "/work/bin" but not of "/workspace").
+func isPathAncestor(ancestor, p string) bool {
+	if ancestor == "/" {
+		return p != "/"
+	}
+	return strings.HasPrefix(p, ancestor+"/")
+}
+
+// execCoveredByPrefix reports whether the absolute path is covered by one of the
+// allowed_exec prefixes (equal to, or nested under, a prefix).
+func execCoveredByPrefix(p string, execs []string) bool {
+	pn := normalizePathPrefix(p)
+	if pn == "" {
+		return false
+	}
+	for _, e := range execs {
+		en := normalizePathPrefix(e)
+		if en == "" {
+			continue
+		}
+		if pn == en || isPathAncestor(en, pn) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizePathPrefix canonicalises a configured path prefix the same way the
+// sandbox policy compiler does: absolute, cleaned, no trailing slash (except
+// root). Empty / relative inputs return "".
+func normalizePathPrefix(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || !strings.HasPrefix(s, "/") {
+		return ""
+	}
+	// path.Clean removes any trailing slash (except for root) and collapses
+	// redundant separators, matching internal/sandbox.normalizePrefix.
+	return path.Clean(s)
+}
+
+// isHexSHA256 reports whether s is a 64-character lowercase-or-uppercase hex
+// string (a SHA-256 digest).
+func isHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // validateBindAddress checks that addr is a valid "host:port" or ":port" string.

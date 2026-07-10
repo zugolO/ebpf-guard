@@ -60,6 +60,28 @@ type DashboardStats struct {
 	RuleHits     map[string]int64 // ruleID → hit count
 	TopProcesses map[string]int64 // comm → event count
 	UpdatedAt    time.Time
+
+	// SandboxAudits/SandboxDenials count ai_sandbox decisions seen via the
+	// ai_agent_sandbox_audit / ai_agent_sandbox_deny alerts (issue #273).
+	SandboxAudits  int64
+	SandboxDenials int64
+	SandboxByHook  map[string]int64 // hook → decision count, both audit and deny
+}
+
+// SandboxDecision is one ai_sandbox audit/deny record surfaced for the live
+// "Sandbox" TUI panel (issue #273). It is derived from the ai_agent_sandbox_*
+// alert's Details map (populated in internal/correlator/rules.go) so it works
+// both locally and over the fleet-mode REST poller, where the alert's raw
+// Event field is not serialized.
+type SandboxDecision struct {
+	Timestamp time.Time
+	Hook      string
+	Decision  string // "sandbox_audit" or "sandbox_deny"
+	Enforced  bool
+	Path      string
+	ProfileID uint32
+	PID       uint32
+	Comm      string
 }
 
 // ─── Alert feed ─────────────────────────────────────────────────────────────
@@ -70,6 +92,9 @@ type Feed struct {
 	alerts []types.Alert
 	events []types.Event
 	stats  DashboardStats
+	// sandboxDecisions holds recent ai_sandbox audit/deny records for the
+	// "Sandbox" panel (issue #273), newest last, mirroring alerts/events.
+	sandboxDecisions []SandboxDecision
 	// agents tracks per-endpoint health in fleet mode (--fleet), keyed by
 	// endpoint URL. Empty in single-agent mode.
 	agents map[string]AgentStatus
@@ -83,8 +108,9 @@ type Feed struct {
 func NewFeed() *Feed {
 	return &Feed{
 		stats: DashboardStats{
-			RuleHits:     make(map[string]int64),
-			TopProcesses: make(map[string]int64),
+			RuleHits:      make(map[string]int64),
+			TopProcesses:  make(map[string]int64),
+			SandboxByHook: make(map[string]int64),
 		},
 	}
 }
@@ -102,6 +128,38 @@ func (f *Feed) PushAlert(a types.Alert) {
 	}
 	f.stats.RuleHits[a.RuleID]++
 	f.stats.UpdatedAt = time.Now()
+
+	// Surface ai_sandbox audit/deny alerts on the dedicated Sandbox panel
+	// (issue #273). Details is populated by rules.lsmAuditDetails for
+	// lsm_audit-typed events, so this works locally and over fleet polling.
+	if a.RuleID == "ai_agent_sandbox_audit" || a.RuleID == "ai_agent_sandbox_deny" {
+		decision, _ := a.Details["decision"].(string)
+		hook, _ := a.Details["hook"].(string)
+		if decision == "sandbox_deny" {
+			f.stats.SandboxDenials++
+		} else {
+			f.stats.SandboxAudits++
+		}
+		if hook != "" {
+			f.stats.SandboxByHook[hook]++
+		}
+		path, _ := a.Details["path"].(string)
+		enforced, _ := a.Details["enforced"].(bool)
+		var profileID uint32
+		if v, ok := a.Details["profile_id"].(uint32); ok {
+			profileID = v
+		}
+		f.sandboxDecisions = append(f.sandboxDecisions, SandboxDecision{
+			Timestamp: a.Timestamp,
+			Hook:      hook,
+			Decision:  decision,
+			Enforced:  enforced,
+			Path:      path,
+			ProfileID: profileID,
+			PID:       a.PID,
+			Comm:      a.Comm,
+		})
+	}
 }
 
 // PushEvent adds an event to the feed.
@@ -145,7 +203,26 @@ func (f *Feed) Snapshot(maxAlerts, maxEvents int) ([]types.Alert, []types.Event,
 	for k, v := range f.stats.TopProcesses {
 		stats.TopProcesses[k] = v
 	}
+	stats.SandboxByHook = make(map[string]int64, len(f.stats.SandboxByHook))
+	for k, v := range f.stats.SandboxByHook {
+		stats.SandboxByHook[k] = v
+	}
 	return aSnap, eSnap, stats
+}
+
+// SandboxDecisions returns a stable copy of the last max ai_sandbox audit/deny
+// decisions observed, newest last (issue #273).
+func (f *Feed) SandboxDecisions(max int) []SandboxDecision {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	d := f.sandboxDecisions
+	if len(d) > max {
+		d = d[len(d)-max:]
+	}
+	out := make([]SandboxDecision, len(d))
+	copy(out, d)
+	return out
 }
 
 // SetAgentStatus records (or updates) the health of one fleet agent. Used by
@@ -190,23 +267,25 @@ const (
 	TabRules
 	TabStatus
 	TabFleet
+	TabSandbox
 	tabCount
 )
 
-var tabNames = [tabCount]string{"Alerts", "Events", "Top Rules", "Status", "Fleet"}
+var tabNames = [tabCount]string{"Alerts", "Events", "Top Rules", "Status", "Fleet", "Sandbox"}
 
 // Model is the bubbletea model for the dashboard.
 type Model struct {
-	feed      *Feed
-	activeTab Tab
-	width     int
-	height    int
-	alerts    []types.Alert
-	events    []types.Event
-	stats     DashboardStats
-	agents    []AgentStatus
-	scrollTop int
-	paused    bool
+	feed             *Feed
+	activeTab        Tab
+	width            int
+	height           int
+	alerts           []types.Alert
+	events           []types.Event
+	stats            DashboardStats
+	agents           []AgentStatus
+	sandboxDecisions []SandboxDecision
+	scrollTop        int
+	paused           bool
 
 	// Event cursor and rule builder state.
 	evtCursor       int              // index into m.events (0 = newest)
@@ -249,6 +328,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.events = e
 			m.stats = s
 			m.agents = m.feed.AgentStatuses()
+			m.sandboxDecisions = m.feed.SandboxDecisions(100)
 		}
 		return m, tickCmd()
 
@@ -291,6 +371,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollTop = 0
 		case "5":
 			m.activeTab = TabFleet
+			m.scrollTop = 0
+		case "6":
+			m.activeTab = TabSandbox
 			m.scrollTop = 0
 		case "p":
 			m.paused = !m.paused
@@ -391,6 +474,8 @@ func (m Model) View() string {
 		content = m.renderStatus(contentHeight)
 	case TabFleet:
 		content = m.renderFleet(contentHeight)
+	case TabSandbox:
+		content = m.renderSandbox(contentHeight)
 	}
 	sb.WriteString(content)
 
@@ -635,6 +720,75 @@ func (m *Model) renderFleet(maxLines int) string {
 		if !a.Healthy && a.LastError != "" {
 			lines = append(lines, styleCritical.Render("      "+util.Truncate(a.LastError, 90)))
 		}
+	}
+
+	return renderScrollable(lines, m.scrollTop, maxLines)
+}
+
+// renderSandbox shows ai_sandbox activity (issue #273): decision totals by
+// mode and hook, and a live feed of the most recent audit/deny records. Backed
+// by ai_agent_sandbox_audit / ai_agent_sandbox_deny alerts, so it works both
+// locally and in --fleet mode.
+func (m *Model) renderSandbox(maxLines int) string {
+	total := m.stats.SandboxAudits + m.stats.SandboxDenials
+	if total == 0 {
+		lines := []string{
+			styleGood.Render("  ✓  No ai_sandbox activity observed yet"),
+			styleDim.Render("  (requires ai_sandbox to be enabled and #268's decision-forwarding pipeline)"),
+		}
+		return renderScrollable(lines, m.scrollTop, maxLines)
+	}
+
+	lines := []string{
+		styleHeader.Render("  AI-Sandbox Activity"),
+		"",
+		fmt.Sprintf("  %s  %s   %s  %s",
+			styleKey.Render("Audits (would-block):"), styleWarning.Render(fmt.Sprintf("%d", m.stats.SandboxAudits)),
+			styleKey.Render("Denials (blocked):"), styleCritical.Render(fmt.Sprintf("%d", m.stats.SandboxDenials))),
+		"",
+		styleHeader.Render("  By Hook"),
+		styleDim.Render("  " + strings.Repeat("─", 35)),
+	}
+
+	hookPairs := make([]kv, 0, len(m.stats.SandboxByHook))
+	for k, v := range m.stats.SandboxByHook {
+		hookPairs = append(hookPairs, kv{k, v})
+	}
+	for i := 0; i < len(hookPairs); i++ {
+		for j := i + 1; j < len(hookPairs); j++ {
+			if hookPairs[j].v > hookPairs[i].v {
+				hookPairs[i], hookPairs[j] = hookPairs[j], hookPairs[i]
+			}
+		}
+	}
+	for _, p := range hookPairs {
+		lines = append(lines, fmt.Sprintf("  %-20s  %d", styleValue.Render(p.k), p.v))
+	}
+
+	lines = append(lines,
+		"",
+		styleHeader.Render("  Recent Decisions"),
+		fmt.Sprintf("  %-8s  %-7s  %-13s  %-8s  %-6s  %s",
+			"TIME", "MODE", "HOOK", "PROFILE", "PID", "PATH/DEST"),
+		styleDim.Render("  "+strings.Repeat("─", 78)),
+	)
+
+	for i := len(m.sandboxDecisions) - 1; i >= 0; i-- {
+		d := m.sandboxDecisions[i]
+		modeStyle := styleWarning
+		modeLabel := "audit"
+		if d.Decision == "sandbox_deny" {
+			modeStyle = styleCritical
+			modeLabel = "deny"
+		}
+		lines = append(lines, fmt.Sprintf("  %-8s  %-7s  %-13s  %-8d  %-6d  %s",
+			d.Timestamp.Format("15:04:05"),
+			modeStyle.Render(modeLabel),
+			styleValue.Render(util.Truncate(d.Hook, 13)),
+			d.ProfileID,
+			d.PID,
+			styleValue.Render(util.Truncate(d.Path, 40)),
+		))
 	}
 
 	return renderScrollable(lines, m.scrollTop, maxLines)

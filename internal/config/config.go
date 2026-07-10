@@ -111,6 +111,11 @@ type Config struct {
 	// Detects and optionally blocks attempts by external processes to detach
 	// or modify our BPF programs/maps. Graceful no-op on kernel < 5.7.
 	SelfProtection SelfProtectionConfig `mapstructure:"self_protection"`
+
+	// AISandbox configures the AI-agent containment profile (issue #255) —
+	// the deny-by-default, allow-known-good usage profile that constrains what
+	// an autonomous AI/coding agent may do at runtime.
+	AISandbox AISandboxConfig `mapstructure:"ai_sandbox"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -1145,6 +1150,153 @@ type SelfProtectionConfig struct {
 	AlertSeverity string `mapstructure:"alert_severity"`
 }
 
+// AISandboxConfig configures the AI-agent containment profile (issue #255).
+//
+// ebpf-guard has two usage profiles over one engine: the default deny-known-bad
+// threat-detection profile, and this deny-by-default, allow-known-good profile
+// that constrains what a designated autonomous AI/coding agent process tree may
+// do at runtime (exec / file / network). This section holds the positive policy
+// MODEL and target selection; the semantic detection ruleset lives in
+// rules/ai-agent/ai-agent.yaml (RulesPath).
+//
+// Enforcement primitives (cgroup-scoped LSM allow maps, the bprm_check_security
+// exec hook, and the `ebpf-guard run` wrapper) are delivered by follow-up
+// sub-issues of #255. On kernels without BPF LSM support (< 5.7 or no
+// CONFIG_BPF_LSM), enforce mode gracefully degrades to audit-only with a clear
+// startup log; egress may still be constrained via the nftables fallback.
+type AISandboxConfig struct {
+	// Enabled activates AI-agent sandbox evaluation. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+
+	// Mode is the enforcement posture: "audit" (log violations only) or
+	// "enforce" (deny with -EPERM). audit-first is the safe default so an
+	// over-broad profile never bricks the agent. Default: "audit".
+	Mode string `mapstructure:"mode"`
+
+	// RulesPath is the semantic containment ruleset applied to sandboxed
+	// agents (cred-path reads, curl|sh pipelines, unexpected egress, ...).
+	// Default: "rules/ai-agent/ai-agent.yaml".
+	RulesPath string `mapstructure:"rules_path"`
+
+	// Selector chooses which processes fall under a sandbox profile.
+	Selector AISandboxSelector `mapstructure:"selector"`
+
+	// Profiles is the set of named containment profiles. The selector picks
+	// exactly one profile per sandboxed target by name.
+	Profiles []AISandboxProfile `mapstructure:"profiles"`
+
+	// DNSRefreshInterval is how often profiles' allowed_domains are re-resolved
+	// and their A/AAAA records reprogrammed into the egress allow-list (DNS-pinned
+	// egress). 0 disables DNS pinning and leaves egress to the static
+	// allowed_egress_cidrs only. Default: 60s when any profile lists domains.
+	DNSRefreshInterval time.Duration `mapstructure:"dns_refresh_interval"`
+
+	// DNSPinTTL is how long a resolved address stays pinned after it was last
+	// seen in a DNS reply. Large domains (github.com, CDNs, API endpoints) return
+	// a rotating subset of their A/AAAA records per query, so an address that is
+	// still live routinely drops out of the very next reply. Pinning a union of
+	// recently-seen addresses and evicting them on this TTL — rather than on
+	// absence from the latest reply — stops egress to an allowed_domains host from
+	// flapping across refreshes. 0 derives a default of 4×DNSRefreshInterval.
+	DNSPinTTL time.Duration `mapstructure:"dns_pin_ttl"`
+
+	// AuditLog is the path to a dedicated append-only JSONL sink for ai_sandbox
+	// decisions (sandbox_audit / sandbox_deny), independent of
+	// enforcement.audit_log (issue #268). Empty means no dedicated file: sandbox
+	// decisions still surface through the correlator (/api/v1/alerts) and
+	// Prometheus, and are written to enforcement.audit_log if that is configured.
+	AuditLog string `mapstructure:"audit_log"`
+}
+
+// AISandboxSelector chooses which processes are placed under a sandbox profile.
+type AISandboxSelector struct {
+	// KubeLabel is the pod label whose value names the profile to apply
+	// (e.g. "ebpf-guard.io/sandbox-profile"). The Kubernetes enricher resolves
+	// the matching pod's cgroup subtree. Empty disables label-based targeting.
+	KubeLabel string `mapstructure:"kube_label"`
+
+	// DefaultProfile is the profile name applied via `ebpf-guard run` when
+	// --profile is omitted, and as a fallback when a pod carries no recognised
+	// KubeLabel value.
+	DefaultProfile string `mapstructure:"default_profile"`
+}
+
+// AISandboxProfile is a positive (allow) policy for a sandboxed agent process
+// tree: deny-by-default, allow only what is listed. An empty allow list for a
+// dimension means "deny everything in that dimension" when Mode is "enforce".
+type AISandboxProfile struct {
+	// Name identifies the profile; referenced by the selector label value or
+	// DefaultProfile. Must be unique and non-empty.
+	Name string `mapstructure:"name"`
+
+	// AllowedExec lists absolute path prefixes the agent may exec. In enforce
+	// mode a downloaded/unknown binary outside these prefixes is denied at exec.
+	//
+	// Prefix matching alone cannot tell a legitimate binary from a malicious one
+	// dropped at the same path (a "dropped-binary exec"). Two mechanisms harden
+	// this: ValidateConfig rejects a profile whose allowed_exec prefix is also
+	// writable (a binary could then be swapped in place), and AllowedExecPins
+	// pins named binaries to a content hash.
+	AllowedExec []string `mapstructure:"allowed_exec"`
+
+	// AllowedExecPins pins specific exec paths to a content hash (issue #255,
+	// stitched with the #225 cosign exec allow-list). A pinned path may exec only
+	// when the binary's SHA-256 matches; a rebuilt or swapped binary at that path
+	// is denied even though the path is covered by AllowedExec. The #225 verifier
+	// populates these from cosign/Sigstore attestations; they may also be set
+	// statically to pin trusted interpreters/tools. Pinned paths must be absolute
+	// files (not prefixes) and must fall under an AllowedExec prefix.
+	AllowedExecPins []AISandboxExecPin `mapstructure:"allowed_exec_pins"`
+
+	// AllowedReadPaths lists path prefixes the agent may open for reading.
+	AllowedReadPaths []string `mapstructure:"allowed_read_paths"`
+
+	// AllowedWritePaths lists path prefixes the agent may open for writing.
+	AllowedWritePaths []string `mapstructure:"allowed_write_paths"`
+
+	// DeniedPaths lists path prefixes that are always denied even when covered
+	// by an allow entry — defence-in-depth for secrets (~/.ssh, ~/.aws, .env).
+	DeniedPaths []string `mapstructure:"denied_paths"`
+
+	// AllowedEgressCIDRs lists destination CIDRs the agent may connect to.
+	// Each entry must parse as a CIDR (e.g. "10.0.0.0/8", "93.184.216.0/24").
+	AllowedEgressCIDRs []string `mapstructure:"allowed_egress_cidrs"`
+
+	// AllowedEgressPorts lists destination TCP/UDP ports the agent may connect
+	// to. Empty means all ports are permitted (constrain via CIDR/domain).
+	AllowedEgressPorts []uint16 `mapstructure:"allowed_egress_ports"`
+
+	// AllowedDomains lists DNS domain suffixes the agent may resolve and reach
+	// (e.g. "github.com", "pypi.org"). A leading dot is optional. When DNS-pinned
+	// egress is active the resolver programs each domain's current A/AAAA records
+	// as /32 (or /128) entries into the profile's egress allow-list and refreshes
+	// them on the record TTL.
+	AllowedDomains []string `mapstructure:"allowed_domains"`
+
+	// AllowLoopback opts this profile in to unrestricted 127.0.0.0/8 / ::1
+	// egress. Defaults to false: loopback is a normal destination that must
+	// match AllowedEgressCIDRs (and AllowedEgressPorts, if set) like any other
+	// address. A blanket loopback exemption over-exposes every localhost-bound
+	// service on the node — e.g. `ebpf-guard run` isolates the child only by
+	// cgroup, sharing the host's loopback — so it must be explicitly requested
+	// (issue #274 item 3).
+	AllowLoopback bool `mapstructure:"allow_loopback"`
+}
+
+// AISandboxExecPin pins a single exec path to a content hash for a sandbox
+// profile (issue #255 / #225). Identity, not location, decides: the binary at
+// Path may exec only when its SHA-256 equals Sha256, closing the dropped-binary
+// gap that plain path-prefix allow-lists leave open.
+type AISandboxExecPin struct {
+	// Path is the absolute path of the pinned binary (an exact file, not a
+	// prefix). It must fall under one of the profile's allowed_exec prefixes.
+	Path string `mapstructure:"path"`
+
+	// Sha256 is the hex-encoded (64-char) SHA-256 of the binary's contents that
+	// is permitted to exec at Path. A mismatch is denied in enforce mode.
+	Sha256 string `mapstructure:"sha256"`
+}
+
 // EnforcementConfig holds enforcement settings.
 type EnforcementConfig struct {
 	// Enabled enables enforcement actions
@@ -2042,6 +2194,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("admission_webhook.tls_key_file", "")
 	v.SetDefault("admission_webhook.tls_auto_generate", false)
 	v.SetDefault("admission_webhook.webhook_path", "/admission")
+
+	// AI-agent sandbox defaults (issue #255) — disabled by default; audit-first
+	// so an over-broad profile can never brick the agent it wraps.
+	v.SetDefault("ai_sandbox.enabled", false)
+	v.SetDefault("ai_sandbox.mode", "audit")
+	v.SetDefault("ai_sandbox.rules_path", "rules/ai-agent/ai-agent.yaml")
+	v.SetDefault("ai_sandbox.selector.kube_label", "ebpf-guard.io/sandbox-profile")
+	v.SetDefault("ai_sandbox.selector.default_profile", "")
+	v.SetDefault("ai_sandbox.profiles", []AISandboxProfile{})
+	v.SetDefault("ai_sandbox.dns_refresh_interval", 60*time.Second)
+	v.SetDefault("ai_sandbox.audit_log", "")
 }
 
 // Get returns the current configuration (thread-safe).

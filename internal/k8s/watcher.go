@@ -37,6 +37,79 @@ type Watcher struct {
 	// lastSyncAt is the UnixNano timestamp of the last successful cache sync or
 	// pod event. Zero means the watcher has never completed its initial sync.
 	lastSyncAt atomic.Int64
+
+	// podHandlers are optional subscribers notified on every pod add/update/
+	// delete. Used by the ai_sandbox label controller to react to labelled pods.
+	handlerMu   sync.RWMutex
+	podHandlers []PodEventHandler
+}
+
+// PodEvent identifies the kind of pod lifecycle change delivered to handlers.
+type PodEvent int
+
+const (
+	PodAdded PodEvent = iota
+	PodUpdated
+	PodDeleted
+)
+
+// PodEventHandler is invoked (synchronously, off the informer goroutine's
+// handler call) for each pod lifecycle event with a snapshot PodInfo.
+type PodEventHandler func(evt PodEvent, info *PodInfo)
+
+// AddPodEventHandler registers h to receive pod lifecycle events. Safe to call
+// before Start; handlers must not block for long.
+func (w *Watcher) AddPodEventHandler(h PodEventHandler) {
+	w.handlerMu.Lock()
+	defer w.handlerMu.Unlock()
+	w.podHandlers = append(w.podHandlers, h)
+}
+
+func (w *Watcher) notifyHandlers(evt PodEvent, info *PodInfo) {
+	w.handlerMu.RLock()
+	handlers := w.podHandlers
+	w.handlerMu.RUnlock()
+	for _, h := range handlers {
+		h(evt, info)
+	}
+}
+
+// hasPodHandlers reports whether any PodEventHandler is registered. Callers use
+// this to skip building a PodInfo snapshot (copyMap of labels/annotations +
+// ContainerIDs slice) when nothing would consume it — with ai_sandbox off
+// (the default), onPodUpdate fires on every status heartbeat cluster-wide, so
+// this avoids continuous discarded allocation (issue #272).
+func (w *Watcher) hasPodHandlers() bool {
+	w.handlerMu.RLock()
+	defer w.handlerMu.RUnlock()
+	return len(w.podHandlers) > 0
+}
+
+// podInfoFromPod builds a PodInfo snapshot (labels, annotations, container IDs)
+// from a corev1.Pod, matching what updatePodCache stores.
+func podInfoFromPod(pod *corev1.Pod) *PodInfo {
+	info := &PodInfo{
+		Name:        pod.Name,
+		Namespace:   pod.Namespace,
+		UID:         string(pod.UID),
+		Labels:      copyMap(pod.Labels),
+		Annotations: copyMap(pod.Annotations),
+		NodeName:    pod.Spec.NodeName,
+	}
+	if pod.Status.StartTime != nil {
+		info.StartTime = pod.Status.StartTime.Time
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cid := normalizeContainerID(cs.ContainerID); cid != "" {
+			info.ContainerIDs = append(info.ContainerIDs, cid)
+		}
+	}
+	for _, is := range pod.Status.InitContainerStatuses {
+		if cid := normalizeContainerID(is.ContainerID); cid != "" {
+			info.ContainerIDs = append(info.ContainerIDs, cid)
+		}
+	}
+	return info
 }
 
 // PodInfo contains Kubernetes metadata for a pod.
@@ -48,6 +121,12 @@ type PodInfo struct {
 	Annotations map[string]string
 	ContainerIDs []string
 	NodeName    string
+	// StartTime is pod.Status.StartTime — when the kubelet began the pod's
+	// containers. Zero until the kubelet sets it. The SandboxController uses it
+	// to measure the unenforced startup window: the gap between a pod's
+	// containers starting and its cgroups being placed under the sandbox
+	// profile (issue #277 P1).
+	StartTime time.Time
 }
 
 // WatcherConfig holds configuration for the pod watcher.
@@ -266,6 +345,9 @@ func (w *Watcher) onPodAdd(obj interface{}) {
 
 	w.logger.Debug("pod added", "name", pod.Name, "namespace", pod.Namespace)
 	w.updatePodCache(pod)
+	if w.hasPodHandlers() {
+		w.notifyHandlers(PodAdded, podInfoFromPod(pod))
+	}
 	w.touchSyncAt()
 }
 
@@ -279,6 +361,9 @@ func (w *Watcher) onPodUpdate(oldObj, newObj interface{}) {
 
 	w.logger.Debug("pod updated", "name", newPod.Name, "namespace", newPod.Namespace)
 	w.updatePodCache(newPod)
+	if w.hasPodHandlers() {
+		w.notifyHandlers(PodUpdated, podInfoFromPod(newPod))
+	}
 	w.touchSyncAt()
 }
 
@@ -301,6 +386,9 @@ func (w *Watcher) onPodDelete(obj interface{}) {
 
 	w.logger.Debug("pod deleted", "name", pod.Name, "namespace", pod.Namespace)
 	w.removePodFromCache(pod)
+	if w.hasPodHandlers() {
+		w.notifyHandlers(PodDeleted, podInfoFromPod(pod))
+	}
 	w.touchSyncAt()
 }
 
@@ -339,6 +427,9 @@ func (w *Watcher) updatePodCache(pod *corev1.Pod) {
 		Labels:      copyMap(pod.Labels),
 		Annotations: copyMap(pod.Annotations),
 		NodeName:    pod.Spec.NodeName,
+	}
+	if pod.Status.StartTime != nil {
+		info.StartTime = pod.Status.StartTime.Time
 	}
 
 	// Extract container IDs

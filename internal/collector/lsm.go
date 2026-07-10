@@ -11,10 +11,11 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,26 +24,28 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
-// fnv32a returns the FNV-1a 32-bit hash of s. This must produce the same
-// output as the fnv32a() BPF helper in bpf/lsm.bpf.c so that paths added
-// via AddPathToBlocklist map correctly to what the kernel checks.
+// fnv32a returns the FNV-1a 32-bit hash of s, matching the fnv32a() BPF helper
+// in bpf/lsm.bpf.c, so that paths added via AddPathToBlocklist map correctly to
+// what the kernel checks. Delegates to the single shared implementation in
+// internal/util so this and internal/sandbox never diverge from each other or
+// from the kernel (issue #271).
 func fnv32a(s string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	return h.Sum32()
+	return util.FNV32aPath(s)
 }
 
 // lsmAuditEventRaw mirrors struct lsm_audit_event from bpf/common.h.
 // The struct is __attribute__((packed)), so fields are at fixed byte offsets with no padding.
 // Layout (107 bytes total):
-//   type(4) + timestamp_ns(8) + pid(4) + target_pid(4) + uid(4) +
-//   action(1) + hook(1) + sig(1) + comm(16) + path(64)
+//
+//	type(4) + timestamp_ns(8) + pid(4) + target_pid(4) + uid(4) +
+//	action(1) + hook(1) + sig(1) + comm(16) + path(64)
 type lsmAuditEventRaw struct {
 	Type      uint32
 	Timestamp uint64
@@ -58,7 +61,19 @@ type lsmAuditEventRaw struct {
 
 const lsmAuditEventSize = 4 + 8 + 4 + 4 + 4 + 1 + 1 + 1 + 16 + 64 // 107 bytes
 
-var lsmHookNames = [3]string{"file_open", "socket_connect", "task_kill"}
+var lsmHookNames = [10]string{
+	"file_open", "socket_connect", "task_kill", "bprm_check",
+	"bpf", "ptrace", "mount", "module", "uring", "link",
+}
+
+// LSM_HOOK_SOCKET_CONNECT and the ai_sandbox action codes, mirroring
+// bpf/common.h. Duplicated here (rather than imported) because these are C
+// #defines with no Go binding.
+const (
+	lsmHookSocketConnect  = 1
+	lsmActionSandboxAudit = 2
+	lsmActionSandboxDeny  = 3
+)
 
 // parseLSMAuditEventRaw deserialises a raw ring-buffer record into lsmAuditEventRaw.
 func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
@@ -66,14 +81,14 @@ func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
 		return lsmAuditEventRaw{}, fmt.Errorf("lsm_audit_event too short: %d < %d", len(raw), lsmAuditEventSize)
 	}
 	var e lsmAuditEventRaw
-	e.Type      = binary.LittleEndian.Uint32(raw[0:4])
+	e.Type = binary.LittleEndian.Uint32(raw[0:4])
 	e.Timestamp = binary.LittleEndian.Uint64(raw[4:12])
-	e.PID       = binary.LittleEndian.Uint32(raw[12:16])
+	e.PID = binary.LittleEndian.Uint32(raw[12:16])
 	e.TargetPID = binary.LittleEndian.Uint32(raw[16:20])
-	e.UID       = binary.LittleEndian.Uint32(raw[20:24])
-	e.Action    = raw[24]
-	e.Hook      = raw[25]
-	e.Sig       = raw[26]
+	e.UID = binary.LittleEndian.Uint32(raw[20:24])
+	e.Action = raw[24]
+	e.Hook = raw[25]
+	e.Sig = raw[26]
 	copy(e.Comm[:], raw[27:43])
 	copy(e.Path[:], raw[43:107])
 	return e, nil
@@ -85,22 +100,139 @@ func (e lsmAuditEventRaw) toAuditEntry() audit.Entry {
 	if int(e.Hook) < len(lsmHookNames) {
 		hookName = lsmHookNames[e.Hook]
 	}
+	// Action codes match LSM_ACTION_* in bpf/common.h:
+	//   0 audit-only, 1 deny, 2 ai_sandbox audit, 3 ai_sandbox deny.
 	action := "audit"
-	if e.Action == 1 { // LSM_ACTION_DENY
-		action = "deny"
+	rule := "lsm_audit"
+	enforced := false
+	switch e.Action {
+	case 1:
+		action, enforced = "deny", true
+	case 2:
+		action, rule = "sandbox_audit", "ai_sandbox"
+	case 3:
+		action, rule, enforced = "sandbox_deny", "ai_sandbox", true
 	}
+	path := nullTermString(e.Path[:])
+	if e.Hook == lsmHookSocketConnect && (e.Action == lsmActionSandboxAudit || e.Action == lsmActionSandboxDeny) {
+		// sandbox_emit() packs socket_connect violations as port(2, BE) + raw
+		// address bytes rather than a path string (see bpf/lsm.bpf.c); decode
+		// that instead of null-terminating it as text.
+		path = decodeSandboxAddr(e.Sig, e.Path[:])
+	}
+
 	return audit.Entry{
 		TS:        time.Now(),
 		Action:    action,
 		PID:       e.PID,
-		Rule:      "lsm_audit",
+		Rule:      rule,
 		Comm:      nullTermString(e.Comm[:]),
-		Enforced:  e.Action == 1,
+		Enforced:  enforced,
 		Hook:      hookName,
 		TargetPID: e.TargetPID,
-		Path:      nullTermString(e.Path[:]),
+		Path:      path,
 		UID:       e.UID,
 	}
+}
+
+// DecodeLSMAuditRecord decodes one raw lsm_events ring-buffer record into an
+// audit.Entry, reporting whether it is an ai_sandbox decision. It lets callers
+// outside this package (the `ebpf-guard run` wrapper) drain the sandbox
+// lsm_events buffer and write audit records without duplicating the wire format
+// (issue #268). Returns ok=false for a record that is not an LSM audit event.
+func DecodeLSMAuditRecord(raw []byte) (entry audit.Entry, sandbox, ok bool, err error) {
+	if len(raw) < 4 {
+		return audit.Entry{}, false, false, fmt.Errorf("lsm audit record too short (%d bytes)", len(raw))
+	}
+	if binary.LittleEndian.Uint32(raw[:4]) != uint32(types.EventLSMAudit) {
+		return audit.Entry{}, false, false, nil
+	}
+	ae, perr := parseLSMAuditEventRaw(raw)
+	if perr != nil {
+		return audit.Entry{}, false, false, perr
+	}
+	return ae.toAuditEntry(), ae.isSandboxAction(), true, nil
+}
+
+// isSandboxAction reports whether the action code is an ai_sandbox decision
+// (sandbox_audit / sandbox_deny) rather than an enforcer file/socket/task block.
+func (e lsmAuditEventRaw) isSandboxAction() bool {
+	return e.Action == lsmActionSandboxAudit || e.Action == lsmActionSandboxDeny
+}
+
+// toTypesEvent converts a parsed LSM audit event into a types.Event carrying an
+// LSMAuditEvent, so ai_sandbox decisions can flow through the correlation
+// pipeline (rules → /api/v1/alerts → Prometheus) like any other event. It reuses
+// toAuditEntry for consistent hook/decision/path decoding.
+func (e lsmAuditEventRaw) toTypesEvent() types.Event {
+	entry := e.toAuditEntry()
+	ev := types.Event{
+		Type:      types.EventLSMAudit,
+		Timestamp: e.Timestamp,
+		PID:       e.PID,
+		TGID:      e.PID,
+		UID:       e.UID,
+		LSMAudit: &types.LSMAuditEvent{
+			Hook:      entry.Hook,
+			Decision:  entry.Action,
+			Enforced:  entry.Enforced,
+			Path:      entry.Path,
+			TargetPID: e.TargetPID,
+		},
+	}
+	copy(ev.Comm[:], e.Comm[:])
+	return ev
+}
+
+// recordSandboxAudit writes an ai_sandbox decision to the dedicated sandbox sink
+// (falling back to the shared enforcement audit logger when no dedicated sink is
+// configured) and bumps the Prometheus counter. The pipeline forwarding in
+// parseKmodOrFallback is independent of this: a sandbox event is surfaced even
+// when no audit sink at all is configured (issue #268).
+func (c *KmodCollector) recordSandboxAudit(ae lsmAuditEventRaw) {
+	entry := ae.toAuditEntry()
+	if c.sandboxEvents != nil {
+		c.sandboxEvents.WithLabelValues(entry.Hook, entry.Action).Inc()
+	}
+	sink := c.sandboxAudit
+	if sink == nil {
+		sink = c.auditLogger // fall back to the shared enforcement sink
+	}
+	if sink == nil {
+		return
+	}
+	if err := sink.Log(entry); err != nil {
+		c.logger.Warn("kmod: sandbox audit log write failed", "error", err)
+	}
+}
+
+// decodeSandboxAddr decodes an ai_sandbox socket_connect violation's packed
+// path[] field — port(2, BE) followed by raw address bytes, family given by
+// the event's sig byte — into a "host:port" string. Returns "" for an
+// unrecognised family or a short buffer.
+func decodeSandboxAddr(family uint8, path []byte) string {
+	const (
+		afINET  = 2
+		afINET6 = 10
+	)
+	if len(path) < 2 {
+		return ""
+	}
+	port := binary.BigEndian.Uint16(path[:2])
+	var addrLen int
+	switch family {
+	case afINET:
+		addrLen = 4
+	case afINET6:
+		addrLen = 16
+	default:
+		return ""
+	}
+	if len(path) < 2+addrLen {
+		return ""
+	}
+	ip := net.IP(path[2 : 2+addrLen])
+	return net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
 }
 
 // nullTermString converts a NUL-padded byte slice to a Go string.
@@ -461,7 +593,35 @@ type KmodCollector struct {
 	strategy     BackpressureStrategy
 	available    bool
 	lostTotal    atomic.Uint64
-	auditLogger  *audit.Logger // optional; routes LSM audit events out-of-band
+	auditLogger  *audit.Logger // optional; routes enforcer LSM audit events out-of-band
+
+	// sandboxAudit is a dedicated append-only sink for ai_sandbox decisions,
+	// independent of the enforcement.audit_log sink above (issue #268). When set,
+	// sandbox_audit/sandbox_deny records are written here regardless of whether
+	// the enforcement audit log is configured.
+	sandboxAudit *audit.Logger
+
+	// sandboxEvents counts ai_sandbox decisions surfaced from the lsm_events ring
+	// buffer, labelled by hook and decision, so violations show up in Prometheus
+	// even before any correlation rule fires (issue #268).
+	sandboxEvents *prometheus.CounterVec
+
+	// lsmStats mirrors the kernel lsm_stats percpu counters into Prometheus. It
+	// replaces the previous startStatsCollector stub that never read the map
+	// (issue #268).
+	lsmStats      *prometheus.GaugeVec
+	statsInterval time.Duration
+}
+
+// lsmStatNames maps each lsm_stats index (see LSM_STAT_* in bpf/lsm.bpf.c) to
+// its Prometheus counter label. The order MUST match the C #defines.
+var lsmStatNames = [12]string{
+	"file_open_allow", "file_open_block",
+	"sock_conn_allow", "sock_conn_block",
+	"task_kill_allow", "task_kill_block",
+	"kmod_load", "cgroup_esc",
+	"sbx_bpf_block", "sbx_ptrace_block",
+	"sbx_mount_block", "sbx_module_block",
 }
 
 // NewKmodCollector creates a new kernel-module-load and cgroup-escape collector.
@@ -470,10 +630,19 @@ func NewKmodCollector(logger *slog.Logger) (*KmodCollector, error) {
 		logger = slog.Default()
 	}
 	c := &KmodCollector{
-		logger:     logger.With("collector", "kmod"),
-		dropLogger: newDropLogger(5 * time.Second),
-		status:     NoopStatusReporter{},
-		strategy:   StrategyDrop,
+		logger:        logger.With("collector", "kmod"),
+		dropLogger:    newDropLogger(5 * time.Second),
+		status:        NoopStatusReporter{},
+		strategy:      StrategyDrop,
+		statsInterval: 15 * time.Second,
+		sandboxEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ebpf_guard_sandbox_events_total",
+			Help: "ai_sandbox LSM decisions surfaced from the lsm_events ring buffer, by hook and decision.",
+		}, []string{"hook", "decision"}),
+		lsmStats: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "ebpf_guard_lsm_stats",
+			Help: "Kernel LSM hook counters from the lsm_stats map (allow/block per hook, incl. ai_sandbox escape-primitive blocks).",
+		}, []string{"counter"}),
 	}
 	// Determine whether LSM BPF is available (same check as LSMCollector).
 	data, err := os.ReadFile("/sys/kernel/security/lsm")
@@ -495,11 +664,29 @@ func (c *KmodCollector) WithBackpressureStrategy(s BackpressureStrategy) *KmodCo
 	return c
 }
 
-// WithAuditLogger wires an audit.Logger so that LSM audit events (EVENT_TYPE_LSM_AUDIT)
-// are written to the JSONL audit log instead of forwarded to the event channel.
+// WithAuditLogger wires an audit.Logger so that enforcer LSM audit events
+// (file_open / socket_connect / task_kill blocks) are written to the JSONL
+// audit log out-of-band instead of forwarded to the event channel.
 func (c *KmodCollector) WithAuditLogger(l *audit.Logger) *KmodCollector {
 	c.auditLogger = l
 	return c
+}
+
+// WithSandboxAudit wires a dedicated append-only sink for ai_sandbox decisions,
+// independent of the enforcement.audit_log sink (issue #268). When set, every
+// sandbox_audit/sandbox_deny record is written here in addition to being
+// forwarded through the correlation pipeline.
+func (c *KmodCollector) WithSandboxAudit(l *audit.Logger) *KmodCollector {
+	c.sandboxAudit = l
+	return c
+}
+
+// RegisterMetrics registers the collector's Prometheus metrics.
+func (c *KmodCollector) RegisterMetrics(reg prometheus.Registerer) error {
+	if err := reg.Register(c.sandboxEvents); err != nil {
+		return err
+	}
+	return reg.Register(c.lsmStats)
 }
 
 // Name returns the collector identifier.
@@ -507,6 +694,36 @@ func (c *KmodCollector) Name() string { return "kmod" }
 
 // IsHealthy returns true if the collector loaded without error.
 func (c *KmodCollector) IsHealthy() bool { return c.loadError == nil }
+
+// Load performs the eBPF load/attach for kernel-module-load detection ahead of
+// Start, so callers that need the resulting *bpf.KmodObjects up front (the
+// ai_sandbox Manager — issue #260) can share this one load instead of issuing
+// a second, independent LoadKmodObjects call against the same lsm.bpf.c
+// object. Idempotent: a no-op if already loaded or LSM is unavailable. Start
+// calls this itself, so it is safe to leave unloaded here and let Start do it.
+func (c *KmodCollector) Load() error {
+	if !c.available || c.kmodObjs != nil {
+		return nil
+	}
+	if err := c.loadKmod(); err != nil {
+		c.available = false
+		// loadKmod assigns c.kmodObjs before it can fail, so a failed load
+		// still leaves a non-nil but unusable object; clear it so Objects()
+		// correctly reports "nothing loaded" rather than a broken pointer.
+		c.kmodObjs = nil
+		return err
+	}
+	return nil
+}
+
+// Objects returns the loaded *bpf.KmodObjects, or nil if LSM is unavailable or
+// nothing has loaded it yet (call Load or Start first). Exposed so the
+// ai_sandbox Manager can attach its own programs against this same object
+// instead of loading a second, independent copy whose maps and lsm_events
+// ring buffer nobody else reads (issue #260).
+func (c *KmodCollector) Objects() *bpf.KmodObjects {
+	return c.kmodObjs
+}
 
 // Start attaches eBPF programs and begins forwarding events. Blocks until ctx is cancelled.
 //
@@ -519,12 +736,15 @@ func (c *KmodCollector) IsHealthy() bool { return c.loadError == nil }
 func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	c.logger.Info("starting kmod collector", "lsm_available", c.available)
 
-	if c.available {
+	switch {
+	case c.available && c.kmodObjs != nil:
+		c.logger.Info("kmod: using LSM objects pre-loaded via Load (shared with ai_sandbox)")
+	case c.available:
 		if err := c.loadKmod(); err != nil {
 			c.logger.Warn("kmod: LSM load failed, kernel module load detection disabled", "error", err)
 			c.available = false
 		}
-	} else {
+	default:
 		c.logger.Info("kmod: LSM BPF unavailable, kernel module load detection disabled (no tracepoint fallback exists)")
 	}
 
@@ -541,10 +761,59 @@ func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error
 	if c.cgroupReader != nil {
 		go c.readLoop(ctx, out, c.cgroupReader, c.parseCgroupEsc)
 	}
+	c.startStatsLoop(ctx)
 
 	<-ctx.Done()
 	c.logger.Info("stopping kmod collector")
 	return nil
+}
+
+// startStatsLoop periodically mirrors the shared lsm_stats percpu counters into
+// Prometheus. The map is written by every LSM program in lsm.bpf.c (including
+// the ai_sandbox hooks the Manager attaches), so this is the reader the issue
+// #268 stub was missing. No-op when the map or metric is unavailable.
+func (c *KmodCollector) startStatsLoop(ctx context.Context) {
+	if c.kmodObjs == nil || c.kmodObjs.LsmStats == nil || c.lsmStats == nil {
+		return
+	}
+	interval := c.statsInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		c.collectLSMStats() // publish an initial sample immediately
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.collectLSMStats()
+			}
+		}
+	}()
+}
+
+// collectLSMStats reads the percpu lsm_stats array, sums each counter across
+// CPUs, and publishes it as a Prometheus gauge labelled by counter name.
+func (c *KmodCollector) collectLSMStats() {
+	m := c.kmodObjs.LsmStats
+	if m == nil || c.lsmStats == nil {
+		return
+	}
+	for idx, name := range lsmStatNames {
+		var perCPU []uint64
+		if err := m.Lookup(uint32(idx), &perCPU); err != nil { // #nosec G115 -- idx is bounded by len(lsmStatNames)
+			c.logger.Debug("kmod: lsm_stats lookup failed", "index", idx, "error", err)
+			continue
+		}
+		var total uint64
+		for _, v := range perCPU {
+			total += v
+		}
+		c.lsmStats.WithLabelValues(name).Set(float64(total))
+	}
 }
 
 // Close releases all eBPF resources.
@@ -674,12 +943,23 @@ func (c *KmodCollector) parseKmodOrFallback(raw []byte) (*types.Event, error) {
 	}
 	evtType := binary.LittleEndian.Uint32(raw[:4])
 	if evtType == uint32(types.EventLSMAudit) {
-		// LSM audit events are routed to the audit logger, not the event channel.
+		ae, err := parseLSMAuditEventRaw(raw)
+		if err != nil {
+			return nil, fmt.Errorf("kmod: lsm audit event: %w", err)
+		}
+		if ae.isSandboxAction() {
+			// ai_sandbox decisions are recorded to the dedicated sandbox sink
+			// (independent of enforcement.audit_log) and forwarded through the
+			// pipeline so they reach the correlator, /api/v1/alerts and Prometheus
+			// even when no enforcement audit log is configured (issue #268).
+			c.recordSandboxAudit(ae)
+			ev := ae.toTypesEvent()
+			return &ev, nil
+		}
+		// Enforcer LSM audit events (file_open / socket_connect / task_kill
+		// blocks) keep the original behaviour: routed to the enforcement audit
+		// logger out-of-band, never forwarded to the event channel.
 		if c.auditLogger != nil {
-			ae, err := parseLSMAuditEventRaw(raw)
-			if err != nil {
-				return nil, fmt.Errorf("kmod: lsm audit event: %w", err)
-			}
 			if logErr := c.auditLogger.Log(ae.toAuditEntry()); logErr != nil {
 				c.logger.Warn("kmod: audit log write failed", "error", logErr)
 			}

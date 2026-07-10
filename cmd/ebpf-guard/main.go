@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -37,6 +38,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
+	"github.com/zugolO/ebpf-guard/internal/sandbox"
 	"github.com/zugolO/ebpf-guard/internal/simple"
 	"github.com/zugolO/ebpf-guard/internal/simulate"
 	"github.com/zugolO/ebpf-guard/internal/store"
@@ -66,6 +68,10 @@ const pendingFlushInterval = 100 * time.Millisecond
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var ec *exitCodeError
+		if errors.As(err, &ec) {
+			os.Exit(ec.code)
+		}
 		os.Exit(1)
 	}
 }
@@ -124,6 +130,8 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		configCmd,
 		newAttackSimCmd(&cfgPath),
 		newPluginsCmd(),
+		newRunCmd(&cfgPath),
+		newSandboxChildCmd(),
 	)
 
 	return root
@@ -182,8 +190,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		cfg = cfgManager.Get()
 
-		// Load rules from file or directory (config defaults to rules/ dir)
-		rules, err = loadRules(cfg.Rules.Path)
+		// Load rules from file or directory (config defaults to rules/ dir), plus
+		// the ai_sandbox semantic ruleset when enabled (issue #255). Shared with
+		// the hot-reload handler below so a reload can never silently drop the
+		// ai_agent_* rules (issue #261).
+		rules, err = loadRulesWithAISandbox(cfg)
 		if err != nil {
 			slog.Warn("failed to load rules file, starting with empty rule set",
 				slog.String("path", cfg.Rules.Path),
@@ -483,8 +494,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
-	// Open the append-only enforcement audit log when configured.
+	// Open the append-only enforcement audit log when configured. Also shared
+	// with the kmod collector below to log LSM audit events (including
+	// ai_sandbox sandbox_audit/sandbox_deny records — issue #260), since it is
+	// the same append-only JSONL sink.
 	var auditCh chan enforcer.AuditEntry
+	var auditLogger *audit.Logger
 	if cfg.Enforcement.AuditLog != "" {
 		al, alErr := audit.New(cfg.Enforcement.AuditLog)
 		if alErr != nil {
@@ -493,6 +508,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Any("error", alErr))
 		} else {
 			defer al.Close()
+			auditLogger = al
 			auditCh = make(chan enforcer.AuditEntry, 256)
 			go func() {
 				for entry := range auditCh {
@@ -861,6 +877,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.String("overflow_policy", overflowPolicy))
 
 	var collectors []collector.Collector
+	// Hoisted out of the collector-construction block below so the ai_sandbox
+	// wiring further down can share its already-loaded *bpf.KmodObjects
+	// instead of loading a second, independent copy of lsm.bpf.c (issue #260).
+	var kmodCollector *collector.KmodCollector
 	if dryRun {
 		slog.Info("dry-run mode: using synthetic event generator")
 		collectors = []collector.Collector{
@@ -952,11 +972,44 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Info("lsm: collector enabled")
 		}
 
+		// Dedicated ai_sandbox audit sink, independent of enforcement.audit_log
+		// (issue #268): when configured, sandbox_audit/sandbox_deny records are
+		// written here even if no enforcement audit log is set. Regardless of this
+		// sink, sandbox decisions are forwarded through the correlator so they
+		// reach /api/v1/alerts and Prometheus.
+		var sandboxAuditLogger *audit.Logger
+		if cfg.AISandbox.Enabled && cfg.AISandbox.AuditLog != "" {
+			if sal, salErr := audit.New(cfg.AISandbox.AuditLog); salErr != nil {
+				slog.Warn("ai_sandbox: dedicated audit log unavailable; sandbox decisions still surface via /alerts and Prometheus",
+					slog.String("path", cfg.AISandbox.AuditLog), slog.Any("error", salErr))
+			} else {
+				defer func() { _ = sal.Close() }()
+				sandboxAuditLogger = sal
+			}
+		}
+
 		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {
 			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
 		} else {
+			kc.WithAuditLogger(auditLogger)
+			kc.WithSandboxAudit(sandboxAuditLogger)
+			if mErr := kc.RegisterMetrics(prometheus.DefaultRegisterer); mErr != nil {
+				slog.Warn("kmod: register metrics failed", slog.Any("error", mErr))
+			}
+			kmodCollector = kc
 			collectors = append(collectors, kc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("kmod: collector enabled")
+		}
+	}
+
+	// ai_sandbox and the kmod collector both attach programs compiled from the
+	// same bpf/lsm.bpf.c object; load it once, here, before either the
+	// collectors below or ai_sandbox's Manager.Load attach anything, so both
+	// share one set of maps and one lsm_events ring buffer (issue #260).
+	if cfg.AISandbox.Enabled && kmodCollector != nil {
+		if err := kmodCollector.Load(); err != nil {
+			slog.Warn("kmod: pre-load for ai_sandbox failed; sandbox will load its own LSM objects",
+				slog.Any("error", err))
 		}
 	}
 
@@ -1063,8 +1116,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			oldCount := len(oldRules)
 
 			// Phase 1: parse and fully validate in isolation — no swap yet.
+			// Uses the same loadRulesWithAISandbox helper as startup so a
+			// reload never drops the ai_agent_* rules (issue #261).
 			t0 := time.Now()
-			newRules, err := loadRules(newCfg.Rules.Path)
+			newRules, err := loadRulesWithAISandbox(newCfg)
 			engine.ObserveYAMLParseDuration(time.Since(t0))
 			if err != nil {
 				slog.Error("hot-reload aborted: validation failed",
@@ -1172,6 +1227,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// API server. Scoped to this node via NODE_NAME to bound memory. Runs first
 	// in the enrichment chain so the runtime enricher only fills container fields.
 	// No-ops gracefully off-cluster (NewEnricher returns an error).
+	// Start is deferred until after the ai_sandbox block below has a chance to
+	// register the sandbox controller's pod-event handler (issue #266, item 3):
+	// registering after Start risks missing PodAdded events for pods already
+	// present at startup, which fire as soon as the informer's initial List
+	// completes and aren't redelivered until the next ResyncPeriod (default 300s).
 	var k8sEnricher *k8s.Enricher
 	if cfg.Kubernetes.Enabled {
 		ke, keErr := k8s.NewEnricher(k8s.EnricherConfig{
@@ -1184,14 +1244,74 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Any("error", keErr))
 		} else {
 			k8sEnricher = ke
-			go func() {
-				if err := k8sEnricher.Start(ctx); err != nil {
-					slog.Warn("k8s enricher stopped", slog.Any("error", err))
-				}
-			}()
-			defer func() { _ = k8sEnricher.Stop() }()
-			slog.Info("k8s enricher active (pod metadata enrichment)")
 		}
+	}
+
+	// ── AI-agent sandbox (issue #255) ───────────────────────────────────────
+	// Deny-by-default allow-known-good policy for a designated agent process
+	// tree, enforced in the kernel via the LSM allow maps. Disabled by default;
+	// audit-first. In Kubernetes it targets pods by the configured label; the
+	// `ebpf-guard run` wrapper covers local agents.
+	if cfg.AISandbox.Enabled {
+		sbxMgr, sbxErr := sandbox.New(cfg.AISandbox, slog.Default())
+		if sbxErr != nil {
+			slog.Error("ai_sandbox: invalid configuration", slog.Any("error", sbxErr))
+			return sbxErr
+		}
+		// Attach against the kmod collector's already-loaded LSM objects when
+		// available, so the two share one set of sandbox_state/sandbox_cgroups
+		// maps and one lsm_events ring buffer instead of two independent,
+		// unsynchronised copies (issue #260). Falls back to loading its own
+		// when the kmod collector is disabled/unavailable (dry-run has no
+		// collectors at all, so kmodCollector is nil there too).
+		var sharedLSMObjs *internalbpf.KmodObjects
+		if kmodCollector != nil {
+			sharedLSMObjs = kmodCollector.Objects()
+		}
+		if err := sbxMgr.Load(sharedLSMObjs); err != nil {
+			slog.Warn("ai_sandbox: kernel enforcement unavailable, continuing in audit-only mode",
+				slog.Any("error", err))
+		}
+		defer func() { _ = sbxMgr.Close() }()
+		slog.Info("ai_sandbox active",
+			slog.String("mode", sbxMgr.Mode()),
+			slog.Bool("kernel_enforced", sbxMgr.KernelEnforced()),
+			slog.Bool("exec_enforced", sbxMgr.ExecEnforced()),
+			slog.Int("profiles", len(cfg.AISandbox.Profiles)))
+
+		if label := cfg.AISandbox.Selector.KubeLabel; label != "" && k8sEnricher != nil {
+			ctrl := k8s.NewSandboxController(label, sbxMgr, nil, slog.Default())
+			ctrl.Register(k8sEnricher.Watcher())
+			slog.Info("ai_sandbox: k8s label targeting enabled", slog.String("label", label))
+			// Informer-driven targeting attaches the profile only after a pod's
+			// cgroups resolve, so a labelled pod runs unsandboxed for the first
+			// moments of its life (entrypoint/init). Surface the gap up front;
+			// per-pod windows are logged as they occur (issue #277 P1).
+			slog.Warn("ai_sandbox: pods have an unenforced startup window before their cgroups are " +
+				"registered — the image entrypoint/init runs outside the sandbox; gate the workload " +
+				"behind an init/readiness delay (see docs/ai-agent-sandbox.md#kubernetes-the-unenforced-startup-window)")
+		}
+
+		// DNS-pinned egress (issue #264): `ebpf-guard run` starts this today, but
+		// the main agent path — including K8s label targeting above — did not,
+		// so allowed_domains had no effect outside the local `run` wrapper.
+		if pinner, ok := sandbox.NewDNSPinner(cfg.AISandbox, sbxMgr, nil, slog.Default()); ok {
+			go pinner.Run(ctx)
+			slog.Info("ai_sandbox: DNS-pinned egress active")
+		}
+	}
+
+	// Now that any sandbox controller has registered its pod-event handler,
+	// start the informer so its initial List/Watch is delivered to every
+	// subscriber instead of only the ones registered before this point.
+	if k8sEnricher != nil {
+		go func() {
+			if err := k8sEnricher.Start(ctx); err != nil {
+				slog.Warn("k8s enricher stopped", slog.Any("error", err))
+			}
+		}()
+		defer func() { _ = k8sEnricher.Stop() }()
+		slog.Info("k8s enricher active (pod metadata enrichment)")
 	}
 
 	// ── Container runtime enricher (issue #123) ─────────────────────────────
@@ -2826,6 +2946,8 @@ func newAttackSimCmd(cfgPath *string) *cobra.Command {
 		agentAddr   string
 		bearerToken string
 		timeoutStr  string
+		aiAgentMode bool
+		containment bool
 	)
 
 	cmd := &cobra.Command{
@@ -2841,16 +2963,54 @@ Modes:
   --scenario ID   Run a single scenario (use --list to see IDs).
   --verify        Poll a live agent's /api/v1/alerts API after running a scenario and
                   assert the expected rule fired (requires --agent).
+  --ai-agent      Use the AI-agent misbehaviour detection scenarios (ai_sandbox ruleset).
+  --containment   Run the AI-agent containment acceptance harness: assert the
+                  deny-by-default ai_sandbox policy contains each escape vector
+                  (kill, map-write, cgroup-escape, dropped-binary exec).
 
 Examples:
   ebpf-guard attack-sim --list
   ebpf-guard attack-sim --run-all
   ebpf-guard attack-sim --scenario dga-dns-query
+  ebpf-guard attack-sim --containment
   ebpf-guard attack-sim --scenario sensitive-file-read --verify \
     --agent http://localhost:8080 --token mytoken --timeout 30s`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			setupLogger("info")
-			runner := attacker.NewRunner(nil, slog.Default())
+
+			// Containment acceptance harness (issue #255, sub-task 7): assert the
+			// deny-by-default ai_sandbox policy contains each escape vector (kill,
+			// map-write, cgroup-escape, dropped-binary exec). Evaluated against the
+			// userspace policy oracle, so no kernel or config file is needed.
+			if containment {
+				scenarios := attacker.ContainmentScenarios()
+				if listOnly {
+					fmt.Printf("%-30s  %-20s  %s\n", "ID", "VECTOR", "Name")
+					fmt.Println(strings.Repeat("-", 78))
+					for _, s := range scenarios {
+						fmt.Printf("%-30s  %-20s  %s\n", s.ID, s.Vector, s.Name)
+					}
+					return nil
+				}
+				results, err := attacker.RunContainment(scenarios)
+				if err != nil {
+					return fmt.Errorf("containment: %w", err)
+				}
+				attacker.PrintContainmentResults(results, os.Stdout)
+				for _, r := range results {
+					if !r.Passed {
+						return fmt.Errorf("one or more containment vectors NOT contained")
+					}
+				}
+				return nil
+			}
+
+			var runner *attacker.Runner
+			if aiAgentMode {
+				runner = attacker.NewRunner(attacker.AIAgentScenarios(), slog.Default())
+			} else {
+				runner = attacker.NewRunner(nil, slog.Default())
+			}
 
 			if listOnly {
 				fmt.Printf("%-40s  %-12s  %s\n", "ID", "MITRE", "Name")
@@ -2866,6 +3026,11 @@ Examples:
 				return fmt.Errorf("load config: %w", err)
 			}
 			rulesPath := cfgManager.Get().Rules.Path
+			if aiAgentMode {
+				// The ai-agent ruleset lives outside the default rules directory;
+				// point the engine at ai_sandbox.rules_path for these scenarios.
+				rulesPath = cfgManager.Get().AISandbox.RulesPath
+			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
@@ -2931,6 +3096,8 @@ Examples:
 	}
 
 	cmd.Flags().BoolVar(&listOnly, "list", false, "list all available scenarios and exit")
+	cmd.Flags().BoolVar(&aiAgentMode, "ai-agent", false, "use the AI-agent misbehavior scenarios against ai_sandbox.rules_path")
+	cmd.Flags().BoolVar(&containment, "containment", false, "run the AI-agent containment acceptance harness (kill, map-write, cgroup-escape, dropped-binary exec)")
 	cmd.Flags().BoolVar(&runAll, "run-all", false, "run all scenarios through local rule engine")
 	cmd.Flags().StringVar(&scenarioID, "scenario", "", "run a single scenario by ID")
 	cmd.Flags().BoolVar(&verifyMode, "verify", false, "poll live agent API to confirm alert fired")
@@ -3134,4 +3301,42 @@ func loadRules(path string) ([]correlator.Rule, error) {
 		return correlator.LoadRulesFromDir(path)
 	}
 	return correlator.LoadRulesFromFile(path)
+}
+
+// loadRulesWithAISandbox loads the base rule set from cfg.Rules.Path and, when
+// ai_sandbox is enabled, merges in its semantic ruleset from
+// cfg.AISandbox.RulesPath, skipping any rule ID already present in the base
+// set. Kept out of the default rules directory (issue #255) so it only
+// activates when ai_sandbox is enabled. Shared between startup and the
+// hot-reload handler so a reload can never silently drop the ai_agent_* rules
+// (issue #261) — a failure to load the AI ruleset only warns and falls back
+// to the base set, it never fails the whole load.
+func loadRulesWithAISandbox(cfg *config.Config) ([]correlator.Rule, error) {
+	rules, err := loadRules(cfg.Rules.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.AISandbox.Enabled && cfg.AISandbox.RulesPath != "" {
+		aiRules, aiErr := correlator.LoadRulesFromFile(cfg.AISandbox.RulesPath)
+		if aiErr != nil {
+			slog.Warn("ai_sandbox: failed to load semantic ruleset",
+				slog.String("path", cfg.AISandbox.RulesPath), slog.Any("error", aiErr))
+		} else {
+			seen := make(map[string]bool, len(rules))
+			for _, r := range rules {
+				seen[r.ID] = true
+			}
+			added := 0
+			for _, r := range aiRules {
+				if !seen[r.ID] {
+					rules = append(rules, r)
+					added++
+				}
+			}
+			slog.Info("ai_sandbox: semantic ruleset loaded",
+				slog.String("path", cfg.AISandbox.RulesPath), slog.Int("rules", added))
+		}
+	}
+	return rules, nil
 }

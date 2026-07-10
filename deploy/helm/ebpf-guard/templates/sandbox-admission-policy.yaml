@@ -1,0 +1,78 @@
+{{- if .Values.sandboxAdmissionPolicy.enabled }}
+{{- $sap := .Values.sandboxAdmissionPolicy }}
+{{- $label := $sap.labelKey | default "ebpf-guard.io/sandbox-profile" }}
+{{- $pinAnn := $sap.pinAnnotation | default "ebpf-guard.io/sandbox-profile-pin" }}
+{{- $allowedAnn := $sap.allowedAnnotation | default "ebpf-guard.io/sandbox-allowed-profiles" }}
+# ValidatingAdmissionPolicy — ai_sandbox label trust (issue #277 P2).
+#
+# Targeting an agent by a pod label the workload author controls is advisory:
+# a pod can omit the label (no sandbox) or name a weaker profile (downgrade).
+# This native policy makes the label MANDATORY and pins/allow-lists its value
+# per namespace, so a workload cannot dodge or downgrade its own containment.
+# No webhook server / TLS is involved; requires Kubernetes 1.30+ (VAP GA).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-sandbox-label
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+spec:
+  failurePolicy: {{ $sap.failurePolicy | default "Fail" }}
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    # The pod's labels, defaulting to an empty map so lookups never error.
+    - name: labels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+    # The target namespace's annotations, which carry the per-namespace pin /
+    # allow-list. namespaceObject is the Namespace of the admitted pod.
+    - name: nsAnnotations
+      expression: "(has(namespaceObject.metadata) && has(namespaceObject.metadata.annotations)) ? namespaceObject.metadata.annotations : {}"
+    # The profile the pod asks for (its sandbox label value), or '' if absent.
+    - name: profile
+      expression: "'{{ $label }}' in variables.labels ? variables.labels['{{ $label }}'] : ''"
+    # The single profile this namespace pins every sandboxed pod to, or '' for none.
+    - name: pinned
+      expression: "'{{ $pinAnn }}' in variables.nsAnnotations ? variables.nsAnnotations['{{ $pinAnn }}'] : ''"
+    # The comma-separated set of profiles this namespace permits, or '' for any.
+    - name: allowed
+      expression: "'{{ $allowedAnn }}' in variables.nsAnnotations ? variables.nsAnnotations['{{ $allowedAnn }}'] : ''"
+  validations:
+    # 1. Remove the opt-out: the sandbox label must be present and non-empty.
+    - expression: "'{{ $label }}' in variables.labels && variables.profile != ''"
+      message: "pod is missing the mandatory ai_sandbox label {{ $label }}; a sandboxed namespace may not opt out of containment"
+      reason: Forbidden
+    # 2. Remove the downgrade: if the namespace pins a profile, match it exactly.
+    - expression: "variables.pinned == '' || variables.profile == variables.pinned"
+      messageExpression: "'ai_sandbox profile ' + variables.profile + ' is not permitted: this namespace pins ' + variables.pinned + ' (workloads may not downgrade their own containment)'"
+      reason: Forbidden
+    # 3. Enforce the allow-list: if the namespace lists profiles, the value must
+    #    be one of them.
+    - expression: "variables.allowed == '' || variables.profile in variables.allowed.split(',')"
+      messageExpression: "'ai_sandbox profile ' + variables.profile + ' is not in this namespace allowed set (' + variables.allowed + ')'"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "ebpf-guard.fullname" . }}-sandbox-label
+  labels:
+    {{- include "ebpf-guard.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "ebpf-guard.fullname" . }}-sandbox-label
+  validationActions:
+    {{- toYaml ($sap.validationActions | default (list "Deny")) | nindent 4 }}
+  matchResources:
+    {{- with $sap.namespaceSelector }}
+    namespaceSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $sap.objectSelector }}
+    objectSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

@@ -481,6 +481,372 @@ rules:
         severity: critical
         action: alert
 
+  # AI-agent semantic ruleset, mounted when aiSandbox.enabled=true and loaded
+  # from ai_sandbox.rules_path. Fires as detections for any process; the
+  # kernel allow-maps do the cgroup-scoped enforcement. Override to customise.
+  aiAgentContent: |
+    # AI-Agent Containment Rules for ebpf-guard (issue #255)
+    #
+    # ebpf-guard's second usage profile: constraining what an autonomous AI/coding
+    # agent (Claude Code, Aider, Cursor, an in-cluster agent Pod, ...) is allowed to
+    # do at runtime. These rules are expressed in *agent* terms — credential reads,
+    # curl|sh pipelines, package-manager installs, egress to cloud metadata, secret
+    # env dumps — rather than generic threat-detection terms.
+    #
+    # They complement (do not replace) the positive allow-policy enforced in the
+    # kernel via the `ai_sandbox` config section. Rules here fire as detections/audit
+    # signals for ANY process on the host; the config-driven cgroup allow-lists in
+    # bpf/lsm.bpf.c perform the actual deny-by-default enforcement, scoped to the
+    # agent's cgroup subtree.
+    #
+    # Scoping note: this file is loaded on demand from `ai_sandbox.rules_path` only
+    # when `ai_sandbox.enabled: true` — it is NOT part of the default rules
+    # directory, so it never fires unless you have opted into the agent profile.
+    # The detections themselves are process-wide (they are not gated on cgroup
+    # membership); pair them with an `ai_sandbox` profile so the kernel allow-maps
+    # constrain the agent while these rules surface the attempts.
+    #
+    # Severity is deliberately conservative (mostly `warning`, `action: alert`) so
+    # they are safe to enable in audit-first mode over a real agent workload before
+    # switching the sandbox to `enforce`.
+
+    rules:
+      # ==========================================================================
+      # Credential & secret access — the highest-value target for a prompt-injected
+      # or over-eager agent. MITRE ATT&CK T1552 (Unsecured Credentials).
+      # ==========================================================================
+
+      - id: ai_agent_read_ssh_keys
+        name: "AI Agent: read of SSH private key material"
+        description: >
+          A sandboxed agent process opened a file under ~/.ssh. Agents rarely need
+          raw private keys; a read here is a classic exfiltration or lateral-movement
+          setup step.
+        event_type: file
+        condition_group:
+          operator: and
+          conditions:
+            - field: file.path
+              op: contains
+              values: ["/.ssh/"]
+            - field: file.op
+              op: in
+              values: ["read", "open"]
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, credential-access, mitre:T1552.004]
+
+      - id: ai_agent_read_cloud_credentials
+        name: "AI Agent: read of cloud credential files"
+        description: >
+          A sandboxed agent read AWS/GCP/Azure credential material. These grant
+          control-plane access and are a prime exfiltration target for an agent that
+          has been steered off-task.
+        event_type: file
+        condition_group:
+          operator: and
+          conditions:
+            - field: file.path
+              op: suffix
+              values:
+                - "/.aws/credentials"
+                - "/.aws/config"
+                - "/.config/gcloud/credentials.db"
+                - "/.config/gcloud/access_tokens.db"
+                - "/.azure/accessTokens.json"
+                - "/.azure/azureProfile.json"
+            - field: file.op
+              op: in
+              values: ["read", "open"]
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, credential-access, cloud, mitre:T1552.001]
+
+      - id: ai_agent_read_dotenv_secrets
+        name: "AI Agent: read of .env / secret files"
+        description: >
+          A sandboxed agent opened a dotenv, kubeconfig, npmrc, pypirc, netrc, or
+          git-credentials file. These commonly hold API tokens and registry
+          credentials.
+        event_type: file
+        condition_group:
+          operator: and
+          conditions:
+            - field: file.path
+              op: suffix
+              values:
+                - "/.env"
+                - "/.env.local"
+                - "/.env.production"
+                - "/.kube/config"
+                - "/.npmrc"
+                - "/.pypirc"
+                - "/.netrc"
+                - "/.git-credentials"
+                - "/.docker/config.json"
+            - field: file.op
+              op: in
+              values: ["read", "open"]
+        severity: warning
+        action: alert
+        tags: [ai-agent, sandbox, credential-access, secrets, mitre:T1552.001]
+
+      - id: ai_agent_read_proc_environ
+        name: "AI Agent: read of /proc/<pid>/environ (secret env dump)"
+        description: >
+          A sandboxed agent read a process environment block from /proc. Environment
+          variables frequently carry API keys and tokens; dumping another process's
+          environ is a secret-harvesting technique.
+        event_type: file
+        condition_group:
+          operator: and
+          conditions:
+            - field: file.path
+              op: prefix
+              values: ["/proc/"]
+            - field: file.path
+              op: suffix
+              values: ["/environ"]
+        severity: warning
+        action: alert
+        tags: [ai-agent, sandbox, credential-access, mitre:T1552.001]
+
+      # ==========================================================================
+      # Remote code execution pipelines — `curl | sh`, `wget | bash`, and
+      # package-manager installs pulling arbitrary code. MITRE T1105 / T1059.
+      # ==========================================================================
+
+      - id: ai_agent_pipe_to_shell
+        name: "AI Agent: curl|sh / wget|bash remote-code pipeline"
+        description: >
+          A process fetched a remote payload and piped it directly into an
+          interpreter (curl ... | sh, wget ... | bash). This is the canonical
+          unreviewed-remote-code pattern. Matched on the full command line
+          regardless of which binary is running it, so a direct `curl … | sh`
+          invocation is caught, not only a wrapping shell.
+        event_type: syscall
+        condition:
+          field: proc.args
+          op: regex
+          values: ['(?i)(curl|wget)\s+[^|]*\|\s*(sudo\s+)?(ba)?sh\b']
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, remote-code, mitre:T1105, mitre:T1059.004]
+
+      - id: ai_agent_package_install
+        name: "AI Agent: package-manager install pulling remote code"
+        description: >
+          A sandboxed agent ran a package manager install command (pip, npm, gem,
+          cargo, go get, apt). Uncontrolled installs are a supply-chain and
+          arbitrary-code-execution vector inside an agent sandbox.
+        event_type: syscall
+        condition:
+          field: proc.args
+          op: regex
+          values:
+            - '(?i)\b(pip3?|pipx)\s+install\b'
+            - '(?i)\bnpm\s+(install|i|exec)\b'
+            - '(?i)\bnpx\s+'
+            - '(?i)\bgem\s+install\b'
+            - '(?i)\bcargo\s+install\b'
+            - '(?i)\bgo\s+(get|install)\b'
+            - '(?i)\bapt(-get)?\s+install\b'
+        severity: warning
+        action: alert
+        tags: [ai-agent, sandbox, supply-chain, mitre:T1059]
+
+      # ==========================================================================
+      # Persistence & self-modification — an agent writing to shell rc files, cron,
+      # or authorized_keys to survive past its task. MITRE T1547 / T1053 / T1098.
+      # ==========================================================================
+
+      - id: ai_agent_write_persistence_paths
+        name: "AI Agent: write to persistence / autostart paths"
+        description: >
+          A sandboxed agent wrote to a shell startup file, cron directory, systemd
+          unit, or SSH authorized_keys. Legitimate coding tasks rarely touch these;
+          writes here indicate an attempt to persist beyond the sandboxed task.
+        event_type: file
+        condition_group:
+          operator: and
+          conditions:
+            - field: file.path
+              op: suffix
+              values:
+                - "/.bashrc"
+                - "/.bash_profile"
+                - "/.profile"
+                - "/.zshrc"
+                - "/.ssh/authorized_keys"
+            - field: file.op
+              op: in
+              values: ["write", "open"]
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, persistence, mitre:T1547.001, mitre:T1098.004]
+
+      - id: ai_agent_write_cron_systemd
+        name: "AI Agent: write to cron / systemd unit directories"
+        description: >
+          A sandboxed agent wrote into a cron or systemd unit directory — a
+          scheduled-task persistence vector.
+        event_type: file
+        condition_group:
+          operator: and
+          conditions:
+            - field: file.path
+              op: prefix
+              values:
+                - "/etc/cron.d/"
+                - "/etc/cron.daily/"
+                - "/etc/cron.hourly/"
+                - "/var/spool/cron/"
+                - "/etc/systemd/system/"
+                - "/etc/systemd/user/"
+            - field: file.op
+              op: in
+              values: ["write", "open"]
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, persistence, mitre:T1053.003, mitre:T1543.002]
+
+      # ==========================================================================
+      # Egress control — connections an agent has no business making. The positive
+      # allow-list lives in ai_sandbox config; these rules flag well-known abuse
+      # destinations regardless of profile. MITRE T1552.005 / T1071.
+      # ==========================================================================
+
+      - id: ai_agent_egress_cloud_metadata
+        name: "AI Agent: connection to cloud instance metadata service (SSRF)"
+        description: >
+          A sandboxed agent connected to the link-local cloud metadata endpoint
+          (169.254.169.254). Agents reaching the metadata service can harvest
+          instance role credentials — a common prompt-injection SSRF objective.
+        event_type: network
+        condition:
+          field: daddr
+          op: in
+          values: ["169.254.169.254"]
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, credential-access, ssrf, mitre:T1552.005]
+
+      - id: ai_agent_git_push_ssh
+        name: "AI Agent: git push over SSH to a remote"
+        description: >
+          A sandboxed agent's git process opened an outbound SSH connection
+          (port 22) — typically a `git push` to a remote. In a contained agent this
+          should match an allow-listed remote; flag for review otherwise.
+        event_type: network
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["git", "ssh", "git-remote-http"]
+            - field: dport
+              op: in
+              values: ["22"]
+        severity: warning
+        action: alert
+        tags: [ai-agent, sandbox, exfiltration, mitre:T1567]
+
+      # ==========================================================================
+      # Reverse / bind shells — an agent spawning an interactive shell back to a
+      # remote is a strong compromise signal. MITRE T1059 / T1071.
+      # ==========================================================================
+
+      - id: ai_agent_reverse_shell_tooling
+        name: "AI Agent: reverse-shell tooling invocation"
+        description: >
+          A sandboxed agent invoked netcat/socat/ncat with a shell redirection, or a
+          language one-liner opening a socket to a shell — the canonical reverse-shell
+          construction.
+        event_type: syscall
+        condition:
+          field: proc.args
+          op: regex
+          values:
+            - '(?i)\b(nc|ncat|netcat)\b.*\s-e\b'
+            - '(?i)\bsocat\b.*\bexec'
+            - '(?i)(bash|sh)\s+-i\b.*/dev/tcp/'
+            - '(?i)/dev/tcp/[0-9]'
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, reverse-shell, mitre:T1059.004]
+
+      # ==========================================================================
+      # Kernel-enforced sandbox decisions (issue #268). The ai_sandbox LSM hooks in
+      # bpf/lsm.bpf.c emit an lsm_audit record for every action a sandboxed cgroup
+      # took outside its positive allow-list — a would-be-deny in audit mode, an
+      # actual -EPERM deny in enforce mode. These rules surface those kernel
+      # decisions as alerts so they reach /api/v1/alerts and Prometheus regardless of
+      # whether a dedicated audit log is configured. Because the hook only fires on a
+      # policy violation, every match is already a signal (not routine allow traffic).
+      # ==========================================================================
+
+      - id: ai_agent_sandbox_deny
+        name: "AI Agent: sandbox policy DENY (kernel-enforced)"
+        description: >
+          The ai_sandbox LSM hooks denied an action (-EPERM) taken by a sandboxed
+          agent cgroup outside its allow-list: an exec/read/write of a disallowed
+          path, or egress to a disallowed host/port. This is a hard containment
+          boundary being hit.
+        event_type: lsm_audit
+        condition:
+          field: decision
+          op: eq
+          values: ["sandbox_deny"]
+        severity: critical
+        action: alert
+        tags: [ai-agent, sandbox, containment, kernel-enforced]
+
+      - id: ai_agent_sandbox_audit
+        name: "AI Agent: sandbox policy violation (audit mode)"
+        description: >
+          The ai_sandbox LSM hooks observed an action a sandboxed agent cgroup took
+          outside its allow-list while running in audit mode — it would have been
+          denied under enforce. Review these before switching the profile to enforce.
+        event_type: lsm_audit
+        condition:
+          field: decision
+          op: eq
+          values: ["sandbox_audit"]
+        severity: warning
+        action: alert
+        tags: [ai-agent, sandbox, containment, audit]
+# AI-agent sandbox (issue #255) — deny-by-default, allow-known-good policy for a
+# designated agent process tree, enforced in the kernel via BPF LSM allow maps.
+# Disabled and audit-first by default. When enabled with a kubeLabel, pods
+# carrying that label have the named profile applied to their cgroup subtree.
+# Requires kernel 5.7+ with CONFIG_BPF_LSM for enforcement; degrades to
+# audit-only otherwise.
+aiSandbox:
+  enabled: false
+  # mode: "audit" (log violations only) or "enforce" (deny with -EPERM).
+  mode: audit
+  # rulesPath is where the semantic ruleset is mounted (see rules.aiAgentContent).
+  rulesPath: /etc/ebpf-guard/ai-agent.yaml
+  selector:
+    # Pods labelled with this key get the profile named by the label's value.
+    kubeLabel: "ebpf-guard.io/sandbox-profile"
+    defaultProfile: ""
+  # dnsRefreshInterval is how often profiles' allowed_domains are re-resolved
+  # into the egress CIDR allow-list (config: ai_sandbox.dns_refresh_interval).
+  # "0s" disables re-resolution.
+  dnsRefreshInterval: 60s
+  # profiles is a list of named allow-lists. Example:
+  # profiles:
+  #   - name: ai-agent
+  #     allowed_exec: ["/usr/bin/", "/usr/local/bin/"]
+  #     allowed_read_paths: ["/workspace/", "/etc/ssl/"]
+  #     allowed_write_paths: ["/workspace/", "/tmp/"]
+  #     denied_paths: ["/root/.ssh/", "/root/.aws/"]
+  #     allowed_egress_cidrs: ["140.82.112.0/20"]
+  #     allowed_egress_ports: [443]
+  #     allowed_domains: ["github.com", "pypi.org"]
+  profiles: []
+
 # Enforcement settings — configure how ebpf-guard responds to threats.
 enforcement:
   # networkpolicy controls automatic Kubernetes NetworkPolicy generation.
@@ -538,6 +904,46 @@ admissionWebhook:
     enabled: false
     issuerName: "selfsigned-issuer"
     issuerKind: "ClusterIssuer"
+
+# sandboxAdmissionPolicy makes the ai_sandbox label a MANDATORY control at
+# admission time (issue #277 P2 — label trust). Targeting an agent by the
+# `ebpf-guard.io/sandbox-profile` pod label is only advisory otherwise: the
+# workload author owns that label, so a pod can omit it (no sandbox) or name a
+# weaker profile (downgrade). This native Kubernetes ValidatingAdmissionPolicy
+# (no webhook server, no TLS) forces the label to be present and — where a
+# namespace pins or allow-lists profiles — pins the value, so a workload cannot
+# dodge or downgrade its own containment. Requires Kubernetes 1.30+ (VAP GA).
+#
+# Opt a namespace in:            kubectl label ns <ns> ebpf-guard.io/sandbox=enforced
+# Pin a namespace to a profile:  kubectl annotate ns <ns> ebpf-guard.io/sandbox-profile-pin=ai-agent-strict
+# Allow a set (comma-separated): kubectl annotate ns <ns> ebpf-guard.io/sandbox-allowed-profiles=ai-agent,ai-agent-strict
+sandboxAdmissionPolicy:
+  # enabled creates the ValidatingAdmissionPolicy + binding. Default: false.
+  enabled: false
+  # labelKey is the pod label whose presence is mandatory and whose value is
+  # pinned. Must match ai_sandbox.selector.kube_label.
+  labelKey: "ebpf-guard.io/sandbox-profile"
+  # validationActions: how the API server acts on a violating pod.
+  #   [Deny]  — reject the pod (mandatory control; the default).
+  #   [Warn]  — admit but return a warning (dry-run / roll-out).
+  #   [Audit] — admit but annotate the audit log.
+  validationActions:
+    - Deny
+  # failurePolicy when the policy itself errors: "Fail" (fail-closed, default) or
+  # "Ignore". A mandatory control should fail closed.
+  failurePolicy: "Fail"
+  # namespaceSelector opts namespaces in. Only namespaces carrying this label are
+  # subject to the mandatory-label rule, so system namespaces are unaffected.
+  namespaceSelector:
+    matchLabels:
+      ebpf-guard.io/sandbox: "enforced"
+  # objectSelector optionally narrows which pods in an opted-in namespace the
+  # policy applies to (e.g. only pods labelled app=agent). Empty = all pods.
+  objectSelector: {}
+  # pinAnnotation / allowedAnnotation are the namespace annotations the policy
+  # reads to pin a single profile or allow-list a set for that namespace.
+  pinAnnotation: "ebpf-guard.io/sandbox-profile-pin"
+  allowedAnnotation: "ebpf-guard.io/sandbox-allowed-profiles"
 
 # Grafana dashboard ConfigMap (loaded by Grafana sidecar if enabled)
 grafana:

@@ -1,0 +1,61 @@
+config_version: "v0.1"
+
+server:
+  bind_address: ":19090"
+  metrics_path: "/metrics"
+  health_path: "/health"
+
+bpf:
+  map_sizes:
+    events: 32768
+    processes: 8192
+    connections: 16384
+  sampling:
+    enabled: true
+    syscall_rate: 1
+    network_rate: 1
+    file_rate: 1
+
+rules:
+  path: "/opt/ebpf-guard/rules/"
+  hot_reload: true
+
+profiler:
+  enabled: true
+  learning_period: 300
+  min_learning_samples: 50
+  anomaly_threshold: 0.7
+  max_tracked_pids: 2048
+
+enforcement:
+  enabled: true
+  block_backend: log        # Начинаем с log (dry run)
+  dry_run: true             # Сначала dry run для тестов
+  enable_block: true
+  enable_kill: true
+  enable_throttle: true
+  audit_log: "/var/log/ebpf-guard/audit.jsonl"
+
+alerting:
+  enabled: true
+  alertmanager:
+    url: ""
+
+store:
+  backend: sqlite
+  sqlite:
+    path: "/var/lib/ebpf-guard/test-events.db"
+
+collectors:
+  dns:
+    enabled: true
+  tls:
+    enabled: false
+
+notifications:
+  unix_socket:
+    enabled: true
+    path: /run/ebpf-guard/alerts.sock
+
+kubernetes:
+  enabled: false

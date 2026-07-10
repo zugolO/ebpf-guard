@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # ebpf-guard metrics (будет на хосте, не в контейнере)
+  - job_name: 'ebpf-guard'
+    static_configs:
+      # host.docker.internal - специальный DNS для доступа к хосту из контейнера
+      # или используйте IP хоста
+      - targets: ['host.docker.internal:19090']
+    scrape_interval: 10s
+    metrics_path: '/metrics'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

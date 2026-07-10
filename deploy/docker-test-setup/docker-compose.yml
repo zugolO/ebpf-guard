@@ -29,6 +29,8 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Для Linux Docker
 
   # Grafana для визуализации (опционально)
   grafana:

@@ -6,9 +6,8 @@ scrape_configs:
   # ebpf-guard metrics (будет на хосте, не в контейнере)
   - job_name: 'ebpf-guard'
     static_configs:
-      # host.docker.internal - специальный DNS для доступа к хосту из контейнера
-      # или используйте IP хоста
-      - targets: ['host.docker.internal:19090']
+      # В Linux Docker используем host.docker.internal (через extra_hosts) или gateway IP
+      - targets: ['172.17.0.1:19090']  # Docker bridge gateway IP
     scrape_interval: 10s
     metrics_path: '/metrics'
 

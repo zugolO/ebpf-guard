@@ -12,7 +12,7 @@ on:
 
 env:
   CLANG_VERSION: '15'
-  GO_VERSION: '1.26'
+  GO_VERSION: '1.26.5'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   # Use the system-installed Go toolchain instead of downloading one via the
   # module proxy. The downloaded toolchain is a stripped module archive that

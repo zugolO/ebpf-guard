@@ -254,8 +254,8 @@ func TestHTTPCollectorWithBackpressureStrategy(t *testing.T) {
 	coll, err := NewHTTPCollector(logger, true, nil)
 	require.NoError(t, err)
 
-	coll.WithBackpressureStrategy(StrategyDropOldest)
-	assert.Equal(t, StrategyDropOldest, coll.strategy)
+	coll.WithBackpressureStrategy(StrategyBlock)
+	assert.Equal(t, StrategyBlock, coll.strategy)
 }
 
 // TestHTTPCollectorWithRingBufSize verifies WithRingBufSize builder.

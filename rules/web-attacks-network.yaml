@@ -1,0 +1,123 @@
+# Network-based Web Attack Detection Rules for ebpf-guard
+# Phase B implementation - addresses the remaining part of issue #281 that
+# Phase A (rules/web-attacks-enhanced.yaml) could not cover: true network-payload
+# SQL injection / XSS detection against the actual HTTP request bytes, not just
+# side-effects visible in file operations.
+#
+# This became possible only after adding a real HTTP payload capture path:
+#   - collectors.tls (bpf/tls_uprobe.bpf.c) already captured payloads for TLS traffic.
+#   - collectors.http_plaintext (bpf/http_uprobe.bpf.c) now captures payloads for
+#     plaintext (non-TLS) HTTP traffic via uprobes on libc read()/recv() in known
+#     web-server processes.
+#
+# Requirements:
+#   - collectors.http_plaintext.enabled: true (requires CAP_SYS_PTRACE), for
+#     plaintext HTTP traffic, OR
+#   - collectors.tls.enabled: true, for HTTPS traffic terminated via OpenSSL/libssl
+#     (see rules/tls-patterns.yaml for the TLS-side equivalents of these rules)
+#
+# Limitations:
+#   - collectors.http_plaintext only attaches to a configurable allow-list of
+#     web-server process names (default: nginx, apache2, httpd, node, python,
+#     python3, php-fpm, java, ruby, gunicorn, uwsgi, caddy, traefik, lighttpd) —
+#     see collectors.http_plaintext.server_comms in config.yaml.
+#   - Only the first 256 bytes of each read()/recv() call are captured, and only
+#     calls whose buffer starts with an HTTP request/status line are captured
+#     at all (in-kernel filter, see bpf/http_uprobe.bpf.c).
+#   - Go net/http and other runtimes that don't ultimately call libc read()/recv()
+#     for their socket I/O are not covered by this collector.
+
+rules:
+  # ============================================================================
+  # SQL Injection Detection (real network payload)
+  # ============================================================================
+
+  - id: web_sql_injection_network
+    name: "Web Attack: SQL injection patterns in plaintext HTTP payload"
+    description: "SQL keywords/injection patterns detected in captured plaintext HTTP request/response bytes (network-based SQLi detection)"
+    event_type: http_plaintext
+    condition:
+      field: data
+      op: regex
+      values:
+        # Union-based SQLi
+        - "union.*select"
+        - "UNION.*SELECT"
+        # Boolean-based SQLi (case-insensitive)
+        - "[Oo][Rr]\\s+\\d+\\s*=\\s*\\d+"
+        - "[Aa][Nn][Dd]\\s+\\d+\\s*=\\s*\\d+"
+        # Quote escaping patterns
+        - "'%27"
+        - "%27'"
+        # SQL keywords often abused in injection (case-insensitive)
+        - "[Dd][Rr][Oo][Pp]\\s+[Tt][Aa][Bb][Ll][Ee]"
+        - "[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]"
+        - "[Ii][Nn][Ss][Ee][Rr][Tt]\\s+[Ii][Nn][Tt][Oo]"
+        - "[Uu][Pp][Dd][Aa][Tt][Ee]\\s+.*\\s+[Ss][Ee][Tt]"
+        # Dangerous SQL functions/timing attacks
+        - "waitfor\\s+delay"
+        - "sleep\\s*\\("
+        - "benchmark\\s*\\("
+        - "pg_sleep\\s*\\("
+    severity: critical
+    action: alert
+    tags: [web-attack, sql-injection, owasp, a03-injection, injection, network-based]
+
+  # ============================================================================
+  # Cross-Site Scripting (XSS) Detection (real network payload)
+  # ============================================================================
+
+  - id: web_xss_network_pattern
+    name: "Web Attack: XSS patterns in plaintext HTTP payload"
+    description: "XSS payload patterns (script tags, event handlers, dangerous JavaScript) detected in captured plaintext HTTP request/response bytes (network-based XSS detection)"
+    event_type: http_plaintext
+    condition:
+      field: data
+      op: regex
+      values:
+        # Script tags
+        - "<script"
+        - "%3Cscript"
+        - "%253Cscript"  # double-encoded
+        # JavaScript protocol
+        - "javascript:"
+        - "javascript%3a"
+        # Event handlers (XSS vectors)
+        - "onerror\\s*="
+        - "onload\\s*="
+        - "onclick\\s*="
+        - "onmouseover\\s*="
+        # Dangerous JavaScript properties
+        - "document\\.cookie"
+        - "document%2ecookie"
+        - "innerHTML"
+        # eval-based XSS
+        - "eval\\s*\\("
+        # XSS data URI vectors
+        - "data:text/html"
+        - "data%3atext%3ahtml"
+    severity: critical
+    action: alert
+    tags: [web-attack, xss, owasp, a03-injection, cross-site-scripting, network-based]
+
+  # ============================================================================
+  # Path Traversal Detection (real network payload)
+  # ============================================================================
+
+  - id: web_path_traversal_network
+    name: "Web Attack: Path traversal patterns in plaintext HTTP request"
+    description: "Path traversal patterns (including URL encoding evasion) detected in captured plaintext HTTP request bytes"
+    event_type: http_plaintext
+    condition:
+      field: data
+      op: regex
+      values:
+        - "\\.\\./"
+        - "\\.\\.\\\\"
+        - "%2e%2e%2f"
+        - "%2e%2e%5c"
+        - "%252e%252e%252f"
+        - "%c0%ae"
+    severity: critical
+    action: alert
+    tags: [web-attack, path-traversal, owasp, a01-broken-access-control, network-based]

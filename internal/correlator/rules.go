@@ -1202,6 +1202,24 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "ja3s":
 			return e.TLS.JA3S
 		}
+	case types.EventHTTPPlaintext:
+		if e.HTTPPlaintext == nil {
+			return ""
+		}
+		switch field {
+		case "http_data", "data":
+			l := e.HTTPPlaintext.DataLen
+			if l > uint32(len(e.HTTPPlaintext.Data)) {
+				l = uint32(len(e.HTTPPlaintext.Data))
+			}
+			return string(e.HTTPPlaintext.Data[:l])
+		case "direction":
+			return strconv.FormatUint(uint64(e.HTTPPlaintext.Direction), 10)
+		case "data_len":
+			return strconv.FormatUint(uint64(e.HTTPPlaintext.DataLen), 10)
+		case "comm":
+			return util.BytesToString(e.Comm[:])
+		}
 	case types.EventPrivesc:
 		// caps_gained / caps_dropped are handled before getFieldValue.
 		// Common process fields are also accessible.

@@ -43,6 +43,9 @@ const (
 	EventIOUring EventType = 14
 	// EventBPFProgram indicates a bpf() syscall event: BPF_PROG_LOAD or BPF_MAP_CREATE.
 	EventBPFProgram EventType = 15
+	// EventHTTPPlaintext indicates a plaintext (non-TLS) HTTP request/response
+	// payload captured via uprobes on libc read/recv in known web-server processes.
+	EventHTTPPlaintext EventType = 16
 )
 
 // eventTypeCanonical maps each EventType to its single canonical lowercase
@@ -64,8 +67,9 @@ var eventTypeCanonical = map[EventType]string{
 	EventLSMAudit:   "lsm_audit",
 	EventSequence:   "sequence",
 	EventCloudAudit: "cloud_audit",
-	EventIOUring:    "io_uring",
-	EventBPFProgram: "bpf_program",
+	EventIOUring:       "io_uring",
+	EventBPFProgram:    "bpf_program",
+	EventHTTPPlaintext: "http_plaintext",
 }
 
 // String returns the canonical lowercase name of the event type, or "unknown"
@@ -168,6 +172,8 @@ var eventTypeNames = map[string]EventType{
 	"bpf_program":   EventBPFProgram,
 	"bpf_prog_load": EventBPFProgram,
 	"bpf":           EventBPFProgram,
+	"http_plaintext": EventHTTPPlaintext,
+	"http":           EventHTTPPlaintext,
 }
 
 // UnmarshalYAML allows EventType to be decoded from both numeric and string YAML values.
@@ -221,6 +227,10 @@ type Event struct {
 	// BPFProgram holds bpf() syscall monitoring data (BPF_PROG_LOAD / BPF_MAP_CREATE).
 	// Populated when Type == EventBPFProgram.
 	BPFProgram *BPFProgramEvent
+	// HTTPPlaintext holds plaintext HTTP request/response data captured via
+	// libc read/recv uprobes on known web-server processes.
+	// Populated when Type == EventHTTPPlaintext.
+	HTTPPlaintext *HTTPEvent
 	// TraceContext holds OpenTelemetry trace context for distributed tracing.
 	TraceContext *TraceContext
 	// Enrichment holds Kubernetes metadata for the event.
@@ -316,6 +326,30 @@ type TLSEvent struct {
 	// JA3S is the JA3S server-side fingerprint hash (MD5 hex) computed from the
 	// TLS ServerHello handshake message.
 	JA3S string
+}
+
+// HTTPDirection indicates the direction of captured plaintext HTTP data.
+type HTTPDirection uint8
+
+const (
+	// HTTPDirectionRequest indicates data read from a client socket (request).
+	HTTPDirectionRequest HTTPDirection = 0
+	// HTTPDirectionResponse indicates data written to a client socket (response).
+	HTTPDirectionResponse HTTPDirection = 1
+)
+
+// HTTPEvent contains plaintext HTTP data captured via libc read/recv uprobes.
+// Unlike TLSEvent (captured before encryption/after decryption in libssl),
+// this event is only ever produced for traffic that never went through TLS —
+// the collector filters in-kernel for buffers that look like an HTTP request
+// line or status line before submitting to the ring buffer.
+type HTTPEvent struct {
+	// Direction indicates whether this is a request (read) or response (write).
+	Direction HTTPDirection
+	// DataLen is the actual length of the captured read/write (may exceed len(Data)).
+	DataLen uint32
+	// Data contains the captured plaintext (first 256 bytes).
+	Data [256]byte
 }
 
 // DNSDirection indicates the direction of DNS traffic.

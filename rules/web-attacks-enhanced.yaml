@@ -1,0 +1,261 @@
+# Enhanced Web Attack Detection Rules for ebpf-guard
+# Phase A implementation - Rules only, no new eBPF collector required
+# Addresses issue #281: SQL Injection, XSS, and Path Traversal detection gaps
+
+rules:
+  # ============================================================================
+  # SQL Injection Detection (file/process-based)
+  # ============================================================================
+
+  - id: web_sql_injection_files
+    name: "Web Attack: SQL injection patterns in file operations"
+    description: "SQL keywords/injection patterns detected in file access (potential SQLi via file logging, temp files, or webshell uploads)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        # Union-based SQLi
+        - "union.*select"
+        - "UNION.*SELECT"
+        # Boolean-based SQLi (case-insensitive)
+        - "[Oo][Rr]\\s+\\d+\\s*=\\s*\\d+"
+        - "[Aa][Nn][Dd]\\s+\\d+\\s*=\\s*\\d+"
+        # SQL comment markers (common in SQLi payloads)
+        - "--"
+        - "#"
+        - ";"
+        # Quote escaping patterns
+        - "'%27"
+        - "%27'"
+        - "\"%22"
+        - "%22\""
+        # SQL keywords often abused in injection (case-insensitive)
+        - "[Dd][Rr][Oo][Pp]\\s+[Tt][Aa][Bb][Ll][Ee]"
+        - "[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]"
+        - "[Ii][Nn][Ss][Ee][Rr][Tt]\\s+[Ii][Nn][Tt][Oo]"
+        - "[Uu][Pp][Dd][Aa][Tt][Ee]\\s+.*\\s+[Ss][Ee][Tt]"
+        # Dangerous SQL functions
+        - "exec\\s*\\("
+        - "eval\\s*\\("
+        - "waitfor\\s+delay"
+        - "sleep\\s*\\("
+        - "benchmark\\s*\\("
+        - "pg_sleep\\s*\\("
+    severity: critical
+    action: alert
+    tags: [web-attack, sql-injection, owasp, a03-injection, injection]
+
+  - id: web_sql_injection_command
+    name: "Web Attack: Database process spawned by web server"
+    description: "Database client process (mysql, postgres, sqlite) spawned by potential web server process (indicates possible SQL injection achieving code execution)"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["59", "322", "545"]  # execve, execveat, execveat (x86_64)
+    severity: critical
+    action: alert
+    tags: [web-attack, sql-injection, owasp, a03-injection, process-injection]
+
+  - id: web_blind_sqli_heuristic
+    name: "Web Attack: Blind SQLi timing-based pattern detected"
+    description: "Sleep/wait syscalls following database-adjacent file activity (potential blind SQLi timing attack)"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["35", "206", "162"]  # nanosleep, clock_nanosleep, select (sleep syscalls)
+    severity: warning
+    action: alert
+    tags: [web-attack, sql-injection, blind-sqli, owasp, a03-injection, timing-attack]
+
+  # ============================================================================
+  # Cross-Site Scripting (XSS) Detection (file-based)
+  # ============================================================================
+
+  - id: web_xss_file_pattern
+    name: "Web Attack: XSS patterns in file operations"
+    description: "XSS payload patterns (script tags, event handlers, dangerous JavaScript) detected in file access"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        # Script tags
+        - "<script"
+        - "%3Cscript"
+        - "%253Cscript"  # double-encoded
+        # JavaScript protocol
+        - "javascript:"
+        - "javascript%3a"
+        # Event handlers (XSS vectors)
+        - "onerror\\s*="
+        - "onload\\s*="
+        - "onclick\\s*="
+        - "onmouseover\\s*="
+        - "onfocus\\s*="
+        - "onblur\\s*="
+        # Dangerous JavaScript properties
+        - "document\\.cookie"
+        - "document%2ecookie"
+        - "innerHTML"
+        - "outerHTML"
+        # eval-based XSS
+        - "eval\\s*\\("
+        - "setTimeout\\s*\\("
+        - "setInterval\\s*\\("
+        # XSS data URI vectors
+        - "data:text/html"
+        - "data%3atext%3ahtml"
+    severity: critical
+    action: alert
+    tags: [web-attack, xss, owasp, a03-injection, cross-site-scripting]
+
+  # ============================================================================
+  # Extended Path Traversal Detection
+  # ============================================================================
+
+  - id: web_path_traversal_extended
+    name: "Web Attack: Extended path traversal with encoding evasion"
+    description: "Path traversal patterns including URL encoding, double encoding, Unicode evasion, and mixed encoding variants"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        # Basic traversal (from existing rule, kept for completeness)
+        - "\\.\\./"
+        - "\\.\\.\\\\"
+        # URL-encoded variants
+        - "%2e%2e%2f"
+        - "%2e%2e%5c"
+        # Double-encoded variants (evasion technique)
+        - "%252e%252e%252f"
+        - "%252e%252e%255c"
+        # Unicode evasion (IIS/Tomcat)
+        - "%c0%ae"
+        - "%c1%1c"
+        - "%e0%80%af"
+        # Mixed encoding (ASCII + URL-encoded)
+        - ".%2e/"
+        - "%2e./"
+        - ".%5c"
+        - "%5c."
+        # Repeated traversal patterns (aggressive)
+        - "(\\.\\./){2,}"
+        - "(\\.\\.\\\\){2,}"
+    severity: critical
+    action: alert
+    tags: [web-attack, path-traversal, owasp, a01-broken-access-control, encoding-evasion]
+
+  - id: web_path_traversal_process
+    name: "Web Attack: Path traversal by web server process"
+    description: "Web server process accessing files with path traversal patterns (reduces false positives vs. generic traversal rule)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        # Combined pattern: web server process + traversal
+        - "(nginx|apache|httpd|node|python|php|java|tomcat|jetty|lighttpd|caddy|traefik|gunicorn|uwsgi|passenger|mongrel|webrick).*?(\\.\\.|%2e|%2f|%5c|%c0)"
+        - "(\\.\\./|\\.\\.\\\\|%2e%2e%2f|%252e%252e%252f|%c0%ae).+?(nginx|apache|httpd|node|python|php|java|tomcat|jetty|lighttpd|caddy|traefik|gunicorn|uwsgi|passenger|mongrel|webrick)"
+    severity: critical
+    action: alert
+    tags: [web-attack, path-traversal, owasp, a01-broken-access-control, web-server]
+
+  # ============================================================================
+  # Additional File-Based Attack Rules
+  # ============================================================================
+
+  - id: web_file_inclusion_attack
+    name: "Web Attack: Local/Remote file inclusion wrappers"
+    description: "PHP/Java stream wrappers and file inclusion attack patterns (LFI/RFI)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        # PHP wrappers (LFI/RFI vectors)
+        - "php://input"
+        - "php://file"
+        - "expect://"
+        - "data://"
+        - "zip://"
+        - "phar://"
+        - "glob://"
+        # Java file:// URL patterns
+        - "file:///"
+        - "file://%2e%2e"
+    severity: critical
+    action: alert
+    tags: [web-attack, file-inclusion, lfi, rfi, owasp, a01-broken-access-control]
+
+  - id: web_template_injection
+    name: "Web Attack: Server-Side Template Injection (SSTI) patterns"
+    description: "Template engine syntax patterns (Jinja2, Twig, FreeMarker, Velocity, Smarty, ERB, etc.)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        # Jinja2/Django
+        - "\\{\\{.*\\}\\}"
+        - "\\{%.*%\\}"
+        - "\\{#.*#\\}"
+        # Twig/Smarty
+        - "\\{\\$.*\\}"
+        # FreeMarker
+        - "<#.*>"
+        - "\\[#.*\\]"
+        # Velocity
+        - "#\\{.*\\}"
+        - "\\$\\{.*\\}"
+        - "\\$!.*\\}"
+        # Ruby ERB
+        - "<%=.*%>"
+        - "<%.*%>"
+        # Handlebars/Mustache
+        - "\\{\\{\\{?\\}\\}\\}?"
+        # Pebble/Templates
+        - "\\{%\\s*(extends|import|include|set|macro|block|end).*%\\}"
+    severity: critical
+    action: alert
+    tags: [web-attack, ssti, template-injection, owasp, a03-injection]
+
+  - id: web_internal_recon
+    name: "Web Attack: Internal network reconnaissance"
+    description: "Web server process connecting to private IP address ranges (internal network recon/pivoting)"
+    event_type: network
+    condition:
+      field: daddr
+      op: in_cidr
+      values:
+        - "10.0.0.0/8"        # RFC1918 private Class A
+        - "172.16.0.0/12"    # RFC1918 private Class B
+        - "192.168.0.0/16"   # RFC1918 private Class C
+    severity: warning
+    action: alert
+    tags: [web-attack, internal-recon, pivoting, owasp, a10-ssrf, private-network]
+
+  # ============================================================================
+  # Combined Attack Correlation
+  # ============================================================================
+
+  - id: web_combined_attack
+    name: "Web Attack: Combined multi-vector attack indicators"
+    description: "Multiple web attack vectors from the same process within short time window (correlated attack detection)"
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values:
+        # Combined SQLi + path traversal pattern
+        - "(union.*select|or\\s+1\\s*=\\s*1|drop\\s+table).*.*(\\.\\.|%2e|%2f|%5c)"
+        # Combined XSS + file inclusion pattern
+        - "(<script|javascript:|innerHTML).*(php://|file://|data://)"
+        # Combined SSTI + traversal pattern
+        - "(\\{\\{|\\{%|#\\{|<%=).*.*(\\.\\.|%2e|%2f)"
+    severity: critical
+    action: alert
+    tags: [web-attack, combined-attack, multi-vector, correlation, owasp]

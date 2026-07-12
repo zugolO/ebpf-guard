@@ -941,6 +941,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 		}
 
+		if cfg.Collectors.HTTPPlaintext.Enabled {
+			if hc, hcErr := collector.NewHTTPCollector(slog.Default(), true, cfg.Collectors.HTTPPlaintext.ServerComms); hcErr != nil {
+				slog.Warn("http_plaintext: collector creation failed", slog.Any("error", hcErr))
+			} else {
+				collectors = append(collectors, hc.WithBackpressureStrategy(bpStrategy))
+				slog.Info("http_plaintext: collector enabled")
+			}
+		}
+
 		lsmCfg := collector.LSMConfig{Enabled: "auto"}
 		if cfg.Enforcement.BlockBackend == "lsm" {
 			lsmCfg.Enabled = "true"

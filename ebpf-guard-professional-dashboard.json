@@ -1,0 +1,437 @@
+{
+  "dashboard": {
+    "title": "ebpf-guard — Enterprise Security Monitor",
+    "description": "Комплексный мониторинг безопасности на базе eBPF",
+    "tags": ["security", "ebpf", "container", "kubernetes", "runtime"],
+    "timezone": "browser",
+    "refresh": "30s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "🚨 SECURITY STATUS",
+        "type": "row",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 0},
+        "collapsed": false
+      },
+      {
+        "id": 2,
+        "title": "🔴 Critical Alerts",
+        "type": "stat",
+        "gridPos": {"h": 5, "w": 4, "x": 0, "y": 2},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 1, "color": "red"},
+                {"value": 10, "color": "dark-red"}
+              ]
+            },
+            "mappings": [
+              {"type": "value", "value": "0", "text": "✅ SECURE"},
+              {"type": "range", "from": "1", "to": "10", "text": "⚠️ ALERT"},
+              {"type": "range", "from": "10", "to": "100000", "text": "🔥 CRITICAL"}
+            ]
+          }
+        },
+        "targets": [{
+          "expr": "sum(ebpf_guard_alerts_total{severity=\"critical\"})"
+        }]
+      },
+      {
+        "id": 3,
+        "title": "🟡 Warning Alerts",
+        "type": "stat",
+        "gridPos": {"h": 5, "w": 4, "x": 4, "y": 2},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 50, "color": "yellow"},
+                {"value": 200, "color": "orange"}
+              ]
+            }
+          }
+        },
+        "targets": [{
+          "expr": "sum(ebpf_guard_alerts_total{severity=\"warning\"})"
+        }]
+      },
+      {
+        "id": 4,
+        "title": "🔵 Info Alerts",
+        "type": "stat",
+        "gridPos": {"h": 5, "w": 4, "x": 8, "y": 2},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "blue"},
+                {"value": 20, "color": "light-blue"},
+                {"value": 50, "color": "cyan"}
+              ]
+            }
+          }
+        },
+        "targets": [{
+          "expr": "sum(ebpf_guard_alerts_total{severity=\"info\"})"
+        }]
+      },
+      {
+        "id": 5,
+        "title": "⚡ Attack Rate",
+        "type": "stat",
+        "gridPos": {"h": 5, "w": 4, "x": 12, "y": 2},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "color": {"mode": "palette-classic"}
+          }
+        },
+        "targets": [{
+          "expr": "sum(rate(ebpf_guard_alerts_total[5m])) * 60",
+          "legendFormat": "attacks/min"
+        }]
+      },
+      {
+        "id": 6,
+        "title": "📊 Events/sec",
+        "type": "stat",
+        "gridPos": {"h": 5, "w": 4, "x": 16, "y": 2},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 1000, "color": "yellow"},
+                {"value": 10000, "color": "red"}
+              ]
+            }
+          }
+        },
+        "targets": [{
+          "expr": "sum(rate(ebpf_guard_events_collected_total[5m]))"
+        }]
+      },
+      {
+        "id": 7,
+        "title": "🎯 Detection Ratio",
+        "type": "stat",
+        "gridPos": {"h": 5, "w": 4, "x": 20, "y": 2},
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "max": 100,
+            "min": 0,
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "red"},
+                {"value": 50, "color": "yellow"},
+                {"value": 90, "color": "green"}
+              ]
+            }
+          }
+        },
+        "targets": [{
+          "expr": "(sum(ebpf_guard_alerts_total) / sum(ebpf_guard_events_collected_total)) * 100"
+        }]
+      },
+      {
+        "id": 8,
+        "title": "📈 ATTACK TIMELINE",
+        "type": "row",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 7},
+        "collapsed": false
+      },
+      {
+        "id": 9,
+        "title": "🎯 Attack Timeline (All Severities)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 9},
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "lineWidth": 2,
+              "fillOpacity": 20,
+              "gradientMode": "opacity"
+            }
+          }
+        },
+        "options": {
+          "legend": {
+            "showLegend": true,
+            "placement": "right",
+            "calcs": ["mean", "max", "last"]
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "sum(rate(ebpf_guard_alerts_total{severity=\"critical\"}[30s]))",
+            "legendFormat": "🔴 CRITICAL",
+            "color": {"mode": "fixed", "fixedColor": "red"}
+          },
+          {
+            "expr": "sum(rate(ebpf_guard_alerts_total{severity=\"warning\"}[30s]))",
+            "legendFormat": "🟡 WARNING",
+            "color": {"mode": "fixed", "fixedColor": "yellow"}
+          },
+          {
+            "expr": "sum(rate(ebpf_guard_alerts_total{severity=\"info\"}[30s]))",
+            "legendFormat": "🔵 INFO",
+            "color": {"mode": "fixed", "fixedColor": "blue"}
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "🔍 ATTACK ANALYSIS",
+        "type": "row",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 17},
+        "collapsed": false
+      },
+      {
+        "id": 11,
+        "title": "🎯 Top Attack Vectors",
+        "type": "bargauge",
+        "gridPos": {"h": 10, "w": 12, "x": 0, "y": 19},
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "unit": "short"
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient",
+          "maxVizHeight": 300,
+          "minVizHeight": 100,
+          "minVizWidth": 80
+        },
+        "targets": [{
+          "expr": "topk(15, sum by (rule_id) (ebpf_guard_alerts_total))",
+          "legendFormat": "{{rule_id}}",
+          "instant": true
+        }]
+      },
+      {
+        "id": 12,
+        "title": "🦠 Attack Categories",
+        "type": "piechart",
+        "gridPos": {"h": 10, "w": 12, "x": 12, "y": 19},
+        "options": {
+          "pieType": "donut",
+          "displayLabels": ["name", "value", "percent"],
+          "legend": {
+            "showLegend": true,
+            "placement": "right",
+            "values": ["value"],
+            "calcs": ["last"]
+          }
+        },
+        "targets": [
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*container.*\"})",
+            "legendFormat": "🚪 Container Escape"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*webshell.*\"})",
+            "legendFormat": "🐚 Webshell"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*owasp.*\"})",
+            "legendFormat": "🕸️ OWASP"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*rootkit.*\"})",
+            "legendFormat": "🦠 Rootkit"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*exfil.*\"})",
+            "legendFormat": "📤 Exfiltration"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*privesc.*\"})",
+            "legendFormat": "⬆️ Privilege Escalation"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*recon.*\"})",
+            "legendFormat": "👁️ Reconnaissance"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*anomaly.*\"})",
+            "legendFormat": "🤖 Anomaly"
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "🔥 THREAT INTELLIGENCE",
+        "type": "row",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 29},
+        "collapsed": false
+      },
+      {
+        "id": 14,
+        "title": "📋 Recent Critical Alerts Table",
+        "type": "table",
+        "gridPos": {"h": 12, "w": 24, "x": 0, "y": 31},
+        "options": {
+          "showHeader": true,
+          "sortBy": [{\"desc\": true, \"displayName\": \"Severity\"}]
+        },
+        "transformations": [
+          {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true}}}
+        ],
+        "targets": [{
+          "expr": "topk(20, ebpf_guard_alerts_total{severity=\"critical\"})",
+          "format": "table",
+          "instant": true
+        }],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {"align": "left"},
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 10, "color": "yellow"},
+                {"value": 50, "color": "red"}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 15,
+        "title": "📊 PERFORMANCE METRICS",
+        "type": "row",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 43},
+        "collapsed": false
+      },
+      {
+        "id": 16,
+        "title": "⚡ System Performance",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 45},
+        "targets": [
+          {
+            "expr": "rate(ebpf_guard_events_collected_total[1m])",
+            "legendFormat": "📊 Events/sec"
+          },
+          {
+            "expr": "rate(ebpf_guard_correlation_duration_seconds_sum[1m]) / rate(ebpf_guard_correlation_duration_seconds_count[1m])",
+            "legendFormat": "⏱️ Avg Correlation Time"
+          },
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(ebpf_guard_correlation_duration_seconds_bucket[1m])) by (le))",
+            "legendFormat": "🎯 P99 Correlation"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {"mode": "palette-classic"}
+          }
+        }
+      },
+      {
+        "id": 17,
+        "title": "🌐 Network Security",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 45},
+        "targets": [
+          {
+            "expr": "sum(rate(ebpf_guard_alerts_total{rule_id=~\".*network.*|.*port.*|.*connection.*\"}[5m]))",
+            "legendFormat": "🌐 Network Alerts"
+          },
+          {
+            "expr": "sum(rate(ebpf_guard_alerts_total{rule_id=~\".*dns.*\"}[5m]))",
+            "legendFormat": "🔍 DNS Alerts"
+          },
+          {
+            "expr": "sum(rate(ebpf_guard_alerts_total{rule_id=~\".*tls.*|.*ssl.*\"}[5m]))",
+            "legendFormat": "🔐 TLS Alerts"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"}
+          }
+        }
+      },
+      {
+        "id": 18,
+        "title": "🎯 MITRE ATT&CK COVERAGE",
+        "type": "row",
+        "gridPos": {"h": 2, "w": 24, "x": 0, "y": 53},
+        "collapsed": false
+      },
+      {
+        "id": 19,
+        "title": "🎯 MITRE Tactics Coverage",
+        "type": "bargauge",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 55},
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient"
+        },
+        "targets": [
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*recon.*|.*scan.*|.*find.*\"})",
+            "legendFormat": "👁️ Reconnaissance"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*exfil.*|.*data.*\"})",
+            "legendFormat": "📤 Exfiltration"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*privesc.*|.*suid.*\"})",
+            "legendFormat": "⬆️ Privilege Escalation"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*defense.*|.*evasion.*\"})",
+            "legendFormat": "🛡️ Defense Evasion"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*credential.*|.*password.*\"})",
+            "legendFormat": "🔑 Credential Access"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*persistence.*|.*cron.*|.*service.*\"})",
+            "legendFormat": "🔄 Persistence"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*execution.*|.*shell.*|.*command.*\"})",
+            "legendFormat": "⚡ Execution"
+          },
+          {
+            "expr": "sum(ebpf_guard_alerts_total{rule_id=~\".*lateral.*|.*ssh.*|.*network.*\"})",
+            "legendFormat": "🌐 Lateral Movement"
+          }
+        ]
+      }
+    ]
+  },
+  "overwrite": true
+}

@@ -1,7 +1,7 @@
 config_version: "v0.1"
 
 server:
-  bind_address: ":19090"
+  bind_address: "0.0.0.0:19090"  # Слушать на всех интерфейсах для Docker
   metrics_path: "/metrics"
   health_path: "/health"
 

@@ -1,0 +1,148 @@
+groups:
+  # Основные правила для мониторинга ebpf-guard
+  - name: ebpf_guard_health
+    interval: 30s
+    rules:
+      # ebpf-guard доступен
+      - alert: EbpfGuardDown
+        expr: up{job="ebpf-guard"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: ebpf-guard
+        annotations:
+          summary: "ebpf-guard instance down"
+          description: "ebpf-guard has been down for more than 1 minute"
+
+      # Высокий rate алертов (возможна атака)
+      - alert: HighAlertRate
+        expr: rate(ebpf_guard_alerts_total[1m]) > 100
+        for: 2m
+        labels:
+          severity: warning
+          component: ebpf-guard
+        annotations:
+          summary: "High alert rate detected"
+          description: "Alert rate is {{ $value }} alerts/sec for 2 minutes"
+
+      # Критический rate алертов (активная атака)
+      - alert: CriticalAlertRate
+        expr: rate(ebpf_guard_alerts_total[1m]) > 500
+        for: 1m
+        labels:
+          severity: critical
+          component: ebpf-guard
+        annotations:
+          summary: "Critical alert rate - possible attack"
+          description: "Alert rate is {{ $value }} alerts/sec for 1 minute"
+
+  # Правила для детектирования конкретных типов атак
+  - name: ebpf_guard_attacks
+    interval: 15s
+    rules:
+      # SQL Injection атаки
+      - alert: SQLInjectionDetected
+        expr: sum(rate(ebpf_guard_alerts_total{rule=~".*sql.*|.*injection.*"}[1m])) > 5
+        for: 1m
+        labels:
+          severity: critical
+          attack_type: sql_injection
+          component: ebpf-guard
+        annotations:
+          summary: "SQL Injection attack detected"
+          description: "{{ $value }} SQL injection alerts per second"
+
+      # Brute Force атаки
+      - alert: BruteForceAttackDetected
+        expr: sum(rate(ebpf_guard_alerts_total{rule=~".*auth.*|.*brute.*|.*login.*|.*password.*"}[1m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+          attack_type: brute_force
+          component: ebpf-guard
+        annotations:
+          summary: "Brute force attack detected"
+          description: "{{ $value }} authentication attack alerts per second"
+
+      # SSRF атаки
+      - alert: SSRFAttackDetected
+        expr: sum(rate(ebpf_guard_alerts_total{rule=~".*ssrf.*|.*internal.*access.*"}[1m])) > 3
+        for: 1m
+        labels:
+          severity: critical
+          attack_type: ssrf
+          component: ebpf-guard
+        annotations:
+          summary: "SSRF attack detected"
+          description: "{{ $value }} SSRF alerts per second"
+
+      # File access anomalies
+      - alert: SuspiciousFileAccess
+        expr: sum(rate(ebpf_guard_alerts_total{rule=~".*sensitive.*file.*|.*etc.*passwd.*"}[1m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+          attack_type: file_access
+          component: ebpf-guard
+        annotations:
+          summary: "Suspicious file access detected"
+          description: "{{ $value }} suspicious file access alerts per second"
+
+      # Memory anomalies
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes{job="ebpf-guard"} > 2_000_000_000
+        for: 5m
+        labels:
+          severity: warning
+          component: ebpf-guard
+        annotations:
+          summary: "ebpf-guard high memory usage"
+          description: "Memory usage is {{ $value | humanize }} bytes"
+
+      # Anomaly detection spike
+      - alert: AnomalySpikeDetected
+        expr: rate(ebpf_guard_profiler_anomalies_total[1m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+          component: ebpf-guard
+        annotations:
+          summary: "Anomaly spike detected"
+          description: "{{ $value }} anomalies per second detected"
+
+  # Правила для мониторинга системы
+  - name: ebpf_guard_system
+    interval: 1m
+    rules:
+      # BPF programs attached
+      - alert: BPFProgramsDetached
+        expr: ebpf_guard_bpf_attached == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: ebpf-guard
+        annotations:
+          summary: "BPF programs detached"
+          description: "ebpf-guard BPF programs are not attached"
+
+      # Collector health
+      - alert: CollectorDown
+        expr: ebpf_guard_collector_up == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: ebpf-guard
+        annotations:
+          summary: "Collector down: {{ $labels.collector }}"
+          description: "Collector {{ $labels.collector }} has been down for 2 minutes"
+
+      # Rules loaded
+      - alert: RulesNotLoaded
+        expr: ebpf_guard_rules_loaded == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: ebpf-guard
+        annotations:
+          summary: "Detection rules not loaded"
+          description: "No detection rules are loaded in ebpf-guard"

@@ -379,6 +379,8 @@ type FileOpsConfig struct {
 type CollectorsConfig struct {
 	// TLS collector configuration
 	TLS TLSCollectorConfig `mapstructure:"tls"`
+	// HTTPPlaintext collector configuration (issue #281 network-based detection gap)
+	HTTPPlaintext HTTPPlaintextCollectorConfig `mapstructure:"http_plaintext"`
 	// DNS collector configuration
 	DNS DNSCollectorConfig `mapstructure:"dns"`
 	// FileOps controls which file operation types are collected.
@@ -531,6 +533,29 @@ type TLSCollectorConfig struct {
 	// MaxDataSize is the maximum bytes to capture per TLS record.
 	// Default: 256
 	MaxDataSize int `mapstructure:"max_data_size"`
+}
+
+// HTTPPlaintextCollectorConfig holds plaintext (non-TLS) HTTP inspection settings.
+// This is the network-based detection collector added for issue #281: TLSCollector
+// only sees data that goes through OpenSSL/libssl, so plaintext HTTP traffic
+// (unencrypted, or terminated by a non-OpenSSL TLS stack in front of the app)
+// was previously invisible to network-based SQLi/XSS rules.
+type HTTPPlaintextCollectorConfig struct {
+	// Enabled enables plaintext HTTP inspection via uprobes on libc read/recv.
+	// Requires CAP_SYS_PTRACE capability.
+	// Default: false
+	Enabled bool `mapstructure:"enabled"`
+	// ScanInterval is the interval for scanning for known web-server processes.
+	// Default: 30s
+	ScanInterval string `mapstructure:"scan_interval"`
+	// MaxDataSize is the maximum bytes to capture per read()/recv() call.
+	// Default: 256
+	MaxDataSize int `mapstructure:"max_data_size"`
+	// ServerComms is the list of process names (comm) to attach uprobes to.
+	// Default: nginx, apache2, httpd, node, python, python3, php-fpm, java, ruby,
+	// gunicorn, uwsgi, caddy, traefik, lighttpd (see defaultHTTPServerComms in
+	// internal/collector/http_uprobe.go).
+	ServerComms []string `mapstructure:"server_comms"`
 }
 
 // DNSCollectorConfig holds DNS monitoring settings.
@@ -1882,6 +1907,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.tls.enabled", false)
 	v.SetDefault("collectors.tls.scan_interval", "30s")
 	v.SetDefault("collectors.tls.max_data_size", 256)
+
+	// Plaintext HTTP collector defaults (issue #281 network-based detection gap)
+	v.SetDefault("collectors.http_plaintext.enabled", false)
+	v.SetDefault("collectors.http_plaintext.scan_interval", "30s")
+	v.SetDefault("collectors.http_plaintext.max_data_size", 256)
+	v.SetDefault("collectors.http_plaintext.server_comms", []string{})
 
 	// DNS collector defaults
 	v.SetDefault("collectors.dns.enabled", true)

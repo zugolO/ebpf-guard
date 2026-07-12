@@ -241,6 +241,16 @@ collectors:
     enabled: false              # Requires CAP_SYS_PTRACE; attach uprobes to libssl processes
     scan_interval: 30s          # Interval to scan /proc for new libssl processes
     max_data_size: 256          # Maximum bytes captured per SSL_write/SSL_read call
+  http_plaintext:
+    # Plaintext (non-TLS) HTTP inspection — closes the issue #281 gap where
+    # network-based SQLi/XSS rules had no payload to match against for traffic
+    # that never goes through OpenSSL/libssl (collectors.tls only sees TLS data).
+    enabled: false              # Requires CAP_SYS_PTRACE; attach uprobes to libc read/recv
+    scan_interval: 30s          # Interval to scan /proc for known web-server processes
+    max_data_size: 256          # Maximum bytes captured per read()/recv() call
+    server_comms: []            # Process names to attach to; empty = built-in default list
+                                 # (nginx, apache2, httpd, node, python, python3, php-fpm,
+                                 #  java, ruby, gunicorn, uwsgi, caddy, traefik, lighttpd)
   dns:
     enabled: true
     dga_threshold: 3.5          # Shannon entropy bits/char; above this → DGA suspicion

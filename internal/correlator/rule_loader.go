@@ -84,6 +84,14 @@ var (
 		// Process context — available on all event types via Event.Comm
 		"proc.comm": true, "comm": true,
 	}
+	validHTTPPlaintextFields = map[string]bool{
+		"http_data": true, "direction": true, "data_len": true,
+		// "data" is an alias for "http_data" accepted in rule YAML for ergonomics,
+		// mirroring the tls_data/data alias pattern.
+		"data": true,
+		// Process context — available on all event types via Event.Comm
+		"proc.comm": true, "comm": true,
+	}
 	// caps_gained / caps_dropped use the OpCapsGained / OpCapsDropped operators
 	// (not standard value comparison), so their only meaningful field is "caps".
 	validPrivescFields = map[string]bool{
@@ -450,6 +458,8 @@ func validateFieldName(field string, eventType types.EventType) error {
 		validFields = validCloudAuditFields
 	case types.EventBPFProgram:
 		validFields = validBpfProgramFields
+	case types.EventHTTPPlaintext:
+		validFields = validHTTPPlaintextFields
 	default:
 		return fmt.Errorf("unknown event type: %d", eventType)
 	}

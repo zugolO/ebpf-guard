@@ -92,6 +92,7 @@ BPF_SOURCES=(
   "${BPF_DIR}/hidden_process.bpf.c"
   "${BPF_DIR}/tls_clienthello.bpf.c"
   "${BPF_DIR}/tls_uprobe.bpf.c"
+  "${BPF_DIR}/http_uprobe.bpf.c"
   "${BPF_DIR}/xdp_block.bpf.c"
   "${BPF_DIR}/gpu_uprobe.bpf.c"
 )

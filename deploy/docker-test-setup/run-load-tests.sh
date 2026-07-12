@@ -10,7 +10,7 @@ LOGS_DIR="/opt/ebpf-load-test/logs"
 DURATION=${DURATION:-30}  # Default test duration in seconds
 CONCURRENCY=${CONCURRENCY:-10}  # Default concurrent connections
 TARGET_URL=${TARGET_URL:-"http://localhost:3000"}  # Default target (Juice Shop)
-METRICS_URL=${METRICS_URL:-"http://localhost:9090/metrics"}  # ebpf-guard metrics
+METRICS_URL=${METRICS_URL:-"http://localhost:19090/metrics"}  # ebpf-guard metrics (9090 is Prometheus itself, not ebpf-guard)
 REPORT_DIR="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$REPORT_DIR"
 
@@ -47,8 +47,8 @@ analyze_metrics() {
     echo "=== Alert Metrics ===" >> "$output"
     grep -E "ebpf_guard_alerts_total|ebpf_guard_events_total" "$after" 2>/dev/null || echo "No alert metrics found" >> "$output"
 
-    echo "=== Event Processing Metrics ===" >> "$output"
-    grep -E "ebpf_guard_correlator_processing|ebpf_guard_collector_events" "$after" 2>/dev/null || echo "No processing metrics found" >> "$output"
+    echo "=== Event Processing / Backpressure Metrics ===" >> "$output"
+    grep -E "ebpf_guard_correlation_duration_seconds|ebpf_guard_bpf_lost_events_total|ebpf_guard_event_queue_(depth|dropped_total)" "$after" 2>/dev/null || echo "No processing metrics found" >> "$output"
 
     echo "=== Memory Usage ===" >> "$output"
     grep -E "go_memstats|process_resident_memory_bytes" "$after" 2>/dev/null || echo "No memory metrics found" >> "$output"

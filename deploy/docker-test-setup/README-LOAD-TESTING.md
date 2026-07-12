@@ -82,7 +82,7 @@ ab -n 1000 -c 100 http://localhost:3000/
 ### Test Specific Endpoint
 
 ```bash
-TARGET_URL="http://localhost:8080/api/Products" ./run-load-tests.sh
+TARGET_URL="http://localhost:3000/api/Products" ./run-load-tests.sh
 ```
 
 ### Custom Duration and Concurrency
@@ -96,15 +96,15 @@ DURATION=120 CONCURRENCY=200 ./run-load-tests.sh
 ```bash
 # Create endpoints.txt with your endpoints
 cat > endpoints.txt << EOF
-http://localhost:8080/api/user/authenticated
-http://localhost:8080/api/basket/products
+http://localhost:3000/api/user/authenticated
+http://localhost:3000/api/basket/products
 EOF
 
 # Run with authentication token
 hey -n 1000 -c 10 \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -m GET \
-  http://localhost:8080/api/
+  http://localhost:3000/api/
 ```
 
 ## Analyzing Results
@@ -121,7 +121,7 @@ python3 analyze-load-test.py /opt/ebpf-load-test/results/20231215_143000 \
 
 ```bash
 # ebpf-guard metrics
-curl http://localhost:9100/metrics | grep ebpf_guard
+curl http://localhost:19090/metrics | grep ebpf_guard
 
 # Key metrics to watch:
 # - ebpf_guard_alerts_total
@@ -132,7 +132,7 @@ curl http://localhost:9100/metrics | grep ebpf_guard
 
 ### Grafana Dashboards
 
-Access Grafana at `http://YOUR_VPS:3000` (admin/admin)
+Access Grafana at `http://YOUR_VPS:3001` (admin/admin123)
 
 Import the pre-configured dashboard:
 ```bash
@@ -208,7 +208,7 @@ docker logs juice-shop
 
 ```bash
 # Verify ebpf-guard metrics endpoint
-curl -v http://localhost:9100/metrics
+curl -v http://localhost:19090/metrics
 
 # Check if metrics are enabled in config
 grep -A 5 "server:" config-test.yaml
@@ -224,10 +224,10 @@ docker inspect ebpf-guard | grep -E "Privileged|CapAdd"
 ## Access URLs
 
 After deployment:
-- **Grafana**: http://<VPS_IP>:3000
+- **Grafana**: http://<VPS_IP>:3001 (admin/admin123)
 - **Prometheus**: http://<VPS_IP>:9090
-- **Juice Shop**: http://<VPS_IP>:8080
-- **ebpf-guard metrics**: http://<VPS_IP>:9100/metrics
+- **Juice Shop**: http://<VPS_IP>:3000
+- **ebpf-guard metrics**: http://<VPS_IP>:19090/metrics
 
 ## Next Steps
 

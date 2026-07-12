@@ -18,7 +18,7 @@ def parse_wrk_output(file_path):
 
     metrics = {
         'requests_per_sec': None,
-        'transfer_per_sec': None',
+        'transfer_per_sec': None,
         'avg_latency_ms': None,
         'stdev_latency_ms': None,
         'p50_latency_ms': None,
@@ -67,7 +67,14 @@ def parse_latency(lat_str):
     return val
 
 def parse_prometheus_metrics(file_path):
-    """Parse Prometheus metrics file"""
+    """Parse Prometheus metrics file.
+
+    ebpf-guard's counters/gauges (e.g. ebpf_guard_alerts_total,
+    ebpf_guard_events_total) are exported per label combination
+    (rule_id/severity/pod/... or type/pod/...), so a metric name can
+    appear on many lines. Values are summed per metric name so totals
+    reflect the whole process, not just whichever label combo came first.
+    """
     metrics = {}
 
     try:
@@ -81,12 +88,15 @@ def parse_prometheus_metrics(file_path):
                         match = re.match(r'(\w+)\{(.+?)\}\s+(.+)', line)
                         if match:
                             name, labels, value = match.groups()
-                            metrics[name] = float(value)
+                            metrics[name] = metrics.get(name, 0.0) + float(value)
                     else:
                         # Simple metric
                         parts = line.split()
                         if len(parts) >= 2:
-                            metrics[parts[0]] = float(parts[1])
+                            try:
+                                metrics[parts[0]] = metrics.get(parts[0], 0.0) + float(parts[1])
+                            except ValueError:
+                                continue
     except FileNotFoundError:
         print(f"Warning: {file_path} not found")
 
@@ -163,15 +173,32 @@ def generate_markdown_report(results_dir, output_file):
 
         # Alert metrics
         if 'ebpf_guard_alerts_total' in current_metrics:
-            report.append(f"- **Total Alerts**: {current_metrics['ebpf_guard_alerts_total']}")
+            report.append(f"- **Total Alerts**: {current_metrics['ebpf_guard_alerts_total']:.0f}")
 
         # Event metrics
         if 'ebpf_guard_events_total' in current_metrics:
-            report.append(f"- **Total Events Processed**: {current_metrics['ebpf_guard_events_total']}")
+            report.append(f"- **Total Events Processed**: {current_metrics['ebpf_guard_events_total']:.0f}")
 
-        # Processing metrics
-        if 'ebpf_guard_correlator_processing_duration_seconds' in current_metrics:
-            report.append(f"- **Avg Processing Time**: {current_metrics['ebpf_guard_correlator_processing_duration_seconds']:.4f}s")
+        # Correlation engine latency (histogram: avg = _sum / _count)
+        corr_sum = current_metrics.get('ebpf_guard_correlation_duration_seconds_sum')
+        corr_count = current_metrics.get('ebpf_guard_correlation_duration_seconds_count')
+        if corr_sum is not None and corr_count:
+            report.append(f"- **Avg Correlation Time**: {(corr_sum / corr_count) * 1000:.3f}ms")
+
+        # Backpressure / loss indicators
+        if 'ebpf_guard_bpf_lost_events_total' in current_metrics:
+            report.append(f"- **BPF Events Lost (backpressure)**: {current_metrics['ebpf_guard_bpf_lost_events_total']:.0f}")
+        if 'ebpf_guard_event_queue_dropped_total' in current_metrics:
+            report.append(f"- **Event Queue Drops**: {current_metrics['ebpf_guard_event_queue_dropped_total']:.0f}")
+        if 'ebpf_guard_event_queue_depth' in current_metrics:
+            report.append(f"- **Event Queue Depth**: {current_metrics['ebpf_guard_event_queue_depth']:.0f}")
+
+        # Resource usage
+        if 'process_resident_memory_bytes' in current_metrics:
+            mem_mb = current_metrics['process_resident_memory_bytes'] / (1024 * 1024)
+            report.append(f"- **Resident Memory**: {mem_mb:.1f} MB")
+        if 'ebpf_guard_goroutine_pool_active' in current_metrics:
+            report.append(f"- **Active Goroutines (pool)**: {current_metrics['ebpf_guard_goroutine_pool_active']:.0f}")
 
     # Performance vs Load Analysis
     report.append("\n---\n")

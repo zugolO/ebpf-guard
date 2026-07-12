@@ -60,6 +60,7 @@ get_baseline_metrics() {
     curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
     curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
+    curl -s "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
 
     # Подсчет начальных алертов
     if command -v jq &> /dev/null; then
@@ -137,6 +138,7 @@ get_final_metrics() {
     curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
     curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
     curl -s "$EBPF_GUARD_API/health" > "$RESULTS_DIR/final-health-$TIMESTAMP.json"
+    curl -s "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/final-state-$TIMESTAMP.json"
 
     echo ""
 }
@@ -168,13 +170,29 @@ generate_final_report() {
         echo "АНАЛИЗ МЕТРИК ebpf-guard"
         echo "═══════════════════════════════════════════════════════════════"
 
-        # Сравнение метрик
+        # Сравнение метрик — берём точные счетчики из /debug/state (JSON),
+        # т.к. ebpf_guard_alerts_total / ebpf_guard_events_total в /metrics
+        # экспортируются по многим комбинациям лейблов (rule_id/severity/pod/...),
+        # и grep по первой строке даёт только один срез, а не сумму.
         echo ""
         echo "=== КЛЮЧЕВЫЕ МЕТРИКИ ==="
 
-        # Alerts total
-        local baseline_alerts=$(grep -E "alerts_total" "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt" 2>/dev/null | awk '{print $2}' || echo 0)
-        local final_alerts=$(grep -E "alerts_total" "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt" 2>/dev/null | awk '{print $2}' || echo 0)
+        local baseline_state="$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
+        local final_state="$RESULTS_DIR/final-state-$TIMESTAMP.json"
+
+        local baseline_alerts=0 final_alerts=0 baseline_events=0 final_events=0
+        local baseline_anomalies=0 final_anomalies=0
+        if command -v jq &> /dev/null; then
+            baseline_alerts=$(jq -r '.engine_stats.total_alerts // 0' "$baseline_state" 2>/dev/null || echo 0)
+            final_alerts=$(jq -r '.engine_stats.total_alerts // 0' "$final_state" 2>/dev/null || echo 0)
+            baseline_events=$(jq -r '.engine_stats.total_events // 0' "$baseline_state" 2>/dev/null || echo 0)
+            final_events=$(jq -r '.engine_stats.total_events // 0' "$final_state" 2>/dev/null || echo 0)
+            baseline_anomalies=$(jq -r '.profiler_stats.anomalies_total // 0' "$baseline_state" 2>/dev/null || echo 0)
+            final_anomalies=$(jq -r '.profiler_stats.anomalies_total // 0' "$final_state" 2>/dev/null || echo 0)
+        else
+            warn "jq не найден — пропускаем разбор /debug/state, проверьте *-state-$TIMESTAMP.json вручную"
+        fi
+
         local new_alerts=$((final_alerts - baseline_alerts))
         echo "Alerts Total:"
         echo "  До тестов: $baseline_alerts"
@@ -182,9 +200,6 @@ generate_final_report() {
         echo "  Новых: $new_alerts"
         echo ""
 
-        # Events total
-        local baseline_events=$(grep -E "events_total" "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt" 2>/dev/null | awk '{print $2}' || echo 0)
-        local final_events=$(grep -E "events_total" "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt" 2>/dev/null | awk '{print $2}' || echo 0)
         local new_events=$((final_events - baseline_events))
         echo "Events Total:"
         echo "  До тестов: $baseline_events"
@@ -192,9 +207,6 @@ generate_final_report() {
         echo "  Новых: $new_events"
         echo ""
 
-        # Anomalies
-        local baseline_anomalies=$(grep -E "anomalies_total" "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt" 2>/dev/null | awk '{print $2}' || echo 0)
-        local final_anomalies=$(grep -E "anomalies_total" "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt" 2>/dev/null | awk '{print $2}' || echo 0)
         local new_anomalies=$((final_anomalies - baseline_anomalies))
         echo "Anomalies Total:"
         echo "  До тестов: $baseline_anomalies"

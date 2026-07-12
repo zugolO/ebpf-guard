@@ -68,7 +68,7 @@ class AlertsAnalyzer:
         return dict(counter)
 
     def analyze_by_severity(self) -> Dict[str, int]:
-        """Анализ по严重程度"""
+        """Анализ по степени серьезности"""
         counter = Counter()
         for alert in self.alerts:
             severity = alert.get('severity', 'unknown')

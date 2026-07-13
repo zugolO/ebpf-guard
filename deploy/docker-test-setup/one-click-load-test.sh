@@ -56,9 +56,9 @@ echo "Step 6: Starting containers..."
 docker stop juice-shop prometheus grafana ebpf-guard 2>/dev/null || true
 docker rm juice-shop prometheus grafana ebpf-guard 2>/dev/null || true
 
-docker run -d --name juice-shop --restart unless-stopped -p 8080:3000 bkimminich/juice-shop:latest
+docker run -d --name juice-shop --restart unless-stopped -p 3000:3000 bkimminich/juice-shop:latest
 docker run -d --name prometheus --restart unless-stopped -p 9090:9090 prom/prometheus:latest
-docker run -d --name grafana --restart unless-stopped -p 3000:3000 \
+docker run -d --name grafana --restart unless-stopped -p 3001:3000 \
   -e GF_SECURITY_ADMIN_USER=admin \
   -e GF_SECURITY_ADMIN_PASSWORD=admin \
   grafana/grafana:latest
@@ -77,11 +77,11 @@ docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "juice-
 echo ""
 echo "Testing endpoints..."
 echo -n "Juice Shop: "
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 && echo " ✓" || echo " ✗"
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 && echo " ✓" || echo " ✗"
 echo -n "Prometheus: "
 curl -s -o /dev/null -w "%{http_code}" http://localhost:9090 && echo " ✓" || echo " ✗"
 echo -n "Grafana: "
-curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 && echo " ✓" || echo " ✗"
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3001 && echo " ✓" || echo " ✗"
 
 echo ""
 echo "=========================================="
@@ -89,12 +89,12 @@ echo "Ready to test!"
 echo "=========================================="
 echo ""
 echo "Available commands:"
-echo "  wrk -t1 -c1 -d10s http://localhost:8080          # Quick test"
-echo "  wrk -t4 -c50 -d30s http://localhost:8080         # High load test"
-echo "  hey -n 1000 -c 100 http://localhost:8080        # Alternative tool"
+echo "  wrk -t1 -c1 -d10s http://localhost:3000          # Quick test"
+echo "  wrk -t4 -c50 -d30s http://localhost:3000         # High load test"
+echo "  hey -n 1000 -c 100 http://localhost:3000        # Alternative tool"
 echo ""
 echo "Access URLs:"
-echo "  Juice Shop:  http://$(hostname -I | awk '{print $1}'):8080"
+echo "  Juice Shop:  http://$(hostname -I | awk '{print $1}'):3000"
 echo "  Prometheus:  http://$(hostname -I | awk '{print $1}'):9090"
-echo "  Grafana:     http://$(hostname -I | awk '{print $1}'):3000 (admin/admin)"
+echo "  Grafana:     http://$(hostname -I | awk '{print $1}'):3001 (admin/admin)"
 echo ""

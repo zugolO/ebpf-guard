@@ -25,11 +25,12 @@ apt-get install -y \
     git \
     wget
 
-# 3. Установка Go 1.23
-echo "Установка Go 1.23..."
-if ! command -v go &> /dev/null; then
-    wget -q https://go.dev/dl/go1.23.0.linux-amd64.tar.gz
-    tar -C /usr/local -xzf go1.23.0.linux-amd64.tar.gz
+# 3. Установка Go 1.26 (соответствует go.mod и CI)
+echo "Установка Go 1.26.5..."
+if ! go version 2>/dev/null | grep -qE "go1\.(2[6-9]|[3-9][0-9])"; then
+    wget -q https://go.dev/dl/go1.26.5.linux-amd64.tar.gz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf go1.26.5.linux-amd64.tar.gz
     echo 'export PATH=$PATH:/usr/local/go/bin' >> /root/.bashrc
     export PATH=$PATH:/usr/local/go/bin
 fi
@@ -37,7 +38,7 @@ fi
 # 4. Клонирование ebpf-guard (если нет)
 if [ ! -d "/opt/ebpf-guard" ]; then
     echo "Клонирование ebpf-guard..."
-    git clone https://github.com/your-org/ebpf-guard.git /opt/ebpf-guard
+    git clone https://github.com/zugolO/ebpf-guard.git /opt/ebpf-guard
     cd /opt/ebpf-guard
 else
     echo "Обновление ebpf-guard..."

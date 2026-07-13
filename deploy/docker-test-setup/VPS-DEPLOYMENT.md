@@ -95,7 +95,7 @@ docker pull prom/prometheus:latest
 docker pull grafana/grafana:latest
 
 # Start Juice Shop (target application)
-docker run -d --name juice-shop -p 8080:3000 bkimminich/juice-shop:latest
+docker run -d --name juice-shop -p 3000:3000 bkimminich/juice-shop:latest
 
 # Start Prometheus
 docker run -d --name prometheus -p 9090:9090 \
@@ -103,7 +103,7 @@ docker run -d --name prometheus -p 9090:9090 \
   prom/prometheus:latest
 
 # Start Grafana
-docker run -d --name grafana -p 3000:3000 \
+docker run -d --name grafana -p 3001:3000 \
   -e GF_SECURITY_ADMIN_USER=admin \
   -e GF_SECURITY_ADMIN_PASSWORD=admin \
   grafana/grafana:latest
@@ -116,7 +116,7 @@ docker run -d --name grafana -p 3000:3000 \
 docker ps
 
 # Test Juice Shop
-curl -I http://localhost:8080
+curl -I http://localhost:3000
 
 # Test Prometheus
 curl -I http://localhost:9090
@@ -131,7 +131,7 @@ curl -I http://localhost:3000
 cd /opt/ebpf-guard-test
 
 # Quick test (2 minutes)
-export TARGET_URL="http://localhost:8080"
+export TARGET_URL="http://localhost:3000"
 export QUICK_MODE=1
 bash run-load-tests.sh
 
@@ -155,8 +155,8 @@ cat /opt/ebpf-load-test/results/*/summary.md
 
 ## Access URLs (From Your Browser)
 
-- **Juice Shop**: http://<VPS_IP>:8080
-- **Grafana**: http://<VPS_IP>:3000 (admin/admin)
+- **Juice Shop**: http://<VPS_IP>:3000
+- **Grafana**: http://<VPS_IP>:3001 (admin/admin)
 - **Prometheus**: http://<VPS_IP>:9090
 
 ## Troubleshooting
@@ -170,19 +170,19 @@ systemctl start docker
 ### Port conflicts
 ```bash
 # Check what's using the port
-netstat -tulpn | grep -E "8080|9090|3000"
+netstat -tulpn | grep -E "3000|3001|9090"
 
 # Stop conflicting service
-systemctl stop nginx  # if nginx is using port 8080
+systemctl stop nginx  # if nginx is using port 3000
 ```
 
 ### Connection refused
 ```bash
 # Check firewall
 ufw status
-ufw allow 8080/tcp
-ufw allow 9090/tcp
 ufw allow 3000/tcp
+ufw allow 3001/tcp
+ufw allow 9090/tcp
 ```
 
 ### Out of memory
@@ -211,11 +211,11 @@ After deployment and initial tests:
 
 ```bash
 # Test Juice Shop is responding
-wrk -t1 -c1 -d10s http://localhost:8080
+wrk -t1 -c1 -d10s http://localhost:3000
 
 # Test with 50 concurrent users
-wrk -t4 -c50 -d30s http://localhost:8080
+wrk -t4 -c50 -d30s http://localhost:3000
 
 # Test specific endpoint
-wrk -t2 -c10 -d30s http://localhost:8080/rest/user/login
+wrk -t2 -c10 -d30s http://localhost:3000/rest/user/login
 ```

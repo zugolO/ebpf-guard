@@ -130,13 +130,13 @@ docker stop juice-shop prometheus grafana 2>/dev/null || true
 docker rm juice-shop prometheus grafana 2>/dev/null || true
 
 # Start Juice Shop
-docker run -d --name juice-shop --restart unless-stopped -p 8080:3000 bkimminich/juice-shop:latest
+docker run -d --name juice-shop --restart unless-stopped -p 3000:3000 bkimminich/juice-shop:latest
 
 # Start Prometheus
 docker run -d --name prometheus --restart unless-stopped -p 9090:9090 prom/prometheus:latest
 
 # Start Grafana
-docker run -d --name grafana --restart unless-stopped -p 3000:3000 \
+docker run -d --name grafana --restart unless-stopped -p 3001:3000 \
   -e GF_SECURITY_ADMIN_USER=admin \
   -e GF_SECURITY_ADMIN_PASSWORD=admin \
   grafana/grafana:latest
@@ -149,29 +149,29 @@ docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "juice-
 
 echo ""
 echo "=== Endpoint Tests ==="
-echo -n "Juice Shop (8080): "
-curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 && echo " ✓"
+echo -n "Juice Shop (3000): "
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 && echo " ✓"
 
 echo -n "Prometheus (9090): "
 curl -s -o /dev/null -w "%{http_code}" http://localhost:9090 && echo " ✓"
 
-echo -n "Grafana (3000): "
-curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 && echo " ✓"
+echo -n "Grafana (3001): "
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3001 && echo " ✓"
 EOF
 
 log ""
 log "Step 7: Running baseline load test..."
 ssh "$VPS_USER@$VPS_IP" << 'EOF'
 echo "=== Baseline Test (1 connection, 30s) ==="
-wrk -t1 -c1 -d30s http://localhost:8080
+wrk -t1 -c1 -d30s http://localhost:3000
 
 echo ""
 echo "=== Medium Load Test (10 connections, 30s) ==="
-wrk -t2 -c10 -d30s http://localhost:8080
+wrk -t2 -c10 -d30s http://localhost:3000
 
 echo ""
 echo "=== High Load Test (50 connections, 30s) ==="
-wrk -t4 -c50 -d30s http://localhost:8080
+wrk -t4 -c50 -d30s http://localhost:3000
 EOF
 
 log ""
@@ -180,9 +180,9 @@ log "✓ Deployment and testing complete!"
 log "=========================================="
 log ""
 log "Access URLs:"
-log "  Juice Shop:  http://$VPS_IP:8080"
+log "  Juice Shop:  http://$VPS_IP:3000"
 log "  Prometheus:  http://$VPS_IP:9090"
-log "  Grafana:     http://$VPS_IP:3000 (admin/admin)"
+log "  Grafana:     http://$VPS_IP:3001 (admin/admin)"
 log ""
 log "Next steps:"
 log "  1. Check Grafana dashboard for metrics"

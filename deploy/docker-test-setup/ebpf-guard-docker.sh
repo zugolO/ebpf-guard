@@ -20,10 +20,15 @@ apt-get install -y \
     clang \
     llvm \
     libbpf-dev \
-    linux-headers-$(uname -r) \
+    "linux-headers-$(uname -r)" \
+    linux-tools-common \
+    linux-tools-generic \
     build-essential \
     git \
     wget
+# Exact-kernel bpftool package isn't always available on VPS/cloud kernels
+# (generic vs cloud-specific build); linux-tools-generic above is enough.
+apt-get install -y "linux-tools-$(uname -r)" 2>/dev/null || true
 
 # make generate ищет команду `clang` в PATH; если дистрибутив ставит
 # только версионные clang-N/llvm-strip-N, добавляем алиасы.

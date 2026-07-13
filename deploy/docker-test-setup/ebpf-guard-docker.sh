@@ -63,15 +63,16 @@ else
     git pull
 fi
 
-# 5. Сборка
-echo "Сборка ebpf-guard..."
-make generate
-make build
-
-# 6. Создание директорий
+# 5. Создание директорий (до сборки — так они точно есть перед первым запуском,
+#    даже если сборка/запуск делаются вручную по шагам позже)
 mkdir -p /var/log/ebpf-guard
 mkdir -p /var/lib/ebpf-guard
 mkdir -p /opt/ebpf-guard/rules
+
+# 6. Сборка
+echo "Сборка ebpf-guard..."
+make generate
+make build
 
 # 7. Конфигурация для тестирования
 cat > /opt/ebpf-guard/config-test.yaml << 'EOF'

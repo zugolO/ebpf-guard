@@ -81,3 +81,6 @@ desktop.ini
 
 # Cygwin/Windows crash dumps
 *.stackdump
+
+# VPS demo/test setup secrets (see deploy/docker-test-setup/prometheus.yml)
+deploy/docker-test-setup/prometheus-token.txt

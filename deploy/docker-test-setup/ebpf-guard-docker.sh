@@ -17,13 +17,25 @@ fi
 echo "Установка зависимостей..."
 apt-get update
 apt-get install -y \
-    clang-14 \
-    llvm-14 \
+    clang \
+    llvm \
     libbpf-dev \
     linux-headers-$(uname -r) \
     build-essential \
     git \
     wget
+
+# make generate ищет команду `clang` в PATH; если дистрибутив ставит
+# только версионные clang-N/llvm-strip-N, добавляем алиасы.
+if ! command -v clang &>/dev/null; then
+    CLANG_BIN=$(ls /usr/bin/clang-* 2>/dev/null | sort -V | tail -1)
+    [ -n "$CLANG_BIN" ] && update-alternatives --install /usr/bin/clang clang "$CLANG_BIN" 100
+fi
+if ! command -v llvm-strip &>/dev/null; then
+    STRIP_BIN=$(ls /usr/bin/llvm-strip-* 2>/dev/null | sort -V | tail -1)
+    [ -n "$STRIP_BIN" ] && update-alternatives --install /usr/bin/llvm-strip llvm-strip "$STRIP_BIN" 100
+fi
+command -v clang &>/dev/null || { echo "Error: clang not found after install"; exit 1; }
 
 # 3. Установка Go 1.26 (соответствует go.mod и CI)
 echo "Установка Go 1.26.5..."

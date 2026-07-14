@@ -333,12 +333,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		engineCfg.MaxAlertsPerSecond = cfg.Correlator.MaxAlertsPerSecond
 	}
 
+	// Wire the anomaly score reporter so profiler scores are published to
+	// ebpf_guard_profiler_anomaly_score via the cardinality-guarded gauge.
+	engineCfg.AnomalyScoreReporter = exporter.SetAnomalyScoreWithGuard
+
 	// samplingMux fans BPF-side sampling changes out to the per-collector
 	// SamplingControllers. It is shared by the collectors' status reporters
 	// (which register each controller as its collector comes up) and the CPU
 	// pressure watcher (which adjusts rates under load).
 	samplingMux := watchdog.NewMultiBPFController(slog.Default())
 
+	var prof *profiler.Profiler
 	if cfg.Profiler.Enabled {
 		profCfg := profiler.ProfilerConfig{
 			Threshold:      cfg.Profiler.AnomalyThreshold,
@@ -368,8 +373,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				PersistPath:     cfg.Profiler.SyscallAllowlist.PersistPath,
 			},
 		}
-		p := profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
-		engineCfg.LineageTracker = p.GetLineageTracker()
+		prof = profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
+		engineCfg.LineageTracker = prof.GetLineageTracker()
+		if err := prof.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+			slog.Warn("profiler: failed to register Prometheus metrics",
+				slog.Any("error", err))
+		}
+		if wpm := prof.GetDetector().GetProfileManager(); wpm != nil {
+			if err := wpm.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+				slog.Warn("profiler: failed to register workload profile metrics",
+					slog.Any("error", err))
+			}
+		}
 
 		if cfg.Watchdog.MemoryPressure.Enabled {
 			memCfg := watchdog.MemoryConfig{
@@ -380,7 +395,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				DisableSequenceThreshold: cfg.Watchdog.MemoryPressure.DisableSequenceThreshold,
 				DisableAllThreshold:      cfg.Watchdog.MemoryPressure.DisableAllThreshold,
 			}
-			seqProfilers := []watchdog.ControllableProfiler{p.GetSequenceProfiler()}
+			seqProfilers := []watchdog.ControllableProfiler{prof.GetSequenceProfiler()}
 			memWatcher := watchdog.NewMemoryPressureWatcherWithSequence(
 				memCfg, slog.Default(), seqProfilers, nil, nil,
 			)
@@ -536,6 +551,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		} else {
 			enf = e
 			engineCfg.ActionExecutor = enf
+			if err := enf.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+				slog.Warn("enforcer: failed to register Prometheus metrics",
+					slog.Any("error", err))
+			}
 			slog.Info("enforcer: active",
 				slog.String("backend", cfg.Enforcement.BlockBackend),
 				slog.Bool("dry_run", cfg.Enforcement.DryRun))
@@ -1302,6 +1321,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			case <-ticker.C:
 				exporter.RecordQueueDepth(len(eventCh), cap(eventCh))
 				exporter.SetGoroutinePoolActive(activeWorkers.Load())
+			}
+		}
+	}()
+
+	// Background: publish BPF map size (static) and tracked-PIDs count every 15s.
+	exporter.SetBPFMapSize("events", float64(cfg.BPF.MapSizes.Events))
+	exporter.SetBPFMapSize("processes", float64(cfg.BPF.MapSizes.Processes))
+	exporter.SetBPFMapSize("connections", float64(cfg.BPF.MapSizes.Connections))
+	exporter.SetBPFMapEntries("events", 0)
+	exporter.SetBPFMapEntries("processes", 0)
+	exporter.SetBPFMapEntries("connections", 0)
+	// Initialise events_dropped label sets so the series appear even at zero.
+	exporter.EventsDropped.WithLabelValues("syscall", "channel_full")
+	exporter.EventsDropped.WithLabelValues("network", "channel_full")
+	exporter.EventsDropped.WithLabelValues("fileaccess", "channel_full")
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				exporter.SetLearningProgress(engine.LearningProgress())
+				exporter.SetTrackedPIDs(float64(engine.TrackedPIDCount()))
 			}
 		}
 	}()

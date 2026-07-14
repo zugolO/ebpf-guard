@@ -71,6 +71,23 @@ var (
 		[]string{"map_name"},
 	)
 
+	// BPFMapSize tracks the maximum capacity of BPF maps.
+	BPFMapSize = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_bpf_map_size",
+			Help: "Maximum capacity of BPF maps",
+		},
+		[]string{"map_name"},
+	)
+
+	// TrackedPIDs tracks the number of processes currently monitored by the profiler.
+	TrackedPIDs = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_tracked_pids_total",
+			Help: "Number of PIDs currently tracked by the profiler.",
+		},
+	)
+
 	// CollectorUp indicates whether each collector is successfully loaded (1) or in stub/failed state (0).
 	CollectorUp = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -207,6 +224,16 @@ func RecordAlert(ruleID, severity, namespace, podName, node string) {
 // SetBPFMapEntries sets the entry count for a BPF map.
 func SetBPFMapEntries(mapName string, count float64) {
 	BPFMapEntries.WithLabelValues(mapName).Set(count)
+}
+
+// SetBPFMapSize sets the maximum capacity for a BPF map.
+func SetBPFMapSize(mapName string, size float64) {
+	BPFMapSize.WithLabelValues(mapName).Set(size)
+}
+
+// SetTrackedPIDs sets the number of currently tracked PIDs.
+func SetTrackedPIDs(n float64) {
+	TrackedPIDs.Set(n)
 }
 
 // RecordBPFMapFull increments the map-full counter by delta for the given map name.

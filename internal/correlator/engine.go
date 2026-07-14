@@ -1796,6 +1796,25 @@ func (ce *CorrelationEngine) GetAnomalyDetector() *profiler.AnomalyDetector {
 	return ce.anomalyDetector
 }
 
+// TrackedPIDCount returns the total number of workload profiles tracked across
+// all per-worker anomaly detectors and the engine-level detector.
+func (ce *CorrelationEngine) TrackedPIDCount() int {
+	var total int
+	for _, w := range ce.ingestPool {
+		if w != nil && w.ad != nil {
+			if wpm := w.ad.GetProfileManager(); wpm != nil {
+				total += wpm.Len()
+			}
+		}
+	}
+	if ce.anomalyDetector != nil {
+		if wpm := ce.anomalyDetector.GetProfileManager(); wpm != nil {
+			total += wpm.Len()
+		}
+	}
+	return total
+}
+
 // IsLearningComplete checks if anomaly detection learning is complete.
 func (ce *CorrelationEngine) IsLearningComplete() bool {
 	if ce.anomalyDetector == nil {

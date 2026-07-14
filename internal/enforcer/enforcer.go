@@ -304,6 +304,12 @@ func (e *Enforcer) RegisterMetrics(reg prometheus.Registerer) error {
 			return err
 		}
 	}
+	// Initialise label sets so series appear in /metrics even at zero.
+	e.actionsTotal.WithLabelValues("block")
+	e.actionsTotal.WithLabelValues("kill")
+	e.actionsTotal.WithLabelValues("throttle")
+	e.actionsTotal.WithLabelValues("lsm_block")
+	e.actionsTotal.WithLabelValues("networkpolicy")
 	return nil
 }
 

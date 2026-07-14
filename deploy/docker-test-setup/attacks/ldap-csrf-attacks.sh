@@ -336,7 +336,7 @@ analyze_results() {
         local ldap_files=(localhost_scan filter disclosure blind)
         for file in "$RESULTS_DIR"/ldap_*.txt; do
             if [ -f "$file" ]; then
-                local count=$(grep -c "http_code" "$file" 2>/dev/null || echo 0)
+                local count=$(grep -c "http_code" "$file" 2>/dev/null)
                 echo "$(basename $file): $count attempts"
             fi
         done
@@ -345,7 +345,7 @@ analyze_results() {
         echo "=== CSRF ATTACKS ==="
         for file in "$RESULTS_DIR"/csrf_*.txt; do
             if [ -f "$file" ]; then
-                local count=$(grep -c "http_code" "$file" 2>/dev/null || echo 0)
+                local count=$(grep -c "http_code" "$file" 2>/dev/null)
                 echo "$(basename $file): $count attempts"
             fi
         done

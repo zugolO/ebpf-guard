@@ -4,6 +4,7 @@ server:
   bind_address: "0.0.0.0:19090"  # Слушать на всех интерфейсах для Docker
   metrics_path: "/metrics"
   health_path: "/health"
+  enable_debug: true  # нужен /debug/state, который используют attacks/run-all-attacks.sh и analyze-alerts.py
 
 bpf:
   map_sizes:

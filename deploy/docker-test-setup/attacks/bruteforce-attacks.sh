@@ -303,7 +303,7 @@ analyze_results() {
         echo "=== REQUEST STATISTICS ==="
         for file in "$RESULTS_DIR"/*_$TIMESTAMP.txt; do
             if [ -f "$file" ] && [[ ! "$file" =~ (metrics|alerts|summary) ]]; then
-                local count=$(grep -c "Status:" "$file" 2>/dev/null || echo 0)
+                local count=$(grep -c "Status:" "$file" 2>/dev/null)
                 echo "$(basename $file): $count requests"
             fi
         done

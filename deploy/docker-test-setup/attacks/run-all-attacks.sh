@@ -61,6 +61,9 @@ get_baseline_metrics() {
     curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
     curl -s "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
+    if ! curl -s -o /dev/null -w "%{http_code}" "$EBPF_GUARD_API/debug/state" | grep -q "200"; then
+        warn "server.enable_debug не включен в конфиге ebpf-guard — /debug/state недоступен, Alerts/Events/Anomalies Total в отчете будут нулевыми"
+    fi
 
     # Подсчет начальных алертов
     if command -v jq &> /dev/null; then
@@ -230,7 +233,10 @@ generate_final_report() {
                 local attempts=0
                 for file in "$result_dir"/*.txt; do
                     if [ -f "$file" ]; then
-                        local count=$(grep -c "http_code\|Status:" "$file" 2>/dev/null || echo 0)
+                        # grep -c always prints a count (even "0") and only
+                        # exits non-zero on no match, so "|| echo 0" used to
+                        # append a second line and break the arithmetic below.
+                        local count=$(grep -c "http_code\|Status:" "$file" 2>/dev/null)
                         attempts=$((attempts + count))
                     fi
                 done

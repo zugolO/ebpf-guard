@@ -311,6 +311,11 @@ func (p *Profiler) GetAllowlistProfiler() *SyscallAllowlistProfiler {
 	return p.allowlist
 }
 
+// GetDetector returns the underlying anomaly detector (for metrics registration).
+func (p *Profiler) GetDetector() *AnomalyDetector {
+	return p.detector
+}
+
 // SaveState serializes the EWMA learning state and allowlist profiles to path.
 // Allowlist state is saved to path + ".allowlist".
 func (p *Profiler) SaveState(path string) error {

@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VPS_IP="${VPS_IP:?Set VPS_IP environment variable to your test VPS address}"
+VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
 EBPF_GUARD_API="http://${VPS_IP}:19090"
 RESULTS_DIR="./attack-results"

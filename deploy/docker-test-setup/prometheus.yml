@@ -10,6 +10,11 @@ scrape_configs:
       - targets: ['172.17.0.1:19090']  # Docker bridge gateway IP
     scrape_interval: 10s
     metrics_path: '/metrics'
+    # /metrics требует bearer-auth (auth.enabled в config-test.yaml). Файл с
+    # viewer-токеном монтируется в контейнер через docker-compose.yml и не
+    # хранится в git — см. deploy/docker-test-setup/README (или auth.viewer_token
+    # в вашем config-test.yaml).
+    bearer_token_file: /etc/prometheus/token
 
   # Prometheus self-monitoring
   - job_name: 'prometheus'

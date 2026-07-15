@@ -54,19 +54,19 @@ const (
 // than hand-maintaining their own switch, so adding a new EventType here makes
 // every consumer pick up its label automatically.
 var eventTypeCanonical = map[EventType]string{
-	EventSyscall:    "syscall",
-	EventTCPConnect: "tcp_connect",
-	EventFileAccess: "file",
-	EventTLS:        "tls",
-	EventDNS:        "dns",
-	EventPrivesc:    "privesc",
-	EventNetClose:   "net_close",
-	EventKmodLoad:   "kmod",
-	EventCgroupEsc:  "cgroup_esc",
-	EventGPU:        "gpu",
-	EventLSMAudit:   "lsm_audit",
-	EventSequence:   "sequence",
-	EventCloudAudit: "cloud_audit",
+	EventSyscall:       "syscall",
+	EventTCPConnect:    "tcp_connect",
+	EventFileAccess:    "file",
+	EventTLS:           "tls",
+	EventDNS:           "dns",
+	EventPrivesc:       "privesc",
+	EventNetClose:      "net_close",
+	EventKmodLoad:      "kmod",
+	EventCgroupEsc:     "cgroup_esc",
+	EventGPU:           "gpu",
+	EventLSMAudit:      "lsm_audit",
+	EventSequence:      "sequence",
+	EventCloudAudit:    "cloud_audit",
 	EventIOUring:       "io_uring",
 	EventBPFProgram:    "bpf_program",
 	EventHTTPPlaintext: "http_plaintext",
@@ -99,16 +99,16 @@ var bpfProgTypeNames = map[uint32]string{
 
 // BPF command numbers for the bpf(2) syscall.
 const (
-	BPFCmdMapCreate    uint32 = 0
-	BPFCmdMapLookup    uint32 = 1
-	BPFCmdMapUpdate    uint32 = 2
-	BPFCmdMapDelete    uint32 = 3
+	BPFCmdMapCreate     uint32 = 0
+	BPFCmdMapLookup     uint32 = 1
+	BPFCmdMapUpdate     uint32 = 2
+	BPFCmdMapDelete     uint32 = 3
 	BPFCmdMapGetNextKey uint32 = 4
-	BPFCmdProgLoad     uint32 = 5
-	BPFCmdObjPin       uint32 = 6
-	BPFCmdObjGet       uint32 = 7
-	BPFCmdProgAttach   uint32 = 8
-	BPFCmdProgDetach   uint32 = 9
+	BPFCmdProgLoad      uint32 = 5
+	BPFCmdObjPin        uint32 = 6
+	BPFCmdObjGet        uint32 = 7
+	BPFCmdProgAttach    uint32 = 8
+	BPFCmdProgDetach    uint32 = 9
 )
 
 // BPFCmdName returns the human-readable name for a bpf() command number.
@@ -150,28 +150,28 @@ func BPFProgTypeName(t uint32) string {
 // eventTypeNames maps string names used in rule YAML to numeric EventType constants.
 // Kept lowercase; matching is case-insensitive.
 var eventTypeNames = map[string]EventType{
-	"syscall":     EventSyscall,
-	"network":     EventTCPConnect,
-	"tcp_connect": EventTCPConnect,
-	"file":        EventFileAccess,
-	"file_access": EventFileAccess,
-	"tls":         EventTLS,
-	"dns":         EventDNS,
-	"privesc":     EventPrivesc,
-	"net_close":   EventNetClose,
-	"kmod":        EventKmodLoad,
-	"kmod_load":   EventKmodLoad,
-	"cgroup_esc":  EventCgroupEsc,
-	"gpu":         EventGPU,
-	"lsm_audit":   EventLSMAudit,
-	"sequence":    EventSequence,
-	"cloud_audit": EventCloudAudit,
-	"cloud":       EventCloudAudit,
-	"iouring":       EventIOUring,
-	"io_uring":      EventIOUring,
-	"bpf_program":   EventBPFProgram,
-	"bpf_prog_load": EventBPFProgram,
-	"bpf":           EventBPFProgram,
+	"syscall":        EventSyscall,
+	"network":        EventTCPConnect,
+	"tcp_connect":    EventTCPConnect,
+	"file":           EventFileAccess,
+	"file_access":    EventFileAccess,
+	"tls":            EventTLS,
+	"dns":            EventDNS,
+	"privesc":        EventPrivesc,
+	"net_close":      EventNetClose,
+	"kmod":           EventKmodLoad,
+	"kmod_load":      EventKmodLoad,
+	"cgroup_esc":     EventCgroupEsc,
+	"gpu":            EventGPU,
+	"lsm_audit":      EventLSMAudit,
+	"sequence":       EventSequence,
+	"cloud_audit":    EventCloudAudit,
+	"cloud":          EventCloudAudit,
+	"iouring":        EventIOUring,
+	"io_uring":       EventIOUring,
+	"bpf_program":    EventBPFProgram,
+	"bpf_prog_load":  EventBPFProgram,
+	"bpf":            EventBPFProgram,
 	"http_plaintext": EventHTTPPlaintext,
 	"http":           EventHTTPPlaintext,
 }
@@ -208,16 +208,16 @@ type Event struct {
 	Comm       [16]byte // process name from BPF
 	ParentComm [16]byte // parent process name (if available)
 	// Type-specific fields below (union-style, only one populated)
-	Syscall    *SyscallEvent
-	Network    *NetworkEvent
-	File       *FileEvent
-	TLS        *TLSEvent
-	DNS        *DNSEvent
-	Privesc    *PrivescEvent
-	NetClose   *NetworkCloseEvent
-	Kmod       *KmodEvent
-	CgroupEsc  *CgroupEscapeEvent
-	GPU        *GPUEvent
+	Syscall   *SyscallEvent
+	Network   *NetworkEvent
+	File      *FileEvent
+	TLS       *TLSEvent
+	DNS       *DNSEvent
+	Privesc   *PrivescEvent
+	NetClose  *NetworkCloseEvent
+	Kmod      *KmodEvent
+	CgroupEsc *CgroupEscapeEvent
+	GPU       *GPUEvent
 	// CloudAudit holds cloud control-plane audit data (AWS CloudTrail, GCP Audit Logs).
 	// Populated when Type == EventCloudAudit.
 	CloudAudit *CloudAuditEvent
@@ -402,25 +402,25 @@ type ProcessTree []ProcessNode
 
 // Alert represents a detected security anomaly or rule violation.
 type Alert struct {
-	ID         string                 `json:"id"`
-	Timestamp  time.Time              `json:"timestamp"`
-	RuleID     string                 `json:"rule_id"`
-	RuleName   string                 `json:"rule_name,omitempty"`
-	Severity   Severity               `json:"severity"`
-	PID        uint32                 `json:"pid"`
-	Comm       string                 `json:"comm"`
-	Message    string                 `json:"message"`
-	Details    map[string]interface{} `json:"details,omitempty"`
-	TraceID    string                 `json:"trace_id,omitempty"`
+	ID        string                 `json:"id"`
+	Timestamp time.Time              `json:"timestamp"`
+	RuleID    string                 `json:"rule_id"`
+	RuleName  string                 `json:"rule_name,omitempty"`
+	Severity  Severity               `json:"severity"`
+	PID       uint32                 `json:"pid"`
+	Comm      string                 `json:"comm"`
+	Message   string                 `json:"message"`
+	Details   map[string]interface{} `json:"details,omitempty"`
+	TraceID   string                 `json:"trace_id,omitempty"`
 	// SpanID is the parent APM span ID extracted from the W3C traceparent header.
 	// Set when the alert was triggered for a request carrying OTel trace context.
 	SpanID string `json:"span_id,omitempty"`
 	// TraceContext carries the full structured trace context including the extraction
 	// source. When set, TraceID and SpanID above mirror TraceContext.TraceID and
 	// TraceContext.SpanID for backward compatibility.
-	TraceContext *TraceContext   `json:"trace_context,omitempty"`
+	TraceContext *TraceContext  `json:"trace_context,omitempty"`
 	Enrichment   EnrichmentInfo `json:"enrichment,omitempty"`
-	Event      Event                  `json:"-"` // the triggering event (not serialized to store)
+	Event        Event          `json:"-"` // the triggering event (not serialized to store)
 	// ProcessTree holds the full ancestor chain for the triggering process.
 	// Ordered from oldest known ancestor to the process that fired the alert.
 	// Populated by CorrelationEngine when a LineageTracker is configured.
@@ -447,6 +447,10 @@ type Alert struct {
 	// LastSeen is the timestamp of the most recent raw alert folded into this
 	// aggregate. Only set when Count > 1.
 	LastSeen time.Time `json:"last_seen,omitempty"`
+	// Class carries the matching rule's classification ("threat" or "drift").
+	// Empty is equivalent to "threat" (the default for unclassified rules).
+	// Populated by correlator.RuleEngine from Rule.Class.
+	Class string `json:"class,omitempty"`
 }
 
 // TraceContext holds OpenTelemetry trace context for propagation.

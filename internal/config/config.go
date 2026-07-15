@@ -966,6 +966,26 @@ type ProfilerConfig struct {
 	StatePersistence StatePersistenceConfig `mapstructure:"state_persistence"`
 	// SyscallAllowlist configures deny-unknown (allowlist) mode for syscalls.
 	SyscallAllowlist SyscallAllowlistConfig `mapstructure:"syscall_allowlist"`
+	// DriftBaseline configures observe-mode baselining for rules tagged
+	// `class: drift` (issue #286): matches are learned per-workload during a
+	// learning window and only alerted on thereafter when they deviate from
+	// that baseline, instead of alerting on every match like a threat rule.
+	DriftBaseline DriftBaselineConfig `mapstructure:"drift_baseline"`
+}
+
+// DriftBaselineConfig configures observe-mode baselining for class: drift rules.
+type DriftBaselineConfig struct {
+	// Enabled activates drift-class alert suppression via the learned baseline.
+	// When false, class: drift rules alert exactly like class: threat rules.
+	Enabled bool `mapstructure:"enabled"`
+	// LearningPeriod is the duration in seconds to observe drift-class matches
+	// before a workload's baseline is considered complete.
+	LearningPeriod int `mapstructure:"learning_period"`
+	// MinSamples is the minimum number of drift-class matches required before
+	// learning completes, in addition to LearningPeriod elapsing.
+	MinSamples int `mapstructure:"min_samples"`
+	// PerWorkload separates baselines per (comm, namespace, app_label) tuple.
+	PerWorkload bool `mapstructure:"per_workload"`
 }
 
 // EWMASettings groups Exponentially Weighted Moving Average tuning under
@@ -1860,6 +1880,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiler.lineage.enabled", true)
 	v.SetDefault("profiler.lineage.ttl", 300)
 	v.SetDefault("profiler.lineage.max_depth", 16)
+
+	// Drift-baseline observe mode defaults (issue #286). Disabled by default:
+	// class: drift rules alert like class: threat rules until an operator
+	// opts in. When enabled without further tuning, one hour and 20 samples
+	// mirrors the syscall allowlist profiler's learning defaults.
+	v.SetDefault("profiler.drift_baseline.enabled", false)
+	v.SetDefault("profiler.drift_baseline.learning_period", 3600)
+	v.SetDefault("profiler.drift_baseline.min_samples", 20)
+	v.SetDefault("profiler.drift_baseline.per_workload", true)
 
 	// Exporter defaults
 	v.SetDefault("exporter.enabled", true)

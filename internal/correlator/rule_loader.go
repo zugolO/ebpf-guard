@@ -35,14 +35,14 @@ var (
 		"proc.args":           true,
 		"proc.args_truncated": true,
 		// Aliases: dot-prefixed names used in rule YAML files for readability.
-		"file.path":           true,
-		"file.op":             true,
-		"file.flags":          true,
-		"file.mode":           true,
-		"file.directory":      true,
-		"file.extension":      true,
-		"proc.comm":           true,
-		"uid":                 true,
+		"file.path":      true,
+		"file.op":        true,
+		"file.flags":     true,
+		"file.mode":      true,
+		"file.directory": true,
+		"file.extension": true,
+		"proc.comm":      true,
+		"uid":            true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
@@ -157,13 +157,13 @@ var (
 		"cloud.event_id":   true, // provider event ID
 	}
 	validBpfProgramFields = map[string]bool{
-		"cmd":       true, // bpf command: "PROG_LOAD" or "MAP_CREATE"
-		"cmd_nr":    true, // numeric bpf command: 5 for PROG_LOAD, 0 for MAP_CREATE
-		"prog_type": true, // BPF program type name (e.g. "XDP", "KPROBE", "SCHED_CLS")
+		"cmd":          true, // bpf command: "PROG_LOAD" or "MAP_CREATE"
+		"cmd_nr":       true, // numeric bpf command: 5 for PROG_LOAD, 0 for MAP_CREATE
+		"prog_type":    true, // BPF program type name (e.g. "XDP", "KPROBE", "SCHED_CLS")
 		"prog_type_nr": true, // numeric BPF program type
-		"ret":       true, // return value: >=0 = fd, <0 = error
-		"uid":       true,
-		"comm":      true,
+		"ret":          true, // return value: >=0 = fd, <0 = error
+		"uid":          true,
+		"comm":         true,
 	}
 )
 
@@ -308,6 +308,12 @@ func validateRule(rule *Rule) error {
 	}
 	if rule.Severity == "" {
 		rule.Severity = "warning" // Default severity
+	}
+	switch rule.Class {
+	case "", ClassThreat, ClassDrift:
+		// valid
+	default:
+		return fmt.Errorf("unknown class %q, valid: threat, drift", rule.Class)
 	}
 
 	// Reject empty condition_group (Н-4): would silently match every event.

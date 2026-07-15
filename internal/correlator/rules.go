@@ -111,25 +111,25 @@ const (
 type condOpCode uint8
 
 const (
-	condOpUnknown    condOpCode = iota
-	condOpIn                    // "in"
-	condOpNotIn                 // "not_in"
-	condOpEquals                // "equals"
-	condOpNotEquals             // "not_equals"
-	condOpPrefix                // "prefix"
-	condOpNotPrefix             // "not_prefix"
-	condOpSuffix                // "suffix"
-	condOpNotSuffix             // "not_suffix"
-	condOpContains              // "contains"
-	condOpRegex                 // "regex"
-	condOpGT                    // "gt"
-	condOpLT                    // "lt"
-	condOpGTE                   // "gte"
-	condOpLTE                   // "lte"
-	condOpInCIDR                // "in_cidr"
-	condOpNotInCIDR             // "not_in_cidr"
-	condOpCapsGained            // "caps_gained"
-	condOpCapsDropped           // "caps_dropped"
+	condOpUnknown     condOpCode = iota
+	condOpIn                     // "in"
+	condOpNotIn                  // "not_in"
+	condOpEquals                 // "equals"
+	condOpNotEquals              // "not_equals"
+	condOpPrefix                 // "prefix"
+	condOpNotPrefix              // "not_prefix"
+	condOpSuffix                 // "suffix"
+	condOpNotSuffix              // "not_suffix"
+	condOpContains               // "contains"
+	condOpRegex                  // "regex"
+	condOpGT                     // "gt"
+	condOpLT                     // "lt"
+	condOpGTE                    // "gte"
+	condOpLTE                    // "lte"
+	condOpInCIDR                 // "in_cidr"
+	condOpNotInCIDR              // "not_in_cidr"
+	condOpCapsGained             // "caps_gained"
+	condOpCapsDropped            // "caps_dropped"
 )
 
 // opCodeOf converts a RuleConditionOperator string to its numeric code.
@@ -234,6 +234,33 @@ const (
 	ActionThrottle RuleAction = "throttle"
 )
 
+// RuleClass classifies a rule's signal type for default alert visibility
+// (issue #286, "low false-positive out of the box").
+type RuleClass string
+
+const (
+	// ClassThreat marks a rule as a genuine attack signature — always shown
+	// as an alert. This is the default when Class is unset, so existing rule
+	// files behave exactly as before.
+	ClassThreat RuleClass = "threat"
+	// ClassDrift marks a rule as container/FIM drift monitoring rather than a
+	// direct attack signature. Drift-class matches are not alerted directly;
+	// instead they are routed through profiler.DriftBaselineProfiler, which
+	// learns a per-workload baseline during a learning window and alerts only
+	// on genuine deviation from it. Has no effect unless the correlation
+	// engine is configured with a DriftBaselineProfiler.
+	ClassDrift RuleClass = "drift"
+)
+
+// EffectiveClass returns the rule's class, defaulting to ClassThreat when
+// Class is unset so unclassified rules keep alerting as before.
+func (r *Rule) EffectiveClass() RuleClass {
+	if r.Class == "" {
+		return ClassThreat
+	}
+	return r.Class
+}
+
 // Rule defines a detection rule.
 type Rule struct {
 	ID          string          `yaml:"id"`
@@ -258,6 +285,10 @@ type Rule struct {
 	Exceptions []RuleException `yaml:"exceptions,omitempty"`
 	// Tags are optional metadata for rule categorization and filtering
 	Tags []string `yaml:"tags,omitempty"`
+	// Class classifies the rule as "threat" (default) or "drift". See
+	// RuleClass/ClassDrift for the semantics. Use EffectiveClass to read this
+	// field so callers get the correct default without checking for "".
+	Class RuleClass `yaml:"class,omitempty"`
 	// Sampling holds the nested per-rule sampling configuration.
 	// Takes precedence over the flat SampleRate/SampleDeterministic fields if set.
 	//
@@ -663,6 +694,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 			Action:    string(rule.Action),
+			Class:     string(rule.Class),
 		})
 	}
 }
@@ -705,6 +737,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 			Action:    string(rule.Action),
+			Class:     string(rule.Class),
 		})
 	}
 
@@ -1574,4 +1607,3 @@ func hasPrefix(prefixes []string, value string) bool {
 	}
 	return false
 }
-

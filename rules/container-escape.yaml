@@ -333,6 +333,7 @@ rules:
         - "/proc/bus/.*"
     severity: warning
     action: alert
+    class: drift
     tags: [container-escape, procfs, kernel-parameters]
     # Legitimate systemd/ldconfig maintenance regularly touches these paths;
     # suppress the (frequent, benign) alert without editing the condition
@@ -358,6 +359,7 @@ rules:
         - "/proc/self/root/proc/1/"
     severity: warning
     action: alert
+    class: drift
     tags: [container-escape, init-process, pid-1]
 
   # ============================================================================

@@ -437,6 +437,16 @@ type Alert struct {
 	// configured with EnableEventBuffer=true. Provides temporal attack-chain context
 	// (e.g. DNS→TCP→file write→execve) for SOC triage without a separate API query.
 	PreAlertContext []Event `json:"pre_alert_context,omitempty"`
+	// Count is the number of raw alerts folded into this one by aggregation
+	// (see correlator.AlertAggregator). 0 or 1 means no repeats were observed;
+	// omitted from JSON in that case so unaggregated alerts are unaffected.
+	Count int `json:"count,omitempty"`
+	// FirstSeen is the timestamp of the first raw alert in this aggregation window.
+	// Only set when Count > 1.
+	FirstSeen time.Time `json:"first_seen,omitempty"`
+	// LastSeen is the timestamp of the most recent raw alert folded into this
+	// aggregate. Only set when Count > 1.
+	LastSeen time.Time `json:"last_seen,omitempty"`
 }
 
 // TraceContext holds OpenTelemetry trace context for propagation.

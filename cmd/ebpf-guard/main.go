@@ -1315,16 +1315,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// falls back to this agent's own node identity.
 	metricsNodeName := resolveMetricsNodeName()
 
-	// dispatchAlerts fans a batch of alerts out to every configured sink: the
+	// alertAggregator folds repeated alerts sharing the same rule/comm/path-prefix/
+	// pod key within a time window into a single alert with a running count,
+	// so an operator sees one incident instead of a storm of identical rows.
+	// Disabled by default; see correlator.alert_aggregation in config.yaml.
+	alertAggWindow, err := time.ParseDuration(cfg.Correlator.AlertAggregation.Window)
+	if err != nil || alertAggWindow <= 0 {
+		alertAggWindow = 60 * time.Second
+	}
+	alertAggregator := correlator.NewAlertAggregator(correlator.AlertAggregationConfig{
+		Enabled: cfg.Correlator.AlertAggregation.Enabled,
+		Window:  alertAggWindow,
+	})
+
+	// forwardAlerts fans a batch of alerts out to every configured sink: the
 	// simple-mode auto-enforcer, attack-simulation collector, alert store,
 	// Alertmanager webhook, notification fanout, and cross-node gossip.
-	dispatchAlerts := func(dispatched []types.Alert) {
-		for _, a := range dispatched {
-			podName, namespace, node := a.Enrichment.PodName, a.Enrichment.Namespace, a.Enrichment.NodeName
-			if node == "" {
-				node = metricsNodeName
-			}
-			exporter.RecordAlert(a.RuleID, string(a.Severity), namespace, podName, node)
+	forwardAlerts := func(dispatched []types.Alert) {
+		if len(dispatched) == 0 {
+			return
 		}
 		// Simple mode: auto-enforce high-confidence threats.
 		if simpleEngine != nil && enf != nil {
@@ -1360,6 +1369,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// dispatchAlerts records per-event Prometheus metrics for every raw alert —
+	// RecordAlert always sees the un-aggregated stream, so ebpf_guard_alerts_total
+	// stays per-event regardless of aggregation — then hands the batch to
+	// alertAggregator.Ingest, which forwards new aggregation keys immediately
+	// and folds repeats into their running count. Closed-window summaries for
+	// keys that received repeats are forwarded separately by the Reap ticker
+	// below.
+	dispatchAlerts := func(dispatched []types.Alert) {
+		for _, a := range dispatched {
+			podName, namespace, node := a.Enrichment.PodName, a.Enrichment.Namespace, a.Enrichment.NodeName
+			if node == "" {
+				node = metricsNodeName
+			}
+			exporter.RecordAlert(a.RuleID, string(a.Severity), namespace, podName, node)
+		}
+		forwardAlerts(alertAggregator.Ingest(dispatched, time.Now()))
+	}
+
 	// dispatchAsync runs dispatchAlerts in a bounded goroutine pool to prevent
 	// unbounded goroutine growth under burst alert rates; drops (and records)
 	// the batch if the pool is saturated.
@@ -1380,6 +1407,30 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}()
 			dispatchAlerts(a)
 		}(dispatched)
+	}
+
+	// Background: close out expired alert-aggregation windows and forward the
+	// final count/first_seen/last_seen for any key that received repeats
+	// within its window. The first occurrence of a key already went out
+	// immediately via dispatchAlerts; this ticker is what turns "216 more
+	// alerts suppressed" into one visible summary instead of silence.
+	if cfg.Correlator.AlertAggregation.Enabled {
+		reapInterval := alertAggWindow / 2
+		if reapInterval < time.Second {
+			reapInterval = time.Second
+		}
+		go func() {
+			ticker := time.NewTicker(reapInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					forwardAlerts(alertAggregator.Reap(time.Now()))
+				}
+			}
+		}()
 	}
 
 	// Background: periodically drain alerts the correlation engine accumulated

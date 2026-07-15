@@ -136,6 +136,16 @@ correlator:
   # 53 KB per active PID. Raise for deeper per-process history at the cost of RAM.
   buffer_size: 256
 
+  # Alert aggregation: folds repeated alerts sharing the same
+  # (rule_id, comm, path-prefix, pod/namespace) key within `window` into a
+  # single alert carrying a count/first_seen/last_seen, instead of forwarding
+  # one row per occurrence to storage and notification backends. The first
+  # occurrence of a key is always forwarded immediately; Prometheus's
+  # ebpf_guard_alerts_total counter is unaffected (stays per-event).
+  alert_aggregation:
+    enabled: false
+    window: 60s
+
 alerting:
   enabled: false
   # Alertmanager webhook endpoint (since v0.2.0; replaces alerting.webhook_url).

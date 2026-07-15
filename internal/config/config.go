@@ -918,6 +918,18 @@ type CorrelatorConfig struct {
 	BufferSize int `mapstructure:"buffer_size"`
 	// MaxAlertsPerSecond is the global token-bucket rate limit for alerts (default 10000, 0 = unlimited).
 	MaxAlertsPerSecond int `mapstructure:"max_alerts_per_second"`
+	// AlertAggregation folds repeated alerts sharing the same rule/comm/path-prefix/pod
+	// key within a time window into a single alert carrying a count, instead of
+	// forwarding one row per occurrence to storage/notifications.
+	AlertAggregation AlertAggregationConfig `mapstructure:"alert_aggregation"`
+}
+
+// AlertAggregationConfig configures alert aggregation (see correlator.AlertAggregator).
+type AlertAggregationConfig struct {
+	// Enabled activates aggregation. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// Window is the aggregation period, e.g. "60s". Default: 60s.
+	Window string `mapstructure:"window"`
 }
 
 // ProfilerConfig holds behavioral profiling settings.
@@ -1822,6 +1834,8 @@ func setDefaults(v *viper.Viper) {
 	// per-process history. 256 events × ~208 B ≈ 53 KB/PID keeps memory bounded.
 	v.SetDefault("correlator.buffer_size", 256)
 	v.SetDefault("correlator.max_alerts_per_second", 10000)
+	v.SetDefault("correlator.alert_aggregation.enabled", false)
+	v.SetDefault("correlator.alert_aggregation.window", "60s")
 
 	// Profiler defaults
 	v.SetDefault("profiler.enabled", true)

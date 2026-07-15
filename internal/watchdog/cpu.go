@@ -45,15 +45,27 @@ type CPUPressureWatcher struct {
 	logger        *slog.Logger
 	bpfController BPFSamplingController
 
-	// Thresholds, expressed as a percentage of total VPS CPU (0–100, where
-	// 100 == every core fully busy).
+	// Thresholds, expressed as a percentage of a single CPU core (0–100 ==
+	// idle..one core fully busy; can exceed 100 if the agent burns more than
+	// one core). This is an absolute budget, not normalized by core count, so
+	// the same defaults behave the same way on a 1-core VPS and an 8-core
+	// box: one busy thread trips the same threshold either way.
 	fileShedThreshold float64 // L1: cut file sampling above this
 	allShedThreshold  float64 // L2: also cut syscall/network above this
 	recoveryThreshold float64 // hysteresis: recover one level when below this
 
 	checkInterval time.Duration
 	windowSize    int
-	numCPU        int
+	numCPU        int // informational only (logged at startup); not used to scale thresholds
+
+	// minDwell is the minimum time a shed level must be held before the
+	// watcher will step back down, even if the smoothed CPU% has already
+	// dropped below recoveryThreshold. This prevents the state machine from
+	// flapping when load arrives in bursts shorter than the smoothing
+	// window: without a dwell floor, a lull between bursts recovers
+	// sampling just before the next burst re-trips it, and the agent loses
+	// visibility exactly when it matters most.
+	minDwell time.Duration
 
 	// Injectable for tests. cpuTimeFn returns cumulative process CPU seconds
 	// (utime+stime); nowFn returns the current wall-clock time.
@@ -61,13 +73,14 @@ type CPUPressureWatcher struct {
 	nowFn     func() time.Time
 
 	// State (guarded by mu).
-	mu          sync.RWMutex
-	state       int
-	window      []float64 // sliding window of recent CPU% samples
-	lastCPU     float64   // previous cumulative CPU seconds
-	lastWall    time.Time // previous sample wall-clock time
-	haveLast    bool
-	normalRates map[string]float64 // saved sampling rates before shedding
+	mu             sync.RWMutex
+	state          int
+	window         []float64 // sliding window of recent CPU% samples
+	lastCPU        float64   // previous cumulative CPU seconds
+	lastWall       time.Time // previous sample wall-clock time
+	haveLast       bool
+	enteredStateAt time.Time          // when the current state was entered
+	normalRates    map[string]float64 // saved sampling rates before shedding
 
 	// Metrics.
 	pressureLevel   prometheus.Gauge
@@ -78,30 +91,43 @@ type CPUPressureWatcher struct {
 type CPUConfig struct {
 	Enabled       bool          `mapstructure:"enabled"`
 	CheckInterval time.Duration `mapstructure:"check_interval"`
-	// CPULimitPercent is the target CPU budget (percent of total VPS CPU).
-	// It seeds the level thresholds when those are left at zero.
+	// CPULimitPercent is the target CPU budget, expressed as a percentage of
+	// a single core (100 == one full core, independent of how many cores the
+	// host has). It seeds the level thresholds when those are left at zero.
 	CPULimitPercent float64 `mapstructure:"cpu_limit_percent"`
-	// FileShedThreshold (L1): CPU% above which file sampling is reduced.
+	// FileShedThreshold (L1): CPU% (of one core) above which file sampling is
+	// reduced.
 	FileShedThreshold float64 `mapstructure:"file_shed_threshold"`
-	// AllShedThreshold (L2): CPU% above which syscall/network are also reduced.
+	// AllShedThreshold (L2): CPU% (of one core) above which syscall/network
+	// are also reduced.
 	AllShedThreshold float64 `mapstructure:"all_shed_threshold"`
-	// RecoveryThreshold: CPU% below which the watcher steps back one level.
+	// RecoveryThreshold: CPU% (of one core) below which the watcher steps
+	// back one level.
 	RecoveryThreshold float64 `mapstructure:"recovery_threshold"`
 	// WindowSize is the number of samples averaged into the sliding window.
 	WindowSize int `mapstructure:"window_size"`
+	// MinDwell is the minimum time a shed level is held before the watcher
+	// will step back down, even once the smoothed CPU% is back under
+	// RecoveryThreshold. Guards against bursty attack traffic flapping the
+	// state machine faster than the smoothing window can absorb.
+	MinDwell time.Duration `mapstructure:"min_dwell"`
 }
 
-// DefaultCPUConfig returns safe defaults: shed file collectors above 15% CPU,
-// add syscall/network above 25%, recover below 9%, smoothed over 3 samples.
+// DefaultCPUConfig returns safe defaults: shed file collectors above 40% of
+// one core, add syscall/network above 70%, recover below 20%, smoothed over
+// 6 samples (30s at the default 5s check interval), and held for at least
+// 30s before recovering a level. These are absolute per-core percentages, so
+// they behave identically on a 1-core VPS and an 8-core host.
 func DefaultCPUConfig() CPUConfig {
 	return CPUConfig{
 		Enabled:           true,
 		CheckInterval:     5 * time.Second,
-		CPULimitPercent:   15.0,
-		FileShedThreshold: 15.0,
-		AllShedThreshold:  25.0,
-		RecoveryThreshold: 9.0,
-		WindowSize:        3,
+		CPULimitPercent:   40.0,
+		FileShedThreshold: 40.0,
+		AllShedThreshold:  70.0,
+		RecoveryThreshold: 20.0,
+		WindowSize:        6,
+		MinDwell:          30 * time.Second,
 	}
 }
 
@@ -116,20 +142,23 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 		config.CheckInterval = 5 * time.Second
 	}
 	if config.WindowSize <= 0 {
-		config.WindowSize = 3
+		config.WindowSize = 6
+	}
+	if config.MinDwell <= 0 {
+		config.MinDwell = 30 * time.Second
 	}
 	// Seed thresholds from CPULimitPercent when not set explicitly.
 	if config.CPULimitPercent <= 0 {
-		config.CPULimitPercent = 15.0
+		config.CPULimitPercent = 40.0
 	}
 	if config.FileShedThreshold <= 0 {
 		config.FileShedThreshold = config.CPULimitPercent
 	}
 	if config.AllShedThreshold <= 0 {
-		config.AllShedThreshold = config.FileShedThreshold * 5.0 / 3.0
+		config.AllShedThreshold = config.FileShedThreshold * 7.0 / 4.0
 	}
 	if config.RecoveryThreshold <= 0 {
-		config.RecoveryThreshold = config.FileShedThreshold * 0.6
+		config.RecoveryThreshold = config.FileShedThreshold * 0.5
 	}
 
 	numCPU := runtime.NumCPU()
@@ -145,6 +174,7 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 		recoveryThreshold: config.RecoveryThreshold,
 		checkInterval:     config.CheckInterval,
 		windowSize:        config.WindowSize,
+		minDwell:          config.MinDwell,
 		numCPU:            numCPU,
 		cpuTimeFn:         readProcSelfCPUSeconds,
 		nowFn:             time.Now,
@@ -155,7 +185,7 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 		}),
 		pressurePercent: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_cpu_pressure_percent",
-			Help: "Smoothed agent CPU usage as a percentage of total VPS CPU (0–100).",
+			Help: "Smoothed agent CPU usage as a percentage of a single CPU core (0-100 == idle..one core fully busy; not normalized by core count).",
 		}),
 	}
 	w.pressureLevel.Set(cpuLevelNormal)
@@ -199,9 +229,11 @@ func SetupCPUPressureWatcher(
 	}
 	go w.Start(ctx)
 	logger.Info("cpu pressure: adaptive load shedding enabled",
-		slog.Float64("file_shed_threshold", w.fileShedThreshold),
-		slog.Float64("all_shed_threshold", w.allShedThreshold),
-		slog.Float64("recovery_threshold", w.recoveryThreshold))
+		slog.Int("num_cpu", w.numCPU),
+		slog.Float64("file_shed_threshold_pct_of_one_core", w.fileShedThreshold),
+		slog.Float64("all_shed_threshold_pct_of_one_core", w.allShedThreshold),
+		slog.Float64("recovery_threshold_pct_of_one_core", w.recoveryThreshold),
+		slog.Duration("min_dwell", w.minDwell))
 	return w
 }
 
@@ -241,6 +273,7 @@ func (w *CPUPressureWatcher) checkCPU() {
 		w.lastCPU = cpuSeconds
 		w.lastWall = now
 		w.haveLast = true
+		w.enteredStateAt = now
 		return
 	}
 
@@ -255,13 +288,16 @@ func (w *CPUPressureWatcher) checkCPU() {
 		cpuDelta = 0
 	}
 
-	// Percentage of total VPS CPU: busy core-seconds over the interval,
-	// normalised by the number of cores.
-	pct := (cpuDelta / wallDelta) / float64(w.numCPU) * 100.0
+	// Percentage of a single CPU core: busy seconds over wall-clock seconds.
+	// Deliberately NOT normalized by numCPU — an absolute per-core budget
+	// means the same threshold means the same thing (e.g. "0.4 of a core")
+	// on a 1-core VPS and an 8-core box, instead of scaling the trip point
+	// with unrelated hardware capacity.
+	pct := (cpuDelta / wallDelta) * 100.0
 	avg := w.pushWindow(pct)
 	w.pressurePercent.Set(avg)
 
-	w.evaluate(avg)
+	w.evaluate(avg, now)
 }
 
 // pushWindow appends a sample to the sliding window and returns its mean.
@@ -279,8 +315,16 @@ func (w *CPUPressureWatcher) pushWindow(pct float64) float64 {
 
 // evaluate transitions between pressure levels based on the smoothed CPU%.
 // Recovery uses the (lower) recoveryThreshold for hysteresis so the watcher
-// does not flap around a single threshold.
-func (w *CPUPressureWatcher) evaluate(cpuPct float64) {
+// does not flap around a single threshold, and additionally requires the
+// current level to have been held for at least minDwell: attack traffic
+// arrives in bursts shorter than the smoothing window, and without a dwell
+// floor a lull between bursts recovers sampling just before the next burst
+// re-trips it — the agent loses visibility exactly when it matters most.
+// Escalation is never gated by dwell time so the watcher still reacts
+// immediately to genuine, sustained pressure.
+func (w *CPUPressureWatcher) evaluate(cpuPct float64, now time.Time) {
+	dwelled := now.Sub(w.enteredStateAt) >= w.minDwell
+
 	switch w.state {
 	case cpuLevelNormal:
 		if cpuPct >= w.allShedThreshold {
@@ -289,13 +333,13 @@ func (w *CPUPressureWatcher) evaluate(cpuPct float64) {
 				slog.String("threshold", fmt.Sprintf("%.1f%%", w.allShedThreshold)))
 			w.enterFileShedMode()
 			w.enterAllShedMode()
-			w.setState(cpuLevelAllShed)
+			w.setState(cpuLevelAllShed, now)
 		} else if cpuPct >= w.fileShedThreshold {
 			w.logger.Warn("cpu pressure: reducing file sampling",
 				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
 				slog.String("threshold", fmt.Sprintf("%.1f%%", w.fileShedThreshold)))
 			w.enterFileShedMode()
-			w.setState(cpuLevelFileShed)
+			w.setState(cpuLevelFileShed, now)
 		}
 
 	case cpuLevelFileShed:
@@ -304,29 +348,31 @@ func (w *CPUPressureWatcher) evaluate(cpuPct float64) {
 				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
 				slog.String("threshold", fmt.Sprintf("%.1f%%", w.allShedThreshold)))
 			w.enterAllShedMode()
-			w.setState(cpuLevelAllShed)
-		} else if cpuPct < w.recoveryThreshold {
+			w.setState(cpuLevelAllShed, now)
+		} else if cpuPct < w.recoveryThreshold && dwelled {
 			w.logger.Info("cpu pressure: recovered — restoring file sampling",
 				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
 				slog.String("threshold", fmt.Sprintf("%.1f%%", w.recoveryThreshold)))
 			w.recoverNormalMode()
-			w.setState(cpuLevelNormal)
+			w.setState(cpuLevelNormal, now)
 		}
 
 	case cpuLevelAllShed:
-		if cpuPct < w.recoveryThreshold {
+		if cpuPct < w.recoveryThreshold && dwelled {
 			w.logger.Info("cpu pressure: recovered — restoring all sampling",
 				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
 				slog.String("threshold", fmt.Sprintf("%.1f%%", w.recoveryThreshold)))
 			w.recoverNormalMode()
-			w.setState(cpuLevelNormal)
+			w.setState(cpuLevelNormal, now)
 		}
 	}
 }
 
-// setState updates the state and syncs the exported level gauge.
-func (w *CPUPressureWatcher) setState(s int) {
+// setState updates the state, records when it was entered (for dwell-time
+// gating), and syncs the exported level gauge.
+func (w *CPUPressureWatcher) setState(s int, now time.Time) {
 	w.state = s
+	w.enteredStateAt = now
 	w.pressureLevel.Set(float64(s))
 }
 
@@ -336,6 +382,12 @@ func (w *CPUPressureWatcher) enterFileShedMode() {
 }
 
 // enterAllShedMode reduces syscall and network sampling (L2).
+//
+// Deliberately does not touch "lsm" or any exec/canary event type: those are
+// the highest-value sources for detecting the exact class of attack (privesc,
+// container escape) that also tends to spike CPU, so this watcher never
+// trades them away regardless of pressure level. Even L2 costs CPU budget
+// rather than detection coverage on the hooks that matter most.
 func (w *CPUPressureWatcher) enterAllShedMode() {
 	w.shed("syscall")
 	w.shed("network")

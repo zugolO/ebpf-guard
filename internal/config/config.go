@@ -1280,29 +1280,38 @@ type MemoryPressureConfig struct {
 
 // CPUPressureConfig holds CPU pressure auto-tuning settings.
 //
-// When the agent's own CPU usage (as a percentage of total VPS CPU) exceeds the
-// thresholds, the watchdog adaptively reduces BPF-side sampling of the noisiest
-// collectors — file first (level 1), then syscall/network (level 2) — and
-// restores them once usage drops back below the recovery threshold.
+// When the agent's own CPU usage (as a percentage of a SINGLE core — 100 ==
+// one full core busy, not normalized by host core count) exceeds the
+// thresholds, the watchdog adaptively reduces BPF-side sampling of the
+// noisiest collectors — file first (level 1), then syscall/network (level
+// 2) — and restores them once usage drops back below the recovery threshold
+// AND the current level has been held for at least MinDwell. LSM/canary/exec
+// hooks are never shed. Using an absolute per-core budget (instead of a
+// percentage of total host CPU) means the defaults behave the same way on a
+// 1-core VPS and an 8-core box.
 type CPUPressureConfig struct {
 	// Enabled enables CPU pressure monitoring.
 	Enabled bool `mapstructure:"enabled"`
 	// CheckInterval is the interval for sampling CPU usage (seconds).
 	CheckInterval int `mapstructure:"check_interval"`
-	// CPULimitPercent is the target CPU budget (% of total VPS CPU). It seeds
-	// the level thresholds when those are left at zero. Default: 15.0.
+	// CPULimitPercent is the target CPU budget (% of a single core). It seeds
+	// the level thresholds when those are left at zero. Default: 40.0.
 	CPULimitPercent float64 `mapstructure:"cpu_limit_percent"`
-	// FileShedThreshold is the CPU % above which file sampling is reduced (level 1).
-	// Defaults to CPULimitPercent.
+	// FileShedThreshold is the CPU % (of one core) above which file sampling
+	// is reduced (level 1). Defaults to CPULimitPercent.
 	FileShedThreshold float64 `mapstructure:"file_shed_threshold"`
-	// AllShedThreshold is the CPU % above which syscall/network are also reduced (level 2).
-	// Defaults to ~1.67x FileShedThreshold.
+	// AllShedThreshold is the CPU % (of one core) above which syscall/network
+	// are also reduced (level 2). Defaults to 1.75x FileShedThreshold.
 	AllShedThreshold float64 `mapstructure:"all_shed_threshold"`
-	// RecoveryThreshold is the CPU % below which the watcher steps back one level (hysteresis).
-	// Defaults to 0.6x FileShedThreshold.
+	// RecoveryThreshold is the CPU % (of one core) below which the watcher
+	// steps back one level (hysteresis). Defaults to 0.5x FileShedThreshold.
 	RecoveryThreshold float64 `mapstructure:"recovery_threshold"`
-	// WindowSize is the number of samples averaged into the sliding window. Default: 3.
+	// WindowSize is the number of samples averaged into the sliding window. Default: 6.
 	WindowSize int `mapstructure:"window_size"`
+	// MinDwell is the minimum time (seconds) a shed level is held before the
+	// watcher will step back down, even once CPU is back under
+	// RecoveryThreshold. Default: 30.
+	MinDwell int `mapstructure:"min_dwell"`
 }
 
 // PolicyConfig holds policy-as-code settings (Sprint 23.0).
@@ -1959,11 +1968,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("watchdog.memory_pressure.disable_all_threshold", 5.0)
 	v.SetDefault("watchdog.cpu_pressure.enabled", true)
 	v.SetDefault("watchdog.cpu_pressure.check_interval", 5)
-	v.SetDefault("watchdog.cpu_pressure.cpu_limit_percent", 15.0)
-	v.SetDefault("watchdog.cpu_pressure.file_shed_threshold", 15.0)
-	v.SetDefault("watchdog.cpu_pressure.all_shed_threshold", 25.0)
-	v.SetDefault("watchdog.cpu_pressure.recovery_threshold", 9.0)
-	v.SetDefault("watchdog.cpu_pressure.window_size", 3)
+	v.SetDefault("watchdog.cpu_pressure.cpu_limit_percent", 40.0)
+	v.SetDefault("watchdog.cpu_pressure.file_shed_threshold", 40.0)
+	v.SetDefault("watchdog.cpu_pressure.all_shed_threshold", 70.0)
+	v.SetDefault("watchdog.cpu_pressure.recovery_threshold", 20.0)
+	v.SetDefault("watchdog.cpu_pressure.window_size", 6)
+	v.SetDefault("watchdog.cpu_pressure.min_dwell", 30)
 
 	// Policy defaults (Sprint 23.0)
 	v.SetDefault("policy.rego.enabled", true)

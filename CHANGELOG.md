@@ -11,6 +11,12 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `CPUPressureWatcher` (issue #211 follow-up): CPU budget is now measured as an absolute percentage of a single core instead of a percentage of total host CPU, so the same default thresholds behave identically on a 1-core VPS and an 8-core box instead of scaling with unrelated hardware capacity
+- Widened hysteresis for CPU pressure load-shedding: raised default thresholds (40%/70%/20% of one core), grew the smoothing window to 30s, and added a `min_dwell` floor (default 30s) so the state machine no longer flaps every 10-15s under bursty attack traffic, which was cutting file/syscall/network visibility exactly while an attack was in progress
+- `enterAllShedMode` now documents explicitly that `lsm`/exec/canary hooks are never shed regardless of pressure level, since those are the highest-value sources for the attacks most likely to spike CPU
+- Added a `CPU Pressure Level` panel to the Grafana dashboard so operators can see load-shedding oscillation instead of only finding it in logs
+
 ---
 
 ## [0.10.0-alpha] - 2026-06-25

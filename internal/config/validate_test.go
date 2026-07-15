@@ -258,12 +258,12 @@ func TestValidateConfig_CPUPressure(t *testing.T) {
 		{"valid", func(c *CPUPressureConfig) {}, ""},
 		{"disabled skips validation", func(c *CPUPressureConfig) {
 			c.Enabled = false
-			c.FileShedThreshold = 200 // out of range but ignored when disabled
+			c.FileShedThreshold = 900 // out of range but ignored when disabled
 		}, ""},
-		{"cpu_limit out of range", func(c *CPUPressureConfig) { c.CPULimitPercent = 150 }, "cpu_limit_percent"},
+		{"cpu_limit out of range", func(c *CPUPressureConfig) { c.CPULimitPercent = 900 }, "cpu_limit_percent"},
 		{"file_shed negative", func(c *CPUPressureConfig) { c.FileShedThreshold = -1 }, "file_shed_threshold"},
-		{"all_shed out of range", func(c *CPUPressureConfig) { c.AllShedThreshold = 101 }, "all_shed_threshold"},
-		{"recovery out of range", func(c *CPUPressureConfig) { c.RecoveryThreshold = 101 }, "recovery_threshold"},
+		{"all_shed out of range", func(c *CPUPressureConfig) { c.AllShedThreshold = 801 }, "all_shed_threshold"},
+		{"recovery out of range", func(c *CPUPressureConfig) { c.RecoveryThreshold = 801 }, "recovery_threshold"},
 		{"file_shed above all_shed", func(c *CPUPressureConfig) {
 			c.FileShedThreshold = 30
 			c.AllShedThreshold = 25
@@ -273,6 +273,7 @@ func TestValidateConfig_CPUPressure(t *testing.T) {
 			c.FileShedThreshold = 15
 		}, "must be less than file_shed_threshold"},
 		{"negative window", func(c *CPUPressureConfig) { c.WindowSize = -1 }, "window_size"},
+		{"negative min_dwell", func(c *CPUPressureConfig) { c.MinDwell = -1 }, "min_dwell"},
 	}
 
 	for _, tt := range tests {

@@ -405,6 +405,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		AllShedThreshold:  cp.AllShedThreshold,
 		RecoveryThreshold: cp.RecoveryThreshold,
 		WindowSize:        cp.WindowSize,
+		MinDwell:          time.Duration(cp.MinDwell) * time.Second,
 	}, slog.Default(), samplingMux, prometheus.DefaultRegisterer)
 
 	// Feature F: cross-node alert correlation via gossip amplification.

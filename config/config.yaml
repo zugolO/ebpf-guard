@@ -103,17 +103,26 @@ watchdog:
     disable_all_threshold: 5.0        # free RAM %: disable all profiling (L2)
     recovery_threshold: 20.0          # free RAM %: recover to normal
   # cpu_pressure: adaptively shed the noisiest collectors when the agent's own
-  # CPU usage (as a % of total VPS CPU) exceeds the budget. File monitoring is
-  # shed first (L1); syscall + network are added if CPU stays high (L2).
-  # Sampling is restored once usage drops below recovery_threshold (hysteresis).
+  # CPU usage exceeds the budget. File monitoring is shed first (L1); syscall
+  # + network are added if CPU stays high (L2). LSM/canary/exec hooks are
+  # never shed regardless of level. Sampling is restored once usage drops
+  # below recovery_threshold AND the current level has been held for at
+  # least min_dwell (hysteresis + dwell floor, to avoid flapping on bursty
+  # attack traffic).
+  #
+  # All thresholds are a percentage of a SINGLE core (100 == one full core
+  # busy), not of total host CPU — this makes the defaults behave the same
+  # on a 1-core VPS and an 8-core box, instead of scaling the trip point with
+  # unrelated hardware capacity.
   cpu_pressure:
     enabled: true
     check_interval: 5            # seconds between CPU samples
-    cpu_limit_percent: 15.0      # target CPU budget; seeds thresholds below
-    file_shed_threshold: 15.0    # CPU %: reduce file sampling (L1)
-    all_shed_threshold: 25.0     # CPU %: also reduce syscall/network (L2)
-    recovery_threshold: 9.0      # CPU %: step back one level
-    window_size: 3               # samples averaged into the sliding window
+    cpu_limit_percent: 40.0      # target CPU budget (% of one core); seeds thresholds below
+    file_shed_threshold: 40.0    # CPU % of one core: reduce file sampling (L1)
+    all_shed_threshold: 70.0     # CPU % of one core: also reduce syscall/network (L2)
+    recovery_threshold: 20.0     # CPU % of one core: step back one level
+    window_size: 6               # samples averaged into the sliding window (30s at 5s interval)
+    min_dwell: 30                # seconds a level is held before recovering
 
 # Correlator tuning
 correlator:

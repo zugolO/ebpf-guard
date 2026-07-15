@@ -882,6 +882,10 @@ type RulesConfig struct {
 	// ChecksumFile is the path to the SHA-256 checksum file (sha256sum format).
 	// Defaults to <rules_dir>/checksums.sha256.
 	ChecksumFile string `mapstructure:"checksum_file"`
+	// LocalTuningPath points to an optional local-tuning overlay YAML file
+	// (see correlator.TuningOverlay) that adds exceptions to existing rules by
+	// rule_id without editing the shipped rule files. Missing file is a no-op.
+	LocalTuningPath string `mapstructure:"local_tuning_path"`
 }
 
 // NamespaceRuleConfig maps a Kubernetes label selector to additional rule files.
@@ -1807,6 +1811,7 @@ func setDefaults(v *viper.Viper) {
 	// Rules defaults
 	v.SetDefault("rules.path", "rules/")
 	v.SetDefault("rules.hot_reload", true)
+	v.SetDefault("rules.local_tuning_path", "rules/local-tuning.yaml")
 	v.SetDefault("rules.rate_limit_alerts", true)
 	v.SetDefault("rules.rate_limit_window", 60)
 	v.SetDefault("rules.max_alerts_per_window", 10)

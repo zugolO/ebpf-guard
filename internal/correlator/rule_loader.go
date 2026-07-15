@@ -345,7 +345,7 @@ func validateRule(rule *Rule) error {
 		return fmt.Errorf("rule %s: sample_rate %.4f out of range, must be in (0.0, 1.0]", rule.ID, rule.SampleRate)
 	}
 
-	// Validate conditions
+	// Validate conditions (including every exception's condition/condition_group).
 	conditions := getAllConditions(rule)
 	for _, cond := range conditions {
 		if err := validateCondition(&cond, rule.EventType); err != nil {
@@ -353,15 +353,38 @@ func validateRule(rule *Rule) error {
 		}
 	}
 
+	// Validate exception metadata not covered by getAllConditions above.
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		if exc.Name == "" {
+			return fmt.Errorf("rule %s: exception %d missing required 'name'", rule.ID, i)
+		}
+		if exc.ConditionGroup != nil && len(exc.ConditionGroup.Conditions) == 0 && len(exc.ConditionGroup.SubGroups) == 0 {
+			return fmt.Errorf("rule %s: exception %q condition_group has no conditions or subgroups", rule.ID, exc.Name)
+		}
+	}
+
 	return nil
 }
 
-// getAllConditions extracts all conditions from a rule, recursively traversing SubGroups.
+// getAllConditions extracts all conditions from a rule, recursively traversing
+// SubGroups, and from every exception's condition/condition_group.
 func getAllConditions(rule *Rule) []RuleCondition {
+	var conds []RuleCondition
 	if rule.ConditionGroup != nil {
-		return getConditionsFromGroup(rule.ConditionGroup)
+		conds = getConditionsFromGroup(rule.ConditionGroup)
+	} else {
+		conds = []RuleCondition{rule.Condition}
 	}
-	return []RuleCondition{rule.Condition}
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		if exc.ConditionGroup != nil {
+			conds = append(conds, getConditionsFromGroup(exc.ConditionGroup)...)
+		} else {
+			conds = append(conds, exc.Condition)
+		}
+	}
+	return conds
 }
 
 // getConditionsFromGroup recursively extracts conditions from a RuleConditionGroup and its SubGroups.

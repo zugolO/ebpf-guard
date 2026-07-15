@@ -70,6 +70,11 @@ rules:
   rate_limit_alerts: true
   rate_limit_window: 60
   max_alerts_per_window: 100
+  # Optional local-tuning overlay: adds `exceptions` to existing rules by
+  # rule_id without editing the shipped rule files, so it survives rule-set
+  # updates. Missing file is a no-op. See rules/local-tuning.yaml.example
+  # and docs/rule-authoring-guide.md#exceptions.
+  local_tuning_path: "/opt/ebpf-guard/rules/local-tuning.yaml"
 
 profiler:
   enabled: true

@@ -1,0 +1,46 @@
+# Local rule-tuning overlay (issue #284).
+#
+# Copy this file to `rules/local-tuning.yaml` (or point `rules.local_tuning_path`
+# at a different location) and add exceptions to suppress known false
+# positives WITHOUT editing the shipped rule files. Because it is a separate
+# file, it survives rule-set updates instead of being overwritten.
+#
+# Each entry adds one or more `exceptions` to an existing rule, matched by
+# `rule_id`. If an event matches both the rule's own condition AND any one of
+# its exceptions, the alert is suppressed. Suppressions are counted in the
+# `ebpf_guard_rule_exceptions_total{rule_id,exception_name}` Prometheus metric
+# so you can see how much noise each exception is removing.
+#
+# Exceptions use the same condition language as rules (`condition` or
+# `condition_group`, same `op` values, same field names for the rule's
+# event_type). Unknown fields/operators are rejected at load time, exactly
+# like a core rule condition.
+#
+# rule_id entries that don't match any currently loaded rule are logged as a
+# warning and skipped — not a hard startup error — since the overlay may
+# reference rules from a ruleset that isn't currently enabled.
+#
+# This file is picked up on the next rule hot-reload the same way changes to
+# rules.path are (see docs/rule-authoring-guide.md#exceptions).
+
+overlays:
+  - rule_id: container_escape_proc_write
+    exceptions:
+      - name: systemd-sysctl
+        condition:
+          field: proc.comm
+          op: in
+          values: [systemd, systemd-sysctl]
+
+  - rule_id: fim_library_replaced
+    exceptions:
+      - name: ldconfig
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ldconfig.real]
+            - field: file.path
+              op: prefix
+              values: ["/etc/ld.so"]

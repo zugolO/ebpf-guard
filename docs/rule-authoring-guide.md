@@ -246,6 +246,81 @@ Rules are watched with `fsnotify`.  Any change to a file under the configured
 agent.  You can verify hot-reload by watching `ebpf_guard_rules_loaded` in
 Prometheus metrics.
 
+## Exceptions
+
+A rule either fires or it doesn't — but production environments have
+legitimate processes (systemd, ldconfig, package managers) that regularly
+trip detection rules like `container_escape_proc_write` or
+`fim_library_replaced`. Editing the rule's own `condition` to carve out that
+process is one option, but it's lost the next time the rule set is updated.
+
+`exceptions` let you attach named suppression conditions to a rule: if the
+event matches the rule's condition **and** any one of its exceptions, the
+alert is suppressed instead of raised.
+
+```yaml
+rules:
+  - id: container_escape_proc_write
+    event_type: file
+    condition:
+      field: filename
+      op: regex
+      values: ["/proc/sys/.*"]
+    severity: warning
+    action: alert
+    exceptions:
+      - name: systemd-sysctl
+        condition:
+          field: proc.comm
+          op: in
+          values: [systemd, systemd-sysctl]
+      - name: ldconfig
+        condition_group:
+          operator: and
+          conditions:
+            - { field: proc.comm, op: eq, values: [ldconfig.real] }
+            - { field: file.path, op: prefix, values: ["/etc/ld.so"] }
+```
+
+Exceptions use the exact same condition language as rule conditions —
+`condition` or `condition_group`, the same operators, the same field names
+for the rule's `event_type` — and are validated at load time the same way:
+unknown field names or operators are rejected before the rule set is
+activated.
+
+Every suppressed alert increments
+`ebpf_guard_rule_exceptions_total{rule_id, exception_name}`, so you can see
+exactly how much noise each exception is removing.
+
+### Local-tuning overlay
+
+Editing `exceptions:` directly into a shipped rule file still means your
+change is lost on the next rule-set update. For exceptions you want to keep
+across updates, add them to a separate overlay file instead — by default
+`rules/local-tuning.yaml` (configurable via `rules.local_tuning_path`), which
+is **not** part of the shipped rule set and is never touched by a rules
+refresh. See [`rules/local-tuning.yaml.example`](../rules/local-tuning.yaml.example)
+for the full format:
+
+```yaml
+overlays:
+  - rule_id: container_escape_proc_write
+    exceptions:
+      - name: systemd-sysctl
+        condition:
+          field: proc.comm
+          op: in
+          values: [systemd, systemd-sysctl]
+```
+
+Each entry adds its `exceptions` to the existing rule matching `rule_id`, so
+the base rule file is never modified. The overlay is loaded and merged
+every time rules are (re)loaded — including hot-reload — so editing it takes
+effect without restarting the agent, the same as any other rules change. A
+`rule_id` that doesn't match a currently loaded rule is logged as a warning
+and skipped rather than treated as a startup error, since the overlay may
+reference rules from a currently-disabled rule set.
+
 ## Best practices
 
 - Give every rule a globally unique, descriptive `id` (e.g. `cryptominer_pool_ports`).

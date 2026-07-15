@@ -29,11 +29,12 @@ func newFakeClock(numCPU int) *fakeClock {
 }
 
 // stepFor advances the clock by interval and adds enough CPU time to produce
-// the requested per-VPS CPU percentage over that interval.
+// the requested single-core CPU percentage over that interval.
 func (f *fakeClock) stepFor(pct float64, interval time.Duration) {
 	f.now = f.now.Add(interval)
-	// pct = (cpuDelta / wallDelta) / numCPU * 100
-	cpuDelta := pct / 100.0 * interval.Seconds() * float64(f.numCPU)
+	// pct = (cpuDelta / wallDelta) * 100 (percentage of a single core; not
+	// normalized by numCPU).
+	cpuDelta := pct / 100.0 * interval.Seconds()
 	f.cpu += cpuDelta
 }
 
@@ -53,19 +54,20 @@ func TestDefaultCPUConfig(t *testing.T) {
 	c := DefaultCPUConfig()
 	assert.True(t, c.Enabled)
 	assert.Equal(t, 5*time.Second, c.CheckInterval)
-	assert.Equal(t, 15.0, c.CPULimitPercent)
-	assert.Equal(t, 15.0, c.FileShedThreshold)
-	assert.Equal(t, 25.0, c.AllShedThreshold)
-	assert.Equal(t, 9.0, c.RecoveryThreshold)
-	assert.Equal(t, 3, c.WindowSize)
+	assert.Equal(t, 40.0, c.CPULimitPercent)
+	assert.Equal(t, 40.0, c.FileShedThreshold)
+	assert.Equal(t, 70.0, c.AllShedThreshold)
+	assert.Equal(t, 20.0, c.RecoveryThreshold)
+	assert.Equal(t, 6, c.WindowSize)
+	assert.Equal(t, 30*time.Second, c.MinDwell)
 }
 
 func TestCPUWatcher_ThresholdSeedingFromLimit(t *testing.T) {
 	// Only cpu_limit_percent set; the rest should be derived.
 	w := NewCPUPressureWatcher(CPUConfig{CPULimitPercent: 12.0, WindowSize: 1}, nil, nil)
 	assert.Equal(t, 12.0, w.fileShedThreshold)
-	assert.InDelta(t, 20.0, w.allShedThreshold, 0.001) // 12 * 5/3
-	assert.InDelta(t, 7.2, w.recoveryThreshold, 0.001) // 12 * 0.6
+	assert.InDelta(t, 21.0, w.allShedThreshold, 0.001) // 12 * 7/4
+	assert.InDelta(t, 6.0, w.recoveryThreshold, 0.001) // 12 * 0.5
 }
 
 func TestCPUWatcher_RegisterMetrics(t *testing.T) {
@@ -99,6 +101,7 @@ func TestCPUWatcher_EscalateAndRecover(t *testing.T) {
 		AllShedThreshold:  25,
 		RecoveryThreshold: 9,
 		WindowSize:        1,
+		MinDwell:          time.Nanosecond,
 	}
 	w, fc := newTestWatcher(t, cfg, bpf)
 	interval := time.Second
@@ -147,6 +150,7 @@ func TestCPUWatcher_Hysteresis_NoFlapBetweenThresholds(t *testing.T) {
 		AllShedThreshold:  25,
 		RecoveryThreshold: 9,
 		WindowSize:        1,
+		MinDwell:          time.Nanosecond,
 	}
 	w, fc := newTestWatcher(t, cfg, bpf)
 	interval := time.Second
@@ -172,6 +176,7 @@ func TestCPUWatcher_SlidingWindowSmoothsSpike(t *testing.T) {
 		AllShedThreshold:  25,
 		RecoveryThreshold: 9,
 		WindowSize:        3,
+		MinDwell:          time.Nanosecond,
 	}
 	w, fc := newTestWatcher(t, cfg, bpf)
 	interval := time.Second
@@ -200,6 +205,7 @@ func TestCPUWatcher_NilControllerTracksStateOnly(t *testing.T) {
 		AllShedThreshold:  25,
 		RecoveryThreshold: 9,
 		WindowSize:        1,
+		MinDwell:          time.Nanosecond,
 	}
 	w, fc := newTestWatcher(t, cfg, nil)
 	w.checkCPU()
@@ -233,6 +239,7 @@ func TestCPUWatcher_DirectRecoverFromL1(t *testing.T) {
 		AllShedThreshold:  25,
 		RecoveryThreshold: 9,
 		WindowSize:        1,
+		MinDwell:          time.Nanosecond,
 	}
 	w, fc := newTestWatcher(t, cfg, bpf)
 	w.checkCPU()
@@ -316,11 +323,52 @@ func TestCPUWatcher_DefaultSeedingFromZeroConfig(t *testing.T) {
 	// An all-zero config must be filled in with safe defaults.
 	w := NewCPUPressureWatcher(CPUConfig{}, nil, nil)
 	assert.Equal(t, 5*time.Second, w.checkInterval)
-	assert.Equal(t, 3, w.windowSize)
-	assert.Equal(t, 15.0, w.fileShedThreshold)
-	assert.InDelta(t, 25.0, w.allShedThreshold, 0.001)
-	assert.InDelta(t, 9.0, w.recoveryThreshold, 0.001)
+	assert.Equal(t, 6, w.windowSize)
+	assert.Equal(t, 40.0, w.fileShedThreshold)
+	assert.InDelta(t, 70.0, w.allShedThreshold, 0.001)
+	assert.InDelta(t, 20.0, w.recoveryThreshold, 0.001)
+	assert.Equal(t, 30*time.Second, w.minDwell)
 	assert.GreaterOrEqual(t, w.numCPU, 1)
+}
+
+func TestCPUWatcher_MinDwellPreventsPrematureRecovery(t *testing.T) {
+	// A burst shorter than the smoothing window must not recover sampling
+	// the instant CPU% dips, only to re-trip on the next burst: that would
+	// cost the agent visibility right when an attack is in progress. With a
+	// dwell floor, recovery must wait even though the instantaneous reading
+	// is already below the recovery threshold.
+	bpf := newMockBPFController()
+	cfg := CPUConfig{
+		CheckInterval:     time.Second,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        1,
+		MinDwell:          10 * time.Second,
+	}
+	w, fc := newTestWatcher(t, cfg, bpf)
+	interval := time.Second
+	w.checkCPU()
+
+	// Trip to level 1.
+	fc.stepFor(16, interval)
+	w.checkCPU()
+	require.Equal(t, cpuLevelFileShed, w.PressureLevel())
+
+	// CPU immediately drops below recovery, but only ~1s has elapsed in the
+	// shed state — well short of the 10s dwell floor. Must stay shed.
+	fc.stepFor(2, interval)
+	w.checkCPU()
+	assert.Equal(t, cpuLevelFileShed, w.PressureLevel())
+	assert.Equal(t, 0.1, bpf.GetSamplingRate("file"))
+
+	// Keep CPU low until the dwell floor has elapsed, then it should recover.
+	for i := 0; i < 10; i++ {
+		fc.stepFor(2, interval)
+		w.checkCPU()
+	}
+	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
+	assert.Equal(t, 1.0, bpf.GetSamplingRate("file"))
 }
 
 func TestCPUWatcher_ShedIsIdempotent(t *testing.T) {

@@ -273,6 +273,7 @@ func TestValidateConfig_CPUPressure(t *testing.T) {
 			c.FileShedThreshold = 15
 		}, "must be less than file_shed_threshold"},
 		{"negative window", func(c *CPUPressureConfig) { c.WindowSize = -1 }, "window_size"},
+		{"negative min_dwell", func(c *CPUPressureConfig) { c.MinDwell = -1 }, "min_dwell"},
 	}
 
 	for _, tt := range tests {

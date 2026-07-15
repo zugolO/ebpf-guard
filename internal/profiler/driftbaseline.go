@@ -195,6 +195,7 @@ func (p *DriftBaselineProfiler) resolveKey(e types.Event) WorkloadKey {
 // description of what a drift-class rule matched, so that repeated matches
 // against the same class of target (e.g. any file under /etc, any
 // connection to the same port) collapse into a single baseline signature.
+//nolint:exhaustive // only file/network/syscall events are meaningful drift-class targets; other event types fall through to the zero-value signature.
 func driftSignatureTarget(e types.Event) string {
 	switch e.Type {
 	case types.EventFileAccess:

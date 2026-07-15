@@ -163,7 +163,7 @@ func normalizePathPrefix(path string) string {
 		return ""
 	}
 	segs := strings.Split(path, "/")
-	var kept []string
+	kept := make([]string, 0, pathPrefixMaxDepth)
 	for _, s := range segs {
 		if s == "" {
 			continue

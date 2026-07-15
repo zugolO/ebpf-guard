@@ -182,8 +182,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		cfg = cfgManager.Get()
 
-		// Load rules from file or directory (config defaults to rules/ dir)
-		rules, err = loadRules(cfg.Rules.Path)
+		// Load rules from file or directory (config defaults to rules/ dir),
+		// merging in the local-tuning overlay if configured.
+		rules, err = loadRulesWithTuning(cfg.Rules.Path, cfg.Rules.LocalTuningPath)
 		if err != nil {
 			slog.Warn("failed to load rules file, starting with empty rule set",
 				slog.String("path", cfg.Rules.Path),
@@ -1074,7 +1075,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 			// Phase 1: parse and fully validate in isolation — no swap yet.
 			t0 := time.Now()
-			newRules, err := loadRules(newCfg.Rules.Path)
+			newRules, err := loadRulesWithTuning(newCfg.Rules.Path, newCfg.Rules.LocalTuningPath)
 			engine.ObserveYAMLParseDuration(time.Since(t0))
 			if err != nil {
 				slog.Error("hot-reload aborted: validation failed",
@@ -1858,7 +1859,7 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 			}
 			cfg := cfgManager.Get()
 
-			rules, err := loadRules(cfg.Rules.Path)
+			rules, err := loadRulesWithTuning(cfg.Rules.Path, cfg.Rules.LocalTuningPath)
 			if err != nil {
 				return fmt.Errorf("load rules: %w", err)
 			}
@@ -2763,7 +2764,7 @@ func runDashboard(cfgPath string, dryRun bool) error {
 	}
 	cfg := cfgManager.Get()
 
-	rules, _ := loadRules(cfg.Rules.Path)
+	rules, _ := loadRulesWithTuning(cfg.Rules.Path, cfg.Rules.LocalTuningPath)
 
 	engineCfg := correlator.DefaultCorrelationEngineConfig()
 	engineCfg.Rules = rules
@@ -3136,12 +3137,41 @@ func parseDuration(s string, defaultDur time.Duration) time.Duration {
 
 // loadRules loads rules from a file or directory path.
 func loadRules(path string) ([]correlator.Rule, error) {
+	return loadRulesWithTuning(path, "")
+}
+
+// loadRulesWithTuning loads the base rule set from path and, if tuningPath is
+// non-empty, merges in a local-tuning overlay (see correlator.TuningOverlay)
+// that adds exceptions to existing rules by rule_id. A missing tuning file is
+// not an error — the overlay is opt-in.
+func loadRulesWithTuning(path, tuningPath string) ([]correlator.Rule, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat rules path: %w", err)
 	}
+
+	var rules []correlator.Rule
 	if info.IsDir() {
-		return correlator.LoadRulesFromDir(path)
+		rules, err = correlator.LoadRulesFromDir(path)
+	} else {
+		rules, err = correlator.LoadRulesFromFile(path)
 	}
-	return correlator.LoadRulesFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	overlay, err := correlator.LoadTuningOverlay(tuningPath)
+	if err != nil {
+		return nil, fmt.Errorf("load tuning overlay: %w", err)
+	}
+	unknown, err := correlator.ApplyTuningOverlay(rules, overlay)
+	if err != nil {
+		return nil, fmt.Errorf("apply tuning overlay: %w", err)
+	}
+	for _, id := range unknown {
+		slog.Warn("tuning overlay: rule_id not found in active rule set, exceptions not applied",
+			slog.String("rule_id", id), slog.String("tuning_path", tuningPath))
+	}
+
+	return rules, nil
 }

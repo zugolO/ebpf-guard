@@ -38,6 +38,15 @@ var (
 		},
 		[]string{"rule_id", "mode", "sample_rate"},
 	)
+	// ruleExceptionsTotal counts alerts suppressed because the event matched a
+	// rule's own condition AND one of its exceptions (FP-tuning suppression).
+	ruleExceptionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_rule_exceptions_total",
+			Help: "Alerts suppressed because the event matched a rule exception",
+		},
+		[]string{"rule_id", "exception_name"},
+	)
 )
 
 // alertsPool recycles the backing arrays of []types.Alert slices returned by
@@ -194,6 +203,21 @@ type RuleConditionGroup struct {
 	SubGroups []RuleConditionGroup `yaml:"subgroups,omitempty"`
 }
 
+// RuleException defines a named suppression condition for a rule. When an
+// event matches the rule's own condition AND any one of its exceptions, the
+// alert is suppressed. This lets an operator tune away known false positives
+// (e.g. systemd touching a container-escape-sensitive path) without editing
+// the rule itself, so the exception survives the next rule-set update.
+type RuleException struct {
+	// Name identifies the exception in logs, metrics, and audit trails.
+	Name string `yaml:"name"`
+	// Condition is a single suppression condition (for simple exceptions).
+	Condition RuleCondition `yaml:"condition"`
+	// ConditionGroup allows AND/OR logic across multiple fields; takes
+	// precedence over Condition when set.
+	ConditionGroup *RuleConditionGroup `yaml:"condition_group,omitempty"`
+}
+
 // RuleAction defines what to do when a rule matches.
 type RuleAction string
 
@@ -228,6 +252,10 @@ type Rule struct {
 	ConditionGroup *RuleConditionGroup `yaml:"condition_group,omitempty"`
 	Severity       types.AlertSeverity `yaml:"severity"`
 	Action         RuleAction          `yaml:"action"`
+	// Exceptions are suppression conditions: if the event also matches any one
+	// of them, the alert is not raised. Populated either inline in the rule
+	// file or merged in from a local-tuning overlay (see ApplyTuningOverlay).
+	Exceptions []RuleException `yaml:"exceptions,omitempty"`
 	// Tags are optional metadata for rule categorization and filtering
 	Tags []string `yaml:"tags,omitempty"`
 	// Sampling holds the nested per-rule sampling configuration.
@@ -398,12 +426,25 @@ func collectRequiredPatterns(rules []Rule) (regexPats, cidrPats, setKeys map[str
 }
 
 // extractAllRuleConditions returns all RuleCondition entries from a rule,
-// traversing both the top-level Condition and any ConditionGroup/subgroups.
+// traversing the top-level Condition/ConditionGroup as well as every
+// exception's Condition/ConditionGroup, so cache-inheritance sees patterns
+// referenced only from an exception.
 func extractAllRuleConditions(rule *Rule) []RuleCondition {
+	var conds []RuleCondition
 	if rule.ConditionGroup != nil {
-		return extractGroupConditions(rule.ConditionGroup)
+		conds = extractGroupConditions(rule.ConditionGroup)
+	} else {
+		conds = []RuleCondition{rule.Condition}
 	}
-	return []RuleCondition{rule.Condition}
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		if exc.ConditionGroup != nil {
+			conds = append(conds, extractGroupConditions(exc.ConditionGroup)...)
+		} else {
+			conds = append(conds, exc.Condition)
+		}
+	}
+	return conds
 }
 
 // extractGroupConditions recursively collects conditions from a group and its subgroups.
@@ -464,6 +505,18 @@ func (re *RuleEngine) compilePatterns() error {
 		}
 		if re.rules[i].ConditionGroup != nil {
 			if err := re.compileGroupPatterns(re.rules[i].ConditionGroup); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		for j := range re.rules[i].Exceptions {
+			exc := &re.rules[i].Exceptions[j]
+			if exc.ConditionGroup != nil {
+				if err := re.compileGroupPatterns(exc.ConditionGroup); err != nil {
+					errs = append(errs, err)
+				}
+				continue
+			}
+			if err := re.compileCondPtr(&exc.Condition); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -734,11 +787,33 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 	}
 
 	// Use condition group if present, otherwise use single condition.
+	var matched bool
 	if rule.ConditionGroup != nil {
-		return re.evaluateConditionGroup(e, rule.ConditionGroup, dnsAnalysis)
+		matched = re.evaluateConditionGroup(e, rule.ConditionGroup, dnsAnalysis)
+	} else {
+		matched = re.evaluateCondition(e, &rule.Condition, dnsAnalysis)
+	}
+	if !matched {
+		return false
 	}
 
-	return re.evaluateCondition(e, &rule.Condition, dnsAnalysis)
+	// An event matching the rule is still suppressed if it also matches any
+	// one of the rule's exceptions (FP tuning without editing the rule).
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		var excMatched bool
+		if exc.ConditionGroup != nil {
+			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis)
+		} else {
+			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis)
+		}
+		if excMatched {
+			ruleExceptionsTotal.WithLabelValues(rule.ID, exc.Name).Inc()
+			return false
+		}
+	}
+
+	return true
 }
 
 // evaluateConditionGroup evaluates a group of conditions with AND/OR logic, recursing into SubGroups.

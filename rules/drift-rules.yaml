@@ -51,6 +51,7 @@ rules:
           values: []
     severity: critical
     action: alert
+    class: drift
     tags:
       - "T1204.002"
       - "drift"
@@ -80,6 +81,7 @@ rules:
           values: [".so"]
     severity: warning
     action: alert
+    class: drift
     tags:
       - "T1574.006"
       - "drift"
@@ -109,6 +111,7 @@ rules:
             - "/etc/systemd/system/"
     severity: warning
     action: alert
+    class: drift
     tags:
       - "T1543.002"
       - "drift"
@@ -127,6 +130,7 @@ rules:
       values: ["4444", "8080", "8443", "31337", "1337", "5555", "6666", "7777", "8888", "9999"]
     severity: warning
     action: alert
+    class: drift
     tags:
       - "T1571"
       - "drift"
@@ -157,6 +161,7 @@ rules:
         - "request_key"
     severity: critical
     action: alert
+    class: drift
     tags:
       - "T1611"
       - "drift"

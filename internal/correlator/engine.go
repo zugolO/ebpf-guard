@@ -103,11 +103,11 @@ type CorrelationEngine struct {
 	alertsDroppedGlobal  prometheus.Counter // ebpf_guard_alerts_dropped_total{reason="global_rate_limit"}
 
 	// Rego policy engine (post-YAML filter, Sprint 23.0)
-	regoEngine      *policy.RegoEngine
-	enableRegoEval  bool
-	regoQueue         chan regoTask
-	regoQueueDropped  prometheus.Counter
-	regoQueueGauge    prometheus.Gauge // ebpf_guard_rego_queue_occupancy
+	regoEngine       *policy.RegoEngine
+	enableRegoEval   bool
+	regoQueue        chan regoTask
+	regoQueueDropped prometheus.Counter
+	regoQueueGauge   prometheus.Gauge // ebpf_guard_rego_queue_occupancy
 	// regoWg tracks in-flight rego evaluation tasks for clean Drain.
 	regoWg sync.WaitGroup
 
@@ -143,7 +143,7 @@ type CorrelationEngine struct {
 	reloadTotal         *prometheus.CounterVec // ebpf_guard_rule_reload_total{status}
 	reloadDuration      *prometheus.GaugeVec   // ebpf_guard_rule_reload_duration_seconds{phase}
 	rulesActive         *prometheus.GaugeVec   // ebpf_guard_rules_active{event_type}
-	lastReloadTimestamp prometheus.Gauge        // ebpf_guard_rule_last_reload_timestamp_seconds
+	lastReloadTimestamp prometheus.Gauge       // ebpf_guard_rule_last_reload_timestamp_seconds
 
 	// Metrics callback
 	onCorrelate MetricsCallback
@@ -181,8 +181,8 @@ type CorrelationEngine struct {
 	enforceCooldown time.Duration
 	// cooldowns is sharded across mapShardCount buckets; pid selects the shard.
 	// This reduces lock contention under enforcement bursts vs. a single mutex.
-	cooldowns       *shardedCooldowns
-	enforcedCounter prometheus.Counter
+	cooldowns           *shardedCooldowns
+	enforcedCounter     prometheus.Counter
 	enforceQueue        chan enforceTask
 	enforceQueueDropped prometheus.Counter
 	enforceQueueGauge   prometheus.Gauge // ebpf_guard_enforcement_queue_occupancy
@@ -196,6 +196,12 @@ type CorrelationEngine struct {
 	// allowlistProfiler detects unknown syscalls after the learning phase.
 	// nil disables allowlist enforcement.
 	allowlistProfiler *profiler.SyscallAllowlistProfiler
+
+	// driftBaselineProfiler suppresses class: drift rule matches during a
+	// per-workload learning window and thereafter alerts only on matches that
+	// deviate from the learned baseline (issue #286). nil disables it, in
+	// which case drift-class rules alert exactly like threat-class rules.
+	driftBaselineProfiler *profiler.DriftBaselineProfiler
 
 	// regoEvalErrors counts Rego evaluation failures so degraded-enrichment
 	// is observable via Prometheus rather than silently swallowed.
@@ -419,6 +425,13 @@ type CorrelationEngineConfig struct {
 	// Created externally (e.g. in main) so the learning phase can start
 	// before the correlation engine is fully initialised.
 	AllowlistProfiler *profiler.SyscallAllowlistProfiler
+
+	// DriftBaselineProfiler suppresses class: drift rule matches until they
+	// deviate from a learned per-workload baseline (issue #286).
+	// Created externally (e.g. in main) so the learning phase can start
+	// before the correlation engine is fully initialised.
+	// Optional — nil means class: drift rules alert exactly like class: threat.
+	DriftBaselineProfiler *profiler.DriftBaselineProfiler
 }
 
 // DefaultCorrelationEngineConfig returns a default configuration.
@@ -594,53 +607,54 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	}
 
 	ce := &CorrelationEngine{
-		buffer:               NewShardedEventBuffer(config.BufferSize),
-		enableEventBuffer:    config.EnableEventBuffer,
-		traceCtxCache:        newTraceContextCache(),
-		pending:              make([]types.Alert, 0),
-		enableAnomaly:        config.EnableAnomaly,
-		rateLimiter:          NewRateLimiterWithContext(ctx, config.RateLimitWindow, config.MaxAlertsPerWindow, config.EnableRateLimit),
-		rlStatesGauge:        rlStatesGauge,
-		cancelCleanup:        cancel,
-		enableRegoEval:       config.EnableRegoEval,
-		regoEngine:           config.RegoEngine,
-		dnsPrefilter:         DefaultDNSPrefilter(),
-		regoQueue:            regoQueue,
-		regoQueueDropped:     regoQueueDropped,
-		regoQueueGauge:       regoQueueGauge,
-		onCorrelate:          config.OnCorrelate,
-		lineageTracker:       lt,
-		feedbackManager:      config.FeedbackManager,
-		iocMatcher:           config.IOCMatcher,
-		sensitivityAdjuster:  config.SensitivityAdjuster,
-		baseAnomalyThreshold: config.AnomalyThreshold,
-		wasmEngine:           config.WasmEngine,
-		enableDedup:          config.EnableDedup,
-		dedupWindow:          dedupWindow,
-		dedup:                newShardedDedup(dedupWindow),
-		alertsDedupDropped:   alertsDedupDropped,
-		actionExecutor:       config.ActionExecutor,
-		enforceCooldown:      enforceCooldown,
-		cooldowns:            newShardedCooldowns(),
-		enforcedCounter:      enforcedCounter,
-		enforceQueue:         enforceQueue,
-		enforceQueueDropped:  enforceQueueDropped,
-		enforceQueueGauge:    enforceQueueGauge,
-		globalLimiter:        globalLimiter,
-		globalLimiterEnabled: globalLimiterEnabled,
-		alertsDroppedGlobal:  alertsDroppedGlobal,
-		queueDepthGauge:      queueDepthGauge,
-		latencyHistogram:     latencyHistogram,
-		activeRulesGauge:     activeRulesGauge,
-		cooldownEntriesGauge: cooldownEntriesGauge,
-		dedupEntriesGauge:    dedupEntriesGauge,
-		reloadTotal:          reloadTotal,
-		reloadDuration:       reloadDuration,
-		rulesActive:          rulesActive,
-		lastReloadTimestamp:  lastReloadTimestamp,
-		incidentTracker:      newIncidentTracker(config.IncidentWindow),
-		regoEvalErrors:       regoEvalErrors,
-		allowlistProfiler:    config.AllowlistProfiler,
+		buffer:                NewShardedEventBuffer(config.BufferSize),
+		enableEventBuffer:     config.EnableEventBuffer,
+		traceCtxCache:         newTraceContextCache(),
+		pending:               make([]types.Alert, 0),
+		enableAnomaly:         config.EnableAnomaly,
+		rateLimiter:           NewRateLimiterWithContext(ctx, config.RateLimitWindow, config.MaxAlertsPerWindow, config.EnableRateLimit),
+		rlStatesGauge:         rlStatesGauge,
+		cancelCleanup:         cancel,
+		enableRegoEval:        config.EnableRegoEval,
+		regoEngine:            config.RegoEngine,
+		dnsPrefilter:          DefaultDNSPrefilter(),
+		regoQueue:             regoQueue,
+		regoQueueDropped:      regoQueueDropped,
+		regoQueueGauge:        regoQueueGauge,
+		onCorrelate:           config.OnCorrelate,
+		lineageTracker:        lt,
+		feedbackManager:       config.FeedbackManager,
+		iocMatcher:            config.IOCMatcher,
+		sensitivityAdjuster:   config.SensitivityAdjuster,
+		baseAnomalyThreshold:  config.AnomalyThreshold,
+		wasmEngine:            config.WasmEngine,
+		enableDedup:           config.EnableDedup,
+		dedupWindow:           dedupWindow,
+		dedup:                 newShardedDedup(dedupWindow),
+		alertsDedupDropped:    alertsDedupDropped,
+		actionExecutor:        config.ActionExecutor,
+		enforceCooldown:       enforceCooldown,
+		cooldowns:             newShardedCooldowns(),
+		enforcedCounter:       enforcedCounter,
+		enforceQueue:          enforceQueue,
+		enforceQueueDropped:   enforceQueueDropped,
+		enforceQueueGauge:     enforceQueueGauge,
+		globalLimiter:         globalLimiter,
+		globalLimiterEnabled:  globalLimiterEnabled,
+		alertsDroppedGlobal:   alertsDroppedGlobal,
+		queueDepthGauge:       queueDepthGauge,
+		latencyHistogram:      latencyHistogram,
+		activeRulesGauge:      activeRulesGauge,
+		cooldownEntriesGauge:  cooldownEntriesGauge,
+		dedupEntriesGauge:     dedupEntriesGauge,
+		reloadTotal:           reloadTotal,
+		reloadDuration:        reloadDuration,
+		rulesActive:           rulesActive,
+		lastReloadTimestamp:   lastReloadTimestamp,
+		incidentTracker:       newIncidentTracker(config.IncidentWindow),
+		regoEvalErrors:        regoEvalErrors,
+		allowlistProfiler:     config.AllowlistProfiler,
+		driftBaselineProfiler: config.DriftBaselineProfiler,
 	}
 
 	ce.ruleEngine.Store(NewRuleEngine(config.Rules))
@@ -1341,96 +1355,108 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	rulesSnapshot := ce.ruleEngine.Load()
 	if rulesSnapshot != nil {
 		rulesSnapshot.EvaluateInto(e, func(alert types.Alert) {
-		// Dedup check runs before rate-limiter so burst duplicates do not inflate
-		// per-rule counters. isDup is checked, not a hard continue yet — enforcement
-		// must still fire for deduped events (dedup suppresses alerts, not actions).
-		isDup := ce.enableDedup && ce.checkDup(alert.RuleID, alert.PID, alert.Comm)
-
-		if !isDup {
-			// Per-rule rate limit check (only for non-deduped alerts).
-			if !ce.rateLimiter.Allow(alert.RuleID) {
-				ce.alertsDropped.Add(1)
-				return
-			}
-			// Global token-bucket rate limit.
-			if ce.globalLimiterEnabled && !ce.globalLimiter.Allow() {
-				ce.alertsDropped.Add(1)
-				ce.alertsDroppedGlobal.Add(1)
-				return
-			}
-		}
-
-		// Append monotonic sequence number to guarantee uniqueness across
-		// concurrent alerts that share ruleID+timestamp+pid.
-		seq := ce.alertSeq.Add(1)
-		alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
-
-		// Propagate trace context to the alert for APM correlation.
-		// Prefer the TLS-uprobe-extracted header context; fall back to /proc environ.
-		if e.TraceContext != nil {
-			alert.TraceID = e.TraceContext.TraceID
-			alert.SpanID = e.TraceContext.SpanID
-			tc := *e.TraceContext
-			tc.Source = "tls_header"
-			alert.TraceContext = &tc
-		} else if tc := ce.traceCtxCache.lookup(e.PID, start); tc != nil {
-			alert.TraceID = tc.TraceID
-			alert.SpanID = tc.SpanID
-			alert.TraceContext = tc
-		}
-
-		// Carry Kubernetes enrichment from the event onto the alert.
-		if e.Enrichment != nil {
-			alert.Enrichment = *e.Enrichment
-		}
-
-		// Attach full process tree for SOC triage.
-		alert.ProcessTree = getProcessTree()
-
-		// Attach the most-recent pre-alert events for this PID when the per-PID
-		// buffer is enabled. The current event is already in the buffer (added at
-		// the top of ingestWithAD), so GetRecent returns the temporal context
-		// leading up to and including the trigger event — the attack kill chain.
-		if ce.enableEventBuffer {
-			alert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
-		}
-
-		// Rule-based enforcement runs regardless of dedup: the action cooldown
-		// is the sole gate against enforcement spam, not the alert dedup window.
-		if ce.actionExecutor != nil && isEnforcedAction(alert.Action) {
-			if ce.tryAcquireEnforceCooldown(alert.RuleID, alert.PID, start) {
-				alert.Enforced = true
-				ce.enforcedCounter.Inc()
-				// Detach from the per-request span context: the parent span ends
-				// when Ingest() returns, which may be before the worker runs.
-				// WithoutCancel preserves OTel baggage; the 30 s timeout prevents
-				// a hung enforcer from blocking a worker indefinitely.
-				enfCtx, enfCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				task := enforceTask{ctx: enfCtx, cancel: enfCancel, action: alert.Action, alert: alert}
-				ce.enforceWg.Add(1)
-				select {
-				case ce.enforceQueue <- task:
-				default:
-					// Queue full: drop this enforcement action and record the drop.
-					ce.enforceWg.Done()
-					enfCancel()
-					ce.enforceQueueDropped.Add(1)
+			// Drift-class matches (container/FIM drift, as opposed to threat
+			// signatures) are routed through the baseline profiler instead of
+			// alerting directly: it suppresses matches during the per-workload
+			// learning window and matches against the learned baseline, only
+			// letting through signatures never seen for this workload before.
+			// nil profiler or a non-drift class alert pass through unchanged.
+			if alert.Class == string(ClassDrift) && ce.driftBaselineProfiler != nil {
+				if !ce.driftBaselineProfiler.Observe(alert.RuleID, e) {
+					return
 				}
 			}
-		}
 
-		if isDup {
-			ce.alertsDedupDropped.Add(1)
-			ce.alertsDropped.Add(1)
-			return
-		}
+			// Dedup check runs before rate-limiter so burst duplicates do not inflate
+			// per-rule counters. isDup is checked, not a hard continue yet — enforcement
+			// must still fire for deduped events (dedup suppresses alerts, not actions).
+			isDup := ce.enableDedup && ce.checkDup(alert.RuleID, alert.PID, alert.Comm)
 
-		// Alert passed all filters — record in dedup window and emit.
-		if ce.enableDedup {
-			ce.markDedup(alert.RuleID, alert.PID, alert.Comm, start)
-		}
-		alerts = append(alerts, alert)
-		ce.alertsGenerated.Add(1)
+			if !isDup {
+				// Per-rule rate limit check (only for non-deduped alerts).
+				if !ce.rateLimiter.Allow(alert.RuleID) {
+					ce.alertsDropped.Add(1)
+					return
+				}
+				// Global token-bucket rate limit.
+				if ce.globalLimiterEnabled && !ce.globalLimiter.Allow() {
+					ce.alertsDropped.Add(1)
+					ce.alertsDroppedGlobal.Add(1)
+					return
+				}
+			}
+
+			// Append monotonic sequence number to guarantee uniqueness across
+			// concurrent alerts that share ruleID+timestamp+pid.
+			seq := ce.alertSeq.Add(1)
+			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
+
+			// Propagate trace context to the alert for APM correlation.
+			// Prefer the TLS-uprobe-extracted header context; fall back to /proc environ.
+			if e.TraceContext != nil {
+				alert.TraceID = e.TraceContext.TraceID
+				alert.SpanID = e.TraceContext.SpanID
+				tc := *e.TraceContext
+				tc.Source = "tls_header"
+				alert.TraceContext = &tc
+			} else if tc := ce.traceCtxCache.lookup(e.PID, start); tc != nil {
+				alert.TraceID = tc.TraceID
+				alert.SpanID = tc.SpanID
+				alert.TraceContext = tc
+			}
+
+			// Carry Kubernetes enrichment from the event onto the alert.
+			if e.Enrichment != nil {
+				alert.Enrichment = *e.Enrichment
+			}
+
+			// Attach full process tree for SOC triage.
+			alert.ProcessTree = getProcessTree()
+
+			// Attach the most-recent pre-alert events for this PID when the per-PID
+			// buffer is enabled. The current event is already in the buffer (added at
+			// the top of ingestWithAD), so GetRecent returns the temporal context
+			// leading up to and including the trigger event — the attack kill chain.
+			if ce.enableEventBuffer {
+				alert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+			}
+
+			// Rule-based enforcement runs regardless of dedup: the action cooldown
+			// is the sole gate against enforcement spam, not the alert dedup window.
+			if ce.actionExecutor != nil && isEnforcedAction(alert.Action) {
+				if ce.tryAcquireEnforceCooldown(alert.RuleID, alert.PID, start) {
+					alert.Enforced = true
+					ce.enforcedCounter.Inc()
+					// Detach from the per-request span context: the parent span ends
+					// when Ingest() returns, which may be before the worker runs.
+					// WithoutCancel preserves OTel baggage; the 30 s timeout prevents
+					// a hung enforcer from blocking a worker indefinitely.
+					enfCtx, enfCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					task := enforceTask{ctx: enfCtx, cancel: enfCancel, action: alert.Action, alert: alert}
+					ce.enforceWg.Add(1)
+					select {
+					case ce.enforceQueue <- task:
+					default:
+						// Queue full: drop this enforcement action and record the drop.
+						ce.enforceWg.Done()
+						enfCancel()
+						ce.enforceQueueDropped.Add(1)
+					}
+				}
+			}
+
+			if isDup {
+				ce.alertsDedupDropped.Add(1)
+				ce.alertsDropped.Add(1)
+				return
+			}
+
+			// Alert passed all filters — record in dedup window and emit.
+			if ce.enableDedup {
+				ce.markDedup(alert.RuleID, alert.PID, alert.Comm, start)
+			}
+			alerts = append(alerts, alert)
+			ce.alertsGenerated.Add(1)
 		})
 	}
 

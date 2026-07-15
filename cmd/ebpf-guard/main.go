@@ -334,6 +334,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		engineCfg.MaxAlertsPerSecond = cfg.Correlator.MaxAlertsPerSecond
 	}
 
+	// Drift-baseline observe mode (issue #286): suppresses class: drift rule
+	// matches (container/FIM drift monitoring) during a per-workload learning
+	// window, then alerts only on matches that deviate from the learned
+	// baseline. Independent of the general anomaly profiler above — it only
+	// affects rules explicitly tagged class: drift.
+	if cfg.Profiler.DriftBaseline.Enabled {
+		driftProfiler := profiler.NewDriftBaselineProfiler(profiler.DriftBaselineConfig{
+			Enabled:        cfg.Profiler.DriftBaseline.Enabled,
+			LearningPeriod: cfg.Profiler.DriftBaseline.LearningPeriod,
+			MinSamples:     cfg.Profiler.DriftBaseline.MinSamples,
+			PerWorkload:    cfg.Profiler.DriftBaseline.PerWorkload,
+		}, slog.Default())
+		if err := driftProfiler.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+			slog.Warn("drift baseline: failed to register metrics", slog.Any("error", err))
+		}
+		engineCfg.DriftBaselineProfiler = driftProfiler
+	}
+
 	// samplingMux fans BPF-side sampling changes out to the per-collector
 	// SamplingControllers. It is shared by the collectors' status reporters
 	// (which register each controller as its collector comes up) and the CPU

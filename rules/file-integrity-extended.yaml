@@ -38,6 +38,7 @@ rules:
         - "^/usr/lib64/.*\\.so(\\.[0-9]+)*$"
     severity: critical
     action: alert
+    class: drift
     tags: [mitre:T1565.001, fim, library-replacement]
 
   # ============================================================================

@@ -75,6 +75,46 @@ overlays:
 	assert.Contains(t, err.Error(), "missing name")
 }
 
+func TestLoadTuningOverlay_RejectsUnreadableFile(t *testing.T) {
+	// A directory can never be read as file content — exercises the
+	// non-IsNotExist branch of the os.ReadFile error handling.
+	_, err := LoadTuningOverlay(t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read tuning overlay")
+}
+
+func TestLoadTuningOverlay_RejectsInvalidYAML(t *testing.T) {
+	path := writeTuningFile(t, "overlays: [this is not valid yaml")
+	_, err := LoadTuningOverlay(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unmarshal tuning overlay")
+}
+
+func TestLoadTuningOverlay_RejectsEmptyExceptions(t *testing.T) {
+	path := writeTuningFile(t, `
+overlays:
+  - rule_id: some_rule
+    exceptions: []
+`)
+	_, err := LoadTuningOverlay(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "has no exceptions")
+}
+
+func TestLoadTuningOverlay_RejectsEmptyExceptionConditionGroup(t *testing.T) {
+	path := writeTuningFile(t, `
+overlays:
+  - rule_id: some_rule
+    exceptions:
+      - name: bad
+        condition_group:
+          operator: and
+`)
+	_, err := LoadTuningOverlay(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "condition_group has no conditions")
+}
+
 func TestApplyTuningOverlay_MergesByRuleID(t *testing.T) {
 	rules := []Rule{
 		{
@@ -134,6 +174,29 @@ func TestApplyTuningOverlay_InvalidFieldNameErrors(t *testing.T) {
 		Overlays: []RuleTuningOverlay{
 			{RuleID: "rule_a", Exceptions: []RuleException{
 				{Name: "x", Condition: RuleCondition{Field: "filename", Op: OpEquals, Values: []string{"a"}}},
+			}},
+		},
+	}
+
+	_, err := ApplyTuningOverlay(rules, overlay)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid field name")
+}
+
+func TestApplyTuningOverlay_InvalidConditionGroupFieldErrors(t *testing.T) {
+	rules := []Rule{
+		{ID: "rule_a", Name: "a", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"1"}}},
+	}
+	overlay := &TuningOverlay{
+		Overlays: []RuleTuningOverlay{
+			{RuleID: "rule_a", Exceptions: []RuleException{
+				{
+					Name: "x",
+					ConditionGroup: &RuleConditionGroup{
+						Operator:   "and",
+						Conditions: []RuleCondition{{Field: "filename", Op: OpEquals, Values: []string{"a"}}},
+					},
+				},
 			}},
 		},
 	}

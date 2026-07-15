@@ -30,7 +30,7 @@ func LoadTuningOverlay(path string) (*TuningOverlay, error) {
 	if path == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is supplied via the operator's own config (rules.local_tuning_path), never user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

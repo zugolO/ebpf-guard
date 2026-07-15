@@ -104,6 +104,80 @@ func TestRuleException_ConditionGroup(t *testing.T) {
 	assert.Len(t, engine.Evaluate(e), 1)
 }
 
+func TestRuleException_InvalidRegexConditionErrors(t *testing.T) {
+	rule := Rule{
+		ID:        "r1",
+		Name:      "r1",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"1"}},
+		Exceptions: []RuleException{
+			{Name: "bad", Condition: RuleCondition{Field: "comm", Op: OpRegex, Values: []string{"("}}},
+		},
+	}
+	engine := NewRuleEngine([]Rule{rule})
+	require.Error(t, engine.CompileErrors())
+}
+
+func TestRuleException_InvalidRegexConditionGroupErrors(t *testing.T) {
+	rule := Rule{
+		ID:        "r1",
+		Name:      "r1",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"1"}},
+		Exceptions: []RuleException{
+			{
+				Name: "bad",
+				ConditionGroup: &RuleConditionGroup{
+					Operator:   "and",
+					Conditions: []RuleCondition{{Field: "comm", Op: OpRegex, Values: []string{"("}}},
+				},
+			},
+		},
+	}
+	engine := NewRuleEngine([]Rule{rule})
+	require.Error(t, engine.CompileErrors())
+}
+
+func TestRuleException_PatternInheritedAcrossHotReload(t *testing.T) {
+	rule := Rule{
+		ID:        "r1",
+		Name:      "r1",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"1"}},
+		Exceptions: []RuleException{
+			{Name: "systemd-regex", Condition: RuleCondition{Field: "comm", Op: OpRegex, Values: []string{"^systemd"}}},
+		},
+	}
+	prior := NewRuleEngine([]Rule{rule})
+	require.NoError(t, prior.CompileErrors())
+
+	reloaded := NewRuleEngineWithCache([]Rule{rule}, prior)
+	require.NoError(t, reloaded.CompileErrors())
+
+	assert.Same(t, prior.regexCache["^systemd"], reloaded.regexCache["^systemd"],
+		"regex pattern referenced only from an exception should be inherited, not recompiled")
+}
+
+func TestRuleConditionGroupPatternInheritedAcrossHotReload(t *testing.T) {
+	rule := Rule{
+		ID:        "r1",
+		Name:      "r1",
+		EventType: types.EventSyscall,
+		ConditionGroup: &RuleConditionGroup{
+			Operator:   "and",
+			Conditions: []RuleCondition{{Field: "comm", Op: OpRegex, Values: []string{"^attacker"}}},
+		},
+	}
+	prior := NewRuleEngine([]Rule{rule})
+	require.NoError(t, prior.CompileErrors())
+
+	reloaded := NewRuleEngineWithCache([]Rule{rule}, prior)
+	require.NoError(t, reloaded.CompileErrors())
+
+	assert.Same(t, prior.regexCache["^attacker"], reloaded.regexCache["^attacker"],
+		"regex pattern referenced from a top-level condition_group should be inherited, not recompiled")
+}
+
 func TestValidateRule_Exceptions(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -383,6 +383,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// (which register each controller as its collector comes up) and the CPU
 	// pressure watcher (which adjusts rates under load).
 	samplingMux := watchdog.NewMultiBPFController(slog.Default())
+	if err := samplingMux.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+		slog.Warn("sampling: failed to register effective-rate metric", slog.Any("error", err))
+	}
 
 	if cfg.Profiler.Enabled {
 		profCfg := profiler.ProfilerConfig{
@@ -451,7 +454,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		RecoveryThreshold: cp.RecoveryThreshold,
 		WindowSize:        cp.WindowSize,
 		MinDwell:          time.Duration(cp.MinDwell) * time.Second,
-	}, slog.Default(), samplingMux, prometheus.DefaultRegisterer)
+		// Write through a named arbiter view so a CPU-pressure recovery
+		// restores the operator's configured base rate (not a hardcoded 1.0)
+		// and never overwrites another controller's active degradation (#304).
+	}, slog.Default(), samplingMux.Controller("cpu_pressure"), prometheus.DefaultRegisterer)
 
 	// Feature F: cross-node alert correlation via gossip amplification.
 	var gossipMgr *gossip.Manager
@@ -1659,15 +1665,36 @@ func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig, 
 		return
 	}
 	// Expose this controller to the CPU pressure watcher so it can adaptively
-	// reduce this collector's sampling rate under load.
+	// reduce this collector's sampling rate under load, and publish the
+	// operator-configured base rate to the arbiter so recovery restores this
+	// value rather than a hardcoded 1.0 (#304).
 	if mux != nil {
 		mux.Register(eventType, ctrl)
+		var configured uint32
+		switch eventType {
+		case "syscall":
+			configured = sc.SyscallRate
+		case "network":
+			configured = sc.NetworkRate
+		case "file":
+			configured = sc.FileRate
+		}
+		mux.SetBaseRate(eventType, sampleRateToFloat(configured))
 	}
 	slog.Info("sampling: enabled BPF-side static sample rate",
 		slog.String("collector", name),
 		slog.Uint64("syscall_rate", uint64(sc.SyscallRate)),
 		slog.Uint64("network_rate", uint64(sc.NetworkRate)),
 		slog.Uint64("file_rate", uint64(sc.FileRate)))
+}
+
+// sampleRateToFloat converts a BPF 1-in-N sampling rate (0 = disabled, 1 = all
+// events) into the float rate in [0,1] used by the sampling arbiter.
+func sampleRateToFloat(oneInN uint32) float64 {
+	if oneInN == 0 {
+		return 0 // disabled
+	}
+	return 1.0 / float64(oneInN)
 }
 
 // The entire procedure is bounded by a 30-second context.

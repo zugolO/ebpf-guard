@@ -1,6 +1,7 @@
 package profiler
 
 import (
+	"container/heap"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -36,6 +37,23 @@ type DriftBaselineConfig struct {
 	// PerWorkload separates baselines per (comm, namespace, app_label) tuple.
 	// When false a single global baseline is maintained across all workloads.
 	PerWorkload bool `mapstructure:"per_workload"`
+	// MaxWorkloads caps the number of per-workload profiles held in memory.
+	// Once the cap is reached, the least-recently-active profile is evicted
+	// before a new one is created. comm cardinality is attacker-controlled
+	// (prctl(PR_SET_NAME), random binary names), so without a cap the profile
+	// map grows unbounded — a slow but guaranteed memory leak, felt most on
+	// the lite profile's tight GOMEMLIMIT. Default: 1000. Zero or negative
+	// means unbounded (not recommended).
+	MaxWorkloads int `mapstructure:"max_workloads"`
+	// EnforceDeadlinePeriods forces a workload into enforcing after this many
+	// LearningPeriods have elapsed, regardless of whether MinSamples was ever
+	// reached. Without it, a workload generating drift events more rarely than
+	// MinSamples per LearningPeriod stays in learning forever — and while
+	// learning, every match is suppressed, so drift rules never fire on that
+	// workload. Low traffic means a baseline is reached quickly and
+	// confidently, not that the workload should be a permanent blind spot.
+	// Default: 3. Zero or negative disables deadline-based forcing.
+	EnforceDeadlinePeriods int `mapstructure:"enforce_deadline_periods"`
 }
 
 // DefaultDriftBaselineConfig returns safe defaults. Disabled by default so
@@ -43,12 +61,22 @@ type DriftBaselineConfig struct {
 // until an operator opts in.
 func DefaultDriftBaselineConfig() DriftBaselineConfig {
 	return DriftBaselineConfig{
-		Enabled:        false,
-		LearningPeriod: 3600,
-		MinSamples:     20,
-		PerWorkload:    true,
+		Enabled:                false,
+		LearningPeriod:         3600,
+		MinSamples:             20,
+		PerWorkload:            true,
+		MaxWorkloads:           1000,
+		EnforceDeadlinePeriods: 3,
 	}
 }
+
+// defaultDriftMaxWorkloads is the fallback profile cap applied when the config
+// leaves MaxWorkloads unset.
+const defaultDriftMaxWorkloads = 1000
+
+// defaultDriftEnforceDeadlinePeriods is the fallback deadline multiplier applied
+// when the config leaves EnforceDeadlinePeriods unset.
+const defaultDriftEnforceDeadlinePeriods = 3
 
 // driftWorkloadProfile holds the drift-signature baseline learned for one workload.
 type driftWorkloadProfile struct {
@@ -56,6 +84,7 @@ type driftWorkloadProfile struct {
 	// during the learning window.
 	signatures  map[string]struct{}
 	startedAt   time.Time
+	lastSeen    time.Time
 	sampleCount int
 	enforcing   bool
 }
@@ -68,10 +97,27 @@ type DriftBaselineProfiler struct {
 	mu     sync.RWMutex
 	// profiles is keyed by WorkloadKey.String().
 	profiles map[string]*driftWorkloadProfile
+	// lruHeap/lruIndex order profile keys by last activity so the cap can
+	// evict the least-recently-active profile in O(log n).
+	lruHeap  lruStringHeap
+	lruIndex lruStringIndex
+
+	// maxWorkloads is the resolved profile cap (0 = unbounded).
+	maxWorkloads int
+	// enforceDeadline is the resolved wall-clock duration after which a
+	// still-learning workload is forced into enforcing (0 = disabled).
+	enforceDeadline time.Duration
+
+	// nowFn is injectable so tests can drive the learning deadline
+	// deterministically; defaults to time.Now.
+	nowFn func() time.Time
 
 	suppressedTotal *prometheus.CounterVec
 	anomaliesTotal  *prometheus.CounterVec
 	learningGauge   prometheus.Gauge
+	profilesGauge   prometheus.Gauge
+	stuckGauge      prometheus.Gauge
+	evictionsTotal  prometheus.Counter
 	log             *slog.Logger
 }
 
@@ -80,10 +126,31 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 	if log == nil {
 		log = slog.Default()
 	}
+
+	maxWorkloads := cfg.MaxWorkloads
+	if maxWorkloads == 0 {
+		maxWorkloads = defaultDriftMaxWorkloads
+	}
+	if maxWorkloads < 0 {
+		maxWorkloads = 0 // explicit "unbounded"
+	}
+	deadlinePeriods := cfg.EnforceDeadlinePeriods
+	if deadlinePeriods == 0 {
+		deadlinePeriods = defaultDriftEnforceDeadlinePeriods
+	}
+	var enforceDeadline time.Duration
+	if deadlinePeriods > 0 && cfg.LearningPeriod > 0 {
+		enforceDeadline = time.Duration(deadlinePeriods) * time.Duration(cfg.LearningPeriod) * time.Second
+	}
+
 	return &DriftBaselineProfiler{
-		config:   cfg,
-		profiles: make(map[string]*driftWorkloadProfile),
-		log:      log,
+		config:          cfg,
+		profiles:        make(map[string]*driftWorkloadProfile),
+		lruIndex:        make(lruStringIndex),
+		maxWorkloads:    maxWorkloads,
+		enforceDeadline: enforceDeadline,
+		nowFn:           time.Now,
+		log:             log,
 		suppressedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ebpf_guard_drift_baseline_suppressed_total",
 			Help: "Drift-class rule matches suppressed because they were still learning or matched the workload's known baseline.",
@@ -96,12 +163,27 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 			Name: "ebpf_guard_drift_baseline_learning_workloads",
 			Help: "Number of workloads currently in the drift-baseline learning phase.",
 		}),
+		profilesGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_drift_baseline_profiles",
+			Help: "Number of per-workload drift baseline profiles currently held in memory.",
+		}),
+		stuckGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_drift_baseline_stuck_learning_workloads",
+			Help: "Number of workloads that have been learning longer than one LearningPeriod (drift-rule blind spots until they enforce).",
+		}),
+		evictionsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_drift_baseline_evictions_total",
+			Help: "Total drift baseline profiles evicted because the workload cap was reached.",
+		}),
 	}
 }
 
 // RegisterMetrics registers Prometheus metrics with reg.
 func (p *DriftBaselineProfiler) RegisterMetrics(reg prometheus.Registerer) error {
-	for _, c := range []prometheus.Collector{p.suppressedTotal, p.anomaliesTotal, p.learningGauge} {
+	for _, c := range []prometheus.Collector{
+		p.suppressedTotal, p.anomaliesTotal, p.learningGauge,
+		p.profilesGauge, p.stuckGauge, p.evictionsTotal,
+	} {
 		if err := reg.Register(c); err != nil {
 			return err
 		}
@@ -125,18 +207,27 @@ func (p *DriftBaselineProfiler) Observe(ruleID string, e types.Event) bool {
 
 	sig := ruleID + "|" + driftSignatureTarget(e)
 	key := p.resolveKey(e)
-	now := time.Now()
+	keyStr := key.String()
+	now := p.nowFn()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	prof, ok := p.profiles[key.String()]
+	prof, ok := p.profiles[keyStr]
 	if !ok {
+		// Enforce the profile cap before inserting a new workload so that
+		// attacker-driven comm cardinality cannot grow the map without bound.
+		p.evictIfOverCapacityLocked()
 		prof = &driftWorkloadProfile{
 			signatures: make(map[string]struct{}),
 			startedAt:  now,
+			lastSeen:   now,
 		}
-		p.profiles[key.String()] = prof
+		p.profiles[keyStr] = prof
+		p.lruIndex.push(&p.lruHeap, keyStr)
+	} else {
+		prof.lastSeen = now
+		p.lruIndex.touch(&p.lruHeap, keyStr)
 	}
 
 	if !prof.enforcing {
@@ -144,10 +235,21 @@ func (p *DriftBaselineProfiler) Observe(ruleID string, e types.Event) bool {
 		prof.sampleCount++
 
 		learningPeriod := time.Duration(p.config.LearningPeriod) * time.Second
-		if now.Sub(prof.startedAt) >= learningPeriod && prof.sampleCount >= p.config.MinSamples {
+		elapsed := now.Sub(prof.startedAt)
+		switch {
+		case elapsed >= learningPeriod && prof.sampleCount >= p.config.MinSamples:
 			prof.enforcing = true
 			p.log.Info("drift-baseline: workload baseline learned, switching to enforcing",
 				"workload", key.Comm, "namespace", key.Namespace, "unique_signatures", len(prof.signatures))
+		case p.enforceDeadline > 0 && elapsed >= p.enforceDeadline:
+			// Deadline reached without ever meeting MinSamples: a low-traffic
+			// workload must not stay a permanent blind spot. Freeze whatever
+			// baseline was learned and start enforcing against it.
+			prof.enforcing = true
+			p.log.Info("drift-baseline: learning deadline reached, forcing enforcing despite low sample count",
+				"workload", key.Comm, "namespace", key.Namespace,
+				"samples", prof.sampleCount, "min_samples", p.config.MinSamples,
+				"unique_signatures", len(prof.signatures))
 		}
 
 		p.suppressedTotal.WithLabelValues(ruleID, "learning").Inc()
@@ -177,11 +279,59 @@ func (p *DriftBaselineProfiler) LearningWorkloads() int {
 	return n
 }
 
-// UpdateLearningGauge refreshes the learning-progress gauge. Intended to be
-// called periodically (e.g. by the same background loop that persists other
-// profiler state).
+// StuckLearningWorkloads returns the number of workloads that have been in the
+// learning phase for longer than one LearningPeriod. These are drift-rule blind
+// spots (every match suppressed) until the enforcement deadline promotes them,
+// so an operator needs to be able to see them.
+func (p *DriftBaselineProfiler) StuckLearningWorkloads() int {
+	learningPeriod := time.Duration(p.config.LearningPeriod) * time.Second
+	if learningPeriod <= 0 {
+		return 0
+	}
+	now := p.nowFn()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	n := 0
+	for _, prof := range p.profiles {
+		if !prof.enforcing && now.Sub(prof.startedAt) > learningPeriod {
+			n++
+		}
+	}
+	return n
+}
+
+// ProfileCount returns the number of per-workload profiles currently held.
+func (p *DriftBaselineProfiler) ProfileCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.profiles)
+}
+
+// UpdateLearningGauge refreshes the learning-progress, profile-count and
+// stuck-learning gauges. Intended to be called periodically (e.g. by the same
+// background loop that persists other profiler state).
 func (p *DriftBaselineProfiler) UpdateLearningGauge() {
 	p.learningGauge.Set(float64(p.LearningWorkloads()))
+	p.profilesGauge.Set(float64(p.ProfileCount()))
+	p.stuckGauge.Set(float64(p.StuckLearningWorkloads()))
+}
+
+// evictIfOverCapacityLocked drops the least-recently-active profile when the
+// map is at the configured cap, so a new workload can be inserted without
+// growing memory past the bound. Caller must hold p.mu. No-op when the cap is
+// disabled (maxWorkloads <= 0) or the map is below the cap.
+func (p *DriftBaselineProfiler) evictIfOverCapacityLocked() {
+	if p.maxWorkloads <= 0 || len(p.profiles) < p.maxWorkloads {
+		return
+	}
+	if p.lruHeap.Len() == 0 {
+		return
+	}
+	e := heap.Pop(&p.lruHeap).(*lruEntry)
+	delete(p.lruIndex, e.key)
+	delete(p.profiles, e.key)
+	p.profilesGauge.Set(float64(len(p.profiles)))
+	p.evictionsTotal.Inc()
 }
 
 func (p *DriftBaselineProfiler) resolveKey(e types.Event) WorkloadKey {
@@ -195,6 +345,7 @@ func (p *DriftBaselineProfiler) resolveKey(e types.Event) WorkloadKey {
 // description of what a drift-class rule matched, so that repeated matches
 // against the same class of target (e.g. any file under /etc, any
 // connection to the same port) collapse into a single baseline signature.
+//
 //nolint:exhaustive // only file/network/syscall events are meaningful drift-class targets; other event types fall through to the zero-value signature.
 func driftSignatureTarget(e types.Event) string {
 	switch e.Type {

@@ -365,10 +365,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// affects rules explicitly tagged class: drift.
 	if cfg.Profiler.DriftBaseline.Enabled {
 		driftProfiler := profiler.NewDriftBaselineProfiler(profiler.DriftBaselineConfig{
-			Enabled:        cfg.Profiler.DriftBaseline.Enabled,
-			LearningPeriod: cfg.Profiler.DriftBaseline.LearningPeriod,
-			MinSamples:     cfg.Profiler.DriftBaseline.MinSamples,
-			PerWorkload:    cfg.Profiler.DriftBaseline.PerWorkload,
+			Enabled:                cfg.Profiler.DriftBaseline.Enabled,
+			LearningPeriod:         cfg.Profiler.DriftBaseline.LearningPeriod,
+			MinSamples:             cfg.Profiler.DriftBaseline.MinSamples,
+			PerWorkload:            cfg.Profiler.DriftBaseline.PerWorkload,
+			MaxWorkloads:           cfg.Profiler.DriftBaseline.MaxWorkloads,
+			EnforceDeadlinePeriods: cfg.Profiler.DriftBaseline.EnforceDeadlinePeriods,
 		}, slog.Default())
 		if err := driftProfiler.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 			slog.Warn("drift baseline: failed to register metrics", slog.Any("error", err))

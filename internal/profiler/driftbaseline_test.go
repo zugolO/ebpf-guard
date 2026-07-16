@@ -1,10 +1,13 @@
 package profiler
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func fileEventForPath(comm string, path string) types.Event {
@@ -92,6 +95,68 @@ func TestDriftBaselineProfiler_GlobalBaselineWhenPerWorkloadDisabled(t *testing.
 	// Different comm, but PerWorkload=false means one shared baseline — the
 	// signature learned above is already known, so this is suppressed too.
 	assert.False(t, p.Observe("drift_rule", fileEventForPath("curl", "/etc/systemd/system/foo.service")))
+}
+
+func TestDriftBaselineProfiler_ProfileCapBoundsMemory(t *testing.T) {
+	const cap = 50
+	cfg := DriftBaselineConfig{
+		Enabled:        true,
+		LearningPeriod: 3600,
+		MinSamples:     20,
+		PerWorkload:    true,
+		MaxWorkloads:   cap,
+	}
+	p := NewDriftBaselineProfiler(cfg, nil)
+
+	// Simulate an attacker spawning processes under random comm names: each
+	// distinct comm would otherwise create its own never-evicted profile.
+	for i := 0; i < cap*20; i++ {
+		comm := fmt.Sprintf("evil-%d", i)
+		p.Observe("drift_rule", fileEventForPath(comm, "/etc/ld.so.cache"))
+	}
+
+	assert.LessOrEqual(t, p.ProfileCount(), cap,
+		"profile count must stay bounded by MaxWorkloads regardless of comm cardinality")
+}
+
+func TestDriftBaselineProfiler_EnforcesAfterDeadlineDespiteLowSamples(t *testing.T) {
+	cfg := DriftBaselineConfig{
+		Enabled:                true,
+		LearningPeriod:         3600, // 1h
+		MinSamples:             20,   // never reached by a ~1 event/hour workload
+		PerWorkload:            true,
+		EnforceDeadlinePeriods: 2, // deadline = 2h
+	}
+	p := NewDriftBaselineProfiler(cfg, nil)
+
+	base := time.Now()
+	current := base
+	p.nowFn = func() time.Time { return current }
+
+	// One event learns signature A. Far below MinSamples, so the normal
+	// completion path can never fire.
+	require.False(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+	assert.Equal(t, 1, p.LearningWorkloads())
+
+	// Past one LearningPeriod but before the deadline: still learning, and now
+	// visible as a stuck (blind-spot) workload.
+	current = base.Add(90 * time.Minute)
+	assert.Equal(t, 1, p.StuckLearningWorkloads())
+	require.False(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+
+	// Past the 2h deadline: the next observation promotes the workload to
+	// enforcing even though MinSamples was never met.
+	current = base.Add(2*time.Hour + time.Minute)
+	require.False(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+	assert.Equal(t, 0, p.LearningWorkloads(), "deadline must force the workload out of learning")
+	assert.Equal(t, 0, p.StuckLearningWorkloads())
+
+	// Now enforcing: a signature never seen during learning alerts, proving the
+	// low-traffic workload is no longer a silent blind spot.
+	assert.True(t, p.Observe("drift_rule", fileEventForPath("cron", "/root/.ssh/authorized_keys")),
+		"a novel signature must alert once the deadline has forced enforcing")
+	// The learned signature is still suppressed as known-baseline.
+	assert.False(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
 }
 
 func TestNormalizeDriftPathPrefix(t *testing.T) {

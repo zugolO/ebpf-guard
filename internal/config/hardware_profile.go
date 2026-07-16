@@ -49,7 +49,7 @@ func DetectHardware() HardwareInfo {
 }
 
 func readMemTotalMB(path string) (int, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an internal constant (/proc/meminfo), never user input
 	if err != nil {
 		return 0, err
 	}

@@ -370,7 +370,8 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(buildAlertSummary(alerts)) //nolint:errcheck // #nosec G104 -- response encode error is not actionable once headers are written; other handlers in this file follow the same pattern
+	// #nosec G104 -- response encode error is not actionable once headers are written; other handlers in this file follow the same pattern
+	json.NewEncoder(w).Encode(buildAlertSummary(alerts)) //nolint:errcheck
 }
 
 // AlertSummary is the aggregate response returned by /api/v1/summary.

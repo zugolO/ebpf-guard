@@ -131,6 +131,38 @@ func TestSummarize_SeverityFilter(t *testing.T) {
 	}
 }
 
+// TestSummarize_SQLiteNamespacesAndEmpty covers the SQLite-specific buildWhere
+// Namespaces (multi-namespace IN) branch and the empty-result shape.
+func TestSummarize_SQLiteNamespacesAndEmpty(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	sq := newSQLiteAlertStore(t)
+	seedAlerts(t, sq, []types.Alert{
+		{ID: "a", Timestamp: now, RuleID: "r", Severity: types.SeverityWarning, Comm: "x", Message: "m",
+			Enrichment: types.EnrichmentInfo{Namespace: "team-a"}},
+		{ID: "b", Timestamp: now, RuleID: "r", Severity: types.SeverityCritical, Comm: "x", Message: "m",
+			Enrichment: types.EnrichmentInfo{Namespace: "team-b"}},
+	})
+
+	t.Run("multi namespace IN", func(t *testing.T) {
+		s, err := sq.Summarize(ctx, QueryFilters{Namespaces: []string{"team-a", "team-b"}})
+		require.NoError(t, err)
+		assert.Equal(t, 2, s.Total)
+		s, err = sq.Summarize(ctx, QueryFilters{Namespaces: []string{"team-a"}})
+		require.NoError(t, err)
+		assert.Equal(t, 1, s.Total)
+	})
+
+	t.Run("empty result", func(t *testing.T) {
+		s, err := sq.Summarize(ctx, QueryFilters{Namespace: "none"})
+		require.NoError(t, err)
+		assert.Zero(t, s.Total)
+		assert.Empty(t, s.BySeverity)
+		assert.Empty(t, s.TopRules)
+		assert.Empty(t, s.Timeline)
+	})
+}
+
 // BenchmarkMemorySummarize measures the summary hot path over a large window;
 // the key property is that allocation does not scale with the number of alerts
 // (no result slice is materialized).

@@ -172,6 +172,26 @@ func TestBuildAlertSummaryEmpty(t *testing.T) {
 	assert.Empty(t, summary.Timeline)
 }
 
+// TestIsPublicAsset covers the public-asset allowlist branches added for #300.
+func TestIsPublicAsset(t *testing.T) {
+	public := []string{
+		"/", "/ui", "/ui/", "/ui/app.js", "/ui/style.css",
+		"/swaggerui/", "/swaggerui/swagger-ui.css",
+		"/api/docs", "/api/openapi.yaml",
+	}
+	for _, p := range public {
+		assert.True(t, isPublicAsset(p), "%s should be public", p)
+	}
+
+	private := []string{
+		"/api/v1/alerts", "/api/v1/summary", "/api/v1/status",
+		"/metrics", "/uiX", "/apix", "/api/v1/rules",
+	}
+	for _, p := range private {
+		assert.False(t, isPublicAsset(p), "%s must not be public", p)
+	}
+}
+
 // TestHandleSummary_StoreSideCountsFullWindow verifies that with a Summarizer
 // store (the memory store), the summary counts the whole window and is not
 // capped by a client-supplied limit (issue #303).

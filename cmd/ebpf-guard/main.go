@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -80,6 +81,7 @@ func newRootCmd() *cobra.Command {
 		shutdownTimeout  string
 		zeroConfig       bool
 		enableSimple     bool
+		profileFlag      string
 	)
 
 	root := &cobra.Command{
@@ -90,7 +92,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		Version:      fmt.Sprintf("%s (commit %s)", Version, Commit),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration, shutdownTimeout, zeroConfig, enableSimple)
+			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration, shutdownTimeout, zeroConfig, enableSimple, profileFlag)
 		},
 	}
 
@@ -107,6 +109,9 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		"run without a config file: uses embedded defaults and built-in rules (one-command deployment)")
 	root.PersistentFlags().BoolVar(&enableSimple, "simple", false,
 		"enable simple mode: auto-kill cryptominers, webshells, and reverse shells with safety rails")
+	root.PersistentFlags().StringVar(&profileFlag, "profile", os.Getenv("EBPF_GUARD_PROFILE"),
+		"hardware-aware tuning preset: lite, balanced, or production (default: $EBPF_GUARD_PROFILE, "+
+			"or autodetect from nproc/meminfo if that's unset too)")
 
 	rulesCmd := newRulesCmd(&cfgPath)
 	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
@@ -129,7 +134,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 	return root
 }
 
-func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string, zeroConfig bool, enableSimple bool) error {
+func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string, zeroConfig bool, enableSimple bool, profileFlag string) error {
 	setupLogger(logLevel)
 
 	slog.Info("ebpf-guard starting",
@@ -149,7 +154,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if zeroConfig {
 		slog.Info("zero-config mode: using embedded defaults and built-in rules")
-		cfgManager = config.NewZeroConfigManager()
+		cfgManager = config.NewZeroConfigManagerWithProfile(profileFlag)
 		cfg = cfgManager.Get()
 
 		// Load all built-in rules from the embedded filesystem.
@@ -176,7 +181,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		printZeroConfigBanner(cfg)
 	} else {
 		var err error
-		cfgManager, err = config.NewManagerSkipPermCheck(cfgPath)
+		cfgManager, err = config.NewManagerSkipPermCheckWithProfile(cfgPath, profileFlag)
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
@@ -194,6 +199,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Info("rules loaded", slog.Int("count", len(rules)))
 		}
 	}
+
+	// ── Hardware-aware profile (issue #287) ────────────────────────────────────
+	// Log the resolved lite/balanced/production preset and apply GOMEMLIMIT/GOGC
+	// tuning so a single-core/1-2GB VPS runs `lite` without any manual config.
+	hwProfile := cfgManager.HardwareProfile()
+	slog.Info("hardware profile resolved",
+		slog.String("profile", hwProfile.Profile),
+		slog.String("source", hwProfile.Source),
+		slog.String("reason", hwProfile.Reason),
+		slog.Int("cpus", hwProfile.Hardware.CPUs),
+		slog.Int("mem_total_mb", hwProfile.Hardware.MemTotalMB),
+		slog.Int("bpf_events_map", hwProfile.Applied.EventsMap),
+		slog.Int("bpf_processes_map", hwProfile.Applied.ProcessesMap),
+		slog.Int("bpf_connections_map", hwProfile.Applied.ConnectionsMap),
+		slog.Int("profiler_max_tracked_pids", hwProfile.Applied.MaxTrackedPIDs),
+		slog.Bool("sequence_profiler", hwProfile.Applied.SequenceEnabled),
+		slog.Bool("lineage_tracker", hwProfile.Applied.LineageEnabled),
+	)
+	applyRuntimeTuning(hwProfile)
 
 	if shutdownTimeoutFlag != "" {
 		d, err := time.ParseDuration(shutdownTimeoutFlag)
@@ -690,6 +714,22 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if gossipMgr != nil {
 		srv.RegisterGossipRoutes(gossip.Handler(gossipMgr))
+	}
+
+	if dbg := srv.GetDebugHandler(); dbg != nil {
+		dbg.SetHardwareProfile(exporter.HardwareProfileState{
+			Profile:         hwProfile.Profile,
+			Source:          hwProfile.Source,
+			Reason:          hwProfile.Reason,
+			CPUs:            hwProfile.Hardware.CPUs,
+			MemTotalMB:      hwProfile.Hardware.MemTotalMB,
+			EventsMap:       hwProfile.Applied.EventsMap,
+			ProcessesMap:    hwProfile.Applied.ProcessesMap,
+			ConnectionsMap:  hwProfile.Applied.ConnectionsMap,
+			MaxTrackedPIDs:  hwProfile.Applied.MaxTrackedPIDs,
+			SequenceEnabled: hwProfile.Applied.SequenceEnabled,
+			LineageEnabled:  hwProfile.Applied.LineageEnabled,
+		})
 	}
 
 	if err := srv.Start(ctx); err != nil {
@@ -3139,6 +3179,24 @@ func buildSyntheticEvents(perType int) []types.Event {
 		)
 	}
 	return events
+}
+
+// applyRuntimeTuning applies the resolved hardware profile's GOMEMLIMIT/GOGC
+// preset (lite only, currently) so the process stays within a small VPS's
+// memory budget without operator intervention. No-op for profiles that don't
+// set a ratio/percent (balanced, production keep the Go runtime defaults).
+func applyRuntimeTuning(hw config.HardwareProfileInfo) {
+	if hw.Applied.GOMEMLIMITRatio > 0 && hw.Hardware.MemTotalMB > 0 {
+		limitBytes := int64(float64(hw.Hardware.MemTotalMB) * hw.Applied.GOMEMLIMITRatio * 1024 * 1024)
+		debug.SetMemoryLimit(limitBytes)
+		slog.Info("runtime tuning: GOMEMLIMIT set",
+			slog.Int64("limit_bytes", limitBytes),
+			slog.Float64("ratio", hw.Applied.GOMEMLIMITRatio))
+	}
+	if hw.Applied.GOGCPercent > 0 {
+		debug.SetGCPercent(hw.Applied.GOGCPercent)
+		slog.Info("runtime tuning: GOGC set", slog.Int("percent", hw.Applied.GOGCPercent))
+	}
 }
 
 // printZeroConfigBanner prints a human-friendly first-run summary to stderr

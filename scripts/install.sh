@@ -149,12 +149,28 @@ verify_checksum() {
 }
 
 # ── Install systemd unit ─────────────────────────────────────────────────────
+# EBPF_GUARD_PROFILE pins a hardware-aware tuning preset (lite/balanced/
+# production). Leave it unset (the default) to let the agent autodetect from
+# nproc/meminfo on every start — see docs/hardware-profiles.md.
 install_systemd_unit() {
 	info "Installing systemd service..."
 
 	mkdir -p "$CONFIG_DIR"
 
-	cat > "$SERVICE_FILE" <<'SERVICEOF'
+	profile_env=""
+	if [ -n "${EBPF_GUARD_PROFILE:-}" ]; then
+		case "$EBPF_GUARD_PROFILE" in
+			lite|balanced|production)
+				profile_env="Environment=EBPF_GUARD_PROFILE=${EBPF_GUARD_PROFILE}"
+				info "Pinning hardware profile: ${EBPF_GUARD_PROFILE}"
+				;;
+			*)
+				warn "ignoring invalid EBPF_GUARD_PROFILE=${EBPF_GUARD_PROFILE} (expected lite, balanced, or production) — autodetecting instead"
+				;;
+		esac
+	fi
+
+	cat > "$SERVICE_FILE" <<SERVICEOF
 [Unit]
 Description=ebpf-guard — eBPF runtime security agent
 Documentation=https://github.com/zugolO/ebpf-guard
@@ -163,6 +179,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+${profile_env}
 ExecStart=/usr/local/bin/ebpf-guard --zero-config
 Restart=on-failure
 RestartSec=10
@@ -252,11 +269,14 @@ main() {
 	printf "  Binary:   %s\n" "${INSTALL_DIR}/${BINARY}"
 	printf "  Config:   embedded (--zero-config)\n"
 	printf "  Rules:    built-in (~570 detection rules)\n"
+	printf "  Tuning:   hardware-aware (lite/balanced auto-selected from CPU/RAM)\n"
 	printf "  Metrics:  http://localhost:9090/metrics\n"
 	printf "  Health:   http://localhost:9090/health\n"
 	printf "\n"
 	printf "  View logs:\n"
 	printf "    journalctl -u ebpf-guard -f\n"
+	printf "  See which tuning profile was picked (and why):\n"
+	printf "    journalctl -u ebpf-guard | grep 'hardware profile resolved'\n"
 	printf "\n"
 	printf "  To connect Alertmanager, Discord, or Telegram:\n"
 	printf "    Create %s/config.yaml and restart without --zero-config\n" "$CONFIG_DIR"

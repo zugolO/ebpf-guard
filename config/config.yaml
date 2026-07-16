@@ -1,6 +1,13 @@
 # ebpf-guard configuration
 config_version: "v0.1"
 
+# profile selects a built-in hardware-aware tuning preset: "lite", "balanced",
+# or "production" (see docs/hardware-profiles.md). Leave unset to autodetect
+# from nproc/meminfo at startup, or override with --profile. Any value set
+# explicitly below (e.g. bpf.map_sizes.events) still takes precedence over
+# whatever the chosen profile would otherwise apply for that field.
+# profile: lite
+
 server:
   bind_address: ":19090"
   metrics_path: "/metrics"

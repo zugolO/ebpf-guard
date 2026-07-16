@@ -11,15 +11,33 @@ import (
 
 // DebugState represents the current operational state of the agent.
 type DebugState struct {
-	Timestamp       time.Time              `json:"timestamp"`
-	Version         string                 `json:"version"`
-	Uptime          time.Duration          `json:"uptime"`
-	Rules           []RuleState            `json:"rules"`
-	ActiveSilences  []SilenceState         `json:"active_silences"`
-	EngineStats     EngineStats            `json:"engine_stats"`
-	ProfilerStats   ProfilerStats          `json:"profiler_stats"`
-	CollectorStats  []CollectorStatus      `json:"collector_stats"`
-	EnrichmentStats EnrichmentStats        `json:"enrichment_stats"`
+	Timestamp       time.Time            `json:"timestamp"`
+	Version         string               `json:"version"`
+	Uptime          time.Duration        `json:"uptime"`
+	Rules           []RuleState          `json:"rules"`
+	ActiveSilences  []SilenceState       `json:"active_silences"`
+	EngineStats     EngineStats          `json:"engine_stats"`
+	ProfilerStats   ProfilerStats        `json:"profiler_stats"`
+	CollectorStats  []CollectorStatus    `json:"collector_stats"`
+	EnrichmentStats EnrichmentStats      `json:"enrichment_stats"`
+	HardwareProfile HardwareProfileState `json:"hardware_profile"`
+}
+
+// HardwareProfileState reports how the hardware-aware tuning profile
+// (lite/balanced/production, issue #287) was resolved at startup, and what
+// it applied to BPF map sizes and profiler limits.
+type HardwareProfileState struct {
+	Profile         string `json:"profile"`
+	Source          string `json:"source"` // "flag", "config", or "autodetect"
+	Reason          string `json:"reason"`
+	CPUs            int    `json:"cpus"`
+	MemTotalMB      int    `json:"mem_total_mb"`
+	EventsMap       int    `json:"bpf_events_map"`
+	ProcessesMap    int    `json:"bpf_processes_map"`
+	ConnectionsMap  int    `json:"bpf_connections_map"`
+	MaxTrackedPIDs  int    `json:"profiler_max_tracked_pids"`
+	SequenceEnabled bool   `json:"sequence_profiler_enabled"`
+	LineageEnabled  bool   `json:"lineage_tracker_enabled"`
 }
 
 // RuleState represents a loaded rule.
@@ -34,11 +52,11 @@ type RuleState struct {
 
 // SilenceState represents an active silence.
 type SilenceState struct {
-	RuleID     string        `json:"rule_id"`
-	Severity   string        `json:"severity,omitempty"`
-	Duration   time.Duration `json:"duration"`
-	CreatedAt  time.Time     `json:"created_at"`
-	ExpiresAt  time.Time     `json:"expires_at"`
+	RuleID    string        `json:"rule_id"`
+	Severity  string        `json:"severity,omitempty"`
+	Duration  time.Duration `json:"duration"`
+	CreatedAt time.Time     `json:"created_at"`
+	ExpiresAt time.Time     `json:"expires_at"`
 }
 
 // EngineStats contains correlation engine statistics.
@@ -59,23 +77,24 @@ type ProfilerStats struct {
 
 // EnrichmentStats contains K8s enrichment statistics.
 type EnrichmentStats struct {
-	Enabled      bool   `json:"enabled"`
-	CachedPods   int    `json:"cached_pods"`
-	CacheSize    int    `json:"cache_size"`
-	Enrichments  uint64 `json:"enrichments_total"`
+	Enabled     bool   `json:"enabled"`
+	CachedPods  int    `json:"cached_pods"`
+	CacheSize   int    `json:"cache_size"`
+	Enrichments uint64 `json:"enrichments_total"`
 }
 
 // DebugHandler provides debug endpoints.
 type DebugHandler struct {
-	mu              sync.RWMutex
-	startTime       time.Time
-	version         string
-	rules           []RuleState
-	silenceProvider SilenceProvider
-	engineProvider  EngineProvider
+	mu               sync.RWMutex
+	startTime        time.Time
+	version          string
+	rules            []RuleState
+	silenceProvider  SilenceProvider
+	engineProvider   EngineProvider
 	profilerProvider ProfilerProvider
 	enricherProvider EnricherProvider
-	server          *Server
+	server           *Server
+	hardwareProfile  HardwareProfileState
 }
 
 // SilenceProvider interface for getting active silences.
@@ -143,6 +162,14 @@ func (h *DebugHandler) SetRules(rules []RuleState) {
 	h.rules = rules
 }
 
+// SetHardwareProfile records how the lite/balanced/production tuning profile
+// was resolved at startup, surfaced via /debug/state.
+func (h *DebugHandler) SetHardwareProfile(state HardwareProfileState) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.hardwareProfile = state
+}
+
 // ServeHTTP implements http.Handler for /debug/state.
 func (h *DebugHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	state := h.buildState()
@@ -163,10 +190,11 @@ func (h *DebugHandler) buildState() DebugState {
 	defer h.mu.RUnlock()
 
 	state := DebugState{
-		Timestamp: time.Now(),
-		Version:   h.version,
-		Uptime:    time.Since(h.startTime),
-		Rules:     h.rules,
+		Timestamp:       time.Now(),
+		Version:         h.version,
+		Uptime:          time.Since(h.startTime),
+		Rules:           h.rules,
+		HardwareProfile: h.hardwareProfile,
 	}
 
 	// Get collector stats from server

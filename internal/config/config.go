@@ -111,6 +111,16 @@ type Config struct {
 	// Detects and optionally blocks attempts by external processes to detach
 	// or modify our BPF programs/maps. Graceful no-op on kernel < 5.7.
 	SelfProtection SelfProtectionConfig `mapstructure:"self_protection"`
+
+	// Profile selects a built-in hardware-aware preset — "lite", "balanced",
+	// or "production" — that sets BPF map sizes, tracked-PID limits, and
+	// sequence/lineage profiler enablement for the host (issue #287). Left
+	// empty in the file, it's resolved by autodetecting nproc/meminfo; any
+	// value explicitly set elsewhere in this file still overrides the
+	// preset for that field. Prefer the --profile flag or Manager's
+	// resolved-profile accessors over reading this field directly, since it
+	// reflects the raw config value, not the final autodetect/flag decision.
+	Profile string `mapstructure:"profile"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -1640,29 +1650,77 @@ func modeWho(masked os.FileMode) string {
 
 // Manager handles configuration loading and hot-reload.
 type Manager struct {
-	viper    *viper.Viper
-	config   *Config
-	mu       sync.RWMutex
-	onChange func(*Config)
+	viper           *viper.Viper
+	config          *Config
+	mu              sync.RWMutex
+	onChange        func(*Config)
+	hardwareProfile HardwareProfileInfo
+}
+
+// HardwareProfileInfo describes how the active hardware profile was chosen
+// and what it applied, for startup logging and the /debug/state endpoint.
+type HardwareProfileInfo struct {
+	// Profile is the resolved preset name: "lite", "balanced", or "production".
+	Profile string `json:"profile"`
+	// Source explains how Profile was decided: "flag", "config", or "autodetect".
+	Source string `json:"source"`
+	// Reason is a human-readable justification (e.g. detected CPU/RAM for autodetect).
+	Reason string `json:"reason"`
+	// Hardware is the detected host resources used for autodetection.
+	Hardware HardwareInfo `json:"hardware"`
+	// Applied is the preset's tuning values (before any per-field config-file override).
+	Applied ProfileDefaults `json:"applied"`
+}
+
+// HardwareProfile returns how the active hardware profile was resolved.
+func (m *Manager) HardwareProfile() HardwareProfileInfo {
+	return m.hardwareProfile
 }
 
 // NewManager creates a new configuration manager.
 // It checks config file permissions before loading. Use NewManagerSkipPermCheck
 // for test environments where the config file is not expected to be root-owned.
 func NewManager(configPath string) (*Manager, error) {
-	return newManager(configPath, false)
+	return newManager(configPath, false, "")
 }
 
 // NewManagerSkipPermCheck creates a configuration manager without permission checks.
 // Use only in tests.
 func NewManagerSkipPermCheck(configPath string) (*Manager, error) {
-	return newManager(configPath, true)
+	return newManager(configPath, true, "")
 }
 
-func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
+// NewManagerWithProfile is like NewManager but accepts an explicit hardware
+// profile override (e.g. from --profile), taking precedence over any
+// "profile:" key in the config file and over autodetection.
+func NewManagerWithProfile(configPath, profileOverride string) (*Manager, error) {
+	return newManager(configPath, false, profileOverride)
+}
+
+// NewManagerSkipPermCheckWithProfile is NewManagerSkipPermCheck plus an
+// explicit hardware profile override. Use only in tests.
+func NewManagerSkipPermCheckWithProfile(configPath, profileOverride string) (*Manager, error) {
+	return newManager(configPath, true, profileOverride)
+}
+
+func newManager(configPath string, skipPermCheck bool, profileOverride string) (*Manager, error) {
 	if err := CheckConfigPermissions(configPath, skipPermCheck); err != nil {
 		return nil, err
 	}
+
+	// Peek at the raw file (no defaults registered) so we can tell which
+	// keys the file explicitly sets, separate from the base defaults
+	// registered on the real viper instance below.
+	fileV := viper.New()
+	fileV.SetConfigFile(configPath)
+	fileV.SetConfigType("yaml")
+	_ = fileV.ReadInConfig()
+
+	if profileOverride != "" && !ValidProfileName(profileOverride) {
+		return nil, fmt.Errorf("config: invalid --profile %q (valid: %s, %s, %s)",
+			profileOverride, ProfileLite, ProfileBalanced, ProfileProduction)
+	}
+	hwInfo := resolveHardwareProfile(profileOverride, fileV)
 
 	v := viper.New()
 	v.SetConfigFile(configPath)
@@ -1670,6 +1728,13 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 
 	// Set defaults
 	setDefaults(v)
+
+	applied, err := ApplyHardwareProfile(v, fileV.IsSet, hwInfo.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("config: apply hardware profile: %w", err)
+	}
+	hwInfo.Applied = applied
+	v.SetDefault("profile", hwInfo.Profile)
 
 	// Read config
 	if err := v.ReadInConfig(); err != nil {
@@ -1696,8 +1761,9 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 	}
 
 	m := &Manager{
-		viper:  v,
-		config: &cfg,
+		viper:           v,
+		config:          &cfg,
+		hardwareProfile: hwInfo,
 	}
 
 	return m, nil
@@ -1707,6 +1773,13 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 // file required. Used by `ebpf-guard --zero-config` for one-command deployments
 // where no config file or rules directory exists on disk.
 func NewZeroConfigManager() *Manager {
+	return NewZeroConfigManagerWithProfile("")
+}
+
+// NewZeroConfigManagerWithProfile is NewZeroConfigManager plus an explicit
+// hardware profile override (e.g. from --profile); empty autodetects from
+// nproc/meminfo, matching the "curl | sh" one-command install path.
+func NewZeroConfigManagerWithProfile(profileOverride string) *Manager {
 	v := viper.New()
 	v.SetConfigType("yaml")
 	setDefaults(v)
@@ -1716,6 +1789,12 @@ func NewZeroConfigManager() *Manager {
 	// - All collectors disabled by default (no BPF unless --privileged)
 	// - Kubernetes disabled (no K8s config available)
 	// - Rules loaded from embedded filesystem (handled by main.go)
+
+	hwInfo := resolveHardwareProfile(profileOverride, nil)
+	if applied, err := ApplyHardwareProfile(v, nil, hwInfo.Profile); err == nil {
+		hwInfo.Applied = applied
+	}
+	v.SetDefault("profile", hwInfo.Profile)
 
 	var cfg Config
 	_ = v.Unmarshal(&cfg)
@@ -1742,8 +1821,9 @@ func NewZeroConfigManager() *Manager {
 	}
 
 	return &Manager{
-		viper:  v,
-		config: &cfg,
+		viper:           v,
+		config:          &cfg,
+		hardwareProfile: hwInfo,
 	}
 }
 

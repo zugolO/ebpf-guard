@@ -80,6 +80,17 @@ func (a *AlertAggregator) Ingest(alerts []types.Alert, now time.Time) []types.Al
 		key := aggregationKey(alert)
 		entry, ok := a.entries[key]
 		if !ok || now.After(entry.windowEnd) {
+			// The prior window for this key has expired. If it accumulated
+			// repeats (Count > 1) that Reap has not yet flushed (its ticker
+			// runs only every window/2), emit that final aggregate now, before
+			// we overwrite the entry — otherwise the "N more suppressed" tail
+			// is dropped forever on the most common pattern: a continuous
+			// stream of the same key whose next repeat lands just after the
+			// window closes. No double-emit results: we replace the map entry
+			// immediately below, so Reap will never see this aggregate again.
+			if ok && entry.alert.Count > 1 {
+				out = append(out, entry.alert)
+			}
 			head := alert
 			head.Count = 1
 			head.FirstSeen = now

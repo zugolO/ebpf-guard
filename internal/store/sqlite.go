@@ -251,7 +251,8 @@ func applySQLitePragmas(db *sql.DB) error {
 	return nil
 }
 
-// initSchema creates the alerts table if it doesn't exist.
+// initSchema creates the alerts table if it doesn't exist and applies
+// column migrations for databases created by older versions.
 func (s *SQLiteStore) initSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS alerts (
@@ -268,6 +269,9 @@ func (s *SQLiteStore) initSchema() error {
 		namespace TEXT,
 		container_id TEXT,
 		labels TEXT,
+		count INTEGER,
+		first_seen DATETIME,
+		last_seen DATETIME,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -280,8 +284,81 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_alerts_severity_ts ON alerts(severity, timestamp DESC);
 	`
 
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.migrateAggregationColumns()
+}
+
+// migrateAggregationColumns adds the alert-aggregation columns (count,
+// first_seen, last_seen) to databases created before they existed. Newer
+// databases already have them from CREATE TABLE, so each ADD COLUMN is guarded
+// by a table_info check (SQLite has no ADD COLUMN IF NOT EXISTS).
+func (s *SQLiteStore) migrateAggregationColumns() error {
+	existing := map[string]bool{}
+	rows, err := s.db.Query("PRAGMA table_info(alerts)")
+	if err != nil {
+		return fmt.Errorf("inspect alerts schema: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	migrations := []struct{ col, ddl string }{
+		{"count", "ALTER TABLE alerts ADD COLUMN count INTEGER"},
+		{"first_seen", "ALTER TABLE alerts ADD COLUMN first_seen DATETIME"},
+		{"last_seen", "ALTER TABLE alerts ADD COLUMN last_seen DATETIME"},
+	}
+	for _, m := range migrations {
+		if existing[m.col] {
+			continue
+		}
+		if _, err := s.db.Exec(m.ddl); err != nil {
+			return fmt.Errorf("migrate column %s: %w", m.col, err)
+		}
+	}
+	return nil
+}
+
+// alertUpsertSQL inserts an alert, upserting on the id primary key. Alert
+// aggregation (aggregator.Reap) re-emits the same alert ID with a final
+// count/first_seen/last_seen once its window closes; a plain INSERT would fail
+// the UNIQUE constraint and roll back the whole batch. ON CONFLICT applies the
+// same last-write-wins upsert semantics the memory store already uses, so the
+// aggregated count is persisted instead of lost.
+const alertUpsertSQL = `
+	INSERT INTO alerts (id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels, count, first_seen, last_seen)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		timestamp=excluded.timestamp,
+		message=excluded.message,
+		details=excluded.details,
+		count=excluded.count,
+		first_seen=excluded.first_seen,
+		last_seen=excluded.last_seen
+`
+
+// alertSelectColumns is the column list shared by Query and QueryByID.
+const alertSelectColumns = "id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels, count, first_seen, last_seen"
+
+// nullTime returns a sql argument that stores t, or NULL when t is the zero
+// time, so unaggregated alerts don't persist a bogus 0001-01-01 first/last_seen.
+func nullTime(t time.Time) interface{} {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 // Store persists a single alert.
@@ -311,12 +388,11 @@ func (s *SQLiteStore) Store(ctx context.Context, alert types.Alert) error {
 		}
 	}
 
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO alerts (id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, alert.ID, alert.Timestamp, alert.RuleID, string(alert.Severity), alert.PID, alert.Comm,
+	_, err = s.db.ExecContext(ctx, alertUpsertSQL,
+		alert.ID, alert.Timestamp, alert.RuleID, string(alert.Severity), alert.PID, alert.Comm,
 		message, storedDetails, alert.TraceID, alert.Enrichment.PodName,
-		alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels)
+		alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels,
+		alert.Count, nullTime(alert.FirstSeen), nullTime(alert.LastSeen))
 	if err != nil {
 		return fmt.Errorf("insert alert: %w", err)
 	}
@@ -331,10 +407,7 @@ func (s *SQLiteStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO alerts (id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+	stmt, err := tx.PrepareContext(ctx, alertUpsertSQL)
 	if err != nil {
 		return fmt.Errorf("prepare statement: %w", err)
 	}
@@ -369,7 +442,8 @@ func (s *SQLiteStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 		if _, err = stmt.ExecContext(ctx, alert.ID, alert.Timestamp, alert.RuleID,
 			string(alert.Severity), alert.PID, alert.Comm, message,
 			storedDetails, alert.TraceID, alert.Enrichment.PodName,
-			alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels); err != nil {
+			alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels,
+			alert.Count, nullTime(alert.FirstSeen), nullTime(alert.LastSeen)); err != nil {
 			return fmt.Errorf("insert alert: %w", err)
 		}
 	}
@@ -436,7 +510,7 @@ func (s *SQLiteStore) buildQuery(filters QueryFilters) (string, []interface{}) {
 		args = append(args, filters.Namespace)
 	}
 
-	query := "SELECT id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels FROM alerts"
+	query := "SELECT " + alertSelectColumns + " FROM alerts"
 	if len(whereClauses) > 0 {
 		query += " WHERE " + strings.Join(whereClauses, " AND ")
 	}
@@ -492,15 +566,28 @@ func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 		var alert types.Alert
 		var severityStr string
 		var detailsJSON, labelsJSON []byte
+		var count sql.NullInt64
+		var firstSeen, lastSeen sql.NullTime
 
 		err := rows.Scan(
 			&alert.ID, &alert.Timestamp, &alert.RuleID, &severityStr,
 			&alert.PID, &alert.Comm, &alert.Message, &detailsJSON,
 			&alert.TraceID, &alert.Enrichment.PodName, &alert.Enrichment.Namespace,
 			&alert.Enrichment.ContainerID, &labelsJSON,
+			&count, &firstSeen, &lastSeen,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan alert: %w", err)
+		}
+
+		if count.Valid {
+			alert.Count = int(count.Int64)
+		}
+		if firstSeen.Valid {
+			alert.FirstSeen = firstSeen.Time
+		}
+		if lastSeen.Valid {
+			alert.LastSeen = lastSeen.Time
 		}
 
 		s.decryptFields(alert.ID, &alert.Message, &detailsJSON, &labelsJSON)
@@ -525,26 +612,37 @@ func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 
 // QueryByID retrieves a single alert by ID.
 func (s *SQLiteStore) QueryByID(ctx context.Context, alertID string) (*types.Alert, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels
-		FROM alerts WHERE id = ?
-	`, alertID)
+	row := s.db.QueryRowContext(ctx,
+		"SELECT "+alertSelectColumns+" FROM alerts WHERE id = ?", alertID)
 
 	var alert types.Alert
 	var severityStr string
 	var detailsJSON, labelsJSON []byte
+	var count sql.NullInt64
+	var firstSeen, lastSeen sql.NullTime
 
 	err := row.Scan(
 		&alert.ID, &alert.Timestamp, &alert.RuleID, &severityStr,
 		&alert.PID, &alert.Comm, &alert.Message, &detailsJSON,
 		&alert.TraceID, &alert.Enrichment.PodName, &alert.Enrichment.Namespace,
 		&alert.Enrichment.ContainerID, &labelsJSON,
+		&count, &firstSeen, &lastSeen,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("alert not found: %s", alertID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan alert: %w", err)
+	}
+
+	if count.Valid {
+		alert.Count = int(count.Int64)
+	}
+	if firstSeen.Valid {
+		alert.FirstSeen = firstSeen.Time
+	}
+	if lastSeen.Valid {
+		alert.LastSeen = lastSeen.Time
 	}
 
 	s.decryptFields(alert.ID, &alert.Message, &detailsJSON, &labelsJSON)

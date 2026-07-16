@@ -996,6 +996,14 @@ type DriftBaselineConfig struct {
 	MinSamples int `mapstructure:"min_samples"`
 	// PerWorkload separates baselines per (comm, namespace, app_label) tuple.
 	PerWorkload bool `mapstructure:"per_workload"`
+	// MaxWorkloads caps the number of per-workload drift profiles kept in
+	// memory; the least-recently-active is evicted at the cap. Bounds memory
+	// against attacker-controlled comm cardinality. Default 1000 when unset.
+	MaxWorkloads int `mapstructure:"max_workloads"`
+	// EnforceDeadlinePeriods forces a still-learning workload into enforcing
+	// after this many LearningPeriods, regardless of MinSamples, so rarely
+	// active workloads are not permanent blind spots. Default 3 when unset.
+	EnforceDeadlinePeriods int `mapstructure:"enforce_deadline_periods"`
 }
 
 // EWMASettings groups Exponentially Weighted Moving Average tuning under

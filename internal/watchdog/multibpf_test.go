@@ -102,4 +102,76 @@ func TestMultiBPFController_ErrorIsSwallowed(t *testing.T) {
 // be handed to the pressure watchers.
 func TestMultiBPFController_ImplementsInterface(t *testing.T) {
 	var _ BPFSamplingController = NewMultiBPFController(nil)
+	var _ BPFSamplingController = NewMultiBPFController(nil).Controller("x")
+}
+
+// A controller's recovery (multiplier back to 1.0) must restore the operator's
+// configured base rate, not a hardcoded 1.0. Regression for issue #304 part 1.
+func TestMultiBPFController_RecoveryRestoresBaseNotOne(t *testing.T) {
+	m := NewMultiBPFController(nil)
+	sysCtrl := newFakeRateController()
+	m.Register("syscall", sysCtrl)
+	m.SetBaseRate("syscall", 0.25) // operator configured 1-in-4
+
+	// Base is applied immediately.
+	got, _ := sysCtrl.rate("syscall")
+	assert.Equal(t, 0.25, got)
+
+	cpu := m.Controller("cpu_pressure")
+	cpu.SetSamplingRate("syscall", 0.1) // shed: multiplier 0.1
+	got, _ = sysCtrl.rate("syscall")
+	assert.InDelta(t, 0.025, got, 1e-9, "shed applies base x multiplier")
+
+	cpu.SetSamplingRate("syscall", 1.0) // recover: multiplier back to 1.0
+	got, _ = sysCtrl.rate("syscall")
+	assert.Equal(t, 0.25, got, "recovery must restore the configured base, not 1.0")
+
+	assert.Equal(t, 0.25, m.EffectiveRates()["syscall"])
+}
+
+// Two independent controllers must not tug: one recovering must not undo the
+// other's active degradation. Regression for issue #304 part 2.
+func TestMultiBPFController_TwoControllersDoNotTug(t *testing.T) {
+	m := NewMultiBPFController(nil)
+	sysCtrl := newFakeRateController()
+	m.Register("syscall", sysCtrl)
+	// Base 1.0 (default, no SetBaseRate).
+
+	cpu := m.Controller("cpu_pressure")
+	ringbuf := m.Controller("ringbuf_load")
+
+	// Ring-buffer controller degrades syscall to 0.25 due to a full channel.
+	ringbuf.SetSamplingRate("syscall", 0.25)
+	got, _ := sysCtrl.rate("syscall")
+	assert.Equal(t, 0.25, got)
+
+	// CPU watcher sheds harder, to 0.1 — effective is the tighter of the two.
+	cpu.SetSamplingRate("syscall", 0.1)
+	got, _ = sysCtrl.rate("syscall")
+	assert.Equal(t, 0.1, got)
+
+	// CPU watcher recovers. The ring-buffer controller still wants 0.25, so the
+	// effective rate must fall back to 0.25 — NOT jump to 1.0.
+	cpu.SetSamplingRate("syscall", 1.0)
+	got, _ = sysCtrl.rate("syscall")
+	assert.Equal(t, 0.25, got, "one controller's recovery must not overwrite the other's degradation")
+
+	// Ring-buffer finally recovers too: back to full.
+	ringbuf.SetSamplingRate("syscall", 1.0)
+	got, _ = sysCtrl.rate("syscall")
+	assert.Equal(t, 1.0, got)
+}
+
+// A degradation applied before the collector's controller registers must be
+// picked up at registration time.
+func TestMultiBPFController_PendingDegradationAppliedOnRegister(t *testing.T) {
+	m := NewMultiBPFController(nil)
+	m.Controller("cpu_pressure").SetSamplingRate("file", 0.1) // no controller yet
+
+	fileCtrl := newFakeRateController()
+	m.Register("file", fileCtrl)
+
+	got, ok := fileCtrl.rate("file")
+	assert.True(t, ok, "registration must flush the pending degraded rate")
+	assert.Equal(t, 0.1, got)
 }

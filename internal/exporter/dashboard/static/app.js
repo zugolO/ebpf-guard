@@ -47,16 +47,31 @@
     };
   }
 
-  function buildQuery(f, extra) {
+  // buildFilterParams builds the shared filter params (severity/rule/since)
+  // without a row limit.
+  function buildFilterParams(f) {
     const params = new URLSearchParams();
     if (f.since) params.set("since", f.since);
     if (f.severity) params.set("severity", f.severity);
     if (f.rule_id) params.set("rule_id", f.rule_id);
+    return params;
+  }
+
+  // buildQuery is for the alert LIST, which is intentionally paged.
+  function buildQuery(f, extra) {
+    const params = buildFilterParams(f);
     params.set("limit", "500");
     if (extra) {
       for (const k in extra) params.set(k, extra[k]);
     }
     return params.toString();
+  }
+
+  // buildSummaryQuery is for /api/v1/summary. It must NOT send a limit: summary
+  // counts reflect the whole window, so a client-side cap of 500 would peg the
+  // "Alerts (window)" stat at 500 during a real storm (issue #303).
+  function buildSummaryQuery(f) {
+    return buildFilterParams(f).toString();
   }
 
   function fmtTime(ts) {
@@ -89,7 +104,10 @@
   }
 
   function renderSummary(summary) {
-    el("stat-total").textContent = summary.total ?? 0;
+    const total = summary.total ?? 0;
+    // Truncated is only set by the Query-based fallback path; show "≥N" so the
+    // operator knows the real count is at least this high.
+    el("stat-total").textContent = summary.truncated ? "≥" + total : total;
     el("stat-critical").textContent = (summary.by_severity && summary.by_severity.critical) || 0;
     el("stat-warning").textContent = (summary.by_severity && summary.by_severity.warning) || 0;
 
@@ -212,7 +230,7 @@
     try {
       const [status, summary, alerts] = await Promise.all([
         api("/api/v1/status"),
-        api("/api/v1/summary?" + buildQuery(filters)),
+        api("/api/v1/summary?" + buildSummaryQuery(filters)),
         api("/api/v1/alerts?" + buildQuery(filters)),
       ]);
       setStatus(status.healthy ? "connected" : "degraded", status.healthy ? "ok" : "error");

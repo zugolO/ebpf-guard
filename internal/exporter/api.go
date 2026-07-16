@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -353,9 +352,6 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	if filters.Since.IsZero() && r.URL.Query().Get("since") == "" {
 		filters.Since = time.Now().Add(-24 * time.Hour)
 	}
-	if filters.Limit == 0 {
-		filters.Limit = 5000
-	}
 
 	ctx := r.Context()
 	restricted, err := applyNamespaceScope(ctx, filters)
@@ -364,94 +360,60 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alerts, err := s.alertStore.Query(ctx, restricted)
+	summary, err := s.summarize(ctx, restricted)
 	if err != nil {
-		s.logger.Error("failed to query alerts for summary", "error", err)
+		s.logger.Error("failed to summarize alerts", "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	// #nosec G104 -- response encode error is not actionable once headers are written; other handlers in this file follow the same pattern
-	json.NewEncoder(w).Encode(buildAlertSummary(alerts)) //nolint:errcheck
+	json.NewEncoder(w).Encode(summary) //nolint:errcheck
 }
 
-// AlertSummary is the aggregate response returned by /api/v1/summary.
-type AlertSummary struct {
-	Total      int              `json:"total"`
-	BySeverity map[string]int   `json:"by_severity"`
-	TopRules   []RuleCount      `json:"top_rules"`
-	Timeline   []TimelineBucket `json:"timeline"`
+// summarize computes the dashboard summary. Stores that implement
+// store.Summarizer aggregate over the FULL matching window in the data layer
+// (exact counts, no per-alert materialization). Stores that don't fall back to
+// Query with a bounded cap and flag Truncated when the cap is hit, so a summary
+// during an alert storm reports "≥N" rather than a silently low 500/5000.
+func (s *Server) summarize(ctx context.Context, filters store.QueryFilters) (store.AlertSummary, error) {
+	if sz, ok := s.alertStore.(store.Summarizer); ok {
+		// A summary reflects the whole window; a list-page limit must not cap it.
+		filters.Limit = 0
+		return sz.Summarize(ctx, filters)
+	}
+
+	// Fallback: materialize a bounded page and aggregate in-process.
+	const summaryFallbackCap = 5000
+	if filters.Limit == 0 {
+		filters.Limit = summaryFallbackCap
+	}
+	alerts, err := s.alertStore.Query(ctx, filters)
+	if err != nil {
+		return store.AlertSummary{BySeverity: map[string]int{}}, err
+	}
+	summary := store.SummarizeAlerts(alerts)
+	if filters.Limit > 0 && len(alerts) >= filters.Limit {
+		summary.Truncated = true
+	}
+	return summary, nil
 }
 
-// RuleCount pairs a rule ID with the number of alerts it produced.
-type RuleCount struct {
-	RuleID string `json:"rule_id"`
-	Count  int    `json:"count"`
-}
+// AlertSummary, RuleCount, and TimelineBucket are defined in the store package
+// so aggregation can happen store-side; these aliases keep the exporter's API
+// surface (and JSON shape) stable.
+type (
+	AlertSummary   = store.AlertSummary
+	RuleCount      = store.RuleCount
+	TimelineBucket = store.TimelineBucket
+)
 
-// TimelineBucket counts alerts within a single hour-wide bucket.
-type TimelineBucket struct {
-	Hour  string `json:"hour"`
-	Count int    `json:"count"`
-}
-
-// buildAlertSummary aggregates a slice of alerts into severity counts, the
-// top 10 rules by alert count, and an hourly timeline covering the observed
-// range (oldest to newest alert, inclusive).
+// buildAlertSummary aggregates a slice of alerts into severity counts, the top
+// rules by alert count, and an hourly timeline. Thin wrapper over
+// store.SummarizeAlerts, retained for existing callers/tests.
 func buildAlertSummary(alerts []types.Alert) AlertSummary {
-	summary := AlertSummary{
-		Total:      len(alerts),
-		BySeverity: map[string]int{},
-	}
-	if len(alerts) == 0 {
-		return summary
-	}
-
-	ruleCounts := make(map[string]int)
-	hourCounts := make(map[time.Time]int)
-	var minHour, maxHour time.Time
-
-	for _, a := range alerts {
-		summary.BySeverity[string(a.Severity)]++
-		ruleCounts[a.RuleID]++
-
-		hour := a.Timestamp.UTC().Truncate(time.Hour)
-		hourCounts[hour]++
-		if minHour.IsZero() || hour.Before(minHour) {
-			minHour = hour
-		}
-		if maxHour.IsZero() || hour.After(maxHour) {
-			maxHour = hour
-		}
-	}
-
-	summary.TopRules = make([]RuleCount, 0, len(ruleCounts))
-	for ruleID, count := range ruleCounts {
-		summary.TopRules = append(summary.TopRules, RuleCount{RuleID: ruleID, Count: count})
-	}
-	sort.Slice(summary.TopRules, func(i, j int) bool {
-		if summary.TopRules[i].Count != summary.TopRules[j].Count {
-			return summary.TopRules[i].Count > summary.TopRules[j].Count
-		}
-		return summary.TopRules[i].RuleID < summary.TopRules[j].RuleID
-	})
-	if len(summary.TopRules) > 10 {
-		summary.TopRules = summary.TopRules[:10]
-	}
-
-	// Cap the timeline to a reasonable number of buckets so a wide "since"
-	// window (e.g. months) doesn't produce an unbounded response.
-	const maxBuckets = 500
-	summary.Timeline = make([]TimelineBucket, 0)
-	for h := minHour; !h.After(maxHour) && len(summary.Timeline) < maxBuckets; h = h.Add(time.Hour) {
-		summary.Timeline = append(summary.Timeline, TimelineBucket{
-			Hour:  h.Format(time.RFC3339),
-			Count: hourCounts[h],
-		})
-	}
-
-	return summary
+	return store.SummarizeAlerts(alerts)
 }
 
 // StatusAPIResponse represents the status API response

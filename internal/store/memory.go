@@ -378,6 +378,87 @@ func (s *MemoryStore) Query(ctx context.Context, filters QueryFilters) ([]types.
 	return results, nil
 }
 
+// Summarize computes an AlertSummary over the matching alerts without building
+// a result slice: it walks the time index in-window and accumulates counts,
+// reading each matching alert transiently from the map. Memory use is O(distinct
+// rules + timeline buckets), not O(matching alerts), so a summary during an
+// alert storm does not balloon like Query would.
+func (s *MemoryStore) Summarize(_ context.Context, filters QueryFilters) (AlertSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	summary := AlertSummary{BySeverity: map[string]int{}}
+	ruleCounts := make(map[string]int)
+	hourCounts := make(map[time.Time]int)
+	var minHour, maxHour time.Time
+
+	// Narrow to the [Since, Until] window using the sorted-DESC index.
+	start, end := 0, len(s.byTime)
+	if !filters.Until.IsZero() {
+		start = sort.Search(len(s.byTime), func(i int) bool {
+			return !s.byTime[i].ts.After(filters.Until)
+		})
+	}
+	if !filters.Since.IsZero() {
+		end = sort.Search(len(s.byTime), func(i int) bool {
+			return s.byTime[i].ts.Before(filters.Since)
+		})
+	}
+
+	for i := start; i < end; i++ {
+		e := &s.byTime[i]
+
+		// Pre-filter on cached index fields before the map lookup.
+		if len(filters.Severity) > 0 {
+			found := false
+			for _, sev := range filters.Severity {
+				if e.severity == sev {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		if len(filters.Namespaces) > 0 {
+			found := false
+			for _, ns := range filters.Namespaces {
+				if e.namespace == ns {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		} else if filters.Namespace != "" && e.namespace != filters.Namespace {
+			continue
+		}
+
+		alert := s.alerts[e.id]
+		if !matchesFilters(alert, filters) {
+			continue
+		}
+
+		summary.Total++
+		summary.BySeverity[string(alert.Severity)]++
+		ruleCounts[alert.RuleID]++
+		hour := alert.Timestamp.UTC().Truncate(time.Hour)
+		hourCounts[hour]++
+		if minHour.IsZero() || hour.Before(minHour) {
+			minHour = hour
+		}
+		if maxHour.IsZero() || hour.After(maxHour) {
+			maxHour = hour
+		}
+	}
+
+	summary.TopRules = topRulesFromCounts(ruleCounts)
+	summary.Timeline = timelineFromCounts(hourCounts, minHour, maxHour)
+	return summary, nil
+}
+
 // Release returns a result slice obtained from Query back to the pool so its
 // backing array can be reused on the next Query call. The slice must not be
 // read or written after Release returns. Callers that need to retain results

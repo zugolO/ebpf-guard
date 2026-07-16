@@ -464,8 +464,10 @@ func (s *SQLiteStore) Query(ctx context.Context, filters QueryFilters) ([]types.
 	return s.scanAlerts(rows)
 }
 
-// buildQuery constructs the SQL query and arguments from filters.
-func (s *SQLiteStore) buildQuery(filters QueryFilters) (string, []interface{}) {
+// buildWhere constructs the WHERE clause (including the leading " WHERE ", or an
+// empty string when there are no filters) and its bound arguments. Shared by
+// buildQuery and Summarize so both apply identical filtering.
+func (s *SQLiteStore) buildWhere(filters QueryFilters) (string, []interface{}) {
 	var whereClauses []string
 	var args []interface{}
 
@@ -509,11 +511,26 @@ func (s *SQLiteStore) buildQuery(filters QueryFilters) (string, []interface{}) {
 		whereClauses = append(whereClauses, "namespace = ?")
 		args = append(args, filters.Namespace)
 	}
-
-	query := "SELECT " + alertSelectColumns + " FROM alerts"
-	if len(whereClauses) > 0 {
-		query += " WHERE " + strings.Join(whereClauses, " AND ")
+	if len(filters.Namespaces) > 0 {
+		placeholders := make([]string, len(filters.Namespaces))
+		for i := range filters.Namespaces {
+			placeholders[i] = "?"
+			args = append(args, filters.Namespaces[i])
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("namespace IN (%s)", strings.Join(placeholders, ",")))
 	}
+
+	if len(whereClauses) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(whereClauses, " AND "), args
+}
+
+// buildQuery constructs the SQL query and arguments from filters.
+func (s *SQLiteStore) buildQuery(filters QueryFilters) (string, []interface{}) {
+	where, args := s.buildWhere(filters)
+
+	query := "SELECT " + alertSelectColumns + " FROM alerts" + where
 	query += " ORDER BY timestamp DESC"
 
 	if filters.Limit > 0 {
@@ -524,6 +541,110 @@ func (s *SQLiteStore) buildQuery(filters QueryFilters) (string, []interface{}) {
 	}
 
 	return query, args
+}
+
+// Summarize computes the dashboard AlertSummary entirely in SQL (COUNT/GROUP
+// BY) so no alert rows are materialized — total, per-severity counts, the top
+// rules by volume, and an hourly timeline are each a single aggregate query.
+// The Limit/Offset fields of filters are intentionally ignored: a summary
+// always reflects the full matching window, never a truncated page.
+func (s *SQLiteStore) Summarize(ctx context.Context, filters QueryFilters) (AlertSummary, error) {
+	where, args := s.buildWhere(filters)
+	summary := AlertSummary{BySeverity: map[string]int{}}
+
+	// Total + per-severity counts in one pass.
+	sevRows, err := s.db.QueryContext(ctx,
+		"SELECT severity, COUNT(*) FROM alerts"+where+" GROUP BY severity", args...)
+	if err != nil {
+		return summary, fmt.Errorf("summarize severities: %w", err)
+	}
+	func() {
+		defer sevRows.Close()
+		for sevRows.Next() {
+			var sev string
+			var n int
+			if err := sevRows.Scan(&sev, &n); err != nil {
+				return
+			}
+			summary.BySeverity[sev] += n
+			summary.Total += n
+		}
+	}()
+	if err := sevRows.Err(); err != nil {
+		return summary, fmt.Errorf("summarize severities: %w", err)
+	}
+
+	// Top rules by count, ties broken by rule_id for determinism.
+	ruleRows, err := s.db.QueryContext(ctx,
+		"SELECT rule_id, COUNT(*) c FROM alerts"+where+
+			fmt.Sprintf(" GROUP BY rule_id ORDER BY c DESC, rule_id ASC LIMIT %d", summaryTopRules), args...)
+	if err != nil {
+		return summary, fmt.Errorf("summarize top rules: %w", err)
+	}
+	func() {
+		defer ruleRows.Close()
+		for ruleRows.Next() {
+			var rc RuleCount
+			if err := ruleRows.Scan(&rc.RuleID, &rc.Count); err != nil {
+				return
+			}
+			summary.TopRules = append(summary.TopRules, rc)
+		}
+	}()
+	if err := ruleRows.Err(); err != nil {
+		return summary, fmt.Errorf("summarize top rules: %w", err)
+	}
+
+	// Hourly timeline. strftime with the 'utc' modifier normalizes stored
+	// timestamps (which may carry a zone offset) to UTC hour buckets, matching
+	// the in-memory summary's Timestamp.UTC().Truncate(time.Hour).
+	tlRows, err := s.db.QueryContext(ctx,
+		"SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp, 'utc') h, COUNT(*) FROM alerts"+where+
+			" GROUP BY h ORDER BY h ASC", args...)
+	if err != nil {
+		return summary, fmt.Errorf("summarize timeline: %w", err)
+	}
+	hourCounts := make(map[time.Time]int)
+	var minHour, maxHour time.Time
+	var scanErr error
+	func() {
+		defer tlRows.Close()
+		for tlRows.Next() {
+			var hourStr string
+			var n int
+			if err := tlRows.Scan(&hourStr, &n); err != nil {
+				scanErr = err
+				return
+			}
+			hour, err := time.Parse(time.RFC3339, hourStr)
+			if err != nil {
+				scanErr = err
+				return
+			}
+			hourCounts[hour] = n
+			if minHour.IsZero() || hour.Before(minHour) {
+				minHour = hour
+			}
+			if maxHour.IsZero() || hour.After(maxHour) {
+				maxHour = hour
+			}
+		}
+	}()
+	if scanErr != nil {
+		return summary, fmt.Errorf("summarize timeline: %w", scanErr)
+	}
+	if err := tlRows.Err(); err != nil {
+		return summary, fmt.Errorf("summarize timeline: %w", err)
+	}
+	// Fill gaps between the first and last active hour so the timeline matches
+	// the in-memory summary (contiguous buckets, zero-filled), capped at
+	// summaryMaxBuckets.
+	summary.Timeline = timelineFromCounts(hourCounts, minHour, maxHour)
+
+	if summary.TopRules == nil {
+		summary.TopRules = []RuleCount{}
+	}
+	return summary, nil
 }
 
 // decryptFields decrypts the sensitive columns of a scanned alert row when

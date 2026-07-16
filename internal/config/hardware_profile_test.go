@@ -32,6 +32,42 @@ func TestDetectProfile(t *testing.T) {
 	}
 }
 
+func TestReadMemTotalMB(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		tmp := filepath.Join(t.TempDir(), "meminfo")
+		require.NoError(t, os.WriteFile(tmp, []byte("MemTotal:       1048576 kB\nMemFree:        200000 kB\n"), 0o644))
+		mb, err := readMemTotalMB(tmp)
+		require.NoError(t, err)
+		assert.Equal(t, 1024, mb)
+	})
+
+	t.Run("missing_file", func(t *testing.T) {
+		_, err := readMemTotalMB(filepath.Join(t.TempDir(), "does-not-exist"))
+		require.Error(t, err)
+	})
+
+	t.Run("no_memtotal_line", func(t *testing.T) {
+		tmp := filepath.Join(t.TempDir(), "meminfo")
+		require.NoError(t, os.WriteFile(tmp, []byte("MemFree:        200000 kB\n"), 0o644))
+		_, err := readMemTotalMB(tmp)
+		require.Error(t, err)
+	})
+
+	t.Run("malformed_memtotal_line", func(t *testing.T) {
+		tmp := filepath.Join(t.TempDir(), "meminfo")
+		require.NoError(t, os.WriteFile(tmp, []byte("MemTotal:\n"), 0o644))
+		_, err := readMemTotalMB(tmp)
+		require.Error(t, err)
+	})
+
+	t.Run("non_numeric_memtotal", func(t *testing.T) {
+		tmp := filepath.Join(t.TempDir(), "meminfo")
+		require.NoError(t, os.WriteFile(tmp, []byte("MemTotal:       notanumber kB\n"), 0o644))
+		_, err := readMemTotalMB(tmp)
+		require.Error(t, err)
+	})
+}
+
 func TestProfilePresets_UnknownProfile(t *testing.T) {
 	_, err := ProfilePresets("nonsense")
 	require.Error(t, err)

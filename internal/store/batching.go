@@ -190,6 +190,19 @@ func (s *BatchingStore) QueryByID(ctx context.Context, alertID string) (*types.A
 	return s.inner.QueryByID(ctx, alertID)
 }
 
+// Summarize delegates to the inner store's native aggregation when available,
+// otherwise falls back to Query + SummarizeAlerts.
+func (s *BatchingStore) Summarize(ctx context.Context, filters QueryFilters) (AlertSummary, error) {
+	if sz, ok := s.inner.(Summarizer); ok {
+		return sz.Summarize(ctx, filters)
+	}
+	alerts, err := s.inner.Query(ctx, filters)
+	if err != nil {
+		return AlertSummary{BySeverity: map[string]int{}}, err
+	}
+	return SummarizeAlerts(alerts), nil
+}
+
 // Count delegates to the inner store.
 func (s *BatchingStore) Count(ctx context.Context, filters QueryFilters) (int64, error) {
 	return s.inner.Count(ctx, filters)

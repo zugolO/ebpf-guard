@@ -264,6 +264,20 @@ func (s *InstrumentedStore) Query(ctx context.Context, filters QueryFilters) ([]
 	return s.inner.Query(ctx, filters)
 }
 
+// Summarize delegates to the wrapped store's native aggregation when available,
+// otherwise falls back to Query + SummarizeAlerts so the wrapper always
+// satisfies Summarizer regardless of the inner backend.
+func (s *InstrumentedStore) Summarize(ctx context.Context, filters QueryFilters) (AlertSummary, error) {
+	if sz, ok := s.inner.(Summarizer); ok {
+		return sz.Summarize(ctx, filters)
+	}
+	alerts, err := s.inner.Query(ctx, filters)
+	if err != nil {
+		return AlertSummary{BySeverity: map[string]int{}}, err
+	}
+	return SummarizeAlerts(alerts), nil
+}
+
 func (s *InstrumentedStore) QueryByID(ctx context.Context, alertID string) (*types.Alert, error) {
 	return s.inner.QueryByID(ctx, alertID)
 }

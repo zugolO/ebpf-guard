@@ -25,7 +25,9 @@
     const res = await fetch(path, { headers });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`${res.status} ${text}`);
+      const err = new Error(`${res.status} ${text}`);
+      err.status = res.status;
+      throw err;
     }
     return res.json();
   }
@@ -45,16 +47,31 @@
     };
   }
 
-  function buildQuery(f, extra) {
+  // buildFilterParams builds the shared filter params (severity/rule/since)
+  // without a row limit.
+  function buildFilterParams(f) {
     const params = new URLSearchParams();
     if (f.since) params.set("since", f.since);
     if (f.severity) params.set("severity", f.severity);
     if (f.rule_id) params.set("rule_id", f.rule_id);
+    return params;
+  }
+
+  // buildQuery is for the alert LIST, which is intentionally paged.
+  function buildQuery(f, extra) {
+    const params = buildFilterParams(f);
     params.set("limit", "500");
     if (extra) {
       for (const k in extra) params.set(k, extra[k]);
     }
     return params.toString();
+  }
+
+  // buildSummaryQuery is for /api/v1/summary. It must NOT send a limit: summary
+  // counts reflect the whole window, so a client-side cap of 500 would peg the
+  // "Alerts (window)" stat at 500 during a real storm (issue #303).
+  function buildSummaryQuery(f) {
+    return buildFilterParams(f).toString();
   }
 
   function fmtTime(ts) {
@@ -65,14 +82,32 @@
     });
   }
 
+  // escapeHTML escapes the five HTML-significant characters, INCLUDING both
+  // quote characters. The previous textContent→innerHTML trick escaped only
+  // & < >, leaving " and ' intact — which let attacker-controlled values (comm,
+  // file paths in message) break out of the HTML attributes they are
+  // interpolated into (title="…", href="…"). This explicit map closes that.
+  const HTML_ESCAPES = {
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&#34;", "'": "&#39;",
+  };
   function escapeHTML(str) {
-    const div = document.createElement("div");
-    div.textContent = str == null ? "" : String(str);
-    return div.innerHTML;
+    if (str == null) return "";
+    return String(str).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+  }
+
+  // safeURL returns u only if it is an http/https URL, otherwise "#". Used for
+  // reference/MITRE links so a javascript:/data: URL in attacker-controlled
+  // data cannot become a live link even if the CSP is ever relaxed.
+  function safeURL(u) {
+    const s = String(u == null ? "" : u).trim();
+    return /^https?:\/\//i.test(s) ? s : "#";
   }
 
   function renderSummary(summary) {
-    el("stat-total").textContent = summary.total ?? 0;
+    const total = summary.total ?? 0;
+    // Truncated is only set by the Query-based fallback path; show "≥N" so the
+    // operator knows the real count is at least this high.
+    el("stat-total").textContent = summary.truncated ? "≥" + total : total;
     el("stat-critical").textContent = (summary.by_severity && summary.by_severity.critical) || 0;
     el("stat-warning").textContent = (summary.by_severity && summary.by_severity.warning) || 0;
 
@@ -153,7 +188,7 @@
       .map((m) => `<li>${escapeHTML(m)}</li>`)
       .join("");
     const references = (exp.references || [])
-      .map((r) => `<div><a class="mitre-link" href="${escapeHTML(r)}" target="_blank" rel="noopener noreferrer">${escapeHTML(r)}</a></div>`)
+      .map((r) => `<div><a class="mitre-link" href="${escapeHTML(safeURL(r))}" target="_blank" rel="noopener noreferrer">${escapeHTML(r)}</a></div>`)
       .join("");
 
     detail.innerHTML = `
@@ -174,7 +209,7 @@
       <div class="detail-field">
         <div class="label">MITRE ATT&amp;CK</div>
         <div class="value">${escapeHTML(mitre.tactic)} / ${escapeHTML(mitre.technique_id)} — ${escapeHTML(mitre.technique)}</div>
-        ${mitre.url ? `<a class="mitre-link" href="${escapeHTML(mitre.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(mitre.url)}</a>` : ""}
+        ${mitre.url ? `<a class="mitre-link" href="${escapeHTML(safeURL(mitre.url))}" target="_blank" rel="noopener noreferrer">${escapeHTML(mitre.url)}</a>` : ""}
       </div>` : ""}
       ${mitigations ? `
       <div class="detail-field">
@@ -195,7 +230,7 @@
     try {
       const [status, summary, alerts] = await Promise.all([
         api("/api/v1/status"),
-        api("/api/v1/summary?" + buildQuery(filters)),
+        api("/api/v1/summary?" + buildSummaryQuery(filters)),
         api("/api/v1/alerts?" + buildQuery(filters)),
       ]);
       setStatus(status.healthy ? "connected" : "degraded", status.healthy ? "ok" : "error");
@@ -204,15 +239,23 @@
       renderAlerts(state.alerts);
     } catch (err) {
       setStatus("error: " + err.message, "error");
+      // The static shell loads without a token, but the data API is
+      // authenticated. On the first 401, prompt for a token so the operator
+      // isn't left staring at a bare "401 Unauthorized" string.
+      if (err.status === 401) openTokenDialog();
     }
+  }
+
+  function openTokenDialog() {
+    const dialog = el("token-dialog");
+    if (dialog.open) return;
+    el("token-input").value = getToken();
+    dialog.showModal();
   }
 
   function initTokenDialog() {
     const dialog = el("token-dialog");
-    el("token-btn").addEventListener("click", () => {
-      el("token-input").value = getToken();
-      dialog.showModal();
-    });
+    el("token-btn").addEventListener("click", openTokenDialog);
     el("token-form").addEventListener("submit", () => {
       setToken(el("token-input").value.trim());
       refresh();
@@ -240,4 +283,10 @@
   }
 
   document.addEventListener("DOMContentLoaded", init);
+
+  // Export the pure string helpers for unit testing under Node. Guarded by a
+  // typeof check so this is a no-op in the browser (there is no `module`).
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { escapeHTML, safeURL };
+  }
 })();

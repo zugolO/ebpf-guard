@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/zugolO/ebpf-guard/pkg/types"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 var (
@@ -163,8 +163,8 @@ func (s *SQLiteStore) performMaintenance(ctx context.Context) {
 // updateSizeMetric sets storeSizeBytes from SQLite page statistics.
 func (s *SQLiteStore) updateSizeMetric(ctx context.Context) {
 	var pageCount, pageSize int64
-	s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount)  //nolint:errcheck
-	s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize)    //nolint:errcheck
+	s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount) //nolint:errcheck
+	s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize)   //nolint:errcheck
 	if pageSize > 0 {
 		storeSizeBytes.Set(float64(pageCount * pageSize))
 	}
@@ -300,7 +300,7 @@ func (s *SQLiteStore) migrateAggregationColumns() error {
 	if err != nil {
 		return fmt.Errorf("inspect alerts schema: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -552,14 +552,19 @@ func (s *SQLiteStore) Summarize(ctx context.Context, filters QueryFilters) (Aler
 	where, args := s.buildWhere(filters)
 	summary := AlertSummary{BySeverity: map[string]int{}}
 
+	// The three summary queries concatenate the WHERE clause built by buildWhere,
+	// which uses only bound ? placeholders and constant clause fragments — no
+	// caller data ever enters the SQL text — and the LIMIT is a compile-time
+	// constant. gosec G202 can't prove that, hence the suppressions below.
+
 	// Total + per-severity counts in one pass.
-	sevRows, err := s.db.QueryContext(ctx,
-		"SELECT severity, COUNT(*) FROM alerts"+where+" GROUP BY severity", args...)
+	sevQuery := "SELECT severity, COUNT(*) FROM alerts" + where + " GROUP BY severity" // #nosec G202 -- WHERE uses bound placeholders; only constant fragments concatenated
+	sevRows, err := s.db.QueryContext(ctx, sevQuery, args...)
 	if err != nil {
 		return summary, fmt.Errorf("summarize severities: %w", err)
 	}
 	func() {
-		defer sevRows.Close()
+		defer func() { _ = sevRows.Close() }()
 		for sevRows.Next() {
 			var sev string
 			var n int
@@ -575,14 +580,14 @@ func (s *SQLiteStore) Summarize(ctx context.Context, filters QueryFilters) (Aler
 	}
 
 	// Top rules by count, ties broken by rule_id for determinism.
-	ruleRows, err := s.db.QueryContext(ctx,
-		"SELECT rule_id, COUNT(*) c FROM alerts"+where+
-			fmt.Sprintf(" GROUP BY rule_id ORDER BY c DESC, rule_id ASC LIMIT %d", summaryTopRules), args...)
+	ruleGroupBy := fmt.Sprintf(" GROUP BY rule_id ORDER BY c DESC, rule_id ASC LIMIT %d", summaryTopRules)
+	ruleQuery := "SELECT rule_id, COUNT(*) c FROM alerts" + where + ruleGroupBy // #nosec G202 -- WHERE uses bound placeholders; LIMIT is a constant
+	ruleRows, err := s.db.QueryContext(ctx, ruleQuery, args...)
 	if err != nil {
 		return summary, fmt.Errorf("summarize top rules: %w", err)
 	}
 	func() {
-		defer ruleRows.Close()
+		defer func() { _ = ruleRows.Close() }()
 		for ruleRows.Next() {
 			var rc RuleCount
 			if err := ruleRows.Scan(&rc.RuleID, &rc.Count); err != nil {
@@ -598,9 +603,8 @@ func (s *SQLiteStore) Summarize(ctx context.Context, filters QueryFilters) (Aler
 	// Hourly timeline. strftime with the 'utc' modifier normalizes stored
 	// timestamps (which may carry a zone offset) to UTC hour buckets, matching
 	// the in-memory summary's Timestamp.UTC().Truncate(time.Hour).
-	tlRows, err := s.db.QueryContext(ctx,
-		"SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp, 'utc') h, COUNT(*) FROM alerts"+where+
-			" GROUP BY h ORDER BY h ASC", args...)
+	tlQuery := "SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp, 'utc') h, COUNT(*) FROM alerts" + where + " GROUP BY h ORDER BY h ASC" // #nosec G202 -- WHERE uses bound placeholders; only constant fragments concatenated
+	tlRows, err := s.db.QueryContext(ctx, tlQuery, args...)
 	if err != nil {
 		return summary, fmt.Errorf("summarize timeline: %w", err)
 	}
@@ -608,7 +612,7 @@ func (s *SQLiteStore) Summarize(ctx context.Context, filters QueryFilters) (Aler
 	var minHour, maxHour time.Time
 	var scanErr error
 	func() {
-		defer tlRows.Close()
+		defer func() { _ = tlRows.Close() }()
 		for tlRows.Next() {
 			var hourStr string
 			var n int

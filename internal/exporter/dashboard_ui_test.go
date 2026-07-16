@@ -47,20 +47,41 @@ func TestDashboardRoutes(t *testing.T) {
 	})
 }
 
-func TestDashboardRequiresAuthWhenEnabled(t *testing.T) {
+// TestDashboardStaticIsPublicWhenAuthEnabled pins the post-#300 model: the
+// static dashboard shell (HTML/JS/CSS) is served without a token so a browser
+// can load it on first navigation, while all alert *data* under /api/v1/*
+// remains behind bearer auth.
+func TestDashboardStaticIsPublicWhenAuthEnabled(t *testing.T) {
 	srv := NewServerWithMultiTenant("localhost:0", "/metrics", "/health", false, false,
 		nil, "viewer-token", "admin-token", true)
 
-	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	// Static assets: reachable with no Authorization header.
+	for _, path := range []string{"/ui/", "/ui/app.js", "/ui/style.css"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		srv.server.Handler.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code, "%s must be served without a token", path)
+	}
+
+	// Root redirect must also work unauthenticated so the browser lands on /ui/.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	srv.server.Handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusUnauthorized, w.Code, "dashboard must require auth like the rest of the read-only API")
+	assert.Equal(t, http.StatusFound, w.Code, "root redirect must not require auth")
+	assert.Equal(t, "/ui/", w.Header().Get("Location"))
 
-	req = httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	// Data endpoints: still require a token.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil)
+	w = httptest.NewRecorder()
+	srv.server.Handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "alert data must stay authenticated")
+
+	// Data endpoints: reachable with a valid viewer token.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 	req.Header.Set("Authorization", "Bearer viewer-token")
 	w = httptest.NewRecorder()
 	srv.server.Handler.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code, "viewer role must be able to reach the dashboard")
+	assert.Equal(t, http.StatusOK, w.Code, "viewer token must reach the data API")
 }
 
 func TestHandleSummary(t *testing.T) {

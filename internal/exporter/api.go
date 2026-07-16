@@ -55,7 +55,9 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/openapi.yaml", s.handleOpenAPISpec)
 
 	// Embedded read-only dashboard — self-contained, no external assets.
-	// Subject to the same bearer auth as the rest of the read-only API (see viewerPrefixes).
+	// Static assets are served WITHOUT auth (see isPublicAsset) so a browser can
+	// load the shell before it has a token; all data is fetched from the
+	// authenticated /api/v1/* endpoints below.
 	mux.Handle("/ui/", dashboard.Handler())
 	mux.HandleFunc("/", s.handleDashboardRedirect)
 }

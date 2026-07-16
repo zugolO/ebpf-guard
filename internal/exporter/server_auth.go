@@ -153,6 +153,9 @@ func BearerTokenMiddleware(token string) func(http.Handler) http.Handler {
 }
 
 // viewerPrefixes lists URL path prefixes that viewer-role tokens may access via GET.
+// Static UI/doc assets are not listed here — they are served publicly (see
+// publicAssetPrefixes / publicAssetPaths) so a browser can load the HTML shell
+// before it has a token to attach. All alert *data* stays under /api/v1/*.
 var viewerPrefixes = []string{
 	"/metrics",
 	"/api/v1/alerts",
@@ -161,8 +164,41 @@ var viewerPrefixes = []string{
 	"/api/v1/summary",
 	"/api/v1/feedback",
 	"/api/v1/incidents",
-	"/ui",
-	"/",
+}
+
+// publicAssetPrefixes lists path prefixes served WITHOUT authentication. These
+// hold only static, data-free assets — the embedded dashboard (HTML/JS/CSS) and
+// the Swagger UI bundle. A browser navigating to /ui/ cannot send an
+// Authorization header on the initial navigation, so the shell must load
+// unauthenticated; the JS then prompts for a token and attaches it to every
+// /api/v1/* fetch, which remain behind auth.
+var publicAssetPrefixes = []string{
+	"/ui/",
+	"/swaggerui/",
+}
+
+// publicAssetPaths lists exact paths served without authentication: the root
+// redirect to /ui/, the bare /ui (redirected to /ui/ by the mux), and the
+// OpenAPI docs page + spec, which contain no alert data.
+var publicAssetPaths = map[string]struct{}{
+	"/":                 {},
+	"/ui":               {},
+	"/api/docs":         {},
+	"/api/openapi.yaml": {},
+}
+
+// isPublicAsset reports whether path may be served without a bearer token.
+// Only static assets qualify; every /api/v1/* data endpoint stays authenticated.
+func isPublicAsset(path string) bool {
+	if _, ok := publicAssetPaths[path]; ok {
+		return true
+	}
+	for _, prefix := range publicAssetPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isViewerAllowed returns true when the viewer role may access the given method+path.
@@ -205,6 +241,13 @@ func MultiTenantRBACMiddleware(tokens []NamespacedToken) func(http.Handler) http
 			path := r.URL.Path
 
 			if strings.HasPrefix(path, "/health") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Static UI/doc assets are public so a browser can load the shell
+			// before it has a token; the data API below stays authenticated.
+			if isPublicAsset(path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -253,6 +296,13 @@ func RBACMiddleware(viewerToken, adminToken string) func(http.Handler) http.Hand
 
 			// Health probes are always public — Kubernetes needs them without auth.
 			if strings.HasPrefix(path, "/health") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Static UI/doc assets are public so a browser can load the shell
+			// before it has a token; the data API below stays authenticated.
+			if isPublicAsset(path) {
 				next.ServeHTTP(w, r)
 				return
 			}

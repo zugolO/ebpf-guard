@@ -25,7 +25,9 @@
     const res = await fetch(path, { headers });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`${res.status} ${text}`);
+      const err = new Error(`${res.status} ${text}`);
+      err.status = res.status;
+      throw err;
     }
     return res.json();
   }
@@ -204,15 +206,23 @@
       renderAlerts(state.alerts);
     } catch (err) {
       setStatus("error: " + err.message, "error");
+      // The static shell loads without a token, but the data API is
+      // authenticated. On the first 401, prompt for a token so the operator
+      // isn't left staring at a bare "401 Unauthorized" string.
+      if (err.status === 401) openTokenDialog();
     }
+  }
+
+  function openTokenDialog() {
+    const dialog = el("token-dialog");
+    if (dialog.open) return;
+    el("token-input").value = getToken();
+    dialog.showModal();
   }
 
   function initTokenDialog() {
     const dialog = el("token-dialog");
-    el("token-btn").addEventListener("click", () => {
-      el("token-input").value = getToken();
-      dialog.showModal();
-    });
+    el("token-btn").addEventListener("click", openTokenDialog);
     el("token-form").addEventListener("submit", () => {
       setToken(el("token-input").value.trim());
       refresh();

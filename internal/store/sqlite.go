@@ -163,8 +163,10 @@ func (s *SQLiteStore) performMaintenance(ctx context.Context) {
 // updateSizeMetric sets storeSizeBytes from SQLite page statistics.
 func (s *SQLiteStore) updateSizeMetric(ctx context.Context) {
 	var pageCount, pageSize int64
-	s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount) //nolint:errcheck
-	s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize)   //nolint:errcheck
+	// Best-effort size metric; explicit `_ =` discards the error to satisfy both
+	// errcheck and gosec G104 (a bare //nolint:errcheck leaves gosec unhappy).
+	_ = s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount)
+	_ = s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize)
 	if pageSize > 0 {
 		storeSizeBytes.Set(float64(pageCount * pageSize))
 	}

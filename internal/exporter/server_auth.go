@@ -158,8 +158,11 @@ var viewerPrefixes = []string{
 	"/api/v1/alerts",
 	"/api/v1/rules",
 	"/api/v1/status",
+	"/api/v1/summary",
 	"/api/v1/feedback",
 	"/api/v1/incidents",
+	"/ui",
+	"/",
 }
 
 // isViewerAllowed returns true when the viewer role may access the given method+path.

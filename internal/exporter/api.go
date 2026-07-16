@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	apispec "github.com/zugolO/ebpf-guard/api"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/exporter/dashboard"
 	"github.com/zugolO/ebpf-guard/internal/exporter/swaggerui"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
@@ -32,6 +34,9 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// Status endpoint
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 
+	// Summary endpoint (aggregates for the dashboard: top rules, severity, timeline)
+	mux.HandleFunc("/api/v1/summary", s.handleSummary)
+
 	// Rules endpoints
 	mux.HandleFunc("/api/v1/rules", s.handleRules)
 	mux.HandleFunc("/api/v1/rules/reload", s.handleRulesReload)
@@ -48,6 +53,21 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("/swaggerui/", swaggerui.Handler())
 	mux.HandleFunc("/api/docs", s.handleAPIDocs)
 	mux.HandleFunc("/api/openapi.yaml", s.handleOpenAPISpec)
+
+	// Embedded read-only dashboard — self-contained, no external assets.
+	// Subject to the same bearer auth as the rest of the read-only API (see viewerPrefixes).
+	mux.Handle("/ui/", dashboard.Handler())
+	mux.HandleFunc("/", s.handleDashboardRedirect)
+}
+
+// handleDashboardRedirect redirects the bare root path to the embedded dashboard.
+// Any other unmatched path falls through to a 404, matching prior behavior.
+func (s *Server) handleDashboardRedirect(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, "/ui/", http.StatusFound)
 }
 
 // handleAlerts handles GET /api/v1/alerts with query parameter filters.
@@ -310,6 +330,125 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleSummary handles GET /api/v1/summary — aggregate statistics for the
+// dashboard: total count, severity distribution, top rules, and an hourly
+// timeline. Accepts the same query filters as /api/v1/alerts, defaulting to
+// a 24h window when "since" is not provided.
+func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.alertStore == nil {
+		http.Error(w, "Alert store not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	filters := parseQueryFilters(r)
+	if filters.Since.IsZero() && r.URL.Query().Get("since") == "" {
+		filters.Since = time.Now().Add(-24 * time.Hour)
+	}
+	if filters.Limit == 0 {
+		filters.Limit = 5000
+	}
+
+	ctx := r.Context()
+	restricted, err := applyNamespaceScope(ctx, filters)
+	if err != nil {
+		http.Error(w, "Forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	alerts, err := s.alertStore.Query(ctx, restricted)
+	if err != nil {
+		s.logger.Error("failed to query alerts for summary", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(buildAlertSummary(alerts))
+}
+
+// AlertSummary is the aggregate response returned by /api/v1/summary.
+type AlertSummary struct {
+	Total      int              `json:"total"`
+	BySeverity map[string]int   `json:"by_severity"`
+	TopRules   []RuleCount      `json:"top_rules"`
+	Timeline   []TimelineBucket `json:"timeline"`
+}
+
+// RuleCount pairs a rule ID with the number of alerts it produced.
+type RuleCount struct {
+	RuleID string `json:"rule_id"`
+	Count  int    `json:"count"`
+}
+
+// TimelineBucket counts alerts within a single hour-wide bucket.
+type TimelineBucket struct {
+	Hour  string `json:"hour"`
+	Count int    `json:"count"`
+}
+
+// buildAlertSummary aggregates a slice of alerts into severity counts, the
+// top 10 rules by alert count, and an hourly timeline covering the observed
+// range (oldest to newest alert, inclusive).
+func buildAlertSummary(alerts []types.Alert) AlertSummary {
+	summary := AlertSummary{
+		Total:      len(alerts),
+		BySeverity: map[string]int{},
+	}
+	if len(alerts) == 0 {
+		return summary
+	}
+
+	ruleCounts := make(map[string]int)
+	hourCounts := make(map[time.Time]int)
+	var minHour, maxHour time.Time
+
+	for _, a := range alerts {
+		summary.BySeverity[string(a.Severity)]++
+		ruleCounts[a.RuleID]++
+
+		hour := a.Timestamp.UTC().Truncate(time.Hour)
+		hourCounts[hour]++
+		if minHour.IsZero() || hour.Before(minHour) {
+			minHour = hour
+		}
+		if maxHour.IsZero() || hour.After(maxHour) {
+			maxHour = hour
+		}
+	}
+
+	summary.TopRules = make([]RuleCount, 0, len(ruleCounts))
+	for ruleID, count := range ruleCounts {
+		summary.TopRules = append(summary.TopRules, RuleCount{RuleID: ruleID, Count: count})
+	}
+	sort.Slice(summary.TopRules, func(i, j int) bool {
+		if summary.TopRules[i].Count != summary.TopRules[j].Count {
+			return summary.TopRules[i].Count > summary.TopRules[j].Count
+		}
+		return summary.TopRules[i].RuleID < summary.TopRules[j].RuleID
+	})
+	if len(summary.TopRules) > 10 {
+		summary.TopRules = summary.TopRules[:10]
+	}
+
+	// Cap the timeline to a reasonable number of buckets so a wide "since"
+	// window (e.g. months) doesn't produce an unbounded response.
+	const maxBuckets = 500
+	summary.Timeline = make([]TimelineBucket, 0)
+	for h := minHour; !h.After(maxHour) && len(summary.Timeline) < maxBuckets; h = h.Add(time.Hour) {
+		summary.Timeline = append(summary.Timeline, TimelineBucket{
+			Hour:  h.Format(time.RFC3339),
+			Count: hourCounts[h],
+		})
+	}
+
+	return summary
 }
 
 // StatusAPIResponse represents the status API response

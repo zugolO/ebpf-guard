@@ -67,10 +67,25 @@
     });
   }
 
+  // escapeHTML escapes the five HTML-significant characters, INCLUDING both
+  // quote characters. The previous textContent→innerHTML trick escaped only
+  // & < >, leaving " and ' intact — which let attacker-controlled values (comm,
+  // file paths in message) break out of the HTML attributes they are
+  // interpolated into (title="…", href="…"). This explicit map closes that.
+  const HTML_ESCAPES = {
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&#34;", "'": "&#39;",
+  };
   function escapeHTML(str) {
-    const div = document.createElement("div");
-    div.textContent = str == null ? "" : String(str);
-    return div.innerHTML;
+    if (str == null) return "";
+    return String(str).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+  }
+
+  // safeURL returns u only if it is an http/https URL, otherwise "#". Used for
+  // reference/MITRE links so a javascript:/data: URL in attacker-controlled
+  // data cannot become a live link even if the CSP is ever relaxed.
+  function safeURL(u) {
+    const s = String(u == null ? "" : u).trim();
+    return /^https?:\/\//i.test(s) ? s : "#";
   }
 
   function renderSummary(summary) {
@@ -155,7 +170,7 @@
       .map((m) => `<li>${escapeHTML(m)}</li>`)
       .join("");
     const references = (exp.references || [])
-      .map((r) => `<div><a class="mitre-link" href="${escapeHTML(r)}" target="_blank" rel="noopener noreferrer">${escapeHTML(r)}</a></div>`)
+      .map((r) => `<div><a class="mitre-link" href="${escapeHTML(safeURL(r))}" target="_blank" rel="noopener noreferrer">${escapeHTML(r)}</a></div>`)
       .join("");
 
     detail.innerHTML = `
@@ -176,7 +191,7 @@
       <div class="detail-field">
         <div class="label">MITRE ATT&amp;CK</div>
         <div class="value">${escapeHTML(mitre.tactic)} / ${escapeHTML(mitre.technique_id)} — ${escapeHTML(mitre.technique)}</div>
-        ${mitre.url ? `<a class="mitre-link" href="${escapeHTML(mitre.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(mitre.url)}</a>` : ""}
+        ${mitre.url ? `<a class="mitre-link" href="${escapeHTML(safeURL(mitre.url))}" target="_blank" rel="noopener noreferrer">${escapeHTML(mitre.url)}</a>` : ""}
       </div>` : ""}
       ${mitigations ? `
       <div class="detail-field">
@@ -250,4 +265,10 @@
   }
 
   document.addEventListener("DOMContentLoaded", init);
+
+  // Export the pure string helpers for unit testing under Node. Guarded by a
+  // typeof check so this is a no-op in the browser (there is no `module`).
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { escapeHTML, safeURL };
+  }
 })();

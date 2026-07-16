@@ -370,7 +370,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(buildAlertSummary(alerts))
+	json.NewEncoder(w).Encode(buildAlertSummary(alerts)) //nolint:errcheck
 }
 
 // AlertSummary is the aggregate response returned by /api/v1/summary.

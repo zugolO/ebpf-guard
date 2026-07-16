@@ -1,6 +1,7 @@
 package exporter
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/internal/store"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -104,6 +106,41 @@ func TestHandleSummary(t *testing.T) {
 		assert.Equal(t, 2, summary.TopRules[0].Count)
 		assert.GreaterOrEqual(t, len(summary.Timeline), 3)
 	})
+}
+
+func TestHandleSummary_ForbiddenNamespaceParam(t *testing.T) {
+	ms := store.NewMemoryStore()
+	srv := NewServerWithMultiTenant("", "/metrics", "/health", false, false, nil, "", "", false)
+	srv.SetAlertStore(ms)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/summary?namespace=team-b", nil)
+	req = req.WithContext(context.WithValue(req.Context(), tokenScopeKey{}, TokenScope{
+		Role:       RoleViewer,
+		Namespaces: []string{"team-a"},
+	}))
+	w := httptest.NewRecorder()
+	srv.handleSummary(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestHandleSummary_DefaultsToTwentyFourHourWindow(t *testing.T) {
+	now := time.Now().UTC()
+	mock := &mockAlertStore{
+		alerts: []types.Alert{
+			{ID: "recent", Timestamp: now, RuleID: "rule_001", Severity: types.SeverityWarning, Comm: "sh", Message: "m"},
+		},
+		healthy: true,
+	}
+	srv := newTestServer()
+	srv.SetAlertStore(mock)
+
+	w := httptest.NewRecorder()
+	srv.handleSummary(w, httptest.NewRequest(http.MethodGet, "/api/v1/summary", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var summary AlertSummary
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&summary))
+	assert.Equal(t, 1, summary.Total)
 }
 
 func TestBuildAlertSummaryEmpty(t *testing.T) {

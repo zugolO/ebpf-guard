@@ -48,6 +48,8 @@ type TuningExceptionResponse struct {
 // comm-based exception at all. Kept in sync with the field-name allowlists in
 // rule_loader.go: "comm" for syscalls, "proc.comm" everywhere else that
 // carries process enrichment.
+//
+//nolint:exhaustive // only syscall/network/file events carry a comm-bearing field usable in an exception condition; every other event type falls through to the default (unsupported).
 func commFieldForEventType(eventType types.EventType) (string, bool) {
 	switch eventType {
 	case types.EventSyscall:
@@ -155,6 +157,7 @@ func (s *Server) handleTuningExceptions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// #nosec G104 -- response encode error is not actionable once headers are written; other handlers in this file follow the same pattern
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 

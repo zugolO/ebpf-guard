@@ -2,7 +2,7 @@
   "use strict";
 
   const TOKEN_KEY = "ebpf-guard-token";
-  const state = { alerts: [], selectedId: null };
+  const state = { alerts: [], selectedId: null, incidents: [], selectedIncidentId: null };
 
   const el = (id) => document.getElementById(id);
 
@@ -138,6 +138,18 @@
     }
   }
 
+  // alertSortKey returns the timestamp that should govern feed ordering: for
+  // an aggregated alert (count > 1) that is last_seen, so a still-firing
+  // storm stays at the top of the feed instead of sinking to where its first
+  // occurrence landed (issue #307).
+  function alertSortKey(a) {
+    return a.last_seen || a.timestamp;
+  }
+
+  function sortAlertsByRecency(alerts) {
+    return alerts.slice().sort((a, b) => new Date(alertSortKey(b)) - new Date(alertSortKey(a)));
+  }
+
   function renderAlerts(alerts) {
     const container = el("alerts");
     container.innerHTML = "";
@@ -149,11 +161,15 @@
       const row = document.createElement("div");
       row.className = "alert-row" + (a.id === state.selectedId ? " selected" : "");
       row.dataset.id = a.id;
+      const countBadge = a.count > 1
+        ? `<span class="count-badge" title="Aggregated: ${a.count} occurrences">×${a.count}</span>`
+        : "";
       row.innerHTML = `
         <span class="sev-badge ${escapeHTML(a.severity)}">${escapeHTML(a.severity)}</span>
         <span class="rule" title="${escapeHTML(a.message)}">${escapeHTML(a.rule_id)}</span>
+        ${countBadge}
         <span class="comm">${escapeHTML(a.comm)}</span>
-        <span class="time">${fmtTime(a.timestamp)}</span>`;
+        <span class="time">${fmtTime(alertSortKey(a))}</span>`;
       row.addEventListener("click", () => selectAlert(a.id));
       container.appendChild(row);
     }
@@ -171,17 +187,48 @@
       r.classList.toggle("selected", r.dataset.id === id);
     });
 
+    const alert = state.alerts.find((a) => a.id === id);
     const detail = el("alert-detail");
     detail.innerHTML = "<h2>Details</h2><p class=\"muted\">Loading…</p>";
     try {
       const explanation = await api(`/api/v1/alerts/${encodeURIComponent(id)}/explain`);
-      renderDetail(explanation);
+      renderDetail(explanation, alert);
     } catch (err) {
       detail.innerHTML = `<h2>Details</h2><p class="muted">Could not load explanation: ${escapeHTML(err.message)}</p>`;
     }
   }
 
-  function renderDetail(exp) {
+  // durationBetween formats the span between two ISO timestamps as a compact
+  // "1h 12m" / "45s" string for the aggregation window display.
+  function durationBetween(a, b) {
+    const ms = Math.max(0, new Date(b) - new Date(a));
+    const totalSec = Math.round(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  // renderAggregation shows the "×N occurrences over a first_seen…last_seen
+  // window" callout for an aggregated alert, so an operator can tell a single
+  // hit apart from a storm that fired hundreds of times (issue #307). Alert
+  // rows carry these fields directly — no extra API call is needed.
+  function renderAggregation(alert) {
+    if (!alert || !(alert.count > 1)) return "";
+    const dur = durationBetween(alert.first_seen, alert.last_seen);
+    return `
+      <div class="detail-field">
+        <div class="label">Aggregation</div>
+        <div class="value">
+          <span class="count-badge">×${alert.count}</span>
+          ${fmtTime(alert.first_seen)} &rarr; ${fmtTime(alert.last_seen)} (${dur})
+        </div>
+      </div>`;
+  }
+
+  function renderDetail(exp, alert) {
     const detail = el("alert-detail");
     const mitre = exp.mitre || {};
     const mitigations = (exp.mitigations || [])
@@ -193,6 +240,7 @@
 
     detail.innerHTML = `
       <h2>Details</h2>
+      ${renderAggregation(alert)}
       <div class="detail-field">
         <div class="label">Summary</div>
         <div class="value">${escapeHTML(exp.summary)}</div>
@@ -235,7 +283,7 @@
       ]);
       setStatus(status.healthy ? "connected" : "degraded", status.healthy ? "ok" : "error");
       renderSummary(summary);
-      state.alerts = applyClientFilters(alerts || []);
+      state.alerts = sortAlertsByRecency(applyClientFilters(alerts || []));
       renderAlerts(state.alerts);
     } catch (err) {
       setStatus("error: " + err.message, "error");
@@ -244,6 +292,110 @@
       // isn't left staring at a bare "401 Unauthorized" string.
       if (err.status === 401) openTokenDialog();
     }
+  }
+
+  // --- Incidents tab (issue #307) -------------------------------------
+  // Surfaces /api/v1/incidents (already implemented server-side and already
+  // in the viewer-role allowlist) in the dashboard, which previously had no
+  // tab or link pointing at it.
+
+  function switchTab(name) {
+    for (const tab of ["alerts", "incidents"]) {
+      el("view-" + tab).classList.toggle("hidden", tab !== name);
+      el("tab-" + tab).classList.toggle("active", tab === name);
+    }
+    if (name === "incidents") refreshIncidents();
+  }
+
+  function renderIncidents(incidents) {
+    const container = el("incidents");
+    container.innerHTML = "";
+    if (incidents.length === 0) {
+      container.innerHTML = '<p class="muted">No incidents match the current filters.</p>';
+      return;
+    }
+    for (const inc of incidents) {
+      const row = document.createElement("div");
+      row.className = "alert-row" + (inc.id === state.selectedIncidentId ? " selected" : "");
+      row.dataset.id = inc.id;
+      row.innerHTML = `
+        <span class="sev-badge ${escapeHTML(inc.severity)}">${escapeHTML(inc.severity)}</span>
+        <span class="rule" title="${escapeHTML((inc.rule_ids || []).join(", "))}">${escapeHTML(inc.namespace || "(no namespace)")}</span>
+        <span class="count-badge" title="${inc.alert_count} alerts">×${inc.alert_count}</span>
+        <span class="comm">${escapeHTML(inc.status)}</span>
+        <span class="time">${fmtTime(inc.last_seen)}</span>`;
+      row.addEventListener("click", () => selectIncident(inc.id));
+      container.appendChild(row);
+    }
+  }
+
+  function selectIncident(id) {
+    state.selectedIncidentId = id;
+    document.querySelectorAll("#incidents .alert-row").forEach((r) => {
+      r.classList.toggle("selected", r.dataset.id === id);
+    });
+
+    const inc = state.incidents.find((i) => i.id === id);
+    const detail = el("incident-detail");
+    if (!inc) {
+      detail.innerHTML = "<h2>Incident</h2><p class=\"muted\">Not found.</p>";
+      return;
+    }
+    const dur = durationBetween(inc.first_seen, inc.last_seen);
+    const alertIds = (inc.alert_ids || [])
+      .map((id) => `<li>${escapeHTML(id)}</li>`)
+      .join("");
+    detail.innerHTML = `
+      <h2>Incident</h2>
+      <div class="detail-field">
+        <div class="label">Status</div>
+        <div class="value">${escapeHTML(inc.status)} — ${escapeHTML(inc.severity)}</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Namespace</div>
+        <div class="value">${escapeHTML(inc.namespace || "(none)")}</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Window</div>
+        <div class="value">${fmtTime(inc.first_seen)} &rarr; ${fmtTime(inc.last_seen)} (${dur})</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Rules involved</div>
+        <div class="value">${escapeHTML((inc.rule_ids || []).join(", "))}</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Alerts (${inc.alert_count})</div>
+        <ul class="mitigations">${alertIds}</ul>
+      </div>`;
+  }
+
+  async function refreshIncidents() {
+    const params = new URLSearchParams();
+    const status = el("inc-status").value;
+    const namespace = el("inc-namespace").value.trim();
+    if (status) params.set("status", status);
+    if (namespace) params.set("namespace", namespace);
+    const container = el("incidents");
+    container.innerHTML = "<p class=\"muted\">Loading…</p>";
+    try {
+      const incidents = await api("/api/v1/incidents?" + params.toString());
+      state.incidents = incidents || [];
+      renderIncidents(state.incidents);
+    } catch (err) {
+      container.innerHTML = `<p class="muted">Could not load incidents: ${escapeHTML(err.message)}</p>`;
+      if (err.status === 401) openTokenDialog();
+    }
+  }
+
+  function initTabs() {
+    for (const tab of ["alerts", "incidents"]) {
+      el("tab-" + tab).addEventListener("click", () => switchTab(tab));
+    }
+    el("inc-refresh-btn").addEventListener("click", refreshIncidents);
+    el("inc-status").addEventListener("change", refreshIncidents);
+    el("inc-namespace").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") refreshIncidents();
+    });
   }
 
   function openTokenDialog() {
@@ -270,6 +422,7 @@
 
   function init() {
     initTokenDialog();
+    initTabs();
     el("refresh-btn").addEventListener("click", refresh);
     ["f-severity", "f-since"].forEach((id) =>
       el(id).addEventListener("change", refresh)
@@ -287,6 +440,6 @@
   // Export the pure string helpers for unit testing under Node. Guarded by a
   // typeof check so this is a no-op in the browser (there is no `module`).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { escapeHTML, safeURL };
+    module.exports = { escapeHTML, safeURL, durationBetween, alertSortKey };
   }
 })();

@@ -87,7 +87,42 @@ main {
 .btn { background: var(--accent); border: 1px solid var(--accent); color: #0d1117; font-weight: 600; }
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); margin-left: auto; }
 
+.hidden { display: none !important; }
+
+.tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); }
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 8px 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+
 .content { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
+
+.incident-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 10px; }
+.incident-filters label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.incident-filters input, .incident-filters select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.count-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(88,166,255,.15);
+  color: var(--accent);
+}
 
 .alert-list { display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow-y: auto; }
 .alert-row {

@@ -127,6 +127,75 @@ jobs:
           ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.spdx.json.cosign.bundle
           ebpf-guard-${{ matrix.os }}-${{ matrix.arch }}.cyclonedx.json
 
+  package:
+    name: Build deb/rpm Packages
+    runs-on: ubuntu-latest
+    needs: [build]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+      with:
+        cosign-release: 'v2.2.3'
+
+    - name: Get version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    - name: Download binary artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ebpf-guard-linux-${{ matrix.arch }}
+        path: build
+
+    - name: Rename to expected layout
+      run: |
+        mkdir -p build-renamed
+        mv build/ebpf-guard-linux-${{ matrix.arch }} build-renamed/ebpf-guard-linux-${{ matrix.arch }}
+        chmod 755 build-renamed/ebpf-guard-linux-${{ matrix.arch }}
+
+    - name: Build deb + rpm packages
+      env:
+        VERSION: ${{ steps.get_version.outputs.VERSION }}
+        ARCH: ${{ matrix.arch }}
+        BIN_PATH: build-renamed/ebpf-guard-linux-${{ matrix.arch }}
+      run: |
+        mkdir -p dist
+        go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0 package \
+          --config packaging/nfpm.yaml --packager deb --target dist/
+        go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0 package \
+          --config packaging/nfpm.yaml --packager rpm --target dist/
+
+    - name: Checksum packages
+      run: |
+        cd dist
+        for f in *.deb *.rpm; do sha256sum "$f" > "$f.sha256"; done
+
+    - name: Sign packages with cosign
+      env:
+        COSIGN_EXPERIMENTAL: "1"
+      run: |
+        cd dist
+        for f in *.deb *.rpm; do
+          cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
+        done
+
+    - name: Upload package artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ebpf-guard-packages-${{ matrix.arch }}
+        path: dist/*
+
   docker:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
@@ -245,7 +314,7 @@ jobs:
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, docker, helm, provenance]
+    needs: [build, package, docker, helm, provenance]
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -265,6 +334,13 @@ jobs:
         git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD~1)..HEAD >> $GITHUB_OUTPUT
         echo "" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
+
+    # nfpm package filenames use the version without the leading "v" (the
+    # `package` job strips it before invoking nfpm), so release-note links
+    # to .deb/.rpm assets need that same stripped form.
+    - name: Get package version
+      id: pkg_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
     - name: Create Release
       uses: softprops/action-gh-release@v2
@@ -311,6 +387,36 @@ jobs:
           Software Bill of Materials (SPDX and CycloneDX formats) are attached to this release.
           SBOM files are also signed — verify with `cosign verify-blob` using the `.cosign.bundle` file.
 
+          ## deb/rpm Packages (amd64 + arm64)
+          Packages carry the binary, a hardened systemd unit, the built-in rule
+          set, and config examples — apt/dnf manage install, upgrade, and clean
+          removal for you.
+
+          ```bash
+          # Debian/Ubuntu
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ebpf-guard_${{ steps.pkg_version.outputs.VERSION }}_amd64.deb
+          sudo apt install ./ebpf-guard_${{ steps.pkg_version.outputs.VERSION }}_amd64.deb
+          sudo systemctl start ebpf-guard
+
+          # RHEL/Fedora/Rocky
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ebpf-guard-${{ steps.pkg_version.outputs.VERSION }}-1.x86_64.rpm
+          sudo dnf install ./ebpf-guard-${{ steps.pkg_version.outputs.VERSION }}-1.x86_64.rpm
+          sudo systemctl start ebpf-guard
+          ```
+
+          Use the `arm64`/`aarch64` package names for ARM VPS hosts (Hetzner
+          CAX, Oracle Ampere, AWS Graviton).
+
+          ### Verify a package (cosign keyless)
+          ```bash
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ebpf-guard_${{ steps.pkg_version.outputs.VERSION }}_amd64.deb.cosign.bundle
+          cosign verify-blob \
+            --bundle ebpf-guard_${{ steps.pkg_version.outputs.VERSION }}_amd64.deb.cosign.bundle \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            ebpf-guard_${{ steps.pkg_version.outputs.VERSION }}_amd64.deb
+          ```
+
           ## Helm Chart
           ```bash
           helm install ebpf-guard oci://ghcr.io/${{ github.repository_owner }}/charts/ebpf-guard --version ${{ github.ref_name }}
@@ -328,5 +434,13 @@ jobs:
           artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.spdx.json
           artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.spdx.json.cosign.bundle
           artifacts/ebpf-guard-linux-arm64/ebpf-guard-linux-arm64.cyclonedx.json
+          artifacts/ebpf-guard-packages-amd64/*.deb
+          artifacts/ebpf-guard-packages-amd64/*.rpm
+          artifacts/ebpf-guard-packages-amd64/*.sha256
+          artifacts/ebpf-guard-packages-amd64/*.cosign.bundle
+          artifacts/ebpf-guard-packages-arm64/*.deb
+          artifacts/ebpf-guard-packages-arm64/*.rpm
+          artifacts/ebpf-guard-packages-arm64/*.sha256
+          artifacts/ebpf-guard-packages-arm64/*.cosign.bundle
         draft: false
         prerelease: ${{ contains(github.ref_name, '-') }}

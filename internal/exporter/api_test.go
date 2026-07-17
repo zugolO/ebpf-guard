@@ -473,6 +473,13 @@ func TestParseQueryFilters(t *testing.T) {
 				Namespace: "default",
 			},
 		},
+		{
+			name:  "with comm",
+			query: "comm=nginx",
+			expected: store.QueryFilters{
+				Comm: "nginx",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -485,6 +492,7 @@ func TestParseQueryFilters(t *testing.T) {
 			assert.Equal(t, tt.expected.PIDs, filters.PIDs)
 			assert.Equal(t, tt.expected.PodName, filters.PodName)
 			assert.Equal(t, tt.expected.Namespace, filters.Namespace)
+			assert.Equal(t, tt.expected.Comm, filters.Comm)
 		})
 	}
 }

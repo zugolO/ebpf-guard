@@ -142,6 +142,24 @@ func TestCPUWatcher_EscalateAndRecover(t *testing.T) {
 	assert.Equal(t, 1.0, bpf.GetSamplingRate("network"))
 }
 
+func TestCPUWatcher_PressurePercent(t *testing.T) {
+	cfg := CPUConfig{CheckInterval: time.Second, FileShedThreshold: 90, AllShedThreshold: 95, RecoveryThreshold: 10, WindowSize: 2}
+	w, fc := newTestWatcher(t, cfg, nil)
+
+	assert.Equal(t, 0.0, w.PressurePercent(), "no samples yet")
+
+	w.checkCPU() // primes baseline only
+	assert.Equal(t, 0.0, w.PressurePercent())
+
+	fc.stepFor(20, time.Second)
+	w.checkCPU()
+	assert.InDelta(t, 20.0, w.PressurePercent(), 0.01)
+
+	fc.stepFor(40, time.Second)
+	w.checkCPU()
+	assert.InDelta(t, 30.0, w.PressurePercent(), 0.01) // mean of last 2 samples (window=2)
+}
+
 func TestCPUWatcher_Hysteresis_NoFlapBetweenThresholds(t *testing.T) {
 	bpf := newMockBPFController()
 	cfg := CPUConfig{

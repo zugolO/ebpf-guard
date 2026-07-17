@@ -2,7 +2,7 @@
   "use strict";
 
   const TOKEN_KEY = "ebpf-guard-token";
-  const state = { alerts: [], selectedId: null };
+  const state = { alerts: [], selectedId: null, incidents: [], selectedIncidentId: null };
 
   const el = (id) => document.getElementById(id);
 
@@ -18,11 +18,12 @@
     }
   }
 
-  async function api(path) {
+  async function api(path, opts) {
     const headers = {};
     const token = getToken();
     if (token) headers["Authorization"] = "Bearer " + token;
-    const res = await fetch(path, { headers });
+    if (opts && opts.body) headers["Content-Type"] = "application/json";
+    const res = await fetch(path, Object.assign({ headers }, opts));
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
       const err = new Error(`${res.status} ${text}`);
@@ -138,6 +139,18 @@
     }
   }
 
+  // alertSortKey returns the timestamp that should govern feed ordering: for
+  // an aggregated alert (count > 1) that is last_seen, so a still-firing
+  // storm stays at the top of the feed instead of sinking to where its first
+  // occurrence landed (issue #307).
+  function alertSortKey(a) {
+    return a.last_seen || a.timestamp;
+  }
+
+  function sortAlertsByRecency(alerts) {
+    return alerts.slice().sort((a, b) => new Date(alertSortKey(b)) - new Date(alertSortKey(a)));
+  }
+
   function renderAlerts(alerts) {
     const container = el("alerts");
     container.innerHTML = "";
@@ -149,11 +162,15 @@
       const row = document.createElement("div");
       row.className = "alert-row" + (a.id === state.selectedId ? " selected" : "");
       row.dataset.id = a.id;
+      const countBadge = a.count > 1
+        ? `<span class="count-badge" title="Aggregated: ${a.count} occurrences">×${a.count}</span>`
+        : "";
       row.innerHTML = `
         <span class="sev-badge ${escapeHTML(a.severity)}">${escapeHTML(a.severity)}</span>
         <span class="rule" title="${escapeHTML(a.message)}">${escapeHTML(a.rule_id)}</span>
+        ${countBadge}
         <span class="comm">${escapeHTML(a.comm)}</span>
-        <span class="time">${fmtTime(a.timestamp)}</span>`;
+        <span class="time">${fmtTime(alertSortKey(a))}</span>`;
       row.addEventListener("click", () => selectAlert(a.id));
       container.appendChild(row);
     }
@@ -171,17 +188,48 @@
       r.classList.toggle("selected", r.dataset.id === id);
     });
 
+    const alert = state.alerts.find((a) => a.id === id);
     const detail = el("alert-detail");
     detail.innerHTML = "<h2>Details</h2><p class=\"muted\">Loading…</p>";
     try {
       const explanation = await api(`/api/v1/alerts/${encodeURIComponent(id)}/explain`);
-      renderDetail(explanation);
+      renderDetail(explanation, alert);
     } catch (err) {
       detail.innerHTML = `<h2>Details</h2><p class="muted">Could not load explanation: ${escapeHTML(err.message)}</p>`;
     }
   }
 
-  function renderDetail(exp) {
+  // durationBetween formats the span between two ISO timestamps as a compact
+  // "1h 12m" / "45s" string for the aggregation window display.
+  function durationBetween(a, b) {
+    const ms = Math.max(0, new Date(b) - new Date(a));
+    const totalSec = Math.round(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  // renderAggregation shows the "×N occurrences over a first_seen…last_seen
+  // window" callout for an aggregated alert, so an operator can tell a single
+  // hit apart from a storm that fired hundreds of times (issue #307). Alert
+  // rows carry these fields directly — no extra API call is needed.
+  function renderAggregation(alert) {
+    if (!alert || !(alert.count > 1)) return "";
+    const dur = durationBetween(alert.first_seen, alert.last_seen);
+    return `
+      <div class="detail-field">
+        <div class="label">Aggregation</div>
+        <div class="value">
+          <span class="count-badge">×${alert.count}</span>
+          ${fmtTime(alert.first_seen)} &rarr; ${fmtTime(alert.last_seen)} (${dur})
+        </div>
+      </div>`;
+  }
+
+  function renderDetail(exp, alert) {
     const detail = el("alert-detail");
     const mitre = exp.mitre || {};
     const mitigations = (exp.mitigations || [])
@@ -193,6 +241,7 @@
 
     detail.innerHTML = `
       <h2>Details</h2>
+      ${renderAggregation(alert)}
       <div class="detail-field">
         <div class="label">Summary</div>
         <div class="value">${escapeHTML(exp.summary)}</div>
@@ -221,6 +270,159 @@
         <div class="label">References</div>
         ${references}
       </div>` : ""}
+      ${renderFeedbackSection(alert)}
+    `;
+    if (alert) initFeedbackHandlers(alert);
+  }
+
+  // --- False-positive feedback + exception generation (issue #308) -----
+  // Closes the loop "saw noise in the dashboard → suppressed it" without a
+  // curl command: the operator clicks a verdict, gets a ready-to-paste (or
+  // one-click-save) exception, instead of hand-writing local-tuning.yaml.
+
+  function renderFeedbackSection(alert) {
+    if (!alert) return "";
+    return `
+      <div class="detail-field feedback-section">
+        <div class="label">Feedback</div>
+        <div class="feedback-buttons">
+          <button class="btn-ghost" id="fb-fp-btn" type="button">False positive</button>
+          <button class="btn-ghost" id="fb-tp-btn" type="button">True positive</button>
+        </div>
+        <div id="fb-result" class="fb-result"></div>
+      </div>`;
+  }
+
+  async function submitFeedback(alert, verdict) {
+    const resultEl = el("fb-result");
+    resultEl.innerHTML = '<p class="muted">Submitting…</p>';
+    try {
+      await api(`/api/v1/alerts/${encodeURIComponent(alert.id)}/feedback`, {
+        method: "POST",
+        body: JSON.stringify({ verdict }),
+      });
+    } catch (err) {
+      resultEl.innerHTML = `<p class="muted">Could not submit feedback: ${escapeHTML(err.message)}</p>`;
+      if (err.status === 401) openTokenDialog();
+      return;
+    }
+
+    if (verdict !== "false_positive") {
+      resultEl.innerHTML = '<p class="muted">Recorded. Thanks.</p>';
+      return;
+    }
+    await generateException(alert, resultEl);
+  }
+
+  async function generateException(alert, resultEl) {
+    resultEl.innerHTML = '<p class="muted">Generating exception…</p>';
+    const body = {
+      rule_id: alert.rule_id,
+      name: "fp_" + (alert.comm || "unknown") + "_" + alert.id.slice(0, 8),
+      comm: alert.comm || "",
+      persist: false,
+    };
+    let resp;
+    try {
+      resp = await api("/api/v1/tuning/exceptions", { method: "POST", body: JSON.stringify(body) });
+    } catch (err) {
+      resultEl.innerHTML = `<p class="muted">Recorded as false positive. Exception could not be generated: ${escapeHTML(err.message)}</p>`;
+      return;
+    }
+
+    resultEl.innerHTML = `
+      <p class="muted">Recorded as false positive. Paste into local-tuning.yaml, or save it directly:</p>
+      <pre class="exception-yaml">${escapeHTML(resp.yaml)}</pre>
+      <div class="feedback-buttons">
+        <button class="btn-ghost" id="fb-copy-btn" type="button">Copy YAML</button>
+        <button class="btn" id="fb-save-btn" type="button">Save to tuning file</button>
+      </div>
+      <div id="fb-save-result"></div>`;
+
+    el("fb-copy-btn").addEventListener("click", () => {
+      navigator.clipboard.writeText(resp.yaml).catch(() => {});
+    });
+    el("fb-save-btn").addEventListener("click", async () => {
+      const saveResult = el("fb-save-result");
+      saveResult.textContent = "Saving…";
+      try {
+        const saved = await api("/api/v1/tuning/exceptions", {
+          method: "POST",
+          body: JSON.stringify({ ...body, persist: true }),
+        });
+        saveResult.textContent = saved.persisted
+          ? "Saved — rules will hot-reload the new exception."
+          : "Not persisted (no local-tuning path configured on the agent). Use the snippet above.";
+      } catch (err) {
+        saveResult.textContent = err.status === 403
+          ? "Admin token required to save directly; use the snippet above instead."
+          : "Save failed: " + err.message;
+      }
+    });
+  }
+
+  function initFeedbackHandlers(alert) {
+    el("fb-fp-btn").addEventListener("click", () => submitFeedback(alert, "false_positive"));
+    el("fb-tp-btn").addEventListener("click", () => submitFeedback(alert, "true_positive"));
+  }
+
+  // --- Agent health widget (issue #309) ---------------------------------
+  // Surfaces load-shedding, drift-learning progress, and sampling rates on
+  // the dashboard so a VPS operator without Prometheus/Grafana can tell "no
+  // alerts because nothing happened" apart from "no alerts because the
+  // agent degraded visibility." Sourced entirely from /api/v1/status —
+  // no /metrics parsing on the client.
+
+  const PRESSURE_LEVEL_LABEL = { 0: "normal", 1: "file sampling reduced", 2: "file+syscall+network reduced" };
+
+  function healthDegradedReason(health) {
+    if (!health) return "";
+    if (health.visibility_reduced) {
+      return `Visibility reduced: ${PRESSURE_LEVEL_LABEL[health.cpu_pressure_level] || "degraded"} ` +
+        `(CPU ${Math.round(health.cpu_pressure_percent)}% of one core).`;
+    }
+    return "";
+  }
+
+  function renderHealth(status) {
+    const body = el("health-body");
+    const health = status.health;
+    if (!health) {
+      body.innerHTML = '<p class="muted">Agent health details are not available on this build.</p>';
+      return;
+    }
+
+    const rates = Object.entries(health.sampling_rates || {})
+      .map(([name, rate]) => `<li><span class="name">${escapeHTML(name)}</span><span class="count">${Math.round(rate * 100)}%</span></li>`)
+      .join("");
+
+    body.innerHTML = `
+      <div class="health-row">
+        <div class="health-item">
+          <div class="label">CPU pressure</div>
+          <div class="value ${health.visibility_reduced ? "warn" : ""}">
+            ${escapeHTML(PRESSURE_LEVEL_LABEL[health.cpu_pressure_level] || "unknown")}
+            (${Math.round(health.cpu_pressure_percent)}% of one core)
+          </div>
+        </div>
+        <div class="health-item">
+          <div class="label">Hardware profile</div>
+          <div class="value">${escapeHTML(health.hardware_profile || "unknown")}</div>
+        </div>
+        <div class="health-item">
+          <div class="label">Drift-baseline learning</div>
+          <div class="value">
+            ${health.drift_learning_workloads} learning / ${health.drift_profiles_active} tracked
+            ${health.drift_stuck_workloads > 0 ? `<span class="warn">(${health.drift_stuck_workloads} stuck)</span>` : ""}
+          </div>
+        </div>
+      </div>
+      ${rates ? `
+      <div class="detail-field">
+        <div class="label">Effective sampling rates</div>
+        <ul class="bar-list">${rates}</ul>
+      </div>` : ""}
+      ${health.visibility_reduced ? `<p class="warn">${escapeHTML(healthDegradedReason(health))}</p>` : ""}
     `;
   }
 
@@ -233,9 +435,14 @@
         api("/api/v1/summary?" + buildSummaryQuery(filters)),
         api("/api/v1/alerts?" + buildQuery(filters)),
       ]);
+      const degradedReason = !status.healthy
+        ? "one or more collectors unhealthy"
+        : healthDegradedReason(status.health);
       setStatus(status.healthy ? "connected" : "degraded", status.healthy ? "ok" : "error");
+      el("status").title = degradedReason || "";
       renderSummary(summary);
-      state.alerts = applyClientFilters(alerts || []);
+      renderHealth(status);
+      state.alerts = sortAlertsByRecency(applyClientFilters(alerts || []));
       renderAlerts(state.alerts);
     } catch (err) {
       setStatus("error: " + err.message, "error");
@@ -244,6 +451,110 @@
       // isn't left staring at a bare "401 Unauthorized" string.
       if (err.status === 401) openTokenDialog();
     }
+  }
+
+  // --- Incidents tab (issue #307) -------------------------------------
+  // Surfaces /api/v1/incidents (already implemented server-side and already
+  // in the viewer-role allowlist) in the dashboard, which previously had no
+  // tab or link pointing at it.
+
+  function switchTab(name) {
+    for (const tab of ["alerts", "incidents"]) {
+      el("view-" + tab).classList.toggle("hidden", tab !== name);
+      el("tab-" + tab).classList.toggle("active", tab === name);
+    }
+    if (name === "incidents") refreshIncidents();
+  }
+
+  function renderIncidents(incidents) {
+    const container = el("incidents");
+    container.innerHTML = "";
+    if (incidents.length === 0) {
+      container.innerHTML = '<p class="muted">No incidents match the current filters.</p>';
+      return;
+    }
+    for (const inc of incidents) {
+      const row = document.createElement("div");
+      row.className = "alert-row" + (inc.id === state.selectedIncidentId ? " selected" : "");
+      row.dataset.id = inc.id;
+      row.innerHTML = `
+        <span class="sev-badge ${escapeHTML(inc.severity)}">${escapeHTML(inc.severity)}</span>
+        <span class="rule" title="${escapeHTML((inc.rule_ids || []).join(", "))}">${escapeHTML(inc.namespace || "(no namespace)")}</span>
+        <span class="count-badge" title="${inc.alert_count} alerts">×${inc.alert_count}</span>
+        <span class="comm">${escapeHTML(inc.status)}</span>
+        <span class="time">${fmtTime(inc.last_seen)}</span>`;
+      row.addEventListener("click", () => selectIncident(inc.id));
+      container.appendChild(row);
+    }
+  }
+
+  function selectIncident(id) {
+    state.selectedIncidentId = id;
+    document.querySelectorAll("#incidents .alert-row").forEach((r) => {
+      r.classList.toggle("selected", r.dataset.id === id);
+    });
+
+    const inc = state.incidents.find((i) => i.id === id);
+    const detail = el("incident-detail");
+    if (!inc) {
+      detail.innerHTML = "<h2>Incident</h2><p class=\"muted\">Not found.</p>";
+      return;
+    }
+    const dur = durationBetween(inc.first_seen, inc.last_seen);
+    const alertIds = (inc.alert_ids || [])
+      .map((id) => `<li>${escapeHTML(id)}</li>`)
+      .join("");
+    detail.innerHTML = `
+      <h2>Incident</h2>
+      <div class="detail-field">
+        <div class="label">Status</div>
+        <div class="value">${escapeHTML(inc.status)} — ${escapeHTML(inc.severity)}</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Namespace</div>
+        <div class="value">${escapeHTML(inc.namespace || "(none)")}</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Window</div>
+        <div class="value">${fmtTime(inc.first_seen)} &rarr; ${fmtTime(inc.last_seen)} (${dur})</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Rules involved</div>
+        <div class="value">${escapeHTML((inc.rule_ids || []).join(", "))}</div>
+      </div>
+      <div class="detail-field">
+        <div class="label">Alerts (${inc.alert_count})</div>
+        <ul class="mitigations">${alertIds}</ul>
+      </div>`;
+  }
+
+  async function refreshIncidents() {
+    const params = new URLSearchParams();
+    const status = el("inc-status").value;
+    const namespace = el("inc-namespace").value.trim();
+    if (status) params.set("status", status);
+    if (namespace) params.set("namespace", namespace);
+    const container = el("incidents");
+    container.innerHTML = "<p class=\"muted\">Loading…</p>";
+    try {
+      const incidents = await api("/api/v1/incidents?" + params.toString());
+      state.incidents = incidents || [];
+      renderIncidents(state.incidents);
+    } catch (err) {
+      container.innerHTML = `<p class="muted">Could not load incidents: ${escapeHTML(err.message)}</p>`;
+      if (err.status === 401) openTokenDialog();
+    }
+  }
+
+  function initTabs() {
+    for (const tab of ["alerts", "incidents"]) {
+      el("tab-" + tab).addEventListener("click", () => switchTab(tab));
+    }
+    el("inc-refresh-btn").addEventListener("click", refreshIncidents);
+    el("inc-status").addEventListener("change", refreshIncidents);
+    el("inc-namespace").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") refreshIncidents();
+    });
   }
 
   function openTokenDialog() {
@@ -270,6 +581,10 @@
 
   function init() {
     initTokenDialog();
+    initTabs();
+    el("status").addEventListener("click", () => {
+      el("health-card").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
     el("refresh-btn").addEventListener("click", refresh);
     ["f-severity", "f-since"].forEach((id) =>
       el(id).addEventListener("change", refresh)
@@ -287,6 +602,6 @@
   // Export the pure string helpers for unit testing under Node. Guarded by a
   // typeof check so this is a no-op in the browser (there is no `module`).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { escapeHTML, safeURL };
+    module.exports = { escapeHTML, safeURL, durationBetween, alertSortKey };
   }
 })();

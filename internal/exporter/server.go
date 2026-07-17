@@ -73,6 +73,20 @@ type Server struct {
 	// corsAllowedOrigins specifies which origins may access the OpenAPI spec via CORS.
 	// An empty list means same-origin only. Contains ["*"] by default.
 	corsAllowedOrigins []string
+
+	// localTuningPath is the local-tuning overlay YAML file that
+	// POST /api/v1/tuning/exceptions appends generated exceptions to
+	// (see correlator.TuningOverlay). Empty disables the write path; the
+	// endpoint still returns a copyable YAML snippet either way.
+	localTuningPath string
+	// tuningWriteMu serializes writes to localTuningPath so two concurrent
+	// "save exception" requests cannot race and drop one another's entry.
+	tuningWriteMu sync.Mutex
+
+	// agentHealthFn supplies the agent-health snapshot (CPU pressure,
+	// sampling rates, drift-learning progress, hardware profile) surfaced by
+	// GET /api/v1/status. Optional; nil means the status response omits it.
+	agentHealthFn func() AgentHealth
 }
 
 // NewServer creates a new HTTP server for metrics and health.
@@ -360,6 +374,15 @@ func (s *Server) SetIncidentTracker(t *correlator.IncidentTracker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.incidentTracker = t
+}
+
+// SetLocalTuningPath wires the local-tuning overlay YAML file that
+// POST /api/v1/tuning/exceptions persists generated exceptions to. Empty
+// disables persistence; the endpoint still returns a copyable YAML snippet.
+func (s *Server) SetLocalTuningPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.localTuningPath = path
 }
 
 // SetExplainer wires an Explainer so GET /api/v1/alerts/{id}/explain is served.

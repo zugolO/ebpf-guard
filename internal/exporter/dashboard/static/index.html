@@ -37,6 +37,13 @@
       </div>
     </section>
 
+    <section class="card" id="health-card">
+      <h2>Agent health</h2>
+      <div id="health-body" class="health-body">
+        <p class="muted">Loading…</p>
+      </div>
+    </section>
+
     <section class="filters card">
       <label>Severity
         <select id="f-severity">
@@ -61,7 +68,12 @@
       <button id="refresh-btn" class="btn" type="button">Refresh</button>
     </section>
 
-    <section class="content">
+    <nav class="tabs">
+      <button class="tab-btn active" id="tab-alerts" type="button" data-tab="alerts">Alerts</button>
+      <button class="tab-btn" id="tab-incidents" type="button" data-tab="incidents">Incidents</button>
+    </nav>
+
+    <section class="content" id="view-alerts">
       <div class="card alert-feed">
         <h2>Alerts</h2>
         <div id="alerts" class="alert-list"></div>
@@ -69,6 +81,30 @@
       <div class="card alert-detail" id="alert-detail">
         <h2>Details</h2>
         <p class="muted">Select an alert to see its explanation and MITRE ATT&amp;CK mapping.</p>
+      </div>
+    </section>
+
+    <section class="content hidden" id="view-incidents">
+      <div class="card incident-feed">
+        <h2>Incidents</h2>
+        <div class="incident-filters">
+          <label>Status
+            <select id="inc-status">
+              <option value="">any</option>
+              <option value="open">open</option>
+              <option value="closed">closed</option>
+            </select>
+          </label>
+          <label>Namespace
+            <input id="inc-namespace" type="text" placeholder="production">
+          </label>
+          <button id="inc-refresh-btn" class="btn" type="button">Refresh</button>
+        </div>
+        <div id="incidents" class="alert-list"></div>
+      </div>
+      <div class="card alert-detail" id="incident-detail">
+        <h2>Incident</h2>
+        <p class="muted">Select an incident to see its grouped alerts.</p>
       </div>
     </section>
   </main>

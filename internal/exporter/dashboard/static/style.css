@@ -27,7 +27,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .topbar h1 { font-size: 16px; margin: 0; }
-.status { color: var(--muted); font-size: 12px; }
+.status { color: var(--muted); font-size: 12px; cursor: pointer; }
 .status.ok { color: #3fb950; }
 .status.error { color: var(--critical); }
 
@@ -87,7 +87,47 @@ main {
 .btn { background: var(--accent); border: 1px solid var(--accent); color: #0d1117; font-weight: 600; }
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); margin-left: auto; }
 
+.hidden { display: none !important; }
+
+.health-row { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 10px; }
+.health-item .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+.health-item .value { font-size: 13px; }
+.warn { color: var(--warning); }
+
+.tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); }
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 8px 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tab-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+
 .content { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
+
+.incident-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 10px; }
+.incident-filters label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.incident-filters input, .incident-filters select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.count-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(88,166,255,.15);
+  color: var(--accent);
+}
 
 .alert-list { display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow-y: auto; }
 .alert-row {
@@ -116,6 +156,19 @@ main {
 .mitigations { margin: 0; padding-left: 18px; }
 .mitre-link { display: inline-block; margin-top: 4px; color: var(--accent); text-decoration: none; font-size: 12px; }
 .mitre-link:hover { text-decoration: underline; }
+
+.feedback-section .feedback-buttons { display: flex; gap: 8px; margin: 6px 0; }
+.feedback-section .btn-ghost, .feedback-section .btn { margin-left: 0; }
+.fb-result { font-size: 12px; }
+.exception-yaml {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
 
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 dialog::backdrop { background: rgba(0,0,0,.5); }

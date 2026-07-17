@@ -181,6 +181,7 @@ func NewServerWithMultiTenant(bindAddress, metricsPath, healthPath string, enabl
 			handler = MultiTenantRBACMiddleware(all)(mux)
 		}
 	}
+	handler = s.corsMiddleware(handler)
 
 	s.server = &http.Server{
 		Addr:         bindAddress,
@@ -259,6 +260,7 @@ func NewServerWithRBAC(bindAddress, metricsPath, healthPath string, enablePprof,
 			slog.Bool("admin_role", adminToken != ""))
 		handler = RBACMiddleware(viewerToken, adminToken)(mux)
 	}
+	handler = s.corsMiddleware(handler)
 
 	s.server = &http.Server{
 		Addr:         bindAddress,
@@ -603,9 +605,13 @@ func (s *Server) SetBPFAttached(attached bool) {
 	s.mu.Unlock()
 }
 
-// SetCORSAllowedOrigins configures the CORS allowlist for the OpenAPI spec
-// endpoint (/api/openapi.yaml). An empty list means same-origin only (no CORS
-// header). Include "*" to allow any origin (backward-compatible default).
+// SetCORSAllowedOrigins configures the CORS allowlist applied to the OpenAPI
+// spec endpoint (/api/openapi.yaml) and to the read-only /api/v1/* endpoints
+// (status, summary, alerts, incidents, rules, feedback) — the latter lets a
+// fleet dashboard on one agent's origin poll another agent directly from the
+// browser (issue #312). Write endpoints never receive CORS headers regardless
+// of this setting. An empty list means same-origin only (no CORS header).
+// Include "*" to allow any origin (backward-compatible default).
 func (s *Server) SetCORSAllowedOrigins(origins []string) {
 	s.mu.Lock()
 	s.corsAllowedOrigins = origins

@@ -80,6 +80,7 @@
     <nav class="tabs">
       <button class="tab-btn active" id="tab-alerts" type="button" data-tab="alerts">Alerts</button>
       <button class="tab-btn" id="tab-incidents" type="button" data-tab="incidents">Incidents</button>
+      <button class="tab-btn" id="tab-fleet" type="button" data-tab="fleet">Fleet</button>
     </nav>
 
     <section class="content" id="view-alerts">
@@ -114,6 +115,31 @@
       <div class="card alert-detail" id="incident-detail">
         <h2>Incident</h2>
         <p class="muted">Select an incident to see its grouped alerts.</p>
+      </div>
+    </section>
+
+    <section class="content-full hidden" id="view-fleet">
+      <div class="card">
+        <h2>Agents</h2>
+        <p class="muted">This node is always included. Add other agents (URL + their own bearer token) to see the whole fleet in one place. Tokens are stored only in this browser, per agent.</p>
+        <form id="fleet-add-form" class="fleet-add-form">
+          <input id="fleet-add-name" type="text" placeholder="name (e.g. vps-2)" required>
+          <input id="fleet-add-url" type="text" placeholder="https://vps-2.example.com:19090" required>
+          <input id="fleet-add-token" type="password" placeholder="bearer token" autocomplete="off">
+          <button type="submit" class="btn">Add agent</button>
+        </form>
+        <div id="fleet-agents-list" class="fleet-agents-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>Fleet summary</h2>
+        <button id="fleet-refresh-btn" class="btn-ghost" type="button">Refresh fleet</button>
+        <div id="fleet-nodes" class="fleet-nodes"></div>
+      </div>
+
+      <div class="card">
+        <h2>Critical alerts (all nodes)</h2>
+        <div id="fleet-critical" class="alert-list"></div>
       </div>
     </section>
   </main>

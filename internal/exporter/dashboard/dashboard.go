@@ -13,10 +13,15 @@ import (
 var assets embed.FS
 
 // csp is the Content-Security-Policy applied to every dashboard response.
-// Only same-origin resources are allowed; no inline scripts, no CDNs.
+// Only same-origin resources are allowed for scripts/styles/fonts; no inline
+// scripts, no CDNs. connect-src additionally allows http(s) so the fleet view
+// (issue #312) can poll operator-added agent URLs — those are plain host:port
+// addresses the operator typed in, not third-party content, and the agent's
+// own CORS allowlist (server.cors_allowed_origins) still gates whether the
+// response is actually readable cross-origin.
 const csp = "default-src 'self'; " +
 	"script-src 'self'; " +
-	"connect-src 'self'; " +
+	"connect-src 'self' http: https:; " +
 	"style-src 'self'; " +
 	"img-src 'self' data:; " +
 	"font-src 'self'; " +

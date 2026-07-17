@@ -859,28 +859,7 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
 // CORS is restricted to the configured allowlist (default: "*" for backward compat).
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
-
-	origin := r.Header.Get("Origin")
-	s.mu.RLock()
-	origins := s.corsAllowedOrigins
-	s.mu.RUnlock()
-
-	if len(origins) > 0 && origin != "" {
-		for _, allowed := range origins {
-			if allowed == "*" {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-				break
-			}
-			if allowed == origin {
-				// Reflect the specific origin and add Vary: Origin to prevent
-				// proxy cache poisoning when responses differ by origin.
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
-				break
-			}
-		}
-	}
-
+	s.applyCORSHeaders(w, r)
 	w.Write(apispec.OpenAPISpec) //nolint:errcheck
 }
 

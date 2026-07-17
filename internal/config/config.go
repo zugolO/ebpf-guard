@@ -138,8 +138,12 @@ type ServerConfig struct {
 	ShutdownDrainEnforcement time.Duration `mapstructure:"shutdown_drain_enforcement"`
 	// ShutdownDrainRego caps the time spent draining async Rego evaluation workers during shutdown. Default: 5s.
 	ShutdownDrainRego time.Duration `mapstructure:"shutdown_drain_rego"`
-	// CORSAllowedOrigins lists the origins allowed to access the OpenAPI spec via CORS.
-	// Include "*" to allow any origin (backward-compatible default).
+	// CORSAllowedOrigins lists the origins allowed to access the OpenAPI spec and
+	// the read-only /api/v1/* endpoints (status, summary, alerts, incidents,
+	// rules, feedback) via CORS. This is what lets the dashboard's Fleet tab
+	// (issue #312) on one agent poll another agent's data directly from the
+	// browser. Write endpoints never receive CORS headers regardless of this
+	// setting. Include "*" to allow any origin (backward-compatible default).
 	// An empty list means same-origin only (no CORS header).
 	// Example: ["https://docs.mydomain.com", "https://dev.mydomain.com"]
 	CORSAllowedOrigins []string `mapstructure:"cors_allowed_origins"`

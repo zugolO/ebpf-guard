@@ -272,6 +272,17 @@ func (s *OpenSearchStore) buildQuery(filters QueryFilters) map[string]interface{
 		})
 	}
 
+	if filters.Comm != "" {
+		must = append(must, map[string]interface{}{
+			"wildcard": map[string]interface{}{
+				"comm": map[string]interface{}{
+					"value":            "*" + filters.Comm + "*",
+					"case_insensitive": true,
+				},
+			},
+		})
+	}
+
 	if filters.PodName != "" {
 		must = append(must, map[string]interface{}{
 			"term": map[string]interface{}{"pod_name": filters.PodName},

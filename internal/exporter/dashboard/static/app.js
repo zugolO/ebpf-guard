@@ -2,7 +2,10 @@
   "use strict";
 
   const TOKEN_KEY = "ebpf-guard-token";
-  const state = { alerts: [], selectedId: null, incidents: [], selectedIncidentId: null };
+  const state = {
+    alerts: [], selectedId: null, incidents: [], selectedIncidentId: null,
+    lastPageSize: 0, offset: 0, autoRefreshTimer: null, lastRefreshAt: null,
+  };
 
   const el = (id) => document.getElementById(id);
 
@@ -48,20 +51,25 @@
     };
   }
 
-  // buildFilterParams builds the shared filter params (severity/rule/since)
-  // without a row limit.
+  // buildFilterParams builds the shared filter params (severity/rule/comm/since)
+  // without a row limit. comm is applied server-side (store.QueryFilters.Comm)
+  // so it matches against the full alert set, not just the loaded page
+  // (issue #310).
   function buildFilterParams(f) {
     const params = new URLSearchParams();
     if (f.since) params.set("since", f.since);
     if (f.severity) params.set("severity", f.severity);
     if (f.rule_id) params.set("rule_id", f.rule_id);
+    if (f.comm) params.set("comm", f.comm);
     return params;
   }
+
+  const PAGE_SIZE = 500;
 
   // buildQuery is for the alert LIST, which is intentionally paged.
   function buildQuery(f, extra) {
     const params = buildFilterParams(f);
-    params.set("limit", "500");
+    params.set("limit", String(PAGE_SIZE));
     if (extra) {
       for (const k in extra) params.set(k, extra[k]);
     }
@@ -174,12 +182,17 @@
       row.addEventListener("click", () => selectAlert(a.id));
       container.appendChild(row);
     }
-  }
 
-  function applyClientFilters(alerts) {
-    const comm = el("f-comm").value.trim().toLowerCase();
-    if (!comm) return alerts;
-    return alerts.filter((a) => (a.comm || "").toLowerCase().includes(comm));
+    // "Load more" (issue #310): the API already supports offset-based paging
+    // (api.go's parseQueryFilters); a full page suggests more rows exist.
+    if (state.lastPageSize >= PAGE_SIZE) {
+      const more = document.createElement("button");
+      more.className = "btn-ghost load-more-btn";
+      more.type = "button";
+      more.textContent = "Load more";
+      more.addEventListener("click", loadMore);
+      container.appendChild(more);
+    }
   }
 
   async function selectAlert(id) {
@@ -426,8 +439,11 @@
     `;
   }
 
+  // refresh reloads from offset 0 (a filter/manual-refresh/auto-refresh
+  // tick). loadMore (below) appends the next page on top of what's here.
   async function refresh() {
     setStatus("loading…");
+    state.offset = 0;
     const filters = currentFilters();
     try {
       const [status, summary, alerts] = await Promise.all([
@@ -442,8 +458,12 @@
       el("status").title = degradedReason || "";
       renderSummary(summary);
       renderHealth(status);
-      state.alerts = sortAlertsByRecency(applyClientFilters(alerts || []));
+      const rows = alerts || [];
+      state.lastPageSize = rows.length;
+      state.alerts = sortAlertsByRecency(rows);
       renderAlerts(state.alerts);
+      state.lastRefreshAt = Date.now();
+      renderLastUpdated();
     } catch (err) {
       setStatus("error: " + err.message, "error");
       // The static shell loads without a token, but the data API is
@@ -451,6 +471,88 @@
       // isn't left staring at a bare "401 Unauthorized" string.
       if (err.status === 401) openTokenDialog();
     }
+  }
+
+  // loadMore fetches the next page via the API's existing offset support
+  // (api.go:693) and appends it, instead of the previous hard limit=500 cap
+  // (issue #310).
+  async function loadMore() {
+    const nextOffset = state.offset + PAGE_SIZE;
+    const filters = currentFilters();
+    try {
+      const alerts = await api("/api/v1/alerts?" + buildQuery(filters, { offset: nextOffset }));
+      const rows = alerts || [];
+      state.offset = nextOffset;
+      state.lastPageSize = rows.length;
+      state.alerts = sortAlertsByRecency(state.alerts.concat(rows));
+      renderAlerts(state.alerts);
+    } catch (err) {
+      setStatus("error: " + err.message, "error");
+      if (err.status === 401) openTokenDialog();
+    }
+  }
+
+  // --- Auto-refresh (issue #310) ---------------------------------------
+  // Polls on an interval chosen from the "auto-refresh" dropdown; paused
+  // while the tab is hidden so a backgrounded dashboard doesn't keep
+  // hammering the API. Manual refresh and filter changes still work as
+  // before; auto-refresh always reloads from offset 0.
+
+  const AUTO_REFRESH_KEY = "ebpf-guard-autorefresh";
+
+  function getAutoRefreshSeconds() {
+    const stored = parseInt(localStorage.getItem(AUTO_REFRESH_KEY) || "15", 10);
+    return Number.isFinite(stored) ? stored : 15;
+  }
+
+  function renderLastUpdated() {
+    const label = el("last-updated");
+    if (!label) return;
+    if (!state.lastRefreshAt) {
+      label.textContent = "";
+      return;
+    }
+    const secs = Math.max(0, Math.round((Date.now() - state.lastRefreshAt) / 1000));
+    label.textContent = `updated ${secs}s ago`;
+  }
+
+  function stopAutoRefresh() {
+    if (state.autoRefreshTimer) {
+      clearInterval(state.autoRefreshTimer);
+      state.autoRefreshTimer = null;
+    }
+  }
+
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    const secs = getAutoRefreshSeconds();
+    if (secs <= 0 || document.hidden) return;
+    state.autoRefreshTimer = setInterval(() => {
+      if (document.hidden) return;
+      refresh();
+    }, secs * 1000);
+  }
+
+  function initAutoRefresh() {
+    const select = el("f-autorefresh");
+    if (select) {
+      select.value = String(getAutoRefreshSeconds());
+      select.addEventListener("change", () => {
+        localStorage.setItem(AUTO_REFRESH_KEY, select.value);
+        startAutoRefresh();
+      });
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        stopAutoRefresh();
+      } else {
+        startAutoRefresh();
+        refresh();
+      }
+    });
+    // Ticks the "last updated Ns ago" label independently of the data poll.
+    setInterval(renderLastUpdated, 1000);
+    startAutoRefresh();
   }
 
   // --- Incidents tab (issue #307) -------------------------------------
@@ -594,6 +696,7 @@
         if (e.key === "Enter") refresh();
       })
     );
+    initAutoRefresh();
     refresh();
   }
 

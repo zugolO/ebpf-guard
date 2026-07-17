@@ -505,6 +505,10 @@ func (s *SQLiteStore) buildWhere(filters QueryFilters) (string, []interface{}) {
 		}
 		whereClauses = append(whereClauses, fmt.Sprintf("rule_id IN (%s)", strings.Join(placeholders, ",")))
 	}
+	if filters.Comm != "" {
+		whereClauses = append(whereClauses, "LOWER(comm) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filters.Comm)+"%")
+	}
 	if filters.PodName != "" {
 		whereClauses = append(whereClauses, "pod_name = ?")
 		args = append(args, filters.PodName)

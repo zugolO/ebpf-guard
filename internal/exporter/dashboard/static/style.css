@@ -130,6 +130,8 @@ main {
 }
 
 .alert-list { display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow-y: auto; }
+.load-more-btn { margin: 6px auto 0; }
+.last-updated { font-size: 12px; }
 .alert-row {
   display: flex;
   gap: 10px;

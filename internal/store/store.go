@@ -57,6 +57,9 @@ type QueryFilters struct {
 	Severity []types.Severity
 	// RuleIDs filters by rule ID (empty = all rules).
 	RuleIDs []string
+	// Comm filters by process name (comm), matched as a case-insensitive
+	// substring against the full alert set server-side (empty = all comms).
+	Comm string
 	// PodName filters by Kubernetes pod name (empty = all pods).
 	PodName string
 	// Namespace filters by Kubernetes namespace (empty = all namespaces).

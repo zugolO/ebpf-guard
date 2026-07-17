@@ -431,6 +431,23 @@ func (w *CPUPressureWatcher) IsThrottling() bool {
 	return w.state > cpuLevelNormal
 }
 
+// PressurePercent returns the current smoothed CPU usage as a percentage of a
+// single core (mirrors the ebpf_guard_cpu_pressure_percent gauge), for
+// operator-facing surfaces that would rather read Go state directly than
+// scrape /metrics (issue #309).
+func (w *CPUPressureWatcher) PressurePercent() float64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if len(w.window) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, v := range w.window {
+		sum += v
+	}
+	return sum / float64(len(w.window))
+}
+
 // readProcSelfCPUSeconds returns this process's cumulative CPU time (utime +
 // stime) in seconds, read from /proc/self/stat.
 func readProcSelfCPUSeconds() (float64, error) {

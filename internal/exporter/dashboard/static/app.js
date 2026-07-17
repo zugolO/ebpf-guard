@@ -366,6 +366,66 @@
     el("fb-tp-btn").addEventListener("click", () => submitFeedback(alert, "true_positive"));
   }
 
+  // --- Agent health widget (issue #309) ---------------------------------
+  // Surfaces load-shedding, drift-learning progress, and sampling rates on
+  // the dashboard so a VPS operator without Prometheus/Grafana can tell "no
+  // alerts because nothing happened" apart from "no alerts because the
+  // agent degraded visibility." Sourced entirely from /api/v1/status —
+  // no /metrics parsing on the client.
+
+  const PRESSURE_LEVEL_LABEL = { 0: "normal", 1: "file sampling reduced", 2: "file+syscall+network reduced" };
+
+  function healthDegradedReason(health) {
+    if (!health) return "";
+    if (health.visibility_reduced) {
+      return `Visibility reduced: ${PRESSURE_LEVEL_LABEL[health.cpu_pressure_level] || "degraded"} ` +
+        `(CPU ${Math.round(health.cpu_pressure_percent)}% of one core).`;
+    }
+    return "";
+  }
+
+  function renderHealth(status) {
+    const body = el("health-body");
+    const health = status.health;
+    if (!health) {
+      body.innerHTML = '<p class="muted">Agent health details are not available on this build.</p>';
+      return;
+    }
+
+    const rates = Object.entries(health.sampling_rates || {})
+      .map(([name, rate]) => `<li><span class="name">${escapeHTML(name)}</span><span class="count">${Math.round(rate * 100)}%</span></li>`)
+      .join("");
+
+    body.innerHTML = `
+      <div class="health-row">
+        <div class="health-item">
+          <div class="label">CPU pressure</div>
+          <div class="value ${health.visibility_reduced ? "warn" : ""}">
+            ${escapeHTML(PRESSURE_LEVEL_LABEL[health.cpu_pressure_level] || "unknown")}
+            (${Math.round(health.cpu_pressure_percent)}% of one core)
+          </div>
+        </div>
+        <div class="health-item">
+          <div class="label">Hardware profile</div>
+          <div class="value">${escapeHTML(health.hardware_profile || "unknown")}</div>
+        </div>
+        <div class="health-item">
+          <div class="label">Drift-baseline learning</div>
+          <div class="value">
+            ${health.drift_learning_workloads} learning / ${health.drift_profiles_active} tracked
+            ${health.drift_stuck_workloads > 0 ? `<span class="warn">(${health.drift_stuck_workloads} stuck)</span>` : ""}
+          </div>
+        </div>
+      </div>
+      ${rates ? `
+      <div class="detail-field">
+        <div class="label">Effective sampling rates</div>
+        <ul class="bar-list">${rates}</ul>
+      </div>` : ""}
+      ${health.visibility_reduced ? `<p class="warn">${escapeHTML(healthDegradedReason(health))}</p>` : ""}
+    `;
+  }
+
   async function refresh() {
     setStatus("loading…");
     const filters = currentFilters();
@@ -375,8 +435,13 @@
         api("/api/v1/summary?" + buildSummaryQuery(filters)),
         api("/api/v1/alerts?" + buildQuery(filters)),
       ]);
+      const degradedReason = !status.healthy
+        ? "one or more collectors unhealthy"
+        : healthDegradedReason(status.health);
       setStatus(status.healthy ? "connected" : "degraded", status.healthy ? "ok" : "error");
+      el("status").title = degradedReason || "";
       renderSummary(summary);
+      renderHealth(status);
       state.alerts = sortAlertsByRecency(applyClientFilters(alerts || []));
       renderAlerts(state.alerts);
     } catch (err) {
@@ -517,6 +582,9 @@
   function init() {
     initTokenDialog();
     initTabs();
+    el("status").addEventListener("click", () => {
+      el("health-card").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
     el("refresh-btn").addEventListener("click", refresh);
     ["f-severity", "f-since"].forEach((id) =>
       el(id).addEventListener("change", refresh)

@@ -27,7 +27,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .topbar h1 { font-size: 16px; margin: 0; }
-.status { color: var(--muted); font-size: 12px; }
+.status { color: var(--muted); font-size: 12px; cursor: pointer; }
 .status.ok { color: #3fb950; }
 .status.error { color: var(--critical); }
 
@@ -88,6 +88,11 @@ main {
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); margin-left: auto; }
 
 .hidden { display: none !important; }
+
+.health-row { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 10px; }
+.health-item .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+.health-item .value { font-size: 13px; }
+.warn { color: var(--warning); }
 
 .tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); }
 .tab-btn {

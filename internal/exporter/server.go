@@ -82,6 +82,11 @@ type Server struct {
 	// tuningWriteMu serializes writes to localTuningPath so two concurrent
 	// "save exception" requests cannot race and drop one another's entry.
 	tuningWriteMu sync.Mutex
+
+	// agentHealthFn supplies the agent-health snapshot (CPU pressure,
+	// sampling rates, drift-learning progress, hardware profile) surfaced by
+	// GET /api/v1/status. Optional; nil means the status response omits it.
+	agentHealthFn func() AgentHealth
 }
 
 // NewServer creates a new HTTP server for metrics and health.

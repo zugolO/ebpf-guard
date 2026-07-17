@@ -363,8 +363,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// window, then alerts only on matches that deviate from the learned
 	// baseline. Independent of the general anomaly profiler above — it only
 	// affects rules explicitly tagged class: drift.
+	var driftProfiler *profiler.DriftBaselineProfiler
 	if cfg.Profiler.DriftBaseline.Enabled {
-		driftProfiler := profiler.NewDriftBaselineProfiler(profiler.DriftBaselineConfig{
+		driftProfiler = profiler.NewDriftBaselineProfiler(profiler.DriftBaselineConfig{
 			Enabled:                cfg.Profiler.DriftBaseline.Enabled,
 			LearningPeriod:         cfg.Profiler.DriftBaseline.LearningPeriod,
 			MinSamples:             cfg.Profiler.DriftBaseline.MinSamples,
@@ -445,7 +446,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// The construction/registration/start wiring lives in watchdog so it can be
 	// unit-tested; here we only map config fields.
 	cp := cfg.Watchdog.CPUPressure
-	watchdog.SetupCPUPressureWatcher(ctx, watchdog.CPUConfig{
+	cpuWatcher := watchdog.SetupCPUPressureWatcher(ctx, watchdog.CPUConfig{
 		Enabled:           cp.Enabled,
 		CheckInterval:     time.Duration(cp.CheckInterval) * time.Second,
 		CPULimitPercent:   cp.CPULimitPercent,
@@ -727,6 +728,28 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	if gossipMgr != nil {
 		srv.RegisterGossipRoutes(gossip.Handler(gossipMgr))
 	}
+
+	// Agent-health snapshot for GET /api/v1/status (issue #309): lets a VPS
+	// operator without Prometheus/Grafana see load-shedding, drift-learning
+	// progress, effective sampling rates, and the hardware profile without
+	// parsing /metrics on the client.
+	srv.SetAgentHealthProvider(func() exporter.AgentHealth {
+		health := exporter.AgentHealth{HardwareProfile: hwProfile.Profile}
+		if cpuWatcher != nil {
+			health.CPUPressureLevel = cpuWatcher.PressureLevel()
+			health.CPUPressurePercent = cpuWatcher.PressurePercent()
+			health.VisibilityReduced = cpuWatcher.IsThrottling()
+		}
+		if rates := samplingMux.EffectiveRates(); len(rates) > 0 {
+			health.SamplingRates = rates
+		}
+		if driftProfiler != nil {
+			health.DriftLearningWorkloads = driftProfiler.LearningWorkloads()
+			health.DriftStuckWorkloads = driftProfiler.StuckLearningWorkloads()
+			health.DriftProfilesActive = driftProfiler.ProfileCount()
+		}
+		return health
+	})
 
 	if dbg := srv.GetDebugHandler(); dbg != nil {
 		dbg.SetHardwareProfile(exporter.HardwareProfileState{

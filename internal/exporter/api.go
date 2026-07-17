@@ -331,6 +331,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Collectors: collectorStatuses,
 		Store:      storeHealth,
 	}
+	if health, ok := s.getAgentHealth(); ok {
+		response.Health = &health
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
@@ -427,6 +430,10 @@ type StatusAPIResponse struct {
 	Timestamp  time.Time         `json:"timestamp"`
 	Collectors []CollectorStatus `json:"collectors"`
 	Store      string            `json:"store"`
+	// Health carries CPU pressure, drift-learning progress, sampling rates,
+	// and the hardware profile — omitted when no AgentHealthProvider is
+	// configured (see SetAgentHealthProvider, issue #309).
+	Health *AgentHealth `json:"health,omitempty"`
 }
 
 // handleRules handles GET /api/v1/rules to list loaded rules.

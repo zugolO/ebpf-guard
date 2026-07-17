@@ -1,0 +1,80 @@
+# nfpm package definition for ebpf-guard (issue #311).
+#
+# Builds .deb/.rpm packages carrying the binary, a hardened systemd unit,
+# the built-in rule set, and config examples — so VPS operators get
+# apt/dnf-managed installs, upgrades, and clean removal instead of only the
+# curl-pipe-sh installer (scripts/install.sh).
+#
+# Usage (see Makefile 'package' targets):
+#   VERSION=1.2.3 ARCH=amd64 BIN_PATH=build/ebpf-guard-linux-amd64 \
+#     nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
+#
+# ${VERSION}, ${ARCH}, and ${BIN_PATH} are expanded from the environment by
+# nfpm at package time.
+name: ebpf-guard
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: "ebpf-guard maintainers <noreply@github.com>"
+description: |
+  Lightweight eBPF-based runtime security agent for Linux/Kubernetes.
+  Attaches kernel/userspace probes, correlates events against YAML
+  detection rules, builds behavioral profiles, and exports alerts to
+  Prometheus, Alertmanager, Slack, and Teams. No kernel module required.
+vendor: "ebpf-guard"
+homepage: "https://github.com/zugolO/ebpf-guard"
+license: "Apache-2.0"
+
+contents:
+  - src: ${BIN_PATH}
+    dst: /usr/bin/ebpf-guard
+    expand: true
+    file_info:
+      mode: 0755
+
+  - src: scripts/ebpf-guard.service
+    dst: /lib/systemd/system/ebpf-guard.service
+    file_info:
+      mode: 0644
+
+  - src: config/config.yaml
+    dst: /etc/ebpf-guard/config.yaml.example
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: rules/*.yaml
+    dst: /etc/ebpf-guard/rules/
+    file_info:
+      mode: 0644
+
+  - src: rules/local-tuning.yaml.example
+    dst: /etc/ebpf-guard/local-tuning.yaml.example
+    file_info:
+      mode: 0644
+
+  - dst: /var/lib/ebpf-guard
+    type: dir
+    file_info:
+      mode: 0750
+
+  - dst: /var/log/ebpf-guard
+    type: dir
+    file_info:
+      mode: 0750
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  postremove: packaging/scripts/postremove.sh
+
+overrides:
+  deb:
+    depends:
+      - systemd
+  rpm:
+    depends:
+      - systemd
+    provides:
+      - ebpf-guard

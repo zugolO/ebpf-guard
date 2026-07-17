@@ -65,7 +65,16 @@
           <option value="168h">last 7d</option>
         </select>
       </label>
+      <label>Auto-refresh
+        <select id="f-autorefresh">
+          <option value="0">off</option>
+          <option value="15" selected>15s</option>
+          <option value="30">30s</option>
+          <option value="60">60s</option>
+        </select>
+      </label>
       <button id="refresh-btn" class="btn" type="button">Refresh</button>
+      <span id="last-updated" class="muted last-updated"></span>
     </section>
 
     <nav class="tabs">

@@ -653,6 +653,9 @@ func parseQueryFilters(r *http.Request) store.QueryFilters {
 	if ruleID := r.URL.Query().Get("rule_id"); ruleID != "" {
 		filters.RuleIDs = strings.Split(ruleID, ",")
 	}
+	if comm := r.URL.Query().Get("comm"); comm != "" {
+		filters.Comm = comm
+	}
 	if podName := r.URL.Query().Get("pod"); podName != "" {
 		filters.PodName = podName
 	}

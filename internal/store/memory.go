@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -582,6 +583,9 @@ func matchesFilters(alert types.Alert, filters QueryFilters) bool {
 		if !found {
 			return false
 		}
+	}
+	if filters.Comm != "" && !strings.Contains(strings.ToLower(alert.Comm), strings.ToLower(filters.Comm)) {
+		return false
 	}
 	if filters.PodName != "" && alert.Enrichment.PodName != filters.PodName {
 		return false

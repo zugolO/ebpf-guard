@@ -143,6 +143,39 @@ helm install ebpf-guard oci://ghcr.io/zugolO/charts/ebpf-guard \
 
 ---
 
+## deb/rpm Packages
+
+Every release publishes signed `.deb` and `.rpm` packages for `amd64` and
+`arm64` (Hetzner CAX, Oracle Ampere, AWS Graviton, and other ARM VPS hosts
+included). Packages carry the binary, a hardened systemd unit
+(`ProtectSystem=strict`, a `SystemCallFilter` allowlist, `CapabilityBoundingSet`
+sized for eBPF), the built-in rule set, and config examples — so `apt`/`dnf`
+manage version upgrades/downgrades and removal instead of a manually
+generated unit file.
+
+```bash
+# Debian/Ubuntu
+curl -LO https://github.com/zugolO/ebpf-guard/releases/latest/download/ebpf-guard_<version>_amd64.deb
+sudo apt install ./ebpf-guard_<version>_amd64.deb
+sudo systemctl start ebpf-guard
+
+# RHEL/Fedora/Rocky
+curl -LO https://github.com/zugolO/ebpf-guard/releases/latest/download/ebpf-guard-<version>-1.x86_64.rpm
+sudo dnf install ./ebpf-guard-<version>-1.x86_64.rpm
+sudo systemctl start ebpf-guard
+```
+
+Replace `<version>` with the release tag (without the leading `v`), and swap
+`amd64`/`x86_64` for `arm64`/`aarch64` on ARM hosts. `scripts/install.sh`
+does this detection automatically and installs the package when apt or
+dnf/yum is present, falling back to the raw binary otherwise.
+
+Packages are signed the same way as binaries — see
+[Supply Chain Security](#supply-chain-security) below; swap in the
+`.deb`/`.rpm` filename when verifying with `cosign verify-blob`.
+
+---
+
 ## Supply Chain Security
 
 All release artifacts are signed with [cosign](https://github.com/sigstore/cosign)
@@ -359,7 +392,8 @@ helm install ebpf-guard deploy/helm/ebpf-guard \
 | Understand limitations on Railway / Render / Heroku | [Shared platform guide](docs/platforms/paas-limitations.md) — what works, what doesn't |
 | Deploy to Kubernetes (GKE, EKS, AKS) | Helm section above + [deployment docs](docs/deployment.md) |
 | Try before installing (20-second test drive with synthetic events) | `docker run --rm -it ghcr.io/zugolo/ebpf-guard --dry-run` covers key attacks in one chunk |
-| Install with one command (curl \| sh) | `curl -fsSL https://get.ebpf-guard.io \| sh` — auto-detects arch/kernel, installs systemd, starts monitoring |
+| Install with one command (curl \| sh) | `curl -fsSL https://get.ebpf-guard.io \| sh` — auto-detects arch/kernel, prefers a signed deb/rpm package when apt/dnf are present, installs systemd, starts monitoring |
+| Install a versioned deb/rpm package (amd64 + arm64) | See [deb/rpm packages](#debrpm-packages) below — `apt`/`dnf`-managed upgrades, downgrades, and clean removal |
 
 
 

@@ -47,6 +47,9 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// BPF live-update endpoint (admin-only)
 	mux.HandleFunc("/api/v1/bpf/reload", s.handleBPFReload)
 
+	// Tuning exception generation (admin-only to persist; see issue #308)
+	mux.HandleFunc("/api/v1/tuning/exceptions", s.handleTuningExceptions)
+
 	// Swagger UI — served without auth so API consumers can explore the spec.
 	// Assets are embedded at build time to eliminate the unpkg.com CDN dependency.
 	mux.Handle("/swaggerui/", swaggerui.Handler())

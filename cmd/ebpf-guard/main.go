@@ -719,6 +719,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return engine.GetRules()
 	})
 	srv.SetIncidentTracker(engine.IncidentTracker())
+	// Wires POST /api/v1/tuning/exceptions to append operator-generated
+	// exceptions (from the dashboard's false-positive flow, issue #308) into
+	// the same overlay file the rule loader already reads on startup/reload.
+	srv.SetLocalTuningPath(cfg.Rules.LocalTuningPath)
 
 	if gossipMgr != nil {
 		srv.RegisterGossipRoutes(gossip.Handler(gossipMgr))

@@ -152,6 +152,19 @@ main {
 .mitre-link { display: inline-block; margin-top: 4px; color: var(--accent); text-decoration: none; font-size: 12px; }
 .mitre-link:hover { text-decoration: underline; }
 
+.feedback-section .feedback-buttons { display: flex; gap: 8px; margin: 6px 0; }
+.feedback-section .btn-ghost, .feedback-section .btn { margin-left: 0; }
+.fb-result { font-size: 12px; }
+.exception-yaml {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 dialog::backdrop { background: rgba(0,0,0,.5); }
 #token-form { display: flex; flex-direction: column; gap: 10px; min-width: 280px; }

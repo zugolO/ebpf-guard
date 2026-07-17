@@ -18,11 +18,12 @@
     }
   }
 
-  async function api(path) {
+  async function api(path, opts) {
     const headers = {};
     const token = getToken();
     if (token) headers["Authorization"] = "Bearer " + token;
-    const res = await fetch(path, { headers });
+    if (opts && opts.body) headers["Content-Type"] = "application/json";
+    const res = await fetch(path, Object.assign({ headers }, opts));
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
       const err = new Error(`${res.status} ${text}`);
@@ -269,7 +270,100 @@
         <div class="label">References</div>
         ${references}
       </div>` : ""}
+      ${renderFeedbackSection(alert)}
     `;
+    if (alert) initFeedbackHandlers(alert);
+  }
+
+  // --- False-positive feedback + exception generation (issue #308) -----
+  // Closes the loop "saw noise in the dashboard → suppressed it" without a
+  // curl command: the operator clicks a verdict, gets a ready-to-paste (or
+  // one-click-save) exception, instead of hand-writing local-tuning.yaml.
+
+  function renderFeedbackSection(alert) {
+    if (!alert) return "";
+    return `
+      <div class="detail-field feedback-section">
+        <div class="label">Feedback</div>
+        <div class="feedback-buttons">
+          <button class="btn-ghost" id="fb-fp-btn" type="button">False positive</button>
+          <button class="btn-ghost" id="fb-tp-btn" type="button">True positive</button>
+        </div>
+        <div id="fb-result" class="fb-result"></div>
+      </div>`;
+  }
+
+  async function submitFeedback(alert, verdict) {
+    const resultEl = el("fb-result");
+    resultEl.innerHTML = '<p class="muted">Submitting…</p>';
+    try {
+      await api(`/api/v1/alerts/${encodeURIComponent(alert.id)}/feedback`, {
+        method: "POST",
+        body: JSON.stringify({ verdict }),
+      });
+    } catch (err) {
+      resultEl.innerHTML = `<p class="muted">Could not submit feedback: ${escapeHTML(err.message)}</p>`;
+      if (err.status === 401) openTokenDialog();
+      return;
+    }
+
+    if (verdict !== "false_positive") {
+      resultEl.innerHTML = '<p class="muted">Recorded. Thanks.</p>';
+      return;
+    }
+    await generateException(alert, resultEl);
+  }
+
+  async function generateException(alert, resultEl) {
+    resultEl.innerHTML = '<p class="muted">Generating exception…</p>';
+    const body = {
+      rule_id: alert.rule_id,
+      name: "fp_" + (alert.comm || "unknown") + "_" + alert.id.slice(0, 8),
+      comm: alert.comm || "",
+      persist: false,
+    };
+    let resp;
+    try {
+      resp = await api("/api/v1/tuning/exceptions", { method: "POST", body: JSON.stringify(body) });
+    } catch (err) {
+      resultEl.innerHTML = `<p class="muted">Recorded as false positive. Exception could not be generated: ${escapeHTML(err.message)}</p>`;
+      return;
+    }
+
+    resultEl.innerHTML = `
+      <p class="muted">Recorded as false positive. Paste into local-tuning.yaml, or save it directly:</p>
+      <pre class="exception-yaml">${escapeHTML(resp.yaml)}</pre>
+      <div class="feedback-buttons">
+        <button class="btn-ghost" id="fb-copy-btn" type="button">Copy YAML</button>
+        <button class="btn" id="fb-save-btn" type="button">Save to tuning file</button>
+      </div>
+      <div id="fb-save-result"></div>`;
+
+    el("fb-copy-btn").addEventListener("click", () => {
+      navigator.clipboard.writeText(resp.yaml).catch(() => {});
+    });
+    el("fb-save-btn").addEventListener("click", async () => {
+      const saveResult = el("fb-save-result");
+      saveResult.textContent = "Saving…";
+      try {
+        const saved = await api("/api/v1/tuning/exceptions", {
+          method: "POST",
+          body: JSON.stringify({ ...body, persist: true }),
+        });
+        saveResult.textContent = saved.persisted
+          ? "Saved — rules will hot-reload the new exception."
+          : "Not persisted (no local-tuning path configured on the agent). Use the snippet above.";
+      } catch (err) {
+        saveResult.textContent = err.status === 403
+          ? "Admin token required to save directly; use the snippet above instead."
+          : "Save failed: " + err.message;
+      }
+    });
+  }
+
+  function initFeedbackHandlers(alert) {
+    el("fb-fp-btn").addEventListener("click", () => submitFeedback(alert, "false_positive"));
+    el("fb-tp-btn").addEventListener("click", () => submitFeedback(alert, "true_positive"));
   }
 
   async function refresh() {

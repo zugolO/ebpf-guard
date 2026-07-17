@@ -561,11 +561,12 @@
   // tab or link pointing at it.
 
   function switchTab(name) {
-    for (const tab of ["alerts", "incidents"]) {
+    for (const tab of ["alerts", "incidents", "fleet"]) {
       el("view-" + tab).classList.toggle("hidden", tab !== name);
       el("tab-" + tab).classList.toggle("active", tab === name);
     }
     if (name === "incidents") refreshIncidents();
+    if (name === "fleet") refreshFleet();
   }
 
   function renderIncidents(incidents) {
@@ -649,7 +650,7 @@
   }
 
   function initTabs() {
-    for (const tab of ["alerts", "incidents"]) {
+    for (const tab of ["alerts", "incidents", "fleet"]) {
       el("tab-" + tab).addEventListener("click", () => switchTab(tab));
     }
     el("inc-refresh-btn").addEventListener("click", refreshIncidents);
@@ -657,6 +658,163 @@
     el("inc-namespace").addEventListener("keydown", (e) => {
       if (e.key === "Enter") refreshIncidents();
     });
+  }
+
+  // --- Fleet view (issue #312) -------------------------------------------
+  // Multi-agent mode for the "3-10 VPS" scenario: the operator adds other
+  // agents (url + their own bearer token) in this browser, and the fleet tab
+  // polls all of them client-side and merges the results. Zero server-side
+  // changes are required beyond the CORS allowlist (server.cors_allowed_origins)
+  // added alongside this feature — the browser talks to each agent directly.
+  // Agent list and tokens live only in this browser's localStorage, never sent
+  // to any node other than the one they belong to.
+
+  const FLEET_AGENTS_KEY = "ebpf-guard-fleet-agents";
+  const SELF_AGENT = { id: "self", name: "this node", url: "" };
+
+  function getFleetAgents() {
+    try {
+      const raw = localStorage.getItem(FLEET_AGENTS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function saveFleetAgents(agents) {
+    localStorage.setItem(FLEET_AGENTS_KEY, JSON.stringify(agents));
+  }
+
+  // fleetFetch calls path on the given agent: a relative fetch (using this
+  // browser's own token) for SELF_AGENT, or an absolute cross-origin fetch
+  // (using that agent's own token) for anything added by the operator.
+  async function fleetFetch(agent, path) {
+    const isSelf = !agent.url;
+    const url = isSelf ? path : agent.url + path;
+    const token = isSelf ? getToken() : (agent.token || "");
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status} ${text}`);
+    }
+    return res.json();
+  }
+
+  // fetchFleetNode never rejects: an unreachable/misconfigured agent must not
+  // break the summary for the rest of the fleet (acceptance criteria — offline
+  // node shown as offline, not breaking the rest).
+  async function fetchFleetNode(agent) {
+    try {
+      const [status, summary, criticalAlerts] = await Promise.all([
+        fleetFetch(agent, "/api/v1/status"),
+        fleetFetch(agent, "/api/v1/summary?since=1h"),
+        fleetFetch(agent, "/api/v1/alerts?severity=critical&since=1h&limit=20"),
+      ]);
+      return { agent, online: true, status, summary, criticalAlerts: criticalAlerts || [] };
+    } catch (err) {
+      return { agent, online: false, error: err.message };
+    }
+  }
+
+  function renderFleetNodes(results) {
+    const container = el("fleet-nodes");
+    container.innerHTML = "";
+    for (const r of results) {
+      const div = document.createElement("div");
+      if (r.online) {
+        const critical = (r.summary.by_severity && r.summary.by_severity.critical) || 0;
+        div.className = "fleet-node-card";
+        div.innerHTML = `
+          <div class="fleet-node-dot online"></div>
+          <div class="fleet-node-name">${escapeHTML(r.agent.name)}</div>
+          <div class="fleet-node-stat"><span class="stat-value">${r.summary.total ?? 0}</span><span class="stat-label">total</span></div>
+          <div class="fleet-node-stat"><span class="stat-value ${critical > 0 ? "warn" : ""}">${critical}</span><span class="stat-label">critical</span></div>`;
+      } else {
+        div.className = "fleet-node-card offline";
+        div.innerHTML = `
+          <div class="fleet-node-dot offline"></div>
+          <div class="fleet-node-name">${escapeHTML(r.agent.name)}</div>
+          <div class="fleet-node-stat muted">offline${r.error ? ` — ${escapeHTML(r.error)}` : ""}</div>`;
+      }
+      container.appendChild(div);
+    }
+  }
+
+  function renderFleetCritical(results) {
+    const container = el("fleet-critical");
+    const merged = [];
+    for (const r of results) {
+      if (!r.online) continue;
+      for (const a of r.criticalAlerts) merged.push(Object.assign({}, a, { _node: r.agent.name }));
+    }
+    const sorted = sortAlertsByRecency(merged).slice(0, 100);
+    container.innerHTML = "";
+    if (sorted.length === 0) {
+      container.innerHTML = '<p class="muted">No critical alerts across the fleet in the last hour.</p>';
+      return;
+    }
+    for (const a of sorted) {
+      const row = document.createElement("div");
+      row.className = "alert-row";
+      row.innerHTML = `
+        <span class="sev-badge critical">critical</span>
+        <span class="node-badge" title="${escapeHTML(a._node)}">${escapeHTML(a._node)}</span>
+        <span class="rule" title="${escapeHTML(a.message)}">${escapeHTML(a.rule_id)}</span>
+        <span class="comm">${escapeHTML(a.comm)}</span>
+        <span class="time">${fmtTime(alertSortKey(a))}</span>`;
+      container.appendChild(row);
+    }
+  }
+
+  async function refreshFleet() {
+    const agents = [SELF_AGENT].concat(getFleetAgents());
+    const results = await Promise.all(agents.map(fetchFleetNode));
+    renderFleetNodes(results);
+    renderFleetCritical(results);
+  }
+
+  function renderFleetAgentsList() {
+    const container = el("fleet-agents-list");
+    container.innerHTML = "";
+    const selfRow = document.createElement("div");
+    selfRow.className = "fleet-agent-row";
+    selfRow.innerHTML = `<span class="fleet-agent-name">this node</span><span class="muted">${escapeHTML(location.origin)}</span>`;
+    container.appendChild(selfRow);
+    for (const a of getFleetAgents()) {
+      const row = document.createElement("div");
+      row.className = "fleet-agent-row";
+      row.innerHTML = `
+        <span class="fleet-agent-name">${escapeHTML(a.name)}</span>
+        <span class="muted">${escapeHTML(a.url)}</span>
+        <button class="btn-ghost fleet-remove-btn" type="button">Remove</button>`;
+      row.querySelector(".fleet-remove-btn").addEventListener("click", () => {
+        saveFleetAgents(getFleetAgents().filter((x) => x.id !== a.id));
+        renderFleetAgentsList();
+        refreshFleet();
+      });
+      container.appendChild(row);
+    }
+  }
+
+  function initFleet() {
+    el("fleet-add-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = el("fleet-add-name").value.trim();
+      const url = el("fleet-add-url").value.trim().replace(/\/+$/, "");
+      const token = el("fleet-add-token").value.trim();
+      if (!name || !/^https?:\/\//i.test(url)) return;
+      const agents = getFleetAgents();
+      agents.push({ id: Date.now() + "-" + Math.random().toString(36).slice(2), name, url, token });
+      saveFleetAgents(agents);
+      el("fleet-add-form").reset();
+      renderFleetAgentsList();
+      refreshFleet();
+    });
+    el("fleet-refresh-btn").addEventListener("click", refreshFleet);
+    renderFleetAgentsList();
   }
 
   function openTokenDialog() {
@@ -684,6 +842,7 @@
   function init() {
     initTokenDialog();
     initTabs();
+    initFleet();
     el("status").addEventListener("click", () => {
       el("health-card").scrollIntoView({ behavior: "smooth", block: "center" });
     });
@@ -705,6 +864,9 @@
   // Export the pure string helpers for unit testing under Node. Guarded by a
   // typeof check so this is a no-op in the browser (there is no `module`).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { escapeHTML, safeURL, durationBetween, alertSortKey };
+    module.exports = {
+      escapeHTML, safeURL, durationBetween, alertSortKey,
+      getFleetAgents, saveFleetAgents, fetchFleetNode,
+    };
   }
 })();

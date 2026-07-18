@@ -867,6 +867,7 @@
     module.exports = {
       escapeHTML, safeURL, durationBetween, alertSortKey,
       getFleetAgents, saveFleetAgents, fetchFleetNode,
+      buildFilterParams, healthDegradedReason,
     };
   }
 })();

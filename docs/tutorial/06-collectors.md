@@ -39,7 +39,7 @@ CloudTrail, GCP Audit Log, Azure Monitor) через их API, но привод
    `bpf2go`, глава 5), забирает из пула переиспользуемый указатель
    `*types.Event` (`eventPool.Get()`, строка 267), чтобы не аллоцировать
    новый объект на каждое событие.
-2. **Парсинг сырых байт** — `internal/collector/syscall.go:345` вызывает
+2. **Парсинг сырых байт** — `internal/collector/syscall.go:342` вызывает
    `bpf.ParseSyscallEventInto(raw, &se)` (реализация —
    `internal/bpf/events.go:315`), которая читает срез `[]byte` из ring
    buffer в промежуточную Go-структуру `SyscallEvent`, поле за полем, в
@@ -113,24 +113,30 @@ collector.NewSyntheticCollector(slog.Default(), 100*time.Millisecond)
 - **BPF-side sampling (1-в-N)** — конфигурируется секцией `sampling` в
   `config.yaml` (`internal/config/config.go:758-768`,
   `SamplingConfig`), применяется через `enableSampling()`
-  (`main.go:1675-1714`): каждый коллектор объявляет свою карту допустимых
+  (`main.go:1675-1716`): каждый коллектор объявляет свою карту допустимых
   типов событий и множителей через `SamplingConfigMap()` (например,
   `internal/collector/syscall.go:328-335`, `network.go:270-276`,
   `fileaccess.go:135-141`), а `internalbpf.SamplingController` записывает
   эти коэффициенты прямо в BPF map `sampling_config` — то есть решение
   «пропустить событие» принимается **внутри ядра**, ещё до попадания в
   ring buffer, экономя копирование данных в userspace.
-- **Adaptive sampling** — `AdaptiveSamplingConfig`
-  (`internal/config/config.go:884-916`) позволяет агенту динамически
-  увеличивать семплирование под давлением CPU: `watchdog.MultiBPFController`
-  (`main.go:386`, поле `samplingMux`) получает сигнал от наблюдателя за
-  нагрузкой (`main.go:449-461`) и снижает частоту событий на лету, без
-  перезапуска агента.
+- **Adaptive sampling** — `CPUPressureConfig`
+  (`internal/config/config.go:1350-1371`, секция `watchdog.cpu_pressure`)
+  позволяет агенту динамически снижать семплирование «шумных» коллекторов
+  под давлением CPU: `watchdog.MultiBPFController`
+  (`main.go:386`, поле `samplingMux`) получает сигнал от
+  `watchdog.SetupCPUPressureWatcher` (`main.go:448-461`) и снижает частоту
+  событий на лету — сначала для `file`, затем для `syscall`/`network`
+  (двухуровневое ослабление, см. `FileShedThreshold`/`AllShedThreshold`
+  выше) — без перезапуска агента.
 
 Это отдельный механизм от per-rule семплирования внутри самого
-`RuleEngine` (`internal/correlator/rules.go:757-781`, `rule.SampleRate`) —
-там семплируется не поток событий, а частота, с которой конкретное правило
-имеет право сработать (подробнее — в главе 7).
+`RuleEngine` (`internal/correlator/rules.go:757-781`, `rule.SampleRate`,
+конфигурируется через `rules.sampling.adaptive_sampling` /
+`AdaptiveSamplingConfig`, `internal/config/config.go:884-916`) — там
+семплируется не поток событий из ring buffer, а частота, с которой
+конкретное уже распарсенное событие проверяется тем или иным правилом
+(подробнее — в главе 7).
 
 ## Дальше почитать
 

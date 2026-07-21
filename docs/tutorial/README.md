@@ -20,5 +20,8 @@ runtime-security. Главы добавляются последовательн
 ## Часть III. Обнаружение: правила и поведенческий анализ
 
 8. [Руководство по написанию правил + встроенные наборы](08-writing-rules.md) — средний
+9. [Профайлер и аномалии (`internal/profiler/`)](09-profiler-anomalies.md) — средний
+10. [Policy engine (`internal/policy/`, Rego/OPA)](10-policy-engine.md) — средний
+11. [Автообучение и дрейф (`internal/autolearn/`, `internal/drift/`, `internal/feedback/`)](11-autolearn-drift.md) — средний
 
 Остальные главы появятся по мере закрытия соответствующих пунктов issue #319.

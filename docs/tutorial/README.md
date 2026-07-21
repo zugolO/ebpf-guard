@@ -30,4 +30,10 @@ runtime-security. Главы добавляются последовательн
 13. [Экспортёры и интеграции (`internal/exporter/`)](13-exporters.md) — средний
 14. [Хранилище алертов (`internal/store/`)](14-alert-store.md) — средний
 
+## Часть V. Продвинутые фичи
+
+15. [Продвинутая защита и наблюдение](15-advanced-protection.md) — продвинутый
+16. [WASM-плагины (`internal/wasm/`)](16-wasm-plugins.md) — продвинутый
+17. [TLS/HTTP inspection и DNS-мониторинг](17-tls-dns-monitoring.md) — продвинутый
+
 Остальные главы появятся по мере закрытия соответствующих пунктов issue #319.

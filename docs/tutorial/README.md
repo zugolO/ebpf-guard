@@ -36,4 +36,13 @@ runtime-security. Главы добавляются последовательн
 16. [WASM-плагины (`internal/wasm/`)](16-wasm-plugins.md) — продвинутый
 17. [TLS/HTTP inspection и DNS-мониторинг](17-tls-dns-monitoring.md) — продвинутый
 
+## Часть VI. Эксплуатация
+
+18. [Полный справочник CLI](18-cli-reference.md) — средний
+19. [Полный справочник конфигурации (`internal/config/`)](19-config-reference.md) — средний
+20. [Развёртывание в Kubernetes](20-kubernetes-deployment.md) — средний
+21. [Миграция с Falco (`internal/migration/`)](21-falco-migration.md) — средний
+22. [Производительность, тюнинг и траблшутинг](22-performance-tuning.md) — продвинутый
+23. [Безопасность самого агента и модель угроз](23-agent-security.md) — продвинутый
+
 Остальные главы появятся по мере закрытия соответствующих пунктов issue #319.

@@ -10,4 +10,11 @@ runtime-security. Главы добавляются последовательн
 2. [Ликбез по eBPF (нулевой уровень)](02-ebpf-basics.md) — новичок
 3. [Быстрый старт (Getting Started)](03-getting-started.md) — новичок
 
+## Часть II. Как устроен ebpf-guard внутри
+
+4. [Архитектура и поток событий](04-architecture.md) — средний
+5. [BPF-слой (`bpf/*.bpf.c`)](05-bpf-layer.md) — средний
+6. [Коллекторы (`internal/collector/`)](06-collectors.md) — средний
+7. [Движок корреляции и DSL правил (`internal/correlator/`)](07-correlation-engine.md) — средний
+
 Остальные главы появятся по мере закрытия соответствующих пунктов issue #319.

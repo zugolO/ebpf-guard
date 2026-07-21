@@ -24,4 +24,10 @@ runtime-security. Главы добавляются последовательн
 10. [Policy engine (`internal/policy/`, Rego/OPA)](10-policy-engine.md) — средний
 11. [Автообучение и дрейф (`internal/autolearn/`, `internal/drift/`, `internal/feedback/`)](11-autolearn-drift.md) — средний
 
+## Часть IV. Реакция и вывод
+
+12. [Enforcer — активная реакция (`internal/enforcer/`)](12-enforcer.md) — средний
+13. [Экспортёры и интеграции (`internal/exporter/`)](13-exporters.md) — средний
+14. [Хранилище алертов (`internal/store/`)](14-alert-store.md) — средний
+
 Остальные главы появятся по мере закрытия соответствующих пунктов issue #319.

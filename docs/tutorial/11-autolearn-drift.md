@@ -276,4 +276,4 @@ Content-Type: application/json
 
 ---
 
-**Назад:** [Глава 10. Policy engine](10-policy-engine.md) · **Далее:** Глава 12. Enforcer — активная реакция *(в работе)*
+**Назад:** [Глава 10. Policy engine](10-policy-engine.md) · **Далее:** [Глава 12. Enforcer — активная реакция](12-enforcer.md)

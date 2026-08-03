@@ -19,6 +19,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// Default HTTP timeouts. These are deliberately more forgiving than a
+// typical public API: /health, /metrics, and the dashboard API must keep
+// responding while the agent's own event-loop and worker pool are
+// CPU-starving the Go scheduler under attack-driven load, where scheduling
+// delay alone — not a slow client — can eat several seconds. Override via
+// Server.SetTimeouts if a deployment needs tighter bounds.
+const (
+	defaultReadTimeout  = 15 * time.Second
+	defaultWriteTimeout = 30 * time.Second
+	defaultIdleTimeout  = 120 * time.Second
+)
+
 // CollectorStatus tracks the status of a collector.
 type CollectorStatus struct {
 	Name    string `json:"name"`
@@ -186,9 +198,9 @@ func NewServerWithMultiTenant(bindAddress, metricsPath, healthPath string, enabl
 	s.server = &http.Server{
 		Addr:         bindAddress,
 		Handler:      handler,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  defaultReadTimeout,
+		WriteTimeout: defaultWriteTimeout,
+		IdleTimeout:  defaultIdleTimeout,
 	}
 
 	return s
@@ -265,9 +277,9 @@ func NewServerWithRBAC(bindAddress, metricsPath, healthPath string, enablePprof,
 	s.server = &http.Server{
 		Addr:         bindAddress,
 		Handler:      handler,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  defaultReadTimeout,
+		WriteTimeout: defaultWriteTimeout,
+		IdleTimeout:  defaultIdleTimeout,
 	}
 
 	return s
@@ -282,6 +294,27 @@ func (s *Server) RegisterGossipRoutes(h http.Handler) {
 	s.mux.Handle("/gossip/", h)
 }
 
+// SetTimeouts overrides the HTTP server's ReadTimeout/WriteTimeout. Zero
+// values leave the corresponding timeout unchanged. Must be called before
+// Start. Raising these gives /health, /metrics, and the dashboard API more
+// slack to survive scheduler contention when the hot event-loop and its
+// worker pool are burning CPU (issue: UI/API 503s under attack-driven load,
+// since the default 5s/10s can trip on scheduling delay alone, not just slow
+// clients).
+func (s *Server) SetTimeouts(readTimeout, writeTimeout time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.server == nil {
+		return
+	}
+	if readTimeout > 0 {
+		s.server.ReadTimeout = readTimeout
+	}
+	if writeTimeout > 0 {
+		s.server.WriteTimeout = writeTimeout
+	}
+}
+
 // Start starts the HTTP server in a goroutine.
 // It also launches the anomaly score cardinality cleanup goroutine so stale
 // per-PID Prometheus label sets are removed before they cause OOM.
@@ -293,6 +326,13 @@ func (s *Server) Start(ctx context.Context) error {
 	go StartAnomalyScoreCleanup(ctx, AnomalyScoreEvictionInterval, 30*time.Minute)
 
 	go func() {
+		// Pin this goroutine to its own OS thread so the Go scheduler always
+		// has a dedicated M to run the HTTP listener on, instead of
+		// competing with the potentially thousands of hot event-loop/worker
+		// goroutines for the same P under attack-driven CPU load.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
 		slog.Info("exporter/server: starting HTTP server",
 			slog.String("address", s.bindAddress),
 			slog.String("metrics", s.metricsPath),

@@ -233,6 +233,11 @@ func (ad *AnomalyDetector) TimeRemaining() time.Duration {
 	return ad.learner.TimeRemaining()
 }
 
+// GetSampleCount returns the number of samples recorded during the learning phase.
+func (ad *AnomalyDetector) GetSampleCount() uint64 {
+	return ad.learner.GetSampleCount()
+}
+
 // GetProfileManager returns the underlying workload profile manager.
 func (ad *AnomalyDetector) GetProfileManager() *WorkloadProfileManager {
 	return ad.profileManager
@@ -242,7 +247,9 @@ func (ad *AnomalyDetector) GetProfileManager() *WorkloadProfileManager {
 //
 // Lock order invariant: wpm.mu (WorkloadProfileManager) must be acquired before
 // profile.mu. This is enforced by the call chain:
-//   ProcessEvent -> GetByKey (holds wpm.mu) -> calculateAnomalyScore.
+//
+//	ProcessEvent -> GetByKey (holds wpm.mu) -> calculateAnomalyScore.
+//
 // The invariant prevents deadlock between RecordEvent and calculateAnomalyScore.
 func (ad *AnomalyDetector) calculateAnomalyScore(profile *ProcessProfile, event types.Event, key WorkloadKey) *AnomalyResult {
 	profile.mu.Lock()

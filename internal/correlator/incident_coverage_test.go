@@ -9,15 +9,15 @@ import (
 )
 
 func TestNewIncidentTracker_DefaultsWindowWhenZeroOrNegative(t *testing.T) {
-	tr := newIncidentTracker(0)
+	tr := newIncidentTracker(0, nil, []Rule{})
 	assert.Equal(t, 60*time.Second, tr.window)
 
-	tr = newIncidentTracker(-time.Second)
+	tr = newIncidentTracker(-time.Second, nil, []Rule{})
 	assert.Equal(t, 60*time.Second, tr.window)
 }
 
 func TestIncidentTracker_Add_ZeroTimestampUsesNow(t *testing.T) {
-	tr := newIncidentTracker(60 * time.Second)
+	tr := newIncidentTracker(60*time.Second, nil, []Rule{})
 	before := time.Now()
 
 	tr.Add(types.Alert{PID: 1, RuleID: "r1"}) // Timestamp left zero-valued

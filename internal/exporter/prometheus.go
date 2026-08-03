@@ -2,6 +2,8 @@
 package exporter
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
@@ -132,6 +134,24 @@ var (
 		prometheus.GaugeOpts{
 			Name: "ebpf_guard_learning_progress",
 			Help: "Progress of the behavioral learning phase (0.0-1.0)",
+		},
+	)
+
+	// LearningComplete indicates whether the profiler learning phase has
+	// finished (1) or is still in progress (0).
+	LearningComplete = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_learning_complete",
+			Help: "1 if the behavioral learning phase is complete, 0 if still learning",
+		},
+	)
+
+	// LearningSecondsRemaining tracks the estimated time left in the profiler
+	// learning phase. 0 once learning is complete.
+	LearningSecondsRemaining = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_learning_seconds_remaining",
+			Help: "Estimated seconds remaining in the behavioral learning phase",
 		},
 	)
 
@@ -278,6 +298,22 @@ func SetLearningProgress(progress float64) {
 	LearningProgress.Set(progress)
 }
 
+// SetLearningComplete sets the learning-complete gauge: 1 if the behavioral
+// learning phase has finished, 0 if still learning.
+func SetLearningComplete(complete bool) {
+	if complete {
+		LearningComplete.Set(1)
+	} else {
+		LearningComplete.Set(0)
+	}
+}
+
+// SetLearningSecondsRemaining sets the estimated seconds remaining in the
+// behavioral learning phase.
+func SetLearningSecondsRemaining(remaining time.Duration) {
+	LearningSecondsRemaining.Set(remaining.Seconds())
+}
+
 // SetProfilerStateRestored sets the state-restored gauge: 1 if EWMA state was
 // loaded from disk, 0 if the agent started fresh.
 func SetProfilerStateRestored(restored bool) {
@@ -370,7 +406,6 @@ var (
 func RecordGPUEvent(op string) {
 	GPUEventsTotal.WithLabelValues(op).Inc()
 }
-
 
 // ── Kubernetes enricher metrics ───────────────────────────────────────────────
 

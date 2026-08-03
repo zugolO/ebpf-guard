@@ -1134,6 +1134,16 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 				return "ipv6"
 			}
 			return "ipv4"
+		case "conn_rate_1m":
+			// Behavioral signal for high-frequency connection patterns
+			// (password spraying / brute-force) that leave no syscall or
+			// file trace. See docs/l7-detection-coverage.md.
+			//
+			// Read-only: the engine records the attempt once per event before
+			// rule evaluation. Recording here instead would count one
+			// connection once per rule referencing this field.
+			count := globalConnFrequency.Rate(e.PID, e.Network.Dport, eventTime(e))
+			return formatConnRate(count)
 		case "proc.args":
 			return e.ProcArgs
 		case "proc.args_truncated":

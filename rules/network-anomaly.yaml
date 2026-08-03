@@ -102,6 +102,30 @@ rules:
     action: alert
     tags: [mitre:T1046, network-anomaly, portscan]
 
+  # High-frequency connections to the same destination port from one process —
+  # a behavioral signal for password spraying / credential-stuffing / brute-force
+  # login attempts. These attacks are L7 (HTTP request bodies) and leave no
+  # syscall/file trace; connection rate is the only kernel-visible signal.
+  # See docs/detection-coverage-l7.md for the full coverage boundary.
+  - id: net_high_frequency_connections
+    name: "High-frequency connections to same port (possible brute-force)"
+    description: >
+      A process opened an unusually high number of TCP connections to the same
+      destination port within 60 seconds. This is consistent with password
+      spraying, credential stuffing, or brute-force login attempts against a
+      web/auth endpoint — attacks whose actual payload (failed login attempts)
+      is invisible at the syscall/network level without TLS-uprobe parsing.
+    event_type: network
+    condition_group:
+      operator: and
+      conditions:
+        - field: conn_rate_1m
+          op: gt
+          values: ["30"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1110, brute-force, network-anomaly, behavioral]
+
   # SSH session lasting more than 72 hours is unusual even for admins.
   - id: net_long_ssh_session
     name: "SSH session lasting more than 72 hours"

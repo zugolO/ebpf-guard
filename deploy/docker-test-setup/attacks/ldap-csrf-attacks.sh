@@ -333,23 +333,41 @@ analyze_results() {
         echo "========================================"
         echo ""
 
+        # curl's -w "...%{http_code}" writes the *resolved* numeric status,
+        # not the literal string "http_code" — grepping for "http_code" against
+        # the output files always matched 0 lines. Match the actual format
+        # instead: every attack function writes "<label>: <3-digit code>".
         echo "=== LDAP ATTACKS ==="
-        local ldap_files=(localhost_scan filter disclosure blind)
+        local total_requests=0
+        local zero_request_files=""
         for file in "$RESULTS_DIR"/ldap_*.txt; do
             if [ -f "$file" ]; then
-                local count=$(grep -c "http_code" "$file" 2>/dev/null)
+                local count=$(grep -cE ': [0-9]{3}$' "$file" 2>/dev/null)
                 echo "$(basename $file): $count attempts"
+                total_requests=$((total_requests + count))
+                [ "$count" -eq 0 ] && zero_request_files="$zero_request_files $(basename "$file")"
             fi
         done
 
         echo ""
         echo "=== CSRF ATTACKS ==="
-        for file in "$RESULTS_DIR"/csrf_*.txt; do
+        for file in "$RESULTS_DIR"/csrf_*.txt "$RESULTS_DIR"/session_manipulation_*.txt; do
             if [ -f "$file" ]; then
-                local count=$(grep -c "http_code" "$file" 2>/dev/null)
+                local count=$(grep -cE ': [0-9]{3}$' "$file" 2>/dev/null)
                 echo "$(basename $file): $count attempts"
+                total_requests=$((total_requests + count))
+                [ "$count" -eq 0 ] && zero_request_files="$zero_request_files $(basename "$file")"
             fi
         done
+
+        echo ""
+        echo "=== REQUEST GATE ==="
+        echo "Всего запросов: $total_requests"
+        if [ -n "$zero_request_files" ]; then
+            echo "GATE: FAILED — файлы с 0 попытками:$zero_request_files"
+        else
+            echo "GATE: OK — все сценарии отправили >0 запросов"
+        fi
 
         echo ""
         echo "=== LDAP/CSRF-RELATED METRICS ==="

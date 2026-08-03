@@ -82,6 +82,10 @@ tlsInspection:
 
 ## Limitations
 
+> **See also:** [L7 (Application-Layer) Detection Coverage Boundary](l7-detection-coverage.md)
+> for what this means in practice for web attacks (SQLi, brute-force logins)
+> against unsupported runtimes like Node.js.
+
 ### Library Support
 
 | Library | Support Status | Notes |

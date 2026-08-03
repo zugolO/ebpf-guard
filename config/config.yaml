@@ -12,6 +12,13 @@ server:
   bind_address: ":19090"
   metrics_path: "/metrics"
   health_path: "/health"
+  # HTTP read/write timeouts. Defaults (15s/30s) are deliberately forgiving so
+  # /health, /metrics, and the dashboard API stay responsive under CPU
+  # contention from the event-loop/worker pool during an attack, rather than
+  # tripping on scheduling delay alone. Lower these if you need tighter
+  # bounds and are not running under sustained CPU pressure.
+  # read_timeout: 15s
+  # write_timeout: 30s
 
 bpf:
   map_sizes:
@@ -102,6 +109,20 @@ profiler:
   # The code default is 4096 when unset; 0 = auto-detect from
   # /proc/sys/kernel/pid_max (can be millions on modern kernels — not advised).
   max_tracked_pids: 1024
+  # state_persistence: save the learned EWMA baseline and syscall allowlist to
+  # disk so a restart (rescheduling, OOM-kill, upgrade) doesn't reset the
+  # learning_period timer to zero. Disabled by default because it writes to
+  # local disk — in Kubernetes, mount a persistent volume at the parent
+  # directory of `path` (a plain emptyDir is lost on rescheduling, same as
+  # not persisting at all). State older than 2x learning_period is treated
+  # as stale and ignored.
+  state_persistence:
+    enabled: false
+    path: /var/lib/ebpf-guard/profiler-state.json
+    # save_interval_seconds: periodic autosave in addition to the save that
+    # always happens on graceful shutdown, so a SIGKILL/OOM-kill doesn't lose
+    # everything learned since the last clean exit.
+    save_interval_seconds: 300
 
 # Watchdog: auto-tuning under resource pressure. Both watchers degrade the
 # agent gracefully and recover automatically; all fields below are optional and

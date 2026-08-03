@@ -610,6 +610,22 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1003, sigma, memory-dump, credential-access]
+    # systemd-journal reads /proc/[pid]/{maps,environ,cmdline} routinely when
+    # attributing log lines to a process (_COMM/_CMDLINE journal fields), and
+    # ebpf-guard reads its own /proc/self equivalents for self-monitoring —
+    # neither is credential access. Observed as ~97% of this rule's alerts on
+    # an idle host (see ISSUES-attack-run-2026-08-03.md P1-6).
+    exceptions:
+      - name: systemd-journal
+        condition:
+          field: proc.comm
+          op: eq
+          values: [systemd-journal]
+      - name: ebpf-guard-self
+        condition:
+          field: proc.comm
+          op: eq
+          values: [ebpf-guard]
 
   - id: sigma_ptrace_attach
     name: "ptrace PTRACE_ATTACH to another process"

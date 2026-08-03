@@ -5,8 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -121,7 +124,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 
 	root.AddCommand(
 		newAlertsCmd(&cfgPath),
-		newStatusCmd(),
+		newStatusCmd(&cfgPath),
 		rulesCmd,
 		newVersionCmd(),
 		newLearnCmd(),
@@ -351,6 +354,16 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	engineCfg.LearningPeriod = time.Duration(cfg.Profiler.LearningPeriod) * time.Second
 	engineCfg.EWMAWeight = cfg.Profiler.EWMAWeight
 	engineCfg.MinLearningSamples = cfg.Profiler.MinLearningSamples
+
+	// Learning takes as long as configured regardless of how long this process
+	// happens to run for; a short-lived run (a manual test, a CI smoke test)
+	// against a long learning_period will never leave the learning phase, and
+	// without this warning that reads as "profiler broken" rather than "still
+	// learning". See ISSUES-attack-run-2026-08-03.md P1-4.
+	if cfg.Profiler.Enabled && engineCfg.LearningPeriod > 10*time.Minute {
+		slog.Warn("profiler: learning_period is long relative to typical test/attack-sim runs; anomaly detection will stay in the learning phase (no anomaly alerts) until it elapses",
+			slog.Duration("learning_period", engineCfg.LearningPeriod))
+	}
 	engineCfg.EnableRateLimit = cfg.Rules.RateLimitAlerts
 	engineCfg.RateLimitWindow = time.Duration(cfg.Rules.RateLimitWindow) * time.Second
 	engineCfg.MaxAlertsPerWindow = cfg.Rules.MaxAlertsPerWindow
@@ -433,6 +446,44 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Warn("profiler: failed to register workload profile metrics",
 					slog.Any("error", err))
 			}
+		}
+
+		// Restore learned EWMA/allowlist state from a previous run so restarts
+		// (common in a Kubernetes DaemonSet) don't reset the learning timer to
+		// zero every time. See ISSUES-attack-run-2026-08-03.md P0-3.
+		if cfg.Profiler.StatePersistence.Enabled {
+			learningPeriod := time.Duration(cfg.Profiler.LearningPeriod) * time.Second
+			if ready, loadErr := prof.LoadState(cfg.Profiler.StatePersistence.Path, learningPeriod); loadErr != nil {
+				slog.Warn("profiler: failed to load persisted state, starting fresh",
+					slog.String("path", cfg.Profiler.StatePersistence.Path),
+					slog.Any("error", loadErr))
+				exporter.ProfilerStateRestored.Set(0)
+			} else {
+				slog.Info("profiler: restored persisted state",
+					slog.String("path", cfg.Profiler.StatePersistence.Path),
+					slog.Bool("learning_complete", ready))
+				exporter.ProfilerStateRestored.Set(1)
+			}
+
+			saveInterval := time.Duration(cfg.Profiler.StatePersistence.SaveIntervalSeconds) * time.Second
+			if saveInterval <= 0 {
+				saveInterval = 5 * time.Minute
+			}
+			go func() {
+				ticker := time.NewTicker(saveInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if saveErr := prof.SaveState(cfg.Profiler.StatePersistence.Path); saveErr != nil {
+							slog.Warn("profiler: periodic state autosave failed",
+								slog.Any("error", saveErr))
+						}
+					}
+				}
+			}()
 		}
 
 		if cfg.Watchdog.MemoryPressure.Enabled {
@@ -748,6 +799,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		adminToken,
 		cfg.Auth.Enabled,
 	)
+	srv.SetTimeouts(cfg.Server.ReadTimeout, cfg.Server.WriteTimeout)
 	srv.SetCORSAllowedOrigins(cfg.Server.CORSAllowedOrigins)
 	srv.SetAlertStore(alertStore)
 	srv.SetRulesProvider(func() []correlator.Rule {
@@ -782,6 +834,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			health.DriftStuckWorkloads = driftProfiler.StuckLearningWorkloads()
 			health.DriftProfilesActive = driftProfiler.ProfileCount()
 		}
+		health.LearningComplete = engine.IsLearningComplete()
+		health.LearningProgress = engine.LearningProgress()
+		health.LearningSecondsRemaining = engine.LearningTimeRemaining().Seconds()
+		health.LearningSamples = engine.LearningSampleCount()
 		return health
 	})
 
@@ -1449,13 +1505,28 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
+		const logEvery = 4 // log learning progress roughly once a minute, not every 15s
+		tick := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				exporter.SetLearningProgress(engine.LearningProgress())
+				progress := engine.LearningProgress()
+				complete := engine.IsLearningComplete()
+				remaining := engine.LearningTimeRemaining()
+				exporter.SetLearningProgress(progress)
+				exporter.SetLearningComplete(complete)
+				exporter.SetLearningSecondsRemaining(remaining)
 				exporter.SetTrackedPIDs(float64(engine.TrackedPIDCount()))
+
+				tick++
+				if cfg.Profiler.Enabled && !complete && tick%logEvery == 0 {
+					slog.Info("profiler: learning in progress",
+						slog.String("progress", fmt.Sprintf("%.0f%%", progress*100)),
+						slog.Duration("time_remaining", remaining.Round(time.Second)),
+						slog.Uint64("samples", engine.LearningSampleCount()))
+				}
 			}
 		}
 	}()
@@ -1611,7 +1682,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Debug("shutdown: worker pool drain interrupted", slog.Any("error", aerr))
 			}
 			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration,
-				cfg.Server.ShutdownTimeout, cfg.Server.ShutdownDrainEnforcement, cfg.Server.ShutdownDrainRego)
+				cfg.Server.ShutdownTimeout, cfg.Server.ShutdownDrainEnforcement, cfg.Server.ShutdownDrainRego,
+				prof, cfg.Profiler.StatePersistence)
 			return nil
 
 		case event, ok := <-eventCh:
@@ -1795,6 +1867,8 @@ func gracefulShutdown(
 	fanout *exporter.FanoutNotifier,
 	shutdownDuration prometheus.Gauge,
 	totalTimeout, drainEnforcementTimeout, drainRegoTimeout time.Duration,
+	prof *profiler.Profiler,
+	statePersistence config.StatePersistenceConfig,
 ) {
 	if totalTimeout <= 0 {
 		totalTimeout = 30 * time.Second
@@ -1905,6 +1979,16 @@ func gracefulShutdown(
 	}
 
 	engine.Close()
+
+	// Persist learned EWMA/allowlist state so the next restart doesn't reset
+	// the learning timer to zero. See ISSUES-attack-run-2026-08-03.md P0-3.
+	if prof != nil && statePersistence.Enabled {
+		slog.Info("graceful shutdown: saving profiler state",
+			slog.String("path", statePersistence.Path))
+		if err := prof.SaveState(statePersistence.Path); err != nil {
+			slog.Warn("graceful shutdown: profiler state save error", slog.Any("error", err))
+		}
+	}
 
 	// Step 8: remove nftables/iptables rules the enforcer installed.
 	if enf != nil {
@@ -2101,14 +2185,121 @@ func newAlertsCmd(cfgPath *string) *cobra.Command {
 	return cmd
 }
 
-func newStatusCmd() *cobra.Command {
-	return &cobra.Command{
+func newStatusCmd(cfgPath *string) *cobra.Command {
+	var (
+		url   string
+		token string
+	)
+
+	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show agent status",
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Println("Use 'GET /health' on the running agent for live status.")
+		Short: "Show live agent status, including profiler learning progress",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if url == "" {
+				url = defaultStatusURL(*cfgPath)
+			}
+			if token == "" {
+				token = defaultStatusToken(*cfgPath)
+			}
+
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				return fmt.Errorf("build request: %w", err)
+			}
+			if token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+			if err != nil {
+				return fmt.Errorf("request %s: %w (is the agent running? use --url to point at a different agent)", url, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("%s returned %s: %s", url, resp.Status, strings.TrimSpace(string(body)))
+			}
+
+			var status exporter.StatusAPIResponse
+			if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+				return fmt.Errorf("decode status response: %w", err)
+			}
+
+			fmt.Printf("healthy: %v   ready: %v   uptime: %s\n", status.Healthy, status.Ready, status.Uptime)
+			fmt.Printf("store: %s\n", status.Store)
+			for _, c := range status.Collectors {
+				state := "up"
+				if !c.Healthy {
+					state = "down: " + c.Error
+				}
+				fmt.Printf("  collector %-12s %s\n", c.Name, state)
+			}
+
+			if status.Health == nil {
+				fmt.Println("\nlearning: unknown (agent-health provider not configured)")
+				return nil
+			}
+			h := status.Health
+			fmt.Println()
+			if h.LearningComplete {
+				fmt.Println("learning: complete")
+			} else {
+				fmt.Printf("learning: %.0f%% complete, ~%s remaining, %d samples\n",
+					h.LearningProgress*100,
+					time.Duration(h.LearningSecondsRemaining*float64(time.Second)).Round(time.Second),
+					h.LearningSamples)
+			}
+			if h.VisibilityReduced {
+				fmt.Printf("visibility: REDUCED (cpu pressure level %d, %.0f%% cpu)\n", h.CPUPressureLevel, h.CPUPressurePercent)
+			}
+			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&url, "url", "", "agent status endpoint (default: derived from --config's server.bind_address)")
+	cmd.Flags().StringVar(&token, "token", "", "bearer token for authenticated agents (default: read from config or the persisted token file)")
+	return cmd
+}
+
+// defaultStatusURL derives the GET /api/v1/status URL from the agent's own
+// config file so `ebpf-guard status` works out of the box on the same host
+// without requiring --url for the common case.
+func defaultStatusURL(cfgPath string) string {
+	bind := ":9090"
+	if cfgManager, err := config.NewManagerSkipPermCheck(cfgPath); err == nil {
+		if b := cfgManager.Get().Server.BindAddress; b != "" {
+			bind = b
+		}
+	}
+	host := "127.0.0.1"
+	port := bind
+	if idx := strings.LastIndex(bind, ":"); idx >= 0 {
+		if h := bind[:idx]; h != "" && h != "0.0.0.0" && h != "::" {
+			host = h
+		}
+		port = bind[idx:]
+	}
+	return "http://" + host + port + "/api/v1/status"
+}
+
+// defaultStatusToken resolves a bearer token for `ebpf-guard status` from the
+// config file, falling back to the persisted token file written on first run
+// (see writeTokenFile) when auth tokens were auto-generated.
+func defaultStatusToken(cfgPath string) string {
+	if cfgManager, err := config.NewManagerSkipPermCheck(cfgPath); err == nil {
+		cfg := cfgManager.Get()
+		if cfg.Auth.AdminToken != "" {
+			return cfg.Auth.AdminToken
+		}
+		if cfg.Auth.BearerToken != "" {
+			return cfg.Auth.BearerToken
+		}
+	}
+	if admin, _, err := readTokenFile(); err == nil && admin != "" {
+		return admin
+	}
+	return ""
 }
 
 func newRulesCmd(cfgPath *string) *cobra.Command {

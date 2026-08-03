@@ -248,9 +248,25 @@ func TestSupplyChain_TmpStagingElf(t *testing.T) {
 func TestSupplyChain_BuildToolSystemWrite(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/supply-chain.yaml")
 
-	alerts := re.Evaluate(nrFile("/usr/bin/injected"))
+	event := nrFile("/usr/bin/injected")
+	event.File.Op = 2 // write
+	copy(event.Comm[:], "gcc")
+	alerts := re.Evaluate(event)
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "supply_chain_build_tool_rootwrite")
+}
+
+func TestSupplyChain_BuildToolSystemWrite_NonBuildToolNoAlert(t *testing.T) {
+	re := nrLoadRules(t, "../../rules/supply-chain.yaml")
+
+	// A non-build-tool process (e.g. sshd loading PAM modules) opening/reading
+	// a file under a system directory must not trigger the build-tool rule —
+	// this was the P1-6 false-positive source (see
+	// ISSUES-attack-run-2026-08-03.md).
+	event := nrFile("/usr/bin/injected")
+	copy(event.Comm[:], "sshd")
+	alerts := re.Evaluate(event)
+	assert.NotContains(t, nrAlertIDs(alerts), "supply_chain_build_tool_rootwrite")
 }
 
 func TestSupplyChain_LockfileRecon(t *testing.T) {

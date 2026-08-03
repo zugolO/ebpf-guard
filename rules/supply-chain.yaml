@@ -176,19 +176,45 @@ rules:
       scripts use this to install backdoors during the compilation phase —
       a T1195.002 attack targeting the software development pipeline.
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/usr/bin/"
-        - "/usr/sbin/"
-        - "/usr/lib/"
-        - "/usr/local/bin/"
-        - "/usr/local/lib/"
-        - "/bin/"
-        - "/sbin/"
-        - "/lib/"
-        - "/lib64/"
+    # Requires op: write AND comm to actually be a build tool — without both,
+    # this matched any process (sshd, cron, systemd units, ...) merely
+    # *opening* a file under these very broad prefixes, which was the
+    # majority of this rule's alerts on an idle host (see
+    # ISSUES-attack-run-2026-08-03.md P1-6).
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: proc.comm
+          op: in
+          values:
+            - gcc
+            - "cc1"
+            - clang
+            - make
+            - cargo
+            - rustc
+            - mvn
+            - maven
+            - gradle
+            - go
+            - ld
+            - "as"
+            - link
+        - field: filename
+          op: prefix
+          values:
+            - "/usr/bin/"
+            - "/usr/sbin/"
+            - "/usr/lib/"
+            - "/usr/local/bin/"
+            - "/usr/local/lib/"
+            - "/bin/"
+            - "/sbin/"
+            - "/lib/"
+            - "/lib64/"
     severity: critical
     action: alert
     tags: [mitre-t1195, mitre-t1195.002, supply-chain, build-tool, tampering]

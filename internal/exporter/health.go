@@ -38,6 +38,16 @@ type AgentHealth struct {
 	// HardwareProfile is the resolved lite/balanced/production tuning
 	// profile name (see HardwareProfileState).
 	HardwareProfile string `json:"hardware_profile,omitempty"`
+	// LearningComplete is true once the EWMA behavioral anomaly detector has
+	// finished its learning phase (see ebpf_guard_learning_complete).
+	LearningComplete bool `json:"learning_complete"`
+	// LearningProgress mirrors ebpf_guard_learning_progress (0.0-1.0).
+	LearningProgress float64 `json:"learning_progress"`
+	// LearningSecondsRemaining mirrors ebpf_guard_learning_seconds_remaining;
+	// 0 once learning is complete.
+	LearningSecondsRemaining float64 `json:"learning_seconds_remaining"`
+	// LearningSamples is the number of samples recorded during the learning phase.
+	LearningSamples uint64 `json:"learning_samples"`
 }
 
 // SetAgentHealthProvider wires the function that supplies the agent-health

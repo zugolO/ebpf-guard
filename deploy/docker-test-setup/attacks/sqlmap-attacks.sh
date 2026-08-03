@@ -35,7 +35,22 @@ check_sqlmap() {
         error "sqlmap не установлен. Установите: apt-get install sqlmap"
         exit 1
     fi
-    log "sqlmap найден: $(sqlmap --version | head -1)"
+
+    local version
+    version=$(sqlmap --version 2>/dev/null | head -1 | tr -d '\r\n*')
+    log "sqlmap найден: $version"
+
+    # sqlmap < 1.7 не поддерживает часть флагов, используемых ниже
+    # (--parse-errors требует 1.4+; отсутствие свежих tamper/техник на старых
+    # версиях даёт много false-negative на level=5/risk=3 сценариях) —
+    # апстрим пакеты (apt) часто отстают на несколько лет, поэтому предупреждаем,
+    # а не падаем, чтобы не блокировать прогон на CI-образах без pip.
+    local major minor
+    major=$(echo "$version" | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)
+    minor=$(echo "$version" | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f2)
+    if [ -n "$major" ] && { [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 7 ]; }; }; then
+        warn "sqlmap $version устарел (нужен >= 1.7). Обновите: pip install -U sqlmap  (или git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git)"
+    fi
 }
 
 # Получение метрик до атаки
@@ -214,7 +229,6 @@ attack_comprehensive() {
         --technique=BEUSTQ \
         --dbms=SQLite \
         --dump \
-        --dump-table \
         --output-dir="$output_dir" \
         --flush-session \
         --parse-errors \
@@ -263,6 +277,23 @@ analyze_results() {
     echo "" >> "$summary_file"
     echo "=== SQLMAP VULNERABILITIES FOUND ===" >> "$summary_file"
     find "$RESULTS_DIR" -name "*.log" -exec grep -l "vulnerable" {} \; >> "$summary_file" || echo "Уязвимости не найдены"
+
+    # Gate: sqlmap логирует каждую отправленную HTTP-строку с timestamp-префиксом
+    # "[HH:MM:SS]" ("[INFO] testing ...", "[WARNING] ...", и т.д.) — если во всех
+    # логах прогона таких строк нет, значит sqlmap не отправил ни одного запроса
+    # (сбой опций/сети до старта сканирования), и анализировать метрики бессмысленно.
+    local total_log_lines
+    total_log_lines=$(find "$RESULTS_DIR" -name "sqlmap.log" -newer "$RESULTS_DIR/metrics-before-$TIMESTAMP.txt" -exec grep -cE '^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\]' {} \; 2>/dev/null | awk '{s+=$1} END {print s+0}')
+    echo "" >> "$summary_file"
+    echo "=== REQUEST GATE ===" >> "$summary_file"
+    echo "sqlmap log lines (proxy for requests sent): $total_log_lines" >> "$summary_file"
+    if [ "$total_log_lines" -eq 0 ]; then
+        error "sqlmap не отправил ни одного запроса за весь прогон — проверьте опции/версию sqlmap выше"
+        echo "GATE: FAILED — 0 sqlmap log lines, атаки не выполнялись" >> "$summary_file"
+    else
+        log "✓ sqlmap отправил запросы (лог-строк: $total_log_lines)"
+        echo "GATE: OK" >> "$summary_file"
+    fi
 
     cat "$summary_file"
     log "Summary сохранен в $summary_file"

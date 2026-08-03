@@ -62,3 +62,29 @@ func TestProfiler_SaveAndLoadState(t *testing.T) {
 	_ = ready
 	_ = err
 }
+
+// TestProfiler_SaveAndLoadState_LearningCompletePreserved is the P0-3
+// acceptance test: save a profiler whose learning phase has completed,
+// load it into a brand new detector, and confirm IsLearningComplete()
+// survives the round trip instead of resetting on restart.
+func TestProfiler_SaveAndLoadState_LearningCompletePreserved(t *testing.T) {
+	p := buildFullProfiler(t)
+
+	// Force learning to complete without waiting out the real learning period.
+	p.detector.learner.mu.Lock()
+	p.detector.learner.learningComplete = true
+	p.detector.learner.mu.Unlock()
+	p.detector.learningComplete.Store(true)
+	require.True(t, p.IsLearningComplete())
+
+	path := filepath.Join(t.TempDir(), "state.json")
+	require.NoError(t, p.SaveState(path))
+
+	p2 := buildFullProfiler(t)
+	require.False(t, p2.IsLearningComplete(), "sanity: fresh profiler should not start as learning-complete")
+
+	ready, err := p2.LoadState(path, time.Hour)
+	require.NoError(t, err)
+	assert.True(t, ready, "LoadState should report learning was already complete")
+	assert.True(t, p2.IsLearningComplete(), "IsLearningComplete() must be preserved across save/load")
+}

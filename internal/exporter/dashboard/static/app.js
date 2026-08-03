@@ -112,6 +112,64 @@
     return /^https?:\/\//i.test(s) ? s : "#";
   }
 
+  // --- CSP-safe proportional sizing -------------------------------------
+  // The dashboard is served with `style-src 'self'` and no 'unsafe-inline'
+  // (dashboard.go), which blocks the CSSOM style attribute as well as inline
+  // <style> — so `el.style.width = pct + "%"` was silently dropped and the
+  // top-rules bars and the timeline rendered flat. Snapping to one of 21 fixed
+  // 5%-step classes defined in style.css keeps the CSP intact and needs no
+  // inline style at all.
+  function pctClass(value, max) {
+    const safeMax = max > 0 ? max : 1;
+    const pct = Math.max(0, Math.min(100, (value / safeMax) * 100));
+    return "pct-" + Math.round(pct / 5) * 5;
+  }
+
+  // --- Agent-state banners ----------------------------------------------
+  // An empty alert feed has two very different meanings: "nothing happened" or
+  // "the agent could not see it". These banners make the second case
+  // impossible to miss, rather than leaving it in a card further down the page.
+
+  function renderBanners(status) {
+    const container = el("banners");
+    if (!container) return;
+    const health = status && status.health;
+    const parts = [];
+
+    if (health && health.learning_complete === false) {
+      const pct = Math.round((health.learning_progress || 0) * 100);
+      const remaining = Math.max(0, Math.round((health.learning_seconds_remaining || 0) / 60));
+      parts.push(`
+        <div class="banner learning">
+          <span class="banner-title">Baseline learning: ${pct}%</span>
+          <span class="bar"><span class="${pctClass(pct, 100)}"></span></span>
+          <span class="banner-note">
+            ~${remaining} min remaining · ${health.learning_samples || 0} samples ·
+            behavioral anomaly alerts are suppressed until this completes
+          </span>
+        </div>`);
+    }
+
+    if (health && health.visibility_reduced) {
+      parts.push(`
+        <div class="banner degraded">
+          <span class="banner-title">Reduced visibility</span>
+          <span class="banner-note">${escapeHTML(healthDegradedReason(health))}
+            Some events are being sampled out — an empty feed does not mean "no activity".</span>
+        </div>`);
+    }
+
+    if (health && health.drift_stuck_workloads > 0) {
+      parts.push(`
+        <div class="banner degraded">
+          <span class="banner-title">${health.drift_stuck_workloads} workload(s) stuck in learning</span>
+          <span class="banner-note">Too little traffic to complete a drift baseline; drift rules stay suppressed for them.</span>
+        </div>`);
+    }
+
+    container.innerHTML = parts.join("");
+  }
+
   function renderSummary(summary) {
     const total = summary.total ?? 0;
     // Truncated is only set by the Query-based fallback path; show "≥N" so the
@@ -126,9 +184,8 @@
     const max = rules.reduce((m, r) => Math.max(m, r.count), 1);
     for (const r of rules.slice(0, 8)) {
       const li = document.createElement("li");
-      const pct = Math.round((r.count / max) * 100);
       li.innerHTML = `<span class="name" title="${escapeHTML(r.rule_id)}">${escapeHTML(r.rule_id)}</span>
-        <span class="bar"><span style="width:${pct}%"></span></span>
+        <span class="bar"><span class="${pctClass(r.count, max)}"></span></span>
         <span class="count">${r.count}</span>`;
       topRulesEl.appendChild(li);
     }
@@ -139,9 +196,9 @@
     const tmax = buckets.reduce((m, b) => Math.max(m, b.count), 1);
     for (const b of buckets) {
       const div = document.createElement("div");
-      div.className = "bucket";
-      const height = Math.max(2, Math.round((b.count / tmax) * 100));
-      div.style.height = height + "%";
+      // Height comes from a class, not div.style: the CSP blocks the inline
+      // style attribute, so the previous assignment left every bar flat.
+      div.className = "bucket " + pctClass(b.count, tmax);
       div.title = `${b.hour}: ${b.count}`;
       timelineEl.appendChild(div);
     }
@@ -458,6 +515,7 @@
       el("status").title = degradedReason || "";
       renderSummary(summary);
       renderHealth(status);
+      renderBanners(status);
       const rows = alerts || [];
       state.lastPageSize = rows.length;
       state.alerts = sortAlertsByRecency(rows);
@@ -561,12 +619,22 @@
   // tab or link pointing at it.
 
   function switchTab(name) {
-    for (const tab of ["alerts", "incidents", "fleet"]) {
+    for (const tab of ["alerts", "incidents", "fleet", "coverage"]) {
       el("view-" + tab).classList.toggle("hidden", tab !== name);
       el("tab-" + tab).classList.toggle("active", tab === name);
     }
     if (name === "incidents") refreshIncidents();
     if (name === "fleet") refreshFleet();
+    if (name === "coverage") refreshCoverage();
+  }
+
+  // incidentTitle describes an incident by what it did, not by where it lives.
+  // The process chain (bash → curl → xmrig) is the single most useful
+  // identifier for triage; namespace is the fallback for chainless incidents.
+  function incidentTitle(inc) {
+    const chain = inc.process_chain || [];
+    if (chain.length > 0) return chain.join(" → ");
+    return inc.namespace || "(no namespace)";
   }
 
   function renderIncidents(incidents) {
@@ -580,18 +648,146 @@
       const row = document.createElement("div");
       row.className = "alert-row" + (inc.id === state.selectedIncidentId ? " selected" : "");
       row.dataset.id = inc.id;
+      // Verdict, score and killchain breadth are the triage signals: they are
+      // what separates "one noisy rule fired 200 times" from "five distinct
+      // rules across three tactics on one process tree".
+      const verdict = inc.verdict
+        ? `<span class="verdict-badge ${escapeHTML(inc.verdict)}">${escapeHTML(inc.verdict)}</span>`
+        : "";
+      const score = inc.score
+        ? `<span class="score-badge" title="Incident score">${Math.round(inc.score)}</span>`
+        : "";
+      const tactics = (inc.tactics || []).length
+        ? `<span class="tactic-count" title="${escapeHTML((inc.tactics || []).join(", "))}">${inc.tactics.length} tactics</span>`
+        : "";
       row.innerHTML = `
-        <span class="sev-badge ${escapeHTML(inc.severity)}">${escapeHTML(inc.severity)}</span>
-        <span class="rule" title="${escapeHTML((inc.rule_ids || []).join(", "))}">${escapeHTML(inc.namespace || "(no namespace)")}</span>
+        ${verdict || `<span class="sev-badge ${escapeHTML(inc.severity)}">${escapeHTML(inc.severity)}</span>`}
+        ${score}
+        <span class="rule" title="${escapeHTML((inc.rule_ids || []).join(", "))}">${escapeHTML(incidentTitle(inc))}</span>
+        ${tactics}
         <span class="count-badge" title="${inc.alert_count} alerts">×${inc.alert_count}</span>
-        <span class="comm">${escapeHTML(inc.status)}</span>
         <span class="time">${fmtTime(inc.last_seen)}</span>`;
       row.addEventListener("click", () => selectIncident(inc.id));
       container.appendChild(row);
     }
   }
 
-  function selectIncident(id) {
+  // MITRE tactic order along the killchain, so the incident timeline reads
+  // left-to-right as attack progression rather than as an arbitrary set.
+  const TACTIC_ORDER = [
+    "initial-access", "execution", "persistence", "privilege-escalation",
+    "defense-evasion", "credential-access", "discovery", "lateral-movement",
+    "collection", "command-and-control", "exfiltration", "impact",
+  ];
+
+  function tacticRank(t) {
+    const i = TACTIC_ORDER.indexOf(String(t || "").toLowerCase());
+    return i === -1 ? TACTIC_ORDER.length : i;
+  }
+
+  // renderKillchain lays the incident's observed tactics out along the standard
+  // ATT&CK progression. Reaching impact/exfiltration from initial-access is the
+  // difference between "someone poked at us" and "we lost something", and that
+  // is not visible in a flat list of rule IDs.
+  function renderKillchain(inc) {
+    const present = new Set((inc.tactics || []).map((t) => String(t).toLowerCase()));
+    if (present.size === 0) return "";
+    const steps = TACTIC_ORDER
+      .filter((t) => present.has(t))
+      .map((t) => `<li class="killchain-step hit">${escapeHTML(t)}</li>`)
+      .join('<li class="killchain-arrow">→</li>');
+    // Tactics the agent reported but that aren't in the standard ordering.
+    const extra = [...present]
+      .filter((t) => tacticRank(t) === TACTIC_ORDER.length)
+      .map((t) => `<li class="killchain-step hit">${escapeHTML(t)}</li>`)
+      .join('<li class="killchain-arrow">→</li>');
+    return `
+      <div class="detail-field">
+        <div class="label">Killchain progress (${present.size} tactics)</div>
+        <ul class="killchain">${steps}${steps && extra ? '<li class="killchain-arrow">→</li>' : ""}${extra}</ul>
+      </div>`;
+  }
+
+  // renderScoreBreakdown explains the verdict instead of asserting it. An
+  // operator who cannot see why a score crossed the threshold has no basis to
+  // trust it — or to tune it.
+  function renderScoreBreakdown(inc) {
+    if (!inc.score) return "";
+    const verdictClass = inc.verdict === "attack" ? "attack" : "suspicious";
+    return `
+      <div class="detail-field">
+        <div class="label">Verdict</div>
+        <div class="value">
+          <span class="verdict-badge ${escapeHTML(verdictClass)}">${escapeHTML(inc.verdict || "unscored")}</span>
+          <span class="score-badge">${Math.round(inc.score)}</span>
+        </div>
+        <div class="score-inputs muted">
+          ${(inc.rule_ids || []).length} distinct rules ·
+          ${(inc.tactics || []).length} tactics ·
+          ${inc.alert_count} alerts ·
+          max severity ${escapeHTML(inc.severity)}
+        </div>
+      </div>`;
+  }
+
+  // renderIncidentTimeline orders the incident's own alerts by time so the
+  // sequence of the attack is visible. Alerts are looked up from the already
+  // loaded feed where possible; anything not in the current page is fetched
+  // individually. Fetches are capped so a 500-alert incident cannot fan out
+  // into 500 requests.
+  const INCIDENT_TIMELINE_FETCH_CAP = 40;
+
+  async function loadIncidentAlerts(inc) {
+    const ids = inc.alert_ids || [];
+    const byId = new Map(state.alerts.map((a) => [a.id, a]));
+    const resolved = [];
+    const missing = [];
+    for (const id of ids) {
+      const hit = byId.get(id);
+      if (hit) resolved.push(hit);
+      else missing.push(id);
+    }
+    const toFetch = missing.slice(0, Math.max(0, INCIDENT_TIMELINE_FETCH_CAP - resolved.length));
+    const fetched = await Promise.all(
+      toFetch.map((id) =>
+        api(`/api/v1/alerts/${encodeURIComponent(id)}`).catch(() => null)
+      )
+    );
+    for (const a of fetched) if (a) resolved.push(a);
+    resolved.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    return { alerts: resolved, omitted: ids.length - resolved.length };
+  }
+
+  function renderIncidentTimeline(result, inc) {
+    if (!result.alerts.length) {
+      return `<div class="detail-field">
+        <div class="label">Alerts (${inc.alert_count})</div>
+        <p class="muted">Alert details are no longer retained for this incident.</p>
+      </div>`;
+    }
+    const start = new Date(result.alerts[0].timestamp);
+    const rows = result.alerts.map((a) => {
+      const offset = Math.max(0, Math.round((new Date(a.timestamp) - start) / 1000));
+      return `<li class="timeline-event">
+        <span class="t-offset">+${offset}s</span>
+        <span class="sev-badge ${escapeHTML(a.severity)}">${escapeHTML(a.severity)}</span>
+        <span class="t-rule" title="${escapeHTML(a.message)}">${escapeHTML(a.rule_id)}</span>
+        <span class="t-comm">${escapeHTML(a.comm)}</span>
+        ${a.enforced ? `<span class="enforced-badge" title="Enforcement action executed">${escapeHTML(a.action)}</span>` : ""}
+      </li>`;
+    }).join("");
+    const note = result.omitted > 0
+      ? `<p class="muted">${result.omitted} further alert(s) not shown.</p>`
+      : "";
+    return `
+      <div class="detail-field">
+        <div class="label">Sequence (${inc.alert_count} alerts)</div>
+        <ul class="event-timeline">${rows}</ul>
+        ${note}
+      </div>`;
+  }
+
+  async function selectIncident(id) {
     state.selectedIncidentId = id;
     document.querySelectorAll("#incidents .alert-row").forEach((r) => {
       r.classList.toggle("selected", r.dataset.id === id);
@@ -604,31 +800,41 @@
       return;
     }
     const dur = durationBetween(inc.first_seen, inc.last_seen);
-    const alertIds = (inc.alert_ids || [])
-      .map((id) => `<li>${escapeHTML(id)}</li>`)
-      .join("");
-    detail.innerHTML = `
+    const chain = (inc.process_chain || []).length
+      ? escapeHTML(inc.process_chain.join(" → "))
+      : "(not reconstructed)";
+
+    const header = `
       <h2>Incident</h2>
+      ${renderScoreBreakdown(inc)}
       <div class="detail-field">
-        <div class="label">Status</div>
-        <div class="value">${escapeHTML(inc.status)} — ${escapeHTML(inc.severity)}</div>
+        <div class="label">Process chain${inc.root_pid ? ` (root PID ${inc.root_pid})` : ""}</div>
+        <div class="value">${chain}</div>
+      </div>
+      ${renderKillchain(inc)}
+      <div class="detail-field">
+        <div class="label">Window</div>
+        <div class="value">${fmtTime(inc.first_seen)} &rarr; ${fmtTime(inc.last_seen)} (${dur}) · ${escapeHTML(inc.status)}</div>
       </div>
       <div class="detail-field">
         <div class="label">Namespace</div>
         <div class="value">${escapeHTML(inc.namespace || "(none)")}</div>
       </div>
       <div class="detail-field">
-        <div class="label">Window</div>
-        <div class="value">${fmtTime(inc.first_seen)} &rarr; ${fmtTime(inc.last_seen)} (${dur})</div>
-      </div>
-      <div class="detail-field">
-        <div class="label">Rules involved</div>
+        <div class="label">Rules involved (${(inc.rule_ids || []).length})</div>
         <div class="value">${escapeHTML((inc.rule_ids || []).join(", "))}</div>
-      </div>
-      <div class="detail-field">
-        <div class="label">Alerts (${inc.alert_count})</div>
-        <ul class="mitigations">${alertIds}</ul>
       </div>`;
+
+    detail.innerHTML = header + '<p class="muted">Loading sequence…</p>';
+    try {
+      const result = await loadIncidentAlerts(inc);
+      // A newer selection may have completed while this was in flight.
+      if (state.selectedIncidentId !== id) return;
+      detail.innerHTML = header + renderIncidentTimeline(result, inc);
+    } catch (err) {
+      if (state.selectedIncidentId !== id) return;
+      detail.innerHTML = header + `<p class="muted">Could not load alert sequence: ${escapeHTML(err.message)}</p>`;
+    }
   }
 
   async function refreshIncidents() {
@@ -641,7 +847,13 @@
     container.innerHTML = "<p class=\"muted\">Loading…</p>";
     try {
       const incidents = await api("/api/v1/incidents?" + params.toString());
-      state.incidents = incidents || [];
+      let rows = incidents || [];
+      // Verdict has no server-side filter, so it is applied here. The server
+      // already returns incidents ranked by score (IncidentTracker.GetAll), so
+      // no client-side re-sort is needed.
+      const verdict = el("inc-verdict").value;
+      if (verdict) rows = rows.filter((i) => i.verdict === verdict);
+      state.incidents = rows;
       renderIncidents(state.incidents);
     } catch (err) {
       container.innerHTML = `<p class="muted">Could not load incidents: ${escapeHTML(err.message)}</p>`;
@@ -649,12 +861,101 @@
     }
   }
 
+  // --- Coverage tab -----------------------------------------------------
+  // Answers "what can this agent actually catch, and what has it caught?"
+  // Rules are the capability side; fired alerts are the evidence side. The
+  // distinction matters: a tactic with rules but zero hits is unproven
+  // coverage, and a tactic with no rules at all is a blind spot — those two
+  // look identical on an alert-only dashboard.
+
+  async function refreshCoverage() {
+    const matrix = el("coverage-matrix");
+    matrix.innerHTML = '<p class="muted">Loading…</p>';
+    let rules, alerts;
+    try {
+      [rules, alerts] = await Promise.all([
+        api("/api/v1/rules"),
+        api("/api/v1/alerts?" + buildQuery(currentFilters())),
+      ]);
+    } catch (err) {
+      matrix.innerHTML = `<p class="muted">Could not load coverage: ${escapeHTML(err.message)}</p>`;
+      if (err.status === 401) openTokenDialog();
+      return;
+    }
+
+    // Tactics come from the server (RuleAPIResponse.tactics) so this view
+    // always agrees with what the incident scorer counts.
+    const rulesByTactic = new Map();
+    for (const r of rules || []) {
+      for (const t of r.tactics || []) {
+        if (!rulesByTactic.has(t)) rulesByTactic.set(t, new Set());
+        rulesByTactic.get(t).add(r.id);
+      }
+    }
+    // Map fired rule IDs back onto tactics via the same rule metadata.
+    const tacticsByRuleID = new Map((rules || []).map((r) => [r.id, r.tactics || []]));
+    const firedByTactic = new Map();
+    for (const a of alerts || []) {
+      for (const t of tacticsByRuleID.get(a.rule_id) || []) {
+        firedByTactic.set(t, (firedByTactic.get(t) || 0) + (a.count > 1 ? a.count : 1));
+      }
+    }
+
+    const maxFired = Math.max(1, ...firedByTactic.values());
+    matrix.innerHTML = TACTIC_ORDER.map((t) => {
+      const ruleCount = (rulesByTactic.get(t) || new Set()).size;
+      const fired = firedByTactic.get(t) || 0;
+      const cls = ruleCount === 0 ? "blind" : fired > 0 ? "active" : "covered";
+      const note = ruleCount === 0
+        ? "no rules"
+        : fired > 0
+          ? `${fired} alert(s)`
+          : `${ruleCount} rule(s), no hits`;
+      return `
+        <div class="coverage-cell ${cls}" title="${escapeHTML(t)}: ${escapeHTML(note)}">
+          <div class="coverage-tactic">${escapeHTML(t)}</div>
+          <div class="coverage-bar"><span class="${pctClass(fired, maxFired)}"></span></div>
+          <div class="coverage-note muted">${escapeHTML(note)}</div>
+        </div>`;
+    }).join("");
+
+    renderL7Coverage(rules || []);
+  }
+
+  // renderL7Coverage states plainly which application-layer attacks are
+  // detected behaviorally rather than by payload inspection, so an operator
+  // running a SQLi test and seeing no alert knows whether that is a gap or the
+  // documented design.
+  const L7_SIGNALS = [
+    { name: "Brute force / password spraying", how: "Connection frequency per (pid, port)", field: "conn_rate_1m" },
+    { name: "SQL injection", how: "Only if it spawns a process or reads unexpected files", field: null },
+    { name: "SSRF", how: "Outbound connection destination + process lineage", field: null },
+    { name: "Reverse shell", how: "Process lineage + socket syscalls", field: null },
+    { name: "DNS tunnelling / exfiltration", how: "Query entropy and rate", field: null },
+  ];
+
+  function renderL7Coverage(rules) {
+    const usesConnRate = (rules || []).some((r) =>
+      JSON.stringify(r.condition_group || r.condition || {}).includes("conn_rate_1m")
+    );
+    el("coverage-l7").innerHTML = L7_SIGNALS.map((s) => {
+      const active = s.field !== "conn_rate_1m" || usesConnRate;
+      return `
+        <div class="l7-row">
+          <span class="l7-name">${escapeHTML(s.name)}</span>
+          <span class="l7-how muted">${escapeHTML(s.how)}</span>
+          <span class="l7-status ${active ? "on" : "off"}">${active ? "behavioral" : "no rule loaded"}</span>
+        </div>`;
+    }).join("");
+  }
+
   function initTabs() {
-    for (const tab of ["alerts", "incidents", "fleet"]) {
+    for (const tab of ["alerts", "incidents", "fleet", "coverage"]) {
       el("tab-" + tab).addEventListener("click", () => switchTab(tab));
     }
     el("inc-refresh-btn").addEventListener("click", refreshIncidents);
     el("inc-status").addEventListener("change", refreshIncidents);
+    el("inc-verdict").addEventListener("change", refreshIncidents);
     el("inc-namespace").addEventListener("keydown", (e) => {
       if (e.key === "Enter") refreshIncidents();
     });
@@ -867,6 +1168,7 @@
     module.exports = {
       escapeHTML, safeURL, durationBetween, alertSortKey,
       getFleetAgents, saveFleetAgents, fetchFleetNode,
+      pctClass, tacticRank, incidentTitle, TACTIC_ORDER,
     };
   }
 })();

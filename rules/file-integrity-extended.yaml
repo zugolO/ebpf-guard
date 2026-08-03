@@ -12,14 +12,22 @@ rules:
     name: "System binary replaced in /usr/bin or /bin"
     description: "A file was written directly to /usr/bin, /usr/sbin, /bin, or /sbin — replacing a system binary with a malicious one."
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "^/usr/bin/[^/]+$"
-        - "^/usr/sbin/[^/]+$"
-        - "^/bin/[^/]+$"
-        - "^/sbin/[^/]+$"
+    # op: write is required — without it this rule also matches execve's
+    # implicit open()/read() of every binary run from these directories,
+    # which is nearly all process execution on a normal host.
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: regex
+          values:
+            - "^/usr/bin/[^/]+$"
+            - "^/usr/sbin/[^/]+$"
+            - "^/bin/[^/]+$"
+            - "^/sbin/[^/]+$"
     severity: critical
     action: alert
     tags: [mitre:T1565.001, fim, binary-replacement, system-binary]
@@ -28,14 +36,24 @@ rules:
     name: "System shared library replaced"
     description: "A file was written to /lib or /usr/lib matching a .so pattern — replacing a shared library with a malicious one."
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "^/lib/.*\\.so(\\.[0-9]+)*$"
-        - "^/usr/lib/.*\\.so(\\.[0-9]+)*$"
-        - "^/lib64/.*\\.so(\\.[0-9]+)*$"
-        - "^/usr/lib64/.*\\.so(\\.[0-9]+)*$"
+    # op: write is required — without it this rule also matches the dynamic
+    # linker's routine open()/read() of every .so under /lib, /usr/lib on
+    # every process start (sshd's PAM/NSS modules, cron's helper binaries,
+    # systemd units, ...), which was ~97% of this rule's alerts on an idle
+    # host (see ISSUES-attack-run-2026-08-03.md P1-6).
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: regex
+          values:
+            - "^/lib/.*\\.so(\\.[0-9]+)*$"
+            - "^/usr/lib/.*\\.so(\\.[0-9]+)*$"
+            - "^/lib64/.*\\.so(\\.[0-9]+)*$"
+            - "^/usr/lib64/.*\\.so(\\.[0-9]+)*$"
     severity: critical
     action: alert
     class: drift

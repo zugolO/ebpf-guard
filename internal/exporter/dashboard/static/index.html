@@ -14,6 +14,11 @@
   </header>
 
   <main>
+    <!-- Banners for agent state an operator must know about before trusting an
+         empty screen: learning in progress, and reduced visibility. Both are
+         hidden until /api/v1/status says otherwise. -->
+    <div id="banners" class="banners"></div>
+
     <section class="summary">
       <div class="card stat">
         <div class="stat-value" id="stat-total">–</div>
@@ -81,6 +86,7 @@
       <button class="tab-btn active" id="tab-alerts" type="button" data-tab="alerts">Alerts</button>
       <button class="tab-btn" id="tab-incidents" type="button" data-tab="incidents">Incidents</button>
       <button class="tab-btn" id="tab-fleet" type="button" data-tab="fleet">Fleet</button>
+      <button class="tab-btn" id="tab-coverage" type="button" data-tab="coverage">Coverage</button>
     </nav>
 
     <section class="content" id="view-alerts">
@@ -103,6 +109,13 @@
               <option value="">any</option>
               <option value="open">open</option>
               <option value="closed">closed</option>
+            </select>
+          </label>
+          <label>Verdict
+            <select id="inc-verdict">
+              <option value="">any</option>
+              <option value="attack">attack</option>
+              <option value="suspicious">suspicious</option>
             </select>
           </label>
           <label>Namespace
@@ -140,6 +153,30 @@
       <div class="card">
         <h2>Critical alerts (all nodes)</h2>
         <div id="fleet-critical" class="alert-list"></div>
+      </div>
+    </section>
+
+    <section class="content-full hidden" id="view-coverage">
+      <div class="card">
+        <h2>Detection coverage by MITRE tactic</h2>
+        <p class="muted">
+          Which tactics the loaded ruleset can detect, and which have actually fired
+          in the selected window. A tactic with rules but no hits is not necessarily
+          quiet — it may simply never have been exercised.
+        </p>
+        <div id="coverage-matrix" class="coverage-matrix"></div>
+      </div>
+
+      <div class="card">
+        <h2>Layer-7 visibility</h2>
+        <p class="muted">
+          ebpf-guard observes syscalls, files, connections and DNS — not HTTP request
+          bodies. Application-layer attacks are detected behaviorally (connection
+          frequency, process lineage), not by payload inspection, so a SQLi probe that
+          never spawns a process or opens a file will not raise a content-based alert.
+          See <code>docs/l7-detection-coverage.md</code>.
+        </p>
+        <div id="coverage-l7" class="coverage-l7"></div>
       </div>
     </section>
   </main>

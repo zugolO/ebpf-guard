@@ -226,37 +226,72 @@ generate_final_report() {
         echo ""
 
         # Статистика по результатам
+        local attack_gate_failed=""
         for result_dir in sqlmap-results bruteforce-results ssrf-results ldap-csrf-results; do
             if [ -d "$result_dir" ]; then
                 local file_count=$(find "$result_dir" -type f | wc -l)
                 echo "📁 $result_dir:"
                 echo "   Файлов создано: $file_count"
 
-                # Подсчет атак attempts
+                # Подсчет атак attempts. curl's -w "...%{http_code}" writes the
+                # *resolved* numeric status, so the literal string "http_code"
+                # never appears in output files — only "Status: <code>" or
+                # "<label>: <code>" do. Matching just "http_code" always
+                # counted 0, which is why sqlmap/ssrf/ldap-csrf showed
+                # "Попыток атак: 0" here despite real traffic being sent.
                 local attempts=0
                 for file in "$result_dir"/*.txt; do
                     if [ -f "$file" ]; then
                         # grep -c always prints a count (even "0") and only
                         # exits non-zero on no match, so "|| echo 0" used to
                         # append a second line and break the arithmetic below.
-                        local count=$(grep -c "http_code\|Status:" "$file" 2>/dev/null)
+                        local count=$(grep -cE 'Status: [0-9]{3}|: [0-9]{3}$' "$file" 2>/dev/null)
                         attempts=$((attempts + count))
                     fi
                 done
                 echo "   Попыток атак: $attempts"
                 echo ""
+
+                # Gate: 0 попыток трафика делает любой вывод об алертах/детекте
+                # для этой категории бессмысленным (см. P2-8) — отмечаем явно,
+                # вместо того чтобы молча включать её в общий "новых алертов".
+                if [ "$attempts" -eq 0 ]; then
+                    attack_gate_failed="$attack_gate_failed $result_dir"
+                fi
             fi
         done
 
+        echo "=== ATTACK TRAFFIC GATE ==="
+        if [ -n "$attack_gate_failed" ]; then
+            warn "Категории без реального трафика (0 попыток):$attack_gate_failed"
+            echo "GATE: FAILED — для этих категорий 'новых алертов: 0' не является валидным результатом детекта:$attack_gate_failed"
+        else
+            log "✓ Все категории атак отправили трафик"
+            echo "GATE: OK"
+        fi
+        echo ""
+
         echo "═══════════════════════════════════════════════════════════════"
-        echo "ТОП АЛЕРТОВ ПО ТИПАМ"
+        echo "ТОП НОВЫХ АЛЕРТОВ ПО ТИПАМ (дельта baseline → final по id)"
         echo "═══════════════════════════════════════════════════════════════"
         echo ""
 
-        # Анализ алертов по категориям
+        local baseline_alerts_json="$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
+        local final_alerts_json="$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
+
+        # Дельта считается по множеству id алертов (final \ baseline), а не по
+        # абсолютным count'ам из /api/v1/alerts — иначе "топ алертов" не сходится
+        # с "новых алертов: N" выше, т.к. эндпоинт отдаёт весь текущий стор, а не
+        # только события с начала прогона.
         if command -v jq &> /dev/null; then
-            echo "=== ALERT CATEGORIES ==="
-            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | jq -r 'group_by(.rule_id) | map({rule: .[0].rule_id, count: length}) | sort_by(.count) | reverse | .[:10] | .[] | "\(.rule): \(.count)"' 2>/dev/null || echo "Не удалось разобрать алерты"
+            echo "=== ALERT CATEGORIES (new only) ==="
+            jq -s '
+                (.[0] // []) as $baseline |
+                (.[1] // []) as $final |
+                ($baseline | map(.id) | unique) as $baseline_ids |
+                ($final | map(select(.id as $id | ($baseline_ids | index($id)) | not))) as $new |
+                $new | group_by(.rule_id) | map({rule: .[0].rule_id, count: length}) | sort_by(.count) | reverse | .[:10] | .[] | "\(.rule): \(.count)"
+            ' -r "$baseline_alerts_json" "$final_alerts_json" 2>/dev/null || echo "Не удалось разобрать алерты"
             echo ""
         fi
 
@@ -265,15 +300,30 @@ generate_final_report() {
         echo "═══════════════════════════════════════════════════════════════"
         echo ""
 
-        # Анализ того, что было детектировано
-        local detected=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | grep -oE '"rule_id":"[^"]+' | cut -d'"' -f4 | sort -u | wc -l)
-        echo "Уникальных типов атак детектировано: $detected"
+        # Уникальные rule_id среди новых (final \ baseline) алертов
+        local detected=0
+        if command -v jq &> /dev/null; then
+            detected=$(jq -s '
+                (.[0] // []) as $baseline |
+                (.[1] // []) as $final |
+                ($baseline | map(.id) | unique) as $baseline_ids |
+                ($final | map(select(.id as $id | ($baseline_ids | index($id)) | not))) as $new |
+                $new | map(.rule_id) | unique | length
+            ' -r "$baseline_alerts_json" "$final_alerts_json" 2>/dev/null || echo 0)
+        fi
+        echo "Уникальных типов атак детектировано (новых): $detected"
         echo ""
 
-        # Топ атак по severity
+        # Топ атак по severity (тоже только новые, для согласованности с "Новых: $new_alerts")
         if command -v jq &> /dev/null; then
-            echo "=== BY SEVERITY ==="
-            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | jq -r 'group_by(.severity) | map({severity: .[0].severity, count: length}) | .[] | "\(.severity): \(.count)"' 2>/dev/null || echo "Не удалось разобрать severity"
+            echo "=== BY SEVERITY (new only) ==="
+            jq -s '
+                (.[0] // []) as $baseline |
+                (.[1] // []) as $final |
+                ($baseline | map(.id) | unique) as $baseline_ids |
+                ($final | map(select(.id as $id | ($baseline_ids | index($id)) | not))) as $new |
+                $new | group_by(.severity) | map({severity: .[0].severity, count: length}) | .[] | "\(.severity): \(.count)"
+            ' -r "$baseline_alerts_json" "$final_alerts_json" 2>/dev/null || echo "Не удалось разобрать severity"
             echo ""
         fi
 

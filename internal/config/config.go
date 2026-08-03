@@ -138,6 +138,14 @@ type ServerConfig struct {
 	ShutdownDrainEnforcement time.Duration `mapstructure:"shutdown_drain_enforcement"`
 	// ShutdownDrainRego caps the time spent draining async Rego evaluation workers during shutdown. Default: 5s.
 	ShutdownDrainRego time.Duration `mapstructure:"shutdown_drain_rego"`
+	// ReadTimeout is the HTTP server's request read timeout. Raise this on
+	// CPU-constrained hosts where the event-loop/worker pool can starve the
+	// scheduler long enough to trip a short timeout even for a healthy,
+	// well-behaved client. 0 keeps the built-in default (15s).
+	ReadTimeout time.Duration `mapstructure:"read_timeout"`
+	// WriteTimeout is the HTTP server's response write timeout. 0 keeps the
+	// built-in default (30s). See ReadTimeout.
+	WriteTimeout time.Duration `mapstructure:"write_timeout"`
 	// CORSAllowedOrigins lists the origins allowed to access the OpenAPI spec and
 	// the read-only /api/v1/* endpoints (status, summary, alerts, incidents,
 	// rules, feedback) via CORS. This is what lets the dashboard's Fleet tab
@@ -1057,6 +1065,10 @@ type StatePersistenceConfig struct {
 	// Path is the file path where the profiler state JSON is written.
 	// Defaults to /var/lib/ebpf-guard/profiler-state.json.
 	Path string `mapstructure:"path"`
+	// SaveIntervalSeconds is how often state is autosaved in addition to the
+	// graceful-shutdown save, so a SIGKILL/OOM-kill doesn't lose all learning
+	// since the last clean shutdown. Defaults to 300 (5 minutes).
+	SaveIntervalSeconds int `mapstructure:"save_interval_seconds"`
 }
 
 // SequenceProfilerConfig holds syscall sequence anomaly detection settings.
@@ -1908,6 +1920,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.shutdown_timeout", "30s")
 	v.SetDefault("server.shutdown_drain_enforcement", "5s")
 	v.SetDefault("server.shutdown_drain_rego", "5s")
+	v.SetDefault("server.read_timeout", "15s")
+	v.SetDefault("server.write_timeout", "30s")
 	v.SetDefault("server.cors_allowed_origins", []string{"*"})
 
 	// BPF defaults
@@ -1972,6 +1986,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiler.lineage.enabled", true)
 	v.SetDefault("profiler.lineage.ttl", 300)
 	v.SetDefault("profiler.lineage.max_depth", 16)
+
+	// State persistence defaults: disabled by default (opt-in), since it writes
+	// to local disk and DaemonSets need a persistent volume for it to survive
+	// pod rescheduling rather than just single-container restarts.
+	v.SetDefault("profiler.state_persistence.enabled", false)
+	v.SetDefault("profiler.state_persistence.path", "/var/lib/ebpf-guard/profiler-state.json")
+	v.SetDefault("profiler.state_persistence.save_interval_seconds", 300)
 
 	// Drift-baseline observe mode defaults (issue #286). Disabled by default:
 	// class: drift rules alert like class: threat rules until an operator

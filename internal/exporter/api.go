@@ -485,14 +485,19 @@ func (s *Server) handleRulesReload(w http.ResponseWriter, r *http.Request) {
 
 // RuleAPIResponse represents a rule in the API response
 type RuleAPIResponse struct {
-	ID             string                 `json:"id"`
-	Name           string                 `json:"name"`
-	Description    string                 `json:"description"`
-	EventType      string                 `json:"event_type"`
-	Severity       string                 `json:"severity"`
-	Action         string                 `json:"action"`
-	Tags           []string               `json:"tags,omitempty"`
-	Condition      RuleConditionResponse  `json:"condition,omitempty"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	EventType   string   `json:"event_type"`
+	Severity    string   `json:"severity"`
+	Action      string   `json:"action"`
+	Tags        []string `json:"tags,omitempty"`
+	// Tactics are the canonical MITRE tactics this rule's tags resolve to, as
+	// computed by the same mapping the incident scorer uses. Reported by the
+	// server so clients (the dashboard coverage view) don't have to duplicate
+	// the alias/technique tables and drift out of sync with scoring.
+	Tactics        []string                    `json:"tactics,omitempty"`
+	Condition      RuleConditionResponse       `json:"condition,omitempty"`
 	ConditionGroup *RuleConditionGroupResponse `json:"condition_group,omitempty"`
 }
 
@@ -529,6 +534,7 @@ func convertRuleToAPI(rule correlator.Rule) RuleAPIResponse {
 		Severity:    string(rule.Severity),
 		Action:      string(rule.Action),
 		Tags:        rule.Tags,
+		Tactics:     correlator.TacticsForTags(rule.Tags),
 		Condition: RuleConditionResponse{
 			Field:  rule.Condition.Field,
 			Op:     string(rule.Condition.Op),

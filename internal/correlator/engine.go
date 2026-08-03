@@ -651,13 +651,18 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		reloadDuration:        reloadDuration,
 		rulesActive:           rulesActive,
 		lastReloadTimestamp:   lastReloadTimestamp,
-		incidentTracker:       newIncidentTracker(config.IncidentWindow),
+		incidentTracker:       newIncidentTracker(config.IncidentWindow, lt, config.Rules),
 		regoEvalErrors:        regoEvalErrors,
 		allowlistProfiler:     config.AllowlistProfiler,
 		driftBaselineProfiler: config.DriftBaselineProfiler,
 	}
 
 	ce.ruleEngine.Store(NewRuleEngine(config.Rules))
+
+	// Emit a synthetic critical alert the first time an incident is judged an
+	// attack, so correlated attacks reach exporters, notifications and the alert
+	// store instead of only the incidents query API (P0-2).
+	ce.incidentTracker.SetAttackHandler(ce.emitConfirmedAttackAlert)
 
 	// Seed active rules gauge
 	activeRulesGauge.Set(float64(len(config.Rules)))
@@ -713,6 +718,11 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				ce.incidentTracker.Cleanup(now)
 				ce.lineageTracker.Cleanup(now)
 				ce.traceCtxCache.cleanup(now)
+				// Evict (pid, dport) keys with no connections in the last
+				// 10 minutes. Each live key holds a fixed 1024-entry ring
+				// buffer, so without this short-lived PIDs leak ~24 KB each
+				// for the lifetime of the process.
+				globalConnFrequency.Cleanup(10 * time.Minute)
 			}
 		}
 	}()
@@ -1317,6 +1327,16 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 
 	ce.processedEvents.Add(1)
 
+	// Record the connection attempt exactly once per event, here rather than in
+	// getFieldValue. The rule engine calls getFieldValue once per rule (and once
+	// more per condition inside a condition group), so recording there counted a
+	// single connection as many times as there are rules referencing
+	// conn_rate_1m — inflating the rate and making the threshold depend on the
+	// ruleset rather than on traffic. getFieldValue now only reads the count.
+	if e.Type == types.EventTCPConnect && e.Network != nil {
+		globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(e))
+	}
+
 	// Add event to per-process buffer. Gated: the buffer has no production
 	// reader today, so by default we skip the shard lock + Event-struct copy on
 	// every event. Enable via EnableEventBuffer when a consumer needs it.
@@ -1857,6 +1877,24 @@ func (ce *CorrelationEngine) LearningProgress() float64 {
 	return ce.anomalyDetector.LearningProgress()
 }
 
+// LearningTimeRemaining returns the time remaining in the anomaly detection
+// learning phase. Zero once learning is complete or no detector is configured.
+func (ce *CorrelationEngine) LearningTimeRemaining() time.Duration {
+	if ce.anomalyDetector == nil {
+		return 0
+	}
+	return ce.anomalyDetector.TimeRemaining()
+}
+
+// LearningSampleCount returns the number of samples recorded during the
+// anomaly detection learning phase.
+func (ce *CorrelationEngine) LearningSampleCount() uint64 {
+	if ce.anomalyDetector == nil {
+		return 0
+	}
+	return ce.anomalyDetector.GetSampleCount()
+}
+
 // GetRateLimiter returns the rate limiter.
 func (ce *CorrelationEngine) GetRateLimiter() *RateLimiter {
 	return ce.rateLimiter
@@ -1962,9 +2000,29 @@ func (ce *CorrelationEngine) UpdateRules(rules []Rule) {
 		ce.lastReloadTimestamp.Set(float64(time.Now().Unix()))
 	}
 
+	// Refresh the incident tracker's rule→tactic mapping. Without this, rules
+	// added or retagged by a hot reload contribute no tactics and incident
+	// scoring silently degrades.
+	if ce.incidentTracker != nil {
+		ce.incidentTracker.SetRules(rules)
+	}
+
 	if ce.syscallFilterFn != nil {
 		ce.syscallFilterFn(re.ReferencedSyscalls())
 	}
+}
+
+// emitConfirmedAttackAlert queues the synthetic incident_confirmed_attack alert
+// for a newly confirmed attack incident. It is registered as the incident
+// tracker's attack handler and runs outside the tracker's lock.
+//
+// The alert is appended to pending so it drains through the same Flush() path
+// as rule alerts, reaching exporters, notification fanout and the alert store.
+func (ce *CorrelationEngine) emitConfirmedAttackAlert(inc types.Incident) {
+	alert := buildConfirmedAttackAlert(inc)
+	ce.pendingMu.Lock()
+	ce.pending = append(ce.pending, alert)
+	ce.pendingMu.Unlock()
 }
 
 // ObserveYAMLParseDuration records the duration of the YAML rule file parsing phase.

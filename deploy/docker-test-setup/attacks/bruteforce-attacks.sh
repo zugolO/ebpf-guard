@@ -98,7 +98,7 @@ attack_password_spraying() {
             curl -s -X POST "$JUICE_SH_URL/rest/user/login" \
                 -H "Content-Type: application/json" \
                 -d "{\"email\":\"${user}@juice-sh.op\",\"password\":\"${password}\"}" \
-                -o /dev/null -w "." \
+                -o /dev/null -w "Status: %{http_code}\n" \
                 >> "$output_file" 2>&1
             sleep 0.05
         done
@@ -218,7 +218,7 @@ attack_high_frequency() {
         curl -s -X POST "$JUICE_SH_URL/rest/user/login" \
             -H "Content-Type: application/json" \
             -d "{\"email\":\"${random_user}@juice-sh.op\",\"password\":\"wrongpassword\"}" \
-            -o /dev/null -w "." \
+            -o /dev/null -w "Status: %{http_code}\n" \
             >> "$output_file" 2>&1
 
         # Каждые 50 попыток - вывод прогресса
@@ -258,7 +258,7 @@ attack_distributed_pattern() {
             -H "User-Agent: $ua" \
             -H "X-Forwarded-For: 192.168.1.$((i % 255))" \
             -d "{\"email\":\"${user}@juice-sh.op\",\"password\":\"wrong\"}" \
-            -o /dev/null -w "." \
+            -o /dev/null -w "Status: %{http_code}\n" \
             >> "$output_file" 2>&1
 
         sleep 0.05
@@ -302,12 +302,30 @@ analyze_results() {
         echo ""
 
         echo "=== REQUEST STATISTICS ==="
+        local total_requests=0
+        local zero_request_files=""
         for file in "$RESULTS_DIR"/*_$TIMESTAMP.txt; do
             if [ -f "$file" ] && [[ ! "$file" =~ (metrics|alerts|summary) ]]; then
                 local count=$(grep -c "Status:" "$file" 2>/dev/null)
                 echo "$(basename $file): $count requests"
+                total_requests=$((total_requests + count))
+                if [ "$count" -eq 0 ]; then
+                    zero_request_files="$zero_request_files $(basename "$file")"
+                fi
             fi
         done
+
+        # Gate: если конкретный сценарий атаки отправил 0 запросов, это баг
+        # генератора (см. P2-8), а не "детект не сработал" — явно это отмечаем,
+        # чтобы не путать с реальным результатом детектирования.
+        echo ""
+        echo "=== REQUEST GATE ==="
+        echo "Всего запросов по всем сценариям: $total_requests"
+        if [ -n "$zero_request_files" ]; then
+            echo "GATE: FAILED — сценарии с 0 запросов:$zero_request_files"
+        else
+            echo "GATE: OK — все сценарии отправили >0 запросов"
+        fi
 
         echo ""
         echo "=== AUTHENTICATION EVENTS IN ebpf-guard ==="

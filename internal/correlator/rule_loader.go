@@ -18,6 +18,9 @@ import (
 var (
 	validNetworkFields = map[string]bool{
 		"dport": true, "sport": true, "daddr": true, "saddr": true, "proto": true, "family": true,
+		// conn_rate_1m: computed behavioral field — connection attempts to the
+		// same (pid, dport) within the trailing 60s window. See ConnFrequencyTracker.
+		"conn_rate_1m": true,
 		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
 		"proc.args":           true,
 		"proc.args_truncated": true,

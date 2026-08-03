@@ -22,9 +22,9 @@ require (
 	github.com/tetratelabs/wazero v1.8.2
 	go.opentelemetry.io/otel v1.41.0
 	go.opentelemetry.io/otel/trace v1.41.0
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.45.0
-	golang.org/x/text v0.37.0
+	golang.org/x/text v0.39.0
 	golang.org/x/time v0.11.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.31.0

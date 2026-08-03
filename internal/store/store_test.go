@@ -78,6 +78,16 @@ func TestMemoryStore_QueryWithFilters(t *testing.T) {
 			expected: 2,
 		},
 		{
+			name:     "filter by comm substring case-insensitive",
+			filters:  QueryFilters{Comm: "ROC1"},
+			expected: 2,
+		},
+		{
+			name:     "filter by comm no match",
+			filters:  QueryFilters{Comm: "nonexistent"},
+			expected: 0,
+		},
+		{
 			name:     "filter by time range",
 			filters:  QueryFilters{Since: now.Add(-30 * time.Minute)},
 			expected: 1,
@@ -270,6 +280,7 @@ func TestMatchesFilters(t *testing.T) {
 		RuleID:    "rule-1",
 		Severity:  types.SeverityWarning,
 		PID:       1234,
+		Comm:      "nginx-proxy",
 		Enrichment: types.EnrichmentInfo{
 			PodName:   "test-pod",
 			Namespace: "default",
@@ -314,6 +325,16 @@ func TestMatchesFilters(t *testing.T) {
 		{
 			name:    "non-matching pid",
 			filters: QueryFilters{PIDs: []uint32{5678}},
+			want:    false,
+		},
+		{
+			name:    "matching comm substring case-insensitive",
+			filters: QueryFilters{Comm: "NGINX"},
+			want:    true,
+		},
+		{
+			name:    "non-matching comm",
+			filters: QueryFilters{Comm: "bash"},
 			want:    false,
 		},
 		{

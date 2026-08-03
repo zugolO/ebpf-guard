@@ -91,9 +91,9 @@ func TestSQLiteStore_QueryFilters(t *testing.T) {
 
 	now := time.Now()
 	alerts := []types.Alert{
-		{ID: "1", Timestamp: now, RuleID: "rule-a", Severity: types.SeverityWarning, PID: 100, Enrichment: types.EnrichmentInfo{Namespace: "ns1", PodName: "p1"}},
-		{ID: "2", Timestamp: now.Add(-time.Hour), RuleID: "rule-b", Severity: types.SeverityCritical, PID: 200, Enrichment: types.EnrichmentInfo{Namespace: "ns2", PodName: "p2"}},
-		{ID: "3", Timestamp: now.Add(-2 * time.Hour), RuleID: "rule-a", Severity: types.SeverityWarning, PID: 100, Enrichment: types.EnrichmentInfo{Namespace: "ns1", PodName: "p3"}},
+		{ID: "1", Timestamp: now, RuleID: "rule-a", Severity: types.SeverityWarning, PID: 100, Comm: "nginx", Enrichment: types.EnrichmentInfo{Namespace: "ns1", PodName: "p1"}},
+		{ID: "2", Timestamp: now.Add(-time.Hour), RuleID: "rule-b", Severity: types.SeverityCritical, PID: 200, Comm: "bash", Enrichment: types.EnrichmentInfo{Namespace: "ns2", PodName: "p2"}},
+		{ID: "3", Timestamp: now.Add(-2 * time.Hour), RuleID: "rule-a", Severity: types.SeverityWarning, PID: 100, Comm: "nginx-worker", Enrichment: types.EnrichmentInfo{Namespace: "ns1", PodName: "p3"}},
 	}
 	require.NoError(t, s.StoreBatch(ctx, alerts))
 
@@ -109,6 +109,8 @@ func TestSQLiteStore_QueryFilters(t *testing.T) {
 		{"by namespace", QueryFilters{Namespace: "ns1"}, 2},
 		{"by namespaces", QueryFilters{Namespaces: []string{"ns1", "ns2"}}, 3},
 		{"by pod name", QueryFilters{PodName: "p2"}, 1},
+		{"by comm substring case-insensitive", QueryFilters{Comm: "NGINX"}, 2},
+		{"by comm no match", QueryFilters{Comm: "python"}, 0},
 		{"since", QueryFilters{Since: now.Add(-90 * time.Minute)}, 2},
 		{"limit", QueryFilters{Limit: 1}, 1},
 		{"limit+offset", QueryFilters{Limit: 10, Offset: 1}, 2},

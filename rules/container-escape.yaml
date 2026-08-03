@@ -333,7 +333,18 @@ rules:
         - "/proc/bus/.*"
     severity: warning
     action: alert
+    class: drift
     tags: [container-escape, procfs, kernel-parameters]
+    # Legitimate systemd/ldconfig maintenance regularly touches these paths;
+    # suppress the (frequent, benign) alert without editing the condition
+    # above — see docs/rule-authoring-guide.md#exceptions for the local-tuning
+    # overlay alternative that survives rule-set updates.
+    exceptions:
+      - name: systemd-sysctl
+        condition:
+          field: proc.comm
+          op: in
+          values: [systemd, systemd-sysctl]
 
   # Access to host's /proc/1
   - id: container_escape_init_proc
@@ -348,6 +359,7 @@ rules:
         - "/proc/self/root/proc/1/"
     severity: warning
     action: alert
+    class: drift
     tags: [container-escape, init-process, pid-1]
 
   # ============================================================================

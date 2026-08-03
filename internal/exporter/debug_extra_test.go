@@ -33,6 +33,11 @@ func TestDebugHandler_ServeHTTP(t *testing.T) {
 	h.SetEngineProvider(fakeEngineProvider{s: EngineStats{TotalEvents: 10, TotalAlerts: 2, RulesLoaded: 1}})
 	h.SetProfilerProvider(fakeProfilerProvider{s: ProfilerStats{LearningComplete: true, LearningProgress: 1.0, ProfilesActive: 3}})
 	h.SetEnricherProvider(fakeEnricherProvider{s: EnrichmentStats{Enabled: true, CachedPods: 5}})
+	h.SetHardwareProfile(HardwareProfileState{
+		Profile: "lite", Source: "autodetect", Reason: "detected 1 CPU(s) / 1024MB RAM",
+		CPUs: 1, MemTotalMB: 1024, EventsMap: 8192, ProcessesMap: 2048, ConnectionsMap: 4096,
+		MaxTrackedPIDs: 256, SequenceEnabled: false, LineageEnabled: false,
+	})
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -53,6 +58,9 @@ func TestDebugHandler_ServeHTTP(t *testing.T) {
 	assert.Equal(t, uint64(10), state.EngineStats.TotalEvents)
 	assert.True(t, state.ProfilerStats.LearningComplete)
 	assert.Equal(t, 5, state.EnrichmentStats.CachedPods)
+	assert.Equal(t, "lite", state.HardwareProfile.Profile)
+	assert.Equal(t, "autodetect", state.HardwareProfile.Source)
+	assert.Equal(t, 8192, state.HardwareProfile.EventsMap)
 }
 
 func TestDebugHandler_ServeHTTP_NoProviders(t *testing.T) {

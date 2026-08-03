@@ -315,6 +315,6 @@ func stringContains(s, sub string) bool {
 func TestDashboardPanelCount(t *testing.T) {
 	root := repoRoot(t)
 	dash := loadDashboard(t, filepath.Join(root, "deploy", "grafana", "ebpf-guard-dashboard.json"))
-	assert.Equal(t, 20, len(dash.Panels),
-		"expected 20 panels total (17 original + 2 new stat panels + 1 blocked attacks rate panel)")
+	assert.Equal(t, 21, len(dash.Panels),
+		"expected 21 panels total (17 original + 2 new stat panels + 1 blocked attacks rate panel + 1 CPU pressure level panel)")
 }

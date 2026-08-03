@@ -56,6 +56,10 @@ config/secrets.yml
 deploy/helm/*/charts/
 deploy/helm/*/*.lock
 
+# ── Operator-owned rule tuning overlay (see rules/local-tuning.yaml.example) ───
+# Never shipped/updated by rule-set releases; each deployment keeps its own.
+rules/local-tuning.yaml
+
 # ── AI-assisted development meta-files ────────────────────────────────────────
 AGENTS.md
 CLAUDE.md

@@ -20,6 +20,42 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// TestOpenSearchStore_BuildQueryComm covers the comm filter's wildcard query
+// clause without requiring a live cluster — buildQuery is a pure function.
+func TestOpenSearchStore_BuildQueryComm(t *testing.T) {
+	s := &OpenSearchStore{}
+
+	t.Run("comm filter adds a case-insensitive wildcard clause", func(t *testing.T) {
+		q := s.buildQuery(QueryFilters{Comm: "Nginx"})
+		must := q["query"].(map[string]interface{})["bool"].(map[string]interface{})["must"].([]map[string]interface{})
+
+		var found bool
+		for _, clause := range must {
+			wc, ok := clause["wildcard"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			comm, ok := wc["comm"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			assert.Equal(t, "*Nginx*", comm["value"])
+			assert.Equal(t, true, comm["case_insensitive"])
+			found = true
+		}
+		assert.True(t, found, "expected a wildcard clause on comm")
+	})
+
+	t.Run("no comm filter omits the clause", func(t *testing.T) {
+		q := s.buildQuery(QueryFilters{})
+		must := q["query"].(map[string]interface{})["bool"].(map[string]interface{})["must"].([]map[string]interface{})
+		for _, clause := range must {
+			_, ok := clause["wildcard"]
+			assert.False(t, ok, "did not expect a wildcard clause without a Comm filter")
+		}
+	})
+}
+
 // TestOpenSearchStoreIntegration tests the OpenSearch store with a real container.
 // This test is skipped unless the -integration flag is provided.
 func TestOpenSearchStoreIntegration(t *testing.T) {

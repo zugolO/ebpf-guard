@@ -2,6 +2,12 @@ version: 2
 
 project_name: ebpf-guard
 
+# Note: .github/workflows/release.yml does not invoke goreleaser — it builds
+# artifacts manually per-arch to sequence cosign signing/SBOM/SLSA the way
+# this project needs. deb/rpm packaging (issue #311) lives in
+# packaging/nfpm.yaml and is built directly with nfpm in that workflow's
+# 'package' job, not through this file's (unused) builds/archives config.
+
 before:
   hooks:
     - go mod tidy

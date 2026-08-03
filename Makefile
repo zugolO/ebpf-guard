@@ -1,7 +1,7 @@
 # ebpf-guard Makefile
 # Requires: go 1.23+, clang, llvm, kernel headers
 
-.PHONY: all generate build build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare pgo-profile pgo-update build-pgo
+.PHONY: all generate build build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare pgo-profile pgo-update build-pgo package package-deb package-rpm
 
 # Variables
 BINARY_NAME := ebpf-guard
@@ -212,6 +212,32 @@ release: generate
 		-ldflags="-w -s -X main.Version=$$(git describe --tags --always || echo 'dev') -X main.Commit=$$(git rev-parse --short HEAD || echo 'unknown')" \
 		-o build/ebpf-guard-linux-arm64 ./cmd/ebpf-guard
 	@echo "Release binaries built in build/"
+
+# Build .deb/.rpm packages for amd64+arm64 via nfpm (issue #311).
+# Requires 'make release' to have built build/ebpf-guard-linux-{amd64,arm64}
+# first. Installs nfpm on the fly via 'go run' if it isn't on PATH.
+NFPM := $(shell command -v nfpm 2>/dev/null || echo "go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0")
+PKG_VERSION := $(shell git describe --tags --always 2>/dev/null | sed 's/^v//' || echo 0.0.0-dev)
+
+package: package-deb package-rpm
+
+package-deb:
+	@mkdir -p dist
+	@for arch in amd64 arm64; do \
+		bin="build/ebpf-guard-linux-$$arch"; \
+		test -f "$$bin" || { echo "  $$arch: binary not found — run 'make release' first"; exit 1; }; \
+		VERSION=$(PKG_VERSION) ARCH=$$arch BIN_PATH=$$bin \
+			$(NFPM) package --config packaging/nfpm.yaml --packager deb --target dist/; \
+	done
+
+package-rpm:
+	@mkdir -p dist
+	@for arch in amd64 arm64; do \
+		bin="build/ebpf-guard-linux-$$arch"; \
+		test -f "$$bin" || { echo "  $$arch: binary not found — run 'make release' first"; exit 1; }; \
+		VERSION=$(PKG_VERSION) ARCH=$$arch BIN_PATH=$$bin \
+			$(NFPM) package --config packaging/nfpm.yaml --packager rpm --target dist/; \
+	done
 
 # Update the SHA-256 checksums in scripts/install.sh for the current build.
 checksums:

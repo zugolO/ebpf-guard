@@ -153,13 +153,52 @@ func BearerTokenMiddleware(token string) func(http.Handler) http.Handler {
 }
 
 // viewerPrefixes lists URL path prefixes that viewer-role tokens may access via GET.
+// Static UI/doc assets are not listed here — they are served publicly (see
+// publicAssetPrefixes / publicAssetPaths) so a browser can load the HTML shell
+// before it has a token to attach. All alert *data* stays under /api/v1/*.
 var viewerPrefixes = []string{
 	"/metrics",
 	"/api/v1/alerts",
 	"/api/v1/rules",
 	"/api/v1/status",
+	"/api/v1/summary",
 	"/api/v1/feedback",
 	"/api/v1/incidents",
+}
+
+// publicAssetPrefixes lists path prefixes served WITHOUT authentication. These
+// hold only static, data-free assets — the embedded dashboard (HTML/JS/CSS) and
+// the Swagger UI bundle. A browser navigating to /ui/ cannot send an
+// Authorization header on the initial navigation, so the shell must load
+// unauthenticated; the JS then prompts for a token and attaches it to every
+// /api/v1/* fetch, which remain behind auth.
+var publicAssetPrefixes = []string{
+	"/ui/",
+	"/swaggerui/",
+}
+
+// publicAssetPaths lists exact paths served without authentication: the root
+// redirect to /ui/, the bare /ui (redirected to /ui/ by the mux), and the
+// OpenAPI docs page + spec, which contain no alert data.
+var publicAssetPaths = map[string]struct{}{
+	"/":                 {},
+	"/ui":               {},
+	"/api/docs":         {},
+	"/api/openapi.yaml": {},
+}
+
+// isPublicAsset reports whether path may be served without a bearer token.
+// Only static assets qualify; every /api/v1/* data endpoint stays authenticated.
+func isPublicAsset(path string) bool {
+	if _, ok := publicAssetPaths[path]; ok {
+		return true
+	}
+	for _, prefix := range publicAssetPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isViewerAllowed returns true when the viewer role may access the given method+path.
@@ -174,6 +213,58 @@ func isViewerAllowed(method, path string) bool {
 		}
 	}
 	return false
+}
+
+// corsMiddleware adds CORS headers to the read-only /api/v1/* endpoints
+// (status, summary, alerts, incidents, rules, feedback) so a fleet dashboard
+// running on one agent's origin can poll other agents directly from the
+// browser (issue #312). It never touches write endpoints — those stay
+// same-origin only. Preflight OPTIONS requests are answered here, before the
+// RBAC middleware runs, since a browser preflight never carries the
+// Authorization header the RBAC check requires.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isViewerAllowed(http.MethodGet, r.URL.Path) {
+			s.applyCORSHeaders(w, r)
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// applyCORSHeaders sets Access-Control-Allow-Origin (and, when a header was
+// set, the accompanying Allow-Methods/Allow-Headers) based on the configured
+// allowlist. A request with no Origin header (same-origin, curl, Prometheus
+// scraping) is left untouched.
+func (s *Server) applyCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return
+	}
+	s.mu.RLock()
+	origins := s.corsAllowedOrigins
+	s.mu.RUnlock()
+
+	for _, allowed := range origins {
+		if allowed == "*" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			break
+		}
+		if allowed == origin {
+			// Reflect the specific origin and add Vary: Origin to prevent
+			// proxy cache poisoning when responses differ by origin.
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			break
+		}
+	}
+	if w.Header().Get("Access-Control-Allow-Origin") != "" {
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	}
 }
 
 // extractBearerToken parses the Authorization header and returns the bearer token.
@@ -202,6 +293,13 @@ func MultiTenantRBACMiddleware(tokens []NamespacedToken) func(http.Handler) http
 			path := r.URL.Path
 
 			if strings.HasPrefix(path, "/health") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Static UI/doc assets are public so a browser can load the shell
+			// before it has a token; the data API below stays authenticated.
+			if isPublicAsset(path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -250,6 +348,13 @@ func RBACMiddleware(viewerToken, adminToken string) func(http.Handler) http.Hand
 
 			// Health probes are always public — Kubernetes needs them without auth.
 			if strings.HasPrefix(path, "/health") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Static UI/doc assets are public so a browser can load the shell
+			// before it has a token; the data API below stays authenticated.
+			if isPublicAsset(path) {
 				next.ServeHTTP(w, r)
 				return
 			}

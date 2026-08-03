@@ -13,6 +13,7 @@ import (
 
 	apispec "github.com/zugolO/ebpf-guard/api"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
+	"github.com/zugolO/ebpf-guard/internal/exporter/dashboard"
 	"github.com/zugolO/ebpf-guard/internal/exporter/swaggerui"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
@@ -32,6 +33,9 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// Status endpoint
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 
+	// Summary endpoint (aggregates for the dashboard: top rules, severity, timeline)
+	mux.HandleFunc("/api/v1/summary", s.handleSummary)
+
 	// Rules endpoints
 	mux.HandleFunc("/api/v1/rules", s.handleRules)
 	mux.HandleFunc("/api/v1/rules/reload", s.handleRulesReload)
@@ -43,11 +47,31 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// BPF live-update endpoint (admin-only)
 	mux.HandleFunc("/api/v1/bpf/reload", s.handleBPFReload)
 
+	// Tuning exception generation (admin-only to persist; see issue #308)
+	mux.HandleFunc("/api/v1/tuning/exceptions", s.handleTuningExceptions)
+
 	// Swagger UI — served without auth so API consumers can explore the spec.
 	// Assets are embedded at build time to eliminate the unpkg.com CDN dependency.
 	mux.Handle("/swaggerui/", swaggerui.Handler())
 	mux.HandleFunc("/api/docs", s.handleAPIDocs)
 	mux.HandleFunc("/api/openapi.yaml", s.handleOpenAPISpec)
+
+	// Embedded read-only dashboard — self-contained, no external assets.
+	// Static assets are served WITHOUT auth (see isPublicAsset) so a browser can
+	// load the shell before it has a token; all data is fetched from the
+	// authenticated /api/v1/* endpoints below.
+	mux.Handle("/ui/", dashboard.Handler())
+	mux.HandleFunc("/", s.handleDashboardRedirect)
+}
+
+// handleDashboardRedirect redirects the bare root path to the embedded dashboard.
+// Any other unmatched path falls through to a 404, matching prior behavior.
+func (s *Server) handleDashboardRedirect(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, "/ui/", http.StatusFound)
 }
 
 // handleAlerts handles GET /api/v1/alerts with query parameter filters.
@@ -307,9 +331,95 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Collectors: collectorStatuses,
 		Store:      storeHealth,
 	}
+	if health, ok := s.getAgentHealth(); ok {
+		response.Health = &health
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleSummary handles GET /api/v1/summary — aggregate statistics for the
+// dashboard: total count, severity distribution, top rules, and an hourly
+// timeline. Accepts the same query filters as /api/v1/alerts, defaulting to
+// a 24h window when "since" is not provided.
+func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.alertStore == nil {
+		http.Error(w, "Alert store not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	filters := parseQueryFilters(r)
+	if filters.Since.IsZero() && r.URL.Query().Get("since") == "" {
+		filters.Since = time.Now().Add(-24 * time.Hour)
+	}
+
+	ctx := r.Context()
+	restricted, err := applyNamespaceScope(ctx, filters)
+	if err != nil {
+		http.Error(w, "Forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	summary, err := s.summarize(ctx, restricted)
+	if err != nil {
+		s.logger.Error("failed to summarize alerts", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	// #nosec G104 -- response encode error is not actionable once headers are written; other handlers in this file follow the same pattern
+	json.NewEncoder(w).Encode(summary) //nolint:errcheck
+}
+
+// summarize computes the dashboard summary. Stores that implement
+// store.Summarizer aggregate over the FULL matching window in the data layer
+// (exact counts, no per-alert materialization). Stores that don't fall back to
+// Query with a bounded cap and flag Truncated when the cap is hit, so a summary
+// during an alert storm reports "≥N" rather than a silently low 500/5000.
+func (s *Server) summarize(ctx context.Context, filters store.QueryFilters) (store.AlertSummary, error) {
+	if sz, ok := s.alertStore.(store.Summarizer); ok {
+		// A summary reflects the whole window; a list-page limit must not cap it.
+		filters.Limit = 0
+		return sz.Summarize(ctx, filters)
+	}
+
+	// Fallback: materialize a bounded page and aggregate in-process.
+	const summaryFallbackCap = 5000
+	if filters.Limit == 0 {
+		filters.Limit = summaryFallbackCap
+	}
+	alerts, err := s.alertStore.Query(ctx, filters)
+	if err != nil {
+		return store.AlertSummary{BySeverity: map[string]int{}}, err
+	}
+	summary := store.SummarizeAlerts(alerts)
+	if filters.Limit > 0 && len(alerts) >= filters.Limit {
+		summary.Truncated = true
+	}
+	return summary, nil
+}
+
+// AlertSummary, RuleCount, and TimelineBucket are defined in the store package
+// so aggregation can happen store-side; these aliases keep the exporter's API
+// surface (and JSON shape) stable.
+type (
+	AlertSummary   = store.AlertSummary
+	RuleCount      = store.RuleCount
+	TimelineBucket = store.TimelineBucket
+)
+
+// buildAlertSummary aggregates a slice of alerts into severity counts, the top
+// rules by alert count, and an hourly timeline. Thin wrapper over
+// store.SummarizeAlerts, retained for existing callers/tests.
+func buildAlertSummary(alerts []types.Alert) AlertSummary {
+	return store.SummarizeAlerts(alerts)
 }
 
 // StatusAPIResponse represents the status API response
@@ -320,6 +430,10 @@ type StatusAPIResponse struct {
 	Timestamp  time.Time         `json:"timestamp"`
 	Collectors []CollectorStatus `json:"collectors"`
 	Store      string            `json:"store"`
+	// Health carries CPU pressure, drift-learning progress, sampling rates,
+	// and the hardware profile — omitted when no AgentHealthProvider is
+	// configured (see SetAgentHealthProvider, issue #309).
+	Health *AgentHealth `json:"health,omitempty"`
 }
 
 // handleRules handles GET /api/v1/rules to list loaded rules.
@@ -539,6 +653,9 @@ func parseQueryFilters(r *http.Request) store.QueryFilters {
 	if ruleID := r.URL.Query().Get("rule_id"); ruleID != "" {
 		filters.RuleIDs = strings.Split(ruleID, ",")
 	}
+	if comm := r.URL.Query().Get("comm"); comm != "" {
+		filters.Comm = comm
+	}
 	if podName := r.URL.Query().Get("pod"); podName != "" {
 		filters.PodName = podName
 	}
@@ -742,28 +859,7 @@ func (s *Server) handleAPIDocs(w http.ResponseWriter, _ *http.Request) {
 // CORS is restricted to the configured allowlist (default: "*" for backward compat).
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
-
-	origin := r.Header.Get("Origin")
-	s.mu.RLock()
-	origins := s.corsAllowedOrigins
-	s.mu.RUnlock()
-
-	if len(origins) > 0 && origin != "" {
-		for _, allowed := range origins {
-			if allowed == "*" {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-				break
-			}
-			if allowed == origin {
-				// Reflect the specific origin and add Vary: Origin to prevent
-				// proxy cache poisoning when responses differ by origin.
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
-				break
-			}
-		}
-	}
-
+	s.applyCORSHeaders(w, r)
 	w.Write(apispec.OpenAPISpec) //nolint:errcheck
 }
 

@@ -35,14 +35,14 @@ var (
 		"proc.args":           true,
 		"proc.args_truncated": true,
 		// Aliases: dot-prefixed names used in rule YAML files for readability.
-		"file.path":           true,
-		"file.op":             true,
-		"file.flags":          true,
-		"file.mode":           true,
-		"file.directory":      true,
-		"file.extension":      true,
-		"proc.comm":           true,
-		"uid":                 true,
+		"file.path":      true,
+		"file.op":        true,
+		"file.flags":     true,
+		"file.mode":      true,
+		"file.directory": true,
+		"file.extension": true,
+		"proc.comm":      true,
+		"uid":            true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
@@ -157,13 +157,13 @@ var (
 		"cloud.event_id":   true, // provider event ID
 	}
 	validBpfProgramFields = map[string]bool{
-		"cmd":       true, // bpf command: "PROG_LOAD" or "MAP_CREATE"
-		"cmd_nr":    true, // numeric bpf command: 5 for PROG_LOAD, 0 for MAP_CREATE
-		"prog_type": true, // BPF program type name (e.g. "XDP", "KPROBE", "SCHED_CLS")
+		"cmd":          true, // bpf command: "PROG_LOAD" or "MAP_CREATE"
+		"cmd_nr":       true, // numeric bpf command: 5 for PROG_LOAD, 0 for MAP_CREATE
+		"prog_type":    true, // BPF program type name (e.g. "XDP", "KPROBE", "SCHED_CLS")
 		"prog_type_nr": true, // numeric BPF program type
-		"ret":       true, // return value: >=0 = fd, <0 = error
-		"uid":       true,
-		"comm":      true,
+		"ret":          true, // return value: >=0 = fd, <0 = error
+		"uid":          true,
+		"comm":         true,
 	}
 )
 
@@ -309,6 +309,12 @@ func validateRule(rule *Rule) error {
 	if rule.Severity == "" {
 		rule.Severity = "warning" // Default severity
 	}
+	switch rule.Class {
+	case "", ClassThreat, ClassDrift:
+		// valid
+	default:
+		return fmt.Errorf("unknown class %q, valid: threat, drift", rule.Class)
+	}
 
 	// Reject empty condition_group (Н-4): would silently match every event.
 	if rule.ConditionGroup != nil && len(rule.ConditionGroup.Conditions) == 0 && len(rule.ConditionGroup.SubGroups) == 0 {
@@ -345,7 +351,7 @@ func validateRule(rule *Rule) error {
 		return fmt.Errorf("rule %s: sample_rate %.4f out of range, must be in (0.0, 1.0]", rule.ID, rule.SampleRate)
 	}
 
-	// Validate conditions
+	// Validate conditions (including every exception's condition/condition_group).
 	conditions := getAllConditions(rule)
 	for _, cond := range conditions {
 		if err := validateCondition(&cond, rule.EventType); err != nil {
@@ -353,15 +359,38 @@ func validateRule(rule *Rule) error {
 		}
 	}
 
+	// Validate exception metadata not covered by getAllConditions above.
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		if exc.Name == "" {
+			return fmt.Errorf("rule %s: exception %d missing required 'name'", rule.ID, i)
+		}
+		if exc.ConditionGroup != nil && len(exc.ConditionGroup.Conditions) == 0 && len(exc.ConditionGroup.SubGroups) == 0 {
+			return fmt.Errorf("rule %s: exception %q condition_group has no conditions or subgroups", rule.ID, exc.Name)
+		}
+	}
+
 	return nil
 }
 
-// getAllConditions extracts all conditions from a rule, recursively traversing SubGroups.
+// getAllConditions extracts all conditions from a rule, recursively traversing
+// SubGroups, and from every exception's condition/condition_group.
 func getAllConditions(rule *Rule) []RuleCondition {
+	var conds []RuleCondition
 	if rule.ConditionGroup != nil {
-		return getConditionsFromGroup(rule.ConditionGroup)
+		conds = getConditionsFromGroup(rule.ConditionGroup)
+	} else {
+		conds = []RuleCondition{rule.Condition}
 	}
-	return []RuleCondition{rule.Condition}
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		if exc.ConditionGroup != nil {
+			conds = append(conds, getConditionsFromGroup(exc.ConditionGroup)...)
+		} else {
+			conds = append(conds, exc.Condition)
+		}
+	}
+	return conds
 }
 
 // getConditionsFromGroup recursively extracts conditions from a RuleConditionGroup and its SubGroups.

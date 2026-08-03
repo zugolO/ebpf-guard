@@ -1,6 +1,13 @@
 # ebpf-guard configuration
 config_version: "v0.1"
 
+# profile selects a built-in hardware-aware tuning preset: "lite", "balanced",
+# or "production" (see docs/hardware-profiles.md). Leave unset to autodetect
+# from nproc/meminfo at startup, or override with --profile. Any value set
+# explicitly below (e.g. bpf.map_sizes.events) still takes precedence over
+# whatever the chosen profile would otherwise apply for that field.
+# profile: lite
+
 server:
   bind_address: ":19090"
   metrics_path: "/metrics"
@@ -70,6 +77,11 @@ rules:
   rate_limit_alerts: true
   rate_limit_window: 60
   max_alerts_per_window: 100
+  # Optional local-tuning overlay: adds `exceptions` to existing rules by
+  # rule_id without editing the shipped rule files, so it survives rule-set
+  # updates. Missing file is a no-op. See rules/local-tuning.yaml.example
+  # and docs/rule-authoring-guide.md#exceptions.
+  local_tuning_path: "/opt/ebpf-guard/rules/local-tuning.yaml"
 
 profiler:
   enabled: true
@@ -103,17 +115,26 @@ watchdog:
     disable_all_threshold: 5.0        # free RAM %: disable all profiling (L2)
     recovery_threshold: 20.0          # free RAM %: recover to normal
   # cpu_pressure: adaptively shed the noisiest collectors when the agent's own
-  # CPU usage (as a % of total VPS CPU) exceeds the budget. File monitoring is
-  # shed first (L1); syscall + network are added if CPU stays high (L2).
-  # Sampling is restored once usage drops below recovery_threshold (hysteresis).
+  # CPU usage exceeds the budget. File monitoring is shed first (L1); syscall
+  # + network are added if CPU stays high (L2). LSM/canary/exec hooks are
+  # never shed regardless of level. Sampling is restored once usage drops
+  # below recovery_threshold AND the current level has been held for at
+  # least min_dwell (hysteresis + dwell floor, to avoid flapping on bursty
+  # attack traffic).
+  #
+  # All thresholds are a percentage of a SINGLE core (100 == one full core
+  # busy), not of total host CPU — this makes the defaults behave the same
+  # on a 1-core VPS and an 8-core box, instead of scaling the trip point with
+  # unrelated hardware capacity.
   cpu_pressure:
     enabled: true
     check_interval: 5            # seconds between CPU samples
-    cpu_limit_percent: 15.0      # target CPU budget; seeds thresholds below
-    file_shed_threshold: 15.0    # CPU %: reduce file sampling (L1)
-    all_shed_threshold: 25.0     # CPU %: also reduce syscall/network (L2)
-    recovery_threshold: 9.0      # CPU %: step back one level
-    window_size: 3               # samples averaged into the sliding window
+    cpu_limit_percent: 40.0      # target CPU budget (% of one core); seeds thresholds below
+    file_shed_threshold: 40.0    # CPU % of one core: reduce file sampling (L1)
+    all_shed_threshold: 70.0     # CPU % of one core: also reduce syscall/network (L2)
+    recovery_threshold: 20.0     # CPU % of one core: step back one level
+    window_size: 6               # samples averaged into the sliding window (30s at 5s interval)
+    min_dwell: 30                # seconds a level is held before recovering
 
 # Correlator tuning
 correlator:
@@ -121,6 +142,16 @@ correlator:
   # evaluate per-event). Grows lazily up to this size. ~208 B/event, so 256 ≈
   # 53 KB per active PID. Raise for deeper per-process history at the cost of RAM.
   buffer_size: 256
+
+  # Alert aggregation: folds repeated alerts sharing the same
+  # (rule_id, comm, path-prefix, pod/namespace) key within `window` into a
+  # single alert carrying a count/first_seen/last_seen, instead of forwarding
+  # one row per occurrence to storage and notification backends. The first
+  # occurrence of a key is always forwarded immediately; Prometheus's
+  # ebpf_guard_alerts_total counter is unaffected (stays per-event).
+  alert_aggregation:
+    enabled: false
+    window: 60s
 
 alerting:
   enabled: false

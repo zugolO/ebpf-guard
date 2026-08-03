@@ -156,6 +156,117 @@ func TestLoadRules_MissingPath(t *testing.T) {
 	}
 }
 
+func TestLoadRulesWithTuning_MissingTuningFileIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	rulePath := filepath.Join(dir, "rule.yaml")
+	writeFile(t, rulePath, minimalRuleYAML("tuning_missing_file_rule"))
+
+	rules, err := loadRulesWithTuning(rulePath, filepath.Join(dir, "does-not-exist-tuning.yaml"))
+	if err != nil {
+		t.Fatalf("loadRulesWithTuning error = %v", err)
+	}
+	if len(rules) != 1 || len(rules[0].Exceptions) != 0 {
+		t.Errorf("loadRulesWithTuning() = %+v, want single rule with no exceptions", rules)
+	}
+}
+
+func TestLoadRulesWithTuning_MergesExceptions(t *testing.T) {
+	dir := t.TempDir()
+	rulePath := filepath.Join(dir, "rule.yaml")
+	writeFile(t, rulePath, minimalRuleYAML("tuning_merge_rule"))
+
+	tuningPath := filepath.Join(dir, "local-tuning.yaml")
+	writeFile(t, tuningPath, `
+overlays:
+  - rule_id: tuning_merge_rule
+    exceptions:
+      - name: allow-lo
+        condition:
+          field: dport
+          op: eq
+          values: [4444]
+`)
+
+	rules, err := loadRulesWithTuning(rulePath, tuningPath)
+	if err != nil {
+		t.Fatalf("loadRulesWithTuning error = %v", err)
+	}
+	if len(rules) != 1 || len(rules[0].Exceptions) != 1 || rules[0].Exceptions[0].Name != "allow-lo" {
+		t.Errorf("loadRulesWithTuning() = %+v, want single rule with 1 merged exception", rules)
+	}
+}
+
+func TestLoadRulesWithTuning_BaseRulesErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	rulePath := filepath.Join(dir, "rule.yaml")
+	writeFile(t, rulePath, "not: [valid yaml")
+
+	if _, err := loadRulesWithTuning(rulePath, ""); err == nil {
+		t.Fatal("loadRulesWithTuning(invalid rules) error = nil, want error")
+	}
+}
+
+func TestLoadRulesWithTuning_InvalidTuningFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	rulePath := filepath.Join(dir, "rule.yaml")
+	writeFile(t, rulePath, minimalRuleYAML("tuning_invalid_overlay_rule"))
+
+	tuningPath := filepath.Join(dir, "local-tuning.yaml")
+	writeFile(t, tuningPath, "overlays: [this is not valid yaml")
+
+	if _, err := loadRulesWithTuning(rulePath, tuningPath); err == nil {
+		t.Fatal("loadRulesWithTuning(invalid tuning file) error = nil, want error")
+	}
+}
+
+func TestLoadRulesWithTuning_InvalidOverlayFieldErrors(t *testing.T) {
+	dir := t.TempDir()
+	rulePath := filepath.Join(dir, "rule.yaml")
+	writeFile(t, rulePath, minimalRuleYAML("tuning_bad_field_rule"))
+
+	tuningPath := filepath.Join(dir, "local-tuning.yaml")
+	writeFile(t, tuningPath, `
+overlays:
+  - rule_id: tuning_bad_field_rule
+    exceptions:
+      - name: bad
+        condition:
+          field: not_a_real_field
+          op: eq
+          values: [x]
+`)
+
+	if _, err := loadRulesWithTuning(rulePath, tuningPath); err == nil {
+		t.Fatal("loadRulesWithTuning(invalid overlay field) error = nil, want error")
+	}
+}
+
+func TestLoadRulesWithTuning_UnknownRuleIDIsWarnedNotErrored(t *testing.T) {
+	dir := t.TempDir()
+	rulePath := filepath.Join(dir, "rule.yaml")
+	writeFile(t, rulePath, minimalRuleYAML("tuning_known_rule"))
+
+	tuningPath := filepath.Join(dir, "local-tuning.yaml")
+	writeFile(t, tuningPath, `
+overlays:
+  - rule_id: rule_that_does_not_exist
+    exceptions:
+      - name: x
+        condition:
+          field: dport
+          op: eq
+          values: [4444]
+`)
+
+	rules, err := loadRulesWithTuning(rulePath, tuningPath)
+	if err != nil {
+		t.Fatalf("loadRulesWithTuning error = %v", err)
+	}
+	if len(rules) != 1 || len(rules[0].Exceptions) != 0 {
+		t.Errorf("loadRulesWithTuning() = %+v, want unmodified rule (unknown rule_id skipped)", rules)
+	}
+}
+
 func TestBuildSyntheticEvents(t *testing.T) {
 	events := buildSyntheticEvents(0)
 	if len(events) != 6 {

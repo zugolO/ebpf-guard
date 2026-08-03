@@ -38,6 +38,15 @@ var (
 		},
 		[]string{"rule_id", "mode", "sample_rate"},
 	)
+	// ruleExceptionsTotal counts alerts suppressed because the event matched a
+	// rule's own condition AND one of its exceptions (FP-tuning suppression).
+	ruleExceptionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_rule_exceptions_total",
+			Help: "Alerts suppressed because the event matched a rule exception",
+		},
+		[]string{"rule_id", "exception_name"},
+	)
 )
 
 // alertsPool recycles the backing arrays of []types.Alert slices returned by
@@ -102,25 +111,25 @@ const (
 type condOpCode uint8
 
 const (
-	condOpUnknown    condOpCode = iota
-	condOpIn                    // "in"
-	condOpNotIn                 // "not_in"
-	condOpEquals                // "equals"
-	condOpNotEquals             // "not_equals"
-	condOpPrefix                // "prefix"
-	condOpNotPrefix             // "not_prefix"
-	condOpSuffix                // "suffix"
-	condOpNotSuffix             // "not_suffix"
-	condOpContains              // "contains"
-	condOpRegex                 // "regex"
-	condOpGT                    // "gt"
-	condOpLT                    // "lt"
-	condOpGTE                   // "gte"
-	condOpLTE                   // "lte"
-	condOpInCIDR                // "in_cidr"
-	condOpNotInCIDR             // "not_in_cidr"
-	condOpCapsGained            // "caps_gained"
-	condOpCapsDropped           // "caps_dropped"
+	condOpUnknown     condOpCode = iota
+	condOpIn                     // "in"
+	condOpNotIn                  // "not_in"
+	condOpEquals                 // "equals"
+	condOpNotEquals              // "not_equals"
+	condOpPrefix                 // "prefix"
+	condOpNotPrefix              // "not_prefix"
+	condOpSuffix                 // "suffix"
+	condOpNotSuffix              // "not_suffix"
+	condOpContains               // "contains"
+	condOpRegex                  // "regex"
+	condOpGT                     // "gt"
+	condOpLT                     // "lt"
+	condOpGTE                    // "gte"
+	condOpLTE                    // "lte"
+	condOpInCIDR                 // "in_cidr"
+	condOpNotInCIDR              // "not_in_cidr"
+	condOpCapsGained             // "caps_gained"
+	condOpCapsDropped            // "caps_dropped"
 )
 
 // opCodeOf converts a RuleConditionOperator string to its numeric code.
@@ -194,6 +203,21 @@ type RuleConditionGroup struct {
 	SubGroups []RuleConditionGroup `yaml:"subgroups,omitempty"`
 }
 
+// RuleException defines a named suppression condition for a rule. When an
+// event matches the rule's own condition AND any one of its exceptions, the
+// alert is suppressed. This lets an operator tune away known false positives
+// (e.g. systemd touching a container-escape-sensitive path) without editing
+// the rule itself, so the exception survives the next rule-set update.
+type RuleException struct {
+	// Name identifies the exception in logs, metrics, and audit trails.
+	Name string `yaml:"name"`
+	// Condition is a single suppression condition (for simple exceptions).
+	Condition RuleCondition `yaml:"condition"`
+	// ConditionGroup allows AND/OR logic across multiple fields; takes
+	// precedence over Condition when set.
+	ConditionGroup *RuleConditionGroup `yaml:"condition_group,omitempty"`
+}
+
 // RuleAction defines what to do when a rule matches.
 type RuleAction string
 
@@ -209,6 +233,33 @@ const (
 	// ActionThrottle rate-limits the offending process via cgroups v2.
 	ActionThrottle RuleAction = "throttle"
 )
+
+// RuleClass classifies a rule's signal type for default alert visibility
+// (issue #286, "low false-positive out of the box").
+type RuleClass string
+
+const (
+	// ClassThreat marks a rule as a genuine attack signature — always shown
+	// as an alert. This is the default when Class is unset, so existing rule
+	// files behave exactly as before.
+	ClassThreat RuleClass = "threat"
+	// ClassDrift marks a rule as container/FIM drift monitoring rather than a
+	// direct attack signature. Drift-class matches are not alerted directly;
+	// instead they are routed through profiler.DriftBaselineProfiler, which
+	// learns a per-workload baseline during a learning window and alerts only
+	// on genuine deviation from it. Has no effect unless the correlation
+	// engine is configured with a DriftBaselineProfiler.
+	ClassDrift RuleClass = "drift"
+)
+
+// EffectiveClass returns the rule's class, defaulting to ClassThreat when
+// Class is unset so unclassified rules keep alerting as before.
+func (r *Rule) EffectiveClass() RuleClass {
+	if r.Class == "" {
+		return ClassThreat
+	}
+	return r.Class
+}
 
 // Rule defines a detection rule.
 type Rule struct {
@@ -228,8 +279,16 @@ type Rule struct {
 	ConditionGroup *RuleConditionGroup `yaml:"condition_group,omitempty"`
 	Severity       types.AlertSeverity `yaml:"severity"`
 	Action         RuleAction          `yaml:"action"`
+	// Exceptions are suppression conditions: if the event also matches any one
+	// of them, the alert is not raised. Populated either inline in the rule
+	// file or merged in from a local-tuning overlay (see ApplyTuningOverlay).
+	Exceptions []RuleException `yaml:"exceptions,omitempty"`
 	// Tags are optional metadata for rule categorization and filtering
 	Tags []string `yaml:"tags,omitempty"`
+	// Class classifies the rule as "threat" (default) or "drift". See
+	// RuleClass/ClassDrift for the semantics. Use EffectiveClass to read this
+	// field so callers get the correct default without checking for "".
+	Class RuleClass `yaml:"class,omitempty"`
 	// Sampling holds the nested per-rule sampling configuration.
 	// Takes precedence over the flat SampleRate/SampleDeterministic fields if set.
 	//
@@ -398,12 +457,25 @@ func collectRequiredPatterns(rules []Rule) (regexPats, cidrPats, setKeys map[str
 }
 
 // extractAllRuleConditions returns all RuleCondition entries from a rule,
-// traversing both the top-level Condition and any ConditionGroup/subgroups.
+// traversing the top-level Condition/ConditionGroup as well as every
+// exception's Condition/ConditionGroup, so cache-inheritance sees patterns
+// referenced only from an exception.
 func extractAllRuleConditions(rule *Rule) []RuleCondition {
+	var conds []RuleCondition
 	if rule.ConditionGroup != nil {
-		return extractGroupConditions(rule.ConditionGroup)
+		conds = extractGroupConditions(rule.ConditionGroup)
+	} else {
+		conds = []RuleCondition{rule.Condition}
 	}
-	return []RuleCondition{rule.Condition}
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		if exc.ConditionGroup != nil {
+			conds = append(conds, extractGroupConditions(exc.ConditionGroup)...)
+		} else {
+			conds = append(conds, exc.Condition)
+		}
+	}
+	return conds
 }
 
 // extractGroupConditions recursively collects conditions from a group and its subgroups.
@@ -464,6 +536,18 @@ func (re *RuleEngine) compilePatterns() error {
 		}
 		if re.rules[i].ConditionGroup != nil {
 			if err := re.compileGroupPatterns(re.rules[i].ConditionGroup); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		for j := range re.rules[i].Exceptions {
+			exc := &re.rules[i].Exceptions[j]
+			if exc.ConditionGroup != nil {
+				if err := re.compileGroupPatterns(exc.ConditionGroup); err != nil {
+					errs = append(errs, err)
+				}
+				continue
+			}
+			if err := re.compileCondPtr(&exc.Condition); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -610,6 +694,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 			Action:    string(rule.Action),
+			Class:     string(rule.Class),
 		})
 	}
 }
@@ -652,6 +737,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Comm:      util.BytesToString(e.Comm[:]),
 			Event:     e,
 			Action:    string(rule.Action),
+			Class:     string(rule.Class),
 		})
 	}
 
@@ -734,11 +820,33 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 	}
 
 	// Use condition group if present, otherwise use single condition.
+	var matched bool
 	if rule.ConditionGroup != nil {
-		return re.evaluateConditionGroup(e, rule.ConditionGroup, dnsAnalysis)
+		matched = re.evaluateConditionGroup(e, rule.ConditionGroup, dnsAnalysis)
+	} else {
+		matched = re.evaluateCondition(e, &rule.Condition, dnsAnalysis)
+	}
+	if !matched {
+		return false
 	}
 
-	return re.evaluateCondition(e, &rule.Condition, dnsAnalysis)
+	// An event matching the rule is still suppressed if it also matches any
+	// one of the rule's exceptions (FP tuning without editing the rule).
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		var excMatched bool
+		if exc.ConditionGroup != nil {
+			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis)
+		} else {
+			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis)
+		}
+		if excMatched {
+			ruleExceptionsTotal.WithLabelValues(rule.ID, exc.Name).Inc()
+			return false
+		}
+	}
+
+	return true
 }
 
 // evaluateConditionGroup evaluates a group of conditions with AND/OR logic, recursing into SubGroups.
@@ -1499,4 +1607,3 @@ func hasPrefix(prefixes []string, value string) bool {
 	}
 	return false
 }
-

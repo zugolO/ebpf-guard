@@ -12,11 +12,14 @@ func TestExampleConfigLoadsCPUPressure(t *testing.T) {
 	if !cp.Enabled {
 		t.Fatal("expected cpu_pressure.enabled=true from example config")
 	}
-	if cp.FileShedThreshold != 15.0 || cp.AllShedThreshold != 25.0 || cp.RecoveryThreshold != 9.0 {
+	if cp.FileShedThreshold != 40.0 || cp.AllShedThreshold != 70.0 || cp.RecoveryThreshold != 20.0 {
 		t.Fatalf("unexpected cpu_pressure thresholds: %+v", cp)
 	}
-	if cp.WindowSize != 3 {
+	if cp.WindowSize != 6 {
 		t.Fatalf("unexpected window_size: %d", cp.WindowSize)
+	}
+	if cp.MinDwell != 30 {
+		t.Fatalf("unexpected min_dwell: %d", cp.MinDwell)
 	}
 	if err := ValidateConfig(cfg); err != nil {
 		t.Fatalf("example config failed validation: %v", err)

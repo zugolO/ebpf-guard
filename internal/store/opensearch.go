@@ -91,6 +91,13 @@ type alertDocument struct {
 	Namespace   string            `json:"namespace,omitempty"`
 	ContainerID string            `json:"container_id,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
+	// Alert-aggregation fields. Reap re-emits the same alert ID with the final
+	// count once its window closes; the bulk "index" action below overwrites the
+	// document by _id, so these carry through correctly (no UNIQUE-style error,
+	// unlike a plain INSERT — see the SQLite backend for the analogous fix).
+	Count     int       `json:"count,omitempty"`
+	FirstSeen time.Time `json:"first_seen,omitempty"`
+	LastSeen  time.Time `json:"last_seen,omitempty"`
 }
 
 // toDocument converts an Alert to an OpenSearch document.
@@ -108,6 +115,9 @@ func toDocument(alert types.Alert) alertDocument {
 		Namespace:   alert.Enrichment.Namespace,
 		ContainerID: alert.Enrichment.ContainerID,
 		Labels:      alert.Enrichment.Labels,
+		Count:       alert.Count,
+		FirstSeen:   alert.FirstSeen,
+		LastSeen:    alert.LastSeen,
 	}
 }
 
@@ -262,6 +272,17 @@ func (s *OpenSearchStore) buildQuery(filters QueryFilters) map[string]interface{
 		})
 	}
 
+	if filters.Comm != "" {
+		must = append(must, map[string]interface{}{
+			"wildcard": map[string]interface{}{
+				"comm": map[string]interface{}{
+					"value":            "*" + filters.Comm + "*",
+					"case_insensitive": true,
+				},
+			},
+		})
+	}
+
 	if filters.PodName != "" {
 		must = append(must, map[string]interface{}{
 			"term": map[string]interface{}{"pod_name": filters.PodName},
@@ -306,6 +327,9 @@ func fromDocument(doc alertDocument) types.Alert {
 		Message:   doc.Message,
 		Details:   doc.Details,
 		TraceID:   doc.TraceID,
+		Count:     doc.Count,
+		FirstSeen: doc.FirstSeen,
+		LastSeen:  doc.LastSeen,
 		Enrichment: types.EnrichmentInfo{
 			PodName:     doc.PodName,
 			Namespace:   doc.Namespace,

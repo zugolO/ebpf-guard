@@ -267,6 +267,40 @@ components:
           enum: [healthy, unhealthy, "not configured"]
           example: "healthy"
 
+    AlertSummary:
+      type: object
+      required: [total, by_severity, top_rules, timeline]
+      properties:
+        total:
+          type: integer
+        by_severity:
+          type: object
+          additionalProperties:
+            type: integer
+          example: { critical: 3, warning: 12 }
+        top_rules:
+          type: array
+          items:
+            type: object
+            required: [rule_id, count]
+            properties:
+              rule_id:
+                type: string
+              count:
+                type: integer
+        timeline:
+          type: array
+          description: Hourly alert counts covering the queried range.
+          items:
+            type: object
+            required: [hour, count]
+            properties:
+              hour:
+                type: string
+                format: date-time
+              count:
+                type: integer
+
     RuleCondition:
       type: object
       required: [field, op, values]
@@ -773,6 +807,45 @@ paths:
                 $ref: "#/components/schemas/StatusResponse"
         "401":
           description: Missing or invalid Bearer token
+
+  /api/v1/summary:
+    get:
+      tags: [status]
+      summary: Alert aggregate summary
+      description: >
+        Returns aggregate statistics over the queried alert window: total count,
+        severity distribution, top rules by alert count, and an hourly timeline.
+        Powers the embedded dashboard at /ui/. Accepts the same filters as
+        /api/v1/alerts; defaults to a 24h window when "since" is omitted.
+      operationId: getAlertSummary
+      security:
+        - bearerViewer: []
+        - bearerAdmin: []
+      parameters:
+        - name: since
+          in: query
+          schema:
+            type: string
+          example: "24h"
+        - name: severity
+          in: query
+          schema:
+            type: string
+        - name: rule_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Alert summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertSummary"
+        "401":
+          description: Missing or invalid Bearer token
+        "503":
+          description: Alert store not configured
 
   # ── Incidents ────────────────────────────────────────────────────────────────
 

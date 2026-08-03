@@ -57,6 +57,9 @@ type QueryFilters struct {
 	Severity []types.Severity
 	// RuleIDs filters by rule ID (empty = all rules).
 	RuleIDs []string
+	// Comm filters by process name (comm), matched as a case-insensitive
+	// substring against the full alert set server-side (empty = all comms).
+	Comm string
 	// PodName filters by Kubernetes pod name (empty = all pods).
 	PodName string
 	// Namespace filters by Kubernetes namespace (empty = all namespaces).
@@ -262,6 +265,20 @@ func (s *InstrumentedStore) StoreBatch(ctx context.Context, alerts []types.Alert
 
 func (s *InstrumentedStore) Query(ctx context.Context, filters QueryFilters) ([]types.Alert, error) {
 	return s.inner.Query(ctx, filters)
+}
+
+// Summarize delegates to the wrapped store's native aggregation when available,
+// otherwise falls back to Query + SummarizeAlerts so the wrapper always
+// satisfies Summarizer regardless of the inner backend.
+func (s *InstrumentedStore) Summarize(ctx context.Context, filters QueryFilters) (AlertSummary, error) {
+	if sz, ok := s.inner.(Summarizer); ok {
+		return sz.Summarize(ctx, filters)
+	}
+	alerts, err := s.inner.Query(ctx, filters)
+	if err != nil {
+		return AlertSummary{BySeverity: map[string]int{}}, err
+	}
+	return SummarizeAlerts(alerts), nil
 }
 
 func (s *InstrumentedStore) QueryByID(ctx context.Context, alertID string) (*types.Alert, error) {

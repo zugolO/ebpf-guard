@@ -93,14 +93,17 @@ func ValidateConfig(cfg *Config) error {
 	}
 	if cfg.Watchdog.CPUPressure.Enabled {
 		cp := cfg.Watchdog.CPUPressure
+		// Thresholds are a percentage of a single core, so they may
+		// legitimately exceed 100 on hosts where the agent is allowed to
+		// burn more than one full core before shedding.
 		for name, v := range map[string]float64{
 			"cpu_limit_percent":   cp.CPULimitPercent,
 			"file_shed_threshold": cp.FileShedThreshold,
 			"all_shed_threshold":  cp.AllShedThreshold,
 			"recovery_threshold":  cp.RecoveryThreshold,
 		} {
-			if v < 0 || v > 100 {
-				add(fmt.Errorf("watchdog.cpu_pressure.%s: must be in [0, 100], got %.2f", name, v))
+			if v < 0 || v > 800 {
+				add(fmt.Errorf("watchdog.cpu_pressure.%s: must be in [0, 800], got %.2f", name, v))
 			}
 		}
 		if cp.FileShedThreshold > 0 && cp.AllShedThreshold > 0 && cp.FileShedThreshold > cp.AllShedThreshold {
@@ -113,6 +116,9 @@ func ValidateConfig(cfg *Config) error {
 		}
 		if cp.WindowSize < 0 {
 			add(fmt.Errorf("watchdog.cpu_pressure.window_size: must be >= 0, got %d", cp.WindowSize))
+		}
+		if cp.MinDwell < 0 {
+			add(fmt.Errorf("watchdog.cpu_pressure.min_dwell: must be >= 0, got %d", cp.MinDwell))
 		}
 	}
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -80,6 +81,7 @@ func newRootCmd() *cobra.Command {
 		shutdownTimeout  string
 		zeroConfig       bool
 		enableSimple     bool
+		profileFlag      string
 	)
 
 	root := &cobra.Command{
@@ -90,7 +92,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		Version:      fmt.Sprintf("%s (commit %s)", Version, Commit),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration, shutdownTimeout, zeroConfig, enableSimple)
+			return runAgent(cfgPath, logLevel, dryRun, simulateMode, simulateDuration, shutdownTimeout, zeroConfig, enableSimple, profileFlag)
 		},
 	}
 
@@ -107,6 +109,9 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 		"run without a config file: uses embedded defaults and built-in rules (one-command deployment)")
 	root.PersistentFlags().BoolVar(&enableSimple, "simple", false,
 		"enable simple mode: auto-kill cryptominers, webshells, and reverse shells with safety rails")
+	root.PersistentFlags().StringVar(&profileFlag, "profile", os.Getenv("EBPF_GUARD_PROFILE"),
+		"hardware-aware tuning preset: lite, balanced, or production (default: $EBPF_GUARD_PROFILE, "+
+			"or autodetect from nproc/meminfo if that's unset too)")
 
 	rulesCmd := newRulesCmd(&cfgPath)
 	rulesCmd.AddCommand(newRulesTestCmd(&cfgPath))
@@ -129,7 +134,7 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 	return root
 }
 
-func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string, zeroConfig bool, enableSimple bool) error {
+func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string, zeroConfig bool, enableSimple bool, profileFlag string) error {
 	setupLogger(logLevel)
 
 	slog.Info("ebpf-guard starting",
@@ -149,7 +154,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if zeroConfig {
 		slog.Info("zero-config mode: using embedded defaults and built-in rules")
-		cfgManager = config.NewZeroConfigManager()
+		cfgManager = config.NewZeroConfigManagerWithProfile(profileFlag)
 		cfg = cfgManager.Get()
 
 		// Load all built-in rules from the embedded filesystem.
@@ -176,14 +181,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		printZeroConfigBanner(cfg)
 	} else {
 		var err error
-		cfgManager, err = config.NewManagerSkipPermCheck(cfgPath)
+		cfgManager, err = config.NewManagerSkipPermCheckWithProfile(cfgPath, profileFlag)
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
 		cfg = cfgManager.Get()
 
-		// Load rules from file or directory (config defaults to rules/ dir)
-		rules, err = loadRules(cfg.Rules.Path)
+		// Load rules from file or directory (config defaults to rules/ dir),
+		// merging in the local-tuning overlay if configured.
+		rules, err = loadRulesWithTuning(cfg.Rules.Path, cfg.Rules.LocalTuningPath)
 		if err != nil {
 			slog.Warn("failed to load rules file, starting with empty rule set",
 				slog.String("path", cfg.Rules.Path),
@@ -193,6 +199,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Info("rules loaded", slog.Int("count", len(rules)))
 		}
 	}
+
+	// ── Hardware-aware profile (issue #287) ────────────────────────────────────
+	// Log the resolved lite/balanced/production preset and apply GOMEMLIMIT/GOGC
+	// tuning so a single-core/1-2GB VPS runs `lite` without any manual config.
+	hwProfile := cfgManager.HardwareProfile()
+	slog.Info("hardware profile resolved",
+		slog.String("profile", hwProfile.Profile),
+		slog.String("source", hwProfile.Source),
+		slog.String("reason", hwProfile.Reason),
+		slog.Int("cpus", hwProfile.Hardware.CPUs),
+		slog.Int("mem_total_mb", hwProfile.Hardware.MemTotalMB),
+		slog.Int("bpf_events_map", hwProfile.Applied.EventsMap),
+		slog.Int("bpf_processes_map", hwProfile.Applied.ProcessesMap),
+		slog.Int("bpf_connections_map", hwProfile.Applied.ConnectionsMap),
+		slog.Int("profiler_max_tracked_pids", hwProfile.Applied.MaxTrackedPIDs),
+		slog.Bool("sequence_profiler", hwProfile.Applied.SequenceEnabled),
+		slog.Bool("lineage_tracker", hwProfile.Applied.LineageEnabled),
+	)
+	applyRuntimeTuning(hwProfile)
 
 	if shutdownTimeoutFlag != "" {
 		d, err := time.ParseDuration(shutdownTimeoutFlag)
@@ -337,11 +362,35 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// ebpf_guard_profiler_anomaly_score via the cardinality-guarded gauge.
 	engineCfg.AnomalyScoreReporter = exporter.SetAnomalyScoreWithGuard
 
+	// Drift-baseline observe mode (issue #286): suppresses class: drift rule
+	// matches (container/FIM drift monitoring) during a per-workload learning
+	// window, then alerts only on matches that deviate from the learned
+	// baseline. Independent of the general anomaly profiler above — it only
+	// affects rules explicitly tagged class: drift.
+	var driftProfiler *profiler.DriftBaselineProfiler
+	if cfg.Profiler.DriftBaseline.Enabled {
+		driftProfiler = profiler.NewDriftBaselineProfiler(profiler.DriftBaselineConfig{
+			Enabled:                cfg.Profiler.DriftBaseline.Enabled,
+			LearningPeriod:         cfg.Profiler.DriftBaseline.LearningPeriod,
+			MinSamples:             cfg.Profiler.DriftBaseline.MinSamples,
+			PerWorkload:            cfg.Profiler.DriftBaseline.PerWorkload,
+			MaxWorkloads:           cfg.Profiler.DriftBaseline.MaxWorkloads,
+			EnforceDeadlinePeriods: cfg.Profiler.DriftBaseline.EnforceDeadlinePeriods,
+		}, slog.Default())
+		if err := driftProfiler.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+			slog.Warn("drift baseline: failed to register metrics", slog.Any("error", err))
+		}
+		engineCfg.DriftBaselineProfiler = driftProfiler
+	}
+
 	// samplingMux fans BPF-side sampling changes out to the per-collector
 	// SamplingControllers. It is shared by the collectors' status reporters
 	// (which register each controller as its collector comes up) and the CPU
 	// pressure watcher (which adjusts rates under load).
 	samplingMux := watchdog.NewMultiBPFController(slog.Default())
+	if err := samplingMux.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+		slog.Warn("sampling: failed to register effective-rate metric", slog.Any("error", err))
+	}
 
 	var prof *profiler.Profiler
 	if cfg.Profiler.Enabled {
@@ -412,7 +461,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// The construction/registration/start wiring lives in watchdog so it can be
 	// unit-tested; here we only map config fields.
 	cp := cfg.Watchdog.CPUPressure
-	watchdog.SetupCPUPressureWatcher(ctx, watchdog.CPUConfig{
+	cpuWatcher := watchdog.SetupCPUPressureWatcher(ctx, watchdog.CPUConfig{
 		Enabled:           cp.Enabled,
 		CheckInterval:     time.Duration(cp.CheckInterval) * time.Second,
 		CPULimitPercent:   cp.CPULimitPercent,
@@ -420,7 +469,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		AllShedThreshold:  cp.AllShedThreshold,
 		RecoveryThreshold: cp.RecoveryThreshold,
 		WindowSize:        cp.WindowSize,
-	}, slog.Default(), samplingMux, prometheus.DefaultRegisterer)
+		MinDwell:          time.Duration(cp.MinDwell) * time.Second,
+		// Write through a named arbiter view so a CPU-pressure recovery
+		// restores the operator's configured base rate (not a hardcoded 1.0)
+		// and never overwrites another controller's active degradation (#304).
+	}, slog.Default(), samplingMux.Controller("cpu_pressure"), prometheus.DefaultRegisterer)
 
 	// Feature F: cross-node alert correlation via gossip amplification.
 	var gossipMgr *gossip.Manager
@@ -686,9 +739,51 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return engine.GetRules()
 	})
 	srv.SetIncidentTracker(engine.IncidentTracker())
+	// Wires POST /api/v1/tuning/exceptions to append operator-generated
+	// exceptions (from the dashboard's false-positive flow, issue #308) into
+	// the same overlay file the rule loader already reads on startup/reload.
+	srv.SetLocalTuningPath(cfg.Rules.LocalTuningPath)
 
 	if gossipMgr != nil {
 		srv.RegisterGossipRoutes(gossip.Handler(gossipMgr))
+	}
+
+	// Agent-health snapshot for GET /api/v1/status (issue #309): lets a VPS
+	// operator without Prometheus/Grafana see load-shedding, drift-learning
+	// progress, effective sampling rates, and the hardware profile without
+	// parsing /metrics on the client.
+	srv.SetAgentHealthProvider(func() exporter.AgentHealth {
+		health := exporter.AgentHealth{HardwareProfile: hwProfile.Profile}
+		if cpuWatcher != nil {
+			health.CPUPressureLevel = cpuWatcher.PressureLevel()
+			health.CPUPressurePercent = cpuWatcher.PressurePercent()
+			health.VisibilityReduced = cpuWatcher.IsThrottling()
+		}
+		if rates := samplingMux.EffectiveRates(); len(rates) > 0 {
+			health.SamplingRates = rates
+		}
+		if driftProfiler != nil {
+			health.DriftLearningWorkloads = driftProfiler.LearningWorkloads()
+			health.DriftStuckWorkloads = driftProfiler.StuckLearningWorkloads()
+			health.DriftProfilesActive = driftProfiler.ProfileCount()
+		}
+		return health
+	})
+
+	if dbg := srv.GetDebugHandler(); dbg != nil {
+		dbg.SetHardwareProfile(exporter.HardwareProfileState{
+			Profile:         hwProfile.Profile,
+			Source:          hwProfile.Source,
+			Reason:          hwProfile.Reason,
+			CPUs:            hwProfile.Hardware.CPUs,
+			MemTotalMB:      hwProfile.Hardware.MemTotalMB,
+			EventsMap:       hwProfile.Applied.EventsMap,
+			ProcessesMap:    hwProfile.Applied.ProcessesMap,
+			ConnectionsMap:  hwProfile.Applied.ConnectionsMap,
+			MaxTrackedPIDs:  hwProfile.Applied.MaxTrackedPIDs,
+			SequenceEnabled: hwProfile.Applied.SequenceEnabled,
+			LineageEnabled:  hwProfile.Applied.LineageEnabled,
+		})
 	}
 
 	if err := srv.Start(ctx); err != nil {
@@ -1092,7 +1187,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 			// Phase 1: parse and fully validate in isolation — no swap yet.
 			t0 := time.Now()
-			newRules, err := loadRules(newCfg.Rules.Path)
+			newRules, err := loadRulesWithTuning(newCfg.Rules.Path, newCfg.Rules.LocalTuningPath)
 			engine.ObserveYAMLParseDuration(time.Since(t0))
 			if err != nil {
 				slog.Error("hot-reload aborted: validation failed",
@@ -1357,16 +1452,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// falls back to this agent's own node identity.
 	metricsNodeName := resolveMetricsNodeName()
 
-	// dispatchAlerts fans a batch of alerts out to every configured sink: the
+	// alertAggregator folds repeated alerts sharing the same rule/comm/path-prefix/
+	// pod key within a time window into a single alert with a running count,
+	// so an operator sees one incident instead of a storm of identical rows.
+	// Disabled by default; see correlator.alert_aggregation in config.yaml.
+	alertAggWindow, err := time.ParseDuration(cfg.Correlator.AlertAggregation.Window)
+	if err != nil || alertAggWindow <= 0 {
+		alertAggWindow = 60 * time.Second
+	}
+	alertAggregator := correlator.NewAlertAggregator(correlator.AlertAggregationConfig{
+		Enabled: cfg.Correlator.AlertAggregation.Enabled,
+		Window:  alertAggWindow,
+	})
+
+	// forwardAlerts fans a batch of alerts out to every configured sink: the
 	// simple-mode auto-enforcer, attack-simulation collector, alert store,
 	// Alertmanager webhook, notification fanout, and cross-node gossip.
-	dispatchAlerts := func(dispatched []types.Alert) {
-		for _, a := range dispatched {
-			podName, namespace, node := a.Enrichment.PodName, a.Enrichment.Namespace, a.Enrichment.NodeName
-			if node == "" {
-				node = metricsNodeName
-			}
-			exporter.RecordAlert(a.RuleID, string(a.Severity), namespace, podName, node)
+	forwardAlerts := func(dispatched []types.Alert) {
+		if len(dispatched) == 0 {
+			return
 		}
 		// Simple mode: auto-enforce high-confidence threats.
 		if simpleEngine != nil && enf != nil {
@@ -1402,6 +1506,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// dispatchAlerts records per-event Prometheus metrics for every raw alert —
+	// RecordAlert always sees the un-aggregated stream, so ebpf_guard_alerts_total
+	// stays per-event regardless of aggregation — then hands the batch to
+	// alertAggregator.Ingest, which forwards new aggregation keys immediately
+	// and folds repeats into their running count. Closed-window summaries for
+	// keys that received repeats are forwarded separately by the Reap ticker
+	// below.
+	dispatchAlerts := func(dispatched []types.Alert) {
+		for _, a := range dispatched {
+			podName, namespace, node := a.Enrichment.PodName, a.Enrichment.Namespace, a.Enrichment.NodeName
+			if node == "" {
+				node = metricsNodeName
+			}
+			exporter.RecordAlert(a.RuleID, string(a.Severity), namespace, podName, node)
+		}
+		forwardAlerts(alertAggregator.Ingest(dispatched, time.Now()))
+	}
+
 	// dispatchAsync runs dispatchAlerts in a bounded goroutine pool to prevent
 	// unbounded goroutine growth under burst alert rates; drops (and records)
 	// the batch if the pool is saturated.
@@ -1422,6 +1544,30 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}()
 			dispatchAlerts(a)
 		}(dispatched)
+	}
+
+	// Background: close out expired alert-aggregation windows and forward the
+	// final count/first_seen/last_seen for any key that received repeats
+	// within its window. The first occurrence of a key already went out
+	// immediately via dispatchAlerts; this ticker is what turns "216 more
+	// alerts suppressed" into one visible summary instead of silence.
+	if cfg.Correlator.AlertAggregation.Enabled {
+		reapInterval := alertAggWindow / 2
+		if reapInterval < time.Second {
+			reapInterval = time.Second
+		}
+		go func() {
+			ticker := time.NewTicker(reapInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					forwardAlerts(alertAggregator.Reap(time.Now()))
+				}
+			}
+		}()
 	}
 
 	// Background: periodically drain alerts the correlation engine accumulated
@@ -1590,15 +1736,36 @@ func enableSampling(name string, configMap *ebpf.Map, sc config.SamplingConfig, 
 		return
 	}
 	// Expose this controller to the CPU pressure watcher so it can adaptively
-	// reduce this collector's sampling rate under load.
+	// reduce this collector's sampling rate under load, and publish the
+	// operator-configured base rate to the arbiter so recovery restores this
+	// value rather than a hardcoded 1.0 (#304).
 	if mux != nil {
 		mux.Register(eventType, ctrl)
+		var configured uint32
+		switch eventType {
+		case "syscall":
+			configured = sc.SyscallRate
+		case "network":
+			configured = sc.NetworkRate
+		case "file":
+			configured = sc.FileRate
+		}
+		mux.SetBaseRate(eventType, sampleRateToFloat(configured))
 	}
 	slog.Info("sampling: enabled BPF-side static sample rate",
 		slog.String("collector", name),
 		slog.Uint64("syscall_rate", uint64(sc.SyscallRate)),
 		slog.Uint64("network_rate", uint64(sc.NetworkRate)),
 		slog.Uint64("file_rate", uint64(sc.FileRate)))
+}
+
+// sampleRateToFloat converts a BPF 1-in-N sampling rate (0 = disabled, 1 = all
+// events) into the float rate in [0,1] used by the sampling arbiter.
+func sampleRateToFloat(oneInN uint32) float64 {
+	if oneInN == 0 {
+		return 0 // disabled
+	}
+	return 1.0 / float64(oneInN)
 }
 
 // The entire procedure is bounded by a 30-second context.
@@ -1901,7 +2068,7 @@ func newRulesCmd(cfgPath *string) *cobra.Command {
 			}
 			cfg := cfgManager.Get()
 
-			rules, err := loadRules(cfg.Rules.Path)
+			rules, err := loadRulesWithTuning(cfg.Rules.Path, cfg.Rules.LocalTuningPath)
 			if err != nil {
 				return fmt.Errorf("load rules: %w", err)
 			}
@@ -2806,7 +2973,7 @@ func runDashboard(cfgPath string, dryRun bool) error {
 	}
 	cfg := cfgManager.Get()
 
-	rules, _ := loadRules(cfg.Rules.Path)
+	rules, _ := loadRulesWithTuning(cfg.Rules.Path, cfg.Rules.LocalTuningPath)
 
 	engineCfg := correlator.DefaultCorrelationEngineConfig()
 	engineCfg.Rules = rules
@@ -3114,6 +3281,24 @@ func buildSyntheticEvents(perType int) []types.Event {
 	return events
 }
 
+// applyRuntimeTuning applies the resolved hardware profile's GOMEMLIMIT/GOGC
+// preset (lite only, currently) so the process stays within a small VPS's
+// memory budget without operator intervention. No-op for profiles that don't
+// set a ratio/percent (balanced, production keep the Go runtime defaults).
+func applyRuntimeTuning(hw config.HardwareProfileInfo) {
+	if hw.Applied.GOMEMLIMITRatio > 0 && hw.Hardware.MemTotalMB > 0 {
+		limitBytes := int64(float64(hw.Hardware.MemTotalMB) * hw.Applied.GOMEMLIMITRatio * 1024 * 1024)
+		debug.SetMemoryLimit(limitBytes)
+		slog.Info("runtime tuning: GOMEMLIMIT set",
+			slog.Int64("limit_bytes", limitBytes),
+			slog.Float64("ratio", hw.Applied.GOMEMLIMITRatio))
+	}
+	if hw.Applied.GOGCPercent > 0 {
+		debug.SetGCPercent(hw.Applied.GOGCPercent)
+		slog.Info("runtime tuning: GOGC set", slog.Int("percent", hw.Applied.GOGCPercent))
+	}
+}
+
 // printZeroConfigBanner prints a human-friendly first-run summary to stderr
 // so that users running `curl | sh` or `docker run` immediately see what is
 // being monitored and where alerts go.
@@ -3179,12 +3364,41 @@ func parseDuration(s string, defaultDur time.Duration) time.Duration {
 
 // loadRules loads rules from a file or directory path.
 func loadRules(path string) ([]correlator.Rule, error) {
+	return loadRulesWithTuning(path, "")
+}
+
+// loadRulesWithTuning loads the base rule set from path and, if tuningPath is
+// non-empty, merges in a local-tuning overlay (see correlator.TuningOverlay)
+// that adds exceptions to existing rules by rule_id. A missing tuning file is
+// not an error — the overlay is opt-in.
+func loadRulesWithTuning(path, tuningPath string) ([]correlator.Rule, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat rules path: %w", err)
 	}
+
+	var rules []correlator.Rule
 	if info.IsDir() {
-		return correlator.LoadRulesFromDir(path)
+		rules, err = correlator.LoadRulesFromDir(path)
+	} else {
+		rules, err = correlator.LoadRulesFromFile(path)
 	}
-	return correlator.LoadRulesFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	overlay, err := correlator.LoadTuningOverlay(tuningPath)
+	if err != nil {
+		return nil, fmt.Errorf("load tuning overlay: %w", err)
+	}
+	unknown, err := correlator.ApplyTuningOverlay(rules, overlay)
+	if err != nil {
+		return nil, fmt.Errorf("apply tuning overlay: %w", err)
+	}
+	for _, id := range unknown {
+		slog.Warn("tuning overlay: rule_id not found in active rule set, exceptions not applied",
+			slog.String("rule_id", id), slog.String("tuning_path", tuningPath))
+	}
+
+	return rules, nil
 }

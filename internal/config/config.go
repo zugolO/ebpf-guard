@@ -111,6 +111,16 @@ type Config struct {
 	// Detects and optionally blocks attempts by external processes to detach
 	// or modify our BPF programs/maps. Graceful no-op on kernel < 5.7.
 	SelfProtection SelfProtectionConfig `mapstructure:"self_protection"`
+
+	// Profile selects a built-in hardware-aware preset — "lite", "balanced",
+	// or "production" — that sets BPF map sizes, tracked-PID limits, and
+	// sequence/lineage profiler enablement for the host (issue #287). Left
+	// empty in the file, it's resolved by autodetecting nproc/meminfo; any
+	// value explicitly set elsewhere in this file still overrides the
+	// preset for that field. Prefer the --profile flag or Manager's
+	// resolved-profile accessors over reading this field directly, since it
+	// reflects the raw config value, not the final autodetect/flag decision.
+	Profile string `mapstructure:"profile"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -128,8 +138,12 @@ type ServerConfig struct {
 	ShutdownDrainEnforcement time.Duration `mapstructure:"shutdown_drain_enforcement"`
 	// ShutdownDrainRego caps the time spent draining async Rego evaluation workers during shutdown. Default: 5s.
 	ShutdownDrainRego time.Duration `mapstructure:"shutdown_drain_rego"`
-	// CORSAllowedOrigins lists the origins allowed to access the OpenAPI spec via CORS.
-	// Include "*" to allow any origin (backward-compatible default).
+	// CORSAllowedOrigins lists the origins allowed to access the OpenAPI spec and
+	// the read-only /api/v1/* endpoints (status, summary, alerts, incidents,
+	// rules, feedback) via CORS. This is what lets the dashboard's Fleet tab
+	// (issue #312) on one agent poll another agent's data directly from the
+	// browser. Write endpoints never receive CORS headers regardless of this
+	// setting. Include "*" to allow any origin (backward-compatible default).
 	// An empty list means same-origin only (no CORS header).
 	// Example: ["https://docs.mydomain.com", "https://dev.mydomain.com"]
 	CORSAllowedOrigins []string `mapstructure:"cors_allowed_origins"`
@@ -882,6 +896,10 @@ type RulesConfig struct {
 	// ChecksumFile is the path to the SHA-256 checksum file (sha256sum format).
 	// Defaults to <rules_dir>/checksums.sha256.
 	ChecksumFile string `mapstructure:"checksum_file"`
+	// LocalTuningPath points to an optional local-tuning overlay YAML file
+	// (see correlator.TuningOverlay) that adds exceptions to existing rules by
+	// rule_id without editing the shipped rule files. Missing file is a no-op.
+	LocalTuningPath string `mapstructure:"local_tuning_path"`
 }
 
 // NamespaceRuleConfig maps a Kubernetes label selector to additional rule files.
@@ -914,6 +932,18 @@ type CorrelatorConfig struct {
 	BufferSize int `mapstructure:"buffer_size"`
 	// MaxAlertsPerSecond is the global token-bucket rate limit for alerts (default 10000, 0 = unlimited).
 	MaxAlertsPerSecond int `mapstructure:"max_alerts_per_second"`
+	// AlertAggregation folds repeated alerts sharing the same rule/comm/path-prefix/pod
+	// key within a time window into a single alert carrying a count, instead of
+	// forwarding one row per occurrence to storage/notifications.
+	AlertAggregation AlertAggregationConfig `mapstructure:"alert_aggregation"`
+}
+
+// AlertAggregationConfig configures alert aggregation (see correlator.AlertAggregator).
+type AlertAggregationConfig struct {
+	// Enabled activates aggregation. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// Window is the aggregation period, e.g. "60s". Default: 60s.
+	Window string `mapstructure:"window"`
 }
 
 // ProfilerConfig holds behavioral profiling settings.
@@ -950,6 +980,34 @@ type ProfilerConfig struct {
 	StatePersistence StatePersistenceConfig `mapstructure:"state_persistence"`
 	// SyscallAllowlist configures deny-unknown (allowlist) mode for syscalls.
 	SyscallAllowlist SyscallAllowlistConfig `mapstructure:"syscall_allowlist"`
+	// DriftBaseline configures observe-mode baselining for rules tagged
+	// `class: drift` (issue #286): matches are learned per-workload during a
+	// learning window and only alerted on thereafter when they deviate from
+	// that baseline, instead of alerting on every match like a threat rule.
+	DriftBaseline DriftBaselineConfig `mapstructure:"drift_baseline"`
+}
+
+// DriftBaselineConfig configures observe-mode baselining for class: drift rules.
+type DriftBaselineConfig struct {
+	// Enabled activates drift-class alert suppression via the learned baseline.
+	// When false, class: drift rules alert exactly like class: threat rules.
+	Enabled bool `mapstructure:"enabled"`
+	// LearningPeriod is the duration in seconds to observe drift-class matches
+	// before a workload's baseline is considered complete.
+	LearningPeriod int `mapstructure:"learning_period"`
+	// MinSamples is the minimum number of drift-class matches required before
+	// learning completes, in addition to LearningPeriod elapsing.
+	MinSamples int `mapstructure:"min_samples"`
+	// PerWorkload separates baselines per (comm, namespace, app_label) tuple.
+	PerWorkload bool `mapstructure:"per_workload"`
+	// MaxWorkloads caps the number of per-workload drift profiles kept in
+	// memory; the least-recently-active is evicted at the cap. Bounds memory
+	// against attacker-controlled comm cardinality. Default 1000 when unset.
+	MaxWorkloads int `mapstructure:"max_workloads"`
+	// EnforceDeadlinePeriods forces a still-learning workload into enforcing
+	// after this many LearningPeriods, regardless of MinSamples, so rarely
+	// active workloads are not permanent blind spots. Default 3 when unset.
+	EnforceDeadlinePeriods int `mapstructure:"enforce_deadline_periods"`
 }
 
 // EWMASettings groups Exponentially Weighted Moving Average tuning under
@@ -1280,29 +1338,38 @@ type MemoryPressureConfig struct {
 
 // CPUPressureConfig holds CPU pressure auto-tuning settings.
 //
-// When the agent's own CPU usage (as a percentage of total VPS CPU) exceeds the
-// thresholds, the watchdog adaptively reduces BPF-side sampling of the noisiest
-// collectors — file first (level 1), then syscall/network (level 2) — and
-// restores them once usage drops back below the recovery threshold.
+// When the agent's own CPU usage (as a percentage of a SINGLE core — 100 ==
+// one full core busy, not normalized by host core count) exceeds the
+// thresholds, the watchdog adaptively reduces BPF-side sampling of the
+// noisiest collectors — file first (level 1), then syscall/network (level
+// 2) — and restores them once usage drops back below the recovery threshold
+// AND the current level has been held for at least MinDwell. LSM/canary/exec
+// hooks are never shed. Using an absolute per-core budget (instead of a
+// percentage of total host CPU) means the defaults behave the same way on a
+// 1-core VPS and an 8-core box.
 type CPUPressureConfig struct {
 	// Enabled enables CPU pressure monitoring.
 	Enabled bool `mapstructure:"enabled"`
 	// CheckInterval is the interval for sampling CPU usage (seconds).
 	CheckInterval int `mapstructure:"check_interval"`
-	// CPULimitPercent is the target CPU budget (% of total VPS CPU). It seeds
-	// the level thresholds when those are left at zero. Default: 15.0.
+	// CPULimitPercent is the target CPU budget (% of a single core). It seeds
+	// the level thresholds when those are left at zero. Default: 40.0.
 	CPULimitPercent float64 `mapstructure:"cpu_limit_percent"`
-	// FileShedThreshold is the CPU % above which file sampling is reduced (level 1).
-	// Defaults to CPULimitPercent.
+	// FileShedThreshold is the CPU % (of one core) above which file sampling
+	// is reduced (level 1). Defaults to CPULimitPercent.
 	FileShedThreshold float64 `mapstructure:"file_shed_threshold"`
-	// AllShedThreshold is the CPU % above which syscall/network are also reduced (level 2).
-	// Defaults to ~1.67x FileShedThreshold.
+	// AllShedThreshold is the CPU % (of one core) above which syscall/network
+	// are also reduced (level 2). Defaults to 1.75x FileShedThreshold.
 	AllShedThreshold float64 `mapstructure:"all_shed_threshold"`
-	// RecoveryThreshold is the CPU % below which the watcher steps back one level (hysteresis).
-	// Defaults to 0.6x FileShedThreshold.
+	// RecoveryThreshold is the CPU % (of one core) below which the watcher
+	// steps back one level (hysteresis). Defaults to 0.5x FileShedThreshold.
 	RecoveryThreshold float64 `mapstructure:"recovery_threshold"`
-	// WindowSize is the number of samples averaged into the sliding window. Default: 3.
+	// WindowSize is the number of samples averaged into the sliding window. Default: 6.
 	WindowSize int `mapstructure:"window_size"`
+	// MinDwell is the minimum time (seconds) a shed level is held before the
+	// watcher will step back down, even once CPU is back under
+	// RecoveryThreshold. Default: 30.
+	MinDwell int `mapstructure:"min_dwell"`
 }
 
 // PolicyConfig holds policy-as-code settings (Sprint 23.0).
@@ -1595,29 +1662,77 @@ func modeWho(masked os.FileMode) string {
 
 // Manager handles configuration loading and hot-reload.
 type Manager struct {
-	viper    *viper.Viper
-	config   *Config
-	mu       sync.RWMutex
-	onChange func(*Config)
+	viper           *viper.Viper
+	config          *Config
+	mu              sync.RWMutex
+	onChange        func(*Config)
+	hardwareProfile HardwareProfileInfo
+}
+
+// HardwareProfileInfo describes how the active hardware profile was chosen
+// and what it applied, for startup logging and the /debug/state endpoint.
+type HardwareProfileInfo struct {
+	// Profile is the resolved preset name: "lite", "balanced", or "production".
+	Profile string `json:"profile"`
+	// Source explains how Profile was decided: "flag", "config", or "autodetect".
+	Source string `json:"source"`
+	// Reason is a human-readable justification (e.g. detected CPU/RAM for autodetect).
+	Reason string `json:"reason"`
+	// Hardware is the detected host resources used for autodetection.
+	Hardware HardwareInfo `json:"hardware"`
+	// Applied is the preset's tuning values (before any per-field config-file override).
+	Applied ProfileDefaults `json:"applied"`
+}
+
+// HardwareProfile returns how the active hardware profile was resolved.
+func (m *Manager) HardwareProfile() HardwareProfileInfo {
+	return m.hardwareProfile
 }
 
 // NewManager creates a new configuration manager.
 // It checks config file permissions before loading. Use NewManagerSkipPermCheck
 // for test environments where the config file is not expected to be root-owned.
 func NewManager(configPath string) (*Manager, error) {
-	return newManager(configPath, false)
+	return newManager(configPath, false, "")
 }
 
 // NewManagerSkipPermCheck creates a configuration manager without permission checks.
 // Use only in tests.
 func NewManagerSkipPermCheck(configPath string) (*Manager, error) {
-	return newManager(configPath, true)
+	return newManager(configPath, true, "")
 }
 
-func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
+// NewManagerWithProfile is like NewManager but accepts an explicit hardware
+// profile override (e.g. from --profile), taking precedence over any
+// "profile:" key in the config file and over autodetection.
+func NewManagerWithProfile(configPath, profileOverride string) (*Manager, error) {
+	return newManager(configPath, false, profileOverride)
+}
+
+// NewManagerSkipPermCheckWithProfile is NewManagerSkipPermCheck plus an
+// explicit hardware profile override. Use only in tests.
+func NewManagerSkipPermCheckWithProfile(configPath, profileOverride string) (*Manager, error) {
+	return newManager(configPath, true, profileOverride)
+}
+
+func newManager(configPath string, skipPermCheck bool, profileOverride string) (*Manager, error) {
 	if err := CheckConfigPermissions(configPath, skipPermCheck); err != nil {
 		return nil, err
 	}
+
+	// Peek at the raw file (no defaults registered) so we can tell which
+	// keys the file explicitly sets, separate from the base defaults
+	// registered on the real viper instance below.
+	fileV := viper.New()
+	fileV.SetConfigFile(configPath)
+	fileV.SetConfigType("yaml")
+	_ = fileV.ReadInConfig()
+
+	if profileOverride != "" && !ValidProfileName(profileOverride) {
+		return nil, fmt.Errorf("config: invalid --profile %q (valid: %s, %s, %s)",
+			profileOverride, ProfileLite, ProfileBalanced, ProfileProduction)
+	}
+	hwInfo := resolveHardwareProfile(profileOverride, fileV)
 
 	v := viper.New()
 	v.SetConfigFile(configPath)
@@ -1625,6 +1740,13 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 
 	// Set defaults
 	setDefaults(v)
+
+	applied, err := ApplyHardwareProfile(v, fileV.IsSet, hwInfo.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("config: apply hardware profile: %w", err)
+	}
+	hwInfo.Applied = applied
+	v.SetDefault("profile", hwInfo.Profile)
 
 	// Read config
 	if err := v.ReadInConfig(); err != nil {
@@ -1651,8 +1773,9 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 	}
 
 	m := &Manager{
-		viper:  v,
-		config: &cfg,
+		viper:           v,
+		config:          &cfg,
+		hardwareProfile: hwInfo,
 	}
 
 	return m, nil
@@ -1662,6 +1785,13 @@ func newManager(configPath string, skipPermCheck bool) (*Manager, error) {
 // file required. Used by `ebpf-guard --zero-config` for one-command deployments
 // where no config file or rules directory exists on disk.
 func NewZeroConfigManager() *Manager {
+	return NewZeroConfigManagerWithProfile("")
+}
+
+// NewZeroConfigManagerWithProfile is NewZeroConfigManager plus an explicit
+// hardware profile override (e.g. from --profile); empty autodetects from
+// nproc/meminfo, matching the "curl | sh" one-command install path.
+func NewZeroConfigManagerWithProfile(profileOverride string) *Manager {
 	v := viper.New()
 	v.SetConfigType("yaml")
 	setDefaults(v)
@@ -1671,6 +1801,12 @@ func NewZeroConfigManager() *Manager {
 	// - All collectors disabled by default (no BPF unless --privileged)
 	// - Kubernetes disabled (no K8s config available)
 	// - Rules loaded from embedded filesystem (handled by main.go)
+
+	hwInfo := resolveHardwareProfile(profileOverride, nil)
+	if applied, err := ApplyHardwareProfile(v, nil, hwInfo.Profile); err == nil {
+		hwInfo.Applied = applied
+	}
+	v.SetDefault("profile", hwInfo.Profile)
 
 	var cfg Config
 	_ = v.Unmarshal(&cfg)
@@ -1697,8 +1833,9 @@ func NewZeroConfigManager() *Manager {
 	}
 
 	return &Manager{
-		viper:  v,
-		config: &cfg,
+		viper:           v,
+		config:          &cfg,
+		hardwareProfile: hwInfo,
 	}
 }
 
@@ -1798,6 +1935,7 @@ func setDefaults(v *viper.Viper) {
 	// Rules defaults
 	v.SetDefault("rules.path", "rules/")
 	v.SetDefault("rules.hot_reload", true)
+	v.SetDefault("rules.local_tuning_path", "rules/local-tuning.yaml")
 	v.SetDefault("rules.rate_limit_alerts", true)
 	v.SetDefault("rules.rate_limit_window", 60)
 	v.SetDefault("rules.max_alerts_per_window", 10)
@@ -1808,6 +1946,8 @@ func setDefaults(v *viper.Viper) {
 	// per-process history. 256 events × ~208 B ≈ 53 KB/PID keeps memory bounded.
 	v.SetDefault("correlator.buffer_size", 256)
 	v.SetDefault("correlator.max_alerts_per_second", 10000)
+	v.SetDefault("correlator.alert_aggregation.enabled", false)
+	v.SetDefault("correlator.alert_aggregation.window", "60s")
 
 	// Profiler defaults
 	v.SetDefault("profiler.enabled", true)
@@ -1832,6 +1972,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("profiler.lineage.enabled", true)
 	v.SetDefault("profiler.lineage.ttl", 300)
 	v.SetDefault("profiler.lineage.max_depth", 16)
+
+	// Drift-baseline observe mode defaults (issue #286). Disabled by default:
+	// class: drift rules alert like class: threat rules until an operator
+	// opts in. When enabled without further tuning, one hour and 20 samples
+	// mirrors the syscall allowlist profiler's learning defaults.
+	v.SetDefault("profiler.drift_baseline.enabled", false)
+	v.SetDefault("profiler.drift_baseline.learning_period", 3600)
+	v.SetDefault("profiler.drift_baseline.min_samples", 20)
+	v.SetDefault("profiler.drift_baseline.per_workload", true)
 
 	// Exporter defaults
 	v.SetDefault("exporter.enabled", true)
@@ -1959,11 +2108,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("watchdog.memory_pressure.disable_all_threshold", 5.0)
 	v.SetDefault("watchdog.cpu_pressure.enabled", true)
 	v.SetDefault("watchdog.cpu_pressure.check_interval", 5)
-	v.SetDefault("watchdog.cpu_pressure.cpu_limit_percent", 15.0)
-	v.SetDefault("watchdog.cpu_pressure.file_shed_threshold", 15.0)
-	v.SetDefault("watchdog.cpu_pressure.all_shed_threshold", 25.0)
-	v.SetDefault("watchdog.cpu_pressure.recovery_threshold", 9.0)
-	v.SetDefault("watchdog.cpu_pressure.window_size", 3)
+	v.SetDefault("watchdog.cpu_pressure.cpu_limit_percent", 40.0)
+	v.SetDefault("watchdog.cpu_pressure.file_shed_threshold", 40.0)
+	v.SetDefault("watchdog.cpu_pressure.all_shed_threshold", 70.0)
+	v.SetDefault("watchdog.cpu_pressure.recovery_threshold", 20.0)
+	v.SetDefault("watchdog.cpu_pressure.window_size", 6)
+	v.SetDefault("watchdog.cpu_pressure.min_dwell", 30)
 
 	// Policy defaults (Sprint 23.0)
 	v.SetDefault("policy.rego.enabled", true)

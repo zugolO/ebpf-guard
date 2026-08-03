@@ -61,7 +61,7 @@ get_baseline_metrics() {
     log "==========================================="
 
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
-    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
     if ! curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" | grep -q "200"; then
@@ -70,7 +70,7 @@ get_baseline_metrics() {
 
     # Подсчет начальных алертов
     if command -v jq &> /dev/null; then
-        local alert_count=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | jq '. | length' 2>/dev/null || echo 0)
+        local alert_count=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | jq '. | length' 2>/dev/null || echo 0)
         log "Начальное количество алертов: $alert_count"
     else
         log "Начальные метрики сохранены"
@@ -142,7 +142,7 @@ get_final_metrics() {
     log "==========================================="
 
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
-    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/final-health-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/final-state-$TIMESTAMP.json"
 
@@ -256,7 +256,7 @@ generate_final_report() {
         # Анализ алертов по категориям
         if command -v jq &> /dev/null; then
             echo "=== ALERT CATEGORIES ==="
-            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | jq -r 'group_by(.rule_id) | map({rule: .[0].rule_id, count: length}) | sort_by(.count) | reverse | .[:10] | .[] | "\(.rule): \(.count)"' 2>/dev/null || echo "Не удалось разобрать алерты"
+            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | jq -r 'group_by(.rule_id) | map({rule: .[0].rule_id, count: length}) | sort_by(.count) | reverse | .[:10] | .[] | "\(.rule): \(.count)"' 2>/dev/null || echo "Не удалось разобрать алерты"
             echo ""
         fi
 
@@ -266,14 +266,14 @@ generate_final_report() {
         echo ""
 
         # Анализ того, что было детектировано
-        local detected=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | grep -oE '"rule_id":"[^"]+' | cut -d'"' -f4 | sort -u | wc -l)
+        local detected=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | grep -oE '"rule_id":"[^"]+' | cut -d'"' -f4 | sort -u | wc -l)
         echo "Уникальных типов атак детектировано: $detected"
         echo ""
 
         # Топ атак по severity
         if command -v jq &> /dev/null; then
             echo "=== BY SEVERITY ==="
-            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | jq -r 'group_by(.severity) | map({severity: .[0].severity, count: length}) | .[] | "\(.severity): \(.count)"' 2>/dev/null || echo "Не удалось разобрать severity"
+            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | jq -r 'group_by(.severity) | map({severity: .[0].severity, count: length}) | .[] | "\(.severity): \(.count)"' 2>/dev/null || echo "Не удалось разобрать severity"
             echo ""
         fi
 
@@ -316,7 +316,7 @@ generate_final_report() {
         echo ""
         echo "📊 Prometheus: http://${VPS_IP}:9090"
         echo "📈 Grafana: http://${VPS_IP}:3001 (admin/admin123)"
-        echo "🔔 ebpf-guard Alerts API: $EBPF_GUARD_API/alerts"
+        echo "🔔 ebpf-guard Alerts API: $EBPF_GUARD_API/api/v1/alerts"
         echo "🏥 ebpf-guard Health: $EBPF_GUARD_API/health"
         echo ""
 

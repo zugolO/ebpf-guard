@@ -38,7 +38,7 @@ class AlertsAnalyzer:
     def fetch_alerts(self) -> List[Dict]:
         """Получение алертов из ebpf-guard API"""
         try:
-            cmd = ["curl", "-s", f"{self.api_url}/alerts"]
+            cmd = ["curl", "-s", f"{self.api_url}/api/v1/alerts"]
             if self.token:
                 cmd += ["-H", f"Authorization: Bearer {self.token}"]
             result = subprocess.run(

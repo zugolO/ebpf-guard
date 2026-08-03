@@ -42,7 +42,7 @@ check_sqlmap() {
 get_metrics_before() {
     log "Получение базовых метрик ebpf-guard..."
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-before-$TIMESTAMP.txt"
-    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-before-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/alerts-before-$TIMESTAMP.json"
     log "Метрики сохранены в $RESULTS_DIR/metrics-before-$TIMESTAMP.txt"
 }
 
@@ -228,7 +228,7 @@ attack_comprehensive() {
 get_metrics_after() {
     log "Получение метрик после атаки..."
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-after-$TIMESTAMP.txt"
-    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-after-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/alerts-after-$TIMESTAMP.json"
 
     log "Анализ новых алертов..."
     diff "$RESULTS_DIR/alerts-before-$TIMESTAMP.json" "$RESULTS_DIR/alerts-after-$TIMESTAMP.json" || true
@@ -298,7 +298,7 @@ main() {
     log "ВСЕ АТАКИ ЗАВЕРШЕНЫ"
     log "==========================================="
     log "Результаты сохранены в: $RESULTS_DIR"
-    log "Проверьте ebpf-guard alerts: $EBPF_GUARD_API/alerts"
+    log "Проверьте ebpf-guard alerts: $EBPF_GUARD_API/api/v1/alerts"
 }
 
 # Запуск

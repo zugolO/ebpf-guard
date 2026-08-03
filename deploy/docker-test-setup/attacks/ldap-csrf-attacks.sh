@@ -357,7 +357,7 @@ analyze_results() {
 
         echo ""
         echo "=== RELATED ALERTS ==="
-        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | grep -iE "ldap|csrf|session|token" | head -20 || echo "No LDAP/CSRF alerts found"
+        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | grep -iE "ldap|csrf|session|token" | head -20 || echo "No LDAP/CSRF alerts found"
 
     } | tee "$summary_file"
 

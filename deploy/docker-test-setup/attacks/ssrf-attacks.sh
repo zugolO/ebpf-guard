@@ -267,7 +267,7 @@ analyze_results() {
 
         echo ""
         echo "=== ALERTS RELATED TO SSRF ==="
-        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | grep -i "ssrf\|localhost\|internal.*access\|metadata" || echo "No SSRF alerts found"
+        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" | grep -i "ssrf\|localhost\|internal.*access\|metadata" || echo "No SSRF alerts found"
 
     } | tee "$summary_file"
 

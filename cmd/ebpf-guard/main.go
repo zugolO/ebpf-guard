@@ -1421,16 +1421,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}()
 
 	// Background: publish BPF map size (static) and tracked-PIDs count every 15s.
-	exporter.SetBPFMapSize("events", float64(cfg.BPF.MapSizes.Events))
-	exporter.SetBPFMapSize("processes", float64(cfg.BPF.MapSizes.Processes))
-	exporter.SetBPFMapSize("connections", float64(cfg.BPF.MapSizes.Connections))
-	exporter.SetBPFMapEntries("events", 0)
-	exporter.SetBPFMapEntries("processes", 0)
-	exporter.SetBPFMapEntries("connections", 0)
-	// Initialise events_dropped label sets so the series appear even at zero.
-	exporter.EventsDropped.WithLabelValues("syscall", "channel_full")
-	exporter.EventsDropped.WithLabelValues("network", "channel_full")
-	exporter.EventsDropped.WithLabelValues("fileaccess", "channel_full")
+	initStaticBPFMetrics(cfg.BPF.MapSizes)
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -1439,8 +1430,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				exporter.SetLearningProgress(engine.LearningProgress())
-				exporter.SetTrackedPIDs(float64(engine.TrackedPIDCount()))
+				publishLearningMetrics(engine)
 			}
 		}
 	}()
@@ -1913,6 +1903,36 @@ func gracefulShutdown(
 		shutdownDuration.Set(elapsed.Seconds())
 	}
 	slog.Info("graceful shutdown: complete", slog.Duration("elapsed", elapsed))
+}
+
+// initStaticBPFMetrics publishes the configured BPF map capacities and resets
+// the entry/drop gauges to zero so their series exist in /metrics before the
+// first real update, instead of only appearing after the first event.
+func initStaticBPFMetrics(mapSizes config.MapSizeConfig) {
+	exporter.SetBPFMapSize("events", float64(mapSizes.Events))
+	exporter.SetBPFMapSize("processes", float64(mapSizes.Processes))
+	exporter.SetBPFMapSize("connections", float64(mapSizes.Connections))
+	exporter.SetBPFMapEntries("events", 0)
+	exporter.SetBPFMapEntries("processes", 0)
+	exporter.SetBPFMapEntries("connections", 0)
+	exporter.EventsDropped.WithLabelValues("syscall", "channel_full")
+	exporter.EventsDropped.WithLabelValues("network", "channel_full")
+	exporter.EventsDropped.WithLabelValues("fileaccess", "channel_full")
+}
+
+// learningProgressReporter is satisfied by *correlator.CorrelationEngine; it
+// exists so publishLearningMetrics is testable without a full engine.
+type learningProgressReporter interface {
+	LearningProgress() float64
+	TrackedPIDCount() int
+}
+
+// publishLearningMetrics copies the engine's current learning progress and
+// tracked-PID count into their Prometheus gauges. Called on a timer from
+// runAgent's background metrics ticker.
+func publishLearningMetrics(reporter learningProgressReporter) {
+	exporter.SetLearningProgress(reporter.LearningProgress())
+	exporter.SetTrackedPIDs(float64(reporter.TrackedPIDCount()))
 }
 
 func setupLogger(level string) {

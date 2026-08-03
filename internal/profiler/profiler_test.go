@@ -619,3 +619,20 @@ func TestProfilerConfig_AllowlistDefault(t *testing.T) {
 	assert.Equal(t, 100, def.MinSamples)
 	assert.Equal(t, 10, def.SparseThreshold)
 }
+
+// TestProfiler_GetDetector verifies GetDetector exposes the same
+// AnomalyDetector instance used internally by the profiler, so callers (e.g.
+// main.go registering the workload profile manager's metrics) reach the same
+// state rather than a copy.
+func TestProfiler_GetDetector(t *testing.T) {
+	cfg := ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+	}
+	p := NewProfiler(cfg, nil)
+
+	det := p.GetDetector()
+	assert.NotNil(t, det)
+	assert.NotNil(t, det.GetProfileManager())
+}

@@ -402,6 +402,63 @@ func TestWriteTokenFile_AdminOnly(t *testing.T) {
 	}
 }
 
+func TestReadTokenFile_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	origDir := tokenFileDir
+	tokenFileDir = filepath.Join(dir, "ebpf-guard")
+	defer func() { tokenFileDir = origDir }()
+
+	if err := writeTokenFile("admin-abc", "viewer-xyz"); err != nil {
+		t.Fatalf("writeTokenFile error = %v", err)
+	}
+	admin, viewer, err := readTokenFile()
+	if err != nil {
+		t.Fatalf("readTokenFile error = %v", err)
+	}
+	if admin != "admin-abc" {
+		t.Errorf("admin token = %q, want %q", admin, "admin-abc")
+	}
+	if viewer != "viewer-xyz" {
+		t.Errorf("viewer token = %q, want %q", viewer, "viewer-xyz")
+	}
+}
+
+func TestReadTokenFile_MissingFileReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	origDir := tokenFileDir
+	tokenFileDir = filepath.Join(dir, "does-not-exist")
+	defer func() { tokenFileDir = origDir }()
+
+	admin, viewer, err := readTokenFile()
+	if err != nil {
+		t.Fatalf("readTokenFile on missing file should not error, got %v", err)
+	}
+	if admin != "" || viewer != "" {
+		t.Errorf("expected empty tokens for missing file, got admin=%q viewer=%q", admin, viewer)
+	}
+}
+
+func TestReadTokenFile_AdminOnly(t *testing.T) {
+	dir := t.TempDir()
+	origDir := tokenFileDir
+	tokenFileDir = filepath.Join(dir, "ebpf-guard")
+	defer func() { tokenFileDir = origDir }()
+
+	if err := writeTokenFile("admin-only-tok", ""); err != nil {
+		t.Fatalf("writeTokenFile error = %v", err)
+	}
+	admin, viewer, err := readTokenFile()
+	if err != nil {
+		t.Fatalf("readTokenFile error = %v", err)
+	}
+	if admin != "admin-only-tok" {
+		t.Errorf("admin token = %q, want %q", admin, "admin-only-tok")
+	}
+	if viewer != "" {
+		t.Errorf("viewer token = %q, want empty", viewer)
+	}
+}
+
 // writeFile is a small test helper for creating fixture files.
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()

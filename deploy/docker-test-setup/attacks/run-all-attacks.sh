@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
 EBPF_GUARD_API="http://${VPS_IP}:19090"
+# admin token from config-test.yaml (auth.admin_token) — needed because auth.enabled=true;
+# /debug/state and /metrics require a bearer token. Override via env if changed.
+EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
 RESULTS_DIR="./attack-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -41,7 +44,7 @@ check_services() {
     fi
 
     # Проверка ebpf-guard
-    if curl -s -o /dev/null -w "%{http_code}" "$EBPF_GUARD_API/health" | grep -q "200"; then
+    if curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" | grep -q "200"; then
         log "✓ ebpf-guard доступен: $EBPF_GUARD_API"
     else
         error "✗ ebpf-guard недоступен"
@@ -57,17 +60,17 @@ get_baseline_metrics() {
     log "СБОР БАЗОВЫХ МЕТРИК"
     log "==========================================="
 
-    curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
-    curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
-    curl -s "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
-    curl -s "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
-    if ! curl -s -o /dev/null -w "%{http_code}" "$EBPF_GUARD_API/debug/state" | grep -q "200"; then
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
+    if ! curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" | grep -q "200"; then
         warn "server.enable_debug не включен в конфиге ebpf-guard — /debug/state недоступен, Alerts/Events/Anomalies Total в отчете будут нулевыми"
     fi
 
     # Подсчет начальных алертов
     if command -v jq &> /dev/null; then
-        local alert_count=$(curl -s "$EBPF_GUARD_API/alerts" | jq '. | length' 2>/dev/null || echo 0)
+        local alert_count=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | jq '. | length' 2>/dev/null || echo 0)
         log "Начальное количество алертов: $alert_count"
     else
         log "Начальные метрики сохранены"
@@ -138,10 +141,10 @@ get_final_metrics() {
     log "СБОР ФИНАЛЬНЫХ МЕТРИК"
     log "==========================================="
 
-    curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
-    curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
-    curl -s "$EBPF_GUARD_API/health" > "$RESULTS_DIR/final-health-$TIMESTAMP.json"
-    curl -s "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/final-state-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/final-health-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/final-state-$TIMESTAMP.json"
 
     echo ""
 }
@@ -253,7 +256,7 @@ generate_final_report() {
         # Анализ алертов по категориям
         if command -v jq &> /dev/null; then
             echo "=== ALERT CATEGORIES ==="
-            curl -s "$EBPF_GUARD_API/alerts" | jq -r 'group_by(.rule_id) | map({rule: .[0].rule_id, count: length}) | sort_by(.count) | reverse | .[:10] | .[] | "\(.rule): \(.count)"' 2>/dev/null || echo "Не удалось разобрать алерты"
+            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | jq -r 'group_by(.rule_id) | map({rule: .[0].rule_id, count: length}) | sort_by(.count) | reverse | .[:10] | .[] | "\(.rule): \(.count)"' 2>/dev/null || echo "Не удалось разобрать алерты"
             echo ""
         fi
 
@@ -263,14 +266,14 @@ generate_final_report() {
         echo ""
 
         # Анализ того, что было детектировано
-        local detected=$(curl -s "$EBPF_GUARD_API/alerts" | grep -oE '"rule_id":"[^"]+' | cut -d'"' -f4 | sort -u | wc -l)
+        local detected=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | grep -oE '"rule_id":"[^"]+' | cut -d'"' -f4 | sort -u | wc -l)
         echo "Уникальных типов атак детектировано: $detected"
         echo ""
 
         # Топ атак по severity
         if command -v jq &> /dev/null; then
             echo "=== BY SEVERITY ==="
-            curl -s "$EBPF_GUARD_API/alerts" | jq -r 'group_by(.severity) | map({severity: .[0].severity, count: length}) | .[] | "\(.severity): \(.count)"' 2>/dev/null || echo "Не удалось разобрать severity"
+            curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | jq -r 'group_by(.severity) | map({severity: .[0].severity, count: length}) | .[] | "\(.severity): \(.count)"' 2>/dev/null || echo "Не удалось разобрать severity"
             echo ""
         fi
 

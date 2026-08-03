@@ -19,11 +19,11 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 var tlsTrackedPIDsGauge = promauto.NewGauge(prometheus.GaugeOpts{
@@ -137,7 +137,7 @@ func (e *TLSEventRaw) ToTypesEvent() types.Event {
 
 	return types.Event{
 		Type:       types.EventTLS,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,

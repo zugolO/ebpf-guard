@@ -330,7 +330,7 @@ func ParseSyscallEventInto(raw []byte, out *SyscallEvent) error {
 	offset += 4
 	copy(out.Comm[:], raw[offset:offset+16])
 	offset += 16
-	out.Nr = int64(binary.LittleEndian.Uint64(raw[offset:]))  /* #nosec G115 */
+	out.Nr = int64(binary.LittleEndian.Uint64(raw[offset:])) /* #nosec G115 */
 	offset += 8
 	out.Ret = int64(binary.LittleEndian.Uint64(raw[offset:])) /* #nosec G115 */
 	offset += 8
@@ -758,7 +758,7 @@ func ParseTlsClientHelloEvent(raw []byte) (*TlsClientHelloRawEvent, error) {
 func (e *SyscallEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:      types.EventSyscall,
-		Timestamp: e.Timestamp,
+		Timestamp: types.KtimeToEpoch(e.Timestamp),
 		PID:       e.PID,
 		TGID:      e.TGID,
 		UID:       e.UID,
@@ -775,7 +775,7 @@ func (e *SyscallEvent) ToTypesEvent() types.Event {
 func (e *NetworkEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:       types.EventTCPConnect,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
@@ -800,7 +800,7 @@ func (e *FileaccessEvent) ToTypesEvent() types.Event {
 	fdPath := nullTerminatedString(e.Filename[:])
 	return types.Event{
 		Type:       types.EventFileAccess,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
@@ -822,7 +822,7 @@ func (e *FileaccessEvent) ToTypesEvent() types.Event {
 func (e *PrivescRawEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:       types.EventPrivesc,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
@@ -840,7 +840,7 @@ func (e *PrivescRawEvent) ToTypesEvent() types.Event {
 func (e *NetworkCloseRawEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:       types.EventNetClose,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
@@ -870,7 +870,7 @@ func (e *KmodRawEvent) ToTypesEvent() types.Event {
 	}
 	return types.Event{
 		Type:       types.EventKmodLoad,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		UID:        e.UID,
 		PPID:       e.PPID,
@@ -887,7 +887,7 @@ func (e *KmodRawEvent) ToTypesEvent() types.Event {
 func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:       types.EventCgroupEsc,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		UID:        e.UID,
 		PPID:       e.PPID,
@@ -904,7 +904,7 @@ func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
 func (e *IOUringRawEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:       types.EventIOUring,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
@@ -924,7 +924,7 @@ func (e *IOUringRawEvent) ToTypesEvent() types.Event {
 func (e *BpfMonitorRawEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:       types.EventBPFProgram,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
@@ -945,7 +945,7 @@ func (e *BpfMonitorRawEvent) ToTypesEvent() types.Event {
 func (e *TlsClientHelloRawEvent) ToTypesEvent() types.Event {
 	return types.Event{
 		Type:       types.EventTLS,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,

@@ -680,6 +680,21 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		adminToken = cfg.Auth.BearerToken
 	}
 	if cfg.Auth.Enabled {
+		// Reuse tokens persisted by a previous run (see writeTokenFile) instead
+		// of rotating credentials on every restart — rotating broke Prometheus
+		// scraping and any client holding the old token. Only tokens not set
+		// explicitly in the config are loaded from the persist file, so an
+		// explicit auth.admin_token / auth.viewer_token always wins.
+		pAdmin, pViewer, pErr := readTokenFile()
+		if pErr != nil {
+			slog.Warn("auth: cannot read persisted token file", "error", pErr)
+		}
+		if adminToken == "" && len(cfg.Auth.Tokens) == 0 {
+			adminToken = pAdmin
+		}
+		if viewerToken == "" && len(cfg.Auth.Tokens) == 0 {
+			viewerToken = pViewer
+		}
 		if adminToken == "" && len(cfg.Auth.Tokens) == 0 {
 			t, err := generateToken()
 			if err != nil {
@@ -1940,8 +1955,14 @@ func generateToken() (string, error) {
 
 // tokenFileDir is the directory writeTokenFile writes the generated-token
 // file into. It is a var (not a const) so tests can point it at a temp
-// directory instead of the real /run/ebpf-guard.
-var tokenFileDir = "/run/ebpf-guard" // #nosec G101 -- filesystem directory path for the token file, not a credential value
+// directory instead of the real /var/lib/ebpf-guard.
+//
+// /var/lib (not /run) is intentional: /run is ephemeral and cleared on reboot,
+// so a token persisted there would not survive a host restart and the agent
+// would rotate credentials on every boot, breaking Prometheus scraping.
+// /var/lib/ebpf-guard persists across reboots, so a generated token is stable
+// for the lifetime of the installation unless the operator deletes the file.
+var tokenFileDir = "/var/lib/ebpf-guard" // #nosec G101 -- filesystem directory path for the token file, not a credential value
 
 // writeTokenFile writes auto-generated tokens to <tokenFileDir>/token
 // with mode 0600, so operators can retrieve the credentials.
@@ -1967,6 +1988,39 @@ func writeTokenFile(adminToken, viewerToken string) error {
 	}
 	slog.Info("auth: tokens written to file", "path", tokenPath)
 	return nil
+}
+
+// readTokenFile loads admin/viewer tokens previously persisted by writeTokenFile
+// from <tokenFileDir>/token. It is called at startup so the agent reuses the
+// same credentials across restarts instead of generating new ones each time.
+// Returns empty strings with no error when the file does not exist (first run);
+// a malformed line is skipped rather than fatal.
+func readTokenFile() (adminToken, viewerToken string, err error) {
+	tokenPath := tokenFileDir + "/token"
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("read %s: %w", tokenPath, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(k) {
+		case "admin":
+			adminToken = strings.TrimSpace(v)
+		case "viewer":
+			viewerToken = strings.TrimSpace(v)
+		}
+	}
+	return adminToken, viewerToken, nil
 }
 
 func newVersionCmd() *cobra.Command {

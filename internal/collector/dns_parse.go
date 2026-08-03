@@ -92,7 +92,7 @@ func decodeDNSEvent(raw []byte) *types.Event {
 
 	return &types.Event{
 		Type:      types.EventDNS,
-		Timestamp: timestamp,
+		Timestamp: types.KtimeToEpoch(timestamp),
 		PID:       pid,
 		TGID:      tgid,
 		UID:       uid,

@@ -42,6 +42,16 @@ alerting:
   alertmanager:
     url: ""
 
+auth:
+  enabled: true
+  # No explicit tokens: the agent generates a random admin/viewer pair on
+  # first run and persists it to /var/lib/ebpf-guard/token, reusing the same
+  # pair across restarts (see main.go readTokenFile/writeTokenFile). This
+  # keeps Prometheus scraping stable without hardcoding secrets into git.
+  # Set viewer_token/admin_token explicitly here to pin known values instead.
+  viewer_token: ""
+  admin_token: ""
+
 store:
   backend: sqlite
   sqlite:

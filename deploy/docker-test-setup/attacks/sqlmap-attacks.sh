@@ -7,6 +7,7 @@ set -e
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
 EBPF_GUARD_API="http://${VPS_IP}:19090"
+EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"  # persisted at /var/lib/ebpf-guard/token
 RESULTS_DIR="./sqlmap-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -40,8 +41,8 @@ check_sqlmap() {
 # Получение метрик до атаки
 get_metrics_before() {
     log "Получение базовых метрик ebpf-guard..."
-    curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-before-$TIMESTAMP.txt"
-    curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-before-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-before-$TIMESTAMP.txt"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-before-$TIMESTAMP.json"
     log "Метрики сохранены в $RESULTS_DIR/metrics-before-$TIMESTAMP.txt"
 }
 
@@ -226,8 +227,8 @@ attack_comprehensive() {
 # Получение метрик после атаки
 get_metrics_after() {
     log "Получение метрик после атаки..."
-    curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-after-$TIMESTAMP.txt"
-    curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-after-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-after-$TIMESTAMP.txt"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-after-$TIMESTAMP.json"
 
     log "Анализ новых алертов..."
     diff "$RESULTS_DIR/alerts-before-$TIMESTAMP.json" "$RESULTS_DIR/alerts-after-$TIMESTAMP.json" || true

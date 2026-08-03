@@ -7,6 +7,7 @@ set -e
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
 EBPF_GUARD_API="http://${VPS_IP}:19090"
+EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"  # persisted at /var/lib/ebpf-guard/token
 RESULTS_DIR="./ldap-csrf-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -352,11 +353,11 @@ analyze_results() {
 
         echo ""
         echo "=== LDAP/CSRF-RELATED METRICS ==="
-        curl -s "$EBPF_GUARD_API/metrics" | grep -E "ldap|csrf|session|token" || echo "No LDAP/CSRF metrics found"
+        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" | grep -E "ldap|csrf|session|token" || echo "No LDAP/CSRF metrics found"
 
         echo ""
         echo "=== RELATED ALERTS ==="
-        curl -s "$EBPF_GUARD_API/alerts" | grep -iE "ldap|csrf|session|token" | head -20 || echo "No LDAP/CSRF alerts found"
+        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | grep -iE "ldap|csrf|session|token" | head -20 || echo "No LDAP/CSRF alerts found"
 
     } | tee "$summary_file"
 

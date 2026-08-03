@@ -7,6 +7,7 @@ set -e
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
 EBPF_GUARD_API="http://${VPS_IP}:19090"
+EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"  # persisted at /var/lib/ebpf-guard/token
 RESULTS_DIR="./bruteforce-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -26,8 +27,8 @@ mkdir -p "$RESULTS_DIR"
 # Получение метрик до атаки
 get_metrics_before() {
     log "Получение базовых метрик..."
-    curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-before-$TIMESTAMP.txt"
-    curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-before-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-before-$TIMESTAMP.txt"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-before-$TIMESTAMP.json"
 }
 
 # Attack 1: Credential Stuffing с常见 паролями
@@ -270,8 +271,8 @@ attack_distributed_pattern() {
 # Получение метрик после атаки
 get_metrics_after() {
     log "Получение метрик после атаки..."
-    curl -s "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-after-$TIMESTAMP.txt"
-    curl -s "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-after-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/metrics-after-$TIMESTAMP.txt"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" > "$RESULTS_DIR/alerts-after-$TIMESTAMP.json"
 }
 
 # Анализ результатов
@@ -310,7 +311,7 @@ analyze_results() {
 
         echo ""
         echo "=== AUTHENTICATION EVENTS IN ebpf-guard ==="
-        curl -s "$EBPF_GUARD_API/alerts" | grep -i "auth\|login\|brute\|password" | head -20 || echo "No auth alerts found"
+        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | grep -i "auth\|login\|brute\|password" | head -20 || echo "No auth alerts found"
 
     } | tee "$summary_file"
 

@@ -86,5 +86,7 @@ desktop.ini
 # Cygwin/Windows crash dumps
 *.stackdump
 
-# VPS demo/test setup secrets (see deploy/docker-test-setup/prometheus.yml)
+# VPS demo/test setup: prometheus token is generated at runtime from
+# /var/lib/ebpf-guard/token (synced by the deploy step) — never committed.
 deploy/docker-test-setup/prometheus-token.txt
+

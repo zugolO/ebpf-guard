@@ -16,8 +16,21 @@ import os
 class AlertsAnalyzer:
     """Анализатор алертов ebpf-guard"""
 
-    def __init__(self, api_url: str = None):
+    def __init__(self, api_url: str = None, token: str = None):
         self.api_url = api_url or os.environ.get("EBPF_GUARD_API", "http://localhost:19090")
+        # Bearer token is required because config-test.yaml enables auth.
+        # Priority: explicit arg > EBPF_GUARD_TOKEN env > persisted token file
+        # at /var/lib/ebpf-guard/token (written by ebpf-guard on first run).
+        self.token = token or os.environ.get("EBPF_GUARD_TOKEN", "")
+        if not self.token:
+            try:
+                with open("/var/lib/ebpf-guard/token") as f:
+                    for line in f:
+                        if line.startswith("admin="):
+                            self.token = line.split("=", 1)[1].strip()
+                            break
+            except (OSError, ValueError):
+                pass
         self.alerts = []
         self.baseline_alerts = []
         self.attack_alerts = []
@@ -25,8 +38,11 @@ class AlertsAnalyzer:
     def fetch_alerts(self) -> List[Dict]:
         """Получение алертов из ebpf-guard API"""
         try:
+            cmd = ["curl", "-s", f"{self.api_url}/alerts"]
+            if self.token:
+                cmd += ["-H", f"Authorization: Bearer {self.token}"]
             result = subprocess.run(
-                ["curl", "-s", f"{self.api_url}/alerts"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=10

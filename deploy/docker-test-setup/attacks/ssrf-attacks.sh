@@ -7,6 +7,7 @@ set -e
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
 EBPF_GUARD_API="http://${VPS_IP}:19090"
+EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"  # persisted at /var/lib/ebpf-guard/token
 RESULTS_DIR="./ssrf-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -262,11 +263,11 @@ analyze_results() {
 
         echo ""
         echo "=== NETWORK-RELATED METRICS ==="
-        curl -s "$EBPF_GUARD_API/metrics" | grep -E "ssrf|internal_access|localhost_connect" || echo "No SSRF metrics found"
+        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" | grep -E "ssrf|internal_access|localhost_connect" || echo "No SSRF metrics found"
 
         echo ""
         echo "=== ALERTS RELATED TO SSRF ==="
-        curl -s "$EBPF_GUARD_API/alerts" | grep -i "ssrf\|localhost\|internal.*access\|metadata" || echo "No SSRF alerts found"
+        curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/alerts" | grep -i "ssrf\|localhost\|internal.*access\|metadata" || echo "No SSRF alerts found"
 
     } | tee "$summary_file"
 

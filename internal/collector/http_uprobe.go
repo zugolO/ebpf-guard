@@ -152,7 +152,7 @@ func (e *HTTPEventRaw) ToTypesEvent() types.Event {
 
 	return types.Event{
 		Type:       types.EventHTTPPlaintext,
-		Timestamp:  e.Timestamp,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,

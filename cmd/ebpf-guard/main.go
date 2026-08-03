@@ -424,16 +424,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		prof = profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
 		engineCfg.LineageTracker = prof.GetLineageTracker()
-		if err := prof.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
-			slog.Warn("profiler: failed to register Prometheus metrics",
-				slog.Any("error", err))
-		}
-		if wpm := prof.GetDetector().GetProfileManager(); wpm != nil {
-			if err := wpm.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
-				slog.Warn("profiler: failed to register workload profile metrics",
-					slog.Any("error", err))
-			}
-		}
+		registerProfilerMetrics(prof, prometheus.DefaultRegisterer)
 
 		if cfg.Watchdog.MemoryPressure.Enabled {
 			memCfg := watchdog.MemoryConfig{
@@ -604,10 +595,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		} else {
 			enf = e
 			engineCfg.ActionExecutor = enf
-			if err := enf.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
-				slog.Warn("enforcer: failed to register Prometheus metrics",
-					slog.Any("error", err))
-			}
+			registerEnforcerMetrics(enf, prometheus.DefaultRegisterer)
 			slog.Info("enforcer: active",
 				slog.String("backend", cfg.Enforcement.BlockBackend),
 				slog.Bool("dry_run", cfg.Enforcement.DryRun))
@@ -1903,6 +1891,34 @@ func gracefulShutdown(
 		shutdownDuration.Set(elapsed.Seconds())
 	}
 	slog.Info("graceful shutdown: complete", slog.Duration("elapsed", elapsed))
+}
+
+// registerProfilerMetrics registers the profiler's own Prometheus metrics and,
+// if a workload profile manager backs its anomaly detector, that manager's
+// metrics too. Registration failure (e.g. a duplicate collector) is logged and
+// swallowed rather than treated as fatal, since a running agent without a few
+// extra metrics series is still useful.
+func registerProfilerMetrics(prof *profiler.Profiler, reg prometheus.Registerer) {
+	if err := prof.RegisterMetrics(reg); err != nil {
+		slog.Warn("profiler: failed to register Prometheus metrics",
+			slog.Any("error", err))
+	}
+	if wpm := prof.GetDetector().GetProfileManager(); wpm != nil {
+		if err := wpm.RegisterMetrics(reg); err != nil {
+			slog.Warn("profiler: failed to register workload profile metrics",
+				slog.Any("error", err))
+		}
+	}
+}
+
+// registerEnforcerMetrics registers the enforcer's action-count metrics.
+// Registration failure is logged and swallowed for the same reason as
+// registerProfilerMetrics above.
+func registerEnforcerMetrics(enf *enforcer.Enforcer, reg prometheus.Registerer) {
+	if err := enf.RegisterMetrics(reg); err != nil {
+		slog.Warn("enforcer: failed to register Prometheus metrics",
+			slog.Any("error", err))
+	}
 }
 
 // initStaticBPFMetrics publishes the configured BPF map capacities and resets

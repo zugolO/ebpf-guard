@@ -2,17 +2,22 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/zugolO/ebpf-guard/internal/config"
+	"github.com/zugolO/ebpf-guard/internal/enforcer"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -491,4 +496,49 @@ func TestPublishLearningMetrics(t *testing.T) {
 	if got := testutil.ToFloat64(exporter.TrackedPIDs); got != 0 {
 		t.Errorf("TrackedPIDs after second publish = %v, want 0", got)
 	}
+}
+
+func TestRegisterProfilerMetrics(t *testing.T) {
+	prof := profiler.NewProfilerWithContext(context.Background(), profiler.ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+	}, slog.Default())
+
+	reg := prometheus.NewRegistry()
+	registerProfilerMetrics(prof, reg)
+
+	count, err := testutil.GatherAndCount(reg)
+	if err != nil {
+		t.Fatalf("GatherAndCount: %v", err)
+	}
+	if count == 0 {
+		t.Error("registerProfilerMetrics registered no metrics")
+	}
+
+	// Registering the same profiler on the same registry a second time hits
+	// the duplicate-collector error path; it must be logged and swallowed,
+	// not panic or otherwise fail the caller.
+	registerProfilerMetrics(prof, reg)
+}
+
+func TestRegisterEnforcerMetrics(t *testing.T) {
+	enf, err := enforcer.NewEnforcer(slog.Default(), enforcer.Config{})
+	if err != nil {
+		t.Fatalf("NewEnforcer: %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	registerEnforcerMetrics(enf, reg)
+
+	count, err := testutil.GatherAndCount(reg)
+	if err != nil {
+		t.Fatalf("GatherAndCount: %v", err)
+	}
+	if count == 0 {
+		t.Error("registerEnforcerMetrics registered no metrics")
+	}
+
+	// Same duplicate-registration path as above: must not panic.
+	registerEnforcerMetrics(enf, reg)
 }

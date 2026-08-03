@@ -744,3 +744,57 @@ func TestSharedLearner_GetRulesBeforeUpdate(t *testing.T) {
 	}
 	<-done
 }
+
+// TestCorrelationEngine_TrackedPIDCount verifies TrackedPIDCount reflects the
+// number of distinct PIDs the anomaly detector has built a profile for, and
+// starts at zero before anything has been ingested.
+func TestCorrelationEngine_TrackedPIDCount(t *testing.T) {
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{}
+	cfg.EnableAnomaly = true
+	cfg.EnableRateLimit = false
+	cfg.EnableDedup = false
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	if got := engine.TrackedPIDCount(); got != 0 {
+		t.Fatalf("TrackedPIDCount() before any events = %d, want 0", got)
+	}
+
+	ctx := context.Background()
+	// Profiles are keyed by workload class (comm + namespace + app label), not
+	// raw PID, so distinct comm values are needed to produce distinct entries.
+	comms := []string{"nginx", "curl", "bash", "cat", "nc"}
+	const distinctWorkloads = 5
+	for i := 0; i < distinctWorkloads; i++ {
+		engine.Ingest(ctx, types.Event{
+			Type: types.EventSyscall,
+			PID:  uint32(i + 1),
+			Comm: mkComm16(comms[i]),
+			Syscall: &types.SyscallEvent{
+				Nr: 1,
+			},
+		})
+	}
+
+	if got := engine.TrackedPIDCount(); got != distinctWorkloads {
+		t.Errorf("TrackedPIDCount() after %d distinct workloads = %d, want %d", distinctWorkloads, got, distinctWorkloads)
+	}
+}
+
+// TestCorrelationEngine_TrackedPIDCount_NoAnomalyDetector verifies
+// TrackedPIDCount returns 0 (not a panic) when the profiler is disabled, since
+// both ce.anomalyDetector and the per-worker detectors are nil in that mode.
+func TestCorrelationEngine_TrackedPIDCount_NoAnomalyDetector(t *testing.T) {
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{}
+	cfg.EnableAnomaly = false
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	if got := engine.TrackedPIDCount(); got != 0 {
+		t.Errorf("TrackedPIDCount() with anomaly disabled = %d, want 0", got)
+	}
+}

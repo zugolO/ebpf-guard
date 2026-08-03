@@ -2,14 +2,22 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/zugolO/ebpf-guard/internal/config"
+	"github.com/zugolO/ebpf-guard/internal/enforcer"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -424,4 +432,113 @@ func minimalRuleYAML(id string) string {
     severity: critical
     action: alert
 `
+}
+
+func TestInitStaticBPFMetrics(t *testing.T) {
+	initStaticBPFMetrics(config.MapSizeConfig{
+		Events:      32768,
+		Processes:   8192,
+		Connections: 16384,
+	})
+
+	for _, tc := range []struct {
+		mapName string
+		want    float64
+	}{
+		{"events", 32768},
+		{"processes", 8192},
+		{"connections", 16384},
+	} {
+		if got := testutil.ToFloat64(exporter.BPFMapSize.WithLabelValues(tc.mapName)); got != tc.want {
+			t.Errorf("BPFMapSize[%s] = %v, want %v", tc.mapName, got, tc.want)
+		}
+		if got := testutil.ToFloat64(exporter.BPFMapEntries.WithLabelValues(tc.mapName)); got != 0 {
+			t.Errorf("BPFMapEntries[%s] = %v, want 0", tc.mapName, got)
+		}
+	}
+
+	// The events_dropped label sets must exist (and read as 0) even though no
+	// event has actually been dropped yet, so the series is visible in
+	// /metrics from the start rather than appearing only after a real drop.
+	for _, evType := range []string{"syscall", "network", "fileaccess"} {
+		if got := testutil.ToFloat64(exporter.EventsDropped.WithLabelValues(evType, "channel_full")); got != 0 {
+			t.Errorf("EventsDropped[%s, channel_full] = %v, want 0", evType, got)
+		}
+	}
+}
+
+// fakeLearningReporter is a stand-in for *correlator.CorrelationEngine in
+// tests, since building a real engine here would pull in the eBPF-backed
+// collector stack.
+type fakeLearningReporter struct {
+	progress    float64
+	trackedPIDs int
+}
+
+func (f fakeLearningReporter) LearningProgress() float64 { return f.progress }
+func (f fakeLearningReporter) TrackedPIDCount() int      { return f.trackedPIDs }
+
+func TestPublishLearningMetrics(t *testing.T) {
+	publishLearningMetrics(fakeLearningReporter{progress: 0.42, trackedPIDs: 7})
+
+	if got := testutil.ToFloat64(exporter.LearningProgress); got != 0.42 {
+		t.Errorf("LearningProgress = %v, want 0.42", got)
+	}
+	if got := testutil.ToFloat64(exporter.TrackedPIDs); got != 7 {
+		t.Errorf("TrackedPIDs = %v, want 7", got)
+	}
+
+	// A later publish must overwrite, not accumulate.
+	publishLearningMetrics(fakeLearningReporter{progress: 1, trackedPIDs: 0})
+	if got := testutil.ToFloat64(exporter.LearningProgress); got != 1 {
+		t.Errorf("LearningProgress after second publish = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(exporter.TrackedPIDs); got != 0 {
+		t.Errorf("TrackedPIDs after second publish = %v, want 0", got)
+	}
+}
+
+func TestRegisterProfilerMetrics(t *testing.T) {
+	prof := profiler.NewProfilerWithContext(context.Background(), profiler.ProfilerConfig{
+		Threshold:  0.5,
+		Weight:     0.3,
+		TTLSeconds: 60,
+	}, slog.Default())
+
+	reg := prometheus.NewRegistry()
+	registerProfilerMetrics(prof, reg)
+
+	count, err := testutil.GatherAndCount(reg)
+	if err != nil {
+		t.Fatalf("GatherAndCount: %v", err)
+	}
+	if count == 0 {
+		t.Error("registerProfilerMetrics registered no metrics")
+	}
+
+	// Registering the same profiler on the same registry a second time hits
+	// the duplicate-collector error path; it must be logged and swallowed,
+	// not panic or otherwise fail the caller.
+	registerProfilerMetrics(prof, reg)
+}
+
+func TestRegisterEnforcerMetrics(t *testing.T) {
+	enf, err := enforcer.NewEnforcer(slog.Default(), enforcer.Config{})
+	if err != nil {
+		t.Fatalf("NewEnforcer: %v", err)
+	}
+
+	reg := prometheus.NewRegistry()
+	registerEnforcerMetrics(enf, reg)
+
+	count, err := testutil.GatherAndCount(reg)
+	if err != nil {
+		t.Fatalf("GatherAndCount: %v", err)
+	}
+	if count == 0 {
+		t.Error("registerEnforcerMetrics registered no metrics")
+	}
+
+	// Same duplicate-registration path as above: must not panic.
+	registerEnforcerMetrics(enf, reg)
 }

@@ -358,6 +358,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		engineCfg.MaxAlertsPerSecond = cfg.Correlator.MaxAlertsPerSecond
 	}
 
+	// Wire the anomaly score reporter so profiler scores are published to
+	// ebpf_guard_profiler_anomaly_score via the cardinality-guarded gauge.
+	engineCfg.AnomalyScoreReporter = exporter.SetAnomalyScoreWithGuard
+
 	// Drift-baseline observe mode (issue #286): suppresses class: drift rule
 	// matches (container/FIM drift monitoring) during a per-workload learning
 	// window, then alerts only on matches that deviate from the learned
@@ -388,6 +392,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Warn("sampling: failed to register effective-rate metric", slog.Any("error", err))
 	}
 
+	var prof *profiler.Profiler
 	if cfg.Profiler.Enabled {
 		profCfg := profiler.ProfilerConfig{
 			Threshold:      cfg.Profiler.AnomalyThreshold,
@@ -417,8 +422,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				PersistPath:     cfg.Profiler.SyscallAllowlist.PersistPath,
 			},
 		}
-		p := profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
-		engineCfg.LineageTracker = p.GetLineageTracker()
+		prof = profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
+		engineCfg.LineageTracker = prof.GetLineageTracker()
+		registerProfilerMetrics(prof, prometheus.DefaultRegisterer)
 
 		if cfg.Watchdog.MemoryPressure.Enabled {
 			memCfg := watchdog.MemoryConfig{
@@ -429,7 +435,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				DisableSequenceThreshold: cfg.Watchdog.MemoryPressure.DisableSequenceThreshold,
 				DisableAllThreshold:      cfg.Watchdog.MemoryPressure.DisableAllThreshold,
 			}
-			seqProfilers := []watchdog.ControllableProfiler{p.GetSequenceProfiler()}
+			seqProfilers := []watchdog.ControllableProfiler{prof.GetSequenceProfiler()}
 			memWatcher := watchdog.NewMemoryPressureWatcherWithSequence(
 				memCfg, slog.Default(), seqProfilers, nil, nil,
 			)
@@ -589,6 +595,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		} else {
 			enf = e
 			engineCfg.ActionExecutor = enf
+			registerEnforcerMetrics(enf, prometheus.DefaultRegisterer)
 			slog.Info("enforcer: active",
 				slog.String("backend", cfg.Enforcement.BlockBackend),
 				slog.Bool("dry_run", cfg.Enforcement.DryRun))
@@ -1401,6 +1408,21 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}()
 
+	// Background: publish BPF map size (static) and tracked-PIDs count every 15s.
+	initStaticBPFMetrics(cfg.BPF.MapSizes)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				publishLearningMetrics(engine)
+			}
+		}
+	}()
+
 	// metricsNodeName labels the ebpf_guard_events_total / ebpf_guard_alerts_total
 	// node dimension so the fleet-wide Grafana dashboard can attribute events and
 	// alerts to a node even when Kubernetes enrichment is disabled (bare-metal/VM
@@ -1869,6 +1891,64 @@ func gracefulShutdown(
 		shutdownDuration.Set(elapsed.Seconds())
 	}
 	slog.Info("graceful shutdown: complete", slog.Duration("elapsed", elapsed))
+}
+
+// registerProfilerMetrics registers the profiler's own Prometheus metrics and,
+// if a workload profile manager backs its anomaly detector, that manager's
+// metrics too. Registration failure (e.g. a duplicate collector) is logged and
+// swallowed rather than treated as fatal, since a running agent without a few
+// extra metrics series is still useful.
+func registerProfilerMetrics(prof *profiler.Profiler, reg prometheus.Registerer) {
+	if err := prof.RegisterMetrics(reg); err != nil {
+		slog.Warn("profiler: failed to register Prometheus metrics",
+			slog.Any("error", err))
+	}
+	if wpm := prof.GetDetector().GetProfileManager(); wpm != nil {
+		if err := wpm.RegisterMetrics(reg); err != nil {
+			slog.Warn("profiler: failed to register workload profile metrics",
+				slog.Any("error", err))
+		}
+	}
+}
+
+// registerEnforcerMetrics registers the enforcer's action-count metrics.
+// Registration failure is logged and swallowed for the same reason as
+// registerProfilerMetrics above.
+func registerEnforcerMetrics(enf *enforcer.Enforcer, reg prometheus.Registerer) {
+	if err := enf.RegisterMetrics(reg); err != nil {
+		slog.Warn("enforcer: failed to register Prometheus metrics",
+			slog.Any("error", err))
+	}
+}
+
+// initStaticBPFMetrics publishes the configured BPF map capacities and resets
+// the entry/drop gauges to zero so their series exist in /metrics before the
+// first real update, instead of only appearing after the first event.
+func initStaticBPFMetrics(mapSizes config.MapSizeConfig) {
+	exporter.SetBPFMapSize("events", float64(mapSizes.Events))
+	exporter.SetBPFMapSize("processes", float64(mapSizes.Processes))
+	exporter.SetBPFMapSize("connections", float64(mapSizes.Connections))
+	exporter.SetBPFMapEntries("events", 0)
+	exporter.SetBPFMapEntries("processes", 0)
+	exporter.SetBPFMapEntries("connections", 0)
+	exporter.EventsDropped.WithLabelValues("syscall", "channel_full")
+	exporter.EventsDropped.WithLabelValues("network", "channel_full")
+	exporter.EventsDropped.WithLabelValues("fileaccess", "channel_full")
+}
+
+// learningProgressReporter is satisfied by *correlator.CorrelationEngine; it
+// exists so publishLearningMetrics is testable without a full engine.
+type learningProgressReporter interface {
+	LearningProgress() float64
+	TrackedPIDCount() int
+}
+
+// publishLearningMetrics copies the engine's current learning progress and
+// tracked-PID count into their Prometheus gauges. Called on a timer from
+// runAgent's background metrics ticker.
+func publishLearningMetrics(reporter learningProgressReporter) {
+	exporter.SetLearningProgress(reporter.LearningProgress())
+	exporter.SetTrackedPIDs(float64(reporter.TrackedPIDCount()))
 }
 
 func setupLogger(level string) {

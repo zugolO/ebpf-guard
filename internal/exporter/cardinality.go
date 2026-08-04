@@ -4,10 +4,12 @@ package exporter
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -18,6 +20,48 @@ const (
 	// AnomalyScoreEvictionInterval is how often to check for evictions.
 	AnomalyScoreEvictionInterval = 5 * time.Minute
 )
+
+// SanitizeLabelValue makes a kernel-supplied string safe to use as a Prometheus
+// label value. Invalid UTF-8 bytes and control characters are replaced with
+// \xNN escapes; the Prometheus client panics outright on invalid UTF-8, so any
+// value derived from attacker-controlled data (comm, paths, argv) must pass
+// through here before reaching WithLabelValues.
+//
+// This mirrors enforcer.sanitizeComm, kept separate to avoid a dependency from
+// exporter to enforcer.
+func SanitizeLabelValue(raw string) string {
+	// Fast path: the overwhelming majority of comms are plain ASCII.
+	if isPlainLabelValue(raw) {
+		return raw
+	}
+
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); {
+		r, size := utf8.DecodeRuneInString(raw[i:])
+		if r == utf8.RuneError && size == 1 {
+			out = append(out, []byte(fmt.Sprintf(`\x%02x`, raw[i]))...)
+			i++
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			out = append(out, []byte(fmt.Sprintf(`\x%02x`, r))...)
+		} else {
+			out = append(out, raw[i:i+size]...)
+		}
+		i += size
+	}
+	return string(out)
+}
+
+// isPlainLabelValue reports whether s is printable ASCII and needs no escaping.
+func isPlainLabelValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] >= 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 // AnomalyScoreEntry tracks a single anomaly score series for eviction.
 type AnomalyScoreEntry struct {
@@ -58,10 +102,10 @@ func (h *AnomalyScoreHeap) Pop() interface{} {
 
 // AnomalyScoreGuard provides cardinality-limited anomaly score tracking.
 type AnomalyScoreGuard struct {
-	mu       sync.RWMutex
-	entries  map[string]*AnomalyScoreEntry
-	heap     AnomalyScoreHeap
-	maxSize  int
+	mu        sync.RWMutex
+	entries   map[string]*AnomalyScoreEntry
+	heap      AnomalyScoreHeap
+	maxSize   int
 	threshold float64
 }
 
@@ -80,6 +124,15 @@ func NewAnomalyScoreGuard() *AnomalyScoreGuard {
 // SetAnomalyScore sets an anomaly score with cardinality guard.
 // If the limit is reached, low-score entries are evicted.
 func (g *AnomalyScoreGuard) SetAnomalyScore(pid, comm string, score float64) {
+	// comm comes straight from the kernel and is attacker-controlled: a process
+	// can name itself with arbitrary bytes. The Prometheus client panics on
+	// label values that are not valid UTF-8, which crashed the agent in the
+	// 2026-08-04 idle run (panic: label value "\xfe\xff" is not valid UTF-8).
+	// Sanitize before building the key so the map, the heap and the metric
+	// label all agree on one value — otherwise eviction would call
+	// DeleteLabelValues with the raw bytes and leak the sanitized series.
+	comm = SanitizeLabelValue(comm)
+
 	key := pid + "/" + comm
 
 	g.mu.Lock()

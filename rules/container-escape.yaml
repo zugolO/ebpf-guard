@@ -324,27 +324,41 @@ rules:
     name: "Container Escape: /proc write attempt"
     description: "Process writing to /proc filesystem (kernel parameter modification)"
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/proc/sys/.*"
-        - "/proc/irq/.*"
-        - "/proc/bus/.*"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: regex
+          values:
+            - "/proc/sys/.*"
+            - "/proc/irq/.*"
+            - "/proc/bus/.*"
     severity: warning
     action: alert
     class: drift
     tags: [container-escape, procfs, kernel-parameters]
-    # Legitimate systemd/ldconfig maintenance regularly touches these paths;
-    # suppress the (frequent, benign) alert without editing the condition
-    # above — see docs/rule-authoring-guide.md#exceptions for the local-tuning
-    # overlay alternative that survives rule-set updates.
     exceptions:
       - name: systemd-sysctl
         condition:
           field: proc.comm
           op: in
           values: [systemd, systemd-sysctl]
+      # Scoped to comm AND path: irqbalance legitimately writes IRQ affinity
+      # masks only. A write to /proc/sys/* (kernel parameters) or /proc/bus/*
+      # from a process named "irqbalance" is still a container-escape signal.
+      - name: irqbalance
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [irqbalance]
+            - field: filename
+              op: prefix
+              values: ["/proc/irq/"]
 
   # Access to host's /proc/1
   - id: container_escape_init_proc
@@ -361,6 +375,31 @@ rules:
     action: alert
     class: drift
     tags: [container-escape, init-process, pid-1]
+    exceptions:
+      # Both exceptions are scoped to comm AND path. The benign reads are
+      # cgroup/stat/status metadata; /proc/1/environ, /proc/1/mem and the
+      # /proc/self/root/ escape path still alert for every process, so a
+      # compromised binary named "ebpf-guard" or "prometheus" stays visible.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: in
+              values: ["/proc/1/cgroup", "/proc/1/stat", "/proc/1/status"]
+      - name: prometheus
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [prometheus]
+            - field: filename
+              op: in
+              values: ["/proc/1/cgroup", "/proc/1/stat", "/proc/1/status"]
 
   # ============================================================================
   # Cgroup Namespace Escape (Sprint 33.0)

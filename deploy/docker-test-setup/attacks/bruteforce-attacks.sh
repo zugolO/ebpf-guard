@@ -288,8 +288,13 @@ analyze_results() {
         echo "========================================"
         echo ""
 
-        local alerts_before=$(wc -l < "$RESULTS_DIR/alerts-before-$TIMESTAMP.json" 2>/dev/null || echo 0)
-        local alerts_after=$(wc -l < "$RESULTS_DIR/alerts-after-$TIMESTAMP.json" 2>/dev/null || echo 0)
+        # /api/v1/alerts отдаёт JSON-массив на одной строке — "wc -l" всегда
+        # давал 1/1/0 независимо от реального числа элементов (см. P2-7 п.4).
+        local alerts_before=0 alerts_after=0
+        if command -v jq &> /dev/null; then
+            alerts_before=$(jq 'length' "$RESULTS_DIR/alerts-before-$TIMESTAMP.json" 2>/dev/null || echo 0)
+            alerts_after=$(jq 'length' "$RESULTS_DIR/alerts-after-$TIMESTAMP.json" 2>/dev/null || echo 0)
+        fi
         local new_alerts=$((alerts_after - alerts_before))
 
         echo "Алерты до атаки: $alerts_before"

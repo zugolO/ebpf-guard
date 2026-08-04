@@ -22,15 +22,24 @@ rules:
       ports or uncommon destinations may indicate pipeline injection (T1195.002)
       or secrets exfiltration from a compromised build step.
     event_type: network
-    condition:
-      field: dport
-      op: not_in
-      values:
-        - "80"
-        - "443"
-        - "22"
-        - "8080"
-        - "8443"
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["actions-runner", "gitlab-runner", "drone-runner",
+                    "tekton", "jenkins-agent", "buildkite-agent"]
+        - field: dport
+          op: not_in
+          values:
+            - "80"
+            - "443"
+            - "22"
+            - "8080"
+            - "8443"
+        - field: daddr
+          op: not_in_cidr
+          values: ["127.0.0.0/8", "::1/128"]
     severity: warning
     action: alert
     tags: [mitre-t1195, mitre-t1195.002, supply-chain, cicd, pipeline-injection]

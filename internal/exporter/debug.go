@@ -112,6 +112,20 @@ type ProfilerProvider interface {
 	GetStats() ProfilerStats
 }
 
+// EngineStatsFunc adapts a function to the EngineProvider interface. The
+// function is called on every request so /debug/state reflects live counters
+// rather than a snapshot taken at wiring time.
+type EngineStatsFunc func() EngineStats
+
+// GetStats returns the engine stats for the debug endpoint.
+func (f EngineStatsFunc) GetStats() EngineStats { return f() }
+
+// ProfilerStatsFunc adapts a function to the ProfilerProvider interface.
+type ProfilerStatsFunc func() ProfilerStats
+
+// GetStats returns the profiler stats for the debug endpoint.
+func (f ProfilerStatsFunc) GetStats() ProfilerStats { return f() }
+
 // EnricherProvider interface for getting enrichment stats.
 type EnricherProvider interface {
 	GetStats() EnrichmentStats

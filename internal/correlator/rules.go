@@ -478,6 +478,41 @@ func extractAllRuleConditions(rule *Rule) []RuleCondition {
 	return conds
 }
 
+// RulesRequiringFileOp returns the IDs of file rules whose top-level condition
+// requires FileEvent.Op to equal op (e.g. "write"). Such rules can never match
+// unless the fileaccess collector is configured to emit that operation, so the
+// agent warns at startup when the corresponding track_* flag is off — see
+// P2-12: the *_write/*_modified rules were previously firing on plain opens,
+// and now that they correctly require a write they go silent instead if the
+// collector never supplies one.
+func RulesRequiringFileOp(rules []Rule, op string) []string {
+	var ids []string
+	for i := range rules {
+		r := &rules[i]
+		if r.EventType != types.EventFileAccess || r.ConditionGroup == nil {
+			continue
+		}
+		// Only an AND group makes the op a hard requirement; under OR the
+		// rule can still match through another branch.
+		if !strings.EqualFold(string(r.ConditionGroup.Operator), "and") {
+			continue
+		}
+		for _, c := range r.ConditionGroup.Conditions {
+			if c.Field != "op" {
+				continue
+			}
+			if c.Op != OpEquals && c.Op != "eq" {
+				continue
+			}
+			if len(c.Values) == 1 && c.Values[0] == op {
+				ids = append(ids, r.ID)
+				break
+			}
+		}
+	}
+	return ids
+}
+
 // extractGroupConditions recursively collects conditions from a group and its subgroups.
 func extractGroupConditions(g *RuleConditionGroup) []RuleCondition {
 	if g == nil {
@@ -1202,6 +1237,8 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return util.BytesToString(e.Comm[:])
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
+		case "pid":
+			return strconv.FormatUint(uint64(e.PID), 10)
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {
@@ -1245,6 +1282,8 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 				return "true"
 			}
 			return "false"
+		case "pid":
+			return strconv.FormatUint(uint64(e.PID), 10)
 		}
 	case types.EventDNS:
 		if e.DNS == nil {

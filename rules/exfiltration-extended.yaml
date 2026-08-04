@@ -181,6 +181,9 @@ rules:
           values: ["rsync", "scp", "sftp", "rclone", "aws", "gsutil",
                    "az", "restic", "duplicati", "borgbackup", "bacula",
                    "prometheus", "node_exporter", "telegraf", "fluentd"]
+        - field: daddr
+          op: not_in_cidr
+          values: ["127.0.0.0/8", "::1/128"]
     severity: warning
     action: alert
     tags: [mitre:T1030, exfiltration, chunked-transfer]

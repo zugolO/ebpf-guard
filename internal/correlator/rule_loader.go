@@ -31,6 +31,8 @@ var (
 	}
 	validFileFields = map[string]bool{
 		"filename": true, "flags": true, "mode": true, "op": true, "directory": true, "extension": true,
+		"pid": true,
+		"uid": true,
 		// fd-enrichment fields (issue #47): available for all file ops; populated via BPF fd→path map.
 		"fd.name":           true,
 		"fd.name_truncated": true,
@@ -45,10 +47,10 @@ var (
 		"file.directory": true,
 		"file.extension": true,
 		"proc.comm":      true,
-		"uid":            true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
+		"pid": true,
 		// Process identity — available from the base Event struct on all syscalls.
 		"uid": true, "comm": true,
 		// Raw syscall arguments (arg0 = first argument, arg1 = second, …).

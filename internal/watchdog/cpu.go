@@ -82,9 +82,35 @@ type CPUPressureWatcher struct {
 	enteredStateAt time.Time          // when the current state was entered
 	normalRates    map[string]float64 // saved sampling rates before shedding
 
+	// Transition-log deduplication: a burst of transitions in quick
+	// succession — whether repeated same-kind shedding or flapping back and
+	// forth between reduce and recover — collapses into a single summary
+	// line with per-kind counts, instead of one WARN/INFO per transition.
+	// See logTransition for the flush conditions.
+	transitionRunActive bool      // a run is currently open
+	transitionRunStart  time.Time // when the current run started
+	lastTransitionAt    time.Time // wall time of the most recent transition
+	reduceCount         int       // reduce transitions seen in the current run
+	recoverCount        int       // recover transitions seen in the current run
+	// pendingTransition* mirror the message/values of the first transition
+	// in the current run, reused when flushing its summary.
+	pendingTransitionKind      string
+	pendingTransitionMsg       string
+	pendingTransitionPct       float64
+	pendingTransitionThreshold float64
+
+	// degradedSince records when the watcher most recently entered a
+	// degraded (shed) state; zero value means currently normal. Combined
+	// with degradedSeconds this tracks the fraction of time spent shedding
+	// (see P1-18a acceptance criterion / degradedFraction).
+	degradedSince   time.Time
+	degradedSeconds float64 // accumulated seconds spent in any shed state
+	trackingSince   time.Time
+
 	// Metrics.
-	pressureLevel   prometheus.Gauge
-	pressurePercent prometheus.Gauge
+	pressureLevel    prometheus.Gauge
+	pressurePercent  prometheus.Gauge
+	degradedFraction prometheus.Gauge
 }
 
 // CPUConfig holds configuration for CPU pressure handling.
@@ -116,8 +142,17 @@ type CPUConfig struct {
 // DefaultCPUConfig returns safe defaults: shed file collectors above 40% of
 // one core, add syscall/network above 70%, recover below 20%, smoothed over
 // 6 samples (30s at the default 5s check interval), and held for at least
-// 30s before recovering a level. These are absolute per-core percentages, so
-// they behave identically on a 1-core VPS and an 8-core host.
+// 3 minutes before recovering a level. These are absolute per-core
+// percentages, so they behave identically on a 1-core VPS and an 8-core
+// host.
+//
+// MinDwell of 3 minutes (not the previous 30s) breaks a feedback loop
+// observed on idle hosts: shedding file sampling to 10% is itself what drops
+// CPU from ~50% to ~1%, so a short dwell just recovers full sampling,
+// re-trips the threshold, and repeats — 813 reduce/recover cycles in one
+// 9-hour idle run, one every ~40s (see P1-18a / ISSUES-attack-run.md). The
+// dwell floor must be well above the time it takes shed-then-recovered load
+// to climb back to the trip threshold, not just above the check interval.
 func DefaultCPUConfig() CPUConfig {
 	return CPUConfig{
 		Enabled:           true,
@@ -127,7 +162,7 @@ func DefaultCPUConfig() CPUConfig {
 		AllShedThreshold:  70.0,
 		RecoveryThreshold: 20.0,
 		WindowSize:        6,
-		MinDwell:          30 * time.Second,
+		MinDwell:          3 * time.Minute,
 	}
 }
 
@@ -145,7 +180,7 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 		config.WindowSize = 6
 	}
 	if config.MinDwell <= 0 {
-		config.MinDwell = 30 * time.Second
+		config.MinDwell = 3 * time.Minute
 	}
 	// Seed thresholds from CPULimitPercent when not set explicitly.
 	if config.CPULimitPercent <= 0 {
@@ -187,6 +222,10 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 			Name: "ebpf_guard_cpu_pressure_percent",
 			Help: "Smoothed agent CPU usage as a percentage of a single CPU core (0-100 == idle..one core fully busy; not normalized by core count).",
 		}),
+		degradedFraction: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_cpu_degraded_fraction",
+			Help: "Fraction (0-1) of tracked watcher lifetime spent with sampling reduced (any shed level above normal). Lets an operator tell how much visibility was actually lost, rather than inferring it from log-grepping reduce/recover pairs.",
+		}),
 	}
 	w.pressureLevel.Set(cpuLevelNormal)
 	return w
@@ -194,7 +233,7 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 
 // RegisterMetrics registers Prometheus metrics.
 func (w *CPUPressureWatcher) RegisterMetrics(reg prometheus.Registerer) error {
-	for _, c := range []prometheus.Collector{w.pressureLevel, w.pressurePercent} {
+	for _, c := range []prometheus.Collector{w.pressureLevel, w.pressurePercent, w.degradedFraction} {
 		if err := reg.Register(c); err != nil {
 			return err
 		}
@@ -248,6 +287,11 @@ func (w *CPUPressureWatcher) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Flush any collapsed-repeats run still pending so its summary
+			// isn't silently lost on shutdown.
+			w.mu.Lock()
+			w.flushTransitionRun()
+			w.mu.Unlock()
 			w.logger.Info("cpu pressure watcher stopped")
 			return
 		case <-ticker.C:
@@ -274,6 +318,7 @@ func (w *CPUPressureWatcher) checkCPU() {
 		w.lastWall = now
 		w.haveLast = true
 		w.enteredStateAt = now
+		w.trackingSince = now
 		return
 	}
 
@@ -288,6 +333,15 @@ func (w *CPUPressureWatcher) checkCPU() {
 		cpuDelta = 0
 	}
 
+	// Attribute the elapsed interval to whatever state was in effect for
+	// (most of) it, before evaluate() may transition to a new one — the
+	// degraded-time accounting is about how long sampling was actually
+	// reduced, not about the state as of this instant.
+	if w.state != cpuLevelNormal {
+		w.degradedSeconds += wallDelta
+	}
+	w.updateDegradedFraction(now)
+
 	// Percentage of a single CPU core: busy seconds over wall-clock seconds.
 	// Deliberately NOT normalized by numCPU — an absolute per-core budget
 	// means the same threshold means the same thing (e.g. "0.4 of a core")
@@ -298,6 +352,26 @@ func (w *CPUPressureWatcher) checkCPU() {
 	w.pressurePercent.Set(avg)
 
 	w.evaluate(avg, now)
+
+	// A run that goes quiet (no further transition) would otherwise sit
+	// unflushed until the next transition or shutdown — potentially
+	// indefinitely on a host that settles down. Flush it once the gap has
+	// elapsed so its summary still appears promptly instead of only in the
+	// final shutdown flush.
+	if w.transitionRunActive && now.Sub(w.lastTransitionAt) >= transitionLogGap {
+		w.flushTransitionRun()
+	}
+}
+
+// updateDegradedFraction recomputes and publishes the fraction of tracked
+// lifetime spent in a degraded (shed) state. Must be called with mu held.
+func (w *CPUPressureWatcher) updateDegradedFraction(now time.Time) {
+	total := now.Sub(w.trackingSince).Seconds()
+	if total <= 0 {
+		w.degradedFraction.Set(0)
+		return
+	}
+	w.degradedFraction.Set(w.degradedSeconds / total)
 }
 
 // pushWindow appends a sample to the sliding window and returns its mean.
@@ -328,43 +402,131 @@ func (w *CPUPressureWatcher) evaluate(cpuPct float64, now time.Time) {
 	switch w.state {
 	case cpuLevelNormal:
 		if cpuPct >= w.allShedThreshold {
-			w.logger.Warn("cpu pressure: reducing file, syscall and network sampling",
-				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
-				slog.String("threshold", fmt.Sprintf("%.1f%%", w.allShedThreshold)))
+			w.logTransition("reduce", "cpu pressure: reducing file, syscall and network sampling", cpuPct, w.allShedThreshold, now)
 			w.enterFileShedMode()
 			w.enterAllShedMode()
 			w.setState(cpuLevelAllShed, now)
 		} else if cpuPct >= w.fileShedThreshold {
-			w.logger.Warn("cpu pressure: reducing file sampling",
-				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
-				slog.String("threshold", fmt.Sprintf("%.1f%%", w.fileShedThreshold)))
+			w.logTransition("reduce", "cpu pressure: reducing file sampling", cpuPct, w.fileShedThreshold, now)
 			w.enterFileShedMode()
 			w.setState(cpuLevelFileShed, now)
 		}
 
 	case cpuLevelFileShed:
 		if cpuPct >= w.allShedThreshold {
-			w.logger.Warn("cpu pressure: escalating — reducing syscall and network sampling",
-				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
-				slog.String("threshold", fmt.Sprintf("%.1f%%", w.allShedThreshold)))
+			w.logTransition("reduce", "cpu pressure: escalating — reducing syscall and network sampling", cpuPct, w.allShedThreshold, now)
 			w.enterAllShedMode()
 			w.setState(cpuLevelAllShed, now)
 		} else if cpuPct < w.recoveryThreshold && dwelled {
-			w.logger.Info("cpu pressure: recovered — restoring file sampling",
-				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
-				slog.String("threshold", fmt.Sprintf("%.1f%%", w.recoveryThreshold)))
+			w.logTransition("recover", "cpu pressure: recovered — restoring file sampling", cpuPct, w.recoveryThreshold, now)
 			w.recoverNormalMode()
 			w.setState(cpuLevelNormal, now)
 		}
 
 	case cpuLevelAllShed:
 		if cpuPct < w.recoveryThreshold && dwelled {
-			w.logger.Info("cpu pressure: recovered — restoring all sampling",
-				slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
-				slog.String("threshold", fmt.Sprintf("%.1f%%", w.recoveryThreshold)))
+			w.logTransition("recover", "cpu pressure: recovered — restoring all sampling", cpuPct, w.recoveryThreshold, now)
 			w.recoverNormalMode()
 			w.setState(cpuLevelNormal, now)
 		}
+	}
+}
+
+// transitionLogGap is how long a gap since the last transition (of either
+// kind) ends the current run and lets the next transition log immediately
+// again (rather than being folded into a stale run from long ago).
+const transitionLogGap = 5 * time.Minute
+
+// logTransition records a state transition, logging the first transition of
+// a new run immediately for operator visibility, and silently counting every
+// subsequent transition within transitionLogGap — regardless of kind —
+// instead of logging each one. This deliberately collapses flapping
+// (alternating reduce/recover), not just repeated same-kind transitions:
+// real-world flapping alternates by construction (shed lowers CPU, which
+// triggers recovery, which raises CPU again), so a same-kind-only rule would
+// never actually collapse it. The accumulated run is flushed as a single
+// summary line with per-kind counts once it ends — see flushTransitionRun.
+// Must be called with mu held.
+//
+// Before this, a flapping watcher (813 reduce/recover cycles across one
+// 9-hour idle run, one every ~40s) produced 1626 nearly-identical log lines
+// — 99% of the night's log — burying anything else an operator needed to
+// see and devaluing WARN as a signal.
+func (w *CPUPressureWatcher) logTransition(kind, msg string, cpuPct, threshold float64, now time.Time) {
+	sameRun := w.transitionRunActive && now.Sub(w.lastTransitionAt) < transitionLogGap
+	if sameRun {
+		// Within an active run: count silently by kind, don't re-log.
+		if kind == "reduce" {
+			w.reduceCount++
+		} else {
+			w.recoverCount++
+		}
+		w.lastTransitionAt = now
+		return
+	}
+
+	// A stale/absent run: flush whatever was pending first (in case it was
+	// merely idle past the gap, not yet flushed), then start a new run with
+	// this transition logged immediately.
+	w.flushTransitionRun()
+
+	w.transitionRunActive = true
+	w.transitionRunStart = now
+	w.lastTransitionAt = now
+	if kind == "reduce" {
+		w.reduceCount = 1
+		w.recoverCount = 0
+	} else {
+		w.reduceCount = 0
+		w.recoverCount = 1
+	}
+	w.pendingTransitionKind = kind
+	w.pendingTransitionMsg = msg
+	w.pendingTransitionPct = cpuPct
+	w.pendingTransitionThreshold = threshold
+
+	w.emitTransitionLog(kind, msg, cpuPct, threshold, 0, 0, 0)
+}
+
+// flushTransitionRun emits a summary line for an in-progress run when it
+// contained more than the one transition already logged by logTransition,
+// and clears run-tracking state. A no-op if there is no active run or it
+// never grew beyond its first transition. Must be called with mu held.
+func (w *CPUPressureWatcher) flushTransitionRun() {
+	if !w.transitionRunActive {
+		return
+	}
+	total := w.reduceCount + w.recoverCount
+	if total > 1 {
+		w.emitTransitionLog(w.pendingTransitionKind, w.pendingTransitionMsg+" (collapsed repeats)",
+			w.pendingTransitionPct, w.pendingTransitionThreshold,
+			w.reduceCount, w.recoverCount, w.lastTransitionAt.Sub(w.transitionRunStart))
+	}
+	w.transitionRunActive = false
+	w.reduceCount = 0
+	w.recoverCount = 0
+}
+
+// emitTransitionLog writes one log line for a transition or a collapsed-run
+// summary. reduceCount and recoverCount are both 0 for a single, uncollapsed
+// transition (no repeat/duration fields added); a collapsed-run summary
+// passes the per-kind counts accumulated over the run.
+func (w *CPUPressureWatcher) emitTransitionLog(kind, msg string, cpuPct, threshold float64, reduceCount, recoverCount int, runDuration time.Duration) {
+	attrs := []any{
+		slog.String("cpu_pct", fmt.Sprintf("%.1f%%", cpuPct)),
+		slog.String("threshold", fmt.Sprintf("%.1f%%", threshold)),
+	}
+	if reduceCount+recoverCount > 0 {
+		attrs = append(attrs,
+			slog.Int("repeat_count", reduceCount+recoverCount),
+			slog.Int("reduce_count", reduceCount),
+			slog.Int("recover_count", recoverCount),
+			slog.Duration("run_duration", runDuration))
+	}
+	if kind == "recover" {
+		w.logger.Info(msg, attrs...)
+	} else {
+		w.logger.Warn(msg, attrs...)
 	}
 }
 

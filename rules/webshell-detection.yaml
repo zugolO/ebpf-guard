@@ -112,10 +112,19 @@ rules:
     name: "Web server process making outbound connection"
     description: "apache/nginx/httpd worker initiated outbound TCP — reverse shell or data exfiltration from compromised web server."
     event_type: network
-    condition:
-      field: dport
-      op: not_in
-      values: ["80", "443", "8080", "8443", "53", "25", "587", "465"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
+        - field: dport
+          op: not_in
+          values: ["80", "443", "8080", "8443", "53", "25", "587", "465"]
+        - field: daddr
+          op: not_in_cidr
+          values: ["127.0.0.0/8", "::1/128"]
     severity: critical
     action: alert
     tags: [mitre:T1505.003, mitre:T1059.004, webshell, reverse-shell, web-process]
@@ -124,10 +133,19 @@ rules:
     name: "Web server outbound connection to high port"
     description: "Web server process connected to a high-numbered port (>10000) — reverse shell or C2 beacon."
     event_type: network
-    condition:
-      field: dport
-      op: gt
-      values: ["10000"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
+        - field: dport
+          op: gt
+          values: ["10000"]
+        - field: daddr
+          op: not_in_cidr
+          values: ["127.0.0.0/8", "::1/128"]
     severity: warning
     action: alert
     tags: [mitre:T1505.003, webshell, high-port, c2]

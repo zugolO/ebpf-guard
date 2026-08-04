@@ -229,6 +229,20 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1497.001, sandbox-evasion, container-detect, evasion]
+    exceptions:
+      # Scoped to comm AND path: the agent reads its own cgroup and uptime
+      # for self-identification. Reading /proc/1/environ or /proc/1/status —
+      # the host-escape reconnaissance primitives — still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: in
+              values: ["/proc/self/cgroup", "/proc/uptime"]
 
   - id: mitre_sandbox_detect_cpuid
     name: "CPU virtualization detection via cpuid"
@@ -364,11 +378,16 @@ rules:
     name: "NSS configuration modified"
     description: "/etc/nsswitch.conf modified — changing name service switch order to redirect authentication or naming."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/etc/nsswitch.conf"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/etc/nsswitch.conf"
     severity: warning
     action: alert
     tags: [mitre:T1484, nsswitch, nss, policy-modification]

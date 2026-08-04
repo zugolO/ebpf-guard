@@ -335,14 +335,19 @@ analyze_results() {
 
         # curl's -w "...%{http_code}" writes the *resolved* numeric status,
         # not the literal string "http_code" — grepping for "http_code" against
-        # the output files always matched 0 lines. Match the actual format
-        # instead: every attack function writes "<label>: <3-digit code>".
+        # the output files always matched 0 lines. Most attack functions write
+        # "<label>: <3-digit code>", but attack_csrf_enumeration uses
+        # "curl -D - -o /dev/null" to dump raw response headers instead, whose
+        # first line is "HTTP/1.1 <3-digit code> <reason>" — that line was not
+        # matched by ": [0-9]{3}$" (no trailing colon-space before the code,
+        # and a reason phrase after it), so 500 responses in that file always
+        # counted as 0 attempts (see P3-16 п.3). Match both formats.
         echo "=== LDAP ATTACKS ==="
         local total_requests=0
         local zero_request_files=""
         for file in "$RESULTS_DIR"/ldap_*.txt; do
             if [ -f "$file" ]; then
-                local count=$(grep -cE ': [0-9]{3}$' "$file" 2>/dev/null)
+                local count=$(grep -cE ': [0-9]{3}$|^HTTP/[0-9.]+ [0-9]{3}' "$file" 2>/dev/null)
                 echo "$(basename $file): $count attempts"
                 total_requests=$((total_requests + count))
                 [ "$count" -eq 0 ] && zero_request_files="$zero_request_files $(basename "$file")"
@@ -353,7 +358,7 @@ analyze_results() {
         echo "=== CSRF ATTACKS ==="
         for file in "$RESULTS_DIR"/csrf_*.txt "$RESULTS_DIR"/session_manipulation_*.txt; do
             if [ -f "$file" ]; then
-                local count=$(grep -cE ': [0-9]{3}$' "$file" 2>/dev/null)
+                local count=$(grep -cE ': [0-9]{3}$|^HTTP/[0-9.]+ [0-9]{3}' "$file" 2>/dev/null)
                 echo "$(basename $file): $count attempts"
                 total_requests=$((total_requests + count))
                 [ "$count" -eq 0 ] && zero_request_files="$zero_request_files $(basename "$file")"

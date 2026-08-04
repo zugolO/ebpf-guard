@@ -155,7 +155,10 @@ watchdog:
     all_shed_threshold: 70.0     # CPU % of one core: also reduce syscall/network (L2)
     recovery_threshold: 20.0     # CPU % of one core: step back one level
     window_size: 6               # samples averaged into the sliding window (30s at 5s interval)
-    min_dwell: 30                # seconds a level is held before recovering
+    min_dwell: 180               # seconds a level is held before recovering.
+                                 # Minutes, not seconds: shedding is itself what
+                                 # drops CPU, so a short dwell recovers, re-trips
+                                 # and flaps (P1-18a).
 
 # Correlator tuning
 correlator:

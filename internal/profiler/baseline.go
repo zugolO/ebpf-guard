@@ -2,6 +2,7 @@
 package profiler
 
 import (
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -112,7 +113,12 @@ func (bl *BaselineLearner) IsLearningComplete() bool {
 	bl.mu.RUnlock()
 	if done {
 		bl.mu.Lock()
-		bl.learningComplete = true
+		if !bl.learningComplete {
+			bl.learningComplete = true
+			slog.Info("profiler: learning complete",
+				"samples", bl.sampleCount,
+				"elapsed_seconds", elapsed.Seconds())
+		}
 		bl.mu.Unlock()
 		return true
 	}

@@ -98,6 +98,9 @@ rules:
             - "53"    # DNS
             - "8080"  # alt HTTP
             - "8443"  # alt HTTPS
+        - field: daddr
+          op: not_in_cidr
+          values: ["127.0.0.0/8", "::1/128"]
     severity: warning
     action: alert
     tags: [mitre:T1046, network-anomaly, portscan]

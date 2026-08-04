@@ -138,17 +138,25 @@ rules:
       operation; this pattern is indicative of T1048.003 bulk exfiltration or
       a compromised database server relaying stolen records.
     event_type: network
-    condition:
-      field: dport
-      op: not_in
-      values:
-        - "3306"    # MySQL replication
-        - "5432"    # PostgreSQL replication
-        - "27017"   # MongoDB replication
-        - "6379"    # Redis
-        - "6380"    # Redis TLS
-        - "443"     # HTTPS backups
-        - "80"
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["mysqld", "postgres", "mongod", "redis-server"]
+        - field: dport
+          op: not_in
+          values:
+            - "3306"    # MySQL replication
+            - "5432"    # PostgreSQL replication
+            - "27017"   # MongoDB replication
+            - "6379"    # Redis
+            - "6380"    # Redis TLS
+            - "443"     # HTTPS backups
+            - "80"
+        - field: daddr
+          op: not_in_cidr
+          values: ["127.0.0.0/8", "::1/128"]
     severity: critical
     action: alert
     tags: [mitre-t1048, mitre-t1048.003, data-exfiltration, database, lateral-movement]
@@ -180,6 +188,11 @@ rules:
             - "8080"   # HTTP alternate
             - "10250"  # kubelet
             - "10255"  # kubelet read-only
+        # Loopback is not exfiltration: data never leaves the host (P2-14).
+        # netintr_loopback_high_port covers the local-proxy/C2-relay case.
+        - field: daddr
+          op: not_in_cidr
+          values: ["127.0.0.0/8", "::1/128"]
     severity: info
     action: alert
     tags: [mitre-t1048, mitre-t1030, data-exfiltration, high-port, covert-channel]

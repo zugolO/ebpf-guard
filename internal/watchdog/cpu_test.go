@@ -3,14 +3,17 @@
 package watchdog
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,7 +62,7 @@ func TestDefaultCPUConfig(t *testing.T) {
 	assert.Equal(t, 70.0, c.AllShedThreshold)
 	assert.Equal(t, 20.0, c.RecoveryThreshold)
 	assert.Equal(t, 6, c.WindowSize)
-	assert.Equal(t, 30*time.Second, c.MinDwell)
+	assert.Equal(t, 3*time.Minute, c.MinDwell)
 }
 
 func TestCPUWatcher_ThresholdSeedingFromLimit(t *testing.T) {
@@ -77,9 +80,11 @@ func TestCPUWatcher_RegisterMetrics(t *testing.T) {
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	require.Len(t, families, 2)
-	assert.Equal(t, "ebpf_guard_cpu_pressure_level", *families[0].Name)
-	assert.Equal(t, "ebpf_guard_cpu_pressure_percent", *families[1].Name)
+	require.Len(t, families, 3)
+	names := []string{*families[0].Name, *families[1].Name, *families[2].Name}
+	assert.Contains(t, names, "ebpf_guard_cpu_pressure_level")
+	assert.Contains(t, names, "ebpf_guard_cpu_pressure_percent")
+	assert.Contains(t, names, "ebpf_guard_cpu_degraded_fraction")
 }
 
 func TestCPUWatcher_FirstSamplePrimesOnly(t *testing.T) {
@@ -345,7 +350,7 @@ func TestCPUWatcher_DefaultSeedingFromZeroConfig(t *testing.T) {
 	assert.Equal(t, 40.0, w.fileShedThreshold)
 	assert.InDelta(t, 70.0, w.allShedThreshold, 0.001)
 	assert.InDelta(t, 20.0, w.recoveryThreshold, 0.001)
-	assert.Equal(t, 30*time.Second, w.minDwell)
+	assert.Equal(t, 3*time.Minute, w.minDwell)
 	assert.GreaterOrEqual(t, w.numCPU, 1)
 }
 
@@ -430,7 +435,7 @@ func TestSetupCPUPressureWatcher_EnabledRegistersAndRuns(t *testing.T) {
 	// Metrics registered.
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	assert.Len(t, families, 2)
+	assert.Len(t, families, 3)
 
 	// Let the background goroutine tick at least once, then stop it cleanly.
 	time.Sleep(50 * time.Millisecond)
@@ -475,4 +480,157 @@ func TestParseProcStatCPUSeconds_Malformed(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+// newBufferedLogWatcher wires a watcher to a fake clock and a slog handler
+// writing into buf, for tests that need to inspect actual log output.
+func newBufferedLogWatcher(t *testing.T, cfg CPUConfig, bpf BPFSamplingController) (*CPUPressureWatcher, *fakeClock, *bytes.Buffer) {
+	t.Helper()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	w := NewCPUPressureWatcher(cfg, logger, bpf)
+	fc := newFakeClock(w.numCPU)
+	w.cpuTimeFn = func() (float64, error) { return fc.cpu, nil }
+	w.nowFn = func() time.Time { return fc.now }
+	return w, fc, &buf
+}
+
+// TestCPUWatcher_FlappingCollapsesToOneLogLinePerRun is the regression test
+// for P1-18a: a flapping watcher (repeated reduce/recover within the same
+// dwell-driven cadence) must not print one WARN/INFO line per transition.
+// Before this fix, 813 reduce/recover cycles over one 9-hour idle run
+// produced 1626 nearly-identical lines — 99% of the night's log.
+func TestCPUWatcher_FlappingCollapsesToOneLogLinePerRun(t *testing.T) {
+	bpf := newMockBPFController()
+	cfg := CPUConfig{
+		CheckInterval:     time.Second,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        1,
+		MinDwell:          time.Nanosecond, // isolate log collapsing from dwell gating
+	}
+	w, fc, buf := newBufferedLogWatcher(t, cfg, bpf)
+	interval := time.Second
+	w.checkCPU()
+
+	// Flap between shed (reduce) and recovered ten times in a row, each
+	// transition well within transitionLogGap of the last. Real flapping
+	// alternates kind by construction (shed lowers CPU → triggers recovery →
+	// CPU rises again → re-trips), so the run must collapse across kinds,
+	// not just repeats of the same kind.
+	const cycles = 10
+	for i := 0; i < cycles; i++ {
+		fc.stepFor(16, interval) // trip: reduce
+		w.checkCPU()
+		fc.stepFor(2, interval) // drop below recovery: recover
+		w.checkCPU()
+	}
+
+	logged := buf.String()
+	reduceLines := strings.Count(logged, "reducing file sampling")
+	recoverLines := strings.Count(logged, "recovered — restoring file sampling")
+
+	// Only the very first transition of the whole run logs immediately;
+	// every other transition — reduce or recover — must be collapsed into
+	// the run instead of producing its own line.
+	assert.Equal(t, 1, reduceLines, "only the first transition overall should log immediately, log:\n%s", logged)
+	assert.Equal(t, 0, recoverLines, "no recover should log while the run is still open, log:\n%s", logged)
+
+	// The transition run is still in progress (no flush triggered yet), so
+	// the repeat count must not have been printed prematurely.
+	assert.NotContains(t, logged, "repeat_count")
+}
+
+// TestCPUWatcher_FlushTransitionRunEmitsRepeatSummary verifies that a run of
+// collapsed flapping is eventually surfaced as a single summary line with
+// per-kind counts, rather than being silently dropped — collapsing noise
+// must not mean losing the information that flapping happened at all.
+func TestCPUWatcher_FlushTransitionRunEmitsRepeatSummary(t *testing.T) {
+	bpf := newMockBPFController()
+	cfg := CPUConfig{
+		CheckInterval:     time.Second,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        1,
+		MinDwell:          time.Nanosecond,
+	}
+	w, fc, buf := newBufferedLogWatcher(t, cfg, bpf)
+	interval := time.Second
+	w.checkCPU()
+
+	// Two full reduce/recover cycles: first reduce logs immediately and
+	// opens the run; the following recover, reduce, recover are all
+	// collapsed into that same run (2 reduces, 2 recovers total).
+	fc.stepFor(16, interval)
+	w.checkCPU() // reduce #1 (logged, opens run)
+	fc.stepFor(2, interval)
+	w.checkCPU() // recover #1 (collapsed)
+	fc.stepFor(16, interval)
+	w.checkCPU() // reduce #2 (collapsed)
+	fc.stepFor(2, interval)
+	w.checkCPU() // recover #2 (collapsed)
+
+	// Directly flush the pending run and check its summary.
+	w.mu.Lock()
+	w.flushTransitionRun()
+	w.mu.Unlock()
+
+	logged := buf.String()
+	assert.Contains(t, logged, "collapsed repeats")
+	assert.Contains(t, logged, "repeat_count=4")
+	assert.Contains(t, logged, "reduce_count=2")
+	assert.Contains(t, logged, "recover_count=2")
+}
+
+// TestCPUWatcher_DegradedFractionTracksShedTime verifies the
+// ebpf_guard_cpu_degraded_fraction gauge reflects the actual proportion of
+// tracked lifetime spent shedding, addressing the P1-18a gap where an
+// operator could only infer degraded time by grepping reduce/recover pairs.
+func TestCPUWatcher_DegradedFractionTracksShedTime(t *testing.T) {
+	cfg := CPUConfig{
+		CheckInterval:     time.Second,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        1,
+		MinDwell:          time.Hour, // stay shed for the whole test
+	}
+	w, fc := newTestWatcher(t, cfg, newMockBPFController())
+	interval := time.Second
+	w.checkCPU() // prime
+
+	// 5 normal seconds.
+	for i := 0; i < 5; i++ {
+		fc.stepFor(0, interval)
+		w.checkCPU()
+	}
+	assert.InDelta(t, 0.0, testDegradedFractionValue(t, w), 0.01)
+
+	// Trip to shed state, then hold it for 5 more seconds (MinDwell blocks
+	// recovery for the whole test, so state stays shed).
+	fc.stepFor(16, interval)
+	w.checkCPU()
+	require.Equal(t, cpuLevelFileShed, w.PressureLevel())
+	for i := 0; i < 4; i++ {
+		fc.stepFor(16, interval)
+		w.checkCPU()
+	}
+
+	// 10 total tracked seconds since priming, 5 of them shed (the tick that
+	// caused the trip is attributed to the still-normal state, then 4 more
+	// ticks while shed) → fraction should land around 0.4-0.5.
+	frac := testDegradedFractionValue(t, w)
+	assert.Greater(t, frac, 0.3)
+	assert.Less(t, frac, 0.6)
+}
+
+// testDegradedFractionValue reads the current value of the watcher's
+// degradedFraction gauge via the Prometheus collector interface.
+func testDegradedFractionValue(t *testing.T, w *CPUPressureWatcher) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, w.degradedFraction.Write(&m))
+	return m.GetGauge().GetValue()
 }

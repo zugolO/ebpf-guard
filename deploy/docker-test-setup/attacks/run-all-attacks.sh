@@ -63,6 +63,8 @@ get_baseline_metrics() {
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
+    # /health не отдаёт фазу обучения (она только в /api/v1/status) — см. P1-4/P2-7 п.6.
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/status" > "$RESULTS_DIR/baseline-status-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
     if ! curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" | grep -q "200"; then
         warn "server.enable_debug не включен в конфиге ebpf-guard — /debug/state недоступен, Alerts/Events/Anomalies Total в отчете будут нулевыми"
@@ -144,6 +146,7 @@ get_final_metrics() {
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/final-health-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/status" > "$RESULTS_DIR/final-status-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/final-state-$TIMESTAMP.json"
 
     echo ""
@@ -156,6 +159,12 @@ generate_final_report() {
     log "==========================================="
 
     local report_file="$RESULTS_DIR/FINAL-REPORT-$TIMESTAMP.txt"
+    # generate_final_report's body runs inside a "{ ... } | tee" pipeline,
+    # i.e. a subshell — a plain variable set there would be lost once the
+    # pipeline exits. Use a flag file instead so the caller (full_run/
+    # interactive_mode) can see whether any gate failed and exit non-zero.
+    local gate_flag_file="$RESULTS_DIR/.gate-failed-$TIMESTAMP"
+    rm -f "$gate_flag_file"
 
     {
         echo "╔═══════════════════════════════════════════════════════════════╗"
@@ -220,6 +229,21 @@ generate_final_report() {
         echo "  Новых: $new_anomalies"
         echo ""
 
+        # Фаза обучения — только в /api/v1/status, не в /health (см. P1-4, P2-7 п.6).
+        local baseline_status="$RESULTS_DIR/baseline-status-$TIMESTAMP.json"
+        local final_status="$RESULTS_DIR/final-status-$TIMESTAMP.json"
+        if command -v jq &> /dev/null; then
+            local b_complete b_progress f_complete f_progress
+            b_complete=$(jq -r '.learning_complete // "unknown"' "$baseline_status" 2>/dev/null)
+            b_progress=$(jq -r '.learning_progress // "unknown"' "$baseline_status" 2>/dev/null)
+            f_complete=$(jq -r '.learning_complete // "unknown"' "$final_status" 2>/dev/null)
+            f_progress=$(jq -r '.learning_progress // "unknown"' "$final_status" 2>/dev/null)
+            echo "Learning Phase:"
+            echo "  До тестов: complete=$b_complete progress=$b_progress"
+            echo "  После тестов: complete=$f_complete progress=$f_progress"
+            echo ""
+        fi
+
         echo "═══════════════════════════════════════════════════════════════"
         echo "СТАТИСТИКА ПО ТИПАМ АТАК"
         echo "═══════════════════════════════════════════════════════════════"
@@ -265,10 +289,35 @@ generate_final_report() {
         if [ -n "$attack_gate_failed" ]; then
             warn "Категории без реального трафика (0 попыток):$attack_gate_failed"
             echo "GATE: FAILED — для этих категорий 'новых алертов: 0' не является валидным результатом детекта:$attack_gate_failed"
+            touch "$gate_flag_file"
         else
             log "✓ Все категории атак отправили трафик"
             echo "GATE: OK"
         fi
+        echo ""
+
+        # Каждый под-скрипт (sqlmap/bruteforce/ssrf/ldap-csrf-attacks.sh) пишет
+        # собственный "GATE: FAILED"/"GATE: OK" в свой summary-*.txt, но раньше
+        # итоговый отчёт этот статус не читал вовсе — секция могла напечатать
+        # "GATE: FAILED" и итог всё равно бы завершился как успешный прогон
+        # (см. P3-16 п.2). Собираем реальный провал из всех summary-файлов.
+        echo "=== PER-SCRIPT GATES ==="
+        for result_dir in sqlmap-results bruteforce-results ssrf-results ldap-csrf-results; do
+            local summary
+            summary=$(find "$result_dir" -maxdepth 1 -name 'summary-*.txt' 2>/dev/null | sort | tail -1)
+            if [ -n "$summary" ] && [ -f "$summary" ]; then
+                if grep -q '^GATE: FAILED' "$summary"; then
+                    echo "  $result_dir: FAILED ($summary)"
+                    touch "$gate_flag_file"
+                elif grep -q 'GATE: OK' "$summary"; then
+                    echo "  $result_dir: OK"
+                else
+                    echo "  $result_dir: UNKNOWN (no GATE line in $summary)"
+                fi
+            else
+                echo "  $result_dir: NO SUMMARY FOUND"
+            fi
+        done
         echo ""
 
         echo "═══════════════════════════════════════════════════════════════"
@@ -408,6 +457,21 @@ generate_final_report() {
     fi
 }
 
+# Проверяет флаг, выставленный generate_final_report при провале любого
+# gate (traffic gate или per-script gate), и завершает процесс ненулевым
+# кодом — раньше провал печатался в отчёт, но exit code всегда был 0
+# (см. P3-16 п.2), поэтому CI/операторы, смотрящие только на код возврата,
+# не видели проваленный прогон.
+check_final_gate() {
+    local gate_flag_file="$RESULTS_DIR/.gate-failed-$TIMESTAMP"
+    if [ -f "$gate_flag_file" ]; then
+        error "ATTACK TESTING GATE: FAILED — см. FINAL-REPORT-$TIMESTAMP.txt для деталей"
+        return 1
+    fi
+    log "✓ ATTACK TESTING GATE: OK"
+    return 0
+}
+
 # Главное меню
 show_menu() {
     echo ""
@@ -443,6 +507,7 @@ interactive_mode() {
                 run_ldap_csrf_attacks
                 get_final_metrics
                 generate_final_report
+                check_final_gate
                 ;;
             2)
                 check_services || continue
@@ -469,6 +534,7 @@ interactive_mode() {
                 ;;
             8)
                 generate_final_report
+                check_final_gate
                 ;;
             9)
                 log "Выход..."
@@ -499,6 +565,11 @@ full_run() {
     log "==========================================="
     log "ВСЕ ТЕСТЫ ЗАВЕРШЕНЫ"
     log "==========================================="
+
+    # check_final_gate returning 1 under "set -e" would abort before the log
+    # lines above print — capture the result and exit after reporting instead
+    # (see P3-16 п.2: exit code must reflect gate failure).
+    check_final_gate || exit 1
 }
 
 # Главная точка входа

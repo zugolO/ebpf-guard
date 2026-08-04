@@ -27,6 +27,12 @@ profiler:
   min_learning_samples: 50
   anomaly_threshold: 0.7
   max_tracked_pids: 2048
+  # Сохранять обученный EWMA-baseline на диск, чтобы рестарт агента не сбрасывал
+  # learning в ноль (задача P0-3 в ISSUES-attack-run-2026-08-03.md).
+  state_persistence:
+    enabled: true
+    path: /var/lib/ebpf-guard/profiler-state.json
+    save_interval_seconds: 300
 
 enforcement:
   enabled: true

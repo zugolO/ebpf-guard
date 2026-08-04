@@ -391,6 +391,11 @@ func SetGoroutinePoolActive(n int64) {
 	GoroutinePoolActive.Set(float64(n))
 }
 
+// RecordAnomaly increments the anomalies counter.
+func RecordAnomaly() {
+	AnomaliesTotal.Inc()
+}
+
 var (
 	// GPUEventsTotal counts GPU/CUDA events by operation type.
 	GPUEventsTotal = promauto.NewCounterVec(
@@ -444,5 +449,13 @@ var (
 			Help: "Total number of event enrichment lookups that found no matching pod in the cache",
 		},
 		[]string{"node"},
+	)
+
+	// AnomaliesTotal counts the total number of behavioral anomalies detected.
+	AnomaliesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_anomalies_total",
+			Help: "Total number of behavioral anomalies detected by the profiler",
+		},
 	)
 )

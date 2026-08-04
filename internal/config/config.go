@@ -1380,7 +1380,13 @@ type CPUPressureConfig struct {
 	WindowSize int `mapstructure:"window_size"`
 	// MinDwell is the minimum time (seconds) a shed level is held before the
 	// watcher will step back down, even once CPU is back under
-	// RecoveryThreshold. Default: 30.
+	// RecoveryThreshold. Default: 180.
+	//
+	// Must stay well above the time it takes shed-then-recovered load to climb
+	// back to the trip threshold: shedding is itself what drops CPU, so a short
+	// dwell recovers full sampling, immediately re-trips, and flaps. The
+	// previous 30s default produced 813 reduce/recover cycles in one 9-hour
+	// idle run, one every ~40s (P1-18a).
 	MinDwell int `mapstructure:"min_dwell"`
 }
 
@@ -2134,7 +2140,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("watchdog.cpu_pressure.all_shed_threshold", 70.0)
 	v.SetDefault("watchdog.cpu_pressure.recovery_threshold", 20.0)
 	v.SetDefault("watchdog.cpu_pressure.window_size", 6)
-	v.SetDefault("watchdog.cpu_pressure.min_dwell", 30)
+	// 180s, not 30s: the shorter dwell let the watcher flap (see P1-18a and
+	// CPUPressureConfig.MinDwell). This default is what actually reaches the
+	// watcher — watchdog.DefaultCPUConfig() is only a fallback for a zero
+	// value, so leaving this at 30 would keep the flapping loop in place.
+	v.SetDefault("watchdog.cpu_pressure.min_dwell", 180)
 
 	// Policy defaults (Sprint 23.0)
 	v.SetDefault("policy.rego.enabled", true)

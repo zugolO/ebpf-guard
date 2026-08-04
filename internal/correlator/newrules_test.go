@@ -66,6 +66,16 @@ func nrNetwork(dport uint16) types.Event {
 	}
 }
 
+// nrNetworkFrom is nrNetwork with a process name. Several network rules were
+// narrowed under P2-14 to only fire for the process role they actually name
+// (a CI runner, a database, a web server), so tests for those rules must
+// supply a matching comm instead of an empty one.
+func nrNetworkFrom(comm string, dport uint16) types.Event {
+	e := nrNetwork(dport)
+	copy(e.Comm[:], comm)
+	return e
+}
+
 func nrDNS(qname string, qtype uint16) types.Event {
 	return types.Event{
 		Type:      types.EventDNS,
@@ -288,8 +298,9 @@ func TestSupplyChain_SafePort443_NoAlert(t *testing.T) {
 func TestSupplyChain_NonStandardPort_Alert(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/supply-chain.yaml")
 
-	// Non-standard port 4444 (reverse shell favourite)
-	alerts := re.Evaluate(nrNetwork(4444))
+	// Non-standard port 4444 (reverse shell favourite) from a CI/CD runner —
+	// the rule is scoped to runner processes (P2-14).
+	alerts := re.Evaluate(nrNetworkFrom("gitlab-runner", 4444))
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "supply_chain_cicd_runner_network")
 }
@@ -344,8 +355,9 @@ func TestDataExfil_SafeDns_NoAlert(t *testing.T) {
 func TestDataExfil_DbNonstandardPort(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/data-exfiltration.yaml")
 
-	// MySQL connecting to port 9999 (not in whitelist) → exfil indicator
-	alerts := re.Evaluate(nrNetwork(9999))
+	// MySQL connecting to port 9999 (not in whitelist) → exfil indicator.
+	// The rule is scoped to database processes (P2-14), so comm must be set.
+	alerts := re.Evaluate(nrNetworkFrom("mysqld", 9999))
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "exfil_db_nonstandard_port_connect")
 }

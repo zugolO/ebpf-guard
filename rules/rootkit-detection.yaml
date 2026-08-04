@@ -99,12 +99,17 @@ rules:
     name: "/etc/ld.so.preload modified (global LD_PRELOAD hijack)"
     description: "The system-wide LD_PRELOAD file /etc/ld.so.preload was written — global shared library injection affecting all processes."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/etc/ld.so.preload"
-        - "/etc/ld.so.conf"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/etc/ld.so.preload"
+            - "/etc/ld.so.conf"
     severity: critical
     action: block
     tags: [mitre:T1574.006, rootkit, ld-preload, library-injection]
@@ -142,15 +147,20 @@ rules:
     name: "Shared library written to system library path"
     description: "A .so file was written to /lib, /usr/lib, or /usr/local/lib — injecting malicious shared library into system paths."
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/lib/[^/]+\\.so(\\.[0-9]+)*$"
-        - "/usr/lib/[^/]+\\.so(\\.[0-9]+)*$"
-        - "/usr/local/lib/[^/]+\\.so(\\.[0-9]+)*$"
-        - "/lib64/[^/]+\\.so(\\.[0-9]+)*$"
-        - "/usr/lib64/[^/]+\\.so(\\.[0-9]+)*$"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: regex
+          values:
+            - "/lib/[^/]+\\.so(\\.[0-9]+)*$"
+            - "/usr/lib/[^/]+\\.so(\\.[0-9]+)*$"
+            - "/usr/local/lib/[^/]+\\.so(\\.[0-9]+)*$"
+            - "/lib64/[^/]+\\.so(\\.[0-9]+)*$"
+            - "/usr/lib64/[^/]+\\.so(\\.[0-9]+)*$"
     severity: warning
     action: alert
     tags: [mitre:T1574.006, rootkit, shared-library, system-lib]
@@ -163,13 +173,18 @@ rules:
     name: "Kernel parameter modified via /proc/sys"
     description: "A kernel parameter file under /proc/sys was written — modifying kernel behavior to disable security or aid rootkit."
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/proc/sys/kernel/"
-        - "/proc/sys/net/ipv4/conf/"
-        - "/proc/sys/vm/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: prefix
+          values:
+            - "/proc/sys/kernel/"
+            - "/proc/sys/net/ipv4/conf/"
+            - "/proc/sys/vm/"
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, sysctl, kernel-param]
@@ -307,17 +322,22 @@ rules:
     name: "Kernel image or vmlinuz file modified"
     description: "The kernel image (/boot/vmlinuz*) was written — tampering with the bootable kernel for persistent root access."
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/boot/vmlinuz.*"
-        - "/boot/vmlinux.*"
-        - "/boot/initrd.*"
-        - "/boot/initramfs.*"
-        - "/boot/grub/grub\\.cfg"
-        - "/boot/grub2/grub\\.cfg"
-        - "/boot/efi/.*"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: regex
+          values:
+            - "/boot/vmlinuz.*"
+            - "/boot/vmlinux.*"
+            - "/boot/initrd.*"
+            - "/boot/initramfs.*"
+            - "/boot/grub/grub\\.cfg"
+            - "/boot/grub2/grub\\.cfg"
+            - "/boot/efi/.*"
     severity: critical
     action: alert
     tags: [mitre:T1014, rootkit, boot-tampering, kernel-image]
@@ -421,12 +441,17 @@ rules:
     name: "System password database modified (/etc/passwd)"
     description: "/etc/passwd was written — adding a new backdoor user account with UID 0 (root equivalent)."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/etc/passwd"
-        - "/etc/shadow"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/etc/passwd"
+            - "/etc/shadow"
     severity: critical
     action: alert
     tags: [mitre:T1136.001, rootkit, passwd, backdoor-account]

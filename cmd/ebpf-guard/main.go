@@ -137,6 +137,22 @@ against YAML detection rules, and exports alerts to Prometheus and Alertmanager.
 	return root
 }
 
+// convertRulesToDebugState converts correlator rules to exporter RuleState for the debug endpoint.
+func convertRulesToDebugState(rules []correlator.Rule) []exporter.RuleState {
+	states := make([]exporter.RuleState, 0, len(rules))
+	for _, rule := range rules {
+		states = append(states, exporter.RuleState{
+			ID:          rule.ID,
+			Name:        rule.Name,
+			EventType:   rule.EventType.String(),
+			Severity:    string(rule.Severity),
+			Action:      string(rule.Action),
+			Description: rule.Description,
+		})
+	}
+	return states
+}
+
 func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulateDuration, shutdownTimeoutFlag string, zeroConfig bool, enableSimple bool, profileFlag string) error {
 	setupLogger(logLevel)
 
@@ -855,6 +871,32 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			SequenceEnabled: hwProfile.Applied.SequenceEnabled,
 			LineageEnabled:  hwProfile.Applied.LineageEnabled,
 		})
+
+		// Providers are closures, not snapshots: /debug/state must agree with
+		// /metrics at request time (P1-10).
+		dbg.SetEngineProvider(exporter.EngineStatsFunc(func() exporter.EngineStats {
+			st := engine.GetStats()
+			return exporter.EngineStats{
+				TotalEvents:   st.ProcessedEvents,
+				TotalAlerts:   st.AlertsGenerated,
+				DroppedEvents: st.AlertsDropped,
+				RulesLoaded:   len(engine.GetRules()),
+			}
+		}))
+
+		if prof != nil {
+			dbg.SetProfilerProvider(exporter.ProfilerStatsFunc(func() exporter.ProfilerStats {
+				st := prof.GetStats()
+				return exporter.ProfilerStats{
+					LearningComplete: st.LearningComplete,
+					LearningProgress: st.LearningProgress,
+					ProfilesActive:   st.ProfilesActive,
+					AnomaliesTotal:   st.AnomaliesTotal,
+				}
+			}))
+		}
+
+		dbg.SetRules(convertRulesToDebugState(engine.GetRules()))
 	}
 
 	if err := srv.Start(ctx); err != nil {
@@ -1105,6 +1147,19 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Bool("track_read", fo.TrackRead),
 				slog.Bool("track_write", fo.TrackWrite),
 			)
+			// P2-12: *_write/*_modified rules require a real write event. If
+			// the collector never emits one, those rules are inert — say so
+			// loudly rather than letting the operator assume they are armed.
+			if !fo.TrackWrite {
+				if inert := correlator.RulesRequiringFileOp(engine.GetRules(), "write"); len(inert) > 0 {
+					slog.Warn("fileaccess: write-dependent rules are inert — "+
+						"collectors.file_ops.track_write is false, so no write events are produced "+
+						"and these rules can never match",
+						slog.Int("rules_disabled", len(inert)),
+						slog.Any("rule_ids", inert),
+					)
+				}
+			}
 		}
 
 		if dc, dcErr := collector.NewDNSCollector(cfg.Collectors.DNS.Enabled); dcErr != nil {
@@ -1277,6 +1332,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 			// Phase 2: atomic swap — only reached after full validation.
 			engine.ReloadRules(newRules)
+			// Keep /debug/state's rule list in sync with the engine (P1-10).
+			if dbg := srv.GetDebugHandler(); dbg != nil {
+				dbg.SetRules(convertRulesToDebugState(newRules))
+			}
 			slog.Info("hot-reload applied",
 				slog.Int("rules_count", len(newRules)),
 				slog.Int("old_count", oldCount))
@@ -1606,6 +1665,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				node = metricsNodeName
 			}
 			exporter.RecordAlert(a.RuleID, string(a.Severity), namespace, podName, node)
+			if a.RuleID == "anomaly_detection" {
+				exporter.RecordAnomaly()
+			}
 		}
 		forwardAlerts(alertAggregator.Ingest(dispatched, time.Now()))
 	}

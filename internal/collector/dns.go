@@ -199,7 +199,10 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 
 		record, err := c.reader.Read()
 		if err != nil {
-			if err == ringbuf.ErrClosed {
+			// Graceful shutdown: the ring buffer is closed either by Close()
+			// or as the context is cancelled. Both race with this blocking
+			// Read, so neither is an error worth an ERROR log line.
+			if ctx.Err() != nil || errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, os.ErrClosed) {
 				return
 			}
 			slog.Error("dns: read from ringbuf", slog.Any("error", err))

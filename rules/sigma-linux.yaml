@@ -324,14 +324,19 @@ rules:
     name: "Login record files modified (utmp/wtmp)"
     description: "The system login tracking files (utmp, wtmp, lastlog) were modified — attacker hiding active sessions."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/var/run/utmp"
-        - "/var/log/wtmp"
-        - "/var/log/btmp"
-        - "/var/log/lastlog"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/var/run/utmp"
+            - "/var/log/wtmp"
+            - "/var/log/btmp"
+            - "/var/log/lastlog"
     severity: warning
     action: alert
     tags: [mitre:T1070, sigma, utmp, session-hiding]
@@ -466,6 +471,20 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1222, sigma, chmod, sensitive-file]
+    exceptions:
+      # Scoped to comm AND path: the agent only ever chmods its own canary
+      # traps (0400 on /etc/*.canary). A compromised process named
+      # "ebpf-guard" must still alert on real /etc/shadow or /etc/sudoers.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: suffix
+              values: [".canary"]
 
   # ============================================================================
   # T1082 — System Information Discovery
@@ -488,6 +507,20 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1082, sigma, discovery, system-info]
+    exceptions:
+      # Scoped to comm AND path: the hardware profiler / CPU watchdog reads
+      # only these three files. Enumeration of the /proc/sys/kernel/* entries
+      # by a process named "ebpf-guard" still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: in
+              values: ["/proc/cpuinfo", "/proc/meminfo", "/proc/version"]
 
   - id: sigma_kernel_version_read
     name: "Kernel version file read"
@@ -528,6 +561,20 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1083, mitre:T1552, sigma, discovery, credential-files]
+    exceptions:
+      # Scoped to comm AND path: the agent's only access under these
+      # directories is verifying its own canary trap
+      # (/root/.ssh/id_rsa.canary). Reading a real key still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: suffix
+              values: [".canary"]
 
   # ============================================================================
   # T1087 — Account Discovery
@@ -766,11 +813,16 @@ rules:
     name: "Write to /proc/sysrq-trigger"
     description: "Process wrote to /proc/sysrq-trigger — can crash/reboot system or sync/unmount filesystems to destroy evidence."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/proc/sysrq-trigger"
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/proc/sysrq-trigger"
     severity: critical
     action: alert
     tags: [mitre:T1014, sigma, sysrq, system-manipulation]

@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -66,6 +67,7 @@ type fileRecord struct {
 type Manager struct {
 	cfg     Config
 	records []fileRecord
+	selfPID uint32
 }
 
 // New returns a Manager. If cfg.Files is empty, DefaultFiles is used.
@@ -79,7 +81,10 @@ func New(cfg Config) *Manager {
 	if cfg.VerifyInterval == 0 {
 		cfg.VerifyInterval = 60 * time.Second
 	}
-	return &Manager{cfg: cfg}
+	return &Manager{
+		cfg:     cfg,
+		selfPID: uint32(os.Getpid()), /* #nosec G115 -- Linux PIDs always fit in uint32 (max 4194304) */
+	}
 }
 
 // Setup creates canary files on disk when AutoCreate is enabled and records
@@ -215,6 +220,16 @@ func (m *Manager) Rules() []correlator.Rule {
 			Severity: sev,
 			Action:   correlator.ActionAlert,
 			Tags:     []string{"canary", "honeypot", "reconnaissance", "high-confidence"},
+			Exceptions: []correlator.RuleException{
+				{
+					Name: "ebpf-guard-self",
+					Condition: correlator.RuleCondition{
+						Field:  "pid",
+						Op:     correlator.OpEquals,
+						Values: []string{strconv.FormatUint(uint64(m.selfPID), 10)},
+					},
+				},
+			},
 		})
 	}
 	return rules
@@ -223,4 +238,9 @@ func (m *Manager) Rules() []correlator.Rule {
 // Paths returns the configured canary file paths.
 func (m *Manager) Paths() []string {
 	return m.cfg.Files
+}
+
+// SelfPID returns the agent's own PID captured at initialization time.
+func (m *Manager) SelfPID() uint32 {
+	return m.selfPID
 }

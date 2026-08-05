@@ -141,7 +141,12 @@ func TestProfilerStats_AggregatesAcrossIngestPool(t *testing.T) {
 	// every detector was switched onto at construction, so the engine-level
 	// view matches the solo detector regardless of which worker saw events.
 	assert.Equal(t, ce.IsLearningComplete(), stats.LearningComplete)
-	assert.InDelta(t, ce.LearningProgress(), stats.LearningProgress, 1e-9)
+	// LearningProgress is derived from time.Since(startTime) (baseline.go:138),
+	// so the two calls here are sampled microseconds apart and cannot be equal
+	// to 1e-9. The assertion is that both read the same learner, not that a
+	// wall clock stood still — a tolerance well under the smallest meaningful
+	// difference in progress still catches a wrong-detector regression.
+	assert.InDelta(t, ce.LearningProgress(), stats.LearningProgress, 1e-4)
 
 	// Cross-check: sum per-detector ProfilesActive manually and confirm the
 	// engine aggregator produces the same total — guards against future

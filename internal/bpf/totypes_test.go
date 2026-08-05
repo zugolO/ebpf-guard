@@ -23,7 +23,7 @@ func TestPrivescRawEvent_ToTypesEvent(t *testing.T) {
 	}
 	e := raw.ToTypesEvent()
 	assert.Equal(t, types.EventPrivesc, e.Type)
-	assert.Equal(t, uint64(111), e.Timestamp)
+	assert.Equal(t, types.KtimeToEpoch(111), e.Timestamp)
 	assert.Equal(t, uint32(1), e.PID)
 	require.NotNil(t, e.Privesc)
 	assert.Equal(t, uint64(0b01), e.Privesc.OldCaps)

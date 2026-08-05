@@ -62,7 +62,11 @@ func TestSyscallEvent_ToTypesEvent(t *testing.T) {
 	result := evt.ToTypesEvent()
 
 	assert.Equal(t, types.EventSyscall, result.Type)
-	assert.Equal(t, evt.Timestamp, result.Timestamp)
+	// ToTypesEvent converts the kernel monotonic clock to a wall-clock epoch,
+	// so the raw ktime does not survive unchanged. On Linux the boot offset is
+	// non-zero and asserting identity fails; on hosts without /proc/uptime the
+	// offset is 0, which is why this passed on non-Linux dev machines only.
+	assert.Equal(t, types.KtimeToEpoch(evt.Timestamp), result.Timestamp)
 	assert.Equal(t, evt.PID, result.PID)
 	assert.NotNil(t, result.Syscall)
 	assert.Equal(t, evt.Nr, result.Syscall.Nr)

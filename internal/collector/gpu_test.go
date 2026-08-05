@@ -77,7 +77,7 @@ func TestGPUEventRawToTypesEvent(t *testing.T) {
 			result := tt.raw.ToTypesEvent()
 
 			assert.Equal(t, types.EventGPU, result.Type)
-			assert.Equal(t, tt.raw.Timestamp, result.Timestamp)
+			assert.Equal(t, types.KtimeToEpoch(tt.raw.Timestamp), result.Timestamp)
 			assert.Equal(t, tt.raw.PID, result.PID)
 			assert.Equal(t, tt.raw.TGID, result.TGID)
 			assert.Equal(t, tt.raw.PPID, result.PPID)

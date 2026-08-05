@@ -93,7 +93,7 @@ func TestTLSEventRawToTypesEvent(t *testing.T) {
 			result := tt.raw.ToTypesEvent()
 
 			assert.Equal(t, tt.expected.Type, result.Type)
-			assert.Equal(t, tt.expected.Timestamp, result.Timestamp)
+			assert.Equal(t, types.KtimeToEpoch(tt.expected.Timestamp), result.Timestamp)
 			assert.Equal(t, tt.expected.PID, result.PID)
 			assert.Equal(t, tt.expected.TGID, result.TGID)
 			assert.Equal(t, tt.expected.PPID, result.PPID)

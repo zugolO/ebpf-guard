@@ -116,7 +116,7 @@ func TestParseEvent(t *testing.T) {
 
 	require.NotNil(t, event)
 	assert.Equal(t, types.EventDNS, event.Type)
-	assert.Equal(t, uint64(1234567890), event.Timestamp)
+	assert.Equal(t, types.KtimeToEpoch(1234567890), event.Timestamp)
 	assert.Equal(t, uint32(1234), event.PID)
 	assert.Equal(t, uint32(1000), event.UID)
 	assert.Equal(t, "example.com", event.DNS.QName)

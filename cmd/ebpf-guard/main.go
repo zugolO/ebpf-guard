@@ -1914,7 +1914,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			if !ok {
 				return nil
 			}
-			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, exporter, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
 
 		case event, ok := <-lowPriorityEventCh:
 			if !ok {
@@ -1930,13 +1930,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					if !hiOK {
 						return nil
 					}
-					processEvent(ctx, hi, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, exporter, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+					processEvent(ctx, hi, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
 					drained++
 				default:
 					break drain
 				}
 			}
-			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, exporter, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
 		}
 	}
 }
@@ -1951,11 +1951,10 @@ const maxProtectedDrainBurst = 64
 func processEvent(
 	ctx context.Context,
 	event types.Event,
-	eventLog *eventlog.Writer,
+	eventLog *store.EventLog,
 	k8sEnricher *k8s.Enricher,
 	runtimeEnricher *runtime.Enricher,
 	metricsNodeName string,
-	exporter *exporter.Exporter,
 	engine *correlator.CorrelationEngine,
 	driftDetector *drift.Detector,
 	driftSeq *atomic.Uint64,

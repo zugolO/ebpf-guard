@@ -59,12 +59,24 @@ func TestNewVersionCmd_WithBuildTime(t *testing.T) {
 }
 
 func TestNewStatusCmd(t *testing.T) {
-	cmd := newStatusCmd()
-	out := captureStdout(t, func() {
-		cmd.Run(cmd, nil)
-	})
-	if !strings.Contains(out, "/health") {
-		t.Errorf("status output = %q, want it to mention /health", out)
+	// newStatusCmd now takes the root's --config pointer and queries a live
+	// agent over HTTP via RunE, so the old body (call Run, assert on printed
+	// "/health") no longer applies: Run is nil, and the endpoint moved to
+	// /api/v1/status. Assert on the wiring instead — invoking it here would
+	// make a network call to whatever the config points at.
+	cfgPath := "testdata/does-not-exist.yaml"
+	cmd := newStatusCmd(&cfgPath)
+
+	if cmd.Use != "status" {
+		t.Errorf("cmd.Use = %q, want status", cmd.Use)
+	}
+	if cmd.RunE == nil {
+		t.Error("cmd.RunE is nil, want the status handler")
+	}
+	for _, flag := range []string{"url", "token"} {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Errorf("cmd is missing the --%s flag", flag)
+		}
 	}
 }
 

@@ -842,6 +842,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			health.CPUPressurePercent = cpuWatcher.PressurePercent()
 			health.VisibilityReduced = cpuWatcher.IsThrottling()
 		}
+		// P0-25: sampling throttling is not the only way visibility degrades.
+		// Run #4 lost 52% of network events with sampling untouched, and this
+		// field still read false. Queue drops must raise it too.
+		if srv.VisibilityReduced() {
+			health.VisibilityReduced = true
+		}
 		if rates := samplingMux.EffectiveRates(); len(rates) > 0 {
 			health.SamplingRates = rates
 		}
@@ -879,19 +885,26 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			return exporter.EngineStats{
 				TotalEvents:   st.ProcessedEvents,
 				TotalAlerts:   st.AlertsGenerated,
-				DroppedEvents: st.AlertsDropped,
+				AlertsDropped: st.AlertsDropped,
 				RulesLoaded:   len(engine.GetRules()),
 			}
 		}))
 
 		if prof != nil {
+			// P1-10 (question 7): the live detector state lives in the engine's
+			// per-worker ingest pool, not main.go's solo *profiler.Profiler.
+			// Run #4 shipped profiler_stats=0/0/0/0 in /debug/state precisely
+			// because this closure read prof.GetStats() off an object that
+			// never receives events under IngestAsync. Aggregate over the pool
+			// at request time so /debug/state agrees with /metrics.
 			dbg.SetProfilerProvider(exporter.ProfilerStatsFunc(func() exporter.ProfilerStats {
-				st := prof.GetStats()
+				st := engine.ProfilerStats()
 				return exporter.ProfilerStats{
-					LearningComplete: st.LearningComplete,
-					LearningProgress: st.LearningProgress,
-					ProfilesActive:   st.ProfilesActive,
-					AnomaliesTotal:   st.AnomaliesTotal,
+					LearningComplete:    st.LearningComplete,
+					LearningProgress:    st.LearningProgress,
+					ProfilesActive:      st.ProfilesActive,
+					AnomaliesTotal:      st.AnomaliesTotal,
+					LearningSampleCount: st.LearningSampleCount,
 				}
 			}))
 		}
@@ -1060,9 +1073,16 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	if eventQueueDepth <= 0 {
 		eventQueueDepth = engineCfg.BufferSize
 	}
-	eventCh := make(chan types.Event, eventQueueDepth)
-	engine.SetQueueDepthFn(func() int { return len(eventCh) }, func() int { return cap(eventCh) })
-	exporter.RecordQueueDepth(0, eventQueueDepth)
+
+	// P0-25: Separate event queues by priority to prevent network/dns event loss.
+	// High-priority events (network, dns) get dedicated queues to protect security signal.
+	// Low-priority events (file, syscall) share a queue but are isolated from network/dns.
+	highPriorityEventCh := make(chan types.Event, eventQueueDepth)
+	lowPriorityEventCh := make(chan types.Event, eventQueueDepth)
+
+	// Track queue depths for both priority levels
+	engine.SetQueueDepthFn(func() int { return len(highPriorityEventCh) + len(lowPriorityEventCh) }, func() int { return cap(highPriorityEventCh) + cap(lowPriorityEventCh) })
+	exporter.RecordQueueDepth(0, eventQueueDepth*2)
 
 	// Determine overflow policy: BPF config takes precedence over the collector
 	// backpressure_strategy for the worker-pool overflow path.
@@ -1103,7 +1123,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					return
 				}
 				if cfg.BPF.KernelFilter.Enabled {
-					enableKernelFilter(sc, cfg.BPF.KernelFilter)
+					comm, sys, kfCfg, agentPID := sc.KernelFilterMaps()
+					enableKernelFilter("syscall", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter)
 				}
 				if cfg.BPF.Sampling.Enabled {
 					enableSampling("syscall", sc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "syscall")
@@ -1133,12 +1154,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		} else {
 			fo := cfg.Collectors.FileOps
 			fc.WithFileOps(fo.TrackOpen, fo.TrackRead, fo.TrackWrite)
-			if cfg.BPF.Sampling.Enabled {
+			if cfg.BPF.Sampling.Enabled || cfg.BPF.KernelFilter.Enabled {
 				fc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
 					if name != "fileaccess" || !up {
 						return
 					}
-					enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "file")
+					// P0-22 (wave 0.5): fileaccess.bpf.c consults its OWN copies
+					// of comm_filter_map / kernel_filter_config / agent_pid_map.
+					// Populating the syscall collector's maps leaves these zeroed,
+					// which would silently disable both the comm denylist and the
+					// agent self-exclusion for the collector producing 99.4% of
+					// the event stream.
+					if cfg.BPF.KernelFilter.Enabled {
+						comm, sys, kfCfg, agentPID := fc.KernelFilterMaps()
+						enableKernelFilter("fileaccess", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter)
+					}
+					if cfg.BPF.Sampling.Enabled {
+						enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "file")
+					}
 				}))
 			}
 			collectors = append(collectors, fc.WithBackpressureStrategy(bpStrategy))
@@ -1275,11 +1308,56 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		err  error
 	}, len(collectors))
 
+	// P0-25: track drops so /health can report degraded visibility. Run #4 lost
+	// 52% of network events while reporting visibility_reduced:false; the whole
+	// point of these counters is that any nonzero drop rate becomes visible.
+	var highPriorityDrops atomic.Int64
+	var lowPriorityDrops atomic.Int64
+	var highPriorityAccepted atomic.Int64
+	var lowPriorityAccepted atomic.Int64
+	var lastHighPriorityDropTime atomic.Int64
+	var lastLowPriorityDropTime atomic.Int64
+
+	recordEventDrop := func(collectorName string, isHighPriority bool) {
+		if isHighPriority {
+			highPriorityDrops.Add(1)
+			lastHighPriorityDropTime.Store(time.Now().UnixNano())
+		} else {
+			lowPriorityDrops.Add(1)
+			lastLowPriorityDropTime.Store(time.Now().UnixNano())
+		}
+		// reason=router_to_queue: dropped between the priority router and the
+		// hi/lo queue (plan.md 1.5c). Distinguished from ringbuf_to_router so a
+		// zero on network/dns can be attributed to a specific hop instead of an
+		// aggregate that hides which stage actually lost the event.
+		exporter.EventsDropped.WithLabelValues(collectorName, "router_to_queue").Inc()
+	}
+
+	// Accepted events are the denominator of the loss fraction; without them a
+	// drop count cannot be turned into "we lost 52% of network events".
+	recordEventAccepted := func(_ string, isHighPriority bool) {
+		if isHighPriority {
+			highPriorityAccepted.Add(1)
+		} else {
+			lowPriorityAccepted.Add(1)
+		}
+	}
+
+	// P0-25: wrap every collector so its events are routed by type into the
+	// protected (network/dns/syscall/…) or bulk (file) queue instead of all
+	// sharing one channel that the file stream fills.
+	priorityCollectors := make([]collector.Collector, 0, len(collectors))
 	for _, c := range collectors {
+		priorityCollectors = append(priorityCollectors,
+			collector.NewPriorityEventCollector(c, highPriorityEventCh, lowPriorityEventCh, bpStrategy, recordEventDrop, recordEventAccepted, slog.Default()))
+	}
+
+	for _, c := range priorityCollectors {
 		exporter.SetCollectorUp(c.Name(), true)
 		srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: true})
 		go func(c collector.Collector) {
-			if err := c.Start(ctx, eventCh); err != nil && ctx.Err() == nil {
+			// The wrapper routes internally; this argument is unused by it.
+			if err := c.Start(ctx, lowPriorityEventCh); err != nil && ctx.Err() == nil {
 				slog.Error("collector error", slog.String("name", c.Name()), slog.Any("error", err))
 				exporter.SetCollectorUp(c.Name(), false)
 				srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false, Error: err.Error()})
@@ -1544,7 +1622,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				exporter.RecordQueueDepth(len(eventCh), cap(eventCh))
+				exporter.RecordQueueDepth(len(highPriorityEventCh)+len(lowPriorityEventCh), cap(highPriorityEventCh)+cap(lowPriorityEventCh))
 				exporter.SetGoroutinePoolActive(activeWorkers.Load())
 			}
 		}
@@ -1558,9 +1636,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	exporter.SetBPFMapEntries("processes", 0)
 	exporter.SetBPFMapEntries("connections", 0)
 	// Initialise events_dropped label sets so the series appear even at zero.
-	exporter.EventsDropped.WithLabelValues("syscall", "channel_full")
-	exporter.EventsDropped.WithLabelValues("network", "channel_full")
-	exporter.EventsDropped.WithLabelValues("fileaccess", "channel_full")
+	// Both hops are pre-registered per collector (plan.md 1.5c): a run-gate
+	// summing "network"/"dns" series for zero loss must see both reasons
+	// present, or an all-zero read is indistinguishable from a missing series.
+	for _, name := range []string{"syscall", "network", "fileaccess", "dns"} {
+		exporter.EventsDropped.WithLabelValues(name, "ringbuf_to_router")
+		exporter.EventsDropped.WithLabelValues(name, "router_to_queue")
+	}
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -1718,6 +1800,78 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}()
 	}
 
+	// P0-25 / plan.md 1.5b: publish visibility degradation whenever ANY queue
+	// (protected or bulk) is dropping events — the plan's literal criterion.
+	// Previously only protected-queue drops raised degradation, so a run that
+	// lost fim_*/canary_*/cred_* signal to bulk-queue drops would still read
+	// /health: healthy — exactly the "mechanism silently fails, indicator shows
+	// success" defect the whole wave exists to close. DegradedQueues tells the
+	// two cases apart (signal loss vs. expected volume shedding) so raising
+	// bulk drops to degraded doesn't itself get ignored as noise.
+	// The state is sticky for degradationThreshold after the last drop so a
+	// bursty loss does not flap between scrapes, and it is driven by the drop
+	// counters themselves — not by whether sampling was reduced, which is what
+	// let run #4 report visibility_reduced:false while losing 52% of network
+	// events.
+	const degradationThreshold = 5 * time.Second
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		var degraded bool
+		var prevHiDrop, prevLoDrop, prevHiOK, prevLoOK int64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				hiDrop, loDrop := highPriorityDrops.Load(), lowPriorityDrops.Load()
+				hiOK, loOK := highPriorityAccepted.Load(), lowPriorityAccepted.Load()
+
+				// Publish the loss ratio per window, not just the counter: 52%
+				// of network events is invisible as an absolute number next to
+				// a million file events (P0-25, item 3).
+				exporter.EventsDroppedFraction.WithLabelValues("protected").
+					Set(lossFraction(hiDrop-prevHiDrop, hiOK-prevHiOK))
+				exporter.EventsDroppedFraction.WithLabelValues("bulk").
+					Set(lossFraction(loDrop-prevLoDrop, loOK-prevLoOK))
+
+				lastHiDrop := lastHighPriorityDropTime.Load()
+				lastLoDrop := lastLowPriorityDropTime.Load()
+				hiDegraded := lastHiDrop > 0 && time.Since(time.Unix(0, lastHiDrop)) < degradationThreshold
+				loDegraded := lastLoDrop > 0 && time.Since(time.Unix(0, lastLoDrop)) < degradationThreshold
+				nowDegraded := hiDegraded || loDegraded
+
+				var queues []string
+				if hiDegraded {
+					queues = append(queues, "protected")
+				}
+				if loDegraded {
+					queues = append(queues, "bulk")
+				}
+				srv.SetDegradedQueues(queues)
+
+				if nowDegraded != degraded {
+					degraded = nowDegraded
+					srv.SetVisibilityReduced(degraded)
+					if degraded {
+						slog.Warn("visibility reduced: a priority queue is dropping events",
+							slog.String("status", "degraded"),
+							slog.Any("degraded_queues", queues),
+							slog.Int64("protected_dropped_since_start", hiDrop),
+							slog.Int64("protected_dropped_in_window", hiDrop-prevHiDrop),
+							slog.Int64("bulk_dropped_since_start", loDrop),
+							slog.Int64("bulk_dropped_in_window", loDrop-prevLoDrop))
+					} else {
+						slog.Info("visibility restored: all priority queues flowing normally",
+							slog.Int64("protected_dropped_since_start", hiDrop),
+							slog.Int64("bulk_dropped_since_start", loDrop))
+					}
+				}
+				prevHiDrop, prevLoDrop, prevHiOK, prevLoOK = hiDrop, loDrop, hiOK, loOK
+			}
+		}
+	}()
+
 	// Background: periodically drain alerts the correlation engine accumulated
 	// via IngestAsync (rule matches, anomaly detection, Rego enrichment) and
 	// dispatch them. Without this, engine.pending would only ever be drained
@@ -1748,59 +1902,113 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				prof, cfg.Profiler.StatePersistence)
 			return nil
 
-		case event, ok := <-eventCh:
+		// P0-25: protected queue (network/dns/syscall/…) first.
+		//
+		// A plain two-case select would NOT prioritise: when both channels are
+		// ready Go picks a uniformly random case, so at 5800 file ev/s against
+		// 33 network ev/s the protected queue would still be serviced ~50% of
+		// the time only by luck of arrival. The non-blocking drain below makes
+		// the preference explicit — the bulk queue is only read once the
+		// protected queue is empty.
+		case event, ok := <-highPriorityEventCh:
 			if !ok {
 				return nil
 			}
-			if eventLog != nil {
-				if wErr := eventLog.Write(event); wErr != nil {
-					slog.Debug("event log: write error", slog.Any("error", wErr))
-				}
-			}
+			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, exporter, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
 
-			// Enrich before rule evaluation so conditions on pod/container fields
-			// can match. K8s pod metadata first (namespace, labels, pod name),
-			// then the runtime enricher fills container fields (name, image) and
-			// any node-local pod identity the k8s enricher could not resolve.
-			if k8sEnricher != nil {
-				k8sEnricher.EnrichEvent(&event)
+		case event, ok := <-lowPriorityEventCh:
+			if !ok {
+				return nil
 			}
-			if runtimeEnricher != nil {
-				runtimeEnricher.EnrichEvent(&event)
-			}
-
-			// Fleet-wide event metric: type/pod/namespace/node so the Grafana fleet
-			// dashboard can aggregate events/sec across the whole cluster, not just
-			// this agent's own scrape target.
-			var evtPod, evtNamespace, evtNode string
-			if event.Enrichment != nil {
-				evtPod, evtNamespace, evtNode = event.Enrichment.PodName, event.Enrichment.Namespace, event.Enrichment.NodeName
-			}
-			if evtNode == "" {
-				evtNode = metricsNodeName
-			}
-			exporter.RecordEventWithLabels(exporter.EventTypeLabel(event.Type), evtPod, evtNamespace, evtNode)
-
-			// Route to the PID-partitioned ingest worker pool so rule evaluation,
-			// lineage tracking, and anomaly scoring are spread across goroutines
-			// instead of serializing on this one. Resulting alerts land in
-			// engine.pending and are drained by the periodic flush above — do
-			// NOT also dispatch a return value here, or every alert double-fires.
-			engine.IngestAsync(ctx, event)
-
-			// Drift detection runs independently of the correlation engine's
-			// pending buffer, so its alerts are dispatched immediately.
-			if driftDetector != nil {
-				driftAlerts := driftDetector.Ingest(event)
-				if len(driftAlerts) > 0 {
-					alerts := make([]types.Alert, 0, len(driftAlerts))
-					for _, da := range driftAlerts {
-						seq := driftSeq.Add(1)
-						alerts = append(alerts, drift.DriftAlertToTypes(da, seq, cfg.Drift.EnforceMode))
+			// Before spending time on a bulk event, yield to anything that
+			// arrived on the protected queue in the meantime.
+			drained := 0
+		drain:
+			for drained < maxProtectedDrainBurst {
+				select {
+				case hi, hiOK := <-highPriorityEventCh:
+					if !hiOK {
+						return nil
 					}
-					dispatchAsync(alerts)
+					processEvent(ctx, hi, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, exporter, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+					drained++
+				default:
+					break drain
 				}
 			}
+			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, exporter, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+		}
+	}
+}
+
+// maxProtectedDrainBurst caps how many protected-queue events are handled
+// before the already-dequeued bulk event is processed. Without a cap, a
+// sustained protected-queue burst could starve file events entirely; with it,
+// bulk throughput degrades gracefully instead of stopping.
+const maxProtectedDrainBurst = 64
+
+// processEvent handles a single event through the enrichment and correlation pipeline.
+func processEvent(
+	ctx context.Context,
+	event types.Event,
+	eventLog *eventlog.Writer,
+	k8sEnricher *k8s.Enricher,
+	runtimeEnricher *runtime.Enricher,
+	metricsNodeName string,
+	exporter *exporter.Exporter,
+	engine *correlator.CorrelationEngine,
+	driftDetector *drift.Detector,
+	driftSeq *atomic.Uint64,
+	cfg *config.Config,
+	dispatchAsync func([]types.Alert),
+) {
+	if eventLog != nil {
+		if wErr := eventLog.Write(event); wErr != nil {
+			slog.Debug("event log: write error", slog.Any("error", wErr))
+		}
+	}
+
+	// Enrich before rule evaluation so conditions on pod/container fields
+	// can match. K8s pod metadata first (namespace, labels, pod name),
+	// then the runtime enricher fills container fields (name, image) and
+	// any node-local pod identity the k8s enricher could not resolve.
+	if k8sEnricher != nil {
+		k8sEnricher.EnrichEvent(&event)
+	}
+	if runtimeEnricher != nil {
+		runtimeEnricher.EnrichEvent(&event)
+	}
+
+	// Fleet-wide event metric: type/pod/namespace/node so the Grafana fleet
+	// dashboard can aggregate events/sec across the whole cluster, not just
+	// this agent's own scrape target.
+	var evtPod, evtNamespace, evtNode string
+	if event.Enrichment != nil {
+		evtPod, evtNamespace, evtNode = event.Enrichment.PodName, event.Enrichment.Namespace, event.Enrichment.NodeName
+	}
+	if evtNode == "" {
+		evtNode = metricsNodeName
+	}
+	exporter.RecordEventWithLabels(exporter.EventTypeLabel(event.Type), evtPod, evtNamespace, evtNode)
+
+	// Route to the PID-partitioned ingest worker pool so rule evaluation,
+	// lineage tracking, and anomaly scoring are spread across goroutines
+	// instead of serializing on this one. Resulting alerts land in
+	// engine.pending and are drained by the periodic flush above — do
+	// NOT also dispatch a return value here, or every alert double-fires.
+	engine.IngestAsync(ctx, event)
+
+	// Drift detection runs independently of the correlation engine's
+	// pending buffer, so its alerts are dispatched immediately.
+	if driftDetector != nil {
+		driftAlerts := driftDetector.Ingest(event)
+		if len(driftAlerts) > 0 {
+			alerts := make([]types.Alert, 0, len(driftAlerts))
+			for _, da := range driftAlerts {
+				seq := driftSeq.Add(1)
+				alerts = append(alerts, drift.DriftAlertToTypes(da, seq, cfg.Drift.EnforceMode))
+			}
+			dispatchAsync(alerts)
 		}
 	}
 }
@@ -1818,16 +2026,23 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 //  8. Cleanup nftables/iptables chains left by the enforcer (if active).
 //  9. Shutdown the HTTP server.
 //
-// enableKernelFilter populates the syscall collector's BPF-side content
-// filter (comm denylist + syscall allowlist) and turns it on. Without this,
-// raw_syscalls/sys_enter and sys_exit forward every syscall on the host to
-// the ring buffer — on a busy node that overwhelms the event channel within
-// seconds. Called once the collector reports its BPF maps are loaded.
-func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterConfig) {
-	commMap, syscallMap, cfgMap := sc.KernelFilterMaps()
-	kf, err := internalbpf.NewKernelFilterController(commMap, syscallMap, cfgMap)
+// enableKernelFilter populates a collector's BPF-side content filter (comm
+// denylist + syscall allowlist + agent self-exclusion PID) and turns it on.
+// Without this, raw_syscalls/sys_enter and sys_exit forward every syscall on
+// the host to the ring buffer — on a busy node that overwhelms the event
+// channel within seconds. Called once the collector reports its BPF maps are
+// loaded.
+//
+// The filter maps are declared in bpf/common.h, which means each compiled BPF
+// object owns a SEPARATE instance of them. Populating the syscall collector's
+// maps does nothing for the fileaccess programs, so this must be called once
+// per collector whose programs consult the filter — hence the `name` label and
+// the map arguments rather than a concrete collector type.
+func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFilterConfig) {
+	kf, err := internalbpf.NewKernelFilterController(maps.comm, maps.syscall, maps.cfg, maps.agentPid)
 	if err != nil {
-		slog.Warn("kernel_filter: maps unavailable, syscalls forwarded unfiltered", slog.Any("error", err))
+		slog.Warn("kernel_filter: maps unavailable, events forwarded unfiltered",
+			slog.String("collector", name), slog.Any("error", err))
 		return
 	}
 
@@ -1853,9 +2068,56 @@ func enableKernelFilter(sc *collector.SyscallCollector, fc config.KernelFilterCo
 		return
 	}
 	slog.Info("kernel_filter: enabled BPF-side syscall/comm filtering",
+		slog.String("collector", name),
 		slog.Int("monitored_syscalls", len(nrs)),
 		slog.Int("comm_denylist", len(denylist)),
 		slog.Bool("daemon_denylist_disabled", fc.DisableDefaultDaemonDenylist))
+
+	// P0-22 (wave 0.5): self-exclusion by the agent's own PID, so the agent's
+	// SQLite writes, audit.jsonl appends and API responses stop generating the
+	// events that feed them. Keyed on PID, never on path — another process
+	// touching the agent's files stays fully visible.
+	if maps.agentPid != nil {
+		agentPID := uint32(os.Getpid())
+		if err := kf.SetAgentPID(agentPID); err != nil {
+			slog.Warn("kernel_filter: set agent pid failed",
+				slog.String("collector", name),
+				slog.Uint64("pid", uint64(agentPID)), slog.Any("error", err))
+		} else {
+			slog.Info("kernel_filter: agent self-exclusion enabled",
+				slog.String("collector", name),
+				slog.Uint64("agent_pid", uint64(agentPID)))
+		}
+	} else {
+		slog.Warn("kernel_filter: agent_pid_map unavailable, self-exclusion inactive",
+			slog.String("collector", name))
+	}
+}
+
+// lossFraction returns dropped/(dropped+accepted) for one window, or 0 when
+// the window carried no events at all — an idle queue is not a lossy one.
+func lossFraction(dropped, accepted int64) float64 {
+	if dropped < 0 {
+		dropped = 0
+	}
+	if accepted < 0 {
+		accepted = 0
+	}
+	total := dropped + accepted
+	if total == 0 {
+		return 0
+	}
+	return float64(dropped) / float64(total)
+}
+
+// kernelFilterMapSet groups the four BPF maps that back one compiled object's
+// content filter. Each BPF object has its own copies (the maps live in
+// bpf/common.h), so they are always passed and populated as a set.
+type kernelFilterMapSet struct {
+	comm     *ebpf.Map
+	syscall  *ebpf.Map
+	cfg      *ebpf.Map
+	agentPid *ebpf.Map
 }
 
 // enableSampling applies the configured static BPF-side sample rate to the

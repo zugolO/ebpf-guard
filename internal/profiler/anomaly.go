@@ -243,6 +243,39 @@ func (ad *AnomalyDetector) GetProfileManager() *WorkloadProfileManager {
 	return ad.profileManager
 }
 
+// AlertTotal returns the sum of AlertCount across every workload profile in this
+// detector's profile manager. Exported so the correlation engine can aggregate
+// anomalies_total across the ingest-worker pool without reaching into profiler
+// internals (P1-10: /debug/state reported 0 anomalies while the real counts
+// lived in per-worker detectors).
+func (ad *AnomalyDetector) AlertTotal() uint64 {
+	if ad == nil || ad.profileManager == nil {
+		return 0
+	}
+	return CountAlertTotal(ad.profileManager)
+}
+
+// CountAlertTotal sums AlertCount across every workload profile in wpm. It is
+// the package-level aggregator used by engine-level stats consumers that hold a
+// *WorkloadProfileManager but not the owning *AnomalyDetector.
+func CountAlertTotal(wpm *WorkloadProfileManager) uint64 {
+	if wpm == nil {
+		return 0
+	}
+	var total uint64
+	for i := range wpm.shards {
+		sh := wpm.shards[i]
+		sh.mu.RLock()
+		for _, profile := range sh.profiles {
+			profile.mu.Lock()
+			total += profile.AlertCount
+			profile.mu.Unlock()
+		}
+		sh.mu.RUnlock()
+	}
+	return total
+}
+
 // calculateAnomalyScore calculates the anomaly score for a workload profile.
 //
 // Lock order invariant: wpm.mu (WorkloadProfileManager) must be acquired before

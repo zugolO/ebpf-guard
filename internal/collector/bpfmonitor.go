@@ -236,7 +236,7 @@ func (c *BPFMonitorCollector) readLoop(ctx context.Context, out chan<- types.Eve
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("bpfmonitor", "channel_full")
+			exporter.RecordDropped("bpfmonitor", "ringbuf_to_router")
 			c.dropLogger.record(c.logger, "bpfmonitor")
 			c.lostTotal.Add(1)
 		})

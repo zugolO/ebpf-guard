@@ -141,6 +141,22 @@ func (c *FileaccessCollector) SamplingConfigMap() *ebpf.Map {
 	return c.objs.SamplingConfig
 }
 
+// KernelFilterMaps returns the comm_filter_map, syscall_filter_map,
+// kernel_filter_config, and agent_pid_map BPF maps backing this collector's
+// content filter, or nil maps if the collector has not loaded (stub mode).
+//
+// These maps are declared in bpf/common.h, so every BPF object file gets its
+// OWN instance of them — the fileaccess program does not see values written
+// into the syscall collector's copies. Wave 0.5 (kernel_filter + agent
+// self-exclusion in fileaccess.bpf.c) therefore requires populating this
+// collector's maps separately; see enableKernelFilter in cmd/ebpf-guard.
+func (c *FileaccessCollector) KernelFilterMaps() (comm, syscall, cfg, agentPid *ebpf.Map) {
+	if c.objs == nil {
+		return nil, nil, nil, nil
+	}
+	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, c.objs.AgentPidMap
+}
+
 // GetPrograms returns the loaded BPF programs for attestation.
 // Implements watchdog.BPFProgramProvider interface.
 func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {
@@ -335,7 +351,7 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("fileaccess", "channel_full")
+			exporter.RecordDropped("fileaccess", "ringbuf_to_router")
 			c.dropLogger.record(c.logger, "fileaccess")
 			c.lostTotal.Add(1)
 		})

@@ -291,7 +291,7 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("syscall", "channel_full")
+			exporter.RecordDropped("syscall", "ringbuf_to_router")
 			c.dropLogger.record(c.logger, "syscall")
 			c.lostTotal.Add(1)
 		})
@@ -315,14 +315,14 @@ func (c *SyscallCollector) MapFullCountersMap() *ebpf.Map {
 	return c.objs.MapFullCounters
 }
 
-// KernelFilterMaps returns the comm_filter_map, syscall_filter_map, and
-// kernel_filter_config BPF maps backing this collector's content filter, or
-// nil maps if the collector has not loaded (stub mode).
-func (c *SyscallCollector) KernelFilterMaps() (comm, syscall, cfg *ebpf.Map) {
+// KernelFilterMaps returns the comm_filter_map, syscall_filter_map,
+// kernel_filter_config, and agent_pid_map BPF maps backing this collector's
+// content filter, or nil maps if the collector has not loaded (stub mode).
+func (c *SyscallCollector) KernelFilterMaps() (comm, syscall, cfg, agentPid *ebpf.Map) {
 	if c.objs == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig
+	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, c.objs.AgentPidMap
 }
 
 // SamplingConfigMap returns the sampling_config BPF map backing this

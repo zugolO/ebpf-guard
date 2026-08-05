@@ -90,3 +90,20 @@ desktop.ini
 # /var/lib/ebpf-guard/token (synced by the deploy step) — never committed.
 deploy/docker-test-setup/prometheus-token.txt
 
+
+# Attack-run raw output (server-logs/, attack-results/): sizeable binary/
+# plaintext-alert dumps pulled from the VPS stand for analysis (see
+# plan.md, вопрос 13). Only the small runs/<date>-summary.json from
+# run-gate.sh is meant to be committed.
+server-logs/
+deploy/docker-test-setup/attacks/attack-results/
+# Per-run attacker PID/comm manifest. It sits next to the scripts (all
+# producers and consumers anchor to SCRIPT_DIR) rather than under
+# attack-results/, so it needs its own entry — it is regenerated each run and
+# would otherwise show up as a dirty tracked directory after every progon.
+deploy/docker-test-setup/attacks/attack-manifest.json
+# Per-category output from the four attack sub-scripts (RESULTS_DIR in each).
+deploy/docker-test-setup/attacks/sqlmap-results/
+deploy/docker-test-setup/attacks/ssrf-results/
+deploy/docker-test-setup/attacks/bruteforce-results/
+deploy/docker-test-setup/attacks/ldap-csrf-results/

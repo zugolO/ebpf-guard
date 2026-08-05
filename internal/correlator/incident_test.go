@@ -22,6 +22,15 @@ func makeAlert(ruleID string, pid uint32, namespace string, sev types.Severity, 
 	}
 }
 
+// makeAlertWithComm is the P1-27 companion to makeAlert: incidents must carry
+// the triggering process name, so attack-burst helpers need a way to attach a
+// comm without touching every existing caller of makeAlert.
+func makeAlertWithComm(ruleID string, pid uint32, namespace string, sev types.Severity, ts time.Time, comm string) types.Alert {
+	a := makeAlert(ruleID, pid, namespace, sev, ts)
+	a.Comm = comm
+	return a
+}
+
 func TestIncidentTracker_AttackScoring(t *testing.T) {
 	rules := []Rule{
 		{ID: "rule1", Tags: []string{"execution", "persistence"}},

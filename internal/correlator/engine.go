@@ -1861,6 +1861,78 @@ func (ce *CorrelationEngine) TrackedPIDCount() int {
 	return total
 }
 
+// anomalyDetectors returns every live AnomalyDetector the engine routes events
+// through: the single-goroutine detector (used by Ingest) plus each per-worker
+// detector in the ingest pool (used by IngestAsync). Nil detectors are skipped.
+//
+// This is the engine-level view that persistence (P0-3) and the /debug/state
+// profiler provider (P1-10) must aggregate over: run #4 shipped
+// profiler_stats=0/0/0/0 and a 174-byte state file because both walked only the
+// solo detector in main.go while the real profiles lived in the pool. Question
+// 7 in plan.md closes this as one shared root.
+func (ce *CorrelationEngine) anomalyDetectors() []*profiler.AnomalyDetector {
+	out := make([]*profiler.AnomalyDetector, 0, len(ce.ingestPool)+1)
+	if ce.anomalyDetector != nil {
+		out = append(out, ce.anomalyDetector)
+	}
+	for _, w := range ce.ingestPool {
+		if w != nil && w.ad != nil {
+			out = append(out, w.ad)
+		}
+	}
+	return out
+}
+
+// ProfilerStats aggregates profiler statistics across every anomaly detector in
+// the engine (solo + ingest pool). Learning phase is sourced from the shared
+// BaselineLearner that every detector was switched onto at construction
+// (engine.go:801-806), so IsLearningComplete / LearningProgress /
+// LearningSampleCount are already aggregate — we reuse the solo detector's view
+// for those three. ProfilesActive and AnomaliesTotal are summed across every
+// detector's WorkloadProfileManager because each worker owns an independent
+// profile set (events are sharded by PID hash).
+//
+// This is the P1-10 fix: /debug/state's profiler_stats must agree with /metrics
+// at request time, which requires walking the pool, not main.go's solo
+// *profiler.Profiler (which receives no events under IngestAsync).
+func (ce *CorrelationEngine) ProfilerStats() profiler.ProfilerStats {
+	// Learning-phase fields: the shared learner makes these identical across
+	// detectors, so any live detector gives the authoritative value. Fall back
+	// to "learning complete" only when anomaly detection is disabled (no
+	// detector configured), matching the existing IsLearningComplete() contract.
+	var (
+		learningComplete bool    = true
+		learningProgress float64 = 1.0
+		sampleCount      uint64
+		profilesActive   int
+		anomaliesTotal   uint64
+		haveDetector     bool
+	)
+	for _, ad := range ce.anomalyDetectors() {
+		haveDetector = true
+		if wpm := ad.GetProfileManager(); wpm != nil {
+			profilesActive += wpm.Len()
+		}
+		anomaliesTotal += ad.AlertTotal()
+	}
+	if ce.anomalyDetector != nil {
+		learningComplete = ce.anomalyDetector.IsLearningComplete()
+		learningProgress = ce.anomalyDetector.LearningProgress()
+		sampleCount = ce.anomalyDetector.GetSampleCount()
+	} else if !haveDetector {
+		// No detector configured at all — learning is trivially "complete".
+		learningComplete = true
+		learningProgress = 1.0
+	}
+	return profiler.ProfilerStats{
+		LearningComplete:    learningComplete,
+		LearningProgress:    learningProgress,
+		ProfilesActive:      profilesActive,
+		AnomaliesTotal:      anomaliesTotal,
+		LearningSampleCount: sampleCount,
+	}
+}
+
 // IsLearningComplete checks if anomaly detection learning is complete.
 func (ce *CorrelationEngine) IsLearningComplete() bool {
 	if ce.anomalyDetector == nil {

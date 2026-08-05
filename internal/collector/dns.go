@@ -35,12 +35,24 @@ type DNSCollector struct {
 	dropLogger *dropLogger
 	strategy   BackpressureStrategy
 	lostTotal  atomic.Uint64
+	// eventsSeen counts records read from the ring buffer. Published by the
+	// read loop and consumed by watchForStaleness, which cannot observe the
+	// loop directly because reader.Read() blocks exactly when there is nothing
+	// to see (P0-26).
+	eventsSeen atomic.Uint64
 }
 
 // dnsMetrics holds Prometheus metrics for DNS collection.
 type dnsMetrics struct {
 	queriesTotal  *prometheus.CounterVec
 	eventsDropped prometheus.Counter
+	// decodeErrors separates "the collector saw nothing" from "the collector
+	// saw traffic it could not parse" — P0-26 could not distinguish these.
+	decodeErrors prometheus.Counter
+	// stale is 1 while the collector has produced no events for staleThreshold
+	// despite being enabled and attached. This is the metric that would have
+	// surfaced P0-26 (7 events for an entire run, reported as healthy:true).
+	stale prometheus.Gauge
 }
 
 // NewDNSCollector creates a new DNS collector.
@@ -62,6 +74,14 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 		eventsDropped: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ebpf_guard_dns_events_dropped_total",
 			Help: "Total number of dropped DNS events due to ring buffer overflow",
+		}),
+		decodeErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_dns_decode_errors_total",
+			Help: "Total number of DNS event decode errors",
+		}),
+		stale: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_dns_collector_stale",
+			Help: "1 when the DNS collector has seen no events for an extended period despite being attached",
 		}),
 	}
 
@@ -87,7 +107,13 @@ func (c *DNSCollector) RegisterMetrics(reg prometheus.Registerer) error {
 	if err := reg.Register(c.metrics.queriesTotal); err != nil {
 		return err
 	}
-	return reg.Register(c.metrics.eventsDropped)
+	if err := reg.Register(c.metrics.eventsDropped); err != nil {
+		return err
+	}
+	if err := reg.Register(c.metrics.decodeErrors); err != nil {
+		return err
+	}
+	return reg.Register(c.metrics.stale)
 }
 
 // Start begins collecting DNS events.
@@ -97,7 +123,14 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 		return nil
 	}
 
-	slog.Info("dns: starting collector")
+	// The "limitations" note is deliberately part of the startup line: P0-26
+	// showed that a collector which starts cleanly and reports healthy reads as
+	// working, so its blind spots have to be stated where they will be seen.
+	slog.Info("dns: starting collector",
+		slog.String("strategy", string(c.strategy)),
+		slog.String("visibility", "AF_INET (IPv4) UDP port 53 only"),
+		slog.String("blind_spots", "IPv6 and TCP DNS; resolution via systemd-resolved's AF_UNIX varlink path (nss-resolve); sockets connected before the agent started"),
+	)
 
 	objs := &bpf.DNSObjects{}
 	if err := bpf.LoadDNSObjects(objs, nil); err != nil {
@@ -190,9 +223,19 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 
 	defer c.reader.Close()
 
+	// P0-26: watch for silence on a timer of its own.
+	//
+	// A staleness check placed inside this loop can never fire, because
+	// reader.Read() blocks while no events arrive — the exact condition it is
+	// meant to report. That is how the DNS collector delivered 7 events for a
+	// whole run while reporting healthy:true. The watchdog therefore runs in a
+	// separate goroutine and reads a counter this loop publishes.
+	go c.watchForStaleness(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Info("dns: read loop exiting", slog.Uint64("total_events_seen", c.eventsSeen.Load()))
 			return
 		default:
 		}
@@ -208,8 +251,11 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			slog.Error("dns: read from ringbuf", slog.Any("error", err))
 			continue
 		}
+
+		c.eventsSeen.Add(1)
 		event := decodeDNSEvent(record.RawSample)
 		if event == nil {
+			c.metrics.decodeErrors.Inc()
 			continue
 		}
 
@@ -224,6 +270,55 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			c.dropLogger.record(slog.Default(), "dns")
 			c.lostTotal.Add(1)
 		})
+	}
+}
+
+// dnsStaleThreshold is how long the collector may see zero events before it
+// reports itself stale. Long enough that a quiet host does not flap, short
+// enough that a whole attack run cannot pass unnoticed as it did in run #4.
+const dnsStaleThreshold = 5 * time.Minute
+
+// watchForStaleness reports "attached but seeing nothing" as a distinct state.
+//
+// P0-26's real defect was not that DNS saw no traffic — it may legitimately see
+// none when systemd-resolved answers over AF_UNIX. The defect was that silence
+// was indistinguishable from success: the collector logged "starting", reported
+// healthy:true, and never said otherwise. Staleness is deliberately NOT
+// unhealthy — the collector is not broken — but it must be visible.
+func (c *DNSCollector) watchForStaleness(ctx context.Context) {
+	ticker := time.NewTicker(dnsStaleThreshold)
+	defer ticker.Stop()
+
+	var lastCount uint64
+	var reportedStale bool
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			count := c.eventsSeen.Load()
+			if count > lastCount {
+				if reportedStale {
+					slog.Info("dns: collector recovered, events flowing again",
+						slog.Uint64("events_total", count))
+					reportedStale = false
+					c.metrics.stale.Set(0)
+				}
+				lastCount = count
+				continue
+			}
+
+			if !reportedStale {
+				reportedStale = true
+				c.metrics.stale.Set(1)
+				slog.Warn("dns: collector attached but has seen no events — visibility into DNS is absent, not merely quiet",
+					slog.Duration("silent_for", dnsStaleThreshold),
+					slog.Uint64("events_total", count),
+					slog.String("likely_causes", "systemd-resolved answering over AF_UNIX (nss-resolve/varlink), IPv6 or TCP DNS, or resolver sockets connected before the agent started"),
+					slog.String("verify", "run `dig example.com @8.8.8.8` and re-check ebpf_guard_events_total{type=\"dns\"}"))
+			}
+		}
 	}
 }
 

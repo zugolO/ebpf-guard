@@ -44,6 +44,21 @@ var (
 		[]string{"collector", "reason"},
 	)
 
+	// EventsDroppedFraction is the share of events lost in the most recent
+	// sampling window, per queue priority ("protected" / "bulk").
+	//
+	// P0-25: the absolute counter alone hid the problem. Run #4 dropped 24 426
+	// network events — a number that reads as unremarkable next to 4 million
+	// file events, while actually being 52% of all network traffic. The ratio
+	// is the figure an alert rule can usefully threshold on.
+	EventsDroppedFraction = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_events_dropped_fraction",
+			Help: "Fraction of events dropped in the last window (0-1), by queue priority",
+		},
+		[]string{"priority"},
+	)
+
 	// AlertsTotal counts generated alerts by rule, severity, namespace, pod, and node.
 	// Pod and node are required for the fleet-wide Grafana dashboard to attribute
 	// alerts to a specific pod/node without relying on Prometheus scrape relabeling.

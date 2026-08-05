@@ -373,17 +373,19 @@ func BuildCommDenylist(kernelThreads []string, daemons []string, disableDaemons 
 }
 
 // KernelFilterController manages the BPF-side content-based event filters:
-// the comm denylist, the syscall allowlist, and the global filter enable flag.
+// the comm denylist, the syscall allowlist, the global filter enable flag,
+// and the agent PID map for self-exclusion.
 type KernelFilterController struct {
 	commFilterMap      *ebpf.Map // comm_filter_map: key char[16], value uint8
 	syscallFilterMap   *ebpf.Map // syscall_filter_map: key uint32, value uint8
 	kernelFilterConfig *ebpf.Map // kernel_filter_config: key uint32, value uint8
+	agentPidMap        *ebpf.Map // agent_pid_map: key uint32, value uint32
 	hasBatch           bool
 }
 
-// NewKernelFilterController creates a controller for the three filter maps.
-// All three maps must be non-nil.
-func NewKernelFilterController(commMap, syscallMap, cfgMap *ebpf.Map) (*KernelFilterController, error) {
+// NewKernelFilterController creates a controller for the filter maps.
+// All maps except agentPidMap are required; agentPidMap is optional (nil = no self-exclusion).
+func NewKernelFilterController(commMap, syscallMap, cfgMap, agentPidMap *ebpf.Map) (*KernelFilterController, error) {
 	if commMap == nil {
 		return nil, fmt.Errorf("bpf: comm_filter_map is nil")
 	}
@@ -397,6 +399,7 @@ func NewKernelFilterController(commMap, syscallMap, cfgMap *ebpf.Map) (*KernelFi
 		commFilterMap:      commMap,
 		syscallFilterMap:   syscallMap,
 		kernelFilterConfig: cfgMap,
+		agentPidMap:        agentPidMap,
 	}, nil
 }
 
@@ -488,6 +491,41 @@ func (kf *KernelFilterController) LoadDefaultFilters() error {
 		}
 	}
 	return kf.Enable()
+}
+
+// SetAgentPID sets the PID of the ebpf-guard agent for self-exclusion.
+// Events from this PID are filtered out in the kernel, preventing the agent's
+// own I/O operations (SQLite, audit.jsonl, API responses) from being monitored.
+// Attacks on agent files by other processes remain visible because the check
+// is by PID, not by path.
+func (kf *KernelFilterController) SetAgentPID(pid uint32) error {
+	if kf.agentPidMap == nil {
+		return fmt.Errorf("bpf: agent_pid_map is nil (self-exclusion not available)")
+	}
+	// The BPF side reads 0 as "not configured", so accepting 0 here would
+	// silently leave self-exclusion off while reporting success.
+	if pid == 0 {
+		return fmt.Errorf("bpf: agent pid 0 is invalid (0 means self-exclusion disabled)")
+	}
+	key := uint32(0)
+	if err := kf.agentPidMap.Update(key, pid, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("bpf: set agent pid %d: %w", pid, err)
+	}
+	return nil
+}
+
+// GetAgentPID returns the currently configured agent PID for self-exclusion.
+// Returns 0 if no PID is set or if the map is not available.
+func (kf *KernelFilterController) GetAgentPID() uint32 {
+	if kf.agentPidMap == nil {
+		return 0
+	}
+	key := uint32(0)
+	var pid uint32
+	if err := kf.agentPidMap.Lookup(key, &pid); err != nil {
+		return 0
+	}
+	return pid
 }
 
 // UpdateSyscallFilter atomically replaces the BPF syscall allowlist with the

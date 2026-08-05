@@ -243,7 +243,7 @@ func (c *NetworkCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("network", "channel_full")
+			exporter.RecordDropped("network", "ringbuf_to_router")
 			c.dropLogger.record(c.logger, "network")
 			c.lostTotal.Add(1)
 		})

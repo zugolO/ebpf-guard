@@ -11,6 +11,11 @@ EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token
 RESULTS_DIR="./bruteforce-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# Anchored to this script's directory, not the working directory — see
+# sqlmap-attacks.sh for why (plan.md волна 1.5g).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_FILE="$SCRIPT_DIR/attack-manifest.json"
+
 # Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -23,6 +28,22 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 # Создание директории для результатов
 mkdir -p "$RESULTS_DIR"
+
+# Записывает категорию атаки и её comm в общий attack-manifest.json
+# (plan.md волна 1.5g, вопрос 8) — см. sqlmap-attacks.sh для полного
+# описания назначения.
+record_manifest() {
+    local category="$1" comm="$2"
+    local manifest="$MANIFEST_FILE"
+    local entry
+    entry=$(jq -n --arg cat "$category" --arg comm "$comm" --arg ts "$(date -Iseconds)" \
+        '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null) || return 0
+    if [ -f "$manifest" ]; then
+        jq --argjson e "$entry" '. + [$e]' "$manifest" > "$manifest.tmp" 2>/dev/null && mv "$manifest.tmp" "$manifest"
+    else
+        echo "[$entry]" | jq '.' > "$manifest" 2>/dev/null
+    fi
+}
 
 # Получение метрик до атаки
 get_metrics_before() {
@@ -350,6 +371,7 @@ main() {
     log "ebpf-guard API: $EBPF_GUARD_API"
     log "Results dir: $RESULTS_DIR"
     log "==========================================="
+    record_manifest "bruteforce" "curl"
 
     get_metrics_before
 

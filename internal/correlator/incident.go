@@ -253,6 +253,27 @@ func (t *IncidentTracker) getProcessChain(alert types.Alert) []string {
 	return chain
 }
 
+// rootComm returns the root ancestor's comm for the alert. Prefers the attached
+// ProcessTree's root node; falls back to the alert's own comm when no lineage is
+// available (single-process incident). Used to populate Incident.RootComm so an
+// operator can triage the origin process without rebuilding the tree.
+func (t *IncidentTracker) rootComm(alert types.Alert, rootPID uint32) string {
+	if len(alert.ProcessTree) > 0 && alert.ProcessTree[0].Comm != "" {
+		return alert.ProcessTree[0].Comm
+	}
+	if rootPID == alert.PID || rootPID == 0 {
+		return alert.Comm
+	}
+	// Root is a different PID but no tree was attached: ask the lineage tracker
+	// for the root's comm as a best-effort, otherwise leave it to the alert comm.
+	if t.lineageTracker != nil {
+		if tree := t.lineageTracker.GetProcessTree(alert.PID); len(tree) > 0 && tree[0].Comm != "" {
+			return tree[0].Comm
+		}
+	}
+	return alert.Comm
+}
+
 // Add associates alert with the appropriate incident.
 // A new incident is created when no open incident exists for the root process
 // identity + namespace, or the most recent alert in the open incident arrived
@@ -280,11 +301,19 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 			ID:           id,
 			FirstSeen:    ts,
 			PID:          alert.PID,
+			Comm:         alert.Comm,
 			Namespace:    alert.Enrichment.Namespace,
 			AlertIDs:     make([]string, 0, 4),
 			RuleIDs:      make([]string, 0, 4),
 			RootPID:      rootPID,
+			RootComm:     t.rootComm(alert, rootPID),
 			ProcessChain: t.getProcessChain(alert),
+		}
+		// Seed the distinct-comm set with the creating alert's comm. Kept only
+		// when more than one process contributes — exposing multi-process
+		// attacks even when lineage tracking failed to build a tree (P0-1).
+		if alert.Comm != "" {
+			inc.Comms = []string{alert.Comm}
 		}
 		t.open[key] = inc
 		t.byID[id] = inc
@@ -292,6 +321,25 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		// Update process chain if this alert provides a longer chain
 		if chain := t.getProcessChain(alert); len(chain) > len(inc.ProcessChain) {
 			inc.ProcessChain = chain
+		}
+		// The most recent alert's comm is the actionable leaf process.
+		if alert.Comm != "" {
+			inc.Comm = alert.Comm
+		}
+		// Track distinct comms across the incident. Only retained in the
+		// exported field once a second comm appears, so the common single-process
+		// case stays absent from JSON (omitempty).
+		if alert.Comm != "" {
+			found := false
+			for _, c := range inc.Comms {
+				if c == alert.Comm {
+					found = true
+					break
+				}
+			}
+			if !found {
+				inc.Comms = append(inc.Comms, alert.Comm)
+			}
 		}
 	}
 
@@ -321,6 +369,9 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		snapshot.AlertIDs = append([]string(nil), inc.AlertIDs...)
 		snapshot.RuleIDs = append([]string(nil), inc.RuleIDs...)
 		snapshot.ProcessChain = append([]string(nil), inc.ProcessChain...)
+		if inc.Comms != nil {
+			snapshot.Comms = append([]string(nil), inc.Comms...)
+		}
 	}
 	t.mu.Unlock()
 
@@ -557,15 +608,49 @@ func incidentSeverityRank(s types.Severity) int {
 // (rules, tactics, process chain) so downstream notifiers and the alert store
 // can present the correlated attack rather than N isolated signals.
 func buildConfirmedAttackAlert(inc types.Incident) types.Alert {
-	chain := "unknown"
-	if len(inc.ProcessChain) > 0 {
-		chain = strings.Join(inc.ProcessChain, " → ")
+	// Message provenance (P1-27): name the process so an operator can triage
+	// without decoding alert_ids. Prefer the explicit process chain when the
+	// lineage tracker populated it; otherwise fall back to "<comm> (pid <pid>)"
+	// using the leaf comm — the common case while P0-1 (chain population) is
+	// still open. "unknown" is kept only as the last resort so the message is
+	// never empty.
+	var where string
+	switch {
+	case len(inc.ProcessChain) > 0:
+		where = "process chain " + strings.Join(inc.ProcessChain, " → ")
+	case inc.Comm != "":
+		where = fmt.Sprintf("%s (pid %d)", inc.Comm, inc.PID)
+	default:
+		where = "process chain unknown"
 	}
 	tactics := inc.Tactics
 	msg := fmt.Sprintf(
-		"Confirmed attack: %d alerts from %d rules across %d MITRE tactics (%s) in process chain %s (score %.1f)",
-		inc.AlertCount, len(inc.RuleIDs), len(tactics), strings.Join(tactics, ", "), chain, inc.Score,
+		"Confirmed attack: %d alerts from %d rules across %d MITRE tactics (%s) in %s (score %.1f)",
+		inc.AlertCount, len(inc.RuleIDs), len(tactics), strings.Join(tactics, ", "), where, inc.Score,
 	)
+
+	// comms carries the distinct process set when more than one process
+	// contributed to the incident — surfaces multi-process attacks even when
+	// ProcessChain is empty (lineage tracking gap, see P0-1).
+	details := map[string]interface{}{
+		"incident_id":   inc.ID,
+		"root_pid":      inc.RootPID,
+		"score":         inc.Score,
+		"verdict":       string(types.VerdictAttack),
+		"alert_count":   inc.AlertCount,
+		"rule_ids":      inc.RuleIDs,
+		"alert_ids":     inc.AlertIDs,
+		"tactics":       tactics,
+		"process_chain": inc.ProcessChain,
+		"first_seen":    inc.FirstSeen,
+		"last_seen":     inc.LastSeen,
+	}
+	if len(inc.Comms) > 1 {
+		details["comms"] = inc.Comms
+	}
+	if inc.RootComm != "" {
+		details["root_comm"] = inc.RootComm
+	}
 
 	return types.Alert{
 		ID:        "alert-" + inc.ID + "-attack",
@@ -574,20 +659,9 @@ func buildConfirmedAttackAlert(inc types.Incident) types.Alert {
 		RuleName:  "Correlated incident confirmed as attack",
 		Severity:  types.SeverityCritical,
 		PID:       inc.PID,
+		Comm:      inc.Comm,
 		Message:   msg,
-		Details: map[string]interface{}{
-			"incident_id":   inc.ID,
-			"root_pid":      inc.RootPID,
-			"score":         inc.Score,
-			"verdict":       string(types.VerdictAttack),
-			"alert_count":   inc.AlertCount,
-			"rule_ids":      inc.RuleIDs,
-			"alert_ids":     inc.AlertIDs,
-			"tactics":       tactics,
-			"process_chain": inc.ProcessChain,
-			"first_seen":    inc.FirstSeen,
-			"last_seen":     inc.LastSeen,
-		},
+		Details:   details,
 		Enrichment: types.EnrichmentInfo{
 			Namespace: inc.Namespace,
 		},

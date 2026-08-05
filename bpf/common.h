@@ -232,6 +232,21 @@ struct {
 	__type(value, __u8);
 } kernel_filter_config SEC(".maps");
 
+/*
+ * agent_pid_map - stores the PID of the ebpf-guard agent itself.
+ * Events from this PID are filtered out in the kernel (self-exclusion).
+ * key 0: agent PID (__u32)
+ * This allows the agent to filter out its own I/O operations (SQLite,
+ * audit.jsonl, API responses) without affecting visibility into attacks
+ * on agent files by other processes.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} agent_pid_map SEC(".maps");
+
 /* Per-CPU event counters for sampling */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -387,6 +402,37 @@ static __always_inline bool syscall_is_monitored(__s64 nr)
 	key = (__u32)nr;
 	val = bpf_map_lookup_elem(&syscall_filter_map, &key);
 	return val && (*val == 1);
+}
+
+/*
+ * pid_is_agent - returns true if the current process is the ebpf-guard agent.
+ * This is used for self-exclusion: the agent's own I/O operations (SQLite,
+ * audit.jsonl, API responses) are filtered out in the kernel, but attacks
+ * on agent files by other processes remain visible.
+ *
+ * The check is on the TGID (thread-group leader), so every thread of the agent
+ * is covered, and it is by PID rather than by path — a different process
+ * touching the agent's own files still produces events, which is what keeps
+ * "attack on the agent" detectable.
+ *
+ * agent_pid_map is a BPF_MAP_TYPE_ARRAY, so the lookup always succeeds and
+ * yields 0 until userspace sets the real PID. Zero is therefore treated as
+ * "self-exclusion not configured": without this guard, every program on the
+ * host would be compared against 0 during the window between BPF load and
+ * SetAgentPID, and any event whose TGID read as 0 would be dropped silently.
+ */
+static __always_inline bool pid_is_agent(void)
+{
+	__u32 key = 0;
+	__u32 *agent_pid;
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	__u32 tgid = (__u32)(pid_tgid >> 32);
+
+	agent_pid = bpf_map_lookup_elem(&agent_pid_map, &key);
+	if (!agent_pid || *agent_pid == 0)
+		return false;
+
+	return tgid == *agent_pid;
 }
 
 /*

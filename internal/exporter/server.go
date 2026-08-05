@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/explainer"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/store"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Default HTTP timeouts. These are deliberately more forgiving than a
@@ -54,6 +54,8 @@ type Server struct {
 	startTime          time.Time
 	collectorStatuses  map[string]CollectorStatus
 	requiredCollectors map[string]bool // names that must be healthy for /health/ready → 200
+	visibilityReduced  bool            // P0-25: true when any priority queue is dropping events
+	degradedQueues     []string        // plan.md 1.5b: which queues ("protected", "bulk") are dropping
 
 	// Debug handler (optional)
 	debugHandler *DebugHandler
@@ -352,12 +354,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.healthy = false
 	s.ready = false
 	s.mu.Unlock()
-	
+
 	slog.Info("exporter/server: shutting down HTTP server")
-	
+
 	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	
+
 	return s.server.Shutdown(shutdownCtx)
 }
 
@@ -499,7 +501,7 @@ func (s *Server) SetupFeedbackManager(exportPath string) error {
 func (s *Server) GetCollectorStatuses() []CollectorStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	statuses := make([]CollectorStatus, 0, len(s.collectorStatuses))
 	for _, status := range s.collectorStatuses {
 		statuses = append(statuses, status)
@@ -518,11 +520,11 @@ func (s *Server) GetDebugHandler() *DebugHandler {
 func (s *Server) AllCollectorsHealthy() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	if len(s.collectorStatuses) == 0 {
 		return true // No collectors registered yet
 	}
-	
+
 	for _, status := range s.collectorStatuses {
 		if !status.Healthy {
 			return false
@@ -534,15 +536,15 @@ func (s *Server) AllCollectorsHealthy() bool {
 // handleHealth handles the /health endpoint (comprehensive health check).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := s.getHealthStatus()
-	
+
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	if !status.Healthy {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
-	
+
 	if err := json.NewEncoder(w).Encode(status); err != nil {
 		slog.Error("exporter/server: failed to encode health status", slog.Any("error", err))
 	}
@@ -618,7 +620,7 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	healthy := s.healthy
 	s.mu.RUnlock()
-	
+
 	if healthy {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("alive\n"))
@@ -645,6 +647,44 @@ func (s *Server) SetBPFAttached(attached bool) {
 	s.mu.Unlock()
 }
 
+// SetVisibilityReduced sets the visibility reduced flag (P0-25).
+// Called when protected-queue events are being dropped.
+func (s *Server) SetVisibilityReduced(reduced bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.visibilityReduced = reduced
+}
+
+// VisibilityReduced reports whether the agent is currently losing events it is
+// meant to be watching (P0-25). Read by the agent-health provider so
+// /api/v1/status and /health agree on degradation.
+func (s *Server) VisibilityReduced() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.visibilityReduced
+}
+
+// SetDegradedQueues records which priority queues are currently dropping
+// events (P0-25 / plan.md 1.5b). "protected" carries network/dns/syscall —
+// its loss is a security-signal loss. "bulk" carries file events, whose loss
+// is expected under sustained load and only a volume loss. Both must set
+// VisibilityReduced (the plan's literal criterion is "any drop"), but the
+// queue list lets an operator tell "we're losing fim_*/canary_* signal" apart
+// from "we're shedding file noise, as designed" instead of both reading as an
+// undifferentiated degraded=true.
+func (s *Server) SetDegradedQueues(queues []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.degradedQueues = queues
+}
+
+// DegradedQueues returns the priority queues currently dropping events.
+func (s *Server) DegradedQueues() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.degradedQueues
+}
+
 // SetCORSAllowedOrigins configures the CORS allowlist applied to the OpenAPI
 // spec endpoint (/api/openapi.yaml) and to the read-only /api/v1/* endpoints
 // (status, summary, alerts, incidents, rules, feedback) — the latter lets a
@@ -660,15 +700,33 @@ func (s *Server) SetCORSAllowedOrigins(origins []string) {
 
 // HealthStatus represents the health check response.
 type HealthStatus struct {
-	Healthy     bool          `json:"healthy"`
-	Ready       bool          `json:"ready"`
-	Uptime      time.Duration `json:"uptime"`
-	Timestamp   time.Time     `json:"timestamp"`
-	Goroutines  int           `json:"goroutines"`
-	MemoryMB    float64       `json:"memory_mb"`
-	RulesLoaded bool          `json:"rules_loaded"`
-	BPFAttached bool          `json:"bpf_attached"`
+	Healthy           bool          `json:"healthy"`
+	Ready             bool          `json:"ready"`
+	Uptime            time.Duration `json:"uptime"`
+	Timestamp         time.Time     `json:"timestamp"`
+	Goroutines        int           `json:"goroutines"`
+	MemoryMB          float64       `json:"memory_mb"`
+	RulesLoaded       bool          `json:"rules_loaded"`
+	BPFAttached       bool          `json:"bpf_attached"`
+	VisibilityReduced bool          `json:"visibility_reduced"` // P0-25: true when any priority queue is dropping events
+	// DegradedQueues names which priority queues are currently dropping events
+	// — "protected" (network/dns/syscall: signal loss) and/or "bulk" (file:
+	// volume loss). Lets an operator distinguish the two without treating both
+	// as an undifferentiated degraded=true (plan.md 1.5b).
+	DegradedQueues []string `json:"degraded_queues,omitempty"`
+	// Status is a single word an operator or gate script can branch on:
+	// "healthy", "degraded" (serving, but losing events it should be seeing),
+	// or "unhealthy". Kept alongside the booleans rather than replacing them so
+	// existing consumers of Healthy/Ready are unaffected.
+	Status string `json:"status"`
 }
+
+// Health status values reported in HealthStatus.Status.
+const (
+	HealthStatusHealthy   = "healthy"
+	HealthStatusDegraded  = "degraded"
+	HealthStatusUnhealthy = "unhealthy"
+)
 
 // getHealthStatus returns the current health status.
 func (s *Server) getHealthStatus() HealthStatus {
@@ -678,6 +736,8 @@ func (s *Server) getHealthStatus() HealthStatus {
 	startTime := s.startTime
 	bpfAttached := s.bpfAttached
 	rulesProviderFn := s.rulesProviderFn
+	visibilityReduced := s.visibilityReduced
+	degradedQueues := s.degradedQueues
 	s.mu.RUnlock()
 
 	var memStats runtime.MemStats
@@ -688,14 +748,30 @@ func (s *Server) getHealthStatus() HealthStatus {
 		rulesLoaded = len(rulesProviderFn()) > 0
 	}
 
+	// P0-25: losing events the agent is supposed to be watching is a degraded
+	// state, not a healthy one — run #4 dropped 52% of network events while
+	// /health reported an unqualified success. It stays 200/healthy=true so
+	// orchestrators do not restart a working agent; the distinction is carried
+	// by Status and VisibilityReduced.
+	statusStr := HealthStatusHealthy
+	switch {
+	case !healthy:
+		statusStr = HealthStatusUnhealthy
+	case visibilityReduced:
+		statusStr = HealthStatusDegraded
+	}
+
 	return HealthStatus{
-		Healthy:     healthy,
-		Ready:       ready,
-		Uptime:      time.Since(startTime),
-		Timestamp:   time.Now(),
-		Goroutines:  runtime.NumGoroutine(),
-		MemoryMB:    float64(memStats.Alloc) / (1024 * 1024),
-		RulesLoaded: rulesLoaded,
-		BPFAttached: bpfAttached,
+		Healthy:           healthy,
+		Ready:             ready,
+		Uptime:            time.Since(startTime),
+		Timestamp:         time.Now(),
+		Goroutines:        runtime.NumGoroutine(),
+		MemoryMB:          float64(memStats.Alloc) / (1024 * 1024),
+		RulesLoaded:       rulesLoaded,
+		BPFAttached:       bpfAttached,
+		VisibilityReduced: visibilityReduced,
+		DegradedQueues:    degradedQueues,
+		Status:            statusStr,
 	}
 }

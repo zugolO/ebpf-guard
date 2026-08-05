@@ -64,11 +64,41 @@ func TestDefaultCommDenylist(t *testing.T) {
 }
 
 func TestNewKernelFilterController_NilMaps(t *testing.T) {
-	_, err := NewKernelFilterController(nil, nil, nil)
+	_, err := NewKernelFilterController(nil, nil, nil, nil)
 	require.Error(t, err, "nil commMap should return error")
 
 	// The error message should identify which map is nil.
 	assert.Contains(t, err.Error(), "comm_filter_map")
+}
+
+// TestKernelFilterController_AgentPID_NilMap covers the self-exclusion path
+// (P0-22, wave 0.5) when the agent_pid_map is unavailable — e.g. a collector
+// running in stub mode. It must fail loudly rather than silently pretend the
+// agent is excluded, because a caller that believes self-exclusion is active
+// would misread the resulting file-event volume.
+func TestKernelFilterController_AgentPID_NilMap(t *testing.T) {
+	kf := &KernelFilterController{} // agentPidMap is nil
+
+	err := kf.SetAgentPID(1234)
+	require.Error(t, err, "SetAgentPID must report that self-exclusion is unavailable")
+	assert.Contains(t, err.Error(), "agent_pid_map")
+
+	// The getter stays safe and reports "no PID configured" rather than panicking.
+	assert.Equal(t, uint32(0), kf.GetAgentPID())
+}
+
+// TestKernelFilterController_AgentPID_RejectsZero pins the contract shared with
+// pid_is_agent() in bpf/common.h: 0 means "self-exclusion not configured", so
+// storing 0 must be an error rather than a success that quietly does nothing.
+//
+// The map is left nil here because a real *ebpf.Map cannot be created off a
+// Linux host; what matters is that SetAgentPID never returns nil for pid 0,
+// which would let a caller believe self-exclusion is armed when it is not.
+func TestKernelFilterController_AgentPID_RejectsZero(t *testing.T) {
+	kf := &KernelFilterController{}
+
+	err := kf.SetAgentPID(0)
+	require.Error(t, err, "pid 0 must never be accepted as a valid agent PID")
 }
 
 func TestKernelFilterController_SetSyscallFilter_OutOfRange(t *testing.T) {

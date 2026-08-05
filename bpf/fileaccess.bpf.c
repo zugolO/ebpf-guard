@@ -113,6 +113,16 @@ int trace_open(struct trace_event_raw_sys_enter *ctx)
 	umode_t mode = (umode_t)ctx->args[3];
 	struct event *e;
 
+	/* Self-exclusion: drop events from the agent's own PID */
+	if (pid_is_agent())
+		return 0;
+
+	/* BPF-side content filtering: drop before touching the ring buffer */
+	if (kernel_filter_enabled()) {
+		if (comm_is_denied())
+			return 0;
+	}
+
 	scratch_store(filename);
 
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
@@ -186,6 +196,20 @@ int trace_read(struct trace_event_raw_sys_enter *ctx)
 	__u64 pid_tgid;
 	__u32 tgid;
 
+	/* Self-exclusion: drop events from the agent's own PID.
+	 * read() is the highest-volume of the three file hooks (SQLite page reads,
+	 * audit.jsonl, rule reloads), so omitting the check here would leave most
+	 * of the agent's self-generated file stream in place.
+	 */
+	if (pid_is_agent())
+		return 0;
+
+	/* BPF-side content filtering: drop before touching the ring buffer */
+	if (kernel_filter_enabled()) {
+		if (comm_is_denied())
+			return 0;
+	}
+
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
 	if (!e)
 		return 0;
@@ -217,6 +241,16 @@ int trace_write(struct trace_event_raw_sys_enter *ctx)
 	struct event *e;
 	__u64 pid_tgid;
 	__u32 tgid;
+
+	/* Self-exclusion: drop events from the agent's own PID */
+	if (pid_is_agent())
+		return 0;
+
+	/* BPF-side content filtering: drop before touching the ring buffer */
+	if (kernel_filter_enabled()) {
+		if (comm_is_denied())
+			return 0;
+	}
 
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
 	if (!e)

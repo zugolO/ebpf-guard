@@ -17,6 +17,7 @@ type Incident struct {
 	FirstSeen    time.Time       `json:"first_seen"`
 	LastSeen     time.Time       `json:"last_seen"`
 	PID          uint32          `json:"pid"`
+	Comm         string          `json:"comm"`                // leaf process name (most recent alert's comm); P1-27
 	Namespace    string          `json:"namespace"`
 	AlertIDs     []string        `json:"alert_ids"`
 	AlertCount   int             `json:"alert_count"`
@@ -24,7 +25,9 @@ type Incident struct {
 	Status       string          `json:"status"`                  // "open" | "closed"
 	RuleIDs      []string        `json:"rule_ids"`                // distinct rule IDs contributing to this incident
 	RootPID      uint32          `json:"root_pid,omitempty"`      // root ancestor PID from process tree
+	RootComm     string          `json:"root_comm,omitempty"`     // root ancestor comm; P1-27
 	ProcessChain []string        `json:"process_chain,omitempty"` // ordered list of process names in the chain
+	Comms        []string        `json:"comms,omitempty"`         // distinct process names across grouped alerts (only when >1); P1-27
 	Verdict      IncidentVerdict `json:"verdict,omitempty"`       // "suspicious" | "attack" based on scoring
 	Score        float64         `json:"score,omitempty"`         // incident score (0-100+)
 	Tactics      []string        `json:"tactics,omitempty"`       // distinct MITRE tactics represented by the incident's rules

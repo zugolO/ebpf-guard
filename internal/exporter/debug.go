@@ -61,18 +61,26 @@ type SilenceState struct {
 
 // EngineStats contains correlation engine statistics.
 type EngineStats struct {
-	TotalEvents   uint64 `json:"total_events"`
-	TotalAlerts   uint64 `json:"total_alerts"`
-	DroppedEvents uint64 `json:"dropped_events"`
+	TotalEvents uint64 `json:"total_events"`
+	TotalAlerts uint64 `json:"total_alerts"`
+	// AlertsDropped counts alerts the engine itself discarded (dedup/rate-limit/
+	// feedback filter). Renamed from the misleading `dropped_events` (P1-10):
+	// run #4 showed /debug/state's dropped_events=103867 against /metrics'
+	// events_dropped_total=1155880 — an 11x gap that looked like a bug but was
+	// two different counters (engine alert drops vs collector event drops) sold
+	// under indistinguishable names. The JSON key is now `alerts_dropped` to
+	// match its actual contents.
+	AlertsDropped uint64 `json:"alerts_dropped"`
 	RulesLoaded   int    `json:"rules_loaded"`
 }
 
 // ProfilerStats contains profiler learning statistics.
 type ProfilerStats struct {
-	LearningComplete bool    `json:"learning_complete"`
-	LearningProgress float64 `json:"learning_progress"` // 0.0-1.0
-	ProfilesActive   int     `json:"profiles_active"`
-	AnomaliesTotal   uint64  `json:"anomalies_total"`
+	LearningComplete    bool    `json:"learning_complete"`
+	LearningProgress    float64 `json:"learning_progress"` // 0.0-1.0
+	ProfilesActive      int     `json:"profiles_active"`
+	AnomaliesTotal      uint64  `json:"anomalies_total"`
+	LearningSampleCount uint64  `json:"learning_sample_count"`
 }
 
 // EnrichmentStats contains K8s enrichment statistics.

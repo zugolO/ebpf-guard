@@ -21,10 +21,11 @@ func TestSyscallCollector_NilObjsAccessors(t *testing.T) {
 	assert.Nil(t, c.MapFullCountersMap(), "MapFullCountersMap must be nil before load")
 	assert.Nil(t, c.SamplingConfigMap(), "SamplingConfigMap must be nil before load")
 
-	comm, syscall, cfg := c.KernelFilterMaps()
+	comm, syscall, cfg, agentPid := c.KernelFilterMaps()
 	assert.Nil(t, comm)
 	assert.Nil(t, syscall)
 	assert.Nil(t, cfg)
+	assert.Nil(t, agentPid)
 
 	assert.NoError(t, c.LoadError(), "no load attempted yet")
 	assert.Equal(t, uint64(0), c.LostEvents(), "no events lost before start")
@@ -45,10 +46,11 @@ func TestSyscallCollector_LoadedObjsAccessors(t *testing.T) {
 	// branch executes without panicking.
 	assert.Nil(t, c.MapFullCountersMap())
 	assert.Nil(t, c.SamplingConfigMap())
-	comm, syscall, cfg := c.KernelFilterMaps()
+	comm, syscall, cfg, agentPid := c.KernelFilterMaps()
 	assert.Nil(t, comm)
 	assert.Nil(t, syscall)
 	assert.Nil(t, cfg)
+	assert.Nil(t, agentPid)
 
 	// With objs set and no load error, the collector reports healthy.
 	assert.True(t, c.IsHealthy())

@@ -167,7 +167,7 @@ func TestUpdateSyscallFilter_BatchPath(t *testing.T) {
 	}
 	defer commMap.Close()
 
-	kf, err := NewKernelFilterController(commMap, syscallMap, cfgMap)
+	kf, err := NewKernelFilterController(commMap, syscallMap, cfgMap, nil)
 	require.NoError(t, err)
 	kf.SetBatchMode(true)
 
@@ -203,7 +203,7 @@ func TestUpdateSyscallFilter_SequentialPath(t *testing.T) {
 	}
 	defer commMap.Close()
 
-	kf, err := NewKernelFilterController(commMap, syscallMap, cfgMap)
+	kf, err := NewKernelFilterController(commMap, syscallMap, cfgMap, nil)
 	require.NoError(t, err)
 	// hasBatch defaults to false — sequential path.
 
@@ -247,7 +247,7 @@ func TestUpdateSyscallFilter_BatchFallsBackOnError(t *testing.T) {
 	}
 	defer commMap.Close()
 
-	kf, err := NewKernelFilterController(commMap, syscallMap, cfgMap)
+	kf, err := NewKernelFilterController(commMap, syscallMap, cfgMap, nil)
 	require.NoError(t, err)
 	kf.SetBatchMode(true)
 
@@ -343,7 +343,7 @@ func BenchmarkUpdateSyscallFilter_Sequential(b *testing.B) {
 	}
 	defer commMap.Close()
 
-	kf, _ := NewKernelFilterController(commMap, syscallMap, cfgMap)
+	kf, _ := NewKernelFilterController(commMap, syscallMap, cfgMap, nil)
 	nrs := make([]uint32, 14)
 	for i, n := range DefaultMonitoredSyscalls() {
 		nrs[i] = uint32(n)
@@ -377,7 +377,7 @@ func BenchmarkUpdateSyscallFilter_Batch(b *testing.B) {
 	}
 	defer commMap.Close()
 
-	kf, _ := NewKernelFilterController(commMap, syscallMap, cfgMap)
+	kf, _ := NewKernelFilterController(commMap, syscallMap, cfgMap, nil)
 	kf.SetBatchMode(true)
 	nrs := make([]uint32, 14)
 	for i, n := range DefaultMonitoredSyscalls() {

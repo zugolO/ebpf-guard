@@ -14,6 +14,12 @@ EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token
 RESULTS_DIR="./attack-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# Shared with the four attack sub-scripts and run-gate.sh. Anchored to
+# SCRIPT_DIR rather than the working directory so every producer and consumer
+# agrees on one path regardless of where the run was launched from
+# (plan.md волна 1.5g).
+MANIFEST_FILE="$SCRIPT_DIR/attack-manifest.json"
+
 # Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -60,12 +66,22 @@ get_baseline_metrics() {
     log "СБОР БАЗОВЫХ МЕТРИК"
     log "==========================================="
 
+    # Clear the shared attack-manifest.json (plan.md волна 1.5g, вопрос 8) so
+    # each sub-script's record_manifest starts this run from an empty file —
+    # otherwise categories/comms from a previous run would leak into this
+    # run's precision/recall calculation below.
+    rm -f "$MANIFEST_FILE"
+
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
     # /health не отдаёт фазу обучения (она только в /api/v1/status) — см. P1-4/P2-7 п.6.
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/status" > "$RESULTS_DIR/baseline-status-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
+    # Baseline counterpart of the final incidents snapshot — lets the idle FP
+    # rate (570 incidents per 2h in run #4, all on sshd) be compared against the
+    # attack run rather than only counted once.
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/incidents" > "$RESULTS_DIR/baseline-incidents-$TIMESTAMP.json"
     if ! curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" | grep -q "200"; then
         warn "server.enable_debug не включен в конфиге ebpf-guard — /debug/state недоступен, Alerts/Events/Anomalies Total в отчете будут нулевыми"
     fi
@@ -148,6 +164,11 @@ get_final_metrics() {
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/final-health-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/status" > "$RESULTS_DIR/final-status-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" > "$RESULTS_DIR/final-state-$TIMESTAMP.json"
+    # Incidents carry the P1-27 comm field that run-gate.sh criterion 4 checks.
+    # Without this snapshot that criterion silently degrades to a WARN, i.e. the
+    # headline result of wave 1 would go unverified by the very gate written to
+    # verify it (plan.md волна 1.5h).
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/incidents" > "$RESULTS_DIR/final-incidents-$TIMESTAMP.json"
 
     echo ""
 }
@@ -234,10 +255,14 @@ generate_final_report() {
         local final_status="$RESULTS_DIR/final-status-$TIMESTAMP.json"
         if command -v jq &> /dev/null; then
             local b_complete b_progress f_complete f_progress
-            b_complete=$(jq -r '.learning_complete // "unknown"' "$baseline_status" 2>/dev/null)
-            b_progress=$(jq -r '.learning_progress // "unknown"' "$baseline_status" 2>/dev/null)
-            f_complete=$(jq -r '.learning_complete // "unknown"' "$final_status" 2>/dev/null)
-            f_progress=$(jq -r '.learning_progress // "unknown"' "$final_status" 2>/dev/null)
+            # AgentHealth is nested under "health" in /api/v1/status
+            # (see internal/exporter/api.go StatusAPIResponse.Health); the
+            # top-level fallback covers a future flattened response shape
+            # (plan.md волна 1.5f).
+            b_complete=$(jq -r '.health.learning_complete // .learning_complete // "unknown"' "$baseline_status" 2>/dev/null)
+            b_progress=$(jq -r '.health.learning_progress // .learning_progress // "unknown"' "$baseline_status" 2>/dev/null)
+            f_complete=$(jq -r '.health.learning_complete // .learning_complete // "unknown"' "$final_status" 2>/dev/null)
+            f_progress=$(jq -r '.health.learning_progress // .learning_progress // "unknown"' "$final_status" 2>/dev/null)
             echo "Learning Phase:"
             echo "  До тестов: complete=$b_complete progress=$b_progress"
             echo "  После тестов: complete=$f_complete progress=$f_progress"
@@ -377,6 +402,66 @@ generate_final_report() {
         fi
 
         echo "═══════════════════════════════════════════════════════════════"
+        echo "ВЕРДИКТ ПО attack-manifest.json (plan.md волна 1.5g, вопрос 8)"
+        echo "═══════════════════════════════════════════════════════════════"
+        echo ""
+
+        # Precision/recall against the known attacker comms recorded by each
+        # sub-script (sqlmap-attacks.sh etc. via record_manifest). This
+        # replaces having to manually cross-reference alert PIDs against
+        # attack logs (as required for the run #4 writeup) — recall is the
+        # fraction of manifest categories that produced at least one new
+        # alert whose comm matches, precision is the fraction of new alerts
+        # whose comm is an attacker comm from the manifest.
+        local manifest_file="$MANIFEST_FILE"
+        if [ -f "$manifest_file" ] && command -v jq &> /dev/null; then
+            local attacker_comms
+            attacker_comms=$(jq -c '[.[].comm] | unique' "$manifest_file" 2>/dev/null || echo '[]')
+            echo "Известные comm атакующих процессов (из манифеста): $attacker_comms"
+            echo ""
+
+            jq -s --argjson comms "$attacker_comms" '
+                (.[0] // []) as $baseline |
+                (.[1] // []) as $final |
+                ($baseline | map(.id) | unique) as $baseline_ids |
+                ($final | map(select(.id as $id | ($baseline_ids | index($id)) | not))) as $new |
+                ($new | length) as $new_total |
+                ($new | map(select(.comm as $c | $comms | index($c))) | length) as $new_attacker |
+                {
+                    new_alerts_total: $new_total,
+                    new_alerts_from_attacker_comm: $new_attacker,
+                    precision: (if $new_total > 0 then ($new_attacker / $new_total) else null end)
+                }
+            ' -r "$baseline_alerts_json" "$final_alerts_json" 2>/dev/null || echo "Не удалось посчитать precision"
+            echo ""
+
+            jq -s --argjson manifest "$(jq -c '.' "$manifest_file" 2>/dev/null || echo '[]')" '
+                (.[0] // []) as $baseline |
+                (.[1] // []) as $final |
+                ($baseline | map(.id) | unique) as $baseline_ids |
+                ($final | map(select(.id as $id | ($baseline_ids | index($id)) | not))) as $new |
+                ($new | map(.comm) | unique) as $new_comms |
+                ($manifest | map(.category) | unique) as $categories |
+                ($manifest | group_by(.category) | map({
+                    category: .[0].category,
+                    comm: .[0].comm,
+                    detected: ((.[0].comm as $c | $new_comms | index($c)) != null)
+                })) as $per_category |
+                {
+                    categories_total: ($categories | length),
+                    categories_detected: ($per_category | map(select(.detected)) | length),
+                    recall: (if ($categories | length) > 0 then (($per_category | map(select(.detected)) | length) / ($categories | length)) else null end),
+                    per_category: $per_category
+                }
+            ' -r 2>/dev/null || echo "Не удалось посчитать recall"
+            echo ""
+        else
+            warn "attack-manifest.json не найден — precision/recall по вердикту не посчитаны"
+            echo "GATE: FAILED — attack-manifest.json отсутствует"
+            touch "$gate_flag_file"
+        fi
+
+        echo "═══════════════════════════════════════════════════════════════"
         echo "FALSE POSITIVE ANALYSIS"
         echo "═══════════════════════════════════════════════════════════════"
         echo ""
@@ -453,7 +538,19 @@ generate_final_report() {
             echo "  }"
             echo "}"
         } > "$json_report"
-        log "JSON отчет сохранен: $json_report"
+
+        # Regression guard (P2-28): the JSON branch broke silently once before
+        # (empty $baseline_alerts/$final_alerts interpolated as bare commas,
+        # producing invalid JSON) while the text branch above kept printing
+        # correct numbers, so the break went unnoticed until manual review.
+        # Validate the file we just wrote before calling the run done.
+        if jq empty "$json_report" 2>/dev/null; then
+            log "JSON отчет сохранен: $json_report"
+        else
+            error "JSON отчет невалиден: $json_report — см. вывод jq ниже"
+            jq empty "$json_report"
+            touch "$gate_flag_file"
+        fi
     fi
 }
 
@@ -464,6 +561,19 @@ generate_final_report() {
 # не видели проваленный прогон.
 check_final_gate() {
     local gate_flag_file="$RESULTS_DIR/.gate-failed-$TIMESTAMP"
+
+    # run-gate.sh checks the six ЗАМЕР №1 thresholds from plan.md (потери,
+    # dns growth, деградация, comm, JSON validity, детект жив) — a superset
+    # of the traffic/script gates above. Its own FAIL also marks
+    # gate_flag_file so check_final_gate's exit code reflects it too
+    # (plan.md волна 1.5h, вопрос 12).
+    if [ -f "$SCRIPT_DIR/run-gate.sh" ]; then
+        bash "$SCRIPT_DIR/run-gate.sh" "$RESULTS_DIR" "$TIMESTAMP" || touch "$gate_flag_file"
+        echo ""
+    else
+        warn "run-gate.sh не найден рядом с $0 — критерии замера №1 не проверены"
+    fi
+
     if [ -f "$gate_flag_file" ]; then
         error "ATTACK TESTING GATE: FAILED — см. FINAL-REPORT-$TIMESTAMP.txt для деталей"
         return 1

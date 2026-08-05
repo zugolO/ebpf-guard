@@ -237,7 +237,7 @@ func (c *IOUringCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("iouring", "channel_full")
+			exporter.RecordDropped("iouring", "ringbuf_to_router")
 			c.dropLogger.record(c.logger, "iouring")
 			c.lostTotal.Add(1)
 		})

@@ -44,10 +44,11 @@ const (
 
 // ProfilerStats contains profiler learning statistics for the debug endpoint.
 type ProfilerStats struct {
-	LearningComplete bool    `json:"learning_complete"`
-	LearningProgress float64 `json:"learning_progress"` // 0.0-1.0
-	ProfilesActive   int     `json:"profiles_active"`
-	AnomaliesTotal   uint64  `json:"anomalies_total"`
+	LearningComplete    bool    `json:"learning_complete"`
+	LearningProgress    float64 `json:"learning_progress"` // 0.0-1.0
+	ProfilesActive      int     `json:"profiles_active"`
+	AnomaliesTotal      uint64  `json:"anomalies_total"`
+	LearningSampleCount uint64  `json:"learning_sample_count"`
 }
 
 // ProfilerConfig holds configuration for all profiler components.
@@ -374,16 +375,5 @@ func (p *Profiler) GetStats() ProfilerStats {
 
 // countAnomalies counts total alert counts across all profiles.
 func (p *Profiler) countAnomalies(wpm *WorkloadProfileManager) uint64 {
-	var total uint64
-	for i := range wpm.shards {
-		sh := wpm.shards[i]
-		sh.mu.RLock()
-		for _, profile := range sh.profiles {
-			profile.mu.Lock()
-			total += profile.AlertCount
-			profile.mu.Unlock()
-		}
-		sh.mu.RUnlock()
-	}
-	return total
+	return CountAlertTotal(wpm)
 }

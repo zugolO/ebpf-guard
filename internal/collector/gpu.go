@@ -564,7 +564,7 @@ func (c *GPUCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("gpu", "channel_full")
+			exporter.RecordDropped("gpu", "ringbuf_to_router")
 			c.dropLogger.record(c.logger, "gpu")
 			c.lostTotal.Add(1)
 		})

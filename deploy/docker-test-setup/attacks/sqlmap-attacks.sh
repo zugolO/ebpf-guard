@@ -11,6 +11,16 @@ EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token
 RESULTS_DIR="./sqlmap-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# attack-manifest.json lives next to these scripts and is shared by all four
+# attack scripts plus run-all-attacks.sh and run-gate.sh. Anchor it to the
+# script's own directory rather than the working directory: run-all-attacks.sh
+# invokes these with its own cwd, so a relative "../attack-manifest.json"
+# resolved one level above where the parent reads "./attack-manifest.json" —
+# the manifest was written, then never found, and the verdict gate failed with
+# a live detector (plan.md волна 1.5g).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_FILE="$SCRIPT_DIR/attack-manifest.json"
+
 # Цвета для вывода
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -50,6 +60,24 @@ check_sqlmap() {
     minor=$(echo "$version" | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f2)
     if [ -n "$major" ] && { [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 7 ]; }; }; then
         warn "sqlmap $version устарел (нужен >= 1.7). Обновите: pip install -U sqlmap  (или git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git)"
+    fi
+}
+
+# Записывает категорию атаки и её comm (имя процесса, которым атака видна
+# ebpf-guard) в общий attack-manifest.json (plan.md волна 1.5g, вопрос 8).
+# run-gate.sh/generate_final_report сверяют инциденты/алерты по этому файлу
+# вместо счёта "новых алертов вообще", который не отличает детект реальной
+# атаки от FP на системных демонах (см. P1-13).
+record_manifest() {
+    local category="$1" comm="$2"
+    local manifest="$MANIFEST_FILE"
+    local entry
+    entry=$(jq -n --arg cat "$category" --arg comm "$comm" --arg ts "$(date -Iseconds)" \
+        '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null) || return 0
+    if [ -f "$manifest" ]; then
+        jq --argjson e "$entry" '. + [$e]' "$manifest" > "$manifest.tmp" 2>/dev/null && mv "$manifest.tmp" "$manifest"
+    else
+        echo "[$entry]" | jq '.' > "$manifest" 2>/dev/null
     fi
 }
 
@@ -324,6 +352,7 @@ main() {
     log "==========================================="
 
     check_sqlmap
+    record_manifest "sqlmap" "sqlmap"
     get_metrics_before
 
     # Запуск атак по очереди

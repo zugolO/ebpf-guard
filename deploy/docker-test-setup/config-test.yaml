@@ -16,6 +16,12 @@ bpf:
     syscall_rate: 1
     network_rate: 1
     file_rate: 1
+  # Волна 0.5 (P0-22 п.1–2): BPF-side фильтрация + самоисключение агента по TGID.
+  # Дефолт и так true (config.go), но план (волна 1.5, «Готовность конфига»)
+  # требует задать явно — чтобы намерение было видно в startup-логе прогона, а
+  # не выводилось из умолчаний при разборе.
+  kernel_filter:
+    enabled: true
 
 rules:
   path: "/opt/ebpf-guard/rules/"
@@ -76,7 +82,12 @@ collectors:
   # физически не могут сработать — агент помечает их inert при старте.
   file_ops:
     track_open: true
-    track_read: false
+    # Включён на ЗАМЕР №1 (план, волна 1.5 «Готовность конфига»). Самоисключение
+    # агента волны 0.5 добавлено в т.ч. в read-хук, а fileaccess.bpf.c:199
+    # отмечает read() как самый объёмный источник (SQLite page reads,
+    # audit.jsonl, перечитывание правил). При false этот хук не активен и гейт
+    # волны 0.5 («file-поток падает с ~5800 до сотен соб./с») непроверяем.
+    track_read: true
     track_write: true
 
 watchdog:

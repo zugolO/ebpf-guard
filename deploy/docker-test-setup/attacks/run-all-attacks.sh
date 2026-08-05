@@ -511,6 +511,29 @@ generate_final_report() {
     # Также создадим JSON версию отчета
     local json_report="$RESULTS_DIR/FINAL-REPORT-$TIMESTAMP.json"
     if command -v jq &> /dev/null; then
+        # P2-28 (второй регресс): счётчики выше объявлены `local` ВНУТРИ блока
+        # "{ ... } | tee", то есть в субшелле, и к этому месту их уже не
+        # существует — в JSON подставлялись пустые строки ("before": ,), из-за
+        # чего файл был невалиден, пока текстовая ветка печатала верные числа.
+        # Это ровно та же ловушка субшелла, что описана у gate_flag_file выше.
+        # Перечитываем значения из state-файлов здесь, а не полагаемся на
+        # переменные, переживание которых зависит от структуры пайплайна.
+        local js_baseline_state="$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
+        local js_final_state="$RESULTS_DIR/final-state-$TIMESTAMP.json"
+        local j_ba j_fa j_be j_fe j_ban j_fan
+        j_ba=$(jq -r '.engine_stats.total_alerts // 0' "$js_baseline_state" 2>/dev/null || echo 0)
+        j_fa=$(jq -r '.engine_stats.total_alerts // 0' "$js_final_state" 2>/dev/null || echo 0)
+        j_be=$(jq -r '.engine_stats.total_events // 0' "$js_baseline_state" 2>/dev/null || echo 0)
+        j_fe=$(jq -r '.engine_stats.total_events // 0' "$js_final_state" 2>/dev/null || echo 0)
+        j_ban=$(jq -r '.profiler_stats.anomalies_total // 0' "$js_baseline_state" 2>/dev/null || echo 0)
+        j_fan=$(jq -r '.profiler_stats.anomalies_total // 0' "$js_final_state" 2>/dev/null || echo 0)
+        # Пустая строка от отсутствующего файла снова дала бы "before": ,
+        # поэтому нормализуем всё, что не является целым числом, в 0.
+        for v in j_ba j_fa j_be j_fe j_ban j_fan; do
+            case "${!v}" in
+                ''|*[!0-9]*) eval "$v=0" ;;
+            esac
+        done
         {
             echo "{"
             echo "  \"timestamp\": \"$TIMESTAMP\","
@@ -521,19 +544,19 @@ generate_final_report() {
             echo "  },"
             echo "  \"metrics\": {"
             echo "    \"alerts\": {"
-            echo "      \"before\": $baseline_alerts,"
-            echo "      \"after\": $final_alerts,"
-            echo "      \"new\": $new_alerts"
+            echo "      \"before\": $j_ba,"
+            echo "      \"after\": $j_fa,"
+            echo "      \"new\": $((j_fa - j_ba))"
             echo "    },"
             echo "    \"events\": {"
-            echo "      \"before\": $baseline_events,"
-            echo "      \"after\": $final_events,"
-            echo "      \"new\": $new_events"
+            echo "      \"before\": $j_be,"
+            echo "      \"after\": $j_fe,"
+            echo "      \"new\": $((j_fe - j_be))"
             echo "    },"
             echo "    \"anomalies\": {"
-            echo "      \"before\": $baseline_anomalies,"
-            echo "      \"after\": $final_anomalies,"
-            echo "      \"new\": $new_anomalies"
+            echo "      \"before\": $j_ban,"
+            echo "      \"after\": $j_fan,"
+            echo "      \"new\": $((j_fan - j_ban))"
             echo "    }"
             echo "  }"
             echo "}"

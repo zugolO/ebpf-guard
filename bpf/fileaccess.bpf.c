@@ -120,6 +120,32 @@ cleanup:
 }
 
 /*
+ * fd_lookup_scratch — per-CPU snapshot buffer for fd_path_lookup().
+ *
+ * trace_read/trace_write cannot hold the `struct fd_path` snapshot on the
+ * stack: at FILENAME_LEN=256 it is ~264 bytes, and stacked with the buffers
+ * path_is_denied() (struct path_filter_key) and comm_is_denied() (char
+ * comm[COMM_LEN]) allocate in the same frame it exceeds the BPF 512-byte
+ * stack limit, which clang rejects outright ("Looks like the BPF stack limit
+ * of 512 bytes is exceeded"). A per-CPU array gives each snapshot a
+ * map-backed home instead.
+ *
+ * Per-CPU is sufficient despite the snapshot living across the
+ * reserve_event_with_sampling() call: BPF tracepoint programs run with
+ * preemption disabled, so the same CPU cannot re-enter these hooks and
+ * overwrite the entry mid-use.
+ *
+ * trace_open keeps its on-stack `struct fd_path` — it is the only large buffer
+ * in that frame and stays under the limit.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct fd_path);
+} fd_lookup_scratch SEC(".maps");
+
+/*
  * fd_path_lookup - look up fd→path without touching the ring buffer, copying
  * the result into a caller-owned snapshot. Used by trace_read/trace_write to
  * check the path-prefix denylist BEFORE reserving an event, so a filtered
@@ -267,8 +293,9 @@ SEC("tp/syscalls/sys_enter_read")
 int trace_read(struct trace_event_raw_sys_enter *ctx)
 {
 	unsigned int fd = (unsigned int)ctx->args[0];
+	__u32 zero = 0;
 	struct event *e;
-	struct fd_path fdp = {};
+	struct fd_path *fdp;
 	bool have_path;
 	__u64 pid_tgid;
 	__u32 tgid;
@@ -301,8 +328,12 @@ int trace_read(struct trace_event_raw_sys_enter *ctx)
 	 * see its comment for why holding an LRU-map pointer across the reserve
 	 * below would be a filter bypass, not just a style issue.
 	 */
-	have_path = fd_path_lookup(tgid, fd, &fdp);
-	if (kernel_filter_enabled() && have_path && path_is_denied(fdp.path))
+	fdp = bpf_map_lookup_elem(&fd_lookup_scratch, &zero);
+	if (!fdp)
+		return 0;
+
+	have_path = fd_path_lookup(tgid, fd, fdp);
+	if (kernel_filter_enabled() && have_path && path_is_denied(fdp->path))
 		return 0;
 
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
@@ -318,8 +349,8 @@ int trace_read(struct trace_event_raw_sys_enter *ctx)
 	e->file.fd_path_truncated = 0;
 
 	if (have_path) {
-		__builtin_memcpy(e->file.filename, fdp.path, FILENAME_LEN);
-		e->file.fd_path_truncated = fdp.truncated;
+		__builtin_memcpy(e->file.filename, fdp->path, FILENAME_LEN);
+		e->file.fd_path_truncated = fdp->truncated;
 	}
 
 	submit_event(e);
@@ -334,8 +365,9 @@ SEC("tp/syscalls/sys_enter_write")
 int trace_write(struct trace_event_raw_sys_enter *ctx)
 {
 	unsigned int fd = (unsigned int)ctx->args[0];
+	__u32 zero = 0;
 	struct event *e;
-	struct fd_path fdp = {};
+	struct fd_path *fdp;
 	bool have_path;
 	__u64 pid_tgid;
 	__u32 tgid;
@@ -353,9 +385,15 @@ int trace_write(struct trace_event_raw_sys_enter *ctx)
 	pid_tgid = bpf_get_current_pid_tgid();
 	tgid = (__u32)(pid_tgid >> 32);
 
-	/* P1-18b: resolve path before reserving — see trace_read for rationale. */
-	have_path = fd_path_lookup(tgid, fd, &fdp);
-	if (kernel_filter_enabled() && have_path && path_is_denied(fdp.path))
+	/* P1-18b: resolve path before reserving — see trace_read for rationale.
+	 * Snapshot lives in fd_lookup_scratch, not on the stack — see that map's
+	 * comment for the 512-byte stack limit this avoids. */
+	fdp = bpf_map_lookup_elem(&fd_lookup_scratch, &zero);
+	if (!fdp)
+		return 0;
+
+	have_path = fd_path_lookup(tgid, fd, fdp);
+	if (kernel_filter_enabled() && have_path && path_is_denied(fdp->path))
 		return 0;
 
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
@@ -371,8 +409,8 @@ int trace_write(struct trace_event_raw_sys_enter *ctx)
 	e->file.fd_path_truncated = 0;
 
 	if (have_path) {
-		__builtin_memcpy(e->file.filename, fdp.path, FILENAME_LEN);
-		e->file.fd_path_truncated = fdp.truncated;
+		__builtin_memcpy(e->file.filename, fdp->path, FILENAME_LEN);
+		e->file.fd_path_truncated = fdp->truncated;
 	}
 
 	submit_event(e);

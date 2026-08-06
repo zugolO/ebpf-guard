@@ -553,6 +553,18 @@ struct {
 } path_filter_map SEC(".maps");
 
 /*
+ * path_key_scratch — per-CPU storage for the LPM lookup key that
+ * path_is_denied() builds. See that function for why the key cannot be a
+ * stack local.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct path_filter_key);
+} path_key_scratch SEC(".maps");
+
+/*
  * path_filter_drop_counters — per-CPU drop counter for in-kernel path-prefix
  * filtering. Index 0: total file events dropped because their path matched a
  * denylisted prefix. Userspace sums across CPUs and exports as
@@ -589,13 +601,29 @@ static __always_inline void record_path_filter_drop(void)
  */
 static __always_inline bool path_is_denied(const char *path)
 {
-	struct path_filter_key key = {};
+	__u32 zero = 0;
+	struct path_filter_key *key;
 	__u8 *val;
 
-	key.prefixlen = PATH_FILTER_PREFIX_LEN * 8;
-	__builtin_memcpy(key.path, path, PATH_FILTER_PREFIX_LEN);
+	/*
+	 * The 132-byte LPM key lives in a per-CPU array, not on the stack.
+	 * path_is_denied() is __always_inline, so the buffer would land in the
+	 * *caller's* frame; in the file hooks it stacks with the fd path snapshot
+	 * and the comm_is_denied() buffer and pushes the frame past the BPF
+	 * 512-byte stack limit, which clang rejects at compile time.
+	 *
+	 * Per-CPU is safe here: the key is filled and consumed by the single
+	 * lookup below with no intervening helper that could yield the CPU, and
+	 * BPF programs run with preemption disabled.
+	 */
+	key = bpf_map_lookup_elem(&path_key_scratch, &zero);
+	if (!key)
+		return false;
 
-	val = bpf_map_lookup_elem(&path_filter_map, &key);
+	key->prefixlen = PATH_FILTER_PREFIX_LEN * 8;
+	__builtin_memcpy(key->path, path, PATH_FILTER_PREFIX_LEN);
+
+	val = bpf_map_lookup_elem(&path_filter_map, key);
 	if (!val)
 		return false;
 

@@ -1,0 +1,592 @@
+rule_id,status,event_type,severity,total,attacker,system_or_other,fp_ratio,reason_or_decision
+net_portscan_indicator,confirmed-clean,net_close,warning,1026,1022,4,0.0,"KEEP — high-precision signal, no change"
+c2_periodic_beacon_pattern,confirmed-clean,tcp_connect,info,709,705,4,0.01,"KEEP — high-precision signal, no change"
+net_high_frequency_connections,confirmed-clean,tcp_connect,warning,643,643,0,0.0,"KEEP — high-precision signal, no change"
+lateral_tool_transfer_wget,confirmed-clean,tcp_connect,warning,104,104,0,0.0,"KEEP — high-precision signal, no change"
+sigma_reverse_shell_named_pipe,confirmed-clean,file,warning,87,84,3,0.03,"KEEP — high-precision signal, no change"
+sigma_sensitive_file_chmod,confirmed-noisy,file,critical,3117,241,2876,0.92,3.1 — add comm dimension (Q9) + consolidate: one /etc/passwd read fires 6 rules
+owasp_web_sensitive_file_read,confirmed-noisy,file,critical,3031,230,2801,0.92,3.1 — add comm dimension (Q9) + consolidate: one /etc/passwd read fires 6 rules
+appexploit_lfi_passwd_access,confirmed-noisy,file,critical,2999,237,2762,0.92,3.1 — add comm dimension (Q9) + consolidate: one /etc/passwd read fires 6 rules
+sigma_passwd_shadow_read,confirmed-noisy,file,warning,2999,237,2762,0.92,3.1 — add comm dimension (Q9) + consolidate: one /etc/passwd read fires 6 rules
+webshell_sensitive_file_read,confirmed-noisy,file,critical,2890,243,2647,0.92,3.1 — add comm dimension (Q9) + consolidate: one /etc/passwd read fires 6 rules
+appexploit_xxe_file_read,confirmed-noisy,file,warning,2765,281,2484,0.9,3.1 — add comm dimension (Q9) + consolidate: one /etc/passwd read fires 6 rules
+drift_new_library_in_system_dir,confirmed-noisy,file,warning,2503,89,2414,0.96,"3.2 — add toolchain/build comm exception (as,cc1,ld,go,compile,vet) + ebpf-guard self"
+sensitive_file_read,confirmed-noisy,file,warning,1140,367,773,0.68,3.1 — add comm dimension (Q9) + consolidate: one /etc/passwd read fires 6 rules
+netintr_loopback_high_port,confirmed-noisy,tcp_connect,warning,980,972,8,0.01,"KEEP — low FP, real network signal (core detection value)"
+drift_new_file_dir_sensitive,confirmed-noisy,file,warning,833,459,374,0.45,"3.2 — add toolchain/build comm exception (as,cc1,ld,go,compile,vet) + ebpf-guard self"
+beacon_fixed_interval,confirmed-noisy,tcp_connect,warning,787,705,82,0.1,"KEEP — low FP, real network signal (core detection value)"
+web_internal_recon,confirmed-noisy,tcp_connect,warning,764,686,78,0.1,"KEEP — low FP, real network signal (core detection value)"
+webshell_ssrf_internal_network,confirmed-noisy,tcp_connect,warning,764,686,78,0.1,"KEEP — low FP, real network signal (core detection value)"
+exfil_repeated_outbound_to_same_ip,confirmed-noisy,tcp_connect,warning,742,694,48,0.06,"KEEP — low FP, real network signal (core detection value)"
+sigma_binary_in_tmp_executed,confirmed-noisy,file,warning,658,84,574,0.87,"3.2 — add toolchain/build comm exception (as,cc1,ld,go,compile,vet) + ebpf-guard self"
+privesc_suid_suspicious_path,confirmed-noisy,file,critical,654,84,570,0.87,"3.2 — add toolchain/build comm exception (as,cc1,ld,go,compile,vet) + ebpf-guard self"
+drift_new_exec_critical,confirmed-noisy,file,critical,584,84,500,0.86,"3.2 — add toolchain/build comm exception (as,cc1,ld,go,compile,vet) + ebpf-guard self"
+evasion_hidden_elf_in_tmp,confirmed-noisy,file,warning,207,61,146,0.71,"3.2 — add toolchain/build comm exception (as,cc1,ld,go,compile,vet) + ebpf-guard self"
+exfil_db_nonstandard_port_connect,confirmed-noisy,tcp_connect,critical,169,165,4,0.02,"KEEP — low FP, real network signal (core detection value)"
+netintr_ssh_non_standard_port,confirmed-noisy,tcp_connect,warning,169,162,7,0.04,"KEEP — low FP, real network signal (core detection value)"
+owasp_web_ssrf_outbound,confirmed-noisy,tcp_connect,warning,169,165,4,0.02,"KEEP — low FP, real network signal (core detection value)"
+supply_chain_cicd_runner_network,confirmed-noisy,tcp_connect,warning,169,165,4,0.02,"KEEP — low FP, real network signal (core detection value)"
+webshell_network_connection_web_proc,confirmed-noisy,tcp_connect,critical,169,165,4,0.02,"KEEP — low FP, real network signal (core detection value)"
+webshell_script_write_via_web_process,confirmed-noisy,file,critical,150,88,62,0.41,3.2 — tune: attacker signal present but mixed with daemon/self noise
+netintr_syn_scan_pattern,confirmed-noisy,tcp_connect,warning,121,24,97,0.8,3.2 — tune: attacker signal present but mixed with daemon/self noise
+initial_package_postinstall_network,confirmed-noisy,tcp_connect,warning,117,24,93,0.79,3.2 — tune: attacker signal present but mixed with daemon/self noise
+exfil_large_http_post,confirmed-noisy,tcp_connect,warning,108,56,52,0.48,3.2 — tune: attacker signal present but mixed with daemon/self noise
+netintr_http_on_non_web_port,confirmed-noisy,tcp_connect,warning,108,56,52,0.48,3.2 — tune: attacker signal present but mixed with daemon/self noise
+fim_passwd_write,confirmed-noisy,file,critical,83,27,56,0.67,"3.2 — legitimate daemon writes (sshd/cron), add comm+path exception"
+rootkit_passwd_modified,confirmed-noisy,file,critical,83,27,56,0.67,"3.2 — legitimate daemon writes (sshd/cron), add comm+path exception"
+rootkit_hidden_dir_dev,confirmed-noisy,file,critical,64,52,12,0.19,3.2 — tune: attacker signal present but mixed with daemon/self noise
+fim_resolv_conf_modified,confirmed-noisy,file,warning,50,41,9,0.18,"3.2 — legitimate daemon writes (sshd/cron), add comm+path exception"
+mitre_nsswitch_modified,confirmed-noisy,file,warning,50,41,9,0.18,3.2 — tune: attacker signal present but mixed with daemon/self noise
+exfil_outbound_high_port,confirmed-noisy,tcp_connect,info,38,8,30,0.79,3.2 — tune: attacker signal present but mixed with daemon/self noise
+owasp_reverse_shell_pattern,confirmed-noisy,tcp_connect,warning,38,8,30,0.79,3.2 — tune: attacker signal present but mixed with daemon/self noise
+fim_hosts_file_modified,confirmed-noisy,file,warning,26,12,14,0.54,"3.2 — legitimate daemon writes (sshd/cron), add comm+path exception"
+webshell_outbound_high_port,confirmed-noisy,tcp_connect,warning,12,8,4,0.33,3.2 — tune: attacker signal present but mixed with daemon/self noise
+cred_proc_maps_mass_read,noisy-only,file,critical,3263,0,3263,1.0,3.2 — recon/sandbox rules fire on legitimate inventory (ps/pgrep/find/grep); add comm exception
+container_escape_init_proc,noisy-only,file,warning,3066,0,3066,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+mitre_sandbox_detect_proc_read,noisy-only,file,warning,2502,0,2502,1.0,3.2 — recon/sandbox rules fire on legitimate inventory (ps/pgrep/find/grep); add comm exception
+sigma_failed_login_syscall,noisy-only,file,warning,2354,0,2354,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+rootkit_pam_module_added,noisy-only,file,critical,2195,0,2195,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+sigma_log_deletion,noisy-only,file,critical,2089,0,2089,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+sigma_utmp_wtmp_modified,noisy-only,file,warning,1597,0,1597,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+recon_sensitive_file_find,noisy-only,file,info,591,0,591,1.0,3.2 — recon/sandbox rules fire on legitimate inventory (ps/pgrep/find/grep); add comm exception
+sigma_memory_proc_dump,noisy-only,file,critical,431,0,431,1.0,3.2 — recon/sandbox rules fire on legitimate inventory (ps/pgrep/find/grep); add comm exception
+sigma_cpu_info_access,noisy-only,file,warning,388,0,388,1.0,3.2 — recon/sandbox rules fire on legitimate inventory (ps/pgrep/find/grep); add comm exception
+sigma_kernel_version_read,noisy-only,file,warning,380,0,380,1.0,3.2 — recon/sandbox rules fire on legitimate inventory (ps/pgrep/find/grep); add comm exception
+supply_chain_pkg_tmp_staging,noisy-only,file,warning,364,0,364,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+cred_shadow_read,noisy-only,file,critical,362,0,362,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+web_sql_injection_files,noisy-only,file,critical,318,0,318,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+container_escape_proc_write,noisy-only,file,warning,142,0,142,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+netintr_long_dns_session,noisy-only,net_close,warning,132,0,132,1.0,3.2 — grafana monitoring DNS looks like tunneling; add monitoring-infra exception
+netintr_large_upload_port,noisy-only,tcp_connect,warning,97,0,97,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+container_escape_host_mount,noisy-only,file,critical,90,0,90,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+owasp_log_tampering,noisy-only,file,warning,82,0,82,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+cryptominer_xmrig_signature,noisy-only,file,critical,70,0,70,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+owasp_path_traversal,noisy-only,file,critical,56,0,56,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+web_path_traversal_extended,noisy-only,file,critical,56,0,56,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+eks_ecr_credential_helper_access,noisy-only,file,warning,50,0,50,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+rootkit_proc_sysctl_write,noisy-only,file,warning,50,0,50,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+mitre_reflective_elf_load,noisy-only,file,critical,46,0,46,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+mitre_so_injection_via_proc,noisy-only,file,critical,46,0,46,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+container_escape_host_network,noisy-only,file,warning,44,0,44,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+fim_group_write,noisy-only,file,critical,38,0,38,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+sigma_sensitive_dir_listing,noisy-only,file,warning,30,0,30,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+fim_profile_modified,noisy-only,file,warning,26,0,26,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+fim_shadow_write,noisy-only,file,critical,22,0,22,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+container_escape_module_access,noisy-only,file,warning,20,0,20,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+canary_004,noisy-only,file,critical,16,0,16,1.0,3.2 / P1-17 remainder — ebpf-guard self triggering own canaries (self-exclusion gap)
+rootkit_ssh_authorized_keys_modified,noisy-only,file,critical,14,0,14,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+webshell_crontab_modification,noisy-only,file,critical,13,0,13,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+appexploit_nodejs_child_process,noisy-only,file,warning,8,0,8,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+container_escape_cgroup_v2,noisy-only,file,warning,8,0,8,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+dns_tunneling_long_domain,noisy-only,dns,critical,8,0,8,1.0,3.2 — grafana monitoring DNS looks like tunneling; add monitoring-infra exception
+exfil_dns_txt_long_label,noisy-only,dns,critical,8,0,8,1.0,3.2 — grafana monitoring DNS looks like tunneling; add monitoring-infra exception
+netintr_dns_long_label,noisy-only,dns,critical,8,0,8,1.0,3.2 — grafana monitoring DNS looks like tunneling; add monitoring-infra exception
+sigma_tool_download_to_tmp,noisy-only,file,warning,8,0,8,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+webshell_dns_exfil_long_subdomain,noisy-only,dns,warning,8,0,8,1.0,3.2 — grafana monitoring DNS looks like tunneling; add monitoring-infra exception
+canary_001,noisy-only,file,critical,7,0,7,1.0,3.2 / P1-17 remainder — ebpf-guard self triggering own canaries (self-exclusion gap)
+canary_002,noisy-only,file,critical,7,0,7,1.0,3.2 / P1-17 remainder — ebpf-guard self triggering own canaries (self-exclusion gap)
+canary_003,noisy-only,file,critical,7,0,7,1.0,3.2 / P1-17 remainder — ebpf-guard self triggering own canaries (self-exclusion gap)
+canary_005,noisy-only,file,critical,7,0,7,1.0,3.2 / P1-17 remainder — ebpf-guard self triggering own canaries (self-exclusion gap)
+fim_ssh_key_written,noisy-only,file,critical,6,0,6,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+container_escape_host_device,noisy-only,file,critical,4,0,4,1.0,3.2 — fires on container runtime internals (runc/containerd/dockerd); needs comm scoping
+impact_raw_disk_write_from_container,noisy-only,file,critical,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+mitre_arp_spoof_raw_socket,noisy-only,syscall,warning,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+proc_keys_read,noisy-only,file,warning,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+rootkit_kcore_access,noisy-only,file,critical,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+rootkit_proc_modules_read,noisy-only,file,warning,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+sigma_cron_job_created,noisy-only,file,critical,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+sigma_systemd_service_created,noisy-only,file,critical,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+supply_chain_dockerfile_persistence,noisy-only,file,warning,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+supply_chain_lockfile_recon,noisy-only,file,info,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+supply_chain_pkg_install_etc_write,noisy-only,file,critical,4,0,4,1.0,3.2 — pure FP on system daemon; add exception or disable pending review
+aks_azure_linux_agent_access,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+aks_bootstrap_kubeconfig_access,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+aks_imds_access,silent,tcp_connect,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+aks_managed_identity_token_abuse,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+aks_service_principal_secret_access,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+aks_workload_identity_token_read,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+appexploit_cmd_injection_nc,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_cmd_injection_whoami,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_containerd_socket_access,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_cri_socket_access,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_docker_socket_access,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_java_deser_network_port,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+appexploit_java_deser_ysoserial,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+appexploit_lfi_log_poisoning,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_log4shell_jndi_lookup,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+appexploit_log4shell_ldap_port,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+appexploit_log4shell_rmi_port,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+appexploit_php_deser_chain,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+appexploit_pip_install_malicious,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+appexploit_shellshock_pattern,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+appexploit_spring4shell_file_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_sqli_exec_xp,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+appexploit_sqli_outfile,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+appexploit_ssrf_gcp_metadata,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+appexploit_ssti_pattern,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+appexploit_struts2_ognl_shell,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+appexploit_xmrig_download,silent,file,critical,0,0,0,0,M. cryptominer: no miner binary executed in test attacks (stratum not exercised)
+bpf_activity_unexpected_process,silent,bpf_program,warning,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+bpf_kprobe_unauthorized,silent,bpf_program,critical,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+bpf_prog_load_unauthorized,silent,bpf_program,critical,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+bpf_xdp_tc_unauthorized,silent,bpf_program,critical,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+c2_connect_to_tor_port,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+c2_high_port_outbound,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+c2_icmp_large_payload,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+c2_ingress_piped_to_shell,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+c2_paste_site_access,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+c2_raw_socket_shell,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+c2_remote_access_tool,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+c2_reverse_shell_standard_ports,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+cis_5_1_1_cluster_admin_usage,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+cis_5_1_3_secret_access,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cis_5_2_1_privileged_container,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+cis_5_2_5_privilege_escalation,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+cloud_001,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_002,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_003,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_004,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_005,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_006,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_007,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_cloudtrail_stopped,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_ec2_snapshot_copy,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_guardduty_disabled,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_iam_assume_role_repeated,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_iam_user_created,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_imds_v1_access,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+cloud_ext_aws_lambda_function_created,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_new_access_key,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_root_account_login,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_s3_bucket_public,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_secretsmanager_access,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_aws_ssm_shell,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_azure_keyvault_secret_access,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_azure_rbac_assignment,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_azure_runcommand,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_azure_sentinel_disabled,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_azure_storage_anonymous_access,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_gcp_compute_metadata_access,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+cloud_ext_gcp_kubernetes_pod_exec,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_gcp_project_iam_modified,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_gcp_service_account_key,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_gcp_storage_public,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_k8s_cluster_admin_binding,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_k8s_etcd_access,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+cloud_ext_k8s_privileged_pod,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_k8s_secret_list,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+cloud_ext_k8s_webhook_created,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+collection_direct_db_file_access,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+collection_local_mail_spool_access,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+container_escape_cap_sys_admin,silent,syscall,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_cgroup_migrate,silent,cgroup_esc,critical,0,0,0,0,G. cgroup-escape: needs LSM hooks unavailable on stend
+container_escape_cgroup_to_root,silent,cgroup_esc,critical,0,0,0,0,G. cgroup-escape: needs LSM hooks unavailable on stend
+container_escape_cgroup_v1_release_agent,silent,file,critical,0,0,0,0,G. cgroup-escape: needs LSM hooks unavailable on stend
+container_escape_chroot,silent,syscall,warning,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_containerd_socket,silent,file,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_core_pattern,silent,file,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_crio_socket,silent,file,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_docker_socket,silent,file,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_kmem_access,silent,file,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_mount,silent,syscall,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_nsenter,silent,syscall,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_pivot_root,silent,syscall,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_sysrq_trigger,silent,file,critical,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+container_escape_unshare_user,silent,syscall,warning,0,0,0,0,P. container-escape-file: escape not attempted; many paths need LSM too
+cred_aws_credentials_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cred_bash_history_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cred_browser_store_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cred_docker_auth_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cred_gcp_service_account_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cred_ssh_private_key_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cred_vault_token_read,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+credaccess_pam_config_backdoor,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+credaccess_ssh_authorized_keys_modified,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+cryptominer_binary_name,silent,syscall,critical,0,0,0,0,M. cryptominer: no miner binary executed in test attacks (stratum not exercised)
+cryptominer_container_workload,silent,tcp_connect,critical,0,0,0,0,M. cryptominer: no miner binary executed in test attacks (stratum not exercised)
+cryptominer_dns_pool,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+cryptominer_high_cpu_network,silent,sequence,warning,0,0,0,0,M. cryptominer: no miner binary executed in test attacks (stratum not exercised)
+cryptominer_pool_ports,silent,tcp_connect,critical,0,0,0,0,M. cryptominer: no miner binary executed in test attacks (stratum not exercised)
+cryptominer_stratum_protocol,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+cryptominer_wallet_address,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+defense_evasion_binary_truncate_pad,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+defense_evasion_journald_log_clear,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+dns_any_query,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_dga_high_entropy,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_dga_ngram,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_doh_detected,silent,dns,info,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_dynamic_dns,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_nxdomain_flood,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_ptr_recon,silent,dns,info,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_suspicious_tld_emercoin,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_suspicious_tld_onion,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+dns_txt_suspicious,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+drift_dangerous_syscall,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+drift_new_network_common_c2_ports,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+ebpf_subversion_detach_nonroot,silent,syscall,critical,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+ebpf_subversion_unauthorized_caller,silent,syscall,critical,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+eks_aws_config_dir_access,silent,file,warning,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+eks_aws_credentials_file_read,silent,file,warning,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+eks_fargate_task_metadata_access,silent,tcp_connect,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+eks_imds_credential_theft,silent,tcp_connect,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+eks_irsa_token_read,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+eks_irsa_unusual_assume_role,silent,cloud_audit,warning,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+eks_pod_identity_token_read,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+evasion_auditd_stop,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+evasion_base64_shell_decode,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+evasion_chmod_sensitive,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+evasion_iptables_flush,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+evasion_log_clear,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+evasion_self_delete,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+evasion_system_binary_replace,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+evasion_timestamp_modify,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+exec_from_tmp,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+execution_dbus_activation_attack,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+execution_motd_hook_exec,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+exfil_archive_to_network_pipe,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+exfil_clipboard_tool_network,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+exfil_cloud_sync_tool,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+exfil_dns_deep_subdomain,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+exfil_dns_dga_high_score,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+exfil_dns_high_entropy_txt,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+exfil_dns_high_query_rate,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+exfil_ftp_active_connection,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+exfil_large_tls_upload,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+exfil_raw_socket_by_non_root,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+exfil_scp_from_container,silent,tcp_connect,info,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+exfil_usb_mount,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+exfil_wayland_socket_access,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+exfil_x11_socket_access,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_apparmor_profile_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_audit_rules_modified,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_binary_replaced_in_system_dir,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_ca_cert_modified,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_containerd_config_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_docker_config_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_init_d_script_written,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_kubeconfig_written,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+fim_library_replaced,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_network_config_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_polkit_policy_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_private_key_written,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_rc_local_modified,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_selinux_config_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_ssh_known_hosts_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_sudoers_written,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+fim_syslog_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+gke_cloudsql_proxy_socket_access,silent,file,warning,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+gke_gcloud_credential_access,silent,file,warning,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+gke_gcp_sa_json_key_access,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+gke_kubelet_readonly_port_access,silent,tcp_connect,warning,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+gke_metadata_server_access,silent,tcp_connect,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+gke_service_account_key_creation,silent,cloud_audit,critical,0,0,0,0,A. cloud_audit: no cloud provider integration on bare-metal docker stend
+gke_workload_identity_endpoint_abuse,silent,tcp_connect,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+gpu_alloc_from_unexpected_process,silent,gpu,warning,0,0,0,0,B. gpu: no GPU device on stend
+gpu_dtoh_from_shell,silent,gpu,critical,0,0,0,0,B. gpu: no GPU device on stend
+gpu_kernel_launch_from_shell,silent,gpu,critical,0,0,0,0,B. gpu: no GPU device on stend
+gpu_large_compute_burst,silent,gpu,warning,0,0,0,0,B. gpu: no GPU device on stend
+gpu_large_dtoh_copy,silent,gpu,critical,0,0,0,0,B. gpu: no GPU device on stend
+gpu_medium_dtoh_non_framework,silent,gpu,warning,0,0,0,0,B. gpu: no GPU device on stend
+gpu_mining_pool_connect,silent,tcp_connect,critical,0,0,0,0,B. gpu: no GPU device on stend
+gpu_root_dtoh_copy,silent,gpu,warning,0,0,0,0,B. gpu: no GPU device on stend
+gpu_unknown_process,silent,gpu,warning,0,0,0,0,B. gpu: no GPU device on stend
+gpu_very_large_dtoh_copy,silent,gpu,critical,0,0,0,0,B. gpu: no GPU device on stend
+impact_fork_bomb_pattern,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+impact_mass_file_deletion_critical,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+impact_systemd_service_disabled,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+initial_driveby_browser_download_exec,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+initial_email_link_download_exec,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+initial_java_jndi_ldap,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+initial_office_macro_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+initial_ssh_login_new_user,silent,tcp_connect,info,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+initial_trusted_api_pivot,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+initial_vpn_unexpected_access,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+initial_web_shell_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+integrity_container_runtime_modified,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+integrity_grub_bootloader_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+integrity_kernel_module_from_user_path,silent,file,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+integrity_ld_cache_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+integrity_ld_so_preload_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+integrity_lib_replaced,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+integrity_proc_self_exe_exec,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+integrity_sysctl_security_disable,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+iouring_high_volume_submit,silent,io_uring,warning,0,0,0,0,I. io_uring: attacks do not exercise io_uring
+iouring_unexpected_enter,silent,io_uring,critical,0,0,0,0,I. io_uring: attacks do not exercise io_uring
+iouring_unexpected_setup,silent,io_uring,warning,0,0,0,0,I. io_uring: attacks do not exercise io_uring
+k8s_dockerconfig_secret_read,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_etcd_direct_access,silent,tcp_connect,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_hostpath_kubecfg_access,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_hostpath_kubelet_access,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_kubectl_apiserver_exec,silent,tcp_connect,warning,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_metadata_api_access,silent,tcp_connect,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_runtime_socket_access,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_sa_token_projected_read,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+k8s_sa_token_read,silent,file,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+kmod_from_container,silent,kmod,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+kmod_load_from_tmpfs,silent,kmod,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+kmod_load_nonroot,silent,kmod,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+kmod_suspicious_name,silent,kmod,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+kmod_unexpected_parent,silent,kmod,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+lateral_kubectl_exec_from_pod,silent,syscall,critical,0,0,0,0,"L. k8s/cloud-k8s: stend is bare docker, not a k8s node"
+lateral_netcat_socat_pivot,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lateral_port_forward_ssh,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+lateral_rdp_connection,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+lateral_shared_volume_exec,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+lateral_ssh_agent_socket_access,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+lateral_ssh_from_container,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lateral_ssh_keygen_new_key,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_apt_pre_invoke,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_bash_dev_tcp,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_bash_dev_udp,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_bash_interactive_shell,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_busybox_shell,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+lolbin_curl_data_exfil,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_dns_exfil_via_dig,silent,syscall,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+lolbin_dpkg_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_find_sensitive_recon,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_gdb_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_git_clone_to_tmp,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_ld_audit_set,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_less_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_lua_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_make_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_nmap_script_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_node_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_path_hijack_indicator,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_perl_socket_shell,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_php_exec_oneliner,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_pip_download_to_tmp,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_python_socket_shell,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_rsync_staging,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_ruby_socket_shell,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_scp_download_to_tmp,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_sftp_staging,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_socat_shell,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_strace_exec,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+lolbin_tar_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_tclsh_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_tcpdump_write,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_vim_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_wget_download_tmp,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_wget_post_exfil,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+lolbin_zip_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_at_job_scheduled,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_dbus_config_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_dns_c2_high_frequency,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+mitre_http_c2_beacon_pattern,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+mitre_keytab_file_read,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_krb5_ccache_read,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_masq_double_extension,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_masq_legitimate_name_in_tmp,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_newuidmap_newgidmap,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_ngrok_dns_query,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+mitre_ngrok_tunnel,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_obfusc_base64_payload_large,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_obfusc_char_concatenation,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_obfusc_gzip_payload,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_obfusc_hex_encoded_exec,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_sandbox_detect_cpuid,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_software_enum_dpkg,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_software_enum_security_tools,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_ssh_agent_forward_abuse,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_sslstrip_proxy,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_systemd_transient_timer,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_token_impersonation_su,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_vm_detect_dmi_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+mitre_vpn_service_started,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+mitre_winrm_port_connection,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+net_long_c2_connection,silent,net_close,critical,0,0,0,0,Z3. net_close: timing/size pattern not matched
+net_long_https_connection,silent,net_close,warning,0,0,0,0,Z3. net_close: timing/size pattern not matched
+net_long_plaintext_http,silent,net_close,warning,0,0,0,0,Z3. net_close: timing/size pattern not matched
+net_long_ssh_session,silent,net_close,warning,0,0,0,0,Z3. net_close: timing/size pattern not matched
+netintr_brute_ratel_port,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_cobalt_strike_default_port,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_connection_to_multicast,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_covenant_default_port,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_dga_domain_query,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+netintr_dns_high_digit_ratio,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+netintr_dns_high_entropy_query,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+netintr_dns_many_subdomains,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+netintr_dns_over_nonstandard_port,silent,tcp_connect,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+netintr_ftp_data_exfil,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_gre_tunnel,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_high_port_established,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_icmp_outbound_large,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_nmap_fingerprint_ports,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_outbound_smb,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_persistent_c2_beacon,silent,net_close,critical,0,0,0,0,Z3. net_close: timing/size pattern not matched
+netintr_raw_socket_connection,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_rdp_outbound,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_reverse_shell_port_1234,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_reverse_shell_port_31337,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_reverse_shell_port_4444,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_smtp_exfil,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_socks_proxy_port,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+netintr_vnc_outbound,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+owasp_backup_config_access,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+owasp_package_manager_access,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+owasp_php_in_upload,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+owasp_web_metadata_access,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+owasp_web_shell_spawn,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+owasp_web_suspicious_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_apache_conf_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_etc_environment_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_etc_profile_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_git_hook_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_profile_d_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_sshd_config_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_systemd_path_unit,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_systemd_timer_created,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persist_systemd_wants_symlink,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+persist_xdg_autostart_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_at_spool_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_cron_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_efi_boot_entry_modified,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+persistence_etc_init_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_ld_preload_env,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_motd_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_pam_modified,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_shell_rc_write,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_ssh_authorized_keys,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_systemd_new_service,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+persistence_systemd_service_created,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+privesc_caps_drop_all,silent,privesc,warning,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_cgroup_notify_on_release,silent,file,critical,0,0,0,0,G. cgroup-escape: needs LSM hooks unavailable on stend
+privesc_net_admin_gained,silent,privesc,warning,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_net_raw_gained,silent,privesc,warning,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_setns_syscall,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+privesc_setuid_gained,silent,privesc,critical,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_sys_admin_gained,silent,privesc,critical,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_sys_chroot_gained,silent,privesc,warning,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_sys_module_gained,silent,privesc,critical,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_sys_ptrace_gained,silent,privesc,critical,0,0,0,0,K. privesc: no successful privilege escalation in test attacks (good)
+privesc_unshare_user_ns,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+proc_inject_devshm_so,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+proc_inject_fexecve,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+proc_inject_ld_preload_conf,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+proc_inject_ld_preload_file,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+proc_inject_maps_recon,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+proc_inject_memfd_create,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+proc_inject_proc_mem_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+proc_inject_ptrace,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+ptrace_attach,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+ransomware_backup_delete,silent,syscall,warning,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_backup_tool_kill,silent,syscall,warning,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_disk_wipe,silent,file,critical,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_document_enum,silent,syscall,warning,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_encrypted_extension,silent,file,critical,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_log_wipe,silent,file,warning,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_mass_rename,silent,syscall,critical,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_ransom_note,silent,file,critical,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+ransomware_shadow_delete,silent,syscall,critical,0,0,0,0,N. ransomware: no mass-encryption attack in suite
+recon_active_connections,silent,syscall,info,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+recon_network_config,silent,syscall,info,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+recon_port_scan_outbound,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+recon_process_enum,silent,syscall,info,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+recon_security_tools_enum,silent,syscall,info,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+recon_sudo_privs,silent,file,info,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+recon_system_info,silent,syscall,info,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+recon_user_enum,silent,syscall,info,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+rootkit_anonymous_exec_memory,silent,syscall,warning,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_bpf_map_create_suspicious,silent,syscall,warning,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+rootkit_bpf_prog_load_suspicious,silent,syscall,warning,0,0,0,0,H. bpf-subversion: no BPF tampering attempted in test attacks
+rootkit_delete_module_syscall,silent,syscall,warning,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_hidden_proc_dir,silent,file,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_init_module_syscall,silent,syscall,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_kallsyms_read,silent,file,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_kernel_image_write,silent,file,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_kexec_load,silent,syscall,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_kmod_from_tmp,silent,file,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_kmod_suspicious_name,silent,kmod,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+rootkit_kmod_unsigned_load,silent,kmod,critical,0,0,0,0,F. kmod: collector partial (needs LSM); no module loads during attacks
+rootkit_large_hidden_file,silent,file,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_ld_library_path_suspicious,silent,syscall,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_ld_preload_env_set,silent,syscall,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_ld_preload_written,silent,file,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_perf_event_open,silent,syscall,warning,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_shared_lib_written_to_system,silent,file,warning,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_sshd_config_modified,silent,file,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+rootkit_userfaultfd_create,silent,syscall,critical,0,0,0,0,O. rootkit-deploy: no actual rootkit deployed in attacks (rules need a real rootkit artifact)
+sigma_auditd_stopped,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_base64_execution_shell,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_chmod_executable_tmp,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_crontab_modification,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_dev_mem_access,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_history_file_cleared,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_iptables_flush,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_irc_c2_ports,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+sigma_java_child_shell,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_lolbin_awk_shell,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_lolbin_dd_write,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_lolbin_env_execution,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_lolbin_find_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_lolbin_openssl_connect,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_lolbin_python_download,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_masquerade_kernel_thread,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_masquerade_sshd,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_memfd_create_anonymous,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_mprotect_exec_heap,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_outbound_tor_ports,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+sigma_perl_shell_execution,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_prctl_dumpable,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_proc_sysrq_write,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_process_vm_readv,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_process_vm_writev,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_ptrace_attach,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_python_exec_shell,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_ruby_shell_execution,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_script_dropper_via_curl,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_seccomp_filter_install,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_setuid_syscall,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_shell_from_unexpected_parent,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_ssh_many_failed_auth,silent,tcp_connect,warning,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+sigma_sudo_config_read,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_systemd_timer_created,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+sigma_web_server_shell_spawn,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+sigma_world_writable_dir_created,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+supply_chain_build_tool_rootwrite,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+supply_chain_pkg_dga_dns,silent,dns,warning,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+supply_chain_suspicious_registry_dns,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+tls_api_key_exposure,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_data_exfil_patterns,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_http_basic_auth,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_any_known_bad_present,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_brute_ratel,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_cobalt_strike_default,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_cobalt_strike_malleable_common,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_empire_default,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_metasploit_default,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_mythic_default,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_poshc2_default,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_sliver_default,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_ja3_suspicious_old_tls,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_reverse_shell_indicator,silent,tls,critical,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_sql_patterns,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_suspicious_user_agent,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+tls_unexpected_large_transfer,silent,tls,warning,0,0,0,0,C. tls: collector disabled in test config (config-test.yaml tls.enabled=false)
+web_blind_sqli_heuristic,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+web_combined_attack,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+web_file_inclusion_attack,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+web_path_traversal_network,silent,http_plaintext,critical,0,0,0,0,J. http_plaintext: no http collector output captured in runs
+web_path_traversal_process,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+web_sql_injection_command,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+web_sql_injection_network,silent,http_plaintext,critical,0,0,0,0,J. http_plaintext: no http collector output captured in runs
+web_template_injection,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+web_xss_file_pattern,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+web_xss_network_pattern,silent,http_plaintext,critical,0,0,0,0,J. http_plaintext: no http collector output captured in runs
+webshell_apache_config_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_asp_written,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_command_injection_patterns,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+webshell_common_filename,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_curl_from_web_proc,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_dns_high_entropy,silent,dns,critical,0,0,0,0,"D. dns: collector blind on nss-resolve path (P0-26); attacks hit localhost:3000, no resolution needed"
+webshell_htaccess_modification,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_image_extension_script,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_java_runtime_exec,silent,syscall,warning,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+webshell_jsp_in_web_root,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_nginx_config_modified,silent,file,warning,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_php_disable_functions_bypass,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+webshell_php_eval_pattern,silent,syscall,critical,0,0,0,0,Z1. syscall: condition (arg pattern / specific nr+ret) not matched by test attacks
+webshell_php_in_web_root,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)
+webshell_ssrf_aws_metadata,silent,tcp_connect,critical,0,0,0,0,Z2. tcp_connect: specific dest/port pattern not matched (attacks use localhost/known ports)
+webshell_upload_via_image_dir,silent,file,critical,0,0,0,0,Z4. file: watched path/op not touched by attacks OR comm condition unmet (needs YAML review)

@@ -427,15 +427,42 @@ rules:
     name: "PAM module configuration modified"
     description: "A PAM config file was modified — attacker adding malicious PAM module for credential capture or auth bypass."
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/etc/pam.d/"
-        - "/etc/pam.conf"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/pam.d/"
+            - "/etc/pam.conf"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: critical
     action: alert
     tags: [mitre:T1556.003, rootkit, pam, credential-capture]
+
+  # sshd/cron read/touch PAM config on every login/job run (account/session
+  # module lookup) — the base rule has no op filter, so this is read
+  # traffic, not modification. plan.md wave 5.1: downgrade, don't suppress.
+  - id: rootkit_pam_module_added_daemon
+    name: "PAM module configuration accessed by login/cron daemon"
+    description: "sshd or cron accessed a PAM config file — usually routine login/job accounting, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/pam.d/"
+            - "/etc/pam.conf"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: info
+    action: alert
+    tags: [mitre:T1556.003, rootkit, pam, credential-capture, needs-content-analysis]
 
   - id: rootkit_passwd_modified
     name: "System password database modified (/etc/passwd)"

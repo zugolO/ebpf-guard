@@ -687,6 +687,8 @@ func parseSeverityList(s string) []types.Severity {
 	var result []types.Severity
 	for _, part := range strings.Split(s, ",") {
 		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "info":
+			result = append(result, types.SeverityInfo)
 		case "warning":
 			result = append(result, types.SeverityWarning)
 		case "critical":

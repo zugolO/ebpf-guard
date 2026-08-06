@@ -380,6 +380,10 @@ type DNSEvent struct {
 type Severity string
 
 const (
+	// SeverityInfo indicates a routine event kept for observability —
+	// e.g. a daemon touching a sensitive path as part of normal operation.
+	// Not actionable on its own; see plan.md wave 5.1.
+	SeverityInfo Severity = "info"
 	// SeverityWarning indicates a suspicious but not critical event.
 	SeverityWarning Severity = "warning"
 	// SeverityCritical indicates a high-priority security event.

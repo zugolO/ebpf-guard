@@ -192,8 +192,14 @@ func TestStage1_LoopbackNotExfiltration(t *testing.T) {
 // alert volume writing to passwd/shadow/utmp during routine login and cron
 // accounting. The recommendation explicitly rejects suppressing this via an
 // exception ("это редкий высокоценный сигнал" — rare, high-value signal) and
-// instead requires downgrading severity to warning for the daemon triple
-// while every other process (a real attacker) still gets critical.
+// instead requires downgrading severity for the daemon triple while every
+// other process (a real attacker) still gets critical.
+//
+// sigma_utmp_wtmp_modified_daemon expects info, not warning: wave 5.1
+// (замер №2) found it still gave 656 alerts/71min at warning, so its
+// severity was corrected — see TestStage1_5_1_ClusterDaemonWritesDowngraded.
+// The other three keep the original P1-6 warning level; they weren't part
+// of the wave 5.1 cluster.
 func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
 	engine := correlator.NewRuleEngine(loadStage1Rules(t))
 
@@ -204,11 +210,12 @@ func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
 		path       string
 		baseRule   string
 		daemonRule string
+		daemonSev  types.Severity
 	}{
-		{"passwd", "/etc/passwd", "fim_passwd_write", "fim_passwd_write_daemon"},
-		{"shadow", "/etc/shadow", "fim_shadow_write", "fim_shadow_write_daemon"},
-		{"passwd-or-shadow (rootkit)", "/etc/passwd", "rootkit_passwd_modified", "rootkit_passwd_modified_daemon"},
-		{"utmp", "/var/run/utmp", "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon"},
+		{"passwd", "/etc/passwd", "fim_passwd_write", "fim_passwd_write_daemon", types.SeverityWarning},
+		{"shadow", "/etc/shadow", "fim_shadow_write", "fim_shadow_write_daemon", types.SeverityWarning},
+		{"passwd-or-shadow (rootkit)", "/etc/passwd", "rootkit_passwd_modified", "rootkit_passwd_modified_daemon", types.SeverityWarning},
+		{"utmp", "/var/run/utmp", "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon", types.Severity("info")},
 	}
 
 	for _, tc := range testCases {
@@ -222,7 +229,7 @@ func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
 
 				if a, ok := byID[tc.baseRule]; ok {
 					t.Errorf("%s fired at severity %v for daemon comm %q — must not fire the "+
-						"critical base rule for sshd/cron, only the daemon variant at warning",
+						"critical base rule for sshd/cron, only the daemon variant",
 						tc.baseRule, a.Severity, daemonComm)
 				}
 
@@ -230,9 +237,9 @@ func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
 				require.True(t, ok, "%s did not fire for daemon comm %q — the P1-6 daemon "+
 					"variant must still alert (open question 10: downgrade, not suppress)",
 					tc.daemonRule, daemonComm)
-				assert.Equal(t, types.SeverityWarning, a.Severity,
-					"%s fired at %v for daemon comm %q, want warning (open question 10)",
-					tc.daemonRule, a.Severity, daemonComm)
+				assert.Equal(t, tc.daemonSev, a.Severity,
+					"%s fired at %v for daemon comm %q, want %v",
+					tc.daemonRule, a.Severity, daemonComm, tc.daemonSev)
 			}
 
 			// A non-daemon process (attacker) must still get the critical base rule.
@@ -249,6 +256,119 @@ func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
 				tc.daemonRule)
 		})
 	}
+}
+
+// TestStage1_5_1_ClusterDaemonWritesDowngraded pins plan.md wave 5.1: the
+// seven rules found in замер №2 to account for 86% of idle alert volume
+// (sshd/cron logging in and running cron jobs tripping the same
+// /etc/passwd-adjacent cluster seven times over) are split base/_daemon the
+// same way P1-6 split the write-path rules, but at info (not warning) —
+// замер №2 showed sigma_utmp_wtmp_modified_daemon at warning still gave 656
+// alerts/71min, so a severity-only downgrade does not solve volume for a
+// cluster this size.
+func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
+	engine := correlator.NewRuleEngine(loadStage1Rules(t))
+
+	const opOpen uint8 = 0
+	const opWrite uint8 = 2
+
+	testCases := []struct {
+		name       string
+		path       string
+		op         uint8
+		baseRule   string
+		daemonRule string
+	}{
+		{"passwd/shadow read", "/etc/passwd", opOpen, "sigma_passwd_shadow_read", "sigma_passwd_shadow_read_daemon"},
+		{"sensitive file chmod", "/etc/shadow", opOpen, "sigma_sensitive_file_chmod", "sigma_sensitive_file_chmod_daemon"},
+		{"PAM config access", "/etc/pam.d/sshd", opOpen, "sigma_failed_login_syscall", "sigma_failed_login_syscall_daemon"},
+		{"library load", "/usr/lib/security/pam_unix.so", opOpen, "drift_new_library_in_system_dir", "drift_new_library_in_system_dir_daemon"},
+		{"PAM module config", "/etc/pam.d/common-auth", opOpen, "rootkit_pam_module_added", "rootkit_pam_module_added_daemon"},
+		{"log touch", "/var/log/auth.log", opOpen, "sigma_log_deletion", "sigma_log_deletion_daemon"},
+		{"utmp write", "/var/run/utmp", opWrite, "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, daemonComm := range []string{"sshd", "cron"} {
+				alerts := engine.Evaluate(stage1FileEvent(daemonComm, tc.path, tc.op))
+				byID := make(map[string]types.Alert)
+				for _, a := range alerts {
+					byID[a.RuleID] = a
+				}
+
+				if a, ok := byID[tc.baseRule]; ok {
+					t.Errorf("%s fired at severity %v for daemon comm %q — must not fire the "+
+						"base rule for sshd/cron, only the daemon variant at info",
+						tc.baseRule, a.Severity, daemonComm)
+				}
+
+				a, ok := byID[tc.daemonRule]
+				require.True(t, ok, "%s did not fire for daemon comm %q — the wave 5.1 daemon "+
+					"variant must still alert (downgrade, not suppress)",
+					tc.daemonRule, daemonComm)
+				assert.Equal(t, types.Severity("info"), a.Severity,
+					"%s fired at %v for daemon comm %q, want info (wave 5.1 correction: "+
+						"warning alone did not cut volume for sigma_utmp_wtmp_modified_daemon)",
+					tc.daemonRule, a.Severity, daemonComm)
+			}
+
+			// A non-daemon process (attacker) must still get the base rule at its
+			// original severity.
+			alerts := engine.Evaluate(stage1FileEvent("attacker", tc.path, tc.op))
+			byID := make(map[string]bool)
+			for _, a := range alerts {
+				byID[a.RuleID] = true
+			}
+			assert.True(t, byID[tc.baseRule],
+				"%s did not fire for a non-daemon process — wave 5.1 must not weaken "+
+					"detection of a real attacker touching %s", tc.baseRule, tc.path)
+			assert.False(t, byID[tc.daemonRule],
+				"%s fired for a non-daemon process — the daemon variant must be scoped to sshd/cron only",
+				tc.daemonRule)
+		})
+	}
+}
+
+// TestStage1_5_1_ContainerEscapeInitProcDaemon pins the container_escape_init_proc
+// split (plan.md wave 5.1): prometheus/grafana reading their own /proc/1/* as
+// PID 1 of their container namespace is routine self-introspection, not a
+// container escape. Interim axis is proc.comm (not container_id/cgroup —
+// that needs wave 6.1's k8s metadata).
+func TestStage1_5_1_ContainerEscapeInitProcDaemon(t *testing.T) {
+	engine := correlator.NewRuleEngine(loadStage1Rules(t))
+
+	const opOpen uint8 = 0
+
+	for _, daemonComm := range []string{"prometheus", "grafana"} {
+		alerts := engine.Evaluate(stage1FileEvent(daemonComm, "/proc/1/cmdline", opOpen))
+		byID := make(map[string]types.Alert)
+		for _, a := range alerts {
+			byID[a.RuleID] = a
+		}
+
+		if a, ok := byID["container_escape_init_proc"]; ok {
+			t.Errorf("container_escape_init_proc fired at severity %v for %q — must not fire "+
+				"the base rule, only container_escape_init_proc_daemon at info", a.Severity, daemonComm)
+		}
+		a, ok := byID["container_escape_init_proc_daemon"]
+		require.True(t, ok, "container_escape_init_proc_daemon did not fire for %q", daemonComm)
+		assert.Equal(t, types.Severity("info"), a.Severity,
+			"container_escape_init_proc_daemon fired at %v for %q, want info", a.Severity, daemonComm)
+	}
+
+	// A real container-escape attempt from any other process must still alert
+	// at the base rule's severity.
+	alerts := engine.Evaluate(stage1FileEvent("bash", "/proc/1/environ", opOpen))
+	byID := make(map[string]bool)
+	for _, a := range alerts {
+		byID[a.RuleID] = true
+	}
+	assert.True(t, byID["container_escape_init_proc"],
+		"container_escape_init_proc did not fire for bash reading /proc/1/environ — "+
+			"wave 5.1 must not weaken container escape detection")
+	assert.False(t, byID["container_escape_init_proc_daemon"],
+		"container_escape_init_proc_daemon fired for a non-daemon process")
 }
 
 // TestStage1_Q9_WebFileRulesRequireWebProcess pins closed question 9 (plan.md,

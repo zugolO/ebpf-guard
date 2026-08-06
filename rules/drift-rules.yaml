@@ -79,6 +79,9 @@ rules:
         - field: filename
           op: suffix
           values: [".so"]
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: warning
     action: alert
     class: drift
@@ -86,6 +89,42 @@ rules:
       - "T1574.006"
       - "drift"
       - "library-injection"
+
+  # sshd/cron dlopen PAM/NSS modules (pam_unix.so, libnss_*.so) on every
+  # login/job run — legitimate dynamic loading, not injection. plan.md
+  # wave 5.1: downgrade, don't suppress.
+  - id: drift_new_library_in_system_dir_daemon
+    name: "Shared library loaded in system path by login/cron daemon"
+    description: >
+      sshd or cron opened a .so file under /lib or /usr/lib — usually a
+      PAM or NSS module loaded during login/job accounting, but content
+      is not inspected.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: equals
+          values: ["open"]
+        - field: filename
+          op: prefix
+          values:
+            - "/lib/"
+            - "/usr/lib/"
+        - field: filename
+          op: suffix
+          values: [".so"]
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: info
+    action: alert
+    class: drift
+    tags:
+      - "T1574.006"
+      - "drift"
+      - "library-injection"
+      - "needs-content-analysis"
 
   # ── New directory access drift ─────────────────────────────────────────────
   - id: drift_new_file_dir_sensitive

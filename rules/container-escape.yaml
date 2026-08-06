@@ -361,25 +361,36 @@ rules:
               values: ["/proc/irq/"]
 
   # Access to host's /proc/1
+  # plan.md wave 5.1: this cluster is container init daemons legitimately
+  # living at PID 1 of their own namespace (prometheus, grafana), not the
+  # /etc/passwd cluster — the correct axis is container_id/cgroup, but
+  # that needs k8s metadata (wave 6.1, not done yet). Interim: comm
+  # not_in, matching how P1-6/5.1 handle every other daemon-noise cluster.
+  # The narrower ebpf-guard-self exception below still catches a
+  # compromised binary literally named "ebpf-guard".
   - id: container_escape_init_proc
     name: "Container Escape: Init process access"
     description: "Container accessing init process (PID 1) information"
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/proc/1/"
-        - "/proc/self/root/proc/1/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/proc/1/"
+            - "/proc/self/root/proc/1/"
+        - field: proc.comm
+          op: not_in
+          values: ["prometheus", "grafana"]
     severity: warning
     action: alert
     class: drift
     tags: [container-escape, init-process, pid-1]
     exceptions:
-      # Both exceptions are scoped to comm AND path. The benign reads are
-      # cgroup/stat/status metadata; /proc/1/environ, /proc/1/mem and the
-      # /proc/self/root/ escape path still alert for every process, so a
-      # compromised binary named "ebpf-guard" or "prometheus" stays visible.
+      # Scoped to comm AND path: the agent's own benign reads are
+      # cgroup/stat/status metadata. /proc/1/environ, /proc/1/mem and the
+      # /proc/self/root/ escape path still alert even for "ebpf-guard".
       - name: ebpf-guard-self
         condition_group:
           operator: and
@@ -390,16 +401,32 @@ rules:
             - field: filename
               op: in
               values: ["/proc/1/cgroup", "/proc/1/stat", "/proc/1/status"]
-      - name: prometheus
-        condition_group:
-          operator: and
-          conditions:
-            - field: proc.comm
-              op: eq
-              values: [prometheus]
-            - field: filename
-              op: in
-              values: ["/proc/1/cgroup", "/proc/1/stat", "/proc/1/status"]
+
+  # prometheus/grafana routinely read /proc/1/* metadata as PID 1 of their
+  # own container namespace — legitimate self-introspection, not escape.
+  # info, not warning: same reasoning as sigma_utmp_wtmp_modified_daemon,
+  # this cluster is high-volume (435/71min in замер №2) so warning alone
+  # wouldn't cut noise. Ax is comm, not container_id/cgroup, until wave 6.1
+  # provides k8s metadata — recorded here per plan.md wave 5.1.
+  - id: container_escape_init_proc_daemon
+    name: "Init process access by container-native daemon"
+    description: "prometheus or grafana accessed /proc/1/* as PID 1 of their own container namespace — usually self-introspection, but content is not inspected and the comm axis is a temporary substitute for container_id."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/proc/1/"
+            - "/proc/self/root/proc/1/"
+        - field: proc.comm
+          op: in
+          values: ["prometheus", "grafana"]
+    severity: info
+    action: alert
+    class: drift
+    tags: [container-escape, init-process, pid-1, needs-content-analysis]
 
   # ============================================================================
   # Cgroup Namespace Escape (Sprint 33.0)

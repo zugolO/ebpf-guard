@@ -96,7 +96,7 @@ func (c *Collector) PrintReport(w io.Writer) {
 	// Severity breakdown
 	fmt.Fprintln(w, "  By severity:")
 	sevs := c.sevCounts()
-	for _, sev := range []types.Severity{types.SeverityCritical, types.SeverityWarning} {
+	for _, sev := range []types.Severity{types.SeverityCritical, types.SeverityWarning, types.SeverityInfo} {
 		if n := sevs[sev]; n > 0 {
 			fmt.Fprintf(w, "    %-10s %d\n", string(sev), n)
 		}

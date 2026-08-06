@@ -309,11 +309,16 @@ rules:
     name: "System log files deleted"
     description: "Files in /var/log/ were deleted or truncated — log tampering to remove attack evidence."
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/var/log/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/var/log/"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: critical
     action: alert
     tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion]
@@ -332,6 +337,29 @@ rules:
             - field: filename
               op: prefix
               values: ["/var/log/ebpf-guard/"]
+
+  # sshd/cron routinely touch /var/log/ (log rotation hooks, cron job
+  # output redirection) without deleting anything malicious. plan.md wave
+  # 5.1: this rule has no op filter (findings note it fires on any touch,
+  # including rotation) — daemon split only strips volume, doesn't narrow
+  # the base rule's op coverage.
+  - id: sigma_log_deletion_daemon
+    name: "System log files touched by login/cron daemon"
+    description: "sshd or cron touched a file under /var/log/ — usually routine logging or rotation, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/var/log/"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: info
+    action: alert
+    tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion, needs-content-analysis]
 
   - id: sigma_history_file_cleared
     name: "Shell history file cleared or deleted"
@@ -374,8 +402,10 @@ rules:
     tags: [mitre:T1070, sigma, utmp, session-hiding]
 
   # sshd/cron routinely update utmp/wtmp/lastlog on every login/job run.
-  # Open question 10: already warning severity, so this split only adds the
-  # needs-content-analysis tag for observability — no severity change here.
+  # plan.md wave 5.1 correction: замер №2 showed this rule at warning still
+  # gave 656 alerts/71min — downgrading severity without downgrading volume
+  # doesn't solve the noise problem for a cluster this size. Now info,
+  # matching the other six daemon splits from this wave.
   - id: sigma_utmp_wtmp_modified_daemon
     name: "Login record files modified by login/cron daemon"
     description: "sshd or cron updated utmp/wtmp/lastlog — usually routine session accounting, but content is not inspected."
@@ -396,7 +426,7 @@ rules:
         - field: proc.comm
           op: in
           values: ["sshd", "cron"]
-    severity: warning
+    severity: info
     action: alert
     tags: [mitre:T1070, sigma, utmp, session-hiding, needs-content-analysis]
 
@@ -518,15 +548,20 @@ rules:
     name: "Permissions changed on sensitive system file"
     description: "chmod/fchmod applied to critical system files — preparation for tampering."
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/etc/shadow"
-        - "/etc/passwd"
-        - "/etc/sudoers"
-        - "/etc/ssh/"
-        - "/etc/pam.d/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/shadow"
+            - "/etc/passwd"
+            - "/etc/sudoers"
+            - "/etc/ssh/"
+            - "/etc/pam.d/"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: critical
     action: alert
     tags: [mitre:T1222, sigma, chmod, sensitive-file]
@@ -544,6 +579,32 @@ rules:
             - field: filename
               op: suffix
               values: [".canary"]
+
+  # sshd/cron routinely chmod PAM/SSH config or credential files during
+  # login/job accounting. plan.md wave 5.1: downgrade, don't suppress —
+  # info severity (not warning — warning-level daemon splits from P1-6
+  # kept full volume, see sigma_utmp_wtmp_modified_daemon precedent).
+  - id: sigma_sensitive_file_chmod_daemon
+    name: "Permissions changed on sensitive system file by login/cron daemon"
+    description: "sshd or cron changed permissions on a sensitive system file — usually routine accounting, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/shadow"
+            - "/etc/passwd"
+            - "/etc/sudoers"
+            - "/etc/ssh/"
+            - "/etc/pam.d/"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: info
+    action: alert
+    tags: [mitre:T1222, sigma, chmod, sensitive-file, needs-content-analysis]
 
   # ============================================================================
   # T1082 — System Information Discovery
@@ -657,17 +718,47 @@ rules:
     name: "Credential files read (/etc/passwd or /etc/shadow)"
     description: "Reads to /etc/passwd (user enumeration) or /etc/shadow (password hash extraction)."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/etc/passwd"
-        - "/etc/shadow"
-        - "/etc/gshadow"
-        - "/etc/group"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/etc/passwd"
+            - "/etc/shadow"
+            - "/etc/gshadow"
+            - "/etc/group"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: warning
     action: alert
     tags: [mitre:T1087.001, sigma, credential-access, account-discovery]
+
+  # sshd/cron routinely read passwd/shadow/group on every login/job run
+  # (PAM account lookup). plan.md wave 5.1, closed question 10: this rule
+  # promises nothing about the process — sigma_passwd_shadow_read_daemon
+  # exists purely to strip the idle volume, not to re-scope detection.
+  - id: sigma_passwd_shadow_read_daemon
+    name: "Credential files read by login/cron daemon"
+    description: "sshd or cron read /etc/passwd, /etc/shadow, /etc/gshadow, or /etc/group — usually routine PAM account lookup, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/etc/passwd"
+            - "/etc/shadow"
+            - "/etc/gshadow"
+            - "/etc/group"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: info
+    action: alert
+    tags: [mitre:T1087.001, sigma, credential-access, account-discovery, needs-content-analysis]
 
   - id: sigma_sudo_config_read
     name: "Sudoers configuration read"
@@ -920,15 +1011,43 @@ rules:
     name: "Authentication failure via PAM"
     description: "Login failure recorded — tracks repeated authentication failures for brute force detection."
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/etc/pam.d/"
-        - "/etc/security/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/pam.d/"
+            - "/etc/security/"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: warning
     action: alert
     tags: [mitre:T1110, sigma, pam, auth-failure]
+
+  # sshd/cron read PAM config on every login/job run regardless of outcome —
+  # this rule only ever proxies "PAM config touched", not an actual failed
+  # login (that distinction needs content analysis eBPF doesn't have).
+  # plan.md wave 5.1: downgrade, don't suppress.
+  - id: sigma_failed_login_syscall_daemon
+    name: "PAM config accessed by login/cron daemon"
+    description: "sshd or cron accessed PAM configuration — usually routine login/job accounting, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/pam.d/"
+            - "/etc/security/"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: info
+    action: alert
+    tags: [mitre:T1110, sigma, pam, auth-failure, needs-content-analysis]
 
   # ============================================================================
   # T1190 — Exploit Public-Facing Application

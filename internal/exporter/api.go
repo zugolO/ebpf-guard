@@ -703,10 +703,13 @@ func parseSeverityList(s string) []types.Severity {
 func formatCEF(alert types.Alert) string {
 	// Map our severity to CEF severity (0-10)
 	cefSeverity := "5" // Medium
-	if alert.Severity == types.SeverityCritical {
+	switch alert.Severity {
+	case types.SeverityCritical:
 		cefSeverity = "10" // High
-	} else if alert.Severity == types.SeverityWarning {
+	case types.SeverityWarning:
 		cefSeverity = "4" // Low-Medium
+	case types.SeverityInfo:
+		cefSeverity = "1" // Low
 	}
 
 	// Build extensions

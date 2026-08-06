@@ -22,8 +22,8 @@ import (
 // SyslogCEFConfig holds syslog / CEF exporter configuration.
 type SyslogCEFConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
-	Network string `mapstructure:"network"`  // "tcp", "tcp+tls", "udp"
-	Address string `mapstructure:"address"`  // "host:port", default port 514
+	Network string `mapstructure:"network"` // "tcp", "tcp+tls", "udp"
+	Address string `mapstructure:"address"` // "host:port", default port 514
 	// Format selects the wire format: "rfc5424" (default) or "cef".
 	Format  string `mapstructure:"format"`
 	AppName string `mapstructure:"app_name"` // syslog APP-NAME field (default "ebpf-guard")
@@ -75,10 +75,7 @@ func NewSyslogCEFNotifier(cfg SyslogCEFConfig, logger *slog.Logger) *SyslogCEFNo
 		return &SyslogCEFNotifier{config: cfg, logger: logger}
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	if cfg.AppName == "" {
 		cfg.AppName = "ebpf-guard"
@@ -170,10 +167,7 @@ func (n *SyslogCEFNotifier) Close() error {
 }
 
 func (n *SyslogCEFNotifier) syslogMeetsSeverity(alert types.Alert) bool {
-	if n.minSeverity == types.SeverityCritical {
-		return alert.Severity == types.SeverityCritical
-	}
-	return true
+	return types.SeverityAtLeast(alert.Severity, n.minSeverity)
 }
 
 // writeLine dials (or reuses) the connection and writes msg + newline.
@@ -225,6 +219,8 @@ func syslogSeverity(s types.Severity) int {
 	switch s {
 	case types.SeverityCritical:
 		return 2 // CRIT
+	case types.SeverityInfo:
+		return 6 // INFO
 	default:
 		return 4 // WARNING
 	}

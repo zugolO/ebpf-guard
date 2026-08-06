@@ -31,7 +31,8 @@ func validateHeaders(headers map[string]string) error {
 
 // isValidHeaderName checks the name against RFC 7230 token definition:
 // token = 1*tchar  tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" /
-//         "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+//
+//	"-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
 func isValidHeaderName(name string) bool {
 	if name == "" {
 		return false
@@ -135,10 +136,7 @@ func NewGenericWebhookNotifierWithCompat(cfg WebhookConfig, logger *slog.Logger,
 		return &GenericWebhookNotifier{config: cfg, logger: logger}
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	// Parse custom template or use default
 	tmplStr := defaultWebhookTemplate
@@ -185,8 +183,8 @@ func (w *GenericWebhookNotifier) Send(ctx context.Context, alert types.Alert) er
 	}
 
 	// Filter by severity
-	if alert.Severity != types.SeverityCritical && w.minSeverity == types.SeverityCritical {
-		return nil // Skip non-critical alerts when min_severity is critical
+	if !types.SeverityAtLeast(alert.Severity, w.minSeverity) {
+		return nil // Skip alerts below min_severity
 	}
 
 	payload, err := w.buildPayload(alert)

@@ -5,11 +5,28 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
+
+// parseMinSeverity converts a configured min_severity string into a threshold.
+//
+// Unrecognized and empty values fall back to warning, which stays the default
+// for every notifier: info-level alerts (wave 5.1 daemon splits) are routine
+// background and must be opted into explicitly rather than paging by default.
+func parseMinSeverity(s string) types.Severity {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "critical":
+		return types.SeverityCritical
+	case "info":
+		return types.SeverityInfo
+	default:
+		return types.SeverityWarning
+	}
+}
 
 // Notifier is the interface for alert notification backends.
 type Notifier interface {

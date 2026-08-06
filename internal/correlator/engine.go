@@ -1826,14 +1826,18 @@ func selectMostSevereDecision(decisions []policy.PolicyDecision) policy.PolicyDe
 		return decisions[0]
 	}
 
-	// Priority: critical > warning
-	for _, d := range decisions {
-		if d.Severity == types.SeverityCritical {
-			return d
+	// Priority: critical > warning > info. Ranked rather than a critical-only
+	// scan so a warning decision still wins over an info one — without this,
+	// the winner between those two was decided by rule order.
+	best := decisions[0]
+	bestRank := types.SeverityRank(best.Severity)
+	for _, d := range decisions[1:] {
+		if r := types.SeverityRank(d.Severity); r > bestRank {
+			best, bestRank = d, r
 		}
 	}
 
-	return decisions[0]
+	return best
 }
 
 // Flush returns and resets pending alerts. Production callers using

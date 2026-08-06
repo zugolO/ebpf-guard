@@ -24,15 +24,15 @@ import (
 
 // OTLPConfig holds OpenTelemetry Protocol log exporter configuration.
 type OTLPConfig struct {
-	Enabled    bool              `mapstructure:"enabled"`
-	Endpoint   string            `mapstructure:"endpoint"`    // e.g. "https://otel-collector:4318"
-	TLSEnabled bool              `mapstructure:"tls_enabled"` // upgrade to HTTPS
-	CACert     string            `mapstructure:"ca_cert"`
-	ClientCert string            `mapstructure:"client_cert"`
-	ClientKey  string            `mapstructure:"client_key"`
-	Headers    map[string]string `mapstructure:"headers"`
-	MinSeverity string           `mapstructure:"min_severity"`
-	Timeout    time.Duration     `mapstructure:"timeout"`
+	Enabled     bool              `mapstructure:"enabled"`
+	Endpoint    string            `mapstructure:"endpoint"`    // e.g. "https://otel-collector:4318"
+	TLSEnabled  bool              `mapstructure:"tls_enabled"` // upgrade to HTTPS
+	CACert      string            `mapstructure:"ca_cert"`
+	ClientCert  string            `mapstructure:"client_cert"`
+	ClientKey   string            `mapstructure:"client_key"`
+	Headers     map[string]string `mapstructure:"headers"`
+	MinSeverity string            `mapstructure:"min_severity"`
+	Timeout     time.Duration     `mapstructure:"timeout"`
 }
 
 // otlpSeverityNumber maps ebpf-guard severity to OTLP SeverityNumber.
@@ -41,6 +41,8 @@ func otlpSeverityNumber(s types.Severity) int {
 	switch s {
 	case types.SeverityCritical:
 		return 21 // FATAL
+	case types.SeverityInfo:
+		return 9 // INFO
 	default:
 		return 13 // WARN
 	}
@@ -81,10 +83,7 @@ func NewOTLPNotifier(cfg OTLPConfig, logger *slog.Logger, strictSSRF bool) (*OTL
 		return &OTLPNotifier{config: cfg, logger: logger}, nil
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 10 * time.Second
@@ -141,8 +140,10 @@ func NewOTLPNotifier(cfg OTLPConfig, logger *slog.Logger, strictSSRF bool) (*OTL
 	}, nil
 }
 
-func (n *OTLPNotifier) Name() string    { return "otlp" }
-func (n *OTLPNotifier) Enabled() bool   { return n.config.Enabled && n.config.Endpoint != "" && n.client != nil }
+func (n *OTLPNotifier) Name() string { return "otlp" }
+func (n *OTLPNotifier) Enabled() bool {
+	return n.config.Enabled && n.config.Endpoint != "" && n.client != nil
+}
 
 // Send serialises alert as an OTLP LogRecord and POSTs it to /v1/logs.
 func (n *OTLPNotifier) Send(ctx context.Context, alert types.Alert) error {
@@ -190,10 +191,7 @@ func (n *OTLPNotifier) Close() error {
 
 // meetsSeverity reports whether the alert meets the minimum severity threshold.
 func (n *OTLPNotifier) meetsSeverity(alert types.Alert) bool {
-	if n.minSeverity == types.SeverityCritical {
-		return alert.Severity == types.SeverityCritical
-	}
-	return true
+	return types.SeverityAtLeast(alert.Severity, n.minSeverity)
 }
 
 // buildPayload builds the OTLP JSON/HTTP body for the given alert.

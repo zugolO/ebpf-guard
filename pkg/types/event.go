@@ -390,6 +390,31 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
+// SeverityRank orders severities for threshold comparisons: info < warning <
+// critical. An unrecognized value ranks with info — the lowest level — so an
+// unknown severity is never treated as more urgent than it is.
+//
+// Every min_severity filter must compare through this function rather than
+// testing equality against SeverityCritical. Equality tests were correct only
+// while severity was a two-value type; once SeverityInfo was added (wave 5.1)
+// they let info-level daemon noise through to notification backends whenever
+// min_severity was "warning" — exactly the volume that wave was removing.
+func SeverityRank(s Severity) int {
+	switch s {
+	case SeverityCritical:
+		return 2
+	case SeverityWarning:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// SeverityAtLeast reports whether s meets or exceeds the min threshold.
+func SeverityAtLeast(s, min Severity) bool {
+	return SeverityRank(s) >= SeverityRank(min)
+}
+
 // AlertSeverity is an alias for backward compatibility.
 type AlertSeverity = Severity
 

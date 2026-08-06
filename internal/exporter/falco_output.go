@@ -62,6 +62,8 @@ func toFalcoPriority(s types.Severity) string {
 	switch s {
 	case types.SeverityCritical:
 		return "Critical"
+	case types.SeverityInfo:
+		return "Informational"
 	default:
 		return "Warning"
 	}

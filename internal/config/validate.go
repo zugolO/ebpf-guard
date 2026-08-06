@@ -142,7 +142,7 @@ func ValidateConfig(cfg *Config) error {
 			add(validateHTTPURL("notifications.slack.webhook_url", cfg.Notifications.Slack.WebhookURL))
 		}
 		add(validateOneOf("notifications.slack.min_severity", cfg.Notifications.Slack.MinSeverity,
-			[]string{"warning", "critical"}))
+			[]string{"info", "warning", "critical"}))
 	}
 	if cfg.Notifications.Teams.Enabled {
 		if cfg.Notifications.Teams.WebhookURL == "" {
@@ -151,7 +151,7 @@ func ValidateConfig(cfg *Config) error {
 			add(validateHTTPURL("notifications.teams.webhook_url", cfg.Notifications.Teams.WebhookURL))
 		}
 		add(validateOneOf("notifications.teams.min_severity", cfg.Notifications.Teams.MinSeverity,
-			[]string{"warning", "critical"}))
+			[]string{"info", "warning", "critical"}))
 	}
 	if cfg.Notifications.Webhook.Enabled {
 		if cfg.Notifications.Webhook.URL == "" {
@@ -160,7 +160,7 @@ func ValidateConfig(cfg *Config) error {
 			add(validateHTTPURL("notifications.webhook.url", cfg.Notifications.Webhook.URL))
 		}
 		add(validateOneOf("notifications.webhook.min_severity", cfg.Notifications.Webhook.MinSeverity,
-			[]string{"warning", "critical"}))
+			[]string{"info", "warning", "critical"}))
 	}
 
 	// ── Gossip ───────────────────────────────────────────────────────────────

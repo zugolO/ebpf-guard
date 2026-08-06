@@ -48,10 +48,7 @@ func NewTelegramNotifier(cfg TelegramConfig, logger *slog.Logger, strictSSRF boo
 			slog.Any("error", err))
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	return &TelegramNotifier{
 		config:      cfg,
@@ -78,7 +75,7 @@ func (t *TelegramNotifier) Send(ctx context.Context, alert types.Alert) error {
 		return fmt.Errorf("telegram notifier not enabled")
 	}
 
-	if alert.Severity != types.SeverityCritical && t.minSeverity == types.SeverityCritical {
+	if !types.SeverityAtLeast(alert.Severity, t.minSeverity) {
 		return nil
 	}
 

@@ -23,9 +23,9 @@ type SlackConfig struct {
 
 // SlackNotifier sends alerts to Slack via Incoming Webhooks.
 type SlackNotifier struct {
-	config     SlackConfig
-	client     *http.Client
-	logger     *slog.Logger
+	config      SlackConfig
+	client      *http.Client
+	logger      *slog.Logger
 	minSeverity types.Severity
 }
 
@@ -47,10 +47,7 @@ func NewSlackNotifier(cfg SlackConfig, logger *slog.Logger, strictSSRF bool) *Sl
 			slog.Any("error", err))
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	return &SlackNotifier{
 		config:      cfg,
@@ -77,8 +74,8 @@ func (s *SlackNotifier) Send(ctx context.Context, alert types.Alert) error {
 	}
 
 	// Filter by severity
-	if alert.Severity != types.SeverityCritical && s.minSeverity == types.SeverityCritical {
-		return nil // Skip non-critical alerts when min_severity is critical
+	if !types.SeverityAtLeast(alert.Severity, s.minSeverity) {
+		return nil // Skip alerts below min_severity
 	}
 
 	payload := s.buildPayload(alert)
@@ -242,14 +239,14 @@ func (s *SlackNotifier) buildPayloadWithContext(alert types.Alert) interface{} {
 			},
 		},
 		map[string]interface{}{
-			"type":   "section",
+			"type": "section",
 			"fields": []SlackText{
 				{Type: "mrkdwn", Text: fmt.Sprintf("*Rule ID:*\n%s", alert.RuleID)},
 				{Type: "mrkdwn", Text: fmt.Sprintf("*Severity:*\n%s", alert.Severity)},
 			},
 		},
 		map[string]interface{}{
-			"type":   "section",
+			"type": "section",
 			"fields": []SlackText{
 				{Type: "mrkdwn", Text: fmt.Sprintf("*Process:*\n%s (PID: %d)", alert.Comm, alert.PID)},
 				{Type: "mrkdwn", Text: fmt.Sprintf("*Time:*\n%s", alert.Timestamp.Format(time.RFC3339))},

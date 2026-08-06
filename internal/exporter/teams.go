@@ -46,10 +46,7 @@ func NewTeamsNotifier(cfg TeamsConfig, logger *slog.Logger, strictSSRF bool) *Te
 			slog.Any("error", err))
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	return &TeamsNotifier{
 		config:      cfg,
@@ -76,8 +73,8 @@ func (t *TeamsNotifier) Send(ctx context.Context, alert types.Alert) error {
 	}
 
 	// Filter by severity
-	if alert.Severity != types.SeverityCritical && t.minSeverity == types.SeverityCritical {
-		return nil // Skip non-critical alerts when min_severity is critical
+	if !types.SeverityAtLeast(alert.Severity, t.minSeverity) {
+		return nil // Skip alerts below min_severity
 	}
 
 	payload := t.buildPayload(alert)
@@ -108,44 +105,44 @@ func (t *TeamsNotifier) Send(ctx context.Context, alert types.Alert) error {
 
 // TeamsAdaptiveCard represents a Teams Adaptive Card message.
 type TeamsAdaptiveCard struct {
-	Type        string              `json:"type"`
-	Attachments []TeamsAttachment   `json:"attachments"`
+	Type        string            `json:"type"`
+	Attachments []TeamsAttachment `json:"attachments"`
 }
 
 // TeamsAttachment represents a card attachment.
 type TeamsAttachment struct {
-	ContentType string                 `json:"contentType"`
-	ContentURL  string                 `json:"contentUrl,omitempty"`
+	ContentType string                   `json:"contentType"`
+	ContentURL  string                   `json:"contentUrl,omitempty"`
 	Content     TeamsAdaptiveCardContent `json:"content"`
 }
 
 // TeamsAdaptiveCardContent represents the card content.
 type TeamsAdaptiveCardContent struct {
-	Schema  string                 `json:"$schema"`
-	Type    string                 `json:"type"`
-	Version string                 `json:"version"`
-	Body    []TeamsCardElement     `json:"body"`
-	Actions []TeamsCardAction      `json:"actions,omitempty"`
+	Schema  string             `json:"$schema"`
+	Type    string             `json:"type"`
+	Version string             `json:"version"`
+	Body    []TeamsCardElement `json:"body"`
+	Actions []TeamsCardAction  `json:"actions,omitempty"`
 }
 
 // TeamsCardElement represents a card body element.
 type TeamsCardElement struct {
-	Type      string            `json:"type"`
-	Text      string            `json:"text,omitempty"`
-	Size      string            `json:"size,omitempty"`
-	Weight    string            `json:"weight,omitempty"`
-	Color     string            `json:"color,omitempty"`
-	Spacing   string            `json:"spacing,omitempty"`
-	Separator bool              `json:"separator,omitempty"`
-	Wrap      bool              `json:"wrap,omitempty"`
-	Columns   []TeamsColumn     `json:"columns,omitempty"`
-	Facts     []TeamsFact       `json:"facts,omitempty"`
+	Type      string        `json:"type"`
+	Text      string        `json:"text,omitempty"`
+	Size      string        `json:"size,omitempty"`
+	Weight    string        `json:"weight,omitempty"`
+	Color     string        `json:"color,omitempty"`
+	Spacing   string        `json:"spacing,omitempty"`
+	Separator bool          `json:"separator,omitempty"`
+	Wrap      bool          `json:"wrap,omitempty"`
+	Columns   []TeamsColumn `json:"columns,omitempty"`
+	Facts     []TeamsFact   `json:"facts,omitempty"`
 }
 
 // TeamsColumn represents a column in a column set.
 type TeamsColumn struct {
-	Type  string           `json:"type"`
-	Width string           `json:"width"`
+	Type  string             `json:"type"`
+	Width string             `json:"width"`
 	Items []TeamsCardElement `json:"items"`
 }
 
@@ -223,5 +220,3 @@ func (t *TeamsNotifier) buildPayload(alert types.Alert) TeamsAdaptiveCard {
 		},
 	}
 }
-
-

@@ -73,10 +73,7 @@ func NewKafkaNotifier(cfg KafkaConfig, logger *slog.Logger) (*KafkaNotifier, err
 		return &KafkaNotifier{config: cfg, logger: logger}, nil
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	if cfg.SASLEnabled && !cfg.TLSEnabled {
 		return nil, errors.New("kafka: SASL PLAIN requires tls_enabled: true to avoid credential exposure")
@@ -200,8 +197,5 @@ func (n *KafkaNotifier) Close() error {
 }
 
 func (n *KafkaNotifier) kafkaMeetsSeverity(alert types.Alert) bool {
-	if n.minSeverity == types.SeverityCritical {
-		return alert.Severity == types.SeverityCritical
-	}
-	return true
+	return types.SeverityAtLeast(alert.Severity, n.minSeverity)
 }

@@ -46,10 +46,7 @@ func NewDiscordNotifier(cfg DiscordConfig, logger *slog.Logger, strictSSRF bool)
 			slog.Any("error", err))
 	}
 
-	minSev := types.SeverityWarning
-	if cfg.MinSeverity == "critical" {
-		minSev = types.SeverityCritical
-	}
+	minSev := parseMinSeverity(cfg.MinSeverity)
 
 	return &DiscordNotifier{
 		config:      cfg,
@@ -92,7 +89,7 @@ func (d *DiscordNotifier) Send(ctx context.Context, alert types.Alert) error {
 		return fmt.Errorf("discord notifier not enabled")
 	}
 
-	if alert.Severity != types.SeverityCritical && d.minSeverity == types.SeverityCritical {
+	if !types.SeverityAtLeast(alert.Severity, d.minSeverity) {
 		return nil
 	}
 

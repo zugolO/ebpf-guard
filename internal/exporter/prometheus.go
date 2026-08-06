@@ -70,6 +70,21 @@ var (
 		[]string{"rule_id", "severity", "namespace", "pod", "node"},
 	)
 
+	// AlertsFiltered counts alerts held back from AlertsTotal and the alert
+	// store by store.min_severity (wave 5.1a). Labelled by rule_id and severity
+	// so suppressed volume stays attributable: the point of filtering at the
+	// intake is to shrink the counter, and without this metric that shrink
+	// would be indistinguishable from detection silently stopping. Rules stay
+	// loaded and keep firing — nothing is deleted, only kept out of the two
+	// sinks whose volume the idle-rate criterion measures.
+	AlertsFiltered = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_alerts_filtered_total",
+			Help: "Alerts excluded from ebpf_guard_alerts_total and the alert store by store.min_severity. The rule still fired; this is the suppressed volume, kept visible so filtering cannot be mistaken for lost detection.",
+		},
+		[]string{"rule_id", "severity"},
+	)
+
 	// ProfilerAnomalyScore tracks anomaly scores per process.
 	ProfilerAnomalyScore = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -261,6 +276,42 @@ func RecordAlert(ruleID, severity, namespace, podName, node string) {
 	// Collapse namespace(2)/pod(3)/node(4) to "other" if the limit is exceeded.
 	labels = alertsCardinalityLimiter.Normalize(labels, 2, 3, 4)
 	AlertsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3], labels[4]).Inc()
+}
+
+// RecordAlertFiltered increments the suppressed-alert counter for an alert held
+// back by store.min_severity. Labels are rule_id and severity only: both are
+// bounded by the ruleset, so unlike RecordAlert this needs no cardinality guard.
+func RecordAlertFiltered(ruleID, severity string) {
+	AlertsFiltered.WithLabelValues(ruleID, severity).Inc()
+}
+
+// FilterAlertsForIntake splits alerts into those admitted to
+// ebpf_guard_alerts_total and the alert store, and those held back by
+// minSeverity, recording each held-back alert in ebpf_guard_alerts_filtered_total
+// (wave 5.1a).
+//
+// Why this exists at all: wave 5.1 downgraded the seven-rule daemon cluster to
+// info and the idle alert rate did not move (4986/hour against a <1000 target).
+// alerts_total counts every alert regardless of severity, so a severity change
+// alone cannot reduce volume — the tier has to be kept out of the intake, not
+// merely relabelled. Rules stay loaded and keep firing; their output moves to
+// the filtered counter rather than disappearing (порядок работы, п. 8).
+//
+// A minSeverity of "info" (the default) admits everything and returns the input
+// slice unchanged, so the pre-5.1a path allocates nothing.
+func FilterAlertsForIntake(alerts []types.Alert, minSeverity types.Severity) []types.Alert {
+	if minSeverity == types.SeverityInfo || len(alerts) == 0 {
+		return alerts
+	}
+	admitted := make([]types.Alert, 0, len(alerts))
+	for _, a := range alerts {
+		if types.SeverityAtLeast(a.Severity, minSeverity) {
+			admitted = append(admitted, a)
+			continue
+		}
+		RecordAlertFiltered(a.RuleID, string(a.Severity))
+	}
+	return admitted
 }
 
 // SetBPFMapEntries sets the entry count for a BPF map.

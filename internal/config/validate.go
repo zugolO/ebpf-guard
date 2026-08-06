@@ -26,6 +26,14 @@ func ValidateConfig(cfg *Config) error {
 	// ── Store ────────────────────────────────────────────────────────────────
 	add(validateOneOf("store.backend", cfg.Store.Backend,
 		[]string{"memory", "sqlite", "opensearch"}))
+	if cfg.Store.MinSeverity != "" {
+		// Validated rather than silently coerced: a typo here would quietly
+		// admit or drop a whole severity tier, and the only symptom would be a
+		// metric that looks healthy (wave 5.1's notifier defect was exactly
+		// this shape — an unknown value falling into a default branch).
+		add(validateOneOf("store.min_severity", cfg.Store.MinSeverity,
+			[]string{"info", "warning", "critical"}))
+	}
 
 	// ── Server ───────────────────────────────────────────────────────────────
 	if cfg.Server.BindAddress != "" {

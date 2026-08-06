@@ -64,6 +64,36 @@ func TestValidateConfig_StoreBackend(t *testing.T) {
 	}
 }
 
+// TestValidateConfig_StoreMinSeverity covers the wave-5.1a intake filter knob.
+// A typo here would quietly admit or drop a whole severity tier with no symptom
+// other than a metric that looks healthy — the same shape as the notifier
+// defect wave 5.1 had to find on a live stand. Empty is accepted because it
+// means "unset": the default admits everything.
+func TestValidateConfig_StoreMinSeverity(t *testing.T) {
+	tests := []struct {
+		minSeverity string
+		wantErr     bool
+	}{
+		{"info", false},
+		{"warning", false},
+		{"critical", false},
+		{"", false}, // unset → default "info", nothing filtered
+		{"crticial", true},
+		{"none", true},
+	}
+	for _, tt := range tests {
+		cfg := baseConfig()
+		cfg.Store.MinSeverity = tt.minSeverity
+		err := ValidateConfig(cfg)
+		if tt.wantErr && err == nil {
+			t.Errorf("min_severity %q: expected error, got nil", tt.minSeverity)
+		}
+		if !tt.wantErr && err != nil {
+			t.Errorf("min_severity %q: unexpected error: %v", tt.minSeverity, err)
+		}
+	}
+}
+
 func TestValidateConfig_BlockBackend(t *testing.T) {
 	tests := []struct {
 		backend string

@@ -1768,6 +1768,20 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		Window:  alertAggWindow,
 	})
 
+	// storeMinSeverity gates admission to ebpf_guard_alerts_total and the alert
+	// store (wave 5.1a). Default "info" admits everything, so an unset or empty
+	// value cannot silently start dropping a severity tier; the value is
+	// validated at load time, so anything else here is one of the three known
+	// severities.
+	storeMinSeverity := types.SeverityInfo
+	if cfg.Store.MinSeverity != "" {
+		storeMinSeverity = types.Severity(cfg.Store.MinSeverity)
+	}
+	if storeMinSeverity != types.SeverityInfo {
+		slog.Info("alert intake filter active: alerts below the threshold are excluded from alerts_total and the store, but their rules still fire and their volume is counted in ebpf_guard_alerts_filtered_total",
+			slog.String("store_min_severity", string(storeMinSeverity)))
+	}
+
 	// forwardAlerts fans a batch of alerts out to every configured sink: the
 	// simple-mode auto-enforcer, attack-simulation collector, alert store,
 	// Alertmanager webhook, notification fanout, and cross-node gossip.
@@ -1817,7 +1831,20 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// keys that received repeats are forwarded separately by the Reap ticker
 	// below.
 	dispatchAlerts := func(dispatched []types.Alert) {
-		for _, a := range dispatched {
+		// Wave 5.1a: hold alerts below store.min_severity out of both intake
+		// sinks — the counter and the store — rather than only out of the
+		// notifiers. Wave 5.1 downgraded the seven-rule daemon cluster to info
+		// and measured no change in volume (4986/hour against a <1000 target):
+		// alerts_total counts every alert regardless of severity, so lowering
+		// severity alone moves nothing. The rules stay loaded and keep firing;
+		// what they produce is counted in alerts_filtered_total instead, so the
+		// suppressed volume stays visible (порядок работы, п. 8).
+		//
+		// The filter runs before aggregation so a filtered alert cannot re-enter
+		// through a window summary, and admitted alerts keep flowing to
+		// forwardAlerts unchanged.
+		admitted := exporter.FilterAlertsForIntake(dispatched, storeMinSeverity)
+		for _, a := range admitted {
 			podName, namespace, node := a.Enrichment.PodName, a.Enrichment.Namespace, a.Enrichment.NodeName
 			if node == "" {
 				node = metricsNodeName
@@ -1827,7 +1854,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				exporter.RecordAnomaly()
 			}
 		}
-		forwardAlerts(alertAggregator.Ingest(dispatched, time.Now()))
+		forwardAlerts(alertAggregator.Ingest(admitted, time.Now()))
 	}
 
 	// dispatchAsync runs dispatchAlerts in a bounded goroutine pool to prevent

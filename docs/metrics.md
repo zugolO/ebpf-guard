@@ -108,8 +108,13 @@ sum by (collector) (ebpf_guard_events_dropped_total)
 | Attribute | Value |
 |-----------|-------|
 | **Type** | Counter |
-| **Labels** | `rule_id`, `severity` (warning\|critical), `namespace`, `pod`, `node` |
-| **Description** | Total number of security alerts generated |
+| **Labels** | `rule_id`, `severity` (info\|warning\|critical), `namespace`, `pod`, `node` |
+| **Description** | Total number of security alerts generated, subject to `store.min_severity` |
+
+Alerts below `store.min_severity` are **not** counted here — they are counted in
+`ebpf_guard_alerts_filtered_total` instead. The default (`info`) admits
+everything, so this counter is a complete count of generated alerts unless the
+threshold has been raised.
 
 **Example Alert:**
 ```yaml
@@ -124,6 +129,30 @@ groups:
           severity: warning
         annotations:
           summary: "High rate of security alerts"
+```
+
+---
+
+#### `ebpf_guard_alerts_filtered_total`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Counter |
+| **Labels** | `rule_id`, `severity` (info\|warning\|critical) |
+| **Description** | Alerts excluded from `ebpf_guard_alerts_total` and the alert store by `store.min_severity` |
+
+The rule still fired — this is suppressed volume, not lost detection. It exists
+so that raising `store.min_severity` cannot be confused with detection quietly
+stopping: a drop in `alerts_total` should be matched by a rise here.
+
+Typical use is a noisy tier deliberately downgraded to `info`. Lowering a rule's
+severity alone does not reduce alert volume, since `alerts_total` counts every
+alert regardless of severity; keeping that tier out of the intake is what
+reduces it, and this counter is what keeps it observable.
+
+```promql
+# Suppressed volume by rule, to see what a raised threshold is holding back
+topk(10, rate(ebpf_guard_alerts_filtered_total[5m]))
 ```
 
 ---

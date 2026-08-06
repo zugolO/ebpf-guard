@@ -383,6 +383,22 @@ type StoreConfig struct {
 	// Batching configures async write batching. When batch_size > 0 alerts are
 	// buffered and written in groups, reducing per-write overhead under burst load.
 	Batching StoreBatchingConfig `mapstructure:"batching"`
+	// MinSeverity is the lowest severity admitted to ebpf_guard_alerts_total and
+	// to the alert store ("info", "warning", "critical"). Default: "info" —
+	// everything is counted and stored, the behaviour before wave 5.1a.
+	//
+	// Set to "warning" to keep the info tier out of the counter and the
+	// database while leaving its rules loaded and firing. Wave 5.1 downgraded
+	// the seven-rule daemon cluster to info and found that a severity change
+	// alone does not reduce volume: alerts_total counts every alert regardless
+	// of severity, so the idle rate did not move (4986/hour against a <1000
+	// target, plan.md "Замер 5.1 на стенде"). Filtering at the intake is what
+	// turns that into the measured 810/hour of non-daemon alerts.
+	//
+	// Filtered alerts are counted in ebpf_guard_alerts_filtered_total{severity},
+	// so suppressed volume stays observable — a filter that leaves no trace is
+	// deletion, and nothing is deleted silently (plan.md порядок работы, п. 8).
+	MinSeverity string `mapstructure:"min_severity"`
 }
 
 // FileOpsConfig controls which file-access operations are collected.
@@ -2095,6 +2111,8 @@ func setDefaults(v *viper.Viper) {
 
 	// Store defaults
 	v.SetDefault("store.backend", "memory")
+	// "info" keeps pre-5.1a behaviour: nothing is filtered unless asked for.
+	v.SetDefault("store.min_severity", "info")
 	v.SetDefault("store.memory.max_alerts", int64(10000))
 	v.SetDefault("store.memory.retention_period", "6h")
 	v.SetDefault("store.sqlite.path", "/var/lib/ebpf-guard/events.db")

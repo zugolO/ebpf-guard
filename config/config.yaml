@@ -301,6 +301,19 @@ enforcement:
 # Supported backends: memory, sqlite, opensearch
 store:
   backend: memory             # memory | sqlite | opensearch
+  # Нижняя граница severity для попадания в ebpf_guard_alerts_total и в хранилище.
+  # info (по умолчанию) — считать и хранить всё, поведение до волны 5.1a.
+  #
+  # warning — держать info-ярус вне счётчика и БД, оставив его правила
+  # загруженными и срабатывающими. Нужно там, где шумный ярус понижен до info
+  # ради отделимости: понижение severity само по себе объём не снижает —
+  # alerts_total считает всё подряд (волна 5.1: 4986 алертов/час на idle не
+  # изменились после понижения семи правил).
+  #
+  # Отфильтрованное не исчезает: ebpf_guard_alerts_filtered_total{rule_id,severity}
+  # показывает подавленный объём, иначе фильтрацию было бы не отличить от
+  # прекратившегося детекта.
+  min_severity: info
   memory:
     # Max alerts to keep in memory. Oldest are evicted when this is exceeded.
     # Prevents unbounded RSS growth on long-running VPS deployments.

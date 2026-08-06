@@ -1,0 +1,66 @@
+# Базовый СОСТАВ типов детекта (rule_id), критерий 6 run-gate.sh.
+#
+# Зачем состав, а не число (волна 5.3, находка №2 замера №2). Порог «>= 43 типа»
+# был снят с прогона №4 и стал недостижим после законного сужения правил: замер
+# №2 дал 41 тип и FAIL, хотя ни один настоящий детект не пропал — часть типов
+# перестала срабатывать потому, что была FP и её сузили намеренно. Одно число не
+# отличает «детект просел» от «FP перестал считаться детектом», и разбирать это
+# пришлось руками. Гейт теперь печатает diff: потеряно / добавлено.
+#
+# Основание: замер №2 (TIMESTAMP=20260806_154041), 1096 новых алертов за прогон,
+# 41 уникальный rule_id. Список снят с него как есть — это фиксация факта, а не
+# целевое состояние.
+#
+# Как обновлять. Diff — это не автоматический провал: «добавлено» после волны,
+# которая заводит правила, ожидаемо; «потеряно» после волны, которая правило
+# намеренно сузила или переименовала, — тоже. Провалом считается потеря, которую
+# никто не объяснил. Обновлять файл ТОЛЬКО вместе с записью в plan.md о том,
+# какая волна и почему изменила состав, иначе база теряет смысл основания.
+#
+# Известное расхождение к замеру №2.1: волна 5.1 раздвоила семь правил кластера
+# на базовое и *_daemon. В этом списке уже есть sigma_utmp_wtmp_modified_daemon
+# (правило существовало до 5.1), а остальные шесть записаны в базовых именах —
+# после 5.1 в diff ожидаются добавления вида *_daemon при сохранении базовых.
+# Это ожидаемое «добавлено», не потеря.
+
+anomaly_detection
+beacon_fixed_interval
+c2_periodic_beacon_pattern
+container_escape_init_proc
+cred_proc_maps_mass_read
+drift_new_exec_critical
+drift_new_file_dir_sensitive
+drift_new_library_in_system_dir
+evasion_hidden_elf_in_tmp
+exfil_large_http_post
+exfil_repeated_outbound_to_same_ip
+incident_confirmed_attack
+initial_package_postinstall_network
+lateral_tool_transfer_wget
+mitre_sandbox_detect_proc_read
+net_high_frequency_connections
+net_portscan_indicator
+netintr_http_on_non_web_port
+netintr_large_upload_port
+netintr_long_dns_session
+netintr_loopback_high_port
+netintr_syn_scan_pattern
+privesc_suid_suspicious_path
+recon_sensitive_file_find
+rootkit_hidden_dir_dev
+rootkit_pam_module_added
+sensitive_file_read
+sigma_binary_in_tmp_executed
+sigma_cpu_info_access
+sigma_failed_login_syscall
+sigma_kernel_version_read
+sigma_log_deletion
+sigma_memory_proc_dump
+sigma_passwd_shadow_read
+sigma_reverse_shell_named_pipe
+sigma_sensitive_file_chmod
+sigma_utmp_wtmp_modified_daemon
+web_internal_recon
+web_sql_injection_files
+webshell_script_write_via_web_process
+webshell_ssrf_internal_network

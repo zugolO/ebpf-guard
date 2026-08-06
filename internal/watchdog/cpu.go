@@ -120,6 +120,7 @@ type CPUPressureWatcher struct {
 	pressureLevel    prometheus.Gauge
 	pressurePercent  prometheus.Gauge
 	degradedFraction prometheus.Gauge
+	transitionsTotal *prometheus.CounterVec
 }
 
 // CPUConfig holds configuration for CPU pressure handling.
@@ -235,14 +236,28 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 			Name: "ebpf_guard_cpu_degraded_fraction",
 			Help: "Fraction (0-1) of tracked watcher lifetime spent with sampling reduced (any shed level above normal). Lets an operator tell how much visibility was actually lost, rather than inferring it from log-grepping reduce/recover pairs.",
 		}),
+		// A gauge sampled at the end of a run cannot distinguish "one reduce
+		// under attack load, still shedding at the snapshot" from "flapping all
+		// run": both read level=1. The acceptance criterion is about repeated
+		// transitions, so it needs a monotonic count of them, not a level
+		// (plan.md волна 5.3, находка №5 замера №2).
+		transitionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ebpf_guard_cpu_pressure_transitions_total",
+			Help: "Count of CPU pressure state transitions by direction: reduce=stepped up a shed level, recover=stepped back down. One reduce+recover pair per load spike is the regulator working; repeated pairs are flapping.",
+		}, []string{"direction"}),
 	}
+	// Pre-create both series so a run with zero transitions exports 0 rather
+	// than an absent metric — an absent series reads as "not measured", which
+	// the gate must not score as a pass.
+	w.transitionsTotal.WithLabelValues("reduce").Add(0)
+	w.transitionsTotal.WithLabelValues("recover").Add(0)
 	w.pressureLevel.Set(cpuLevelNormal)
 	return w
 }
 
 // RegisterMetrics registers Prometheus metrics.
 func (w *CPUPressureWatcher) RegisterMetrics(reg prometheus.Registerer) error {
-	for _, c := range []prometheus.Collector{w.pressureLevel, w.pressurePercent, w.degradedFraction} {
+	for _, c := range []prometheus.Collector{w.pressureLevel, w.pressurePercent, w.degradedFraction, w.transitionsTotal} {
 		if err := reg.Register(c); err != nil {
 			return err
 		}
@@ -578,6 +593,17 @@ func (w *CPUPressureWatcher) emitTransitionLog(kind, msg string, cpuPct, thresho
 // setState updates the state, records when it was entered (for dwell-time
 // gating), and syncs the exported level gauge.
 func (w *CPUPressureWatcher) setState(s int, now time.Time) {
+	// Count the direction of the move before overwriting the old state. Only a
+	// real change counts: setState is also called on re-evaluation ticks that
+	// keep the level where it is, and counting those would turn a steady shed
+	// into fake flapping.
+	if s != w.state {
+		if s > w.state {
+			w.transitionsTotal.WithLabelValues("reduce").Inc()
+		} else {
+			w.transitionsTotal.WithLabelValues("recover").Inc()
+		}
+	}
 	w.state = s
 	w.enteredStateAt = now
 	w.pressureLevel.Set(float64(s))

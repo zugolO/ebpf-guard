@@ -80,11 +80,18 @@ func TestCPUWatcher_RegisterMetrics(t *testing.T) {
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	require.Len(t, families, 3)
-	names := []string{*families[0].Name, *families[1].Name, *families[2].Name}
+	require.Len(t, families, 4)
+	names := make([]string, 0, len(families))
+	for _, f := range families {
+		names = append(names, f.GetName())
+	}
 	assert.Contains(t, names, "ebpf_guard_cpu_pressure_level")
 	assert.Contains(t, names, "ebpf_guard_cpu_pressure_percent")
 	assert.Contains(t, names, "ebpf_guard_cpu_degraded_fraction")
+	// Registered, not just constructed: criterion 14 of run-gate.sh reads this
+	// from /metrics, so a watcher that counts transitions but never exports
+	// them would leave the gate permanently on SKIP (волна 5.3).
+	assert.Contains(t, names, "ebpf_guard_cpu_pressure_transitions_total")
 }
 
 func TestCPUWatcher_FirstSamplePrimesOnly(t *testing.T) {
@@ -435,10 +442,10 @@ func TestSetupCPUPressureWatcher_EnabledRegistersAndRuns(t *testing.T) {
 	w := SetupCPUPressureWatcher(ctx, cfg, nil, bpf, reg)
 	require.NotNil(t, w)
 
-	// Metrics registered.
+	// Metrics registered (4 since волна 5.3 added the transition counter).
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	assert.Len(t, families, 3)
+	assert.Len(t, families, 4)
 
 	// Let the background goroutine tick at least once, then stop it cleanly.
 	time.Sleep(50 * time.Millisecond)
@@ -691,4 +698,65 @@ func testDegradedFractionValue(t *testing.T, w *CPUPressureWatcher) float64 {
 	var m dto.Metric
 	require.NoError(t, w.degradedFraction.Write(&m))
 	return m.GetGauge().GetValue()
+}
+
+func testTransitionCount(t *testing.T, w *CPUPressureWatcher, direction string) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, w.transitionsTotal.WithLabelValues(direction).Write(&m))
+	return m.GetCounter().GetValue()
+}
+
+// TestCPUWatcher_TransitionsCounted is the wave-5.3 regression test for
+// criterion 14 (находка №5 замера №2): the gate read cpu_pressure_level at the
+// final snapshot and printed FAIL for a run whose regulator worked exactly as
+// designed — one reduce under attack load, still shedding when the snapshot was
+// taken. A level cannot express "how many times", so the criterion needs a
+// transition counter. Both directions are asserted separately: a counter that
+// incremented on every tick, or only ever in one direction, would still satisfy
+// a looser "counter moved" check.
+func TestCPUWatcher_TransitionsCounted(t *testing.T) {
+	interval := time.Second
+	cfg := CPUConfig{
+		CheckInterval:     time.Second,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        1,
+		// Long enough that the held-load phase below cannot recover, short
+		// enough that the drop phase can: the test needs the two phases to be
+		// distinguishable, otherwise "held shed" and "recovered" blur together
+		// and the assertions stop meaning what they say.
+		MinDwell: 3 * interval,
+	}
+	w, fc := newTestWatcher(t, cfg, newMockBPFController())
+	w.checkCPU() // prime
+
+	// Both series exist at zero before anything happens: an absent series would
+	// read as "not measured" to the gate, which must not score as a pass.
+	require.Equal(t, 0.0, testTransitionCount(t, w, "reduce"))
+	require.Equal(t, 0.0, testTransitionCount(t, w, "recover"))
+
+	// One spike: trip into shed, then hold the load high for several more
+	// ticks. The extra ticks re-evaluate at the same level and must not count.
+	fc.stepFor(16, interval)
+	w.checkCPU()
+	require.Equal(t, cpuLevelFileShed, w.PressureLevel())
+	for i := 0; i < 3; i++ {
+		fc.stepFor(16, interval)
+		w.checkCPU()
+	}
+	assert.Equal(t, 1.0, testTransitionCount(t, w, "reduce"),
+		"holding a shed level must not count as repeated reductions")
+	assert.Equal(t, 0.0, testTransitionCount(t, w, "recover"))
+
+	// Load drops: one recover, and idling at normal must not count either.
+	for i := 0; i < 4; i++ {
+		fc.stepFor(0, interval)
+		w.checkCPU()
+	}
+	require.Equal(t, cpuLevelNormal, w.PressureLevel())
+	assert.Equal(t, 1.0, testTransitionCount(t, w, "reduce"))
+	assert.Equal(t, 1.0, testTransitionCount(t, w, "recover"),
+		"one spike must produce exactly one reduce/recover pair — the shape the gate scores as PASS")
 }

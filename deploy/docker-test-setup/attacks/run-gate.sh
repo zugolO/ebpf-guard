@@ -39,6 +39,25 @@
 # Все четыре дают SKIP при отсутствии данных, а не FAIL: непроверенное не
 # засчитывается ни в одну сторону (замечание 1 к волне 1.75).
 #
+# Волна 5.3 переписала три критерия — все три печатали FAIL при исправно
+# работающем агенте (находки №4 и №5 замера №2). Это второй случай того же
+# класса, что волна 1.75c: линейка чинится ДО прогона, иначе следующий замер
+# снова провалит систему за то, что она сделала правильно.
+#   3  (деградация)  — reason="path_denylist" исключён из суммы дропов.
+#                      Намеренная фильтрация не есть потеря видимости, а приёмка
+#                      4.3 требует, чтобы этих дропов было НЕ ноль: старый
+#                      критерий ломался на каждом прогоне с рабочим фильтром.
+#   6  (детект жив)  — сравнение СОСТАВА типов с detection-baseline.txt и diff
+#                      «потеряно/добавлено» вместо порога ">= 43 типа". Число не
+#                      отличает просевший детект от FP, переставшего считаться
+#                      детектом (замер №2: 41 тип и FAIL без единой реальной
+#                      потери).
+#   14 (CPU-watchdog) — число пар reduce↔recover по счётчику
+#                      ebpf_guard_cpu_pressure_transitions_total (заведён в 5.3)
+#                      плюс cpu_degraded_fraction, вместо мгновенного
+#                      cpu_pressure_level в момент среза. Ноль переходов означал
+#                      бы, что регулятор не нужен; критерий про флап.
+#
 # Использование: run-gate.sh [RESULTS_DIR] [TIMESTAMP]
 # По умолчанию берёт последний TIMESTAMP, для которого в RESULTS_DIR есть
 # baseline-state-*.json и final-state-*.json.
@@ -99,6 +118,8 @@ final_alerts="$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
 # from RESULTS_DIR or the working directory (plan.md волна 1.5g).
 GATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 manifest_file="$GATE_SCRIPT_DIR/attack-manifest.json"
+# Зафиксированный состав типов детекта для критерия 6 (волна 5.3).
+baseline_types_file="$GATE_SCRIPT_DIR/detection-baseline.txt"
 
 for f in "$baseline_state" "$final_state" "$baseline_metrics" "$final_metrics" "$baseline_alerts" "$final_alerts"; do
     if [ ! -f "$f" ]; then
@@ -157,10 +178,20 @@ else
 fi
 echo ""
 
-# 3. Деградация в /health видна при любых потерях.
+# 3. Деградация в /health видна при любых НЕПРЕДНАМЕРЕННЫХ потерях.
+# Волна 5.3 (находка №4 замера №2): reason="path_denylist" исключён из суммы.
+# Это не потеря видимости, а сработавший по конфигу фильтр — приёмка 4.3 по
+# построению требует, чтобы дропы по нему были НЕ нулевые, поэтому старая
+# формулировка ломала критерий 3 на каждом прогоне, где фильтр вообще работал
+# (замер №2: 25 дропов при status=healthy → FAIL при исправном агенте).
+# Величина всё равно печатается и проверяется отдельно — критерием 13.
 echo "=== 3. Деградация в /health при потерях ==="
 if [ -f "$final_health" ]; then
-    any_dropped_total=$(grep 'ebpf_guard_events_dropped_total{' "$final_metrics" | awk -F'} ' '{sum+=$2} END{print sum+0}')
+    any_dropped_total=$(grep 'ebpf_guard_events_dropped_total{' "$final_metrics" \
+        | grep -v 'reason="path_denylist"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+    intentional_drops=$(grep 'ebpf_guard_events_dropped_total{' "$final_metrics" \
+        | grep 'reason="path_denylist"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+    echo "  непреднамеренных дропов: $any_dropped_total; намеренных (path_denylist): ${intentional_drops%.*} — в критерий не входят"
     visibility_reduced=$(jq -r '.visibility_reduced // false' "$final_health" 2>/dev/null)
     status=$(jq -r '.status // "unknown"' "$final_health" 2>/dev/null)
     if awk -v d="$any_dropped_total" 'BEGIN{exit !(d>0)}'; then
@@ -272,10 +303,44 @@ else
     attacker_rate=$(awk -v a="$attacker_alerts" -v m="$runtime_min" 'BEGIN{ if(m>0) printf "%.1f", a/m; else print "n/a" }')
 fi
 
-if [ "$detected_types" -ge 43 ] 2>/dev/null; then
-    pass "уникальных типов атак: $detected_types (>= 43)"
+# Состав, а не число (волна 5.3, находка №2 замера №2). Порог «>= 43» был снят
+# с прогона №4 и стал недостижим после законного сужения правил: 41 тип в замере
+# №2 дал FAIL, хотя ни один настоящий детект не пропал. Одно число не отличает
+# «детект просел» от «FP перестал считаться детектом» — гейт печатает diff.
+detected_type_list=$(jq -s -r '
+    (.[0] // []) as $baseline | (.[1] // []) as $final |
+    ($baseline | map(.id) | unique) as $bids |
+    ($final | map(select(.id as $id | ($bids | index($id)) | not))) as $new |
+    $new | map(.rule_id) | map(select(. != null and . != "")) | unique | .[]
+' "$baseline_alerts" "$final_alerts" 2>/dev/null | tr -d '\r' | sort)
+
+if [ ! -f "$baseline_types_file" ]; then
+    skip "detection-baseline.txt не найден рядом с гейтом — состав детекта сравнить не с чем (число типов: $detected_types)"
 else
-    fail "уникальных типов атак: $detected_types (ожидалось >= 43)"
+    # tr -d '\r' с обеих сторон: иначе diff вырождается в "всё потеряно и всё
+    # добавлено" при малейшем расхождении переводов строк между базой и выводом
+    # jq (поймано при пересчёте 5.3 на Windows-сборке jq).
+    expected_types=$(grep -vE '^\s*(#|$)' "$baseline_types_file" | tr -d '\r' | sort)
+    lost_types=$(comm -23 <(echo "$expected_types") <(echo "$detected_type_list"))
+    added_types=$(comm -13 <(echo "$expected_types") <(echo "$detected_type_list"))
+    lost_count=$(echo "$lost_types" | grep -c . || true)
+    added_count=$(echo "$added_types" | grep -c . || true)
+    echo "  типов в прогоне: $detected_types, в базе: $(echo "$expected_types" | grep -c .)"
+    if [ "$added_count" -gt 0 ]; then
+        echo "  добавлено (+$added_count):"
+        echo "$added_types" | sed 's/^/    + /'
+    fi
+    if [ "$lost_count" -gt 0 ]; then
+        echo "  потеряно (-$lost_count):"
+        echo "$lost_types" | sed 's/^/    - /'
+    fi
+    # Провал — только потеря. Добавления печатаются и требуют обновления базы,
+    # но не проваливают прогон: новое правило, которое сработало, — не регресс.
+    if [ "$lost_count" -eq 0 ]; then
+        pass "состав детекта без потерь (добавлено: $added_count — обновить detection-baseline.txt вместе с записью в plan.md)"
+    else
+        fail "состав детекта: потеряно $lost_count типов (см. список выше). Если потеря намеренная — обновить detection-baseline.txt и записать причину в plan.md, иначе это регресс детекта"
+    fi
 fi
 if [ "$attacker_alerts_known" -eq 0 ]; then
     skip "темп алертов непроверяем — нет attack-manifest.json, множество атакующих comms неизвестно"
@@ -484,26 +549,53 @@ else
 fi
 echo ""
 
-# 14. P1-18a: CPU-watchdog не переходил в шеддинг (приёмка волны 4.4).
-# Критерий имеет смысл только на дефолтных порогах 40/70/20: со стендовым
-# оверрайдом 200/320/150 порог недостижим по построению, и «ноль переходов»
-# не означает ничего (пункт 2.Gb плана — оверрайд снят именно поэтому).
-# cpu_pressure_level: 0 = норма, 1 = file shed, 2 = all shed. Отдельного
-# счётчика переходов в агенте нет, поэтому проверяются оба среза прогона —
-# baseline и final: это ловит устойчивый шеддинг, но не короткий всплеск
-# между срезами, что и записано в выводе.
-echo "=== 14. P1-18a: CPU-watchdog без шеддинга (пороги 40/70/20) ==="
+# 14. P1-18a: CPU-watchdog не флапает (приёмка волны 4.4, переформулировано
+# волной 5.3 по находке №5 замера №2).
+#
+# Старая формулировка требовала level==0 в обоих срезах. Замер №2 показал, что
+# она мерит не то: агент отработал ровно как задуман — один reduce под нагрузкой
+# атаки и один recover, cpu_degraded_fraction 0.091 — но срез пришёлся на
+# шеддинг (level=1), и гейт напечатал FAIL за штатную работу регулятора. Ноль
+# переходов означал бы, что регулятор не нужен; критерий про то, чтобы он не
+# ФЛАПАЛ (813 циклов за ночь в ISSUES-attack-run-2026-08-03 — вот это находка).
+#
+# Поэтому меряем: (а) число пар reduce↔recover за прогон по счётчику
+# ebpf_guard_cpu_pressure_transitions_total (заведён в 5.3 — gauge не может
+# ответить «сколько раз»); (б) cpu_degraded_fraction как долю потерянной
+# видимости. Порог: ноль ПОВТОРНЫХ переходов, то есть не более одной пары.
+# Основание порога: замер №2 — 2 перехода за 96 мин, degraded_fraction 0.091.
+# Критерий имеет смысл только на дефолтных порогах 40/70/20 (пункт 2.Gb).
+echo "=== 14. P1-18a: CPU-watchdog без флапа (пары reduce↔recover, пороги 40/70/20) ==="
 lvl_base=$(awk '/^ebpf_guard_cpu_pressure_level( |\{)/ {print $NF; exit}' "$baseline_metrics")
 lvl_final=$(awk '/^ebpf_guard_cpu_pressure_level( |\{)/ {print $NF; exit}' "$final_metrics")
 cpu_pct=$(awk '/^ebpf_guard_cpu_pressure_percent( |\{)/ {print $NF; exit}' "$final_metrics")
+deg_frac=$(awk '/^ebpf_guard_cpu_degraded_fraction( |\{)/ {print $NF; exit}' "$final_metrics")
+# Дельта между срезами, а не абсолют: счётчик монотонный и переживает прогоны.
+tr_reduce_base=$(awk '/^ebpf_guard_cpu_pressure_transitions_total\{/ && /direction="reduce"/ {sum+=$NF} END{print sum+0}' "$baseline_metrics")
+tr_reduce_final=$(awk '/^ebpf_guard_cpu_pressure_transitions_total\{/ && /direction="reduce"/ {sum+=$NF} END{print sum+0}' "$final_metrics")
+tr_recover_base=$(awk '/^ebpf_guard_cpu_pressure_transitions_total\{/ && /direction="recover"/ {sum+=$NF} END{print sum+0}' "$baseline_metrics")
+tr_recover_final=$(awk '/^ebpf_guard_cpu_pressure_transitions_total\{/ && /direction="recover"/ {sum+=$NF} END{print sum+0}' "$final_metrics")
+has_transition_metric=$(grep -c '^ebpf_guard_cpu_pressure_transitions_total{' "$final_metrics" || true)
+
 if [ -z "${lvl_base:-}" ] || [ -z "${lvl_final:-}" ]; then
     skip "ebpf_guard_cpu_pressure_level отсутствует в срезах — шеддинг не проверен"
+elif [ "$has_transition_metric" -eq 0 ]; then
+    # Старая сборка агента без счётчика (до волны 5.3). Считать её PASS по
+    # level нельзя — это ровно та подмена критерия, которую 5.3 и чинит.
+    skip "ebpf_guard_cpu_pressure_transitions_total отсутствует (сборка до волны 5.3) — число пар не измерено; level: baseline=$lvl_base final=$lvl_final"
 else
+    d_reduce=$(awk -v a="$tr_reduce_final" -v b="$tr_reduce_base" 'BEGIN{print a-b}')
+    d_recover=$(awk -v a="$tr_recover_final" -v b="$tr_recover_base" 'BEGIN{print a-b}')
+    echo "  переходов за прогон: reduce=$d_reduce recover=$d_recover"
     echo "  cpu_pressure_level: baseline=$lvl_base final=$lvl_final, cpu_pressure_percent=${cpu_pct:-n/a}"
-    if [ "${lvl_base%.*}" -eq 0 ] && [ "${lvl_final%.*}" -eq 0 ] 2>/dev/null; then
-        pass "шеддинга нет (level 0 в обоих срезах); всплеск между срезами гейт не увидит — сверить с логом переходов"
+    echo "  cpu_degraded_fraction: ${deg_frac:-n/a} (доля времени с урезанным сэмплингом)"
+    # Пара = один reduce и следующий за ним recover. Незакрытая пара (агент всё
+    # ещё шеддит в момент среза) — норма, ровно случай замера №2, поэтому
+    # считаем по reduce: 0 или 1 reduce = не флапает.
+    if awk -v r="$d_reduce" 'BEGIN{exit !(r+0 <= 1)}'; then
+        pass "переходов reduce=$d_reduce recover=$d_recover — повторных нет (порог: <= 1 пара); degraded_fraction=${deg_frac:-n/a}"
     else
-        fail "watchdog в шеддинге: baseline=$lvl_base final=$lvl_final (ожидался 0; при дефолтных порогах это находка, а не повод задрать порог)"
+        fail "watchdog флапает: reduce=$d_reduce recover=$d_recover за прогон (ожидалось <= 1 пары; 813 циклов за ночь — ISSUES-attack-run-2026-08-03)"
     fi
 fi
 echo ""

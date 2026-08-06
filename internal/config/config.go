@@ -864,6 +864,26 @@ type KernelFilterConfig struct {
 	// Each entry must be at most 15 characters (kernel TASK_COMM_LEN - 1).
 	// SECURITY NOTE: comm names can be spoofed via prctl(PR_SET_NAME).
 	NoisyDaemonDenylist []string `mapstructure:"noisy_daemon_denylist"`
+
+	// PathDenylist lists file path prefixes (e.g. "/var/log/") whose
+	// open/read/write events are discarded in the kernel before they reach
+	// the ring buffer (P1-18b). Matching is longest-prefix, byte-wise, up to
+	// bpf.PathFilterPrefixLen (128) bytes.
+	//
+	// Empty by default and NOT populated from any built-in list: unlike the
+	// comm/syscall filters, an error here is a silent-blindness risk — a
+	// wrong prefix can swallow a whole class of file events (fim_*, canary_*,
+	// cred_* rules depend on exactly the events this filters) while making
+	// an idle run look healthier. Populate deliberately, and re-run an
+	// attack scenario (not just idle) after any change — see P1-18b
+	// acceptance criteria in ISSUES-attack-run-2026-08-03.md.
+	//
+	// Known-noisy directories worth considering: log rotation targets
+	// (/var/log), package manager caches, container runtime overlay churn.
+	// Do NOT add /proc, /etc, /root/.ssh, /usr/bin, or /var/www — these
+	// carry the file-based attack signal the plan explicitly protects
+	// (fim_*/canary_*/cred_* rules, credential theft, container escape).
+	PathDenylist []string `mapstructure:"path_denylist"`
 }
 
 // MapSizeConfig holds BPF map size settings.
@@ -944,6 +964,13 @@ type CorrelatorConfig struct {
 	// key within a time window into a single alert carrying a count, instead of
 	// forwarding one row per occurrence to storage/notifications.
 	AlertAggregation AlertAggregationConfig `mapstructure:"alert_aggregation"`
+	// TrustedComms lists process names whose alerts cannot on their own promote
+	// an incident to an "attack" verdict (wave 2 trust gate). Alerts from these
+	// processes still reach the incident and its process chain — they just do
+	// not supply the score for a verdict without an untrusted or network signal.
+	// Empty means the built-in default (sshd, cron). Which daemons are noisy is
+	// deployment-specific, so this must be tunable without a rebuild.
+	TrustedComms []string `mapstructure:"trusted_comms"`
 }
 
 // AlertAggregationConfig configures alert aggregation (see correlator.AlertAggregator).
@@ -1943,6 +1970,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.kernel_filter.enabled", true)
 	v.SetDefault("bpf.kernel_filter.disable_default_daemon_denylist", false)
 	v.SetDefault("bpf.kernel_filter.noisy_daemon_denylist", []string{})
+	// P1-18b: empty by default, deliberately not populated from a built-in
+	// list — see the PathDenylist field doc for why this is opt-in only.
+	v.SetDefault("bpf.kernel_filter.path_denylist", []string{})
 	v.SetDefault("bpf.sampling.enabled", true)
 	v.SetDefault("bpf.sampling.syscall_rate", 1)
 	v.SetDefault("bpf.sampling.network_rate", 1)
@@ -2070,6 +2100,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("store.sqlite.path", "/var/lib/ebpf-guard/events.db")
 	v.SetDefault("store.sqlite.max_alerts", int64(100000))
 	v.SetDefault("store.sqlite.vacuum_interval", "1h")
+	// Age-based retention default: bounds unattended DaemonSet growth (P2-21 —
+	// 31.2 MB/9h idle with no cap observed on the test stand). 100k rows is a
+	// generous ceiling already; 7d keeps a useful investigation window without
+	// unbounded growth when max_alerts alone isn't reached.
+	v.SetDefault("store.sqlite.retention_period", "168h")
 	v.SetDefault("store.opensearch.url", "")
 	v.SetDefault("store.opensearch.index", "ebpf-guard-events")
 	v.SetDefault("store.opensearch.username", "")

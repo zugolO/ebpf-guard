@@ -95,6 +95,21 @@ rules:
     severity: warning
     action: alert
     tags: [mitre-t1195, mitre-t1195.001, supply-chain, staging, tmp-exec]
+    exceptions:
+      # Scoped to comm AND path: the canary manager's lure file
+      # /tmp/.secret_key matches the dotfile-in-/tmp pattern but is never
+      # executed. Any other dotfile or scripted/binary extension in /tmp or
+      # /var/tmp still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: eq
+              values: ["/tmp/.secret_key"]
 
   # ============================================================================
   # T1195.001 — Suspicious Package Registry DNS

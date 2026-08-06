@@ -39,6 +39,15 @@ const clockTicksPerSecond = 100.0
 // is shed under CPU pressure (1 event in 10).
 const shedSamplingRate = 0.1
 
+// shedCPUFraction is the assumed share of the agent's total CPU% attributable
+// to whatever collectors are currently shed, used by extrapolateNormalPct to
+// undo the effect of the watcher's own throttling when deciding whether it is
+// safe to recover. File dominates event volume in practice (P0-22: 99.4% of
+// events on an idle host), so this is set high; it is intentionally a fixed
+// constant rather than a measured value — the watcher has no way to attribute
+// its own CPU time back to a specific event type.
+const shedCPUFraction = 0.8
+
 // CPUPressureWatcher monitors the agent's own CPU usage and reduces BPF-side
 // sampling of noisy collectors when CPU exceeds configured thresholds.
 type CPUPressureWatcher struct {
@@ -351,7 +360,18 @@ func (w *CPUPressureWatcher) checkCPU() {
 	avg := w.pushWindow(pct)
 	w.pressurePercent.Set(avg)
 
-	w.evaluate(avg, now)
+	// Break the feedback loop: while shedding, the measured pct is CPU spent
+	// processing an already-throttled stream, not the load the box actually
+	// carries. Left alone, that always reads as "fine", so the watcher
+	// recovers, the full stream comes back, pct climbs past the threshold
+	// again, and it re-trips — the 40s flapping cycle this task exists to
+	// remove, just stretched out by minDwell rather than broken. Recovery
+	// decisions use an extrapolated estimate of what pct would be at normal
+	// sampling instead of the raw (deflated) reading; escalation still uses
+	// the raw reading so genuine new pressure is never masked.
+	extrapolated := w.extrapolateNormalPct(avg)
+
+	w.evaluate(avg, extrapolated, now)
 
 	// A run that goes quiet (no further transition) would otherwise sit
 	// unflushed until the next transition or shutdown — potentially
@@ -387,16 +407,18 @@ func (w *CPUPressureWatcher) pushWindow(pct float64) float64 {
 	return sum / float64(len(w.window))
 }
 
-// evaluate transitions between pressure levels based on the smoothed CPU%.
-// Recovery uses the (lower) recoveryThreshold for hysteresis so the watcher
-// does not flap around a single threshold, and additionally requires the
-// current level to have been held for at least minDwell: attack traffic
-// arrives in bursts shorter than the smoothing window, and without a dwell
-// floor a lull between bursts recovers sampling just before the next burst
-// re-trips it — the agent loses visibility exactly when it matters most.
-// Escalation is never gated by dwell time so the watcher still reacts
-// immediately to genuine, sustained pressure.
-func (w *CPUPressureWatcher) evaluate(cpuPct float64, now time.Time) {
+// evaluate transitions between pressure levels. Escalation uses the raw
+// measured cpuPct so the watcher still reacts immediately to genuine,
+// sustained pressure. Recovery uses recoveryExtrapolatedPct — the estimated
+// CPU% the box would show at normal sampling — for both the threshold
+// comparison and the dwell floor's premise: recovering because the
+// *throttled* stream is quiet says nothing about whether the full stream
+// would be. Recovery additionally requires the current level to have been
+// held for at least minDwell: attack traffic arrives in bursts shorter than
+// the smoothing window, and without a dwell floor a lull between bursts
+// recovers sampling just before the next burst re-trips it — the agent loses
+// visibility exactly when it matters most.
+func (w *CPUPressureWatcher) evaluate(cpuPct, recoveryExtrapolatedPct float64, now time.Time) {
 	dwelled := now.Sub(w.enteredStateAt) >= w.minDwell
 
 	switch w.state {
@@ -417,19 +439,42 @@ func (w *CPUPressureWatcher) evaluate(cpuPct float64, now time.Time) {
 			w.logTransition("reduce", "cpu pressure: escalating — reducing syscall and network sampling", cpuPct, w.allShedThreshold, now)
 			w.enterAllShedMode()
 			w.setState(cpuLevelAllShed, now)
-		} else if cpuPct < w.recoveryThreshold && dwelled {
-			w.logTransition("recover", "cpu pressure: recovered — restoring file sampling", cpuPct, w.recoveryThreshold, now)
+		} else if recoveryExtrapolatedPct < w.recoveryThreshold && dwelled {
+			w.logTransition("recover", "cpu pressure: recovered — restoring file sampling", recoveryExtrapolatedPct, w.recoveryThreshold, now)
 			w.recoverNormalMode()
 			w.setState(cpuLevelNormal, now)
 		}
 
 	case cpuLevelAllShed:
-		if cpuPct < w.recoveryThreshold && dwelled {
-			w.logTransition("recover", "cpu pressure: recovered — restoring all sampling", cpuPct, w.recoveryThreshold, now)
+		if recoveryExtrapolatedPct < w.recoveryThreshold && dwelled {
+			w.logTransition("recover", "cpu pressure: recovered — restoring all sampling", recoveryExtrapolatedPct, w.recoveryThreshold, now)
 			w.recoverNormalMode()
 			w.setState(cpuLevelNormal, now)
 		}
 	}
+}
+
+// extrapolateNormalPct estimates what the smoothed CPU% would read if every
+// currently-shed collector were sampling at its normal (pre-shed) rate,
+// instead of the reduced rate the watcher itself imposed.
+//
+// Model: cpuPct is treated as split between a shed-affected portion and a
+// fixed remainder. The shed portion currently costs shedSamplingRate of what
+// it would at full sampling, so inflating just that portion by 1/shedSamplingRate
+// approximates the full-rate load. shedCPUFraction is the assumed share of
+// total agent CPU attributable to the collectors this watcher can shed (file,
+// and at L2 also syscall/network) — file dominates in practice (P0-22: file
+// was 99.4% of event volume), so a single fixed fraction is a deliberately
+// coarse but conservative estimate, not a per-collector accounting the
+// watcher has no way to measure directly (CPU time isn't attributed by event
+// type). Returns cpuPct unchanged when nothing is currently shed.
+func (w *CPUPressureWatcher) extrapolateNormalPct(cpuPct float64) float64 {
+	if len(w.normalRates) == 0 {
+		return cpuPct
+	}
+	shedPortion := cpuPct * shedCPUFraction
+	remainder := cpuPct - shedPortion
+	return remainder + shedPortion/shedSamplingRate
 }
 
 // transitionLogGap is how long a gap since the last transition (of either

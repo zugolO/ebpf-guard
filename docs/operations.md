@@ -206,7 +206,10 @@ Two complementary retention controls are available:
 | `store.sqlite.max_alerts` | Hard row cap — oldest rows pruned when count exceeds limit |
 | `store.sqlite.retention_period` | Time-based purge — alerts older than this are deleted |
 
-Both run on the same `vacuum_interval` cadence (default 1 h). Configure both for defense-in-depth:
+Both run on the same `vacuum_interval` cadence (default 1 h). Both also ship with defaults
+(`max_alerts: 100000`, `retention_period: 168h`, `vacuum_interval: 1h`) so a DaemonSet
+deployment is bounded even without an explicit `store.sqlite` block — override if a node's
+disk budget needs a tighter cap:
 
 ```yaml
 store:
@@ -235,17 +238,26 @@ The backup uses SQLite's `VACUUM INTO` command, which produces a defragmented, W
 
 > **Tip**: Mount `/backup` from a separate PersistentVolumeClaim so backups survive pod eviction even if the primary data volume is lost.
 
-### Backup Metrics
+`store.sqlite.backup.enabled` defaults to `false` — a fresh deployment with no `backup`
+block will correctly show `ebpf_guard_store_backup_last_success_timestamp 0` forever. That
+reading means "never configured", not "broken"; only alert on it once `backup.enabled: true`
+has actually been set.
 
-Monitor backup health with these Prometheus metrics:
+### Backup and Retention Metrics
+
+Monitor store health and backup status with these Prometheus metrics:
 
 | Metric | Type | Description |
 |---|---|---|
-| `ebpf_guard_store_backup_last_success_timestamp` | Gauge | Unix timestamp of the last successful backup |
+| `ebpf_guard_store_backup_last_success_timestamp` | Gauge | Unix timestamp of the last successful backup (0 if backup was never enabled) |
 | `ebpf_guard_store_backup_duration_seconds` | Histogram | Time taken to complete each backup |
 | `ebpf_guard_store_size_bytes` | Gauge | Approximate database size (page_count × page_size) |
+| `ebpf_guard_store_records_total` | Gauge | Number of alert rows currently in the store |
+| `ebpf_guard_store_oldest_record_age_seconds` | Gauge | Age of the oldest surviving row; should stay below `retention_period` once maintenance has run |
 
-Example alert — fire if no successful backup in 2 hours:
+All five are refreshed once per `vacuum_interval`, alongside pruning — not on every write.
+
+Example alert — fire if no successful backup in 2 hours (only meaningful once backup is enabled):
 
 ```yaml
 # deploy/helm/ebpf-guard/templates/prometheusrule.yaml
@@ -488,6 +500,68 @@ The host directory is created as `DirectoryOrCreate`. Configure your log shipper
 ### Retention
 
 The audit log is rotated (renamed to `<path>.1`) when it reaches `max_size_mb`. Only one rotation backup is kept. For longer retention, configure your log shipper to forward entries to a central store before the `.1` file is overwritten, or mount a larger host path and increase `max_size_mb`.
+
+## In-Kernel Path Filtering (file event volume)
+
+File events dominate the agent's event volume — on an idle test host they were 99.4% of
+everything the ring buffer carried, while every useful detection in the same run came from
+the 0.2% that were network events. `bpf.kernel_filter.path_denylist` lets you drop file
+open/read/write events **in the kernel**, by path prefix, before they consume a ring-buffer
+slot or any userspace CPU.
+
+```yaml
+bpf:
+  kernel_filter:
+    enabled: true
+    path_denylist:
+      - "/sys/devices/system/"   # cpu/node topology, polled by monitoring
+      - "/sys/block/"            # block device statistics
+      - "/usr/share/zoneinfo/"   # tzdata, re-read by every process at startup
+```
+
+Before adding a prefix, grep the rule set for it — including any *broader* prefix that
+would cover it. The three above were chosen that way and are the list the test stand runs
+with. Two obvious-looking candidates did not survive that check:
+
+- `/var/log/` (this document's earlier example) is **not** safe: `sigma_log_deletion`
+  matches any access under `/var/log/`, so denying it removes a detection rule's only
+  input.
+- `/proc/...` is not safe at any depth: `cred_proc_maps_mass_read` is anchored on the
+  `/proc/` prefix itself.
+
+Matching is longest-prefix, byte-wise, over the first 128 bytes of the path. A path that
+matches any listed prefix is dropped; anything else passes through untouched.
+
+> **This is the one tuning knob in the agent that can silently blind it.** A wrong prefix
+> does not produce an error — it produces a quieter, healthier-looking agent that has
+> stopped feeding the `fim_*`, `canary_*`, and `cred_*` rules. The list is therefore empty
+> by default and is deliberately not seeded from any built-in list.
+
+**Never add** `/proc`, `/etc`, `/root/.ssh`, `/usr/bin`, or `/var/www`: these carry the
+file-based attack signal the detection rules depend on (credential theft, file integrity
+monitoring, webshell drops, container escape).
+
+**After any change to this list, re-run an attack scenario — not just an idle run.** An
+idle run gets greener the more you filter, so it cannot tell a good prefix from a bad one.
+The acceptance check is that file-based detections are unchanged from the previous run.
+
+### Verifying the filter is working
+
+Every kernel-side drop is counted and exported, so a mistake shows up as a visible, growing
+number rather than as absence:
+
+```promql
+# Events dropped in-kernel by the path denylist
+rate(ebpf_guard_events_dropped_total{collector="fileaccess", reason="path_denylist"}[5m])
+```
+
+Read it alongside the file-based detection rate: drops climbing while `fim_*`/`canary_*`
+alerts fall to zero is the signature of a prefix that is too broad. The counter is polled
+from the BPF map every 15s.
+
+The denylist is applied at `open()` and again at `read()`/`write()` (against the path
+resolved for that file descriptor), so filtering is not defeated by a process that opens a
+file once and then reads it in a loop.
 
 ## Memory Pressure Auto-Tuning
 

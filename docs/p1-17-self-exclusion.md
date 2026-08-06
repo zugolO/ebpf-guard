@@ -190,8 +190,59 @@ curl -s http://localhost:9090/api/v1/alerts | jq '.[] | select(.process.comm == 
 ## Follow-up Items
 
 1. **Verify on actual system** — Run idle-while-agent test to confirm 6293 alerts reduced to zero
-2. **Extend to other rules** — Monitor for additional rules that may need `ebpf-guard-self` exception
+2. ~~**Extend to other rules** — Monitor for additional rules that may need `ebpf-guard-self` exception~~ →
+   done in the P1-17 remainder below (2026-08-06)
 3. **Document best practices** — Update operator guide with self-exclusion pattern for custom rules
+
+## P1-17 (остаток) — 2026-08-06
+
+The stand run after the first fix showed canary alerts at 0, but 1220 `comm=ebpf-guard`
+alerts remained over a 2h idle run: `cred_proc_maps_mass_read` (79) and
+`mitre_sandbox_detect_proc_read` (68) — both already carrying an `ebpf-guard-self`
+exception — plus three rules absent from the original table:
+`supply_chain_pkg_tmp_staging`, `sigma_binary_in_tmp_executed`,
+`privesc_suid_suspicious_path` (6 each).
+
+**Root cause of the remainder:** every exception above (and in the first pass) was
+built by reading alert output and enumerating the paths that appeared in it — a
+method that, by construction, can never catch a path the agent touches that nobody
+happened to see fire yet.
+
+**Method used to close it:** flip the direction. `TestP1_17_SelfTraffic_NoAlertOnRealPaths`
+(`internal/correlator/p1_17_self_traffic_test.go`) starts from the real paths the
+agent's own code opens — enumerated from `internal/config` defaults, `internal/canary.DefaultFiles`,
+`internal/audit`, `internal/store`, `internal/profiler` persistence — and evaluates
+every one of them, under `comm=ebpf-guard` and the real self-PID, against the full
+production rule catalog (`rules/` + the canary manager's dynamically generated
+per-path rules, mirroring `main.go`'s startup sequence). Any alert fails the test.
+Its paired negative control, `TestP1_17_SelfTraffic_ForeignProcessStillAlerts`,
+asserts the same watched paths still alert for a foreign process — catching the
+"fixed the silence by going blind" failure mode from the other direction.
+
+Running this test against the pre-fix rule catalog reproduced the 4 offending rules
+above it, plus two the original alert-volume-driven method had missed entirely
+(they hadn't yet crossed into visible alert volume on the reference stand):
+
+- `sigma_log_deletion` (`rules/sigma-linux.yaml`) — fires on any touch to `/var/log/`
+  with no `file.op` filter; the agent's own rule-audit log rotation
+  (`/var/log/ebpf-guard/audit.jsonl`) matched.
+- `sigma_kernel_version_read` (`rules/sigma-linux.yaml`) — fires on `/proc/version`;
+  `sigma_cpu_info_access` already exempted this same path for the agent, but
+  `sigma_kernel_version_read` (a separate rule keying on the same path) did not.
+- `evasion_hidden_elf_in_tmp` (`rules/defense-evasion.yaml`) — the canary lure file
+  `/tmp/.secret_key` has no extension, so it wasn't caught by the rule's
+  `not_suffix` allowlist.
+
+All six rules now carry a `comm == ebpf-guard` AND `path`-scoped `ebpf-guard-self`
+exception, following the same binding rule as the first pass: never `comm` alone.
+`TestP1_17_SelfTraffic_NoAlertOnRealPaths` and `TestStage1_AttacksStillDetected`
+both pass, so none of the six went blind on the attacker-primitive path.
+
+**Known gap, out of scope for this pass:** the reverse test only covers paths this
+document already knows the agent touches. It is not a runtime trace of actual file
+opens, so a self-touched path nobody has enumerated in this list yet can still slip
+through — the same failure mode this pass fixed, one level up. Verification on a
+live stand (idle run, `comm=ebpf-guard` alert count) remains the authoritative check.
 
 ## References
 

@@ -244,6 +244,199 @@ func restoreProfile(pp persistedProfile, key WorkloadKey, weight float64) *Proce
 	return p
 }
 
+// SaveDetectorsState serializes the combined learned state of every detector in
+// detectors to a single JSON file at path. Used by the correlation engine,
+// which — once anomaly detection is enabled — never routes events through a
+// single AnomalyDetector: IngestAsync partitions events across a per-worker
+// pool by PID hash, so each worker's WorkloadProfileManager only ever sees a
+// fraction of any given workload's traffic (see engine.go's ingest-pool
+// comment). Saving only one detector's state, as main.go did before P0-3,
+// silently drops all profiles the other workers learned. Profiles for the
+// same workload key are merged with the most-recently-seen one winning —
+// good enough for a coarse restore, since the alternative (empty profile) is
+// what every restart produced before this fix.
+//
+// Learner fields (learning_complete, sample_count, start_time) are read from
+// the first non-nil detector: after CorrelationEngine construction every
+// detector's learner is the same shared *BaselineLearner instance (see
+// engine.go's SetSharedLearner wiring), so any one of them is authoritative.
+func SaveDetectorsState(detectors []*AnomalyDetector, path string) error {
+	// No detectors means anomaly detection is disabled, so there is nothing
+	// learned to persist. Writing anyway would truncate a state file left by a
+	// previous run that DID have the profiler enabled: the agent would come
+	// back up, find a syntactically valid but empty snapshot, and restart its
+	// learning window from scratch — silently undoing P0-3 for anyone who
+	// toggles profiler.enabled off and on again. Saving nothing is always the
+	// safe choice here; a missing file is handled by LoadDetectorsState.
+	live := 0
+	for _, ad := range detectors {
+		if ad != nil {
+			live++
+		}
+	}
+	if live == 0 {
+		return nil
+	}
+
+	var (
+		startTime        time.Time
+		sampleCount      uint64
+		learningComplete bool
+		learningPeriod   time.Duration
+		haveLearner      bool
+	)
+
+	type keyedProfile struct {
+		key      WorkloadKey
+		snapshot persistedProfile
+	}
+	merged := make(map[string]keyedProfile)
+
+	for _, ad := range detectors {
+		if ad == nil {
+			continue
+		}
+		if !haveLearner {
+			ad.learner.mu.RLock()
+			startTime = ad.learner.startTime
+			sampleCount = ad.learner.sampleCount
+			learningComplete = ad.learner.learningComplete
+			ad.learner.mu.RUnlock()
+			ad.mu.RLock()
+			learningPeriod = ad.learningPeriod
+			ad.mu.RUnlock()
+			haveLearner = true
+		}
+
+		for i := range ad.profileManager.shards {
+			sh := ad.profileManager.shards[i]
+			sh.mu.RLock()
+			for k, p := range sh.profiles {
+				merged[k.String()] = keyedProfile{key: k, snapshot: snapshotProfile(p)}
+			}
+			sh.mu.RUnlock()
+		}
+	}
+
+	profiles := make(map[string]persistedProfile, len(merged))
+	for keyStr, kp := range merged {
+		profiles[keyStr] = kp.snapshot
+	}
+
+	state := ProfilerState{
+		SavedAt:           time.Now(),
+		LearningPeriod:    learningPeriod,
+		LearningComplete:  learningComplete,
+		LearningStartTime: startTime,
+		SampleCount:       sampleCount,
+		Profiles:          profiles,
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("profiler: marshal state: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("profiler: create state dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("profiler: write state: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("profiler: rename state file: %w", err)
+	}
+	return nil
+}
+
+// LoadDetectorsState restores a previously saved combined state into every
+// detector in detectors. Learner fields are restored into each detector's
+// learner; since every detector shares the same *BaselineLearner instance
+// after CorrelationEngine construction, this is a redundant-but-harmless
+// write repeated N times rather than N independent restores. Profiles are
+// broadcast into every detector's profile manager: each per-worker detector
+// only ever observes a fraction of a workload's live traffic (PID-hash
+// partitioning), so seeding every worker with the full merged baseline gives
+// each one a sensible starting point rather than leaving N-1 of them empty.
+//
+// One field is deliberately NOT broadcast: AlertCount. The EWMA fields are a
+// *baseline* — replicating them into every worker is the whole point, since
+// each worker must score its own share of traffic against the same learned
+// normal. AlertCount is a *tally* of published anomaly alerts, and engine-level
+// stats sum it across detectors (CorrelationEngine.ProfilerStats →
+// AlertTotal/CountAlertTotal). Broadcasting it would multiply the restored
+// total by the detector count on every restart: with a 4-worker pool plus the
+// solo detector, a saved 46 comes back as 230, and /debug/state diverges from
+// /metrics again — the exact 1.75b defect, reintroduced through persistence.
+// Only the first detector keeps the restored tally; the rest start at zero, so
+// the sum equals what was saved.
+//
+// See SaveDetectorsState for why this exists instead of persisting a single
+// detector's state.
+func LoadDetectorsState(detectors []*AnomalyDetector, path string, learningPeriod time.Duration) (bool, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("profiler: read state: %w", err)
+	}
+
+	var state ProfilerState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return false, fmt.Errorf("profiler: parse state: %w", err)
+	}
+
+	if time.Since(state.SavedAt) > 2*learningPeriod {
+		return false, nil
+	}
+
+	// keepsAlertTally marks the single detector that inherits the persisted
+	// AlertCount values; every other detector is seeded with the same baseline
+	// but a zero tally, so the engine-level sum reproduces the saved total
+	// instead of multiplying it by len(detectors). See the doc comment above.
+	keepsAlertTally := true
+
+	for _, ad := range detectors {
+		if ad == nil {
+			continue
+		}
+
+		ad.learner.mu.Lock()
+		ad.learner.startTime = state.LearningStartTime
+		ad.learner.sampleCount = state.SampleCount
+		ad.learner.learningComplete = state.LearningComplete
+		ad.learner.mu.Unlock()
+
+		if state.LearningComplete {
+			ad.learningComplete.Store(true)
+		}
+
+		for keyStr, pp := range state.Profiles {
+			key := workloadKeyFromString(keyStr)
+			if !keepsAlertTally {
+				pp.AlertCount = 0
+			}
+			sh := ad.profileManager.shardFor(key)
+			sh.mu.Lock()
+			if _, exists := sh.profiles[key]; exists {
+				sh.mu.Unlock()
+				continue // already populated by events arriving during startup
+			}
+			profile := restoreProfile(pp, key, ad.profileManager.weight)
+			sh.profiles[key] = profile
+			sh.lruIndex.push(&sh.lruHeap, key)
+			sh.mu.Unlock()
+		}
+
+		keepsAlertTally = false
+	}
+
+	return state.LearningComplete, nil
+}
+
 // workloadKeyFromString parses the canonical string produced by WorkloadKey.String().
 // Format: "comm|namespace|applabel" — SplitN 3 handles applabels that contain "|".
 func workloadKeyFromString(s string) WorkloadKey {

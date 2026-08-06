@@ -266,6 +266,20 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1036, mitre:T1059, sigma, temp-execution]
+    exceptions:
+      # Scoped to comm AND path: the canary manager opens its own lure file
+      # at /tmp/.secret_key on a verification loop — it never executes it.
+      # Any other file under the watched temp dirs still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: eq
+              values: ["/tmp/.secret_key"]
 
   # Syscall-based companion: detects processes whose argv[0] starts with /tmp/,
   # catching execution even when no subsequent file opens happen in /tmp.
@@ -303,6 +317,21 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion]
+    exceptions:
+      # Scoped to comm AND path: the agent writes and rotates its own
+      # rule-audit log under /var/log/ebpf-guard/. Touching any other file
+      # under /var/log/ — including a real log-tampering delete/truncate —
+      # still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: prefix
+              values: ["/var/log/ebpf-guard/"]
 
   - id: sigma_history_file_cleared
     name: "Shell history file cleared or deleted"
@@ -337,9 +366,39 @@ rules:
             - "/var/log/wtmp"
             - "/var/log/btmp"
             - "/var/log/lastlog"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: warning
     action: alert
     tags: [mitre:T1070, sigma, utmp, session-hiding]
+
+  # sshd/cron routinely update utmp/wtmp/lastlog on every login/job run.
+  # Open question 10: already warning severity, so this split only adds the
+  # needs-content-analysis tag for observability — no severity change here.
+  - id: sigma_utmp_wtmp_modified_daemon
+    name: "Login record files modified by login/cron daemon"
+    description: "sshd or cron updated utmp/wtmp/lastlog — usually routine session accounting, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/var/run/utmp"
+            - "/var/log/wtmp"
+            - "/var/log/btmp"
+            - "/var/log/lastlog"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1070, sigma, utmp, session-hiding, needs-content-analysis]
 
   # ============================================================================
   # T1218 — System Binary Proxy Execution
@@ -540,6 +599,20 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1082, sigma, discovery, os-fingerprinting]
+    exceptions:
+      # Scoped to comm AND path: the kernel BTF/version detector reads
+      # /proc/version at startup. Reading the distro release files — the
+      # actual fingerprinting-for-exploit-selection primitive — still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: eq
+              values: ["/proc/version"]
 
   # ============================================================================
   # T1083 — File and Directory Discovery

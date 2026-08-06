@@ -118,6 +118,21 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1036.005, defense-evasion]
+    exceptions:
+      # Scoped to comm AND path: the canary manager writes its own lure file
+      # at /tmp/.secret_key, which has no extension and so isn't caught by
+      # the not_suffix allowlist above. Any other write under the watched
+      # temp dirs still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: eq
+              values: ["/tmp/.secret_key"]
 
   # MITRE ATT&CK: T1562.006 — Impair Defenses: Indicator Blocking
   - id: evasion_auditd_stop

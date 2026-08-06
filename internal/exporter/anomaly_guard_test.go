@@ -35,3 +35,18 @@ func TestAnomalyScoreGuard(t *testing.T) {
 	assert.GreaterOrEqual(t, removed, 1)
 	assert.Equal(t, 0, g.Size())
 }
+
+// TestAnomalyScoreGuardSkipsEmptyComm reproduces the P1-11 cardinality regression:
+// short-lived PIDs whose comm never got read land at the guard with comm="",
+// which is 37% of series in the measured attack run and identifies nothing.
+// SetAnomalyScore must drop these before they consume cardinality budget.
+func TestAnomalyScoreGuardSkipsEmptyComm(t *testing.T) {
+	g := NewAnomalyScoreGuard()
+
+	g.SetAnomalyScore("123", "", 0.9)
+	assert.Equal(t, 0, g.Size(), "empty comm must not create a series")
+
+	// A subsequent real event for the same PID still gets tracked normally.
+	g.SetAnomalyScore("123", "sshd", 0.9)
+	assert.Equal(t, 1, g.Size())
+}

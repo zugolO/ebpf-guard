@@ -325,7 +325,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.ready = true
 	s.mu.Unlock()
 
-	go StartAnomalyScoreCleanup(ctx, AnomalyScoreEvictionInterval, 30*time.Minute)
+	go StartAnomalyScoreCleanup(ctx, AnomalyScoreEvictionInterval, AnomalyScoreMaxAge)
 
 	go func() {
 		// Pin this goroutine to its own OS thread so the Go scheduler always

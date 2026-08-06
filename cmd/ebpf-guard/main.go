@@ -380,6 +380,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Warn("profiler: learning_period is long relative to typical test/attack-sim runs; anomaly detection will stay in the learning phase (no anomaly alerts) until it elapses",
 			slog.Duration("learning_period", engineCfg.LearningPeriod))
 	}
+	engineCfg.IncidentTrustedComms = cfg.Correlator.TrustedComms
 	engineCfg.EnableRateLimit = cfg.Rules.RateLimitAlerts
 	engineCfg.RateLimitWindow = time.Duration(cfg.Rules.RateLimitWindow) * time.Second
 	engineCfg.MaxAlertsPerWindow = cfg.Rules.MaxAlertsPerWindow
@@ -464,42 +465,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 		}
 
-		// Restore learned EWMA/allowlist state from a previous run so restarts
-		// (common in a Kubernetes DaemonSet) don't reset the learning timer to
-		// zero every time. See ISSUES-attack-run-2026-08-03.md P0-3.
+		// Restore the syscall allowlist from a previous run. The allowlist
+		// profiler is recorded/checked synchronously per-event through
+		// ce.allowlistProfiler (the same instance as prof's), so it can be
+		// restored here safely. Anomaly-detector (EWMA) state cannot: it is
+		// restored further down, after the correlation engine (and its
+		// per-worker detector pool) exists. See the P0-3 note there.
 		if cfg.Profiler.StatePersistence.Enabled {
-			learningPeriod := time.Duration(cfg.Profiler.LearningPeriod) * time.Second
-			if ready, loadErr := prof.LoadState(cfg.Profiler.StatePersistence.Path, learningPeriod); loadErr != nil {
-				slog.Warn("profiler: failed to load persisted state, starting fresh",
-					slog.String("path", cfg.Profiler.StatePersistence.Path),
-					slog.Any("error", loadErr))
-				exporter.ProfilerStateRestored.Set(0)
-			} else {
-				slog.Info("profiler: restored persisted state",
-					slog.String("path", cfg.Profiler.StatePersistence.Path),
-					slog.Bool("learning_complete", ready))
-				exporter.ProfilerStateRestored.Set(1)
-			}
-
-			saveInterval := time.Duration(cfg.Profiler.StatePersistence.SaveIntervalSeconds) * time.Second
-			if saveInterval <= 0 {
-				saveInterval = 5 * time.Minute
-			}
-			go func() {
-				ticker := time.NewTicker(saveInterval)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						if saveErr := prof.SaveState(cfg.Profiler.StatePersistence.Path); saveErr != nil {
-							slog.Warn("profiler: periodic state autosave failed",
-								slog.Any("error", saveErr))
-						}
-					}
-				}
-			}()
+			prof.LoadAllowlistState(cfg.Profiler.StatePersistence.Path)
 		}
 
 		if cfg.Watchdog.MemoryPressure.Enabled {
@@ -682,6 +655,63 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
+	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+		slog.Warn("correlation engine: failed to register Prometheus metrics",
+			slog.Any("error", err))
+	}
+
+	// Restore learned EWMA anomaly-detector state from a previous run so
+	// restarts (common in a Kubernetes DaemonSet) don't reset the learning
+	// timer to zero every time. See ISSUES-attack-run-2026-08-03.md P0-3.
+	//
+	// This must run against engine.SaveState/LoadState, not prof.SaveState/
+	// LoadState: once anomaly detection is enabled, IngestAsync routes events
+	// exclusively through the engine's per-worker detector pool
+	// (CorrelationEngine.anomalyDetectors()), never through prof's own
+	// detector. It also must run here, after NewCorrelationEngineWithConfig,
+	// not before: the engine constructs its detector pool and switches every
+	// detector onto one shared *BaselineLearner as part of that call, and
+	// loading state earlier would be immediately overwritten by that
+	// construction (SetSharedLearner resets learningComplete on every
+	// detector it touches).
+	if prof != nil && cfg.Profiler.StatePersistence.Enabled {
+		learningPeriod := time.Duration(cfg.Profiler.LearningPeriod) * time.Second
+		if ready, loadErr := engine.LoadState(cfg.Profiler.StatePersistence.Path, learningPeriod); loadErr != nil {
+			slog.Warn("profiler: failed to load persisted state, starting fresh",
+				slog.String("path", cfg.Profiler.StatePersistence.Path),
+				slog.Any("error", loadErr))
+			exporter.ProfilerStateRestored.Set(0)
+		} else {
+			slog.Info("profiler: restored persisted state",
+				slog.String("path", cfg.Profiler.StatePersistence.Path),
+				slog.Bool("learning_complete", ready))
+			exporter.ProfilerStateRestored.Set(1)
+		}
+
+		saveInterval := time.Duration(cfg.Profiler.StatePersistence.SaveIntervalSeconds) * time.Second
+		if saveInterval <= 0 {
+			saveInterval = 5 * time.Minute
+		}
+		go func() {
+			ticker := time.NewTicker(saveInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if saveErr := engine.SaveState(cfg.Profiler.StatePersistence.Path); saveErr != nil {
+						slog.Warn("profiler: periodic state autosave failed",
+							slog.Any("error", saveErr))
+					}
+					if saveErr := prof.SaveAllowlistState(cfg.Profiler.StatePersistence.Path); saveErr != nil {
+						slog.Warn("profiler: periodic allowlist autosave failed",
+							slog.Any("error", saveErr))
+					}
+				}
+			}
+		}()
+	}
 
 	// Feature E: BPF self-telemetry — per-program CPU overhead metrics.
 	bpfTelemetry := watchdog.NewBPFTelemetry(slog.Default())
@@ -1107,6 +1137,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Int64("max_concurrent_events", maxConcurrent),
 		slog.String("overflow_policy", overflowPolicy))
 
+	// P1-18b: set by enablePathFilter once the fileaccess collector reports
+	// up; polled by the periodic stats loop below to publish the in-kernel
+	// path-filter drop count. atomic.Pointer because SetUp fires from the
+	// collector's own goroutine, concurrently with the poller starting.
+	var pathFilterCtrl atomic.Pointer[internalbpf.PathFilterController]
+
 	var collectors []collector.Collector
 	if dryRun {
 		slog.Info("dry-run mode: using synthetic event generator")
@@ -1168,6 +1204,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					if cfg.BPF.KernelFilter.Enabled {
 						comm, sys, kfCfg, agentPID := fc.KernelFilterMaps()
 						enableKernelFilter("fileaccess", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter)
+						// P1-18b: path-prefix denylist only exists in
+						// fileaccess.bpf.c — no other collector's programs
+						// consult path_filter_map.
+						if len(cfg.BPF.KernelFilter.PathDenylist) > 0 {
+							pathMap, dropCounters := fc.PathFilterMaps()
+							if pf := enablePathFilter("fileaccess", pathMap, dropCounters, cfg.BPF.KernelFilter.PathDenylist); pf != nil {
+								pathFilterCtrl.Store(pf)
+							}
+						}
 					}
 					if cfg.BPF.Sampling.Enabled {
 						enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "file")
@@ -1643,6 +1688,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		exporter.EventsDropped.WithLabelValues(name, "ringbuf_to_router")
 		exporter.EventsDropped.WithLabelValues(name, "router_to_queue")
 	}
+	// P1-18b: pre-register the path_denylist series too, and track the
+	// cumulative BPF-side total so the 15s poll below can report deltas
+	// (RecordDroppedN adds to a Prometheus counter — feeding it the
+	// cumulative value every tick would double-count).
+	exporter.EventsDropped.WithLabelValues("fileaccess", "path_denylist")
+	var lastPathFilterDropTotal uint64
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -1660,6 +1711,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				exporter.SetLearningComplete(complete)
 				exporter.SetLearningSecondsRemaining(remaining)
 				exporter.SetTrackedPIDs(float64(engine.TrackedPIDCount()))
+
+				// P1-18b: publish the in-kernel path-filter drop count so a
+				// wrong denylist prefix shows up as a visible, growing
+				// number instead of quietly reducing file-event volume.
+				// RecordDroppedN adds to the counter, so this must report the
+				// delta since the last tick, not the cumulative total.
+				if pf := pathFilterCtrl.Load(); pf != nil {
+					if total, err := pf.ReadPathFilterDropCount(); err != nil {
+						slog.Warn("path_filter: failed to read drop counter", slog.Any("error", err))
+					} else if total < lastPathFilterDropTotal {
+						// The BPF counter went backwards — the map was
+						// recreated (collector reload) and restarted from a
+						// lower value. Re-baseline instead of subtracting:
+						// unsigned wraparound here would add ~2^64 to the
+						// Prometheus counter in one tick and destroy the
+						// series for the rest of the process's life.
+						slog.Debug("path_filter: drop counter reset, re-baselining",
+							slog.Uint64("previous", lastPathFilterDropTotal),
+							slog.Uint64("current", total))
+						lastPathFilterDropTotal = total
+					} else if delta := total - lastPathFilterDropTotal; delta > 0 {
+						exporter.RecordDroppedN("fileaccess", "path_denylist", delta)
+						lastPathFilterDropTotal = total
+					}
+				}
 
 				tick++
 				if cfg.Profiler.Enabled && !complete && tick%logEvery == 0 {
@@ -2093,6 +2169,36 @@ func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFi
 	}
 }
 
+// enablePathFilter populates path_filter_map with the configured path-prefix
+// denylist (P1-18b) and returns the controller so the caller can poll
+// ReadPathFilterDropCount for the ebpf_guard_events_dropped_total{reason=
+// "path_denylist"} metric. Returns nil if the maps are unavailable (stub
+// mode) or the update fails — the caller logs and continues unfiltered
+// rather than blocking startup on a diagnostic feature.
+//
+// Unlike enableKernelFilter's comm/syscall filters, an empty prefix list is
+// a no-op here by construction (main.go only calls this when
+// len(PathDenylist) > 0), and PathFilterController.SetDenylist itself
+// refuses an empty-string prefix — the two-layer guard against
+// "accidentally deny everything" is intentional given P1-18b's risk note.
+func enablePathFilter(name string, pathMap, dropCounters *ebpf.Map, prefixes []string) *internalbpf.PathFilterController {
+	pf, err := internalbpf.NewPathFilterController(pathMap, dropCounters)
+	if err != nil {
+		slog.Warn("path_filter: map unavailable, path denylist inactive",
+			slog.String("collector", name), slog.Any("error", err))
+		return nil
+	}
+	if err := pf.SetDenylist(prefixes); err != nil {
+		slog.Error("path_filter: failed to load path denylist",
+			slog.String("collector", name), slog.Any("error", err))
+		return nil
+	}
+	slog.Info("path_filter: enabled BPF-side path-prefix denylist",
+		slog.String("collector", name),
+		slog.Int("prefixes", len(prefixes)))
+	return pf
+}
+
 // lossFraction returns dropped/(dropped+accepted) for one window, or 0 when
 // the window carried no events at all — an idle queue is not a lossy one.
 func lossFraction(dropped, accepted int64) float64 {
@@ -2305,11 +2411,23 @@ func gracefulShutdown(
 
 	// Persist learned EWMA/allowlist state so the next restart doesn't reset
 	// the learning timer to zero. See ISSUES-attack-run-2026-08-03.md P0-3.
+	// EWMA state is saved from engine (the detector pool IngestAsync actually
+	// routes events through); allowlist state from prof (unaffected — see
+	// Profiler.SaveAllowlistState).
+	//
+	// prof != nil tracks cfg.Profiler.Enabled, which is also what gates the
+	// engine's detector pool. Keeping the check here means a run with the
+	// profiler off never even attempts a save — SaveDetectorsState refuses to
+	// truncate an existing file in that case, but the intent belongs at the
+	// call site as well as in the callee.
 	if prof != nil && statePersistence.Enabled {
 		slog.Info("graceful shutdown: saving profiler state",
 			slog.String("path", statePersistence.Path))
-		if err := prof.SaveState(statePersistence.Path); err != nil {
+		if err := engine.SaveState(statePersistence.Path); err != nil {
 			slog.Warn("graceful shutdown: profiler state save error", slog.Any("error", err))
+		}
+		if err := prof.SaveAllowlistState(statePersistence.Path); err != nil {
+			slog.Warn("graceful shutdown: allowlist state save error", slog.Any("error", err))
 		}
 	}
 

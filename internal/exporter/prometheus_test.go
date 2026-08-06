@@ -44,6 +44,16 @@ func TestRecordDropped(t *testing.T) {
 	assert.Equal(t, 1.0, networkDropped)
 }
 
+func TestRecordDroppedN(t *testing.T) {
+	EventsDropped.Reset()
+
+	RecordDroppedN("fileaccess", "path_denylist", 7)
+	RecordDroppedN("fileaccess", "path_denylist", 3)
+
+	dropped := testutil.ToFloat64(EventsDropped.WithLabelValues("fileaccess", "path_denylist"))
+	assert.Equal(t, 10.0, dropped, "RecordDroppedN must add, not replace, the counter value")
+}
+
 func TestRecordAlert(t *testing.T) {
 	AlertsTotal.Reset()
 
@@ -91,9 +101,12 @@ func TestSetBPFMapEntries(t *testing.T) {
 // This is a regression test for Sprint 7.2.
 func TestCardinalityRegression_ProfilerAnomalyScore(t *testing.T) {
 	ProfilerAnomalyScore.Reset()
+	globalGuard = NewAnomalyScoreGuard()
 
-	// Simulate 1000 unique processes
-	const numProcesses = 1000
+	// Simulate as many unique processes as the guard allows, so every one of
+	// them survives (this test asserts on exact series count/values, which
+	// eviction would break — eviction itself is covered by TestBoundedCardinality).
+	numProcesses := MaxAnomalyScoreSeries
 	for i := 0; i < numProcesses; i++ {
 		pid := fmt.Sprintf("%d", i+1)
 		comm := fmt.Sprintf("process_%d", i)

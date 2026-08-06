@@ -276,6 +276,36 @@ func CountAlertTotal(wpm *WorkloadProfileManager) uint64 {
 	return total
 }
 
+// RecordPublishedAnomaly increments the AlertCount of the workload profile that
+// produced this event's anomaly alert. Call this exactly once per *published*
+// anomaly alert — i.e. after dedup and rate-limit have passed, at the same
+// point main.go calls exporter.RecordAnomaly for the Prometheus counter.
+//
+// Why this lives here, not in main.go: ProfileState for /debug/state is summed
+// from per-worker AnomalyDetectors via AlertTotal()/CountAlertTotal, which read
+// profile.AlertCount. Before 1.75b that field was only ever written during
+// persistence restore, so /debug/state reported anomalies_total=0 while
+// /metrics reported the live count (46 vs 0 in замер №1). Incrementing
+// AlertCount here, in the detector that owns the profile, makes the two views
+// converge by construction rather than by coincidence — see plan.md волна 1.75b.
+//
+// Missing profile is a no-op: an event whose workload was never recorded (e.g.
+// first event for a new comm) cannot have produced an anomaly alert, so the
+// caller would not have reached the publish path.
+func (ad *AnomalyDetector) RecordPublishedAnomaly(e types.Event) {
+	if ad == nil || ad.profileManager == nil {
+		return
+	}
+	key := WorkloadKeyFromEvent(e)
+	p := ad.profileManager.GetByKey(key)
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.AlertCount++
+	p.mu.Unlock()
+}
+
 // calculateAnomalyScore calculates the anomaly score for a workload profile.
 //
 // Lock order invariant: wpm.mu (WorkloadProfileManager) must be acquired before

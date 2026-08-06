@@ -220,6 +220,21 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1548.001, privesc, suid, filesystem-escape]
+    exceptions:
+      # Scoped to comm AND path: the canary manager creates a lure file at
+      # /tmp/.secret_key and re-opens it every VerifyInterval to check for
+      # tampering — it never executes anything. Any other path under /tmp,
+      # /var/tmp, /dev/shm, or a user home dir still alerts.
+      - name: ebpf-guard-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [ebpf-guard]
+            - field: filename
+              op: eq
+              values: ["/tmp/.secret_key"]
 
   # ============================================================================
   # cgroup v2 escape — writing notify_on_release (T1611)

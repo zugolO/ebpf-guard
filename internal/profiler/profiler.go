@@ -325,34 +325,31 @@ func (p *Profiler) GetDetector() *AnomalyDetector {
 	return p.detector
 }
 
-// SaveState serializes the EWMA learning state and allowlist profiles to path.
-// Allowlist state is saved to path + ".allowlist".
-func (p *Profiler) SaveState(path string) error {
-	if err := p.detector.SaveState(path); err != nil {
-		return err
-	}
+// SaveAllowlistState persists the syscall allowlist profiles to path+".allowlist".
+//
+// P0-3: this used to be bundled into SaveState alongside p.detector's EWMA
+// state, but p.detector never receives events once anomaly detection is
+// enabled (IngestAsync routes exclusively through the correlation engine's
+// per-worker detector pool — see CorrelationEngine.SaveState/LoadState in
+// internal/correlator/engine.go). The allowlist profiler has no such
+// split — ce.allowlistProfiler is the same instance as p.allowlist and is
+// recorded/checked synchronously per-event — so its persistence stays here.
+func (p *Profiler) SaveAllowlistState(path string) error {
 	if p.allowlist.config.Enabled && p.allowlist.config.PersistPath == "" {
-		if err := p.allowlist.SaveState(path + ".allowlist"); err != nil {
-			return err
-		}
+		return p.allowlist.SaveState(path + ".allowlist")
 	}
 	return nil
 }
 
-// LoadState restores a previously saved EWMA learning state and allowlist profiles.
-// learningPeriod is the currently configured learning period used for the freshness check.
-// Returns true if the state was valid and learning was already complete.
-func (p *Profiler) LoadState(path string, learningPeriod time.Duration) (bool, error) {
-	ready, err := p.detector.LoadState(path, learningPeriod)
-	if err != nil {
-		return false, err
-	}
+// LoadAllowlistState restores previously saved syscall allowlist profiles
+// from path+".allowlist". See SaveAllowlistState for why this is split from
+// anomaly-detector state.
+func (p *Profiler) LoadAllowlistState(path string) {
 	if p.allowlist.config.Enabled && p.allowlist.config.PersistPath == "" {
 		if err := p.allowlist.loadState(path + ".allowlist"); err != nil {
 			slog.Warn("profiler: failed to load allowlist state, starting fresh", "err", err)
 		}
 	}
-	return ready, nil
 }
 
 // GetStats returns profiler statistics for the debug endpoint.

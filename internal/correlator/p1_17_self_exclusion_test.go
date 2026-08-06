@@ -59,23 +59,31 @@ func TestP1_17_SelfExclusion(t *testing.T) {
 		// alert even when comm is spoofed to "ebpf-guard".
 		attackPath string
 		op         uint8
+		// foreignComm is the non-agent process used for assertions (2) and (3).
+		// Defaults to "nc". Rules scoped to a process role by closed question 9
+		// need a comm inside that role, otherwise the case would assert the Q9
+		// scoping instead of the self-exception this test is about.
+		foreignComm string
 	}{
 		{"sigma_cpu_info_access", "../../rules/sigma-linux.yaml", "sigma_cpu_info_access",
-			"/proc/cpuinfo", "/proc/sys/kernel/osrelease", opOpen},
+			"/proc/cpuinfo", "/proc/sys/kernel/osrelease", opOpen, ""},
 		{"cred_proc_maps_mass_read", "../../rules/credential-access.yaml", "cred_proc_maps_mass_read",
-			"/proc/1234/maps", "/proc/1234/mem", opOpen},
+			"/proc/1234/maps", "/proc/1234/mem", opOpen, ""},
 		{"mitre_sandbox_detect_proc_read", "../../rules/mitre-additional.yaml", "mitre_sandbox_detect_proc_read",
-			"/proc/self/cgroup", "/proc/1/environ", opOpen},
+			"/proc/self/cgroup", "/proc/1/environ", opOpen, ""},
 		{"container_escape_init_proc", "../../rules/container-escape.yaml", "container_escape_init_proc",
-			"/proc/1/cgroup", "/proc/1/environ", opOpen},
+			"/proc/1/cgroup", "/proc/1/environ", opOpen, ""},
+		// Q9 scoped this rule to web-server processes, so the foreign process
+		// here must be one — a bare "nc" would no longer match the rule at all
+		// and the case would silently stop testing the self-exception.
 		{"owasp_web_sensitive_file_read", "../../rules/owasp-web.yaml", "owasp_web_sensitive_file_read",
-			"/etc/passwd.canary", "/etc/shadow", opOpen},
+			"/etc/passwd.canary", "/etc/shadow", opOpen, "nginx"},
 		{"sigma_sensitive_file_chmod", "../../rules/sigma-linux.yaml", "sigma_sensitive_file_chmod",
-			"/etc/shadow.canary", "/etc/sudoers", opOpen},
+			"/etc/shadow.canary", "/etc/sudoers", opOpen, ""},
 		{"sigma_sensitive_dir_listing", "../../rules/sigma-linux.yaml", "sigma_sensitive_dir_listing",
-			"/root/.ssh/id_rsa.canary", "/root/.ssh/id_rsa", opOpen},
+			"/root/.ssh/id_rsa.canary", "/root/.ssh/id_rsa", opOpen, ""},
 		{"drift_new_file_dir_sensitive", "../../rules/drift-rules.yaml", "drift_new_file_dir_sensitive",
-			"/root/.ssh/id_rsa.canary", "/etc/cron.d/backdoor", opOpen},
+			"/root/.ssh/id_rsa.canary", "/etc/cron.d/backdoor", opOpen, ""},
 	}
 
 	for _, tc := range testCases {
@@ -116,15 +124,39 @@ func TestP1_17_SelfExclusion(t *testing.T) {
 			assert.Empty(t, engine.Evaluate(p117FileEvent(selfPID, "ebpf-guard", tc.benignPath, tc.op)),
 				"rule %s must not alert on ebpf-guard's own access to %s", tc.ruleID, tc.benignPath)
 
+			foreignComm := tc.foreignComm
+			if foreignComm == "" {
+				foreignComm = "nc"
+			}
+
 			// (2) the same access from a foreign process still alerts.
-			assert.NotEmpty(t, engine.Evaluate(p117FileEvent(4242, "nc", tc.benignPath, tc.op)),
-				"rule %s went blind: it no longer alerts on %s from a foreign process — "+
-					"the self-exception must narrow the rule, not disable it", tc.ruleID, tc.benignPath)
+			assert.NotEmpty(t, engine.Evaluate(p117FileEvent(4242, foreignComm, tc.benignPath, tc.op)),
+				"rule %s went blind: it no longer alerts on %s from a foreign process (%s) — "+
+					"the self-exception must narrow the rule, not disable it",
+				tc.ruleID, tc.benignPath, foreignComm)
 
 			// (3) comm spoofing does not buy invisibility on attacker paths.
-			assert.NotEmpty(t, engine.Evaluate(p117FileEvent(4242, "ebpf-guard", tc.attackPath, tc.op)),
-				"rule %s: a process spoofing comm='ebpf-guard' was able to access %s "+
-					"undetected — the self-exception is not bound to a path", tc.ruleID, tc.attackPath)
+			//
+			// For a rule Q9 scoped to a process role, spoofing comm='ebpf-guard'
+			// puts the process outside the rule's scope entirely, so this rule
+			// alone cannot answer the question. The property still has to hold
+			// somewhere, so it is asserted against the whole catalog below —
+			// weakening it to "this rule is scoped now" would drop exactly the
+			// guarantee the case exists for.
+			spoofEvent := p117FileEvent(4242, "ebpf-guard", tc.attackPath, tc.op)
+			if tc.foreignComm == "" {
+				assert.NotEmpty(t, engine.Evaluate(spoofEvent),
+					"rule %s: a process spoofing comm='ebpf-guard' was able to access %s "+
+						"undetected — the self-exception is not bound to a path", tc.ruleID, tc.attackPath)
+				return
+			}
+
+			catalog, err := correlator.LoadRulesFromDir("../../rules")
+			require.NoError(t, err)
+			assert.NotEmpty(t, correlator.NewRuleEngine(catalog).Evaluate(spoofEvent),
+				"rule %s is Q9-scoped, and no rule in the catalog alerts on %s from a "+
+					"process spoofing comm='ebpf-guard' — comm spoofing must not grant "+
+					"invisibility on an attacker path", tc.ruleID, tc.attackPath)
 		})
 	}
 }

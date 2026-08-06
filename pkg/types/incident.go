@@ -38,4 +38,18 @@ type Incident struct {
 	// counter. Internal bookkeeping — not part of the API surface.
 	CountedAttack     bool `json:"-"`
 	CountedSuspicious bool `json:"-"`
+
+	// SourceEvents counts the distinct (pid, event timestamp) pairs behind this
+	// incident's alerts. P1-13: a single kernel event (sshd reading /etc/passwd
+	// at login) can trip five rules at once, one source event masquerading as
+	// five independent signals. Scoring counts distinct source events, not
+	// distinct alerts, so this fan-out cannot manufacture unique-rule score on
+	// its own. Internal bookkeeping — not part of the API surface.
+	SourceEvents map[uint64]struct{} `json:"-"`
+	// HasUntrustedSignal is true once an alert from a comm outside the trusted
+	// allowlist (see defaultTrustedComms) has contributed to this incident.
+	HasUntrustedSignal bool `json:"-"`
+	// HasNetworkSignal is true once an alert whose triggering event is a
+	// network/dns/tls event has contributed to this incident.
+	HasNetworkSignal bool `json:"-"`
 }

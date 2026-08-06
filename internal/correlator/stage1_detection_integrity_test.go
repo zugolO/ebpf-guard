@@ -187,6 +187,115 @@ func TestStage1_LoopbackNotExfiltration(t *testing.T) {
 		len(got), keysOf(got))
 }
 
+// TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed pins the plan.md open
+// question 10 resolution for P1-6: sshd/cron are the source of ~52% of idle
+// alert volume writing to passwd/shadow/utmp during routine login and cron
+// accounting. The recommendation explicitly rejects suppressing this via an
+// exception ("это редкий высокоценный сигнал" — rare, high-value signal) and
+// instead requires downgrading severity to warning for the daemon triple
+// while every other process (a real attacker) still gets critical.
+func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
+	engine := correlator.NewRuleEngine(loadStage1Rules(t))
+
+	const opWrite uint8 = 2
+
+	testCases := []struct {
+		name       string
+		path       string
+		baseRule   string
+		daemonRule string
+	}{
+		{"passwd", "/etc/passwd", "fim_passwd_write", "fim_passwd_write_daemon"},
+		{"shadow", "/etc/shadow", "fim_shadow_write", "fim_shadow_write_daemon"},
+		{"passwd-or-shadow (rootkit)", "/etc/passwd", "rootkit_passwd_modified", "rootkit_passwd_modified_daemon"},
+		{"utmp", "/var/run/utmp", "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, daemonComm := range []string{"sshd", "cron"} {
+				alerts := engine.Evaluate(stage1FileEvent(daemonComm, tc.path, opWrite))
+				byID := make(map[string]types.Alert)
+				for _, a := range alerts {
+					byID[a.RuleID] = a
+				}
+
+				if a, ok := byID[tc.baseRule]; ok {
+					t.Errorf("%s fired at severity %v for daemon comm %q — must not fire the "+
+						"critical base rule for sshd/cron, only the daemon variant at warning",
+						tc.baseRule, a.Severity, daemonComm)
+				}
+
+				a, ok := byID[tc.daemonRule]
+				require.True(t, ok, "%s did not fire for daemon comm %q — the P1-6 daemon "+
+					"variant must still alert (open question 10: downgrade, not suppress)",
+					tc.daemonRule, daemonComm)
+				assert.Equal(t, types.SeverityWarning, a.Severity,
+					"%s fired at %v for daemon comm %q, want warning (open question 10)",
+					tc.daemonRule, a.Severity, daemonComm)
+			}
+
+			// A non-daemon process (attacker) must still get the critical base rule.
+			alerts := engine.Evaluate(stage1FileEvent("attacker", tc.path, opWrite))
+			byID := make(map[string]bool)
+			for _, a := range alerts {
+				byID[a.RuleID] = true
+			}
+			assert.True(t, byID[tc.baseRule],
+				"%s did not fire for a non-daemon writer — P1-6 must not weaken detection "+
+					"of a real attacker writing to %s", tc.baseRule, tc.path)
+			assert.False(t, byID[tc.daemonRule],
+				"%s fired for a non-daemon writer — the daemon variant must be scoped to sshd/cron only",
+				tc.daemonRule)
+		})
+	}
+}
+
+// TestStage1_Q9_WebFileRulesRequireWebProcess pins closed question 9 (plan.md,
+// wave 3, "Специфичность файловых правил"). These rules all claim a web server
+// process in their name/description but used to condition on filename alone,
+// so a single sshd login read of /etc/passwd raised the whole cluster. The
+// audit measured the cost: ~19 850 of 58 045 alerts over four runs came from
+// this cluster, only ~8% of them from an attacker.
+//
+// This is the file-rule twin of TestStage1_NetworkRuleSpecificity (P2-14), and
+// like it, it asserts both directions: the daemon no longer matches, the web
+// process still does.
+func TestStage1_Q9_WebFileRulesRequireWebProcess(t *testing.T) {
+	engine := correlator.NewRuleEngine(loadStage1Rules(t))
+
+	const opOpen uint8 = 0
+
+	testCases := []struct {
+		rule string
+		path string
+	}{
+		{"owasp_web_sensitive_file_read", "/etc/passwd"},
+		{"appexploit_lfi_passwd_access", "/etc/passwd"},
+		{"appexploit_xxe_file_read", "/etc/passwd"},
+		{"webshell_sensitive_file_read", "/etc/passwd"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.rule, func(t *testing.T) {
+			// The idle-run FP: sshd reading /etc/passwd during authentication.
+			for _, daemonComm := range []string{"sshd", "cron"} {
+				got := firedRules(engine, stage1FileEvent(daemonComm, tc.path, opOpen))
+				assert.False(t, got[tc.rule],
+					"%s fired for %q reading %s — the rule names a web server process "+
+						"but its condition does not check one (Q9)", tc.rule, daemonComm, tc.path)
+			}
+
+			// The signal the rule exists for must survive: a web worker
+			// reading the same path is exactly LFI/XXE/webshell credential access.
+			got := firedRules(engine, stage1FileEvent("nginx", tc.path, opOpen))
+			assert.True(t, got[tc.rule],
+				"%s did not fire for nginx reading %s — the Q9 comm scoping must "+
+					"narrow the rule to web processes, not disable it", tc.rule, tc.path)
+		})
+	}
+}
+
 // TestStage1_NetworkRuleSpecificity asserts the P2-14 fix is real: rules that
 // name a specific process role no longer fire for unrelated processes.
 func TestStage1_NetworkRuleSpecificity(t *testing.T) {

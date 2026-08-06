@@ -259,17 +259,17 @@ func BenchmarkCleanup(b *testing.B) {
 	}
 }
 
-// TestBoundedCardinality verifies that after 10,001 unique-PID anomaly events,
-// the AnomalyScoreGuard size never exceeds MaxAnomalyScoreSeries (10,000).
+// TestBoundedCardinality verifies that after MaxAnomalyScoreSeries+1 unique-PID
+// anomaly events, the AnomalyScoreGuard size never exceeds MaxAnomalyScoreSeries.
 // This ensures the eviction path is exercised and prevents Prometheus OOM.
 func TestBoundedCardinality(t *testing.T) {
 	guard := NewAnomalyScoreGuard()
 
 	// Verify the limit is as expected
-	assert.Equal(t, 10000, MaxAnomalyScoreSeries, "MaxAnomalyScoreSeries should be 10000")
+	assert.Equal(t, 500, MaxAnomalyScoreSeries, "MaxAnomalyScoreSeries should be 500")
 
-	// Simulate 10,001 unique PID events
-	for i := 0; i < 10001; i++ {
+	// Simulate MaxAnomalyScoreSeries+1 unique PID events
+	for i := 0; i < MaxAnomalyScoreSeries+1; i++ {
 		pid := fmt.Sprintf("%d", i)
 		comm := fmt.Sprintf("proc%d", i)
 		// Use a score above threshold to avoid immediate eviction
@@ -283,10 +283,10 @@ func TestBoundedCardinality(t *testing.T) {
 
 	// Final verification
 	assert.Equal(t, MaxAnomalyScoreSeries, guard.Size(),
-		"expected guard to be at max capacity after 10,001 unique PIDs")
+		"expected guard to be at max capacity after MaxAnomalyScoreSeries+1 unique PIDs")
 
 	// Verify that we can still add more entries (eviction should work)
-	for i := 10001; i < 11000; i++ {
+	for i := MaxAnomalyScoreSeries + 1; i < MaxAnomalyScoreSeries+1000; i++ {
 		pid := fmt.Sprintf("%d", i)
 		comm := fmt.Sprintf("proc%d", i)
 		score := 0.5 + float64(i%50)/100.0

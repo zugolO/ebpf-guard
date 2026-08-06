@@ -78,9 +78,38 @@ rules:
           values:
             - "/etc/passwd"
             - "/etc/passwd-"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: critical
     action: alert
     tags: [mitre:T1098, fim, passwd, account-manipulation]
+
+  # sshd/cron routinely touch /etc/passwd during login/job accounting (lastlog
+  # update, PAM session bookkeeping). Open question 10: don't suppress — it's
+  # rare, high-value signal if abused — instead downgrade to warning and flag
+  # for content analysis, which eBPF alone cannot do.
+  - id: fim_passwd_write_daemon
+    name: "/etc/passwd written by login/cron daemon"
+    description: "sshd or cron wrote /etc/passwd — usually routine login/job accounting, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/etc/passwd"
+            - "/etc/passwd-"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1098, fim, passwd, account-manipulation, needs-content-analysis]
 
   - id: fim_shadow_write
     name: "/etc/shadow written (password hash modification)"
@@ -99,9 +128,37 @@ rules:
             - "/etc/shadow-"
             - "/etc/gshadow"
             - "/etc/gshadow-"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: critical
     action: alert
     tags: [mitre:T1098, fim, shadow, credential-manipulation]
+
+  # See fim_passwd_write_daemon above — same rationale (open question 10).
+  - id: fim_shadow_write_daemon
+    name: "/etc/shadow written by login/cron daemon"
+    description: "sshd or cron wrote /etc/shadow — usually routine password-aging bookkeeping, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/etc/shadow"
+            - "/etc/shadow-"
+            - "/etc/gshadow"
+            - "/etc/gshadow-"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1098, fim, shadow, credential-manipulation, needs-content-analysis]
 
   - id: fim_group_write
     name: "/etc/group written (group membership modification)"

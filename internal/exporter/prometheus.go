@@ -244,6 +244,13 @@ func RecordDropped(collector, reason string) {
 	EventsDropped.WithLabelValues(collector, reason).Inc()
 }
 
+// RecordDroppedN adds n to the dropped events counter with reason. Used when
+// the drop count is read as a periodic delta from a BPF counter (e.g. the
+// P1-18b path-filter drop map) rather than observed one event at a time.
+func RecordDroppedN(collector, reason string, n uint64) {
+	EventsDropped.WithLabelValues(collector, reason).Add(float64(n))
+}
+
 // RecordAlert increments the alerts counter for the given rule, severity,
 // namespace, pod, and node. Under normal operation all labels are recorded
 // verbatim; if the series count exceeds the cardinality limit, namespace, pod,

@@ -131,7 +131,7 @@ type CorrelationEngine struct {
 	alertsDropped   atomic.Uint64
 
 	// Sprint 34.0 Prometheus metrics
-	queueDepthGauge  prometheus.Gauge     // ebpf_guard_event_queue_depth
+	queueDepthGauge  prometheus.Gauge     // ebpf_guard_event_queue_fill_ratio
 	latencyHistogram prometheus.Histogram // ebpf_guard_correlation_latency_seconds (internal histogram)
 	activeRulesGauge prometheus.Gauge     // ebpf_guard_active_rules_total
 
@@ -419,6 +419,11 @@ type CorrelationEngineConfig struct {
 	// same (pid, namespace) into an Incident. Zero → 60 seconds.
 	IncidentWindow time.Duration
 
+	// IncidentTrustedComms overrides the set of process names whose alerts
+	// cannot alone promote an incident to an "attack" verdict. Empty → the
+	// built-in default (see defaultTrustedComms).
+	IncidentTrustedComms []string
+
 	// AllowlistProfiler enables deny-unknown syscall enforcement.
 	// When set, every syscall event is checked against the learned allowlist
 	// and generates an alert (or enforced action) when unknown.
@@ -480,8 +485,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	})
 
 	queueDepthGauge := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "ebpf_guard_event_queue_depth",
-		Help: "Current event channel fill level as a fraction [0,1].",
+		Name: "ebpf_guard_event_queue_fill_ratio",
+		Help: "Current event channel fill level as a fraction [0,1]. Distinct from ebpf_guard_event_queue_depth (raw count).",
 	})
 
 	latencyHistogram := prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -658,6 +663,12 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	}
 
 	ce.ruleEngine.Store(NewRuleEngine(config.Rules))
+
+	// Which daemons are background noise is deployment-specific, so the trust
+	// gate's allowlist is tunable without a rebuild. Empty keeps the default.
+	if len(config.IncidentTrustedComms) > 0 {
+		ce.incidentTracker.SetTrustedComms(config.IncidentTrustedComms)
+	}
 
 	// Emit a synthetic critical alert the first time an incident is judged an
 	// attack, so correlated attacks reach exporters, notifications and the alert
@@ -1619,6 +1630,16 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 						}
 						alerts = append(alerts, anomalyAlert)
 						ce.alertsGenerated.Add(1)
+						// 1.75b: bump the detector's workload-profile AlertCount in
+						// lock-step with the published-anomaly path. main.go will
+						// call exporter.RecordAnomaly for the Prometheus counter on
+						// dispatch; without this mirror write /debug/state's
+						// anomalies_total (summed via AlertTotal/CountAlertTotal)
+						// stays at zero while /metrics climbs — the exact
+						// divergence seen in замер №1 (46 vs 0). Doing it here,
+						// post-dedup/rate-limit, keeps the two counts equal by
+						// construction rather than only when nothing was dropped.
+						ad.RecordPublishedAnomaly(e)
 					} else {
 						ce.alertsDropped.Add(1)
 						if !globalOK {
@@ -1883,6 +1904,30 @@ func (ce *CorrelationEngine) anomalyDetectors() []*profiler.AnomalyDetector {
 	return out
 }
 
+// SaveState persists the combined learned state of every anomaly detector the
+// engine routes events through (solo detector + ingest pool) to path.
+//
+// P0-3: main.go previously called SaveState/LoadState on main.go's standalone
+// *profiler.Profiler, whose detector never receives events once anomaly
+// detection is enabled — IngestAsync routes exclusively through
+// ce.anomalyDetectors() (see that method's comment). Persistence therefore
+// saved an always-empty detector and restored into one nothing read from,
+// making state_persistence a complete no-op end to end despite reporting
+// success via ebpf_guard_profiler_state_restored. Callers must use this
+// method (and LoadState below) instead.
+func (ce *CorrelationEngine) SaveState(path string) error {
+	return profiler.SaveDetectorsState(ce.anomalyDetectors(), path)
+}
+
+// LoadState restores previously saved combined anomaly-detector state into
+// every detector the engine routes events through. See SaveState and
+// anomalyDetectors for why this must run after the ingest pool (and its
+// shared BaselineLearner) is constructed — call it only on an already-built
+// *CorrelationEngine, never on the standalone *profiler.Profiler.
+func (ce *CorrelationEngine) LoadState(path string, learningPeriod time.Duration) (bool, error) {
+	return profiler.LoadDetectorsState(ce.anomalyDetectors(), path, learningPeriod)
+}
+
 // ProfilerStats aggregates profiler statistics across every anomaly detector in
 // the engine (solo + ingest pool). Learning phase is sourced from the shared
 // BaselineLearner that every detector was switched onto at construction
@@ -1908,13 +1953,25 @@ func (ce *CorrelationEngine) ProfilerStats() profiler.ProfilerStats {
 		anomaliesTotal   uint64
 		haveDetector     bool
 	)
+	// ProfilesActive counts DISTINCT workloads, not per-detector profile slots.
+	// A plain sum double-counts after a restart: LoadDetectorsState broadcasts
+	// the same restored baseline into every detector, so one saved workload
+	// would report as len(detectors) live ones. Deduplicating by WorkloadKey
+	// keeps the number meaning "how many workloads is the profiler tracking",
+	// which is what /debug/state consumers read it as. AnomaliesTotal stays a
+	// plain sum: each detector tallies only the anomalies it published, and
+	// persistence deliberately restores that tally into a single detector.
+	seenWorkloads := make(map[profiler.WorkloadKey]struct{})
 	for _, ad := range ce.anomalyDetectors() {
 		haveDetector = true
 		if wpm := ad.GetProfileManager(); wpm != nil {
-			profilesActive += wpm.Len()
+			for _, k := range wpm.Keys() {
+				seenWorkloads[k] = struct{}{}
+			}
 		}
 		anomaliesTotal += ad.AlertTotal()
 	}
+	profilesActive = len(seenWorkloads)
 	if ce.anomalyDetector != nil {
 		learningComplete = ce.anomalyDetector.IsLearningComplete()
 		learningProgress = ce.anomalyDetector.LearningProgress()

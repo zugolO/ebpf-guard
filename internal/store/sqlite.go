@@ -33,6 +33,14 @@ var (
 		Name: "ebpf_guard_store_size_bytes",
 		Help: "Approximate size of the SQLite alert database in bytes (page_count * page_size).",
 	})
+	storeRecordsTotal = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_store_records_total",
+		Help: "Number of alert rows currently in the SQLite store.",
+	})
+	storeOldestRecordAge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_store_oldest_record_age_seconds",
+		Help: "Age in seconds of the oldest alert row in the SQLite store. 0 when the store is empty.",
+	})
 )
 
 // SQLiteStore implements AlertStore using SQLite.
@@ -160,7 +168,8 @@ func (s *SQLiteStore) performMaintenance(ctx context.Context) {
 	s.updateSizeMetric(ctx)
 }
 
-// updateSizeMetric sets storeSizeBytes from SQLite page statistics.
+// updateSizeMetric sets storeSizeBytes, storeRecordsTotal, and
+// storeOldestRecordAge from SQLite page statistics and the alerts table.
 func (s *SQLiteStore) updateSizeMetric(ctx context.Context) {
 	var pageCount, pageSize int64
 	// Best-effort size metric; explicit `_ =` discards the error to satisfy both
@@ -170,6 +179,43 @@ func (s *SQLiteStore) updateSizeMetric(ctx context.Context) {
 	if pageSize > 0 {
 		storeSizeBytes.Set(float64(pageCount * pageSize))
 	}
+
+	var count int64
+	var oldest sql.NullString
+	_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*), MIN(timestamp) FROM alerts").Scan(&count, &oldest)
+	storeRecordsTotal.Set(float64(count))
+	if oldest.Valid {
+		if t, err := parseSQLiteTime(oldest.String); err == nil {
+			storeOldestRecordAge.Set(time.Since(t).Seconds())
+		} else {
+			storeOldestRecordAge.Set(0)
+		}
+	} else {
+		storeOldestRecordAge.Set(0)
+	}
+}
+
+// sqliteTimeLayouts are the timestamp formats mattn/go-sqlite3 writes for Go
+// time.Time values (with and without a fractional-second component). MIN() on
+// an aggregate query loses the declared column type, so the driver returns the
+// raw string instead of scanning it into time.Time directly — this mirrors the
+// driver's own parsing so aggregate reads match single-row reads.
+var sqliteTimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05-07:00",
+	time.RFC3339,
+}
+
+func parseSQLiteTime(s string) (time.Time, error) {
+	var lastErr error
+	for _, layout := range sqliteTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		} else {
+			lastErr = err
+		}
+	}
+	return time.Time{}, lastErr
 }
 
 // runBackup is the background periodic-backup goroutine.

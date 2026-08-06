@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -222,4 +223,49 @@ func TestSQLiteStore_BackupDisabled(t *testing.T) {
 
 	// Should be a no-op, not panic.
 	s.performBackup(context.Background())
+}
+
+// TestSQLiteStore_RecordsAndOldestAgeMetrics verifies that performMaintenance
+// publishes store_records_total and store_oldest_record_age_seconds from the
+// alerts table (P2-21: neither existed before, leaving retention unobservable).
+func TestSQLiteStore_RecordsAndOldestAgeMetrics(t *testing.T) {
+	s, err := NewSQLiteStore(SQLiteConfig{
+		Path:           ":memory:",
+		VacuumInterval: time.Hour, // won't fire during the test
+	})
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// Empty store: records=0, oldest age=0.
+	s.performMaintenance(ctx)
+	assert.Equal(t, float64(0), testutil.ToFloat64(storeRecordsTotal))
+	assert.Equal(t, float64(0), testutil.ToFloat64(storeOldestRecordAge))
+
+	oldest := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, s.Store(ctx, types.Alert{
+		ID:        "oldest",
+		Timestamp: oldest,
+		RuleID:    "rule",
+		Severity:  types.SeverityWarning,
+		PID:       1,
+		Comm:      "test",
+		Message:   "oldest alert",
+	}))
+	require.NoError(t, s.Store(ctx, types.Alert{
+		ID:        "newer",
+		Timestamp: time.Now(),
+		RuleID:    "rule",
+		Severity:  types.SeverityWarning,
+		PID:       2,
+		Comm:      "test",
+		Message:   "newer alert",
+	}))
+
+	s.performMaintenance(ctx)
+
+	assert.Equal(t, float64(2), testutil.ToFloat64(storeRecordsTotal))
+	age := testutil.ToFloat64(storeOldestRecordAge)
+	assert.InDelta(t, 2*time.Hour.Seconds(), age, 10, "oldest record age should be ~2h")
 }

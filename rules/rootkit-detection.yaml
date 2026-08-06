@@ -452,6 +452,33 @@ rules:
           values:
             - "/etc/passwd"
             - "/etc/shadow"
+        - field: proc.comm
+          op: not_in
+          values: ["sshd", "cron"]
     severity: critical
     action: alert
     tags: [mitre:T1136.001, rootkit, passwd, backdoor-account]
+
+  # See fim_passwd_write_daemon rationale (open question 10): don't suppress
+  # sshd/cron writes to passwd/shadow — downgrade and flag instead.
+  - id: rootkit_passwd_modified_daemon
+    name: "System password database modified by login/cron daemon"
+    description: "sshd or cron wrote /etc/passwd or /etc/shadow — usually routine login/job accounting, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: op
+          op: eq
+          values: ["write"]
+        - field: filename
+          op: in
+          values:
+            - "/etc/passwd"
+            - "/etc/shadow"
+        - field: proc.comm
+          op: in
+          values: ["sshd", "cron"]
+    severity: warning
+    action: alert
+    tags: [mitre:T1136.001, rootkit, passwd, backdoor-account, needs-content-analysis]

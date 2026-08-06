@@ -23,6 +23,39 @@ var (
 		},
 		[]string{"verdict"},
 	)
+
+	// incidentsEmptyChainTotal counts incidents promoted to a verdict without a
+	// populated process chain. Together with incidents_total it gives the ratio
+	// empty/total — the operational signal for P0-1 health: a non-zero value
+	// here means the lineage pipeline is silently broken (events arriving with
+	// PPID=0 and /proc enrichment not recovering them). The problem persisted
+	// across four attack runs precisely because no metric surfaced it.
+	incidentsEmptyChainTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_incidents_empty_chain_total",
+			Help: "Incidents promoted to a verdict without a populated process chain. Compare with ebpf_guard_incidents_total to track P0-1 lineage health.",
+		},
+		[]string{"verdict"},
+	)
+
+	// incidentsTrustedRootTotal counts incidents whose root process is a trusted
+	// system daemon (sshd, cron — see defaultTrustedComms). Divided by
+	// incidents_total it is the "share of incidents on system daemons" that the
+	// wave 2 gate puts at < 20%; in run #4 it was 100% (114/114 on sshd) and in
+	// замер №1 still 37.4%.
+	//
+	// This is the counterpart to incidents_empty_chain_total: that metric covers
+	// the gate's second criterion, this one its first. Without it the share is
+	// only computable by post-hoc analysis of an incidents snapshot, which is
+	// exactly how P0-1 survived four runs unnoticed — a criterion nobody
+	// computes is a criterion that quietly weakens (пункт 4 «Порядка работы»).
+	incidentsTrustedRootTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_incidents_trusted_root_total",
+			Help: "Incidents promoted to a verdict whose root process is a trusted system daemon. Divide by ebpf_guard_incidents_total for the daemon share (wave 2 gate: < 20%).",
+		},
+		[]string{"verdict"},
+	)
 )
 
 const (
@@ -50,6 +83,26 @@ const (
 	// emitted when an incident crosses the attack threshold.
 	AlertRuleIDConfirmedAttack = "incident_confirmed_attack"
 )
+
+// defaultTrustedComms lists processes whose file/config-read alerts are
+// legitimate background activity (auth reading /etc/passwd, cron reading its
+// spool) rather than attacker behaviour. P1-13: 102 of 114 "attack" incidents
+// in attack-run telemetry were sshd reading /etc/passwd at login, matched by
+// five rules that key on filename alone. Wave 3 (closed question 9) has since
+// added the missing comm dimension to the web-framed rules
+// (owasp-web.yaml/application-exploits.yaml/webshell-detection.yaml), which
+// removes most of that fan-out at the source — this gate stays as the
+// correlation-level defence, because rule specificity is per-rule work that
+// can regress, while the trust gate is one place that cannot.
+//
+// Alerts from these comms still reach the incident and its process_chain, they
+// just cannot supply the score that promotes a verdict — see
+// hasUntrustedOrNetworkSignal. Override per deployment via
+// correlator.trusted_comms (see IncidentTrustedComms).
+var defaultTrustedComms = map[string]struct{}{
+	"sshd": {},
+	"cron": {},
+}
 
 // IncidentScoringConfig tunes how incidents are scored and when they are
 // promoted to an "attack" verdict. Weights are per-unit contributions; the
@@ -142,6 +195,10 @@ type IncidentTracker struct {
 	window         time.Duration
 	lineageTracker *profiler.LineageTracker
 	scoringConfig  IncidentScoringConfig
+	// trustedComms lists process names whose alerts cannot by themselves
+	// promote an incident to "attack" — see defaultTrustedComms and
+	// hasUntrustedOrNetworkSignal.
+	trustedComms map[string]struct{}
 
 	// onAttack is invoked (outside the tracker lock) the first time an incident
 	// is promoted to the "attack" verdict, so the engine can emit a synthetic
@@ -170,6 +227,7 @@ func newIncidentTracker(window time.Duration, lineageTracker *profiler.LineageTr
 		window:         window,
 		lineageTracker: lineageTracker,
 		scoringConfig:  DefaultIncidentScoringConfig(),
+		trustedComms:   defaultTrustedComms,
 		ruleTactics:    buildRuleTactics(rules),
 		open:           make(map[incidentKey]*types.Incident),
 		byID:           make(map[string]*types.Incident),
@@ -206,6 +264,19 @@ func (t *IncidentTracker) SetScoringConfig(cfg IncidentScoringConfig) {
 	t.mu.Unlock()
 }
 
+// SetTrustedComms replaces the set of process names whose alerts cannot alone
+// promote an incident to "attack" (see defaultTrustedComms). An empty or nil
+// slice clears the allowlist entirely, i.e. every comm counts as untrusted.
+func (t *IncidentTracker) SetTrustedComms(comms []string) {
+	next := make(map[string]struct{}, len(comms))
+	for _, c := range comms {
+		next[c] = struct{}{}
+	}
+	t.mu.Lock()
+	t.trustedComms = next
+	t.mu.Unlock()
+}
+
 // SetAttackHandler registers a callback invoked once per incident, at the moment
 // it is first promoted to the "attack" verdict. The callback runs outside the
 // tracker lock and must not call back into the tracker.
@@ -236,6 +307,48 @@ func (t *IncidentTracker) rootIdentity(alert types.Alert) (uint32, string) {
 	// PPID+comm is a stable identity for a live process and changes when the PID
 	// is recycled by an unrelated process.
 	return root.PID, fmt.Sprintf("%d/%s", root.PPID, root.Comm)
+}
+
+// sourceEventKey identifies the kernel event that produced alert, so that
+// multiple rules firing on the same event (same PID, same nanosecond-precision
+// alert timestamp) count as one source event rather than N independent
+// signals. Uses Alert.Timestamp because the engine always populates it — it is
+// derived from the triggering event's clock, so every rule that fires on one
+// event carries the identical value, which is exactly the equality this dedup
+// needs. The embedded Event.Timestamp is left zero on synthetic and
+// engine-internal alerts, which would collapse unrelated alerts into one key.
+// Packing PID into the high bits keeps the key collision-free across
+// concurrently active PIDs sharing a timestamp; a raw timestamp key would
+// conflate unrelated processes sampled in the same tick.
+func sourceEventKey(alert types.Alert) uint64 {
+	return uint64(alert.PID)<<32 ^ uint64(alert.Timestamp.UnixNano())
+}
+
+// isTrustedComm reports whether comm is in the tracker's trusted-process
+// allowlist (see defaultTrustedComms). Caller must hold at least the read lock,
+// or call before any lock is taken (trustedComms is only replaced wholesale by
+// SetTrustedComms, never mutated in place).
+func (t *IncidentTracker) isTrustedComm(comm string) bool {
+	if comm == "" {
+		return false
+	}
+	_, ok := t.trustedComms[comm]
+	return ok
+}
+
+// isNetworkSignal reports whether et is a network-observable event type
+// (TCP connect/close, DNS, TLS) as opposed to a purely local
+// syscall/file/privesc event. Attacker traffic (sqlmap, curl, C2 beacons) is
+// exactly the traffic run #4 failed to flag — a real attack chain should
+// eventually surface one of these types even when individual hops are
+// local syscalls.
+func isNetworkSignal(et types.EventType) bool {
+	switch et { //nolint:exhaustive // only the network-observable types are meaningful here; every other type falls through to false.
+	case types.EventTCPConnect, types.EventNetClose, types.EventDNS, types.EventTLS:
+		return true
+	default:
+		return false
+	}
 }
 
 // getProcessChain extracts the process chain from an alert's ProcessTree.
@@ -308,6 +421,7 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 			RootPID:      rootPID,
 			RootComm:     t.rootComm(alert, rootPID),
 			ProcessChain: t.getProcessChain(alert),
+			SourceEvents: make(map[uint64]struct{}, 4),
 		}
 		// Seed the distinct-comm set with the creating alert's comm. Kept only
 		// when more than one process contributes — exposing multi-process
@@ -341,6 +455,22 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 				inc.Comms = append(inc.Comms, alert.Comm)
 			}
 		}
+	}
+
+	// P1-13: record the source event this alert came from, and whether it
+	// carries an untrusted-comm or network signal. recalculateScore uses these
+	// to reject incidents built entirely from one kernel event fanned out
+	// across rules that key only on filename (sshd + /etc/passwd), or entirely
+	// from allowlisted daemons with no network corroboration.
+	if inc.SourceEvents == nil {
+		inc.SourceEvents = make(map[uint64]struct{}, 4)
+	}
+	inc.SourceEvents[sourceEventKey(alert)] = struct{}{}
+	if !t.isTrustedComm(alert.Comm) {
+		inc.HasUntrustedSignal = true
+	}
+	if isNetworkSignal(alert.Event.Type) {
+		inc.HasNetworkSignal = true
 	}
 
 	inc.LastSeen = ts
@@ -400,7 +530,16 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 		dur = time.Second
 	}
 
+	// P1-13: cap the unique-rules signal at the number of distinct source
+	// events. Without this, one kernel event that trips five filename-keyed
+	// rules (sshd + /etc/passwd) scores as if five independent attack signals
+	// had been observed — the exact shape of the 102/114 false "confirmed
+	// attacks" in attack-run telemetry. A real multi-rule incident has more
+	// than one source event backing it; this only clamps the degenerate case.
 	uniqueRules := len(inc.RuleIDs)
+	if sourceEvents := len(inc.SourceEvents); sourceEvents > 0 && sourceEvents < uniqueRules {
+		uniqueRules = sourceEvents
+	}
 	if uniqueRules >= minUniqueRulesForScore {
 		score += float64(uniqueRules) * cfg.WeightUniqueRules
 	}
@@ -425,8 +564,15 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 
 	inc.Score = score
 
+	// P1-13: a high score alone is not enough to confirm an attack when every
+	// contributing alert came from a trusted daemon (sshd, cron) with no
+	// network corroboration — that combination is background noise dressed up
+	// as five rules, not evidence of compromise. Score-qualifying incidents
+	// that fail this check are held at "suspicious" instead of promoted.
+	hasQualifyingSignal := inc.HasUntrustedSignal || inc.HasNetworkSignal
+
 	verdict := types.IncidentVerdict("")
-	if score >= cfg.AttackThreshold {
+	if score >= cfg.AttackThreshold && hasQualifyingSignal {
 		verdict = types.VerdictAttack
 	} else if score > 0 {
 		verdict = types.VerdictSuspicious
@@ -440,19 +586,41 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 	}
 	inc.Verdict = verdict
 
-	// Count each incident at most once per verdict.
+	// Count each incident at most once per verdict. The empty-chain counter
+	// fires alongside the total so an operator can compute the ratio directly
+	// from the metrics: empty_chain{verdict} / incidents_total{verdict}. The
+	// chain snapshot is taken at promotion time, so a later alert that extends
+	// the chain does not retract the counter — this is intentional, the
+	// incident was *promoted* without a chain, which is the failure signal.
 	promoted := false
+	emptyChain := len(inc.ProcessChain) == 0
+	// Root comm, not the comm of any single alert: an incident rooted at sshd
+	// that also contains alerts from an attacker child is not a daemon FP, and
+	// counting it as one would understate the gate.
+	trustedRoot := t.isTrustedComm(inc.RootComm)
 	switch verdict {
 	case types.VerdictAttack:
 		if !inc.CountedAttack {
 			inc.CountedAttack = true
 			incidentsTotal.WithLabelValues("attack").Inc()
+			if emptyChain {
+				incidentsEmptyChainTotal.WithLabelValues("attack").Inc()
+			}
+			if trustedRoot {
+				incidentsTrustedRootTotal.WithLabelValues("attack").Inc()
+			}
 			promoted = true
 		}
 	case types.VerdictSuspicious:
 		if !inc.CountedSuspicious {
 			inc.CountedSuspicious = true
 			incidentsTotal.WithLabelValues("suspicious").Inc()
+			if emptyChain {
+				incidentsEmptyChainTotal.WithLabelValues("suspicious").Inc()
+			}
+			if trustedRoot {
+				incidentsTrustedRootTotal.WithLabelValues("suspicious").Inc()
+			}
 		}
 	}
 

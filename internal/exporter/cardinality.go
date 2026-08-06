@@ -14,11 +14,24 @@ import (
 
 const (
 	// MaxAnomalyScoreSeries is the maximum number of time series for anomaly scores.
-	MaxAnomalyScoreSeries = 10000
+	//
+	// P1-11: was 10000, which never engaged evictLowest during an 11.5-minute
+	// attack run that only reached 6319 series — the guard was configured
+	// against a limit the workload never approaches. 500 covers the observed
+	// idle plateau (~660 includes short-lived PIDs the plateau itself doesn't
+	// survive) with real headroom while actually bounding growth during a burst.
+	MaxAnomalyScoreSeries = 500
 	// AnomalyScoreEvictionThreshold is the score below which a series can be evicted.
 	AnomalyScoreEvictionThreshold = 0.1
 	// AnomalyScoreEvictionInterval is how often to check for evictions.
 	AnomalyScoreEvictionInterval = 5 * time.Minute
+	// AnomalyScoreMaxAge is how old a series may get before Cleanup evicts it.
+	//
+	// P1-11: was 30 minutes, longer than the attack runs it was meant to bound
+	// (11.5 min / 8.2 min), so TTL cleanup never fired during either measured
+	// run. 5 minutes matches the cleanup interval so stale short-lived-PID
+	// series are reclaimed within one cleanup tick of going stale.
+	AnomalyScoreMaxAge = 5 * time.Minute
 )
 
 // SanitizeLabelValue makes a kernel-supplied string safe to use as a Prometheus
@@ -124,6 +137,16 @@ func NewAnomalyScoreGuard() *AnomalyScoreGuard {
 // SetAnomalyScore sets an anomaly score with cardinality guard.
 // If the limit is reached, low-score entries are evicted.
 func (g *AnomalyScoreGuard) SetAnomalyScore(pid, comm string, score float64) {
+	// P1-11: an empty comm means the kernel-side comm read raced the
+	// short-lived process's exit (same root cause as the empty comm in
+	// incidents, P1-27) — it identifies nothing and, under a burst of
+	// short-lived PIDs, was 37% of all series in the measured attack run.
+	// Drop it here rather than publish a "pid=X comm=" series that just
+	// consumes cardinality budget without being attributable to anything.
+	if comm == "" {
+		return
+	}
+
 	// comm comes straight from the kernel and is attacker-controlled: a process
 	// can name itself with arbitrary bytes. The Prometheus client panics on
 	// label values that are not valid UTF-8, which crashed the agent in the

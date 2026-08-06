@@ -69,6 +69,21 @@ bpf:
       - 87   # unlink
       - 263  # unlinkat
 
+    # P1-18b: path-prefix denylist for file open/read/write events, matched
+    # in-kernel before the event reaches the ring buffer. Empty by default —
+    # deliberately NOT populated from a built-in list. An error here is a
+    # silent-blindness risk (a wrong prefix can quietly stop feeding fim_*/
+    # canary_*/cred_* rules, and an idle run will look "healthier" with no
+    # indication anything is wrong). See docs/... P1-18b acceptance
+    # criteria: after enabling, re-run an attack scenario (not just idle)
+    # and confirm file-based detections are unchanged.
+    #
+    # Do NOT list /proc, /etc, /root/.ssh, /usr/bin, or /var/www — these
+    # carry the file-based attack signal the detection rules depend on.
+    # Safe candidates are narrowly-scoped noise sources, e.g.:
+    #   - "/var/log/"   — log rotation churn
+    path_denylist: []
+
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling
   # rates for high-volume syscall/file events when the event channel starts
   # filling up, preventing silent kernel-side ring-buffer drops.
@@ -177,6 +192,19 @@ correlator:
     enabled: false
     window: 60s
 
+  # Processes whose alerts cannot, on their own, promote an incident to an
+  # "attack" verdict. Their alerts still join the incident and its process
+  # chain — they just don't supply the score without a corroborating signal
+  # from an untrusted process or a network event.
+  #
+  # This is the correlation-level defence against one kernel event fanning out
+  # across several filename-keyed rules: sshd reading /etc/passwd at login
+  # produced 102 of 114 false "confirmed attacks" in attack-run telemetry.
+  # Unset (commented out) keeps the built-in default below. Setting it REPLACES
+  # the default rather than adding to it, so include sshd/cron if you still
+  # want them gated.
+  # trusted_comms: ["sshd", "cron"]
+
 alerting:
   enabled: false
   # Alertmanager webhook endpoint (since v0.2.0; replaces alerting.webhook_url).
@@ -281,6 +309,12 @@ store:
     retention_period: "6h"
   sqlite:
     path: /var/lib/ebpf-guard/events.db
+    # Bounds unattended growth on long-running DaemonSet nodes (P2-21: 31.2 MB / 9h idle
+    # with no cap on the test stand — ~2.5 GB/month projected). Oldest rows are pruned
+    # by count and/or age every vacuum_interval.
+    max_alerts: 100000
+    vacuum_interval: 1h
+    retention_period: 168h   # 7 days
   opensearch:
     url: ""                   # e.g., https://opensearch:9200
     index: ebpf-guard-events

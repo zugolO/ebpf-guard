@@ -28,19 +28,29 @@ rules:
     name: "OWASP: Web server reading sensitive system files"
     description: "Web server process (nginx, apache, node, python) accessed sensitive files"
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/etc/shadow"
-        - "/etc/passwd"
-        - "/etc/hosts"
-        - "/proc/self/environ"
-        - "/proc/self/cmdline"
-        - "/proc/self/maps"
-        - "/proc/self/mem"
-        - "/root/.ssh/"
-        - "/home/*/.ssh/"
+    # Q9 (plan.md, wave 3): the condition used to key on filename alone, so any
+    # process reading /etc/passwd — sshd at every login above all — raised this
+    # "web server" rule. The process role lived only in the description. Same
+    # defect P2-14 fixed for the network rules; the comm list is the same one.
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/shadow"
+            - "/etc/passwd"
+            - "/etc/hosts"
+            - "/proc/self/environ"
+            - "/proc/self/cmdline"
+            - "/proc/self/maps"
+            - "/proc/self/mem"
+            - "/root/.ssh/"
+            - "/home/*/.ssh/"
     severity: critical
     action: alert
     tags: [owasp, sensitive-file, a01-broken-access-control, lfi]

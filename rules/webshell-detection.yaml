@@ -154,19 +154,28 @@ rules:
     name: "Web process reading sensitive system files"
     description: "Web server worker read /etc/passwd, /etc/shadow, or SSH keys — post-exploitation credential access via web shell."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/etc/passwd"
-        - "/etc/shadow"
-        - "/etc/gshadow"
-        - "/root/.ssh/id_rsa"
-        - "/root/.ssh/id_ecdsa"
-        - "/root/.ssh/id_ed25519"
-        - "/root/.ssh/authorized_keys"
-        - "/etc/ssh/ssh_host_rsa_key"
-        - "/etc/ssh/ssh_host_ecdsa_key"
+    # Q9 (plan.md, wave 3): a web shell runs *as the web server*. Matching on
+    # filename alone made every sshd login look like webshell credential
+    # access. sshd reading its own host keys was also counted here.
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
+        - field: filename
+          op: in
+          values:
+            - "/etc/passwd"
+            - "/etc/shadow"
+            - "/etc/gshadow"
+            - "/root/.ssh/id_rsa"
+            - "/root/.ssh/id_ecdsa"
+            - "/root/.ssh/id_ed25519"
+            - "/root/.ssh/authorized_keys"
+            - "/etc/ssh/ssh_host_rsa_key"
+            - "/etc/ssh/ssh_host_ecdsa_key"
     severity: critical
     action: alert
     tags: [mitre:T1505.003, mitre:T1552, webshell, credential-access]

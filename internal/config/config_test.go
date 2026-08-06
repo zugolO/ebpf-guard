@@ -58,6 +58,13 @@ func TestNewManager_Defaults(t *testing.T) {
 	assert.Equal(t, 0.3, cfg.Profiler.EWMAWeight)
 	assert.Equal(t, 86400, cfg.Profiler.ProfileTTL)
 
+	// Check SQLite store retention defaults (P2-21): unattended DaemonSet
+	// deployments must not grow the store file without bound even when
+	// store.sqlite is omitted from the config entirely.
+	assert.Equal(t, int64(100000), cfg.Store.SQLite.MaxAlerts)
+	assert.Equal(t, "1h", cfg.Store.SQLite.VacuumInterval)
+	assert.Equal(t, "168h", cfg.Store.SQLite.RetentionPeriod)
+
 	// Check alerting defaults
 	assert.False(t, cfg.Alerting.Enabled)
 	assert.Equal(t, "", cfg.Alerting.WebhookURL)
@@ -461,4 +468,46 @@ bpf:
 	require.Len(t, cfg.BPF.KernelFilter.NoisyDaemonDenylist, 2)
 	assert.Equal(t, "mylogd", cfg.BPF.KernelFilter.NoisyDaemonDenylist[0])
 	assert.Equal(t, "myagent", cfg.BPF.KernelFilter.NoisyDaemonDenylist[1])
+}
+
+// TestKernelFilterConfig_PathDenylistDefaultEmpty guards P1-18b's opt-in
+// default: unlike the comm/syscall filters, path_denylist must NOT be
+// populated from any built-in list. A silent default here would risk the
+// exact failure mode P1-18b warns about — file events quietly stop reaching
+// the ring buffer while an idle run looks healthier for it.
+func TestKernelFilterConfig_PathDenylistDefaultEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	require.NoError(t, os.WriteFile(configPath, []byte(""), 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	assert.Empty(t, cfg.BPF.KernelFilter.PathDenylist)
+}
+
+func TestKernelFilterConfig_PathDenylistOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yaml := []byte(`
+bpf:
+  kernel_filter:
+    path_denylist:
+      - /var/log/
+      - /tmp/noisy/
+`)
+	require.NoError(t, os.WriteFile(configPath, yaml, 0644))
+
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	defer mgr.Stop()
+
+	cfg := mgr.Get()
+	require.Len(t, cfg.BPF.KernelFilter.PathDenylist, 2)
+	assert.Equal(t, "/var/log/", cfg.BPF.KernelFilter.PathDenylist[0])
+	assert.Equal(t, "/tmp/noisy/", cfg.BPF.KernelFilter.PathDenylist[1])
 }

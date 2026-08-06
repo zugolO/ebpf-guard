@@ -99,6 +99,18 @@ type procEntry struct {
 	comm      string
 	ppid      uint32
 	timestamp time.Time
+	// ppidMissing records that readProcStatus was already tried for this PID
+	// and could not supply a parent — the process had exited, or /proc is not
+	// available at all (non-Linux, restricted container). Without this, the
+	// PPID==0 fallback in lookupOwnPPID re-reads /proc on *every* event from
+	// such a PID, since a failed read leaves nothing to cache. That is the hot
+	// path: getParentInfo runs per event, ahead of store()'s steady-state fast
+	// path, and short-lived forking attackers (sqlmap) are exactly the workload
+	// that produces dead PIDs at volume. Measured cost of the uncached miss was
+	// ~100x the cached path, so the negative result has to be cached too.
+	// TTL eviction in Cleanup applies to these entries like any other, so a
+	// recycled PID gets a fresh lookup.
+	ppidMissing bool
 }
 
 // LineageMatch represents a detected suspicious lineage pattern.
@@ -217,6 +229,9 @@ func (lt *LineageTracker) store(pid, ppid uint32, parentComm, comm string) {
 				info.Timestamp = now
 				if entry, ok := s.procCache[pid]; ok {
 					entry.comm, entry.ppid, entry.timestamp = comm, ppid, now
+					// A BPF-supplied ppid supersedes an earlier failed /proc
+					// read, so the negative-cache flag must not outlive it.
+					entry.ppidMissing = ppid == 0 && entry.ppidMissing
 				} else if comm != "" || ppid > 0 {
 					s.procCache[pid] = &procEntry{comm: comm, ppid: ppid, timestamp: now}
 				}
@@ -245,6 +260,8 @@ func (lt *LineageTracker) store(pid, ppid uint32, parentComm, comm string) {
 	// /proc reads when this process becomes a parent in later chain builds.
 	if entry, ok := s.procCache[pid]; ok {
 		entry.comm, entry.ppid, entry.timestamp = comm, ppid, now
+		// A BPF-supplied ppid supersedes an earlier failed /proc read.
+		entry.ppidMissing = ppid == 0 && entry.ppidMissing
 	} else if comm != "" || ppid > 0 {
 		s.procCache[pid] = &procEntry{comm: comm, ppid: ppid, timestamp: now}
 	}
@@ -455,47 +472,121 @@ func readProcStatus(pid uint32) (comm string, ppid uint32) {
 }
 
 // getParentInfo extracts parent PID and comm from event or /proc.
+//
+// Two resolution paths converge on the same parent-comm lookup:
+//
+//  1. BPF populated e.PPID (preferred) — used directly.
+//  2. e.PPID == 0 — BPF left the field unset. This is the common case for the
+//     four main collectors (syscall, network, fileaccess, privesc) whose shared
+//     fill_process_info in bpf/common.h zeroes ppid/parent_comm by design (the
+//     "BPF verifier issues with pointer-chasing through task_struct on kernel
+//     5.15" caveat), expecting userspace to recover the parent via /proc.
+//     Synthetic test events and any older BPF program land here too.
+//
+// The previous implementation skipped path 2 entirely with a comment claiming
+// "real BPF events always carry PPID" — that claim was provably false against
+// the shipped BPF, and was the root cause of P0-1: ProcessTree stayed empty
+// across four attack runs because Track() never stored ancestry for any event
+// from the main collectors.
+//
+// Path 2 performs a /proc/<e.PID>/status read on the first unseen PID, caches
+// the result in procCache, and subsequent events for the same PID hit the
+// cache — so the per-event syscall cost is paid once per process, not per
+// event. When /proc is unavailable (e.g. non-Linux tests, or the process has
+// already exited) path 2 returns (0, "") and the event is silently skipped,
+// preserving the previous no-crash behaviour.
 func (lt *LineageTracker) getParentInfo(e types.Event) (uint32, string) {
-	// First try to get from event (if BPF provides PPID)
-	if e.PPID > 0 {
-		// Prefer the parent comm captured by BPF at fork/exec time. This is
-		// authoritative and, crucially, survives short-lived parents (e.g. the
-		// bash in nginx→bash→curl) that may already have exited before we can
-		// read /proc. Without this, attack-chain detection silently misses the
-		// most interesting cases.
-		if parentComm := cleanComm(e.ParentComm[:]); parentComm != "" {
-			return e.PPID, parentComm
+	ppid := e.PPID
+	if ppid == 0 {
+		// BPF did not populate PPID. Recover the parent PID from /proc so the
+		// main collectors (syscall/network/fileaccess/privesc) still feed the
+		// ancestry chain — without this, P0-1 regresses and every incident
+		// comes back with an empty ProcessTree.
+		ppid = lt.lookupOwnPPID(e.PID)
+		if ppid == 0 {
+			return 0, ""
 		}
-
-		// Check lineage map and procCache under a single RLock on the ppid shard.
-		ps := lt.shardFor(e.PPID)
-		ps.mu.RLock()
-		if info, ok := ps.lineage[e.PPID]; ok {
-			comm := info.ParentComm
-			ps.mu.RUnlock()
-			return e.PPID, comm
-		}
-		if entry, ok := ps.procCache[e.PPID]; ok && entry.comm != "" {
-			comm := entry.comm
-			ps.mu.RUnlock()
-			return e.PPID, comm
-		}
-		ps.mu.RUnlock()
-
-		// Cache miss: read /proc/<ppid>/status (single syscall for comm+ppid).
-		comm, grandPPID := readProcStatus(e.PPID)
-		if comm != "" || grandPPID > 0 {
-			ps.mu.Lock()
-			ps.procCache[e.PPID] = &procEntry{comm: comm, ppid: grandPPID, timestamp: time.Now()}
-			ps.mu.Unlock()
-		}
-		return e.PPID, comm
 	}
 
-	// e.PPID == 0 means BPF did not populate the parent PID field (common for
-	// synthetic/test events and non-exec syscall tracepoints). Skip the /proc
-	// fallback to avoid a per-event syscall; real BPF events always carry PPID.
-	return 0, ""
+	// Prefer the parent comm captured by BPF at fork/exec time. This is
+	// authoritative and, crucially, survives short-lived parents (e.g. the
+	// bash in nginx→bash→curl) that may already have exited before we can
+	// read /proc. Without this, attack-chain detection silently misses the
+	// most interesting cases.
+	if ppid == e.PPID {
+		if parentComm := cleanComm(e.ParentComm[:]); parentComm != "" {
+			return ppid, parentComm
+		}
+	}
+
+	// Check lineage map and procCache under a single RLock on the ppid shard.
+	ps := lt.shardFor(ppid)
+	ps.mu.RLock()
+	if info, ok := ps.lineage[ppid]; ok {
+		comm := info.ParentComm
+		ps.mu.RUnlock()
+		return ppid, comm
+	}
+	if entry, ok := ps.procCache[ppid]; ok && entry.comm != "" {
+		comm := entry.comm
+		ps.mu.RUnlock()
+		return ppid, comm
+	}
+	ps.mu.RUnlock()
+
+	// Cache miss: read /proc/<ppid>/status (single syscall for comm+ppid).
+	comm, grandPPID := readProcStatus(ppid)
+	if comm != "" || grandPPID > 0 {
+		ps.mu.Lock()
+		ps.procCache[ppid] = &procEntry{comm: comm, ppid: grandPPID, timestamp: time.Now()}
+		ps.mu.Unlock()
+	}
+	return ppid, comm
+}
+
+// lookupOwnPPID returns the parent PID of pid by reading /proc/<pid>/status.
+// Results are cached in procCache — both hits and misses — so subsequent events
+// for the same PID pay the syscall at most once per TTL window. Returns 0 when
+// /proc is unavailable or the process has exited, in which case the caller
+// treats the event as having no resolvable parent.
+//
+// Caching the miss matters as much as caching the hit: this runs on the
+// per-event hot path (getParentInfo → Track, ahead of store()'s steady-state
+// fast path), and a forking attacker leaves behind dead PIDs whose /proc entry
+// is gone before the event is processed. See procEntry.ppidMissing.
+func (lt *LineageTracker) lookupOwnPPID(pid uint32) uint32 {
+	if pid == 0 {
+		return 0
+	}
+	s := lt.shardFor(pid)
+	s.mu.RLock()
+	if entry, ok := s.procCache[pid]; ok {
+		if entry.ppid > 0 {
+			ppid := entry.ppid
+			s.mu.RUnlock()
+			return ppid
+		}
+		if entry.ppidMissing {
+			// Already tried and failed within the TTL window — don't re-read.
+			s.mu.RUnlock()
+			return 0
+		}
+	}
+	s.mu.RUnlock()
+
+	_, ppid := readProcStatus(pid)
+
+	now := time.Now()
+	s.mu.Lock()
+	if e, ok := s.procCache[pid]; ok {
+		e.ppid = ppid
+		e.ppidMissing = ppid == 0
+		e.timestamp = now
+	} else {
+		s.procCache[pid] = &procEntry{ppid: ppid, ppidMissing: ppid == 0, timestamp: now}
+	}
+	s.mu.Unlock()
+	return ppid
 }
 
 // checkPattern checks if the parent-child combination matches any pattern,

@@ -72,6 +72,22 @@ get_baseline_metrics() {
     # run's precision/recall calculation below.
     rm -f "$MANIFEST_FILE"
 
+    # Pre-populate with docker-proxy as a transit attack process (план 1.75c).
+    # Attack traffic to localhost:3000 is carried by Docker's port-forwarder
+    # (comm=docker-proxy) — в замере №1 оно дало 402 из 912 "атакующих"
+    # алертов, но без записи в манифесте выпадало из множества comms атакующих
+    # и критерий "алерты от атакующих" занижался в ~2 раза. transit:true
+    # маркирует запись как вспомогательную: она участвует в precision и в
+    # критерии темпа алертов от атакующих, но исключена из recall (это не
+    # отдельная категория атаки, а транзит).
+    if command -v jq &> /dev/null; then
+        docker_proxy_entry=$(jq -n --arg cat "transit" --arg comm "docker-proxy" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts, transit: true}' 2>/dev/null)
+        if [ -n "$docker_proxy_entry" ]; then
+            echo "[$docker_proxy_entry]" | jq '.' > "$MANIFEST_FILE" 2>/dev/null || rm -f "$MANIFEST_FILE"
+        fi
+    fi
+
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
@@ -435,14 +451,23 @@ generate_final_report() {
             ' -r "$baseline_alerts_json" "$final_alerts_json" 2>/dev/null || echo "Не удалось посчитать precision"
             echo ""
 
+            # 1.75a: тот же класс дефекта, что P2-7 и P2-28 (отчёт печатает
+            # провал там, где система отработала). jq -s выше вызывался БЕЗ
+            # аргументов-файлов — пустой stdin, $new_comms = [], index($c)
+            # вернул null для каждой категории, recall печатался 0 при
+            # фактических 4/4 = 1.0 в замере №1. Передаём те же два файла, что
+            # в precision-блоке выше. Recall-категории исключают transit
+            # (docker-proxy и подобные — транзитные процессы атаки, не её
+            # источники; план 1.75c).
             jq -s --argjson manifest "$(jq -c '.' "$manifest_file" 2>/dev/null || echo '[]')" '
                 (.[0] // []) as $baseline |
                 (.[1] // []) as $final |
                 ($baseline | map(.id) | unique) as $baseline_ids |
                 ($final | map(select(.id as $id | ($baseline_ids | index($id)) | not))) as $new |
                 ($new | map(.comm) | unique) as $new_comms |
-                ($manifest | map(.category) | unique) as $categories |
-                ($manifest | group_by(.category) | map({
+                ($manifest | map(select(.transit != true))) as $real_manifest |
+                ($real_manifest | map(.category) | unique) as $categories |
+                ($real_manifest | group_by(.category) | map({
                     category: .[0].category,
                     comm: .[0].comm,
                     detected: ((.[0].comm as $c | $new_comms | index($c)) != null)
@@ -453,7 +478,7 @@ generate_final_report() {
                     recall: (if ($categories | length) > 0 then (($per_category | map(select(.detected)) | length) / ($categories | length)) else null end),
                     per_category: $per_category
                 }
-            ' -r 2>/dev/null || echo "Не удалось посчитать recall"
+            ' -r "$baseline_alerts_json" "$final_alerts_json" 2>/dev/null || echo "Не удалось посчитать recall"
             echo ""
         else
             warn "attack-manifest.json не найден — precision/recall по вердикту не посчитаны"
@@ -585,12 +610,20 @@ generate_final_report() {
 check_final_gate() {
     local gate_flag_file="$RESULTS_DIR/.gate-failed-$TIMESTAMP"
 
-    # run-gate.sh checks the six ЗАМЕР №1 thresholds from plan.md (потери,
-    # dns growth, деградация, comm, JSON validity, детект жив) — a superset
-    # of the traffic/script gates above. Its own FAIL also marks
-    # gate_flag_file so check_final_gate's exit code reflects it too
-    # (plan.md волна 1.5h, вопрос 12).
+    # run-gate.sh checks the fourteen ЗАМЕР №1/№2/№3 thresholds from plan.md
+    # (потери, dns probe, деградация, comm, JSON validity, детект жив,
+    # recall, alerts_dropped, доля на демонах, process_chain, anomalies_total,
+    # кардинальность, path_denylist, CPU-watchdog) — a superset of the
+    # traffic/script gates above.
+    # Its own FAIL also marks gate_flag_file so check_final_gate's exit code
+    # reflects it too (plan.md волна 1.5h, вопрос 12). After 1.75c the gate
+    # also runs an active DNS probe that needs EBPF_GUARD_API/TOKEN — pass
+    # them explicitly so a non-exported env override on the master script
+    # still reaches the gate (default fallbacks live in both scripts).
     if [ -f "$SCRIPT_DIR/run-gate.sh" ]; then
+        EBPF_GUARD_API="$EBPF_GUARD_API" \
+        EBPF_GUARD_TOKEN="$EBPF_GUARD_TOKEN" \
+        VPS_IP="$VPS_IP" \
         bash "$SCRIPT_DIR/run-gate.sh" "$RESULTS_DIR" "$TIMESTAMP" || touch "$gate_flag_file"
         echo ""
     else

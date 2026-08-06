@@ -132,13 +132,14 @@ func TestCPUWatcher_EscalateAndRecover(t *testing.T) {
 	assert.Equal(t, 0.1, bpf.GetSamplingRate("syscall"))
 	assert.Equal(t, 0.1, bpf.GetSamplingRate("network"))
 
-	// Still elevated (12%) but above recovery threshold → stay at level 2.
-	fc.stepFor(12, interval)
+	// Still elevated post-shed (2%, extrapolates to ~16.4% ≥ 9) → stay at level 2.
+	fc.stepFor(2, interval)
 	w.checkCPU()
 	assert.Equal(t, cpuLevelAllShed, w.PressureLevel())
 
-	// Drop below recovery threshold (5%) → recover fully, rates restored.
-	fc.stepFor(5, interval)
+	// Drop to near-idle post-shed (0.5%, extrapolates to ~4.1% < 9) → recover
+	// fully, rates restored.
+	fc.stepFor(0.5, interval)
 	w.checkCPU()
 	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
 	assert.False(t, w.IsThrottling())
@@ -273,8 +274,9 @@ func TestCPUWatcher_DirectRecoverFromL1(t *testing.T) {
 	require.Equal(t, cpuLevelFileShed, w.PressureLevel())
 	require.Equal(t, 0.1, bpf.GetSamplingRate("file"))
 
-	// Drop straight below recovery from level 1 → back to normal, file restored.
-	fc.stepFor(3, time.Second)
+	// Drop to near-idle post-shed (0.5%, extrapolates to ~4.1% < 9) → back to
+	// normal, file restored.
+	fc.stepFor(0.5, time.Second)
 	w.checkCPU()
 	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
 	assert.Equal(t, 1.0, bpf.GetSamplingRate("file"))
@@ -378,16 +380,17 @@ func TestCPUWatcher_MinDwellPreventsPrematureRecovery(t *testing.T) {
 	w.checkCPU()
 	require.Equal(t, cpuLevelFileShed, w.PressureLevel())
 
-	// CPU immediately drops below recovery, but only ~1s has elapsed in the
-	// shed state — well short of the 10s dwell floor. Must stay shed.
-	fc.stepFor(2, interval)
+	// CPU immediately drops below recovery (post-shed 0.5%, extrapolates to
+	// ~4.1% < 9), but only ~1s has elapsed in the shed state — well short of
+	// the 10s dwell floor. Must stay shed.
+	fc.stepFor(0.5, interval)
 	w.checkCPU()
 	assert.Equal(t, cpuLevelFileShed, w.PressureLevel())
 	assert.Equal(t, 0.1, bpf.GetSamplingRate("file"))
 
 	// Keep CPU low until the dwell floor has elapsed, then it should recover.
 	for i := 0; i < 10; i++ {
-		fc.stepFor(2, interval)
+		fc.stepFor(0.5, interval)
 		w.checkCPU()
 	}
 	assert.Equal(t, cpuLevelNormal, w.PressureLevel())
@@ -562,14 +565,17 @@ func TestCPUWatcher_FlushTransitionRunEmitsRepeatSummary(t *testing.T) {
 
 	// Two full reduce/recover cycles: first reduce logs immediately and
 	// opens the run; the following recover, reduce, recover are all
-	// collapsed into that same run (2 reduces, 2 recovers total).
+	// collapsed into that same run (2 reduces, 2 recovers total). Recover
+	// steps use 0.5% (post-shed reading that extrapolates to ~4.1% < 9); a
+	// higher post-shed reading like 2% would now extrapolate above the
+	// recovery threshold and never trigger recovery at all.
 	fc.stepFor(16, interval)
 	w.checkCPU() // reduce #1 (logged, opens run)
-	fc.stepFor(2, interval)
+	fc.stepFor(0.5, interval)
 	w.checkCPU() // recover #1 (collapsed)
 	fc.stepFor(16, interval)
 	w.checkCPU() // reduce #2 (collapsed)
-	fc.stepFor(2, interval)
+	fc.stepFor(0.5, interval)
 	w.checkCPU() // recover #2 (collapsed)
 
 	// Directly flush the pending run and check its summary.
@@ -624,6 +630,58 @@ func TestCPUWatcher_DegradedFractionTracksShedTime(t *testing.T) {
 	frac := testDegradedFractionValue(t, w)
 	assert.Greater(t, frac, 0.3)
 	assert.Less(t, frac, 0.6)
+}
+
+// TestCPUWatcher_ExtrapolationBreaksFeedbackLoop is the regression test for
+// P1-18a's remaining gap: the observed 813 reduce/recover cycles over one
+// idle night were not actually caused by too-short a dwell (MinDwell already
+// stretched the period from ~40s to ~3min without changing the outcome) —
+// they were caused by the watcher measuring its own throttled output and
+// concluding load was fine. This reproduces the ISSUES-attack-run-2026-08-03
+// numbers: idle load trips file shed at ~50% CPU (threshold 40%); shedding
+// file sampling to 1-in-10 then drops the *measured* reading to ~1-3%, which
+// used to read as comfortably below recoveryThreshold (20%) and recover
+// immediately — undoing the shed and re-tripping on the next sample. With
+// extrapolation, the same ~1-3% observed reading is inflated back toward the
+// pre-shed load and must NOT trigger recovery.
+func TestCPUWatcher_ExtrapolationBreaksFeedbackLoop(t *testing.T) {
+	bpf := newMockBPFController()
+	cfg := DefaultCPUConfig() // file_shed=40, all_shed=70, recovery=20
+	cfg.CheckInterval = time.Second
+	cfg.WindowSize = 1
+	cfg.MinDwell = time.Nanosecond // isolate extrapolation from the dwell floor
+	w, fc := newTestWatcher(t, cfg, bpf)
+	interval := time.Second
+	w.checkCPU()
+
+	// Idle host actually running hot: 50% CPU (observed prior to any shed),
+	// matching the run's measured min-50/p50-50/max-64.8 range.
+	fc.stepFor(50, interval)
+	w.checkCPU()
+	require.Equal(t, cpuLevelFileShed, w.PressureLevel())
+	require.Equal(t, 0.1, bpf.GetSamplingRate("file"))
+
+	// After shedding, the *measured* reading collapses (the actual run saw
+	// idle CPU fall from ~50% to ~1.2-1.3% once file sampling was cut). Use a
+	// reading (3%) that pre-extrapolation comfortably clears
+	// recoveryThreshold=20 and would recover on the very next sample, but
+	// whose extrapolated equivalent (~24.6%, undoing the 10x shed on ~80% of
+	// load) still exceeds it.
+	fc.stepFor(3, interval)
+	w.checkCPU()
+	assert.Equal(t, cpuLevelFileShed, w.PressureLevel(),
+		"extrapolation must keep sampling shed: a low *observed* reading right after shedding reflects the throttle, not recovered headroom")
+	assert.Equal(t, 0.1, bpf.GetSamplingRate("file"))
+
+	// Confirm this isn't just "never recovers": once the extrapolated load is
+	// genuinely low (near-zero post-shed reading), recovery still happens.
+	for i := 0; i < 5; i++ {
+		fc.stepFor(0.1, interval)
+		w.checkCPU()
+	}
+	assert.Equal(t, cpuLevelNormal, w.PressureLevel(),
+		"a genuinely idle host (near-zero post-shed reading) must still recover")
+	assert.Equal(t, 1.0, bpf.GetSamplingRate("file"))
 }
 
 // testDegradedFractionValue reads the current value of the watcher's

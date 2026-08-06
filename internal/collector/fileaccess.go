@@ -157,6 +157,21 @@ func (c *FileaccessCollector) KernelFilterMaps() (comm, syscall, cfg, agentPid *
 	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, c.objs.AgentPidMap
 }
 
+// PathFilterMaps returns the path_filter_map and path_filter_drop_counters
+// BPF maps backing this collector's path-prefix denylist (P1-18b), or nil
+// maps if the collector has not loaded (stub mode).
+//
+// Only fileaccess.bpf.c consults path_filter_map — trace_open checks it
+// against the raw filename before reserving a ring buffer slot, and
+// trace_read/trace_write check it against the fd_path_map-resolved path,
+// also before reserving. See bpf/fileaccess.bpf.c for the ordering rationale.
+func (c *FileaccessCollector) PathFilterMaps() (pathMap, dropCounters *ebpf.Map) {
+	if c.objs == nil {
+		return nil, nil
+	}
+	return c.objs.PathFilterMap, c.objs.PathFilterDropCounters
+}
+
 // GetPrograms returns the loaded BPF programs for attestation.
 // Implements watchdog.BPFProgramProvider interface.
 func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {

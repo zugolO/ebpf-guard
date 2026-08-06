@@ -519,6 +519,90 @@ static __always_inline void record_net_drop(void)
 		__sync_fetch_and_add(cnt, 1);
 }
 
+/*
+ * Path-prefix denylist (P1-18b) — in-kernel filtering of file events by path,
+ * same LPM-trie mechanism as the IP blocklist above but matching bytes of a
+ * path string instead of an address. The trie performs longest-prefix-match
+ * on the raw bytes of path_filter_key.path up to prefixlen bits (prefixlen is
+ * always a multiple of 8 — whole bytes — set from userspace as
+ * 8 * len(prefix_string)).
+ *
+ * This is a DENYLIST, not an allowlist: an event matching a stored prefix is
+ * dropped before it reaches the ring buffer; a path with no matching prefix
+ * passes through unfiltered. Per P1-18b's risk note, denylist errors are
+ * cheaper than allowlist errors — a missing entry just leaves noise in place,
+ * it does not blind the agent to files nobody thought to list.
+ *
+ * PATH_FILTER_PREFIX_LEN bounds the key size the trie has to walk; prefixes
+ * longer than this are truncated by the loader (see path_filter.go).
+ */
+#define PATH_FILTER_PREFIX_LEN 128
+
+/* LPM key type — layout must match Go struct PathLPMKey in internal/bpf. */
+struct path_filter_key {
+	__u32 prefixlen;                    /* significant prefix bits (0-1024, multiple of 8) */
+	__u8  path[PATH_FILTER_PREFIX_LEN]; /* path prefix bytes */
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 1024);
+	__type(key, struct path_filter_key);
+	__type(value, __u8);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} path_filter_map SEC(".maps");
+
+/*
+ * path_filter_drop_counters — per-CPU drop counter for in-kernel path-prefix
+ * filtering. Index 0: total file events dropped because their path matched a
+ * denylisted prefix. Userspace sums across CPUs and exports as
+ * ebpf_guard_events_dropped_total{reason="path_denylist"} — without this
+ * counter, path filtering would be exactly the silent-blindness failure mode
+ * P1-18b warns against: a DNS-collector-shaped bug where the filter works but
+ * nothing says so.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} path_filter_drop_counters SEC(".maps");
+
+/* Increment the in-kernel path-filter drop counter (per-CPU). */
+static __always_inline void record_path_filter_drop(void)
+{
+	__u32 idx = 0;
+	__u64 *cnt = bpf_map_lookup_elem(&path_filter_drop_counters, &idx);
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
+/*
+ * path_is_denied - returns true if `path` matches a denylisted prefix in
+ * path_filter_map. `path` must be a fixed-size buffer of at least
+ * PATH_FILTER_PREFIX_LEN bytes (NUL-padded) so the full key is safe to read
+ * for the verifier — pass a kernel-side buffer already resolved into an
+ * event/scratch struct (struct fd_path::path), never a raw userspace pointer.
+ *
+ * Increments record_path_filter_drop() on every match so the drop is visible
+ * even when the caller only checks the boolean.
+ */
+static __always_inline bool path_is_denied(const char *path)
+{
+	struct path_filter_key key = {};
+	__u8 *val;
+
+	key.prefixlen = PATH_FILTER_PREFIX_LEN * 8;
+	__builtin_memcpy(key.path, path, PATH_FILTER_PREFIX_LEN);
+
+	val = bpf_map_lookup_elem(&path_filter_map, &key);
+	if (!val)
+		return false;
+
+	record_path_filter_drop();
+	return true;
+}
+
 /* Helper to get current process info */
 static __always_inline void fill_process_info(struct event *e)
 {

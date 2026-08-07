@@ -46,6 +46,24 @@ type Incident struct {
 	// distinct alerts, so this fan-out cannot manufacture unique-rule score on
 	// its own. Internal bookkeeping — not part of the API surface.
 	SourceEvents map[uint64]struct{} `json:"-"`
+	// ScoringRuleIDs mirrors RuleIDs but excludes rules that only ever fired at
+	// info severity. Wave 5.5a: info alerts remain fully visible in RuleIDs,
+	// AlertIDs and alerts_filtered_total (пункт 8 — nothing disappears without
+	// a record), but the intake filter that keeps them out of alerts_total and
+	// the store sits downstream of the correlator, so IncidentTracker still saw
+	// the full info stream and let it alone manufacture uniqueRules/tactics
+	// score (находка №8, замер №2.1). ScoringRuleIDs and ScoringSourceEvents
+	// are the same bookkeeping as RuleIDs/SourceEvents, populated only from
+	// warning/critical alerts, so scoring reads a clean input without touching
+	// observability. Internal bookkeeping — not part of the API surface.
+	ScoringRuleIDs map[string]struct{} `json:"-"`
+	// ScoringSourceEvents is SourceEvents restricted to warning/critical
+	// alerts — see ScoringRuleIDs.
+	ScoringSourceEvents map[uint64]struct{} `json:"-"`
+	// ScoringAlertCount is AlertCount restricted to warning/critical alerts,
+	// used for the time-density score so an info-only burst cannot inflate
+	// density either — see ScoringRuleIDs.
+	ScoringAlertCount int `json:"-"`
 	// HasUntrustedSignal is true once an alert from a comm outside the trusted
 	// allowlist (see defaultTrustedComms) has contributed to this incident.
 	HasUntrustedSignal bool `json:"-"`

@@ -473,6 +473,23 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		inc.HasNetworkSignal = true
 	}
 
+	// 5.5a: info-severity alerts stay in RuleIDs/AlertIDs/SourceEvents above
+	// (still visible, still in filtered_total) but are kept out of the
+	// scoring-only mirrors, so a cron/sshd burst of pure info alerts cannot
+	// reach minUniqueRulesForScore and manufacture a "suspicious"/"attack"
+	// verdict on its own — see находка №8.
+	if alert.Severity != types.SeverityInfo {
+		if inc.ScoringRuleIDs == nil {
+			inc.ScoringRuleIDs = make(map[string]struct{}, 4)
+		}
+		inc.ScoringRuleIDs[alert.RuleID] = struct{}{}
+		if inc.ScoringSourceEvents == nil {
+			inc.ScoringSourceEvents = make(map[uint64]struct{}, 4)
+		}
+		inc.ScoringSourceEvents[sourceEventKey(alert)] = struct{}{}
+		inc.ScoringAlertCount++
+	}
+
 	inc.LastSeen = ts
 	inc.AlertIDs = append(inc.AlertIDs, alert.ID)
 	inc.AlertCount = len(inc.AlertIDs)
@@ -530,27 +547,36 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 		dur = time.Second
 	}
 
+	// 5.5a: score from the scoring-only rule set, which excludes rules that
+	// only ever fired at info severity — see the ScoringRuleIDs doc comment.
+	scoringRuleIDs := make([]string, 0, len(inc.ScoringRuleIDs))
+	for id := range inc.ScoringRuleIDs {
+		scoringRuleIDs = append(scoringRuleIDs, id)
+	}
+
 	// P1-13: cap the unique-rules signal at the number of distinct source
 	// events. Without this, one kernel event that trips five filename-keyed
 	// rules (sshd + /etc/passwd) scores as if five independent attack signals
 	// had been observed — the exact shape of the 102/114 false "confirmed
 	// attacks" in attack-run telemetry. A real multi-rule incident has more
 	// than one source event backing it; this only clamps the degenerate case.
-	uniqueRules := len(inc.RuleIDs)
-	if sourceEvents := len(inc.SourceEvents); sourceEvents > 0 && sourceEvents < uniqueRules {
+	uniqueRules := len(scoringRuleIDs)
+	if sourceEvents := len(inc.ScoringSourceEvents); sourceEvents > 0 && sourceEvents < uniqueRules {
 		uniqueRules = sourceEvents
 	}
 	if uniqueRules >= minUniqueRulesForScore {
 		score += float64(uniqueRules) * cfg.WeightUniqueRules
 	}
 
-	tactics := t.extractTactics(inc.RuleIDs)
+	tactics := t.extractTactics(scoringRuleIDs)
 	if len(tactics) >= minTacticsForScore {
 		score += float64(len(tactics)) * cfg.WeightTacticsDiversity
 	}
 	inc.Tactics = tactics
 
-	density := float64(inc.AlertCount) / dur.Minutes()
+	// 5.5a: density from the scoring-only alert count — an info-only burst
+	// (cron reading its spool) should not be able to inflate density either.
+	density := float64(inc.ScoringAlertCount) / dur.Minutes()
 	if density > minDensityForScore {
 		score += cfg.WeightTimeDensity * math.Min(density/minDensityForScore, maxDensityScoreUnits)
 	}

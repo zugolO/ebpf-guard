@@ -22,10 +22,32 @@
 # (правило существовало до 5.1), а остальные шесть записаны в базовых именах —
 # после 5.1 в diff ожидаются добавления вида *_daemon при сохранении базовых.
 # Это ожидаемое «добавлено», не потеря.
+#
+# Обновление 5.5b (находка №7 замера №2.1): критерий 6 напечатал FAIL на пяти
+# типах при исправном детекте — все пять присутствуют в alerts_filtered_total
+# замера №2.1, просто их не стало в alerts_total/store после 5.1a (фильтр info
+# на входе идёт ниже IncidentTracker, но выше сериализации alerts_total/store).
+# Удалены из базы как отдельные строки (не «переименованы» — гейт сравнивает
+# rule_id по alerts_total, а не по alerts_filtered_total). Два разных случая,
+# свёрнутых в один симптом:
+#   - rootkit_pam_module_added, sigma_failed_login_syscall — базовые имена
+#     кластера волны 5.1; сейчас на idle/этом прогоне срабатывает только
+#     *_daemon-двойник (severity info). Базовое имя остаётся валидным
+#     rule_id — сработает и попадёт в alerts_total, если тронет процесс
+#     вне [sshd, cron] — просто не в этом прогоне.
+#   - sigma_utmp_wtmp_modified_daemon — было в базе уже с суффиксом (родилось
+#     _daemon в P1-6, до волны 5.1); волна 5.1 поменяла только severity
+#     warning → info — другая запись, не переименование.
+#   - c2_periodic_beacon_pattern, recon_sensitive_file_find — НЕ из кластера
+#     волны 5.1, severity: info изначально; тот же фильтр 5.1a впервые их
+#     коснулся на этом прогоне. Ничего не переименовано, не тронуто волной 5.1.
+# Если любой из пяти снова понадобится в базе — то с тем же типом записи, что
+# здесь: строка + причина в этом файле и в plan.md (5.5b), а не тихий возврат.
+# Добавлено: owasp_log_tampering — новое срабатывание правила (замер №2.1),
+# не регресс и не связано с находкой №7.
 
 anomaly_detection
 beacon_fixed_interval
-c2_periodic_beacon_pattern
 container_escape_init_proc
 cred_proc_maps_mass_read
 drift_new_exec_critical
@@ -45,21 +67,18 @@ netintr_large_upload_port
 netintr_long_dns_session
 netintr_loopback_high_port
 netintr_syn_scan_pattern
+owasp_log_tampering
 privesc_suid_suspicious_path
-recon_sensitive_file_find
 rootkit_hidden_dir_dev
-rootkit_pam_module_added
 sensitive_file_read
 sigma_binary_in_tmp_executed
 sigma_cpu_info_access
-sigma_failed_login_syscall
 sigma_kernel_version_read
 sigma_log_deletion
 sigma_memory_proc_dump
 sigma_passwd_shadow_read
 sigma_reverse_shell_named_pipe
 sigma_sensitive_file_chmod
-sigma_utmp_wtmp_modified_daemon
 web_internal_recon
 web_sql_injection_files
 webshell_script_write_via_web_process

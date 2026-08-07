@@ -79,6 +79,34 @@ const (
 	minDensityForScore     = 10.0
 	maxDensityScoreUnits   = 5.0
 
+	// backgroundReopenWindow extends the grouping window for a *periodic
+	// background* incident: one rooted at a trusted daemon that has never
+	// carried an untrusted-comm or network signal, and never assembled a
+	// scoring-qualifying cluster.
+	//
+	// 5.5d (находка №9). The tracker's window is 60s and a cron minute tick is
+	// exactly 60s apart, so `ts.Sub(LastSeen) > window` fired on every single
+	// tick: the same long-lived daemon (root_pid 160579 throughout замер №2.1)
+	// minted a brand-new incident once a minute, each one lasting <1s. With a
+	// 5-minute retention that is a standing population of exactly five cron
+	// incidents in every snapshot — the daemon share of /api/v1/incidents is a
+	// structural constant, not a detection outcome, and no amount of scoring
+	// work moves it. On idle without attacks the snapshot is 11/11 background
+	// daemons.
+	//
+	// Rather than suppress the verdict (which would hide the activity and
+	// break P1-13's deliberate "held at suspicious" behaviour), the periodic
+	// background case simply stays *one* incident: a longer reopen window lets
+	// the next tick land in the existing entry instead of creating a sibling.
+	// The alerts, rules and counts all still accrue — nothing disappears
+	// (пункт 8), it is one row instead of N identical ones.
+	//
+	// Chosen as 5×window so a strictly-once-a-minute source coalesces with
+	// margin, while anything genuinely idle for five minutes still starts a
+	// fresh incident. Only ever applied to incidents that qualify as periodic
+	// background on *every* dimension — see isPeriodicBackground.
+	backgroundReopenWindow = 5
+
 	// AlertRuleIDConfirmedAttack is the synthetic rule ID carried by the alert
 	// emitted when an incident crosses the attack threshold.
 	AlertRuleIDConfirmedAttack = "incident_confirmed_attack"
@@ -336,6 +364,42 @@ func (t *IncidentTracker) isTrustedComm(comm string) bool {
 	return ok
 }
 
+// isPeriodicBackground reports whether inc is recurring trusted-daemon
+// background rather than a developing incident: rooted at a trusted comm, with
+// no untrusted-comm and no network signal anywhere in it, and never having
+// assembled a scoring-qualifying cluster of non-info rules.
+//
+// 5.5d (находка №9): such an incident is what a cron minute tick produces, and
+// it gets a longer reopen window so consecutive ticks coalesce into one entry
+// — see backgroundReopenWindow. The three conditions are deliberately
+// conjunctive and all are load-bearing:
+//
+//   - trusted root: the P1-13 allowlist (sshd, cron), the same notion of
+//     "background" already used for verdict promotion. RootComm, not the leaf
+//     comm, so an incident rooted at cron that later sprouts an attacker child
+//     is judged on its origin.
+//   - no untrusted/network signal: the moment either appears the incident stops
+//     being background and reverts to the normal window on the next alert, so
+//     an attack that starts inside a daemon is not swallowed by a 5-minute
+//     grouping.
+//   - sub-threshold scoring cluster: uses the 5.5a scoring mirrors, so a daemon
+//     that genuinely trips minUniqueRulesForScore distinct non-info rules is
+//     never treated as background regardless of the other two.
+//
+// Caller must hold at least the read lock.
+func (t *IncidentTracker) isPeriodicBackground(inc *types.Incident) bool {
+	if inc == nil {
+		return false
+	}
+	if inc.HasUntrustedSignal || inc.HasNetworkSignal {
+		return false
+	}
+	if !t.isTrustedComm(inc.RootComm) {
+		return false
+	}
+	return len(inc.ScoringRuleIDs) < minUniqueRulesForScore
+}
+
 // isNetworkSignal reports whether et is a network-observable event type
 // (TCP connect/close, DNS, TLS) as opposed to a purely local
 // syscall/file/privesc event. Attacker traffic (sqlmap, curl, C2 beacons) is
@@ -408,7 +472,13 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 	t.mu.Lock()
 
 	inc, exists := t.open[key]
-	if !exists || ts.Sub(inc.LastSeen) > t.window {
+	// 5.5d: periodic daemon background coalesces into one incident instead of
+	// one per tick — see backgroundReopenWindow.
+	window := t.window
+	if exists && t.isPeriodicBackground(inc) {
+		window = t.window * backgroundReopenWindow
+	}
+	if !exists || ts.Sub(inc.LastSeen) > window {
 		id := t.nextID(ts)
 		inc = &types.Incident{
 			ID:           id,
@@ -687,7 +757,7 @@ func (t *IncidentTracker) GetAll(namespace, status string, limit int) []types.In
 
 	out := make([]types.Incident, 0, len(t.byID))
 	for _, inc := range t.byID {
-		s := incStatus(inc, now, t.window)
+		s := t.incStatusFor(inc, now)
 		if namespace != "" && inc.Namespace != namespace {
 			continue
 		}
@@ -729,7 +799,7 @@ func (t *IncidentTracker) GetByID(id string) (*types.Incident, bool) {
 		return nil, false
 	}
 	snap := *inc
-	snap.Status = incStatus(inc, now, t.window)
+	snap.Status = t.incStatusFor(inc, now)
 	return &snap, true
 }
 
@@ -737,8 +807,10 @@ func (t *IncidentTracker) GetByID(id string) (*types.Incident, bool) {
 // (e.g. the engine's maintenance goroutine).
 //
 // An open entry is moved to closed (removed from the open map) once its last
-// alert is older than window. Entries in byID are evicted once older than
-// window * incidentRetentionMultiplier to bound memory growth.
+// alert is older than window — or window * backgroundReopenWindow for periodic
+// daemon background, matching the window Add uses to reopen it (5.5d). Entries
+// in byID are evicted once older than window * incidentRetentionMultiplier to
+// bound memory growth.
 func (t *IncidentTracker) Cleanup(now time.Time) {
 	retention := t.window * incidentRetentionMultiplier
 
@@ -746,7 +818,15 @@ func (t *IncidentTracker) Cleanup(now time.Time) {
 	defer t.mu.Unlock()
 
 	for k, inc := range t.open {
-		if now.Sub(inc.LastSeen) > t.window {
+		// 5.5d: a periodic background incident is held open for the same
+		// extended window Add uses to reopen it. Evicting it at t.window would
+		// undo the coalescing — the next tick would find no open entry and mint
+		// a sibling anyway, which is the exact behaviour находка №9 removes.
+		closeAfter := t.window
+		if t.isPeriodicBackground(inc) {
+			closeAfter = t.window * backgroundReopenWindow
+		}
+		if now.Sub(inc.LastSeen) > closeAfter {
 			delete(t.open, k)
 		}
 	}
@@ -776,6 +856,20 @@ func incStatus(inc *types.Incident, now time.Time, window time.Duration) string 
 		return "open"
 	}
 	return "closed"
+}
+
+// incStatusFor is incStatus with the 5.5d extended window applied to periodic
+// daemon background, so the reported status matches the window that actually
+// governs grouping — otherwise a coalescing cron incident reads "closed"
+// between ticks while still accepting alerts into the same entry.
+//
+// Caller must hold at least the read lock.
+func (t *IncidentTracker) incStatusFor(inc *types.Incident, now time.Time) string {
+	window := t.window
+	if t.isPeriodicBackground(inc) {
+		window = t.window * backgroundReopenWindow
+	}
+	return incStatus(inc, now, window)
 }
 
 // maxIncidentSeverity returns the higher-ranked of two Severity values.

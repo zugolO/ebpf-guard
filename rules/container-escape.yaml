@@ -368,6 +368,11 @@ rules:
   # not_in, matching how P1-6/5.1 handle every other daemon-noise cluster.
   # The narrower ebpf-guard-self exception below still catches a
   # compromised binary literally named "ebpf-guard".
+  #
+  # 5.6c (замер №2.2, idle-регресс, 86/ч): cron reads /proc/1/* as part of
+  # routine job accounting (same PAM/session bookkeeping that already earns
+  # cron the sensitive_file_read_daemon split below) — added to not_in here
+  # and split off into container_escape_init_proc_daemon.
   - id: container_escape_init_proc
     name: "Container Escape: Init process access"
     description: "Container accessing init process (PID 1) information"
@@ -382,7 +387,7 @@ rules:
             - "/proc/self/root/proc/1/"
         - field: proc.comm
           op: not_in
-          values: ["prometheus", "grafana"]
+          values: ["prometheus", "grafana", "cron"]
     severity: warning
     action: alert
     class: drift
@@ -410,7 +415,7 @@ rules:
   # provides k8s metadata — recorded here per plan.md wave 5.1.
   - id: container_escape_init_proc_daemon
     name: "Init process access by container-native daemon"
-    description: "prometheus or grafana accessed /proc/1/* as PID 1 of their own container namespace — usually self-introspection, but content is not inspected and the comm axis is a temporary substitute for container_id."
+    description: "prometheus, grafana, or cron accessed /proc/1/* as PID 1 of their own container namespace or during routine job accounting — usually self-introspection, but content is not inspected and the comm axis is a temporary substitute for container_id."
     event_type: file
     condition_group:
       operator: and
@@ -422,7 +427,7 @@ rules:
             - "/proc/self/root/proc/1/"
         - field: proc.comm
           op: in
-          values: ["prometheus", "grafana"]
+          values: ["prometheus", "grafana", "cron"]
     severity: info
     action: alert
     class: drift

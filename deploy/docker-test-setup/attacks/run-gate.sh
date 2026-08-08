@@ -252,12 +252,6 @@ echo ""
 # длины (план 1.75c). docker-proxy (402 алерта замера №1) теперь в манифесте
 # с transit:true — без него множество атакующих comms занижало темп вдвое.
 echo "=== 6. Детект жив (типы атак, темп алертов от атакующих) ==="
-detected_types=$(jq -s '
-    (.[0] // []) as $baseline | (.[1] // []) as $final |
-    ($baseline | map(.id) | unique) as $bids |
-    ($final | map(select(.id as $id | ($bids | index($id)) | not))) as $new |
-    $new | map(.rule_id) | unique | length
-' -r "$baseline_alerts" "$final_alerts" 2>/dev/null || echo 0)
 
 attacker_alerts=0
 attacker_alerts_known=1
@@ -307,12 +301,61 @@ fi
 # с прогона №4 и стал недостижим после законного сужения правил: 41 тип в замере
 # №2 дал FAIL, хотя ни один настоящий детект не пропал. Одно число не отличает
 # «детект просел» от «FP перестал считаться детектом» — гейт печатает diff.
-detected_type_list=$(jq -s -r '
-    (.[0] // []) as $baseline | (.[1] // []) as $final |
-    ($baseline | map(.id) | unique) as $bids |
-    ($final | map(select(.id as $id | ($bids | index($id)) | not))) as $new |
-    $new | map(.rule_id) | map(select(. != null and . != "")) | unique | .[]
-' "$baseline_alerts" "$final_alerts" 2>/dev/null | tr -d '\r' | sort)
+#
+# Волна 5.6a (находка №10, замер №2.2): состав строится по дельте счётчиков
+# ebpf_guard_alerts_total{rule_id=...} между baseline- и final-снимком /metrics,
+# а не по дельте списков алертов по id. Дельта по id видит только то, что
+# сработало внутри окна атаки (7.79 мин в замере №2.2); правило с частотой
+# 2-20 срабатываний в час может отстреляться целиком ДО baseline или ПОСЛЕ
+# final и пропасть из diff, оставаясь живым — так потерялись пять типов на
+# замере №2.2 при полном совпадении счётчиков baseline/final (15/15 и т.д.).
+# Дельта по alerts_total не зависит от границы окна: правило видно, если у
+# него хоть одно срабатывание где-либо в /metrics с положительной дельтой
+# (или отсутствует в baseline и присутствует в final — новое срабатывание).
+#
+# Разделение снимков — по FILENAME, а не по NR == FNR: пустой (нулевой длины)
+# baseline-снимок делает NR == FNR истинным для строк ВТОРОГО файла, и тогда
+# весь final уходит в base[], seen[] остаётся пустым, а состав выводится как
+# «потеряны все 41 тип» — гейт напечатал бы полный регресс детекта вместо
+# проблемы сбора. Существование файлов проверено выше (-f), непустота — нет:
+# оборвавшийся curl оставляет 0-байтный файл, который -f проходит.
+# tr -d '\r' на входе: FS не включает \r, поэтому на CRLF-снимке rule_id из
+# последней метки получил бы хвостовой \r и разошёлся бы с базой, очищенной
+# через tr ниже (тот же дефект, что ловили при пересчёте 5.3).
+for f in "$baseline_metrics" "$final_metrics"; do
+    if [ ! -s "$f" ]; then
+        echo "Снимок /metrics пуст: $f — состав детекта (критерий 6) посчитать нельзя" >&2
+        exit 2
+    fi
+done
+detected_type_list=$(awk -F'[{}", ]+' -v basefile="$baseline_metrics" '
+    function rule_id(   i, rid) {
+        rid = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^rule_id=?$/) { rid = $(i+1); break }
+        }
+        return rid
+    }
+    { gsub(/\r/, "") }
+    !/^ebpf_guard_alerts_total\{/ { next }
+    FILENAME == basefile {
+        rid = rule_id(); if (rid == "") next
+        base[rid] += $NF
+        next
+    }
+    {
+        rid = rule_id(); if (rid == "") next
+        final[rid] += $NF
+        seen[rid] = 1
+    }
+    END {
+        for (r in seen) {
+            b = (r in base) ? base[r] : 0
+            if (final[r] > b) print r
+        }
+    }
+' "$baseline_metrics" "$final_metrics" | sort)
+detected_types=$(echo "$detected_type_list" | grep -c . || true)
 
 if [ ! -f "$baseline_types_file" ]; then
     skip "detection-baseline.txt не найден рядом с гейтом — состав детекта сравнить не с чем (число типов: $detected_types)"
@@ -448,12 +491,29 @@ else
 fi
 echo ""
 
-# 10. >= 80% инцидентов с непустым process_chain (гейт волны 2, критерий 2).
+# 10. process_chain (гейт волны 2, критерий 2; переформулировано волной 5.6b,
+# находка №11 замера №2.2).
 # P0-1: в прогоне №4 было 114/114 «chain unknown». Метрика
 # ebpf_guard_incidents_empty_chain_total заведена в 2.1, но гейт её не читал —
 # здесь она сверяется со снапшотом, чтобы расхождение метрики и снапшота
 # (как в замере №1 по comm) было видно сразу, а не через прогон.
-echo "=== 10. Доля инцидентов с непустым process_chain (гейт волны 2: >= 80%) ==="
+#
+# Находка №11: порог 80% на знаменателе «все инциденты» недостижим на выборке
+# из 13 — шаг 7.7 п.п., «ровно 80%» не существует. Знаменатель включал
+# однoалертные anomaly_detection-инциденты на короткоживущих процессах, где
+# дерева нет ПО УСТРОЙСТВУ (мгновенный алерт на уже завершившемся процессе), а
+# не по дефекту — и на замере №2.2 их доля выросла с 33% до 77%, утопив
+# критерий не в детекте, а в составе выборки.
+#
+# Правка из двух частей, обе делают критерий строже, а не мягче:
+#   1. Знаменатель — только многоалертные инциденты (alert_count > 1): цепочка
+#      имеет смысл только для них.
+#   2. Новое условие: доля с цепочкой среди verdict="attack" = 100% — это
+#      сторона, которая ловит настоящий регресс P0-1 (нет цепочки у
+#      подтверждённой атаки), и раньше не проверялась вовсе.
+# Однoалертные инциденты не пропадают из отчёта — печатаются отдельной
+# строкой (план 5.1a, п. 8: рост этого числа должен быть виден).
+echo "=== 10. process_chain: многоалертные >= 80%, attack-инциденты = 100% (волна 5.6b) ==="
 if [ ! -f "$final_incidents" ]; then
     skip "final-incidents-$TIMESTAMP.json не собран — process_chain не проверен"
 elif ! jq -e 'type == "array"' "$final_incidents" >/dev/null 2>&1; then
@@ -463,12 +523,57 @@ else
     if [ "$inc_total" -eq 0 ]; then
         skip "инцидентов нет — доля с process_chain неопределена"
     else
-        with_chain=$(jq '[.[] | select((.process_chain // []) | length > 0)] | length' "$final_incidents")
-        chain_share=$(awk -v c="$with_chain" -v t="$inc_total" 'BEGIN{ printf "%.1f", 100*c/t }')
-        if awk -v s="$chain_share" 'BEGIN{exit !(s+0 >= 80)}'; then
-            pass "инцидентов с process_chain: $with_chain/$inc_total = ${chain_share}% (>= 80%)"
+        multi_total=$(jq '[.[] | select((.alert_count // 1) > 1)] | length' "$final_incidents")
+        # «без цепочки» — именно инциденты с пустым process_chain (любой
+        # alert_count), а не все однoалертные: однoалертный инцидент с цепочкой
+        # существует (долгоживущий процесс), и записывать его в бесцепочечные
+        # значило бы печатать в отчёте не то число, которое подписано.
+        no_chain=$(jq '[.[] | select((.process_chain // []) | length == 0)] | length' "$final_incidents")
+        single_instant=$(jq '[.[] | select((.alert_count // 1) <= 1
+            and ((.process_chain // []) | length == 0))] | length' "$final_incidents")
+        echo "  без цепочки: $no_chain, из них однoалертных мгновенных: $single_instant"
+
+        # Сторона attack считается ДО и НЕЗАВИСИМО от многоалертной: это
+        # отдельное условие критерия (п. 2 правки 5.6b), и именно оно ловит
+        # регресс P0-1. Внутри ветки multi_total > 0 она была бы пропущена
+        # вместе со всем критерием на выборке без многоалертных инцидентов —
+        # attack без цепочки прошёл бы как skip, а не FAIL.
+        attack_total=$(jq '[.[] | select(.verdict == "attack")] | length' "$final_incidents")
+        if [ "$attack_total" -eq 0 ]; then
+            echo "  attack-инцидентов нет — доля с process_chain среди них не проверена"
+            attack_ok=1
+            attack_checked=0
+            attack_note=" attack: инцидентов нет, сторона не проверена"
         else
-            fail "инцидентов с process_chain: $with_chain/$inc_total = ${chain_share}% (гейт волны 2: >= 80%)"
+            attack_with_chain=$(jq '[.[] | select(.verdict == "attack"
+                and ((.process_chain // []) | length > 0))] | length' "$final_incidents")
+            attack_share=$(awk -v c="$attack_with_chain" -v t="$attack_total" 'BEGIN{ printf "%.1f", 100*c/t }')
+            attack_ok=0
+            attack_checked=1
+            if awk -v s="$attack_share" 'BEGIN{exit !(s+0 >= 100)}'; then attack_ok=1; fi
+            attack_note=" attack: $attack_with_chain/$attack_total = ${attack_share}% (= 100%)"
+        fi
+
+        if [ "$multi_total" -eq 0 ]; then
+            # Многоалертная сторона неопределена, но attack-сторона могла быть
+            # посчитана — её провал остаётся FAIL, а не превращается в skip.
+            if [ "$attack_checked" -eq 1 ] && [ "$attack_ok" -eq 0 ]; then
+                fail "многоалертных инцидентов нет (доля среди них неопределена);$attack_note"
+            else
+                skip "многоалертных инцидентов нет — доля с process_chain среди них неопределена;$attack_note"
+            fi
+        else
+            with_chain=$(jq '[.[] | select((.alert_count // 1) > 1
+                and ((.process_chain // []) | length > 0))] | length' "$final_incidents")
+            chain_share=$(awk -v c="$with_chain" -v t="$multi_total" 'BEGIN{ printf "%.1f", 100*c/t }')
+            multi_ok=0
+            if awk -v s="$chain_share" 'BEGIN{exit !(s+0 >= 80)}'; then multi_ok=1; fi
+
+            if [ "$multi_ok" -eq 1 ] && [ "$attack_ok" -eq 1 ]; then
+                pass "многоалертные: $with_chain/$multi_total = ${chain_share}% (>= 80%);$attack_note"
+            else
+                fail "многоалертные: $with_chain/$multi_total = ${chain_share}% (>= 80% требуется);$attack_note"
+            fi
         fi
     fi
 fi

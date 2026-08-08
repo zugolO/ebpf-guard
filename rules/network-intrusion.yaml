@@ -363,14 +363,28 @@ rules:
     action: alert
     tags: [mitre:T1095, multicast, covert-channel]
 
+  # 5.6c (замер №2.2, idle-регресс): rule name/description promised "high
+  # port" but the condition never checked dport — it fired on every loopback
+  # connection, including a health-check's plain `curl http://127.0.0.1:PORT/`.
+  # That single network event was enough to supply HasNetworkSignal and
+  # corroborate an unrelated file-access cluster into a false
+  # incident_confirmed_attack on idle (bash → curl, every 5 min). Added the
+  # dport condition the rule always claimed to have; threshold matches the
+  # ephemeral-port convention used elsewhere in this file
+  # (netintr_high_port_established, > 49152).
   - id: netintr_loopback_high_port
     name: "Connection to loopback on high port (local proxy)"
-    description: "Outbound connection to 127.0.0.1 on a high port — local SOCKS proxy or C2 relay tool."
+    description: "Outbound connection to 127.0.0.1 on a high (ephemeral-range) port — local SOCKS proxy or C2 relay tool, not a well-known service port."
     event_type: network
-    condition:
-      field: daddr
-      op: in
-      values: ["127.0.0.1", "::1"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: daddr
+          op: in
+          values: ["127.0.0.1", "::1"]
+        - field: dport
+          op: gt
+          values: ["49152"]
     severity: warning
     action: alert
     tags: [mitre:T1090, loopback, proxy, local-relay]

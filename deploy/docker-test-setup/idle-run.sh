@@ -156,7 +156,36 @@ journalctl -u "$SERVICE" --since "@$(( $(date +%s) - DURATION - 600 ))" --no-pag
     echo "recovered: $(grep -c 'cpu pressure: recovered' "$OUT/journal.log" 2>/dev/null)"
     echo
     echo "--- рестарты агента за прогон (незапланированные = баг) ---"
-    grep -c 'ebpf-guard starting' "$OUT/journal.log" 2>/dev/null
+    # 5.6d: считать смены PID агента (ebpf-guard[NNNNNN]), а не строки
+    # "ebpf-guard starting" — та же строка печатается один раз при самом
+    # первом запуске прогона (не рестарт) и один раз на каждый настоящий
+    # рестарт, так что счётчик был завышен на 1 всегда. Первая увиденная в
+    # журнале смена PID — это старт самого прогона, не рестарт, и
+    # исключается явно. Каждая следующая смена PID считается плановой, если
+    # где-то среди строк под старым PID встретилась "graceful shutdown:
+    # complete" (не обязательно последней — за ней ещё идут короткие строки
+    # cleanup); иначе — незапланированный рестарт (баг).
+    awk '
+        /ebpf-guard\[[0-9]+\]/ {
+            line = $0
+            sub(/.*ebpf-guard\[/, "", line)
+            sub(/\].*/, "", line)
+            pid = line
+            if (pid != last_pid) {
+                if (seen) {
+                    if (graceful) planned++
+                    else unplanned++
+                }
+                seen = 1
+                graceful = 0
+            }
+            last_pid = pid
+            if ($0 ~ /graceful shutdown: complete/) graceful = 1
+        }
+        END {
+            printf "рестартов: %d (плановых: %d, незапланированных: %d)\n", planned+unplanned, planned, unplanned
+        }
+    ' "$OUT/journal.log" 2>/dev/null
 } > "$OUT/SUMMARY.txt" 2>&1
 
 cat "$OUT/SUMMARY.txt" | tee -a "$OUT/idle-run.log"

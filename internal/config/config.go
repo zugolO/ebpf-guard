@@ -984,8 +984,9 @@ type CorrelatorConfig struct {
 	// an incident to an "attack" verdict (wave 2 trust gate). Alerts from these
 	// processes still reach the incident and its process chain — they just do
 	// not supply the score for a verdict without an untrusted or network signal.
-	// Empty means the built-in default (sshd, cron). Which daemons are noisy is
-	// deployment-specific, so this must be tunable without a rebuild.
+	// Empty means the built-in default (sshd, cron, landscape-sysin,
+	// systemd-logind, grafana). Which daemons are noisy is deployment-specific,
+	// so this must be tunable without a rebuild.
 	TrustedComms []string `mapstructure:"trusted_comms"`
 }
 

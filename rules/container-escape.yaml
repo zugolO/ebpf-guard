@@ -373,6 +373,8 @@ rules:
   # routine job accounting (same PAM/session bookkeeping that already earns
   # cron the sensitive_file_read_daemon split below) — added to not_in here
   # and split off into container_escape_init_proc_daemon.
+  # 5.7a (замер №2.3, находка №13): pgrep's per-PID scan hits /proc/1/* too
+  # (204/h, top offender of the four-rule pgrep cluster) — same treatment.
   - id: container_escape_init_proc
     name: "Container Escape: Init process access"
     description: "Container accessing init process (PID 1) information"
@@ -387,7 +389,7 @@ rules:
             - "/proc/self/root/proc/1/"
         - field: proc.comm
           op: not_in
-          values: ["prometheus", "grafana", "cron"]
+          values: ["prometheus", "grafana", "cron", "pgrep"]
     severity: warning
     action: alert
     class: drift
@@ -415,7 +417,7 @@ rules:
   # provides k8s metadata — recorded here per plan.md wave 5.1.
   - id: container_escape_init_proc_daemon
     name: "Init process access by container-native daemon"
-    description: "prometheus, grafana, or cron accessed /proc/1/* as PID 1 of their own container namespace or during routine job accounting — usually self-introspection, but content is not inspected and the comm axis is a temporary substitute for container_id."
+    description: "prometheus, grafana, cron, or pgrep accessed /proc/1/* as PID 1 of their own container namespace, during routine job accounting, or as part of a per-PID process scan — usually self-introspection, but content is not inspected and the comm axis is a temporary substitute for container_id."
     event_type: file
     condition_group:
       operator: and
@@ -427,7 +429,7 @@ rules:
             - "/proc/self/root/proc/1/"
         - field: proc.comm
           op: in
-          values: ["prometheus", "grafana", "cron"]
+          values: ["prometheus", "grafana", "cron", "pgrep"]
     severity: info
     action: alert
     class: drift

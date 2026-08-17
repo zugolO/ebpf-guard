@@ -59,14 +59,25 @@ rules:
   # T1046 — Network Service Discovery (Port Scanning)
   # ============================================================================
 
+  # plan.md wave 5.7 (замер №2.3, находка №12): matches any single connection
+  # to a common port (53/80/443/…) with no rate/burst dimension despite the
+  # name — grafana's routine DNS resolution and HTTPS notification traffic
+  # trips it on ordinary operation. Scoped comm exception, not a port
+  # carve-out: an attacker scanning these same ports from any other process
+  # still alerts.
   - id: netintr_syn_scan_pattern
     name: "Rapid sequential TCP connections (port scan)"
     description: "Process opening many TCP connections rapidly to different ports — network port scanning."
     event_type: network
-    condition:
-      field: dport
-      op: in
-      values: ["21", "22", "23", "25", "53", "80", "110", "143", "443", "445", "3389", "5985", "5986"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: in
+          values: ["21", "22", "23", "25", "53", "80", "110", "143", "443", "445", "3389", "5985", "5986"]
+        - field: proc.comm
+          op: not_in
+          values: ["grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [mitre:T1046, network-scan, discovery, reconnaissance]
@@ -163,14 +174,23 @@ rules:
     action: alert
     tags: [mitre:T1572, ssh-tunnel, c2]
 
+  # plan.md wave 5.7 (замер №2.3, находка №12): 9090 is Prometheus's own
+  # default scrape port — grafana querying its data source trips this by
+  # design. Scoped comm exception; any other process on these ports still
+  # alerts.
   - id: netintr_http_on_non_web_port
     name: "HTTP connection on non-standard port"
     description: "Outbound HTTP/HTTPS on unusual port — HTTP C2 channel or reverse proxy for command execution."
     event_type: network
-    condition:
-      field: dport
-      op: in
-      values: ["8443", "8888", "9090", "9443", "9999", "10443", "4433"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: in
+          values: ["8443", "8888", "9090", "9443", "9999", "10443", "4433"]
+        - field: proc.comm
+          op: not_in
+          values: ["grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [mitre:T1572, http-c2, non-standard-port]
@@ -203,14 +223,26 @@ rules:
     action: alert
     tags: [mitre:T1048.002, smtp, data-exfiltration]
 
+  # plan.md wave 5.7 (замер №2.3, находка №12): matches on dport 443 alone,
+  # so it fires on every plain HTTPS connection — grafana's own outbound
+  # notification/alerting webhooks and metrics push were 89/71min in the
+  # docs-audit sample (2026-08-06), the single largest contributor to the
+  # idle-hour containerd-shim→grafana "attack" incident. Scoped comm
+  # exception, not a blanket dport carve-out: an attacker process using 443
+  # for actual exfil still alerts.
   - id: netintr_large_upload_port
     name: "Connection to common data exfiltration services"
     description: "Outbound connection to cloud storage ports used for bulk exfiltration (S3, GCS, Azure Blob)."
     event_type: network
-    condition:
-      field: dport
-      op: in
-      values: ["443"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: in
+          values: ["443"]
+        - field: proc.comm
+          op: not_in
+          values: ["grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [mitre:T1048, data-exfiltration, cloud-storage]
@@ -393,14 +425,24 @@ rules:
   # Long-lived connection detection
   # ============================================================================
 
+  # plan.md wave 5.7 (замер №2.3, находка №12): grafana keeps a long-lived
+  # resolver connection open for its own periodic upstream health checks
+  # (128/71min in docs-audit 2026-08-06) — indistinguishable from tunneling
+  # by duration alone. Scoped comm exception so an attacker's actual
+  # DNS-over-TCP tunnel still alerts regardless of process name.
   - id: netintr_long_dns_session
     name: "Extremely long-lived DNS connection (tunneling)"
     description: "DNS TCP connection lasting more than 60 seconds — DNS-over-TCP tunnel for C2 or exfiltration."
     event_type: net_close
-    condition:
-      field: duration_sec
-      op: gt
-      values: ["60"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: duration_sec
+          op: gt
+          values: ["60"]
+        - field: comm
+          op: not_in
+          values: ["grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [mitre:T1048.001, dns-tunnel, long-connection]

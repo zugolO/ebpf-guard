@@ -213,19 +213,30 @@ rules:
   # T1497 — Virtualization/Sandbox Evasion
   # ============================================================================
 
+  # plan.md wave 5.7a (замер №2.3, находка №13): pgrep enumerates every PID's
+  # /proc/<pid>/* including PID 1 as part of its normal matching pass — same
+  # /proc/1/* signature this rule looks for, but that's pgrep's own scan
+  # pattern, not sandbox-detection recon. comm not_in, matching the daemon-
+  # noise convention (container_escape_init_proc, wave 5.6c); split off into
+  # mitre_sandbox_detect_proc_read_daemon below.
   - id: mitre_sandbox_detect_proc_read
     name: "Sandbox detection via /proc enumeration"
     description: "Process reading /proc/1/cgroup, /proc/1/environ, or /proc/uptime for container/sandbox detection."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/proc/1/cgroup"
-        - "/proc/1/environ"
-        - "/proc/uptime"
-        - "/proc/1/status"
-        - "/proc/self/cgroup"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/proc/1/cgroup"
+            - "/proc/1/environ"
+            - "/proc/uptime"
+            - "/proc/1/status"
+            - "/proc/self/cgroup"
+        - field: proc.comm
+          op: not_in
+          values: ["pgrep"]
     severity: warning
     action: alert
     tags: [mitre:T1497.001, sandbox-evasion, container-detect, evasion]
@@ -243,6 +254,31 @@ rules:
             - field: filename
               op: in
               values: ["/proc/self/cgroup", "/proc/uptime"]
+
+  # pgrep's routine per-PID matching pass reads /proc/1/{cgroup,environ,status}
+  # as a side effect of scanning every running process, not sandbox-detection
+  # recon — info, not warning, same reasoning as container_escape_init_proc_daemon.
+  - id: mitre_sandbox_detect_proc_read_daemon
+    name: "Sandbox-detection-pattern /proc read by pgrep"
+    description: "pgrep read /proc/1/{cgroup,environ,status} as part of its routine per-PID matching pass across all running processes — same signature as sandbox-detection recon, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/proc/1/cgroup"
+            - "/proc/1/environ"
+            - "/proc/uptime"
+            - "/proc/1/status"
+            - "/proc/self/cgroup"
+        - field: proc.comm
+          op: in
+          values: ["pgrep"]
+    severity: info
+    action: alert
+    tags: [mitre:T1497.001, sandbox-evasion, container-detect, evasion, needs-content-analysis]
 
   - id: mitre_sandbox_detect_cpuid
     name: "CPU virtualization detection via cpuid"

@@ -223,17 +223,29 @@ rules:
     action: alert
     tags: [web-attack, ssti, template-injection, owasp, a03-injection]
 
+  # plan.md wave 5.7 (замер №2.3, находка №12): matches any connection to
+  # RFC1918 space with no comm scoping at all — in a containerized stand
+  # every container-to-container connection (grafana→prometheus, any
+  # service→service call) lands in a private range by construction. grafana
+  # excluded as the observed idle-hour offender; the rule stays broad for
+  # every other process, including an actual attacker pivoting from a
+  # compromised web process.
   - id: web_internal_recon
     name: "Web Attack: Internal network reconnaissance"
     description: "Web server process connecting to private IP address ranges (internal network recon/pivoting)"
     event_type: network
-    condition:
-      field: daddr
-      op: in_cidr
-      values:
-        - "10.0.0.0/8"        # RFC1918 private Class A
-        - "172.16.0.0/12"    # RFC1918 private Class B
-        - "192.168.0.0/16"   # RFC1918 private Class C
+    condition_group:
+      operator: and
+      conditions:
+        - field: daddr
+          op: in_cidr
+          values:
+            - "10.0.0.0/8"        # RFC1918 private Class A
+            - "172.16.0.0/12"    # RFC1918 private Class B
+            - "192.168.0.0/16"   # RFC1918 private Class C
+        - field: proc.comm
+          op: not_in
+          values: ["grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [web-attack, internal-recon, pivoting, owasp, a10-ssrf, private-network]

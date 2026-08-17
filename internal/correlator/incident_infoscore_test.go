@@ -37,6 +37,14 @@ func TestIncidentTracker_InfoAlertsAlone_DoesNotPromote(t *testing.T) {
 	assert.NotEqual(t, types.VerdictAttack, inc.Verdict,
 		"a cron burst made entirely of info alerts must not score high enough to promote")
 	assert.Zero(t, inc.Score, "info alerts must contribute nothing to score")
+
+	// 5.7e (находка №17): an all-info incident must report an explicit verdict
+	// and severity, not the empty string a fresh Incident zero-values to — an
+	// empty JSON field is indistinguishable from "scoring never ran".
+	assert.Equal(t, types.VerdictNone, inc.Verdict,
+		"an all-info incident must report verdict=none, not an empty string")
+	assert.Equal(t, types.SeverityInfo, inc.Severity,
+		"the first info alert must not lose its severity to the incident's zero value on a rank tie")
 }
 
 // TestIncidentTracker_InfoAlerts_DoNotBlockRealCluster is the other side of

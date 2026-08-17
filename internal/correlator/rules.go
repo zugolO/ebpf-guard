@@ -1413,6 +1413,8 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return strconv.FormatInt(int64(e.NetClose.Duration.Seconds()), 10)
 		case "duration_ms":
 			return strconv.FormatInt(e.NetClose.Duration.Milliseconds(), 10)
+		case "comm":
+			return util.BytesToString(e.Comm[:])
 		}
 	case types.EventGPU:
 		if e.GPU == nil {

@@ -641,6 +641,20 @@ rules:
             - field: filename
               op: in
               values: ["/proc/cpuinfo", "/proc/meminfo", "/proc/version"]
+      # plan.md wave 5.7a (замер №2.3, находка №13): pgrep reads /proc/cpuinfo
+      # as part of its libc/procps startup (189/h, part of the four-rule
+      # pgrep cluster). Scoped to comm AND path — enumeration of
+      # /proc/sys/kernel/* by pgrep would be out of character and still alerts.
+      - name: pgrep-cpuinfo-scan
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [pgrep]
+            - field: filename
+              op: in
+              values: ["/proc/cpuinfo", "/proc/meminfo", "/proc/version"]
 
   - id: sigma_kernel_version_read
     name: "Kernel version file read"
@@ -826,6 +840,12 @@ rules:
     # ebpf-guard reads its own /proc/self equivalents for self-monitoring —
     # neither is credential access. Observed as ~97% of this rule's alerts on
     # an idle host (see ISSUES-attack-run-2026-08-03.md P1-6).
+    #
+    # plan.md wave 5.7a (замер №2.3, находка №13): pgrep's per-PID matching
+    # pass reads only /proc/<pid>/cmdline (193/h) — never /mem or /maps, the
+    # actual credential-scraping primitives. Scoped to comm AND path so the
+    # real dump surface stays alerting even from pgrep (control criterion:
+    # attack-window /proc/*/mem dumps must keep firing, see cred_proc_maps_mass_read).
     exceptions:
       - name: systemd-journal
         condition:
@@ -837,6 +857,17 @@ rules:
           field: proc.comm
           op: eq
           values: [ebpf-guard]
+      - name: pgrep-cmdline-scan
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [pgrep]
+            - field: filename
+              op: regex
+              values:
+                - "/proc/[0-9]+/cmdline"
 
   - id: sigma_ptrace_attach
     name: "ptrace PTRACE_ATTACH to another process"

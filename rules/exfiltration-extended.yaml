@@ -78,6 +78,10 @@ rules:
     tags: [mitre:T1048.002, exfiltration, tls]
 
   # MITRE ATT&CK: T1041 — Exfiltration Over C2 Channel (large HTTP POST)
+  # plan.md wave 5.7 (замер №2.3, находка №12): the dport match list includes
+  # 9090 — Prometheus's own scrape port — so grafana querying its data
+  # source is indistinguishable from this rule's C2 pattern. grafana added
+  # alongside the existing runtime/webserver comm exclusions.
   - id: exfil_large_http_post
     name: "Large HTTP POST to non-standard port"
     description: >
@@ -100,7 +104,7 @@ rules:
         - field: proc.comm
           op: not_in
           values: ["java", "python3", "python", "node", "ruby", "perl",
-                   "nginx", "apache2", "httpd", "caddy"]
+                   "nginx", "apache2", "httpd", "caddy", "grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [mitre:T1041, exfiltration, command-and-control]
@@ -180,7 +184,8 @@ rules:
           op: not_in
           values: ["rsync", "scp", "sftp", "rclone", "aws", "gsutil",
                    "az", "restic", "duplicati", "borgbackup", "bacula",
-                   "prometheus", "node_exporter", "telegraf", "fluentd"]
+                   "prometheus", "node_exporter", "telegraf", "fluentd",
+                   "grafana"]
         - field: daddr
           op: not_in_cidr
           values: ["127.0.0.0/8", "::1/128"]

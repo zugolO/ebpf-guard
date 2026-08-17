@@ -5,6 +5,11 @@ import "time"
 type IncidentVerdict string
 
 const (
+	// VerdictNone marks an incident whose alerts never reached scoring — e.g.
+	// all-info incidents under 5.5a, which are deliberately kept out of the
+	// score entirely. Explicit so an empty JSON verdict is never mistaken for
+	// "scoring failed to run" (5.7e, находка №17).
+	VerdictNone       IncidentVerdict = "none"
 	VerdictSuspicious IncidentVerdict = "suspicious"
 	VerdictAttack     IncidentVerdict = "attack"
 )

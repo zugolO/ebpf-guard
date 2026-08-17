@@ -267,17 +267,26 @@ rules:
     action: alert
     tags: [mitre:T1552.005, mitre:T1190, webshell, ssrf, cloud-metadata]
 
+  # plan.md wave 5.7 (замер №2.3, находка №12): same overbroad shape as
+  # web_internal_recon — no comm scoping, so any container-to-container
+  # connection (grafana→prometheus) reads as SSRF pivoting. grafana excluded
+  # as the observed idle-hour offender.
   - id: webshell_ssrf_internal_network
     name: "Web process connecting to internal RFC1918 range (SSRF)"
     description: "Web server process initiated connection to internal private IP range — SSRF pivoting to internal services."
     event_type: network
-    condition:
-      field: daddr
-      op: in_cidr
-      values:
-        - "10.0.0.0/8"
-        - "172.16.0.0/12"
-        - "192.168.0.0/16"
+    condition_group:
+      operator: and
+      conditions:
+        - field: daddr
+          op: in_cidr
+          values:
+            - "10.0.0.0/8"
+            - "172.16.0.0/12"
+            - "192.168.0.0/16"
+        - field: proc.comm
+          op: not_in
+          values: ["grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [mitre:T1190, webshell, ssrf, internal-pivot]

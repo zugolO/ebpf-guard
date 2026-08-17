@@ -105,6 +105,7 @@ var (
 	validNetCloseFields = map[string]bool{
 		"dport": true, "sport": true, "daddr": true, "saddr": true,
 		"family": true, "duration_sec": true, "duration_ms": true,
+		"comm": true,
 	}
 	validGPUFields = map[string]bool{
 		"gpu_op":       true, // operation name: alloc, free, memcpy_htod, memcpy_dtoh, memcpy_dtod, kernel_launch

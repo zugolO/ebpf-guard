@@ -42,6 +42,12 @@ rules:
     tags: [mitre:T1095, command-and-control]
 
   # MITRE ATT&CK: T1071.001 — Repeated outbound connection on C2 ports (beacon)
+  # plan.md wave 5.7 (замер №2.3, находка №12): grafana added to the comm
+  # exclusion list alongside the existing package-manager/dev-tool entries —
+  # its own periodic scrape of prometheus on 9090 is a fixed-interval
+  # non-standard-port connection by design, the exact shape this rule looks
+  # for. Not a dport carve-out: an attacker beacon to any port, including
+  # 9090, from any other process still alerts.
   - id: beacon_fixed_interval
     name: "Fixed-interval C2 beacon — repeated connection to non-standard port"
     description: >
@@ -59,7 +65,8 @@ rules:
           op: not_in
           values: ["curl", "wget", "apt", "yum", "dnf", "pip", "pip3",
                    "npm", "yarn", "gem", "cargo", "go", "gradle", "mvn",
-                   "ssh", "scp", "rsync", "nmap", "nc", "netcat"]
+                   "ssh", "scp", "rsync", "nmap", "nc", "netcat",
+                   "grafana", "prometheus"]
     severity: warning
     action: alert
     tags: [mitre:T1071.001, command-and-control, beaconing, c2]

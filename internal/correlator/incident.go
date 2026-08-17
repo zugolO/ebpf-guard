@@ -127,9 +127,27 @@ const (
 // just cannot supply the score that promotes a verdict — see
 // hasUntrustedOrNetworkSignal. Override per deployment via
 // correlator.trusted_comms (see IncidentTrustedComms).
+//
+// plan.md wave 5.7 (замер №2.3, находка №12): idle-hour attack-verdict
+// incidents rooted at landscape-sysin (score 82, 5 tactics — its own startup
+// exec + log rotation + /proc self-inspection, same shape as the sshd/cron
+// case above), systemd-logind (score 75, 5 tactics — PAM/session accounting
+// reads of /etc/passwd misread by web_sql_injection_files et al.), and
+// grafana (score 58-73, 5 tactics — container-native /proc/1 self-
+// introspection plus monitoring traffic misread as scan/exfil/tunneling by
+// netintr_*/exfil_* rules) all reduce to the identical pattern: a single
+// system/monitoring daemon's own routine activity, not corroborated by any
+// second untrusted process or a real attacker-controlled network signal.
+// curl is deliberately NOT added here — it is one of the most common
+// attacker tools (see attack-manifest.json), so trusting it would blind the
+// `bash → curl` attack path; its idle-noise share (3/9) is a rule-level
+// problem, not a trust-gate one.
 var defaultTrustedComms = map[string]struct{}{
-	"sshd": {},
-	"cron": {},
+	"sshd":            {},
+	"cron":            {},
+	"landscape-sysin": {},
+	"systemd-logind":  {},
+	"grafana":         {},
 }
 
 // IncidentScoringConfig tunes how incidents are scored and when they are
@@ -667,7 +685,10 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 	// that fail this check are held at "suspicious" instead of promoted.
 	hasQualifyingSignal := inc.HasUntrustedSignal || inc.HasNetworkSignal
 
-	verdict := types.IncidentVerdict("")
+	// 5.7e: VerdictNone, not "", when score never qualifies — an all-info
+	// incident (5.5a) is expected to land here, not to look like scoring never
+	// ran.
+	verdict := types.VerdictNone
 	if score >= cfg.AttackThreshold && hasQualifyingSignal {
 		verdict = types.VerdictAttack
 	} else if score > 0 {
@@ -873,8 +894,13 @@ func (t *IncidentTracker) incStatusFor(inc *types.Incident, now time.Time) strin
 }
 
 // maxIncidentSeverity returns the higher-ranked of two Severity values.
+//
+// 5.7e: a tie must not favor a — an incident's zero-value Severity ("") ranks
+// equal to SeverityInfo, so the first info alert on a fresh incident lost the
+// tie and left Severity permanently "". Ties now favor b, the incoming alert,
+// so an unset Severity always adopts the first real value it sees.
 func maxIncidentSeverity(a, b types.Severity) types.Severity {
-	if incidentSeverityRank(a) >= incidentSeverityRank(b) {
+	if incidentSeverityRank(a) > incidentSeverityRank(b) {
 		return a
 	}
 	return b
@@ -886,8 +912,10 @@ func incidentSeverityRank(s types.Severity) int {
 		return 2
 	case types.SeverityWarning:
 		return 1
-	default:
+	case types.SeverityInfo:
 		return 0
+	default:
+		return -1
 	}
 }
 

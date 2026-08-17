@@ -142,15 +142,25 @@ for etype in network dns; do
 done
 echo ""
 
-# 2. DNS-события: активная проверка, что коллектор видит резолвинг.
+# 2. DNS-события: активная проверка, что коллектор видит резолвинг, ПЛЮС
+# проверка периодической слепоты за весь прогон (5.7d, находка №16).
+#
 # В замере №1 атаки шли на localhost:3000 — резолвинг не нужен, поэтому
 # предыдущая формулировка ("растёт на сотни") давала FAIL при +2, хотя
 # сам коллектор рабочий (вопрос 3 закрыт диагностикой на стенде: dig даёт
-# прирост). Теперь гейт сам шлёт dig example.com @8.8.8.8 (путь sendto)
-# и требует, чтобы events_total{dns} вырос хотя бы на 1. Без dig, без
-# сети или без доступа к API — SKIP с явной записью, а не FAIL: критерий
-# непроверяем по построению, не провален (план 1.75c).
-echo "=== 2. DNS-события: активная проверка коллектора ==="
+# прирост). Гейт сам шлёт dig example.com @8.8.8.8 (путь sendto) и требует,
+# чтобы events_total{dns} вырос хотя бы на 1. Без dig, без сети или без
+# доступа к API — SKIP с явной записью, а не FAIL: критерий непроверяем по
+# построению, не провален (план 1.75c).
+#
+# 5.7d добавила вторую часть: "выросли на N после дига" — точечная проверка,
+# не ловит пятиминутные окна слепоты между дигами (находка №16 — коллектор
+# слеп 5 минут и оживает сам, "растёт на 5" проходит и при провале, и без
+# него). ebpf_guard_dns_collector_stale_transitions_total — монотонный
+# счётчик входов в состояние "нет событий дольше dnsStaleThreshold",
+# читается из final_metrics и покрывает весь прогон целиком, а не момент
+# снятия снимка.
+echo "=== 2. DNS-события: активная проверка коллектора + периодическая слепота ==="
 if ! command -v dig &> /dev/null; then
     skip "dig не найден — DNS-проверка пропущена (установить dnsutils для активной проверки)"
 elif [ -z "$EBPF_GUARD_TOKEN" ]; then
@@ -174,6 +184,20 @@ else
         pass "dns events_total выросли на $dns_delta после активного резолвинга"
     else
         fail "dns events_total не вырос после dig (delta=$dns_delta) — коллектор слеп на резолвинг (см. вопрос 3: systemd-resolved/nss-пути)"
+    fi
+fi
+
+if [ ! -f "$final_metrics" ]; then
+    skip "нет final_metrics — проверка периодической слепоты DNS пропущена"
+else
+    dns_stale_transitions=$(grep '^ebpf_guard_dns_collector_stale_transitions_total' "$final_metrics" \
+        | awk '{print $2+0}')
+    if [ -z "$dns_stale_transitions" ]; then
+        skip "ebpf_guard_dns_collector_stale_transitions_total не найден в final_metrics — сборка агента старее 5.7d?"
+    elif [ "${dns_stale_transitions%.*}" -eq 0 ] 2>/dev/null; then
+        pass "dns_collector_stale_transitions_total = 0 — окон тишины дольше порога не было"
+    else
+        fail "dns_collector_stale_transitions_total = $dns_stale_transitions — коллектор входил в состояние тишины $dns_stale_transitions раз за прогон (находка №16)"
     fi
 fi
 echo ""
@@ -302,16 +326,22 @@ fi
 # №2 дал FAIL, хотя ни один настоящий детект не пропал. Одно число не отличает
 # «детект просел» от «FP перестал считаться детектом» — гейт печатает diff.
 #
-# Волна 5.6a (находка №10, замер №2.2): состав строится по дельте счётчиков
-# ebpf_guard_alerts_total{rule_id=...} между baseline- и final-снимком /metrics,
-# а не по дельте списков алертов по id. Дельта по id видит только то, что
-# сработало внутри окна атаки (7.79 мин в замере №2.2); правило с частотой
+# Волна 5.6a (находка №10, замер №2.2): состав строится по счётчикам
+# ebpf_guard_alerts_total{rule_id=...} из final-снимка /metrics, а не по
+# дельте списков алертов по id. Дельта по id видит только то, что сработало
+# внутри окна атаки (7.79 мин в замере №2.2); правило с частотой
 # 2-20 срабатываний в час может отстреляться целиком ДО baseline или ПОСЛЕ
 # final и пропасть из diff, оставаясь живым — так потерялись пять типов на
 # замере №2.2 при полном совпадении счётчиков baseline/final (15/15 и т.д.).
-# Дельта по alerts_total не зависит от границы окна: правило видно, если у
-# него хоть одно срабатывание где-либо в /metrics с положительной дельтой
-# (или отсутствует в baseline и присутствует в final — новое срабатывание).
+#
+# Волна 5.7b (находка №14, замер №2.3): 5.6a сменила источник, но условие
+# осталось final[r] > b (дельта baseline→final) — на №2.3 owasp_log_tampering
+# (5→5) и sigma_log_deletion (10→10) сработали за пределами окна атаки, но
+# печатались как «потеряны», хотя оба живы. Условие теперь final[r] > 0:
+# тип, сработавший хоть раз за всё время жизни агента (включая простой ДО
+# окна атаки), — живой. base[] для этого больше не нужен, baseline-снимок
+# по-прежнему читается — FILENAME == basefile просто пропускает его строки,
+# чтобы final[] не задваивался значениями из baseline при общем rule_id.
 #
 # Разделение снимков — по FILENAME, а не по NR == FNR: пустой (нулевой длины)
 # baseline-снимок делает NR == FNR истинным для строк ВТОРОГО файла, и тогда
@@ -338,11 +368,7 @@ detected_type_list=$(awk -F'[{}", ]+' -v basefile="$baseline_metrics" '
     }
     { gsub(/\r/, "") }
     !/^ebpf_guard_alerts_total\{/ { next }
-    FILENAME == basefile {
-        rid = rule_id(); if (rid == "") next
-        base[rid] += $NF
-        next
-    }
+    FILENAME == basefile { next }
     {
         rid = rule_id(); if (rid == "") next
         final[rid] += $NF
@@ -350,8 +376,7 @@ detected_type_list=$(awk -F'[{}", ]+' -v basefile="$baseline_metrics" '
     }
     END {
         for (r in seen) {
-            b = (r in base) ? base[r] : 0
-            if (final[r] > b) print r
+            if (final[r] > 0) print r
         }
     }
 ' "$baseline_metrics" "$final_metrics" | sort)
@@ -402,6 +427,15 @@ echo ""
 # незамеченным между двумя дефектами критериев. Порог 0.5: ниже — провал,
 # 1.0 — идеальный охват. Transit-категории (docker-proxy и подобные) из
 # recall исключены — это транзитные процессы атаки, не отдельные категории.
+#
+# Волна 5.7c (находка №15, замер №2.3): считалось по unique(comm), а несколько
+# категорий манифеста могут делить один comm (на №2.3 — bruteforce/ssrf/
+# ldap_csrf все под curl). unique схлопывал 4 категории в 2 «атакующих comm»,
+# и гейт печатал 2/2 = 1.000 PASS даже если bruteforce и ssrf не задетектились
+# вовсе — критерий физически не мог напечатать 4/4. Теперь recall считается
+# по category: comm остаётся способом сопоставить категорию с алертами
+# (comm → «был ли хоть один новый алерт от этого comm» — как и раньше), но
+# знаменатель и числитель — уникальные категории, а не уникальные comm.
 echo "=== 7. Recall по attack-manifest ==="
 if [ ! -f "$manifest_file" ]; then
     skip "attack-manifest.json не найден — recall непроверяем"
@@ -409,17 +443,17 @@ elif ! command -v jq &> /dev/null; then
     skip "jq недоступен — recall непроверяем"
 else
     manifest_real=$(jq '[.[] | select(.transit != true)]' "$manifest_file" 2>/dev/null)
-    manifest_total=$(echo "$manifest_real" | jq 'length')
+    manifest_total=$(echo "$manifest_real" | jq '[.[].category] | unique | length')
     if [ "$manifest_total" -eq 0 ] 2>/dev/null; then
         skip "манифест пуст (нет не-transit категорий) — recall непроверяем"
     else
-        attacker_comms_for_recall=$(echo "$manifest_real" | jq -c '[.[].comm] | unique')
-        recall_result=$(jq -s --argjson comms "$attacker_comms_for_recall" '
+        attacker_categories_for_recall=$(echo "$manifest_real" | jq -c '[.[] | {category, comm}] | unique')
+        recall_result=$(jq -s --argjson categories "$attacker_categories_for_recall" '
             (.[0] // []) as $baseline | (.[1] // []) as $final |
             ($baseline | map(.id) | unique) as $bids |
             ($final | map(select(.id as $id | ($bids | index($id)) | not))) as $new |
             ($new | map(.comm) | unique) as $new_comms |
-            ($comms | map(. as $c | {comm: $c, detected: ($new_comms | index($c) != null)})) |
+            ($categories | map(. as $c | {category: $c.category, detected: ($new_comms | index($c.comm) != null)}) | unique_by(.category)) |
             {detected: (map(select(.detected)) | length), total: length}
         ' -r "$baseline_alerts" "$final_alerts" 2>/dev/null)
         recall_detected=$(echo "$recall_result" | jq -r '.detected // 0')
@@ -479,7 +513,8 @@ else
         # которому считает ebpf_guard_incidents_trusted_root_total. Список
         # демонов совпадает с defaultTrustedComms/correlator.trusted_comms.
         daemon_inc=$(jq '[.[] | select((.root_comm // .comm) as $c
-            | $c == "sshd" or $c == "cron")] | length' "$final_incidents")
+            | $c == "sshd" or $c == "cron" or $c == "landscape-sysin"
+            or $c == "systemd-logind" or $c == "grafana")] | length' "$final_incidents")
         daemon_share=$(awk -v d="$daemon_inc" -v t="$inc_total" \
             'BEGIN{ printf "%.1f", 100*d/t }')
         if awk -v s="$daemon_share" 'BEGIN{exit !(s+0 < 20)}'; then
@@ -575,6 +610,27 @@ else
                 fail "многоалертные: $with_chain/$multi_total = ${chain_share}% (>= 80% требуется);$attack_note"
             fi
         fi
+    fi
+fi
+echo ""
+
+# 5.7e (находка №17): ни одного инцидента с пустым/отсутствующим verdict.
+# Раньше all-info инцидент (все алерты severity=info, 5.5a — они не участвуют
+# в скоринге) оставался с verdict="" и severity="" — в JSON это неотличимо от
+# «скоринг не отработал». Агент теперь пишет verdict="none" явно (пакет
+# types.VerdictNone); критерий проверяет, что пустых строк в снапшоте
+# инцидентов не осталось.
+echo "=== 5.7e. verdict: ни одного пустого/отсутствующего в снапшоте инцидентов ==="
+if [ ! -f "$final_incidents" ]; then
+    skip "final-incidents-$TIMESTAMP.json не собран — verdict не проверен"
+elif ! jq -e 'type == "array"' "$final_incidents" >/dev/null 2>&1; then
+    skip "final-incidents-$TIMESTAMP.json не JSON-массив — verdict не проверен"
+else
+    empty_verdict=$(jq '[.[] | select((.verdict // "") == "")] | length' "$final_incidents")
+    if [ "$empty_verdict" -eq 0 ]; then
+        pass "verdict заполнен во всех инцидентах ($(jq 'length' "$final_incidents") шт.)"
+    else
+        fail "$empty_verdict инцидент(ов) с пустым/отсутствующим verdict — сборка агента старее 5.7e?"
     fi
 fi
 echo ""

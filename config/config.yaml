@@ -201,9 +201,9 @@ correlator:
   # across several filename-keyed rules: sshd reading /etc/passwd at login
   # produced 102 of 114 false "confirmed attacks" in attack-run telemetry.
   # Unset (commented out) keeps the built-in default below. Setting it REPLACES
-  # the default rather than adding to it, so include sshd/cron if you still
-  # want them gated.
-  # trusted_comms: ["sshd", "cron"]
+  # the default rather than adding to it, so include every entry below if you
+  # still want them gated.
+  # trusted_comms: ["sshd", "cron", "landscape-sysin", "systemd-logind", "grafana"]
 
 alerting:
   enabled: false

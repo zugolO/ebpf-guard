@@ -40,6 +40,10 @@ type DNSCollector struct {
 	// loop directly because reader.Read() blocks exactly when there is nothing
 	// to see (P0-26).
 	eventsSeen atomic.Uint64
+	// lastEventUnixNano is the wall-clock time (UnixNano) the last event was
+	// read, or zero before the first event. watchForStaleness compares against
+	// this directly instead of a once-per-tick snapshot — see 5.7d.
+	lastEventUnixNano atomic.Int64
 }
 
 // dnsMetrics holds Prometheus metrics for DNS collection.
@@ -53,6 +57,12 @@ type dnsMetrics struct {
 	// despite being enabled and attached. This is the metric that would have
 	// surfaced P0-26 (7 events for an entire run, reported as healthy:true).
 	stale prometheus.Gauge
+	// staleTransitions counts entries into the stale state. 5.7d: the stale
+	// gauge alone can only be checked at snapshot time, which misses a window
+	// of transient stale periods that recovered before the snapshot was taken
+	// (the exact failure the idle-hour gate needs to catch). A monotonic
+	// counter lets the gate require zero over the whole window instead.
+	staleTransitions prometheus.Counter
 }
 
 // NewDNSCollector creates a new DNS collector.
@@ -82,6 +92,10 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 		stale: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_dns_collector_stale",
 			Help: "1 when the DNS collector has seen no events for an extended period despite being attached",
+		}),
+		staleTransitions: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_dns_collector_stale_transitions_total",
+			Help: "Total number of times the DNS collector transitioned into the stale state. A gate can require zero over a window without depending on the state at snapshot time.",
 		}),
 	}
 
@@ -113,7 +127,10 @@ func (c *DNSCollector) RegisterMetrics(reg prometheus.Registerer) error {
 	if err := reg.Register(c.metrics.decodeErrors); err != nil {
 		return err
 	}
-	return reg.Register(c.metrics.stale)
+	if err := reg.Register(c.metrics.stale); err != nil {
+		return err
+	}
+	return reg.Register(c.metrics.staleTransitions)
 }
 
 // Start begins collecting DNS events.
@@ -253,6 +270,7 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		}
 
 		c.eventsSeen.Add(1)
+		c.lastEventUnixNano.Store(time.Now().UnixNano())
 		event := decodeDNSEvent(record.RawSample)
 		if event == nil {
 			c.metrics.decodeErrors.Inc()
@@ -278,6 +296,17 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 // enough that a whole attack run cannot pass unnoticed as it did in run #4.
 const dnsStaleThreshold = 5 * time.Minute
 
+// dnsStalePollInterval is how often watchForStaleness checks elapsed time
+// since the last event. 5.7d: the previous design compared event counts once
+// per dnsStaleThreshold tick, which measures events-per-tick-window, not
+// elapsed-time-since-last-event — any tick boundary that happened to land
+// between two events declared staleness even with a live collector, and
+// "silent_for" was always exactly the threshold because it was the tick
+// period, not a measurement. Polling well inside the threshold and comparing
+// against the actual last-event timestamp makes staleness reflect real
+// silence instead of tick alignment.
+const dnsStalePollInterval = 30 * time.Second
+
 // watchForStaleness reports "attached but seeing nothing" as a distinct state.
 //
 // P0-26's real defect was not that DNS saw no traffic — it may legitimately see
@@ -286,10 +315,10 @@ const dnsStaleThreshold = 5 * time.Minute
 // healthy:true, and never said otherwise. Staleness is deliberately NOT
 // unhealthy — the collector is not broken — but it must be visible.
 func (c *DNSCollector) watchForStaleness(ctx context.Context) {
-	ticker := time.NewTicker(dnsStaleThreshold)
+	ticker := time.NewTicker(dnsStalePollInterval)
 	defer ticker.Stop()
 
-	var lastCount uint64
+	start := time.Now()
 	var reportedStale bool
 
 	for {
@@ -298,22 +327,33 @@ func (c *DNSCollector) watchForStaleness(ctx context.Context) {
 			return
 		case <-ticker.C:
 			count := c.eventsSeen.Load()
-			if count > lastCount {
+
+			lastEvent := c.lastEventUnixNano.Load()
+			var silentFor time.Duration
+			if lastEvent == 0 {
+				// No event since startup: measure from process start, not
+				// from the zero value, so silentFor is meaningful in logs.
+				silentFor = time.Since(start)
+			} else {
+				silentFor = time.Since(time.Unix(0, lastEvent))
+			}
+
+			if silentFor < dnsStaleThreshold {
 				if reportedStale {
 					slog.Info("dns: collector recovered, events flowing again",
 						slog.Uint64("events_total", count))
 					reportedStale = false
 					c.metrics.stale.Set(0)
 				}
-				lastCount = count
 				continue
 			}
 
 			if !reportedStale {
 				reportedStale = true
 				c.metrics.stale.Set(1)
+				c.metrics.staleTransitions.Inc()
 				slog.Warn("dns: collector attached but has seen no events — visibility into DNS is absent, not merely quiet",
-					slog.Duration("silent_for", dnsStaleThreshold),
+					slog.Duration("silent_for", silentFor.Round(time.Second)),
 					slog.Uint64("events_total", count),
 					slog.String("likely_causes", "systemd-resolved answering over AF_UNIX (nss-resolve/varlink), IPv6 or TCP DNS, or resolver sockets connected before the agent started"),
 					slog.String("verify", "run `dig example.com @8.8.8.8` and re-check ebpf_guard_events_total{type=\"dns\"}"))

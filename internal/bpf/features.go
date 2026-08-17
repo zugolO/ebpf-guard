@@ -3,9 +3,6 @@ package bpf
 
 import (
 	"fmt"
-
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/features"
 )
 
 // KernelFeatures holds detected kernel capabilities.
@@ -30,15 +27,20 @@ func DetectFeatures() (*KernelFeatures, error) {
 	return detectFeaturesWithProber(realFeatureProber{})
 }
 
-// haveMapTypeRingBuf delegates to the cilium/ebpf features probe.
-// Indirected through a package-level var so tests on non-BPF hosts can stub it.
-var haveMapTypeRingBuf = func() error { return features.HaveMapType(ebpf.RingBuf) }
+// The three probes below delegate to the cilium/ebpf features package on Linux
+// and report "unsupported" everywhere else — see features_probe_linux.go and
+// features_probe_other.go. The split matters: cilium/ebpf issues a real bpf(2)
+// syscall here, and on darwin its signal-masking helper panics outright, which
+// would abort the whole test binary rather than fail one assertion.
+//
+// Each is a package-level var so tests on non-BPF hosts can stub it.
+var haveMapTypeRingBuf = defaultHaveMapTypeRingBuf
 
-// haveProgramTypeKprobe delegates to the cilium/ebpf features probe.
-var haveProgramTypeKprobe = func() error { return features.HaveProgramType(ebpf.Kprobe) }
+// haveProgramTypeKprobe reports whether the kernel supports kprobe programs.
+var haveProgramTypeKprobe = defaultHaveProgramTypeKprobe
 
-// haveProgramTypeTracepoint delegates to the cilium/ebpf features probe.
-var haveProgramTypeTracepoint = func() error { return features.HaveProgramType(ebpf.TracePoint) }
+// haveProgramTypeTracepoint reports whether the kernel supports tracepoint programs.
+var haveProgramTypeTracepoint = defaultHaveProgramTypeTracepoint
 
 // haveBatchMapOps reports whether the kernel supports BPF batch map operations.
 // Kernel 5.6+ added BPF_MAP_LOOKUP_BATCH and BPF_MAP_UPDATE_BATCH.

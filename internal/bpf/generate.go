@@ -22,8 +22,12 @@
 //	fileaccess_bpfel.go / fileaccess_bpfeb.go
 //	... etc.
 //
-// After generation, delete syscall_bpf_gen.go (the stub file) — the generated
-// files provide the real XxxObjects types and LoadXxx functions.
+// After generation, delete the *_bpf_gen.go stub files — the generated files
+// provide the real XxxObjects types and LoadXxx functions. `make generate`
+// does this for you (rm -f internal/bpf/*_bpf_gen.go).
+//
+// The stubs exist so the tree builds and tests without a BPF toolchain, which
+// is the only option on macOS: clang there has no BPF backend at all.
 
 package bpf
 

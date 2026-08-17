@@ -1,4 +1,11 @@
+//go:build linux
+
 // Package enforcer provides nftables-based network enforcement.
+//
+// This backend talks to netfilter over netlink via github.com/google/nftables,
+// whose expression types reference Linux-only constants (unix.NFPROTO_*), so
+// the whole file is Linux-only. See nftables_stub.go for the API-compatible
+// no-op used on other platforms.
 package enforcer
 
 import (

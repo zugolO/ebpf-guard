@@ -128,3 +128,85 @@ func TestEngine_IncidentTrustedComms_ConfigOverride(t *testing.T) {
 	assert.Equal(t, types.VerdictAttack, replaced.Verdict,
 		"the config replaces the default set; sshd is not in it and must no longer be gated")
 }
+
+// TestDefaultTrustedComms_Wave57Membership pins the built-in trusted set.
+//
+// Волна 5.7 (находка №12, замер №2.3) добавила в него три имени, и на этом
+// списке держится закрытие 4 из 9 idle-инцидентов с вердиктом attack:
+// landscape-sysin (3) и systemd-logind (1) — целиком, grafana (2) — вместе с
+// comm-сужением десяти сетевых правил. До этого теста состав списка не
+// проверялся ничем: молчаливое удаление имени вернуло бы ложные attack на
+// простое, а молчаливое добавление — раздало бы доверие незамеченным.
+// Список сознательно перечислен целиком: тест обязан падать и на добавление,
+// чтобы каждое новое доверенное имя проходило через ревизию, а не через
+// правку литерала.
+func TestDefaultTrustedComms_Wave57Membership(t *testing.T) {
+	want := []string{"sshd", "cron", "landscape-sysin", "systemd-logind", "grafana"}
+
+	got := make([]string, 0, len(defaultTrustedComms))
+	for comm := range defaultTrustedComms {
+		got = append(got, comm)
+	}
+	assert.ElementsMatch(t, want, got,
+		"состав defaultTrustedComms изменился — это решение уровня ревизии волны, а не правка литерала")
+}
+
+// TestIncidentTracker_TrustGate_Wave57Daemons_StayNonAttack проверяет эффект,
+// ради которого имена добавлены: инцидент, целиком построенный на файловых/
+// syscall-алертах самого демона (собственный exec, ротация логов, PAM-учёт,
+// самодиагностика — ровно форма кластеров landscape-sysin и systemd-logind на
+// №2.3), не промоутится в attack без сетевого или недоверенного сигнала.
+func TestIncidentTracker_TrustGate_Wave57Daemons_StayNonAttack(t *testing.T) {
+	for pid, comm := range map[uint32]string{
+		4243: "landscape-sysin",
+		4244: "systemd-logind",
+		4245: "grafana",
+	} {
+		t.Run(comm, func(t *testing.T) {
+			tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+			now := time.Now()
+			// Пять правил на пяти РАЗНЫХ исходных событиях: колпак P1-13 по
+			// числу source events здесь не срабатывает, так что вердикт
+			// удерживает именно trust-гейт, а не он.
+			for i, id := range []string{"r1", "r2", "r3", "r4", "r5"} {
+				tr.Add(makeAlertWithComm(id, pid, "prod", types.SeverityCritical,
+					now.Add(time.Duration(i)*time.Second), comm))
+			}
+
+			incidents := tr.GetAll("", "", 0)
+			require.Len(t, incidents, 1)
+			assert.NotEqual(t, types.VerdictAttack, incidents[0].Verdict,
+				"кластер собственных алертов демона не должен подтверждать атаку без сетевого сигнала")
+		})
+	}
+}
+
+// TestIncidentTracker_TrustGate_GrafanaWithNetworkSignalStillPromotes —
+// обратная сторона предыдущего теста и причина, по которой grafana в волне 5.7
+// потребовала ещё и comm-сужения десяти сетевых правил.
+//
+// hasQualifyingSignal := HasUntrustedSignal || HasNetworkSignal, а
+// HasNetworkSignal ставится по ТИПУ события, не по правилу — то есть доверие
+// само по себе не закрывает процесс, который штатно ходит в сеть. Это же
+// свойство — гарантия, что скомпрометированная grafana не спрячется за
+// доверием: как только в инциденте появляется сетевое событие, промоушен
+// снова возможен.
+func TestIncidentTracker_TrustGate_GrafanaWithNetworkSignalStillPromotes(t *testing.T) {
+	tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+	now := time.Now()
+	for i, id := range []string{"r1", "r2", "r3", "r4"} {
+		tr.Add(makeAlertWithComm(id, 4246, "prod", types.SeverityCritical,
+			now.Add(time.Duration(i)*time.Second), "grafana"))
+	}
+	netAlert := makeAlertWithComm("r5", 4246, "prod", types.SeverityCritical,
+		now.Add(4*time.Second), "grafana")
+	netAlert.Event.Type = types.EventTCPConnect
+	tr.Add(netAlert)
+
+	incidents := tr.GetAll("", "", 0)
+	require.Len(t, incidents, 1)
+	assert.Equal(t, types.VerdictAttack, incidents[0].Verdict,
+		"доверие не должно глушить grafana с сетевым сигналом — иначе скомпрометированный процесс станет невидим")
+}

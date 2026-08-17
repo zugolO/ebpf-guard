@@ -197,7 +197,14 @@ else
     elif [ "${dns_stale_transitions%.*}" -eq 0 ] 2>/dev/null; then
         pass "dns_collector_stale_transitions_total = 0 — окон тишины дольше порога не было"
     else
-        fail "dns_collector_stale_transitions_total = $dns_stale_transitions — коллектор входил в состояние тишины $dns_stale_transitions раз за прогон (находка №16)"
+        # Ревизия 5.7 (риск №8): счётчик не отличает «коллектор слеп» от «на
+        # хосте 5 минут никто не резолвил». На стенде с 122 DNS-событиями за
+        # прогон второе вполне возможно на idle-часе, поэтому FAIL надо
+        # разбирать, а не считать доказанным дефектом: сверять окно тишины по
+        # журналу (WARN silent_for) с тем, шли ли в это время резолвы вообще.
+        dns_events_final=$(grep '^ebpf_guard_events_total{' "$final_metrics" 2>/dev/null \
+            | grep 'type="dns"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+        fail "dns_collector_stale_transitions_total = $dns_stale_transitions — коллектор входил в состояние тишины $dns_stale_transitions раз за прогон (находка №16; всего dns-событий за прогон: ${dns_events_final:-n/a}). Разобрать по журналу: реальная слепота или на хосте действительно не было резолвов дольше dnsStaleThreshold"
     fi
 fi
 echo ""
@@ -352,13 +359,27 @@ fi
 # tr -d '\r' на входе: FS не включает \r, поэтому на CRLF-снимке rule_id из
 # последней метки получил бы хвостовой \r и разошёлся бы с базой, очищенной
 # через tr ниже (тот же дефект, что ловили при пересчёте 5.3).
-for f in "$baseline_metrics" "$final_metrics"; do
-    if [ ! -s "$f" ]; then
-        echo "Снимок /metrics пуст: $f — состав детекта (критерий 6) посчитать нельзя" >&2
-        exit 2
-    fi
-done
-detected_type_list=$(awk -F'[{}", ]+' -v basefile="$baseline_metrics" '
+#
+# Ревизия 5.7 (неточность №7): после 5.7b baseline-снимок в РАСЧЁТЕ не
+# участвует — он только пропускается (FILENAME == basefile), чтобы его строки
+# не попали в final[]. Обрывать весь гейт (exit 2) из-за файла, который больше
+# не читается, значит терять 14 остальных критериев на ровном месте. Жёсткое
+# требование осталось только у final-снимка; отсутствующий/пустой baseline
+# теперь просто не передаётся awk (basefile="" не совпадёт ни с одним
+# FILENAME) с явной записью в вывод.
+if [ ! -s "$final_metrics" ]; then
+    echo "Снимок /metrics пуст: $final_metrics — состав детекта (критерий 6) посчитать нельзя" >&2
+    exit 2
+fi
+if [ -s "$baseline_metrics" ]; then
+    metrics_inputs=("$baseline_metrics" "$final_metrics")
+    basefile_arg="$baseline_metrics"
+else
+    echo "  (baseline-снимок пуст или отсутствует — на состав детекта не влияет, считается по final)"
+    metrics_inputs=("$final_metrics")
+    basefile_arg=""
+fi
+detected_type_list=$(awk -F'[{}", ]+' -v basefile="$basefile_arg" '
     function rule_id(   i, rid) {
         rid = ""
         for (i = 1; i <= NF; i++) {
@@ -379,7 +400,7 @@ detected_type_list=$(awk -F'[{}", ]+' -v basefile="$baseline_metrics" '
             if (final[r] > 0) print r
         }
     }
-' "$baseline_metrics" "$final_metrics" | sort)
+' "${metrics_inputs[@]}" | sort)
 detected_types=$(echo "$detected_type_list" | grep -c . || true)
 
 if [ ! -f "$baseline_types_file" ]; then
@@ -424,9 +445,9 @@ echo ""
 # 7. Recall по attack-manifest: все ли категории атак задетектированы.
 # Это критерий, которого в гейте не было вовсе (план 1.75c), поэтому FAIL
 # recall в замере №1 (напечатанный 1.75a как 0 при фактических 4/4) прошёл
-# незамеченным между двумя дефектами критериев. Порог 0.5: ниже — провал,
-# 1.0 — идеальный охват. Transit-категории (docker-proxy и подобные) из
-# recall исключены — это транзитные процессы атаки, не отдельные категории.
+# незамеченным между двумя дефектами критериев. Transit-категории
+# (docker-proxy и подобные) из recall исключены — это транзитные процессы
+# атаки, не отдельные категории.
 #
 # Волна 5.7c (находка №15, замер №2.3): считалось по unique(comm), а несколько
 # категорий манифеста могут делить один comm (на №2.3 — bruteforce/ssrf/
@@ -436,6 +457,24 @@ echo ""
 # по category: comm остаётся способом сопоставить категорию с алертами
 # (comm → «был ли хоть один новый алерт от этого comm» — как и раньше), но
 # знаменатель и числитель — уникальные категории, а не уникальные comm.
+#
+# Ревизия 5.7, две правки поверх 5.7c:
+#
+#   (неточность №3) свёртка категорий была unique_by(.category) — а это
+#   group_by | map(.[0]), то есть «взять ПЕРВЫЙ comm группы», а не «хоть
+#   один». Категория, заявленная в манифесте под двумя comm и задетектированная
+#   только по второму, печаталась как непойманная. На манифесте №2.3 не
+#   стреляло (один comm на категорию), но это ровно тот класс дефекта, против
+#   которого заведена сама 5.7c. Теперь group_by(.category) + any.
+#
+#   (неточность №2) порог PASS был >= 0.5 и остался от знаменателя 2. С
+#   знаменателем 4 он пропускает 2/4 — то есть сценарий из самой находки №15
+#   («bruteforce и ssrf не детектятся, ldap_csrf остался») снова печатал бы
+#   PASS. Порог поднят до 1.0: манифест мы пишем сами, каждая его категория
+#   обязана быть поймана, и потеря любой — это потеря детекта, а не допуск.
+#   Это ужесточение критерия, а не подгонка под результат (п. 4): таблица
+#   приёмки волны 5.7 и так требует 4/4. Непойманные категории печатаются
+#   поимённо, чтобы FAIL было с чем разбирать.
 echo "=== 7. Recall по attack-manifest ==="
 if [ ! -f "$manifest_file" ]; then
     skip "attack-manifest.json не найден — recall непроверяем"
@@ -453,20 +492,28 @@ else
             ($baseline | map(.id) | unique) as $bids |
             ($final | map(select(.id as $id | ($bids | index($id)) | not))) as $new |
             ($new | map(.comm) | unique) as $new_comms |
-            ($categories | map(. as $c | {category: $c.category, detected: ($new_comms | index($c.comm) != null)}) | unique_by(.category)) |
-            {detected: (map(select(.detected)) | length), total: length}
+            ($categories
+                | map(. as $c | {category: $c.category, detected: ($new_comms | index($c.comm) != null)})
+                | group_by(.category)
+                | map({category: .[0].category, detected: (map(.detected) | any)})) as $per_category |
+            {
+                detected: ($per_category | map(select(.detected)) | length),
+                total: ($per_category | length),
+                missed: ($per_category | map(select(.detected | not) | .category))
+            }
         ' -r "$baseline_alerts" "$final_alerts" 2>/dev/null)
         recall_detected=$(echo "$recall_result" | jq -r '.detected // 0')
         recall_total=$(echo "$recall_result" | jq -r '.total // 0')
+        recall_missed=$(echo "$recall_result" | jq -r '(.missed // []) | join(", ")')
         if [ "$recall_total" -gt 0 ] 2>/dev/null; then
             recall_value=$(awk -v d="$recall_detected" -v t="$recall_total" 'BEGIN{printf "%.3f", d/t}')
         else
             recall_value="0"
         fi
-        if awk -v r="$recall_value" 'BEGIN{exit !(r+0>=0.5)}'; then
-            pass "recall по манифесту: $recall_detected/$recall_total = $recall_value (>= 0.5)"
+        if awk -v r="$recall_value" 'BEGIN{exit !(r+0>=1.0)}'; then
+            pass "recall по манифесту: $recall_detected/$recall_total = $recall_value (все категории манифеста пойманы)"
         else
-            fail "recall по манифесту: $recall_detected/$recall_total = $recall_value (ожидалось >= 0.5)"
+            fail "recall по манифесту: $recall_detected/$recall_total = $recall_value (ожидалось 1.000; не пойманы: ${recall_missed:-—})"
         fi
     fi
 fi

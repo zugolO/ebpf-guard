@@ -142,12 +142,47 @@ journalctl -u "$SERVICE" --since "@$(( $(date +%s) - DURATION - 600 ))" --no-pag
     head -2 "$OUT/timeseries.tsv" | tail -1
     tail -1 "$OUT/timeseries.tsv"
     echo
-    echo "--- алерты за прогон ---"
-    echo "start: $(grep -c '"rule_id"' "$OUT/alerts-start.json" 2>/dev/null)"
-    echo "end:   $(grep -c '"rule_id"' "$OUT/alerts-end.json" 2>/dev/null)"
+    echo "--- алерты за прогон (стор/API, /api/v1/alerts) ---"
+    # 5.8b (находка №21): grep -c '"rule_id"' считает СТРОКИ, не вхождения —
+    # /api/v1/alerts отдаёт минифицированный JSON одной строкой, поэтому старая
+    # формулировка печатала 1 при непустом файле независимо от числа алертов
+    # (SUMMARY замера №2.4 показал "start: 1, end: 1" при 67 и 2805 реальных).
+    # jq length считает элементы массива, а не строки.
+    alerts_store_start=$(jq 'length' "$OUT/alerts-start.json" 2>/dev/null || echo "n/a")
+    alerts_store_end=$(jq 'length' "$OUT/alerts-end.json" 2>/dev/null || echo "n/a")
+    echo "start: $alerts_store_start"
+    echo "end:   $alerts_store_end"
+    if [[ "$alerts_store_start" =~ ^[0-9]+$ && "$alerts_store_end" =~ ^[0-9]+$ ]]; then
+        store_delta=$((alerts_store_end - alerts_store_start))
+        echo "дельта за idle-час (стор/API): $store_delta"
+    fi
+    # Метрика ebpf_guard_alerts_total — второе измерение того же самого
+    # (находка №21, волна 5.8b): расходится со стором в разы, потому что
+    # canary-tamper и hidden-process алерты пишутся в стор в обход счётчика
+    # (cmd/ebpf-guard/main.go: canaryAlertFn/hiddenAlertFn вызывают
+    # alertStore.StoreBatch напрямую, минуя exporter.RecordAlert), и часть
+    # обычных правил расходится сильнее, чем объясняет этот обходной путь —
+    # причина для отдельных правил (owasp_log_tampering, sigma_log_deletion:
+    # 184 в сторе против 6 в метрике на замере №2.4) не установлена, см.
+    # plan.md, волна 5.8b.
+    metrics_alerts_start=$(grep '^ebpf_guard_alerts_total{' "$OUT/metrics-start.txt" 2>/dev/null \
+        | awk '{s+=$NF} END{printf "%d", s+0}')
+    metrics_alerts_end=$(grep '^ebpf_guard_alerts_total{' "$OUT/metrics-end.txt" 2>/dev/null \
+        | awk '{s+=$NF} END{printf "%d", s+0}')
+    echo "дельта за idle-час (метрика ebpf_guard_alerts_total): $(( ${metrics_alerts_end:-0} - ${metrics_alerts_start:-0} ))"
     echo
     echo "--- critical / confirmed attack на idle (должно быть 0 — P1-6/P1-13) ---"
-    echo "incident_confirmed_attack: $(grep -c 'incident_confirmed_attack' "$OUT/alerts-end.json" 2>/dev/null)"
+    # Тот же дефект, что починен выше по файлу (5.8b): grep -c считает СТРОКИ,
+    # а /api/v1/alerts отдаёт минифицированный JSON одной строкой — печаталось
+    # 0 или 1 независимо от реального числа инцидентов. jq считает элементы;
+    # grep -o оставлен запасным путём на случай, если jq не установлен.
+    if command -v jq >/dev/null 2>&1; then
+        confirmed_attack=$(jq '[.[] | select(.rule_id == "incident_confirmed_attack")] | length' \
+            "$OUT/alerts-end.json" 2>/dev/null || echo "n/a")
+    else
+        confirmed_attack=$(grep -o 'incident_confirmed_attack' "$OUT/alerts-end.json" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    echo "incident_confirmed_attack: $confirmed_attack"
     grep '^ebpf_guard_incidents_total' "$OUT/metrics-end.txt" 2>/dev/null
     echo
     echo "--- CPU watchdog циклы в журнале (не должно быть на idle) ---"

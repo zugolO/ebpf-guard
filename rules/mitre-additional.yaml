@@ -239,7 +239,7 @@ rules:
           values: ["pgrep"]
     severity: warning
     action: alert
-    tags: [mitre:T1497.001, sandbox-evasion, container-detect, evasion]
+    tags: [mitre:T1497.001, sandbox-evasion, container-detect, evasion, proc-recon-cluster]
     exceptions:
       # Scoped to comm AND path: the agent reads its own cgroup and uptime
       # for self-identification. Reading /proc/1/environ or /proc/1/status —

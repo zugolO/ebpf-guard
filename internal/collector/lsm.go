@@ -535,15 +535,25 @@ func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error
 
 	c.status.SetUp("kmod", true)
 
+	var kmodDone, cgroupDone <-chan struct{}
 	if c.kmodReader != nil {
-		go c.readLoop(ctx, out, c.kmodReader, c.parseKmodOrFallback)
+		kmodDone = runReadLoop(func() { c.readLoop(ctx, out, c.kmodReader, c.parseKmodOrFallback) })
 	}
 	if c.cgroupReader != nil {
-		go c.readLoop(ctx, out, c.cgroupReader, c.parseCgroupEsc)
+		cgroupDone = runReadLoop(func() { c.readLoop(ctx, out, c.cgroupReader, c.parseCgroupEsc) })
 	}
 
+	// Wait for context cancellation, then for both readLoops to actually stop
+	// sending (5.8d) — Close() unblocks the ring buffer Read() a readLoop may
+	// be parked in, and Close() runs after ctx is already done.
 	<-ctx.Done()
 	c.logger.Info("stopping kmod collector")
+	if kmodDone != nil {
+		<-kmodDone
+	}
+	if cgroupDone != nil {
+		<-cgroupDone
+	}
 	return nil
 }
 

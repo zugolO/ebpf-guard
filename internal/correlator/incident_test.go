@@ -66,6 +66,142 @@ func TestIncidentTracker_AttackScoring(t *testing.T) {
 	}
 }
 
+// TestIncidentTracker_ScoringAlertCountDedupsBySourceEvent is the regression
+// test for 5.8f (находка №19): a single /proc read fans out into multiple
+// rule matches, and prior to the fix each one incremented ScoringAlertCount
+// independently, inflating the time-density score term as if that many
+// distinct events had arrived in the same instant. sourceEventKey is derived
+// from (PID, Timestamp), which the correlator always sets identically for
+// every rule that fires off the same triggering event — makeAlert with a
+// shared ts reproduces that here without needing a real event.
+func TestIncidentTracker_ScoringAlertCountDedupsBySourceEvent(t *testing.T) {
+	rules := []Rule{
+		{ID: "r1", Tags: []string{"execution"}},
+		{ID: "r2", Tags: []string{"execution"}},
+		{ID: "r3", Tags: []string{"execution"}},
+	}
+	tr := newIncidentTracker(60*time.Second, nil, rules)
+	ts := time.Now()
+
+	tr.Add(makeAlert("r1", 100, "prod", types.SeverityWarning, ts))
+	tr.Add(makeAlert("r2", 100, "prod", types.SeverityWarning, ts))
+	tr.Add(makeAlert("r3", 100, "prod", types.SeverityWarning, ts))
+
+	incidents := tr.GetAll("", "", 0)
+	if len(incidents) != 1 {
+		t.Fatalf("expected 1 incident, got %d", len(incidents))
+	}
+	inc := incidents[0]
+	if inc.AlertCount != 3 {
+		t.Errorf("AlertCount (observability, unaffected by the fix) = %d, want 3", inc.AlertCount)
+	}
+	if inc.ScoringAlertCount != 1 {
+		t.Errorf("ScoringAlertCount = %d, want 1 (one source event, not one per fanned-out rule)", inc.ScoringAlertCount)
+	}
+	if len(inc.ScoringSourceEvents) != 1 {
+		t.Errorf("ScoringSourceEvents has %d entries, want 1", len(inc.ScoringSourceEvents))
+	}
+}
+
+// TestIncidentTracker_ProcReconClusterCollapsesToOneSignal is the regression
+// test for 5.8f point 2 (находка №19): container_escape_init_proc,
+// mitre_sandbox_detect_proc_read and sigma_cpu_info_access all detect the
+// same underlying /proc read from three angles and share procReconClusterTag.
+// Before collapsing, one such read firing all three counted as three
+// independent rules and — since the three rules here carry three distinct
+// tactics — three independent tactics, both of which push the score up on
+// their own. After collapsing they must count as exactly one signal.
+func TestIncidentTracker_ProcReconClusterCollapsesToOneSignal(t *testing.T) {
+	rules := []Rule{
+		{ID: "cluster_a", Tags: []string{"execution", procReconClusterTag}},
+		{ID: "cluster_b", Tags: []string{"persistence", procReconClusterTag}},
+		{ID: "cluster_c", Tags: []string{"privilege_escalation", procReconClusterTag}},
+	}
+	tr := newIncidentTracker(60*time.Second, nil, rules)
+	ts := time.Now()
+
+	// One /proc read, same PID + timestamp, fanning out across the cluster.
+	tr.Add(makeAlert("cluster_a", 100, "prod", types.SeverityWarning, ts))
+	tr.Add(makeAlert("cluster_b", 100, "prod", types.SeverityWarning, ts))
+	tr.Add(makeAlert("cluster_c", 100, "prod", types.SeverityWarning, ts))
+
+	incidents := tr.GetAll("", "", 0)
+	if len(incidents) != 1 {
+		t.Fatalf("expected 1 incident, got %d", len(incidents))
+	}
+	inc := incidents[0]
+
+	// RuleIDs stays fully observable — nothing disappears from the record.
+	if len(inc.RuleIDs) != 3 {
+		t.Errorf("RuleIDs (observability) = %d, want 3: %v", len(inc.RuleIDs), inc.RuleIDs)
+	}
+	// Tactics is observable too and keeps reporting everything actually seen —
+	// collapsing it would both hide evidence and (since the collapse picks one
+	// cluster member) make the reported tactic depend on map iteration order.
+	if len(inc.Tactics) != 3 {
+		t.Errorf("Tactics (observability) = %d, want 3: %v", len(inc.Tactics), inc.Tactics)
+	}
+	// The collapse shows up in the score instead. Measured against the same
+	// three alerts on three *untagged* rules: there the three distinct tactics
+	// clear minTacticsForScore and add 3 × WeightTacticsDiversity, here the
+	// cluster contributes one tactic and the term must not fire at all.
+	untagged := []Rule{
+		{ID: "cluster_a", Tags: []string{"execution"}},
+		{ID: "cluster_b", Tags: []string{"persistence"}},
+		{ID: "cluster_c", Tags: []string{"privilege_escalation"}},
+	}
+	tu := newIncidentTracker(60*time.Second, nil, untagged)
+	tu.Add(makeAlert("cluster_a", 100, "prod", types.SeverityWarning, ts))
+	tu.Add(makeAlert("cluster_b", 100, "prod", types.SeverityWarning, ts))
+	tu.Add(makeAlert("cluster_c", 100, "prod", types.SeverityWarning, ts))
+	uncollapsed := tu.GetAll("", "", 0)[0].Score
+	wantDelta := 3 * DefaultIncidentScoringConfig().WeightTacticsDiversity
+	if uncollapsed-inc.Score != wantDelta {
+		t.Errorf("collapse saved %f score points, want exactly %f (3 tactics × WeightTacticsDiversity); collapsed=%f uncollapsed=%f",
+			uncollapsed-inc.Score, wantDelta, inc.Score, uncollapsed)
+	}
+	if inc.Verdict == types.VerdictAttack {
+		t.Errorf("a single fanned-out /proc read must not alone promote to attack; score=%f", inc.Score)
+	}
+}
+
+// TestIncidentTracker_ClusterCollapseIsDeterministic pins the collapse to a
+// stable representative. Cluster members carry different tactics, so choosing
+// the representative by Go map iteration order made the score (and the
+// reported Tactics) differ between runs on byte-identical input — a scoring
+// formula that is not a function of its inputs cannot be reasoned about across
+// two measurement runs, which is exactly what wave 5.8 is being accepted on.
+func TestIncidentTracker_ClusterCollapseIsDeterministic(t *testing.T) {
+	// Tagged exactly like the three real cluster members, whose tactic sets
+	// differ in *size*: container_escape_init_proc's tags map to no MITRE
+	// tactic at all, the other two map to one each. Whichever member the
+	// collapse keeps therefore decides whether the incident shows 1 or 2
+	// tactics — i.e. whether it clears minTacticsForScore.
+	rules := []Rule{
+		{ID: "cluster_a", Tags: []string{"container-escape", "init-process", "pid-1", procReconClusterTag}},
+		{ID: "cluster_b", Tags: []string{"mitre:T1497.001", "sandbox-evasion", procReconClusterTag}},
+		{ID: "cluster_c", Tags: []string{"mitre:T1082", "sigma", procReconClusterTag}},
+		{ID: "solo_d", Tags: []string{"mitre:T1543", "persistence"}},
+	}
+
+	var first float64
+	for i := 0; i < 50; i++ {
+		tr := newIncidentTracker(60*time.Second, nil, rules)
+		ts := time.Now()
+		for j, id := range []string{"cluster_a", "cluster_b", "cluster_c", "solo_d"} {
+			tr.Add(makeAlert(id, 100, "prod", types.SeverityWarning, ts.Add(time.Duration(j)*time.Second)))
+		}
+		score := tr.GetAll("", "", 0)[0].Score
+		if i == 0 {
+			first = score
+			continue
+		}
+		if score != first {
+			t.Fatalf("iteration %d scored %f, first iteration scored %f — collapse representative depends on map order", i, score, first)
+		}
+	}
+}
+
 func TestIncidentTracker_GroupsSamePIDNamespace(t *testing.T) {
 	tr := newIncidentTracker(60*time.Second, nil, []Rule{})
 	now := time.Now()

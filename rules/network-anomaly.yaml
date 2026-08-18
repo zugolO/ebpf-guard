@@ -76,12 +76,19 @@ rules:
 
   # Very short connections (<100ms) to many different ports are indicative of
   # port scanning. Captured as individual close events with tiny durations.
+  # 5.8g (замер №2.4, находка №19 / curl- и crontab-кластеры): a single short
+  # connection is common noise from monitoring/health-check tooling (curl,
+  # crontab-triggered probes) — the rule's own description already asked for
+  # "combine with count-based alerting". threshold requires 5 matches from the
+  # same PID within a 10s window before this alerts, so one-off short
+  # connections are counted but not alerted, while an actual scan (many ports
+  # from one PID in a tight window) still fires.
   - id: net_portscan_indicator
     name: "Port scan indicator — very short connection"
     description: >
       A TCP connection closed within 100 ms on a non-standard port. A burst of
       such events from one PID indicates port scanning activity. Single events
-      may be false positives; combine with count-based alerting in SIEM.
+      may be false positives; gated by a count-based threshold (5.8g).
     event_type: net_close
     condition_group:
       operator: and
@@ -101,6 +108,15 @@ rules:
         - field: daddr
           op: not_in_cidr
           values: ["127.0.0.0/8", "::1/128"]
+    threshold:
+      count: 5
+      window_seconds: 10
+      # PID grouping: a port scan keeps one process alive across probes, so the
+      # scanner's own PID is the right bucket. group_by: chain exists for the
+      # opposite shape (a parent spawning a fresh child per probe) — if замер
+      # №2.5 shows the crontab cluster surviving this rule, that is the knob to
+      # turn, not the count.
+      group_by: pid
     severity: warning
     action: alert
     tags: [mitre:T1046, network-anomaly, portscan]

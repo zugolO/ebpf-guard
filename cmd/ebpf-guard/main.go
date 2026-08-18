@@ -387,6 +387,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	if cfg.Correlator.MaxAlertsPerSecond > 0 {
 		engineCfg.MaxAlertsPerSecond = cfg.Correlator.MaxAlertsPerSecond
 	}
+	// 5.8e (находка №18): self-exclusion is on by default and the default lives
+	// in viper (correlator.self_exclude.enabled, config.setDefaults), not in the
+	// zero value of this bool — so the config value is copied over
+	// unconditionally and an operator's explicit `false` takes effect.
+	engineCfg.SelfExcludeEnabled = cfg.Correlator.SelfExclude.Enabled
 
 	// Wire the anomaly score reporter so profiler scores are published to
 	// ebpf_guard_profiler_anomaly_score via the cardinality-guarded gauge.

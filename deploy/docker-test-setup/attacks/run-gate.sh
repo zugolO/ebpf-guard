@@ -120,6 +120,12 @@ GATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 manifest_file="$GATE_SCRIPT_DIR/attack-manifest.json"
 # Зафиксированный состав типов детекта для критерия 6 (волна 5.3).
 baseline_types_file="$GATE_SCRIPT_DIR/detection-baseline.txt"
+# Разметка "фоновых" правил для критерия 6 (волна 5.8a, находка №22).
+background_rules_file="$GATE_SCRIPT_DIR/background-rules.txt"
+# Снимки /metrics idle-часа (idle-run.sh), опционально — только они дают
+# критерию 6 вторую сторону измерения для фоновых правил (5.8a).
+IDLE_METRICS_START="${IDLE_METRICS_START:-}"
+IDLE_METRICS_END="${IDLE_METRICS_END:-}"
 
 for f in "$baseline_state" "$final_state" "$baseline_metrics" "$final_metrics" "$baseline_alerts" "$final_alerts"; do
     if [ ! -f "$f" ]; then
@@ -187,24 +193,26 @@ else
     fi
 fi
 
+# 5.8c (продолжение находки №16): stale_transitions на этом стенде не отличает
+# «коллектор слеп» от «хост тихий» — idle-час замера №2.4 дал 36 dns-событий
+# (~0.6/мин), то есть пятиминутные паузы между резолвами НОРМАЛЬНЫ здесь. FAIL
+# по этому счётчику на такой базе гарантированно ложный, поэтому он снят в
+# наблюдение без порога; активная проверка выше (dig + прирост events_total)
+# остаётся единственным PASS/FAIL для этого критерия. Порог по слепоте
+# вернуть, когда появится стенд с постоянным DNS-фоном (волна 6.3).
 if [ ! -f "$final_metrics" ]; then
-    skip "нет final_metrics — проверка периодической слепоты DNS пропущена"
+    skip "нет final_metrics — наблюдение периодической тишины DNS пропущено"
 else
     dns_stale_transitions=$(grep '^ebpf_guard_dns_collector_stale_transitions_total' "$final_metrics" \
         | awk '{print $2+0}')
     if [ -z "$dns_stale_transitions" ]; then
         skip "ebpf_guard_dns_collector_stale_transitions_total не найден в final_metrics — сборка агента старее 5.7d?"
     elif [ "${dns_stale_transitions%.*}" -eq 0 ] 2>/dev/null; then
-        pass "dns_collector_stale_transitions_total = 0 — окон тишины дольше порога не было"
+        echo "    (наблюдение) dns_collector_stale_transitions_total = 0 — окон тишины дольше порога не было"
     else
-        # Ревизия 5.7 (риск №8): счётчик не отличает «коллектор слеп» от «на
-        # хосте 5 минут никто не резолвил». На стенде с 122 DNS-событиями за
-        # прогон второе вполне возможно на idle-часе, поэтому FAIL надо
-        # разбирать, а не считать доказанным дефектом: сверять окно тишины по
-        # журналу (WARN silent_for) с тем, шли ли в это время резолвы вообще.
         dns_events_final=$(grep '^ebpf_guard_events_total{' "$final_metrics" 2>/dev/null \
             | grep 'type="dns"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
-        fail "dns_collector_stale_transitions_total = $dns_stale_transitions — коллектор входил в состояние тишины $dns_stale_transitions раз за прогон (находка №16; всего dns-событий за прогон: ${dns_events_final:-n/a}). Разобрать по журналу: реальная слепота или на хосте действительно не было резолвов дольше dnsStaleThreshold"
+        echo "    (наблюдение, без PASS/FAIL — см. 5.8c) dns_collector_stale_transitions_total = $dns_stale_transitions за прогон; всего dns-событий: ${dns_events_final:-n/a}. На тихом стенде это ожидаемо; разбирать по журналу (WARN silent_for/last_seen) только если dns-событий за прогон много, а транзиций тоже много."
     fi
 fi
 echo ""
@@ -410,15 +418,77 @@ else
     # добавлено" при малейшем расхождении переводов строк между базой и выводом
     # jq (поймано при пересчёте 5.3 на Windows-сборке jq).
     expected_types=$(grep -vE '^\s*(#|$)' "$baseline_types_file" | tr -d '\r' | sort)
-    lost_types=$(comm -23 <(echo "$expected_types") <(echo "$detected_type_list"))
+    lost_types_raw=$(comm -23 <(echo "$expected_types") <(echo "$detected_type_list"))
     added_types=$(comm -13 <(echo "$expected_types") <(echo "$detected_type_list"))
-    lost_count=$(echo "$lost_types" | grep -c . || true)
     added_count=$(echo "$added_types" | grep -c . || true)
     echo "  типов в прогоне: $detected_types, в базе: $(echo "$expected_types" | grep -c .)"
     if [ "$added_count" -gt 0 ]; then
         echo "  добавлено (+$added_count):"
         echo "$added_types" | sed 's/^/    + /'
     fi
+
+    # Волна 5.8a (находка №22): final[r] > 0 в attack-results смешивает две
+    # популяции правил — те, что срабатывают под атакой, и фоновые, которым
+    # там неоткуда сработать (owasp_log_tampering/sigma_log_deletion — на
+    # rsyslogd, а не на действия атакующего). Правило из background-rules.txt,
+    # потерянное по attack-results, получает вторую попытку — по приросту
+    # между IDLE_METRICS_START и IDLE_METRICS_END (снимки idle-run.sh,
+    # передаются через переменные окружения). OR, а не замена: правило,
+    # переставшее срабатывать И там, и там, остаётся потерянным.
+    lost_types="$lost_types_raw"
+    recovered_types=""
+    if [ -n "$lost_types_raw" ] && [ -f "$background_rules_file" ]; then
+        background_set=$(grep -vE '^\s*(#|$)' "$background_rules_file" | tr -d '\r' | sort)
+        lost_background=$(comm -12 <(echo "$lost_types_raw") <(echo "$background_set"))
+        if [ -n "$lost_background" ]; then
+            if [ -n "$IDLE_METRICS_START" ] && [ -n "$IDLE_METRICS_END" ] \
+                && [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
+                idle_delta_list=$(awk -F'[{}", ]+' '
+                    function rule_id(   i, rid) {
+                        rid = ""
+                        for (i = 1; i <= NF; i++) {
+                            if ($i ~ /^rule_id=?$/) { rid = $(i+1); break }
+                        }
+                        return rid
+                    }
+                    { gsub(/\r/, "") }
+                    !/^ebpf_guard_alerts_total\{/ { next }
+                    {
+                        rid = rule_id(); if (rid == "") next
+                        # Суммируем по сериям (у одного rule_id несколько
+                        # лейблсетов) РАЗДЕЛЬНО по снимкам: общий аккумулятор
+                        # здесь давал start+end во втором файле, и разность
+                        # вырождалась в "end > 0" — правило с нулевым приростом
+                        # ошибочно считалось выросшим.
+                        if (FNR == NR) { start[rid] += $NF } else { end[rid] += $NF }
+                    }
+                    END {
+                        for (r in end) {
+                            if (end[r] - (start[r]+0) > 0) print r
+                        }
+                    }
+                ' "$IDLE_METRICS_START" "$IDLE_METRICS_END" | sort)
+                # Разбираем lost_background по одному, чтобы напечатать судьбу
+                # каждого правила, а не только итоговое число.
+                while IFS= read -r rid; do
+                    [ -z "$rid" ] && continue
+                    if echo "$idle_delta_list" | grep -qx "$rid"; then
+                        recovered_types="$recovered_types$rid"$'\n'
+                        echo "  фоновое $rid: не сработало под атакой, но выросло за idle-час — не считается потерей (5.8a)"
+                    else
+                        echo "  фоновое $rid: не сработало ни под атакой, ни за idle-час — потеря подтверждена"
+                    fi
+                done <<< "$lost_background"
+            else
+                skip "IDLE_METRICS_START/END не заданы — фоновые правила из потерь (${lost_background//$'\n'/, }) проверены только по attack-results, как до 5.8a"
+            fi
+        fi
+        if [ -n "$recovered_types" ]; then
+            recovered_sorted=$(echo "$recovered_types" | grep -v '^$' | sort -u)
+            lost_types=$(comm -23 <(echo "$lost_types_raw") <(echo "$recovered_sorted"))
+        fi
+    fi
+    lost_count=$(echo "$lost_types" | grep -c . || true)
     if [ "$lost_count" -gt 0 ]; then
         echo "  потеряно (-$lost_count):"
         echo "$lost_types" | sed 's/^/    - /'

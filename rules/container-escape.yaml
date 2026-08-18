@@ -393,7 +393,7 @@ rules:
     severity: warning
     action: alert
     class: drift
-    tags: [container-escape, init-process, pid-1]
+    tags: [container-escape, init-process, pid-1, proc-recon-cluster]
     exceptions:
       # Scoped to comm AND path: the agent's own benign reads are
       # cgroup/stat/status metadata. /proc/1/environ, /proc/1/mem and the

@@ -203,6 +203,45 @@ type RuleConditionGroup struct {
 	SubGroups []RuleConditionGroup `yaml:"subgroups,omitempty"`
 }
 
+// RuleThreshold enables count-based (burst) alerting (5.8g, remainder of
+// 5.7's net_portscan_indicator finding): the rule's own base condition
+// (Condition/ConditionGroup) must match at least Count times within
+// WindowSeconds for the same PID before an alert fires. A single match is
+// suppressed and counted; the alert fires on the match that reaches Count,
+// and again on every further match while the PID stays at or above Count
+// within the sliding window. Nil (the default) alerts on every match, i.e.
+// unchanged pre-5.8g behavior.
+//
+// Matches are grouped by GroupBy: the PID by default, or the process chain
+// the PID belongs to.
+type RuleThreshold struct {
+	// Count is the number of matches required within WindowSeconds before
+	// the rule starts alerting. Must be >= 2 (1 is equivalent to no threshold).
+	Count int `yaml:"count"`
+	// WindowSeconds is the sliding window width, in seconds. Must be >= 1.
+	WindowSeconds int `yaml:"window_seconds"`
+	// GroupBy selects what counts as "the same source" for the burst:
+	//
+	//   pid   (default) — one PID must reach Count on its own. Right for a
+	//                     scanner that keeps one process alive across probes.
+	//   chain           — matches from every process in one ancestry chain
+	//                     share a counter. Right for the shape group_by: pid
+	//                     cannot see at all: a parent (cron, a shell script)
+	//                     spawning a fresh short-lived child per probe, where
+	//                     no single PID ever matches twice.
+	//
+	// chain resolves the chain identity through the engine's LineageTracker;
+	// when no chain is known for a PID it degrades to that PID rather than
+	// merging unrelated processes into one bucket.
+	GroupBy string `yaml:"group_by,omitempty"`
+}
+
+// Threshold grouping modes (RuleThreshold.GroupBy).
+const (
+	ThresholdGroupPID   = "pid"
+	ThresholdGroupChain = "chain"
+)
+
 // RuleException defines a named suppression condition for a rule. When an
 // event matches the rule's own condition AND any one of its exceptions, the
 // alert is suppressed. This lets an operator tune away known false positives
@@ -305,6 +344,11 @@ type Rule struct {
 	// a random number, ensuring the same PID is consistently sampled within ~1s windows.
 	// Deprecated: prefer sampling.mode: hash_pid.
 	SampleDeterministic bool `yaml:"sample_deterministic,omitempty"`
+	// Threshold enables count-based (burst) alerting: the base condition must
+	// match at least Count times within WindowSeconds for the same PID
+	// before the rule alerts. Nil (default) alerts on every match. See
+	// RuleThreshold.
+	Threshold *RuleThreshold `yaml:"threshold,omitempty"`
 }
 
 // RuleSet contains all loaded rules.
@@ -356,6 +400,13 @@ type RuleEngine struct {
 	valueSetCache map[string]map[string]struct{}
 	// sampler manages per-rule sample rates including adaptive overrides.
 	sampler *RuleSampler
+	// chainGroupFn resolves a PID to the identity of the process chain it
+	// belongs to, for rules with threshold.group_by: chain (5.8g). Supplied by
+	// the correlation engine, which owns the LineageTracker — the rule engine
+	// deliberately does not depend on the profiler package. nil (the default,
+	// and the case in ruletest/CLI paths that build a bare RuleEngine) means
+	// chain grouping degrades to PID grouping rather than failing.
+	chainGroupFn func(pid uint32) (uint64, bool)
 	// mu protects the rules slice
 	mu sync.RWMutex
 	// compilePatternsError records any error encountered during compilePatterns.
@@ -369,6 +420,29 @@ type RuleEngine struct {
 // Returns nil when all patterns compiled successfully.
 func (re *RuleEngine) CompileErrors() error {
 	return re.compilePatternsError
+}
+
+// SetChainGroupResolver installs the resolver used by threshold rules with
+// group_by: chain (5.8g). It must be called before the engine is published for
+// evaluation — the correlation engine does so immediately after constructing or
+// hot-reloading a RuleEngine, so the field is never written concurrently with a
+// read on the hot path.
+func (re *RuleEngine) SetChainGroupResolver(fn func(pid uint32) (uint64, bool)) {
+	re.chainGroupFn = fn
+}
+
+// burstGroup returns the key a threshold rule's matches are counted under.
+// Chain grouping falls back to the PID when no resolver is installed or the
+// chain is unknown for this PID: an unknown chain must isolate the process, not
+// merge every unresolved PID into one shared bucket — that would let unrelated
+// processes push each other over the threshold.
+func (re *RuleEngine) burstGroup(rule *Rule, e types.Event) uint64 {
+	if rule.Threshold != nil && rule.Threshold.GroupBy == ThresholdGroupChain && re.chainGroupFn != nil {
+		if group, ok := re.chainGroupFn(e.PID); ok {
+			return group
+		}
+	}
+	return uint64(e.PID)
 }
 
 // NewRuleEngine creates a new rule engine with the given rules.
@@ -711,6 +785,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 		return
 	}
 	rules := re.byType[t]
+	filePath := fileAccessPath(e)
 	for i := range rules {
 		rule := &rules[i] // pointer avoids copying the ~300-byte Rule struct
 		if !re.matchesTyped(e, rule) {
@@ -730,6 +805,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			Event:     e,
 			Action:    string(rule.Action),
 			Class:     string(rule.Class),
+			Details:   filePathDetails(filePath),
 		})
 	}
 }
@@ -750,6 +826,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 	var alerts []types.Alert
 
 	rules := re.byType[t]
+	filePath := fileAccessPath(e)
 	for i := range rules {
 		rule := &rules[i]
 		if !re.matchesTyped(e, rule) {
@@ -773,10 +850,38 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Event:     e,
 			Action:    string(rule.Action),
 			Class:     string(rule.Class),
+			Details:   filePathDetails(filePath),
 		})
 	}
 
 	return alerts
+}
+
+// fileAccessPath returns the file path behind a file-access event, or "" for
+// any other event type. Prefers FDPath (resolved via the fd→path BPF map,
+// populated for read/write events) and falls back to Filename (populated at
+// open). 5.8e.1 (находка №18): the triggering path was previously visible
+// only in the unserialized Event field (json:"-"), so a dump of alerts could
+// not show whether a suppressed-looking rule was actually matching a
+// different suffix than its exception covers, or whether the exception was
+// silently not firing at all.
+func fileAccessPath(e types.Event) string {
+	if e.Type != types.EventFileAccess || e.File == nil {
+		return ""
+	}
+	if e.File.FDPath != "" {
+		return e.File.FDPath
+	}
+	return util.BytesToString(e.File.Filename[:])
+}
+
+// filePathDetails wraps path into the alert Details map, or returns nil when
+// path is empty so non-file alerts keep their existing details,omitempty behavior.
+func filePathDetails(path string) map[string]interface{} {
+	if path == "" {
+		return nil
+	}
+	return map[string]interface{}{"file.path": path}
 }
 
 // ReleaseAlerts returns a slice obtained from Evaluate back to the pool.
@@ -877,6 +982,18 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 		}
 		if excMatched {
 			ruleExceptionsTotal.WithLabelValues(rule.ID, exc.Name).Inc()
+			return false
+		}
+	}
+
+	// Count-based (burst) gate: a rule with Threshold set only alerts once
+	// its own condition has matched Count times for this group within the
+	// sliding window (5.8g). Recorded here, after the exception check, so a
+	// suppressed match does not consume a slot in the burst count.
+	if rule.Threshold != nil {
+		window := time.Duration(rule.Threshold.WindowSeconds) * time.Second
+		n := globalBurstTracker.Record(rule.ID, re.burstGroup(rule, e), eventTime(e), window)
+		if n < rule.Threshold.Count {
 			return false
 		}
 	}

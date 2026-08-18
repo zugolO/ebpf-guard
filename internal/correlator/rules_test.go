@@ -4,10 +4,11 @@ package correlator
 import (
 	"fmt"
 	"testing"
+	"time"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 func TestRuleEngine_Evaluate(t *testing.T) {
@@ -248,6 +249,57 @@ func TestRuleEngine_AlertContent(t *testing.T) {
 	assert.Equal(t, types.SeverityCritical, alert.Severity)
 	assert.Equal(t, uint32(1234), alert.PID)
 	assert.Equal(t, uint32(1234), alert.Event.PID)
+}
+
+// TestRuleEngine_AlertDetailsCarriesFilePath is the regression test for
+// 5.8e.1 (находка №18): the triggering file path was previously visible only
+// on the unserialized Alert.Event field (json:"-"), so a dump of stored
+// alerts could not show which path an "ebpf-guard-self" exception was
+// failing to match. Both Evaluate and EvaluateInto must populate
+// Details["file.path"] for file-access alerts, preferring the fd-resolved
+// path (reads/writes) over Filename (opens) — see fileAccessPath.
+func TestRuleEngine_AlertDetailsCarriesFilePath(t *testing.T) {
+	rules := []Rule{
+		{
+			ID:        "file_001",
+			Name:      "Any file read",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{Field: "op", Op: OpEquals, Values: []string{"read"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		},
+	}
+	engine := NewRuleEngine(rules)
+
+	t.Run("read event uses fd-resolved path", func(t *testing.T) {
+		event := types.Event{
+			Type: types.EventFileAccess,
+			PID:  1234,
+			File: &types.FileEvent{Op: 1, FDPath: "/proc/1234/maps"},
+		}
+
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+		require.NotNil(t, alerts[0].Details)
+		assert.Equal(t, "/proc/1234/maps", alerts[0].Details["file.path"])
+
+		var got []types.Alert
+		engine.EvaluateInto(event, func(a types.Alert) { got = append(got, a) })
+		require.Len(t, got, 1)
+		require.NotNil(t, got[0].Details)
+		assert.Equal(t, "/proc/1234/maps", got[0].Details["file.path"])
+	})
+
+	t.Run("open event with no fd path leaves Details nil", func(t *testing.T) {
+		event := types.Event{
+			Type: types.EventFileAccess,
+			PID:  1234,
+			File: &types.FileEvent{Op: 1}, // no FDPath, no Filename set
+		}
+		alerts := engine.Evaluate(event)
+		require.Len(t, alerts, 1)
+		assert.Nil(t, alerts[0].Details)
+	})
 }
 
 func TestRuleEngine_RegexOperator(t *testing.T) {
@@ -1617,7 +1669,7 @@ func TestSamplingValidation(t *testing.T) {
 		rate    float64
 		wantErr bool
 	}{
-		{0.0, false},  // normalised to 1.0
+		{0.0, false}, // normalised to 1.0
 		{0.1, false},
 		{0.5, false},
 		{1.0, false},
@@ -1636,4 +1688,233 @@ func TestSamplingValidation(t *testing.T) {
 
 	// sample_deterministic is a boolean, no range to validate
 	assert.NoError(t, validateRule(validRule(0.5, true)))
+}
+
+// TestThresholdRule verifies the 5.8g count/burst operator: a rule with
+// Threshold set only alerts once its base condition has matched Count times
+// for the same PID within WindowSeconds.
+func TestThresholdRule(t *testing.T) {
+	baseRule := Rule{
+		ID:        "burst_001",
+		Name:      "Burst rule",
+		EventType: types.EventNetClose,
+		Condition: RuleCondition{
+			Field:  "duration_ms",
+			Op:     OpLessThan,
+			Values: []string{"100"},
+		},
+		Threshold: &RuleThreshold{Count: 3, WindowSeconds: 10},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	// unique PID per subtest so globalBurstTracker state doesn't leak across cases.
+	nextPID := uint32(900000)
+	pidFor := func() uint32 {
+		nextPID++
+		return nextPID
+	}
+
+	evt := func(pid uint32, ts time.Time) types.Event {
+		return types.Event{
+			Type:      types.EventNetClose,
+			PID:       pid,
+			Timestamp: uint64(ts.UnixNano()),
+			NetClose:  &types.NetworkCloseEvent{Duration: 10 * time.Millisecond},
+		}
+	}
+
+	t.Run("first two matches within window are suppressed", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{baseRule})
+		pid := pidFor()
+		base := time.Unix(1_700_000_000, 0)
+		assert.Empty(t, engine.Evaluate(evt(pid, base)), "1st match must be suppressed")
+		assert.Empty(t, engine.Evaluate(evt(pid, base.Add(time.Second))), "2nd match must be suppressed")
+	})
+
+	t.Run("third match within window fires, and so does every match after", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{baseRule})
+		pid := pidFor()
+		base := time.Unix(1_700_100_000, 0)
+		engine.Evaluate(evt(pid, base))
+		engine.Evaluate(evt(pid, base.Add(time.Second)))
+		alerts := engine.Evaluate(evt(pid, base.Add(2*time.Second)))
+		require.Len(t, alerts, 1, "3rd match must fire (reached threshold)")
+		alerts = engine.Evaluate(evt(pid, base.Add(3*time.Second)))
+		require.Len(t, alerts, 1, "match after threshold is reached must keep firing")
+	})
+
+	t.Run("matches outside the window reset the count", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{baseRule})
+		pid := pidFor()
+		base := time.Unix(1_700_200_000, 0)
+		engine.Evaluate(evt(pid, base))
+		engine.Evaluate(evt(pid, base.Add(time.Second)))
+		// 3rd match arrives well outside the 10s window from the 1st match,
+		// so only the last 2 (this one plus the 2nd) are within window.
+		alerts := engine.Evaluate(evt(pid, base.Add(30*time.Second)))
+		assert.Empty(t, alerts, "match after the window expired must not immediately fire")
+	})
+
+	t.Run("different PIDs are tracked independently", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{baseRule})
+		pidA, pidB := pidFor(), pidFor()
+		base := time.Unix(1_700_300_000, 0)
+		engine.Evaluate(evt(pidA, base))
+		engine.Evaluate(evt(pidA, base.Add(time.Second)))
+		// pidB's 1st match must not benefit from pidA's count.
+		alerts := engine.Evaluate(evt(pidB, base.Add(2*time.Second)))
+		assert.Empty(t, alerts, "a different PID must start its own count from zero")
+	})
+
+	t.Run("nil threshold alerts on every match (unchanged behavior)", func(t *testing.T) {
+		r := baseRule
+		r.Threshold = nil
+		engine := NewRuleEngine([]Rule{r})
+		pid := pidFor()
+		alerts := engine.Evaluate(evt(pid, time.Unix(1_700_400_000, 0)))
+		assert.Len(t, alerts, 1, "no threshold configured must alert immediately")
+	})
+}
+
+func TestThresholdValidation(t *testing.T) {
+	validRule := func(count, windowSeconds int) *Rule {
+		return &Rule{
+			ID:        "tv_001",
+			Name:      "test",
+			EventType: types.EventNetClose,
+			Condition: RuleCondition{Field: "duration_ms", Op: OpLessThan, Values: []string{"100"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+			Threshold: &RuleThreshold{Count: count, WindowSeconds: windowSeconds},
+		}
+	}
+
+	cases := []struct {
+		name          string
+		count, window int
+		wantErr       bool
+	}{
+		{"count 1 rejected (equivalent to no threshold)", 1, 10, true},
+		{"count 0 rejected", 0, 10, true},
+		{"negative window rejected", 5, -1, true},
+		{"zero window rejected", 5, 0, true},
+		{"count 2, window 1 accepted", 2, 1, false},
+		{"count 5, window 60 accepted", 5, 60, false},
+	}
+	for _, tc := range cases {
+		err := validateRule(validRule(tc.count, tc.window))
+		if tc.wantErr {
+			assert.Error(t, err, tc.name)
+		} else {
+			assert.NoError(t, err, tc.name)
+		}
+	}
+
+	// group_by (5.8g): an unrecognised mode must be rejected rather than
+	// silently falling back to PID grouping, and the empty default must be
+	// normalised so nothing downstream has to special-case "".
+	groupCases := []struct {
+		name    string
+		groupBy string
+		wantErr bool
+		want    string
+	}{
+		{"empty group_by defaults to pid", "", false, ThresholdGroupPID},
+		{"explicit pid accepted", ThresholdGroupPID, false, ThresholdGroupPID},
+		{"chain accepted", ThresholdGroupChain, false, ThresholdGroupChain},
+		{"typo rejected, not silently treated as pid", "chan", true, ""},
+		{"lineage rejected", "lineage", true, ""},
+	}
+	for _, tc := range groupCases {
+		r := validRule(5, 10)
+		r.Threshold.GroupBy = tc.groupBy
+		err := validateRule(r)
+		if tc.wantErr {
+			assert.Error(t, err, tc.name)
+			continue
+		}
+		require.NoError(t, err, tc.name)
+		assert.Equal(t, tc.want, r.Threshold.GroupBy, tc.name)
+	}
+}
+
+// TestThresholdRule_ChainGrouping covers the shape group_by: pid cannot see at
+// all (5.8g): a parent spawning a fresh short-lived child per probe, where no
+// single PID ever matches twice and a PID-grouped threshold therefore never
+// fires no matter how large the burst.
+func TestThresholdRule_ChainGrouping(t *testing.T) {
+	rule := Rule{
+		ID:        "burst_chain_001",
+		Name:      "burst chain test",
+		EventType: types.EventNetClose,
+		Condition: RuleCondition{Field: "duration_ms", Op: OpLessThan, Values: []string{"100"}},
+		Threshold: &RuleThreshold{Count: 3, WindowSeconds: 10, GroupBy: ThresholdGroupChain},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	base := time.Unix(1_700_100_000, 0)
+	evt := func(pid uint32, ts time.Time) types.Event {
+		return types.Event{
+			Type:      types.EventNetClose,
+			PID:       pid,
+			Timestamp: uint64(ts.UnixNano()),
+			NetClose:  &types.NetworkCloseEvent{Duration: 10 * time.Millisecond},
+		}
+	}
+
+	t.Run("children of one chain share a counter", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{rule})
+		// PIDs 910001..910004 all resolve to the same chain; 910009 to another.
+		engine.SetChainGroupResolver(func(pid uint32) (uint64, bool) {
+			if pid >= 910001 && pid <= 910004 {
+				return 0xAAAA, true
+			}
+			return 0xBBBB, true
+		})
+
+		assert.Empty(t, engine.Evaluate(evt(910001, base)), "1st child of the chain: below threshold")
+		assert.Empty(t, engine.Evaluate(evt(910002, base.Add(time.Second))), "2nd child: below threshold")
+		assert.Len(t, engine.Evaluate(evt(910003, base.Add(2*time.Second))), 1, "3rd child reaches Count for the chain")
+		assert.Len(t, engine.Evaluate(evt(910004, base.Add(3*time.Second))), 1, "burst keeps firing while the chain stays hot")
+
+		// A different chain is unaffected — one match is still one match.
+		assert.Empty(t, engine.Evaluate(evt(910009, base.Add(4*time.Second))), "unrelated chain must not inherit the burst")
+	})
+
+	t.Run("same events under pid grouping never fire", func(t *testing.T) {
+		pidRule := rule
+		pidRule.ID = "burst_chain_002"
+		pidRule.Threshold = &RuleThreshold{Count: 3, WindowSeconds: 10, GroupBy: ThresholdGroupPID}
+		engine := NewRuleEngine([]Rule{pidRule})
+		engine.SetChainGroupResolver(func(uint32) (uint64, bool) { return 0xAAAA, true })
+
+		for i, pid := range []uint32{920001, 920002, 920003, 920004} {
+			assert.Empty(t, engine.Evaluate(evt(pid, base.Add(time.Duration(i)*time.Second))),
+				"one match per PID never reaches Count under pid grouping")
+		}
+	})
+
+	t.Run("unknown chain isolates the PID instead of merging", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{rule})
+		engine.SetChainGroupResolver(func(uint32) (uint64, bool) { return 0, false })
+
+		// Three distinct PIDs with no known chain must NOT be pooled together.
+		for i, pid := range []uint32{930001, 930002, 930003} {
+			assert.Empty(t, engine.Evaluate(evt(pid, base.Add(time.Duration(i)*time.Second))),
+				"unresolved chains must fall back to per-PID isolation, not a shared bucket")
+		}
+		// The same PID repeating does reach the threshold.
+		assert.Empty(t, engine.Evaluate(evt(930001, base.Add(4*time.Second))))
+		assert.Len(t, engine.Evaluate(evt(930001, base.Add(5*time.Second))), 1)
+	})
+
+	t.Run("no resolver installed degrades to pid grouping", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{rule})
+		pid := uint32(940001)
+		assert.Empty(t, engine.Evaluate(evt(pid, base)))
+		assert.Empty(t, engine.Evaluate(evt(pid, base.Add(time.Second))))
+		assert.Len(t, engine.Evaluate(evt(pid, base.Add(2*time.Second))), 1)
+	})
 }

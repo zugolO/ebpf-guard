@@ -79,6 +79,17 @@ const (
 	minDensityForScore     = 10.0
 	maxDensityScoreUnits   = 5.0
 
+	// procReconClusterTag marks rules that detect the same underlying
+	// technique — reading /proc/<pid>/* for reconnaissance or sandbox/
+	// container-escape detection — from three different angles
+	// (container_escape_init_proc, mitre_sandbox_detect_proc_read,
+	// sigma_cpu_info_access). 5.8f (находка №19): one process reading /proc
+	// once can trip all three, and untagged they counted as three
+	// independent rules/tactics toward the incident score. Tagged rules
+	// collapse to a single representative in recalculateScore's uniqueRules
+	// and tactics computation — see ruleClusterKeys.
+	procReconClusterTag = "proc-recon-cluster"
+
 	// backgroundReopenWindow extends the grouping window for a *periodic
 	// background* incident: one rooted at a trusted daemon that has never
 	// carried an untrusted-comm or network signal, and never assembled a
@@ -256,6 +267,10 @@ type IncidentTracker struct {
 	// SetRules. Only the derived tactics are retained, so the tracker never
 	// aliases a []Rule the engine may mutate elsewhere.
 	ruleTactics map[string][]string
+	// ruleClusterKeys maps ruleID → a collapsing key for rules that carry
+	// procReconClusterTag (or any rule id, itself, for rules without it) —
+	// see procReconClusterTag and recalculateScore's use of it (5.8f).
+	ruleClusterKeys map[string]string
 	open        map[incidentKey]*types.Incident // active incidents (last alert within window)
 	byID        map[string]*types.Incident      // all incidents for ID-based lookups
 	seq         atomic.Uint64
@@ -270,13 +285,14 @@ func newIncidentTracker(window time.Duration, lineageTracker *profiler.LineageTr
 		window = 60 * time.Second
 	}
 	t := &IncidentTracker{
-		window:         window,
-		lineageTracker: lineageTracker,
-		scoringConfig:  DefaultIncidentScoringConfig(),
-		trustedComms:   defaultTrustedComms,
-		ruleTactics:    buildRuleTactics(rules),
-		open:           make(map[incidentKey]*types.Incident),
-		byID:           make(map[string]*types.Incident),
+		window:          window,
+		lineageTracker:  lineageTracker,
+		scoringConfig:   DefaultIncidentScoringConfig(),
+		trustedComms:    defaultTrustedComms,
+		ruleTactics:     buildRuleTactics(rules),
+		ruleClusterKeys: buildRuleClusterKeys(rules),
+		open:            make(map[incidentKey]*types.Incident),
+		byID:            make(map[string]*types.Incident),
 	}
 	return t
 }
@@ -291,13 +307,35 @@ func buildRuleTactics(rules []Rule) map[string][]string {
 	return m
 }
 
+// buildRuleClusterKeys maps each rule ID to the key used to collapse it with
+// other rules detecting the same underlying technique when computing
+// recalculateScore's uniqueRules and tactics inputs. Rules carrying
+// procReconClusterTag all collapse to that tag; every other rule maps to its
+// own ID, i.e. is its own cluster of one (5.8f, находка №19).
+func buildRuleClusterKeys(rules []Rule) map[string]string {
+	m := make(map[string]string, len(rules))
+	for i := range rules {
+		key := rules[i].ID
+		for _, tag := range rules[i].Tags {
+			if tag == procReconClusterTag {
+				key = procReconClusterTag
+				break
+			}
+		}
+		m[rules[i].ID] = key
+	}
+	return m
+}
+
 // SetRules refreshes the tracker's rule→tactic mapping after a rule hot-reload.
 // Without this, rules added or retagged by a reload resolve to no tactics and
 // incident scoring silently degrades.
 func (t *IncidentTracker) SetRules(rules []Rule) {
-	next := buildRuleTactics(rules)
+	nextTactics := buildRuleTactics(rules)
+	nextClusters := buildRuleClusterKeys(rules)
 	t.mu.Lock()
-	t.ruleTactics = next
+	t.ruleTactics = nextTactics
+	t.ruleClusterKeys = nextClusters
 	t.mu.Unlock()
 }
 
@@ -574,8 +612,18 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		if inc.ScoringSourceEvents == nil {
 			inc.ScoringSourceEvents = make(map[uint64]struct{}, 4)
 		}
-		inc.ScoringSourceEvents[sourceEventKey(alert)] = struct{}{}
-		inc.ScoringAlertCount++
+		// 5.8f (находка №19): ScoringAlertCount previously incremented once per
+		// alert, so one /proc read fanning out across five rules inflated the
+		// time-density term as if five separate events had arrived in the same
+		// instant. WeightUniqueRules already clamped its own contribution to
+		// the number of distinct source events (P1-13) — density gets the same
+		// treatment here: only a source event this incident has not seen before
+		// counts toward density.
+		key := sourceEventKey(alert)
+		if _, seen := inc.ScoringSourceEvents[key]; !seen {
+			inc.ScoringSourceEvents[key] = struct{}{}
+			inc.ScoringAlertCount++
+		}
 	}
 
 	inc.LastSeen = ts
@@ -637,8 +685,35 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 
 	// 5.5a: score from the scoring-only rule set, which excludes rules that
 	// only ever fired at info severity — see the ScoringRuleIDs doc comment.
-	scoringRuleIDs := make([]string, 0, len(inc.ScoringRuleIDs))
+	// 5.8f: rules sharing procReconClusterTag collapse to one representative
+	// before counting — otherwise the /proc-recon cluster's three rules
+	// (container_escape_init_proc, mitre_sandbox_detect_proc_read,
+	// sigma_cpu_info_access) triggered by the same underlying read count as
+	// three independent rules/tactics instead of one signal seen three ways.
+	// The representative kept for each cluster must not depend on Go's
+	// randomised map iteration order: cluster members carry *different*
+	// tactics (container_escape_init_proc none, mitre_sandbox_detect_proc_read
+	// defense-evasion, sigma_cpu_info_access discovery), so picking whichever
+	// id came out of the map first made both the score and the observable
+	// Tactics field vary between runs on identical input. Sort first, keep the
+	// lexicographically smallest member of each cluster.
+	allScoringRuleIDs := make([]string, 0, len(inc.ScoringRuleIDs))
 	for id := range inc.ScoringRuleIDs {
+		allScoringRuleIDs = append(allScoringRuleIDs, id)
+	}
+	sort.Strings(allScoringRuleIDs)
+
+	seenClusters := make(map[string]struct{}, len(allScoringRuleIDs))
+	scoringRuleIDs := make([]string, 0, len(allScoringRuleIDs))
+	for _, id := range allScoringRuleIDs {
+		key := id
+		if ck, ok := t.ruleClusterKeys[id]; ok {
+			key = ck
+		}
+		if _, dup := seenClusters[key]; dup {
+			continue
+		}
+		seenClusters[key] = struct{}{}
 		scoringRuleIDs = append(scoringRuleIDs, id)
 	}
 
@@ -656,11 +731,14 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 		score += float64(uniqueRules) * cfg.WeightUniqueRules
 	}
 
-	tactics := t.extractTactics(scoringRuleIDs)
-	if len(tactics) >= minTacticsForScore {
-		score += float64(len(tactics)) * cfg.WeightTacticsDiversity
+	// Scoring uses the collapsed set — that is the point of 5.8f: one /proc
+	// read seen by three overlapping rules is one piece of evidence, not three
+	// tactics. inc.Tactics is an observable field served over the API, so it
+	// keeps reporting every tactic actually seen, exactly as RuleIDs does.
+	if scoringTactics := t.extractTactics(scoringRuleIDs); len(scoringTactics) >= minTacticsForScore {
+		score += float64(len(scoringTactics)) * cfg.WeightTacticsDiversity
 	}
-	inc.Tactics = tactics
+	inc.Tactics = t.extractTactics(allScoringRuleIDs)
 
 	// 5.5a: density from the scoring-only alert count — an info-only burst
 	// (cron reading its spool) should not be able to inflate density either.

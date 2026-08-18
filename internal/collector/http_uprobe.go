@@ -265,10 +265,14 @@ func (c *HTTPCollector) Start(ctx context.Context, out chan<- types.Event) error
 	c.loadError = nil
 	c.status.SetUp("http_plaintext", true)
 
-	go c.readLoop(ctx, out)
+	readLoopDone := runReadLoop(func() { c.readLoop(ctx, out) })
 
+	// Wait for context cancellation, then for readLoop to actually stop
+	// sending (5.8d) — Close() unblocks the ring buffer Read() readLoop may
+	// be parked in, and Close() runs after ctx is already done.
 	<-ctx.Done()
 	c.logger.Info("stopping plaintext HTTP collector")
+	<-readLoopDone
 	return nil
 }
 

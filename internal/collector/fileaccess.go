@@ -114,11 +114,14 @@ func (c *FileaccessCollector) Start(ctx context.Context, out chan<- types.Event)
 	c.status.SetUp("fileaccess", true)
 
 	// Start reading loop
-	go c.readLoop(ctx, out)
+	readLoopDone := runReadLoop(func() { c.readLoop(ctx, out) })
 
-	// Wait for context cancellation
+	// Wait for context cancellation, then for readLoop to actually stop
+	// sending (5.8d) — Close() unblocks the ring buffer Read() readLoop may
+	// be parked in, and Close() runs after ctx is already done.
 	<-ctx.Done()
 	c.logger.Info("stopping fileaccess collector")
+	<-readLoopDone
 	return nil
 }
 

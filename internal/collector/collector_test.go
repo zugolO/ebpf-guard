@@ -256,6 +256,80 @@ func TestPartialFailure_ChannelFull(t *testing.T) {
 	}
 }
 
+// TestRunReadLoop_WaitsForReadLoopBeforeCallerClosesChannel reproduces the
+// 5.8d panic (finding №20): "send on closed channel" on graceful shutdown.
+//
+// Before the fix, a collector's Start did `go c.readLoop(ctx, out);
+// <-ctx.Done(); return nil` — returning as soon as ctx was cancelled while
+// readLoop could still be blocked in a ring buffer Read(), about to send.
+// PriorityEventCollector.Start closes its hand-off channel immediately after
+// the wrapped collector's Start returns, so a readLoop that unblocked and
+// sent right after that close would panic. This test models exactly that
+// caller contract — close `out` as soon as the Start-equivalent returns —
+// against runReadLoop, and requires zero panics whether the simulated
+// readLoop is mid-send (under load) or idle (quiet) at cancellation time.
+func TestRunReadLoop_WaitsForReadLoopBeforeCallerClosesChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		underLoad   bool
+		shutdownDur time.Duration
+	}{
+		{name: "under load: event pending when ctx is cancelled", underLoad: true},
+		{name: "quiet: no event pending when ctx is cancelled", underLoad: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			out := make(chan types.Event, 1)
+
+			releaseBlockedRead := make(chan struct{})
+			readLoopStarted := make(chan struct{})
+
+			// Simulates a collector's readLoop: parked in a blocking Read()
+			// (releaseBlockedRead models Close() unblocking it, which in the
+			// real agent happens strictly after ctx is already Done), then —
+			// same as fileaccess/syscall/network/dns/tls/http/kmod readLoop —
+			// sends on `out` via the shared strategy switch in sendEvent.
+			readLoop := func() {
+				close(readLoopStarted)
+				<-releaseBlockedRead
+				if tc.underLoad {
+					sendEvent(ctx, out, types.Event{}, StrategyDrop, func() {})
+				}
+			}
+
+			// Start-equivalent: matches every fixed collector's Start body.
+			startDone := make(chan struct{})
+			go func() {
+				defer close(startDone)
+				readLoopDone := runReadLoop(readLoop)
+				<-ctx.Done()
+				<-readLoopDone
+			}()
+
+			<-readLoopStarted
+			cancel() // ctx.Done() fires; readLoop is still blocked in "Read()"
+
+			// Give the Start-equivalent goroutine a chance to reach <-ctx.Done()
+			// and start waiting on readLoopDone before the read unblocks —
+			// exercises the actual ordering from the panic (ctx cancels well
+			// before Close() runs and unblocks the reader).
+			time.Sleep(20 * time.Millisecond)
+			close(releaseBlockedRead) // models Close() unblocking Read()
+
+			select {
+			case <-startDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Start-equivalent did not return after readLoop finished")
+			}
+
+			// PriorityEventCollector's contract: close the hand-off channel
+			// immediately once Start returns. Must not panic — runReadLoop
+			// guarantees readLoop already stopped calling sendEvent.
+			require.NotPanics(t, func() { close(out) })
+		})
+	}
+}
+
 // BenchmarkEventPool measures the overhead of the pool acquire/fill/release cycle.
 // Target: 0 allocs/op once the pool is warm. Run with -benchmem to verify.
 func BenchmarkEventPool(b *testing.B) {

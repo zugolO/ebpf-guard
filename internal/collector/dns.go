@@ -181,9 +181,13 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	}
 	c.reader = reader
 
-	go c.readLoop(ctx, out)
+	readLoopDone := runReadLoop(func() { c.readLoop(ctx, out) })
 
+	// Wait for context cancellation, then for readLoop to actually stop
+	// sending (5.8d) — Close() unblocks the ring buffer Read() readLoop may
+	// be parked in, and Close() runs after ctx is already done.
 	<-ctx.Done()
+	<-readLoopDone
 	return nil
 }
 
@@ -352,10 +356,20 @@ func (c *DNSCollector) watchForStaleness(ctx context.Context) {
 				reportedStale = true
 				c.metrics.stale.Set(1)
 				c.metrics.staleTransitions.Inc()
-				slog.Warn("dns: collector attached but has seen no events — visibility into DNS is absent, not merely quiet",
+				var lastSeenMsg string
+				if lastEvent == 0 {
+					lastSeenMsg = "never"
+				} else {
+					lastSeenMsg = time.Unix(0, lastEvent).Format(time.RFC3339)
+				}
+				// 5.8c: the old text ("has seen no events") contradicted its own
+				// events_total field once the collector had already seen traffic —
+				// this state is "no NEW events since last_seen", not "never saw any".
+				slog.Warn("dns: no new events for silent_for — visibility into DNS may be absent, or the host may simply be quiet",
 					slog.Duration("silent_for", silentFor.Round(time.Second)),
+					slog.String("last_seen", lastSeenMsg),
 					slog.Uint64("events_total", count),
-					slog.String("likely_causes", "systemd-resolved answering over AF_UNIX (nss-resolve/varlink), IPv6 or TCP DNS, or resolver sockets connected before the agent started"),
+					slog.String("likely_causes", "systemd-resolved answering over AF_UNIX (nss-resolve/varlink), IPv6 or TCP DNS, or resolver sockets connected before the agent started — or the host has genuinely not resolved anything in dnsStaleThreshold"),
 					slog.String("verify", "run `dig example.com @8.8.8.8` and re-check ebpf_guard_events_total{type=\"dns\"}"))
 			}
 		}

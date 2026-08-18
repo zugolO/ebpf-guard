@@ -988,6 +988,20 @@ type CorrelatorConfig struct {
 	// systemd-logind, grafana). Which daemons are noisy is deployment-specific,
 	// so this must be tunable without a rebuild.
 	TrustedComms []string `mapstructure:"trusted_comms"`
+	// SelfExclude configures the 5.8e self-exclusion filter: events from the
+	// agent's own process tree are dropped before rule evaluation.
+	SelfExclude SelfExcludeConfig `mapstructure:"self_exclude"`
+}
+
+// SelfExcludeConfig configures the correlator's self-exclusion filter (5.8e,
+// находка №18 — the agent generated 45% of its own idle-hour alert volume).
+type SelfExcludeConfig struct {
+	// Enabled drops events whose PID is the agent's own PID or a descendant
+	// of it before they reach rule evaluation. Default: true. Disable only
+	// to verify a suspected impersonating binary named "ebpf-guard", or to
+	// reproduce pre-5.8e detection baselines — per-rule "ebpf-guard-self"
+	// exceptions in the rule files remain the fallback when this is off.
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // AlertAggregationConfig configures alert aggregation (see correlator.AlertAggregator).
@@ -2015,6 +2029,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("correlator.max_alerts_per_second", 10000)
 	v.SetDefault("correlator.alert_aggregation.enabled", false)
 	v.SetDefault("correlator.alert_aggregation.window", "60s")
+	v.SetDefault("correlator.self_exclude.enabled", true)
 
 	// Profiler defaults
 	v.SetDefault("profiler.enabled", true)

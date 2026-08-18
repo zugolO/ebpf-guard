@@ -318,7 +318,11 @@ rules:
             - "/var/log/"
         - field: proc.comm
           op: not_in
-          values: ["sshd", "cron"]
+          # 5.8h (замер №2.4, находка №21/№22): rsyslogd ("rs:main Q:Reg",
+          # its main queue-regulator thread name, truncated by COMM_LEN) and
+          # systemd-journald ("systemd-journal", same truncation) route
+          # through here on every write, same class as sshd/cron below.
+          values: ["sshd", "cron", "rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
     severity: critical
     action: alert
     tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion]
@@ -344,8 +348,8 @@ rules:
   # including rotation) — daemon split only strips volume, doesn't narrow
   # the base rule's op coverage.
   - id: sigma_log_deletion_daemon
-    name: "System log files touched by login/cron daemon"
-    description: "sshd or cron touched a file under /var/log/ — usually routine logging or rotation, but content is not inspected."
+    name: "System log files touched by login/cron/syslog daemon"
+    description: "sshd, cron, rsyslogd, or systemd-journald touched a file under /var/log/ — usually routine logging or rotation, but content is not inspected."
     event_type: file
     condition_group:
       operator: and
@@ -356,7 +360,7 @@ rules:
             - "/var/log/"
         - field: proc.comm
           op: in
-          values: ["sshd", "cron"]
+          values: ["sshd", "cron", "rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
     severity: info
     action: alert
     tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion, needs-content-analysis]
@@ -626,7 +630,7 @@ rules:
         - "/proc/sys/kernel/version"
     severity: warning
     action: alert
-    tags: [mitre:T1082, sigma, discovery, system-info]
+    tags: [mitre:T1082, sigma, discovery, system-info, proc-recon-cluster]
     exceptions:
       # Scoped to comm AND path: the hardware profiler / CPU watchdog reads
       # only these three files. Enumeration of the /proc/sys/kernel/* entries

@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCorrelationEngine_Ingest(t *testing.T) {
@@ -136,6 +137,93 @@ func TestCorrelationEngine_Ingest(t *testing.T) {
 	}
 }
 
+// TestCorrelationEngine_SelfExclusion is the regression test for 5.8e
+// (находка №18: the agent generated 45% of its own idle-hour alert volume —
+// canary self-scans and the uprobe attacher's /proc/<pid>/maps reads slipping
+// past per-rule "ebpf-guard-self" exceptions). It exercises the self-exclusion
+// filter added at the top of ingestWithAD directly, rather than relying on the
+// per-rule exceptions it is meant to backstop.
+func TestCorrelationEngine_SelfExclusion(t *testing.T) {
+	rules := []Rule{
+		{
+			ID:        "rule_001",
+			Name:      "Any file access",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{Field: "op", Op: OpEquals, Values: []string{"read"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		},
+	}
+
+	const selfPID = uint32(999)
+	const childPID = uint32(1000)
+	const otherPID = uint32(2000)
+
+	newEvent := func(pid, ppid uint32) types.Event {
+		return types.Event{
+			Type: types.EventFileAccess,
+			PID:  pid,
+			PPID: ppid,
+			File: &types.FileEvent{Op: 1}, // 1 = read, see fileOpNames
+		}
+	}
+
+	t.Run("enabled: self PID produces no alert", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.SelfExcludeEnabled = true
+		cfg.SelfPID = selfPID
+		engine := NewCorrelationEngineWithConfig(cfg)
+		ctx := context.Background()
+
+		alerts := engine.Ingest(ctx, newEvent(selfPID, 1))
+		assert.Empty(t, alerts, "events with e.PID == selfPID must not reach rule evaluation")
+	})
+
+	t.Run("enabled: descendant discovered via PPID produces no alert", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.SelfExcludeEnabled = true
+		cfg.SelfPID = selfPID
+		engine := NewCorrelationEngineWithConfig(cfg)
+		ctx := context.Background()
+
+		// First event from the child carries PPID == selfPID, so the child is
+		// learned as part of the self tree...
+		alerts := engine.Ingest(ctx, newEvent(childPID, selfPID))
+		assert.Empty(t, alerts)
+
+		// ...and a later event from the same child, without PPID set again,
+		// is still excluded via the now-populated selfTree.
+		alerts = engine.Ingest(ctx, newEvent(childPID, 0))
+		assert.Empty(t, alerts)
+	})
+
+	t.Run("enabled: unrelated PID is unaffected", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.SelfExcludeEnabled = true
+		cfg.SelfPID = selfPID
+		engine := NewCorrelationEngineWithConfig(cfg)
+		ctx := context.Background()
+
+		alerts := engine.Ingest(ctx, newEvent(otherPID, 1))
+		assert.Len(t, alerts, 1, "an attacker process, not a descendant of the agent, must still alert")
+	})
+
+	t.Run("disabled: self PID still alerts", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.SelfExcludeEnabled = false
+		cfg.SelfPID = selfPID
+		engine := NewCorrelationEngineWithConfig(cfg)
+		ctx := context.Background()
+
+		alerts := engine.Ingest(ctx, newEvent(selfPID, 1))
+		assert.Len(t, alerts, 1, "self-exclusion must be fully disable-able via config")
+	})
+}
+
 func TestCorrelationEngine_Flush(t *testing.T) {
 	rules := []Rule{
 		{
@@ -226,19 +314,19 @@ func TestPreAlertContext_AttachedOnMatch(t *testing.T) {
 	// Send 5 background events (nr=99, no match) to seed the buffer.
 	for i := range 5 {
 		engine.Ingest(ctx, types.Event{
-			Type:    types.EventSyscall,
-			PID:     pid,
+			Type:      types.EventSyscall,
+			PID:       pid,
 			Timestamp: uint64(i + 1),
-			Syscall: &types.SyscallEvent{Nr: 99},
+			Syscall:   &types.SyscallEvent{Nr: 99},
 		})
 	}
 
 	// Send the triggering event (nr=1, matches the rule).
 	alerts := engine.Ingest(ctx, types.Event{
-		Type:    types.EventSyscall,
-		PID:     pid,
+		Type:      types.EventSyscall,
+		PID:       pid,
 		Timestamp: uint64(100),
-		Syscall: &types.SyscallEvent{Nr: 1},
+		Syscall:   &types.SyscallEvent{Nr: 1},
 	})
 	require.Len(t, alerts, 1, "expected one alert from rule match")
 
@@ -269,10 +357,10 @@ func TestPreAlertContext_DisabledByDefault(t *testing.T) {
 	ctx := context.Background()
 
 	alerts := engine.Ingest(ctx, types.Event{
-		Type:    types.EventSyscall,
-		PID:     1,
+		Type:      types.EventSyscall,
+		PID:       1,
 		Timestamp: 1,
-		Syscall: &types.SyscallEvent{Nr: 1},
+		Syscall:   &types.SyscallEvent{Nr: 1},
 	})
 	require.Len(t, alerts, 1)
 	assert.Nil(t, alerts[0].PreAlertContext, "PreAlertContext must be nil when buffer is disabled")
@@ -462,6 +550,72 @@ func TestCorrelationEngine_ProcessTree(t *testing.T) {
 	prev := tree[len(tree)-2]
 	assert.Equal(t, uint32(200), prev.PID, "second-to-last should be bash")
 	assert.Equal(t, "bash", prev.Comm)
+}
+
+// TestCorrelationEngine_DedupDropsAreAttributedPerRule covers the 5.8b
+// remediation of finding №21: alerts_dedup_dropped_total is a single aggregate
+// counter, so when the store and the metric disagreed 2× for most rules and
+// ~30× for owasp_log_tampering/sigma_log_deletion, nothing in the agent could
+// say whether dedup accounted for either. The per-rule breakdown has to
+// attribute a suppression to the rule that produced it, not just count it.
+func TestCorrelationEngine_DedupDropsAreAttributedPerRule(t *testing.T) {
+	comm := func(s string) [16]byte {
+		var b [16]byte
+		copy(b[:], s)
+		return b
+	}
+
+	noisy := Rule{
+		ID:        "dedup_attrib_noisy",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"443"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+	quiet := Rule{
+		ID:        "dedup_attrib_quiet",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8443"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{noisy, quiet}
+	cfg.EnableRateLimit = false
+	cfg.EnableAnomaly = false
+	cfg.EnableDedup = true
+	cfg.DedupWindow = 10 * time.Second
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	ctx := context.Background()
+	event := types.Event{
+		Type:    types.EventTCPConnect,
+		PID:     100,
+		Comm:    comm("nginx"),
+		Network: &types.NetworkEvent{Dport: 443},
+	}
+
+	require.Len(t, engine.Ingest(ctx, event), 1, "first alert must not be deduped")
+	for i := 0; i < 3; i++ {
+		assert.Empty(t, engine.Ingest(ctx, event), "duplicate within window must be suppressed")
+	}
+
+	// One event for the quiet rule, never repeated — it must not pick up any
+	// of the noisy rule's suppressions.
+	quietEvent := event
+	quietEvent.PID = 200
+	quietEvent.Network = &types.NetworkEvent{Dport: 8443}
+	require.Len(t, engine.Ingest(ctx, quietEvent), 1)
+
+	assert.Equal(t, 3.0, testutil.ToFloat64(engine.alertsDedupDroppedByRule.WithLabelValues(noisy.ID)),
+		"all three suppressions must be attributed to the rule that produced them")
+	assert.Equal(t, 0.0, testutil.ToFloat64(engine.alertsDedupDroppedByRule.WithLabelValues(quiet.ID)),
+		"a rule that never deduped must not accumulate another rule's drops")
+	assert.Equal(t, 3.0, testutil.ToFloat64(engine.alertsDedupDropped),
+		"the aggregate counter must stay consistent with the per-rule breakdown")
 }
 
 func TestCorrelationEngine_DedupWindow(t *testing.T) {

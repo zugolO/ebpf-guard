@@ -36,6 +36,29 @@ const (
 	StrategySample BackpressureStrategy = "sample"
 )
 
+// runReadLoop starts fn (a collector's readLoop) in a goroutine and blocks
+// until it returns.
+//
+// Each collector's Start used to do `go c.readLoop(ctx, out); <-ctx.Done();
+// return nil` — returning as soon as ctx was cancelled, without waiting for
+// readLoop to actually stop. readLoop can still be parked in a blocking ring
+// buffer Read() at that point; it only unblocks once Close() runs, which
+// happens later, after ctx is already done (cmd/ebpf-guard's gracefulShutdown
+// closes collectors after the context is cancelled). The caller of Start
+// (PriorityEventCollector) closes its hand-off channel as soon as Start
+// returns, so a readLoop still in flight would send on a closed channel —
+// exactly the "send on closed channel" panic on graceful shutdown (5.8d,
+// finding №20). Start must not return until readLoop has actually stopped
+// calling sendEvent on `out`.
+func runReadLoop(fn func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	return done
+}
+
 // sendEvent sends an event to the output channel according to the configured
 // backpressure strategy. It is called from each collector's readLoop.
 func sendEvent(ctx context.Context, out chan<- types.Event, e types.Event, strategy BackpressureStrategy, dropped func()) {

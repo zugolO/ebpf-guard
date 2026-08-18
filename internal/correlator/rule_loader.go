@@ -327,6 +327,28 @@ func validateRule(rule *Rule) error {
 		return fmt.Errorf("rule %s: condition_group has no conditions or subgroups", rule.ID)
 	}
 
+	// Validate the count/burst threshold block (5.8g), if present.
+	if rule.Threshold != nil {
+		if rule.Threshold.Count < 2 {
+			return fmt.Errorf("rule %s: threshold.count %d must be >= 2 (1 is equivalent to no threshold)", rule.ID, rule.Threshold.Count)
+		}
+		if rule.Threshold.WindowSeconds < 1 {
+			return fmt.Errorf("rule %s: threshold.window_seconds %d must be >= 1", rule.ID, rule.Threshold.WindowSeconds)
+		}
+		// Normalise the empty default rather than treating it as an unknown
+		// mode: an unrecognised value must be rejected, not silently grouped
+		// by PID — a rule author who writes group_by: chan would otherwise get
+		// PID grouping and no indication of it.
+		switch rule.Threshold.GroupBy {
+		case "":
+			rule.Threshold.GroupBy = ThresholdGroupPID
+		case ThresholdGroupPID, ThresholdGroupChain:
+		default:
+			return fmt.Errorf("rule %s: threshold.group_by %q must be %q or %q",
+				rule.ID, rule.Threshold.GroupBy, ThresholdGroupPID, ThresholdGroupChain)
+		}
+	}
+
 	// Resolve nested sampling block (takes precedence over flat sample_rate/sample_deterministic).
 	if rule.Sampling != nil {
 		if rule.Sampling.Rate != 0 {

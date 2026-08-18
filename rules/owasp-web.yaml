@@ -178,21 +178,56 @@ rules:
   # ============================================================================
 
   # Log file tampering
+  #
+  # 5.8h (замер №2.4, находка №21/№22): this condition never checked comm at
+  # all — any write under /var/log/*.log alerted, including rsyslogd's own
+  # main queue-regulator thread ("rs:main Q:Reg", truncated to 16 bytes by
+  # COMM_LEN) and systemd-journald's forwarder ("systemd-journal", same
+  # truncation). Split by the 5.1/5.6c precedent: routine daemons go to the
+  # info-severity _daemon twin below instead of being silenced outright —
+  # content is not inspected, so a compromised rsyslogd truncating a log
+  # still shows up, just at info severity.
   - id: owasp_log_tampering
     name: "OWASP: Potential log tampering"
     description: "Process writing to or truncating log files"
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/var/log/.*\\.log$"
-        - "/var/log/nginx/"
-        - "/var/log/apache2/"
-        - "/var/log/httpd/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            - "/var/log/.*\\.log$"
+            - "/var/log/nginx/"
+            - "/var/log/apache2/"
+            - "/var/log/httpd/"
+        - field: proc.comm
+          op: not_in
+          values: ["rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
     severity: warning
     action: alert
     tags: [owasp, log-tampering, a09-logging-failures]
+
+  - id: owasp_log_tampering_daemon
+    name: "Log file touched by syslog/journal daemon"
+    description: "rsyslogd or systemd-journald wrote to a file under /var/log/ — routine logging, but content is not inspected."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            - "/var/log/.*\\.log$"
+            - "/var/log/nginx/"
+            - "/var/log/apache2/"
+            - "/var/log/httpd/"
+        - field: proc.comm
+          op: in
+          values: ["rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
+    severity: info
+    action: alert
+    tags: [owasp, log-tampering, a09-logging-failures, needs-content-analysis]
 
   # ============================================================================
   # Additional Web Attack Patterns

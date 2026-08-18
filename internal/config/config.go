@@ -991,6 +991,10 @@ type CorrelatorConfig struct {
 	// SelfExclude configures the 5.8e self-exclusion filter: events from the
 	// agent's own process tree are dropped before rule evaluation.
 	SelfExclude SelfExcludeConfig `mapstructure:"self_exclude"`
+	// ObserverExclude configures the 5.9a observer-tree exclusion filter:
+	// events from the measurement harness's process tree are dropped before
+	// rule evaluation. Test-only.
+	ObserverExclude ObserverExcludeConfig `mapstructure:"observer_exclude"`
 }
 
 // SelfExcludeConfig configures the correlator's self-exclusion filter (5.8e,
@@ -1002,6 +1006,22 @@ type SelfExcludeConfig struct {
 	// reproduce pre-5.8e detection baselines — per-rule "ebpf-guard-self"
 	// exceptions in the rule files remain the fallback when this is off.
 	Enabled bool `mapstructure:"enabled"`
+}
+
+// ObserverExcludeConfig configures the correlator's observer-tree exclusion
+// filter (5.9a, находки №27/№28 — the idle-hour measurement harness produced
+// 71% of measured idle alert volume). Test-only: never set in production.
+type ObserverExcludeConfig struct {
+	// Enabled drops events whose PID is the harness root PID (see
+	// RootPIDFile) or a descendant of it, before they reach rule evaluation.
+	// Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// RootPIDFile is a path the agent polls for the harness's current root
+	// PID (a single integer, rewritten by the harness at start). Polled
+	// rather than read once at startup because the harness (idle-run.sh)
+	// starts well after the agent's own systemd service is already running,
+	// so the root PID is not known at config-load time.
+	RootPIDFile string `mapstructure:"root_pid_file"`
 }
 
 // AlertAggregationConfig configures alert aggregation (see correlator.AlertAggregator).
@@ -1414,9 +1434,12 @@ type MemoryPressureConfig struct {
 // noisiest collectors — file first (level 1), then syscall/network (level
 // 2) — and restores them once usage drops back below the recovery threshold
 // AND the current level has been held for at least MinDwell. LSM/canary/exec
-// hooks are never shed. Using an absolute per-core budget (instead of a
-// percentage of total host CPU) means the defaults behave the same way on a
-// 1-core VPS and an 8-core box.
+// hooks are never shed. Thresholds are still expressed per-core below, but by
+// default (ScaleByCPUCount) they are scaled by host core count before use, so
+// "40%" means 40% of total machine capacity rather than 40% of a single
+// core — see ScaleByCPUCount for why the old un-scaled default (an absolute
+// per-core budget, identical on a 1-core VPS and an 8-core box) tripped too
+// easily on multi-core hosts (5.9e, находка №31).
 type CPUPressureConfig struct {
 	// Enabled enables CPU pressure monitoring.
 	Enabled bool `mapstructure:"enabled"`
@@ -1446,6 +1469,16 @@ type CPUPressureConfig struct {
 	// previous 30s default produced 813 reduce/recover cycles in one 9-hour
 	// idle run, one every ~40s (P1-18a).
 	MinDwell int `mapstructure:"min_dwell"`
+	// ScaleByCPUCount multiplies FileShedThreshold/AllShedThreshold/
+	// RecoveryThreshold by the host's core count before they are compared
+	// against the (per-core-scale) measured CPU%. Without it, "40% of one
+	// core" trips at just 0.4 busy cores regardless of how many cores the
+	// box has — on a 4-CPU host that is 10% of total machine capacity, and
+	// замер №2.5 spent 49% of an idle-load run shedding under exactly this
+	// default (5.9e, находка №31). Default: true. Existing single-core /
+	// small VPS deployments that relied on the old absolute-budget behavior
+	// can set this to false to keep it.
+	ScaleByCPUCount bool `mapstructure:"scale_by_cpu_count"`
 }
 
 // PolicyConfig holds policy-as-code settings (Sprint 23.0).
@@ -2030,6 +2063,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("correlator.alert_aggregation.enabled", false)
 	v.SetDefault("correlator.alert_aggregation.window", "60s")
 	v.SetDefault("correlator.self_exclude.enabled", true)
+	v.SetDefault("correlator.observer_exclude.enabled", false)
+	v.SetDefault("correlator.observer_exclude.root_pid_file", "/var/lib/ebpf-guard/observer-root-pid")
 
 	// Profiler defaults
 	v.SetDefault("profiler.enabled", true)
@@ -2214,6 +2249,10 @@ func setDefaults(v *viper.Viper) {
 	// watcher — watchdog.DefaultCPUConfig() is only a fallback for a zero
 	// value, so leaving this at 30 would keep the flapping loop in place.
 	v.SetDefault("watchdog.cpu_pressure.min_dwell", 180)
+	// true: interpret the thresholds above as a fraction of total machine
+	// capacity (multiplied by numCPU internally), not of a single core —
+	// see CPUPressureConfig.ScaleByCPUCount / 5.9e, находка №31.
+	v.SetDefault("watchdog.cpu_pressure.scale_by_cpu_count", true)
 
 	// Policy defaults (Sprint 23.0)
 	v.SetDefault("policy.rego.enabled", true)

@@ -78,8 +78,15 @@ func TestP1_17_SelfExclusion(t *testing.T) {
 		// and the case would silently stop testing the self-exception.
 		{"owasp_web_sensitive_file_read", "../../rules/owasp-web.yaml", "owasp_web_sensitive_file_read",
 			"/etc/passwd.canary", "/etc/shadow", opOpen, "nginx"},
-		{"sigma_sensitive_file_chmod", "../../rules/sigma-linux.yaml", "sigma_sensitive_file_chmod",
-			"/etc/shadow.canary", "/etc/sudoers", opOpen, ""},
+		// sigma_sensitive_file_chmod was removed from this table by 5.9d: it
+		// moved from event_type: file to event_type: syscall (the collector
+		// never hooks chmod/fchmod/fchmodat at the file layer at all, so the
+		// rule could never observe a genuine chmod there — see rules/sigma-linux.yaml).
+		// Syscall args are raw pointers, not resolved paths, so a comm+path
+		// self-exception is no longer possible for this rule; the agent's own
+		// canary chmods are now covered only by the PID-tree self-exclusion
+		// filter (correlator.self_exclude, 5.8e), applied before rule
+		// evaluation rather than per-rule.
 		{"sigma_sensitive_dir_listing", "../../rules/sigma-linux.yaml", "sigma_sensitive_dir_listing",
 			"/root/.ssh/id_rsa.canary", "/root/.ssh/id_rsa", opOpen, ""},
 		{"drift_new_file_dir_sensitive", "../../rules/drift-rules.yaml", "drift_new_file_dir_sensitive",

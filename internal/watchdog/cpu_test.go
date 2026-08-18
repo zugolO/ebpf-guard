@@ -63,6 +63,7 @@ func TestDefaultCPUConfig(t *testing.T) {
 	assert.Equal(t, 20.0, c.RecoveryThreshold)
 	assert.Equal(t, 6, c.WindowSize)
 	assert.Equal(t, 3*time.Minute, c.MinDwell)
+	assert.True(t, c.ScaleThresholdsByCPUCount)
 }
 
 func TestCPUWatcher_ThresholdSeedingFromLimit(t *testing.T) {
@@ -71,6 +72,46 @@ func TestCPUWatcher_ThresholdSeedingFromLimit(t *testing.T) {
 	assert.Equal(t, 12.0, w.fileShedThreshold)
 	assert.InDelta(t, 21.0, w.allShedThreshold, 0.001) // 12 * 7/4
 	assert.InDelta(t, 6.0, w.recoveryThreshold, 0.001) // 12 * 0.5
+}
+
+// 5.9e (находка №31): ScaleThresholdsByCPUCount must multiply every resolved
+// threshold — explicit or seeded from CPULimitPercent — by numCPU, and must
+// leave them untouched when unset (the zero value, used by every other test
+// in this file that builds a bare CPUConfig{...}).
+func TestCPUWatcher_ScaleThresholdsByCPUCount(t *testing.T) {
+	w := NewCPUPressureWatcher(CPUConfig{
+		FileShedThreshold:         40.0,
+		AllShedThreshold:          70.0,
+		RecoveryThreshold:         20.0,
+		WindowSize:                1,
+		ScaleThresholdsByCPUCount: true,
+	}, nil, nil)
+	n := float64(w.numCPU)
+	assert.InDelta(t, 40.0*n, w.fileShedThreshold, 0.001)
+	assert.InDelta(t, 70.0*n, w.allShedThreshold, 0.001)
+	assert.InDelta(t, 20.0*n, w.recoveryThreshold, 0.001)
+}
+
+func TestCPUWatcher_ScaleThresholdsByCPUCount_AppliesToSeededValues(t *testing.T) {
+	w := NewCPUPressureWatcher(CPUConfig{
+		CPULimitPercent:           12.0,
+		WindowSize:                1,
+		ScaleThresholdsByCPUCount: true,
+	}, nil, nil)
+	n := float64(w.numCPU)
+	assert.InDelta(t, 12.0*n, w.fileShedThreshold, 0.001)
+	assert.InDelta(t, 21.0*n, w.allShedThreshold, 0.001) // 12 * 7/4, then * n
+	assert.InDelta(t, 6.0*n, w.recoveryThreshold, 0.001) // 12 * 0.5, then * n
+}
+
+func TestCPUWatcher_ScaleThresholdsByCPUCount_DefaultFalseLeavesThresholdsUnscaled(t *testing.T) {
+	// Zero value (false): every other test in this file relies on this to
+	// keep its literal threshold numbers meaningful regardless of the host's
+	// core count.
+	w := NewCPUPressureWatcher(CPUConfig{FileShedThreshold: 15, AllShedThreshold: 25, RecoveryThreshold: 9, WindowSize: 1}, nil, nil)
+	assert.Equal(t, 15.0, w.fileShedThreshold)
+	assert.Equal(t, 25.0, w.allShedThreshold)
+	assert.Equal(t, 9.0, w.recoveryThreshold)
 }
 
 func TestCPUWatcher_RegisterMetrics(t *testing.T) {
@@ -657,6 +698,11 @@ func TestCPUWatcher_ExtrapolationBreaksFeedbackLoop(t *testing.T) {
 	cfg.CheckInterval = time.Second
 	cfg.WindowSize = 1
 	cfg.MinDwell = time.Nanosecond // isolate extrapolation from the dwell floor
+	// This test reproduces literal absolute CPU% readings from a real
+	// incident (ISSUES-attack-run-2026-08-03); disable the 5.9e per-machine
+	// scaling so its numbers stay meaningful regardless of the test
+	// runner's core count.
+	cfg.ScaleThresholdsByCPUCount = false
 	w, fc := newTestWatcher(t, cfg, bpf)
 	interval := time.Second
 	w.checkCPU()

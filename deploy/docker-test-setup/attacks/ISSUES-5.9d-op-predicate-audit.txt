@@ -1,0 +1,62 @@
+# 5.9d (plan.md): file-event rules whose name/description names an operation
+# (read/written/chmod/deleted/...) but whose condition has no op/file.op field.
+# Generated once during wave 5.9d (2026-08-18) by a one-off grep/regex scan of
+# rules/*.yaml -- not re-run automatically, so re-check before trusting it stale.
+# 3 of the original 46 matches were fixed in 5.9d itself and are NOT listed here:
+#   sigma_sensitive_file_chmod (moved to event_type: syscall, path no longer claimed)
+#   sigma_passwd_shadow_read, sigma_passwd_shadow_read_daemon (op predicate added)
+# The remaining 43 are an unverified backlog, not a ready-to-apply fix list: some
+# cannot be fixed by adding an op predicate at all (e.g. "deleted"/"truncate" have
+# no corresponding FileEvent.Op value -- only open/read/write exist in the
+# collector), and each needs individual judgement plus a live-stand check before
+# its condition is touched, per plan.md "Порядок работы" (не глушить, не сузить
+# детект молча).
+
+rules/rootkit-detection.yaml	rootkit_proc_modules_read
+rules/rootkit-detection.yaml	rootkit_kallsyms_read
+rules/rootkit-detection.yaml	rootkit_ssh_authorized_keys_modified
+rules/container-escape.yaml	container_escape_sysrq_trigger
+rules/privesc.yaml	privesc_cgroup_notify_on_release
+rules/mitre-additional.yaml	mitre_sandbox_detect_proc_read
+rules/mitre-additional.yaml	mitre_sandbox_detect_proc_read_daemon
+rules/mitre-additional.yaml	mitre_vm_detect_dmi_read
+rules/mitre-additional.yaml	mitre_software_enum_security_tools
+rules/mitre-additional.yaml	mitre_keytab_file_read
+rules/mitre-additional.yaml	mitre_krb5_ccache_read
+rules/supply-chain.yaml	supply_chain_pkg_tmp_staging
+rules/supply-chain.yaml	supply_chain_lockfile_recon
+rules/application-exploits.yaml	appexploit_spring4shell_file_write
+rules/application-exploits.yaml	appexploit_lfi_passwd_access
+rules/application-exploits.yaml	appexploit_lfi_log_poisoning
+rules/application-exploits.yaml	appexploit_xxe_file_read
+rules/application-exploits.yaml	appexploit_xmrig_download
+rules/k8s-attacks.yaml	k8s_sa_token_read
+rules/k8s-attacks.yaml	k8s_sa_token_projected_read
+rules/webshell-detection.yaml	webshell_php_in_web_root
+rules/webshell-detection.yaml	webshell_jsp_in_web_root
+rules/webshell-detection.yaml	webshell_asp_written
+rules/webshell-detection.yaml	webshell_script_write_via_web_process
+rules/webshell-detection.yaml	webshell_image_extension_script
+rules/webshell-detection.yaml	webshell_sensitive_file_read
+rules/webshell-detection.yaml	webshell_upload_via_image_dir
+rules/webshell-detection.yaml	webshell_nginx_config_modified
+rules/webshell-detection.yaml	webshell_apache_config_modified
+rules/aks-threats.yaml	aks_workload_identity_token_read
+rules/owasp-web.yaml	owasp_web_sensitive_file_read
+rules/sigma-linux.yaml	sigma_cron_job_created
+rules/sigma-linux.yaml	sigma_crontab_modification
+rules/sigma-linux.yaml	sigma_tool_download_to_tmp
+rules/sigma-linux.yaml	sigma_log_deletion
+rules/sigma-linux.yaml	sigma_history_file_cleared
+rules/sigma-linux.yaml	sigma_kernel_version_read
+rules/sigma-linux.yaml	sigma_sudo_config_read
+rules/sigma-linux.yaml	sigma_memory_proc_dump
+rules/credential-access.yaml	cred_proc_maps_mass_read
+rules/eks-threats.yaml	eks_irsa_token_read
+rules/eks-threats.yaml	eks_pod_identity_token_read
+rules/process-injection.yaml	proc_inject_proc_mem_write
+rules/process-injection.yaml	proc_inject_ld_preload_file
+rules/process-injection.yaml	proc_inject_maps_recon
+rules/process-injection.yaml	proc_inject_devshm_so
+
+# total: 43

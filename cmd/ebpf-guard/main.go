@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -392,6 +393,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// zero value of this bool — so the config value is copied over
 	// unconditionally and an operator's explicit `false` takes effect.
 	engineCfg.SelfExcludeEnabled = cfg.Correlator.SelfExclude.Enabled
+	// 5.9a: observer-tree exclusion is test-only and off by default (the
+	// zero value already matches), copied over the same unconditional way as
+	// self-exclusion above so an operator's explicit config value takes
+	// effect either direction.
+	engineCfg.ObserverExcludeEnabled = cfg.Correlator.ObserverExclude.Enabled
 
 	// Wire the anomaly score reporter so profiler scores are published to
 	// ebpf_guard_profiler_anomaly_score via the cardinality-guarded gauge.
@@ -507,14 +513,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// unit-tested; here we only map config fields.
 	cp := cfg.Watchdog.CPUPressure
 	cpuWatcher := watchdog.SetupCPUPressureWatcher(ctx, watchdog.CPUConfig{
-		Enabled:           cp.Enabled,
-		CheckInterval:     time.Duration(cp.CheckInterval) * time.Second,
-		CPULimitPercent:   cp.CPULimitPercent,
-		FileShedThreshold: cp.FileShedThreshold,
-		AllShedThreshold:  cp.AllShedThreshold,
-		RecoveryThreshold: cp.RecoveryThreshold,
-		WindowSize:        cp.WindowSize,
-		MinDwell:          time.Duration(cp.MinDwell) * time.Second,
+		Enabled:                   cp.Enabled,
+		CheckInterval:             time.Duration(cp.CheckInterval) * time.Second,
+		CPULimitPercent:           cp.CPULimitPercent,
+		FileShedThreshold:         cp.FileShedThreshold,
+		AllShedThreshold:          cp.AllShedThreshold,
+		RecoveryThreshold:         cp.RecoveryThreshold,
+		WindowSize:                cp.WindowSize,
+		MinDwell:                  time.Duration(cp.MinDwell) * time.Second,
+		ScaleThresholdsByCPUCount: cp.ScaleByCPUCount,
 		// Write through a named arbiter view so a CPU-pressure recovery
 		// restores the operator's configured base rate (not a hardcoded 1.0)
 		// and never overwrites another controller's active degradation (#304).
@@ -663,6 +670,45 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 		slog.Warn("correlation engine: failed to register Prometheus metrics",
 			slog.Any("error", err))
+	}
+
+	// 5.9a: poll the harness's root-PID file rather than read it once at
+	// startup, because the measurement harness (idle-run.sh) is started
+	// separately from — and typically well after — this process, so its PID
+	// isn't known yet when the config is loaded. Polling interval (2s) is a
+	// tradeoff: fast enough that the exclusion window opens well within one
+	// idle-run.sh snapshot interval (300s default), slow enough not to add
+	// its own read() noise to the very measurement it is trying to clean up.
+	if cfg.Correlator.ObserverExclude.Enabled {
+		rootPIDFile := cfg.Correlator.ObserverExclude.RootPIDFile
+		slog.Info("correlator: observer-root-pid poller starting (5.9a, test-only)",
+			slog.String("root_pid_file", rootPIDFile))
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			var lastPID uint64
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					data, readErr := os.ReadFile(rootPIDFile)
+					if readErr != nil {
+						continue
+					}
+					pid, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 32)
+					if parseErr != nil || pid == 0 {
+						continue
+					}
+					if pid != lastPID {
+						slog.Info("correlator: observer root PID updated",
+							slog.Uint64("root_pid", pid))
+						lastPID = pid
+					}
+					engine.SetObserverRoot(uint32(pid)) /* #nosec G115 -- bounded by ParseUint bitSize 32 */
+				}
+			}
+		}()
 	}
 
 	// Restore learned EWMA anomaly-detector state from a previous run so

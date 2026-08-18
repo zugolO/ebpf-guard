@@ -122,10 +122,20 @@ manifest_file="$GATE_SCRIPT_DIR/attack-manifest.json"
 baseline_types_file="$GATE_SCRIPT_DIR/detection-baseline.txt"
 # Разметка "фоновых" правил для критерия 6 (волна 5.8a, находка №22).
 background_rules_file="$GATE_SCRIPT_DIR/background-rules.txt"
+# Явный список "намеренно вне базы" для критерия 6 — правила, которым нечем
+# сработать на этом стенде вообще, ни на простое, ни под атакой (волна 5.9g,
+# находка №33). Отдельно от background_rules_file: там вторая попытка по
+# idle-приросту, здесь её нет смысла давать — idle-прирост тоже будет нулевым.
+intentional_loss_file="$GATE_SCRIPT_DIR/intentional-loss.txt"
 # Снимки /metrics idle-часа (idle-run.sh), опционально — только они дают
 # критерию 6 вторую сторону измерения для фоновых правил (5.8a).
 IDLE_METRICS_START="${IDLE_METRICS_START:-}"
 IDLE_METRICS_END="${IDLE_METRICS_END:-}"
+# 5.9f (находка №32): состояние idle-run.sh на момент его завершения
+# (state-end.json — тот же /debug/state, что и baseline/final здесь), нужно
+# только для критерия 16 (слепое окно между idle-часом и attack-baseline).
+# Опционально — без него критерий 16 печатает SKIP, остальные 15 не страдают.
+IDLE_STATE_END="${IDLE_STATE_END:-}"
 
 for f in "$baseline_state" "$final_state" "$baseline_metrics" "$final_metrics" "$baseline_alerts" "$final_alerts"; do
     if [ ! -f "$f" ]; then
@@ -224,13 +234,36 @@ echo ""
 # формулировка ломала критерий 3 на каждом прогоне, где фильтр вообще работал
 # (замер №2: 25 дропов при status=healthy → FAIL при исправном агенте).
 # Величина всё равно печатается и проверяется отдельно — критерием 13.
+#
+# Волна 5.9b (находка №30): 5.3 читала final_metrics как есть — кумулятивный
+# счётчик с момента старта процесса агента, а не с начала ЭТОГО прогона. Любые
+# дропы, накопленные до baseline-снимка (idle-час до прогона, предыдущий
+# attack-прогон без рестарта агента), уже делали any_dropped_total > 0 ДО
+# первой атаки, и критерий 3 требовал status=degraded с самого начала —
+# структурно непроходим на любом стенде без гарантированного рестарта агента
+# перед каждым прогоном. Считаем как ΔΣ = final − baseline ПО КАЖДОМУ
+# лейблсету (кроме reason="path_denylist"), суммируя только положительные
+# дельты — это то же измерение, которым проверяется предсказание волны 5.9
+# на данных №2.5 (374 = 374 → PASS).
 echo "=== 3. Деградация в /health при потерях ==="
 if [ -f "$final_health" ]; then
-    any_dropped_total=$(grep 'ebpf_guard_events_dropped_total{' "$final_metrics" \
-        | grep -v 'reason="path_denylist"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+    any_dropped_total=$(awk -F'} ' '
+        FNR==NR { if ($0 !~ /reason="path_denylist"/) base[$1]=$2+0; next }
+        { if ($0 !~ /reason="path_denylist"/) { fin[$1]=$2+0; keys[$1]=1 } }
+        END {
+            total=0
+            for (k in keys) {
+                b = (k in base) ? base[k] : 0
+                d = fin[k] - b
+                if (d > 0) total += d
+            }
+            printf "%d", total
+        }
+    ' <(grep 'ebpf_guard_events_dropped_total{' "$baseline_metrics") \
+      <(grep 'ebpf_guard_events_dropped_total{' "$final_metrics"))
     intentional_drops=$(grep 'ebpf_guard_events_dropped_total{' "$final_metrics" \
         | grep 'reason="path_denylist"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
-    echo "  непреднамеренных дропов: $any_dropped_total; намеренных (path_denylist): ${intentional_drops%.*} — в критерий не входят"
+    echo "  непреднамеренных дропов за прогон (Δ final-baseline): $any_dropped_total; намеренных за весь аптайм агента (path_denylist, кумулятив): ${intentional_drops%.*} — в критерий не входят"
     visibility_reduced=$(jq -r '.visibility_reduced // false' "$final_health" 2>/dev/null)
     status=$(jq -r '.status // "unknown"' "$final_health" 2>/dev/null)
     if awk -v d="$any_dropped_total" 'BEGIN{exit !(d>0)}'; then
@@ -271,6 +304,24 @@ else
     else
         fail "$empty_comm из $total_incidents инцидентов с пустым comm"
     fi
+fi
+# 5.9h (находка №33): критерий 4 покрывал только инциденты (IncidentTracker
+# сворачивает цепочку алертов и сам подставляет leaf comm — pkg/types/incident.go),
+# а не сами алерты в сторе. 15 алертов с пустым comm на замере №2.5 не поймал ни
+# один критерий — ни этот (смотрит инциденты), ни 12-й (смотрит серии профайлера,
+# другой набор меток). Тот же порог 0, что и у инцидентов выше.
+if [ -f "$final_alerts" ] && jq -e 'type == "array"' "$final_alerts" >/dev/null 2>&1; then
+    total_alerts_comm=$(jq 'length' "$final_alerts")
+    empty_comm_alerts=$(jq '[.[] | select(.comm == "" or .comm == null)] | length' "$final_alerts")
+    if [ "$total_alerts_comm" -eq 0 ]; then
+        skip "алертов нет вовсе — 'comm непустой в алертах' непроверяем на этом прогоне"
+    elif [ "$empty_comm_alerts" -eq 0 ]; then
+        pass "все $total_alerts_comm алертов в сторе имеют непустой comm"
+    else
+        fail "$empty_comm_alerts из $total_alerts_comm алертов в сторе с пустым comm"
+    fi
+else
+    skip "final-alerts-$TIMESTAMP.json отсутствует или не JSON-массив — 'comm непустой в алертах' не проверен"
 fi
 echo ""
 
@@ -488,17 +539,35 @@ else
             lost_types=$(comm -23 <(echo "$lost_types_raw") <(echo "$recovered_sorted"))
         fi
     fi
+    # 5.9g (находка №33): правила из intentional_loss_file не имеют сценария
+    # трафика на этом стенде вообще — их потеря печатается как наблюдение и не
+    # участвует в lost_count, в отличие от background_rules_file выше (там
+    # потеря снимается только при подтверждённом idle-приросте).
+    intentional_lost=""
+    if [ -n "$lost_types" ] && [ -f "$intentional_loss_file" ]; then
+        intentional_set=$(grep -vE '^\s*(#|$)' "$intentional_loss_file" | tr -d '\r' | sort)
+        intentional_lost=$(comm -12 <(echo "$lost_types") <(echo "$intentional_set"))
+        if [ -n "$intentional_lost" ]; then
+            lost_types=$(comm -23 <(echo "$lost_types") <(echo "$intentional_lost"))
+        fi
+    fi
+    intentional_lost_count=$(echo "$intentional_lost" | grep -c . || true)
+    if [ "$intentional_lost_count" -gt 0 ]; then
+        echo "  потеряно намеренно (-$intentional_lost_count, наблюдение без порога, см. intentional-loss.txt):"
+        echo "$intentional_lost" | sed 's/^/    ~ /'
+    fi
     lost_count=$(echo "$lost_types" | grep -c . || true)
     if [ "$lost_count" -gt 0 ]; then
         echo "  потеряно (-$lost_count):"
         echo "$lost_types" | sed 's/^/    - /'
     fi
-    # Провал — только потеря. Добавления печатаются и требуют обновления базы,
-    # но не проваливают прогон: новое правило, которое сработало, — не регресс.
+    # Провал — только потеря вне intentional_loss_file. Добавления печатаются и
+    # требуют обновления базы, но не проваливают прогон: новое правило, которое
+    # сработало, — не регресс.
     if [ "$lost_count" -eq 0 ]; then
-        pass "состав детекта без потерь (добавлено: $added_count — обновить detection-baseline.txt вместе с записью в plan.md)"
+        pass "состав детекта без потерь вне списка намеренных (добавлено: $added_count — обновить detection-baseline.txt вместе с записью в plan.md)"
     else
-        fail "состав детекта: потеряно $lost_count типов (см. список выше). Если потеря намеренная — обновить detection-baseline.txt и записать причину в plan.md, иначе это регресс детекта"
+        fail "состав детекта: потеряно $lost_count типов вне intentional-loss.txt (см. список выше). Если потеря намеренная — обновить detection-baseline.txt/intentional-loss.txt и записать причину в plan.md, иначе это регресс детекта"
     fi
 fi
 if [ "$attacker_alerts_known" -eq 0 ]; then
@@ -509,6 +578,22 @@ elif awk -v r="$attacker_rate" 'BEGIN{exit !(r+0>=74)}'; then
     pass "темп алертов от атакующих: $attacker_alerts за ${runtime_min} мин = $attacker_rate/мин (>= 74, уровень прогона №4)"
 else
     fail "темп алертов от атакующих: $attacker_alerts за ${runtime_min} мин = $attacker_rate/мин (ожидалось >= 74)"
+fi
+
+# 5.9e (находка №31): темп детекта сам по себе не отличает "агент не детектит"
+# от "агент половину прогона просидел под CPU-шеддингом", а замер №2.5 провёл
+# именно так — 49% времени при cpu_pressure_percent=14.13. cpu_degraded_fraction
+# печатается рядом с темпом и заводит отдельный FAIL при > 0.2: прогон,
+# наполовину прошедший под урезанным сэмплингом, не измеряет детект, даже если
+# темп выше порога 74/мин (шеддинг режет file/syscall/network, но не
+# lsm/canary/exec — часть детекта продолжает срабатывать и на шеддинге).
+cpu_degraded_fraction=$(awk '/^ebpf_guard_cpu_degraded_fraction( |\{)/ {print $NF; exit}' "$final_metrics")
+if [ -z "${cpu_degraded_fraction:-}" ]; then
+    skip "cpu_degraded_fraction отсутствует в срезе — доля времени под шеддингом не проверена (сборка до волны 5.3/4.4)"
+elif awk -v f="$cpu_degraded_fraction" 'BEGIN{exit !(f+0 > 0.2)}'; then
+    fail "cpu_degraded_fraction=$cpu_degraded_fraction > 0.2 — прогон прошёл под шеддингом слишком долго, темп детекта выше не является чистым измерением (5.9e)"
+else
+    pass "cpu_degraded_fraction=$cpu_degraded_fraction (<= 0.2) — прогон не искажён CPU-шеддингом"
 fi
 echo ""
 
@@ -875,6 +960,133 @@ else
     else
         fail "watchdog флапает: reduce=$d_reduce recover=$d_recover за прогон (ожидалось <= 1 пары; 813 циклов за ночь — ISSUES-attack-run-2026-08-03)"
     fi
+fi
+echo ""
+
+# 15. Тождество счётчиков алертов (5.9c, находка №29). engine_stats.total_alerts
+# считает всё, что сгенерировал движок ДО store.min_severity; ebpf_guard_alerts_total
+# {rule_id} — то, что реально прошло фильтр и ушло в /metrics; /api/v1/alerts — стор,
+# третье, независимое измерение. Находка №29 (5.8b, замер №2.5): расхождение
+# стор/метрика было 2-30x на части правил, причина для них не найдена — стор и
+# метрика НЕ гарантированно синхронны (canary-tamper/hidden-process пишутся в стор
+# в обход счётчика, см. cmd/ebpf-guard/main.go). Тождество
+# Δengine − Δalerts_filtered_total = Δexported = Δstore с допуском ≤1%: сходится —
+# объяснение (min_severity + известные обходные пути) исчерпывающее; не сходится —
+# есть четвёртый счётчик, о котором мы не знаем, и FAIL печатает все дельты, чтобы
+# было с чем разбирать.
+echo "=== 15. Тождество счётчиков алертов: Δengine−Δfiltered−Δsuppressed = Δexported = Δstore (5.9c) ==="
+if command -v jq &> /dev/null; then
+    engine_base=$(jq -r '.engine_stats.total_alerts // 0' "$baseline_state" 2>/dev/null || echo 0)
+    engine_final=$(jq -r '.engine_stats.total_alerts // 0' "$final_state" 2>/dev/null || echo 0)
+    d_engine=$(( engine_final - engine_base ))
+
+    filtered_base=$(grep '^ebpf_guard_alerts_filtered_total{' "$baseline_metrics" 2>/dev/null \
+        | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+    filtered_final=$(grep '^ebpf_guard_alerts_filtered_total{' "$final_metrics" 2>/dev/null \
+        | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+    d_filtered=$(( ${filtered_final:-0} - ${filtered_base:-0} ))
+
+    exported_base=$(grep '^ebpf_guard_alerts_total{' "$baseline_metrics" 2>/dev/null \
+        | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+    exported_final=$(grep '^ebpf_guard_alerts_total{' "$final_metrics" 2>/dev/null \
+        | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+    d_exported=$(( ${exported_final:-0} - ${exported_base:-0} ))
+
+    store_base=$(jq 'length' "$baseline_alerts" 2>/dev/null || echo 0)
+    store_final=$(jq 'length' "$final_alerts" 2>/dev/null || echo 0)
+    d_store=$(( store_final - store_base ))
+
+    # 5.9c-доработка (разбор на данных №2.5): между alertsGenerated и экспортом
+    # есть легальный сток — analyst-подавление (feedbackManager.FilterAlerts),
+    # с этой волны считаемое в ebpf_guard_alerts_suppressed_total{reason}.
+    # Без вычитания тождество текло бы на каждом подавленном алерте. На
+    # снимках агента до этой правки метрики нет — дельта тогда 0, и на данных
+    # №2.5 idle тождество даёт задокументированный FAIL (340 против 344: +11
+    # несчитанных incident_confirmed_attack, −7 не считавшихся подавлений).
+    suppressed_base=$(grep '^ebpf_guard_alerts_suppressed_total{' "$baseline_metrics" 2>/dev/null \
+        | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+    suppressed_final=$(grep '^ebpf_guard_alerts_suppressed_total{' "$final_metrics" 2>/dev/null \
+        | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+    d_suppressed=$(( ${suppressed_final:-0} - ${suppressed_base:-0} ))
+
+    d_lhs=$(( d_engine - d_filtered - d_suppressed ))
+    echo "  Δengine(total_alerts)=$d_engine, Δfiltered(alerts_filtered_total)=$d_filtered, Δsuppressed(alerts_suppressed_total)=$d_suppressed, Δengine−Δfiltered−Δsuppressed=$d_lhs"
+    echo "  Δexported(ebpf_guard_alerts_total)=$d_exported"
+    echo "  Δstore(/api/v1/alerts)=$d_store"
+
+    identity_ok=$(awk -v lhs="$d_lhs" -v exported="$d_exported" -v store="$d_store" '
+        BEGIN {
+            base = (lhs > 0) ? lhs : ((exported > 0) ? exported : ((store > 0) ? store : 0))
+            if (base == 0) {
+                print (lhs == exported && exported == store) ? 1 : 0
+                exit
+            }
+            tol = base * 0.01
+            if (tol < 1) tol = 1
+            diff_exp = lhs - exported; if (diff_exp < 0) diff_exp = -diff_exp
+            diff_store = lhs - store; if (diff_store < 0) diff_store = -diff_store
+            print (diff_exp <= tol && diff_store <= tol) ? 1 : 0
+        }
+    ')
+    if [ "$identity_ok" -eq 1 ]; then
+        pass "тождество сходится (допуск <= 1%): Δengine−Δfiltered−Δsuppressed=$d_lhs = Δexported=$d_exported = Δstore=$d_store"
+    else
+        fail "тождество расходится сверх допуска 1%: Δengine=$d_engine, Δfiltered=$d_filtered, Δsuppressed=$d_suppressed, Δengine−Δfiltered−Δsuppressed=$d_lhs, Δexported=$d_exported, Δstore=$d_store — есть четвёртый счётчик (находка №29)"
+    fi
+else
+    skip "jq недоступен — тождество счётчиков алертов не проверено"
+fi
+echo ""
+
+# 16. Слепое окно idle-конец → attack-baseline (5.9f, находка №32): окно между
+# концом idle-часа (idle-run.sh) и снятием baseline этого прогона — время
+# подготовки стенда и входа оператора — не покрыто ни idle-измерением, ни
+# окном атаки, и в прогоне №2.5 именно в нём произошли все дропы, а темп
+# алертов в нём был выше обоих измеряемых окон. Постановка 5.9f: baseline
+# этого прогона снимается ПОСЛЕ подготовки стенда и входа оператора (см.
+# run-all-attacks.sh: get_baseline_metrics вызывается только после
+# check_services, то есть после того, как оператор подтвердил готовность
+# обоих сервисов) — здесь эта политика не проверяется, только измеряется её
+# следствие: объём окна. Информационно, без PASS/FAIL — порог для нового,
+# впервые измеряемого окна ставить рано.
+echo "=== 16. Слепое окно idle-конец → attack-baseline (наблюдение, без порога) ==="
+if [ -z "$IDLE_STATE_END" ] || [ ! -s "$IDLE_STATE_END" ] || [ -z "$IDLE_METRICS_END" ] || [ ! -s "$IDLE_METRICS_END" ]; then
+    skip "IDLE_STATE_END/IDLE_METRICS_END не заданы — окно idle-конец → attack-baseline не измерено"
+elif command -v jq &> /dev/null; then
+    idle_end_ts=$(jq -r '.timestamp // empty' "$IDLE_STATE_END" 2>/dev/null)
+    baseline_ts=$(jq -r '.timestamp // empty' "$baseline_state" 2>/dev/null)
+    if [ -z "$idle_end_ts" ] || [ -z "$baseline_ts" ]; then
+        skip "нет .timestamp в IDLE_STATE_END или baseline-state — окно не измерено"
+    else
+        idle_end_epoch=$(date -d "$idle_end_ts" +%s.%N 2>/dev/null || echo 0)
+        baseline_epoch=$(date -d "$baseline_ts" +%s.%N 2>/dev/null || echo 0)
+        blind_min=$(awk -v a="$idle_end_epoch" -v b="$baseline_epoch" 'BEGIN{ if(a>0 && b>a) printf "%.1f", (b-a)/60; else print "n/a" }')
+
+        idle_end_exported=$(grep '^ebpf_guard_alerts_total{' "$IDLE_METRICS_END" 2>/dev/null \
+            | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+        baseline_run_exported=$(grep '^ebpf_guard_alerts_total{' "$baseline_metrics" 2>/dev/null \
+            | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+        blind_new_alerts=$(( ${baseline_run_exported:-0} - ${idle_end_exported:-0} ))
+        # idle-run.sh в конце РЕСТАРТУЕТ агента (проверка P0-3), а метрика —
+        # кумулятив с момента старта процесса: attack-baseline снят уже новым
+        # процессом, и дельта через рестарт отрицательна/бессмысленна.
+        # Проверено на данных №2.5: получалось −194. В этом случае объём окна
+        # в алертах этим способом не измерим — честно печатаем причину, а не
+        # отрицательное «число алертов».
+        if [ "$blind_new_alerts" -lt 0 ]; then
+            echo "  окно: ${blind_min} мин; дельта алертов не измерима: ebpf_guard_alerts_total у attack-baseline МЕНЬШЕ idle-конца ($baseline_run_exported < $idle_end_exported) — агент рестартовал между окнами (P0-3-рестарт в конце idle-run.sh), кумулятивный счётчик обнулился"
+            echo "  (длительность окна измерена; объём алертов в нём требует либо NO_RESTART=1 у idle-run.sh, либо чтения стора вместо метрики — открытый вопрос 5.9f)"
+        else
+            blind_rate="n/a"
+            if [ "$blind_min" != "n/a" ] && awk -v m="$blind_min" 'BEGIN{exit !(m+0>0)}'; then
+                blind_rate=$(awk -v a="$blind_new_alerts" -v m="$blind_min" 'BEGIN{printf "%.1f", a/m}')
+            fi
+            echo "  окно: ${blind_min} мин, новых экспортированных алертов: $blind_new_alerts (темп: ${blind_rate}/мин)"
+            echo "  (наблюдение без порога — впервые измеряется 5.9f; для сравнения: измеряемые окна атаки/idle дают $attacker_rate/мин и (idle-час) отдельно)"
+        fi
+    fi
+else
+    skip "jq недоступен — окно idle-конец → attack-baseline не измерено"
 fi
 echo ""
 

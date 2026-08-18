@@ -54,18 +54,20 @@ type CPUPressureWatcher struct {
 	logger        *slog.Logger
 	bpfController BPFSamplingController
 
-	// Thresholds, expressed as a percentage of a single CPU core (0–100 ==
+	// Thresholds, on the same per-core scale as the measured cpuPct (0–100 ==
 	// idle..one core fully busy; can exceed 100 if the agent burns more than
-	// one core). This is an absolute budget, not normalized by core count, so
-	// the same defaults behave the same way on a 1-core VPS and an 8-core
-	// box: one busy thread trips the same threshold either way.
+	// one core). Already scaled by numCPU at construction when
+	// CPUConfig.ScaleThresholdsByCPUCount was set (the default) — see that
+	// field. Unscaled, these were an absolute per-core budget that tripped
+	// at the same load on a 1-core VPS and an 8-core box alike, which is
+	// what 5.9e/находка №31 found too easy to trip on multi-core hosts.
 	fileShedThreshold float64 // L1: cut file sampling above this
 	allShedThreshold  float64 // L2: also cut syscall/network above this
 	recoveryThreshold float64 // hysteresis: recover one level when below this
 
 	checkInterval time.Duration
 	windowSize    int
-	numCPU        int // informational only (logged at startup); not used to scale thresholds
+	numCPU        int // logged at startup; also used to scale thresholds when ScaleThresholdsByCPUCount is set
 
 	// minDwell is the minimum time a shed level must be held before the
 	// watcher will step back down, even if the smoothed CPU% has already
@@ -147,6 +149,20 @@ type CPUConfig struct {
 	// RecoveryThreshold. Guards against bursty attack traffic flapping the
 	// state machine faster than the smoothing window can absorb.
 	MinDwell time.Duration `mapstructure:"min_dwell"`
+	// ScaleThresholdsByCPUCount multiplies FileShedThreshold, AllShedThreshold
+	// and RecoveryThreshold by runtime.NumCPU() at construction time, once all
+	// three have been resolved (explicit config or seeded from
+	// CPULimitPercent). Effect: the configured number is a fraction of the
+	// whole machine's CPU budget rather than of a single core.
+	//
+	// Without this, "40% of one core" trips at just 0.4 busy cores no matter
+	// how many cores the host has — 10% of total capacity on a 4-CPU box.
+	// замер №2.5 measured 49% of an idle-load run spent shedding under
+	// exactly that default (cpu_pressure_percent averaging 14.13, well above
+	// a would-be 10%-of-machine budget) — 5.9e, находка №31. Left false in
+	// ad-hoc CPUConfig literals (e.g. in tests) so existing fixed-threshold
+	// expectations are unaffected; DefaultCPUConfig sets it true.
+	ScaleThresholdsByCPUCount bool
 }
 
 // DefaultCPUConfig returns safe defaults: shed file collectors above 40% of
@@ -165,14 +181,15 @@ type CPUConfig struct {
 // to climb back to the trip threshold, not just above the check interval.
 func DefaultCPUConfig() CPUConfig {
 	return CPUConfig{
-		Enabled:           true,
-		CheckInterval:     5 * time.Second,
-		CPULimitPercent:   40.0,
-		FileShedThreshold: 40.0,
-		AllShedThreshold:  70.0,
-		RecoveryThreshold: 20.0,
-		WindowSize:        6,
-		MinDwell:          3 * time.Minute,
+		Enabled:                   true,
+		CheckInterval:             5 * time.Second,
+		CPULimitPercent:           40.0,
+		FileShedThreshold:         40.0,
+		AllShedThreshold:          70.0,
+		RecoveryThreshold:         20.0,
+		WindowSize:                6,
+		MinDwell:                  3 * time.Minute,
+		ScaleThresholdsByCPUCount: true,
 	}
 }
 
@@ -209,6 +226,16 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 	numCPU := runtime.NumCPU()
 	if numCPU < 1 {
 		numCPU = 1
+	}
+
+	// Rescale once numCPU is known and every threshold has been resolved
+	// (explicit or seeded above) — see ScaleThresholdsByCPUCount. Order
+	// matters: this must run after the CPULimitPercent seeding block, not
+	// before, so a seeded value is scaled too, not just an explicit one.
+	if config.ScaleThresholdsByCPUCount {
+		config.FileShedThreshold *= float64(numCPU)
+		config.AllShedThreshold *= float64(numCPU)
+		config.RecoveryThreshold *= float64(numCPU)
 	}
 
 	w := &CPUPressureWatcher{

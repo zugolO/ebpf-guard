@@ -231,6 +231,10 @@ generate_final_report() {
 
         local baseline_state="$RESULTS_DIR/baseline-state-$TIMESTAMP.json"
         local final_state="$RESULTS_DIR/final-state-$TIMESTAMP.json"
+        local baseline_metrics="$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
+        local final_metrics="$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
+        local baseline_alerts_json="$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
+        local final_alerts_json="$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
 
         local baseline_alerts=0 final_alerts=0 baseline_events=0 final_events=0
         local baseline_anomalies=0 final_anomalies=0
@@ -245,11 +249,38 @@ generate_final_report() {
             warn "jq не найден — пропускаем разбор /debug/state, проверьте *-state-$TIMESTAMP.json вручную"
         fi
 
-        local new_alerts=$((final_alerts - baseline_alerts))
-        echo "Alerts Total:"
+        # 5.9c (находка №29): раньше здесь печаталось только engine_stats.total_alerts
+        # (счётчик ДО store.min_severity) под подписью "Alerts Total", и "Новых: N"
+        # считалось по нему же — то есть по величине, которая не совпадает ни с тем,
+        # что реально экспортируется в /metrics (ebpf_guard_alerts_total{rule_id}),
+        # ни с тем, что оказывается в сторе (/api/v1/alerts, длина). Печатаем все три
+        # рядом с явными подписями, и "Новых:" теперь считается по ПОСЛЕ-фильтровой
+        # величине (exported) — это то число, которое реально ушло получателям.
+        local baseline_exported=0 final_exported=0
+        baseline_exported=$(grep '^ebpf_guard_alerts_total{' "$baseline_metrics" 2>/dev/null \
+            | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+        final_exported=$(grep '^ebpf_guard_alerts_total{' "$final_metrics" 2>/dev/null \
+            | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+        local baseline_store=0 final_store=0
+        if command -v jq &> /dev/null; then
+            baseline_store=$(jq 'length' "$baseline_alerts_json" 2>/dev/null || echo 0)
+            final_store=$(jq 'length' "$final_alerts_json" 2>/dev/null || echo 0)
+        fi
+
+        local new_alerts_exported=$(( ${final_exported:-0} - ${baseline_exported:-0} ))
+        echo "Alerts (engine_stats.total_alerts, до store.min_severity):"
         echo "  До тестов: $baseline_alerts"
         echo "  После тестов: $final_alerts"
-        echo "  Новых: $new_alerts"
+        echo ""
+        echo "Alerts (ebpf_guard_alerts_total{rule_id}, после min_severity — экспортированные):"
+        echo "  До тестов: ${baseline_exported:-0}"
+        echo "  После тестов: ${final_exported:-0}"
+        echo ""
+        echo "Alerts (/api/v1/alerts, длина — стор):"
+        echo "  До тестов: $baseline_store"
+        echo "  После тестов: $final_store"
+        echo ""
+        echo "Новых: $new_alerts_exported"
         echo ""
 
         local new_events=$((final_events - baseline_events))
@@ -714,6 +745,19 @@ interactive_mode() {
 }
 
 # Режим полного запуска (без интерактива)
+#
+# 5.9f (находка №32): baseline снимается ПОСЛЕ check_services, то есть после
+# того, как оператор подтвердил готовность и Juice Shop, и ebpf-guard — не до
+# входа оператора и подготовки стенда. Выбор сделан явно (а не "как получится"):
+# альтернатива — снимать baseline ДО входа оператора — не отражала бы шум самой
+# подготовки стенда в baseline, и он бы весь попал в окно атаки как "новые"
+# алерты. Оставшийся зазор — между концом idle-часа (idle-run.sh) и запуском
+# ЭТОГО скрипта оператором — этот выбор не устраняет: там, где раньше терялись
+# все дропы прогона №2.5, всё ещё есть время между окончанием idle-run.sh и
+# стартом full_run(), которое ни один автоматический скрипт не видит целиком.
+# run-gate.sh критерий 16 измеряет объём этого зазора (по .timestamp снимков),
+# если ему передали IDLE_STATE_END/IDLE_METRICS_END — как наблюдение, без
+# порога (окно измеряется впервые, порог ставить рано).
 full_run() {
     log "==========================================="
     log "ПОЛНЫЙ ЗАПУСК ВСЕХ АТАК"

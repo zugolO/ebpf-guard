@@ -12,6 +12,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -222,6 +223,195 @@ func TestCorrelationEngine_SelfExclusion(t *testing.T) {
 		alerts := engine.Ingest(ctx, newEvent(selfPID, 1))
 		assert.Len(t, alerts, 1, "self-exclusion must be fully disable-able via config")
 	})
+}
+
+// TestCorrelationEngine_ObserverExclusion is the regression test for 5.9a
+// (находки №27/№28: the idle-hour measurement harness — idle-run.sh and the
+// curl/ps/grep/awk it forks — produced 71% of measured idle alert volume).
+// It exercises the observer-tree exclusion filter, set live via
+// SetObserverRoot the way main.go's root-PID-file poller does, mirroring
+// TestCorrelationEngine_SelfExclusion above for the harness's tree instead of
+// the agent's own.
+func TestCorrelationEngine_ObserverExclusion(t *testing.T) {
+	rules := []Rule{
+		{
+			ID:        "rule_001",
+			Name:      "Any file access",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{Field: "op", Op: OpEquals, Values: []string{"read"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		},
+	}
+
+	const rootPID = uint32(4242)
+	const childPID = uint32(4300)
+	const otherPID = uint32(5000)
+
+	newEvent := func(pid, ppid uint32) types.Event {
+		return types.Event{
+			Type: types.EventFileAccess,
+			PID:  pid,
+			PPID: ppid,
+			File: &types.FileEvent{Op: 1}, // 1 = read, see fileOpNames
+		}
+	}
+
+	t.Run("enabled: harness root PID produces no alert", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		ctx := context.Background()
+
+		alerts := engine.Ingest(ctx, newEvent(rootPID, 1))
+		assert.Empty(t, alerts, "events with e.PID == observer root must not reach rule evaluation")
+	})
+
+	t.Run("enabled: descendant discovered via PPID produces no alert", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		ctx := context.Background()
+
+		alerts := engine.Ingest(ctx, newEvent(childPID, rootPID))
+		assert.Empty(t, alerts)
+
+		alerts = engine.Ingest(ctx, newEvent(childPID, 0))
+		assert.Empty(t, alerts)
+	})
+
+	t.Run("enabled: unrelated PID is unaffected", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		ctx := context.Background()
+
+		alerts := engine.Ingest(ctx, newEvent(otherPID, 1))
+		assert.Len(t, alerts, 1, "an attacker process, not a descendant of the harness, must still alert")
+	})
+
+	t.Run("enabled but root not yet set: nothing is excluded", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		ctx := context.Background()
+
+		// SetObserverRoot never called — root PID is still the zero value,
+		// which must never match a real process (PID 0 is not a process).
+		alerts := engine.Ingest(ctx, newEvent(rootPID, 1))
+		assert.Len(t, alerts, 1, "before the harness's PID is known, nothing should be excluded")
+	})
+
+	t.Run("disabled: root PID still alerts", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = false
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		ctx := context.Background()
+
+		alerts := engine.Ingest(ctx, newEvent(rootPID, 1))
+		assert.Len(t, alerts, 1, "observer-exclusion must be fully disable-able via config")
+	})
+
+	t.Run("root change clears the cached tree", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		ctx := context.Background()
+
+		// Grow the tree: childPID cached as a descendant of rootPID.
+		assert.Empty(t, engine.Ingest(ctx, newEvent(childPID, rootPID)))
+
+		// Harness run ends (root cleared to 0), a NEW harness starts with a
+		// different PID. childPID may since have been reused by an unrelated
+		// process — the stale cache entry must not keep excluding it.
+		engine.SetObserverRoot(0)
+		engine.SetObserverRoot(otherPID)
+
+		alerts := engine.Ingest(ctx, newEvent(childPID, 1))
+		assert.Len(t, alerts, 1,
+			"a PID cached under a previous observer root must alert again after the root changes")
+	})
+}
+
+// TestCorrelationEngine_ConfirmedAttackAlertCountsInStats is the regression
+// test for the 5.9c accounting hole found while recomputing the counter
+// identity on №2.5 data: emitConfirmedAttackAlert fed synthetic
+// incident_confirmed_attack alerts into pending without incrementing
+// alertsGenerated, so every confirmed incident made engine_stats.total_alerts
+// undercount the exported/store counters by one (11 of them on the idle hour).
+func TestCorrelationEngine_ConfirmedAttackAlertCountsInStats(t *testing.T) {
+	cfg := DefaultCorrelationEngineConfig()
+	engine := NewCorrelationEngineWithConfig(cfg)
+
+	before := engine.GetStats().AlertsGenerated
+	engine.emitConfirmedAttackAlert(types.Incident{ID: "inc-1", PID: 4242})
+	after := engine.GetStats().AlertsGenerated
+
+	assert.Equal(t, before+1, after,
+		"synthetic incident_confirmed_attack alerts enter the same pending pipeline as rule alerts and must be counted in engine_stats.total_alerts, or the 5.9c identity Δengine−Δfiltered−Δsuppressed = Δexported leaks one per incident")
+}
+
+// TestCorrelationEngine_FeedbackSuppressionCounted covers the other half of
+// the same 5.9c accounting hole: feedbackManager.FilterAlerts drops alerts
+// AFTER alertsGenerated already counted them, and until this wave that drop
+// was invisible to every exported counter (7 such alerts on №2.5 idle could
+// not be attributed). The drop must now land in
+// ebpf_guard_alerts_suppressed_total{reason="feedback"}.
+func TestCorrelationEngine_FeedbackSuppressionCounted(t *testing.T) {
+	rules := []Rule{
+		{
+			ID:        "rule_001",
+			Name:      "Any file read",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{Field: "op", Op: OpEquals, Values: []string{"read"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		},
+	}
+
+	fm := feedback.NewManager("", slog.Default())
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = rules
+	cfg.FeedbackManager = fm
+	engine := NewCorrelationEngineWithConfig(cfg)
+	ctx := context.Background()
+
+	newEvent := func(pid uint32) types.Event {
+		e := types.Event{
+			Type: types.EventFileAccess,
+			PID:  pid,
+			File: &types.FileEvent{Op: 1}, // 1 = read, see fileOpNames
+		}
+		copy(e.Comm[:], "curl")
+		return e
+	}
+
+	alerts := engine.Ingest(ctx, newEvent(4242))
+	require.Len(t, alerts, 1, "sanity: the rule fires before any suppression exists")
+	require.Equal(t, float64(0),
+		testutil.ToFloat64(engine.alertsSuppressedTotal.WithLabelValues("feedback")))
+
+	_, err := fm.Submit(alerts[0], feedback.VerdictFalsePositive, "analyst says noise")
+	require.NoError(t, err)
+
+	// Different PID so the dedup window can't be what drops the second alert —
+	// only the feedback suppression path is under test.
+	alerts = engine.Ingest(ctx, newEvent(4243))
+	assert.Empty(t, alerts, "the (rule_id, comm) pair is analyst-suppressed")
+	assert.Equal(t, float64(1),
+		testutil.ToFloat64(engine.alertsSuppressedTotal.WithLabelValues("feedback")),
+		"a post-generation feedback drop must be counted, or the 5.9c counter identity leaks")
 }
 
 func TestCorrelationEngine_Flush(t *testing.T) {

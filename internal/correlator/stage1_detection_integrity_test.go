@@ -70,6 +70,19 @@ func stage1FileEvent(procComm, path string, op uint8) types.Event {
 	return e
 }
 
+// stage1SyscallEvent builds a syscall event for a given syscall number. Used
+// by chmod-family rules (5.9d): chmod/fchmod/fchmodat cannot be observed via
+// EventFileAccess at all (the collector never hooks them), only via the raw
+// syscall number — see sigma_sensitive_file_chmod and sigma_chmod_executable_tmp.
+func stage1SyscallEvent(procComm string, nr int64) types.Event {
+	return types.Event{
+		Type:    types.EventSyscall,
+		PID:     4242,
+		Comm:    stage1Comm(procComm),
+		Syscall: &types.SyscallEvent{Nr: nr},
+	}
+}
+
 // firedRules returns the set of rule IDs that alerted for the event.
 func firedRules(engine *correlator.RuleEngine, e types.Event) map[string]bool {
 	got := make(map[string]bool)
@@ -280,7 +293,6 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 		daemonRule string
 	}{
 		{"passwd/shadow read", "/etc/passwd", opOpen, "sigma_passwd_shadow_read", "sigma_passwd_shadow_read_daemon"},
-		{"sensitive file chmod", "/etc/shadow", opOpen, "sigma_sensitive_file_chmod", "sigma_sensitive_file_chmod_daemon"},
 		{"PAM config access", "/etc/pam.d/sshd", opOpen, "sigma_failed_login_syscall", "sigma_failed_login_syscall_daemon"},
 		{"library load", "/usr/lib/security/pam_unix.so", opOpen, "drift_new_library_in_system_dir", "drift_new_library_in_system_dir_daemon"},
 		{"PAM module config", "/etc/pam.d/common-auth", opOpen, "rootkit_pam_module_added", "rootkit_pam_module_added_daemon"},
@@ -328,6 +340,52 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 				tc.daemonRule)
 		})
 	}
+}
+
+// TestStage1_5_9d_SensitiveFileChmodMovedToSyscallAxis pins the 5.9d fix: the
+// old event_type: file condition never checked the operation at all (any
+// open/read/write to /etc/shadow tripped a rule named "chmod"), and the
+// collector has no chmod hook on that axis to check in the first place —
+// FileEvent.Op only ever reports open/read/write (bpf/common.h FILE_OP_*).
+// The fix moved detection to the syscall axis (nr in chmod/fchmod/fchmodat),
+// which is the only place a genuine chmod is observable, at the cost of path
+// specificity (syscall args are raw pointers, not resolved paths — see
+// RulesRequiringFileOp / sigma_chmod_executable_tmp for the same limitation).
+func TestStage1_5_9d_SensitiveFileChmodMovedToSyscallAxis(t *testing.T) {
+	engine := correlator.NewRuleEngine(loadStage1Rules(t))
+
+	const nrChmod int64 = 90
+
+	for _, daemonComm := range []string{"sshd", "cron"} {
+		alerts := engine.Evaluate(stage1SyscallEvent(daemonComm, nrChmod))
+		byID := make(map[string]types.Alert)
+		for _, a := range alerts {
+			byID[a.RuleID] = a
+		}
+
+		if a, ok := byID["sigma_sensitive_file_chmod"]; ok {
+			t.Errorf("sigma_sensitive_file_chmod fired at severity %v for daemon comm %q — "+
+				"must not fire the base rule for sshd/cron, only the daemon variant at info",
+				a.Severity, daemonComm)
+		}
+		a, ok := byID["sigma_sensitive_file_chmod_daemon"]
+		require.True(t, ok, "sigma_sensitive_file_chmod_daemon did not fire for daemon comm %q — "+
+			"the wave 5.1 daemon variant must still alert (downgrade, not suppress)", daemonComm)
+		assert.Equal(t, types.Severity("info"), a.Severity,
+			"sigma_sensitive_file_chmod_daemon fired at %v for daemon comm %q, want info", a.Severity, daemonComm)
+	}
+
+	// A non-daemon process (attacker) must still get the base rule.
+	alerts := engine.Evaluate(stage1SyscallEvent("attacker", nrChmod))
+	byID := make(map[string]bool)
+	for _, a := range alerts {
+		byID[a.RuleID] = true
+	}
+	assert.True(t, byID["sigma_sensitive_file_chmod"],
+		"sigma_sensitive_file_chmod did not fire for a non-daemon chmod syscall — "+
+			"5.9d must not weaken chmod detection while fixing the missing operation predicate")
+	assert.False(t, byID["sigma_sensitive_file_chmod_daemon"],
+		"sigma_sensitive_file_chmod_daemon fired for a non-daemon process — must be scoped to sshd/cron only")
 }
 
 // TestStage1_5_1_ContainerEscapeInitProcDaemon pins the container_escape_init_proc

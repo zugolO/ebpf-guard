@@ -206,9 +206,18 @@ rules:
     action: alert
     tags: [mitre:T1105, sigma, tool-transfer, staging]
 
+  # 5.9d (сплошная ревизия, plan.md): reverse asymmetry — the name/description
+  # claim "/tmp or /dev/shm" scoping, but the condition only checks the
+  # syscall number. This was never a missing-predicate bug to fix by adding
+  # a path filter: chmod/fchmod/fchmodat syscall args are raw pointers, not
+  # resolved strings (see RulesRequiringFileOp, sigma_sensitive_file_chmod
+  # above for the same limitation), so no rule on event_type: syscall can
+  # check a path today. Name/description corrected to state what is actually
+  # detected — any chmod +x, not specifically in /tmp or /dev/shm — rather
+  # than leaving a claim the condition cannot back up.
   - id: sigma_chmod_executable_tmp
-    name: "chmod +x on file in temporary directory"
-    description: "Executable permission set on a file in /tmp or /dev/shm — dropper staging before execution."
+    name: "chmod syscall observed (path not resolved)"
+    description: "A chmod/fchmod/fchmodat syscall was made. The collector cannot resolve the target path at the syscall layer, so this cannot be scoped to /tmp or /dev/shm despite the id name (kept for continuity) — treat as a broad staging signal, not location-specific."
     event_type: syscall
     condition:
       field: nr
@@ -548,62 +557,63 @@ rules:
     action: alert
     tags: [mitre:T1222, sigma, world-writable, filesystem]
 
+  # 5.9d (находка №27, plan.md): условие раньше проверяло только префикс пути
+  # + comm — ни chmod, ни fchmod не проверялись вовсе, поэтому правило
+  # срабатывало на ЛЮБОЕ обращение к этим путям (open/read/write), включая
+  # обычное чтение (sigma_passwd_shadow_read и sensitive_file_read уже это
+  # покрывают, отдельно). Настоящий предикат операции здесь физически
+  # невозможен на event_type: file: файловый коллектор (bpf/fileaccess.bpf.c)
+  # не хукает chmod/fchmod/fchmodat вовсе — FileEvent.Op знает только
+  # open/read/write (FILE_OP_* в bpf/common.h). Единственное место, где
+  # настоящий chmod виден — трассировка syscall по номеру (см.
+  # sigma_chmod_executable_tmp выше), но там args — сырые указатели, а не
+  # разрешённые строки, так что путь проверить нельзя (см.
+  # RulesRequiringFileOp). Перевод на syscall-ось — единственный способ
+  # сохранить срабатывание на НАСТОЯЩЕМ chmod, ценой потери привязки к
+  # конкретному пути; это ограничение вынесено в description, а не спрятано.
+  # Severity понижена до warning вместе с потерей "sensitive file" адресности
+  # (было critical, когда правило ошибочно претендовало на привязку к пути).
   - id: sigma_sensitive_file_chmod
-    name: "Permissions changed on sensitive system file"
-    description: "chmod/fchmod applied to critical system files — preparation for tampering."
-    event_type: file
+    name: "chmod/fchmod syscall by non-daemon process (path not resolved)"
+    description: >
+      A chmod/fchmod/fchmodat syscall was made by a process other than sshd or
+      cron. The collector cannot resolve which file was the target — syscall
+      arguments are raw pointers, not paths — so this is a broader signal than
+      "sensitive system file" despite the id name (kept for continuity with
+      prior alerts/dashboards). True path-scoped chmod detection needs a new
+      BPF probe that resolves the path argument; tracked as follow-up, not
+      done here (plan.md находка №27, 5.9d).
+    event_type: syscall
     condition_group:
       operator: and
       conditions:
-        - field: filename
-          op: prefix
-          values:
-            - "/etc/shadow"
-            - "/etc/passwd"
-            - "/etc/sudoers"
-            - "/etc/ssh/"
-            - "/etc/pam.d/"
-        - field: proc.comm
+        - field: nr
+          op: in
+          values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
+        - field: comm
           op: not_in
           values: ["sshd", "cron"]
-    severity: critical
+    severity: warning
     action: alert
-    tags: [mitre:T1222, sigma, chmod, sensitive-file]
-    exceptions:
-      # Scoped to comm AND path: the agent only ever chmods its own canary
-      # traps (0400 on /etc/*.canary). A compromised process named
-      # "ebpf-guard" must still alert on real /etc/shadow or /etc/sudoers.
-      - name: ebpf-guard-self
-        condition_group:
-          operator: and
-          conditions:
-            - field: proc.comm
-              op: eq
-              values: [ebpf-guard]
-            - field: filename
-              op: suffix
-              values: [".canary"]
+    tags: [mitre:T1222, sigma, chmod]
 
   # sshd/cron routinely chmod PAM/SSH config or credential files during
   # login/job accounting. plan.md wave 5.1: downgrade, don't suppress —
   # info severity (not warning — warning-level daemon splits from P1-6
   # kept full volume, see sigma_utmp_wtmp_modified_daemon precedent).
+  # 5.9d: moved to the same syscall axis as sigma_sensitive_file_chmod above,
+  # for the same reason (chmod is not observable via event_type: file).
   - id: sigma_sensitive_file_chmod_daemon
-    name: "Permissions changed on sensitive system file by login/cron daemon"
-    description: "sshd or cron changed permissions on a sensitive system file — usually routine accounting, but content is not inspected."
-    event_type: file
+    name: "chmod/fchmod syscall by login/cron daemon (path not resolved)"
+    description: "sshd or cron made a chmod/fchmod/fchmodat syscall — usually routine accounting, but neither content nor target path is inspected (see sigma_sensitive_file_chmod for the path-resolution limitation)."
+    event_type: syscall
     condition_group:
       operator: and
       conditions:
-        - field: filename
-          op: prefix
-          values:
-            - "/etc/shadow"
-            - "/etc/passwd"
-            - "/etc/sudoers"
-            - "/etc/ssh/"
-            - "/etc/pam.d/"
-        - field: proc.comm
+        - field: nr
+          op: in
+          values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
+        - field: comm
           op: in
           values: ["sshd", "cron"]
     severity: info
@@ -732,6 +742,12 @@ rules:
   # T1087 — Account Discovery
   # ============================================================================
 
+  # 5.9d (сплошная ревизия, находка №27): name/description say "read" but the
+  # condition never checked op — fired on any file event to these paths
+  # (open/read/write alike). Added op in [open, read] to match what the name
+  # claims: a bare open() without a following read() still counts (same
+  # convention as sensitive_file_read in credential-access.yaml), a write()
+  # no longer does.
   - id: sigma_passwd_shadow_read
     name: "Credential files read (/etc/passwd or /etc/shadow)"
     description: "Reads to /etc/passwd (user enumeration) or /etc/shadow (password hash extraction)."
@@ -746,6 +762,9 @@ rules:
             - "/etc/shadow"
             - "/etc/gshadow"
             - "/etc/group"
+        - field: op
+          op: in
+          values: ["open", "read"]
         - field: proc.comm
           op: not_in
           values: ["sshd", "cron"]
@@ -771,6 +790,9 @@ rules:
             - "/etc/shadow"
             - "/etc/gshadow"
             - "/etc/group"
+        - field: op
+          op: in
+          values: ["open", "read"]
         - field: proc.comm
           op: in
           values: ["sshd", "cron"]

@@ -158,22 +158,28 @@ watchdog:
   # least min_dwell (hysteresis + dwell floor, to avoid flapping on bursty
   # attack traffic).
   #
-  # All thresholds are a percentage of a SINGLE core (100 == one full core
-  # busy), not of total host CPU — this makes the defaults behave the same
-  # on a 1-core VPS and an 8-core box, instead of scaling the trip point with
-  # unrelated hardware capacity.
+  # All thresholds below are on a per-core scale (100 == one full core busy),
+  # but scale_by_cpu_count (5.9e) multiplies them by the host's core count
+  # before comparing against measured CPU% — so "40" means 40% of total
+  # machine capacity, not 40% of a single core regardless of host size. Set
+  # scale_by_cpu_count: false to keep the old absolute-per-core-budget
+  # behavior (identical trip point on a 1-core VPS and an 8-core box), which
+  # tripped too easily on multi-core hosts — замер №2.5 spent 49% of an
+  # idle-load run shedding under exactly that default (находка №31).
   cpu_pressure:
     enabled: true
     check_interval: 5            # seconds between CPU samples
-    cpu_limit_percent: 40.0      # target CPU budget (% of one core); seeds thresholds below
-    file_shed_threshold: 40.0    # CPU % of one core: reduce file sampling (L1)
-    all_shed_threshold: 70.0     # CPU % of one core: also reduce syscall/network (L2)
-    recovery_threshold: 20.0     # CPU % of one core: step back one level
+    cpu_limit_percent: 40.0      # target CPU budget (% of machine, see scale_by_cpu_count); seeds thresholds below
+    file_shed_threshold: 40.0    # % of machine: reduce file sampling (L1)
+    all_shed_threshold: 70.0     # % of machine: also reduce syscall/network (L2)
+    recovery_threshold: 20.0     # % of machine: step back one level
     window_size: 6               # samples averaged into the sliding window (30s at 5s interval)
     min_dwell: 180               # seconds a level is held before recovering.
                                  # Minutes, not seconds: shedding is itself what
                                  # drops CPU, so a short dwell recovers, re-trips
                                  # and flaps (P1-18a).
+    scale_by_cpu_count: true     # interpret thresholds above as % of the whole
+                                 # machine (thresholds x numCPU), not of one core (5.9e)
 
 # Correlator tuning
 correlator:

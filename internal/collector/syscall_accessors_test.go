@@ -79,24 +79,30 @@ func TestSyscallCollector_ParseEvent(t *testing.T) {
 	})
 
 	t.Run("valid sample is decoded", func(t *testing.T) {
-		// 104 bytes is the minimum syscall sample size; a zeroed buffer with the
+		// 124 bytes is the minimum syscall sample size; a zeroed buffer with the
 		// event-type field set parses successfully.
-		raw := make([]byte, 104)
+		raw := make([]byte, 124)
 		binary.LittleEndian.PutUint32(raw[0:], uint32(types.EventSyscall))
 		var evt types.Event
 		require.NoError(t, c.parseEvent(raw, &evt))
 	})
 }
 
-// validSyscallSample builds a minimal 104-byte syscall wire-format record
+// validSyscallSample builds a minimal 124-byte syscall wire-format record
 // with Type set to bpf.EventTypeSyscall, nr set to nr, and comm left at its
 // zero value (16 leading NULs, i.e. IsEmptyComm(comm) == true) unless comm is
 // non-empty.
+//
+// Offsets are the C struct's, verified with offsetof() on the compiled
+// `struct event` (packed): comm at 28, the union — and therefore nr — at 60.
+// This helper previously wrote comm at 24 and nr at 40, matching the parser's
+// own off-by-ppid/parent_comm mistake, so the diagnostics tests below agreed
+// with the bug instead of catching it.
 func validSyscallSample(nr int64, comm string) []byte {
-	raw := make([]byte, 104)
+	raw := make([]byte, 124)
 	binary.LittleEndian.PutUint32(raw[0:], bpfpkg.EventTypeSyscall)
-	copy(raw[24:40], comm) // offset 24 = comm field start (see ParseSyscallEventInto)
-	binary.LittleEndian.PutUint64(raw[40:], uint64(nr))
+	copy(raw[28:44], comm)
+	binary.LittleEndian.PutUint64(raw[60:], uint64(nr))
 	return raw
 }
 

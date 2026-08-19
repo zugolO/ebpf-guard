@@ -55,9 +55,20 @@ netintr_syn_scan_pattern
 #   web_blind_sqli_heuristic         — nr=35/162/206 (nanosleep-family), нет
 #       attack-шага, отличного от общего sqli-сценария.
 #
-# ransomware_mass_rename (nr=82) и ransomware_backup_delete (nr=87/263) сюда
-# НЕ входят: оба номера уже в config.yaml kernel_filter, правила достижимы —
-# см. internal/correlator/TestUnreachableSyscallRules_RepoRuleCount.
+#   ransomware_mass_rename (nr=82) и ransomware_backup_delete (nr=87/263) —
+#       ИСПРАВЛЕНО 2026-08-19 по факту живого старта агента на стенде. Волна
+#       5.9.2b записала их как достижимые, потому что 82/87/263 есть в
+#       config/config.yaml. Стенд этот файл не читает: он работает на
+#       deploy/docker-test-setup/config-test.yaml, где kernel_filter вообще не
+#       задаёт monitored_syscalls, поэтому эффективный allowlist — это
+#       DefaultMonitoredSyscalls() (22 номера, без 82/87/263). Агент при старте
+#       печатает 13 немых правил, а не 11. Открывать три номера не стали:
+#       rename/unlink/unlinkat — высокочастотная тройка на активной машине, а
+#       attack-шага под ransomware на стенде нет вовсе (ни в
+#       detection-baseline.txt, ни в run-all-attacks.sh), то есть открытый вход
+#       был бы чистым приростом idle-шума без единого срабатывания — ровно то,
+#       что запрещает запрет №1 волны 5.9.2. Разблокируется волной 6 вместе с
+#       ransomware-сценарием.
 cis_5_2_1_privileged_container
 mitre_sandbox_detect_cpuid
 mitre_arp_spoof_raw_socket
@@ -69,3 +80,5 @@ sigma_prctl_dumpable
 sigma_seccomp_filter_install
 sigma_world_writable_dir_created
 web_blind_sqli_heuristic
+ransomware_mass_rename
+ransomware_backup_delete

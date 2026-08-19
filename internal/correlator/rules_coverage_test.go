@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -365,40 +366,55 @@ func TestUnreachableSyscallRules(t *testing.T) {
 // intentional-loss.txt entry, or if the mechanism itself stops flagging an
 // obviously-unmonitored syscall number.
 //
-// The allowlist is READ FROM config/config.yaml rather than restated here.
-// A copy would be a fourth place holding the same list (the wave found three
-// and a 241/298 mismatch between them), and it would drift exactly the way
-// finding #39 describes: the test would keep passing against the numbers it
-// remembers while the agent runs on different ones.
+// The allowlist is RESOLVED THE WAY main.go RESOLVES IT, for every config the
+// project actually runs — not restated here, and not read from one file only.
+// Both mistakes have already been made: the wave found the same list in three
+// places with a 241/298 mismatch between them, and then measured "11 mute
+// rules" against config/config.yaml while the test stand runs
+// config-test.yaml, which sets no monitored_syscalls at all and therefore
+// falls back to DefaultMonitoredSyscalls() — a different, shorter list that
+// leaves 13 rules mute. A test that reads one file keeps passing against
+// numbers the agent never uses.
 func TestUnreachableSyscallRules_RepoRuleCount(t *testing.T) {
 	rules, err := LoadRulesFromDir("../../rules")
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}
 	re := NewRuleEngine(rules)
+	recorded := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/intentional-loss.txt")
 
-	allowlist := monitoredSyscallsFromConfig(t, "../../config/config.yaml")
-	require.NotEmpty(t, allowlist, "config.yaml must carry a kernel_filter allowlist for this test to mean anything")
-
-	unreachable := re.UnreachableSyscallRules(allowlist)
-	if len(unreachable) > 20 {
-		t.Errorf("wave 5.9.2b ceiling exceeded: %d syscall rules have no reachable nr "+
-			"(want <=20, rules must either get their nr opened in the allowlist or be "+
-			"recorded in deploy/docker-test-setup/attacks/intentional-loss.txt): %v",
-			len(unreachable), unreachable)
+	configs := []struct {
+		name string
+		path string
+	}{
+		{"config.yaml (shipped default)", "../../config/config.yaml"},
+		{"config-test.yaml (the measurement stand)", "../../deploy/docker-test-setup/config-test.yaml"},
 	}
 
-	// Criterion 5.9.2b is "≤20 AND every survivor has a line in
-	// intentional-loss.txt with a reason" — the count alone was checked here,
-	// the second half only by hand. Checking it by hand is what let 27 rules
-	// accumulate unnoticed in the first place, so it is checked here too: a
-	// new mute rule now fails this test until it is either given an allowlist
-	// entry or recorded as an intentional loss.
-	recorded := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/intentional-loss.txt")
-	for _, id := range unreachable {
-		assert.Contains(t, recorded, id,
-			"rule %q has no reachable nr in the kernel allowlist and no line in intentional-loss.txt: "+
-				"either open its syscall (and add an attack step) or record why it cannot fire", id)
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			allowlist := effectiveAllowlist(t, cfg.path)
+			require.NotEmpty(t, allowlist, "an empty effective allowlist would make every syscall rule mute")
+
+			unreachable := re.UnreachableSyscallRules(allowlist)
+			if len(unreachable) > 20 {
+				t.Errorf("wave 5.9.2b ceiling exceeded: %d syscall rules have no reachable nr "+
+					"(want <=20, rules must either get their nr opened in the allowlist or be "+
+					"recorded in deploy/docker-test-setup/attacks/intentional-loss.txt): %v",
+					len(unreachable), unreachable)
+			}
+
+			// Criterion 5.9.2b is "≤20 AND every survivor has a line in
+			// intentional-loss.txt with a reason" — the count alone was checked
+			// here, the second half only by hand. Checking it by hand is what let
+			// 27 rules accumulate unnoticed in the first place.
+			for _, id := range unreachable {
+				assert.Contains(t, recorded, id,
+					"rule %q has no reachable nr under %s and no line in intentional-loss.txt: "+
+						"either open its syscall (and add an attack step) or record why it cannot fire",
+					id, cfg.path)
+			}
+		})
 	}
 
 	// The mechanism itself must still catch an obviously unmonitored syscall,
@@ -409,15 +425,16 @@ func TestUnreachableSyscallRules_RepoRuleCount(t *testing.T) {
 		Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"9001"}},
 		Action:    ActionAlert,
 	})
-	canaryUnreachable := NewRuleEngine(augmented).UnreachableSyscallRules(allowlist)
+	canaryUnreachable := NewRuleEngine(augmented).UnreachableSyscallRules(bpf.DefaultMonitoredSyscalls())
 	assert.Contains(t, canaryUnreachable, "zz_canary_unmonitored_nr")
 }
 
-// monitoredSyscallsFromConfig reads bpf.kernel_filter.monitored_syscalls out of
-// a config file. It parses only that key rather than the whole config struct so
-// the test does not depend on internal/config (which imports the correlator
-// package's siblings) and stays readable as a fixture reader.
-func monitoredSyscallsFromConfig(t *testing.T, path string) []int {
+// effectiveAllowlist resolves a config file the way cmd/ebpf-guard/main.go
+// does: the explicit bpf.kernel_filter.monitored_syscalls list when it is set,
+// and DefaultMonitoredSyscalls() when it is not. Reproducing that fallback is
+// the point — config-test.yaml omits the key entirely, so a test that only
+// read the file would have measured against an empty list.
+func effectiveAllowlist(t *testing.T, path string) []int {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -433,6 +450,9 @@ func monitoredSyscallsFromConfig(t *testing.T, path string) []int {
 	}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("parse %s: %v", path, err)
+	}
+	if len(doc.BPF.KernelFilter.MonitoredSyscalls) == 0 {
+		return bpf.DefaultMonitoredSyscalls()
 	}
 	return doc.BPF.KernelFilter.MonitoredSyscalls
 }

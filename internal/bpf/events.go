@@ -25,13 +25,30 @@ const EventTypeSyscall uint32 = 1
 
 // SyscallEvent matches the C struct event from common.h
 // Layout matches packed C struct exactly
+// SyscallEvent matches the C struct event for syscall events.
+// Wire layout (packed, little-endian) — verified against offsetof() on the
+// compiled struct, not against this Go struct:
+//
+//	[0  ] type         uint32   (4)
+//	[4  ] timestamp    uint64   (8)
+//	[12 ] pid          uint32   (4)
+//	[16 ] tgid         uint32   (4)
+//	[20 ] ppid         uint32   (4)
+//	[24 ] uid          uint32   (4)
+//	[28 ] comm         [16]byte
+//	[44 ] parent_comm  [16]byte
+//	[60 ] nr           int64    (8)   ← union payload starts here
+//	[68 ] ret          int64    (8)
+//	[76 ] args         [6]uint64 (48)
 type SyscallEvent struct {
-	Type      uint32
-	Timestamp uint64
-	PID       uint32
-	TGID      uint32
-	UID       uint32
-	Comm      [16]byte
+	Type       uint32
+	Timestamp  uint64
+	PID        uint32
+	TGID       uint32
+	PPID       uint32
+	UID        uint32
+	Comm       [16]byte
+	ParentComm [16]byte
 	// Union payload - syscall specific
 	Nr   int64
 	Ret  int64
@@ -321,8 +338,19 @@ func (r *RingbufReader) Read() (ringbuf.Record, error) {
 // ParseSyscallEventInto parses raw bytes into an existing SyscallEvent,
 // avoiding a heap allocation on the hot path. Prefer this over ParseSyscallEvent
 // when the caller can provide a stack-allocated or pooled struct.
+// The two fields this parser used to skip — ppid (4 bytes) and parent_comm
+// (16 bytes) — sat between uid and the union in the C struct all along. Every
+// other struct-event parser here counts them (see ParseNetworkEventInto and
+// ParseFileEventInto's minSize); this one did not, so it read comm 4 bytes
+// early and nr/ret/args 20 bytes early. Live evidence from the stand
+// (2026-08-19): a record whose comm is "sshd" decoded as "\x00\x00\x00\x00sshd"
+// — empty for every uid=0 process, which is finding #40's 13 empty-comm
+// alerts — while nr decoded from the tail of comm plus the head of
+// parent_comm, i.e. never a real syscall number, which is why
+// ebpf_guard_events_malformed_total{reason="nr_not_monitored"} counted 3140
+// records the in-kernel allowlist had already guaranteed were monitored.
 func ParseSyscallEventInto(raw []byte, out *SyscallEvent) error {
-	const minSize = 4 + 8 + 4 + 4 + 4 + 16 + 8 + 8 + 48 // 104 bytes
+	const minSize = 4 + 8 + 4 + 4 + 4 + 4 + 16 + 16 + 8 + 8 + 48 // 124 bytes
 	if len(raw) < minSize {
 		return fmt.Errorf("raw sample too small: %d bytes (need %d)", len(raw), minSize)
 	}
@@ -335,9 +363,13 @@ func ParseSyscallEventInto(raw []byte, out *SyscallEvent) error {
 	offset += 4
 	out.TGID = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
+	out.PPID = binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
 	out.UID = binary.LittleEndian.Uint32(raw[offset:])
 	offset += 4
 	copy(out.Comm[:], raw[offset:offset+16])
+	offset += 16
+	copy(out.ParentComm[:], raw[offset:offset+16])
 	offset += 16
 	out.Nr = int64(binary.LittleEndian.Uint64(raw[offset:])) /* #nosec G115 */
 	offset += 8
@@ -766,12 +798,14 @@ func ParseTlsClientHelloEvent(raw []byte) (*TlsClientHelloRawEvent, error) {
 // ToTypesEvent converts a SyscallEvent to types.Event.
 func (e *SyscallEvent) ToTypesEvent() types.Event {
 	return types.Event{
-		Type:      types.EventSyscall,
-		Timestamp: types.KtimeToEpoch(e.Timestamp),
-		PID:       e.PID,
-		TGID:      e.TGID,
-		UID:       e.UID,
-		Comm:      e.Comm,
+		Type:       types.EventSyscall,
+		Timestamp:  types.KtimeToEpoch(e.Timestamp),
+		PID:        e.PID,
+		TGID:       e.TGID,
+		PPID:       e.PPID,
+		UID:        e.UID,
+		Comm:       e.Comm,
+		ParentComm: e.ParentComm,
 		Syscall: &types.SyscallEvent{
 			Nr:   e.Nr,
 			Ret:  e.Ret,

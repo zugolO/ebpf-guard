@@ -234,3 +234,61 @@ func TestNullTerminatedString(t *testing.T) {
 		assert.Equal(t, tc.want, nullTerminatedString(tc.input))
 	}
 }
+
+// TestParseSyscallEvent_WireOffsets pins the parser to the C struct's real
+// layout instead of to the Go struct's.
+//
+// The pre-existing TestParseSyscallEvent above round-trips a SyscallEvent
+// through binary.Write and parses it back — which validates the parser against
+// itself and passed for as long as the parser was wrong. This test builds the
+// record byte by byte at the offsets `offsetof()` reports on the compiled
+// `struct event` (packed: type 0, ts 4, pid 12, tgid 16, ppid 20, uid 24,
+// comm 28, parent_comm 44, nr 60, ret 68, args 76) and is the only reason a
+// future field insertion in bpf/common.h cannot silently shift the syscall
+// stream again.
+func TestParseSyscallEvent_WireOffsets(t *testing.T) {
+	const recordSize = 124
+	raw := make([]byte, recordSize)
+
+	binary.LittleEndian.PutUint32(raw[0:], 1)          // type = EVENT_TYPE_SYSCALL
+	binary.LittleEndian.PutUint64(raw[4:], 0xDEADBEEF) // timestamp
+	binary.LittleEndian.PutUint32(raw[12:], 4242)      // pid
+	binary.LittleEndian.PutUint32(raw[16:], 4242)      // tgid
+	binary.LittleEndian.PutUint32(raw[20:], 1)         // ppid
+	binary.LittleEndian.PutUint32(raw[24:], 0)         // uid = 0 (root: the case that read as an empty comm)
+	copy(raw[28:44], "sshd")                           // comm
+	copy(raw[44:60], "systemd")                        // parent_comm
+	binary.LittleEndian.PutUint64(raw[60:], 59)        // nr = execve
+	binary.LittleEndian.PutUint64(raw[68:], 0)         // ret
+	binary.LittleEndian.PutUint64(raw[76:], 0xAABB)    // args[0]
+
+	var out SyscallEvent
+	require.NoError(t, ParseSyscallEventInto(raw, &out))
+
+	assert.Equal(t, uint32(1), out.Type)
+	assert.Equal(t, uint32(4242), out.PID)
+	assert.Equal(t, uint32(1), out.PPID, "ppid sits between tgid and uid and must be read, not skipped")
+	assert.Equal(t, uint32(0), out.UID)
+	assert.Equal(t, "sshd", string(bytes.TrimRight(out.Comm[:], "\x00")),
+		"comm starts at offset 28; reading it at 24 yields four NUL bytes for every uid=0 process — finding #40")
+	assert.Equal(t, "systemd", string(bytes.TrimRight(out.ParentComm[:], "\x00")))
+	assert.Equal(t, int64(59), out.Nr,
+		"nr is the first union member at offset 60; reading it at 40 yields comm/parent_comm bytes, never a syscall number")
+	assert.Equal(t, uint64(0xAABB), out.Args[0])
+
+	// The conversion must carry the parent forward: the correlator's lineage
+	// tracker and the observer-tree walk both key off e.PPID, and a syscall
+	// event that always reported ppid=0 gave them nothing to walk.
+	ev := out.ToTypesEvent()
+	assert.Equal(t, uint32(1), ev.PPID)
+	assert.Equal(t, "sshd", string(bytes.TrimRight(ev.Comm[:], "\x00")))
+}
+
+// A record shorter than the full syscall payload must be rejected, not parsed
+// from whatever bytes happen to be there.
+func TestParseSyscallEvent_RejectsShortRecord(t *testing.T) {
+	var out SyscallEvent
+	err := ParseSyscallEventInto(make([]byte, 123), &out)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "124")
+}

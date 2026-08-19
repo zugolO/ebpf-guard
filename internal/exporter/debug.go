@@ -72,6 +72,13 @@ type EngineStats struct {
 	// match its actual contents.
 	AlertsDropped uint64 `json:"alerts_dropped"`
 	RulesLoaded   int    `json:"rules_loaded"`
+	// ObserverRootPID is the measurement harness root PID currently active for
+	// the 5.9a/5.9.1a observer-tree exclusion filter (0 if unset or the filter
+	// is disabled). Exposed so idle-run.sh can confirm the agent has actually
+	// picked up its root-PID-file write (polled every 2s, see
+	// cmd/ebpf-guard/main.go) before generating any events of its own —
+	// closing the registration-window gap in находка №34 (5.9.1a).
+	ObserverRootPID uint32 `json:"observer_root_pid"`
 }
 
 // ProfilerStats contains profiler learning statistics.

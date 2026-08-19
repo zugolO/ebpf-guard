@@ -7,6 +7,8 @@ package bpf
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -884,20 +886,62 @@ func (e *KmodRawEvent) ToTypesEvent() types.Event {
 }
 
 // ToTypesEvent converts a CgroupEscapeRawEvent to types.Event.
+//
+// 5.9.1f (остаток 5.9h, пустой comm): bpf/cgroup.bpf.c читает comm через
+// BPF_CORE_READ(leader, comm) — чужой task, не текущий, без синхронизации —
+// тот же класс torn-read, что 5.9h разобрала для parent_comm, только здесь
+// задет leaf-поле Comm самого события (то, что попадает в Alert.Comm).
+// cgroup_attach_task срабатывает у самого рождения процесса
+// (clone3(CLONE_INTO_CGROUP)), гоняясь с инициализацией comm той же задачи,
+// поэтому Comm может прийти полностью пустым, не просто искажённым. BPF-фикс
+// требует make generate (clang+linux-headers), недоступного в этой сессии
+// (macOS) — см. TODO у BPF_CORE_READ(leader, comm) в bpf/cgroup.bpf.c.
+// Здесь — userspace-заплатка: если ядро вернуло пустой Comm, подтягиваем его
+// из /proc/<pid>/comm; best-effort — если /proc недоступен (не-Linux,
+// процесс уже завершился), Comm остаётся пустым, как раньше, без ошибки.
 func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
+	comm := e.Comm
+	if isEmptyComm(comm) {
+		if resolved, ok := readProcComm(e.PID); ok {
+			comm = resolved
+		}
+	}
 	return types.Event{
 		Type:       types.EventCgroupEsc,
 		Timestamp:  types.KtimeToEpoch(e.Timestamp),
 		PID:        e.PID,
 		UID:        e.UID,
 		PPID:       e.PPID,
-		Comm:       e.Comm,
+		Comm:       comm,
 		ParentComm: e.ParentComm,
 		CgroupEsc: &types.CgroupEscapeEvent{
 			InitCgroupID: e.InitCgroupID,
 			NewCgroupID:  e.NewCgroupID,
 		},
 	}
+}
+
+// isEmptyComm reports whether comm is a torn/unfilled read (leading NUL)
+// rather than a legitimately short name padded with NULs.
+func isEmptyComm(comm [16]byte) bool {
+	return comm[0] == 0
+}
+
+// readProcComm resolves a process's command name via /proc/<pid>/comm,
+// truncated to the kernel's 16-byte TASK_COMM_LEN. ok=false when /proc is
+// unavailable or the process has already exited — callers must leave the
+// original (possibly empty) Comm untouched in that case.
+func readProcComm(pid uint32) (comm [16]byte, ok bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return comm, false
+	}
+	name := strings.TrimSuffix(string(data), "\n")
+	if name == "" {
+		return comm, false
+	}
+	copy(comm[:], name)
+	return comm, true
 }
 
 // ToTypesEvent converts an IOUringRawEvent to types.Event.

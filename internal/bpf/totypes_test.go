@@ -1,6 +1,8 @@
 package bpf
 
 import (
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -60,6 +62,49 @@ func TestCgroupEscapeRawEvent_ToTypesEvent(t *testing.T) {
 	require.NotNil(t, e.CgroupEsc)
 	assert.Equal(t, uint64(100), e.CgroupEsc.InitCgroupID)
 	assert.Equal(t, uint64(200), e.CgroupEsc.NewCgroupID)
+}
+
+// TestCgroupEscapeRawEvent_ToTypesEvent_NonEmptyCommUntouched hedges the
+// non-empty path against the 5.9.1f fallback overwriting a Comm the kernel
+// already filled correctly — the fallback must only engage on the torn-read
+// case (leading NUL), never override a valid name.
+func TestCgroupEscapeRawEvent_ToTypesEvent_NonEmptyCommUntouched(t *testing.T) {
+	raw := &CgroupEscapeRawEvent{Timestamp: 3, PID: 4000002, Comm: comm16("runc"), InitCgroupID: 1, NewCgroupID: 2}
+	e := raw.ToTypesEvent()
+	assert.Equal(t, comm16("runc"), e.Comm)
+}
+
+// TestCgroupEscapeRawEvent_ToTypesEvent_EmptyCommDeadPIDStaysEmpty guards the
+// 5.9.1f /proc fallback added for bpf/cgroup.bpf.c's torn leader->comm read
+// (BPF_CORE_READ on a different task than the one that triggered the LSM
+// hook, unsynchronized — same class as 5.9h's parent_comm finding, but here
+// it hits the event's own leaf Comm, which is what lands in Alert.Comm).
+// A PID this high cannot exist on any Linux host (pid_max is 2^22 at most,
+// see lineage_ppidfallback_test.go's TestLookupOwnPPID_CachesNegativeResult
+// for the same technique), so /proc/<pid>/comm is guaranteed to miss on
+// every platform — the fallback must leave Comm empty, not panic or fabricate
+// a name.
+func TestCgroupEscapeRawEvent_ToTypesEvent_EmptyCommDeadPIDStaysEmpty(t *testing.T) {
+	const deadPID uint32 = 4000000
+	raw := &CgroupEscapeRawEvent{Timestamp: 3, PID: deadPID, Comm: [16]byte{}, InitCgroupID: 1, NewCgroupID: 2}
+	e := raw.ToTypesEvent()
+	assert.Equal(t, [16]byte{}, e.Comm, "no /proc entry for this PID exists — Comm must stay empty, not be fabricated")
+}
+
+// TestCgroupEscapeRawEvent_ToTypesEvent_EmptyCommOwnPIDResolves is the
+// positive case: on a host with /proc (Linux — CI and ebaka2), an empty Comm
+// for a PID that is genuinely alive (this test process itself) must resolve
+// to a non-empty name via /proc/<pid>/comm. On platforms without /proc
+// (macOS dev) the fallback misses gracefully and this assertion is skipped
+// rather than failing on environment, not code.
+func TestCgroupEscapeRawEvent_ToTypesEvent_EmptyCommOwnPIDResolves(t *testing.T) {
+	pid := uint32(os.Getpid())
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d/comm", pid)); err != nil {
+		t.Skipf("/proc/%d/comm unavailable on this platform (%v) — fallback path not exercisable here", pid, err)
+	}
+	raw := &CgroupEscapeRawEvent{Timestamp: 3, PID: pid, Comm: [16]byte{}, InitCgroupID: 1, NewCgroupID: 2}
+	e := raw.ToTypesEvent()
+	assert.NotEqual(t, [16]byte{}, e.Comm, "a live PID's /proc/<pid>/comm must backfill the torn empty read")
 }
 
 func TestIOUringRawEvent_ToTypesEvent(t *testing.T) {

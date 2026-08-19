@@ -748,9 +748,24 @@ rules:
   # claims: a bare open() without a following read() still counts (same
   # convention as sensitive_file_read in credential-access.yaml), a write()
   # no longer does.
+  #
+  # 5.9.1e (остаток 5.9d, находка "дубли"): это правило и sensitive_file_read
+  # (credential-access.yaml) буквально дублировали друг друга на /etc/passwd
+  # и /etc/shadow — оба warning, оба срабатывают на одном open(). Выбрана
+  # вторая из двух опций постановки 5.9.1e («оставить оба, развести по осям,
+  # понизить один до info»), не слияние в одно правило: sensitive_file_read
+  # остаётся единственным warning-сигналом на этот класс события (шире список
+  # исключённых auth-бинарей, точнее соответствует своему тегу T1003.008 —
+  # credential access), это правило понижено до info и оставлено как более
+  # широкий T1087.001 (account discovery) сигнал — единственная причина не
+  # удалять его: оно покрывает /etc/group, которого нет в sensitive_file_read.
+  # daemon-двойник (sigma_passwd_shadow_read_daemon, ниже) был info и до этой
+  # правки — теперь совпадает по severity с базовым правилом; различие
+  # daemon/non-daemon для этого id больше не несёт priority-смысла, только
+  # тег "кто читал".
   - id: sigma_passwd_shadow_read
-    name: "Credential files read (/etc/passwd or /etc/shadow)"
-    description: "Reads to /etc/passwd (user enumeration) or /etc/shadow (password hash extraction)."
+    name: "Credential files read (/etc/passwd or /etc/shadow) — account discovery"
+    description: "Reads to /etc/passwd (user enumeration), /etc/shadow, /etc/gshadow, or /etc/group. Broader companion to sensitive_file_read (credential-access.yaml), which is the warning-severity signal for the same /etc/passwd, /etc/shadow reads — downgraded to info in 5.9.1e to remove the literal duplicate at warning severity; kept at info because it also covers /etc/group, which sensitive_file_read does not."
     event_type: file
     condition_group:
       operator: and
@@ -768,7 +783,7 @@ rules:
         - field: proc.comm
           op: not_in
           values: ["sshd", "cron"]
-    severity: warning
+    severity: info
     action: alert
     tags: [mitre:T1087.001, sigma, credential-access, account-discovery]
 

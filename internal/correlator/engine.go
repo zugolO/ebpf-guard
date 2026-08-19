@@ -1165,20 +1165,56 @@ func (ce *CorrelationEngine) SetObserverRoot(pid uint32) {
 	}
 }
 
+// ObserverRoot returns the harness root PID currently set via SetObserverRoot
+// (0 if unset), so callers like /debug/state (5.9.1a) can confirm the agent's
+// 2s file poller has actually picked up a registration before the harness
+// proceeds to generate events of its own.
+func (ce *CorrelationEngine) ObserverRoot() uint32 {
+	return ce.observerRootPID.Load()
+}
+
 // isObserverDescendant mirrors isSelfOrDescendant, but against the harness
-// root PID set via SetObserverRoot instead of the agent's own PID. Root 0
-// (not yet set) never matches, since PID 0 is not a real process PID.
-func (ce *CorrelationEngine) isObserverDescendant(pid, ppid uint32) bool {
+// root PID set via SetObserverRoot instead of the agent's own PID, and (5.9.1a,
+// находка №34) walks the full ancestor chain instead of one ppid hop. A
+// one-hop check only catches a leaf whose immediate parent already had an
+// event of its own tracked; it misses a leaf that fires its first event
+// before that parent does, which is exactly the pattern short-lived processes
+// forked straight off the harness (or off a shell the harness just forked)
+// produce. Root 0 (not yet set) never matches, since PID 0 is not a real
+// process PID.
+func (ce *CorrelationEngine) isObserverDescendant(e types.Event) bool {
 	root := ce.observerRootPID.Load()
 	if root == 0 {
 		return false
 	}
+	pid, ppid := e.PID, e.PPID
 	if pid == root {
 		return true
 	}
 	if _, ok := ce.observerTree.Load(pid); ok {
 		return true
 	}
+	if ce.lineageTracker != nil {
+		if tree := ce.lineageTracker.GetProcessTree(pid); len(tree) > 0 {
+			for _, node := range tree {
+				// node.PID == root fires when the chain was bootstrapped from
+				// /proc far enough to include the root process itself.
+				// node.PPID == root fires for the (common) case where the
+				// oldest *tracked* ancestor's parent is root but root's own
+				// PID never appears as a chain entry — the harness process
+				// forks children without necessarily emitting BPF events of
+				// its own, so it may never get a node in anyone's chain.
+				if node.PID == root || node.PPID == root {
+					ce.observerTree.Store(pid, struct{}{})
+					return true
+				}
+			}
+			return false
+		}
+	}
+	// No lineage tracker, or its ancestry for pid couldn't be resolved
+	// (disabled, or both the event and /proc lacked ppid): fall back to the
+	// one-hop check rather than treating "unresolved" as "not excluded".
 	if ppid == root {
 		ce.observerTree.Store(pid, struct{}{})
 		return true
@@ -1609,9 +1645,28 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	// idle-hour alert volume, measuring the measurer instead of the agent.
 	// Test-only: observerExcludeEnabled is false unless the deployment opts
 	// in via correlator.observer_exclude.enabled (config-test.yaml).
-	if ce.observerExcludeEnabled && ce.isObserverDescendant(e.PID, e.PPID) {
-		ce.eventsExcludedTotal.WithLabelValues("observer_tree").Add(1)
-		return nil, false
+	//
+	// 5.9.1a (находка №34): isObserverDescendant needs pid's full ancestor
+	// chain, not just its immediate ppid, so ancestry must be tracked BEFORE
+	// the membership check runs — not after, as the one shared Track() call
+	// below used to do. A short-lived leaf (e.g. curl reading /etc/passwd in
+	// its first milliseconds) fires its very first — and often only — event
+	// before its own parent ever gets its own tracked event; a one-hop
+	// ppid==root check misses it, but a full walk (bootstrapped from /proc by
+	// buildAncestry when the parent isn't cached yet) reaches the root
+	// regardless of how many already-resolved or already-exited hops sit in
+	// between. This second Track() call is a steady-state no-op (single shard
+	// lock + comparison) for every PID whose ancestry the later call already
+	// built, so the added cost is confined to observer-tree evaluation on
+	// test-only deployments.
+	if ce.observerExcludeEnabled {
+		if ce.lineageTracker != nil {
+			ce.lineageTracker.Track(e)
+		}
+		if ce.isObserverDescendant(e) {
+			ce.eventsExcludedTotal.WithLabelValues("observer_tree").Add(1)
+			return nil, false
+		}
 	}
 
 	// Record the connection attempt exactly once per event, here rather than in

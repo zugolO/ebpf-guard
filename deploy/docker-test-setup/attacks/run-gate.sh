@@ -430,6 +430,56 @@ if [ ! -s "$final_metrics" ]; then
     echo "Снимок /metrics пуст: $final_metrics — состав детекта (критерий 6) посчитать нельзя" >&2
     exit 2
 fi
+
+# Два помощника, общие для критерия 6 и для 5.8a-вычитания ниже. Раньше та же
+# awk-программа была написана дважды (в detected_type_list и в idle_delta_list)
+# и различалась только именем метрики; из-за этого 5.8a умел смотреть только на
+# ebpf_guard_alerts_total и только на прирост — обе неточности разобраны в
+# правках ниже по этому же критерию.
+#
+# metric_grown_rules <метрика> <снимок-старт|""> <снимок-конец>
+#   печатает rule_id, у которых счётчик вырос между снимками. Пустой первый
+#   аргумент означает «старта нет» — тогда «выросло» = «> 0 в конце».
+# metric_nonzero_rules <метрика> <снимок>
+#   печатает rule_id, у которых счётчик в снимке > 0 (сработало хоть раз за
+#   жизнь этого процесса агента, независимо от границ окна).
+#
+# Разделение снимков по FILENAME, а не по NR == FNR — по той же причине, что
+# расписана выше: пустой стартовый снимок ломает NR == FNR.
+metric_grown_rules() {
+    local metric="$1" startf="$2" endf="$3"
+    local files=("$endf")
+    if [ -n "$startf" ] && [ -s "$startf" ]; then
+        files=("$startf" "$endf")
+    else
+        startf=""
+    fi
+    awk -F'[{}", ]+' -v metric="$metric" -v startfile="$startf" '
+        function rule_id(   i, rid) {
+            rid = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^rule_id=?$/) { rid = $(i+1); break }
+            }
+            return rid
+        }
+        { gsub(/\r/, "") }
+        index($0, metric "{") != 1 { next }
+        {
+            rid = rule_id(); if (rid == "") next
+            if (startfile != "" && FILENAME == startfile) { start[rid] += $NF; next }
+            end[rid] += $NF; seen[rid] = 1
+        }
+        END {
+            for (r in seen) {
+                if (end[r] - (start[r]+0) > 0) print r
+            }
+        }
+    ' "${files[@]}" | sort
+}
+
+metric_nonzero_rules() {
+    metric_grown_rules "$1" "" "$2"
+}
 if [ -s "$baseline_metrics" ]; then
     metrics_inputs=("$baseline_metrics" "$final_metrics")
     basefile_arg="$baseline_metrics"
@@ -478,6 +528,35 @@ else
         echo "$added_types" | sed 's/^/    + /'
     fi
 
+    # 5.9.1e-следствие, найдено пересчётом на снятых данных №2.9 (условие №1
+    # гейта волны 5.9.1). detected_type_list строится по ebpf_guard_alerts_total,
+    # а туда попадает только то, что прошло store.min_severity (на стенде —
+    # warning). Правило, ПОНИЖЕННОЕ до info — ровно то, что 5.9.1e сделала с
+    # sigma_passwd_shadow_read, разводя дубль на /etc/passwd по осям, —
+    # продолжает срабатывать в полном объёме, но уходит в
+    # ebpf_guard_alerts_filtered_total и пропадает из alerts_total. Критерий 6
+    # засчитал бы это как потерю детекта: пересчёт на данных №2.9 с вырезанными
+    # строками alerts_total{rule_id="sigma_passwd_shadow_read"} даёт «потеряно
+    # (-4)» вместо (-3), причём четвёртый — правило, которое срабатывает 53 раза
+    # за прогон. Это ложный FAIL того же класса, что чинили 5.3 и 5.8a:
+    # понижение severity — не потеря детекта, а перенос в другой счётчик.
+    #
+    # Снимаем такие правила из потерь ОТДЕЛЬНОЙ строкой, а не молча: понижение
+    # должно быть видно в выводе гейта, иначе следующая правка severity опять
+    # пройдёт незамеченной. Порог тут не нужен — факт роста filtered_total за то
+    # же окно атаки и есть доказательство, что правило живо.
+    info_detected=$(metric_grown_rules ebpf_guard_alerts_filtered_total "$basefile_arg" "$final_metrics")
+    if [ -n "$lost_types_raw" ] && [ -n "$info_detected" ]; then
+        info_recovered=$(comm -12 <(echo "$lost_types_raw") <(echo "$info_detected"))
+        if [ -n "$info_recovered" ]; then
+            while IFS= read -r rid; do
+                [ -z "$rid" ] && continue
+                echo "  $rid: сработало под атакой ниже store.min_severity (прирост ebpf_guard_alerts_filtered_total) — детект жив, не потеря"
+            done <<< "$info_recovered"
+            lost_types_raw=$(comm -23 <(echo "$lost_types_raw") <(echo "$info_recovered"))
+        fi
+    fi
+
     # Волна 5.8a (находка №22): final[r] > 0 в attack-results смешивает две
     # популяции правил — те, что срабатывают под атакой, и фоновые, которым
     # там неоткуда сработать (owasp_log_tampering/sigma_log_deletion — на
@@ -494,31 +573,29 @@ else
         if [ -n "$lost_background" ]; then
             if [ -n "$IDLE_METRICS_START" ] && [ -n "$IDLE_METRICS_END" ] \
                 && [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
-                idle_delta_list=$(awk -F'[{}", ]+' '
-                    function rule_id(   i, rid) {
-                        rid = ""
-                        for (i = 1; i <= NF; i++) {
-                            if ($i ~ /^rule_id=?$/) { rid = $(i+1); break }
-                        }
-                        return rid
-                    }
-                    { gsub(/\r/, "") }
-                    !/^ebpf_guard_alerts_total\{/ { next }
-                    {
-                        rid = rule_id(); if (rid == "") next
-                        # Суммируем по сериям (у одного rule_id несколько
-                        # лейблсетов) РАЗДЕЛЬНО по снимкам: общий аккумулятор
-                        # здесь давал start+end во втором файле, и разность
-                        # вырождалась в "end > 0" — правило с нулевым приростом
-                        # ошибочно считалось выросшим.
-                        if (FNR == NR) { start[rid] += $NF } else { end[rid] += $NF }
-                    }
-                    END {
-                        for (r in end) {
-                            if (end[r] - (start[r]+0) > 0) print r
-                        }
-                    }
-                ' "$IDLE_METRICS_START" "$IDLE_METRICS_END" | sort)
+                # Прирост за idle-час. Считается по ОБЕИМ метрикам, а не только
+                # по alerts_total: фоновое правило info-уровня (их на стенде
+                # уже несколько — sigma_log_deletion_daemon, и с 5.9.1e
+                # sigma_passwd_shadow_read) целиком живёт в filtered_total, и
+                # старый однометричный вариант объявлял бы его потерянным и
+                # здесь, во второй попытке, а не только в первой.
+                idle_delta_list=$( { metric_grown_rules ebpf_guard_alerts_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"
+                                     metric_grown_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"; } | sort -u)
+                # Третья попытка: правило, сработавшее ПОСЛЕ старта агента, но
+                # ДО открытия idle-окна. Пересчёт 5.9.1d на данных №2.9 показал,
+                # что находка №37 назвала web_sql_injection_files «фоном, который
+                # 5.8a обязан вычесть», прочитав абсолют (2 на обоих концах
+                # idle-часа) как прирост; прироста там ноль, и предсказание
+                # «критерий 6 напечатает 0 потерь» на данных №2.9 не сбылось —
+                # печатается 3, из них web_sql_injection_files ложное. Правило
+                # сработало дважды между рестартом агента (шаг 1 пайплайна
+                # обнуляет счётчики вместе с процессом) и стартом окна — то есть
+                # оно живо на этой сборке, просто не попало в час наблюдения.
+                # Считать это «регрессом детекта» нельзя; печатаем отдельной,
+                # заметно иначе сформулированной строкой, чтобы разница между
+                # «сработало в окне» и «сработало до окна» не стёрлась.
+                idle_prewindow_list=$( { metric_nonzero_rules ebpf_guard_alerts_total "$IDLE_METRICS_END"
+                                         metric_nonzero_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_END"; } | sort -u)
                 # Разбираем lost_background по одному, чтобы напечатать судьбу
                 # каждого правила, а не только итоговое число.
                 while IFS= read -r rid; do
@@ -526,8 +603,11 @@ else
                     if echo "$idle_delta_list" | grep -qx "$rid"; then
                         recovered_types="$recovered_types$rid"$'\n'
                         echo "  фоновое $rid: не сработало под атакой, но выросло за idle-час — не считается потерей (5.8a)"
+                    elif echo "$idle_prewindow_list" | grep -qx "$rid"; then
+                        recovered_types="$recovered_types$rid"$'\n'
+                        echo "  фоновое $rid: за idle-час прироста нет, но счётчик ненулевой — правило срабатывало после старта агента, до открытия окна; живо, не считается потерей (5.8a, уточнение 5.9.1d)"
                     else
-                        echo "  фоновое $rid: не сработало ни под атакой, ни за idle-час — потеря подтверждена"
+                        echo "  фоновое $rid: не сработало ни под атакой, ни за idle-час, счётчик нулевой с самого старта агента — потеря подтверждена"
                     fi
                 done <<< "$lost_background"
             else
@@ -1013,6 +1093,21 @@ if command -v jq &> /dev/null; then
     echo "  Δengine(total_alerts)=$d_engine, Δfiltered(alerts_filtered_total)=$d_filtered, Δsuppressed(alerts_suppressed_total)=$d_suppressed, Δengine−Δfiltered−Δsuppressed=$d_lhs"
     echo "  Δexported(ebpf_guard_alerts_total)=$d_exported"
     echo "  Δstore(/api/v1/alerts)=$d_store"
+
+    # 5.9.1c (находка №36): дельта тождества выше сходится только если ОБА
+    # конца окна (baseline и final) сами по себе уже слиты — если baseline
+    # снят слишком рано после рестарта (P0-3), у него остаётся собственный
+    # engine−filtered−suppressed−exported ≠ 0, и это смещение переходит на
+    # Δlhs целиком, хотя тождество внутри самого прогона верно. Печатаем
+    # offset каждого конца отдельной строкой всегда — раньше это было видно
+    # только если разбирать абсолютные величины вручную (см. plan.md, 5.9.1c).
+    base_offset=$(( engine_base - ${filtered_base:-0} - ${suppressed_base:-0} - ${exported_base:-0} ))
+    final_offset=$(( engine_final - ${filtered_final:-0} - ${suppressed_final:-0} - ${exported_final:-0} ))
+    echo "  offset базового среза (engine−filtered−suppressed−exported)=$base_offset"
+    echo "  offset финального среза (engine−filtered−suppressed−exported)=$final_offset"
+    if [ "$base_offset" -ne 0 ] || [ "$final_offset" -ne 0 ]; then
+        echo "  ВНИМАНИЕ: ненулевой offset на одном из концов окна — конвейер не слился к моменту снимка (см. 5.9.1c); baseline снимается с ожиданием слива в run-all-attacks.sh, но не гарантирован при таймауте 30с"
+    fi
 
     identity_ok=$(awk -v lhs="$d_lhs" -v exported="$d_exported" -v store="$d_store" '
         BEGIN {

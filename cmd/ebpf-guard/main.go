@@ -964,10 +964,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		dbg.SetEngineProvider(exporter.EngineStatsFunc(func() exporter.EngineStats {
 			st := engine.GetStats()
 			return exporter.EngineStats{
-				TotalEvents:   st.ProcessedEvents,
-				TotalAlerts:   st.AlertsGenerated,
-				AlertsDropped: st.AlertsDropped,
-				RulesLoaded:   len(engine.GetRules()),
+				TotalEvents:     st.ProcessedEvents,
+				TotalAlerts:     st.AlertsGenerated,
+				AlertsDropped:   st.AlertsDropped,
+				RulesLoaded:     len(engine.GetRules()),
+				ObserverRootPID: engine.ObserverRoot(),
 			}
 		}))
 

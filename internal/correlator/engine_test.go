@@ -342,6 +342,51 @@ func TestCorrelationEngine_ObserverExclusion(t *testing.T) {
 		assert.Len(t, alerts, 1,
 			"a PID cached under a previous observer root must alert again after the root changes")
 	})
+
+	// Regression test for находка №34 (5.9.1a). SetObserverRoot is driven by a
+	// 2s file poller (cmd/ebpf-guard/main.go) that typically lags well behind
+	// the harness's first fork/exec, so an intermediate process's own event
+	// commonly arrives — and gets lineage-tracked — before the agent has even
+	// learned the root PID. The old one-hop check only ever cached a PID in
+	// observerTree as a side effect of isObserverDescendant matching at the
+	// moment that PID's own event was evaluated; if root was still 0 at that
+	// moment, the match could never happen and the PID was cached nowhere, so
+	// a descendant's later event (after root becomes known) had nothing to
+	// hit via observerTree.Load(ppid). The full ancestor-chain walk fixes this
+	// because lineageTracker.Track records raw PID/PPID lineage independently
+	// of whether observer exclusion matched anything at the time.
+	t.Run("enabled: descendant excluded even though intermediate was tracked before root was known", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		ctx := context.Background()
+
+		const intermediatePID = uint32(4310) // e.g. a shell the harness forked
+		const leafPID = uint32(4320)          // e.g. curl, forked by the shell
+
+		// Root not set yet (poller hasn't picked up the harness's PID file):
+		// this event cannot be excluded, but lineageTracker.Track still runs
+		// and records intermediatePID -> rootPID ancestry.
+		nonMatchingEvent := types.Event{
+			Type: types.EventFileAccess,
+			PID:  intermediatePID,
+			PPID: rootPID,
+			File: &types.FileEvent{Op: 2}, // not "read" (1) — won't match rule_001
+		}
+		assert.Empty(t, engine.Ingest(ctx, nonMatchingEvent))
+
+		// Root becomes known only now.
+		engine.SetObserverRoot(rootPID)
+
+		// leafPID's first event: its own ppid is intermediatePID, not root, and
+		// intermediatePID was never cached in observerTree (its one chance to
+		// be — its own event above — ran while root was still 0). The full
+		// ancestor walk must still find root via intermediatePID's PPID field.
+		alerts := engine.Ingest(ctx, newEvent(leafPID, intermediatePID))
+		assert.Empty(t, alerts,
+			"a descendant must be excluded via the full ancestor chain even when its parent's own PID was never cached in observerTree")
+	})
 }
 
 // TestCorrelationEngine_ConfirmedAttackAlertCountsInStats is the regression

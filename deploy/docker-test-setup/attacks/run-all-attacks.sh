@@ -88,6 +88,42 @@ get_baseline_metrics() {
         fi
     fi
 
+    # 5.9.1c (находка №36): если этот прогон стартует сразу после рестарта
+    # агента (P0-3 в idle-run.sh или ручной), стартовый всплеск алертов ещё
+    # не дотёк от alertsGenerated (engine_stats.total_alerts) до экспорта
+    # (ebpf_guard_alerts_total) — снятый в этот момент baseline несёт offset
+    # engine−filtered−suppressed−exported ≠ 0, и весь attack-прогон
+    # наследует этот перекос как расхождение критерия 15 в run-gate.sh,
+    # хотя тождество на самом деле верно. Ждём схождения offset к нулю перед
+    # снятием снимков, а не сразу за check_services; таймаут 30с (лаг слива
+    # на находке №36 был ~20с) — если конвейер не сошёлся, снимаем всё равно
+    # (иначе baseline не будет снят вовсе) и печатаем фактический offset,
+    # чтобы run-gate.sh не молчал о нём.
+    if command -v jq &> /dev/null; then
+        drain_offset="n/a"
+        for _ in $(seq 1 15); do
+            engine_now=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" 2>/dev/null \
+                | jq -r '.engine_stats.total_alerts // empty' 2>/dev/null)
+            metrics_now=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+            filtered_now=$(echo "$metrics_now" | grep '^ebpf_guard_alerts_filtered_total{' | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+            suppressed_now=$(echo "$metrics_now" | grep '^ebpf_guard_alerts_suppressed_total{' | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+            exported_now=$(echo "$metrics_now" | grep '^ebpf_guard_alerts_total{' | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+            if [ -n "$engine_now" ]; then
+                drain_offset=$(( engine_now - ${filtered_now:-0} - ${suppressed_now:-0} - ${exported_now:-0} ))
+                if [ "$drain_offset" -eq 0 ]; then
+                    break
+                fi
+            fi
+            sleep 2
+        done
+        if [ "$drain_offset" = "0" ]; then
+            log "5.9.1c: конвейер слился перед baseline (offset=0)"
+        else
+            warn "5.9.1c: offset конвейера не сошёлся к нулю за 30с (offset=$drain_offset) — baseline снимается как есть, критерий 15 обязан это учесть"
+        fi
+        echo "drain_offset_before_baseline=$drain_offset" > "$RESULTS_DIR/baseline-drain-offset-$TIMESTAMP.txt"
+    fi
+
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
@@ -166,6 +202,100 @@ run_ldap_csrf_attacks() {
     else
         warn "LDAP/CSRF скрипт не найден, пропускаем..."
     fi
+    echo ""
+}
+
+# 5.9.1e (остаток 5.9d): attack-сторона критерия 5.9d — «на attack-прогоне
+# детект по sigma_sensitive_file_chmod сохраняется там, где chmod
+# действительно был» — не была проверена ни одним прогоном №2.9/№2.9.1,
+# потому что манифест атак не содержал ни одного настоящего chmod-syscall.
+# С 5.9d правило переведено на syscall-ось (nr in chmod/fchmod/fchmodat,
+# путь не разрешается), поэтому детект больше не привязан к конкретному
+# файлу — важен сам факт chmod от не-демона. Создаём одноразовый canary-файл
+# внутри /etc (песочница прогона — этот стенд одноразовый, файл не
+# существовавший до атаки и удаляемый сразу после), чтобы не трогать ни один
+# реальный системный файл. comm=chmod (внешняя команда, не builtin), что не
+# входит в исключение [sshd, cron] правила.
+run_chmod_attack() {
+    log "==========================================="
+    log "ЗАПУСК CHMOD АТАКИ (5.9.1e)"
+    log "==========================================="
+
+    local canary_file="/etc/.ebpf-guard-attack-canary-$TIMESTAMP"
+
+    if ! touch "$canary_file" 2>/dev/null; then
+        warn "Нет прав на запись в /etc — chmod-атака (5.9.1e) пропущена, sigma_sensitive_file_chmod останется непроверенным на attack-стороне"
+        echo ""
+        return
+    fi
+
+    chmod 755 "$canary_file" 2>/dev/null || warn "chmod на $canary_file завершился с ошибкой"
+    log "chmod 755 $canary_file выполнен — ожидается срабатывание sigma_sensitive_file_chmod"
+    rm -f "$canary_file"
+
+    if command -v jq &> /dev/null; then
+        chmod_entry=$(jq -n --arg cat "chmod" --arg comm "chmod" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$chmod_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$chmod_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
+# 5.9.1d, часть (в) — разбор owasp_log_tampering, не выполненный в сессии,
+# где закрывались 5.9.1c/5.9.1d. Причина установлена по снятым данным №2.9,
+# без нового прогона: правило матчит filename РЕГУЛЯРКОЙ
+# (/var/log/.*\.log$, /var/log/nginx/, /var/log/apache2/, /var/log/httpd/),
+# а его daemon-двойник owasp_log_tampering_daemon — той же регуляркой с тем же
+# списком comm — дал 0, тогда как sigma_log_deletion_daemon с ТЕМ ЖЕ списком
+# comm, но префиксом /var/log/, дал 60. Один и тот же трафик, одни и те же
+# процессы, разница только в предикате пути: на стенде нет ни nginx/apache,
+# ни rsyslogd — журналирование идёт через journald в /var/log/journal/*.journal,
+# и ни один файл с суффиксом .log под /var/log/ не открывается вообще. То есть
+# это не регресс детекта, а отсутствие сценария трафика — ровно тот же случай,
+# что sigma_sensitive_file_chmod до 5.9.1e.
+#
+# Решение то же, что 5.9.1e выбрала для chmod, и НЕ запись в
+# intentional-loss.txt: запрет №3 постановки волны 5.9.1 требует, чтобы каждая
+# такая запись сопровождалась проверкой, что правило срабатывает там, где
+# обязано, — а проверить это можно только дав правилу трафик. Даём: canary-файл
+# с суффиксом .log под /var/log/, запись и усечение из-под не-демона (comm
+# tee/truncate, ни один из них не входит в исключения [rsyslogd, rs:main Q:Reg,
+# systemd-journal, systemd-journald]). Файл не существовал до атаки и удаляется
+# сразу после — ни один настоящий системный лог не тронут.
+run_log_tamper_attack() {
+    log "==========================================="
+    log "ЗАПУСК LOG-TAMPER АТАКИ (5.9.1d в)"
+    log "==========================================="
+
+    local canary_log="/var/log/.ebpf-guard-attack-canary-$TIMESTAMP.log"
+
+    if ! touch "$canary_log" 2>/dev/null; then
+        warn "Нет прав на запись в /var/log — log-tamper атака (5.9.1d в) пропущена, owasp_log_tampering останется непроверенным на attack-стороне"
+        echo ""
+        return
+    fi
+
+    # Запись (append) и усечение — две операции, которые правило называет в
+    # своём description ("writing to or truncating log files").
+    echo "ebpf-guard attack canary $(date -Iseconds)" | tee -a "$canary_log" >/dev/null 2>&1 \
+        || warn "запись в $canary_log завершилась с ошибкой"
+    : > "$canary_log" 2>/dev/null || warn "усечение $canary_log завершилось с ошибкой"
+    log "запись и усечение $canary_log выполнены — ожидается срабатывание owasp_log_tampering (и sigma_log_deletion по префиксу)"
+    rm -f "$canary_log"
+
+    if command -v jq &> /dev/null; then
+        log_tamper_entry=$(jq -n --arg cat "log_tamper" --arg comm "tee" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$log_tamper_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$log_tamper_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
     echo ""
 }
 
@@ -681,10 +811,11 @@ show_menu() {
     echo "3. Только Brute Force атаки"
     echo "4. Только SSRF атаки"
     echo "5. Только LDAP/CSRF атаки"
-    echo "6. Проверить состояние сервисов"
-    echo "7. Собрать текущие метрики"
-    echo "8. Сгенерировать отчет"
-    echo "9. Выход"
+    echo "6. Только canary-атаки (chmod 5.9.1e + log tamper 5.9.1d в)"
+    echo "7. Проверить состояние сервисов"
+    echo "8. Собрать текущие метрики"
+    echo "9. Сгенерировать отчет"
+    echo "10. Выход"
     echo ""
 }
 
@@ -692,7 +823,7 @@ show_menu() {
 interactive_mode() {
     while true; do
         show_menu
-        read -p "Выберите опцию [1-9]: " choice
+        read -p "Выберите опцию [1-10]: " choice
 
         case $choice in
             1)
@@ -702,6 +833,8 @@ interactive_mode() {
                 run_bruteforce_attacks
                 run_ssrf_attacks
                 run_ldap_csrf_attacks
+                run_chmod_attack
+                run_log_tamper_attack
                 get_final_metrics
                 generate_final_report
                 check_final_gate
@@ -723,17 +856,21 @@ interactive_mode() {
                 run_ldap_csrf_attacks
                 ;;
             6)
-                check_services
+                run_chmod_attack
+                run_log_tamper_attack
                 ;;
             7)
+                check_services
+                ;;
+            8)
                 get_baseline_metrics
                 log "Текущие метрики сохранены в $RESULTS_DIR"
                 ;;
-            8)
+            9)
                 generate_final_report
                 check_final_gate
                 ;;
-            9)
+            10)
                 log "Выход..."
                 exit 0
                 ;;
@@ -769,6 +906,8 @@ full_run() {
     run_bruteforce_attacks
     run_ssrf_attacks
     run_ldap_csrf_attacks
+    run_chmod_attack
+    run_log_tamper_attack
     get_final_metrics
     generate_final_report
 

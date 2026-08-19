@@ -87,3 +87,71 @@ func TestSyscallCollector_ParseEvent(t *testing.T) {
 		require.NoError(t, c.parseEvent(raw, &evt))
 	})
 }
+
+// validSyscallSample builds a minimal 104-byte syscall wire-format record
+// with Type set to bpf.EventTypeSyscall, nr set to nr, and comm left at its
+// zero value (16 leading NULs, i.e. IsEmptyComm(comm) == true) unless comm is
+// non-empty.
+func validSyscallSample(nr int64, comm string) []byte {
+	raw := make([]byte, 104)
+	binary.LittleEndian.PutUint32(raw[0:], bpfpkg.EventTypeSyscall)
+	copy(raw[24:40], comm) // offset 24 = comm field start (see ParseSyscallEventInto)
+	binary.LittleEndian.PutUint64(raw[40:], uint64(nr))
+	return raw
+}
+
+// TestSyscallCollector_ParseEvent_MalformedDiagnostics covers the three
+// independent diagnostic checks parseEvent added for 5.9.2c (finding #40):
+// type_mismatch always drops the record (the "недостающая валидация формата"
+// barrier), nr_not_monitored and empty_comm are observation-only and let the
+// record through.
+func TestSyscallCollector_ParseEvent_MalformedDiagnostics(t *testing.T) {
+	t.Run("type mismatch is dropped and reported once, not double-counted", func(t *testing.T) {
+		c := newTestSyscallCollector(t)
+		raw := validSyscallSample(1, "sh") // nr=1 (write) is irrelevant here
+		binary.LittleEndian.PutUint32(raw[0:], 7 /* EVENT_TYPE_NET_CLOSE */)
+
+		var evt types.Event
+		err := c.parseEvent(raw, &evt)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errMalformedSyscallType)
+	})
+
+	t.Run("type match with nr outside allowlist is observed but not dropped", func(t *testing.T) {
+		c := newTestSyscallCollector(t)
+		c.WithMalformedDiagnostics([]int{59}, true) // execve only
+		raw := validSyscallSample(41 /* socket, not in allowlist */, "sh")
+
+		var evt types.Event
+		require.NoError(t, c.parseEvent(raw, &evt))
+		assert.Equal(t, int64(41), evt.Syscall.Nr)
+	})
+
+	t.Run("nr outside allowlist is not flagged when kernel_filter is disabled", func(t *testing.T) {
+		c := newTestSyscallCollector(t)
+		c.WithMalformedDiagnostics([]int{59}, false)
+		raw := validSyscallSample(41, "sh")
+
+		var evt types.Event
+		require.NoError(t, c.parseEvent(raw, &evt))
+	})
+
+	t.Run("empty comm is observed but not dropped", func(t *testing.T) {
+		c := newTestSyscallCollector(t)
+		raw := validSyscallSample(59, "") // comm left zeroed
+
+		var evt types.Event
+		require.NoError(t, c.parseEvent(raw, &evt))
+		assert.Equal(t, byte(0), evt.Comm[0])
+	})
+
+	t.Run("well-formed record trips none of the three counters", func(t *testing.T) {
+		c := newTestSyscallCollector(t)
+		c.WithMalformedDiagnostics([]int{59}, true)
+		raw := validSyscallSample(59, "bash")
+
+		var evt types.Event
+		require.NoError(t, c.parseEvent(raw, &evt))
+		assert.Equal(t, int64(59), evt.Syscall.Nr)
+	})
+}

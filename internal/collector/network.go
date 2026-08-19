@@ -246,7 +246,7 @@ func (c *NetworkCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("network", "ringbuf_to_router")
+			exporter.RecordEventDrop("network", "ringbuf_to_router", defaultEventPriority(event.Type))
 			c.dropLogger.record(c.logger, "network")
 			c.lostTotal.Add(1)
 		})
@@ -290,4 +290,21 @@ func (c *NetworkCollector) parseEvent(raw []byte, event *types.Event) error {
 	}
 	*event = evt
 	return nil
+}
+
+// ObserverFilterMaps returns the observer_root_pid and
+// observer_excluded_counters BPF maps backing the in-kernel measurement-harness
+// exclusion (5.9.2g), or nil maps if the collector has not loaded (stub mode).
+//
+// Each BPF object carries its own copy of these maps — the same per-object
+// arrangement that made P0-22 populate comm_filter_map separately per collector
+// — so the root PID must be published to every collector that emits
+// correlatable events, not just to one of them. observer_tree_cache is not
+// returned: it is populated exclusively by the kernel walk and userspace has no
+// reason to touch it.
+func (c *NetworkCollector) ObserverFilterMaps() (rootMap, excludedCounters *ebpf.Map) {
+	if c.objs == nil {
+		return nil, nil
+	}
+	return c.objs.ObserverRootPid, c.objs.ObserverExcludedCounters
 }

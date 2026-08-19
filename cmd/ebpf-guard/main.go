@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -252,6 +253,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	if err := config.ValidateConfig(cfg); err != nil {
 		return fmt.Errorf("config validation:\n%w", err)
+	}
+
+	// Wave 5.9.2b (finding #39): a rule that constrains event_type: syscall by
+	// a numeric "nr" outside the in-kernel allowlist can never fire — the event
+	// is dropped before it reaches the rule engine. 27 rules accumulated in
+	// this state silently before this check existed. Report them once at
+	// startup rather than let them decay unnoticed again.
+	if len(rules) > 0 {
+		allowlist := cfg.BPF.KernelFilter.MonitoredSyscalls
+		if len(allowlist) == 0 {
+			allowlist = internalbpf.DefaultMonitoredSyscalls()
+		}
+		if cfg.BPF.KernelFilter.Enabled {
+			if unreachable := correlator.NewRuleEngine(rules).UnreachableSyscallRules(allowlist); len(unreachable) > 0 {
+				slog.Warn("rules: syscall rules with no reachable nr in the kernel allowlist",
+					slog.Int("count", len(unreachable)),
+					slog.Any("rule_ids", unreachable))
+			}
+		}
 	}
 
 	// ── BTF source resolution ──────────────────────────────────────────────────
@@ -679,6 +699,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// tradeoff: fast enough that the exclusion window opens well within one
 	// idle-run.sh snapshot interval (300s default), slow enough not to add
 	// its own read() noise to the very measurement it is trying to clean up.
+	// 5.9.2g: in-kernel measurement-harness exclusion. Every BPF object has its
+	// OWN observer_root_pid map (the same per-object arrangement that made
+	// P0-22 populate comm_filter_map once per collector), so the registry holds
+	// one controller per collector rather than a single global one, and the
+	// root PID is published to all of them. Collectors register from their own
+	// status-reporter goroutines as they come up, concurrently with the poller
+	// below — hence the mutex and the replay of the last known root.
+	observerFilters := &observerFilterRegistry{}
+
 	if cfg.Correlator.ObserverExclude.Enabled {
 		rootPIDFile := cfg.Correlator.ObserverExclude.RootPIDFile
 		slog.Info("correlator: observer-root-pid poller starting (5.9a, test-only)",
@@ -705,7 +734,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 							slog.Uint64("root_pid", pid))
 						lastPID = pid
 					}
-					engine.SetObserverRoot(uint32(pid)) /* #nosec G115 -- bounded by ParseUint bitSize 32 */
+					// The userspace filter stays configured as the fallback:
+					// if no BPF object accepted the root (verifier rejection,
+					// stub build, collector not up yet), observerFilters.
+					// publish reports 0 and the engine keeps doing the walk.
+					engine.SetObserverRoot(uint32(pid))                                    /* #nosec G115 -- bounded by ParseUint bitSize 32 */
+					engine.SetObserverKernelSide(observerFilters.publish(uint32(pid)) > 0) /* #nosec G115 -- bounded by ParseUint bitSize 32 */
 				}
 			}
 		}()
@@ -964,11 +998,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		dbg.SetEngineProvider(exporter.EngineStatsFunc(func() exporter.EngineStats {
 			st := engine.GetStats()
 			return exporter.EngineStats{
-				TotalEvents:     st.ProcessedEvents,
-				TotalAlerts:     st.AlertsGenerated,
-				AlertsDropped:   st.AlertsDropped,
-				RulesLoaded:     len(engine.GetRules()),
-				ObserverRootPID: engine.ObserverRoot(),
+				TotalEvents:        st.ProcessedEvents,
+				TotalAlerts:        st.AlertsGenerated,
+				AlertsDropped:      st.AlertsDropped,
+				RulesLoaded:        len(engine.GetRules()),
+				ObserverRootPID:    engine.ObserverRoot(),
+				ObserverKernelSide: engine.ObserverKernelSide(),
 			}
 		}))
 
@@ -1217,7 +1252,20 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				if cfg.BPF.Sampling.Enabled {
 					enableSampling("syscall", sc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "syscall")
 				}
+				if cfg.Correlator.ObserverExclude.Enabled {
+					observerRoot, observerCounters := sc.ObserverFilterMaps()
+					observerFilters.register("syscall", observerRoot, observerCounters)
+				}
 			}))
+			// 5.9.2c (finding #40): same effective allowlist the "unreachable
+			// rules" check above and enableKernelFilter both use, so the
+			// nr_not_monitored diagnostic and the actual in-kernel filter
+			// can never disagree about what "monitored" means.
+			diagAllowlist := cfg.BPF.KernelFilter.MonitoredSyscalls
+			if len(diagAllowlist) == 0 {
+				diagAllowlist = internalbpf.DefaultMonitoredSyscalls()
+			}
+			sc.WithMalformedDiagnostics(diagAllowlist, cfg.BPF.KernelFilter.Enabled)
 			collectors = append(collectors, sc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("syscall: collector enabled")
 		}
@@ -1225,12 +1273,23 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if nc, ncErr := collector.NewNetworkCollector(slog.Default()); ncErr != nil {
 			slog.Warn("network: collector creation failed", slog.Any("error", ncErr))
 		} else {
-			if cfg.BPF.Sampling.Enabled {
+			// The reporter is also needed when observer exclusion is on, not
+			// only for sampling: without this condition the network collector
+			// would silently keep emitting harness events while syscall and
+			// fileaccess dropped theirs, and the "share of the observer tree"
+			// criterion would be measured against a partially filtered stream.
+			if cfg.BPF.Sampling.Enabled || cfg.Correlator.ObserverExclude.Enabled {
 				nc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
 					if name != "network" || !up {
 						return
 					}
-					enableSampling("network", nc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "network")
+					if cfg.BPF.Sampling.Enabled {
+						enableSampling("network", nc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "network")
+					}
+					if cfg.Correlator.ObserverExclude.Enabled {
+						observerRoot, observerCounters := nc.ObserverFilterMaps()
+						observerFilters.register("network", observerRoot, observerCounters)
+					}
 				}))
 			}
 			collectors = append(collectors, nc.WithBackpressureStrategy(bpStrategy))
@@ -1242,7 +1301,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		} else {
 			fo := cfg.Collectors.FileOps
 			fc.WithFileOps(fo.TrackOpen, fo.TrackRead, fo.TrackWrite)
-			if cfg.BPF.Sampling.Enabled || cfg.BPF.KernelFilter.Enabled {
+			if cfg.BPF.Sampling.Enabled || cfg.BPF.KernelFilter.Enabled || cfg.Correlator.ObserverExclude.Enabled {
 				fc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
 					if name != "fileaccess" || !up {
 						return
@@ -1268,6 +1327,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					}
 					if cfg.BPF.Sampling.Enabled {
 						enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "file")
+					}
+					if cfg.Correlator.ObserverExclude.Enabled {
+						observerRoot, observerCounters := fc.ObserverFilterMaps()
+						observerFilters.register("fileaccess", observerRoot, observerCounters)
 					}
 				}))
 			}
@@ -1412,22 +1475,23 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	var lowPriorityDrops atomic.Int64
 	var highPriorityAccepted atomic.Int64
 	var lowPriorityAccepted atomic.Int64
-	var lastHighPriorityDropTime atomic.Int64
-	var lastLowPriorityDropTime atomic.Int64
 
+	// 5.9.2a (finding #38): the drop-time watcher that degradation status reads
+	// now lives in exporter.RecordEventDrop, shared with every collector's
+	// ringbuf_to_router hop (internal/collector/*.go) — not tracked locally
+	// here any more, so a hop this closure doesn't see can't go unnoticed by
+	// /health the way ringbuf_to_router previously did.
 	recordEventDrop := func(collectorName string, isHighPriority bool) {
 		if isHighPriority {
 			highPriorityDrops.Add(1)
-			lastHighPriorityDropTime.Store(time.Now().UnixNano())
 		} else {
 			lowPriorityDrops.Add(1)
-			lastLowPriorityDropTime.Store(time.Now().UnixNano())
 		}
 		// reason=router_to_queue: dropped between the priority router and the
 		// hi/lo queue (plan.md 1.5c). Distinguished from ringbuf_to_router so a
 		// zero on network/dns can be attributed to a specific hop instead of an
 		// aggregate that hides which stage actually lost the event.
-		exporter.EventsDropped.WithLabelValues(collectorName, "router_to_queue").Inc()
+		exporter.RecordEventDrop(collectorName, "router_to_queue", isHighPriority)
 	}
 
 	// Accepted events are the denominator of the loss fraction; without them a
@@ -1769,6 +1833,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				// number instead of quietly reducing file-event volume.
 				// RecordDroppedN adds to the counter, so this must report the
 				// delta since the last tick, not the cumulative total.
+				// 5.9.2g: drain the in-kernel observer-exclusion counter onto
+				// the same series 5.9a published from the correlator, so the
+				// "share of the observer tree" criterion keeps being computed
+				// from one metric across both implementations. Delta, not
+				// total — see RecordObserverExcludedN.
+				if delta := observerFilters.drainExcluded(); delta > 0 {
+					engine.RecordObserverExcludedN(delta)
+				}
+
 				if pf := pathFilterCtrl.Load(); pf != nil {
 					if total, err := pf.ReadPathFilterDropCount(); err != nil {
 						slog.Warn("path_filter: failed to read drop counter", slog.Any("error", err))
@@ -1990,8 +2063,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				exporter.EventsDroppedFraction.WithLabelValues("bulk").
 					Set(lossFraction(loDrop-prevLoDrop, loOK-prevLoOK))
 
-				lastHiDrop := lastHighPriorityDropTime.Load()
-				lastLoDrop := lastLowPriorityDropTime.Load()
+				// 5.9.2a: both hops (ringbuf_to_router, in each collector's
+				// readLoop, and router_to_queue, in recordEventDrop above) feed
+				// exporter.RecordEventDrop, so a drop at either one marks these
+				// timestamps — not just router_to_queue as before.
+				lastHiDrop := exporter.LastHighPriorityDropTime()
+				lastLoDrop := exporter.LastLowPriorityDropTime()
 				hiDegraded := lastHiDrop > 0 && time.Since(time.Unix(0, lastHiDrop)) < degradationThreshold
 				loDegraded := lastLoDrop > 0 && time.Since(time.Unix(0, lastLoDrop)) < degradationThreshold
 				nowDegraded := hiDegraded || loDegraded
@@ -2009,13 +2086,22 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					degraded = nowDegraded
 					srv.SetVisibilityReduced(degraded)
 					if degraded {
+						// 5.9.2a: the aggregate protected/bulk counters above only
+						// ever counted router_to_queue drops, so an operator
+						// looking at this line could not tell "losing fim signal"
+						// (fileaccess/ringbuf_to_router) from "shedding file
+						// noise" (any other collector/hop) — exactly the
+						// ambiguity DegradedQueues was introduced to resolve, but
+						// one level too coarse. breakdown gives the same
+						// distinction per collector and hop.
 						slog.Warn("visibility reduced: a priority queue is dropping events",
 							slog.String("status", "degraded"),
 							slog.Any("degraded_queues", queues),
 							slog.Int64("protected_dropped_since_start", hiDrop),
 							slog.Int64("protected_dropped_in_window", hiDrop-prevHiDrop),
 							slog.Int64("bulk_dropped_since_start", loDrop),
-							slog.Int64("bulk_dropped_in_window", loDrop-prevLoDrop))
+							slog.Int64("bulk_dropped_in_window", loDrop-prevLoDrop),
+							slog.Any("dropped_by_collector_and_hop", exporter.DropBreakdownSnapshot()))
 					} else {
 						slog.Info("visibility restored: all priority queues flowing normally",
 							slog.Int64("protected_dropped_since_start", hiDrop),
@@ -4166,4 +4252,132 @@ func loadRulesWithTuning(path, tuningPath string) ([]correlator.Rule, error) {
 	}
 
 	return rules, nil
+}
+
+// observerFilterRegistry holds one in-kernel observer-exclusion controller per
+// collector (5.9.2g). Each BPF object compiled from bpf/common.h carries its
+// own observer_root_pid, observer_tree_cache and observer_excluded_counters —
+// maps are per-object unless pinned, which is also why P0-22 has to populate
+// comm_filter_map separately for the syscall and fileaccess collectors. A
+// single controller would therefore filter exactly one collector's stream and
+// leave the others emitting harness events, which is worse than not filtering
+// at all: the "share of the observer tree" criterion would be computed over a
+// partially filtered denominator and would look better than reality.
+//
+// Collectors register from their own status-reporter goroutines as they come
+// up, which races the root-PID poller — hence the mutex, and hence lastRoot:
+// a collector registering after the root is known is configured immediately
+// rather than waiting up to one poll interval (2s) during which it would emit
+// harness events the others were already dropping.
+type observerFilterRegistry struct {
+	mu       sync.Mutex
+	ctrls    map[string]*internalbpf.ObserverFilterController
+	lastRoot uint32
+
+	// lastExcluded is the per-collector cumulative BPF counter value at the
+	// previous drain, so drainExcluded can return a delta.
+	lastExcluded map[string]uint64
+}
+
+// register adds a collector's maps to the registry. Nil maps (stub build, or
+// a collector that failed to load its objects) are ignored — with a log line,
+// because silently registering nothing is how a filter ends up believed-on and
+// measurably off.
+func (r *observerFilterRegistry) register(name string, rootMap, counters *ebpf.Map) {
+	if rootMap == nil {
+		slog.Warn("observer_filter: root map unavailable, in-kernel exclusion inactive for this collector",
+			slog.String("collector", name))
+		return
+	}
+	ctrl, err := internalbpf.NewObserverFilterController(rootMap, counters)
+	if err != nil {
+		slog.Warn("observer_filter: controller creation failed",
+			slog.String("collector", name), slog.Any("error", err))
+		return
+	}
+
+	r.mu.Lock()
+	if r.ctrls == nil {
+		r.ctrls = make(map[string]*internalbpf.ObserverFilterController)
+		r.lastExcluded = make(map[string]uint64)
+	}
+	r.ctrls[name] = ctrl
+	root := r.lastRoot
+	r.mu.Unlock()
+
+	slog.Info("observer_filter: in-kernel harness exclusion registered (5.9.2g)",
+		slog.String("collector", name))
+	if root != 0 {
+		if err := ctrl.SetRootPID(root); err != nil {
+			slog.Warn("observer_filter: replaying root pid to late collector failed",
+				slog.String("collector", name), slog.Any("error", err))
+		}
+	}
+}
+
+// publish writes the harness root TGID to every registered collector and
+// returns how many accepted it. A return of 0 means no BPF object is filtering,
+// and the caller must keep the userspace filter engaged.
+func (r *observerFilterRegistry) publish(root uint32) int {
+	if root == 0 {
+		return 0
+	}
+	r.mu.Lock()
+	r.lastRoot = root
+	ctrls := make(map[string]*internalbpf.ObserverFilterController, len(r.ctrls))
+	for k, v := range r.ctrls {
+		ctrls[k] = v
+	}
+	r.mu.Unlock()
+
+	var ok int
+	for name, c := range ctrls {
+		if c.RootPID() == root {
+			ok++
+			continue
+		}
+		if err := c.SetRootPID(root); err != nil {
+			slog.Warn("observer_filter: set root pid failed",
+				slog.String("collector", name),
+				slog.Uint64("root_pid", uint64(root)), slog.Any("error", err))
+			continue
+		}
+		slog.Info("observer_filter: harness root published to kernel",
+			slog.String("collector", name), slog.Uint64("root_pid", uint64(root)))
+		ok++
+	}
+	return ok
+}
+
+// drainExcluded returns the number of events dropped in the kernel as belonging
+// to the harness tree since the previous call, summed over all collectors.
+//
+// A collector whose counter went backwards had its maps recreated (collector
+// reload) and is re-baselined rather than subtracted: on unsigned counters the
+// subtraction would add ~2^64 to the Prometheus series in a single tick and
+// destroy it for the life of the process — the same trap the path-filter drain
+// guards against.
+func (r *observerFilterRegistry) drainExcluded() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var delta uint64
+	for name, c := range r.ctrls {
+		total, err := c.ReadExcludedCount()
+		if err != nil {
+			slog.Warn("observer_filter: failed to read excluded counter",
+				slog.String("collector", name), slog.Any("error", err))
+			continue
+		}
+		prev := r.lastExcluded[name]
+		if total < prev {
+			slog.Debug("observer_filter: excluded counter reset, re-baselining",
+				slog.String("collector", name),
+				slog.Uint64("previous", prev), slog.Uint64("current", total))
+		} else {
+			delta += total - prev
+		}
+		r.lastExcluded[name] = total
+	}
+	return delta
 }

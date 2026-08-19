@@ -91,13 +91,19 @@ int BPF_PROG(lsm_cgroup_attach_task, struct cgroup *dst_cgrp,
 	 * here it lands in the event's own leaf comm (Alert.Comm), and
 	 * cgroup_attach_task fires close to process birth (clone3 with
 	 * CLONE_INTO_CGROUP), racing leader's own comm initialization — this
-	 * is why comm can come back fully empty (3 alerts observed on
-	 * замер №2.9), not just garbled. Fix should mirror parent_comm's
-	 * existing pattern below or move to bpf_get_current_comm() if the
-	 * hook ever runs on leader's own task; not done here — needs
-	 * `make generate` (clang+linux-headers), unavailable in the dev
-	 * session that added the userspace-side /proc fallback
-	 * (internal/bpf/events.go, CgroupEscapeRawEvent.ToTypesEvent).
+	 * is why comm can come back fully empty, not just garbled. This is a
+	 * real defect on THIS path, but NOT the source of finding #40 (13
+	 * empty-comm alerts on замер №2.9.1, plan.md, 5.9.2c): that batch was
+	 * proven to be entirely on the syscall path (11 anomaly_detection + 2
+	 * mitre_arp_spoof_raw_socket), with zero cgroup-escape alerts in the
+	 * run — this hook cannot have produced them. Do not point future
+	 * empty-comm investigations here without re-checking event_type
+	 * first. Fix should mirror parent_comm's existing pattern below or
+	 * move to bpf_get_current_comm() if the hook ever runs on leader's
+	 * own task; not done here — needs `make generate`
+	 * (clang+linux-headers), unavailable in the dev session that added
+	 * the userspace-side /proc fallback (internal/bpf/events.go,
+	 * CgroupEscapeRawEvent.ToTypesEvent).
 	 */
 	bpf_probe_read_kernel(&e->comm, sizeof(e->comm),
 			      BPF_CORE_READ(leader, comm));

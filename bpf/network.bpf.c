@@ -96,6 +96,13 @@ int BPF_KPROBE(trace_tcp_connect, struct sock *sk)
 		record_map_full(MAP_FULL_IDX_CONN_START);
 
 	/* Reserve space in ring buffer with sampling */
+	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
+	 * buffer. Placed here — after the content filters, immediately before the
+	 * reserve — so the counter means "events that would otherwise have been
+	 * emitted", which is what 5.9a's userspace counter meant. */
+	if (observer_should_drop())
+		return 0;
+
 	e = reserve_event_with_sampling(EVENT_TYPE_TCP_CONNECT, 0);
 	if (!e)
 		goto store_meta;
@@ -193,6 +200,13 @@ int BPF_KPROBE(trace_tcp_close, struct sock *sk, long timeout)
 	bpf_map_delete_elem(&conn_start_map, &sk_ptr);
 
 	meta = bpf_map_lookup_elem(&conn_meta_map, &sk_ptr);
+
+	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
+	 * buffer. Placed here — after the content filters, immediately before the
+	 * reserve — so the counter means "events that would otherwise have been
+	 * emitted", which is what 5.9a's userspace counter meant. */
+	if (observer_should_drop())
+		return 0;
 
 	e = reserve_event();
 	if (!e) {

@@ -21,9 +21,12 @@ import (
 
 // NetworkMaps holds the BPF maps exported by bpf/network.bpf.c.
 type NetworkMaps struct {
-	Events          *ebpf.Map `ebpf:"events"`
-	MapFullCounters *ebpf.Map `ebpf:"map_full_counters"`
-	SamplingConfig  *ebpf.Map `ebpf:"sampling_config"`
+	Events                   *ebpf.Map `ebpf:"events"`
+	MapFullCounters          *ebpf.Map `ebpf:"map_full_counters"`
+	ObserverExcludedCounters *ebpf.Map `ebpf:"observer_excluded_counters"`
+	ObserverRootPid          *ebpf.Map `ebpf:"observer_root_pid"`
+	ObserverTreeCache        *ebpf.Map `ebpf:"observer_tree_cache"`
+	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
 }
 
 // NetworkPrograms holds the BPF programs exported by bpf/network.bpf.c.
@@ -55,6 +58,15 @@ func (o *NetworkObjects) Close() error {
 	}
 	if o.SamplingConfig != nil {
 		errs = append(errs, o.SamplingConfig.Close())
+	}
+	if o.ObserverExcludedCounters != nil {
+		errs = append(errs, o.ObserverExcludedCounters.Close())
+	}
+	if o.ObserverRootPid != nil {
+		errs = append(errs, o.ObserverRootPid.Close())
+	}
+	if o.ObserverTreeCache != nil {
+		errs = append(errs, o.ObserverTreeCache.Close())
 	}
 	return errors.Join(errs...)
 }

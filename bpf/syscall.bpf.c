@@ -53,6 +53,13 @@ int trace_sys_enter(struct sys_enter_args *ctx)
 			return 0;
 	}
 
+	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
+	 * buffer. Placed here — after the content filters, immediately before the
+	 * reserve — so the counter means "events that would otherwise have been
+	 * emitted", which is what 5.9a's userspace counter meant. */
+	if (observer_should_drop())
+		return 0;
+
 	/* Reserve space in ring buffer with sampling */
 	e = reserve_event_with_sampling(EVENT_TYPE_SYSCALL, 0);
 	if (!e)
@@ -104,6 +111,13 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 		if (!syscall_is_monitored(ctx->syscall_nr))
 			return 0;
 	}
+
+	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
+	 * buffer. Placed here — after the content filters, immediately before the
+	 * reserve — so the counter means "events that would otherwise have been
+	 * emitted", which is what 5.9a's userspace counter meant. */
+	if (observer_should_drop())
+		return 0;
 
 	/* Reserve space in ring buffer with sampling */
 	e = reserve_event_with_sampling(EVENT_TYPE_SYSCALL, 0);

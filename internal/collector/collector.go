@@ -3,8 +3,10 @@ package collector
 
 import (
 	"context"
+	"encoding/hex"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -121,4 +123,59 @@ func (d *dropLogger) record(logger *slog.Logger, collectorName string) {
 			slog.Int64("dropped_count", count),
 			slog.String("window", d.interval.String()))
 	}
+}
+
+// malformedLogger throttles hex-dump diagnostic warnings for one
+// malformed-record reason (see exporter.EventsMalformed) to at most one line
+// per interval, keeping the most recent offending sample. Wave 5.9.2c
+// (finding #40): the counter alone says a reason fired; the sample is what
+// lets a human confirm which hypothesis it actually is, without flooding the
+// log at ring-buffer rate.
+type malformedLogger struct {
+	interval    time.Duration
+	lastLogTime atomic.Int64
+	pending     atomic.Int64
+
+	mu         sync.Mutex
+	lastSample []byte
+}
+
+func newMalformedLogger(interval time.Duration) *malformedLogger {
+	return &malformedLogger{interval: interval}
+}
+
+// record notes one occurrence of reason, keeping up to the first 48 bytes of
+// raw as the sample logged when the throttle window next opens.
+func (m *malformedLogger) record(logger *slog.Logger, collectorName, reason string, raw []byte) {
+	m.pending.Add(1)
+
+	n := len(raw)
+	if n > 48 {
+		n = 48
+	}
+	m.mu.Lock()
+	m.lastSample = append(m.lastSample[:0], raw[:n]...)
+	m.mu.Unlock()
+
+	now := time.Now().UnixNano()
+	last := m.lastLogTime.Load()
+	if now-last < m.interval.Nanoseconds() {
+		return
+	}
+	if !m.lastLogTime.CompareAndSwap(last, now) {
+		return
+	}
+	count := m.pending.Swap(0)
+	if count == 0 {
+		return
+	}
+	m.mu.Lock()
+	sample := hex.EncodeToString(m.lastSample)
+	m.mu.Unlock()
+	logger.Warn("malformed event record",
+		slog.String("collector", collectorName),
+		slog.String("reason", reason),
+		slog.Int64("count", count),
+		slog.String("window", m.interval.String()),
+		slog.String("sample_hex", sample))
 }

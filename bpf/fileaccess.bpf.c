@@ -220,6 +220,13 @@ int trace_open(struct trace_event_raw_sys_enter *ctx)
 	if (kernel_filter_enabled() && path_is_denied(path.path))
 		return 0;
 
+	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
+	 * buffer. Placed here — after the content filters, immediately before the
+	 * reserve — so the counter means "events that would otherwise have been
+	 * emitted", which is what 5.9a's userspace counter meant. */
+	if (observer_should_drop())
+		return 0;
+
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
 	if (!e)
 		return 0;
@@ -336,6 +343,13 @@ int trace_read(struct trace_event_raw_sys_enter *ctx)
 	if (kernel_filter_enabled() && have_path && path_is_denied(fdp->path))
 		return 0;
 
+	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
+	 * buffer. Placed here — after the content filters, immediately before the
+	 * reserve — so the counter means "events that would otherwise have been
+	 * emitted", which is what 5.9a's userspace counter meant. */
+	if (observer_should_drop())
+		return 0;
+
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
 	if (!e)
 		return 0;
@@ -394,6 +408,13 @@ int trace_write(struct trace_event_raw_sys_enter *ctx)
 
 	have_path = fd_path_lookup(tgid, fd, fdp);
 	if (kernel_filter_enabled() && have_path && path_is_denied(fdp->path))
+		return 0;
+
+	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
+	 * buffer. Placed here — after the content filters, immediately before the
+	 * reserve — so the counter means "events that would otherwise have been
+	 * emitted", which is what 5.9a's userspace counter meant. */
+	if (observer_should_drop())
 		return 0;
 
 	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);

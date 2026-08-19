@@ -1,11 +1,14 @@
 package correlator
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zugolO/ebpf-guard/pkg/types"
+	"gopkg.in/yaml.v3"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,4 +325,135 @@ func TestReferencedSyscalls(t *testing.T) {
 	}
 	// Default monitored syscalls are always merged in.
 	assertContainsU32(59)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UnreachableSyscallRules (wave 5.9.2b, finding #39)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestUnreachableSyscallRules(t *testing.T) {
+	rules := []Rule{
+		// nr entirely outside the allowlist -> unreachable.
+		{ID: "unreachable_single", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"999"}}, Action: ActionAlert},
+		// nr set with a partial hit -> reachable, not reported.
+		{ID: "partially_reachable", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: OpIn, Values: []string{"59", "999"}}, Action: ActionAlert},
+		// nr fully inside the allowlist -> reachable.
+		{ID: "reachable", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"59"}}, Action: ActionAlert},
+		// No numeric "nr" condition at all (e.g. drift's string-valued nr) -> not reported,
+		// since there's nothing to intersect against the allowlist.
+		{ID: "non_numeric_nr", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"ptrace"}}, Action: ActionAlert},
+		// Not a syscall rule -> ignored regardless of nr.
+		{ID: "not_syscall", EventType: types.EventDNS, Condition: RuleCondition{Field: "qname", Op: OpEquals, Values: []string{"evil.com"}}, Action: ActionAlert},
+		// Unreachable nr via a ConditionGroup, not a top-level Condition.
+		{ID: "unreachable_group", EventType: types.EventSyscall, ConditionGroup: &RuleConditionGroup{
+			Operator:   "or",
+			Conditions: []RuleCondition{{Field: "nr", Op: OpIn, Values: []string{"998"}}},
+		}, Action: ActionAlert},
+	}
+	re := NewRuleEngine(rules)
+	allowlist := []int{59, 322, 101}
+
+	unreachable := re.UnreachableSyscallRules(allowlist)
+
+	assert.ElementsMatch(t, []string{"unreachable_single", "unreachable_group"}, unreachable)
+}
+
+// TestUnreachableSyscallRules_RepoRuleCount is a regression guard for finding
+// #39: it loads the real rules/*.yaml tree and fails if the count of
+// syscall rules with no reachable "nr" grows past the wave 5.9.2b ceiling
+// (started at 27, capped at ≤20 by that wave) without a matching
+// intentional-loss.txt entry, or if the mechanism itself stops flagging an
+// obviously-unmonitored syscall number.
+//
+// The allowlist is READ FROM config/config.yaml rather than restated here.
+// A copy would be a fourth place holding the same list (the wave found three
+// and a 241/298 mismatch between them), and it would drift exactly the way
+// finding #39 describes: the test would keep passing against the numbers it
+// remembers while the agent runs on different ones.
+func TestUnreachableSyscallRules_RepoRuleCount(t *testing.T) {
+	rules, err := LoadRulesFromDir("../../rules")
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	re := NewRuleEngine(rules)
+
+	allowlist := monitoredSyscallsFromConfig(t, "../../config/config.yaml")
+	require.NotEmpty(t, allowlist, "config.yaml must carry a kernel_filter allowlist for this test to mean anything")
+
+	unreachable := re.UnreachableSyscallRules(allowlist)
+	if len(unreachable) > 20 {
+		t.Errorf("wave 5.9.2b ceiling exceeded: %d syscall rules have no reachable nr "+
+			"(want <=20, rules must either get their nr opened in the allowlist or be "+
+			"recorded in deploy/docker-test-setup/attacks/intentional-loss.txt): %v",
+			len(unreachable), unreachable)
+	}
+
+	// Criterion 5.9.2b is "≤20 AND every survivor has a line in
+	// intentional-loss.txt with a reason" — the count alone was checked here,
+	// the second half only by hand. Checking it by hand is what let 27 rules
+	// accumulate unnoticed in the first place, so it is checked here too: a
+	// new mute rule now fails this test until it is either given an allowlist
+	// entry or recorded as an intentional loss.
+	recorded := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/intentional-loss.txt")
+	for _, id := range unreachable {
+		assert.Contains(t, recorded, id,
+			"rule %q has no reachable nr in the kernel allowlist and no line in intentional-loss.txt: "+
+				"either open its syscall (and add an attack step) or record why it cannot fire", id)
+	}
+
+	// The mechanism itself must still catch an obviously unmonitored syscall,
+	// so the ceiling check above can't silently pass because the detector broke.
+	augmented := append(append([]Rule{}, rules...), Rule{
+		ID:        "zz_canary_unmonitored_nr",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"9001"}},
+		Action:    ActionAlert,
+	})
+	canaryUnreachable := NewRuleEngine(augmented).UnreachableSyscallRules(allowlist)
+	assert.Contains(t, canaryUnreachable, "zz_canary_unmonitored_nr")
+}
+
+// monitoredSyscallsFromConfig reads bpf.kernel_filter.monitored_syscalls out of
+// a config file. It parses only that key rather than the whole config struct so
+// the test does not depend on internal/config (which imports the correlator
+// package's siblings) and stays readable as a fixture reader.
+func monitoredSyscallsFromConfig(t *testing.T, path string) []int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	var doc struct {
+		BPF struct {
+			KernelFilter struct {
+				MonitoredSyscalls []int `yaml:"monitored_syscalls"`
+			} `yaml:"kernel_filter"`
+		} `yaml:"bpf"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return doc.BPF.KernelFilter.MonitoredSyscalls
+}
+
+// intentionalLossRuleIDs reads the bare rule_id lines out of
+// intentional-loss.txt. The file's format is one rule_id per line with no
+// trailing text — run-gate.sh compares it against detected rule IDs with
+// `comm -12`, so anything after the id would break the match there.
+func intentionalLossRuleIDs(t *testing.T, path string) map[string]struct{} {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	ids := map[string]struct{}{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		ids[line] = struct{}{}
+	}
+	return ids
 }

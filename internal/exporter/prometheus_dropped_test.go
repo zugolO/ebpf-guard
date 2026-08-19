@@ -53,6 +53,42 @@ func TestRecordLogLine(t *testing.T) {
 	assert.Equal(t, float64(1), errorCount, "expected 1 ERROR log")
 }
 
+// TestRecordEventDrop_BothHopsFeedTheSameWatcher is the regression test for
+// wave 5.9.2a (finding #38): before RecordEventDrop existed, only the
+// router_to_queue hop updated the last-drop-time watcher that degradation
+// status reads — a collector losing every event at ringbuf_to_router (its
+// own readLoop's output channel being full) could never flip /health to
+// degraded. Both hops must now mark the same clock.
+func TestRecordEventDrop_BothHopsFeedTheSameWatcher(t *testing.T) {
+	EventsDropped.Reset()
+	dropBreakdownMu.Lock()
+	dropBreakdown = map[dropHop]uint64{}
+	dropBreakdownMu.Unlock()
+	lastHighPriorityDropTime.Store(0)
+	lastLowPriorityDropTime.Store(0)
+
+	assert.Equal(t, int64(0), LastHighPriorityDropTime())
+	assert.Equal(t, int64(0), LastLowPriorityDropTime())
+
+	// ringbuf_to_router, bulk (fileaccess) — must mark the low-priority clock,
+	// exactly as router_to_queue already did before this wave.
+	RecordEventDrop("fileaccess", "ringbuf_to_router", false)
+	assert.NotZero(t, LastLowPriorityDropTime(), "ringbuf_to_router drop must mark the low-priority watcher")
+	assert.Zero(t, LastHighPriorityDropTime(), "a bulk-priority drop must not mark the protected watcher")
+
+	// router_to_queue, protected (network) — the previously-working hop must
+	// keep working after being routed through the same function.
+	RecordEventDrop("network", "router_to_queue", true)
+	assert.NotZero(t, LastHighPriorityDropTime(), "router_to_queue drop must mark the high-priority watcher")
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(EventsDropped.WithLabelValues("fileaccess", "ringbuf_to_router")))
+	assert.Equal(t, float64(1), testutil.ToFloat64(EventsDropped.WithLabelValues("network", "router_to_queue")))
+
+	breakdown := DropBreakdownSnapshot()
+	assert.Equal(t, uint64(1), breakdown["fileaccess/ringbuf_to_router"])
+	assert.Equal(t, uint64(1), breakdown["network/router_to_queue"])
+}
+
 func TestSetCollectorUp(t *testing.T) {
 	// Reset metric before test
 	CollectorUp.Reset()

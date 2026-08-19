@@ -353,46 +353,34 @@ journalctl -u "$SERVICE" --since "@$(( $(date +%s) - DURATION - 600 ))" --no-pag
     echo "событий исключено как дерево измерителя за прогон (СОБЫТИЯ, не алерты — см. дельту стора выше отдельной величиной): $excluded_delta"
     echo
     echo "--- critical / confirmed attack на idle (должно быть 0 — P1-6/P1-13) ---"
-    # 5.9.1b (находка №35): alerts-end.json — это ВЕСЬ стор на момент финального
-    # среза, не только то, что произошло за это измерительное окно. Раньше
-    # здесь считался абсолют — любой incident_confirmed_attack, оставшийся в
-    # сторе с ДО начала окна (например, от запуска пайплайна по ssh при
-    # непустом сторе), навсегда засчитывался волне в минус, хотя гигиена
-    # прогона (очистка стора шагом 1 пайплайна) тут ни при чём: подготовка
-    # стенда между очисткой и стартом окна — отдельная, ненулевая величина
-    # сама по себе (см. открытый вопрос 5.9f), и её надо печатать отдельно,
-    # а не сваливать в один счётчик с окном.
-    #
-    # Тот же дефект со счётом, что починен выше по файлу (5.8b): grep -c
-    # считает СТРОКИ, а /api/v1/alerts отдаёт минифицированный JSON одной
-    # строкой — печаталось 0 или 1 независимо от реального числа инцидентов.
-    # jq считает элементы; grep -o оставлен запасным путём без разбивки по
-    # окну на случай, если jq не установлен (окно тогда не проверяется).
-    if command -v jq >/dev/null 2>&1 && [[ -n "${RUN_START_TS:-}" && -n "${RUN_END_TS:-}" ]]; then
-        confirmed_attack_total=$(jq '[.[] | select(.rule_id == "incident_confirmed_attack")] | length' \
-            "$OUT/alerts-end.json" 2>/dev/null || echo "n/a")
-        confirmed_attack=$(jq --arg start "$RUN_START_TS" --arg end "$RUN_END_TS" '
-            def toepoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
-            ($start | toepoch) as $s | ($end | toepoch) as $e |
-            [.[] | select(.rule_id == "incident_confirmed_attack")
-                 | select((.timestamp | toepoch) >= $s and (.timestamp | toepoch) <= $e)] | length
-        ' "$OUT/alerts-end.json" 2>/dev/null || echo "n/a")
-        echo "incident_confirmed_attack (окно $RUN_START_TS .. $RUN_END_TS): $confirmed_attack"
-        if [[ "$confirmed_attack_total" =~ ^[0-9]+$ && "$confirmed_attack" =~ ^[0-9]+$ ]]; then
-            outside_window=$((confirmed_attack_total - confirmed_attack))
-            echo "наблюдение: incident_confirmed_attack вне окна (до старта или после конца измерения): $outside_window"
-        fi
-    elif command -v jq >/dev/null 2>&1; then
-        confirmed_attack=$(jq '[.[] | select(.rule_id == "incident_confirmed_attack")] | length' \
-            "$OUT/alerts-end.json" 2>/dev/null || echo "n/a")
-        echo "ВНИМАНИЕ: RUN_START_TS/RUN_END_TS не заданы — incident_confirmed_attack ниже АБСОЛЮТНЫЙ, не по окну."
-        echo "incident_confirmed_attack (абсолют, весь стор): $confirmed_attack"
+    # 5.9.2e (находка №42): две строки здесь были неверны по-разному, но одним
+    # классом (№23/№35, третье появление в линейке). "attack" читался как
+    # incident_confirmed_attack по alerts-end.json с оконным jq-фильтром на
+    # timestamp — на замере №2.9.1 jq-выражение падало (формат `.timestamp` в
+    # сторе не совпадает с ожидаемым `toepoch`), и `|| echo "n/a"` печатал
+    # "нет данных", хотя реальный ответ — 0 инцидентов confirmed_attack за
+    # окно, что и подтверждает отсутствие серии verdict="attack" в обоих
+    # срезах метрики. "suspicious" печатался сырым `grep` по metrics-end.txt
+    # — это КУМУЛЯТИВНОЕ значение счётчика с момента старта процесса
+    # (33 на замере №2.9.1), а не дельта за idle-час (22: 11 уже было на
+    # старте окна, до его начала). Обе величины теперь считаются одинаково —
+    # дельтой ebpf_guard_incidents_total{verdict=…} между metrics-start.txt и
+    # metrics-end.txt, тем же способом, что и ebpf_guard_alerts_total выше.
+    # "n/a" печатается только если сам файл среза недоступен: отсутствие
+    # серии в присутствующем файле — это 0, а не «нет данных» (тот же
+    # принцип, что уже применён к дельте алертов выше).
+    if [[ -f "$OUT/metrics-start.txt" && -f "$OUT/metrics-end.txt" ]]; then
+        for verdict in attack suspicious; do
+            v_start=$(grep -F "ebpf_guard_incidents_total{verdict=\"$verdict\"}" "$OUT/metrics-start.txt" 2>/dev/null \
+                | awk '{s+=$NF} END{printf "%d", s+0}')
+            v_end=$(grep -F "ebpf_guard_incidents_total{verdict=\"$verdict\"}" "$OUT/metrics-end.txt" 2>/dev/null \
+                | awk '{s+=$NF} END{printf "%d", s+0}')
+            echo "$verdict (дельта за idle-час, ebpf_guard_incidents_total{verdict=\"$verdict\"}): $(( ${v_end:-0} - ${v_start:-0} ))"
+        done
     else
-        confirmed_attack=$(grep -o 'incident_confirmed_attack' "$OUT/alerts-end.json" 2>/dev/null | wc -l | tr -d ' ')
-        echo "ВНИМАНИЕ: jq не найден — incident_confirmed_attack ниже АБСОЛЮТНЫЙ, не по окну."
-        echo "incident_confirmed_attack (абсолют, весь стор): $confirmed_attack"
+        echo "attack: n/a (metrics-start.txt/metrics-end.txt недоступны)"
+        echo "suspicious: n/a (metrics-start.txt/metrics-end.txt недоступны)"
     fi
-    grep '^ebpf_guard_incidents_total' "$OUT/metrics-end.txt" 2>/dev/null
     echo
     echo "--- CPU watchdog циклы в журнале (не должно быть на idle) ---"
     echo "reducing:  $(grep -c 'cpu pressure: reducing' "$OUT/journal.log" 2>/dev/null)"

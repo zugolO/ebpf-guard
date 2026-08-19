@@ -79,6 +79,14 @@ type EngineStats struct {
 	// cmd/ebpf-guard/main.go) before generating any events of its own —
 	// closing the registration-window gap in находка №34 (5.9.1a).
 	ObserverRootPID uint32 `json:"observer_root_pid"`
+	// ObserverKernelSide reports which of the two observer-tree filters is
+	// actually running: true = the in-kernel one (5.9.2g), false = the
+	// userspace walk in the correlator (5.9a, kept as the fallback for when
+	// the BPF program fails to load). A run whose "share of the observer tree"
+	// criterion was measured on the fallback is a materially different
+	// measurement from one measured in the kernel, and without this field the
+	// two are indistinguishable after the fact.
+	ObserverKernelSide bool `json:"observer_kernel_side"`
 }
 
 // ProfilerStats contains profiler learning statistics.

@@ -21,14 +21,17 @@ import (
 
 // FileaccessMaps holds the BPF maps exported by bpf/fileaccess.bpf.c.
 type FileaccessMaps struct {
-	AgentPidMap            *ebpf.Map `ebpf:"agent_pid_map"`
-	CommFilterMap          *ebpf.Map `ebpf:"comm_filter_map"`
-	Events                 *ebpf.Map `ebpf:"events"`
-	KernelFilterConfig     *ebpf.Map `ebpf:"kernel_filter_config"`
-	PathFilterDropCounters *ebpf.Map `ebpf:"path_filter_drop_counters"`
-	PathFilterMap          *ebpf.Map `ebpf:"path_filter_map"`
-	SamplingConfig         *ebpf.Map `ebpf:"sampling_config"`
-	SyscallFilterMap       *ebpf.Map `ebpf:"syscall_filter_map"`
+	AgentPidMap              *ebpf.Map `ebpf:"agent_pid_map"`
+	CommFilterMap            *ebpf.Map `ebpf:"comm_filter_map"`
+	Events                   *ebpf.Map `ebpf:"events"`
+	KernelFilterConfig       *ebpf.Map `ebpf:"kernel_filter_config"`
+	ObserverExcludedCounters *ebpf.Map `ebpf:"observer_excluded_counters"`
+	ObserverRootPid          *ebpf.Map `ebpf:"observer_root_pid"`
+	ObserverTreeCache        *ebpf.Map `ebpf:"observer_tree_cache"`
+	PathFilterDropCounters   *ebpf.Map `ebpf:"path_filter_drop_counters"`
+	PathFilterMap            *ebpf.Map `ebpf:"path_filter_map"`
+	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
+	SyscallFilterMap         *ebpf.Map `ebpf:"syscall_filter_map"`
 }
 
 // FileaccessPrograms holds the BPF programs exported by bpf/fileaccess.bpf.c.
@@ -91,6 +94,15 @@ func (o *FileaccessObjects) Close() error {
 	}
 	if o.SyscallFilterMap != nil {
 		errs = append(errs, o.SyscallFilterMap.Close())
+	}
+	if o.ObserverExcludedCounters != nil {
+		errs = append(errs, o.ObserverExcludedCounters.Close())
+	}
+	if o.ObserverRootPid != nil {
+		errs = append(errs, o.ObserverRootPid.Close())
+	}
+	if o.ObserverTreeCache != nil {
+		errs = append(errs, o.ObserverTreeCache.Close())
 	}
 	return errors.Join(errs...)
 }

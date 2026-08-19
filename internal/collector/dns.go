@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -289,6 +290,7 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			c.metrics.eventsDropped.Inc()
+			exporter.RecordEventDrop("dns", "ringbuf_to_router", defaultEventPriority(event.Type))
 			c.dropLogger.record(slog.Default(), "dns")
 			c.lostTotal.Add(1)
 		})

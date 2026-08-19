@@ -284,6 +284,15 @@ type CorrelationEngine struct {
 	// observerTree records PIDs known to be the observer root or a descendant
 	// of it, grown the same incremental way as selfTree.
 	observerTree sync.Map // map[uint32]struct{}
+	// observerKernelSide is set once the in-kernel filter (5.9.2g) has the
+	// harness root published to at least one collector's observer_root_pid
+	// map. From that point the userspace walk below is dead weight: BPF drops
+	// harness events before bpf_ringbuf_reserve, so anything reaching here is
+	// by definition not in the tree. Kept as a runtime switch rather than a
+	// config flag because the BPF program may fail to load (verifier, missing
+	// BTF, stub build) — in that case this stays false and the userspace path
+	// remains the filter, which is the whole reason it is not simply deleted.
+	observerKernelSide atomic.Bool
 	// eventsExcludedTotal counts events dropped by reason (currently only
 	// "observer_tree"), separate from selfExcludedEvents so existing 5.8e
 	// dashboards built on ebpf_guard_self_excluded_events_total stay
@@ -1165,6 +1174,61 @@ func (ce *CorrelationEngine) SetObserverRoot(pid uint32) {
 	}
 }
 
+// observerKernelFilteredType reports whether the in-kernel observer filter
+// (5.9.2g) runs for events of this type, i.e. whether the BPF object that
+// emits them calls observer_should_drop() before reserving the record.
+//
+// Kept next to SetObserverKernelSide so the two are read together: the flag
+// says "the kernel side is live", this says "for which streams" — and only
+// their conjunction may skip the userspace walk. Extend this list in the same
+// commit that adds observer_should_drop() to another .bpf.c, never before.
+func observerKernelFilteredType(t types.EventType) bool {
+	switch t {
+	case types.EventSyscall, // bpf/syscall.bpf.c (sys_enter, sys_exit)
+		types.EventFileAccess,                      // bpf/fileaccess.bpf.c (open, read, write)
+		types.EventTCPConnect, types.EventNetClose: // bpf/network.bpf.c (tcp_connect, tcp_close)
+		return true
+	default:
+		return false
+	}
+}
+
+// SetObserverKernelSide records whether the in-kernel observer filter (5.9.2g)
+// is live. When it is, ProcessEvent skips the userspace ancestry walk entirely:
+// the events that walk existed to discard never leave the kernel.
+//
+// Callers must only pass true after a successful write to observer_root_pid —
+// not merely because the feature is enabled in config. Setting it optimistically
+// would disable both filters at once if the BPF side failed to load, which is
+// the silent-blindness failure mode this wave exists to remove.
+func (ce *CorrelationEngine) SetObserverKernelSide(active bool) {
+	if ce.observerKernelSide.Swap(active) != active {
+		slog.Info("correlator: observer-tree exclusion moved",
+			slog.String("filter", map[bool]string{true: "kernel (5.9.2g)", false: "userspace (5.9a)"}[active]))
+	}
+}
+
+// RecordObserverExcludedN adds n to
+// ebpf_guard_events_excluded_total{reason="observer_tree"} on behalf of the
+// in-kernel filter, which counts its own drops in a BPF per-CPU array that
+// userspace drains periodically.
+//
+// Callers pass the DELTA since their last read, never the cumulative BPF total:
+// this is a Prometheus counter, and adding a cumulative value each tick would
+// make the series grow quadratically.
+func (ce *CorrelationEngine) RecordObserverExcludedN(n uint64) {
+	if n == 0 {
+		return
+	}
+	ce.eventsExcludedTotal.WithLabelValues("observer_tree").Add(float64(n))
+}
+
+// ObserverKernelSide reports whether the in-kernel observer filter is live, so
+// /debug/state can show which of the two filters actually ran for a given run.
+func (ce *CorrelationEngine) ObserverKernelSide() bool {
+	return ce.observerKernelSide.Load()
+}
+
 // ObserverRoot returns the harness root PID currently set via SetObserverRoot
 // (0 if unset), so callers like /debug/state (5.9.1a) can confirm the agent's
 // 2s file poller has actually picked up a registration before the harness
@@ -1208,13 +1272,29 @@ func (ce *CorrelationEngine) isObserverDescendant(e types.Event) bool {
 					ce.observerTree.Store(pid, struct{}{})
 					return true
 				}
+				// 5.9.2d (находка №41): a chain that does not itself reach
+				// root can still hang off a PID already known to be in the
+				// tree. This used to `return false` here, skipping the memo
+				// checks below entirely — so a short-lived pipeline leaf
+				// (`… | awk`, `… | tee`, `$(date)`), whose chain is rebuilt
+				// from /proc after the intervening shell already exited and
+				// therefore breaks at the first unresolvable hop, escaped the
+				// filter even though its parent was recorded. That was 7 of
+				// the 41 idle-hour alerts on замер №2.9.1, and both of the
+				// process_chain-less `grep` incidents that failed criterion 10.
+				if _, ok := ce.observerTree.Load(node.PID); ok {
+					ce.observerTree.Store(pid, struct{}{})
+					return true
+				}
 			}
-			return false
+			// Fall through to the one-hop checks below rather than returning:
+			// an unresolved-to-root chain is "don't know", not "not a member".
 		}
 	}
-	// No lineage tracker, or its ancestry for pid couldn't be resolved
-	// (disabled, or both the event and /proc lacked ppid): fall back to the
-	// one-hop check rather than treating "unresolved" as "not excluded".
+	// No lineage tracker, its ancestry for pid couldn't be resolved (disabled,
+	// or both the event and /proc lacked ppid), or the chain resolved without
+	// reaching root: fall back to the one-hop check rather than treating
+	// "unresolved" as "not excluded".
 	if ppid == root {
 		ce.observerTree.Store(pid, struct{}{})
 		return true
@@ -1659,7 +1739,26 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	// lock + comparison) for every PID whose ancestry the later call already
 	// built, so the added cost is confined to observer-tree evaluation on
 	// test-only deployments.
-	if ce.observerExcludeEnabled {
+	//
+	// 5.9.2g: when the in-kernel filter is live this block is skipped for the
+	// event types that filter actually covers. The kernel decides membership
+	// with one LRU lookup before the ring buffer, so such an event that gets
+	// here is already known not to be in the harness tree — repeating the
+	// lineage walk would cost a map lookup (and, on a miss, a /proc bootstrap)
+	// per event to re-derive an answer we have. The counter is published from
+	// the BPF per-CPU counter instead, on the same
+	// ebpf_guard_events_excluded_total{reason="observer_tree"} series.
+	//
+	// The bypass is scoped BY EVENT TYPE, not global: observer_should_drop()
+	// is compiled into three BPF objects only (syscall, fileaccess, network —
+	// see bpf/common.h and the call sites in those .bpf.c files), while dns,
+	// tls, lsm/kmod, privesc, iouring, gpu, bpfmonitor and http_uprobe emit
+	// through their own objects with no such check. A global bypass therefore
+	// turned OFF harness exclusion for those collectors the moment the kernel
+	// side came up — the harness's own curl/dig traffic would re-enter the
+	// "share of the observer tree" numerator through an uncovered collector,
+	// which is the very quantity this wave is measured on.
+	if ce.observerExcludeEnabled && !(ce.observerKernelSide.Load() && observerKernelFilteredType(e.Type)) {
 		if ce.lineageTracker != nil {
 			ce.lineageTracker.Track(e)
 		}

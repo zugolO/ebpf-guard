@@ -245,6 +245,106 @@ run_chmod_attack() {
     echo ""
 }
 
+# 5.9.2b (находка №39): attack-сторона для трёх сисколлов, чей вход в
+# in-kernel allowlist эта волна открывает впервые — setuid (105), bpf (321),
+# init_module/finit_module/delete_module (175/313/176). Без шага здесь
+# "вход открыт" неотличимо от "вход закрыт": критерий 5.9.2b требует, чтобы
+# каждый новый номер был либо покрыт срабатыванием на attack-прогоне, либо
+# записан в intentional-loss.txt с причиной — не подтверждённые тут остаются
+# в списке (см. deploy/docker-test-setup/attacks/intentional-loss.txt).
+run_setuid_attack() {
+    log "==========================================="
+    log "ЗАПУСК SETUID АТАКИ (5.9.2b, sigma_setuid_syscall)"
+    log "==========================================="
+
+    if command -v python3 &> /dev/null; then
+        # setuid(getuid()) — no-op privilege change, invokes syscall 105
+        # directly without altering the process's actual privileges.
+        python3 -c 'import os; os.setuid(os.getuid())' 2>/dev/null \
+            && log "setuid(getuid()) выполнен — ожидается срабатывание sigma_setuid_syscall" \
+            || warn "setuid-атака (5.9.2b) завершилась с ошибкой или пропущена"
+    else
+        warn "python3 не найден — setuid-атака (5.9.2b) пропущена"
+    fi
+    echo ""
+}
+
+run_bpf_attack() {
+    log "==========================================="
+    log "ЗАПУСК BPF(2) АТАКИ (5.9.2b, rootkit_bpf_*/ebpf_subversion_*)"
+    log "==========================================="
+
+    # Read-only bpf(2) subcommand (BPF_PROG_GET_NEXT_ID) — enumerates loaded
+    # programs without loading or modifying anything. Invokes syscall 321.
+    if command -v bpftool &> /dev/null; then
+        bpftool prog list >/dev/null 2>&1 \
+            && log "bpftool prog list выполнен — ожидается срабатывание bpf(2)-правил" \
+            || warn "bpf-атака (5.9.2b) завершилась с ошибкой (нет прав/BPF недоступен)"
+    else
+        warn "bpftool не найден — bpf-атака (5.9.2b) пропущена"
+    fi
+    echo ""
+}
+
+run_kmod_attack() {
+    log "==========================================="
+    log "ЗАПУСК KMOD АТАКИ (5.9.2b, rootkit_init_module_syscall/rootkit_delete_module_syscall)"
+    log "==========================================="
+
+    # ВАЖНО: `insmod /несуществующий.ko` НЕ вызывает finit_module вообще —
+    # kmod открывает файл сам и падает на ENOENT ещё в userspace, до всякого
+    # сисколла; то же с `rmmod несуществующий-модуль` (он смотрит
+    # /sys/module/... и выходит, не доходя до delete_module). Первая редакция
+    # шага 5.9.2b была написана именно так и не дала бы НИ ОДНОГО события —
+    # ровно тот класс «механизм не может сработать, а индикатор рядом печатает
+    # PASS», ради которого заведена волна. Поэтому:
+    #   * finit_module (313) — insmod на РЕАЛЬНО СУЩЕСТВУЮЩИЙ пустой файл:
+    #     kmod открывает его успешно и вызывает сисколл, ядро отвергает
+    #     содержимое (ENOEXEC). В ядро ничего не попадает.
+    #   * init_module (175) и delete_module (176) — прямым syscall(2) через
+    #     ctypes, с заведомо невалидными аргументами: сисколл вызывается и
+    #     возвращает ошибку, модуль не загружается и не выгружается.
+    local bogus_module="/tmp/ebpf-guard-canary-$TIMESTAMP.ko"
+    : > "$bogus_module"
+
+    if command -v insmod &> /dev/null; then
+        # `|| warn` обязателен: скрипт под `set -e`, а insmod здесь ВСЕГДА
+        # возвращает ненулевой код (ядро отвергает пустой файл). Без guard'а
+        # прогон обрывался бы прямо здесь — до get_final_metrics,
+        # generate_final_report и check_final_gate, то есть замер остался бы
+        # вообще без итоговых срезов и без гейта.
+        insmod "$bogus_module" >/dev/null 2>&1 \
+            || log "insmod $bogus_module отвергнут ядром (ожидаемо, ENOEXEC) — сисколл finit_module(313) вызван"
+    else
+        warn "insmod не найден — finit_module-часть kmod-атаки (5.9.2b) пропущена"
+    fi
+    rm -f "$bogus_module"
+
+    if command -v python3 &> /dev/null; then
+        # init_module(64 нулевых байта, 64, "") -> ENOEXEC;
+        # delete_module("несуществующий модуль", 0) -> ENOENT.
+        # Оба сисколла вызываются напрямую, потому что штатные утилиты до них
+        # не доходят: rmmod проверяет /sys/module/<name> в userspace и выходит
+        # с ошибкой, не вызвав delete_module вовсе.
+        rc=0
+        python3 - >/dev/null 2>&1 <<'PYEOF' || rc=$?
+import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+buf = ctypes.create_string_buffer(b"\x00" * 64)
+libc.syscall(175, buf, ctypes.c_size_t(64), b"")             # init_module
+libc.syscall(176, b"ebpf_guard_canary_mod", ctypes.c_int(0)) # delete_module
+PYEOF
+        if [ "$rc" -eq 0 ]; then
+            log "syscall(175)/syscall(176) вызваны напрямую (ожидаемо отвергнуты ядром) — ожидается rootkit_init_module_syscall/rootkit_delete_module_syscall"
+        else
+            warn "прямой вызов init_module/delete_module (5.9.2b) не выполнился, код $rc"
+        fi
+    else
+        warn "python3 не найден — init_module/delete_module-часть kmod-атаки (5.9.2b) пропущена"
+    fi
+    echo ""
+}
+
 # 5.9.1d, часть (в) — разбор owasp_log_tampering, не выполненный в сессии,
 # где закрывались 5.9.1c/5.9.1d. Причина установлена по снятым данным №2.9,
 # без нового прогона: правило матчит filename РЕГУЛЯРКОЙ
@@ -811,7 +911,7 @@ show_menu() {
     echo "3. Только Brute Force атаки"
     echo "4. Только SSRF атаки"
     echo "5. Только LDAP/CSRF атаки"
-    echo "6. Только canary-атаки (chmod 5.9.1e + log tamper 5.9.1d в)"
+    echo "6. Только canary-атаки (chmod 5.9.1e + log tamper 5.9.1d в + setuid/bpf/kmod 5.9.2b)"
     echo "7. Проверить состояние сервисов"
     echo "8. Собрать текущие метрики"
     echo "9. Сгенерировать отчет"
@@ -835,6 +935,9 @@ interactive_mode() {
                 run_ldap_csrf_attacks
                 run_chmod_attack
                 run_log_tamper_attack
+                run_setuid_attack
+                run_bpf_attack
+                run_kmod_attack
                 get_final_metrics
                 generate_final_report
                 check_final_gate
@@ -858,6 +961,9 @@ interactive_mode() {
             6)
                 run_chmod_attack
                 run_log_tamper_attack
+                run_setuid_attack
+                run_bpf_attack
+                run_kmod_attack
                 ;;
             7)
                 check_services
@@ -908,6 +1014,9 @@ full_run() {
     run_ldap_csrf_attacks
     run_chmod_attack
     run_log_tamper_attack
+    run_setuid_attack
+    run_bpf_attack
+    run_kmod_attack
     get_final_metrics
     generate_final_report
 

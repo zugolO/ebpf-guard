@@ -1747,11 +1747,61 @@ func (re *RuleEngine) ReferencedSyscalls() []uint32 {
 	return out
 }
 
+// UnreachableSyscallRules returns the IDs of loaded EventSyscall rules whose
+// "nr" condition (eq/in) names only syscall numbers absent from allowlist —
+// i.e. rules the in-kernel filter can never forward an event for. Rules with
+// no "nr" condition, or whose "nr" values are non-numeric (e.g. a raw syscall
+// name), are not reported: this function only flags the case findings #2/#39
+// described — a numeric nr set that provably never intersects the allowlist.
+//
+// allowlist should be the same syscall-number set actually enforced at
+// runtime (cfg.BPF.KernelFilter.MonitoredSyscalls, or the built-in default).
+// The result is sorted for stable output.
+func (re *RuleEngine) UnreachableSyscallRules(allowlist []int) []string {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	allowed := make(map[int64]struct{}, len(allowlist))
+	for _, nr := range allowlist {
+		allowed[int64(nr)] = struct{}{}
+	}
+
+	var out []string
+	for _, rule := range re.rules {
+		if rule.EventType != types.EventSyscall {
+			continue
+		}
+		hasNumericNr := false
+		reachable := false
+		for _, cond := range re.getAllConditions(rule) {
+			if cond.Field != "nr" || (cond.Op != OpEquals && cond.Op != OpIn) {
+				continue
+			}
+			for _, v := range cond.Values {
+				n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+				if err != nil {
+					continue
+				}
+				hasNumericNr = true
+				if _, ok := allowed[n]; ok {
+					reachable = true
+				}
+			}
+		}
+		if hasNumericNr && !reachable {
+			out = append(out, rule.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // defaultMonitoredSyscallsU32 returns the default monitored syscall list as
 // []uint32 so it can be used without importing the bpf package.
 func defaultMonitoredSyscallsU32() []uint32 {
 	return []uint32{
-		59, 322, 101, 126, 308, 272, 319, 165, 166, 155, 161, 311, 310, 241,
+		59, 322, 101, 126, 308, 272, 319, 165, 166, 155, 161, 311, 310,
+		298, // perf_event_open (wave 5.9.2b: was 241/semtimedop, mismatched its own comment)
 		321, // bpf(2) — always forward so ebpf-subversion rules fire even without an explicit rule
 	}
 }

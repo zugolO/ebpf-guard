@@ -2,6 +2,8 @@
 package exporter
 
 import (
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -57,6 +59,29 @@ var (
 			Help: "Fraction of events dropped in the last window (0-1), by queue priority",
 		},
 		[]string{"priority"},
+	)
+
+	// EventsMalformed counts ring-buffer records that failed a wire-format
+	// sanity check before being handed to a collector's normal parse path, by
+	// collector and reason.
+	//
+	// Wave 5.9.2c (finding #40): a prior investigation (5.9.1f) diagnosed 13
+	// empty-`comm` alerts as a torn read on the cgroup-escape path and shipped
+	// a /proc fallback there — but every one of those 13 alerts was on the
+	// syscall path, which cgroup-escape events never touch. This counter
+	// exists to name the real source with evidence instead of guessing again:
+	// "type_mismatch" (record's own Type field doesn't match the collector
+	// reading it — the record is not what the parser assumes it is),
+	// "nr_not_monitored" (syscall nr falls outside the in-kernel allowlist
+	// that should have dropped it before it ever reached userspace), and
+	// "empty_comm" (comm is a leading NUL after the first two hypotheses are
+	// ruled out, i.e. a genuine kernel-side torn/unfilled read on this path).
+	EventsMalformed = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_events_malformed_total",
+			Help: "Ring-buffer records that failed a wire-format sanity check, by collector and reason (type_mismatch, nr_not_monitored, empty_comm)",
+		},
+		[]string{"collector", "reason"},
 	)
 
 	// AlertsTotal counts generated alerts by rule, severity, namespace, pod, and node.
@@ -264,6 +289,82 @@ func RecordDropped(collector, reason string) {
 // P1-18b path-filter drop map) rather than observed one event at a time.
 func RecordDroppedN(collector, reason string, n uint64) {
 	EventsDropped.WithLabelValues(collector, reason).Add(float64(n))
+}
+
+// RecordMalformed increments the malformed-record counter with reason. See
+// EventsMalformed for the reason vocabulary.
+func RecordMalformed(collector, reason string) {
+	EventsMalformed.WithLabelValues(collector, reason).Inc()
+}
+
+// dropHop identifies which pipeline hop a drop happened at, paired with the
+// collector name, for the per-hop/per-collector breakdown RecordEventDrop
+// keeps alongside the Prometheus counter.
+type dropHop struct {
+	collector string
+	hop       string
+}
+
+var (
+	lastHighPriorityDropTime atomic.Int64 // UnixNano; 0 = never
+	lastLowPriorityDropTime  atomic.Int64 // UnixNano; 0 = never
+
+	dropBreakdownMu sync.Mutex
+	dropBreakdown   = map[dropHop]uint64{}
+)
+
+// RecordEventDrop records a dropped event at a named pipeline hop for a
+// collector and marks the shared high/low-priority drop-time watcher that
+// degradation-status computation reads.
+//
+// Wave 5.9.2a (finding #38): before this function existed, only the
+// router_to_queue hop (PriorityEventCollector's internal hand-off channel)
+// fed the watcher — the earlier ringbuf_to_router hop, where every one of the
+// ten collectors' readLoops drops events when their own output channel is
+// full, updated only the Prometheus counter. A collector could lose every
+// event at that hop and /health would still report healthy, because the
+// watcher never heard about it. Both hops now call this one function, using
+// the same priority classification (see defaultEventPriority) so a drop is
+// never invisible to degradation status depending on which hop it happened
+// at.
+func RecordEventDrop(collector, hop string, highPriority bool) {
+	EventsDropped.WithLabelValues(collector, hop).Inc()
+
+	now := time.Now().UnixNano()
+	if highPriority {
+		lastHighPriorityDropTime.Store(now)
+	} else {
+		lastLowPriorityDropTime.Store(now)
+	}
+
+	dropBreakdownMu.Lock()
+	dropBreakdown[dropHop{collector, hop}]++
+	dropBreakdownMu.Unlock()
+}
+
+// LastHighPriorityDropTime returns the UnixNano timestamp of the most recent
+// high-priority (protected-queue) drop recorded via RecordEventDrop, or 0 if
+// none has happened yet.
+func LastHighPriorityDropTime() int64 { return lastHighPriorityDropTime.Load() }
+
+// LastLowPriorityDropTime returns the UnixNano timestamp of the most recent
+// low-priority (bulk-queue) drop recorded via RecordEventDrop, or 0 if none
+// has happened yet.
+func LastLowPriorityDropTime() int64 { return lastLowPriorityDropTime.Load() }
+
+// DropBreakdownSnapshot returns a point-in-time copy of cumulative drops per
+// (collector, hop), keyed as "collector/hop", for use in the degraded-status
+// log line — so an operator can tell "losing fim signal" (fileaccess/
+// ringbuf_to_router) from "shedding file noise" (a different collector or
+// hop) instead of seeing only the aggregate protected/bulk counters.
+func DropBreakdownSnapshot() map[string]uint64 {
+	dropBreakdownMu.Lock()
+	defer dropBreakdownMu.Unlock()
+	out := make(map[string]uint64, len(dropBreakdown))
+	for k, v := range dropBreakdown {
+		out[k.collector+"/"+k.hop] = v
+	}
+	return out
 }
 
 // RecordAlert increments the alerts counter for the given rule, severity,

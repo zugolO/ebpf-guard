@@ -25,6 +25,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -666,6 +667,7 @@ func (c *KmodCollector) readLoop(ctx context.Context, out chan<- types.Event, re
 			continue
 		}
 		sendEvent(ctx, out, *event, c.strategy, func() {
+			exporter.RecordEventDrop("kmod", "ringbuf_to_router", defaultEventPriority(event.Type))
 			c.dropLogger.record(c.logger, "kmod")
 			c.lostTotal.Add(1)
 		})

@@ -582,7 +582,7 @@ func (c *TLSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("tls", "ringbuf_to_router")
+			exporter.RecordEventDrop("tls", "ringbuf_to_router", defaultEventPriority(event.Type))
 			c.dropLogger.record(c.logger, "tls")
 			c.lostTotal.Add(1)
 		})

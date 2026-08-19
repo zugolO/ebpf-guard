@@ -289,7 +289,8 @@ func (rl *RateLimiter) SetSamplingRate(eventType string, rate float64) {
 // DefaultMonitoredSyscalls returns the syscall numbers that should be monitored
 // by default: execve/execveat, ptrace, capset, setns, unshare, memfd_create,
 // mount, umount2, pivot_root, chroot, process_vm_writev, process_vm_readv,
-// perf_event_open.
+// perf_event_open, chmod/fchmod/fchmodat, init_module/finit_module/delete_module,
+// bpf, setuid.
 func DefaultMonitoredSyscalls() []int {
 	return []int{
 		59,  // execve
@@ -305,7 +306,15 @@ func DefaultMonitoredSyscalls() []int {
 		161, // chroot
 		311, // process_vm_writev
 		310, // process_vm_readv
-		241, // perf_event_open
+		298, // perf_event_open (was 241/semtimedop — wave 5.9.2b, finding #39)
+		90,  // chmod
+		91,  // fchmod
+		268, // fchmodat
+		175, // init_module
+		313, // finit_module
+		176, // delete_module
+		321, // bpf
+		105, // setuid
 	}
 }
 

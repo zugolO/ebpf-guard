@@ -436,6 +436,202 @@ static __always_inline bool pid_is_agent(void)
 }
 
 /*
+ * Observer-tree exclusion (находка №34 / 5.9.2g) — in-kernel version.
+ *
+ * WHY THIS IS IN THE KERNEL AND NOT IN USERSPACE.
+ * 5.9a implemented this filter in the correlator: every event walked the
+ * lineage tracker, and on a cache miss bootstrapped the ancestor chain from
+ * /proc. That is one map lookup plus, on the miss path, several syscalls and
+ * allocations — per event, on the hottest path in the agent, to decide that
+ * the event should be thrown away. It also filtered too late to help: the
+ * event had already crossed the ring buffer, the router and the per-shard
+ * buffer before anything looked at its ancestry. Here it costs one LRU hash
+ * lookup, and on a miss a bounded parent walk, before bpf_ringbuf_reserve.
+ *
+ * WHY A PARENT WALK AND NOT A sched_process_fork HOOK.
+ * The originally planned fix (5.9.1a) propagated membership at fork time.
+ * A walk is strictly better here for three reasons: it needs no fork hook and
+ * no exit hook (so no PID-lifetime bookkeeping and no leak when a process
+ * dies without one), it works for processes that already existed when the
+ * root PID was set (a fork hook only ever sees the future), and — the reason
+ * that actually matters — each BPF object built from this header keeps its
+ * OWN copy of every map, so a fork hook living in one object could never
+ * populate the maps consulted by the others. The walk derives membership from
+ * task_struct, which all objects can read.
+ *
+ * SEMANTICS. Returns true when the current task's tgid is the observer root
+ * or has it among its ancestors, walking real_parent up to OBSERVER_MAX_DEPTH
+ * hops or until init (tgid 1) / a NULL parent. Both outcomes are memoised in
+ * an LRU hash, so a long-lived harness child pays the walk once. Root 0 means
+ * "not configured" and short-circuits to false — same convention as
+ * agent_pid_map, and for the same reason: without it every process on the
+ * host would be compared against 0 in the window between BPF load and the
+ * first SetObserverRoot.
+ *
+ * TEST-ONLY. Userspace never sets a non-zero root unless
+ * correlator.observer_exclude.enabled is on (config-test.yaml). On a
+ * production deployment this is one array lookup returning 0.
+ */
+#define OBSERVER_MAX_DEPTH 12
+
+/* observer_root_pid — key 0 holds the harness root TGID, 0 = not configured. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} observer_root_pid SEC(".maps");
+
+/*
+ * observer_tree_cache — memoised membership, keyed by TGID.
+ *
+ * The value carries the root the verdict was decided under, not just the
+ * verdict. Каждый прогон харнесса — новый root PID, and a bare boolean would
+ * outlive the root that produced it: a PID cached as "in the tree" under the
+ * previous run would stay excluded under the next one (silently invisible to
+ * correlation), and a PID cached as "not in the tree" would stay visible even
+ * after becoming a descendant of the new root. The userspace filter had to
+ * flush its whole memo in SetObserverRoot for exactly this reason; tagging the
+ * entry makes a stale verdict simply not match, so there is nothing to flush
+ * and no window in which the two sides disagree.
+ *
+ * LRU eviction is what makes PID reuse tolerable: a recycled PID inherits a
+ * stale verdict only while the entry survives, and is re-decided by the walk as
+ * soon as it is evicted. A non-LRU hash would instead fill up and start
+ * refusing inserts, silently turning the memo off under fork pressure — the
+ * failure mode is "slow", not "wrong", but it would be invisible either way.
+ */
+struct observer_verdict {
+	__u32 root;   /* the observer root this verdict was decided under */
+	__u8  member; /* 1 = in the observer tree, 0 = walked and not in it */
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 8192);
+	__type(key, __u32);
+	__type(value, struct observer_verdict);
+} observer_tree_cache SEC(".maps");
+
+/*
+ * observer_excluded_counters — per-CPU count of events dropped as belonging to
+ * the measurement harness. Userspace sums across CPUs and exports the delta as
+ * ebpf_guard_events_excluded_total{reason="observer_tree"}, the same series
+ * 5.9a published from the correlator. Without it this filter would be exactly
+ * the silent blindness the wave exists to eliminate: event volume drops and
+ * nothing says why.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} observer_excluded_counters SEC(".maps");
+
+static __always_inline void record_observer_excluded(void)
+{
+	__u32 idx = 0;
+	__u64 *cnt = bpf_map_lookup_elem(&observer_excluded_counters, &idx);
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
+/*
+ * pid_is_observer - true if the current task belongs to the measurement
+ * harness's process tree.
+ *
+ * The loop is #pragma unroll'd over a compile-time bound so the verifier sees
+ * a fixed instruction count rather than a loop it has to prove terminates —
+ * kernel 5.15 accepts bounded loops, but unrolling keeps this working on the
+ * older verifiers the project still targets, and OBSERVER_MAX_DEPTH is small
+ * enough that the unrolled form stays cheap.
+ *
+ * Note on the read style: this walks real_parent (the true parent), not
+ * parent, so a process reparented by ptrace does not appear to leave the
+ * harness tree. Reads go through BPF_CORE_READ so the offsets are relocated
+ * by BTF rather than baked in — see cgroup.bpf.c for the same pattern.
+ */
+static __always_inline bool pid_is_observer(void)
+{
+	__u32 key = 0;
+	__u32 *root_ptr;
+	__u32 root;
+	__u32 tgid;
+	struct observer_verdict *cached;
+	struct observer_verdict verdict = {};
+	struct task_struct *task;
+	int i;
+
+	root_ptr = bpf_map_lookup_elem(&observer_root_pid, &key);
+	if (!root_ptr)
+		return false;
+	/* Read the root once into a local: it is re-checked on every hop below,
+	 * and userspace can rewrite the map mid-walk when the harness restarts.
+	 * Re-reading through the pointer would let one walk compare its first
+	 * hops against one root and its last hops against another, producing a
+	 * verdict that was never true of either. */
+	root = *root_ptr;
+	if (root == 0)
+		return false;
+
+	tgid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	if (tgid == root)
+		return true;
+
+	cached = bpf_map_lookup_elem(&observer_tree_cache, &tgid);
+	if (cached && cached->root == root)
+		return cached->member == 1;
+
+	task = (struct task_struct *)bpf_get_current_task();
+	if (!task)
+		return false;
+
+	verdict.root = root;
+
+#pragma unroll
+	for (i = 0; i < OBSERVER_MAX_DEPTH; i++) {
+		struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+		__u32 ptgid;
+
+		if (!parent)
+			break;
+		ptgid = BPF_CORE_READ(parent, tgid);
+		/* The root test comes first. If the harness root ever were PID 1
+		 * itself, testing for init before testing for the root would break
+		 * out of the walk one hop before the match and report every process
+		 * on the host as unrelated. */
+		if (ptgid == root) {
+			verdict.member = 1;
+			break;
+		}
+		/* Reaching init (1) or a zero tgid means the chain ended without the
+		 * root: stop rather than spend the remaining hops walking above init,
+		 * where the answer can no longer change. */
+		if (ptgid == 0 || ptgid == 1)
+			break;
+		task = parent;
+	}
+
+	/* Both verdicts are cached. Caching only the positive one would leave
+	 * every unrelated process on the host repeating the full walk on every
+	 * event — the negative answer is the common case and the expensive one. */
+	bpf_map_update_elem(&observer_tree_cache, &tgid, &verdict, BPF_ANY);
+	return verdict.member == 1;
+}
+
+/*
+ * observer_should_drop - pid_is_observer() plus the drop counter, so call
+ * sites read as one line and cannot accidentally drop without counting.
+ */
+static __always_inline bool observer_should_drop(void)
+{
+	if (!pid_is_observer())
+		return false;
+	record_observer_excluded();
+	return true;
+}
+
+/*
  * Network blocklist maps — in-kernel IP/subnet/port blocking.
  *
  * net_block_ipv4 / net_block_ipv6: LPM TRIE for IPv4/IPv6 subnets.

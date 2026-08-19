@@ -363,7 +363,7 @@ func TestCorrelationEngine_ObserverExclusion(t *testing.T) {
 		ctx := context.Background()
 
 		const intermediatePID = uint32(4310) // e.g. a shell the harness forked
-		const leafPID = uint32(4320)          // e.g. curl, forked by the shell
+		const leafPID = uint32(4320)         // e.g. curl, forked by the shell
 
 		// Root not set yet (poller hasn't picked up the harness's PID file):
 		// this event cannot be excluded, but lineageTracker.Track still runs
@@ -386,6 +386,133 @@ func TestCorrelationEngine_ObserverExclusion(t *testing.T) {
 		alerts := engine.Ingest(ctx, newEvent(leafPID, intermediatePID))
 		assert.Empty(t, alerts,
 			"a descendant must be excluded via the full ancestor chain even when its parent's own PID was never cached in observerTree")
+	})
+
+	// Regression test for находка №41 (замер №2.9.1, 5.9.2d). The ancestor walk
+	// returned false as soon as the lineage tracker produced ANY non-empty
+	// chain that did not itself contain root — skipping the observerTree memo
+	// checks below it. A short-lived pipeline leaf (`… | awk`, `… | tee`,
+	// `$(date)`) has exactly that shape: by the time its chain is rebuilt from
+	// /proc the intervening shell has exited, so the chain breaks at the first
+	// unresolvable hop and never reaches root, even though the hop it DID
+	// resolve is a PID the filter already confirmed. On замер №2.9.1 this left
+	// 7 of 41 idle-hour alerts (17%, threshold <5%) on harness processes and
+	// produced both process_chain-less `grep` incidents that failed criterion 10.
+	t.Run("enabled: leaf excluded via memoised ancestor when its chain stops short of root", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		ctx := context.Background()
+
+		const shellPID = uint32(4400) // shell forked by the harness
+		const leafPID = uint32(4410)  // awk, forked by that shell
+
+		// The shell's own event resolves to root and is memoised in observerTree.
+		assert.Empty(t, engine.Ingest(ctx, newEvent(shellPID, rootPID)),
+			"the shell is a direct child of the harness root and must be excluded")
+		_, memoised := engine.observerTree.Load(shellPID)
+		require.True(t, memoised, "the shell must be in observerTree for this test to exercise the memo path")
+
+		// The shell exits and its lineage entry ages out — this is what makes
+		// the leaf's chain stop short of root while the memo still holds the
+		// answer. Cleanup is driven by the engine's own maintenance ticker in
+		// production; here it is called directly with a clock far enough ahead
+		// to pass the TTL.
+		engine.lineageTracker.Cleanup(time.Now().Add(24 * time.Hour))
+		require.Empty(t, engine.lineageTracker.GetProcessTree(shellPID),
+			"the shell's ancestry must be gone for the chain to break at that hop")
+
+		// The leaf's first event. Its chain can no longer reach root: the only
+		// hop it resolves is the shell, whose own ancestry has been evicted.
+		alerts := engine.Ingest(ctx, newEvent(leafPID, shellPID))
+		assert.Empty(t, alerts,
+			"a leaf whose ancestor chain stops short of root must still be excluded when its parent is already known to be in the observer tree")
+	})
+
+	// 5.9.2g: the in-kernel filter drops harness events before the ring buffer,
+	// so once it is live the userspace walk is pure overhead on the agent's
+	// hottest path. Anything that still arrives is by definition not in the
+	// tree, and must be evaluated normally rather than re-walked.
+	t.Run("kernel-side active: userspace walk is bypassed", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		ctx := context.Background()
+
+		require.Empty(t, engine.Ingest(ctx, newEvent(rootPID, 1)),
+			"sanity: with the userspace filter engaged the root's own events are excluded")
+
+		engine.SetObserverKernelSide(true)
+		assert.True(t, engine.ObserverKernelSide())
+
+		alerts := engine.Ingest(ctx, newEvent(rootPID, 1))
+		assert.NotEmpty(t, alerts,
+			"with the kernel filter live the userspace walk must not run: an event that reached userspace already passed the kernel-side check")
+	})
+
+	// The kernel-side bypass must be scoped to the streams the BPF filter
+	// actually covers. observer_should_drop() is compiled into three objects
+	// (syscall, fileaccess, network); dns, tls, lsm/kmod, privesc, iouring,
+	// gpu, bpfmonitor and http_uprobe have no such check, so for their events
+	// the userspace walk is still the only filter there is. A global bypass
+	// let the harness's own traffic back into the "share of the observer tree"
+	// numerator through any of those collectors the moment the kernel side
+	// came up — the same "mechanism silently off, indicator reads PASS" shape
+	// wave 5.9.2 exists to remove.
+	t.Run("kernel-side active: an event type the BPF filter does not cover is still walked", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = []Rule{{
+			ID:        "rule_dns",
+			Name:      "Any DNS query",
+			EventType: types.EventDNS,
+			Condition: RuleCondition{Field: "qname", Op: OpEquals, Values: []string{"example.com"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		}}
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+		engine.SetObserverRoot(rootPID)
+		engine.SetObserverKernelSide(true)
+		ctx := context.Background()
+
+		dnsEvent := func(pid, ppid uint32) types.Event {
+			return types.Event{
+				Type: types.EventDNS,
+				PID:  pid,
+				PPID: ppid,
+				DNS:  &types.DNSEvent{QName: "example.com"},
+			}
+		}
+
+		require.NotEmpty(t, engine.Ingest(ctx, dnsEvent(otherPID, 1)),
+			"sanity: an unrelated process's DNS event must alert, or this test proves nothing")
+
+		assert.Empty(t, engine.Ingest(ctx, dnsEvent(rootPID, 1)),
+			"dns has no observer_should_drop() in its BPF object, so the userspace walk must still exclude the harness root even with the kernel side live")
+		assert.Empty(t, engine.Ingest(ctx, dnsEvent(childPID, rootPID)),
+			"the same must hold for a descendant discovered through the userspace walk")
+	})
+
+	// The counter series must stay continuous across the move from the
+	// userspace filter to the kernel one, or the "share of the observer tree"
+	// criterion silently changes meaning between waves.
+	t.Run("kernel-side drops land on the same metric series", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = true
+		engine := NewCorrelationEngineWithConfig(cfg)
+
+		before := testutil.ToFloat64(engine.eventsExcludedTotal.WithLabelValues("observer_tree"))
+		engine.RecordObserverExcludedN(7)
+		engine.RecordObserverExcludedN(0) // a zero delta must be a no-op
+		after := testutil.ToFloat64(engine.eventsExcludedTotal.WithLabelValues("observer_tree"))
+
+		assert.Equal(t, before+7, after,
+			"kernel-side exclusions must accumulate on ebpf_guard_events_excluded_total{reason=\"observer_tree\"}, the same series 5.9a published from userspace")
 	})
 }
 

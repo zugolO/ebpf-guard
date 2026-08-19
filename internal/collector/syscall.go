@@ -3,6 +3,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -32,6 +33,15 @@ type SyscallCollector struct {
 	loader   syscallLoader
 	opener   ringbufOpener
 	attacher linkAttacher
+
+	// malformed-record diagnostics (5.9.2c, finding #40). monitoredNrs and
+	// kernelFilterEnabled mirror the same allowlist main.go programs into the
+	// BPF-side syscall_filter_map, so "nr_not_monitored" means the userspace
+	// view of what should be filtered disagrees with what actually arrived —
+	// not that filtering is off.
+	monitoredNrs        map[int64]struct{}
+	kernelFilterEnabled bool
+	malformedLoggers    map[string]*malformedLogger
 }
 
 // NewSyscallCollector creates a new syscall event collector.
@@ -44,7 +54,28 @@ func NewSyscallCollector(logger *slog.Logger) (*SyscallCollector, error) {
 		loader:     defaultSyscallLoader{},
 		opener:     defaultRingbufOpener{},
 		attacher:   defaultLinkAttacher{},
+		malformedLoggers: map[string]*malformedLogger{
+			"type_mismatch":    newMalformedLogger(5 * time.Second),
+			"nr_not_monitored": newMalformedLogger(5 * time.Second),
+			"empty_comm":       newMalformedLogger(5 * time.Second),
+		},
 	}, nil
+}
+
+// WithMalformedDiagnostics configures the nr_not_monitored diagnostic (5.9.2c,
+// finding #40) with the same effective syscall allowlist and enabled flag
+// main.go uses to program syscall_filter_map, so parseEvent can tell "kernel
+// filtering is off, nr is expected to be unfiltered" apart from "kernel
+// filtering is on and this nr got through anyway". Call with enabled=false
+// (or omit) when bpf.kernel_filter.enabled is false — the check is skipped in
+// that case since every nr is legitimately unfiltered.
+func (c *SyscallCollector) WithMalformedDiagnostics(monitoredNrs []int, enabled bool) *SyscallCollector {
+	c.kernelFilterEnabled = enabled
+	c.monitoredNrs = make(map[int64]struct{}, len(monitoredNrs))
+	for _, nr := range monitoredNrs {
+		c.monitoredNrs[int64(nr)] = struct{}{}
+	}
+	return c
 }
 
 // WithStatusReporter sets the StatusReporter used to signal up/down state.
@@ -133,9 +164,9 @@ func (c *SyscallCollector) GetPrograms() map[string]*ebpf.Program {
 		return nil
 	}
 	return map[string]*ebpf.Program{
-		"trace_sys_enter":           c.objs.TraceSysEnter,
-		"trace_sys_exit":            c.objs.TraceSysExit,
-		"trace_sched_process_exec":  c.objs.TraceSchedProcessExec,
+		"trace_sys_enter":          c.objs.TraceSysEnter,
+		"trace_sys_exit":           c.objs.TraceSysExit,
+		"trace_sched_process_exec": c.objs.TraceSchedProcessExec,
 	}
 }
 
@@ -269,8 +300,14 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 
 		event := eventPool.Get().(*types.Event)
 		if err := c.parseEvent(record.RawSample, event); err != nil {
-			c.logger.Error("failed to parse event", "error", err)
-			exporter.RecordDropped("syscall", "parse_error")
+			// errMalformedSyscallType is already counted and logged (rate
+			// limited, with a hex dump) inside parseEvent under
+			// ebpf_guard_events_malformed_total — counting it again here
+			// under a different reason would just double-book the same drop.
+			if !errors.Is(err, errMalformedSyscallType) {
+				c.logger.Error("failed to parse event", "error", err)
+				exporter.RecordDropped("syscall", "parse_error")
+			}
 			event.Reset()
 			eventPool.Put(event)
 			continue
@@ -294,7 +331,7 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		}
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
-			exporter.RecordDropped("syscall", "ringbuf_to_router")
+			exporter.RecordEventDrop("syscall", "ringbuf_to_router", defaultEventPriority(event.Type))
 			c.dropLogger.record(c.logger, "syscall")
 			c.lostTotal.Add(1)
 		})
@@ -337,14 +374,62 @@ func (c *SyscallCollector) SamplingConfigMap() *ebpf.Map {
 	return c.objs.SamplingConfig
 }
 
+// ObserverFilterMaps returns the observer_root_pid and
+// observer_excluded_counters BPF maps backing the in-kernel measurement-harness
+// exclusion (5.9.2g), or nil maps if the collector has not loaded (stub mode).
+//
+// Each BPF object carries its own copy of these maps — the same per-object
+// arrangement that made P0-22 populate comm_filter_map separately per collector
+// — so the root PID must be published to every collector that emits
+// correlatable events, not just to one of them. observer_tree_cache is not
+// returned: it is populated exclusively by the kernel walk and userspace has no
+// reason to touch it.
+func (c *SyscallCollector) ObserverFilterMaps() (rootMap, excludedCounters *ebpf.Map) {
+	if c.objs == nil {
+		return nil, nil
+	}
+	return c.objs.ObserverRootPid, c.objs.ObserverExcludedCounters
+}
+
+// errMalformedSyscallType marks a parseEvent failure already accounted for
+// under exporter.EventsMalformed{reason="type_mismatch"} — the caller must
+// not also count/log it as a generic parse_error.
+var errMalformedSyscallType = fmt.Errorf("syscall: record type mismatch")
+
 // parseEvent converts raw bytes from the ring buffer into event, which must be
 // a pooled *types.Event obtained from eventPool. Caller is responsible for
 // Reset() and Put() after the event value has been consumed.
+//
+// Wave 5.9.2c (finding #40): runs three independent diagnostic checks before
+// handing the event on, matching the three hypotheses for the 13 empty-`comm`
+// alerts misdiagnosed by 5.9.1f as a cgroup-escape torn read. Only
+// type_mismatch drops the record — it is the "недостающая валидация формата"
+// the postscript calls for independently of which hypothesis holds;
+// nr_not_monitored and empty_comm are observation only, since dropping on
+// them before the root cause is established would repeat 5.9.1f's mistake of
+// patching a symptom instead of confirming a source.
 func (c *SyscallCollector) parseEvent(raw []byte, event *types.Event) error {
 	var se bpf.SyscallEvent
 	if err := bpf.ParseSyscallEventInto(raw, &se); err != nil {
 		return err
 	}
+
+	if se.Type != bpf.EventTypeSyscall {
+		exporter.RecordMalformed("syscall", "type_mismatch")
+		c.malformedLoggers["type_mismatch"].record(c.logger, "syscall", "type_mismatch", raw)
+		return errMalformedSyscallType
+	}
+	if c.kernelFilterEnabled {
+		if _, ok := c.monitoredNrs[se.Nr]; !ok {
+			exporter.RecordMalformed("syscall", "nr_not_monitored")
+			c.malformedLoggers["nr_not_monitored"].record(c.logger, "syscall", "nr_not_monitored", raw)
+		}
+	}
+	if bpf.IsEmptyComm(se.Comm) {
+		exporter.RecordMalformed("syscall", "empty_comm")
+		c.malformedLoggers["empty_comm"].record(c.logger, "syscall", "empty_comm", raw)
+	}
+
 	*event = se.ToTypesEvent()
 	return nil
 }

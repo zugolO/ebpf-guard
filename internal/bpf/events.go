@@ -16,6 +16,13 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// EventTypeSyscall mirrors EVENT_TYPE_SYSCALL from bpf/common.h. Wave 5.9.2c
+// (finding #40): the syscall ring buffer is meant to carry only this type —
+// nothing else reserves an event on it in bpf/syscall.bpf.c — so a record
+// whose own Type field disagrees is evidence of a wire-format problem, not a
+// legitimate event to hand to the correlator.
+const EventTypeSyscall uint32 = 1
+
 // SyscallEvent matches the C struct event from common.h
 // Layout matches packed C struct exactly
 type SyscallEvent struct {
@@ -887,21 +894,27 @@ func (e *KmodRawEvent) ToTypesEvent() types.Event {
 
 // ToTypesEvent converts a CgroupEscapeRawEvent to types.Event.
 //
-// 5.9.1f (остаток 5.9h, пустой comm): bpf/cgroup.bpf.c читает comm через
-// BPF_CORE_READ(leader, comm) — чужой task, не текущий, без синхронизации —
-// тот же класс torn-read, что 5.9h разобрала для parent_comm, только здесь
-// задет leaf-поле Comm самого события (то, что попадает в Alert.Comm).
-// cgroup_attach_task срабатывает у самого рождения процесса
+// 5.9.1f (пустой comm на cgroup-escape пути, а НЕ находка №40): bpf/cgroup.bpf.c
+// читает comm через BPF_CORE_READ(leader, comm) — чужой task, не текущий, без
+// синхронизации — тот же класс torn-read, что 5.9h разобрала для parent_comm,
+// только здесь задет leaf-поле Comm самого события (то, что попадает в
+// Alert.Comm). cgroup_attach_task срабатывает у самого рождения процесса
 // (clone3(CLONE_INTO_CGROUP)), гоняясь с инициализацией comm той же задачи,
-// поэтому Comm может прийти полностью пустым, не просто искажённым. BPF-фикс
-// требует make generate (clang+linux-headers), недоступного в этой сессии
-// (macOS) — см. TODO у BPF_CORE_READ(leader, comm) в bpf/cgroup.bpf.c.
-// Здесь — userspace-заплатка: если ядро вернуло пустой Comm, подтягиваем его
-// из /proc/<pid>/comm; best-effort — если /proc недоступен (не-Linux,
-// процесс уже завершился), Comm остаётся пустым, как раньше, без ошибки.
+// поэтому Comm может прийти полностью пустым, не просто искажённым. Это
+// реальный, самостоятельный дефект этого пути — но 5.9.2c (находка №40,
+// plan.md) установила прогоном, что 13 пустых comm на замере №2.9.1 (11
+// anomaly_detection + 2 mitre_arp_spoof_raw_socket) были все на syscall-пути,
+// который CgroupEscapeRawEvent никогда не затрагивает (ноль cgroup-escape
+// алертов в том прогоне вообще); эта заплатка их не объясняет и не закрывает.
+// BPF-фикс требует make generate (clang+linux-headers), недоступного в этой
+// сессии (macOS) — см. TODO у BPF_CORE_READ(leader, comm) в
+// bpf/cgroup.bpf.c. Здесь — userspace-заплатка: если ядро вернуло пустой
+// Comm, подтягиваем его из /proc/<pid>/comm; best-effort — если /proc
+// недоступен (не-Linux, процесс уже завершился), Comm остаётся пустым, как
+// раньше, без ошибки.
 func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
 	comm := e.Comm
-	if isEmptyComm(comm) {
+	if IsEmptyComm(comm) {
 		if resolved, ok := readProcComm(e.PID); ok {
 			comm = resolved
 		}
@@ -921,9 +934,9 @@ func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
 	}
 }
 
-// isEmptyComm reports whether comm is a torn/unfilled read (leading NUL)
+// IsEmptyComm reports whether comm is a torn/unfilled read (leading NUL)
 // rather than a legitimately short name padded with NULs.
-func isEmptyComm(comm [16]byte) bool {
+func IsEmptyComm(comm [16]byte) bool {
 	return comm[0] == 0
 }
 

@@ -21,13 +21,16 @@ import (
 
 // SyscallMaps holds the BPF maps exported by bpf/syscall.bpf.c.
 type SyscallMaps struct {
-	AgentPidMap        *ebpf.Map `ebpf:"agent_pid_map"`
-	CommFilterMap      *ebpf.Map `ebpf:"comm_filter_map"`
-	Events             *ebpf.Map `ebpf:"events"`
-	KernelFilterConfig *ebpf.Map `ebpf:"kernel_filter_config"`
-	MapFullCounters    *ebpf.Map `ebpf:"map_full_counters"`
-	SamplingConfig     *ebpf.Map `ebpf:"sampling_config"`
-	SyscallFilterMap   *ebpf.Map `ebpf:"syscall_filter_map"`
+	AgentPidMap              *ebpf.Map `ebpf:"agent_pid_map"`
+	CommFilterMap            *ebpf.Map `ebpf:"comm_filter_map"`
+	Events                   *ebpf.Map `ebpf:"events"`
+	KernelFilterConfig       *ebpf.Map `ebpf:"kernel_filter_config"`
+	MapFullCounters          *ebpf.Map `ebpf:"map_full_counters"`
+	ObserverExcludedCounters *ebpf.Map `ebpf:"observer_excluded_counters"`
+	ObserverRootPid          *ebpf.Map `ebpf:"observer_root_pid"`
+	ObserverTreeCache        *ebpf.Map `ebpf:"observer_tree_cache"`
+	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
+	SyscallFilterMap         *ebpf.Map `ebpf:"syscall_filter_map"`
 }
 
 // SyscallPrograms holds the BPF programs exported by bpf/syscall.bpf.c.
@@ -75,6 +78,15 @@ func (o *SyscallObjects) Close() error {
 	}
 	if o.SyscallFilterMap != nil {
 		errs = append(errs, o.SyscallFilterMap.Close())
+	}
+	if o.ObserverExcludedCounters != nil {
+		errs = append(errs, o.ObserverExcludedCounters.Close())
+	}
+	if o.ObserverRootPid != nil {
+		errs = append(errs, o.ObserverRootPid.Close())
+	}
+	if o.ObserverTreeCache != nil {
+		errs = append(errs, o.ObserverTreeCache.Close())
 	}
 	return errors.Join(errs...)
 }

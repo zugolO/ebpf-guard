@@ -33,6 +33,9 @@ tests:
     rule_id: owasp_web_sensitive_file_read
     event:
       type: file
+      # 5.9.3g: the rule was narrowed to web-server comms back in wave 3 (Q9);
+      # the test still sent a comm-less event and had been red ever since.
+      comm: "nginx"
       file:
         filename: "/etc/shadow"
         op: read
@@ -43,6 +46,9 @@ tests:
     rule_id: owasp_web_sensitive_file_read
     event:
       type: file
+      # 5.9.3g: the rule was narrowed to web-server comms back in wave 3 (Q9);
+      # the test still sent a comm-less event and had been red ever since.
+      comm: "nginx"
       file:
         filename: "/root/.ssh/id_rsa"
         op: read

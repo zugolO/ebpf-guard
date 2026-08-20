@@ -1,0 +1,89 @@
+suite: collection_and_evasion_gaps
+rules_path: ../../rules/collection-and-evasion-gaps.yaml
+tests:
+  # 5.9.3g (#51): the rule keys on an interpreter exec'd with no program
+  # argument — the shape of `curl … | sh`, where the program arrives on fd 0.
+  - name: "bare sh exec'd by a shell fires c2_ingress_piped_to_shell (curl | sh)"
+    rule_id: c2_ingress_piped_to_shell
+    event:
+      type: syscall
+      comm: "sh"
+      parent_comm: "bash"
+      proc_args: "sh"
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: critical
+
+  - name: "curl | bash -s -- arg still fires (flag, but no program)"
+    rule_id: c2_ingress_piped_to_shell
+    event:
+      type: syscall
+      comm: "bash"
+      parent_comm: "bash"
+      proc_args: "bash -s -- --prefix=/opt"
+      syscall:
+        nr: 59
+    expect: alert
+
+  - name: "curl | python3 - fires"
+    rule_id: c2_ingress_piped_to_shell
+    event:
+      type: syscall
+      comm: "python3"
+      parent_comm: "bash"
+      proc_args: "python3 -"
+      syscall:
+        nr: 59
+    expect: alert
+
+  # The measured idle noise: every one of these carries a program in argv.
+  - name: "shell running a script does not fire (run-parts shebang exec)"
+    event:
+      type: syscall
+      comm: "bash"
+      parent_comm: "sh"
+      proc_args: "/bin/bash /etc/cron.daily/logrotate"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "sh -c from a script does not fire"
+    event:
+      type: syscall
+      comm: "sh"
+      parent_comm: "sh"
+      proc_args: "/bin/sh -c /usr/bin/find /var/log -mtime +7"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "login shell (-bash) does not fire"
+    event:
+      type: syscall
+      comm: "bash"
+      parent_comm: "bash"
+      proc_args: "-bash"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "bare sh spawned directly by sshd does not fire (ssh host sh)"
+    event:
+      type: syscall
+      comm: "sh"
+      parent_comm: "sshd"
+      proc_args: "sh"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  - name: "unreadable cmdline does not fire — an empty argv is not evidence"
+    event:
+      type: syscall
+      comm: "sh"
+      parent_comm: "bash"
+      proc_args: ""
+      syscall:
+        nr: 59
+    expect: no_alert

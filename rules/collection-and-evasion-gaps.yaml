@@ -125,6 +125,10 @@ rules:
     description: >
       curl or wget was used in a pipeline that feeds downloaded content
       directly to a shell interpreter (curl | bash, wget -O- | sh).
+      Detected as: an interpreter exec'd with no program argument (so its
+      program can only come from fd 0) whose parent is not one of the usual
+      interactive/system launchers. The curl/wget side is a sibling in the
+      pipeline, not an ancestor, so it is not visible from this event.
       This is the most common ingress tool transfer pattern: attackers
       download a script and execute it immediately without writing to disk,
       evading file-based antivirus. Covers T1105 with T1059.004 chain.
@@ -149,6 +153,33 @@ rules:
         - field: proc.parent_comm
           op: not_in
           values: ["sshd", "cron", "systemd", "run-parts", "login", "su", "sudo"]
+        # 5.9.3g (#51): the condition that actually carries the signal.
+        # An interpreter invoked with NO program argument has nowhere to read
+        # its program from except fd 0 — which is precisely what the pipe in
+        # `curl … | sh` supplies. Every benign shell in the measured idle
+        # noise carried a program in argv and is excluded by this:
+        # `sh -c "…"` (cron, systemd units), `/bin/bash /etc/cron.daily/x`
+        # (run-parts, shebang exec), `-bash` (login shell, leading dash).
+        # `curl … | bash -s -- arg` and `curl … | python3 -` are the two
+        # standard variants that still pass a flag but no program, so they
+        # are matched explicitly.
+        #
+        # This still does not prove the *source* was curl/wget — that needs
+        # sibling correlation across two events (open question, out of the
+        # "one condition = one event" perimeter). What it does prove is that
+        # the interpreter took its program from a pipe or redirect, which is
+        # the half of the technique a single event can carry.
+        #
+        # proc.args comes from /proc/PID/cmdline read at collection time
+        # (internal/collector/syscall.go, execve/execveat only). It is empty
+        # if the process is gone before the read; such an event no longer
+        # matches this rule. That is a deliberate trade: an unreadable
+        # cmdline is not evidence of piping.
+        - field: proc.args
+          op: regex
+          values:
+            - "^(/usr/local/bin/|/usr/bin/|/bin/)?(sh|bash|dash|zsh|ksh)( -s)?( --.*)?$"
+            - "^(/usr/local/bin/|/usr/bin/|/bin/)?(python3|python|perl|ruby)( -)?$"
     severity: critical
     action: alert
     tags: [mitre:T1105, command-and-control, ingress-tool-transfer,

@@ -55,22 +55,22 @@ tests:
         op: read
     expect: no_alert
 
-  - name: "unshare syscall (nr=160) from non-runtime comm fires cis_5_2_1_privileged_container"
+  - name: "unshare syscall (nr=272) from non-runtime comm fires cis_5_2_1_privileged_container"
     rule_id: cis_5_2_1_privileged_container
     event:
       type: syscall
       comm: "app"
       syscall:
-        nr: 160
+        nr: 272
     expect: alert
     expect_severity: critical
 
-  - name: "unshare syscall (nr=160) from runc does not fire cis_5_2_1_privileged_container"
+  - name: "unshare syscall (nr=272) from runc does not fire cis_5_2_1_privileged_container"
     event:
       type: syscall
       comm: "runc"
       syscall:
-        nr: 160
+        nr: 272
     expect: no_alert
 
   - name: "setuid syscall (nr=105) from non-privsep comm fires cis_5_2_5_privilege_escalation"

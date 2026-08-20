@@ -37,8 +37,13 @@ netintr_syn_scan_pattern
 # через `comm -12`, и любой текст после rule_id сломает совпадение. Причина
 # для каждого — здесь, в этом комментарии, а не на строке правила:
 #
-#   cis_5_2_1_privileged_container   — nr=160 (setns family variant), не открыт:
-#       нет отдельного attack-шага, отличного от уже открытого 308 (setns).
+#   cis_5_2_1_privileged_container   — СНЯТО 2026-08-20 (волна 5.9.3f, находка
+#       №50). Запись «nr=160 (setns family variant)» была основана на неверном
+#       номере в самом правиле: 160 — это setrlimit(2), а не что-либо из
+#       setns-семейства, и правило было немым по построению, а не «не открытым».
+#       Номер исправлен на 272 (unshare), который есть в
+#       DefaultMonitoredSyscalls(), — вход правилу открыт, исключать его из
+#       критерия 6 больше не за что. Строка ниже удалена.
 #   mitre_sandbox_detect_cpuid       — nr=135 (personality), нет attack-шага.
 #   mitre_arp_spoof_raw_socket       — nr=41 (socket(AF_PACKET)), нет attack-шага.
 #   rootkit_anonymous_exec_memory    — nr=9 (mmap) — слишком общий syscall,
@@ -69,7 +74,6 @@ netintr_syn_scan_pattern
 #       был бы чистым приростом idle-шума без единого срабатывания — ровно то,
 #       что запрещает запрет №1 волны 5.9.2. Разблокируется волной 6 вместе с
 #       ransomware-сценарием.
-cis_5_2_1_privileged_container
 mitre_sandbox_detect_cpuid
 mitre_arp_spoof_raw_socket
 rootkit_anonymous_exec_memory

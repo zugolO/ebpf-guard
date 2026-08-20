@@ -79,6 +79,9 @@ type EventSpec struct {
 	Comm       string       `yaml:"comm,omitempty"`
 	PPID       uint32       `yaml:"ppid,omitempty"`
 	ParentComm string       `yaml:"parent_comm,omitempty"`
+	// ProcArgs is the space-joined /proc/PID/cmdline the collector attaches to
+	// execve/execveat events (5.9.3g: c2_ingress_piped_to_shell keys on it).
+	ProcArgs string `yaml:"proc_args,omitempty"`
 	Syscall    *SyscallSpec `yaml:"syscall,omitempty"`
 	Network    *NetworkSpec `yaml:"network,omitempty"`
 	File       *FileSpec    `yaml:"file,omitempty"`
@@ -165,6 +168,7 @@ func (s EventSpec) Build() (types.Event, error) {
 	if s.ParentComm != "" {
 		copy(e.ParentComm[:], s.ParentComm)
 	}
+	e.ProcArgs = s.ProcArgs
 
 	switch strings.ToLower(s.Type) {
 	case "syscall":

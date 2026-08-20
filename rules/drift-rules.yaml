@@ -220,10 +220,21 @@ rules:
         # ends on a node that starts new pods continuously — exclude the
         # runtime, not the syscalls. The drift signal (post-baseline
         # novelty) still does the rest of the work.
+        #
+        # 5.9.3f (#50): the same exclusion is needed for systemd, and it was
+        # not visible until #50 made this rule reachable at all — its nr
+        # values were syscall NAMES, which never matched. Measured on the
+        # stand (smoke run 2026-08-20, 120 s): 4 alerts, all comm=systemd,
+        # pid 1 and transient (sd-executor) children — unit sandboxing
+        # (PrivateTmp/ProtectSystem) calls mount/unshare on every unit
+        # start, which is exactly the "new after the learning window"
+        # shape this rule looks for.
         - field: comm
           op: not_in
           values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
-                    "dockerd", "conmon", "crun"]
+                    "dockerd", "conmon", "crun",
+                    "systemd", "(sd-executor)", "systemd-udevd",
+                    "mount", "umount"]
     severity: critical
     action: alert
     class: drift

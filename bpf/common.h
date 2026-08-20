@@ -836,11 +836,43 @@ static __always_inline void fill_process_info(struct event *e)
 	e->pid = (__u32)(pid_tgid >> 32);
 	e->tgid = (__u32)pid_tgid;
 	e->uid = (__u32)uid_gid;
-	/* ppid/parent_comm are enriched in userspace via /proc to avoid
-	 * BPF verifier issues with pointer-chasing through task_struct
-	 * across complex code paths on kernel 5.15. */
+
+	/* Parent identity is read here, in the kernel, from
+	 * task_struct->real_parent — it is NOT enriched in userspace.
+	 *
+	 * It used to be zeroed here with a comment blaming verifier trouble
+	 * with pointer-chasing through task_struct on kernel 5.15, leaving
+	 * /proc/<pid>/status as the only source (LineageTracker.lookupOwnPPID).
+	 * That fallback loses the race against any short-lived process: the
+	 * task is gone before the event is dequeued, lookupOwnPPID returns 0,
+	 * Track() bails out and the alert carries no ProcessTree. Замер №2.9.2
+	 * measured the consequence — 34 of 34 incidents without a process
+	 * chain were instant processes, and criterion 10 failed at 52.6%.
+	 *
+	 * The stated verifier concern was disproved by that same run: 5.9.2g's
+	 * pid_is_observer() walks real_parent for OBSERVER_MAX_DEPTH hops and
+	 * loads on this exact kernel. One hop is strictly cheaper. The read
+	 * style mirrors cgroup.bpf.c, which has always done this.
+	 *
+	 * real_parent, not parent: a task reparented by ptrace keeps its true
+	 * ancestry, matching pid_is_observer()'s choice.
+	 */
 	e->ppid = 0;
 	__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));
+	{
+		struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+		struct task_struct *parent;
+
+		if (task) {
+			parent = BPF_CORE_READ(task, real_parent);
+			if (parent) {
+				e->ppid = BPF_CORE_READ(parent, tgid);
+				bpf_probe_read_kernel(&e->parent_comm,
+						      sizeof(e->parent_comm),
+						      BPF_CORE_READ(parent, comm));
+			}
+		}
+	}
 
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->timestamp = bpf_ktime_get_ns();

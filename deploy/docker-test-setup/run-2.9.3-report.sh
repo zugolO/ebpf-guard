@@ -127,8 +127,8 @@ fi
 echo ""
 echo "=== п.5: контекстно-пустых syscall-правил (цель <= 5, поимённо) ==="
 if [ -d "$REPO_DIR" ] && command -v go >/dev/null 2>&1; then
-    ( cd "$REPO_DIR" && go test -count=1 -run 'TestContextEmptySyscallRules' ./internal/correlator/ 2>&1 ) \
-        | sed 's/^/    /'
+    ( cd "$REPO_DIR" && go test -count=1 -v -run 'TestContextEmptySyscallRules' ./internal/correlator/ 2>&1 ) \
+        | grep -E 'контекстно-пустых|^(ok|FAIL|--- )' | sed 's/^/    /'
 else
     echo "  SKIP: нет $REPO_DIR или go в PATH"
 fi

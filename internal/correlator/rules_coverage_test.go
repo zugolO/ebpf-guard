@@ -498,6 +498,10 @@ func TestContextEmptySyscallRules_RepoRuleCount(t *testing.T) {
 	re := NewRuleEngine(rules)
 
 	got := re.ContextEmptySyscallRules()
+	// Logged, not just asserted: замер №2.9.3 requires this number by name in
+	// the run's own report (п.5), and a passing test that prints nothing
+	// forces whoever reads the protocol to take the count on trust.
+	t.Logf("контекстно-пустых syscall-правил: %d (потолок 5): %v", len(got), got)
 	if len(got) > 5 {
 		t.Errorf("wave 5.9.3c ceiling exceeded: %d syscall rules constrain only \"nr\" "+
 			"(want <=5, each documented in contextEmptySyscallRulesRemainder): %v", len(got), got)

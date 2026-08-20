@@ -1,0 +1,111 @@
+# Список rule_id, чьё исключение comm not_in пересекается с comm, под
+# которым реально бежит один из шагов attack-скриптов (deploy/docker-test-
+# setup/attacks/*.sh, знание берётся из их record_manifest-вызовов) —
+# машинная проверка RuleEngine.ExclusionsCollidingWithAttackerComms и
+# TestExclusionsCollidingWithAttackerComms_RepoRules (internal/correlator/
+# rules_coverage_test.go), волна 5.9.4e, находка №56.
+#
+# Зачем этот файл. Находка №56: rootkit_bpf_prog_load_suspicious/
+# rootkit_bpf_map_create_suspicious исключали "bpftool" по имени — и тем
+# самым слепили собственный позитивный контроль (bpftool prog list, шаг
+# 5.9.2b) без единого теста, который бы это поймал. Обе правки этого не
+# делают больше (rules/rootkit-detection.yaml, условие на arg0 вместо
+# comm-whitelist). Эта проверка — машинный гейт на класс той же ошибки:
+# правило с action alert/kill/..., которое не может сработать на реальном
+# шаге атаки, потому что comm этого шага сам в исключении.
+#
+# Формат: один rule_id на строку, дальше — причина, почему коллизия здесь
+# НЕ находка №56 (а не "ещё не дошли руки"). Пустые строки и строки с #
+# игнорируются при чтении rule_id (тест разбирает только первое слово в
+# непустой нерешёточной строке).
+#
+# ── beacon_fixed_interval, c2_periodic_beacon_pattern (rules/command-and-control.yaml) ──
+# comm not_in исключает curl (среди ~15 общих CLI/пакетных инструментов).
+# bruteforce-attacks.sh/ssrf-attacks.sh/ldap-csrf-attacks.sh реально бегут
+# как curl (record_manifest "bruteforce"/"ssrf"/"ldap_csrf" "curl"), но эти
+# правила не про их категории атак — они про периодический beacon на
+# нестандартный порт (T1071.001, Metasploit/Cobalt Strike), и коллизия
+# предшествует волне 5.9.3 (файл добавлен разом в "add 75 new rules",
+# 5.9.3b/c его не трогали — не подпадает под постановку 5.9.4e буквально).
+# curl — слишком частый легитимный инструмент, чтобы убрать его из
+# whitelist без замены сигнала (нужна частотная/интервальная метрика вместо
+# comm) — это отдельная правка правила, не входит в 5.9.4e. Дата: 2026-08-20.
+beacon_fixed_interval
+c2_periodic_beacon_pattern
+
+# ── credaccess_pam_config_backdoor (rules/credential-and-defense-gaps.yaml) ──
+# comm not_in исключает tee (среди sed/echo/cat/vim/nano/emacs как типичных
+# редакторов конфигурации). log_tamper-шаг run-all-attacks.sh реально бежит
+# как tee (record_manifest "log_tamper" "tee"), но целится в лог-файл, а не
+# в /etc/pam.d/ — на текущем attack-манифесте это не активная слепота
+# позитивного контроля, только теоретическая: реальная PAM-атака через
+# `tee /etc/pam.d/...` детект не поднимет. Правило старше волны 5.9.3 (тот
+# же коммит "add 75 new rules"). Сузить exclusion до "не по этому пути" —
+# отдельная правка вне периметра 5.9.4e, записано как долг. Дата: 2026-08-20.
+credaccess_pam_config_backdoor
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Блок 2026-08-20 (ревизия волны 5.9.4): расширение множества атакующих comm
+# ═══════════════════════════════════════════════════════════════════════════
+# Первая версия проверки брала атакующие comm ТОЛЬКО из attack-manifest.json
+# (curl/sqlmap/docker-proxy/chmod/tee). Ревизия волны нашла у этого дефект,
+# ровно того же класса, что и сама находка №56: bpftool в манифест не
+# записывается — его гоняет run_bpf_attack напрямую, — значит проверка,
+# написанная ИЗ-ЗА исключения "bpftool", на этом исключении оставалась бы
+# зелёной. knownAttackerComms (internal/correlator/rules_coverage_test.go)
+# дополнен тремя именами прямых шагов run-all-attacks.sh: bpftool
+# (run_bpf_attack), insmod (run_kmod_attack), python3 (run_setuid_attack).
+# Ниже — девять коллизий, которые это вскрыло, разобранные поимённо.
+#
+# ── bpf_activity_unexpected_process (rules/bpf-rootkit.yaml) ──
+# Исключает bpftool по comm при условиях "comm not_in [...] AND ret >= 0" —
+# то есть ровно форма находки №56 (кто, а не что), но на другом коллекторе:
+# event_type bpf_program, а не syscall. Настоящее лечение — условие на
+# cmd_nr, как у соседних правил того же файла (bpf_prog_load_kprobe и др.)
+# и как 5.9.4e сделала для syscall-близнецов. Не сделано здесь по периметру:
+# коллектор bpf_program на docker-стенде не активен, правило и так немо, а
+# трогать его вслепую — это менять правило, которое нечем проверить (та же
+# ошибка, из-за которой 5.9.4e выкинула непроверенные bpftool/cilium-agent/
+# falco). Записано как долг волны 6.х вместе с включением bpf_program.
+# Дата: 2026-08-20.
+bpf_activity_unexpected_process
+
+# ── rootkit_init_module_syscall (rules/rootkit-detection.yaml) ──
+# Исключает insmod/modprobe/kmod/systemd-modules-load (волна 5.9.3c, №47) по
+# осознанному соображению: руткит зовёт init_module напрямую или из
+# переименованного бинаря, а не через insmod. Шаг run_kmod_attack при этом
+# бежит именно insmod — то есть позитивного контроля у правила на стенде нет
+# и не появится от этой записи. Важно: он и так не появлялся бы — insmod на
+# заведомо несуществующем модуле падает ДО сисколла (см. комментарий в
+# run-all-attacks.sh, тот же класс, что открытый вопрос 5.9.4e (1) про
+# BPF_PROG_LOAD). Нужен настоящий .ko-фикстур; до него правило остаётся без
+# позитивного контроля осознанно, а не по недосмотру. Дата: 2026-08-20.
+rootkit_init_module_syscall
+
+# ── cred_aws_credentials_read, cred_gcp_service_account_read,
+#    cred_vault_token_read (rules/credential-access.yaml) ──
+# Исключают python3/python/node/java как штатных читателей облачных
+# секретов (SDK). Шаг run_setuid_attack бежит python3, но он вызывает
+# setuid(2)/ctypes-libc, а не читает ~/.aws/credentials — event_type у этих
+# правил file, у шага — syscall, пересечение чисто номинальное. Широкий
+# проектный компромисс (python3 — слишком частый легитимный читатель), а не
+# забытое самоисключение; правила старше волны 5.9.3. Дата: 2026-08-20.
+cred_aws_credentials_read
+cred_gcp_service_account_read
+cred_vault_token_read
+
+# ── exfil_large_http_post (rules/exfiltration-extended.yaml) ──
+# То же: python3 в whitelist как частый легитимный HTTP-клиент, event_type
+# network, а python3-шаг стенда сетевых соединений не делает вовсе.
+# Дата: 2026-08-20.
+exfil_large_http_post
+
+# ── gpu_large_compute_burst, gpu_medium_dtoh_non_framework,
+#    gpu_unknown_process (rules/gpu-threats.yaml) ──
+# python3 исключён как имя процесса ML-фреймворка (torch/tensorflow бегут
+# как python3) — без этого исключения правила были бы FP-генератором на
+# любом GPU-узле. event_type gpu; на docker-стенде GPU нет вообще, правила
+# немы по среде (это сфера волны 6, не №56). Дата: 2026-08-20.
+gpu_large_compute_burst
+gpu_medium_dtoh_non_framework
+gpu_unknown_process

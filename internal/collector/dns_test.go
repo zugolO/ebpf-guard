@@ -73,6 +73,10 @@ func buildMockRawEvent(direction types.DNSDirection, payload []byte) []byte {
 	offset += 4
 	copy(header[offset:], "curl\x00")
 	offset += 16
+	binary.LittleEndian.PutUint32(header[offset:], 999) // ppid
+	offset += 4
+	copy(header[offset:], "bash\x00")
+	offset += 16
 	header[offset] = byte(direction)
 	offset += 1
 	binary.LittleEndian.PutUint16(header[offset:], uint16(len(payload)))
@@ -119,6 +123,8 @@ func TestParseEvent(t *testing.T) {
 	assert.Equal(t, types.KtimeToEpoch(1234567890), event.Timestamp)
 	assert.Equal(t, uint32(1234), event.PID)
 	assert.Equal(t, uint32(1000), event.UID)
+	assert.Equal(t, uint32(999), event.PPID)
+	assert.Equal(t, "bash", string(event.ParentComm[:4]))
 	assert.Equal(t, "example.com", event.DNS.QName)
 	assert.Equal(t, uint16(1), event.DNS.QType)
 	assert.Equal(t, uint16(0), event.DNS.RCode)

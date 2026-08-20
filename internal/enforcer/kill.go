@@ -69,6 +69,22 @@ func (e *Enforcer) executeKill(ctx context.Context, alert types.Alert) error {
 
 	pid := alert.Event.PID
 
+	if e.dryRun {
+		entry.Success = false
+		entry.DryRun = true
+		entry.Description = fmt.Sprintf("would send SIGKILL to PID %d (dry run)", pid)
+		e.logAudit(entry)
+		e.logger.Warn("KILL action suppressed by dry_run",
+			slog.String("rule_id", alert.RuleID),
+			slog.Uint64("pid", uint64(pid)),
+			slog.String("comm", comm),
+		)
+		if e.dryrunTotal != nil {
+			e.dryrunTotal.WithLabelValues("kill").Inc()
+		}
+		return nil
+	}
+
 	if pidfdSupported {
 		if err := killViaPidfd(pid); err != nil {
 			entry.Success = false

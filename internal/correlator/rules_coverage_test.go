@@ -573,3 +573,156 @@ func intentionalLossRuleIDs(t *testing.T, path string) map[string]struct{} {
 	}
 	return ids
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DestructiveRulesWithoutArgCondition — wave 5.9.4b, finding №53
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestDestructiveRulesWithoutArgCondition(t *testing.T) {
+	rules := []Rule{
+		// kill + comm-only exclusion -> flagged: nothing looks at what happened,
+		// only who the caller claims to be.
+		{ID: "kill_comm_only", EventType: types.EventSyscall, Condition: RuleCondition{Field: "comm", Op: OpNotIn, Values: []string{"trusted"}}, Action: ActionKill},
+		// kill + comm plus a real arg condition -> not flagged.
+		{ID: "kill_comm_and_arg", EventType: types.EventSyscall, ConditionGroup: &RuleConditionGroup{
+			Operator: "and",
+			Conditions: []RuleCondition{
+				{Field: "comm", Op: OpNotIn, Values: []string{"trusted"}},
+				{Field: "arg0", Op: OpIn, Values: []string{"9"}},
+			},
+		}, Action: ActionKill},
+		// block on a real field (not comm) -> not flagged.
+		{ID: "block_on_field", EventType: types.EventCgroupEsc, Condition: RuleCondition{Field: "new_cgroup_id", Op: OpEquals, Values: []string{"1"}}, Action: ActionBlock},
+		// throttle with no condition at all -> flagged.
+		{ID: "throttle_bare", EventType: types.EventSyscall, Action: ActionThrottle},
+		// alert action -> out of scope regardless of condition shape.
+		{ID: "alert_comm_only", EventType: types.EventSyscall, Condition: RuleCondition{Field: "comm", Op: OpNotIn, Values: []string{"trusted"}}, Action: ActionAlert},
+		// drop action -> also out of scope.
+		{ID: "drop_comm_only", EventType: types.EventSyscall, Condition: RuleCondition{Field: "comm", Op: OpNotIn, Values: []string{"trusted"}}, Action: ActionDrop},
+	}
+	re := NewRuleEngine(rules)
+
+	got := re.DestructiveRulesWithoutArgCondition()
+
+	assert.ElementsMatch(t, []string{"kill_comm_only", "throttle_bare"}, got)
+}
+
+// TestDestructiveRulesInventory_RepoRules is the machine inventory required
+// by wave 5.9.4b (#53): every loaded rule with action kill/block/throttle
+// must have a real argument/value condition, or be named in
+// destructive-actions.txt with a reason. Logged, not just asserted — the
+// measurement report for №2.9.4 needs this count and list by name (5.9.4b
+// criterion), and a passing test that prints nothing would put that back on
+// trust the way the missing inventory did before finding №53.
+func TestDestructiveRulesInventory_RepoRules(t *testing.T) {
+	rules, err := LoadRulesFromDir("../../rules")
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	re := NewRuleEngine(rules)
+	recorded := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/destructive-actions.txt")
+
+	got := re.DestructiveRulesWithoutArgCondition()
+	t.Logf("разрушительных правил (kill/block/throttle) без условия на аргумент: %d: %v", len(got), got)
+
+	for _, id := range got {
+		assert.Contains(t, recorded, id,
+			"rule %q has action kill/block/throttle, no condition beyond comm, and no line in "+
+				"destructive-actions.txt: either give it a real argument/value condition or record "+
+				"why that isn't possible", id)
+	}
+
+	// The mechanism itself must still catch an obviously unguarded destructive
+	// rule, so a clean inventory above can't silently pass because the
+	// detector broke.
+	augmented := append(append([]Rule{}, rules...), Rule{
+		ID:        "zz_canary_destructive_no_arg",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{Field: "comm", Op: OpNotIn, Values: []string{"trusted"}},
+		Action:    ActionKill,
+	})
+	canary := NewRuleEngine(augmented).DestructiveRulesWithoutArgCondition()
+	assert.Contains(t, canary, "zz_canary_destructive_no_arg")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExclusionsCollidingWithAttackerComms — wave 5.9.4e, finding №56
+// ─────────────────────────────────────────────────────────────────────────────
+
+// knownAttackerComms is the set of process names the attack scripts under
+// deploy/docker-test-setup/attacks actually run as.
+//
+// The first group is attack-manifest.json's own contents: the record_manifest
+// calls in sqlmap-attacks.sh, bruteforce-attacks.sh, ssrf-attacks.sh and
+// ldap-csrf-attacks.sh, plus the inline manifest entries in run-all-attacks.sh
+// (docker-proxy transit, chmod, log_tamper/tee).
+//
+// The second group is the reason this list is not just the manifest: several
+// attack steps in run-all-attacks.sh execute a tool directly without recording
+// a manifest entry for it, and finding №56 was exactly one of those — the
+// bpftool step (5.9.2b). A check built only from the manifest would have stayed
+// green on the defect it was written to catch, and would stay green if a
+// `comm not_in [bpftool]` were reintroduced tomorrow. These names are read off
+// the attack steps themselves: run_bpf_attack runs bpftool, run_kmod_attack
+// runs insmod, run_setuid_attack runs python3.
+var knownAttackerComms = map[string]bool{
+	// in attack-manifest.json
+	"sqlmap":       true,
+	"curl":         true,
+	"docker-proxy": true,
+	"chmod":        true,
+	"tee":          true,
+	// direct attack steps in run-all-attacks.sh, not in the manifest
+	"bpftool": true, // run_bpf_attack (5.9.2b/5.9.4e) — the finding-№56 comm itself
+	"insmod":  true, // run_kmod_attack
+	"python3": true, // run_setuid_attack
+}
+
+func TestExclusionsCollidingWithAttackerComms(t *testing.T) {
+	re := NewRuleEngine([]Rule{
+		// comm not_in excludes an attacker comm -> flagged: this rule can
+		// never fire on that attack step.
+		{ID: "excludes_attacker", EventType: types.EventSyscall, ConditionGroup: &RuleConditionGroup{
+			Operator: "and",
+			Conditions: []RuleCondition{
+				{Field: "nr", Op: OpIn, Values: []string{"321"}},
+				{Field: "comm", Op: OpNotIn, Values: []string{"ebpf-guard", "curl"}},
+			},
+		}},
+		// comm not_in excludes only non-attacker names -> not flagged.
+		{ID: "clean_exclusion", EventType: types.EventSyscall, Condition: RuleCondition{Field: "comm", Op: OpNotIn, Values: []string{"ebpf-guard"}}},
+		// comm in (not not_in) mentioning an attacker comm is a different
+		// shape (allowlist, not exclusion) -> not flagged.
+		{ID: "comm_allowlist", EventType: types.EventSyscall, Condition: RuleCondition{Field: "comm", Op: OpIn, Values: []string{"curl"}}},
+	})
+
+	got := re.ExclusionsCollidingWithAttackerComms(knownAttackerComms)
+	assert.Equal(t, []string{"excludes_attacker"}, got)
+}
+
+// TestExclusionsCollidingWithAttackerComms_RepoRules is the machine check
+// required by wave 5.9.4e criterion: "исключение × манифест атак" must run
+// against every loaded rule and print how many it checked. A rule found here
+// silently blinds its own positive control the way rootkit_bpf_prog_load_suspicious
+// and rootkit_bpf_map_create_suspicious did against bpftool before this wave.
+func TestExclusionsCollidingWithAttackerComms_RepoRules(t *testing.T) {
+	rules, err := LoadRulesFromDir("../../rules")
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	re := NewRuleEngine(rules)
+	recorded := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/attacker-comm-exclusions.txt")
+
+	got := re.ExclusionsCollidingWithAttackerComms(knownAttackerComms)
+	t.Logf("правил проверено на пересечение исключения по comm с манифестом атак: %d, найдено коллизий: %d %v",
+		len(rules), len(got), got)
+
+	for _, id := range got {
+		assert.Contains(t, recorded, id,
+			"rule %q excludes a comm that an attack script actually runs as — it can never fire "+
+				"on that attack step: either give it a real argument/value condition (the way "+
+				"5.9.4e fixed rootkit_bpf_prog_load_suspicious/rootkit_bpf_map_create_suspicious, "+
+				"finding №56) or record why the collision isn't a coverage gap in "+
+				"attacker-comm-exclusions.txt", id)
+	}
+}

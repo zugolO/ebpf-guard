@@ -441,4 +441,11 @@ log "архив: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 # вместо вычитания. Печатаем все три переменные одной строкой, чтобы копипаста
 # больше не теряла ни одну:
 #   export IDLE_METRICS_START="$OUT/metrics-start.txt"
-log "для критерия 6 (состав детекта) и критерия 16 (слепое окно) run-gate.sh: IDLE_METRICS_START=$OUT/metrics-start.txt IDLE_STATE_END=$OUT/state-end.json IDLE_METRICS_END=$OUT/metrics-end.txt"
+#
+# 5.9.4g (находка №58): критерий 16 больше не считает объём окна по
+# кумулятивному счётчику ebpf_guard_alerts_total (idle-run.sh рестартует
+# агента в конце, P0-3, и счётчик обнуляется) — вместо этого по множеству
+# `id` снимка /api/v1/alerts, который этот скрипт и так пишет как
+# alerts-end.json:
+#   export IDLE_ALERTS_END="$OUT/alerts-end.json"
+log "для критерия 6 (состав детекта) и критерия 16 (слепое окно) run-gate.sh: IDLE_METRICS_START=$OUT/metrics-start.txt IDLE_STATE_END=$OUT/state-end.json IDLE_METRICS_END=$OUT/metrics-end.txt IDLE_ALERTS_END=$OUT/alerts-end.json"

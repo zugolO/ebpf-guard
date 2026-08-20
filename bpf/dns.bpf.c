@@ -73,6 +73,8 @@ struct dns_event {
 	__u32 tgid;
 	__u32 uid;
 	__u8  comm[COMM_LEN];
+	__u32 ppid;                       /* Parent process ID (plan.md 5.9.4i, debt from 5.9.3d) */
+	__u8  parent_comm[COMM_LEN];      /* Parent process name (if available) */
 	__u8  direction;                  /* 0 = query (outbound), 1 = response (inbound) */
 	__u16 payload_len;                /* Number of valid bytes in payload (<= DNS_MAX_PAYLOAD) */
 	__u8  payload[DNS_MAX_PAYLOAD];   /* Raw UDP payload, starting at the DNS header */
@@ -122,6 +124,30 @@ static __always_inline void fill_dns_process_info(struct dns_event *e)
 	e->timestamp = bpf_ktime_get_ns();
 
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+
+	/* Parent identity, read from task_struct->real_parent — same approach
+	 * as fill_process_info() in common.h (plan.md wave 5.9.2g), carried
+	 * over to DNS events by 5.9.4i. Without it, DNS-triggered alerts have
+	 * no process_chain and criterion 10 regresses by the exact mechanism
+	 * finding #45 already diagnosed for other event types; wave 6.3 adds
+	 * dns-threats.yaml, a new rule class whose alerts would otherwise ship
+	 * chain-less from day one. */
+	e->ppid = 0;
+	__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));
+	{
+		struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+		struct task_struct *parent;
+
+		if (task) {
+			parent = BPF_CORE_READ(task, real_parent);
+			if (parent) {
+				e->ppid = BPF_CORE_READ(parent, tgid);
+				bpf_probe_read_kernel(&e->parent_comm,
+						      sizeof(e->parent_comm),
+						      BPF_CORE_READ(parent, comm));
+			}
+		}
+	}
 }
 
 /* Helper: reserve a dns_event, fill in process info + payload, and submit. */

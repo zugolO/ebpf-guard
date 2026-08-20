@@ -50,11 +50,26 @@ rules:
   # ============================================================================
   # Rule 2 – bpf() syscall from a process outside the allowed whitelist
   #
-  # Only the ebpf-guard agent binary (comm="ebpf-guard") is expected to issue
-  # destructive BPF commands on a monitored node.  Any other caller — including
-  # root-owned tooling such as bpftool or a compromised container — is
-  # considered hostile when it attempts to detach or delete BPF objects.
-  # Tune the whitelist values if additional trusted BPF tools are deployed.
+  # Only the ebpf-guard agent binary (comm="ebpf-guard") and the node's own
+  # container/cgroup managers are expected to issue destructive BPF commands
+  # on a monitored node — systemd, systemd-cgroups, containerd, dockerd, and
+  # runc all manage cgroup-BPF programs as part of routine container
+  # lifecycle operations (attach/detach on cgroup create/delete). Any other
+  # caller — including root-owned tooling such as bpftool or a compromised
+  # container — is considered hostile when it attempts to detach or delete
+  # BPF objects.
+  #
+  # DEBT (wave 5.9.4b, finding №53): the whitelist-by-comm below is a
+  # stopgap, not a fix. It cannot distinguish a legitimate daemon detaching
+  # ITS OWN cgroup-BPF program from that same daemon (or a process spoofing
+  # its comm) detaching ebpf-guard's monitoring program — the syscall
+  # collector captures only nr/arg0-arg5/comm/uid, not which BPF object
+  # (map_id/prog_id, or its owning cgroup) the command targets. A real fix
+  # needs the collector to parse the bpf_attr union to recover the target
+  # object and check its owner. Until that lands, this rule cannot safely
+  # kill on comm alone — downgraded to alert (see
+  # deploy/docker-test-setup/attacks/destructive-actions.txt and plan.md
+  # 5.9.4b for the accounting).
   # ============================================================================
 
   - id: ebpf_subversion_unauthorized_caller
@@ -62,9 +77,12 @@ rules:
     description: >-
       A process whose comm name is not in the trusted whitelist invoked bpf(2)
       with a destructive command (BPF_PROG_DETACH, BPF_MAP_DELETE_ELEM,
-      BPF_OBJ_PIN, BPF_LINK_DETACH). Only the ebpf-guard agent binary is
-      expected to manage attached BPF programs; any other caller should be
-      treated as a potential defense-evasion attempt.
+      BPF_OBJ_PIN, BPF_LINK_DETACH). Only the ebpf-guard agent binary and the
+      node's container/cgroup managers are expected to manage BPF programs;
+      any other caller should be treated as a potential defense-evasion
+      attempt. action is alert, not kill, until the collector can identify
+      the targeted BPF object and confirm the caller does not own it — see
+      the DEBT note above.
     event_type: syscall
     condition_group:
       operator: and
@@ -77,7 +95,13 @@ rules:
           values: ["3", "6", "9", "33"] # destructive BPF commands only
         - field: comm
           op: not_in
-          values: ["ebpf-guard"]        # whitelist: only the security agent is trusted
+          values:                       # trusted: security agent + container/cgroup managers
+            - "ebpf-guard"
+            - "systemd"
+            - "systemd-cgroups"
+            - "containerd"
+            - "dockerd"
+            - "runc"
     severity: critical
-    action: kill
+    action: alert
     tags: [ebpf-subversion, defense-evasion, monitor-tampering, mitre-t1562]

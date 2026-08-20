@@ -145,7 +145,7 @@ func TestDecodeDNSName_PointerOutOfRange(t *testing.T) {
 // bytes actually present.
 func TestDecodeDNSEvent_PayloadLenExceedsBuffer(t *testing.T) {
 	raw := buildDNSRawRecord(types.DNSDirection(0), buildDNSQuery("a.com", 1))
-	binary.LittleEndian.PutUint16(raw[41:], 200) // <= dnsMaxPayload but > present bytes
+	binary.LittleEndian.PutUint16(raw[61:], 200) // <= dnsMaxPayload but > present bytes
 	assert.Nil(t, decodeDNSEvent(raw))
 }
 

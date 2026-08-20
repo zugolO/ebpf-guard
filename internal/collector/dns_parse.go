@@ -11,9 +11,11 @@ import (
 
 // dnsRawEventFixedLen is the size of struct dns_event in dns.bpf.c up to
 // (but not including) the variable-meaningful payload bytes: type(4) +
-// timestamp(8) + pid(4) + tgid(4) + uid(4) + comm(16) + direction(1) +
-// payload_len(2) = 43. The struct is packed, so there is no padding.
-const dnsRawEventFixedLen = 4 + 8 + 4 + 4 + 4 + 16 + 1 + 2
+// timestamp(8) + pid(4) + tgid(4) + uid(4) + comm(16) + ppid(4) +
+// parent_comm(16) + direction(1) + payload_len(2) = 63. The struct is
+// packed, so there is no padding. ppid/parent_comm added by plan.md 5.9.4i
+// (debt from 5.9.3d) so DNS-triggered alerts carry a process_chain.
+const dnsRawEventFixedLen = 4 + 8 + 4 + 4 + 4 + 16 + 4 + 16 + 1 + 2
 
 // dnsMaxPayload mirrors DNS_MAX_PAYLOAD in dns.bpf.c — the kernel side
 // always reserves this many payload bytes in the ring buffer record,
@@ -72,6 +74,15 @@ func decodeDNSEvent(raw []byte) *types.Event {
 	copy(comm[:], raw[offset:])
 	offset += 16
 
+	// ppid (4 bytes)
+	ppid := binary.LittleEndian.Uint32(raw[offset:])
+	offset += 4
+
+	// parent_comm (16 bytes)
+	var parentComm [16]byte
+	copy(parentComm[:], raw[offset:])
+	offset += 16
+
 	// direction (1 byte)
 	direction := types.DNSDirection(raw[offset])
 	offset += 1
@@ -91,12 +102,14 @@ func decodeDNSEvent(raw []byte) *types.Event {
 	}
 
 	return &types.Event{
-		Type:      types.EventDNS,
-		Timestamp: types.KtimeToEpoch(timestamp),
-		PID:       pid,
-		TGID:      tgid,
-		UID:       uid,
-		Comm:      comm,
+		Type:       types.EventDNS,
+		Timestamp:  types.KtimeToEpoch(timestamp),
+		PID:        pid,
+		TGID:       tgid,
+		PPID:       ppid,
+		UID:        uid,
+		Comm:       comm,
+		ParentComm: parentComm,
 		DNS: &types.DNSEvent{
 			QName:       msg.qname,
 			QType:       msg.qtype,

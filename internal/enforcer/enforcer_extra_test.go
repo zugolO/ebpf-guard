@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -393,6 +394,44 @@ func TestExecuteThrottle_WritesCgroupCPUMax(t *testing.T) {
 	assert.Equal(t, "10000 100000\n", string(data), "cpu.max content must match quota/period")
 }
 
+// TestExecuteThrottle_DryRun is the regression test for №52: dry_run must
+// gate executeThrottle before the cgroup cpu.max write, the actual syscall.
+func TestExecuteThrottle_DryRun(t *testing.T) {
+	requireRoot(t)
+	e, err := NewEnforcer(testLogger(), Config{EnableThrottle: true, DryRun: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = e.Close() })
+
+	pid := uint32(os.Getpid())
+	target := cgroupWritePath(t, e)
+	existedBefore := fileExists(target)
+	var mtimeBefore time.Time
+	if existedBefore {
+		info, statErr := os.Stat(target)
+		require.NoError(t, statErr)
+		mtimeBefore = info.ModTime()
+	}
+
+	before := testutil.ToFloat64(e.actionsTotal.WithLabelValues("throttle"))
+	beforeDryrun := testutil.ToFloat64(e.dryrunTotal.WithLabelValues("throttle"))
+
+	require.NoError(t, e.Execute(context.Background(), ActionThrottle, syscallAlert("r", pid, 0)))
+
+	after := testutil.ToFloat64(e.actionsTotal.WithLabelValues("throttle"))
+	afterDryrun := testutil.ToFloat64(e.dryrunTotal.WithLabelValues("throttle"))
+	assert.Equal(t, before, after, "enforcement_actions_total{throttle} must not increase under dry_run")
+	assert.Equal(t, beforeDryrun+1, afterDryrun, "enforcement_dryrun_total{throttle} must increase by exactly 1")
+
+	// cpu.max must be untouched: either still absent, or unmodified.
+	if existedBefore {
+		info, statErr := os.Stat(target)
+		require.NoError(t, statErr)
+		assert.Equal(t, mtimeBefore, info.ModTime(), "cpu.max must not be rewritten under dry_run")
+	} else {
+		assert.False(t, fileExists(target), "cpu.max must not be created under dry_run")
+	}
+}
+
 func TestFindCgroupPath(t *testing.T) {
 	t.Parallel()
 	e, err := NewEnforcer(testLogger(), Config{})
@@ -560,6 +599,147 @@ func TestParseBlockBackend(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, tt.want, got)
 			}
+		})
+	}
+}
+
+// allDestructiveActionTypes lists every ActionType wired into Execute's
+// switch (excluding ActionLog, which is never routed through Execute — the
+// correlator handles "log" as a no-op locally). Any new ActionType constant
+// that performs enforcement MUST be added here, or this sentinel fails
+// closed via the "unknown action type" branch of Execute instead of
+// silently reaching the stand as an unguarded destructive action (№52/№53).
+var allDestructiveActionTypes = []ActionType{
+	ActionBlock,
+	ActionLSMBlock,
+	ActionKill,
+	ActionThrottle,
+	ActionNetworkPolicy,
+}
+
+// actionsRequiringExplicitDryRunGate are the ActionTypes whose handler must
+// itself account for dry_run: leave an AuditEntry with DryRun=true, count
+// enforcement_dryrun_total, and never touch enforcement_actions_total, the
+// counter that means "a real action happened".
+//
+// Originally (5.9.4a) this listed only kill and throttle — the two that reach
+// a raw OS syscall — on the assumption that every other handler delegates to
+// a manager constructed with the same Config.DryRun. Review of that wave found
+// the assumption false for networkpolicy: NetworkPolicyCfg has no DryRun field
+// at all, so in mode "apply" with an Applier set the handler would create a
+// real NetworkPolicy in the cluster while enforcer.dry_run was true — #52 in a
+// second location. All five are listed now, and the accounting requirement is
+// the same for all of them regardless of who suppresses the side effect.
+var actionsRequiringExplicitDryRunGate = []ActionType{
+	ActionKill,
+	ActionThrottle,
+	ActionBlock,
+	ActionLSMBlock,
+	ActionNetworkPolicy,
+}
+
+// TestDryRunSentinel_AllActionTypesRouteThroughExecute guards against a new
+// ActionType being added to the const block without being wired into
+// Execute's switch — see №52/5.9.4a. If this fails after adding an action,
+// add the missing `case` in Execute (enforcer.go) and, if the action
+// reaches a syscall directly, add it to actionsRequiringExplicitDryRunGate
+// below and give it a dry-run branch before the syscall.
+func TestDryRunSentinel_AllActionTypesRouteThroughExecute(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux only: ValidatePID/killViaPidfd read /proc")
+	}
+	f := newFakeLSM(true)
+	e, err := NewEnforcer(testLogger(), Config{
+		EnableBlock:    true,
+		EnableKill:     true,
+		EnableThrottle: true,
+		BlockBackend:   BlockBackendLog, // no real network side effect
+		DryRun:         true,
+		LSMManager:     f,
+		NetworkPolicy:  NetworkPolicyCfg{Enabled: true}, // default "suggest" mode: no apply side effect
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = e.Close() })
+
+	// Use a disposable child, never the test process itself: if the dry-run
+	// gate under test is broken, ActionKill would send a real SIGKILL.
+	_, pid := spawnChild(t)
+
+	for _, action := range allDestructiveActionTypes {
+		t.Run(string(action), func(t *testing.T) {
+			err := e.Execute(context.Background(), action, syscallAlert("sentinel", pid, 0))
+			require.NoError(t, err, "action %s must be routed through Execute, not fall into the default branch", action)
+		})
+	}
+
+	assert.Empty(t, f.addPIDCalls, "dry_run must never reach the LSM blocklist")
+	assert.True(t, isAlive(pid), "dry_run must never actually kill the target process")
+}
+
+// TestDryRunSentinel_SyscallActionsGateBeforeEffect is the machine-checked
+// version of the 5.9.4a requirement: every action in
+// actionsRequiringExplicitDryRunGate must produce a DryRun=true audit entry
+// and must not increment enforcement_actions_total under dry_run. A new
+// syscall-reaching action added to that list without a dry-run branch fails
+// here instead of on the live stand.
+func TestDryRunSentinel_SyscallActionsGateBeforeEffect(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux only: ValidatePID/killViaPidfd read /proc")
+	}
+	for _, action := range actionsRequiringExplicitDryRunGate {
+		t.Run(string(action), func(t *testing.T) {
+			auditCh := make(chan AuditEntry, 4)
+			applier := &fakePolicyApplier{}
+			lsm := newFakeLSM(true)
+			e, err := NewEnforcer(testLogger(), Config{
+				EnableKill:      true,
+				EnableThrottle:  true,
+				EnableBlock:     true,
+				BlockBackend:    BlockBackendLog,
+				LSMManager:      lsm,
+				DryRun:          true,
+				AuditLogChannel: auditCh,
+				// Apply mode with a live applier: the only configuration in
+				// which the networkpolicy handler has a real side effect to
+				// suppress. Testing it in the default "suggest" mode would
+				// pass with no gate at all — which is how the gap survived
+				// wave 5.9.4a.
+				NetworkPolicy: NetworkPolicyCfg{
+					Enabled: true,
+					Mode:    NetworkPolicyModeApply,
+					Applier: applier,
+				},
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = e.Close() })
+
+			// Use a disposable child, never the test process itself: if the
+			// dry-run gate under test is broken, ActionKill would send a
+			// real SIGKILL.
+			_, pid := spawnChild(t)
+
+			label := string(action)
+			before := testutil.ToFloat64(e.actionsTotal.WithLabelValues(label))
+			dryBefore := testutil.ToFloat64(e.dryrunTotal.WithLabelValues(label))
+
+			require.NoError(t, e.Execute(context.Background(), action, syscallAlert("sentinel", pid, 0)))
+
+			after := testutil.ToFloat64(e.actionsTotal.WithLabelValues(label))
+			assert.Equal(t, before, after, "enforcement_actions_total{%s} must not increase under dry_run", label)
+			assert.Equal(t, float64(dryBefore+1), testutil.ToFloat64(e.dryrunTotal.WithLabelValues(label)),
+				"enforcement_dryrun_total{%s} must record the suppressed action", label)
+
+			select {
+			case entry := <-auditCh:
+				assert.True(t, entry.DryRun, "audit entry for %s under dry_run must have DryRun=true", label)
+				assert.False(t, entry.Success, "a suppressed action must not be audited as successful (%s)", label)
+			case <-time.After(time.Second):
+				t.Fatalf("expected an audit entry for %s but none arrived", label)
+			}
+
+			assert.True(t, isAlive(pid), "dry_run must never actually act on the target process")
+			assert.Empty(t, applier.applied, "dry_run must never apply a NetworkPolicy to the cluster")
+			assert.Empty(t, lsm.addPIDCalls, "dry_run must never reach the LSM blocklist")
 		})
 	}
 }

@@ -90,6 +90,7 @@ type AuditEntry struct {
 	UID         uint32          `json:"uid"`
 	Description string          `json:"description"`
 	Success     bool            `json:"success"`
+	DryRun      bool            `json:"dry_run,omitempty"`
 	Error       string          `json:"error,omitempty"`
 	EventType   types.EventType `json:"event_type"`
 }
@@ -155,6 +156,7 @@ type Enforcer struct {
 	throttleCleanupInterval time.Duration
 
 	actionsTotal *prometheus.CounterVec // ebpf_guard_enforcement_actions_total{action}
+	dryrunTotal  *prometheus.CounterVec // ebpf_guard_enforcement_dryrun_total{action}
 	auditDropped prometheus.Counter     // ebpf_guard_audit_log_dropped_total
 	pidfdUsed    prometheus.Counter     // ebpf_guard_enforcer_kill_pidfd_used_total
 }
@@ -231,6 +233,10 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 			Name: "ebpf_guard_enforcement_actions_total",
 			Help: "Total enforcement actions executed by action type.",
 		}, []string{"action"}),
+		dryrunTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ebpf_guard_enforcement_dryrun_total",
+			Help: "Total enforcement actions that fired but were suppressed by dry_run, by action type.",
+		}, []string{"action"}),
 		auditDropped: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ebpf_guard_audit_log_dropped_total",
 			Help: "Total audit log entries dropped due to a full channel.",
@@ -296,7 +302,7 @@ func NewEnforcer(logger *slog.Logger, cfg Config) (*Enforcer, error) {
 
 // RegisterMetrics registers the Enforcer's Prometheus metrics with the given registerer.
 func (e *Enforcer) RegisterMetrics(reg prometheus.Registerer) error {
-	for _, c := range []prometheus.Collector{e.actionsTotal, e.auditDropped, e.pidfdUsed} {
+	for _, c := range []prometheus.Collector{e.actionsTotal, e.dryrunTotal, e.auditDropped, e.pidfdUsed} {
 		if c == nil {
 			continue
 		}
@@ -305,11 +311,10 @@ func (e *Enforcer) RegisterMetrics(reg prometheus.Registerer) error {
 		}
 	}
 	// Initialise label sets so series appear in /metrics even at zero.
-	e.actionsTotal.WithLabelValues("block")
-	e.actionsTotal.WithLabelValues("kill")
-	e.actionsTotal.WithLabelValues("throttle")
-	e.actionsTotal.WithLabelValues("lsm_block")
-	e.actionsTotal.WithLabelValues("networkpolicy")
+	for _, action := range []string{"block", "kill", "throttle", "lsm_block", "networkpolicy"} {
+		e.actionsTotal.WithLabelValues(action)
+		e.dryrunTotal.WithLabelValues(action)
+	}
 	return nil
 }
 
@@ -369,7 +374,15 @@ func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
 		EventType:   alert.Event.Type,
 	}
 
-	e.logger.Warn("BLOCK action executed",
+	// 5.9.4a follow-up (#52): the message itself must not claim an action was
+	// executed while dry_run suppressed it — reading "BLOCK action executed" in
+	// the journal and having to check a field on the same line for whether it
+	// happened is exactly what made #52 survive a whole measurement run.
+	blockMsg := "BLOCK action executed"
+	if e.dryRun {
+		blockMsg = "BLOCK action suppressed by dry_run"
+	}
+	e.logger.Warn(blockMsg,
 		slog.String("rule_id", alert.RuleID),
 		slog.Uint64("pid", uint64(alert.Event.PID)),
 		slog.String("comm", comm),
@@ -405,9 +418,18 @@ func (e *Enforcer) executeBlock(ctx context.Context, alert types.Alert) error {
 		// log-only — already logged above
 	}
 
-	entry.Success = true
+	// Under dry_run the managers above are no-ops (they are constructed with
+	// the same cfg.DryRun), so the counter that means "a real action happened"
+	// must not move either — it goes to enforcement_dryrun_total instead, the
+	// same split kill/throttle use (5.9.4a).
+	entry.Success = !e.dryRun
+	entry.DryRun = e.dryRun
 	e.logAudit(entry)
-	if e.actionsTotal != nil {
+	if e.dryRun {
+		if e.dryrunTotal != nil {
+			e.dryrunTotal.WithLabelValues("block").Inc()
+		}
+	} else if e.actionsTotal != nil {
 		e.actionsTotal.WithLabelValues("block").Inc()
 	}
 	return nil
@@ -500,8 +522,12 @@ func (e *Enforcer) executeLSMBlock(ctx context.Context, alert types.Alert) error
 	}
 
 	if e.dryRun {
-		entry.Success = true
-		entry.Description += " (dry run)"
+		// Success=false/DryRun=true, not Success=true: an audit trail that
+		// records a suppressed action as a successful one is unreadable
+		// after the fact (5.9.4a, same shape as kill/throttle/block).
+		entry.Success = false
+		entry.DryRun = true
+		entry.Description += " (dry run, suppressed)"
 	} else if e.lsmManager != nil && e.lsmManager.IsAvailable() {
 		if err := e.lsmManager.AddToBlocklist(alert.Event.PID); err != nil {
 			e.logger.Warn("LSM block failed, falling back to nftables", "error", err, "pid", alert.Event.PID)
@@ -542,7 +568,11 @@ nftablesFallback:
 
 done:
 	e.logAudit(entry)
-	if entry.Success && e.actionsTotal != nil {
+	if e.dryRun {
+		if e.dryrunTotal != nil {
+			e.dryrunTotal.WithLabelValues("lsm_block").Inc()
+		}
+	} else if entry.Success && e.actionsTotal != nil {
 		e.actionsTotal.WithLabelValues("lsm_block").Inc()
 	}
 	return execErr
@@ -555,6 +585,40 @@ func (e *Enforcer) executeNetworkPolicy(ctx context.Context, alert types.Alert) 
 			slog.String("rule_id", alert.RuleID))
 		return nil
 	}
+
+	// 5.9.4a follow-up (#52): unlike the nftables/iptables/XDP managers, the
+	// NetworkPolicyManager is NOT constructed with cfg.DryRun — NetworkPolicyCfg
+	// has no such field — so in mode "apply" with an Applier set it would create
+	// a real NetworkPolicy in the cluster while enforcer.dry_run is true. That is
+	// the same defect #52 found on kill, one wave earlier than wave 6 needs it:
+	// the gate is here, before the manager is ever called.
+	if e.dryRun {
+		comm := sanitizeComm(string(bytesToString(alert.Event.Comm[:])))
+		entry := AuditEntry{
+			Timestamp:   time.Now(),
+			Action:      ActionNetworkPolicy,
+			RuleID:      alert.RuleID,
+			PID:         alert.Event.PID,
+			TGID:        alert.Event.TGID,
+			Comm:        comm,
+			UID:         alert.Event.UID,
+			Description: fmt.Sprintf("would generate a NetworkPolicy for PID %d (dry run)", alert.Event.PID),
+			Success:     false,
+			DryRun:      true,
+			EventType:   alert.Event.Type,
+		}
+		e.logAudit(entry)
+		e.logger.Warn("NETWORKPOLICY action suppressed by dry_run",
+			slog.String("rule_id", alert.RuleID),
+			slog.Uint64("pid", uint64(alert.Event.PID)),
+			slog.String("comm", comm),
+		)
+		if e.dryrunTotal != nil {
+			e.dryrunTotal.WithLabelValues("networkpolicy").Inc()
+		}
+		return nil
+	}
+
 	if err := e.networkPolicyMgr.Execute(ctx, alert); err != nil {
 		return fmt.Errorf("enforcer/networkpolicy: %w", err)
 	}
@@ -598,6 +662,23 @@ func (e *Enforcer) executeThrottle(ctx context.Context, alert types.Alert) error
 	state.LastThrottle = time.Now()
 	state.Count++
 	e.mu.Unlock()
+
+	if e.dryRun {
+		entry.Success = false
+		entry.DryRun = true
+		entry.Description = fmt.Sprintf("would throttle PID %d via cgroups v2 (dry run)", pid)
+		e.logAudit(entry)
+		e.logger.Warn("THROTTLE action suppressed by dry_run",
+			"rule_id", alert.RuleID,
+			"pid", pid,
+			"comm", comm,
+			"throttle_count", state.Count,
+		)
+		if e.dryrunTotal != nil {
+			e.dryrunTotal.WithLabelValues("throttle").Inc()
+		}
+		return nil
+	}
 
 	// Apply cgroup v2 CPU throttling
 	// This writes to the cgroup's cpu.max file

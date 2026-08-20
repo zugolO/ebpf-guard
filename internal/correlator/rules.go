@@ -1852,6 +1852,107 @@ func (re *RuleEngine) UnreachableSyscallRules(allowlist []int) []string {
 	return out
 }
 
+// destructiveRuleActions are the RuleAction values wave 5.9.4b treats as
+// capable of a real side effect against a live process or the network — the
+// set the machine inventory below audits. (lsm_block is not a valid
+// rule-level Action; validateRule rejects it, so it is not listed here.)
+var destructiveRuleActions = map[RuleAction]bool{
+	ActionKill:     true,
+	ActionBlock:    true,
+	ActionThrottle: true,
+}
+
+// destructiveIdentityOnlyFields are condition fields that identify *who*
+// triggered an event (a process name) rather than *what* it did. A rule
+// whose only conditions live in this set can fire on any argument value at
+// all from a non-whitelisted caller — see finding №53/5.9.4b:
+// ebpf_subversion_unauthorized_caller paired a real arg0 condition with a
+// "comm not_in [ebpf-guard]" identity check, and the identity check alone
+// was narrow enough to fire on systemd/containerd/dockerd/runc doing
+// routine cgroup-BPF management.
+var destructiveIdentityOnlyFields = map[string]bool{
+	"comm": true,
+}
+
+// DestructiveRulesWithoutArgCondition returns, sorted, the IDs of loaded
+// rules whose action is kill/block/throttle (destructiveRuleActions) and
+// whose condition set has no constraint beyond identity fields
+// (destructiveIdentityOnlyFields) — i.e. nothing that actually looks at
+// *what* the process did, only *who* it was.
+//
+// Every rule returned here must either gain a real argument/value condition
+// or be recorded in deploy/docker-test-setup/attacks/destructive-actions.txt
+// with a named justification — see plan.md wave 5.9.4b (#53). The result is sorted for
+// stable output.
+func (re *RuleEngine) DestructiveRulesWithoutArgCondition() []string {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	var out []string
+	for _, rule := range re.rules {
+		if !destructiveRuleActions[rule.Action] {
+			continue
+		}
+		hasArgCondition := false
+		for _, cond := range re.getAllConditions(rule) {
+			field := normaliseFieldName(cond.Field)
+			if field == "" {
+				continue // zero-value/unset condition, not a real constraint
+			}
+			if !destructiveIdentityOnlyFields[field] {
+				hasArgCondition = true
+				break
+			}
+		}
+		if !hasArgCondition {
+			out = append(out, rule.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ExclusionsCollidingWithAttackerComms returns, sorted, the IDs of loaded
+// rules that carry a "comm not_in [...]" exclusion naming a process that a
+// live attack step actually runs as — see finding №56 (5.9.4e):
+// rootkit_bpf_prog_load_suspicious/rootkit_bpf_map_create_suspicious
+// whitelisted "bpftool" by comm, which silently blinded their own positive
+// control (bpftool prog list, step 5.9.2b in run-all-attacks.sh) with no
+// test catching it. attackerComms is the set of process names the attack
+// scripts under deploy/docker-test-setup/attacks run as (sourced from their
+// record_manifest calls); a rule excluding one of them by comm can never
+// fire on that attack step, which is a defect by construction, not a tuning
+// choice — those need a real argument/value condition instead, the way
+// 5.9.4e fixed the two rootkit_bpf_* rules above.
+func (re *RuleEngine) ExclusionsCollidingWithAttackerComms(attackerComms map[string]bool) []string {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	var out []string
+	for _, rule := range re.rules {
+		collides := false
+		for _, cond := range re.getAllConditions(rule) {
+			if normaliseFieldName(cond.Field) != "comm" || opCodeOf(cond.Op) != condOpNotIn {
+				continue
+			}
+			for _, excluded := range cond.Values {
+				if attackerComms[excluded] {
+					collides = true
+					break
+				}
+			}
+			if collides {
+				break
+			}
+		}
+		if collides {
+			out = append(out, rule.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // defaultMonitoredSyscallsU32 returns the default monitored syscall list as
 // []uint32 so it can be used without importing the bpf package.
 func defaultMonitoredSyscallsU32() []uint32 {

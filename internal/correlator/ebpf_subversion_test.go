@@ -68,11 +68,23 @@ func TestEBPFSubversionRules_Load(t *testing.T) {
 	require.NoError(t, err, "ebpf-subversion.yaml must load without error")
 	require.Len(t, rules, 2, "expected exactly 2 ebpf-subversion rules")
 
+	// wave 5.9.4b (#53): ebpf_subversion_unauthorized_caller was downgraded
+	// from kill to alert. Its only discriminator beyond arg0 is a comm
+	// whitelist, which cannot tell a legitimate daemon managing its own
+	// cgroup-BPF program from that same daemon (or a spoofed comm) touching
+	// ebpf-guard's — see the DEBT note in rules/ebpf-subversion.yaml.
+	wantAction := map[string]RuleAction{
+		"ebpf_subversion_detach_nonroot":      ActionKill,
+		"ebpf_subversion_unauthorized_caller": ActionAlert,
+	}
+
 	ids := map[string]bool{}
 	for _, r := range rules {
 		ids[r.ID] = true
 		assert.Equal(t, types.SeverityCritical, r.Severity, "rule %s must be critical", r.ID)
-		assert.Equal(t, ActionKill, r.Action, "rule %s must use kill action", r.ID)
+		if want, ok := wantAction[r.ID]; ok {
+			assert.Equal(t, want, r.Action, "rule %s has unexpected action", r.ID)
+		}
 	}
 	assert.True(t, ids["ebpf_subversion_detach_nonroot"], "ebpf_subversion_detach_nonroot rule missing")
 	assert.True(t, ids["ebpf_subversion_unauthorized_caller"], "ebpf_subversion_unauthorized_caller rule missing")
@@ -151,6 +163,21 @@ func TestEBPFSubversion_UnauthorizedCaller(t *testing.T) {
 			for _, a := range engine.Evaluate(e) {
 				assert.NotEqual(t, "ebpf_subversion_unauthorized_caller", a.RuleID,
 					"ebpf-guard calling %s must not trigger unauthorized_caller", tc.name)
+			}
+		}
+	})
+
+	// wave 5.9.4b (#53): systemd/containerd/dockerd/runc manage cgroup-BPF
+	// programs as routine container lifecycle work and tripped this rule on
+	// idle nodes before the whitelist was widened.
+	t.Run("container_cgroup_managers_are_whitelisted", func(t *testing.T) {
+		for _, comm := range []string{"systemd", "systemd-cgroups", "containerd", "dockerd", "runc"} {
+			for _, tc := range destructiveBPFCmds {
+				e := makeBPFEvent(tc.cmd, 0, comm)
+				for _, a := range engine.Evaluate(e) {
+					assert.NotEqual(t, "ebpf_subversion_unauthorized_caller", a.RuleID,
+						"%s calling %s must not trigger unauthorized_caller", comm, tc.name)
+				}
 			}
 		}
 	})

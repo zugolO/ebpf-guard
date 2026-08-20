@@ -249,6 +249,47 @@ func TestExecuteKill_ProcBranch(t *testing.T) {
 	})
 }
 
+// TestExecuteKill_DryRun is the regression test for №52: dry_run must gate
+// executeKill before any signal is sent, regardless of pidfd availability.
+func TestExecuteKill_DryRun(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux only")
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	auditCh := make(chan AuditEntry, 16)
+	e, err := NewEnforcer(logger, Config{
+		EnableKill:      true,
+		DryRun:          true,
+		AuditLogChannel: auditCh,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = e.Close() })
+
+	cmd, pid := spawnChild(t)
+
+	before := testutil.ToFloat64(e.actionsTotal.WithLabelValues("kill"))
+	beforeDryrun := testutil.ToFloat64(e.dryrunTotal.WithLabelValues("kill"))
+
+	err = e.executeKill(context.Background(), killAlert(pid, "sleep"))
+	require.NoError(t, err, "dry-run kill must not error")
+
+	after := testutil.ToFloat64(e.actionsTotal.WithLabelValues("kill"))
+	afterDryrun := testutil.ToFloat64(e.dryrunTotal.WithLabelValues("kill"))
+	assert.Equal(t, before, after, "enforcement_actions_total{kill} must not increase under dry_run")
+	assert.Equal(t, beforeDryrun+1, afterDryrun, "enforcement_dryrun_total{kill} must increase by exactly 1")
+
+	entry := readAudit(t, auditCh)
+	assert.False(t, entry.Success)
+	assert.True(t, entry.DryRun)
+
+	// The process must survive: no signal was ever sent.
+	time.Sleep(200 * time.Millisecond)
+	assert.True(t, isAlive(pid), "process must survive a dry-run kill")
+
+	require.NoError(t, cmd.Process.Kill())
+}
+
 func TestExecuteKill_PidfdBranch(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("linux only")

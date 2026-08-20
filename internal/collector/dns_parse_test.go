@@ -81,8 +81,10 @@ func buildDNSRawRecord(direction types.DNSDirection, payload []byte) []byte {
 	binary.LittleEndian.PutUint32(raw[16:], 4321)                  // tgid
 	binary.LittleEndian.PutUint32(raw[20:], 1000)                  // uid
 	copy(raw[24:40], "dig")                                        // comm[16]
-	raw[40] = byte(direction)                                      // direction
-	binary.LittleEndian.PutUint16(raw[41:], uint16(len(payload)))  // payload_len
+	binary.LittleEndian.PutUint32(raw[40:], 4320)                  // ppid
+	copy(raw[44:60], "bash")                                       // parent_comm[16]
+	raw[60] = byte(direction)                                      // direction
+	binary.LittleEndian.PutUint16(raw[61:], uint16(len(payload)))  // payload_len
 	copy(raw[dnsRawEventFixedLen:], payload)
 	return raw
 }
@@ -191,7 +193,7 @@ func TestDecodeDNSEvent_WrongType(t *testing.T) {
 func TestDecodeDNSEvent_PayloadLenOverflow(t *testing.T) {
 	raw := buildDNSRawRecord(types.DNSDirection(0), buildDNSQuery("a.com", 1))
 	// Claim a payload far larger than what's present.
-	binary.LittleEndian.PutUint16(raw[41:], 9000)
+	binary.LittleEndian.PutUint16(raw[61:], 9000)
 	assert.Nil(t, decodeDNSEvent(raw))
 }
 

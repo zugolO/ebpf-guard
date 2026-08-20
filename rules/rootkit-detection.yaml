@@ -322,7 +322,7 @@ rules:
 
   - id: rootkit_bpf_prog_load_suspicious
     name: "BPF program loaded by non-privileged tool"
-    description: "BPF program loaded outside of known security or network tools — possible BPF rootkit."
+    description: "BPF_PROG_LOAD (bpf(2) cmd=5) invoked outside of the agent itself — possible BPF rootkit."
     event_type: syscall
     condition_group:
       operator: and
@@ -330,19 +330,28 @@ rules:
         - field: nr
           op: in
           values: ["321"]  # bpf
-        # 5.9.3c (#47): "outside of known security or network tools" was
-        # never enforced — bare nr matched this agent's own BPF map/program
-        # loading too. Exclude the known legitimate loaders by name.
+        # 5.9.4e (#56): a bare nr=321 match couldn't tell a real BPF_PROG_LOAD
+        # from bpftool's read-only introspection commands (BPF_PROG_GET_NEXT_ID
+        # etc.) — so it was gated purely by a comm whitelist, which is trivial
+        # to defeat by spoofing comm and which blinded the bpftool positive
+        # control (5.9.2b) by name instead of by what it actually does.
+        # Condition on the command itself instead: BPF_PROG_LOAD=5.
+        - field: arg0
+          op: in
+          values: ["5"]  # BPF_PROG_LOAD
+        # The only verified noise source is the agent's own program loading
+        # at startup; bpftool/cilium-agent/falco were never confirmed and are
+        # dropped rather than carried forward as unverified exclusions.
         - field: comm
           op: not_in
-          values: ["ebpf-guard", "bpftool", "cilium-agent", "falco"]
+          values: ["ebpf-guard"]
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, bpf, bpf-rootkit]
 
   - id: rootkit_bpf_map_create_suspicious
     name: "BPF map created with large capacity"
-    description: "BPF map creation detected — BPF-based rootkits use maps to store hidden process lists or intercept system calls."
+    description: "BPF_MAP_CREATE (bpf(2) cmd=0) invoked outside of the agent itself — BPF-based rootkits use maps to store hidden process lists or intercept system calls."
     event_type: syscall
     condition_group:
       operator: and
@@ -350,9 +359,14 @@ rules:
         - field: nr
           op: in
           values: ["321"]  # bpf
+        # 5.9.4e (#56): same fix as rootkit_bpf_prog_load_suspicious above —
+        # condition on BPF_MAP_CREATE=0 instead of a comm whitelist.
+        - field: arg0
+          op: in
+          values: ["0"]  # BPF_MAP_CREATE
         - field: comm
           op: not_in
-          values: ["ebpf-guard", "bpftool", "cilium-agent", "falco"]
+          values: ["ebpf-guard"]
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, bpf-map]

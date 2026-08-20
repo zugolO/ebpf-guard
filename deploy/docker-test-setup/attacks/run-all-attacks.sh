@@ -271,18 +271,41 @@ run_setuid_attack() {
 
 run_bpf_attack() {
     log "==========================================="
-    log "ЗАПУСК BPF(2) АТАКИ (5.9.2b, rootkit_bpf_*/ebpf_subversion_*)"
+    log "ЗАПУСК BPF(2) АТАКИ (5.9.2b/5.9.4e, rootkit_bpf_*/ebpf_subversion_*)"
     log "==========================================="
 
-    # Read-only bpf(2) subcommand (BPF_PROG_GET_NEXT_ID) — enumerates loaded
-    # programs without loading or modifying anything. Invokes syscall 321.
+    # Read-only bpf(2) subcommand (BPF_PROG_GET_NEXT_ID / BPF_PROG_GET_FD_BY_ID /
+    # BPF_OBJ_GET_INFO_BY_FD, verified via strace on the stand) — enumerates
+    # loaded programs without loading or modifying anything. Invokes syscall
+    # 321, but its arg0 is none of the destructive/load/create commands any
+    # repo rule now looks for (5.9.4e, №56: rootkit_bpf_* used to match on
+    # bare nr + a comm whitelist, which this call satisfied by accident; now
+    # it correctly matches nothing).
     if command -v bpftool &> /dev/null; then
         bpftool prog list >/dev/null 2>&1 \
-            && log "bpftool prog list выполнен — ожидается срабатывание bpf(2)-правил" \
+            && log "bpftool prog list выполнен (не ожидается срабатывание правил — read-only bpf(2), см. 5.9.4e)" \
             || warn "bpf-атака (5.9.2b) завершилась с ошибкой (нет прав/BPF недоступен)"
+
+        # Positive control for rootkit_bpf_map_create_suspicious (BPF_MAP_CREATE=0,
+        # verified via strace: bpf(BPF_MAP_CREATE, ...) then BPF_OBJ_PIN). Pinned
+        # under a run-scoped name and removed immediately after.
+        local bpf_map_pin="/sys/fs/bpf/ebpf-guard-attack-canary-$TIMESTAMP"
+        if bpftool map create "$bpf_map_pin" type hash key 4 value 4 entries 8 name gate_canary >/dev/null 2>&1; then
+            log "bpftool map create выполнен — ожидается срабатывание rootkit_bpf_map_create_suspicious"
+            rm -f "$bpf_map_pin"
+        else
+            warn "bpftool map create завершился с ошибкой (нет прав/BPF недоступен) — rootkit_bpf_map_create_suspicious останется непроверенным на attack-стороне"
+        fi
     else
-        warn "bpftool не найден — bpf-атака (5.9.2b) пропущена"
+        warn "bpftool не найден — bpf-атака (5.9.2b/5.9.4e) пропущена"
     fi
+
+    # rootkit_bpf_prog_load_suspicious (BPF_PROG_LOAD=5) has no positive
+    # control here: a real BPF_PROG_LOAD needs a valid compiled BPF object,
+    # and `bpftool prog load` on a bogus/empty file fails in libbpf before
+    # ever reaching the bpf(2) syscall (the same class of gap as the
+    # insmod/rmmod no-op noted below for kmod attacks). Needs a small
+    # purpose-built .bpf.o fixture — open question, see plan.md 5.9.4e.
     echo ""
 }
 
@@ -405,7 +428,51 @@ get_final_metrics() {
     log "СБОР ФИНАЛЬНЫХ МЕТРИК"
     log "==========================================="
 
-    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
+    # 5.9.4c (находка №54): то же ожидание слива конвейера, что 5.9.1c
+    # поставила перед baseline (get_baseline_metrics выше) — без него
+    # финальный снимок наследует временный перекос
+    # engine−filtered−suppressed−exported ≠ 0 просто потому, что последний
+    # алерт прогона ещё не дотёк до экспорта в момент снятия среза, и
+    # критерий 15 в run-gate.sh находит "четвёртый счётчик", которого на
+    # самом деле нет — тот же класс ложного расхождения, что 5.9.1c закрыла
+    # на baseline-конце. Таймаут 30с, тот же порог. Результат пишется в
+    # final-drain-offset-$TIMESTAMP.txt независимо от того, сошёлся offset
+    # или нет — критерий 15 обязан видеть его в обоих случаях.
+    if command -v jq &> /dev/null; then
+        local drain_offset="n/a"
+        local engine_now metrics_now filtered_now suppressed_now exported_now
+        for _ in $(seq 1 15); do
+            engine_now=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" 2>/dev/null \
+                | jq -r '.engine_stats.total_alerts // empty' 2>/dev/null)
+            metrics_now=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+            filtered_now=$(echo "$metrics_now" | grep '^ebpf_guard_alerts_filtered_total{' | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+            suppressed_now=$(echo "$metrics_now" | grep '^ebpf_guard_alerts_suppressed_total{' | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+            exported_now=$(echo "$metrics_now" | grep '^ebpf_guard_alerts_total{' | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
+            if [ -n "$engine_now" ]; then
+                drain_offset=$(( engine_now - ${filtered_now:-0} - ${suppressed_now:-0} - ${exported_now:-0} ))
+                if [ "$drain_offset" -eq 0 ]; then
+                    break
+                fi
+            fi
+            sleep 2
+        done
+        if [ "$drain_offset" = "0" ]; then
+            log "5.9.4c: конвейер слился перед final (offset=0)"
+        else
+            warn "5.9.4c: offset конвейера не сошёлся к нулю за 30с (offset=$drain_offset) — final снимается как есть, критерий 15 обязан это учесть"
+        fi
+        echo "drain_offset_before_final=$drain_offset" > "$RESULTS_DIR/final-drain-offset-$TIMESTAMP.txt"
+    fi
+
+    # 5.9.4c: порядок снимков — сначала стор и состояние (/api/v1/alerts,
+    # /health, /api/v1/status, /debug/state, /api/v1/incidents), /metrics —
+    # ПОСЛЕДНЕЙ. Раньше /metrics снималась первой: если стор ещё дописывал
+    # алерт из последней атаки в момент снятия /metrics, тип был виден в
+    # /api/v1/alerts, но отсутствовал в ebpf_guard_alerts_total{rule_id}, и
+    # критерий 6 (который до 5.9.4c считал состав только по метрике) печатал
+    # бы потерю там, где детект сработал — просто стор и метрика ещё не
+    # синхронны. Метрика теперь никогда не может отстать от стора: она
+    # снимается последней из всех.
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/final-health-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/status" > "$RESULTS_DIR/final-status-$TIMESTAMP.json"
@@ -415,6 +482,7 @@ get_final_metrics() {
     # headline result of wave 1 would go unverified by the very gate written to
     # verify it (plan.md волна 1.5h).
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/incidents" > "$RESULTS_DIR/final-incidents-$TIMESTAMP.json"
+    curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
 
     echo ""
 }

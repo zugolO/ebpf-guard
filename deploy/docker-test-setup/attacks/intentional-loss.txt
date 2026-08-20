@@ -86,3 +86,46 @@ sigma_world_writable_dir_created
 web_blind_sqli_heuristic
 ransomware_mass_rename
 ransomware_backup_delete
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Волна 5.9.4f (находка №57, замер №2.9.3, gate-2.9.3.txt): восемь из 19
+# «потерянных» типов не потеря — на замере №2.9.2 (final-alerts того замера)
+# они были ложноположительными и волна 5.9.3b/c их убила по прямому
+# назначению (parent_comm/comm/nr условия из plan.md, разделы 5.9.3b/5.9.3c),
+# просто detection-baseline.txt был обновлён 5.9.3b ДО чистки FP-массива и
+# теперь несёт шум как эталон. Кто порождал на №2.9.2 и чем убито:
+#
+#   owasp_web_shell_spawn, web_sql_injection_command — cron, 50-motd-news,
+#       50-landscape-sy, run-parts, ldconfig, sleep, date… (436 каждый) —
+#       узкий parent_comm/nr-контекст 5.9.3b исключил штатные cron-задания.
+#   container_escape_chroot — sshd (162) — тот же узкий контекст 5.9.3b:
+#       sshd больше не входит в срабатывающий набор для этого правила.
+#   initial_driveby_browser_download_exec, initial_email_link_download_exec,
+#       initial_office_macro_exec, sigma_web_server_shell_spawn — bash, sh,
+#       curl (222 каждый) — 5.9.3b/5.9.3f сузили условие до конкретных
+#       родителей, curl-пайп в общем случае больше не триггерит.
+#   web_sql_injection_files — systemd-logind (2) — тот же узкий контекст;
+#       единственный экземпляр FP на этом типе, счётчик уходит в 0 и дальше
+#       пересекается с находкой №59 (5.9.4h, немые правила) — см. plan.md.
+#
+# Три типа из таблицы находки №57 (sigma_cpu_info_access,
+# sigma_kernel_version_read, sigma_memory_proc_dump) сюда НЕ включены: они
+# не срабатывали никогда, даже до чистки FP на №2.9.2 — это находка №59
+# (правила, немые по конструкции), обрабатывается волной 5.9.4h, а не здесь.
+# Постановка 5.9.4f говорит «десять типов»; итог разбора — восемь с
+# ненулевой историей FP плюс три нулевых из №59 = 11, а не 10+3 — то есть
+# исходная оценка в finding №57 разошлась с построчным разбором на единицу.
+# Открытый вопрос, не блокирующий: см. plan.md, раздел 5.9.4f.
+#
+# rootkit_bpf_map_create_suspicious/rootkit_bpf_prog_load_suspicious (два из
+# 19) сюда НЕ входят — они не FP, а находка №56, закрытая волной 5.9.4e
+# правкой самого правила (arg0-условие вместо comm-whitelist), а не записью
+# в этот список.
+container_escape_chroot
+initial_driveby_browser_download_exec
+initial_email_link_download_exec
+initial_office_macro_exec
+owasp_web_shell_spawn
+sigma_web_server_shell_spawn
+web_sql_injection_command
+web_sql_injection_files

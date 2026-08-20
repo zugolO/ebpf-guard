@@ -136,6 +136,14 @@ IDLE_METRICS_END="${IDLE_METRICS_END:-}"
 # только для критерия 16 (слепое окно между idle-часом и attack-baseline).
 # Опционально — без него критерий 16 печатает SKIP, остальные 15 не страдают.
 IDLE_STATE_END="${IDLE_STATE_END:-}"
+# 5.9.4g (находка №58): снимок /api/v1/alerts на конец idle-часа
+# (alerts-end.json — idle-run.sh уже пишет его сам). Нужен, чтобы критерий 16
+# считал объём слепого окна по множеству `id`, а не по кумулятивному счётчику
+# ebpf_guard_alerts_total — тот обнуляется рестартом агента в конце
+# idle-run.sh (P0-3) и на №2.9.3 давал отрицательную/вырожденную дельту.
+# Опционально — без него критерий 16 печатает SKIP по объёму (длительность
+# окна печатается и без него).
+IDLE_ALERTS_END="${IDLE_ALERTS_END:-}"
 
 for f in "$baseline_state" "$final_state" "$baseline_metrics" "$final_metrics" "$baseline_alerts" "$final_alerts"; do
     if [ ! -f "$f" ]; then
@@ -245,7 +253,23 @@ echo ""
 # лейблсету (кроме reason="path_denylist"), суммируя только положительные
 # дельты — это то же измерение, которым проверяется предсказание волны 5.9
 # на данных №2.5 (374 = 374 → PASS).
-echo "=== 3. Деградация в /health при потерях ==="
+#
+# 5.9.4d (находка №55): "потери есть → требуем degraded В ФИНАЛЬНОМ СНИМКЕ"
+# ловит только флаг, залипший до конца прогона — если агент перешёл в
+# degraded и вернулся в healthy ДО снятия final_health (регулятор отработал,
+# как и должен), критерий печатал FAIL за штатное поведение: потери были,
+# видимость восстановлена, а формулировка требовала видеть деградацию именно
+# в срезе. Источник истины — переход, а не мгновенный снимок: cmd/ebpf-guard/
+# main.go пишет slog "visibility reduced: a priority queue is dropping events"
+# при входе в degraded и "visibility restored: ..." при выходе (обе строки
+# существуют с P0-25/5.9.2a, до этой правки их не читал никто). Гейт считает
+# такие записи в журнале agent-сервиса за окно baseline→final; это дешевле,
+# чем заводить отдельный экспортируемый счётчик переходов (второй вариант из
+# постановки 5.9.4d), и ничего не требует от продукта. Финальный флаг
+# по-прежнему проверяется — но только на противоположную ошибку, "залипание
+# ВКЛ": дропов не было вовсе, а /health всё равно показывает
+# visibility_reduced=true.
+echo "=== 3. Деградация в /health при потерях (переход в degraded — 5.9.4d) ==="
 if [ -f "$final_health" ]; then
     any_dropped_total=$(awk -F'} ' '
         FNR==NR { if ($0 !~ /reason="path_denylist"/) base[$1]=$2+0; next }
@@ -266,14 +290,60 @@ if [ -f "$final_health" ]; then
     echo "  непреднамеренных дропов за прогон (Δ final-baseline): $any_dropped_total; намеренных за весь аптайм агента (path_denylist, кумулятив): ${intentional_drops%.*} — в критерий не входят"
     visibility_reduced=$(jq -r '.visibility_reduced // false' "$final_health" 2>/dev/null)
     status=$(jq -r '.status // "unknown"' "$final_health" 2>/dev/null)
+
+    # Окно прогона — те же .timestamp снимков /debug/state, что критерий 6
+    # использует для темпа алертов ниже; читаются здесь заново (а не через
+    # переменную из критерия 6), потому что критерий 3 по порядку идёт раньше.
+    degraded_journal_checked=0
+    degraded_transitions=0
+    if command -v jq &> /dev/null && command -v journalctl &> /dev/null; then
+        c3_baseline_ts=$(jq -r '.timestamp // empty' "$baseline_state" 2>/dev/null)
+        c3_final_ts=$(jq -r '.timestamp // empty' "$final_state" 2>/dev/null)
+        if [ -n "$c3_baseline_ts" ] && [ -n "$c3_final_ts" ]; then
+            c3_since=$(date -d "$c3_baseline_ts" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
+            c3_until=$(date -d "$c3_final_ts" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
+            if [ -n "$c3_since" ] && [ -n "$c3_until" ]; then
+                degraded_journal=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" \
+                    --since "$c3_since" --until "$c3_until" 2>/dev/null)
+                if [ $? -eq 0 ]; then
+                    degraded_journal_checked=1
+                    degraded_transitions=$(echo "$degraded_journal" \
+                        | grep -c "visibility reduced: a priority queue is dropping events" || true)
+                fi
+            fi
+        fi
+    fi
+
     if awk -v d="$any_dropped_total" 'BEGIN{exit !(d>0)}'; then
-        if [ "$visibility_reduced" = "true" ] && [ "$status" = "degraded" ]; then
-            pass "потери есть ($any_dropped_total) и /health показывает degraded"
+        if [ "$degraded_journal_checked" -eq 1 ]; then
+            echo "  переходов в degraded за окно прогона (журнал $c3_since .. $c3_until): $degraded_transitions"
+            if [ "$degraded_transitions" -gt 0 ]; then
+                pass "потери есть ($any_dropped_total) и в журнале зафиксирован переход в degraded ($degraded_transitions раз, 5.9.4d)"
+            else
+                fail "потери есть ($any_dropped_total), но в журнале нет ни одного перехода в degraded за окно прогона (5.9.4d); финальный флаг для справки: visibility_reduced=$visibility_reduced status=$status"
+            fi
         else
-            fail "потери есть ($any_dropped_total), но /health: visibility_reduced=$visibility_reduced status=$status"
+            # Журнал недоступен (не root / нет journalctl / нет .timestamp) —
+            # резервная проверка по финальному флагу, как до 5.9.4d. Слабее:
+            # не отличает "деградация ещё идёт" от "уже восстановилась и
+            # снимок этого не увидел", но лучше, чем непроверяемый критерий.
+            warn "журнал agent-сервиса недоступен для проверки перехода (5.9.4d) — резервная проверка по финальному флагу"
+            if [ "$visibility_reduced" = "true" ] && [ "$status" = "degraded" ]; then
+                pass "потери есть ($any_dropped_total) и /health показывает degraded (резервная проверка)"
+            else
+                fail "потери есть ($any_dropped_total), но /health: visibility_reduced=$visibility_reduced status=$status (резервная проверка, журнал недоступен)"
+            fi
         fi
     else
-        pass "потерь нет, /health status=$status (проверка неприменима)"
+        # Дропов не было вовсе — единственное, что здесь может быть неверно,
+        # это залипший флаг ("залипание ВКЛ"): visibility_reduced=true без
+        # единой причины. Обратное залипание (флаг молчит при дропах) выше
+        # уже покрыто веткой any_dropped_total>0.
+        if [ "$visibility_reduced" = "true" ]; then
+            fail "потерь нет, но /health.visibility_reduced=true — флаг залип (5.9.4d)"
+        else
+            pass "потерь нет, /health status=$status (проверка неприменима)"
+        fi
     fi
 else
     fail "final-health-$TIMESTAMP.json отсутствует"
@@ -510,7 +580,32 @@ detected_type_list=$(awk -F'[{}", ]+' -v basefile="$basefile_arg" '
         }
     }
 ' "${metrics_inputs[@]}" | sort)
+
+# 5.9.4c (находка №54): состав детекта до этой правки читался ТОЛЬКО из
+# /metrics. Криттерий 5.9.4c ставит порядок снимков так, что /metrics не
+# может отстать от стора (get_final_metrics в run-all-attacks.sh снимает её
+# последней) — но на случай, если гейт когда-нибудь запустят на артефактах,
+# собранных до этой правки, или конвейер всё же не слился за 30с (см.
+# final-drain-offset ниже по критерию 15), состав считается по ОБЪЕДИНЕНИЮ
+# метрики и стора: тип, присутствующий хотя бы в одном источнике, живой.
+# Расхождение — типы, видимые в сторе, но отсутствующие в метрике — печатается
+# отдельной диагностической строкой ("конвейер не слился"), а не как потеря
+# детекта: правило, которое стор уже видел, а метрика ещё нет, — не регресс.
+metric_type_list="$detected_type_list"
+store_type_list=""
+if [ -f "$final_alerts" ] && jq -e 'type == "array"' "$final_alerts" >/dev/null 2>&1; then
+    store_type_list=$(jq -r '[.[].rule_id] | map(select(. != null and . != "")) | unique | .[]' "$final_alerts" 2>/dev/null | sort)
+fi
+only_in_store=$(comm -23 <(echo "$store_type_list") <(echo "$metric_type_list") | grep -v '^$' || true)
+only_in_store_count=$(echo "$only_in_store" | grep -c . || true)
+detected_type_list=$(printf '%s\n%s\n' "$metric_type_list" "$store_type_list" | grep -v '^$' | sort -u)
 detected_types=$(echo "$detected_type_list" | grep -c . || true)
+if [ "$only_in_store_count" -gt 0 ]; then
+    echo "  типов только в сторе: $only_in_store_count — конвейер не слился (5.9.4c):"
+    echo "$only_in_store" | sed 's/^/    ? /'
+else
+    echo "  типов только в сторе: 0 — метрика и стор согласованы (5.9.4c)"
+fi
 
 if [ ! -f "$baseline_types_file" ]; then
     skip "detection-baseline.txt не найден рядом с гейтом — состав детекта сравнить не с чем (число типов: $detected_types)"
@@ -658,6 +753,30 @@ elif awk -v r="$attacker_rate" 'BEGIN{exit !(r+0>=74)}'; then
     pass "темп алертов от атакующих: $attacker_alerts за ${runtime_min} мин = $attacker_rate/мин (>= 74, уровень прогона №4)"
 else
     fail "темп алертов от атакующих: $attacker_alerts за ${runtime_min} мин = $attacker_rate/мин (ожидалось >= 74)"
+fi
+
+# 5.9.4f (№57/№61): база темпа (83.0/мин) признана загрязнённой — снята до
+# того, как 10 FP-типов волны 5.9.3b были убраны из детекта (найдены только
+# разбором №2.9.3, см. intentional-loss.txt), то есть считала шум частью
+# темпа. Порог гейта (>= 74, строка выше) остаётся прежним до двух чистых
+# прогонов подряд — постановка 5.9.4f запрещает менять его на данных одного
+# прогона. Эта строка — сырой материал для новой базы, не решение: печатает
+# фактический темп текущего прогона и топ-10 rule_id по числу алертов от
+# атакующих, чтобы просадку темпа можно было объяснить составом, а не гадать.
+if [ "$attacker_alerts_known" -eq 1 ] && [ -f "$manifest_file" ] && command -v jq &> /dev/null; then
+    echo "  темп этого прогона как кандидат новой базы: $attacker_rate/мин (нужен второй чистый прогон, прежде чем заменить 83.0)"
+    top10=$(jq -s -r --argjson comms "$attacker_comms" '
+        (.[0] // []) as $baseline | (.[1] // []) as $final |
+        ($baseline | map(.id) | unique) as $bids |
+        ($final | map(select(.id as $id | ($bids | index($id)) | not))) as $new |
+        $new | map(select(.comm as $c | $comms | index($c))) |
+        group_by(.rule_id) | map({rule_id: .[0].rule_id, n: length}) |
+        sort_by(-.n) | .[0:10] | .[] | "    \(.n)  \(.rule_id)"
+    ' "$baseline_alerts" "$final_alerts" 2>/dev/null)
+    if [ -n "$top10" ]; then
+        echo "  алертов от атакующих по правилам, топ-10:"
+        echo "$top10"
+    fi
 fi
 
 # 5.9e (находка №31): темп детекта сам по себе не отличает "агент не детектит"
@@ -892,6 +1011,25 @@ else
                 fail "многоалертные: $with_chain/$multi_total = ${chain_share}% (>= 80% требуется);$attack_note"
             fi
         fi
+
+        # 5.9.4g (находка №60): «доля с непустым process_chain» дошла до
+        # 100% (0 из 18 без цепочки на №2.9.3) и перестала различать связные
+        # и несвязные инциденты — большинство цепочек оказались минимальными
+        # («процесс + его родитель», 15 из 18), а у двух все звенья с одним
+        # comm. PASS/FAIL остаётся на (а) выше как регрессионный сторож
+        # (значение уже не тавтология: не «пусто/непусто», а «>=80% с
+        # содержательной цепочкой»); наблюдение (б) печатает состав без
+        # порога — второй прогон нужен, прежде чем ставить границу.
+        chain_present=$(jq '[.[] | select((.process_chain // []) | length > 0)] | length' "$final_incidents")
+        if [ "$chain_present" -eq 0 ]; then
+            echo "  крит.10 (б): ни одного инцидента с process_chain — состав не измерен"
+        else
+            hops3=$(jq '[.[] | select((.process_chain // []) | length >= 3)] | length' "$final_incidents")
+            comm2=$(jq '[.[] | select(((.process_chain // []) | unique | length) >= 2)] | length' "$final_incidents")
+            hops3_share=$(awk -v c="$hops3" -v t="$chain_present" 'BEGIN{ printf "%.1f", 100*c/t }')
+            comm2_share=$(awk -v c="$comm2" -v t="$chain_present" 'BEGIN{ printf "%.1f", 100*c/t }')
+            echo "  крит.10 (б, наблюдение без порога): >=3 хопов: $hops3/$chain_present = ${hops3_share}%; >=2 разных comm: $comm2/$chain_present = ${comm2_share}%"
+        fi
     fi
 fi
 echo ""
@@ -1109,6 +1247,29 @@ if command -v jq &> /dev/null; then
         echo "  ВНИМАНИЕ: ненулевой offset на одном из концов окна — конвейер не слился к моменту снимка (см. 5.9.1c); baseline снимается с ожиданием слива в run-all-attacks.sh, но не гарантирован при таймауте 30с"
     fi
 
+    # 5.9.4c (находка №54): final_offset выше — то же число, что и
+    # final-drain-offset-$TIMESTAMP.txt, но посчитанное здесь заново из
+    # готовых снимков, а не то, что get_final_metrics измерил В МОМЕНТ
+    # снятия (с ретраями до 30с). Явный критерий по обоим числам: файл
+    # подтверждает, что ожидание слива вообще было — final_offset подтверждает,
+    # что оно сработало и на итоговых снимках, которые видит весь остальной
+    # гейт. Расхождение между ними означало бы, что конвейер дотёк уже ПОСЛЕ
+    # записи файла, но до снятия финальных снимков, — маловероятно (снимки
+    # берутся сразу после цикла ожидания), но стоит печатать отдельно, а не
+    # молча доверять файлу.
+    final_drain_offset_file="$RESULTS_DIR/final-drain-offset-$TIMESTAMP.txt"
+    if [ -f "$final_drain_offset_file" ]; then
+        final_drain_offset=$(grep -o 'drain_offset_before_final=.*' "$final_drain_offset_file" | cut -d= -f2)
+        echo "  final_drain_offset (5.9.4c, измерен в get_final_metrics с ретраями до 30с)=${final_drain_offset:-n/a}"
+        if [ "$final_drain_offset" = "0" ] && [ "$final_offset" -eq 0 ]; then
+            pass "final_drain_offset=0 и offset финального среза=0 — конвейер слился перед снятием финального среза (5.9.4c)"
+        else
+            fail "final_drain_offset=${final_drain_offset:-n/a}, offset финального среза=$final_offset — конвейер не слился перед финальным срезом (5.9.4c); тождество ниже наследует это смещение"
+        fi
+    else
+        skip "final-drain-offset-$TIMESTAMP.txt не найден — final_drain_offset не измерен (артефакты собраны до 5.9.4c)"
+    fi
+
     identity_ok=$(awk -v lhs="$d_lhs" -v exported="$d_exported" -v store="$d_store" '
         BEGIN {
             base = (lhs > 0) ? lhs : ((exported > 0) ? exported : ((store > 0) ? store : 0))
@@ -1133,21 +1294,37 @@ else
 fi
 echo ""
 
-# 16. Слепое окно idle-конец → attack-baseline (5.9f, находка №32): окно между
-# концом idle-часа (idle-run.sh) и снятием baseline этого прогона — время
-# подготовки стенда и входа оператора — не покрыто ни idle-измерением, ни
-# окном атаки, и в прогоне №2.5 именно в нём произошли все дропы, а темп
-# алертов в нём был выше обоих измеряемых окон. Постановка 5.9f: baseline
-# этого прогона снимается ПОСЛЕ подготовки стенда и входа оператора (см.
-# run-all-attacks.sh: get_baseline_metrics вызывается только после
-# check_services, то есть после того, как оператор подтвердил готовность
-# обоих сервисов) — здесь эта политика не проверяется, только измеряется её
-# следствие: объём окна. Информационно, без PASS/FAIL — порог для нового,
-# впервые измеряемого окна ставить рано.
+# 16. Слепое окно idle-конец → attack-baseline (5.9f, находка №32; переписано
+# 5.9.4g, находка №58): окно между концом idle-часа (idle-run.sh) и снятием
+# baseline этого прогона — время подготовки стенда и входа оператора — не
+# покрыто ни idle-измерением, ни окном атаки, и в прогоне №2.5 именно в нём
+# произошли все дропы, а темп алертов в нём был выше обоих измеряемых окон.
+# Постановка 5.9f: baseline этого прогона снимается ПОСЛЕ подготовки стенда и
+# входа оператора (см. run-all-attacks.sh: get_baseline_metrics вызывается
+# только после check_services) — здесь эта политика не проверяется, только
+# измеряется её следствие: объём окна. Информационно, без PASS/FAIL — порог
+# для нового окна ставить рано.
+#
+# №58: на №2.9.3 снимок конца idle и baseline атак совпали по времени (окно
+# 0.0 мин), но объём «38 новых алертов» всё равно напечатался — числитель и
+# знаменатель были оба вырождены, и величина выглядела как измерение там, где
+# измерения не было. 5.9.4g: окно короче 10с честно печатает «не измерялось»
+# вместо деления на почти-ноль.
+#
+# №58, вторая часть: объём окна раньше брался дельтой кумулятивного счётчика
+# ebpf_guard_alerts_total (idle-конец vs attack-baseline) — тот же счётчик,
+# который idle-run.sh обнуляет своим рестартом в конце (P0-3), и делал дельту
+# отрицательной/бессмысленной. Теперь считается по множеству `id` снимков
+# /api/v1/alerts: IDLE_ALERTS_END (idle-run.sh пишет его сам как
+# alerts-end.json) против baseline-alerts этого прогона. Разность множеств
+# «id есть в baseline, id нет в idle-конце» уже исключает всё, что попало в
+# idle-час — считать это отдельным вычитанием не нужно.
 echo "=== 16. Слепое окно idle-конец → attack-baseline (наблюдение, без порога) ==="
-if [ -z "$IDLE_STATE_END" ] || [ ! -s "$IDLE_STATE_END" ] || [ -z "$IDLE_METRICS_END" ] || [ ! -s "$IDLE_METRICS_END" ]; then
-    skip "IDLE_STATE_END/IDLE_METRICS_END не заданы — окно idle-конец → attack-baseline не измерено"
-elif command -v jq &> /dev/null; then
+if [ -z "$IDLE_STATE_END" ] || [ ! -s "$IDLE_STATE_END" ]; then
+    skip "IDLE_STATE_END не задан — окно idle-конец → attack-baseline не измерено"
+elif ! command -v jq &> /dev/null; then
+    skip "jq недоступен — окно idle-конец → attack-baseline не измерено"
+else
     idle_end_ts=$(jq -r '.timestamp // empty' "$IDLE_STATE_END" 2>/dev/null)
     baseline_ts=$(jq -r '.timestamp // empty' "$baseline_state" 2>/dev/null)
     if [ -z "$idle_end_ts" ] || [ -z "$baseline_ts" ]; then
@@ -1155,33 +1332,90 @@ elif command -v jq &> /dev/null; then
     else
         idle_end_epoch=$(date -d "$idle_end_ts" +%s.%N 2>/dev/null || echo 0)
         baseline_epoch=$(date -d "$baseline_ts" +%s.%N 2>/dev/null || echo 0)
-        blind_min=$(awk -v a="$idle_end_epoch" -v b="$baseline_epoch" 'BEGIN{ if(a>0 && b>a) printf "%.1f", (b-a)/60; else print "n/a" }')
+        blind_sec=$(awk -v a="$idle_end_epoch" -v b="$baseline_epoch" 'BEGIN{ if(a>0 && b>a) printf "%.1f", (b-a); else print "n/a" }')
 
-        idle_end_exported=$(grep '^ebpf_guard_alerts_total{' "$IDLE_METRICS_END" 2>/dev/null \
-            | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
-        baseline_run_exported=$(grep '^ebpf_guard_alerts_total{' "$baseline_metrics" 2>/dev/null \
-            | awk -F'} ' '{s+=$2} END{printf "%d", s+0}')
-        blind_new_alerts=$(( ${baseline_run_exported:-0} - ${idle_end_exported:-0} ))
-        # idle-run.sh в конце РЕСТАРТУЕТ агента (проверка P0-3), а метрика —
-        # кумулятив с момента старта процесса: attack-baseline снят уже новым
-        # процессом, и дельта через рестарт отрицательна/бессмысленна.
-        # Проверено на данных №2.5: получалось −194. В этом случае объём окна
-        # в алертах этим способом не измерим — честно печатаем причину, а не
-        # отрицательное «число алертов».
-        if [ "$blind_new_alerts" -lt 0 ]; then
-            echo "  окно: ${blind_min} мин; дельта алертов не измерима: ebpf_guard_alerts_total у attack-baseline МЕНЬШЕ idle-конца ($baseline_run_exported < $idle_end_exported) — агент рестартовал между окнами (P0-3-рестарт в конце idle-run.sh), кумулятивный счётчик обнулился"
-            echo "  (длительность окна измерена; объём алертов в нём требует либо NO_RESTART=1 у idle-run.sh, либо чтения стора вместо метрики — открытый вопрос 5.9f)"
+        if [ "$blind_sec" = "n/a" ]; then
+            echo "  не измерялось: timestamp'ы IDLE_STATE_END/baseline-state не разобраны или baseline не позже idle-конца"
+        elif awk -v s="$blind_sec" 'BEGIN{exit !(s+0 < 10)}'; then
+            echo "  не измерялось: окно ${blind_sec}с < 10с — снимки idle-конца и attack-baseline совпали по времени (№58)"
         else
-            blind_rate="n/a"
-            if [ "$blind_min" != "n/a" ] && awk -v m="$blind_min" 'BEGIN{exit !(m+0>0)}'; then
-                blind_rate=$(awk -v a="$blind_new_alerts" -v m="$blind_min" 'BEGIN{printf "%.1f", a/m}')
+            blind_min=$(awk -v s="$blind_sec" 'BEGIN{printf "%.1f", s/60}')
+            if [ -z "$IDLE_ALERTS_END" ] || [ ! -s "$IDLE_ALERTS_END" ]; then
+                echo "  окно: ${blind_min} мин; объём не измерен — IDLE_ALERTS_END не задан"
+            elif ! jq -e 'type == "array"' "$IDLE_ALERTS_END" >/dev/null 2>&1; then
+                echo "  окно: ${blind_min} мин; объём не измерен — IDLE_ALERTS_END не JSON-массив"
+            else
+                blind_new_alerts=$(jq -n --slurpfile a "$baseline_alerts" --slurpfile b "$IDLE_ALERTS_END" '
+                    ($b[0] | map(.id)) as $seen
+                    | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not))) | length')
+                blind_rate="n/a"
+                if awk -v m="$blind_min" 'BEGIN{exit !(m+0>0)}'; then
+                    blind_rate=$(awk -v a="$blind_new_alerts" -v m="$blind_min" 'BEGIN{printf "%.1f", a/m}')
+                fi
+                echo "  окно: ${blind_min} мин, новых алертов (по id, вне idle-часа): $blind_new_alerts (темп: ${blind_rate}/мин)"
+                echo "  (наблюдение без порога; для сравнения: измеряемые окна атаки/idle дают $attacker_rate/мин и (idle-час) отдельно)"
             fi
-            echo "  окно: ${blind_min} мин, новых экспортированных алертов: $blind_new_alerts (темп: ${blind_rate}/мин)"
-            echo "  (наблюдение без порога — впервые измеряется 5.9f; для сравнения: измеряемые окна атаки/idle дают $attacker_rate/мин и (idle-час) отдельно)"
         fi
     fi
+fi
+echo ""
+
+# 5.9.4h (находка №59): машинный гейт на правила, немые за ВЕСЬ аптайм
+# агента (не за окно этого прогона — final_metrics кумулятивен с момента
+# старта процесса). Раньше такого гейта не было вовсе: четыре правила
+# (sigma_cpu_info_access, sigma_kernel_version_read, sigma_memory_proc_dump,
+# web_sql_injection_files) молчали с самого старта агента и на №2.9.3 это
+# всплыло только ручным разбором таблицы находки №57. Правило хода:
+# каждое молчащее правило обязано быть поименовано в
+# silent-rules.txt с категорией (а) «немо по конструкции» или (б) «немо
+# из-за среды» — без строки там оно проваливает гейт как категория (в)
+# «без объяснения», ровно та потеря, что дожила до №2.9.3.
+#
+# Область проверки — НЕ все ~600 правил репозитория (подавляющее
+# большинство — aks_/cloud_/gpu_/k8s_/eks_/... — заведомо немо не по
+# дефекту, а потому что на этом docker-стенде нет ни узла, ни облака, ни
+# GPU: это сфера волны 6, не находки №59), а $lost_types критерия 6 —
+# подмножество detection-baseline.txt, которое НЕ сработало в этом
+# прогоне и уже пережило обе имеющиеся отсрочки критерия 6 (вторую
+# попытку по idle-приросту через background-rules.txt и вычитание
+# intentional-loss.txt). Всё, что доживает до этой точки, — по
+# определению либо немо с самого начала (находка №59), либо настоящий
+# регресс детекта; критерий 6 выше уже пометил это FAIL по составу — этот
+# гейт требует вдобавок, чтобы каждое такое правило было ПОИМЕНОВАНО с
+# категорией, а не просто числилось в потере.
+echo "=== 5.9.4h. Правила из детект-базы, немые за весь аптайм (без объяснения — 0) ==="
+if [ ! -s "$final_metrics" ]; then
+    skip "$final_metrics пуст — немые правила не проверены"
+elif [ ! -f "$baseline_types_file" ]; then
+    skip "$baseline_types_file отсутствует — немые правила не проверены"
+elif [ -z "${lost_types+x}" ]; then
+    skip "критерий 6 не вычислил lost_types (нет baseline-снимка) — немые правила не проверены"
 else
-    skip "jq недоступен — окно idle-конец → attack-baseline не измерено"
+    silent_registry="$GATE_SCRIPT_DIR/silent-rules.txt"
+    silent_ids=$(echo "$lost_types" | grep -v '^$' | sort -u)
+    silent_count=$(echo "$silent_ids" | grep -c . || true)
+
+    if [ "$silent_count" -eq 0 ]; then
+        pass "немых правил за весь аптайм: 0 (после отсрочек критерия 6 потерь не осталось)"
+    elif [ ! -f "$silent_registry" ]; then
+        fail "$silent_count правил(о) немы за весь аптайм, а silent-rules.txt отсутствует — все они категория (в): $(echo "$silent_ids" | tr '\n' ' ')"
+    else
+        recorded_a=$(awk '!/^[[:space:]]*(#|$)/ && $2 == "a" {print $1}' "$silent_registry" | sort -u)
+        recorded_b=$(awk '!/^[[:space:]]*(#|$)/ && $2 == "b" {print $1}' "$silent_registry" | sort -u)
+        recorded_all=$(printf '%s\n%s\n' "$recorded_a" "$recorded_b" | grep -v '^$' | sort -u)
+        unexplained=$(comm -23 <(echo "$silent_ids") <(echo "$recorded_all"))
+        unexplained_count=$(echo "$unexplained" | grep -c . || true)
+
+        a_count=$(comm -12 <(echo "$silent_ids") <(echo "$recorded_a") | grep -c . || true)
+        b_count=$(comm -12 <(echo "$silent_ids") <(echo "$recorded_b") | grep -c . || true)
+        echo "  немых всего: $silent_count — (а) по конструкции: $a_count, (б) нет сценария на стенде: $b_count"
+
+        if [ "$unexplained_count" -eq 0 ]; then
+            pass "0 правил категории (в) без объяснения ($silent_count немых, все — в silent-rules.txt)"
+        else
+            fail "$unexplained_count правил(о) немы за весь аптайм без строки в silent-rules.txt (категория (в)): $(echo "$unexplained" | tr '\n' ' ')"
+        fi
+    fi
 fi
 echo ""
 

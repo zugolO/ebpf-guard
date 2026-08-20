@@ -48,10 +48,11 @@ tests:
         op: read
     expect: alert
 
-  - name: "execve syscall (nr=59) fires owasp_web_shell_spawn"
+  - name: "execve syscall (nr=59) from nginx fires owasp_web_shell_spawn"
     rule_id: owasp_web_shell_spawn
     event:
       type: syscall
+      parent_comm: "nginx"
       syscall:
         nr: 59
     expect: alert

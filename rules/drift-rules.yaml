@@ -197,21 +197,33 @@ rules:
       container escape was observed after the baseline window, when it
       was NOT observed during the learning period.
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values:
-        - "ptrace"
-        - "mount"
-        - "umount2"
-        - "pivot_root"
-        - "unshare"
-        - "setns"
-        - "kexec_load"
-        - "perf_event_open"
-        - "bpf"
-        - "add_key"
-        - "request_key"
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values:
+            - "ptrace"
+            - "mount"
+            - "umount2"
+            - "pivot_root"
+            - "unshare"
+            - "setns"
+            - "kexec_load"
+            - "perf_event_open"
+            - "bpf"
+            - "add_key"
+            - "request_key"
+        # 5.9.3c (#47): container runtimes legitimately call several of
+        # these (mount/unshare/setns/pivot_root) while building a new
+        # container's namespaces, which can land after the learning window
+        # ends on a node that starts new pods continuously — exclude the
+        # runtime, not the syscalls. The drift signal (post-baseline
+        # novelty) still does the rest of the work.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
     class: drift

@@ -115,7 +115,11 @@ func TestProcessInjection_MemfdCreate(t *testing.T) {
 func TestProcessInjection_Fexecve(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/process-injection.yaml")
 
-	alerts := re.Evaluate(nrSyscall(322)) // execveat / fexecve
+	// 5.9.3c (#47): proc_inject_fexecve now requires AT_EMPTY_PATH (4096) in
+	// arg4 to distinguish real fexecve from a plain execveat(path) call.
+	ev := nrSyscall(322) // execveat / fexecve
+	ev.Syscall.Args[4] = 4096
+	alerts := re.Evaluate(ev)
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "proc_inject_fexecve")
 }

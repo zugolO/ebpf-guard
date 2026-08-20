@@ -1,28 +1,39 @@
 suite: rootkit_detection
 rules_path: ../../rules/rootkit-detection.yaml
 tests:
-  - name: "init_module syscall (nr=175) fires rootkit_init_module_syscall"
+  - name: "init_module syscall (nr=175) from non-modprobe comm fires rootkit_init_module_syscall"
     rule_id: rootkit_init_module_syscall
     event:
       type: syscall
+      comm: "app"
       syscall:
         nr: 175
     expect: alert
     expect_severity: critical
 
-  - name: "finit_module syscall (nr=313) fires rootkit_init_module_syscall"
+  - name: "finit_module syscall (nr=313) from non-modprobe comm fires rootkit_init_module_syscall"
     rule_id: rootkit_init_module_syscall
     event:
       type: syscall
+      comm: "app"
       syscall:
         nr: 313
     expect: alert
     expect_severity: critical
 
-  - name: "delete_module syscall (nr=176) fires rootkit_delete_module_syscall"
+  - name: "init_module syscall (nr=175) from modprobe does not fire rootkit_init_module_syscall"
+    event:
+      type: syscall
+      comm: "modprobe"
+      syscall:
+        nr: 175
+    expect: no_alert
+
+  - name: "delete_module syscall (nr=176) from non-rmmod comm fires rootkit_delete_module_syscall"
     rule_id: rootkit_delete_module_syscall
     event:
       type: syscall
+      comm: "app"
       syscall:
         nr: 176
     expect: alert

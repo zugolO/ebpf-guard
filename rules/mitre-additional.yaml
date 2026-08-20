@@ -284,10 +284,20 @@ rules:
     name: "CPU virtualization detection via cpuid"
     description: "Process calling cpuid via custom assembly — checking for hypervisor bit to detect virtual machine environments."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["135"]  # arch_prctl (used with cpuid in VMs)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["135"]  # arch_prctl
+        # 5.9.3c (#47): bare arch_prctl matched every process on the box —
+        # every process calls it at startup with ARCH_SET_FS (0x1002) to
+        # set the TLS base. The cpuid-faulting-control codes this rule is
+        # actually named for are ARCH_GET_CPUID=0x1011(4113) and
+        # ARCH_SET_CPUID=0x1012(4114). arch_prctl(code, addr): arg0 is code.
+        - field: arg0
+          op: in
+          values: ["4113", "4114"]
     severity: warning
     action: alert
     tags: [mitre:T1497.001, sandbox-evasion, vm-detection, cpuid]
@@ -350,10 +360,19 @@ rules:
     name: "ARP spoofing via raw socket"
     description: "Raw socket created at link layer (AF_PACKET) — ARP spoofing tool sending crafted ARP packets."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["41"]  # socket
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["41"]  # socket
+        # 5.9.3c (#47): the rule name promises AF_PACKET specifically, but
+        # the condition matched every socket() call on the box — one of the
+        # most common syscalls there is. socket(domain, type, protocol):
+        # arg0 is domain. AF_PACKET=17.
+        - field: arg0
+          op: in
+          values: ["17"]
     severity: warning
     action: alert
     tags: [mitre:T1557.002, arp-spoof, mitm, raw-socket]

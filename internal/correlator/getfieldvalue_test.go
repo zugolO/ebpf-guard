@@ -3,8 +3,8 @@ package correlator
 import (
 	"testing"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 func mkComm(s string) [16]byte {
@@ -57,6 +57,13 @@ func TestGetFieldValue(t *testing.T) {
 		{"syscall arg0", types.Event{Type: types.EventSyscall, Syscall: &types.SyscallEvent{Args: [6]uint64{42}}}, "arg0", "42"},
 		{"syscall arg5", types.Event{Type: types.EventSyscall, Syscall: &types.SyscallEvent{Args: [6]uint64{0, 0, 0, 0, 0, 99}}}, "arg5", "99"},
 		{"syscall uid", types.Event{Type: types.EventSyscall, UID: 1000, Syscall: &types.SyscallEvent{}}, "uid", "1000"},
+		{"syscall parent_comm", types.Event{Type: types.EventSyscall, ParentComm: mkComm("nginx"), Syscall: &types.SyscallEvent{}}, "parent_comm", "nginx"},
+		{"syscall ppid", types.Event{Type: types.EventSyscall, PPID: 1234, Syscall: &types.SyscallEvent{}}, "ppid", "1234"},
+		{"syscall alias proc.parent_comm", types.Event{Type: types.EventSyscall, ParentComm: mkComm("sshd"), Syscall: &types.SyscallEvent{}}, "proc.parent_comm", "sshd"},
+		{"net parent_comm", types.Event{Type: types.EventTCPConnect, ParentComm: mkComm("systemd"), Network: &types.NetworkEvent{}}, "parent_comm", "systemd"},
+		{"net ppid", types.Event{Type: types.EventTCPConnect, PPID: 1, Network: &types.NetworkEvent{}}, "ppid", "1"},
+		{"file parent_comm", types.Event{Type: types.EventFileAccess, ParentComm: mkComm("bash"), File: &types.FileEvent{}}, "parent_comm", "bash"},
+		{"file ppid", types.Event{Type: types.EventFileAccess, PPID: 42, File: &types.FileEvent{}}, "ppid", "42"},
 
 		// DNS
 		{"dns qname", types.Event{Type: types.EventDNS, DNS: &types.DNSEvent{QName: "evil.example.com"}}, "qname", "evil.example.com"},

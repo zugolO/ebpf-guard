@@ -80,10 +80,17 @@ rules:
     name: "OWASP: Shell spawned by web server process"
     description: "Web server executed shell command (potential command injection)"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["59", "322", "545"]  # execve, execveat, execveat (x86_64)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["59", "322", "545"]  # execve, execveat, execveat (x86_64)
+        # 5.9.3b (#47): without parent_comm this matched every exec on the
+        # box — the "web server" half of the rule name was unenforced.
+        - field: parent_comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "gunicorn", "uwsgi", "node", "java"]
     severity: critical
     action: alert
     tags: [owasp, command-injection, a03-injection, rce]

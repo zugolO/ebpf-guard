@@ -31,10 +31,19 @@ rules:
     name: "CIS 5.2.1: Privileged container detected"
     description: "Container running with privileged security context"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["160"]  # unshare syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["160"]  # unshare syscall
+        # 5.9.3c (#47): container runtimes call unshare() while building a
+        # container's namespaces at startup — exclude the runtime, not the
+        # syscall.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
 
@@ -43,9 +52,18 @@ rules:
     name: "CIS 5.2.5: Privilege escalation detected"
     description: "Process attempting privilege escalation"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["82", "105"]  # setuid, setgid
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["82", "105"]  # setuid, setgid
+        # 5.9.3b (#47): privsep daemons call setuid/setgid as part of normal
+        # operation (dropping root after bind) — exclude them by comm rather
+        # than by nr, same reasoning as sigma_setuid_syscall.
+        - field: comm
+          op: not_in
+          values: ["sshd", "su", "sudo", "cron", "crond", "apache2", "nginx",
+                    "php-fpm", "postgres", "mysqld", "dovecot", "vsftpd"]
     severity: critical
     action: alert

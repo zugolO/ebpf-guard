@@ -165,10 +165,19 @@ rules:
       PID 1's namespaces) is the core step of a T1611 container escape attempt.
       Legitimate callers include nsenter and container runtime shims.
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["308"]   # __NR_setns (x86-64)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["308"]   # __NR_setns (x86-64)
+        # 5.9.3c (#47): the description already names the legitimate
+        # callers — encode them as an exclusion instead of leaving the
+        # syscall unscoped.
+        - field: comm
+          op: not_in
+          values: ["nsenter", "runc", "containerd-shim",
+                    "containerd-shim-runc-v2", "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
     tags: [mitre:T1611, mitre:T1548.002, privesc, setns, namespace-escape, container-escape]
@@ -185,10 +194,18 @@ rules:
       class container escapes (CVE-2019-5736, CVE-2022-0492). Legitimate
       use is restricted to container runtime setup only.
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["272"]   # __NR_unshare (x86-64)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["272"]   # __NR_unshare (x86-64)
+        # 5.9.3c (#47): the description already restricts legitimate use to
+        # container runtime setup — encode that as an exclusion.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: warning
     action: alert
     tags: [mitre:T1611, mitre:T1548.002, privesc, unshare, user-namespace, container-escape]

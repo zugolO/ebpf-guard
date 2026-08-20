@@ -11,10 +11,19 @@ rules:
     name: "Container Escape: Mount syscall from container"
     description: "Container process executed mount syscall (attempting to access host filesystem)"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["165"]  # mount syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["165"]  # mount syscall
+        # 5.9.3c (#47): container runtimes call mount() to set up the very
+        # namespace this rule watches for escapes out of — exclude the
+        # shim/runtime processes, not the syscall.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
     tags: [container-escape, privilege-escalation, mount, cis]
@@ -48,10 +57,20 @@ rules:
     name: "Container Escape: Namespace enter attempt"
     description: "Process used nsenter to enter another namespace"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["308"]  # setns syscall (nsenter uses this)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["308"]  # setns syscall (nsenter uses this)
+        # 5.9.3c (#47): container runtime shims call setns() to attach into
+        # a namespace during normal `kubectl exec`/`docker exec` — exclude
+        # them, not the syscall. nsenter(1) itself is NOT excluded: it is
+        # the tool the escape technique this rule names is built on.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
     tags: [container-escape, namespace-breakout, nsenter]
@@ -61,10 +80,19 @@ rules:
     name: "Container Escape: User namespace creation"
     description: "Process created new user namespace (potential privilege escalation)"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["272"]  # unshare syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["272"]  # unshare syscall
+        # 5.9.3c (#47): container runtimes call unshare() to build the
+        # container's namespaces at startup — exclude the runtime, not the
+        # syscall.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: warning
     action: alert
     tags: [container-escape, unshare, user-namespace]
@@ -129,15 +157,24 @@ rules:
     name: "Container Escape: CAP_SYS_ADMIN operation"
     description: "Process performed operation requiring CAP_SYS_ADMIN"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values:
-        - "165"   # mount
-        - "166"   # umount2
-        - "272"   # unshare
-        - "308"   # setns
-        - "159"   # pivot_root
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values:
+            - "165"   # mount
+            - "166"   # umount2
+            - "272"   # unshare
+            - "308"   # setns
+            - "159"   # pivot_root
+        # 5.9.3c (#47): every one of these syscalls is also how a container
+        # runtime builds a container's namespaces at startup — exclude the
+        # runtime, not the syscalls.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
     tags: [container-escape, capabilities, cap-sys-admin]
@@ -147,10 +184,19 @@ rules:
     name: "Container Escape: pivot_root syscall"
     description: "Process changed root filesystem (pivot_root)"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["155"]  # pivot_root syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["155"]  # pivot_root syscall
+        # 5.9.3c (#47): container runtimes call pivot_root() to switch into
+        # the container rootfs at startup — exclude the runtime, not the
+        # syscall.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
     tags: [container-escape, pivot-root, chroot]
@@ -160,10 +206,18 @@ rules:
     name: "Container Escape: chroot syscall"
     description: "Process executed chroot (may indicate escape attempt)"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["161"]  # chroot syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["161"]  # chroot syscall
+        # 5.9.3b (#47): sshd re-execs itself into a chroot for privilege
+        # separation (ChrootDirectory / UsePrivilegeSeparation) on every
+        # session — exclude it by comm, not by removing the syscall check.
+        - field: comm
+          op: not_in
+          values: ["sshd"]
     severity: warning
     action: alert
     tags: [container-escape, chroot, filesystem]

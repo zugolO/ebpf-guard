@@ -1,28 +1,39 @@
 suite: container_escape
 rules_path: ../../rules/container-escape.yaml
 tests:
-  - name: "mount syscall (nr=165) fires container_escape_mount"
+  - name: "mount syscall (nr=165) from non-runtime comm fires container_escape_mount"
     rule_id: container_escape_mount
     event:
       type: syscall
+      comm: "app"
       syscall:
         nr: 165
     expect: alert
     expect_severity: critical
 
-  - name: "setns syscall (nr=308) fires container_escape_nsenter"
+  - name: "mount syscall (nr=165) from runc does not fire container_escape_mount"
+    event:
+      type: syscall
+      comm: "runc"
+      syscall:
+        nr: 165
+    expect: no_alert
+
+  - name: "setns syscall (nr=308) from non-runtime comm fires container_escape_nsenter"
     rule_id: container_escape_nsenter
     event:
       type: syscall
+      comm: "app"
       syscall:
         nr: 308
     expect: alert
     expect_severity: critical
 
-  - name: "unshare syscall (nr=272) fires container_escape_unshare_user"
+  - name: "unshare syscall (nr=272) from non-runtime comm fires container_escape_unshare_user"
     rule_id: container_escape_unshare_user
     event:
       type: syscall
+      comm: "app"
       syscall:
         nr: 272
     expect: alert

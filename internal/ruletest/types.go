@@ -72,17 +72,19 @@ func (tc TestCase) effectiveExpectRuleID() string {
 
 // EventSpec describes a synthetic event in YAML.
 type EventSpec struct {
-	Type    string       `yaml:"type"`
-	PID     uint32       `yaml:"pid,omitempty"`
-	TGID    uint32       `yaml:"tgid,omitempty"`
-	UID     uint32       `yaml:"uid,omitempty"`
-	Comm    string       `yaml:"comm,omitempty"`
-	Syscall *SyscallSpec `yaml:"syscall,omitempty"`
-	Network *NetworkSpec `yaml:"network,omitempty"`
-	File    *FileSpec    `yaml:"file,omitempty"`
-	DNS     *DNSSpec     `yaml:"dns,omitempty"`
-	Privesc *PrivescSpec `yaml:"privesc,omitempty"`
-	TLS     *TLSSpec     `yaml:"tls,omitempty"`
+	Type       string       `yaml:"type"`
+	PID        uint32       `yaml:"pid,omitempty"`
+	TGID       uint32       `yaml:"tgid,omitempty"`
+	UID        uint32       `yaml:"uid,omitempty"`
+	Comm       string       `yaml:"comm,omitempty"`
+	PPID       uint32       `yaml:"ppid,omitempty"`
+	ParentComm string       `yaml:"parent_comm,omitempty"`
+	Syscall    *SyscallSpec `yaml:"syscall,omitempty"`
+	Network    *NetworkSpec `yaml:"network,omitempty"`
+	File       *FileSpec    `yaml:"file,omitempty"`
+	DNS        *DNSSpec     `yaml:"dns,omitempty"`
+	Privesc    *PrivescSpec `yaml:"privesc,omitempty"`
+	TLS        *TLSSpec     `yaml:"tls,omitempty"`
 }
 
 // TLSSpec describes a TLS plaintext inspection event payload.
@@ -158,6 +160,10 @@ func (s EventSpec) Build() (types.Event, error) {
 	}
 	if s.Comm != "" {
 		copy(e.Comm[:], s.Comm)
+	}
+	e.PPID = s.PPID
+	if s.ParentComm != "" {
+		copy(e.ParentComm[:], s.ParentComm)
 	}
 
 	switch strings.ToLower(s.Type) {

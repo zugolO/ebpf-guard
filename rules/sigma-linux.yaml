@@ -11,10 +11,20 @@ rules:
     name: "Shell spawned from unexpected parent process"
     description: "A shell (bash/sh/zsh/dash) was executed by a process that does not normally spawn shells. Common indicator of exploitation or RCE."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["59"]  # execve
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["59"]  # execve
+        - field: comm
+          op: regex
+          values: ["^sh$", "^bash$", "^dash$", "^zsh$", "^ksh$"]
+        # 5.9.3b (#47): the "unexpected parent" half of the rule was never
+        # enforced — bare nr matched every execve on the box.
+        - field: parent_comm
+          op: not_in
+          values: ["sshd", "cron", "systemd", "run-parts", "login", "su", "sudo"]
     severity: warning
     action: alert
     tags: [mitre:T1059.004, sigma, shell-spawn, execution]
@@ -549,10 +559,30 @@ rules:
     name: "World-writable directory created"
     description: "mkdir called with world-writable permissions (chmod 777 or mode 0777) — staging ground for privilege escalation."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["83", "258"]  # mkdir, mkdirat
+    condition_group:
+      # 5.9.3c (#47): the description promises mode 0777 specifically, but
+      # the condition never checked it — bare mkdir/mkdirat matched every
+      # directory creation on the box. The mode argument sits at a
+      # different offset per syscall: mkdir(path, mode) has mode at arg1;
+      # mkdirat(dirfd, path, mode) has mode at arg2. 511 = 0777.
+      operator: or
+      subgroups:
+        - operator: and
+          conditions:
+            - field: nr
+              op: eq
+              values: ["83"]  # mkdir
+            - field: arg1
+              op: eq
+              values: ["511"]
+        - operator: and
+          conditions:
+            - field: nr
+              op: eq
+              values: ["258"]  # mkdirat
+            - field: arg2
+              op: eq
+              values: ["511"]
     severity: warning
     action: alert
     tags: [mitre:T1222, sigma, world-writable, filesystem]
@@ -837,10 +867,19 @@ rules:
     name: "setuid/setgid syscall called"
     description: "Process called setuid(0) or setgid(0) — attempting to switch to root identity."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["105", "106", "113", "114", "117", "119"]  # setuid, setgid, setreuid, setregid, setresuid, setresgid
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["105", "106", "113", "114", "117", "119"]  # setuid, setgid, setreuid, setregid, setresuid, setresgid
+        # 5.9.3b (#47): privsep daemons call setuid/setgid as part of normal
+        # operation (dropping root after bind, forked worker privsep) — the
+        # signal is an *unexpected* caller, not the syscall itself.
+        - field: comm
+          op: not_in
+          values: ["sshd", "su", "sudo", "cron", "crond", "apache2", "nginx",
+                    "php-fpm", "postgres", "mysqld", "dovecot", "vsftpd"]
     severity: warning
     action: alert
     tags: [mitre:T1548.001, sigma, setuid, privilege-escalation]
@@ -849,10 +888,25 @@ rules:
     name: "Process set itself non-dumpable via prctl"
     description: "prctl(PR_SET_DUMPABLE, 0) called — process hiding from /proc inspection and core dumps."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["157"]  # prctl
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["157"]  # prctl
+        # 5.9.3c (#47): the rule name promises PR_SET_DUMPABLE specifically,
+        # but the condition matched every prctl option (PR_SET_NAME,
+        # PR_SET_SECCOMP, PR_SET_NO_NEW_PRIVS, thread naming, …), which
+        # nearly every process calls at startup. prctl(option, …): arg0 is
+        # option. PR_SET_DUMPABLE=4.
+        - field: arg0
+          op: in
+          values: ["4"]
+        # arg1 is the dumpable value; 0 = non-dumpable (the hiding case
+        # this rule is named for), 1 just restores the default.
+        - field: arg1
+          op: eq
+          values: ["0"]
     severity: warning
     action: alert
     tags: [mitre:T1548, sigma, prctl, process-hiding]
@@ -914,10 +968,20 @@ rules:
     name: "ptrace PTRACE_ATTACH to another process"
     description: "ptrace(PTRACE_ATTACH) used to attach to another process — credential theft or code injection."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["101"]  # ptrace
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["101"]  # ptrace
+        # 5.9.3c (#47): the rule name promises PTRACE_ATTACH specifically,
+        # but the condition matched every ptrace request (PEEKDATA, CONT,
+        # …) — the overwhelming majority of legitimate debugger traffic.
+        # ptrace(request, pid, addr, data): arg0 is request.
+        # PTRACE_ATTACH=16, PTRACE_SEIZE=16902(0x4206).
+        - field: arg0
+          op: in
+          values: ["16", "16902"]
     severity: critical
     action: alert
     tags: [mitre:T1003, mitre:T1055, sigma, ptrace, credential-access]
@@ -942,10 +1006,20 @@ rules:
     name: "Memory region marked executable (mprotect)"
     description: "mprotect PROT_EXEC applied — marking heap/stack as executable. Used in shellcode injection."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["10"]  # mprotect
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["10"]  # mprotect
+        # 5.9.3c (#47): the rule name promises PROT_EXEC specifically, but
+        # the condition matched every mprotect call — glibc's malloc arena
+        # management alone makes this one of the noisiest syscalls on the
+        # box. mprotect(addr, len, prot): arg2 is prot.
+        # 4=EXEC, 5=EXEC|READ, 6=EXEC|WRITE, 7=EXEC|WRITE|READ.
+        - field: arg2
+          op: in
+          values: ["4", "5", "6", "7"]
     severity: warning
     action: alert
     tags: [mitre:T1055, sigma, mprotect, shellcode]
@@ -954,10 +1028,17 @@ rules:
     name: "process_vm_readv cross-process memory read"
     description: "process_vm_readv syscall used to read another process's address space — credential theft or memory scraping."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["310"]  # process_vm_readv
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["310"]  # process_vm_readv
+        # 5.9.3c (#47): legitimate callers are debuggers/core-dump and
+        # checkpoint tooling — exclude them, not the syscall.
+        - field: comm
+          op: not_in
+          values: ["gdb", "gcore", "criu"]
     severity: critical
     action: alert
     tags: [mitre:T1055, sigma, process-vm, memory-scraping]
@@ -966,10 +1047,15 @@ rules:
     name: "process_vm_writev cross-process memory write"
     description: "process_vm_writev used to write to another process — code injection without ptrace."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["311"]  # process_vm_writev
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["311"]  # process_vm_writev
+        - field: comm
+          op: not_in
+          values: ["gdb", "criu"]
     severity: critical
     action: alert
     tags: [mitre:T1055, sigma, process-vm, code-injection]
@@ -982,10 +1068,20 @@ rules:
     name: "seccomp BPF filter installed by non-container-runtime"
     description: "seccomp(SECCOMP_SET_MODE_FILTER) called — installing syscall filter. Legitimate for sandboxing, suspicious from unknown processes."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["317"]  # seccomp
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["317"]  # seccomp
+        # 5.9.3c (#47): the id says "by non-container-runtime" but the
+        # condition never excluded the container runtime — or the other
+        # major legitimate seccomp installer, browser renderer sandboxes.
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun", "chrome", "chromium",
+                    "docker-init"]
     severity: warning
     action: alert
     tags: [mitre:T1562, sigma, seccomp, defense-evasion]
@@ -1129,15 +1225,22 @@ rules:
     name: "Shell spawned from web server process"
     description: "A shell was launched with a web server (apache2, nginx, httpd) as its ancestor — RCE via web application."
     event_type: syscall
-    condition:
-      field: comm
-      op: regex
-      values:
-        - "^sh$"
-        - "^bash$"
-        - "^dash$"
-        - "^zsh$"
-        - "^ksh$"
+    condition_group:
+      operator: and
+      conditions:
+        - field: comm
+          op: regex
+          values:
+            - "^sh$"
+            - "^bash$"
+            - "^dash$"
+            - "^zsh$"
+            - "^ksh$"
+        # 5.9.3b (#47): the rule name promises a web-server ancestor but the
+        # condition never checked it — any shell on the box matched.
+        - field: parent_comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "gunicorn", "uwsgi", "node", "java"]
     severity: critical
     action: alert
     tags: [mitre:T1190, sigma, rce, webshell, web-server]

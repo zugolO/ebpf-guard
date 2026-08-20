@@ -55,10 +55,18 @@ rules:
     name: "Kernel module load via init_module syscall"
     description: "init_module(2) or finit_module(2) syscall called — loading a kernel module into the running kernel."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["175", "313"]  # init_module, finit_module
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["175", "313"]  # init_module, finit_module
+        # 5.9.3c (#47): exclude the standard module-loading tools, not the
+        # syscall — a rootkit calls init_module directly or via a renamed
+        # binary, not via insmod/modprobe.
+        - field: comm
+          op: not_in
+          values: ["insmod", "modprobe", "kmod", "systemd-modules-load"]
     severity: critical
     action: alert
     tags: [mitre:T1547.006, rootkit, init-module, syscall]
@@ -67,10 +75,15 @@ rules:
     name: "Kernel module removal via delete_module"
     description: "delete_module syscall called — removing a kernel module. Rootkits often remove themselves after installing hooks."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["176"]  # delete_module
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["176"]  # delete_module
+        - field: comm
+          op: not_in
+          values: ["rmmod", "modprobe", "kmod"]
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, delete-module]
@@ -242,10 +255,25 @@ rules:
     name: "Executable memory mapping without backing file"
     description: "mmap with PROT_EXEC|PROT_WRITE without a file backing — anonymous executable memory, used for shellcode and fileless rootkits."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["9"]  # mmap
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["9"]  # mmap
+        # 5.9.3c (#47): the description names PROT_EXEC|PROT_WRITE without a
+        # file backing as the actual signal, but the condition never checked
+        # it — bare mmap() is one of the most common syscalls on the box
+        # (malloc, the dynamic linker, every JIT). mmap(addr, len, prot,
+        # flags, fd, off): arg2 is prot (4=EXEC, 6=EXEC|WRITE, 7=EXEC|WRITE|
+        # READ), arg4 is fd (-1 == 0xFFFFFFFFFFFFFFFF for MAP_ANONYMOUS per
+        # POSIX — anonymous mappings must pass fd=-1).
+        - field: arg2
+          op: in
+          values: ["4", "5", "6", "7"]
+        - field: arg4
+          op: eq
+          values: ["18446744073709551615"]
     severity: warning
     action: alert
     tags: [mitre:T1620, rootkit, mmap, fileless, shellcode]
@@ -254,10 +282,17 @@ rules:
     name: "userfaultfd created (kernel exploit primitive)"
     description: "userfaultfd syscall used — creates a user-mode page fault handler. Used in kernel heap spray and UAF exploit chains."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["323"]  # userfaultfd
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["323"]  # userfaultfd
+        # 5.9.3c (#47): legitimate userfaultfd users are checkpoint/restore
+        # and VM live-migration tooling — exclude them, not the syscall.
+        - field: comm
+          op: not_in
+          values: ["criu", "qemu-system-x86_64", "qemu-kvm"]
     severity: critical
     action: alert
     tags: [mitre:T1014, rootkit, userfaultfd, kernel-exploit]
@@ -266,10 +301,17 @@ rules:
     name: "perf_event_open used for kernel address read"
     description: "perf_event_open with PERF_TYPE_RAW — can be abused to read kernel memory addresses for KASLR bypass."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["298"]  # perf_event_open
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["298"]  # perf_event_open
+        # 5.9.3c (#47): legitimate profilers call perf_event_open
+        # constantly — exclude them, not the syscall.
+        - field: comm
+          op: not_in
+          values: ["perf", "bpftrace"]
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, perf-event, kaslr-bypass]
@@ -282,10 +324,18 @@ rules:
     name: "BPF program loaded by non-privileged tool"
     description: "BPF program loaded outside of known security or network tools — possible BPF rootkit."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["321"]  # bpf
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["321"]  # bpf
+        # 5.9.3c (#47): "outside of known security or network tools" was
+        # never enforced — bare nr matched this agent's own BPF map/program
+        # loading too. Exclude the known legitimate loaders by name.
+        - field: comm
+          op: not_in
+          values: ["ebpf-guard", "bpftool", "cilium-agent", "falco"]
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, bpf, bpf-rootkit]
@@ -294,10 +344,15 @@ rules:
     name: "BPF map created with large capacity"
     description: "BPF map creation detected — BPF-based rootkits use maps to store hidden process lists or intercept system calls."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["321"]  # bpf
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["321"]  # bpf
+        - field: comm
+          op: not_in
+          values: ["ebpf-guard", "bpftool", "cilium-agent", "falco"]
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, bpf-map]
@@ -310,10 +365,17 @@ rules:
     name: "kexec_load called (kernel replacement)"
     description: "kexec_load or kexec_file_load syscall used — replacing the running kernel. Rootkits use this for persistent kernel backdoors."
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["246", "320"]  # kexec_load, kexec_file_load
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["246", "320"]  # kexec_load, kexec_file_load
+        # 5.9.3c (#47): legitimate callers are the kexec/kdump tooling —
+        # exclude them, not the syscall.
+        - field: comm
+          op: not_in
+          values: ["kexec", "kdumpctl"]
     severity: critical
     action: alert
     tags: [mitre:T1014, rootkit, kexec, kernel-replacement]

@@ -24,10 +24,14 @@ var (
 		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
 		"proc.args":           true,
 		"proc.args_truncated": true,
+		// Parent process identity — read from task_struct->real_parent in the
+		// kernel since 5.9.3a (#45).
+		"ppid": true, "parent_comm": true,
 		// Aliases: dot-prefixed names used in rule YAML files for readability.
 		"network.dport": true, "network.sport": true,
 		"network.daddr": true, "network.saddr": true, "network.proto": true,
 		"proc.comm": true, "uid": true,
+		"proc.ppid": true, "proc.parent_comm": true,
 	}
 	validFileFields = map[string]bool{
 		"filename": true, "flags": true, "mode": true, "op": true, "directory": true, "extension": true,
@@ -39,20 +43,28 @@ var (
 		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
 		"proc.args":           true,
 		"proc.args_truncated": true,
+		// Parent process identity — read from task_struct->real_parent in the
+		// kernel since 5.9.3a (#45).
+		"ppid": true, "parent_comm": true,
 		// Aliases: dot-prefixed names used in rule YAML files for readability.
-		"file.path":      true,
-		"file.op":        true,
-		"file.flags":     true,
-		"file.mode":      true,
-		"file.directory": true,
-		"file.extension": true,
-		"proc.comm":      true,
+		"file.path":        true,
+		"file.op":          true,
+		"file.flags":       true,
+		"file.mode":        true,
+		"file.directory":   true,
+		"file.extension":   true,
+		"proc.comm":        true,
+		"proc.ppid":        true,
+		"proc.parent_comm": true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
 		"pid": true,
 		// Process identity — available from the base Event struct on all syscalls.
 		"uid": true, "comm": true,
+		// Parent process identity — read from task_struct->real_parent in the
+		// kernel since 5.9.3a (#45). Populated on syscall/network/fileaccess/privesc.
+		"ppid": true, "parent_comm": true,
 		// Raw syscall arguments (arg0 = first argument, arg1 = second, …).
 		"arg0": true, "arg1": true, "arg2": true,
 		"arg3": true, "arg4": true, "arg5": true,
@@ -67,6 +79,7 @@ var (
 		"syscall.arg0": true, "syscall.arg1": true, "syscall.arg2": true,
 		"syscall.arg3": true, "syscall.arg4": true, "syscall.arg5": true,
 		"proc.comm": true,
+		"proc.ppid": true, "proc.parent_comm": true,
 	}
 	validDNSFields = map[string]bool{
 		"qname": true, "qtype": true, "rcode": true, "direction": true,

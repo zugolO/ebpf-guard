@@ -100,33 +100,67 @@
 # intentional-loss.txt (та же папка). Обновлять оба файла синхронно: имя,
 # добавленное в один без другого, либо ломает состав базы, либо перестаёт
 # гаситься в критерии 6.
+#
+# Обновление 5.9.3b (замер №2.9.2, gate-2.9.2.txt, TIMESTAMP=20260819_201036).
+# Критерий 6 напечатал «добавлено (+26)» и PASS с явным требованием обновить
+# базу тем же коммитом — сделано здесь. Список взят как есть из gate-2.9.2.txt
+# (37 -> 63 типов), не пересчитан заново: волна 5.9.3b/c, идущая следом, меняет
+# УСЛОВИЯ части этих самых правил (parent_comm/comm/argN контекст —
+# c2_ingress_piped_to_shell, cis_5_2_5_privilege_escalation,
+# container_escape_chroot, initial_driveby_browser_download_exec,
+# initial_email_link_download_exec, initial_office_macro_exec,
+# owasp_web_shell_spawn, sigma_chmod_executable_tmp [не тронуто],
+# sigma_setuid_syscall, sigma_shell_from_unexpected_parent,
+# sigma_web_server_shell_spawn, web_sql_injection_command — см. plan.md
+# 5.9.3b/c), поэтому чьё именно точное срабатывание на новом прогоне
+# подтвердит эти 26 типов — вопрос замера №2.9.3, не этого коммита.
 
 anomaly_detection
 beacon_fixed_interval
+c2_ingress_piped_to_shell
+cis_5_2_5_privilege_escalation
+container_escape_chroot
+container_escape_host_mount
 container_escape_init_proc
+container_escape_module_access
 cred_proc_maps_mass_read
+dns_tunneling_long_domain
 drift_new_exec_critical
 drift_new_file_dir_sensitive
 drift_new_library_in_system_dir
+evasion_chmod_sensitive
 evasion_hidden_elf_in_tmp
+exfil_archive_to_network_pipe
+exfil_dns_txt_long_label
 exfil_large_http_post
 exfil_repeated_outbound_to_same_ip
 incident_confirmed_attack
+initial_driveby_browser_download_exec
+initial_email_link_download_exec
+initial_office_macro_exec
 initial_package_postinstall_network
+integrity_kernel_module_from_user_path
 lateral_tool_transfer_wget
 mitre_sandbox_detect_proc_read
 net_high_frequency_connections
 net_portscan_indicator
+netintr_dns_long_label
 netintr_http_on_non_web_port
 netintr_large_upload_port
 netintr_long_dns_session
 netintr_loopback_high_port
 netintr_syn_scan_pattern
 owasp_log_tampering
+owasp_reverse_shell_pattern
+owasp_web_shell_spawn
 privesc_suid_suspicious_path
+rootkit_bpf_map_create_suspicious
+rootkit_bpf_prog_load_suspicious
 rootkit_hidden_dir_dev
+rootkit_kmod_from_tmp
 sensitive_file_read
 sigma_binary_in_tmp_executed
+sigma_chmod_executable_tmp
 sigma_cpu_info_access
 sigma_kernel_version_read
 sigma_log_deletion
@@ -134,7 +168,13 @@ sigma_memory_proc_dump
 sigma_passwd_shadow_read
 sigma_reverse_shell_named_pipe
 sigma_sensitive_file_chmod
+sigma_setuid_syscall
+sigma_shell_from_unexpected_parent
+sigma_web_server_shell_spawn
 web_internal_recon
+web_sql_injection_command
 web_sql_injection_files
+webshell_crontab_modification
+webshell_dns_exfil_long_subdomain
 webshell_script_write_via_web_process
 webshell_ssrf_internal_network

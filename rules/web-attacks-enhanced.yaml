@@ -50,10 +50,17 @@ rules:
     name: "Web Attack: Database process spawned by web server"
     description: "Database client process (mysql, postgres, sqlite) spawned by potential web server process (indicates possible SQL injection achieving code execution)"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["59", "322", "545"]  # execve, execveat, execveat (x86_64)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["59", "322", "545"]  # execve, execveat, execveat (x86_64)
+        # 5.9.3b (#47): "spawned by web server" was never enforced — bare nr
+        # matched every exec on the box.
+        - field: parent_comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "gunicorn", "uwsgi", "node", "java"]
     severity: critical
     action: alert
     tags: [web-attack, sql-injection, owasp, a03-injection, process-injection]
@@ -62,10 +69,21 @@ rules:
     name: "Web Attack: Blind SQLi timing-based pattern detected"
     description: "Sleep/wait syscalls following database-adjacent file activity (potential blind SQLi timing attack)"
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["35", "206", "162"]  # nanosleep, clock_nanosleep, select (sleep syscalls)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["35", "206", "162"]  # nanosleep, clock_nanosleep, select (sleep syscalls)
+        # 5.9.3c (#47): sleep/select syscalls alone are near-universal —
+        # every event loop and rate limiter uses them. The description's
+        # "following database-adjacent file activity" isn't checkable from
+        # a single-event condition (needs sequence correlation, out of
+        # scope here); scope to the one context single-event fields can
+        # give: the caller descends from a web server process.
+        - field: parent_comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "gunicorn", "uwsgi"]
     severity: warning
     action: alert
     tags: [web-attack, sql-injection, blind-sqli, owasp, a03-injection, timing-attack]

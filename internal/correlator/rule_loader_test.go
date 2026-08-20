@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // TestGetAllConditionsRecursive verifies that getAllConditions properly
@@ -302,6 +302,53 @@ rules:
 	require.NoError(t, err, "valid nested rules should load successfully")
 	assert.Len(t, rules, 1)
 	assert.Equal(t, "valid_nested", rules[0].ID)
+}
+
+// TestSyscallRuleParentCommField verifies that a syscall rule can constrain on
+// parent_comm (added in 5.9.3b / #49) — it must load without a field-validation
+// error and must match an event carrying the expected ParentComm.
+func TestSyscallRuleParentCommField(t *testing.T) {
+	ruleContent := `
+rules:
+  - id: test_parent_comm_syscall
+    name: "Shell spawned by nginx"
+    description: "Test rule matching on parent_comm for a syscall event"
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: parent_comm
+          op: in
+          values: ["nginx", "apache2"]
+        - field: syscall.nr
+          op: equals
+          values: ["59"]
+`
+	tmpDir := t.TempDir()
+	ruleFile := filepath.Join(tmpDir, "test_rules.yaml")
+	err := os.WriteFile(ruleFile, []byte(ruleContent), 0644)
+	require.NoError(t, err)
+
+	rules, err := LoadRulesFromFile(ruleFile)
+	require.NoError(t, err, "syscall rule with parent_comm field should load successfully")
+	require.Len(t, rules, 1)
+	assert.Equal(t, "test_parent_comm_syscall", rules[0].ID)
+
+	re := NewRuleEngine(rules)
+	matching := types.Event{
+		Type:       types.EventSyscall,
+		ParentComm: mkComm("nginx"),
+		Syscall:    &types.SyscallEvent{Nr: 59},
+	}
+	alerts := re.Evaluate(matching)
+	require.Len(t, alerts, 1, "event with matching parent_comm should trigger the rule")
+
+	nonMatching := types.Event{
+		Type:       types.EventSyscall,
+		ParentComm: mkComm("sshd"),
+		Syscall:    &types.SyscallEvent{Nr: 59},
+	}
+	assert.Empty(t, re.Evaluate(nonMatching), "event with non-matching parent_comm must not trigger the rule")
 }
 
 // TestGetConditionsFromGroupEdgeCases tests edge cases for getConditionsFromGroup.

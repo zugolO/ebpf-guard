@@ -429,6 +429,98 @@ func TestUnreachableSyscallRules_RepoRuleCount(t *testing.T) {
 	assert.Contains(t, canaryUnreachable, "zz_canary_unmonitored_nr")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ContextEmptySyscallRules (wave 5.9.3c, finding #47)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestContextEmptySyscallRules(t *testing.T) {
+	rules := []Rule{
+		// nr-only condition -> context-empty.
+		{ID: "bare_nr", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: OpIn, Values: []string{"59"}}, Action: ActionAlert},
+		// nr-only via the syscall.nr alias -> still context-empty after normalisation.
+		{ID: "bare_nr_alias", EventType: types.EventSyscall, Condition: RuleCondition{Field: "syscall.nr", Op: OpEquals, Values: []string{"59"}}, Action: ActionAlert},
+		// nr plus a comm exclusion -> has context, not reported.
+		{ID: "nr_with_comm", EventType: types.EventSyscall, ConditionGroup: &RuleConditionGroup{
+			Operator: "and",
+			Conditions: []RuleCondition{
+				{Field: "nr", Op: OpIn, Values: []string{"59"}},
+				{Field: "comm", Op: OpNotIn, Values: []string{"sshd"}},
+			},
+		}, Action: ActionAlert},
+		// nr plus an arg constraint -> has context, not reported.
+		{ID: "nr_with_arg", EventType: types.EventSyscall, ConditionGroup: &RuleConditionGroup{
+			Operator: "and",
+			Conditions: []RuleCondition{
+				{Field: "nr", Op: OpIn, Values: []string{"10"}},
+				{Field: "arg2", Op: OpIn, Values: []string{"4"}},
+			},
+		}, Action: ActionAlert},
+		// Not a syscall rule -> ignored regardless of field.
+		{ID: "not_syscall", EventType: types.EventDNS, Condition: RuleCondition{Field: "qname", Op: OpEquals, Values: []string{"evil.com"}}, Action: ActionAlert},
+	}
+	re := NewRuleEngine(rules)
+
+	got := re.ContextEmptySyscallRules()
+
+	assert.ElementsMatch(t, []string{"bare_nr", "bare_nr_alias"}, got)
+}
+
+// TestContextEmptySyscallRules_RepoRuleCount is the 5.9.3c acceptance check:
+// it loads the real rules/*.yaml tree and fails if the count of context-empty
+// syscall rules grows past the wave's ≤5 ceiling, or if a rule leaves that
+// ceiling without a documented reason here. wave 5.9.3b closed 6 of these
+// (the ones event_type:syscall with only "nr"; the other 5 of the "11
+// rules" mentioned in plan.md 5.9.3b use comm/proc.comm, not nr, so they were
+// never counted by this check) and wave 5.9.3c closed 29 more, from 39 down
+// to the 4 below — one under the ≤5 target.
+//
+// The 4 that remain use only "nr" because the real distinguishing signal —
+// whether the memfd/anon-fd this syscall touches is later exec'd, or whether
+// the chmod target path was under /tmp — needs correlation across multiple
+// events (fd lifecycle, path resolution at the syscall layer) that a single
+// condition on a single event cannot express. Giving them a comm/parent_comm
+// allowlist would not add real context: memfd_create and chmod are used by
+// enough ordinary software (browsers, systemd, package managers) that an
+// allowlist would either chase an ever-growing list or exclude away most of
+// the signal. See plan.md wave 5.9.3c for the full writeup.
+var contextEmptySyscallRulesRemainder = map[string]string{
+	"integrity_proc_self_exe_exec": "memfd_create/memfd_secret alone; the actual signal (exec of that fd) needs fd-lifecycle correlation, not a single-event field",
+	"proc_inject_memfd_create":     "same memfd_create limitation as integrity_proc_self_exe_exec — pervasive legitimate use (browsers, systemd, JVM), no single-event field distinguishes staging from routine anonymous-file use",
+	"sigma_memfd_create_anonymous": "duplicate of the same memfd_create limitation, different rule file",
+	"sigma_chmod_executable_tmp":   "documented in the rule's own description (5.9d, finding #27): the collector cannot resolve the chmod target path at the syscall layer, so it cannot be scoped to /tmp despite the rule id",
+}
+
+func TestContextEmptySyscallRules_RepoRuleCount(t *testing.T) {
+	rules, err := LoadRulesFromDir("../../rules")
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	re := NewRuleEngine(rules)
+
+	got := re.ContextEmptySyscallRules()
+	if len(got) > 5 {
+		t.Errorf("wave 5.9.3c ceiling exceeded: %d syscall rules constrain only \"nr\" "+
+			"(want <=5, each documented in contextEmptySyscallRulesRemainder): %v", len(got), got)
+	}
+	for _, id := range got {
+		assert.Contains(t, contextEmptySyscallRulesRemainder, id,
+			"rule %q has no context beyond nr and no documented reason in "+
+				"contextEmptySyscallRulesRemainder: either give it comm/parent_comm/argN "+
+				"context or document why that's not possible", id)
+	}
+
+	// The mechanism itself must still catch an obviously context-empty rule,
+	// so the ceiling check above can't silently pass because the detector broke.
+	augmented := append(append([]Rule{}, rules...), Rule{
+		ID:        "zz_canary_context_empty",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"9001"}},
+		Action:    ActionAlert,
+	})
+	canary := NewRuleEngine(augmented).ContextEmptySyscallRules()
+	assert.Contains(t, canary, "zz_canary_context_empty")
+}
+
 // effectiveAllowlist resolves a config file the way cmd/ebpf-guard/main.go
 // does: the explicit bpf.kernel_filter.monitored_syscalls list when it is set,
 // and DefaultMonitoredSyscalls() when it is not. Reproducing that fallback is

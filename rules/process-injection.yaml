@@ -19,10 +19,18 @@ rules:
       expected from debuggers (gdb, strace, perf) or profilers. Any other caller
       should be investigated as a potential T1055.008 process injection attempt.
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["101"]   # __NR_ptrace (x86-64)
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["101"]   # __NR_ptrace (x86-64)
+        # 5.9.3c (#47): the description already names the expected callers
+        # — encode them as an exclusion instead of leaving the syscall
+        # unscoped.
+        - field: comm
+          op: not_in
+          values: ["gdb", "strace", "perf", "ltrace", "lldb"]
     severity: warning
     action: alert
     tags: [mitre-t1055, mitre-t1055.008, process-injection, lateral-movement]
@@ -59,10 +67,19 @@ rules:
       with AT_EMPTY_PATH). Combined with memfd_create this is the canonical
       fileless execution chain — the payload never appears as a named file.
     event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["322"]   # __NR_execveat (x86-64); fexecve uses AT_EMPTY_PATH
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values: ["322"]   # __NR_execveat (x86-64); fexecve uses AT_EMPTY_PATH
+        # 5.9.3c (#47): the description names AT_EMPTY_PATH as what makes
+        # this fexecve rather than a plain execveat(path) call — the
+        # condition never actually checked it. arg4 is execveat's flags
+        # argument; 4096 = AT_EMPTY_PATH.
+        - field: arg4
+          op: in
+          values: ["4096"]
     severity: critical
     action: alert
     tags: [mitre-t1055, mitre-t1055.002, process-injection, fileless, fexecve]

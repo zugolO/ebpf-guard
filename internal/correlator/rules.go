@@ -1227,6 +1227,10 @@ func normaliseFieldName(field string) string {
 		return "extension"
 	case "proc.comm":
 		return "comm"
+	case "proc.ppid":
+		return "ppid"
+	case "proc.parent_comm":
+		return "parent_comm"
 	case "network.dport":
 		return "dport"
 	case "network.sport":
@@ -1307,6 +1311,10 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return util.BytesToString(e.Comm[:])
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
+		case "ppid":
+			return strconv.FormatUint(uint64(e.PPID), 10)
+		case "parent_comm":
+			return util.BytesToString(e.ParentComm[:])
 		}
 	case types.EventFileAccess:
 		if e.File == nil {
@@ -1356,6 +1364,10 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return strconv.FormatUint(uint64(e.UID), 10)
 		case "pid":
 			return strconv.FormatUint(uint64(e.PID), 10)
+		case "ppid":
+			return strconv.FormatUint(uint64(e.PPID), 10)
+		case "parent_comm":
+			return util.BytesToString(e.ParentComm[:])
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {
@@ -1401,6 +1413,10 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return "false"
 		case "pid":
 			return strconv.FormatUint(uint64(e.PID), 10)
+		case "ppid":
+			return strconv.FormatUint(uint64(e.PPID), 10)
+		case "parent_comm":
+			return util.BytesToString(e.ParentComm[:])
 		}
 	case types.EventDNS:
 		if e.DNS == nil {
@@ -1744,6 +1760,46 @@ func (re *RuleEngine) ReferencedSyscalls() []uint32 {
 		out = append(out, nr)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// ContextEmptySyscallRules returns the IDs of loaded EventSyscall rules whose
+// condition set — after normalising dotted-name aliases (syscall.nr → nr) —
+// constrains only the "nr" field. Such a rule fires on the bare occurrence of
+// a syscall regardless of caller, arguments, or process ancestry: on a syscall
+// as common as execve or mmap that is not a signal, it is noise indexed by
+// nr. wave 5.9.3c (#47) is the machine-checkable half of "does this rule have
+// context" — it does not judge whether the added context (comm/parent_comm/
+// argN exclusion or restriction) is the *right* context, only whether the
+// rule has any at all beyond the syscall number.
+//
+// The result is sorted for stable output. See plan.md wave 5.9.3c for the
+// full accounting of the remainder.
+func (re *RuleEngine) ContextEmptySyscallRules() []string {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	var out []string
+	for _, rule := range re.rules {
+		if rule.EventType != types.EventSyscall {
+			continue
+		}
+		conds := re.getAllConditions(rule)
+		if len(conds) == 0 {
+			continue
+		}
+		onlyNr := true
+		for _, cond := range conds {
+			if normaliseFieldName(cond.Field) != "nr" {
+				onlyNr = false
+				break
+			}
+		}
+		if onlyNr {
+			out = append(out, rule.ID)
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

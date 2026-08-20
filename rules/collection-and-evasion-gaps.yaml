@@ -139,6 +139,16 @@ rules:
         - field: syscall.nr
           op: equals
           values: ["59"]
+        # 5.9.3b (#47), partial: comm+nr alone matched every command a shell
+        # runs. parent_comm cannot see the curl/wget side of `curl | sh` —
+        # in a pipeline both are siblings forked by the *same* parent shell,
+        # not parent/child of each other — so this only narrows to shells
+        # started by something other than the usual interactive/system
+        # launchers. It does not prove the piping actually happened; see
+        # plan.md 5.9.3c open questions.
+        - field: proc.parent_comm
+          op: not_in
+          values: ["sshd", "cron", "systemd", "run-parts", "login", "su", "sudo"]
     severity: critical
     action: alert
     tags: [mitre:T1105, command-and-control, ingress-tool-transfer,

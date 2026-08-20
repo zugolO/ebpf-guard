@@ -1,14 +1,23 @@
 suite: process_injection
 rules_path: ../../rules/process-injection.yaml
 tests:
-  - name: "ptrace syscall fires proc_inject_ptrace"
+  - name: "ptrace syscall from non-debugger comm fires proc_inject_ptrace"
     rule_id: proc_inject_ptrace
     event:
       type: syscall
+      comm: "app"
       syscall:
         nr: 101
     expect: alert
     expect_severity: warning
+
+  - name: "ptrace syscall from gdb does not fire proc_inject_ptrace"
+    event:
+      type: syscall
+      comm: "gdb"
+      syscall:
+        nr: 101
+    expect: no_alert
 
   - name: "memfd_create syscall fires proc_inject_memfd_create"
     rule_id: proc_inject_memfd_create
@@ -19,14 +28,23 @@ tests:
     expect: alert
     expect_severity: critical
 
-  - name: "fexecve (execveat) fires proc_inject_fexecve"
+  - name: "execveat with AT_EMPTY_PATH (fexecve) fires proc_inject_fexecve"
     rule_id: proc_inject_fexecve
     event:
       type: syscall
       syscall:
         nr: 322
+        args: [0, 0, 0, 0, 4096]
     expect: alert
     expect_severity: critical
+
+  - name: "execveat without AT_EMPTY_PATH does not fire proc_inject_fexecve"
+    event:
+      type: syscall
+      syscall:
+        nr: 322
+        args: [0, 0, 0, 0, 0]
+    expect: no_alert
 
   - name: "write to /proc/PID/mem fires proc_inject_proc_mem_write"
     rule_id: proc_inject_proc_mem_write

@@ -63,6 +63,12 @@ rules:
         - field: syscall.nr
           op: equals
           values: ["59"]
+        # 5.9.3b (#47): "spawned by" was never enforced — bare comm+nr
+        # matched any shell exec regardless of ancestor.
+        - field: proc.parent_comm
+          op: in
+          values: ["soffice", "soffice.bin", "libreoffice", "acroread",
+                    "evince", "okular", "atril", "xpdf", "mupdf"]
     severity: warning
     action: alert
     tags: [mitre:T1566, initial-access, phishing]
@@ -182,6 +188,12 @@ rules:
         - field: syscall.nr
           op: equals
           values: ["59"]    # execve
+        # 5.9.3b (#47): "browser spawned" was never enforced — bare comm+nr
+        # matched any shell exec regardless of ancestor.
+        - field: proc.parent_comm
+          op: in
+          values: ["chrome", "chromium", "chromium-browser", "google-chrome",
+                    "firefox", "brave", "msedge", "opera"]
     severity: critical
     action: alert
     tags: [mitre:T1189, initial-access, drive-by-compromise]
@@ -206,6 +218,11 @@ rules:
         - field: syscall.nr
           op: equals
           values: ["59"]    # execve
+        # 5.9.3b (#47): "email client spawned" was never enforced — bare
+        # comm+nr matched any shell exec regardless of ancestor.
+        - field: proc.parent_comm
+          op: in
+          values: ["thunderbird", "evolution", "mutt", "neomutt", "geary", "kmail"]
     severity: critical
     action: alert
     tags: [mitre:T1204.001, initial-access, phishing, email]

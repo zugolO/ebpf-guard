@@ -26,6 +26,26 @@ TIMESTAMP="${2:-}"
 IDLE_OUT="${IDLE_OUT:-}"
 REPO_DIR="${REPO_DIR:-/opt/ebpf-guard}"
 
+# Go на стенде стоит в /usr/local/go/bin, которого нет в PATH неинтерактивного
+# ssh — без этого п.5 молча уходил в SKIP.
+export PATH="$PATH:/usr/local/go/bin"
+
+# Сумма счётчика ebpf_guard_alerts_total по одному rule_id. Через awk по метке,
+# а не grep -F по префиксу строки: rule_id стоит НЕ первой меткой
+# (namespace/node/pod идут раньше), и `grep -F 'alerts_total{rule_id="X"'`
+# не матчит ничего — на дымовом прогоне отчёта это дало ровный 0 у правила,
+# которое в той же таблице выше показывало 122.
+rule_counter() {
+    local file="$1" rid="$2"
+    [ -s "$file" ] || { echo 0; return; }
+    awk -v rid="rule_id=\"$rid\"" '
+        { gsub(/\r/, "") }
+        index($0, "ebpf_guard_alerts_total{") != 1 { next }
+        index($0, rid) == 0 { next }
+        { s += $NF }
+        END { printf "%d", s+0 }' "$file"
+}
+
 if ! command -v jq >/dev/null 2>&1; then
     echo "jq не найден — отчёт №2.9.3 не может быть построен" >&2
     exit 2
@@ -167,17 +187,17 @@ echo ""
 echo "=== наблюдение 5.9.3g: c2_ingress_piped_to_shell ==="
 c2_idle="n/a"
 if [ -n "$idle_metrics_start" ] && [ -s "$idle_metrics_start" ] && [ -s "$idle_metrics_end" ]; then
-    cs=$(grep -F 'ebpf_guard_alerts_total{rule_id="c2_ingress_piped_to_shell"' "$idle_metrics_start" 2>/dev/null | awk '{s+=$NF} END{print s+0}')
-    ce=$(grep -F 'ebpf_guard_alerts_total{rule_id="c2_ingress_piped_to_shell"' "$idle_metrics_end" 2>/dev/null | awk '{s+=$NF} END{print s+0}')
-    c2_idle=$(( ${ce:-0} - ${cs:-0} ))
+    cs=$(rule_counter "$idle_metrics_start" c2_ingress_piped_to_shell)
+    ce=$(rule_counter "$idle_metrics_end" c2_ingress_piped_to_shell)
+    c2_idle=$(( ce - cs ))
 fi
 echo "  за idle-час: $c2_idle (на №2.9.2 — порядка 450/час)"
 final_metrics="$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
 baseline_metrics="$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
 if [ -s "$final_metrics" ] && [ -s "$baseline_metrics" ]; then
-    bs=$(grep -F 'ebpf_guard_alerts_total{rule_id="c2_ingress_piped_to_shell"' "$baseline_metrics" 2>/dev/null | awk '{s+=$NF} END{print s+0}')
-    fs=$(grep -F 'ebpf_guard_alerts_total{rule_id="c2_ingress_piped_to_shell"' "$final_metrics" 2>/dev/null | awk '{s+=$NF} END{print s+0}')
-    echo "  под атакой: $(( ${fs:-0} - ${bs:-0} ))" \
+    bs=$(rule_counter "$baseline_metrics" c2_ingress_piped_to_shell)
+    fs=$(rule_counter "$final_metrics" c2_ingress_piped_to_shell)
+    echo "  под атакой: $(( fs - bs ))" \
          "(в attack-наборе стенда нет сценария curl-в-шелл — ноль здесь ожидаем и НЕ доказывает работоспособность правила)"
 fi
 

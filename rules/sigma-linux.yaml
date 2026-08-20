@@ -22,9 +22,21 @@ rules:
           values: ["^sh$", "^bash$", "^dash$", "^zsh$", "^ksh$"]
         # 5.9.3b (#47): the "unexpected parent" half of the rule was never
         # enforced — bare nr matched every execve on the box.
+        #
+        # 5.9.3f (#50): list verified against live values on the stand
+        # (clean 120 s window, 2026-08-20) — this rule and
+        # c2_ingress_piped_to_shell produced 28 of 31 idle alerts, all of
+        # them a shell whose parent is another shell: the incident chains
+        # were `cron -> cron -> sh -> sh` and
+        # `sshd -> sshd -> sh -> run-parts -> 97-overlayroot -> egrep`.
+        # A shell IS a process that normally spawns shells — every script
+        # does it — so the shells belong in this list. The first hop of a
+        # real exploitation chain (nginx -> sh, php-fpm -> bash) is
+        # unaffected: its parent is the web server, not a shell.
         - field: parent_comm
           op: not_in
-          values: ["sshd", "cron", "systemd", "run-parts", "login", "su", "sudo"]
+          values: ["sshd", "cron", "systemd", "run-parts", "login", "su", "sudo",
+                    "sh", "bash", "dash", "zsh", "ksh"]
     severity: warning
     action: alert
     tags: [mitre:T1059.004, sigma, shell-spawn, execution]

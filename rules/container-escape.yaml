@@ -167,7 +167,7 @@ rules:
             - "166"   # umount2
             - "272"   # unshare
             - "308"   # setns
-            - "159"   # pivot_root
+            - "155"   # pivot_root (5.9.3 review, #50: "159" is adjtimex)
         # 5.9.3c (#47): every one of these syscalls is also how a container
         # runtime builds a container's namespaces at startup — exclude the
         # runtime, not the syscalls.

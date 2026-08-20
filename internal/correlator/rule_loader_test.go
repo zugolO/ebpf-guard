@@ -776,3 +776,65 @@ func filterRulesByTag(rules []Rule, tag string) []Rule {
 	}
 	return filtered
 }
+
+// TestSyscallNrNamesNormalised covers finding #50 (5.9.3 review): a rule that
+// spells its syscalls by name loaded happily but never matched, because
+// getFieldValue renders nr as a decimal string. Names must be rewritten to
+// numbers at load time, and an unknown name must be a load error rather than a
+// rule that is mute by construction.
+func TestSyscallNrNamesNormalised(t *testing.T) {
+	yamlDoc := `
+rules:
+  - id: nr_by_name
+    name: "syscalls named, not numbered"
+    event_type: syscall
+    condition:
+      field: nr
+      op: in
+      values: ["ptrace", "mount", "101"]
+    severity: warning
+    action: alert
+`
+	dir := t.TempDir()
+	ruleFile := filepath.Join(dir, "nr-names.yaml")
+	if err := os.WriteFile(ruleFile, []byte(yamlDoc), 0o600); err != nil {
+		t.Fatalf("write rule file: %v", err)
+	}
+	rules, err := LoadRulesFromFile(ruleFile)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	got := rules[0].Condition.Values
+	want := []string{"101", "165", "101"}
+	if len(got) != len(want) {
+		t.Fatalf("values = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("values = %v, want %v", got, want)
+		}
+	}
+
+	bad := `
+rules:
+  - id: nr_bogus
+    name: "unknown syscall name"
+    event_type: syscall
+    condition:
+      field: syscall.nr
+      op: eq
+      values: ["definitely_not_a_syscall"]
+    severity: warning
+    action: alert
+`
+	badFile := filepath.Join(dir, "nr-bogus.yaml")
+	if err := os.WriteFile(badFile, []byte(bad), 0o600); err != nil {
+		t.Fatalf("write rule file: %v", err)
+	}
+	if _, err := LoadRulesFromFile(badFile); err == nil {
+		t.Fatal("expected load error for an unknown syscall name, got nil")
+	}
+}

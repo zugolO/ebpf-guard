@@ -34,9 +34,12 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # 5.9.3 review (#50): "160" is setrlimit(2), not unshare — and it is
+        # not in the kernel allowlist, so this rule was mute by construction
+        # (same class as the 241/298 mix-up fixed in config/config.yaml).
         - field: nr
           op: in
-          values: ["160"]  # unshare syscall
+          values: ["272"]  # unshare syscall
         # 5.9.3c (#47): container runtimes call unshare() while building a
         # container's namespaces at startup — exclude the runtime, not the
         # syscall.
@@ -55,9 +58,12 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # 5.9.3 review (#50): "82" is rename(2), not setuid — and rename is
+        # in the kernel allowlist, so this rule alerted on every rename by
+        # any process outside the privsep list below. setuid=105, setgid=106.
         - field: nr
           op: in
-          values: ["82", "105"]  # setuid, setgid
+          values: ["105", "106"]  # setuid, setgid
         # 5.9.3b (#47): privsep daemons call setuid/setgid as part of normal
         # operation (dropping root after bind) — exclude them by comm rather
         # than by nr, same reasoning as sigma_setuid_syscall.

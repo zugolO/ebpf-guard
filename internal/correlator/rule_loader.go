@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -392,6 +394,19 @@ func validateRule(rule *Rule) error {
 		return fmt.Errorf("rule %s: sample_rate %.4f out of range, must be in (0.0, 1.0]", rule.ID, rule.SampleRate)
 	}
 
+	// Normalise syscall names written in `nr` values into numbers BEFORE
+	// validation (5.9.3 review, finding #50). getFieldValue renders
+	// Event.Syscall.Nr as a decimal string, so a rule that spells its syscalls
+	// by name ("ptrace", "mount", …) never matches anything — the same
+	// "mute by construction" class as the 241/298 mix-up called out in
+	// config/config.yaml. Silent blindness, so it is normalised here and an
+	// unknown name is a load error rather than a rule that quietly never fires.
+	if rule.EventType == types.EventSyscall {
+		if err := normaliseSyscallNrValues(rule); err != nil {
+			return err
+		}
+	}
+
 	// Validate conditions (including every exception's condition/condition_group).
 	conditions := getAllConditions(rule)
 	for _, cond := range conditions {
@@ -411,6 +426,73 @@ func validateRule(rule *Rule) error {
 		}
 	}
 
+	return nil
+}
+
+// normaliseSyscallNrValues rewrites syscall names in `nr` conditions of an
+// EventSyscall rule into their x86_64 numbers, in place. Only the operators
+// that name concrete syscalls (eq/in and their negations) are rewritten;
+// regex/prefix conditions on nr are left untouched. An unrecognised name is
+// returned as an error: a rule that names a syscall the loader cannot resolve
+// would otherwise load happily and never match.
+func normaliseSyscallNrValues(rule *Rule) error {
+	var walk func(g *RuleConditionGroup) error
+	fix := func(cond *RuleCondition) error {
+		if normaliseFieldName(cond.Field) != "nr" {
+			return nil
+		}
+		switch cond.Op {
+		case OpIn, OpNotIn, OpEquals, OpNotEquals, "eq", "neq":
+		default:
+			return nil
+		}
+		for i, v := range cond.Values {
+			v = strings.TrimSpace(v)
+			if _, err := strconv.ParseInt(v, 10, 64); err == nil {
+				cond.Values[i] = v
+				continue
+			}
+			nr, ok := autolearn.SyscallNr(v)
+			if !ok {
+				return fmt.Errorf("rule %s: unknown syscall name %q in nr condition", rule.ID, v)
+			}
+			cond.Values[i] = strconv.FormatInt(nr, 10)
+		}
+		return nil
+	}
+	walk = func(g *RuleConditionGroup) error {
+		if g == nil {
+			return nil
+		}
+		for i := range g.Conditions {
+			if err := fix(&g.Conditions[i]); err != nil {
+				return err
+			}
+		}
+		for i := range g.SubGroups {
+			if err := walk(&g.SubGroups[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if rule.ConditionGroup != nil {
+		if err := walk(rule.ConditionGroup); err != nil {
+			return err
+		}
+	} else if err := fix(&rule.Condition); err != nil {
+		return err
+	}
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		if exc.ConditionGroup != nil {
+			if err := walk(exc.ConditionGroup); err != nil {
+				return err
+			}
+		} else if err := fix(&exc.Condition); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

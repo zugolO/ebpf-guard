@@ -476,12 +476,16 @@ func readProcStatus(pid uint32) (comm string, ppid uint32) {
 // Two resolution paths converge on the same parent-comm lookup:
 //
 //  1. BPF populated e.PPID (preferred) — used directly.
-//  2. e.PPID == 0 — BPF left the field unset. This is the common case for the
-//     four main collectors (syscall, network, fileaccess, privesc) whose shared
-//     fill_process_info in bpf/common.h zeroes ppid/parent_comm by design (the
-//     "BPF verifier issues with pointer-chasing through task_struct on kernel
-//     5.15" caveat), expecting userspace to recover the parent via /proc.
-//     Synthetic test events and any older BPF program land here too.
+//  2. e.PPID == 0 — BPF left the field unset. Until wave 5.9.3a (#45) this was
+//     the common case: the shared fill_process_info in bpf/common.h zeroed
+//     ppid/parent_comm by design (the "BPF verifier issues with pointer-chasing
+//     through task_struct on kernel 5.15" caveat), and userspace had to recover
+//     the parent via /proc for all four main collectors (syscall, network,
+//     fileaccess, privesc). 5.9.3a reads task_struct->real_parent in the kernel
+//     instead, so those four now take path 1. Path 2 remains the only route for
+//     the dns collector (no ppid/parent_comm in struct dns_event at all — see
+//     plan.md 5.9.3d), for synthetic test events, for older BPF programs, and
+//     as the backstop whenever the kernel read comes back empty.
 //
 // The previous implementation skipped path 2 entirely with a comment claiming
 // "real BPF events always carry PPID" — that claim was provably false against

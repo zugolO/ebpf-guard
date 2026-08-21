@@ -704,7 +704,16 @@ run_induced_drop() {
         kill "$burst_pid" 2>/dev/null || true
         wait "$burst_pid" 2>/dev/null || true
 
-        [ "$degraded_seen" -eq 1 ] && break
+        if [ "$degraded_seen" -eq 1 ]; then
+            # Пауза перед выходом: WARN «visibility reduced» пишет секундный
+            # тикер агента, а следом идёт get_final_metrics — на №2.9.5 строка
+            # легла в ту же секунду, что и финальный снимок, и критерий 3
+            # потерял её на границе окна journalctl. Запас на стороне гейта
+            # (+15с к --until) это чинит, но пусть и порядок событий будет
+            # правильным: строка в журнале раньше снимка, а не вровень с ним.
+            sleep 3
+            break
+        fi
         if [ "$round" -lt 3 ]; then
             warn "раунд $round: перехода не видели — пауза 90с на выход регулятора CPU-давления из min_dwell (180с), затем повтор"
             sleep 90

@@ -313,7 +313,17 @@ if [ -f "$final_health" ]; then
         c3_final_ts=$(jq -r '.timestamp // empty' "$final_state" 2>/dev/null)
         if [ -n "$c3_baseline_ts" ] && [ -n "$c3_final_ts" ]; then
             c3_since=$(date -d "$c3_baseline_ts" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
-            c3_until=$(date -d "$c3_final_ts" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
+            # +15с запаса на конце окна. Наведённый дроп (5.9.5b) стоит
+            # последним шагом перед финальным снимком, а WARN о переходе пишет
+            # секундный тикер — то есть строка всегда ложится на границу окна.
+            # На №2.9.5 она легла в ту же секунду, что и снимок, и на 260 мс
+            # РАНЬШЕ него (журнал 09:28:41.024, снимок 09:28:41.284), но
+            # `--until` у journalctl режет по целой секунде и эту секунду
+            # исключает: критерий напечатал "переходов 0" и провалил прогон,
+            # имея доказательство перехода в собственном журнале. Запас берётся
+            # только на конце и только вперёд — событий после финального снимка
+            # ничего, кроме этого же наведённого дропа, породить не может.
+            c3_until=$(date -d "$c3_final_ts + 15 seconds" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
             if [ -n "$c3_since" ] && [ -n "$c3_until" ]; then
                 degraded_journal=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" \
                     --since "$c3_since" --until "$c3_until" 2>/dev/null)
@@ -329,10 +339,25 @@ if [ -f "$final_health" ]; then
     if awk -v d="$any_dropped_total" 'BEGIN{exit !(d>0)}'; then
         if [ "$degraded_journal_checked" -eq 1 ]; then
             echo "  переходов в degraded за окно прогона (журнал $c3_since .. $c3_until): $degraded_transitions"
+            # Маркер наведённого дропа — второй, независимый источник того же
+            # факта: run_induced_drop опрашивает /health во время всплеска и
+            # пишет degraded_seen=1 только при реально увиденном status=
+            # degraded. Постановка 5.9.5b требует НАБЛЮДАВШЕГОСЯ перехода, а
+            # опрос /health — это и есть наблюдение; журнальная строка лишь
+            # его лог. Читается, когда журнал перехода не показал: иначе
+            # прогон валится из-за границы окна при исправном механизме.
+            c3_induced_executed=0
+            c3_induced_degraded=0
+            if [ -f "$induced_drop_marker" ]; then
+                c3_induced_executed=$(awk -F= '$1=="executed"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
+                c3_induced_degraded=$(awk -F= '$1=="degraded_seen"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
+            fi
             if [ "$degraded_transitions" -gt 0 ]; then
                 pass "потери есть ($any_dropped_total) и в журнале зафиксирован переход в degraded ($degraded_transitions раз, 5.9.4d)"
+            elif [ "${c3_induced_executed:-0}" -eq 1 ] && [ "${c3_induced_degraded:-0}" -eq 1 ]; then
+                pass "потери есть ($any_dropped_total); журнал перехода за окно не показал, но наведённый дроп (5.9.5b) наблюдал status=degraded опросом /health — механизм проверен управляемым входом"
             else
-                fail "потери есть ($any_dropped_total), но в журнале нет ни одного перехода в degraded за окно прогона (5.9.4d); финальный флаг для справки: visibility_reduced=$visibility_reduced status=$status"
+                fail "потери есть ($any_dropped_total), но перехода в degraded не видели ни в журнале за окно прогона, ни опросом /health во время наведённого дропа (5.9.4d/5.9.5b); наведённый дроп: исполнен=${c3_induced_executed:-0}, degraded=${c3_induced_degraded:-0}; финальный флаг для справки: visibility_reduced=$visibility_reduced status=$status"
             fi
         else
             # Журнал недоступен (не root / нет journalctl / нет .timestamp) —

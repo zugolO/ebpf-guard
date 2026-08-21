@@ -145,6 +145,29 @@ log "сервис:     $SERVICE"
     echo "=== docker ps ==="; docker ps 2>/dev/null
 } > "$OUT/environment.txt" 2>&1
 
+# 5.9.5f (находка №68): systemctl show на каждом срезе форкает systemctl(1), который
+# говорит с PID 1 по dbus — это процесс ВНЕ дерева харнесса, наблюдательный фильтр
+# observer_exclude его не ловит по построению (см. комментарий у observer_exclude в
+# config-test.yaml). PID снимается ОДИН раз при старте окна; внутри окна рестартов нет
+# (NO_RESTART=1, инвариант 5.9.1c), поэтому живость на каждом срезе проверяется без
+# форка — тестом на каталог /proc/<pid>, а не повторным systemctl show.
+SERVICE_PID="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)"
+if [[ -z "$SERVICE_PID" || "$SERVICE_PID" == "0" ]]; then
+    log "ВНИМАНИЕ: не удалось определить MainPID сервиса $SERVICE при старте окна — rss/cpu будут 0 весь прогон."
+    SERVICE_PID=""
+fi
+
+# 5.9.5f, вторая половина (замер №2.9.5): весь форкающий пролог окна —
+# сбор environment.txt (`systemctl list-timers`, `docker ps`, `crontab -l`) и
+# снятие MainPID выше — обязан отработать ДО стартового среза, и его следу
+# нужно дать осесть. На №2.9.5 перенос systemctl show из цикла срезов убрал
+# наведение с 26 алертов из 48 до 4 из 18, но эти 4 остались: все четыре с
+# меткой первого среза (08:19:35, pid=1 systemd и containerd) — то есть
+# наведены не циклом, а прологом, чьи алерты не успели попасть в alerts-start
+# и потому засчитались приростом окна. Пауза ставит их по правильную сторону
+# границы: они попадают в базовый снимок, а не в дельту.
+sleep 5
+
 # --- стартовый срез (1 curl вместо 3) ---
 # 5.9.1b (находка №35): граница измерительного окна для критерия
 # incident_confirmed_attack ниже по файлу — снята здесь, а не в SUMMARY,
@@ -234,18 +257,6 @@ snapshot() {
 }
 
 printf 'timestamp\tn\trss_kb\tcpu_pct\tloadavg\tmem_avail_kb\n' > "$OUT/timeseries-raw.tsv"
-
-# 5.9.5f (находка №68): systemctl show на каждом срезе форкает systemctl(1), который
-# говорит с PID 1 по dbus — это процесс ВНЕ дерева харнесса, наблюдательный фильтр
-# observer_exclude его не ловит по построению (см. комментарий у observer_exclude в
-# config-test.yaml). PID снимается ОДИН раз при старте окна; внутри окна рестартов нет
-# (NO_RESTART=1, инвариант 5.9.1c), поэтому живость на каждом срезе проверяется без
-# форка — тестом на каталог /proc/<pid>, а не повторным systemctl show.
-SERVICE_PID="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)"
-if [[ -z "$SERVICE_PID" || "$SERVICE_PID" == "0" ]]; then
-    log "ВНИМАНИЕ: не удалось определить MainPID сервиса $SERVICE при старте окна — rss/cpu будут 0 весь прогон."
-    SERVICE_PID=""
-fi
 
 END=$(( $(date +%s) + DURATION ))
 n=0

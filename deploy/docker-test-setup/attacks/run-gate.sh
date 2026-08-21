@@ -362,11 +362,26 @@ if [ -f "$final_health" ]; then
             # строкой отчёта, а не молчанием под маской PASS.
             induced_executed=0
             induced_degraded=0
+            induced_rounds="n/a"
+            induced_pressure_before="n/a"
+            induced_pressure_after="n/a"
             if [ -f "$induced_drop_marker" ]; then
                 induced_executed=$(awk -F= '$1=="executed"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
                 induced_degraded=$(awk -F= '$1=="degraded_seen"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
+                induced_rounds=$(awk -F= '$1=="rounds"{print $2}' "$induced_drop_marker" 2>/dev/null)
+                induced_pressure_before=$(awk -F= '$1=="cpu_pressure_level_before"{print $2}' "$induced_drop_marker" 2>/dev/null)
+                induced_pressure_after=$(awk -F= '$1=="cpu_pressure_level_after"{print $2}' "$induced_drop_marker" 2>/dev/null)
             fi
-            echo "  наведённый дроп (5.9.5b): исполнен=${induced_executed:-0}, degraded зафиксирован во время всплеска=${induced_degraded:-0}"
+            echo "  наведённый дроп (5.9.5b): исполнен=${induced_executed:-0}, degraded зафиксирован во время всплеска=${induced_degraded:-0}, раундов=${induced_rounds:-n/a}"
+            # cpu_pressure_level (0=норма, 1=file_sampling_reduced,
+            # 2=all_noisy_sampling_reduced) отвечает на вопрос, почему всплеск
+            # мог не дать дропа: пока регулятор держит пониженную выборку
+            # файловых событий (min_dwell 180с после срабатывания), уронить
+            # bulk-очередь нечем по построению — и это работающий регулятор, а
+            # не непроверенный фильтр. Замерено на стенде 2026-08-21: после
+            # часа нагрузки level=1, и всплеск перестал давать прирост
+            # events_dropped_total вовсе.
+            echo "  cpu_pressure_level до/после всплеска: ${induced_pressure_before:-n/a}/${induced_pressure_after:-n/a} (1 или 2 = выборка снижена регулятором, дроп навести нельзя)"
             skip "механизм не проверен — потерь за прогон нет (5.9.5b); /health status=$status"
         fi
     fi
@@ -941,11 +956,19 @@ else
             fired_count=$((fired_count + 1))
             chain_empty=0
             chain_total=0
-            if [ -f "$final_alerts" ] && command -v jq &> /dev/null; then
-                chain_total=$(jq --arg r "$rid" '[.[] | select(.rule_id == $r)] | length' "$final_alerts" 2>/dev/null || echo 0)
-                chain_empty=$(jq --arg r "$rid" '[.[] | select(.rule_id == $r and ((.process_chain // []) | length == 0))] | length' "$final_alerts" 2>/dev/null || echo 0)
+            # Цепочка читается из ИНЦИДЕНТОВ, а не из /api/v1/alerts: алерт в
+            # выдаче API несёт только id/timestamp/rule_id/severity/pid/comm/
+            # message/enrichment/first_seen/last_seen — поля process_chain у
+            # него нет вовсе (проверено на стенде 2026-08-21). jq по
+            # .process_chain на alerts-снимке молча даёт пусто у ВСЕХ алертов,
+            # то есть критерий 13 печатал бы "пуст у N/N" при исправной
+            # линейке — ровно тот класс лжи, из-за которого заведена волна.
+            # Тот же источник, что у п.13 отчёта run-2.9.5-report.sh.
+            if [ -f "$final_incidents" ] && command -v jq &> /dev/null; then
+                chain_total=$(jq --arg r "$rid" '[.[] | select(((.rule_ids // [.rule_id]) | map(select(. != null))) | index($r))] | length' "$final_incidents" 2>/dev/null || echo 0)
+                chain_empty=$(jq --arg r "$rid" '[.[] | select(((.rule_ids // [.rule_id]) | map(select(. != null))) | index($r)) | select(((.process_chain // []) | length) == 0)] | length' "$final_incidents" 2>/dev/null || echo 0)
             fi
-            echo "  $rid: сработало (позитивный контроль подтверждён); process_chain пуст у ${chain_empty:-0}/${chain_total:-0} сработавших алертов (крит. 13 постановки, живой вход впервые — 5.9.4i)"
+            echo "  $rid: сработало (позитивный контроль подтверждён); process_chain пуст у ${chain_empty:-0}/${chain_total:-0} инцидентов с этим правилом (крит. 13 постановки, живой вход впервые — 5.9.4i)"
         elif [ -f "$dns_silent_registry" ] && awk -v id="$rid" '!/^[[:space:]]*(#|$)/ && $1 == id {found=1} END{exit !found}' "$dns_silent_registry"; then
             reason_cat=$(awk -v id="$rid" '!/^[[:space:]]*(#|$)/ && $1 == id {print $2; exit}' "$dns_silent_registry")
             echo "  $rid: молчит, но причина установлена (категория $reason_cat, silent-rules.txt)"

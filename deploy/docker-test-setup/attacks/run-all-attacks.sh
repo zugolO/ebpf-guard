@@ -622,7 +622,7 @@ PYEOF
 # 5.9.5b (находка №62, P1) — наведённый дроп, управляемый вход для критерия 3.
 # Дожидаться, пока стенд сам уронит события, — ждать случая: 222 дропа на
 # №2.9.3, 0 на №2.9.4. Всплеск файловых операций внутри дерева харнесса (а не
-# `find /usr` от отдельного, вне-дерева процесса — то дало бы алерты вне
+# от отдельного, вне-дерева процесса — то дало бы алерты вне
 # observer_exclude, находка №68) должен перегрузить bulk-очередь настолько,
 # чтобы приоритетная очередь начала дропать и /health показал status=degraded
 # — переход опрашивается, пока всплеск идёт, потому что критерию нужен
@@ -638,42 +638,95 @@ run_induced_drop() {
     local marker="$RESULTS_DIR/induced-drop-$TIMESTAMP.txt"
     local executed=0
     local degraded_seen=0
+    local rounds_done=0
 
-    log "старт всплеска: find /usr -type f | head -200000 (в дереве харнесса, наблюдательный root не меняется)"
-    ( find /usr -type f 2>/dev/null | head -200000 >/dev/null ) &
-    local burst_pid=$!
-    if kill -0 "$burst_pid" 2>/dev/null; then
-        executed=1
-    fi
+    # Уровень CPU-шединга (ebpf_guard_cpu_pressure_level: 0=норма,
+    # 1=file_sampling_reduced, 2=all_noisy_sampling_reduced). Пишется в маркер
+    # обоими концами окна: пока регулятор держит пониженную выборку файловых
+    # событий, всплеск физически не может уронить bulk-очередь, и «перехода не
+    # видели» означает работающий регулятор, а не сломанный дроп. Без этой
+    # величины критерий 3 не отличил бы одно от другого — это ровно тот класс
+    # немого SKIP, из-за которого заведена находка №62.
+    pressure_level() {
+        curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
+            | awk '/^ebpf_guard_cpu_pressure_level /{print $2; found=1} END{if(!found) print "n/a"}' || echo "n/a"
+    }
+    local pressure_before pressure_after
+    pressure_before=$(pressure_level)
+    log "cpu_pressure_level до всплеска: $pressure_before (0=норма; при 1/2 файловая выборка снижена, дроп навести нельзя)"
 
-    local i=0
-    while kill -0 "$burst_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
-        # `|| true` на обеих ветках: под `set -e` и неудачный curl (агент
-        # занят/недоступен под всплеском — а это ровно ожидаемое состояние),
-        # и падение jq на неполном JSON обрывали бы прогон прямо в момент
-        # наведённого дропа.
-        st=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" 2>/dev/null \
-            | jq -r '.status // empty' 2>/dev/null || true)
-        if [ "$st" = "degraded" ]; then
-            degraded_seen=1
-            log "  /health status=degraded во время всплеска (опрос №$i)"
+    # До трёх раундов с паузой: регулятор CPU-давления держит пониженную
+    # выборку min_dwell = 180с после срабатывания (internal/watchdog/cpu.go), а
+    # окно атак прямо перед этим шагом само поднимает нагрузку. Один раунд,
+    # попавший в дежурство регулятора, — это гарантированный SKIP критерия 3
+    # (третий замер подряд); пауза между раундами даёт регулятору выйти в
+    # recovery и делает вход управляемым, как того требует постановка 5.9.5b.
+    local round
+    for round in 1 2 3; do
+        rounds_done=$round
+        # `tar -cf - /usr | cat` открывает И читает каждый файл дерева, поэтому
+        # даёт прирост fileaccess/ringbuf_to_router с первой же секунды
+        # (замерено на стенде 2026-08-21: +813 дропов за 1с, /health
+        # status=degraded, degraded_queues=["bulk"]). Важно, что архив идёт в
+        # ПОТОК: GNU tar, увидев архивом /dev/null, содержимое файлов не читает
+        # вовсе — вариант `tar -cf /dev/null` проверен здесь же и перехода не
+        # дал, как и прежний `find /usr -type f` (find делает getdents/statx, а
+        # коллектор смотрит open/read/write — ноль дропов за 6с, /health
+        # healthy все опросы; это и была причина SKIP на №2.9.3/№2.9.4).
+        log "раунд $round/3: всплеск tar -cf - /usr | cat (в дереве харнесса, наблюдательный root не меняется)"
+        ( tar -cf - /usr 2>/dev/null | cat >/dev/null 2>&1 ) &
+        local burst_pid=$!
+        if kill -0 "$burst_pid" 2>/dev/null; then
+            executed=1
         fi
-        sleep 1
-        i=$(( i + 1 ))
+
+        # Опрос идёт и ПОСЛЕ конца всплеска (до 20 срезов всего): состояние
+        # degraded держится degradationThreshold = 5с после последнего дропа
+        # (cmd/ebpf-guard/main.go), а обход прогретого кэша укладывается в
+        # 1-3с — цикл, выходящий вместе с всплеском, пропустил бы переход,
+        # который к этому моменту уже наступил.
+        local i=0
+        while { kill -0 "$burst_pid" 2>/dev/null || [ "$i" -lt 10 ]; } && [ "$i" -lt 20 ]; do
+            # `|| true` на обеих ветках: под `set -e` и неудачный curl (агент
+            # занят/недоступен под всплеском — а это ровно ожидаемое
+            # состояние), и падение jq на неполном JSON обрывали бы прогон
+            # прямо в момент наведённого дропа.
+            st=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" 2>/dev/null \
+                | jq -r '.status // empty' 2>/dev/null || true)
+            if [ "$st" = "degraded" ]; then
+                degraded_seen=1
+                log "  /health status=degraded во время всплеска (раунд $round, опрос №$i)"
+                break
+            fi
+            sleep 1
+            i=$(( i + 1 ))
+        done
+        kill "$burst_pid" 2>/dev/null || true
+        wait "$burst_pid" 2>/dev/null || true
+
+        [ "$degraded_seen" -eq 1 ] && break
+        if [ "$round" -lt 3 ]; then
+            warn "раунд $round: перехода не видели — пауза 90с на выход регулятора CPU-давления из min_dwell (180с), затем повтор"
+            sleep 90
+        fi
     done
-    wait "$burst_pid" 2>/dev/null || true
+
+    pressure_after=$(pressure_level)
 
     {
         echo "executed=$executed"
         echo "degraded_seen=$degraded_seen"
+        echo "rounds=$rounds_done"
+        echo "cpu_pressure_level_before=$pressure_before"
+        echo "cpu_pressure_level_after=$pressure_after"
     } > "$marker"
 
     if [ "$degraded_seen" -eq 1 ]; then
-        log "PASS (наблюдение): переход в degraded зафиксирован во время наведённого дропа — критерий 3 получит вход"
+        log "PASS (наблюдение): переход в degraded зафиксирован во время наведённого дропа (раунд $rounds_done) — критерий 3 получит вход"
     elif [ "$executed" -eq 1 ]; then
-        warn "всплеск исполнен, но status=degraded за время опроса не замечен — критерий 3 останется без входа в этом прогоне"
+        warn "всплеск исполнен в $rounds_done раунда(х), но status=degraded не замечен — cpu_pressure_level до/после: $pressure_before/$pressure_after (при 1/2 файловая выборка снижена регулятором, и дроп навести нельзя по построению)"
     else
-        warn "наведённый дроп не запустился (find/head недоступны?) — критерий 3 останется без входа"
+        warn "наведённый дроп не запустился (tar/cat недоступны?) — критерий 3 останется без входа"
     fi
     echo ""
 }

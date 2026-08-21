@@ -871,6 +871,15 @@ var knownAttackerComms = map[string]bool{
 	"insmod":  true, // run_kmod_attack
 	"python3": true, // run_setuid_attack
 	"dig":     true, // run_dns_long_label_attack (5.9.5c, findings №64/№65)
+	// The DNS event's comm is NOT "dig": it comes from bpf_get_current_comm in
+	// the sendmsg/sendto context, i.e. the name of the calling THREAD, and
+	// modern dig (bind9 9.18+, libuv) sends from "isc-net-0000". Verified on
+	// the stand 2026-08-21: the four long-label rules fired with comm=
+	// isc-net-0000. Listing only "dig" would leave this step's real comm
+	// unprotected — a future `comm not_in [isc-net-0000]` exclusion would
+	// blind the 5.9.5c positive control and this check would stay green,
+	// which is finding №56 all over again.
+	"isc-net-0000": true, // run_dns_long_label_attack, actual event comm
 }
 
 func TestExclusionsCollidingWithAttackerComms(t *testing.T) {

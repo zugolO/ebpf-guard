@@ -124,65 +124,130 @@
 # оказались ложноположительными, убитыми волной 5.9.3b/c по назначению, и
 # перенесены в intentional-loss.txt с построчной причиной (5.9.4f, №57) —
 # сама база здесь не тронута, эти строки только гасят критерий 6.
+#
+# Обновление 5.9.6f (замер №2.9.5, gate-2.9.5.txt, находка №75). Прошлое
+# обновление (5.9.4e/f) прямо сказало «состав не менялся» — с тех пор база
+# устарела на два замера (№2.9.4, №2.9.5): 63 типа в файле против 69 живых в
+# прогоне №2.9.5, критерий 6 печатал «добавлено (+18)» дважды подряд, а
+# строка-обновление игнорировалась. Список ниже взят из gate-2.9.5.txt тем же
+# способом, что и переход 37→63 в 5.9.3b — «как есть», по факту
+# ebpf_guard_alerts_total{rule_id=...} > 0 на конец прогона
+# (final-metrics-20260821_091936.txt), а не пересчитан вручную.
+#
+# Добавлено (+18, все — attack-фаза, gate-2.9.5.txt строки "добавлено"):
+# container_escape_cap_sys_admin, drift_dangerous_syscall,
+# ebpf_subversion_detach_nonroot, ebpf_subversion_unauthorized_caller,
+# mitre_software_enum_dpkg, owasp_backup_config_access, owasp_path_traversal,
+# rootkit_delete_module_syscall, rootkit_init_module_syscall,
+# rootkit_large_hidden_file, rootkit_pam_module_added (возвращается — было
+# удалено как отдельная строка в 5.5b, базовое имя снова сработало вне
+# кластера [sshd, cron]), rootkit_ssh_authorized_keys_modified,
+# sigma_failed_login_syscall (тот же случай, что rootkit_pam_module_added),
+# sigma_lolbin_env_execution, sigma_sensitive_dir_listing,
+# sigma_tool_download_to_tmp, supply_chain_pkg_tmp_staging,
+# web_path_traversal_extended.
+#
+# Убрано (-12, не сработали в прогоне №2.9.5, из них 11 напечатаны гейтом как
+# «потеряно намеренно», см. intentional-loss.txt — построчная причина уже там,
+# здесь не дублируется): container_escape_chroot, exfil_large_http_post,
+# initial_driveby_browser_download_exec, initial_email_link_download_exec,
+# initial_office_macro_exec, netintr_http_on_non_web_port,
+# netintr_long_dns_session, netintr_loopback_high_port, owasp_web_shell_spawn,
+# sigma_web_server_shell_spawn, web_sql_injection_command. Двенадцатый,
+# sigma_passwd_shadow_read, гейт НЕ печатает как потерю (сработало под атакой
+# ниже store.min_severity, живёт в alerts_filtered_total — см. run-gate.sh,
+# ветка «детект жив, не потеря», урок 5.9.1e) — тем не менее в
+# ebpf_guard_alerts_total его нет, а эта база сравнивается именно с этой
+# метрикой, поэтому строка временно выходит из списка. Правило живо, не
+# регресс; если понадобится обратно в состав — вернуть той же записью, что
+# rootkit_pam_module_added выше, а не тихим возвратом.
+#
+# Ни один из двенадцати не удалён НАВСЕГДА в смысле «правило сломано» — все
+# остаются валидными rule_id (тот же принцип, что у сети 5.9g выше) и
+# появятся здесь снова строкой «добавлено», как только сценарий их зацепит.
+# Обновлять этот файл только вместе с записью в plan.md (5.9.6f) — иначе
+# следующее расхождение снова пройдёт молча, ради чего и заведено
+# предупреждение критерия 6 после двух одинаковых замеров подряд
+# (detection-baseline-diff-state.txt, run-gate.sh).
+#
+# ОТКРЫТЫЙ ВОПРОС (не устранён этой правкой, см. plan.md 5.9.6e/f): три из
+# оставшихся в базе типов — sigma_cpu_info_access, sigma_kernel_version_read,
+# sigma_memory_proc_dump — а также web_sql_injection_files числятся в
+# silent-rules.txt категорией «b» («немо из-за среды», волна 5.9.4h, до сих
+# пор не тронуто этой правкой). final-metrics-20260821_091936.txt показывает
+# их с ненулевыми счётчиками (5, 6, 5 и 4 соответственно) на конец прогона
+# №2.9.5, при этом gate-2.9.5.txt печатает «немых правил за весь аптайм: 0».
+# То есть эти четыре правила больше не немые, но run-all-attacks.sh (текущий
+# diff) не добавляет reconnaissance-сценарий, который бы их объяснил — причина
+# срабатывания не установлена (фоновая активность стенда? сам агент?),
+# silent-rules.txt не обновлён. Задача 5.9.6f по постановке касалась только
+# detection-baseline.txt/крит. 6 — этот отдельный реестр (5.9.4h) остаётся
+# устаревшим и требует отдельного разбора, не входящего в эту правку.
 
 anomaly_detection
 beacon_fixed_interval
 c2_ingress_piped_to_shell
 cis_5_2_5_privilege_escalation
-container_escape_chroot
+container_escape_cap_sys_admin
 container_escape_host_mount
 container_escape_init_proc
 container_escape_module_access
 cred_proc_maps_mass_read
 dns_tunneling_long_domain
+drift_dangerous_syscall
 drift_new_exec_critical
 drift_new_file_dir_sensitive
 drift_new_library_in_system_dir
+ebpf_subversion_detach_nonroot
+ebpf_subversion_unauthorized_caller
 evasion_chmod_sensitive
 evasion_hidden_elf_in_tmp
 exfil_archive_to_network_pipe
 exfil_dns_txt_long_label
-exfil_large_http_post
 exfil_repeated_outbound_to_same_ip
 incident_confirmed_attack
-initial_driveby_browser_download_exec
-initial_email_link_download_exec
-initial_office_macro_exec
 initial_package_postinstall_network
 integrity_kernel_module_from_user_path
 lateral_tool_transfer_wget
 mitre_sandbox_detect_proc_read
+mitre_software_enum_dpkg
 net_high_frequency_connections
 net_portscan_indicator
 netintr_dns_long_label
-netintr_http_on_non_web_port
 netintr_large_upload_port
-netintr_long_dns_session
-netintr_loopback_high_port
 netintr_syn_scan_pattern
+owasp_backup_config_access
 owasp_log_tampering
+owasp_path_traversal
 owasp_reverse_shell_pattern
-owasp_web_shell_spawn
 privesc_suid_suspicious_path
 rootkit_bpf_map_create_suspicious
 rootkit_bpf_prog_load_suspicious
+rootkit_delete_module_syscall
 rootkit_hidden_dir_dev
+rootkit_init_module_syscall
 rootkit_kmod_from_tmp
+rootkit_large_hidden_file
+rootkit_pam_module_added
+rootkit_ssh_authorized_keys_modified
 sensitive_file_read
 sigma_binary_in_tmp_executed
 sigma_chmod_executable_tmp
 sigma_cpu_info_access
+sigma_failed_login_syscall
 sigma_kernel_version_read
 sigma_log_deletion
+sigma_lolbin_env_execution
 sigma_memory_proc_dump
-sigma_passwd_shadow_read
 sigma_reverse_shell_named_pipe
+sigma_sensitive_dir_listing
 sigma_sensitive_file_chmod
 sigma_setuid_syscall
 sigma_shell_from_unexpected_parent
-sigma_web_server_shell_spawn
+sigma_tool_download_to_tmp
+supply_chain_pkg_tmp_staging
 web_internal_recon
-web_sql_injection_command
+web_path_traversal_extended
 web_sql_injection_files
 webshell_crontab_modification
 webshell_dns_exfil_long_subdomain

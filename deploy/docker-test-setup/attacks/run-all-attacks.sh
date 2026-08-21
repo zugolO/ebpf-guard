@@ -177,6 +177,182 @@ get_baseline_metrics() {
     echo ""
 }
 
+# sum_metric PATTERN — sums the value field of every line of a Prometheus
+# text exposition (read from stdin) whose label set matches the ERE PATTERN.
+# Same idiom as run-gate.sh's sum_metric_delta, but operating on one snapshot
+# already held in a shell variable rather than two files on disk — 5.9.6c/
+# 5.9.6d need before/after deltas within a single function call, not across
+# the whole run's baseline/final files.
+sum_metric() {
+    local pattern="$1"
+    awk -F'} ' -v p="$pattern" '$0 ~ p {s+=$2} END{printf "%.0f", s+0}'
+}
+
+# emit_counting_canary N PATH — opens PATH for read exactly N times, back to
+# back, from a single python3 process. One process (not N bash forks/curl
+# calls) so wall-clock cost is dominated by the syscalls under test, not by
+# shell fork overhead — at N=300000 the fork cost alone would swamp the
+# window and make the "under drop" pass indistinguishable from ordinary
+# fork-storm noise. Re-opening ONE file N times (rather than N unique paths)
+# is deliberate: fileaccess.bpf.c emits one event per openat() regardless of
+# path uniqueness (bpf/fileaccess.bpf.c trace_open), and creating N real
+# inodes would make the idle-pass's own I/O the dominant cost instead of the
+# syscall path 5.9.6c is meant to isolate.
+#
+# Возвращает 1 вместо падения, если создать канарейку или прогнать генератор
+# не удалось. Скрипт под `set -e`, а этот шаг стоит ПЕРВЫМ в full_run — до
+# всех атак и до финальных снимков: необработанная ошибка здесь унесла бы
+# весь прогон целиком, ровно как нелегальный DNS-лейбл 5.9.5c уносил его до
+# kill-сценария (P0 ревизии волны 5.9.5). Контроль счётности не наступил —
+# это SKIP одного критерия, а не потеря замера.
+emit_counting_canary() {
+    local n="$1" path="$2"
+    : > "$path" || return 1
+    python3 - "$n" "$path" <<'PYEOF' || return 1
+import os, sys
+n = int(sys.argv[1])
+path = sys.argv[2]
+for _ in range(n):
+    fd = os.open(path, os.O_RDONLY)
+    os.close(fd)
+PYEOF
+}
+
+# 5.9.6c (P0, "ни один вызов не теряется"): positive control on counting.
+# 5.9.6b's balance proves the counters agree with EACH OTHER; it says nothing
+# about whether the kernel saw the call in the first place (a tracepoint that
+# silently didn't fire would still balance — nothing was ever emitted to
+# balance against). This generates a KNOWN N and checks it against an
+# INDEPENDENT input: Δevents_total{type="file"} + Δevents_dropped_total{
+# collector="fileaccess"} (all reasons — a call counted as any kind of drop
+# is not "lost", it is accounted for) must equal N.
+#
+# Deliberately NOT run concurrently with run_induced_drop's tar burst: tar
+# opens AND reads every file in its list, so its own activity would inflate
+# both sides of the equation by an unknown amount, and the check would no
+# longer be against a KNOWN N. mode=drop instead reuses this same generator
+# at a size intended to overflow the ring buffer on its own (no tar
+# involved) — self-contained, so the only fileaccess-collector traffic
+# during its window is the canary itself, and Δevents+Δdrops staying == N
+# while ringbuf_full > 0 is exactly "counted correctly even while losing
+# heavily", which is the property 5.9.6c exists to prove.
+run_counting_control() {
+    local mode="$1" n="$2"
+    local marker="$RESULTS_DIR/counting-control-${mode}-$TIMESTAMP.txt"
+    local canary_path="/tmp/ebpf-guard-counting-canary-$TIMESTAMP-$mode"
+
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ СЧЁТНОСТИ (5.9.6c, mode=$mode, N=$n)"
+    log "==========================================="
+
+    if ! command -v python3 &> /dev/null; then
+        warn "python3 не найден — контроль счётности ($mode) пропущен, критерий 5.9.6c без входа для этого режима"
+        echo "skipped=1" > "$marker"
+        echo ""
+        return
+    fi
+
+    # ФОН. Δevents_total{type="file"} — счётчик ВСЕГО файлового коллектора,
+    # по всем процессам и всем путям; уникальность пути-канарейки на него не
+    # влияет никак (у метрики нет лейбла пути). Поэтому в сумму «до/после»
+    # неизбежно попадает всё, что открывали в это же окно посторонние
+    # процессы стенда (prometheus, grafana, docker, containerd), а окно
+    # длится не мгновение: генератор плюс опрос-устаканивание — секунды.
+    # Мерим фон ДО генератора на фиксированном окне и печатаем оценку
+    # числом: гейт учтёт её как ЗАЯВЛЕННУЮ ЗАРАНЕЕ поправку, а не как
+    # расширение допуска задним числом под полученную цифру (п.4 порядка
+    # работы). Если фон окажется велик относительно N, это тоже результат —
+    # он будет виден в маркере, а не спрятан в невязке.
+    local bg_window="${COUNTING_CONTROL_BG_WINDOW:-3}"
+    local bg_a bg_b bg_rate
+    bg_a=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
+        | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+    sleep "$bg_window"
+    bg_b=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
+        | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+    bg_rate=$(awk -v a="${bg_a:-0}" -v b="${bg_b:-0}" -v w="$bg_window" 'BEGIN{r=(b-a)/w; if(r<0) r=0; printf "%.2f", r}')
+    log "фон файловых событий до генератора: $(awk -v a="${bg_a:-0}" -v b="${bg_b:-0}" 'BEGIN{printf "%d", b-a}') за ${bg_window}с = ${bg_rate}/с"
+
+    local before events_before drops_before ringbuf_full_before
+    before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+    drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+    ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
+    local window_start
+    window_start=$(date +%s)
+
+    log "генератор: $n открытий $canary_path"
+    local t0 t1
+    t0=$(date +%s)
+    if ! emit_counting_canary "$n" "$canary_path"; then
+        warn "генератор канарейки ($mode) не отработал — контроль счётности пропущен, критерий 5.9.6c без входа для этого режима"
+        echo "skipped=1" > "$marker"
+        rm -f "$canary_path"
+        echo ""
+        return 0
+    fi
+    t1=$(date +%s)
+    log "генератор закончил за $((t1 - t0))с"
+
+    # Устояться перед снимком "после": конвейер (ringbuf → router → bulk
+    # queue → correlator) асинхронный, и снятие "после" сразу за концом
+    # генератора недосчитало бы события, ещё лежащие в очереди — то же
+    # искажение границы, которое 5.9.4c нашла между baseline и attack-окном.
+    # Опрашиваем, пока events+drops не перестанут расти два среза подряд,
+    # до 30с.
+    local prev_sum=-1 cur_sum after i=0 ev dr
+    for i in $(seq 1 30); do
+        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+        ev=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+        dr=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+        cur_sum=$(( ${ev:-0} + ${dr:-0} ))
+        if [ "$cur_sum" -eq "$prev_sum" ]; then
+            break
+        fi
+        prev_sum=$cur_sum
+        sleep 1
+    done
+
+    local events_after drops_after ringbuf_full_after
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+    drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+    ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
+
+    local events_delta drops_delta ringbuf_full_delta sum diff window_seconds background_estimate
+    events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
+    drops_delta=$(( ${drops_after:-0} - ${drops_before:-0} ))
+    ringbuf_full_delta=$(( ${ringbuf_full_after:-0} - ${ringbuf_full_before:-0} ))
+    sum=$(( events_delta + drops_delta ))
+    diff=$(( sum - n ))
+    # Длина окна «до»→«после» целиком, включая устаканивание: именно столько
+    # времени фон подмешивался в обе метрики.
+    window_seconds=$(( $(date +%s) - window_start ))
+    background_estimate=$(awk -v r="$bg_rate" -v w="$window_seconds" 'BEGIN{printf "%.0f", r*w}')
+
+    {
+        echo "mode=$mode"
+        echo "n=$n"
+        echo "events_delta=$events_delta"
+        echo "drops_delta=$drops_delta"
+        echo "ringbuf_full_delta=$ringbuf_full_delta"
+        echo "sum=$sum"
+        echo "diff=$diff"
+        echo "quiesced_iterations=$i"
+        echo "generator_seconds=$((t1 - t0))"
+        echo "background_rate_per_sec=$bg_rate"
+        echo "background_window_seconds=$bg_window"
+        echo "window_seconds=$window_seconds"
+        echo "background_estimate=$background_estimate"
+    } > "$marker"
+
+    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess,все причины)=$drops_delta Δringbuf_full(fileaccess)=$ringbuf_full_delta сумма=$sum разница_с_N=$diff (устоялось за ${i} срезов, окно ${window_seconds}с, оценка фона $background_estimate)"
+    if [ "$mode" = "drop" ] && [ "${ringbuf_full_delta:-0}" -le 0 ]; then
+        warn "mode=drop: ringbuf_full не вырос — N=$n не переполнил кольцо на этом стенде; критерий 5.9.6c для этого режима останется без второй половины (см. открытые вопросы, COUNTING_CONTROL_DROP_N не откалиброван)"
+    fi
+    rm -f "$canary_path"
+    echo ""
+}
+
 # Запуск SQLMap атак
 run_sqlmap_attacks() {
     log "==========================================="
@@ -640,6 +816,29 @@ run_induced_drop() {
     local degraded_seen=0
     local rounds_done=0
 
+    # 5.9.6d (находка №73, P1): снимок до всплеска, для наведённой потери
+    # ЭТОГО шага по хопам — отдельно от baseline/final всего прогона, которые
+    # печатает раздел 1 run-gate.sh и с которыми это число не обязано
+    # совпадать (baseline снят задолго до этого шага).
+    local metrics_before_drop
+    metrics_before_drop=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+
+    # 5.9.6d: список файлов вместо `tar -cf - /usr` целиком — на №2.9.5
+    # неограниченный `/usr` дал 795 тыс. дропов, из которых для перехода в
+    # degraded хватило первой доли секунды, а остальное сгорело уже после
+    # финального снимка, не измеренным ничем. Список фиксированной длины
+    # сохраняет свойство, ради которого выбран именно tar (один процесс,
+    # массовое чтение, без per-файлового fork — `find | xargs cat` такой
+    # скорости не даёт), но ограничивает объём числом, известным заранее.
+    # Калибровка (сколько файлов реально нужно, чтобы получить переход) не
+    # проверялась на стенде в этой сессии — см. открытые вопросы 5.9.6d.
+    local max_files="${INDUCED_DROP_MAX_FILES:-20000}"
+    local filelist="/tmp/ebpf-guard-induced-drop-filelist-$TIMESTAMP.txt"
+    find /usr -type f 2>/dev/null | head -n "$max_files" > "$filelist"
+    local bounded_files
+    bounded_files=$(wc -l < "$filelist" | tr -d ' ')
+    log "наведённый дроп ограничен списком: $bounded_files файлов (лимит INDUCED_DROP_MAX_FILES=$max_files)"
+
     # Уровень CPU-шединга (ebpf_guard_cpu_pressure_level: 0=норма,
     # 1=file_sampling_reduced, 2=all_noisy_sampling_reduced). Пишется в маркер
     # обоими концами окна: пока регулятор держит пониженную выборку файловых
@@ -673,8 +872,8 @@ run_induced_drop() {
         # дал, как и прежний `find /usr -type f` (find делает getdents/statx, а
         # коллектор смотрит open/read/write — ноль дропов за 6с, /health
         # healthy все опросы; это и была причина SKIP на №2.9.3/№2.9.4).
-        log "раунд $round/3: всплеск tar -cf - /usr | cat (в дереве харнесса, наблюдательный root не меняется)"
-        ( tar -cf - /usr 2>/dev/null | cat >/dev/null 2>&1 ) &
+        log "раунд $round/3: всплеск tar -cf - --files-from=$bounded_files-файлового-списка | cat (в дереве харнесса, наблюдательный root не меняется)"
+        ( tar -cf - --files-from="$filelist" 2>/dev/null | cat >/dev/null 2>&1 ) &
         local burst_pid=$!
         if kill -0 "$burst_pid" 2>/dev/null; then
             executed=1
@@ -722,12 +921,62 @@ run_induced_drop() {
 
     pressure_after=$(pressure_level)
 
+    # 5.9.6d: ждать окончания раунда мало — на №2.9.5 финальный снимок
+    # ушёл в 09:28:41.284, а 795 тыс. дропов той же самой пачки легли
+    # тридцатью секундами позже, вне снимка вообще. Опрашиваем, пока либо
+    # /health не выйдет из degraded ("visibility restored"), либо прирост
+    # events_dropped_total{collector="fileaccess"} не остановится два среза
+    # подряд — до 60с. Идёт всегда, не только при degraded_seen=1: даже
+    # необнаруженный переход мог оставить дропы в полёте.
+    local settle_prev=-1 settle_cur settle_status settle_reason="timeout" settle_i
+    for settle_i in $(seq 1 60); do
+        settle_cur=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
+            | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+        settle_status=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" 2>/dev/null \
+            | jq -r '.status // empty' 2>/dev/null || true)
+        if [ -n "$settle_status" ] && [ "$settle_status" != "degraded" ]; then
+            settle_reason="visibility_restored"
+            break
+        fi
+        if [ "$settle_cur" = "$settle_prev" ]; then
+            settle_reason="growth_flattened"
+            break
+        fi
+        settle_prev="$settle_cur"
+        sleep 1
+    done
+    log "5.9.6d: снимок откладывается до затухания — причина остановки: $settle_reason (за ${settle_i}с)"
+
+    local metrics_after_drop
+    metrics_after_drop=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+    local d_ringbuf_full d_ringbuf_to_router d_router_to_queue d_path_denylist d_total
+    d_ringbuf_full=$(( $(echo "$metrics_after_drop" | sum_metric 'collector="fileaccess".*reason="ringbuf_full"') \
+        - $(echo "$metrics_before_drop" | sum_metric 'collector="fileaccess".*reason="ringbuf_full"') ))
+    d_ringbuf_to_router=$(( $(echo "$metrics_after_drop" | sum_metric 'collector="fileaccess".*reason="ringbuf_to_router"') \
+        - $(echo "$metrics_before_drop" | sum_metric 'collector="fileaccess".*reason="ringbuf_to_router"') ))
+    d_router_to_queue=$(( $(echo "$metrics_after_drop" | sum_metric 'collector="fileaccess".*reason="router_to_queue"') \
+        - $(echo "$metrics_before_drop" | sum_metric 'collector="fileaccess".*reason="router_to_queue"') ))
+    d_path_denylist=$(( $(echo "$metrics_after_drop" | sum_metric 'collector="fileaccess".*reason="path_denylist"') \
+        - $(echo "$metrics_before_drop" | sum_metric 'collector="fileaccess".*reason="path_denylist"') ))
+    d_total=$(( $(echo "$metrics_after_drop" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"') \
+        - $(echo "$metrics_before_drop" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"') ))
+    log "5.9.6d: наведённая потеря этого шага (fileaccess), по хопам — ringbuf_full=$d_ringbuf_full ringbuf_to_router=$d_ringbuf_to_router router_to_queue=$d_router_to_queue path_denylist=$d_path_denylist | всего=$d_total"
+    rm -f "$filelist"
+
     {
         echo "executed=$executed"
         echo "degraded_seen=$degraded_seen"
         echo "rounds=$rounds_done"
         echo "cpu_pressure_level_before=$pressure_before"
         echo "cpu_pressure_level_after=$pressure_after"
+        echo "bounded_files=$bounded_files"
+        echo "settle_reason=$settle_reason"
+        echo "settle_seconds=$settle_i"
+        echo "induced_drop_ringbuf_full=$d_ringbuf_full"
+        echo "induced_drop_ringbuf_to_router=$d_ringbuf_to_router"
+        echo "induced_drop_router_to_queue=$d_router_to_queue"
+        echo "induced_drop_path_denylist=$d_path_denylist"
+        echo "induced_drop_total=$d_total"
     } > "$marker"
 
     if [ "$degraded_seen" -eq 1 ]; then
@@ -1315,6 +1564,8 @@ interactive_mode() {
             1)
                 check_services || continue
                 get_baseline_metrics
+                run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
+                run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
                 run_sqlmap_attacks
                 run_bruteforce_attacks
                 run_ssrf_attacks
@@ -1398,6 +1649,8 @@ full_run() {
 
     check_services || exit 1
     get_baseline_metrics
+    run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
+    run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
     run_sqlmap_attacks
     run_bruteforce_attacks
     run_ssrf_attacks

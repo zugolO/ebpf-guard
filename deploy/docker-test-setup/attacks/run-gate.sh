@@ -79,10 +79,31 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-pass() { echo -e "${GREEN}[PASS]${NC} $1"; }
+# 5.9.6i (№68 хвост + №77): PASS отсутствием ("событие не наступило") и PASS
+# доказательством раньше печатались одинаково — единственным различием было
+# читать журнал глазами. PASS_COUNT/SKIP_COUNT считаются здесь, а не
+# постфактум grep'ом по выводу, потому что вывод раскрашен ANSI-кодами и
+# идёт вперемешку с диагностическими echo — печатаются итоговой строкой
+# рядом с PASS/FAIL, чтобы число SKIP было видно без пересчёта вручную.
+PASS_COUNT=0
+SKIP_COUNT=0
+pass() { echo -e "${GREEN}[PASS]${NC} $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; GATE_FAILED=1; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; }
+skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
+
+# sum_metric_delta PATTERN FILE_BASE FILE_FINAL — sums every metric line in
+# each file matching the ERE PATTERN and prints (final-sum − base-sum) as an
+# integer. Generalizes the base/final-diff idiom criterion 3 introduced for
+# a single key, for 5.9.6a/5.9.6b's per-collector sums (plan.md).
+sum_metric_delta() {
+    local pattern="$1" file_base="$2" file_final="$3"
+    awk -F'} ' -v p="$pattern" '
+        FNR==NR { if ($0 ~ p) base+=$2+0; next }
+        { if ($0 ~ p) fin+=$2+0 }
+        END { printf "%.0f", fin-base }
+    ' "$file_base" "$file_final"
+}
 
 GATE_FAILED=0
 
@@ -139,6 +160,14 @@ intentional_loss_file="$GATE_SCRIPT_DIR/intentional-loss.txt"
 # 5.9.4h ниже уже печатала для него причину. Тот же файл, читается тем же
 # способом (comm -12), что и intentional_loss_file.
 silent_rules_file="$GATE_SCRIPT_DIR/silent-rules.txt"
+# 5.9.6f (находка №75): база реестра сама по себе не устаревает молча —
+# нужно ловить, когда расхождение «прогон vs база» держится два замера
+# подряд (значит, никто её не обновил, а не что она разово другая на этом
+# прогоне). Состояние — сигнатура прошлого прогона, а не сам гейт: файл
+# перезаписывается каждым запуском и в git не попадает (та же схема, что у
+# attack-manifest.json — см. .gitignore), поэтому сравнение работает только
+# при последовательных прогонах на одном стенде/чекауте.
+diff_state_file="$GATE_SCRIPT_DIR/detection-baseline-diff-state.txt"
 # Снимки /metrics idle-часа (idle-run.sh), опционально — только они дают
 # критерию 6 вторую сторону измерения для фоновых правил (5.8a).
 IDLE_METRICS_START="${IDLE_METRICS_START:-}"
@@ -390,14 +419,27 @@ if [ -f "$final_health" ]; then
             induced_rounds="n/a"
             induced_pressure_before="n/a"
             induced_pressure_after="n/a"
+            induced_bounded_files="n/a"
+            induced_settle_reason="n/a"
+            induced_drop_total="n/a"
             if [ -f "$induced_drop_marker" ]; then
                 induced_executed=$(awk -F= '$1=="executed"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
                 induced_degraded=$(awk -F= '$1=="degraded_seen"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
                 induced_rounds=$(awk -F= '$1=="rounds"{print $2}' "$induced_drop_marker" 2>/dev/null)
                 induced_pressure_before=$(awk -F= '$1=="cpu_pressure_level_before"{print $2}' "$induced_drop_marker" 2>/dev/null)
                 induced_pressure_after=$(awk -F= '$1=="cpu_pressure_level_after"{print $2}' "$induced_drop_marker" 2>/dev/null)
+                induced_bounded_files=$(awk -F= '$1=="bounded_files"{print $2}' "$induced_drop_marker" 2>/dev/null)
+                induced_settle_reason=$(awk -F= '$1=="settle_reason"{print $2}' "$induced_drop_marker" 2>/dev/null)
+                induced_drop_total=$(awk -F= '$1=="induced_drop_total"{print $2}' "$induced_drop_marker" 2>/dev/null)
             fi
             echo "  наведённый дроп (5.9.5b): исполнен=${induced_executed:-0}, degraded зафиксирован во время всплеска=${induced_degraded:-0}, раундов=${induced_rounds:-n/a}"
+            # 5.9.6d (находка №73, P1): всплеск теперь ограничен списком файлов
+            # (bounded_files, не весь /usr), а снимок этой секции (final-health)
+            # снимается после затухания прироста дропов (settle_reason), а не
+            # сразу за концом всплеска — величина потери, которую этот вход
+            # стоил критерию 3, печатается числом, а не только выводится из
+            # журнала постфактум, как на №2.9.5.
+            echo "  наведённый дроп (5.9.6d): ограничен ${induced_bounded_files:-n/a} файлами, снимок отложен до «${induced_settle_reason:-n/a}», потеряно всего (fileaccess, все хопы) = ${induced_drop_total:-n/a}"
             # cpu_pressure_level (0=норма, 1=file_sampling_reduced,
             # 2=all_noisy_sampling_reduced) отвечает на вопрос, почему всплеск
             # мог не дать дропа: пока регулятор держит пониженную выборку
@@ -469,6 +511,40 @@ else
     fail "FINAL-REPORT-$TIMESTAMP.json отсутствует или невалиден"
 fi
 echo ""
+
+# 5.9.6h (находка №76): rule_id'ы, чей прирост попадает целиком в слепое
+# окно idle-конец → attack-baseline (критерий 16 ниже измеряет только его
+# ОБЪЁМ, не состав). Тот же расчёт "новое в baseline_alerts, чего не было в
+# IDLE_ALERTS_END" критерий 16 уже делает по .id для темпа окна; здесь —
+# то же множество, но по .rule_id, чтобы критерий 6 мог заменить "фаза не
+# определена" на третью фазу ("gap") везде, где прирост объясняется именно
+# этим окном, а не отсутствием измерения. Опционально — без IDLE_ALERTS_END
+# gap_rule_ids остаётся пустым и обе секции ведут себя как раньше (5.9.6h
+# не может СУЗИТЬ множество "фаза не определена" без данных, но не проваливает
+# остальное).
+gap_rule_ids=""
+# Инициализация здесь, а не только внутри критерия 6, — под `set -u` крит.
+# 16 читает эту переменную, а критерий 6 присваивает её лишь в ветке
+# added_count>0; без дефолта здесь запуск с added_count=0 падал бы на
+# необъявленной переменной, а не печатал бы честный SKIP/PASS.
+added_undetermined_count=0
+# added_types_analyzed=1 означает "критерий 6 действительно разбирал прирост
+# типов по фазам", а не "прироста не было". Без этого различия критерий 16
+# ниже печатал PASS «у каждого добавленного типа определена фаза» и при
+# added_count=0, где добавленных типов нет вовсе — то есть PASS
+# ненаступлением события, ровно тот дефект, который 5.9.6i (№77) выносит из
+# гейта. А added_count=0 — это ОЖИДАЕМЫЙ исход №2.9.6 после обновления базы
+# в 5.9.6f, то есть ветка сработала бы именно на том прогоне, ради которого
+# написана.
+added_types_analyzed=0
+if [ -n "$IDLE_ALERTS_END" ] && [ -s "$IDLE_ALERTS_END" ] && [ -s "$baseline_alerts" ] \
+    && jq -e 'type == "array"' "$IDLE_ALERTS_END" >/dev/null 2>&1 \
+    && jq -e 'type == "array"' "$baseline_alerts" >/dev/null 2>&1; then
+    gap_rule_ids=$(jq -r -n --slurpfile a "$baseline_alerts" --slurpfile b "$IDLE_ALERTS_END" '
+        ($b[0] | map(.id)) as $seen
+        | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)) | map(.rule_id) | map(select(. != null)))
+        | unique | .[]' 2>/dev/null | sort -u)
+fi
 
 # 6. Детект жив: >= 43 типов + темп алертов от атакующих >= 74/мин.
 # Абсолютный порог 850 (бывшая формулировка) привязан к длине окна: замер №1
@@ -703,28 +779,46 @@ else
         fi
         added_attack_count=0
         added_idle_count=0
+        added_gap_count=0
+        added_undetermined_count=0
+        added_types_analyzed=1
         echo "  добавлено (+$added_count):"
         while IFS= read -r rid; do
             [ -z "$rid" ] && continue
-            in_attack=0; in_idle=0
+            in_attack=0; in_idle=0; in_gap=0
             echo "$added_attack_list" | grep -qx "$rid" && in_attack=1
             echo "$added_idle_list" | grep -qx "$rid" && in_idle=1
-            if [ "$in_attack" -eq 1 ] && [ "$in_idle" -eq 1 ]; then
-                phase="attack+idle"
-            elif [ "$in_attack" -eq 1 ]; then
-                phase="attack"
-            elif [ "$in_idle" -eq 1 ]; then
-                phase="idle"
+            echo "$gap_rule_ids" | grep -qx "$rid" && in_gap=1
+            # 5.9.6h (находка №76): третья фаза ("gap" — слепое окно
+            # idle-конец → attack-baseline) закрывает "фаза не определена"
+            # для приростов, объяснимых именно этим окном, а не отсутствием
+            # измерения. Правило может расти в gap И attack/idle одновременно
+            # (окна не пересекаются по времени, но одно и то же правило
+            # вправе сработать в обоих) — печатается составной меткой, как
+            # уже делает attack+idle.
+            phase_parts=""
+            [ "$in_attack" -eq 1 ] && phase_parts="${phase_parts}attack+"
+            [ "$in_idle" -eq 1 ] && phase_parts="${phase_parts}idle+"
+            [ "$in_gap" -eq 1 ] && phase_parts="${phase_parts}gap+"
+            if [ -n "$phase_parts" ]; then
+                phase="${phase_parts%+}"
             elif [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ]; then
                 phase="фаза не определена — IDLE_METRICS_START/END не заданы"
+            elif [ -z "$IDLE_ALERTS_END" ]; then
+                phase="фаза не определена — IDLE_ALERTS_END не задан, gap-окно не проверено"
             else
-                phase="фаза не определена — сработало вне обоих окон измерения (до baseline или между idle-снимками)"
+                phase="фаза не определена — сработало вне всех трёх окон измерения (до baseline, между idle-снимками, и вне gap)"
             fi
             [ "$in_attack" -eq 1 ] && added_attack_count=$((added_attack_count + 1))
             [ "$in_idle" -eq 1 ] && added_idle_count=$((added_idle_count + 1))
+            [ "$in_gap" -eq 1 ] && added_gap_count=$((added_gap_count + 1))
+            [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ] && added_undetermined_count=$((added_undetermined_count + 1))
             echo "    + $rid ($phase)"
         done <<< "$added_types"
-        echo "  добавлено по фазам: attack=$added_attack_count, idle=$added_idle_count (сумма может превышать $added_count — правило, выросшее в обоих окнах, считается в обеих)"
+        echo "  добавлено по фазам: attack=$added_attack_count, idle=$added_idle_count, gap=$added_gap_count, не определено=$added_undetermined_count (сумма может превышать $added_count — правило, выросшее в нескольких окнах, считается в каждом)"
+        if [ "$added_undetermined_count" -gt 0 ] && [ -z "$IDLE_ALERTS_END" ]; then
+            echo "  (5.9.6h: gap-окно не проверялось на этом прогоне — IDLE_ALERTS_END не задан; \"не определено\" выше не означает, что фаза действительно отсутствует)"
+        fi
     fi
 
     # 5.9.1e-следствие, найдено пересчётом на снятых данных №2.9 (условие №1
@@ -872,6 +966,31 @@ else
         pass "состав детекта без потерь вне списка намеренных (добавлено: $added_count — обновить detection-baseline.txt вместе с записью в plan.md)"
     else
         fail "состав детекта: потеряно $lost_count типов вне intentional-loss.txt (см. список выше). Если потеря намеренная — обновить detection-baseline.txt/intentional-loss.txt и записать причину в plan.md, иначе это регресс детекта"
+    fi
+
+    # 5.9.6f (находка №75): «добавлено»/«потеряно» этого прогона — сигнатура
+    # расхождения с базой. Один прогон с расхождением — это находка (ожидаемо,
+    # гейт её и печатает выше). Тот же самый набор типов на ДВУХ прогонах
+    # подряд означает, что находку никто не разобрал и базу не обновили —
+    # реестр устарел молча. Сравниваем с сигнатурой, оставленной прошлым
+    # запуском, не с самим фактом расхождения: разные расхождения на двух
+    # прогонах подряд — это два разных наблюдения, не одна брошенная база.
+    # Сигнатура строится ТОЛЬКО из содержимого списков. Прежняя редакция
+    # печатала литералы "added:"/"lost:" безусловно, поэтому на чистом
+    # прогоне (расхождения нет) сигнатура всё равно выходила непустой, ветка
+    # rm -f была недостижима, а ДВА чистых прогона подряд давали одинаковую
+    # сигнатуру и печатали "база брошена" — ровно наоборот смыслу критерия.
+    diff_signature=""
+    if [ -n "$(echo "$added_types" | grep -v '^$' || true)" ] || [ -n "$(echo "$lost_types" | grep -v '^$' || true)" ]; then
+        diff_signature=$(printf 'added:\n%s\nlost:\n%s\n' "$added_types" "$lost_types")
+    fi
+    if [ -n "$diff_signature" ]; then
+        if [ -f "$diff_state_file" ] && [ "$(cat "$diff_state_file")" = "$diff_signature" ]; then
+            warn "состав детекта расходится с detection-baseline.txt уже второй замер подряд тем же набором типов (добавлено $added_count, потеряно $lost_count вне intentional-loss.txt) — база брошена, обновить detection-baseline.txt и записать в plan.md"
+        fi
+        echo "$diff_signature" > "$diff_state_file"
+    elif [ -f "$diff_state_file" ]; then
+        rm -f "$diff_state_file"
     fi
 fi
 if [ "$attacker_alerts_known" -eq 0 ]; then
@@ -1402,8 +1521,19 @@ else
     # Пара = один reduce и следующий за ним recover. Незакрытая пара (агент всё
     # ещё шеддит в момент среза) — норма, ровно случай замера №2, поэтому
     # считаем по reduce: 0 или 1 reduce = не флапает.
-    if awk -v r="$d_reduce" 'BEGIN{exit !(r+0 <= 1)}'; then
-        pass "переходов reduce=$d_reduce recover=$d_recover — повторных нет (порог: <= 1 пара); degraded_fraction=${deg_frac:-n/a}"
+    #
+    # 5.9.6i (находка №77, тот же класс, что кластер ua-timer/тест коллизий):
+    # reduce=0 раньше печатался как PASS "повторных нет" — но при reduce=0
+    # механизм НЕ СРАБОТАЛ НИ РАЗУ за прогон, то есть утверждение "не
+    # флапает" ничем не доказано, а не отличается по тексту от "сработал
+    # один раз и не повторился". PASS отсутствием события — ровно то, что
+    # 5.9.5b уже вытеснила из критерия 3 постановкой наведённого дропа;
+    # здесь наведённого CPU-давления в прогоне нет (вне объёма этой волны),
+    # поэтому reduce=0 — SKIP с названной причиной, а не PASS.
+    if [ "$d_reduce" -eq 0 ]; then
+        skip "переходов reduce=0 — watchdog ни разу не сработал за прогон, порог \"не флапает\" не проверен (нет наведённого CPU-давления в этом прогоне); degraded_fraction=${deg_frac:-n/a}"
+    elif awk -v r="$d_reduce" 'BEGIN{exit !(r+0 <= 1)}'; then
+        pass "переходов reduce=$d_reduce recover=$d_recover — сработал, повторных нет (порог: <= 1 пара); degraded_fraction=${deg_frac:-n/a}"
     else
         fail "watchdog флапает: reduce=$d_reduce recover=$d_recover за прогон (ожидалось <= 1 пары; 813 циклов за ночь — ISSUES-attack-run-2026-08-03)"
     fi
@@ -1548,7 +1678,13 @@ echo ""
 # alerts-end.json) против baseline-alerts этого прогона. Разность множеств
 # «id есть в baseline, id нет в idle-конце» уже исключает всё, что попало в
 # idle-час — считать это отдельным вычитанием не нужно.
-echo "=== 16. Слепое окно idle-конец → attack-baseline (наблюдение, без порога) ==="
+# 5.9.6h (находка №76): раньше секция была наблюдением без PASS/FAIL — окно
+# растянулось с 8.9 до 12с (5.9.5i) и заполнилось 53 алертами (22% прогона
+# №2.9.5) без единой связи с гейтом. Постановка даёт два легитимных исхода:
+# окно схлопывается до объёма, где содержимое пренебрежимо (<= 5 алертов),
+# либо каждый тип из критерия 6 получает фазу из трёх (attack/idle/gap) без
+# "не определено". Проверяется здесь оба варианта, PASS по первому истинному.
+echo "=== 16. Слепое окно idle-конец → attack-baseline (5.9.6h: <=5 алертов либо все фазы определены) ==="
 if [ -z "$IDLE_STATE_END" ] || [ ! -s "$IDLE_STATE_END" ]; then
     skip "IDLE_STATE_END не задан — окно idle-конец → attack-baseline не измерено"
 elif ! command -v jq &> /dev/null; then
@@ -1582,7 +1718,22 @@ else
                     blind_rate=$(awk -v a="$blind_new_alerts" -v m="$blind_min" 'BEGIN{printf "%.1f", a/m}')
                 fi
                 echo "  окно: ${blind_min} мин, новых алертов (по id, вне idle-часа): $blind_new_alerts (темп: ${blind_rate}/мин)"
-                echo "  (наблюдение без порога; для сравнения: измеряемые окна атаки/idle дают $attacker_rate/мин и (idle-час) отдельно)"
+                echo "  (для сравнения: измеряемые окна атаки/idle дают $attacker_rate/мин и (idle-час) отдельно)"
+                if awk -v n="$blind_new_alerts" 'BEGIN{exit !(n<=5)}'; then
+                    pass "объём слепого окна $blind_new_alerts <= 5 — содержимое окна пренебрежимо (5.9.6h)"
+                elif [ "$added_types_analyzed" -eq 0 ]; then
+                    # 5.9.6i: вторая половина критерия 5.9.6h опирается на
+                    # разбор прироста типов критерием 6. Если прироста не
+                    # было (added_count=0 — ожидаемый исход после обновления
+                    # базы в 5.9.6f), то "не определено = 0" верно
+                    # ненаступлением, а не доказательством: состав окна не
+                    # проверял никто. SKIP, не PASS.
+                    skip "объём слепого окна $blind_new_alerts > 5, а прироста типов в критерии 6 не было — состав окна ничем не разбирался, вторая половина 5.9.6h не проверена (окно не схлопнуто и не объяснено)"
+                elif [ "$added_undetermined_count" -eq 0 ]; then
+                    pass "объём слепого окна $blind_new_alerts > 5, но у каждого из добавленных в критерии 6 типов определена фаза (attack/idle/gap), \"не определено\" нет — окно не слепое по составу (5.9.6h)"
+                else
+                    fail "объём слепого окна $blind_new_alerts > 5, и $added_undetermined_count добавленных типов в критерии 6 остались с неопределённой фазой — ни окно не схлопнулось, ни состав не объяснён (5.9.6h)"
+                fi
             fi
         fi
     fi
@@ -1711,7 +1862,326 @@ else
 fi
 echo ""
 
+# 18. 5.9.6a (находка №71, P0): потеря в ядре считается собственным
+# счётчиком, а не молчаливо теряется. До этой волны
+# ebpf_guard_bpf_lost_events_total обещал ядро именем, а на деле дублировал
+# userspace-хоп ringbuf_to_router (см. plan.md 5.9.6a) — критерий 1 выше эту
+# путаницу не ловит, потому что считает как раз ringbuf_to_router/
+# router_to_queue, а не переполнение самого кольца. Секция читает НОВЫЙ
+# счётчик ringbuf_full_counters (bpf/common.h), выгруженный per-коллектор как
+# events_dropped_total{collector,reason="ringbuf_full"} для syscall/network/
+# fileaccess — трёх коллекторов, делящих `events`-ringbuf через
+# reserve_event()/reserve_event_with_sampling(). privesc-коллектор не
+# инстанцируется в cmd/ebpf-guard/main.go на момент этой правки (отдельный,
+# ранее не замеченный пробел — см. открытые вопросы 5.9.6a) и в критерий не
+# входит.
+echo "=== 18. events_dropped_total{reason=\"ringbuf_full\"}: потеря в ядре считается (5.9.6a, №71) ==="
+core_collectors_have_series=0
+for c in syscall network fileaccess; do
+    if grep -Eq "ebpf_guard_events_dropped_total\{(collector=\"$c\",reason=\"ringbuf_full\"|reason=\"ringbuf_full\",collector=\"$c\")\}" "$final_metrics" 2>/dev/null; then
+        core_collectors_have_series=$((core_collectors_have_series + 1))
+    fi
+    d=$(sum_metric_delta "collector=\"$c\".*reason=\"ringbuf_full\"" "$baseline_metrics" "$final_metrics")
+    eval "ringbuf_full_delta_$c=\${d:-0}"
+    echo "  $c: Δringbuf_full за прогон = ${d:-0}"
+done
+if [ "$core_collectors_have_series" -eq 0 ]; then
+    skip "серия events_dropped_total{reason=\"ringbuf_full\"} отсутствует ни для одного из syscall/network/fileaccess — сборка агента старее 5.9.6a"
+else
+    idle_zero_checked=0
+    idle_zero_ok=1
+    idle_report=""
+    if [ -n "$IDLE_METRICS_START" ] && [ -n "$IDLE_METRICS_END" ] \
+        && [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
+        idle_zero_checked=1
+        for c in syscall network fileaccess; do
+            di=$(sum_metric_delta "collector=\"$c\".*reason=\"ringbuf_full\"" "$IDLE_METRICS_START" "$IDLE_METRICS_END")
+            idle_report="$idle_report $c=${di:-0}"
+            if ! awk -v d="${di:-0}" 'BEGIN{exit !(d==0)}'; then
+                idle_zero_ok=0
+            fi
+        done
+    fi
+
+    induced_ok=0
+    if [ -f "$induced_drop_marker" ]; then
+        induced_executed_c18=$(awk -F= '$1=="executed"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
+        if [ "${induced_executed_c18:-0}" -eq 1 ]; then
+            fa_delta=$(eval echo "\$ringbuf_full_delta_fileaccess")
+            if awk -v d="${fa_delta:-0}" 'BEGIN{exit !(d>0)}'; then
+                induced_ok=1
+            fi
+        fi
+    fi
+
+    if [ "$idle_zero_checked" -eq 1 ] && [ "$idle_zero_ok" -eq 0 ]; then
+        fail "ringbuf_full ненулевой на idle-часе (ожидался 0 для всех трёх коллекторов):$idle_report"
+    elif [ "$induced_ok" -eq 1 ] && { [ "$idle_zero_checked" -eq 0 ] || [ "$idle_zero_ok" -eq 1 ]; }; then
+        pass "fileaccess: ringbuf_full > 0 под наведённым дропом (5.9.5b/5.9.6d)$( [ "$idle_zero_checked" -eq 1 ] && echo ", на idle-часе 0" )"
+    elif [ "$idle_zero_checked" -eq 1 ] && [ "$idle_zero_ok" -eq 1 ] && [ "$induced_ok" -eq 0 ]; then
+        skip "idle-час чист (0 у всех трёх), но наведённый дроп не дал fileaccess.ringbuf_full > 0 — половина критерия 5.9.6a не проверена (наведённый дроп 5.9.5b не откалиброван на переполнение именно ring buffer, долг 5.9.6d)"
+    else
+        skip "ни IDLE_METRICS_START/END, ни исполненный наведённый дроп с fileaccess.ringbuf_full > 0 не доступны — механизм не проверен ни с одной стороны"
+    fi
+fi
+echo ""
+
+# 19. 5.9.6b (находка №72, P0): сквозной баланс событий по коллектору.
+#
+# ТОЧКА СЪЁМА ЛЕВОЙ ЧАСТИ (существенно, ревизия 2026-08-21): счётчик
+# events_emitted_counters (bpf/common.h) инкрементируется на УСПЕШНОМ
+# bpf_ringbuf_reserve(), то есть считает события, реально положенные в
+# кольцо. Всё, что теряется РАНЬШЕ резерва, в него не попадает по
+# построению:
+#   - ringbuf_full     — резерв не состоялся (это и есть счётчик неудач);
+#   - path_denylist    — path_is_denied() делает `return 0` ДО reserve
+#                        (bpf/fileaccess.bpf.c, комментарий P1-18b прямо
+#                        говорит: "так фильтрованный путь не стоит слота
+#                        кольца");
+#   - observer_tree    — observer_should_drop() тоже стоит ДО reserve
+#                        (bpf/*.bpf.c, "immediately before the reserve").
+# Поэтому тождество, сходящееся по построению, ровно одно:
+#
+#   emitted_kernel = events_total + ringbuf_to_router + router_to_queue
+#                    + malformed
+#
+# Прежняя редакция этой секции складывала в правую часть ещё ringbuf_full и
+# path_denylist — то есть события, которых в левой части нет ни одного.
+# Невязка тогда обязана была равняться −(ringbuf_full + path_denylist)
+# на ИСПРАВНОЙ системе, и критерий валил бы гейт тем сильнее, чем лучше
+# работает 5.9.6d (наведённый дроп специально гонит ringbuf_full вверх).
+# Пункт 4 порядка работы запрещает двигать допуск под результат — здесь и
+# не двигается допуск, здесь исправлено само равенство.
+#
+# Потери ДО резерва печатаются отдельной строкой «ядро видело, но не
+# положило в кольцо» — постановка требует, чтобы ни одно слагаемое не
+# отсутствовало молча, и они не отсутствуют: они просто стоят по другую
+# сторону точки съёма. excluded{observer_tree} остаётся информационным по
+# прежней причине (ce.eventsExcludedTotal публикует его одним числом на всё
+# приложение, а не per-коллектор — internal/correlator/engine.go).
+#
+# Допуск объявлен ДО прогона, а не подобран под результат (пункт 4 порядка
+# работы): снимки counter-серий не атомарны друг относительно друга (каждая
+# серия читается отдельным HTTP-скрейпом `/metrics` в разное мгновение), так
+# что допуск берётся порядка секундного темпа детекта, зафиксированного
+# №2.9.5 (79.9 событий/мин детекта; событий на входе на порядки больше) —
+# 500 событий или 0.5% от emitted_kernel, что больше.
+echo "=== 19. Сквозной баланс событий (5.9.6b, №72) ==="
+emitted_have_series=0
+for c in syscall network fileaccess; do
+    if grep -q "ebpf_guard_events_emitted_kernel_total{collector=\"$c\"}" "$final_metrics" 2>/dev/null; then
+        emitted_have_series=$((emitted_have_series + 1))
+    fi
+done
+if [ "$emitted_have_series" -eq 0 ]; then
+    skip "серия events_emitted_kernel_total отсутствует — сборка агента старее 5.9.6b"
+else
+    # 5.9.6a/5.9.6b используют один и тот же коллектор→тип-label маппинг
+    # exporter.EventTypeLabel применяет к network (TCP_CONNECT+NET_CLOSE
+    # оба дают type="network"); syscall/fileaccess совпадают с collector.
+    declare -A c19_type
+    c19_type[syscall]="syscall"
+    c19_type[network]="network"
+    c19_type[fileaccess]="file"
+    any_balance_checked=0
+    for c in syscall network fileaccess; do
+        emitted=$(grep "ebpf_guard_events_emitted_kernel_total{collector=\"$c\"}" "$final_metrics" 2>/dev/null | awk -F'} ' '{print $2+0}')
+        emitted_base=$(grep "ebpf_guard_events_emitted_kernel_total{collector=\"$c\"}" "$baseline_metrics" 2>/dev/null | awk -F'} ' '{print $2+0}')
+        emitted_delta=$(awk -v a="${emitted:-0}" -v b="${emitted_base:-0}" 'BEGIN{printf "%.0f", a-b}')
+
+        # Шаблон якорится именем семейства: голое type="syscall" совпало бы
+        # с любой другой серией, у которой есть лейбл type с тем же
+        # значением (а такие в проекте есть — internal/drift/detector.go),
+        # и невязка молча вобрала бы чужой счётчик.
+        events_total_delta=$(sum_metric_delta "^ebpf_guard_events_total\\{.*type=\"${c19_type[$c]}\"" "$baseline_metrics" "$final_metrics")
+        ringbuf_full_d=$(sum_metric_delta "collector=\"$c\".*reason=\"ringbuf_full\"" "$baseline_metrics" "$final_metrics")
+        r2r_d=$(sum_metric_delta "collector=\"$c\".*reason=\"ringbuf_to_router\"" "$baseline_metrics" "$final_metrics")
+        r2q_d=$(sum_metric_delta "collector=\"$c\".*reason=\"router_to_queue\"" "$baseline_metrics" "$final_metrics")
+        denylist_d=0
+        if [ "$c" = "fileaccess" ]; then
+            denylist_d=$(sum_metric_delta "collector=\"$c\".*reason=\"path_denylist\"" "$baseline_metrics" "$final_metrics")
+        fi
+        malformed_d=$(awk -F'} ' -v c="$c" '
+            FNR==NR { if ($0 ~ "ebpf_guard_events_malformed_total\\{" && $0 ~ ("collector=\"" c "\"")) base+=$2+0; next }
+            { if ($0 ~ "ebpf_guard_events_malformed_total\\{" && $0 ~ ("collector=\"" c "\"")) fin+=$2+0 }
+            END { printf "%.0f", fin-base }
+        ' "$baseline_metrics" "$final_metrics")
+
+        # Правая часть — только то, что случилось ПОСЛЕ успешного резерва.
+        # ringbuf_full/path_denylist сюда не входят: см. врезку «точка съёма»
+        # над секцией.
+        rhs=$(awk -v a="${events_total_delta:-0}" -v d="${r2r_d:-0}" \
+                  -v e="${r2q_d:-0}" -v g="${malformed_d:-0}" \
+                  'BEGIN{printf "%.0f", a+d+e+g}')
+        residual=$(awk -v l="${emitted_delta:-0}" -v r="$rhs" 'BEGIN{printf "%.0f", l-r}')
+        tolerance=$(awk -v e="${emitted_delta:-0}" 'BEGIN{t=e*0.005; if(t<500) t=500; printf "%.0f", t}')
+        abs_residual=$(awk -v r="$residual" 'BEGIN{print (r<0)?-r:r}')
+        pre_reserve=$(awk -v b="${ringbuf_full_d:-0}" -v f="${denylist_d:-0}" 'BEGIN{printf "%.0f", b+f}')
+
+        echo "  $c: emitted_kernel=$emitted_delta = events_total=$events_total_delta + ringbuf_to_router=$r2r_d + router_to_queue=$r2q_d + malformed=$malformed_d | невязка=$residual (допуск ±$tolerance)"
+        echo "  $c: потеряно ДО резерва (в тождество не входит, левой части не касается): ringbuf_full=$ringbuf_full_d path_denylist=$denylist_d | всего=$pre_reserve"
+        if awk -v p="$pre_reserve" -v e="${emitted_delta:-0}" 'BEGIN{exit !(e>0 && p>0)}'; then
+            echo "  $c: доля потерь до резерва = $(awk -v p="$pre_reserve" -v e="${emitted_delta:-0}" 'BEGIN{printf "%.3f%%", 100*p/(p+e)}') (наблюдение без порога — 5.9.6b печатает долю, но не судит её)"
+        fi
+        if [ "$emitted_have_series" -gt 0 ] && grep -q "ebpf_guard_events_emitted_kernel_total{collector=\"$c\"}" "$final_metrics" 2>/dev/null; then
+            any_balance_checked=1
+            if awk -v a="$abs_residual" -v t="$tolerance" 'BEGIN{exit !(a<=t)}'; then
+                pass "$c: баланс сходится в пределах допуска (невязка $residual, допуск ±$tolerance)"
+            else
+                fail "$c: невязка $residual превышает допуск ±$tolerance — потеря считается не полностью (проверить, не появился ли новый путь потери мимо перечисленных слагаемых)"
+            fi
+        else
+            skip "$c: events_emitted_kernel_total отсутствует для этого коллектора"
+        fi
+    done
+    excluded_observer_tree=$(sum_metric_delta "reason=\"observer_tree\"" "$baseline_metrics" "$final_metrics")
+    echo "  excluded{observer_tree} за прогон (не коллектор-специфично, в невязку выше не входит): ${excluded_observer_tree:-0}"
+    if [ "$any_balance_checked" -eq 0 ]; then
+        skip "ни для одного коллектора баланс не проверен"
+    fi
+fi
+echo ""
+
+# 20. 5.9.6c (P0): позитивный контроль счётности — известный вход N,
+# независимый от 5.9.6b's баланса (который доказывает лишь внутреннюю
+# непротиворечивость счётчиков ДРУГ С ДРУГОМ, а не то, что ядро вообще
+# увидело вызов). run_counting_control (run-all-attacks.sh) генерирует
+# ровно N openat() на файл-канарейку — один раз в тишине, второй раз тем же
+# генератором, увеличенным до размера, рассчитанного переполнить кольцо
+# самостоятельно (без tar — см. plan.md 5.9.6c, почему совмещать с
+# наведённым дропом 5.9.6d нельзя без искажения N) — и пишет
+# counting-control-{idle,drop}-$TIMESTAMP.txt.
+echo "=== 20. Позитивный контроль счётности: N вызовов = N событий (5.9.6c) ==="
+counting_checked_modes=0
+counting_ok_modes=0
+for c20_mode in idle drop; do
+    c20_marker="$RESULTS_DIR/counting-control-${c20_mode}-$TIMESTAMP.txt"
+    if [ ! -f "$c20_marker" ]; then
+        skip "контроль счётности ($c20_mode) не запускался — маркер counting-control-${c20_mode}-$TIMESTAMP.txt отсутствует"
+        continue
+    fi
+    if grep -q '^skipped=1' "$c20_marker" 2>/dev/null; then
+        skip "контроль счётности ($c20_mode): python3 недоступен на харнессе в момент прогона"
+        continue
+    fi
+    c20_n=$(awk -F= '$1=="n"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_sum=$(awk -F= '$1=="sum"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_diff=$(awk -F= '$1=="diff"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_events=$(awk -F= '$1=="events_delta"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_drops=$(awk -F= '$1=="drops_delta"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_ringbuf_full=$(awk -F= '$1=="ringbuf_full_delta"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_bg=$(awk -F= '$1=="background_estimate"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_bg_rate=$(awk -F= '$1=="background_rate_per_sec"{print $2+0}' "$c20_marker" 2>/dev/null)
+    c20_window=$(awk -F= '$1=="window_seconds"{print $2+0}' "$c20_marker" 2>/dev/null)
+    counting_checked_modes=$((counting_checked_modes + 1))
+    # Допуск объявлен здесь, а не подобран по результату (п.4 порядка
+    # работы), и состоит из двух заранее названных частей.
+    #
+    # Часть первая — неатомарность снимков: один срез /metrics до и один
+    # после (не два разных HTTP-скрейпа для разных counter-семейств, как в
+    # критерии 19), поэтому 0.1% или 5, что больше — на порядок туже, чем
+    # допуск 5.9.6b.
+    #
+    # Часть вторая — ФОН, и он не ноль. Прежняя редакция считала его нулём
+    # «по построению, путь-канарейка уникален» — рассуждение неверное:
+    # ebpf_guard_events_total{type="file"} не имеет лейбла пути и считает
+    # ВСЕ файловые события стенда, так что за окно «до→после» (генератор
+    # плюс опрос-устаканивание, секунды) в обе метрики попадает всё, что
+    # открывали prometheus/grafana/docker в это же время. Харнесс меряет
+    # фон отдельным окном ДО генератора и кладёт оценку в маркер
+    # (background_estimate = темп×длину окна); гейт прибавляет её к допуску.
+    # Это не ослабление критерия под результат, а вычитание известного
+    # заранее и измеренного независимо загрязнения: без него критерий валил
+    # бы исправную систему тем вернее, чем шумнее стенд.
+    #
+    # Старый маркер (сборка харнесса до этой правки) не содержит
+    # background_estimate — тогда поправка равна нулю и поведение прежнее.
+    c20_tolerance=$(awk -v n="${c20_n:-0}" -v bg="${c20_bg:-0}" 'BEGIN{t=n*0.001; if(t<5) t=5; printf "%.0f", t+bg}')
+    c20_abs_diff=$(awk -v d="${c20_diff:-0}" 'BEGIN{print (d<0)?-d:d}')
+    echo "  $c20_mode: N=${c20_n:-0} Δevents(file)=${c20_events:-0} Δdrops(fileaccess)=${c20_drops:-0} Δringbuf_full=${c20_ringbuf_full:-0} сумма=${c20_sum:-0} разница=${c20_diff:-0} (допуск ±$c20_tolerance = базовый + фон ${c20_bg:-0} @ ${c20_bg_rate:-0}/с × ${c20_window:-0}с)"
+    if ! awk -v a="$c20_abs_diff" -v t="$c20_tolerance" 'BEGIN{exit !(a<=t)}'; then
+        fail "$c20_mode: N=${c20_n:-0} не сходится с Δevents+Δdrops (сумма ${c20_sum:-0}, разница ${c20_diff:-0}, допуск ±$c20_tolerance) — либо непосчитанная потеря, либо вызов не увиден ядром"
+    elif [ "$c20_mode" = "drop" ] && ! awk -v r="${c20_ringbuf_full:-0}" 'BEGIN{exit !(r>0)}'; then
+        skip "$c20_mode: N сошёлся (разница ${c20_diff:-0}), но ringbuf_full=${c20_ringbuf_full:-0} — генератор не переполнил кольцо на этом стенде, вторая половина критерия («сходится ПОД дропом») не проверена (COUNTING_CONTROL_DROP_N не откалиброван)"
+        counting_ok_modes=$((counting_ok_modes + 1))
+    else
+        counting_ok_modes=$((counting_ok_modes + 1))
+        pass "$c20_mode: N=${c20_n:-0} сходится с Δevents+Δdrops (разница ${c20_diff:-0}, допуск ±$c20_tolerance)$( [ "$c20_mode" = "drop" ] && echo ", ringbuf_full=${c20_ringbuf_full:-0} > 0")"
+    fi
+done
+if [ "$counting_checked_modes" -eq 0 ]; then
+    skip "ни один режим контроля счётности (idle/drop) не запускался — сборка харнесса старее 5.9.6c"
+fi
+# 21. 5.9.6g (№65 долг): каждая ненулевая строка dns_decode_errors_total
+# имеет установленную причину — либо исправлена, либо записана как известная
+# с числом и обоснованием в dns-decode-reasons.txt (тот же реестровый
+# приём, что silent-rules.txt даёт критерию 6 в 5.9.4h/5.9.5d). Плюс:
+# флап dns_collector_stale_transitions_total разбирается отдельной строкой
+# — 44 пары за 8 часов на №2.9.5 не были ни доказаны безопасными, ни
+# отнесены к потере видимости, гейт печатал бы то же самое в обоих случаях.
+dns_decode_reasons_file="$GATE_SCRIPT_DIR/dns-decode-reasons.txt"
+echo "=== 21. DNS decode errors: причины разделены по реестру + флап stale/recovered (5.9.6g, №65) ==="
+if [ ! -s "$final_metrics" ]; then
+    skip "$final_metrics пуст — decode errors/флап не проверены"
+else
+    decode_unexplained=""
+    decode_checked=0
+    decode_err_lines_21=$(grep '^ebpf_guard_dns_decode_errors_total{' "$final_metrics" 2>/dev/null)
+    if [ -z "$decode_err_lines_21" ]; then
+        skip "ebpf_guard_dns_decode_errors_total отсутствует в срезе — сборка агента старее 5.9.5c"
+    else
+        while IFS= read -r reason; do
+            [ -z "$reason" ] && continue
+            cnt=$(echo "$decode_err_lines_21" | grep "reason=\"$reason\"" | awk -F'} ' '{sum+=$2} END{print sum+0}')
+            [ "${cnt%.*}" -eq 0 ] 2>/dev/null && continue
+            decode_checked=$((decode_checked + 1))
+            if [ -f "$dns_decode_reasons_file" ] && awk -v r="$reason" '!/^[[:space:]]*#/ && $1 == r {found=1} END{exit !found}' "$dns_decode_reasons_file"; then
+                cat_21=$(awk -v r="$reason" '!/^[[:space:]]*#/ && $1 == r {print $2; exit}' "$dns_decode_reasons_file")
+                echo "  $reason=$cnt: причина установлена (категория $cat_21, dns-decode-reasons.txt)"
+            else
+                decode_unexplained="$decode_unexplained $reason($cnt)"
+                echo "  $reason=$cnt: причина НЕ установлена"
+            fi
+        done <<< "$(echo "$decode_err_lines_21" | awk -F'[{}", ]+' '{ for (i=1;i<=NF;i++) if ($i ~ /^reason=?$/) print $(i+1) }' | sort -u)"
+
+        if [ "$decode_checked" -eq 0 ]; then
+            pass "все reason'ы dns_decode_errors_total нулевые за прогон — decode-ошибок нет"
+        elif [ -n "$decode_unexplained" ]; then
+            fail "decode errors без установленной причины:$decode_unexplained — добавить в $dns_decode_reasons_file (категория fixed/known/pending, 5.9.6g)"
+        else
+            pass "все $decode_checked ненулевых reason'ов decode errors объяснены реестром (5.9.6g)"
+        fi
+    fi
+
+    # Флап stale/recovered: считается по счётчику (не по логам — тот
+    # опционален и трудоёмок парсить построчно), классификация — по тому,
+    # растут ли decode errors/events_total одновременно с флапом (признак
+    # реальной потери видимости) или флап идёт на фоне продолжающегося
+    # events_total (признак, что порог dnsStaleThreshold=5м просто короче
+    # пауз между резолвами на тихом стенде).
+    stale_base=$(awk '/^ebpf_guard_dns_collector_stale_transitions_total( |\{)/ {print $NF+0; exit}' "$baseline_metrics" 2>/dev/null)
+    stale_final=$(awk '/^ebpf_guard_dns_collector_stale_transitions_total( |\{)/ {print $NF+0; exit}' "$final_metrics" 2>/dev/null)
+    if [ -z "$stale_base" ] || [ -z "$stale_final" ]; then
+        skip "ebpf_guard_dns_collector_stale_transitions_total отсутствует в срезах — флап stale/recovered не проверен (сборка старее 5.7d)"
+    else
+        stale_delta=$((stale_final - stale_base))
+        dns_events_at_base=$(grep '^ebpf_guard_events_total{' "$baseline_metrics" 2>/dev/null | grep 'type="dns"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+        dns_events_at_final=$(grep '^ebpf_guard_events_total{' "$final_metrics" 2>/dev/null | grep 'type="dns"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+        dns_events_grew=$(awk -v a="$dns_events_at_base" -v b="$dns_events_at_final" 'BEGIN{print (b>a)?1:0}')
+        echo "  stale_transitions за прогон: $stale_delta, events_total{type=dns} baseline=$dns_events_at_base final=$dns_events_at_final"
+        if [ "$stale_delta" -eq 0 ]; then
+            skip "stale_transitions=0 за прогон — флап не наблюдался в этом окне, классификация не проверена (наблюдалось на №2.9.5, аптайм длиннее одного прогона)"
+        elif [ "$dns_events_grew" -eq 1 ]; then
+            pass "stale_transitions=$stale_delta за прогон, events_total{dns} продолжает расти между срезами — похоже на порог dnsStaleThreshold короче пауз резолва на тихом стенде, не на потерю видимости (5.9.6g)"
+        else
+            fail "stale_transitions=$stale_delta за прогон, events_total{dns} НЕ вырос между срезами — похоже на потерю видимости, а не на порог (5.9.6g)"
+        fi
+    fi
+fi
+echo ""
+
 echo "==========================================="
+echo "RUN-GATE: PASS=$PASS_COUNT SKIP=$SKIP_COUNT (5.9.6i)"
 if [ "$GATE_FAILED" -eq 0 ]; then
     echo -e "${GREEN}RUN-GATE: PASS${NC}"
     exit 0

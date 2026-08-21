@@ -102,6 +102,11 @@ deploy/docker-test-setup/attacks/attack-results/
 # attack-results/, so it needs its own entry — it is regenerated each run and
 # would otherwise show up as a dirty tracked directory after every progon.
 deploy/docker-test-setup/attacks/attack-manifest.json
+# Критерий 6 (5.9.6f, находка №75): сигнатура расхождения «прогон vs база»
+# прошлого запуска гейта, нужна только чтобы поймать, когда одно и то же
+# расхождение держится два замера подряд (значит, база брошена). Та же
+# причина, что у attack-manifest.json выше — регенерируется каждым прогоном.
+deploy/docker-test-setup/attacks/detection-baseline-diff-state.txt
 # Per-category output from the four attack sub-scripts (RESULTS_DIR in each).
 deploy/docker-test-setup/attacks/sqlmap-results/
 deploy/docker-test-setup/attacks/ssrf-results/

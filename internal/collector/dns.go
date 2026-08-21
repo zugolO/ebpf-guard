@@ -308,7 +308,41 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		if event == nil {
 			c.metrics.decodeErrors.WithLabelValues(reason).Inc()
 			if logger := c.decodeErrorLoggers[reason]; logger != nil {
-				logger.record(slog.Default(), "dns", reason, record.RawSample)
+				// malformedLogger keeps only the first 48 bytes of what it's
+				// given (collector.go), and the fixed dns_event header alone
+				// (type+timestamp+pid+tgid+uid+comm+ppid+parent_comm+
+				// direction+payload_len) is dnsRawEventFixedLen=63 bytes —
+				// logging record.RawSample as-is can never reach the DNS
+				// payload/qname bytes that actually failed to decode, only
+				// ever showing header fields (pid/comm/parent_comm). Found
+				// while investigating plan.md 5.9.6e/№74: the one "bad_qname"
+				// sample_hex captured for the grafana idle event decoded
+				// entirely to header fields, not a single payload byte.
+				// too_short/unparseable mean the header itself didn't parse
+				// (or wasn't a DNS event at all), so there is no reliable
+				// payload offset to slice at — keep the raw dump for those.
+				sample := record.RawSample
+				var extra []slog.Attr
+				if reason != dnsDecodeReasonTooShort && reason != dnsDecodeReasonUnparseable &&
+					len(sample) > dnsRawEventFixedLen {
+					sample = sample[dnsRawEventFixedLen:]
+					// 5.9.6g: direction/payload_len distinguish the three
+					// №65 hypotheses (sport-53 response, TCP-DNS/mDNS,
+					// DNS_MAX_PAYLOAD truncation) without a human re-parsing
+					// the hex dump by hand — see dnsHeaderDiagFields.
+					if dir, plen, ok := dnsHeaderDiagFields(record.RawSample); ok {
+						dirStr := "query"
+						if dir == 1 {
+							dirStr = "response"
+						}
+						extra = []slog.Attr{
+							slog.String("direction", dirStr),
+							slog.Int("payload_len", int(plen)),
+							slog.Bool("at_dns_max_payload", int(plen) >= dnsMaxPayload),
+						}
+					}
+				}
+				logger.record(slog.Default(), "dns", reason, sample, extra...)
 			}
 			continue
 		}

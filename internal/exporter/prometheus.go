@@ -46,6 +46,22 @@ var (
 		[]string{"collector", "reason"},
 	)
 
+	// EventsEmittedKernel counts events the kernel actually produced — a
+	// successful bpf_ringbuf_reserve() on the shared `events` ring buffer —
+	// by collector. This is the left-hand side of 5.9.6b's (№72) event
+	// balance identity: emitted_kernel == events_total + Σdropped +
+	// excluded + malformed. Without it, "how many events happened" could
+	// only be inferred from events_total, which is measured downstream of
+	// every filter and therefore cannot detect a filter eating events it
+	// shouldn't.
+	EventsEmittedKernel = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_events_emitted_kernel_total",
+			Help: "Total number of events the kernel produced (successful ring-buffer reserve), by collector",
+		},
+		[]string{"collector"},
+	)
+
 	// EventsDroppedFraction is the share of events lost in the most recent
 	// sampling window, per queue priority ("protected" / "bulk").
 	//
@@ -163,13 +179,23 @@ var (
 		[]string{"level"},
 	)
 
-	// BPFLostEvents counts events dropped when the collector output channel is full.
-	// Incremented by the watchdog drop-tracking loop every 10 seconds from each
-	// collector's atomic counter, which is incremented on each backpressure drop.
+	// BPFLostEvents counts events lost in the kernel ring buffer for the
+	// collectors that back it with a real kernel-side counter (syscall,
+	// network, fileaccess, privesc — the four sharing the events ring buffer
+	// via reserve_event()/reserve_event_with_sampling(), see bpf/common.h's
+	// ringbuf_full_counters and 5.9.6a in plan.md, №71). For every other
+	// collector this series still reports the pre-5.9.6a meaning: events
+	// dropped when the collector's own output channel was full — a
+	// userspace hop, not a kernel one, already counted under
+	// ebpf_guard_events_dropped_total{reason="ringbuf_to_router"}. That
+	// double meaning is a known residual of 5.9.6a, not a design choice —
+	// see plan.md 5.9.6a for which collectors are which.
+	// Incremented by the watchdog drop-tracking loop every 10 seconds from
+	// each collector's DropTracker.LostEvents().
 	BPFLostEvents = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ebpf_guard_bpf_lost_events_total",
-			Help: "Total number of events dropped by BPF collectors due to consumer backpressure",
+			Help: "Total number of events lost: kernel ring-buffer-full for syscall/network/fileaccess/privesc, consumer backpressure for other collectors (5.9.6a, see plan.md)",
 		},
 		[]string{"collector"},
 	)
@@ -289,6 +315,14 @@ func RecordDropped(collector, reason string) {
 // P1-18b path-filter drop map) rather than observed one event at a time.
 func RecordDroppedN(collector, reason string, n uint64) {
 	EventsDropped.WithLabelValues(collector, reason).Add(float64(n))
+}
+
+// RecordEmittedKernelN adds n to the kernel-emitted events counter for
+// collector. Used when the count is read as a periodic delta from a BPF
+// counter (events_emitted_counters, 5.9.6b) rather than observed one event
+// at a time.
+func RecordEmittedKernelN(collector string, n uint64) {
+	EventsEmittedKernel.WithLabelValues(collector).Add(float64(n))
 }
 
 // RecordMalformed increments the malformed-record counter with reason. See

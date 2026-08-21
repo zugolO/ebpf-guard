@@ -24,11 +24,13 @@ type SyscallMaps struct {
 	AgentPidMap              *ebpf.Map `ebpf:"agent_pid_map"`
 	CommFilterMap            *ebpf.Map `ebpf:"comm_filter_map"`
 	Events                   *ebpf.Map `ebpf:"events"`
+	EventsEmittedCounters    *ebpf.Map `ebpf:"events_emitted_counters"`
 	KernelFilterConfig       *ebpf.Map `ebpf:"kernel_filter_config"`
 	MapFullCounters          *ebpf.Map `ebpf:"map_full_counters"`
 	ObserverExcludedCounters *ebpf.Map `ebpf:"observer_excluded_counters"`
 	ObserverRootPid          *ebpf.Map `ebpf:"observer_root_pid"`
 	ObserverTreeCache        *ebpf.Map `ebpf:"observer_tree_cache"`
+	RingbufFullCounters      *ebpf.Map `ebpf:"ringbuf_full_counters"`
 	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
 	SyscallFilterMap         *ebpf.Map `ebpf:"syscall_filter_map"`
 }
@@ -67,6 +69,9 @@ func (o *SyscallObjects) Close() error {
 	if o.Events != nil {
 		errs = append(errs, o.Events.Close())
 	}
+	if o.EventsEmittedCounters != nil {
+		errs = append(errs, o.EventsEmittedCounters.Close())
+	}
 	if o.KernelFilterConfig != nil {
 		errs = append(errs, o.KernelFilterConfig.Close())
 	}
@@ -87,6 +92,9 @@ func (o *SyscallObjects) Close() error {
 	}
 	if o.ObserverTreeCache != nil {
 		errs = append(errs, o.ObserverTreeCache.Close())
+	}
+	if o.RingbufFullCounters != nil {
+		errs = append(errs, o.RingbufFullCounters.Close())
 	}
 	return errors.Join(errs...)
 }

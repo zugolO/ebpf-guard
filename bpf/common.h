@@ -342,19 +342,107 @@ static __always_inline bool should_sample(__u32 event_type, __u32 rate)
 	return (new_count % rate) == 0;
 }
 
+/*
+ * ringbuf_full_counters - per-CPU counter for a failed bpf_ringbuf_reserve()
+ * on the shared `events` ring buffer (syscall.bpf.c, network.bpf.c,
+ * fileaccess.bpf.c, privesc.bpf.c all include this header and share this
+ * counter within their own compiled object). Index 0: total reserve
+ * failures, i.e. events the kernel produced but the ring buffer was too full
+ * to accept.
+ *
+ * This is placed inside reserve_event()/reserve_event_with_sampling() below,
+ * not at the call sites — 5.9.6a (№71). The project already tried "count at
+ * every call site" for a different drop class and it held for a while
+ * (path_filter_drop_counters, net_block_counters), but there are more than
+ * twenty bpf_ringbuf_reserve() call sites across the whole tree, and a drop
+ * counted only by caller discipline is a drop that goes uncounted the first
+ * time someone adds call site twenty-one and forgets. Counting inside the
+ * macro means the number of call sites is irrelevant.
+ *
+ * A should_sample()==false skip is NOT a ring-buffer-full drop — it is a
+ * deliberate sampling decision, already accounted for by event_counters —
+ * and must not increment this counter. The macro below only reaches the
+ * increment after actually calling bpf_ringbuf_reserve() and finding it
+ * returned NULL, so a sampled-out event never touches this counter.
+ *
+ * Userspace sums across CPUs and exports as
+ * ebpf_guard_events_dropped_total{collector=...,reason="ringbuf_full"} —
+ * see cmd/ebpf-guard/main.go's ringbufFullRegistry — and separately backs
+ * ebpf_guard_bpf_lost_events_total{collector=...} for these four collectors
+ * (watchdog.DropTracker), replacing the previous userspace-hop count that
+ * metric used to report under a kernel-sounding name (№71 in plan.md).
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} ringbuf_full_counters SEC(".maps");
+
+/* Increment the in-kernel ring-buffer-full drop counter (per-CPU). */
+static __always_inline void record_ringbuf_full(void)
+{
+	__u32 idx = 0;
+	__u64 *cnt = bpf_map_lookup_elem(&ringbuf_full_counters, &idx);
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
+/*
+ * events_emitted_counters - per-CPU counter for a SUCCESSFUL
+ * bpf_ringbuf_reserve() on the shared `events` ring buffer — the left-hand
+ * side of 5.9.6b's (№72) event balance identity:
+ *   emitted_kernel == events_total + Σdropped + excluded + malformed
+ * Without this, "how many events did the kernel actually produce" has to be
+ * inferred from events_total, which is measured downstream of every filter —
+ * exactly the gap 5.9.6b closes.
+ *
+ * A reservation that succeeds here always reaches submit_event() in this
+ * codebase's four shared-ringbuf files (syscall/network/fileaccess/privesc
+ * never call bpf_ringbuf_discard() on the `events` ring buffer), so counting
+ * at reserve success is equivalent to counting at submit and is simpler:
+ * one place instead of eight call sites.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} events_emitted_counters SEC(".maps");
+
+/* Increment the in-kernel successful-reserve counter (per-CPU). */
+static __always_inline void record_event_emitted(void)
+{
+	__u32 idx = 0;
+	__u64 *cnt = bpf_map_lookup_elem(&events_emitted_counters, &idx);
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
 /* Helper macro to reserve space in ring buffer with sampling check */
 #define reserve_event_with_sampling(event_type, sample_rate) \
 	({ \
 		struct event *__e = NULL; \
 		if (should_sample(event_type, sample_rate)) { \
 			__e = bpf_ringbuf_reserve(&events, sizeof(struct event), 0); \
+			if (__e) \
+				record_event_emitted(); \
+			else \
+				record_ringbuf_full(); \
 		} \
 		__e; \
 	})
 
 /* Helper macro to reserve space in ring buffer (no sampling - legacy) */
 #define reserve_event() \
-	bpf_ringbuf_reserve(&events, sizeof(struct event), 0)
+	({ \
+		struct event *__e = bpf_ringbuf_reserve(&events, sizeof(struct event), 0); \
+		if (__e) \
+			record_event_emitted(); \
+		else \
+			record_ringbuf_full(); \
+		__e; \
+	})
 
 /* Helper macro to submit event to ring buffer */
 #define submit_event(e) \

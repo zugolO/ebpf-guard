@@ -708,6 +708,24 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// below — hence the mutex and the replay of the last known root.
 	observerFilters := &observerFilterRegistry{}
 
+	// ringbufFullTrackers holds the ringbuf_full_counters map for each
+	// collector sharing the `events` ring buffer (syscall, network,
+	// fileaccess), so the periodic stats loop below can publish
+	// ebpf_guard_events_dropped_total{collector,reason="ringbuf_full"} — the
+	// kernel-side loss counter added by 5.9.6a (№71) so a full ring buffer is
+	// no longer silently absorbed. See kernelCounterRegistry for the drain.
+	ringbufFullTrackers := &kernelCounterRegistry{
+		sink: func(collector string, delta uint64) {
+			exporter.RecordDroppedN(collector, "ringbuf_full", delta)
+		},
+	}
+	// emittedTrackers holds the events_emitted_counters map for the same
+	// three collectors — the kernel-side count of successful reserves,
+	// the left-hand side of 5.9.6b's (№72) event balance identity.
+	emittedTrackers := &kernelCounterRegistry{
+		sink: exporter.RecordEmittedKernelN,
+	}
+
 	if cfg.Correlator.ObserverExclude.Enabled {
 		rootPIDFile := cfg.Correlator.ObserverExclude.RootPIDFile
 		slog.Info("correlator: observer-root-pid poller starting (5.9a, test-only)",
@@ -1245,6 +1263,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				if name != "syscall" || !up {
 					return
 				}
+				ringbufFullTrackers.register("syscall", sc.RingbufFullMap())
+				emittedTrackers.register("syscall", sc.EmittedMap())
 				if cfg.BPF.KernelFilter.Enabled {
 					comm, sys, kfCfg, agentPID := sc.KernelFilterMaps()
 					enableKernelFilter("syscall", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter)
@@ -1278,11 +1298,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			// would silently keep emitting harness events while syscall and
 			// fileaccess dropped theirs, and the "share of the observer tree"
 			// criterion would be measured against a partially filtered stream.
-			if cfg.BPF.Sampling.Enabled || cfg.Correlator.ObserverExclude.Enabled {
+			// 5.9.6a: also needed unconditionally to register the kernel-side
+			// ringbuf_full counter, so the reporter is now always attached.
+			{
 				nc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
 					if name != "network" || !up {
 						return
 					}
+					ringbufFullTrackers.register("network", nc.RingbufFullMap())
+					emittedTrackers.register("network", nc.EmittedMap())
 					if cfg.BPF.Sampling.Enabled {
 						enableSampling("network", nc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "network")
 					}
@@ -1301,11 +1325,16 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		} else {
 			fo := cfg.Collectors.FileOps
 			fc.WithFileOps(fo.TrackOpen, fo.TrackRead, fo.TrackWrite)
-			if cfg.BPF.Sampling.Enabled || cfg.BPF.KernelFilter.Enabled || cfg.Correlator.ObserverExclude.Enabled {
+			// 5.9.6a: unconditionally attached now to register the kernel-side
+			// ringbuf_full counter, not only for the sampling/filter/observer
+			// options below.
+			{
 				fc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
 					if name != "fileaccess" || !up {
 						return
 					}
+					ringbufFullTrackers.register("fileaccess", fc.RingbufFullMap())
+					emittedTrackers.register("fileaccess", fc.EmittedMap())
 					// P0-22 (wave 0.5): fileaccess.bpf.c consults its OWN copies
 					// of comm_filter_map / kernel_filter_config / agent_pid_map.
 					// Populating the syscall collector's maps leaves these zeroed,
@@ -1804,6 +1833,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		exporter.EventsDropped.WithLabelValues(name, "ringbuf_to_router")
 		exporter.EventsDropped.WithLabelValues(name, "router_to_queue")
 	}
+	// 5.9.6a (№71): pre-register the kernel ring-buffer-full series for the
+	// three collectors sharing the `events` ring buffer's reserve_event()/
+	// reserve_event_with_sampling() macros. privesc is excluded — its
+	// collector is not currently instantiated in this startup sequence (see
+	// plan.md 5.9.6a open questions), so pre-registering it here would print
+	// a permanently-zero series for a collector that never runs.
+	for _, name := range []string{"syscall", "network", "fileaccess"} {
+		exporter.EventsDropped.WithLabelValues(name, "ringbuf_full")
+		// 5.9.6b (№72): same three collectors, the balance identity's
+		// left-hand side.
+		exporter.EventsEmittedKernel.WithLabelValues(name)
+	}
 	// P1-18b: pre-register the path_denylist series too, and track the
 	// cumulative BPF-side total so the 15s poll below can report deltas
 	// (RecordDroppedN adds to a Prometheus counter — feeding it the
@@ -1827,6 +1868,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				exporter.SetLearningComplete(complete)
 				exporter.SetLearningSecondsRemaining(remaining)
 				exporter.SetTrackedPIDs(float64(engine.TrackedPIDCount()))
+
+				// 5.9.6a (№71): drain the kernel ring-buffer-full counters onto
+				// ebpf_guard_events_dropped_total{reason="ringbuf_full"} so a
+				// full ring buffer shows up as a visible, growing number
+				// per collector instead of being absorbed as an unexplained
+				// gap between events_total and the actual syscall/connection/
+				// file-op rate.
+				ringbufFullTrackers.drain()
+				emittedTrackers.drain()
 
 				// P1-18b: publish the in-kernel path-filter drop count so a
 				// wrong denylist prefix shows up as a visible, growing
@@ -4380,4 +4430,84 @@ func (r *observerFilterRegistry) drainExcluded() uint64 {
 		r.lastExcluded[name] = total
 	}
 	return delta
+}
+
+// kernelCounterRegistry holds each core collector's copy of a single-slot
+// PERCPU_ARRAY BPF counter (ringbuf_full_counters for 5.9.6a/№71,
+// events_emitted_counters for 5.9.6b/№72 — see bpf/common.h) and drains it,
+// per collector, into whatever Prometheus series sink reports.
+//
+// Deliberately separate from observerFilterRegistry despite the similar
+// shape: that registry sums across collectors into one correlator-side
+// number (the "share of the observer tree" is a single question), while this
+// one must keep collectors apart — 5.9.6b's per-collector event balance
+// needs to attribute a kernel-side count to the collector it happened in,
+// not to a project-wide total.
+type kernelCounterRegistry struct {
+	mu   sync.Mutex
+	maps map[string]*ebpf.Map
+	last map[string]uint64
+
+	// sink receives the delta for one collector on a positive read. Two
+	// instances of this registry exist, each with its own sink: one that
+	// reports through ebpf_guard_events_dropped_total{reason="ringbuf_full"}
+	// and one through ebpf_guard_events_emitted_kernel_total.
+	sink func(collector string, delta uint64)
+}
+
+// register adds a collector's counter map. A nil map (stub build, or a
+// collector that failed to load) is ignored — there is nothing to drain, and
+// pre-registering a series that can never move would be worse than not
+// having it: the run-gate treats an unmoving series as evidence of health,
+// not absence.
+func (r *kernelCounterRegistry) register(name string, m *ebpf.Map) {
+	if m == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.maps == nil {
+		r.maps = make(map[string]*ebpf.Map)
+		r.last = make(map[string]uint64)
+	}
+	r.maps[name] = m
+}
+
+// drain reads every registered collector's cumulative counter total and
+// reports the delta since the previous call to r.sink. A counter that went
+// backwards had its map recreated (collector reload) and is re-baselined
+// rather than subtracted — the same trap the path-filter and
+// observer-exclusion drains guard against.
+func (r *kernelCounterRegistry) drain() {
+	r.mu.Lock()
+	maps := make(map[string]*ebpf.Map, len(r.maps))
+	for k, v := range r.maps {
+		maps[k] = v
+	}
+	r.mu.Unlock()
+
+	for name, m := range maps {
+		total, err := internalbpf.SumPerCPUUint64(m)
+		if err != nil {
+			slog.Warn("kernel_counter: failed to read counter",
+				slog.String("collector", name), slog.Any("error", err))
+			continue
+		}
+		r.mu.Lock()
+		prev := r.last[name]
+		if total < prev {
+			slog.Debug("kernel_counter: counter reset, re-baselining",
+				slog.String("collector", name),
+				slog.Uint64("previous", prev), slog.Uint64("current", total))
+			r.last[name] = total
+			r.mu.Unlock()
+			continue
+		}
+		delta := total - prev
+		r.last[name] = total
+		r.mu.Unlock()
+		if delta > 0 {
+			r.sink(name, delta)
+		}
+	}
 }

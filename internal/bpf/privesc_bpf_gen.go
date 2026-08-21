@@ -21,7 +21,9 @@ import (
 
 // PrivescMaps holds the BPF maps exported by bpf/privesc.bpf.c.
 type PrivescMaps struct {
-	Events *ebpf.Map `ebpf:"events"`
+	Events                *ebpf.Map `ebpf:"events"`
+	EventsEmittedCounters *ebpf.Map `ebpf:"events_emitted_counters"`
+	RingbufFullCounters   *ebpf.Map `ebpf:"ringbuf_full_counters"`
 }
 
 // PrivescPrograms holds the BPF programs exported by bpf/privesc.bpf.c.
@@ -47,6 +49,12 @@ func (o *PrivescObjects) Close() error {
 	}
 	if o.Events != nil {
 		errs = append(errs, o.Events.Close())
+	}
+	if o.EventsEmittedCounters != nil {
+		errs = append(errs, o.EventsEmittedCounters.Close())
+	}
+	if o.RingbufFullCounters != nil {
+		errs = append(errs, o.RingbufFullCounters.Close())
 	}
 	return errors.Join(errs...)
 }

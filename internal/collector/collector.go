@@ -138,6 +138,12 @@ type malformedLogger struct {
 
 	mu         sync.Mutex
 	lastSample []byte
+	// lastExtra holds the structured fields (5.9.6g, №65) passed alongside
+	// the last recorded sample — e.g. DNS's direction/payload_len. Kept
+	// next to lastSample under the same lock so the fields logged when the
+	// throttle window opens describe the SAME occurrence as sample_hex,
+	// not a stale one from an earlier call that happened to lose the race.
+	lastExtra []slog.Attr
 }
 
 func newMalformedLogger(interval time.Duration) *malformedLogger {
@@ -145,8 +151,13 @@ func newMalformedLogger(interval time.Duration) *malformedLogger {
 }
 
 // record notes one occurrence of reason, keeping up to the first 48 bytes of
-// raw as the sample logged when the throttle window next opens.
-func (m *malformedLogger) record(logger *slog.Logger, collectorName, reason string, raw []byte) {
+// raw as the sample logged when the throttle window next opens. extra is an
+// optional set of structured fields describing this specific occurrence
+// (5.9.6g) — e.g. the DNS event's direction and payload_len, which the
+// caller already parsed from the fixed header before the payload itself
+// failed to decode, and which a hex dump alone forces a human to re-derive
+// by hand. Existing callers (syscall.go) pass none and are unaffected.
+func (m *malformedLogger) record(logger *slog.Logger, collectorName, reason string, raw []byte, extra ...slog.Attr) {
 	m.pending.Add(1)
 
 	n := len(raw)
@@ -155,6 +166,7 @@ func (m *malformedLogger) record(logger *slog.Logger, collectorName, reason stri
 	}
 	m.mu.Lock()
 	m.lastSample = append(m.lastSample[:0], raw[:n]...)
+	m.lastExtra = append([]slog.Attr(nil), extra...)
 	m.mu.Unlock()
 
 	now := time.Now().UnixNano()
@@ -171,11 +183,17 @@ func (m *malformedLogger) record(logger *slog.Logger, collectorName, reason stri
 	}
 	m.mu.Lock()
 	sample := hex.EncodeToString(m.lastSample)
+	lastExtra := m.lastExtra
 	m.mu.Unlock()
-	logger.Warn("malformed event record",
+	args := []any{
 		slog.String("collector", collectorName),
 		slog.String("reason", reason),
 		slog.Int64("count", count),
 		slog.String("window", m.interval.String()),
-		slog.String("sample_hex", sample))
+		slog.String("sample_hex", sample),
+	}
+	for _, a := range lastExtra {
+		args = append(args, a)
+	}
+	logger.Warn("malformed event record", args...)
 }

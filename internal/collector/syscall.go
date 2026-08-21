@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -28,7 +27,6 @@ type SyscallCollector struct {
 	status      StatusReporter
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
-	lostTotal   atomic.Uint64
 	// injectable dependencies — set to production defaults in NewSyscallCollector.
 	loader   syscallLoader
 	opener   ringbufOpener
@@ -333,17 +331,49 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordEventDrop("syscall", "ringbuf_to_router", defaultEventPriority(event.Type))
 			c.dropLogger.record(c.logger, "syscall")
-			c.lostTotal.Add(1)
 		})
 		event.Reset()
 		eventPool.Put(event)
 	}
 }
 
-// LostEvents returns the total number of events lost in the BPF ring buffer
-// since the collector started. Implements watchdog.DropTracker.
+// LostEvents returns the cumulative number of events lost to a full kernel
+// ring buffer since the BPF program loaded (5.9.6a, №71) — read from
+// ringbuf_full_counters, not from a userspace channel-drop counter, so the
+// name watchdog.DropTracker publishes this under actually means what it says.
+// Implements watchdog.DropTracker.
 func (c *SyscallCollector) LostEvents() uint64 {
-	return c.lostTotal.Load()
+	m := c.RingbufFullMap()
+	if m == nil {
+		return 0
+	}
+	total, err := bpf.SumPerCPUUint64(m)
+	if err != nil {
+		c.logger.Warn("failed to read ringbuf_full_counters", "error", err)
+		return 0
+	}
+	return total
+}
+
+// RingbufFullMap returns the ringbuf_full_counters BPF map backing
+// LostEvents, or nil in stub/dry-run mode. Exposed so main.go can also drain
+// it into ebpf_guard_events_dropped_total{reason="ringbuf_full"} (5.9.6a).
+func (c *SyscallCollector) RingbufFullMap() *ebpf.Map {
+	if c.objs == nil {
+		return nil
+	}
+	return c.objs.RingbufFullCounters
+}
+
+// EmittedMap returns the events_emitted_counters BPF map — the kernel-side
+// count of successful bpf_ringbuf_reserve() calls, i.e. events the kernel
+// actually produced, the left-hand side of 5.9.6b's event balance identity
+// (№72) — or nil in stub/dry-run mode.
+func (c *SyscallCollector) EmittedMap() *ebpf.Map {
+	if c.objs == nil {
+		return nil
+	}
+	return c.objs.EventsEmittedCounters
 }
 
 // MapFullCountersMap returns the BPF map_full_counters PERCPU_ARRAY, or nil

@@ -66,6 +66,27 @@ var dnsDecodeReasons = []string{
 	dnsDecodeReasonUnparseable,
 }
 
+// dnsHeaderDiagFields reads direction and payload_len straight out of the
+// fixed dns_event header, independent of whether decodeDNSEvent went on to
+// parse the wire message successfully. 5.9.6g (№65): the three decode-error
+// hypotheses from 5.9.5c — a response captured with the wrong assumption
+// about which side is which, a non-UDP/53 message reaching the parser
+// (TCP-DNS/mDNS), and truncation at DNS_MAX_PAYLOAD — are exactly the three
+// things these two fields distinguish. bad_qname/compression_loop on a
+// direction=1 (response) with payload_len at or near dnsMaxPayload usually
+// means hypothesis 3; the same reason on a small payload_len rules 3 out and
+// points at 1 or 2 instead. ok is false when raw is too short for even the
+// fixed header (too_short/unparseable already cover that case; the caller
+// doesn't log these fields there because there is nothing reliable to read).
+func dnsHeaderDiagFields(raw []byte) (direction byte, payloadLen uint16, ok bool) {
+	if len(raw) < dnsRawEventFixedLen {
+		return 0, 0, false
+	}
+	direction = raw[dnsRawEventFixedLen-3]
+	payloadLen = binary.LittleEndian.Uint16(raw[dnsRawEventFixedLen-2:])
+	return direction, payloadLen, true
+}
+
 // decodeDNSEvent parses a raw ring buffer record into a types.Event. It has no
 // kernel dependencies — it only decodes bytes — so it is unit-tested directly
 // without a running probe.

@@ -2,6 +2,7 @@ package correlator
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -574,6 +575,72 @@ func intentionalLossRuleIDs(t *testing.T, path string) map[string]struct{} {
 	return ids
 }
 
+// silentRulesRegistry parses silent-rules.txt's "<rule_id> <category>"
+// format (see the file's own header). Unlike intentionalLossRuleIDs' bare
+// one-id-per-line format, each line here carries a category token — kept as
+// a separate parser rather than overloading intentionalLossRuleIDs, whose
+// callers all rely on its "whole trimmed line is the id" behavior.
+func silentRulesRegistry(t *testing.T, path string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	reg := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		require.Lenf(t, fields, 2, "%s: malformed line %q — expected exactly \"<rule_id> <category>\"", path, line)
+		id, cat := fields[0], fields[1]
+		if prev, ok := reg[id]; ok {
+			require.Equalf(t, prev, cat, "%s: rule %q recorded twice with different categories (%q vs %q) — a rule cannot be both \"silent by construction\" and \"silent because of environment\"", path, id, prev, cat)
+		}
+		reg[id] = cat
+	}
+	return reg
+}
+
+// TestExplanationRegistries_ReferenceRealRules is the machine gate wave
+// 5.9.5d (finding №63) promises: background-rules.txt, intentional-loss.txt
+// and silent-rules.txt are read by run-gate.sh criterion 6 and its
+// 5.9.4h section purely by rule_id string match (comm -12 / awk), with no
+// check that the id still names a loaded rule. A renamed or deleted rule
+// left behind in one of these files would silently stop being "explained"
+// (or worse, silently keep matching a coincidentally-reused id) and nobody
+// would notice — this test catches that at review time instead of on a live
+// gate run.
+func TestExplanationRegistries_ReferenceRealRules(t *testing.T) {
+	rules, err := LoadRulesFromDir("../../rules")
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	validIDs := make(map[string]struct{}, len(rules)+1)
+	for _, r := range rules {
+		validIDs[r.ID] = struct{}{}
+	}
+	// "anomaly_detection" is not a YAML rule — it's the synthetic RuleID the
+	// profiler stamps on EWMA anomaly alerts (internal/correlator/engine.go,
+	// internal/feedback/manager.go's anomalyRuleID). background-rules.txt
+	// legitimately explains it the same way it explains any other rule_id.
+	validIDs["anomaly_detection"] = struct{}{}
+
+	checkBareList := func(path string) {
+		for id := range intentionalLossRuleIDs(t, path) {
+			assert.Containsf(t, validIDs, id, "%s: rule_id %q does not name any loaded rule under rules/ — stale or misspelled entry", path, id)
+		}
+	}
+	checkBareList("../../deploy/docker-test-setup/attacks/background-rules.txt")
+	checkBareList("../../deploy/docker-test-setup/attacks/intentional-loss.txt")
+
+	silentPath := "../../deploy/docker-test-setup/attacks/silent-rules.txt"
+	for id := range silentRulesRegistry(t, silentPath) {
+		assert.Containsf(t, validIDs, id, "%s: rule_id %q does not name any loaded rule under rules/ — stale or misspelled entry", silentPath, id)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DestructiveRulesWithoutArgCondition — wave 5.9.4b, finding №53
 // ─────────────────────────────────────────────────────────────────────────────
@@ -645,6 +712,133 @@ func TestDestructiveRulesInventory_RepoRules(t *testing.T) {
 	assert.Contains(t, canary, "zz_canary_destructive_no_arg")
 }
 
+// TestKillScenarioControlRule_ActionIsKill guards the rule wave 5.9.5a
+// designated as the live positive control for run-gate.sh criterion 17 (the
+// kill-scenario in run_kill_scenario, deploy/docker-test-setup/attacks/
+// run-all-attacks.sh): ebpf_subversion_detach_nonroot is the only repo rule
+// with action: kill, and the scenario relies on it having no comm condition
+// (so a non-root child of the harness — not a comm-whitelisted binary — can
+// trigger it) and firing on nr=321 (bpf syscall) with arg0 one of the
+// destructive bpf(2) commands and uid>0.
+//
+// If a future edit downgrades this rule's action away from kill, or narrows
+// it with a comm condition, criterion 17 stops proving anything the moment
+// it starts passing vacuously again (finding №62) — this test is the machine
+// check destructive-actions.txt (5.9.5a block) promises exists.
+func TestKillScenarioControlRule_ActionIsKill(t *testing.T) {
+	rules, err := LoadRulesFromDir("../../rules")
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	var kills []Rule
+	var control *Rule
+	for i := range rules {
+		if rules[i].Action != ActionKill {
+			continue
+		}
+		kills = append(kills, rules[i])
+		if rules[i].ID == "ebpf_subversion_detach_nonroot" {
+			control = &rules[i]
+		}
+	}
+
+	var killIDs []string
+	for _, r := range kills {
+		killIDs = append(killIDs, r.ID)
+	}
+	require.NotNilf(t, control, "kill-scenario control rule ebpf_subversion_detach_nonroot not found among kill-action rules %v — 5.9.5a's positive control has no target left", killIDs)
+	require.Equal(t, []string{"ebpf_subversion_detach_nonroot"}, killIDs,
+		"kill-scenario control rule assumes it is the ONLY kill-action rule in the repo; a new one changes what criterion 17's pairing check actually proves and needs its own review")
+
+	require.NotNil(t, control.ConditionGroup, "control rule must use condition_group (nr+arg0+uid), not a single condition")
+	var sawComm, sawNR, sawArg0, sawUID bool
+	for _, c := range control.ConditionGroup.Conditions {
+		switch c.Field {
+		case "comm":
+			sawComm = true
+		case "nr":
+			sawNR = true
+			assert.Contains(t, c.Values, "321", "control rule must match bpf(2), nr=321")
+		case "arg0":
+			sawArg0 = true
+			assert.Contains(t, c.Values, "3", "control rule must accept BPF_MAP_DELETE_ELEM=3 — that's what run_kill_scenario invokes")
+		case "uid":
+			sawUID = true
+			assert.Equal(t, OpGreaterThan, c.Op, "control rule must require uid>0 — the scenario runs as a non-root harness child")
+		}
+	}
+	assert.False(t, sawComm, "control rule must NOT gate on comm — that's what makes it immune to attacker-comm exclusions, unlike ebpf_subversion_unauthorized_caller")
+	assert.True(t, sawNR && sawArg0 && sawUID, "control rule must condition on nr, arg0 and uid — run_kill_scenario's bpf(BPF_MAP_DELETE_ELEM) call satisfies exactly these")
+}
+
+// TestDNSLongLabelControlRules_MatchOnQNameLengthAlone guards the four rules
+// wave 5.9.5c (findings №64/№65) designated as the live positive control for
+// run_dns_long_label_attack (run-all-attacks.sh): dns_tunneling_long_domain,
+// exfil_dns_txt_long_label, netintr_dns_long_label and
+// webshell_dns_exfil_long_subdomain all fire on qname_length alone, with no
+// comm condition — which is exactly what lets one long-label query satisfy
+// all four regardless of which process resolves it (the attack step uses
+// dig, none of these rules name it; qname_length is measured on the full
+// dotted name, so the step spends its length on several labels rather than
+// one over-long one).
+//
+// On замер №2.9.4 these four were silent for the whole agent uptime with no
+// scenario ever having exercised them, and it could not be told apart from a
+// DNS-parse regression. If a future edit adds a comm condition, or raises a
+// threshold past what the attack step's label satisfies (a single label
+// built from two 60-char filler labels plus a run-scoped marker label,
+// comfortably over the highest threshold here — netintr_dns_long_label's
+// 100), the positive
+// control stops proving anything the moment it starts passing vacuously
+// again — this test is the machine check finding №64's "не нет сценария"
+// conclusion depends on.
+func TestDNSLongLabelControlRules_MatchOnQNameLengthAlone(t *testing.T) {
+	rules, err := LoadRulesFromDir("../../rules")
+	if err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	byID := make(map[string]*Rule, len(rules))
+	for i := range rules {
+		byID[rules[i].ID] = &rules[i]
+	}
+
+	cases := []struct {
+		id     string
+		thresh int // expected qname_length threshold, reviewed against the attack step's label
+	}{
+		{"dns_tunneling_long_domain", 50},
+		{"exfil_dns_txt_long_label", 60},
+		{"netintr_dns_long_label", 100},
+		{"webshell_dns_exfil_long_subdomain", 60},
+	}
+
+	// The attack step builds a MULTI-LABEL name, not one long label: RFC 1035
+	// caps a single label at 63 octets and dig refuses to send a query that
+	// breaks it, so the length that clears these thresholds has to come from
+	// several labels — filler(60) + "." + filler(60) + "." +
+	// "ebpfguard-5951c-" + TIMESTAMP(>=15) + ".dns-tunnel-canary.invalid"(26),
+	// i.e. >= 60+1+60+1+16+15+26 = 179 chars, every label under 63 and the
+	// whole name under the 253-octet limit. 150 keeps a safety margin without
+	// this test having to reproduce run-all-attacks.sh's exact TIMESTAMP format.
+	const attackLabelMinLength = 150
+
+	for _, c := range cases {
+		r, ok := byID[c.id]
+		require.Truef(t, ok, "control rule %q not found among loaded rules — 5.9.5c's positive control has no target left", c.id)
+		assert.Equalf(t, types.EventDNS, r.EventType, "%s must be event_type: dns", c.id)
+		require.Nilf(t, r.ConditionGroup, "%s must use a single condition (field: qname_length), not condition_group — a condition_group could hide a comm gate the attack step doesn't satisfy", c.id)
+		assert.Equalf(t, "qname_length", r.Condition.Field, "%s must condition on qname_length alone", c.id)
+		assert.Equalf(t, OpGreaterThan, r.Condition.Op, "%s must use op: gt", c.id)
+		require.Len(t, r.Condition.Values, 1)
+		thresh, convErr := strconv.Atoi(r.Condition.Values[0])
+		require.NoError(t, convErr)
+		assert.Equalf(t, c.thresh, thresh, "%s threshold changed from the value 5.9.5c reviewed — re-check it against run_dns_long_label_attack's label before updating this constant", c.id)
+		assert.Lessf(t, thresh, attackLabelMinLength, "%s threshold %d must stay below the attack label's guaranteed length (%d) or the control stops proving anything", c.id, thresh, attackLabelMinLength)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ExclusionsCollidingWithAttackerComms — wave 5.9.4e, finding №56
 // ─────────────────────────────────────────────────────────────────────────────
@@ -676,6 +870,7 @@ var knownAttackerComms = map[string]bool{
 	"bpftool": true, // run_bpf_attack (5.9.2b/5.9.4e) — the finding-№56 comm itself
 	"insmod":  true, // run_kmod_attack
 	"python3": true, // run_setuid_attack
+	"dig":     true, // run_dns_long_label_attack (5.9.5c, findings №64/№65)
 }
 
 func TestExclusionsCollidingWithAttackerComms(t *testing.T) {
@@ -712,17 +907,55 @@ func TestExclusionsCollidingWithAttackerComms_RepoRules(t *testing.T) {
 	}
 	re := NewRuleEngine(rules)
 	recorded := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/attacker-comm-exclusions.txt")
+	// 5.9.5h (finding №69): a rule already recorded in intentional-loss.txt
+	// ("no scenario on this stand") has zero positive control regardless of
+	// which comm is excluded — the comm-exclusion collision can't be the
+	// thing blinding it, because nothing reaches its other conditions
+	// either. Accepting this registry too, instead of requiring the same
+	// rule_id to also carry a redundant entry in attacker-comm-exclusions.txt,
+	// keeps each silence explained exactly once — see
+	// TestIntentionalLossAndCommExclusionsDontDoubleBook below for the
+	// invariant that enforces "exactly once" going forward.
+	noScenario := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/intentional-loss.txt")
 
 	got := re.ExclusionsCollidingWithAttackerComms(knownAttackerComms)
 	t.Logf("правил проверено на пересечение исключения по comm с манифестом атак: %d, найдено коллизий: %d %v",
 		len(rules), len(got), got)
 
 	for _, id := range got {
-		assert.Contains(t, recorded, id,
+		_, inExclusions := recorded[id]
+		_, inNoScenario := noScenario[id]
+		assert.Truef(t, inExclusions || inNoScenario,
 			"rule %q excludes a comm that an attack script actually runs as — it can never fire "+
 				"on that attack step: either give it a real argument/value condition (the way "+
 				"5.9.4e fixed rootkit_bpf_prog_load_suspicious/rootkit_bpf_map_create_suspicious, "+
 				"finding №56) or record why the collision isn't a coverage gap in "+
-				"attacker-comm-exclusions.txt", id)
+				"attacker-comm-exclusions.txt (or in intentional-loss.txt, if the rule has no "+
+				"scenario on this stand at all)", id)
+	}
+}
+
+// TestIntentionalLossAndCommExclusionsDontDoubleBook is the machine check
+// wave 5.9.5h added for finding №69: exfil_large_http_post was recorded in
+// BOTH intentional-loss.txt ("no scenario" — nothing on this stand ever
+// makes a large POST to the tracked non-standard ports, full stop) AND
+// attacker-comm-exclusions.txt (its comm not_in list excludes python3,
+// which does run as an attack step). Two reasons for one silence is worse
+// than one: a reader trusts whichever registry they open first, and the
+// two can drift independently. A rule with a genuine "no scenario" entry
+// can never be additionally blinded by a comm exclusion — nothing reaches
+// that condition either way — so the comm-collision entry is always
+// redundant once "no scenario" is recorded, never a second real cause.
+func TestIntentionalLossAndCommExclusionsDontDoubleBook(t *testing.T) {
+	noScenario := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/intentional-loss.txt")
+	commExclusions := intentionalLossRuleIDs(t, "../../deploy/docker-test-setup/attacks/attacker-comm-exclusions.txt")
+
+	for id := range noScenario {
+		assert.NotContainsf(t, commExclusions, id,
+			"rule %q is recorded in both intentional-loss.txt (\"no scenario\") and "+
+				"attacker-comm-exclusions.txt (comm collision) — a rule with no scenario on this "+
+				"stand can't be separately blinded by a comm exclusion; consolidate to the single "+
+				"intentional-loss.txt entry and drop the attacker-comm-exclusions.txt one (5.9.5h, "+
+				"finding №69)", id)
 	}
 }

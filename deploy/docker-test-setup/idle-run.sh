@@ -211,9 +211,12 @@ snapshot() {
     # выполняется один раз в конце окна измерения (см. постобработку ниже),
     # чтобы не добавлять grep/awk-процессы в сам измеряемый период.
     local pid rss loadavg memavail
-    pid="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)"
-    if [[ -n "$pid" && "$pid" != "0" ]]; then
+    pid="$SERVICE_PID"
+    if [[ -n "$pid" && -d "/proc/$pid" ]]; then
         rss="$(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    elif [[ -n "$pid" ]]; then
+        log "ВНИМАНИЕ: PID $pid сервиса $SERVICE не найден в /proc на срезе $pad — процесс умер или незапланированно перезапустился (PID сменился бы, а окно снимает его только один раз, см. 5.9.5f)."
+        pid=""
     fi
     loadavg="$(cut -d' ' -f1 /proc/loadavg)"
     memavail="$(awk '/MemAvailable/{print $2}' /proc/meminfo)"
@@ -231,6 +234,18 @@ snapshot() {
 }
 
 printf 'timestamp\tn\trss_kb\tcpu_pct\tloadavg\tmem_avail_kb\n' > "$OUT/timeseries-raw.tsv"
+
+# 5.9.5f (находка №68): systemctl show на каждом срезе форкает systemctl(1), который
+# говорит с PID 1 по dbus — это процесс ВНЕ дерева харнесса, наблюдательный фильтр
+# observer_exclude его не ловит по построению (см. комментарий у observer_exclude в
+# config-test.yaml). PID снимается ОДИН раз при старте окна; внутри окна рестартов нет
+# (NO_RESTART=1, инвариант 5.9.1c), поэтому живость на каждом срезе проверяется без
+# форка — тестом на каталог /proc/<pid>, а не повторным systemctl show.
+SERVICE_PID="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)"
+if [[ -z "$SERVICE_PID" || "$SERVICE_PID" == "0" ]]; then
+    log "ВНИМАНИЕ: не удалось определить MainPID сервиса $SERVICE при старте окна — rss/cpu будут 0 весь прогон."
+    SERVICE_PID=""
+fi
 
 END=$(( $(date +%s) + DURATION ))
 n=0
@@ -278,6 +293,12 @@ if [[ "$NO_RESTART" != "1" ]]; then
 
     systemctl restart "$SERVICE"
     sleep 20
+
+    # 5.9.5f: единственный плановый рестарт окна — PID сервиса меняется, перечитываем
+    # его один раз здесь (не в цикле срезов, тот уже закончился); если что-то после
+    # этой точки снова начнёт опрашивать rss/cpu сервиса, обязано брать SERVICE_PID
+    # заново из этой переменной, а не звать systemctl show на каждом обращении.
+    SERVICE_PID="$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)"
 
     api_multi /api/v1/status "$OUT/p0-3-status-after-restart.json"
     grep -o '"learning_complete":[a-z]*' "$OUT/p0-3-status-after-restart.json" | head -1 \
@@ -448,4 +469,11 @@ log "архив: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 # `id` снимка /api/v1/alerts, который этот скрипт и так пишет как
 # alerts-end.json:
 #   export IDLE_ALERTS_END="$OUT/alerts-end.json"
-log "для критерия 6 (состав детекта) и критерия 16 (слепое окно) run-gate.sh: IDLE_METRICS_START=$OUT/metrics-start.txt IDLE_STATE_END=$OUT/state-end.json IDLE_METRICS_END=$OUT/metrics-end.txt IDLE_ALERTS_END=$OUT/alerts-end.json"
+#
+# 5.9.5i (находка №70): IDLE_STATE_END теперь читает не только run-gate.sh
+# для критерия 16, но и run-all-attacks.sh (get_baseline_metrics) — если
+# зазор с этого момента до снятия attack-baseline меньше 10с, скрипт сам
+# ждёт до 15с перед снимком. Экспортировать эту переменную нужно ДО запуска
+# run-all-attacks.sh, а не только до run-gate.sh, иначе гарантия не сработает
+# и критерий 16 снова напечатает «не измерялось».
+log "для критерия 6 (состав детекта), критерия 16 (слепое окно, 5.9.5i — экспортировать IDLE_STATE_END ДО run-all-attacks.sh) run-gate.sh/run-all-attacks.sh: IDLE_METRICS_START=$OUT/metrics-start.txt IDLE_STATE_END=$OUT/state-end.json IDLE_METRICS_END=$OUT/metrics-end.txt IDLE_ALERTS_END=$OUT/alerts-end.json"

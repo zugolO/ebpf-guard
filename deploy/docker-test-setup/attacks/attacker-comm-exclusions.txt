@@ -77,9 +77,14 @@ bpf_activity_unexpected_process
 # бежит именно insmod — то есть позитивного контроля у правила на стенде нет
 # и не появится от этой записи. Важно: он и так не появлялся бы — insmod на
 # заведомо несуществующем модуле падает ДО сисколла (см. комментарий в
-# run-all-attacks.sh, тот же класс, что открытый вопрос 5.9.4e (1) про
-# BPF_PROG_LOAD). Нужен настоящий .ko-фикстур; до него правило остаётся без
-# позитивного контроля осознанно, а не по недосмотру. Дата: 2026-08-20.
+# run-all-attacks.sh) — тот же класс дефекта, что закрыла 5.9.5j для
+# соседнего правила BPF_PROG_LOAD компиляцией и загрузкой настоящего
+# минимального объекта (attacks/fixtures/gate-canary.bpf.c). Тот же приём
+# здесь не годится напрямую — insmod читает файл сам и не даёт передать ему
+# уже открытый валидный дескриптор, нужен настоящий .ko-фикстур, собранный
+# под ядро стенда. Нужен настоящий .ko-фикстур; до него правило остаётся без
+# позитивного контроля осознанно, а не по недосмотру. Дата: 2026-08-20,
+# дополнено 2026-08-21 (5.9.5j).
 rootkit_init_module_syscall
 
 # ── cred_aws_credentials_read, cred_gcp_service_account_read,
@@ -94,11 +99,19 @@ cred_aws_credentials_read
 cred_gcp_service_account_read
 cred_vault_token_read
 
-# ── exfil_large_http_post (rules/exfiltration-extended.yaml) ──
-# То же: python3 в whitelist как частый легитимный HTTP-клиент, event_type
-# network, а python3-шаг стенда сетевых соединений не делает вовсе.
-# Дата: 2026-08-20.
-exfil_large_http_post
+# ── exfil_large_http_post: перенесено в intentional-loss.txt (5.9.5h, №69) ──
+# Было здесь же (python3 в whitelist как частый легитимный HTTP-клиент,
+# event_type network, python3-шаг стенда сетевых соединений не делает
+# вовсе) — но правило уже записано в intentional-loss.txt как «нет сценария
+# трафика на этом стенде вообще» (порт из diapasona 4444/8080/... там не
+# бьётся никем, независимо от comm). Две причины одной тишины хуже одной:
+# TestIntentionalLossAndCommExclusionsDontDoubleBook (rules_coverage_test.go)
+# роняет тест, если rule_id снова появится в обоих реестрах разом. Единый
+# источник правды теперь intentional-loss.txt; TestExclusionsCollidingWith
+# AttackerComms_RepoRules принимает intentional-loss.txt как равноценное
+# объяснение коллизии по comm — правило без сценария нельзя дополнительно
+# ослепить comm-исключением, до него всё равно ничего не доходит.
+# Дата: 2026-08-21.
 
 # ── gpu_large_compute_burst, gpu_medium_dtoh_non_framework,
 #    gpu_unknown_process (rules/gpu-threats.yaml) ──

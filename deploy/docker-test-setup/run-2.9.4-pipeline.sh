@@ -53,7 +53,10 @@ go test -count=1 -v ./internal/correlator/ -run 'TestDestructiveRulesInventory_R
 # dry_run обязан быть включён в конфиге замера: критерий 5.9.4a («ноль записей
 # KILL action executed при dry_run: true») бессмыслен, если dry_run выключен, а
 # ноль убийств в таком прогоне ничего не доказывает.
-grep -n -A3 '^enforcer:' "$SETUP/config-test.yaml" | sed 's/^/  конфиг enforcer: /'
+# Секция называется enforcement:, не enforcer: — печатаем её целиком, включая
+# dry_run/enable_kill: без dry_run: true критерий 5.9.4a ничего не проверяет, а
+# kill в этом прогоне был бы настоящим.
+grep -n -A7 '^enforcement:' "$SETUP/config-test.yaml" | sed 's/^/  конфиг enforcement: /'
 echo "преflight завершён в $(date -u +%H:%M:%S) UTC"
 
 echo "=== [1/9] make generate && make build (5.9.4i: layout dns_event 43 -> 63 байт) ==="

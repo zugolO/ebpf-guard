@@ -27,6 +27,45 @@ const dnsMaxPayload = 256
 // BPF verifier here — this is a plain userspace safety limit.
 const dnsMaxNameJumps = 32
 
+// DNS decode-failure reasons, published on ebpf_guard_dns_decode_errors_total
+// (wave 5.9.5c, findings №64/№65). Kept as a closed vocabulary — a new failure
+// mode should map onto one of these or add one deliberately, not fall through
+// to "unparseable" by accident:
+//
+//	too_short          — record (or the DNS payload within it) is smaller than
+//	                      the fixed header it must contain.
+//	not_a_query        — well-formed header, but QDCOUNT=0: not a request or
+//	                      response to any question, so there is nothing to
+//	                      correlate against a rule.
+//	bad_qname          — a label or pointer in a name walk points outside the
+//	                      buffer or claims a length the buffer doesn't have.
+//	truncated_payload  — payload_len from the BPF side exceeds DNS_MAX_PAYLOAD
+//	                      or the bytes actually present in the record.
+//	compression_loop    — name compression pointers exceeded dnsMaxNameJumps.
+//	unparseable        — caught a failure this vocabulary doesn't name yet
+//	                      (event type mismatch on the DNS-only ring buffer, or
+//	                      any future branch that doesn't set a reason).
+const (
+	dnsDecodeReasonTooShort         = "too_short"
+	dnsDecodeReasonNotAQuery        = "not_a_query"
+	dnsDecodeReasonBadQName         = "bad_qname"
+	dnsDecodeReasonTruncatedPayload = "truncated_payload"
+	dnsDecodeReasonCompressionLoop  = "compression_loop"
+	dnsDecodeReasonUnparseable      = "unparseable"
+)
+
+// dnsDecodeReasons is the closed vocabulary above as a list, so the collector
+// can prime one metric series and one rate-limited logger per reason without
+// either place re-deriving the set (and drifting from it).
+var dnsDecodeReasons = []string{
+	dnsDecodeReasonTooShort,
+	dnsDecodeReasonNotAQuery,
+	dnsDecodeReasonBadQName,
+	dnsDecodeReasonTruncatedPayload,
+	dnsDecodeReasonCompressionLoop,
+	dnsDecodeReasonUnparseable,
+}
+
 // decodeDNSEvent parses a raw ring buffer record into a types.Event. It has no
 // kernel dependencies — it only decodes bytes — so it is unit-tested directly
 // without a running probe.
@@ -34,11 +73,13 @@ const dnsMaxNameJumps = 32
 // The BPF side (dns.bpf.c) no longer decodes the DNS wire format — it just
 // captures the raw UDP payload, so all QNAME/QTYPE/RCODE/answer parsing,
 // including compression-pointer chasing, happens here where there's no
-// verifier instruction budget to fight. A nil return means the record is not a
-// usable DNS event (too short, wrong type, or an unparseable message).
-func decodeDNSEvent(raw []byte) *types.Event {
+// verifier instruction budget to fight. A nil event means the record is not a
+// usable DNS event; the second return is always "" on success and one of the
+// dnsDecodeReason* constants on failure, so the caller can attribute the drop
+// instead of only counting it (5.9.5c).
+func decodeDNSEvent(raw []byte) (*types.Event, string) {
 	if len(raw) < dnsRawEventFixedLen {
-		return nil
+		return nil, dnsDecodeReasonTooShort
 	}
 
 	// Parse the fixed dns_event header. Layout matches struct dns_event in
@@ -50,7 +91,7 @@ func decodeDNSEvent(raw []byte) *types.Event {
 	offset += 4
 
 	if eventType != uint32(types.EventDNS) {
-		return nil
+		return nil, dnsDecodeReasonUnparseable
 	}
 
 	// timestamp (8 bytes)
@@ -92,13 +133,13 @@ func decodeDNSEvent(raw []byte) *types.Event {
 	offset += 2
 
 	if int(payloadLen) > dnsMaxPayload || offset+int(payloadLen) > len(raw) {
-		return nil
+		return nil, dnsDecodeReasonTruncatedPayload
 	}
 	payload := raw[offset : offset+int(payloadLen)]
 
-	msg, ok := parseDNSWireMessage(payload)
-	if !ok {
-		return nil
+	msg, reason := parseDNSWireMessage(payload)
+	if reason != "" {
+		return nil, reason
 	}
 
 	return &types.Event{
@@ -117,7 +158,7 @@ func decodeDNSEvent(raw []byte) *types.Event {
 			Direction:   direction,
 			ResponseIPs: msg.responseIPs,
 		},
-	}
+	}, ""
 }
 
 // dnsWireMessage holds the fields the rest of the system cares about,
@@ -133,11 +174,11 @@ type dnsWireMessage struct {
 // answer records for responses) per RFC 1035. Unlike the in-kernel decoder
 // it replaces, this correctly follows compression pointers in QNAME/answer
 // names since there's no verifier-imposed bound on loop complexity here.
-func parseDNSWireMessage(payload []byte) (dnsWireMessage, bool) {
+func parseDNSWireMessage(payload []byte) (dnsWireMessage, string) {
 	var msg dnsWireMessage
 
 	if len(payload) < 12 {
-		return msg, false
+		return msg, dnsDecodeReasonTooShort
 	}
 
 	flags := binary.BigEndian.Uint16(payload[2:4])
@@ -147,19 +188,19 @@ func parseDNSWireMessage(payload []byte) (dnsWireMessage, bool) {
 	qdCount := binary.BigEndian.Uint16(payload[4:6])
 	anCount := binary.BigEndian.Uint16(payload[6:8])
 	if qdCount == 0 {
-		return msg, false
+		return msg, dnsDecodeReasonNotAQuery
 	}
 
 	pos := 12
-	qname, pos, ok := decodeDNSName(payload, pos)
-	if !ok {
-		return msg, false
+	qname, pos, reason := decodeDNSName(payload, pos)
+	if reason != "" {
+		return msg, reason
 	}
 	msg.qname = qname
 
 	if pos+4 > len(payload) {
 		// Got the name but not QTYPE/QCLASS; still useful to the caller.
-		return msg, true
+		return msg, ""
 	}
 	msg.qtype = binary.BigEndian.Uint16(payload[pos : pos+2])
 	pos += 4 // QTYPE (2) + QCLASS (2)
@@ -168,18 +209,22 @@ func parseDNSWireMessage(payload []byte) (dnsWireMessage, bool) {
 		msg.responseIPs = decodeDNSAnswerIPs(payload, pos, anCount)
 	}
 
-	return msg, true
+	return msg, ""
 }
 
 // decodeDNSAnswerIPs walks anCount answer records starting at pos and
-// returns the A-record (IPv4) addresses found.
+// returns the A-record (IPv4) addresses found. A malformed answer name or
+// record stops the walk (returning whatever IPs were found so far) rather
+// than failing the whole message — the question section already parsed
+// cleanly, and this loop's own failure reason is not surfaced to
+// dns_decode_errors_total, only the top-level parse failure is.
 func decodeDNSAnswerIPs(payload []byte, pos int, anCount uint16) []string {
 	var ips []string
 
 	for i := 0; i < int(anCount); i++ {
-		var ok bool
-		_, pos, ok = decodeDNSName(payload, pos)
-		if !ok {
+		var reason string
+		_, pos, reason = decodeDNSName(payload, pos)
+		if reason != "" {
 			break
 		}
 
@@ -208,14 +253,14 @@ func decodeDNSAnswerIPs(payload []byte, pos int, anCount uint16) []string {
 // after the name in the *original* stream (i.e. after a compression
 // pointer, not after whatever it points to). jumps are capped at
 // dnsMaxNameJumps to guarantee termination on malformed input.
-func decodeDNSName(payload []byte, pos int) (string, int, bool) {
+func decodeDNSName(payload []byte, pos int) (string, int, string) {
 	var sb strings.Builder
 	endPos := -1
 	jumps := 0
 
 	for {
 		if pos < 0 || pos >= len(payload) {
-			return "", 0, false
+			return "", 0, dnsDecodeReasonBadQName
 		}
 
 		b := payload[pos]
@@ -230,14 +275,14 @@ func decodeDNSName(payload []byte, pos int) (string, int, bool) {
 
 		if b&0xC0 == 0xC0 {
 			if pos+1 >= len(payload) {
-				return "", 0, false
+				return "", 0, dnsDecodeReasonBadQName
 			}
 			if endPos == -1 {
 				endPos = pos + 2
 			}
 			jumps++
 			if jumps > dnsMaxNameJumps {
-				return "", 0, false
+				return "", 0, dnsDecodeReasonCompressionLoop
 			}
 			ptr := int(binary.BigEndian.Uint16(payload[pos:pos+2]) & 0x3FFF)
 			pos = ptr
@@ -247,7 +292,7 @@ func decodeDNSName(payload []byte, pos int) (string, int, bool) {
 		labelLen := int(b)
 		pos++
 		if pos+labelLen > len(payload) {
-			return "", 0, false
+			return "", 0, dnsDecodeReasonBadQName
 		}
 		if sb.Len() > 0 {
 			sb.WriteByte('.')
@@ -259,7 +304,7 @@ func decodeDNSName(payload []byte, pos int) (string, int, bool) {
 	if endPos == -1 {
 		endPos = pos
 	}
-	return sb.String(), endPos, true
+	return sb.String(), endPos, ""
 }
 
 // intToIPv4 converts a uint32 IP in network byte order (big-endian, as stored by BPF)

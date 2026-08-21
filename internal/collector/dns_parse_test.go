@@ -93,16 +93,16 @@ func buildDNSRawRecord(direction types.DNSDirection, payload []byte) []byte {
 
 func TestDecodeDNSName_Simple(t *testing.T) {
 	payload := encodeDNSName("example.com")
-	name, pos, ok := decodeDNSName(payload, 0)
-	require.True(t, ok)
+	name, pos, reason := decodeDNSName(payload, 0)
+	require.Empty(t, reason)
 	assert.Equal(t, "example.com", name)
 	assert.Equal(t, len(payload), pos)
 }
 
 func TestDecodeDNSName_Root(t *testing.T) {
 	// A single zero byte is the root name.
-	name, pos, ok := decodeDNSName([]byte{0x00}, 0)
-	require.True(t, ok)
+	name, pos, reason := decodeDNSName([]byte{0x00}, 0)
+	require.Empty(t, reason)
 	assert.Equal(t, "", name)
 	assert.Equal(t, 1, pos)
 }
@@ -115,8 +115,8 @@ func TestDecodeDNSName_CompressionPointer(t *testing.T) {
 	// Pointer to offset 0.
 	binary.BigEndian.PutUint16(payload[len(base):], 0xC000)
 
-	name, pos, ok := decodeDNSName(payload, len(base))
-	require.True(t, ok)
+	name, pos, reason := decodeDNSName(payload, len(base))
+	require.Empty(t, reason)
 	assert.Equal(t, "a.com", name)
 	// endPos is right after the 2-byte pointer, not after the target.
 	assert.Equal(t, len(base)+2, pos)
@@ -125,22 +125,22 @@ func TestDecodeDNSName_CompressionPointer(t *testing.T) {
 func TestDecodeDNSName_PointerLoopBounded(t *testing.T) {
 	// A pointer at offset 0 that points to itself must terminate via the jump cap.
 	payload := []byte{0xC0, 0x00}
-	_, _, ok := decodeDNSName(payload, 0)
-	assert.False(t, ok, "self-referential pointer must be rejected, not loop forever")
+	_, _, reason := decodeDNSName(payload, 0)
+	assert.Equal(t, dnsDecodeReasonCompressionLoop, reason, "self-referential pointer must be rejected, not loop forever")
 }
 
 func TestDecodeDNSName_LabelOverrun(t *testing.T) {
 	// Label length claims 9 bytes but only 3 remain.
 	payload := []byte{0x09, 'a', 'b', 'c'}
-	_, _, ok := decodeDNSName(payload, 0)
-	assert.False(t, ok)
+	_, _, reason := decodeDNSName(payload, 0)
+	assert.Equal(t, dnsDecodeReasonBadQName, reason)
 }
 
 // --- parseDNSWireMessage ---------------------------------------------------
 
 func TestParseDNSWireMessage_Query(t *testing.T) {
-	msg, ok := parseDNSWireMessage(buildDNSQuery("example.com", 28)) // AAAA
-	require.True(t, ok)
+	msg, reason := parseDNSWireMessage(buildDNSQuery("example.com", 28)) // AAAA
+	require.Empty(t, reason)
 	assert.Equal(t, "example.com", msg.qname)
 	assert.Equal(t, uint16(28), msg.qtype)
 	assert.Equal(t, uint16(0), msg.rcode)
@@ -148,8 +148,8 @@ func TestParseDNSWireMessage_Query(t *testing.T) {
 }
 
 func TestParseDNSWireMessage_ResponseWithA(t *testing.T) {
-	msg, ok := parseDNSWireMessage(buildDNSResponseWithA("example.com", [4]byte{93, 184, 216, 34}))
-	require.True(t, ok)
+	msg, reason := parseDNSWireMessage(buildDNSResponseWithA("example.com", [4]byte{93, 184, 216, 34}))
+	require.Empty(t, reason)
 	assert.Equal(t, "example.com", msg.qname)
 	assert.Equal(t, uint16(1), msg.qtype)
 	require.Len(t, msg.responseIPs, 1)
@@ -157,21 +157,22 @@ func TestParseDNSWireMessage_ResponseWithA(t *testing.T) {
 }
 
 func TestParseDNSWireMessage_TooShort(t *testing.T) {
-	_, ok := parseDNSWireMessage([]byte{0x00, 0x01, 0x02})
-	assert.False(t, ok)
+	_, reason := parseDNSWireMessage([]byte{0x00, 0x01, 0x02})
+	assert.Equal(t, dnsDecodeReasonTooShort, reason)
 }
 
 func TestParseDNSWireMessage_NoQuestion(t *testing.T) {
 	hdr := make([]byte, 12) // qdcount = 0
-	_, ok := parseDNSWireMessage(hdr)
-	assert.False(t, ok)
+	_, reason := parseDNSWireMessage(hdr)
+	assert.Equal(t, dnsDecodeReasonNotAQuery, reason)
 }
 
 // --- decodeDNSEvent --------------------------------------------------------
 
 func TestDecodeDNSEvent_Query(t *testing.T) {
 	raw := buildDNSRawRecord(types.DNSDirection(0), buildDNSQuery("evil.example.com", 1))
-	evt := decodeDNSEvent(raw)
+	evt, reason := decodeDNSEvent(raw)
+	require.Empty(t, reason)
 	require.NotNil(t, evt)
 	assert.Equal(t, types.EventDNS, evt.Type)
 	assert.Equal(t, uint32(4321), evt.PID)
@@ -181,20 +182,26 @@ func TestDecodeDNSEvent_Query(t *testing.T) {
 }
 
 func TestDecodeDNSEvent_TooShort(t *testing.T) {
-	assert.Nil(t, decodeDNSEvent(make([]byte, dnsRawEventFixedLen-1)))
+	evt, reason := decodeDNSEvent(make([]byte, dnsRawEventFixedLen-1))
+	assert.Nil(t, evt)
+	assert.Equal(t, dnsDecodeReasonTooShort, reason)
 }
 
 func TestDecodeDNSEvent_WrongType(t *testing.T) {
 	raw := buildDNSRawRecord(types.DNSDirection(0), buildDNSQuery("a.com", 1))
 	binary.LittleEndian.PutUint32(raw[0:], uint32(types.EventSyscall)) // not DNS
-	assert.Nil(t, decodeDNSEvent(raw))
+	evt, reason := decodeDNSEvent(raw)
+	assert.Nil(t, evt)
+	assert.Equal(t, dnsDecodeReasonUnparseable, reason)
 }
 
 func TestDecodeDNSEvent_PayloadLenOverflow(t *testing.T) {
 	raw := buildDNSRawRecord(types.DNSDirection(0), buildDNSQuery("a.com", 1))
 	// Claim a payload far larger than what's present.
 	binary.LittleEndian.PutUint16(raw[61:], 9000)
-	assert.Nil(t, decodeDNSEvent(raw))
+	evt, reason := decodeDNSEvent(raw)
+	assert.Nil(t, evt)
+	assert.Equal(t, dnsDecodeReasonTruncatedPayload, reason)
 }
 
 // --- string helpers --------------------------------------------------------

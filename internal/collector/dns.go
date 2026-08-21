@@ -45,6 +45,13 @@ type DNSCollector struct {
 	// read, or zero before the first event. watchForStaleness compares against
 	// this directly instead of a once-per-tick snapshot — see 5.7d.
 	lastEventUnixNano atomic.Int64
+	// decodeErrorLoggers holds one rate-limited hex-dump logger per
+	// dnsDecodeReason* value (5.9.5c), mirroring the syscall collector's
+	// malformedLoggers (5.9.2c) — the counter alone says a reason fired, the
+	// sample is what lets a human confirm which of the three №64/№65
+	// hypotheses (stand silence, parse regression, or collector regression)
+	// it actually is.
+	decodeErrorLoggers map[string]*malformedLogger
 }
 
 // dnsMetrics holds Prometheus metrics for DNS collection.
@@ -53,7 +60,12 @@ type dnsMetrics struct {
 	eventsDropped prometheus.Counter
 	// decodeErrors separates "the collector saw nothing" from "the collector
 	// saw traffic it could not parse" — P0-26 could not distinguish these.
-	decodeErrors prometheus.Counter
+	// Labelled by reason (wave 5.9.5c, findings №64/№65): a single unlabelled
+	// counter could not tell "molecular silence" (rules never seeing traffic)
+	// apart from "traffic arrives but decodeDNSEvent rejects it", which is
+	// exactly the ambiguity that left four DNS rules silent on №2.9.4 without
+	// anyone being able to say which of those it was.
+	decodeErrors *prometheus.CounterVec
 	// stale is 1 while the collector has produced no events for staleThreshold
 	// despite being enabled and attached. This is the metric that would have
 	// surfaced P0-26 (7 events for an entire run, reported as healthy:true).
@@ -86,10 +98,10 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 			Name: "ebpf_guard_dns_events_dropped_total",
 			Help: "Total number of dropped DNS events due to ring buffer overflow",
 		}),
-		decodeErrors: prometheus.NewCounter(prometheus.CounterOpts{
+		decodeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ebpf_guard_dns_decode_errors_total",
-			Help: "Total number of DNS event decode errors",
-		}),
+			Help: "Total number of DNS event decode errors, by reason (too_short, not_a_query, bad_qname, truncated_payload, compression_loop, unparseable)",
+		}, []string{"reason"}),
 		stale: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_dns_collector_stale",
 			Help: "1 when the DNS collector has seen no events for an extended period despite being attached",
@@ -100,11 +112,17 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 		}),
 	}
 
+	decodeErrorLoggers := make(map[string]*malformedLogger, len(dnsDecodeReasons))
+	for _, reason := range dnsDecodeReasons {
+		decodeErrorLoggers[reason] = newMalformedLogger(5 * time.Second)
+	}
+
 	return &DNSCollector{
-		enabled:    enabled,
-		metrics:    metrics,
-		dropLogger: newDropLogger(5 * time.Second),
-		strategy:   StrategyDrop,
+		enabled:            enabled,
+		metrics:            metrics,
+		dropLogger:         newDropLogger(5 * time.Second),
+		strategy:           StrategyDrop,
+		decodeErrorLoggers: decodeErrorLoggers,
 	}, nil
 }
 
@@ -127,6 +145,16 @@ func (c *DNSCollector) RegisterMetrics(reg prometheus.Registerer) error {
 	}
 	if err := reg.Register(c.metrics.decodeErrors); err != nil {
 		return err
+	}
+	// Materialise every reason at zero so the series exist in /metrics from
+	// the first scrape, the same way enforcer.RegisterMetrics primes its
+	// action labels. Without this a clean run publishes no
+	// ebpf_guard_dns_decode_errors_total lines at all, and the 5.9.5c gate
+	// section cannot tell "no decode errors happened" — which is the answer
+	// finding №65 is asking for — from "this binary predates the reason
+	// label". A CounterVec with no observations is silence, not a zero.
+	for _, reason := range dnsDecodeReasons {
+		c.metrics.decodeErrors.WithLabelValues(reason)
 	}
 	if err := reg.Register(c.metrics.stale); err != nil {
 		return err
@@ -276,9 +304,12 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 
 		c.eventsSeen.Add(1)
 		c.lastEventUnixNano.Store(time.Now().UnixNano())
-		event := decodeDNSEvent(record.RawSample)
+		event, reason := decodeDNSEvent(record.RawSample)
 		if event == nil {
-			c.metrics.decodeErrors.Inc()
+			c.metrics.decodeErrors.WithLabelValues(reason).Inc()
+			if logger := c.decodeErrorLoggers[reason]; logger != nil {
+				logger.record(slog.Default(), "dns", reason, record.RawSample)
+			}
 			continue
 		}
 

@@ -113,6 +113,11 @@ baseline_metrics="$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
 final_metrics="$RESULTS_DIR/final-metrics-$TIMESTAMP.txt"
 baseline_alerts="$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
 final_alerts="$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
+# 5.9.5b (находка №62): маркер наведённого дропа, написанный run_induced_drop
+# (run-all-attacks.sh) — исполнился ли всплеск и был ли во время него замечен
+# status=degraded. Опционален: без него критерий 3 просто печатает "не
+# исполнялся" в ветке отсутствия дропов, вместо FAIL/SKIP по построению.
+induced_drop_marker="$RESULTS_DIR/induced-drop-$TIMESTAMP.txt"
 # The manifest is written by the four attack sub-scripts next to the scripts
 # themselves, so anchor to this script's directory rather than deriving a path
 # from RESULTS_DIR or the working directory (plan.md волна 1.5g).
@@ -127,6 +132,13 @@ background_rules_file="$GATE_SCRIPT_DIR/background-rules.txt"
 # находка №33). Отдельно от background_rules_file: там вторая попытка по
 # idle-приросту, здесь её нет смысла давать — idle-прирост тоже будет нулевым.
 intentional_loss_file="$GATE_SCRIPT_DIR/intentional-loss.txt"
+# 5.9.5d (находка №63): реестр правил, немых за весь аптайм агента с
+# установленной причиной (волна 5.9.4h) — до этой правки критерий 6 его не
+# читал вовсе, так что правило, уже объяснённое здесь категорией (а)/(б),
+# всё равно засчитывалось критерием 6 как непонятная потеря, хотя секция
+# 5.9.4h ниже уже печатала для него причину. Тот же файл, читается тем же
+# способом (comm -12), что и intentional_loss_file.
+silent_rules_file="$GATE_SCRIPT_DIR/silent-rules.txt"
 # Снимки /metrics idle-часа (idle-run.sh), опционально — только они дают
 # критерию 6 вторую сторону измерения для фоновых правил (5.8a).
 IDLE_METRICS_START="${IDLE_METRICS_START:-}"
@@ -342,7 +354,20 @@ if [ -f "$final_health" ]; then
         if [ "$visibility_reduced" = "true" ]; then
             fail "потерь нет, но /health.visibility_reduced=true — флаг залип (5.9.4d)"
         else
-            pass "потерь нет, /health status=$status (проверка неприменима)"
+            # 5.9.5b (находка №62): нулевые дропы на №2.9.3/№2.9.4 чередовались
+            # со случаем, а не с работающим фильтром — "PASS: проверка
+            # неприменима" читалось как "критерий пройден", хотя механизм не
+            # проверялся ни разу. Печатаем SKIP и явно — был ли исполнен
+            # наведённый дроп (run_induced_drop), чтобы "не проверено" было
+            # строкой отчёта, а не молчанием под маской PASS.
+            induced_executed=0
+            induced_degraded=0
+            if [ -f "$induced_drop_marker" ]; then
+                induced_executed=$(awk -F= '$1=="executed"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
+                induced_degraded=$(awk -F= '$1=="degraded_seen"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
+            fi
+            echo "  наведённый дроп (5.9.5b): исполнен=${induced_executed:-0}, degraded зафиксирован во время всплеска=${induced_degraded:-0}"
+            skip "механизм не проверен — потерь за прогон нет (5.9.5b); /health status=$status"
         fi
     fi
 else
@@ -619,8 +644,47 @@ else
     added_count=$(echo "$added_types" | grep -c . || true)
     echo "  типов в прогоне: $detected_types, в базе: $(echo "$expected_types" | grep -c .)"
     if [ "$added_count" -gt 0 ]; then
+        # 5.9.5g (находка №67): "добавлено (+N)" раньше не говорило, откуда
+        # взялся прирост — под атакой или на простое. Прирост, целиком
+        # состоящий из idle-срабатываний, для этого критерия по-прежнему
+        # "детект жив" (порог не меняется), но читателю нужно видеть разницу:
+        # idle-only прирост — кандидат в ложноположительные, а не победа.
+        # Фаза считается по тем же двум помощникам (metric_grown_rules), что
+        # уже используются для 5.8a-вычитания ниже — attack: рост между
+        # baseline_metrics/final_metrics (окно атак), idle: рост между
+        # IDLE_METRICS_START/END (idle-час, опционально).
+        added_attack_list=$( { metric_grown_rules ebpf_guard_alerts_total "$basefile_arg" "$final_metrics"
+                                metric_grown_rules ebpf_guard_alerts_filtered_total "$basefile_arg" "$final_metrics"; } | sort -u)
+        added_idle_list=""
+        if [ -n "$IDLE_METRICS_START" ] && [ -n "$IDLE_METRICS_END" ] \
+            && [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
+            added_idle_list=$( { metric_grown_rules ebpf_guard_alerts_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"
+                                  metric_grown_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"; } | sort -u)
+        fi
+        added_attack_count=0
+        added_idle_count=0
         echo "  добавлено (+$added_count):"
-        echo "$added_types" | sed 's/^/    + /'
+        while IFS= read -r rid; do
+            [ -z "$rid" ] && continue
+            in_attack=0; in_idle=0
+            echo "$added_attack_list" | grep -qx "$rid" && in_attack=1
+            echo "$added_idle_list" | grep -qx "$rid" && in_idle=1
+            if [ "$in_attack" -eq 1 ] && [ "$in_idle" -eq 1 ]; then
+                phase="attack+idle"
+            elif [ "$in_attack" -eq 1 ]; then
+                phase="attack"
+            elif [ "$in_idle" -eq 1 ]; then
+                phase="idle"
+            elif [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ]; then
+                phase="фаза не определена — IDLE_METRICS_START/END не заданы"
+            else
+                phase="фаза не определена — сработало вне обоих окон измерения (до baseline или между idle-снимками)"
+            fi
+            [ "$in_attack" -eq 1 ] && added_attack_count=$((added_attack_count + 1))
+            [ "$in_idle" -eq 1 ] && added_idle_count=$((added_idle_count + 1))
+            echo "    + $rid ($phase)"
+        done <<< "$added_types"
+        echo "  добавлено по фазам: attack=$added_attack_count, idle=$added_idle_count (сумма может превышать $added_count — правило, выросшее в обоих окнах, считается в обеих)"
     fi
 
     # 5.9.1e-следствие, найдено пересчётом на снятых данных №2.9 (условие №1
@@ -731,6 +795,31 @@ else
         echo "  потеряно намеренно (-$intentional_lost_count, наблюдение без порога, см. intentional-loss.txt):"
         echo "$intentional_lost" | sed 's/^/    ~ /'
     fi
+    # 5.9.5d (находка №63): третий реестр. Правило, немое за весь аптайм
+    # агента с УЖЕ установленной причиной (silent-rules.txt, категория (а)
+    # «немо по конструкции» или (б) «немо из-за среды», волна 5.9.4h),
+    # засчитывалось этим критерием как непонятная потеря — тот же класс
+    # рассогласования, что 5.9.4c чинила для метрики/стора: два реестра
+    # об одном и том же множестве правил не совпадали, потому что этот
+    # критерий читал только два файла из трёх. Вычитание таким же образом,
+    # как intentional_loss_file строкой выше (comm -12).
+    silent_lost=""
+    if [ -n "$lost_types" ] && [ -f "$silent_rules_file" ]; then
+        silent_lost_a=$(awk '!/^[[:space:]]*(#|$)/ && $2 == "a" {print $1}' "$silent_rules_file" | sort -u)
+        silent_lost_b=$(awk '!/^[[:space:]]*(#|$)/ && $2 == "b" {print $1}' "$silent_rules_file" | sort -u)
+        silent_set=$(printf '%s\n%s\n' "$silent_lost_a" "$silent_lost_b" | grep -v '^$' | sort -u)
+        silent_lost=$(comm -12 <(echo "$lost_types") <(echo "$silent_set"))
+        if [ -n "$silent_lost" ]; then
+            lost_types=$(comm -23 <(echo "$lost_types") <(echo "$silent_lost"))
+        fi
+    fi
+    silent_lost_count=$(echo "$silent_lost" | grep -c . || true)
+    if [ "$silent_lost_count" -gt 0 ]; then
+        echo "  потеряно, но уже объяснено немотой за весь аптайм (-$silent_lost_count, см. silent-rules.txt, секция 5.9.4h ниже):"
+        echo "$silent_lost" | sed 's/^/    ~ /'
+    fi
+    background_recovered_count=$(echo "${recovered_sorted:-}" | grep -c . || true)
+    echo "  объяснено: intentional-loss $intentional_lost_count, silent-rules $silent_lost_count, background-rules $background_recovered_count (\"потеряно 0\" не означает, что список объяснений пуст — см. счётчики выше)"
     lost_count=$(echo "$lost_types" | grep -c . || true)
     if [ "$lost_count" -gt 0 ]; then
         echo "  потеряно (-$lost_count):"
@@ -793,6 +882,98 @@ elif awk -v f="$cpu_degraded_fraction" 'BEGIN{exit !(f+0 > 0.2)}'; then
     fail "cpu_degraded_fraction=$cpu_degraded_fraction > 0.2 — прогон прошёл под шеддингом слишком долго, темп детекта выше не является чистым измерением (5.9e)"
 else
     pass "cpu_degraded_fraction=$cpu_degraded_fraction (<= 0.2) — прогон не искажён CPU-шеддингом"
+fi
+echo ""
+
+# 5.9.5c (находки №64/№65, P1): DNS decode-error разбивка по reason плюс
+# ответ на вопрос №64 — тишина стенда или регресс разбора — для четырёх
+# правил, молчавших на №2.9.4 (dns_tunneling_long_domain,
+# exfil_dns_txt_long_label, netintr_dns_long_label,
+# webshell_dns_exfil_long_subdomain, см. TestDNSLongLabelControlRules_
+# MatchOnQNameLengthAlone, internal/correlator/rules_coverage_test.go).
+# run_dns_long_label_attack (run-all-attacks.sh) даёт им позитивный контроль:
+# один long-label запрос через dig, заведомо выше порога всех четырёх правил,
+# неотличимый от фонового comm=grafana только благодаря уникальной метке с
+# TIMESTAMP этого прогона.
+#
+# dns_decode_errors_total печатается по reason БЕЗ порога (постановка 5.9.5c,
+# п.2): три гипотезы находки №65 (ответы с sport 53, TCP-DNS/mDNS, обрезка по
+# DNS_MAX_PAYLOAD) ещё не разделены, и дропать записи до установления причины
+# повторило бы ошибку 5.9.1f — это наблюдение, не гейт.
+echo "=== 5.9.5c. DNS-видимость: decode errors по reason + позитивный контроль на длинный лейбл ==="
+if [ ! -s "$final_metrics" ]; then
+    skip "$final_metrics пуст — DNS decode errors/позитивный контроль не проверены"
+else
+    echo "  dns_decode_errors_total по reason (кумулятив за весь аптайм агента, наблюдение без порога):"
+    decode_err_lines=$(grep '^ebpf_guard_dns_decode_errors_total{' "$final_metrics" 2>/dev/null)
+    if [ -z "$decode_err_lines" ]; then
+        echo "    метрика отсутствует — сборка агента старее 5.9.5c (dns_decode_errors_total ещё без label reason);"
+        echo "    начиная с 5.9.5c коллектор публикует все шесть reason'ов нулями с первого скрейпа,"
+        echo "    поэтому \"ноль ошибок разбора\" выглядит как шесть строк с 0, а не как отсутствие метрики"
+    else
+        echo "$decode_err_lines" | awk -F'[{}", ]+' '
+            function reason_of(   i, r) {
+                r = ""
+                for (i = 1; i <= NF; i++) { if ($i ~ /^reason=?$/) { r = $(i+1); break } }
+                return r
+            }
+            { r = reason_of(); if (r != "") sum[r] += $NF }
+            END { for (r in sum) printf "    %-18s %d\n", r, sum[r] }
+        ' | sort
+    fi
+
+    dns_events_final=$(grep '^ebpf_guard_events_total{' "$final_metrics" 2>/dev/null \
+        | grep 'type="dns"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+
+    dns_target_rules="dns_tunneling_long_domain exfil_dns_txt_long_label netintr_dns_long_label webshell_dns_exfil_long_subdomain"
+    # Обе метрики, как в критерии 6: правило, чей алерт съеден пост-фильтром
+    # (rate limit / Rego), по alerts_total не растёт — и без
+    # alerts_filtered_total читалось бы здесь как «молчит», то есть как
+    # «регресс разбора», хотя разбор отработал и правило сматчило.
+    grown_dns_rules=$( { metric_grown_rules ebpf_guard_alerts_total "$basefile_arg" "$final_metrics"
+                          metric_grown_rules ebpf_guard_alerts_filtered_total "$basefile_arg" "$final_metrics"; } | sort -u)
+    dns_silent_registry="$GATE_SCRIPT_DIR/silent-rules.txt"
+
+    fired_count=0
+    unexplained_dns=""
+    for rid in $dns_target_rules; do
+        if echo "$grown_dns_rules" | grep -qx "$rid"; then
+            fired_count=$((fired_count + 1))
+            chain_empty=0
+            chain_total=0
+            if [ -f "$final_alerts" ] && command -v jq &> /dev/null; then
+                chain_total=$(jq --arg r "$rid" '[.[] | select(.rule_id == $r)] | length' "$final_alerts" 2>/dev/null || echo 0)
+                chain_empty=$(jq --arg r "$rid" '[.[] | select(.rule_id == $r and ((.process_chain // []) | length == 0))] | length' "$final_alerts" 2>/dev/null || echo 0)
+            fi
+            echo "  $rid: сработало (позитивный контроль подтверждён); process_chain пуст у ${chain_empty:-0}/${chain_total:-0} сработавших алертов (крит. 13 постановки, живой вход впервые — 5.9.4i)"
+        elif [ -f "$dns_silent_registry" ] && awk -v id="$rid" '!/^[[:space:]]*(#|$)/ && $1 == id {found=1} END{exit !found}' "$dns_silent_registry"; then
+            reason_cat=$(awk -v id="$rid" '!/^[[:space:]]*(#|$)/ && $1 == id {print $2; exit}' "$dns_silent_registry")
+            echo "  $rid: молчит, но причина установлена (категория $reason_cat, silent-rules.txt)"
+        else
+            unexplained_dns="$unexplained_dns $rid"
+            echo "  $rid: молчит, причина НЕ установлена"
+        fi
+    done
+
+    if [ "$fired_count" -eq 4 ]; then
+        pass "все 4 DNS long-label правила сработали под позитивным контролем — молчание №2.9.4 было тишиной стенда, не регрессом разбора (находка №64 закрыта)"
+    elif [ -n "$unexplained_dns" ]; then
+        if [ "${dns_events_final%.*}" -eq 0 ] 2>/dev/null; then
+            fail "events_total{type=\"dns\"}=0 за весь прогон — регресс DNS-коллектора (dns.bpf.c/dns.go), а не вопрос №64; чинить/откатывать коллектор до всего остального"
+        else
+            fail "$fired_count/4 DNS long-label правил сработало, без объяснения:$unexplained_dns (events_total{type=dns}=${dns_events_final:-n/a}, а не 0) — регресс разбора, не тишина стенда (находка №64)"
+        fi
+    elif [ "$fired_count" -eq 0 ]; then
+        # Вырожденный PASS — ровно тот класс, из-за которого заведена находка
+        # №62: позитивный контроль был исполнен, но НИ ОДНО правило не
+        # поднялось, а все четыре объяснены реестром. Реестр объясняет
+        # молчание за аптайм, он не отвечает на вопрос №64 («тишина стенда
+        # или регресс разбора») — при исполненном контроле на этот вопрос
+        # отвечает только срабатывание.
+        fail "0/4 DNS long-label правил сработало при исполненном позитивном контроле — silent-rules.txt объясняет молчание за аптайм, но не заменяет ответ на вопрос №64; проверить, дошёл ли запрос dig (лог атак) и растёт ли events_total{type=dns}=${dns_events_final:-n/a}"
+    else
+        pass "$fired_count/4 сработало под контролем, остальные — с установленной причиной в silent-rules.txt"
+    fi
 fi
 echo ""
 
@@ -1415,6 +1596,69 @@ else
         else
             fail "$unexplained_count правил(о) немы за весь аптайм без строки в silent-rules.txt (категория (в)): $(echo "$unexplained" | tr '\n' ' ')"
         fi
+    fi
+fi
+echo ""
+
+# 17. Kill-сценарий парный (5.9.5a, находка №62, P0).
+#
+# На №2.9.4 оба счётчика (enforcement_actions_total{kill} и
+# enforcement_dryrun_total{kill}) стояли на 0/0 за весь аптайм: "dry_run
+# гасит kill" было измерено как отсутствие срабатывания, а не как
+# срабатывание-без-убийства (риск №3 постановки 5.9.4, найдено на замере, а
+# не на ревью). run_kill_scenario (run-all-attacks.sh, 5.9.5a) даёт
+# ebpf_subversion_detach_nonroot — единственному kill-правилу репозитория,
+# без comm-условия, см. attacks/destructive-actions.txt блок 5.9.5a и
+# TestKillScenarioControlRule_ActionIsKill — реальный вход: bpf(2) от
+# непривилегированного дочернего процесса харнесса.
+#
+# Критерий по построению ТРОЙНОЙ, один ноль без остальных двух — FAIL, а не
+# PASS (это и есть парность, которую риск №3 требовал и находка №62 не
+# получила):
+#   (1) enforcement_dryrun_total{action="kill"} >= 1   — правило сработало;
+#   (2) enforcement_actions_total{action="kill"} == 0  — dry_run погасил;
+#   (3) ноль записей "KILL action executed" в журнале за ВЕСЬ аптайм агента
+#       (не за окно прогона — 5.9.4a измеряла именно так).
+echo "=== 17. Kill-сценарий: dry_run гасит kill, доказано живьём (5.9.5a) ==="
+if [ ! -s "$final_metrics" ]; then
+    skip "$final_metrics пуст — критерий 17 не проверен"
+else
+    dry_kill=$(grep 'ebpf_guard_enforcement_dryrun_total{' "$final_metrics" 2>/dev/null \
+        | grep 'action="kill"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+    act_kill=$(grep 'ebpf_guard_enforcement_actions_total{' "$final_metrics" 2>/dev/null \
+        | grep 'action="kill"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
+
+    journal_checked=0
+    kill_executed=0
+    if command -v journalctl &> /dev/null; then
+        journal_args=(--boot)
+        if [ -s "${AGENT_START_FILE:-}" ]; then
+            journal_args=(--since "$(head -1 "$AGENT_START_FILE")")
+        fi
+        kill_journal=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" "${journal_args[@]}" 2>/dev/null)
+        # journalctl выходит с кодом 0 и на несуществующем юните («-- No
+        # entries --»), поэтому одного кода возврата мало: пустой журнал
+        # доказывал бы п.3 («ноль KILL за аптайм») ровно тем же способом,
+        # каким №2.9.4 «доказал» предохранитель нулём срабатываний. Агент за
+        # аптайм пишет в журнал непрерывно, так что пустота здесь означает
+        # неверное имя юнита или нехватку прав, а не чистый прогон.
+        if [ $? -eq 0 ] && [ -n "$kill_journal" ]; then
+            journal_checked=1
+            kill_executed=$(echo "$kill_journal" | grep -c "KILL action executed" || true)
+        fi
+    fi
+
+    echo "  enforcement_dryrun_total{kill}=$dry_kill, enforcement_actions_total{kill}=$act_kill, журнал проверен=$journal_checked, \"KILL action executed\"=$kill_executed"
+    if [ "$journal_checked" -eq 0 ]; then
+        skip "журнал agent-сервиса недоступен или пуст (проверить EBPF_GUARD_SERVICE_UNIT и права) — критерий 17 не может подтвердить п.3 (ноль KILL за аптайм)"
+    elif awk -v d="$dry_kill" 'BEGIN{exit !(d>=1)}' && [ "$act_kill" -eq 0 ] && [ "$kill_executed" -eq 0 ]; then
+        pass "правило сработало ($dry_kill раз), убийств 0, журнал за весь аптайм чист — предохранитель доказан живьём (5.9.5a)"
+    elif awk -v d="$dry_kill" 'BEGIN{exit !(d<1)}'; then
+        fail "enforcement_dryrun_total{kill}=$dry_kill < 1 — kill-сценарий не дал правилу сработать, критерий 17 не доказывает ничего (проверить run_kill_scenario)"
+    elif [ "$act_kill" -ne 0 ] || [ "$kill_executed" -ne 0 ]; then
+        fail "enforcement_actions_total{kill}=$act_kill, \"KILL action executed\"=$kill_executed за аптайм — dry_run не погасил kill (регресс находки №52)"
+    else
+        fail "критерий 17: непредвиденная комбинация dry_kill=$dry_kill act_kill=$act_kill kill_executed=$kill_executed"
     fi
 fi
 echo ""

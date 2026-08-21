@@ -116,8 +116,9 @@ func TestParseEvent(t *testing.T) {
 	respPayload := buildDNSResponsePayload("example.com", net.IPv4(93, 184, 216, 34))
 	raw := buildMockRawEvent(types.DNSDirectionResponse, respPayload)
 
-	event := decodeDNSEvent(raw)
+	event, reason := decodeDNSEvent(raw)
 
+	require.Empty(t, reason)
 	require.NotNil(t, event)
 	assert.Equal(t, types.EventDNS, event.Type)
 	assert.Equal(t, types.KtimeToEpoch(1234567890), event.Timestamp)
@@ -143,8 +144,9 @@ func TestParseEvent_Query(t *testing.T) {
 	payload = binary.BigEndian.AppendUint16(payload, 1) // QCLASS IN
 
 	raw := buildMockRawEvent(types.DNSDirectionQuery, payload)
-	event := decodeDNSEvent(raw)
+	event, reason := decodeDNSEvent(raw)
 
+	require.Empty(t, reason)
 	require.NotNil(t, event)
 	assert.Equal(t, "example.com", event.DNS.QName)
 	assert.Equal(t, uint16(1), event.DNS.QType)
@@ -157,13 +159,17 @@ func TestParseEvent_InvalidType(t *testing.T) {
 	buf := make([]byte, 32)
 	binary.LittleEndian.PutUint32(buf, 99) // Wrong type
 
-	event := decodeDNSEvent(buf)
+	event, reason := decodeDNSEvent(buf)
 	assert.Nil(t, event)
+	// buf is 32 bytes — shorter than dnsRawEventFixedLen (63) — so this hits
+	// the length check before the type field is ever compared.
+	assert.Equal(t, dnsDecodeReasonTooShort, reason)
 }
 
 func TestParseEvent_TooShort(t *testing.T) {
-	event := decodeDNSEvent([]byte{1, 2, 3}) // Too short
+	event, reason := decodeDNSEvent([]byte{1, 2, 3}) // Too short
 	assert.Nil(t, event)
+	assert.Equal(t, dnsDecodeReasonTooShort, reason)
 }
 
 func TestDNSCollector_Name(t *testing.T) {

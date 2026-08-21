@@ -124,6 +124,34 @@ get_baseline_metrics() {
         echo "drain_offset_before_baseline=$drain_offset" > "$RESULTS_DIR/baseline-drain-offset-$TIMESTAMP.txt"
     fi
 
+    # 5.9.5i (находка №70): критерий 16 в run-gate.sh (слепое окно idle-конец →
+    # attack-baseline) три замера подряд получал зазор < 10с и печатал «не
+    # измерялось» — числитель/знаменатель были оба вырождены (№58). Если
+    # оператор передал IDLE_STATE_END (тот же файл, что идёт в run-gate.sh —
+    # см. подсказку в конце вывода idle-run.sh), ждём здесь явно перед
+    # снятием baseline, когда естественного зазора не набралось. Это не
+    # «ssh внутрь окна» и не разрыв цепочки (гигиена замеров, 5.9f) — тот же
+    # процесс, та же последовательность вызовов, просто пауза перед curl.
+    if [ -n "$IDLE_STATE_END" ] && [ -s "$IDLE_STATE_END" ] && command -v jq &> /dev/null; then
+        local idle_end_ts idle_end_epoch now_epoch gap wait_for
+        idle_end_ts=$(jq -r '.timestamp // empty' "$IDLE_STATE_END" 2>/dev/null || true)
+        if [ -n "$idle_end_ts" ]; then
+            idle_end_epoch=$(date -d "$idle_end_ts" +%s 2>/dev/null || echo 0)
+            now_epoch=$(date +%s)
+            gap=$(( now_epoch - idle_end_epoch ))
+            log "5.9.5i: конец idle-часа $idle_end_ts, сейчас $(date -Iseconds), зазор до этого момента ${gap}с"
+            if [ "$idle_end_epoch" -gt 0 ] && [ "$gap" -lt 10 ]; then
+                wait_for=$(( 15 - gap ))
+                if [ "$wait_for" -gt 0 ]; then
+                    log "5.9.5i: зазор ${gap}с < 10с — ждём ещё ${wait_for}с перед baseline, иначе критерий 16 снова напечатает «не измерялось»"
+                    sleep "$wait_for"
+                fi
+            fi
+        else
+            warn "5.9.5i: IDLE_STATE_END задан, но .timestamp не разобран — гарантированное окно для критерия 16 не применено"
+        fi
+    fi
+
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/api/v1/alerts" > "$RESULTS_DIR/baseline-alerts-$TIMESTAMP.json"
     curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" > "$RESULTS_DIR/baseline-health-$TIMESTAMP.json"
@@ -300,12 +328,104 @@ run_bpf_attack() {
         warn "bpftool не найден — bpf-атака (5.9.2b/5.9.4e) пропущена"
     fi
 
-    # rootkit_bpf_prog_load_suspicious (BPF_PROG_LOAD=5) has no positive
-    # control here: a real BPF_PROG_LOAD needs a valid compiled BPF object,
-    # and `bpftool prog load` on a bogus/empty file fails in libbpf before
-    # ever reaching the bpf(2) syscall (the same class of gap as the
-    # insmod/rmmod no-op noted below for kmod attacks). Needs a small
-    # purpose-built .bpf.o fixture — open question, see plan.md 5.9.4e.
+    # 5.9.5j (долг 5.9.4e, №1): positive control for rootkit_bpf_prog_load_suspicious
+    # (BPF_PROG_LOAD=5). `bpftool prog load` on a bogus/empty file fails in
+    # libbpf before ever reaching the bpf(2) syscall (the same class of gap
+    # as the insmod/rmmod no-op below for kmod attacks) — needs a real
+    # compiled BPF object. attacks/fixtures/gate-canary.bpf.c is a minimal
+    # no-op SEC("socket") program with no maps/helpers, compiled here rather
+    # than checked in as a prebuilt .bpf.o: a binary fixture would be tied to
+    # whatever clang/kernel produced it and can't be verified by reading the
+    # repo. If clang has no bpf target on this host, this step is skipped
+    # like the map-create control above when bpftool itself is missing.
+    local bpf_fixture_src="$SCRIPT_DIR/fixtures/gate-canary.bpf.c"
+    local bpf_fixture_obj="/tmp/ebpf-guard-gate-canary-$TIMESTAMP.bpf.o"
+    local bpf_prog_pin="/sys/fs/bpf/ebpf-guard-attack-canary-prog-$TIMESTAMP"
+    if command -v bpftool &> /dev/null && command -v clang &> /dev/null && [ -f "$bpf_fixture_src" ]; then
+        if clang -target bpf -O2 -c "$bpf_fixture_src" -o "$bpf_fixture_obj" >/dev/null 2>&1; then
+            if bpftool prog load "$bpf_fixture_obj" "$bpf_prog_pin" >/dev/null 2>&1; then
+                log "bpftool prog load выполнен — ожидается срабатывание rootkit_bpf_prog_load_suspicious"
+                rm -f "$bpf_prog_pin"
+            else
+                warn "bpftool prog load завершился с ошибкой (нет прав/BPF недоступен) — rootkit_bpf_prog_load_suspicious останется непроверенным на attack-стороне"
+            fi
+        else
+            warn "clang -target bpf не собрал fixtures/gate-canary.bpf.c (нет BPF-таргета на этом хосте) — rootkit_bpf_prog_load_suspicious останется непроверенным на attack-стороне"
+        fi
+        rm -f "$bpf_fixture_obj"
+    else
+        warn "bpftool и/или clang не найдены, либо fixtures/gate-canary.bpf.c отсутствует — BPF_PROG_LOAD-атака (5.9.5j) пропущена"
+    fi
+    echo ""
+}
+
+# 5.9.5c (findings №64/№65): positive control for the four DNS rules that
+# match on qname_length alone (dns_tunneling_long_domain > 50,
+# exfil_dns_txt_long_label/webshell_dns_exfil_long_subdomain > 60,
+# netintr_dns_long_label > 100 — see rules/dns-threats.yaml,
+# rules/data-exfiltration.yaml, rules/network-intrusion.yaml,
+# rules/webshell-detection.yaml). On замер №2.9.4 all four were silent for the
+# whole agent uptime with no scenario ever exercising them — silence that
+# could not be told apart from a DNS-parse regression (the same run also had
+# dns_decode_errors_total=69 against 53 parsed events). This step gives them
+# a real, uniquely identifiable query: a label well past all four thresholds,
+# built from this run's TIMESTAMP so a hit can never be mistaken for the
+# background comm=grafana traffic that tripped these same rules on №2.9.3.
+run_dns_long_label_attack() {
+    log "==========================================="
+    log "ЗАПУСК DNS LONG-LABEL АТАКИ (5.9.5c, findings №64/№65)"
+    log "==========================================="
+
+    if ! command -v dig &> /dev/null; then
+        warn "dig не найден — DNS long-label атака (5.9.5c) пропущена, dns_tunneling_long_domain/exfil_dns_txt_long_label/netintr_dns_long_label/webshell_dns_exfil_long_subdomain останутся непроверенными на attack-стороне"
+        echo ""
+        return
+    fi
+
+    # qname_length (rules.go, getFieldValue) counts the FULL dotted name, not
+    # the longest single label — so the way to clear netintr_dns_long_label's
+    # threshold of 100 is a long NAME, and it must be built out of several
+    # labels: RFC 1035 §2.3.4 caps one label at 63 octets, and dig refuses to
+    # even send a query containing a longer one ("is not a legal name (label
+    # too long)", exit 10) — the first cut of this step used a single ~130-char
+    # label and would have sent nothing at all, leaving the positive control
+    # silent in exactly the way находка №64 could not tell apart from a parse
+    # regression. Three labels of 60/60/31 give a 179-char name: над всеми
+    # четырьмя порогами (50/60/60/100), под общим лимитом имени в 253 октета,
+    # и под DNS_MAX_PAYLOAD=256 в dns.bpf.c вместе с 12-байтным заголовком.
+    local filler_a filler_b
+    filler_a=$(printf 'x%.0s' $(seq 1 60))
+    filler_b=$(printf 'y%.0s' $(seq 1 60))
+    local long_qname="${filler_a}.${filler_b}.ebpfguard-5951c-${TIMESTAMP}.dns-tunnel-canary.invalid"
+
+    # +short/+time/+tries: a bounded, best-effort lookup — NXDOMAIN (expected,
+    # .invalid never resolves) still puts the query itself, long qname and
+    # all, on the wire and through the sendto/sendmsg tracepoints dns.go
+    # attaches to. The event is generated by the query, not the answer.
+    #
+    # `|| true` is not cosmetic: this script runs under `set -e`, and dig exits
+    # non-zero on a refused name (10) or an unreachable resolver (9). Without
+    # it a failed positive control would abort run-all-attacks.sh right here —
+    # before run_kill_scenario, run_induced_drop and get_final_metrics — and
+    # take the whole замер with it instead of costing one step.
+    dig +short +time=2 +tries=1 "$long_qname" >/dev/null 2>&1 || \
+        warn "dig вернул ненулевой код на $long_qname — запрос мог не уйти в сеть; проверить резолвер стенда (шаг не валит прогон, но критерий 5.9.5c останется без входа)"
+    log "dig на $long_qname выполнен (длина qname: ${#long_qname}) — ожидается срабатывание dns_tunneling_long_domain/exfil_dns_txt_long_label/netintr_dns_long_label/webshell_dns_exfil_long_subdomain"
+
+    # Намеренно БЕЗ записи в attack-manifest.json — по образцу run_bpf_attack
+    # (постановка 5.9.5c: «прямой вызов, без записи в манифест»). Манифест
+    # питает критерий 7 гейта (recall с порогом 1.000), а тот сопоставляет
+    # категорию с алертами ПО comm: у DNS-события comm берётся из
+    # bpf_get_current_comm в контексте sendmsg/sendto, то есть это имя ПОТОКА
+    # вызывающего процесса — у современного dig (bind9 9.18+, libuv) это
+    # `isc-net-0000`, а не `dig`. Запись в манифест подняла бы знаменатель
+    # recall до 5 и завалила бы весь гейт по недоказанному предположению об
+    # имени потока. Позитивный контроль засчитывается не манифестом, а секцией
+    # 5.9.5c run-gate.sh — по срабатыванию самих четырёх правил. Comm шага при
+    # этом остаётся в knownAttackerComms (rules_coverage_test.go), как и просит
+    # постановка: это защита от будущего `comm not_in`-исключения (находка №56),
+    # она манифеста не требует.
+
     echo ""
 }
 
@@ -419,6 +539,142 @@ run_log_tamper_attack() {
         fi
     fi
 
+    echo ""
+}
+
+# 5.9.5a (находка №62, P0) — kill-сценарий, живой позитивный контроль
+# предохранителя энфорсера. На №2.9.4 оба счётчика (enforcement_actions_total
+# и enforcement_dryrun_total) стояли на 0/0 за весь аптайм — ни одно
+# разрушительное правило не сработало ни разу, и "dry_run гасит kill"
+# осталось недоказанным (риск №3 постановки 5.9.4, материализовавшийся
+# дословно). Контрольное правило — ebpf_subversion_detach_nonroot
+# (rules/ebpf-subversion.yaml, единственное с action: kill в репозитории,
+# см. attacks/destructive-actions.txt, блок 5.9.5a и
+# TestKillScenarioControlRule_ActionIsKill): нет comm-условия, значит его
+# нельзя обойти сменой имени процесса, и оно матчит nr=321 (bpf syscall),
+# arg0 in [3,6,9,33] (деструктивные bpf(2)-команды), uid>0.
+#
+# Жертва — ОДИН И ТОТ ЖЕ одноразовый дочерний процесс харнесса, не системный
+# демон (урок №53: ebpf_subversion_unauthorized_caller бил по systemd,
+# TestExecuteKill_DryRun — тот же приём в internal/enforcer/kill_test.go,
+# только здесь на стенде): непривилегированный (uid>0) python3 под
+# пользователем nobody вызывает bpf(BPF_MAP_DELETE_ELEM=3) напрямую через
+# ctypes.syscall и после этого ещё несколько секунд жив, чтобы можно было
+# проверить, убил ли его энфорсер (не должен — dry_run: true).
+run_kill_scenario() {
+    log "==========================================="
+    log "ЗАПУСК KILL-СЦЕНАРИЯ (5.9.5a, №62 P0: живой контроль предохранителя, критерий 17)"
+    log "==========================================="
+
+    if ! id nobody >/dev/null 2>&1; then
+        warn "пользователь nobody недоступен — kill-сценарий (5.9.5a) пропущен, критерий 17 останется без входа"
+        echo ""
+        return
+    fi
+    if ! command -v python3 &> /dev/null; then
+        warn "python3 не найден — kill-сценарий (5.9.5a) пропущен, критерий 17 останется без входа"
+        echo ""
+        return
+    fi
+    if ! command -v runuser &> /dev/null; then
+        warn "runuser не найден — kill-сценарий (5.9.5a) пропущен, критерий 17 останется без входа"
+        echo ""
+        return
+    fi
+
+    local victim_script="/tmp/ebpf-guard-kill-scenario-$TIMESTAMP.py"
+    cat > "$victim_script" <<'PYEOF'
+import ctypes
+import time
+
+libc = ctypes.CDLL(None, use_errno=True)
+# bpf(BPF_MAP_DELETE_ELEM=3, attr=NULL, size=0) as an unprivileged (uid>0)
+# process — matches ebpf_subversion_detach_nonroot's nr=321/arg0=3/uid>0
+# condition regardless of the syscall's return value (it always fails here,
+# there is no valid map fd; the rule looks at the call, not its outcome).
+libc.syscall(321, ctypes.c_long(3), None, ctypes.c_ulong(0))
+time.sleep(6)
+PYEOF
+    chmod 644 "$victim_script"
+
+    runuser -u nobody -- python3 "$victim_script" &
+    local victim_pid=$!
+    log "жертва kill-сценария: pid=$victim_pid (nobody, вызвал bpf(BPF_MAP_DELETE_ELEM), arg0=3, uid>0)"
+    sleep 3
+    if kill -0 "$victim_pid" 2>/dev/null; then
+        log "наблюдение: жертва pid=$victim_pid жива через 3с после bpf() — согласуется с dry_run: true, ЕСЛИ правило сработало (само срабатывание смотреть в критерии 17)"
+    else
+        error "наблюдение: жертва pid=$victim_pid мертва раньше срока (sleep 6 не должен был закончиться) — проверить журнал: настоящий SIGKILL при dry_run: true был бы регрессом находки №52"
+    fi
+    # `|| true`: под `set -e` статус wait — это статус жертвы, а убитая жертва
+    # даёт 137. То есть без этой заглушки ровно тот случай, ради которого
+    # заведён критерий 17 (сломанный предохранитель реально убил процесс),
+    # обрывал бы run-all-attacks.sh здесь — до run_induced_drop и
+    # get_final_metrics, — и гейт не увидел бы ни финальных метрик, ни
+    # доказательства регресса. Регресс диагностируется строкой error выше и
+    # критерием 17, а не аварийным выходом скрипта.
+    wait "$victim_pid" 2>/dev/null || true
+    rm -f "$victim_script"
+    log "kill-сценарий завершён — вердикт в run-gate.sh, критерий 17 (enforcement_dryrun_total{action=kill} >= 1 и enforcement_actions_total{action=kill} == 0)"
+    echo ""
+}
+
+# 5.9.5b (находка №62, P1) — наведённый дроп, управляемый вход для критерия 3.
+# Дожидаться, пока стенд сам уронит события, — ждать случая: 222 дропа на
+# №2.9.3, 0 на №2.9.4. Всплеск файловых операций внутри дерева харнесса (а не
+# `find /usr` от отдельного, вне-дерева процесса — то дало бы алерты вне
+# observer_exclude, находка №68) должен перегрузить bulk-очередь настолько,
+# чтобы приоритетная очередь начала дропать и /health показал status=degraded
+# — переход опрашивается, пока всплеск идёт, потому что критерию нужен
+# НАБЛЮДАВШИЙСЯ переход, а не вывод постфактум. Итог (исполнен ли всплеск,
+# зафиксирован ли degraded) пишется в файл-маркер, который читает run-gate.sh
+# критерий 3, — «дроп не случился» тоже обязана быть строкой отчёта, а не
+# молчанием.
+run_induced_drop() {
+    log "==========================================="
+    log "НАВЕДЁННЫЙ ДРОП (5.9.5b, №62 P1: вход для критерия 3)"
+    log "==========================================="
+
+    local marker="$RESULTS_DIR/induced-drop-$TIMESTAMP.txt"
+    local executed=0
+    local degraded_seen=0
+
+    log "старт всплеска: find /usr -type f | head -200000 (в дереве харнесса, наблюдательный root не меняется)"
+    ( find /usr -type f 2>/dev/null | head -200000 >/dev/null ) &
+    local burst_pid=$!
+    if kill -0 "$burst_pid" 2>/dev/null; then
+        executed=1
+    fi
+
+    local i=0
+    while kill -0 "$burst_pid" 2>/dev/null && [ "$i" -lt 30 ]; do
+        # `|| true` на обеих ветках: под `set -e` и неудачный curl (агент
+        # занят/недоступен под всплеском — а это ровно ожидаемое состояние),
+        # и падение jq на неполном JSON обрывали бы прогон прямо в момент
+        # наведённого дропа.
+        st=$(curl -s -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" 2>/dev/null \
+            | jq -r '.status // empty' 2>/dev/null || true)
+        if [ "$st" = "degraded" ]; then
+            degraded_seen=1
+            log "  /health status=degraded во время всплеска (опрос №$i)"
+        fi
+        sleep 1
+        i=$(( i + 1 ))
+    done
+    wait "$burst_pid" 2>/dev/null || true
+
+    {
+        echo "executed=$executed"
+        echo "degraded_seen=$degraded_seen"
+    } > "$marker"
+
+    if [ "$degraded_seen" -eq 1 ]; then
+        log "PASS (наблюдение): переход в degraded зафиксирован во время наведённого дропа — критерий 3 получит вход"
+    elif [ "$executed" -eq 1 ]; then
+        warn "всплеск исполнен, но status=degraded за время опроса не замечен — критерий 3 останется без входа в этом прогоне"
+    else
+        warn "наведённый дроп не запустился (find/head недоступны?) — критерий 3 останется без входа"
+    fi
     echo ""
 }
 
@@ -979,7 +1235,7 @@ show_menu() {
     echo "3. Только Brute Force атаки"
     echo "4. Только SSRF атаки"
     echo "5. Только LDAP/CSRF атаки"
-    echo "6. Только canary-атаки (chmod 5.9.1e + log tamper 5.9.1d в + setuid/bpf/kmod 5.9.2b)"
+    echo "6. Только canary-атаки (chmod 5.9.1e + log tamper 5.9.1d в + setuid/bpf/kmod 5.9.2b + dns long-label 5.9.5c)"
     echo "7. Проверить состояние сервисов"
     echo "8. Собрать текущие метрики"
     echo "9. Сгенерировать отчет"
@@ -1006,6 +1262,9 @@ interactive_mode() {
                 run_setuid_attack
                 run_bpf_attack
                 run_kmod_attack
+                run_dns_long_label_attack
+                run_kill_scenario
+                run_induced_drop
                 get_final_metrics
                 generate_final_report
                 check_final_gate
@@ -1032,6 +1291,7 @@ interactive_mode() {
                 run_setuid_attack
                 run_bpf_attack
                 run_kmod_attack
+                run_dns_long_label_attack
                 ;;
             7)
                 check_services
@@ -1085,6 +1345,9 @@ full_run() {
     run_setuid_attack
     run_bpf_attack
     run_kmod_attack
+    run_dns_long_label_attack
+    run_kill_scenario
+    run_induced_drop
     get_final_metrics
     generate_final_report
 

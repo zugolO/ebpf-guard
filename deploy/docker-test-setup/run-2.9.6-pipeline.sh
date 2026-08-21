@@ -145,9 +145,25 @@ fi
 # карта не появилась в объекте, поля пропадут, и это обязано быть видно
 # здесь, а не по пустой серии в /metrics через два часа.
 echo "--- generate: новые карты волны 5.9.6 в сгенерированных биндингах ---"
-grep -c 'RingbufFullCounters\|EventsEmittedCounters' \
-    internal/bpf/syscall_bpf_gen.go internal/bpf/network_bpf_gen.go \
-    internal/bpf/fileaccess_bpf_gen.go internal/bpf/privesc_bpf_gen.go | sed 's/^/  /'
+# Файлы *_bpf_gen.go — рукописные заглушки, и make generate их УДАЛЯЕТ,
+# заменяя выводом bpf2go в *_x86_bpfel.go. Грепать заглушки после generate
+# значит грепать несуществующие файлы: шаг печатал бы «No such file» и не
+# проверял ничего — ровно та слепота, против которой он поставлен.
+gen_maps_missing=0
+for c in syscall network fileaccess privesc; do
+    gf=$(ls internal/bpf/${c}_*_bpfe*.go 2>/dev/null | head -1)
+    if [ -z "$gf" ]; then
+        echo "  $c: сгенерированных биндингов нет — bpf2go не выдал объект"
+        gen_maps_missing=1
+        continue
+    fi
+    n=$(grep -c 'RingbufFullCounters\|EventsEmittedCounters' "$gf")
+    echo "  $c ($gf): полей новых карт = $n"
+    [ "$n" -eq 0 ] && gen_maps_missing=1
+done
+if [ "$gen_maps_missing" -ne 0 ]; then
+    echo "ВНИМАНИЕ: карты волны 5.9.6 отсутствуют хотя бы в одном объекте — 5.9.6a/5.9.6b не доедут до /metrics; SMOKE-гейт [4/10] обязан это подтвердить красным"
+fi
 git status --porcelain internal/bpf/ | sed 's/^/  generate изменил: /'
 if ! make build; then
     echo "СТОП: make build упал"

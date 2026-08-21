@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/explainer"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
@@ -150,7 +149,7 @@ func NewServerWithMultiTenant(bindAddress, metricsPath, healthPath string, enabl
 
 	mux := http.NewServeMux()
 	s.mux = mux
-	mux.Handle(metricsPath, promhttp.Handler())
+	mux.Handle(metricsPath, MetricsHandler())
 	mux.HandleFunc(healthPath, s.handleHealth)
 	mux.HandleFunc(healthPath+"/ready", s.handleReady)
 	mux.HandleFunc(healthPath+"/live", s.handleLive)
@@ -234,7 +233,7 @@ func NewServerWithRBAC(bindAddress, metricsPath, healthPath string, enablePprof,
 
 	mux := http.NewServeMux()
 	s.mux = mux
-	mux.Handle(metricsPath, promhttp.Handler())
+	mux.Handle(metricsPath, MetricsHandler())
 	mux.HandleFunc(healthPath, s.handleHealth)
 	mux.HandleFunc(healthPath+"/ready", s.handleReady)
 	mux.HandleFunc(healthPath+"/live", s.handleLive)

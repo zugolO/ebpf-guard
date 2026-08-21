@@ -725,6 +725,22 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	emittedTrackers := &kernelCounterRegistry{
 		sink: exporter.RecordEmittedKernelN,
 	}
+	// Both kernel counters are also drained at scrape time, not only on the
+	// 15s stats tick below. 5.9.6b's balance identity puts these two series
+	// on the left of an equality whose right-hand side (events_total,
+	// events_dropped_total, events_malformed_total) is written as events are
+	// processed, i.e. with no lag at all. Draining only on a timer therefore
+	// injects up to one tick of one-sided lag into the residual: measured on
+	// ebaka2 it reached −7288 for fileaccess against the gate's ±500 floor,
+	// an accounting hole that exists purely in the reading, not in the
+	// pipeline — and one that grows with event rate, so the induced drop of
+	// 5.9.6d would make it worse exactly where the criterion matters.
+	// kernelCounterRegistry.drain is delta-based and mutex-guarded, so the
+	// scrape and the tick can race harmlessly.
+	exporter.RegisterPreScrapeHook(func() {
+		ringbufFullTrackers.drain()
+		emittedTrackers.drain()
+	})
 
 	if cfg.Correlator.ObserverExclude.Enabled {
 		rootPIDFile := cfg.Correlator.ObserverExclude.RootPIDFile

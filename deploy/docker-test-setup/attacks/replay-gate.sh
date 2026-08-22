@@ -150,7 +150,7 @@ if [ -z "$ts5" ]; then
     bad "collect-2.9.5: baseline-state-*.json не найден в $C295_DIR/attacks — архив недоступен"
 else
     run_offline_gate "$C295_DIR/attacks" "$ts5"
-    sec19_295=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 19\.' '^=== 20\.')
+    sec19_295=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 19[.]' '^=== 20[.]')
     if grep -q 'серия events_emitted_kernel_total отсутствует' <<< "$sec19_295"; then
         ok "collect-2.9.5 (ts=$ts5): секция 19 = SKIP по отсутствующей серии — левой части баланса в этом архиве действительно нет (сборка старее 5.9.6b)"
     else
@@ -166,7 +166,7 @@ if [ -z "$ts6" ]; then
     bad "collect-2.9.6: baseline-state-*.json не найден в $C296_DIR/attacks — архив недоступен"
 else
     run_offline_gate "$C296_DIR/attacks" "$ts6"
-    sec19_296=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 19\.' '^=== 20\.')
+    sec19_296=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 19[.]' '^=== 20[.]')
     balance_pass_count=$(grep -c '\[PASS\].*баланс сходится' <<< "$sec19_296" || true)
     if [ "$balance_pass_count" -eq 3 ]; then
         ok "collect-2.9.6 (ts=$ts6): секция 19 сходится PASS по всем трём коллекторам (syscall/network/fileaccess)"
@@ -197,7 +197,7 @@ window_seconds=31
 EOF
     run_offline_gate "$tmp296" "$ts6"
     rm -rf "$tmp296"
-    sec20_296=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 20\.' '^=== 21\.')
+    sec20_296=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 20[.]' '^=== 21[.]')
     if grep -q '\[PASS\].*idle: N=10000 сходится' <<< "$sec20_296" \
         && ! grep -q '\[FAIL\].*drop:' <<< "$sec20_296"; then
         ok "collect-2.9.6 (ts=$ts6) + синтетический null (547/с): idle PASS, drop не FAIL (SKIP по ringbuf_full=0 на этом стенде — ожидаемо, см. plan.md) — старая формула валила оба режима, новая нет"
@@ -226,7 +226,7 @@ else
         awk '/ebpf_guard_events_emitted_kernel_total\{collector="syscall"\}/{$NF=$NF+1000} {print}' \
             "$loss_final" > "$loss_final.tmp" && mv "$loss_final.tmp" "$loss_final"
         run_offline_gate "$tmp_loss" "$ts6"
-        sec19_loss=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 19\.' '^=== 20\.')
+        sec19_loss=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 19[.]' '^=== 20[.]')
         if grep -q '\[FAIL\].*syscall: невязка' <<< "$sec19_loss"; then
             ok "collect-2.9.6 (ts=$ts6) с искусственной потерей 1000 на syscall: секция 19 упала FAIL именно на syscall — тождество умеет падать, а не только сходиться"
         else

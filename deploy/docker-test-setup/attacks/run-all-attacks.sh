@@ -748,6 +748,65 @@ run_chmod_attack() {
 # каждый новый номер был либо покрыт срабатыванием на attack-прогоне, либо
 # записан в intentional-loss.txt с причиной — не подтверждённые тут остаются
 # в списке (см. deploy/docker-test-setup/attacks/intentional-loss.txt).
+# 5.9.7e / риск №3 постановки №2.9.7: ПОЗИТИВНЫЙ КОНТРОЛЬ сужения двух правил.
+# Волна 5.9.7e сузила rootkit_ssh_authorized_keys_modified условием `op: eq
+# write`, чтобы штатный ssh-логин (sshd читает authorized_keys) перестал
+# считаться детектом. Это ровно тот приём, которым 5.9.3b убила восемь типов
+# разом (находка №57): «правило молчит» и «правило ослепло» по артефактам
+# прогона неотличимы, если на том же прогоне нет записи, которая ОБЯЗАНА его
+# поднять. Юнит-тест (TestWave597*) проверяет ту же пару офлайн; здесь —
+# живьём, на настоящем ядре, тем же конвейером, которым считается критерий.
+#
+# Запись делается посторонним comm (`tee -a`), а не sshd, и только
+# комментарием: файл сначала копируется, потом восстанавливается из копии,
+# так что доступ по ключу не может быть потерян даже при обрыве шага
+# (комментарий в authorized_keys безвреден для sshd и сам по себе).
+run_ssh_keys_positive_control() {
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.7e (риск №3): запись в authorized_keys посторонним comm"
+    log "==========================================="
+
+    local keys="/root/.ssh/authorized_keys"
+    local backup="/root/.ssh/authorized_keys.ebpf-guard-bak-$TIMESTAMP"
+
+    if [ ! -f "$keys" ]; then
+        warn "$keys отсутствует — позитивный контроль 5.9.7e пропущен, сужение правила остаётся недоказанным (риск №3)"
+        echo ""
+        return
+    fi
+    if ! cp -p "$keys" "$backup" 2>/dev/null; then
+        warn "не удалось сделать копию $keys — позитивный контроль 5.9.7e пропущен (без копии запись не делается)"
+        echo ""
+        return
+    fi
+
+    mark_attack_window
+    echo "# ebpf-guard 5.9.7e positive control $TIMESTAMP" | tee -a "$keys" >/dev/null 2>&1 \
+        && log "запись в $keys выполнена comm=tee — ожидается срабатывание rootkit_ssh_authorized_keys_modified" \
+        || warn "запись в $keys не удалась — позитивный контроль 5.9.7e не исполнен"
+    mark_attack_window
+
+    # Восстановление обязательно и проверяется: шаг, который умеет испортить
+    # ключи и не умеет это заметить, хуже отсутствующего шага.
+    if cp -p "$backup" "$keys" 2>/dev/null && ! grep -q "ebpf-guard 5.9.7e positive control $TIMESTAMP" "$keys"; then
+        rm -f "$backup"
+        log "$keys восстановлен из копии, строка контроля снята"
+    else
+        error "НЕ УДАЛОСЬ восстановить $keys — копия оставлена в $backup, снять вручную"
+    fi
+
+    if command -v jq &> /dev/null; then
+        keys_entry=$(jq -n --arg cat "ssh_keys_positive_control" --arg comm "tee" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$keys_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$keys_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
 run_setuid_attack() {
     log "==========================================="
     log "ЗАПУСК SETUID АТАКИ (5.9.2b, sigma_setuid_syscall)"
@@ -1852,7 +1911,7 @@ show_menu() {
     echo "3. Только Brute Force атаки"
     echo "4. Только SSRF атаки"
     echo "5. Только LDAP/CSRF атаки"
-    echo "6. Только canary-атаки (chmod 5.9.1e + log tamper 5.9.1d в + setuid/bpf/kmod 5.9.2b + dns long-label 5.9.5c)"
+    echo "6. Только canary-атаки (chmod 5.9.1e + ssh-keys 5.9.7e + log tamper 5.9.1d в + setuid/bpf/kmod 5.9.2b + dns long-label 5.9.5c)"
     echo "7. Проверить состояние сервисов"
     echo "8. Собрать текущие метрики"
     echo "9. Сгенерировать отчет"
@@ -1877,6 +1936,7 @@ interactive_mode() {
                 run_ssrf_attacks
                 run_ldap_csrf_attacks
                 run_chmod_attack
+                run_ssh_keys_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack
@@ -1906,6 +1966,7 @@ interactive_mode() {
                 ;;
             6)
                 run_chmod_attack
+                run_ssh_keys_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack
@@ -1962,6 +2023,7 @@ full_run() {
     run_ssrf_attacks
     run_ldap_csrf_attacks
     run_chmod_attack
+    run_ssh_keys_positive_control
     run_log_tamper_attack
     run_setuid_attack
     run_bpf_attack

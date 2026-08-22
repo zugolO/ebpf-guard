@@ -1276,6 +1276,37 @@ else
 fi
 echo ""
 
+# 5.9.7e / риск №3 постановки №2.9.7: позитивный контроль сужения по ssh.
+# Волна 5.9.7e сузила rootkit_ssh_authorized_keys_modified (`op: eq write`) и
+# sigma_sensitive_dir_listing (исключение comm=sshd на /root/.ssh/), чтобы
+# штатный ssh-логин перестал считаться детектом. У этого приёма есть ровно
+# один способ провалиться незаметно — правило умирает целиком (находка №57,
+# восемь типов на 5.9.3b), и по артефактам прогона это неотличимо от
+# «нечему было срабатывать». Поэтому критерий двусторонний, и обе стороны
+# считаются на ОДНОМ прогоне: шаг run_ssh_keys_positive_control пишет в
+# authorized_keys посторонним comm (обязан дать алерт), а sshd за тот же
+# прогон обязан не дать ни одного алерта этих двух правил.
+echo "=== 5.9.7e. Позитивный контроль сужения по ssh (риск №3) ==="
+if [ ! -s "$final_alerts" ] || ! jq -e 'type == "array"' "$final_alerts" >/dev/null 2>&1; then
+    skip "final-alerts-$TIMESTAMP.json отсутствует или не JSON-массив — позитивный контроль 5.9.7e не проверен (5.9.7e: позитивный контроль)"
+else
+    ssh_ctl_hits=$(jq '[.[] | select(.rule_id == "rootkit_ssh_authorized_keys_modified")
+        | select(.comm != "sshd")] | length' "$final_alerts" 2>/dev/null || echo 0)
+    ssh_ctl_sshd=$(jq '[.[] | select(.rule_id == "rootkit_ssh_authorized_keys_modified"
+        or .rule_id == "sigma_sensitive_dir_listing") | select(.comm == "sshd")] | length' "$final_alerts" 2>/dev/null || echo 0)
+    ssh_ctl_comms=$(jq -r '[.[] | select(.rule_id == "rootkit_ssh_authorized_keys_modified")
+        | .comm] | unique | join(",")' "$final_alerts" 2>/dev/null || echo "")
+    echo "  алертов rootkit_ssh_authorized_keys_modified: comm != sshd — $ssh_ctl_hits, comm = sshd — по обоим правилам $ssh_ctl_sshd (comm'ы правила: ${ssh_ctl_comms:-нет})"
+    if [ "$ssh_ctl_hits" -ge 1 ] && [ "$ssh_ctl_sshd" -eq 0 ]; then
+        pass "запись в authorized_keys посторонним comm поднимает правило ($ssh_ctl_hits), sshd не поднимает ни одного — сужение не ослепило (5.9.7e: позитивный контроль)"
+    elif [ "$ssh_ctl_hits" -eq 0 ]; then
+        fail "rootkit_ssh_authorized_keys_modified не сработало ни разу на записи посторонним comm — сужение 5.9.7e неотличимо от ослепления правила (риск №3, тот же класс, что находка №57) (5.9.7e: позитивный контроль)"
+    else
+        fail "$ssh_ctl_sshd алерт(ов) этих двух правил с comm=sshd — штатный ssh-логин по-прежнему считается детектом, сужение 5.9.7e не работает (5.9.7e: позитивный контроль)"
+    fi
+fi
+echo ""
+
 # 5.9.7f (находка №83): постановка п.8 требовала "DNS long-label на idle — 0,
 # либо запись с числами в 6.3", но 5.9.6e была оформлена только как правка
 # правил+разбор — критерия в гейте не было, и три критикала в idle-час

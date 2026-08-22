@@ -470,17 +470,29 @@ rules:
   # SSH backdoor patterns
   # ============================================================================
 
+  # 5.9.7e (находка №82): the collector tracks open(2) by default, and the
+  # rule's original bare filename condition matched that open() regardless of
+  # read/write intent — every sshd pubkey-auth login opens authorized_keys to
+  # read it, so the rule fired on every login (name promised "modified", the
+  # condition checked "opened"). op: write requires collectors.file_ops.track_write
+  # (see config.yaml) — main.go warns at startup via RulesRequiringFileOp if
+  # it's off, the same convention as fim_binary_replaced_in_system_dir.
   - id: rootkit_ssh_authorized_keys_modified
     name: "SSH authorized_keys modified"
     description: "SSH authorized_keys file written — adding attacker SSH key for persistent backdoor access."
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - ".*/\\.ssh/authorized_keys$"
-        - "/root/\\.ssh/authorized_keys$"
-        - "/etc/ssh/authorized_keys$"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            - ".*/\\.ssh/authorized_keys$"
+            - "/root/\\.ssh/authorized_keys$"
+            - "/etc/ssh/authorized_keys$"
+        - field: op
+          op: eq
+          values: ["write"]
     severity: critical
     action: alert
     tags: [mitre:T1098.004, rootkit, ssh-backdoor, persistence]

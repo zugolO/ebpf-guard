@@ -20,6 +20,32 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # (plan.md волна 1.5g).
 MANIFEST_FILE="$SCRIPT_DIR/attack-manifest.json"
 
+# 5.9.7d (№80, P1): маркер окна атаки. Прежде темп детекта (крит. 6
+# run-gate.sh) делился на всё окно baseline→final, то есть на длину ВСЕГО
+# пайплайна — get_baseline_metrics, три режима run_counting_control,
+# kill-сценарий, наведённый дроп и снятие финальных метрик считались частью
+# "окна атаки", хотя ни один из них не отправляет трафик атаки. Каждый шаг,
+# который реально его отправляет, зовёт mark_attack_window ДО и ПОСЛЕ своей
+# работы; марка "first" пишется только первым вызовом за прогон и больше не
+# трогается, "last" перезаписывается каждым — так okно считается по факту
+# того, что действительно случилось, а не вычисляется гейтом по именам
+# функций (иначе следующий добавленный шаг снова уедет в знаменатель, то же
+# искажение, найденное этой волной, повторится с другим виновником).
+ATTACK_WINDOW_MARKER="$RESULTS_DIR/attack-window-$TIMESTAMP.txt"
+mark_attack_window() {
+    local now
+    now=$(date +%s.%N)
+    if [ ! -f "$ATTACK_WINDOW_MARKER" ]; then
+        echo "first=$now" > "$ATTACK_WINDOW_MARKER"
+    fi
+    if grep -q '^last=' "$ATTACK_WINDOW_MARKER" 2>/dev/null; then
+        awk -v n="$now" -F= 'BEGIN{OFS="="} $1=="last"{$2=n} {print}' "$ATTACK_WINDOW_MARKER" > "$ATTACK_WINDOW_MARKER.tmp" \
+            && mv "$ATTACK_WINDOW_MARKER.tmp" "$ATTACK_WINDOW_MARKER"
+    else
+        echo "last=$now" >> "$ATTACK_WINDOW_MARKER"
+    fi
+}
+
 # Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,6 +60,86 @@ info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 
 # Создание директории для результатов
 mkdir -p "$RESULTS_DIR"
+
+# 5.9.7g (находка №84, P2): регистрация дерева измерителя в observer_tree —
+# тот же канал (OBSERVER_ROOT_PID_FILE), что уже использует idle-run.sh
+# (5.9a/5.9.1a), но ДО этой правки run-all-attacks.sh его не трогал вовсе.
+# Разбор находки №84 (57 алертов от curl/grep/jq/date/rm в слепом окне)
+# показал, что дело не в том, что цепочка real_parent не успевала дойти до
+# корня — цепочка была цела, но агент никогда не узнавал, что у ЭТОГО дерева
+# вообще есть корень: check_services/get_baseline_metrics — тот самый пролог
+# сбора baseline — исполнялись под PID'ом, который ни разу не публиковался в
+# observer_root_pid.
+#
+# ГРАНИЦА РЕГИСТРАЦИИ — не весь скрипт, а только пролог. Это не деталь
+# оформления, а условие корректности: observer_should_drop() (bpf/common.h)
+# роняет в ядре ВСЕ события ЛЮБОГО потомка корня на глубину до 12 хопов, до
+# резервирования в кольце. run-all-attacks.sh — одновременно измеритель И
+# генератор атак, в отличие от idle-run.sh, который только измеряет. Если
+# корнем объявить $$ на весь прогон, из корреляции исчезают ровно те
+# процессы, ради которых прогон существует: по архиву №2.9.6 это sqlmap
+# (202 алерта), curl (169), chmod (6), tee (5) — то есть весь непустой
+# знаменатель recall'а (крит. 7) и почти весь числитель темпа детекта
+# (крит. 6), плюс канарейка run_counting_control (её N openat() перестали бы
+# считаться вовсе — тождество 5.9.7a обнулилось бы) и канарейка
+# run_ringbuf_overflow (кольцо нечем стало бы переполнять — 5.9.7b).
+# Поэтому корнем регистрируется САБШЕЛЛ пролога (run_measurement_prologue),
+# а не сам скрипт: check_services/get_baseline_metrics — его потомки и
+# исключаются, всё, что запускается после, потомками не является и остаётся
+# видимым. Это в точности окно, которое меряет крит. 16 (idle-конец →
+# attack-baseline), и ни секундой больше.
+OBSERVER_ROOT_PID_FILE="${OBSERVER_ROOT_PID_FILE:-/var/lib/ebpf-guard/observer-root-pid}"
+
+# Регистрация вызывается ВНУТРИ сабшелла пролога, поэтому пишет $BASHPID
+# (PID сабшелла), а не $$ (PID скрипта — в сабшелле $$ остаётся прежним).
+observer_root_register() {
+    local root="$BASHPID"
+    if ! echo "$root" > "$OBSERVER_ROOT_PID_FILE" 2>/dev/null; then
+        warn "не удалось записать $OBSERVER_ROOT_PID_FILE — 5.9.7g не подхватит корень, пролог baseline (curl/grep/jq/date/rm) не будет исключён из корреляции"
+        return 0
+    fi
+    log "5.9.7g: дерево пролога зарегистрировано, root_pid=$root ($OBSERVER_ROOT_PID_FILE); шаги после пролога под ним НЕ идут и остаются видимыми"
+    if ! command -v jq &> /dev/null; then
+        warn "jq недоступен — подтверждение подхвата root_pid=$root не проверено, пролог продолжается вслепую"
+        return 0
+    fi
+    local observer_confirmed=0 reported_root
+    sleep 3
+    for _ in $(seq 1 7); do
+        reported_root="$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" 2>/dev/null \
+            | jq -r '.engine_stats.observer_root_pid // empty' 2>/dev/null || true)"
+        if [ "$reported_root" = "$root" ]; then
+            observer_confirmed=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$observer_confirmed" -eq 1 ]; then
+        log "5.9.7g: агент подтвердил подхват root_pid=$root через /debug/state"
+    else
+        warn "агент не подтвердил подхват root_pid=$root за ~17с (/debug/state недоступен, observer_exclude выключен в его конфиге, или агент не запущен) — пролог продолжается без подтверждения"
+    fi
+}
+
+# Пролог замера целиком в сабшелле: всё, что он порождает, — потомки
+# зарегистрированного корня и исключается в ядре; всё, что вызывается ПОСЛЕ
+# него, потомком не является. Статус возвращается наружу как обычно, поэтому
+# `run_measurement_prologue || exit 1` ведёт себя ровно как прежний
+# `check_services || exit 1`.
+#
+# После выхода сабшелла корень остаётся указывать на уже мёртвый PID. Это не
+# упущение и не новое состояние: idle-run.sh ведёт себя так же с 5.9a (его
+# EXIT-trap пишет в файл 0, но агент значение 0 игнорирует — см. plan.md,
+# находка о мёртвом освобождении корня), и весь attack-прогон до этой волны
+# шёл именно под мёртвым корнем idle-run.sh. Мёртвый PID никому не предок,
+# то есть фильтр после пролога фактически выключен — что здесь и требуется.
+run_measurement_prologue() {
+    (
+        observer_root_register
+        check_services || exit 1
+        get_baseline_metrics
+    )
+}
 
 # Проверка доступности сервисов
 check_services() {
@@ -236,42 +342,35 @@ PYEOF
 # during its window is the canary itself, and Δevents+Δdrops staying == N
 # while ringbuf_full > 0 is exactly "counted correctly even while losing
 # heavily", which is the property 5.9.6c exists to prove.
+#
+# 5.9.7a (№78, P0): mode=null is a THIRD, negative-control mode — same
+# window, same settle loop, same snapshots, N=0 (no canary at all). Its own
+# Δevents+Δdrops IS the background of the window: file events from
+# prometheus/grafana/docker/containerd that ebpf_guard_events_total{type=
+# "file"} counts indiscriminately alongside the canary (the metric has no
+# path label). The previous approach — sampling the rate for
+# COUNTING_CONTROL_BG_WINDOW seconds BEFORE the generator — is deleted, not
+# adjusted: measured 3s before 300k openat() calls, it carries none of the
+# tail those calls leave in the collector/router/queue chain, so it
+# systematically underestimates the background of the idle/drop windows
+# that follow it. null must run FIRST, before idle and before drop, so
+# neither positive-control window's background is contaminated by the
+# canary traffic of the other (plan.md 5.9.7a).
 run_counting_control() {
     local mode="$1" n="$2"
     local marker="$RESULTS_DIR/counting-control-${mode}-$TIMESTAMP.txt"
     local canary_path="/tmp/ebpf-guard-counting-canary-$TIMESTAMP-$mode"
 
     log "==========================================="
-    log "ПОЗИТИВНЫЙ КОНТРОЛЬ СЧЁТНОСТИ (5.9.6c, mode=$mode, N=$n)"
+    log "КОНТРОЛЬ СЧЁТНОСТИ (5.9.7a, mode=$mode, N=$n)"
     log "==========================================="
 
-    if ! command -v python3 &> /dev/null; then
-        warn "python3 не найден — контроль счётности ($mode) пропущен, критерий 5.9.6c без входа для этого режима"
+    if [ "$mode" != "null" ] && ! command -v python3 &> /dev/null; then
+        warn "python3 не найден — контроль счётности ($mode) пропущен, критерий 5.9.7a без входа для этого режима"
         echo "skipped=1" > "$marker"
         echo ""
         return
     fi
-
-    # ФОН. Δevents_total{type="file"} — счётчик ВСЕГО файлового коллектора,
-    # по всем процессам и всем путям; уникальность пути-канарейки на него не
-    # влияет никак (у метрики нет лейбла пути). Поэтому в сумму «до/после»
-    # неизбежно попадает всё, что открывали в это же окно посторонние
-    # процессы стенда (prometheus, grafana, docker, containerd), а окно
-    # длится не мгновение: генератор плюс опрос-устаканивание — секунды.
-    # Мерим фон ДО генератора на фиксированном окне и печатаем оценку
-    # числом: гейт учтёт её как ЗАЯВЛЕННУЮ ЗАРАНЕЕ поправку, а не как
-    # расширение допуска задним числом под полученную цифру (п.4 порядка
-    # работы). Если фон окажется велик относительно N, это тоже результат —
-    # он будет виден в маркере, а не спрятан в невязке.
-    local bg_window="${COUNTING_CONTROL_BG_WINDOW:-3}"
-    local bg_a bg_b bg_rate
-    bg_a=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
-        | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-    sleep "$bg_window"
-    bg_b=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
-        | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-    bg_rate=$(awk -v a="${bg_a:-0}" -v b="${bg_b:-0}" -v w="$bg_window" 'BEGIN{r=(b-a)/w; if(r<0) r=0; printf "%.2f", r}')
-    log "фон файловых событий до генератора: $(awk -v a="${bg_a:-0}" -v b="${bg_b:-0}" 'BEGIN{printf "%d", b-a}') за ${bg_window}с = ${bg_rate}/с"
 
     local before events_before drops_before ringbuf_full_before
     before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
@@ -281,18 +380,24 @@ run_counting_control() {
     local window_start
     window_start=$(date +%s)
 
-    log "генератор: $n открытий $canary_path"
     local t0 t1
-    t0=$(date +%s)
-    if ! emit_counting_canary "$n" "$canary_path"; then
-        warn "генератор канарейки ($mode) не отработал — контроль счётности пропущен, критерий 5.9.6c без входа для этого режима"
-        echo "skipped=1" > "$marker"
-        rm -f "$canary_path"
-        echo ""
-        return 0
+    if [ "$mode" = "null" ]; then
+        log "негативный контроль: генератор не запускается (N=0) — это окно и есть измерение фона"
+        t0=$(date +%s)
+        t1=$t0
+    else
+        log "генератор: $n открытий $canary_path"
+        t0=$(date +%s)
+        if ! emit_counting_canary "$n" "$canary_path"; then
+            warn "генератор канарейки ($mode) не отработал — контроль счётности пропущен, критерий 5.9.7a без входа для этого режима"
+            echo "skipped=1" > "$marker"
+            rm -f "$canary_path"
+            echo ""
+            return 0
+        fi
+        t1=$(date +%s)
+        log "генератор закончил за $((t1 - t0))с"
     fi
-    t1=$(date +%s)
-    log "генератор закончил за $((t1 - t0))с"
 
     # Устояться перед снимком "после": конвейер (ringbuf → router → bulk
     # queue → correlator) асинхронный, и снятие "после" сразу за концом
@@ -318,16 +423,18 @@ run_counting_control() {
     drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
     ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
 
-    local events_delta drops_delta ringbuf_full_delta sum diff window_seconds background_estimate
+    local events_delta drops_delta ringbuf_full_delta sum diff window_seconds
     events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
     drops_delta=$(( ${drops_after:-0} - ${drops_before:-0} ))
     ringbuf_full_delta=$(( ${ringbuf_full_after:-0} - ${ringbuf_full_before:-0} ))
     sum=$(( events_delta + drops_delta ))
     diff=$(( sum - n ))
     # Длина окна «до»→«после» целиком, включая устаканивание: именно столько
-    # времени фон подмешивался в обе метрики.
+    # времени фон (mode=null) или фон+канарейка (idle/drop) копились в обе
+    # метрики. run-gate.sh делит null's sum на это же поле, чтобы получить
+    # темп фона независимо от того, сколько заняло устаканивание в этом
+    # конкретном прогоне.
     window_seconds=$(( $(date +%s) - window_start ))
-    background_estimate=$(awk -v r="$bg_rate" -v w="$window_seconds" 'BEGIN{printf "%.0f", r*w}')
 
     {
         echo "mode=$mode"
@@ -339,15 +446,190 @@ run_counting_control() {
         echo "diff=$diff"
         echo "quiesced_iterations=$i"
         echo "generator_seconds=$((t1 - t0))"
-        echo "background_rate_per_sec=$bg_rate"
-        echo "background_window_seconds=$bg_window"
         echo "window_seconds=$window_seconds"
-        echo "background_estimate=$background_estimate"
     } > "$marker"
 
-    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess,все причины)=$drops_delta Δringbuf_full(fileaccess)=$ringbuf_full_delta сумма=$sum разница_с_N=$diff (устоялось за ${i} срезов, окно ${window_seconds}с, оценка фона $background_estimate)"
+    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess,все причины)=$drops_delta Δringbuf_full(fileaccess)=$ringbuf_full_delta сумма=$sum сумма-N=$diff (устоялось за ${i} срезов, окно ${window_seconds}с)"
     if [ "$mode" = "drop" ] && [ "${ringbuf_full_delta:-0}" -le 0 ]; then
         warn "mode=drop: ringbuf_full не вырос — N=$n не переполнил кольцо на этом стенде; критерий 5.9.6c для этого режима останется без второй половины (см. открытые вопросы, COUNTING_CONTROL_DROP_N не откалиброван)"
+    fi
+    rm -f "$canary_path"
+    echo ""
+}
+
+# 5.9.7b (№79, P0): кольцо переполняется управляемо, а не надеждой на
+# нагрузку. Пункты 1 и 5 постановки №2.9.6 остались недоказанными на любой
+# нагрузке, которую этот харнесс способен создать против дефолтного кольца
+# (auto-sized от MemAvailable, десятки МБ — internal/bpf/ringbuf_size.go) —
+# читатель успевает вычерпывать его быстрее любого генератора.
+#
+# Метод А постановки (сузить bpf.ring_buf_size и перезапустить агента) на
+# этом коде НЕ исполним: ComputeRingBufSize клэмпит ЛЮБОЕ заданное значение
+# в [4 МБ, 32 МБ] (ringBufMinBytes/ringBufMaxBytes), так что "порядка 4096
+# байт" из постановки после клэмпа неотличимо от дефолта. Комментарий у
+# ringBufMinBytes называет его "kernel enforced minimum" — это неточно:
+# BPF_MAP_TYPE_RINGBUF требует только степень двойки и выравнивание по
+# странице, 4 МБ — собственный пол продукта. Метод А отмечен как
+# заблокированный кодом, а не пропущен молча (открытый вопрос 5.9.7b) —
+# смена этого пола не входит в 5.9.7b и не делалась.
+#
+# Метод Б (исполняется здесь): SIGSTOP всему процессу агента на время
+# генератора. Кольцо — BPF-карта в ядре, живёт независимо от userspace;
+# пока читающий poll-луп заморожен, bpf_ringbuf_reserve() в BPF-программе
+# всё равно исполняется при каждом syscall'е канарейки и промахивается,
+# когда кольцо заполнено — сам промах считается в перцпу-карте
+# ringbuf_full_counters (5.9.6a) НЕЗАВИСИМО от того, читает ли кто-то
+# userspace-часть. SIGCONT возвращает процесс; events_dropped_total{reason=
+# "ringbuf_full"} обновляется на следующем скрейпе (prescrape hook,
+# beb16a0), bpf_lost_events_total — на следующем тике watchdog'а (≤10с,
+# internal/watchdog/watchdog.go runDropTracking) — отсюда settle-луп ждёт
+# не только стабилизации events+drops, но и минимум 12с после SIGCONT.
+run_ringbuf_overflow() {
+    local n="${RINGBUF_OVERFLOW_N:-300000}"
+    local service="${RINGBUF_OVERFLOW_SERVICE:-ebpf-guard-test.service}"
+    local marker="$RESULTS_DIR/ringbuf-overflow-$TIMESTAMP.txt"
+    local canary_path="/tmp/ebpf-guard-ringbuf-overflow-canary-$TIMESTAMP"
+    local method_a_blocked="ComputeRingBufSize клэмпит SizeBytes в [4МБ,32МБ] (internal/bpf/ringbuf_size.go) — узкая карта из постановки недостижима без правки кода, не делалась в 5.9.7b"
+
+    log "==========================================="
+    log "ПЕРЕПОЛНЕНИЕ КОЛЬЦА ПОД КОНТРОЛЕМ (5.9.7b, №79, N=$n, метод=SIGSTOP)"
+    log "==========================================="
+
+    if ! command -v python3 &> /dev/null; then
+        warn "python3 не найден — run_ringbuf_overflow пропущен, критерий 5.9.7b без входа"
+        { echo "skipped=1"; echo "skip_reason=python3 недоступен на харнессе"; } > "$marker"
+        echo ""
+        return
+    fi
+    if [ "$(id -u)" -ne 0 ]; then
+        warn "не root — SIGSTOP/SIGCONT сервиса недоступны, run_ringbuf_overflow пропущен"
+        { echo "skipped=1"; echo "skip_reason=харнесс запущен не от root, SIGSTOP сервиса невозможен"; } > "$marker"
+        echo ""
+        return
+    fi
+
+    local pid
+    pid=$(systemctl show -p MainPID --value "$service" 2>/dev/null)
+    if [ -z "$pid" ] || [ "$pid" = "0" ]; then
+        warn "не удалось получить MainPID $service — run_ringbuf_overflow пропущен"
+        { echo "skipped=1"; echo "skip_reason=MainPID $service не найден (systemctl show)"; } > "$marker"
+        echo ""
+        return
+    fi
+    log "агент: $service pid=$pid"
+
+    # Справочное значение — критерий 18 (run-gate.sh) судит его отдельно за
+    # окно idle-часа; здесь только печатается в маркер, если снимки под рукой
+    # (тот же приём, что IDLE_METRICS_START/END в остальном харнессе).
+    local idle_ringbuf_full=""
+    if [ -n "$IDLE_METRICS_START" ] && [ -n "$IDLE_METRICS_END" ] \
+        && [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
+        idle_ringbuf_full=$(awk -F'} ' '
+            FNR==NR { if ($0 ~ "ebpf_guard_events_dropped_total\\{" && $0 ~ "collector=\"fileaccess\"" && $0 ~ "reason=\"ringbuf_full\"") base+=$2+0; next }
+            { if ($0 ~ "ebpf_guard_events_dropped_total\\{" && $0 ~ "collector=\"fileaccess\"" && $0 ~ "reason=\"ringbuf_full\"") fin+=$2+0 }
+            END { printf "%.0f", fin-base }
+        ' "$IDLE_METRICS_START" "$IDLE_METRICS_END" 2>/dev/null)
+    fi
+
+    local before events_before drops_before ringbuf_full_before bpf_lost_before
+    before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+    drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+    ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
+    bpf_lost_before=$(echo "$before" | sum_metric 'ebpf_guard_bpf_lost_events_total\{collector="fileaccess"\}')
+    if [ -z "$before" ]; then
+        warn "снимок /metrics до заморозки пуст — run_ringbuf_overflow пропущен (агент недоступен ДО SIGSTOP, замораживать нечего)"
+        { echo "skipped=1"; echo "skip_reason=пустой снимок /metrics до SIGSTOP"; } > "$marker"
+        echo ""
+        return
+    fi
+
+    : > "$canary_path" || true
+    log "SIGSTOP pid=$pid"
+    if ! kill -STOP "$pid" 2>/dev/null; then
+        warn "kill -STOP $pid не удался — run_ringbuf_overflow пропущен"
+        { echo "skipped=1"; echo "skip_reason=kill -STOP не удался"; } > "$marker"
+        rm -f "$canary_path"
+        echo ""
+        return
+    fi
+
+    local t0 t1
+    t0=$(date +%s)
+    # Генератор запускается, ПОКА агент заморожен: кольцо в ядре продолжает
+    # принимать резервирования (bpf_ringbuf_reserve) от каждого openat(),
+    # читающий poll-луп не выгребает ничего, и кольцо обязано заполниться
+    # раньше, чем закончатся N попыток, если N калиброван достаточно щедро
+    # относительно auto-sized кольца этого стенда.
+    if ! emit_counting_canary "$n" "$canary_path"; then
+        warn "генератор канарейки под SIGSTOP не отработал — SIGCONT немедленно, run_ringbuf_overflow без входа"
+        kill -CONT "$pid" 2>/dev/null || true
+        { echo "skipped=1"; echo "skip_reason=генератор канарейки под SIGSTOP не отработал"; } > "$marker"
+        rm -f "$canary_path"
+        echo ""
+        return
+    fi
+    t1=$(date +%s)
+    log "генератор закончил за $((t1 - t0))с (кольцо заморожено всё это время)"
+
+    log "SIGCONT pid=$pid"
+    kill -CONT "$pid" 2>/dev/null || true
+
+    # Settle-луп той же формы, что run_counting_control, ПЛЮС минимум 12с
+    # после SIGCONT — bpf_lost_events_total обновляется watchdog'ом раз в
+    # 10с (internal/watchdog/watchdog.go runDropTracking), не на скрейпе, и
+    # без этого хвоста критерий 5.9.7b сравнивал бы его со значением,
+    # которое ещё не успело догнать events_dropped_total{reason=ringbuf_full}
+    # (тот обновляется на скрейпе, prescrape hook, beb16a0).
+    local prev_sum=-1 cur_sum after i=0 ev dr
+    for i in $(seq 1 30); do
+        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+        ev=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+        dr=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+        cur_sum=$(( ${ev:-0} + ${dr:-0} ))
+        if [ "$cur_sum" -eq "$prev_sum" ] && [ "$(( $(date +%s) - t1 ))" -ge 12 ]; then
+            break
+        fi
+        prev_sum=$cur_sum
+        sleep 1
+    done
+
+    local events_after drops_after ringbuf_full_after bpf_lost_after
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+    drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+    ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
+    bpf_lost_after=$(echo "$after" | sum_metric 'ebpf_guard_bpf_lost_events_total\{collector="fileaccess"\}')
+
+    local events_delta drops_delta ringbuf_full_delta bpf_lost_delta sum diff
+    events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
+    drops_delta=$(( ${drops_after:-0} - ${drops_before:-0} ))
+    ringbuf_full_delta=$(( ${ringbuf_full_after:-0} - ${ringbuf_full_before:-0} ))
+    bpf_lost_delta=$(( ${bpf_lost_after:-0} - ${bpf_lost_before:-0} ))
+    sum=$(( events_delta + drops_delta ))
+    diff=$(( sum - n ))
+
+    {
+        echo "n=$n"
+        echo "pid=$pid"
+        echo "events_delta=$events_delta"
+        echo "drops_delta=$drops_delta"
+        echo "ringbuf_full_delta=$ringbuf_full_delta"
+        echo "bpf_lost_delta=$bpf_lost_delta"
+        echo "sum=$sum"
+        echo "diff=$diff"
+        echo "quiesced_iterations=$i"
+        echo "generator_seconds=$((t1 - t0))"
+        echo "method_a_blocked_reason=$method_a_blocked"
+        [ -n "$idle_ringbuf_full" ] && echo "idle_hour_ringbuf_full=$idle_ringbuf_full"
+    } > "$marker"
+
+    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess)=$drops_delta сумма-N=$diff Δringbuf_full=$ringbuf_full_delta Δbpf_lost_events_total=$bpf_lost_delta (устоялось за ${i} срезов)"
+    if [ "${ringbuf_full_delta:-0}" -le 0 ]; then
+        warn "ringbuf_full не вырос под SIGSTOP — N=$n не переполнил кольцо на этом стенде даже с замороженным читателем; критерий 5.9.7b без входа (см. открытые вопросы)"
+    elif [ "${ringbuf_full_delta:-0}" -ne "${bpf_lost_delta:-0}" ]; then
+        warn "ringbuf_full=$ringbuf_full_delta != bpf_lost_events_total=$bpf_lost_delta — 5.9.6a не подтверждается живьём на этом прогоне"
+    else
+        log "ringbuf_full=$ringbuf_full_delta == bpf_lost_events_total=$bpf_lost_delta — 5.9.6a подтверждена живьём"
     fi
     rm -f "$canary_path"
     echo ""
@@ -360,7 +642,9 @@ run_sqlmap_attacks() {
     log "==========================================="
 
     if [ -f "$SCRIPT_DIR/sqlmap-attacks.sh" ]; then
+        mark_attack_window
         bash "$SCRIPT_DIR/sqlmap-attacks.sh" || warn "SQLMap атаки завершились с ошибками"
+        mark_attack_window
     else
         warn "SQLMap скрипт не найден, пропускаем..."
     fi
@@ -374,7 +658,9 @@ run_bruteforce_attacks() {
     log "==========================================="
 
     if [ -f "$SCRIPT_DIR/bruteforce-attacks.sh" ]; then
+        mark_attack_window
         bash "$SCRIPT_DIR/bruteforce-attacks.sh" || warn "Brute force атаки завершились с ошибками"
+        mark_attack_window
     else
         warn "Brute force скрипт не найден, пропускаем..."
     fi
@@ -388,7 +674,9 @@ run_ssrf_attacks() {
     log "==========================================="
 
     if [ -f "$SCRIPT_DIR/ssrf-attacks.sh" ]; then
+        mark_attack_window
         bash "$SCRIPT_DIR/ssrf-attacks.sh" || warn "SSRF атаки завершились с ошибками"
+        mark_attack_window
     else
         warn "SSRF скрипт не найден, пропускаем..."
     fi
@@ -402,7 +690,9 @@ run_ldap_csrf_attacks() {
     log "==========================================="
 
     if [ -f "$SCRIPT_DIR/ldap-csrf-attacks.sh" ]; then
+        mark_attack_window
         bash "$SCRIPT_DIR/ldap-csrf-attacks.sh" || warn "LDAP/CSRF атаки завершились с ошибками"
+        mark_attack_window
     else
         warn "LDAP/CSRF скрипт не найден, пропускаем..."
     fi
@@ -433,7 +723,9 @@ run_chmod_attack() {
         return
     fi
 
+    mark_attack_window
     chmod 755 "$canary_file" 2>/dev/null || warn "chmod на $canary_file завершился с ошибкой"
+    mark_attack_window
     log "chmod 755 $canary_file выполнен — ожидается срабатывание sigma_sensitive_file_chmod"
     rm -f "$canary_file"
 
@@ -464,9 +756,11 @@ run_setuid_attack() {
     if command -v python3 &> /dev/null; then
         # setuid(getuid()) — no-op privilege change, invokes syscall 105
         # directly without altering the process's actual privileges.
+        mark_attack_window
         python3 -c 'import os; os.setuid(os.getuid())' 2>/dev/null \
             && log "setuid(getuid()) выполнен — ожидается срабатывание sigma_setuid_syscall" \
             || warn "setuid-атака (5.9.2b) завершилась с ошибкой или пропущена"
+        mark_attack_window
     else
         warn "python3 не найден — setuid-атака (5.9.2b) пропущена"
     fi
@@ -486,6 +780,7 @@ run_bpf_attack() {
     # bare nr + a comm whitelist, which this call satisfied by accident; now
     # it correctly matches nothing).
     if command -v bpftool &> /dev/null; then
+        mark_attack_window
         bpftool prog list >/dev/null 2>&1 \
             && log "bpftool prog list выполнен (не ожидается срабатывание правил — read-only bpf(2), см. 5.9.4e)" \
             || warn "bpf-атака (5.9.2b) завершилась с ошибкой (нет прав/BPF недоступен)"
@@ -500,6 +795,7 @@ run_bpf_attack() {
         else
             warn "bpftool map create завершился с ошибкой (нет прав/BPF недоступен) — rootkit_bpf_map_create_suspicious останется непроверенным на attack-стороне"
         fi
+        mark_attack_window
     else
         warn "bpftool не найден — bpf-атака (5.9.2b/5.9.4e) пропущена"
     fi
@@ -518,6 +814,7 @@ run_bpf_attack() {
     local bpf_fixture_obj="/tmp/ebpf-guard-gate-canary-$TIMESTAMP.bpf.o"
     local bpf_prog_pin="/sys/fs/bpf/ebpf-guard-attack-canary-prog-$TIMESTAMP"
     if command -v bpftool &> /dev/null && command -v clang &> /dev/null && [ -f "$bpf_fixture_src" ]; then
+        mark_attack_window
         if clang -target bpf -O2 -c "$bpf_fixture_src" -o "$bpf_fixture_obj" >/dev/null 2>&1; then
             if bpftool prog load "$bpf_fixture_obj" "$bpf_prog_pin" >/dev/null 2>&1; then
                 log "bpftool prog load выполнен — ожидается срабатывание rootkit_bpf_prog_load_suspicious"
@@ -528,6 +825,7 @@ run_bpf_attack() {
         else
             warn "clang -target bpf не собрал fixtures/gate-canary.bpf.c (нет BPF-таргета на этом хосте) — rootkit_bpf_prog_load_suspicious останется непроверенным на attack-стороне"
         fi
+        mark_attack_window
         rm -f "$bpf_fixture_obj"
     else
         warn "bpftool и/или clang не найдены, либо fixtures/gate-canary.bpf.c отсутствует — BPF_PROG_LOAD-атака (5.9.5j) пропущена"
@@ -584,8 +882,10 @@ run_dns_long_label_attack() {
     # it a failed positive control would abort run-all-attacks.sh right here —
     # before run_kill_scenario, run_induced_drop and get_final_metrics — and
     # take the whole замер with it instead of costing one step.
+    mark_attack_window
     dig +short +time=2 +tries=1 "$long_qname" >/dev/null 2>&1 || \
         warn "dig вернул ненулевой код на $long_qname — запрос мог не уйти в сеть; проверить резолвер стенда (шаг не валит прогон, но критерий 5.9.5c останется без входа)"
+    mark_attack_window
     log "dig на $long_qname выполнен (длина qname: ${#long_qname}) — ожидается срабатывание dns_tunneling_long_domain/exfil_dns_txt_long_label/netintr_dns_long_label/webshell_dns_exfil_long_subdomain"
 
     # Намеренно БЕЗ записи в attack-manifest.json — по образцу run_bpf_attack
@@ -632,8 +932,10 @@ run_kmod_attack() {
         # прогон обрывался бы прямо здесь — до get_final_metrics,
         # generate_final_report и check_final_gate, то есть замер остался бы
         # вообще без итоговых срезов и без гейта.
+        mark_attack_window
         insmod "$bogus_module" >/dev/null 2>&1 \
             || log "insmod $bogus_module отвергнут ядром (ожидаемо, ENOEXEC) — сисколл finit_module(313) вызван"
+        mark_attack_window
     else
         warn "insmod не найден — finit_module-часть kmod-атаки (5.9.2b) пропущена"
     fi
@@ -646,6 +948,7 @@ run_kmod_attack() {
         # не доходят: rmmod проверяет /sys/module/<name> в userspace и выходит
         # с ошибкой, не вызвав delete_module вовсе.
         rc=0
+        mark_attack_window
         python3 - >/dev/null 2>&1 <<'PYEOF' || rc=$?
 import ctypes
 libc = ctypes.CDLL(None, use_errno=True)
@@ -653,6 +956,7 @@ buf = ctypes.create_string_buffer(b"\x00" * 64)
 libc.syscall(175, buf, ctypes.c_size_t(64), b"")             # init_module
 libc.syscall(176, b"ebpf_guard_canary_mod", ctypes.c_int(0)) # delete_module
 PYEOF
+        mark_attack_window
         if [ "$rc" -eq 0 ]; then
             log "syscall(175)/syscall(176) вызваны напрямую (ожидаемо отвергнуты ядром) — ожидается rootkit_init_module_syscall/rootkit_delete_module_syscall"
         else
@@ -700,9 +1004,11 @@ run_log_tamper_attack() {
 
     # Запись (append) и усечение — две операции, которые правило называет в
     # своём description ("writing to or truncating log files").
+    mark_attack_window
     echo "ebpf-guard attack canary $(date -Iseconds)" | tee -a "$canary_log" >/dev/null 2>&1 \
         || warn "запись в $canary_log завершилась с ошибкой"
     : > "$canary_log" 2>/dev/null || warn "усечение $canary_log завершилось с ошибкой"
+    mark_attack_window
     log "запись и усечение $canary_log выполнены — ожидается срабатывание owasp_log_tampering (и sigma_log_deletion по префиксу)"
     rm -f "$canary_log"
 
@@ -1562,8 +1868,8 @@ interactive_mode() {
 
         case $choice in
             1)
-                check_services || continue
-                get_baseline_metrics
+                run_measurement_prologue || continue
+                run_counting_control null 0
                 run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
                 run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
                 run_sqlmap_attacks
@@ -1647,8 +1953,8 @@ full_run() {
     log "ПОЛНЫЙ ЗАПУСК ВСЕХ АТАК"
     log "==========================================="
 
-    check_services || exit 1
-    get_baseline_metrics
+    run_measurement_prologue || exit 1
+    run_counting_control null 0
     run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
     run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
     run_sqlmap_attacks
@@ -1682,12 +1988,20 @@ main() {
 
     if [ "$1" = "--interactive" ] || [ "$1" = "-i" ]; then
         interactive_mode
+    elif [ "$1" = "--ringbuf-overflow" ]; then
+        # 5.9.7b: отдельный, короткий шаг пайплайна — ВНЕ окна замера
+        # (baseline→final), поэтому не часть full_run(). Вызывается
+        # пайплайном как самостоятельная команда, до или после основного
+        # окна, не между get_baseline_metrics и get_final_metrics.
+        check_services || exit 1
+        run_ringbuf_overflow
     elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
         echo "Использование: $0 [опции]"
         echo ""
         echo "Опции:"
-        echo "  -i, --interactive    Интерактивный режим с меню"
-        echo "  -h, --help           Показать эту справку"
+        echo "  -i, --interactive     Интерактивный режим с меню"
+        echo "  --ringbuf-overflow    Только 5.9.7b: переполнение кольца под SIGSTOP, вне окна замера"
+        echo "  -h, --help            Показать эту справку"
         echo ""
         echo "Без опций: запуск всех атак последовательно"
         exit 0

@@ -183,6 +183,32 @@
 # silent-rules.txt не обновлён. Задача 5.9.6f по постановке касалась только
 # detection-baseline.txt/крит. 6 — этот отдельный реестр (5.9.4h) остаётся
 # устаревшим и требует отдельного разбора, не входящего в эту правку.
+#
+# Обновление 5.9.7e (замер №2.9.6, находка №81). 5.9.6f подняла в базу четыре
+# типа без проверки их фазы — все четыре читались из gate-2.9.5.txt как
+# «сработало», но крит. 6 в том же прогоне печатал у них «фаза не определена».
+# Разбор по времени (final-alerts-20260821_091936.json) показал: три —
+# rootkit_ssh_authorized_keys_modified, sigma_sensitive_dir_listing,
+# sigma_lolbin_env_execution — сработали одновременно (08:08:40-08:09:00), за
+# час с лишним до окна атаки (09:19), и это ssh-логин оператора на стенд, а не
+# детект. Четвёртый, mitre_software_enum_dpkg, сработал один раз (09:27:00,
+# dpkg-query) — тоже вне атакующего сценария: run-all-attacks.sh не вызывает
+# dpkg-query/rpm ни в одном шаге. Правило обновления базы теперь машинное
+# (run-gate.sh, секция крит. 6): «добавлено» с фазой «не определена» печатается
+# отдельным списком с явной пометкой «не заносить», а не тихо принимается на
+# следующей волне.
+#
+# Все четыре УДАЛЕНЫ отсюда (не «намеренно потеряны» — см. intentional-loss.txt
+# для того случая, здесь тип никогда не был доказанным детектом):
+#   - rootkit_ssh_authorized_keys_modified, sigma_sensitive_dir_listing —
+#     правила получили условие/исключение, отличающее ssh-логин от настоящего
+#     срабатывания (rules/rootkit-detection.yaml, rules/sigma-linux.yaml).
+#     Вернутся в базу, когда сработают на attack/idle-сценарии с этим условием.
+#   - sigma_lolbin_env_execution — условие не менялось (не FP по построению,
+#     просто нет attack-шага, который бы его отличал от штатного `env` в
+#     ssh-сессии); вернётся в базу на attack-срабатывании.
+#   - mitre_software_enum_dpkg — перенесён в silent-rules.txt категорией b
+#     («немо из-за среды»: нет attack-шага с dpkg-query/rpm), не в эту базу.
 
 anomaly_detection
 beacon_fixed_interval
@@ -210,7 +236,6 @@ initial_package_postinstall_network
 integrity_kernel_module_from_user_path
 lateral_tool_transfer_wget
 mitre_sandbox_detect_proc_read
-mitre_software_enum_dpkg
 net_high_frequency_connections
 net_portscan_indicator
 netintr_dns_long_label
@@ -229,7 +254,6 @@ rootkit_init_module_syscall
 rootkit_kmod_from_tmp
 rootkit_large_hidden_file
 rootkit_pam_module_added
-rootkit_ssh_authorized_keys_modified
 sensitive_file_read
 sigma_binary_in_tmp_executed
 sigma_chmod_executable_tmp
@@ -237,10 +261,8 @@ sigma_cpu_info_access
 sigma_failed_login_syscall
 sigma_kernel_version_read
 sigma_log_deletion
-sigma_lolbin_env_execution
 sigma_memory_proc_dump
 sigma_reverse_shell_named_pipe
-sigma_sensitive_dir_listing
 sigma_sensitive_file_chmod
 sigma_setuid_syscall
 sigma_shell_from_unexpected_parent

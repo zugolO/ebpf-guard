@@ -805,7 +805,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			Event:     e,
 			Action:    string(rule.Action),
 			Class:     string(rule.Class),
-			Details:   filePathDetails(filePath),
+			Details:   alertDetails(e, filePath),
 		})
 	}
 }
@@ -850,7 +850,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Event:     e,
 			Action:    string(rule.Action),
 			Class:     string(rule.Class),
-			Details:   filePathDetails(filePath),
+			Details:   alertDetails(e, filePath),
 		})
 	}
 
@@ -882,6 +882,42 @@ func filePathDetails(path string) map[string]interface{} {
 		return nil
 	}
 	return map[string]interface{}{"file.path": path}
+}
+
+// dnsAlertDetails wraps the query name and longest label length into the
+// alert Details map for DNS events, or returns nil for any other event type.
+// 5.9.7f (находка №83): without dns.qname a DNS alert's record carried only
+// comm/pid/container_id — whether a critical alert was a real long-label
+// query or a false positive on a routine resolve was unanswerable from the
+// alert itself once the collector log had rotated. qname_length (an existing
+// rule-condition field) is the whole name; max_label_len is the longest
+// single label, which is what the four long-label rules actually reason
+// about — a name with several short labels can exceed qname_length's
+// threshold without any single label looking unusual.
+func dnsAlertDetails(e types.Event) map[string]interface{} {
+	if e.Type != types.EventDNS || e.DNS == nil {
+		return nil
+	}
+	maxLabel := 0
+	for _, label := range strings.Split(e.DNS.QName, ".") {
+		if len(label) > maxLabel {
+			maxLabel = len(label)
+		}
+	}
+	return map[string]interface{}{
+		"dns.qname":         e.DNS.QName,
+		"dns.max_label_len": maxLabel,
+	}
+}
+
+// alertDetails picks the Details map for an alert: file path for file-access
+// events, qname/label-length for DNS events, nil (details,omitempty) for
+// everything else.
+func alertDetails(e types.Event, filePath string) map[string]interface{} {
+	if d := filePathDetails(filePath); d != nil {
+		return d
+	}
+	return dnsAlertDetails(e)
 }
 
 // ReleaseAlerts returns a slice obtained from Evaluate back to the pool.

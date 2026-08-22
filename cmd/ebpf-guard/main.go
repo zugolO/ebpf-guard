@@ -725,6 +725,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	emittedTrackers := &kernelCounterRegistry{
 		sink: exporter.RecordEmittedKernelN,
 	}
+	// 5.9.7b (№79): watchdog.Watchdog existed fully wired (drop tracking,
+	// heartbeat, BPF liveness/attestation) but was never instantiated here —
+	// New() had no caller outside tests, so ebpf_guard_bpf_lost_events_total
+	// stayed at zero forever regardless of real ring buffer loss, silently
+	// contradicting the metric 5.9.6a built. Only DropTracker registration is
+	// wired below (syscall/network/fileaccess, next to the ringbuf_full/
+	// emitted registrations they already had); BPFProgramChecker/
+	// MapFullTracker registration is a separate, untested behavior change
+	// (reattach-on-detach, tamper attestation) and stays out of this fix —
+	// see open questions, plan.md 5.9.7b.
+	wd := watchdog.New(slog.Default(), watchdog.DefaultConfig())
 	// Both kernel counters are also drained at scrape time, not only on the
 	// 15s stats tick below. 5.9.6b's balance identity puts these two series
 	// on the left of an equality whose right-hand side (events_total,
@@ -1281,6 +1292,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				}
 				ringbufFullTrackers.register("syscall", sc.RingbufFullMap())
 				emittedTrackers.register("syscall", sc.EmittedMap())
+				wd.RegisterDropTracker(sc)
 				if cfg.BPF.KernelFilter.Enabled {
 					comm, sys, kfCfg, agentPID := sc.KernelFilterMaps()
 					enableKernelFilter("syscall", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter)
@@ -1323,6 +1335,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					}
 					ringbufFullTrackers.register("network", nc.RingbufFullMap())
 					emittedTrackers.register("network", nc.EmittedMap())
+					wd.RegisterDropTracker(nc)
 					if cfg.BPF.Sampling.Enabled {
 						enableSampling("network", nc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "network")
 					}
@@ -1351,6 +1364,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					}
 					ringbufFullTrackers.register("fileaccess", fc.RingbufFullMap())
 					emittedTrackers.register("fileaccess", fc.EmittedMap())
+					wd.RegisterDropTracker(fc)
 					// P0-22 (wave 0.5): fileaccess.bpf.c consults its OWN copies
 					// of comm_filter_map / kernel_filter_config / agent_pid_map.
 					// Populating the syscall collector's maps leaves these zeroed,
@@ -1548,6 +1562,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			lowPriorityAccepted.Add(1)
 		}
 	}
+
+	// 5.9.7b: start the watchdog now that every collector had a chance to
+	// register as a DropTracker from its own status-reporter callback above.
+	// Only drop tracking is exercised by registration here (BPFProgramChecker/
+	// MapFullTracker stay unregistered, so runLivenessChecks/runMapFullTracking
+	// remain no-ops exactly as before this fix); runHeartbeat now also starts
+	// publishing ebpf_guard_heartbeat_timestamp_seconds, previously always
+	// absent for the same reason (watchdog.New had no caller).
+	if err := wd.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+		slog.Warn("watchdog: register metrics failed", slog.Any("error", err))
+	}
+	wd.Start(ctx)
 
 	// P0-25: wrap every collector so its events are routed by type into the
 	// protected (network/dns/syscall/…) or bulk (file) queue instead of all

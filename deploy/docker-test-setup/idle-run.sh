@@ -487,4 +487,12 @@ log "архив: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 # ждёт до 15с перед снимком. Экспортировать эту переменную нужно ДО запуска
 # run-all-attacks.sh, а не только до run-gate.sh, иначе гарантия не сработает
 # и критерий 16 снова напечатает «не измерялось».
-log "для критерия 6 (состав детекта), критерия 16 (слепое окно, 5.9.5i — экспортировать IDLE_STATE_END ДО run-all-attacks.sh) run-gate.sh/run-all-attacks.sh: IDLE_METRICS_START=$OUT/metrics-start.txt IDLE_STATE_END=$OUT/state-end.json IDLE_METRICS_END=$OUT/metrics-end.txt IDLE_ALERTS_END=$OUT/alerts-end.json"
+#
+# 5.9.7f (находка №83): секция DNS-FP на idle разбивает прирост четырёх
+# long-label правил по comm — для этого нужен снимок /api/v1/alerts с
+# НАЧАЛА idle-часа, тот же принцип, что IDLE_METRICS_START дал критерию 6.
+# Этот скрипт уже пишет его как alerts-start.json (строка выше,
+# api_multi /api/v1/alerts "$OUT/alerts-start.json" ...), просто раньше
+# никто его наружу не экспортировал:
+#   export IDLE_ALERTS_START="$OUT/alerts-start.json"
+log "для критерия 6 (состав детекта), критерия 16 (слепое окно, 5.9.5i — экспортировать IDLE_STATE_END ДО run-all-attacks.sh), секции 5.9.7f (DNS-FP на idle) run-gate.sh/run-all-attacks.sh: IDLE_METRICS_START=$OUT/metrics-start.txt IDLE_STATE_END=$OUT/state-end.json IDLE_METRICS_END=$OUT/metrics-end.txt IDLE_ALERTS_START=$OUT/alerts-start.json IDLE_ALERTS_END=$OUT/alerts-end.json"

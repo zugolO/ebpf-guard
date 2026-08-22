@@ -779,6 +779,22 @@ rules:
             - field: filename
               op: suffix
               values: [".canary"]
+      # 5.9.7e (находка №81/№82): sshd opens authorized_keys (and other files
+      # under /root/.ssh/) on every pubkey-auth login — one routine ssh login
+      # gave two alerts (this rule + rootkit_ssh_authorized_keys_modified),
+      # one of them critical. Scoped to comm AND the /root/.ssh/ prefix only:
+      # sshd touching /root/.aws/, /root/.kube/, or /home/ is still unusual
+      # and still alerts.
+      - name: sshd-ssh-dir-login
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [sshd]
+            - field: filename
+              op: prefix
+              values: ["/root/.ssh/"]
 
   # ============================================================================
   # T1087 — Account Discovery

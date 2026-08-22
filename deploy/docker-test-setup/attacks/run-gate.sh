@@ -1391,6 +1391,36 @@ else
 fi
 echo ""
 
+# 5.9.7f, п.16 постановки: у DNS-алертов обязано быть имя запроса. Без него
+# риск №4 неразрешим по артефактам — разбор «порог верен, стенд шумный» или
+# «порог неверен» делается из записи алерта, а журнал коллектора к моменту
+# разбора уже ротирован (именно так был потерян разбор grafana/:46:32 на
+# №2.9.6). Проверяются ровно те правила, чей вход — DNS-событие
+# ($dns_target_rules); правила по exec (lolbin_dns_exfil_via_dig и соседи)
+# сюда не входят: их событие не DNS-пакет, и qname у них взяться неоткуда —
+# требовать его там значило бы валить критерий за то, чего он не называет.
+echo "=== 5.9.7f. dns.qname в DNS-алертах (п.16 постановки) ==="
+if [ ! -s "$final_alerts" ] || ! jq -e 'type == "array"' "$final_alerts" >/dev/null 2>&1; then
+    skip "final-alerts-$TIMESTAMP.json отсутствует или не JSON-массив — наличие details.dns.qname не проверено (5.9.7f: dns.qname)"
+else
+    dns_rules_json=$(printf '%s\n' $dns_target_rules | jq -R . | jq -s .)
+    qname_total=$(jq --argjson r "$dns_rules_json" '[.[] | select(.rule_id as $x | $r | index($x))] | length' "$final_alerts")
+    qname_empty=$(jq --argjson r "$dns_rules_json" '[.[] | select(.rule_id as $x | $r | index($x))
+        | select((.details["dns.qname"] // "") == "")] | length' "$final_alerts")
+    echo "  DNS-алертов (правила по DNS-событию): $qname_total, из них без dns.qname: $qname_empty"
+    jq -r --argjson r "$dns_rules_json" '[.[] | select(.rule_id as $x | $r | index($x))
+        | {rule_id, comm, qname: (.details["dns.qname"] // ""), len: (.details["dns.max_label_len"] // "-")}]
+        | unique | .[] | "    \(.rule_id) (\(.comm)): \(.qname) [макс. лейбл \(.len)]"' "$final_alerts" 2>/dev/null | head -20
+    if [ "$qname_total" -eq 0 ]; then
+        skip "DNS-алертов на этом прогоне нет — п.16 непроверяем (dig-контроль 5.9.5c обязан был их дать, см. секцию 2) (5.9.7f: dns.qname)"
+    elif [ "$qname_empty" -eq 0 ]; then
+        pass "у всех $qname_total DNS-алертов details.dns.qname непусто (5.9.7f: dns.qname)"
+    else
+        fail "$qname_empty из $qname_total DNS-алертов без details.dns.qname — разбор порога длины лейбла по артефактам невозможен (риск №4) (5.9.7f: dns.qname)"
+    fi
+fi
+echo ""
+
 # 7. Recall по attack-manifest: все ли категории атак задетектированы.
 # Это критерий, которого в гейте не было вовсе (план 1.75c), поэтому FAIL
 # recall в замере №1 (напечатанный 1.75a как 0 при фактических 4/4) прошёл

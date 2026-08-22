@@ -100,7 +100,7 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 		}),
 		decodeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ebpf_guard_dns_decode_errors_total",
-			Help: "Total number of DNS event decode errors, by reason (too_short, not_a_query, bad_qname, truncated_payload, compression_loop, unparseable)",
+			Help: "Total number of DNS event decode errors, by reason (too_short, not_a_query, bad_qname, truncated_payload, compression_loop, bad_header, unparseable)",
 		}, []string{"reason"}),
 		stale: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_dns_collector_stale",

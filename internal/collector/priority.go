@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -134,6 +135,18 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 		p.dropLogger.record(p.logger, p.collector.Name())
 		if p.droppedFn != nil {
 			p.droppedFn(p.collector.Name(), isHighPriority)
+		}
+		// plan.md 5.9.8b (№91): the router_to_queue hop is the third and last
+		// place a canary event can go missing, and it is counted in the
+		// general series (events_dropped_total{collector="fileaccess"}, via
+		// droppedFn above) that the canary series has to stay comparable
+		// with. Without this the canary sum would be short by exactly the
+		// events lost here, and criterion 20 would read a real, explained
+		// loss as an unexplained one — the inverse of the background bias
+		// 5.9.8b exists to remove. Counted here rather than in main.go
+		// because an event dropped at this hop never reaches processEvent.
+		if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.FDPath) {
+			exporter.RecordCountingCanary("dropped")
 		}
 	}
 

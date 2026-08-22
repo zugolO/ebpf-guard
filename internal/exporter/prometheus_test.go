@@ -271,3 +271,23 @@ func TestMetricDocumentation(t *testing.T) {
 	assert.Equal(t, 1.0, testutil.ToFloat64(CollectorUp.WithLabelValues("test")))
 	assert.Equal(t, 1.0, testutil.ToFloat64(LogLinesTotal.WithLabelValues("INFO")))
 }
+
+// --- CountingCanaryTotal (5.9.8b, №91) --------------------------------------
+
+func TestIsCountingCanaryPath(t *testing.T) {
+	assert.True(t, IsCountingCanaryPath("/tmp/ebpf-guard-counting-canary-20260822_120000-idle"))
+	assert.False(t, IsCountingCanaryPath("/tmp/ebpf-guard-ringbuf-overflow-canary-20260822_120000"))
+	assert.False(t, IsCountingCanaryPath("/etc/passwd"))
+	assert.False(t, IsCountingCanaryPath(""))
+}
+
+func TestRecordCountingCanary(t *testing.T) {
+	CountingCanaryTotal.Reset()
+
+	RecordCountingCanary("events")
+	RecordCountingCanary("events")
+	RecordCountingCanary("dropped")
+
+	assert.Equal(t, 2.0, testutil.ToFloat64(CountingCanaryTotal.WithLabelValues("events")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(CountingCanaryTotal.WithLabelValues("dropped")))
+}

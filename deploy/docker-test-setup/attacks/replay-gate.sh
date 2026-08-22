@@ -14,8 +14,8 @@
 # просто печатает результат на глаз (постановка явно требует «проверки, а не
 # печать»).
 #
-# Три обязательных ожидания (числа получены прогоном текущего run-gate.sh
-# против этих же архивов на этой сессии, см. plan.md 5.9.7c):
+# Четыре обязательных ожидания (числа получены прогоном текущего run-gate.sh
+# против этих же архивов на этой сессии, см. plan.md 5.9.7c/5.9.8e):
 #   1. collect-2.9.5 (до 5.9.6a/b): events_emitted_kernel_total в архиве нет
 #      вовсе — секция 19 обязана SKIP'нуть по отсутствующей серии, а не
 #      печатать невязку по несуществующей левой части.
@@ -28,11 +28,17 @@
 #   3. Синтетическая потеря 1000 событий на emitted_kernel{collector=
 #      "syscall"} без роста правой части — секция 19 обязана упасть FAIL
 #      именно на syscall (допуск там ±500, невязка станет 1012).
+#   4. collect-2.9.7 (5.9.8e, №90): секция 6 (гейт называет её "критерий 9"
+#      в тексте постановки) обязана дать PASS 88.6/мин, а не SKIP по
+#      «сборка харнесса старее 5.9.7d» — маркер окна атаки на этом архиве
+#      есть и разобран правильно, SKIP до правки был ложным (OFMT awk
+#      усекал дробный unix-эпох first/last до одинакового значения).
 #
-# Использование: replay-gate.sh [collect-2.9.5-dir] [collect-2.9.6-dir]
-# По умолчанию — server-logs/collect-2.9.5 и server-logs/collect-2.9.6
-# относительно корня репозитория. Любое несовпадение — ненулевой код
-# возврата (preflight-стоп); печатает REPLAY-GATE: PASS/FAIL в конце.
+# Использование: replay-gate.sh [collect-2.9.5-dir] [collect-2.9.6-dir] [collect-2.9.7-dir]
+# По умолчанию — server-logs/collect-2.9.5, server-logs/collect-2.9.6 и
+# server-logs/collect-2.9.7 относительно корня репозитория. Любое
+# несовпадение — ненулевой код возврата (преflight-стоп); печатает
+# REPLAY-GATE: PASS/FAIL в конце.
 set -u
 
 # Реплей зовёт run-gate.sh через "${BASH:-bash}", то есть ТЕМ ЖЕ
@@ -53,6 +59,13 @@ GATE="$SCRIPT_DIR/run-gate.sh"
 
 C295_DIR="${1:-$REPO_ROOT/server-logs/collect-2.9.5}"
 C296_DIR="${2:-$REPO_ROOT/server-logs/collect-2.9.6}"
+# 5.9.8e (№90, P1): четвёртый реплей — collect-2.9.7, крит. 9 (темп алертов
+# от атакующих, гейт называет его "6") обязан дать 88.6/мин, а не SKIP. До
+# правки OFMT (см. run-gate.sh, окно атаки) "first"/"last" усекались до
+# одинакового значения "1.78741e+09" и окно обнулялось — гейт печатал SKIP с
+# причиной "сборка харнесса старее 5.9.7d", хотя маркер был на месте и
+# разобран правильно почти до самого конца.
+C297_DIR="${3:-$REPO_ROOT/server-logs/collect-2.9.7}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -94,6 +107,31 @@ restore_diff_state() {
         rm -f "$DIFF_STATE_BACKUP"
     else
         rm -f "$DIFF_STATE"
+    fi
+}
+
+# attack-manifest.json (5.9.8e, реплей 4/4) — run-gate.sh читает его
+# из своего собственного каталога ($GATE_SCRIPT_DIR/attack-manifest.json),
+# не из results_dir, и файл регенерируется каждым прогоном (.gitignore) —
+# в рабочем дереве его обычно нет вовсе. Без него крит. 6 не считает темп
+# и SKIP'ает по другой причине ("нет attack-manifest.json"), что для этого
+# реплея неотличимо от прохождения; манифест архива подкладывается на время
+# вызова и снимается сразу после, тем же приёмом, что save/restore_diff_state.
+MANIFEST_FILE_LIVE="$SCRIPT_DIR/attack-manifest.json"
+MANIFEST_BACKUP=""
+save_manifest() {
+    MANIFEST_BACKUP=""
+    if [ -f "$MANIFEST_FILE_LIVE" ]; then
+        MANIFEST_BACKUP=$(mktemp)
+        cp "$MANIFEST_FILE_LIVE" "$MANIFEST_BACKUP"
+    fi
+}
+restore_manifest() {
+    if [ -n "$MANIFEST_BACKUP" ]; then
+        cp "$MANIFEST_BACKUP" "$MANIFEST_FILE_LIVE"
+        rm -f "$MANIFEST_BACKUP"
+    else
+        rm -f "$MANIFEST_FILE_LIVE"
     fi
 }
 
@@ -144,7 +182,7 @@ echo "==========================================="
 echo ""
 
 # --- Реплей 1: collect-2.9.5 (до 5.9.6a/b) --------------------------------
-echo "--- реплей 1/3: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
+echo "--- реплей 1/4: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
 ts5=$(find_ts "$C295_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts5" ]; then
     bad "collect-2.9.5: baseline-state-*.json не найден в $C295_DIR/attacks — архив недоступен"
@@ -160,7 +198,7 @@ fi
 echo ""
 
 # --- Реплей 2: collect-2.9.6, баланс + счётность с синтетическим фоном ---
-echo "--- реплей 2/3: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
+echo "--- реплей 2/4: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
 ts6=$(find_ts "$C296_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts6" ]; then
     bad "collect-2.9.6: baseline-state-*.json не найден в $C296_DIR/attacks — архив недоступен"
@@ -208,7 +246,7 @@ fi
 echo ""
 
 # --- Реплей 3: синтетическая потеря 1000 событий -------------------------
-echo "--- реплей 3/3: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
+echo "--- реплей 3/4: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
 if [ -z "${ts6:-}" ]; then
     bad "синтетическая потеря: collect-2.9.6 недоступен, шаг пропущен"
 else
@@ -234,6 +272,27 @@ else
         fi
     fi
     rm -rf "$tmp_loss"
+fi
+echo ""
+
+# --- Реплей 4: collect-2.9.7, крит. 9 обязан дать 88.6/мин, а не SKIP -----
+echo "--- реплей 4/4: collect-2.9.7, крит. 9 (темп по окну атаки) = 88.6/мин, не SKIP (5.9.8e, №90) ---"
+ts7=$(find_ts "$C297_DIR/attacks" 2>/dev/null || true)
+if [ -z "$ts7" ]; then
+    bad "collect-2.9.7: baseline-state-*.json не найден в $C297_DIR/attacks — архив недоступен"
+elif [ ! -f "$C297_DIR/attacks/attack-manifest.json" ]; then
+    bad "collect-2.9.7: attack-manifest.json не найден в архиве — реплей крит. 9 невозможен без множества атакующих comms"
+else
+    save_manifest
+    cp "$C297_DIR/attacks/attack-manifest.json" "$MANIFEST_FILE_LIVE"
+    run_offline_gate "$C297_DIR/attacks" "$ts7"
+    restore_manifest
+    sec6_297=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 6[.]' '^=== 7[.]')
+    if grep -q '\[PASS\].*темп алертов от атакующих:.*= 88\.6/мин' <<< "$sec6_297"; then
+        ok "collect-2.9.7 (ts=$ts7): крит. 9 = PASS, 88.6/мин — окно атаки разобралось по first/last без потери точности (5.9.8e)"
+    else
+        bad "collect-2.9.7 (ts=$ts7): крит. 9 не дал ожидаемого PASS/88.6 — вывод разошёлся с зафиксированным на сессии 5.9.8e (см. plan.md); секция 6:"$'\n'"$sec6_297"
+    fi
 fi
 echo ""
 

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -231,4 +232,59 @@ func TestIntToIPv4(t *testing.T) {
 	// 0x7f000001 = 127.0.0.1 in network byte order.
 	assert.Equal(t, "127.0.0.1", intToIPv4(0x7f000001))
 	assert.Equal(t, "0.0.0.0", intToIPv4(0))
+}
+
+// --- validateDNSHeader (5.9.8a, №94) ----------------------------------------
+
+func TestParseDNSWireMessage_BadHeaderZBit(t *testing.T) {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint16(payload[2:], 0x0040) // Z bit set, everything else 0
+	binary.BigEndian.PutUint16(payload[4:], 1)       // qdcount = 1
+
+	_, reason := parseDNSWireMessage(payload)
+	assert.Equal(t, dnsDecodeReasonBadHeader, reason, "the reserved Z bit must never be set on a real DNS message")
+}
+
+func TestParseDNSWireMessage_BadHeaderOpcode(t *testing.T) {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint16(payload[2:], 0x7800) // opcode = 15, well above the IANA range
+	binary.BigEndian.PutUint16(payload[4:], 1)
+
+	_, reason := parseDNSWireMessage(payload)
+	assert.Equal(t, dnsDecodeReasonBadHeader, reason, "an opcode outside the assigned IANA range is not a real DNS message")
+}
+
+func TestParseDNSWireMessage_TLSClientHelloNeverAccepted(t *testing.T) {
+	// A real TLS 1.2 ClientHello record: content type 0x16, version 0x0301,
+	// followed by a handshake header. plan.md 5.9.8a (№94): this is the
+	// exact shape of bytes a reused fd could hand to the DNS collector
+	// before the dns_socket_map key fix. This particular byte pattern
+	// happens to clear the Z-bit/opcode checks in validateDNSHeader (its
+	// flags bytes decode to opcode=0) — it is caught downstream instead,
+	// when the implausible QDCOUNT (15105) it produces sends decodeDNSName
+	// walking off the end of the buffer (bad_qname). Both outcomes are
+	// "never accepted as valid DNS"; this test pins that invariant rather
+	// than which specific reason fires, since the reason depends on which
+	// arbitrary bytes happen to land in which header field.
+	clientHello, err := hex.DecodeString(
+		"160301003b0100003703035b3fc0ff112233445566778899aabbccddeeff" +
+			"00112233445566778899aabbccddeeff0011223344556677889900130100")
+	require.NoError(t, err)
+
+	msg, reason := parseDNSWireMessage(clientHello)
+	assert.NotEmpty(t, reason, "TLS ClientHello bytes must never be accepted as a DNS message")
+	assert.Empty(t, msg.qname)
+}
+
+func TestParseDNSWireMessage_ValidHeaderNotRejected(t *testing.T) {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint16(payload[2:], 0x0100) // standard query, recursion desired
+	binary.BigEndian.PutUint16(payload[4:], 1)      // qdcount = 1
+	payload = append(payload, encodeDNSName("example.com")...)
+	payload = appendBE16(payload, 1) // QTYPE A
+	payload = appendBE16(payload, 1) // QCLASS IN
+
+	msg, reason := parseDNSWireMessage(payload)
+	assert.Empty(t, reason)
+	assert.Equal(t, "example.com", msg.qname)
 }

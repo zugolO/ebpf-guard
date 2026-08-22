@@ -682,12 +682,34 @@ fi
 attack_window_marker="$RESULTS_DIR/attack-window-$TIMESTAMP.txt"
 attack_window_min=0
 attack_window_known=0
+# 5.9.8e (№90, P1): SKIP по этому пункту раньше называл одну причину
+# («сборка харнесса старее 5.9.7d») для трёх разных ситуаций: маркера нет
+# файлом, маркер есть, но пуст, и маркер есть и непуст, но first/last не
+# разобрались (или разобрались в невалидное окно) — последнее ровно то, что
+# происходило из-за дефекта OFMT ниже, и никак не было связано со старой
+# сборкой харнесса. Причина теперь различается явно.
+attack_window_reason="marker_missing"
 if [ -f "$attack_window_marker" ]; then
-    aw_first=$(awk -F= '$1=="first"{print $2+0}' "$attack_window_marker" 2>/dev/null)
-    aw_last=$(awk -F= '$1=="last"{print $2+0}' "$attack_window_marker" 2>/dev/null)
-    attack_window_min=$(awk -v f="${aw_first:-0}" -v l="${aw_last:-0}" 'BEGIN{ if(f>0 && l>f) print (l-f)/60; else print 0 }')
-    if awk -v m="$attack_window_min" 'BEGIN{exit !(m>0)}'; then
-        attack_window_known=1
+    if [ ! -s "$attack_window_marker" ]; then
+        attack_window_reason="marker_empty"
+    else
+        attack_window_reason="marker_unparsed"
+        # "first"/"last" — дробный unix-эпох (date +%s.%N), т.е. НЕ целое
+        # число. `print $2+0` без printf форматируется по OFMT awk (по
+        # умолчанию "%.6g") ровно потому, что значение не целое —
+        # 1787406778.924855 и 1787407280.204581 (реальные значения с
+        # №2.9.7) оба усекаются до "1.78741e+09" и совпадают, окно
+        # обнуляется. Целые счётчики этого дефекта не несут (awk печатает
+        # целое значение без OFMT независимо от величины), поэтому правка
+        # точечная — только эти два поля форматируются через printf с
+        # микросекундной точностью.
+        aw_first=$(awk -F= '$1=="first"{printf "%.6f", $2+0}' "$attack_window_marker" 2>/dev/null)
+        aw_last=$(awk -F= '$1=="last"{printf "%.6f", $2+0}' "$attack_window_marker" 2>/dev/null)
+        attack_window_min=$(awk -v f="${aw_first:-0}" -v l="${aw_last:-0}" 'BEGIN{ if(f>0 && l>f) print (l-f)/60; else print 0 }')
+        if awk -v m="$attack_window_min" 'BEGIN{exit !(m>0)}'; then
+            attack_window_known=1
+            attack_window_reason=""
+        fi
     fi
 fi
 if [ "$attack_window_known" -eq 1 ]; then
@@ -1110,7 +1132,14 @@ fi
 if [ "$attacker_alerts_known" -eq 0 ]; then
     skip "темп алертов непроверяем — нет attack-manifest.json, множество атакующих comms неизвестно"
 elif [ "$attack_window_known" -eq 0 ]; then
-    skip "темп алертов непроверяем по окну атаки — attack-window-$TIMESTAMP.txt отсутствует или пуст (сборка харнесса старее 5.9.7d); полное окно baseline→final: ${runtime_min} мин, справочно, в вердикт не входит"
+    case "$attack_window_reason" in
+        marker_missing)
+            skip "темп алертов непроверяем по окну атаки — attack-window-$TIMESTAMP.txt отсутствует (сборка харнесса старее 5.9.7d); полное окно baseline→final: ${runtime_min} мин, справочно, в вердикт не входит" ;;
+        marker_empty)
+            skip "темп алертов непроверяем по окну атаки — attack-window-$TIMESTAMP.txt пуст (mark_attack_window не вызывался ни разу за прогон); полное окно baseline→final: ${runtime_min} мин, справочно, в вердикт не входит" ;;
+        *)
+            skip "темп алертов непроверяем по окну атаки — attack-window-$TIMESTAMP.txt не разобрался (first=${aw_first:-?} last=${aw_last:-?}, окно = ${attack_window_min} мин); полное окно baseline→final: ${runtime_min} мин, справочно, в вердикт не входит" ;;
+    esac
 elif awk -v r="$attacker_rate" 'BEGIN{exit !(r+0>=74)}'; then
     pass "темп алертов от атакующих: $attacker_alerts за ${attack_window_min} мин (окно атаки, 5.9.7d) = $attacker_rate/мин (>= 74, уровень прогона №4); полное окно baseline→final: ${runtime_min} мин"
 else
@@ -1272,6 +1301,74 @@ else
         fail "0/4 DNS long-label правил сработало при исполненном позитивном контроле — silent-rules.txt объясняет молчание за аптайм, но не заменяет ответ на вопрос №64; проверить, дошёл ли запрос dig (лог атак) и растёт ли events_total{type=dns}=${dns_events_final:-n/a}"
     else
         pass "$fired_count/4 сработало под контролем, остальные — с установленной причиной в silent-rules.txt"
+    fi
+fi
+echo ""
+
+# 5.9.8a (№94, P0, запрет №6): dns_socket_map ключ pid_tgid→tgid плюс
+# validateDNSHeader() не принимаются без ОБОИХ контролей на одном прогоне.
+# Оба — отдельный шаг харнесса (run-all-attacks.sh --dns-fd-reuse-controls),
+# ВНЕ окна замера (запрет №3), маркеры находятся по маске, а не по TIMESTAMP
+# этого прогона — тот же приём, что критерий 22 использует для
+# run_ringbuf_overflow (5.9.7b), потому что оба шага пишутся отдельным
+# вызовом скрипта со своим собственным TIMESTAMP.
+echo "=== 5.9.8a. DNS: негативный + позитивный контроль переиспользования fd (№94) ==="
+dns_neg_marker=$(ls -t "$RESULTS_DIR"/dns-negative-control-*.txt 2>/dev/null | head -1)
+dns_pos_marker=$(ls -t "$RESULTS_DIR"/dns-positive-control-*.txt 2>/dev/null | head -1)
+
+if [ -z "$dns_neg_marker" ] && [ -z "$dns_pos_marker" ]; then
+    skip "run-all-attacks.sh --dns-fd-reuse-controls не запускался — маркеры dns-{negative,positive}-control-*.txt отсутствуют; сборка/пайплайн старее 5.9.8a"
+else
+    dns_neg_ok=0
+    if [ -z "$dns_neg_marker" ]; then
+        skip "негативный контроль DNS не запускался — маркер dns-negative-control-*.txt отсутствует"
+    elif grep -q '^skipped=1' "$dns_neg_marker" 2>/dev/null; then
+        skip "негативный контроль DNS пропущен харнессом (python3 недоступен в момент прогона)"
+    else
+        dns_neg_delta=$(awk -F= '$1=="events_dns_delta"{print $2+0}' "$dns_neg_marker" 2>/dev/null)
+        dns_neg_reused=$(awk -F= '$1=="reused_fd"{print $2+0}' "$dns_neg_marker" 2>/dev/null)
+        # cross_thread_close — вторая половина сценария №94 и единственное,
+        # что отличает этот контроль от тавтологии: close() ОБЯЗАН прийти с
+        # чужого потока, иначе старый (потоковый) ключ удалил бы запись сам
+        # и «0 DNS-событий» ничего не доказывало бы (ревизия волны 5.9.8).
+        # Отсутствует поле — маркер писала сборка харнесса старее этой правки.
+        dns_neg_xthread=$(awk -F= '$1=="cross_thread_close"{print $2+0}' "$dns_neg_marker" 2>/dev/null)
+        echo "  негативный: reused_fd=${dns_neg_reused:-0} cross_thread_close=${dns_neg_xthread:-нет поля} Δevents_total{type=dns}=${dns_neg_delta:-n/a}"
+        if ! grep -q '^cross_thread_close=' "$dns_neg_marker" 2>/dev/null; then
+            skip "негативный контроль: маркер без cross_thread_close — сборка харнесса, где close() шёл с того же потока, что connect(); такой сценарий проходит и на старом ключе, доказательством №94 не является"
+        elif [ "${dns_neg_xthread:-0}" -ne 1 ]; then
+            skip "негативный контроль: close() с чужого потока не удался — сценарий №94 не воспроизведён, критерий без входа на этот раз"
+        elif [ "${dns_neg_reused:-0}" -ne 1 ]; then
+            skip "негативный контроль: fd не переиспользован этим прогоном (reused_fd=0) — сценарий не воспроизвёлся, критерий без входа на этот раз"
+        elif [ "${dns_neg_delta:-0}" -eq 0 ] 2>/dev/null; then
+            dns_neg_ok=1
+            pass "негативный контроль: fd переиспользован, TLS-ClientHello-подобные байты по нему НЕ дали DNS-событий (dns_socket_map больше не принимает переиспользованный fd, 5.9.8a)"
+        else
+            fail "негативный контроль: fd переиспользован, Δevents_total{type=dns}=${dns_neg_delta} > 0 — dns_socket_map всё ещё принимает переиспользованный fd за DNS (№94 не закрыта)"
+        fi
+    fi
+
+    dns_pos_ok=0
+    if [ -z "$dns_pos_marker" ]; then
+        skip "позитивный контроль DNS не запускался — маркер dns-positive-control-*.txt отсутствует"
+    elif grep -q '^skipped=1' "$dns_pos_marker" 2>/dev/null; then
+        skip "позитивный контроль DNS пропущен харнессом (python3 недоступен в момент прогона)"
+    else
+        dns_pos_n=$(awk -F= '$1=="n"{print $2+0}' "$dns_pos_marker" 2>/dev/null)
+        dns_pos_delta=$(awk -F= '$1=="events_dns_delta"{print $2+0}' "$dns_pos_marker" 2>/dev/null)
+        echo "  позитивный: N=${dns_pos_n:-0} Δevents_total{type=dns}=${dns_pos_delta:-n/a}"
+        if [ -z "${dns_pos_n:-}" ] || [ "${dns_pos_n:-0}" -eq 0 ]; then
+            skip "позитивный контроль: N не записан или равен 0 — python-генератор не отработал"
+        elif [ "${dns_pos_delta:-0}" -ge "${dns_pos_n:-0}" ] 2>/dev/null; then
+            dns_pos_ok=1
+            pass "позитивный контроль: межпоточный резолв (N=${dns_pos_n}) дал Δevents_total{type=dns}=${dns_pos_delta} >= N — connect() на одном потоке, write()/read() на другом остаётся видимым (5.9.8a)"
+        else
+            fail "позитивный контроль: Δevents_total{type=dns}=${dns_pos_delta:-0} < N=${dns_pos_n:-0} — межпоточный резолв недосчитан, правка ключа сузила видимость вместо починки (риск №2 постановки №2.9.8)"
+        fi
+    fi
+
+    if [ "$dns_neg_ok" -eq 1 ] && [ "$dns_pos_ok" -eq 1 ]; then
+        pass "оба контроля 5.9.8a исполнены на этом прогоне и сошлись — запрет №6 выполнен"
     fi
 fi
 echo ""
@@ -2001,40 +2098,42 @@ else
                 elif [ "$baseline_types_present" -eq 0 ]; then
                     # detection-baseline.txt отсутствует вовсе — added_count
                     # недостоверен (не 0, а "не считался"), ни разбор по
-                    # фазам, ни разбор по составу (5.9.7g) провести не на чем.
-                    skip "объём слепого окна $blind_new_alerts > 5, а detection-baseline.txt отсутствует — added_count не определён, ни фазы, ни разбор по составу (5.9.7g) не проверены"
-                elif [ "$added_count" -lt 3 ]; then
-                    # 5.9.7g (находка №84): при added_count < 3 фазовый разбор
-                    # критерия 6 статистически ненадёжен — вплоть до
-                    # added_count=0, где он не разбирал вообще ничего (старая
-                    # ветка 5.9.6i засчитывала это как SKIP). Вместо фаз типов
-                    # разбирается СОСТАВ самого окна по comm: доля алертов от
-                    # процессов дерева измерителя обязана быть 0 (5.9.7a/g:
-                    # это дерево обязано быть исключено observer_tree целиком,
-                    # включая пролог сбора baseline — curl/grep/jq/date/rm),
-                    # остальное печатается поимённо для человека.
+                    # фазам, ни разбор по составу (5.9.7g/5.9.8g) провести не на чем.
+                    skip "объём слепого окна $blind_new_alerts > 5, а detection-baseline.txt отсутствует — added_count не определён, ни фазы, ни разбор по составу (5.9.7g/5.9.8g) не проверены"
+                else
+                    # 5.9.8g (находки №95/№96): разбор по составу окна больше
+                    # не условен на added_count<3 (5.9.7g) — критерий "0
+                    # алертов от дерева измерителя" обязан держаться в ЛЮБОМ
+                    # слепом окне, не только в статистически ненадёжном по
+                    # числу добавленных типов. Дерево измерителя
+                    # run-all-attacks.sh/idle-run.sh: инструменты, которые сам
+                    # харнесс порождает в прологе сбора baseline, в
+                    # периодических срезах и в постобработке idle-run.sh
+                    # (P0-3 рестарт, journalctl, сборка архива) — не список
+                    # "подозрительных" comm, а перечень того, что 5.9.7g/5.9.8g
+                    # регистрируют под observer_root_pid. Список выведен ИЗ
+                    # ДАННЫХ, а не из чтения тела функций: разбор слепого окна
+                    # №2.9.6 (baseline-alerts минус alerts-end idle-часа) дал
+                    # ровно curl/grep/jq/bash/date/rm/dirname; tar/journalctl/du
+                    # добавлены этой волной — они не встречались в срезах
+                    # №2.9.6/№2.9.7 постольку, поскольку постобработка
+                    # idle-run.sh молчала на том стенде, а не потому что эти
+                    # инструменты не часть дерева измерителя. Намеренно НЕ
+                    # содержит comm'ов атакующих шагов (chmod, tee, insmod,
+                    # bpftool, clang, dig, python3, sqlmap): пометить их
+                    # «деревом измерителя» значило бы дать настоящему регрессу
+                    # спрятаться под этим списком.
                     blind_comm_breakdown=$(jq -n --slurpfile a "$baseline_alerts" --slurpfile b "$IDLE_ALERTS_END" '
                         ($b[0] | map(.id)) as $seen
                         | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)))
                         | group_by(.comm // "")
                         | map({comm: (.[0].comm // "(пусто)"), count: length})
                         | sort_by(-.count)')
-                    # Дерево измерителя run-all-attacks.sh/idle-run.sh:
-                    # инструменты, которые сам харнесс порождает в прологе
-                    # сбора baseline и в периодических срезах — не список
-                    # "подозрительных" comm, а перечень того, что 5.9.7g
-                    # регистрирует под observer_root_pid (см. run-all-attacks.sh).
-                    # Список выведен ИЗ ДАННЫХ, а не из чтения тела функций:
-                    # разбор слепого окна №2.9.6 (baseline-alerts минус
-                    # alerts-end idle-часа) дал ровно curl/grep/jq/bash/date/
-                    # rm/dirname; остальные добавлены как соседи того же
-                    # пролога. Намеренно НЕ содержит comm'ов атакующих шагов
-                    # (chmod, tee, tar, insmod, bpftool, clang, dig, python3,
-                    # sqlmap): пометить их «деревом измерителя» значило бы
-                    # дать настоящему регрессу спрятаться под этим списком.
-                    harness_comms='bash sh curl jq grep awk sed cat cut tr head tail wc sort seq sleep date rm ps dirname basename mktemp stat systemctl'
+                    harness_comms='bash sh curl jq grep awk sed cat cut tr head tail wc sort seq sleep date rm ps dirname basename mktemp stat systemctl tar journalctl du'
                     harness_alerts=0
-                    echo "  added_count=$added_count (< 3) — вердикт по составу окна, не по фазам (5.9.7g):"
+                    background_alerts=0
+                    background_breakdown=""
+                    echo "  разбор по составу (5.9.7g/5.9.8g):"
                     while IFS= read -r row; do
                         [ -z "$row" ] && continue
                         row_comm=$(echo "$row" | jq -r '.comm')
@@ -2047,18 +2146,26 @@ else
                             harness_alerts=$((harness_alerts + row_count))
                             echo "    ! $row_comm: $row_count (дерево измерителя)"
                         else
+                            background_alerts=$((background_alerts + row_count))
+                            background_breakdown="$background_breakdown $row_comm:$row_count"
                             echo "    . $row_comm: $row_count"
                         fi
                     done < <(echo "$blind_comm_breakdown" | jq -c '.[]')
-                    if [ "$harness_alerts" -eq 0 ]; then
-                        pass "объём слепого окна $blind_new_alerts > 5, added_count=$added_count < 3, но 0 алертов от дерева измерителя ($harness_comms) — окно не слепое по составу (5.9.7g)"
+                    # Строка "фон" — отдельно от вердикта по построению
+                    # (5.9.8g: "алерты фона печатаются отдельной строкой").
+                    # docker-proxy и подобные comm'ы вне дерева измерителя не
+                    # проваливают критерий 16 сами по себе — это наблюдение,
+                    # не промах.
+                    echo "  дерево измерителя: $harness_alerts алерт(ов); фон вне дерева измерителя (5.9.8g): $background_alerts алерт(ов)${background_breakdown:+ (${background_breakdown# })}"
+                    if [ "$harness_alerts" -gt 0 ]; then
+                        fail "объём слепого окна $blind_new_alerts > 5, и $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — observer_root не подхвачен агентом на этом прогоне (5.9.7g/5.9.8g)"
+                    elif [ "$added_count" -lt 3 ]; then
+                        pass "объём слепого окна $blind_new_alerts > 5, added_count=$added_count < 3, 0 алертов от дерева измерителя — окно не слепое по составу (5.9.7g)"
+                    elif [ "$added_undetermined_count" -eq 0 ]; then
+                        pass "объём слепого окна $blind_new_alerts > 5, 0 алертов от дерева измерителя, и у каждого из добавленных в критерии 6 типов определена фаза (attack/idle/gap) — окно не слепое (5.9.6h/5.9.8g)"
                     else
-                        fail "объём слепого окна $blind_new_alerts > 5, added_count=$added_count < 3, и $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — 5.9.7g (регистрация observer_root в run-all-attacks.sh) не подхвачена агентом на этом прогоне"
+                        fail "объём слепого окна $blind_new_alerts > 5, 0 алертов от дерева измерителя, но $added_undetermined_count добавленных типов в критерии 6 остались с неопределённой фазой — состав не объяснён (5.9.6h)"
                     fi
-                elif [ "$added_undetermined_count" -eq 0 ]; then
-                    pass "объём слепого окна $blind_new_alerts > 5, но у каждого из добавленных в критерии 6 типов определена фаза (attack/idle/gap), \"не определено\" нет — окно не слепое по составу (5.9.6h)"
-                else
-                    fail "объём слепого окна $blind_new_alerts > 5, и $added_undetermined_count добавленных типов в критерии 6 остались с неопределённой фазой — ни окно не схлопнулось, ни состав не объяснён (5.9.6h)"
                 fi
             fi
         fi
@@ -2361,10 +2468,36 @@ else
         fi
     done
     excluded_observer_tree=$(sum_metric_delta "reason=\"observer_tree\"" "$baseline_metrics" "$final_metrics")
-    echo "  excluded{observer_tree} за прогон (не коллектор-специфично, в невязку выше не входит): ${excluded_observer_tree:-0}"
+    # 5.9.8d (№97): observer_should_drop() стоит ДО bpf_ringbuf_reserve() на
+    # каждом из шести хуков трёх коллекторов — bpf/syscall.bpf.c:60/119,
+    # bpf/network.bpf.c:103/208, bpf/fileaccess.bpf.c:227/350/417 (везде
+    # `if (observer_should_drop()) return 0;` предшествует
+    # `reserve_event[_with_sampling]()`). excluded{observer_tree} поэтому не
+    # входит в emitted_kernel по построению — это код, а не утверждение по
+    # памяти; если рефакторинг когда-нибудь переставит эти строки, находка
+    # всплывёт здесь же как невязка, растущая вместе с ростом excluded.
+    echo "  excluded{observer_tree} за прогон (не коллектор-специфично, в невязку выше не входит — observer_should_drop() до reserve_event() во всех шести хуках, 5.9.8d): ${excluded_observer_tree:-0}"
     if [ "$any_balance_checked" -eq 0 ]; then
         skip "ни для одного коллектора баланс не проверен"
     fi
+fi
+
+# 5.9.8d (№97, P1): events_drain_offset — тот же приём, что final_drain_offset
+# (5.9.4c, критерий 15), только для событийного тождества секции 19 вместо
+# алертного. get_final_metrics (run-all-attacks.sh) снимает финальный срез
+# ПОСЛЕ того, как суммарный |остаток| этого тождества по трём коллекторам
+# перестал убывать между срезами (не "стал нулём" — секция 19 держит допуск
+# 500/0.5%, а не 0), с ретраями до 30с, и пишет величину в
+# final-drain-offset-$TIMESTAMP.txt рядом с drain_offset_before_final.
+# Печатается числом независимо от того, к чему сошёлся, — постановка не
+# требует, чтобы он был мал, только чтобы он не отсутствовал молча.
+events_drain_offset_file="$RESULTS_DIR/final-drain-offset-$TIMESTAMP.txt"
+if [ -f "$events_drain_offset_file" ] && grep -q '^events_drain_offset=' "$events_drain_offset_file" 2>/dev/null; then
+    events_drain_offset=$(grep -o 'events_drain_offset=.*' "$events_drain_offset_file" | cut -d= -f2)
+    echo "  events_drain_offset (5.9.8d, |остаток| тождества секции 19 перед final, устоялся или истёк таймаут 30с) = ${events_drain_offset:-n/a}"
+    pass "events_drain_offset напечатан числом (5.9.8d, №97): ${events_drain_offset:-n/a}"
+else
+    skip "events_drain_offset отсутствует в final-drain-offset-$TIMESTAMP.txt — сборка харнесса старее 5.9.8d"
 fi
 echo ""
 
@@ -2407,12 +2540,105 @@ if [ -f "$c20_null_marker" ] && ! grep -q '^skipped=1' "$c20_null_marker" 2>/dev
     c20_null_available=1
     echo "  null: N=0 окно=${c20_null_window:-0}с Δevents+Δdrops=${c20_null_sum:-0} => фон ${c20_null_rate}/с (джиттер ±${c20_null_jitter})"
     pass "null: негативный контроль исполнен первым, фон измерен числом вместо оценки до генератора (5.9.7a, №78)"
+
+    # 5.9.8b (№91): канареечная серия сама себя проверяет в mode=null — она
+    # обязана быть строго 0, потому что генератор в этом режиме не
+    # запускается вовсе. Ненулевая канареечная сумма при N=0 значит, что
+    # префикс /tmp/ebpf-guard-counting-canary- ловит что-то за пределами
+    # самого контроля счётности (см. IsCountingCanaryPath, prometheus.go).
+    if grep -q '^canary_sum=' "$c20_null_marker" 2>/dev/null; then
+        c20_null_canary_sum=$(awk -F= '$1=="canary_sum"{print $2+0}' "$c20_null_marker" 2>/dev/null)
+        echo "  null: канареечная серия Δevents+Δdropped=${c20_null_canary_sum:-0} (обязана быть 0)"
+        if [ "${c20_null_canary_sum:-0}" -eq 0 ]; then
+            pass "null: канареечная серия = 0 (5.9.8b, №91) — префикс не ловит лишнее"
+        else
+            fail "null: канареечная серия = ${c20_null_canary_sum} при N=0 — префикс /tmp/ebpf-guard-counting-canary- ловит события за пределами контроля счётности (5.9.8b)"
+        fi
+    else
+        skip "null: маркер без canary_sum — сборка агента/харнесса старее 5.9.8b, канареечная серия не проверена"
+    fi
 elif [ -f "$c20_null_marker" ]; then
     skip "null: python3 недоступен на харнессе в момент прогона — фон не измерен"
 else
     skip "null не запускался — маркер counting-control-null-$TIMESTAMP.txt отсутствует; сборка харнесса старее 5.9.7a, idle/drop ниже считаются без поправки на фон"
 fi
 echo ""
+
+# 5.9.8c (№92, P0): единая арифметика остатка контроля счётности — читает
+# canary_sum из маркера, если он есть (5.9.8b), иначе вычитает измеренный
+# фон null-режима (5.9.7a). Общая для секции 20 (idle/drop) и секции 22
+# (run_ringbuf_overflow): постановка требует секцию 22 "той же формулой, что
+# секция 20", и это буквально тот же код, а не независимо переписанная
+# копия — секция 22 раньше несла собственный фиксированный допуск ±1500,
+# который не масштабировался ни с N, ни с длиной окна (находка №92).
+# Канареечная серия считается ТОЛЬКО в userspace (RecordCountingCanary,
+# cmd/ebpf-guard/main.go + internal/collector/{fileaccess,priority}.go) — по
+# трём хопам, до которых событие дошло живым: events, ringbuf_to_router,
+# router_to_queue. Событие, потерянное В КОЛЬЦЕ, до userspace не доходит
+# вовсе, и приписать его канарейке нечем: ringbuf_full — перцпу-счётчик ядра
+# (5.9.6a) без метки пути, он считает потери ВСЕХ файловых событий окна
+# сразу. Поэтому тождество канарейки не «canary_sum == N», а
+#
+#     0 <= N - canary_sum <= Δringbuf_full          (± допуск)
+#
+# то есть: канарейка не может насчитать БОЛЬШЕ, чем было вызовов (левая
+# граница ловит двойной счёт и загрязнение префикса), и её недостача не
+# может превысить то, что кольцо в этом окне заведомо потеряло (правая
+# граница). Правая граница — ВЕРХНЯЯ ОЦЕНКА, а не вычитание фона: фон
+# входит в Δringbuf_full и делает её только шире, но недостачу СВЕРХ
+# доказанной потери кольца она не прячет — а это и есть то, что критерий
+# 20/22 обязан ловить. В окнах без переполнения (Δringbuf_full = 0 —
+# idle, null) обе границы схлопываются в прежнее строгое
+# |canary_sum - N| <= допуск, без единого слагаемого фона, ровно как
+# требует 5.9.8b.
+#
+# Без этого канареечный путь был бы заведомо красным везде, где кольцо
+# переполняется намеренно: на №2.9.7 шаг run_ringbuf_overflow потерял в
+# кольце 288 195 событий из N=300 000, то есть «остаток» -288 195 при
+# допуске 1500 — критерий 22 не мог бы пройти ни при каком исправном
+# продукте (5.9.8c, ревизия волны 5.9.8).
+#
+# Выход через глобали (bash-функции не возвращают структур):
+#   CR_TOLERANCE, CR_RESIDUAL, CR_ABS_RESIDUAL, CR_USED_CANARY (1/0),
+#   CR_RING_BOUND, CR_OK (1/0), CR_LINE
+counting_control_residual() {
+    local marker="$1" n="$2" window="$3"
+    local ring_full
+    ring_full=$(awk -F= '$1=="ringbuf_full_delta"{print $2+0}' "$marker" 2>/dev/null)
+    CR_RING_BOUND="${ring_full:-0}"
+    if grep -q '^canary_sum=' "$marker" 2>/dev/null; then
+        local canary_events canary_dropped canary_sum canary_diff
+        canary_events=$(awk -F= '$1=="canary_events_delta"{print $2+0}' "$marker" 2>/dev/null)
+        canary_dropped=$(awk -F= '$1=="canary_dropped_delta"{print $2+0}' "$marker" 2>/dev/null)
+        canary_sum=$(awk -F= '$1=="canary_sum"{print $2+0}' "$marker" 2>/dev/null)
+        canary_diff=$(awk -F= '$1=="canary_diff"{print $2+0}' "$marker" 2>/dev/null)
+        CR_TOLERANCE=$(awk -v n="${n:-0}" 'BEGIN{t=n*0.005; if(t<5) t=5; printf "%.0f", t}')
+        CR_RESIDUAL="${canary_diff:-0}"
+        CR_ABS_RESIDUAL=$(awk -v d="${canary_diff:-0}" 'BEGIN{print (d<0)?-d:d}')
+        CR_USED_CANARY=1
+        # d = canary_sum - N. Верх: d <= +допуск (насчитано лишнее).
+        # Низ: d >= -(Δringbuf_full + допуск) (недостача сверх потери кольца).
+        CR_OK=$(awk -v d="${canary_diff:-0}" -v t="$CR_TOLERANCE" -v r="${CR_RING_BOUND:-0}" \
+            'BEGIN{ if(r<0) r=0; print (d<=t && d>=-(r+t)) ? 1 : 0 }')
+        if [ "${CR_RING_BOUND:-0}" -gt 0 ] 2>/dev/null; then
+            CR_LINE="канарейка Δevents=${canary_events:-0} Δdropped=${canary_dropped:-0} сумма=${canary_sum:-0} остаток=${CR_RESIDUAL} (окно с переполнением: допустимо от -(Δringbuf_full=${CR_RING_BOUND} + ${CR_TOLERANCE}) до +${CR_TOLERANCE}; потеря в кольце канарейке не видна по построению — 5.9.8b/5.9.8c, №91/№92)"
+        else
+            CR_LINE="канарейка Δevents=${canary_events:-0} Δdropped=${canary_dropped:-0} сумма=${canary_sum:-0} остаток=${CR_RESIDUAL} (допуск ±${CR_TOLERANCE} = max(5,0.5%N), без вычета фона, Δringbuf_full=0 — 5.9.8b/5.9.8c, №91/№92)"
+        fi
+    else
+        local diff bg
+        diff=$(awk -F= '$1=="diff"{print $2+0}' "$marker" 2>/dev/null)
+        bg=$(awk -v r="$c20_null_rate" -v w="${window:-0}" 'BEGIN{printf "%.0f", r*w}')
+        CR_RESIDUAL=$(( ${diff:-0} - bg ))
+        CR_TOLERANCE=$(awk -v n="${n:-0}" -v j="$c20_null_jitter" 'BEGIN{t=n*0.005; if(t<5) t=5; printf "%.0f", t+j}')
+        CR_ABS_RESIDUAL=$(awk -v d="$CR_RESIDUAL" 'BEGIN{print (d<0)?-d:d}')
+        CR_USED_CANARY=0
+        # Запасной путь считает общую серию, которая ringbuf_full УЖЕ
+        # включает в drops_delta — там граница по кольцу не нужна.
+        CR_OK=$(awk -v a="$CR_ABS_RESIDUAL" -v t="$CR_TOLERANCE" 'BEGIN{print (a<=t)?1:0}')
+        CR_LINE="фон=${bg} остаток=${CR_RESIDUAL} (допуск ±${CR_TOLERANCE} = 0.5%N/мин.5 + джиттер фона ${c20_null_jitter}) — маркер старее 5.9.8b/5.9.8c, канареечная серия недоступна"
+    fi
+}
 
 counting_checked_modes=0
 counting_ok_modes=0
@@ -2435,30 +2661,27 @@ for c20_mode in idle drop; do
     c20_window=$(awk -F= '$1=="window_seconds"{print $2+0}' "$c20_marker" 2>/dev/null)
     counting_checked_modes=$((counting_checked_modes + 1))
 
-    # Фон этого конкретного окна = темп null × длину ЭТОГО окна. Остаток —
-    # не "разница_с_N" (диагноз 5.9.7a: старая формулировка вводила в
-    # заблуждение, потому что не вычитала фон вовсе) — это то, что не
-    # объяснено ни N, ни измеренным фоном.
-    c20_bg=$(awk -v r="$c20_null_rate" -v w="${c20_window:-0}" 'BEGIN{printf "%.0f", r*w}')
-    c20_residual=$(( c20_diff - c20_bg ))
-
-    # Допуск объявлен здесь, а не подобран по результату (п.4 порядка
-    # работы): базовая часть — неатомарность снимков (один срез /metrics до
-    # и один после, на порядок туже, чем допуск 5.9.6b) — max(5, 0.5% N);
-    # плюс джиттер null-режима, то есть неопределённость самого измерения
-    # фона (5.9.7a). Без null-маркера джиттер = 5 (минимум), поведение как
-    # раньше при отсутствующем фоне.
-    c20_tolerance=$(awk -v n="${c20_n:-0}" -v j="$c20_null_jitter" 'BEGIN{t=n*0.005; if(t<5) t=5; printf "%.0f", t+j}')
-    c20_abs_residual=$(awk -v d="$c20_residual" 'BEGIN{print (d<0)?-d:d}')
-    echo "  $c20_mode: N=${c20_n:-0} Δevents(file)=${c20_events:-0} Δdrops(fileaccess)=${c20_drops:-0} Δringbuf_full=${c20_ringbuf_full:-0} сумма=${c20_sum:-0} фон=${c20_bg} остаток=${c20_residual} (допуск ±$c20_tolerance = 0.5%N/мин.5 + джиттер фона ${c20_null_jitter})"
-    if ! awk -v a="$c20_abs_residual" -v t="$c20_tolerance" 'BEGIN{exit !(a<=t)}'; then
-        fail "$c20_mode: N=${c20_n:-0} не сходится с Δevents+Δdrops после вычета фона (сумма ${c20_sum:-0}, фон ${c20_bg}, остаток ${c20_residual}, допуск ±$c20_tolerance) — либо непосчитанная потеря, либо вызов не увиден ядром"
+    # 5.9.8b/5.9.8c (№91/№92): приём меняется с "оценить фон точнее" на
+    # "убрать фон из измеряемой величины" — counting_control_residual читает
+    # канареечную серию, если маркер её несёт (сборка агента+харнесса не
+    # старее 5.9.8b), иначе считает запасным путём с вычетом фона (5.9.7a).
+    # Общая серия (c20_sum/c20_diff) печатается ниже справочно в обоих
+    # случаях.
+    counting_control_residual "$c20_marker" "$c20_n" "$c20_window"
+    if [ "$CR_USED_CANARY" -eq 1 ]; then
+        echo "  $c20_mode: N=${c20_n:-0} $CR_LINE"
+        echo "  $c20_mode: справочно, общая серия (контаминирована фоном): Δevents(file)=${c20_events:-0} Δdrops(fileaccess)=${c20_drops:-0} Δringbuf_full=${c20_ringbuf_full:-0} сумма=${c20_sum:-0}"
+    else
+        echo "  $c20_mode: N=${c20_n:-0} Δevents(file)=${c20_events:-0} Δdrops(fileaccess)=${c20_drops:-0} Δringbuf_full=${c20_ringbuf_full:-0} сумма=${c20_sum:-0} $CR_LINE"
+    fi
+    if [ "${CR_OK:-0}" -ne 1 ]; then
+        fail "$c20_mode: N=${c20_n:-0} не сходится (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE$( [ "${CR_RING_BOUND:-0}" -gt 0 ] && echo " с поправкой на Δringbuf_full=${CR_RING_BOUND}" )$( [ "$CR_USED_CANARY" -eq 1 ] && echo ", по канареечной серии" || echo ", после вычета фона" )) — либо непосчитанная потеря, либо вызов не увиден ядром (5.9.8b/5.9.8c, №91)"
     elif [ "$c20_mode" = "drop" ] && ! awk -v r="${c20_ringbuf_full:-0}" 'BEGIN{exit !(r>0)}'; then
-        skip "$c20_mode: N сошёлся (остаток ${c20_residual}), но ringbuf_full=${c20_ringbuf_full:-0} — генератор не переполнил кольцо на этом стенде, вторая половина критерия («сходится ПОД дропом») не проверена (COUNTING_CONTROL_DROP_N не откалиброван; см. также шаг run_ringbuf_overflow, 5.9.7b)"
+        skip "$c20_mode: N сошёлся (остаток ${CR_RESIDUAL}), но ringbuf_full=${c20_ringbuf_full:-0} — генератор не переполнил кольцо на этом стенде, вторая половина критерия («сходится ПОД дропом») не проверена (COUNTING_CONTROL_DROP_N не откалиброван; см. также шаг run_ringbuf_overflow, 5.9.7b)"
         counting_ok_modes=$((counting_ok_modes + 1))
     else
         counting_ok_modes=$((counting_ok_modes + 1))
-        pass "$c20_mode: N=${c20_n:-0} сходится с Δevents+Δdrops после вычета фона (остаток ${c20_residual}, допуск ±$c20_tolerance)$( [ "$c20_mode" = "drop" ] && echo ", ringbuf_full=${c20_ringbuf_full:-0} > 0")"
+        pass "$c20_mode: N=${c20_n:-0} сходится (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE)$( [ "$c20_mode" = "drop" ] && echo ", ringbuf_full=${c20_ringbuf_full:-0} > 0") (5.9.8b/5.9.8c, №91)"
     fi
 done
 if [ "$counting_checked_modes" -eq 0 ]; then
@@ -2535,17 +2758,21 @@ else
 fi
 echo ""
 
-# 22. 5.9.7b (№79, P0): переполнение кольца под управляемой нагрузкой, а не
-# надеждой на нагрузку стенда. run_ringbuf_overflow (run-all-attacks.sh
-# --ringbuf-overflow) — отдельный, короткий шаг, ВНЕ окна замера (запрет №3
-# постановки 5.9.7): SIGSTOP всему процессу агента, генератор известного N
-# openat() на канарейку копится в кольце ядра пока читатель заморожен,
-# SIGCONT, затем те же три величины, что у критерия 20 — Δevents+Δdrops == N,
-# ringbuf_full > 0, и НОВОЕ: Δbpf_lost_events_total{collector} совпадает с
-# Δevents_dropped_total{collector,reason="ringbuf_full"} того же коллектора —
-# первое живое подтверждение 5.9.6a, которого №2.9.6 не дало. Маркер пишется
-# ЭТИМ шагом заранее, отдельно от baseline/final основного окна.
-echo "=== 22. run_ringbuf_overflow: переполнение под контролем + bpf_lost_events_total живьём (5.9.7b, №79) ==="
+# 22. 5.9.7b/5.9.8c (№79/№92, P0): переполнение кольца под управляемой
+# нагрузкой, а не надеждой на нагрузку стенда. run_ringbuf_overflow
+# (run-all-attacks.sh --ringbuf-overflow) — отдельный, короткий шаг, ВНЕ окна
+# замера (запрет №3 постановки 5.9.7): SIGSTOP всему процессу агента,
+# генератор известного N openat() на канарейку копится в кольце ядра пока
+# читатель заморожен, SIGCONT, затем тот же остаток, что у критерия 20 —
+# counting_control_residual (5.9.8c) считает его ТЕМ ЖЕ КОДОМ: канареечная
+# серия, если маркер её несёт, иначе вычет измеренного null-фона. Прежний
+# фиксированный допуск ±1500 не масштабировался ни с N, ни с длиной окна
+# (находка №92) и удалён вместе с отдельной формулой. Плюс НОВОЕ (5.9.7b):
+# Δbpf_lost_events_total{collector} совпадает с Δevents_dropped_total{
+# collector,reason="ringbuf_full"} того же коллектора — первое живое
+# подтверждение 5.9.6a, которого №2.9.6 не дало. Маркер пишется ЭТИМ шагом
+# заранее, отдельно от baseline/final основного окна.
+echo "=== 22. run_ringbuf_overflow: переполнение под контролем + bpf_lost_events_total живьём (5.9.7b/5.9.8c, №79/№92) ==="
 ringbuf_overflow_marker=$(ls -t "$RESULTS_DIR"/ringbuf-overflow-*.txt 2>/dev/null | head -1)
 if [ -z "$ringbuf_overflow_marker" ] || [ ! -f "$ringbuf_overflow_marker" ]; then
     skip "run_ringbuf_overflow не запускался — маркер ringbuf-overflow-*.txt отсутствует; сборка/пайплайн старее 5.9.7b"
@@ -2560,25 +2787,77 @@ else
     c22_bpf_lost=$(awk -F= '$1=="bpf_lost_delta"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
     c22_sum=$(awk -F= '$1=="sum"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
     c22_diff=$(awk -F= '$1=="diff"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
+    c22_window=$(awk -F= '$1=="window_seconds"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
     c22_method_a=$(awk -F= '$1=="method_a_blocked_reason"{ $1=""; print substr($0,2)}' "$ringbuf_overflow_marker" 2>/dev/null)
     c22_idle_ringbuf_full=$(awk -F= '$1=="idle_hour_ringbuf_full"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
 
-    c22_tolerance=$(awk -v n="${c22_n:-0}" 'BEGIN{t=n*0.005; if(t<5) t=5; printf "%.0f", t}')
-    c22_abs_diff=$(awk -v d="${c22_diff:-0}" 'BEGIN{print (d<0)?-d:d}')
+    counting_control_residual "$ringbuf_overflow_marker" "$c22_n" "$c22_window"
     echo "  метод: SIGSTOP читателя (сужение bpf.ring_buf_size заблокировано кодом: ${c22_method_a:-см. открытые вопросы 5.9.7b})"
-    echo "  N=${c22_n:-0} Δevents(file)=${c22_events:-0} Δdrops(fileaccess)=${c22_drops:-0} сумма=${c22_sum:-0} разница=${c22_diff:-0} (допуск ±$c22_tolerance)"
+    echo "  N=${c22_n:-0} $CR_LINE"
+    if [ "$CR_USED_CANARY" -eq 1 ]; then
+        echo "  справочно, общая серия (контаминирована фоном): Δevents(file)=${c22_events:-0} Δdrops(fileaccess)=${c22_drops:-0} сумма=${c22_sum:-0} сумма-N=${c22_diff:-0}"
+    fi
     echo "  Δringbuf_full(fileaccess)=${c22_ringbuf_full:-0} Δbpf_lost_events_total(fileaccess)=${c22_bpf_lost:-0}"
     [ -n "$c22_idle_ringbuf_full" ] && echo "  ringbuf_full за idle-час (справочно, критерий 18 судит это же значение отдельно): ${c22_idle_ringbuf_full}"
 
-    if ! awk -v a="$c22_abs_diff" -v t="$c22_tolerance" 'BEGIN{exit !(a<=t)}'; then
-        fail "run_ringbuf_overflow: N=${c22_n:-0} не сходится с Δevents+Δdrops под SIGSTOP (разница ${c22_diff:-0}, допуск ±$c22_tolerance) — тождество 5.9.6c не подтверждено под реальным переполнением"
+    if [ "${CR_OK:-0}" -ne 1 ]; then
+        fail "run_ringbuf_overflow: N=${c22_n:-0} не сходится под SIGSTOP (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE с поправкой на Δringbuf_full=${CR_RING_BOUND:-0}, той же формулой, что критерий 20 — 5.9.8c) — тождество 5.9.6c не подтверждено под реальным переполнением"
     elif ! awk -v r="${c22_ringbuf_full:-0}" 'BEGIN{exit !(r>0)}'; then
         fail "run_ringbuf_overflow: N сошёлся, но ringbuf_full=${c22_ringbuf_full:-0} — SIGSTOP не переполнил кольцо на этом стенде (кольцо больше, чем предполагалось, или окно заморозки было коротким); переполнение остаётся недоказанным управляемой нагрузкой"
     elif ! awk -v a="${c22_ringbuf_full:-0}" -v b="${c22_bpf_lost:-0}" 'BEGIN{exit !(a==b)}'; then
         fail "run_ringbuf_overflow: ringbuf_full=${c22_ringbuf_full:-0} != bpf_lost_events_total=${c22_bpf_lost:-0} — счётчик 5.9.6a не совпадает с переполнением кольца под нагрузкой, которую он должен объяснять"
     else
-        pass "run_ringbuf_overflow: N=${c22_n:-0} сходится (разница ${c22_diff:-0}), ringbuf_full=${c22_ringbuf_full:-0} > 0, bpf_lost_events_total совпадает — переполнение доказано управляемой нагрузкой, не надеждой (5.9.7b, №79)"
+        pass "run_ringbuf_overflow: N=${c22_n:-0} сходится (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE), ringbuf_full=${c22_ringbuf_full:-0} > 0, bpf_lost_events_total совпадает — переполнение доказано управляемой нагрузкой, не надеждой (5.9.7b/5.9.8c, №79/№92)"
     fi
+fi
+echo ""
+
+# 5.9.8f (№93, P1): settle_reason — каждый settle-луп контроля счётности
+# (run_counting_control/run_ringbuf_overflow, counting_settle_loop в
+# run-all-attacks.sh) теперь пишет причину остановки
+# (flattened/ceiling/timeout), не только quiesced_iterations. "ceiling" —
+# луп докрутил все срезы, не сойдясь к фону: старое условие выхода
+# (сумма events+drops не выросла между двумя срезами) на стенде с
+# непрерывным фоном недостижимо, и quiesced_iterations=30 было
+# неотличимо от «настоящего» устаканивания за 30 срезов — это и есть
+# находка №93. Критерий: причина печатается для всех четырёх маркеров
+# (null/idle/drop/run_ringbuf_overflow), и ни один не "ceiling".
+echo "=== 5.9.8f. settle_reason: контроль счётности сообщает причину остановки (№93) ==="
+settle_reason_ceiling_count=0
+settle_reason_checked=0
+for settle_label in null idle drop; do
+    settle_marker="$RESULTS_DIR/counting-control-${settle_label}-$TIMESTAMP.txt"
+    if [ ! -f "$settle_marker" ] || grep -q '^skipped=1' "$settle_marker" 2>/dev/null; then
+        echo "  $settle_label: маркер отсутствует или пропущен — причина не проверена"
+        continue
+    fi
+    if ! grep -q '^settle_reason=' "$settle_marker" 2>/dev/null; then
+        echo "  $settle_label: маркер без settle_reason — сборка харнесса старее 5.9.8f"
+        continue
+    fi
+    settle_reason_checked=$((settle_reason_checked + 1))
+    settle_val=$(awk -F= '$1=="settle_reason"{print $2}' "$settle_marker" 2>/dev/null)
+    echo "  $settle_label: settle_reason=${settle_val:-?}"
+    [ "$settle_val" = "ceiling" ] && settle_reason_ceiling_count=$((settle_reason_ceiling_count + 1))
+done
+if [ -n "$ringbuf_overflow_marker" ] && [ -f "$ringbuf_overflow_marker" ] && ! grep -q '^skipped=1' "$ringbuf_overflow_marker" 2>/dev/null; then
+    if grep -q '^settle_reason=' "$ringbuf_overflow_marker" 2>/dev/null; then
+        settle_reason_checked=$((settle_reason_checked + 1))
+        settle_val=$(awk -F= '$1=="settle_reason"{print $2}' "$ringbuf_overflow_marker" 2>/dev/null)
+        echo "  run_ringbuf_overflow: settle_reason=${settle_val:-?}"
+        [ "$settle_val" = "ceiling" ] && settle_reason_ceiling_count=$((settle_reason_ceiling_count + 1))
+    else
+        echo "  run_ringbuf_overflow: маркер без settle_reason — сборка харнесса старее 5.9.8f"
+    fi
+else
+    echo "  run_ringbuf_overflow: маркер отсутствует или пропущен — причина не проверена"
+fi
+if [ "$settle_reason_checked" -eq 0 ]; then
+    skip "settle_reason нигде не найден — сборка харнесса старее 5.9.8f, ни один из четырёх маркеров не проверен"
+elif [ "$settle_reason_ceiling_count" -gt 0 ]; then
+    fail "$settle_reason_ceiling_count из $settle_reason_checked маркеров settle-лупа докрутили до потолка (settle_reason=ceiling) — снимок «после» мог уйти раньше конца асинхронного хвоста (5.9.8f, №93)"
+else
+    pass "ни один из $settle_reason_checked проверенных маркеров settle-лупа не докрутил до потолка (5.9.8f, №93)"
 fi
 echo ""
 

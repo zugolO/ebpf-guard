@@ -209,6 +209,31 @@
 #     ssh-сессии); вернётся в базу на attack-срабатывании.
 #   - mitre_software_enum_dpkg — перенесён в silent-rules.txt категорией b
 #     («немо из-за среды»: нет attack-шага с dpkg-query/rpm), не в эту базу.
+#
+# Обновление 5.9.8h (замер №2.9.7, gate-2.9.7.txt): гигиена реестра, дата
+# замера — 2026-08-22. Прогон №2.9.7 дал шесть типов «добавлено» той же
+# фазовой картиной, что закрывала 5.9.7e — критерий 6 печатал их как
+# срабатывание с определённой фазой attack. Добавлены пятью строками ниже:
+# credaccess_ssh_authorized_keys_modified, fim_ssh_key_written,
+# persistence_ssh_authorized_keys, rootkit_ssh_authorized_keys_modified,
+# sigma_sensitive_dir_listing — все пять с фазой attack (run_ssh_keys_
+# positive_control, 5.9.7e), то есть реальные срабатывания сузившегося
+# условия на настоящей записи, а не повторение находки №81 (те же два типа
+# были удалены отсюда в 5.9.7e именно потому, что тогда фаза была не
+# определена — сейчас определена, это другое наблюдение, не отмена того
+# решения).
+#
+# impact_systemd_service_disabled НЕ заносится — фаза «не определена»
+# (правило родом из 5.9.7e), критерий 6 требует машинной печати «не
+# заносить» для такого случая, а не молчаливого принятия следующей волной;
+# вернётся в базу, когда сработает на сценарии с определённой фазой.
+#
+# WARN «состав детекта расходится… уже второй замер подряд» (run-gate.sh,
+# detection-baseline-diff-state.txt) снимается этой записью, а не кодом —
+# сама WARN печатается только когда сигнатура добавлено/потеряно совпадает
+# на двух прогонах подряд; обновление базы здесь меняет сигнатуру следующего
+# прогона, поэтому дальше повторяться она не должна. Если №2.9.8 всё равно
+# её напечатает — база снова разошлась, а не багована сама WARN.
 
 anomaly_detection
 beacon_fixed_interval
@@ -219,6 +244,7 @@ container_escape_host_mount
 container_escape_init_proc
 container_escape_module_access
 cred_proc_maps_mass_read
+credaccess_ssh_authorized_keys_modified
 dns_tunneling_long_domain
 drift_dangerous_syscall
 drift_new_exec_critical
@@ -231,6 +257,7 @@ evasion_hidden_elf_in_tmp
 exfil_archive_to_network_pipe
 exfil_dns_txt_long_label
 exfil_repeated_outbound_to_same_ip
+fim_ssh_key_written
 incident_confirmed_attack
 initial_package_postinstall_network
 integrity_kernel_module_from_user_path
@@ -245,6 +272,7 @@ owasp_backup_config_access
 owasp_log_tampering
 owasp_path_traversal
 owasp_reverse_shell_pattern
+persistence_ssh_authorized_keys
 privesc_suid_suspicious_path
 rootkit_bpf_map_create_suspicious
 rootkit_bpf_prog_load_suspicious
@@ -254,6 +282,7 @@ rootkit_init_module_syscall
 rootkit_kmod_from_tmp
 rootkit_large_hidden_file
 rootkit_pam_module_added
+rootkit_ssh_authorized_keys_modified
 sensitive_file_read
 sigma_binary_in_tmp_executed
 sigma_chmod_executable_tmp
@@ -263,6 +292,7 @@ sigma_kernel_version_read
 sigma_log_deletion
 sigma_memory_proc_dump
 sigma_reverse_shell_named_pipe
+sigma_sensitive_dir_listing
 sigma_sensitive_file_chmod
 sigma_setuid_syscall
 sigma_shell_from_unexpected_parent

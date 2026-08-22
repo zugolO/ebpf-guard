@@ -2323,6 +2323,18 @@ func processEvent(
 	}
 	exporter.RecordEventWithLabels(exporter.EventTypeLabel(event.Type), evtPod, evtNamespace, evtNode)
 
+	// plan.md 5.9.8b (№91): counting-control canary events get their own
+	// series, so criterion 20 can read a count that is background-free by
+	// construction instead of subtracting an estimated background from
+	// ebpf_guard_events_total{type="file"}. Checked here — post-parse, in
+	// userspace, on the event every collector already funnels through — not
+	// in BPF (risk №3 of постановка №2.9.8: a path-prefix compare in the
+	// fileaccess hot path risked the 3M-events/10min throughput this
+	// collector already runs at).
+	if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.FDPath) {
+		exporter.RecordCountingCanary("events")
+	}
+
 	// Route to the PID-partitioned ingest worker pool so rule evaluation,
 	// lineage tracking, and anomaly scoring are spread across goroutines
 	// instead of serializing on this one. Resulting alerts land in

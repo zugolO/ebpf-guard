@@ -179,12 +179,47 @@ static __always_inline void emit_dns_raw_event(void *data, __u32 cap_len, __u8 d
 /*
  * dns_socket_key - composite key identifying a UDP socket fd within a
  * thread group. fd alone is not unique across processes (each process has
- * its own fd namespace), so pid_tgid must be part of the key.
+ * its own fd namespace), so the thread group id must be part of the key.
+ *
+ * plan.md 5.9.8a (№94): this used to be the full pid_tgid (pid in the high
+ * 32 bits, tgid in the low 32 bits), which made the key *thread*-scoped
+ * instead of *process*-scoped. A UDP socket connect()ed to port 53 on one
+ * thread is fair game for any thread in the same process to write()/read()
+ * on — multi-threaded resolvers do exactly this — but the old key only
+ * recognized traffic from the connecting thread. Two independent failures
+ * followed from that: close() from a different thread never matched the
+ * connecting thread's key, so dns_socket_map entries for such fds were
+ * never cleaned up by trace_close and lingered until LRU eviction; and once
+ * the fd number was reused by a *different* file (a TLS socket, most
+ * commonly — see the header sanity check in internal/collector/dns.go),
+ * write()/read() on it from the reusing thread matched no key at all under
+ * the old scheme, which should have made it invisible — except LRU
+ * eviction of the stale entry is not immediate, so during the window before
+ * eviction a reused fd number from a *different* thread in the same
+ * process could still hit the stale entry and be misread as DNS. Keying on
+ * tgid alone fixes both: close() from any thread in the process drops the
+ * entry immediately, and only fd numbers actually live within a connected
+ * thread group can match, without the thread-identity mismatch that made
+ * eviction timing matter in the first place.
  */
 struct dns_socket_key {
-	__u64 pid_tgid;
+	__u32 tgid;
 	__u32 fd;
 };
+
+/* Extract the process-wide id from the combined pid_tgid value returned by
+ * bpf_get_current_pid_tgid(): the high 32 bits, shared by every thread in
+ * the process — same convention as pid_is_agent()'s `tgid` local and
+ * fill_process_info()/fill_dns_process_info()'s `e->pid` field in
+ * common.h/this file (bpf_get_current_pid_tgid() packs the kernel's
+ * task_tgid_nr() into the high bits and the per-thread task_pid_nr() into
+ * the low bits; this codebase's field named `tgid` on struct event holds
+ * the low, per-thread half instead — the low bits are not what this key
+ * needs). */
+static __always_inline __u32 current_tgid(void)
+{
+	return (__u32)(bpf_get_current_pid_tgid() >> 32);
+}
 
 /*
  * dns_socket_map - tracks fds that were connect()ed to UDP port 53.
@@ -227,16 +262,18 @@ struct {
 } dns_pending_io SEC(".maps");
 
 /* Helper: is fd (in the current thread group) a tracked DNS socket?
- * struct dns_socket_key has 4 bytes of trailing padding after .fd (to
- * align to its __u64 member); a designated initializer doesn't zero that
- * padding, and the verifier rejects passing a struct with uninitialized
- * stack bytes as a map key. __builtin_memset first to be explicit. */
+ * struct dns_socket_key is two adjacent __u32 members with no trailing
+ * padding (unlike its pre-5.9.8a __u64-plus-__u32 shape), but the explicit
+ * __builtin_memset is kept anyway: it costs nothing and keeps every
+ * stack-allocated map key in this file zeroed the same way, so a future
+ * field addition here doesn't quietly reintroduce the uninitialized-padding
+ * verifier rejection this pattern was originally written to avoid. */
 static __always_inline bool is_dns_socket_fd(__u32 fd)
 {
 	struct dns_socket_key key;
 
 	__builtin_memset(&key, 0, sizeof(key));
-	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.tgid = current_tgid();
 	key.fd = fd;
 	return bpf_map_lookup_elem(&dns_socket_map, &key) != NULL;
 }
@@ -259,7 +296,7 @@ int trace_connect(struct trace_event_raw_sys_enter *ctx)
 		return 0;
 
 	__builtin_memset(&key, 0, sizeof(key));
-	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.tgid = current_tgid();
 	key.fd = (__u32)ctx->args[0];
 	bpf_map_update_elem(&dns_socket_map, &key, &val, BPF_ANY);
 	return 0;
@@ -275,7 +312,7 @@ int trace_close(struct trace_event_raw_sys_enter *ctx)
 	struct dns_socket_key key;
 
 	__builtin_memset(&key, 0, sizeof(key));
-	key.pid_tgid = bpf_get_current_pid_tgid();
+	key.tgid = current_tgid();
 	key.fd = (__u32)ctx->args[0];
 	bpf_map_delete_elem(&dns_socket_map, &key);
 	return 0;

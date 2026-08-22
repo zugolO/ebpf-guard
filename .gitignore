@@ -29,6 +29,12 @@ vmlinux.h
 # `make generate` without a BTF-enabled kernel (see Makefile `generate`).
 !bpf/vmlinux.h
 
+# Vendored upstream libbpf headers (bpf_helpers.h etc.) — IDE-only, so
+# clangd can resolve <bpf/...> includes in bpf/*.bpf.c on machines without
+# libbpf installed (e.g. macOS). Not used by the real build; make generate
+# uses the system libbpf inside the Linux/Docker toolchain.
+bpf/.vendor/
+
 # ── Go toolchain ───────────────────────────────────────────────────────────────
 vendor/
 coverage.out

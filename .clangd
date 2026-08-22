@@ -1,0 +1,7 @@
+CompileFlags:
+  Add:
+    - --target=bpf
+    - -I bpf/.vendor
+    - -I bpf
+    - -D__TARGET_ARCH_x86
+  Compiler: clang

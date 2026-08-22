@@ -294,6 +294,22 @@ sum_metric() {
     awk -F'} ' -v p="$pattern" '$0 ~ p {s+=$2} END{printf "%.0f", s+0}'
 }
 
+# sum_metric_delta PATTERN FILE_BASE FILE_FINAL — same idiom as run-gate.sh's
+# function of the same name (deliberately identical body, not an independent
+# reimplementation): sums a metric family matched by ERE PATTERN in each of
+# two on-disk snapshots and returns final-base. Needed here (not just in
+# run-gate.sh) by get_final_metrics's events_drain_offset settle loop (5.9.8d,
+# №97), which diffs the on-disk baseline snapshot against a live poll taken
+# during the loop, before run-gate.sh ever runs.
+sum_metric_delta() {
+    local pattern="$1" file_base="$2" file_final="$3"
+    awk -F'} ' -v p="$pattern" '
+        FNR==NR { if ($0 ~ p) base+=$2+0; next }
+        { if ($0 ~ p) fin+=$2+0 }
+        END { printf "%.0f", fin-base }
+    ' "$file_base" "$file_final"
+}
+
 # emit_counting_canary N PATH — opens PATH for read exactly N times, back to
 # back, from a single python3 process. One process (not N bash forks/curl
 # calls) so wall-clock cost is dominated by the syscalls under test, not by
@@ -322,6 +338,139 @@ for _ in range(n):
     fd = os.open(path, os.O_RDONLY)
     os.close(fd)
 PYEOF
+}
+
+# 5.9.8f (№93, P1): общий settle-луп для run_counting_control и
+# run_ringbuf_overflow. Старое условие выхода — «сумма events+drops не
+# выросла между двумя последовательными срезами» — это РАВЕНСТВО, а не
+# производная, и на стенде с непрерывным фоном (idle-фон здесь ~500/с,
+# счётные строки collect-2.9.7) недостижимо в принципе: сумма растёт КАЖДУЮ
+# секунду, петля всегда докручивала все 30 срезов, а маркер печатал
+# quiesced_iterations=30 неотличимо от «настояще устоялось за 30 срезов» —
+# это и есть находка №93.
+#
+# Новое условие — производная: ТЕМП за этот срез (прирост, делённый на
+# реально измеренную длительность среза — она не равна 1с, см. prev_t ниже)
+# сравнивается с фоном плюс джиттер, а не с нулём.
+#   - для mode != null, если рядом уже лежит маркер mode=null ЭТОГО ЖЕ
+#     прогона (null всегда идёт первым, см. комментарий выше по коду) —
+#     фон берётся из него: sum/window_seconds этого маркера, то есть
+#     реально измеренный темп фона за минуту до этого вызова;
+#   - для mode == null (или когда null-маркер недоступен — процесс
+#     запущен не через run_counting_control, а отдельно) внешнего фона
+#     нет по определению: null И ЕСТЬ измерение фона. Вместо него —
+#     разброс последних ТРЁХ приростов этого же лупа (скользящее окно,
+#     не кумулятивное среднее с начала лупа — среднее «с начала»
+#     оставалось бы задранным всплеском генератора ещё долго ПОСЛЕ того,
+#     как реальный темп уже стал плоским, потому что первые несколько
+#     больших приростов навсегда тянут кумулятивное среднее вверх;
+#     проверено вручную на синтетическом ряде до правки — кумулятивная
+#     версия признавала лупа «устоявшимся» уже на первом срезе после
+#     всплеска, пока в среднем ещё сидели сами всплесковые числа).
+#     Устоявшимся признаётся возврат к СВОЕЙ недавней стабильной
+#     скорости (max−min трёх последних приростов <= джиттер), а не
+#     падение к нулю, которого на шумном стенде не бывает.
+#   Джиттер — 10% от опорного значения, не меньше 5 (та же форма допуска,
+#   что run-gate.sh уже применяет к канареечной серии, max(5, доля)).
+#
+# settle_reason (пишется в маркер вызывающей функцией, не этой):
+#   flattened — прирост за срез сошёлся к опорному значению +- джиттер;
+#   ceiling   — луп доработал MAX_ITERS срезов, не сойдясь (то самое
+#               "quiesced_iterations=30" без причины — находка №93);
+#   timeout   — /metrics не ответил три среза подряд подряд — харнесс не
+#               может судить о затухании вовсе, это отдельная причина от
+#               "не сошлось за отведённое время".
+#
+# Возвращает через globals, не echo: вызывающему нужен полный текст
+# последнего снятого /metrics (SETTLE_AFTER), а не только числа.
+counting_settle_loop() {
+    local mode="$1" max_iters="$2" min_wait_after="$3" t1="$4" null_marker="$5"
+
+    local bg_rate=""
+    if [ "$mode" != "null" ] && [ -f "$null_marker" ]; then
+        local bg_sum bg_window
+        bg_sum=$(awk -F= '$1=="sum"{print $2+0}' "$null_marker" 2>/dev/null)
+        bg_window=$(awk -F= '$1=="window_seconds"{print $2+0}' "$null_marker" 2>/dev/null)
+        if [ -n "${bg_sum:-}" ] && [ -n "${bg_window:-}" ] && awk -v w="${bg_window:-0}" 'BEGIN{exit !(w>0)}'; then
+            bg_rate=$(awk -v s="$bg_sum" -v w="$bg_window" 'BEGIN{printf "%.4f", s/w}')
+        fi
+    fi
+
+    # prev_t/now_t: срез снимается НЕ ровно раз в секунду — sleep 1 плюс
+    # время самого curl дают период 1.0…1.5с. Опорное значение bg_rate —
+    # темп В СЕКУНДУ (sum/window_seconds null-маркера), поэтому прирост за
+    # срез обязан делиться на реальную длительность среза, иначе сравнение
+    # идёт в разных единицах и систематически завышает левую часть: при
+    # фоне 500/с и периоде 1.2с прирост 600 против порога 550 (=r+10%) не
+    # сходится НИКОГДА, и луп докручивает до потолка с settle_reason=ceiling
+    # — то есть 5.9.8f печатал бы «не устоялось» на исправном стенде
+    # (ревизия волны 5.9.8).
+    local prev_sum=-1 cur_sum ev dr i miss=0 delta ref jitter have_ref spread
+    local prev_t=0 now_t elapsed rate
+    # Скользящее окно последних трёх приростов (d1 — самый старый из
+    # трёх, d3 — только что вычисленный), win_n — сколько слотов реально
+    # заполнено (0..3).
+    local d1=0 d2=0 d3=0 win_n=0
+    SETTLE_REASON="ceiling"
+    SETTLE_AFTER=""
+    SETTLE_I=0
+    for i in $(seq 1 "$max_iters"); do
+        SETTLE_AFTER=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+        if [ -z "$SETTLE_AFTER" ]; then
+            miss=$(( miss + 1 ))
+            if [ "$miss" -ge 3 ]; then
+                SETTLE_REASON="timeout"
+                SETTLE_I="$i"
+                return
+            fi
+            sleep 1
+            continue
+        fi
+        miss=0
+        ev=$(echo "$SETTLE_AFTER" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
+        dr=$(echo "$SETTLE_AFTER" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+        cur_sum=$(( ${ev:-0} + ${dr:-0} ))
+        now_t=$(date +%s)
+        if [ "$prev_sum" -ge 0 ] && [ "$(( now_t - t1 ))" -ge "${min_wait_after:-0}" ]; then
+            delta=$(( cur_sum - prev_sum ))
+            elapsed=$(( now_t - prev_t ))
+            [ "$elapsed" -lt 1 ] && elapsed=1
+            # Темп за этот срез, в событиях в секунду — та же единица, что
+            # у bg_rate и что у скользящего окна ниже.
+            rate=$(awk -v d="$delta" -v e="$elapsed" 'BEGIN{printf "%.4f", d/e}')
+            have_ref=0
+            if [ -n "$bg_rate" ]; then
+                # Внешний фон (idle/drop/ringbuf_overflow с null-маркером
+                # под рукой) сравнивается напрямую, без окна — он уже
+                # измерен отдельным прогоном, самоопорного смещения нет.
+                ref="$bg_rate"
+                have_ref=1
+            fi
+            d1=$d2; d2=$d3; d3=$rate
+            [ "$win_n" -lt 3 ] && win_n=$((win_n + 1))
+            if [ "$have_ref" -eq 0 ] && [ "$win_n" -eq 3 ]; then
+                ref=$(awk -v a="$d1" -v b="$d2" -v c="$d3" 'BEGIN{printf "%.4f", (a+b+c)/3}')
+                spread=$(awk -v a="$d1" -v b="$d2" -v c="$d3" 'BEGIN{mx=a; if(b>mx)mx=b; if(c>mx)mx=c; mn=a; if(b<mn)mn=b; if(c<mn)mn=c; printf "%.4f", mx-mn}')
+                jitter=$(awk -v r="$ref" 'BEGIN{j=r*0.10; if(j<5) j=5; printf "%.4f", j}')
+                if awk -v s="$spread" -v j="$jitter" 'BEGIN{exit !(s<=j)}'; then
+                    SETTLE_REASON="flattened"
+                    SETTLE_I="$i"
+                    return
+                fi
+            elif [ "$have_ref" -eq 1 ]; then
+                jitter=$(awk -v r="$ref" 'BEGIN{j=r*0.10; if(j<5) j=5; printf "%.4f", j}')
+                if awk -v d="$rate" -v r="$ref" -v j="$jitter" 'BEGIN{exit !(d <= r+j)}'; then
+                    SETTLE_REASON="flattened"
+                    SETTLE_I="$i"
+                    return
+                fi
+            fi
+        fi
+        prev_sum=$cur_sum
+        prev_t=$now_t
+        sleep 1
+    done
+    SETTLE_I="$i"
 }
 
 # 5.9.6c (P0, "ни один вызов не теряется"): positive control on counting.
@@ -372,11 +521,18 @@ run_counting_control() {
         return
     fi
 
-    local before events_before drops_before ringbuf_full_before
+    local before events_before drops_before ringbuf_full_before canary_events_before canary_dropped_before
     before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
     events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
     drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
     ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
+    # 5.9.8b (№91): canary-only series, background-free by construction —
+    # see CountingCanaryTotal (internal/exporter/prometheus.go). Read
+    # alongside the general series above (kept for comparison/diagnostics),
+    # not instead of it — the general series remains useful context even
+    # after run-gate.sh's criterion 20 stops judging by it.
+    canary_events_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
+    canary_dropped_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
     local window_start
     window_start=$(date +%s)
 
@@ -403,32 +559,31 @@ run_counting_control() {
     # queue → correlator) асинхронный, и снятие "после" сразу за концом
     # генератора недосчитало бы события, ещё лежащие в очереди — то же
     # искажение границы, которое 5.9.4c нашла между baseline и attack-окном.
-    # Опрашиваем, пока events+drops не перестанут расти два среза подряд,
-    # до 30с.
-    local prev_sum=-1 cur_sum after i=0 ev dr
-    for i in $(seq 1 30); do
-        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-        ev=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-        dr=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
-        cur_sum=$(( ${ev:-0} + ${dr:-0} ))
-        if [ "$cur_sum" -eq "$prev_sum" ]; then
-            break
-        fi
-        prev_sum=$cur_sum
-        sleep 1
-    done
+    # 5.9.8f (№93): условие выхода — производная (counting_settle_loop),
+    # не равенство; null-маркер этого же прогона (если mode!=null и он уже
+    # написан — null всегда идёт первым) даёт опорный фон.
+    local null_marker="$RESULTS_DIR/counting-control-null-$TIMESTAMP.txt"
+    counting_settle_loop "$mode" 30 0 "$t1" "$null_marker"
+    local after="$SETTLE_AFTER" i="$SETTLE_I" settle_reason="$SETTLE_REASON"
 
-    local events_after drops_after ringbuf_full_after
+    local events_after drops_after ringbuf_full_after canary_events_after canary_dropped_after
     events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
     drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
     ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
+    canary_events_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
+    canary_dropped_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
 
     local events_delta drops_delta ringbuf_full_delta sum diff window_seconds
+    local canary_events_delta canary_dropped_delta canary_sum canary_diff
     events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
     drops_delta=$(( ${drops_after:-0} - ${drops_before:-0} ))
     ringbuf_full_delta=$(( ${ringbuf_full_after:-0} - ${ringbuf_full_before:-0} ))
     sum=$(( events_delta + drops_delta ))
     diff=$(( sum - n ))
+    canary_events_delta=$(( ${canary_events_after:-0} - ${canary_events_before:-0} ))
+    canary_dropped_delta=$(( ${canary_dropped_after:-0} - ${canary_dropped_before:-0} ))
+    canary_sum=$(( canary_events_delta + canary_dropped_delta ))
+    canary_diff=$(( canary_sum - n ))
     # Длина окна «до»→«после» целиком, включая устаканивание: именно столько
     # времени фон (mode=null) или фон+канарейка (idle/drop) копились в обе
     # метрики. run-gate.sh делит null's sum на это же поле, чтобы получить
@@ -444,12 +599,20 @@ run_counting_control() {
         echo "ringbuf_full_delta=$ringbuf_full_delta"
         echo "sum=$sum"
         echo "diff=$diff"
+        echo "canary_events_delta=$canary_events_delta"
+        echo "canary_dropped_delta=$canary_dropped_delta"
+        echo "canary_sum=$canary_sum"
+        echo "canary_diff=$canary_diff"
         echo "quiesced_iterations=$i"
+        echo "settle_reason=$settle_reason"
         echo "generator_seconds=$((t1 - t0))"
         echo "window_seconds=$window_seconds"
     } > "$marker"
 
-    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess,все причины)=$drops_delta Δringbuf_full(fileaccess)=$ringbuf_full_delta сумма=$sum сумма-N=$diff (устоялось за ${i} срезов, окно ${window_seconds}с)"
+    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess,все причины)=$drops_delta Δringbuf_full(fileaccess)=$ringbuf_full_delta сумма=$sum сумма-N=$diff канарейка:Δevents=$canary_events_delta Δdropped=$canary_dropped_delta сумма=$canary_sum сумма-N=$canary_diff (причина остановки: ${settle_reason}, за ${i} срезов, окно ${window_seconds}с)"
+    if [ "$settle_reason" = "ceiling" ]; then
+        warn "mode=$mode: settle-луп не сошёлся за 30 срезов (5.9.8f, №93) — снимок «после» мог уйти раньше конца асинхронного хвоста"
+    fi
     if [ "$mode" = "drop" ] && [ "${ringbuf_full_delta:-0}" -le 0 ]; then
         warn "mode=drop: ringbuf_full не вырос — N=$n не переполнил кольцо на этом стенде; критерий 5.9.6c для этого режима останется без второй половины (см. открытые вопросы, COUNTING_CONTROL_DROP_N не откалиброван)"
     fi
@@ -488,7 +651,13 @@ run_ringbuf_overflow() {
     local n="${RINGBUF_OVERFLOW_N:-300000}"
     local service="${RINGBUF_OVERFLOW_SERVICE:-ebpf-guard-test.service}"
     local marker="$RESULTS_DIR/ringbuf-overflow-$TIMESTAMP.txt"
-    local canary_path="/tmp/ebpf-guard-ringbuf-overflow-canary-$TIMESTAMP"
+    # 5.9.8c (№92): путь обязан начинаться с CountingCanaryPathPrefix
+    # (internal/exporter/prometheus.go) — иначе ebpf_guard_counting_canary_total
+    # не увидит эти open()'ы вовсе, и counting_control_residual (run-gate.sh)
+    # молча свалится в устаревший (не-канареечный) путь на каждом прогоне.
+    # Суффикс "-ringbuf-overflow" — тот же приём именования, что "-$mode" у
+    # run_counting_control, различает серии разных шагов по одному пути.
+    local canary_path="/tmp/ebpf-guard-counting-canary-$TIMESTAMP-ringbuf-overflow"
     local method_a_blocked="ComputeRingBufSize клэмпит SizeBytes в [4МБ,32МБ] (internal/bpf/ringbuf_size.go) — узкая карта из постановки недостижима без правки кода, не делалась в 5.9.7b"
 
     log "==========================================="
@@ -532,17 +701,25 @@ run_ringbuf_overflow() {
     fi
 
     local before events_before drops_before ringbuf_full_before bpf_lost_before
+    local canary_events_before canary_dropped_before
     before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
     events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
     drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
     ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
     bpf_lost_before=$(echo "$before" | sum_metric 'ebpf_guard_bpf_lost_events_total\{collector="fileaccess"\}')
+    # 5.9.8c (№92): та же канареечная серия, что run_counting_control читает
+    # для критерия 20 — counting_control_residual (run-gate.sh) сравнивает их
+    # тем же кодом, а не переоткрытой копией формулы.
+    canary_events_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
+    canary_dropped_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
     if [ -z "$before" ]; then
         warn "снимок /metrics до заморозки пуст — run_ringbuf_overflow пропущен (агент недоступен ДО SIGSTOP, замораживать нечего)"
         { echo "skipped=1"; echo "skip_reason=пустой снимок /metrics до SIGSTOP"; } > "$marker"
         echo ""
         return
     fi
+    local window_start
+    window_start=$(date +%s)
 
     : > "$canary_path" || true
     log "SIGSTOP pid=$pid"
@@ -575,38 +752,46 @@ run_ringbuf_overflow() {
     log "SIGCONT pid=$pid"
     kill -CONT "$pid" 2>/dev/null || true
 
-    # Settle-луп той же формы, что run_counting_control, ПЛЮС минимум 12с
-    # после SIGCONT — bpf_lost_events_total обновляется watchdog'ом раз в
-    # 10с (internal/watchdog/watchdog.go runDropTracking), не на скрейпе, и
-    # без этого хвоста критерий 5.9.7b сравнивал бы его со значением,
-    # которое ещё не успело догнать events_dropped_total{reason=ringbuf_full}
-    # (тот обновляется на скрейпе, prescrape hook, beb16a0).
-    local prev_sum=-1 cur_sum after i=0 ev dr
-    for i in $(seq 1 30); do
-        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-        ev=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-        dr=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
-        cur_sum=$(( ${ev:-0} + ${dr:-0} ))
-        if [ "$cur_sum" -eq "$prev_sum" ] && [ "$(( $(date +%s) - t1 ))" -ge 12 ]; then
-            break
-        fi
-        prev_sum=$cur_sum
-        sleep 1
-    done
+    # Settle-луп той же формы, что run_counting_control (counting_settle_loop,
+    # 5.9.8f/№93 — производная, не равенство), ПЛЮС минимум 12с после
+    # SIGCONT — bpf_lost_events_total обновляется watchdog'ом раз в 10с
+    # (internal/watchdog/watchdog.go runDropTracking), не на скрейпе, и без
+    # этого хвоста критерий 5.9.7b сравнивал бы его со значением, которое
+    # ещё не успело догнать events_dropped_total{reason=ringbuf_full} (тот
+    # обновляется на скрейпе, prescrape hook, beb16a0). mode="ringbuf_overflow"
+    # (не "null") — читает фон из null-маркера ЭТОГО прогона, если он уже
+    # написан (шаг может исполняться и отдельно, до run_counting_control —
+    # тогда фон берётся из скользящего среднего этого же лупа, см.
+    # counting_settle_loop).
+    local null_marker="$RESULTS_DIR/counting-control-null-$TIMESTAMP.txt"
+    counting_settle_loop "ringbuf_overflow" 30 12 "$t1" "$null_marker"
+    local after="$SETTLE_AFTER" i="$SETTLE_I" settle_reason="$SETTLE_REASON"
 
     local events_after drops_after ringbuf_full_after bpf_lost_after
+    local canary_events_after canary_dropped_after
     events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
     drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
     ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
     bpf_lost_after=$(echo "$after" | sum_metric 'ebpf_guard_bpf_lost_events_total\{collector="fileaccess"\}')
+    canary_events_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
+    canary_dropped_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
 
-    local events_delta drops_delta ringbuf_full_delta bpf_lost_delta sum diff
+    local events_delta drops_delta ringbuf_full_delta bpf_lost_delta sum diff window_seconds
+    local canary_events_delta canary_dropped_delta canary_sum canary_diff
     events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
     drops_delta=$(( ${drops_after:-0} - ${drops_before:-0} ))
     ringbuf_full_delta=$(( ${ringbuf_full_after:-0} - ${ringbuf_full_before:-0} ))
     bpf_lost_delta=$(( ${bpf_lost_after:-0} - ${bpf_lost_before:-0} ))
     sum=$(( events_delta + drops_delta ))
     diff=$(( sum - n ))
+    canary_events_delta=$(( ${canary_events_after:-0} - ${canary_events_before:-0} ))
+    canary_dropped_delta=$(( ${canary_dropped_after:-0} - ${canary_dropped_before:-0} ))
+    canary_sum=$(( canary_events_delta + canary_dropped_delta ))
+    canary_diff=$(( canary_sum - n ))
+    # 5.9.8c (№92): тот же смысл, что window_seconds у run_counting_control —
+    # длина всего окна «до»→«после», которую counting_control_residual делит
+    # на темп null-фона в запасном (не-канареечном) пути.
+    window_seconds=$(( $(date +%s) - window_start ))
 
     {
         echo "n=$n"
@@ -617,13 +802,22 @@ run_ringbuf_overflow() {
         echo "bpf_lost_delta=$bpf_lost_delta"
         echo "sum=$sum"
         echo "diff=$diff"
+        echo "canary_events_delta=$canary_events_delta"
+        echo "canary_dropped_delta=$canary_dropped_delta"
+        echo "canary_sum=$canary_sum"
+        echo "canary_diff=$canary_diff"
+        echo "window_seconds=$window_seconds"
         echo "quiesced_iterations=$i"
+        echo "settle_reason=$settle_reason"
         echo "generator_seconds=$((t1 - t0))"
         echo "method_a_blocked_reason=$method_a_blocked"
         [ -n "$idle_ringbuf_full" ] && echo "idle_hour_ringbuf_full=$idle_ringbuf_full"
     } > "$marker"
 
-    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess)=$drops_delta сумма-N=$diff Δringbuf_full=$ringbuf_full_delta Δbpf_lost_events_total=$bpf_lost_delta (устоялось за ${i} срезов)"
+    log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess)=$drops_delta сумма-N=$diff канарейка:Δevents=$canary_events_delta Δdropped=$canary_dropped_delta сумма=$canary_sum сумма-N=$canary_diff Δringbuf_full=$ringbuf_full_delta Δbpf_lost_events_total=$bpf_lost_delta (причина остановки: ${settle_reason}, за ${i} срезов, окно ${window_seconds}с)"
+    if [ "$settle_reason" = "ceiling" ]; then
+        warn "run_ringbuf_overflow: settle-луп не сошёлся за 30 срезов (5.9.8f, №93) — снимок «после» мог уйти раньше конца асинхронного хвоста"
+    fi
     if [ "${ringbuf_full_delta:-0}" -le 0 ]; then
         warn "ringbuf_full не вырос под SIGSTOP — N=$n не переполнил кольцо на этом стенде даже с замороженным читателем; критерий 5.9.7b без входа (см. открытые вопросы)"
     elif [ "${ringbuf_full_delta:-0}" -ne "${bpf_lost_delta:-0}" ]; then
@@ -807,6 +1001,66 @@ run_ssh_keys_positive_control() {
     echo ""
 }
 
+# 5.9.8g (находка №96, риск №3 постановки): позитивный контроль сужения
+# webshell_script_write_via_web_process (rules/webshell-detection.yaml) до
+# comm веб-воркера. №2.9.7 поймал живьём critical от comm=bash, писавшего
+# .sh — правило матчило любой comm, хотя его собственное сообщение обещает
+# "apache2, nginx, or httpd worker". Условие сужено (proc.comm in
+# [apache2, nginx, httpd]); без этого шага сужение неотличимо от ослепления
+# (тот же приём, что и №57/5.9.7e — TestWave598g_WebshellScriptWrite
+# проверяет то же офлайн, здесь — живьём, на настоящем ядре).
+#
+# На этом стенде нет apache2/nginx/httpd (Juice Shop — node-приложение),
+# поэтому comm подделывается тем же приёмом, что уже применён к SSH-контролю
+# выше: символическая ссылка с именем "apache2" на существующий бинарь
+# (tee) — comm ядро берёт из последнего компонента ПУТИ, переданного
+# execve(), а не из инода/цели ссылки, так что запуск через $fake_bin даёт
+# proc.comm="apache2" без модификации системных пакетов.
+run_webshell_script_write_positive_control() {
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.8g (риск №3): запись .php веб-воркером (comm=apache2)"
+    log "==========================================="
+
+    local tee_bin
+    tee_bin="$(command -v tee 2>/dev/null)"
+    if [ -z "$tee_bin" ]; then
+        warn "tee не найден — позитивный контроль 5.9.8g пропущен, сужение webshell_script_write_via_web_process остаётся недоказанным (риск №3)"
+        echo ""
+        return
+    fi
+
+    local fake_dir fake_bin target
+    fake_dir="$(mktemp -d)"
+    fake_bin="$fake_dir/apache2"
+    target="$fake_dir/control-$TIMESTAMP.php"
+    if ! ln -s "$tee_bin" "$fake_bin" 2>/dev/null; then
+        warn "не удалось создать $fake_bin — позитивный контроль 5.9.8g пропущен"
+        rm -rf "$fake_dir"
+        echo ""
+        return
+    fi
+
+    mark_attack_window
+    echo "<?php /* ebpf-guard 5.9.8g positive control $TIMESTAMP */ ?>" | "$fake_bin" "$target" >/dev/null 2>&1 \
+        && log "запись $target выполнена comm=apache2 — ожидается срабатывание webshell_script_write_via_web_process" \
+        || warn "запись через $fake_bin не удалась — позитивный контроль 5.9.8g не исполнен"
+    mark_attack_window
+
+    rm -f "$target"
+    rm -rf "$fake_dir"
+
+    if command -v jq &> /dev/null; then
+        wc_entry=$(jq -n --arg cat "webshell_positive_control" --arg comm "apache2" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$wc_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$wc_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
 run_setuid_attack() {
     log "==========================================="
     log "ЗАПУСК SETUID АТАКИ (5.9.2b, sigma_setuid_syscall)"
@@ -961,6 +1215,250 @@ run_dns_long_label_attack() {
     # постановка: это защита от будущего `comm not_in`-исключения (находка №56),
     # она манифеста не требует.
 
+    echo ""
+}
+
+# 5.9.8a (№94, P0, запрет №6): the two controls the fix to dns_socket_map is
+# not accepted without, on the same run. Both are standalone, outside the
+# idle/attack measurement window — invoked via `--dns-fd-reuse-controls`,
+# same convention as `--ringbuf-overflow` (5.9.7b): a step whose own
+# side-effects must not land inside the window another criterion measures.
+#
+# NEGATIVE CONTROL (№94's actual failure mode): open a UDP socket,
+# connect() it to port 53, close() it, then immediately open a TCP socket —
+# CPython's socket module allocates the lowest free fd, so closing the UDP
+# socket first makes fd reuse by the very next socket() call highly likely
+# on the same thread. Writing TLS-ClientHello-shaped bytes to that reused fd
+# number must produce zero DNS events: before the 5.9.8a key fix, a
+# dns_socket_map entry surviving past close() (or matched via stale
+# thread-scoped state) would have let this write() be misread as a DNS
+# query, which is exactly how a real ClientHello reached the long-label
+# rules on №2.9.7.
+run_dns_fd_reuse_negative_control() {
+    local marker="$RESULTS_DIR/dns-negative-control-$TIMESTAMP.txt"
+
+    log "==========================================="
+    log "DNS: НЕГАТИВНЫЙ КОНТРОЛЬ ПЕРЕИСПОЛЬЗОВАНИЯ FD (5.9.8a, №94)"
+    log "==========================================="
+
+    if ! command -v python3 &> /dev/null; then
+        warn "python3 не найден — негативный контроль DNS (5.9.8a) пропущен"
+        echo "skipped=1" > "$marker"
+        echo ""
+        return
+    fi
+
+    local before after events_before events_after
+    before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+
+    local py_out
+    py_out=$(python3 - <<'PYEOF' 2>&1
+import os, socket, threading
+
+# Negative control: reproduce находка №94 exactly, which requires the
+# close() to happen on a DIFFERENT thread than the connect().
+#
+# Ревизия волны 5.9.8: первая редакция этого контроля делала connect(),
+# close() и write() на одном потоке — и была тавтологией. Под СТАРЫМ
+# (потоковым) ключом close() с того же потока попадал ровно в ту запись,
+# что вставил connect(), удалял её, и переиспользованный fd не совпадал ни
+# с чем: контроль давал 0 DNS-событий и ДО правки, и ПОСЛЕ, то есть не мог
+# отличить починку от ослепления — ровно то, что запрет №6 постановки
+# требует исключить.
+#
+# Настоящий сценарий №94: connect() на потоке A (запись ключа), close() на
+# потоке B (под старым ключом НЕ удаляет запись потока A — это и есть
+# первая половина дефекта), затем поток A получает тот же номер fd под
+# TCP-сокет и пишет в него ClientHello. Под старым ключом lookup потока A
+# попадает в протухшую запись → байты TLS уходят в DNS-разбор. Под новым
+# (tgid) ключом close() потока B удаляет запись процесса, и попадать
+# некуда.
+#
+# Реальная сетевая достижимость не нужна: write() на неподключённом
+# TCP-сокете всё равно входит в ядро (и в sys_enter_write), хотя и падает
+# с ENOTCONN — трейспойнт срабатывает на входе в вызов, независимо от
+# кода возврата.
+u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+u.connect(("127.0.0.1", 53))
+fd = u.fileno()
+
+# close() из ЧУЖОГО потока — половина дефекта №94, которую старый ключ не
+# видел. os.close(fd) напрямую, а не u.close(): нужен именно системный
+# вызов close() с другого tid, без участия объекта сокета главного потока.
+closer_err = []
+def closer():
+    try:
+        os.close(fd)
+    except OSError as e:
+        closer_err.append(str(e))
+th = threading.Thread(target=closer)
+th.start()
+th.join()
+u.detach()  # объект больше не владеет уже закрытым дескриптором
+
+t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+reused = (t.fileno() == fd)
+
+# 60 bytes shaped like a TLS record + ClientHello handshake header (content
+# type 0x16, version 0x0301, length, handshake type 0x01) followed by
+# arbitrary payload — enough to clear the dns.bpf.c len>=12 floor and to
+# fail validateDNSHeader's structural checks if it ever reaches userspace.
+clienthello = bytes.fromhex(
+    "160301003b0100003703035b3fc0ff112233445566778899aabbccddeeff"
+    "00112233445566778899aabbccddeeff0011223344556677889900130100"
+)
+try:
+    os.write(t.fileno(), clienthello)
+except OSError:
+    pass
+t.close()
+
+print(f"reused_fd={int(reused)}")
+print(f"target_fd={fd}")
+print(f"cross_thread_close={int(not closer_err)}")
+PYEOF
+    )
+    local py_status=$?
+
+    # Устояться перед снимком "после" — тот же приём, что run_counting_control.
+    local prev=-1 cur i=0
+    for i in $(seq 1 10); do
+        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+        if [ "$cur" = "$prev" ]; then break; fi
+        prev=$cur
+        sleep 1
+    done
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+
+    local events_delta
+    events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
+
+    {
+        echo "$py_out"
+        echo "python_status=$py_status"
+        echo "events_dns_delta=$events_delta"
+    } > "$marker"
+
+    log "негативный контроль: $py_out (python exit=$py_status), Δevents_total{type=dns}=$events_delta"
+    if [ "$events_delta" -gt 0 ]; then
+        warn "негативный контроль DNS: events_total{type=dns} вырос на $events_delta — dns_socket_map всё ещё принимает переиспользованный fd за DNS (см. run-gate.sh, критерий 5.9.8a)"
+    fi
+    echo ""
+}
+
+# POSITIVE CONTROL: the OTHER failure mode the same key change fixes — a
+# write()/read() from a thread that did NOT call connect() on that fd. A
+# thread pool handing an already-connected DNS socket to a worker thread is
+# exactly how real multi-threaded resolvers behave, and is invisible to a
+# pid_tgid-keyed (thread-scoped) dns_socket_map even though the fd is
+# legitimately a live DNS query. main thread connect()s N UDP sockets;
+# N worker threads each write()/read() one of them — same tgid throughout,
+# different tid than the one that inserted the dns_socket_map entry.
+run_dns_cross_thread_positive_control() {
+    local n="${DNS_CROSS_THREAD_N:-8}"
+    local marker="$RESULTS_DIR/dns-positive-control-$TIMESTAMP.txt"
+
+    log "==========================================="
+    log "DNS: ПОЗИТИВНЫЙ КОНТРОЛЬ МЕЖПОТОЧНОГО FD (5.9.8a, №94, N=$n)"
+    log "==========================================="
+
+    if ! command -v python3 &> /dev/null; then
+        warn "python3 не найден — позитивный контроль DNS (5.9.8a) пропущен"
+        echo "skipped=1" > "$marker"
+        echo ""
+        return
+    fi
+
+    local before after events_before events_after
+    before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+
+    local resolver
+    resolver=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+    resolver="${resolver:-127.0.0.53}"
+
+    local py_out
+    py_out=$(python3 - "$n" "$resolver" <<'PYEOF' 2>&1
+import random, socket, struct, sys, threading
+
+n = int(sys.argv[1])
+resolver = sys.argv[2]
+
+def build_query(name):
+    qid = random.randint(0, 0xffff)
+    header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+    question = b""
+    for label in name.split("."):
+        question += bytes([len(label)]) + label.encode()
+    question += b"\x00" + struct.pack(">HH", 1, 1)  # QTYPE=A, QCLASS=IN
+    return header + question
+
+# Main thread: connect() every socket. This is the thread that populates
+# dns_socket_map under both the old and new key.
+socks = []
+for i in range(n):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(2)
+    try:
+        s.connect((resolver, 53))
+    except OSError:
+        pass
+    socks.append(s)
+
+# Worker threads: write()/read() on a socket a DIFFERENT thread connected —
+# the exact cross-thread pattern a pid_tgid-scoped map cannot recognize.
+def worker(sock, name):
+    q = build_query(name)
+    try:
+        sock.send(q)
+    except OSError:
+        pass
+    try:
+        sock.recv(512)
+    except OSError:
+        pass
+
+threads = []
+for i, s in enumerate(socks):
+    th = threading.Thread(target=worker, args=(s, f"ebpfguard-598a-{i}.dns-tunnel-canary.invalid"))
+    threads.append(th)
+    th.start()
+for th in threads:
+    th.join()
+for s in socks:
+    s.close()
+
+print(f"n={n}")
+PYEOF
+    )
+    local py_status=$?
+
+    local prev=-1 cur i=0
+    for i in $(seq 1 15); do
+        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+        if [ "$cur" = "$prev" ]; then break; fi
+        prev=$cur
+        sleep 1
+    done
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+
+    local events_delta
+    events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
+
+    {
+        echo "$py_out"
+        echo "python_status=$py_status"
+        echo "resolver=$resolver"
+        echo "events_dns_delta=$events_delta"
+    } > "$marker"
+
+    log "позитивный контроль: N=$n резолвер=$resolver Δevents_total{type=dns}=$events_delta (python exit=$py_status)"
+    if [ "$events_delta" -lt "$n" ]; then
+        warn "позитивный контроль DNS: Δevents_total{type=dns}=$events_delta < N=$n — межпоточный резолв недосчитан (см. run-gate.sh, критерий 5.9.8a)"
+    fi
     echo ""
 }
 
@@ -1395,6 +1893,53 @@ get_final_metrics() {
         fi
         echo "drain_offset_before_final=$drain_offset" > "$RESULTS_DIR/final-drain-offset-$TIMESTAMP.txt"
     fi
+
+    # 5.9.8d (№97, P1): тот же приём, что 5.9.4c выше, но для событийного
+    # тождества критерия 19 (run-gate.sh), а не для алертного offset. Без
+    # него финальный срез наследует хвост в очереди коллектор→router→bulk
+    # queue как невязку, которая выглядит как потерянное событие, хотя это
+    # просто событие, ещё не дотёкшее до events_total на момент снятия среза
+    # — тот же класс перекоса, что 5.9.4c закрыла для алертов, применённый ко
+    # второму независимому тождеству. Условие выхода — «остаток перестал
+    # убывать по модулю», а не «стал нулём» (секция 19 держит допуск
+    # 500/0.5%, не 0) — на стенде с непрерывным фоном точный ноль
+    # недостижим. Таймаут 30с (15 срезов × 2с), тот же порядок величины, что
+    # у алертного drain_offset. baseline-metrics-$TIMESTAMP.txt уже на диске
+    # (get_baseline_metrics выше) — берётся как есть, без повторного снятия.
+    local baseline_metrics_file="$RESULTS_DIR/baseline-metrics-$TIMESTAMP.txt"
+    local events_drain_offset="n/a"
+    if [ -s "$baseline_metrics_file" ]; then
+        local cur_metrics_file="$RESULTS_DIR/.events-drain-probe-$TIMESTAMP.txt"
+        local prev_abs=-1 cur_abs c19_c c19_type em_d ev_d r2r_d r2q_d mf_d res
+        for _ in $(seq 1 15); do
+            curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" > "$cur_metrics_file" 2>/dev/null
+            cur_abs=0
+            for c19_c in syscall network fileaccess; do
+                case "$c19_c" in
+                    fileaccess) c19_type="file" ;;
+                    *) c19_type="$c19_c" ;;
+                esac
+                em_d=$(sum_metric_delta "ebpf_guard_events_emitted_kernel_total\\{collector=\"$c19_c\"\\}" "$baseline_metrics_file" "$cur_metrics_file")
+                ev_d=$(sum_metric_delta "^ebpf_guard_events_total\\{.*type=\"$c19_type\"" "$baseline_metrics_file" "$cur_metrics_file")
+                r2r_d=$(sum_metric_delta "collector=\"$c19_c\".*reason=\"ringbuf_to_router\"" "$baseline_metrics_file" "$cur_metrics_file")
+                r2q_d=$(sum_metric_delta "collector=\"$c19_c\".*reason=\"router_to_queue\"" "$baseline_metrics_file" "$cur_metrics_file")
+                mf_d=$(sum_metric_delta "ebpf_guard_events_malformed_total\\{collector=\"$c19_c\"\\}" "$baseline_metrics_file" "$cur_metrics_file")
+                res=$(awk -v e="${em_d:-0}" -v a="${ev_d:-0}" -v b="${r2r_d:-0}" -v d="${r2q_d:-0}" -v m="${mf_d:-0}" 'BEGIN{printf "%.0f", e-(a+b+d+m)}')
+                cur_abs=$(awk -v s="$cur_abs" -v r="$res" 'BEGIN{r=(r<0)?-r:r; printf "%.0f", s+r}')
+            done
+            events_drain_offset=$cur_abs
+            if [ "$prev_abs" -ge 0 ] && [ "$cur_abs" -ge "$prev_abs" ]; then
+                break
+            fi
+            prev_abs=$cur_abs
+            sleep 2
+        done
+        rm -f "$cur_metrics_file"
+        log "5.9.8d: суммарный |остаток| тождества секции 19 по syscall/network/fileaccess перед final = $events_drain_offset (перестал убывать либо истёк таймаут 30с)"
+    else
+        warn "5.9.8d: baseline-metrics-$TIMESTAMP.txt отсутствует или пуст — events_drain_offset не измерен"
+    fi
+    echo "events_drain_offset=$events_drain_offset" >> "$RESULTS_DIR/final-drain-offset-$TIMESTAMP.txt"
 
     # 5.9.4c: порядок снимков — сначала стор и состояние (/api/v1/alerts,
     # /health, /api/v1/status, /debug/state, /api/v1/incidents), /metrics —
@@ -1937,6 +2482,7 @@ interactive_mode() {
                 run_ldap_csrf_attacks
                 run_chmod_attack
                 run_ssh_keys_positive_control
+                run_webshell_script_write_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack
@@ -1967,6 +2513,7 @@ interactive_mode() {
             6)
                 run_chmod_attack
                 run_ssh_keys_positive_control
+                run_webshell_script_write_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack
@@ -2024,6 +2571,7 @@ full_run() {
     run_ldap_csrf_attacks
     run_chmod_attack
     run_ssh_keys_positive_control
+    run_webshell_script_write_positive_control
     run_log_tamper_attack
     run_setuid_attack
     run_bpf_attack
@@ -2057,12 +2605,39 @@ main() {
         # окна, не между get_baseline_metrics и get_final_metrics.
         check_services || exit 1
         run_ringbuf_overflow
+    elif [ "$1" = "--dns-fd-reuse-controls" ]; then
+        # 5.9.8a (№94, запрет №3/№6): оба контроля запрета №6 — своим шагом,
+        # ДО окна замера (preflight, как реплей 5.9.7c и run_ringbuf_overflow
+        # 5.9.7b), а не встроены в run_dns_long_label_attack внутри
+        # full_run() — их собственные DNS-события/decode-errors не должны
+        # засчитываться в idle-час или attack-окно, которые мерят другие
+        # критерии.
+        check_services || exit 1
+        run_dns_fd_reuse_negative_control
+        run_dns_cross_thread_positive_control
+    elif [ "$1" = "--counting-control" ]; then
+        # 5.9.8b/5.9.8c: три режима контроля счётности своим шагом, вне
+        # full_run(). Нужен предпрогону: канареечная серия — второй P0 волны
+        # (после DNS), и без этого шага она впервые оживает только на минуте
+        # ~95 полного замера, внутри окна атак.
+        #
+        # Маркеры пишутся со СВОИМ TIMESTAMP, а секция 20 гейта ищет
+        # counting-control-<mode>-$TIMESTAMP.txt по таймстампу основного
+        # прогона — то есть эти маркеры в вердикт замера не попадают и
+        # запрет №3 не нарушают. Вердикт остаётся за гейтом; здесь только
+        # получение величин.
+        check_services || exit 1
+        run_counting_control null 0
+        run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
+        run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
     elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
         echo "Использование: $0 [опции]"
         echo ""
         echo "Опции:"
-        echo "  -i, --interactive     Интерактивный режим с меню"
-        echo "  --ringbuf-overflow    Только 5.9.7b: переполнение кольца под SIGSTOP, вне окна замера"
+        echo "  -i, --interactive          Интерактивный режим с меню"
+        echo "  --ringbuf-overflow         Только 5.9.7b: переполнение кольца под SIGSTOP, вне окна замера"
+        echo "  --dns-fd-reuse-controls    Только 5.9.8a: негативный+позитивный контроль dns_socket_map, вне окна замера"
+        echo "  --counting-control         Только 5.9.8b/c: три режима контроля счётности (null/idle/drop), вне окна замера"
         echo "  -h, --help            Показать эту справку"
         echo ""
         echo "Без опций: запуск всех атак последовательно"

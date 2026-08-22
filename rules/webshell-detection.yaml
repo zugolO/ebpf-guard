@@ -62,11 +62,29 @@ rules:
     name: "Script file written by web server worker process"
     description: "apache2, nginx, or httpd worker wrote a script file — web shell dropped via file upload RCE."
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - ".*\\.(php|php5|php7|phtml|shtml|cgi|pl|py|rb|sh|jsp|jspx|asp|aspx)$"
+    # 5.9.8g (находка №96): до этой правки условие проверяло только
+    # расширение файла и матчило ЛЮБОЙ comm — сообщение правила обещало
+    # "apache2, nginx, or httpd worker", а условие этого не проверяло.
+    # №2.9.7 поймал это на живом стенде: comm=bash, писавший .sh-скрипт вне
+    # какого-либо веб-процесса, дал critical. condition_group сужает
+    # срабатывание до comm веб-воркера — тем же приёмом, что 5.9.7e
+    # (см. rootkit-detection.yaml), и с тем же требованием риска №3 (запрет
+    # №6 постановки): сужение без живого позитивного контроля на том же
+    # прогоне не принимается (run_webshell_script_write_positive_control,
+    # run-all-attacks.sh).
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values:
+            - "apache2"
+            - "nginx"
+            - "httpd"
+        - field: filename
+          op: regex
+          values:
+            - ".*\\.(php|php5|php7|phtml|shtml|cgi|pl|py|rb|sh|jsp|jspx|asp|aspx)$"
     severity: critical
     action: alert
     tags: [mitre:T1505.003, mitre:T1190, webshell, file-upload]

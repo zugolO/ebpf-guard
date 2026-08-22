@@ -2,6 +2,7 @@
 package exporter
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,15 @@ func init() {
 	// Register the process-wide string interner as a Prometheus collector so
 	// ebpf_guard_interner_hits_total, _misses_total, and _size are scraped.
 	prometheus.MustRegister(util.DefaultInterner)
+
+	// Materialise both counting-canary stages at zero from the first scrape
+	// (same reasoning as dns_decode_errors_total in internal/collector/dns.go,
+	// 5.9.5c): without this, a clean mode=null run — where the canary series
+	// is expected to stay at exactly 0 all along — is indistinguishable in
+	// /metrics from "this binary predates 5.9.8b", which is exactly the
+	// ambiguity a criterion checking for "canary series = 0" cannot resolve.
+	CountingCanaryTotal.WithLabelValues("events")
+	CountingCanaryTotal.WithLabelValues("dropped")
 }
 
 // Global cardinality limiters for high-cardinality metrics.
@@ -265,7 +275,54 @@ var (
 		},
 		[]string{"map_name"},
 	)
+
+	// CountingCanaryTotal counts fileaccess events whose path matches the
+	// counting-control canary prefix (CountingCanaryPathPrefix), by pipeline
+	// stage ("events" for events that reached the correlator, "dropped" for
+	// events lost to output-channel backpressure before reaching it).
+	//
+	// plan.md 5.9.8b (№91): criterion 20's known-N counting control used to
+	// read Δevents_total{type="file"} and Δevents_dropped_total{collector=
+	// "fileaccess"} — both series count every file event on the host, not
+	// just the canary's, so the residual after subtracting N was really
+	// N-plus-whatever-background-happened-during-the-window. 5.9.7a
+	// estimated that background with a separate null-mode run and subtracted
+	// it; this series removes the need to estimate anything by only ever
+	// counting events whose path IS the canary's, which no unrelated
+	// background process on the host can produce. The path-prefix compare
+	// happens once, in userspace, on the already-parsed event (see
+	// IsCountingCanaryPath / cmd/ebpf-guard/main.go) — not in the BPF
+	// fileaccess hot path, which runs at millions of events per ten minutes
+	// and cannot absorb an unbudgeted string compare per event without risking
+	// the throughput regression named as risk №3 of постановка №2.9.8.
+	CountingCanaryTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_counting_canary_total",
+			Help: "Fileaccess events whose path matches the counting-control canary prefix, by pipeline stage (events, dropped)",
+		},
+		[]string{"stage"},
+	)
 )
+
+// CountingCanaryPathPrefix is the path prefix run-all-attacks.sh's
+// run_counting_control() uses for its generator files
+// (/tmp/ebpf-guard-counting-canary-$TIMESTAMP-$mode). Any fileaccess event
+// whose path starts with this prefix is, by construction, an artifact of
+// that harness step and never of ordinary host activity — see
+// CountingCanaryTotal.
+const CountingCanaryPathPrefix = "/tmp/ebpf-guard-counting-canary-"
+
+// IsCountingCanaryPath reports whether path was produced by the
+// counting-control canary generator.
+func IsCountingCanaryPath(path string) bool {
+	return strings.HasPrefix(path, CountingCanaryPathPrefix)
+}
+
+// RecordCountingCanary increments CountingCanaryTotal for the given pipeline
+// stage ("events" or "dropped").
+func RecordCountingCanary(stage string) {
+	CountingCanaryTotal.WithLabelValues(stage).Inc()
+}
 
 // RecordEvent increments the events counter for the given type.
 // Deprecated: Use RecordEventWithLabels to provide proper pod/namespace/node labels.

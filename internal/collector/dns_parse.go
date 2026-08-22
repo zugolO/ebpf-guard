@@ -42,6 +42,18 @@ const dnsMaxNameJumps = 32
 //	truncated_payload  — payload_len from the BPF side exceeds DNS_MAX_PAYLOAD
 //	                      or the bytes actually present in the record.
 //	compression_loop    — name compression pointers exceeded dnsMaxNameJumps.
+//	bad_header         — well-formed length, but the fixed 12-byte DNS header
+//	                      fails a structural sanity check (reserved Z bit set,
+//	                      or opcode outside the IANA range — see
+//	                      validateDNSHeader for why section-length
+//	                      consistency is deliberately not checked here): the
+//	                      bytes are not a DNS message at all, most likely
+//	                      non-DNS traffic that reached this path because
+//	                      dns_socket_map misclassified an fd (plan.md 5.9.8a,
+//	                      №94 — a TLS ClientHello read via a reused fd number
+//	                      previously reached parseDNSWireMessage and was
+//	                      scored against the long-label rules as if it were a
+//	                      QNAME).
 //	unparseable        — caught a failure this vocabulary doesn't name yet
 //	                      (event type mismatch on the DNS-only ring buffer, or
 //	                      any future branch that doesn't set a reason).
@@ -51,6 +63,7 @@ const (
 	dnsDecodeReasonBadQName         = "bad_qname"
 	dnsDecodeReasonTruncatedPayload = "truncated_payload"
 	dnsDecodeReasonCompressionLoop  = "compression_loop"
+	dnsDecodeReasonBadHeader        = "bad_header"
 	dnsDecodeReasonUnparseable      = "unparseable"
 )
 
@@ -63,7 +76,61 @@ var dnsDecodeReasons = []string{
 	dnsDecodeReasonBadQName,
 	dnsDecodeReasonTruncatedPayload,
 	dnsDecodeReasonCompressionLoop,
+	dnsDecodeReasonBadHeader,
 	dnsDecodeReasonUnparseable,
+}
+
+// dnsMaxOpcode is the highest IANA-assigned DNS OPCODE as of this writing
+// (6 = DSO, RFC 8490). Anything above it is not a value any real resolver or
+// server emits, and is exactly the kind of bit pattern non-DNS traffic
+// (a TLS record header, in particular) produces by coincidence.
+const dnsMaxOpcode = 6
+
+// validateDNSHeader is the second, independent guard against non-DNS bytes
+// reaching the QNAME walk, on top of the dns_socket_map key fix in
+// dns.bpf.c (plan.md 5.9.8a, №94, запрет №6: the kernel-side fix and this
+// check are both required on the same run, not either/or). Even a perfectly
+// fd-scoped dns_socket_map only proves the fd was once connect()ed to
+// port 53 — it says nothing about what bytes a later write()/read() on that
+// fd actually carries, so this checks the bytes themselves against the
+// structural constraints RFC 1035 places on a DNS header, before a single
+// label byte is walked:
+//
+//   - the Z bit (RFC 1035 §4.1.1, reserved, must be zero in every
+//     conforming message) is set — real resolvers and servers never set it;
+//   - OPCODE is outside the range any assigned value occupies.
+//
+// Section-length consistency (payload_len vs the sum of header+question+
+// answers) is deliberately NOT re-checked here: decodeDNSName/
+// decodeDNSAnswerIPs already reject a name or record that overruns the
+// buffer as dnsDecodeReasonBadQName, and decodeDNSEvent already rejects a
+// payload_len inconsistent with the record itself as
+// dnsDecodeReasonTruncatedPayload — duplicating either check here with a
+// coarser rule of thumb would only produce a second, less accurate opinion
+// about the same bytes (and did, in an earlier revision of this function: a
+// QDCOUNT-vs-length budget check misclassified a legitimately truncated
+// question as bad_header instead of letting the qname walk call it
+// bad_qname, see TestParseDNSWireMessage_BadQName).
+//
+// This is a guard, not a classifier: a TLS ClientHello read off a reused fd
+// lands its record-length bytes in the position a DNS header keeps its flags,
+// so whether it trips one of these two checks depends on that length — a
+// ClientHello of 0x003b bytes yields opcode=0 and a clear Z bit and passes
+// here, then fails downstream in decodeDNSName as bad_qname. Both outcomes
+// are correct and both are non-events for the long-label rules; what matters
+// is the invariant that no such message ever becomes a DNS event, which is
+// what TestParseDNSWireMessage_TLSClientHelloNeverAccepted pins (and why it
+// asserts on the invariant rather than on bad_header specifically).
+func validateDNSHeader(payload []byte) string {
+	flags := binary.BigEndian.Uint16(payload[2:4])
+	if flags&0x0040 != 0 { // Z bit, RFC 1035 §4.1.1
+		return dnsDecodeReasonBadHeader
+	}
+	opcode := (flags >> 11) & 0x0f
+	if opcode > dnsMaxOpcode {
+		return dnsDecodeReasonBadHeader
+	}
+	return ""
 }
 
 // dnsHeaderDiagFields reads direction and payload_len straight out of the
@@ -200,6 +267,15 @@ func parseDNSWireMessage(payload []byte) (dnsWireMessage, string) {
 
 	if len(payload) < 12 {
 		return msg, dnsDecodeReasonTooShort
+	}
+
+	// Second, independent guard (plan.md 5.9.8a, запрет №6): reject bytes
+	// that fail basic DNS header structure before touching a single label —
+	// this is what stops a TLS ClientHello read via a reused fd number from
+	// scoring against the long-label rules even if dns_socket_map ever
+	// misclassifies an fd again in the future.
+	if reason := validateDNSHeader(payload); reason != "" {
+		return msg, reason
 	}
 
 	flags := binary.BigEndian.Uint16(payload[2:4])

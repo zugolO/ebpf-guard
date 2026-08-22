@@ -85,6 +85,9 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+# Machine-local clangd config for bpf/*.bpf.c IntelliSense — contains
+# absolute paths specific to this checkout, not portable across machines.
+.clangd
 *.swp
 *.swo
 *~

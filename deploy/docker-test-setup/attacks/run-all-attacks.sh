@@ -427,8 +427,8 @@ counting_settle_loop() {
             continue
         fi
         miss=0
-        ev=$(echo "$SETTLE_AFTER" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-        dr=$(echo "$SETTLE_AFTER" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+        ev=$(echo "$SETTLE_AFTER" | sum_metric 'ebpf_guard_events_total\\{.*type="file"')
+        dr=$(echo "$SETTLE_AFTER" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"')
         cur_sum=$(( ${ev:-0} + ${dr:-0} ))
         now_t=$(date +%s)
         if [ "$prev_sum" -ge 0 ] && [ "$(( now_t - t1 ))" -ge "${min_wait_after:-0}" ]; then
@@ -523,16 +523,16 @@ run_counting_control() {
 
     local before events_before drops_before ringbuf_full_before canary_events_before canary_dropped_before
     before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-    drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
-    ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\\{.*type="file"')
+    drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"')
+    ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess",reason="ringbuf_full"\\}')
     # 5.9.8b (№91): canary-only series, background-free by construction —
     # see CountingCanaryTotal (internal/exporter/prometheus.go). Read
     # alongside the general series above (kept for comparison/diagnostics),
     # not instead of it — the general series remains useful context even
     # after run-gate.sh's criterion 20 stops judging by it.
-    canary_events_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
-    canary_dropped_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
+    canary_events_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="events"')
+    canary_dropped_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="dropped"')
     local window_start
     window_start=$(date +%s)
 
@@ -567,11 +567,11 @@ run_counting_control() {
     local after="$SETTLE_AFTER" i="$SETTLE_I" settle_reason="$SETTLE_REASON"
 
     local events_after drops_after ringbuf_full_after canary_events_after canary_dropped_after
-    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-    drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
-    ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
-    canary_events_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
-    canary_dropped_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\\{.*type="file"')
+    drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"')
+    ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess",reason="ringbuf_full"\\}')
+    canary_events_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="events"')
+    canary_dropped_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="dropped"')
 
     local events_delta drops_delta ringbuf_full_delta sum diff window_seconds
     local canary_events_delta canary_dropped_delta canary_sum canary_diff
@@ -703,15 +703,15 @@ run_ringbuf_overflow() {
     local before events_before drops_before ringbuf_full_before bpf_lost_before
     local canary_events_before canary_dropped_before
     before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-    drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
-    ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
-    bpf_lost_before=$(echo "$before" | sum_metric 'ebpf_guard_bpf_lost_events_total\{collector="fileaccess"\}')
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\\{.*type="file"')
+    drops_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"')
+    ringbuf_full_before=$(echo "$before" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess",reason="ringbuf_full"\\}')
+    bpf_lost_before=$(echo "$before" | sum_metric 'ebpf_guard_bpf_lost_events_total\\{collector="fileaccess"\\}')
     # 5.9.8c (№92): та же канареечная серия, что run_counting_control читает
     # для критерия 20 — counting_control_residual (run-gate.sh) сравнивает их
     # тем же кодом, а не переоткрытой копией формулы.
-    canary_events_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
-    canary_dropped_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
+    canary_events_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="events"')
+    canary_dropped_before=$(echo "$before" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="dropped"')
     if [ -z "$before" ]; then
         warn "снимок /metrics до заморозки пуст — run_ringbuf_overflow пропущен (агент недоступен ДО SIGSTOP, замораживать нечего)"
         { echo "skipped=1"; echo "skip_reason=пустой снимок /metrics до SIGSTOP"; } > "$marker"
@@ -769,12 +769,12 @@ run_ringbuf_overflow() {
 
     local events_after drops_after ringbuf_full_after bpf_lost_after
     local canary_events_after canary_dropped_after
-    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="file"')
-    drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
-    ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess",reason="ringbuf_full"\}')
-    bpf_lost_after=$(echo "$after" | sum_metric 'ebpf_guard_bpf_lost_events_total\{collector="fileaccess"\}')
-    canary_events_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="events"')
-    canary_dropped_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\{stage="dropped"')
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\\{.*type="file"')
+    drops_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"')
+    ringbuf_full_after=$(echo "$after" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess",reason="ringbuf_full"\\}')
+    bpf_lost_after=$(echo "$after" | sum_metric 'ebpf_guard_bpf_lost_events_total\\{collector="fileaccess"\\}')
+    canary_events_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="events"')
+    canary_dropped_after=$(echo "$after" | sum_metric 'ebpf_guard_counting_canary_total\\{stage="dropped"')
 
     local events_delta drops_delta ringbuf_full_delta bpf_lost_delta sum diff window_seconds
     local canary_events_delta canary_dropped_delta canary_sum canary_diff
@@ -1250,7 +1250,7 @@ run_dns_fd_reuse_negative_control() {
 
     local before after events_before events_after
     before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\\{.*type="dns"')
 
     local py_out
     py_out=$(python3 - <<'PYEOF' 2>&1
@@ -1325,12 +1325,12 @@ PYEOF
     local prev=-1 cur i=0
     for i in $(seq 1 10); do
         after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\\{.*type="dns"')
         if [ "$cur" = "$prev" ]; then break; fi
         prev=$cur
         sleep 1
     done
-    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\\{.*type="dns"')
 
     local events_delta
     events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
@@ -1373,7 +1373,7 @@ run_dns_cross_thread_positive_control() {
 
     local before after events_before events_after
     before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\\{.*type="dns"')
 
     local resolver
     resolver=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
@@ -1438,12 +1438,12 @@ PYEOF
     local prev=-1 cur i=0
     for i in $(seq 1 15); do
         after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\\{.*type="dns"')
         if [ "$cur" = "$prev" ]; then break; fi
         prev=$cur
         sleep 1
     done
-    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\\{.*type="dns"')
 
     local events_delta
     events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
@@ -1794,7 +1794,7 @@ run_induced_drop() {
     local settle_prev=-1 settle_cur settle_status settle_reason="timeout" settle_i
     for settle_i in $(seq 1 60); do
         settle_cur=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
-            | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"')
+            | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"')
         settle_status=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/health" 2>/dev/null \
             | jq -r '.status // empty' 2>/dev/null || true)
         if [ -n "$settle_status" ] && [ "$settle_status" != "degraded" ]; then
@@ -1821,8 +1821,8 @@ run_induced_drop() {
         - $(echo "$metrics_before_drop" | sum_metric 'collector="fileaccess".*reason="router_to_queue"') ))
     d_path_denylist=$(( $(echo "$metrics_after_drop" | sum_metric 'collector="fileaccess".*reason="path_denylist"') \
         - $(echo "$metrics_before_drop" | sum_metric 'collector="fileaccess".*reason="path_denylist"') ))
-    d_total=$(( $(echo "$metrics_after_drop" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"') \
-        - $(echo "$metrics_before_drop" | sum_metric 'ebpf_guard_events_dropped_total\{collector="fileaccess"') ))
+    d_total=$(( $(echo "$metrics_after_drop" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"') \
+        - $(echo "$metrics_before_drop" | sum_metric 'ebpf_guard_events_dropped_total\\{collector="fileaccess"') ))
     log "5.9.6d: наведённая потеря этого шага (fileaccess), по хопам — ringbuf_full=$d_ringbuf_full ringbuf_to_router=$d_ringbuf_to_router router_to_queue=$d_router_to_queue path_denylist=$d_path_denylist | всего=$d_total"
     rm -f "$filelist"
 

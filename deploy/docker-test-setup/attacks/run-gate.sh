@@ -111,9 +111,15 @@ skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
 # a single key, for 5.9.6a/5.9.6b's per-collector sums (plan.md).
 sum_metric_delta() {
     local pattern="$1" file_base="$2" file_final="$3"
-    awk -F'} ' -v p="$pattern" '
-        FNR==NR { if ($0 ~ p) base+=$2+0; next }
-        { if ($0 ~ p) fin+=$2+0 }
+    # ENVIRON, not -v: patterns here carry \{ to match a literal Prometheus
+    # label-brace, and -v assignments run the same backslash-escape
+    # processing as an awk string constant — \{ isn't a recognized escape,
+    # so every call warned "escape sequence `\{' treated as plain `{'" on
+    # stderr (criterion 19 alone calls this 3x per collector per run).
+    # ENVIRON entries are plain environment strings, never escape-processed.
+    P="$pattern" awk -F'} ' '
+        FNR==NR { if ($0 ~ ENVIRON["P"]) base+=$2+0; next }
+        { if ($0 ~ ENVIRON["P"]) fin+=$2+0 }
         END { printf "%.0f", fin-base }
     ' "$file_base" "$file_final"
 }

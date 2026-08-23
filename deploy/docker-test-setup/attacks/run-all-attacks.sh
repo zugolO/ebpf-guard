@@ -291,7 +291,15 @@ get_baseline_metrics() {
 # the whole run's baseline/final files.
 sum_metric() {
     local pattern="$1"
-    awk -F'} ' -v p="$pattern" '$0 ~ p {s+=$2} END{printf "%.0f", s+0}'
+    # ERE patterns here carry \{ (see call sites) to match a literal Prometheus
+    # label-brace. Passed via -v, awk's -v assignment runs the same
+    # backslash-escape processing as a string constant, and \{ isn't a
+    # recognized escape — every call warned "escape sequence `\{' treated as
+    # plain `{'" on stderr, which polluted the pipeline log once per curl in
+    # the counting-control settle loops (hundreds of times per run). ENVIRON
+    # entries are plain process environment strings and are never subject to
+    # that escape processing, so the pattern reaches awk unmodified.
+    P="$pattern" awk -F'} ' '$0 ~ ENVIRON["P"] {s+=$2} END{printf "%.0f", s+0}'
 }
 
 # sum_metric_delta PATTERN FILE_BASE FILE_FINAL — same idiom as run-gate.sh's
@@ -303,9 +311,10 @@ sum_metric() {
 # during the loop, before run-gate.sh ever runs.
 sum_metric_delta() {
     local pattern="$1" file_base="$2" file_final="$3"
-    awk -F'} ' -v p="$pattern" '
-        FNR==NR { if ($0 ~ p) base+=$2+0; next }
-        { if ($0 ~ p) fin+=$2+0 }
+    # ENVIRON, not -v — see sum_metric() above for why.
+    P="$pattern" awk -F'} ' '
+        FNR==NR { if ($0 ~ ENVIRON["P"]) base+=$2+0; next }
+        { if ($0 ~ ENVIRON["P"]) fin+=$2+0 }
         END { printf "%.0f", fin-base }
     ' "$file_base" "$file_final"
 }

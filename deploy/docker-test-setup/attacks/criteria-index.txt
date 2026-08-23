@@ -61,3 +61,4 @@
 5.9.9f	../run-2.9.9-pipeline.sh	ENVIRON
 5.9.9f	../run-2.9.5-report.sh	КОНЕЦ ОТЧЁТА №
 5.9.9g	../run-2.9.9-pipeline.sh	--- контроли DNS: попытка 
+5.9.9h	run-all-attacks.sh	dns_counter_settle

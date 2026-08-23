@@ -1364,6 +1364,68 @@ run_dns_long_label_attack() {
 # thread-scoped state) would have let this write() be misread as a DNS
 # query, which is exactly how a real ClientHello reached the long-label
 # rules on №2.9.7.
+# 5.9.9h (находка №106): общий settle-луп обоих контролей DNS.
+#
+# ebpf_guard_events_total{type="dns"} — счётчик ЭКСПОРТЁРА: он растёт после
+# того, как событие прошло очередь и корреляцию, а не в момент разбора пакета
+# в коллекторе. Прежний луп у обоих контролей останавливался, как только два
+# СОСЕДНИХ среза (1с) совпали, — на непустом конвейере (рестарт агента, шаг
+# SMOKE перед контролями, 288k событий шага [9/14]) этого недостаточно:
+# наблюдались 3, 5 и 7 событий из восьми, а недосчитанное всплывало в окне
+# СЛЕДУЮЩЕГО вызова (16 из 8). Ни одного потерянного события при этом не
+# было — decode_errors=0, bpf_lost=0, сумма за пять вызовов сошлась ровно.
+# То есть прежний контроль мерил не «видит ли коллектор межпоточный резолв»,
+# а «успел ли конвейер слиться за одну секунду».
+#
+# Луп ждёт одного из трёх (та же номенклатура, что settle_reason 5.9.8f):
+#   ceiling   — счётчик достиг цели (аргумент 1): ответ получен, ждать нечего;
+#   flattened — счётчик не менялся пять срезов подряд: конвейер слился;
+#   timeout   — не сошлось за 60с либо /metrics не ответил три раза подряд.
+# Пустой аргумент 1 означает «цели нет, ждать только затухания» — так его
+# зовёт негативный контроль, которому нужен ноль, а не N.
+#
+# Возвращает через globals: DNS_SETTLE_METRICS (полный текст последнего
+# снятого /metrics), DNS_SETTLE_VALUE, DNS_SETTLE_REASON, DNS_SETTLE_I.
+dns_counter_settle() {
+    local target="${1:-}"
+    local max_iters="${2:-60}"
+    local prev="" cur stable=0 miss=0 i
+
+    DNS_SETTLE_METRICS=""
+    DNS_SETTLE_VALUE=0
+    DNS_SETTLE_REASON="timeout"
+    DNS_SETTLE_I=0
+
+    for i in $(seq 1 "$max_iters"); do
+        DNS_SETTLE_I="$i"
+        DNS_SETTLE_METRICS=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
+        if [ -z "$DNS_SETTLE_METRICS" ]; then
+            miss=$(( miss + 1 ))
+            [ "$miss" -ge 3 ] && { DNS_SETTLE_REASON="timeout"; return; }
+            sleep 1
+            continue
+        fi
+        miss=0
+        cur=$(echo "$DNS_SETTLE_METRICS" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+        DNS_SETTLE_VALUE="${cur:-0}"
+        if [ -n "$target" ] && [ "${cur:-0}" -ge "$target" ]; then
+            DNS_SETTLE_REASON="ceiling"
+            return
+        fi
+        if [ "$cur" = "$prev" ]; then
+            stable=$(( stable + 1 ))
+            if [ "$stable" -ge 5 ]; then
+                DNS_SETTLE_REASON="flattened"
+                return
+            fi
+        else
+            stable=0
+        fi
+        prev="$cur"
+        sleep 1
+    done
+}
+
 run_dns_fd_reuse_negative_control() {
     local marker="$RESULTS_DIR/dns-negative-control-$TIMESTAMP.txt"
 
@@ -1378,9 +1440,17 @@ run_dns_fd_reuse_negative_control() {
         return
     fi
 
+    # 5.9.9h: снимок "до" берётся ТОЛЬКО после затухания счётчика. Иначе
+    # опоздавшие события предыдущего шага (в том числе позитивного контроля
+    # на предыдущей попытке) попадают в окно негативного и читаются как
+    # "dns_socket_map всё ещё принимает переиспользованный fd за DNS" —
+    # находка №94, которой нет.
     local before after events_before events_after
-    before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    local settle_before_reason
+    dns_counter_settle "" 60
+    settle_before_reason="$DNS_SETTLE_REASON"
+    before="$DNS_SETTLE_METRICS"
+    events_before="$DNS_SETTLE_VALUE"
 
     local py_out
     py_out=$(python3 - <<'PYEOF' 2>&1
@@ -1451,16 +1521,11 @@ PYEOF
     )
     local py_status=$?
 
-    # Устояться перед снимком "после" — тот же приём, что run_counting_control.
-    local prev=-1 cur i=0
-    for i in $(seq 1 10); do
-        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
-        if [ "$cur" = "$prev" ]; then break; fi
-        prev=$cur
-        sleep 1
-    done
-    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    # Снимок "после" — по затуханию, а не по одному совпадению (5.9.9h).
+    # Цели нет: ожидаемый ответ здесь ноль, и ждать «пока дорастёт» нечего.
+    dns_counter_settle "" 60
+    after="$DNS_SETTLE_METRICS"
+    events_after="$DNS_SETTLE_VALUE"
 
     local events_delta
     events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
@@ -1469,6 +1534,9 @@ PYEOF
         echo "$py_out"
         echo "python_status=$py_status"
         echo "events_dns_delta=$events_delta"
+        echo "settle_reason_before=$settle_before_reason"
+        echo "settle_reason=$DNS_SETTLE_REASON"
+        echo "settle_iters=$DNS_SETTLE_I"
     } > "$marker"
 
     log "негативный контроль: $py_out (python exit=$py_status), Δevents_total{type=dns}=$events_delta"
@@ -1520,9 +1588,14 @@ run_dns_cross_thread_positive_control() {
         return
     fi
 
+    # 5.9.9h: как и у негативного — снимок "до" по затуханию, иначе опоздавшие
+    # события предыдущего шага завышают Δ и контроль проходит чужой заслугой.
     local before after events_before events_after
-    before=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-    events_before=$(echo "$before" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    local settle_before_reason
+    dns_counter_settle "" 60
+    settle_before_reason="$DNS_SETTLE_REASON"
+    before="$DNS_SETTLE_METRICS"
+    events_before="$DNS_SETTLE_VALUE"
 
     local resolver
     resolver=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
@@ -1584,15 +1657,11 @@ PYEOF
     )
     local py_status=$?
 
-    local prev=-1 cur i=0
-    for i in $(seq 1 15); do
-        after=$(curl -s --max-time 10 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null)
-        cur=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
-        if [ "$cur" = "$prev" ]; then break; fi
-        prev=$cur
-        sleep 1
-    done
-    events_after=$(echo "$after" | sum_metric 'ebpf_guard_events_total\{.*type="dns"')
+    # 5.9.9h: ждём ЛИБО N событий (ceiling — ответ получен), ЛИБО затухания
+    # конвейера (flattened — больше не придёт, недосчёт настоящий).
+    dns_counter_settle $(( ${events_before:-0} + n )) 60
+    after="$DNS_SETTLE_METRICS"
+    events_after="$DNS_SETTLE_VALUE"
 
     local events_delta
     events_delta=$(( ${events_after:-0} - ${events_before:-0} ))
@@ -1602,6 +1671,9 @@ PYEOF
         echo "python_status=$py_status"
         echo "resolver=$resolver"
         echo "events_dns_delta=$events_delta"
+        echo "settle_reason_before=$settle_before_reason"
+        echo "settle_reason=$DNS_SETTLE_REASON"
+        echo "settle_iters=$DNS_SETTLE_I"
     } > "$marker"
 
     log "позитивный контроль: N=$n резолвер=$resolver Δevents_total{type=dns}=$events_delta (python exit=$py_status)"

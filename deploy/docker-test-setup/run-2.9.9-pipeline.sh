@@ -96,6 +96,15 @@ go test -count=1 -v ./internal/correlator/ -run 'TestWave598' 2>&1 | grep -E '^(
 go test -count=1 ./internal/correlator/ -run 'TestWave598' >/dev/null 2>&1 \
     || die "юнит-тесты 5.9.8g красные — сужение webshell_script_write_via_web_process не доказано как не-ослепление (риск №3)"
 
+# Волна 5.9.9. Сужение webshell_crontab_modification по comm (5.9.9b,
+# находка №98) — тот же риск №3 в четвёртый раз, и его юнит-половина обязана
+# стоять здесь по той же причине, что 5.9.7e и 5.9.8g: сужение, ослепившее
+# правило, красит преflight, а не идёт в отчёт после idle-часа.
+echo "--- преflight: go-тесты волны 5.9.9 ---"
+go test -count=1 -v ./internal/correlator/ -run 'TestWave599' 2>&1 | grep -E '^(=== RUN|--- |ok|FAIL)' | sed 's/^/  /'
+go test -count=1 ./internal/correlator/ -run 'TestWave599' >/dev/null 2>&1 \
+    || die "юнит-тесты 5.9.9b красные — сужение webshell_crontab_modification не доказано как не-ослепление (риск №3)"
+
 echo "--- преflight: синтаксис харнесса ---"
 bash -n $SETUP/attacks/run-all-attacks.sh || die "run-all-attacks.sh: синтаксическая ошибка"
 bash -n $SETUP/attacks/run-gate.sh         || die "run-gate.sh: синтаксическая ошибка"
@@ -127,6 +136,17 @@ echo "--- преflight: шаги волны 5.9.8 присутствуют в ц
 for fn in run_dns_fd_reuse_negative_control run_dns_cross_thread_positive_control run_webshell_script_write_positive_control; do
     grep -q "^$fn()" $SETUP/attacks/run-all-attacks.sh || die "5.9.8: $fn отсутствует в run-all-attacks.sh — соответствующий пункт постановки без входа"
     grep -qE "^[[:space:]]+$fn[[:space:]]*$" $SETUP/attacks/run-all-attacks.sh || die "5.9.8: $fn определён, но не вызывается — шаг не исполнится"
+    echo "  ок: $fn определён и вызывается"
+done
+
+# То же для волны 5.9.9: позитивная половина сужения (5.9.9b) и сценарий
+# container_escape_cap_sys_admin (5.9.9c, находка №101). Обе категории
+# читает крит. 7 (recall) — функция, определённая, но не вызванная, дала бы
+# не «контроль не исполнился», а тихое отсутствие категории в манифесте.
+echo "--- преflight: шаги волны 5.9.9 присутствуют в цепочке ---"
+for fn in run_webshell_crontab_positive_control run_container_escape_positive_control; do
+    grep -q "^$fn()" $SETUP/attacks/run-all-attacks.sh || die "5.9.9: $fn отсутствует в run-all-attacks.sh — соответствующий пункт постановки без входа"
+    grep -qE "^[[:space:]]+$fn[[:space:]]*$" $SETUP/attacks/run-all-attacks.sh || die "5.9.9: $fn определён, но не вызывается — шаг не исполнится"
     echo "  ок: $fn определён и вызывается"
 done
 
@@ -371,34 +391,60 @@ echo "=== [7/14] ЖЁСТКИЙ СТОП №4 (НОВЫЙ): оба контро�
 # починке и при полностью ослепшем DNS-коллекторе. Отсюда порядок: контроли
 # в преflight, idle-час — потом. Слепой коллектор на idle-час не едет.
 cd $SETUP/attacks
-bash ./run-all-attacks.sh --dns-fd-reuse-controls 2>&1 | tee /root/dns-controls-2.9.9.txt
-dns_neg=$(ls -t $SETUP/attacks/attack-results/dns-negative-control-*.txt 2>/dev/null | head -1)
-dns_pos=$(ls -t $SETUP/attacks/attack-results/dns-positive-control-*.txt 2>/dev/null | head -1)
-[ -n "$dns_neg" ] || die "негативный контроль DNS не оставил маркера — 5.9.8a без входа"
-[ -n "$dns_pos" ] || die "позитивный контроль DNS не оставил маркера — 5.9.8a без входа"
-cat "$dns_neg" | sed 's/^/  негативный: /'
-cat "$dns_pos" | sed 's/^/  позитивный: /'
-grep -q '^skipped=1' "$dns_neg" && die "негативный контроль DNS пропущен харнессом — правка dns_socket_map не проверена (запрет №6)"
-grep -q '^skipped=1' "$dns_pos" && die "позитивный контроль DNS пропущен харнессом — правка dns_socket_map не проверена (запрет №6)"
+# 5.9.9g (находка №105, ЭТА ПРАВКА): шаг повторяем до трёх раз. На преflight'е
+# №2.9.9 позитивный контроль дал Δdns=7 при N=8 и убил цепочку на 15-й минуте;
+# три немедленных повтора подряд дали 8/8, а волна 5.9.9 не трогает ни
+# bpf/dns.bpf.c, ни коллектор — то есть остановкой была потеря ОДНОГО UDP-пакета,
+# а не ослепление. Различить их можно только повтором: ослепший коллектор даёт
+# недосчёт КАЖДЫЙ раз, потерянный пакет — один раз из четырёх. Порог не ослаблен
+# (последняя попытка обязана дать Δdns >= N ровно как раньше), ослаблена только
+# цена единичного промаха. Повторяются лишь исходы «сценарий не воспроизведён»
+# (в их формулировках и раньше стояло «повторить шаг»); Δdns > 0 у негатива —
+# это находка №94, она валит цепочку с первой попытки без повторов.
+DNS_CTL_ATTEMPTS="${DNS_CTL_ATTEMPTS:-3}"
+dns_ctl_ok=0
+for dns_try in $(seq 1 "$DNS_CTL_ATTEMPTS"); do
+    echo "--- контроли DNS: попытка $dns_try из $DNS_CTL_ATTEMPTS ---"
+    bash ./run-all-attacks.sh --dns-fd-reuse-controls 2>&1 | tee /root/dns-controls-2.9.9-$dns_try.txt
+    dns_neg=$(ls -t $SETUP/attacks/attack-results/dns-negative-control-*.txt 2>/dev/null | head -1)
+    dns_pos=$(ls -t $SETUP/attacks/attack-results/dns-positive-control-*.txt 2>/dev/null | head -1)
+    [ -n "$dns_neg" ] || die "негативный контроль DNS не оставил маркера — 5.9.8a без входа"
+    [ -n "$dns_pos" ] || die "позитивный контроль DNS не оставил маркера — 5.9.8a без входа"
+    cat "$dns_neg" | sed 's/^/  негативный: /'
+    cat "$dns_pos" | sed 's/^/  позитивный: /'
+    grep -q '^skipped=1' "$dns_neg" && die "негативный контроль DNS пропущен харнессом — правка dns_socket_map не проверена (запрет №6)"
+    grep -q '^skipped=1' "$dns_pos" && die "позитивный контроль DNS пропущен харнессом — правка dns_socket_map не проверена (запрет №6)"
 
-neg_xthread=$(awk -F= '$1=="cross_thread_close"{print $2+0}' "$dns_neg")
-neg_reused=$(awk -F= '$1=="reused_fd"{print $2+0}' "$dns_neg")
-neg_delta=$(awk -F= '$1=="events_dns_delta"{print $2+0}' "$dns_neg")
-pos_n=$(awk -F= '$1=="n"{print $2+0}' "$dns_pos")
-pos_delta=$(awk -F= '$1=="events_dns_delta"{print $2+0}' "$dns_pos")
-echo "  негативный: cross_thread_close=$neg_xthread reused_fd=$neg_reused Δdns=$neg_delta"
-echo "  позитивный: N=$pos_n Δdns=$pos_delta"
+    neg_xthread=$(awk -F= '$1=="cross_thread_close"{print $2+0}' "$dns_neg")
+    neg_reused=$(awk -F= '$1=="reused_fd"{print $2+0}' "$dns_neg")
+    neg_delta=$(awk -F= '$1=="events_dns_delta"{print $2+0}' "$dns_neg")
+    pos_n=$(awk -F= '$1=="n"{print $2+0}' "$dns_pos")
+    pos_delta=$(awk -F= '$1=="events_dns_delta"{print $2+0}' "$dns_pos")
+    echo "  негативный: cross_thread_close=$neg_xthread reused_fd=$neg_reused Δdns=$neg_delta"
+    echo "  позитивный: N=$pos_n Δdns=$pos_delta"
 
-# Негатив: сценарий №94 обязан ВОСПРОИЗВЕСТИСЬ (close с чужого потока плюс
-# переиспользование fd), иначе «0 событий» ничего не доказывает — это не
-# провал, но и не исполнение, и на такой цепочке idle-час бессмыслен.
-[ "${neg_xthread:-0}" -eq 1 ] || die "негативный контроль: close() с чужого потока не удался — сценарий №94 не воспроизведён, доказывать нечего"
-[ "${neg_reused:-0}" -eq 1 ] || die "негативный контроль: fd не переиспользован (reused_fd=0) — сценарий №94 не воспроизведён; повторить шаг"
-[ "${neg_delta:-0}" -eq 0 ] || die "негативный контроль ПРОВАЛЕН: Δevents_total{type=dns}=$neg_delta > 0 — dns_socket_map всё ещё принимает переиспользованный fd за DNS, находка №94 не закрыта"
-# Позитив: сужение, неотличимое от ослепления, — находка №57 в третий раз.
-[ "${pos_n:-0}" -gt 0 ] || die "позитивный контроль: N=0 — генератор не отработал, вторая половина запрета №6 без входа"
-[ "${pos_delta:-0}" -ge "${pos_n:-0}" ] \
-    || die "позитивный контроль ПРОВАЛЕН: Δevents_total{type=dns}=$pos_delta < N=$pos_n — межпоточный резолв недосчитан, правка ключа ослепила коллектор (риск №2)"
+    # Негатив: Δdns > 0 — это сама находка №94, повтор её не исправит.
+    [ "${neg_delta:-0}" -eq 0 ] || die "негативный контроль ПРОВАЛЕН: Δevents_total{type=dns}=$neg_delta > 0 — dns_socket_map всё ещё принимает переиспользованный fd за DNS, находка №94 не закрыта"
+    # Генератор не отработал вовсе — повтор бессмыслен, вторая половина
+    # запрета №6 осталась бы без входа при любом числе попыток.
+    [ "${pos_n:-0}" -gt 0 ] || die "позитивный контроль: N=0 — генератор не отработал, вторая половина запрета №6 без входа"
+
+    # Три исхода «сценарий не воспроизведён» — повторяемые.
+    if [ "${neg_xthread:-0}" -ne 1 ]; then
+        echo "ВНИМАНИЕ: попытка $dns_try: close() с чужого потока не удался — сценарий №94 не воспроизведён, повтор"
+    elif [ "${neg_reused:-0}" -ne 1 ]; then
+        echo "ВНИМАНИЕ: попытка $dns_try: fd не переиспользован (reused_fd=0) — сценарий №94 не воспроизведён, повтор"
+    elif [ "${pos_delta:-0}" -lt "${pos_n:-0}" ]; then
+        echo "ВНИМАНИЕ: попытка $dns_try: Δevents_total{type=dns}=$pos_delta < N=$pos_n — межпоточный резолв недосчитан, повтор (стабильный недосчёт остановит цепочку ниже)"
+    else
+        dns_ctl_ok=1
+        [ "$dns_try" -gt 1 ] && echo "ВНИМАНИЕ: контроли DNS сошлись с попытки $dns_try, а не с первой — единичные промахи предыдущих попыток выше в логе"
+        break
+    fi
+    sleep 10
+done
+[ "$dns_ctl_ok" -eq 1 ] \
+    || die "контроли DNS не сошлись за $DNS_CTL_ATTEMPTS попыток (последняя: cross_thread_close=$neg_xthread reused_fd=$neg_reused N=$pos_n Δdns=$pos_delta) — недосчёт устойчив, это ослепление коллектора, а не потеря пакета (риск №2)"
 echo "5.9.8a доказан живьём в $(date -u +%H:%M:%S) UTC: TLS по reused fd не даёт DNS-событий, межпоточный резолв даёт"
 
 echo "=== [8/14] контроль счётности вне окна замера: канареечная серия оживает (5.9.8b) ==="

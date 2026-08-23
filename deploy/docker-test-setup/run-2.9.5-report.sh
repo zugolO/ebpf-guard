@@ -39,6 +39,13 @@ SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${1:-$SETUP_DIR/attacks/attack-results}"
 TIMESTAMP="${2:-}"
 IDLE_OUT="${IDLE_OUT:-}"
+# 5.9.9f (№104): заголовок и подвал отчёта раньше были литералом "№2.9.5",
+# хотя этот же скрипт — единственный запасной вариант отчёта на замерах
+# №2.9.6…№2.9.9 (пока для них не заведён собственный run-2.9.N-report.sh,
+# см. фолбэк в run-2.9.N-pipeline.sh) — заголовок печатал неверный номер
+# замера на каждом из них. REPORT_LABEL передаётся пайплайном; без него —
+# прежнее поведение (текст этого скрипта, "2.9.5").
+REPORT_LABEL="${REPORT_LABEL:-2.9.5}"
 REPO_DIR="${REPO_DIR:-/opt/ebpf-guard}"
 SERVICE_UNIT="${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}"
 # Начало аптайма агента, записанное пайплайном в момент рестарта. Без него
@@ -78,7 +85,7 @@ metric_sum() {
 }
 
 if ! command -v jq >/dev/null 2>&1; then
-    echo "jq не найден — отчёт №2.9.5 не может быть построен" >&2
+    echo "jq не найден — отчёт №${REPORT_LABEL} не может быть построен" >&2
     exit 2
 fi
 
@@ -96,7 +103,7 @@ idle_metrics_start="${IDLE_OUT:+$IDLE_OUT/metrics-start.txt}"
 idle_metrics_end="${IDLE_OUT:+$IDLE_OUT/metrics-end.txt}"
 
 echo "==========================================="
-echo "ОТЧЁТ №2.9.5 (сверх гейта): TIMESTAMP=$TIMESTAMP"
+echo "ОТЧЁТ №${REPORT_LABEL} (сверх гейта): TIMESTAMP=$TIMESTAMP"
 echo "  RESULTS_DIR=$RESULTS_DIR"
 echo "  IDLE_OUT=${IDLE_OUT:-<не задан>}"
 echo "==========================================="
@@ -316,4 +323,4 @@ for rid in ebpf_subversion_unauthorized_caller ebpf_subversion_detach_nonroot \
 done
 
 echo ""
-echo "=== КОНЕЦ ОТЧЁТА №2.9.5 ==="
+echo "=== КОНЕЦ ОТЧЁТА №${REPORT_LABEL} ==="

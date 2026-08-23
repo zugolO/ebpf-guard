@@ -68,6 +68,22 @@
 # у соседей: условие достижимо и корректно, сценария у стенда нет. Если
 # правило снова сработает НЕ от dpkg-query оператора — это повод убрать его
 # из этого списка, а не тихо перезаписать причину.
+# Волна 5.9.9c (находка №101): container_escape_pivot_root — сосед
+# container_escape_cap_sys_admin по rules/container-escape.yaml, тот же
+# список исключений [runc, containerd-shim, containerd-shim-runc-v2,
+# dockerd, conmon, crun], та же природа (немо не по конструкции, а из-за
+# отсутствия сценария трафика на этом стенде). Отличие от cap_sys_admin —
+# у cap_sys_admin нашёлся безопасный способ дать трафик (unshare -U true,
+# действие alert, см. run_container_escape_positive_control); у
+# pivot_root безопасного способа нет — вызов pivot_root(2) меняет корень
+# самого вызывающего процесса, и это не откатить так же, как временный
+# файл или символическую ссылку. container_escape_pivot_root не заведён в
+# detection-baseline.txt (никогда не срабатывал ни на одном известном
+# прогоне), поэтому машинный гейт 5.9.4h его не проверяет — строка ниже
+# заведена постановкой 5.9.9c как запись факта, а не потому что 5.9.4h её
+# потребовал. Снимается волной 6, если найдётся безопасный способ вызвать
+# pivot_root(2) из-под харнесса.
+container_escape_pivot_root b
 mitre_software_enum_dpkg b
 sigma_cpu_info_access b
 sigma_kernel_version_read b

@@ -1070,6 +1070,127 @@ run_webshell_script_write_positive_control() {
     echo ""
 }
 
+# 5.9.9b (находка №98, риск №3 постановки): позитивный контроль сужения
+# webshell_crontab_modification (rules/webshell-detection.yaml) до comm
+# веб-воркера. Idle-hour data поймал critical от comm=run-parts — штатного
+# диспетчера /etc/cron.hourly — раз в час без атаки; правило матчило любой
+# comm, хотя его собственное сообщение обещает "Web server worker". Условие
+# сужено (proc.comm in [apache2, nginx, httpd]) тем же приёмом, что 5.9.8g;
+# без этого шага сужение неотличимо от ослепления (TestWave599b_WebshellCrontab
+# проверяет то же офлайн, здесь — живьём).
+#
+# comm подделывается тем же приёмом, что run_webshell_script_write_positive_control:
+# символическая ссылка с именем "apache2" на существующий бинарь (tee) — ядро
+# берёт comm из последнего компонента ПУТИ, переданного execve(). Файл
+# пишется под настоящим /etc/cron.d/ (условие правила проверяет путь
+# префиксом, поддельный каталог его не пройдёт) и удаляется сразу после
+# записи.
+run_webshell_crontab_positive_control() {
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9b (риск №3): запись /etc/cron.d веб-воркером (comm=apache2)"
+    log "==========================================="
+
+    local tee_bin
+    tee_bin="$(command -v tee 2>/dev/null)"
+    if [ -z "$tee_bin" ]; then
+        warn "tee не найден — позитивный контроль 5.9.9b пропущен, сужение webshell_crontab_modification остаётся недоказанным (риск №3)"
+        echo ""
+        return
+    fi
+
+    local fake_dir fake_bin target
+    fake_dir="$(mktemp -d)"
+    fake_bin="$fake_dir/apache2"
+    target="/etc/cron.d/control-$TIMESTAMP"
+    if ! ln -s "$tee_bin" "$fake_bin" 2>/dev/null; then
+        warn "не удалось создать $fake_bin — позитивный контроль 5.9.9b пропущен"
+        rm -rf "$fake_dir"
+        echo ""
+        return
+    fi
+
+    local wc_done=0
+    mark_attack_window
+    if echo "# ebpf-guard 5.9.9b positive control $TIMESTAMP" | "$fake_bin" "$target" >/dev/null 2>&1; then
+        wc_done=1
+        log "запись $target выполнена comm=apache2 — ожидается срабатывание webshell_crontab_modification"
+    else
+        warn "запись через $fake_bin не удалась — позитивный контроль 5.9.9b не исполнен, либо /etc/cron.d недоступен для записи"
+    fi
+    mark_attack_window
+
+    rm -f "$target"
+    rm -rf "$fake_dir"
+
+    # Запись в манифест — только по факту исполнения. Манифест читают крит. 7
+    # (recall: каждая его категория обязана быть поймана) и секция 5.9.9c
+    # (правила с позитивным контролем): категория, записанная после
+    # неудавшегося шага, превращает «контроль не исполнился» в «детект
+    # потерян» — разные находки с разной ценой.
+    if [ "$wc_done" -eq 1 ] && command -v jq &> /dev/null; then
+        wc_entry=$(jq -n --arg cat "webshell_crontab_positive_control" --arg comm "apache2" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$wc_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$wc_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
+# 5.9.9c (находка №101, риск №3 постановки): позитивный контроль для
+# container_escape_cap_sys_admin (rules/container-escape.yaml) — правило уже
+# было в detection-baseline.txt (строка 242), но не имело ни одного сценария
+# трафика на этом стенде: comm=unshare не входит в список исключений
+# [runc, containerd-shim, containerd-shim-runc-v2, dockerd, conmon, crun],
+# однако run-all-attacks.sh никогда не вызывал unshare(2) напрямую — правило
+# было немо не по конструкции, а из-за отсутствия шага. `unshare -U true`
+# создаёт и тут же уничтожает user-namespace — nr=272 (unshare) от
+# comm=unshare; действие правила alert, не kill, поэтому контроль безопасен,
+# побочных эффектов на стенде нет.
+#
+# Тем же явлением объясняется сосед container_escape_pivot_root: тот же
+# список исключений, но pivot_root(2) из-под харнесса не вызывается (нет
+# безопасного способа сменить rootfs процесса-харнесса) — правило остаётся
+# немым по среде и заносится в silent-rules.txt категорией (b), а не сюда.
+run_container_escape_positive_control() {
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9c (находка №101): unshare -U (comm=unshare)"
+    log "==========================================="
+
+    if ! command -v unshare &> /dev/null; then
+        warn "unshare не найден — позитивный контроль 5.9.9c пропущен, container_escape_cap_sys_admin остаётся без сценария (находка №101)"
+        echo ""
+        return
+    fi
+
+    local ce_done=0
+    mark_attack_window
+    if unshare -U true >/dev/null 2>&1; then
+        ce_done=1
+        log "unshare -U true выполнен, comm=unshare — ожидается срабатывание container_escape_cap_sys_admin (nr=272)"
+    else
+        warn "unshare -U true завершился с ошибкой — позитивный контроль 5.9.9c не исполнен (проверить CONFIG_USER_NS / unprivileged_userns_clone на стенде)"
+    fi
+    mark_attack_window
+
+    # Только по факту исполнения, по той же причине, что у 5.9.9b выше:
+    # container_escape_positive_control — НОВАЯ категория манифеста, и
+    # записанная вхолостую она уронила бы крит. 7 (recall) на шаге, который
+    # не состоялся, вместо честного «контроль не исполнился».
+    if [ "$ce_done" -eq 1 ] && command -v jq &> /dev/null; then
+        ce_entry=$(jq -n --arg cat "container_escape_positive_control" --arg comm "unshare" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$ce_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$ce_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
 run_setuid_attack() {
     log "==========================================="
     log "ЗАПУСК SETUID АТАКИ (5.9.2b, sigma_setuid_syscall)"
@@ -1357,6 +1478,25 @@ PYEOF
     echo ""
 }
 
+# 5.9.9d (находка №100, P1): имя запроса ниже — c599d-{i}.probe.invalid,
+# короткое и низкоэнтропийное, а не ebpfguard-598a-{i}.dns-tunnel-canary.invalid
+# (5.9.8a). Контролю нужна только уникальность имени по прогону и живой
+# резолвер — энтропия и длина лейбла не были его свойством, они были
+# случайностью формы прежнего имени, и эта случайность наводила шесть из
+# семи DNS-правил (*_dga_*, *_high_entropy*) вне всех измеряемых окон
+# (преflight, до открытия окна замера). dns_nxdomain_flood — единственное,
+# что останется срабатывать законно (восемь NXDOMAIN за секунду — флуд по
+# определению правила): заносится в detection-baseline.txt ПОСЛЕ живого
+# прогона №2.9.9, по факту наблюдения, а не авансом этой правкой.
+#
+# ЗАПРЕЩЕНО этим пунктом явно: регистрировать python3 этого контроля в
+# observer-дереве (observer_root_register, OBSERVER_ROOT_PID_FILE) по
+# аналогии с 5.9.7g/5.9.8g. Это первое, что приходит в голову — и это
+# ошибка: наблюдатель-фильтр гасит события ДЕРЕВА измерителя, а
+# Δevents_total{type=dns}=8 в этом контроле — не шум, который надо
+# спрятать, а сам измеряемый сигнал. Регистрация погасила бы контроль,
+# который она должна была бы оставить видимым.
+#
 # POSITIVE CONTROL: the OTHER failure mode the same key change fixes — a
 # write()/read() from a thread that did NOT call connect() on that fd. A
 # thread pool handing an already-connected DNS socket to a worker thread is
@@ -1431,7 +1571,7 @@ def worker(sock, name):
 
 threads = []
 for i, s in enumerate(socks):
-    th = threading.Thread(target=worker, args=(s, f"ebpfguard-598a-{i}.dns-tunnel-canary.invalid"))
+    th = threading.Thread(target=worker, args=(s, f"c599d-{i}.probe.invalid"))
     threads.append(th)
     th.start()
 for th in threads:
@@ -2492,6 +2632,8 @@ interactive_mode() {
                 run_chmod_attack
                 run_ssh_keys_positive_control
                 run_webshell_script_write_positive_control
+                run_webshell_crontab_positive_control
+                run_container_escape_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack
@@ -2523,6 +2665,8 @@ interactive_mode() {
                 run_chmod_attack
                 run_ssh_keys_positive_control
                 run_webshell_script_write_positive_control
+                run_webshell_crontab_positive_control
+                run_container_escape_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack
@@ -2581,6 +2725,8 @@ full_run() {
     run_chmod_attack
     run_ssh_keys_positive_control
     run_webshell_script_write_positive_control
+    run_webshell_crontab_positive_control
+    run_container_escape_positive_control
     run_log_tamper_attack
     run_setuid_attack
     run_bpf_attack

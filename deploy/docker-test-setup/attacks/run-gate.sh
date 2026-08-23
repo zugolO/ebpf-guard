@@ -98,12 +98,34 @@ NC='\033[0m'
 # постфактум grep'ом по выводу, потому что вывод раскрашен ANSI-кодами и
 # идёт вперемешку с диагностическими echo — печатаются итоговой строкой
 # рядом с PASS/FAIL, чтобы число SKIP было видно без пересчёта вручную.
+# 5.9.9e (№102): вторая, отдельная от преflight (5.9.7h) сверка
+# criteria-index.txt — не «код для пункта написан?» (это уже спрашивает
+# 5.9.7h статическим grep по исходнику ДО чтения снимков), а «строка пункта
+# реально напечаталась на ЭТОМ прогоне?». CRITERIA_SELF_IDS/PATTERNS —
+# только записи с file="-" (печатаются самим run-gate.sh); заполняются
+# ниже, во время того же прохода по criteria-index.txt, что и преflight.
+# record_covered вызывается из pass()/fail()/warn()/skip() автоматически
+# (они уже получают готовый текст строки первым аргументом), плюс явно —
+# из горстки мест, где пункт печатается голым echo, а не через одну из
+# этих функций (см. вызовы record_covered ниже по файлу).
+declare -A CRITERIA_COVERED=()
+CRITERIA_SELF_IDS=()
+CRITERIA_SELF_PATTERNS=()
+record_covered() {
+    local text="$1" i id
+    for i in "${!CRITERIA_SELF_PATTERNS[@]}"; do
+        id="${CRITERIA_SELF_IDS[$i]}"
+        [ -n "${CRITERIA_COVERED[$id]:-}" ] && continue
+        [[ "$text" == *"${CRITERIA_SELF_PATTERNS[$i]}"* ]] && CRITERIA_COVERED[$id]=1
+    done
+}
+
 PASS_COUNT=0
 SKIP_COUNT=0
-pass() { echo -e "${GREEN}[PASS]${NC} $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
-fail() { echo -e "${RED}[FAIL]${NC} $1"; GATE_FAILED=1; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
+pass() { echo -e "${GREEN}[PASS]${NC} $1"; PASS_COUNT=$((PASS_COUNT + 1)); record_covered "$1"; }
+fail() { echo -e "${RED}[FAIL]${NC} $1"; GATE_FAILED=1; record_covered "$1"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1"; record_covered "$1"; }
+skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); record_covered "$1"; }
 
 # sum_metric_delta PATTERN FILE_BASE FILE_FINAL — sums every metric line in
 # each file matching the ERE PATTERN and prints (final-sum − base-sum) as an
@@ -234,6 +256,10 @@ if [ -f "$CRITERIA_INDEX_FILE" ]; then
         [ -z "$ci_pattern" ] && continue
         if [ "$ci_file" = "-" ]; then
             ci_target="${BASH_SOURCE[0]}"
+            # 5.9.9e: те же строки, но для рантайм-сверки «ветка реально
+            # исполнилась», не только «код для неё есть» (см. record_covered).
+            CRITERIA_SELF_IDS+=("$ci_id")
+            CRITERIA_SELF_PATTERNS+=("$ci_pattern")
         else
             ci_target="$GATE_SCRIPT_DIR/$ci_file"
         fi
@@ -825,6 +851,40 @@ else
     metrics_inputs=("$final_metrics")
     basefile_arg=""
 fi
+
+# 5.9.9d (находка №100, P1): позитивный контроль DNS (5.9.8a,
+# --dns-fd-reuse-controls) — отдельный шаг харнесса, ВНЕ окна замера,
+# запускаемый ДО get_baseline_metrics. Событие, поднятое им, уже отражено
+# И в baseline_metrics, И в final_metrics (родилось раньше обоих снимков),
+# поэтому metric_grown_rules (final-baseline) для него всегда 0 — рост не
+# виден ни в одном из трёх окон (attack/idle/gap) ниже. При этом само
+# срабатывание живёт в сторе (final_alerts — полный дамп с момента старта
+# агента, не диф по снимкам) и раньше единственно объяснялось как «конвейер
+# не слился» (only_in_store), хотя это не рассинхронизация метрики и стора,
+# а нормальное поведение метрики для события, случившегося до открытия
+# любого измеряемого окна. Здесь — не диф "attack/idle/gap", а прямое
+# сравнение времени: маркер контроля старше снимка baseline_metrics.
+dns_ctl_marker=$(ls -t "$RESULTS_DIR"/dns-positive-control-*.txt 2>/dev/null | head -1)
+dns_ctl_before_baseline=0
+if [ -n "$dns_ctl_marker" ] && [ -s "$baseline_metrics" ]; then
+    dns_ctl_mtime=$(stat -c %Y "$dns_ctl_marker" 2>/dev/null || echo "")
+    baseline_mtime=$(stat -c %Y "$baseline_metrics" 2>/dev/null || echo "")
+    if [ -n "$dns_ctl_mtime" ] && [ -n "$baseline_mtime" ] && [ "$dns_ctl_mtime" -lt "$baseline_mtime" ]; then
+        dns_ctl_before_baseline=1
+    fi
+fi
+# Правило, уже сработавшее ДО снятия baseline_metrics (ABSOLUTE, не дельта),
+# растёт на 0 между baseline и final по конструкции delta = final - baseline —
+# оно живо, но невидимо ни одному из трёх окон (attack/idle/gap) ниже. Тот же
+# приём, что 5.9.1d ввела для idle_prewindow_list (metric_nonzero_rules над
+# ОДНИМ снимком, не дельта), применённый к снимку baseline_metrics вместо
+# IDLE_METRICS_END.
+preexisting_at_baseline_list=""
+if [ -n "$basefile_arg" ]; then
+    preexisting_at_baseline_list=$( { metric_nonzero_rules ebpf_guard_alerts_total "$baseline_metrics"
+                                       metric_nonzero_rules ebpf_guard_alerts_filtered_total "$baseline_metrics"; } | sort -u)
+fi
+
 detected_type_list=$(awk -F'[{}", ]+' -v basefile="$basefile_arg" '
     function rule_id(   i, rid) {
         rid = ""
@@ -909,6 +969,8 @@ else
         added_gap_count=0
         added_undetermined_count=0
         added_undetermined_ids=""
+        added_induced_count=0
+        added_induced_ids=""
         added_types_analyzed=1
         echo "  добавлено (+$added_count):"
         while IFS= read -r rid; do
@@ -928,7 +990,33 @@ else
             [ "$in_attack" -eq 1 ] && phase_parts="${phase_parts}attack+"
             [ "$in_idle" -eq 1 ] && phase_parts="${phase_parts}idle+"
             [ "$in_gap" -eq 1 ] && phase_parts="${phase_parts}gap+"
-            if [ -n "$phase_parts" ]; then
+            # 5.9.9d (находка №100): четвёртая фаза, проверяемая ДО падения в
+            # "не определена". preexisting_at_baseline_list — тип, чей
+            # ebpf_guard_alerts_total/_filtered_total уже ненулевой В САМОМ
+            # baseline_metrics (не дельта final-baseline, а абсолютное
+            # значение снимка) — то есть сработал ДО того, как baseline был
+            # снят, а не в промежутке между baseline и final. dns_ctl_before_baseline
+            # подтверждает, что такое окно вообще было на этом прогоне (маркер
+            # позитивного контроля DNS старше снимка baseline_metrics) — без
+            # этого условия любое правило, случайно сработавшее до старта
+            # окна по не связанной с контролем причине, маскировалось бы под
+            # "наведено контролем" вместо честного "не определено".
+            in_induced=0
+            if [ "$dns_ctl_before_baseline" -eq 1 ] && echo "$preexisting_at_baseline_list" | grep -qx "$rid"; then
+                in_induced=1
+            fi
+            if [ "$in_induced" -eq 1 ]; then
+                # Формулировка намеренно шире, чем «контроль DNS»: признак
+                # (а) — «ненулевое ЗНАЧЕНИЕ в baseline-снимке» — ловит любое
+                # правило, сработавшее до открытия окна, а до окна на этом
+                # прогоне идут ВСЕ шаги преflight'а (контроли DNS 5.9.8a,
+                # run_ringbuf_overflow 5.9.7b, контроль счётности 5.9.7a).
+                # Маркер контроля DNS здесь — доказательство, что преflight
+                # вообще был, а не имя источника конкретного срабатывания;
+                # называть источником DNS-контроль значило бы приписывать ему
+                # чужие типы (та же неточность, что поправка к №67).
+                phase="наведено шагом преflight'а до открытия baseline (5.9.8a/5.9.9d, №100) — ни одно из измеряемых окон не применимо; источник — один из шагов вне окна, не обязательно контроль DNS"
+            elif [ -n "$phase_parts" ]; then
                 phase="${phase_parts%+}"
             elif [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ]; then
                 phase="фаза не определена — IDLE_METRICS_START/END не заданы"
@@ -940,15 +1028,29 @@ else
             [ "$in_attack" -eq 1 ] && added_attack_count=$((added_attack_count + 1))
             [ "$in_idle" -eq 1 ] && added_idle_count=$((added_idle_count + 1))
             [ "$in_gap" -eq 1 ] && added_gap_count=$((added_gap_count + 1))
-            if [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ]; then
+            if [ "$in_induced" -eq 1 ]; then
+                added_induced_count=$((added_induced_count + 1))
+                added_induced_ids="$added_induced_ids$rid"$'\n'
+            elif [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ]; then
                 added_undetermined_count=$((added_undetermined_count + 1))
                 added_undetermined_ids="$added_undetermined_ids$rid"$'\n'
             fi
             echo "    + $rid ($phase)"
         done <<< "$added_types"
-        echo "  добавлено по фазам: attack=$added_attack_count, idle=$added_idle_count, gap=$added_gap_count, не определено=$added_undetermined_count (сумма может превышать $added_count — правило, выросшее в нескольких окнах, считается в каждом)"
+        echo "  добавлено по фазам: attack=$added_attack_count, idle=$added_idle_count, gap=$added_gap_count, наведено преflight-шагом=$added_induced_count, не определено=$added_undetermined_count (сумма может превышать $added_count — правило, выросшее в нескольких окнах, считается в каждом)"
         if [ "$added_undetermined_count" -gt 0 ] && [ -z "$IDLE_ALERTS_END" ]; then
             echo "  (5.9.6h: gap-окно не проверялось на этом прогоне — IDLE_ALERTS_END не задан; \"не определено\" выше не означает, что фаза действительно отсутствует)"
+        fi
+        # 5.9.9d (находка №100): типы, наведённые позитивным контролем, — не
+        # доказательство детекта продукта (сам факт срабатывания ожидаем и
+        # желателен — это подтверждает, что контроль жив), но и не
+        # "потерянная фаза" критерия 6. Печатаются отдельным списком, чтобы
+        # detection-baseline.txt пополнялся по факту наблюдения (см.
+        # run_dns_cross_thread_positive_control, plan.md 5.9.9d), а не через
+        # общий список "не заносить, фаза не определена" ниже.
+        if [ "$added_induced_count" -gt 0 ]; then
+            echo "  наведено шагом преflight'а (вне измеряемых окон), не входит в \"не определено\" ($added_induced_count шт., заносить в detection-baseline.txt отдельной строкой с пояснением после наблюдения):"
+            echo "$added_induced_ids" | grep -v '^$' | sed 's/^/    * /'
         fi
         # 5.9.7e (находка №81): фаза "не определена" — не доказательство
         # детекта (могло быть ssh-логином оператора, ручной командой, чем
@@ -1126,11 +1228,28 @@ else
     if [ -n "$(echo "$added_types" | grep -v '^$' || true)" ] || [ -n "$(echo "$lost_types" | grep -v '^$' || true)" ]; then
         diff_signature=$(printf 'added:\n%s\nlost:\n%s\n' "$added_types" "$lost_types")
     fi
-    if [ -n "$diff_signature" ]; then
-        if [ -f "$diff_state_file" ] && [ "$(cat "$diff_state_file")" = "$diff_signature" ]; then
+    # 5.9.9a (находка №99): detection-baseline-diff-state.txt несёт TIMESTAMP
+    # замера первой строкой, тело сигнатуры — ниже. Без этого гейт,
+    # запускаемый дважды за один и тот же замер (второй ручной вызов после
+    # full_run() run-all-attacks.sh — обычный режим разбора без цепочки),
+    # сравнивает сигнатуру со своим же первым вызовом и печатает "база
+    # брошена" на одном расхождении — самонаведение измерителя, не находка.
+    # Если сохранённый TIMESTAMP равен текущему — это тот же замер, а не
+    # следующий: WARN не печатается, файл не перезаписывается и веткой
+    # rm -f не трогается. Разные TIMESTAMP — сравнение тел, как раньше.
+    saved_state_ts=""
+    saved_signature=""
+    if [ -f "$diff_state_file" ]; then
+        saved_state_ts=$(head -1 "$diff_state_file")
+        saved_signature=$(tail -n +2 "$diff_state_file")
+    fi
+    if [ -f "$diff_state_file" ] && [ "$saved_state_ts" = "$TIMESTAMP" ]; then
+        : # тот же замер, что уже оставил файл — состояние не трогаем
+    elif [ -n "$diff_signature" ]; then
+        if [ -f "$diff_state_file" ] && [ "$saved_signature" = "$diff_signature" ]; then
             warn "состав детекта расходится с detection-baseline.txt уже второй замер подряд тем же набором типов (добавлено $added_count, потеряно $lost_count вне intentional-loss.txt) — база брошена, обновить detection-baseline.txt и записать в plan.md"
         fi
-        echo "$diff_signature" > "$diff_state_file"
+        printf '%s\n%s\n' "$TIMESTAMP" "$diff_signature" > "$diff_state_file"
     elif [ -f "$diff_state_file" ]; then
         rm -f "$diff_state_file"
     fi
@@ -1319,6 +1438,7 @@ echo ""
 # run_ringbuf_overflow (5.9.7b), потому что оба шага пишутся отдельным
 # вызовом скрипта со своим собственным TIMESTAMP.
 echo "=== 5.9.8a. DNS: негативный + позитивный контроль переиспользования fd (№94) ==="
+record_covered "=== 5.9.8a. DNS: негативный + позитивный контроль"
 dns_neg_marker=$(ls -t "$RESULTS_DIR"/dns-negative-control-*.txt 2>/dev/null | head -1)
 dns_pos_marker=$(ls -t "$RESULTS_DIR"/dns-positive-control-*.txt 2>/dev/null | head -1)
 
@@ -1419,6 +1539,7 @@ echo ""
 # прогон), по каждому экземпляру (rule_id + comm) либо 0, либо объяснено в
 # dns-idle-fp.txt.
 echo "=== 5.9.7f. DNS-FP на idle: прирост long-label правил за idle-час = 0 либо объяснено ==="
+record_covered "=== 5.9.7f. DNS-FP"
 if [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ] \
     || [ ! -s "$IDLE_METRICS_START" ] || [ ! -s "$IDLE_METRICS_END" ]; then
     skip "IDLE_METRICS_START/END не заданы — прирост DNS long-label правил за idle-час не измерен"
@@ -2099,19 +2220,23 @@ else
                 fi
                 echo "  окно: ${blind_min} мин, новых алертов (по id, вне idle-часа): $blind_new_alerts (темп: ${blind_rate}/мин)"
                 echo "  (для сравнения: измеряемые окна атаки/idle дают $attacker_rate/мин и (idle-час) отдельно)"
-                if awk -v n="$blind_new_alerts" 'BEGIN{exit !(n<=5)}'; then
-                    pass "объём слепого окна $blind_new_alerts <= 5 — содержимое окна пренебрежимо (5.9.6h)"
-                elif [ "$baseline_types_present" -eq 0 ]; then
-                    # detection-baseline.txt отсутствует вовсе — added_count
-                    # недостоверен (не 0, а "не считался"), ни разбор по
-                    # фазам, ни разбор по составу (5.9.7g/5.9.8g) провести не на чем.
-                    skip "объём слепого окна $blind_new_alerts > 5, а detection-baseline.txt отсутствует — added_count не определён, ни фазы, ни разбор по составу (5.9.7g/5.9.8g) не проверены"
-                else
-                    # 5.9.8g (находки №95/№96): разбор по составу окна больше
-                    # не условен на added_count<3 (5.9.7g) — критерий "0
-                    # алертов от дерева измерителя" обязан держаться в ЛЮБОМ
-                    # слепом окне, не только в статистически ненадёжном по
-                    # числу добавленных типов. Дерево измерителя
+                # 5.9.9e (№102, находка №2.9.8): разбор по составу раньше был
+                # условен на blind_new_alerts > 5 — окно с 1-5 новыми алертами
+                # получало ранний PASS по объёму и НИКОГДА не проверялось на
+                # присутствие дерева измерителя. Пункт постановки существовал
+                # (5.9.7g/5.9.8g), а ветка для малых окон не исполнялась —
+                # именно тот разрыв, который эта волна закрывает. Теперь
+                # разбор считается всегда, когда есть чем его считать
+                # (detection-baseline.txt доступен), а ранний PASS по объёму
+                # остаётся вердиктом — но harness_alerts > 0 проваливает
+                # критерий безусловно, даже если blind_new_alerts <= 5.
+                harness_alerts=0
+                background_alerts=0
+                background_breakdown=""
+                composition_checked=0
+                if [ "$baseline_types_present" -ne 0 ]; then
+                    composition_checked=1
+                    # 5.9.8g (находки №95/№96): дерево измерителя
                     # run-all-attacks.sh/idle-run.sh: инструменты, которые сам
                     # харнесс порождает в прологе сбора baseline, в
                     # периодических срезах и в постобработке idle-run.sh
@@ -2136,10 +2261,8 @@ else
                         | map({comm: (.[0].comm // "(пусто)"), count: length})
                         | sort_by(-.count)')
                     harness_comms='bash sh curl jq grep awk sed cat cut tr head tail wc sort seq sleep date rm ps dirname basename mktemp stat systemctl tar journalctl du'
-                    harness_alerts=0
-                    background_alerts=0
-                    background_breakdown=""
                     echo "  разбор по составу (5.9.7g/5.9.8g):"
+                    record_covered "разбор по составу (5.9.7g/5.9.8g)"
                     while IFS= read -r row; do
                         [ -z "$row" ] && continue
                         row_comm=$(echo "$row" | jq -r '.comm')
@@ -2163,6 +2286,20 @@ else
                     # проваливают критерий 16 сами по себе — это наблюдение,
                     # не промах.
                     echo "  дерево измерителя: $harness_alerts алерт(ов); фон вне дерева измерителя (5.9.8g): $background_alerts алерт(ов)${background_breakdown:+ (${background_breakdown# })}"
+                    record_covered "фон вне дерева измерителя (5.9.8g)"
+                fi
+                if awk -v n="$blind_new_alerts" 'BEGIN{exit !(n<=5)}'; then
+                    if [ "$composition_checked" -eq 1 ] && [ "$harness_alerts" -gt 0 ]; then
+                        fail "объём слепого окна $blind_new_alerts <= 5, но $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — observer_root не подхвачен агентом на этом прогоне (5.9.7g/5.9.8g/5.9.9e)"
+                    else
+                        pass "объём слепого окна $blind_new_alerts <= 5 — содержимое окна пренебрежимо (5.9.6h)"
+                    fi
+                elif [ "$composition_checked" -eq 0 ]; then
+                    # detection-baseline.txt отсутствует вовсе — added_count
+                    # недостоверен (не 0, а "не считался"), ни разбор по
+                    # фазам, ни разбор по составу (5.9.7g/5.9.8g) провести не на чем.
+                    skip "объём слепого окна $blind_new_alerts > 5, а detection-baseline.txt отсутствует — added_count не определён, ни фазы, ни разбор по составу (5.9.7g/5.9.8g) не проверены"
+                else
                     if [ "$harness_alerts" -gt 0 ]; then
                         fail "объём слепого окна $blind_new_alerts > 5, и $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — observer_root не подхвачен агентом на этом прогоне (5.9.7g/5.9.8g)"
                     elif [ "$added_count" -lt 3 ]; then
@@ -2234,6 +2371,59 @@ else
         else
             fail "$unexplained_count правил(о) немы за весь аптайм без строки в silent-rules.txt (категория (в)): $(echo "$unexplained" | tr '\n' ' ') (5.9.7e: немых за аптайм без объяснения)"
         fi
+    fi
+fi
+echo ""
+
+# 5.9.9c (находка №101): наблюдение без порога, а не критерий — сколько
+# правил детект-базы имеют исполненный позитивный контроль в
+# attack-manifest.json на этом прогоне, а не полагаются на органический
+# трафик атак/простоя. Смысл в различении двух разных немот: правило БЕЗ
+# контроля, замолчавшее за весь аптайм, — категория (в) выше и FAIL; правило
+# С контролем, замолчавшее несмотря на него, — совсем другая находка (сам
+# контроль сломан), которую этот счётчик не проверяет по существу, но делает
+# видимой без ручного вспоминания, у какого правила контроль вообще есть.
+# Карта статическая и пополняется штучно вместе с каждым run_*_positive_control
+# (ssh_keys — 5.9.7e, webshell_* — 5.9.8g/5.9.9b, container_escape — 5.9.9c),
+# а не выводится автоматически из имён функций run-all-attacks.sh.
+# У двух правил семьи webshell_* категории РАЗНЫЕ намеренно: одна на обоих
+# (как было в первой редакции 5.9.9c) означала бы, что исполнившийся
+# контроль script_write засчитывает контроль crontab, которого не было —
+# счётчик, врущий ровно про то, что он заведён различать.
+declare -A positive_control_rule_categories=(
+    [rootkit_ssh_authorized_keys_modified]="ssh_keys_positive_control"
+    [webshell_script_write_via_web_process]="webshell_positive_control"
+    [webshell_crontab_modification]="webshell_crontab_positive_control"
+    [container_escape_cap_sys_admin]="container_escape_positive_control"
+)
+echo "=== 5.9.9c. Правила детект-базы с позитивным контролем в манифесте ==="
+# 5.9.9e: заголовок печатается голым echo (секция — наблюдение без порога, у
+# неё нет ни pass, ни fail в общем случае), поэтому рантайм-отметку надо
+# ставить явно — иначе 5.9.9c попадает в список «ветка не исполнилась» на
+# КАЖДОМ прогоне и валит собственный критерий 5.9.9e в SKIP.
+record_covered "=== 5.9.9c. Правила детект-базы с позитивным контролем в манифесте ==="
+if [ ! -f "$baseline_types_file" ]; then
+    skip "$baseline_types_file отсутствует — соответствие правило/контроль не проверено"
+else
+    baseline_all_rules=$(grep -vE '^\s*(#|$)' "$baseline_types_file" | tr -d '\r' | sort -u)
+    baseline_rule_count=$(echo "$baseline_all_rules" | grep -c . || true)
+    manifest_categories_present=""
+    if [ -f "$manifest_file" ] && command -v jq &> /dev/null; then
+        manifest_categories_present=$(jq -r '[.[].category] | unique | .[]' "$manifest_file" 2>/dev/null)
+    fi
+    covered_count=0
+    covered_ids=""
+    for rid in $baseline_all_rules; do
+        cat="${positive_control_rule_categories[$rid]:-}"
+        [ -z "$cat" ] && continue
+        if echo "$manifest_categories_present" | grep -qx "$cat"; then
+            covered_count=$((covered_count + 1))
+            covered_ids="$covered_ids$rid"$'\n'
+        fi
+    done
+    echo "  правила детект-базы, у которых есть позитивный контроль в манифесте: $covered_count из $baseline_rule_count"
+    if [ "$covered_count" -gt 0 ]; then
+        echo "$covered_ids" | grep -v '^$' | sed 's/^/    * /'
     fi
 fi
 echo ""
@@ -2526,6 +2716,7 @@ echo ""
 # исполненный ПЕРВЫМ (до idle и до drop — иначе его собственное окно понесёт
 # хвост от их канареек).
 echo "=== 20. Контроль счётности: null/idle/drop, остаток после вычета фона (5.9.7a) ==="
+record_covered "=== 20. Контроль счётности"
 c20_null_marker="$RESULTS_DIR/counting-control-null-$TIMESTAMP.txt"
 c20_null_rate=0
 c20_null_jitter=5
@@ -2779,6 +2970,13 @@ echo ""
 # подтверждение 5.9.6a, которого №2.9.6 не дало. Маркер пишется ЭТИМ шагом
 # заранее, отдельно от baseline/final основного окна.
 echo "=== 22. run_ringbuf_overflow: переполнение под контролем + bpf_lost_events_total живьём (5.9.7b/5.9.8c, №79/№92) ==="
+# 5.9.9e: строка передаётся ЦЕЛИКОМ, а не обрезанным началом заголовка —
+# в criteria-index.txt на эту секцию заведены ДВА паттерна разной длины
+# ("=== 22. run_ringbuf_overflow" для 5.9.7b и "=== 22. run_ringbuf_overflow:
+# переполнение под контролем" для 5.9.8c), а record_covered ищет паттерн
+# ПОДСТРОКОЙ в переданном тексте: короткий аргумент покрыл бы только первый
+# из них, и 5.9.8c числился бы неисполнившимся на каждом прогоне.
+record_covered "=== 22. run_ringbuf_overflow: переполнение под контролем + bpf_lost_events_total живьём (5.9.7b/5.9.8c, №79/№92) ==="
 ringbuf_overflow_marker=$(ls -t "$RESULTS_DIR"/ringbuf-overflow-*.txt 2>/dev/null | head -1)
 if [ -z "$ringbuf_overflow_marker" ] || [ ! -f "$ringbuf_overflow_marker" ]; then
     skip "run_ringbuf_overflow не запускался — маркер ringbuf-overflow-*.txt отсутствует; сборка/пайплайн старее 5.9.7b"
@@ -2829,6 +3027,7 @@ echo ""
 # находка №93. Критерий: причина печатается для всех четырёх маркеров
 # (null/idle/drop/run_ringbuf_overflow), и ни один не "ceiling".
 echo "=== 5.9.8f. settle_reason: контроль счётности сообщает причину остановки (№93) ==="
+record_covered "=== 5.9.8f. settle_reason"
 settle_reason_ceiling_count=0
 settle_reason_checked=0
 for settle_label in null idle drop; do
@@ -2873,12 +3072,79 @@ echo ""
 # uncovered_criteria_count > 0 — эта проверка добивает единственный
 # оставшийся случай, когда реестр отсутствовал вовсе (-1, "не проверено"), и
 # не даёт такому прогону просто промолчать по этому пункту в финальной строке.
+#
+# 5.9.9e: этот блок стоит ПЕРЕД сводкой «ветка не исполнилась» ниже
+# намеренно. Строка 5.9.7h — единственная машинная печать своего пункта, и
+# считает её рантайм-сверка через record_covered из pass()/fail(); стой она
+# после сводки, 5.9.7h попадал бы в список неисполнившихся на каждом
+# прогоне (то же самонаведение, что чинится у 5.9.9e ниже).
 if [ "$uncovered_criteria_count" -lt 0 ]; then
     fail "непокрытых пунктов постановки: не проверено (criteria-index.txt отсутствовал) (5.9.7h)"
 elif [ "$uncovered_criteria_count" -gt 0 ]; then
     fail "непокрытых пунктов постановки: $uncovered_criteria_count (5.9.7h)"
 else
     pass "непокрытых пунктов постановки: 0 (5.9.7h)"
+fi
+echo ""
+
+# 5.9.9e (№102): «пункты постановки, чья ветка не исполнилась на этом
+# прогоне» — вопрос, ОТДЕЛЬНЫЙ от преflight'а 5.9.7h выше. Преflight
+# отвечает «код для пункта написан?» статическим grep по исходнику ДО
+# чтения снимков этого прогона; здесь спрашивается «строка пункта реально
+# напечаталась СЕЙЧАС?». №2.9.8 показал, что ответы расходятся: код для
+# разбора по составу (5.9.7g/5.9.8g) существовал и проходил преflight, но
+# ветка не исполнялась на окнах с blind_new_alerts<=5 (закрыто выше в этой
+# же правке) — преflight такой разрыв в принципе не видит, потому что он не
+# смотрит на то, что реально напечаталось.
+#
+# id с file="-" в criteria-index.txt считается исполнившимся, если хотя бы
+# один pass()/fail()/warn()/skip() или explicit record_covered() с этим id
+# уже отметил его через CRITERIA_COVERED (см. определения выше). id с
+# файлом, отличным от "-", считается исполнившимся, если его паттерн сейчас
+# найден в этом файле — тот же grep -F, что и в преflight'е, но выполненный
+# ПОСЛЕ прогона, по свежему артефакту (rules/*.yaml, dns-idle-fp.txt,
+# detection-baseline.txt, вывод replay-gate.sh), а не по состоянию до него.
+#
+# Собственная строка 5.9.9e отмечается ДО подсчёта, а не через pass()/skip()
+# ниже: её record_covered сработал бы уже ПОСЛЕ того, как список посчитан, и
+# пункт 5.9.9e числился бы неисполнившимся на каждом прогоне — то есть
+# механизм самонаведённо валил бы сам себя в SKIP, ровно тот класс дефекта
+# (№99), который эта же волна чинит у сигнатуры состава детекта. Отметка
+# здесь честна: строка ниже печатается безусловно, у неё нет ветвления.
+record_covered "пунктов постановки с неисполнившейся веткой"
+unexecuted_criteria_ids=""
+unexecuted_criteria_count=0
+if [ -f "$CRITERIA_INDEX_FILE" ]; then
+    declare -A _final_id_covered=()
+    _final_ordered_ids=()
+    while IFS=$'\t' read -r ci_id ci_file ci_pattern; do
+        [ -z "$ci_id" ] && continue
+        case "$ci_id" in "#"*) continue ;; esac
+        [ -z "$ci_pattern" ] && continue
+        if [[ ! " ${_final_ordered_ids[*]-} " == *" $ci_id "* ]]; then
+            _final_ordered_ids+=("$ci_id")
+        fi
+        if [ "$ci_file" = "-" ]; then
+            [ -n "${CRITERIA_COVERED[$ci_id]:-}" ] && _final_id_covered[$ci_id]=1
+        else
+            ci_target="$GATE_SCRIPT_DIR/$ci_file"
+            [ -f "$ci_target" ] && grep -qF -- "$ci_pattern" "$ci_target" && _final_id_covered[$ci_id]=1
+        fi
+    done < "$CRITERIA_INDEX_FILE"
+    for _fid in "${_final_ordered_ids[@]}"; do
+        if [ -z "${_final_id_covered[$_fid]:-}" ]; then
+            unexecuted_criteria_count=$((unexecuted_criteria_count + 1))
+            unexecuted_criteria_ids="$unexecuted_criteria_ids $_fid"
+        fi
+    done
+fi
+echo "пункты постановки, чья ветка не исполнилась на этом прогоне:${unexecuted_criteria_ids:- (пусто)}"
+if [ ! -f "$CRITERIA_INDEX_FILE" ]; then
+    skip "пункты постановки с неисполнившейся веткой: не проверено (criteria-index.txt отсутствовал) (5.9.9e, №102)"
+elif [ "$unexecuted_criteria_count" -gt 0 ]; then
+    skip "пунктов постановки с неисполнившейся веткой: $unexecuted_criteria_count — это SKIP, а не PASS (5.9.9e, №102)"
+else
+    pass "пунктов постановки с неисполнившейся веткой: 0 (5.9.9e, №102)"
 fi
 echo ""
 

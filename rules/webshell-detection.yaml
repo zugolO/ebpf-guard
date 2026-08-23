@@ -202,12 +202,35 @@ rules:
     name: "Web process modified crontab (persistence)"
     description: "Web server worker wrote to /etc/cron* — persistence via web shell after initial compromise."
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/etc/cron"
-        - "/var/spool/cron"
+    # 5.9.9b (находка №98): до этой правки условие проверяло только путь и
+    # матчило ЛЮБОЙ comm — сообщение правила обещало "web server worker", а
+    # условие этого не проверяло. Часовой тик /etc/cron.hourly
+    # (comm=run-parts, штатный системный cron) давал critical раз в час без
+    # какой-либо атаки — тот же класс FP, что 5.9.8g (находка №96) починила у
+    # webshell_script_write_via_web_process, разобранный тогда как единичный
+    # случай вместо класса. condition_group сужает срабатывание до comm
+    # веб-воркера тем же приёмом; сужение без живого позитивного контроля на
+    # том же прогоне не принимается (запрет №6 постановки) —
+    # run_webshell_crontab_positive_control в run-all-attacks.sh.
+    # Аудит соседей по файлу (см. №98, plan.md 5.9.9b) дал ещё три правила,
+    # обещающих веб-процесс без предиката на comm — webshell_htaccess_modification,
+    # webshell_apache_config_modified, webshell_ssrf_aws_metadata — и все
+    # три сужать вредно: путь /var/www или /etc/apache2 сам означает веб, и
+    # 169.254.169.254 подозрителен от любого процесса. Не трогаются.
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values:
+            - "apache2"
+            - "nginx"
+            - "httpd"
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/cron"
+            - "/var/spool/cron"
     severity: critical
     action: alert
     tags: [mitre:T1505.003, mitre:T1053.003, webshell, persistence]

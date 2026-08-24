@@ -126,9 +126,30 @@ if [ -n "$top_level_reg" ]; then
 fi
 echo "  ок: корень наблюдателя регистрируется только внутри пролога"
 
+# 5.9.9.Fg (находка №112, ЭТА ПРАВКА): все сторожа «определён и вызывается»
+# ниже искали вызов ПО ВСЕМУ файлу — а вызовы шагов есть ещё и в
+# interactive_mode (пункты меню 1 и 6), который на замере не исполняется
+# никогда. Поэтому сторож проходил на функции, отсутствующей в full_run(), —
+# ровно то, что он обязан ловить, и ровно это и случилось с
+# run_cred_proc_maps_positive_control (её не было в full_run(); исправлено
+# той же правкой). Проверяем ТЕЛО full_run(), а не файл.
+# Шаги волны делятся на два класса, и оба законны:
+#   - внутри full_run() — окно замера (крит. 7 читает их по манифесту);
+#   - внутри своей ветки main() (--dns-fd-reuse-controls, --counting-control,
+#     --ringbuf-overflow, --cred-proc-maps-control) — вне окна, по запрету №3.
+# Незаконен ровно один случай: вызов ТОЛЬКО из interactive_mode, который на
+# замере не исполняется никогда. Поэтому ищем вызов в файле БЕЗ тела
+# interactive_mode.
+calls_outside_menu() {
+    sed '/^interactive_mode() {/,/^}/d' $SETUP/attacks/run-all-attacks.sh | grep -qE "^[[:space:]]+$1[[:space:]]*$"
+}
+calls_in_full_run() {
+    sed -n '/^full_run() {/,/^}/p' $SETUP/attacks/run-all-attacks.sh | grep -qE "^[[:space:]]+$1[[:space:]]*$"
+}
+
 echo "--- преflight: позитивный контроль 5.9.7e присутствует в цепочке (риск №3) ---"
 grep -q 'run_ssh_keys_positive_control()' $SETUP/attacks/run-all-attacks.sh || die "риск №3: run_ssh_keys_positive_control отсутствует"
-grep -qE '^[[:space:]]+run_ssh_keys_positive_control[[:space:]]*$' $SETUP/attacks/run-all-attacks.sh || die "риск №3: run_ssh_keys_positive_control определён, но не вызывается"
+calls_in_full_run run_ssh_keys_positive_control || die "риск №3: run_ssh_keys_positive_control определён, но не вызывается из full_run()"
 echo "  ок: позитивный контроль 5.9.7e в цепочке"
 
 # То же требование, но для волны 5.9.8: три шага харнесса, без которых три
@@ -137,7 +158,7 @@ echo "  ок: позитивный контроль 5.9.7e в цепочке"
 echo "--- преflight: шаги волны 5.9.8 присутствуют в цепочке ---"
 for fn in run_dns_fd_reuse_negative_control run_dns_cross_thread_positive_control run_webshell_script_write_positive_control; do
     grep -q "^$fn()" $SETUP/attacks/run-all-attacks.sh || die "5.9.8: $fn отсутствует в run-all-attacks.sh — соответствующий пункт постановки без входа"
-    grep -qE "^[[:space:]]+$fn[[:space:]]*$" $SETUP/attacks/run-all-attacks.sh || die "5.9.8: $fn определён, но не вызывается — шаг не исполнится"
+    calls_outside_menu "$fn" || die "5.9.8: $fn вызывается только из interactive_mode — на замере шаг не исполнится (находка №112)"
     echo "  ок: $fn определён и вызывается"
 done
 
@@ -148,7 +169,7 @@ done
 echo "--- преflight: шаги волны 5.9.9 присутствуют в цепочке ---"
 for fn in run_webshell_crontab_positive_control run_container_escape_positive_control; do
     grep -q "^$fn()" $SETUP/attacks/run-all-attacks.sh || die "5.9.9: $fn отсутствует в run-all-attacks.sh — соответствующий пункт постановки без входа"
-    grep -qE "^[[:space:]]+$fn[[:space:]]*$" $SETUP/attacks/run-all-attacks.sh || die "5.9.9: $fn определён, но не вызывается — шаг не исполнится"
+    calls_in_full_run "$fn" || die "5.9.9: $fn определён, но не вызывается из full_run() — шаг не исполнится"
     echo "  ок: $fn определён и вызывается"
 done
 
@@ -162,11 +183,11 @@ done
 # детекта».
 echo "--- преflight: шаг и юнит-тесты волны 5.9.9.F присутствуют (5.9.9.Fa, №107) ---"
 grep -q "^run_cred_proc_maps_positive_control()" $SETUP/attacks/run-all-attacks.sh     || die "5.9.9.Fa: run_cred_proc_maps_positive_control отсутствует — суженное cred_proc_maps_mass_read остаётся без единого входа (находка №57)"
-grep -qE "^[[:space:]]+run_cred_proc_maps_positive_control[[:space:]]*$" $SETUP/attacks/run-all-attacks.sh     || die "5.9.9.Fa: run_cred_proc_maps_positive_control определён, но не вызывается — шаг не исполнится"
+calls_in_full_run run_cred_proc_maps_positive_control     || die "5.9.9.Fa: run_cred_proc_maps_positive_control определён, но не вызывается из full_run() — шаг не исполнится (находка №112)"
 grep -q '\^/proc/\[0-9\]+/(task/\[0-9\]+/)?(maps|mem|environ)\$' rules/credential-access.yaml     || die "5.9.9.Fa: numeric-PID предикат отсутствует в rules/credential-access.yaml — правка №107 не в дереве"
 go test -count=1 -v ./internal/correlator/ -run 'TestP1_17_CredProcMapsMassRead_NumericPID|TestP1_17_ProcSelfNarrowingIsRuleLocal' 2>&1     | grep -E '^(=== RUN|--- |ok|FAIL)' | sed 's/^/  /'
 go test -count=1 ./internal/correlator/ -run 'TestP1_17_CredProcMapsMassRead_NumericPID|TestP1_17_ProcSelfNarrowingIsRuleLocal' >/dev/null 2>&1     || die "5.9.9.Fa: юнит-тесты красные — либо сужение не доказано как не-ослепление, либо нарушен запрет волны (/proc/self у owasp_web_sensitive_file_read)"
-echo "  ок: шаг в цепочке, оба юнит-теста зелёные"
+echo "  ок: шаг вызывается из full_run(), оба юнит-теста зелёные"
 
 # Сторож 5.9.8a на уровне ИСХОДНИКА BPF: ключ dns_socket_map обязан быть
 # процессным (tgid), а не потоковым. Проверяется здесь, а не только в
@@ -545,6 +566,57 @@ grep -q '^canary_sum=' "$rb_marker" \
     || echo "ВНИМАНИЕ: маркер без canary_sum — секция 22 посчитает по запасному пути с вычетом фона (5.9.8c не исполнена этим прогоном)"
 echo "5.9.7b/5.9.8c доказан живьём в $(date -u +%H:%M:%S) UTC"
 
+echo "=== [9.5/14] позитивный контроль cred_proc_maps_mass_read живьём (5.9.9.Fg, находка №112) ==="
+# Только на предпрогоне. На полном замере шаг стоит ВНУТРИ full_run() (окно
+# атак) — там его читает крит. 7, и второй прогон вне окна дал бы правилу
+# ненулевой абсолют ДО idle-часа, то есть включил бы ветку спасения фонового
+# правила чужой заслугой и замаскировал бы настоящий регресс в крит. 6.
+#
+# Смысл шага ровно тот же, что у контролей DNS в [7/14]: сужение
+# cred_proc_maps_mass_read до numeric-PID (5.9.9.Fa) правит ПРАВИЛО, и
+# «сработает ли оно на живом ядре» офлайн-реплеем не проверяется никак —
+# юнит-тест судит матчер, а не путь ядро→коллектор→корреляция→стор.
+if [ "${SMOKE_ONLY:-0}" = "1" ]; then
+    cd $SETUP/attacks
+    CRED_API="http://${VPS_IP:-localhost}:19090"
+    CRED_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
+    cred_alerts() { curl -s --max-time 15 -H "Authorization: Bearer $CRED_TOKEN" "$CRED_API/api/v1/alerts" 2>/dev/null; }
+    cred_count() { cred_alerts | jq --arg r "$1" '[.[]|select(.rule_id==$r)]|length' 2>/dev/null || echo 0; }
+
+    cred_before=$(cred_count cred_proc_maps_mass_read)
+    dump_before=$(cred_count sigma_memory_proc_dump)
+    echo "  до контроля: cred_proc_maps_mass_read=$cred_before sigma_memory_proc_dump=$dump_before"
+
+    EBPF_GUARD_API="$CRED_API" EBPF_GUARD_TOKEN="$CRED_TOKEN" \
+        bash ./run-all-attacks.sh --cred-proc-maps-control 2>&1 | tee /root/cred-proc-maps-2.9.9.F.txt
+    cred_marker=$(ls -t $SETUP/attacks/attack-results/cred-proc-maps-control-*.txt 2>/dev/null | head -1)
+    [ -n "$cred_marker" ] || die "5.9.9.Fa: позитивный контроль не оставил маркера — шаг не исполнен"
+    sed 's/^/  маркер: /' "$cred_marker"
+    grep -q '^skipped=1' "$cred_marker" && die "5.9.9.Fa: контроль пропущен харнессом: $(awk -F= '$1=="skip_reason"{$1="";print substr($0,2)}' "$cred_marker") — это дефект стенда, не детекта"
+    grep -q '^done=1' "$cred_marker" || die "5.9.9.Fa: контроль не дочитал /proc/<pid>/maps (done!=1) — шаг не состоялся"
+
+    # Порог правила — 5 за 10 с; корреляция и запись в стор идут асинхронно.
+    sleep 20
+    cred_after=$(cred_count cred_proc_maps_mass_read)
+    dump_after=$(cred_count sigma_memory_proc_dump)
+    echo "  после контроля: cred_proc_maps_mass_read=$cred_after (Δ$((cred_after - cred_before))) sigma_memory_proc_dump=$dump_after (Δ$((dump_after - dump_before)))"
+    cred_alerts | jq -r '.[]|select(.rule_id=="cred_proc_maps_mass_read")|"    \(.rule_id) comm=\(.comm) pid=\(.pid) \(.message)"' 2>/dev/null | tail -5
+
+    [ "$((cred_after - cred_before))" -ge 1 ] \
+        || die "5.9.9.Fa ПРОВАЛЕН живьём: 8 чтений /proc/<pid>/maps процессом comm=credscrape не дали НИ ОДНОГО алерта cred_proc_maps_mass_read. Сужение до numeric-PID ослепило правило (находка №57) — полный замер объявил бы это регрессом детекта в крит. 6 после потраченного idle-часа"
+    # sigma_memory_proc_dump — без порога, судится наблюдением: у него нет
+    # threshold, и он обязан подняться на тех же чтениях. Ноль здесь — не
+    # стоп волны 5.9.9.F, но это вход в отдельную находку, и он должен быть
+    # виден в логе предпрогона, а не всплыть на приёмке.
+    if [ "$((dump_after - dump_before))" -lt 1 ]; then
+        echo "ВНИМАНИЕ: sigma_memory_proc_dump не сработал на тех же 8 чтениях (Δ=0) — правило без порога обязано было подняться; отдельная находка, цепочку не останавливает"
+    fi
+    echo "5.9.9.Fa доказан живьём в $(date -u +%H:%M:%S) UTC: суженное правило видит чтение чужого /proc/<pid>/maps"
+    rm -f /tmp/credscrape
+else
+    echo "  пропущено: на полном замере шаг исполняется внутри full_run() (окно атак), крит. 7"
+fi
+
 # SMOKE_ONLY=1 — короткий прогон «сборка + живые доказательства», без
 # idle-часа и атак (~15 минут вместо ~1ч50м). Именно здесь его место: всё,
 # что выше, проверяется машинно и способно провалиться, а всё, что ниже, —
@@ -554,7 +626,7 @@ echo "5.9.7b/5.9.8c доказан живьём в $(date -u +%H:%M:%S) UTC"
 # а не на 90-й. Приёмкой волны такой прогон НЕ является: пункты 1, 5-7, 10,
 # 16, 20, 23, 24 постановки имеют входом только idle-час.
 if [ "${SMOKE_ONLY:-0}" = "1" ]; then
-    echo "=== SMOKE_ONLY=1: сборка, SMOKE, оба контроля DNS, контроль счётности и переполнение кольца пройдены ==="
+    echo "=== SMOKE_ONLY=1: сборка, SMOKE, оба контроля DNS, контроль счётности, переполнение кольца и позитивный контроль cred_proc_maps пройдены ==="
     echo "=== idle-час, атаки и гейт НЕ запускались — это не приёмка волны 5.9.8 ==="
     echo "=== ПРЕФИКС №2.9.9.F ЗАВЕРШЁН $(date -u +%H:%M:%S) UTC ==="
     touch /root/PIPELINE-2.9.9.F-DONE

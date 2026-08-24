@@ -1278,6 +1278,13 @@ run_container_escape_positive_control() {
 # засчитывалась бы по алертам ЛЮБОГО шага харнесса — крит. 7 (recall) стал
 # бы вакуумным, а разбор 5.9.9.Fd отнёс бы шаг к дереву измерителя.
 run_cred_proc_maps_positive_control() {
+    # 5.9.9.Fg (находка №112): маркер — как у контролей DNS и счётности.
+    # Без него шаг неотличим машинно в трёх исходах («не исполнился»,
+    # «исполнился, правило промолчало», «исполнился и сработал»), а
+    # предпрогону нужен именно первый-против-второго: cp /bin/cat не удался —
+    # это стенд, а молчащее правило — регресс детекта.
+    local marker="$RESULTS_DIR/cred-proc-maps-control-$TIMESTAMP.txt"
+
     log "==========================================="
     log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.Fa (находка №107): чтение /proc/<pid>/maps чужого процесса"
     log "==========================================="
@@ -1285,6 +1292,8 @@ run_cred_proc_maps_positive_control() {
     local reader="/tmp/credscrape"
     if ! cp /bin/cat "$reader" 2>/dev/null || ! chmod 0755 "$reader" 2>/dev/null; then
         warn "не удалось подготовить $reader — позитивный контроль 5.9.9.Fa пропущен, сужение cred_proc_maps_mass_read остаётся недоказанным (находка №57)"
+        echo "skipped=1" > "$marker"
+        echo "skip_reason=cp /bin/cat /tmp/credscrape не удался" >> "$marker"
         echo ""
         return
     fi
@@ -1300,6 +1309,8 @@ run_cred_proc_maps_positive_control() {
         warn "$maps недоступен — позитивный контроль 5.9.9.Fa не исполнен"
         kill "$target_pid" 2>/dev/null || true
         rm -f "$reader"
+        echo "skipped=1" > "$marker"
+        echo "skip_reason=$maps недоступен" >> "$marker"
         echo ""
         return
     fi
@@ -1319,6 +1330,15 @@ run_cred_proc_maps_positive_control() {
     kill "$target_pid" 2>/dev/null || true
     wait "$target_pid" 2>/dev/null || true
     rm -f "$reader"
+
+    {
+        echo "skipped=0"
+        echo "done=$cs_done"
+        echo "comm=credscrape"
+        echo "reads=8"
+        echo "target_pid=$target_pid"
+        echo "maps_path=$maps"
+    } > "$marker"
 
     # Только по факту исполнения — как у 5.9.9b/5.9.9c: категория новая, и
     # записанная вхолостую она уронила бы крит. 7 (recall) на шаге, который
@@ -2945,6 +2965,7 @@ full_run() {
     run_webshell_script_write_positive_control
     run_webshell_crontab_positive_control
     run_container_escape_positive_control
+    run_cred_proc_maps_positive_control
     run_log_tamper_attack
     run_setuid_attack
     run_bpf_attack
@@ -3003,6 +3024,16 @@ main() {
         run_counting_control null 0
         run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
         run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
+    elif [ "$1" = "--cred-proc-maps-control" ]; then
+        # 5.9.9.Fg (находка №112): позитивный контроль 5.9.9.Fa отдельным
+        # шагом — нужен ПРЕДПРОГОНУ (SMOKE_ONLY). Сужение до numeric-PID
+        # правит правило, а не харнесс, и «сработало ли оно на живом ядре»
+        # офлайн-реплеем не проверяется никак. В полном замере шаг остаётся
+        # внутри full_run() (окно атак), здесь — вне окна, со своим
+        # TIMESTAMP, поэтому в вердикт замера маркер не попадает (запрет №3,
+        # как у --counting-control).
+        check_services || exit 1
+        run_cred_proc_maps_positive_control
     elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
         echo "Использование: $0 [опции]"
         echo ""
@@ -3011,6 +3042,7 @@ main() {
         echo "  --ringbuf-overflow         Только 5.9.7b: переполнение кольца под SIGSTOP, вне окна замера"
         echo "  --dns-fd-reuse-controls    Только 5.9.8a: негативный+позитивный контроль dns_socket_map, вне окна замера"
         echo "  --counting-control         Только 5.9.8b/c: три режима контроля счётности (null/idle/drop), вне окна замера"
+        echo "  --cred-proc-maps-control   Только 5.9.9.Fa: позитивный контроль cred_proc_maps_mass_read, вне окна замера"
         echo "  -h, --help            Показать эту справку"
         echo ""
         echo "Без опций: запуск всех атак последовательно"

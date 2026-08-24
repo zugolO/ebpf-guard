@@ -2383,7 +2383,14 @@ else
                     harness_unclassified=0
                     if [ "$harness_alerts" -gt 0 ]; then
                         harness_comms_jq=$(printf '%s\n' $harness_comms | jq -R . | jq -s .)
-                        harness_ts_list=$(jq -n --slurpfile a "$baseline_alerts" --slurpfile b "$IDLE_ALERTS_END" --argjson hc "$harness_comms_jq" '
+                        # 5.9.9.Fh (находка №113): -r обязателен. Без него jq
+                        # печатает JSON-строку В КАВЫЧКАХ, date -d "\"…\"" не
+                        # разбирает её никогда, alert_epoch пуст — и КАЖДЫЙ
+                        # харнесс-алерт попадал в harness_unclassified, то есть
+                        # вся классификация 5.9.9.Fb была мертва с рождения, а
+                        # вердикт называл причиной «маркер недоступен» при
+                        # исправном маркере.
+                        harness_ts_list=$(jq -rn --slurpfile a "$baseline_alerts" --slurpfile b "$IDLE_ALERTS_END" --argjson hc "$harness_comms_jq" '
                             ($b[0] | map(.id)) as $seen
                             | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)))
                             | map(select((.comm // "") as $c | $hc | index($c)))

@@ -1,0 +1,51 @@
+# 5.9.9.Fe (plan.md, P2): one-time scan of rules/*.yaml for rules whose
+# name/description promises a frequency ("multiple|mass|rapid succession|
+# repeated|burst|flood|high frequency|in a row", word-boundary, case-
+# insensitive) but whose rule block has no `threshold:` block. Generated
+# once during wave 5.9.9.F (2026-08-24) by a one-off scan (script kept in
+# session scratchpad, not committed) -- not re-run automatically, so
+# re-check before trusting it stale, same caveat as
+# ISSUES-5.9d-op-predicate-audit.txt.
+#
+# This is an unverified backlog, not a ready-to-apply fix list. A rule
+# lacking `threshold:` is not automatically wrong: some of these gate on a
+# single count-style condition field instead (op: gt on a count field, e.g.
+# netintr_dns_many_subdomains/mitre_dns_c2_high_frequency use
+# qname_subdomain_count > N, which IS a frequency-shaped guard, just not
+# expressed as the dedicated threshold: block that cred_proc_maps_mass_read
+# now uses per 5.9.9.Fa). Each needs individual judgement plus a live-stand
+# positive control before its condition is touched, per plan.md "Порядок
+# работы" (не глушить, не сузить детект молча) -- volume 5.9.9.F explicitly
+# does not touch any of these (see plan.md "Что в волну 5.9.9.F намеренно
+# не входит").
+
+rules/cloud-attacks-extended.yaml	cloud_ext_aws_iam_assume_role_repeated
+rules/cloud-threats.yaml	cloud_007
+rules/command-and-control.yaml	beacon_fixed_interval
+rules/dns-threats.yaml	dns_nxdomain_flood
+rules/exfiltration-extended.yaml	exfil_repeated_outbound_to_same_ip
+rules/impact-gaps.yaml	impact_mass_file_deletion_critical
+rules/mitre-additional.yaml	mitre_dns_c2_high_frequency
+rules/network-intrusion.yaml	netintr_dns_many_subdomains
+rules/ransomware.yaml	ransomware_mass_rename
+rules/sigma-linux.yaml	sigma_failed_login_syscall
+rules/tls-fingerprints.yaml	tls_ja3_mythic_default
+rules/web-attacks-enhanced.yaml	web_combined_attack
+
+# total: 12
+
+# --- №111: defect the scan above does NOT catch (name/description carries
+# no frequency keyword), requires manual judgement -----------------------
+#
+# rules/sigma-linux.yaml sigma_memory_proc_dump (line ~946): condition
+# regex includes "/proc/[0-9]+/cmdline" in the same critical-severity path
+# list as mem/maps/environ. The rule's own comment already documents that
+# cmdline is ~97% idle-host noise (systemd-journal + ebpf-guard reading
+# _COMM/_CMDLINE attribution, see ISSUES-attack-run-2026-08-03.md P1-6) --
+# unlike mem/maps/environ, reading a process's cmdline is not a credential-
+# scraping primitive. Measured at 3 alerts/run on №2.9.9 -- far below
+# cred_proc_maps_mass_read's 44, and explicitly out of scope for wave
+# 5.9.9.F (see plan.md "Что в волну 5.9.9.F намеренно не входит": "Правка
+# sigma_memory_proc_dump (№111) ... Переносится в волну 7"). Listed here
+# only so the backlog carries both classes of defect this wave found --
+# not fixed by this entry, not scanned-for by the regex above.

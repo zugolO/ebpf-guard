@@ -52,20 +52,28 @@
 # Обновлять только с записью в plan.md, тем же порядком, что и
 # detection-baseline.txt.
 
-anomaly_detection
-container_escape_init_proc
-cred_proc_maps_mass_read
-drift_new_exec_critical
-drift_new_file_dir_sensitive
-drift_new_library_in_system_dir
-mitre_sandbox_detect_proc_read
-net_portscan_indicator
-owasp_log_tampering
-sensitive_file_read
-sigma_cpu_info_access
-sigma_kernel_version_read
-sigma_log_deletion
-sigma_memory_proc_dump
-sigma_passwd_shadow_read
-sigma_sensitive_file_chmod
-web_sql_injection_files
+# 5.9.9.Fe (P3, находка №111 разбора): второе поле — <замер>:<алертов за
+# idle-час>, замер и величина, по которым строка внесена в список (тот же
+# idle-час замера №2.4, что и порог 10/ч выше — idle-20260817_153403,
+# alerts-start.json → alerts-end.json по id, тем же способом, что и
+# оригинальный отбор). run-gate.sh читает только первое поле (awk
+# '{print $1}'); второе — для человека и для критерия гигиены ниже, гейт
+# его не парсит. Реестр НЕ пересобирается этой правкой: значения — та же
+# исходная выборка №2.4, а не пересчёт на более свежих данных.
+anomaly_detection	2.4:160
+container_escape_init_proc	2.4:117
+cred_proc_maps_mass_read	2.4:561
+drift_new_exec_critical	2.4:34
+drift_new_file_dir_sensitive	2.4:59
+drift_new_library_in_system_dir	2.4:23
+mitre_sandbox_detect_proc_read	2.4:519
+net_portscan_indicator	2.4:77
+owasp_log_tampering	2.4:184
+sensitive_file_read	2.4:73
+sigma_cpu_info_access	2.4:67
+sigma_kernel_version_read	2.4:41
+sigma_log_deletion	2.4:184
+sigma_memory_proc_dump	2.4:44
+sigma_passwd_shadow_read	2.4:74
+sigma_sensitive_file_chmod	2.4:73
+web_sql_injection_files	2.4:49

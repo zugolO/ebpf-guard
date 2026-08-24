@@ -570,16 +570,24 @@ func intentionalLossRuleIDs(t *testing.T, path string) map[string]struct{} {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// First whitespace-separated field only: 5.9.9.Fe gave every
+		// background-rules.txt line a second column (<замер>:<alerts per
+		// idle hour>), and run-gate.sh was taught to read just the id
+		// (awk '{print $1}') — this parser has to agree with it, or every
+		// entry in that file reads as an unknown rule_id here. The other
+		// registries this helper reads are bare one-id-per-line, for which
+		// taking field 1 is identical to taking the whole line.
+		if i := strings.IndexAny(line, " \t"); i >= 0 {
+			line = line[:i]
+		}
 		ids[line] = struct{}{}
 	}
 	return ids
 }
 
 // silentRulesRegistry parses silent-rules.txt's "<rule_id> <category>"
-// format (see the file's own header). Unlike intentionalLossRuleIDs' bare
-// one-id-per-line format, each line here carries a category token — kept as
-// a separate parser rather than overloading intentionalLossRuleIDs, whose
-// callers all rely on its "whole trimmed line is the id" behavior.
+// format (see the file's own header). It stays a separate parser because its
+// callers need the category token too, not only the id.
 func silentRulesRegistry(t *testing.T, path string) map[string]string {
 	t.Helper()
 	data, err := os.ReadFile(path)

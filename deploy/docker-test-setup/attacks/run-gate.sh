@@ -164,6 +164,16 @@ fi
 
 echo "==========================================="
 echo "RUN-GATE: TIMESTAMP=$TIMESTAMP RESULTS_DIR=$RESULTS_DIR"
+# 5.9.9.Fc (находка №110): окно журнала первой строкой, а не выводом из
+# расхождения PASS/SKIP между двумя вызовами гейта (прямой вызов пайплайна
+# задаёт AGENT_START_FILE, внутренний вызов из full_run()/run-all-attacks.sh —
+# нет). Секция 17 ниже читает ту же переменную.
+if [ -s "${AGENT_START_FILE:-}" ]; then
+    echo "окно журнала: $(head -1 "$AGENT_START_FILE")"
+else
+    echo "окно журнала: не задано"
+fi
+record_covered "окно журнала:"
 echo "==========================================="
 echo ""
 
@@ -180,6 +190,20 @@ final_alerts="$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
 # status=degraded. Опционален: без него критерий 3 просто печатает "не
 # исполнялся" в ветке отсутствия дропов, вместо FAIL/SKIP по построению.
 induced_drop_marker="$RESULTS_DIR/induced-drop-$TIMESTAMP.txt"
+# 5.9.9.Fb (находка №109): регистрация/подтверждение observer_root, написанные
+# run-all-attacks.sh (observer_root_register). Даёт критерию 16 времена,
+# которых раньше не было ни в одном артефакте: без них секция не может
+# отличить «алерт до регистрации корня» и «алерт в окне лага подхвата» от
+# «observer_root не подхвачен вовсе» — все три печатались одним текстом.
+observer_root_marker="$RESULTS_DIR/observer-root-register-$TIMESTAMP.txt"
+# 5.9.8g (находки №95/№96): дерево измерителя run-all-attacks.sh/idle-run.sh —
+# инструменты, которые сам харнесс порождает в прологе, периодических срезах и
+# постобработке, не список "подозрительных" comm. Выведен ИЗ ДАННЫХ (разбор
+# слепого окна №2.9.6), не из чтения тела функций. Хоистится на уровень
+# скрипта (было локально внутри критерия 16): 5.9.9.Fd использует тот же
+# список для разбора окна атаки, а не только критерий 16 — окно idle-конец →
+# attack-baseline.
+harness_comms='bash sh curl jq grep awk sed cat cut tr head tail wc sort seq sleep date rm ps dirname basename mktemp stat systemctl tar journalctl du'
 # The manifest is written by the four attack sub-scripts next to the scripts
 # themselves, so anchor to this script's directory rather than deriving a path
 # from RESULTS_DIR or the working directory (plan.md волна 1.5g).
@@ -1105,7 +1129,11 @@ else
     lost_types="$lost_types_raw"
     recovered_types=""
     if [ -n "$lost_types_raw" ] && [ -f "$background_rules_file" ]; then
-        background_set=$(grep -vE '^\s*(#|$)' "$background_rules_file" | tr -d '\r' | sort)
+        # 5.9.9.Fe: строки несут второй столбец (<замер>:<алертов за
+        # idle-час>) — читаем только первое поле, иначе comm -12 ниже
+        # сравнивал бы целые строки и переставал матчить (awk '{print $1}',
+        # а не сам текст строки).
+        background_set=$(grep -vE '^\s*(#|$)' "$background_rules_file" | tr -d '\r' | awk '{print $1}' | sort)
         lost_background=$(comm -12 <(echo "$lost_types_raw") <(echo "$background_set"))
         if [ -n "$lost_background" ]; then
             if [ -n "$IDLE_METRICS_START" ] && [ -n "$IDLE_METRICS_END" ] \
@@ -1323,6 +1351,44 @@ elif awk -v f="$cpu_degraded_fraction" 'BEGIN{exit !(f+0 > 0.2)}'; then
     fail "cpu_degraded_fraction=$cpu_degraded_fraction > 0.2 — прогон прошёл под шеддингом слишком долго, темп детекта выше не является чистым измерением (5.9e)"
 else
     pass "cpu_degraded_fraction=$cpu_degraded_fraction (<= 0.2) — прогон не искажён CPU-шеддингом"
+fi
+echo ""
+
+# 5.9.9.Fe (P3, разбор находки №111): гигиена background-rules.txt.
+# Отдельно от разбора lost_background внутри критерия 6 выше (тот проверяет
+# idle-прирост только для строк, РЕАЛЬНО потерянных в attack-results этого
+# прогона) — здесь проверяются ВСЕ 17 строк реестра безусловно, иначе
+# устаревание строки, которая пока срабатывает под атакой и потому не
+# попадает в lost_background вовсе, остаётся невидимым бессрочно. Пункт
+# производит только величину и список ("наблюдение без порога" в
+# постановке) — реестр не пересобирается и строки из него не удаляются
+# (вторая ветка OR критерия 6 для таких строк остаётся мертва: устаревание
+# делает гейт строже, а не мягче).
+echo "=== 5.9.9.Fe. Гигиена background-rules.txt: idle-час ЭТОГО прогона (№111) ==="
+if [ ! -f "$background_rules_file" ]; then
+    skip "background-rules.txt не найден — гигиена не проверена (5.9.9.Fe)"
+else
+    bg_total=$(grep -vE '^\s*(#|$)' "$background_rules_file" | tr -d '\r' | grep -c . || true)
+    bg_no_value=$(grep -vE '^\s*(#|$)' "$background_rules_file" | tr -d '\r' | awk 'NF<2{print $1}')
+    bg_no_value_count=$(echo "$bg_no_value" | grep -c . || true)
+    if [ "$bg_no_value_count" -gt 0 ]; then
+        fail "строк background-rules.txt без замера и величины: $bg_no_value_count из $bg_total ($(echo "$bg_no_value" | tr '\n' ' ')) — каждая строка обязана нести <замер>:<алертов за idle-час> (5.9.9.Fe)"
+    else
+        pass "строк background-rules.txt без замера и величины: 0 из $bg_total — каждая несёт <замер>:<алертов за idle-час> (5.9.9.Fe)"
+    fi
+    if [ -n "$IDLE_METRICS_START" ] && [ -n "$IDLE_METRICS_END" ] \
+        && [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
+        bg_all_ids=$(grep -vE '^\s*(#|$)' "$background_rules_file" | tr -d '\r' | awk '{print $1}' | sort -u)
+        bg_grown_ids=$( { metric_grown_rules ebpf_guard_alerts_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"
+                           metric_grown_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"; } | sort -u)
+        bg_unconfirmed=$(comm -23 <(echo "$bg_all_ids") <(echo "$bg_grown_ids"))
+        bg_unconfirmed_count=$(echo "$bg_unconfirmed" | grep -c . || true)
+        echo "  строк background-rules.txt, не подтверждённых idle-часом ЭТОГО прогона: $bg_unconfirmed_count"
+        [ "$bg_unconfirmed_count" -gt 0 ] && echo "$bg_unconfirmed" | sed 's/^/    ~ /'
+        record_covered "строк background-rules.txt, не подтверждённых idle-часом"
+    else
+        skip "IDLE_METRICS_START/END не заданы — гигиена background-rules.txt по idle-часу ЭТОГО прогона не проверена (5.9.9.Fe)"
+    fi
 fi
 echo ""
 
@@ -2220,6 +2286,27 @@ else
                 fi
                 echo "  окно: ${blind_min} мин, новых алертов (по id, вне idle-часа): $blind_new_alerts (темп: ${blind_rate}/мин)"
                 echo "  (для сравнения: измеряемые окна атаки/idle дают $attacker_rate/мин и (idle-час) отдельно)"
+                # 5.9.9.Fb (находка №109): лаг подхвата печатается числом
+                # всегда, а не только при FAIL — это величина, которой раньше
+                # не было ни в одном артефакте прогона, хотя она и определяет
+                # ширину структурно неизмеримого окна (регистрация корня →
+                # подтверждение агентом через /debug/state).
+                root_register_epoch=""
+                root_confirm_epoch=""
+                root_confirmed=""
+                root_lag_sec="n/a"
+                if [ -s "$observer_root_marker" ]; then
+                    root_register_epoch=$(awk -F= '$1=="register_epoch"{print $2}' "$observer_root_marker")
+                    root_confirmed=$(awk -F= '$1=="confirmed"{print $2}' "$observer_root_marker")
+                    root_confirm_epoch=$(awk -F= '$1=="confirm_epoch"{print $2}' "$observer_root_marker")
+                    lag_from_marker=$(awk -F= '$1=="lag_sec"{print $2}' "$observer_root_marker")
+                    [ -n "$lag_from_marker" ] && root_lag_sec="$lag_from_marker"
+                fi
+                if [ "$root_lag_sec" = "n/a" ]; then
+                    echo "  лаг подхвата observer_root (регистрация → подтверждение через /debug/state): не измерен (маркер observer-root-register-$TIMESTAMP.txt отсутствует или подтверждения не было)"
+                else
+                    echo "  лаг подхвата observer_root (регистрация → подтверждение через /debug/state): ${root_lag_sec}с"
+                fi
                 # 5.9.9e (№102, находка №2.9.8): разбор по составу раньше был
                 # условен на blind_new_alerts > 5 — окно с 1-5 новыми алертами
                 # получало ранний PASS по объёму и НИКОГДА не проверялось на
@@ -2236,31 +2323,20 @@ else
                 composition_checked=0
                 if [ "$baseline_types_present" -ne 0 ]; then
                     composition_checked=1
-                    # 5.9.8g (находки №95/№96): дерево измерителя
-                    # run-all-attacks.sh/idle-run.sh: инструменты, которые сам
-                    # харнесс порождает в прологе сбора baseline, в
-                    # периодических срезах и в постобработке idle-run.sh
-                    # (P0-3 рестарт, journalctl, сборка архива) — не список
-                    # "подозрительных" comm, а перечень того, что 5.9.7g/5.9.8g
-                    # регистрируют под observer_root_pid. Список выведен ИЗ
-                    # ДАННЫХ, а не из чтения тела функций: разбор слепого окна
-                    # №2.9.6 (baseline-alerts минус alerts-end idle-часа) дал
-                    # ровно curl/grep/jq/bash/date/rm/dirname; tar/journalctl/du
-                    # добавлены этой волной — они не встречались в срезах
-                    # №2.9.6/№2.9.7 постольку, поскольку постобработка
-                    # idle-run.sh молчала на том стенде, а не потому что эти
-                    # инструменты не часть дерева измерителя. Намеренно НЕ
-                    # содержит comm'ов атакующих шагов (chmod, tee, insmod,
-                    # bpftool, clang, dig, python3, sqlmap): пометить их
-                    # «деревом измерителя» значило бы дать настоящему регрессу
-                    # спрятаться под этим списком.
+                    # harness_comms — хоистирован на уровень скрипта (см.
+                    # определение выше, 5.9.9.Fd): дерево измерителя
+                    # run-all-attacks.sh/idle-run.sh, выведено ИЗ ДАННЫХ, не из
+                    # чтения тела функций. Намеренно НЕ содержит comm'ов
+                    # атакующих шагов (chmod, tee, insmod, bpftool, clang, dig,
+                    # python3, sqlmap): пометить их «деревом измерителя»
+                    # значило бы дать настоящему регрессу спрятаться под этим
+                    # списком.
                     blind_comm_breakdown=$(jq -n --slurpfile a "$baseline_alerts" --slurpfile b "$IDLE_ALERTS_END" '
                         ($b[0] | map(.id)) as $seen
                         | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)))
                         | group_by(.comm // "")
                         | map({comm: (.[0].comm // "(пусто)"), count: length})
                         | sort_by(-.count)')
-                    harness_comms='bash sh curl jq grep awk sed cat cut tr head tail wc sort seq sleep date rm ps dirname basename mktemp stat systemctl tar journalctl du'
                     echo "  разбор по составу (5.9.7g/5.9.8g):"
                     record_covered "разбор по составу (5.9.7g/5.9.8g)"
                     while IFS= read -r row; do
@@ -2287,10 +2363,74 @@ else
                     # не промах.
                     echo "  дерево измерителя: $harness_alerts алерт(ов); фон вне дерева измерителя (5.9.8g): $background_alerts алерт(ов)${background_breakdown:+ (${background_breakdown# })}"
                     record_covered "фон вне дерева измерителя (5.9.8g)"
+
+                    # 5.9.9.Fb (находка №109): каждый алерт дерева измерителя
+                    # относится к одному из трёх случаев, различимых только по
+                    # временам — регистрация корня, подтверждение подхвата,
+                    # собственный timestamp алерта:
+                    #   1. алерт СТАРШЕ регистрации root_pid — предшествует ей;
+                    #   2. алерт МЕЖДУ регистрацией и подтверждением — окно лага;
+                    #   3. алерт ПОСЛЕ подтверждения — вот это и есть
+                    #      «observer_root не подхвачен» в буквальном смысле.
+                    # Без маркера (наблюдательное дерево регистрируется, но
+                    # эта волна не переиграна на стенде, либо старый
+                    # run-all-attacks.sh) все харнесс-алерты остаются
+                    # неклассифицированными — вердикт ниже не должен молчать
+                    # об этом.
+                    harness_case1=0
+                    harness_case2=0
+                    harness_case3=0
+                    harness_unclassified=0
+                    if [ "$harness_alerts" -gt 0 ]; then
+                        harness_comms_jq=$(printf '%s\n' $harness_comms | jq -R . | jq -s .)
+                        harness_ts_list=$(jq -n --slurpfile a "$baseline_alerts" --slurpfile b "$IDLE_ALERTS_END" --argjson hc "$harness_comms_jq" '
+                            ($b[0] | map(.id)) as $seen
+                            | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)))
+                            | map(select((.comm // "") as $c | $hc | index($c)))
+                            | map(.timestamp // empty)
+                            | .[]' 2>/dev/null)
+                        while IFS= read -r alert_ts; do
+                            [ -z "$alert_ts" ] && continue
+                            if [ -z "$root_register_epoch" ]; then
+                                harness_unclassified=$((harness_unclassified + 1))
+                                continue
+                            fi
+                            alert_epoch=$(date -d "$alert_ts" +%s.%N 2>/dev/null || echo "")
+                            if [ -z "$alert_epoch" ]; then
+                                harness_unclassified=$((harness_unclassified + 1))
+                                continue
+                            fi
+                            if awk -v a="$alert_epoch" -v r="$root_register_epoch" 'BEGIN{exit !(a<r)}'; then
+                                harness_case1=$((harness_case1 + 1))
+                            elif [ "$root_confirmed" = "1" ] && [ -n "$root_confirm_epoch" ] \
+                                 && awk -v a="$alert_epoch" -v c="$root_confirm_epoch" 'BEGIN{exit !(a<=c)}'; then
+                                harness_case2=$((harness_case2 + 1))
+                            else
+                                harness_case3=$((harness_case3 + 1))
+                            fi
+                        done <<< "$harness_ts_list"
+                        echo "  дерево измерителя по случаю (5.9.9.Fb): предшествуют регистрации корня=$harness_case1, окно лага подхвата=$harness_case2, после подтверждения (не подхвачен)=$harness_case3, не классифицировано=$harness_unclassified"
+                    fi
                 fi
+                # 5.9.9.Fb (находка №109): причина FAIL называется тем из трёх
+                # случаев выше, который реально наблюдался — «observer_root не
+                # подхвачен» теперь означает только случай 3 (алерт ПОСЛЕ
+                # подтверждения); случаи 1 и 2 структурно неизбежны (алерт до
+                # регистрации корня, алерт в окне лага) и называются так же.
+                harness_reason() {
+                    if [ "$harness_case3" -gt 0 ]; then
+                        echo "observer_root не подхвачен агентом на этом прогоне: $harness_case3 алерт(ов) после подтверждения подхвата (5.9.7g/5.9.8g/5.9.9.Fb)"
+                    elif [ "$harness_case2" -gt 0 ]; then
+                        echo "$harness_case2 алерт(ов) в окне лага подхвата (${root_lag_sec}с между регистрацией и подтверждением, 5.9.9.Fb) — не считается поломкой подхвата"
+                    elif [ "$harness_case1" -gt 0 ]; then
+                        echo "$harness_case1 алерт(ов) предшествуют регистрации корня (5.9.9.Fb) — не считается поломкой подхвата"
+                    else
+                        echo "$harness_alerts алерт(ов) от дерева измерителя не классифицированы по времени (маркер observer-root-register-$TIMESTAMP.txt недоступен, 5.9.9.Fb)"
+                    fi
+                }
                 if awk -v n="$blind_new_alerts" 'BEGIN{exit !(n<=5)}'; then
                     if [ "$composition_checked" -eq 1 ] && [ "$harness_alerts" -gt 0 ]; then
-                        fail "объём слепого окна $blind_new_alerts <= 5, но $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — observer_root не подхвачен агентом на этом прогоне (5.9.7g/5.9.8g/5.9.9e)"
+                        fail "объём слепого окна $blind_new_alerts <= 5, но $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — $(harness_reason)"
                     else
                         pass "объём слепого окна $blind_new_alerts <= 5 — содержимое окна пренебрежимо (5.9.6h)"
                     fi
@@ -2301,7 +2441,7 @@ else
                     skip "объём слепого окна $blind_new_alerts > 5, а detection-baseline.txt отсутствует — added_count не определён, ни фазы, ни разбор по составу (5.9.7g/5.9.8g) не проверены"
                 else
                     if [ "$harness_alerts" -gt 0 ]; then
-                        fail "объём слепого окна $blind_new_alerts > 5, и $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — observer_root не подхвачен агентом на этом прогоне (5.9.7g/5.9.8g)"
+                        fail "объём слепого окна $blind_new_alerts > 5, и $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — $(harness_reason)"
                     elif [ "$added_count" -lt 3 ]; then
                         pass "объём слепого окна $blind_new_alerts > 5, added_count=$added_count < 3, 0 алертов от дерева измерителя — окно не слепое по составу (5.9.7g)"
                     elif [ "$added_undetermined_count" -eq 0 ]; then
@@ -2311,6 +2451,83 @@ else
                     fi
                 fi
             fi
+        fi
+    fi
+fi
+echo ""
+
+# 5.9.9.Fd (№108, P1): состав окна атаки (baseline→final, новые по id) по
+# критикалам, разобранным по comm на три класса — величина, которой на
+# №2.9.9 не было вовсе: 138 новых критикалов за окно, и ни один критерий
+# гейта не спрашивал, кто их породил. Второй по величине производитель был
+# grep (23) — все они cred_proc_maps_mass_read на /proc/self/maps, дефект
+# правила (5.9.9.Fa), а не что-то отдельное, требующее разбора здесь.
+#
+# Секция 16 выше — про слепое окно между концом idle-часа и attack-baseline;
+# эта секция — про само окно атаки (baseline→final). Их пересечение пусто по
+# построению (5.9.9.Fd намеренно не трогает секцию 16), поэтому harness_comms
+# (хоистирован на уровень скрипта) используется тем же списком, но на другом
+# срезе алертов.
+#
+# Вердикта на первом прогоне нет — только величина (см. plan.md 5.9.9.Fd):
+# порог назначается по итогам №2.9.9.F, той же логикой, что уже применена к
+# alerts_dropped/published (5.9.6i: порог на неизмеренную величину даёт
+# PASS/FAIL по случайности, а не по существу). Единственный уже вынесенный
+# вердикт внутри разбора — cred_proc_maps_mass_read на /proc/self/maps = 0
+# (5.9.9.Fa), потому что там правильный ответ известен заранее (44 из 44
+# разобраны поимённо на №2.9.9).
+echo "=== 5.9.9.Fd. Состав окна атаки по критикалам: манифест / дерево измерителя / прочее (№108) ==="
+if [ ! -s "$baseline_alerts" ] || [ ! -s "$final_alerts" ]; then
+    skip "baseline/final-alerts недоступны — состав окна атаки не разобран (5.9.9.Fd)"
+elif ! command -v jq &> /dev/null; then
+    skip "jq недоступен — состав окна атаки не разобран (5.9.9.Fd)"
+else
+    attackwin_criticals=$(jq -s '
+        (.[0] // []) as $baseline | (.[1] // []) as $final |
+        ($baseline | map(.id) | unique) as $bids |
+        ($final | map(select(.id as $id | ($bids | index($id)) | not))) as $new |
+        $new | map(select(.severity == "critical"))
+    ' -r "$baseline_alerts" "$final_alerts" 2>/dev/null)
+    attackwin_total=$(echo "${attackwin_criticals:-[]}" | jq 'length' 2>/dev/null || echo 0)
+    if ! [ "$attackwin_total" -ge 0 ] 2>/dev/null; then
+        attackwin_total=0
+    fi
+    if [ "$attackwin_total" -eq 0 ]; then
+        echo "  критикалов окна атаки: 0"
+        record_covered "критикалов окна атаки"
+        pass "критикалов окна атаки: 0 — разбор по составу не нужен (5.9.9.Fd)"
+    else
+        attackwin_manifest_comms='[]'
+        [ -f "$manifest_file" ] && attackwin_manifest_comms=$(jq -c '[.[].comm] | unique' "$manifest_file" 2>/dev/null || echo '[]')
+        attackwin_harness_comms_jq=$(printf '%s\n' $harness_comms | jq -R . | jq -s .)
+        attackwin_breakdown=$(echo "$attackwin_criticals" | jq -c \
+            --argjson manifest "$attackwin_manifest_comms" --argjson harness "$attackwin_harness_comms_jq" '
+            map(
+                (.comm // "") as $c |
+                if ($manifest | index($c)) then {class: "manifest", comm: $c}
+                elif ($harness | index($c)) then {class: "harness", comm: $c}
+                else {class: "other", comm: (.comm // "(пусто)")}
+                end
+            )')
+        attackwin_manifest_n=$(echo "$attackwin_breakdown" | jq '[.[] | select(.class=="manifest")] | length')
+        attackwin_harness_n=$(echo "$attackwin_breakdown" | jq '[.[] | select(.class=="harness")] | length')
+        attackwin_other_n=$(echo "$attackwin_breakdown" | jq '[.[] | select(.class=="other")] | length')
+        attackwin_other_list=$(echo "$attackwin_breakdown" | jq -r '
+            [.[] | select(.class=="other") | .comm] | group_by(.)
+            | map({comm: .[0], count: length}) | sort_by(-.count) | .[] | "\(.comm):\(.count)"' \
+            2>/dev/null | tr '\n' ' ')
+
+        echo "  критикалов окна атаки (baseline→final, новые по id): $attackwin_total"
+        echo "  от манифестных comm: $attackwin_manifest_n"
+        echo "  от дерева измерителя (harness_comms, тот же список, что у критерия 16): $attackwin_harness_n"
+        echo "  прочее: $attackwin_other_n${attackwin_other_list:+ (${attackwin_other_list% })}"
+        record_covered "критикалов окна атаки"
+
+        attackwin_sum=$((attackwin_manifest_n + attackwin_harness_n + attackwin_other_n))
+        if [ "$attackwin_sum" -ne "$attackwin_total" ]; then
+            fail "5.9.9.Fd: сумма классов ($attackwin_sum) != общего числа критикалов окна ($attackwin_total) — разбор по составу не сходится"
+        else
+            pass "критикалов окна атаки разобраны по составу: манифест=$attackwin_manifest_n, дерево измерителя=$attackwin_harness_n, прочее=$attackwin_other_n, сумма=$attackwin_total — величина, порог назначается по итогам №2.9.9.F (5.9.9.Fd)"
         fi
     fi
 fi
@@ -2395,6 +2612,13 @@ declare -A positive_control_rule_categories=(
     [webshell_script_write_via_web_process]="webshell_positive_control"
     [webshell_crontab_modification]="webshell_crontab_positive_control"
     [container_escape_cap_sys_admin]="container_escape_positive_control"
+    # 5.9.9.Fa (находка №107): numeric-PID сужение cred_proc_maps_mass_read
+    # оставило правило без единого входа на стенде — 44 его алерта были
+    # шумом на /proc/self/maps, а ни один шаг манифеста чужой
+    # /proc/<pid>/maps не читал. Постановка 5.9.9.Fa считала контроль
+    # существующим («4 из 70») — его не было; шаг
+    # run_cred_proc_maps_positive_control добавлен вместе с этой строкой.
+    [cred_proc_maps_mass_read]="cred_proc_maps_positive_control"
 )
 echo "=== 5.9.9c. Правила детект-базы с позитивным контролем в манифесте ==="
 # 5.9.9e: заголовок печатается голым echo (секция — наблюдение без порога, у
@@ -2450,6 +2674,18 @@ echo ""
 echo "=== 17. Kill-сценарий: dry_run гасит kill, доказано живьём (5.9.5a) ==="
 if [ ! -s "$final_metrics" ]; then
     skip "$final_metrics пуст — критерий 17 не проверен"
+elif [ ! -s "${AGENT_START_FILE:-}" ]; then
+    # 5.9.9.Fc (находка №110): без AGENT_START_FILE секция раньше подставляла
+    # `--boot` и считала "KILL action executed" по всему журналу юнита за
+    # ВЕСЬ аптайм хоста — то есть и по прошлым, не относящимся к этому
+    # прогону замерам (107 записей из №2.9.3 в этом журнале ничего не
+    # говорят о текущем kill-сценарии). Это не консервативная оценка, а
+    # неверная: печатать по ней FAIL/PASS значит выносить вердикт по чужим
+    # данным. Внутренний вызов из full_run() (run-all-attacks.sh) не
+    # экспортирует AGENT_START_FILE — единственный способ получить хоть
+    # какой-то вердикт при интерактивном прогоне без цепочки, и убирать этот
+    # вызов значит чинить симптом ценой рабочего режима (см. 5.9.9a).
+    skip "окно журнала не задано — вердикт не выносится (AGENT_START_FILE пуст или отсутствует, критерий 17 не может ограничить журнал текущим прогоном)"
 else
     dry_kill=$(grep 'ebpf_guard_enforcement_dryrun_total{' "$final_metrics" 2>/dev/null \
         | grep 'action="kill"' | awk -F'} ' '{sum+=$2} END{print sum+0}')
@@ -2459,10 +2695,7 @@ else
     journal_checked=0
     kill_executed=0
     if command -v journalctl &> /dev/null; then
-        journal_args=(--boot)
-        if [ -s "${AGENT_START_FILE:-}" ]; then
-            journal_args=(--since "$(head -1 "$AGENT_START_FILE")")
-        fi
+        journal_args=(--since "$(head -1 "$AGENT_START_FILE")")
         kill_journal=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" "${journal_args[@]}" 2>/dev/null)
         # journalctl выходит с кодом 0 и на несуществующем юните («-- No
         # entries --»), поэтому одного кода возврата мало: пустой журнал

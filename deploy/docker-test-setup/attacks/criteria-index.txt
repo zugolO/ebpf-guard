@@ -58,7 +58,19 @@
 5.9.9c	-	=== 5.9.9c. Правила детект-базы
 5.9.9d	run-all-attacks.sh	c599d-
 5.9.9e	-	пунктов постановки с неисполнившейся веткой
-5.9.9f	../run-2.9.9-pipeline.sh	ENVIRON
+5.9.9f	../run-2.9.9.F-pipeline.sh	ENVIRON
 5.9.9f	../run-2.9.5-report.sh	КОНЕЦ ОТЧЁТА №
-5.9.9g	../run-2.9.9-pipeline.sh	--- контроли DNS: попытка 
+5.9.9g	../run-2.9.9.F-pipeline.sh	--- контроли DNS: попытка
 5.9.9h	run-all-attacks.sh	dns_counter_settle
+5.9.9.Fa	../../../rules/credential-access.yaml	^/proc/[0-9]+/(task/[0-9]+/)?(maps|mem|environ)$
+5.9.9.Fa	run-all-attacks.sh	cred_proc_maps_positive_control
+5.9.9.Fb	run-all-attacks.sh	observer-root-register-
+5.9.9.Fc	-	окно журнала:
+5.9.9.Fc	-	окно журнала не задано — вердикт не выносится
+5.9.9.Fd	-	=== 5.9.9.Fd. Состав окна атаки
+5.9.9.Fd	-	критикалов окна атаки
+5.9.9.Fe	ISSUES-5.9.9.F-threshold-audit.txt	# total:
+5.9.9.Fe	-	=== 5.9.9.Fe. Гигиена background-rules.txt
+5.9.9.Fe	-	без замера и величины
+5.9.9.Fe	-	не подтверждённых idle-часом ЭТОГО прогона
+5.9.9.Fe	replay-gate.sh	реплей 6/6

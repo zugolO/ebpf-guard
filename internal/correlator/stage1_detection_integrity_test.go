@@ -102,6 +102,12 @@ func TestStage1_AttacksStillDetected(t *testing.T) {
 		// anyOf: at least one of these rule IDs must fire.
 		anyOf []string
 		event types.Event
+		// repeat: number of times to evaluate the same event before checking
+		// firedRules. Rules gated by threshold{} (5.9.9.Fa:
+		// cred_proc_maps_mass_read) need >=Count identical events in the
+		// same burst window before they alert; every other case fires on
+		// the first, so 0 below defaults to 1.
+		repeat int
 	}{
 		{
 			name:  "SSRF: web process reaches cloud metadata endpoint",
@@ -132,6 +138,8 @@ func TestStage1_AttacksStillDetected(t *testing.T) {
 			name:  "Credential scraping: /proc/<pid>/mem read",
 			anyOf: []string{"cred_proc_maps_mass_read"},
 			event: stage1FileEvent("sqlmap", "/proc/1234/mem", 0),
+			// cred_proc_maps_mass_read carries threshold{count: 5} (5.9.9.Fa).
+			repeat: 5,
 		},
 		{
 			name:  "SSH key theft: real private key read",
@@ -159,7 +167,14 @@ func TestStage1_AttacksStillDetected(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := firedRules(engine, tc.event)
+			n := tc.repeat
+			if n < 1 {
+				n = 1
+			}
+			var got map[string]bool
+			for i := 0; i < n; i++ {
+				got = firedRules(engine, tc.event)
+			}
 			for _, id := range tc.anyOf {
 				if got[id] {
 					return

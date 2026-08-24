@@ -4,13 +4,33 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 5.9.9.Fb (находка №109, слепое окно): SCRIPT_DIR и EBPF_GUARD_TOKEN
+# исполняются на самом верху скрипта — то есть в момент, когда run-2.9.9.F
+# идёт от конца idle-часа к вызову run-all-attacks.sh, а run_measurement_prologue
+# (регистрация observer_root) ещё не вызван. Раньше здесь форкались
+# `dirname` и `grep`+`cut` — процессы вне какого-либо дерева измерителя,
+# видимые агенту без исключения. Оба заменены bash-builtin'ами (parameter
+# expansion, `read`), которые не форкают внешний процесс и потому не создают
+# отдельного PID для правил, реагирующих на exec/comm.
+case "${BASH_SOURCE[0]}" in
+    */*) SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)" ;;
+    *)   SCRIPT_DIR="$(pwd)" ;;
+esac
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
 EBPF_GUARD_API="http://${VPS_IP}:19090"
 # admin token from config-test.yaml (auth.admin_token) — needed because auth.enabled=true;
 # /debug/state and /metrics require a bearer token. Override via env if changed.
-EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
+EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-}"
+if [ -z "$EBPF_GUARD_TOKEN" ] && [ -r /var/lib/ebpf-guard/token ]; then
+    while IFS='=' read -r _tok_key _tok_val; do
+        if [ "$_tok_key" = "admin" ]; then
+            EBPF_GUARD_TOKEN="$_tok_val"
+            break
+        fi
+    done < /var/lib/ebpf-guard/token
+    unset _tok_key _tok_val
+fi
 RESULTS_DIR="./attack-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -92,32 +112,74 @@ OBSERVER_ROOT_PID_FILE="${OBSERVER_ROOT_PID_FILE:-/var/lib/ebpf-guard/observer-r
 
 # Регистрация вызывается ВНУТРИ сабшелла пролога, поэтому пишет $BASHPID
 # (PID сабшелла), а не $$ (PID скрипта — в сабшелле $$ остаётся прежним).
+# 5.9.9.Fb (находка №109): секция 16 run-gate.sh раньше не могла отличить
+# «observer_root реально не подхвачен» от двух structurно неизбежных случаев
+# (алерт до регистрации корня; алерт в окне лага между регистрацией и
+# подтверждением) — печатала один и тот же вердикт для всех трёх. Различить
+# их можно только по временам регистрации/подтверждения, которых раньше
+# нигде не было в артефактах прогона: значение in-memory умирало вместе с
+# этим процессом. Маркер — тот же файл-по-TIMESTAMP, что baseline-*/final-*
+# ($RESULTS_DIR/<name>-$TIMESTAMP.txt), поэтому run-gate.sh находит его тем
+# же путём, каким находит baseline_state.
+observer_root_marker() {
+    echo "$RESULTS_DIR/observer-root-register-$TIMESTAMP.txt"
+}
+
 observer_root_register() {
     local root="$BASHPID"
+    local marker register_epoch
+    marker="$(observer_root_marker)"
+    register_epoch=$(date +%s.%N)
     if ! echo "$root" > "$OBSERVER_ROOT_PID_FILE" 2>/dev/null; then
         warn "не удалось записать $OBSERVER_ROOT_PID_FILE — 5.9.7g не подхватит корень, пролог baseline (curl/grep/jq/date/rm) не будет исключён из корреляции"
+        {
+            echo "root_pid=$root"
+            echo "register_epoch=$register_epoch"
+            echo "write_failed=1"
+            echo "confirmed=0"
+            echo "confirm_reason=write_failed"
+        } > "$marker"
         return 0
     fi
     log "5.9.7g: дерево пролога зарегистрировано, root_pid=$root ($OBSERVER_ROOT_PID_FILE); шаги после пролога под ним НЕ идут и остаются видимыми"
+    {
+        echo "root_pid=$root"
+        echo "register_epoch=$register_epoch"
+        echo "write_failed=0"
+    } > "$marker"
     if ! command -v jq &> /dev/null; then
         warn "jq недоступен — подтверждение подхвата root_pid=$root не проверено, пролог продолжается вслепую"
+        {
+            echo "confirmed=0"
+            echo "confirm_reason=jq_unavailable"
+        } >> "$marker"
         return 0
     fi
-    local observer_confirmed=0 reported_root
+    local observer_confirmed=0 reported_root confirm_epoch
     sleep 3
     for _ in $(seq 1 7); do
         reported_root="$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/debug/state" 2>/dev/null \
             | jq -r '.engine_stats.observer_root_pid // empty' 2>/dev/null || true)"
         if [ "$reported_root" = "$root" ]; then
             observer_confirmed=1
+            confirm_epoch=$(date +%s.%N)
             break
         fi
         sleep 2
     done
     if [ "$observer_confirmed" -eq 1 ]; then
         log "5.9.7g: агент подтвердил подхват root_pid=$root через /debug/state"
+        {
+            echo "confirmed=1"
+            echo "confirm_epoch=$confirm_epoch"
+            echo "lag_sec=$(awk -v a="$register_epoch" -v b="$confirm_epoch" 'BEGIN{printf "%.1f", b-a}')"
+        } >> "$marker"
     else
         warn "агент не подтвердил подхват root_pid=$root за ~17с (/debug/state недоступен, observer_exclude выключен в его конфиге, или агент не запущен) — пролог продолжается без подтверждения"
+        {
+            echo "confirmed=0"
+            echo "confirm_reason=timeout"
+        } >> "$marker"
     fi
 }
 
@@ -1184,6 +1246,88 @@ run_container_escape_positive_control() {
             '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
         if [ -n "$ce_entry" ] && [ -f "$MANIFEST_FILE" ]; then
             jq --argjson e "$ce_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
+# 5.9.9.Fa (находка №107, риск №57): позитивный контроль cred_proc_maps_mass_read.
+#
+# Постановка 5.9.9.Fa утверждала, что контроль «уже числится в манифесте
+# (4 из 70)» — это неверно: в positive_control_rule_categories гейта лежат
+# ssh_keys/webshell/webshell_crontab/container_escape, и ни один шаг харнесса
+# не читал /proc/<pid>/maps ЧУЖОГО процесса вовсе. До 5.9.9.Fa правило и без
+# шага набирало 44 критикала в прогон — все на /proc/self/maps от grep'а, то
+# есть на шуме; после сужения до numeric-PID оно осталось бы без единого
+# входа, и критерий 6 (состав детекта) объявил бы его потерей: в
+# detection-baseline.txt оно есть, в background-rules.txt тоже, но обе ветки
+# спасения (прирост за idle-час и ненулевой абсолют) после правки дают ноль.
+# Правка без этого шага была бы ровно находкой №57 — «сузили детект, а
+# доказать, что он жив, нечем».
+#
+# Форма шага выбрана под ОБА режима группировки порога (threshold count: 5,
+# window_seconds: 10, group_by: chain): один процесс делает 8 открытий
+# подряд, поэтому порог набирается и по chain, и по pid — если lineage
+# tracker почему-то не отдаст корень цепочки, шаг всё равно сработает, а не
+# промолчит неотличимо от регресса.
+#
+# comm=credscrape (копия /bin/cat под своим именем), а не cat/tail/head:
+# те трое в harness_comms гейта, и категория манифеста с таким comm
+# засчитывалась бы по алертам ЛЮБОГО шага харнесса — крит. 7 (recall) стал
+# бы вакуумным, а разбор 5.9.9.Fd отнёс бы шаг к дереву измерителя.
+run_cred_proc_maps_positive_control() {
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.Fa (находка №107): чтение /proc/<pid>/maps чужого процесса"
+    log "==========================================="
+
+    local reader="/tmp/credscrape"
+    if ! cp /bin/cat "$reader" 2>/dev/null || ! chmod 0755 "$reader" 2>/dev/null; then
+        warn "не удалось подготовить $reader — позитивный контроль 5.9.9.Fa пропущен, сужение cred_proc_maps_mass_read остаётся недоказанным (находка №57)"
+        echo ""
+        return
+    fi
+
+    # Чужой живой процесс — собственный короткий sleep, а не pid 1: цель
+    # шага в том, чтобы читать ЧУЖУЮ память, а /proc/1/* поднимает соседние
+    # правила (container_escape_init_proc и др.) и смешал бы вход.
+    sleep 20 &
+    local target_pid=$!
+    local maps="/proc/$target_pid/maps"
+
+    if [ ! -r "$maps" ]; then
+        warn "$maps недоступен — позитивный контроль 5.9.9.Fa не исполнен"
+        kill "$target_pid" 2>/dev/null || true
+        rm -f "$reader"
+        echo ""
+        return
+    fi
+
+    local cs_done=0
+    mark_attack_window
+    # 8 открытий одним процессом: порог правила — 5 за 10 с, запас на случай,
+    # если часть событий не доедет (sampling/переполнение кольца).
+    if "$reader" "$maps" "$maps" "$maps" "$maps" "$maps" "$maps" "$maps" "$maps" >/dev/null 2>&1; then
+        cs_done=1
+        log "$maps прочитан 8 раз comm=credscrape — ожидается срабатывание cred_proc_maps_mass_read (порог 5 за 10 с)"
+    else
+        warn "чтение $maps не удалось — позитивный контроль 5.9.9.Fa не исполнен"
+    fi
+    mark_attack_window
+
+    kill "$target_pid" 2>/dev/null || true
+    wait "$target_pid" 2>/dev/null || true
+    rm -f "$reader"
+
+    # Только по факту исполнения — как у 5.9.9b/5.9.9c: категория новая, и
+    # записанная вхолостую она уронила бы крит. 7 (recall) на шаге, который
+    # не состоялся, вместо честного «контроль не исполнился».
+    if [ "$cs_done" -eq 1 ] && command -v jq &> /dev/null; then
+        cs_entry=$(jq -n --arg cat "cred_proc_maps_positive_control" --arg comm "credscrape" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$cs_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$cs_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
                 && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
         fi
     fi
@@ -2706,6 +2850,7 @@ interactive_mode() {
                 run_webshell_script_write_positive_control
                 run_webshell_crontab_positive_control
                 run_container_escape_positive_control
+                run_cred_proc_maps_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack
@@ -2739,6 +2884,7 @@ interactive_mode() {
                 run_webshell_script_write_positive_control
                 run_webshell_crontab_positive_control
                 run_container_escape_positive_control
+                run_cred_proc_maps_positive_control
                 run_log_tamper_attack
                 run_setuid_attack
                 run_bpf_attack

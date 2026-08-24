@@ -14,7 +14,7 @@
 # просто печатает результат на глаз (постановка явно требует «проверки, а не
 # печать»).
 #
-# Пять обязательных ожиданий (числа получены прогоном текущего run-gate.sh
+# Шесть обязательных ожиданий (числа получены прогоном текущего run-gate.sh
 # против этих же архивов на этой сессии, см. plan.md 5.9.7c/5.9.8e):
 #   1. collect-2.9.5 (до 5.9.6a/b): events_emitted_kernel_total в архиве нет
 #      вовсе — секция 19 обязана SKIP'нуть по отсутствующей серии, а не
@@ -39,10 +39,18 @@
 #      когда TIMESTAMP чужой, а тело сигнатуры то же. Реплей, давший только
 #      один из двух исходов, — стоп: до 5.9.9a WARN печатался всегда, и
 #      «всегда молчит» было бы такой же поломкой, только тихой.
+#   6. collect-2.9.9 (5.9.9.Fe, разбор №111): третья ветка спасения фонового
+#      правила (idle_prewindow_list — «счётчик ненулевой, но прироста за
+#      idle-час нет») отличается от второй («выросло за idle-час») на ОДНОМ
+#      прогоне с двумя искусственно потерянными background-правилами —
+#      anomaly_detection (реально выросло за idle-час этого архива) и
+#      container_escape_init_proc (реально не выросло, но ненулевое на обоих
+#      концах). Реплей, не различивший обе формулировки, — стоп, как и
+#      остальные пять.
 #
-# Использование: replay-gate.sh [collect-2.9.5-dir] [collect-2.9.6-dir] [collect-2.9.7-dir] [collect-2.9.8-dir]
+# Использование: replay-gate.sh [collect-2.9.5-dir] [collect-2.9.6-dir] [collect-2.9.7-dir] [collect-2.9.8-dir] [collect-2.9.9-dir]
 # По умолчанию — server-logs/collect-2.9.5, server-logs/collect-2.9.6,
-# server-logs/collect-2.9.7 и server-logs/collect-2.9.8 относительно корня
+# server-logs/collect-2.9.7, server-logs/collect-2.9.8 и server-logs/collect-2.9.9 относительно корня
 # репозитория. Любое
 # несовпадение — ненулевой код возврата (преflight-стоп); печатает
 # REPLAY-GATE: PASS/FAIL в конце.
@@ -79,6 +87,15 @@ C297_DIR="${3:-$REPO_ROOT/server-logs/collect-2.9.7}"
 # состояния) и печатать WARN, когда TIMESTAMP другой, а сигнатура та же.
 # Постановка №2.9.9 называет это пятым жёстким стопом преflight'а.
 C298_DIR="${4:-$REPO_ROOT/server-logs/collect-2.9.8}"
+# 5.9.9.Fe (P3, разбор находки №111): шестой реплей — collect-2.9.9, третья
+# ветка спасения фонового правила (idle_prewindow_list, run-gate.sh:1136+,
+# «сработывало до окна») проверяется тестом, а не глазами. Архив 2.9.9
+# несёт настоящие idle-метрики этого прогона (idle/metrics-start.txt →
+# metrics-end.txt) — они и подставляются как IDLE_METRICS_START/END,
+# синтетика нужна только на СТОРОНЕ final (искусственная потеря двух
+# background-правил из final-metrics/final-alerts одного и того же
+# реального attack-прогона этого архива).
+C299_DIR="${5:-$REPO_ROOT/server-logs/collect-2.9.9}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -205,7 +222,7 @@ echo "==========================================="
 echo ""
 
 # --- Реплей 1: collect-2.9.5 (до 5.9.6a/b) --------------------------------
-echo "--- реплей 1/5: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
+echo "--- реплей 1/6: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
 ts5=$(find_ts "$C295_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts5" ]; then
     bad "collect-2.9.5: baseline-state-*.json не найден в $C295_DIR/attacks — архив недоступен"
@@ -221,7 +238,7 @@ fi
 echo ""
 
 # --- Реплей 2: collect-2.9.6, баланс + счётность с синтетическим фоном ---
-echo "--- реплей 2/5: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
+echo "--- реплей 2/6: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
 ts6=$(find_ts "$C296_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts6" ]; then
     bad "collect-2.9.6: baseline-state-*.json не найден в $C296_DIR/attacks — архив недоступен"
@@ -269,7 +286,7 @@ fi
 echo ""
 
 # --- Реплей 3: синтетическая потеря 1000 событий -------------------------
-echo "--- реплей 3/5: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
+echo "--- реплей 3/6: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
 if [ -z "${ts6:-}" ]; then
     bad "синтетическая потеря: collect-2.9.6 недоступен, шаг пропущен"
 else
@@ -299,7 +316,7 @@ fi
 echo ""
 
 # --- Реплей 4: collect-2.9.7, крит. 9 обязан дать 88.6/мин, а не SKIP -----
-echo "--- реплей 4/5: collect-2.9.7, крит. 9 (темп по окну атаки) = 88.6/мин, не SKIP (5.9.8e, №90) ---"
+echo "--- реплей 4/6: collect-2.9.7, крит. 9 (темп по окну атаки) = 88.6/мин, не SKIP (5.9.8e, №90) ---"
 ts7=$(find_ts "$C297_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts7" ]; then
     bad "collect-2.9.7: baseline-state-*.json не найден в $C297_DIR/attacks — архив недоступен"
@@ -336,7 +353,7 @@ echo ""
 # сошёлся с detection-baseline.txt, расхождения нет) — это не «PASS
 # отсутствием», а невозможность проверки, и она считается несовпадением:
 # архив, на котором нечего проверять, для этого реплея не годится.
-echo "--- реплей 5/5: collect-2.9.8, «база брошена» молчит на повторном вызове и падает на чужом TIMESTAMP (5.9.9a, №99) ---"
+echo "--- реплей 5/6: collect-2.9.8, «база брошена» молчит на повторном вызове и падает на чужом TIMESTAMP (5.9.9a, №99) ---"
 ts8=$(find_ts "$C298_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts8" ]; then
     bad "collect-2.9.8: baseline-state-*.json не найден в $C298_DIR/attacks — архив недоступен"
@@ -367,6 +384,50 @@ else
         fi
     fi
     restore_diff_state
+fi
+echo ""
+
+# --- Реплей 6/6: collect-2.9.9, третья ветка спасения фонового правила ---
+echo "--- реплей 6/6: collect-2.9.9, вторая и третья ветки спасения фонового правила различаются (5.9.9.Fe, №111) ---"
+ts9=$(find_ts "$C299_DIR/attacks" 2>/dev/null || true)
+idle_start9="$C299_DIR/idle/metrics-start.txt"
+idle_end9="$C299_DIR/idle/metrics-end.txt"
+if [ -z "$ts9" ]; then
+    bad "collect-2.9.9: baseline-state-*.json не найден в $C299_DIR/attacks — архив недоступен"
+elif [ ! -s "$idle_start9" ] || [ ! -s "$idle_end9" ]; then
+    bad "collect-2.9.9: idle/metrics-start.txt или metrics-end.txt отсутствуют/пусты в $C299_DIR — вторая/третья ветка непроверяемы без реального idle-часа"
+else
+    # anomaly_detection реально выросло за idle-час этого архива (93→113,
+    # ветка 2 — «выросло за idle-час»); container_escape_init_proc реально
+    # не выросло, но ненулевое на обоих концах (21→21, ветка 3 — «до
+    # открытия окна»). Обе — background-правила (background-rules.txt),
+    # присутствующие в baseline И final этого прогона архива на самом деле
+    # (не потеряны взаправду) — искусственно вычёркиваются из final
+    # (metrics + store), чтобы критерий 6 счёл их потерянными и отдал на
+    # разбор второй попытке; правится ВРЕМЕННАЯ копия архива, не сам архив.
+    tmp299=$(mktemp -d)
+    cp -r "$C299_DIR/attacks/." "$tmp299/" 2>/dev/null
+    sed -i.bak '/rule_id="anomaly_detection"/d;/rule_id="container_escape_init_proc"/d' \
+        "$tmp299/final-metrics-$ts9.txt"
+    rm -f "$tmp299/final-metrics-$ts9.txt.bak"
+    if [ -s "$tmp299/final-alerts-$ts9.json" ]; then
+        jq '[.[] | select(.rule_id!="anomaly_detection" and .rule_id!="container_escape_init_proc")]' \
+            "$tmp299/final-alerts-$ts9.json" > "$tmp299/final-alerts-$ts9.json.tmp" \
+            && mv "$tmp299/final-alerts-$ts9.json.tmp" "$tmp299/final-alerts-$ts9.json"
+    fi
+    IDLE_METRICS_START="$idle_start9" IDLE_METRICS_END="$idle_end9" \
+        run_offline_gate "$tmp299" "$ts9"
+    rm -rf "$tmp299"
+    sec6_299=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 6[.]' '^=== 5\.9\.9\.Fe[.]')
+    branch2_ok=0
+    branch3_ok=0
+    grep -q 'фоновое anomaly_detection: не сработало под атакой, но выросло за idle-час' <<< "$sec6_299" && branch2_ok=1
+    grep -q 'фоновое container_escape_init_proc: за idle-час прироста нет, но счётчик ненулевой' <<< "$sec6_299" && branch3_ok=1
+    if [ "$branch2_ok" -eq 1 ] && [ "$branch3_ok" -eq 1 ]; then
+        ok "collect-2.9.9 (ts=$ts9): вторая ветка («выросло за idle-час», anomaly_detection) и третья ветка («сработывало до окна», container_escape_init_proc) напечатаны разными формулировками на одном прогоне"
+    else
+        bad "collect-2.9.9 (ts=$ts9): вторая ветка=$branch2_ok, третья ветка=$branch3_ok (ожидались обе=1) — реплей не различил ветки спасения idle_delta_list/idle_prewindow_list (run-gate.sh:1136+)"
+    fi
 fi
 echo ""
 

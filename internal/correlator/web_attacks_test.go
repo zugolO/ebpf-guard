@@ -30,9 +30,21 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 			{"UNION SELECT payload", "/tmp/log?union+select+users", true},
 			{"Boolean SQLi", "/var/www/upload.php?or 1=1", true},
 			{"DROP TABLE", "/app/upload.sql?drop table users", true},
-			{"Comment marker", "/tmp/file--", true},
 			{"Quote escaping", "/var/www/test'%27", true},
 			{"Normal file", "/var/www/index.html", false},
+			// 5.9.9.F.1c (finding #114): this row used to read
+			// {"Comment marker", "/tmp/file--", true} — a test that demanded
+			// the defect. The bare markers "--", "#" and ";" were matched
+			// against a FILENAME, so one character raised a critical "SQL
+			// injection": замер №2.9.9.F produced 10 such criticals, zero of
+			// them true (systemd-logind session temp files, a git man page).
+			// The expectation is inverted, not deleted — a deleted row would
+			// let the pattern come back unnoticed, which is how it survived
+			// this long.
+			{"Bare comment marker in a filename is not an injection", "/tmp/file--", false},
+			{"Bare hash in a filename is not an injection", "/run/systemd/sessions/.#114376ChHzY", false},
+			{"Bare semicolon in a filename is not an injection", "/tmp/report;final.csv", false},
+			{"Double dash inside a package name is not an injection", "git-mergetool--lib.1.gz", false},
 		}
 
 		for _, tc := range sqliTestCases {

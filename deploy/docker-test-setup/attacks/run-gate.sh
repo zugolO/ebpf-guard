@@ -127,6 +127,40 @@ fail() { echo -e "${RED}[FAIL]${NC} $1"; GATE_FAILED=1; record_covered "$1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; record_covered "$1"; }
 skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); record_covered "$1"; }
 
+# 5.9.9.F.1a (находка №116, вторая половина): перевод ISO-8601 в epoch с
+# долями секунды БЕЗ опоры на GNU date. Классификация харнесс-алертов
+# (критерий 16) различает случаи по разнице в десятки миллисекунд — на
+# №2.9.9.F это 26 мс, — то есть доли секунды обязательны, а `date -d ...
+# +%s.%N` есть только у GNU coreutils. На стенде это Linux и работало бы,
+# но проверять правку критерия 16 полагается офлайн-реплеем на архиве, а
+# replay-gate.sh обязан быть переносимым (тот же довод, что у явного
+# "$BASH" "$GATE" в нём). С BSD date классификация молча уходила бы в
+# «не классифицировано» — то есть реплей на маке показывал бы FAIL там,
+# где стенд даёт PASS, и правку 5.9.9.F.1a нечем было бы проверить.
+# Целая часть считается date'ом (GNU или BSD), дробная приписывается как
+# есть — она не зависит от календаря.
+iso_to_epoch() {
+    local ts="$1" whole frac e
+    [ -z "$ts" ] && return 1
+    whole=${ts%%.*}
+    whole=${whole%Z}
+    frac=""
+    case "$ts" in
+        *.*) frac=${ts#*.}; frac=${frac%Z} ;;
+    esac
+    e=$(date -u -d "${whole}Z" +%s 2>/dev/null) || e=""
+    if [ -z "$e" ]; then
+        e=$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "$whole" +%s 2>/dev/null) || e=""
+    fi
+    [ -z "$e" ] && return 1
+    if [ -n "$frac" ]; then
+        printf '%s.%s\n' "$e" "$frac"
+    else
+        printf '%s\n' "$e"
+    fi
+}
+
+
 # sum_metric_delta PATTERN FILE_BASE FILE_FINAL — sums every metric line in
 # each file matching the ERE PATTERN and prints (final-sum − base-sum) as an
 # integer. Generalizes the base/final-diff idiom criterion 3 introduced for
@@ -255,6 +289,10 @@ IDLE_STATE_END="${IDLE_STATE_END:-}"
 # Опционально — без него критерий 16 печатает SKIP по объёму (длительность
 # окна печатается и без него).
 IDLE_ALERTS_END="${IDLE_ALERTS_END:-}"
+# 5.9.9.F.1d (находка №115): срез алертов на НАЧАЛО idle-часа. Пайплайн
+# экспортировал его и раньше, гейт не читал — без него разбор дельты
+# idle-часа по comm провести не на чем.
+IDLE_ALERTS_START="${IDLE_ALERTS_START:-}"
 # 5.9.7f (находка №83): снимок /api/v1/alerts на НАЧАЛО idle-часа
 # (alerts-start.json — idle-run.sh уже пишет его сам, см. idle-run.sh).
 # Нужен только для разбивки прироста DNS long-label правил по comm — без
@@ -712,8 +750,8 @@ if command -v jq &> /dev/null; then
     if [ -n "$b_ts" ] && [ -n "$f_ts" ]; then
         # date -d понимает ISO 8601 с миллисекундами/таймзоной; awk делает
         # деление на 60 для минут (с дробной частью).
-        b_epoch=$(date -d "$b_ts" +%s.%N 2>/dev/null || echo 0)
-        f_epoch=$(date -d "$f_ts" +%s.%N 2>/dev/null || echo 0)
+        b_epoch=$(iso_to_epoch "$b_ts" || echo 0)
+        f_epoch=$(iso_to_epoch "$f_ts" || echo 0)
         runtime_min=$(awk -v b="$b_epoch" -v f="$f_epoch" 'BEGIN{ if(b>0 && f>b) print (f-b)/60; else print 0 }')
     fi
 fi
@@ -2262,8 +2300,11 @@ else
     if [ -z "$idle_end_ts" ] || [ -z "$baseline_ts" ]; then
         skip "нет .timestamp в IDLE_STATE_END или baseline-state — окно не измерено"
     else
-        idle_end_epoch=$(date -d "$idle_end_ts" +%s.%N 2>/dev/null || echo 0)
-        baseline_epoch=$(date -d "$baseline_ts" +%s.%N 2>/dev/null || echo 0)
+        # 5.9.9.F.1a: через iso_to_epoch, иначе вся секция 16 «не измерялась»
+        # на любой системе без GNU date — то есть офлайн-реплей правки
+        # 5.9.9.F.1a не доходил бы до классификации вовсе.
+        idle_end_epoch=$(iso_to_epoch "$idle_end_ts" || echo 0)
+        baseline_epoch=$(iso_to_epoch "$baseline_ts" || echo 0)
         blind_sec=$(awk -v a="$idle_end_epoch" -v b="$baseline_epoch" 'BEGIN{ if(a>0 && b>a) printf "%.1f", (b-a); else print "n/a" }')
 
         if [ "$blind_sec" = "n/a" ]; then
@@ -2402,7 +2443,7 @@ else
                                 harness_unclassified=$((harness_unclassified + 1))
                                 continue
                             fi
-                            alert_epoch=$(date -d "$alert_ts" +%s.%N 2>/dev/null || echo "")
+                            alert_epoch=$(iso_to_epoch "$alert_ts")
                             if [ -z "$alert_epoch" ]; then
                                 harness_unclassified=$((harness_unclassified + 1))
                                 continue
@@ -2424,20 +2465,54 @@ else
                 # подхвачен» теперь означает только случай 3 (алерт ПОСЛЕ
                 # подтверждения); случаи 1 и 2 структурно неизбежны (алерт до
                 # регистрации корня, алерт в окне лага) и называются так же.
+                #
+                # 5.9.9.F.1a (находка №116): вердикт теперь СЛЕДУЕТ этому
+                # разбору, а не игнорирует его. До правки ветка смотрела
+                # только на harness_alerts > 0 и валила прогон независимо от
+                # случая — то есть печатала «не считается поломкой подхвата»
+                # и тут же FAIL. Дефект не косметический: харнесс-bash
+                # алертится РАНЬШЕ, чем пролог успевает записать свой pid
+                # (замер №2.9.9.F: алерт ...439.880, регистрация ...439.906,
+                # разница 26 мс, и pid алерта даже не тот, что регистрируется
+                # корнем) — значит у критерия не было достижимого PASS по
+                # построению, и он навсегда оставался ручным переводом
+                # вердикта. Валят только те случаи, которые действительно
+                # означают промах подхвата:
+                #   случай 3        — алерт от дерева измерителя ПОСЛЕ
+                #                     подтверждения подхвата;
+                #   не классифицировано — маркер отсутствует или не читается,
+                #                     то есть разбор провести не на чем.
+                # Второе обязательно: без него пропажа маркера снова стала бы
+                # тихим PASS, а это находка №109 наоборот.
+                # Значения по умолчанию: блок классификации выше исполняется
+                # только при composition_checked=1 и harness_alerts>0.
+                harness_case1=${harness_case1:-0}; harness_case2=${harness_case2:-0}
+                harness_case3=${harness_case3:-0}; harness_unclassified=${harness_unclassified:-0}
+                harness_blocking=$((harness_case3 + harness_unclassified))
+                harness_benign=$((harness_case1 + harness_case2))
                 harness_reason() {
                     if [ "$harness_case3" -gt 0 ]; then
                         echo "observer_root не подхвачен агентом на этом прогоне: $harness_case3 алерт(ов) после подтверждения подхвата (5.9.7g/5.9.8g/5.9.9.Fb)"
-                    elif [ "$harness_case2" -gt 0 ]; then
-                        echo "$harness_case2 алерт(ов) в окне лага подхвата (${root_lag_sec}с между регистрацией и подтверждением, 5.9.9.Fb) — не считается поломкой подхвата"
-                    elif [ "$harness_case1" -gt 0 ]; then
-                        echo "$harness_case1 алерт(ов) предшествуют регистрации корня (5.9.9.Fb) — не считается поломкой подхвата"
                     else
-                        echo "$harness_alerts алерт(ов) от дерева измерителя не классифицированы по времени (маркер observer-root-register-$TIMESTAMP.txt недоступен, 5.9.9.Fb)"
+                        echo "$harness_unclassified алерт(ов) от дерева измерителя не классифицированы по времени (маркер observer-root-register-$TIMESTAMP.txt недоступен или не разобран, 5.9.9.Fb/5.9.9.F.1a)"
+                    fi
+                }
+                # Величина не исчезает вместе с FAIL: случай называется и в
+                # тексте PASS, числом (5.9.9.F.1a).
+                harness_benign_reason() {
+                    if [ "$harness_case1" -gt 0 ] && [ "$harness_case2" -gt 0 ]; then
+                        echo "$harness_case1 предшествуют регистрации корня + $harness_case2 в окне лага подхвата (${root_lag_sec}с)"
+                    elif [ "$harness_case2" -gt 0 ]; then
+                        echo "$harness_case2 алерт(ов) в окне лага подхвата (${root_lag_sec}с между регистрацией и подтверждением)"
+                    else
+                        echo "$harness_case1 алерт(ов) предшествуют регистрации корня"
                     fi
                 }
                 if awk -v n="$blind_new_alerts" 'BEGIN{exit !(n<=5)}'; then
-                    if [ "$composition_checked" -eq 1 ] && [ "$harness_alerts" -gt 0 ]; then
-                        fail "объём слепого окна $blind_new_alerts <= 5, но $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — $(harness_reason)"
+                    if [ "$composition_checked" -eq 1 ] && [ "$harness_blocking" -gt 0 ]; then
+                        fail "объём слепого окна $blind_new_alerts <= 5, но $harness_blocking алерт(ов) — от дерева измерителя (см. \"!\" выше) — $(harness_reason)"
+                    elif [ "$composition_checked" -eq 1 ] && [ "$harness_benign" -gt 0 ]; then
+                        pass "объём слепого окна $blind_new_alerts <= 5; $harness_benign алерт(ов) дерева измерителя — структурно неизбежные: $(harness_benign_reason) (5.9.9.Fb/5.9.9.F.1a)"
                     else
                         pass "объём слепого окна $blind_new_alerts <= 5 — содержимое окна пренебрежимо (5.9.6h)"
                     fi
@@ -2447,14 +2522,20 @@ else
                     # фазам, ни разбор по составу (5.9.7g/5.9.8g) провести не на чем.
                     skip "объём слепого окна $blind_new_alerts > 5, а detection-baseline.txt отсутствует — added_count не определён, ни фазы, ни разбор по составу (5.9.7g/5.9.8g) не проверены"
                 else
-                    if [ "$harness_alerts" -gt 0 ]; then
-                        fail "объём слепого окна $blind_new_alerts > 5, и $harness_alerts алерт(ов) — от дерева измерителя (см. \"!\" выше) — $(harness_reason)"
+                    # 5.9.9.F.1a: на широком окне структурно неизбежные алерты
+                    # НЕ дают pass сами по себе — исполнение обязано провалиться
+                    # дальше, в разбор по фазам. Иначе харнесс-алерт стал бы
+                    # способом обойти 5.9.6h/5.9.7g на окне любой ширины.
+                    harness_note=""
+                    [ "$harness_benign" -gt 0 ] && harness_note=" ($harness_benign алерт(ов) дерева измерителя структурно неизбежны: $(harness_benign_reason))"
+                    if [ "$harness_blocking" -gt 0 ]; then
+                        fail "объём слепого окна $blind_new_alerts > 5, и $harness_blocking алерт(ов) — от дерева измерителя (см. \"!\" выше) — $(harness_reason)"
                     elif [ "$added_count" -lt 3 ]; then
-                        pass "объём слепого окна $blind_new_alerts > 5, added_count=$added_count < 3, 0 алертов от дерева измерителя — окно не слепое по составу (5.9.7g)"
+                        pass "объём слепого окна $blind_new_alerts > 5, added_count=$added_count < 3, 0 алертов дерева измерителя, означающих промах подхвата${harness_note} — окно не слепое по составу (5.9.7g)"
                     elif [ "$added_undetermined_count" -eq 0 ]; then
-                        pass "объём слепого окна $blind_new_alerts > 5, 0 алертов от дерева измерителя, и у каждого из добавленных в критерии 6 типов определена фаза (attack/idle/gap) — окно не слепое (5.9.6h/5.9.8g)"
+                        pass "объём слепого окна $blind_new_alerts > 5, 0 алертов дерева измерителя, означающих промах подхвата${harness_note}, и у каждого из добавленных в критерии 6 типов определена фаза (attack/idle/gap) — окно не слепое (5.9.6h/5.9.8g)"
                     else
-                        fail "объём слепого окна $blind_new_alerts > 5, 0 алертов от дерева измерителя, но $added_undetermined_count добавленных типов в критерии 6 остались с неопределённой фазой — состав не объяснён (5.9.6h)"
+                        fail "объём слепого окна $blind_new_alerts > 5, 0 алертов дерева измерителя, означающих промах подхвата${harness_note}, но $added_undetermined_count добавленных типов в критерии 6 остались с неопределённой фазой — состав не объяснён (5.9.6h)"
                     fi
                 fi
             fi
@@ -2536,6 +2617,83 @@ else
         else
             pass "критикалов окна атаки разобраны по составу: манифест=$attackwin_manifest_n, дерево измерителя=$attackwin_harness_n, прочее=$attackwin_other_n, сумма=$attackwin_total — величина, порог назначается по итогам №2.9.9.F (5.9.9.Fd)"
         fi
+    fi
+fi
+echo ""
+
+# 5.9.9.F.1d (№115, P1): дельта ebpf_guard_incidents_total{verdict="attack"}
+# за idle-час — главная величина часа простоя, которую до этой волны не читал
+# НИ ОДИН критерий гейта. idle/SUMMARY.txt печатал её сам, с собственной
+# пометкой «должно быть 0 — P1-6/P1-13», и на этом всё: на №2.9.9.F там стояло
+# 7, гейт напечатал PASS=42 и о числе не знал. Родня находки №108 (там не
+# проверялся состав окна атаки), но про другое окно.
+#
+# Порога в этой волне НЕТ намеренно — тем же запретом 5.9.6, что применён к
+# 5.9.9.Fd и к alerts_dropped/published: критерий с неизвестным правильным
+# ответом выносит вердикт по случайности. 7 из SUMMARY.txt — не измерение
+# критерием, а число, напечатанное сбоку; эта секция измеряет его впервые.
+# Порог назначается по итогам №2.9.9.F.1.
+#
+# Вместе с числом печатается состав — по comm и по правилам-участникам.
+# Иначе следующая волна получит ту же величину без ответа на вопрос «кто»,
+# ровно как критерий 6 получал 138 критикалов до 5.9.9.Fd. Состав считается
+# по алертам idle-часа (IDLE_ALERTS_START→END): снимка инцидентов за idle-час
+# стенд не делает, а правило incident_confirmed_attack срабатывает ровно на
+# промоушене инцидента — на №2.9.9.F его 7 алертов совпали с дельтой
+# счётчика 4→11 ... 7, то есть прокси точная, но она ПРОКСИ, и расхождение
+# печатается, а не скрывается.
+echo "=== 5.9.9.F.1d. Инциденты verdict=\"attack\" за idle-час: величина + состав (№115) ==="
+if [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ] \
+    || [ ! -s "$IDLE_METRICS_START" ] || [ ! -s "$IDLE_METRICS_END" ]; then
+    skip "IDLE_METRICS_START/END не заданы — дельта verdict=\"attack\" за idle-час не измерена (5.9.9.F.1d)"
+else
+    idle_verdict_metric() {
+        awk -v v="$2" '$0 ~ "^ebpf_guard_incidents_total\\{verdict=\"" v "\"\\}" {print $2}' "$1" 2>/dev/null | tail -1
+    }
+    idle_attack_start=$(idle_verdict_metric "$IDLE_METRICS_START" attack)
+    idle_attack_end=$(idle_verdict_metric "$IDLE_METRICS_END" attack)
+    idle_susp_start=$(idle_verdict_metric "$IDLE_METRICS_START" suspicious)
+    idle_susp_end=$(idle_verdict_metric "$IDLE_METRICS_END" suspicious)
+    if [ -z "$idle_attack_start" ] || [ -z "$idle_attack_end" ]; then
+        skip "ebpf_guard_incidents_total{verdict=\"attack\"} отсутствует в срезах idle-часа — величина не измерена (5.9.9.F.1d)"
+    else
+        idle_attack_delta=$(awk -v a="$idle_attack_start" -v b="$idle_attack_end" 'BEGIN{printf "%d", b-a}')
+        idle_susp_delta=$(awk -v a="${idle_susp_start:-0}" -v b="${idle_susp_end:-0}" 'BEGIN{printf "%d", b-a}')
+        echo "  verdict=\"attack\" за idle-час: ${idle_attack_start} -> ${idle_attack_end}, дельта = $idle_attack_delta"
+        echo "  verdict=\"suspicious\" за idle-час (справочно): ${idle_susp_start:-n/a} -> ${idle_susp_end:-n/a}, дельта = $idle_susp_delta"
+        record_covered "verdict=\"attack\" за idle-час"
+
+        # Состав. Печатается ВСЕГДА, когда есть на чём считать, — в том числе
+        # при дельте 0: «состав пуст» и «состав не считался» это разные строки.
+        if [ -n "$IDLE_ALERTS_START" ] && [ -s "$IDLE_ALERTS_START" ] \
+            && [ -n "$IDLE_ALERTS_END" ] && [ -s "$IDLE_ALERTS_END" ] \
+            && command -v jq &> /dev/null; then
+            idle_new_alerts=$(jq -c -n --slurpfile a "$IDLE_ALERTS_START" --slurpfile b "$IDLE_ALERTS_END" '
+                ($a[0] // [] | map(.id)) as $seen
+                | (($b[0] // []) | map(select(.id as $i | ($seen | index($i)) | not)))' 2>/dev/null)
+            idle_new_n=$(echo "${idle_new_alerts:-[]}" | jq 'length' 2>/dev/null || echo 0)
+            idle_new_crit=$(echo "${idle_new_alerts:-[]}" | jq '[.[] | select(.severity=="critical")] | length' 2>/dev/null || echo 0)
+            idle_promo_n=$(echo "${idle_new_alerts:-[]}" | jq '[.[] | select(.rule_id=="incident_confirmed_attack")] | length' 2>/dev/null || echo 0)
+            echo "  алертов за idle-час: $idle_new_n, из них critical: $idle_new_crit"
+            echo "  алертов incident_confirmed_attack (прокси промоушена): $idle_promo_n"
+            if [ "$idle_promo_n" -ne "$idle_attack_delta" ]; then
+                echo "  ! прокси расходится со счётчиком ($idle_promo_n против $idle_attack_delta) — состав ниже неполон, разбирать по журналу"
+            fi
+            echo "  состав промоушенов по comm:"
+            echo "${idle_new_alerts:-[]}" | jq -r '
+                [.[] | select(.rule_id=="incident_confirmed_attack") | (.comm // "(пусто)")]
+                | group_by(.) | map({comm: .[0], count: length}) | sort_by(-.count)
+                | .[] | "    \(.comm): \(.count)"' 2>/dev/null || true
+            echo "  критикалы idle-часа по правилам (кто наполняет час простоя):"
+            echo "${idle_new_alerts:-[]}" | jq -r '
+                [.[] | select(.severity=="critical") | {r: (.rule_id // "(пусто)"), c: (.comm // "(пусто)")}]
+                | group_by(.r) | map({rule: .[0].r, count: length, comms: (map(.c) | unique | join(","))})
+                | sort_by(-.count) | .[] | "    \(.count)\t\(.rule)\t[\(.comms)]"' 2>/dev/null || true
+            record_covered "состав промоушенов по comm"
+        else
+            echo "  состав не считался: IDLE_ALERTS_START/END не заданы или jq недоступен (величина выше от этого не зависит)"
+        fi
+        pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta — величина, порог назначается по итогам №2.9.9.F.1 (5.9.9.F.1d, №115)"
     fi
 fi
 echo ""

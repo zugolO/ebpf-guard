@@ -951,10 +951,19 @@ rules:
       field: filename
       op: regex
       values:
+        # 5.9.9.F.1b (находка №111): /proc/[0-9]+/cmdline УБРАН. Чтение чужой
+        # командной строки не credential-примитива — в отличие от mem/maps
+        # (образ памяти) и environ (T1552, секреты в окружении). Замер
+        # №2.9.9.F: 19 алертов правила за прогон, истинный ОДИН
+        # (credscrape /proc/<pid>/maps, позитивный контроль 5.9.9.Fa),
+        # остальные 18 — landscape-sysinfo (/proc/1/cmdline ×9) и
+        # dbus-daemon (×9). Прежняя попытка чинить это исключением по comm
+        # (pgrep-cmdline-scan, волна 5.7a) не обобщилась на два новых демона
+        # и дала рост 3 → 19 за один замер: условие правится предикатом,
+        # список исключений не заменяет верного условия.
         - "/proc/[0-9]+/mem"
         - "/proc/[0-9]+/maps"
         - "/proc/[0-9]+/environ"
-        - "/proc/[0-9]+/cmdline"
     severity: critical
     action: alert
     tags: [mitre:T1003, sigma, memory-dump, credential-access]
@@ -966,9 +975,16 @@ rules:
     #
     # plan.md wave 5.7a (замер №2.3, находка №13): pgrep's per-PID matching
     # pass reads only /proc/<pid>/cmdline (193/h) — never /mem or /maps, the
-    # actual credential-scraping primitives. Scoped to comm AND path so the
-    # real dump surface stays alerting even from pgrep (control criterion:
-    # attack-window /proc/*/mem dumps must keep firing, see cred_proc_maps_mass_read).
+    # actual credential-scraping primitives. Fixed then by a comm-scoped
+    # exception (pgrep-cmdline-scan); wave 5.9.9.F.1b removed BOTH that
+    # exception and /proc/[0-9]+/cmdline from the condition above — see
+    # находка №111. The exception never generalised: замер №2.9.9.F showed
+    # landscape-sysinfo and dbus-daemon doing the same cmdline reads (18 of
+    # the rule's 19 alerts). Dropping the predicate makes the exception
+    # unnecessary, which is the point: список исключений не заменяет верного
+    # условия. Control criterion unchanged — attack-window /proc/*/mem and
+    # /proc/*/maps dumps must keep firing (see cred_proc_maps_mass_read and
+    # run_cred_proc_maps_positive_control, comm=credscrape).
     exceptions:
       - name: systemd-journal
         condition:
@@ -980,17 +996,6 @@ rules:
           field: proc.comm
           op: eq
           values: [ebpf-guard]
-      - name: pgrep-cmdline-scan
-        condition_group:
-          operator: and
-          conditions:
-            - field: proc.comm
-              op: eq
-              values: [pgrep]
-            - field: filename
-              op: regex
-              values:
-                - "/proc/[0-9]+/cmdline"
 
   - id: sigma_ptrace_attach
     name: "ptrace PTRACE_ATTACH to another process"

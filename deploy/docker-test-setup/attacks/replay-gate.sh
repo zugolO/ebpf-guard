@@ -96,6 +96,10 @@ C298_DIR="${4:-$REPO_ROOT/server-logs/collect-2.9.8}"
 # background-правил из final-metrics/final-alerts одного и того же
 # реального attack-прогона этого архива).
 C299_DIR="${5:-$REPO_ROOT/server-logs/collect-2.9.9}"
+# 5.9.9.F.1a (находка №116): седьмой реплей — collect-2.9.9.F, единственный
+# архив, где дерево измерителя дало алерт в слепом окне и где маркер
+# observer-root-register-*.txt лежит рядом с подтверждением подхвата.
+C299F_DIR="${6:-$REPO_ROOT/server-logs/collect-2.9.9.F}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -222,7 +226,7 @@ echo "==========================================="
 echo ""
 
 # --- Реплей 1: collect-2.9.5 (до 5.9.6a/b) --------------------------------
-echo "--- реплей 1/6: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
+echo "--- реплей 1/8: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
 ts5=$(find_ts "$C295_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts5" ]; then
     bad "collect-2.9.5: baseline-state-*.json не найден в $C295_DIR/attacks — архив недоступен"
@@ -238,7 +242,7 @@ fi
 echo ""
 
 # --- Реплей 2: collect-2.9.6, баланс + счётность с синтетическим фоном ---
-echo "--- реплей 2/6: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
+echo "--- реплей 2/8: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
 ts6=$(find_ts "$C296_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts6" ]; then
     bad "collect-2.9.6: baseline-state-*.json не найден в $C296_DIR/attacks — архив недоступен"
@@ -286,7 +290,7 @@ fi
 echo ""
 
 # --- Реплей 3: синтетическая потеря 1000 событий -------------------------
-echo "--- реплей 3/6: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
+echo "--- реплей 3/8: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
 if [ -z "${ts6:-}" ]; then
     bad "синтетическая потеря: collect-2.9.6 недоступен, шаг пропущен"
 else
@@ -316,7 +320,7 @@ fi
 echo ""
 
 # --- Реплей 4: collect-2.9.7, крит. 9 обязан дать 88.6/мин, а не SKIP -----
-echo "--- реплей 4/6: collect-2.9.7, крит. 9 (темп по окну атаки) = 88.6/мин, не SKIP (5.9.8e, №90) ---"
+echo "--- реплей 4/8: collect-2.9.7, крит. 9 (темп по окну атаки) = 88.6/мин, не SKIP (5.9.8e, №90) ---"
 ts7=$(find_ts "$C297_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts7" ]; then
     bad "collect-2.9.7: baseline-state-*.json не найден в $C297_DIR/attacks — архив недоступен"
@@ -353,7 +357,7 @@ echo ""
 # сошёлся с detection-baseline.txt, расхождения нет) — это не «PASS
 # отсутствием», а невозможность проверки, и она считается несовпадением:
 # архив, на котором нечего проверять, для этого реплея не годится.
-echo "--- реплей 5/6: collect-2.9.8, «база брошена» молчит на повторном вызове и падает на чужом TIMESTAMP (5.9.9a, №99) ---"
+echo "--- реплей 5/8: collect-2.9.8, «база брошена» молчит на повторном вызове и падает на чужом TIMESTAMP (5.9.9a, №99) ---"
 ts8=$(find_ts "$C298_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts8" ]; then
     bad "collect-2.9.8: baseline-state-*.json не найден в $C298_DIR/attacks — архив недоступен"
@@ -387,8 +391,8 @@ else
 fi
 echo ""
 
-# --- Реплей 6/6: collect-2.9.9, третья ветка спасения фонового правила ---
-echo "--- реплей 6/6: collect-2.9.9, вторая и третья ветки спасения фонового правила различаются (5.9.9.Fe, №111) ---"
+# --- Реплей 6/8: collect-2.9.9, третья ветка спасения фонового правила ---
+echo "--- реплей 6/8: collect-2.9.9, вторая и третья ветки спасения фонового правила различаются (5.9.9.Fe, №111) ---"
 ts9=$(find_ts "$C299_DIR/attacks" 2>/dev/null || true)
 idle_start9="$C299_DIR/idle/metrics-start.txt"
 idle_end9="$C299_DIR/idle/metrics-end.txt"
@@ -427,6 +431,180 @@ else
         ok "collect-2.9.9 (ts=$ts9): вторая ветка («выросло за idle-час», anomaly_detection) и третья ветка («сработывало до окна», container_escape_init_proc) напечатаны разными формулировками на одном прогоне"
     else
         bad "collect-2.9.9 (ts=$ts9): вторая ветка=$branch2_ok, третья ветка=$branch3_ok (ожидались обе=1) — реплей не различил ветки спасения idle_delta_list/idle_prewindow_list (run-gate.sh:1136+)"
+    fi
+fi
+echo ""
+
+# --- Реплей 7/8: collect-2.9.9.F, крит. 16 умеет и PASS, и FAIL (5.9.9.F.1a) ---
+#
+# Находка №116. До правки вердикт критерия 16 смотрел только на
+# harness_alerts > 0 и валил прогон независимо от случая — печатая при этом
+# «не считается поломкой подхвата». На №2.9.9.F это дало единственный FAIL
+# прогона на алерте, который на 26 мс СТАРШЕ регистрации корня, то есть у
+# критерия не было достижимого PASS по построению.
+#
+# Реплей обязан показать оба исхода на ОДНОМ архиве, иначе правка
+# неотличима от «критерий больше никогда не падает»:
+#   исход 1 — архив как есть: случай 1, PASS, случай назван числом;
+#   исход 2 — тот же архив с timestamp'ом харнесс-алерта, сдвинутым ЗА
+#             confirm_epoch: случай 3, FAIL, причина «observer_root не
+#             подхвачен».
+# Правится ВРЕМЕННАЯ копия архива, не сам архив.
+echo "--- реплей 7/8: collect-2.9.9.F, крит. 16 умеет выносить и PASS (случай 1), и FAIL (случай 3) (5.9.9.F.1a, №116) ---"
+ts9f=$(find_ts "$C299F_DIR/attacks" 2>/dev/null || true)
+marker9f=""
+[ -n "$ts9f" ] && marker9f="$C299F_DIR/attacks/observer-root-register-$ts9f.txt"
+idle_alerts9f="$C299F_DIR/idle/alerts-end.json"
+idle_state9f="$C299F_DIR/idle/state-end.json"
+if [ -z "$ts9f" ]; then
+    bad "collect-2.9.9.F: baseline-state-*.json не найден в $C299F_DIR/attacks — архив недоступен"
+elif [ ! -s "$marker9f" ]; then
+    bad "collect-2.9.9.F: маркер $marker9f отсутствует — без register/confirm epoch классификация 5.9.9.Fb непроверяема"
+elif [ ! -s "$idle_alerts9f" ] || [ ! -s "$idle_state9f" ]; then
+    bad "collect-2.9.9.F: idle/alerts-end.json или idle/state-end.json отсутствуют — слепое окно не измеряется без конца idle-часа"
+else
+    confirm9f=$(awk -F= '$1=="confirm_epoch"{print $2}' "$marker9f")
+    harness_ts9f=$(jq -r -n --slurpfile a "$C299F_DIR/attacks/baseline-alerts-$ts9f.json" \
+        --slurpfile b "$idle_alerts9f" '
+        ($b[0] | map(.id)) as $seen
+        | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)))
+        | map(select((.comm // "") == "bash")) | .[0].timestamp // empty' 2>/dev/null)
+    if [ -z "$harness_ts9f" ] || [ -z "$confirm9f" ]; then
+        bad "collect-2.9.9.F (ts=$ts9f): в слепом окне нет алерта дерева измерителя либо в маркере нет confirm_epoch — оба исхода 5.9.9.F.1a на этом архиве непроверяемы"
+    else
+        # Исход 1: архив как есть — случай 1, PASS.
+        IDLE_ALERTS_END="$idle_alerts9f" IDLE_STATE_END="$idle_state9f" \
+            IDLE_ALERTS_START="$C299F_DIR/idle/alerts-start.json" \
+            IDLE_METRICS_START="$C299F_DIR/idle/metrics-start.txt" \
+            IDLE_METRICS_END="$C299F_DIR/idle/metrics-end.txt" \
+            run_offline_gate "$C299F_DIR/attacks" "$ts9f"
+        sec16_a=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 16[.]' '^=== 5\.9\.9\.Fd[.]')
+        case1_ok=0
+        grep -q 'предшествуют регистрации корня=1' <<< "$sec16_a" && case1_ok=1
+        pass16=0
+        grep -qE '\[PASS\].*структурно неизбежные' <<< "$sec16_a" && pass16=1
+        if [ "$case1_ok" -eq 1 ] && [ "$pass16" -eq 1 ]; then
+            ok "collect-2.9.9.F (ts=$ts9f): архив как есть — случай 1 (алерт старше регистрации корня) и PASS с названным случаем; критерий 16 достижим (5.9.9.F.1a)"
+        else
+            bad "collect-2.9.9.F (ts=$ts9f): случай1=$case1_ok, PASS=$pass16 (ожидались оба=1) — крит. 16 либо не классифицировал алерт (проверить iso_to_epoch), либо всё ещё валит структурно неизбежный случай (находка №116)"
+        fi
+
+        # Исход 2: тот же архив, timestamp харнесс-алерта сдвинут за
+        # confirm_epoch — случай 3, FAIL. Сдвиг делается по epoch'у маркера,
+        # а не константой, чтобы реплей не рассыпался при пересъёмке архива.
+        tmp299f=$(mktemp -d)
+        cp -r "$C299F_DIR/attacks/." "$tmp299f/" 2>/dev/null
+        after9f=$(awk -v c="$confirm9f" 'BEGIN{printf "%d", c+5}')
+        after_iso9f=$(date -u -d "@$after9f" +%Y-%m-%dT%H:%M:%S.000000000Z 2>/dev/null \
+            || date -u -r "$after9f" +%Y-%m-%dT%H:%M:%S.000000000Z 2>/dev/null)
+        if [ -z "$after_iso9f" ]; then
+            bad "collect-2.9.9.F (ts=$ts9f): не удалось построить timestamp после confirm_epoch ни GNU, ни BSD date — исход 2 не проверен"
+        else
+            jq --arg old "$harness_ts9f" --arg new "$after_iso9f" \
+                'map(if (.comm // "") == "bash" and .timestamp == $old then .timestamp = $new else . end)' \
+                "$C299F_DIR/attacks/baseline-alerts-$ts9f.json" > "$tmp299f/baseline-alerts-$ts9f.json"
+            IDLE_ALERTS_END="$idle_alerts9f" IDLE_STATE_END="$idle_state9f" \
+                IDLE_ALERTS_START="$C299F_DIR/idle/alerts-start.json" \
+                IDLE_METRICS_START="$C299F_DIR/idle/metrics-start.txt" \
+                IDLE_METRICS_END="$C299F_DIR/idle/metrics-end.txt" \
+                run_offline_gate "$tmp299f" "$ts9f"
+            sec16_b=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 16[.]' '^=== 5\.9\.9\.Fd[.]')
+            case3_ok=0
+            grep -q 'после подтверждения (не подхвачен)=1' <<< "$sec16_b" && case3_ok=1
+            fail16=0
+            grep -qE '\[FAIL\].*observer_root не подхвачен' <<< "$sec16_b" && fail16=1
+            if [ "$case3_ok" -eq 1 ] && [ "$fail16" -eq 1 ]; then
+                ok "collect-2.9.9.F (ts=$ts9f): с алертом, сдвинутым за confirm_epoch — случай 3 и FAIL «observer_root не подхвачен»; критерий 16 умеет падать, а не только пропускать (5.9.9.F.1a)"
+            else
+                bad "collect-2.9.9.F (ts=$ts9f): случай3=$case3_ok, FAIL=$fail16 (ожидались оба=1) — правка 5.9.9.F.1a ослепила критерий 16, что хуже находки №116 (тихо, а не шумно)"
+            fi
+        fi
+        rm -rf "$tmp299f"
+    fi
+fi
+echo ""
+
+# --- Реплей 8/8: collect-2.9.9.F, ноль web_sql_injection_files объясняется
+#     реестром, а не печатается потерей (5.9.9.F.1c, №114) ---
+#
+# 5.9.9.F.1c убирает из web_sql_injection_files голые "--", "#" и ";" —
+# единственные паттерны, которые правило когда-либо матчило на этом стенде
+# (10 критикалов за прогон №2.9.9.F, истинных 0). Ожидаемая величина после
+# правки — 0 за прогон, и это ОПАСНАЯ форма приёмки: «правило замолчало»
+# неотличимо от ослепления по одному счётчику — находка №57 в чистом виде.
+# У 5.9.9.F.1b защита есть (позитивный контроль credscrape держит правило
+# ненулевым), у 5.9.9.F.1c её нет по построению: реестр silent-rules.txt
+# прямо говорит, что у стенда НЕТ сценария, создающего файл с SQLi-паттерном
+# в имени, а позитивный контроль на это заводит волна 6.
+#
+# Поэтому проверка 5.9.9.F.1c — не число, а ВЕТКА РЕЕСТРА: гейт обязан
+# напечатать, что ноль объяснён, и назвать чем. Постановка волны требует это
+# проверить, а не допустить. Реплей и проверяет — на двух исходах:
+#   исход 1 — правило вычеркнуто из final и из ОБОИХ срезов idle-часа
+#             (иначе его спасла бы ветка background-rules по idle-приросту,
+#             и ветка реестра осталась бы неисполненной): крит. 6 обязан
+#             отнести его в «потеряно намеренно» и НЕ упасть;
+#   исход 2 — тем же способом вычеркнуто owasp_path_traversal, которого нет
+#             ни в одном из трёх реестров: крит. 6 обязан УПАСТЬ и назвать
+#             его. Без второго исхода первый доказывал бы только то, что
+#             критерий 6 вообще никогда не падает.
+echo "--- реплей 8/8: collect-2.9.9.F, ноль web_sql_injection_files объясняется реестром, а не печатается потерей (5.9.9.F.1c, №114) ---"
+ts9f2=$(find_ts "$C299F_DIR/attacks" 2>/dev/null || true)
+if [ -z "$ts9f2" ]; then
+    bad "collect-2.9.9.F: baseline-state-*.json не найден в $C299F_DIR/attacks — архив недоступен"
+elif [ ! -s "$C299F_DIR/idle/metrics-start.txt" ] || [ ! -s "$C299F_DIR/idle/metrics-end.txt" ]; then
+    bad "collect-2.9.9.F: idle/metrics-start.txt или metrics-end.txt отсутствуют — без них ветка background-rules спасла бы правило, и ветка реестра осталась бы непроверенной"
+else
+    # Вычёркивает правило из временной копии архива И из временных копий
+    # срезов idle-часа, затем гоняет гейт. Сам архив не правится.
+    replay8_run() {
+        local rule="$1"
+        local tmpdir idle_s idle_e
+        tmpdir=$(mktemp -d)
+        cp -r "$C299F_DIR/attacks/." "$tmpdir/" 2>/dev/null
+        idle_s="$tmpdir/replay8-idle-start.txt"
+        idle_e="$tmpdir/replay8-idle-end.txt"
+        grep -v "rule_id=\"$rule\"" "$C299F_DIR/idle/metrics-start.txt" > "$idle_s"
+        grep -v "rule_id=\"$rule\"" "$C299F_DIR/idle/metrics-end.txt" > "$idle_e"
+        grep -v "rule_id=\"$rule\"" "$C299F_DIR/attacks/final-metrics-$ts9f2.txt" > "$tmpdir/final-metrics-$ts9f2.txt"
+        if [ -s "$C299F_DIR/attacks/final-alerts-$ts9f2.json" ]; then
+            jq --arg r "$rule" '[.[] | select(.rule_id != $r)]' \
+                "$C299F_DIR/attacks/final-alerts-$ts9f2.json" > "$tmpdir/final-alerts-$ts9f2.json"
+        fi
+        IDLE_METRICS_START="$idle_s" IDLE_METRICS_END="$idle_e" \
+            IDLE_ALERTS_END="$C299F_DIR/idle/alerts-end.json" \
+            IDLE_ALERTS_START="$C299F_DIR/idle/alerts-start.json" \
+            IDLE_STATE_END="$C299F_DIR/idle/state-end.json" \
+            run_offline_gate "$tmpdir" "$ts9f2"
+        rm -rf "$tmpdir"
+    }
+
+    # Исход 1: правило из реестров — ноль обязан быть объяснён, крит. 6 не падает.
+    replay8_run web_sql_injection_files
+    sec6_a=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 6[.]' '^=== 5\.9\.9\.Fe[.]')
+    explained8=0
+    grep -qE '^\s+~ web_sql_injection_files$' <<< "$sec6_a" && explained8=1
+    crit6_pass=0
+    grep -qE '\[PASS\].*состав детекта без потерь вне списка намеренных' <<< "$sec6_a" && crit6_pass=1
+    lost_named=0
+    grep -qE '^\s+- web_sql_injection_files$' <<< "$sec6_a" && lost_named=1
+    if [ "$explained8" -eq 1 ] && [ "$crit6_pass" -eq 1 ] && [ "$lost_named" -eq 0 ]; then
+        ok "collect-2.9.9.F (ts=$ts9f2): web_sql_injection_files с нулём за прогон отнесён реестром («~» в объяснённых) и крит. 6 не упал — ноль 5.9.9.F.1c объясняется печатью, а не допущением (№114)"
+    else
+        bad "collect-2.9.9.F (ts=$ts9f2): объяснён=$explained8, крит.6 PASS=$crit6_pass, назван потерей=$lost_named (ожидались 1/1/0) — ноль web_sql_injection_files НЕ разбирается реестром, и приёмка 5.9.9.F.1c осталась бы допущением"
+    fi
+
+    # Исход 2: правило вне всех трёх реестров — крит. 6 обязан упасть.
+    replay8_run owasp_path_traversal
+    sec6_b=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 6[.]' '^=== 5\.9\.9\.Fe[.]')
+    crit6_fail=0
+    grep -qE '\[FAIL\].*потеряно .* типов вне intentional-loss' <<< "$sec6_b" && crit6_fail=1
+    unreg_named=0
+    grep -qE '^\s+- owasp_path_traversal$' <<< "$sec6_b" && unreg_named=1
+    if [ "$crit6_fail" -eq 1 ] && [ "$unreg_named" -eq 1 ]; then
+        ok "collect-2.9.9.F (ts=$ts9f2): owasp_path_traversal (ни в одном реестре) с нулём за прогон валит крит. 6 и назван поимённо — ветка реестра различает объяснённый ноль и регресс детекта (5.9.9.F.1c)"
+    else
+        bad "collect-2.9.9.F (ts=$ts9f2): крит.6 FAIL=$crit6_fail, назван=$unreg_named (ожидались оба=1) — крит. 6 пропускает потерю правила вне реестров, то есть исход 1 выше не доказывает ничего"
     fi
 fi
 echo ""

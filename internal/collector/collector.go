@@ -157,7 +157,12 @@ func newMalformedLogger(interval time.Duration) *malformedLogger {
 // caller already parsed from the fixed header before the payload itself
 // failed to decode, and which a hex dump alone forces a human to re-derive
 // by hand. Existing callers (syscall.go) pass none and are unaffected.
-func (m *malformedLogger) record(logger *slog.Logger, collectorName, reason string, raw []byte, extra ...slog.Attr) {
+//
+// logger is expected to already carry a "collector" attribute (bound via
+// .With, the same convention every collector's c.logger already follows)
+// — record does not add its own, since doing so on top of an already-bound
+// logger duplicated the "collector" key in the emitted JSON (finding #127).
+func (m *malformedLogger) record(logger *slog.Logger, reason string, raw []byte, extra ...slog.Attr) {
 	m.pending.Add(1)
 
 	n := len(raw)
@@ -186,7 +191,6 @@ func (m *malformedLogger) record(logger *slog.Logger, collectorName, reason stri
 	lastExtra := m.lastExtra
 	m.mu.Unlock()
 	args := []any{
-		slog.String("collector", collectorName),
 		slog.String("reason", reason),
 		slog.Int64("count", count),
 		slog.String("window", m.interval.String()),

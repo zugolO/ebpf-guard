@@ -102,3 +102,27 @@ mitre_software_enum_dpkg b
 sigma_cpu_info_access b
 sigma_kernel_version_read b
 web_sql_injection_files b
+
+# Волна 5.9.9.F.2e (находка №122): 11 правил, которые агент сам называет
+# при старте — "rules: syscall rules with no reachable nr in the kernel
+# allowlist" (cmd/ebpf-guard/main.go) — event_type: syscall с условием на
+# числовой nr вне cfg.BPF.KernelFilter.MonitoredSyscalls. Никогда не
+# срабатывали ни на одном известном прогоне и не заведены в
+# detection-baseline.txt вовсе (baseline — это то, что хоть раз сработало),
+# поэтому $lost_types критерия 6 их не видит по построению: находка не в
+# потере, а в отсутствии самой возможности потерять. Категория (а) «немо
+# по конструкции» ровно по определению этой категории выше — это тот же
+# UnreachableSyscallRules, что уже проверяет rules_coverage_test.go.
+# Снимается волной 6, если новый источник событий (расширенный
+# KernelFilter.MonitoredSyscalls) сделает nr достижимым.
+mitre_arp_spoof_raw_socket a
+mitre_sandbox_detect_cpuid a
+ransomware_backup_delete a
+ransomware_mass_rename a
+rootkit_anonymous_exec_memory a
+rootkit_kexec_load a
+rootkit_userfaultfd_create a
+sigma_mprotect_exec_heap a
+sigma_prctl_dumpable a
+sigma_seccomp_filter_install a
+web_blind_sqli_heuristic a

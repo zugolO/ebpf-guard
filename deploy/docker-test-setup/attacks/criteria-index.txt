@@ -85,5 +85,20 @@
 5.9.9.F.1b	../../../rules/sigma-linux.yaml	5.9.9.F.1b (находка №111)
 5.9.9.F.1c	../../../rules/web-attacks-enhanced.yaml	5.9.9.F.1c (находка №114)
 5.9.9.F.1d	-	=== 5.9.9.F.1d. Инциденты verdict=
-5.9.9.F.1d	-	порог назначается по итогам №2.9.9.F.1 (5.9.9.F.1d, №115)
+5.9.9.F.1d	-	5.9.9.F.1d, №115
+5.9.9.F.2d	-	idle-actors.txt отсутствует рядом с гейтом
+5.9.9.F.2d	-	новый(е) актор(ы) idle-часа вне idle-actors.txt
+5.9.9.F.2d	idle-actors.txt	Формат (TAB-separated, 3 поля)
+5.9.9.F.2d	replay-gate.sh	idle-actors.txt
 5.9.9.F.1e	background-rules.txt	# 5.9.9.F.1e
+5.9.9.F.2e	-	критикалов окна атаки по правилам
+5.9.9.F.2e	-	состав за весь аптайм
+5.9.9.F.2e	silent-rules.txt	5.9.9.F.2e
+5.9.9.F.2e	replay-gate.sh	реплей 11/12
+5.9.9.F.2f	-	смещения:
+5.9.9.F.2f	background-rules.txt	5.9.9.F.2f
+5.9.9.F.2f	intentional-loss.txt	5.9.9.F.2f
+5.9.9.F.2f	replay-gate.sh	5.9.9.F.2f
+5.9.9.F.2a	-	замкнутое тождество, допуск ±
+5.9.9.F.2a	replay-gate.sh	реплей 12/12
+5.9.9.F.2b	-	наведённое CPU-давление вне окна (5.9.9.F.2b

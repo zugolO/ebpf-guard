@@ -342,7 +342,7 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 						}
 					}
 				}
-				logger.record(slog.Default(), "dns", reason, sample, extra...)
+				logger.record(slog.Default().With(slog.String("collector", "dns")), reason, sample, extra...)
 			}
 			continue
 		}

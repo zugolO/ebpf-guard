@@ -48,9 +48,10 @@
 #      концах). Реплей, не различивший обе формулировки, — стоп, как и
 #      остальные пять.
 #
-# Использование: replay-gate.sh [collect-2.9.5-dir] [collect-2.9.6-dir] [collect-2.9.7-dir] [collect-2.9.8-dir] [collect-2.9.9-dir]
+# Использование: replay-gate.sh [collect-2.9.5-dir] [collect-2.9.6-dir] [collect-2.9.7-dir] [collect-2.9.8-dir] [collect-2.9.9-dir] [collect-2.9.9.F-dir] [collect-2.9.9.F.1-dir]
 # По умолчанию — server-logs/collect-2.9.5, server-logs/collect-2.9.6,
-# server-logs/collect-2.9.7, server-logs/collect-2.9.8 и server-logs/collect-2.9.9 относительно корня
+# server-logs/collect-2.9.7, server-logs/collect-2.9.8, server-logs/collect-2.9.9,
+# server-logs/collect-2.9.9.F и server-logs/collect-2.9.9.F.1 относительно корня
 # репозитория. Любое
 # несовпадение — ненулевой код возврата (преflight-стоп); печатает
 # REPLAY-GATE: PASS/FAIL в конце.
@@ -100,6 +101,13 @@ C299_DIR="${5:-$REPO_ROOT/server-logs/collect-2.9.9}"
 # архив, где дерево измерителя дало алерт в слепом окне и где маркер
 # observer-root-register-*.txt лежит рядом с подтверждением подхвата.
 C299F_DIR="${6:-$REPO_ROOT/server-logs/collect-2.9.9.F}"
+# 5.9.9.F.2c (№128) и 5.9.9.F.2d (№118): девятый и десятый реплеи —
+# collect-2.9.9.F.1. Единственный архив с agent-start-*.txt рядом (окно
+# журнала критерия 17) и, вместе с collect-2.9.9.F, второе из двух окон
+# суток, которыми проверяется idle-actors.txt (2.9.9.F — утро, 2.9.9.F.1 —
+# ночь). 5.9.9.F.2e (№122): одиннадцатый реплей — тот же архив, тот же
+# приём заглушки journalctl, что и девятый.
+C299F1_DIR="${7:-$REPO_ROOT/server-logs/collect-2.9.9.F.1}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -226,7 +234,7 @@ echo "==========================================="
 echo ""
 
 # --- Реплей 1: collect-2.9.5 (до 5.9.6a/b) --------------------------------
-echo "--- реплей 1/8: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
+echo "--- реплей 1/12: collect-2.9.5, секция 19 обязана SKIP по отсутствующей серии ---"
 ts5=$(find_ts "$C295_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts5" ]; then
     bad "collect-2.9.5: baseline-state-*.json не найден в $C295_DIR/attacks — архив недоступен"
@@ -242,7 +250,7 @@ fi
 echo ""
 
 # --- Реплей 2: collect-2.9.6, баланс + счётность с синтетическим фоном ---
-echo "--- реплей 2/8: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
+echo "--- реплей 2/12: collect-2.9.6, секция 19 PASS×3, секция 20 с фоном 547/с (5.9.7a) ---"
 ts6=$(find_ts "$C296_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts6" ]; then
     bad "collect-2.9.6: baseline-state-*.json не найден в $C296_DIR/attacks — архив недоступен"
@@ -280,17 +288,21 @@ EOF
     run_offline_gate "$tmp296" "$ts6"
     rm -rf "$tmp296"
     sec20_296=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 20[.]' '^=== 21[.]')
+    # 5.9.9.F.2a (№123): режим drop удалён из секции 20 вместе с
+    # COUNTING_CONTROL_DROP_N — прежняя половина условия («drop не FAIL»)
+    # стала бы тавтологией (её нечему давать), поэтому проверяется прямо
+    # противоположное: режима drop в выводе секции 20 больше нет вовсе.
     if grep -q '\[PASS\].*idle: N=10000 сходится' <<< "$sec20_296" \
-        && ! grep -q '\[FAIL\].*drop:' <<< "$sec20_296"; then
-        ok "collect-2.9.6 (ts=$ts6) + синтетический null (547/с): idle PASS, drop не FAIL (SKIP по ringbuf_full=0 на этом стенде — ожидаемо, см. plan.md) — старая формула валила оба режима, новая нет"
+        && ! grep -qE '^\s*\[(PASS|FAIL|SKIP)\] drop:' <<< "$sec20_296"; then
+        ok "collect-2.9.6 (ts=$ts6) + синтетический null (547/с): idle PASS, режима drop в секции 20 нет (удалён 5.9.9.F.2a, №123) — старая формула валила оба режима, новая нет"
     else
-        bad "collect-2.9.6 (ts=$ts6) + синтетический null (547/с): секция 20 разошлась с зафиксированным исходом (idle PASS / drop не FAIL) — см. вывод выше"
+        bad "collect-2.9.6 (ts=$ts6) + синтетический null (547/с): секция 20 разошлась с зафиксированным исходом (idle PASS, drop отсутствует) — см. вывод выше"
     fi
 fi
 echo ""
 
 # --- Реплей 3: синтетическая потеря 1000 событий -------------------------
-echo "--- реплей 3/8: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
+echo "--- реплей 3/12: collect-2.9.6 с искусственно потерянной 1000 событий на syscall — баланс обязан упасть ---"
 if [ -z "${ts6:-}" ]; then
     bad "синтетическая потеря: collect-2.9.6 недоступен, шаг пропущен"
 else
@@ -320,7 +332,7 @@ fi
 echo ""
 
 # --- Реплей 4: collect-2.9.7, крит. 9 обязан дать 88.6/мин, а не SKIP -----
-echo "--- реплей 4/8: collect-2.9.7, крит. 9 (темп по окну атаки) = 88.6/мин, не SKIP (5.9.8e, №90) ---"
+echo "--- реплей 4/12: collect-2.9.7, крит. 9 (темп по окну атаки) = 88.6/мин, не SKIP (5.9.8e, №90) ---"
 ts7=$(find_ts "$C297_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts7" ]; then
     bad "collect-2.9.7: baseline-state-*.json не найден в $C297_DIR/attacks — архив недоступен"
@@ -357,7 +369,7 @@ echo ""
 # сошёлся с detection-baseline.txt, расхождения нет) — это не «PASS
 # отсутствием», а невозможность проверки, и она считается несовпадением:
 # архив, на котором нечего проверять, для этого реплея не годится.
-echo "--- реплей 5/8: collect-2.9.8, «база брошена» молчит на повторном вызове и падает на чужом TIMESTAMP (5.9.9a, №99) ---"
+echo "--- реплей 5/12: collect-2.9.8, «база брошена» молчит на повторном вызове и падает на чужом TIMESTAMP (5.9.9a, №99) ---"
 ts8=$(find_ts "$C298_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts8" ]; then
     bad "collect-2.9.8: baseline-state-*.json не найден в $C298_DIR/attacks — архив недоступен"
@@ -391,8 +403,8 @@ else
 fi
 echo ""
 
-# --- Реплей 6/8: collect-2.9.9, третья ветка спасения фонового правила ---
-echo "--- реплей 6/8: collect-2.9.9, вторая и третья ветки спасения фонового правила различаются (5.9.9.Fe, №111) ---"
+# --- Реплей 6/12: collect-2.9.9, третья ветка спасения фонового правила ---
+echo "--- реплей 6/12: collect-2.9.9, вторая и третья ветки спасения фонового правила различаются (5.9.9.Fe, №111) ---"
 ts9=$(find_ts "$C299_DIR/attacks" 2>/dev/null || true)
 idle_start9="$C299_DIR/idle/metrics-start.txt"
 idle_end9="$C299_DIR/idle/metrics-end.txt"
@@ -435,7 +447,7 @@ else
 fi
 echo ""
 
-# --- Реплей 7/8: collect-2.9.9.F, крит. 16 умеет и PASS, и FAIL (5.9.9.F.1a) ---
+# --- Реплей 7/12: collect-2.9.9.F, крит. 16 умеет и PASS, и FAIL (5.9.9.F.1a) ---
 #
 # Находка №116. До правки вердикт критерия 16 смотрел только на
 # harness_alerts > 0 и валил прогон независимо от случая — печатая при этом
@@ -450,7 +462,7 @@ echo ""
 #             confirm_epoch: случай 3, FAIL, причина «observer_root не
 #             подхвачен».
 # Правится ВРЕМЕННАЯ копия архива, не сам архив.
-echo "--- реплей 7/8: collect-2.9.9.F, крит. 16 умеет выносить и PASS (случай 1), и FAIL (случай 3) (5.9.9.F.1a, №116) ---"
+echo "--- реплей 7/12: collect-2.9.9.F, крит. 16 умеет выносить и PASS (случай 1), и FAIL (случай 3) (5.9.9.F.1a, №116) ---"
 ts9f=$(find_ts "$C299F_DIR/attacks" 2>/dev/null || true)
 marker9f=""
 [ -n "$ts9f" ] && marker9f="$C299F_DIR/attacks/observer-root-register-$ts9f.txt"
@@ -483,10 +495,18 @@ else
         grep -q 'предшествуют регистрации корня=1' <<< "$sec16_a" && case1_ok=1
         pass16=0
         grep -qE '\[PASS\].*структурно неизбежные' <<< "$sec16_a" && pass16=1
-        if [ "$case1_ok" -eq 1 ] && [ "$pass16" -eq 1 ]; then
-            ok "collect-2.9.9.F (ts=$ts9f): архив как есть — случай 1 (алерт старше регистрации корня) и PASS с названным случаем; критерий 16 достижим (5.9.9.F.1a)"
+        # 5.9.9.F.2f (находка №126): постановка 5.9.9.F.1a просила формат
+        # «1 алерт предшествует регистрации корня, −26 мс» — до этой правки
+        # печатались только число алертов по случаю и лаг подхвата (другая
+        # величина), самого смещения не было. Число здесь не подобрано под
+        # архив: это тот же −26 мс, которым сама постановка 5.9.9.F.1a
+        # описывала находку №116 на этом же архиве.
+        offset126_ok=0
+        grep -q 'предшествуют регистрации корня=1 (смещения: -26мс)' <<< "$sec16_a" && offset126_ok=1
+        if [ "$case1_ok" -eq 1 ] && [ "$pass16" -eq 1 ] && [ "$offset126_ok" -eq 1 ]; then
+            ok "collect-2.9.9.F (ts=$ts9f): архив как есть — случай 1 (алерт старше регистрации корня), смещение -26мс напечатано, PASS с названным случаем; критерий 16 достижим (5.9.9.F.1a, 5.9.9.F.2f №126)"
         else
-            bad "collect-2.9.9.F (ts=$ts9f): случай1=$case1_ok, PASS=$pass16 (ожидались оба=1) — крит. 16 либо не классифицировал алерт (проверить iso_to_epoch), либо всё ещё валит структурно неизбежный случай (находка №116)"
+            bad "collect-2.9.9.F (ts=$ts9f): случай1=$case1_ok, PASS=$pass16, смещение=$offset126_ok (ожидались все=1) — крит. 16 либо не классифицировал алерт (проверить iso_to_epoch), либо всё ещё валит структурно неизбежный случай (находка №116), либо смещение в мс не напечатано (находка №126)"
         fi
 
         # Исход 2: тот же архив, timestamp харнесс-алерта сдвинут за
@@ -524,7 +544,7 @@ else
 fi
 echo ""
 
-# --- Реплей 8/8: collect-2.9.9.F, ноль web_sql_injection_files объясняется
+# --- Реплей 8/12: collect-2.9.9.F, ноль web_sql_injection_files объясняется
 #     реестром, а не печатается потерей (5.9.9.F.1c, №114) ---
 #
 # 5.9.9.F.1c убирает из web_sql_injection_files голые "--", "#" и ";" —
@@ -548,7 +568,7 @@ echo ""
 #             ни в одном из трёх реестров: крит. 6 обязан УПАСТЬ и назвать
 #             его. Без второго исхода первый доказывал бы только то, что
 #             критерий 6 вообще никогда не падает.
-echo "--- реплей 8/8: collect-2.9.9.F, ноль web_sql_injection_files объясняется реестром, а не печатается потерей (5.9.9.F.1c, №114) ---"
+echo "--- реплей 8/12: collect-2.9.9.F, ноль web_sql_injection_files объясняется реестром, а не печатается потерей (5.9.9.F.1c, №114) ---"
 ts9f2=$(find_ts "$C299F_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts9f2" ]; then
     bad "collect-2.9.9.F: baseline-state-*.json не найден в $C299F_DIR/attacks — архив недоступен"
@@ -605,6 +625,289 @@ else
         ok "collect-2.9.9.F (ts=$ts9f2): owasp_path_traversal (ни в одном реестре) с нулём за прогон валит крит. 6 и назван поимённо — ветка реестра различает объяснённый ноль и регресс детекта (5.9.9.F.1c)"
     else
         bad "collect-2.9.9.F (ts=$ts9f2): крит.6 FAIL=$crit6_fail, назван=$unreg_named (ожидались оба=1) — крит. 6 пропускает потерю правила вне реестров, то есть исход 1 выше не доказывает ничего"
+    fi
+fi
+echo ""
+
+# --- Реплей 9/12: collect-2.9.9.F.1, крит. 17 даёт SKIP без AGENT_START_FILE
+#     и PASS с ним — оба исхода на одном архиве (5.9.9.F.2c, №128) ---
+#
+# 5.9.9.Fc (находка №110) убрала подстановку `--boot` без AGENT_START_FILE —
+# без него секция 17 больше не считает "KILL action executed" по всему
+# журналу юнита за ВЕСЬ аптайм ХОСТА (в том числе по чужим, не относящимся к
+# этому прогону замерам), а честно SKIP'ает текстом «окно журнала не
+# задано». Постановка волны 5.9.9.F.2 требует проверить эту ветку РЕПЛЕЕМ, а
+# не только прочитать код: оба исхода на одном архиве, тем же приёмом, что
+# 5.9.9a закрыла свою ветку (реплей 5/12 выше).
+#
+# journalctl на машине, где гоняется офлайн-реплей, нет вовсе (без него
+# gate.sh честно печатает SKIP «журнал agent-сервиса недоступен», не PASS) —
+# исход 2 живьём на живом стенде читает journalctl, а офлайн может дать
+# PASS только если что-то отвечает на вызов `journalctl -u ... --since ...`
+# тем же содержимым, что видел бы живой journalctl. Поэтому исход 2 временно
+# подставляет в PATH заглушку journalctl, которая печатает архивный
+# journal-agent-2.9.9.F.1.log (собран этим же самым стендом за этот же
+# прогон) — единственный способ получить PASS без живого хоста; заглушка
+# снимается сразу после вызова.
+echo "--- реплей 9/12: collect-2.9.9.F.1, крит. 17 — SKIP без AGENT_START_FILE, PASS с ним (5.9.9.F.2c, №128) ---"
+ts9f1=$(find_ts "$C299F1_DIR/attacks" 2>/dev/null || true)
+journal9f1="$C299F1_DIR/journal-agent-2.9.9.F.1.log"
+agentstart9f1="$C299F1_DIR/agent-start-2.9.9.F.1.txt"
+if [ -z "$ts9f1" ]; then
+    bad "collect-2.9.9.F.1: baseline-state-*.json не найден в $C299F1_DIR/attacks — архив недоступен"
+elif [ ! -s "$journal9f1" ] || [ ! -s "$agentstart9f1" ]; then
+    bad "collect-2.9.9.F.1: journal-agent-2.9.9.F.1.log или agent-start-2.9.9.F.1.txt отсутствуют — оба исхода крит. 17 непроверяемы"
+else
+    # Исход 1: AGENT_START_FILE не задан — SKIP «окно журнала не задано».
+    run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
+    sec17_a=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 17[.]' '^=== 18[.]')
+    skip17=0
+    grep -qE '\[SKIP\].*окно журнала не задано' <<< "$sec17_a" && skip17=1
+    no_verdict17=1
+    grep -qE '\[(PASS|FAIL)\]' <<< "$sec17_a" && no_verdict17=0
+    if [ "$skip17" -eq 1 ] && [ "$no_verdict17" -eq 1 ]; then
+        ok "collect-2.9.9.F.1 (ts=$ts9f1): без AGENT_START_FILE крит. 17 = SKIP «окно журнала не задано», вердикта нет — ветка 5.9.9.Fc воспроизведена (5.9.9.F.2c)"
+    else
+        bad "collect-2.9.9.F.1 (ts=$ts9f1): без AGENT_START_FILE skip17=$skip17, без_вердикта=$no_verdict17 (ожидались оба=1) — секция 17 разошлась с ожидаемым SKIP"
+    fi
+
+    # Исход 2: AGENT_START_FILE задан, journalctl подставлен заглушкой,
+    # читающей архивный журнал этого же прогона — PASS.
+    tmpbin9f1=$(mktemp -d)
+    cat > "$tmpbin9f1/journalctl" <<'STUBEOF'
+#!/bin/sh
+# Заглушка офлайн-реплея (5.9.9.F.2c): на машине реплея настоящего
+# journalctl нет, поэтому вместо обращения к systemd она печатает
+# заранее собранный архивный журнал агента того же прогона.
+if [ -n "$JOURNAL_STUB_LOG_FILE" ] && [ -s "$JOURNAL_STUB_LOG_FILE" ]; then
+    cat "$JOURNAL_STUB_LOG_FILE"
+    exit 0
+fi
+exit 1
+STUBEOF
+    chmod +x "$tmpbin9f1/journalctl"
+    PATH="$tmpbin9f1:$PATH" JOURNAL_STUB_LOG_FILE="$journal9f1" AGENT_START_FILE="$agentstart9f1" \
+        run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
+    rm -rf "$tmpbin9f1"
+    sec17_b=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 17[.]' '^=== 18[.]')
+    pass17=0
+    grep -qE '\[PASS\].*предохранитель доказан живьём' <<< "$sec17_b" && pass17=1
+    if [ "$pass17" -eq 1 ]; then
+        ok "collect-2.9.9.F.1 (ts=$ts9f1): с AGENT_START_FILE (и архивным журналом за окно) крит. 17 = PASS — оба исхода 5.9.9.Fc воспроизведены на одном архиве (5.9.9.F.2c, №128)"
+    else
+        bad "collect-2.9.9.F.1 (ts=$ts9f1): с AGENT_START_FILE крит. 17 не дал ожидаемого PASS — секция:"$'\n'"$sec17_b"
+    fi
+fi
+echo ""
+
+# --- Реплей 10/12: collect-2.9.9.F и collect-2.9.9.F.1, состав idle-часа
+#     против idle-actors.txt — PASS на обоих реальных окнах, FAIL на
+#     синтетическом акторе вне реестра (5.9.9.F.2d, №118) ---
+#
+# Находка №118: дельта verdict="attack" за idle-час не сопоставима между
+# замерами (утро/ночь), порог по числу поэтому не назначается. Вместо него
+# 5.9.9.F.1d/5.9.9.F.2d сверяет состав idle-часа по comm с реестром
+# idle-actors.txt и падает на НОВОМ акторе. Реплей обязан показать все три
+# исхода: оба реальных архива (уже покрывающих оба окна суток, которыми и
+# заведён реестр) дают PASS без единого нового актора, а один и тот же
+# архив с ПОДЛОЖЕННЫМ синтетическим комом вне реестра — FAIL с его именем.
+# Без третьего исхода первые два доказывали бы только то, что критерий
+# никогда не падает.
+echo "--- реплей 10/12: idle-actors.txt — PASS на collect-2.9.9.F и collect-2.9.9.F.1, FAIL на синтетическом акторе (5.9.9.F.2d, №118) ---"
+replay10_check_known() {
+    local dir="$1" label="$2"
+    local ts
+    ts=$(find_ts "$dir/attacks" 2>/dev/null || true)
+    if [ -z "$ts" ]; then
+        bad "$label: baseline-state-*.json не найден в $dir/attacks — архив недоступен"
+        return
+    fi
+    if [ ! -s "$dir/idle/metrics-start.txt" ] || [ ! -s "$dir/idle/metrics-end.txt" ] \
+        || [ ! -s "$dir/idle/alerts-start.json" ] || [ ! -s "$dir/idle/alerts-end.json" ]; then
+        bad "$label: срезы idle-часа (metrics/alerts start/end) отсутствуют — реестр idle-actors.txt непроверяем"
+        return
+    fi
+    IDLE_METRICS_START="$dir/idle/metrics-start.txt" IDLE_METRICS_END="$dir/idle/metrics-end.txt" \
+        IDLE_ALERTS_START="$dir/idle/alerts-start.json" IDLE_ALERTS_END="$dir/idle/alerts-end.json" \
+        run_offline_gate "$dir/attacks" "$ts"
+    local sec
+    sec=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 5\.9\.9\.F\.1d[.]' '^=== 5\.9\.4h[.]')
+    local zero_unknown=0 pass_ok=0
+    grep -qE 'новых акторов 0' <<< "$sec" && zero_unknown=1
+    grep -qE '\[PASS\].*состав idle-часа целиком покрыт idle-actors\.txt' <<< "$sec" && pass_ok=1
+    if [ "$zero_unknown" -eq 1 ] && [ "$pass_ok" -eq 1 ]; then
+        ok "$label (ts=$ts): состав idle-часа целиком покрыт idle-actors.txt, новых акторов 0, крит. PASS (5.9.9.F.2d)"
+    else
+        bad "$label (ts=$ts): целиком_покрыт=$zero_unknown, PASS=$pass_ok (ожидались оба=1) — idle-actors.txt не покрывает реальный idle-час этого архива, секция:"$'\n'"$sec"
+    fi
+}
+replay10_check_known "$C299F_DIR" "collect-2.9.9.F"
+replay10_check_known "$C299F1_DIR" "collect-2.9.9.F.1"
+
+# Синтетический актор вне реестра: подложенная копия alerts-end.json
+# collect-2.9.9.F.1 с одним добавленным алертом с comm вне idle-actors.txt.
+if [ -z "${ts9f1:-}" ]; then
+    bad "collect-2.9.9.F.1: TIMESTAMP не определён (см. реплей 9 выше) — синтетический актор не проверен"
+elif [ ! -s "$C299F1_DIR/idle/alerts-end.json" ] || [ ! -s "$C299F1_DIR/idle/alerts-start.json" ] \
+    || [ ! -s "$C299F1_DIR/idle/metrics-start.txt" ] || [ ! -s "$C299F1_DIR/idle/metrics-end.txt" ]; then
+    bad "collect-2.9.9.F.1: срезы idle-часа отсутствуют — синтетический актор не проверен"
+else
+    tmp10=$(mktemp -d)
+    synth_comm="replay10-synthetic-actor-$$"
+    jq --arg c "$synth_comm" '. + [{
+        "id": ("replay10-synthetic-" + $c),
+        "timestamp": "2026-01-01T00:00:00Z",
+        "rule_id": "sigma_cpu_info_access",
+        "severity": "warning",
+        "pid": 999999,
+        "comm": $c,
+        "message": "synthetic (replay-gate.sh, 5.9.9.F.2d)"
+    }]' "$C299F1_DIR/idle/alerts-end.json" > "$tmp10/alerts-end-synthetic.json"
+    IDLE_METRICS_START="$C299F1_DIR/idle/metrics-start.txt" IDLE_METRICS_END="$C299F1_DIR/idle/metrics-end.txt" \
+        IDLE_ALERTS_START="$C299F1_DIR/idle/alerts-start.json" IDLE_ALERTS_END="$tmp10/alerts-end-synthetic.json" \
+        run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
+    sec10_synth=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 5\.9\.9\.F\.1d[.]' '^=== 5\.9\.4h[.]')
+    fail10=0
+    grep -qE '\[FAIL\].*новый\(е\) актор\(ы\) idle-часа вне idle-actors\.txt' <<< "$sec10_synth" && fail10=1
+    named10=0
+    grep -qF "новый(е) актор(ы) idle-часа вне idle-actors.txt: $synth_comm" <<< "$sec10_synth" && named10=1
+    rm -rf "$tmp10"
+    if [ "$fail10" -eq 1 ] && [ "$named10" -eq 1 ]; then
+        ok "collect-2.9.9.F.1 (ts=$ts9f1): синтетический актор $synth_comm вне idle-actors.txt — крит. FAIL и назван поимённо (5.9.9.F.2d, №118)"
+    else
+        bad "collect-2.9.9.F.1 (ts=$ts9f1): fail=$fail10, назван=$named10 (ожидались оба=1) — критерий не ловит нового актора вне idle-actors.txt, реплей 10 (два PASS выше) не доказывает ничего"
+    fi
+fi
+echo ""
+
+# --- Реплей 11/12: collect-2.9.9.F.1, крит. 5.9.4h читает 11 syscall-правил
+#     без достижимого nr из журнала агента, а не молчит "0" (5.9.9.F.2e, №122) ---
+#
+# Находка №122: агент сам печатает при старте ("rules: syscall rules with
+# no reachable nr in the kernel allowlist", count=11) список правил, у
+# которых условие по числовому nr никогда не попадёт в kernel-allowlist —
+# они никогда не срабатывали и поэтому не заведены в detection-baseline.txt
+# вовсе, то есть $lost_types критерия 6 их не видит по построению. До этой
+# правки крит. 5.9.4h печатал "немых правил: 0", хотя агент назвал 11
+# поимённо — величина уже была, никто её не читал. Реплей должен показать
+# ОБА исхода на одном архиве: без источника журнала критерий деградирует к
+# старому "0" (не падает, не врёт — просто не знает), а с ним — печатает
+# 11 правил категории (а) «по конструкции» (silent-rules.txt), не смешивая
+# их с категорией (б).
+#
+# journalctl -o cat на живом стенде сам убирает служебный префикс
+# syslog/journald; офлайн-архив (journal-agent-2.9.9.F.1.log) хранит его
+# как есть, поэтому заглушка вырезает всё до первой "{" САМА — это делает
+# именно "-o cat", а не run-gate.sh, который получает уже чистую JSON-строку
+# и на живом стенде увидит её без всякой правки.
+echo "--- реплей 11/12: crit. 5.9.4h — 11 правил без достижимого nr читаются из журнала, а не молчат «0» (5.9.9.F.2e, №122) ---"
+if [ -z "${ts9f1:-}" ]; then
+    bad "collect-2.9.9.F.1: TIMESTAMP не определён (см. реплей 9 выше) — 5.9.4h/kernel-unreachable не проверен"
+elif [ ! -s "$journal9f1" ]; then
+    bad "collect-2.9.9.F.1: journal-agent-2.9.9.F.1.log отсутствует — 5.9.4h/kernel-unreachable не проверен"
+else
+    # Исход 1: без journalctl в PATH — деградация к старому поведению, не крах.
+    run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
+    sec54h_a=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 5\.9\.4h[.]' '^=== 5\.9\.9c[.]')
+    degrade_ok=0
+    grep -qE 'немых правил за весь аптайм: 0' <<< "$sec54h_a" && degrade_ok=1
+    if [ "$degrade_ok" -eq 1 ]; then
+        ok "collect-2.9.9.F.1 (ts=$ts9f1): без journalctl крит. 5.9.4h деградирует к старому «0» текстом, не падает (5.9.9.F.2e)"
+    else
+        bad "collect-2.9.9.F.1 (ts=$ts9f1): без journalctl крит. 5.9.4h не дал ожидаемой деградации — секция:"$'\n'"$sec54h_a"
+    fi
+
+    # Исход 2: journalctl подставлен заглушкой, читающей архивный журнал
+    # этого же прогона (тем же приёмом, что реплей 9) — 11 правил названы
+    # поимённо категорией (а), «немых правил: 0» больше не печатается.
+    tmpbin11=$(mktemp -d)
+    cat > "$tmpbin11/journalctl" <<'STUBEOF'
+#!/bin/sh
+# Заглушка офлайн-реплея (5.9.9.F.2e): архивный журнал хранит служебный
+# syslog-префикс перед каждой JSON-строкой (реальный "journalctl -o cat" его
+# сам убирает) — заглушка вырезает всё до первой "{", это её замена -o cat,
+# а не поведение, которое должен уметь run-gate.sh.
+if [ -n "$JOURNAL_STUB_LOG_FILE" ] && [ -s "$JOURNAL_STUB_LOG_FILE" ]; then
+    sed -E 's/^[^{]*(\{.*)$/\1/' "$JOURNAL_STUB_LOG_FILE"
+    exit 0
+fi
+exit 1
+STUBEOF
+    chmod +x "$tmpbin11/journalctl"
+    PATH="$tmpbin11:$PATH" JOURNAL_STUB_LOG_FILE="$journal9f1" \
+        run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
+    rm -rf "$tmpbin11"
+    sec54h_b=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 5\.9\.4h[.]' '^=== 5\.9\.9c[.]')
+    kernel11_named=0
+    grep -qE 'немых всего: 11 — \(а\) по конструкции: 11, \(б\) нет сценария на стенде: 0' <<< "$sec54h_b" && kernel11_named=1
+    kernel11_pass=0
+    grep -qE '\[PASS\].*0 правил категории \(в\) без объяснения \(11 немых' <<< "$sec54h_b" && kernel11_pass=1
+    zero_gone=1
+    grep -qE 'немых правил за весь аптайм: 0' <<< "$sec54h_b" && zero_gone=0
+    if [ "$kernel11_named" -eq 1 ] && [ "$kernel11_pass" -eq 1 ] && [ "$zero_gone" -eq 1 ]; then
+        ok "collect-2.9.9.F.1 (ts=$ts9f1): с журналом крит. 5.9.4h называет 11 правил категорией (а), «немых правил: 0» не печатается (5.9.9.F.2e, №122)"
+    else
+        bad "collect-2.9.9.F.1 (ts=$ts9f1): назван_11=$kernel11_named, PASS=$kernel11_pass, «0»_ушло=$zero_gone (ожидались все=1) — секция:"$'\n'"$sec54h_b"
+    fi
+fi
+echo ""
+
+# --- Реплей 12/12: collect-2.9.9.F.1, крит. 22 — замкнутое тождество
+#     сходится на исправном прогоне и ПАДАЕТ на занижении Δringbuf_full
+#     (5.9.9.F.2a, №123/№124) ---
+#
+# Находка №124: прежний допуск крит. 22 был асимметричным —
+# -(Δringbuf_full+1500)…+1500, то есть растягивался на всю величину потери
+# в кольце (288192 на этом архиве) и проходил ЛЮБОЙ результат. 5.9.9.F.2a
+# заменила его замкнутым тождеством canary_events+canary_dropped+
+# ringbuf_full=N с симметричным ±1500. Реплей обязан показать оба исхода на
+# одном архиве: как есть — PASS с остатком внутри допуска; с синтетически
+# заниженным на 5000 Δringbuf_full (то есть с потерей, которую тождество
+# больше не прячет в допуск) — FAIL с названной величиной. Без второго
+# исхода первый доказывал бы только то, что критерий никогда не падает —
+# ровно тем и была находка №124.
+echo "--- реплей 12/12: collect-2.9.9.F.1, крит. 22 — замкнутое тождество сходится и умеет падать (5.9.9.F.2a, №123/№124) ---"
+if [ -z "${ts9f1:-}" ]; then
+    bad "collect-2.9.9.F.1: TIMESTAMP не определён (см. реплей 9 выше) — крит. 22 не проверен"
+else
+    # Исход 1: архив как есть.
+    run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
+    sec22_a=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 22[.]' '^=== 5\.9\.8f[.]')
+    closed_ok=0
+    grep -qE 'тождество .*Δringbuf_full=.*допуск ±1500, симметричный' <<< "$sec22_a" && closed_ok=1
+    pass22=0
+    grep -qE '\[PASS\].*run_ringbuf_overflow' <<< "$sec22_a" && pass22=1
+    if [ "$closed_ok" -eq 1 ] && [ "$pass22" -eq 1 ]; then
+        ok "collect-2.9.9.F.1 (ts=$ts9f1): крит. 22 считает замкнутым тождеством с симметричным ±1500 и даёт PASS на исправном прогоне (5.9.9.F.2a)"
+    else
+        bad "collect-2.9.9.F.1 (ts=$ts9f1): формула=$closed_ok, PASS=$pass22 (ожидались оба=1) — крит. 22 либо ушёл не в ту ветку формулы (проверить выбор маркера ringbuf-overflow-*.txt), либо не сошёлся, секция:"$'\n'"$sec22_a"
+    fi
+
+    # Исход 2: тот же архив, Δringbuf_full занижен на 5000 во ВРЕМЕННОЙ
+    # копии — правится копия, а не сам архив.
+    marker22=$(ls -1 "$C299F1_DIR/attacks"/ringbuf-overflow-*.txt 2>/dev/null | LC_ALL=C sort | tail -1)
+    if [ -z "$marker22" ]; then
+        bad "collect-2.9.9.F.1: ringbuf-overflow-*.txt не найден — отрицательный исход крит. 22 не проверен"
+    else
+        tmp22=$(mktemp -d)
+        cp -r "$C299F1_DIR/attacks/." "$tmp22/" 2>/dev/null
+        # Все марки, кроме последней по имени, убираются: гейт выбирает
+        # маркер тем же правилом (последний по имени), и подменять надо
+        # именно ту марку, которую он возьмёт.
+        rf_orig=$(awk -F= '$1=="ringbuf_full_delta"{print $2+0}' "$marker22")
+        rf_low=$(( rf_orig - 5000 ))
+        awk -F= -v v="$rf_low" 'BEGIN{OFS="="} $1=="ringbuf_full_delta"{print $1, v; next} {print}' \
+            "$marker22" > "$tmp22/$(basename "$marker22")"
+        run_offline_gate "$tmp22" "$ts9f1"
+        rm -rf "$tmp22"
+        sec22_b=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 22[.]' '^=== 5\.9\.8f[.]')
+        fail22=0
+        grep -qE '\[FAIL\].*не сходится под SIGSTOP.*остаток -4[0-9]{3}' <<< "$sec22_b" && fail22=1
+        if [ "$fail22" -eq 1 ]; then
+            ok "collect-2.9.9.F.1 (ts=$ts9f1): Δringbuf_full занижен на 5000 — крит. 22 FAIL с названным остатком; замкнутое тождество умеет падать, старый асимметричный допуск это прошёл бы (5.9.9.F.2a, №124)"
+        else
+            bad "collect-2.9.9.F.1 (ts=$ts9f1): с заниженным на 5000 Δringbuf_full крит. 22 не упал — допуск снова прячет потерю в кольце (находка №124), секция:"$'\n'"$sec22_b"
+        fi
     fi
 fi
 echo ""

@@ -224,6 +224,38 @@ final_alerts="$RESULTS_DIR/final-alerts-$TIMESTAMP.json"
 # status=degraded. Опционален: без него критерий 3 просто печатает "не
 # исполнялся" в ветке отсутствия дропов, вместо FAIL/SKIP по построению.
 induced_drop_marker="$RESULTS_DIR/induced-drop-$TIMESTAMP.txt"
+# Маркеры шагов, которые исполняются ВНЕ окна замера (run_ringbuf_overflow,
+# контроли DNS, наведённое CPU-давление), пишутся отдельным вызовом
+# run-all-attacks.sh со СВОИМ TIMESTAMP, поэтому находятся по маске, а не по
+# $TIMESTAMP этого прогона. Выбор — по ИМЕНИ (в имени лежит
+# YYYYmmdd_HHMMSS, лексикографический порядок совпадает с хронологическим),
+# а не `ls -t` по mtime: на дереве, выгруженном одним `git checkout`
+# (офлайн-реплей), все маркеры получают одинаковый mtime, и `ls -t` брал
+# первый по алфавиту — то есть САМЫЙ СТАРЫЙ марку, из-за чего критерий 22
+# уходил в устаревшую ветку вычета фона вместо formula=closed и валил
+# исправный архив. На живом стенде порядок тот же, что давал `ls -t`.
+latest_marker() {
+    local dir="$1" mask="$2"
+    ls -1 "$dir"/$mask 2>/dev/null | LC_ALL=C sort | tail -1
+}
+
+# 5.9.9.F.2a (№123): поднята сюда из секции 22 — крит. 18 теперь тоже читает
+# этот маркер (run_ringbuf_overflow, SIGSTOP-метод), а не только наведённый
+# дроп 5.9.5b, который никогда не был откалиброван на переполнение именно
+# ring buffer (долг 5.9.6d). run_ringbuf_overflow переполняет кольцо
+# управляемо на каждом архивном прогоне — вторая половина крит. 18 получает
+# достижимый PASS вместо постоянного SKIP.
+ringbuf_overflow_marker=$(latest_marker "$RESULTS_DIR" 'ringbuf-overflow-*.txt')
+# 5.9.9.F.2b (№125): маркер наведённого CPU-давления с выдержкой
+# (run_cpu_pressure_control, run-all-attacks.sh) — даёт критерию 14
+# достижимую пару reduce↔recover вместо постоянного SKIP. Ищется ПО МАСКЕ,
+# а не по $TIMESTAMP этого прогона: шаг идёт ВНЕ окна замера, отдельным
+# вызовом run-all-attacks.sh, и пишет маркер со СВОИМ TIMESTAMP — тот же
+# приём и та же причина, что у ringbuf-overflow-*.txt выше и у
+# dns-{negative,positive}-control-*.txt в секции 5.9.8a. По $TIMESTAMP
+# основного прогона этот маркер не нашёлся бы никогда, и критерий 14
+# остался бы в SKIP на живом стенде, как будто шаг не запускался.
+cpu_pressure_control_marker=$(latest_marker "$RESULTS_DIR" 'cpu-pressure-control-*.txt')
 # 5.9.9.Fb (находка №109): регистрация/подтверждение observer_root, написанные
 # run-all-attacks.sh (observer_root_register). Даёт критерию 16 времена,
 # которых раньше не было ни в одном артефакте: без них секция не может
@@ -764,7 +796,7 @@ if ! awk -v r="$runtime_min" 'BEGIN{exit !(r>0)}'; then
 fi
 
 # 5.9.7d (№80, P1): темп делится на ОКНО АТАКИ, а не на длину всего
-# пайплайна. runtime_min выше (baseline→final) включает три режима
+# пайплайна. runtime_min выше (baseline→final) включает режимы
 # run_counting_control, kill-сценарий, наведённый дроп и снятие метрик — ни
 # один из них не отправляет трафик атаки, и удлинение любого из них раньше
 # просаживало темп детекта без единой реальной потери (находка №80: 64.0/мин
@@ -926,7 +958,7 @@ fi
 # а нормальное поведение метрики для события, случившегося до открытия
 # любого измеряемого окна. Здесь — не диф "attack/idle/gap", а прямое
 # сравнение времени: маркер контроля старше снимка baseline_metrics.
-dns_ctl_marker=$(ls -t "$RESULTS_DIR"/dns-positive-control-*.txt 2>/dev/null | head -1)
+dns_ctl_marker=$(latest_marker "$RESULTS_DIR" 'dns-positive-control-*.txt')
 dns_ctl_before_baseline=0
 if [ -n "$dns_ctl_marker" ] && [ -s "$baseline_metrics" ]; then
     dns_ctl_mtime=$(stat -c %Y "$dns_ctl_marker" 2>/dev/null || echo "")
@@ -1543,8 +1575,8 @@ echo ""
 # вызовом скрипта со своим собственным TIMESTAMP.
 echo "=== 5.9.8a. DNS: негативный + позитивный контроль переиспользования fd (№94) ==="
 record_covered "=== 5.9.8a. DNS: негативный + позитивный контроль"
-dns_neg_marker=$(ls -t "$RESULTS_DIR"/dns-negative-control-*.txt 2>/dev/null | head -1)
-dns_pos_marker=$(ls -t "$RESULTS_DIR"/dns-positive-control-*.txt 2>/dev/null | head -1)
+dns_neg_marker=$(latest_marker "$RESULTS_DIR" 'dns-negative-control-*.txt')
+dns_pos_marker=$(latest_marker "$RESULTS_DIR" 'dns-positive-control-*.txt')
 
 if [ -z "$dns_neg_marker" ] && [ -z "$dns_pos_marker" ]; then
     skip "run-all-attacks.sh --dns-fd-reuse-controls не запускался — маркеры dns-{negative,positive}-control-*.txt отсутствуют; сборка/пайплайн старее 5.9.8a"
@@ -2136,7 +2168,35 @@ else
     # здесь наведённого CPU-давления в прогоне нет (вне объёма этой волны),
     # поэтому reduce=0 — SKIP с названной причиной, а не PASS.
     if [ "$d_reduce" -eq 0 ]; then
-        skip "переходов reduce=0 — watchdog ни разу не сработал за прогон, порог \"не флапает\" не проверен (нет наведённого CPU-давления в этом прогоне); degraded_fraction=${deg_frac:-n/a}"
+        # 5.9.9.F.2b (№125): раньше reduce=0 всегда означал SKIP — критерий
+        # зависел от того, поднимется ли давление САМО во время окна атак.
+        # Теперь читаем маркер run_cpu_pressure_control (вне окна замера,
+        # запрет №3): если он есть, естественных переходов в окне и не
+        # требуется — пара reduce↔recover уже доказана управляемой нагрузкой.
+        if [ -f "$cpu_pressure_control_marker" ] && ! grep -q '^skipped=1' "$cpu_pressure_control_marker" 2>/dev/null; then
+            cpc_reduce=$(awk -F= '$1=="reduce"{print $2+0}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_recover=$(awk -F= '$1=="recover"{print $2+0}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_reduce_wait=$(awk -F= '$1=="reduce_wait_seconds"{print $2+0}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_recover_wait=$(awk -F= '$1=="recover_wait_seconds"{print $2+0}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_min_dwell=$(awk -F= '$1=="min_dwell_seconds"{print $2+0}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_max_recover_wait=$(awk -F= '$1=="max_recover_wait_seconds"{print $2+0}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_file_shed=$(awk -F= '$1=="file_shed_threshold_pct"{print $2}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_all_shed=$(awk -F= '$1=="all_shed_threshold_pct"{print $2}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_recovery=$(awk -F= '$1=="recovery_threshold_pct"{print $2}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_num_cpu=$(awk -F= '$1=="num_cpu"{print $2}' "$cpu_pressure_control_marker" 2>/dev/null)
+            cpc_fail_reason=$(awk -F= '$1=="fail_reason"{ $1=""; print substr($0,2)}' "$cpu_pressure_control_marker" 2>/dev/null)
+            echo "  наведённое CPU-давление вне окна (5.9.9.F.2b, №125): reduce=${cpc_reduce:-0} recover=${cpc_recover:-0}, ожидание reduce=${cpc_reduce_wait:-n/a}с recover=${cpc_recover_wait:-n/a}с (min_dwell=${cpc_min_dwell:-n/a}с, потолок=${cpc_max_recover_wait:-n/a}с)"
+            echo "  пороги, прочитанные у агента: file_shed=${cpc_file_shed:-n/a} all_shed=${cpc_all_shed:-n/a} recovery=${cpc_recovery:-n/a} (num_cpu=${cpc_num_cpu:-n/a})"
+            if [ "${cpc_reduce:-0}" -eq 1 ] && [ "${cpc_recover:-0}" -eq 1 ]; then
+                pass "наведённое CPU-давление: reduce=1 recover=1, флапа нет (5.9.9.F.2b, №125); естественных переходов в окне замера 0, degraded_fraction=${deg_frac:-n/a}"
+            elif [ "${cpc_reduce:-0}" -eq 1 ]; then
+                fail "наведённое CPU-давление: reduce=1, но recovered не пришёл за 2×min_dwell=${cpc_max_recover_wait:-n/a}с — пара reduce↔recover не подтверждена (5.9.9.F.2b, №125)"
+            else
+                fail "наведённое CPU-давление: reduce=0 — ${cpc_fail_reason:-нагрузка не подняла cpu_pressure_level до file_shed} (5.9.9.F.2b, №125)"
+            fi
+        else
+            skip "переходов reduce=0 — watchdog ни разу не сработал за прогон, и наведённое CPU-давление (5.9.9.F.2b, run_cpu_pressure_control) не запускалось или пропущено харнессом; порог \"не флапает\" не проверен; degraded_fraction=${deg_frac:-n/a}"
+        fi
     elif awk -v r="$d_reduce" 'BEGIN{exit !(r+0 <= 1)}'; then
         pass "переходов reduce=$d_reduce recover=$d_recover — сработал, повторных нет (порог: <= 1 пара); degraded_fraction=${deg_frac:-n/a}"
     else
@@ -2422,6 +2482,15 @@ else
                     harness_case2=0
                     harness_case3=0
                     harness_unclassified=0
+                    # 5.9.9.F.2f (находка №126): постановка 5.9.9.F.1a просила
+                    # формат «1 алерт предшествует регистрации корня, −26 мс» —
+                    # печатались только число алертов по случаю и лаг подхвата
+                    # (отдельная величина), самого смещения не было, и
+                    # восстановить его из отчёта было нельзя. Смещение
+                    # (alert_epoch − root_register_epoch, мс, отрицательное —
+                    # алерт раньше регистрации) собирается для каждого алерта
+                    # случая 1 и печатается рядом со счётчиком.
+                    harness_case1_offsets=""
                     if [ "$harness_alerts" -gt 0 ]; then
                         harness_comms_jq=$(printf '%s\n' $harness_comms | jq -R . | jq -s .)
                         # 5.9.9.Fh (находка №113): -r обязателен. Без него jq
@@ -2450,6 +2519,8 @@ else
                             fi
                             if awk -v a="$alert_epoch" -v r="$root_register_epoch" 'BEGIN{exit !(a<r)}'; then
                                 harness_case1=$((harness_case1 + 1))
+                                offset_ms=$(awk -v a="$alert_epoch" -v r="$root_register_epoch" 'BEGIN{printf "%.0f", (a-r)*1000}')
+                                harness_case1_offsets="$harness_case1_offsets ${offset_ms}мс"
                             elif [ "$root_confirmed" = "1" ] && [ -n "$root_confirm_epoch" ] \
                                  && awk -v a="$alert_epoch" -v c="$root_confirm_epoch" 'BEGIN{exit !(a<=c)}'; then
                                 harness_case2=$((harness_case2 + 1))
@@ -2457,7 +2528,7 @@ else
                                 harness_case3=$((harness_case3 + 1))
                             fi
                         done <<< "$harness_ts_list"
-                        echo "  дерево измерителя по случаю (5.9.9.Fb): предшествуют регистрации корня=$harness_case1, окно лага подхвата=$harness_case2, после подтверждения (не подхвачен)=$harness_case3, не классифицировано=$harness_unclassified"
+                        echo "  дерево измерителя по случаю (5.9.9.Fb): предшествуют регистрации корня=$harness_case1${harness_case1_offsets:+ (смещения:${harness_case1_offsets})}, окно лага подхвата=$harness_case2, после подтверждения (не подхвачен)=$harness_case3, не классифицировано=$harness_unclassified"
                     fi
                 fi
                 # 5.9.9.Fb (находка №109): причина FAIL называется тем из трёх
@@ -2611,12 +2682,52 @@ else
         echo "  прочее: $attackwin_other_n${attackwin_other_list:+ (${attackwin_other_list% })}"
         record_covered "критикалов окна атаки"
 
+        # 5.9.9.F.2e (№121): состав только по comm не отличал бы правило,
+        # которое волна 5.9.9.F.1 уже погасила (web_sql_injection_files), от
+        # правила, которое осталось шуметь (sigma_memory_proc_dump), — обе
+        # величины 19/10 нашла не эта секция, а ручной разбор
+        # ISSUES-5.9.9.F-threshold-audit.txt по ebpf_guard_alerts_total.
+        # Состав по правилам печатается тем же срезом (attackwin_criticals),
+        # чтобы следующая волна получила ответ "какое правило" бесплатно.
+        attackwin_by_rule=$(echo "$attackwin_criticals" | jq -r '
+            [.[] | (.rule_id // "(пусто)")] | group_by(.)
+            | map({rule: .[0], count: length}) | sort_by(-.count)
+            | .[] | "    \(.count)\t\(.rule)"' 2>/dev/null)
+        echo "  критикалов окна атаки по правилам:"
+        echo "$attackwin_by_rule"
+
         attackwin_sum=$((attackwin_manifest_n + attackwin_harness_n + attackwin_other_n))
         if [ "$attackwin_sum" -ne "$attackwin_total" ]; then
             fail "5.9.9.Fd: сумма классов ($attackwin_sum) != общего числа критикалов окна ($attackwin_total) — разбор по составу не сходится"
         else
             pass "критикалов окна атаки разобраны по составу: манифест=$attackwin_manifest_n, дерево измерителя=$attackwin_harness_n, прочее=$attackwin_other_n, сумма=$attackwin_total — величина, порог назначается по итогам №2.9.9.F (5.9.9.Fd)"
         fi
+    fi
+
+    # 5.9.9.F.2e (№121): найденные 19/10 шумели ВНЕ окна атаки (в idle и на
+    # других отрезках аптайма), поэтому состав, ограниченный baseline→final,
+    # по построению их не видит — секция 5.9.9.Fd мерила не то окно, в
+    # котором была величина. Состав за ВЕСЬ аптайм печатается отдельной
+    # строкой из final_alerts (полный дамп стора с момента старта агента, не
+    # окно прогона — тот же источник, что критерий 5.9.9c использует для
+    # store_final) — без разбора baseline/new, специально шире окна атаки.
+    if [ -s "$final_alerts" ] && command -v jq &> /dev/null \
+        && jq -e 'type == "array"' "$final_alerts" >/dev/null 2>&1; then
+        uptime_crit_total=$(jq '[.[] | select(.severity == "critical")] | length' "$final_alerts" 2>/dev/null || echo 0)
+        echo "  критикалов за весь аптайм (final_alerts, полный дамп стора, справочно вне окна атаки): $uptime_crit_total"
+        if [ "$uptime_crit_total" -gt 0 ]; then
+            echo "  состав за весь аптайм по правилам:"
+            jq -r '[.[] | select(.severity == "critical") | (.rule_id // "(пусто)")]
+                | group_by(.) | map({rule: .[0], count: length}) | sort_by(-.count)
+                | .[] | "    \(.count)\t\(.rule)"' "$final_alerts" 2>/dev/null
+            echo "  состав за весь аптайм по comm:"
+            jq -r '[.[] | select(.severity == "critical") | (.comm // "(пусто)")]
+                | group_by(.) | map({comm: .[0], count: length}) | sort_by(-.count)
+                | .[] | "    \(.comm): \(.count)"' "$final_alerts" 2>/dev/null
+        fi
+        record_covered "критикалов за весь аптайм"
+    else
+        echo "  состав за весь аптайм не считался: final_alerts недоступен или не массив"
     fi
 fi
 echo ""
@@ -2663,8 +2774,25 @@ else
         echo "  verdict=\"suspicious\" за idle-час (справочно): ${idle_susp_start:-n/a} -> ${idle_susp_end:-n/a}, дельта = $idle_susp_delta"
         record_covered "verdict=\"attack\" за idle-час"
 
+        # 5.9.9.F.2d (№118): дельта не сопоставима между замерами (11:07
+        # утром против 4 ночью на одной и той же волне) — её меняет не
+        # регресс, а час суток. Порог по числу по-прежнему не назначается.
+        # Вместо порога печатается окно idle-часа в UTC (по mtime срезов
+        # IDLE_METRICS_START/END — единственная метка времени, которая есть
+        # у среза без дополнительных переменных окружения) — величина,
+        # которая делает дельты разных замеров читаемыми рядом, а не
+        # сопоставимыми напрямую.
+        idle_win_start_epoch=$(stat -c %Y "$IDLE_METRICS_START" 2>/dev/null || stat -f %m "$IDLE_METRICS_START" 2>/dev/null)
+        idle_win_end_epoch=$(stat -c %Y "$IDLE_METRICS_END" 2>/dev/null || stat -f %m "$IDLE_METRICS_END" 2>/dev/null)
+        idle_win_start_utc=$(date -u -d "@${idle_win_start_epoch:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -r "${idle_win_start_epoch:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+        idle_win_end_utc=$(date -u -d "@${idle_win_end_epoch:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -r "${idle_win_end_epoch:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+        echo "  окно idle-часа (UTC, по mtime срезов IDLE_METRICS_START/END): ${idle_win_start_utc:-?} -> ${idle_win_end_utc:-?}"
+
         # Состав. Печатается ВСЕГДА, когда есть на чём считать, — в том числе
         # при дельте 0: «состав пуст» и «состав не считался» это разные строки.
+        idle_actors_ok=""
         if [ -n "$IDLE_ALERTS_START" ] && [ -s "$IDLE_ALERTS_START" ] \
             && [ -n "$IDLE_ALERTS_END" ] && [ -s "$IDLE_ALERTS_END" ] \
             && command -v jq &> /dev/null; then
@@ -2690,10 +2818,45 @@ else
                 | group_by(.r) | map({rule: .[0].r, count: length, comms: (map(.c) | unique | join(","))})
                 | sort_by(-.count) | .[] | "    \(.count)\t\(.rule)\t[\(.comms)]"' 2>/dev/null || true
             record_covered "состав промоушенов по comm"
+
+            # 5.9.9.F.2d (№118): состав ВСЕХ новых алертов idle-часа по comm
+            # (не только промоушенов) сверяется с реестром idle-actors.txt —
+            # величина, которая от часа запуска не зависит: критерий падает
+            # не на числе алертов, а на новом акторе, которого нет в
+            # реестре. Реестр заведён из двух уже снятых idle-часов
+            # (collect-2.9.9.F — утро, collect-2.9.9.F.1 — ночь), то есть
+            # покрывает оба окна суток, а не подгоняется под последнее.
+            echo "  состав ВСЕХ новых алертов idle-часа по comm (сверка с idle-actors.txt):"
+            echo "${idle_new_alerts:-[]}" | jq -r '
+                [.[] | (.comm // "(пусто)")]
+                | group_by(.) | map({comm: .[0], count: length}) | sort_by(-.count)
+                | .[] | "    \(.comm): \(.count)"' 2>/dev/null || true
+            idle_actors_registry="$GATE_SCRIPT_DIR/idle-actors.txt"
+            if [ ! -f "$idle_actors_registry" ]; then
+                echo "  ! idle-actors.txt отсутствует рядом с гейтом — состав не сверен с реестром"
+            else
+                idle_seen_comms=$(echo "${idle_new_alerts:-[]}" | jq -r '[.[] | (.comm // "(пусто)")] | unique | .[]' 2>/dev/null | sort -u)
+                idle_known_comms=$(awk -F'\t' '!/^[[:space:]]*(#|$)/ && NF>=1 {print $1}' "$idle_actors_registry" | sort -u)
+                idle_unknown_comms=$(comm -23 <(echo "$idle_seen_comms") <(echo "$idle_known_comms") | grep -v '^$' || true)
+                if [ -z "$idle_unknown_comms" ]; then
+                    idle_actors_ok=1
+                else
+                    idle_actors_ok=0
+                    echo "  новые акторы idle-часа вне idle-actors.txt: $(echo "$idle_unknown_comms" | tr '\n' ' ')"
+                fi
+                record_covered "состав idle-часа против idle-actors.txt"
+            fi
         else
             echo "  состав не считался: IDLE_ALERTS_START/END не заданы или jq недоступен (величина выше от этого не зависит)"
         fi
-        pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta — величина, порог назначается по итогам №2.9.9.F.1 (5.9.9.F.1d, №115)"
+
+        if [ "$idle_actors_ok" = "1" ]; then
+            pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав idle-часа целиком покрыт idle-actors.txt, новых акторов 0 (5.9.9.F.2d, №118; величина 5.9.9.F.1d, №115, порог по-прежнему не назначен)"
+        elif [ "$idle_actors_ok" = "0" ]; then
+            fail "новый(е) актор(ы) idle-часа вне idle-actors.txt: $(echo "$idle_unknown_comms" | tr '\n' ' ') — дельта verdict=\"attack\" за idle-час = $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC (5.9.9.F.2d, №118)"
+        else
+            pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав против idle-actors.txt не проверен (реестр отсутствует, IDLE_ALERTS_START/END не заданы или jq недоступен) — не засчитывается ни в одну сторону (5.9.9.F.1d, №115)"
+        fi
     fi
 fi
 echo ""
@@ -2730,7 +2893,29 @@ elif [ -z "${lost_types+x}" ]; then
     skip "критерий 6 не вычислил lost_types (нет baseline-снимка) — немые правила не проверены"
 else
     silent_registry="$GATE_SCRIPT_DIR/silent-rules.txt"
-    silent_ids=$(echo "$lost_types" | grep -v '^$' | sort -u)
+
+    # 5.9.9.F.2e (№122): агент сам печатает при старте, какие syscall-правила
+    # не имеют достижимого "nr" в kernel-allowlist ("rules: syscall rules
+    # with no reachable nr in the kernel allowlist", cmd/ebpf-guard/main.go) —
+    # эти правила никогда не срабатывали и не появляются в
+    # detection-baseline.txt вовсе, поэтому $lost_types (baseline минус
+    # текущий прогон) их не видит по построению, а крит. 5.9.4h печатал
+    # "немых правил: 0", хотя агент назвал 11 поимённо. Читается из журнала
+    # сервиса без границ окна — строка печатается один раз при старте
+    # процесса и живёт в журнале весь его аптайм, тем же приёмом, что уже
+    # применён к 5.9.9.F.2b (min_dwell читается из журнальной строки агента,
+    # а не задаётся константой).
+    kernel_unreachable_ids=""
+    if command -v journalctl &> /dev/null; then
+        kernel_unreachable_line=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" \
+            --no-pager -o cat 2>/dev/null \
+            | grep 'rules: syscall rules with no reachable nr in the kernel allowlist' | tail -1)
+        if [ -n "$kernel_unreachable_line" ] && command -v jq &> /dev/null; then
+            kernel_unreachable_ids=$(echo "$kernel_unreachable_line" | jq -r '.rule_ids[]?' 2>/dev/null | sort -u)
+        fi
+    fi
+
+    silent_ids=$(printf '%s\n%s\n' "$lost_types" "$kernel_unreachable_ids" | grep -v '^$' | sort -u)
     silent_count=$(echo "$silent_ids" | grep -c . || true)
 
     if [ "$silent_count" -eq 0 ]; then
@@ -2930,13 +3115,28 @@ else
         done
     fi
 
+    # 5.9.9.F.2a (№123): источник индуцированного переполнения — сперва
+    # run_ringbuf_overflow (крит. 22, SIGSTOP-метод, переполняет кольцо
+    # управляемо на каждом прогоне), и только если он недоступен — наведённый
+    # дроп 5.9.5b (не откалиброван на переполнение именно ring buffer, долг
+    # 5.9.6d закрыт как поставленный неверно, а не исполнением: у режима не
+    # было и не могло быть собственного способа переполнить кольцо).
     induced_ok=0
-    if [ -f "$induced_drop_marker" ]; then
+    induced_source=""
+    if [ -n "$ringbuf_overflow_marker" ] && [ -f "$ringbuf_overflow_marker" ] && ! grep -q '^skipped=1' "$ringbuf_overflow_marker" 2>/dev/null; then
+        ro_ring_full_c18=$(awk -F= '$1=="ringbuf_full_delta"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
+        if awk -v d="${ro_ring_full_c18:-0}" 'BEGIN{exit !(d>0)}'; then
+            induced_ok=1
+            induced_source="run_ringbuf_overflow (5.9.7b), Δringbuf_full=${ro_ring_full_c18}"
+        fi
+    fi
+    if [ "$induced_ok" -ne 1 ] && [ -f "$induced_drop_marker" ]; then
         induced_executed_c18=$(awk -F= '$1=="executed"{print $2+0}' "$induced_drop_marker" 2>/dev/null)
         if [ "${induced_executed_c18:-0}" -eq 1 ]; then
             fa_delta=$(eval echo "\$ringbuf_full_delta_fileaccess")
             if awk -v d="${fa_delta:-0}" 'BEGIN{exit !(d>0)}'; then
                 induced_ok=1
+                induced_source="наведённый дроп 5.9.5b"
             fi
         fi
     fi
@@ -2944,11 +3144,11 @@ else
     if [ "$idle_zero_checked" -eq 1 ] && [ "$idle_zero_ok" -eq 0 ]; then
         fail "ringbuf_full ненулевой на idle-часе (ожидался 0 для всех трёх коллекторов):$idle_report"
     elif [ "$induced_ok" -eq 1 ] && { [ "$idle_zero_checked" -eq 0 ] || [ "$idle_zero_ok" -eq 1 ]; }; then
-        pass "fileaccess: ringbuf_full > 0 под наведённым дропом (5.9.5b/5.9.6d)$( [ "$idle_zero_checked" -eq 1 ] && echo ", на idle-часе 0" )"
+        pass "fileaccess: ringbuf_full > 0 под управляемым переполнением ($induced_source, 5.9.9.F.2a/№123)$( [ "$idle_zero_checked" -eq 1 ] && echo ", на idle-часе 0" )"
     elif [ "$idle_zero_checked" -eq 1 ] && [ "$idle_zero_ok" -eq 1 ] && [ "$induced_ok" -eq 0 ]; then
-        skip "idle-час чист (0 у всех трёх), но наведённый дроп не дал fileaccess.ringbuf_full > 0 — половина критерия 5.9.6a не проверена (наведённый дроп 5.9.5b не откалиброван на переполнение именно ring buffer, долг 5.9.6d)"
+        skip "idle-час чист (0 у всех трёх), но ни run_ringbuf_overflow, ни наведённый дроп не дали fileaccess.ringbuf_full > 0 — половина критерия 5.9.6a не проверена ни одним из двух источников"
     else
-        skip "ни IDLE_METRICS_START/END, ни исполненный наведённый дроп с fileaccess.ringbuf_full > 0 не доступны — механизм не проверен ни с одной стороны"
+        skip "ни IDLE_METRICS_START/END, ни run_ringbuf_overflow, ни наведённый дроп с fileaccess.ringbuf_full > 0 не доступны — механизм не проверен ни с одной стороны"
     fi
 fi
 echo ""
@@ -3113,7 +3313,7 @@ echo ""
 # следующих за ней idle/drop-окон. Вместо неё используется ЖИВОЙ null-прогон,
 # исполненный ПЕРВЫМ (до idle и до drop — иначе его собственное окно понесёт
 # хвост от их канареек).
-echo "=== 20. Контроль счётности: null/idle/drop, остаток после вычета фона (5.9.7a) ==="
+echo "=== 20. Контроль счётности: null/idle, остаток после вычета фона (5.9.7a; режим drop удалён 5.9.9.F.2a, №123 — его половину тождества несёт критерий 22) ==="
 record_covered "=== 20. Контроль счётности"
 c20_null_marker="$RESULTS_DIR/counting-control-null-$TIMESTAMP.txt"
 c20_null_rate=0
@@ -3161,11 +3361,16 @@ echo ""
 
 # 5.9.8c (№92, P0): единая арифметика остатка контроля счётности — читает
 # canary_sum из маркера, если он есть (5.9.8b), иначе вычитает измеренный
-# фон null-режима (5.9.7a). Общая для секции 20 (idle/drop) и секции 22
-# (run_ringbuf_overflow): постановка требует секцию 22 "той же формулой, что
-# секция 20", и это буквально тот же код, а не независимо переписанная
-# копия — секция 22 раньше несла собственный фиксированный допуск ±1500,
-# который не масштабировался ни с N, ни с длиной окна (находка №92).
+# фон null-режима (5.9.7a). Общая для секции 20 (idle) и секции 22
+# (run_ringbuf_overflow): тот же код counting_control_residual, а не
+# независимо переписанная копия — параметр formula переключает только
+# арифметику допуска. Секция 22 раньше несла собственный фиксированный
+# допуск ±1500, который не масштабировался ни с N, ни с длиной окна
+# (находка №92); теперь несёт formula="closed" (5.9.9.F.2a) — замкнутое
+# тождество canary_events+canary_dropped+ringbuf_full=N с тем же
+# фиксированным ±1500, но без асимметрии. Секция 20 (idle/null) не
+# переполняет кольцо по построению и продолжает пользоваться прежней
+# процентной формулой (formula по умолчанию, "legacy").
 # Канареечная серия считается ТОЛЬКО в userspace (RecordCountingCanary,
 # cmd/ebpf-guard/main.go + internal/collector/{fileaccess,priority}.go) — по
 # трём хопам, до которых событие дошло живым: events, ringbuf_to_router,
@@ -3196,8 +3401,19 @@ echo ""
 # Выход через глобали (bash-функции не возвращают структур):
 #   CR_TOLERANCE, CR_RESIDUAL, CR_ABS_RESIDUAL, CR_USED_CANARY (1/0),
 #   CR_RING_BOUND, CR_OK (1/0), CR_LINE
+#
+# 5.9.9.F.2a (№123/№124): четвёртый параметр formula="closed" переключает
+# канареечную ветку на замкнутое тождество
+# canary_events + canary_dropped + ringbuf_full = N с фиксированным
+# симметричным допуском ±1500 — им пользуется только критерий 22.
+# Прежнее асимметричное окно -(Δringbuf_full+допуск)…+допуск растягивалось
+# на всю величину потери в кольце и проходило любой результат (№124);
+# закрытое тождество включает потерю в кольце в сумму, а не в допуск.
+# Критерий 20 (idle/null) продолжает пользоваться прежней процентной
+# формулой без параметра — там Δringbuf_full=0 по построению, и тождество
+# ей не нужно.
 counting_control_residual() {
-    local marker="$1" n="$2" window="$3"
+    local marker="$1" n="$2" window="$3" formula="${4:-legacy}"
     local ring_full
     ring_full=$(awk -F= '$1=="ringbuf_full_delta"{print $2+0}' "$marker" 2>/dev/null)
     CR_RING_BOUND="${ring_full:-0}"
@@ -3207,18 +3423,28 @@ counting_control_residual() {
         canary_dropped=$(awk -F= '$1=="canary_dropped_delta"{print $2+0}' "$marker" 2>/dev/null)
         canary_sum=$(awk -F= '$1=="canary_sum"{print $2+0}' "$marker" 2>/dev/null)
         canary_diff=$(awk -F= '$1=="canary_diff"{print $2+0}' "$marker" 2>/dev/null)
-        CR_TOLERANCE=$(awk -v n="${n:-0}" 'BEGIN{t=n*0.005; if(t<5) t=5; printf "%.0f", t}')
-        CR_RESIDUAL="${canary_diff:-0}"
-        CR_ABS_RESIDUAL=$(awk -v d="${canary_diff:-0}" 'BEGIN{print (d<0)?-d:d}')
         CR_USED_CANARY=1
-        # d = canary_sum - N. Верх: d <= +допуск (насчитано лишнее).
-        # Низ: d >= -(Δringbuf_full + допуск) (недостача сверх потери кольца).
-        CR_OK=$(awk -v d="${canary_diff:-0}" -v t="$CR_TOLERANCE" -v r="${CR_RING_BOUND:-0}" \
-            'BEGIN{ if(r<0) r=0; print (d<=t && d>=-(r+t)) ? 1 : 0 }')
-        if [ "${CR_RING_BOUND:-0}" -gt 0 ] 2>/dev/null; then
-            CR_LINE="канарейка Δevents=${canary_events:-0} Δdropped=${canary_dropped:-0} сумма=${canary_sum:-0} остаток=${CR_RESIDUAL} (окно с переполнением: допустимо от -(Δringbuf_full=${CR_RING_BOUND} + ${CR_TOLERANCE}) до +${CR_TOLERANCE}; потеря в кольце канарейке не видна по построению — 5.9.8b/5.9.8c, №91/№92)"
+        if [ "$formula" = "closed" ]; then
+            CR_TOLERANCE=1500
+            local closed_sum
+            closed_sum=$(( canary_sum + CR_RING_BOUND ))
+            CR_RESIDUAL=$(( closed_sum - n ))
+            CR_ABS_RESIDUAL=$(awk -v d="$CR_RESIDUAL" 'BEGIN{print (d<0)?-d:d}')
+            CR_OK=$(awk -v a="$CR_ABS_RESIDUAL" -v t="$CR_TOLERANCE" 'BEGIN{print (a<=t)?1:0}')
+            CR_LINE="тождество Δevents=${canary_events:-0}+Δdropped=${canary_dropped:-0}+Δringbuf_full=${CR_RING_BOUND}=${closed_sum}, N=${n:-0}, остаток=${CR_RESIDUAL} (допуск ±${CR_TOLERANCE}, симметричный, без поправки на потерю в кольце — 5.9.9.F.2a, №123/№124)"
         else
-            CR_LINE="канарейка Δevents=${canary_events:-0} Δdropped=${canary_dropped:-0} сумма=${canary_sum:-0} остаток=${CR_RESIDUAL} (допуск ±${CR_TOLERANCE} = max(5,0.5%N), без вычета фона, Δringbuf_full=0 — 5.9.8b/5.9.8c, №91/№92)"
+            CR_TOLERANCE=$(awk -v n="${n:-0}" 'BEGIN{t=n*0.005; if(t<5) t=5; printf "%.0f", t}')
+            CR_RESIDUAL="${canary_diff:-0}"
+            CR_ABS_RESIDUAL=$(awk -v d="${canary_diff:-0}" 'BEGIN{print (d<0)?-d:d}')
+            # d = canary_sum - N. Верх: d <= +допуск (насчитано лишнее).
+            # Низ: d >= -(Δringbuf_full + допуск) (недостача сверх потери кольца).
+            CR_OK=$(awk -v d="${canary_diff:-0}" -v t="$CR_TOLERANCE" -v r="${CR_RING_BOUND:-0}" \
+                'BEGIN{ if(r<0) r=0; print (d<=t && d>=-(r+t)) ? 1 : 0 }')
+            if [ "${CR_RING_BOUND:-0}" -gt 0 ] 2>/dev/null; then
+                CR_LINE="канарейка Δevents=${canary_events:-0} Δdropped=${canary_dropped:-0} сумма=${canary_sum:-0} остаток=${CR_RESIDUAL} (окно с переполнением: допустимо от -(Δringbuf_full=${CR_RING_BOUND} + ${CR_TOLERANCE}) до +${CR_TOLERANCE}; потеря в кольце канарейке не видна по построению — 5.9.8b/5.9.8c, №91/№92)"
+            else
+                CR_LINE="канарейка Δevents=${canary_events:-0} Δdropped=${canary_dropped:-0} сумма=${canary_sum:-0} остаток=${CR_RESIDUAL} (допуск ±${CR_TOLERANCE} = max(5,0.5%N), без вычета фона, Δringbuf_full=0 — 5.9.8b/5.9.8c, №91/№92)"
+            fi
         fi
     else
         local diff bg
@@ -3237,7 +3463,14 @@ counting_control_residual() {
 
 counting_checked_modes=0
 counting_ok_modes=0
-for c20_mode in idle drop; do
+# 5.9.9.F.2a (№123): режим drop удалён вместе с COUNTING_CONTROL_DROP_N —
+# генератор never имел собственного способа переполнить кольцо (N ни при
+# чём, потеря уходила в router_to_queue при ringbuf_full=0), а его половина
+# тождества 5.9.6c ("сходится ПОД дропом") теперь целиком несётся критерием
+# 22 (run_ringbuf_overflow, SIGSTOP-метод, переполняет кольцо управляемо на
+# каждом прогоне). Долг 5.9.6d закрыт записью «поставлен неверно», не
+# исполнением.
+for c20_mode in idle; do
     c20_marker="$RESULTS_DIR/counting-control-${c20_mode}-$TIMESTAMP.txt"
     if [ ! -f "$c20_marker" ]; then
         skip "контроль счётности ($c20_mode) не запускался — маркер counting-control-${c20_mode}-$TIMESTAMP.txt отсутствует"
@@ -3271,16 +3504,13 @@ for c20_mode in idle drop; do
     fi
     if [ "${CR_OK:-0}" -ne 1 ]; then
         fail "$c20_mode: N=${c20_n:-0} не сходится (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE$( [ "${CR_RING_BOUND:-0}" -gt 0 ] && echo " с поправкой на Δringbuf_full=${CR_RING_BOUND}" )$( [ "$CR_USED_CANARY" -eq 1 ] && echo ", по канареечной серии" || echo ", после вычета фона" )) — либо непосчитанная потеря, либо вызов не увиден ядром (5.9.8b/5.9.8c, №91)"
-    elif [ "$c20_mode" = "drop" ] && ! awk -v r="${c20_ringbuf_full:-0}" 'BEGIN{exit !(r>0)}'; then
-        skip "$c20_mode: N сошёлся (остаток ${CR_RESIDUAL}), но ringbuf_full=${c20_ringbuf_full:-0} — генератор не переполнил кольцо на этом стенде, вторая половина критерия («сходится ПОД дропом») не проверена (COUNTING_CONTROL_DROP_N не откалиброван; см. также шаг run_ringbuf_overflow, 5.9.7b)"
-        counting_ok_modes=$((counting_ok_modes + 1))
     else
         counting_ok_modes=$((counting_ok_modes + 1))
-        pass "$c20_mode: N=${c20_n:-0} сходится (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE)$( [ "$c20_mode" = "drop" ] && echo ", ringbuf_full=${c20_ringbuf_full:-0} > 0") (5.9.8b/5.9.8c, №91)"
+        pass "$c20_mode: N=${c20_n:-0} сходится (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE) (5.9.8b/5.9.8c, №91)"
     fi
 done
 if [ "$counting_checked_modes" -eq 0 ]; then
-    skip "ни один режим контроля счётности (idle/drop) не запускался — сборка харнесса старее 5.9.6c"
+    skip "ни один режим контроля счётности (idle) не запускался — сборка харнесса старее 5.9.6c"
 fi
 if [ "$c20_null_available" -eq 0 ]; then
     skip "негативный контроль (mode=null) не запускался или пропущен — критерий 5.9.7a исполнен не полностью (только positive-control половина)"
@@ -3358,11 +3588,16 @@ echo ""
 # (run-all-attacks.sh --ringbuf-overflow) — отдельный, короткий шаг, ВНЕ окна
 # замера (запрет №3 постановки 5.9.7): SIGSTOP всему процессу агента,
 # генератор известного N openat() на канарейку копится в кольце ядра пока
-# читатель заморожен, SIGCONT, затем тот же остаток, что у критерия 20 —
-# counting_control_residual (5.9.8c) считает его ТЕМ ЖЕ КОДОМ: канареечная
-# серия, если маркер её несёт, иначе вычет измеренного null-фона. Прежний
-# фиксированный допуск ±1500 не масштабировался ни с N, ни с длиной окна
-# (находка №92) и удалён вместе с отдельной формулой. Плюс НОВОЕ (5.9.7b):
+# читатель заморожен, SIGCONT, затем остаток считается ТЕМ ЖЕ КОДОМ, что и
+# критерий 20 (counting_control_residual), но формулой "closed"
+# (5.9.9.F.2a, №123/№124): замкнутое тождество
+# canary_events + canary_dropped + ringbuf_full = N с фиксированным
+# симметричным допуском ±1500 — потеря в кольце входит в тождество, а не
+# расширяет допуск. Прежнее асимметричное окно
+# -(Δringbuf_full+1500)…+1500 растягивалось на всю величину потери и
+# проходило любой результат (находка №124); заменено, а не расширено.
+# Реплей на десяти архивных прогонах (collect-2.9.7…collect-2.9.9.F.1)
+# кладёт остаток в +183…+335 — заведомо внутри допуска. Плюс НОВОЕ (5.9.7b):
 # Δbpf_lost_events_total{collector} совпадает с Δevents_dropped_total{
 # collector,reason="ringbuf_full"} того же коллектора — первое живое
 # подтверждение 5.9.6a, которого №2.9.6 не дало. Маркер пишется ЭТИМ шагом
@@ -3375,7 +3610,8 @@ echo "=== 22. run_ringbuf_overflow: переполнение под контро
 # ПОДСТРОКОЙ в переданном тексте: короткий аргумент покрыл бы только первый
 # из них, и 5.9.8c числился бы неисполнившимся на каждом прогоне.
 record_covered "=== 22. run_ringbuf_overflow: переполнение под контролем + bpf_lost_events_total живьём (5.9.7b/5.9.8c, №79/№92) ==="
-ringbuf_overflow_marker=$(ls -t "$RESULTS_DIR"/ringbuf-overflow-*.txt 2>/dev/null | head -1)
+# ringbuf_overflow_marker: найден один раз выше (5.9.9.F.2a) — секция 18
+# читает тот же маркер.
 if [ -z "$ringbuf_overflow_marker" ] || [ ! -f "$ringbuf_overflow_marker" ]; then
     skip "run_ringbuf_overflow не запускался — маркер ringbuf-overflow-*.txt отсутствует; сборка/пайплайн старее 5.9.7b"
 elif grep -q '^skipped=1' "$ringbuf_overflow_marker" 2>/dev/null; then
@@ -3393,7 +3629,7 @@ else
     c22_method_a=$(awk -F= '$1=="method_a_blocked_reason"{ $1=""; print substr($0,2)}' "$ringbuf_overflow_marker" 2>/dev/null)
     c22_idle_ringbuf_full=$(awk -F= '$1=="idle_hour_ringbuf_full"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
 
-    counting_control_residual "$ringbuf_overflow_marker" "$c22_n" "$c22_window"
+    counting_control_residual "$ringbuf_overflow_marker" "$c22_n" "$c22_window" closed
     echo "  метод: SIGSTOP читателя (сужение bpf.ring_buf_size заблокировано кодом: ${c22_method_a:-см. открытые вопросы 5.9.7b})"
     echo "  N=${c22_n:-0} $CR_LINE"
     if [ "$CR_USED_CANARY" -eq 1 ]; then
@@ -3403,7 +3639,7 @@ else
     [ -n "$c22_idle_ringbuf_full" ] && echo "  ringbuf_full за idle-час (справочно, критерий 18 судит это же значение отдельно): ${c22_idle_ringbuf_full}"
 
     if [ "${CR_OK:-0}" -ne 1 ]; then
-        fail "run_ringbuf_overflow: N=${c22_n:-0} не сходится под SIGSTOP (остаток ${CR_RESIDUAL}, допуск ±$CR_TOLERANCE с поправкой на Δringbuf_full=${CR_RING_BOUND:-0}, той же формулой, что критерий 20 — 5.9.8c) — тождество 5.9.6c не подтверждено под реальным переполнением"
+        fail "run_ringbuf_overflow: N=${c22_n:-0} не сходится под SIGSTOP (остаток ${CR_RESIDUAL}, замкнутое тождество, допуск ±$CR_TOLERANCE симметричный — 5.9.9.F.2a, №123/№124) — тождество 5.9.6c не подтверждено под реальным переполнением"
     elif ! awk -v r="${c22_ringbuf_full:-0}" 'BEGIN{exit !(r>0)}'; then
         fail "run_ringbuf_overflow: N сошёлся, но ringbuf_full=${c22_ringbuf_full:-0} — SIGSTOP не переполнил кольцо на этом стенде (кольцо больше, чем предполагалось, или окно заморозки было коротким); переполнение остаётся недоказанным управляемой нагрузкой"
     elif ! awk -v a="${c22_ringbuf_full:-0}" -v b="${c22_bpf_lost:-0}" 'BEGIN{exit !(a==b)}'; then
@@ -3422,13 +3658,14 @@ echo ""
 # (сумма events+drops не выросла между двумя срезами) на стенде с
 # непрерывным фоном недостижимо, и quiesced_iterations=30 было
 # неотличимо от «настоящего» устаканивания за 30 срезов — это и есть
-# находка №93. Критерий: причина печатается для всех четырёх маркеров
-# (null/idle/drop/run_ringbuf_overflow), и ни один не "ceiling".
+# находка №93. Критерий: причина печатается для всех трёх маркеров
+# (null/idle/run_ringbuf_overflow — режим drop удалён волной 5.9.9.F.2a,
+# №123), и ни один не "ceiling".
 echo "=== 5.9.8f. settle_reason: контроль счётности сообщает причину остановки (№93) ==="
 record_covered "=== 5.9.8f. settle_reason"
 settle_reason_ceiling_count=0
 settle_reason_checked=0
-for settle_label in null idle drop; do
+for settle_label in null idle; do
     settle_marker="$RESULTS_DIR/counting-control-${settle_label}-$TIMESTAMP.txt"
     if [ ! -f "$settle_marker" ] || grep -q '^skipped=1' "$settle_marker" 2>/dev/null; then
         echo "  $settle_label: маркер отсутствует или пропущен — причина не проверена"

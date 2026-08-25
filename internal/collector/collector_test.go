@@ -1,7 +1,9 @@
 package collector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -328,6 +330,50 @@ func TestRunReadLoop_WaitsForReadLoopBeforeCallerClosesChannel(t *testing.T) {
 			require.NotPanics(t, func() { close(out) })
 		})
 	}
+}
+
+// TestMalformedLogger_RecordDoesNotDuplicateCollectorKey guards against
+// finding #127 (5.9.9.F.2g): record() used to add its own "collector" attr
+// on top of a logger already bound with one via .With (the convention every
+// collector's c.logger follows), producing
+// {"msg":"malformed event record","collector":"syscall","collector":"syscall",...}
+// — a duplicate JSON key that strict parsers reject. json.Unmarshal into a
+// map silently keeps the last value and would not catch this, so the test
+// walks the raw token stream instead, where every key shows up once per
+// occurrence regardless of value collisions.
+func TestMalformedLogger_RecordDoesNotDuplicateCollectorKey(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil)).With(slog.String("collector", "syscall"))
+
+	m := newMalformedLogger(0)
+	m.record(logger, "nr_not_monitored", []byte{0x01, 0x02, 0x03})
+
+	line := buf.Bytes()
+	require.NotEmpty(t, line)
+
+	var generic map[string]any
+	require.NoError(t, json.Unmarshal(line, &generic), "record must emit valid JSON: %s", line)
+	assert.Equal(t, "syscall", generic["collector"])
+	assert.Equal(t, "nr_not_monitored", generic["reason"])
+
+	dec := json.NewDecoder(bytes.NewReader(line))
+	tok, err := dec.Token()
+	require.NoError(t, err)
+	require.Equal(t, json.Delim('{'), tok)
+
+	seen := map[string]int{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		require.NoError(t, err)
+		key, ok := keyTok.(string)
+		require.True(t, ok)
+		seen[key]++
+
+		var discard json.RawMessage
+		require.NoError(t, dec.Decode(&discard))
+	}
+
+	assert.Equal(t, 1, seen["collector"], "collector key must appear exactly once, got record: %s", line)
 }
 
 // BenchmarkEventPool measures the overhead of the pool acquire/fill/release cycle.

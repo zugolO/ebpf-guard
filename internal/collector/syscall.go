@@ -446,18 +446,18 @@ func (c *SyscallCollector) parseEvent(raw []byte, event *types.Event) error {
 
 	if se.Type != bpf.EventTypeSyscall {
 		exporter.RecordMalformed("syscall", "type_mismatch")
-		c.malformedLoggers["type_mismatch"].record(c.logger, "syscall", "type_mismatch", raw)
+		c.malformedLoggers["type_mismatch"].record(c.logger, "type_mismatch", raw)
 		return errMalformedSyscallType
 	}
 	if c.kernelFilterEnabled {
 		if _, ok := c.monitoredNrs[se.Nr]; !ok {
 			exporter.RecordMalformed("syscall", "nr_not_monitored")
-			c.malformedLoggers["nr_not_monitored"].record(c.logger, "syscall", "nr_not_monitored", raw)
+			c.malformedLoggers["nr_not_monitored"].record(c.logger, "nr_not_monitored", raw)
 		}
 	}
 	if bpf.IsEmptyComm(se.Comm) {
 		exporter.RecordMalformed("syscall", "empty_comm")
-		c.malformedLoggers["empty_comm"].record(c.logger, "syscall", "empty_comm", raw)
+		c.malformedLoggers["empty_comm"].record(c.logger, "empty_comm", raw)
 	}
 
 	*event = se.ToTypesEvent()

@@ -42,7 +42,7 @@ MANIFEST_FILE="$SCRIPT_DIR/attack-manifest.json"
 
 # 5.9.7d (№80, P1): маркер окна атаки. Прежде темп детекта (крит. 6
 # run-gate.sh) делился на всё окно baseline→final, то есть на длину ВСЕГО
-# пайплайна — get_baseline_metrics, три режима run_counting_control,
+# пайплайна — get_baseline_metrics, режимы run_counting_control,
 # kill-сценарий, наведённый дроп и снятие финальных метрик считались частью
 # "окна атаки", хотя ни один из них не отправляет трафик атаки. Каждый шаг,
 # который реально его отправляет, зовёт mark_attack_window ДО и ПОСЛЕ своей
@@ -556,12 +556,17 @@ counting_settle_loop() {
 # Deliberately NOT run concurrently with run_induced_drop's tar burst: tar
 # opens AND reads every file in its list, so its own activity would inflate
 # both sides of the equation by an unknown amount, and the check would no
-# longer be against a KNOWN N. mode=drop instead reuses this same generator
-# at a size intended to overflow the ring buffer on its own (no tar
-# involved) — self-contained, so the only fileaccess-collector traffic
-# during its window is the canary itself, and Δevents+Δdrops staying == N
-# while ringbuf_full > 0 is exactly "counted correctly even while losing
-# heavily", which is the property 5.9.6c exists to prove.
+# longer be against a KNOWN N.
+#
+# 5.9.9.F.2a (№123, plan.md): mode=drop, which used to reuse this same
+# generator at a larger N hoping to overflow the ring on its own, is
+# removed — COUNTING_CONTROL_DROP_N was never calibrated to actually do
+# that (the loss went to router_to_queue, not ringbuf_full, whenever the
+# reader kept up, which was every observed run). The "counted correctly
+# even while losing heavily" half of 5.9.6c this mode was meant to prove
+# is now carried by run_ringbuf_overflow (SIGSTOP method, criterion 22 in
+# run-gate.sh), which overflows the ring by construction instead of by
+# hope.
 #
 # 5.9.7a (№78, P0): mode=null is a THIRD, negative-control mode — same
 # window, same settle loop, same snapshots, N=0 (no canary at all). Its own
@@ -656,7 +661,7 @@ run_counting_control() {
     canary_sum=$(( canary_events_delta + canary_dropped_delta ))
     canary_diff=$(( canary_sum - n ))
     # Длина окна «до»→«после» целиком, включая устаканивание: именно столько
-    # времени фон (mode=null) или фон+канарейка (idle/drop) копились в обе
+    # времени фон (mode=null) или фон+канарейка (idle) копились в обе
     # метрики. run-gate.sh делит null's sum на это же поле, чтобы получить
     # темп фона независимо от того, сколько заняло устаканивание в этом
     # конкретном прогоне.
@@ -683,9 +688,6 @@ run_counting_control() {
     log "N=$n Δevents(file)=$events_delta Δdrops(fileaccess,все причины)=$drops_delta Δringbuf_full(fileaccess)=$ringbuf_full_delta сумма=$sum сумма-N=$diff канарейка:Δevents=$canary_events_delta Δdropped=$canary_dropped_delta сумма=$canary_sum сумма-N=$canary_diff (причина остановки: ${settle_reason}, за ${i} срезов, окно ${window_seconds}с)"
     if [ "$settle_reason" = "ceiling" ]; then
         warn "mode=$mode: settle-луп не сошёлся за 30 срезов (5.9.8f, №93) — снимок «после» мог уйти раньше конца асинхронного хвоста"
-    fi
-    if [ "$mode" = "drop" ] && [ "${ringbuf_full_delta:-0}" -le 0 ]; then
-        warn "mode=drop: ringbuf_full не вырос — N=$n не переполнил кольцо на этом стенде; критерий 5.9.6c для этого режима останется без второй половины (см. открытые вопросы, COUNTING_CONTROL_DROP_N не откалиброван)"
     fi
     rm -f "$canary_path"
     echo ""
@@ -897,6 +899,239 @@ run_ringbuf_overflow() {
         log "ringbuf_full=$ringbuf_full_delta == bpf_lost_events_total=$bpf_lost_delta — 5.9.6a подтверждена живьём"
     fi
     rm -f "$canary_path"
+    echo ""
+}
+
+# 5.9.9.F.2b (№125, P1): наведённое CPU-давление с выдержкой — отдельный
+# короткий шаг ВНЕ окна замера (тот же запрет №3, что у run_ringbuf_overflow
+# и контролей DNS/счётности): критерий 14 (run-gate.sh) раньше зависел от
+# того, поднимется ли CPU-давление САМО во время окна атак — reduce=0
+# означал не "не флапает", а "watchdog ни разу не сработал", и постоянно
+# давал SKIP (5.9.6i, находка №77). Этот шаг делает вход достижимым.
+#
+# CPUPressureWatcher (internal/watchdog/cpu.go) меряет CPU ПРОЦЕССА АГЕНТА
+# (utime+stime через /proc/self/stat), а не системную нагрузку — внешний
+# генератор чистого busy-loop агента не тронет. Единственный рычаг снаружи —
+# тот же, что использует run_induced_drop (5.9.5b): массовый всплеск
+# файловых событий (open+read через `tar | cat`) заставляет сам агент
+# тратить CPU на обработку (BPF ring buffer → router → корреляция), и это
+# поднимает его собственный CPU% выше file_shed. В отличие от
+# run_induced_drop (три коротких раунда, цель — переход в degraded по
+# очереди), здесь всплеск держится НЕПРЕРЫВНО, пока cpu_pressure_level не
+# станет >= 1 (poll), затем СНИМАЕТСЯ, и шаг ждёт recovered (level вернулся
+# к 0) минимум min_dwell — иначе критерий 14 продолжил бы видеть
+# незакрытую пару и не смог бы напечатать recover=1.
+#
+# min_dwell читается из журнальной записи "cpu pressure: adaptive load
+# shedding enabled" (SetupCPUPressureWatcher, agent's own startup log,
+# JSON-формат — slog.NewJSONHandler в cmd/ebpf-guard/main.go), а не
+# задаётся константой: иначе смена дефолта (сейчас 3 минуты,
+# DefaultCPUConfig) снова сделает критерий невыполнимым молча — ровно то,
+# что этот пункт постановки прямо запрещает.
+run_cpu_pressure_control() {
+    log "==========================================="
+    log "НАВЕДЁННОЕ CPU-ДАВЛЕНИЕ С ВЫДЕРЖКОЙ (5.9.9.F.2b, №125: вход для критерия 14)"
+    log "==========================================="
+
+    local service="${RINGBUF_OVERFLOW_SERVICE:-ebpf-guard-test.service}"
+    local marker="$RESULTS_DIR/cpu-pressure-control-$TIMESTAMP.txt"
+
+    local startup_line=""
+    if command -v journalctl &> /dev/null; then
+        startup_line=$(journalctl -u "$service" --no-pager -o cat 2>/dev/null \
+            | grep 'cpu pressure: adaptive load shedding enabled' | tail -1)
+    fi
+    if [ -z "$startup_line" ]; then
+        warn "наведённое CPU-давление пропущено: журнальная запись агента 'adaptive load shedding enabled' не найдена — min_dwell неизвестен, критерий 14 без входа от этого шага"
+        { echo "skipped=1"; echo "skip_reason=журнальная запись startup watcher-а не найдена"; } > "$marker"
+        echo ""
+        return 0
+    fi
+
+    local min_dwell_str="" file_shed_pct="" all_shed_pct="" recovery_pct="" num_cpu=""
+    if command -v jq &> /dev/null; then
+        min_dwell_str=$(echo "$startup_line" | jq -r '.min_dwell // empty' 2>/dev/null)
+        file_shed_pct=$(echo "$startup_line" | jq -r '.file_shed_threshold_pct_of_one_core // empty' 2>/dev/null)
+        all_shed_pct=$(echo "$startup_line" | jq -r '.all_shed_threshold_pct_of_one_core // empty' 2>/dev/null)
+        recovery_pct=$(echo "$startup_line" | jq -r '.recovery_threshold_pct_of_one_core // empty' 2>/dev/null)
+        num_cpu=$(echo "$startup_line" | jq -r '.num_cpu // empty' 2>/dev/null)
+    fi
+    if [ -z "$min_dwell_str" ]; then
+        warn "наведённое CPU-давление пропущено: min_dwell не разобран из журнальной строки (jq недоступен или поле отсутствует) — критерий 14 без входа от этого шага"
+        { echo "skipped=1"; echo "skip_reason=min_dwell не разобран (jq недоступен или поле отсутствует)"; } > "$marker"
+        echo ""
+        return 0
+    fi
+
+    # ФОРМАТ. slog.Duration в JSON-хендлере (slog.NewJSONHandler,
+    # cmd/ebpf-guard/main.go) печатает длительность ЧИСЛОМ НАНОСЕКУНД, а не
+    # Go-строкой: в журнале стоит "min_dwell":180000000000, а не "3m0s"
+    # (проверено на архивном journal-agent-2.9.9.F.1.log). Разбор идёт
+    # именно по этому виду; ветка Go-строки оставлена запасной на случай,
+    # если запись когда-нибудь начнёт печататься через ReplaceAttr —
+    # молча получить 0 и уйти в skip этот шаг не имеет права, ровно по той
+    # же причине, по которой min_dwell вообще читается у агента, а не
+    # задаётся константой.
+    local min_dwell_seconds
+    min_dwell_seconds=$(echo "$min_dwell_str" | awk '{
+        s=$0; total=0
+        if (s ~ /^[0-9]+(\.[0-9]+)?$/) {
+            # наносекунды числом (slog.Duration в JSON)
+            total = s / 1000000000
+        } else {
+            # Go duration-строка ("3m0s", "45s", "1h30m0s") — запасной путь
+            while (match(s, /[0-9]+(\.[0-9]+)?(h|ms|m|s|µs|us)/)) {
+                tok = substr(s, RSTART, RLENGTH)
+                unit = tok; gsub(/[0-9.]/, "", unit)
+                num = tok + 0
+                if (unit == "h") total += num*3600
+                else if (unit == "m") total += num*60
+                else if (unit == "s") total += num
+                else if (unit == "ms") total += num/1000
+                s = substr(s, RSTART+RLENGTH)
+            }
+        }
+        printf "%.0f", total
+    }')
+    if [ -z "$min_dwell_seconds" ] || [ "$min_dwell_seconds" -le 0 ]; then
+        warn "наведённое CPU-давление пропущено: min_dwell='$min_dwell_str' не разобран в секунды"
+        { echo "skipped=1"; echo "skip_reason=min_dwell не разобран в секунды: $min_dwell_str"; } > "$marker"
+        echo ""
+        return 0
+    fi
+    log "min_dwell из журнала агента: $min_dwell_str (${min_dwell_seconds}с); пороги (pct одного ядра): file_shed=${file_shed_pct:-n/a} all_shed=${all_shed_pct:-n/a} recovery=${recovery_pct:-n/a} (num_cpu=${num_cpu:-n/a})"
+
+    pressure_level_now() {
+        curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
+            | awk '/^ebpf_guard_cpu_pressure_level( |\{)/{print $NF; exit}'
+    }
+
+    # Тот же генератор всплеска, что run_induced_drop (5.9.5b) — массовое
+    # open+read держит агент занятым обработкой событий; здесь непрерывным
+    # циклом, а не тремя раундами, пока не сработает file_shed.
+    local max_files="${CPU_PRESSURE_MAX_FILES:-20000}"
+    local filelist="/tmp/ebpf-guard-cpu-pressure-filelist-$TIMESTAMP.txt"
+    find /usr /opt /var -type f 2>/dev/null | head -n "$max_files" > "$filelist"
+    local bounded_files
+    bounded_files=$(wc -l < "$filelist" | tr -d ' ')
+    log "нагрузка: непрерывный tar по списку из $bounded_files файлов (лимит CPU_PRESSURE_MAX_FILES=$max_files), пока cpu_pressure_level < 1"
+
+    # Всплеск обязан сниматься ЦЕЛИКОМ. Внутри цикла в каждый момент живут
+    # tar и cat — прямые дети подшелла; убить только подшелл нельзя (они
+    # осиротеют, переедут к init и продолжат грузить стенд ДО КОНЦА ВСЕГО
+    # ЗАМЕРА: шаг идёт до baseline, то есть испортил бы каждую последующую
+    # величину, а не только свою), а `pkill -P` после `wait` уже никого не
+    # найдёт по той же причине. Поэтому останов двухступенчатый и
+    # детерминированный: сперва выставляется флаг-файл (цикл сам выйдет на
+    # следующей проверке условия), затем снимаются текущие tar/cat, и
+    # только потом ждётся сам подшелл. Где есть setsid — вдобавок группа
+    # процессов, которую можно снять одним `kill -- -pgid`, если tar
+    # почему-то не умер.
+    local burst_stop="/tmp/ebpf-guard-cpu-pressure-stop-$TIMESTAMP"
+    rm -f "$burst_stop"
+    local burst_pid burst_pgid=""
+    if command -v setsid &> /dev/null; then
+        setsid bash -c 'while [ ! -f "$2" ]; do tar -cf - --files-from="$1" 2>/dev/null | cat >/dev/null 2>&1; done' _ "$filelist" "$burst_stop" &
+        burst_pid=$!
+        burst_pgid=$(ps -o pgid= -p "$burst_pid" 2>/dev/null | tr -d ' ')
+    else
+        ( while [ ! -f "$burst_stop" ]; do tar -cf - --files-from="$filelist" 2>/dev/null | cat >/dev/null 2>&1; done ) &
+        burst_pid=$!
+    fi
+
+    stop_burst() {
+        touch "$burst_stop" 2>/dev/null || true
+        pkill -P "$burst_pid" 2>/dev/null || true
+        if [ -n "$burst_pgid" ] && [ "$burst_pgid" != "$$" ]; then
+            kill -TERM -- "-$burst_pgid" 2>/dev/null || true
+        fi
+        wait "$burst_pid" 2>/dev/null || true
+        # Контрольный проход: если подшелл всё же успел оставить потомка
+        # (гонка между проверкой флага и запуском очередного tar), он умрёт
+        # здесь, а не переживёт весь замер. Второй проход бьёт по СВОЕЙ
+        # строке аргументов: путь списка файлов несёт $TIMESTAMP этого
+        # шага, поэтому под шаблон не может попасть ни один чужой tar на
+        # стенде.
+        pkill -P "$burst_pid" 2>/dev/null || true
+        pkill -f "files-from=$filelist" 2>/dev/null || true
+        if [ -n "$burst_pgid" ] && [ "$burst_pgid" != "$$" ]; then
+            kill -KILL -- "-$burst_pgid" 2>/dev/null || true
+        fi
+        rm -f "$burst_stop"
+    }
+
+    local reduce_seen=0 reduce_wait=0 lvl=""
+    local max_reduce_wait="${CPU_PRESSURE_MAX_REDUCE_WAIT:-180}"
+    while [ "$reduce_wait" -lt "$max_reduce_wait" ]; do
+        lvl=$(pressure_level_now)
+        if [ -n "$lvl" ] && awk -v l="$lvl" 'BEGIN{exit !(l+0>=1)}'; then
+            reduce_seen=1
+            break
+        fi
+        sleep 2
+        reduce_wait=$((reduce_wait + 2))
+    done
+
+    stop_burst
+    rm -f "$filelist"
+
+    local fail_reason=""
+    if [ "$reduce_seen" -ne 1 ]; then
+        fail_reason="cpu_pressure_level не достиг file_shed (>=1) за ${max_reduce_wait}с непрерывного всплеска"
+        warn "$fail_reason — критерий 14 без входа от этого шага (5.9.9.F.2b)"
+        {
+            echo "reduce=0"
+            echo "recover=0"
+            echo "reduce_wait_seconds=$reduce_wait"
+            echo "min_dwell_seconds=$min_dwell_seconds"
+            echo "fail_reason=$fail_reason"
+        } > "$marker"
+        echo ""
+        return 0
+    fi
+    log "reduce зафиксирован за ${reduce_wait}с — нагрузка снята, жду recovered (level==0) минимум min_dwell=${min_dwell_seconds}с"
+
+    local recovered=0 recover_wait=0
+    local max_recover_wait=$(( min_dwell_seconds * 2 ))
+    while [ "$recover_wait" -lt "$max_recover_wait" ]; do
+        lvl=$(pressure_level_now)
+        if [ -n "$lvl" ] && awk -v l="$lvl" 'BEGIN{exit !(l+0==0)}'; then
+            recovered=1
+            break
+        fi
+        sleep 5
+        recover_wait=$((recover_wait + 5))
+    done
+
+    {
+        echo "reduce=1"
+        echo "recover=$recovered"
+        echo "reduce_wait_seconds=$reduce_wait"
+        echo "recover_wait_seconds=$recover_wait"
+        echo "min_dwell_seconds=$min_dwell_seconds"
+        echo "max_recover_wait_seconds=$max_recover_wait"
+        echo "file_shed_threshold_pct=${file_shed_pct:-}"
+        echo "all_shed_threshold_pct=${all_shed_pct:-}"
+        echo "recovery_threshold_pct=${recovery_pct:-}"
+        echo "num_cpu=${num_cpu:-}"
+    } > "$marker"
+
+    if [ "$recovered" -eq 1 ]; then
+        log "PASS (наблюдение): reduce=1 recover=1 за ${recover_wait}с ожидания (порог 2×min_dwell=${max_recover_wait}с) — критерий 14 получит достижимую пару (5.9.9.F.2b, №125)"
+    else
+        warn "recovered не пришёл за 2×min_dwell=${max_recover_wait}с — записан как явный провал входа, не SKIP (5.9.9.F.2b, №125)"
+    fi
+
+    # Обязательная проверка постановки 5.9.9.F.2b: шаг идёт ВНЕ окна замера
+    # (до baseline), но cpu_degraded_fraction (internal/watchdog/cpu.go) —
+    # доля с момента старта watcher-а, а не с baseline, поэтому запись
+    # degraded-времени этого шага печатается здесь явно — чтобы её было
+    # видно ДО прогона, а не только когда крит. 5.9e (run-gate.sh) уже
+    # вынес вердикт по final_metrics в конце всего замера.
+    local deg_frac_now
+    deg_frac_now=$(curl -s --max-time 5 -H "Authorization: Bearer $EBPF_GUARD_TOKEN" "$EBPF_GUARD_API/metrics" 2>/dev/null \
+        | awk '/^ebpf_guard_cpu_degraded_fraction( |\{)/{print $NF; exit}')
+    log "cpu_degraded_fraction сразу после шага (кумулятивно с момента старта агента): ${deg_frac_now:-n/a} — критерий 5.9e (run-gate.sh) обязан застать его малым к концу всего замера, шаг сам по себе окно замера не искажает (запущен до baseline)"
     echo ""
 }
 
@@ -2860,7 +3095,6 @@ interactive_mode() {
                 run_measurement_prologue || continue
                 run_counting_control null 0
                 run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
-                run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
                 run_sqlmap_attacks
                 run_bruteforce_attacks
                 run_ssrf_attacks
@@ -2955,7 +3189,6 @@ full_run() {
     run_measurement_prologue || exit 1
     run_counting_control null 0
     run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
-    run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
     run_sqlmap_attacks
     run_bruteforce_attacks
     run_ssrf_attacks
@@ -2999,6 +3232,13 @@ main() {
         # окна, не между get_baseline_metrics и get_final_metrics.
         check_services || exit 1
         run_ringbuf_overflow
+    elif [ "$1" = "--cpu-pressure-control" ]; then
+        # 5.9.9.F.2b (№125): наведённое CPU-давление с выдержкой — свой шаг,
+        # ВНЕ окна замера, тем же приёмом, что run_ringbuf_overflow и контроли
+        # DNS. Даёт критерию 14 достижимую пару reduce↔recover вместо
+        # постоянного SKIP "watchdog ни разу не сработал".
+        check_services || exit 1
+        run_cpu_pressure_control
     elif [ "$1" = "--dns-fd-reuse-controls" ]; then
         # 5.9.8a (№94, запрет №3/№6): оба контроля запрета №6 — своим шагом,
         # ДО окна замера (preflight, как реплей 5.9.7c и run_ringbuf_overflow
@@ -3010,7 +3250,7 @@ main() {
         run_dns_fd_reuse_negative_control
         run_dns_cross_thread_positive_control
     elif [ "$1" = "--counting-control" ]; then
-        # 5.9.8b/5.9.8c: три режима контроля счётности своим шагом, вне
+        # 5.9.8b/5.9.8c: режимы контроля счётности (null/idle) своим шагом, вне
         # full_run(). Нужен предпрогону: канареечная серия — второй P0 волны
         # (после DNS), и без этого шага она впервые оживает только на минуте
         # ~95 полного замера, внутри окна атак.
@@ -3023,7 +3263,6 @@ main() {
         check_services || exit 1
         run_counting_control null 0
         run_counting_control idle "${COUNTING_CONTROL_N:-10000}"
-        run_counting_control drop "${COUNTING_CONTROL_DROP_N:-300000}"
     elif [ "$1" = "--cred-proc-maps-control" ]; then
         # 5.9.9.Fg (находка №112): позитивный контроль 5.9.9.Fa отдельным
         # шагом — нужен ПРЕДПРОГОНУ (SMOKE_ONLY). Сужение до numeric-PID
@@ -3040,8 +3279,9 @@ main() {
         echo "Опции:"
         echo "  -i, --interactive          Интерактивный режим с меню"
         echo "  --ringbuf-overflow         Только 5.9.7b: переполнение кольца под SIGSTOP, вне окна замера"
+        echo "  --cpu-pressure-control     Только 5.9.9.F.2b: наведённое CPU-давление с выдержкой, вне окна замера"
         echo "  --dns-fd-reuse-controls    Только 5.9.8a: негативный+позитивный контроль dns_socket_map, вне окна замера"
-        echo "  --counting-control         Только 5.9.8b/c: три режима контроля счётности (null/idle/drop), вне окна замера"
+        echo "  --counting-control         Только 5.9.8b/c: контроль счётности (null/idle), вне окна замера"
         echo "  --cred-proc-maps-control   Только 5.9.9.Fa: позитивный контроль cred_proc_maps_mass_read, вне окна замера"
         echo "  -h, --help            Показать эту справку"
         echo ""

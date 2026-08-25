@@ -193,6 +193,37 @@ find_ts() {
 # EBPF_GUARD_TOKEN одного недостаточно, run-gate.sh сам подхватывает токен из
 # /var/lib/ebpf-guard/token, если он существует).
 OFFLINE_GATE_OUTPUT=""
+
+# 5.9.9.F.2h (находка №129): ЖУРНАЛ ОФЛАЙН-РЕПЛЕЯ ПОДСТАВЛЯЕТСЯ ВСЕГДА.
+# Комментарии реплеев 9 и 11 исходили из того, что «journalctl на машине
+# реплея нет вовсе» — это верно для macOS и неверно для стенда, где реплей и
+# гоняется преflight-ом пайплайна. Там run-gate.sh дотягивался до ЖИВОГО
+# журнала работающего сервиса, то есть офлайн-реплей архива читал данные
+# сегодняшнего агента: реплей 11 (исход «без журнала») получал живую строку
+# «no reachable nr» и не деградировал — REPLAY-GATE: FAIL на стенде при
+# зелёном реплее на macOS. Поэтому заглушка ставится в PATH на КАЖДЫЙ вызов
+# гейта, а не точечно двумя реплеями:
+#   * JOURNAL_STUB_LOG_FILE не задан -> заглушка молчит и выходит с кодом 1,
+#     что для всех трёх мест чтения в run-gate.sh (крит. 3, крит. 17,
+#     крит. 5.9.4h) неотличимо от отсутствия journalctl вовсе — именно то
+#     состояние, в котором эти реплеи и записывались;
+#   * JOURNAL_STUB_LOG_FILE задан -> печатается архивный журнал того же
+#     прогона, с вырезанным служебным syslog-префиксом (это работа реального
+#     "journalctl -o cat", а не run-gate.sh).
+JOURNAL_STUB_DIR=$(mktemp -d)
+cat > "$JOURNAL_STUB_DIR/journalctl" <<'STUBEOF'
+#!/bin/sh
+# Заглушка офлайн-реплея (5.9.9.F.2h): живой журнал стенда архивному реплею
+# недоступен по построению. Без JOURNAL_STUB_LOG_FILE — тишина и код 1
+# (тождественно "journalctl нет"), с ним — архивный журнал без syslog-префикса.
+if [ -n "$JOURNAL_STUB_LOG_FILE" ] && [ -s "$JOURNAL_STUB_LOG_FILE" ]; then
+    sed -E 's/^[^{]*(\{.*)$/\1/' "$JOURNAL_STUB_LOG_FILE"
+    exit 0
+fi
+exit 1
+STUBEOF
+chmod +x "$JOURNAL_STUB_DIR/journalctl"
+trap 'rm -rf "$JOURNAL_STUB_DIR"' EXIT
 # 5.9.9a (№99): вызов гейта БЕЗ снимка/восстановления detection-baseline-diff-state.txt.
 # Нужен ровно одному реплею — пятому, который проверяет сам этот файл и
 # обязан видеть состояние, оставленное собственным предыдущим вызовом.
@@ -200,7 +231,8 @@ OFFLINE_GATE_OUTPUT=""
 # а не вокруг каждого.
 run_offline_gate_keepstate() {
     local results_dir="$1" ts="$2"
-    OFFLINE_GATE_OUTPUT=$(EBPF_GUARD_API="http://127.0.0.1:1" EBPF_GUARD_TOKEN="" "${BASH:-bash}" "$GATE" "$results_dir" "$ts" 2>&1)
+    OFFLINE_GATE_OUTPUT=$(EBPF_GUARD_API="http://127.0.0.1:1" EBPF_GUARD_TOKEN="" \
+        PATH="$JOURNAL_STUB_DIR:$PATH" "${BASH:-bash}" "$GATE" "$results_dir" "$ts" 2>&1)
 }
 
 run_offline_gate() {
@@ -213,7 +245,8 @@ run_offline_gate() {
     # стенде /bin/bash уже bash4+, так что для него это не имело бы значения
     # — но реплей обязан быть переносимым, а не полагаться на то, где его
     # запускают.
-    OFFLINE_GATE_OUTPUT=$(EBPF_GUARD_API="http://127.0.0.1:1" EBPF_GUARD_TOKEN="" "${BASH:-bash}" "$GATE" "$results_dir" "$ts" 2>&1)
+    OFFLINE_GATE_OUTPUT=$(EBPF_GUARD_API="http://127.0.0.1:1" EBPF_GUARD_TOKEN="" \
+        PATH="$JOURNAL_STUB_DIR:$PATH" "${BASH:-bash}" "$GATE" "$results_dir" "$ts" 2>&1)
     restore_diff_state
 }
 
@@ -640,15 +673,13 @@ echo ""
 # не только прочитать код: оба исхода на одном архиве, тем же приёмом, что
 # 5.9.9a закрыла свою ветку (реплей 5/12 выше).
 #
-# journalctl на машине, где гоняется офлайн-реплей, нет вовсе (без него
-# gate.sh честно печатает SKIP «журнал agent-сервиса недоступен», не PASS) —
-# исход 2 живьём на живом стенде читает journalctl, а офлайн может дать
-# PASS только если что-то отвечает на вызов `journalctl -u ... --since ...`
-# тем же содержимым, что видел бы живой journalctl. Поэтому исход 2 временно
-# подставляет в PATH заглушку journalctl, которая печатает архивный
-# journal-agent-2.9.9.F.1.log (собран этим же самым стендом за этот же
-# прогон) — единственный способ получить PASS без живого хоста; заглушка
-# снимается сразу после вызова.
+# Живой journalctl офлайн-реплею недоступен по построению: на macOS его нет,
+# а на стенде он есть и показал бы журнал СЕГОДНЯШНЕГО агента вместо архива
+# (находка №129) — поэтому вызовы гейта идут через общую заглушку
+# (5.9.9.F.2h, см. JOURNAL_STUB_DIR выше). Без неё исход 1 честно печатает
+# SKIP «журнал agent-сервиса недоступен», а исход 2 называет ей архивный
+# journal-agent-2.9.9.F.1.log (собран этим же стендом за этот же прогон) —
+# единственный способ получить PASS без живого хоста.
 echo "--- реплей 9/12: collect-2.9.9.F.1, крит. 17 — SKIP без AGENT_START_FILE, PASS с ним (5.9.9.F.2c, №128) ---"
 ts9f1=$(find_ts "$C299F1_DIR/attacks" 2>/dev/null || true)
 journal9f1="$C299F1_DIR/journal-agent-2.9.9.F.1.log"
@@ -673,22 +704,10 @@ else
 
     # Исход 2: AGENT_START_FILE задан, journalctl подставлен заглушкой,
     # читающей архивный журнал этого же прогона — PASS.
-    tmpbin9f1=$(mktemp -d)
-    cat > "$tmpbin9f1/journalctl" <<'STUBEOF'
-#!/bin/sh
-# Заглушка офлайн-реплея (5.9.9.F.2c): на машине реплея настоящего
-# journalctl нет, поэтому вместо обращения к systemd она печатает
-# заранее собранный архивный журнал агента того же прогона.
-if [ -n "$JOURNAL_STUB_LOG_FILE" ] && [ -s "$JOURNAL_STUB_LOG_FILE" ]; then
-    cat "$JOURNAL_STUB_LOG_FILE"
-    exit 0
-fi
-exit 1
-STUBEOF
-    chmod +x "$tmpbin9f1/journalctl"
-    PATH="$tmpbin9f1:$PATH" JOURNAL_STUB_LOG_FILE="$journal9f1" AGENT_START_FILE="$agentstart9f1" \
+    # Заглушка journalctl теперь общая и стоит в PATH на каждый вызов гейта
+    # (5.9.9.F.2h) — реплею остаётся назвать журнал, который она печатает.
+    JOURNAL_STUB_LOG_FILE="$journal9f1" AGENT_START_FILE="$agentstart9f1" \
         run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
-    rm -rf "$tmpbin9f1"
     sec17_b=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 17[.]' '^=== 18[.]')
     pass17=0
     grep -qE '\[PASS\].*предохранитель доказан живьём' <<< "$sec17_b" && pass17=1
@@ -797,16 +816,19 @@ echo ""
 #
 # journalctl -o cat на живом стенде сам убирает служебный префикс
 # syslog/journald; офлайн-архив (journal-agent-2.9.9.F.1.log) хранит его
-# как есть, поэтому заглушка вырезает всё до первой "{" САМА — это делает
-# именно "-o cat", а не run-gate.sh, который получает уже чистую JSON-строку
-# и на живом стенде увидит её без всякой правки.
+# как есть, поэтому общая заглушка вырезает всё до первой "{" САМА — это
+# делает именно "-o cat", а не run-gate.sh, который получает уже чистую
+# JSON-строку и на живом стенде увидит её без всякой правки.
 echo "--- реплей 11/12: crit. 5.9.4h — 11 правил без достижимого nr читаются из журнала, а не молчат «0» (5.9.9.F.2e, №122) ---"
 if [ -z "${ts9f1:-}" ]; then
     bad "collect-2.9.9.F.1: TIMESTAMP не определён (см. реплей 9 выше) — 5.9.4h/kernel-unreachable не проверен"
 elif [ ! -s "$journal9f1" ]; then
     bad "collect-2.9.9.F.1: journal-agent-2.9.9.F.1.log отсутствует — 5.9.4h/kernel-unreachable не проверен"
 else
-    # Исход 1: без journalctl в PATH — деградация к старому поведению, не крах.
+    # Исход 1: журнал недоступен (общая заглушка молчит, пока не задан
+    # JOURNAL_STUB_LOG_FILE, — 5.9.9.F.2h) — деградация к старому поведению,
+    # не крах. Раньше исход полагался на то, что journalctl на машине реплея
+    # нет; на стенде он есть, и критерий читал ЖИВОЙ журнал (находка №129).
     run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
     sec54h_a=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 5\.9\.4h[.]' '^=== 5\.9\.9c[.]')
     degrade_ok=0
@@ -820,23 +842,8 @@ else
     # Исход 2: journalctl подставлен заглушкой, читающей архивный журнал
     # этого же прогона (тем же приёмом, что реплей 9) — 11 правил названы
     # поимённо категорией (а), «немых правил: 0» больше не печатается.
-    tmpbin11=$(mktemp -d)
-    cat > "$tmpbin11/journalctl" <<'STUBEOF'
-#!/bin/sh
-# Заглушка офлайн-реплея (5.9.9.F.2e): архивный журнал хранит служебный
-# syslog-префикс перед каждой JSON-строкой (реальный "journalctl -o cat" его
-# сам убирает) — заглушка вырезает всё до первой "{", это её замена -o cat,
-# а не поведение, которое должен уметь run-gate.sh.
-if [ -n "$JOURNAL_STUB_LOG_FILE" ] && [ -s "$JOURNAL_STUB_LOG_FILE" ]; then
-    sed -E 's/^[^{]*(\{.*)$/\1/' "$JOURNAL_STUB_LOG_FILE"
-    exit 0
-fi
-exit 1
-STUBEOF
-    chmod +x "$tmpbin11/journalctl"
-    PATH="$tmpbin11:$PATH" JOURNAL_STUB_LOG_FILE="$journal9f1" \
+    JOURNAL_STUB_LOG_FILE="$journal9f1" \
         run_offline_gate "$C299F1_DIR/attacks" "$ts9f1"
-    rm -rf "$tmpbin11"
     sec54h_b=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 5\.9\.4h[.]' '^=== 5\.9\.9c[.]')
     kernel11_named=0
     grep -qE 'немых всего: 11 — \(а\) по конструкции: 11, \(б\) нет сценария на стенде: 0' <<< "$sec54h_b" && kernel11_named=1

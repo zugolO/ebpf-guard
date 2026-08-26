@@ -319,12 +319,20 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		if event.Syscall != nil && event.ProcArgs == "" {
 			nr := event.Syscall.Nr
 			if nr == 59 || nr == 322 {
-				var ok bool
-				event.ProcArgs, event.ProcArgsTruncated, ok = c.procArgsFromBPF(
-					event.PID, util.BytesToString(event.Comm[:]))
+				args, truncated, ok := c.procArgsFromBPF(event.PID)
 				if !ok {
-					event.ProcArgs, event.ProcArgsTruncated = readProcCmdline(event.PID)
+					args, truncated = readProcCmdline(event.PID)
 				}
+				// The guard belongs here, over whichever source answered:
+				// both can hand back the CALLEE's argv for the sys_enter
+				// record of the same execve (the map entry never expires;
+				// the /proc read wins the race often enough). Attaching it
+				// there would raise every proc.args rule twice per exec,
+				// the second time naming the caller.
+				if !commMatchesArgv0(util.BytesToString(event.Comm[:]), args) {
+					args, truncated = "", false
+				}
+				event.ProcArgs, event.ProcArgsTruncated = args, truncated
 			}
 		}
 
@@ -515,7 +523,7 @@ func normalizeCmdline(data []byte) string {
 // its pid field (fill_process_info: e->pid = pid_tgid >> 32), and it is written
 // by the sched_process_exec tracepoint — i.e. during the very execve whose
 // sys_exit produced this record, so the entry is present by the time we look.
-func (c *SyscallCollector) procArgsFromBPF(tgid uint32, comm string) (args string, truncated bool, ok bool) {
+func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated bool, ok bool) {
 	if c.objs == nil || c.objs.ProcArgsMap == nil {
 		return "", false, false
 	}
@@ -534,9 +542,6 @@ func (c *SyscallCollector) procArgsFromBPF(tgid uint32, comm string) (args strin
 		// thoroughly as the lost race did.
 		return "", false, false
 	}
-	if !commMatchesArgv0(comm, s) {
-		return "", false, false
-	}
 	return s, pa.Truncated != 0, true
 }
 
@@ -544,19 +549,21 @@ func (c *SyscallCollector) procArgsFromBPF(tgid uint32, comm string) (args strin
 // carries the NEW program's identity.
 //
 // bpf/syscall.bpf.c submits a record from both tracepoints, sys_enter and
-// sys_exit, so one execve produces two. The map entry, unlike a /proc read,
-// does not expire — so without this test the sys_enter record (whose comm is
-// still the CALLER's, e.g. "bash") would be enriched retroactively with the
-// callee's argv, and every proc.args rule would fire twice per exec, the
-// second time naming the wrong process. Observed directly: five SUID canaries
-// executed from /tmp produced eight alerts, three of them comm=bash.
+// sys_exit, so one execve produces two. Neither source can tell them apart on
+// its own: the map entry never expires, and the /proc read is taken at dequeue
+// time, by which point the exec has usually completed. So without this test the
+// sys_enter record — whose comm is still the CALLER's, e.g. "bash" — is
+// enriched with the callee's argv, and every proc.args rule fires twice per
+// exec, the second time naming the wrong process. Measured on the stand: five
+// SUID canaries executed from /tmp produced eight alerts through the BPF path
+// and six through /proc; only with this guard do they produce five.
 //
 // The discriminator is that the kernel sets comm from the new executable at
 // exec, so on the sys_exit record comm equals basename(argv[0]) — truncated to
 // TASK_COMM_LEN-1 (15) visible bytes, hence prefix rather than equality. When
 // argv[0] is not a path to the running image (a caller that passes a custom
-// argv[0]), this says no and the caller falls back to /proc — i.e. to exactly
-// the behaviour that predates the BPF path, never to silence.
+// argv[0]), this says no and proc.args is left empty: such an argv[0] is not a
+// path under /tmp either, so no rule of this family loses a match it had.
 func commMatchesArgv0(comm, args string) bool {
 	if comm == "" || args == "" {
 		return false

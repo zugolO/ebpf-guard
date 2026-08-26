@@ -495,3 +495,87 @@ func TestK8sAttacks_SafePort80_NoK8sAlert(t *testing.T) {
 		assert.NotEqual(t, "k8s_kubectl_apiserver_exec", a.RuleID, "port 80 must not trigger kubectl rule")
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5.9.9.F.3c (#133): systemd sandboxing is not a container escape
+// ─────────────────────────────────────────────────────────────────────────────
+
+// nrSandboxSyscall builds a syscall event with the process identity fields the
+// two 5.9.9.F.3c exceptions read: pid, ppid and comm.
+func nrSandboxSyscall(nr int64, pid, ppid uint32, comm string) types.Event {
+	e := types.Event{
+		Type:      types.EventSyscall,
+		Timestamp: 1,
+		PID:       pid,
+		PPID:      ppid,
+		Syscall:   &types.SyscallEvent{Nr: nr},
+	}
+	copy(e.Comm[:], comm)
+	return e
+}
+
+// The six rules the point narrows. Kept as one list so a rule added to (or
+// dropped from) the family is noticed here rather than on the stand.
+var nrEscapeFamily = []struct {
+	file string
+	id   string
+}{
+	{"../../rules/container-escape.yaml", "container_escape_mount"},
+	{"../../rules/container-escape.yaml", "container_escape_chroot"},
+	{"../../rules/container-escape.yaml", "container_escape_unshare_user"},
+	{"../../rules/container-escape.yaml", "container_escape_cap_sys_admin"},
+	{"../../rules/privesc.yaml", "privesc_unshare_user_ns"},
+	{"../../rules/cis-k8s.yaml", "cis_5_2_1_privileged_container"},
+}
+
+// Negative half, first shape: the child systemd forks to unfold a unit's
+// sandbox. Its comm is the kernel's parenthesized form ("(mandb)"), never the
+// literal "systemd" — a comm list would not generalize to the next unit, which
+// is exactly how the exception of #111 failed to generalize.
+func TestWave599F3c_SystemdSandboxChild_NoEscapeAlert(t *testing.T) {
+	for _, r := range nrEscapeFamily {
+		re := nrLoadRules(t, r.file)
+		for _, nr := range []int64{155, 161, 165, 166, 272, 308} {
+			ev := nrSandboxSyscall(nr, 6120, 1, "(mandb)")
+			assert.NotContains(t, nrAlertIDs(re.Evaluate(ev)), r.id,
+				"%s fired on a systemd sandbox child (nr=%d)", r.id, nr)
+		}
+	}
+}
+
+// Negative half, second shape — the one the pre-run of №2.9.9.F.3 found and the
+// child shape above does not cover: pid 1 ITSELF mounts and unmounts while
+// assembling that unit's sandbox. `systemctl start man-db.service` raised
+// exactly one alert on the stand, container_escape_cap_sys_admin pid=1
+// comm=systemd, and the wave's negative control requires Δ=0 over all six.
+func TestWave599F3c_SystemdInitSelf_NoEscapeAlert(t *testing.T) {
+	for _, r := range nrEscapeFamily {
+		re := nrLoadRules(t, r.file)
+		for _, nr := range []int64{155, 161, 165, 166, 272, 308} {
+			ev := nrSandboxSyscall(nr, 1, 0, "systemd")
+			assert.NotContains(t, nrAlertIDs(re.Evaluate(ev)), r.id,
+				"%s fired on host init unfolding a unit sandbox (nr=%d)", r.id, nr)
+		}
+	}
+}
+
+// Positive half. Both exceptions above narrow by process identity, and a
+// narrowing that cannot be told from blinding by any counter is the wave's
+// named main risk (#57). A real escape — unshare/mount from a process that is
+// neither pid 1 nor a child of it — must still fire.
+func TestWave599F3c_RealEscape_StillAlerts(t *testing.T) {
+	fired := map[string]bool{}
+	for _, r := range nrEscapeFamily {
+		re := nrLoadRules(t, r.file)
+		for _, nr := range []int64{155, 161, 165, 166, 272, 308} {
+			ev := nrSandboxSyscall(nr, 777, 500, "bash")
+			for _, id := range nrAlertIDs(re.Evaluate(ev)) {
+				fired[id] = true
+			}
+		}
+	}
+	for _, r := range nrEscapeFamily {
+		assert.True(t, fired[r.id],
+			"%s never fired for pid=777 ppid=500 comm=bash — the 5.9.9.F.3c narrowing blinded it (#57)", r.id)
+	}
+}

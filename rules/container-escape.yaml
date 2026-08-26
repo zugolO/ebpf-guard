@@ -45,6 +45,21 @@ rules:
             - field: comm
               op: regex
               values: ["^\\(.*\\)$"]
+      # 5.9.9.F.3c, ревизия по предпрогону №2.9.9.F.3 (2026-08-26): the child
+      # shape above covers only half of a unit start. pid 1 ITSELF calls
+      # mount()/umount2() while assembling and tearing down that unit's
+      # sandbox, and `systemctl start man-db.service` on the stand raised
+      # exactly one alert — container_escape_cap_sys_admin pid=1 comm=systemd —
+      # which is precisely the Δ=0 the wave's own negative control requires.
+      # The predicate is pid, not comm: pid 1 is host init by construction and
+      # cannot be spoofed, whereas a comm list would break on the next init
+      # (the №111 defect this point exists to avoid). An escape performed BY
+      # host init is not an escape: that process already owns the host.
+      - name: systemd-init-self
+        condition:
+          field: pid
+          op: eq
+          values: ["1"]
 
   # Mount of sensitive host paths
   - id: container_escape_host_mount
@@ -127,6 +142,21 @@ rules:
             - field: comm
               op: regex
               values: ["^\\(.*\\)$"]
+      # 5.9.9.F.3c, ревизия по предпрогону №2.9.9.F.3 (2026-08-26): the child
+      # shape above covers only half of a unit start. pid 1 ITSELF calls
+      # mount()/umount2() while assembling and tearing down that unit's
+      # sandbox, and `systemctl start man-db.service` on the stand raised
+      # exactly one alert — container_escape_cap_sys_admin pid=1 comm=systemd —
+      # which is precisely the Δ=0 the wave's own negative control requires.
+      # The predicate is pid, not comm: pid 1 is host init by construction and
+      # cannot be spoofed, whereas a comm list would break on the next init
+      # (the №111 defect this point exists to avoid). An escape performed BY
+      # host init is not an escape: that process already owns the host.
+      - name: systemd-init-self
+        condition:
+          field: pid
+          op: eq
+          values: ["1"]
 
   # ============================================================================
   # Kernel Exploitation
@@ -222,6 +252,21 @@ rules:
             - field: comm
               op: regex
               values: ["^\\(.*\\)$"]
+      # 5.9.9.F.3c, ревизия по предпрогону №2.9.9.F.3 (2026-08-26): the child
+      # shape above covers only half of a unit start. pid 1 ITSELF calls
+      # mount()/umount2() while assembling and tearing down that unit's
+      # sandbox, and `systemctl start man-db.service` on the stand raised
+      # exactly one alert — container_escape_cap_sys_admin pid=1 comm=systemd —
+      # which is precisely the Δ=0 the wave's own negative control requires.
+      # The predicate is pid, not comm: pid 1 is host init by construction and
+      # cannot be spoofed, whereas a comm list would break on the next init
+      # (the №111 defect this point exists to avoid). An escape performed BY
+      # host init is not an escape: that process already owns the host.
+      - name: systemd-init-self
+        condition:
+          field: pid
+          op: eq
+          values: ["1"]
 
   # pivot_root syscall (change root directory)
   - id: container_escape_pivot_root
@@ -278,6 +323,21 @@ rules:
             - field: comm
               op: regex
               values: ["^\\(.*\\)$"]
+      # 5.9.9.F.3c, ревизия по предпрогону №2.9.9.F.3 (2026-08-26): the child
+      # shape above covers only half of a unit start. pid 1 ITSELF calls
+      # mount()/umount2() while assembling and tearing down that unit's
+      # sandbox, and `systemctl start man-db.service` on the stand raised
+      # exactly one alert — container_escape_cap_sys_admin pid=1 comm=systemd —
+      # which is precisely the Δ=0 the wave's own negative control requires.
+      # The predicate is pid, not comm: pid 1 is host init by construction and
+      # cannot be spoofed, whereas a comm list would break on the next init
+      # (the №111 defect this point exists to avoid). An escape performed BY
+      # host init is not an escape: that process already owns the host.
+      - name: systemd-init-self
+        condition:
+          field: pid
+          op: eq
+          values: ["1"]
 
   # ============================================================================
   # cgroup Escape

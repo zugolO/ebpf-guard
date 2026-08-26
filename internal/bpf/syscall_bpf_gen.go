@@ -30,9 +30,21 @@ type SyscallMaps struct {
 	ObserverExcludedCounters *ebpf.Map `ebpf:"observer_excluded_counters"`
 	ObserverRootPid          *ebpf.Map `ebpf:"observer_root_pid"`
 	ObserverTreeCache        *ebpf.Map `ebpf:"observer_tree_cache"`
+	ProcArgsMap              *ebpf.Map `ebpf:"proc_args_map"`
+	ProcArgsScratch          *ebpf.Map `ebpf:"proc_args_scratch"`
 	RingbufFullCounters      *ebpf.Map `ebpf:"ringbuf_full_counters"`
 	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
 	SyscallFilterMap         *ebpf.Map `ebpf:"syscall_filter_map"`
+}
+
+// SyscallProcArgs mirrors `struct proc_args` (bpf/common.h): the argv the
+// sched_process_exec hook caches in proc_args_map, keyed by TGID. Field names
+// and layout match what bpf2go emits for the same struct, so code compiled
+// against this stub compiles unchanged against the generated bindings.
+type SyscallProcArgs struct {
+	Args      [512]int8
+	Truncated uint8
+	Pad       [3]uint8
 }
 
 // SyscallPrograms holds the BPF programs exported by bpf/syscall.bpf.c.

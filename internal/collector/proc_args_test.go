@@ -82,3 +82,27 @@ func TestReadProcCmdlineTruncation(t *testing.T) {
 	assert.NotContains(t, result, "\x00", "result must not contain NUL bytes")
 	assert.False(t, strings.Contains(result, "\x00"))
 }
+
+// TestNormalizeCmdline locks the shared formatting of both proc.args sources.
+// The BPF path (proc_args_map) hands over a fixed 512-byte buffer zero-padded
+// past the end of argv; the /proc path hands over exactly what the kernel
+// wrote. Both must come out as the same space-separated string, because rules
+// match on that string and a difference between the two sources would look
+// like the rule being wrong rather than the source having changed.
+func TestNormalizeCmdline(t *testing.T) {
+	t.Run("NUL separators become spaces", func(t *testing.T) {
+		assert.Equal(t, "/tmp/x --run now",
+			normalizeCmdline([]byte("/tmp/x\x00--run\x00now\x00")))
+	})
+	t.Run("zero padding of the BPF buffer is stripped, not turned into spaces", func(t *testing.T) {
+		buf := make([]byte, 32)
+		copy(buf, "/tmp/canary\x00-v\x00")
+		assert.Equal(t, "/tmp/canary -v", normalizeCmdline(buf))
+	})
+	t.Run("an all-NUL buffer yields the empty string", func(t *testing.T) {
+		assert.Equal(t, "", normalizeCmdline(make([]byte, 16)))
+	})
+	t.Run("a single argument survives unchanged", func(t *testing.T) {
+		assert.Equal(t, "/tmp/canary", normalizeCmdline([]byte("/tmp/canary\x00")))
+	})
+}

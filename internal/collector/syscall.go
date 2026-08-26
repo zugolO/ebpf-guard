@@ -317,7 +317,11 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		if event.Syscall != nil && event.ProcArgs == "" {
 			nr := event.Syscall.Nr
 			if nr == 59 || nr == 322 {
-				event.ProcArgs, event.ProcArgsTruncated = readProcCmdline(event.PID)
+				var ok bool
+				event.ProcArgs, event.ProcArgsTruncated, ok = c.procArgsFromBPF(event.PID)
+				if !ok {
+					event.ProcArgs, event.ProcArgsTruncated = readProcCmdline(event.PID)
+				}
 			}
 		}
 
@@ -468,20 +472,14 @@ func (c *SyscallCollector) parseEvent(raw []byte, event *types.Event) error {
 // Arguments exceeding this limit are truncated and ProcArgsTruncated is set to true.
 const procArgsTruncateAt = 512
 
-// readProcCmdline reads /proc/[pid]/cmdline, replaces NUL argument separators
-// with spaces, strips any trailing NUL bytes, and returns the result. If the
-// raw cmdline exceeds procArgsTruncateAt bytes the string is truncated and
-// truncated=true is returned. Returns ("", false) on any read error.
-func readProcCmdline(pid uint32) (args string, truncated bool) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil || len(data) == 0 {
-		return "", false
-	}
-	if len(data) > procArgsTruncateAt {
-		data = data[:procArgsTruncateAt]
-		truncated = true
-	}
-	// Strip trailing NUL bytes added by the kernel.
+// normalizeCmdline turns a raw kernel argv block (NUL-separated arguments,
+// zero-padded at the end) into the space-separated form rules match on.
+// Shared by both proc.args sources so they cannot drift apart in formatting —
+// a rule matching one and not the other would be indistinguishable from the
+// rule being wrong.
+func normalizeCmdline(data []byte) string {
+	// Strip trailing NUL bytes added by the kernel (and, for the BPF path,
+	// the zero padding of the fixed-size buffer).
 	for len(data) > 0 && data[len(data)-1] == 0 {
 		data = data[:len(data)-1]
 	}
@@ -491,5 +489,66 @@ func readProcCmdline(pid uint32) (args string, truncated bool) {
 			data[i] = ' '
 		}
 	}
-	return string(data), truncated
+	return string(data)
+}
+
+// procArgsFromBPF returns the argv the sched_process_exec hook cached in
+// proc_args_map for this TGID, and whether the lookup succeeded.
+//
+// This is the primary path, and until 5.9.9.F.3 (pre-run of измерение
+// №2.9.9.F.3) it did not exist: the BPF side wrote the map, the comment above
+// the call site named it "primary", and userspace read only /proc/PID/cmdline.
+// That fallback loses the race against any short-lived process — the task is
+// gone before the ring-buffer record is dequeued, os.ReadFile fails, ProcArgs
+// stays empty, and every rule predicated on proc.args silently sees nothing.
+// It is the same defect, in the same shape, that fill_process_info (bpf/common.h)
+// already records for parent identity: "loses the race against any short-lived
+// process". The live positive control of 5.9.9.F.3b caught it — a SUID copy of
+// /bin/true executed from /tmp raised privesc_suid_suspicious_path on some runs
+// and nothing at all on others, which is precisely a coin flip on whether the
+// process outlived the dequeue.
+//
+// The map is keyed by TGID, which is what the ring-buffer record carries in
+// its pid field (fill_process_info: e->pid = pid_tgid >> 32), and it is written
+// by the sched_process_exec tracepoint — i.e. during the very execve whose
+// sys_exit produced this record, so the entry is present by the time we look.
+func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated bool, ok bool) {
+	if c.objs == nil || c.objs.ProcArgsMap == nil {
+		return "", false, false
+	}
+	var pa bpf.SyscallProcArgs
+	if err := c.objs.ProcArgsMap.Lookup(&tgid, &pa); err != nil {
+		return "", false, false
+	}
+	raw := make([]byte, len(pa.Args))
+	for i, b := range pa.Args {
+		raw[i] = byte(b)
+	}
+	s := normalizeCmdline(raw)
+	if s == "" {
+		// An all-NUL entry carries no argv; let the caller fall back rather
+		// than report an empty success, which would blind the rules just as
+		// thoroughly as the lost race did.
+		return "", false, false
+	}
+	return s, pa.Truncated != 0, true
+}
+
+// readProcCmdline reads /proc/[pid]/cmdline, replaces NUL argument separators
+// with spaces, strips any trailing NUL bytes, and returns the result. If the
+// raw cmdline exceeds procArgsTruncateAt bytes the string is truncated and
+// truncated=true is returned. Returns ("", false) on any read error.
+//
+// Fallback path only — see procArgsFromBPF above for why it cannot be the
+// primary one.
+func readProcCmdline(pid uint32) (args string, truncated bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	if len(data) > procArgsTruncateAt {
+		data = data[:procArgsTruncateAt]
+		truncated = true
+	}
+	return normalizeCmdline(data), truncated
 }

@@ -285,33 +285,11 @@ echo "  ок: режим drop удалён, крит. 22 считает замк
 #     юнит-половина зелёная. Живая половина (правило не ослепло) стоит
 #     ниже, шагом [9.6/14], и её здесь заменить нечем;
 #   - у измерительных проверяется, что механизм СПОСОБЕН упасть.
-echo "--- преflight: 5.9.9.F.3a — rootkit_hidden_dir_dev заякорен и не видит штатные ноды /dev (№131) ---"
-grep -q 'id: rootkit_hidden_dir_dev' rules/rootkit-detection.yaml \
-    || die "5.9.9.F.3a: правило rootkit_hidden_dir_dev исчезло из rules/rootkit-detection.yaml — удаление вместо сужения приёмкой волны не является"
-# Якорь ищется в УСЛОВИИ (rule_condition выше), а не в теле правила: тело
-# содержит и имя, и описание, и tags — сторож по телу дал бы ложный пропуск,
-# как это и случилось при первой редакции сторожа 3b.
-rule_condition rootkit_hidden_dir_dev rules/rootkit-detection.yaml | grep -qE '\^/dev/' \
-    || die "5.9.9.F.3a: regex rootkit_hidden_dir_dev не заякорен (^) в условии — /dev/ продолжит матчиться подстрокой внутри /tmp/namespace-dev-*/dev/mqueue (находка №131), правка не в дереве"
-sed -n '/id: rootkit_hidden_dir_dev/,/^  - id:/p' rules/rootkit-detection.yaml | grep -qE 'urandom|random|console|exceptions:' \
-    || die "5.9.9.F.3a: у rootkit_hidden_dir_dev нет ни исключения, ни упоминания штатных нод — /dev/urandom (7 строчных букв) продолжит давать critical по regex [a-z]{6,}, а это 10 из 12 срабатываний правила на №2.9.9.F.2"
-echo "  ок: правило на месте, regex заякорен, штатные ноды учтены"
-
-echo "--- преflight: 5.9.9.F.3b — privesc_suid_suspicious_path проверяет SUID/exec либо переименован (№132) ---"
-grep -q 'id: privesc_suid_suspicious_path' rules/privesc.yaml \
-    || die "5.9.9.F.3b: правило privesc_suid_suspicious_path исчезло из rules/privesc.yaml — удаление вместо сужения приёмкой волны не является"
-# ВАЖНО: искать надо в ПРЕДИКАТЕ, а не в тексте правила. Описание правила
-# буквально содержит слова «SUID binary was executed», и сторож, читающий
-# тело целиком, давал ложный пропуск на неправленом дереве — то есть был бы
-# критерием без достижимого FAIL, ровно тем классом (№123/№124), который
-# чинила прошлая волна. rule_predicate() выбрасывает name:/description: и
-# их свёрнутые продолжения, оставляя только условия и метаданные.
-# ВАЖНО: искать надо в БЛОКЕ УСЛОВИЯ, а не в теле правила целиком. Проверено
-# на неправленом дереве обоими исходами, и обе более грубые редакции этого
-# сторожа давали ЛОЖНЫЙ ПРОПУСК: описание правила буквально содержит «SUID
-# binary was executed», а tags: — слово `suid`. Сторож, читающий тело
-# целиком, был бы критерием без достижимого FAIL — ровно тот класс
-# (№123/№124), который чинила прошлая волна.
+# Определения помощников стоят ЗДЕСЬ, до первого сторожа волны, а не
+# перед сторожем 3b: сторож 3a ниже зовёт rule_condition() раньше, и при
+# определении ниже по файлу bash печатал "command not found", а `|| die`
+# превращал это в ЛОЖНЫЙ СТОП «правка не в дереве» на правленом дереве
+# (предпрогон №2.9.9.F.3, 10:08 UTC).
 #
 # Интервальные квантификаторы ({0,4}) здесь НЕ используются намеренно:
 # awk на стенде — mawk, и полагаться на их поддержку значит получить сторож,
@@ -340,6 +318,34 @@ rule_predicate() {
         /^    (name|description):/ { inc=0 }
         inc && !/^[[:space:]]*#/'
 }
+
+echo "--- преflight: 5.9.9.F.3a — rootkit_hidden_dir_dev заякорен и не видит штатные ноды /dev (№131) ---"
+grep -q 'id: rootkit_hidden_dir_dev' rules/rootkit-detection.yaml \
+    || die "5.9.9.F.3a: правило rootkit_hidden_dir_dev исчезло из rules/rootkit-detection.yaml — удаление вместо сужения приёмкой волны не является"
+# Якорь ищется в УСЛОВИИ (rule_condition выше), а не в теле правила: тело
+# содержит и имя, и описание, и tags — сторож по телу дал бы ложный пропуск,
+# как это и случилось при первой редакции сторожа 3b.
+rule_condition rootkit_hidden_dir_dev rules/rootkit-detection.yaml | grep -qE '\^/dev/' \
+    || die "5.9.9.F.3a: regex rootkit_hidden_dir_dev не заякорен (^) в условии — /dev/ продолжит матчиться подстрокой внутри /tmp/namespace-dev-*/dev/mqueue (находка №131), правка не в дереве"
+sed -n '/id: rootkit_hidden_dir_dev/,/^  - id:/p' rules/rootkit-detection.yaml | grep -qE 'urandom|random|console|exceptions:' \
+    || die "5.9.9.F.3a: у rootkit_hidden_dir_dev нет ни исключения, ни упоминания штатных нод — /dev/urandom (7 строчных букв) продолжит давать critical по regex [a-z]{6,}, а это 10 из 12 срабатываний правила на №2.9.9.F.2"
+echo "  ок: правило на месте, regex заякорен, штатные ноды учтены"
+
+echo "--- преflight: 5.9.9.F.3b — privesc_suid_suspicious_path проверяет SUID/exec либо переименован (№132) ---"
+grep -q 'id: privesc_suid_suspicious_path' rules/privesc.yaml \
+    || die "5.9.9.F.3b: правило privesc_suid_suspicious_path исчезло из rules/privesc.yaml — удаление вместо сужения приёмкой волны не является"
+# ВАЖНО: искать надо в ПРЕДИКАТЕ, а не в тексте правила. Описание правила
+# буквально содержит слова «SUID binary was executed», и сторож, читающий
+# тело целиком, давал ложный пропуск на неправленом дереве — то есть был бы
+# критерием без достижимого FAIL, ровно тем классом (№123/№124), который
+# чинила прошлая волна. rule_predicate() выбрасывает name:/description: и
+# их свёрнутые продолжения, оставляя только условия и метаданные.
+# ВАЖНО: искать надо в БЛОКЕ УСЛОВИЯ, а не в теле правила целиком. Проверено
+# на неправленом дереве обоими исходами, и обе более грубые редакции этого
+# сторожа давали ЛОЖНЫЙ ПРОПУСК: описание правила буквально содержит «SUID
+# binary was executed», а tags: — слово `suid`. Сторож, читающий тело
+# целиком, был бы критерием без достижимого FAIL — ровно тот класс
+# (№123/№124), который чинила прошлая волна.
 f3b_cond=$(rule_condition privesc_suid_suspicious_path rules/privesc.yaml)
 f3b_meta=$(rule_meta privesc_suid_suspicious_path rules/privesc.yaml)
 if echo "$f3b_cond" | grep -qiE 'suid|setuid|mode|exec|proc\.args'; then

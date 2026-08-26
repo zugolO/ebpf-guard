@@ -970,8 +970,14 @@ fi
 dns_ctl_marker=$(latest_marker "$RESULTS_DIR" 'dns-positive-control-*.txt')
 dns_ctl_before_baseline=0
 if [ -n "$dns_ctl_marker" ] && [ -s "$baseline_metrics" ]; then
-    dns_ctl_mtime=$(stat -c %Y "$dns_ctl_marker" 2>/dev/null || echo "")
-    baseline_mtime=$(stat -c %Y "$baseline_metrics" 2>/dev/null || echo "")
+    # stat -f %m — BSD/macOS. Остальные четыре чтения mtime в этом файле
+    # (строки 802/803, окно idle) фолбэк уже имели, а эти два — нет: на
+    # macOS обе величины выходили пустыми, dns_ctl_before_baseline молча
+    # оставался нулём, и четвёртая фаза (5.9.9d/№100) была недостижима.
+    # Реплей 13/14 проверяет именно её, и без фолбэка он давал бы разные
+    # исходы на стенде и на машине разработчика.
+    dns_ctl_mtime=$(stat -c %Y "$dns_ctl_marker" 2>/dev/null || stat -f %m "$dns_ctl_marker" 2>/dev/null || echo "")
+    baseline_mtime=$(stat -c %Y "$baseline_metrics" 2>/dev/null || stat -f %m "$baseline_metrics" 2>/dev/null || echo "")
     if [ -n "$dns_ctl_mtime" ] && [ -n "$baseline_mtime" ] && [ "$dns_ctl_mtime" -lt "$baseline_mtime" ]; then
         dns_ctl_before_baseline=1
     fi

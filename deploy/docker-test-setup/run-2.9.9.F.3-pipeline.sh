@@ -1498,5 +1498,57 @@ else
         bash $SETUP/run-2.9.5-report.sh 2>&1 | tee /root/report-2.9.9.F.3.txt
 fi
 
+echo "=== [14.1/14] наблюдение без порога: состав drift_new_exec_critical (долг «намеренно НЕ входит») ==="
+# Пункт постановки замера, добавленный 2026-08-26 (см. plan.md, «Наблюдение без
+# порога» в приёмке №2.9.9.F.3). drift_new_exec_critical — первое место по
+# критикалам аптайма (44 на №2.9.9.F.2, больше, чем №131 и №132 вместе), и до
+# сих пор он не находка только потому, что его состав никто не смотрел:
+# правило дрейфа ОБЯЗАНО расти в окне атаки, и без разбора «сколько из 44
+# пришло из окна атак, а сколько с фонового open() под /usr/bin» отличить
+# законный рост от четвёртого экземпляра класса «правило шире своего имени»
+# нечем. Шаг ничего не проверяет и НЕ влияет на вердикт: он печатает величину
+# и складывает её в артефакт, чтобы волна 6 входила в разбор с числами, а не
+# с «44 и первое место».
+#
+# Почему здесь, а не в run-gate.sh: у наблюдения нет порога, а всё, что гейт
+# печатает через pass()/fail()/skip(), обязано иметь строку в
+# criteria-index.txt и достижимый исход. Наблюдение без порога, заведённое
+# критерием, стало бы либо вечным PASS (критерий без достижимого FAIL —
+# №123/№124), либо SKIP-ом бухгалтерии (№135/№136/№137). Поэтому — шаг
+# пайплайна, после гейта, на тех же снимках.
+drift_out=/root/drift-composition-2.9.9.F.3.txt
+{
+    echo "=== состав drift_new_exec_critical за аптайм, замер №2.9.9.F.3, $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    # FP_API/FP_TOKEN заданы шагом [9.6/14] в этом же shell; перевычисляются
+    # на случай, если шаг был пропущен режимом прогона.
+    FP_API="${FP_API:-http://${VPS_IP:-localhost}:19090}"
+    FP_TOKEN="${FP_TOKEN:-${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}}"
+    drift_json=$(curl -s --max-time 30 -H "Authorization: Bearer $FP_TOKEN" "$FP_API/api/v1/alerts" 2>/dev/null \
+        | jq '[.[]|select(.rule_id=="drift_new_exec_critical")]' 2>/dev/null)
+    if [ -z "$drift_json" ] || [ "$drift_json" = "null" ]; then
+        echo "НЕ ПОЛУЧЕНО: /api/v1/alerts не отдал массив (токен/агент/jq). Наблюдение пропущено — на вердикт не влияет."
+    else
+        echo "-- записей в сторе: $(echo "$drift_json" | jq 'length')"
+        echo "-- срабатываний с учётом дедупликации (сумма count): $(echo "$drift_json" | jq '[.[]|(.count // 1)]|add // 0')"
+        echo "-- окно: $(echo "$drift_json" | jq -r '[.[].timestamp]|sort|(first // "-")+" .. "+(last // "-")')"
+        echo "-- по severity:"
+        echo "$drift_json" | jq -r 'group_by(.severity)[]|"     \(length)\t\(.[0].severity)"' | sort -rn
+        echo "-- по comm (кто открывал):"
+        echo "$drift_json" | jq -r 'group_by(.comm)[]|"     \(length)\t\(.[0].comm)"' | sort -rn
+        echo "-- по file.path (что открывалось):"
+        echo "$drift_json" | jq -r 'group_by(.details["file.path"])[]|"     \(length)\t\(.[0].details["file.path"] // "-")"' | sort -rn
+        echo "-- пары comm × file.path (для разметки «окно атаки» против фона):"
+        echo "$drift_json" | jq -r 'group_by([.comm, .details["file.path"]])[]|"     \(length)\t\(.[0].comm)\t\(.[0].details["file.path"] // "-")"' | sort -rn
+        echo ""
+        echo "КАК ЧИТАТЬ (postanovka 2026-08-26). Строки, чей comm — шаг манифеста атак"
+        echo "(curl/wget/python3/nc/dropper из run-all-attacks.sh), — законный рост правила"
+        echo "дрейфа в окне атаки. Строки, чей comm — фоновый демон стенда, а file.path —"
+        echo "штатная утилита (/usr/bin/dpkg, /usr/bin/find, /usr/bin/mandb и т.п.), — тот же"
+        echo "класс, что №131/№132: правило шире своего имени. Разметка и решение —"
+        echo "волна 6, не этот замер. Порог здесь НЕ назначается (запрет 5.9.6)."
+    fi
+} 2>&1 | tee "$drift_out"
+echo "  наблюдение сложено в $drift_out (собирается вместе с /root/report-2.9.9.F.3.txt)"
+
 echo "=== ПАЙПЛАЙН №2.9.9.F.3 ЗАВЕРШЁН $(date -u +%H:%M:%S) UTC, гейт=$GATE_RC ==="
 touch /root/PIPELINE-2.9.9.F.3-DONE

@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -318,7 +320,8 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 			nr := event.Syscall.Nr
 			if nr == 59 || nr == 322 {
 				var ok bool
-				event.ProcArgs, event.ProcArgsTruncated, ok = c.procArgsFromBPF(event.PID)
+				event.ProcArgs, event.ProcArgsTruncated, ok = c.procArgsFromBPF(
+					event.PID, util.BytesToString(event.Comm[:]))
 				if !ok {
 					event.ProcArgs, event.ProcArgsTruncated = readProcCmdline(event.PID)
 				}
@@ -512,7 +515,7 @@ func normalizeCmdline(data []byte) string {
 // its pid field (fill_process_info: e->pid = pid_tgid >> 32), and it is written
 // by the sched_process_exec tracepoint — i.e. during the very execve whose
 // sys_exit produced this record, so the entry is present by the time we look.
-func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated bool, ok bool) {
+func (c *SyscallCollector) procArgsFromBPF(tgid uint32, comm string) (args string, truncated bool, ok bool) {
 	if c.objs == nil || c.objs.ProcArgsMap == nil {
 		return "", false, false
 	}
@@ -531,7 +534,41 @@ func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated 
 		// thoroughly as the lost race did.
 		return "", false, false
 	}
+	if !commMatchesArgv0(comm, s) {
+		return "", false, false
+	}
 	return s, pa.Truncated != 0, true
+}
+
+// commMatchesArgv0 answers whether this ring-buffer record is the one that
+// carries the NEW program's identity.
+//
+// bpf/syscall.bpf.c submits a record from both tracepoints, sys_enter and
+// sys_exit, so one execve produces two. The map entry, unlike a /proc read,
+// does not expire — so without this test the sys_enter record (whose comm is
+// still the CALLER's, e.g. "bash") would be enriched retroactively with the
+// callee's argv, and every proc.args rule would fire twice per exec, the
+// second time naming the wrong process. Observed directly: five SUID canaries
+// executed from /tmp produced eight alerts, three of them comm=bash.
+//
+// The discriminator is that the kernel sets comm from the new executable at
+// exec, so on the sys_exit record comm equals basename(argv[0]) — truncated to
+// TASK_COMM_LEN-1 (15) visible bytes, hence prefix rather than equality. When
+// argv[0] is not a path to the running image (a caller that passes a custom
+// argv[0]), this says no and the caller falls back to /proc — i.e. to exactly
+// the behaviour that predates the BPF path, never to silence.
+func commMatchesArgv0(comm, args string) bool {
+	if comm == "" || args == "" {
+		return false
+	}
+	argv0 := args
+	if i := strings.IndexByte(argv0, ' '); i >= 0 {
+		argv0 = argv0[:i]
+	}
+	if i := strings.LastIndexByte(argv0, '/'); i >= 0 {
+		argv0 = argv0[i+1:]
+	}
+	return strings.HasPrefix(argv0, comm)
 }
 
 // readProcCmdline reads /proc/[pid]/cmdline, replaces NUL argument separators

@@ -106,3 +106,31 @@ func TestNormalizeCmdline(t *testing.T) {
 		assert.Equal(t, "/tmp/canary", normalizeCmdline([]byte("/tmp/canary\x00")))
 	})
 }
+
+// TestCommMatchesArgv0 locks the discriminator that keeps the BPF proc.args
+// path from enriching the sys_enter record of an execve. bpf/syscall.bpf.c
+// submits a record from both tracepoints; the map entry, unlike a /proc read,
+// does not expire, so without this test one exec would raise every proc.args
+// rule twice — the second time naming the caller.
+func TestCommMatchesArgv0(t *testing.T) {
+	t.Run("post-exec record: comm is the new image", func(t *testing.T) {
+		assert.True(t, commMatchesArgv0("v1-suidcanary", "/tmp/v1-suidcanary"))
+	})
+	t.Run("pre-exec record: comm is still the caller", func(t *testing.T) {
+		assert.False(t, commMatchesArgv0("bash", "/tmp/v1-suidcanary"))
+	})
+	t.Run("comm truncated at TASK_COMM_LEN-1 still matches by prefix", func(t *testing.T) {
+		// "ebpfguard-f3-suidcanary" -> comm holds the first 15 bytes.
+		assert.True(t, commMatchesArgv0("ebpfguard-f3-su", "/tmp/ebpfguard-f3-suidcanary --run"))
+	})
+	t.Run("arguments after argv[0] are ignored", func(t *testing.T) {
+		assert.True(t, commMatchesArgv0("mandb", "/usr/bin/mandb --quiet /var/cache"))
+	})
+	t.Run("a bare argv[0] without a path still matches its own comm", func(t *testing.T) {
+		assert.True(t, commMatchesArgv0("mandb", "mandb --quiet"))
+	})
+	t.Run("empty input is never a match", func(t *testing.T) {
+		assert.False(t, commMatchesArgv0("", "/tmp/x"))
+		assert.False(t, commMatchesArgv0("bash", ""))
+	})
+}

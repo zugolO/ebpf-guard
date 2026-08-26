@@ -254,6 +254,19 @@ rules:
             - field: filename
               op: in
               values: ["/proc/self/cgroup", "/proc/uptime"]
+      # 5.9.9.F.3c (№133), same defect and fix as №107 and as pid1-self on
+      # container_escape_init_proc: pid 1 reading its own /proc/1/cgroup is
+      # self-introspection, not sandbox-detection recon.
+      - name: pid1-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: pid
+              op: eq
+              values: ["1"]
+            - field: filename
+              op: eq
+              values: ["/proc/1/cgroup"]
 
   # pgrep's routine per-PID matching pass reads /proc/1/{cgroup,environ,status}
   # as a side effect of scanning every running process, not sandbox-detection

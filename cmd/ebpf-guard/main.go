@@ -1530,8 +1530,6 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// P0-25: track drops so /health can report degraded visibility. Run #4 lost
 	// 52% of network events while reporting visibility_reduced:false; the whole
 	// point of these counters is that any nonzero drop rate becomes visible.
-	var highPriorityDrops atomic.Int64
-	var lowPriorityDrops atomic.Int64
 	var highPriorityAccepted atomic.Int64
 	var lowPriorityAccepted atomic.Int64
 
@@ -1540,12 +1538,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// ringbuf_to_router hop (internal/collector/*.go) — not tracked locally
 	// here any more, so a hop this closure doesn't see can't go unnoticed by
 	// /health the way ringbuf_to_router previously did.
+	//
+	// 5.9.9.F.3g (finding #139): the drop *counts* used to be tracked in local
+	// highPriorityDrops/lowPriorityDrops atomics that only this closure
+	// incremented — i.e. router_to_queue only — while the degraded verdict
+	// below already read exporter.LastHighPriorityDropTime/
+	// LastLowPriorityDropTime, which both hops feed. A run degraded purely by
+	// ringbuf_to_router drops printed protected_dropped_in_window=0 and
+	// EventsDroppedFraction=0.0 right next to "status: degraded". The local
+	// counters are gone; the ticker below reads exporter.HighPriorityDropTotal/
+	// LowPriorityDropTotal instead, which count both hops.
 	recordEventDrop := func(collectorName string, isHighPriority bool) {
-		if isHighPriority {
-			highPriorityDrops.Add(1)
-		} else {
-			lowPriorityDrops.Add(1)
-		}
 		// reason=router_to_queue: dropped between the priority router and the
 		// hi/lo queue (plan.md 1.5c). Distinguished from ringbuf_to_router so a
 		// zero on network/dns can be attributed to a specific hop instead of an
@@ -2144,7 +2147,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				hiDrop, loDrop := highPriorityDrops.Load(), lowPriorityDrops.Load()
+				// 5.9.9.F.3g (finding #139): both hops now feed the numerator, not
+				// just router_to_queue — see exporter.HighPriorityDropTotal.
+				hiDrop, loDrop := exporter.HighPriorityDropTotal(), exporter.LowPriorityDropTotal()
 				hiOK, loOK := highPriorityAccepted.Load(), lowPriorityAccepted.Load()
 
 				// Publish the loss ratio per window, not just the counter: 52%

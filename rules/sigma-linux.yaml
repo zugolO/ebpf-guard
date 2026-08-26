@@ -282,12 +282,35 @@ rules:
     action: alert
     tags: [mitre:T1036.005, sigma, masquerade, sshd]
 
+  # 5.9.9.F.3b (#132): named "ELF binary executed" but checked neither ELF
+  # magic nor an exec fact — plain path prefix matched any file (config,
+  # lure, log) under /tmp, which is where its share of the 37 false criticals
+  # of the finding came from.
+  # 5.9.9.F.3 audit (2026-08-26): the first pass kept the rule on file events
+  # and AND-ed in proc.args. That is dead code on a real kernel — ProcArgs is
+  # populated ONLY for execve/execveat syscall events
+  # (internal/collector/syscall.go:317); no collector ever sets it on a file
+  # event, so getFieldValue returns "" for proc.args there and the rule could
+  # not fire at all. (pkg/types.Event.ProcArgs documents the field as
+  # "available" for file events — that describes the rule field being wired up
+  # in getFieldValue, not the value being filled in, and bpf/common.h's
+  # proc_args_map has no Go reader at all.) A rule that cannot fire is the
+  # blinding outcome the wave explicitly forbids, so the exec check was moved
+  # to where the exec fact actually exists: syscall events. ELF magic is still
+  # not verified — the collector has no such field — hence the name says
+  # "process", not "ELF binary". Overlaps exec_from_tmp below by construction
+  # (same signal, wider directory set including /run/user/); the "…and touched
+  # another file in the same directory" variant this rule used to promise
+  # cannot be restored until file events carry proc.args.
   - id: sigma_binary_in_tmp_executed
-    name: "ELF binary executed from /tmp or /dev/shm"
-    description: "A compiled binary was executed from a temporary directory — unusual and indicator of dropper execution."
-    event_type: file
+    name: "Process executed from a temporary directory"
+    description: >
+      A process was executed whose own argv[0] starts under /tmp, /dev/shm,
+      /var/tmp, or /run/user/ — the dropper-execution pattern. Does not verify
+      that the executable is an ELF binary (no such field is collected).
+    event_type: syscall
     condition:
-      field: filename
+      field: proc.args
       op: prefix
       values:
         - "/tmp/"
@@ -298,9 +321,10 @@ rules:
     action: alert
     tags: [mitre:T1036, mitre:T1059, sigma, temp-execution]
     exceptions:
-      # Scoped to comm AND path: the canary manager opens its own lure file
-      # at /tmp/.secret_key on a verification loop — it never executes it.
-      # Any other file under the watched temp dirs still alerts.
+      # Scoped to comm AND path: anything the measurer itself execs out of its
+      # own /tmp/ebpf-guard-* fixture tree (or re-execs from the canary lure)
+      # is self-noise. Was previously the single literal /tmp/.secret_key on
+      # the file-typed version of this rule.
       - name: ebpf-guard-self
         condition_group:
           operator: and
@@ -308,12 +332,17 @@ rules:
             - field: proc.comm
               op: eq
               values: [ebpf-guard]
-            - field: filename
-              op: eq
-              values: ["/tmp/.secret_key"]
+            - field: proc.args
+              op: prefix
+              values: ["/tmp/ebpf-guard-", "/tmp/.secret_key"]
 
-  # Syscall-based companion: detects processes whose argv[0] starts with /tmp/,
-  # catching execution even when no subsequent file opens happen in /tmp.
+  # Companion of sigma_binary_in_tmp_executed above, and since the 5.9.9.F.3
+  # audit an overlapping one: that rule used to be file-typed ("a file under
+  # /tmp was touched") and this one carried the exec fact. With the exec fact
+  # now the only observable half of both, the two differ only in directory set
+  # (this one omits /run/user/). Kept rather than merged because both ids are
+  # referenced by detection-baseline-diff-state.txt and the wave forbids
+  # deleting either; a dropper exec therefore raises two warnings, not one.
   - id: exec_from_tmp
     name: "Process executed from /tmp or /dev/shm"
     description: >

@@ -207,7 +207,12 @@ if [ -s "${AGENT_START_FILE:-}" ]; then
 else
     echo "окно журнала: не задано"
 fi
-record_covered "окно журнала:"
+# 5.9.9.F.3e (№136): record_covered ЗДЕСЬ был бы no-op по построению —
+# CRITERIA_SELF_IDS/PATTERNS заполняются только ниже, во время загрузки
+# criteria-index.txt (строка 343+), и на пустых массивах цикл record_covered
+# не проходит ни одной итерации. Вызов перенесён после загрузки индекса (см.
+# ниже, сразу после преflight-сверки 5.9.7h) — печать текста осталась здесь,
+# первой строкой, только регистрация покрытия сдвинута.
 echo "==========================================="
 echo ""
 
@@ -367,6 +372,10 @@ if [ -f "$CRITERIA_INDEX_FILE" ]; then
         exit 3
     fi
     echo "преflight (5.9.7h): criteria-index.txt сверен, непокрытых пунктов постановки: 0"
+    # 5.9.9.F.3e (№136): регистрация покрытия «окно журнала:», отложенная
+    # с самой первой строки вывода (см. комментарий там) — CRITERIA_SELF_*
+    # заполнены строкой выше, вызов больше не no-op.
+    record_covered "окно журнала:"
 else
     # Реестр отсутствует — это не "0 непокрытых", это "сверка не
     # выполнялась", и финальная строка гейта обязана отличать одно от
@@ -1099,7 +1108,19 @@ else
             if [ "$dns_ctl_before_baseline" -eq 1 ] && echo "$preexisting_at_baseline_list" | grep -qx "$rid"; then
                 in_induced=1
             fi
-            if [ "$in_induced" -eq 1 ]; then
+            # 5.9.9.F.3d (находка №134): окна attack/idle/gap проверяются
+            # ДО «наведено преflight'ом» — тип, сработавший до baseline-
+            # снимка, но ТАКЖЕ выросший в измеряемом окне, отныне получает
+            # окно, а не преflight-ярлык (composite "idle+induced" и т. п.
+            # предпочтительна плоскому "${phase_parts}"). Метка «наведено
+            # шагом преflight'а» остаётся только тем типам, для которых НИ
+            # ОДНО измеряемое окно не применимо — это единственный случай,
+            # где ни один из трёх предыдущих флагов не установлен.
+            if [ -n "$phase_parts" ] && [ "$in_induced" -eq 1 ]; then
+                phase="${phase_parts%+}+induced (также наведён шагом преflight'а до baseline, 5.9.8a/5.9.9d/№100 — не входит в added_induced_count, окно уже объясняет прирост)"
+            elif [ -n "$phase_parts" ]; then
+                phase="${phase_parts%+}"
+            elif [ "$in_induced" -eq 1 ]; then
                 # Формулировка намеренно шире, чем «контроль DNS»: признак
                 # (а) — «ненулевое ЗНАЧЕНИЕ в baseline-снимке» — ловит любое
                 # правило, сработавшее до открытия окна, а до окна на этом
@@ -1110,8 +1131,6 @@ else
                 # называть источником DNS-контроль значило бы приписывать ему
                 # чужие типы (та же неточность, что поправка к №67).
                 phase="наведено шагом преflight'а до открытия baseline (5.9.8a/5.9.9d, №100) — ни одно из измеряемых окон не применимо; источник — один из шагов вне окна, не обязательно контроль DNS"
-            elif [ -n "$phase_parts" ]; then
-                phase="${phase_parts%+}"
             elif [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ]; then
                 phase="фаза не определена — IDLE_METRICS_START/END не заданы"
             elif [ -z "$IDLE_ALERTS_END" ]; then
@@ -1122,10 +1141,18 @@ else
             [ "$in_attack" -eq 1 ] && added_attack_count=$((added_attack_count + 1))
             [ "$in_idle" -eq 1 ] && added_idle_count=$((added_idle_count + 1))
             [ "$in_gap" -eq 1 ] && added_gap_count=$((added_gap_count + 1))
-            if [ "$in_induced" -eq 1 ]; then
+            # 5.9.9.F.3d: added_induced_count/ids mirror the label above —
+            # only the types with NO window match at all (in_attack=in_idle=
+            # in_gap=0) are "pure" preflight-induced and need a
+            # detection-baseline.txt line of their own. A type that is both
+            # induced AND grew in a window is already accounted for by that
+            # window's counter above and printed with the composite label;
+            # counting it here too would double it into added_induced_ids
+            # without a window ever failing to explain it.
+            if [ "$in_induced" -eq 1 ] && [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ]; then
                 added_induced_count=$((added_induced_count + 1))
                 added_induced_ids="$added_induced_ids$rid"$'\n'
-            elif [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ]; then
+            elif [ "$in_induced" -eq 0 ] && [ "$in_attack" -eq 0 ] && [ "$in_idle" -eq 0 ] && [ "$in_gap" -eq 0 ]; then
                 added_undetermined_count=$((added_undetermined_count + 1))
                 added_undetermined_ids="$added_undetermined_ids$rid"$'\n'
             fi
@@ -2853,7 +2880,7 @@ else
         if [ "$idle_actors_ok" = "1" ]; then
             pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав idle-часа целиком покрыт idle-actors.txt, новых акторов 0 (5.9.9.F.2d, №118; величина 5.9.9.F.1d, №115, порог по-прежнему не назначен)"
         elif [ "$idle_actors_ok" = "0" ]; then
-            fail "новый(е) актор(ы) idle-часа вне idle-actors.txt: $(echo "$idle_unknown_comms" | tr '\n' ' ') — дельта verdict=\"attack\" за idle-час = $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC (5.9.9.F.2d, №118)"
+            fail "новый(е) актор(ы) idle-часа вне idle-actors.txt: $(echo "$idle_unknown_comms" | tr '\n' ' ') — дельта verdict=\"attack\" за idle-час = $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC (5.9.9.F.2d, №118; величина 5.9.9.F.1d, №115)"
         else
             pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав против idle-actors.txt не проверен (реестр отсутствует, IDLE_ALERTS_START/END не заданы или jq недоступен) — не засчитывается ни в одну сторону (5.9.9.F.1d, №115)"
         fi

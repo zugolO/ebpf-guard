@@ -422,17 +422,61 @@ rules:
   # Hidden file and directory creation
   # ============================================================================
 
+  # 5.9.9.F.3a (#131): named "created" and scored critical, but the collector
+  # has no mkdir/mkdirat hook (internal/bpf only traces openat/read/write) —
+  # this condition matches ANY open/read/write under /dev, not directory
+  # creation. Anchored to the start of the path and legitimate 6+-letter
+  # device nodes excluded, but the "created" claim in the name is honestly
+  # false: renamed to what the rule actually observes and downgraded to
+  # warning per the 5.9.9.F.3 fallback rule (no predicate invented for a
+  # signal the collector doesn't provide).
   - id: rootkit_hidden_dir_dev
-    name: "Hidden directory created under /dev"
-    description: "A directory was created under /dev — rootkits hide files under /dev to avoid detection in ls listings."
+    name: "Suspicious dot-prefixed or unusually named path accessed under /dev"
+    description: >
+      A file under /dev was opened, read, or written whose name is
+      dot-prefixed or an unusually long lowercase run — a pattern rootkits
+      use to hide files under /dev from ls listings. This does NOT confirm
+      directory creation (mkdir/mkdirat is not observable by the current
+      file-access collector) — it is a path-access heuristic only.
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/dev/\\.[^/]+"
-        - "/dev/[a-z]{6,}"
-    severity: critical
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            - "^/dev/\\.[^/]+$"
+            - "^/dev/[a-z]{6,}$"
+        # Standard kernel-provided nodes whose bare names are 6+ lowercase
+        # letters and so match the second regex legitimately. /dev/pts and
+        # /dev/shm need no entry: they are shorter than {6,} and anything
+        # inside them carries a slash, which the anchored regex excludes.
+        # 5.9.9.F.3 audit (2026-08-26): the first pass listed only the six
+        # nodes the postanovka happened to name. The remaining ones below are
+        # just as standard and just as routinely opened on the stand —
+        # /dev/stdout and /dev/stderr by every shell redirection, /dev/rfkill
+        # by systemd-logind/NetworkManager, /dev/autofs and /dev/watchdog by
+        # systemd itself — and each would have been an idle-hour false alert
+        # of exactly the class the wave exists to remove.
+        - field: filename
+          op: not_in
+          values:
+            - "/dev/urandom"
+            - "/dev/random"
+            - "/dev/console"
+            - "/dev/initctl"
+            - "/dev/mqueue"
+            - "/dev/hugepages"
+            - "/dev/stdout"
+            - "/dev/stderr"
+            - "/dev/rfkill"
+            - "/dev/autofs"
+            - "/dev/watchdog"
+            - "/dev/uinput"
+            - "/dev/userfaultfd"
+            - "/dev/snapshot"
+            - "/dev/sequencer"
+    severity: warning
     action: alert
     tags: [mitre:T1014, mitre:T1564.001, rootkit, hidden-dir]
 

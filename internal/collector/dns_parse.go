@@ -39,8 +39,20 @@ const dnsMaxNameJumps = 32
 //	                      correlate against a rule.
 //	bad_qname          — a label or pointer in a name walk points outside the
 //	                      buffer or claims a length the buffer doesn't have.
-//	truncated_payload  — payload_len from the BPF side exceeds DNS_MAX_PAYLOAD
-//	                      or the bytes actually present in the record.
+//	payload_too_large  — payload_len from the BPF side exceeds DNS_MAX_PAYLOAD
+//	                      outright: the record's own declared length can never
+//	                      fit the buffer it is declared against. DNS_CAPTURE_LEN_MASK
+//	                      in dns.bpf.c keeps the kernel from ever emitting this in
+//	                      practice (cap_len is masked to 0xFF, below dnsMaxPayload),
+//	                      so this reason firing points at a malformed/corrupted
+//	                      record rather than an oversized real DNS message.
+//	truncated_payload  — payload_len is within DNS_MAX_PAYLOAD but larger than
+//	                      the bytes actually present in the record: the message
+//	                      was truncated somewhere between kernel capture and the
+//	                      parser (5.9.9.F.3g, №140 — this reason used to also
+//	                      cover payload_too_large above, conflating "declared
+//	                      length is structurally invalid" with "declared length
+//	                      is plausible but the bytes ran out").
 //	compression_loop    — name compression pointers exceeded dnsMaxNameJumps.
 //	bad_header         — well-formed length, but the fixed 12-byte DNS header
 //	                      fails a structural sanity check (reserved Z bit set,
@@ -61,6 +73,7 @@ const (
 	dnsDecodeReasonTooShort         = "too_short"
 	dnsDecodeReasonNotAQuery        = "not_a_query"
 	dnsDecodeReasonBadQName         = "bad_qname"
+	dnsDecodeReasonPayloadTooLarge  = "payload_too_large"
 	dnsDecodeReasonTruncatedPayload = "truncated_payload"
 	dnsDecodeReasonCompressionLoop  = "compression_loop"
 	dnsDecodeReasonBadHeader        = "bad_header"
@@ -74,6 +87,7 @@ var dnsDecodeReasons = []string{
 	dnsDecodeReasonTooShort,
 	dnsDecodeReasonNotAQuery,
 	dnsDecodeReasonBadQName,
+	dnsDecodeReasonPayloadTooLarge,
 	dnsDecodeReasonTruncatedPayload,
 	dnsDecodeReasonCompressionLoop,
 	dnsDecodeReasonBadHeader,
@@ -138,9 +152,11 @@ func validateDNSHeader(payload []byte) string {
 // parse the wire message successfully. 5.9.6g (№65): the three decode-error
 // hypotheses from 5.9.5c — a response captured with the wrong assumption
 // about which side is which, a non-UDP/53 message reaching the parser
-// (TCP-DNS/mDNS), and truncation at DNS_MAX_PAYLOAD — are exactly the three
-// things these two fields distinguish. bad_qname/compression_loop on a
-// direction=1 (response) with payload_len at or near dnsMaxPayload usually
+// (TCP-DNS/mDNS), and truncation of the message before it reached the parser
+// (dnsDecodeReasonTruncatedPayload — see 5.9.9.F.3g, №140, for why this is no
+// longer the same reason as an outright oversized payload_len) — are exactly
+// the three things these two fields distinguish. bad_qname/compression_loop on
+// a direction=1 (response) with payload_len at or near dnsMaxPayload usually
 // means hypothesis 3; the same reason on a small payload_len rules 3 out and
 // points at 1 or 2 instead. ok is false when raw is too short for even the
 // fixed header (too_short/unparseable already cover that case; the caller
@@ -220,7 +236,15 @@ func decodeDNSEvent(raw []byte) (*types.Event, string) {
 	payloadLen := binary.LittleEndian.Uint16(raw[offset:])
 	offset += 2
 
-	if int(payloadLen) > dnsMaxPayload || offset+int(payloadLen) > len(raw) {
+	// 5.9.9.F.3g (№140): these were one condition/reason ("truncated_payload").
+	// A payload_len that outright exceeds the buffer (dnsMaxPayload) is a
+	// structurally invalid record — kernel-side DNS_CAPTURE_LEN_MASK never
+	// produces one — distinct from a plausible payload_len whose bytes simply
+	// aren't all present, which is a message truncated in flight.
+	if int(payloadLen) > dnsMaxPayload {
+		return nil, dnsDecodeReasonPayloadTooLarge
+	}
+	if offset+int(payloadLen) > len(raw) {
 		return nil, dnsDecodeReasonTruncatedPayload
 	}
 	payload := raw[offset : offset+int(payloadLen)]

@@ -57,6 +57,19 @@ func nrFile(path string) types.Event {
 	}
 }
 
+// nrExec builds the execve event shape the collector produces: a syscall
+// event carrying the process's own argv (proc.args). Only execve/execveat
+// events get ProcArgs filled in — see internal/collector/syscall.go.
+func nrExec(args string) types.Event {
+	return types.Event{
+		Type:      types.EventSyscall,
+		Timestamp: 1,
+		PID:       42,
+		Syscall:   &types.SyscallEvent{Nr: 59},
+		ProcArgs:  args,
+	}
+}
+
 func nrNetwork(dport uint16) types.Event {
 	return types.Event{
 		Type:      types.EventTCPConnect,
@@ -199,10 +212,13 @@ func TestPrivesc_CgroupReleaseAgent(t *testing.T) {
 	assert.Contains(t, nrAlertIDs(alerts), "privesc_cgroup_notify_on_release")
 }
 
+// 5.9.9.F.3b (#132) moved privesc_suid_suspicious_path from file events
+// (any path under /tmp — 37 false criticals, zero true) to the exec fact that
+// is actually collected: argv[0] of an execve, via proc.args.
 func TestPrivesc_SuidSuspiciousPath(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/privesc.yaml")
 
-	alerts := re.Evaluate(nrFile("/tmp/rootkit"))
+	alerts := re.Evaluate(nrExec("/tmp/rootkit --run"))
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "privesc_suid_suspicious_path")
 }
@@ -210,9 +226,29 @@ func TestPrivesc_SuidSuspiciousPath(t *testing.T) {
 func TestPrivesc_DevShmSuid(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/privesc.yaml")
 
-	alerts := re.Evaluate(nrFile("/dev/shm/priv_esc"))
+	alerts := re.Evaluate(nrExec("/dev/shm/priv_esc"))
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "privesc_suid_suspicious_path")
+}
+
+// The negative half of the same finding, and the negative control the wave
+// runs live: an ordinary file under /tmp, opened and read by an ordinary
+// process, must not raise the rule any more — neither as critical nor as a
+// renamed warning.
+func TestPrivesc_SuidSuspiciousPath_PlainTmpFile_NoAlert(t *testing.T) {
+	re := nrLoadRules(t, "../../rules/privesc.yaml")
+
+	alerts := re.Evaluate(nrFile("/tmp/filelist.txt"))
+	assert.NotContains(t, nrAlertIDs(alerts), "privesc_suid_suspicious_path")
+}
+
+// cat /tmp/filelist.txt is an exec whose argv[0] is "cat", not a path under
+// /tmp: reading a temp file must not look like running one.
+func TestPrivesc_SuidSuspiciousPath_ExecReadingTmpFile_NoAlert(t *testing.T) {
+	re := nrLoadRules(t, "../../rules/privesc.yaml")
+
+	alerts := re.Evaluate(nrExec("cat /tmp/filelist.txt"))
+	assert.NotContains(t, nrAlertIDs(alerts), "privesc_suid_suspicious_path")
 }
 
 func TestPrivesc_NormalSyscall_NoAlert(t *testing.T) {

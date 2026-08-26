@@ -49,6 +49,20 @@ rules:
                     "dockerd", "conmon", "crun"]
     severity: critical
     action: alert
+    exceptions:
+      # 5.9.9.F.3c (№133): see systemd-sandbox-child on
+      # container_escape_unshare_user (container-escape.yaml) — same
+      # structural predicate, applied here.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # CIS 5.2.5: Minimize the admission of containers with allowPrivilegeEscalation
   - id: cis_5_2_5_privilege_escalation

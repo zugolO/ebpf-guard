@@ -101,4 +101,24 @@
 5.9.9.F.2f	replay-gate.sh	5.9.9.F.2f
 5.9.9.F.2a	-	замкнутое тождество, допуск ±
 5.9.9.F.2a	replay-gate.sh	реплей 12/12
-5.9.9.F.2b	-	наведённое CPU-давление вне окна (5.9.9.F.2b
+5.9.9.F.2b	-	(5.9.9.F.2b, №125)
+# 5.9.9.F.3f (№138): строки для всех пунктов текущей волны 5.9.9.F.3, плюс
+# задним числом два пункта прошлой волны, обнаруженные этим же сторожем
+# (5.9.9.F.2c/5.9.9.F.2g — были в дереве без строки здесь весь замер №2.9.9.F.2).
+5.9.9.F.3a	../../../rules/rootkit-detection.yaml	Suspicious dot-prefixed or unusually named path accessed under /dev
+5.9.9.F.3b	../../../rules/privesc.yaml	Binary executed from a world-writable path
+5.9.9.F.3b	../../../rules/sigma-linux.yaml	Process executed from a temporary directory
+5.9.9.F.3c	../../../rules/container-escape.yaml	systemd-sandbox-child
+5.9.9.F.3c	../../../rules/container-escape.yaml	pid1-self
+# 5.9.9.F.3d: строка статическая (файл, не "-"), и это осознанный выбор ревизии
+# волны. Рантайм-паттерн («...+induced») печатается ТОЛЬКО когда на прогоне
+# нашёлся тип, попавший и в измеряемое окно, и под преflight-признак. После
+# 3a/3b/3c состав таких типов меняется целиком, и прогон, где составной метки
+# не случилось, объявил бы пункт неисполнившимся — то есть SKIP=1 по причине
+# бухгалтерии, ровно тот класс (№135/№136/№137), который снимает 3e.
+5.9.9.F.3d	run-gate.sh	также наведён шагом преflight'а до baseline
+5.9.9.F.3e	-	5.9.9.F.1d, №115
+5.9.9.F.3f	../run-2.9.9.F.3-pipeline.sh	каждый пункт волны заведён в criteria-index.txt (№138)
+5.9.9.F.3g	../run-2.9.9.F.3-pipeline.sh	записи журнала (№139/№140)
+5.9.9.F.2c	replay-gate.sh	5.9.9.F.2c
+5.9.9.F.2g	../../../internal/collector/collector_test.go	5.9.9.F.2g

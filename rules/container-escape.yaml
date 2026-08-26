@@ -27,6 +27,24 @@ rules:
     severity: critical
     action: alert
     tags: [container-escape, privilege-escalation, mount, cis]
+    exceptions:
+      # 5.9.9.F.3c (№133): systemd sandboxing (PrivateTmp/PrivateDevices/
+      # ProtectSystem) makes every unit's forked child mount() its own
+      # namespace at startup — not a literal comm list (the next unit gives
+      # the next name, same defect as №111), but the structural shape of a
+      # systemd-spawned sandbox child: direct child of pid 1, whose comm the
+      # kernel reports in the "(name)" parenthesized form (truncated/re-exec
+      # display, e.g. "(mandb)").
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # Mount of sensitive host paths
   - id: container_escape_host_mount
@@ -96,6 +114,19 @@ rules:
     severity: warning
     action: alert
     tags: [container-escape, unshare, user-namespace]
+    exceptions:
+      # 5.9.9.F.3c (№133): see systemd-sandbox-child on container_escape_mount
+      # above — same structural predicate, applied here.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # ============================================================================
   # Kernel Exploitation
@@ -178,6 +209,19 @@ rules:
     severity: critical
     action: alert
     tags: [container-escape, capabilities, cap-sys-admin]
+    exceptions:
+      # 5.9.9.F.3c (№133): see systemd-sandbox-child on container_escape_mount
+      # above — same structural predicate, applied here.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # pivot_root syscall (change root directory)
   - id: container_escape_pivot_root
@@ -221,6 +265,19 @@ rules:
     severity: warning
     action: alert
     tags: [container-escape, chroot, filesystem]
+    exceptions:
+      # 5.9.9.F.3c (№133): see systemd-sandbox-child on container_escape_mount
+      # above — same structural predicate, applied here.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # ============================================================================
   # cgroup Escape
@@ -462,6 +519,21 @@ rules:
             - field: filename
               op: in
               values: ["/proc/1/cgroup", "/proc/1/stat", "/proc/1/status"]
+      # 5.9.9.F.3c (№133), same defect and fix as №107 (cred_proc_maps_mass_read
+      # excluding /proc/self/*): pid 1 reading its own /proc/1/cgroup is
+      # self-introspection, not host-escape reconnaissance — structural
+      # predicate is pid == 1, not a comm whitelist that the next daemon
+      # would miss.
+      - name: pid1-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: pid
+              op: eq
+              values: ["1"]
+            - field: filename
+              op: eq
+              values: ["/proc/1/cgroup"]
 
   # prometheus/grafana routinely read /proc/1/* metadata as PID 1 of their
   # own container namespace — legitimate self-introspection, not escape.

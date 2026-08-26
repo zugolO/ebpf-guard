@@ -209,6 +209,23 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1611, mitre:T1548.002, privesc, unshare, user-namespace, container-escape]
+    exceptions:
+      # 5.9.9.F.3c (№133): systemd sandboxing (PrivateTmp/PrivateDevices/
+      # ProtectSystem) makes every unit's forked child call unshare() to
+      # build its own namespace at startup — same structural predicate as
+      # container_escape_unshare_user in container-escape.yaml (direct child
+      # of pid 1, comm reported in kernel's parenthesized "(name)" form),
+      # not a literal comm list, which would be the №111 defect again.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # ============================================================================
   # T1548.001 — SUID Binary Abuse
@@ -217,31 +234,53 @@ rules:
   # SUID binaries execute as their owner (often root) regardless of the caller's
   # UID. Executing SUID binaries not in the known-good list from suspicious
   # parent processes is a T1548.001 escalation pattern.
+  # 5.9.9.F.3b (#132): named "SUID binary executed" and scored critical, but
+  # neither half was checked. The collector has no chmod/fchmod hook and the
+  # FileEvent.Mode field is open(2)'s requested creation mode, not a stat of
+  # the file's actual permission bits — the SUID bit (04000, set by a later
+  # chmod in the real attack path) is not observable at all, so the SUID half
+  # cannot be restored.
+  # 5.9.9.F.3 audit (2026-08-26): the first pass kept the rule on file events
+  # as a path-only heuristic with an honest name. That satisfied neither its
+  # own acceptance criterion nor the point of the finding: every one of the 37
+  # false criticals was an ordinary open/read of an ordinary file under /tmp,
+  # and a rename leaves all 37 in place as warnings — the negative control of
+  # the wave (create and read a plain text file under /tmp -> Δ must be 0)
+  # fails by construction on any file-typed path rule. The exec half, unlike
+  # the SUID half, IS observable: proc.args is populated for execve/execveat
+  # syscall events (internal/collector/syscall.go, readProcCmdline) and is
+  # what the exec_from_tmp companion rule already runs on live. The rule is
+  # therefore an exec rule now: argv[0] under a world-writable path. It is
+  # deliberately wider than exec_from_tmp (home directories and /run/user/*),
+  # and stays "warning" because the SUID bit is still unverified.
   - id: privesc_suid_suspicious_path
-    name: "Privilege Escalation: SUID binary executed from suspicious path"
+    name: "Binary executed from a world-writable path"
     description: >
-      A SUID binary was executed from a path outside the standard system
-      directories (/usr/bin, /bin, /usr/sbin). SUID binaries in /tmp, /dev/shm,
-      /var/tmp, or user-writable directories are almost always malicious:
-      an attacker planted a SUID root helper to achieve T1548.001 escalation.
-    event_type: file
+      A process was executed whose own argv[0] lies under /tmp, /var/tmp,
+      /dev/shm, a user home directory, or /run/user/* — the planting half of
+      T1548.001 (a SUID root helper dropped into a writable directory and run
+      from there). The SUID bit itself is NOT verified: the collector observes
+      neither chmod/fchmod nor a file's actual mode bits, so this is
+      "executed from a writable path", not "executed a SUID binary".
+    event_type: syscall
     condition:
-      field: filename
+      field: proc.args
       op: regex
       values:
-        - "/tmp/[^/]+"
-        - "/var/tmp/[^/]+"
-        - "/dev/shm/[^/]+"
-        - "/home/[^/]+/[^/]+"
-        - "/run/user/[0-9]+/[^/]+"
-    severity: critical
+        - "^/tmp/[^/]+"
+        - "^/var/tmp/[^/]+"
+        - "^/dev/shm/[^/]+"
+        - "^/home/[^/]+/[^/]+"
+        - "^/run/user/[0-9]+/[^/]+"
+    severity: warning
     action: alert
     tags: [mitre:T1548.001, privesc, suid, filesystem-escape]
     exceptions:
-      # Scoped to comm AND path: the canary manager creates a lure file at
-      # /tmp/.secret_key and re-opens it every VerifyInterval to check for
-      # tampering — it never executes anything. Any other path under /tmp,
-      # /var/tmp, /dev/shm, or a user home dir still alerts.
+      # Scoped to comm AND path: anything the measurer itself execs out of its
+      # own /tmp/ebpf-guard-* fixture tree is self-noise, not a finding. The
+      # predecessor of this exception was scoped to the single literal
+      # /tmp/.secret_key on the file-typed version of the rule (canary lure);
+      # both paths are kept so the exception still covers a lure re-exec.
       - name: ebpf-guard-self
         condition_group:
           operator: and
@@ -249,9 +288,9 @@ rules:
             - field: proc.comm
               op: eq
               values: [ebpf-guard]
-            - field: filename
-              op: eq
-              values: ["/tmp/.secret_key"]
+            - field: proc.args
+              op: prefix
+              values: ["/tmp/ebpf-guard-", "/tmp/.secret_key"]
 
   # ============================================================================
   # cgroup v2 escape — writing notify_on_release (T1611)

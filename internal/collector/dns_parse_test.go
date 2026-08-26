@@ -198,11 +198,13 @@ func TestDecodeDNSEvent_WrongType(t *testing.T) {
 
 func TestDecodeDNSEvent_PayloadLenOverflow(t *testing.T) {
 	raw := buildDNSRawRecord(types.DNSDirection(0), buildDNSQuery("a.com", 1))
-	// Claim a payload far larger than what's present.
+	// Claim a payload len that exceeds dnsMaxPayload itself, not just what's
+	// present in this record — structurally invalid (5.9.9.F.3g, №140), and
+	// distinct from TestDecodeDNSEvent_PayloadLenExceedsBuffer below.
 	binary.LittleEndian.PutUint16(raw[61:], 9000)
 	evt, reason := decodeDNSEvent(raw)
 	assert.Nil(t, evt)
-	assert.Equal(t, dnsDecodeReasonTruncatedPayload, reason)
+	assert.Equal(t, dnsDecodeReasonPayloadTooLarge, reason)
 }
 
 // --- string helpers --------------------------------------------------------

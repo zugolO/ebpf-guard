@@ -400,6 +400,19 @@ var (
 	lastHighPriorityDropTime atomic.Int64 // UnixNano; 0 = never
 	lastLowPriorityDropTime  atomic.Int64 // UnixNano; 0 = never
 
+	// highPriorityDropTotal/lowPriorityDropTotal count every drop RecordEventDrop
+	// sees, at either hop. Wave 5.9.9.F.3g (finding #139): the degradation-status
+	// verdict (lastHighPriorityDropTime/lastLowPriorityDropTime, above) already
+	// looked at both hops, but the caller in cmd/ebpf-guard/main.go fed
+	// EventsDroppedFraction and the "visibility reduced" log line from a local
+	// counter that only ever counted the router_to_queue hop — so a run losing
+	// events only at ringbuf_to_router could log "degraded" next to
+	// protected_dropped_in_window=0 and EventsDroppedFraction=0.0. These totals
+	// give the caller a hop-agnostic numerator so the printed drop count can
+	// never read zero while the verdict it sits next to says degraded.
+	highPriorityDropTotal atomic.Int64
+	lowPriorityDropTotal  atomic.Int64
+
 	dropBreakdownMu sync.Mutex
 	dropBreakdown   = map[dropHop]uint64{}
 )
@@ -424,14 +437,26 @@ func RecordEventDrop(collector, hop string, highPriority bool) {
 	now := time.Now().UnixNano()
 	if highPriority {
 		lastHighPriorityDropTime.Store(now)
+		highPriorityDropTotal.Add(1)
 	} else {
 		lastLowPriorityDropTime.Store(now)
+		lowPriorityDropTotal.Add(1)
 	}
 
 	dropBreakdownMu.Lock()
 	dropBreakdown[dropHop{collector, hop}]++
 	dropBreakdownMu.Unlock()
 }
+
+// HighPriorityDropTotal returns the cumulative count of high-priority
+// (protected-queue) drops recorded via RecordEventDrop at ANY hop —
+// ringbuf_to_router and router_to_queue alike (see highPriorityDropTotal).
+func HighPriorityDropTotal() int64 { return highPriorityDropTotal.Load() }
+
+// LowPriorityDropTotal returns the cumulative count of low-priority
+// (bulk-queue) drops recorded via RecordEventDrop at ANY hop — see
+// HighPriorityDropTotal.
+func LowPriorityDropTotal() int64 { return lowPriorityDropTotal.Load() }
 
 // LastHighPriorityDropTime returns the UnixNano timestamp of the most recent
 // high-priority (protected-queue) drop recorded via RecordEventDrop, or 0 if

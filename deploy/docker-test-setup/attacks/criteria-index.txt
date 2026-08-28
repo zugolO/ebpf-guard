@@ -124,3 +124,27 @@
 5.9.9.F.3g	../run-2.9.9.F.3-pipeline.sh	записи журнала (№139/№140)
 5.9.9.F.2c	replay-gate.sh	5.9.9.F.2c
 5.9.9.F.2g	../../../internal/collector/collector_test.go	5.9.9.F.2g
+
+# --- Волна 5.9.9.F.4 (приёмка — замер №2.9.9.F.4; пункт 4i переносит сюда
+# все семь пунктов 5.9.9.F.3 выше, они остаются в строках этого же файла) ---
+5.9.9.F.4a	../../../rules/process-injection.yaml	systemd-sandbox-child
+5.9.9.F.4a	../../../rules/credential-access.yaml	systemd-sandbox-child
+5.9.9.F.4a	../run-2.9.9.F.4-pipeline.sh	покрывает двенадцать правил (№133/№141)
+5.9.9.F.4b	../run-2.9.9.F.4-pipeline.sh	fp_sandbox_actor_attack_incidents
+5.9.9.F.4b	../run-2.9.9.F.4-pipeline.sh	позитивная половина сошлась (обязана исполняться первой — находка №143)
+5.9.9.F.4c	../run-2.9.9.F.4-pipeline.sh	дерево пайплайна зарегистрировано как observer_root
+5.9.9.F.4c	../run-2.9.9.F.4-pipeline.sh	доля алертов аптайма от акторов измерителя и сборки
+5.9.9.F.4d	../../../rules/owasp-web.yaml	Web server process accessed file with path traversal pattern
+5.9.9.F.4d	../../../rules/web-attacks-enhanced.yaml	Web server process accessed file with path traversal patterns including URL encoding
+5.9.9.F.4d	run-all-attacks.sh	run_path_traversal_positive_control
+5.9.9.F.4e	../../../rules/exfiltration-extended.yaml	Archive tool is the parent of a network utility
+5.9.9.F.4e	run-all-attacks.sh	run_exfil_archive_parent_positive_control
+5.9.9.F.4e	../run-2.9.9.F.4-pipeline.sh	exfil_archive_to_network_pipe за аптайм
+5.9.9.F.4f	../../../rules/drift-rules.yaml	Class-wide baseline decision
+5.9.9.F.4f	../run-2.9.9.F.4-pipeline.sh	drift_new_exec_critical за аптайм
+5.9.9.F.4g	../../../internal/correlator/rules_test.go	TestRuleLoaderEmptyValuesList
+5.9.9.F.4g	../run-2.9.9.F.4-pipeline.sh	загрузчик отвергает пустой values: [] (№148)
+5.9.9.F.4h	../../../internal/collector/collector_test.go	TestDropLogger_RecordDoesNotDuplicateCollectorKeyAndDistinguishesHops
+5.9.9.F.4h	../run-2.9.9.F.4-pipeline.sh	пар dns stale/recovered за прогон
+5.9.9.F.4i	../run-2.9.9.F.4-pipeline.sh	перенос волны 5.9.9.F.3 целиком
+5.9.9.F.4i	../run-2.9.9.F.4-pipeline.sh	все семь пунктов 5.9.9.F.3 сверяются этим замером

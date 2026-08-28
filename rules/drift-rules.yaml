@@ -19,36 +19,30 @@ rules:
   - id: drift_new_exec_critical
     name: "Container drift — new binary executed"
     description: >
-      A binary was executed inside a container that was not present during
-      the baseline learning window (or not in the image manifest). This is
-      the #1 highest-signal runtime indicator for dropped payloads,
-      webshells, and cryptominers.
-    event_type: file
-    condition_group:
-      operator: and
-      conditions:
-        - field: op
-          op: equals
-          values: ["open"]
-        - field: filename
-          op: prefix
-          values:
-            - "/bin/"
-            - "/sbin/"
-            - "/usr/bin/"
-            - "/usr/sbin/"
-            - "/usr/local/bin/"
-        - field: filename
-          op: not_in
-          # Allowlist of system utilities that may be legitimately deployed post-start:
-          # - dpkg/rpm package managers (apt operations in running containers)
-          # - curl/wget (runtime downloads in debugging sessions)
-          # These are noisy in dev; uncomment to suppress:
-          # - "/usr/bin/dpkg"
-          # - "/usr/bin/apt"
-          # - "/usr/bin/curl"
-          # - "/usr/bin/wget"
-          values: []
+      A binary under a system bin directory was executed (execve, matched on
+      argv[0] — 5.9.9.F.4f/№146: an `op: open` on the same path range does
+      NOT mean the file ran, e.g. `ldd`/`file`/`readelf`/a package manager
+      inspecting it; this rule now requires the exec fact itself, the same
+      technique 5.9.9.F.3b used for the /tmp-execution family). "not present
+      during the baseline learning window" is aspirational, not current
+      behavior: profiler.drift_baseline.enabled defaults to false (and is
+      false in this stand's config), so today this rule alerts on EVERY
+      matching exec, not just novel ones — enabling the profiler to make the
+      "new" claim true is deferred (see the class-wide baseline-decision
+      note below the last rule in this file). This is intended as the #1
+      highest-signal runtime indicator for dropped payloads, webshells, and
+      cryptominers once baselining is on; until then it is a broad
+      "system-path binary executed" rule.
+    event_type: syscall
+    condition:
+      field: proc.args
+      op: prefix
+      values:
+        - "/bin/"
+        - "/sbin/"
+        - "/usr/bin/"
+        - "/usr/sbin/"
+        - "/usr/local/bin/"
     severity: critical
     action: alert
     class: drift
@@ -61,8 +55,10 @@ rules:
   - id: drift_new_library_in_system_dir
     name: "Container drift — new shared library in system path"
     description: >
-      A shared library was loaded from a system library path that was not
-      observed during baseline. This could indicate an LD_PRELOAD rootkit
+      A shared library was opened from a system library path. "not observed
+      during baseline" is aspirational — see the class-wide baseline note at
+      the end of this file; profiler.drift_baseline is off in this stand, so
+      today this fires on every match. Could indicate an LD_PRELOAD rootkit
       or a malicious library injection.
     event_type: file
     condition_group:
@@ -89,6 +85,19 @@ rules:
       - "T1574.006"
       - "drift"
       - "library-injection"
+    exceptions:
+      # 5.9.9.F.4a (№141): systemd-sandbox-child, extended from the original
+      # six 5.9.9.F.3c rules to the actual class raised by this actor.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.ppid
+              op: eq
+              values: ["1"]
+            - field: proc.comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # sshd/cron dlopen PAM/NSS modules (pam_unix.so, libnss_*.so) on every
   # login/job run — legitimate dynamic loading, not injection. plan.md
@@ -130,9 +139,17 @@ rules:
   - id: drift_new_file_dir_sensitive
     name: "Container drift — access to new sensitive directory"
     description: >
-      A file was accessed in a directory outside the container baseline,
-      and that directory is security-sensitive (/root, /home, /etc/cron, /var/spool/cron).
-      May indicate a process escaping its intended scope.
+      A file was accessed in a directory that is security-sensitive (/root,
+      /home, /etc/cron, /var/spool/cron). "outside the container baseline"
+      is aspirational — see the class-wide baseline note at the end of this
+      file; profiler.drift_baseline is off in this stand, so today this
+      fires on every access, not just ones outside a learned baseline. May
+      indicate a process escaping its intended scope. 5.9.9.F.4c
+      (observer-tree exclusion) closes the largest known non-attack source
+      of this rule's volume (measurer-harness reads of /root/.curlrc,
+      /root/.jq); any remainder outside that tree is unmeasured as of
+      5.9.9.F.4f (no live stand access this session) and is an open
+      question for the next live measurement, not a finding of this wave.
     event_type: file
     condition_group:
       operator: and
@@ -174,8 +191,11 @@ rules:
   - id: drift_new_network_common_c2_ports
     name: "Container drift — outbound connection to unusual port"
     description: >
-      A new outbound TCP connection was established to a port not seen during
-      baseline that is commonly used by C2 frameworks (4444, 8080, 8443, 31337).
+      An outbound TCP connection was established to a port commonly used by
+      C2 frameworks (4444, 8080, 8443, 31337). "not seen during baseline" is
+      aspirational — see the class-wide baseline note at the end of this
+      file; profiler.drift_baseline is off in this stand, so today this
+      fires on every connection to a listed port, not just novel ones.
     event_type: network
     condition:
       field: dport
@@ -193,9 +213,12 @@ rules:
   - id: drift_dangerous_syscall
     name: "Container drift — dangerous new syscall observed"
     description: >
-      A system call that is commonly used for privilege escalation or
-      container escape was observed after the baseline window, when it
-      was NOT observed during the learning period.
+      A system call commonly used for privilege escalation or container
+      escape was observed. "after the baseline window, NOT observed during
+      the learning period" is aspirational — see the class-wide baseline
+      note at the end of this file; profiler.drift_baseline is off in this
+      stand, so today this fires on every occurrence, not just ones novel
+      relative to a learned baseline.
     event_type: syscall
     condition_group:
       operator: and
@@ -243,3 +266,36 @@ rules:
       - "drift"
       - "container-escape"
       - "privilege-escalation"
+
+# ── Class-wide baseline decision (5.9.9.F.4f, №146) ─────────────────────────
+#
+# All six `class: drift` rules above describe themselves as firing on events
+# "not seen during baseline"/"new". That claim depends on
+# profiler.drift_baseline.enabled (internal/profiler/driftbaseline.go,
+# internal/config/config.go:2104) — disabled by default, and NOT set in this
+# stand's config (config/config.yaml has no profiler.drift_baseline section).
+# So as shipped, every rule in this class alerts on EVERY matching event,
+# not just novel ones — exactly the finding named by №146.
+#
+# Two ways to make the description true were on the table (plan.md
+# 5.9.9.F.4f): (a) turn profiler.drift_baseline.enabled on in the stand
+# config, so the six rules work as literally described, or (b) rename/rewrite
+# them to stop promising baseline-relative behavior. This session chose (b)
+# — description text only, IDs unchanged to avoid an ID-rename cascade into
+# detection-baseline.txt/background-rules.txt/the pipeline scripts/tests
+# this same session is already editing (5.9.9.F.4a-e) without live-stand
+# access to verify none of those break.
+#
+# (a) was rejected for THIS session specifically because of the risk the
+# plan named in advance: profiler.drift_baseline.learning_period defaults to
+# 3600s — exactly the length of the idle-hour measurement window. Turning it
+# on requires a preflight guard proving the learning phase has actually
+# closed (e.g. via ebpf_guard_drift_baseline_learning_workloads reaching 0,
+# or /debug/state) BEFORE the idle-hour/attack window opens; otherwise all
+# six rules go silent for the whole measurement by construction, and the
+# wave's mandatory values #3 and #11 (verdict=attack over idle-hour = 0;
+# drift_new_exec_critical = 0 outside exec) turn falsely green. Building and
+# proving that guard needs a live pipeline run to get real timings — not
+# available this session (see [[gate-offline-replay-on-mac]]) — so (a)
+# remains open for a session with stand access, not abandoned.
+

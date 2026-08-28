@@ -573,6 +573,19 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1556.003, rootkit, pam, credential-capture]
+    exceptions:
+      # 5.9.9.F.4a (№141): systemd-sandbox-child, extended from the original
+      # six 5.9.9.F.3c rules to the actual class raised by this actor.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.ppid
+              op: eq
+              values: ["1"]
+            - field: proc.comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # sshd/cron read/touch PAM config on every login/job run (account/session
   # module lookup) — the base rule has no op filter, so this is read

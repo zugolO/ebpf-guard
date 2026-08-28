@@ -376,6 +376,56 @@ func TestMalformedLogger_RecordDoesNotDuplicateCollectorKey(t *testing.T) {
 	assert.Equal(t, 1, seen["collector"], "collector key must appear exactly once, got record: %s", line)
 }
 
+// TestDropLogger_RecordDoesNotDuplicateCollectorKeyAndDistinguishesHops guards
+// against finding #149/#150 (5.9.9.F.4h): record() used to take a
+// collectorName argument and add its own "collector" attr on top of a
+// logger already bound with one via .With (the same duplicate-key bug fixed
+// for malformedLogger at #127), and it used to log byte-identical lines for
+// the ringbuf_to_router and router_to_queue drop hops of the same
+// collector, making the two indistinguishable in the log even though the
+// dropped_by_collector_and_hop metric already tells them apart.
+func TestDropLogger_RecordDoesNotDuplicateCollectorKeyAndDistinguishesHops(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil)).With(slog.String("collector", "fileaccess"))
+
+	d := newDropLogger(0)
+	d.record(logger, "ringbuf_to_router")
+
+	line := buf.Bytes()
+	require.NotEmpty(t, line)
+
+	var generic map[string]any
+	require.NoError(t, json.Unmarshal(line, &generic), "record must emit valid JSON: %s", line)
+	assert.Equal(t, "fileaccess", generic["collector"])
+	assert.Equal(t, "ringbuf_to_router", generic["hop"])
+
+	dec := json.NewDecoder(bytes.NewReader(line))
+	tok, err := dec.Token()
+	require.NoError(t, err)
+	require.Equal(t, json.Delim('{'), tok)
+
+	seen := map[string]int{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		require.NoError(t, err)
+		key, ok := keyTok.(string)
+		require.True(t, ok)
+		seen[key]++
+
+		var discard json.RawMessage
+		require.NoError(t, dec.Decode(&discard))
+	}
+	assert.Equal(t, 1, seen["collector"], "collector key must appear exactly once, got record: %s", line)
+
+	buf.Reset()
+	d2 := newDropLogger(0)
+	d2.record(logger, "router_to_queue")
+	var second map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &second))
+	assert.Equal(t, "router_to_queue", second["hop"])
+	assert.NotEqual(t, generic["hop"], second["hop"], "the two hops of the same collector must be distinguishable in the log")
+}
+
 // BenchmarkEventPool measures the overhead of the pool acquire/fill/release cycle.
 // Target: 0 allocs/op once the pool is warm. Run with -benchmem to verify.
 func BenchmarkEventPool(b *testing.B) {

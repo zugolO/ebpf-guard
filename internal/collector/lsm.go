@@ -668,7 +668,7 @@ func (c *KmodCollector) readLoop(ctx context.Context, out chan<- types.Event, re
 		}
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordEventDrop("kmod", "ringbuf_to_router", defaultEventPriority(event.Type))
-			c.dropLogger.record(c.logger, "kmod")
+			c.dropLogger.record(c.logger, "ringbuf_to_router")
 			c.lostTotal.Add(1)
 		})
 	}

@@ -132,7 +132,7 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 	dropped := false
 	droppedFunc := func() {
 		dropped = true
-		p.dropLogger.record(p.logger, p.collector.Name())
+		p.dropLogger.record(p.logger.With(slog.String("collector", p.collector.Name())), "router_to_queue")
 		if p.droppedFn != nil {
 			p.droppedFn(p.collector.Name(), isHighPriority)
 		}

@@ -385,7 +385,7 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordEventDrop("fileaccess", "ringbuf_to_router", defaultEventPriority(event.Type))
-			c.dropLogger.record(c.logger, "fileaccess")
+			c.dropLogger.record(c.logger, "ringbuf_to_router")
 			// plan.md 5.9.8b (№91): a canary event dropped here never
 			// reaches the point in main.go that counts stage="events" — it
 			// has to be attributed to the canary series right here, or the

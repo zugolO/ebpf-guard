@@ -122,7 +122,7 @@ func (g *GCPAuditCollector) poll(ctx context.Context, out chan<- types.Event) er
 			continue
 		}
 		sendEvent(ctx, out, e, g.strategy, func() {
-			g.dropLogger.record(g.logger, g.Name())
+			g.dropLogger.record(g.logger.With(slog.String("collector", g.Name())), "poll_to_channel")
 		})
 	}
 

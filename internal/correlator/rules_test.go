@@ -1046,6 +1046,30 @@ func TestRuleLoaderEmptyConditionGroup(t *testing.T) {
 	assert.Contains(t, err.Error(), "condition_group has no conditions or subgroups")
 }
 
+// TestRuleLoaderEmptyValuesList verifies that loading a rule whose condition
+// uses a list-based operator with an empty values list is rejected (#148),
+// and that the same rule with a non-empty list loads fine.
+func TestRuleLoaderEmptyValuesList(t *testing.T) {
+	baseRule := func(values []string) *Rule {
+		return &Rule{
+			ID:        "empty_values",
+			Name:      "Empty Values Rule",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{Field: "filename", Op: OpNotIn, Values: values},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+		}
+	}
+
+	err := validateRule(baseRule([]string{}))
+	require.Error(t, err, "empty values list should fail validation")
+	assert.Contains(t, err.Error(), "requires a non-empty values list")
+	assert.Contains(t, err.Error(), "would silently match every event")
+
+	err = validateRule(baseRule([]string{"/etc/shadow"}))
+	require.NoError(t, err, "non-empty values list should load")
+}
+
 // BenchmarkOpInLargeSet measures O(1) map lookup vs O(n) linear scan for a 1000-element set.
 func BenchmarkOpInLargeSet(b *testing.B) {
 	// Build a 1000-element values list

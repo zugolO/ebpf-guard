@@ -104,7 +104,19 @@ func newDropLogger(interval time.Duration) *dropLogger {
 
 // record increments the pending drop counter. If the throttle interval has
 // elapsed since the last emission, it logs the aggregated count and resets.
-func (d *dropLogger) record(logger *slog.Logger, collectorName string) {
+//
+// logger is expected to already carry a "collector" attribute (bound via
+// .With, the same convention every collector's c.logger already follows) —
+// record does not add its own, since doing so on top of an already-bound
+// logger duplicated the "collector" key in the emitted JSON (finding #149,
+// the same class of bug fixed for malformedLogger.record at #127).
+//
+// hop names the stage where the drop happened (e.g. "ringbuf_to_router",
+// "router_to_queue") — the same values exporter.RecordEventDrop's hop
+// argument uses. Two different hops for the same collector previously
+// logged byte-identical lines through this function; hop is what a human
+// reading the log needs to tell them apart (finding #150).
+func (d *dropLogger) record(logger *slog.Logger, hop string) {
 	d.pending.Add(1)
 
 	now := time.Now().UnixNano()
@@ -119,7 +131,7 @@ func (d *dropLogger) record(logger *slog.Logger, collectorName string) {
 	count := d.pending.Swap(0)
 	if count > 0 {
 		logger.Warn("event channel full, dropping events",
-			slog.String("collector", collectorName),
+			slog.String("hop", hop),
 			slog.Int64("dropped_count", count),
 			slog.String("window", d.interval.String()))
 	}

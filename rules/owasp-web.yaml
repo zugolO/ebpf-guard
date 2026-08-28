@@ -7,18 +7,33 @@ rules:
   # ============================================================================
 
   # Path Traversal Detection
+  # 5.9.9.F.4d (находка №144): раньше условие держалось на одном filename-regex,
+  # без проверки роли процесса — тем же дефектом, что чинили Q9/P2-14 у
+  # owasp_web_sensitive_file_read. Любой процесс, открывающий относительный
+  # путь с ".." (grep -r по дереву исходников, ld/clang/llvm-strip по
+  # relative include/lib путям при make build), поднимал critical: 50
+  # алертов за 15 минут аптайма без единой атаки, все ложные. Правило сужено
+  # тем же приёмом, что и сенситив-файл: comm ограничен ролью веб-воркера,
+  # как обещает имя и описание правила ("path traversal attempt" подразумевает
+  # эксплуатацию через веб-фронт, а не любой относительный путь в системе).
   - id: owasp_path_traversal
     name: "OWASP: Path traversal attempt"
-    description: "Process accessed file with path traversal pattern (../../)"
+    description: "Web server process accessed file with path traversal pattern (../../)"
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "\\.\\./"
-        - "\\.\\.\\\\"
-        - "%2e%2e%2f"
-        - "%252e%252e%252f"
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
+        - field: filename
+          op: regex
+          values:
+            - "\\.\\./"
+            - "\\.\\.\\\\"
+            - "%2e%2e%2f"
+            - "%252e%252e%252f"
     severity: critical
     action: alert
     tags: [owasp, path-traversal, a01-broken-access-control]

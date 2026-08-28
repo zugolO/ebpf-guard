@@ -229,7 +229,7 @@ func (c *TLSFingerprintCollector) readLoop(ctx context.Context, out chan<- types
 
 		sendEvent(ctx, out, event, c.strategy, func() {
 			exporter.RecordEventDrop("tlsfingerprint", "ringbuf_to_router", defaultEventPriority(event.Type))
-			c.dropLogger.record(c.logger, "tlsfingerprint")
+			c.dropLogger.record(c.logger, "ringbuf_to_router")
 			c.lostTotal.Add(1)
 		})
 	}

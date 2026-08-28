@@ -1436,6 +1436,145 @@ run_webshell_crontab_positive_control() {
     echo ""
 }
 
+# 5.9.9.F.4d (находка №144, постановка волны 5.9.9.F.4): позитивный контроль
+# для owasp_path_traversal/web_path_traversal_extended (rules/owasp-web.yaml,
+# rules/web-attacks-enhanced.yaml) — оба правила были сужены с "любой filename
+# с '../'" до "тот же filename, но только у веб-воркера" (тем же приёмом, что
+# 5.9.8g/5.9.9b выше), потому что ненаправленное условие ловило grep/ld/clang
+# во время make build самого измерителя (50 критикалов, 27% всех, находка
+# №144). Ни один существующий сценарий run-all-attacks.sh раньше не читал
+# файл с буквальным ".." в аргументе open() под comm веб-воркера — оба
+# правила не имели ни одного позитивного контроля в принципе, узость это
+# не проверяла бы (постановка 4d требует его как обязательное условие
+# приёмки, иначе сужение неотличимо от ослепления). Путь строится ВНУТРИ
+# собственного temp-каталога (a/b/../../target) — литеральная строка
+# аргумента open() содержит "../../", но резолвится обратно в тот же
+# temp-каталог, реальные системные файлы не трогаются.
+run_path_traversal_positive_control() {
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.F.4d (находка №144): чтение файла с '../' в пути веб-воркером (comm=apache2)"
+    log "==========================================="
+
+    local cat_bin
+    cat_bin="$(command -v cat 2>/dev/null)"
+    if [ -z "$cat_bin" ]; then
+        warn "cat не найден — позитивный контроль 5.9.9.F.4d пропущен, сужение owasp_path_traversal/web_path_traversal_extended остаётся недоказанным"
+        echo ""
+        return
+    fi
+
+    local fake_dir fake_bin canary_file target
+    fake_dir="$(mktemp -d)"
+    fake_bin="$fake_dir/apache2"
+    mkdir -p "$fake_dir/a/b"
+    canary_file="$fake_dir/canary-$TIMESTAMP.txt"
+    echo "ebpf-guard 5.9.9.F.4d positive control $TIMESTAMP" > "$canary_file"
+    target="$fake_dir/a/b/../../canary-$TIMESTAMP.txt"
+    if ! ln -s "$cat_bin" "$fake_bin" 2>/dev/null; then
+        warn "не удалось создать $fake_bin — позитивный контроль 5.9.9.F.4d пропущен"
+        rm -rf "$fake_dir"
+        echo ""
+        return
+    fi
+
+    local pt_done=0
+    mark_attack_window
+    if "$fake_bin" "$target" >/dev/null 2>&1; then
+        pt_done=1
+        log "чтение $target выполнено comm=apache2 — ожидается срабатывание owasp_path_traversal/web_path_traversal_extended"
+    else
+        warn "чтение через $fake_bin не удалось — позитивный контроль 5.9.9.F.4d не исполнен"
+    fi
+    mark_attack_window
+
+    rm -rf "$fake_dir"
+
+    # Манифест — только по факту исполнения, тем же правилом, что у
+    # webshell-контролей выше: категория без исполненного шага превратила бы
+    # «контроль не исполнился» в «детект потерян» на разборе крит. 7.
+    if [ "$pt_done" -eq 1 ] && command -v jq &> /dev/null; then
+        pt_entry=$(jq -n --arg cat "path_traversal_positive_control" --arg comm "apache2" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$pt_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$pt_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
+# 5.9.9.F.4e (находка №145): позитивный контроль для exfil_archive_to_network_pipe
+# (rules/exfiltration-extended.yaml) — правило было ослеплено предикатом,
+# который проверял только сам факт execve сетевой утилиты (curl/nc/...),
+# без какой-либо проверки архиватора (96 алертов, первое место по объёму, при
+# нуле истинных). Правка добавила условие "proc.parent_comm — архиватор", но
+# ТОЛЬКО его: событие несёт proc.comm/proc.ppid/proc.parent_comm одного
+# процесса, а движок correlator не хранит родство "братьев" (двух детей
+# одного шелла) — то есть классический одностроч `tar czf - | curl ...`
+# (архиватор и сетевой инструмент — братья под одним bash, не родитель и
+# ребёнок) этим контролем НЕ проверяется и правкой не ловится (см. описание
+# правила и открытый вопрос постановки 4e). Этот контроль проверяет
+# единственную половину, которая выразима полями события: архиватор — ПРЯМОЙ
+# родитель сетевого процесса. Скрипт "tar" (не симлинк — интерпретируемый
+# файл с шебангом, ядро берёт comm из имени файла execve() так же, как для
+# бинарника) как обычную foreground-команду запускает "curl" (симлинк на
+# /bin/true, реальных сетевых вызовов нет) — bash форкает child-процесс на
+# внешнюю команду, поэтому у события curl proc.parent_comm="tar".
+run_exfil_archive_parent_positive_control() {
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.F.4e (находка №145): архиватор как прямой родитель сетевой утилиты (comm=tar → comm=curl)"
+    log "==========================================="
+
+    local true_bin bash_bin
+    true_bin="$(command -v true 2>/dev/null)"
+    bash_bin="$(command -v bash 2>/dev/null)"
+    if [ -z "$true_bin" ] || [ -z "$bash_bin" ]; then
+        warn "true/bash не найдены — позитивный контроль 5.9.9.F.4e пропущен, parent-половина exfil_archive_to_network_pipe остаётся недоказанной"
+        echo ""
+        return
+    fi
+
+    local fake_dir curl_bin tar_script
+    fake_dir="$(mktemp -d)"
+    curl_bin="$fake_dir/curl"
+    tar_script="$fake_dir/tar"
+    if ! ln -s "$true_bin" "$curl_bin" 2>/dev/null; then
+        warn "не удалось создать $curl_bin — позитивный контроль 5.9.9.F.4e пропущен"
+        rm -rf "$fake_dir"
+        echo ""
+        return
+    fi
+    {
+        echo "#!$bash_bin"
+        echo "\"$curl_bin\" -s -o /dev/null http://127.0.0.1:1 || true"
+    } > "$tar_script"
+    chmod +x "$tar_script"
+
+    local ec_done=0
+    mark_attack_window
+    if "$tar_script" >/dev/null 2>&1; then
+        ec_done=1
+        log "child-процесс comm=curl запущен под родителем comm=tar — ожидается срабатывание exfil_archive_to_network_pipe (parent-половина)"
+    else
+        warn "запуск $tar_script не удался — позитивный контроль 5.9.9.F.4e не исполнен"
+    fi
+    mark_attack_window
+
+    rm -rf "$fake_dir"
+
+    if [ "$ec_done" -eq 1 ] && command -v jq &> /dev/null; then
+        ec_entry=$(jq -n --arg cat "exfil_archive_parent_positive_control" --arg comm "curl" --arg parent "tar" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, parent_comm: $parent, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$ec_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$ec_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
 # 5.9.9c (находка №101, риск №3 постановки): позитивный контроль для
 # container_escape_cap_sys_admin (rules/container-escape.yaml) — правило уже
 # было в detection-baseline.txt (строка 242), но не имело ни одного сценария
@@ -3103,6 +3242,8 @@ interactive_mode() {
                 run_ssh_keys_positive_control
                 run_webshell_script_write_positive_control
                 run_webshell_crontab_positive_control
+                run_path_traversal_positive_control
+                run_exfil_archive_parent_positive_control
                 run_container_escape_positive_control
                 run_cred_proc_maps_positive_control
                 run_log_tamper_attack
@@ -3137,6 +3278,8 @@ interactive_mode() {
                 run_ssh_keys_positive_control
                 run_webshell_script_write_positive_control
                 run_webshell_crontab_positive_control
+                run_path_traversal_positive_control
+                run_exfil_archive_parent_positive_control
                 run_container_escape_positive_control
                 run_cred_proc_maps_positive_control
                 run_log_tamper_attack
@@ -3197,6 +3340,8 @@ full_run() {
     run_ssh_keys_positive_control
     run_webshell_script_write_positive_control
     run_webshell_crontab_positive_control
+    run_path_traversal_positive_control
+    run_exfil_archive_parent_positive_control
     run_container_escape_positive_control
     run_cred_proc_maps_positive_control
     run_log_tamper_attack

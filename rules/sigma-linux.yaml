@@ -1063,6 +1063,19 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1055, mitre:T1620, sigma, memfd, fileless]
+    exceptions:
+      # 5.9.9.F.4a (№141): systemd-sandbox-child, extended from the original
+      # six 5.9.9.F.3c rules to the actual class raised by this actor.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   - id: sigma_mprotect_exec_heap
     name: "Memory region marked executable (mprotect)"

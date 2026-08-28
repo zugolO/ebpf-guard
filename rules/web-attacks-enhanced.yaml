@@ -144,35 +144,47 @@ rules:
   # Extended Path Traversal Detection
   # ============================================================================
 
+  # 5.9.9.F.4d (находка №144): тот же дефект и тот же фикс, что у
+  # owasp_path_traversal в rules/owasp-web.yaml — filename-regex без роли
+  # процесса ловил grep/ld/clang/llvm-strip/*.test во время make build и
+  # самого измерителя (18+7+3+1+1 = 30 из 50 критикалов находки №144).
+  # Сужение — тот же comm-список веб-воркера, что у owasp_path_traversal, а
+  # не отдельный список: оба правила про один и тот же класс актора.
   - id: web_path_traversal_extended
     name: "Web Attack: Extended path traversal with encoding evasion"
-    description: "Path traversal patterns including URL encoding, double encoding, Unicode evasion, and mixed encoding variants"
+    description: "Web server process accessed file with path traversal patterns including URL encoding, double encoding, Unicode evasion, and mixed encoding variants"
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        # Basic traversal (from existing rule, kept for completeness)
-        - "\\.\\./"
-        - "\\.\\.\\\\"
-        # URL-encoded variants
-        - "%2e%2e%2f"
-        - "%2e%2e%5c"
-        # Double-encoded variants (evasion technique)
-        - "%252e%252e%252f"
-        - "%252e%252e%255c"
-        # Unicode evasion (IIS/Tomcat)
-        - "%c0%ae"
-        - "%c1%1c"
-        - "%e0%80%af"
-        # Mixed encoding (ASCII + URL-encoded)
-        - ".%2e/"
-        - "%2e./"
-        - ".%5c"
-        - "%5c."
-        # Repeated traversal patterns (aggressive)
-        - "(\\.\\./){2,}"
-        - "(\\.\\.\\\\){2,}"
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
+        - field: filename
+          op: regex
+          values:
+            # Basic traversal (from existing rule, kept for completeness)
+            - "\\.\\./"
+            - "\\.\\.\\\\"
+            # URL-encoded variants
+            - "%2e%2e%2f"
+            - "%2e%2e%5c"
+            # Double-encoded variants (evasion technique)
+            - "%252e%252e%252f"
+            - "%252e%252e%255c"
+            # Unicode evasion (IIS/Tomcat)
+            - "%c0%ae"
+            - "%c1%1c"
+            - "%e0%80%af"
+            # Mixed encoding (ASCII + URL-encoded)
+            - ".%2e/"
+            - "%2e./"
+            - ".%5c"
+            - "%5c."
+            # Repeated traversal patterns (aggressive)
+            - "(\\.\\./){2,}"
+            - "(\\.\\.\\\\){2,}"
     severity: critical
     action: alert
     tags: [web-attack, path-traversal, owasp, a01-broken-access-control, encoding-evasion]

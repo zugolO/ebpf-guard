@@ -121,7 +121,7 @@ func (c *CloudTrailCollector) poll(ctx context.Context, out chan<- types.Event) 
 		}
 		for _, e := range events {
 			sendEvent(ctx, out, e, c.strategy, func() {
-				c.dropLogger.record(c.logger, c.Name())
+				c.dropLogger.record(c.logger.With(slog.String("collector", c.Name())), "poll_to_channel")
 			})
 		}
 		// Acknowledge and delete processed message.

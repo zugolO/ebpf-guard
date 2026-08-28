@@ -356,7 +356,7 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			c.metrics.eventsDropped.Inc()
 			exporter.RecordEventDrop("dns", "ringbuf_to_router", defaultEventPriority(event.Type))
-			c.dropLogger.record(slog.Default(), "dns")
+			c.dropLogger.record(slog.Default().With(slog.String("collector", "dns")), "ringbuf_to_router")
 			c.lostTotal.Add(1)
 		})
 	}
@@ -365,7 +365,19 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 // dnsStaleThreshold is how long the collector may see zero events before it
 // reports itself stale. Long enough that a quiet host does not flap, short
 // enough that a whole attack run cannot pass unnoticed as it did in run #4.
-const dnsStaleThreshold = 5 * time.Minute
+//
+// 5.9.9.F.4h (finding #150): the previous value, 5 minutes, was measured
+// live to be SHORTER than the natural inter-burst gap on a quiet host —
+// journal-agent-2.9.9.F.3.log showed 59 WARN/recovered pairs over an 11.5h
+// idle run, every one of them exactly 312s apart, on a machine whose DNS
+// bursts (~8 events) land roughly every 5 minutes. A threshold picked
+// without margin above that cadence flags every single quiet gap as
+// degraded visibility, which is the false-positive class this collector
+// exists to avoid (P0-26). Raised to comfortably clear the observed 312s
+// gap rather than sit just under it; still well inside "an attack run
+// cannot pass unnoticed" (run #4's regression was on the order of the
+// whole idle window, not a single burst gap).
+const dnsStaleThreshold = 10 * time.Minute
 
 // dnsStalePollInterval is how often watchForStaleness checks elapsed time
 // since the last event. 5.7d: the previous design compared event counts once

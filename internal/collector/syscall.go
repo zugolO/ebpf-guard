@@ -345,7 +345,7 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordEventDrop("syscall", "ringbuf_to_router", defaultEventPriority(event.Type))
-			c.dropLogger.record(c.logger, "syscall")
+			c.dropLogger.record(c.logger, "ringbuf_to_router")
 		})
 		event.Reset()
 		eventPool.Put(event)

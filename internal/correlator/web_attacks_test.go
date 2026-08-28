@@ -119,20 +119,29 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 		}
 	})
 
-	// Test extended path traversal patterns
+	// Test extended path traversal patterns.
+	// 5.9.9.F.4d (finding #144): the rule is no longer "any process that opened
+	// a path containing ../" — it is scoped to the web-worker comm list, the same
+	// one owasp_web_sensitive_file_read uses. Fixtures therefore carry a comm, and
+	// the last case pins the narrowing itself: the same traversal path read by a
+	// non-web process (grep — one of the 50 uptime criticals the finding counted)
+	// must NOT alert. Without that case a re-widening of the rule would go unnoticed.
 	t.Run("Extended Path Traversal Patterns", func(t *testing.T) {
 		traversalTestCases := []struct {
 			name     string
+			comm     string
 			filename string
 			expected bool
 		}{
-			{"Basic traversal", "/etc/passwd/../../", true},
-			{"Backslash traversal", "\\windows\\system32\\..\\..", true},
-			{"URL-encoded", "/var/www/%2e%2e%2f", true},
-			{"Double-encoded", "/tmp/%252e%252e%252f", true},
-			{"Unicode evasion", "/uploads/%c0%ae", true},
-			{"Repeated traversal", "/var/www/../../../../etc/passwd", true},
-			{"Normal file", "/var/www/images/logo.png", false},
+			{"Basic traversal", "nginx", "/etc/passwd/../../", true},
+			{"Backslash traversal", "nginx", "\\windows\\system32\\..\\..", true},
+			{"URL-encoded", "apache2", "/var/www/%2e%2e%2f", true},
+			{"Double-encoded", "php-fpm", "/tmp/%252e%252e%252f", true},
+			{"Unicode evasion", "tomcat", "/uploads/%c0%ae", true},
+			{"Repeated traversal", "node", "/var/www/../../../../etc/passwd", true},
+			{"Normal file", "nginx", "/var/www/images/logo.png", false},
+			{"Traversal by non-web process (5.9.9.F.4d)", "grep", "/var/www/../../../../etc/passwd", false},
+			{"Traversal without comm (5.9.9.F.4d)", "", "/var/www/../../../../etc/passwd", false},
 		}
 
 		for _, tc := range traversalTestCases {
@@ -143,6 +152,7 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 						Filename: [256]byte{},
 					},
 				}
+				copy(event.Comm[:], tc.comm)
 				copy(event.File.Filename[:], tc.filename)
 
 				alerts := engine.Evaluate(event)

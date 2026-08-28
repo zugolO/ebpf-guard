@@ -110,7 +110,7 @@ func (a *AzureMonitorCollector) poll(ctx context.Context, out chan<- types.Event
 
 	for _, e := range events {
 		sendEvent(ctx, out, e, a.strategy, func() {
-			a.dropLogger.record(a.logger, a.Name())
+			a.dropLogger.record(a.logger.With(slog.String("collector", a.Name())), "poll_to_channel")
 		})
 	}
 }

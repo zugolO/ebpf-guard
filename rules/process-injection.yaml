@@ -57,6 +57,23 @@ rules:
     severity: critical
     action: alert
     tags: [mitre-t1055, mitre-t1055.002, process-injection, fileless, memfd]
+    exceptions:
+      # 5.9.9.F.4a (№141): systemd sandboxing (PrivateTmp/PrivateDevices/
+      # ProtectSystem) makes every unit's forked child call memfd_create()
+      # during its own startup — same systemd-sandbox-child shape as
+      # 5.9.9.F.3c, extended here from the original six rules to the actual
+      # class raised by this actor in the archive. Structural: direct child
+      # of pid 1 whose comm the kernel reports in "(name)" form.
+      - name: systemd-sandbox-child
+        condition_group:
+          operator: and
+          conditions:
+            - field: ppid
+              op: eq
+              values: ["1"]
+            - field: comm
+              op: regex
+              values: ["^\\(.*\\)$"]
 
   # fexecve(3) executes the file referenced by an open file descriptor — the
   # canonical second step after memfd_create for fileless execution.

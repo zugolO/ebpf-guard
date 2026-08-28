@@ -564,7 +564,18 @@ func validateCondition(cond *RuleCondition, eventType types.EventType) error {
 	case OpIn, OpNotIn, OpEquals, OpNotEquals, "eq", "neq", OpPrefix, OpNotPrefix, OpSuffix, OpNotSuffix, OpContains,
 		OpGreaterThan, OpLessThan, OpGreaterOrEqual, OpLessOrEqual,
 		OpCapsGained, OpCapsDropped:
-		// These operators don't need pre-validation
+		// Reject an empty values list (#148): for the negated forms
+		// (not_in/not_prefix/not_suffix/not_equals) an empty list means the
+		// exclusion set is empty, so the condition silently matches every
+		// event — the same "would silently match every event" failure mode
+		// already rejected for an empty condition_group above. The remaining
+		// operators in this group never match on an empty list, which is
+		// just as silently wrong (a rule that can never fire), so the same
+		// requirement is applied to all of them rather than special-casing
+		// the negated forms.
+		if len(cond.Values) == 0 {
+			return fmt.Errorf("condition field %s: operator %s requires a non-empty values list (would silently match every event)", cond.Field, cond.Op)
+		}
 	default:
 		return fmt.Errorf("unknown operator: %s", cond.Op)
 	}

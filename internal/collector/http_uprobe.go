@@ -610,7 +610,7 @@ func (c *HTTPCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 
 		sendEvent(ctx, out, *event, c.strategy, func() {
 			exporter.RecordEventDrop("http_plaintext", "ringbuf_to_router", defaultEventPriority(event.Type))
-			c.dropLogger.record(c.logger, "http_plaintext")
+			c.dropLogger.record(c.logger, "ringbuf_to_router")
 			c.lostTotal.Add(1)
 		})
 	}

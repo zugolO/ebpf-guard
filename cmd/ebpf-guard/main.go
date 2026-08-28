@@ -771,7 +771,28 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 						continue
 					}
 					pid, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 32)
-					if parseErr != nil || pid == 0 {
+					if parseErr != nil {
+						continue
+					}
+					// A literal 0 in the file means "release the exclusion",
+					// and it has to be honoured (finding #151, предпрогон
+					// №2.9.9.F.4): skipping it here left the last root PID
+					// published to every BPF object forever, so the harness
+					// could arm the filter but never disarm it. Both halves of
+					// 5.9.9.F.4c depend on the release actually happening —
+					// the measurement window has to see the stand without the
+					// pipeline tree excluded — and so does every induced
+					// positive control the pipeline runs from inside its own
+					// tree. ClearRootPID has existed since 5.9.2g and was
+					// simply never wired to anything.
+					if pid == 0 {
+						if lastPID != 0 {
+							slog.Info("correlator: observer root PID released (exclusion off)")
+							lastPID = 0
+						}
+						engine.SetObserverRoot(0)
+						observerFilters.clear()
+						engine.SetObserverKernelSide(false)
 						continue
 					}
 					if pid != lastPID {
@@ -4456,6 +4477,39 @@ func (r *observerFilterRegistry) publish(root uint32) int {
 		ok++
 	}
 	return ok
+}
+
+// clear disarms the in-kernel exclusion on every registered collector and
+// forgets the last published root, so a collector registering later is not
+// handed a stale root by register's replay path.
+//
+// This is the other half of publish, and it exists because publish cannot be
+// it: publish(0) returns 0 without touching a single map, since its return
+// value means "how many BPF objects are filtering" and 0 legitimately means
+// "none". Disarming has to be an explicit call (finding #151) — the harness
+// writes 0 to the root-PID file to hand the stand back unfiltered, and until
+// this was wired that write did nothing at all.
+func (r *observerFilterRegistry) clear() {
+	r.mu.Lock()
+	r.lastRoot = 0
+	ctrls := make(map[string]*internalbpf.ObserverFilterController, len(r.ctrls))
+	for k, v := range r.ctrls {
+		ctrls[k] = v
+	}
+	r.mu.Unlock()
+
+	for name, c := range ctrls {
+		if c.RootPID() == 0 {
+			continue
+		}
+		if err := c.ClearRootPID(); err != nil {
+			slog.Warn("observer_filter: clear root pid failed",
+				slog.String("collector", name), slog.Any("error", err))
+			continue
+		}
+		slog.Info("observer_filter: harness exclusion disarmed in kernel",
+			slog.String("collector", name))
+	}
 }
 
 // drainExcluded returns the number of events dropped in the kernel as belonging

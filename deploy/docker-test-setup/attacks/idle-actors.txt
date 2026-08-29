@@ -86,3 +86,7 @@ mktemp	2.9.9.F.4:1	по таймеру 50-motd-news (временный файл
 uname	2.9.9.F.4:1	по таймеру 50-motd-news (uname -m)
 sshd	2.9.9.F.1:1	по логину (сессии наблюдателя/крона)
 libuv-worker	2.9.9.F.5:1	рабочий поток grafana (root_comm=containerd-shim); один алерт anomaly_detection warning, score 9, промоушен в suspicious — 5.9.9.F.6c, №172
+fwupd	2.9.9.F.7:12	по таймеру fwupd-refresh.service (суточный, демон обновления прошивок); 5 critical — /dev/mem, /proc/kcore, /sys/module, DMI; промоушен в attack score=50.0 при пороге 50 (5.9.9.F.7e, №179)
+(fwupd)	2.9.9.F.7:2	форкнутый ребёнок fwupd до execve (усечённое имя comm)
+fwupdmgr	2.9.9.F.7:3	CLI, которым fwupd-refresh.service дёргает обновление метаданных (суточный таймер)
+(fwupdmgr)	2.9.9.F.7:3	форкнутый ребёнок fwupdmgr до execve (усечённое имя comm)

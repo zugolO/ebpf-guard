@@ -2100,7 +2100,15 @@ echo "--- 6.0b: посев known-сигнатуры drift_exec_from_system_bin (
 release_pipeline_observer_root
 for _ in $(seq 1 25); do "$DRIFT_PC_BIN" >/dev/null 2>&1 || true; done
 register_pipeline_observer_root
+# T_seed — момент, с которого реально идёт отсчёт learning ДЛЯ ЭТОГО
+# workload'а. driftbaseline.go:224 ставит prof.startedAt при СОЗДАНИИ профиля,
+# то есть на ПЕРВОМ наблюдённом совпадении, а не на старте агента: workload
+# comm=drift-pc до этой секунды не существовал. Отсчёт от T0 (agent-start)
+# ниже сохранён — он держит своё обещание «idle-час открывается не раньше
+# T0+3600с», — но промоушен в enforcing им НЕ обеспечивается.
+drift_seed_epoch=$(date -u +%s)
 echo "  посеяно 25 exec'ов $DRIFT_PC_BIN (comm=drift-pc) в $(date -u +%H:%M:%S) UTC — MinSamples=20 достигнут заведомо с запасом"
+echo "  T_seed (создан профиль drift-pc)=$drift_seed_epoch — learning этого workload'а закроется не раньше T_seed+3600с"
 
 # Досыпание остатка до learning_period=3600с от AGENT_START_FILE. Если этот
 # шаг сам стартовал позже T0+3600 (долгие предыдущие шаги), remaining <= 0
@@ -2127,8 +2135,26 @@ echo "--- 6.0b (продолжение): контрольный exec той же
 # Промоушен learning->enforcing происходит ВНУТРИ Observe(), не по таймеру
 # в фоне — событию нужно физически прийти ПОСЛЕ T0+3600с, чтобы agент
 # увидел elapsed>=learning_period И sampleCount>=min_samples одновременно.
+# Досыпание до T_seed+3600с. Без него шаг держался на невысказанном
+# допущении «от рестарта [5/14] до посева проходит меньше 660с»: контрольный
+# exec приходит в T0+4260, профиль создан в T0+d, его elapsed = 4260-d, и
+# условие elapsed>=3600 верно ТОЛЬКО при d<=660. На замере №2.9.9.F.8 шаги
+# [5/14]→[10/14] заняли d=520с — запас был 140с, а провал вылезал бы через
+# ~75 минут прогона, на 6.0.4, уже после часа ожидания. Здесь допущение
+# снято: ждём по T_seed, сколько бы ни занял участок выше.
+drift_promo_target=$((drift_seed_epoch + 3600 + 30))
+drift_promo_wait=$((drift_promo_target - $(date -u +%s)))
+if [ "$drift_promo_wait" -gt 0 ]; then
+    echo "  до T_seed+3600с осталось ${drift_promo_wait}с — досыпаю перед контрольным exec'ом"
+    sleep "$drift_promo_wait"
+else
+    echo "  T_seed+3600с уже прошёл ($((-drift_promo_wait))с назад) — досыпание не требуется"
+fi
 release_pipeline_observer_root
-"$DRIFT_PC_BIN" >/dev/null 2>&1 || true
+# Три exec'а, а не один: промоушен случается ВНУТРИ Observe(), поэтому нужен
+# факт доставки события. Единственный exec, потерянный на сэмплировании или
+# переполнении кольца, стоил бы всего прогона на 6.0.4.
+for _ in 1 2 3; do "$DRIFT_PC_BIN" >/dev/null 2>&1 || true; sleep 1; done
 sleep 20
 register_pipeline_observer_root
 
@@ -2143,7 +2169,7 @@ echo "  drift_learning_workloads=${drift_learning:-?} drift_stuck_workloads=${dr
 [ "${drift_profiles:-0}" -ge 1 ] \
     || die "6.0.4 ПРОВАЛЕН: drift_profiles_active=0 — ни один workload не выучен, включая наш собственный посев drift-pc; profiler.drift_baseline либо не подхвачен рестартом [5/14], либо посев выше не дошёл до коллектора"
 [ "${drift_profiles:-0}" -gt "${drift_learning:-0}" ] \
-    || die "6.0.4 ПРОВАЛЕН: ни один из $drift_profiles профилей не в enforcing (drift_learning_workloads=$drift_learning >= drift_profiles_active=$drift_profiles) — посев drift-pc должен был перейти в enforcing к этому моменту (T0+3600с+20с), напечатанное состояние не доказывает закрытие learning (риск №1 постановки 6.0)"
+    || die "6.0.4 ПРОВАЛЕН: ни один из $drift_profiles профилей не в enforcing (drift_learning_workloads=$drift_learning >= drift_profiles_active=$drift_profiles) — посев drift-pc должен был перейти в enforcing к этому моменту (T_seed+3600с+30с, досыпание выше), напечатанное состояние не доказывает закрытие learning (риск №1 постановки 6.0)"
 echo "6.0.4 доказан живьём: как минимум один профиль (наш посев drift-pc) в enforcing к открытию idle-часа"
 
 echo "=== [11/14] idle-час, NO_RESTART=1 (5.9.1c) — сокращать нельзя ==="

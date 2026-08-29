@@ -1523,93 +1523,152 @@ run_path_traversal_positive_control() {
 # внешнюю команду, поэтому у события curl proc.parent_comm="tar".
 run_exfil_archive_parent_positive_control() {
     log "==========================================="
-    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.F.5a (находка №152, было 5.9.9.F.4e/№145): архиватор как прямой родитель сетевой утилиты (comm=tar → comm=curl)"
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.F.6d (находка №173, было 5.9.9.F.5a/№152): архиватор как прямой родитель сетевой утилиты (comm=tar → comm=curl), N=20 повторов с гарантированным форком"
     log "==========================================="
 
-    # 5.9.9.F.5a/№152: старая форма делала родителя ШЕБАНГ-СКРИПТОМ
-    # (#!bash). При execve скрипта kernel грузит интерпретатор через
-    # binfmt_script — comm ставится по basename ПУТИ ИНТЕРПРЕТАТОРА
-    # (bprm->filename после подстановки), а не по имени самого скрипта, то
-    # есть comm архиватора был "bash", не "tar". exfil_archive_to_network_pipe
-    # матчит proc.parent_comm == "tar" и на такой родитель не срабатывал по
-    # построению — величина 10 была неизмерима в обе стороны (тот же класс
-    # ошибки, что у shebang-контроля №150/shebang-control-comm-is-interpreter).
-    # Фикс: копия bash-бинаря exec'ится НАПРЯМУЮ под именем "tar" (без
-    # шебанга) — kernel ставит comm по basename исполняемого ФАЙЛА, и это
-    # "tar", независимо от того, что внутри ELF на самом деле bash.
-    local true_bin bash_bin
-    true_bin="$(command -v true 2>/dev/null)"
+    # 5.9.9.F.6d/№173: замер №2.9.9.F.5 дал Δ=0 на подтверждённом comm=tar
+    # (сторож 5.9.9.F.5k/5k печатал "tar" исправно) — предикат доказан
+    # выполнимым офлайн новыми фикстурами (tests/rules/exfiltration_extended_test.yaml),
+    # значит YAML не виноват. Остались ДВЕ гипотезы, и одним прогоном с N=1
+    # их было не разделить:
+    #   (1) bash -c exec'нул curl НА МЕСТЕ (tail-call execve вместо
+    #       fork+execve) — тогда real_parent у curl не tar, а тот, кто
+    #       запустил tar, и правило право, что не сработало;
+    #   (2) сэмплирование съело единственное событие (контроль исполнялся
+    #       РОВНО ОДИН раз, а reserve_event_with_sampling стоит на обоих
+    #       хуках exec).
+    # N=20 повторов снимает (2) статистически (20 независимых execve вместо
+    # одного). Гарантированный форк снимает (1) конструктивно: сетевая
+    # утилита — НЕ последняя команда в строке "-c", после неё безусловно
+    # (не через ||, а через ;) идёт ещё один builtin, поэтому bash не вправе
+    # заменить свой процесс образом curl — он обязан знать код возврата,
+    # чтобы выполнить следующий builtin, а это невозможно после execve().
+    #
+    # 5.9.9.F.5a/№152 (сохранено без изменений): родителем по-прежнему
+    # служит копия bash-бинаря, exec'нутая НАПРЯМУЮ под именем "tar" (без
+    # шебанга) — kernel ставит comm по basename исполняемого ФАЙЛА
+    # независимо от того, что внутри ELF.
+    # 5.9.9.F.7a/№176: `command -v true` возвращает голое имя "true" без пути,
+    # когда true — bash-builtin (шадовит внешний бинарник в выводе `command -v`,
+    # `type -P true` на этом bash тоже пуст) — ссылка `ln -s "$true_bin" …`
+    # создавала БИТУЮ относительную симлинку ("true" не существует внутри
+    # $fake_dir), execve curl_bin падал с ENOENT ДО того, как ядро успевало
+    # сменить comm на "curl" — правило не видело события вовсе, это не баг
+    # BPF/коррелятора. Нужен абсолютный путь до РЕАЛЬНОГО файла /bin/true.
+    local true_bin bash_bin candidate
     bash_bin="$(command -v bash 2>/dev/null)"
-    if [ -z "$true_bin" ] || [ -z "$bash_bin" ]; then
-        warn "true/bash не найдены — позитивный контроль 5.9.9.F.5a пропущен, parent-половина exfil_archive_to_network_pipe остаётся недоказанной"
-        echo ""
-        return
-    fi
-
-    local fake_dir curl_bin tar_bin comm_check_file
-    fake_dir="$(mktemp -d)"
-    curl_bin="$fake_dir/curl"
-    tar_bin="$fake_dir/tar"
-    comm_check_file="$fake_dir/comm_check"
-    if ! ln -s "$true_bin" "$curl_bin" 2>/dev/null; then
-        warn "не удалось создать $curl_bin — позитивный контроль 5.9.9.F.5a пропущен"
-        rm -rf "$fake_dir"
-        echo ""
-        return
-    fi
-    if ! cp "$bash_bin" "$tar_bin" 2>/dev/null; then
-        warn "не удалось скопировать $bash_bin в $tar_bin — позитивный контроль 5.9.9.F.5a пропущен"
-        rm -rf "$fake_dir"
-        echo ""
-        return
-    fi
-    chmod +x "$tar_bin"
-
-    local archiver_ran=0
-    mark_attack_window
-    # -c запускает $tar_bin (реальный exec, не шебанг) как "tar"; сначала
-    # процесс сам печатает свой /proc/self/comm в файл — это и есть
-    # СТОРОЖ, требуемый постановкой 5.9.9.F.5a, — затем forks/exec'ит curl.
-    # 5.9.9.F.5k (находка №161): `cat /proc/self/comm > file` форкал ВНЕШНИЙ
-    # процесс cat, и /proc/self/comm внутри НЕГО — это comm самого cat, а не
-    # comm родителя ($tar_bin, запущенного под именем "tar"). Сторож 5 из 5
-    # раз печатал "cat", величина 10 была обречена на FAIL(сторож) даже при
-    # исправном правиле. Фикс: `read` — builtin bash, не форкает подпроцесс,
-    # /proc/self/comm читается ВНУТРИ самого $tar_bin, comm которого — "tar".
-    if "$tar_bin" -c "read -r c < /proc/self/comm; printf '%s' \"\$c\" > '$comm_check_file' 2>/dev/null; '$curl_bin' -s -o /dev/null http://127.0.0.1:1 || true" >/dev/null 2>&1; then
-        archiver_ran=1
-        log "child-процесс comm=curl запущен под родителем comm=tar — ожидается срабатывание exfil_archive_to_network_pipe (parent-половина)"
-    else
-        warn "запуск $tar_bin -c не удался — позитивный контроль 5.9.9.F.5a не исполнен"
-    fi
-    mark_attack_window
-
-    local observed_comm="" comm_verified=false
-    if [ -f "$comm_check_file" ]; then
-        observed_comm="$(tr -d '\n' < "$comm_check_file")"
-    fi
-    if [ "$observed_comm" = "tar" ]; then
-        comm_verified=true
-        log "СТОРОЖ 5.9.9.F.5a: /proc/self/comm архиватора подтверждён = 'tar'"
-    else
-        warn "СТОРОЖ 5.9.9.F.5a: /proc/self/comm архиватора = '${observed_comm:-<пусто>}', ожидалось 'tar' — позитивный контроль недостоверен, exfil_archive_to_network_pipe (parent-половина) НЕ доказана"
-    fi
-
-    rm -rf "$fake_dir"
-
-    # Маркер в манифест пишется, только если архиватор реально был exec'нут
-    # (archiver_ran=1) — иначе "контроль не исполнился" неотличимо от
-    # "контроль исполнился, но не тем comm" (находка №152 на №2.9.9.F.4).
-    # comm_verified внутри записи — то, что отличает вторую ситуацию от
-    # первой ПОСЛЕ исполнения.
-    if [ "$archiver_ran" -eq 1 ] && command -v jq &> /dev/null; then
-        ec_entry=$(jq -n --arg cat "exfil_archive_parent_positive_control" --arg comm "curl" --arg parent "tar" \
-            --argjson verified "$comm_verified" --arg ts "$(date -Iseconds)" \
-            '{category: $cat, comm: $comm, parent_comm: $parent, comm_verified: $verified, timestamp: $ts}' 2>/dev/null)
-        if [ -n "$ec_entry" ] && [ -f "$MANIFEST_FILE" ]; then
-            jq --argjson e "$ec_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
-                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+    for candidate in /usr/bin/true /bin/true; do
+        if [ -x "$candidate" ]; then
+            true_bin="$candidate"
+            break
         fi
+    done
+    if [ -z "$true_bin" ] || [ -z "$bash_bin" ]; then
+        warn "true/bash не найдены — позитивный контроль 5.9.9.F.6d пропущен, parent-половина exfil_archive_to_network_pipe остаётся недоказанной"
+        echo ""
+        return
+    fi
+
+    local exfil_n_total=20
+    local exfil_n_ran=0
+    local exfil_n_verified=0
+    local i fake_dir curl_bin tar_bin comm_check_file observed_comm comm_verified archiver_ran ec_entry
+    # 5.9.9.F.7a/№176: ВТОРОЙ сторож, по результату. Первый (5.9.9.F.5k)
+    # проверяет comm архиватора и молчит о том, состоялся ли execve самой
+    # сетевой утилиты — именно этой слепоты хватило, чтобы битая симлинка
+    # (execve -> ENOENT) выглядела продуктовым нулём правила на двух замерах
+    # подряд. Записывается КОД ВОЗВРАТА вызова $curl_bin внутри процесса-
+    # архиватора: 0 = образ подменён, comm=curl в ядре был; 126/127 = execve
+    # не состоялся (не исполняем / нет файла) — событие, которое обязано
+    # поднять правило, в поток не попадало вовсе, и ноль правила при таком
+    # стороже не измеряет продукт ни в одну сторону.
+    local exec_rc_file observed_exec_rc exec_verified exfil_n_exec=0
+
+    mark_attack_window
+    for i in $(seq 1 "$exfil_n_total"); do
+        fake_dir="$(mktemp -d)"
+        curl_bin="$fake_dir/curl"
+        tar_bin="$fake_dir/tar"
+        comm_check_file="$fake_dir/comm_check"
+        exec_rc_file="$fake_dir/exec_rc"
+        if ! ln -s "$true_bin" "$curl_bin" 2>/dev/null || ! cp "$bash_bin" "$tar_bin" 2>/dev/null; then
+            warn "повтор $i/$exfil_n_total: не удалось собрать фикстуру $fake_dir — пропущен"
+            rm -rf "$fake_dir"
+            continue
+        fi
+        chmod +x "$tar_bin"
+
+        archiver_ran=0
+        # -c запускает $tar_bin (реальный exec, не шебанг) как "tar";
+        # сначала процесс сам печатает свой /proc/self/comm в файл — это
+        # СТОРОЖ 5.9.9.F.5k (read — builtin, не форкает cat, поэтому
+        # /proc/self/comm читается ВНУТРИ $tar_bin, а не в подпроцессе);
+        # затем безусловно (";", не "||") запускает curl И следом ещё один
+        # builtin (":") — это и есть гарантированный форк 5.9.9.F.6d: curl
+        # не последняя команда, bash не может exec-in-place её.
+        if "$tar_bin" -c "read -r c < /proc/self/comm; printf '%s' \"\$c\" > '$comm_check_file' 2>/dev/null; '$curl_bin' -s -o /dev/null http://127.0.0.1:1 >/dev/null 2>&1; printf '%s' \"\$?\" > '$exec_rc_file' 2>/dev/null; :" >/dev/null 2>&1; then
+            archiver_ran=1
+            exfil_n_ran=$((exfil_n_ran + 1))
+        else
+            warn "повтор $i/$exfil_n_total: запуск $tar_bin -c не удался"
+        fi
+
+        observed_comm=""
+        comm_verified=false
+        if [ -f "$comm_check_file" ]; then
+            observed_comm="$(tr -d '\n' < "$comm_check_file")"
+        fi
+        if [ "$observed_comm" = "tar" ]; then
+            comm_verified=true
+            exfil_n_verified=$((exfil_n_verified + 1))
+        else
+            warn "повтор $i/$exfil_n_total: СТОРОЖ 5.9.9.F.5k: /proc/self/comm архиватора = '${observed_comm:-<пусто>}', ожидалось 'tar'"
+        fi
+
+        # Сторож 5.9.9.F.7a: код возврата execve сетевой утилиты. Печатается
+        # ИМЕННО код, а не «не сработало» — 127 (нет файла: битая симлинка,
+        # находка №176) отличается от 126 (файл есть, не исполняется —
+        # например noexec на $TMPDIR) и от ненулевого кода самой утилиты;
+        # каждый из трёх случаев чинится по-разному, и ни один не является
+        # продуктовым нулём.
+        observed_exec_rc=""
+        exec_verified=false
+        if [ -f "$exec_rc_file" ]; then
+            observed_exec_rc="$(tr -d '\n' < "$exec_rc_file")"
+        fi
+        if [ "$observed_exec_rc" = "0" ]; then
+            exec_verified=true
+            exfil_n_exec=$((exfil_n_exec + 1))
+        else
+            warn "повтор $i/$exfil_n_total: СТОРОЖ 5.9.9.F.7a: execve сетевой утилиты вернул '${observed_exec_rc:-<пусто>}' (127 = нет файла/битая симлинка, 126 = не исполняется) — событие с comm=curl в ядре НЕ рождалось, ноль правила на этом повторе продукт не измеряет"
+        fi
+
+        rm -rf "$fake_dir"
+
+        # Маркер в манифест пишется на КАЖДЫЙ повтор, где архиватор был
+        # exec'нут — блок приёмки 6d считает N (число маркеров) и N-из-N
+        # подтверждённых через jq length по этой же категории, как считал
+        # 5.9.9.F.5a на единственном повторе; менять формулу приёмки не
+        # требуется, меняется только то, сколько записей она видит.
+        if [ "$archiver_ran" -eq 1 ] && command -v jq &> /dev/null; then
+            ec_entry=$(jq -n --arg cat "exfil_archive_parent_positive_control" --arg comm "curl" --arg parent "tar" \
+                --argjson verified "$comm_verified" --argjson execok "$exec_verified" \
+                --arg execrc "${observed_exec_rc:-}" --arg ts "$(date -Iseconds)" --argjson rep "$i" \
+                '{category: $cat, comm: $comm, parent_comm: $parent, comm_verified: $verified, exec_verified: $execok, exec_rc: $execrc, timestamp: $ts, repeat: $rep}' 2>/dev/null)
+            if [ -n "$ec_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+                jq --argjson e "$ec_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                    && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+            fi
+        fi
+    done
+    mark_attack_window
+
+    log "5.9.9.F.6d: повторов исполнено $exfil_n_ran/$exfil_n_total, comm=tar подтверждён на $exfil_n_verified/$exfil_n_total, execve сетевой утилиты успешен на $exfil_n_exec/$exfil_n_total — срабатывание exfil_archive_to_network_pipe ожидается на каждом повторе, подтверждённом ОБОИМИ сторожами"
+    if [ "$exfil_n_verified" -lt "$exfil_n_total" ]; then
+        warn "5.9.9.F.6d: comm=tar подтверждён не на всех повторах ($exfil_n_verified/$exfil_n_total) — величина 10 требует N из N, частичное подтверждение её не закрывает"
+    fi
+    if [ "$exfil_n_exec" -lt "$exfil_n_total" ]; then
+        warn "5.9.9.F.7a: execve сетевой утилиты успешен не на всех повторах ($exfil_n_exec/$exfil_n_total) — событие с comm=curl рождается ТОЛЬКО на успешном execve; ноль правила при неполном стороже не является измерением продукта (ровно тот случай, что дал ложный ноль на №2.9.9.F.5 и №2.9.9.F.6)"
     fi
 
     echo ""

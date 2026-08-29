@@ -1027,6 +1027,44 @@ metric_grown_rules() {
     ' "${files[@]}" | sort
 }
 
+# 5.9.9.F.6b (№164): то же, что metric_grown_rules, но печатает ВЕЛИЧИНУ
+# прироста — "rule_id<TAB>дельта" — а не только имя выросшего правила.
+# Заведено ради пары «объём правила / срезано лимитером за то же окно»:
+# без второго числа первое неинтерпретируемо, что и показал замер
+# №2.9.9.F.5 (drift_exec_from_system_bin: 859 опубликовано за аптайм при
+# 713 срезанных за ОДИН idle-час).
+metric_delta_by_rule() {
+    local metric="$1" startf="$2" endf="$3"
+    local files=("$endf")
+    if [ -n "$startf" ] && [ -s "$startf" ]; then
+        files=("$startf" "$endf")
+    else
+        startf=""
+    fi
+    awk -F'[{}", ]+' -v metric="$metric" -v startfile="$startf" '
+        function rule_id(   i, rid) {
+            rid = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^rule_id=?$/) { rid = $(i+1); break }
+            }
+            return rid
+        }
+        { gsub(/\r/, "") }
+        index($0, metric "{") != 1 { next }
+        {
+            rid = rule_id(); if (rid == "") next
+            if (startfile != "" && FILENAME == startfile) { start[rid] += $NF; next }
+            end[rid] += $NF; seen[rid] = 1
+        }
+        END {
+            for (r in seen) {
+                d = end[r] - (start[r]+0)
+                if (d > 0) printf "%s\t%d\n", r, d
+            }
+        }
+    ' "${files[@]}" | sort
+}
+
 metric_nonzero_rules() {
     metric_grown_rules "$1" "" "$2"
 }
@@ -2005,13 +2043,33 @@ else
 fi
 echo ""
 
-# 9. Доля инцидентов на системных демонах < 20% (гейт волны 2, критерий 1).
+# 9. Доля инцидентов на системных демонах (гейт волны 2, критерий 1;
+# знаменатель пересчитан 5.9.9.F.7c, №175).
 # В прогоне №4 было 114/114 = 100% на sshd, в замере №1 — 37.4%. До волны 3
 # этот критерий считался только ручным разбором снапшота инцидентов — ровно
 # тот способ потерять критерий, против которого пункт 4 «Порядка работы».
 # Считается по тому же /api/v1/incidents, что и критерий 4 (одно множество,
 # в отличие от расхождения 326/107, найденного в замере №1).
-echo "=== 9. Доля инцидентов на системных демонах (гейт волны 2: < 20%) ==="
+#
+# 5.9.9.F.7c (находка №175, P1): порог 20% назначен ДО волны 5d, на
+# знаменателе «инцидент = один алерт». 5d коалесцирует алерты в инциденты и
+# сжимает знаменатель СИЛЬНЕЕ числителя (sshd 5587 алертов → 1 инцидент, cron
+# 227 → 1, containerd-shim 436 → 2 при 13 инцидентах всего на №2.9.9.F.6) —
+# доля по инцидентам после этого меряет коалесцирование, а не объём атаки
+# демонов, и на выборке 12-20 инцидентов (архивы 2.9.4/F.4/F.5/F.6) прыгает
+# 10.0%-30.8% без видимой закономерности: назначать здесь новое число значило
+# бы подбирать порог под четыре точки (риск волны 6 «зелёным правкой
+# прибора»). Печатаются ОБЕ величины — доля по инцидентам (коалесцирование) и
+# доля по алертам (объём, тот же числитель/знаменатель, что и критерии
+# 8/6b/6e). Порог волны 2 (20%) для доли по алертам переносить БЕЗ пересчёта
+# нельзя тоже: измеренная доля по алертам на всех четырёх архивах — 50.5%,
+# 80.9%, 80.4%, 80.8% (idle-фон демонов доминирует объём по построению,
+# sshd/cron генерируют алерты непрерывно) — порог 20% на этой величине падал
+# бы КАЖДЫЙ прогон независимо от состояния продукта, то есть ровно тот же
+# дефект, что нашёлся у доли по инцидентам, только в другую сторону. Обе доли
+# печатаются для наблюдения, обе — честный SKIP: числа есть, порогов с
+# обоснованием под них пока нет ни на одной из двух величин.
+echo "=== 9. Доля инцидентов на системных демонах (5.9.9.F.7c: обе величины, порог явный либо SKIP) ==="
 if [ ! -f "$final_incidents" ]; then
     skip "final-incidents-$TIMESTAMP.json не собран — доля на демонах не посчитана"
 elif ! jq -e 'type == "array"' "$final_incidents" >/dev/null 2>&1; then
@@ -2029,11 +2087,15 @@ else
             or $c == "systemd-logind" or $c == "grafana")] | length' "$final_incidents")
         daemon_share=$(awk -v d="$daemon_inc" -v t="$inc_total" \
             'BEGIN{ printf "%.1f", 100*d/t }')
-        if awk -v s="$daemon_share" 'BEGIN{exit !(s+0 < 20)}'; then
-            pass "инцидентов на демонах: $daemon_inc/$inc_total = ${daemon_share}% (< 20%)"
-        else
-            fail "инцидентов на демонах: $daemon_inc/$inc_total = ${daemon_share}% (гейт волны 2: < 20%)"
-        fi
+        alert_total=$(jq '[.[].alert_count // 1] | add' "$final_incidents")
+        daemon_alerts=$(jq '[.[] | select((.root_comm // .comm) as $c
+            | $c == "sshd" or $c == "cron" or $c == "landscape-sysin"
+            or $c == "systemd-logind" or $c == "grafana") | (.alert_count // 1)] | add' "$final_incidents")
+        alert_share=$(awk -v d="$daemon_alerts" -v t="$alert_total" \
+            'BEGIN{ printf "%.1f", 100*d/t }')
+        echo "  доля по инцидентам (после коалесцирования 5d): $daemon_inc/$inc_total = ${daemon_share}%"
+        echo "  доля по алертам (объём, до коалесцирования): $daemon_alerts/$alert_total = ${alert_share}%"
+        skip "5.9.9.F.7c: порог недостижим на выборке $inc_total инцидентов ни по инцидентам (разброс 10.0%-30.8%), ни по алертам без пересчёта (объём демонов 50.5%-80.9%, старый порог 20% валил бы каждый прогон) — архивы 2.9.4/F.4/F.5/F.6, №175; назначается после расширения стенда"
     fi
 fi
 echo ""
@@ -2630,9 +2692,18 @@ else
                             ($b[0] | map(.id)) as $seen
                             | ($a[0] | map(select(.id as $i | ($seen | index($i)) | not)))
                             | map(select((.comm // "") as $c | $hc | index($c)))
-                            | map(.timestamp // empty)
+                            | map([(.timestamp // ""), ((.pid // "") | tostring), (.comm // "")] | join("\t"))
                             | .[]' 2>/dev/null)
-                        while IFS= read -r alert_ts; do
+                        # 5.9.9.F.7d (перенос 5.9.7g/5.9.8g/5.9.9.Fb): вход для
+                        # разбора случая 3 — печать, а не правка. pid/comm
+                        # берутся из самого алерта; ppid печатается n/a
+                        # безусловно — ни /api/v1/alerts (поля нет вовсе,
+                        # alerts-api-has-no-process-chain), ни
+                        # final-incidents.process_chain ([]string имён comm,
+                        # без pid/ppid, pkg/types/incident.go:34) его не
+                        # несут структурно, восстанавливать неоткуда.
+                        harness_case3_detail=""
+                        while IFS=$'\t' read -r alert_ts alert_pid alert_comm; do
                             [ -z "$alert_ts" ] && continue
                             if [ -z "$root_register_epoch" ]; then
                                 harness_unclassified=$((harness_unclassified + 1))
@@ -2652,9 +2723,25 @@ else
                                 harness_case2=$((harness_case2 + 1))
                             else
                                 harness_case3=$((harness_case3 + 1))
+                                confirm_offset_ms="n/a"
+                                if [ -n "$root_confirm_epoch" ]; then
+                                    confirm_offset_ms=$(awk -v a="$alert_epoch" -v c="$root_confirm_epoch" 'BEGIN{printf "%.0f", (a-c)*1000}')
+                                fi
+                                # ppid не восстановим ни из /api/v1/alerts (поля
+                                # нет вовсе — alerts-api-has-no-process-chain),
+                                # ни из final-incidents.process_chain (проверено
+                                # 2026-08-29: это []string имён comm, а не
+                                # объектов с pid/ppid, pkg/types/incident.go:34)
+                                # — печатается честный n/a, а не подобранный по
+                                # совпадению pid результат.
+                                harness_case3_detail="$harness_case3_detail
+    pid=${alert_pid:-n/a} ppid=n/a comm=${alert_comm:-n/a} смещение_от_confirm_epoch=${confirm_offset_ms}мс"
                             fi
                         done <<< "$harness_ts_list"
                         echo "  дерево измерителя по случаю (5.9.9.Fb): предшествуют регистрации корня=$harness_case1${harness_case1_offsets:+ (смещения:${harness_case1_offsets})}, окно лага подхвата=$harness_case2, после подтверждения (не подхвачен)=$harness_case3, не классифицировано=$harness_unclassified"
+                        if [ -n "$harness_case3_detail" ]; then
+                            echo "  случай 3 (после подтверждения подхвата) — вход для разбора следующей волной (5.9.9.F.7d), порог <=5 этой печатью не меняется:$harness_case3_detail"
+                        fi
                     fi
                 fi
                 # 5.9.9.Fb (находка №109): причина FAIL называется тем из трёх
@@ -2939,10 +3026,50 @@ else
         # читался ни разу с момента постановки 5.9.9.F.5b. `-o cat` отдаёт
         # голое поле MESSAGE (без даты/юнита/pid) — ровно ту JSON-строку,
         # что пишет slog, без парсинга обрамления journalctl.
+        #
+        # 5.9.9.F.6a (№171): разбор JSON, починенный 5.9.9.F.5l, оказался
+        # верным — и всё равно давал ноль, потому что ломался ВХОД, а не
+        # разбор. В `--since` уходила строка `2026-08-29T03:24:37Z`
+        # (ISO-8601 с `T` и `Z`), в которой journalctl не обязан узнавать
+        # своё время: два других места этого же файла, читающие журнал
+        # успешно (критерий 3, `c3_since`/`c3_until`, и `journal_args` для
+        # немых правил), нормализуют время через `date +"%Y-%m-%d %H:%M:%S"`,
+        # и только этот блок передавал ISO как есть. `2>/dev/null` глушил
+        # диагностику парсера, поэтому отказ выглядел как пустое окно.
+        # Замер №2.9.9.F.5 напечатал «промоушенов 0» при ТРЁХ записях в
+        # собственном собранном журнале за то же окно (03:37:35 libuv-worker,
+        # 04:18:01 sh, 04:19:01 sh) — ровно дельта incidents_total = 3.
+        # Правка: окно строится из эпох (они уже посчитаны выше для печати)
+        # тем же `date`-форматом, что у двух работающих мест, а код возврата
+        # journalctl больше не теряется — «журнал не прочитан» обязано быть
+        # отличимо от «журнал прочитан, записей нет» (тот же класс различия,
+        # ради которого 5.9.9.F.5l ставил record_covered внутрь ветки).
+        idle_journal_read_ok=0
+        idle_journal_since=$(date -d "@${idle_win_start_epoch:-0}" +"%Y-%m-%d %H:%M:%S" 2>/dev/null \
+            || date -r "${idle_win_start_epoch:-0}" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
+        idle_journal_until=$(date -d "@${idle_win_end_epoch:-0}" +"%Y-%m-%d %H:%M:%S" 2>/dev/null \
+            || date -r "${idle_win_end_epoch:-0}" +"%Y-%m-%d %H:%M:%S" 2>/dev/null)
         if command -v journalctl &> /dev/null && command -v jq &> /dev/null \
-            && [ -n "${idle_win_start_utc:-}" ] && [ "${idle_win_start_utc:-?}" != "?" ]; then
-            idle_promo_journal_raw=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" -o cat \
-                --since "$idle_win_start_utc" --until "${idle_win_end_utc:-now}" 2>/dev/null \
+            && [ -n "${idle_journal_since:-}" ] && [ -n "${idle_journal_until:-}" ]; then
+            echo "  окно журнала, как оно передано journalctl (локальное время стенда, 5.9.9.F.6a): --since '$idle_journal_since' --until '$idle_journal_until'"
+            idle_journal_err=$(mktemp 2>/dev/null || echo /tmp/gate-idle-journal-err.$$)
+            # stderr — в отдельный файл, а не в поток: смешанный с stdout, он
+            # подмешал бы не-JSON строки в jq, и одна такая строка обрывает
+            # разбор всего окна.
+            idle_promo_journal_lines=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" -o cat \
+                --since "$idle_journal_since" --until "$idle_journal_until" 2>"$idle_journal_err")
+            if [ $? -eq 0 ]; then
+                idle_journal_read_ok=1
+            else
+                echo "  ВНИМАНИЕ (5.9.9.F.6a): journalctl вернул ненулевой код на окне idle-часа — «записей 0» ниже НЕ означает «промоушенов не было»; stderr: $(head -1 "$idle_journal_err" 2>/dev/null)"
+                idle_promo_journal_lines=""
+            fi
+            rm -f "$idle_journal_err" 2>/dev/null
+            # Только JSON-строки уходят в jq: агент пишет slog-JSON, но юнит
+            # может отдать и не-JSON (вывод рантайма, строки до настройки
+            # хендлера), а jq обрывается на первой такой строке.
+            idle_promo_journal_raw=$(printf '%s\n' "$idle_promo_journal_lines" \
+                | grep '^{' \
                 | jq -c 'select(.msg? == "correlator: incident promoted")' 2>/dev/null || true)
             idle_journal_promo_n_all=$(printf '%s\n' "$idle_promo_journal_raw" | grep -c . || true)
             # 5.9.9.F.5l: отметка покрытия ставится ЗДЕСЬ, внутри ветки, где
@@ -2969,14 +3096,19 @@ else
             # обоим вердиктам)» — раньше её было нечем проверить, потому что
             # журнал не читался вовсе.
             idle_promo_delta_total=$(( ${idle_attack_delta:-0} + ${idle_susp_delta:-0} ))
-            if [ "$idle_journal_promo_n_all" -eq "$idle_promo_delta_total" ] 2>/dev/null; then
+            if [ "$idle_journal_read_ok" -ne 1 ]; then
+                # 5.9.9.F.6a: сравнение с нулём, полученным от НЕ прочитанного
+                # журнала, — это и есть механизм №171: №2.9.9.F.5 напечатал
+                # «расходится» ровно так, имея все три записи в журнале.
+                echo "  НЕ ИЗМЕРЕНО (5.9.9.F.6a): журнал за окно idle-часа не прочитан (см. ВНИМАНИЕ выше) — величина «записей о промоушении = дельте incidents_total» не сравнивается с дельтой $idle_promo_delta_total, ноль здесь означал бы отказ чтения, а не отсутствие промоушенов"
+            elif [ "$idle_journal_promo_n_all" -eq "$idle_promo_delta_total" ] 2>/dev/null; then
                 echo "  ДОСТИГНУТО (5.9.9.F.5b/5.9.9.F.5l): записей о промоушении в журнале (оба вердикта) = $idle_journal_promo_n_all = дельта incidents_total (attack+suspicious) = $idle_promo_delta_total"
             else
                 echo "  НЕ ДОСТИГНУТО (5.9.9.F.5b/5.9.9.F.5l): записей о промоушении в журнале (оба вердикта) = $idle_journal_promo_n_all, дельта incidents_total (attack+suspicious) = $idle_promo_delta_total — расходится"
             fi
             record_covered "5.9.9.F.5l: записей о промоушении против дельты incidents_total"
         else
-            echo "  журнал за окно idle-часа не читался (journalctl/jq недоступен либо окно не определено) — состав из журнала не засчитывается"
+            echo "  журнал за окно idle-часа не читался (journalctl/jq недоступен либо окно не определено по mtime срезов) — состав из журнала не засчитывается"
         fi
 
         # Состав. Печатается ВСЕГДА, когда есть на чём считать, — в том числе
@@ -3069,6 +3201,71 @@ else
         else
             pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав против idle-actors.txt не проверен (реестр отсутствует, IDLE_ALERTS_START/END не заданы или jq недоступен, журнал не назвал актора) — не засчитывается ни в одну сторону (5.9.9.F.1d, №115)"
         fi
+    fi
+fi
+echo ""
+
+# ============================================================================
+# 5.9.9.F.6b (№164). Потолок per-rule лимитера: объём правила за idle-час
+# ПЕЧАТАЕТСЯ ВМЕСТЕ с числом срезанных у того же правила за то же окно.
+#
+# Метрика ebpf_guard_alerts_ratelimited_by_rule_total заведена пунктом
+# 5.9.9.F.5n и на замере №2.9.9.F.5 работала — но её не печатал никто: ни
+# гейт, ни блок приёмки пайплайна. Постановка №2.9.9.F.5 (величина 13)
+# требует обратного: «величина по объёму алертов правила, напечатанная без
+# этой пары, не засчитывается». Причина названа там же: потолок 10
+# алертов/правило/60 с делает опубликованный объём величиной ЛИМИТЕРА, а не
+# правила. Числа №2.9.9.F.5 за один idle-час: sigma_failed_login_syscall_daemon
+# срезано 19668, rootkit_pam_module_added_daemon 19656,
+# drift_new_library_in_system_dir_daemon 9174, drift_exec_from_system_bin 713.
+# Порог здесь не назначается — 5.9.6 запрещает назначать пороги до разбора;
+# это величина и её обязательная вторая половина.
+# ============================================================================
+echo "=== 5.9.9.F.6b. Объём правила за idle-час рядом со срезанным лимитером (№164) ==="
+if [ -z "$IDLE_METRICS_START" ] || [ -z "$IDLE_METRICS_END" ] \
+    || [ ! -s "$IDLE_METRICS_START" ] || [ ! -s "$IDLE_METRICS_END" ]; then
+    skip "IDLE_METRICS_START/END не заданы — пара «объём / срезано» за idle-час не измерена (5.9.9.F.6b)"
+else
+    GATE_TMP_RL_VOL=$(mktemp 2>/dev/null || echo "/tmp/gate-rl-vol.$$")
+    rl_metric="ebpf_guard_alerts_ratelimited_by_rule_total"
+    rl_present=$(grep -c "^${rl_metric}{" "$IDLE_METRICS_END" 2>/dev/null || true)
+    rl_cut=$(metric_delta_by_rule "$rl_metric" "$IDLE_METRICS_START" "$IDLE_METRICS_END")
+    # Три числа, а не одно суммарное: на №2.9.9.F.5 серии alerts_total и
+    # alerts_filtered_total по правилу ОКАЗАЛИСЬ НЕПЕРЕСЕКАЮЩИМИСЯ —
+    # drift_exec_from_system_bin живёт только в alerts_total (189→769), а всё
+    # семейство *_daemon только в alerts_filtered_total (187→769). Сумма
+    # назвала бы «опубликовано 582» то, что в стор не попало ни разу.
+    rl_exported=$(metric_delta_by_rule ebpf_guard_alerts_total "$IDLE_METRICS_START" "$IDLE_METRICS_END")
+    rl_filtered=$(metric_delta_by_rule ebpf_guard_alerts_filtered_total "$IDLE_METRICS_START" "$IDLE_METRICS_END")
+    if [ "${rl_present:-0}" -eq 0 ]; then
+        # Отсутствие метрики — не «лимитер ничего не срезал»: до 5.9.9.F.5n
+        # её не было вовсе, и старый агент даст здесь ту же пустоту, что
+        # исправный агент на абсолютно тихом часе. Различать обязательно.
+        fail "метрики $rl_metric нет в срезе idle-часа — объём правил за idle-час напечатан БЕЗ числа срезанных, величина по объёму не засчитывается (5.9.9.F.6b, №164; метрика заведена 5.9.9.F.5n — её отсутствие означает сборку агента старее этого пункта)"
+    else
+        rl_cut_n=$(printf '%s' "$rl_cut" | grep -c . || true)
+        echo "  правил с ненулевым срезом за idle-час: $rl_cut_n (метрика присутствует, серий в срезе: $rl_present)"
+        echo "  по правилам со срезом за idle-час (в стор / отфильтровано / срезано лимитером):"
+        # Сшивка по rule_id: правило со срезом печатается ДАЖЕ с нулём в обеих
+        # первых колонках — «упёрлось в потолок и не издало ни одного алерта»
+        # это и есть худший случай, ради которого пара заведена, и join с
+        # умолчанием его бы потерял.
+        : > "$GATE_TMP_RL_VOL"
+        printf '%s\n' "$rl_exported" | grep . | sed 's/^/exp\t/' >> "$GATE_TMP_RL_VOL"
+        printf '%s\n' "$rl_filtered" | grep . | sed 's/^/flt\t/' >> "$GATE_TMP_RL_VOL"
+        printf '%s\n' "$rl_cut"      | grep . | sed 's/^/cut\t/' >> "$GATE_TMP_RL_VOL"
+        awk -F'\t' '
+            $1 == "exp" { exported[$2] = $3; next }
+            $1 == "flt" { filtered[$2] = $3; next }
+            $1 == "cut" { cut[$2] = $3 }
+            END {
+                for (r in cut)
+                    printf "%d\t%s\t%d\t%d\t%d\n", cut[r], r, exported[r]+0, filtered[r]+0, cut[r]
+            }
+        ' "$GATE_TMP_RL_VOL" | sort -rn \
+            | awk -F'\t' '{printf "    %-45s стор %7d  фильтр %7d  срезано %8d\n", $2, $3, $4, $5}'
+        rm -f "$GATE_TMP_RL_VOL" 2>/dev/null
+        pass "объём правил за idle-час напечатан вместе со срезанным лимитером ($rl_cut_n правил со срезом) — величина 13 постановки №2.9.9.F.5 получила свою вторую половину (5.9.9.F.6b, №164)"
     fi
 fi
 echo ""

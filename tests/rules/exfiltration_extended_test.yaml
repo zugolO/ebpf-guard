@@ -1,0 +1,62 @@
+suite: exfiltration_extended
+rules_path: ../../rules/exfiltration-extended.yaml
+tests:
+  # 5.9.9.F.6d (№173). Замер №2.9.9.F.5 дал по exfil_archive_to_network_pipe
+  # ноль при позитивном контроле, который ЖИВЬЁМ подтвердил comm=tar
+  # (`read -r c < /proc/self/comm` внутри самого архиватора, сторож 5.9.9.F.5k).
+  # Ноль означает одно из двух, и до этих фикстур их было нечем развести:
+  #   (а) предикат правила невыполним в принципе — тогда виновато правило;
+  #   (б) предикат выполним, но события такой формы коллектор не отдаёт —
+  #       тогда виноват вход, и правку надо делать не в YAML.
+  # Эти два случая различаются здесь: фикстуры проверяют ТОЛЬКО (а), на
+  # выдуманном событии, без ядра. Зелёные фикстуры + живой ноль = случай (б),
+  # и это ровно то заключение, которое замер №2.9.9.F.6 обязан подтвердить
+  # или опровергнуть на стенде (см. plan.md, волна 5.9.9.F.6).
+  - name: "exit-форма execve (comm=curl, parent_comm=tar) поднимает exfil_archive_to_network_pipe"
+    rule_id: exfil_archive_to_network_pipe
+    event:
+      type: syscall
+      comm: "curl"
+      parent_comm: "tar"
+      syscall:
+        nr: 59
+    expect: alert
+    expect_severity: warning
+
+  # Та же пара процессов, но событие снято НА ВХОДЕ в execve, где comm ещё
+  # доexec'овый. Это форма, которую отдаёт tp/raw_syscalls/sys_enter
+  # (bpf/syscall.bpf.c): у ребёнка, форкнутого архиватором, comm унаследован
+  # от него же, и real_parent — тоже он. Правило на ней не срабатывает и
+  # срабатывать не должно — но именно эта форма приходит первой, и если
+  # exit-записи по какой-то причине не доходят, живой результат будет нулём
+  # при полностью исправном YAML.
+  - name: "enter-форма того же execve (comm=tar, parent_comm=tar) правило НЕ поднимает"
+    event:
+      type: syscall
+      comm: "tar"
+      parent_comm: "tar"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  # Одиночный curl без архиватора-родителя — негативная половина величины 10
+  # постановки №2.9.9.F.5 («Δ=0 на одиночном curl»).
+  - name: "одиночный curl (parent_comm=bash) правило не поднимает"
+    event:
+      type: syscall
+      comm: "curl"
+      parent_comm: "bash"
+      syscall:
+        nr: 59
+    expect: no_alert
+
+  # Архиватор-родитель есть, но syscall не execve — правило требует именно
+  # факта запуска, а не любого сисколла сетевой утилиты.
+  - name: "comm=curl под parent_comm=tar, но не execve — правило не поднимает"
+    event:
+      type: syscall
+      comm: "curl"
+      parent_comm: "tar"
+      syscall:
+        nr: 257
+    expect: no_alert

@@ -85,3 +85,4 @@ dpkg-query	2.9.9.F.4:1	по таймеру 50-motd-news (dpkg-query -W)
 mktemp	2.9.9.F.4:1	по таймеру 50-motd-news (временный файл для загрузки)
 uname	2.9.9.F.4:1	по таймеру 50-motd-news (uname -m)
 sshd	2.9.9.F.1:1	по логину (сессии наблюдателя/крона)
+libuv-worker	2.9.9.F.5:1	рабочий поток grafana (root_comm=containerd-shim); один алерт anomaly_detection warning, score 9, промоушен в suspicious — 5.9.9.F.6c, №172

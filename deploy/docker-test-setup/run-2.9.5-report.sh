@@ -253,17 +253,31 @@ else
     grep -hE '^ebpf_guard_events_total\{[^}]*type="dns"' "$final_metrics" 2>/dev/null | sed 's/^/    /' | head -3
 fi
 
-# --- п.10: idle-алерты не наведены срезами (5.9.5f, находка №68) -----------
+# --- п.10: idle-алерты не наведены срезами (5.9.5f/5.9.9.F.7b, №68/№174) ---
 # Механизм №68: `systemctl show` на каждом срезе idle-run.sh шёл мимо дерева
 # харнесса (не потомок root_pid — говорит с PID 1 по dbus), поэтому
 # observer_exclude его не ловил по построению; PID 1 в ответ читал /proc, и
 # это ловили mitre_sandbox_detect_proc_read/container_escape_init_proc с
-# метками времени, совпадающими с моментами срезов ПОСЕКУНДНО (все 13 срезов
-# на №2.9.4). 5.9.5f убрал systemctl show из цикла срезов (idle-run.sh теперь
-# читает MainPID один раз при старте окна) — здесь машинная проверка, что
-# метки idle-алертов больше не совпадают с моментами срезов.
+# метками времени, совпадающими с моментами срезов ПОСЕКУНДНО. 5.9.5f убрал
+# systemctl show из цикла срезов (idle-run.sh теперь читает MainPID один раз
+# при старте окна).
+#
+# 5.9.9.F.7b (находка №174, P1): посекундное совпадение — само по себе НЕ
+# достаточное условие. При частоте алертов ~585 за idle-час и 13 срезах
+# случайное совпадение матожидается на уровне ~1.95 события (формула ниже) —
+# ЛЮБОЕ шумное правило рано или поздно попадёт на секунду среза чисто по
+# теории вероятностей, и старая формула (любой матч = FAIL) валила это как
+# рецидив механизма №68, хотя совпавшие алерты принадлежали
+# drift_exec_from_system_bin/sshd — правилу, которое №68 не производил и не
+# мог производить (снят найденной на №2.9.9.F.6 проверкой: 3 совпадения, все
+# drift_exec_from_system_bin/sshd, ни одного правила сигнатуры №68).
+# Критерий теперь падает только тогда, когда совпавший алерт принадлежит
+# САМОЙ сигнатуре №68 — mitre_sandbox_detect_proc_read/container_escape_init_proc
+# (то, что механизм №68 и производил, actor pid 1). Фон печатается числом
+# (наблюдённое совпадений всех правил + матожидание случайного совпадения),
+# а не выводится из вердикта.
 echo ""
-echo "=== п.10: idle-алерты не наведены срезами (5.9.5f, находка №68) ==="
+echo "=== п.10: idle-алерты сигнатуры №68 не наведены срезами (5.9.9.F.7b, №174) ==="
 idle_alerts_start="${IDLE_OUT:+$IDLE_OUT/alerts-start.json}"
 idle_alerts_end="${IDLE_OUT:+$IDLE_OUT/alerts-end.json}"
 idle_timeseries="${IDLE_OUT:+$IDLE_OUT/timeseries.tsv}"
@@ -278,6 +292,7 @@ if [ -n "$IDLE_OUT" ] && [ -s "$idle_alerts_start" ] && [ -s "$idle_alerts_end" 
             h=substr(t,10,2); mi=substr(t,12,2); s=substr(t,14,2)
             printf "%s-%s-%sT%s:%s:%sZ\n", y,mo,d,h,mi,s
         }' | sort -u)
+    num_slices=$(printf '%s\n' "$snapshot_seconds" | grep -c . || true)
     new_only=$(comm -23 \
         <(jq -r '.[].id' "$idle_alerts_end" 2>/dev/null | sort -u) \
         <(jq -r '.[].id' "$idle_alerts_start" 2>/dev/null | sort -u))
@@ -285,21 +300,43 @@ if [ -n "$IDLE_OUT" ] && [ -s "$idle_alerts_start" ] && [ -s "$idle_alerts_end" 
     if [ "$total_new" -eq 0 ]; then
         echo "  SKIP: нет новых алертов за idle-окно (alerts-end == alerts-start)"
     else
-        matched=0
+        matched_any=0
+        matched_sig68=0
+        sig68_ids=""
+        matched_seconds=""
         while IFS= read -r id; do
             [ -z "$id" ] && continue
-            ts_sec=$(jq -r --arg id "$id" '.[] | select(.id==$id) | .timestamp' "$idle_alerts_end" 2>/dev/null \
-                | head -1 | sed -E 's/\.[0-9]+Z$/Z/')
-            [ -z "$ts_sec" ] && continue
+            row=$(jq -r --arg id "$id" '.[] | select(.id==$id) | [.timestamp, .rule_id] | @tsv' \
+                "$idle_alerts_end" 2>/dev/null | head -1)
+            ts_raw=$(cut -f1 <<< "$row")
+            rid=$(cut -f2 <<< "$row")
+            [ -z "$ts_raw" ] && continue
+            ts_sec=$(sed -E 's/\.[0-9]+Z$/Z/' <<< "$ts_raw")
             if printf '%s\n' "$snapshot_seconds" | grep -qF "$ts_sec"; then
-                matched=$((matched + 1))
+                matched_any=$((matched_any + 1))
+                matched_seconds="$matched_seconds
+$ts_sec"
+                if [ "$rid" = "mitre_sandbox_detect_proc_read" ] || [ "$rid" = "container_escape_init_proc" ]; then
+                    matched_sig68=$((matched_sig68 + 1))
+                    sig68_ids="$sig68_ids $id($rid)"
+                fi
             fi
         done <<< "$new_only"
-        echo "  новых idle-алертов: $total_new, на метке среза (посекундно): $matched"
-        if [ "$matched" -eq 0 ]; then
-            echo "  PASS: ни один idle-алерт не совпал с моментом среза"
+        secs_with_alerts=$(printf '%s\n' "$new_only" | while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            jq -r --arg id "$id" '.[] | select(.id==$id) | .timestamp' "$idle_alerts_end" 2>/dev/null \
+                | head -1 | sed -E 's/\.[0-9]+Z$/Z/'
+        done | sort -u | grep -c . || true)
+        expected=$(awk -v s="$secs_with_alerts" -v n="$num_slices" \
+            'BEGIN{ printf "%.2f", s*n/3600 }')
+        echo "  новых idle-алертов: $total_new, срезов: $num_slices, секунд с алертами: $secs_with_alerts"
+        echo "  матожидание случайного совпадения (секунд_с_алертами × срезов / 3600): $expected"
+        echo "  совпало с секундой среза (любое правило, фон): $matched_any"
+        echo "  совпало с секундой среза (правила сигнатуры №68 — mitre_sandbox_detect_proc_read/container_escape_init_proc): $matched_sig68"
+        if [ "$matched_sig68" -eq 0 ]; then
+            echo "  PASS: ни один idle-алерт сигнатуры №68 не совпал с моментом среза (совпадения фона — $matched_any, ожидаемо при $expected случайных)"
         else
-            echo "  FAIL: $matched idle-алертов наведены срезами — механизм №68 не устранён"
+            echo "  FAIL: $matched_sig68 idle-алертов сигнатуры №68 наведены срезами — механизм №68 не устранён ($sig68_ids)"
         fi
     fi
 else

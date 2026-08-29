@@ -20,6 +20,45 @@ func fileEventForPath(comm string, path string) types.Event {
 	}
 }
 
+func syscallEventForExec(comm string, nr int, procArgs string) types.Event {
+	return types.Event{
+		Type:     types.EventSyscall,
+		Comm:     commBytes(comm),
+		Syscall:  &types.SyscallEvent{Nr: int64(nr)},
+		ProcArgs: procArgs,
+	}
+}
+
+// TestDriftBaselineProfiler_SyscallSignatureIncludesProcArgs guards against a
+// defect found while designing wave 6.0's positive control: a bare syscall
+// number (e.g. execve's Nr) is the same for every binary a workload ever
+// runs, so without folding proc.args into the signature, learning one exec
+// permanently suppressed drift_exec_from_system_bin for every OTHER binary
+// the same comm later executed too — a rule whose own condition matches on
+// proc.args (which binary path ran) would never actually alert on a novel
+// binary once baseline learning completed.
+func TestDriftBaselineProfiler_SyscallSignatureIncludesProcArgs(t *testing.T) {
+	cfg := DriftBaselineConfig{
+		Enabled:        true,
+		LearningPeriod: 0,
+		MinSamples:     1,
+		PerWorkload:    true,
+	}
+	p := NewDriftBaselineProfiler(cfg, nil)
+
+	// sshd's baseline learns execve of the real sshd binary.
+	assert.False(t, p.Observe("drift_exec_from_system_bin", syscallEventForExec("sshd", 59, "/usr/sbin/sshd -D -R")))
+	assert.Equal(t, 0, p.LearningWorkloads(), "workload should have switched to enforcing")
+
+	// The same known binary path is suppressed as baseline-known.
+	assert.False(t, p.Observe("drift_exec_from_system_bin", syscallEventForExec("sshd", 59, "/usr/sbin/sshd -D -R")))
+
+	// A different binary under the same comm, same syscall number, is a
+	// genuine deviation and must NOT be swallowed by the syscall-number-only
+	// signature that ldconfig/systemd-style file events don't have.
+	assert.True(t, p.Observe("drift_exec_from_system_bin", syscallEventForExec("sshd", 59, "/usr/local/bin/drift-pc -x")))
+}
+
 func TestDriftBaselineProfiler_DisabledPassesThrough(t *testing.T) {
 	p := NewDriftBaselineProfiler(DriftBaselineConfig{Enabled: false}, nil)
 	for i := 0; i < 5; i++ {

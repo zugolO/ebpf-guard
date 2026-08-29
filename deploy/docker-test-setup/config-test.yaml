@@ -83,6 +83,23 @@ profiler:
     enabled: true
     path: /var/lib/ebpf-guard/profiler-state.json
     save_interval_seconds: 300
+  # 6.0 (plan.md, "Волна 6"): вариант 1 решения 5.9.9.F.5g/5.9.9.F.4f —
+  # включить базовую линию дрейфа, а не жить с description, который лжёт про
+  # class: drift. learning_period 3600с == длина idle-часа измерения (риск
+  # №1 постановки 6.0): агент обязан быть поднят на стенде НЕ МЕНЕЕ часа до
+  # открытия измеряемого idle-окна, иначе обучение не успевает закрыться и
+  # объём class: drift падает до нуля ложно-зелёным способом (прецедент —
+  # sigma_binary_in_tmp_executed, ревизия 5.9.9.F.3). Действующий порядок
+  # пайплайна (run-2.9.9.F.8-pipeline.sh, шаг [5/14]) рестартует агента
+  # НЕПОСРЕДСТВЕННО перед idle-run.sh — этого порядка недостаточно для этой
+  # правки без изменения тайминга; см. открытый вопрос волны 6.0 в plan.md.
+  drift_baseline:
+    enabled: true
+    learning_period: 3600
+    min_samples: 20
+    per_workload: true
+    max_workloads: 1000
+    enforce_deadline_periods: 3
 
 enforcement:
   enabled: true

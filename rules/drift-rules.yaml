@@ -308,4 +308,21 @@ rules:
 # proving that guard needs a live pipeline run to get real timings — not
 # available this session (see [[gate-offline-replay-on-mac]]) — so (a)
 # remains open for a session with stand access, not abandoned.
+#
+# ── Update 2026-08-29 (Wave 6, plan.md "6.0 Базовая линия дрейфа") ─────────
+#
+# (a) is now taken: deploy/docker-test-setup/config-test.yaml sets
+# profiler.drift_baseline.enabled: true (learning_period 3600, min_samples
+# 20, per_workload true, max_workloads 1000, enforce_deadline_periods 3).
+# Rule text/IDs in this file are unchanged — this pointer confirms the
+# baseline mechanism is now the thing making "not seen during learning" true
+# on the measurement stand, not just prose. The preflight guard demanded
+# above (learning demonstrably closed before the idle-hour/attack window
+# opens) is NOT yet built: the current pipeline (run-2.9.9.F.8-pipeline.sh,
+# step [5/14]) restarts the agent immediately before idle-run.sh, which is
+# less than one learning_period before the measured window opens. Turning
+# this default on required a live pipeline run to prove real timings and
+# still does — no stand access this session either — so this is recorded as
+# an explicit open question in plan.md's Wave 6.0 section, not silently
+# assumed correct.
 

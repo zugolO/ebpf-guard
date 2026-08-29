@@ -190,3 +190,7 @@
 5.9.9.F.8a	idle-actors.txt	fwupd
 5.9.9.F.8a	replay-gate.sh	реплей 17/18
 5.9.9.F.8b	replay-gate.sh	реплей 18/18
+6.0.1	../run-6.0-pipeline.sh	6.0.1 — drift_exec_from_system_bin, объём за idle-час
+6.0.2	../run-6.0-pipeline.sh	6.0.2 — правил со срезом лимитера за idle-час < 7
+6.0.3	../run-6.0-pipeline.sh	6.0c: позитивный контроль базовой линии в окне атаки
+6.0.4	../run-6.0-pipeline.sh	6.0.4 доказан живьём

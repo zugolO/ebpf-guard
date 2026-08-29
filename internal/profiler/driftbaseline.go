@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -363,7 +364,28 @@ func driftSignatureTarget(e types.Event) string {
 		}
 	case types.EventSyscall:
 		if e.Syscall != nil {
-			return strconv.Itoa(int(e.Syscall.Nr))
+			sig := strconv.Itoa(int(e.Syscall.Nr))
+			// A bare syscall number collapses every exec of a given
+			// workload into one signature after the first sample — e.g.
+			// drift_exec_from_system_bin matches on proc.args (which binary
+			// path ran), but without this, "sshd execve'd once" would
+			// permanently suppress every later exec of any OTHER binary by
+			// a comm=sshd workload too, since they all share the same
+			// execve syscall number. When proc.args is available (as it is
+			// for any rule that conditions on it, by construction), fold
+			// its argv[0] into the signature so distinct binaries under the
+			// same syscall number stay distinguishable. Rules that don't
+			// populate proc.args (e.g. drift_dangerous_syscall on
+			// ptrace/mount) are unaffected — ProcArgs is empty and the
+			// signature reduces to the syscall number exactly as before.
+			if e.ProcArgs != "" {
+				argv0 := e.ProcArgs
+				if sp := strings.IndexByte(argv0, ' '); sp >= 0 {
+					argv0 = argv0[:sp]
+				}
+				sig += "|" + normalizeDriftPathPrefix(argv0)
+			}
+			return sig
 		}
 	}
 	return ""

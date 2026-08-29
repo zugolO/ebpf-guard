@@ -2,6 +2,7 @@ package correlator
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -420,6 +421,34 @@ func (t *IncidentTracker) isTrustedComm(comm string) bool {
 	return ok
 }
 
+// isTrustedRootShell reports whether comm is a shell interpreter acting as a
+// trusted root's own job-execution mechanism, rather than a foreign process
+// that happens to share its tree — 5.9.9.F.5d (находка №158), variant 1 of
+// the three named there.
+//
+// cron/systemd run every job through "/bin/sh -c ...", so after 4f started
+// giving drift_new_exec_critical a critical-severity comm=sh alert on that
+// exec, isPeriodicBackground's plain isTrustedComm(alert.Comm) check began
+// treating the daemon's own shell as an untrusted signal, disqualifying every
+// cron minute-tick from the periodic-background window and reopening a fresh
+// incident on each one.
+//
+// This check is deliberately name-scoped and does NOT walk the process tree:
+// an attacker's binary launched from the same cron job (e.g. xmrig) sits at
+// the identical tree position — immediate child of the trusted root — as the
+// shell that runs it, so position alone cannot tell them apart. Only sh/bash
+// get the pass, and only when the incident's root is itself trusted; any
+// other comm, including one nested arbitrarily deep under a trusted root,
+// still marks the incident untrusted. See
+// TestIncidentTracker_CronTick_CoalescesIntoOneIncident (sh must coalesce) and
+// TestIncidentTracker_AttackInDaemon_DoesNotCoalesce (xmrig must not).
+func (t *IncidentTracker) isTrustedRootShell(comm, rootComm string) bool {
+	if comm != "sh" && comm != "bash" {
+		return false
+	}
+	return t.isTrustedComm(rootComm)
+}
+
 // isPeriodicBackground reports whether inc is recurring trusted-daemon
 // background rather than a developing incident: rooted at a trusted comm, with
 // no untrusted-comm and no network signal anywhere in it, and never having
@@ -592,7 +621,7 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		inc.SourceEvents = make(map[uint64]struct{}, 4)
 	}
 	inc.SourceEvents[sourceEventKey(alert)] = struct{}{}
-	if !t.isTrustedComm(alert.Comm) {
+	if !t.isTrustedComm(alert.Comm) && !t.isTrustedRootShell(alert.Comm, inc.RootComm) {
 		inc.HasUntrustedSignal = true
 	}
 	if isNetworkSignal(alert.Event.Type) {
@@ -805,6 +834,7 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 				incidentsTrustedRootTotal.WithLabelValues("attack").Inc()
 			}
 			promoted = true
+			logIncidentPromotion(inc, scoringRuleIDs)
 		}
 	case types.VerdictSuspicious:
 		if !inc.CountedSuspicious {
@@ -816,10 +846,34 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 			if trustedRoot {
 				incidentsTrustedRootTotal.WithLabelValues("suspicious").Inc()
 			}
+			logIncidentPromotion(inc, scoringRuleIDs)
 		}
 	}
 
 	return promoted
+}
+
+// logIncidentPromotion writes the one INFO-level journal record required by
+// 5.9.9.F.5b (находка №153): the agent's journal previously carried no trace
+// of an incident being promoted to "suspicious"/"attack" at all — the
+// verdict counter was the only surviving evidence, and an incident promoted
+// and then evicted within the idle-hour window (Cleanup, TTL) left the
+// acceptance pipeline unable to name the actor that was promoted. This fires
+// exactly once per transition (guarded by the CountedAttack/CountedSuspicious
+// latch at each call site above), never once per alert after the transition,
+// and a later de-escalation does not re-fire it — recalculateScore never
+// clears CountedAttack/CountedSuspicious, so re-promotion cannot happen for
+// the same incident/verdict pair.
+func logIncidentPromotion(inc *types.Incident, scoringRuleIDs []string) {
+	slog.Info("correlator: incident promoted",
+		slog.String("incident_id", inc.ID),
+		slog.String("verdict", string(inc.Verdict)),
+		slog.Float64("score", inc.Score),
+		slog.String("root_comm", inc.RootComm),
+		slog.String("comm", inc.Comm),
+		slog.Uint64("pid", uint64(inc.PID)),
+		slog.Any("process_chain", inc.ProcessChain),
+		slog.Any("scoring_rule_ids", scoringRuleIDs))
 }
 
 // extractTactics returns the sorted set of distinct MITRE tactics represented by

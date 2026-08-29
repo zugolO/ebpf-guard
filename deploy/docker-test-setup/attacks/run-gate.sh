@@ -2823,6 +2823,34 @@ else
             || date -u -r "${idle_win_end_epoch:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
         echo "  окно idle-часа (UTC, по mtime срезов IDLE_METRICS_START/END): ${idle_win_start_utc:-?} -> ${idle_win_end_utc:-?}"
 
+        # 5.9.9.F.5b (№153): состав промоушенов читается из ЖУРНАЛА агента за
+        # окно idle-часа — запись "correlator: incident promoted"
+        # (internal/correlator/incident.go, IncidentTracker.recalculateScore)
+        # пишется РОВНО в момент перехода вердикта и существует независимо от
+        # того, дожил ли инцидент до какого-либо снимка: полтора часа
+        # прогона и TTL-очистка (Cleanup) могут вытеснить инцидент, промотед
+        # внутри idle-часа, из финального состояния прежде, чем что-либо его
+        # прочитает. Тем же приёмом, каким 5.9.4h уже читает journalctl.
+        idle_journal_actors=""
+        idle_journal_promo_n=0
+        if command -v journalctl &> /dev/null && [ -n "${idle_win_start_utc:-}" ] && [ "${idle_win_start_utc:-?}" != "?" ]; then
+            idle_promo_journal=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" \
+                --since "$idle_win_start_utc" --until "${idle_win_end_utc:-now}" 2>/dev/null \
+                | grep 'correlator: incident promoted' | grep 'verdict=attack' || true)
+            idle_journal_promo_n=$(printf '%s\n' "$idle_promo_journal" | grep -c . || true)
+            if [ -n "$idle_promo_journal" ]; then
+                idle_journal_actors=$(printf '%s\n' "$idle_promo_journal" \
+                    | grep -oE 'root_comm=[^ ]*' | sed -e 's/root_comm=//' -e 's/^""$/(пусто)/' \
+                    | sort | uniq -c | sort -rn)
+                echo "  промоушенов verdict=attack в журнале за окно idle-часа: $idle_journal_promo_n, акторы (root_comm):"
+                echo "$idle_journal_actors" | sed 's/^/    /'
+            else
+                echo "  промоушенов verdict=attack в журнале за окно idle-часа: 0"
+            fi
+        else
+            echo "  журнал за окно idle-часа не читался (journalctl недоступен либо окно не определено) — состав из журнала не засчитывается"
+        fi
+
         # Состав. Печатается ВСЕГДА, когда есть на чём считать, — в том числе
         # при дельте 0: «состав пуст» и «состав не считался» это разные строки.
         idle_actors_ok=""
@@ -2883,12 +2911,35 @@ else
             echo "  состав не считался: IDLE_ALERTS_START/END не заданы или jq недоступен (величина выше от этого не зависит)"
         fi
 
+        # 5.9.9.F.5b (№153): когда состав по алертам не вычислен (реестр или
+        # снимки недоступны), но дельта ненулевая и журнал за окно idle-часа
+        # НАЗЫВАЕТ актора — актор по журналу используется как запасной
+        # источник вместо «не засчитывается ни в одну сторону». Величина 3
+        # обязана называть актора при FAIL, а не молчать из-за отсутствия
+        # одного конкретного снимка, пока журнал под рукой.
+        if [ -z "$idle_actors_ok" ] && [ "${idle_attack_delta:-0}" -gt 0 ] 2>/dev/null \
+            && [ "${idle_journal_promo_n:-0}" -gt 0 ] && [ -n "$idle_journal_actors" ]; then
+            idle_actors_registry="$GATE_SCRIPT_DIR/idle-actors.txt"
+            if [ -f "$idle_actors_registry" ]; then
+                idle_journal_comms=$(printf '%s\n' "$idle_journal_actors" | awk '{print $2}' | sort -u)
+                idle_known_comms=$(awk -F'\t' '!/^[[:space:]]*(#|$)/ && NF>=1 {print $1}' "$idle_actors_registry" | sort -u)
+                idle_journal_unknown=$(comm -23 <(echo "$idle_journal_comms") <(echo "$idle_known_comms") | grep -v '^$' || true)
+                if [ -z "$idle_journal_unknown" ]; then
+                    idle_actors_ok=1
+                else
+                    idle_actors_ok=0
+                    idle_unknown_comms="$idle_journal_unknown"
+                fi
+                record_covered "состав по журналу против idle-actors.txt (запасной источник, 5.9.9.F.5b)"
+            fi
+        fi
+
         if [ "$idle_actors_ok" = "1" ]; then
             pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав idle-часа целиком покрыт idle-actors.txt, новых акторов 0 (5.9.9.F.2d, №118; величина 5.9.9.F.1d, №115, порог по-прежнему не назначен)"
         elif [ "$idle_actors_ok" = "0" ]; then
-            fail "новый(е) актор(ы) idle-часа вне idle-actors.txt: $(echo "$idle_unknown_comms" | tr '\n' ' ') — дельта verdict=\"attack\" за idle-час = $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC (5.9.9.F.2d, №118; величина 5.9.9.F.1d, №115)"
+            fail "новый(е) актор(ы) idle-часа вне idle-actors.txt: $(echo "$idle_unknown_comms" | tr '\n' ' ') — дельта verdict=\"attack\" за idle-час = $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; по журналу (5.9.9.F.5b): $(echo "${idle_journal_actors:-нет записей}" | tr '\n' ';') (5.9.9.F.2d, №118; величина 5.9.9.F.1d, №115)"
         else
-            pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав против idle-actors.txt не проверен (реестр отсутствует, IDLE_ALERTS_START/END не заданы или jq недоступен) — не засчитывается ни в одну сторону (5.9.9.F.1d, №115)"
+            pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав против idle-actors.txt не проверен (реестр отсутствует, IDLE_ALERTS_START/END не заданы или jq недоступен, журнал не назвал актора) — не засчитывается ни в одну сторону (5.9.9.F.1d, №115)"
         fi
     fi
 fi

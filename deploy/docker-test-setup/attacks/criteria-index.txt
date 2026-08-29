@@ -148,3 +148,10 @@
 5.9.9.F.4h	../run-2.9.9.F.4-pipeline.sh	пар dns stale/recovered за прогон
 5.9.9.F.4i	../run-2.9.9.F.4-pipeline.sh	перенос волны 5.9.9.F.3 целиком
 5.9.9.F.4i	../run-2.9.9.F.4-pipeline.sh	все семь пунктов 5.9.9.F.3 сверяются этим замером
+5.9.9.F.5a	run-all-attacks.sh	run_exfil_archive_parent_positive_control (comm=tar подтверждён /proc/self/comm)
+5.9.9.F.5a	../run-2.9.9.F.5-pipeline.sh	exfil_archive_to_network_pipe за аптайм, сторож comm_verified
+5.9.9.F.5b	../../../internal/correlator/incident_tracker.go	incident promoted журналируется на переход вердикта
+5.9.9.F.5b	../run-2.9.9.F.5-pipeline.sh	состав промоушенов idle-часа читается из журнала
+5.9.9.F.5c	../run-2.9.9.F.5-pipeline.sh	наведено преflight-шагом — порог по смыслу, не по константе
+5.9.9.F.5e	../run-2.9.9.F.5-pipeline.sh	величина 8 по трём окнам (преflight/idle-час/атаки), root_comm вместо comm
+5.9.9.F.5f	../run-2.9.9.F.5-pipeline.sh	состав величины 8 по паре (comm, rule_id)

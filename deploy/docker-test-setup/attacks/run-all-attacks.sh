@@ -1523,49 +1523,83 @@ run_path_traversal_positive_control() {
 # внешнюю команду, поэтому у события curl proc.parent_comm="tar".
 run_exfil_archive_parent_positive_control() {
     log "==========================================="
-    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.F.4e (находка №145): архиватор как прямой родитель сетевой утилиты (comm=tar → comm=curl)"
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ 5.9.9.F.5a (находка №152, было 5.9.9.F.4e/№145): архиватор как прямой родитель сетевой утилиты (comm=tar → comm=curl)"
     log "==========================================="
 
+    # 5.9.9.F.5a/№152: старая форма делала родителя ШЕБАНГ-СКРИПТОМ
+    # (#!bash). При execve скрипта kernel грузит интерпретатор через
+    # binfmt_script — comm ставится по basename ПУТИ ИНТЕРПРЕТАТОРА
+    # (bprm->filename после подстановки), а не по имени самого скрипта, то
+    # есть comm архиватора был "bash", не "tar". exfil_archive_to_network_pipe
+    # матчит proc.parent_comm == "tar" и на такой родитель не срабатывал по
+    # построению — величина 10 была неизмерима в обе стороны (тот же класс
+    # ошибки, что у shebang-контроля №150/shebang-control-comm-is-interpreter).
+    # Фикс: копия bash-бинаря exec'ится НАПРЯМУЮ под именем "tar" (без
+    # шебанга) — kernel ставит comm по basename исполняемого ФАЙЛА, и это
+    # "tar", независимо от того, что внутри ELF на самом деле bash.
     local true_bin bash_bin
     true_bin="$(command -v true 2>/dev/null)"
     bash_bin="$(command -v bash 2>/dev/null)"
     if [ -z "$true_bin" ] || [ -z "$bash_bin" ]; then
-        warn "true/bash не найдены — позитивный контроль 5.9.9.F.4e пропущен, parent-половина exfil_archive_to_network_pipe остаётся недоказанной"
+        warn "true/bash не найдены — позитивный контроль 5.9.9.F.5a пропущен, parent-половина exfil_archive_to_network_pipe остаётся недоказанной"
         echo ""
         return
     fi
 
-    local fake_dir curl_bin tar_script
+    local fake_dir curl_bin tar_bin comm_check_file
     fake_dir="$(mktemp -d)"
     curl_bin="$fake_dir/curl"
-    tar_script="$fake_dir/tar"
+    tar_bin="$fake_dir/tar"
+    comm_check_file="$fake_dir/comm_check"
     if ! ln -s "$true_bin" "$curl_bin" 2>/dev/null; then
-        warn "не удалось создать $curl_bin — позитивный контроль 5.9.9.F.4e пропущен"
+        warn "не удалось создать $curl_bin — позитивный контроль 5.9.9.F.5a пропущен"
         rm -rf "$fake_dir"
         echo ""
         return
     fi
-    {
-        echo "#!$bash_bin"
-        echo "\"$curl_bin\" -s -o /dev/null http://127.0.0.1:1 || true"
-    } > "$tar_script"
-    chmod +x "$tar_script"
+    if ! cp "$bash_bin" "$tar_bin" 2>/dev/null; then
+        warn "не удалось скопировать $bash_bin в $tar_bin — позитивный контроль 5.9.9.F.5a пропущен"
+        rm -rf "$fake_dir"
+        echo ""
+        return
+    fi
+    chmod +x "$tar_bin"
 
-    local ec_done=0
+    local archiver_ran=0
     mark_attack_window
-    if "$tar_script" >/dev/null 2>&1; then
-        ec_done=1
+    # -c запускает $tar_bin (реальный exec, не шебанг) как "tar"; сначала
+    # процесс сам печатает свой /proc/self/comm в файл — это и есть
+    # СТОРОЖ, требуемый постановкой 5.9.9.F.5a, — затем forks/exec'ит curl.
+    if "$tar_bin" -c "cat /proc/self/comm > '$comm_check_file' 2>/dev/null; '$curl_bin' -s -o /dev/null http://127.0.0.1:1 || true" >/dev/null 2>&1; then
+        archiver_ran=1
         log "child-процесс comm=curl запущен под родителем comm=tar — ожидается срабатывание exfil_archive_to_network_pipe (parent-половина)"
     else
-        warn "запуск $tar_script не удался — позитивный контроль 5.9.9.F.4e не исполнен"
+        warn "запуск $tar_bin -c не удался — позитивный контроль 5.9.9.F.5a не исполнен"
     fi
     mark_attack_window
 
+    local observed_comm="" comm_verified=false
+    if [ -f "$comm_check_file" ]; then
+        observed_comm="$(tr -d '\n' < "$comm_check_file")"
+    fi
+    if [ "$observed_comm" = "tar" ]; then
+        comm_verified=true
+        log "СТОРОЖ 5.9.9.F.5a: /proc/self/comm архиватора подтверждён = 'tar'"
+    else
+        warn "СТОРОЖ 5.9.9.F.5a: /proc/self/comm архиватора = '${observed_comm:-<пусто>}', ожидалось 'tar' — позитивный контроль недостоверен, exfil_archive_to_network_pipe (parent-половина) НЕ доказана"
+    fi
+
     rm -rf "$fake_dir"
 
-    if [ "$ec_done" -eq 1 ] && command -v jq &> /dev/null; then
-        ec_entry=$(jq -n --arg cat "exfil_archive_parent_positive_control" --arg comm "curl" --arg parent "tar" --arg ts "$(date -Iseconds)" \
-            '{category: $cat, comm: $comm, parent_comm: $parent, timestamp: $ts}' 2>/dev/null)
+    # Маркер в манифест пишется, только если архиватор реально был exec'нут
+    # (archiver_ran=1) — иначе "контроль не исполнился" неотличимо от
+    # "контроль исполнился, но не тем comm" (находка №152 на №2.9.9.F.4).
+    # comm_verified внутри записи — то, что отличает вторую ситуацию от
+    # первой ПОСЛЕ исполнения.
+    if [ "$archiver_ran" -eq 1 ] && command -v jq &> /dev/null; then
+        ec_entry=$(jq -n --arg cat "exfil_archive_parent_positive_control" --arg comm "curl" --arg parent "tar" \
+            --argjson verified "$comm_verified" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, parent_comm: $parent, comm_verified: $verified, timestamp: $ts}' 2>/dev/null)
         if [ -n "$ec_entry" ] && [ -f "$MANIFEST_FILE" ]; then
             jq --argjson e "$ec_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
                 && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"

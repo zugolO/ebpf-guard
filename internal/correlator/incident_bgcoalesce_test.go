@@ -21,6 +21,19 @@ import (
 func TestIncidentTracker_CronTick_CoalescesIntoOneIncident(t *testing.T) {
 	tr := newIncidentTracker(60*time.Second, nil, scoringRules())
 
+	// Every alert carries the same process tree — cron (root) running the
+	// job through its own shell — so root identity (rootIdentity) resolves
+	// consistently across the whole test regardless of which comm fired the
+	// rule. This is the shape a real lineageTracker-backed event carries; it
+	// is what let the 5.9.9.F.5d comm=sh alert below land in the identical
+	// incidentKey as the plain "cron" ticks instead of forking a new one.
+	cronRoot := func(leafComm string) []types.ProcessNode {
+		return []types.ProcessNode{
+			{PID: 1000, PPID: 1, Comm: "cron"},
+			{PID: 4242, PPID: 1000, Comm: leafComm},
+		}
+	}
+
 	now := time.Now()
 	// Five minute-ticks — the замер №2.1 pattern (20:40:01.111, 20:41:01.125,
 	// … 20:44:01.159). The tick period is a whisker OVER 60s there, and that
@@ -35,17 +48,31 @@ func TestIncidentTracker_CronTick_CoalescesIntoOneIncident(t *testing.T) {
 		for i, id := range []string{"r1", "r2"} {
 			a := makeAlertWithComm(id, 4242, "prod", types.SeverityWarning,
 				at.Add(time.Duration(i)*time.Millisecond), "cron")
+			a.ProcessTree = cronRoot("cron")
 			tr.Add(a)
 		}
 	}
 
+	// 5.9.9.F.5d (находка №158): today's actual composition additionally
+	// includes drift_new_exec_critical firing on cron's own job shell
+	// (comm=sh, severity critical) on the last tick — 4f gave this rule
+	// critical severity on every exec, and sh is not in defaultTrustedComms.
+	// Before the fix this alone flipped HasUntrustedSignal and forced the
+	// plain 60s window on every following tick; it must still coalesce here.
+	shAt := now.Add(4*tickPeriod).Add(2 * time.Millisecond)
+	shAlert := makeAlertWithComm("r3", 4242, "prod", types.SeverityCritical, shAt, "sh")
+	shAlert.ProcessTree = cronRoot("sh")
+	tr.Add(shAlert)
+
 	incidents := tr.GetAll("", "", 0)
 	assert.Len(t, incidents, 1,
-		"five cron minute-ticks must coalesce into one background incident, not five siblings")
+		"five cron minute-ticks plus the daemon's own sh exec must coalesce into one background incident")
 
 	inc := incidents[0]
 	// Nothing is hidden (пункт 8): every alert still accrued to the incident.
-	assert.Equal(t, 10, inc.AlertCount, "all ten alerts stay visible on the single incident")
+	assert.Equal(t, 11, inc.AlertCount, "all eleven alerts stay visible on the single incident")
+	assert.False(t, inc.HasUntrustedSignal,
+		"cron's own job shell (comm=sh) must not be treated as a foreign process — 5.9.9.F.5d variant 1")
 	assert.NotEqual(t, types.VerdictAttack, inc.Verdict,
 		"pure cron background must not promote to attack")
 }

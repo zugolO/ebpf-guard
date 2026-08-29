@@ -173,3 +173,5 @@
 5.9.9.F.5o	../run-2.9.9.F.5-pipeline.sh	TestRuleFixtures красный
 5.9.9.F.5j	../../../internal/correlator/incident.go	func (t *IncidentTracker) trustedIncidentRoot
 5.9.9.F.5j	../../../internal/correlator/incident_bgcoalesce_test.go	func TestIncidentTracker_AttackBehindShim_DoesNotCoalesce
+5.9.9.F.5p	run-gate.sh	переименований применено:
+5.9.9.F.5p	renamed-rules.txt	drift_new_exec_critical

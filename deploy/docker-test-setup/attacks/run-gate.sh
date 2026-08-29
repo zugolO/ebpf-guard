@@ -296,6 +296,59 @@ intentional_loss_file="$GATE_SCRIPT_DIR/intentional-loss.txt"
 # 5.9.4h ниже уже печатала для него причину. Тот же файл, читается тем же
 # способом (comm -12), что и intentional_loss_file.
 silent_rules_file="$GATE_SCRIPT_DIR/silent-rules.txt"
+# 5.9.9.F.5p (находка №170): реестр переименований правил. Реестры критерия 6
+# ведутся в ТЕКУЩИХ именах, архивы реплеев — в тех, что были на момент замера,
+# поэтому любая волна, переименовавшая правило, ломает все реплеи старше себя:
+# нового имени в архиве нет по построению, и крит. 6 печатает потерю там, где
+# ничего не потеряно (предпрогон №2.9.9.F.5 встал на этом с тремя
+# [REPLAY-MISMATCH] после переименования 5.9.9.F.5g). Подстановка применяется к
+# СПИСКУ СРАБОТАВШИХ правил прогона (метрика+стор, приросты idle-часа), а не к
+# базе: молчание под ОБОИМИ именами по-прежнему потеря — меняется имя, а не
+# факт срабатывания. Злоупотребление (алиас на живое правило вместо
+# переименования) ловится преflight-сторожем ниже сверкой с rules/*.yaml.
+renamed_rules_file="$GATE_SCRIPT_DIR/renamed-rules.txt"
+RENAME_OLD_IDS=()
+RENAME_NEW_IDS=()
+if [ -f "$renamed_rules_file" ]; then
+    while IFS= read -r rn_line || [ -n "$rn_line" ]; do
+        rn_line="${rn_line%$'\r'}"
+        case "$rn_line" in ''|'#'*) continue ;; esac
+        rn_old=$(printf '%s\n' "$rn_line" | awk '{print $1}')
+        rn_new=$(printf '%s\n' "$rn_line" | awk '{print $2}')
+        if [ -z "$rn_old" ] || [ -z "$rn_new" ]; then
+            continue
+        fi
+        RENAME_OLD_IDS+=("$rn_old")
+        RENAME_NEW_IDS+=("$rn_new")
+    done < "$renamed_rules_file"
+fi
+
+# Переводит поданный на stdin список rule_id в текущие имена. Печатает
+# отсортированный уникальный список без пустых строк — ровно в том виде, в
+# каком его ждут comm -12/-23 ниже.
+apply_rule_renames() {
+    local input rn_i
+    input=$(cat)
+    if [ "${#RENAME_OLD_IDS[@]}" -gt 0 ]; then
+        for rn_i in "${!RENAME_OLD_IDS[@]}"; do
+            input=$(printf '%s\n' "$input" | sed "s|^${RENAME_OLD_IDS[$rn_i]}\$|${RENAME_NEW_IDS[$rn_i]}|")
+        done
+    fi
+    printf '%s\n' "$input" | grep -v '^$' | sort -u
+}
+
+# Какие именно переименования сработали на этом списке — для печати, чтобы
+# подстановка не была молчаливой (тот же довод, что у "потеряно, но уже
+# объяснено" в критерии 6: снятая потеря обязана быть названа).
+rule_renames_hit() {
+    local input rn_i
+    input=$(cat)
+    for rn_i in "${!RENAME_OLD_IDS[@]}"; do
+        if printf '%s\n' "$input" | grep -qx -- "${RENAME_OLD_IDS[$rn_i]}"; then
+            printf '%s -> %s\n' "${RENAME_OLD_IDS[$rn_i]}" "${RENAME_NEW_IDS[$rn_i]}"
+        fi
+    done
+}
 # 5.9.7f (находка №83): реестр объяснённых DNS-FP на idle — тот же формат,
 # что silent-rules.txt (`<rule_id> <comm> <категория>`). Прирост четырёх
 # long-label правил за idle-час обязан быть 0 либо каждый экземпляр иметь
@@ -345,6 +398,37 @@ IDLE_ALERTS_START="${IDLE_ALERTS_START:-}"
 # гейтом, а ручным разбором задним числом. Один из трёх жёстких стопов
 # преflight'а волны 5.9.7 (два других — replay-gate.sh на архивах и
 # отдельное окно run_ringbuf_overflow — вне run-gate.sh).
+# 5.9.9.F.5p (находка №170): сторож против злоупотребления реестром
+# переименований. Запись здесь обязана быть ПЕРЕИМЕНОВАНИЕМ, а не алиасом:
+# старого id в дереве правил уже нет, новый — есть. Иначе подстановка
+# накрывала бы живое правило именем другого живого правила и гасила бы
+# настоящую потерю — то есть реестр, снимающий ложные потери, сам стал бы
+# способом прятать настоящие. Проверяется ДО чтения снимков, как и сверка
+# criteria-index.txt ниже. Если дерева rules/ рядом нет (гейт запущен из
+# распакованного архива, а не из чекаута) — печатается строка о том, что
+# сверки не было, вместо молчаливого пропуска.
+if [ "${#RENAME_OLD_IDS[@]}" -gt 0 ]; then
+    rn_rules_dir="$GATE_SCRIPT_DIR/../../../rules"
+    if [ -d "$rn_rules_dir" ]; then
+        rn_bad=""
+        for rn_i in "${!RENAME_OLD_IDS[@]}"; do
+            if grep -rqE "^[[:space:]]*-?[[:space:]]*id:[[:space:]]*\"?${RENAME_OLD_IDS[$rn_i]}\"?[[:space:]]*$" "$rn_rules_dir" 2>/dev/null; then
+                rn_bad="$rn_bad ${RENAME_OLD_IDS[$rn_i]}(старое имя всё ещё в rules/)"
+            fi
+            if ! grep -rqE "^[[:space:]]*-?[[:space:]]*id:[[:space:]]*\"?${RENAME_NEW_IDS[$rn_i]}\"?[[:space:]]*$" "$rn_rules_dir" 2>/dev/null; then
+                rn_bad="$rn_bad ${RENAME_NEW_IDS[$rn_i]}(нового имени в rules/ нет)"
+            fi
+        done
+        if [ -n "$rn_bad" ]; then
+            echo "ПРЕФЛАЙТ FAIL (5.9.9.F.5p, №170): renamed-rules.txt описывает не переименование:$rn_bad — подстановка имён накрыла бы живое правило, цепочка остановлена до чтения снимков" >&2
+            exit 3
+        fi
+        echo "преflight (5.9.9.F.5p): renamed-rules.txt сверен с rules/ — переименований ${#RENAME_OLD_IDS[@]}, старых имён в дереве правил нет"
+    else
+        echo "преflight (5.9.9.F.5p): дерева rules/ рядом с гейтом нет — ${#RENAME_OLD_IDS[@]} переименований применяются без сверки с деревом правил"
+    fi
+fi
+
 CRITERIA_INDEX_FILE="$GATE_SCRIPT_DIR/criteria-index.txt"
 uncovered_criteria_count=0
 uncovered_criteria_ids=""
@@ -1035,6 +1119,15 @@ fi
 only_in_store=$(comm -23 <(echo "$store_type_list") <(echo "$metric_type_list") | grep -v '^$' || true)
 only_in_store_count=$(echo "$only_in_store" | grep -c . || true)
 detected_type_list=$(printf '%s\n%s\n' "$metric_type_list" "$store_type_list" | grep -v '^$' | sort -u)
+# 5.9.9.F.5p (находка №170): срабатывания прогона переводятся в текущие имена
+# правил ДО сравнения с detection-baseline.txt — иначе переименование правила
+# печатается как потеря детекта на каждом архиве старше самого переименования.
+renames_hit=$(printf '%s\n' "$detected_type_list" | rule_renames_hit)
+if [ -n "$renames_hit" ]; then
+    detected_type_list=$(printf '%s\n' "$detected_type_list" | apply_rule_renames)
+    echo "  переименований применено: $(printf '%s\n' "$renames_hit" | grep -c .) (renamed-rules.txt): $(printf '%s\n' "$renames_hit" | tr '\n' ';' | sed 's/;$//')"
+    record_covered "переименований применено:"
+fi
 detected_types=$(echo "$detected_type_list" | grep -c . || true)
 if [ "$only_in_store_count" -gt 0 ]; then
     echo "  типов только в сторе: $only_in_store_count — конвейер не слился (5.9.4c):"
@@ -1209,7 +1302,7 @@ else
     # должно быть видно в выводе гейта, иначе следующая правка severity опять
     # пройдёт незамеченной. Порог тут не нужен — факт роста filtered_total за то
     # же окно атаки и есть доказательство, что правило живо.
-    info_detected=$(metric_grown_rules ebpf_guard_alerts_filtered_total "$basefile_arg" "$final_metrics")
+    info_detected=$(metric_grown_rules ebpf_guard_alerts_filtered_total "$basefile_arg" "$final_metrics" | apply_rule_renames)
     if [ -n "$lost_types_raw" ] && [ -n "$info_detected" ]; then
         info_recovered=$(comm -12 <(echo "$lost_types_raw") <(echo "$info_detected"))
         if [ -n "$info_recovered" ]; then
@@ -1248,7 +1341,7 @@ else
                 # старый однометричный вариант объявлял бы его потерянным и
                 # здесь, во второй попытке, а не только в первой.
                 idle_delta_list=$( { metric_grown_rules ebpf_guard_alerts_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"
-                                     metric_grown_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"; } | sort -u)
+                                     metric_grown_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_START" "$IDLE_METRICS_END"; } | apply_rule_renames)
                 # Третья попытка: правило, сработавшее ПОСЛЕ старта агента, но
                 # ДО открытия idle-окна. Пересчёт 5.9.1d на данных №2.9 показал,
                 # что находка №37 назвала web_sql_injection_files «фоном, который
@@ -1263,7 +1356,7 @@ else
                 # заметно иначе сформулированной строкой, чтобы разница между
                 # «сработало в окне» и «сработало до окна» не стёрлась.
                 idle_prewindow_list=$( { metric_nonzero_rules ebpf_guard_alerts_total "$IDLE_METRICS_END"
-                                         metric_nonzero_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_END"; } | sort -u)
+                                         metric_nonzero_rules ebpf_guard_alerts_filtered_total "$IDLE_METRICS_END"; } | apply_rule_renames)
                 # Разбираем lost_background по одному, чтобы напечатать судьбу
                 # каждого правила, а не только итоговое число.
                 while IFS= read -r rid; do
@@ -3030,7 +3123,7 @@ else
             --no-pager -o cat 2>/dev/null \
             | grep 'rules: syscall rules with no reachable nr in the kernel allowlist' | tail -1)
         if [ -n "$kernel_unreachable_line" ] && command -v jq &> /dev/null; then
-            kernel_unreachable_ids=$(echo "$kernel_unreachable_line" | jq -r '.rule_ids[]?' 2>/dev/null | sort -u)
+            kernel_unreachable_ids=$(echo "$kernel_unreachable_line" | jq -r '.rule_ids[]?' 2>/dev/null | apply_rule_renames)
         fi
     fi
 

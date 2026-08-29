@@ -442,6 +442,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Warn("drift baseline: failed to register metrics", slog.Any("error", err))
 		}
 		engineCfg.DriftBaselineProfiler = driftProfiler
+		// The learning/profiles/stuck gauges are snapshots of map state, not
+		// counters incremented on the event path, so nothing refreshes them
+		// unless something calls UpdateLearningGauge. Without this loop they
+		// read 0 forever while GET /api/v1/status reports the true counts —
+		// i.e. the Prometheus half of the drift-baseline observability this
+		// wave turns on was dead, and "no workloads learning" would be
+		// indistinguishable from "gauge never updated" on a dashboard.
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					driftProfiler.UpdateLearningGauge()
+				}
+			}
+		}()
 	}
 
 	// samplingMux fans BPF-side sampling changes out to the per-collector

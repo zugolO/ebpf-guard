@@ -16,23 +16,33 @@
 
 rules:
   # ── New binary execution drift ─────────────────────────────────────────────
-  - id: drift_new_exec_critical
-    name: "Container drift — new binary executed"
+  - id: drift_exec_from_system_bin
+    name: "Container drift — binary executed from system bin dir"
     description: >
       A binary under a system bin directory was executed (execve, matched on
       argv[0] — 5.9.9.F.4f/№146: an `op: open` on the same path range does
       NOT mean the file ran, e.g. `ldd`/`file`/`readelf`/a package manager
       inspecting it; this rule now requires the exec fact itself, the same
-      technique 5.9.9.F.3b used for the /tmp-execution family). "not present
-      during the baseline learning window" is aspirational, not current
-      behavior: profiler.drift_baseline.enabled defaults to false (and is
-      false in this stand's config), so today this rule alerts on EVERY
-      matching exec, not just novel ones — enabling the profiler to make the
-      "new" claim true is deferred (see the class-wide baseline-decision
-      note below the last rule in this file). This is intended as the #1
-      highest-signal runtime indicator for dropped payloads, webshells, and
-      cryptominers once baselining is on; until then it is a broad
-      "system-path binary executed" rule.
+      technique 5.9.9.F.3b used for the /tmp-execution family). Renamed from
+      `drift_new_exec_critical` and downgraded to `warning` by 5.9.9.F.5g/
+      №154: profiler.drift_baseline.enabled defaults to false (and is false
+      in this stand's config), so as shipped this rule cannot tell a novel
+      binary from a routine one — it fires on EVERY matching exec. Under
+      that config the old name/severity was a false claim: on the idle-hour
+      of measurement №2.9.9.F.4 it produced 576 of 607 alerts and 576 of 577
+      criticals, and 499 of those were re-exec of `sshd` on each inbound TCP
+      connection (~1 per 7.2s on this stand's public IP, 9 scanning sources,
+      0 successful auths — see the "5.9.9.F.5g" block in plan.md for the
+      measured numbers). That volume is a property of the stand's ssh
+      exposure, not a drift signal, and it also pins the per-rule rate
+      limiter (10/60s) for most of the idle hour, which is a second,
+      independent reason not to keep it `critical` (see №164/5.9.9.F.5n,
+      still open). `critical` stays reserved for a rule of this shape run
+      WITH `drift_baseline` enabled and a learning window proven closed
+      before the measurement window opens (option 1 of the 5g decision,
+      not implemented this session — the class-wide baseline note below
+      still applies verbatim). Until baselining is on, treat this as a
+      broad "system-path binary executed" rule, not a novelty signal.
     event_type: syscall
     condition:
       field: proc.args
@@ -43,7 +53,7 @@ rules:
         - "/usr/bin/"
         - "/usr/sbin/"
         - "/usr/local/bin/"
-    severity: critical
+    severity: warning
     action: alert
     class: drift
     tags:

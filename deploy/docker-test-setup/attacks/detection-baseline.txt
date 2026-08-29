@@ -247,7 +247,7 @@ cred_proc_maps_mass_read
 credaccess_ssh_authorized_keys_modified
 dns_tunneling_long_domain
 drift_dangerous_syscall
-drift_new_exec_critical
+drift_exec_from_system_bin
 drift_new_file_dir_sensitive
 drift_new_library_in_system_dir
 ebpf_subversion_detach_nonroot

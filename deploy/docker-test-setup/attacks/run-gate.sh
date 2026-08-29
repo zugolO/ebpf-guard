@@ -2833,22 +2833,57 @@ else
         # прочитает. Тем же приёмом, каким 5.9.4h уже читает journalctl.
         idle_journal_actors=""
         idle_journal_promo_n=0
-        if command -v journalctl &> /dev/null && [ -n "${idle_win_start_utc:-}" ] && [ "${idle_win_start_utc:-?}" != "?" ]; then
-            idle_promo_journal=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" \
+        idle_journal_promo_n_all=0
+        # 5.9.9.F.5l (№162): агент пишет структурные логи JSON
+        # (slog.NewJSONHandler, cmd/ebpf-guard/main.go:2765) — запись
+        # "correlator: incident promoted" (internal/correlator/incident.go)
+        # приходит ОДНОЙ JSON-строкой на MESSAGE ("msg":"correlator: incident
+        # promoted","verdict":"attack","root_comm":"...",...), не как
+        # logfmt "key=value". Прежний `grep 'verdict=attack' | grep -oE
+        # 'root_comm=[^ ]*'` не матчил НИКОГДА — искомых подстрок в JSON нет
+        # (там `"verdict":"attack"` и `"root_comm":"..."` с кавычками и
+        # двоеточием) — журнальный источник актора для величины 3 не
+        # читался ни разу с момента постановки 5.9.9.F.5b. `-o cat` отдаёт
+        # голое поле MESSAGE (без даты/юнита/pid) — ровно ту JSON-строку,
+        # что пишет slog, без парсинга обрамления journalctl.
+        if command -v journalctl &> /dev/null && command -v jq &> /dev/null \
+            && [ -n "${idle_win_start_utc:-}" ] && [ "${idle_win_start_utc:-?}" != "?" ]; then
+            idle_promo_journal_raw=$(journalctl -u "${EBPF_GUARD_SERVICE_UNIT:-ebpf-guard-test.service}" -o cat \
                 --since "$idle_win_start_utc" --until "${idle_win_end_utc:-now}" 2>/dev/null \
-                | grep 'correlator: incident promoted' | grep 'verdict=attack' || true)
+                | jq -c 'select(.msg? == "correlator: incident promoted")' 2>/dev/null || true)
+            idle_journal_promo_n_all=$(printf '%s\n' "$idle_promo_journal_raw" | grep -c . || true)
+            # 5.9.9.F.5l: отметка покрытия ставится ЗДЕСЬ, внутри ветки, где
+            # журнал реально прочитан, а не рядом с блоком — иначе механизм
+            # 5.9.9e («ветка исполнилась?») отвечал бы «да» и на стенде без
+            # journalctl/jq, то есть ровно на том исходе, ради различения
+            # которого он и заведён (№102).
+            record_covered "5.9.9.F.5l: журнал прочитан jq по JSON-payload"
+            idle_promo_journal=$(printf '%s\n' "$idle_promo_journal_raw" | jq -c 'select(.verdict? == "attack")' 2>/dev/null || true)
             idle_journal_promo_n=$(printf '%s\n' "$idle_promo_journal" | grep -c . || true)
             if [ -n "$idle_promo_journal" ]; then
                 idle_journal_actors=$(printf '%s\n' "$idle_promo_journal" \
-                    | grep -oE 'root_comm=[^ ]*' | sed -e 's/root_comm=//' -e 's/^""$/(пусто)/' \
+                    | jq -r '(.root_comm // "") | if . == "" then "(пусто)" else . end' \
                     | sort | uniq -c | sort -rn)
                 echo "  промоушенов verdict=attack в журнале за окно idle-часа: $idle_journal_promo_n, акторы (root_comm):"
                 echo "$idle_journal_actors" | sed 's/^/    /'
             else
                 echo "  промоушенов verdict=attack в журнале за окно idle-часа: 0"
             fi
+            echo "  промоушенов в журнале за окно idle-часа (оба вердикта, attack+suspicious): $idle_journal_promo_n_all"
+
+            # 5.9.9.F.5l, долг признанный исполнением 5.9.9.F.5b: плановая
+            # величина «записей о промоушении = дельте incidents_total (по
+            # обоим вердиктам)» — раньше её было нечем проверить, потому что
+            # журнал не читался вовсе.
+            idle_promo_delta_total=$(( ${idle_attack_delta:-0} + ${idle_susp_delta:-0} ))
+            if [ "$idle_journal_promo_n_all" -eq "$idle_promo_delta_total" ] 2>/dev/null; then
+                echo "  ДОСТИГНУТО (5.9.9.F.5b/5.9.9.F.5l): записей о промоушении в журнале (оба вердикта) = $idle_journal_promo_n_all = дельта incidents_total (attack+suspicious) = $idle_promo_delta_total"
+            else
+                echo "  НЕ ДОСТИГНУТО (5.9.9.F.5b/5.9.9.F.5l): записей о промоушении в журнале (оба вердикта) = $idle_journal_promo_n_all, дельта incidents_total (attack+suspicious) = $idle_promo_delta_total — расходится"
+            fi
+            record_covered "5.9.9.F.5l: записей о промоушении против дельты incidents_total"
         else
-            echo "  журнал за окно idle-часа не читался (journalctl недоступен либо окно не определено) — состав из журнала не засчитывается"
+            echo "  журнал за окно idle-часа не читался (journalctl/jq недоступен либо окно не определено) — состав из журнала не засчитывается"
         fi
 
         # Состав. Печатается ВСЕГДА, когда есть на чём считать, — в том числе

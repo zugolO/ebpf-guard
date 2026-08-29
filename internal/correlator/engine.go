@@ -185,6 +185,13 @@ type CorrelationEngine struct {
 	// and sigma_log_deletion — the whole reason that finding stayed open.
 	alertsDedupDroppedByRule *prometheus.CounterVec
 
+	// alertsRateLimitedByRule breaks down per-rule rate-limiter drops (5.9.9.F.5n,
+	// №164): before this, per-rule drops were folded into the un-labelled
+	// alertsDropped counter alongside dedup and global-limiter drops, so a rule
+	// pinned at the 10/60s ceiling was indistinguishable from a rule that simply
+	// stopped firing.
+	alertsRateLimitedByRule *prometheus.CounterVec
+
 	// Rule-based enforcement (optional)
 	actionExecutor  ActionExecutor
 	enforceCooldown time.Duration
@@ -710,6 +717,14 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		Help: "Alerts suppressed by the sliding-window deduplication filter, broken down by rule_id (5.8b).",
 	}, []string{"rule_id"})
 
+	// Per-rule rate-limiter drop counter (5.9.9.F.5n, №164). Same rationale and
+	// cardinality bound as alertsDedupDroppedByRule above: only rules that
+	// actually hit their 10/60s ceiling get a series.
+	alertsRateLimitedByRule := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ebpf_guard_alerts_ratelimited_by_rule_total",
+		Help: "Alerts suppressed by the per-rule rate limiter, broken down by rule_id (5.9.9.F.5n).",
+	}, []string{"rule_id"})
+
 	var regoQueue chan regoTask
 	var regoQueueDropped prometheus.Counter
 	var regoQueueGauge prometheus.Gauge
@@ -761,6 +776,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		dedup:                    newShardedDedup(dedupWindow),
 		alertsDedupDropped:       alertsDedupDropped,
 		alertsDedupDroppedByRule: alertsDedupDroppedByRule,
+		alertsRateLimitedByRule:  alertsRateLimitedByRule,
 		actionExecutor:           config.ActionExecutor,
 		enforceCooldown:          enforceCooldown,
 		cooldowns:                newShardedCooldowns(),
@@ -1366,6 +1382,16 @@ func (ce *CorrelationEngine) recordDedupDrop(ruleID string) {
 	}
 }
 
+// recordRateLimitDrop counts one alert suppressed by the per-rule rate
+// limiter, broken down by rule (5.9.9.F.5n, №164). Every per-rule limiter
+// drop site must go through here — the aggregate alertsDropped counter alone
+// cannot distinguish "rule hit its 10/60s ceiling" from any other drop cause.
+func (ce *CorrelationEngine) recordRateLimitDrop(ruleID string) {
+	if ce.alertsRateLimitedByRule != nil {
+		ce.alertsRateLimitedByRule.WithLabelValues(ruleID).Inc()
+	}
+}
+
 // markDedup records that (ruleID, pid, comm) was emitted at now.
 // Must be called only after the alert has passed all rate-limit checks.
 // now should be captured once per Ingest call (before any lock is acquired).
@@ -1548,6 +1574,7 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 		ce.regoQueueGauge,
 		ce.alertsDedupDropped,
 		ce.alertsDedupDroppedByRule,
+		ce.alertsRateLimitedByRule,
 		ce.regoEvalErrors,
 		ce.reloadTotal,
 		ce.reloadDuration,
@@ -1836,6 +1863,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			if !isDup {
 				// Per-rule rate limit check (only for non-deduped alerts).
 				if !ce.rateLimiter.Allow(alert.RuleID) {
+					ce.recordRateLimitDrop(alert.RuleID)
 					ce.alertsDropped.Add(1)
 					return
 				}
@@ -1931,6 +1959,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 				continue
 			}
 			if !ce.rateLimiter.Allow(alert.RuleID) {
+				ce.recordRateLimitDrop(alert.RuleID)
 				ce.alertsDropped.Add(1)
 				continue
 			}
@@ -1963,15 +1992,24 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			if ce.enableDedup && ce.checkDup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm) {
 				ce.recordDedupDrop(iocAlert.RuleID)
 				ce.alertsDropped.Add(1)
-			} else if ce.rateLimiter.Allow(iocAlert.RuleID) &&
-				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
-				if ce.enableDedup {
-					ce.markDedup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm, start)
-				}
-				alerts = append(alerts, *iocAlert)
-				ce.alertsGenerated.Add(1)
 			} else {
-				ce.alertsDropped.Add(1)
+				perRuleOK := ce.rateLimiter.Allow(iocAlert.RuleID)
+				globalOK := !ce.globalLimiterEnabled || ce.globalLimiter.Allow()
+				if perRuleOK && globalOK {
+					if ce.enableDedup {
+						ce.markDedup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm, start)
+					}
+					alerts = append(alerts, *iocAlert)
+					ce.alertsGenerated.Add(1)
+				} else {
+					ce.alertsDropped.Add(1)
+					if !perRuleOK {
+						ce.recordRateLimitDrop(iocAlert.RuleID)
+					}
+					if !globalOK {
+						ce.alertsDroppedGlobal.Add(1)
+					}
+				}
 			}
 		}
 	}
@@ -2072,6 +2110,9 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 						ad.RecordPublishedAnomaly(e)
 					} else {
 						ce.alertsDropped.Add(1)
+						if !perRuleOK {
+							ce.recordRateLimitDrop(anomalyAlert.RuleID)
+						}
 						if !globalOK {
 							ce.alertsDroppedGlobal.Add(1)
 						}
@@ -2127,15 +2168,24 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			if ce.enableDedup && ce.checkDup(allowlistAlert.RuleID, allowlistAlert.PID, allowlistAlert.Comm) {
 				ce.recordDedupDrop(allowlistAlert.RuleID)
 				ce.alertsDropped.Add(1)
-			} else if ce.rateLimiter.Allow(allowlistAlert.RuleID) &&
-				(!ce.globalLimiterEnabled || ce.globalLimiter.Allow()) {
-				if ce.enableDedup {
-					ce.markDedup(allowlistAlert.RuleID, allowlistAlert.PID, allowlistAlert.Comm, start)
-				}
-				alerts = append(alerts, allowlistAlert)
-				ce.alertsGenerated.Add(1)
 			} else {
-				ce.alertsDropped.Add(1)
+				perRuleOK := ce.rateLimiter.Allow(allowlistAlert.RuleID)
+				globalOK := !ce.globalLimiterEnabled || ce.globalLimiter.Allow()
+				if perRuleOK && globalOK {
+					if ce.enableDedup {
+						ce.markDedup(allowlistAlert.RuleID, allowlistAlert.PID, allowlistAlert.Comm, start)
+					}
+					alerts = append(alerts, allowlistAlert)
+					ce.alertsGenerated.Add(1)
+				} else {
+					ce.alertsDropped.Add(1)
+					if !perRuleOK {
+						ce.recordRateLimitDrop(allowlistAlert.RuleID)
+					}
+					if !globalOK {
+						ce.alertsDroppedGlobal.Add(1)
+					}
+				}
 			}
 		}
 	}

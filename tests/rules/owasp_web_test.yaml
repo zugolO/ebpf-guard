@@ -5,6 +5,10 @@ tests:
     rule_id: owasp_path_traversal
     event:
       type: file
+      # 5.9.9.F.5o (#165): 5.9.9.F.4d narrowed this rule to require a web-worker
+      # comm (finding №144 — it used to fire on grep/ld reading any ../ path);
+      # the fixture predates that narrowing and never got a comm.
+      comm: "nginx"
       file:
         filename: "/var/www/html/../../etc/passwd"
         op: open
@@ -15,6 +19,7 @@ tests:
     rule_id: owasp_path_traversal
     event:
       type: file
+      comm: "nginx" # 5.9.9.F.5o (#165): see note above.
       file:
         filename: "/app/%2e%2e%2fetc/shadow"
         op: open

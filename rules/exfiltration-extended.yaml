@@ -205,9 +205,11 @@ rules:
       commands siblings under the same shell, which this predicate does
       NOT see — the event schema carries proc.comm/proc.ppid/proc.parent_comm
       (single-event, parent-only), and the correlation engine has no
-      sibling/ancestry-fan-out join (5.9.9.F.4e, №145). Detecting the
-      sibling-pipe form requires new stateful correlator support and is
-      deferred to a follow-up finding.
+      sibling/ancestry-fan-out join (5.9.9.F.4e, №145). Decision recorded by
+      5.9.9.F.5a: величина 10 of the acceptance run is formulated on the
+      parent-child form only — the classic pipe form stays undetected and is
+      carried as finding №168 (stateful sibling correlation), NOT as a silent
+      zero in this rule's count.
     event_type: syscall
     condition_group:
       operator: and

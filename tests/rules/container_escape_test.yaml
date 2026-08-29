@@ -5,6 +5,9 @@ tests:
     rule_id: container_escape_mount
     event:
       type: syscall
+      pid: 4242 # 5.9.9.F.5o (#165): the harness defaults an unset pid to 1,
+      # which collides with the systemd-init-self exception (pid==1) added
+      # by 5.9.9.F.3c — an attacking process never legitimately has pid 1.
       comm: "app"
       syscall:
         nr: 165
@@ -33,6 +36,7 @@ tests:
     rule_id: container_escape_unshare_user
     event:
       type: syscall
+      pid: 4242 # 5.9.9.F.5o (#165): see the pid=4242 note on container_escape_mount above.
       comm: "app"
       syscall:
         nr: 272

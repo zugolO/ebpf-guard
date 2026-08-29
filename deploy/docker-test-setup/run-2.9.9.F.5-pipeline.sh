@@ -282,7 +282,7 @@ export CPU_PRESSURE_MAX_REDUCE_WAIT="${CPU_PRESSURE_MAX_REDUCE_WAIT:-180}"
 # её семь пунктов принимаются этим замером наравне с девятью пунктами
 # 5.9.9.F.4; пункт без строки в criteria-index.txt нигде не проверяется, и
 # сторож 5.9.9.F.3f ниже валит преflight именно за это.
-export WAVE_CRITERIA_IDS="${WAVE_CRITERIA_IDS:-5.9.9.F.3a 5.9.9.F.3b 5.9.9.F.3c 5.9.9.F.3d 5.9.9.F.3e 5.9.9.F.3f 5.9.9.F.3g 5.9.9.F.4a 5.9.9.F.4b 5.9.9.F.4c 5.9.9.F.4d 5.9.9.F.4e 5.9.9.F.4f 5.9.9.F.4g 5.9.9.F.4h 5.9.9.F.4i 5.9.9.F.5a 5.9.9.F.5b 5.9.9.F.5c 5.9.9.F.5e 5.9.9.F.5f}"
+export WAVE_CRITERIA_IDS="${WAVE_CRITERIA_IDS:-5.9.9.F.3a 5.9.9.F.3b 5.9.9.F.3c 5.9.9.F.3d 5.9.9.F.3e 5.9.9.F.3f 5.9.9.F.3g 5.9.9.F.4a 5.9.9.F.4b 5.9.9.F.4c 5.9.9.F.4d 5.9.9.F.4e 5.9.9.F.4f 5.9.9.F.4g 5.9.9.F.4h 5.9.9.F.4i 5.9.9.F.5a 5.9.9.F.5b 5.9.9.F.5c 5.9.9.F.5d 5.9.9.F.5e 5.9.9.F.5f 5.9.9.F.5g 5.9.9.F.5h 5.9.9.F.5i 5.9.9.F.5j 5.9.9.F.5k 5.9.9.F.5l 5.9.9.F.5m 5.9.9.F.5n 5.9.9.F.5o}"
 # 5.9.9.F.3a/3b/3c: имена канареек продуктовых контролей. Вынесены сюда по
 # той же причине, что и прочие параметры: величина, на которой стоит вердикт
 # пункта волны, обязана лежать в артефактах замера.
@@ -298,6 +298,11 @@ git status --porcelain | sed 's/^/  локальная правка: /'
 echo "--- преflight: интерпретатор ---"
 echo "  bash: ${BASH_VERSION}"
 [ "${BASH_VERSINFO[0]}" -ge 4 ] || die "bash ${BASH_VERSION} — run-gate.sh требует 4+ (declare -A, секция 19)"
+
+echo "--- преflight: фикстурный набор правил (5.9.9.F.5o, №165) ---"
+go test -count=1 ./tests/... 2>&1 | tail -20
+go test -count=1 ./tests/... >/dev/null 2>&1 \
+    || die "TestRuleFixtures красный — фикстуры/правила разошлись, метрики гейта по правилам недостоверны (5.9.9.F.5o, №165)"
 
 echo "--- преflight: go-тесты волн 5.9.4/5.9.5 ---"
 go test -count=1 ./internal/enforcer/ -run 'DryRunSentinel|TestExecuteKill_DryRun|TestExecuteThrottle_DryRun' 2>&1 | tail -3
@@ -667,11 +672,45 @@ grep -q '/proc/self/comm' <(awk '/^run_exfil_archive_parent_positive_control\(\)
     || die "5.9.9.F.5a: контроль не читает /proc/self/comm архиватора — доказательство comm=tar отсутствует, позитивный контроль остаётся недостоверным ровно как на №2.9.9.F.4"
 echo "  ок: контроль читает /proc/self/comm архиватора и пишет comm_verified в манифест"
 
+# 5.9.9.F.5k (№161): сторож выше (5.9.9.F.5a) проверял НАПИСАНИЕ — что в теле
+# функции есть подстрока "/proc/self/comm". Это не ловит №161: было
+# `cat /proc/self/comm > file`, cat — ВНЕШНИЙ форкнутый процесс, и
+# /proc/self/comm внутри НЕГО — это comm самого cat (5/5 запусков), а не
+# comm родителя-архиватора. Подстрока была на месте, сторож проходил,
+# величина 10 всё равно оставалась без входа — «сторож, проверяющий
+# написание, а не результат» (тот же класс, что №152, уровнем выше).
+# Фикс: сторож исполняет ТУ ЖЕ конструкцию (bash-копия под именем "tar",
+# `read`-builtin вместо `cat`) прямо здесь и падает по РЕЗУЛЬТАТУ, если
+# напечатан не "tar".
+echo "--- преflight: 5.9.9.F.5k — сторож 5a проверяет РЕЗУЛЬТАТ (comm=tar), а не подстроку исходника (№161) ---"
+if [ -r /proc/self/comm ]; then
+    _5k_dir=$(mktemp -d)
+    _5k_bin="$_5k_dir/tar"
+    _5k_bash="$(command -v bash)"
+    if cp "$_5k_bash" "$_5k_bin" 2>/dev/null; then
+        chmod +x "$_5k_bin"
+        _5k_out="$_5k_dir/comm.txt"
+        "$_5k_bin" -c "read -r c < /proc/self/comm; printf '%s' \"\$c\" > '$_5k_out' 2>/dev/null" >/dev/null 2>&1
+        _5k_observed=$(cat "$_5k_out" 2>/dev/null)
+        [ "$_5k_observed" = "tar" ] \
+            || die "5.9.9.F.5k: та же конструкция, что использует run_exfil_archive_parent_positive_control (bash-копия под именем tar, read-builtin), на ЭТОЙ машине даёт comm='${_5k_observed:-<пусто>}', не 'tar' — сторож проверял написание исходника, не результат (№161); величина 10 при таком исходе обречена на FAIL(сторож) даже при исправном правиле"
+        echo "  ок: конструкция сторожа исполнена на месте, comm='tar' подтверждён по результату"
+    else
+        die "5.9.9.F.5k: не удалось скопировать $_5k_bash для смысловой проверки сторожа — сторож не исполнился"
+    fi
+    rm -rf "$_5k_dir"
+else
+    echo "  SKIP: /proc недоступен на этой машине (не Linux) — смысловая проверка сторожа 5a требует живого /proc/self/comm, откладывается до стенда; проверки написания исходника (5.9.9.F.5a выше) остаются в силе"
+fi
+grep -q 'read -r c < /proc/self/comm' <(awk '/^run_exfil_archive_parent_positive_control\(\)/,/^}/' $SETUP/attacks/run-all-attacks.sh) \
+    || die "5.9.9.F.5k: run_exfil_archive_parent_positive_control больше не читает /proc/self/comm через read-builtin — регрессия №161 (форк cat) могла вернуться незамеченной"
+echo "  ок: контроль по-прежнему читает /proc/self/comm через read-builtin (не форкает cat)"
+
 echo "--- преflight: 5.9.9.F.4f — семейство drift правлено, базовая линия решена явно (№146) ---"
-rule_predicate drift_new_exec_critical rules/drift-rules.yaml | grep -q 'proc.args' \
-    || die "5.9.9.F.4f: drift_new_exec_critical по-прежнему не читает факт exec (нет proc.args в условии) — предикат op==open не означает исполнения, и правило остаётся первым местом по критикалам аптайма (44 на №2.9.9.F.2)"
-rule_predicate drift_new_exec_critical rules/drift-rules.yaml | grep -qE 'event_type:[[:space:]]*syscall' \
-    || die "5.9.9.F.4f: drift_new_exec_critical остался event_type: file — proc.args на файловом событии не заполняет НИ ОДИН коллектор (тот же дефект, которым был ослеплён sigma_binary_in_tmp_executed до ревизии 5.9.9.F.3)"
+rule_predicate drift_exec_from_system_bin rules/drift-rules.yaml | grep -q 'proc.args' \
+    || die "5.9.9.F.4f: drift_exec_from_system_bin по-прежнему не читает факт exec (нет proc.args в условии) — предикат op==open не означает исполнения, и правило остаётся первым местом по критикалам аптайма (44 на №2.9.9.F.2)"
+rule_predicate drift_exec_from_system_bin rules/drift-rules.yaml | grep -qE 'event_type:[[:space:]]*syscall' \
+    || die "5.9.9.F.4f: drift_exec_from_system_bin остался event_type: file — proc.args на файловом событии не заполняет НИ ОДИН коллектор (тот же дефект, которым был ослеплён sigma_binary_in_tmp_executed до ревизии 5.9.9.F.3)"
 if grep -qE '^[[:space:]]*values:[[:space:]]*\[\][[:space:]]*$' rules/drift-rules.yaml; then
     die "5.9.9.F.4f: в rules/drift-rules.yaml остался пустой values: [] — «всегда истина» в предикате, и загрузчик 5.9.9.F.4g теперь ОТВЕРГНЕТ этот файл целиком (порядок пунктов волны: 4f раньше 4g)"
 fi
@@ -686,7 +725,45 @@ if awk '/^profiler:/{p=1} p && /drift_baseline:/{d=1} d && /enabled:[[:space:]]*
 fi
 grep -q 'Class-wide baseline decision' rules/drift-rules.yaml \
     || die "5.9.9.F.4f: в rules/drift-rules.yaml нет записи о решении по базовой линии — постановка требует объявить выбор ДО правки и записать его; без записи следующая сессия включит baseline, не увидев риска learning_period == idle-час"
-echo "  ок: drift_new_exec_critical переведён на факт exec, пустых values: [] нет, решение по baseline записано"
+echo "  ок: drift_exec_from_system_bin переведён на факт exec, пустых values: [] нет, решение по baseline записано"
+
+echo "--- преflight: 5.9.9.F.5g — drift_new_exec_critical переименовано и понижено (№154) ---"
+# №154: правило дало 576/607 алертов и 576/577 критикалов idle-часа
+# №2.9.9.F.4, из них 499 — пере-exec sshd на входящее ssh-соединение (см. блок
+# «Числа для решений сняты» в plan.md, волна 5.9.9.F.5). Выбран вариант 2:
+# rename + понижение до warning, critical зарезервирован за вариантом с
+# drift_baseline (не включённым). Сторож ловит обе половины регрессии: старое
+# имя не должно существовать в дереве, новое — обязано быть warning, не
+# critical (иначе агент снова упирается в потолок per-rule лимитера 10/60с на
+# каждом идентичном ssh-скане, находка №164/5.9.9.F.5n).
+grep -q 'id: drift_new_exec_critical' rules/drift-rules.yaml \
+    && die "5.9.9.F.5g: rules/drift-rules.yaml по-прежнему содержит старый id drift_new_exec_critical — переименование №154 откатилось, а detection-baseline.txt/background-rules.txt/этот пайплайн уже сверяются по новому имени drift_exec_from_system_bin"
+grep -q 'id: drift_exec_from_system_bin' rules/drift-rules.yaml \
+    || die "5.9.9.F.5g: rules/drift-rules.yaml не содержит drift_exec_from_system_bin — правило потеряно или переименовано иначе, чем зафиксировано в plan.md"
+rule_predicate drift_exec_from_system_bin rules/drift-rules.yaml | grep -qE '^[[:space:]]*severity:[[:space:]]*warning[[:space:]]*$' \
+    || die "5.9.9.F.5g ПРОВАЛЕН: drift_exec_from_system_bin не понижено до severity: warning — правило снова критикал-first на каждом ssh-скане стенда (499/607 idle-часа №2.9.9.F.4), величина 11 снова меряет потолок per-rule лимитера, а не drift"
+echo "  ок: drift_new_exec_critical переименовано в drift_exec_from_system_bin, severity=warning"
+
+echo "--- преflight: 5.9.9.F.5d/5.9.9.F.5j — коалесцирование фона обеими сторонами (№158/№160) ---"
+# Обе половины 5.5d проверяются ОДНИМ прогоном, потому что поодиночке каждая
+# ничего не доказывает: тест «cron-тики схлопываются» зелёный и у правки,
+# которая просто доверяет всему подряд, а тест «атака из-под демона не
+# схлопывается» зелёный и у полностью выключённого коалесцирования. Пункт
+# считается исполненным, только если зелены обе стороны сразу.
+#   5d (№158): cron-тик + собственный sh демона = один инцидент; xmrig в том
+#              же дереве = по-прежнему два.
+#   5j (№160): grafana за containerd-shim (усечённое на границе контейнера
+#              дерево) = один инцидент вместо пяти строк на снимок; xmrig за
+#              тем же шимом = два, и шим без записанной цепочки трастовым не
+#              становится.
+go test -count=1 ./internal/correlator/ \
+        -run 'TestIncidentTracker_CronTick_CoalescesIntoOneIncident|TestIncidentTracker_AttackInDaemon_DoesNotCoalesce|TestIncidentTracker_ContainerizedDaemon_CoalescesThroughShim|TestIncidentTracker_AttackBehindShim_DoesNotCoalesce|TestIncidentTracker_ShimWithoutChain_StaysUntrustedRooted' >/dev/null 2>&1 \
+    || die "5.9.9.F.5d/5.9.9.F.5j: тесты коалесцирования фона красные или отсутствуют — знаменатель критерия 9 (доля инцидентов на демонах) снова считает по одной строке на тик, и величина «< 20% на демонах» опять измеряет структурную константу, а не детект"
+grep -q 'func (t \*IncidentTracker) trustedIncidentRoot' internal/correlator/incident.go \
+    || die "5.9.9.F.5j: в internal/correlator/incident.go нет trustedIncidentRoot — сквозной просмотр через containerd-shim откатился, пять grafana-инцидентов на снимок вернулись"
+grep -q 'containerd-shim' internal/correlator/incident.go \
+    || die "5.9.9.F.5j: список containerSupervisorComms не содержит containerd-shim — усечённое на границе контейнера дерево снова читается как недоверенный корень"
+echo "  ок: обе стороны 5d и все три стороны 5j зелёные"
 
 echo "--- преflight: 5.9.9.F.4g — загрузчик отвергает пустой values: [] (№148) ---"
 go test -count=1 ./internal/correlator/ -run 'TestRuleLoaderEmptyValuesList' >/dev/null 2>&1 \
@@ -1011,28 +1088,47 @@ register_pipeline_observer_root
 date -u +"%Y-%m-%d %H:%M:%S" > /root/agent-start-2.9.9.F.5.txt
 systemctl show ebpf-guard-test.service -p ExecMainStartTimestamp | sed 's/^/  /'
 
-# 5.9.9.F.4c, поправка предпрогона №2.9.9.F.5 (находка №151). ИСКЛЮЧЕНИЕ
-# ДЕРЕВА СНИМАЕТСЯ НА ВСЁ ВРЕМЯ НАВЕДЁННЫХ КОНТРОЛЕЙ [6/14]...[9.5/14].
+# 5.9.9.F.4c, сужено 5.9.9.F.5h/№151 (вариант 1 постановки: «исключение
+# сужается до поллинга и не покрывает генераторы контролей»).
 #
-# Постановка 4c назвала окном исключения «преflight, сборку И контроли ВНЕ
-# окна замера». Третья часть этого перечисления невыполнима по построению, и
-# предпрогон показал это числом: генераторы всех наведённых контролей —
-# ПОТОМКИ этого самого процесса, а фильтр 5.9.2g режет дерево В ЯДРЕ, до
-# кольца. Контроль счётности [8/14] дал канареечную серию 0 из N=10000
-# (на №2.9.9.F.3, где исключения не было, — 10001) и остановил цепочку; за
-# ним ровно так же ослепли бы переполнение кольца [9/14], CPU-давление
-# [9.7/14], три пары продуктовых контролей [9.6/14] и cred_proc_maps
-# [9.5/14] — то есть ВСЕ жёсткие стопы волны разом, причём в форме, которую
-# сама волна велит читать как ослепление правил (находка №57).
+# До этой правки (предпрогон №2.9.9.F.5, находка №151, `585768a`) исключение
+# СНИМАЛОСЬ ЦЕЛИКОМ на всё время [6/14]...[9.5/14] одним вызовом здесь —
+# генераторы всех наведённых контролей ПОТОМКИ этого самого процесса, а
+# фильтр 5.9.2g режет дерево В ЯДРЕ, до кольца, поэтому взведённое на весь
+# участок исключение ослепляло бы канарейку счётности [8/14] (0 из N=10000
+# вместо 10001), переполнение кольца [9/14], CPU-давление [9.7/14], три пары
+# продуктовых контролей [9.6/14] и cred_proc_maps [9.5/14] разом — находка
+# №57 на всех жёстких стопах волны сразу. Платой было то, что ЛЮБОЙ curl/jq
+# этого пайплайна (fp_count/fp_alerts/cred_count/smoke_metrics и т.д.) внутри
+# всего окна тоже оставался видим — 131 алерт (27.6% окна преflight'а на
+# предпрогоне), 97.7% из которых пары (comm, rule_id) = (curl, ...)/(jq, ...).
 #
-# Поэтому исключение покрывает то, ради чего оно и заводилось, — инструментарий
-# вне контролей (преflight, реплеи, сборка, пауза [10/14], гейт [13/14],
-# отчёт), а на участке наведённых контролей снимается. Плата названа числом,
-# а не спрятана: поллинг самих контролей (curl/jq) попадает в снимок аптайма
-# величины 8, и если доля акторов измерителя не уложится в 5%, это остаток
-# пункта 4c для следующей волны, а не повод вернуть исключение и ослепить
-# контроли.
-release_pipeline_observer_root
+# 5.9.9.F.5h возвращает регистрацию к состоянию ДО release (см. строку 1044
+# выше — `register_pipeline_observer_root` уже вызван) и держит её взведённой
+# по умолчанию через весь участок [6/14]...[9.5/14]. Единственные окна, где
+# исключение снимается, — те, что каждый жёсткий стоп бракетирует САМ вокруг
+# СВОЕГО генератора событий (`release_pipeline_observer_root` непосредственно
+# перед действием, которое обязано быть видно ядру, `register_pipeline_observer_root`
+# сразу после — до последующих `sleep`/fp_count/curl-проверок). Между такими
+# окнами (ожидания, снятие «до»/«после» через API, cd/echo) исключение
+# остаётся взведённым, и curl/jq пайплайна туда не попадают. Реализовано в:
+# SMOKE-канарейка [6/14], оба контроля DNS [7/14] (внутри цикла попыток),
+# контроль счётности [8/14], переполнение кольца [9/14], CPU-давление
+# [9.7/14], все три пары [9.6/14] (обе половины каждой), cred_proc_maps и обе
+# его негативные половины [9.5/14].
+#
+# Открытая граница (не закрыта этой правкой, названа явно): поллер агента,
+# читающий observer-root-pid (cmd/ebpf-guard/main.go), тикает раз в 2с, и
+# register/release здесь подтверждаются через /debug/state тем же циклом
+# (до 7 попыток по 2с) — то есть у каждого бракета есть задержка порядка
+# секунд на снятие и секунд на возврат. Toggle НИЖЕ этой гранулярности
+# (вокруг отдельного curl-вызова) технически недостижим этим механизмом —
+# поэтому бракеты стоят вокруг ДЕЙСТВИЯ генератора целиком (mkdir/unshare/
+# chmod+exec/systemctl start/python3-канарейка/вызовы run-all-attacks.sh),
+# а не вокруг каждого fp_count. Настоящее «поллер, а не пайплайн целиком» на
+# уровне отдельного HTTP-вызова потребовало бы comm-фильтра на стороне BPF
+# (bpf/common.h, observer_should_drop) — не сделано этой сессией (нет
+# стенда/clang для проверки `make generate`, см. память bpf-gen-files-are-stubs).
 
 echo "=== [6/14] SMOKE-гейт: коллекторы грузятся, поток не пуст, серии волны на месте ==="
 SMOKE_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
@@ -1062,6 +1158,12 @@ smoke_metrics() { curl -s --max-time 10 -H "Authorization: Bearer $SMOKE_TOKEN" 
 smoke_sum() { P="$1" awk -F'} ' '$0 ~ ENVIRON["P"] {s+=$2} END{printf "%.0f", s+0}'; }
 
 smoke_before=$(smoke_metrics)
+# 5.9.9.F.5h: канарейка сама эксполнена процессом-потомком пайплайна и
+# считается по events_emitted_kernel_total — этот счётчик инкрементируется
+# ПОСЛЕ observer_should_drop() (bpf/syscall.bpf.c), поэтому под исключением
+# канарейка дала бы Δ=0 и ложный SMOKE FAIL. Бракет — только вокруг самого
+# генератора, а до/после (smoke_metrics) остаются под исключением.
+release_pipeline_observer_root
 python3 -c "
 import os
 p='/tmp/ebpf-guard-smoke-canary'
@@ -1070,6 +1172,7 @@ for _ in range(20000):
     fd=os.open(p, os.O_RDONLY); os.close(fd)
 " || echo "  smoke: генератор не отработал, полагаемся на фоновую активность"
 sleep 8
+register_pipeline_observer_root
 smoke_after=$(smoke_metrics)
 rm -f /tmp/ebpf-guard-smoke-canary
 
@@ -1141,7 +1244,9 @@ DNS_CTL_ATTEMPTS="${DNS_CTL_ATTEMPTS:-3}"
 dns_ctl_ok=0
 for dns_try in $(seq 1 "$DNS_CTL_ATTEMPTS"); do
     echo "--- контроли DNS: попытка $dns_try из $DNS_CTL_ATTEMPTS ---"
+    release_pipeline_observer_root
     bash ./run-all-attacks.sh --dns-fd-reuse-controls 2>&1 | tee /root/dns-controls-2.9.9.F.5-$dns_try.txt
+    register_pipeline_observer_root
     dns_neg=$(ls -t $SETUP/attacks/attack-results/dns-negative-control-*.txt 2>/dev/null | head -1)
     dns_pos=$(ls -t $SETUP/attacks/attack-results/dns-positive-control-*.txt 2>/dev/null | head -1)
     [ -n "$dns_neg" ] || die "негативный контроль DNS не оставил маркера — 5.9.8a без входа"
@@ -1200,7 +1305,9 @@ echo "=== [8/14] контроль счётности вне окна замер�
 # Маркеры пишутся со своим TIMESTAMP и в вердикт замера не попадают (секция
 # 20 ищет их по таймстампу основного прогона) — запрет №3 соблюдён.
 cd $SETUP/attacks
+release_pipeline_observer_root
 bash ./run-all-attacks.sh --counting-control 2>&1 | tee /root/counting-control-2.9.9.F.5.txt
+register_pipeline_observer_root
 # 5.9.9.F.2a (№123): режимов теперь два, а не три — drop удалён вместе с
 # COUNTING_CONTROL_DROP_N. Маркер выбирается по ИМЕНИ (в имени лежит
 # YYYYmmdd_HHMMSS), а не `ls -t` по mtime: тем же правилом, что теперь
@@ -1235,7 +1342,9 @@ echo "5.9.8b доказан живьём в $(date -u +%H:%M:%S) UTC: null=0, id
 
 echo "=== [9/14] ЖЁСТКИЙ СТОП №3: run_ringbuf_overflow ВНЕ окна замера (5.9.7b/5.9.8c) ==="
 cd $SETUP/attacks
+release_pipeline_observer_root
 bash ./run-all-attacks.sh --ringbuf-overflow 2>&1 | tee /root/ringbuf-overflow-2.9.9.F.5.txt
+register_pipeline_observer_root
 rb_marker=$(ls -1 $SETUP/attacks/attack-results/ringbuf-overflow-*.txt 2>/dev/null | LC_ALL=C sort | tail -1)
 [ -n "$rb_marker" ] || die "run_ringbuf_overflow не оставил маркера — шаг не исполнен, 5.9.7b без входа"
 cat "$rb_marker" | sed 's/^/  /'
@@ -1283,8 +1392,10 @@ cpu_metric() { curl -s --max-time 10 -H "Authorization: Bearer $CPU_TOKEN" "$CPU
 
 deg_before=$(cpu_metric ebpf_guard_cpu_degraded_fraction)
 echo "  cpu_degraded_fraction до шага: ${deg_before:-n/a}"
+release_pipeline_observer_root
 EBPF_GUARD_API="$CPU_API" EBPF_GUARD_TOKEN="$CPU_TOKEN" \
     bash ./run-all-attacks.sh --cpu-pressure-control 2>&1 | tee /root/cpu-pressure-2.9.9.F.5.txt
+register_pipeline_observer_root
 cpu_marker=$(ls -1 $SETUP/attacks/attack-results/cpu-pressure-control-*.txt 2>/dev/null | LC_ALL=C sort | tail -1)
 [ -n "$cpu_marker" ] || die "5.9.9.F.2b: run_cpu_pressure_control не оставил маркера — шаг не исполнен, крит. 14 останется в SKIP"
 sed 's/^/  маркер: /' "$cpu_marker"
@@ -1404,6 +1515,7 @@ echo "  все пятнадцать правых правил загружены
 # критикалов правила на №2.9.9.F.2.
 echo "--- 5.9.9.F.3a: пара контролей rootkit_hidden_dir_dev (№131) ---"
 a_before=$(fp_count rootkit_hidden_dir_dev)
+release_pipeline_observer_root
 mkdir -p "/dev/.${FP_CONTROL_TAG}" 2>/dev/null || die "5.9.9.F.3a: не удалось создать /dev/.${FP_CONTROL_TAG} — позитивный контроль без входа (нужен root и rw на /dev)"
 # Ревизия волны (2026-08-26): ОДНОГО mkdir мало, и это не придирка к
 # контролю, а прямое следствие исполнения пункта 3a. Предикат «каталог
@@ -1416,6 +1528,7 @@ mkdir -p "/dev/.${FP_CONTROL_TAG}" 2>/dev/null || die "5.9.9.F.3a: не удал
 : > "/dev/.${FP_CONTROL_TAG}-canary" 2>/dev/null \
     || die "5.9.9.F.3a: не удалось создать файл /dev/.${FP_CONTROL_TAG}-canary — позитивный контроль без входа (нужен root и rw на /dev)"
 head -c 1 "/dev/.${FP_CONTROL_TAG}-canary" >/dev/null 2>&1 || true
+register_pipeline_observer_root
 sleep 20
 a_pos=$(fp_count rootkit_hidden_dir_dev)
 echo "  позитивный: скрытый каталог + открытие /dev/.${FP_CONTROL_TAG}-canary -> Δ=$((a_pos - a_before))"
@@ -1424,7 +1537,9 @@ rmdir "/dev/.${FP_CONTROL_TAG}" 2>/dev/null || true
 [ "$((a_pos - a_before))" -ge 1 ] \
     || die "5.9.9.F.3a ПРОВАЛЕН живьём: скрытый путь под /dev (каталог + открытый dot-файл) НЕ поднял rootkit_hidden_dir_dev (Δ=0). Якорь ^ вместе с исключением штатных нод ослепил правило целиком — это находка №57, а не сужение. Полный замер потратил бы полтора часа, чтобы напечатать это как «потеряно вне реестров» в крит. 6"
 a_neg_before=$(fp_count rootkit_hidden_dir_dev)
+release_pipeline_observer_root
 for _ in $(seq 1 20); do head -c 32 /dev/urandom > /dev/null 2>&1; done
+register_pipeline_observer_root
 sleep 20
 a_neg_after=$(fp_count rootkit_hidden_dir_dev)
 echo "  негативный: 20 чтений /dev/urandom -> Δ=$((a_neg_after - a_neg_before))"
@@ -1444,7 +1559,9 @@ fp_suid="/tmp/${FP_CONTROL_TAG}-suidcanary"
 cp /bin/true "$fp_suid" 2>/dev/null || die "5.9.9.F.3b: не удалось подготовить SUID-канарейку в /tmp — позитивный контроль без входа"
 chown root:root "$fp_suid" 2>/dev/null || true
 chmod 4755 "$fp_suid" || die "5.9.9.F.3b: chmod 4755 не прошёл — без бита SUID позитивный контроль не проверяет ничего"
+release_pipeline_observer_root
 "$fp_suid" >/dev/null 2>&1 || true
+register_pipeline_observer_root
 sleep 20
 b_pos=$(fp_count privesc_suid_suspicious_path)
 b_sigma_pos=$(fp_count sigma_binary_in_tmp_executed)
@@ -1458,7 +1575,9 @@ b_neg_before=$(fp_count privesc_suid_suspicious_path)
 b_neg_sigma_before=$(fp_count sigma_binary_in_tmp_executed)
 fp_txt="/tmp/${FP_CONTROL_TAG}-filelist.txt"
 printf 'harmless\n%s\n' "$FP_CONTROL_TAG" > "$fp_txt"
+release_pipeline_observer_root
 for _ in $(seq 1 10); do cat "$fp_txt" > /dev/null 2>&1; done
+register_pipeline_observer_root
 sleep 20
 b_neg_after=$(fp_count privesc_suid_suspicious_path)
 b_neg_sigma_after=$(fp_count sigma_binary_in_tmp_executed)
@@ -1496,7 +1615,9 @@ c_pos_before=0
 for r in $c_rules; do c_pos_before=$((c_pos_before + $(fp_count "$r"))); done
 # ppid этого процесса — bash пайплайна, не 1: сужение по признаку «ребёнок
 # pid 1» не имеет права его погасить. Побег настоящий: новый user+mount ns.
+release_pipeline_observer_root
 unshare -Urm --propagation private /bin/true >/dev/null 2>&1 || true
+register_pipeline_observer_root
 sleep 20
 c_pos_after=0
 for r in $c_rules; do c_pos_after=$((c_pos_after + $(fp_count "$r"))); done
@@ -1510,7 +1631,9 @@ for r in $c_rules; do c_sum_before=$((c_sum_before + $(fp_count "$r"))); done
 c_actor_inc_before=$(fp_sandbox_actor_attack_incidents)
 fp_unit="${FP_SANDBOX_UNIT:-man-db.service}"
 if systemctl list-unit-files "$fp_unit" >/dev/null 2>&1 && [ -n "$(systemctl list-unit-files --no-legend "$fp_unit" 2>/dev/null)" ]; then
+    release_pipeline_observer_root
     systemctl start "$fp_unit" 2>&1 | sed 's/^/    /' || true
+    register_pipeline_observer_root
     # Юнит одноразовый (Type=oneshot) — ждём и его работу, и корреляцию.
     sleep 45
     c_sum_after=0
@@ -1551,8 +1674,10 @@ if [ "${SMOKE_ONLY:-0}" = "1" ]; then
     dump_before=$(cred_count sigma_memory_proc_dump)
     echo "  до контроля: cred_proc_maps_mass_read=$cred_before sigma_memory_proc_dump=$dump_before"
 
+    release_pipeline_observer_root
     EBPF_GUARD_API="$CRED_API" EBPF_GUARD_TOKEN="$CRED_TOKEN" \
         bash ./run-all-attacks.sh --cred-proc-maps-control 2>&1 | tee /root/cred-proc-maps-2.9.9.F.5.txt
+    register_pipeline_observer_root
     cred_marker=$(ls -t $SETUP/attacks/attack-results/cred-proc-maps-control-*.txt 2>/dev/null | head -1)
     [ -n "$cred_marker" ] || die "5.9.9.Fa: позитивный контроль не оставил маркера — шаг не исполнен"
     sed 's/^/  маркер: /' "$cred_marker"
@@ -1613,7 +1738,9 @@ if [ "${SMOKE_ONLY:-0}" = "1" ]; then
     # №2.9.9.F), после — не обязано.
     cp /bin/cat /tmp/cmdlinescan 2>/dev/null || die "не удалось подготовить comm=cmdlinescan для негативного контроля 5.9.9.F.1b"
     dump_neg_before=$(cred_count sigma_memory_proc_dump)
+    release_pipeline_observer_root
     for _ in $(seq 1 20); do /tmp/cmdlinescan /proc/1/cmdline > /dev/null 2>&1; done
+    register_pipeline_observer_root
     sleep 20
     dump_neg_after=$(cred_count sigma_memory_proc_dump)
     echo "  негативный 5.9.9.F.1b: 20 чтений /proc/1/cmdline под comm=cmdlinescan -> Δsigma_memory_proc_dump=$((dump_neg_after - dump_neg_before))"
@@ -1626,9 +1753,11 @@ if [ "${SMOKE_ONLY:-0}" = "1" ]; then
     # systemd-logind и man-page git). Ни одна из них больше не SQL-инъекция.
     sql_neg_before=$(cred_count web_sql_injection_files)
     sql_dir=$(mktemp -d)
+    release_pipeline_observer_root
     for f in 'git-mergetool--lib.1.gz' '.#114376ChHzY' 'report;final.csv' 'libfoo--dev_1.2.3.deb'; do
         printf 'x' > "$sql_dir/$f" 2>/dev/null && cat "$sql_dir/$f" > /dev/null 2>&1
     done
+    register_pipeline_observer_root
     sleep 20
     sql_neg_after=$(cred_count web_sql_injection_files)
     echo "  негативный 5.9.9.F.1c: 4 имени файла с --/#/; -> Δweb_sql_injection_files=$((sql_neg_after - sql_neg_before))"
@@ -1641,9 +1770,14 @@ else
 fi
 
 # Наведённые контроли позади — дальше снова чистый инструментарий (пауза,
-# idle-run.sh со своим, гораздо более узким корнем, гейт, отчёт), и дерево
-# пайплайна снова исключается. Граница окна замера [11/14] снимает его ещё
-# раз явно, как и требует 4c.
+# idle-run.sh со своим, гораздо более узким корнем, гейт, отчёт). 5.9.9.F.5h:
+# после последнего бракета выше (негативный контроль cred_proc_maps/SQL)
+# исключение уже взведено — этот вызов избыточен по состоянию, оставлен как
+# явная страховка (идемпотентен: тот же $$ снова, дешёвое переподтверждение)
+# на случай, если SMOKE_ONLY=1 и блок [9.5/14] выше не исполнялся вовсе (тогда
+# состояние после [9.6/14] — тоже уже "registered", но явный вызов здесь не
+# полагается на это молча). Граница окна замера [11/14] снимает его ещё раз
+# явно, как и требует 4c.
 register_pipeline_observer_root
 
 # SMOKE_ONLY=1 — короткий прогон «сборка + живые доказательства», без
@@ -1731,6 +1865,10 @@ echo "=== [13/14] гейт, один вызов ==="
 export IDLE_METRICS_END=$IDLE_OUT/metrics-end.txt
 export IDLE_ALERTS_END=$IDLE_OUT/alerts-end.json
 export IDLE_ALERTS_START=$IDLE_OUT/alerts-start.json
+# 5.9.9.F.5m (№163): пара снимков /api/v1/incidents, тем же приёмом, что
+# IDLE_ALERTS_START/END — источник величины 8 ниже (акторы измерителя/сборки).
+export IDLE_INCIDENTS_END=$IDLE_OUT/incidents-end.json
+export IDLE_INCIDENTS_START=$IDLE_OUT/incidents-start.json
 export AGENT_START_FILE=/root/agent-start-2.9.9.F.5.txt
 bash ./run-gate.sh 2>&1 | tee /root/gate-2.9.9.F.5.txt
 GATE_RC=${PIPESTATUS[0]}
@@ -1792,12 +1930,18 @@ fi
 # часе не засчитывается: он неотличим от отсутствия входа (запрет 5.9.6i,
 # PASS отсутствием события).
 acc "3." "idle-час (verdict=\"attack\" = 0 при непустом часе, 5.9.9.F.3c):"
-grep -E 'verdict="attack" за idle-час|алертов за idle-час|состав промоушенов по comm|промоушенов verdict=attack в журнале' /root/gate-2.9.9.F.5.txt | sed 's/^/       /'
+grep -E 'verdict="attack" за idle-час|алертов за idle-час|состав промоушенов по comm|промоушенов verdict=attack в журнале|промоушенов в журнале за окно idle-часа \(оба вердикта' /root/gate-2.9.9.F.5.txt | sed 's/^/       /'
 # 5.9.9.F.5b/№153: журнал агента — независимый источник состава промоушенов
 # (см. run-gate.sh, "correlator: incident promoted"), а не только снимок
 # алертов. Печатается отдельно, чтобы при FAIL было видно, каким источником
 # назван актор — алертами или журналом.
 grep -E 'по журналу \(5\.9\.9\.F\.5b\)' /root/gate-2.9.9.F.5.txt | sed 's/^/       /'
+# 5.9.9.F.5l/№162, долг признанный 5.9.9.F.5b: восьмая строка блока приёмки —
+# записей о промоушении в журнале (оба вердикта) сходится с дельтой
+# incidents_total. Раньше журнал парсился в logfmt и не читался вовсе
+# (см. run-gate.sh); теперь это jq по JSON-payload, и величина впервые имеет
+# вход.
+grep -E 'ДОСТИГНУТО \(5\.9\.9\.F\.5b/5\.9\.9\.F\.5l\)' /root/gate-2.9.9.F.5.txt | sed 's/^/       /'
 acc_idle_alerts=$(grep -oE 'алертов за idle-час: [0-9]+' /root/gate-2.9.9.F.5.txt | tail -1 | grep -oE '[0-9]+$')
 acc_idle_att=$(grep -oE 'verdict="attack" за idle-час: [0-9]+ -> [0-9]+, дельта = [0-9-]+' /root/gate-2.9.9.F.5.txt | tail -1 | grep -oE '[0-9-]+$')
 if [ "${acc_idle_alerts:-0}" -eq 0 ] 2>/dev/null; then
@@ -1892,45 +2036,50 @@ else
     acc "  " "читать так: если правила инцидента — НЕ двенадцать правил 4a, класс актора поднимают ЕЩЁ какие-то правила, и список №141 неполон так же, как был неполон список 3c (это находка следующего замера, а не провал 4a); если правила ИЗ списка 4a — исключение не применилось, правка не в дереве или агент крутит старые правила"
 fi
 
-# (8) 5.9.9.F.4c/№147, пересчитано 5.9.9.F.5e/№155: доля алертов от акторов
-# измерителя и сборки СЧИТАЕТСЯ ПО ОКНАМ ОТДЕЛЬНО (преflight / idle-час / окно
-# атак), а не одной цифрой за весь аптайм. Одна цифра (было: acc_alerts —
-# снимок с рестарта [5/14] до этого момента) складывала три разных
-# утверждения: 131/475 (преflight, единственное окно, на которое влияет
-# пункт 4c), 1/607 (idle-час, атак ещё не было) и 89/866 (окно атак, где
-# curl/jq/grep — это ОРУЖИЕ манифеста, а не фон измерителя: 20 срабатываний
-# lateral_tool_transfer_wget и один incident_confirmed_attack оказались
-# погашены только потому, что их comm совпал с именем из списка). Список
-# harness-comm — поимённо из постановки волны (не восстанавливается по
-# коду): curl, jq, grep, go, ld, clang, llvm-strip, bpf2go, *.test,
-# cmdlinescan. `*.test` матчится суффиксом (go test компилирует бинарь вида
-# pkgname.test), остальные — точным именем comm.
+# (8) 5.9.9.F.4c/№147, пересчитано 5.9.9.F.5e/№155, ИСТОЧНИК ЗАМЕНЁН
+# 5.9.9.F.5m/№163: доля от акторов измерителя и сборки СЧИТАЕТСЯ ПО ОКНАМ
+# ОТДЕЛЬНО (преflight / idle-час / окно атак), а не одной цифрой за весь
+# аптайм — это решение 5.9.9.F.5e не меняется. Меняется ЕДИНИЦА СЧЁТА:
+# инциденты, а не алерты.
+#
+# РАЗВИЛКА 5.9.9.F.5m, выбор записан ДО правки: постановка предлагала два
+# варианта — (1) довести колонку process_tree до SQLite-стора и до ответа
+# /api/v1/alerts, (2) считать величину по инцидентам, у которых RootComm и
+# ProcessChain уже есть сегодня (pkg/types/incident.go). Выбран **вариант
+# 2**: он не трогает продукт (ни схему стора, ни сериализацию Alert — только
+# offline-скрипты пайплайна) и не идёт на ту же грабли, на которую 5.9.9.F.5e
+# уже наступил: `.process_tree` алерта — ЗАВОДИТСЯ engine'ом только когда
+# сконфигурирован LineageTracker (pkg/types/event.go, комментарий у поля),
+# то есть поле № 163 нашёл дважды пустым — и на алерте, и в сторе — по
+# одной и той же причине; RootComm/ProcessChain у Incident заполняются
+# отдельным путём (IncidentTracker) и НЕ зависят от LineageTracker.
+#
+# Подстановка `// "bash"` УБРАНА (прямое требование постановки): раньше
+# `(.process_tree // [])[0].comm // "bash"` молча превращала «поля нет» в
+# «корень — bash», то есть ЛЮБОЙ алерт без process_tree классифицировался
+# как «дерево пайплайна/манифеста» без единого факта на это. Инцидент без
+# root_comm (`.root_comm // ""` даёт пустую строку) НЕ проходит проверку
+# «корень — интерпретатор», то есть по умолчанию считается НЕ-харнессом —
+# безопасное направление ошибки (недосчитать harness хуже недостоверно, чем
+# счесть продуктовый алерт фоном измерителя).
+#
+# Список harness-comm не изменился — поимённо из постановки волны: curl, jq,
+# grep, go, ld, clang, llvm-strip, bpf2go, *.test, cmdlinescan.
 acc_harness_comms='["curl","jq","grep","go","ld","clang","llvm-strip","bpf2go","cmdlinescan"]'
-# ГРАНИЦА (5.9.9.F.5e): постановка требует отделять curl измерителя от curl
-# манифеста «по предку (дерево пайплайна против дерева run-all-attacks.sh),
-# а не по имени» и ссылается на process_chain/root_comm алерта. У алерта
-# (/api/v1/alerts) этих полей НЕТ — они существуют только на инциденте
-# (pkg/types/incident.go: RootComm/ProcessChain, см. память
-# alerts-api-has-no-process-chain.md); у алерта есть `process_tree`
-# (pkg/types/event.go: []ProcessNode{pid,ppid,comm}, от старейшего предка к
-# сработавшему процессу). Использован он: root_comm = .process_tree[0].comm.
-# Это ловит один реальный класс — comm из списка, запущенный НЕ через shell
-# (например, сервисом напрямую), — но НЕ различает пайплайн и
-# run-all-attacks.sh МЕЖДУ СОБОЙ: оба — `bash script.sh`, kernel даёт им
-# одинаковый comm="bash" на каждом уровне дерева (comm ставится по
-# исполняемому файлу — /bin/bash, — а не по имени скрипта в argv; тот же
-# класс дефекта, что shebang-control-comm-is-interpreter.md, только для
-# уровня "оболочка", а не "интерпретатор"). Различить curl пайплайна от curl
-# манифеста ВНУТРИ одного bash-дерева этим полем нельзя — открытый вопрос,
-# не решённый этим заходом (см. итог ниже), и ровно поэтому порог <5%
-# применяется ТОЛЬКО к преflight-окну (см. постановку 5.9.9.F.5e): там
-# манифест ещё не запущен, и любой harness-comm по построению — это
-# инструментарий, а не атака.
-acc_harness_root_ok='(((.process_tree // [])[0].comm // "bash") as $rc | ($rc == "bash" or $rc == "sh" or $rc == "dash"))'
+# ГРАНИЦА, унаследованная от 5.9.9.F.5e и НЕ снятая заменой источника:
+# root_comm по-прежнему не отличает дерево пайплайна от дерева
+# run-all-attacks.sh МЕЖДУ СОБОЙ — оба "bash script.sh", kernel даёт
+# одинаковый comm="bash" на каждом уровне (тот же класс дефекта, что
+# shebang-control-comm-is-interpreter.md, для уровня "оболочка"). Инциденты
+# несут ProcessChain целиком (не только корень), но это не окно и не
+# отличает манифест от пайплайна без имени скрипта в argv, которого comm не
+# хранит. Открытый вопрос остаётся открытым; порог <5% по-прежнему
+# применяется ТОЛЬКО к преflight-окну, где манифест ещё не запущен.
+acc_harness_root_ok='((.root_comm // "") as $rc | ($rc == "bash" or $rc == "sh" or $rc == "dash"))'
 acc_harness_filter="((.comm // \"\") as \$c | (\$hc | index(\$c)) or (\$c | test(\"\\\\.test\$\"))) and $acc_harness_root_ok"
 
 acc_win_stats() {
-    # $1 = alerts JSON (массив). Печатает "harness total pct" одной строкой.
+    # $1 = incidents JSON (массив). Печатает "harness total pct" одной строкой.
     local json="$1" total harness pct
     total=$(echo "$json" | jq 'length' 2>/dev/null)
     harness=$(echo "$json" | jq --argjson hc "$acc_harness_comms" "[.[] | select($acc_harness_filter)] | length" 2>/dev/null)
@@ -1942,43 +2091,44 @@ acc_win_stats() {
     echo "${harness:-?} ${total:-0} ${pct}"
 }
 acc_win_breakdown() {
-    # $1 = alerts JSON. Печатает состав по паре (comm, rule_id) — 5.9.9.F.5f.
+    # $1 = incidents JSON. Состав по паре (comm, rule) — 5.9.9.F.5f, перенесено
+    # на инциденты: rule_ids — МАССИВ (инцидент может нести несколько правил),
+    # группировка идёт по (comm, каждое правило из rule_ids) через `[]`, а не
+    # по единственному .rule_id (которого у инцидента нет).
     echo "$1" | jq --argjson hc "$acc_harness_comms" -r \
-        "[.[] | select($acc_harness_filter)] | group_by([.comm, .rule_id]) | map({c: (.[0].comm), r: (.[0].rule_id), n: length}) | sort_by(-.n) | .[] | \"       \(.n)\t\(.c)\t\(.r)\"" \
+        "[.[] | select($acc_harness_filter)] | map(. as \$i | (\$i.rule_ids // [\"(пусто)\"])[] | {c: (\$i.comm // \"(пусто)\"), r: .}) | group_by([.c, .r]) | map({c: (.[0].c), r: (.[0].r), n: length}) | sort_by(-.n) | .[] | \"       \(.n)\t\(.c)\t\(.r)\"" \
         2>/dev/null | head -20
 }
 
-# Окно преflight'а: снимок IDLE_ALERTS_START (idle-run.sh пишет его ДО первого
-# тика idle-часа) — единственный доступный пайплайну снимок границы
-# преflight/idle-час. Взят как есть (все алерты в файле), а не диффом от
+# Окно преflight'а: снимок IDLE_INCIDENTS_START (idle-run.sh пишет его ДО
+# первого тика idle-часа, тем же вызовом api_multi, что alerts-start.json —
+# 5.9.9.F.5m/№163). Взят как есть (все инциденты в файле), а не диффом от
 # нулевой точки: агент перезапущен на [9/14], и допущение — что стор пуст на
 # рестарте — не проверено живым замером (записано открытым вопросом ниже).
 acc_pf_json='[]'
-[ -s "$IDLE_ALERTS_START" ] && acc_pf_json=$(cat "$IDLE_ALERTS_START" 2>/dev/null || echo '[]')
+[ -s "$IDLE_INCIDENTS_START" ] && acc_pf_json=$(cat "$IDLE_INCIDENTS_START" 2>/dev/null || echo '[]')
 
-# Окно idle-часа: новые по id алерты между IDLE_ALERTS_START и IDLE_ALERTS_END
-# — та же пара снимков, что уже использует run-gate.sh (критерий 16/величина
-# 3), диф вычисляется здесь заново, а не переиспользуется под другим именем.
+# Окно idle-часа: новые по id инциденты между IDLE_INCIDENTS_START и
+# IDLE_INCIDENTS_END — та же пара снимков, что величина 3 использует для
+# алертов, но на инцидентах (5.9.9.F.5m).
 acc_idle_json='[]'
 acc_idle_have=0
-if [ -s "$IDLE_ALERTS_START" ] && [ -s "$IDLE_ALERTS_END" ]; then
-    acc_idle_json=$(jq -n --slurpfile a "$IDLE_ALERTS_START" --slurpfile b "$IDLE_ALERTS_END" \
+if [ -s "$IDLE_INCIDENTS_START" ] && [ -s "$IDLE_INCIDENTS_END" ]; then
+    acc_idle_json=$(jq -n --slurpfile a "$IDLE_INCIDENTS_START" --slurpfile b "$IDLE_INCIDENTS_END" \
         '($a[0]|map(.id)) as $seen | ($b[0]|map(select(.id as $i | ($seen|index($i))|not)))' 2>/dev/null)
     [ -n "$acc_idle_json" ] && acc_idle_have=1
 fi
 
-# Окно атак: новые по id алерты между baseline-alerts-*.json и
-# final-alerts-*.json последнего вызова run-all-attacks.sh (пишет их сам
-# контроль, $SETUP/attacks/attack-results/, тот же источник, что читает
-# run-gate.sh под именами baseline_alerts/final_alerts своего TIMESTAMP).
-# Берётся САМЫЙ ПОЗДНИЙ по имени файл — тот же приём, что latest_marker() в
-# run-gate.sh: в имени лежит YYYYmmdd_HHMMSS, и это вызов [12/14], последний
-# по времени среди всех вызовов run-all-attacks.sh пайплайна (DNS/ringbuf/
-# cpu-pressure/cred-proc-maps контроли исполняются раньше, каждый со своим
-# TIMESTAMP).
+# Окно атак: новые по id инциденты между baseline-incidents-*.json и
+# final-incidents-*.json последнего вызова run-all-attacks.sh — эта пара УЖЕ
+# существует и пишется самим контролем (get_baseline_metrics/get_final_metrics,
+# run-all-attacks.sh) на каждый TIMESTAMP, run-gate.sh уже читает
+# final-incidents-$TIMESTAMP.json под именем final_incidents; здесь берётся та
+# же пара, что и baseline-alerts/final-alerts у величины 8 до этого пункта —
+# самый ПОЗДНИЙ по имени файл (в имени YYYYmmdd_HHMMSS, это вызов [12/14]).
 acc_attack_dir="$SETUP/attacks/attack-results"
-acc_attack_baseline_file=$(ls -1 "$acc_attack_dir"/baseline-alerts-*.json 2>/dev/null | LC_ALL=C sort | tail -1)
-acc_attack_final_file=$(ls -1 "$acc_attack_dir"/final-alerts-*.json 2>/dev/null | LC_ALL=C sort | tail -1)
+acc_attack_baseline_file=$(ls -1 "$acc_attack_dir"/baseline-incidents-*.json 2>/dev/null | LC_ALL=C sort | tail -1)
+acc_attack_final_file=$(ls -1 "$acc_attack_dir"/final-incidents-*.json 2>/dev/null | LC_ALL=C sort | tail -1)
 acc_attack_json='[]'
 acc_attack_have=0
 if [ -s "$acc_attack_baseline_file" ] && [ -s "$acc_attack_final_file" ]; then
@@ -1988,17 +2138,17 @@ if [ -s "$acc_attack_baseline_file" ] && [ -s "$acc_attack_final_file" ]; then
 fi
 
 read -r acc_pf_h acc_pf_t acc_pf_pct <<< "$(acc_win_stats "$acc_pf_json")"
-acc "8." "доля алертов от акторов измерителя и сборки, по окнам (5.9.9.F.4c/5.9.9.F.5e/№147/№155):"
-acc "  " "преflight: $acc_pf_h из $acc_pf_t (${acc_pf_pct}%) — единственное окно с порогом < 5% (было 55% на отклонённом №2.9.9.F.3, 27.6% на №2.9.9.F.4)"
+acc "8." "доля ИНЦИДЕНТОВ от акторов измерителя и сборки, по окнам (5.9.9.F.4c/5.9.9.F.5e/5.9.9.F.5m/№147/№155/№163; единица счёта — инцидент, не алерт, см. РАЗВИЛКА выше)"
+acc "  " "преflight: $acc_pf_h из $acc_pf_t (${acc_pf_pct}%) — единственное окно с порогом < 5% (было 55%/27.6% на отклонённом/предыдущем замерах, считались по алертам — цифры не сопоставимы напрямую с этой строкой)"
 if [ "${acc_pf_t:-0}" -gt 0 ] 2>/dev/null; then
     if awk -v p="$acc_pf_pct" 'BEGIN{exit !(p < 5)}'; then
         acc "  " "ДОСТИГНУТО: преflight < 5%"
     else
-        acc "  " "НЕ ДОСТИГНУТО: преflight >= 5% — состав по (comm, rule_id):"
+        acc "  " "НЕ ДОСТИГНУТО: преflight >= 5% — состав по (comm, rule):"
         acc_win_breakdown "$acc_pf_json"
     fi
 else
-    acc "  " "SKIP: IDLE_ALERTS_START пуст или недоступен — преflight-доля не посчитана"
+    acc "  " "SKIP: IDLE_INCIDENTS_START пуст или недоступен — преflight-доля не посчитана"
 fi
 
 if [ "$acc_idle_have" -eq 1 ]; then
@@ -2006,7 +2156,7 @@ if [ "$acc_idle_have" -eq 1 ]; then
     acc "  " "idle-час: $acc_idle_h из $acc_idle_t (${acc_idle_pct}%) — наблюдение без порога (постановка 5.9.9.F.5e трогает только преflight); ненулевое здесь — атаки ещё не запущены, харнесс-comm может быть только утечкой поллинга idle-run.sh"
     [ "${acc_idle_h:-0}" -gt 0 ] 2>/dev/null && acc_win_breakdown "$acc_idle_json"
 else
-    acc "  " "idle-час: SKIP — IDLE_ALERTS_START/END недоступны, доля не посчитана"
+    acc "  " "idle-час: SKIP — IDLE_INCIDENTS_START/END недоступны, доля не посчитана"
 fi
 
 if [ "$acc_attack_have" -eq 1 ]; then
@@ -2014,7 +2164,7 @@ if [ "$acc_attack_have" -eq 1 ]; then
     acc "  " "окно атак: $acc_atk_h из $acc_atk_t (${acc_atk_pct}%) — наблюдение без порога; ЧИСЛО НЕ ОЧИЩЕНО от кривой манифеста: curl/jq здесь могут быть как оркестровкой run-all-attacks.sh (настоящий фон), так и полезной нагрузкой атаки (lateral_tool_transfer_wget через curl и т.п.) — root_comm их не различает (оба дерева = bash, см. ГРАНИЦА выше), состав ниже — единственный способ разобрать это глазами"
     [ "${acc_atk_h:-0}" -gt 0 ] 2>/dev/null && acc_win_breakdown "$acc_attack_json"
 else
-    acc "  " "окно атак: SKIP — baseline/final-alerts-*.json последнего run-all-attacks.sh не найдены в $acc_attack_dir"
+    acc "  " "окно атак: SKIP — baseline/final-incidents-*.json последнего run-all-attacks.sh не найдены в $acc_attack_dir"
 fi
 # (8, "Учёт" п.2 постановки 4c) systemctl/journalctl говорят с pid 1 по
 # dbus — pid 1 потомком дерева пайплайна не является ни при каком root_pid
@@ -2027,7 +2177,7 @@ fi
 # шагов физически не могут появиться в idle-часе/окне атак.
 acc_pid1_actors='["systemd","systemd-logind","dbus-daemon","polkitd","journald","systemd-journal","systemd-udevd"]'
 acc_pid1_alerts=$(echo "$acc_pf_json" | jq --argjson pc "$acc_pid1_actors" '[.[] | select((.comm // "") as $c | $pc | index($c))] | length' 2>/dev/null)
-acc "  " "наблюдение без порога: алертов преflight'а от акторов, наведённых pid 1 (systemctl/journalctl самого пайплайна, дерево-исключение их не ловит) = ${acc_pid1_alerts:-0}"
+acc "  " "наблюдение без порога: инцидентов преflight'а от акторов, наведённых pid 1 (systemctl/journalctl самого пайплайна, дерево-исключение их не ловит) = ${acc_pid1_alerts:-0} (5.9.9.F.5m: acc_pf_json теперь инциденты, не алерты)"
 acc_excl_obs=$(grep -oE 'excluded\{observer_tree\}[^:]*: [0-9]+' /root/gate-2.9.9.F.5.txt | tail -1 | grep -oE '[0-9]+$')
 if [ "${acc_excl_obs:-0}" -gt 0 ] 2>/dev/null; then
     acc "  " "ДОСТИГНУТО: events_excluded_total{reason=\"observer_tree\"} = $acc_excl_obs (не ноль — исключение действительно сработало, доля не упала по другой причине)"
@@ -2069,6 +2219,12 @@ fi
 # sibling-форму классического пайпа, которой движок не видит вовсе — она
 # остаётся невыполненной до stateful-корреляции братьев, и это записано
 # заранее (plan.md, 4e), а не объясняется задним числом нулём в этой строке.
+# РЕШЕНИЕ 5.9.9.F.5a, принятое до замера (plan.md, блок исполнения 5j/5a):
+# из двух вариантов постановки выбран ПЕРВЫЙ — величина 10 переформулирована
+# по родительской форме, и именно её измеряет эта строка. Второй вариант
+# (stateful-корреляция братьев) — продуктовая работа в корреляторе, вынесена
+# отдельной находкой №168 и в границу этой волны не входит; ноль на
+# sibling-форме поэтому НЕ является исходом величины 10 ни в одну сторону.
 acc_exfil=$(acc_rule exfil_archive_to_network_pipe)
 # Маркер контроля лежит В МАНИФЕСТЕ (attack-manifest.json, category), а не
 # отдельным файлом в attack-results/ — так его пишет
@@ -2091,14 +2247,23 @@ else
     acc "  " "ДОСТИГНУТО (в границе пункта): ненулевое на родительской форме под подтверждённым comm=tar; строки с parent вне списка архиваторов означали бы, что сужение не применилось"
 fi
 
-# (11) 5.9.9.F.4f/№146: drift_new_exec_critical. Предикат переведён с op==open
-# на факт exec, поэтому «0 критикалов на open() без exec» достигается по
-# построению; смысл имеет ВТОРАЯ половина — ненулевое на настоящем exec из
-# манифеста. Отдельного контроля именно под эту величину в манифесте нет
-# (записано открытым вопросом в plan.md, 4f), поэтому опорой служит состав.
-acc_drift=$(acc_rule drift_new_exec_critical); acc_drift_c=$(acc_rule_crit drift_new_exec_critical)
-acc "11." "drift_new_exec_critical за аптайм (5.9.9.F.4f/№146): $acc_drift (critical $acc_drift_c, было 44 критикала на op==open)"
-acc_drift_file_ev=$(echo "$acc_alerts" | jq '[.[]|select(.rule_id=="drift_new_exec_critical" and ((.details["file.path"] // "") != "") and ((.details["proc.args"] // "") == ""))]|length' 2>/dev/null)
+# (11) 5.9.9.F.4f/№146, переименовано и понижено 5.9.9.F.5g/№154:
+# drift_exec_from_system_bin (был drift_new_exec_critical). Предикат
+# переведён с op==open на факт exec, поэтому «0 на open() без exec»
+# достигается по построению; смысл имеет ВТОРАЯ половина — ненулевое на
+# настоящем exec из манифеста. Severity понижена critical -> warning
+# (5.9.9.F.5g: 576/607 алертов и 576/577 критикалов idle-часа №2.9.9.F.4
+# были этим правилом, 499 из них — пере-exec sshd на входящее ssh-соединение
+# на публичном IP стенда, а не drift-сигнал; critical остаётся зарезервирован
+# за вариантом с включённой profiler.drift_baseline, не реализованным этой
+# сессией). acc_drift_c поэтому больше не измеряет "критикалы этого правила
+# за аптайм" содержательно — он обязан быть 0 (или близко к нему) на любом
+# исправном дереве, поскольку правило больше не critical; ненулевое значение
+# здесь означает, что агент крутит СТАРУЮ версию правила (rename/severity не
+# доехали), а не "правило сработало сильнее".
+acc_drift=$(acc_rule drift_exec_from_system_bin); acc_drift_c=$(acc_rule_crit drift_exec_from_system_bin)
+acc "11." "drift_exec_from_system_bin за аптайм (5.9.9.F.4f/№146, severity понижена 5.9.9.F.5g/№154): $acc_drift (critical $acc_drift_c — обязан быть 0 после rename, ненулевое значит старая версия правила)"
+acc_drift_file_ev=$(echo "$acc_alerts" | jq '[.[]|select(.rule_id=="drift_exec_from_system_bin" and ((.details["file.path"] // "") != "") and ((.details["proc.args"] // "") == ""))]|length' 2>/dev/null)
 if [ "${acc_drift_file_ev:-0}" != "0" ]; then
     acc "  " "ВНИМАНИЕ: ${acc_drift_file_ev} срабатывание(й) без proc.args — правило по-прежнему матчится на файловом событии, то есть агент крутит СТАРУЮ версию правила (правка 4f не доехала)"
 fi
@@ -2106,7 +2271,7 @@ if [ "${acc_drift:-0}" = "0" ]; then
     acc "  " "ВНИМАНИЕ: 0 за весь аптайм при исполнившемся манифесте атак — правило ослеплено переводом на proc.args (argv[0] дропнутых бинарей манифеста, видимо, не абсолютный путь под /bin|/usr/bin), это находка №57, а не успех сужения"
 else
     acc "  " "состав (кто исполнялся):"
-    echo "$acc_alerts" | jq -r '.[]|select(.rule_id=="drift_new_exec_critical")|"       \(.severity)\tcomm=\(.comm)\t\(.details["proc.args"] // .details["file.path"] // "-")"' 2>/dev/null | sort | uniq -c | sort -rn | head -15
+    echo "$acc_alerts" | jq -r '.[]|select(.rule_id=="drift_exec_from_system_bin")|"       \(.severity)\tcomm=\(.comm)\t\(.details["proc.args"] // .details["file.path"] // "-")"' 2>/dev/null | sort | uniq -c | sort -rn | head -15
 fi
 
 # (12) 5.9.9.F.4h/№150: 0 пар «dns: no new events» / «dns: collector
@@ -2146,9 +2311,9 @@ else
         bash $SETUP/run-2.9.5-report.sh 2>&1 | tee /root/report-2.9.9.F.5.txt
 fi
 
-echo "=== [14.1/14] наблюдение без порога: состав drift_new_exec_critical (долг «намеренно НЕ входит») ==="
+echo "=== [14.1/14] наблюдение без порога: состав drift_exec_from_system_bin (долг «намеренно НЕ входит») ==="
 # Пункт постановки замера, добавленный 2026-08-26 (см. plan.md, «Наблюдение без
-# порога» в приёмке №2.9.9.F.3). drift_new_exec_critical — первое место по
+# порога» в приёмке №2.9.9.F.3). drift_exec_from_system_bin — первое место по
 # критикалам аптайма (44 на №2.9.9.F.2, больше, чем №131 и №132 вместе), и до
 # сих пор он не находка только потому, что его состав никто не смотрел:
 # правило дрейфа ОБЯЗАНО расти в окне атаки, и без разбора «сколько из 44
@@ -2166,13 +2331,13 @@ echo "=== [14.1/14] наблюдение без порога: состав drift
 # пайплайна, после гейта, на тех же снимках.
 drift_out=/root/drift-composition-2.9.9.F.5.txt
 {
-    echo "=== состав drift_new_exec_critical за аптайм, замер №2.9.9.F.5, $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+    echo "=== состав drift_exec_from_system_bin за аптайм, замер №2.9.9.F.5, $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
     # FP_API/FP_TOKEN заданы шагом [9.6/14] в этом же shell; перевычисляются
     # на случай, если шаг был пропущен режимом прогона.
     FP_API="${FP_API:-http://${VPS_IP:-localhost}:19090}"
     FP_TOKEN="${FP_TOKEN:-${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}}"
     drift_json=$(curl -s --max-time 30 -H "Authorization: Bearer $FP_TOKEN" "$FP_API/api/v1/alerts" 2>/dev/null \
-        | jq '[.[]|select(.rule_id=="drift_new_exec_critical")]' 2>/dev/null)
+        | jq '[.[]|select(.rule_id=="drift_exec_from_system_bin")]' 2>/dev/null)
     if [ -z "$drift_json" ] || [ "$drift_json" = "null" ]; then
         echo "НЕ ПОЛУЧЕНО: /api/v1/alerts не отдал массив (токен/агент/jq). Наблюдение пропущено — на вердикт не влияет."
     else

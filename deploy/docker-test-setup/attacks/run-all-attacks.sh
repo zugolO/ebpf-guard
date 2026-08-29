@@ -1570,7 +1570,13 @@ run_exfil_archive_parent_positive_control() {
     # -c запускает $tar_bin (реальный exec, не шебанг) как "tar"; сначала
     # процесс сам печатает свой /proc/self/comm в файл — это и есть
     # СТОРОЖ, требуемый постановкой 5.9.9.F.5a, — затем forks/exec'ит curl.
-    if "$tar_bin" -c "cat /proc/self/comm > '$comm_check_file' 2>/dev/null; '$curl_bin' -s -o /dev/null http://127.0.0.1:1 || true" >/dev/null 2>&1; then
+    # 5.9.9.F.5k (находка №161): `cat /proc/self/comm > file` форкал ВНЕШНИЙ
+    # процесс cat, и /proc/self/comm внутри НЕГО — это comm самого cat, а не
+    # comm родителя ($tar_bin, запущенного под именем "tar"). Сторож 5 из 5
+    # раз печатал "cat", величина 10 была обречена на FAIL(сторож) даже при
+    # исправном правиле. Фикс: `read` — builtin bash, не форкает подпроцесс,
+    # /proc/self/comm читается ВНУТРИ самого $tar_bin, comm которого — "tar".
+    if "$tar_bin" -c "read -r c < /proc/self/comm; printf '%s' \"\$c\" > '$comm_check_file' 2>/dev/null; '$curl_bin' -s -o /dev/null http://127.0.0.1:1 || true" >/dev/null 2>&1; then
         archiver_ran=1
         log "child-процесс comm=curl запущен под родителем comm=tar — ожидается срабатывание exfil_archive_to_network_pipe (parent-половина)"
     else

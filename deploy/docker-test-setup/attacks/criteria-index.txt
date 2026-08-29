@@ -148,10 +148,28 @@
 5.9.9.F.4h	../run-2.9.9.F.4-pipeline.sh	пар dns stale/recovered за прогон
 5.9.9.F.4i	../run-2.9.9.F.4-pipeline.sh	перенос волны 5.9.9.F.3 целиком
 5.9.9.F.4i	../run-2.9.9.F.4-pipeline.sh	все семь пунктов 5.9.9.F.3 сверяются этим замером
-5.9.9.F.5a	run-all-attacks.sh	run_exfil_archive_parent_positive_control (comm=tar подтверждён /proc/self/comm)
-5.9.9.F.5a	../run-2.9.9.F.5-pipeline.sh	exfil_archive_to_network_pipe за аптайм, сторож comm_verified
-5.9.9.F.5b	../../../internal/correlator/incident_tracker.go	incident promoted журналируется на переход вердикта
-5.9.9.F.5b	../run-2.9.9.F.5-pipeline.sh	состав промоушенов idle-часа читается из журнала
-5.9.9.F.5c	../run-2.9.9.F.5-pipeline.sh	наведено преflight-шагом — порог по смыслу, не по константе
-5.9.9.F.5e	../run-2.9.9.F.5-pipeline.sh	величина 8 по трём окнам (преflight/idle-час/атаки), root_comm вместо comm
-5.9.9.F.5f	../run-2.9.9.F.5-pipeline.sh	состав величины 8 по паре (comm, rule_id)
+5.9.9.F.5a	run-all-attacks.sh	comm_verified: $verified
+5.9.9.F.5a	../run-2.9.9.F.5-pipeline.sh	FAIL(сторож 5.9.9.F.5a)
+5.9.9.F.5b	../../../internal/correlator/incident.go	correlator: incident promoted
+5.9.9.F.5b	../run-2.9.9.F.5-pipeline.sh	промоушенов verdict=attack в журнале
+5.9.9.F.5c	../run-2.9.9.F.5-pipeline.sh	ГРАНИЦА (5.9.9.F.5c)
+5.9.9.F.5e	../run-2.9.9.F.5-pipeline.sh	единственное окно с порогом < 5%
+5.9.9.F.5f	../run-2.9.9.F.5-pipeline.sh	состав по (comm, rule)
+5.9.9.F.5k	run-all-attacks.sh	read -r c < /proc/self/comm
+5.9.9.F.5k	../run-2.9.9.F.5-pipeline.sh	5.9.9.F.5k: та же конструкция
+5.9.9.F.5l	-	5.9.9.F.5l: журнал прочитан jq по JSON-payload
+5.9.9.F.5l	-	5.9.9.F.5l: записей о промоушении против дельты incidents_total
+5.9.9.F.5m	../run-2.9.9.F.5-pipeline.sh	единица счёта — инцидент, не алерт
+5.9.9.F.5m	../idle-run.sh	incidents-start.json
+5.9.9.F.5d	../../../internal/correlator/incident.go	func (t *IncidentTracker) isTrustedRootShell
+5.9.9.F.5d	../../../internal/correlator/incident_bgcoalesce_test.go	func TestIncidentTracker_AttackInDaemon_DoesNotCoalesce
+5.9.9.F.5g	../../../rules/drift-rules.yaml	id: drift_exec_from_system_bin
+5.9.9.F.5g	../run-2.9.9.F.5-pipeline.sh	5.9.9.F.5g ПРОВАЛЕН
+5.9.9.F.5h	../run-2.9.9.F.5-pipeline.sh	release_pipeline_observer_root
+5.9.9.F.5i	idle-actors.txt	50-motd-news
+5.9.9.F.5n	../../../internal/correlator/engine.go	ebpf_guard_alerts_ratelimited_by_rule_total
+5.9.9.F.5n	../../../internal/correlator/engine_test.go	TestCorrelationEngine_RateLimitDropsAreAttributedPerRule
+5.9.9.F.5o	../../../tests/rules/owasp_web_test.yaml	comm: "nginx"
+5.9.9.F.5o	../run-2.9.9.F.5-pipeline.sh	TestRuleFixtures красный
+5.9.9.F.5j	../../../internal/correlator/incident.go	func (t *IncidentTracker) trustedIncidentRoot
+5.9.9.F.5j	../../../internal/correlator/incident_bgcoalesce_test.go	func TestIncidentTracker_AttackBehindShim_DoesNotCoalesce

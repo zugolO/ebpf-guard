@@ -162,3 +162,85 @@ func TestIncidentTracker_DaemonWithRealCluster_DoesNotCoalesce(t *testing.T) {
 	assert.Len(t, incidents, 2,
 		"a daemon incident that reached the scoring threshold is not background and uses the normal window")
 }
+
+// TestIncidentTracker_ContainerizedDaemon_CoalescesThroughShim is the 5.9.9.F.5j
+// regression test for находка №160 (замер №2.9.9.F.4): five grafana incidents
+// per snapshot, verdict "none", score 0, one alert each, on the same minute
+// periodicity the cron case of 5.5d already coalesces. grafana IS in
+// defaultTrustedComms, but the recorded tree is truncated at the container
+// boundary, so RootComm is "containerd-shim" and the trusted-root condition of
+// isPeriodicBackground rejected an incident every alert of which came from a
+// trusted comm. Each tick minted a row, and those rows land in the denominator
+// of the daemon-share criterion.
+func TestIncidentTracker_ContainerizedDaemon_CoalescesThroughShim(t *testing.T) {
+	tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+	shimRoot := func(leafComm string) []types.ProcessNode {
+		return []types.ProcessNode{
+			{PID: 900, PPID: 1, Comm: "containerd-shim"},
+			{PID: 4242, PPID: 900, Comm: leafComm},
+		}
+	}
+
+	const tickPeriod = 60*time.Second + 14*time.Millisecond
+	now := time.Now()
+	for tick := 0; tick < 5; tick++ {
+		a := makeAlertWithComm("r1", 4242, "prod", types.SeverityWarning,
+			now.Add(time.Duration(tick)*tickPeriod), "grafana")
+		a.ProcessTree = shimRoot("grafana")
+		tr.Add(a)
+	}
+
+	incidents := tr.GetAll("", "", 0)
+	assert.Len(t, incidents, 1,
+		"five minute-ticks of a trusted daemon behind a container shim must coalesce into one incident")
+	assert.Equal(t, "containerd-shim", incidents[0].RootComm,
+		"the reported root is unchanged — only the trusted-root test looks through the shim")
+	assert.Equal(t, 5, incidents[0].AlertCount, "no alert is hidden by the coalescing")
+}
+
+// TestIncidentTracker_AttackBehindShim_DoesNotCoalesce is the other side of
+// 5.9.9.F.5j: the shim pass-through must not become a blanket trust of anything
+// rooted at containerd-shim. An untrusted process behind the shim is exactly the
+// containerised-attack case, and it must keep the plain 60s window.
+func TestIncidentTracker_AttackBehindShim_DoesNotCoalesce(t *testing.T) {
+	tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+	shimRoot := []types.ProcessNode{
+		{PID: 900, PPID: 1, Comm: "containerd-shim"},
+		{PID: 4242, PPID: 900, Comm: "xmrig"},
+	}
+
+	now := time.Now()
+	a1 := makeAlertWithComm("r1", 4242, "prod", types.SeverityWarning, now, "xmrig")
+	a1.ProcessTree = shimRoot
+	tr.Add(a1)
+
+	require.True(t, tr.GetAll("", "", 0)[0].HasUntrustedSignal,
+		"an untrusted comm behind the shim must mark the incident untrusted")
+
+	a2 := makeAlertWithComm("r2", 4242, "prod", types.SeverityCritical,
+		now.Add(90*time.Second), "xmrig")
+	a2.ProcessTree = shimRoot
+	tr.Add(a2)
+
+	assert.Len(t, tr.GetAll("", "", 0), 2,
+		"containerised attack keeps the normal window — the shim never trusts what sits behind it")
+}
+
+// TestIncidentTracker_ShimWithoutChain_StaysUntrustedRooted pins the guard that
+// keeps the pass-through from firing on a tree that was never recorded: RootComm
+// can fall back to the alert's own comm, in which case ProcessChain says nothing
+// about what runs behind the shim and the incident must not be read as trusted.
+func TestIncidentTracker_ShimWithoutChain_StaysUntrustedRooted(t *testing.T) {
+	tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+	now := time.Now()
+	// No ProcessTree at all: RootComm degrades to the alert comm.
+	tr.Add(makeAlertWithComm("r1", 4242, "prod", types.SeverityWarning, now, "containerd-shim"))
+	tr.Add(makeAlertWithComm("r2", 4242, "prod", types.SeverityWarning,
+		now.Add(90*time.Second), "containerd-shim"))
+
+	assert.Len(t, tr.GetAll("", "", 0), 2,
+		"a chain-less shim-rooted incident is not background: nothing proves a trusted process is behind it")
+}

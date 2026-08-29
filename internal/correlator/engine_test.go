@@ -980,6 +980,71 @@ func TestCorrelationEngine_DedupDropsAreAttributedPerRule(t *testing.T) {
 		"the aggregate counter must stay consistent with the per-rule breakdown")
 }
 
+// TestCorrelationEngine_RateLimitDropsAreAttributedPerRule covers 5.9.9.F.5n
+// (№164): per-rule rate-limiter drops used to fall into the un-labelled
+// alertsDropped aggregate alongside dedup and global-limiter drops, so a rule
+// pinned at its ceiling (10 alerts/60s) was indistinguishable from a rule that
+// simply stopped firing. The breakdown must attribute a drop to the rule that
+// hit its own ceiling, not to any other rule sharing the aggregate.
+func TestCorrelationEngine_RateLimitDropsAreAttributedPerRule(t *testing.T) {
+	comm := func(s string) [16]byte {
+		var b [16]byte
+		copy(b[:], s)
+		return b
+	}
+
+	noisy := Rule{
+		ID:        "ratelimit_attrib_noisy",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"443"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+	quiet := Rule{
+		ID:        "ratelimit_attrib_quiet",
+		EventType: types.EventTCPConnect,
+		Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"8443"}},
+		Severity:  types.SeverityWarning,
+		Action:    ActionAlert,
+	}
+
+	cfg := DefaultCorrelationEngineConfig()
+	cfg.Rules = []Rule{noisy, quiet}
+	cfg.EnableRateLimit = true
+	cfg.RateLimitWindow = time.Minute
+	cfg.MaxAlertsPerWindow = 2
+	cfg.EnableAnomaly = false
+	cfg.EnableDedup = false
+
+	engine := NewCorrelationEngineWithConfig(cfg)
+	defer engine.Close()
+
+	ctx := context.Background()
+	for pid := uint32(100); pid < 105; pid++ {
+		event := types.Event{
+			Type:    types.EventTCPConnect,
+			PID:     pid,
+			Comm:    comm("nginx"),
+			Network: &types.NetworkEvent{Dport: 443},
+		}
+		engine.Ingest(ctx, event)
+	}
+
+	// One event for the quiet rule, well within its own ceiling.
+	quietEvent := types.Event{
+		Type:    types.EventTCPConnect,
+		PID:     200,
+		Comm:    comm("nginx"),
+		Network: &types.NetworkEvent{Dport: 8443},
+	}
+	engine.Ingest(ctx, quietEvent)
+
+	assert.Equal(t, 3.0, testutil.ToFloat64(engine.alertsRateLimitedByRule.WithLabelValues(noisy.ID)),
+		"the three alerts past the ceiling must be attributed to the rule that hit it")
+	assert.Equal(t, 0.0, testutil.ToFloat64(engine.alertsRateLimitedByRule.WithLabelValues(quiet.ID)),
+		"a rule that never hit its ceiling must not accumulate another rule's drops")
+}
+
 func TestCorrelationEngine_DedupWindow(t *testing.T) {
 	comm := func(s string) [16]byte {
 		var b [16]byte

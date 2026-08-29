@@ -66,4 +66,22 @@ tar	2.9.9.F.1:2	по таймеру dpkg-db-backup.timer (архивация, е
 (b-backup)	2.9.9.F.1:1	по таймеру dpkg-db-backup.timer (усечённое имя comm)
 dpkg-db-backup	2.9.9.F.1:1	по таймеру dpkg-db-backup.timer (ежедневно)
 run-parts	2.9.9.F.1:1	по таймеру (обвязка /etc/cron.*/ через run-parts)
+
+# --- 5.9.9.F.5i/№159 (замер №2.9.9.F.4, впервые наблюдено) — таймер Ubuntu
+# MOTD-новостей, новое окно суток относительно предыдущих замеров. Запрет
+# постановки №2.9.9.F.3 касался mandb/find/install (их здесь нет) —
+# пополнение этой записью законно. Оговорка постановки 5.9.9.F.5i: сама эта
+# запись НЕ закрывает величину 3 (idle-час, verdict="attack") — промоушен
+# wget до incident_confirmed_attack на этом акторе остаётся FAIL до разбора
+# по существу (netintr_syn_scan_pattern/lateral_tool_transfer_wget на
+# штатном таймере, сходившем в сеть, — это класс «правило шире своего
+# имени», отдельный от вопроса «новый ли это актор»).
+run-parts	2.9.9.F.4:1	по таймеру (обвязка /etc/cron.*/50-motd-news через run-parts)
+50-motd-news	2.9.9.F.4:1	по таймеру apt-news.timer/50-motd-news (Ubuntu MOTD news)
+(otd-news)	2.9.9.F.4:1	по таймеру apt-news.timer/50-motd-news (усечённое имя comm)
+wget	2.9.9.F.4:1	по таймеру 50-motd-news (загрузка apt-news JSON)
+dpkg	2.9.9.F.4:1	по таймеру 50-motd-news (dpkg --print-architecture)
+dpkg-query	2.9.9.F.4:1	по таймеру 50-motd-news (dpkg-query -W)
+mktemp	2.9.9.F.4:1	по таймеру 50-motd-news (временный файл для загрузки)
+uname	2.9.9.F.4:1	по таймеру 50-motd-news (uname -m)
 sshd	2.9.9.F.1:1	по логину (сессии наблюдателя/крона)

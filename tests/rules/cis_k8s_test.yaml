@@ -59,6 +59,9 @@ tests:
     rule_id: cis_5_2_1_privileged_container
     event:
       type: syscall
+      pid: 4242 # 5.9.9.F.5o (#165): harness defaults an unset pid to 1, which
+      # collides with the systemd-init-self exception (pid==1) added by
+      # 5.9.9.F.3c — an attacking process never legitimately has pid 1.
       comm: "app"
       syscall:
         nr: 272

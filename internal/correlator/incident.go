@@ -449,6 +449,68 @@ func (t *IncidentTracker) isTrustedRootShell(comm, rootComm string) bool {
 	return t.isTrustedComm(rootComm)
 }
 
+// containerSupervisorComms lists container-runtime supervisor processes that
+// show up as the *root* of a process tree only because the tree is truncated
+// at the container boundary: the shim is the plumbing a container's real root
+// process hangs off, not a semantic ancestor of it. 5.9.9.F.5j (находка №160).
+//
+// Kernel comm is capped at 16 bytes, so containerd-shim-runc-v2 arrives as
+// "containerd-shim" — the truncated form is what has to be listed here.
+var containerSupervisorComms = map[string]struct{}{
+	"containerd-shim": {},
+	"containerd":      {},
+	"dockerd":         {},
+	"runc":            {},
+	"conmon":          {},
+}
+
+// trustedIncidentRoot reports whether the incident's *semantic* root process is
+// in the trusted allowlist, seeing through one layer of container-runtime
+// supervisor — 5.9.9.F.5j (находка №160), the narrowed form of candidate 1 из
+// постановки.
+//
+// Замер №2.9.9.F.4 produced five separate grafana incidents per snapshot,
+// verdict "none", score 0, one alert each, on the same minute periodicity as
+// the cron case 5.5d already coalesces. They failed isPeriodicBackground on
+// exactly one condition: RootComm is "containerd-shim", not "grafana", so the
+// trusted-root test rejected an incident whose every alert came from a comm
+// that IS trusted. Each tick minted a new row, and those rows sit in the
+// denominator of the daemon-share criterion.
+//
+// Deliberately narrower than "add containerd-shim to defaultTrustedComms"
+// (candidate 1 as first written, rejected in plan.md): the shim itself never
+// becomes trusted, it only stops hiding the node behind it. The trusted comm
+// must be the shim's immediate child in the recorded chain, so
+// containerd-shim → xmrig stays untrusted-rooted, and every other condition of
+// isPeriodicBackground still applies unchanged — one untrusted comm anywhere
+// in the incident, one network signal, or a scoring-qualifying rule cluster
+// still disqualifies it. Coalescing does not suppress: alerts, rules, counts
+// and score keep accruing into the single row, so the score-9 anomaly incident
+// on this same actor (журнал предпрогона 2026-08-29) still scores 9 and is
+// still promoted to "suspicious" — it becomes one row instead of N.
+//
+// Not applied to the metric label at recalculateScore (incidents_trusted_root_total),
+// which stays on the plain isTrustedComm so that series remains comparable
+// across замеры №2.1…№2.9 — same reasoning as the separate CounterVec in 5.9.9.F.5n.
+//
+// Caller must hold at least the read lock.
+func (t *IncidentTracker) trustedIncidentRoot(inc *types.Incident) bool {
+	if t.isTrustedComm(inc.RootComm) {
+		return true
+	}
+	if _, isShim := containerSupervisorComms[inc.RootComm]; !isShim {
+		return false
+	}
+	// Only ever look through the shim when the recorded chain actually starts
+	// at it: RootComm can come from the lineage tracker or fall back to the
+	// alert's own comm, in which case ProcessChain says nothing about what sits
+	// under the shim and the incident stays untrusted-rooted.
+	if len(inc.ProcessChain) < 2 || inc.ProcessChain[0] != inc.RootComm {
+		return false
+	}
+	return t.isTrustedComm(inc.ProcessChain[1])
+}
+
 // isPeriodicBackground reports whether inc is recurring trusted-daemon
 // background rather than a developing incident: rooted at a trusted comm, with
 // no untrusted-comm and no network signal anywhere in it, and never having
@@ -462,7 +524,9 @@ func (t *IncidentTracker) isTrustedRootShell(comm, rootComm string) bool {
 //   - trusted root: the P1-13 allowlist (sshd, cron), the same notion of
 //     "background" already used for verdict promotion. RootComm, not the leaf
 //     comm, so an incident rooted at cron that later sprouts an attacker child
-//     is judged on its origin.
+//     is judged on its origin. Read through trustedIncidentRoot, so a tree
+//     truncated at a container-runtime shim is judged on the process behind
+//     the shim (5.9.9.F.5j) rather than on the plumbing.
 //   - no untrusted/network signal: the moment either appears the incident stops
 //     being background and reverts to the normal window on the next alert, so
 //     an attack that starts inside a daemon is not swallowed by a 5-minute
@@ -479,7 +543,7 @@ func (t *IncidentTracker) isPeriodicBackground(inc *types.Incident) bool {
 	if inc.HasUntrustedSignal || inc.HasNetworkSignal {
 		return false
 	}
-	if !t.isTrustedComm(inc.RootComm) {
+	if !t.trustedIncidentRoot(inc) {
 		return false
 	}
 	return len(inc.ScoringRuleIDs) < minUniqueRulesForScore

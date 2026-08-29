@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 
@@ -23,7 +24,23 @@ import (
 // (or extraEnv is itself empty) instead of racing a fixed sleep.
 func spawnWithEnv(t *testing.T, extraEnv []string) (pid uint32, cleanup func()) {
 	t.Helper()
-	cmd := exec.Command("/usr/bin/sleep", "30")
+	// These tests read /proc/<pid>/environ of a live child — a Linux-only
+	// interface. Skipping is the honest answer off Linux; the previous
+	// hardcoded /usr/bin/sleep turned "this platform has no /proc" into a
+	// failure that looked like a defect in extractTraceContext, and the whole
+	// package was read as "red locally, ignore it" ever since.
+	if runtime.GOOS != "linux" {
+		t.Skip("requires /proc/<pid>/environ (Linux only)")
+	}
+	// exec.LookPath, not a hardcoded /usr/bin/sleep: the binary lives in
+	// /bin/sleep on macOS (and on any distro with a different layout), where
+	// the hardcoded path failed every one of these tests with
+	// "fork/exec /usr/bin/sleep: no such file or directory" — a permanent red
+	// that had to be mentally excluded from every local run of this package,
+	// which is exactly how a real regression goes unnoticed.
+	sleepBin, err := exec.LookPath("sleep")
+	require.NoError(t, err, "no sleep(1) on PATH — this test needs a long-lived child process")
+	cmd := exec.Command(sleepBin, "30")
 	cmd.Env = extraEnv
 	require.NoError(t, cmd.Start())
 	p := uint32(cmd.Process.Pid)

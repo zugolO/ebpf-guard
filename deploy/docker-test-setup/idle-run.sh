@@ -188,7 +188,14 @@ sleep 5
 # incident_confirmed_attack ниже по файлу — снята здесь, а не в SUMMARY,
 # чтобы отметить момент максимально близко к самому первому запросу окна.
 RUN_START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-api_multi /api/v1/alerts "$OUT/alerts-start.json" /metrics "$OUT/metrics-start.txt" /api/v1/status "$OUT/status-start.json"
+# 5.9.9.F.5m (№163): incidents-start/-end снимаются той же парой срезов, что
+# alerts-start/-end — величина 8 после этого пункта считается по инцидентам
+# (RootComm/ProcessChain), а не по алертам (у которых process_tree до API не
+# доходит), и preflight-/idle-окну нужен собственный источник инцидентов, а
+# не только final-incidents-$TIMESTAMP.json, который run-all-attacks.sh снимает
+# один раз в самом конце и который к запуску idle-run.sh может быть уже
+# вытеснен TTL-очисткой.
+api_multi /api/v1/alerts "$OUT/alerts-start.json" /api/v1/incidents?limit=1000 "$OUT/incidents-start.json" /metrics "$OUT/metrics-start.txt" /api/v1/status "$OUT/status-start.json"
 
 # --- CPU без `ps`: тики utime+stime из /proc/<pid>/stat, штатным `read` bash ---
 # (5.9a половина 1). CLK_TCK снят один раз на весь прогон, не на срез.
@@ -304,7 +311,8 @@ log "=== постобработка снимков (nseries/alerts_total) ==="
 # --- финальный срез до рестарта (1 curl вместо 4) ---
 log "=== сбор финальных данных ==="
 RUN_END_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-api_multi /api/v1/alerts "$OUT/alerts-end.json" /metrics "$OUT/metrics-end.txt" \
+# 5.9.9.F.5m (№163): incidents-end — см. комментарий у incidents-start выше.
+api_multi /api/v1/alerts "$OUT/alerts-end.json" /api/v1/incidents?limit=1000 "$OUT/incidents-end.json" /metrics "$OUT/metrics-end.txt" \
           /api/v1/status "$OUT/status-end.json" /debug/state "$OUT/state-end.json"
 
 # --- проверка P0-3: переживает ли learning рестарт ---
@@ -374,6 +382,27 @@ journalctl -u "$SERVICE" --since "@$(( $(date +%s) - DURATION - 600 ))" --no-pag
     metrics_alerts_end=$(grep '^ebpf_guard_alerts_total{' "$OUT/metrics-end.txt" 2>/dev/null \
         | awk '{s+=$NF} END{printf "%d", s+0}')
     echo "дельта за idle-час (метрика ebpf_guard_alerts_total): $(( ${metrics_alerts_end:-0} - ${metrics_alerts_start:-0} ))"
+    echo
+    echo "--- 5.9.9.F.5g/№154: ssh-соединений за idle-час (первым шагом решения по drift_exec_from_system_bin — не правка, а число) ---"
+    # Постановка 5g требовала это число ДО правки; правка (5.9.9.F.5g, вариант 2:
+    # переименование + понижение severity) уже сделана в rules/drift-rules.yaml
+    # на данных предпрогона №2.9.9.F.5 (739 соединений/час, 0 успешных auth, 9
+    # источников), но число само по себе — самостоятельная величина ("число
+    # ssh-соединений напечатано" в блоке приёмки волны), поэтому печатается
+    # КАЖДЫЙ idle-час, а не только предпрогоном, который его добыл вручную через
+    # journalctl на стенде. sshd обычно логируется в systemd-journal напрямую
+    # (без отдельного sshd.service юнита на Debian/Ubuntu) — грепаем по SYSLOG_IDENTIFIER,
+    # а не по -u, чтобы не зависеть от того, как называется юнит на конкретном стенде.
+    ssh_journal=$(journalctl SYSLOG_IDENTIFIER=sshd --since "@$(( $(date +%s) - DURATION ))" --no-pager 2>/dev/null)
+    ssh_conn_n=$(echo "$ssh_journal" | grep -cE 'Connection from|Accepted|Failed password|Disconnected from')
+    ssh_accepted_n=$(echo "$ssh_journal" | grep -cE 'Accepted (password|publickey) for')
+    ssh_sources_n=$(echo "$ssh_journal" | grep -oE 'from [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | sort -u | wc -l | tr -d ' ')
+    echo "строк журнала sshd за idle-окно: ${ssh_conn_n:-0} (грубая оценка объёма, не число TCP-соединений один-к-одному — по одному соединению может быть несколько строк)"
+    echo "успешных аутентификаций: ${ssh_accepted_n:-0}"
+    echo "уникальных источников (по IP в тексте строки): ${ssh_sources_n:-0}"
+    if [ "${ssh_conn_n:-0}" -gt 0 ] && [ "${ssh_accepted_n:-0}" -eq 0 ]; then
+        echo "ВНИМАНИЕ: ssh-активность есть, успешных auth нет — похоже на внешнее сканирование/брутфорс (см. plan.md 5.9.9.F.5g: 739/ч, 9 источников, 0 auth на №2.9.9.F.4), а не нагрузку продукта"
+    fi
     echo
     echo "--- 5.9a: дерево измерителя (events_excluded_total{reason=\"observer_tree\"}) ---"
     # 5.9.1g (находка «SUMMARY складывает алерты с событиями»): раньше здесь

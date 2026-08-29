@@ -92,7 +92,7 @@ container_escape_init_proc	2.4:117
 # устаревание ЗДЕСЬ делает гейт мягче, а не строже (тот же довод, что и
 # для cred_proc_maps_mass_read выше). net_portscan_indicator по-прежнему не
 # снимается тем же запретом, что и раньше.
-drift_new_exec_critical	2.4:34
+drift_exec_from_system_bin	2.4:34
 drift_new_file_dir_sensitive	2.4:59
 drift_new_library_in_system_dir	2.4:23
 mitre_sandbox_detect_proc_read	2.4:519

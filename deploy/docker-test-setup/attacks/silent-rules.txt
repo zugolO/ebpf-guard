@@ -126,3 +126,20 @@ sigma_mprotect_exec_heap a
 sigma_prctl_dumpable a
 sigma_seccomp_filter_install a
 web_blind_sqli_heuristic a
+
+# 2026-08-30 (после замера №6.0): escape_pivot_root выделен из
+# drift_dangerous_syscall. pivot_root(new_root, put_old) несёт только
+# указатели в userspace, скалярного аргумента для сигнатуры базовой линии у
+# него нет, поэтому в классе drift он был хуже, чем нем: первый pivot_root в
+# фазе обучения становился базой, и все последующие — включая настоящий побег
+# — подавлялись как «знакомые». Вынесен в class: threat, срабатывает на
+# факте, а не на новизне.
+#
+# Категория (б), а не (а): условие достижимо — pivot_root (155) есть в
+# DefaultMonitoredSyscalls (internal/bpf/sampling.go), правило не «немо по
+# конструкции». Немо оно потому, что единственные процессы, вызывающие
+# pivot_root на этом стенде, — контейнерные рантаймы, и они исключены по comm;
+# ни один шаг run-all-attacks.sh не делает pivot_root вне рантайма. Снимается
+# волной, которая добавит такой шаг (позитивный контроль на побег), а не
+# правкой правила.
+escape_pivot_root b

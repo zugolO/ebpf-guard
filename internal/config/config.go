@@ -1090,6 +1090,12 @@ type DriftBaselineConfig struct {
 	// memory; the least-recently-active is evicted at the cap. Bounds memory
 	// against attacker-controlled comm cardinality. Default 1000 when unset.
 	MaxWorkloads int `mapstructure:"max_workloads"`
+	// MaxSignaturesPerWorkload caps how many distinct signatures a single
+	// workload's baseline may hold. Signature targets are attacker-controlled
+	// (file paths, argv[0]), so the set needs its own bound; at the cap the
+	// baseline freezes and later novel signatures alert rather than being
+	// silently trusted. Default 256 when unset.
+	MaxSignaturesPerWorkload int `mapstructure:"max_signatures_per_workload"`
 	// EnforceDeadlinePeriods forces a still-learning workload into enforcing
 	// after this many LearningPeriods, regardless of MinSamples, so rarely
 	// active workloads are not permanent blind spots. Default 3 when unset.

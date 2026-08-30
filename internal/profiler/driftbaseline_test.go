@@ -2,12 +2,15 @@ package profiler
 
 import (
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 func fileEventForPath(comm string, path string) types.Event {
@@ -198,7 +201,7 @@ func TestDriftBaselineProfiler_EnforcesAfterDeadlineDespiteLowSamples(t *testing
 	assert.False(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
 }
 
-func TestNormalizeDriftPathPrefix(t *testing.T) {
+func TestNormalizeDriftPath(t *testing.T) {
 	cases := []struct {
 		path string
 		want string
@@ -206,11 +209,269 @@ func TestNormalizeDriftPathPrefix(t *testing.T) {
 		{"", ""},
 		{"/etc/passwd", "/etc/passwd"},
 		{"/etc/shadow", "/etc/shadow"},
-		{"/proc/12345/mem", "/proc/*"},
-		{"/proc/12345/maps", "/proc/*"},
-		{"/usr/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib"},
+		{"/proc/12345/mem", "/proc/*/mem"},
+		{"/proc/12345/maps", "/proc/*/maps"},
+		{"/usr/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib/x86_64-linux-gnu/libc.so.6"},
+		// 6.0: paths that used to collapse to their first two segments and so
+		// made the "new binary / new library / new file" rules unable to tell
+		// novel from routine. Regression guard for the 6.0.3 positive control.
+		{"/usr/local/bin/drift-pc", "/usr/local/bin/drift-pc"},
+		{"/usr/local/bin/drift-pc-attack-window/drift-pc", "/usr/local/bin/drift-pc-attack-window/drift-pc"},
+		{"/usr/bin/curl", "/usr/bin/curl"},
+		{"/usr/bin/python3", "/usr/bin/python3"},
+		{"/usr/sbin/sshd", "/usr/sbin/sshd"},
 	}
 	for _, c := range cases {
-		assert.Equal(t, c.want, normalizeDriftPathPrefix(c.path), "path=%q", c.path)
+		assert.Equal(t, c.want, normalizeDriftPath(c.path), "path=%q", c.path)
+	}
+}
+
+// TestDriftBaselineDistinguishesBinariesInSameDir is the unit-level twin of the
+// 6.0.3 positive control that failed live on measurement №6.0: a workload that
+// learned one binary under a system bin dir must still alert on a different
+// binary under that same dir.
+func TestDriftBaselineDistinguishesBinariesInSameDir(t *testing.T) {
+	current := time.Now()
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled: true, LearningPeriod: 60, MinSamples: 2, PerWorkload: true,
+	}, slog.Default())
+	p.nowFn = func() time.Time { return current }
+
+	seed := syscallEventForExec("drift-pc", 59, "/usr/local/bin/drift-pc")
+	require.False(t, p.Observe("drift_exec_from_system_bin", seed))
+	require.False(t, p.Observe("drift_exec_from_system_bin", seed))
+
+	current = current.Add(2 * time.Minute)
+	require.False(t, p.Observe("drift_exec_from_system_bin", seed),
+		"the observation that closes learning is itself suppressed")
+	require.Equal(t, 0, p.LearningWorkloads(), "workload must be enforcing by now")
+
+	require.False(t, p.Observe("drift_exec_from_system_bin", seed),
+		"the learned binary stays suppressed as known baseline")
+	assert.True(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("drift-pc", 59, "/usr/local/bin/drift-pc-attack-window/drift-pc")),
+		"a different binary under the same system bin dir must alert")
+	assert.True(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("drift-pc", 59, "/usr/bin/curl")),
+		"a binary under a different system bin dir must alert")
+}
+
+// TestDriftBaselineSignatureCapFreezesBaseline pins the bound that replaced the
+// depth truncation: the signature set stops growing at the cap, the profile is
+// reported as saturated, and unlearned signatures alert rather than vanish.
+func TestDriftBaselineSignatureCapFreezesBaseline(t *testing.T) {
+	current := time.Now()
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled: true, LearningPeriod: 60, MinSamples: 1, PerWorkload: true,
+		MaxSignaturesPerWorkload: 3,
+	}, slog.Default())
+	p.nowFn = func() time.Time { return current }
+
+	for i := 0; i < 10; i++ {
+		p.Observe("drift_exec_from_system_bin",
+			syscallEventForExec("busy", 59, fmt.Sprintf("/usr/bin/tool%d", i)))
+	}
+	assert.Equal(t, 1, p.SaturatedWorkloads(), "profile must be flagged saturated")
+
+	current = current.Add(2 * time.Minute)
+	require.False(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("busy", 59, "/usr/bin/tool0")), "learned signature stays known")
+	assert.True(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("busy", 59, "/usr/bin/tool9")),
+		"a signature dropped by the cap must alert, not be silently trusted")
+}
+
+// syscallEventWithArgs builds a syscall event carrying register arguments,
+// the way the collector delivers ptrace/mount/bpf/... events (no proc.args).
+func syscallEventWithArgs(comm string, nr int, args ...uint64) types.Event {
+	var a [6]uint64
+	copy(a[:], args)
+	return types.Event{
+		Type:    types.EventSyscall,
+		Comm:    commBytes(comm),
+		Syscall: &types.SyscallEvent{Nr: int64(nr), Args: a},
+	}
+}
+
+// TestDriftBaselineDistinguishesDangerousSyscallArgs is the unit twin of the
+// second blind spot measurement №6.0 exposed: drift_dangerous_syscall matched
+// on the syscall number alone, so one bpf() or mount() call during learning
+// suppressed every later one for that workload — including the escape the rule
+// is named after. The register arguments were carried end-to-end all along.
+func TestDriftBaselineDistinguishesDangerousSyscallArgs(t *testing.T) {
+	const (
+		nrMount   = 165
+		nrBPF     = 321
+		nrPtrace  = 101
+		nrUnshare = 272
+	)
+	cases := []struct {
+		name     string
+		learned  types.Event
+		attack   types.Event
+		whatever string
+	}{
+		{
+			name:     "bpf map lookup does not mask prog load",
+			learned:  syscallEventWithArgs("systemd", nrBPF, 1), // BPF_MAP_LOOKUP_ELEM
+			attack:   syscallEventWithArgs("systemd", nrBPF, 5), // BPF_PROG_LOAD
+			whatever: "bpf",
+		},
+		{
+			name:     "namespace mount does not mask a bind mount",
+			learned:  syscallEventWithArgs("containerd", nrMount, 0, 0, 0, 1),    // MS_RDONLY
+			attack:   syscallEventWithArgs("containerd", nrMount, 0, 0, 0, 4096), // MS_BIND
+			whatever: "mount",
+		},
+		{
+			name:     "reading own registers does not mask attaching to another process",
+			learned:  syscallEventWithArgs("gdb", nrPtrace, 12), // PTRACE_GETREGS
+			attack:   syscallEventWithArgs("gdb", nrPtrace, 16), // PTRACE_ATTACH
+			whatever: "ptrace",
+		},
+		{
+			name:     "mount namespace does not mask a user namespace",
+			learned:  syscallEventWithArgs("runc", nrUnshare, 0x00020000), // CLONE_NEWNS
+			attack:   syscallEventWithArgs("runc", nrUnshare, 0x10000000), // CLONE_NEWUSER
+			whatever: "unshare",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewDriftBaselineProfiler(DriftBaselineConfig{
+				Enabled:        true,
+				LearningPeriod: 0,
+				MinSamples:     1,
+				PerWorkload:    true,
+			}, nil)
+
+			// Learn the benign form, then promote.
+			p.Observe("drift_dangerous_syscall", tc.learned)
+			if p.Observe("drift_dangerous_syscall", tc.learned) {
+				t.Fatal("learned signature alerted after promotion")
+			}
+			if !p.Observe("drift_dangerous_syscall", tc.attack) {
+				t.Fatalf("%s: novel argument did not alert — signature collapsed to the bare syscall number", tc.whatever)
+			}
+		})
+	}
+}
+
+// TestDriftSyscallArgsAllZeroIsNotBPFMapCreate pins the guard against the
+// sys_exit path: when the syscall_args map misses, the event arrives with all
+// six registers zero. bpf(0, ...) is BPF_MAP_CREATE, so an unguarded read
+// would learn a real escape primitive from a dropped map entry.
+func TestDriftSyscallArgsAllZeroIsNotBPFMapCreate(t *testing.T) {
+	lost := driftSignatureTarget(syscallEventWithArgs("systemd", 321))
+	mapCreate := driftSignatureTarget(syscallEventWithArgs("systemd", 321, 0, 1))
+	if lost == mapCreate {
+		t.Fatalf("lost arguments and BPF_MAP_CREATE share signature %q", lost)
+	}
+	if !strings.Contains(lost, driftSyscallArgUnknown) {
+		t.Fatalf("lost arguments rendered as %q, want the %q marker", lost, driftSyscallArgUnknown)
+	}
+	if !strings.Contains(mapCreate, "MAP_CREATE") {
+		t.Fatalf("bpf cmd not decoded: %q", mapCreate)
+	}
+}
+
+// TestDriftSyscallArgFormatting pins the human-readable form of the signature
+// fragment, since it is what an operator reads in /debug/state and in the
+// alert. Unknown flag bits must survive as a hex remainder rather than being
+// dropped, or two different flag sets collapse into one signature.
+func TestDriftSyscallArgFormatting(t *testing.T) {
+	if got := mountFlagNames(4096 | 16384); got != "MS_BIND|MS_REC" {
+		t.Errorf("mount flags: got %q", got)
+	}
+	if got := mountFlagNames(0xC0ED0000 | 1); got != "MS_RDONLY" {
+		t.Errorf("MS_MGC_VAL not masked: got %q", got)
+	}
+	if got := cloneNamespaceFlagNames(0x10000000 | 0x00020000); got != "CLONE_NEWNS|CLONE_NEWUSER" {
+		t.Errorf("clone flags: got %q", got)
+	}
+	if got := mountFlagNames(1 << 30); got != "0x40000000" {
+		t.Errorf("unknown flag bits must survive: got %q", got)
+	}
+	if got := ptraceRequestName(0x4206); got != "PTRACE_SEIZE" {
+		t.Errorf("ptrace request: got %q", got)
+	}
+}
+
+// TestDriftBaselineReportsEachSignatureOnce covers the volume half of the
+// problem. A drift rule reports a change of state, and a state change deserves
+// one alert — not one per recurrence of the new binary. Before this, alert
+// volume tracked how often the novel thing ran (a property of the workload,
+// not of the drift), which is what made measurement №6.0's <=100/hour ceiling
+// unusable as a criterion.
+func TestDriftBaselineReportsEachSignatureOnce(t *testing.T) {
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled:        true,
+		LearningPeriod: 0,
+		MinSamples:     1,
+		PerWorkload:    true,
+	}, nil)
+
+	known := syscallEventForExec("cron", 59, "/usr/bin/known")
+	p.Observe("drift_exec_from_system_bin", known)
+	p.Observe("drift_exec_from_system_bin", known)
+
+	novel := syscallEventForExec("cron", 59, "/usr/bin/novel")
+	if !p.Observe("drift_exec_from_system_bin", novel) {
+		t.Fatal("first occurrence of a novel signature must alert")
+	}
+	for i := 0; i < 50; i++ {
+		if p.Observe("drift_exec_from_system_bin", novel) {
+			t.Fatalf("occurrence %d of the same drift alerted again", i+2)
+		}
+	}
+
+	// A DIFFERENT novel signature still alerts — report-once must dedupe per
+	// signature, not silence the workload.
+	other := syscallEventForExec("cron", 59, "/usr/bin/other")
+	if !p.Observe("drift_exec_from_system_bin", other) {
+		t.Fatal("a second, distinct drift was suppressed by report-once")
+	}
+
+	states := p.WorkloadStates()
+	if len(states) != 1 {
+		t.Fatalf("want 1 workload, got %d", len(states))
+	}
+	if states[0].Reported != 2 {
+		t.Errorf("reported count = %d, want 2", states[0].Reported)
+	}
+}
+
+// TestDriftBaselineRawAnomalyVolumeStaysMeasurable pins the deliberate
+// asymmetry: report-once changes what is ALERTED, not what is COUNTED. The
+// anomalies_total counter must keep the raw volume so a run can show both what
+// the host did and what the operator was paged about.
+func TestDriftBaselineRawAnomalyVolumeStaysMeasurable(t *testing.T) {
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled:        true,
+		LearningPeriod: 0,
+		MinSamples:     1,
+		PerWorkload:    true,
+	}, nil)
+
+	known := syscallEventForExec("cron", 59, "/usr/bin/known")
+	p.Observe("drift_exec_from_system_bin", known)
+	p.Observe("drift_exec_from_system_bin", known)
+
+	novel := syscallEventForExec("cron", 59, "/usr/bin/novel")
+	alerts := 0
+	for i := 0; i < 10; i++ {
+		if p.Observe("drift_exec_from_system_bin", novel) {
+			alerts++
+		}
+	}
+	if alerts != 1 {
+		t.Fatalf("alerts = %d, want 1", alerts)
+	}
+	if got := testutil.ToFloat64(p.anomaliesTotal.WithLabelValues("drift_exec_from_system_bin")); got != 10 {
+		t.Errorf("anomalies_total = %v, want 10 (raw volume must survive report-once)", got)
+	}
+	if got := testutil.ToFloat64(p.suppressedTotal.WithLabelValues("drift_exec_from_system_bin", "already_reported")); got != 9 {
+		t.Errorf("suppressed already_reported = %v, want 9", got)
 	}
 }

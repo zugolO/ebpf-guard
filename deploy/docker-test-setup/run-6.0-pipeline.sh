@@ -914,7 +914,52 @@ grep -q 'Class-wide baseline decision' rules/drift-rules.yaml \
     || die "6.0a: в rules/drift-rules.yaml нет записи о решении по базовой линии — без неё следующая сессия не увидит истории выбора (b)->(a)"
 grep -q 'Wave 6, plan.md' rules/drift-rules.yaml \
     || die "6.0a: в rules/drift-rules.yaml нет записи о решении волны 6.0 — правка config-test.yaml включила baseline без объявленного в дереве решения"
+
+# 6.0a (вторая половина, после разбора замера №6.0): печатать ВСЕ значения
+# drift_baseline, а не только enabled. На №6.0 архив нёс один факт «enabled:
+# true», и learning_period/min_samples/enforce_deadline_periods пришлось
+# восстанавливать по арифметике T_seed+3600 из лога — величины, от которых
+# прямо зависит, слепа нагрузка в окне замера или нет, в архиве отсутствовали.
+DRIFT_LEARNING_PERIOD=$(awk '/^profiler:/{p=1} p && /drift_baseline:/{d=1} d && /^[[:space:]]*learning_period:/{print $2; exit}' $SETUP/config-test.yaml)
+DRIFT_MIN_SAMPLES=$(awk '/^profiler:/{p=1} p && /drift_baseline:/{d=1} d && /^[[:space:]]*min_samples:/{print $2; exit}' $SETUP/config-test.yaml)
+DRIFT_DEADLINE_PERIODS=$(awk '/^profiler:/{p=1} p && /drift_baseline:/{d=1} d && /^[[:space:]]*enforce_deadline_periods:/{print $2; exit}' $SETUP/config-test.yaml)
+DRIFT_MAX_SIGS=$(awk '/^profiler:/{p=1} p && /drift_baseline:/{d=1} d && /^[[:space:]]*max_signatures_per_workload:/{print $2; exit}' $SETUP/config-test.yaml)
+[ -n "$DRIFT_LEARNING_PERIOD" ] && [ -n "$DRIFT_MIN_SAMPLES" ] && [ -n "$DRIFT_DEADLINE_PERIODS" ] \
+    || die "6.0a: в config-test.yaml не вычитаны learning_period/min_samples/enforce_deadline_periods под profiler.drift_baseline — шаг [10/14] считает по ним паузы, брать их из дефолтов кода молча нельзя (на №6.0 именно эти три величины отсутствовали в архиве)"
+DRIFT_DEADLINE_SEC=$((DRIFT_LEARNING_PERIOD * DRIFT_DEADLINE_PERIODS))
 echo "  ок: profiler.drift_baseline.enabled: true в config-test.yaml, решение волны 6.0 записано в rules/drift-rules.yaml"
+echo "  drift_baseline: learning_period=${DRIFT_LEARNING_PERIOD}с min_samples=${DRIFT_MIN_SAMPLES} enforce_deadline_periods=${DRIFT_DEADLINE_PERIODS} (=${DRIFT_DEADLINE_SEC}с) max_signatures_per_workload=${DRIFT_MAX_SIGS:-<дефолт кода 256>}"
+
+# Дедлайн обязан истекать ВНУТРИ пролога, иначе нагрузки, у которых не набрано
+# min_samples, входят в idle-час в состоянии learning и там немы — на №6.0 это
+# было 13 из 21, и ноль по счётчику был неотличим от успеха. Порог 3000с ниже —
+# это длина пролога [5/14]..[11/14] с запасом (на №6.0 фактически 71 мин, после
+# укорочения окон ожидается ~29 мин).
+if [ "$DRIFT_DEADLINE_SEC" -gt 3000 ]; then
+    die "6.0a: enforce_deadline_periods x learning_period = ${DRIFT_DEADLINE_SEC}с > 3000с — дедлайн не истечёт до открытия idle-часа, и нагрузки без min_samples будут слепы весь измеряемый час (замер №6.0: profiles=21 learning=13 stuck=13). Укоротить learning_period либо enforce_deadline_periods в config-test.yaml"
+fi
+
+# Кап сигнатур — продуктовая половина правки 6.0: он заменил усечение пути по
+# глубине, которое схлопывало /usr/bin/* в одну сигнатуру и делало позитивный
+# контроль 6.0.3 непроходимым по конструкции.
+grep -q 'normalizeDriftPath\b' internal/profiler/driftbaseline.go \
+    || die "6.0a: в internal/profiler/driftbaseline.go нет normalizeDriftPath — правка сигнатуры дрейфа откатилась к normalizeDriftPathPrefix с усечением по глубине, и контроль 6.0.3 снова не сможет пройти ни при каком поведении базовой линии"
+grep -q 'driftPathPrefixMaxDepth' internal/profiler/driftbaseline.go \
+    && die "6.0a: в internal/profiler/driftbaseline.go снова есть driftPathPrefixMaxDepth — усечение пути по глубине вернулось, /usr/bin/curl и /usr/bin/python3 опять одна сигнатура"
+echo "  ок: сигнатура дрейфа без усечения по глубине (normalizeDriftPath), кардинальность ограничена капом max_signatures_per_workload"
+
+# Вторая половина той же правки (2026-08-30). Обе проверяются по дереву, а не
+# по бинарю: пайплайн собирает агента сам, и рассинхрон «правка в дереве есть,
+# в собранном бинаре нет» ловится позже — контролем 6.0.3 и полом 16.5.
+grep -q 'driftSyscallArgSpecs' internal/profiler/driftsyscallargs.go \
+    || die "6.0a: нет internal/profiler/driftsyscallargs.go с driftSyscallArgSpecs — сигнатура syscall-правил снова вырождается в голый номер, и drift_dangerous_syscall будет нема весь прогон (замер №6.0: 416 подавлений, 0 алертов)"
+grep -q 'already_reported' internal/profiler/driftbaseline.go \
+    || die "6.0a: в internal/profiler/driftbaseline.go нет ветки already_reported — правка «сообщать один раз» откатилась, объём класса drift снова пропорционален частоте исполнения, и потолок 6.0.1 (<=100/ч) измеряет расписание cron, а не дрейф"
+# Машинный гейт соответствия правил и таблицы аргументов. Дешевле поймать
+# здесь, чем узнать из немого правила через 70 минут прогона.
+go test ./internal/correlator/ -run TestDriftSyscallRulesHaveArgSpecs -count=1 >/dev/null 2>&1 \
+    || die "6.0a: TestDriftSyscallRulesHaveArgSpecs не проходит — какой-то syscall в правиле класса drift не имеет записи в driftSyscallArgSpecs, его сигнатура схлопнута в одно значение на нагрузку. Запустить тест и прочитать имя правила и номер сисколла"
+echo "  ок: syscall-сигнатуры различают аргументы (driftSyscallArgSpecs), дрейф сообщается один раз (already_reported)"
 
 echo "--- преflight: 5.9.9.F.5g — drift_new_exec_critical переименовано и понижено (№154) ---"
 # №154: правило дало 576/607 алертов и 576/577 критикалов idle-часа
@@ -2108,7 +2153,7 @@ register_pipeline_observer_root
 # T0+3600с», — но промоушен в enforcing им НЕ обеспечивается.
 drift_seed_epoch=$(date -u +%s)
 echo "  посеяно 25 exec'ов $DRIFT_PC_BIN (comm=drift-pc) в $(date -u +%H:%M:%S) UTC — MinSamples=20 достигнут заведомо с запасом"
-echo "  T_seed (создан профиль drift-pc)=$drift_seed_epoch — learning этого workload'а закроется не раньше T_seed+3600с"
+echo "  T_seed (создан профиль drift-pc)=$drift_seed_epoch — learning этого workload'а закроется не раньше T_seed+${DRIFT_LEARNING_PERIOD}с"
 
 # Досыпание остатка до learning_period=3600с от AGENT_START_FILE. Если этот
 # шаг сам стартовал позже T0+3600 (долгие предыдущие шаги), remaining <= 0
@@ -2117,13 +2162,17 @@ agent_start_epoch=$(date -u -d "$(cat /root/agent-start-6.0.txt)" +%s 2>/dev/nul
 [ -n "$agent_start_epoch" ] || die "6.0: не удалось разобрать /root/agent-start-6.0.txt ($(cat /root/agent-start-6.0.txt 2>/dev/null)) — без T0 остаток до learning_period=3600с не вычисляется, риск №1 постановки 6.0 не закрыт"
 now_epoch=$(date -u +%s)
 elapsed=$((now_epoch - agent_start_epoch))
-remaining=$((3600 - elapsed))
-echo "  T0 (агент поднят)=$(cat /root/agent-start-6.0.txt) UTC, прошло ${elapsed}с, до 3600с осталось ${remaining}с"
+# Целимся не в learning_period, а в ДЕДЛАЙН: к открытию idle-часа обучение
+# должно быть закрыто у ВСЕХ нагрузок, включая те, что не набрали min_samples
+# (их промоутит только ветка enforceDeadline). Замер №6.0 целился в
+# learning_period=3600 и получил 13 stuck-нагрузок в измеряемом часе.
+remaining=$((DRIFT_DEADLINE_SEC - elapsed))
+echo "  T0 (агент поднят)=$(cat /root/agent-start-6.0.txt) UTC, прошло ${elapsed}с, до дедлайна T0+${DRIFT_DEADLINE_SEC}с осталось ${remaining}с"
 if [ "$remaining" -gt 0 ]; then
-    echo "  досыпаю ${remaining}с, чтобы открытие idle-часа было НЕ РАНЬШЕ T0+3600с ($(date -u +%H:%M:%S) UTC)"
+    echo "  досыпаю ${remaining}с, чтобы открытие idle-часа было НЕ РАНЬШЕ T0+${DRIFT_DEADLINE_SEC}с ($(date -u +%H:%M:%S) UTC)"
     sleep "$remaining"
 else
-    echo "  ВНИМАНИЕ: до шага [10/14] уже прошло ${elapsed}с (>=3600с) без дополнительного сна — предыдущие шаги сами заняли час; остаток отрицательный, это не ошибка, а более длинный прогон, чем обычно"
+    echo "  ВНИМАНИЕ: до шага [10/14] уже прошло ${elapsed}с (>=${DRIFT_DEADLINE_SEC}с) без дополнительного сна — предыдущие шаги сами заняли дольше дедлайна; остаток отрицательный, это не ошибка, а более длинный прогон, чем обычно"
 fi
 
 # 660с наследия волны 8 остаются НЕ отменёнными: они всё ещё нужны, чтобы
@@ -2137,18 +2186,19 @@ echo "--- 6.0b (продолжение): контрольный exec той же
 # увидел elapsed>=learning_period И sampleCount>=min_samples одновременно.
 # Досыпание до T_seed+3600с. Без него шаг держался на невысказанном
 # допущении «от рестарта [5/14] до посева проходит меньше 660с»: контрольный
-# exec приходит в T0+4260, профиль создан в T0+d, его elapsed = 4260-d, и
-# условие elapsed>=3600 верно ТОЛЬКО при d<=660. На замере №2.9.9.F.8 шаги
+# exec приходит в T0+learning_period+660, профиль создан в T0+d, его elapsed =
+# learning_period+660-d, и условие elapsed>=learning_period верно ТОЛЬКО при
+# d<=660. На замере №2.9.9.F.8 шаги
 # [5/14]→[10/14] заняли d=520с — запас был 140с, а провал вылезал бы через
 # ~75 минут прогона, на 6.0.4, уже после часа ожидания. Здесь допущение
 # снято: ждём по T_seed, сколько бы ни занял участок выше.
-drift_promo_target=$((drift_seed_epoch + 3600 + 30))
+drift_promo_target=$((drift_seed_epoch + DRIFT_LEARNING_PERIOD + 30))
 drift_promo_wait=$((drift_promo_target - $(date -u +%s)))
 if [ "$drift_promo_wait" -gt 0 ]; then
-    echo "  до T_seed+3600с осталось ${drift_promo_wait}с — досыпаю перед контрольным exec'ом"
+    echo "  до T_seed+${DRIFT_LEARNING_PERIOD}с осталось ${drift_promo_wait}с — досыпаю перед контрольным exec'ом"
     sleep "$drift_promo_wait"
 else
-    echo "  T_seed+3600с уже прошёл ($((-drift_promo_wait))с назад) — досыпание не требуется"
+    echo "  T_seed+${DRIFT_LEARNING_PERIOD}с уже прошёл ($((-drift_promo_wait))с назад) — досыпание не требуется"
 fi
 release_pipeline_observer_root
 # Три exec'а, а не один: промоушен случается ВНУТРИ Observe(), поэтому нужен
@@ -2169,8 +2219,30 @@ echo "  drift_learning_workloads=${drift_learning:-?} drift_stuck_workloads=${dr
 [ "${drift_profiles:-0}" -ge 1 ] \
     || die "6.0.4 ПРОВАЛЕН: drift_profiles_active=0 — ни один workload не выучен, включая наш собственный посев drift-pc; profiler.drift_baseline либо не подхвачен рестартом [5/14], либо посев выше не дошёл до коллектора"
 [ "${drift_profiles:-0}" -gt "${drift_learning:-0}" ] \
-    || die "6.0.4 ПРОВАЛЕН: ни один из $drift_profiles профилей не в enforcing (drift_learning_workloads=$drift_learning >= drift_profiles_active=$drift_profiles) — посев drift-pc должен был перейти в enforcing к этому моменту (T_seed+3600с+30с, досыпание выше), напечатанное состояние не доказывает закрытие learning (риск №1 постановки 6.0)"
-echo "6.0.4 доказан живьём: как минимум один профиль (наш посев drift-pc) в enforcing к открытию idle-часа"
+    || die "6.0.4 ПРОВАЛЕН: ни один из $drift_profiles профилей не в enforcing (drift_learning_workloads=$drift_learning >= drift_profiles_active=$drift_profiles) — посев drift-pc должен был перейти в enforcing к этому моменту (T_seed+${DRIFT_LEARNING_PERIOD}с+30с, досыпание выше), напечатанное состояние не доказывает закрытие learning (риск №1 постановки 6.0)"
+
+# Разрез по нагрузке (добавлен после разбора №6.0). Неравенство выше говорит
+# лишь «какой-то профиль вышел из learning», а печаталось при этом «наш посев
+# drift-pc в enforcing» — на №6.0 это разошлось: контроль 6.0.3 упал через 70
+# минут, и die-сообщение вынуждено было перечислять две гипотезы, потому что
+# различить их было нечем. Теперь состояние берётся поимённо.
+drift_state_json=$(curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/debug/state" 2>/dev/null)
+echo "$drift_state_json" | jq -e '.drift_baseline.workloads' >/dev/null 2>&1 \
+    || die "6.0.4: GET /debug/state не отдал drift_baseline.workloads — разреза базовой линии по нагрузке нет, значит бинарь собран без правки наблюдаемости 6.0 (или drift_baseline выключен), и утверждение «наш посев в enforcing» опять недоказуемо"
+# Число сигнатур на нагрузку — это ещё и ПРОГНОЗ будущего объёма алертов:
+# после правки «сообщать один раз» поток дрейфа равен числу НОВЫХ сигнатур в
+# час, а не частоте их исполнения, так что размер выученной базы и скорость
+# роста reported говорят, чего ждать от 6.0.1, ДО того как час пройдёт.
+echo "  состояние базовой линии по нагрузкам (state / сигнатур / сэмплов / сообщено / saturated):"
+echo "$drift_state_json" | jq -r '.drift_baseline.workloads[] | "    \(.comm)\t\(.state)\tsig=\(.signatures)\tsamples=\(.samples)\treported=\(.reported)\tsat=\(.saturated)"'
+drift_pc_state=$(echo "$drift_state_json" | jq -r '.drift_baseline.workloads[] | select(.comm=="drift-pc") | .state' 2>/dev/null | head -1)
+[ -n "$drift_pc_state" ] \
+    || die "6.0.4 ПРОВАЛЕН: в /debug/state нет нагрузки comm=drift-pc — посев [10/14] не дошёл до коллектора (или дерево измерителя его срезало), и контроль 6.0.3 ниже будет мерить пустое место"
+[ "$drift_pc_state" = "enforcing" ] \
+    || die "6.0.4 ПРОВАЛЕН: нагрузка comm=drift-pc в состоянии '$drift_pc_state', а не enforcing, к открытию idle-часа — досыпание до T_seed+${DRIFT_LEARNING_PERIOD}с своё обещание не выполнило; позитивный контроль 6.0.3 в окне атаки мерил бы обучение, а не базовую линию (риск №1 постановки 6.0)"
+drift_stuck_state=$(echo "$drift_state_json" | jq -r '[.drift_baseline.workloads[] | select(.state!="enforcing")] | length')
+echo "  нагрузок вне enforcing на открытии idle-часа: ${drift_stuck_state} из $(echo "$drift_state_json" | jq -r '.drift_baseline.workloads | length') (замер №6.0: 13 из 21 — все они были слепы весь измеряемый час)"
+echo "6.0.4 доказан живьём: наш посев comm=drift-pc в состоянии enforcing к открытию idle-часа, установлено поимённо, а не по неравенству агрегатов"
 
 echo "=== [11/14] idle-час, NO_RESTART=1 (5.9.1c) — сокращать нельзя ==="
 # 5.9.9.F.4c (№147): граница окна замера — дерево ПАЙПЛАЙНА обнуляется
@@ -2873,7 +2945,7 @@ acc_rl_stor=$(echo "$acc_rl_line" | grep -oE 'стор[[:space:]]+[0-9]+' | grep
 acc_rl_cut=$(echo "$acc_rl_line" | grep -oE 'срезано[[:space:]]+[0-9]+' | grep -oE '[0-9]+')
 acc "16.1" "6.0.1 — drift_exec_from_system_bin, объём за idle-час (порог <=100/ч): ${acc_rl_stor:-НЕ НАПЕЧАТАН гейтом 5.9.9.F.6b} (было 577/ч на №2.9.9.F.7 без базовой линии)"
 if [ -n "$acc_rl_stor" ] && [ "$acc_rl_stor" -le 100 ] 2>/dev/null; then
-    acc "  " "ДОСТИГНУТО — засчитывается ТОЛЬКО вместе с 6.0.4 (enforcing напечатан на шаге [10/14]), сам по себе низкий объём неотличим от незакрывшегося обучения (риск №1)"
+    acc "  " "ДОСТИГНУТО — засчитывается ТОЛЬКО вместе с 6.0.4 (enforcing напечатан на шаге [10/14]) И с полом 16.5 (класс drift дал за час хоть одну аномалию); сам по себе низкий объём неотличим ни от незакрывшегося обучения (риск №1), ни от свёрнутой сигнатуры (замер №6.0: объём 0 при 15071 совпадении)"
 elif [ -n "$acc_rl_stor" ]; then
     acc "  " "НЕ ДОСТИГНУТО: объём $acc_rl_stor > 100/ч"
 else
@@ -2887,6 +2959,51 @@ else
 fi
 acc "16.3" "6.0.3 — позитивный контроль (шаг [12/14], comm=drift-pc, новая сигнатура у enforcing workload): смотреть 'позитивный контроль' выше по логу этого прогона; шаг die'ит сам, если контроль не прошёл — если приёмка дошла до этой строки, 6.0.3 ДОСТИГНУТО"
 acc "16.4" "6.0.4 — состояние базовой линии на момент открытия idle-часа: смотреть 'состояние базовой линии' на шаге [10/14] этого лога; шаг die'ит сам при непечати или отсутствии enforcing — если приёмка дошла до этой строки, 6.0.4 ДОСТИГНУТО"
+
+# 16.5 — ПОЛ к потолку 6.0.1, добавлен после разбора №6.0.
+#
+# 6.0.1 — потолок: «не больше 100 алертов за idle-час». На №6.0 он был взят
+# с результатом 0, и ноль означал не работу механизма, а его слепоту: все
+# пять правил класса drift молчали целиком, потому что сигнатура сворачивала
+# /usr/bin/* в одну запись. Потолок, взятый сломанным детектором, выглядит
+# в точности как потолок, взятый исправным, — поэтому величина 6.0.1 сама по
+# себе неинформативна и с этого замера засчитывается ТОЛЬКО вместе с полом
+# ниже.
+#
+# Пол проверяет, что за измеряемый час базовая линия вообще что-то делала:
+# были совпадения (suppressed_total растёт) И среди них были аномалии
+# (anomalies_total растёт). anomalies_total считает КАЖДОЕ совпадение новой
+# сигнатуры, включая повторы, которые правка «сообщать один раз» гасит в
+# suppressed_total{reason="already_reported"} — то есть это сырой объём
+# дрейфа, независимый от того, сколько из него дошло до оператора.
+_drift_sum() { # $1=metric $2=reason(опц.) $3=file
+    local metric="$1" reason="$2" file="$3"
+    [ -s "$file" ] || { echo 0; return; }
+    if [ -n "$reason" ]; then
+        awk -v m="$metric" -v r="reason=\"$reason\"" '$0 ~ "^"m"\\{" && index($0, r) { s += $NF } END { printf "%d", s+0 }' "$file"
+    else
+        awk -v m="$metric" '$0 ~ "^"m"\\{" { s += $NF } END { printf "%d", s+0 }' "$file"
+    fi
+}
+if [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
+    _dm=ebpf_guard_drift_baseline
+    acc_drift_anom=$(( $(_drift_sum "${_dm}_anomalies_total" "" "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_anomalies_total" "" "$IDLE_METRICS_START") ))
+    acc_drift_known=$(( $(_drift_sum "${_dm}_suppressed_total" baseline_known "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" baseline_known "$IDLE_METRICS_START") ))
+    acc_drift_learn=$(( $(_drift_sum "${_dm}_suppressed_total" learning "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" learning "$IDLE_METRICS_START") ))
+    acc_drift_rep=$(( $(_drift_sum "${_dm}_suppressed_total" already_reported "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" already_reported "$IDLE_METRICS_START") ))
+    acc "16.5" "6.0.1 (пол) — класс drift за idle-час: аномалий $acc_drift_anom, подавлено baseline_known $acc_drift_known / learning $acc_drift_learn / already_reported $acc_drift_rep"
+    if [ "$acc_drift_anom" -gt 0 ]; then
+        acc "  " "ДОСТИГНУТО: базовая линия отработала — совпадения были и часть из них признана новыми. Потолок 6.0.1 (16.1) теперь осмыслен"
+    elif [ "$acc_drift_known" -gt 0 ]; then
+        acc "  " "НЕ ДОСТИГНУТО: $acc_drift_known совпадений и НИ ОДНОЙ аномалии за час — ровно форма слепоты замера №6.0 (929 baseline_known, 0 алертов). Потолок 16.1 в этом случае взят неработающим детектором и НЕ засчитывается, каким бы низким ни был объём"
+    elif [ "$acc_drift_learn" -gt 0 ]; then
+        acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: за час были только learning-подавления ($acc_drift_learn) — обучение не закрылось внутри окна, класс drift слеп по конструкции. Смотреть 6.0.4 и enforce_deadline_periods"
+    else
+        acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: за idle-час класс drift не получил НИ ОДНОГО совпадения — либо правила не грузятся, либо события до них не доходят; ни потолок, ни пол на таких данных не измеримы"
+    fi
+else
+    acc "16.5" "6.0.1 (пол) — НЕ ЗАСЧИТЫВАЕТСЯ: снимки idle/metrics-start.txt|metrics-end.txt недоступны, дельту класса drift за час считать не из чего"
+fi
 
 echo "=== конец приёмки волны 5.9.9.F.8 (величины 1/4) + регресс волн 5.9.9.F.3…F.7 (вердикт гейта: $GATE_RC) + приёмка волны 6.0 (величины 16.1-16.4) ==="
 echo ""

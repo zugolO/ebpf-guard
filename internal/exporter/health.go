@@ -35,6 +35,11 @@ type AgentHealth struct {
 	// DriftProfilesActive is the total number of workloads with an active
 	// drift baseline (learning or learned).
 	DriftProfilesActive int `json:"drift_profiles_active"`
+	// DriftSaturatedWorkloads is the number of workloads whose signature set
+	// hit MaxSignaturesPerWorkload during learning, so their baseline is
+	// frozen incomplete and may report anomalies for genuinely normal
+	// signatures.
+	DriftSaturatedWorkloads int `json:"drift_saturated_workloads"`
 	// HardwareProfile is the resolved lite/balanced/production tuning
 	// profile name (see HardwareProfileState).
 	HardwareProfile string `json:"hardware_profile,omitempty"`

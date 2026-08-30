@@ -25,10 +25,11 @@ rules:
       inspecting it; this rule now requires the exec fact itself, the same
       technique 5.9.9.F.3b used for the /tmp-execution family). Renamed from
       `drift_new_exec_critical` and downgraded to `warning` by 5.9.9.F.5g/
-      №154: profiler.drift_baseline.enabled defaults to false (and is false
-      in this stand's config), so as shipped this rule cannot tell a novel
-      binary from a routine one — it fires on EVERY matching exec. Under
-      that config the old name/severity was a false claim: on the idle-hour
+      №154: profiler.drift_baseline.enabled defaults to false, so as shipped
+      this rule cannot tell a novel binary from a routine one — it fires on
+      EVERY matching exec. (Wave 6.0 turned it ON in the measurement stand's
+      config; the shipped default is unchanged.) Under the default config the
+      old name/severity was a false claim: on the idle-hour
       of measurement №2.9.9.F.4 it produced 576 of 607 alerts and 576 of 577
       criticals, and 499 of those were re-exec of `sshd` on each inbound TCP
       connection (~1 per 7.2s on this stand's public IP, 9 scanning sources,
@@ -39,10 +40,12 @@ rules:
       independent reason not to keep it `critical` (see №164/5.9.9.F.5n,
       still open). `critical` stays reserved for a rule of this shape run
       WITH `drift_baseline` enabled and a learning window proven closed
-      before the measurement window opens (option 1 of the 5g decision,
-      not implemented this session — the class-wide baseline note below
-      still applies verbatim). Until baselining is on, treat this as a
-      broad "system-path binary executed" rule, not a novelty signal.
+      before the measurement window opens — option 1 of the 5g decision,
+      taken by wave 6.0 (see the class-wide baseline note at the end of this
+      file). Restoring `critical` needs a second clean run, as any change of
+      baseline does, and is a separate decision. Until baselining is on,
+      treat this as a broad "system-path binary executed" rule, not a
+      novelty signal.
     event_type: syscall
     condition:
       field: proc.args
@@ -224,29 +227,40 @@ rules:
     name: "Container drift — dangerous new syscall observed"
     description: >
       A system call commonly used for privilege escalation or container
-      escape was observed. "after the baseline window, NOT observed during
-      the learning period" is aspirational — see the class-wide baseline
-      note at the end of this file; profiler.drift_baseline is off in this
-      stand, so today this fires on every occurrence, not just ones novel
-      relative to a learned baseline.
+      escape was made with an argument combination this workload was never
+      seen using during the baseline window. Since 2026-08-30 the baseline
+      signature includes the syscall's semantic scalar argument (ptrace
+      request, mount flags, unshare/setns namespace flags, bpf command), so
+      "new" means a new KIND of call, not merely the first call of its
+      number — see internal/profiler/driftsyscallargs.go.
     event_type: syscall
     condition_group:
       operator: and
       conditions:
+        # 2026-08-30: every syscall listed here must have an entry in
+        # driftSyscallArgSpecs (internal/profiler/driftsyscallargs.go).
+        # Without one the drift signature degenerates to the bare syscall
+        # number, and the first call of that number during learning silences
+        # the rule for that workload forever — which is what measurement
+        # №6.0 measured: 416 suppressed matches, 0 alerts.
+        #
+        # Removed here on the same date, and NOT moved to the threat rule
+        # below: kexec_load (246), add_key (248), request_key (249). None of
+        # the three is in the kernel syscall allowlist
+        # (internal/bpf/sampling.go, DefaultMonitoredSyscalls), so no event
+        # for them ever reaches the rule engine — listing them promised a
+        # detection that could not happen. Re-add them here (with arg specs)
+        # once the allowlist covers them; kexec_load already has its spec.
         - field: nr
           op: in
           values:
             - "ptrace"
             - "mount"
             - "umount2"
-            - "pivot_root"
             - "unshare"
             - "setns"
-            - "kexec_load"
             - "perf_event_open"
             - "bpf"
-            - "add_key"
-            - "request_key"
         # 5.9.3c (#47): container runtimes legitimately call several of
         # these (mount/unshare/setns/pivot_root) while building a new
         # container's namespaces, which can land after the learning window
@@ -277,15 +291,68 @@ rules:
       - "container-escape"
       - "privilege-escalation"
 
+  # ── pivot_root: occurrence, not novelty ───────────────────────────────────
+  #
+  # pivot_root(new_root, put_old) takes two arguments and both are userspace
+  # pointers, so unlike its former neighbours in drift_dangerous_syscall it has
+  # no scalar the baseline can key on. Left in the drift class it would be
+  # strictly worse than silent: the first pivot_root a workload makes during
+  # learning becomes its baseline, and every later one — including a real
+  # escape — is suppressed as "known".
+  #
+  # Novelty is also the wrong question for it. A container runtime calls
+  # pivot_root while building a namespace and is excluded by comm below;
+  # anything ELSE calling it is worth an alert the first time and every time,
+  # so this is class: threat with no baseline at all.
+  #
+  # Making the baseline usable here instead would mean reading new_root/put_old
+  # with bpf_probe_read_user_str on sys_enter — a BPF-side change plus a
+  # `make generate` run. Deliberately not done as part of the 2026-08-30 fix.
+  #
+  # Expected to be silent on the measurement stand (registered in
+  # attacks/silent-rules.txt, category b): no attack scenario in
+  # run-all-attacks.sh calls pivot_root outside the excluded runtimes. That is
+  # the correct behaviour for an occurrence rule, not a defect.
+  - id: escape_pivot_root
+    name: "Filesystem root pivoted outside a container runtime"
+    description: >
+      pivot_root(2) was called by a process that is not a known container
+      runtime. Changing the filesystem root is how a container escape
+      relocates its view of the host, and outside runtime namespace setup
+      there is no routine reason for it. Reported on every occurrence: the
+      call carries only userspace pointers, so no baseline signature can
+      distinguish one pivot_root from another.
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: in
+          values:
+            - "pivot_root"
+        - field: comm
+          op: not_in
+          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
+                    "dockerd", "conmon", "crun",
+                    "systemd", "(sd-executor)", "systemd-udevd",
+                    "mount", "umount"]
+    severity: critical
+    action: alert
+    class: threat
+    tags:
+      - "T1611"
+      - "container-escape"
+      - "privilege-escalation"
+
 # ── Class-wide baseline decision (5.9.9.F.4f, №146) ─────────────────────────
 #
 # All six `class: drift` rules above describe themselves as firing on events
 # "not seen during baseline"/"new". That claim depends on
 # profiler.drift_baseline.enabled (internal/profiler/driftbaseline.go,
-# internal/config/config.go:2104) — disabled by default, and NOT set in this
-# stand's config (config/config.yaml has no profiler.drift_baseline section).
-# So as shipped, every rule in this class alerts on EVERY matching event,
-# not just novel ones — exactly the finding named by №146.
+# internal/config/config.go) — disabled by default. When it is off, every
+# rule in this class alerts on EVERY matching event, not just novel ones —
+# exactly the finding named by №146. (Since Wave 6.0 it is ON in the
+# measurement stand's config; see the 2026-08-29/30 updates at the end.)
 #
 # Two ways to make the description true were on the table (plan.md
 # 5.9.9.F.4f): (a) turn profiler.drift_baseline.enabled on in the stand
@@ -312,17 +379,82 @@ rules:
 # ── Update 2026-08-29 (Wave 6, plan.md "6.0 Базовая линия дрейфа") ─────────
 #
 # (a) is now taken: deploy/docker-test-setup/config-test.yaml sets
-# profiler.drift_baseline.enabled: true (learning_period 3600, min_samples
-# 20, per_workload true, max_workloads 1000, enforce_deadline_periods 3).
-# Rule text/IDs in this file are unchanged — this pointer confirms the
-# baseline mechanism is now the thing making "not seen during learning" true
-# on the measurement stand, not just prose. The preflight guard demanded
-# above (learning demonstrably closed before the idle-hour/attack window
-# opens) is NOT yet built: the current pipeline (run-2.9.9.F.8-pipeline.sh,
-# step [5/14]) restarts the agent immediately before idle-run.sh, which is
-# less than one learning_period before the measured window opens. Turning
-# this default on required a live pipeline run to prove real timings and
-# still does — no stand access this session either — so this is recorded as
-# an explicit open question in plan.md's Wave 6.0 section, not silently
-# assumed correct.
-
+# profiler.drift_baseline.enabled: true. Rule text/IDs in this file are
+# unchanged — the baseline mechanism, not prose, is what makes "not seen
+# during learning" true on the measurement stand.
+#
+# ── Update 2026-08-30 (after measurement №6.0) ─────────────────────────────
+#
+# Measurement №6.0 ran the guard demanded above and it did its job: the
+# learning phase was proven closed before the idle hour, idle-hour volume for
+# drift_exec_from_system_bin fell from 577/h to 0, and the run-gate's two
+# FAILs plus the 6.0.3 positive control together named a real defect rather
+# than blessing a false green.
+#
+# The defect was in the baseline's own signature, not in these rules.
+# driftSignatureTarget truncated every path to its first two segments, so the
+# signature was exactly as coarse as the prefix lists these rules match on —
+# "/usr/bin", "/usr/sbin", "/usr/local", "/usr/lib", "/etc". Once a workload
+# had exec'd or opened ANY path under such a directory during learning, every
+# other path under it was "known" forever, and the positive control (a
+# brand-new binary under /usr/local/bin, run by an already-enforcing
+# workload) could not have alerted under any configuration. All five drift
+# rules that had ever fired went silent for the whole measurement window.
+#
+# Fixed by removing the depth truncation (normalizeDriftPath keeps every
+# segment, still mapping numeric segments to "*") and bounding signature
+# cardinality directly instead, via
+# profiler.drift_baseline.max_signatures_per_workload (default 256). At the
+# cap a baseline freezes: later novel signatures alert rather than being
+# silently trusted, and the affected profiles are visible in
+# ebpf_guard_drift_baseline_saturated_profiles.
+#
+# Two things the measurement showed that are stand tuning, not rule or code
+# defects, and are recorded here because they change how these rules behave
+# in a short measurement window:
+#
+#   - learning_period 3600 == the idle hour, and enforce_deadline_periods 3
+#     == 3h > the whole run. On №6.0 that left 13 of 21 workloads learning
+#     (i.e. silent for every rule in this file) for the entire measured hour.
+#     The stand config now uses 600 / 2 so the deadline expires inside the
+#     prologue; the shipped product defaults are unchanged.
+#   - Aggregate gauges cannot answer "is THIS workload enforcing".
+#     /debug/state now carries drift_baseline.workloads with per-workload
+#     state, which is what the 6.0.4 pipeline guard reads.
+#
+# ── Update 2026-08-30 (second pass: the two defects the first pass left) ───
+#
+# The depth-2 fix above lifted the four drift rules whose target is a PATH. It
+# did not lift drift_dangerous_syscall, and it did nothing about alert volume.
+# Both are now addressed.
+#
+# 1. Syscalls with no path. ptrace/mount/unshare/setns/bpf carry no proc.args,
+#    so their signature was the decimal syscall number and nothing else — one
+#    mount during learning made every later mount by that workload "known",
+#    which is the same blindness in a different shape (416 suppressed, 0
+#    alerts on №6.0). The register arguments were carried end-to-end the whole
+#    time (bpf/syscall.bpf.c -> internal/bpf/events.go -> arg0..arg5) and are
+#    now folded into the signature: internal/profiler/driftsyscallargs.go maps
+#    each syscall to its semantic scalar and renders it by name, so
+#    "165|mount=MS_BIND" and "165|mount=MS_RDONLY" are two signatures.
+#    Only scalars are usable — pointer arguments are gone by the time
+#    userspace dequeues the record. pivot_root, whose arguments are all
+#    pointers, was therefore moved out of the class entirely (see
+#    escape_pivot_root above), and kexec_load/add_key/request_key were dropped
+#    as unreachable.
+#
+# 2. Alert volume. An anomaly used to be emitted on EVERY match of a novel
+#    signature, so volume tracked how often the new binary happened to run —
+#    a property of the workload's cron schedule, not of the drift. A drift
+#    rule reports a change of state, and a state change is worth one alert, so
+#    the profiler now reports each (workload, signature) once and counts the
+#    repeats as suppressed_total{reason="already_reported"}. Raw volume stays
+#    visible in anomalies_total, which still counts every match. Note the
+#    consequence for measurement: a run's drift ALERT count is now bounded by
+#    the number of distinct new signatures per hour, and the number of newly
+#    reported signatures per workload is readable live in /debug/state
+#    (drift_baseline.workloads[].reported).
+#
+# There is no re-arm TTL: a signature reported once stays reported for the
+# life of the profile. An operator who misses the alert gets no repeat, and
+# the alert store is the record.

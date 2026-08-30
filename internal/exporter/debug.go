@@ -21,6 +21,35 @@ type DebugState struct {
 	CollectorStats  []CollectorStatus    `json:"collector_stats"`
 	EnrichmentStats EnrichmentStats      `json:"enrichment_stats"`
 	HardwareProfile HardwareProfileState `json:"hardware_profile"`
+	// DriftBaseline is the per-workload state of the drift baseline, present
+	// only when profiler.drift_baseline is enabled. Aggregate counts alone
+	// (see /api/v1/status) cannot answer "is THIS workload enforcing", which
+	// is the question every drift positive control actually asks.
+	DriftBaseline *DriftBaselineState `json:"drift_baseline,omitempty"`
+}
+
+// DriftBaselineState reports the drift baseline broken down by workload.
+type DriftBaselineState struct {
+	Profiles  int                  `json:"profiles"`
+	Learning  int                  `json:"learning"`
+	Stuck     int                  `json:"stuck"`
+	Saturated int                  `json:"saturated"`
+	Workloads []DriftWorkloadState `json:"workloads"`
+}
+
+// DriftWorkloadState is one workload's drift-baseline state. Mirrors
+// profiler.DriftWorkloadState; kept separate so the exporter does not depend
+// on the profiler package.
+type DriftWorkloadState struct {
+	Workload   string    `json:"workload"`
+	Comm       string    `json:"comm"`
+	State      string    `json:"state"`
+	Signatures int       `json:"signatures"`
+	Samples    int       `json:"samples"`
+	Saturated  bool      `json:"saturated"`
+	Reported   int       `json:"reported"`
+	StartedAt  time.Time `json:"started_at"`
+	LastSeen   time.Time `json:"last_seen"`
 }
 
 // HardwareProfileState reports how the hardware-aware tuning profile
@@ -118,6 +147,7 @@ type DebugHandler struct {
 	enricherProvider EnricherProvider
 	server           *Server
 	hardwareProfile  HardwareProfileState
+	driftBaselineFn  DriftBaselineFunc
 }
 
 // SilenceProvider interface for getting active silences.
@@ -148,6 +178,10 @@ type ProfilerStatsFunc func() ProfilerStats
 
 // GetStats returns the profiler stats for the debug endpoint.
 func (f ProfilerStatsFunc) GetStats() ProfilerStats { return f() }
+
+// DriftBaselineFunc supplies the per-workload drift-baseline snapshot. Called
+// on every request so /debug/state reflects live state.
+type DriftBaselineFunc func() *DriftBaselineState
 
 // EnricherProvider interface for getting enrichment stats.
 type EnricherProvider interface {
@@ -192,6 +226,15 @@ func (h *DebugHandler) SetEnricherProvider(provider EnricherProvider) {
 	h.enricherProvider = provider
 }
 
+// SetDriftBaselineProvider wires the per-workload drift-baseline snapshot.
+// Leave unset (the default) to omit "drift_baseline" from /debug/state, which
+// is what a build with profiler.drift_baseline disabled should do.
+func (h *DebugHandler) SetDriftBaselineProvider(fn DriftBaselineFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.driftBaselineFn = fn
+}
+
 // SetRules updates the loaded rules state.
 func (h *DebugHandler) SetRules(rules []RuleState) {
 	h.mu.Lock()
@@ -232,6 +275,10 @@ func (h *DebugHandler) buildState() DebugState {
 		Uptime:          time.Since(h.startTime),
 		Rules:           h.rules,
 		HardwareProfile: h.hardwareProfile,
+	}
+
+	if h.driftBaselineFn != nil {
+		state.DriftBaseline = h.driftBaselineFn()
 	}
 
 	// Get collector stats from server

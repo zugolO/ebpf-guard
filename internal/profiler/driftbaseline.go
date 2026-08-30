@@ -3,6 +3,7 @@ package profiler
 import (
 	"container/heap"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,17 @@ type DriftBaselineConfig struct {
 	// the lite profile's tight GOMEMLIMIT. Default: 1000. Zero or negative
 	// means unbounded (not recommended).
 	MaxWorkloads int `mapstructure:"max_workloads"`
+	// MaxSignaturesPerWorkload caps how many distinct (rule, target) signatures
+	// a single workload's baseline may hold. Signature targets include file
+	// paths and argv[0], both attacker-controlled, so the set needs a bound of
+	// its own — the MaxWorkloads cap only bounds the number of profiles, not
+	// the size of each. Once a profile is at the cap its baseline is frozen:
+	// further novel signatures are not learned, and after promotion they are
+	// reported as anomalies like any other unknown signature. That is a
+	// deliberate bias toward noise over blindness, and it is visible in
+	// ebpf_guard_drift_baseline_saturated_profiles. Default: 256. Zero or
+	// negative means unbounded (not recommended).
+	MaxSignaturesPerWorkload int `mapstructure:"max_signatures_per_workload"`
 	// EnforceDeadlinePeriods forces a workload into enforcing after this many
 	// LearningPeriods have elapsed, regardless of whether MinSamples was ever
 	// reached. Without it, a workload generating drift events more rarely than
@@ -62,12 +74,13 @@ type DriftBaselineConfig struct {
 // until an operator opts in.
 func DefaultDriftBaselineConfig() DriftBaselineConfig {
 	return DriftBaselineConfig{
-		Enabled:                false,
-		LearningPeriod:         3600,
-		MinSamples:             20,
-		PerWorkload:            true,
-		MaxWorkloads:           1000,
-		EnforceDeadlinePeriods: 3,
+		Enabled:                  false,
+		LearningPeriod:           3600,
+		MinSamples:               20,
+		PerWorkload:              true,
+		MaxWorkloads:             1000,
+		MaxSignaturesPerWorkload: 256,
+		EnforceDeadlinePeriods:   3,
 	}
 }
 
@@ -79,6 +92,10 @@ const defaultDriftMaxWorkloads = 1000
 // when the config leaves EnforceDeadlinePeriods unset.
 const defaultDriftEnforceDeadlinePeriods = 3
 
+// defaultDriftMaxSignaturesPerWorkload is the fallback per-profile signature cap
+// applied when the config leaves MaxSignaturesPerWorkload unset.
+const defaultDriftMaxSignaturesPerWorkload = 256
+
 // driftWorkloadProfile holds the drift-signature baseline learned for one workload.
 type driftWorkloadProfile struct {
 	// signatures is the set of (rule_id, normalized target) pairs observed
@@ -88,6 +105,13 @@ type driftWorkloadProfile struct {
 	lastSeen    time.Time
 	sampleCount int
 	enforcing   bool
+	// saturated records that the signature set hit MaxSignaturesPerWorkload
+	// during learning, so the baseline is frozen and known to be incomplete.
+	saturated bool
+	// reported holds the signatures already reported as anomalies for this
+	// workload, so a drift is alerted once rather than on every recurrence.
+	// Allocated lazily: most profiles never report anything.
+	reported map[string]struct{}
 }
 
 // DriftBaselineProfiler learns, per workload, which drift-class rule matches
@@ -105,6 +129,8 @@ type DriftBaselineProfiler struct {
 
 	// maxWorkloads is the resolved profile cap (0 = unbounded).
 	maxWorkloads int
+	// maxSignatures is the resolved per-profile signature cap (0 = unbounded).
+	maxSignatures int
 	// enforceDeadline is the resolved wall-clock duration after which a
 	// still-learning workload is forced into enforcing (0 = disabled).
 	enforceDeadline time.Duration
@@ -118,6 +144,7 @@ type DriftBaselineProfiler struct {
 	learningGauge   prometheus.Gauge
 	profilesGauge   prometheus.Gauge
 	stuckGauge      prometheus.Gauge
+	saturatedGauge  prometheus.Gauge
 	evictionsTotal  prometheus.Counter
 	log             *slog.Logger
 }
@@ -135,6 +162,13 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 	if maxWorkloads < 0 {
 		maxWorkloads = 0 // explicit "unbounded"
 	}
+	maxSignatures := cfg.MaxSignaturesPerWorkload
+	if maxSignatures == 0 {
+		maxSignatures = defaultDriftMaxSignaturesPerWorkload
+	}
+	if maxSignatures < 0 {
+		maxSignatures = 0 // explicit "unbounded"
+	}
 	deadlinePeriods := cfg.EnforceDeadlinePeriods
 	if deadlinePeriods == 0 {
 		deadlinePeriods = defaultDriftEnforceDeadlinePeriods
@@ -149,6 +183,7 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 		profiles:        make(map[string]*driftWorkloadProfile),
 		lruIndex:        make(lruStringIndex),
 		maxWorkloads:    maxWorkloads,
+		maxSignatures:   maxSignatures,
 		enforceDeadline: enforceDeadline,
 		nowFn:           time.Now,
 		log:             log,
@@ -172,6 +207,10 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 			Name: "ebpf_guard_drift_baseline_stuck_learning_workloads",
 			Help: "Number of workloads that have been learning longer than one LearningPeriod (drift-rule blind spots until they enforce).",
 		}),
+		saturatedGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_drift_baseline_saturated_profiles",
+			Help: "Number of workload profiles whose signature set hit MaxSignaturesPerWorkload — their baseline is frozen and incomplete.",
+		}),
 		evictionsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ebpf_guard_drift_baseline_evictions_total",
 			Help: "Total drift baseline profiles evicted because the workload cap was reached.",
@@ -183,7 +222,7 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 func (p *DriftBaselineProfiler) RegisterMetrics(reg prometheus.Registerer) error {
 	for _, c := range []prometheus.Collector{
 		p.suppressedTotal, p.anomaliesTotal, p.learningGauge,
-		p.profilesGauge, p.stuckGauge, p.evictionsTotal,
+		p.profilesGauge, p.stuckGauge, p.saturatedGauge, p.evictionsTotal,
 	} {
 		if err := reg.Register(c); err != nil {
 			return err
@@ -198,9 +237,10 @@ func (p *DriftBaselineProfiler) RegisterMetrics(reg prometheus.Registerer) error
 // completed and the signature is genuinely novel, or immediately whenever
 // the given ruleID's signature was never observed during learning.
 //
-// Returns false while the workload is still learning, or when the signature
-// matches a baseline entry learned for this workload — both are treated as
-// "normal for this host" and suppressed rather than alerted.
+// Returns false while the workload is still learning, when the signature
+// matches a baseline entry learned for this workload (both are treated as
+// "normal for this host"), or when this workload already reported the same
+// novel signature once — see the report-once note in the enforcing branch.
 func (p *DriftBaselineProfiler) Observe(ruleID string, e types.Event) bool {
 	if !p.config.Enabled {
 		return true
@@ -232,7 +272,23 @@ func (p *DriftBaselineProfiler) Observe(ruleID string, e types.Event) bool {
 	}
 
 	if !prof.enforcing {
-		prof.signatures[sig] = struct{}{}
+		if _, known := prof.signatures[sig]; !known {
+			if p.maxSignatures > 0 && len(prof.signatures) >= p.maxSignatures {
+				// Baseline full: freeze it rather than grow without bound.
+				// The signature is NOT learned, so once this workload starts
+				// enforcing it will be reported as an anomaly. Noise beats
+				// blindness here, and saturatedGauge says which profiles are
+				// in that state.
+				if !prof.saturated {
+					prof.saturated = true
+					p.log.Warn("drift-baseline: workload signature cap reached, baseline frozen incomplete",
+						"workload", key.Comm, "namespace", key.Namespace,
+						"max_signatures", p.maxSignatures)
+				}
+			} else {
+				prof.signatures[sig] = struct{}{}
+			}
+		}
 		prof.sampleCount++
 
 		learningPeriod := time.Duration(p.config.LearningPeriod) * time.Second
@@ -262,7 +318,37 @@ func (p *DriftBaselineProfiler) Observe(ruleID string, e types.Event) bool {
 		return false
 	}
 
+	// anomaliesTotal counts EVERY match of a novel signature, including the
+	// repeats suppressed just below. It is the raw drift volume, and keeping it
+	// raw is the point: a run can then show both what the host actually did and
+	// what the operator was actually paged about, instead of only the latter.
 	p.anomaliesTotal.WithLabelValues(ruleID).Inc()
+
+	// Report-once. A drift-class rule reports a CHANGE OF STATE — a binary that
+	// was not there before, a mount that this workload never made — and a state
+	// change is worth one alert, not one per recurrence. Without this the alert
+	// volume tracks how often the new thing runs, which is a property of the
+	// workload rather than of the drift, and measurement №6.0's ceiling
+	// criterion (<=100 drift alerts/hour) becomes a lottery on cron frequency.
+	// With it, volume tracks the number of DISTINCT new signatures per hour,
+	// which is what the criterion was always meant to bound.
+	//
+	// The cost is real and deliberate: an operator who misses the first alert
+	// gets no repeat. anomaliesTotal above and the alert store both still hold
+	// the evidence. There is no re-arm TTL yet.
+	if _, seen := prof.reported[sig]; seen {
+		p.suppressedTotal.WithLabelValues(ruleID, "already_reported").Inc()
+		return false
+	}
+	if p.maxSignatures <= 0 || len(prof.reported) < p.maxSignatures {
+		if prof.reported == nil {
+			prof.reported = make(map[string]struct{})
+		}
+		prof.reported[sig] = struct{}{}
+	}
+	// When the reported set is at its cap the signature is not recorded and the
+	// next occurrence alerts again — noise over blindness, same bias as the
+	// learning-side cap. The per-rule rate limiter is the backstop.
 	return true
 }
 
@@ -315,6 +401,94 @@ func (p *DriftBaselineProfiler) UpdateLearningGauge() {
 	p.learningGauge.Set(float64(p.LearningWorkloads()))
 	p.profilesGauge.Set(float64(p.ProfileCount()))
 	p.stuckGauge.Set(float64(p.StuckLearningWorkloads()))
+	p.saturatedGauge.Set(float64(p.SaturatedWorkloads()))
+}
+
+// DriftWorkloadState is a per-workload view of the drift baseline, exposed on
+// GET /debug/state.
+//
+// Wave 6.0 shipped only three aggregate numbers (profiles / learning / stuck).
+// That was enough to say "some profile is enforcing" and not enough to say
+// which — so the 6.0.4 pipeline guard printed "our drift-pc seed is enforcing"
+// while actually asserting `profiles > learning`, and when the 6.0.3 positive
+// control came back silent 70 minutes later there was no way to tell a
+// collapsed signature from a workload that never promoted. This is that
+// missing bit.
+type DriftWorkloadState struct {
+	// Workload is the resolved (comm, namespace, app_label) key.
+	Workload string `json:"workload"`
+	Comm     string `json:"comm"`
+	// State is "learning", "stuck" (learning past one LearningPeriod, still a
+	// blind spot until the deadline promotes it) or "enforcing".
+	State string `json:"state"`
+	// Signatures is how many distinct signatures the baseline holds.
+	Signatures int `json:"signatures"`
+	// Samples is how many drift-class matches were observed during learning.
+	Samples int `json:"samples"`
+	// Saturated is true when the signature cap froze this baseline incomplete.
+	Saturated bool `json:"saturated"`
+	// Reported is how many distinct signatures this workload has already
+	// alerted on. Its growth rate is the drift alert volume for this workload.
+	Reported int `json:"reported"`
+	// StartedAt is when the profile was created (first observed match), which
+	// is what the learning deadline is measured from — NOT agent start.
+	StartedAt time.Time `json:"started_at"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
+// WorkloadStates returns a per-workload snapshot of the drift baseline.
+func (p *DriftBaselineProfiler) WorkloadStates() []DriftWorkloadState {
+	learningPeriod := time.Duration(p.config.LearningPeriod) * time.Second
+	now := p.nowFn()
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make([]DriftWorkloadState, 0, len(p.profiles))
+	for key, prof := range p.profiles {
+		state := "learning"
+		switch {
+		case prof.enforcing:
+			state = "enforcing"
+		case learningPeriod > 0 && now.Sub(prof.startedAt) > learningPeriod:
+			state = "stuck"
+		}
+		// WorkloadKey.String() is "comm|namespace|app_label"; surface comm on
+		// its own so a guard can grep for the workload it seeded by name.
+		comm := key
+		if i := strings.IndexByte(comm, '|'); i >= 0 {
+			comm = comm[:i]
+		}
+		out = append(out, DriftWorkloadState{
+			Workload:   key,
+			Comm:       comm,
+			State:      state,
+			Signatures: len(prof.signatures),
+			Samples:    prof.sampleCount,
+			Saturated:  prof.saturated,
+			Reported:   len(prof.reported),
+			StartedAt:  prof.startedAt,
+			LastSeen:   prof.lastSeen,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Workload < out[j].Workload })
+	return out
+}
+
+// SaturatedWorkloads returns the number of profiles whose signature set hit
+// MaxSignaturesPerWorkload during learning. Their baseline is frozen and known
+// to be incomplete, so they may report anomalies for signatures that are in
+// fact normal — the operator needs to be able to see that.
+func (p *DriftBaselineProfiler) SaturatedWorkloads() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	n := 0
+	for _, prof := range p.profiles {
+		if prof.saturated {
+			n++
+		}
+	}
+	return n
 }
 
 // evictIfOverCapacityLocked drops the least-recently-active profile when the
@@ -356,7 +530,7 @@ func driftSignatureTarget(e types.Event) string {
 			if path == "" {
 				path = util.BytesToString(e.File.Filename[:])
 			}
-			return normalizeDriftPathPrefix(path)
+			return normalizeDriftPath(path)
 		}
 	case types.EventTCPConnect:
 		if e.Network != nil {
@@ -365,6 +539,19 @@ func driftSignatureTarget(e types.Event) string {
 	case types.EventSyscall:
 		if e.Syscall != nil {
 			sig := strconv.Itoa(int(e.Syscall.Nr))
+			// Fold the syscall's semantic scalar argument into the signature
+			// when it has one. Wave 6.0 left drift_dangerous_syscall matching
+			// on nr alone (ptrace/mount/unshare/... carry no proc.args), so a
+			// workload that made ONE bpf() call during learning had every
+			// later bpf() call suppressed — including BPF_PROG_LOAD, the whole
+			// reason the rule exists. The register arguments are already
+			// carried end-to-end (bpf/syscall.bpf.c copies ctx->args on
+			// sys_enter and restores them from syscall_args on sys_exit;
+			// they are the rule fields arg0..arg5), they were simply never
+			// read here.
+			if spec, ok := driftSyscallArgSpecs[e.Syscall.Nr]; ok {
+				sig += "|" + spec.name + "=" + driftFormatSyscallArgs(spec, e.Syscall.Args)
+			}
 			// A bare syscall number collapses every exec of a given
 			// workload into one signature after the first sample — e.g.
 			// drift_exec_from_system_bin matches on proc.args (which binary
@@ -374,16 +561,17 @@ func driftSignatureTarget(e types.Event) string {
 			// execve syscall number. When proc.args is available (as it is
 			// for any rule that conditions on it, by construction), fold
 			// its argv[0] into the signature so distinct binaries under the
-			// same syscall number stay distinguishable. Rules that don't
-			// populate proc.args (e.g. drift_dangerous_syscall on
-			// ptrace/mount) are unaffected — ProcArgs is empty and the
-			// signature reduces to the syscall number exactly as before.
+			// same syscall number stay distinguishable. Since 6.0 that is
+			// literally true: normalizeDriftPath no longer truncates the path,
+			// so /usr/bin/curl and /usr/bin/python3 are two signatures, not
+			// one. Syscalls that carry no proc.args at all (ptrace, mount,
+			// unshare, ...) are handled by the argument fold above, not here.
 			if e.ProcArgs != "" {
 				argv0 := e.ProcArgs
 				if sp := strings.IndexByte(argv0, ' '); sp >= 0 {
 					argv0 = argv0[:sp]
 				}
-				sig += "|" + normalizeDriftPathPrefix(argv0)
+				sig += "|" + normalizeDriftPath(argv0)
 			}
 			return sig
 		}
@@ -391,19 +579,31 @@ func driftSignatureTarget(e types.Event) string {
 	return ""
 }
 
-// driftPathPrefixMaxDepth bounds how many path segments contribute to the
-// signature, matching the aggregator's path-prefix collapsing (issue #285)
-// so drift-class targets are grouped as coarsely as duplicate alerts are.
-const driftPathPrefixMaxDepth = 2
-
-// normalizeDriftPathPrefix reduces a file path to a short, PID/inode-independent
-// prefix (e.g. "/proc/12345/mem" -> "/proc/*") so numeric path components and
-// deep subpaths under the same directory collapse to one baseline signature.
-func normalizeDriftPathPrefix(path string) string {
+// normalizeDriftPath reduces a file path to a PID/inode-independent form by
+// replacing purely numeric path segments with "*" (e.g. "/proc/12345/mem" ->
+// "/proc/*/mem"). Every other segment is kept verbatim.
+//
+// Wave 6.0 removed the depth truncation that used to sit here
+// (driftPathPrefixMaxDepth = 2, kept only the first two segments). It made the
+// baseline exactly as coarse as the drift rules' own prefix lists — "/usr/bin",
+// "/usr/sbin", "/usr/local", "/usr/lib", "/etc" — so once a workload had
+// exec'd or opened ANY path under such a directory during learning, every
+// other path under it was "known" forever. Measurement №6.0 proved it live:
+// the 6.0.3 positive control exec'd a brand-new binary under /usr/local/bin
+// with an already-enforcing workload and got zero alerts, because
+// "/usr/local/bin/drift-pc" and "/usr/local/bin/drift-pc-attack-window/drift-pc"
+// both collapsed to "/usr/local". Rules whose whole purpose is the word "new"
+// (drift_new_library_in_system_dir, drift_new_file_dir_sensitive,
+// drift_exec_from_system_bin) cannot work at directory granularity. Unbounded
+// signature cardinality is now bounded by MaxSignaturesPerWorkload instead,
+// which caps the cost directly rather than by throwing away the distinction
+// the rules are built on.
+func normalizeDriftPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	kept := make([]string, 0, driftPathPrefixMaxDepth)
+	var b strings.Builder
+	b.Grow(len(path))
 	start := 0
 	for i := 0; i <= len(path); i++ {
 		if i == len(path) || path[i] == '/' {
@@ -412,22 +612,16 @@ func normalizeDriftPathPrefix(path string) string {
 				if isNumericSegment(seg) {
 					seg = "*"
 				}
-				kept = append(kept, seg)
-				if len(kept) >= driftPathPrefixMaxDepth {
-					break
-				}
+				b.WriteByte('/')
+				b.WriteString(seg)
 			}
 			start = i + 1
 		}
 	}
-	out := "/"
-	for i, s := range kept {
-		if i > 0 {
-			out += "/"
-		}
-		out += s
+	if b.Len() == 0 {
+		return "/"
 	}
-	return out
+	return b.String()
 }
 
 // isNumericSegment reports whether s consists entirely of ASCII digits (non-empty).

@@ -431,12 +431,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	var driftProfiler *profiler.DriftBaselineProfiler
 	if cfg.Profiler.DriftBaseline.Enabled {
 		driftProfiler = profiler.NewDriftBaselineProfiler(profiler.DriftBaselineConfig{
-			Enabled:                cfg.Profiler.DriftBaseline.Enabled,
-			LearningPeriod:         cfg.Profiler.DriftBaseline.LearningPeriod,
-			MinSamples:             cfg.Profiler.DriftBaseline.MinSamples,
-			PerWorkload:            cfg.Profiler.DriftBaseline.PerWorkload,
-			MaxWorkloads:           cfg.Profiler.DriftBaseline.MaxWorkloads,
-			EnforceDeadlinePeriods: cfg.Profiler.DriftBaseline.EnforceDeadlinePeriods,
+			Enabled:                  cfg.Profiler.DriftBaseline.Enabled,
+			LearningPeriod:           cfg.Profiler.DriftBaseline.LearningPeriod,
+			MinSamples:               cfg.Profiler.DriftBaseline.MinSamples,
+			PerWorkload:              cfg.Profiler.DriftBaseline.PerWorkload,
+			MaxWorkloads:             cfg.Profiler.DriftBaseline.MaxWorkloads,
+			MaxSignaturesPerWorkload: cfg.Profiler.DriftBaseline.MaxSignaturesPerWorkload,
+			EnforceDeadlinePeriods:   cfg.Profiler.DriftBaseline.EnforceDeadlinePeriods,
 		}, slog.Default())
 		if err := driftProfiler.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 			slog.Warn("drift baseline: failed to register metrics", slog.Any("error", err))
@@ -1055,6 +1056,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			health.DriftLearningWorkloads = driftProfiler.LearningWorkloads()
 			health.DriftStuckWorkloads = driftProfiler.StuckLearningWorkloads()
 			health.DriftProfilesActive = driftProfiler.ProfileCount()
+			health.DriftSaturatedWorkloads = driftProfiler.SaturatedWorkloads()
 		}
 		health.LearningComplete = engine.IsLearningComplete()
 		health.LearningProgress = engine.LearningProgress()
@@ -1077,6 +1079,36 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			SequenceEnabled: hwProfile.Applied.SequenceEnabled,
 			LineageEnabled:  hwProfile.Applied.LineageEnabled,
 		})
+
+		// Per-workload drift baseline. Aggregate counts cannot answer "is THIS
+		// workload enforcing" — the question every drift positive control asks,
+		// and the one measurement №6.0 spent 70 minutes failing to answer.
+		if driftProfiler != nil {
+			dbg.SetDriftBaselineProvider(func() *exporter.DriftBaselineState {
+				states := driftProfiler.WorkloadStates()
+				out := &exporter.DriftBaselineState{
+					Profiles:  len(states),
+					Workloads: make([]exporter.DriftWorkloadState, 0, len(states)),
+				}
+				for _, w := range states {
+					switch w.State {
+					case "learning":
+						out.Learning++
+					case "stuck":
+						// Stuck workloads are still learning; the aggregate
+						// gauges count them in both, so mirror that here
+						// rather than inventing a third, disjoint bucket.
+						out.Learning++
+						out.Stuck++
+					}
+					if w.Saturated {
+						out.Saturated++
+					}
+					out.Workloads = append(out.Workloads, exporter.DriftWorkloadState(w))
+				}
+				return out
+			})
+		}
 
 		// Providers are closures, not snapshots: /debug/state must agree with
 		// /metrics at request time (P1-10).

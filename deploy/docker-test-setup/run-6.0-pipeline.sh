@@ -939,21 +939,31 @@ if [ "$DRIFT_DEADLINE_SEC" -gt 3000 ]; then
     die "6.0a: enforce_deadline_periods x learning_period = ${DRIFT_DEADLINE_SEC}с > 3000с — дедлайн не истечёт до открытия idle-часа, и нагрузки без min_samples будут слепы весь измеряемый час (замер №6.0: profiles=21 learning=13 stuck=13). Укоротить learning_period либо enforce_deadline_periods в config-test.yaml"
 fi
 
+# Сторожа ниже смотрят на КОД, а не на текст файла. Предпрогон 6.0b встал
+# ЖЁСТКИМ СТОПОМ ровно на этом: негативный сторож `grep -q
+# driftPathPrefixMaxDepth` сматчил СОБСТВЕННУЮ историческую запись в
+# комментарии normalizeDriftPath («Wave 6.0 removed the depth truncation that
+# used to sit here (driftPathPrefixMaxDepth = 2, ...)») и объявил, что
+# усечение вернулось, хотя в коде его нет. Симметричная опасность у
+# позитивных сторожей: имя, оставшееся только в комментарии, дало бы ложный
+# PASS. Поэтому вход всем четырём — исходник со снятыми комментариями.
+drift_code() { sed 's,//.*,,' "$1"; }
+
 # Кап сигнатур — продуктовая половина правки 6.0: он заменил усечение пути по
 # глубине, которое схлопывало /usr/bin/* в одну сигнатуру и делало позитивный
 # контроль 6.0.3 непроходимым по конструкции.
-grep -q 'normalizeDriftPath\b' internal/profiler/driftbaseline.go \
+grep -qE '^func normalizeDriftPath\(' internal/profiler/driftbaseline.go \
     || die "6.0a: в internal/profiler/driftbaseline.go нет normalizeDriftPath — правка сигнатуры дрейфа откатилась к normalizeDriftPathPrefix с усечением по глубине, и контроль 6.0.3 снова не сможет пройти ни при каком поведении базовой линии"
-grep -q 'driftPathPrefixMaxDepth' internal/profiler/driftbaseline.go \
+drift_code internal/profiler/driftbaseline.go | grep -q 'driftPathPrefixMaxDepth' \
     && die "6.0a: в internal/profiler/driftbaseline.go снова есть driftPathPrefixMaxDepth — усечение пути по глубине вернулось, /usr/bin/curl и /usr/bin/python3 опять одна сигнатура"
 echo "  ок: сигнатура дрейфа без усечения по глубине (normalizeDriftPath), кардинальность ограничена капом max_signatures_per_workload"
 
 # Вторая половина той же правки (2026-08-30). Обе проверяются по дереву, а не
 # по бинарю: пайплайн собирает агента сам, и рассинхрон «правка в дереве есть,
 # в собранном бинаре нет» ловится позже — контролем 6.0.3 и полом 16.5.
-grep -q 'driftSyscallArgSpecs' internal/profiler/driftsyscallargs.go \
+grep -qE '^var driftSyscallArgSpecs = map\[' internal/profiler/driftsyscallargs.go \
     || die "6.0a: нет internal/profiler/driftsyscallargs.go с driftSyscallArgSpecs — сигнатура syscall-правил снова вырождается в голый номер, и drift_dangerous_syscall будет нема весь прогон (замер №6.0: 416 подавлений, 0 алертов)"
-grep -q 'already_reported' internal/profiler/driftbaseline.go \
+drift_code internal/profiler/driftbaseline.go | grep -q '"already_reported"' \
     || die "6.0a: в internal/profiler/driftbaseline.go нет ветки already_reported — правка «сообщать один раз» откатилась, объём класса drift снова пропорционален частоте исполнения, и потолок 6.0.1 (<=100/ч) измеряет расписание cron, а не дрейф"
 # Машинный гейт соответствия правил и таблицы аргументов. Дешевле поймать
 # здесь, чем узнать из немого правила через 70 минут прогона.

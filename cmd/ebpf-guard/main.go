@@ -1087,19 +1087,40 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			dbg.SetDriftBaselineProvider(func() *exporter.DriftBaselineState {
 				states := driftProfiler.WorkloadStates()
 				out := &exporter.DriftBaselineState{
-					Profiles:  len(states),
 					Workloads: make([]exporter.DriftWorkloadState, 0, len(states)),
 				}
 				for _, w := range states {
 					switch w.State {
 					case "learning":
 						out.Learning++
+						out.Profiles++
 					case "stuck":
 						// Stuck workloads are still learning; the aggregate
 						// gauges count them in both, so mirror that here
 						// rather than inventing a third, disjoint bucket.
 						out.Learning++
 						out.Stuck++
+						out.Profiles++
+					case "overdue":
+						// Wave 6.0d (№198): learning past the enforcement
+						// deadline but NOT counted as stuck — the periodic
+						// sweep promotes it without waiting for a match, so
+						// it is not a standing blind spot. Kept out of Stuck
+						// so this field keeps agreeing with the
+						// stuck_learning_workloads gauge; the row's own
+						// state string carries the distinction.
+						out.Learning++
+						out.Profiles++
+					case "global":
+						// The global fallback baseline (№193a) is not a
+						// workload profile: it is exempt from MaxWorkloads and
+						// absent from ProfileCount()/the profiles gauge, so
+						// counting it here would make /debug/state disagree
+						// with /metrics by exactly one. It stays in Workloads
+						// (that is where a guard reads it from) but out of the
+						// aggregate.
+					default:
+						out.Profiles++
 					}
 					if w.Saturated {
 						out.Saturated++

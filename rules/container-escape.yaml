@@ -510,6 +510,9 @@ rules:
     severity: warning
     action: alert
     class: drift
+    # Wave 6.0d, finding №193(б): see drift_dangerous_syscall in
+    # rules/drift-rules.yaml for the rationale.
+    drift_novel_workload: alert
     tags: [container-escape, procfs, kernel-parameters]
     exceptions:
       - name: systemd-sysctl
@@ -564,6 +567,9 @@ rules:
     severity: warning
     action: alert
     class: drift
+    # Wave 6.0d, finding №193(б): see drift_dangerous_syscall in
+    # rules/drift-rules.yaml for the rationale.
+    drift_novel_workload: alert
     tags: [container-escape, init-process, pid-1, proc-recon-cluster]
     exceptions:
       # Scoped to comm AND path: the agent's own benign reads are

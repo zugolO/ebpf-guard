@@ -336,6 +336,17 @@ func validateRule(rule *Rule) error {
 	default:
 		return fmt.Errorf("unknown class %q, valid: threat, drift", rule.Class)
 	}
+	// Волна 6.0d, находка №193(б): drift_novel_workload opts a rule out of the
+	// learning-phase presumption of innocence for new workloads (see
+	// Rule.DriftNovelWorkload doc). Only meaningful on class: drift rules, but
+	// not rejected on others — a rule authored as threat first and reclassified
+	// to drift later should not also need to move this flag in lockstep.
+	switch rule.DriftNovelWorkload {
+	case "", "alert":
+		// valid
+	default:
+		return fmt.Errorf("unknown drift_novel_workload %q, valid: alert", rule.DriftNovelWorkload)
+	}
 
 	// Reject empty condition_group (Н-4): would silently match every event.
 	if rule.ConditionGroup != nil && len(rule.ConditionGroup.Conditions) == 0 && len(rule.ConditionGroup.SubGroups) == 0 {

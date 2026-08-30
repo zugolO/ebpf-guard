@@ -328,6 +328,21 @@ type Rule struct {
 	// RuleClass/ClassDrift for the semantics. Use EffectiveClass to read this
 	// field so callers get the correct default without checking for "".
 	Class RuleClass `yaml:"class,omitempty"`
+	// DriftNovelWorkload, when "alert", removes this class: drift rule's
+	// learning-phase presumption of innocence for new workloads (wave 6.0d,
+	// finding №193). By default a workload in its learning window suppresses
+	// every drift-class match unconditionally — which means an attacker who
+	// arrives as, or spawns, a workload the profiler has never seen before
+	// gets a free pass on exactly the primitives (namespace/mount escape,
+	// dangerous syscalls) the rule exists to catch. Rules flagged here skip
+	// that suppression entirely during learning: matches are evaluated the
+	// same way as for an already-enforcing workload (report-once against its
+	// own baseline), at the cost of extra noise from legitimate new
+	// workloads (measured, not bounded — see ebpf_guard_drift_baseline
+	// discussion in plan.md 6.0d/6.0.8). Empty (default) keeps the
+	// unconditional learning-phase suppression. Only "" and "alert" are
+	// valid; see validateRule.
+	DriftNovelWorkload string `yaml:"drift_novel_workload,omitempty"`
 	// Sampling holds the nested per-rule sampling configuration.
 	// Takes precedence over the flat SampleRate/SampleDeterministic fields if set.
 	//
@@ -795,17 +810,18 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			continue
 		}
 		fn(types.Alert{
-			Timestamp: time.Unix(0, int64(e.Timestamp)),
-			RuleID:    rule.ID,
-			RuleName:  rule.Name,
-			Severity:  rule.Severity,
-			Message:   rule.Description,
-			PID:       e.PID,
-			Comm:      util.BytesToString(e.Comm[:]),
-			Event:     e,
-			Action:    string(rule.Action),
-			Class:     string(rule.Class),
-			Details:   alertDetails(e, filePath),
+			Timestamp:          time.Unix(0, int64(e.Timestamp)),
+			RuleID:             rule.ID,
+			RuleName:           rule.Name,
+			Severity:           rule.Severity,
+			Message:            rule.Description,
+			PID:                e.PID,
+			Comm:               util.BytesToString(e.Comm[:]),
+			Event:              e,
+			Action:             string(rule.Action),
+			Class:              string(rule.Class),
+			DriftNovelWorkload: rule.DriftNovelWorkload == "alert",
+			Details:            alertDetails(e, filePath),
 		})
 	}
 }
@@ -840,17 +856,18 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			alerts = (*sp)[:0]
 		}
 		alerts = append(alerts, types.Alert{
-			Timestamp: time.Unix(0, int64(e.Timestamp)),
-			RuleID:    rule.ID,
-			RuleName:  rule.Name,
-			Severity:  rule.Severity,
-			Message:   rule.Description,
-			PID:       e.PID,
-			Comm:      util.BytesToString(e.Comm[:]),
-			Event:     e,
-			Action:    string(rule.Action),
-			Class:     string(rule.Class),
-			Details:   alertDetails(e, filePath),
+			Timestamp:          time.Unix(0, int64(e.Timestamp)),
+			RuleID:             rule.ID,
+			RuleName:           rule.Name,
+			Severity:           rule.Severity,
+			Message:            rule.Description,
+			PID:                e.PID,
+			Comm:               util.BytesToString(e.Comm[:]),
+			Event:              e,
+			Action:             string(rule.Action),
+			Class:              string(rule.Class),
+			DriftNovelWorkload: rule.DriftNovelWorkload == "alert",
+			Details:            alertDetails(e, filePath),
 		})
 	}
 

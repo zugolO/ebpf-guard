@@ -75,7 +75,7 @@ func internComm(comm [16]byte) string {
 // so all processes with the same comm share one baseline (non-K8s fallback).
 // The comm string is interned to avoid heap allocation on repeated calls.
 func WorkloadKeyFromEvent(e types.Event) WorkloadKey {
-	comm := internComm(e.Comm)
+	comm := stripPreExecCommParens(internComm(e.Comm))
 	if e.Enrichment == nil {
 		return WorkloadKey{Comm: comm}
 	}
@@ -84,6 +84,23 @@ func WorkloadKeyFromEvent(e types.Event) WorkloadKey {
 		Namespace: e.Enrichment.Namespace,
 		AppLabel:  e.Enrichment.Labels["app"],
 	}
+}
+
+// stripPreExecCommParens removes the parenthesization the kernel applies to
+// comm during the pre-exec window ("(find)" while a process is still
+// transitioning into the image named "find" — see task_struct comment in
+// fs/exec.c). Wave 6.0d, finding №197: without this, a workload's
+// preparation phase and its post-exec phase land in two different
+// WorkloadKeys, splitting the sample that most needs a single baseline —
+// the moment right before a process becomes the thing an attacker chose it
+// to become. Applied ONLY to the key: the raw comm (with parens intact) is
+// left untouched everywhere else (events, alerts), since that parenthesized
+// form is itself evidence the action happened pre-exec.
+func stripPreExecCommParens(comm string) string {
+	if len(comm) >= 2 && comm[0] == '(' && comm[len(comm)-1] == ')' {
+		return comm[1 : len(comm)-1]
+	}
+	return comm
 }
 
 // WorkloadProfileManager manages behavioral profiles keyed by WorkloadKey.

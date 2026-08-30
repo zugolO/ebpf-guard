@@ -49,8 +49,10 @@ func TestDriftBaselineProfiler_SyscallSignatureIncludesProcArgs(t *testing.T) {
 	}
 	p := NewDriftBaselineProfiler(cfg, nil)
 
-	// sshd's baseline learns execve of the real sshd binary.
-	assert.False(t, p.Observe("drift_exec_from_system_bin", syscallEventForExec("sshd", 59, "/usr/sbin/sshd -D -R")))
+	// sshd's baseline learns execve of the real sshd binary. First-ever-on-host,
+	// so it alerts via the №193a global fallback even though sshd itself
+	// promotes to enforcing within this same call (MinSamples=1).
+	assert.True(t, p.Observe("drift_exec_from_system_bin", syscallEventForExec("sshd", 59, "/usr/sbin/sshd -D -R")))
 	assert.Equal(t, 0, p.LearningWorkloads(), "workload should have switched to enforcing")
 
 	// The same known binary path is suppressed as baseline-known.
@@ -80,7 +82,16 @@ func TestDriftBaselineProfiler_SuppressesDuringLearning(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		got := p.Observe("drift_rule", fileEventForPath("systemd", "/etc/systemd/system/foo.service"))
-		assert.False(t, got, "matches during learning must be suppressed")
+		if i == 0 {
+			// №193a: a signature no workload on the host has ever produced
+			// alerts on first sight, even while THIS workload is still
+			// learning — that is the whole point of the global fallback
+			// baseline (an unconditional free pass here is exactly what let
+			// a brand-new attacker-controlled workload hide).
+			assert.True(t, got, "first-ever-on-host signature must alert even during learning")
+			continue
+		}
+		assert.False(t, got, "repeat matches once the host has seen the signature must be suppressed")
 	}
 	assert.Equal(t, 1, p.LearningWorkloads())
 }
@@ -95,7 +106,10 @@ func TestDriftBaselineProfiler_KnownSignatureSuppressedAfterEnforcing(t *testing
 	p := NewDriftBaselineProfiler(cfg, nil)
 
 	// Learning phase: observe the same signature twice to complete learning.
-	assert.False(t, p.Observe("drift_rule", fileEventForPath("ldconfig", "/etc/ld.so.cache")))
+	// The first occurrence is novel to the whole host (№193a global fallback),
+	// so it alerts despite the workload still learning; the second is already
+	// known to the global baseline from the first, so it is suppressed.
+	assert.True(t, p.Observe("drift_rule", fileEventForPath("ldconfig", "/etc/ld.so.cache")))
 	assert.False(t, p.Observe("drift_rule", fileEventForPath("ldconfig", "/etc/ld.so.cache")))
 	assert.Equal(t, 0, p.LearningWorkloads(), "workload should have switched to enforcing")
 
@@ -116,11 +130,16 @@ func TestDriftBaselineProfiler_PerWorkloadIsolation(t *testing.T) {
 	}
 	p := NewDriftBaselineProfiler(cfg, nil)
 
-	// systemd's baseline learns /etc/systemd/system.
-	assert.False(t, p.Observe("drift_rule", fileEventForPath("systemd", "/etc/systemd/system/foo.service")))
+	// systemd's baseline learns /etc/systemd/system. First-ever-on-host, so it
+	// alerts via the №193a global fallback despite systemd itself still
+	// nominally being in its own learning window.
+	assert.True(t, p.Observe("drift_rule", fileEventForPath("systemd", "/etc/systemd/system/foo.service")))
 
 	// A different workload (curl) has an independent, still-learning baseline
-	// even though systemd already finished learning the same rule ID.
+	// even though systemd already finished learning the same rule ID. Its own
+	// baseline hasn't seen this signature, but the GLOBAL one now has (from
+	// systemd above), so curl gets the benefit of the global fallback and is
+	// suppressed rather than alerting a second time for the same host-wide fact.
 	assert.False(t, p.Observe("drift_rule", fileEventForPath("curl", "/etc/systemd/system/foo.service")))
 }
 
@@ -176,8 +195,9 @@ func TestDriftBaselineProfiler_EnforcesAfterDeadlineDespiteLowSamples(t *testing
 	p.nowFn = func() time.Time { return current }
 
 	// One event learns signature A. Far below MinSamples, so the normal
-	// completion path can never fire.
-	require.False(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+	// completion path can never fire. First-ever-on-host, so it alerts via
+	// the №193a global fallback even though the workload is brand new.
+	require.True(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
 	assert.Equal(t, 1, p.LearningWorkloads())
 
 	// Past one LearningPeriod but before the deadline: still learning, and now
@@ -199,6 +219,89 @@ func TestDriftBaselineProfiler_EnforcesAfterDeadlineDespiteLowSamples(t *testing
 		"a novel signature must alert once the deadline has forced enforcing")
 	// The learned signature is still suppressed as known-baseline.
 	assert.False(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+}
+
+// Wave 6.0d, finding №198: promotion used to be entirely lazy — a workload
+// past its deadline stayed "learning" forever if nothing ever observed
+// another match for it, because the deadline was only checked inside
+// Observe(). This proves PromoteExpiredWorkloads (and UpdateLearningGauge,
+// which now calls it) forces the transition on its own, with no further
+// event required.
+func TestDriftBaselineProfiler_PeriodicSweepPromotesWithoutFurtherEvents(t *testing.T) {
+	cfg := DriftBaselineConfig{
+		Enabled:                true,
+		LearningPeriod:         3600, // 1h
+		MinSamples:             20,   // never reached by this workload
+		PerWorkload:            true,
+		EnforceDeadlinePeriods: 2, // deadline = 2h
+	}
+	p := NewDriftBaselineProfiler(cfg, nil)
+
+	base := time.Now()
+	current := base
+	p.nowFn = func() time.Time { return current }
+
+	require.True(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+
+	// Past one LearningPeriod but before the deadline: a genuine blind spot,
+	// counted by both the new "stuck" and the old "overdue" definitions.
+	current = base.Add(90 * time.Minute)
+	assert.Equal(t, 1, p.StuckLearningWorkloads())
+	assert.Equal(t, 1, p.LearningOverdueWorkloads())
+
+	// Past the deadline, but crucially: no Observe() call happens here.
+	// Lazy promotion (checked only inside Observe) would leave this workload
+	// in learning indefinitely.
+	current = base.Add(2*time.Hour + time.Minute)
+	assert.Equal(t, 1, p.LearningWorkloads(), "still learning until something promotes it")
+
+	promoted := p.PromoteExpiredWorkloads()
+	assert.Equal(t, 1, promoted)
+	assert.Equal(t, 0, p.LearningWorkloads(), "periodic sweep must promote without waiting for another event")
+
+	// Past the deadline: excluded from "stuck" (genuinely blind right now)
+	// but still visible in the deadline-agnostic "overdue" series had it not
+	// already promoted — since it's enforcing now, both read 0.
+	assert.Equal(t, 0, p.StuckLearningWorkloads())
+	assert.Equal(t, 0, p.LearningOverdueWorkloads())
+
+	// A signature never seen during learning alerts, proving enforcing took
+	// effect for real, not just in the gauges.
+	assert.True(t, p.Observe("drift_rule", fileEventForPath("cron", "/root/.ssh/authorized_keys")))
+}
+
+// StuckLearningWorkloads (deadline-aware) and LearningOverdueWorkloads
+// (deadline-agnostic) must actually diverge somewhere, or splitting the
+// metric into two series (finding №198) was pointless. This puts one
+// workload on each side of the deadline within the same snapshot.
+func TestDriftBaselineProfiler_StuckVsOverdueDiverge(t *testing.T) {
+	cfg := DriftBaselineConfig{
+		Enabled:                true,
+		LearningPeriod:         3600, // 1h
+		MinSamples:             20,
+		PerWorkload:            true,
+		EnforceDeadlinePeriods: 2, // deadline = 2h
+	}
+	p := NewDriftBaselineProfiler(cfg, nil)
+
+	base := time.Now()
+	current := base
+	p.nowFn = func() time.Time { return current }
+
+	require.True(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+
+	// Second workload starts an hour later, so at the check time below it is
+	// past its LearningPeriod but not past its deadline, while the first is
+	// past both.
+	current = base.Add(1 * time.Hour)
+	require.True(t, p.Observe("drift_rule", fileEventForPath("logrotate", "/etc/logrotate.d/job")))
+
+	current = base.Add(2*time.Hour + time.Minute)
+	// cron: elapsed 2h1m — past its 2h deadline, no sweep has run yet.
+	// logrotate: elapsed 1h1m — past its 1h LearningPeriod, well inside its
+	// own 2h deadline (which started when IT began learning, at base+1h).
+	assert.Equal(t, 1, p.StuckLearningWorkloads(), "only logrotate is a live blind spot; cron's deadline has already passed")
+	assert.Equal(t, 2, p.LearningOverdueWorkloads(), "both are learning past one period under the old, deadline-agnostic count")
 }
 
 func TestNormalizeDriftPath(t *testing.T) {
@@ -238,7 +341,9 @@ func TestDriftBaselineDistinguishesBinariesInSameDir(t *testing.T) {
 	p.nowFn = func() time.Time { return current }
 
 	seed := syscallEventForExec("drift-pc", 59, "/usr/local/bin/drift-pc")
-	require.False(t, p.Observe("drift_exec_from_system_bin", seed))
+	// First-ever-on-host: alerts via the №193a global fallback even though
+	// drift-pc is a brand-new workload still in its own learning window.
+	require.True(t, p.Observe("drift_exec_from_system_bin", seed))
 	require.False(t, p.Observe("drift_exec_from_system_bin", seed))
 
 	current = current.Add(2 * time.Minute)
@@ -271,7 +376,12 @@ func TestDriftBaselineSignatureCapFreezesBaseline(t *testing.T) {
 		p.Observe("drift_exec_from_system_bin",
 			syscallEventForExec("busy", 59, fmt.Sprintf("/usr/bin/tool%d", i)))
 	}
-	assert.Equal(t, 1, p.SaturatedWorkloads(), "profile must be flagged saturated")
+	// Both the "busy" workload's own profile AND the №193a global fallback
+	// baseline see the same 10 distinct signatures and hit the same
+	// MaxSignaturesPerWorkload cap — the global one saturates first in
+	// practice (it sees every workload's signatures), but here there is only
+	// one workload, so both saturate together.
+	assert.Equal(t, 2, p.SaturatedWorkloads(), "both the workload profile and the global fallback baseline must be flagged saturated")
 
 	current = current.Add(2 * time.Minute)
 	require.False(t, p.Observe("drift_exec_from_system_bin",
@@ -412,6 +522,9 @@ func TestDriftBaselineReportsEachSignatureOnce(t *testing.T) {
 		PerWorkload:    true,
 	}, nil)
 
+	// "known"'s own first occurrence is itself novel to the whole host, so it
+	// alerts via the №193a global fallback (and closes learning, MinSamples=1)
+	// before settling into ordinary baseline-known suppression on repeat.
 	known := syscallEventForExec("cron", 59, "/usr/bin/known")
 	p.Observe("drift_exec_from_system_bin", known)
 	p.Observe("drift_exec_from_system_bin", known)
@@ -433,12 +546,27 @@ func TestDriftBaselineReportsEachSignatureOnce(t *testing.T) {
 		t.Fatal("a second, distinct drift was suppressed by report-once")
 	}
 
+	// WorkloadStates also surfaces the №193a global fallback baseline as its
+	// own synthetic entry, alongside the one real "cron" workload profile.
 	states := p.WorkloadStates()
-	if len(states) != 1 {
-		t.Fatalf("want 1 workload, got %d", len(states))
+	if len(states) != 2 {
+		t.Fatalf("want 2 states (cron workload + global fallback baseline), got %d", len(states))
 	}
-	if states[0].Reported != 2 {
-		t.Errorf("reported count = %d, want 2", states[0].Reported)
+	var cronState *DriftWorkloadState
+	for i := range states {
+		if states[i].Comm == "cron" {
+			cronState = &states[i]
+		}
+	}
+	if cronState == nil {
+		t.Fatalf("no state for workload cron among %+v", states)
+	}
+	// 3, not 2: "known"'s own first-ever occurrence also went through the
+	// №193a global-fallback alert path (see the comment above the "known"
+	// Observe calls) and so is itself marked reported, in addition to "novel"
+	// and "other".
+	if cronState.Reported != 3 {
+		t.Errorf("reported count = %d, want 3", cronState.Reported)
 	}
 }
 
@@ -454,6 +582,9 @@ func TestDriftBaselineRawAnomalyVolumeStaysMeasurable(t *testing.T) {
 		PerWorkload:    true,
 	}, nil)
 
+	// "known"'s own first occurrence is itself novel to the whole host (№193a
+	// global fallback), so it counts one anomaly of its own before settling
+	// into ordinary baseline-known suppression on repeat.
 	known := syscallEventForExec("cron", 59, "/usr/bin/known")
 	p.Observe("drift_exec_from_system_bin", known)
 	p.Observe("drift_exec_from_system_bin", known)
@@ -468,10 +599,134 @@ func TestDriftBaselineRawAnomalyVolumeStaysMeasurable(t *testing.T) {
 	if alerts != 1 {
 		t.Fatalf("alerts = %d, want 1", alerts)
 	}
-	if got := testutil.ToFloat64(p.anomaliesTotal.WithLabelValues("drift_exec_from_system_bin")); got != 10 {
-		t.Errorf("anomalies_total = %v, want 10 (raw volume must survive report-once)", got)
+	if got := testutil.ToFloat64(p.anomaliesTotal.WithLabelValues("drift_exec_from_system_bin")); got != 11 {
+		t.Errorf("anomalies_total = %v, want 11 (10 raw novel occurrences + 1 from known's own first-ever-on-host alert)", got)
 	}
 	if got := testutil.ToFloat64(p.suppressedTotal.WithLabelValues("drift_exec_from_system_bin", "already_reported")); got != 9 {
 		t.Errorf("suppressed already_reported = %v, want 9", got)
 	}
+}
+
+// TestDriftBaselineGlobalFallbackCoversNewWorkload is the direct regression
+// guard for finding №193: a workload that has never been seen before, doing
+// something no OTHER workload has ever done either, must not get a free pass
+// merely because it is new. Before this, a brand-new workload's entire
+// learning window suppressed every drift-class match unconditionally — which
+// is exactly the shape of an attacker arriving as (or spawning) a workload
+// the profiler has no history for.
+func TestDriftBaselineGlobalFallbackCoversNewWorkload(t *testing.T) {
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled:        true,
+		LearningPeriod: 0, // learning completes as soon as MinSamples is hit
+		MinSamples:     20,
+		PerWorkload:    true,
+	}, nil)
+
+	// A well-established workload (already enforcing) generates a signature.
+	established := syscallEventForExec("nginx", 165, "") // mount, no proc.args
+	for i := 0; i < 25; i++ {
+		p.Observe("drift_new_library_in_system_dir", established)
+	}
+	require.Equal(t, 0, p.LearningWorkloads(), "nginx should have promoted to enforcing")
+
+	// A workload the profiler has NEVER seen before makes the SAME kind of
+	// call (same rule, same signature target). It is brand new — the
+	// pre-6.0d behavior would suppress this unconditionally as "learning" —
+	// but the global baseline already knows this exact signature from nginx,
+	// so it is not the free-pass case finding №193 is about.
+	newButKnownGlobally := syscallEventForExec("some-new-daemon", 165, "")
+	assert.False(t, p.Observe("drift_new_library_in_system_dir", newButKnownGlobally),
+		"a signature already known host-wide must stay suppressed for a new workload")
+
+	// A DIFFERENT new workload does something no workload — new or
+	// established — has ever done on this host. This is the actual finding
+	// №193 scenario, and it must alert despite the workload being new and
+	// still deep in its own learning window.
+	genuinelyNovel := syscallEventForExec("another-new-daemon", 272, "") // unshare
+	assert.True(t, p.Observe("drift_dangerous_syscall", genuinelyNovel),
+		"a signature unknown to every workload on the host must alert even for a brand-new workload")
+}
+
+// TestDriftBaselineNovelWorkloadFlagBypassesGlobalFallback covers finding
+// №193(б): for the subset of rules flagged DriftNovelWorkload=alert
+// (container/namespace-escape primitives), a new workload gets NEITHER its
+// own presumption of innocence NOR the global fallback's — even a signature
+// every other workload on the host produces routinely still alerts the first
+// time THIS workload makes it, because the rule considers "normal for
+// everyone else" an insufficient excuse for "novel to me".
+func TestDriftBaselineNovelWorkloadFlagBypassesGlobalFallback(t *testing.T) {
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled:        true,
+		LearningPeriod: 0, // learning completes as soon as MinSamples is hit
+		MinSamples:     20,
+		PerWorkload:    true,
+	}, nil)
+
+	// runc routinely calls unshare(CLONE_NEWUSER) while building container
+	// namespaces; its own baseline (and the global one) learns this as normal.
+	routine := syscallEventWithArgs("runc", 272, 0x10000000) // CLONE_NEWUSER
+	for i := 0; i < 25; i++ {
+		p.ObserveRule("container_escape_unshare_user", routine, false)
+	}
+	require.Equal(t, 0, p.LearningWorkloads(), "runc should have promoted to enforcing")
+
+	// Without the flag, a brand-new workload doing the exact same routine
+	// call gets the global fallback's benefit of the doubt.
+	assert.False(t, p.ObserveRule("container_escape_unshare_user",
+		syscallEventWithArgs("evil-new-proc", 272, 0x10000000), false),
+		"without the flag, a new workload is covered by the global fallback for a host-routine signature")
+
+	// WITH the flag, a different brand-new workload doing the identical call
+	// is not excused by either its own learning phase or the global fallback.
+	assert.True(t, p.ObserveRule("container_escape_unshare_user",
+		syscallEventWithArgs("another-evil-proc", 272, 0x10000000), true),
+		"drift_novel_workload:alert must not be excused by the global fallback either")
+}
+
+// TestDriftBaselineWorkloadStatesAgreeWithGauges pins the /debug/state ↔
+// /metrics agreement the 6.0d redefinitions could silently break. Two
+// separate ways they could disagree, both of the 5.9.4c class ("two registers
+// about the same set of rules did not match"):
+//
+//   - the global fallback baseline (№193a) is exempt from MaxWorkloads and
+//     absent from ProfileCount(), so it must carry its own state label rather
+//     than being counted as a workload profile;
+//   - "stuck" was redefined by №198 to exclude past-deadline workloads (the
+//     periodic sweep promotes those without waiting for a match), so the
+//     per-row state string must use the same cut as StuckLearningWorkloads()
+//     instead of the pre-6.0d, deadline-agnostic one.
+func TestDriftBaselineWorkloadStatesAgreeWithGauges(t *testing.T) {
+	cfg := DriftBaselineConfig{
+		Enabled:                true,
+		LearningPeriod:         3600, // 1h
+		MinSamples:             20,
+		PerWorkload:            true,
+		EnforceDeadlinePeriods: 2, // deadline = 2h
+	}
+	p := NewDriftBaselineProfiler(cfg, nil)
+
+	base := time.Now()
+	current := base
+	p.nowFn = func() time.Time { return current }
+
+	require.True(t, p.Observe("drift_rule", fileEventForPath("cron", "/etc/cron.d/job")))
+	current = base.Add(1 * time.Hour)
+	require.True(t, p.Observe("drift_rule", fileEventForPath("logrotate", "/etc/logrotate.d/job")))
+	current = base.Add(2*time.Hour + time.Minute)
+
+	byState := map[string]int{}
+	for _, w := range p.WorkloadStates() {
+		byState[w.State]++
+	}
+	assert.Equal(t, 1, byState["stuck"], "stuck rows must match StuckLearningWorkloads()")
+	assert.Equal(t, byState["stuck"], p.StuckLearningWorkloads())
+	assert.Equal(t, 1, byState["overdue"], "past-deadline learning is overdue, not stuck (№198)")
+	assert.Equal(t, byState["stuck"]+byState["overdue"], p.LearningOverdueWorkloads())
+	assert.Equal(t, 1, byState["global"], "the global fallback baseline gets its own row (№193a)")
+
+	// The global row is NOT a workload profile: it must not inflate the count
+	// the profiles gauge reports.
+	assert.Equal(t, 2, p.ProfileCount())
+	assert.Equal(t, len(p.WorkloadStates())-1, p.ProfileCount(),
+		"WorkloadStates carries exactly one row beyond the profile count: the global baseline")
 }

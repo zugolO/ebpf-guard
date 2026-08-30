@@ -1458,8 +1458,51 @@ else
         echo "  потеряно, но уже объяснено немотой за весь аптайм (-$silent_lost_count, см. silent-rules.txt, секция 5.9.4h ниже):"
         echo "$silent_lost" | sed 's/^/    ~ /'
     fi
+    # Волна 6.0d, находка №194: четвёртый реестр. Правило класса `drift` с
+    # ненулевым ebpf_guard_drift_baseline_suppressed_total{rule_id=…} за
+    # прогон (final_metrics кумулятивен с момента старта агента, тем же
+    # приёмом, что и 5.9.4h ниже) не потеряно и не немо — оно матчило и было
+    # подавлено по замыслу базовой линии (baseline_known/learning/
+    # already_reported). Нулевая сумма по всем reason остаётся потерей: вход
+    # исчез, это регресс, а не подавление. Роняет этот критерий и 5.9.4h
+    # одинаково, потому что оба читают $lost_types — правка одного места,
+    # а не двух.
+    drift_suppressed=""
+    if [ -n "$lost_types" ]; then
+        drift_class_rules_dir="$GATE_SCRIPT_DIR/../../../rules"
+        if [ -d "$drift_class_rules_dir" ]; then
+            drift_class_ids=$(awk '
+                /^[[:space:]]*-[[:space:]]*id:/ {
+                    id = $0
+                    sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*"?/, "", id)
+                    sub(/"?[[:space:]]*$/, "", id)
+                }
+                /^[[:space:]]*class:[[:space:]]*drift[[:space:]]*$/ { if (id != "") print id }
+            ' "$drift_class_rules_dir"/*.yaml 2>/dev/null | sort -u)
+            drift_candidates=$(comm -12 <(echo "$lost_types") <(echo "$drift_class_ids"))
+            if [ -n "$drift_candidates" ]; then
+                while IFS= read -r rid; do
+                    [ -z "$rid" ] && continue
+                    rid_breakdown=$(grep "^ebpf_guard_drift_baseline_suppressed_total{" "$final_metrics" 2>/dev/null \
+                        | grep "rule_id=\"$rid\"")
+                    rid_sum=$(echo "$rid_breakdown" | awk -F'} ' '{sum+=$2} END{print sum+0}')
+                    if [ "${rid_sum:-0}" -gt 0 ] 2>/dev/null; then
+                        drift_suppressed="$drift_suppressed$rid"$'\n'
+                        rid_by_reason=$(echo "$rid_breakdown" | sed -nE 's/.*reason="([^"]*)".*\}[[:space:]]+([0-9]+).*/\1=\2/p' | tr '\n' ' ')
+                        echo "  $rid: не потеряно, подавлено базовой линией дрейфа за прогон ($rid_by_reason) (5.9.9.F.6d, №194)"
+                    fi
+                done <<< "$drift_candidates"
+            fi
+        else
+            echo "  (5.9.9.F.6d, №194: дерева rules/ рядом с гейтом нет — подавление базовой линией дрейфа не проверено для потерянных правил класса drift)"
+        fi
+    fi
+    drift_suppressed_count=$(echo "$drift_suppressed" | grep -c . || true)
+    if [ "$drift_suppressed_count" -gt 0 ]; then
+        lost_types=$(comm -23 <(echo "$lost_types") <(echo "$drift_suppressed" | grep -v '^$' | sort -u))
+    fi
     background_recovered_count=$(echo "${recovered_sorted:-}" | grep -c . || true)
-    echo "  объяснено: intentional-loss $intentional_lost_count, silent-rules $silent_lost_count, background-rules $background_recovered_count (\"потеряно 0\" не означает, что список объяснений пуст — см. счётчики выше)"
+    echo "  объяснено: intentional-loss $intentional_lost_count, silent-rules $silent_lost_count, background-rules $background_recovered_count, drift-suppressed $drift_suppressed_count (\"потеряно 0\" не означает, что список объяснений пуст — см. счётчики выше)"
     lost_count=$(echo "$lost_types" | grep -c . || true)
     if [ "$lost_count" -gt 0 ]; then
         echo "  потеряно (-$lost_count):"

@@ -285,6 +285,10 @@ rules:
     severity: critical
     action: alert
     class: drift
+    # Wave 6.0d, finding №193(б): namespace/mount escape primitives never get
+    # the learning-phase presumption of innocence for a new workload, not even
+    # from the global fallback baseline — see Rule.DriftNovelWorkload doc.
+    drift_novel_workload: alert
     tags:
       - "T1611"
       - "drift"

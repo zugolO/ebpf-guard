@@ -480,6 +480,12 @@ type Alert struct {
 	// Empty is equivalent to "threat" (the default for unclassified rules).
 	// Populated by correlator.RuleEngine from Rule.Class.
 	Class string `json:"class,omitempty"`
+	// DriftNovelWorkload mirrors Rule.DriftNovelWorkload == "alert" for
+	// class: drift alerts, so the correlation engine can pass it to
+	// profiler.DriftBaselineProfiler.ObserveRule without a separate
+	// RuleID -> Rule lookup. Internal plumbing only, not part of the alert
+	// contract external consumers see.
+	DriftNovelWorkload bool `json:"-"`
 }
 
 // TraceContext holds OpenTelemetry trace context for propagation.

@@ -971,6 +971,84 @@ go test ./internal/correlator/ -run TestDriftSyscallRulesHaveArgSpecs -count=1 >
     || die "6.0a: TestDriftSyscallRulesHaveArgSpecs не проходит — какой-то syscall в правиле класса drift не имеет записи в driftSyscallArgSpecs, его сигнатура схлопнута в одно значение на нагрузку. Запустить тест и прочитать имя правила и номер сисколла"
 echo "  ок: syscall-сигнатуры различают аргументы (driftSyscallArgSpecs), дрейф сообщается один раз (already_reported)"
 
+echo "--- преflight: 6.0d — правки по находкам №193…№198 (дополнительно к 6.0a) ---"
+# Пункт 1/4: правила подмножества (б) — примитивы побега и захвата, для
+# которых фаза learning новой нагрузки НЕ подавляет вовсе (находка №193б) —
+# обязаны нести флаг drift_novel_workload: alert. Список зашит явно, а не
+# по glob'у "container_escape_*": container_escape_init_proc_daemon
+# существует под тем же префиксом, но это info-severity рулatable для
+# самоинтроспекции штатных демонов (prometheus/grafana/cron/pgrep), а не
+# примитив захвата — включать его в подмножество (б) означало бы алертить
+# на каждый новый demon-под без всякой пользы.
+DRIFT_NOVEL_WORKLOAD_RULES="container_escape_proc_write container_escape_init_proc drift_dangerous_syscall"
+drift_novel_workload_flags=$(awk '
+    /^  - id:/ {
+        if (id != "") print id, (flag ? "1" : "0")
+        id=$0; sub(/^  - id:[[:space:]]*"?/,"",id); sub(/"?[[:space:]]*$/,"",id)
+        flag=0
+        next
+    }
+    # Якорь обязателен: `drift_novel_workload: alert` в КОММЕНТАРИИ (а он там
+    # есть — обе записи в container-escape.yaml ссылаются на drift_dangerous_syscall)
+    # дал бы ложный PASS. Ровно этот класс дефекта остановил предпрогон 6.0b,
+    # когда сторож сигнатуры дрейфа сматчил собственную историческую запись.
+    /^[[:space:]]*drift_novel_workload:[[:space:]]*alert[[:space:]]*$/ { flag=1 }
+    END { if (id != "") print id, (flag ? "1" : "0") }
+' rules/container-escape.yaml rules/drift-rules.yaml)
+for rid in $DRIFT_NOVEL_WORKLOAD_RULES; do
+    rid_flag=$(echo "$drift_novel_workload_flags" | awk -v r="$rid" '$1==r{print $2}')
+    [ "$rid_flag" = "1" ] \
+        || die "6.0d: правило $rid из подмножества (б) (примитив побега/захвата, находка №193б) не несёт drift_novel_workload: alert (найдено: '${rid_flag:-правило не найдено в rules/}') — фаза learning новой нагрузки снова получит презумпцию невиновности на этом примитиве"
+done
+echo "  ок: все правила подмножества (б) ($DRIFT_NOVEL_WORKLOAD_RULES) несут drift_novel_workload: alert"
+# Та же проверка, но через загрузчик правил, а не через awk: awk выше видит
+# ТЕКСТ YAML, тест — то, что из него получил RuleEngine (класс после
+# EffectiveClass, флаг после валидации). Расхождение между этими двумя
+# ответами и есть интересный случай: правило, которое читается глазами как
+# помеченное, но до движка доезжает без флага. Плюс отрицательная половина —
+# container_escape_init_proc_daemon обязан ОСТАТЬСЯ вне подмножества.
+go test ./internal/correlator/ -run 'TestDriftNovelWorkloadSubsetCarriesFlag|TestDriftNovelWorkloadDaemonVariantStaysOut' -count=1 >/dev/null 2>&1 \
+    || die "6.0d: тесты подмножества (б) не проходят — запустить 'go test ./internal/correlator/ -run TestDriftNovelWorkload -v' и прочитать вывод: либо правило подмножества потеряло drift_novel_workload/class: drift, либо исключённый container_escape_init_proc_daemon его приобрёл"
+
+# Пункт 5 плана 6.0d (находка №197) и пункт 6 (находка №198) — правки
+# смотрят на КОД, тем же приёмом, что и сторожа 6.0a выше (комментарии
+# вычищены, чтобы историческая запись о правке не сматчила сама себя).
+grep -qE '^func stripPreExecCommParens\(' internal/profiler/workload.go \
+    || die "6.0d: в internal/profiler/workload.go нет stripPreExecCommParens — находка №197 (расщепление нагрузки на pre-exec comm) не закрыта, WorkloadKeyFromEvent не нормализует (find)/find"
+drift_code internal/profiler/workload.go | grep -q 'stripPreExecCommParens(internComm' \
+    || die "6.0d: WorkloadKeyFromEvent в internal/profiler/workload.go не вызывает stripPreExecCommParens — функция существует, но не подключена к ключу нагрузки"
+grep -qE '^func \(p \*DriftBaselineProfiler\) PromoteExpiredWorkloads\(' internal/profiler/driftbaseline.go \
+    || die "6.0d: в internal/profiler/driftbaseline.go нет PromoteExpiredWorkloads — находка №198 (ленивый промоушен) не закрыта, дедлайн по-прежнему проверяется только внутри Observe()"
+drift_code internal/profiler/driftbaseline.go | grep -q 'p.PromoteExpiredWorkloads()' \
+    || die "6.0d: UpdateLearningGauge в internal/profiler/driftbaseline.go не вызывает PromoteExpiredWorkloads — периодический обход существует, но не запускает промоушен"
+grep -qE '^func \(p \*DriftBaselineProfiler\) LearningOverdueWorkloads\(' internal/profiler/driftbaseline.go \
+    || die "6.0d: в internal/profiler/driftbaseline.go нет LearningOverdueWorkloads — переопределение stuck_learning_workloads (находка №198) стёрло старый срез вместо того, чтобы вывести его отдельной серией"
+go test ./internal/profiler/ -run 'TestWorkloadKeyFromEvent|TestDriftBaselineProfiler_PeriodicSweepPromotesWithoutFurtherEvents|TestDriftBaselineProfiler_StuckVsOverdueDiverge' -count=1 >/dev/null 2>&1 \
+    || die "6.0d: тесты нормализации pre-exec comm и периодического промоушена не проходят — запустить 'go test ./internal/profiler/ -run TestWorkloadKeyFromEvent|TestDriftBaselineProfiler_PeriodicSweepPromotesWithoutFurtherEvents|TestDriftBaselineProfiler_StuckVsOverdueDiverge -v' и прочитать вывод"
+echo "  ок: pre-exec comm нормализуется в ключе нагрузки (№197), промоушен по дедлайну больше не ленив (№198)"
+
+# Пункт 3/4: критерий 6.0.1 (шаг 16.1 ниже) читает отсутствие строки
+# drift_exec_from_system_bin в таблице 5.9.9.F.6b как 0/ч ТОЛЬКО когда сама
+# таблица напечатана штатно — по её pass-строке в run-gate.sh (находка
+# №195). Проверяется здесь, ЗАРАНЕЕ: если этот литерал в run-gate.sh
+# переименуют, шаг 16.1 будет молча читать "таблица не напечатана" на
+# каждом прогоне, и 6.0.1 перестанет засчитываться независимо от
+# фактического объёма.
+grep -qF 'объём правил за idle-час напечатан вместе со срезанным лимитером' $SETUP/attacks/run-gate.sh 2>/dev/null \
+    || die "6.0d: строка-маркер таблицы 5.9.9.F.6b ('объём правил за idle-час напечатан вместе со срезанным лимитером') не найдена в run-gate.sh — критерий 6.0.1 (шаг 16.1, находка №195) не сможет отличить 'таблица не построена' от 'построена, объём 0/ч', и его вердикт станет недостоверным на каждом прогоне, а не только на этом"
+echo "  ок: маркер таблицы 5.9.9.F.6b, на который опирается критерий 6.0.1, найден в run-gate.sh"
+
+# Пункт 4/4: предпосылки контролей 6.0.6/6.0.7 (шаг 6.0e). Оба исполняются в
+# окне атаки, на 90-й минуте прогона, и оба die'ят сам шаг. Отсутствие
+# unshare(1) — не дефект продукта, а незаряженный стенд, и узнавать о нём
+# через полтора часа означает выбросить весь замер: то же соображение, по
+# которому преflight вообще существует.
+command -v unshare >/dev/null 2>&1 \
+    || die "6.0d: на стенде нет unshare(1) (util-linux) — контроль 6.0.6 (позитивный контроль на НОВУЮ нагрузку, находка №193) нечем исполнить, а он обязателен для закрытия волны. Поставить util-linux ДО прогона: apt-get install -y util-linux"
+unshare --user --map-root-user --mount --propagation private -- /bin/true >/dev/null 2>&1 \
+    || die "6.0d: 'unshare --user --map-root-user --mount' не отрабатывает на этом ядре/стенде — примитив контроля 6.0.6 недоступен (проверить kernel.unprivileged_userns_clone и что пайплайн запущен от root). Без исполнимого примитива 6.0.6 дал бы FAIL по среде, а не по детектору, и правка №193 была бы объявлена нерабочей ошибочно"
+echo "  ок: примитив контроля 6.0.6 (unshare CLONE_NEWUSER + mount) исполним на этом стенде"
+
 echo "--- преflight: 5.9.9.F.5g — drift_new_exec_critical переименовано и понижено (№154) ---"
 # №154: правило дало 576/607 алертов и 576/577 критикалов idle-часа
 # №2.9.9.F.4, из них 499 — пере-exec sshd на входящее ssh-соединение (см. блок
@@ -1397,6 +1475,14 @@ systemctl start ebpf-guard-test.service
 echo "рестарт в $(date -u +%H:%M:%S) UTC"
 register_pipeline_observer_root
 date -u +"%Y-%m-%d %H:%M:%S" > /root/agent-start-6.0.txt
+# Реестр исходов drift-контролей (6.0.3/6.0.6), из которого переопределённое
+# решающее правило 6.0.5 читает вердикт (волна 6.0d, находка №196). Обнуляется
+# ЗДЕСЬ, вместе с T0 агента: файл дописывается через >> и переживает прогон, а
+# 6.0.5 требует контроль, исполненный ВНУТРИ окна замера. Без обнуления
+# «6.0.3 PASS» прошлого прогона делал бы 6.0.5 зелёным на следующем — ровно та
+# форма ложно-зелёного, которую волна 6.0d чинит в трёх других местах.
+: > /root/drift-controls-6.0.txt
+echo "# прогон от $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt
 systemctl show ebpf-guard-test.service -p ExecMainStartTimestamp | sed 's/^/  /'
 
 # 5.9.9.F.4c, сужено 5.9.9.F.5h/№151 (вариант 1 постановки: «исключение
@@ -2245,13 +2331,55 @@ echo "$drift_state_json" | jq -e '.drift_baseline.workloads' >/dev/null 2>&1 \
 # роста reported говорят, чего ждать от 6.0.1, ДО того как час пройдёт.
 echo "  состояние базовой линии по нагрузкам (state / сигнатур / сэмплов / сообщено / saturated):"
 echo "$drift_state_json" | jq -r '.drift_baseline.workloads[] | "    \(.comm)\t\(.state)\tsig=\(.signatures)\tsamples=\(.samples)\treported=\(.reported)\tsat=\(.saturated)"'
+# Постановка №6.0d называет это «неизвестным, названным до прогона», и
+# требует читать его ПЕРВЫМ: глобальная резервная база (№193а) видит
+# сигнатуры всех нагрузок сразу и упирается в max_signatures_per_workload
+# раньше любой отдельной. Если она насытилась ДО открытия idle-часа,
+# механизм (а) выродился в «алертить на всё незнакомое», и объём 6.0.8
+# отражает насыщение, а не дрейф. Печатается величиной, а не порогом:
+# запрет 5.9.6 (порог не назначается на том же замере, где величина
+# впервые измерена) действует и здесь.
+echo "  насыщение базовых линий на открытии idle-часа (6.0d): saturated_profiles=$(echo "$drift_state_json" | jq -r '.drift_baseline.saturated'), из них глобальная=$(echo "$drift_state_json" | jq -r '[.drift_baseline.workloads[] | select(.state=="global") | .saturated] | if length == 0 then "нет глобального профиля" else .[0] end'), сигнатур в глобальной=$(echo "$drift_state_json" | jq -r '[.drift_baseline.workloads[] | select(.state=="global") | .signatures] | if length == 0 then "-" else .[0] end') из ${DRIFT_MAX_SIGS:-256}"
 drift_pc_state=$(echo "$drift_state_json" | jq -r '.drift_baseline.workloads[] | select(.comm=="drift-pc") | .state' 2>/dev/null | head -1)
 [ -n "$drift_pc_state" ] \
     || die "6.0.4 ПРОВАЛЕН: в /debug/state нет нагрузки comm=drift-pc — посев [10/14] не дошёл до коллектора (или дерево измерителя его срезало), и контроль 6.0.3 ниже будет мерить пустое место"
 [ "$drift_pc_state" = "enforcing" ] \
     || die "6.0.4 ПРОВАЛЕН: нагрузка comm=drift-pc в состоянии '$drift_pc_state', а не enforcing, к открытию idle-часа — досыпание до T_seed+${DRIFT_LEARNING_PERIOD}с своё обещание не выполнило; позитивный контроль 6.0.3 в окне атаки мерил бы обучение, а не базовую линию (риск №1 постановки 6.0)"
-drift_stuck_state=$(echo "$drift_state_json" | jq -r '[.drift_baseline.workloads[] | select(.state!="enforcing")] | length')
-echo "  нагрузок вне enforcing на открытии idle-часа: ${drift_stuck_state} из $(echo "$drift_state_json" | jq -r '.drift_baseline.workloads | length') (замер №6.0: 13 из 21 — все они были слепы весь измеряемый час)"
+# Глобальная резервная база (№193а) появляется в том же списке отдельной
+# строкой state=global и НЕ является нагрузкой: у неё нет ни дедлайна, ни
+# промоушена. Считать её «нагрузкой вне enforcing» значило бы прибавлять
+# ровно единицу к обеим величинам на каждом прогоне и сделать ряд
+# несравнимым с «13 из 21» замера №6.0.
+drift_stuck_state=$(echo "$drift_state_json" | jq -r '[.drift_baseline.workloads[] | select(.state!="enforcing" and .state!="global")] | length')
+drift_wl_total=$(echo "$drift_state_json" | jq -r '[.drift_baseline.workloads[] | select(.state!="global")] | length')
+echo "  нагрузок вне enforcing на открытии idle-часа: ${drift_stuck_state} из ${drift_wl_total} (замер №6.0: 13 из 21 — все они были слепы весь измеряемый час)"
+echo "  разрез learning/stuck/overdue (6.0d, №198 — overdue промоутится обходом, а не следующим совпадением): $(echo "$drift_state_json" | jq -r '[.drift_baseline.workloads[] | select(.state!="enforcing" and .state!="global") | .state] | group_by(.) | map("\(.[0])=\(length)") | join(" ")')"
+
+# Преflight 6.0d, пункт 2/4: наличие глобального профиля (№193а) в
+# /debug/state. Тот же снимок уже снят для 6.0.4 выше — второй запрос не
+# нужен. Без него правка №193 недоказуема живьём: код мог остаться
+# закомментированным, а посев comm=drift-pc сам по себе не отличает
+# "выучился по своей нагрузке" от "выучился ещё и в глобальной базе".
+drift_global_state=$(echo "$drift_state_json" | jq -r '.drift_baseline.workloads[] | select(.comm=="*global*") | .state' 2>/dev/null | head -1)
+[ "$drift_global_state" = "global" ] \
+    || die "преflight 6.0d: в /debug/state нет записи comm=\"*global*\" state=\"global\" — глобальная резервная база (№193а) не подхватилась (либо per_workload: false, при котором глобальный профиль вырожден в единственный обычный, либо правка driftbaseline.go откатилась); правка (б) без (а) не закрывает находку №193 целиком, см. plan.md 6.0d п.4"
+echo "  ок (преflight 6.0d): глобальная резервная база присутствует в /debug/state (comm=\"*global*\", state=global)"
+# Критерий 6.0.9 (волна 6.0d, находка №197): расщепление нагрузки на pre-exec
+# `comm` снято. Ядро в окне до execve отдаёт comm в обрамляющих скобках
+# ("(find)"), и до правки такой процесс попадал в ОТДЕЛЬНЫЙ WorkloadKey — то
+# есть выборка дробилась ровно на самом привилегированном участке, где
+# процесс вот-вот станет тем, чем его выбрал стать атакующий.
+# WorkloadKeyFromEvent теперь снимает скобки (только в КЛЮЧЕ; в алерте и
+# событии comm остаётся сырым — сам факт «до execve» не теряется), поэтому в
+# ЭТОЙ таблице, которая печатает именно ключи, скобок быть не должно ни у
+# одной строки. Величина запоминается здесь и выносится вердиктом в приёмку
+# (16.9): сама по себе она не повод убивать прогон перед idle-часом.
+DRIFT_PAREN_COMMS=$(echo "$drift_state_json" | jq -r '.drift_baseline.workloads[] | .comm' 2>/dev/null | grep -E '^\(.*\)$' | sort -u | tr '\n' ' ')
+if [ -n "${DRIFT_PAREN_COMMS// /}" ]; then
+    echo "  6.0.9: comm В СКОБКАХ в таблице базовой линии: $DRIFT_PAREN_COMMS — stripPreExecCommParens не применяется к ключу нагрузки (находка №197 не закрыта)"
+else
+    echo "  6.0.9: comm в обрамляющих скобках в таблице базовой линии: нет ни одного — расщепление нагрузки на pre-exec comm снято (№197)"
+fi
 echo "6.0.4 доказан живьём: наш посев comm=drift-pc в состоянии enforcing к открытию idle-часа, установлено поимённо, а не по неравенству агрегатов"
 
 echo "=== [11/14] idle-час, NO_RESTART=1 (5.9.1c) — сокращать нельзя ==="
@@ -2313,10 +2441,140 @@ _drift_pc2_before=$(_drift_pc2_count)
 sleep 20
 _drift_pc2_after=$(_drift_pc2_count)
 echo "  позитивный контроль: exec $DRIFT_PC2_BIN (comm=drift-pc, известный workload, новая сигнатура) -> drift_exec_from_system_bin{comm=drift-pc}: ${_drift_pc2_before:-0} -> ${_drift_pc2_after:-0} ($(date -u +%H:%M:%S) UTC)"
-[ "$((${_drift_pc2_after:-0} - ${_drift_pc2_before:-0}))" -ge 1 ] \
-    || die "6.0.3 ПРОВАЛЕН: exec нового бинаря $DRIFT_PC2_BIN тем же comm=drift-pc, что уже enforcing с шага [10/14], не дал ни одного нового срабатывания drift_exec_from_system_bin (было ${_drift_pc2_before:-0}, стало ${_drift_pc2_after:-0}) — либо базовая линия свернула правило в постоянную тишину для этого workload'а (регрессия сигнатуры syscall-события), либо посев [10/14] и контроль здесь разошлись комм-именами"
+if [ "$((${_drift_pc2_after:-0} - ${_drift_pc2_before:-0}))" -lt 1 ]; then
+    # Находка №196 (6.0d): исход 6.0.3 пишется в файл, переживающий отдельно
+    # от gate-6.0.txt (создаётся позже, на шаге [11/14], этого контроля не
+    # касается) — переопределённый пол 6.0.5 (ниже, "16.5") читает именно
+    # его, и то же самое понадобится будущему офлайн-реплею на архиве: сам
+    # die() ниже долговечен только если оператор запускал скрипт с
+    # перенаправлением стдаута в сохранённый лог.
+    echo "6.0.3 FAIL $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    die "6.0.3 ПРОВАЛЕН: exec нового бинаря $DRIFT_PC2_BIN тем же comm=drift-pc, что уже enforcing с шага [10/14], не дал ни одного нового срабатывания drift_exec_from_system_bin (было ${_drift_pc2_before:-0}, стало ${_drift_pc2_after:-0}) — либо базовая линия свернула правило в постоянную тишину для этого workload'а (регрессия сигнатуры syscall-события), либо посев [10/14] и контроль здесь разошлись комм-именами"
+fi
+echo "6.0.3 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
 echo "6.0.3 доказан живьём в $(date -u +%H:%M:%S) UTC: правило живо для новой сигнатуры уже enforcing workload'а"
 rm -rf "$DRIFT_PC2_DIR" "$DRIFT_PC_BIN"
+
+echo "--- 6.0e: контроли на НОВУЮ нагрузку — опасный примитив от невиданного comm (критерии 6.0.6 и 6.0.7) ---"
+# Буква `d` пропущена так же и по той же причине, по которой её пропустила
+# сама волна: `6.0d` — имя ВОЛНЫ, а этот файл грепается буквально (см. разбор
+# в plan.md, «Почему волна названа 6.0d, а не 6.0c»). Завести шаг с именем
+# волны значило бы создать вторую сущность с тем же именем в файле, по
+# которому criteria-index.txt резолвит паттерны.
+#
+# Чем этот контроль ОТЛИЧАЕТСЯ от 6.0.3 выше и зачем нужен отдельно.
+# 6.0.3 спрашивает: жива ли базовая линия для новой сигнатуры УЖЕ ОБУЧЕННОЙ
+# нагрузки. Находка №193 — про противоположный случай: нагрузку, которой
+# профайлер никогда не видел. До волны 6.0d фаза learning подавляла её
+# совпадения БЕЗУСЛОВНО, то есть атакующий, пришедший под новым comm (а
+# атака нова по определению), получал презумпцию невиновности ровно на тех
+# примитивах, ради которых правило существует. 6.0.6 проверяет, что этой
+# презумпции больше нет; 6.0.7 — что 6.0.6 доказывает НОВИЗНУ, а не просто
+# факт вызова (иначе контроль прошёл бы и на сломанной базовой линии,
+# которая алертит на всё подряд, — ровно то, чем 6.0.5 был непроходим до
+# переопределения).
+DRIFT_NW_COMM="dnw-$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+# comm в ядре — TASK_COMM_LEN=16 с NUL, то есть 15 значащих символов;
+# "dnw-" + 8 hex = 12, с запасом. Случайность на каждый прогон и есть
+# гарантия «ранее не встречавшегося» comm: реестра прошлых comm нет и
+# заводить его не нужно.
+[ "${#DRIFT_NW_COMM}" -le 15 ] || die "6.0e: сгенерированный comm '$DRIFT_NW_COMM' длиннее 15 символов — ядро усечёт его, и отбор алертов по comm разойдётся с посевом"
+DRIFT_NW_SRC=$(command -v unshare 2>/dev/null)
+[ -n "$DRIFT_NW_SRC" ]     || die "6.0e: на стенде нет unshare(1) (util-linux) — контроль 6.0.6 нечем исполнить. Поставить util-linux; без него правка №193 не проверяется живьём и волна 6.0d не может быть закрыта (критерий 6.0.6 — обязательный, не наблюдение)"
+DRIFT_NW_DIR=/usr/local/bin/drift-novel-workload
+mkdir -p "$DRIFT_NW_DIR" 2>/dev/null || die "6.0e: не удалось создать $DRIFT_NW_DIR"
+DRIFT_NW_BIN="$DRIFT_NW_DIR/$DRIFT_NW_COMM"
+cp "$DRIFT_NW_SRC" "$DRIFT_NW_BIN" 2>/dev/null || die "6.0e: не удалось подготовить $DRIFT_NW_BIN из $DRIFT_NW_SRC"
+chmod +x "$DRIFT_NW_BIN"
+
+# Один вызов даёт ОБА примитива подмножества (б) от нашего comm:
+#   unshare(CLONE_NEWUSER|CLONE_NEWNS) — сам unshare(2);
+#   mount(..., MS_REC|MS_PRIVATE, ...) — util-linux делает его сам сразу
+#   после unshare(2) при --mount (см. --propagation, дефолт private).
+# Постановка называет вторым примитивом mount(MS_BIND). Взят MS_REC|MS_PRIVATE,
+# а не MS_BIND, сознательно: MS_BIND через `unshare --mount=<файл>` оставляет
+# ПЕРСИСТЕНТНЫЙ namespace, привязанный к файлу, и требует umount в откате —
+# лишняя точка отказа внутри окна замера. Критерий 6.0.6 сформулирован на
+# правиле drift_dangerous_syscall и на совпадении comm, а не на конкретном
+# флаге mount: обе комбинации проходят через driftSyscallArgSpecs одинаково
+# (165 -> mountFlagNames(a[3])) и обе новы для невиданной нагрузки. Отличие
+# зафиксировано здесь, чтобы в архиве не пришлось гадать, почему в логе
+# MS_PRIVATE, а в постановке MS_BIND.
+_drift_nw_count() {
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/api/v1/alerts" 2>/dev/null \
+        | jq --arg c "$DRIFT_NW_COMM" '[.[]|select(.rule_id=="drift_dangerous_syscall" and .comm==$c)]|length' 2>/dev/null || echo 0
+}
+_drift_nw_limited() {
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/metrics" 2>/dev/null \
+        | awk '/^ebpf_guard_alerts_ratelimited_by_rule_total\{/ && /rule_id="drift_dangerous_syscall"/ { s += $NF } END { printf "%d", s+0 }'
+}
+_drift_nw_suppressed() {
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/metrics" 2>/dev/null \
+        | awk '/^ebpf_guard_drift_baseline_suppressed_total\{/ && /reason="already_reported"/ && /rule_id="drift_dangerous_syscall"/ { s += $NF } END { printf "%d", s+0 }'
+}
+
+# Сторож ложного нуля (память находки №101/«позитивный контроль по
+# результату»). run-all-attacks.sh прямо перед этим шагом исполняет
+# `unshare -U true` (позитивный контроль 5.9.9c) и весь блок container-escape,
+# а drift_dangerous_syscall с волны 6.0d перестала быть немой — то есть
+# per-rule лимитер (10 алертов/правило/60 с) может быть выбран ДО нашего
+# вызова, и наш единственный алерт был бы срезан. Ноль по этой причине
+# неотличим от нуля по причине «правка №193 не работает» — а стоит он
+# целого замера. Поэтому: считаем срез лимитера тем же ДО/ПОСЛЕ, и при
+# нулевом приросте алертов с НЕНУЛЕВЫМ приростом среза даём окну лимитера
+# стечь (60 с + запас) и повторяем ОДИН раз. Повтор безопасен для 6.0.7
+# ниже: он сравнивает с _drift_nw_after, то есть с состоянием после
+# фактически зачтённой попытки, какой бы она ни была по счёту.
+_drift_nw_attempt() {
+    "$DRIFT_NW_BIN" --user --map-root-user --mount --propagation private -- /bin/true >/dev/null 2>&1 || true
+    sleep 20
+}
+_drift_nw_before=$(_drift_nw_count)
+_drift_nw_lim_before=$(_drift_nw_limited)
+_drift_nw_attempt
+_drift_nw_after=$(_drift_nw_count)
+_drift_nw_lim_after=$(_drift_nw_limited)
+echo "  6.0.6 позитивный контроль: $DRIFT_NW_BIN (comm=$DRIFT_NW_COMM — нагрузка, которой профайлер никогда не видел) unshare(CLONE_NEWUSER|CLONE_NEWNS)+mount(MS_REC|MS_PRIVATE) -> drift_dangerous_syscall{comm=$DRIFT_NW_COMM}: ${_drift_nw_before:-0} -> ${_drift_nw_after:-0}, срез лимитера правила ${_drift_nw_lim_before:-0} -> ${_drift_nw_lim_after:-0} ($(date -u +%H:%M:%S) UTC)"
+if [ "$((${_drift_nw_after:-0} - ${_drift_nw_before:-0}))" -lt 1 ] \
+   && [ "$(( ${_drift_nw_lim_after:-0} - ${_drift_nw_lim_before:-0} ))" -gt 0 ]; then
+    echo "  6.0.6: ноль алертов ПРИ выросшем срезе лимитера (+$(( ${_drift_nw_lim_after:-0} - ${_drift_nw_lim_before:-0} ))) — это приборный ноль, а не вердикт о детекторе. Даём окну лимитера (60 с) стечь и повторяем один раз"
+    sleep 70
+    _drift_nw_before=$(_drift_nw_count)
+    _drift_nw_lim_before=$(_drift_nw_limited)
+    _drift_nw_attempt
+    _drift_nw_after=$(_drift_nw_count)
+    _drift_nw_lim_after=$(_drift_nw_limited)
+    echo "  6.0.6 повтор после стекания окна лимитера: алертов ${_drift_nw_before:-0} -> ${_drift_nw_after:-0}, срез ${_drift_nw_lim_before:-0} -> ${_drift_nw_lim_after:-0} ($(date -u +%H:%M:%S) UTC)"
+fi
+if [ "$((${_drift_nw_after:-0} - ${_drift_nw_before:-0}))" -lt 1 ]; then
+    echo "6.0.6 FAIL $(date -u +%FT%TZ) comm=$DRIFT_NW_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    rm -rf "$DRIFT_NW_DIR"
+    die "6.0.6 ПРОВАЛЕН: опасный примитив (unshare CLONE_NEWUSER + mount) от НИКОГДА не виденной нагрузки comm=$DRIFT_NW_COMM не дал ни одного алерта drift_dangerous_syscall (было ${_drift_nw_before:-0}, стало ${_drift_nw_after:-0}). Это ровно находка №193: фаза learning новой нагрузки по-прежнему подавляет примитив побега. Смотреть в порядке: (1) несёт ли drift_dangerous_syscall флаг drift_novel_workload: alert — преflight 6.0d это проверяет статически, значит проводка Rule -> Alert -> ObserveRule оборвалась в бинаре, а не в YAML; (2) есть ли в /debug/state запись comm=\"*global*\" (правка №193а); (3) дошло ли событие до движка вообще — 272/165 в kernel-allowlist (internal/bpf/sampling.go). Срез лимитера за эту попытку: +$(( ${_drift_nw_lim_after:-0} - ${_drift_nw_lim_before:-0} )) — если он ненулевой ПОСЛЕ повтора, причина приборная (лимитер), а не продуктовая"
+fi
+echo "6.0.6 PASS $(date -u +%FT%TZ) comm=$DRIFT_NW_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+echo "6.0.6 доказан живьём в $(date -u +%H:%M:%S) UTC: новая нагрузка НЕ получила презумпцию невиновности на примитиве побега (находка №193 закрыта)"
+
+# 6.0.7 — негативный контроль к 6.0.6. Тот же бинарь, тот же comm, тот же
+# примитив, повторно. Без него 6.0.6 доказывал бы только «правило умеет
+# срабатывать», что верно и для детектора, алертящего на КАЖДЫЙ вызов, —
+# а тогда цена решения (б) была бы неограниченной, и объём 6.0.8 ниже мерил
+# бы частоту исполнения, а не дрейф. Ожидание: 0 новых алертов, прирост
+# уходит в suppressed_total{reason="already_reported"} (правка «сообщать
+# один раз»).
+_drift_nw_rep_before=$(_drift_nw_suppressed)
+"$DRIFT_NW_BIN" --user --map-root-user --mount --propagation private -- /bin/true >/dev/null 2>&1 || true
+sleep 20
+_drift_nw_after2=$(_drift_nw_count)
+_drift_nw_rep_after=$(_drift_nw_suppressed)
+echo "  6.0.7 негативный контроль: повтор того же примитива тем же comm=$DRIFT_NW_COMM -> алертов ${_drift_nw_after:-0} -> ${_drift_nw_after2:-0}, already_reported ${_drift_nw_rep_before:-0} -> ${_drift_nw_rep_after:-0} ($(date -u +%H:%M:%S) UTC)"
+if [ "$((${_drift_nw_after2:-0} - ${_drift_nw_after:-0}))" -ne 0 ]; then
+    echo "6.0.7 FAIL $(date -u +%FT%TZ) comm=$DRIFT_NW_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    rm -rf "$DRIFT_NW_DIR"
+    die "6.0.7 ПРОВАЛЕН: повтор ТОГО ЖЕ примитива тем же comm=$DRIFT_NW_COMM дал $((${_drift_nw_after2:-0} - ${_drift_nw_after:-0})) новых алертов вместо 0 — 'сообщать один раз' не работает для подмножества drift_novel_workload, и 6.0.6 выше доказал факт вызова, а не его новизну. Цена решения (б) в этом случае пропорциональна частоте исполнения примитива, и величина 6.0.8 непригодна для назначения порога"
+fi
+echo "6.0.7 PASS $(date -u +%FT%TZ) comm=$DRIFT_NW_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+echo "6.0.7 доказан живьём в $(date -u +%H:%M:%S) UTC: повторный вызов молчит — 6.0.6 доказывает новизну, а не факт вызова"
+rm -rf "$DRIFT_NW_DIR"
 
 # 5.9.9.F.4c (продолжение): окно замера ЗАКРЫТО (idle-час [11/14] + атаки
 # [12/14] позади), а всё, что идёт дальше, — снова инструментарий: сам гейт
@@ -2953,13 +3211,26 @@ acc_rl_line=$(grep -E '^[[:space:]]*drift_exec_from_system_bin[[:space:]]+сто
 acc_rl_cutn=$(grep -oE 'правил с ненулевым срезом за idle-час: [0-9]+' /root/gate-6.0.txt | tail -1 | grep -oE '[0-9]+$')
 acc_rl_stor=$(echo "$acc_rl_line" | grep -oE 'стор[[:space:]]+[0-9]+' | grep -oE '[0-9]+')
 acc_rl_cut=$(echo "$acc_rl_line" | grep -oE 'срезано[[:space:]]+[0-9]+' | grep -oE '[0-9]+')
+# Находка №195: строка отсутствует в двух РАЗНЫХ ситуациях, которые старая
+# редакция не различала — «правило дало 0 срабатываний за idle-час» (таблица
+# 5.9.9.F.6b построена штатно, драйва под лимитер не было ни разу) и «таблица
+# вообще не построена» (снимки idle не сняты, метрика лимитера старее сборки
+# — гейт печатает fail/skip вместо таблицы). Проверяется заранее, по факту
+# успешной печати таблицы (её pass-строка), а не по наличию конкретной
+# строки правила в ней: только так «нет строки» читается как 0/ч, а не как
+# «не измерено».
+acc_rl_table_ran=0
+grep -qF 'объём правил за idle-час напечатан вместе со срезанным лимитером' /root/gate-6.0.txt \
+    && acc_rl_table_ran=1
 acc "16.1" "6.0.1 — drift_exec_from_system_bin, объём за idle-час (порог <=100/ч): ${acc_rl_stor:-НЕ НАПЕЧАТАН гейтом 5.9.9.F.6b} (было 577/ч на №2.9.9.F.7 без базовой линии)"
 if [ -n "$acc_rl_stor" ] && [ "$acc_rl_stor" -le 100 ] 2>/dev/null; then
     acc "  " "ДОСТИГНУТО — засчитывается ТОЛЬКО вместе с 6.0.4 (enforcing напечатан на шаге [10/14]) И с полом 16.5 (класс drift дал за час хоть одну аномалию); сам по себе низкий объём неотличим ни от незакрывшегося обучения (риск №1), ни от свёрнутой сигнатуры (замер №6.0: объём 0 при 15071 совпадении)"
 elif [ -n "$acc_rl_stor" ]; then
     acc "  " "НЕ ДОСТИГНУТО: объём $acc_rl_stor > 100/ч"
+elif [ "$acc_rl_table_ran" -eq 1 ]; then
+    acc "  " "ДОСТИГНУТО — объём 0/ч (№195): таблица 5.9.9.F.6b напечатана штатно (парсинг цел, pass-строка найдена), drift_exec_from_system_bin в ней просто нет строки — читается как 0 срабатываний за idle-час, а не как «не измерено». Засчитывается, как и ненулевой случай выше, ТОЛЬКО вместе с 6.0.4 и полом 16.5"
 else
-    acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: строка drift_exec_from_system_bin отсутствует в таблице 5.9.9.F.6b — либо правило вообще не сработало за idle-час (тоже требует объяснения), либо парсинг таблицы разошёлся с её форматом"
+    acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: таблица 5.9.9.F.6b вообще не напечатана этим гейтом (снимки idle/metrics-start.txt|metrics-end.txt не сняты, либо метрика лимитера отсутствует — сборка агента старее 5.9.9.F.5n) — это сбой сбора, а не значение величины"
 fi
 acc "16.2" "6.0.2 — правил со срезом лимитера за idle-час < 7 и drift_exec_from_system_bin среди них нет: правил со срезом = ${acc_rl_cutn:-?}, срезано у drift_exec_from_system_bin = ${acc_rl_cut:-0}"
 if [ -n "$acc_rl_cutn" ] && [ "$acc_rl_cutn" -lt 7 ] 2>/dev/null && [ "${acc_rl_cut:-0}" -eq 0 ] 2>/dev/null; then
@@ -2970,7 +3241,7 @@ fi
 acc "16.3" "6.0.3 — позитивный контроль (шаг [12/14], comm=drift-pc, новая сигнатура у enforcing workload): смотреть 'позитивный контроль' выше по логу этого прогона; шаг die'ит сам, если контроль не прошёл — если приёмка дошла до этой строки, 6.0.3 ДОСТИГНУТО"
 acc "16.4" "6.0.4 — состояние базовой линии на момент открытия idle-часа: смотреть 'состояние базовой линии' на шаге [10/14] этого лога; шаг die'ит сам при непечати или отсутствии enforcing — если приёмка дошла до этой строки, 6.0.4 ДОСТИГНУТО"
 
-# 16.5 — ПОЛ к потолку 6.0.1, добавлен после разбора №6.0.
+# 16.5 — пол к потолку 6.0.1, ПЕРЕОПРЕДЕЛЁН находкой №196 (волна 6.0d).
 #
 # 6.0.1 — потолок: «не больше 100 алертов за idle-час». На №6.0 он был взят
 # с результатом 0, и ноль означал не работу механизма, а его слепоту: все
@@ -2980,12 +3251,29 @@ acc "16.4" "6.0.4 — состояние базовой линии на моме
 # себе неинформативна и с этого замера засчитывается ТОЛЬКО вместе с полом
 # ниже.
 #
-# Пол проверяет, что за измеряемый час базовая линия вообще что-то делала:
-# были совпадения (suppressed_total растёт) И среди них были аномалии
-# (anomalies_total растёт). anomalies_total считает КАЖДОЕ совпадение новой
-# сигнатуры, включая повторы, которые правка «сообщать один раз» гасит в
-# suppressed_total{reason="already_reported"} — то есть это сырой объём
-# дрейфа, независимый от того, сколько из него дошло до оператора.
+# До волны 6.0d пол проверял ОБЪЁМ (anomalies_total > 0 за idle-час) —
+# находка №196: это нефальсифицируемо в ту сторону, ради которой пол
+# построен. Класс drift на idle-часе по определению видит только рутину;
+# именно поэтому anomalies_total==0 на исправном детекторе неотличим от
+# anomalies_total==0 на детекторе со свёрнутой сигнатурой (замер №6.0).
+# Ноль не доказывает и не опровергает работоспособность механизма — это
+# измеряет 6.0.8 (цена решения б), а не 6.0.5.
+#
+# Новое решающее правило: 6.0.5 ДОСТИГНУТО <=> в прогоне есть хотя бы один
+# ПРОШЕДШИЙ drift-контроль (6.0.3 и/или 6.0.6), исполненный внутри окна
+# замера — работу механизма доказывает контроль, поставленный намеренно,
+# а не объём, который зависит от того, что случайно произошло на хосте.
+# Оба контроля пишут свой исход в /root/drift-controls-6.0.txt, а не только
+# в свой собственный echo (который живёт только в стдауте этого прогона).
+# 6.0.3 (шаг 6.0c) исполняется РАНЬШЕ gate-6.0.txt (создаётся позже, на шаге
+# [11/14], run-gate.sh перезаписывает его через tee без -a) — если бы контроль
+# писал исход только в gate-6.0.txt, тот же tee его бы стёр. Отдельный файл
+# переживает перезапись и читается одинаково живым гейтом этого прогона и
+# будущим офлайн-реплеем на архиве.
+#
+# Объём (anomalies_total/baseline_known/learning/already_reported)
+# печатается по-прежнему полностью — как измеряемая величина 6.0.8, а не как
+# решающее правило.
 _drift_sum() { # $1=metric $2=reason(опц.) $3=file
     local metric="$1" reason="$2" file="$3"
     [ -s "$file" ] || { echo 0; return; }
@@ -3001,21 +3289,102 @@ if [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
     acc_drift_known=$(( $(_drift_sum "${_dm}_suppressed_total" baseline_known "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" baseline_known "$IDLE_METRICS_START") ))
     acc_drift_learn=$(( $(_drift_sum "${_dm}_suppressed_total" learning "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" learning "$IDLE_METRICS_START") ))
     acc_drift_rep=$(( $(_drift_sum "${_dm}_suppressed_total" already_reported "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" already_reported "$IDLE_METRICS_START") ))
-    acc "16.5" "6.0.1 (пол) — класс drift за idle-час: аномалий $acc_drift_anom, подавлено baseline_known $acc_drift_known / learning $acc_drift_learn / already_reported $acc_drift_rep"
-    if [ "$acc_drift_anom" -gt 0 ]; then
-        acc "  " "ДОСТИГНУТО: базовая линия отработала — совпадения были и часть из них признана новыми. Потолок 6.0.1 (16.1) теперь осмыслен"
-    elif [ "$acc_drift_known" -gt 0 ]; then
-        acc "  " "НЕ ДОСТИГНУТО: $acc_drift_known совпадений и НИ ОДНОЙ аномалии за час — ровно форма слепоты замера №6.0 (929 baseline_known, 0 алертов). Потолок 16.1 в этом случае взят неработающим детектором и НЕ засчитывается, каким бы низким ни был объём"
-    elif [ "$acc_drift_learn" -gt 0 ]; then
-        acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: за час были только learning-подавления ($acc_drift_learn) — обучение не закрылось внутри окна, класс drift слеп по конструкции. Смотреть 6.0.4 и enforce_deadline_periods"
-    else
-        acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: за idle-час класс drift не получил НИ ОДНОГО совпадения — либо правила не грузятся, либо события до них не доходят; ни потолок, ни пол на таких данных не измеримы"
-    fi
+    acc "16.5" "6.0.1 (пол) — величина 6.0.8, справочно: класс drift за idle-час: аномалий $acc_drift_anom, подавлено baseline_known $acc_drift_known / learning $acc_drift_learn / already_reported $acc_drift_rep"
 else
-    acc "16.5" "6.0.1 (пол) — НЕ ЗАСЧИТЫВАЕТСЯ: снимки idle/metrics-start.txt|metrics-end.txt недоступны, дельту класса drift за час считать не из чего"
+    acc "16.5" "6.0.1 (пол) — величина 6.0.8 недоступна: снимки idle/metrics-start.txt|metrics-end.txt недоступны, дельту класса drift за час считать не из чего (не блокирует решающее правило ниже — оно больше не читает объём)"
+fi
+# Решающее правило 6.0.5, напечатано текстом (№196: подмену правила должно
+# быть видно в архиве, а не только в диффе скрипта).
+echo "6.0.5 РЕШАЮЩЕЕ ПРАВИЛО (переопределено 6.0d, находка №196): ДОСТИГНУТО <=> в прогоне есть хотя бы один прошедший drift-контроль (6.0.3 и/или 6.0.6) внутри окна замера; объём (16.5 выше) — величина 6.0.8, не пол"
+acc_drift_ctrl_file=${DRIFT_CONTROLS_FILE:-/root/drift-controls-6.0.txt}
+# Второй источник того же факта — лог прогона. Реестр выше появился только в
+# волне 6.0d, а постановка №6.0d ТРЕБУЕТ реплея переопределённого 6.0.5 на
+# архивах collect-6.0 (обязан дать НЕ ДОСТИГНУТО: контроль 6.0.3 там провален,
+# пайплайн умер на нём) и collect-6.0b (обязан дать ДОСТИГНУТО): правило,
+# которое не меняет вердикт на архивах в обе стороны, не решающее. В этих
+# архивах реестра нет и быть не может, зато есть run-6.0-pipeline.log с
+# исходной печатью шага 6.0c. Строки трассировки `set -x` отбрасываются: PS4
+# по умолчанию "+ ", и без отбрасывания grep нашёл бы СВОЮ СОБСТВЕННУЮ
+# трассу, напечатанную в тот же лог мгновением раньше (тот же класс дефекта,
+# что уронил предпрогон 6.0b на сторожах сигнатуры дрейфа).
+acc_drift_ctrl_log=${DRIFT_CONTROLS_LOG:-/root/run-6.0-pipeline.log}
+acc_drift_ctrl_log_pass=0
+if [ -f "$acc_drift_ctrl_log" ] && grep -v '^+' "$acc_drift_ctrl_log" | grep -qF '6.0.3 доказан живьём'; then
+    acc_drift_ctrl_log_pass=1
+fi
+if [ -f "$acc_drift_ctrl_file" ] && grep -qE '^6\.0\.[36] PASS' "$acc_drift_ctrl_file" 2>/dev/null; then
+    acc "  " "6.0.5 ДОСТИГНУТО: пройденный drift-контроль зафиксирован в $acc_drift_ctrl_file — $(grep -E '^6\.0\.[36] PASS' "$acc_drift_ctrl_file" | tr '\n' ' ')"
+elif [ "$acc_drift_ctrl_log_pass" -eq 1 ]; then
+    acc "  " "6.0.5 ДОСТИГНУТО: реестра drift-контролей нет (архив старее волны 6.0d), но контроль 6.0.3 напечатал 'доказан живьём' в $acc_drift_ctrl_log — механизм доказан контролем, а не объёмом"
+elif [ -f "$acc_drift_ctrl_file" ] && grep -qE '^6\.0\.[36] FAIL' "$acc_drift_ctrl_file" 2>/dev/null; then
+    acc "  " "6.0.5 НЕ ДОСТИГНУТО: $acc_drift_ctrl_file содержит только провалившиеся контроли — $(grep -E '^6\.0\.[36] FAIL' "$acc_drift_ctrl_file" | tr '\n' ' ')"
+elif [ -f "$acc_drift_ctrl_log" ]; then
+    acc "  " "6.0.5 НЕ ДОСТИГНУТО: ни реестр $acc_drift_ctrl_file, ни лог $acc_drift_ctrl_log не содержат ни одного прошедшего drift-контроля — контроль либо не исполнялся, либо провален (на collect-6.0 это ожидаемый исход: 6.0.3 провален по находке №187)"
+else
+    acc "  " "6.0.5 НЕ ЗАСЧИТЫВАЕТСЯ: ни $acc_drift_ctrl_file, ни $acc_drift_ctrl_log не найдены — исход drift-контролей нечем прочитать (это сбой сбора, а не значение величины)"
 fi
 
-echo "=== конец приёмки волны 5.9.9.F.8 (величины 1/4) + регресс волн 5.9.9.F.3…F.7 (вердикт гейта: $GATE_RC) + приёмка волны 6.0 (величины 16.1-16.4) ==="
+
+# ── 16.6…16.9: четыре величины волны 6.0d ────────────────────────────────────
+# Порядок правки соблюдён: эти печати заводятся ЗДЕСЬ, а строки 6.0.6…6.0.9
+# в criteria-index.txt — только после них. Обратный порядок уронил бы преflight
+# run-gate.sh (exit 3) на ВСЕХ архивах сразу, включая старые, — та же механика,
+# что уронила его при перенумерации реплеев (находка №170).
+acc "16.6" "6.0.6 — позитивный контроль на НОВУЮ нагрузку (шаг 6.0e, невиданный comm, unshare+mount): смотреть '6.0.6 позитивный контроль' выше по логу этого прогона; шаг die'ит сам, если контроль не прошёл — если приёмка дошла до этой строки, 6.0.6 ДОСТИГНУТО"
+acc "16.7" "6.0.7 — негативный контроль к нему (повтор того же примитива тем же comm): смотреть '6.0.7 негативный контроль' выше по логу; шаг die'ит сам при ненулевом приросте — если приёмка дошла до этой строки, 6.0.7 ДОСТИГНУТО, и 6.0.6 доказывает новизну, а не факт вызова"
+
+# 16.8 — ЦЕНА решения (б). Величина, НЕ критерий: порог на этом замере не
+# назначается (запрет 5.9.6 — порог не назначается на том же замере, где
+# величина впервые измерена). Считается по трём правилам подмножества (б) за
+# idle-час: объём из дельты alerts_total (метрика без label comm — за него
+# отвечает cardinality guard), разбивка по comm — из снимков стора idle-часа
+# (alerts-start.json/alerts-end.json), отбором по id, а не по timestamp:
+# id уникален, а на границе окна timestamp'ы совпадают с точностью до секунды.
+acc_nw_rules="container_escape_proc_write container_escape_init_proc drift_dangerous_syscall"
+acc_nw_total=0
+acc_nw_per_rule=""
+# Пустой путь скормил бы awk стандартный ввод, и приёмка повисла бы молча —
+# поэтому обе границы проверяются одним -s ДО цикла, а не внутри него.
+if [ -s "${IDLE_METRICS_START:-}" ] && [ -s "${IDLE_METRICS_END:-}" ]; then
+    for _r in $acc_nw_rules; do
+        _a=$(awk -v r="rule_id=\"$_r\"" '/^ebpf_guard_alerts_total\{/ && index($0, r) { s += $NF } END { printf "%d", s+0 }' "$IDLE_METRICS_START")
+        _b=$(awk -v r="rule_id=\"$_r\"" '/^ebpf_guard_alerts_total\{/ && index($0, r) { s += $NF } END { printf "%d", s+0 }' "$IDLE_METRICS_END")
+        _d=$(( ${_b:-0} - ${_a:-0} ))
+        acc_nw_total=$(( acc_nw_total + _d ))
+        acc_nw_per_rule="$acc_nw_per_rule $_r=$_d"
+    done
+else
+    acc_nw_total="НЕ ИЗМЕРЕН"
+    acc_nw_per_rule=" (снимки idle/metrics-start.txt|metrics-end.txt недоступны)"
+fi
+acc_nw_by_comm="снимки стора idle-часа недоступны"
+if [ -s "$IDLE_OUT/alerts-start.json" ] && [ -s "$IDLE_OUT/alerts-end.json" ]; then
+    acc_nw_by_comm=$(jq -r --slurpfile st "$IDLE_OUT/alerts-start.json" '
+        ($st[0] | map(.id) | map({(.):true}) | add // {}) as $seen
+        | map(select(.id as $i | ($seen[$i] // false) | not))
+        | map(select(.rule_id == "container_escape_proc_write"
+                  or .rule_id == "container_escape_init_proc"
+                  or .rule_id == "drift_dangerous_syscall"))
+        | group_by(.comm) | map("\(.[0].comm)=\(length)") | join(" ")
+        | if . == "" then "новых алертов подмножества за час нет" else . end
+    ' "$IDLE_OUT/alerts-end.json" 2>/dev/null || echo "разбор снимков стора не удался")
+fi
+acc "16.8" "6.0.8 — ЦЕНА решения (б), величина без порога (запрет 5.9.6): объём подмножества drift_novel_workload за idle-час = $acc_nw_total (по правилам:$acc_nw_per_rule)"
+acc "  " "разбивка по comm (снимки стора idle-часа): $acc_nw_by_comm"
+acc "  " "читать вместе с saturated_profiles на открытии часа (шаг [10/14]): если глобальная база насытилась ДО открытия, эта величина отражает насыщение, а не дрейф, и порог по ней назначать нельзя"
+
+# 16.9 — прямая проверка правки №197 по таблице 6.0.4. DRIFT_PAREN_COMMS
+# заполнена на шаге [10/14] того же процесса; в архиве та же величина
+# напечатана строкой "6.0.9:" там же.
+if [ -z "${DRIFT_PAREN_COMMS+x}" ]; then
+    acc "16.9" "6.0.9 — расщепление нагрузок на pre-exec comm: НЕ ЗАСЧИТЫВАЕТСЯ — шаг [10/14] не дошёл до печати таблицы базовой линии, проверять нечего"
+elif [ -n "${DRIFT_PAREN_COMMS// /}" ]; then
+    acc "16.9" "6.0.9 — расщепление нагрузок на pre-exec comm НЕ СНЯТО: в таблице 6.0.4 есть comm в обрамляющих скобках ($DRIFT_PAREN_COMMS) — stripPreExecCommParens не доехал до ключа нагрузки (находка №197)"
+else
+    acc "16.9" "6.0.9 ДОСТИГНУТО — расщепление нагрузок снято: в таблице 6.0.4 нет ни одного comm в обрамляющих скобках (№197)"
+fi
+
+echo "=== конец приёмки волны 5.9.9.F.8 (величины 1/4) + регресс волн 5.9.9.F.3…F.7 (вердикт гейта: $GATE_RC) + приёмка волны 6.0 (величины 16.1-16.9) ==="
 echo ""
 
 echo "=== [14/14] сводка idle-части + отчёт сверх гейта ==="

@@ -61,6 +61,20 @@ func TestWorkloadKeyFromEvent(t *testing.T) {
 		assert.Equal(t, "cache", k.Namespace)
 		assert.Equal(t, "", k.AppLabel)
 	})
+
+	// Wave 6.0d, finding №197: a process observed pre-exec carries its comm
+	// wrapped in parentheses ("(find)"); the same process observed after
+	// execve carries the bare name ("find"). Without normalization these
+	// land in two WorkloadKeys, splitting the sample at the exact moment a
+	// process becomes whatever an attacker chose it to become.
+	t.Run("pre-exec parens collapse into the same key as bare comm", func(t *testing.T) {
+		preExec := types.Event{Comm: [16]byte{'(', 'f', 'i', 'n', 'd', ')'}}
+		postExec := types.Event{Comm: [16]byte{'f', 'i', 'n', 'd'}}
+		kPre := WorkloadKeyFromEvent(preExec)
+		kPost := WorkloadKeyFromEvent(postExec)
+		assert.Equal(t, "find", kPre.Comm)
+		assert.Equal(t, kPost, kPre, "pre-exec (find) and post-exec find must share one workload key")
+	})
 }
 
 func TestWorkloadProfileManager_Isolation(t *testing.T) {

@@ -1850,7 +1850,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// letting through signatures never seen for this workload before.
 			// nil profiler or a non-drift class alert pass through unchanged.
 			if alert.Class == string(ClassDrift) && ce.driftBaselineProfiler != nil {
-				if !ce.driftBaselineProfiler.Observe(alert.RuleID, e) {
+				if !ce.driftBaselineProfiler.ObserveRule(alert.RuleID, e, alert.DriftNovelWorkload) {
 					return
 				}
 			}

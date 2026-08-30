@@ -34,6 +34,64 @@ func TestValidateRule_RejectsUnknownClass(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown class")
 }
 
+func TestValidateRule_RejectsUnknownDriftNovelWorkload(t *testing.T) {
+	rules := []Rule{{
+		ID:                 "bad_novel_workload",
+		Name:               "Bad drift_novel_workload",
+		EventType:          types.EventTCPConnect,
+		Condition:          RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"80"}},
+		Class:              ClassDrift,
+		DriftNovelWorkload: "bogus",
+	}}
+	err := ValidateFull(rules)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown drift_novel_workload")
+}
+
+// TestEvaluateInto_PropagatesDriftNovelWorkloadToAlert covers the plumbing
+// wave 6.0d added for finding №193(б): Rule.DriftNovelWorkload == "alert"
+// must reach types.Alert.DriftNovelWorkload so the correlation engine can
+// pass it to DriftBaselineProfiler.ObserveRule without a RuleID -> Rule
+// lookup (see engine.go's EvaluateInto callback).
+func TestEvaluateInto_PropagatesDriftNovelWorkloadToAlert(t *testing.T) {
+	rules := []Rule{
+		{
+			ID:        "drift_default",
+			Name:      "Drift default",
+			EventType: types.EventTCPConnect,
+			Condition: RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"80"}},
+			Severity:  types.SeverityWarning,
+			Action:    ActionAlert,
+			Class:     ClassDrift,
+		},
+		{
+			ID:                 "drift_flagged",
+			Name:               "Drift flagged",
+			EventType:          types.EventTCPConnect,
+			Condition:          RuleCondition{Field: "dport", Op: OpEquals, Values: []string{"443"}},
+			Severity:           types.SeverityWarning,
+			Action:             ActionAlert,
+			Class:              ClassDrift,
+			DriftNovelWorkload: "alert",
+		},
+	}
+	re := NewRuleEngine(rules)
+
+	var got []types.Alert
+	re.EvaluateInto(types.Event{Type: types.EventTCPConnect, Network: &types.NetworkEvent{Dport: 80}}, func(a types.Alert) {
+		got = append(got, a)
+	})
+	require.Len(t, got, 1)
+	assert.False(t, got[0].DriftNovelWorkload, "unflagged drift rule leaves Alert.DriftNovelWorkload false")
+
+	got = nil
+	re.EvaluateInto(types.Event{Type: types.EventTCPConnect, Network: &types.NetworkEvent{Dport: 443}}, func(a types.Alert) {
+		got = append(got, a)
+	})
+	require.Len(t, got, 1)
+	assert.True(t, got[0].DriftNovelWorkload)
+}
+
 func TestEvaluateInto_PropagatesRuleClassToAlert(t *testing.T) {
 	rules := []Rule{
 		{
@@ -117,9 +175,13 @@ func TestCorrelationEngine_DriftClassSuppressedDuringLearning(t *testing.T) {
 		}
 	}
 
-	// Learning phase: same signature observed twice, never alerted.
+	// Learning phase: same signature observed twice. The first occurrence is
+	// novel to the whole host (wave 6.0d, finding №193's global fallback
+	// baseline), so it alerts despite the workload still learning; the second
+	// is already known to the global baseline from the first, so it is
+	// suppressed as before.
 	alerts := ce.Ingest(ctx, fileEvent("sshd", "/etc/ssh/sshd_config"))
-	assert.Empty(t, alerts, "drift match during learning must not alert")
+	require.Len(t, alerts, 1, "first-ever-on-host drift signature must alert even during learning")
 	alerts = ce.Ingest(ctx, fileEvent("sshd", "/etc/ssh/sshd_config"))
 	assert.Empty(t, alerts, "drift match during learning must not alert")
 

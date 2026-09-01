@@ -683,6 +683,49 @@ func TestDriftBaselineNovelWorkloadFlagBypassesGlobalFallback(t *testing.T) {
 		"drift_novel_workload:alert must not be excused by the global fallback either")
 }
 
+// TestDriftBaselineGlobalFallbackSuppressionHasOwnReason is the regression
+// guard for wave 6.0f (№203): a learning-phase suppression that goes through
+// because the GLOBAL fallback baseline already knows the signature must be
+// counted under reason="global_baseline_known", not lumped into the generic
+// "learning" bucket alongside "nobody has any information yet" — the two
+// are different mechanisms and criterion 6.0.11 needs to tell them apart.
+func TestDriftBaselineGlobalFallbackSuppressionHasOwnReason(t *testing.T) {
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled:        true,
+		LearningPeriod: 0,
+		MinSamples:     20,
+		PerWorkload:    true,
+	}, nil)
+
+	established := syscallEventForExec("nginx", 59, "/usr/bin/known")
+	for i := 0; i < 25; i++ {
+		p.Observe("drift_exec_from_system_bin", established)
+	}
+	require.Equal(t, 0, p.LearningWorkloads(), "nginx should have promoted to enforcing")
+
+	// nginx's own learning already routes 19 of its 25 calls through
+	// global_baseline_known: call 1 is genuinely novel (alerts, not
+	// suppressed), calls 2-20 repeat the same signature while nginx itself
+	// is still learning but the global fallback (taught by call 1) already
+	// knows it, and calls 21-25 land in ordinary per-workload
+	// baseline_known once nginx promotes to enforcing at call 20.
+	before := testutil.ToFloat64(p.suppressedTotal.WithLabelValues("drift_exec_from_system_bin", "global_baseline_known"))
+	require.Equal(t, float64(19), before)
+
+	// A brand-new workload repeats the exact signature nginx already taught
+	// the global fallback. It is suppressed (still learning, global knows
+	// it) — that suppression must land under global_baseline_known too.
+	newWorkload := syscallEventForExec("some-new-daemon", 59, "/usr/bin/known")
+	assert.False(t, p.Observe("drift_exec_from_system_bin", newWorkload))
+
+	if got := testutil.ToFloat64(p.suppressedTotal.WithLabelValues("drift_exec_from_system_bin", "global_baseline_known")); got != before+1 {
+		t.Errorf("suppressed global_baseline_known = %v, want %v", got, before+1)
+	}
+	if got := testutil.ToFloat64(p.suppressedTotal.WithLabelValues("drift_exec_from_system_bin", "learning")); got != 0 {
+		t.Errorf("suppressed learning = %v, want 0 — this suppression must not double-count under the generic reason", got)
+	}
+}
+
 // TestDriftBaselineWorkloadStatesAgreeWithGauges pins the /debug/state ↔
 // /metrics agreement the 6.0d redefinitions could silently break. Two
 // separate ways they could disagree, both of the 5.9.4c class ("two registers

@@ -1942,3 +1942,192 @@ func TestThresholdRule_ChainGrouping(t *testing.T) {
 		assert.Len(t, engine.Evaluate(evt(pid, base.Add(2*time.Second))), 1)
 	})
 }
+
+// TestContainerPodEnrichmentFields is the regression guard for wave 6.0f
+// (№200): container.id/k8s.pod (aliases for container_id/pod_name) must
+// read Event.Enrichment, and an event with no Enrichment at all must read
+// as "empty" rather than being rejected as an unknown field.
+func TestContainerPodEnrichmentFields(t *testing.T) {
+	fileEvent := func(enrichment *types.EnrichmentInfo) types.Event {
+		var filename [256]byte
+		copy(filename[:], "/dev/vda1")
+		return types.Event{
+			Type:       types.EventFileAccess,
+			File:       &types.FileEvent{Filename: filename, Op: 1},
+			Enrichment: enrichment,
+		}
+	}
+
+	containerRule := Rule{
+		ID:        "cid_001",
+		Name:      "container.id non-empty",
+		EventType: types.EventFileAccess,
+		Condition: RuleCondition{
+			Field:  "container.id",
+			Op:     OpNotEquals,
+			Values: []string{""},
+		},
+		Severity: types.SeverityCritical,
+		Action:   ActionAlert,
+	}
+	podRule := Rule{
+		ID:        "pod_001",
+		Name:      "k8s.pod empty",
+		EventType: types.EventFileAccess,
+		Condition: RuleCondition{
+			Field:  "k8s.pod",
+			Op:     OpEquals,
+			Values: []string{""},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+
+	t.Run("container.id matches a populated ContainerID", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{containerRule})
+		alerts := engine.Evaluate(fileEvent(&types.EnrichmentInfo{ContainerID: "abc123"}))
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "cid_001", alerts[0].RuleID)
+	})
+
+	t.Run("container.id does not match an empty ContainerID", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{containerRule})
+		assert.Empty(t, engine.Evaluate(fileEvent(&types.EnrichmentInfo{})))
+	})
+
+	t.Run("container.id does not match a nil Enrichment", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{containerRule})
+		assert.Empty(t, engine.Evaluate(fileEvent(nil)))
+	})
+
+	t.Run("k8s.pod empty matches a nil Enrichment (host case)", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{podRule})
+		alerts := engine.Evaluate(fileEvent(nil))
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "pod_001", alerts[0].RuleID)
+	})
+
+	t.Run("k8s.pod empty does not match a populated PodName", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{podRule})
+		assert.Empty(t, engine.Evaluate(fileEvent(&types.EnrichmentInfo{PodName: "web-1"})))
+	})
+}
+
+// TestWave60fShippedRuleSplit200 is the offline half of controls 6.0.13/6.0.14
+// (wave 6.0f, №200) and the ONLY check that the critical, container-scoped
+// path of container_escape_host_device fires at all.
+//
+// Why it exists as a Go test and not only as a pipeline step: the 6.0
+// measurement stand is a bare host with no k8s and no container-runtime
+// enrichment, so container.id/pod_name are empty there for every event that
+// can ever reach the engine. The critical branch of the split rule is
+// therefore physically unreachable on that stand — the pipeline's 6.0.13
+// asserts only that it stays silent, which a rule that can never match also
+// satisfies. Without this test the split (№200) would be indistinguishable
+// from having quietly turned the critical rule mute, which the wave's
+// acceptance clause 4 explicitly forbids ("a FP silenced by making the rule
+// mute is a loss of detection, not a fix").
+//
+// The four fixtures mirror the four live controls:
+//   - dumpe2fs open on the host   -> 6.0.13: no critical from either rule
+//   - dd write on the host        -> 6.0.14: impact rule fires (critical)
+//   - open from inside a container-> the control the stand cannot run
+//   - mkfs.ext4 write             -> the prefix subgroup of the impact rule
+func TestWave60fShippedRuleSplit200(t *testing.T) {
+	escapeRules, err := LoadRulesFromFile("../../rules/container-escape.yaml")
+	require.NoError(t, err, "rules/container-escape.yaml must load")
+	impactRules, err := LoadRulesFromFile("../../rules/impact-gaps.yaml")
+	require.NoError(t, err, "rules/impact-gaps.yaml must load")
+
+	pick := func(rules []Rule, ids ...string) []Rule {
+		var out []Rule
+		for _, want := range ids {
+			found := false
+			for _, r := range rules {
+				if r.ID == want {
+					out = append(out, r)
+					found = true
+					break
+				}
+			}
+			require.True(t, found, "rule %s must exist in the shipped rule files (wave 6.0f, №200)", want)
+		}
+		return out
+	}
+
+	engine := NewRuleEngine(pick(append(append([]Rule{}, escapeRules...), impactRules...),
+		"container_escape_host_device",
+		"container_escape_host_device_from_host",
+		"impact_raw_disk_write_from_container",
+	))
+
+	const (
+		opOpen  = 0
+		opWrite = 2
+	)
+	event := func(comm, path string, op uint8, enrichment *types.EnrichmentInfo) types.Event {
+		var filename [256]byte
+		copy(filename[:], path)
+		e := types.Event{
+			Type:       types.EventFileAccess,
+			File:       &types.FileEvent{Filename: filename, Op: op},
+			Enrichment: enrichment,
+		}
+		copy(e.Comm[:], comm)
+		return e
+	}
+	ids := func(alerts []types.Alert) map[string]types.Severity {
+		got := make(map[string]types.Severity, len(alerts))
+		for _, a := range alerts {
+			got[a.RuleID] = a.Severity
+		}
+		return got
+	}
+
+	t.Run("6.0.13 offline: host dumpe2fs raises no critical", func(t *testing.T) {
+		got := ids(engine.Evaluate(event("dumpe2fs", "/dev/vda1", opOpen, nil)))
+		assert.NotContains(t, got, "container_escape_host_device",
+			"host dumpe2fs must not reach the container-scoped critical rule after the №200 split")
+		assert.NotContains(t, got, "impact_raw_disk_write_from_container",
+			"dumpe2fs opens the device, it does not write it — op=open must no longer match after the №200 narrowing")
+		assert.Equal(t, types.SeverityWarning, got["container_escape_host_device_from_host"],
+			"the host case must still be reported, at warning severity — silencing it entirely would be a loss of detection")
+	})
+
+	t.Run("op=write narrowing: dd merely OPENING the device raises nothing", func(t *testing.T) {
+		// The comm predicate alone does not pin the №200 narrowing: dumpe2fs
+		// above is excluded by comm whatever the op is. This fixture is the
+		// one that fails if file.op widens back to [write, open].
+		got := ids(engine.Evaluate(event("dd", "/dev/vda1", opOpen, nil)))
+		assert.NotContains(t, got, "impact_raw_disk_write_from_container",
+			"opening a block device is not a raw disk write — file.op must stay eq write (№200)")
+	})
+
+	t.Run("6.0.14 offline: host dd write raises the impact critical", func(t *testing.T) {
+		got := ids(engine.Evaluate(event("dd", "/dev/vda1", opWrite, nil)))
+		assert.Equal(t, types.SeverityCritical, got["impact_raw_disk_write_from_container"],
+			"the №200 narrowing must keep the dd case — this is the pipeline's 6.0.14")
+	})
+
+	t.Run("mkfs prefix subgroup still matches", func(t *testing.T) {
+		got := ids(engine.Evaluate(event("mkfs.ext4", "/dev/vda1", opWrite, nil)))
+		assert.Equal(t, types.SeverityCritical, got["impact_raw_disk_write_from_container"],
+			"the mkfs* case is a prefix predicate, not an 'in' value — the engine's 'in' operator compares strings exactly")
+	})
+
+	t.Run("container case reaches the critical rule (unreachable on the bare stand)", func(t *testing.T) {
+		got := ids(engine.Evaluate(event("dumpe2fs", "/dev/vda1", opOpen,
+			&types.EnrichmentInfo{ContainerID: "3f2b8c1d9e00"})))
+		assert.Equal(t, types.SeverityCritical, got["container_escape_host_device"],
+			"the same event that is benign on the host is the escape signal from inside a container — this branch has no live control on the 6.0 stand")
+		assert.NotContains(t, got, "container_escape_host_device_from_host",
+			"the host rule must not double-report the container case")
+	})
+
+	t.Run("pod enrichment alone also reaches the critical rule", func(t *testing.T) {
+		got := ids(engine.Evaluate(event("cat", "/dev/nvme0n1", opOpen,
+			&types.EnrichmentInfo{PodName: "web-1"})))
+		assert.Equal(t, types.SeverityCritical, got["container_escape_host_device"],
+			"the container-case subgroup is an OR over container.id and k8s.pod")
+	})
+}

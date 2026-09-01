@@ -379,7 +379,19 @@ func (p *DriftBaselineProfiler) ObserveRule(ruleID string, e types.Event, novelW
 		case novelWorkloadAlert:
 		case p.config.PerWorkload && !globalKnownBefore:
 		default:
-			p.suppressedTotal.WithLabelValues(ruleID, "learning").Inc()
+			// Wave 6.0f, №203: the only way to reach this branch with
+			// PerWorkload true is globalKnownBefore == true (the case above
+			// falls through otherwise) — i.e. this workload is still
+			// learning, but the global fallback baseline already knows the
+			// signature. That is a distinct kind of suppression from
+			// "nobody has any information yet" (!PerWorkload, no global
+			// baseline is kept at all) and needs its own reason so the two
+			// mechanisms are separately observable (findings №199/№204).
+			reason := "learning"
+			if p.config.PerWorkload {
+				reason = "global_baseline_known"
+			}
+			p.suppressedTotal.WithLabelValues(ruleID, reason).Inc()
 			return false
 		}
 	} else if _, known := prof.signatures[sig]; known {

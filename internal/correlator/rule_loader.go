@@ -58,6 +58,11 @@ var (
 		"proc.comm":        true,
 		"proc.ppid":        true,
 		"proc.parent_comm": true,
+		// Kubernetes/container enrichment (wave 6.0f, №200): populated by
+		// internal/k8s before rule evaluation, see cmd/ebpf-guard/main.go's
+		// "enrich before rule evaluation" ordering comment.
+		"container_id": true, "pod_name": true,
+		"container.id": true, "k8s.pod": true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,

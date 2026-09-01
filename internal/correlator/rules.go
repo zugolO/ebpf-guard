@@ -1284,6 +1284,10 @@ func normaliseFieldName(field string) string {
 		return "ppid"
 	case "proc.parent_comm":
 		return "parent_comm"
+	case "container.id":
+		return "container_id"
+	case "k8s.pod":
+		return "pod_name"
 	case "network.dport":
 		return "dport"
 	case "network.sport":
@@ -1421,6 +1425,22 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return strconv.FormatUint(uint64(e.PPID), 10)
 		case "parent_comm":
 			return util.BytesToString(e.ParentComm[:])
+		case "container_id":
+			// Wave 6.0f, №200: container_escape_host_device needs to tell a
+			// container reading a raw host device from the host itself
+			// reading the same device apart. Empty when Enrichment was never
+			// populated (no k8s/runtime enricher configured, or the event
+			// predates enrichment) — that reads as "host" via condOpEquals
+			// against "", which is the conservative default.
+			if e.Enrichment != nil {
+				return e.Enrichment.ContainerID
+			}
+			return ""
+		case "pod_name":
+			if e.Enrichment != nil {
+				return e.Enrichment.PodName
+			}
+			return ""
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {

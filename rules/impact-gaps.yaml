@@ -103,8 +103,17 @@ rules:
             - "/dev/xvd"
             - "/dev/vd"
         - field: file.op
-          op: in
-          values: ["write", "open"]
+          op: eq
+          values: ["write"]
+      subgroups:
+        - operator: or
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["dd", "wipefs", "shred", "badblocks", "parted", "sfdisk", "fdisk"]
+            - field: proc.comm
+              op: prefix
+              values: ["mkfs"]
     severity: critical
     action: alert
     tags: [mitre:T1561.001, impact, disk-wipe, container-escape]

@@ -41,7 +41,7 @@
 #     его час впервые совпал с idle-часом замера. Запрет постановки
 #     5.9.9.F.3 касался mandb/find/install (пакет systemd, чинить реестром
 #     ЗАПРЕЩЕНО) — fwupd к нему не относится. Строка проверена ОБЕИМИ
-#     сторонами офлайн, реплей 17/18: с реестром крит. PASS «новых акторов
+#     сторонами офлайн, реплей 17/21: с реестром крит. PASS «новых акторов
 #     0», без четырёх строк — FAIL с поимённым fwupd/fwupdmgr.
 #     ВАЖНО ПРО ГРАНИЦУ: реестр закрывает ГЕЙТ (величина 1). Продуктовая
 #     сторона — промоушен fwupd в verdict="attack" со score ровно 50.0 при
@@ -58,7 +58,7 @@
 #     чего защищалась волна 7. Счётчик гейта НЕ правится (это было бы
 #     «зелёное правкой прибора»), вычет делается в приёмке поимённо.
 #     Ветка классификации ПОКАЗАНА ИСПОЛНЯЮЩЕЙСЯ до документирования —
-#     реплей 18/18: на collect-2.9.9.F.2 (флап есть) она даёт PASS, на
+#     реплей 18/21: на collect-2.9.9.F.2 (флап есть) она даёт PASS, на
 #     collect-2.9.9.F.7 (флапа нет) — SKIP. Документируется «не
 #     наблюдалось», а не «ветка мертва».
 #
@@ -386,7 +386,7 @@ export CPU_PRESSURE_MAX_REDUCE_WAIT="${CPU_PRESSURE_MAX_REDUCE_WAIT:-180}"
 # её семь пунктов принимаются этим замером наравне с девятью пунктами
 # 5.9.9.F.4; пункт без строки в criteria-index.txt нигде не проверяется, и
 # сторож 5.9.9.F.3f ниже валит преflight именно за это.
-export WAVE_CRITERIA_IDS="${WAVE_CRITERIA_IDS:-5.9.9.F.3a 5.9.9.F.3b 5.9.9.F.3c 5.9.9.F.3d 5.9.9.F.3e 5.9.9.F.3f 5.9.9.F.3g 5.9.9.F.4a 5.9.9.F.4b 5.9.9.F.4c 5.9.9.F.4d 5.9.9.F.4e 5.9.9.F.4f 5.9.9.F.4g 5.9.9.F.4h 5.9.9.F.4i 5.9.9.F.5a 5.9.9.F.5b 5.9.9.F.5c 5.9.9.F.5d 5.9.9.F.5e 5.9.9.F.5f 5.9.9.F.5g 5.9.9.F.5h 5.9.9.F.5i 5.9.9.F.5j 5.9.9.F.5k 5.9.9.F.5l 5.9.9.F.5m 5.9.9.F.5n 5.9.9.F.5o 5.9.9.F.5p 5.9.9.F.6a 5.9.9.F.6b 5.9.9.F.6c 5.9.9.F.6d 5.9.9.F.6e 6.0.1 6.0.2 6.0.3 6.0.4 6.0.5 6.0.6 6.0.7 6.0.8 6.0.9}"
+export WAVE_CRITERIA_IDS="${WAVE_CRITERIA_IDS:-5.9.9.F.3a 5.9.9.F.3b 5.9.9.F.3c 5.9.9.F.3d 5.9.9.F.3e 5.9.9.F.3f 5.9.9.F.3g 5.9.9.F.4a 5.9.9.F.4b 5.9.9.F.4c 5.9.9.F.4d 5.9.9.F.4e 5.9.9.F.4f 5.9.9.F.4g 5.9.9.F.4h 5.9.9.F.4i 5.9.9.F.5a 5.9.9.F.5b 5.9.9.F.5c 5.9.9.F.5d 5.9.9.F.5e 5.9.9.F.5f 5.9.9.F.5g 5.9.9.F.5h 5.9.9.F.5i 5.9.9.F.5j 5.9.9.F.5k 5.9.9.F.5l 5.9.9.F.5m 5.9.9.F.5n 5.9.9.F.5o 5.9.9.F.5p 5.9.9.F.6a 5.9.9.F.6b 5.9.9.F.6c 5.9.9.F.6d 5.9.9.F.6e 6.0.1 6.0.2 6.0.3 6.0.4 6.0.5 6.0.6 6.0.7 6.0.8 6.0.9 6.0.10 6.0.11 6.0.12 6.0.13 6.0.14 6.0.15}"
 # 6.0d (предпрогон 30.08): в списке НЕ БЫЛО ни одного пункта собственной
 # волны — только 5.9.9.F.3…F.6. Сторож 5.9.9.F.3f при этом печатал «все
 # пункты волны заведены», перебирая пункты ПРОШЛОЙ волны, то есть ровно та
@@ -889,11 +889,11 @@ done
 echo "  ок: все четыре строки fwupd/(fwupd)/fwupdmgr/(fwupdmgr) на месте"
 
 echo "--- преflight: 5.9.9.F.8b — ветка классификации крит. 21 жива, а не только SKIP'ает (№180) ---"
-grep -qF 'реплей 18/18' "$SETUP/attacks/replay-gate.sh" \
-    || die "5.9.9.F.8b: в replay-gate.sh нет реплея 18/18 — SKIP крит. 21 нельзя документировать в приёмке, пока ветка классификации не показана исполняющейся на архиве с флапом (иначе документируется «ветка мертва»)"
+grep -qF 'реплей 18/21' "$SETUP/attacks/replay-gate.sh" \
+    || die "5.9.9.F.8b: в replay-gate.sh нет реплея 18/21 — SKIP крит. 21 нельзя документировать в приёмке, пока ветка классификации не показана исполняющейся на архиве с флапом (иначе документируется «ветка мертва»)"
 grep -qE '^5\.9\.9\.F\.8b'$'\t' "$SETUP/attacks/criteria-index.txt" \
-    || die "5.9.9.F.8b: пункт 5.9.9.F.8b не заведён в criteria-index.txt — сторож 5.9.7h его не проверит, и реплей 18/18 можно будет удалить незаметно"
-echo "  ок: реплей 18/18 на месте и заведён в индексе постановки"
+    || die "5.9.9.F.8b: пункт 5.9.9.F.8b не заведён в criteria-index.txt — сторож 5.9.7h его не проверит, и реплей 18/21 можно будет удалить незаметно"
+echo "  ок: реплей 18/21 на месте и заведён в индексе постановки"
 
 echo "--- преflight: 5.9.9.F.4f — семейство drift правлено, базовая линия решена явно (№146) ---"
 rule_predicate drift_exec_from_system_bin rules/drift-rules.yaml | grep -q 'proc.args' \
@@ -1056,6 +1056,98 @@ unshare --user --map-root-user --mount --propagation private -- /bin/true >/dev/
     || die "6.0d: 'unshare --user --map-root-user --mount' не отрабатывает на этом ядре/стенде — примитив контроля 6.0.6 недоступен (проверить kernel.unprivileged_userns_clone и что пайплайн запущен от root). Без исполнимого примитива 6.0.6 дал бы FAIL по среде, а не по детектору, и правка №193 была бы объявлена нерабочей ошибочно"
 echo "  ок: примитив контроля 6.0.6 (unshare CLONE_NEWUSER + mount) исполним на этом стенде"
 
+echo "--- преflight: 6.0f — приборный долг замера №6.0d и два продуктовых FP (п.9, дополнительно к 6.0d) ---"
+# Пункт 1/4 (№199): 6.0.1 обязан читать собственную метрику (acc_v199_vol), а
+# не таблицу 5.9.9.F.6b — регресс к таблице был бы находкой №195, повторённой
+# ровно тем способом, которым она уже случалась (см. plan.md, «Поле величины
+# 16.1 врёт»). acc_rl_cut/acc_rl_cutn/acc_rl_line остаются переменными ТОЛЬКО
+# 6.0.2 (срез лимитера) — если они просочатся в блок 6.0.1, это и есть
+# регресс, а не рефакторинг.
+# Якорь — литерал самой строки вывода ("acc \"16.1\" \"6.0.1 —"), а не просто
+# "16.1": этот же преflight-сторож НЕ должен матчить собственный исходный код
+# ниже (та же ловушка, что заставила 6.0a чистить комментарии перед grep'ом
+# сигнатуры дрейфа — иначе сторож находит себя, а не проверяемую строку).
+_v199_line=$(grep -F 'acc "16.1" "6.0.1 —' "$SETUP/run-6.0-pipeline.sh")
+[ -n "$_v199_line" ] \
+    || die "преflight 6.0f/№199: не найдена сама строка вывода 6.0.1 (acc \"16.1\" \"6.0.1 —...\") — accumulation-блок переименован или удалён"
+echo "$_v199_line" | grep -q 'acc_v199_vol' \
+    || die "преflight 6.0f/№199: строка acc \"16.1\" не ссылается на acc_v199_vol — критерий 6.0.1 перестал читать собственную метрику, регресс к таблице 5.9.9.F.6b (находка №195, повторно)"
+echo "$_v199_line" | grep -q 'acc_rl_cut' \
+    && die "преflight 6.0f/№199: строка 6.0.1 ссылается на acc_rl_cut (срез лимитера таблицы 5.9.9.F.6b) — эта переменная принадлежит ТОЛЬКО 6.0.2, объём 6.0.1 обязан браться из собственной суммы alerts_total+alerts_filtered_total"
+echo "  ок: 6.0.1 читает объём из собственной метрики (acc_v199_vol), не из таблицы 5.9.9.F.6b"
+# Пункт 2/4 (№201/№170): в replay-gate.sh не меньше 21 реплея, знаменатель
+# N/M один и тот же во всех метках, число заведённых меток совпадает с этим
+# знаменателем, и литерал шага [1/14] этого пайплайна называет то же число —
+# ровно тот класс расхождения, который находка №170 уже один раз поймала
+# (перенумерация 16→18 задним числом разошлась с индексом). Якорь — заголовок
+# "--- реплей N/M:" (с двоеточием), а не голое "реплей N/M": файл содержит
+# постороннее совпадение той же формы ("реплей 4/4" — счётчик другой волны,
+# 5.9.8e, никак не связанный с общей нумерацией реплеев этого гейта).
+_replay_denoms=$(grep -oE -- '--- реплей [0-9]+/[0-9]+:' "$SETUP/attacks/replay-gate.sh" | grep -oE '/[0-9]+:$' | tr -d '/:' | sort -u)
+[ "$(echo "$_replay_denoms" | wc -l | tr -d ' ')" -eq 1 ] \
+    || die "преflight 6.0f/№201: replay-gate.sh смешивает разные знаменатели меток 'реплей N/M' ($_replay_denoms построчно) — перенумерация 18→21 прошла не до конца"
+[ "$_replay_denoms" -ge 21 ] 2>/dev/null \
+    || die "преflight 6.0f/№201: replay-gate.sh знает только реплеи с знаменателем $_replay_denoms (< 21) — три реплея постановки 6.0d (19 6.0.5, 20 6.0.1, 21 5.9.7e, находка №201) не заведены"
+_replay_have=$(grep -oE -- '--- реплей [0-9]+/[0-9]+:' "$SETUP/attacks/replay-gate.sh" | awk '{print $3}' | sort -u | wc -l | tr -d ' ')
+[ "$_replay_have" -eq "$_replay_denoms" ] \
+    || die "преflight 6.0f/№201: replay-gate.sh обещает $_replay_denoms реплеев, но заведено только $_replay_have уникальных меток N/$_replay_denoms — реестр неполон"
+grep -qF "replay-gate.sh на ОДИННАДЦАТИ архивах, ${_replay_denoms} реплей" "$SETUP/run-6.0-pipeline.sh" \
+    || die "преflight 6.0f/№201: литерал шага [1/14] ('...реплей') не называет фактическое число реплеев replay-gate.sh ($_replay_denoms) — тот же класс расхождения текста и факта, что находка №207 нашла у заголовка 16.1"
+echo "  ок: replay-gate.sh заведено $_replay_have/$_replay_denoms реплеев, знаменатель один и совпадает с литералом шага [1/14]"
+# Пункт 5/6 (№203): подавление глобальной резервной базой обязано иметь
+# СОБСТВЕННЫЙ reason, отличимый от "learning" — без этого механизм (а) не
+# измерим ничем (находка №203). Проверяется в двух независимых местах: код
+# профайлера (источник истины) и criteria-index.txt (регистрация, по которой
+# run-gate.sh 5.9.7h ловит будущее исчезновение строки без единого прогона).
+drift_code internal/profiler/driftbaseline.go | grep -q 'global_baseline_known' \
+    || die "преflight 6.0f/№203: в internal/profiler/driftbaseline.go нет reason=\"global_baseline_known\" — подавление глобальным фоллбэком снова неотличимо от learning, механизм (а) снова не измерим ничем"
+grep -qF 'global_baseline_known' "$SETUP/attacks/criteria-index.txt" \
+    || die "преflight 6.0f/№203: criteria-index.txt не содержит global_baseline_known — регистр 5.9.7h не заметит будущее исчезновение reason из кода, разрез снова станет непроверяемым молча"
+echo "  ок: reason=global_baseline_known заведён и в коде профайлера, и в criteria-index.txt"
+# Пункт 4 (№200): оба правила, получившие сужающие предикаты, обязаны нести
+# СВОЙ контроль в манифесте атак этого пайплайна — иначе правка правила без
+# контроля есть заведение немого правила (тот же принцип, что держит
+# WAVE_CRITERIA_IDS/criteria-index.txt в синхроне с постановкой).
+grep -q '_impact_critical_count impact_raw_disk_write_from_container' "$SETUP/run-6.0-pipeline.sh" \
+    || die "преflight 6.0f/№200: impact_raw_disk_write_from_container не несёт контроль в манифесте атак этого пайплайна — правка правила (сужение предиката) без контроля есть заведение немого правила"
+grep -q '_impact_critical_count container_escape_host_device' "$SETUP/run-6.0-pipeline.sh" \
+    || die "преflight 6.0f/№200: container_escape_host_device не несёт контроль в манифесте атак этого пайплайна — разведение container/host без негативного контроля есть заведение немого правила"
+grep -qE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*"?container_escape_host_device_from_host"?[[:space:]]*$' rules/container-escape.yaml \
+    || die "преflight 6.0f/№200: новый id container_escape_host_device_from_host (хостовой случай разведения) не найден в rules/container-escape.yaml — правка №200 откатилась или переименовалась незаметно"
+grep -qF 'container_escape_host_device_from_host' "$SETUP/attacks/detection-baseline.txt" \
+    || die "преflight 6.0f/№200: container_escape_host_device_from_host не заведён в attacks/detection-baseline.txt — состав детекта разойдётся с базой на первом же прогоне"
+echo "  ок: оба правила №200 (impact_raw_disk_write_from_container, container_escape_host_device/_from_host) несут контроль в манифесте атак и заведены в detection-baseline.txt"
+# Пункт 6/7 (реплей-блокер правки №200): правило, заведённое волной, немо на
+# КАЖДОМ архиве старше себя, и это валит ЖЁСТКИЙ СТОП №1 без единого
+# регресса продукта (три реплея разошлись ровно так на 6.0f). Механизм —
+# new-rules.txt, вычитающий такое правило из потерь ТОЛЬКО на прогонах
+# старше даты заведения. Сторож против злоупотребления: каждый id реестра
+# обязан существовать в дереве правил (иначе реестром прикрывают удалённое
+# правило) и в detection-baseline.txt (иначе его нечего было бы терять), а
+# сам гейт обязан этот реестр читать.
+grep -q 'new-rules.txt' "$SETUP/attacks/run-gate.sh" \
+    || die "преflight 6.0f/№200: run-gate.sh не читает new-rules.txt — правила, заведённые этой волной, снова станут «категорией (в) без объяснения» на архивах реплеев, и ЖЁСТКИЙ СТОП №1 встанет без регресса продукта"
+while IFS=$'\t' read -r _nr_id _nr_date _nr_wave; do
+    case "$_nr_id" in ''|\#*) continue ;; esac
+    grep -qE "^[[:space:]]*-[[:space:]]*id:[[:space:]]*\"?${_nr_id}\"?[[:space:]]*$" rules/*.yaml \
+        || die "преflight 6.0f/new-rules: id '$_nr_id' из new-rules.txt не существует в rules/*.yaml — реестром «моложе архива» прикрыто удалённое или переименованное правило, а не новое"
+    grep -qF "$_nr_id" "$SETUP/attacks/detection-baseline.txt" \
+        || die "преflight 6.0f/new-rules: id '$_nr_id' из new-rules.txt отсутствует в detection-baseline.txt — вычитать его из потерь нечего, запись бессмысленна и маскирует состав базы"
+    echo "  ок: new-rules.txt/$_nr_id (заведено $_nr_date, $_nr_wave) существует в дереве правил и в detection-baseline.txt"
+done < "$SETUP/attacks/new-rules.txt"
+# Пункт 7/7 (№203): негативный контроль 6.0.11 обязан читать разрез ПО
+# НАГРУЗКЕ, а не только счётчик подавлений. Метка нагрузки в
+# ebpf_guard_drift_baseline_suppressed_total отсутствует ({rule_id, reason}),
+# поэтому его прирост может дать любая чужая обучающаяся нагрузка — и пара
+# «0 алертов И счётчик вырос» снова становится приборным нулём, засчитывать
+# который постановка запрещает. Свидетель — samples нашего comm в
+# /debug/state.
+grep -q '_drift_g_samples' "$SETUP/run-6.0-pipeline.sh" \
+    || die "преflight 6.0f/№203: шаг 6.0g не читает samples нагрузки из /debug/state (_drift_g_samples) — 6.0.11 снова засчитает ноль алертов по приросту счётчика, у которого нет метки нагрузки, то есть по чужому подавлению"
+grep -q '_drift_g11_samples_after' "$SETUP/run-6.0-pipeline.sh" \
+    || die "преflight 6.0f/№203: свидетель по нагрузке не участвует в вердикте 6.0.11 (нет _drift_g11_samples_after в проверке) — разрез прочитан, но не проверен"
+echo "  ок: 6.0.11 требует прироста samples своей нагрузки, а не только счётчика без метки нагрузки"
+
 echo "--- преflight: 5.9.9.F.5g — drift_new_exec_critical переименовано и понижено (№154) ---"
 # №154: правило дало 576/607 алертов и 576/577 критикалов idle-часа
 # №2.9.9.F.4, из них 499 — пере-exec sshd на входящее ssh-соединение (см. блок
@@ -1198,7 +1290,7 @@ grep -q 'track_write:[[:space:]]*true' "$SETUP/config-test.yaml" \
     || die "track_write выключен — rootkit_ssh_authorized_keys_modified (5.9.7e) немо по построению"
 echo "преflight завершён в $(date -u +%H:%M:%S) UTC"
 
-echo "=== [1/14] ЖЁСТКИЙ СТОП №1: replay-gate.sh на ОДИННАДЦАТИ архивах, 18 реплеев (5.9.7c…5.9.9.F.8) ==="
+echo "=== [1/14] ЖЁСТКИЙ СТОП №1: replay-gate.sh на ОДИННАДЦАТИ архивах, 22 реплей (5.9.7c…5.9.9.F.8) ==="
 # collect-2.9.5 — тождество умеет SKIP по отсутствующей левой части;
 # collect-2.9.6 — сходится там, где сходилось, и новая формула фона проходит
 # там, где старая валила; синтетическая потеря 1000 событий — тождество умеет
@@ -1244,7 +1336,7 @@ C299F2_DIR="${REPLAY_C299F2_DIR:-$(find_archive collect-2.9.9.F.2 || true)}"
 # обязательны: пропуск реплея — находка №85.
 C294_DIR="${REPLAY_C294_DIR:-$(find_archive collect-2.9.4 || true)}"
 C299F6_DIR="${REPLAY_C299F6_DIR:-$(find_archive collect-2.9.9.F.6 || true)}"
-# 5.9.9.F.8a/5.9.9.F.8b (№179/№180) завели реплеи 17/18 и 18/18, а те читают
+# 5.9.9.F.8a/5.9.9.F.8b (№179/№180) завели реплеи 17/21 и 18/21, а те читают
 # ОДИННАДЦАТЫЙ архив — collect-2.9.9.F.7, которого в этом блоке не было:
 # только его idle-час несёт fwupd/fwupdmgr (обе стороны строки реестра,
 # 5.9.9.F.8a) и только он даёт сторону SKIP крит. 21 против стороны PASS на
@@ -1265,7 +1357,7 @@ echo "  архив 2.9.9.F.1: ${C299F1_DIR:-НЕ НАЙДЕН}"
 echo "  архив 2.9.9.F.2: ${C299F2_DIR:-НЕ НАЙДЕН}"
 echo "  архив 2.9.4 (реплеи 15/18, 16/18): ${C294_DIR:-НЕ НАЙДЕН}"
 echo "  архив 2.9.9.F.6 (реплеи 15/18, 16/18): ${C299F6_DIR:-НЕ НАЙДЕН}"
-echo "  архив 2.9.9.F.7 (реплеи 17/18, 18/18): ${C299F7_DIR:-НЕ НАЙДЕН}"
+echo "  архив 2.9.9.F.7 (реплеи 17/21, 18/21): ${C299F7_DIR:-НЕ НАЙДЕН}"
 if [ -z "$C295_DIR" ] || [ -z "$C296_DIR" ] || [ -z "$C297_DIR" ] || [ -z "$C298_DIR" ] || [ -z "$C299_DIR" ] || [ -z "$C299F_DIR" ] || [ -z "$C299F1_DIR" ] || [ -z "$C299F2_DIR" ] || [ -z "$C294_DIR" ] || [ -z "$C299F6_DIR" ] || [ -z "$C299F7_DIR" ]; then
     die "архивы collect-2.9.5…collect-2.9.9.F.2, collect-2.9.4, collect-2.9.9.F.6, collect-2.9.9.F.7 найдены не все на стенде. Скопировать (например в /root/) либо задать REPLAY_C295_DIR…REPLAY_C299F2_DIR/REPLAY_C294_DIR/REPLAY_C299F6_DIR/REPLAY_C299F7_DIR. Пропуск реплея — это находка №85, повторённая одиннадцатый раз"
 fi
@@ -1281,14 +1373,14 @@ for d in "$C294_DIR" "$C299F6_DIR"; do
     ls "$d"/attacks/baseline-state-*.json >/dev/null 2>&1 \
         || die "реплей 16/18: в $d/attacks нет baseline-state-*.json — офлайн-гейт по этому архиву не запустить, обе доли крит. 9 (5.9.9.F.7c) остались бы без входа"
 done
-# Реплеи 17/18 и 18/18 читают idle-час и attacks/ архива 2.9.9.F.7. Их
+# Реплеи 17/21 и 18/21 читают idle-час и attacks/ архива 2.9.9.F.7. Их
 # отсутствие даёт не «реплей пропущен», а «реплей не проверил ничего»,
 # поэтому проверяется ЗДЕСЬ, до вызова, тем же приёмом, что 15/18 и 16/18.
 ls "$C299F7_DIR"/attacks/baseline-state-*.json >/dev/null 2>&1 \
-    || die "реплеи 17/18 и 18/18: в $C299F7_DIR/attacks нет baseline-state-*.json — офлайн-гейт по архиву не запустить, ни строка реестра fwupd (5.9.9.F.8a), ни сторона SKIP крит. 21 (5.9.9.F.8b) не получат входа"
+    || die "реплеи 17/21 и 18/21: в $C299F7_DIR/attacks нет baseline-state-*.json — офлайн-гейт по архиву не запустить, ни строка реестра fwupd (5.9.9.F.8a), ни сторона SKIP крит. 21 (5.9.9.F.8b) не получат входа"
 for f in idle/metrics-start.txt idle/metrics-end.txt idle/alerts-start.json idle/alerts-end.json; do
     [ -s "$C299F7_DIR/$f" ] \
-        || die "реплей 17/18: $C299F7_DIR/$f отсутствует — idle-час с таймером fwupd-refresh не с чем сверять, и четыре строки реестра 5.9.9.F.8a остались бы правкой, сделанной руками и никем не воспроизводимой"
+        || die "реплей 17/21: $C299F7_DIR/$f отсутствует — idle-час с таймером fwupd-refresh не с чем сверять, и четыре строки реестра 5.9.9.F.8a остались бы правкой, сделанной руками и никем не воспроизводимой"
 done
 # Реплеи 9-12 читают не только attacks/, но и журнал с меткой старта агента
 # рядом с архивом. Их отсутствие даёт не «реплей пропущен», а «реплей не
@@ -1405,16 +1497,16 @@ grep -qF 'оба архива: крит. 9 печатает и долю по и�
 # на collect-2.9.9.F.7. Без отрицательного исхода первый доказывал бы только
 # то, что крит. idle-actors.txt на этом архиве не падает ни при каком составе.
 grep -q 'idle-час с fwupd целиком покрыт idle-actors.txt, новых акторов 0' /root/replay-6.0.txt \
-    || die "реплей 17/18: реестр НЕ покрыл idle-час архива 2.9.9.F.7 — четыре строки 5.9.9.F.8a не работают, и idle-час этого замера повторит FAIL №2.9.9.F.7 вслепую"
+    || die "реплей 17/21: реестр НЕ покрыл idle-час архива 2.9.9.F.7 — четыре строки 5.9.9.F.8a не работают, и idle-час этого замера повторит FAIL №2.9.9.F.7 вслепую"
 grep -q 'без четырёх строк реестра крит. FAIL и fwupd/fwupdmgr названы поимённо' /root/replay-6.0.txt \
-    || die "реплей 17/18: с вырезанными строками реестра критерий НЕ упал — сверка с idle-actors.txt зелёная на любом составе, то есть исход 1 не доказывает ничего (класс №124, ровно как №118)"
+    || die "реплей 17/21: с вырезанными строками реестра критерий НЕ упал — сверка с idle-actors.txt зелёная на любом составе, то есть исход 1 не доказывает ничего (класс №124, ровно как №118)"
 # 5.9.9.F.8b (№180): SKIP документируется в приёмке ТОЛЬКО после того, как
 # ветка классификации показана исполняющейся на архиве с флапом.
 grep -q 'ветка классификации исполняется и даёт PASS' /root/replay-6.0.txt \
-    || die "реплей 18/18: на collect-2.9.9.F.2 (флап есть) ветка классификации крит. 21 не дала PASS — документировать SKIP в приёмке НЕЛЬЗЯ, иначе документируется «ветка мертва», а не «флап не наблюдался» (№180)"
+    || die "реплей 18/21: на collect-2.9.9.F.2 (флап есть) ветка классификации крит. 21 не дала PASS — документировать SKIP в приёмке НЕЛЬЗЯ, иначе документируется «ветка мертва», а не «флап не наблюдался» (№180)"
 grep -q 'на collect-2.9.9.F.7 (флапа нет) — SKIP' /root/replay-6.0.txt \
-    || die "реплей 18/18: на collect-2.9.9.F.7 крит. 21 не дал SKIP при stale_transitions=0 — вычет по закрытому списку приёмки (acc_skip_doc21) описывает не тот исход, который гейт печатает на самом деле"
-echo "реплей 18/18 пройден в $(date -u +%H:%M:%S) UTC"
+    || die "реплей 18/21: на collect-2.9.9.F.7 крит. 21 не дал SKIP при stale_transitions=0 — вычет по закрытому списку приёмки (acc_skip_doc21) описывает не тот исход, который гейт печатает на самом деле"
+echo "реплей 18/21 пройден в $(date -u +%H:%M:%S) UTC"
 
 echo "=== [2/14] ЖЁСТКИЙ СТОП №2: сверка criteria-index.txt (5.9.7h/5.9.8h) ==="
 c296_ts=$(ls "$C296_DIR"/attacks/baseline-state-*.json 2>/dev/null | head -1 | sed 's/.*baseline-state-\(.*\)\.json/\1/')
@@ -2215,7 +2307,7 @@ register_pipeline_observer_root
 # только idle-час и полный гейт.
 if [ "${SMOKE_ONLY:-0}" = "1" ]; then
     echo "=== SMOKE_ONLY=1: сборка, SMOKE, оба контроля DNS, контроль счётности, переполнение кольца, наведённое CPU-давление (5.9.9.F.2b), ТРИ ПАРЫ КОНТРОЛЕЙ ПРОДУКТОВЫХ ПРАВОК (5.9.9.F.3a/3b/3c), позитивный контроль cred_proc_maps и пары 5.9.9.F.1b/5.9.9.F.1c пройдены ==="
-    echo "=== 18/18 реплеев пройдены, включая обе стороны реплеев волны 5.9.9.F.8 (17/18 fwupd в реестре, 18/18 ветка крит. 21) ==="
+    echo "=== 22/22 реплеев пройдены, включая обе стороны реплеев волны 5.9.9.F.8 (17/22 fwupd в реестре, 18/22 ветка крит. 21) и четыре новых реплея волны 6.0f (19/22 6.0.5, 20/22 6.0.1, 21/22 5.9.7e, 22/22 6.0.10) ==="
     echo "=== idle-час, атаки и гейт НЕ запускались — это не приёмка волны 5.9.9.F.3 ==="
     echo "=== ПРЕДПРОГОН №6.0 ЗАВЕРШЁН $(date -u +%H:%M:%S) UTC ==="
     # 5.9.9.F.4c: предпрогон не доходит до idle-часа, поэтому границы окна
@@ -2583,6 +2675,256 @@ echo "6.0.7 PASS $(date -u +%FT%TZ) comm=$DRIFT_NW_COMM" >> /root/drift-controls
 echo "6.0.7 доказан живьём в $(date -u +%H:%M:%S) UTC: повторный вызов молчит — 6.0.6 доказывает новизну, а не факт вызова"
 rm -rf "$DRIFT_NW_DIR"
 
+echo "--- 6.0g: контроли механизма (а) — глобальный фоллбэк базовой линии (критерии 6.0.11 и 6.0.12, №203) ---"
+# Буква f пропущена по той же причине, что и d выше: 6.0f — имя ВОЛНЫ, файл
+# грепается буквально.
+#
+# Отличие от 6.0.6/6.0.7 выше: те контроли бьют по подмножеству (б)
+# (drift_novel_workload: alert — три правила из ~600). Эти два бьют по
+# механизму (а) — глобальному резервному фоллбэку (driftbaseline.go, поле
+# `global`), который защищает ВСЕ правила класса drift без явного флага.
+# Взято правило drift_exec_from_system_bin сознательно: у него флага (б)
+# нет (rules/drift-rules.yaml), значит любое подавление здесь идёт через
+# путь per-workload learning + global fallback, а не через обход learning.
+#
+# Сигнатура правила — "<nr>|<normalizeDriftPath(argv0)>" (driftSignatureTarget),
+# а WorkloadKey.Comm — БАЗОВОЕ ИМЯ РЕАЛЬНОГО exec'нутого файла (ядро
+# переписывает comm при execve на новый образ), НЕ argv[0]. execve(path,
+# argv, envp) не требует argv[0] == path — это и есть ось разъезда: один и
+# тот же argv[0] (значит одна и та же сигнатура) может быть исполнен под
+# разными comm, если реальный файл называется иначе, чем то, что подставлено
+# в argv[0]. `bash exec -a <argv0> <реальный_файл>` даёт ровно это.
+DRIFT_G_HEX=$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')
+DRIFT_G_COMM="dnw2-$DRIFT_G_HEX"
+[ "${#DRIFT_G_COMM}" -le 15 ] || die "6.0g: сгенерированный comm '$DRIFT_G_COMM' длиннее 15 символов — ядро усечёт его, и отбор алертов по comm разойдётся с посевом"
+
+DRIFT_G_BINDIR=/usr/local/bin/dnw2-workload
+mkdir -p "$DRIFT_G_BINDIR" 2>/dev/null || die "6.0g: не удалось создать $DRIFT_G_BINDIR"
+DRIFT_G_REALBIN="$DRIFT_G_BINDIR/$DRIFT_G_COMM"
+DRIFT_G_TRUE=$(command -v true 2>/dev/null || echo /bin/true)
+cp "$DRIFT_G_TRUE" "$DRIFT_G_REALBIN" 2>/dev/null || die "6.0g: не удалось подготовить $DRIFT_G_REALBIN из $DRIFT_G_TRUE"
+chmod +x "$DRIFT_G_REALBIN"
+# argv[0] для 6.0.11 — путь, который сеется и затем переисполняется тем же
+# comm ни разу не встречавшимся. "/usr/local/bin/" в префиксе обязателен —
+# без него drift_exec_from_system_bin (proc.args prefix) не сматчит вовсе.
+DRIFT_G_SIG_ARGV0="/usr/local/bin/dnw2-seed/$DRIFT_G_HEX"
+# argv[0] для 6.0.12 — путь, которого на хосте не было никогда (другой
+# случайный hex, отдельная поддиректория).
+DRIFT_G_NOVEL_HEX=$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')
+DRIFT_G_NOVEL_ARGV0="/usr/local/bin/dnw2-novel/$DRIFT_G_NOVEL_HEX"
+
+_drift_g_count() { # $1=comm
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/api/v1/alerts" 2>/dev/null \
+        | jq --arg c "$1" '[.[]|select(.rule_id=="drift_exec_from_system_bin" and .comm==$c)]|length' 2>/dev/null || echo 0
+}
+_drift_g_global_suppressed() {
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/metrics" 2>/dev/null \
+        | awk '/^ebpf_guard_drift_baseline_suppressed_total\{/ && /reason="global_baseline_known"/ && /rule_id="drift_exec_from_system_bin"/ { s += $NF } END { printf "%d", s+0 }'
+}
+_drift_g_limited() {
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/metrics" 2>/dev/null \
+        | awk '/^ebpf_guard_alerts_ratelimited_by_rule_total\{/ && /rule_id="drift_exec_from_system_bin"/ { s += $NF } END { printf "%d", s+0 }'
+}
+# Свидетель того, что правило сматчило ИМЕННО под нашим comm.
+# ebpf_guard_drift_baseline_suppressed_total несёт только метки
+# {rule_id, reason} — нагрузки в ней нет (driftbaseline.go, suppressedTotal).
+# Значит прирост reason="global_baseline_known" по этому rule_id может дать
+# ЛЮБАЯ ещё обучающаяся нагрузка стенда, а не наша: в паре «0 алертов И
+# прирост счётчика >= 1» второе условие тогда выполняется чужими руками, и
+# ноль снова становится неотличим от «правило вообще не сматчило» — ровно
+# тот приборный ноль, который постановка запрещает засчитывать. Разрез по
+# нагрузке даёт /debug/state: samples нашего workload'а растёт на каждый
+# ObserveRule, пока профиль в learning (driftbaseline.go, prof.sampleCount++),
+# а comm dnw2-<hex> синтетический и исполняется только этим шагом.
+_drift_g_samples() { # $1=comm -> число сэмплов профиля этой нагрузки (0, если её нет)
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/debug/state" 2>/dev/null \
+        | jq -r --arg c "$1" '[.drift_baseline.workloads[]? | select(.comm==$c) | .samples] | if length == 0 then 0 else .[0] end' 2>/dev/null || echo 0
+}
+_drift_g_wl_line() { # $1=comm -> строка состояния нагрузки для диагностики
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/debug/state" 2>/dev/null \
+        | jq -r --arg c "$1" '[.drift_baseline.workloads[]? | select(.comm==$c) | "state=\(.state) sig=\(.signatures) samples=\(.samples) reported=\(.reported) last_seen=\(.last_seen)"] | if length == 0 then "нагрузки нет в /debug/state" else .[0] end' 2>/dev/null || echo "нагрузки нет в /debug/state"
+}
+
+# Посев: bash сама (comm=bash, давно enforcing — использовалась всем
+# прологом) исполняет $DRIFT_G_REALBIN с argv[0]=$DRIFT_G_SIG_ARGV0. Дочерний
+# процесс получает НАСТОЯЩИЙ comm=$DRIFT_G_COMM (реальный файл), а сигнатура
+# правила складывается из argv[0] — то есть уже на этом шаге и comm
+# $DRIFT_G_COMM, и сигнатура $DRIFT_G_SIG_ARGV0 существуют. Это не портит
+# 6.0.11: посев учит и per-workload профиль $DRIFT_G_COMM (который сам ещё
+# в learning), и глобальный фоллбэк (учится на КАЖДОМ Observe(), до проверки
+# prof.enforcing — driftbaseline.go). Второй exec ниже — ТЕМ ЖЕ comm, тем
+# же argv[0] — проверяет не «новый comm», а именно то, что постановка
+# требует: что штатный интервал спустя повтор уже известной глобально
+# сигнатуры молчит. Комм совпадает с посевом по построению (один и тот же
+# файл), поэтому «невиданный comm» в тексте волны — это невиданность на
+# момент ПЕРВОГО исполнения, а не различие между посевом и проверкой.
+bash -c "exec -a '$DRIFT_G_SIG_ARGV0' '$DRIFT_G_REALBIN'" >/dev/null 2>&1 || true
+sleep 20
+
+_drift_g11_before=$(_drift_g_count "$DRIFT_G_COMM")
+_drift_g11_global_before=$(_drift_g_global_suppressed)
+_drift_g11_samples_before=$(_drift_g_samples "$DRIFT_G_COMM")
+bash -c "exec -a '$DRIFT_G_SIG_ARGV0' '$DRIFT_G_REALBIN'" >/dev/null 2>&1 || true
+sleep 20
+_drift_g11_after=$(_drift_g_count "$DRIFT_G_COMM")
+_drift_g11_global_after=$(_drift_g_global_suppressed)
+_drift_g11_samples_after=$(_drift_g_samples "$DRIFT_G_COMM")
+echo "  6.0.11 негативный контроль: повтор argv[0]=$DRIFT_G_SIG_ARGV0 под comm=$DRIFT_G_COMM -> drift_exec_from_system_bin{comm=$DRIFT_G_COMM}: ${_drift_g11_before:-0} -> ${_drift_g11_after:-0}, suppressed_total{reason=global_baseline_known}: ${_drift_g11_global_before:-0} -> ${_drift_g11_global_after:-0}, samples нагрузки в /debug/state: ${_drift_g11_samples_before:-0} -> ${_drift_g11_samples_after:-0} ($(date -u +%H:%M:%S) UTC)"
+echo "  6.0.11 состояние нагрузки после повтора: $(_drift_g_wl_line "$DRIFT_G_COMM")"
+if [ "$((${_drift_g11_after:-0} - ${_drift_g11_before:-0}))" -ne 0 ] \
+   || [ "$((${_drift_g11_global_after:-0} - ${_drift_g11_global_before:-0}))" -lt 1 ] \
+   || [ "$((${_drift_g11_samples_after:-0} - ${_drift_g11_samples_before:-0}))" -lt 1 ]; then
+    echo "6.0.11 FAIL $(date -u +%FT%TZ) comm=$DRIFT_G_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    rm -rf "$DRIFT_G_BINDIR"
+    die "6.0.11 ПРОВАЛЕН: ожидалось 0 новых алертов И прирост suppressed_total{reason=global_baseline_known} >= 1 И прирост samples нагрузки comm=$DRIFT_G_COMM >= 1 (постановка запрещает засчитывать нулевые алерты без прироста счётчика — неотличимо от 'правило вообще не сматчило'; сам счётчик меток нагрузки не несёт, поэтому его прирост мог прийти от чужой обучающейся нагрузки, и разрез по /debug/state — единственный свидетель, что сматчило именно наше исполнение). Получено: алертов $((${_drift_g11_after:-0} - ${_drift_g11_before:-0})), прирост счётчика $((${_drift_g11_global_after:-0} - ${_drift_g11_global_before:-0})), прирост samples $((${_drift_g11_samples_after:-0} - ${_drift_g11_samples_before:-0})), нагрузка: $(_drift_g_wl_line "$DRIFT_G_COMM"). Читать в порядке: нулевой прирост samples при нулевых алертах = событие не дошло до drift-базы вовсе (правило не сматчило / коллектор не отдал exec) — это приборный ноль, а не доказательство механизма (а); ненулевой прирост алертов = механизм (а) не подавляет знакомую глобально сигнатуру для нового workload'а (тяжесть №193 тогда целиком на подмножестве (б)); нулевой прирост счётчика при выросших samples = разрез reason=global_baseline_known не дошёл до бинаря либо подавление пошло другой веткой (профиль успел уйти в enforcing -> reason=baseline_known)"
+fi
+echo "6.0.11 PASS $(date -u +%FT%TZ) comm=$DRIFT_G_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+echo "6.0.11 доказан живьём в $(date -u +%H:%M:%S) UTC: знакомая глобально сигнатура молчит для workload'а, который сам ещё в learning"
+
+# 6.0.12 — позитивный контроль. ТОТ ЖЕ comm (та же реальная нагрузка,
+# doказано выше как невиданная на момент 6.0.11), argv[0] — путь, которого
+# на хосте не было никогда. Сторож ложного нуля — тот же, что у 6.0.6:
+# срез лимитера читается ДО/ПОСЛЕ, при нулевом приросте алертов с ненулевым
+# приростом среза окно лимитера (70с) сливается и попытка повторяется один раз.
+_drift_g12_before=$(_drift_g_count "$DRIFT_G_COMM")
+_drift_g12_lim_before=$(_drift_g_limited)
+bash -c "exec -a '$DRIFT_G_NOVEL_ARGV0' '$DRIFT_G_REALBIN'" >/dev/null 2>&1 || true
+sleep 20
+_drift_g12_after=$(_drift_g_count "$DRIFT_G_COMM")
+_drift_g12_lim_after=$(_drift_g_limited)
+echo "  6.0.12 позитивный контроль: argv[0]=$DRIFT_G_NOVEL_ARGV0 (не встречалось на хосте никогда) под comm=$DRIFT_G_COMM -> drift_exec_from_system_bin{comm=$DRIFT_G_COMM}: ${_drift_g12_before:-0} -> ${_drift_g12_after:-0}, срез лимитера ${_drift_g12_lim_before:-0} -> ${_drift_g12_lim_after:-0} ($(date -u +%H:%M:%S) UTC)"
+if [ "$((${_drift_g12_after:-0} - ${_drift_g12_before:-0}))" -lt 1 ] \
+   && [ "$(( ${_drift_g12_lim_after:-0} - ${_drift_g12_lim_before:-0} ))" -gt 0 ]; then
+    echo "  6.0.12: ноль алертов ПРИ выросшем срезе лимитера (+$(( ${_drift_g12_lim_after:-0} - ${_drift_g12_lim_before:-0} ))) — приборный ноль. Даём окну лимитера (60с) стечь и повторяем один раз"
+    sleep 70
+    _drift_g12_before=$(_drift_g_count "$DRIFT_G_COMM")
+    _drift_g12_lim_before=$(_drift_g_limited)
+    bash -c "exec -a '$DRIFT_G_NOVEL_ARGV0' '$DRIFT_G_REALBIN'" >/dev/null 2>&1 || true
+    sleep 20
+    _drift_g12_after=$(_drift_g_count "$DRIFT_G_COMM")
+    _drift_g12_lim_after=$(_drift_g_limited)
+    echo "  6.0.12 повтор после стекания окна лимитера: алертов ${_drift_g12_before:-0} -> ${_drift_g12_after:-0}, срез ${_drift_g12_lim_before:-0} -> ${_drift_g12_lim_after:-0} ($(date -u +%H:%M:%S) UTC)"
+fi
+if [ "$((${_drift_g12_after:-0} - ${_drift_g12_before:-0}))" -lt 1 ]; then
+    echo "6.0.12 FAIL $(date -u +%FT%TZ) comm=$DRIFT_G_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    rm -rf "$DRIFT_G_BINDIR"
+    die "6.0.12 ПРОВАЛЕН: сигнатура, которой не было на хосте никогда (argv[0]=$DRIFT_G_NOVEL_ARGV0), исполненная тем же невиданным comm=$DRIFT_G_COMM, не дала ни одного алерта drift_exec_from_system_bin (было ${_drift_g12_before:-0}, стало ${_drift_g12_after:-0}), срез лимитера за попытку: +$(( ${_drift_g12_lim_after:-0} - ${_drift_g12_lim_before:-0} )). Если срез ненулевой после повтора — причина приборная (лимитер), а не продуктовая; иначе 6.0.11 выше доказывал бы только 'правило молчит', а не 'правило умеет отличать известное от неизвестного'"
+fi
+echo "6.0.12 PASS $(date -u +%FT%TZ) comm=$DRIFT_G_COMM" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+echo "6.0.12 доказан живьём в $(date -u +%H:%M:%S) UTC: незнакомая глобально сигнатура алертит от того же невиданного comm, что молчал на 6.0.11"
+rm -rf "$DRIFT_G_BINDIR"
+
+echo "--- 6.0h: позитивный контроль импакт-правил №200 и подмножества (б) на container_escape_proc_write (критерии 6.0.13/6.0.14/6.0.15, №200/№205) ---"
+# 6.0.13 — негативный, по ОБОИМ правилам №200. dumpe2fs -h на смонтированное
+# устройство раньше был false positive обоих: impact_raw_disk_write_from_container
+# матчило на op=open/filename-регулярку без предиката на comm/тип операции;
+# container_escape_host_device матчило на голый filename-регэксп без
+# различения container/host. После правки: impact_raw_disk_write_from_container
+# сужено до op=write ∧ comm в списке инструментов записи — dumpe2fs делает
+# open(O_RDONLY), не матчит вовсе. container_escape_host_device разведено на
+# container-случай (critical, тот же id) и host-случай (новый id, warning) —
+# этот пайплайн исполняется НА ХОСТЕ (нет container.id/pod_name на событии),
+# поэтому dumpe2fs здесь может поднять только новый warning-id, а критикал
+# по container_escape_host_device остаётся ровно тем, что было ДО правки: 0.
+_impact_critical_count() { # $1=rule_id
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/api/v1/alerts" 2>/dev/null \
+        | jq --arg r "$1" '[.[]|select(.rule_id==$r and .severity=="critical")]|length' 2>/dev/null || echo 0
+}
+_impact_neg_before1=$(_impact_critical_count impact_raw_disk_write_from_container)
+_impact_neg_before2=$(_impact_critical_count container_escape_host_device)
+dumpe2fs -h /dev/vda1 >/dev/null 2>&1 || true
+sleep 15
+_impact_neg_after1=$(_impact_critical_count impact_raw_disk_write_from_container)
+_impact_neg_after2=$(_impact_critical_count container_escape_host_device)
+echo "  6.0.13 негативный контроль: dumpe2fs -h /dev/vda1 -> impact_raw_disk_write_from_container критикалов: ${_impact_neg_before1:-0} -> ${_impact_neg_after1:-0}, container_escape_host_device критикалов: ${_impact_neg_before2:-0} -> ${_impact_neg_after2:-0} ($(date -u +%H:%M:%S) UTC)"
+if [ "$((${_impact_neg_after1:-0} - ${_impact_neg_before1:-0}))" -ne 0 ] \
+   || [ "$((${_impact_neg_after2:-0} - ${_impact_neg_before2:-0}))" -ne 0 ]; then
+    die "6.0.13 ПРОВАЛЕН: dumpe2fs -h /dev/vda1 (read-only open, с хоста) подняло новых критикалов: impact_raw_disk_write_from_container +$((${_impact_neg_after1:-0} - ${_impact_neg_before1:-0})), container_escape_host_device +$((${_impact_neg_after2:-0} - ${_impact_neg_before2:-0})) — правка №200 не сузила хотя бы одно из двух правил, либо агент крутит старые правила (проверить рестарт [5/14]), либо container.id/k8s.pod ошибочно непусты на этом хосте (проверить enrichment)"
+fi
+echo "6.0.13 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+echo "6.0.13 доказан живьём в $(date -u +%H:%M:%S) UTC: штатный dumpe2fs -h не поднимает критикал ни по одному из двух правил №200"
+
+# 6.0.14 — позитивный: count=0 — устройство открывается на запись, ни один
+# байт не пишется физически, откат не нужен по построению.
+_impact_pos_before=$(_impact_critical_count impact_raw_disk_write_from_container)
+dd if=/dev/zero of=/dev/vda1 bs=512 count=0 >/dev/null 2>&1 || true
+sleep 15
+_impact_pos_after=$(_impact_critical_count impact_raw_disk_write_from_container)
+echo "  6.0.14 позитивный контроль: dd if=/dev/zero of=/dev/vda1 bs=512 count=0 -> impact_raw_disk_write_from_container критикалов: ${_impact_pos_before:-0} -> ${_impact_pos_after:-0} ($(date -u +%H:%M:%S) UTC)"
+if [ "$((${_impact_pos_after:-0} - ${_impact_pos_before:-0}))" -lt 1 ]; then
+    die "6.0.14 ПРОВАЛЕН: dd (comm=dd, op=write, count=0) на /dev/vda1 не подняло ни одного критикала impact_raw_disk_write_from_container (было ${_impact_pos_before:-0}, стало ${_impact_pos_after:-0}) — правка №200 сузила правило до немоты вместо сужения FP, находка №200 не закрыта"
+fi
+echo "6.0.14 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+echo "6.0.14 доказан живьём в $(date -u +%H:%M:%S) UTC: dd на raw-устройство по-прежнему поднимает критикал"
+
+# 6.0.15 — позитивный контроль подмножества (б) на container_escape_proc_write
+# (№205, находка №193). sysctl -w того же значения — идемпотентно по
+# построению, откат не нужен. comm=sysctl не входит в список исключений
+# правила (systemd, systemd-sysctl, irqbalance).
+_procwrite_count() {
+    curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/api/v1/alerts" 2>/dev/null \
+        | jq '[.[]|select(.rule_id=="container_escape_proc_write")]|length' 2>/dev/null || echo 0
+}
+_procwrite_before=$(_procwrite_count)
+_pid_max_current=$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo "")
+if [ -n "$_pid_max_current" ]; then
+    sysctl -w kernel.pid_max="$_pid_max_current" >/dev/null 2>&1 || true
+fi
+sleep 15
+_procwrite_after=$(_procwrite_count)
+echo "  6.0.15 позитивный контроль: sysctl -w kernel.pid_max=$_pid_max_current -> container_escape_proc_write алертов: ${_procwrite_before:-0} -> ${_procwrite_after:-0} ($(date -u +%H:%M:%S) UTC)"
+if [ -z "$_pid_max_current" ]; then
+    die "6.0.15 НЕ ИСПОЛНИМ: /proc/sys/kernel/pid_max не читается на этом стенде — контроль нечем исполнить. Постановка требует либо 6.0.15 ДОСТИГНУТО, либо явный вывод container_escape_proc_write из подмножества (б) с записью причины в plan.md — третьего исхода нет"
+fi
+if [ "$((${_procwrite_after:-0} - ${_procwrite_before:-0}))" -lt 1 ]; then
+    echo "6.0.15 FAIL $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    die "6.0.15 ПРОВАЛЕН: sysctl -w kernel.pid_max=<текущее значение> (comm=sysctl, op=write, filename=/proc/sys/kernel/pid_max) не подняло ни одного алерта container_escape_proc_write (было ${_procwrite_before:-0}, стало ${_procwrite_after:-0}) — проводка флага drift_novel_workload:alert на этом правиле мертва, находка №193 закрыта только на drift_dangerous_syscall"
+fi
+echo "6.0.15 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+echo "6.0.15 доказан живьём в $(date -u +%H:%M:%S) UTC: sysctl -w поднимает container_escape_proc_write"
+
+echo "--- 6.0i: окно атаки против времени drift-контролей, одной таблицей (№206, волна 6.0f/п.7) ---"
+# Постановка 6.0d утверждала «6.0e стоит сразу за 6.0c, внутри окна атаки» —
+# находка №206 (замер №6.0d) показала, что это не так: все контроли легли ЗА
+# правой границей окна (last= в attack-window-*.txt), не внутри него. Вреда в
+# этом нет — перенос контролей внутрь окна отклонён сознательно тем же
+# пунктом постановки, иначе их алерты попали бы в числитель темпа атакующих
+# и загрязнили бы величину, служащую базой сравнения с прогоном №4. Здесь
+# правится не код детектора, а наблюдаемость самого прогона: расхождение
+# печатается как факт таблицей, а не остаётся тем, что находит только
+# постфактум-разбор логов.
+_iso_to_epoch() { # $1=ISO8601 UTC (date -u +%FT%TZ)
+    date -u -d "$1" +%s 2>/dev/null \
+        || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null
+}
+_aw_file=$(ls -t $SETUP/attacks/attack-results/attack-window-*.txt 2>/dev/null | head -1)
+_aw_first=""; _aw_last=""
+if [ -n "$_aw_file" ] && [ -s "$_aw_file" ]; then
+    _aw_first=$(grep -oE '^first=[0-9.]+' "$_aw_file" | cut -d= -f2)
+    _aw_last=$(grep -oE '^last=[0-9.]+' "$_aw_file" | cut -d= -f2)
+fi
+echo "  граница окна атаки (5.9.7d): first=${_aw_first:-?} last=${_aw_last:-?}"
+if [ -z "$_aw_last" ]; then
+    echo "  таблица не построена: attack-window-*.txt отсутствует или без строки last= — сравнение невозможно, это наблюдательный, не обязательный пункт"
+elif [ ! -s /root/drift-controls-6.0.txt ]; then
+    echo "  таблица не построена: /root/drift-controls-6.0.txt пуст или отсутствует"
+else
+    _aw_last_i=${_aw_last%.*}
+    echo "  контроль  результат  время_UTC             позиция относительно окна атаки"
+    grep -E '^6\.0\.(3|6|7|11|12|13|14|15) (PASS|FAIL)' /root/drift-controls-6.0.txt | while read -r _cid _cres _cts _rest; do
+        _cepoch=$(_iso_to_epoch "$_cts")
+        _pos="? (метка времени не разобралась)"
+        if [ -n "$_cepoch" ]; then
+            if [ "$_cepoch" -le "$_aw_last_i" ]; then
+                _pos="внутри окна атаки"
+            else
+                _pos="за правой границей (+$(( _cepoch - _aw_last_i ))с, №206)"
+            fi
+        fi
+        printf '    %-9s %-9s %-21s %s\n' "$_cid" "$_cres" "$_cts" "$_pos"
+    done
+fi
+
 # 5.9.9.F.4c (продолжение): окно замера ЗАКРЫТО (idle-час [11/14] + атаки
 # [12/14] позади), а всё, что идёт дальше, — снова инструментарий: сам гейт
 # (сотни вызовов curl/jq/grep/awk), блок приёмки и наблюдение [14.1/14].
@@ -2670,7 +3012,7 @@ acc_verdict=$(grep -cE '^\[FAIL\]|\[0;31m\[FAIL\]' /root/gate-6.0.txt || true)
 # другой SKIP величину 1 валит, как валил до этой правки.
 # 5.9.9.F.8b (№180): список документированных SKIP расширен ВТОРЫМ и
 # последним пунктом — крит. 21 (stale_transitions=0). Он не «мягче» первого:
-# ветка классификации показана исполняющейся офлайн (реплей 18/18, архив
+# ветка классификации показана исполняющейся офлайн (реплей 18/21, архив
 # collect-2.9.9.F.2 с флапом даёт PASS), то есть документируется «флап не
 # наблюдался в этом окне», а не «критерий мёртв». Причина отсутствия флапа
 # названа и измерена: 5.9.9.F.4h подняла dnsStaleThreshold 5м -> 10м ВЫШЕ
@@ -2686,7 +3028,7 @@ acc_skip_eff=$(( ${acc_skip:-99} - ${acc_skip_doc:-0} ))
 if [ "${acc_skip_eff}" = "0" ] && [ "$GATE_RC" -eq 0 ]; then
     acc "1." "SKIP=${acc_skip:-?} (из них документированных крит. 9: ${acc_skip_doc:-0}), эффективный SKIP=0 и FAIL=0 ДОСТИГНУТЫ — $acc_line"
     [ "${acc_skip_doc:-0}" -gt 0 ] 2>/dev/null \
-        && acc "  " "вычет по закрытому списку (2 пункта): крит. 9 = ${acc_skip_doc9:-0} (5.9.9.F.7c — порог не назначен ни доле по инцидентам, ни доле по алертам), крит. 21 = ${acc_skip_doc21:-0} (5.9.9.F.8b — флап не наблюдался, ветка показана живой реплеем 18/18); счётчик гейта не правился"
+        && acc "  " "вычет по закрытому списку (2 пункта): крит. 9 = ${acc_skip_doc9:-0} (5.9.9.F.7c — порог не назначен ни доле по инцидентам, ни доле по алертам), крит. 21 = ${acc_skip_doc21:-0} (5.9.9.F.8b — флап не наблюдался, ветка показана живой реплеем 18/21); счётчик гейта не правился"
 else
     acc "1." "SKIP=${acc_skip:-?} (документированных: ${acc_skip_doc:-0}, эффективный ${acc_skip_eff}), вердикт гейта $GATE_RC, строк FAIL=$acc_verdict (ожидалось: эффективный SKIP=0 и FAIL=0) — $acc_line"
     grep -E '\[SKIP\]|\[FAIL\]' /root/gate-6.0.txt | sed 's/^/       /'
@@ -2739,7 +3081,7 @@ fi
 # Второе проверяется преflight'ом жёстко; здесь печатается результат.
 # ВЕЛИЧИНА ВОЛНЫ 8 (5.9.9.F.8a, №179). Реестр пополнен ЧЕТЫРЬМЯ строками
 # (fwupd/(fwupd)/fwupdmgr/(fwupdmgr)) ДО этого замера, и строка проверена
-# обеими сторонами офлайн (реплей 17/18). ОБРАТНАЯ СТОРОНА ЗАПИСАНА ЗАРАНЕЕ,
+# обеими сторонами офлайн (реплей 17/21). ОБРАТНАЯ СТОРОНА ЗАПИСАНА ЗАРАНЕЕ,
 # до прогона, чтобы исход нельзя было прочесть задним числом в свою пользу:
 #
 #   Исход A — таймер fwupd-refresh попал в idle-час этого замера.
@@ -2754,7 +3096,7 @@ fi
 #
 # Различаются исходы по составу алертов idle-часа, а не по вердикту: ниже
 # печатается, был ли fwupd в часе вообще.
-acc "4." "состав idle-часа против idle-actors.txt (5.9.9.F.2d/№118; реестр пополнен 5.9.9.F.8a, №179 — четыре строки fwupd, проверены реплеем 17/18):"
+acc "4." "состав idle-часа против idle-actors.txt (5.9.9.F.2d/№118; реестр пополнен 5.9.9.F.8a, №179 — четыре строки fwupd, проверены реплеем 17/21):"
 grep -E 'новые акторы idle-часа вне idle-actors|новых акторов 0|состав ВСЕХ новых алертов idle-часа' /root/gate-6.0.txt | sed 's/^/       /'
 if grep -q 'новый(е) актор(ы) idle-часа вне idle-actors.txt' /root/gate-6.0.txt; then
     acc "  " "ВНИМАНИЕ: новые акторы есть. Если среди них mandb/find/install — правки 3a/3b/3c не сняли пакет systemd, и чинить это дописыванием в реестр ЗАПРЕЩЕНО постановкой. Если акторы другие — это новое окно суток, и оно пополняет реестр законно, отдельной записью в plan.md"
@@ -3211,34 +3553,70 @@ fi
 # регресс волн 3/5/7/8, продолжает исполняться без правок; это первая
 # запись, которая принадлежит именно волне 6.0.
 #
-# 6.0.1/6.0.2 читаются из уже существующей таблицы гейта 5.9.9.F.6b («объём
-# правила / срезано лимитером за idle-час») — она печатает ровно то, что
-# нужно этим двум величинам, отдельный подсчёт не заводился.
+# 6.0.1 ПЕРЕОПРЕДЕЛЁН находкой №199 (волна 6.0f). До этой правки объём читался
+# из таблицы гейта 5.9.9.F.6b — но та таблица индексирована СРЕЗОМ лимитера
+# (`for (r in cut)` в run-gate.sh), а не объёмом: правило, ни разу не упёршееся
+# в лимитер, не попадает в неё вообще, независимо от того, сколько алертов
+# опубликовало за idle-час. 6.0.1 теперь считает свою собственную дельту —
+# сумму ebpf_guard_alerts_total и ebpf_guard_alerts_filtered_total по
+# rule_id="drift_exec_from_system_bin" между IDLE_METRICS_START/END (те же
+# снимки, что использует и F.6b, серии не пересекаются — см. комментарий
+# самого гейта у 5.9.9.F.6b, №164). Таблица 5.9.9.F.6b остаётся источником
+# ТОЛЬКО для 6.0.2 (срез лимитера) — второй половины величины.
+_v199_sum_by_rule() { # $1=metric $2=rule_id $3=file
+    local metric="$1" rule="$2" file="$3"
+    [ -s "$file" ] || { echo ""; return; }
+    awk -v m="$metric" -v r="rule_id=\"$rule\"" '
+        $0 ~ "^"m"\\{" && index($0, r) { s += $NF; seen=1 } END { if (seen) printf "%d", s; else printf "" }
+    ' "$file"
+}
+acc_v199_exp_start=""; acc_v199_exp_end=""; acc_v199_flt_start=""; acc_v199_flt_end=""
+if [ -s "${IDLE_METRICS_START:-}" ] && [ -s "${IDLE_METRICS_END:-}" ]; then
+    acc_v199_exp_start=$(_v199_sum_by_rule ebpf_guard_alerts_total drift_exec_from_system_bin "$IDLE_METRICS_START")
+    acc_v199_exp_end=$(_v199_sum_by_rule ebpf_guard_alerts_total drift_exec_from_system_bin "$IDLE_METRICS_END")
+    acc_v199_flt_start=$(_v199_sum_by_rule ebpf_guard_alerts_filtered_total drift_exec_from_system_bin "$IDLE_METRICS_START")
+    acc_v199_flt_end=$(_v199_sum_by_rule ebpf_guard_alerts_filtered_total drift_exec_from_system_bin "$IDLE_METRICS_END")
+fi
+# Серия видна, если найдена хотя бы в одном из двух срезов (start ИЛИ end) —
+# правило могло начать публиковать только к концу часа.
+acc_v199_exp_seen=0; [ -n "$acc_v199_exp_start" ] || [ -n "$acc_v199_exp_end" ] && acc_v199_exp_seen=1
+acc_v199_flt_seen=0; [ -n "$acc_v199_flt_start" ] || [ -n "$acc_v199_flt_end" ] && acc_v199_flt_seen=1
+acc_v199_exp_delta=$(( ${acc_v199_exp_end:-0} - ${acc_v199_exp_start:-0} ))
+acc_v199_flt_delta=$(( ${acc_v199_flt_end:-0} - ${acc_v199_flt_start:-0} ))
+acc_v199_vol=$(( acc_v199_exp_delta + acc_v199_flt_delta ))
+acc_v199_series_any=0; { [ "$acc_v199_exp_seen" -eq 1 ] || [ "$acc_v199_flt_seen" -eq 1 ]; } && acc_v199_series_any=1
+# 6.0.2 (правил со срезом лимитера < 7) по-прежнему читает таблицу 5.9.9.F.6b
+# — это её половина, не тронутая находкой №199.
 acc_rl_line=$(grep -E '^[[:space:]]*drift_exec_from_system_bin[[:space:]]+стор' /root/gate-6.0.txt | tail -1)
 acc_rl_cutn=$(grep -oE 'правил с ненулевым срезом за idle-час: [0-9]+' /root/gate-6.0.txt | tail -1 | grep -oE '[0-9]+$')
-acc_rl_stor=$(echo "$acc_rl_line" | grep -oE 'стор[[:space:]]+[0-9]+' | grep -oE '[0-9]+')
 acc_rl_cut=$(echo "$acc_rl_line" | grep -oE 'срезано[[:space:]]+[0-9]+' | grep -oE '[0-9]+')
-# Находка №195: строка отсутствует в двух РАЗНЫХ ситуациях, которые старая
-# редакция не различала — «правило дало 0 срабатываний за idle-час» (таблица
-# 5.9.9.F.6b построена штатно, драйва под лимитер не было ни разу) и «таблица
-# вообще не построена» (снимки idle не сняты, метрика лимитера старее сборки
-# — гейт печатает fail/skip вместо таблицы). Проверяется заранее, по факту
-# успешной печати таблицы (её pass-строка), а не по наличию конкретной
-# строки правила в ней: только так «нет строки» читается как 0/ч, а не как
-# «не измерено».
+# Находка №195 (сохранена): «таблица не построена» (снимки idle не сняты,
+# метрика лимитера старее сборки) отличается от «правило дало 0 срабатываний»
+# — 6.0.1 теперь различает это НЕ по таблице F.6b (у неё своя работа — срез
+# лимитера для 6.0.2), а по наличию самих снимков IDLE_METRICS_START/END,
+# которые ей и нужны напрямую.
 acc_rl_table_ran=0
 grep -qF 'объём правил за idle-час напечатан вместе со срезанным лимитером' /root/gate-6.0.txt \
     && acc_rl_table_ran=1
-acc "16.1" "6.0.1 — drift_exec_from_system_bin, объём за idle-час (порог <=100/ч): ${acc_rl_stor:-НЕ НАПЕЧАТАН гейтом 5.9.9.F.6b} (было 577/ч на №2.9.9.F.7 без базовой линии)"
-if [ -n "$acc_rl_stor" ] && [ "$acc_rl_stor" -le 100 ] 2>/dev/null; then
-    acc "  " "ДОСТИГНУТО — засчитывается ТОЛЬКО вместе с 6.0.4 (enforcing напечатан на шаге [10/14]) И с полом 16.5 (класс drift дал за час хоть одну аномалию); сам по себе низкий объём неотличим ни от незакрывшегося обучения (риск №1), ни от свёрнутой сигнатуры (замер №6.0: объём 0 при 15071 совпадении)"
-elif [ -n "$acc_rl_stor" ]; then
-    acc "  " "НЕ ДОСТИГНУТО: объём $acc_rl_stor > 100/ч"
-elif [ "$acc_rl_table_ran" -eq 1 ]; then
-    acc "  " "ДОСТИГНУТО — объём 0/ч (№195): таблица 5.9.9.F.6b напечатана штатно (парсинг цел, pass-строка найдена), drift_exec_from_system_bin в ней просто нет строки — читается как 0 срабатываний за idle-час, а не как «не измерено». Засчитывается, как и ненулевой случай выше, ТОЛЬКО вместе с 6.0.4 и полом 16.5"
+# №207 (волна 6.0f, п.8): заголовок и вердикт печатаются ОДНОЙ строкой, не
+# двумя — до этой правки заголовок нёс независимо посчитанное текстовое поле
+# ("НЕ НАПЕЧАТАН гейтом 5.9.9.F.6b"), а вердикт двумя строками ниже мог
+# противоречить ему при беглом чтении архива (найдено на замере №6.0d:
+# заголовок утверждал "НЕ НАПЕЧАТАН" при вердикте "ДОСТИГНУТО — объём 0/ч").
+# Величина берётся из п.1 этой же волны (acc_v199_*, выше) — второго
+# независимого источника для заголовка не существует.
+if [ ! -s "${IDLE_METRICS_START:-}" ] || [ ! -s "${IDLE_METRICS_END:-}" ]; then
+    acc_v199_verdict="НЕ ЗАСЧИТЫВАЕТСЯ: снимки idle/metrics-start.txt|metrics-end.txt недоступны — величине 6.0.1 не из чего считать собственную дельту (№199 читает эти снимки напрямую, не таблицу 5.9.9.F.6b)"
+elif [ "$acc_rl_table_ran" -ne 1 ]; then
+    acc_v199_verdict="НЕ ЗАСЧИТЫВАЕТСЯ: вторая половина величины потеряна — таблица 5.9.9.F.6b (срез лимитера, нужна 6.0.2) этим гейтом не напечатана (метрика лимитера отсутствует — сборка агента старее 5.9.9.F.5n)"
+elif [ "$acc_v199_series_any" -eq 0 ]; then
+    acc_v199_verdict="ДОСТИГНУТО — объём 0/ч: ни ebpf_guard_alerts_total, ни ebpf_guard_alerts_filtered_total не публиковали серию с rule_id=drift_exec_from_system_bin ни в одном из двух срезов idle-часа (правило не публиковало никогда за этот час). Засчитывается ТОЛЬКО вместе с 6.0.4 и полом 16.5"
+elif [ "$acc_v199_vol" -le 100 ]; then
+    acc_v199_verdict="ДОСТИГНУТО — засчитывается ТОЛЬКО вместе с 6.0.4 (enforcing напечатан на шаге [10/14]) И с полом 16.5 (класс drift дал за час хоть одну аномалию); сам по себе низкий объём неотличим ни от незакрывшегося обучения (риск №1), ни от свёрнутой сигнатуры (замер №6.0: объём 0 при 15071 совпадении)"
 else
-    acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: таблица 5.9.9.F.6b вообще не напечатана этим гейтом (снимки idle/metrics-start.txt|metrics-end.txt не сняты, либо метрика лимитера отсутствует — сборка агента старее 5.9.9.F.5n) — это сбой сбора, а не значение величины"
+    acc_v199_verdict="НЕ ДОСТИГНУТО: объём $acc_v199_vol > 100/ч"
 fi
+acc "16.1" "6.0.1 — drift_exec_from_system_bin, объём за idle-час (порог <=100/ч, №199 — сумма своей метрики): ebpf_guard_alerts_total $acc_v199_exp_delta + ebpf_guard_alerts_filtered_total $acc_v199_flt_delta = ${acc_v199_vol} (было 577/ч на №2.9.9.F.7 без базовой линии) -> $acc_v199_verdict"
 acc "16.2" "6.0.2 — правил со срезом лимитера за idle-час < 7 и drift_exec_from_system_bin среди них нет: правил со срезом = ${acc_rl_cutn:-?}, срезано у drift_exec_from_system_bin = ${acc_rl_cut:-0}"
 if [ -n "$acc_rl_cutn" ] && [ "$acc_rl_cutn" -lt 7 ] 2>/dev/null && [ "${acc_rl_cut:-0}" -eq 0 ] 2>/dev/null; then
     acc "  " "ДОСТИГНУТО"
@@ -3296,13 +3674,17 @@ if [ -s "$IDLE_METRICS_START" ] && [ -s "$IDLE_METRICS_END" ]; then
     acc_drift_known=$(( $(_drift_sum "${_dm}_suppressed_total" baseline_known "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" baseline_known "$IDLE_METRICS_START") ))
     acc_drift_learn=$(( $(_drift_sum "${_dm}_suppressed_total" learning "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" learning "$IDLE_METRICS_START") ))
     acc_drift_rep=$(( $(_drift_sum "${_dm}_suppressed_total" already_reported "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" already_reported "$IDLE_METRICS_START") ))
-    acc "16.5" "6.0.1 (пол) — величина 6.0.8, справочно: класс drift за idle-час: аномалий $acc_drift_anom, подавлено baseline_known $acc_drift_known / learning $acc_drift_learn / already_reported $acc_drift_rep"
+    # Волна 6.0f, №203(а1): подавление глобальной резервной базой отделено от
+    # подавления собственной ("learning" выше — это "никто ничего не знает",
+    # а не "уже enforcing, но глобальный фоллбэк знает сигнатуру").
+    acc_drift_global=$(( $(_drift_sum "${_dm}_suppressed_total" global_baseline_known "$IDLE_METRICS_END") - $(_drift_sum "${_dm}_suppressed_total" global_baseline_known "$IDLE_METRICS_START") ))
+    acc "16.5" "6.0.1 (пол) — величина 6.0.8, справочно: класс drift за idle-час: аномалий $acc_drift_anom, подавлено baseline_known $acc_drift_known / learning $acc_drift_learn / already_reported $acc_drift_rep / global_baseline_known $acc_drift_global"
 else
     acc "16.5" "6.0.1 (пол) — величина 6.0.8 недоступна: снимки idle/metrics-start.txt|metrics-end.txt недоступны, дельту класса drift за час считать не из чего (не блокирует решающее правило ниже — оно больше не читает объём)"
 fi
 # Решающее правило 6.0.5, напечатано текстом (№196: подмену правила должно
 # быть видно в архиве, а не только в диффе скрипта).
-echo "6.0.5 РЕШАЮЩЕЕ ПРАВИЛО (переопределено 6.0d, находка №196): ДОСТИГНУТО <=> в прогоне есть хотя бы один прошедший drift-контроль (6.0.3 и/или 6.0.6) внутри окна замера; объём (16.5 выше) — величина 6.0.8, не пол"
+echo "6.0.5 РЕШАЮЩЕЕ ПРАВИЛО (переопределено 6.0d, расширено 6.0f/№203): ДОСТИГНУТО <=> в прогоне есть хотя бы один прошедший drift-контроль (6.0.3 и/или 6.0.6 и/или 6.0.12) внутри окна замера; объём (16.5 выше) — величина 6.0.8, не пол"
 acc_drift_ctrl_file=${DRIFT_CONTROLS_FILE:-/root/drift-controls-6.0.txt}
 # Второй источник того же факта — лог прогона. Реестр выше появился только в
 # волне 6.0d, а постановка №6.0d ТРЕБУЕТ реплея переопределённого 6.0.5 на
@@ -3319,12 +3701,12 @@ acc_drift_ctrl_log_pass=0
 if [ -f "$acc_drift_ctrl_log" ] && grep -v '^+' "$acc_drift_ctrl_log" | grep -qF '6.0.3 доказан живьём'; then
     acc_drift_ctrl_log_pass=1
 fi
-if [ -f "$acc_drift_ctrl_file" ] && grep -qE '^6\.0\.[36] PASS' "$acc_drift_ctrl_file" 2>/dev/null; then
-    acc "  " "6.0.5 ДОСТИГНУТО: пройденный drift-контроль зафиксирован в $acc_drift_ctrl_file — $(grep -E '^6\.0\.[36] PASS' "$acc_drift_ctrl_file" | tr '\n' ' ')"
+if [ -f "$acc_drift_ctrl_file" ] && grep -qE '^6\.0\.(3|6|12) PASS' "$acc_drift_ctrl_file" 2>/dev/null; then
+    acc "  " "6.0.5 ДОСТИГНУТО: пройденный drift-контроль зафиксирован в $acc_drift_ctrl_file — $(grep -E '^6\.0\.(3|6|12) PASS' "$acc_drift_ctrl_file" | tr '\n' ' ')"
 elif [ "$acc_drift_ctrl_log_pass" -eq 1 ]; then
     acc "  " "6.0.5 ДОСТИГНУТО: реестра drift-контролей нет (архив старее волны 6.0d), но контроль 6.0.3 напечатал 'доказан живьём' в $acc_drift_ctrl_log — механизм доказан контролем, а не объёмом"
-elif [ -f "$acc_drift_ctrl_file" ] && grep -qE '^6\.0\.[36] FAIL' "$acc_drift_ctrl_file" 2>/dev/null; then
-    acc "  " "6.0.5 НЕ ДОСТИГНУТО: $acc_drift_ctrl_file содержит только провалившиеся контроли — $(grep -E '^6\.0\.[36] FAIL' "$acc_drift_ctrl_file" | tr '\n' ' ')"
+elif [ -f "$acc_drift_ctrl_file" ] && grep -qE '^6\.0\.(3|6|12) FAIL' "$acc_drift_ctrl_file" 2>/dev/null; then
+    acc "  " "6.0.5 НЕ ДОСТИГНУТО: $acc_drift_ctrl_file содержит только провалившиеся контроли — $(grep -E '^6\.0\.(3|6|12) FAIL' "$acc_drift_ctrl_file" | tr '\n' ' ')"
 elif [ -f "$acc_drift_ctrl_log" ]; then
     acc "  " "6.0.5 НЕ ДОСТИГНУТО: ни реестр $acc_drift_ctrl_file, ни лог $acc_drift_ctrl_log не содержат ни одного прошедшего drift-контроля — контроль либо не исполнялся, либо провален (на collect-6.0 это ожидаемый исход: 6.0.3 провален по находке №187)"
 else
@@ -3391,7 +3773,35 @@ else
     acc "16.9" "6.0.9 ДОСТИГНУТО — расщепление нагрузок снято: в таблице 6.0.4 нет ни одного comm в обрамляющих скобках (№197)"
 fi
 
-echo "=== конец приёмки волны 5.9.9.F.8 (величины 1/4) + регресс волн 5.9.9.F.3…F.7 (вердикт гейта: $GATE_RC) + приёмка волны 6.0 (величины 16.1-16.9) ==="
+# 16.10 — 6.0.10 (№202, волна 6.0f): гигиена idle-часа как измеряемая
+# величина, не смягчение 5.9.9.F.2d. Строка печатается гейтом безусловно,
+# когда journalctl доступен и окно idle-часа определено (см. run-gate.sh);
+# отсутствие строки — сбой сбора (нет journalctl/окна), а не «загрязнения не
+# было». Третья формулировка (контаминация: время + акторы + доля motd)
+# печатается гейтом отдельной строкой ТОЛЬКО при ненулевом значении.
+acc_sshd_n=$(grep -oE 'успешных аутентификаций sshd за окно idle-часа \(6\.0\.10, №202\): [0-9]+' /root/gate-6.0.txt | tail -1 | grep -oE '[0-9]+$')
+acc_sshd_third=$(grep -E '6\.0\.10 \(третья формулировка' /root/gate-6.0.txt | tail -1 | sed 's/^[[:space:]]*//')
+acc "16.10" "6.0.10 — idle-час не загрязнён интерактивной sshd-сессией (успешных аутентификаций sshd = 0): ${acc_sshd_n:-НЕ ИЗМЕРЕН гейтом (journalctl недоступен либо окно не определено)}"
+if [ -z "$acc_sshd_n" ]; then
+    acc "  " "НЕ ЗАСЧИТЫВАЕТСЯ: journalctl недоступен на этом стенде либо окно idle-часа не определено по mtime срезов — это сбой сбора, а не значение величины"
+elif [ "$acc_sshd_n" -eq 0 ] 2>/dev/null; then
+    acc "  " "ДОСТИГНУТО — 0 успешных аутентификаций sshd за idle-окно, час пригоден для чтения величин 6.0.1/6.0.8 как измерения, а не ориентира"
+else
+    acc "  " "НЕ ДОСТИГНУТО: $acc_sshd_n успешных аутентификаций sshd за idle-окно — 5.9.9.F.2d остаётся FAIL/PASS по своему решению (не смягчается), но величины 6.0.1/6.0.8 этого прогона читать только как ориентир (регресс 5.9.9.F.2d при ненулевом 6.0.10 — не регресс детекта, см. plan.md)"
+    acc "  " "${acc_sshd_third:-третья формулировка (час загрязнён логином в HH:MM:SS, новых акторов N, из них объяснимо motd-цепочкой M) НЕ НАПЕЧАТАНА гейтом — проверить run-gate.sh}"
+fi
+
+# 16.11-16.15 — волна 6.0f, пять новых drift/impact-контролей. Все пять
+# `die`'ят сам шаг [12/14] на провале (см. секции 6.0g/6.0h выше), поэтому
+# если исполнение дошло до этой строки, все пять уже ДОСТИГНУТО — акк-строки
+# здесь только фиксируют исход в отчёте, решение принято выше по логу.
+acc "16.11" "6.0.11 — негативный контроль механизма (а) (глобальный фоллбэк, №203): смотреть 'негативный контроль' на шаге 6.0g этого лога; шаг die'ит сам при 0 алертов без прироста suppressed_total{reason=global_baseline_known} — если приёмка дошла до этой строки, 6.0.11 ДОСТИГНУТО"
+acc "16.12" "6.0.12 — позитивный контроль механизма (а): смотреть 'позитивный контроль' на шаге 6.0g этого лога; шаг die'ит сам при 0 алертов после повтора со стеканием лимитера — если приёмка дошла до этой строки, 6.0.12 ДОСТИГНУТО"
+acc "16.13" "6.0.13 — негативный контроль FP №200 (dumpe2fs -h /dev/vda1): смотреть шаг 6.0h этого лога; шаг die'ит сам при ненулевом приросте критикалов — если приёмка дошла до этой строки, 6.0.13 ДОСТИГНУТО"
+acc "16.14" "6.0.14 — позитивный контроль к нему (dd of=/dev/vda1 count=0): смотреть шаг 6.0h этого лога; шаг die'ит сам при 0 новых критикалов — если приёмка дошла до этой строки, 6.0.14 ДОСТИГНУТО"
+acc "16.15" "6.0.15 — позитивный контроль подмножества (б) на container_escape_proc_write (sysctl -w kernel.pid_max=<текущее>): смотреть шаг 6.0h этого лога; шаг die'ит сам при 0 новых алертов — если приёмка дошла до этой строки, 6.0.15 ДОСТИГНУТО"
+
+echo "=== конец приёмки волны 5.9.9.F.8 (величины 1/4) + регресс волн 5.9.9.F.3…F.7 (вердикт гейта: $GATE_RC) + приёмка волны 6.0 (величины 16.1-16.15) ==="
 echo ""
 
 echo "=== [14/14] сводка idle-части + отчёт сверх гейта ==="

@@ -469,22 +469,82 @@ rules:
   # Access to host devices
   - id: container_escape_host_device
     name: "Container Escape: Host device access"
-    description: "Container accessing raw host block devices"
+    description: >
+      Container accessing raw host block devices. Wave 6.0f, №200: scoped to
+      the container case only (container.id or pod_name non-empty) —
+      dumpe2fs/parted/etc. run directly on the host against the same
+      device paths for routine maintenance and is not itself an escape
+      signal (see 6.0.13). The host case is a separate rule below,
+      container_escape_host_device_from_host, at warning severity.
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/dev/sd[a-z][0-9]*"
-        - "/dev/hd[a-z][0-9]*"
-        - "/dev/nvme[0-9]n[0-9]*"
-        - "/dev/vd[a-z][0-9]*"
-        - "/dev/xvd[a-z][0-9]*"
-        - "/dev/mapper/"
-        - "/dev/dm-[0-9]+"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            - "/dev/sd[a-z][0-9]*"
+            - "/dev/hd[a-z][0-9]*"
+            - "/dev/nvme[0-9]n[0-9]*"
+            - "/dev/vd[a-z][0-9]*"
+            - "/dev/xvd[a-z][0-9]*"
+            - "/dev/mapper/"
+            - "/dev/dm-[0-9]+"
+      subgroups:
+        - operator: or
+          conditions:
+            - field: container.id
+              op: neq
+              values: [""]
+            - field: k8s.pod
+              op: neq
+              values: [""]
     severity: critical
     action: alert
     tags: [container-escape, host-device, block-device]
+
+  # Host case of the rule above (wave 6.0f, №200): same device-path match,
+  # but no container/pod enrichment on the event at all — i.e. the process
+  # runs directly on the node, outside any container. Split out rather than
+  # widened in place because a host process reading a host device is
+  # ordinary host administration far more often than it is an escape (a
+  # real container escape onto the host is exactly what the container-case
+  # rule above is for), so it stays a lower-severity, separately-tracked
+  # signal instead of silently sharing the container rule's critical
+  # severity and id (renaming the id would break replay-gate.sh — finding
+  # №170).
+  - id: container_escape_host_device_from_host
+    name: "Host process accessed raw block device"
+    description: >
+      A process with no container/pod enrichment accessed a raw host block
+      device (/dev/sd*, /dev/nvme*, /dev/vd*, /dev/xvd*, /dev/mapper,
+      /dev/dm-*). Routine host maintenance (dumpe2fs, parted, lsblk, backup
+      tooling) produces this constantly — see 6.0.13 for the negative
+      control. Kept as a warning-level, separately-tracked signal rather
+      than folded into container_escape_host_device (critical) above.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            - "/dev/sd[a-z][0-9]*"
+            - "/dev/hd[a-z][0-9]*"
+            - "/dev/nvme[0-9]n[0-9]*"
+            - "/dev/vd[a-z][0-9]*"
+            - "/dev/xvd[a-z][0-9]*"
+            - "/dev/mapper/"
+            - "/dev/dm-[0-9]+"
+        - field: container.id
+          op: eq
+          values: [""]
+        - field: k8s.pod
+          op: eq
+          values: [""]
+    severity: warning
+    action: alert
+    tags: [container-escape, host-device, block-device, host]
 
   # ============================================================================
   # procfs and sysfs Abuse

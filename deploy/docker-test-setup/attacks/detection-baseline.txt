@@ -240,6 +240,7 @@ beacon_fixed_interval
 c2_ingress_piped_to_shell
 cis_5_2_5_privilege_escalation
 container_escape_cap_sys_admin
+container_escape_host_device_from_host
 container_escape_host_mount
 container_escape_init_proc
 container_escape_module_access

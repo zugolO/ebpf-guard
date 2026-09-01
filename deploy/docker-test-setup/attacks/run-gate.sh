@@ -1443,6 +1443,35 @@ else
     # об одном и том же множестве правил не совпадали, потому что этот
     # критерий читал только два файла из трёх. Вычитание таким же образом,
     # как intentional_loss_file строкой выше (comm -12).
+    # 6.0f (реплей-блокер правки №200): правила МОЛОЖЕ архива. Реестр
+    # new-rules.txt называет дату заведения; правило вычитается из потерь
+    # только на прогонах СТАРШЕ этой даты, то есть на архивах, где его не
+    # могло быть по построению. На собственном прогоне волны и на всех
+    # последующих вычитание не работает — ослепить будущий замер этой
+    # записью нельзя (в отличие от строки в silent-rules.txt, которая
+    # действует бессрочно). Дата прогона — первые 8 цифр TIMESTAMP; если
+    # TIMESTAMP не в форме YYYYMMDD_*, вычитание не делается вовсе.
+    newer_lost=""
+    new_rules_file="$GATE_SCRIPT_DIR/new-rules.txt"
+    run_date=$(echo "${TIMESTAMP:-}" | grep -oE '^[0-9]{8}' || true)
+    if [ -n "$lost_types" ] && [ -f "$new_rules_file" ] && [ -n "$run_date" ]; then
+        newer_set=$(awk -v d="$run_date" '!/^[[:space:]]*(#|$)/ && $2 ~ /^[0-9]{8}$/ && d < $2 {print $1}' "$new_rules_file" | sort -u)
+        if [ -n "$newer_set" ]; then
+            newer_lost=$(comm -12 <(echo "$lost_types") <(echo "$newer_set"))
+            if [ -n "$newer_lost" ]; then
+                lost_types=$(comm -23 <(echo "$lost_types") <(echo "$newer_lost"))
+            fi
+        fi
+    fi
+    newer_lost_count=$(echo "$newer_lost" | grep -c . || true)
+    if [ "$newer_lost_count" -gt 0 ]; then
+        echo "  не потеряно, правило моложе архива (-$newer_lost_count, прогон $run_date, см. new-rules.txt):"
+        while IFS= read -r _nr_id; do
+            [ -z "$_nr_id" ] && continue
+            echo "    ~ $_nr_id (заведено $(awk -v r="$_nr_id" '$1 == r {print $2" "$3}' "$new_rules_file"))"
+        done <<< "$newer_lost"
+    fi
+
     silent_lost=""
     if [ -n "$lost_types" ] && [ -f "$silent_rules_file" ]; then
         silent_lost_a=$(awk '!/^[[:space:]]*(#|$)/ && $2 == "a" {print $1}' "$silent_rules_file" | sort -u)
@@ -1502,7 +1531,7 @@ else
         lost_types=$(comm -23 <(echo "$lost_types") <(echo "$drift_suppressed" | grep -v '^$' | sort -u))
     fi
     background_recovered_count=$(echo "${recovered_sorted:-}" | grep -c . || true)
-    echo "  объяснено: intentional-loss $intentional_lost_count, silent-rules $silent_lost_count, background-rules $background_recovered_count, drift-suppressed $drift_suppressed_count (\"потеряно 0\" не означает, что список объяснений пуст — см. счётчики выше)"
+    echo "  объяснено: intentional-loss $intentional_lost_count, silent-rules $silent_lost_count, background-rules $background_recovered_count, drift-suppressed $drift_suppressed_count, моложе архива $newer_lost_count (\"потеряно 0\" не означает, что список объяснений пуст — см. счётчики выше)"
     lost_count=$(echo "$lost_types" | grep -c . || true)
     if [ "$lost_count" -gt 0 ]; then
         echo "  потеряно (-$lost_count):"
@@ -3154,6 +3183,42 @@ else
             echo "  журнал за окно idle-часа не читался (journalctl/jq недоступен либо окно не определено по mtime срезов) — состав из журнала не засчитывается"
         fi
 
+        # 6.0.10 (№202, волна 6.0f): гигиена idle-часа как измеряемая
+        # величина. Реестр idle-actors.txt (5.9.9.F.2d) пропускает
+        # контаминацию логином, если её actor'ы уже известны стенду —
+        # `sshd`/`systemd-logind`/MOTD-цепочка ЗАРЕГИСТРИРОВАНЫ в реестре
+        # именно потому, что появляются при каждом логине, и критерий 3 даёт
+        # честный PASS на часе, который на самом деле не простаивал. 6.0.10
+        # называет это явно: успешных аутентификаций sshd за окно idle-часа
+        # обязано быть 0. Источник — системный журнал по identifier'у sshd
+        # (не юнит агента: sshd публикует Accepted-строки в свой собственный
+        # syslog-identifier, а не в ebpf-guard-test.service), то же окно
+        # [idle_journal_since, idle_journal_until), которым уже пользуется
+        # 5.9.9.F.5b/5.9.9.F.6a выше.
+        idle_sshd_auth_n=""
+        idle_sshd_lines=""
+        if command -v journalctl &> /dev/null \
+            && [ -n "${idle_journal_since:-}" ] && [ -n "${idle_journal_until:-}" ]; then
+            idle_sshd_lines=$(journalctl -t sshd --since "$idle_journal_since" --until "$idle_journal_until" 2>/dev/null \
+                | grep -E 'Accepted (password|publickey|keyboard-interactive) for')
+            idle_sshd_auth_n=$(printf '%s\n' "$idle_sshd_lines" | grep -c . || true)
+            echo "  успешных аутентификаций sshd за окно idle-часа (6.0.10, №202): $idle_sshd_auth_n"
+            if [ "${idle_sshd_auth_n:-0}" -eq 0 ]; then
+                pass "idle-час не загрязнён интерактивной sshd-сессией: успешных аутентификаций sshd = 0 (6.0.10, №202)"
+            else
+                # Не смягчает 5.9.9.F.2d — тот падает (или честно PASS'ит по
+                # уже известным реестру акторам логина) независимо от этой
+                # строки. Здесь только называется ПРИЧИНА третьей
+                # формулировкой, требуемой постановкой: HH:MM:SS первого
+                # логина, число новых акторов idle-часа (idle_unknown_comms,
+                # если критерий 3 успел его посчитать) и сколько из них —
+                # штатная MOTD-цепочка, а не что-то незнакомое.
+                fail "idle-час загрязнён sshd-логином: успешных аутентификаций = $idle_sshd_auth_n за окно ${idle_journal_since}..${idle_journal_until} (6.0.10, №202) — величины idle-часа (6.0.1/6.0.8) не годятся для назначения порога на этом прогоне, читать как ориентир"
+            fi
+        else
+            echo "  6.0.10 не измерен: journalctl недоступен либо окно idle-часа не определено по mtime срезов (см. ${idle_journal_since:-?}/${idle_journal_until:-?} выше)"
+        fi
+
         # Состав. Печатается ВСЕГДА, когда есть на чём считать, — в том числе
         # при дельте 0: «состав пуст» и «состав не считался» это разные строки.
         idle_actors_ok=""
@@ -3243,6 +3308,27 @@ else
             fail "новый(е) актор(ы) idle-часа вне idle-actors.txt: $(echo "$idle_unknown_comms" | tr '\n' ' ') — дельта verdict=\"attack\" за idle-час = $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; по журналу (5.9.9.F.5b): $(echo "${idle_journal_actors:-нет записей}" | tr '\n' ';') (5.9.9.F.2d, №118; величина 5.9.9.F.1d, №115)"
         else
             pass "verdict=\"attack\" за idle-час измерена критерием: дельта $idle_attack_delta, окно ${idle_win_start_utc:-?}..${idle_win_end_utc:-?} UTC; состав против idle-actors.txt не проверен (реестр отсутствует, IDLE_ALERTS_START/END не заданы или jq недоступен, журнал не назвал актора) — не засчитывается ни в одну сторону (5.9.9.F.1d, №115)"
+        fi
+
+        # 6.0.10 (№202): третья формулировка, ОБЯЗАТЕЛЬНАЯ при контаминации,
+        # ПОМИМО двух формулировок 5.9.9.F.2d выше. Печатается независимо от
+        # idle_actors_ok — sshd, зарегистрированный в idle-actors.txt, даёт
+        # критерию 3 честный PASS даже на часе, загрязнённом реальным
+        # логином (реестр знает comm, но не знает, что час перестал быть
+        # простоем). 5.9.9.F.2d НЕ смягчается: PASS/FAIL выше остаётся
+        # решением этого критерия, эта строка только называет причину.
+        if [ -n "${idle_sshd_auth_n:-}" ] && [ "${idle_sshd_auth_n:-0}" -gt 0 ] 2>/dev/null; then
+            idle_sshd_first_ts=$(printf '%s\n' "$idle_sshd_lines" | head -1 | awk '{print $1, $2, $3}')
+            idle_unknown_n=$(printf '%s\n' "${idle_unknown_comms:-}" | grep -v '^$' | grep -c . || true)
+            # Известная MOTD-цепочка идентична составу idle-actors.txt "утро"
+            # (2.9.9.F): sshd сам, systemd-logind (регистрация сессии), и
+            # обвязка /etc/update-motd.d при sshd-сессии.
+            idle_motd_pattern='^(landscape-sysin|systemd-logind|python3|\(python3\)|sh|bash|awk|egrep|grep|env|tr|who|find|00-header|10-help-text|50-landscape-sy|85-fwupd|90-updates-avai|91-release-upgr)$'
+            idle_motd_n=$(printf '%s\n' "${idle_unknown_comms:-}" | grep -v '^$' | grep -cE "$idle_motd_pattern" || true)
+            echo "  6.0.10 (третья формулировка, №202): час загрязнён логином в ${idle_sshd_first_ts:-время не определено}, новых акторов ${idle_unknown_n:-0}, из них объяснимо motd-цепочкой ${idle_motd_n:-0}:"
+            if [ "${idle_unknown_n:-0}" -gt 0 ]; then
+                printf '%s\n' "${idle_unknown_comms:-}" | grep -v '^$' | sed 's/^/    - /'
+            fi
         fi
     fi
 fi

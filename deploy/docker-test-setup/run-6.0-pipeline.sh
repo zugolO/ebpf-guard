@@ -852,6 +852,18 @@ echo "--- преflight: 5.9.9.F.7a — фикстура контроля раз�
 _7a_body=$(awk '/^run_exfil_archive_parent_positive_control\(\)/,/^}/' $SETUP/attacks/run-all-attacks.sh)
 grep -qE 'true_bin="?\$\(command -v true' <<<"$_7a_body" \
     && die "5.9.9.F.7a: run_exfil_archive_parent_positive_control снова берёт true_bin из \`command -v true\` — на bash это ИМЯ builtin'а без пути, ln -s создаёт битую относительную симлинку, execve curl_bin падает с ENOENT и правило получает ложный ноль (находка №176, стоила двух замеров)"
+# 6.0g/№208: тот же запрет — на ВЕСЬ пайплайн, а не только на одну функцию
+# run-all-attacks.sh. Замер 01.09 встал в окне атак ровно на этой
+# конструкции, заведённой шагом 6.0g: сторож №176 её не видел, потому что
+# смотрел в другой файл. Запрещается любое взятие пути до `true` из
+# command -v/type -P (builtin отдаёт голое имя), где угодно в пайплайне.
+# Комментарии ИСКЛЮЧАЮТСЯ явно: разбор дефекта выше цитирует запрещённую
+# конструкцию дословно, и сторож, читающий комментарии как код, валил бы
+# преflight на собственном объяснении (тот же класс, что 4540d53).
+if grep -vE '^[[:space:]]*#' "$SETUP/run-6.0-pipeline.sh" | grep -nE '=\$\((command -v|type -P) true'; then
+    die "6.0g/№208: в run-6.0-pipeline.sh снова берётся путь до \`true\` из command -v/type -P — на bash это builtin и путь пуст, cp/ln падает и шаг умирает через die (на замере 01.09 — уже ПОСЛЕ idle-часа, окно потеряно). Брать абсолютный путь перебором /usr/bin/true /bin/true с проверкой -f -x"
+fi
+echo "  ок: путь до true нигде в пайплайне не берётся из builtin-резолвера (№208)"
 grep -q '/usr/bin/true' <<<"$_7a_body" \
     || die "5.9.9.F.7a: в контроле нет разрешения сетевой утилиты по абсолютному пути (/usr/bin/true|/bin/true с проверкой -x) — правка №176 откатилась"
 grep -q 'exec_rc_file' <<<"$_7a_body" \
@@ -2741,7 +2753,20 @@ DRIFT_G_COMM="dnw2-$DRIFT_G_HEX"
 DRIFT_G_BINDIR=/usr/local/bin/dnw2-workload
 mkdir -p "$DRIFT_G_BINDIR" 2>/dev/null || die "6.0g: не удалось создать $DRIFT_G_BINDIR"
 DRIFT_G_REALBIN="$DRIFT_G_BINDIR/$DRIFT_G_COMM"
-DRIFT_G_TRUE=$(command -v true 2>/dev/null || echo /bin/true)
+# 6.0g/№208 (замер 01.09, стоп в окне атак): здесь стояло
+# `DRIFT_G_TRUE=$(command -v true)`. На bash `true` — BUILTIN, и command -v
+# отдаёт ГОЛОЕ ИМЯ без пути (`type -P true` пуст на этом же bash), поэтому
+# `cp true …` падал, и шаг умирал через die ПОСЛЕ отработавшего idle-часа —
+# замер терял окно целиком. Это буквально находка №176 (5.9.9.F.7a),
+# стоившая двух замеров и разобранная в шапке этого же файла: сторож 7a
+# запрещает конструкцию, но смотрит ТОЛЬКО в run-all-attacks.sh, а 6.0g
+# завела её в самом пайплайне. Нужен абсолютный путь до РЕАЛЬНОГО файла.
+DRIFT_G_TRUE=""
+for _dg_cand in /usr/bin/true /bin/true; do
+    if [ -f "$_dg_cand" ] && [ -x "$_dg_cand" ]; then DRIFT_G_TRUE="$_dg_cand"; break; fi
+done
+[ -n "$DRIFT_G_TRUE" ] \
+    || die "6.0g: ни /usr/bin/true, ни /bin/true не оказались исполняемым обычным файлом — посев нагрузки нечем собрать, брать builtin нельзя (находка №176)"
 cp "$DRIFT_G_TRUE" "$DRIFT_G_REALBIN" 2>/dev/null || die "6.0g: не удалось подготовить $DRIFT_G_REALBIN из $DRIFT_G_TRUE"
 chmod +x "$DRIFT_G_REALBIN"
 # argv[0] для 6.0.11 — путь, который сеется и затем переисполняется тем же

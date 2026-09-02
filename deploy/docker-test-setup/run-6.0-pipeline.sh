@@ -469,6 +469,38 @@ echo "--- преflight: интерпретатор ---"
 echo "  bash: ${BASH_VERSION}"
 [ "${BASH_VERSINFO[0]}" -ge 4 ] || die "bash ${BASH_VERSION} — run-gate.sh требует 4+ (declare -A, секция 19)"
 
+# 6.0j/предпрогон 02.09 (находка №214): БИНДИНГИ BPF ГЕНЕРИРУЮТСЯ ДО ПЕРВОГО
+# go-ТЕСТА ПРЕFLIGHT'А, а не на шаге [3/14].
+#
+# Почему. Волна правит заглушку internal/bpf/syscall_bpf_gen.go (поле exec_ts,
+# нужное сборке на mac'е), и `git pull` вернул её в дерево стенда, где рядом
+# лежит НАСТОЯЩИЙ bpf2go-файл internal/bpf/syscall_x86_bpfel.go от прошлого
+# `make generate`. SyscallObjects/SyscallMaps/LoadSyscallObjects объявлены
+# дважды — пакет не собирается, и ВСЕ go-тесты преflight'а падают с
+# «[build failed]». Предпрогон 02.09 15:27 UTC умер на них с вердиктом
+# «юнит-тесты 5.9.7e/f красные», то есть прибор назвал состояние дерева
+# регрессом продукта (класс №124 наизнанку). `make generate` сносит заглушки
+# последней строкой сам, но шаг [3/14] идёт ПОСЛЕ тестов.
+#
+# Вторая, менее заметная половина того же: даже без коллизии тесты волны
+# (TestProcArgsReachesAlertDetails и компания) обязаны компилироваться против
+# биндингов ЭТОГО коммита, а не против сгенерированных прошлым замером —
+# иначе преflight зелёный на старом ядре событий (память
+# bpf-gen-files-are-stubs). Поэтому генерация безусловная, а не только при
+# коллизии. Шаг [3/14] от этого не становится лишним: он повторяет generate и
+# делает build, и его смерть по-прежнему жёсткая.
+echo "--- преflight: биндинги BPF генерируются до go-тестов (№214) ---"
+ls internal/bpf/*_bpf_gen.go >/dev/null 2>&1 \
+    && echo "  в дереве есть заглушки internal/bpf/*_bpf_gen.go — их снесёт make generate (иначе коллизия с *_x86_bpfel.go)"
+make generate >/tmp/preflight-generate.log 2>&1 \
+    || { tail -20 /tmp/preflight-generate.log; die "make generate упал в преflight'е (№214) — go-тесты преflight'а мерили бы чужие биндинги; полный вывод /tmp/preflight-generate.log"; }
+grep -c . /tmp/preflight-generate.log >/dev/null 2>&1 && tail -3 /tmp/preflight-generate.log | sed 's/^/  /'
+ls internal/bpf/*_bpf_gen.go >/dev/null 2>&1 \
+    && die "преflight/№214: после make generate заглушки internal/bpf/*_bpf_gen.go всё ещё в дереве — их снос из Makefile пропал, коллизия с bpf2go-файлами вернётся тем же «[build failed]»"
+go build ./... >/tmp/preflight-build.log 2>&1 \
+    || { tail -20 /tmp/preflight-build.log; die "go build ./... красный после make generate (№214) — дальше любой красный go-тест преflight'а был бы про сборку, а не про своё правило"; }
+echo "  ок: биндинги свежие, go build ./... зелёный"
+
 echo "--- преflight: фикстурный набор правил (5.9.9.F.5o, №165) ---"
 go test -count=1 ./tests/... 2>&1 | tail -20
 go test -count=1 ./tests/... >/dev/null 2>&1 \

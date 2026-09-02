@@ -8,15 +8,16 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // syncBuffer is a goroutine-safe io.Writer used to capture log output that the
@@ -38,6 +39,23 @@ func (s *syncBuffer) String() string {
 	return s.buf.String()
 }
 
+// tempSockPath returns a short filesystem path for a test unix socket.
+//
+// t.TempDir() names the directory after the test, and a unix socket path is
+// capped by sockaddr_un.sun_path — 104 bytes on darwin, 108 on linux. The two
+// tests below have names long enough to push t.TempDir()+"/a.sock" past the
+// darwin cap, and the bind then fails with "invalid argument": the notifier
+// downgrades itself to disabled and the test fails on Enabled() for a reason
+// that has nothing to do with the code under test. A short temp directory
+// keeps the path well inside both caps.
+func tempSockPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "eg")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "a.sock")
+}
+
 func TestUnixSocketNotifier_Disabled(t *testing.T) {
 	n := NewUnixSocketNotifier(UnixSocketConfig{Enabled: false}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	assert.Equal(t, "unix_socket", n.Name())
@@ -48,7 +66,7 @@ func TestUnixSocketNotifier_Disabled(t *testing.T) {
 }
 
 func TestUnixSocketNotifier_StreamsAlert(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "a.sock")
+	sockPath := tempSockPath(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	n := NewUnixSocketNotifier(UnixSocketConfig{Enabled: true, Path: sockPath}, logger)
@@ -94,7 +112,7 @@ func TestUnixSocketNotifier_EnabledWithoutPath(t *testing.T) {
 }
 
 func TestUnixSocketNotifier_AcceptErrorWhileEnabled(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "a.sock")
+	sockPath := tempSockPath(t)
 	sb := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(sb, nil))
 

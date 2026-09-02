@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // TestReadProcCmdline exercises readProcCmdline using the test process's own
@@ -132,5 +133,52 @@ func TestCommMatchesArgv0(t *testing.T) {
 	t.Run("empty input is never a match", func(t *testing.T) {
 		assert.False(t, commMatchesArgv0("", "/tmp/x"))
 		assert.False(t, commMatchesArgv0("bash", ""))
+	})
+}
+
+// TestExecArgsAreCurrent locks the discriminator that REPLACED the argv[0]
+// heuristic on the primary (BPF map) path — finding №210, wave 6.0j.
+//
+// One execve produces two ring-buffer records, and sched_process_exec writes
+// proc_args_map between them:
+//
+//	t1 sys_enter (record reserved) < t2 exec (map written) < t3 sys_exit
+//
+// so the entry belonging to THIS exec is newer than the enter record and older
+// than the exit record. The three layouts below are exactly the three states
+// the map can be in when a record is dequeued.
+func TestExecArgsAreCurrent(t *testing.T) {
+	// Both arguments pass through types.KtimeToEpoch/the same affine offset,
+	// so the values here are ordered the way the kernel ordered them.
+	const t1, t2, t3 = uint64(1_000), uint64(2_000), uint64(3_000)
+
+	t.Run("exit record: the exec that wrote the entry is older", func(t *testing.T) {
+		assert.True(t, execArgsAreCurrent(t2, types.KtimeToEpoch(t3)))
+	})
+	t.Run("enter record: the entry was written after this record", func(t *testing.T) {
+		assert.False(t, execArgsAreCurrent(t2, types.KtimeToEpoch(t1)))
+	})
+	t.Run("same instant is not older, so it does not attach", func(t *testing.T) {
+		assert.False(t, execArgsAreCurrent(t2, types.KtimeToEpoch(t2)))
+	})
+}
+
+// TestProcArgsSurvivesSpoofedArgv0 is the unit half of criterion 6.0.16: the
+// two cases that the argv[0] heuristic gets wrong and exec_ts gets right.
+// Neither existed among the cases TestCommMatchesArgv0 covers — every one of
+// those has argv[0] naming the image, which is precisely the assumption
+// finding №210 showed to be optional.
+func TestProcArgsSurvivesSpoofedArgv0(t *testing.T) {
+	const tExec, tExit = uint64(2_000), uint64(3_000)
+
+	t.Run("login shell: argv[0] is -bash, comm is bash", func(t *testing.T) {
+		// What the old discriminator says about every interactive session:
+		require.False(t, commMatchesArgv0("bash", "-bash"))
+		// What exec_ts says about the same record.
+		assert.True(t, execArgsAreCurrent(tExec, types.KtimeToEpoch(tExit)))
+	})
+	t.Run("masquerading dropper: argv[0] does not name the image (T1036.003)", func(t *testing.T) {
+		require.False(t, commMatchesArgv0("sp-b46b1514", "/usr/local/bin/sp-seed/b46b1514"))
+		assert.True(t, execArgsAreCurrent(tExec, types.KtimeToEpoch(tExit)))
 	})
 }

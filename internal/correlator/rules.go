@@ -927,14 +927,42 @@ func dnsAlertDetails(e types.Event) map[string]interface{} {
 	}
 }
 
+// procArgsAlertDetails exposes the process command line on alerts raised by
+// rules that condition on it, or returns nil when the event carries none.
+//
+// 6.0j/№209: proc.args was a rule-condition field that never reached the
+// alert record — Alert.Event is json:"-", and Details carried only file path
+// or DNS fields. A control that asserted "the rule matched on proc.args"
+// therefore had no way to show WHICH argv it matched, and could not tell an
+// honest zero from a proc.args that the collector had blanked out
+// (commMatchesArgv0, syscall.go). That is exactly how measurement №6.0f2 lost
+// an idle hour: four zeroes at once, all of them instrumental. The value is
+// what the drift baseline signs its exec signatures with
+// (driftSignatureTarget), so an alert that omits it cannot be reconciled with
+// the baseline it was scored against either.
+func procArgsAlertDetails(e types.Event) map[string]interface{} {
+	if e.ProcArgs == "" {
+		return nil
+	}
+	d := map[string]interface{}{"proc.args": e.ProcArgs}
+	if e.ProcArgsTruncated {
+		d["proc.args_truncated"] = true
+	}
+	return d
+}
+
 // alertDetails picks the Details map for an alert: file path for file-access
-// events, qname/label-length for DNS events, nil (details,omitempty) for
+// events, qname/label-length for DNS events, proc.args for anything carrying
+// a command line (syscall/exec events), nil (details,omitempty) for
 // everything else.
 func alertDetails(e types.Event, filePath string) map[string]interface{} {
 	if d := filePathDetails(filePath); d != nil {
 		return d
 	}
-	return dnsAlertDetails(e)
+	if d := dnsAlertDetails(e); d != nil {
+		return d
+	}
+	return procArgsAlertDetails(e)
 }
 
 // ReleaseAlerts returns a slice obtained from Evaluate back to the pool.

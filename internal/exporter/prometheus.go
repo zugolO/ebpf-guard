@@ -27,6 +27,13 @@ func init() {
 	// ambiguity a criterion checking for "canary series = 0" cannot resolve.
 	CountingCanaryTotal.WithLabelValues("events")
 	CountingCanaryTotal.WithLabelValues("dropped")
+
+	// Same reasoning for both drop reasons of proc.args (6.0j/№210): a run
+	// where the fallback path never fired must be distinguishable in /metrics
+	// from a binary that predates the counter, or "argv0_mismatch = 0" reads
+	// as "no blindness" when it may mean "no instrument".
+	ProcArgsDropped.WithLabelValues("stale_exec")
+	ProcArgsDropped.WithLabelValues("argv0_mismatch")
 }
 
 // Global cardinality limiters for high-cardinality metrics.
@@ -108,6 +115,27 @@ var (
 			Help: "Ring-buffer records that failed a wire-format sanity check, by collector and reason (type_mismatch, nr_not_monitored, empty_comm)",
 		},
 		[]string{"collector", "reason"},
+	)
+
+	// ProcArgsDropped counts execve records whose argv was fetched but then
+	// discarded because the collector could not prove the record belongs to
+	// the completed exec (6.0j/№210). Reasons:
+	//   "stale_exec"      — primary path: proc_args_map holds an entry whose
+	//                       exec_ts is not older than this record, i.e. this
+	//                       is the sys_enter record of the execve;
+	//   "argv0_mismatch"  — fallback path (/proc/PID/cmdline, or a kernel
+	//                       object predating exec_ts): basename(argv[0]) does
+	//                       not prefix comm, which is also what a spoofed
+	//                       argv[0] and every login shell ("-bash") look like.
+	// The second reason is the blindness finding №210 named, made measurable:
+	// growth here is proc.args the fallback path threw away, and with it every
+	// rule of that class that would have matched.
+	ProcArgsDropped = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_proc_args_dropped_total",
+			Help: "execve records whose argv was discarded before enrichment, by reason (stale_exec, argv0_mismatch)",
+		},
+		[]string{"reason"},
 	)
 
 	// AlertsTotal counts generated alerts by rule, severity, namespace, pod, and node.
@@ -380,6 +408,12 @@ func RecordDroppedN(collector, reason string, n uint64) {
 // at a time.
 func RecordEmittedKernelN(collector string, n uint64) {
 	EventsEmittedKernel.WithLabelValues(collector).Add(float64(n))
+}
+
+// RecordProcArgsDropped increments the proc.args drop counter with reason.
+// See ProcArgsDropped for the reason vocabulary.
+func RecordProcArgsDropped(reason string) {
+	ProcArgsDropped.WithLabelValues(reason).Inc()
 }
 
 // RecordMalformed increments the malformed-record counter with reason. See

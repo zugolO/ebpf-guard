@@ -161,6 +161,20 @@ struct lsm_audit_event {
  * enriching file, network, and syscall events with proc.args.
  */
 struct proc_args {
+	/* exec_ts - bpf_ktime_get_ns() at the sched_process_exec that wrote this
+	 * entry (6.0j/№210). It is the discriminator userspace uses to tell the
+	 * sys_enter record of an execve from its sys_exit record: the entry is
+	 * written between the two, so exec_ts < event.timestamp holds on the
+	 * exit record and not on the enter record of the same execve. Before
+	 * this field the discriminator was comm vs basename(argv[0]), which a
+	 * spoofed argv[0] (execve with argv[0] != path, T1036.003) and every
+	 * login shell (argv[0] = "-bash") defeat, blanking proc.args and
+	 * silencing the whole class of rules predicated on it.
+	 *
+	 * First field, not appended: __u64 needs 8-byte alignment, and after
+	 * args[512] + truncated + _pad[3] it would sit at offset 516 and cost
+	 * four more bytes of tail padding. */
+	__u64 exec_ts;
 	char args[PROC_ARGS_MAX]; /* Space-separated argv, NUL-terminated */
 	__u8 truncated;           /* 1 when original cmdline exceeded PROC_ARGS_MAX */
 	__u8 _pad[3];

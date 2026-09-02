@@ -185,6 +185,12 @@ int trace_sched_process_exec(void *ctx)
 
 	__builtin_memset(pa, 0, sizeof(*pa));
 
+	/* 6.0j/№210: stamp the entry with the moment of the exec itself. The
+	 * sys_enter and sys_exit records of this same execve are reserved before
+	 * and after this point, so userspace can attach argv to the exit record
+	 * only (pa->exec_ts < e->timestamp) without guessing from argv[0]. */
+	pa->exec_ts = bpf_ktime_get_ns();
+
 	task = (struct task_struct *)bpf_get_current_task();
 	mm = BPF_CORE_READ(task, mm);
 	if (!mm)

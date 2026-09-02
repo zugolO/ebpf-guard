@@ -42,6 +42,11 @@ type SyscallMaps struct {
 // and layout match what bpf2go emits for the same struct, so code compiled
 // against this stub compiles unchanged against the generated bindings.
 type SyscallProcArgs struct {
+	// ExecTs is bpf_ktime_get_ns() taken inside trace_sched_process_exec
+	// (6.0j/№210) — the discriminator that tells the sys_exit record of an
+	// execve from its sys_enter record without looking at argv[0]. Declared
+	// first, matching the C struct, because __u64 is 8-byte aligned.
+	ExecTs    uint64
 	Args      [512]int8
 	Truncated uint8
 	Pad       [3]uint8

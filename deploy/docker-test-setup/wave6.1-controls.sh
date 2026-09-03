@@ -171,7 +171,15 @@ echo "--- 6.1.0: сторож приборности — container.id непус
 _w61_any_ctr=$(_w61_alerts | jq '[.[]|select((.enrichment.container_id // "") != "")]|length' 2>/dev/null || echo 0)
 _w61_src=$(_w61_alerts | jq -r 'first(.[]|select((.enrichment.container_id // "") != "")|.enrichment.runtime_source // "<источник не проставлен>") // "<алертов с container_id нет>"' 2>/dev/null || echo "<не прочитано>")
 _w61_cache=$(_w61_metrics | awk '$1 == "ebpf_guard_runtime_cache_size" { printf "%d", $2+0; f=1 } END { if (!f) printf "" }')
-echo "  6.1.0: алертов с непустым enrichment.container_id в сторе: ${_w61_any_ctr:-0}; runtime_source: ${_w61_src}; ebpf_guard_runtime_cache_size: ${_w61_cache:-<серии нет>} ($(date -u +%H:%M:%S) UTC)"
+# ВНИМАНИЕ ЧИТАТЕЛЮ ВЕРДИКТА (найдено прогоном 03.09.2026): пустой
+# runtime_source НЕ является признаком деградации оси. SQLite-стор кладёт из
+# EnrichmentInfo только pod_name/namespace/container_id/labels
+# (internal/store/sqlite.go, alertSelectColumns) — container_name,
+# container_image и runtime_source теряются НА ЗАПИСИ и через /api/v1/alerts
+# не возвращаются никогда, каким бы живым ни был энричер. Настоящий источник
+# читать в логе агента: "runtime enricher active" source=docker|containerd|
+# crio|cgroup.
+echo "  6.1.0: алертов с непустым enrichment.container_id в сторе: ${_w61_any_ctr:-0}; runtime_source из стора: ${_w61_src} (стор его НЕ хранит — см. комментарий выше, судить по логу агента); фактический источник по логу: $(journalctl -u ebpf-guard-test.service --since "-24h" --no-pager 2>/dev/null | grep -o 'runtime enricher active.*' | tail -1 | grep -oE '"source":"[a-z]+"' || echo '<в логе не найдено>'); ebpf_guard_runtime_cache_size: ${_w61_cache:-<серии нет>} ($(date -u +%H:%M:%S) UTC)"
 
 W61_INSTRUMENTED=1
 if [ "${_w61_any_ctr:-0}" -lt 1 ] && [ "${_w61_cache:-0}" -lt 1 ]; then
@@ -258,7 +266,7 @@ else
 
     if [ "$_w61_pos_delta" -lt 1 ]; then
         if [ "$_w61_vol_delta" -gt 0 ]; then
-            die "6.1.1 ПРОВАЛЕН (ось не подтверждена, детект есть): правила поднялись (объём +$_w61_vol_delta), но НИ ОДИН алерт не нёс непустой container_id. Значит сработала не контейнерная ось, а что-то другое — и критерий 6.1 ('подтверждено container-полем, а не совпадением comm') НЕ ВЗЯТ этим прогоном. Читать обогащение: enrichment.runtime_source в этих алертах"
+            die "6.1.1 ПРОВАЛЕН (ось не подтверждена, детект есть): правила поднялись (объём +$_w61_vol_delta), но НИ ОДИН алерт не нёс непустой container_id. Значит сработала не контейнерная ось, а что-то другое — и критерий 6.1 ('подтверждено container-полем, а не совпадением comm') НЕ ВЗЯТ этим прогоном. Читать обогащение НЕ по стору (runtime_source туда не пишется), а по логу агента: source= у 'runtime enricher active', и по ebpf_guard_runtime_cache_size/miss-счётчику"
         elif [ "$W61_INSTRUMENTED" = 0 ]; then
             die "6.1.1 НЕ ИЗМЕРЕН: ноль при проваленном стороже 6.1.0 — приборный ноль, вердикта по продукту нет"
         else

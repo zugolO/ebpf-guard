@@ -122,3 +122,77 @@ tests:
         filename: "/tmp/app.conf"
         op: read
     expect: no_alert
+
+  # ==========================================================================
+  # Wave 6.1 — container.id axis (finding №219). These lock in the behaviour
+  # verified live on the stand: a containerized web workload whose worker
+  # threads carry a comm OUTSIDE the web-list (Go binaries, Tomcat http-nio-*)
+  # is caught via container.id; the same binary on the host is not; and
+  # container-runtime init (runc/containerd-shim), which reads the new
+  # container's /etc/passwd during setup while transiently tagged with its
+  # cgroup, is excluded so the rule does not fire on every pod start.
+  # ==========================================================================
+  - name: "containerized web app, out-of-list comm, reads /etc/passwd → fires via container.id"
+    rule_id: owasp_web_sensitive_file_read
+    event:
+      type: file
+      comm: "vulnweb"          # a Go web binary — not in the web comm-list
+      container_id: "aa957db9bd4d"
+      file:
+        filename: "/etc/passwd"
+        op: read
+    expect: alert
+    expect_severity: critical
+
+  - name: "same out-of-list comm on the HOST (no container.id) → silent"
+    event:
+      type: file
+      comm: "vulnweb"
+      file:
+        filename: "/etc/passwd"
+        op: read
+    expect: no_alert
+
+  - name: "runc container-init reading /etc/passwd during setup → excluded, no alert"
+    event:
+      type: file
+      comm: "runc:[2:INIT]"
+      container_id: "aa957db9bd4d"
+      file:
+        filename: "/etc/passwd"
+        op: read
+    expect: no_alert
+
+  - name: "containerd-shim reading /etc/passwd during setup → excluded, no alert"
+    event:
+      type: file
+      comm: "containerd-shim"
+      container_id: "aa957db9bd4d"
+      file:
+        filename: "/etc/passwd"
+        op: read
+    expect: no_alert
+
+  - name: "path traversal from containerized out-of-list comm → fires owasp_path_traversal via container.id"
+    rule_id: owasp_path_traversal
+    event:
+      type: file
+      comm: "vulnweb"
+      container_id: "aa957db9bd4d"
+      file:
+        filename: "/app/../../etc/passwd"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "containerized node keeps comm 'node' (in-list) and still fires without needing the axis"
+    rule_id: owasp_web_sensitive_file_read
+    event:
+      type: file
+      comm: "node"
+      container_id: "f32bdc4a519b"
+      file:
+        filename: "/etc/passwd"
+        op: read
+    expect: alert
+    expect_severity: critical

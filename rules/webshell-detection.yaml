@@ -175,7 +175,8 @@ rules:
     # Q9 (plan.md, wave 3): a web shell runs *as the web server*. Matching on
     # filename alone made every sshd login look like webshell credential
     # access. sshd reading its own host keys was also counted here.
-    # Wave 6.1: comm-list is not extensible to container runtime threads — see
+    # Wave 6.1: the comm-list cannot cover every containerized runtime's worker
+    # thread names (Tomcat http-nio-*, Go binary-named threads, tokio) — see
     # appexploit_lfi_passwd_access (rules/application-exploits.yaml) for the
     # same fix and rationale. sshd on the host has no container.id, so it
     # still can't match through the added subgroup.
@@ -201,9 +202,26 @@ rules:
               op: in
               values: ["nginx", "apache2", "httpd", "php-fpm", "node",
                         "python", "gunicorn", "uwsgi", "java", "tomcat"]
-            - field: container.id
-              op: neq
-              values: [""]
+          # Wave 6.1 fix (finding №219): container.id proves web-workload role
+          # for runtimes whose worker/request threads carry a comm OUTSIDE the
+          # list above — Go binaries (comm = binary name), Tomcat (http-nio-*),
+          # tokio (tokio-runtime-*). NB: node 20 names every thread "node" and
+          # is already caught by the comm list — it was never the "libuv-worker"
+          # case the older comments claimed. Exclude container-runtime init:
+          # runc/containerd-shim read the new container's /etc/passwd during
+          # setup while transiently tagged with its cgroup, which otherwise
+          # tripped this critical rule on every pod start.
+          subgroups:
+            - operator: and
+              conditions:
+                - field: container.id
+                  op: neq
+                  values: [""]
+                - field: proc.comm
+                  op: not_in
+                  values: ["runc", "runc:[0:PARENT]", "runc:[1:CHILD]",
+                           "runc:[2:INIT]", "containerd-shim", "containerd",
+                           "dockerd", "crun", "runsc", "conmon"]
     severity: critical
     action: alert
     tags: [mitre:T1505.003, mitre:T1552, webshell, credential-access]

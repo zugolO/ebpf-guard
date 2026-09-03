@@ -82,6 +82,10 @@ type EventSpec struct {
 	// ProcArgs is the space-joined /proc/PID/cmdline the collector attaches to
 	// execve/execveat events (5.9.3g: c2_ingress_piped_to_shell keys on it).
 	ProcArgs string `yaml:"proc_args,omitempty"`
+	// ContainerID, when set, populates Event.Enrichment.ContainerID so rules
+	// keyed on the container.id axis (wave 6.1) are regression-testable. An
+	// empty string reads as "host" (no enrichment), matching a real host event.
+	ContainerID string `yaml:"container_id,omitempty"`
 	Syscall    *SyscallSpec `yaml:"syscall,omitempty"`
 	Network    *NetworkSpec `yaml:"network,omitempty"`
 	File       *FileSpec    `yaml:"file,omitempty"`
@@ -169,6 +173,9 @@ func (s EventSpec) Build() (types.Event, error) {
 		copy(e.ParentComm[:], s.ParentComm)
 	}
 	e.ProcArgs = s.ProcArgs
+	if s.ContainerID != "" {
+		e.Enrichment = &types.EnrichmentInfo{ContainerID: s.ContainerID}
+	}
 
 	switch strings.ToLower(s.Type) {
 	case "syscall":

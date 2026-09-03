@@ -327,6 +327,7 @@ echo "--- 6.1.3: объём пяти расширенных правил за о
 W61_VOL_WINDOW="${W61_VOL_WINDOW:-600}"
 _w61_v3_start=$(_w61_volume "$W61_RULES")
 _w61_v3_files_start=$(_w61_metrics | awk '$0 ~ /^ebpf_guard_events_total\{/ && index($0, "type=\"file\"") { s += $NF } END { printf "%d", s+0 }')
+_w61_v3_t0=$(date -u +%FT%TZ)
 echo "  6.1.3: окно ${W61_VOL_WINDOW}с открыто в $(date -u +%H:%M:%S) UTC (объём на старте ${_w61_v3_start})"
 sleep "$W61_VOL_WINDOW"
 _w61_v3_end=$(_w61_volume "$W61_RULES")
@@ -334,11 +335,36 @@ _w61_v3_files_end=$(_w61_metrics | awk '$0 ~ /^ebpf_guard_events_total\{/ && ind
 _w61_v3_delta=$(( ${_w61_v3_end:-0} - ${_w61_v3_start:-0} ))
 _w61_v3_floor=$(( ${_w61_v3_files_end:-0} - ${_w61_v3_files_start:-0} ))
 _w61_v3_hour=$(( _w61_v3_delta * 3600 / W61_VOL_WINDOW ))
+
+# РАЗРЕЗ ПО ПРИЧИНЕ СРАБАТЫВАНИЯ. Голый объём пяти правил НЕ является ценой
+# расширения оси: comm-список этих правил содержит java/node/python/nginx/...,
+# и алерт от контейнера с таким comm поднялся бы и БЕЗ клаузулы container.id.
+# Найдено прогоном 03.09.2026: все 8 алертов окна пришли от comm=java
+# (OpenSearch, поднятый testcontainers в постороннем `go test`), то есть
+# «цена расширения 48/ч» не имела к расширению никакого отношения.
+# Цена оси = алерты, у которых comm ВНЕ comm-списка и container_id непуст:
+# ровно их и добавила волна 6.1, всё остальное ловилось и раньше.
+W61_COMMLIST="nginx apache2 httpd php-fpm node python gunicorn uwsgi java tomcat"
+_w61_v3_axis=$(_w61_alerts | jq -r --arg ids "$W61_RULES" --arg cl "$W61_COMMLIST" --arg t0 "$_w61_v3_t0" '
+    [ .[]
+      | select((.rule_id as $r | ($ids|split(" "))|index($r)))
+      | select(.timestamp >= $t0)
+      | select((.enrichment.container_id // "") != "")
+      | select(((.comm // "") as $c | ($cl|split(" "))|index($c)) | not)
+    ] | length' 2>/dev/null || echo 0)
+_w61_v3_axis_hour=$(( ${_w61_v3_axis:-0} * 3600 / W61_VOL_WINDOW ))
+_w61_v3_top=$(_w61_alerts | jq -r --arg ids "$W61_RULES" --arg t0 "$_w61_v3_t0" '
+    [ .[] | select((.rule_id as $r | ($ids|split(" "))|index($r))) | select(.timestamp >= $t0) ]
+    | group_by(.comm) | map("\(.[0].comm // "?")x\(length)") | join(" ")
+    | if . == "" then "<в окне алертов нет>" else . end' 2>/dev/null || echo "<не прочитано>")
+
 echo "  6.1.3 величина: объём пяти правил за ${W61_VOL_WINDOW}с = $_w61_v3_delta (в пересчёте $_w61_v3_hour/ч), пол за то же окно (file-события) = $_w61_v3_floor"
+echo "  6.1.3 ЦЕНА ОСИ (comm вне comm-списка И непустой container_id, то есть поднято ТОЛЬКО волной 6.1): ${_w61_v3_axis:-0} за окно (${_w61_v3_axis_hour}/ч). Разбивка окна по comm: $_w61_v3_top"
+echo "  6.1.3 гигиена: складывать с idle-базой можно ТОЛЬКО цену оси и ТОЛЬКО из тихого окна. Если в разбивке выше видны comm из comm-списка (java/node/python/...) или чужая нагрузка (сборка, go test с testcontainers, чужой прогон) — окно грязное, величину переснять"
 if [ "$_w61_v3_delta" -eq 0 ] && [ "$_w61_v3_floor" -eq 0 ]; then
     die "6.1.3 НЕ ИЗМЕРЕН: объём 0 при НУЛЕВОМ поле — за окно не было ни одного file-события вообще, то есть молчание правил не отличимо от слепоты коллектора. Повторить окно на живой нагрузке"
 else
-    echo "6.1.3 измерен в $(date -u +%H:%M:%S) UTC: $_w61_v3_hour/ч при поле $_w61_v3_floor file-событий — это цена расширения оси, её надо сложить с idle-базой замера (потолок idle-часа волны 6.0 — 23 алерта/ч)"
+    echo "6.1.3 измерен в $(date -u +%H:%M:%S) UTC: суммарный объём пяти правил $_w61_v3_hour/ч при поле $_w61_v3_floor file-событий, из них ЦЕНА РАСШИРЕНИЯ ОСИ ${_w61_v3_axis_hour}/ч — с idle-базой замера складывать надо именно её (потолок idle-часа волны 6.0 — 23 алерта/ч)"
 fi
 
 # Уборка подложенного busybox. СТРОГО в самом конце, а не сразу после 6.1.1:

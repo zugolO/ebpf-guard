@@ -107,7 +107,15 @@ else
 fi
 
 _w62_cfg="${W62_CONFIG:-$W62_SETUP/config-test.yaml}"
-if ! grep -A6 '^kubernetes:' "$_w62_cfg" 2>/dev/null | grep -qE '^\s*enabled:\s*true\s*$'; then
+# Блок читается ЦЕЛИКОМ (от 'kubernetes:' до следующего ключа верхнего
+# уровня), а не окном фиксированной длины: комментарий внутри блока вырос до
+# двух десятков строк, и grep -A6 не доставал до enabled — сторож печатал
+# «НЕ true» при true. Приборный провал сторожа приборности стоит дороже
+# обычного: он объявляет неизмеримым исправный прогон.
+_w62_k8s_block=$(awk '/^kubernetes:/{f=1;next} f && /^[a-zA-Z#]/{exit} f' "$_w62_cfg" 2>/dev/null)
+# Окна обучения дрейфа — вход критерия 6.2.A ниже.
+_w62_drift_cfg=$(awk '/drift_baseline:/{f=1;next} f && /^[a-zA-Z]/{exit} f' "$_w62_cfg" 2>/dev/null)
+if ! echo "$_w62_k8s_block" | grep -qE '^\s*enabled:\s*true\s*$'; then
     die "6.2 преflight ПРОВАЛЕН: в $_w62_cfg kubernetes.enabled НЕ true — k8s-энричер не конструируется вовсе (cmd/ebpf-guard/main.go:1835), namespace/pod_name пусты на каждом событии по построению. Ровно эта находка (№216) стоила прогона волне 6.1"
 else
     pass "6.2 преflight: kubernetes.enabled: true в $_w62_cfg"
@@ -187,14 +195,26 @@ spec:
       - serviceAccountToken:
           path: token
 YAML
-    _w62_before=$(_w62_alerts | jq --arg ids "$W62_K8S_RULES" '[.[]|select((.rule_id as $r | ($ids|split(" "))|index($r)) and ((.enrichment.pod_name // "")=="w62-token-probe"))]|length' 2>/dev/null || echo 0)
+    # Отсечка по ВРЕМЕНИ, а не разность двух счётчиков: под с этим именем мог
+    # существовать раньше (репетиция, предыдущий прогон), и его старые алерты
+    # входят в обе стороны разности одинаково — а вот засчитывать их нельзя.
+    _w62_t_pos=$(date -u +%FT%TZ)
     "$W62_KUBECTL" -n "$W62_NS" apply -f "$W62_ART/w62-token-probe.yaml" >/dev/null 2>&1
     "$W62_KUBECTL" -n "$W62_NS" wait --for=condition=Ready pod/w62-token-probe --timeout=90s >/dev/null 2>&1
-    sleep "$W62_SETTLE"
+    # Алерт доезжает до стора ПАЧКОЙ, а не сразу: репетиция 19:05 показала
+    # ноль при уже поднятых правилах — снимок через фиксированные 20 с застал
+    # запись, которой ещё нет. Ждать событие, а не время.
+    _w62_delta=0
+    _w62_waited=0
+    while [ "$_w62_waited" -lt "${W62_POS_TIMEOUT:-120}" ]; do
+        sleep "$W62_SETTLE"
+        _w62_waited=$(( _w62_waited + W62_SETTLE ))
+        _w62_delta=$(_w62_alerts | jq --arg ids "$W62_K8S_RULES" --arg t "$_w62_t_pos" '[.[]|select((.rule_id as $r | ($ids|split(" "))|index($r)) and ((.enrichment.pod_name // "")=="w62-token-probe") and (.timestamp > $t))]|length' 2>/dev/null || echo 0)
+        [ "${_w62_delta:-0}" -gt 0 ] && break
+    done
+    echo "  ожидание записи в стор: ${_w62_waited}s"
     _w62_sentinel=$("$W62_KUBECTL" -n "$W62_NS" logs w62-token-probe 2>/dev/null | grep -m1 'W62-SENTINEL')
-    _w62_after=$(_w62_alerts | jq --arg ids "$W62_K8S_RULES" '[.[]|select((.rule_id as $r | ($ids|split(" "))|index($r)) and ((.enrichment.pod_name // "")=="w62-token-probe"))]|length' 2>/dev/null || echo 0)
-    _w62_delta=$(( _w62_after - _w62_before ))
-    _w62_rules_hit=$(_w62_alerts | jq -r --arg ids "$W62_K8S_RULES" '.[]|select((.rule_id as $r | ($ids|split(" "))|index($r)) and ((.enrichment.pod_name // "")=="w62-token-probe"))|.rule_id' 2>/dev/null | sort -u | tr '\n' ' ')
+    _w62_rules_hit=$(_w62_alerts | jq -r --arg ids "$W62_K8S_RULES" --arg t "$_w62_t_pos" '.[]|select((.rule_id as $r | ($ids|split(" "))|index($r)) and ((.enrichment.pod_name // "")=="w62-token-probe") and (.timestamp > $t))|.rule_id' 2>/dev/null | sort -u | tr '\n' ' ')
     echo "  сторож результата: ${_w62_sentinel:-НЕ НАПЕЧАТАН}"
     echo "  дельта алертов с pod_name=w62-token-probe: $_w62_delta (правила: ${_w62_rules_hit:-нет})"
     _w62_len=$(printf '%s' "${_w62_sentinel:-}" | grep -oE 'token_len=[0-9]+' | cut -d= -f2)
@@ -229,10 +249,17 @@ if [ "$W62_INSTRUMENTED" -eq 1 ]; then
         # Отдельный comm, чтобы считать ТОЛЬКО своё чтение. Копия, а не
         # symlink: comm берётся из имени исполняемого файла.
         cp /bin/cat /usr/local/bin/w62hostcat 2>/dev/null
+        _w62_t_neg=$(date -u +%FT%TZ)
         _w62_host_bytes=$(/usr/local/bin/w62hostcat "$_w62_host_target" 2>/dev/null | wc -c)
-        sleep "$W62_SETTLE"
-        _w62_host_all=$(_w62_alerts | jq '[.[]|select(.comm=="w62hostcat")]|length' 2>/dev/null || echo 0)
-        _w62_host_podded=$(_w62_alerts | jq '[.[]|select(.comm=="w62hostcat" and ((.enrichment.pod_name // "")!=""))]|length' 2>/dev/null || echo 0)
+        _w62_host_all=0
+        _w62_waited=0
+        while [ "$_w62_waited" -lt "${W62_POS_TIMEOUT:-120}" ]; do
+            sleep "$W62_SETTLE"
+            _w62_waited=$(( _w62_waited + W62_SETTLE ))
+            _w62_host_all=$(_w62_alerts | jq --arg t "$_w62_t_neg" '[.[]|select(.comm=="w62hostcat" and (.timestamp > $t))]|length' 2>/dev/null || echo 0)
+            [ "${_w62_host_all:-0}" -gt 0 ] && break
+        done
+        _w62_host_podded=$(_w62_alerts | jq --arg t "$_w62_t_neg" '[.[]|select(.comm=="w62hostcat" and (.timestamp > $t) and ((.enrichment.pod_name // "")!=""))]|length' 2>/dev/null || echo 0)
         echo "  сторож результата: прочитано байт с хоста = $_w62_host_bytes (цель $_w62_host_target)"
         echo "  алертов от comm=w62hostcat: всего $_w62_host_all, из них с непустым pod_name: $_w62_host_podded"
         if [ "${_w62_host_bytes:-0}" -lt 1 ]; then
@@ -256,6 +283,34 @@ fi
 # Объём читается ВМЕСТЕ со срезом лимитера (пункт Е): правило, упёршееся в
 # 10 алертов/60 с, показывает величину ЛИМИТЕРА, а не реальности.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.2.A ДЛИНА ПРОЛОГА (пункт А «Переноса в 6.1…6.4»), проверяется ЧИСЛОМ.
+# Подъём ноды меняет ключ {Comm, Namespace, AppLabel} у каждого обогащённого
+# события разом — вся выученная база уходит в learning. Пока не прошло
+# learning_period × enforce_deadline_periods от старта агента, окно ниже
+# меряет ОБУЧЕНИЕ, а не базовую линию, и величины дрейфа с него не значат
+# того, что написано в их именах. Волна 6.0a уже платила за это укорочением
+# окон; здесь величина печатается, а не обещается.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- 6.2.A: длина пролога до открытия окна ---"
+_w62_lp=$(echo "$_w62_drift_cfg" | grep -oE 'learning_period:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+_w62_edp=$(echo "$_w62_drift_cfg" | grep -oE 'enforce_deadline_periods:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+_w62_need=$(( ${_w62_lp:-600} * ${_w62_edp:-2} ))
+_w62_started=$(systemctl show ebpf-guard-test.service -p ActiveEnterTimestamp --value 2>/dev/null)
+_w62_started_s=$(date -d "$_w62_started" +%s 2>/dev/null || echo 0)
+_w62_prologue=$(( $(date +%s) - _w62_started_s ))
+echo "  агент поднят: ${_w62_started:-?}; пролог до открытия окна: ${_w62_prologue}s; требуется > learning_period($_w62_lp) × enforce_deadline_periods($_w62_edp) = ${_w62_need}s"
+_w62_learning_now=$(_w62_metric_sum ebpf_guard_drift_baseline_learning_workloads "")
+_w62_prof_now=$(_w62_metric_sum ebpf_guard_drift_baseline_profiles "")
+echo "  на этот момент: профилей $_w62_prof_now, из них в learning $_w62_learning_now"
+if [ "$_w62_started_s" -eq 0 ]; then
+    die "6.2.A НЕИЗМЕРИМ: время старта сервиса не прочитано — длину пролога нечем доказать, и величины дрейфа окна ниже нечем защитить от «это было обучение»"
+elif [ "$_w62_prologue" -le "$_w62_need" ]; then
+    die "6.2.A ПРОВАЛЕН: пролог ${_w62_prologue}s не длиннее ${_w62_need}s — окно ниже меряет ОБУЧЕНИЕ, а не базовую линию (пункт А). Величины дрейфа этого прогона не засчитываются"
+else
+    pass "6.2.A ДОСТИГНУТО: пролог ${_w62_prologue}s > ${_w62_need}s, обучение закрыто до открытия окна"
+fi
+
 echo "--- 6.2.3/6.2.4: тихое окно ${W62_WINDOW}s ---"
 _w62_drift_print() { # $1 = метка среза
     local m; m=$(_w62_metrics)
@@ -264,25 +319,37 @@ _w62_drift_print() { # $1 = метка среза
 _w62_t0=$(date -u +%FT%TZ)
 _w62_vol0=$(_w62_volume "")
 _w62_rl0=$(_w62_ratelimited "")
+# Полный срез метрик на обоих концах окна. Репетиция 19:05 показала, зачем:
+# накопительный счётчик среза лимитера ненулевой почти у всех правил с самого
+# старта агента, и сторож объявлял неизмеримым ВСЁ подряд. Величина, которая
+# нужна пункту Е, — срез ЗА ОКНО (память control-after-attacks-hits-filled-limiter:
+# ноль контроля может быть срезом, а не вердиктом; читать надо срез окна).
+_w62_metrics > "$W62_ART/metrics-window-start.txt"
 _w62_drift_print "открытие"
-_w62_alerts > "$W62_ART/alerts-window-start.json"
 echo "  окно открыто $_w62_t0 — до закрытия НЕ ПОДАВАТЬ вход (память ebpf-guard-measurement-hygiene, п.2/п.5)"
 sleep "$W62_WINDOW"
 _w62_t1=$(date -u +%FT%TZ)
 _w62_vol1=$(_w62_volume "")
 _w62_rl1=$(_w62_ratelimited "")
+_w62_metrics > "$W62_ART/metrics-window-end.txt"
 _w62_drift_print "закрытие"
 _w62_alerts > "$W62_ART/alerts-window-end.json"
+
+# Срез лимитера по правилу ЗА ОКНО: разность двух снимков одной метрики.
+_w62_rl_window() { # $1=rule_id
+    awk -v r="$1" '
+        FILENAME==ARGV[1] && index($0, "rule_id=\"" r "\"") && /^ebpf_guard_alerts_ratelimited_by_rule_total/ { a=$NF }
+        FILENAME==ARGV[2] && index($0, "rule_id=\"" r "\"") && /^ebpf_guard_alerts_ratelimited_by_rule_total/ { b=$NF }
+        END { printf "%d", (b+0)-(a+0) }' "$W62_ART/metrics-window-start.txt" "$W62_ART/metrics-window-end.txt"
+}
 
 # «Новый шум» — алерты окна, принесённые нодой: непустой namespace ЛИБО comm
 # из списка акторов ноды. Остальное — старый фон стенда, к цене ноды не
 # относится и в гейт волны 6 не входит.
-_w62_new=$(jq -n --slurpfile a "$W62_ART/alerts-window-start.json" --slurpfile b "$W62_ART/alerts-window-end.json" \
-    --arg actors "$W62_NODE_ACTORS" '
-    ($a[0]|map(.id)) as $seen
-    | [ $b[0][] | select((.id as $i | ($seen|index($i)))|not)
-        | select(((.enrichment.namespace // "") != "") or ((.comm) as $c | ($actors|split(" "))|index($c))) ]
-    ' 2>/dev/null)
+_w62_new=$(jq --arg t0 "$_w62_t0" --arg t1 "$_w62_t1" --arg actors "$W62_NODE_ACTORS" '
+    [ .[] | select(.timestamp > $t0 and .timestamp <= $t1)
+      | select(((.enrichment.namespace // "") != "") or ((.comm) as $c | ($actors|split(" "))|index($c))) ]
+    ' "$W62_ART/alerts-window-end.json" 2>/dev/null)
 _w62_new_n=$(echo "$_w62_new" | jq 'length' 2>/dev/null || echo 0)
 _w62_new_hour=$(awk -v n="${_w62_new_n:-0}" -v w="$W62_WINDOW" 'BEGIN{printf "%.0f", n*3600.0/w}')
 echo "  окно $_w62_t0 … $_w62_t1"
@@ -297,12 +364,21 @@ echo "$_w62_new" | jq -r 'group_by(.comm)|map({c:.[0].comm,n:length})|sort_by(-.
 # прибора. Называются поимённо, как требует пункт Е.
 _w62_capped=""
 for _r in $(echo "$_w62_new" | jq -r '.[].rule_id' 2>/dev/null | sort -u); do
-    _d=$(( $(_w62_ratelimited "$_r") ))
-    if [ "$_d" -gt 0 ]; then _w62_capped="$_w62_capped $_r($_d)"; fi
+    _d=$(_w62_rl_window "$_r")
+    if [ "${_d:-0}" -gt 0 ]; then _w62_capped="$_w62_capped $_r(+$_d)"; fi
 done
-echo "  правила со СРЕЗОМ лимитера (накопительно):${_w62_capped:- нет}"
-if [ -n "$_w62_capped" ]; then
-    die "6.2.3 НЕИЗМЕРИМ ПО БУКВЕ: у правил${_w62_capped} есть срез лимитера — их вклад в «$_w62_new_hour/ч» есть величина лимитера (10/60с = 600/ч потолок), а не реальный объём (пункт Е «Переноса в 6.1…6.4»). Величина печатается, но порогом 100/ч не судится, пока срез не снят"
+echo "  правила со СРЕЗОМ лимитера ЗА ОКНО:${_w62_capped:- нет}"
+# ПОРЯДОК ПРОВЕРОК ВАЖЕН. Срез лимитера может только ЗАНИЗИТЬ измеренный
+# объём — правило, упёршееся в 10/60с, не печатает то, что сверх. Значит,
+# измеренная величина есть НИЖНЯЯ ОЦЕНКА, и превышение порога ею одной уже
+# доказано: снятие среза может величину только увеличить. Поэтому «выше 100/ч»
+# судится ПЕРВЫМ и при срезе тоже; «неизмеримо» остаётся только для случая,
+# когда величина порог не перешла, а прибор упёрт — там ноль незнания
+# настоящий (пункт Е «Переноса в 6.1…6.4»).
+if [ "$_w62_new_hour" -gt 100 ] && [ -n "$_w62_capped" ]; then
+    die "6.2.3 ПРОВАЛЕН (величина — НИЖНЯЯ оценка): цена ноды не менее $_w62_new_hour алертов/ч при гейте волны 6 «не выше 100/ч». У правил${_w62_capped} есть срез лимитера за окно, то есть реальный объём ВЫШЕ измеренного, а не ниже — вердикт от этого только твёрже. Разбивка по правилам выше — вход для сужения"
+elif [ -n "$_w62_capped" ]; then
+    die "6.2.3 НЕИЗМЕРИМ ПО БУКВЕ: величина $_w62_new_hour/ч порог не перешла, но у правил${_w62_capped} есть срез лимитера за окно — их вклад есть показание упёршегося прибора (10/60с = 600/ч потолок), и «≤100/ч» здесь не вердикт, а показание (пункт Е)"
 elif [ "$_w62_new_hour" -gt 100 ]; then
     die "6.2.3 ПРОВАЛЕН: цена ноды $_w62_new_hour алертов/ч при гейте волны 6 «не выше 100/ч нового шума». Разбивка по правилам напечатана выше — это вход для сужения, а не повод понизить порог"
 else
@@ -341,7 +417,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- 6.2.6: цена одного старта пода ---"
 _w62_churn_n="${W62_CHURN:-3}"
-_w62_ids_before=$(_w62_alerts | jq -r '.[].id' 2>/dev/null | sort -u)
+_w62_t_churn=$(date -u +%FT%TZ)
 for i in $(seq 1 "$_w62_churn_n"); do
     "$W62_KUBECTL" -n "$W62_NS" run "w62-churn-$i" --image=busybox:1.36 --restart=Never --command -- sleep 15 >/dev/null 2>&1
 done
@@ -350,11 +426,11 @@ sleep 45
 for i in $(seq 1 "$_w62_churn_n"); do "$W62_KUBECTL" -n "$W62_NS" delete pod "w62-churn-$i" --ignore-not-found --wait=false >/dev/null 2>&1; done
 sleep "$W62_SETTLE"
 _w62_alerts > "$W62_ART/alerts-churn-end.json"
-_w62_churn=$(jq -n --slurpfile b "$W62_ART/alerts-churn-end.json" --arg seen "$_w62_ids_before" '
-    ($seen|split("\n")) as $s
-    | [ $b[0][] | select((.id as $i | ($s|index($i)))|not)
-        | select(.comm|test("^(runc|containerd|conmon|crun|dockerd)")) ]' 2>/dev/null)
-_w62_churn_n_alerts=$(echo "$_w62_churn" | jq 'length' 2>/dev/null || echo 0)
+_w62_churn=$(jq --arg t "$_w62_t_churn" '
+    [ .[] | select(.timestamp > $t) | select(.comm|test("^(runc|containerd|conmon|crun|dockerd)")) ]
+    ' "$W62_ART/alerts-churn-end.json" 2>/dev/null)
+_w62_churn_n_alerts=$(echo "${_w62_churn:-[]}" | jq 'length' 2>/dev/null)
+_w62_churn_n_alerts=${_w62_churn_n_alerts:-0}
 _w62_per_pod=$(awk -v n="${_w62_churn_n_alerts:-0}" -v p="$_w62_churn_n" 'BEGIN{printf "%.1f", (p>0? n/p : 0)}')
 echo "  запущено и снято подов: $_w62_churn_n; алертов от рантайм-comm: $_w62_churn_n_alerts → $_w62_per_pod на под"
 echo "$_w62_churn" | jq -r 'group_by(.rule_id)|map({r:.[0].rule_id,n:length})|sort_by(-.n)[]|"    \(.r): \(.n)"' 2>/dev/null | head -20

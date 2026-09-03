@@ -221,12 +221,15 @@ _w61_read_in_ctr() {
         if command -v file >/dev/null 2>&1 && ! file -L "$_bb" 2>/dev/null | grep -q "statically linked"; then
             continue
         fi
-        docker cp "$_bb" "$W61_CTR:/w61-busybox" >/dev/null 2>&1 || continue
-        _w61_exec_out=$(docker exec -u 0 "$W61_CTR" /w61-busybox cat /etc/passwd 2>&1)
+        # ИМЯ ФАЙЛА ЗНАЧИМО: busybox выбирает апплет по basename(argv[0]).
+        # Под чужим именем он падает с «applet not found» ещё до разбора
+        # аргументов (найдено прогоном 03.09.2026) — класть только как busybox.
+        docker cp "$_bb" "$W61_CTR:/busybox" >/dev/null 2>&1 || continue
+        _w61_exec_out=$(docker exec -u 0 "$W61_CTR" /busybox cat /etc/passwd 2>&1)
         _w61_exec_rc=$?
         case "$_w61_exec_out" in
             *root:*)
-                W61_INPUT_HOW="docker cp $_bb -> $W61_CTR:/w61-busybox; docker exec -u 0 $W61_CTR /w61-busybox cat /etc/passwd"
+                W61_INPUT_HOW="docker cp $_bb -> $W61_CTR:/busybox; docker exec -u 0 $W61_CTR /busybox cat /etc/passwd"
                 W61_BB_PLANTED=1
                 return 0 ;;
         esac
@@ -335,9 +338,9 @@ fi
 # (runc:[N:INIT] резолвит пользователя), то есть внутри окон 6.1.2/6.1.3 он
 # подмешал бы собственные алерты в измеряемые величины.
 if [ "${W61_BB_PLANTED:-0}" = 1 ]; then
-    docker exec -u 0 "$W61_CTR" /w61-busybox rm -f /w61-busybox >/dev/null 2>&1 \
-        && echo "  уборка: /w61-busybox удалён из $W61_CTR" \
-        || echo "  уборка: НЕ УДАЛОСЬ удалить /w61-busybox из $W61_CTR — снять руками (docker exec -u 0 $W61_CTR /w61-busybox rm -f /w61-busybox), иначе он останется в цели атак следующего прогона"
+    docker exec -u 0 "$W61_CTR" /busybox rm -f /busybox >/dev/null 2>&1 \
+        && echo "  уборка: /busybox удалён из $W61_CTR" \
+        || echo "  уборка: НЕ УДАЛОСЬ удалить /busybox из $W61_CTR — снять руками (docker exec -u 0 $W61_CTR /busybox rm -f /busybox), иначе он останется в цели атак следующего прогона"
 fi
 
 echo "=== wave6.1-controls.sh завершён: проваленных контролей $WAVE61_FAILS, вердикты в $WAVE61_VERDICTS ==="

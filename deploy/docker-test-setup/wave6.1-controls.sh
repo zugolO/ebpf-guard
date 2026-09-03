@@ -82,6 +82,18 @@ _w61_count_with_container() {
     _w61_alerts | jq --arg ids "$1" '[.[]|select((.rule_id as $r | ($ids|split(" "))|index($r)) and ((.enrichment.container_id // "") != ""))]|length' 2>/dev/null || echo 0
 }
 
+# Число алертов по списку правил, У КОТОРЫХ container_id ПУСТ, то есть
+# ХОСТОВЫХ. Ровно это меряет негативный контроль 6.1.2: утверждение «чтение с
+# хоста не поднимает правило» — про хостовые алерты, а не про все подряд.
+# Считать там всё подряд нельзя (найдено на прогоне 03.09.2026): любой
+# контейнер стенда, читающий /etc/passwd в то же 15-секундное окно
+# (grafana/prometheus, да хоть runc:[N:INIT] от соседнего docker exec),
+# даёт +N и роняет 6.1.2 с вердиктом «клаузула матчит там, где контейнера
+# нет» — выводом ПРЯМО ПРОТИВОПОЛОЖНЫМ тому, что произошло.
+_w61_count_host() {
+    _w61_alerts | jq --arg ids "$1" '[.[]|select((.rule_id as $r | ($ids|split(" "))|index($r)) and ((.enrichment.container_id // "") == ""))]|length' 2>/dev/null || echo 0
+}
+
 # Сумма метрики по списку правил (объём, а не срез лимитера — память
 # f6b-table-indexed-by-limiter-cut).
 _w61_metric_sum() { # $1=metric $2=список rule_id
@@ -183,16 +195,53 @@ _w61_vol_before=$(_w61_volume "$W61_PASSWD_RULES")
 # Сторож результата входа (память positive-control-needs-result-sentinel):
 # засчитываем подачу ТОЛЬКО если exec реально прочитал файл. Отсутствующий
 # `cat` в образе или остановленный контейнер иначе дадут ложный ноль.
-_w61_exec_out=$(docker exec "$W61_CTR" cat /etc/passwd 2>&1)
-_w61_exec_rc=$?
+#
+# ПОЧЕМУ НЕ ПРОСТО `docker exec $W61_CTR cat` (прогон на ebaka2 03.09.2026).
+# Образ bkimminich/juice-shop:latest — DISTROLESS: entrypoint /nodejs/bin/node,
+# в нём нет ни `cat`, ни `sh` («exec: "cat": executable file not found in
+# $PATH», rc=126). Прежняя редакция контроля не могла подать вход НИ РАЗУ на
+# штатной цели волны, то есть 6.1.1 всегда печатал «НЕ ИСПОЛНЕН», а критерий
+# 6.1 оставался неизмеримым по механике контроля, а не по продукту.
+# Подменять цель на образ с шеллом нельзя: тогда контроль перестаёт проверять
+# ту самую цель, через которую волна собирается гонять атаки.
+# Решение: подкладываем в контейнер СТАТИЧЕСКИЙ busybox с хоста (без libc
+# внутри distroless динамический бинарь не поднимется) и читаем им. comm при
+# этом — `busybox`/`runc:[N:INIT]`, и то и другое ВНЕ comm-списка правил, то
+# есть смысл позитивного контроля («поднять могла только контейнерная ось»)
+# сохранён полностью.
+_w61_read_in_ctr() {
+    # (1) штатный cat, если образ не distroless
+    _w61_exec_out=$(docker exec "$W61_CTR" cat /etc/passwd 2>&1)
+    _w61_exec_rc=$?
+    case "$_w61_exec_out" in *root:*) W61_INPUT_HOW="docker exec $W61_CTR cat /etc/passwd"; return 0 ;; esac
+    # (2) distroless: кладём статический busybox и читаем им
+    for _bb in ${W61_BUSYBOX:-} /bin/busybox /usr/bin/busybox /usr/local/bin/busybox; do
+        [ -n "$_bb" ] && [ -x "$_bb" ] || continue
+        # статичность обязательна: динамический busybox в distroless не стартует
+        if command -v file >/dev/null 2>&1 && ! file -L "$_bb" 2>/dev/null | grep -q "statically linked"; then
+            continue
+        fi
+        docker cp "$_bb" "$W61_CTR:/w61-busybox" >/dev/null 2>&1 || continue
+        _w61_exec_out=$(docker exec -u 0 "$W61_CTR" /w61-busybox cat /etc/passwd 2>&1)
+        _w61_exec_rc=$?
+        case "$_w61_exec_out" in
+            *root:*)
+                W61_INPUT_HOW="docker cp $_bb -> $W61_CTR:/w61-busybox; docker exec -u 0 $W61_CTR /w61-busybox cat /etc/passwd"
+                W61_BB_PLANTED=1
+                return 0 ;;
+        esac
+    done
+    return 1
+}
+
+W61_INPUT_HOW="docker exec $W61_CTR cat /etc/passwd"
+W61_BB_PLANTED=0
 _w61_exec_ok=0
-case "$_w61_exec_out" in
-    *root:*) _w61_exec_ok=1 ;;
-esac
-echo "  6.1.1 вход: docker exec $W61_CTR cat /etc/passwd -> rc=$_w61_exec_rc, строка root: $( [ "$_w61_exec_ok" = 1 ] && echo 'найдена' || echo 'НЕ НАЙДЕНА' ) ($(date -u +%H:%M:%S) UTC)"
+_w61_read_in_ctr && _w61_exec_ok=1
+echo "  6.1.1 вход: $W61_INPUT_HOW -> rc=$_w61_exec_rc, строка root: $( [ "$_w61_exec_ok" = 1 ] && echo 'найдена' || echo 'НЕ НАЙДЕНА' ) ($(date -u +%H:%M:%S) UTC)"
 
 if [ "$_w61_exec_ok" != 1 ]; then
-    die "6.1.1 НЕ ИСПОЛНЕН: вход не подан — docker exec $W61_CTR cat /etc/passwd вернул rc=$_w61_exec_rc без строки root: (вывод: $(printf '%.200s' "$_w61_exec_out")). Это отказ механики контроля, а не вердикт по продукту: нулей ниже не существует, критерий 6.1 остаётся НЕ ИЗМЕРЕННЫМ. Чинить: поднят ли контейнер ($W61_CTR), есть ли в образе cat (иначе взять busybox sh -c 'read вывод </etc/passwd')"
+    die "6.1.1 НЕ ИСПОЛНЕН: вход не подан — docker exec $W61_CTR cat /etc/passwd вернул rc=$_w61_exec_rc без строки root: (вывод: $(printf '%.200s' "$_w61_exec_out")). Это отказ механики контроля, а не вердикт по продукту: нулей ниже не существует, критерий 6.1 остаётся НЕ ИЗМЕРЕННЫМ. Чинить: поднят ли контейнер ($W61_CTR); есть ли на ХОСТЕ статический busybox (пакет busybox-static, /bin/busybox) — для distroless-образов вроде juice-shop это единственный путь подачи, задать явно через W61_BUSYBOX=/путь"
 else
     sleep "$W61_SETTLE"
     _w61_pos_after=$(_w61_count_with_container "$W61_PASSWD_RULES")
@@ -227,7 +276,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- 6.1.2: негативный контроль — тот же /etc/passwd с ХОСТА ---"
 
-_w61_neg_before=$(_w61_count "$W61_PASSWD_RULES")
+_w61_neg_before=$(_w61_count_host "$W61_PASSWD_RULES")
+_w61_neg_all_before=$(_w61_count "$W61_PASSWD_RULES")
 _w61_neg_lim_before=$(_w61_metric_sum ebpf_guard_alerts_filtered_total "$W61_PASSWD_RULES")
 _w61_host_out=$(cat /etc/passwd 2>&1)
 _w61_host_ok=0
@@ -235,16 +285,18 @@ case "$_w61_host_out" in
     *root:*) _w61_host_ok=1 ;;
 esac
 sleep "$W61_SETTLE"
-_w61_neg_after=$(_w61_count "$W61_PASSWD_RULES")
+_w61_neg_after=$(_w61_count_host "$W61_PASSWD_RULES")
+_w61_neg_all_after=$(_w61_count "$W61_PASSWD_RULES")
 _w61_neg_lim_after=$(_w61_metric_sum ebpf_guard_alerts_filtered_total "$W61_PASSWD_RULES")
 _w61_neg_delta=$(( ${_w61_neg_after:-0} - ${_w61_neg_before:-0} ))
 _w61_neg_lim_delta=$(( ${_w61_neg_lim_after:-0} - ${_w61_neg_lim_before:-0} ))
-echo "  6.1.2 вход: cat /etc/passwd с хоста, строка root: $( [ "$_w61_host_ok" = 1 ] && echo 'найдена' || echo 'НЕ НАЙДЕНА' ); алертов Q9 ${_w61_neg_before:-0} -> ${_w61_neg_after:-0} (дельта $_w61_neg_delta), срезано min_severity за то же окно +$_w61_neg_lim_delta ($(date -u +%H:%M:%S) UTC)"
+_w61_neg_all_delta=$(( ${_w61_neg_all_after:-0} - ${_w61_neg_all_before:-0} ))
+echo "  6.1.2 вход: cat /etc/passwd с хоста, строка root: $( [ "$_w61_host_ok" = 1 ] && echo 'найдена' || echo 'НЕ НАЙДЕНА' ); ХОСТОВЫХ алертов Q9 (container_id пуст) ${_w61_neg_before:-0} -> ${_w61_neg_after:-0} (дельта $_w61_neg_delta); для контекста всех Q9, включая контейнерные: дельта $_w61_neg_all_delta; срезано min_severity за то же окно +$_w61_neg_lim_delta ($(date -u +%H:%M:%S) UTC)"
 
 if [ "$_w61_host_ok" != 1 ]; then
     die "6.1.2 НЕ ИСПОЛНЕН: вход не подан — cat /etc/passwd на хосте не вернул строку root:. Ноль ниже не читается"
 elif [ "$_w61_neg_delta" -ne 0 ]; then
-    die "6.1.2 ПРОВАЛЕН: чтение /etc/passwd С ХОСТА под comm=cat подняло +$_w61_neg_delta алертов Q9-правил ($W61_PASSWD_RULES) — клаузула container.id матчит там, где контейнера нет. Это возврат ровно того FP, ради устранения которого Q9-сужение и заводилось: 92% алертов LFI-правила были sshd/cron. Читать: непуст ли container.id у ХОСТОВЫХ процессов на этом стенде (агент в контейнере с общим cgroup-неймспейсом даст непустой ID всему, что видит) — тогда ось нужно сузить, а не расширять"
+    die "6.1.2 ПРОВАЛЕН: чтение /etc/passwd С ХОСТА под comm=cat подняло +$_w61_neg_delta ХОСТОВЫХ (container_id пуст) алертов Q9-правил ($W61_PASSWD_RULES) — клаузула container.id матчит там, где контейнера нет. Это возврат ровно того FP, ради устранения которого Q9-сужение и заводилось: 92% алертов LFI-правила были sshd/cron. Читать: непуст ли container.id у ХОСТОВЫХ процессов на этом стенде (агент в контейнере с общим cgroup-неймспейсом даст непустой ID всему, что видит) — тогда ось нужно сузить, а не расширять"
 else
     echo "6.1.2 PASS $(date -u +%FT%TZ)" >> "$WAVE61_VERDICTS" 2>/dev/null || true
     echo "6.1.2 доказан живьём в $(date -u +%H:%M:%S) UTC: тот же файл под тем же comm с хоста молчит — расширение оси не вернуло хостовой FP"
@@ -276,6 +328,16 @@ if [ "$_w61_v3_delta" -eq 0 ] && [ "$_w61_v3_floor" -eq 0 ]; then
     die "6.1.3 НЕ ИЗМЕРЕН: объём 0 при НУЛЕВОМ поле — за окно не было ни одного file-события вообще, то есть молчание правил не отличимо от слепоты коллектора. Повторить окно на живой нагрузке"
 else
     echo "6.1.3 измерен в $(date -u +%H:%M:%S) UTC: $_w61_v3_hour/ч при поле $_w61_v3_floor file-событий — это цена расширения оси, её надо сложить с idle-базой замера (потолок idle-часа волны 6.0 — 23 алерта/ч)"
+fi
+
+# Уборка подложенного busybox. СТРОГО в самом конце, а не сразу после 6.1.1:
+# `docker exec` для удаления сам порождает контейнерное чтение /etc/passwd
+# (runc:[N:INIT] резолвит пользователя), то есть внутри окон 6.1.2/6.1.3 он
+# подмешал бы собственные алерты в измеряемые величины.
+if [ "${W61_BB_PLANTED:-0}" = 1 ]; then
+    docker exec -u 0 "$W61_CTR" /w61-busybox rm -f /w61-busybox >/dev/null 2>&1 \
+        && echo "  уборка: /w61-busybox удалён из $W61_CTR" \
+        || echo "  уборка: НЕ УДАЛОСЬ удалить /w61-busybox из $W61_CTR — снять руками (docker exec -u 0 $W61_CTR /w61-busybox rm -f /w61-busybox), иначе он останется в цели атак следующего прогона"
 fi
 
 echo "=== wave6.1-controls.sh завершён: проваленных контролей $WAVE61_FAILS, вердикты в $WAVE61_VERDICTS ==="

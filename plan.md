@@ -449,6 +449,60 @@ API-сервера) `podCache` всегда пуст, и уже прочитан
   6.1.3 — отдельная работа с собственным контролем (правило В), не довесок к этой
   (правило Г).
 
+* **Находка №219 — буква критерия 6.1 закрыта настоящей HTTP-атакой; посылка про
+  `libuv-worker` ложна; ось вносила FP на каждый старт пода.** Живой разбор на ebaka2
+  03.09.2026 (HEAD `92db7a7`) вскрыл три вещи и все три починены В ЭТОЙ ЖЕ волне:
+
+  1. **Штатный Juice Shop НЕ уязвим к LFI на уровне ФС** (проверено запросами):
+     `/ftp/..%2f..%2fetc%2fpasswd` → 403 (приложение режет декодированный `..`);
+     `/ftp/../../../../etc/passwd` → 200, но express нормализует URL ДО вызова
+     `open()`, и ядро `../` не видит; poison-null-byte читает только внутри `/ftp`.
+     До Q9-правил такой запрос не доходит в принципе — то есть буква критерия 6.1
+     («на прогоне атак через веб») стоковым Juice Shop недостижима.
+  2. **Посылка правил про `libuv-worker` — ложь для node 20.** `/proc/<tid>/comm`
+     показывает: node 20 называет ВСЕ треды (включая тред-пул libuv, делающий
+     файловый ввод-вывод) именем `node`. То есть контейнерный node-LFI ловится
+     comm-списком и БЕЗ оси. Комментарии пяти Q9-правил, ссылавшиеся на
+     `libuv-worker` как «реальный comm node», исправлены. Ось реально нужна
+     рантаймам с рабочим тредом ВНЕ comm-списка: Go (`comm`=имя бинаря), Tomcat
+     (`http-nio-8080-*`), tokio (`tokio-runtime-w`).
+  3. **Ось `container.id neq ""` вносила FP на КАЖДЫЙ старт контейнера.**
+     `runc:[2:INIT]` читает `/etc/passwd` нового контейнера, будучи временно тегнут
+     его cgroup; до 6.1 это не срабатывало (`comm` вне списка), а ветка `container.id`
+     это открыла — 1 алерт `appexploit_lfi_passwd_access`/`xxe`/`owasp_web_sensitive`
+     на каждый свежий контейнер (воспроизведено на 5 контейнерах). На узле с оборотом
+     подов — непрерывный critical-FP, ровно против «защищать продуктовые билды».
+     Ветка переписана в AND: `container.id neq "" И proc.comm not_in {runc*,
+     containerd-shim, containerd, dockerd, crun, runsc, conmon}`.
+
+  **Как закрыта буква критерия.** Добавлен fixture
+  [attacks/fixtures/vulnweb/vulnweb.go](deploy/docker-test-setup/attacks/fixtures/vulnweb/vulnweb.go)
+  — умышленно уязвимый Go-веб (LFI без санитизации, `comm`=`vulnweb` вне comm-списка),
+  и контроль [wave6.1-realistic-attack.sh](deploy/docker-test-setup/wave6.1-realistic-attack.sh).
+  Прогон на стенде (`/root/wave6.1-realistic-verdicts.txt`), проваленных контролей **0**:
+  * **позитив** — НАСТОЯЩАЯ HTTP-LFI (`GET /read?path=/etc/passwd`) на
+    контейнеризованный vulnweb подняла 4 Q9-правила (`appexploit_lfi_passwd_access`,
+    `appexploit_xxe_file_read`, `owasp_web_sensitive_file_read`,
+    `webshell_sensitive_file_read`), все с непустым `container_id` — то есть детект
+    именно осью, при `comm` вне списка;
+  * **негатив** — тот же бинарь на ХОСТЕ по тому же HTTP: 0 хостовых Q9-алертов;
+  * **FP-сторож** — старт 2 свежих контейнеров: 0 Q9-алертов от `runc`/`containerd-shim`
+    (исключение работает живьём).
+
+  **Регрессы (зелёные).** Юнит [wave6_1_container_axis_test.go](internal/correlator/wave6_1_container_axis_test.go)
+  дополнен ассертом исключения `runc:[2:INIT]`; декларативные наборы
+  [tests/rules/owasp_web_test.yaml](tests/rules/owasp_web_test.yaml) (+6) и новый
+  [tests/rules/application_exploits_test.yaml](tests/rules/application_exploits_test.yaml)
+  (6) покрывают позитив-контейнер/негатив-хост/исключение-runc. Харнесс `ruletest`
+  получил поле `container_id` — обогащение стало тестируемым декларативно.
+
+  **Что это НЕ закрывает.** `runc:[2:INIT]` при старте контейнера по-прежнему поднимает
+  правила `container-escape`/`rootkit`/`cis` (mount, pivot_root, cap_sys_admin,
+  proc_modules_read и т.д.) — это ДРУГОЙ, до-6.1 источник, вне оси волны; разбирать в
+  6.2 при подъёме ноды (оборот подов сделает его заметным). Находка №218 (стор теряет
+  `runtime_source`/`container_name`/`container_image`) не чинена — для 6.1 не блокер, но
+  сузить ось по `container.image`/`.name` в 6.2 нечем, пока схема не поправлена.
+
 ## 6.2 K8s-нода
 
 Разблокирует правила `cis-k8s.yaml` и k8s-энричер, плюс даёт `container.*` бесплатно

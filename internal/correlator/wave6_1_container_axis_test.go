@@ -13,13 +13,21 @@ import (
 // TestWave6_1ContainerAxis is the positive/negative control for wave 6.1
 // (plan.md, "Контейнерная идентификация", criterion 6.1): a Q9 rule must fire
 // on a containerized web workload even when its comm does not appear in the
-// fixed comm allowlist (a Node app's actual file-syscall comm is a libuv
-// worker thread name, e.g. "libuv-worker", not "node" — the allowlist can
-// never be extended to cover every runtime's thread names), and must still
-// stay silent for the same file read by a host process with no container
-// identity (sshd). This is the result sentinel plan.md's rule В requires:
-// it asserts the alert fired AND that it fired via the container.id axis,
-// not a coincidental comm match.
+// fixed comm allowlist, and must still stay silent for the same file read by a
+// host process with no container identity (sshd). This is the result sentinel
+// plan.md's rule В requires: it asserts the alert fired AND that it fired via
+// the container.id axis, not a coincidental comm match.
+//
+// The out-of-list comm here is a generic worker-thread name. NB (finding
+// №219, verified live on ebaka2 2026-09-03): node 20 names EVERY thread "node"
+// (checked via /proc/<tid>/comm), so a containerized node app is already
+// caught by the comm allowlist — it was never the "libuv-worker" case older
+// comments claimed. The axis genuinely earns its keep for runtimes whose
+// worker/request threads carry an out-of-list comm: Go binaries (comm = binary
+// name), Tomcat (http-nio-8080-*), tokio (tokio-runtime-w). A container-runtime
+// init process (runc/containerd-shim), which reads the new container's
+// /etc/passwd during setup while transiently tagged with its cgroup, must be
+// EXCLUDED so the axis does not fire on every pod start.
 func TestWave6_1ContainerAxis(t *testing.T) {
 	const opOpen = 0
 
@@ -66,20 +74,28 @@ func TestWave6_1ContainerAxis(t *testing.T) {
 			require.NotNil(t, target, "rule %s not found in %s", tc.ruleID, tc.file)
 			engine := correlator.NewRuleEngine([]correlator.Rule{*target})
 
-			// Juice Shop's actual file-syscall comm ("libuv-worker") is not in
-			// the web-worker comm allowlist. Without container.id enrichment
-			// this must stay silent — pins the defect the fix addresses.
-			assert.Empty(t, engine.Evaluate(fileEvent("libuv-worker", tc.path, "")),
-				"rule %s: a libuv-worker comm with no container enrichment must not "+
+			// An out-of-list worker comm (a Go web binary here) with no container
+			// enrichment must stay silent — pins the defect the fix addresses.
+			assert.Empty(t, engine.Evaluate(fileEvent("vulnweb", tc.path, "")),
+				"rule %s: an out-of-list comm with no container enrichment must not "+
 					"alert on its own — the container axis, not the comm coincidence, "+
 					"is what should raise this", tc.ruleID)
 
-			// Same comm, but now with container enrichment (Juice Shop's cgroup
-			// resolved to a container ID by wave 6.1's enricher fix) — must fire.
-			assert.NotEmpty(t, engine.Evaluate(fileEvent("libuv-worker", tc.path, juiceShopContainerID)),
+			// Same comm, but now with container enrichment (the workload's cgroup
+			// resolved to a container ID by wave 6.1's enricher) — must fire.
+			assert.NotEmpty(t, engine.Evaluate(fileEvent("vulnweb", tc.path, juiceShopContainerID)),
 				"rule %s: a containerized web workload must be detected via "+
-					"container.id even when its comm ('libuv-worker') isn't in the "+
+					"container.id even when its comm ('vulnweb') isn't in the "+
 					"web-worker allowlist (criterion 6.1)", tc.ruleID)
+
+			// FP guard (finding №219): container-runtime init reads the new
+			// container's /etc/passwd during setup while transiently tagged with
+			// its cgroup. Before the exclusion this tripped every Q9 rule via
+			// container.id on every pod start. It must now stay silent.
+			assert.Empty(t, engine.Evaluate(fileEvent("runc:[2:INIT]", tc.path, juiceShopContainerID)),
+				"rule %s: runc container-init reading %s during container setup "+
+					"must be excluded from the container.id axis, or the rule fires "+
+					"on every pod start", tc.ruleID, tc.path)
 
 			// Negative control: the same file read by sshd on the host (no
 			// container identity) must not raise a "web server" rule — this is

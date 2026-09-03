@@ -773,3 +773,101 @@ func TestDriftBaselineWorkloadStatesAgreeWithGauges(t *testing.T) {
 	assert.Equal(t, len(p.WorkloadStates())-1, p.ProfileCount(),
 		"WorkloadStates carries exactly one row beyond the profile count: the global baseline")
 }
+
+// TestDriftBaselineEvictionSparesActiveWorkload — сторож вытеснения волны 6.2
+// (plan.md 6.2.5, пункт Б «Переноса в 6.1…6.4»; риск №3 постановки 6.0).
+//
+// ЗАЧЕМ. На docker-стенде к открытию idle-часа было 21 нагрузка, и кап
+// max_workloads: 1000 не проверялся ничем — «в десятки нагрузок не
+// проявляется». Нода превращает число нагрузок в произведение подов на comm,
+// а сам comm атакующий задаёт свободно (prctl(PR_SET_NAME), случайные имена
+// бинарей). Отсюда вопрос, на который живой прогон ответить не может (кап там
+// не достигается): вымывает ли поток НОВЫХ нагрузок базовую линию НАБЛЮДАЕМОЙ
+// нагрузки — то есть можно ли ослепить дрейф-детект по чужой нагрузке, просто
+// заводя свои.
+//
+// Здесь кап уменьшен до 8, чтобы вытеснение произошло детерминированно, а не
+// «в проде когда-нибудь». Величина, которую доказывает тест: вытеснение идёт
+// по НЕДАВНОСТИ (LRU), поэтому активная нагрузка переживает вдесятеро больший
+// поток чужих, а её выученная сигнатура остаётся подавленной; вытесняется
+// молчащая. И каждое вытеснение НАПЕЧАТАНО счётчиком — молчаливая потеря
+// линии неотличима от «нагрузка не встречалась».
+func TestDriftBaselineEvictionSparesActiveWorkload(t *testing.T) {
+	current := time.Now()
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		// LearningPeriod: 0 — обучение закрывается на первом же наблюдении.
+		// Тест про вытеснение, а не про промоушен: длинное окно обучения
+		// только сделало бы «линия сохранилась» неотличимым от «линия ещё
+		// не выучена, поэтому всё подавлено».
+		Enabled: true, LearningPeriod: 0, MinSamples: 1, PerWorkload: true,
+		MaxWorkloads: 8, EnforceDeadlinePeriods: 2,
+	}, slog.Default())
+	p.nowFn = func() time.Time { return current }
+
+	const guardedSig = "/usr/bin/guarded-tool"
+	// Наблюдаемая нагрузка выучила ровно одну сигнатуру и перешла в enforcing.
+	require.True(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("guarded", 59, guardedSig)),
+		"первое наблюдение сигнатуры — первое на хосте, поднимается через глобальный фолбэк (№193a)")
+	// Обучение закрыто у САМОЙ нагрузки; LearningWorkloads() здесь не ноль,
+	// потому что глобальная фолбэк-линия (№193a) живёт своим циклом.
+	require.Equal(t, "enforcing", driftStateOfComm(p, "guarded"),
+		"MinSamples=1 закрывает обучение наблюдаемой нагрузки сразу")
+	require.False(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("guarded", 59, guardedSig)),
+		"выученная сигнатура подавлена — это и есть линия, которую нельзя вымыть")
+
+	// Молчащая жертва: заведена и больше не встречается. Её линия — контроль
+	// на то, что вытеснение вообще происходит (иначе тест ниже доказывал бы
+	// лишь то, что кап не сработал).
+	require.True(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("idle-victim", 59, "/usr/bin/idle-victim")))
+
+	// Атакующий заводит нагрузки. Наблюдаемая продолжает работать — ровно так,
+	// как ведёт себя нагрузка ноды, пока по соседству крутится оборот подов.
+	for i := 0; i < 80; i++ {
+		current = current.Add(time.Second)
+		p.Observe("drift_exec_from_system_bin",
+			syscallEventForExec(fmt.Sprintf("attacker%02d", i), 59, fmt.Sprintf("/tmp/a%02d", i)))
+		if i%4 == 0 {
+			p.Observe("drift_exec_from_system_bin",
+				syscallEventForExec("guarded", 59, guardedSig))
+		}
+	}
+
+	assert.LessOrEqual(t, p.ProfileCount(), 8,
+		"кап обязан держать размер карты — иначе max_workloads не бюджет, а пожелание")
+
+	var guardedSeen, victimSeen bool
+	for _, st := range p.WorkloadStates() {
+		switch st.Comm {
+		case "guarded":
+			guardedSeen = true
+		case "idle-victim":
+			victimSeen = true
+		}
+	}
+	assert.True(t, guardedSeen,
+		"активная нагрузка вытеснена потоком чужих — значит, дрейф-детект по ней ослеплён тем, кто просто заводит свои нагрузки")
+	assert.False(t, victimSeen,
+		"молчащая нагрузка обязана быть вытесненной — иначе тест не доказал, что кап вообще сработал")
+
+	assert.False(t, p.Observe("drift_exec_from_system_bin",
+		syscallEventForExec("guarded", 59, guardedSig)),
+		"линия пережившей нагрузки обязана остаться выученной, а не начаться заново")
+
+	assert.GreaterOrEqual(t, testutil.ToFloat64(p.evictionsTotal), float64(1),
+		"вытеснение обязано быть НАПЕЧАТАНО ebpf_guard_drift_baseline_evictions_total: молчаливая потеря линии неотличима от «нагрузка не встречалась» (plan.md 6.2.4)")
+}
+
+// driftStateOfComm возвращает состояние профиля нагрузки по её comm
+// ("" — профиля нет вовсе), чтобы сторож 6.2.5 читал состояние ИМЕННО своей
+// нагрузки, а не агрегат по всем (в агрегат подмешана глобальная линия).
+func driftStateOfComm(p *DriftBaselineProfiler, comm string) string {
+	for _, st := range p.WorkloadStates() {
+		if st.Comm == comm {
+			return st.State
+		}
+	}
+	return ""
+}

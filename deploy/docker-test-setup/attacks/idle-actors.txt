@@ -111,3 +111,39 @@ fwupdmgr	2.9.9.F.7:3	CLI, которым fwupd-refresh.service дёргает о
 # Дописывание pgrep узаконило бы загрязнение измерителем.
 systemd-tmpfile	6.0f:6	по таймеру systemd-tmpfiles-clean.service (суточный, очистка /tmp); 1 critical — sigma_memory_proc_dump на /proc/1/environ, плюс container_escape_init_proc и mitre_sandbox_detect_proc_read на том же файле (6.0f, открытая находка)
 (tmpfiles)	6.0f:1	форкнутый ребёнок systemd-tmpfiles до execve (усечённое имя comm); один алерт anomaly_detection warning
+# ── Волна 6.2 (2026-09-03): акторы, принесённые k8s-нодой ──────────────────
+# Стенд получил k3s v1.36.4+k3s1 (single-node). Пункт Д «Переноса в 6.1…6.4»
+# требует пополнить реестр ДО прогона, а не после FAIL: ровно одним таким
+# FAIL («новые акторы idle-часа вне реестра») закончился гейт замера №6.0d,
+# и тогда речь шла о двух акторах.
+#
+# ЧЕМ ЭТИ СТРОКИ ОТЛИЧАЮТСЯ ОТ ОСТАЛЬНЫХ. Числа сняты НЕ за idle-час, а за
+# семиминутное окно 18:53:34…19:00 UTC сразу после подъёма ноды и рестарта
+# агента, — то есть это окно СТАРТА кластера (образы, iptables-правила, CNI),
+# а не стационарный фон. Поле «замер» помечено 6.2-preflight именно поэтому:
+# членство в реестре читается по полю 1, а число здесь — не предсказание
+# idle-часа. Окончательные величины даст БАЗОВЫЙ прогон 6.2 (пункт А: первый
+# прогон после подъёма ноды меряет обучение, а не базовую линию).
+#
+# ЧЕГО ЗДЕСЬ НЕТ НАМЕРЕННО. В том же окне видны kubectl/curl/jq/cat/date/
+# systemctl/journalctl/sh — это МОЯ интерактивная сессия подъёма ноды, а не
+# фон стенда. Вносить их значило бы повторить дефект замера 6.0.F, где
+# осиротевшие поллеры наблюдателя дали 1195 совпадений/ч и новый актор
+# (память ebpf-guard-measurement-hygiene, п.5). Они появятся в реестре, только
+# если их увидит чистый idle-час без наблюдателя.
+k3s-server	6.2-preflight:497	демон k3s (control-plane + kubelet + встроенный containerd в одном процессе)
+containerd	6.2-preflight:70	containerd ноды (у k3s свой, /run/k3s/containerd/containerd.sock)
+containerd-shim	6.2-preflight:16	shim пода (усечение containerd-shim-runc-v2)
+runc	6.2-preflight:9	создание контейнера пода
+runc:[1:CHILD]	6.2-preflight:13	промежуточный процесс runc при создании контейнера
+runc:[2:INIT]	6.2-preflight:23	init контейнера; поднимает container-escape/rootkit/cis — до-6.1 источник, критерий 6.2.6
+coredns	6.2-preflight:202	DNS кластера (под kube-system); сетевые правила, см. критерий 6.2.3
+local-path-prov	6.2-preflight:11	local-path-provisioner (под kube-system, усечённое имя comm)
+iptables	6.2-preflight:126	программирование правил сервисов/CNI ноды
+ip6tables	6.2-preflight:21	то же для IPv6
+iptables-save	6.2-preflight:1	снятие текущего набора правил перед правкой
+iptables-restor	6.2-preflight:1	применение набора правил (усечённое имя comm)
+flannel	6.2-preflight:1	CNI k3s
+bridge	6.2-preflight:6	CNI-плагин bridge (setup сети пода)
+loopback	6.2-preflight:4	CNI-плагин loopback (setup сети пода)
+mount	6.2-preflight:4	монтирование томов пода kubelet'ом

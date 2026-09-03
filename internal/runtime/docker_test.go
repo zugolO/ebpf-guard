@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 const dockerInspectResp = `{
@@ -162,6 +163,29 @@ func TestNewEnricher_AutoMode_NoRuntime(t *testing.T) {
 		defaultDockerSocketPath = origDocker
 	})
 
-	_, err := NewEnricher(EnricherConfig{Mode: "auto"}, newTestLogger())
+	// Wave 6.1: auto mode no longer fails when no socket is reachable — it
+	// degrades to the cgroup-only client so container.id stays a usable rule
+	// axis. Losing the axis silently disarmed every container-keyed rule.
+	e, err := NewEnricher(EnricherConfig{Mode: "auto"}, newTestLogger())
+	require.NoError(t, err)
+	require.NotNil(t, e)
+	assert.Equal(t, cgroupOnlySource, e.Source())
+
+	// The degraded client still yields the container ID the cgroup walk found.
+	const containerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	e.pidCache[4242] = containerID
+	event := &types.Event{PID: 4242}
+	e.EnrichEvent(event)
+	require.NotNil(t, event.Enrichment)
+	assert.Equal(t, containerID, event.Enrichment.ContainerID)
+	assert.Empty(t, event.Enrichment.ContainerName, "no socket means no name/image")
+}
+
+// Explicit "docker"/"cri" modes must still fail loudly when the socket the
+// operator named is absent — that is a misconfiguration, not a degraded host,
+// and the cgroup fallback exists only for auto-detection.
+func TestNewEnricher_ExplicitMode_MissingSocketStillErrors(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "absent-docker.sock")
+	_, err := NewEnricher(EnricherConfig{Mode: "docker", SocketPath: absent}, newTestLogger())
 	require.Error(t, err)
 }

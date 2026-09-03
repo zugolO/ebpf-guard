@@ -16,6 +16,13 @@ rules:
   # тем же приёмом, что и сенситив-файл: comm ограничен ролью веб-воркера,
   # как обещает имя и описание правила ("path traversal attempt" подразумевает
   # эксплуатацию через веб-фронт, а не любой относительный путь в системе).
+  #
+  # Волна 6.1: comm-список нерасширяем в принципе — имя треда задаёт рантайм
+  # (node-приложение вроде Juice Shop поднимает файловые операции с comm
+  # "libuv-worker", не "node"), а не мы. Добавлена контейнерная ось —
+  # container.id непусто — тем же subgroups-приёмом, что container_escape_host_device
+  # (rules/container-escape.yaml, wave 6.0f №200): роль процесса подтверждается
+  # либо именем (host-инсталляции), либо фактом контейнеризации, не обоими сразу.
   - id: owasp_path_traversal
     name: "OWASP: Path traversal attempt"
     description: "Web server process accessed file with path traversal pattern (../../)"
@@ -23,10 +30,6 @@ rules:
     condition_group:
       operator: and
       conditions:
-        - field: proc.comm
-          op: in
-          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
-                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
         - field: filename
           op: regex
           values:
@@ -34,6 +37,16 @@ rules:
             - "\\.\\.\\\\"
             - "%2e%2e%2f"
             - "%252e%252e%252f"
+      subgroups:
+        - operator: or
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                        "python", "gunicorn", "uwsgi", "java", "tomcat"]
+            - field: container.id
+              op: neq
+              values: [""]
     severity: critical
     action: alert
     tags: [owasp, path-traversal, a01-broken-access-control]
@@ -47,13 +60,15 @@ rules:
     # process reading /etc/passwd — sshd at every login above all — raised this
     # "web server" rule. The process role lived only in the description. Same
     # defect P2-14 fixed for the network rules; the comm list is the same one.
+    #
+    # Wave 6.1: comm-list stays for host-installed web servers, but it's not
+    # extensible to container runtime thread names (a node app's actual file
+    # syscalls carry comm "libuv-worker", not "node") — see owasp_path_traversal
+    # above for the same fix and rationale. container.id non-empty is the
+    # second, container-native way to prove "this is a web workload, not sshd".
     condition_group:
       operator: and
       conditions:
-        - field: proc.comm
-          op: in
-          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
-                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
         - field: filename
           op: prefix
           values:
@@ -66,6 +81,16 @@ rules:
             - "/proc/self/mem"
             - "/root/.ssh/"
             - "/home/*/.ssh/"
+      subgroups:
+        - operator: or
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                        "python", "gunicorn", "uwsgi", "java", "tomcat"]
+            - field: container.id
+              op: neq
+              values: [""]
     severity: critical
     action: alert
     tags: [owasp, sensitive-file, a01-broken-access-control, lfi]

@@ -247,8 +247,28 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 	}
 	podInfo, ok := e.watcher.GetPodInfoByPID(pid)
 	if !ok {
-		e.missCount.Add(1)
-		return nil
+		// No k8s pod matched — either there's no k8s API server (plain Docker
+		// stand, wave 6.1) or the container isn't tracked by the pod watch yet.
+		// GetPodInfoByPID discards the cgroup-derived container ID in that
+		// case; fall back to it directly so container.id is still available
+		// as a rule axis even without full pod metadata.
+		containerID, cErr := e.watcher.getContainerIDFromPID(pid)
+		if cErr != nil {
+			e.missCount.Add(1)
+			return nil
+		}
+		info := &EnrichmentInfo{
+			ContainerID: containerID,
+			CachedAt:    time.Now(),
+		}
+		e.mu.Lock()
+		if existing, ok := e.enrichmentCache[pid]; ok && time.Since(existing.CachedAt) < e.cacheTTL {
+			info = existing
+		} else {
+			e.enrichmentCache[pid] = info
+		}
+		e.mu.Unlock()
+		return info
 	}
 
 	// Create enrichment info. Intern high-repetition strings (namespace, node

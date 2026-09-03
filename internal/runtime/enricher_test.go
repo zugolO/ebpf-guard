@@ -150,6 +150,45 @@ func TestEnrichEvent_CachesResults(t *testing.T) {
 	}
 }
 
+// Wave 6.1: a failed metadata query must not throw away the container ID the
+// cgroup walk already produced. Before this, a PID inside a container whose
+// runtime lookup failed (unreachable socket, container already gone) was
+// enriched as if it ran on the host, which silently disarmed every rule keyed
+// on container.id — the same defect the k8s enricher had.
+func TestEnrichEvent_RuntimeLookupFailure_KeepsCgroupContainerID(t *testing.T) {
+	const containerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	stub := &stubClient{containers: map[string]*ContainerInfo{}} // every lookup errors
+	e := newTestEnricher(t, stub)
+	e.pidCache[7777] = containerID
+
+	event := &types.Event{PID: 7777}
+	e.EnrichEvent(event)
+
+	require.NotNil(t, event.Enrichment, "enrichment must survive a failed runtime lookup")
+	assert.Equal(t, containerID, event.Enrichment.ContainerID)
+	assert.Empty(t, event.Enrichment.ContainerName, "no metadata is available, only the ID")
+	assert.Equal(t, int64(1), e.missCount.Load(), "the failure is still counted as a miss")
+
+	// The degraded entry is cached, so a broken socket costs one query per TTL
+	// rather than one per event.
+	e.EnrichEvent(&types.Event{PID: 7777})
+	assert.Equal(t, 1, stub.calls, "degraded result must be cached like any other")
+}
+
+// A PID that is not in any container stays unenriched — the fallback must not
+// invent a container for host processes.
+func TestEnrichEvent_HostProcess_StaysUnenriched(t *testing.T) {
+	stub := &stubClient{containers: map[string]*ContainerInfo{}}
+	e := newTestEnricher(t, stub)
+	// No pidCache seed and PID 0 has no /proc/0/cgroup, so the cgroup walk fails
+	// before any runtime query happens.
+	event := &types.Event{PID: 0}
+	e.EnrichEvent(event)
+
+	assert.Nil(t, event.Enrichment)
+	assert.Equal(t, 0, stub.calls, "no container ID means no runtime query at all")
+}
+
 func TestEnrichAlert_PopulatesFields(t *testing.T) {
 	const containerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
 	stub := &stubClient{

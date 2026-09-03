@@ -255,7 +255,9 @@ type EnrichmentInfo struct {
 	ContainerName  string            `json:"container_name,omitempty"`
 	ContainerImage string            `json:"container_image,omitempty"`
 	// RuntimeSource identifies which enrichment path populated this struct:
-	// "k8s", "docker", "containerd", or "crio".
+	// "k8s", "docker", "containerd", "crio", or "cgroup" — the last meaning no
+	// runtime socket was reachable and only the cgroup-derived ContainerID is
+	// populated (ContainerName/ContainerImage stay empty).
 	RuntimeSource string `json:"runtime_source,omitempty"`
 }
 

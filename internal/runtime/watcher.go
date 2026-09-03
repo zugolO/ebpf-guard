@@ -248,5 +248,26 @@ func autoDetect(socketOverride string) (RuntimeClient, string, error) {
 	if c, err := newCRIClient(""); err == nil {
 		return c, c.runtimeType, nil
 	}
-	return nil, "", fmt.Errorf("no container runtime detected (tried Docker and CRI sockets)")
+	// Wave 6.1: no runtime socket reachable. Previously this failed the whole
+	// enricher, which left container.id empty for every event and silently
+	// disabled every rule keyed on the container axis. The cgroup path needs no
+	// socket, so degrade to it instead of losing the axis: name/image stay
+	// empty, container.id stays true.
+	return &cgroupOnlyClient{}, cgroupOnlySource, nil
 }
+
+// cgroupOnlySource is the RuntimeSource reported when container identity comes
+// from /proc/[pid]/cgroup alone, with no runtime socket behind it.
+const cgroupOnlySource = "cgroup"
+
+// cgroupOnlyClient is the degraded RuntimeClient used when no container runtime
+// socket is available. It returns the container ID the cgroup walk already
+// produced and nothing else — enough to keep container.id usable as a rule axis
+// on hosts where the agent cannot reach docker.sock or the CRI endpoint.
+type cgroupOnlyClient struct{}
+
+func (c *cgroupOnlyClient) GetContainerInfo(_ context.Context, containerID string) (*ContainerInfo, error) {
+	return &ContainerInfo{ContainerID: containerID, CachedAt: time.Now()}, nil
+}
+
+func (c *cgroupOnlyClient) Close() error { return nil }

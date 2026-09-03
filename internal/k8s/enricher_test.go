@@ -157,6 +157,48 @@ func TestGetEnrichmentInfo(t *testing.T) {
 	assert.Nil(t, info)
 }
 
+// TestGetEnrichmentInfo_ContainerIDFallbackWithoutPodMatch is the wave 6.1
+// regression test for the enricher bug: GetPodInfoByPID reads container ID
+// from /proc/<pid>/cgroup internally, but used to discard it entirely when
+// no k8s pod matched — the exact situation on a stand with no k8s API
+// server (podCache always empty), where the cgroup read itself works fine.
+// getEnrichmentInfo must now fall back to the bare container ID instead of
+// returning nil, so container.id is usable as a rule axis without k8s.
+func TestGetEnrichmentInfo_ContainerIDFallbackWithoutPodMatch(t *testing.T) {
+	if _, err := os.ReadFile("/proc/self/cgroup"); err != nil {
+		t.Skip("no /proc/self/cgroup on this platform")
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	watcher := &Watcher{
+		logger:   logger,
+		podCache: make(map[string]*PodInfo), // empty: no k8s API server, exactly like the no-k8s test stand
+	}
+	e := &Enricher{
+		watcher:         watcher,
+		logger:          logger.With("component", "k8s_enricher"),
+		enrichmentCache: make(map[uint32]*EnrichmentInfo),
+		cacheTTL:        30 * time.Second,
+	}
+
+	pid := uint32(os.Getpid())
+	wantID, cErr := watcher.getContainerIDFromPID(pid)
+
+	info := e.getEnrichmentInfo(pid)
+
+	if cErr != nil {
+		// This test process itself isn't in a container cgroup — the
+		// documented miss path, not the fallback under test.
+		assert.Nil(t, info)
+		return
+	}
+
+	require.NotNil(t, info, "container ID was resolvable from cgroup (%s) but "+
+		"getEnrichmentInfo returned nil instead of falling back to it", wantID)
+	assert.Equal(t, wantID, info.ContainerID)
+	assert.Empty(t, info.PodName, "no k8s pod matched, so pod metadata must stay empty")
+}
+
 func TestIsHealthy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 

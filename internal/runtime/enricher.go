@@ -214,11 +214,18 @@ func (e *Enricher) lookupByPID(ctx context.Context, pid uint32) *ContainerInfo {
 
 	info, err := e.client.GetContainerInfo(ctx, containerID)
 	if err != nil {
-		e.logger.Debug("runtime lookup failed",
+		e.logger.Debug("runtime lookup failed, falling back to cgroup container ID",
 			slog.String("container_id", containerID[:min(12, len(containerID))]),
 			slog.Any("error", err))
 		e.missCount.Add(1)
-		return nil
+		// Wave 6.1: the metadata query failed, but the cgroup walk above already
+		// proved this PID is in a container and produced its ID. Dropping it
+		// here reported the process as running on the host, which silently
+		// disarmed every rule keyed on container.id. Serve the bare ID instead;
+		// name/image stay empty. Cached like any other entry so a broken socket
+		// costs one query per TTL rather than one per event, and so recovery is
+		// picked up on the next TTL tick.
+		info = &ContainerInfo{ContainerID: containerID, CachedAt: time.Now()}
 	}
 
 	e.containerMu.Lock()

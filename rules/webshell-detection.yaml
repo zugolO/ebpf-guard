@@ -175,13 +175,13 @@ rules:
     # Q9 (plan.md, wave 3): a web shell runs *as the web server*. Matching on
     # filename alone made every sshd login look like webshell credential
     # access. sshd reading its own host keys was also counted here.
+    # Wave 6.1: comm-list is not extensible to container runtime threads — see
+    # appexploit_lfi_passwd_access (rules/application-exploits.yaml) for the
+    # same fix and rationale. sshd on the host has no container.id, so it
+    # still can't match through the added subgroup.
     condition_group:
       operator: and
       conditions:
-        - field: proc.comm
-          op: in
-          values: ["nginx", "apache2", "httpd", "php-fpm", "node",
-                    "python", "gunicorn", "uwsgi", "java", "tomcat"]
         - field: filename
           op: in
           values:
@@ -194,6 +194,16 @@ rules:
             - "/root/.ssh/authorized_keys"
             - "/etc/ssh/ssh_host_rsa_key"
             - "/etc/ssh/ssh_host_ecdsa_key"
+      subgroups:
+        - operator: or
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["nginx", "apache2", "httpd", "php-fpm", "node",
+                        "python", "gunicorn", "uwsgi", "java", "tomcat"]
+            - field: container.id
+              op: neq
+              values: [""]
     severity: critical
     action: alert
     tags: [mitre:T1505.003, mitre:T1552, webshell, credential-access]

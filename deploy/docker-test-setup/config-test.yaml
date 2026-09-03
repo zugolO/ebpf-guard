@@ -218,4 +218,31 @@ notifications:
     path: /run/ebpf-guard/alerts.sock
 
 kubernetes:
-  enabled: false
+  # Волна 6.2 (2026-09-03): на стенде поднят k3s v1.36.4+k3s1 (single-node,
+  # --disable traefik,metrics-server,servicelb). До этого стояло false, и
+  # k8s-энричер не конструировался вовсе (cmd/ebpf-guard/main.go:1835) — на
+  # чём волна 6.1 потеряла прогон (находка №216: правка стояла в энричере,
+  # который на стенде не запускается).
+  #
+  # ЧТО ЭТОТ ФЛАГ ДВИГАЕТ ПОМИМО ОБОГАЩЕНИЯ. Ключ базовой линии дрейфа —
+  # {Comm, Namespace, AppLabel} (internal/profiler/workload.go:77-87), и
+  # Namespace/AppLabel до сих пор были пусты у ВСЕХ событий. Обогащение
+  # заполняет их разом, ключ меняется у каждого обогащённого события, и вся
+  # выученная база одномоментно уходит в learning. Поэтому первый прогон
+  # после подъёма ноды — БАЗОВЫЙ, величины дрейфа с него не засчитываются
+  # (plan.md 6.2, пункт А «Переноса в 6.1…6.4»).
+  enabled: true
+  # k3s кладёт kubeconfig сюда; --write-kubeconfig-mode 644 задан при
+  # установке, иначе клиент под сервисом его не прочитает. Пусто означало бы
+  # in-cluster (агент подом), а он здесь systemd-сервис на хосте.
+  kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+  resync_period: 300
+
+# runtime: секции нет намеренно — дефолт runtime.enrichment: "auto"
+# (config.go:2136). На этом стенде auto выбирает DOCKER-сокет (первым в
+# autoDetect, internal/runtime/watcher.go:245), а поды k3s живут в СВОЁМ
+# containerd (/run/k3s/containerd/containerd.sock). Следствие, измеряемое
+# критерием 6.2.0: у подов container_name/container_image пусты (docker-
+# клиент их не знает), а container.id уцелеет — волна 6.1 внесла деградацию
+# до голого cgroup-ID ровно на этот случай. Личность пода
+# (namespace/pod_name) даёт k8s-энричер выше, через API-сервер.

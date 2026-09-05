@@ -32,6 +32,15 @@ func init() {
 	// where the fallback path never fired must be distinguishable in /metrics
 	// from a binary that predates the counter, or "argv0_mismatch = 0" reads
 	// as "no blindness" when it may mean "no instrument".
+	// Та же причина для привязки chmod-хуков (6.2.1, слой 3): прогон, где ни
+	// один хук не привязался, обязан отличаться в /metrics от бинаря без
+	// счётчика — иначе тишина трёх правил читается как успешное сужение.
+	for _, h := range []string{"sys_enter_chmod", "sys_enter_fchmodat", "sys_enter_fchmod"} {
+		for _, r := range []string{"ok", "error", "missing"} {
+			FileHookAttach.WithLabelValues(h, r)
+		}
+	}
+
 	ProcArgsDropped.WithLabelValues("stale_exec")
 	ProcArgsDropped.WithLabelValues("argv0_mismatch")
 }
@@ -408,6 +417,43 @@ func RecordDroppedN(collector, reason string, n uint64) {
 // at a time.
 func RecordEmittedKernelN(collector string, n uint64) {
 	EventsEmittedKernel.WithLabelValues(collector).Add(float64(n))
+}
+
+// FileHookAttach counts attach outcomes of the file collector's chmod hooks
+// (волна 6.2.1, слой 3), by tracepoint and result: "ok", "error" (the
+// tracepoint exists but attach failed), "missing" (the program is absent from
+// the loaded object — a kernel object built before the layer).
+//
+// Смысл счётчика — сделать «ноль алертов о смене прав» читаемым. Три правила
+// переехали с syscall-оси на файловую; если хуки не привязались, они молчат,
+// и без этой серии тишина неотличима от «chmod никто не звал» — то есть от
+// успешного сужения.
+var FileHookAttach = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_file_hook_attach_total",
+		Help: "File-collector hook attach outcomes, by tracepoint and result (ok, error, missing)",
+	},
+	[]string{"hook", "result"},
+)
+
+// ChmodUnresolved counts chmod file events whose target path could not be
+// resolved — fchmod(2) on a descriptor opened before the agent started, or
+// evicted from the fd→path LRU. Such events match no path-scoped rule, so
+// this series is what separates "nothing changed permissions where it
+// matters" from "we never learned which file it was" (волна 6.2.1, слой 3).
+var ChmodUnresolved = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_file_chmod_unresolved_total",
+		Help: "chmod file events delivered without a resolved target path (fchmod on a pre-agent or LRU-evicted descriptor)",
+	},
+)
+
+// RecordChmodUnresolved counts one chmod event with an unresolved path.
+func RecordChmodUnresolved() { ChmodUnresolved.Inc() }
+
+// RecordFileHookAttach records one attach outcome for a file-collector hook.
+func RecordFileHookAttach(hook, result string) {
+	FileHookAttach.WithLabelValues(hook, result).Inc()
 }
 
 // RecordProcArgsDropped increments the proc.args drop counter with reason.

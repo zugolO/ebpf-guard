@@ -9,14 +9,27 @@
 rules:
   # Rule: Known mining pool ports
   # Detects outbound connections to well-known mining pool ports
+  # Wave 6.2.1, №220: 8080 in this list means any process that happens to
+  # speak to a service on 8080 (coredns's health-check endpoint among them —
+  # 83/window on the 6.2 baseline) matches "mining pool port". Excluded by
+  # comm rather than dropping 8080 from the port list, which would weaken
+  # the rule everywhere, not just for this node's own DNS pod.
+  # Second pass (04.09.2026, re-read of the 6.2 window): k3s-server carries
+  # its own slice of the SAME rule (16/window) that the finding's per-comm
+  # table did not name because the table listed each comm's top rules only.
+  # Excluding coredns alone would have left ~96/h from this rule at a gate
+  # of 100/h — the node's control-plane traffic to in-cluster services on
+  # these ports is the same class, not mining.
   - id: cryptominer_pool_ports
     name: "Cryptominer: Connection to known mining pool port"
     description: "Process connected to a port commonly used by cryptocurrency mining pools"
     event_type: network
-    condition:
-      field: dport
-      op: in
-      values: [3333, 4444, 14444, 45560, 8080, 9999, 20535, 20536, 45700, 45570]
+    condition_group:
+      operator: and
+      conditions:
+        - field: dport
+          op: in
+          values: [3333, 4444, 14444, 45560, 8080, 9999, 20535, 20536, 45700, 45570]
     severity: critical
     action: alert
     tags: [cryptominer, crypto, mining, network]
@@ -24,6 +37,67 @@ rules:
       tactic: "Impact"
       technique: "T1496"
       technique_name: "Resource Hijacking"
+    exceptions:
+      # Волна 6.2.1, продакшен-ужесточение (№220/№221). Фон ноды исключается
+      # ТОЛЬКО в хостовом контексте: comm процесс назначает себе сам
+      # (prctl(PR_SET_NAME), exec -a), а пустые container_id/pod_name приходят
+      # из cgroup и означают «задача не в контейнере». Полезная нагрузка в
+      # поде, назвавшая себя "k3s-server", под исключение не попадает и правило
+      # её поднимает. Если обогащения нет вовсе (нет k8s/рантайма), поля пусты
+      # у ВСЕХ событий и исключение работает как прежний список по comm —
+      # ослабление возможно только там, где оси нет физически, и это видно
+      # нулём приборности 6.2.1.0, а не молча.
+      - name: node-host-daemon
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["k3s-server"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Волна 6.2.1, слой 2 (№220/№221): образ демона. Ось из cgroup выше
+            # отвечает только «процесс НЕ в контейнере» и у всех хостовых процессов
+            # пуста одинаково — она не отличает демона ноды от чего угодно,
+            # запущенного на ней под root с тем же comm. /proc/<pid>/exe ставит ядро
+            # в execve: prctl(PR_SET_NAME) и `exec -a` меняют comm и argv[0] и эту
+            # ссылку не трогают. Условие СТОИТ ПОСЛЕДНИМ намеренно: группа "and"
+            # вычисляется по порядку с коротким замыканием, поэтому readlink
+            # случается только там, где имя демона уже совпало.
+            #
+            # Проверяется КАТАЛОГ образа, а не точный путь, потому что точный путь
+            # k3s/containerd зависит от способа установки, а вписать сюда догадку —
+            # значит рискнуть тем, что исключение молча перестанет применяться.
+            # Ужесточение до точных путей — после того, как контроль 6.2.1.8
+            # напечатает фактические exe_path демонов этого стенда. Уже в этой
+            # редакции обход требует записи в системный каталог (root + срабатывание
+            # evasion_system_binary_replace), а не `cp` в /tmp.
+            #
+            # Пустой exe_path (процесс умер, нет доступа к /proc) под prefix не
+            # подходит — исключение не применяется, правило срабатывает: отказ
+            # открытый, в сторону шума, который видно.
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
+      # Волна 6.2.1, продакшен-ужесточение (№220/№221). Системный под ноды
+      # исключается по СВОЕМУ namespace, а не по одному comm: namespace
+      # приходит из cgroup→pod, процесс его себе не назначит, а имя
+      # "coredns" — назначит. Под в чужом namespace с тем же именем
+      # исключения не получает.
+      - name: kube-system-pod
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["coredns"]
+            - field: k8s.namespace
+              op: eq
+              values: ["kube-system"]
 
   # Rule: Known mining binary names
   # Detects processes with names matching known mining software
@@ -144,6 +218,15 @@ rules:
 
   # Rule: XMRig specific signatures
   # XMRig is the most common Monero mining software
+  # Wave 6.2.1, №220: this is the condition-error case named directly in the
+  # finding, not a threshold — 'config\.json' alone matches ANY file named
+  # config.json anywhere on disk, and on this node that is CoreDNS's own
+  # projected ConfigMap (…/kubernetes.io~configmap/config-volume/…/config.json,
+  # k3s-server) and local-path-provisioner's config (20/window on the 6.2
+  # baseline). Real XMRig deployments keep config.json/pools.txt next to the
+  # xmrig binary itself, so both generic patterns are anchored to a path that
+  # also contains "xmrig"; the bare 'xmrig' pattern (binary/process name) is
+  # untouched and still matches a mining binary dropped under any path.
   - id: cryptominer_xmrig_signature
     name: "Cryptominer: XMRig signature detected"
     description: "Process exhibiting XMRig-specific behavior patterns"
@@ -153,8 +236,8 @@ rules:
       op: regex
       values:
         - 'xmrig'
-        - 'config\.json'
-        - 'pools\.txt'
+        - 'xmrig.*config\.json'
+        - 'xmrig.*pools\.txt'
     severity: critical
     action: alert
     tags: [cryptominer, xmrig, monero, mining]

@@ -15,16 +15,72 @@ rules:
     action: alert
 
   # CIS 5.1.3: Minimize access to secrets
+  # Wave 6.2.1, №220/№221: k3s bundles the kubelet inside the "k3s-server"
+  # binary, which walks every pod's secret/token directory under
+  # /var/lib/kubelet/pods/ on every sync (24/window on the 6.2 baseline) —
+  # that alone saturated the rule's rate limiter and made a real attacker
+  # reading the same prefix from the host invisible (№221). Excluding the
+  # node's own kubelet-equivalent by comm, not by narrowing the path, keeps
+  # the rule armed for anyone else reading the same prefix — including a
+  # compromised host process, which is exactly what 6.2.1.2 exercises.
   - id: cis_5_1_3_secret_access
     name: "CIS 5.1.3: Direct secret access detected"
     description: "Process accessing Kubernetes secrets directly"
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values: ["/var/lib/kubelet/pods/", "/run/secrets/kubernetes.io/"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values: ["/var/lib/kubelet/pods/", "/run/secrets/kubernetes.io/"]
     severity: warning
     action: alert
+    exceptions:
+      # Волна 6.2.1, продакшен-ужесточение (№220/№221). Фон ноды исключается
+      # ТОЛЬКО в хостовом контексте: comm процесс назначает себе сам
+      # (prctl(PR_SET_NAME), exec -a), а пустые container_id/pod_name приходят
+      # из cgroup и означают «задача не в контейнере». Полезная нагрузка в
+      # поде, назвавшая себя "k3s-server", под исключение не попадает и правило
+      # её поднимает. Если обогащения нет вовсе (нет k8s/рантайма), поля пусты
+      # у ВСЕХ событий и исключение работает как прежний список по comm —
+      # ослабление возможно только там, где оси нет физически, и это видно
+      # нулём приборности 6.2.1.0, а не молча.
+      - name: node-host-daemon
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["k3s-server", "kubelet"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Волна 6.2.1, слой 2 (№220/№221): образ демона. Ось из cgroup выше
+            # отвечает только «процесс НЕ в контейнере» и у всех хостовых процессов
+            # пуста одинаково — она не отличает демона ноды от чего угодно,
+            # запущенного на ней под root с тем же comm. /proc/<pid>/exe ставит ядро
+            # в execve: prctl(PR_SET_NAME) и `exec -a` меняют comm и argv[0] и эту
+            # ссылку не трогают. Условие СТОИТ ПОСЛЕДНИМ намеренно: группа "and"
+            # вычисляется по порядку с коротким замыканием, поэтому readlink
+            # случается только там, где имя демона уже совпало.
+            #
+            # Проверяется КАТАЛОГ образа, а не точный путь, потому что точный путь
+            # k3s/containerd зависит от способа установки, а вписать сюда догадку —
+            # значит рискнуть тем, что исключение молча перестанет применяться.
+            # Ужесточение до точных путей — после того, как контроль 6.2.1.8
+            # напечатает фактические exe_path демонов этого стенда. Уже в этой
+            # редакции обход требует записи в системный каталог (root + срабатывание
+            # evasion_system_binary_replace), а не `cp` в /tmp.
+            #
+            # Пустой exe_path (процесс умер, нет доступа к /proc) под prefix не
+            # подходит — исключение не применяется, правило срабатывает: отказ
+            # открытый, в сторону шума, который видно.
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
 
   # CIS 5.2.1: Minimize the admission of privileged containers
   - id: cis_5_2_1_privileged_container

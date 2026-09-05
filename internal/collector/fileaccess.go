@@ -29,6 +29,13 @@ type FileaccessCollector struct {
 	trackOpen  bool // attach sys_enter_openat hooks
 	trackRead  bool // attach sys_enter_read hooks (high volume)
 	trackWrite bool // attach sys_enter_write hooks (high volume)
+	// trackChmod attaches the chmod/fchmod/fchmodat hooks (волна 6.2.1, слой 3).
+	// Включён по умолчанию и НЕ выведен в WithFileOps: три правила о смене прав
+	// переведены на файловую ось и без этих хуков молчат, а выключатель, гасящий
+	// правила без единой записи в логе, — это ровно тот тихий отказ, ради
+	// которого волна и затевалась. Объём мал (chmod на порядки реже read/write),
+	// так что торговаться тут не за что.
+	trackChmod bool
 }
 
 // NewFileaccessCollector creates a new file access event collector.
@@ -42,6 +49,7 @@ func NewFileaccessCollector(logger *slog.Logger) (*FileaccessCollector, error) {
 		trackOpen:  true,
 		trackRead:  false,
 		trackWrite: false,
+		trackChmod: true,
 	}, nil
 }
 
@@ -207,6 +215,15 @@ func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {
 	if c.objs.TraceOpenExit != nil {
 		progs["trace_open_exit"] = c.objs.TraceOpenExit
 	}
+	for name, p := range map[string]*ebpf.Program{
+		"trace_chmod":    c.objs.TraceChmod,
+		"trace_fchmodat": c.objs.TraceFchmodat,
+		"trace_fchmod":   c.objs.TraceFchmod,
+	} {
+		if p != nil {
+			progs[name] = p
+		}
+	}
 	return progs
 }
 
@@ -348,10 +365,57 @@ func (c *FileaccessCollector) attachPrograms() error {
 		}
 	}
 
+	// Волна 6.2.1, слой 3: смена прав на файловой оси. Три правила
+	// (evasion_chmod_sensitive, sigma_chmod_executable_tmp,
+	// sigma_sensitive_file_chmod) переехали сюда с syscall-оси, где путь не
+	// разрешался и все три проверяли одно и то же «случился chmod».
+	//
+	// Неудача привязки НЕ тихая. sys_chmod и sys_fchmodat есть не на всякой
+	// архитектуре (на arm64 chmod(2) отсутствует, glibc идёт через
+	// fchmodat), поэтому промах одного хука — штатное разнообразие ядер, а не
+	// поломка, и падать из-за него нельзя. Но и молчать нельзя: без счётчика
+	// «ноль chmod-алертов за прогон» неотличим от «chmod никто не звал». Оба
+	// исхода материализуются с нуля, чтобы прогон без единой привязки
+	// отличался в /metrics от бинаря, который счётчика не знает.
+	if c.trackChmod {
+		chmodHooks := []struct {
+			tp   string
+			prog *ebpf.Program
+		}{
+			{"sys_enter_chmod", c.objs.TraceChmod},
+			{"sys_enter_fchmodat", c.objs.TraceFchmodat},
+			{"sys_enter_fchmod", c.objs.TraceFchmod},
+		}
+		attached := 0
+		for _, h := range chmodHooks {
+			if h.prog == nil {
+				exporter.RecordFileHookAttach(h.tp, "missing")
+				continue
+			}
+			l, err := link.Tracepoint("syscalls", h.tp, h.prog, nil)
+			if err != nil {
+				exporter.RecordFileHookAttach(h.tp, "error")
+				c.logger.Warn("failed to attach chmod hook", "tracepoint", h.tp, "error", err)
+				continue
+			}
+			exporter.RecordFileHookAttach(h.tp, "ok")
+			c.links = append(c.links, l)
+			attached++
+		}
+		if attached == 0 {
+			// Ни одного хука — правила о смене прав на этом ядре мертвы
+			// целиком. Это не повод падать (агент детектирует ещё сотнями
+			// правил), но повод сказать вслух: критерий, считающий их
+			// срабатывания, читать нельзя.
+			c.logger.Error("no chmod hook attached: the file-axis chmod rules cannot fire on this kernel")
+		}
+	}
+
 	c.logger.Info("fileaccess hooks attached",
 		slog.Bool("open", c.trackOpen),
 		slog.Bool("read", c.trackRead),
 		slog.Bool("write", c.trackWrite),
+		slog.Bool("chmod", c.trackChmod),
 	)
 	return nil
 }
@@ -447,5 +511,22 @@ func (c *FileaccessCollector) parseEvent(raw []byte, event *types.Event) error {
 		return err
 	}
 	*event = fe.ToTypesEvent()
+
+	// Волна 6.2.1, слой 3. chmod, чей путь не разрешился, — это fchmod(2) по
+	// дескриптору, открытому до старта агента или вытесненному из LRU
+	// fd→путь. Такое событие правилам с префиксом пути не подходит, то есть
+	// не даёт алерта. Отличие «правила молчат, потому что никто не менял прав
+	// в опасных местах» от «правила молчат, потому что мы не узнали путь»
+	// держится ровно на этом счётчике: без него сужение слоя 3 выглядело бы
+	// успешным в обоих случаях.
+	if event.Type == types.EventFileAccess && event.File != nil &&
+		event.File.Op == fileOpChmod && event.File.FDPath == "" {
+		exporter.RecordChmodUnresolved()
+	}
 	return nil
 }
+
+// fileOpChmod — FILE_OP_CHMOD из bpf/common.h. Держится здесь, а не берётся
+// из correlator.fileOpNames, чтобы коллектор не зависел от корреляционного
+// слоя ради одной константы протокола.
+const fileOpChmod uint8 = 3

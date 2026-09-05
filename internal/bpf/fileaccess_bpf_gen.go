@@ -38,7 +38,10 @@ type FileaccessMaps struct {
 
 // FileaccessPrograms holds the BPF programs exported by bpf/fileaccess.bpf.c.
 type FileaccessPrograms struct {
+	TraceChmod       *ebpf.Program `ebpf:"trace_chmod"`
 	TraceClose       *ebpf.Program `ebpf:"trace_close"`
+	TraceFchmod      *ebpf.Program `ebpf:"trace_fchmod"`
+	TraceFchmodat    *ebpf.Program `ebpf:"trace_fchmodat"`
 	TraceOpen        *ebpf.Program `ebpf:"trace_open"`
 	TraceOpenExit    *ebpf.Program `ebpf:"trace_open_exit"`
 	TraceOpenat2Exit *ebpf.Program `ebpf:"trace_openat2_exit"`
@@ -55,8 +58,17 @@ type FileaccessObjects struct {
 // Close releases all BPF resources held by the objects.
 func (o *FileaccessObjects) Close() error {
 	var errs []error
+	if o.TraceChmod != nil {
+		errs = append(errs, o.TraceChmod.Close())
+	}
 	if o.TraceClose != nil {
 		errs = append(errs, o.TraceClose.Close())
+	}
+	if o.TraceFchmod != nil {
+		errs = append(errs, o.TraceFchmod.Close())
+	}
+	if o.TraceFchmodat != nil {
+		errs = append(errs, o.TraceFchmodat.Close())
 	}
 	if o.TraceOpen != nil {
 		errs = append(errs, o.TraceOpen.Close())

@@ -383,7 +383,11 @@ var syscallNrStrings [512]string
 // fileOpNames maps FileEvent.Op to a human-readable name. Package-level array
 // avoids the []string{...} literal allocation that would otherwise occur on
 // every file-access rule evaluation (once per file event × rules with op field).
-var fileOpNames = [3]string{"open", "read", "write"}
+// Индекс 3 — chmod (волна 6.2.1, слой 3): смена прав перестала быть видна
+// только как номер сисколла и приходит теперь файловым событием с
+// разрешённым путём. Порядок и значения обязаны совпадать с FILE_OP_* в
+// bpf/common.h — расхождение здесь переименует операцию, а не сломает сборку.
+var fileOpNames = [4]string{"open", "read", "write", "chmod"}
 
 // gpuOpNames maps GPUEvent.Op to a human-readable name.
 var gpuOpNames = [6]string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}
@@ -1316,6 +1320,10 @@ func normaliseFieldName(field string) string {
 		return "container_id"
 	case "k8s.pod":
 		return "pod_name"
+	case "k8s.namespace":
+		return "namespace"
+	case "proc.exe_path":
+		return "exe_path"
 	case "network.dport":
 		return "dport"
 	case "network.sport":
@@ -1353,6 +1361,55 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 	// Normalise dotted-name aliases (file.path → filename, proc.comm → comm, etc.)
 	// to the canonical field names expected by the rest of getFieldValue.
 	field = normaliseFieldName(field)
+
+	// Workload identity is resolved BEFORE the per-type switch, so it is
+	// available on every event type rather than only on file events.
+	//
+	// Wave 6.2.1 (№220/№221). Wave 6.0f added container.id/k8s.pod to file
+	// events alone, and the consequence surfaced when the node's background
+	// had to be narrowed: network and syscall rules had no identity axis at
+	// all, so every exclusion for a node daemon had to be written against
+	// comm. comm is 16 bytes the process assigns to ITSELF (prctl(PR_SET_NAME),
+	// exec -a), so each of those exclusions doubles as a bypass: a payload in
+	// a pod that renames itself "k3s-server" inherits the node's silence on
+	// the very rules that watch for a node compromise. container_id/pod_name/
+	// namespace come from the cgroup the kernel put the task in, resolved by
+	// the enricher — a process cannot assign them to itself.
+	//
+	// Empty is the honest answer when nothing enriched the event (no k8s, no
+	// runtime socket, event predates enrichment): an exclusion scoped to a
+	// concrete identity then does not match and the rule fires. Exclusions
+	// therefore fail OPEN, toward detection and noise, never toward silence.
+	switch field {
+	case "container_id":
+		if e.Enrichment != nil {
+			return e.Enrichment.ContainerID
+		}
+		return ""
+	case "pod_name":
+		if e.Enrichment != nil {
+			return e.Enrichment.PodName
+		}
+		return ""
+	case "namespace":
+		if e.Enrichment != nil {
+			return e.Enrichment.Namespace
+		}
+		return ""
+	case "exe_path":
+		// Слой 2 (см. exepath.go). Ось из cgroup отвечает «в контейнере или
+		// нет» и у ВСЕХ хостовых процессов пуста одинаково, поэтому хостовую
+		// половину исключений ею не сузить. exe_path — образ, назначенный
+		// ядром в execve; comm и argv[0] процесс подделывает, эту ссылку нет.
+		//
+		// Разрешение прямое (readlinkat), без кэша, поэтому в исключении
+		// условие на exe_path обязано стоять ПОСЛЕ условия на comm: группа
+		// "and" вычисляется по порядку с коротким замыканием
+		// (evaluateConditionGroup), так что readlink случается только для
+		// событий, у которых имя демона уже совпало, — единицы в секунду, а
+		// не поток. Порядок в rules/*.yaml — часть контракта, а не стиль.
+		return resolveExePath(e.PID)
+	}
 
 	switch e.Type {
 	case types.EventTCPConnect:
@@ -1453,22 +1510,6 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return strconv.FormatUint(uint64(e.PPID), 10)
 		case "parent_comm":
 			return util.BytesToString(e.ParentComm[:])
-		case "container_id":
-			// Wave 6.0f, №200: container_escape_host_device needs to tell a
-			// container reading a raw host device from the host itself
-			// reading the same device apart. Empty when Enrichment was never
-			// populated (no k8s/runtime enricher configured, or the event
-			// predates enrichment) — that reads as "host" via condOpEquals
-			// against "", which is the conservative default.
-			if e.Enrichment != nil {
-				return e.Enrichment.ContainerID
-			}
-			return ""
-		case "pod_name":
-			if e.Enrichment != nil {
-				return e.Enrichment.PodName
-			}
-			return ""
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {

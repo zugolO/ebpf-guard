@@ -357,22 +357,30 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 	}
 }
 
-// TestStage1_5_9d_SensitiveFileChmodMovedToSyscallAxis pins the 5.9d fix: the
-// old event_type: file condition never checked the operation at all (any
-// open/read/write to /etc/shadow tripped a rule named "chmod"), and the
-// collector has no chmod hook on that axis to check in the first place —
-// FileEvent.Op only ever reports open/read/write (bpf/common.h FILE_OP_*).
-// The fix moved detection to the syscall axis (nr in chmod/fchmod/fchmodat),
-// which is the only place a genuine chmod is observable, at the cost of path
-// specificity (syscall args are raw pointers, not resolved paths — see
-// RulesRequiringFileOp / sigma_chmod_executable_tmp for the same limitation).
-func TestStage1_5_9d_SensitiveFileChmodMovedToSyscallAxis(t *testing.T) {
+// TestStage1_6_2_1_SensitiveFileChmodOnFileAxis закрепляет слой 3 волны 6.2.1
+// и заменяет собой прежний TestStage1_5_9d_SensitiveFileChmodMovedToSyscallAxis.
+//
+// История в двух шагах. До 5.9d правило стояло на файловой оси и не проверяло
+// операцию вовсе: любое open/read/write по /etc/shadow поднимало правило с
+// именем "chmod". 5.9d перенесла его на syscall-ось — единственное место, где
+// НАСТОЯЩИЙ chmod тогда был виден, — ценой полной потери пути: аргументы
+// сисколла это сырые указатели. 6.2.1 (находка №220) сняла эту цену: chmod
+// заведён в файловом коллекторе (FILE_OP_CHMOD, bpf/fileaccess.bpf.c) с
+// разрешением пути, и правило вернулось на файловую ось уже с ОБОИМИ
+// предикатами — и операцией, и путём.
+//
+// Тест держит три вещи, которые терять нельзя ни при каком следующем переносе:
+// операция проверяется, путь проверяется, и разделение волны 5.1 остаётся
+// понижением, а не подавлением (sshd/cron идут в info-двойник, а не в тишину).
+func TestStage1_6_2_1_SensitiveFileChmodOnFileAxis(t *testing.T) {
 	engine := correlator.NewRuleEngine(loadStage1Rules(t))
 
-	const nrChmod int64 = 90
+	const opChmod uint8 = 3 // FILE_OP_CHMOD
+	const opRead uint8 = 1
+	const credPath = "/etc/shadow"
 
 	for _, daemonComm := range []string{"sshd", "cron"} {
-		alerts := engine.Evaluate(stage1SyscallEvent(daemonComm, nrChmod))
+		alerts := engine.Evaluate(stage1FileEvent(daemonComm, credPath, opChmod))
 		byID := make(map[string]types.Alert)
 		for _, a := range alerts {
 			byID[a.RuleID] = a
@@ -391,16 +399,44 @@ func TestStage1_5_9d_SensitiveFileChmodMovedToSyscallAxis(t *testing.T) {
 	}
 
 	// A non-daemon process (attacker) must still get the base rule.
-	alerts := engine.Evaluate(stage1SyscallEvent("attacker", nrChmod))
+	alerts := engine.Evaluate(stage1FileEvent("attacker", credPath, opChmod))
 	byID := make(map[string]bool)
 	for _, a := range alerts {
 		byID[a.RuleID] = true
 	}
 	assert.True(t, byID["sigma_sensitive_file_chmod"],
-		"sigma_sensitive_file_chmod did not fire for a non-daemon chmod syscall — "+
-			"5.9d must not weaken chmod detection while fixing the missing operation predicate")
+		"sigma_sensitive_file_chmod did not fire for a non-daemon chmod — "+
+			"6.2.1 must not weaken chmod detection while restoring the path predicate")
 	assert.False(t, byID["sigma_sensitive_file_chmod_daemon"],
 		"sigma_sensitive_file_chmod_daemon fired for a non-daemon process — must be scoped to sshd/cron only")
+
+	// Предикат операции: чтение того же файла — это НЕ смена прав. Ровно этот
+	// дефект 5.9d и чинила, и он обязан оставаться починенным на новой оси
+	// (чтение /etc/shadow покрывают sensitive_file_read и
+	// sigma_passwd_shadow_read, отдельно и под своими именами).
+	for _, id := range []string{"sigma_sensitive_file_chmod", "sigma_sensitive_file_chmod_daemon"} {
+		for _, a := range engine.Evaluate(stage1FileEvent("attacker", credPath, opRead)) {
+			assert.NotEqual(t, id, a.RuleID,
+				"%s fired on a READ of %s — the operation predicate is gone again", id, credPath)
+		}
+	}
+
+	// Предикат пути: chmod вне списка учётных файлов этому правилу не
+	// принадлежит. До 6.2.1 подходил любой chmod любого файла, и это давало
+	// 144 алерта из 1787 в окне замера 6.2 на три правила-близнеца.
+	for _, a := range engine.Evaluate(stage1FileEvent("attacker", "/var/lib/systemd/timesync/clock", opChmod)) {
+		assert.NotContains(t, a.RuleID, "sensitive_file_chmod",
+			"a chmod outside the credential set matched %s — the path predicate is gone again", a.RuleID)
+	}
+
+	// Старая ось обязана молчать: если бы правило осталось и на syscall-оси,
+	// объём не изменился бы, а критерий 6.2.1.1 считает сумму, а не разность.
+	for _, nr := range []int64{90, 91, 268} {
+		for _, a := range engine.Evaluate(stage1SyscallEvent("attacker", nr)) {
+			assert.NotContains(t, a.RuleID, "chmod",
+				"syscall nr=%d still raises %s — the rule lives on two axes at once", nr, a.RuleID)
+		}
+	}
 }
 
 // TestStage1_5_1_ContainerEscapeInitProcDaemon pins the container_escape_init_proc

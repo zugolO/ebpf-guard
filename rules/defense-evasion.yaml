@@ -47,19 +47,47 @@ rules:
     tags: [mitre:T1070.006, defense-evasion]
 
   # MITRE ATT&CK: T1222 — File and Directory Permissions Modification
+  #
+  # Волна 6.2.1, слой 3 (находка №220). Правило обещало «/bin, /sbin,
+  # /usr/bin, /usr/sbin» с 2024 года, а условие проверяло ровно один факт —
+  # «случился chmod», потому что на syscall-оси аргументы chmod это сырые
+  # указатели, а не разрешённые строки. Ровно то же условие было ещё у двух
+  # правил (sigma_chmod_executable_tmp, sigma_sensitive_file_chmod), поэтому
+  # каждый chmod ЛЮБОГО файла давал три алерта: 144 из 1787 алертов окна
+  # замера 6.2, крупнейший одиночный кластер, и ни один из трёх не отвечал на
+  # вопрос «что именно изменили».
+  #
+  # Сузить их исключениями было нельзя: предикат пути на событии без пути даёт
+  # «поле пусто → не совпало», то есть тихую смерть правила. Поэтому chmod
+  # заведён там, где путь разрешается, — в файловом коллекторе
+  # (bpf/fileaccess.bpf.c, FILE_OP_CHMOD), а правило переехало на file-ось и
+  # впервые проверяет то, что написано в его имени. Объём падает не потому,
+  # что кого-то заглушили, а потому, что три копии одного условия стали тремя
+  # разными правилами.
+  #
+  # ЧЕГО ЭТО ПРАВИЛО НЕ ВИДИТ. fchmod(2) по дескриптору, открытому ДО старта
+  # агента (или вытесненному из LRU fd→путь), приходит с пустым file.path и
+  # под префикс не подходит. Такие события считаются отдельно
+  # (ebpf_guard_file_chmod_unresolved_total): «ноль алертов» читается против
+  # этого счётчика, а не вместо него.
   - id: evasion_chmod_sensitive
-    name: "Permissions changed on sensitive system binary"
+    name: "Permissions changed on a system binary"
     description: >
-      chmod/fchmod was called on a file in /bin, /sbin, /usr/bin, or /usr/sbin.
-      Attackers make malicious binaries world-executable or restore permissions
-      after replacement.
-    event_type: syscall
+      chmod/fchmod/fchmodat changed the mode of a file under /bin, /sbin,
+      /usr/bin, /usr/sbin or /usr/local/{bin,sbin}. Attackers make malicious
+      binaries world-executable or restore permissions after replacing a
+      system utility.
+    event_type: file
     condition_group:
       operator: and
       conditions:
-        - field: syscall.nr
-          op: in
-          values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
+        - field: file.op
+          op: eq
+          values: ["chmod"]
+        - field: file.path
+          op: prefix
+          values: ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/",
+                   "/usr/local/bin/", "/usr/local/sbin/"]
         - field: proc.comm
           op: not_in
           values: ["dpkg", "rpm", "apt", "yum", "dnf", "zypper", "pacman",
@@ -200,6 +228,14 @@ rules:
     tags: [mitre:T1070.004, defense-evasion]
 
   # MITRE ATT&CK: T1562.004 — Impair Defenses: Disable or Modify System Firewall
+  # Wave 6.2.1, №220/№221: this condition never looked at the arguments, so
+  # it fired on EVERY exec of iptables/ip6tables regardless of the subcommand
+  # — including flannel's `iptables -C ... --wait` chain-membership checks
+  # forked by k3s-server, which alone pinned the rule's rate limiter at its
+  # ceiling (100/window on the 6.2 baseline). This is the condition bug
+  # named directly in the finding, not a threshold: the rule name promises
+  # "flushed" and the condition matched every invocation. Narrowed to the
+  # actual flush/delete-chain flags — the same set sigma_iptables_flush uses.
   - id: evasion_iptables_flush
     name: "iptables/nftables rules flushed"
     description: >
@@ -215,6 +251,13 @@ rules:
         - field: syscall.nr
           op: equals
           values: ["59"]
+        - field: proc.args
+          op: regex
+          values:
+            - "(^|\\s)(-F|--flush|-X|--delete-chain)(\\s|$)"
+            - "flush ruleset"
+            - "--panic"
+            - "disable"
     severity: warning
     action: alert
     tags: [mitre:T1562.004, defense-evasion]

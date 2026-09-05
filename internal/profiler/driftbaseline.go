@@ -168,7 +168,18 @@ type DriftBaselineProfiler struct {
 	overdueGauge    prometheus.Gauge
 	saturatedGauge  prometheus.Gauge
 	evictionsTotal  prometheus.Counter
-	log             *slog.Logger
+	// signatureCapReachedTotal counts every profile freeze event caused by
+	// MaxSignaturesPerWorkload — cumulative, unlike saturatedGauge (a
+	// snapshot of profiles CURRENTLY frozen, which can fall back to zero
+	// when a frozen profile is evicted by the unrelated MaxWorkloads cap).
+	// Wave 6.2.1, finding №223: the drift-baseline log line
+	// "workload signature cap reached, baseline frozen incomplete" had no
+	// metric backing it at all, so a sentinel watching only
+	// evictions_total/profiles (the MaxWorkloads ceiling) declared the
+	// instrument healthy while the baseline was silently freezing on the
+	// MaxSignatures ceiling instead.
+	signatureCapReachedTotal prometheus.Counter
+	log                      *slog.Logger
 }
 
 // NewDriftBaselineProfiler creates a new profiler with the given config.
@@ -241,6 +252,10 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 			Name: "ebpf_guard_drift_baseline_evictions_total",
 			Help: "Total drift baseline profiles evicted because the workload cap was reached.",
 		}),
+		signatureCapReachedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_drift_baseline_signature_cap_reached_total",
+			Help: "Total number of times a workload profile's signature set hit MaxSignaturesPerWorkload and its baseline froze incomplete. Cumulative — unlike saturated_profiles, does not fall back to zero when a frozen profile is later evicted (wave 6.2.1, finding №223).",
+		}),
 	}
 }
 
@@ -249,6 +264,7 @@ func (p *DriftBaselineProfiler) RegisterMetrics(reg prometheus.Registerer) error
 	for _, c := range []prometheus.Collector{
 		p.suppressedTotal, p.anomaliesTotal, p.learningGauge,
 		p.profilesGauge, p.stuckGauge, p.overdueGauge, p.saturatedGauge, p.evictionsTotal,
+		p.signatureCapReachedTotal,
 	} {
 		if err := reg.Register(c); err != nil {
 			return err
@@ -445,6 +461,7 @@ func (p *DriftBaselineProfiler) learnSignatureLocked(prof *driftWorkloadProfile,
 	if p.maxSignatures > 0 && len(prof.signatures) >= p.maxSignatures {
 		if !prof.saturated {
 			prof.saturated = true
+			p.signatureCapReachedTotal.Inc()
 			p.log.Warn("drift-baseline: workload signature cap reached, baseline frozen incomplete",
 				"workload", key.Comm, "namespace", key.Namespace,
 				"max_signatures", p.maxSignatures)

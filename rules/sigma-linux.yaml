@@ -228,23 +228,36 @@ rules:
     action: alert
     tags: [mitre:T1105, sigma, tool-transfer, staging]
 
-  # 5.9d (сплошная ревизия, plan.md): reverse asymmetry — the name/description
-  # claim "/tmp or /dev/shm" scoping, but the condition only checks the
-  # syscall number. This was never a missing-predicate bug to fix by adding
-  # a path filter: chmod/fchmod/fchmodat syscall args are raw pointers, not
-  # resolved strings (see RulesRequiringFileOp, sigma_sensitive_file_chmod
-  # above for the same limitation), so no rule on event_type: syscall can
-  # check a path today. Name/description corrected to state what is actually
-  # detected — any chmod +x, not specifically in /tmp or /dev/shm — rather
-  # than leaving a claim the condition cannot back up.
+  # 5.9d (сплошная ревизия, plan.md): reverse asymmetry — имя и описание
+  # обещали привязку к /tmp и /dev/shm, а условие проверяло только номер
+  # сисколла. Тогда это исправили в СЛОВАХ: описание переписали под то, что
+  # правило действительно умеет, потому что путь на syscall-оси не разрешался
+  # физически.
+  #
+  # Волна 6.2.1, слой 3 (находка №220): теперь разрешается. chmod заведён в
+  # файловом коллекторе (FILE_OP_CHMOD), правило переехало на file-ось, и имя
+  # снова описывает условие — на этот раз потому, что условие догнало имя, а
+  # не наоборот. Вместе с evasion_chmod_sensitive и sigma_sensitive_file_chmod
+  # это правило давало три алерта на каждый chmod любого файла (144 из 1787
+  # алертов окна замера 6.2); теперь три правила смотрят на три разных места.
+  #
+  # Права НЕ проверяются: у движка нет побитовой операции, а перечислять
+  # «режимы с битом x» списком значит промахнуться мимо первого же необычного.
+  # Правило детектирует ЛЮБУЮ смену прав в каталогах подготовки — что и есть
+  # сигнал T1105, chmod +x там лишь самый частый его вид.
   - id: sigma_chmod_executable_tmp
-    name: "chmod syscall observed (path not resolved)"
-    description: "A chmod/fchmod/fchmodat syscall was made. The collector cannot resolve the target path at the syscall layer, so this cannot be scoped to /tmp or /dev/shm despite the id name (kept for continuity) — treat as a broad staging signal, not location-specific."
-    event_type: syscall
-    condition:
-      field: nr
-      op: in
-      values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
+    name: "Permissions changed on a file in a staging directory"
+    description: "chmod/fchmod/fchmodat changed the mode of a file under /tmp, /var/tmp or /dev/shm — the staging directories a downloaded payload is made executable in (T1105). Mode bits are not inspected: any permission change in these directories is the signal."
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.op
+          op: eq
+          values: ["chmod"]
+        - field: file.path
+          op: prefix
+          values: ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/shm/"]
     severity: warning
     action: alert
     tags: [mitre:T1105, mitre:T1222, sigma, chmod, staging]
@@ -387,6 +400,36 @@ rules:
     action: alert
     tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion]
     exceptions:
+      # Wave 6.2.1, №220: k3s-server rotates /var/log/pods/… on every pod's
+      # log-rotation cycle (243 alerts on the 6.2 run, 237 of them under
+      # /var/log/pods/ and the remaining 6 on the directory itself; 60/window
+      # inside the volume window). Two ways were possible and only one of them
+      # actually removes the volume: moving k3s-server into the daemon split
+      # below only RENAMES it (wave 5.1's lesson, config-test.yaml:143 —
+      # criterion 6.2.1.1 sums alerts_total + alerts_filtered_total, so an
+      # info-severity twin is still counted). An exception drops the alert
+      # outright and is counted in ruleExceptionsTotal instead. Scoped to comm
+      # AND path like ebpf-guard-self below: k3s-server touching /var/log/auth.log
+      # or any other log outside /var/log/pods/ still alerts.
+      - name: k3s-pod-log-rotation
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [k3s-server]
+            - field: filename
+              op: prefix
+              values: ["/var/log/pods"]
+            # Волна 6.2.1, продакшен-ужесточение: исключение действует только в
+            # хостовом контексте — под, назвавший себя "k3s-server", чистить
+            # чужие логи молча не сможет (comm подделывается, cgroup — нет).
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
       # Scoped to comm AND path: the agent writes and rotates its own
       # rule-audit log under /var/log/ebpf-guard/. Touching any other file
       # under /var/log/ — including a real log-tampering delete/truncate —
@@ -420,6 +463,11 @@ rules:
             - "/var/log/"
         - field: proc.comm
           op: in
+          # Wave 6.2.1, №220: k3s-server is deliberately NOT here — see the
+          # exception on sigma_log_deletion above. An info-severity twin is
+          # still counted by criterion 6.2.1.1 (alerts_total +
+          # alerts_filtered_total), so listing it here would rename the 60
+          # alerts/window, not remove them.
           values: ["sshd", "cron", "rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
     severity: info
     action: alert
@@ -630,66 +678,75 @@ rules:
 
   # 5.9d (находка №27, plan.md): условие раньше проверяло только префикс пути
   # + comm — ни chmod, ни fchmod не проверялись вовсе, поэтому правило
-  # срабатывало на ЛЮБОЕ обращение к этим путям (open/read/write), включая
-  # обычное чтение (sigma_passwd_shadow_read и sensitive_file_read уже это
-  # покрывают, отдельно). Настоящий предикат операции здесь физически
-  # невозможен на event_type: file: файловый коллектор (bpf/fileaccess.bpf.c)
-  # не хукает chmod/fchmod/fchmodat вовсе — FileEvent.Op знает только
-  # open/read/write (FILE_OP_* в bpf/common.h). Единственное место, где
-  # настоящий chmod виден — трассировка syscall по номеру (см.
-  # sigma_chmod_executable_tmp выше), но там args — сырые указатели, а не
-  # разрешённые строки, так что путь проверить нельзя (см.
-  # RulesRequiringFileOp). Перевод на syscall-ось — единственный способ
-  # сохранить срабатывание на НАСТОЯЩЕМ chmod, ценой потери привязки к
-  # конкретному пути; это ограничение вынесено в description, а не спрятано.
-  # Severity понижена до warning вместе с потерей "sensitive file" адресности
-  # (было critical, когда правило ошибочно претендовало на привязку к пути).
+  # срабатывало на ЛЮБОЕ обращение к этим путям (open/read/write). Тогда его
+  # перевели на syscall-ось: это сохранило срабатывание на НАСТОЯЩЕМ chmod
+  # ценой полной потери привязки к пути, и severity честно понизили до
+  # warning, а ограничение вынесли в description.
+  #
+  # Волна 6.2.1, слой 3 (находка №220): цена больше не нужна. chmod заведён в
+  # файловом коллекторе с разрешением пути (FILE_OP_CHMOD), и правило впервые
+  # проверяет ОБА предиката сразу — и операцию, и путь. Прежняя оговорка
+  # «path not resolved» из имени и описания снята, потому что она перестала
+  # быть правдой, а не потому, что перестала быть удобной.
+  #
+  # Severity возвращена в warning (не поднята до critical): смена прав на
+  # файле учётных данных — сильный сигнал, но не сама по себе компрометация,
+  # а поднятие severity увеличило бы вес правила в критерии крит-алертов без
+  # нового знания о событии.
   - id: sigma_sensitive_file_chmod
-    name: "chmod/fchmod syscall by non-daemon process (path not resolved)"
+    name: "Permissions changed on a credential or authentication file"
     description: >
-      A chmod/fchmod/fchmodat syscall was made by a process other than sshd or
-      cron. The collector cannot resolve which file was the target — syscall
-      arguments are raw pointers, not paths — so this is a broader signal than
-      "sensitive system file" despite the id name (kept for continuity with
-      prior alerts/dashboards). True path-scoped chmod detection needs a new
-      BPF probe that resolves the path argument; tracked as follow-up, not
-      done here (plan.md находка №27, 5.9d).
-    event_type: syscall
+      chmod/fchmod/fchmodat changed the mode of /etc/passwd, /etc/shadow,
+      /etc/sudoers, an SSH host or authorized-keys file, or a cron directory.
+      Attackers relax permissions on these to plant credentials or a
+      persistence entry, and restore them afterwards to hide the change.
+    event_type: file
     condition_group:
       operator: and
       conditions:
-        - field: nr
-          op: in
-          values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
-        - field: comm
+        - field: file.op
+          op: eq
+          values: ["chmod"]
+        - field: file.path
+          op: prefix
+          values: ["/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/group",
+                   "/etc/sudoers", "/etc/ssh/", "/root/.ssh/",
+                   "/etc/crontab", "/etc/cron.d/", "/var/spool/cron/"]
+        - field: proc.comm
           op: not_in
           values: ["sshd", "cron"]
     severity: warning
     action: alert
-    tags: [mitre:T1222, sigma, chmod]
+    tags: [mitre:T1222, sigma, chmod, credential-access]
 
   # sshd/cron routinely chmod PAM/SSH config or credential files during
   # login/job accounting. plan.md wave 5.1: downgrade, don't suppress —
   # info severity (not warning — warning-level daemon splits from P1-6
   # kept full volume, see sigma_utmp_wtmp_modified_daemon precedent).
-  # 5.9d: moved to the same syscall axis as sigma_sensitive_file_chmod above,
-  # for the same reason (chmod is not observable via event_type: file).
+  # 6.2.1 слой 3: переехало на файловую ось вместе со своим основным
+  # правилом; пути у двойника обязаны совпадать с ним точь-в-точь, иначе
+  # разделение перестанет быть разделением и часть событий выпадет в никуда.
   - id: sigma_sensitive_file_chmod_daemon
-    name: "chmod/fchmod syscall by login/cron daemon (path not resolved)"
-    description: "sshd or cron made a chmod/fchmod/fchmodat syscall — usually routine accounting, but neither content nor target path is inspected (see sigma_sensitive_file_chmod for the path-resolution limitation)."
-    event_type: syscall
+    name: "Permissions changed on a credential file by a login/cron daemon"
+    description: "sshd or cron changed the mode of a credential, SSH or cron file — usually routine accounting during login or job setup."
+    event_type: file
     condition_group:
       operator: and
       conditions:
-        - field: nr
-          op: in
-          values: ["90", "91", "268"]  # chmod, fchmod, fchmodat
-        - field: comm
+        - field: file.op
+          op: eq
+          values: ["chmod"]
+        - field: file.path
+          op: prefix
+          values: ["/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/group",
+                   "/etc/sudoers", "/etc/ssh/", "/root/.ssh/",
+                   "/etc/crontab", "/etc/cron.d/", "/var/spool/cron/"]
+        - field: proc.comm
           op: in
           values: ["sshd", "cron"]
     severity: info
     action: alert
-    tags: [mitre:T1222, sigma, chmod, sensitive-file, needs-content-analysis]
+    tags: [mitre:T1222, sigma, chmod, sensitive-file]
 
   # ============================================================================
   # T1082 — System Information Discovery
@@ -740,6 +797,28 @@ rules:
             - field: filename
               op: in
               values: ["/proc/cpuinfo", "/proc/meminfo", "/proc/version"]
+      # Wave 6.2.1, №220: k3s-server polls /proc/meminfo as part of its node
+      # resource-pressure check (60/window on the 6.2 baseline). Scoped to
+      # comm AND path like the two exceptions above — enumeration of
+      # /proc/cpuinfo or the /proc/sys/kernel/* entries by k3s-server would
+      # be out of character and still alerts.
+      - name: k3s-server-meminfo-poll
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [k3s-server]
+            - field: filename
+              op: in
+              values: ["/proc/meminfo"]
+            # Волна 6.2.1: только хостовой контекст (см. sigma_log_deletion).
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
 
   - id: sigma_kernel_version_read
     name: "Kernel version file read"
@@ -773,6 +852,28 @@ rules:
             - field: filename
               op: eq
               values: ["/proc/version"]
+      # Wave 6.2.1, №220: k3s-server reads /etc/os-release as part of its own
+      # node-info reporting (59/window on the 6.2 baseline), not exploit
+      # selection. Scoped to comm AND path — k3s-server reading /proc/version
+      # or the other distro-release files would be out of character and
+      # still alerts.
+      - name: k3s-server-os-release
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [k3s-server]
+            - field: filename
+              op: eq
+              values: ["/etc/os-release"]
+            # Волна 6.2.1: только хостовой контекст (см. sigma_log_deletion).
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
 
   # ============================================================================
   # T1083 — File and Directory Discovery
@@ -1161,22 +1262,33 @@ rules:
     action: alert
     tags: [mitre:T1562, sigma, seccomp, defense-evasion]
 
+  # Wave 6.2.1, №220 (second pass, evidence from the 6.2 archive): flannel's
+  # invocations that tripped this rule 60/window are NOT flushes at all —
+  # they are `iptables -t filter -S FLANNEL-FWD 1 --wait` and
+  # `-C FLANNEL-FWD -s 10.42.0.0/16 … -j ACCEPT --wait`. They matched because
+  # `iptables.*-F` is a SUBSTRING match and every one of those command lines
+  # contains "-F" inside the chain name "FLANNEL-FWD". So this is a condition
+  # bug, like evasion_iptables_flush's missing argument check, not a lineage
+  # or threshold problem: the flags are now matched as whole arguments. A real
+  # `iptables -F` / `-X` still alerts, whoever runs it — the first draft of
+  # this narrowing excluded parent_comm=k3s-server instead, which would have
+  # blinded the rule to a genuine flush forked from anything k3s parents, and
+  # rested on a parent_comm value no archive confirms.
   - id: sigma_iptables_flush
     name: "iptables flush or chain delete"
     description: "iptables -F or iptables --flush executed — removing firewall rules to enable C2 communication."
     event_type: syscall
-    condition:
-      field: proc.args
-      op: regex
-      values:
-        - "iptables.*-F"
-        - "iptables.*--flush"
-        - "iptables.*-X"
-        - "iptables.*--delete-chain"
-        - "ip6tables.*-F"
-        - "ufw disable"
-        - "systemctl stop firewalld"
-        - "systemctl disable firewalld"
+    condition_group:
+      operator: and
+      conditions:
+        - field: proc.args
+          op: regex
+          values:
+            - "ip6?tables.*(^|\\s)(-F|--flush)(\\s|$)"
+            - "ip6?tables.*(^|\\s)(-X|--delete-chain)(\\s|$)"
+            - "ufw disable"
+            - "systemctl stop firewalld"
+            - "systemctl disable firewalld"
     severity: critical
     action: alert
     tags: [mitre:T1562.004, sigma, iptables, firewall-disable]

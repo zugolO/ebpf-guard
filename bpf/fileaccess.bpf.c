@@ -292,6 +292,135 @@ int trace_close(struct trace_event_raw_sys_enter *ctx)
 }
 
 /*
+ * chmod_emit — общее тело трёх chmod-хуков (волна 6.2.1, слой 3).
+ *
+ * path == NULL означает «путь не разрешён» (fchmod по дескриптору, которого
+ * нет в fd_path_map: файл открыли до старта агента, либо запись вытеснена
+ * LRU). Событие в этом случае ВСЁ РАВНО отправляется, с пустым filename.
+ * Это намеренно: молча проглотить chmod, пути которого мы не знаем, значит
+ * заменить прежний шум тишиной, а правило обязано иметь возможность отличить
+ * «chmod по пути, который меня не касается» от «chmod, чей путь неизвестен».
+ * Первое отсекается префиксом в правиле, второе видно как алерт с пустым
+ * file.path и считается отдельно на стороне userspace.
+ */
+static __always_inline void chmod_emit(const char *path, __u8 truncated, umode_t mode)
+{
+	struct event *e;
+
+	if (kernel_filter_enabled() && path && path_is_denied(path))
+		return;
+
+	if (observer_should_drop())
+		return;
+
+	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
+	if (!e)
+		return;
+
+	fill_process_info(e);
+	e->type = EVENT_TYPE_FILE_ACCESS;
+	e->file.op = FILE_OP_CHMOD;
+	e->file.flags = 0;
+	/* mode здесь — НОВЫЙ режим, который просит chmod, а не флаги открытия:
+	 * единственное место, где правило может увидеть «выставлен бит
+	 * исполнения», не читая файл. */
+	e->file.mode = mode;
+	__builtin_memset(&e->file.filename, 0, sizeof(e->file.filename));
+	e->file.fd_path_truncated = truncated;
+
+	if (path)
+		__builtin_memcpy(e->file.filename, path, FILENAME_LEN);
+
+	submit_event(e);
+}
+
+/*
+ * Tracepoint for sys_enter_chmod — args[0]=filename (user pointer), args[1]=mode.
+ *
+ * На arm64 и на новых x86-конфигурациях sys_chmod может отсутствовать вовсе
+ * (glibc реализует chmod через fchmodat). Привязка тогда не удастся, и это
+ * НЕ тихий случай: userspace считает неудачу привязки в
+ * ebpf_guard_file_hook_attach_total{hook=...,result="error"} и пишет
+ * предупреждение — иначе «ноль chmod-алертов» невозможно отличить от
+ * «chmod никто не звал».
+ */
+SEC("tp/syscalls/sys_enter_chmod")
+int trace_chmod(struct trace_event_raw_sys_enter *ctx)
+{
+	struct fd_path path = {};
+
+	if (pid_is_agent())
+		return 0;
+	if (kernel_filter_enabled() && comm_is_denied())
+		return 0;
+
+	filename_read(&path, (const char *)ctx->args[0]);
+	chmod_emit(path.path, path.truncated, (umode_t)ctx->args[1]);
+	return 0;
+}
+
+/*
+ * Tracepoint for sys_enter_fchmodat — args[0]=dfd, args[1]=filename, args[2]=mode.
+ *
+ * Относительный путь при dfd != AT_FDCWD остаётся относительным: разрешать
+ * его до абсолютного здесь нечем (нужен обход dentry родителя), и правила
+ * с префиксом на него не совпадут. Это недоразрешение видно как алерт с
+ * относительным file.path, а не как пропажа события; довести до абсолютного
+ * пути — работа отдельной волны, у которой будет свой контроль.
+ */
+SEC("tp/syscalls/sys_enter_fchmodat")
+int trace_fchmodat(struct trace_event_raw_sys_enter *ctx)
+{
+	struct fd_path path = {};
+
+	if (pid_is_agent())
+		return 0;
+	if (kernel_filter_enabled() && comm_is_denied())
+		return 0;
+
+	filename_read(&path, (const char *)ctx->args[1]);
+	chmod_emit(path.path, path.truncated, (umode_t)ctx->args[2]);
+	return 0;
+}
+
+/*
+ * Tracepoint for sys_enter_fchmod — args[0]=fd, args[1]=mode.
+ *
+ * Путь берётся из fd_path_map — той самой таблицы, которую заполняет
+ * trace_open этого же объекта. Именно поэтому весь слой 3 живёт здесь, а не
+ * в syscall.bpf.c: там fd_path_map — чужая карта другого BPF-объекта, и
+ * делить её пришлось бы через пиннинг в bpffs, которого в этом агенте нет.
+ */
+SEC("tp/syscalls/sys_enter_fchmod")
+int trace_fchmod(struct trace_event_raw_sys_enter *ctx)
+{
+	unsigned int fd = (unsigned int)ctx->args[0];
+	__u32 zero = 0;
+	struct fd_path *fdp;
+	__u64 pid_tgid;
+	__u32 tgid;
+
+	if (pid_is_agent())
+		return 0;
+	if (kernel_filter_enabled() && comm_is_denied())
+		return 0;
+
+	pid_tgid = bpf_get_current_pid_tgid();
+	tgid = (__u32)(pid_tgid >> 32);
+
+	fdp = bpf_map_lookup_elem(&fd_lookup_scratch, &zero);
+	if (!fdp)
+		return 0;
+
+	if (!fd_path_lookup(tgid, fd, fdp)) {
+		chmod_emit(NULL, 0, (umode_t)ctx->args[1]);
+		return 0;
+	}
+	chmod_emit(fdp->path, fdp->truncated, (umode_t)ctx->args[1]);
+	return 0;
+}
+
+/*
  * Tracepoint for sys_enter_read — emit event with fd-resolved filename.
  * args[0]=fd.  Raw context avoids "invalid bpf_context access off=0 size=8"
  * that BPF_PROG causes on kernels lacking trace_event_raw_sys_enter_read BTF.

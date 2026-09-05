@@ -62,24 +62,104 @@ rules:
           values: ["1"]
 
   # Mount of sensitive host paths
+  # Wave 6.2.1, №220: the rule name and description say "container" — the
+  # condition never checked for one, so the node's own management daemons
+  # (k3s-server managing /var/lib/kubelet/, 97/window on the 6.2 baseline)
+  # tripped it on their ordinary host-side work. Scoped to container context
+  # the same way container_escape_host_device was in wave 6.0f (№200): a
+  # process with no container.id and no k8s.pod already owns the host, so
+  # the same access from it is not an escape by definition.
   - id: container_escape_host_mount
     name: "Container Escape: Mount of host filesystem path"
     description: "Container attempting to mount host root or sensitive directories"
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/host/"
-        - "/hostroot/"
-        - "/proc/1/root/"
-        - "/var/lib/docker/"
-        - "/var/lib/containerd/"
-        - "/var/lib/kubelet/"
-        - "/run/containerd/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/host/"
+            - "/hostroot/"
+            - "/proc/1/root/"
+            - "/var/lib/docker/"
+            - "/var/lib/containerd/"
+            - "/var/lib/kubelet/"
+            - "/run/containerd/"
+      subgroups:
+        - operator: or
+          conditions:
+            - field: container.id
+              op: neq
+              values: [""]
+            - field: k8s.pod
+              op: neq
+              values: [""]
     severity: critical
     action: alert
     tags: [container-escape, host-mount, docker-socket]
+
+  # Волна 6.2.1, продакшен-решение по находке №220 (прецедент правки №200).
+  # Сужение правила выше до контейнерного контекста сняло 97 алертов за окно,
+  # но вместе с ними — и наблюдение за ХОСТОВЫМ процессом, лезущим в состояние
+  # рантайма. Правильный ход тот же, что волна 6.0f применила к
+  # container_escape_host_device: правило не удаляется, а РАЗДВАИВАЕТСЯ —
+  # критическое остаётся про побег из контейнера, хостовая половина живёт
+  # отдельным warning'ом со своим счётчиком и своим списком демонов рантайма.
+  #
+  # Чего здесь НЕТ намеренно:
+  #   * /var/lib/kubelet/ — хостовое чтение этого дерева уже покрыто
+  #     cis_5_1_3_secret_access и k8s_hostpath_kubelet_access (оба обязаны
+  #     сработать по критерию 6.2.1.2), и второй алерт на то же событие только
+  #     утроил бы инцидентный слой, ничего не добавив дежурному;
+  #   * двойника для container_escape_host_network нет вовсе. Чтение
+  #     /proc/net/* с хоста делают ss, netstat, любой агент мониторинга и сам
+  #     сетевой стек ноды; правило на этом — генератор шума, по которому нельзя
+  #     принять решение. Пробел записан честно, а не закрыт правилом ради
+  #     непустого списка.
+  #
+  # Исключения здесь — по comm, и это осознанно слабее, чем ось identity выше:
+  # у хостового процесса нет cgroup-идентичности, которой его можно отличить,
+  # а /proc/PID/exe в событие пока не приходит (см. plan.md, слой 2). Цена
+  # известна: хостовой root, назвавшийся "containerd", этот warning обойдёт.
+  # Хостовой root уже владеет нодой, поэтому цена принята здесь и НЕ принята
+  # для правил k8s-оси выше, где тем же приёмом обходился критический детект.
+  - id: container_escape_host_mount_from_host
+    name: "Host process accessed container-runtime state"
+    description: >
+      A process with no container/pod identity read container-runtime state
+      (/var/lib/docker, /var/lib/containerd, /run/containerd) or a host-root
+      view (/host, /hostroot, /proc/1/root). For the runtime's own daemons this
+      is ordinary work and they are excluded by name; for anything else on the
+      node it is lateral movement into other containers' filesystems, or the
+      tail of an escape that already succeeded.
+    event_type: file
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/host/"
+            - "/hostroot/"
+            - "/proc/1/root/"
+            - "/var/lib/docker/"
+            - "/var/lib/containerd/"
+            - "/run/containerd/"
+        - field: container.id
+          op: eq
+          values: [""]
+        - field: k8s.pod
+          op: eq
+          values: [""]
+        - field: proc.comm
+          op: not_in
+          values: ["containerd", "dockerd", "docker", "containerd-shim",
+                   "containerd-shim-runc-v2", "runc", "k3s-server", "kubelet",
+                   "crio", "podman", "buildkitd", "ebpf-guard"]
+    severity: warning
+    action: alert
+    tags: [container-escape, host-mount, host, lateral-movement]
 
   # ============================================================================
   # Namespace Breakout
@@ -430,17 +510,34 @@ rules:
   # ============================================================================
 
   # Access to host network namespace
+  # Wave 6.2.1, №220: same defect as container_escape_host_mount above — no
+  # container scoping at all, so flannel's iptables child (comm=iptables)
+  # reading /proc/net/ip_tables_names on the host (85/window on the 6.2
+  # baseline) counted as a "container" escaping. Scoped the same way, and for
+  # the same reason: /proc/net/ as seen by an unscoped host process is its
+  # own view, not evidence of anything.
   - id: container_escape_host_network
     name: "Container Escape: Host network interface access"
     description: "Container process accessing host network configuration"
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/sys/class/net/"
-        - "/proc/net/"
-        - "/sys/devices/virtual/net/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/sys/class/net/"
+            - "/proc/net/"
+            - "/sys/devices/virtual/net/"
+      subgroups:
+        - operator: or
+          conditions:
+            - field: container.id
+              op: neq
+              values: [""]
+            - field: k8s.pod
+              op: neq
+              values: [""]
     severity: warning
     action: alert
     tags: [container-escape, host-network, network-namespace]

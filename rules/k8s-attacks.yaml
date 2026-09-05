@@ -32,9 +32,51 @@ rules:
         - "/var/run/secrets/kubernetes.io/serviceaccount/"
     severity: critical
     action: alert
+    # ── Волна 6.2.1, слой 4 (находка №220): смена КЛАССА, а не сужение. ──────
+    #
+    # Чтение SA-токена изнутри пода нельзя разделить по пути: «свой» токен и
+    # «украденный свой» токен — это один и тот же файл в одной и той же точке
+    # монтирования. Всякий клиент Kubernetes читает его штатно и постоянно,
+    # поэтому статическое правило здесь обречено быть либо шумным (72 алерта/ч
+    # на замере 6.2), либо слепым. Ни исключение, ни префикс, ни порог этого не
+    # чинят — чинит смена вопроса: не «прочитали ли токен», а «прочитал ли его
+    # ТОТ, КТО РАНЬШЕ ЕГО НЕ ЧИТАЛ».
+    #
+    # class: drift пропускает совпадения через DriftBaselineProfiler: сигнатура
+    # «правило|нормализованный путь» в разрезе нагрузки (comm|namespace|app)
+    # выучивается за окно обучения и дальше молчит, а незнакомая — поднимается.
+    # Приложение пода, читающее свой токен, попадает в базу за первые минуты;
+    # оболочка, запущенная через kubectl exec, — это ДРУГОЙ comm, то есть
+    # другая нагрузка, и её чтение незнакомо.
+    #
+    # drift_novel_workload: alert обязателен и не является перестраховкой: без
+    # него новая нагрузка получает поблажку на время своего окна обучения, а
+    # «новая нагрузка» — это ровно то, чем становится атакующий, назвавшийся
+    # чем угодно ранее не встречавшимся. Цена флага честная и измеримая: первое
+    # чтение токена каждым НОВЫМ подом даёт один алерт (величину оборота
+    # печатает контроль 6.2.1.7, порога у неё нет).
+    #
+    # ОТКАЗ ОТКРЫТЫЙ. При profiler.drift_baseline.enabled=false ObserveRule
+    # возвращает true, и правило работает ровно как раньше — выключенный
+    # профилировщик даёт прежний шум, а не тишину.
+    #
+    # ЧТО ЭТО НЕ ЗАКРЫВАЕТ, дословно. Ключ нагрузки — comm|namespace|app, а
+    # comm процесс назначает себе сам. Полезная нагрузка, назвавшаяся именем
+    # приложения пода, попадает в УЖЕ ОБУЧЕННУЮ нагрузку, и её чтение токена
+    # окажется знакомой сигнатурой. Правильное лечение — вложить в ключ
+    # нагрузки образ процесса (слой 2, proc.exe_path); это не сделано здесь
+    # намеренно: перекладка ключа обнуляет ВСЕ существующие базы дрейфа разом,
+    # то есть меняет измеряемую величину каждого drift-правила, и такой
+    # переход обязан идти отдельной волной со своим замером до и после.
+    class: drift
+    drift_novel_workload: alert
     tags: [mitre-t1528, k8s, service-account, token-theft, lateral-movement]
 
   # Projected token path used with CSI driver mounts (Kubernetes 1.22+).
+  # Wave 6.2.1, №220: containerd itself opens this path 60/window as the CRI
+  # runtime projecting the token into the pod's mount namespace — that is the
+  # mechanism this rule exists to watch being abused, not the abuse. Excluded
+  # by comm, not by narrowing the path.
   - id: k8s_sa_token_projected_read
     name: "K8s: projected service account token read"
     description: >
@@ -42,15 +84,101 @@ rules:
       (bound tokens or CSI-mounted secrets). Access by unexpected processes
       indicates T1528 credential theft targeting the current pod's RBAC identity.
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/var/run/secrets/.*serviceaccount.*"
-        - "/run/secrets/.*serviceaccount.*"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            - "/var/run/secrets/.*serviceaccount.*"
+            - "/run/secrets/.*serviceaccount.*"
     severity: critical
     action: alert
+    # ── Волна 6.2.1, слой 4 (находка №220): смена КЛАССА, а не сужение. ──────
+    #
+    # Чтение SA-токена изнутри пода нельзя разделить по пути: «свой» токен и
+    # «украденный свой» токен — это один и тот же файл в одной и той же точке
+    # монтирования. Всякий клиент Kubernetes читает его штатно и постоянно,
+    # поэтому статическое правило здесь обречено быть либо шумным (72 алерта/ч
+    # на замере 6.2), либо слепым. Ни исключение, ни префикс, ни порог этого не
+    # чинят — чинит смена вопроса: не «прочитали ли токен», а «прочитал ли его
+    # ТОТ, КТО РАНЬШЕ ЕГО НЕ ЧИТАЛ».
+    #
+    # class: drift пропускает совпадения через DriftBaselineProfiler: сигнатура
+    # «правило|нормализованный путь» в разрезе нагрузки (comm|namespace|app)
+    # выучивается за окно обучения и дальше молчит, а незнакомая — поднимается.
+    # Приложение пода, читающее свой токен, попадает в базу за первые минуты;
+    # оболочка, запущенная через kubectl exec, — это ДРУГОЙ comm, то есть
+    # другая нагрузка, и её чтение незнакомо.
+    #
+    # drift_novel_workload: alert обязателен и не является перестраховкой: без
+    # него новая нагрузка получает поблажку на время своего окна обучения, а
+    # «новая нагрузка» — это ровно то, чем становится атакующий, назвавшийся
+    # чем угодно ранее не встречавшимся. Цена флага честная и измеримая: первое
+    # чтение токена каждым НОВЫМ подом даёт один алерт (величину оборота
+    # печатает контроль 6.2.1.7, порога у неё нет).
+    #
+    # ОТКАЗ ОТКРЫТЫЙ. При profiler.drift_baseline.enabled=false ObserveRule
+    # возвращает true, и правило работает ровно как раньше — выключенный
+    # профилировщик даёт прежний шум, а не тишину.
+    #
+    # ЧТО ЭТО НЕ ЗАКРЫВАЕТ, дословно. Ключ нагрузки — comm|namespace|app, а
+    # comm процесс назначает себе сам. Полезная нагрузка, назвавшаяся именем
+    # приложения пода, попадает в УЖЕ ОБУЧЕННУЮ нагрузку, и её чтение токена
+    # окажется знакомой сигнатурой. Правильное лечение — вложить в ключ
+    # нагрузки образ процесса (слой 2, proc.exe_path); это не сделано здесь
+    # намеренно: перекладка ключа обнуляет ВСЕ существующие базы дрейфа разом,
+    # то есть меняет измеряемую величину каждого drift-правила, и такой
+    # переход обязан идти отдельной волной со своим замером до и после.
+    class: drift
+    drift_novel_workload: alert
     tags: [mitre-t1528, k8s, service-account, bound-token, projected-volume]
+    exceptions:
+      # Волна 6.2.1, продакшен-ужесточение (№220/№221). Фон ноды исключается
+      # ТОЛЬКО в хостовом контексте: comm процесс назначает себе сам
+      # (prctl(PR_SET_NAME), exec -a), а пустые container_id/pod_name приходят
+      # из cgroup и означают «задача не в контейнере». Полезная нагрузка в
+      # поде, назвавшая себя "containerd", под исключение не попадает и правило
+      # её поднимает. Если обогащения нет вовсе (нет k8s/рантайма), поля пусты
+      # у ВСЕХ событий и исключение работает как прежний список по comm —
+      # ослабление возможно только там, где оси нет физически, и это видно
+      # нулём приборности 6.2.1.0, а не молча.
+      - name: node-host-daemon
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["containerd"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Волна 6.2.1, слой 2 (№220/№221): образ демона. Ось из cgroup выше
+            # отвечает только «процесс НЕ в контейнере» и у всех хостовых процессов
+            # пуста одинаково — она не отличает демона ноды от чего угодно,
+            # запущенного на ней под root с тем же comm. /proc/<pid>/exe ставит ядро
+            # в execve: prctl(PR_SET_NAME) и `exec -a` меняют comm и argv[0] и эту
+            # ссылку не трогают. Условие СТОИТ ПОСЛЕДНИМ намеренно: группа "and"
+            # вычисляется по порядку с коротким замыканием, поэтому readlink
+            # случается только там, где имя демона уже совпало.
+            #
+            # Проверяется КАТАЛОГ образа, а не точный путь, потому что точный путь
+            # k3s/containerd зависит от способа установки, а вписать сюда догадку —
+            # значит рискнуть тем, что исключение молча перестанет применяться.
+            # Ужесточение до точных путей — после того, как контроль 6.2.1.8
+            # напечатает фактические exe_path демонов этого стенда. Уже в этой
+            # редакции обход требует записи в системный каталог (root + срабатывание
+            # evasion_system_binary_replace), а не `cp` в /tmp.
+            #
+            # Пустой exe_path (процесс умер, нет доступа к /proc) под prefix не
+            # подходит — исключение не применяется, правило срабатывает: отказ
+            # открытый, в сторону шума, который видно.
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
 
   # ============================================================================
   # T1552.001 — Unsecured Credentials: Credentials in Files
@@ -104,6 +232,12 @@ rules:
     tags: [mitre-t1611, k8s, hostpath, control-plane, cluster-takeover]
 
   # /var/lib/kubelet/ contains pod specs, node credentials, and kubeconfig.
+  # Wave 6.2.1, №220/№221: on k3s the kubelet function runs inside the
+  # "k3s-server" binary and walks this whole tree constantly (98/window on
+  # the 6.2 baseline — enough alone to pin the rule's rate limiter at its
+  # ceiling and hide a real host-level token theft behind it, №221). Excluded
+  # by comm: a compromised host process reading the same tree under any
+  # other name — including a renamed cat, per 6.2.1.2 — still alerts.
   - id: k8s_hostpath_kubelet_access
     name: "K8s: access to /var/lib/kubelet/ from pod context"
     description: >
@@ -112,14 +246,62 @@ rules:
       process indicates a hostPath escape (T1611) aimed at extracting kubelet
       credentials or modifying pod specifications on the node.
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/var/lib/kubelet/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/var/lib/kubelet/"
     severity: critical
     action: alert
     tags: [mitre-t1611, k8s, hostpath, kubelet, node-credential-theft]
+    exceptions:
+      # Волна 6.2.1, продакшен-ужесточение (№220/№221). Фон ноды исключается
+      # ТОЛЬКО в хостовом контексте: comm процесс назначает себе сам
+      # (prctl(PR_SET_NAME), exec -a), а пустые container_id/pod_name приходят
+      # из cgroup и означают «задача не в контейнере». Полезная нагрузка в
+      # поде, назвавшая себя "k3s-server", под исключение не попадает и правило
+      # её поднимает. Если обогащения нет вовсе (нет k8s/рантайма), поля пусты
+      # у ВСЕХ событий и исключение работает как прежний список по comm —
+      # ослабление возможно только там, где оси нет физически, и это видно
+      # нулём приборности 6.2.1.0, а не молча.
+      - name: node-host-daemon
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["k3s-server", "kubelet"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Волна 6.2.1, слой 2 (№220/№221): образ демона. Ось из cgroup выше
+            # отвечает только «процесс НЕ в контейнере» и у всех хостовых процессов
+            # пуста одинаково — она не отличает демона ноды от чего угодно,
+            # запущенного на ней под root с тем же comm. /proc/<pid>/exe ставит ядро
+            # в execve: prctl(PR_SET_NAME) и `exec -a` меняют comm и argv[0] и эту
+            # ссылку не трогают. Условие СТОИТ ПОСЛЕДНИМ намеренно: группа "and"
+            # вычисляется по порядку с коротким замыканием, поэтому readlink
+            # случается только там, где имя демона уже совпало.
+            #
+            # Проверяется КАТАЛОГ образа, а не точный путь, потому что точный путь
+            # k3s/containerd зависит от способа установки, а вписать сюда догадку —
+            # значит рискнуть тем, что исключение молча перестанет применяться.
+            # Ужесточение до точных путей — после того, как контроль 6.2.1.8
+            # напечатает фактические exe_path демонов этого стенда. Уже в этой
+            # редакции обход требует записи в системный каталог (root + срабатывание
+            # evasion_system_binary_replace), а не `cp` в /tmp.
+            #
+            # Пустой exe_path (процесс умер, нет доступа к /proc) под prefix не
+            # подходит — исключение не применяется, правило срабатывает: отказ
+            # открытый, в сторону шума, который видно.
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
 
   # ============================================================================
   # API Server Abuse — T1078.001 (Default Accounts)

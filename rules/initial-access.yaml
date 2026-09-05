@@ -91,6 +91,12 @@ rules:
       conditions:
         - field: proc.comm
           op: not_in
+          # Wave 6.2.1 (№220): coredns's own traffic on the listed ports
+          # (83/window on the 6.2 baseline, health-check on 8080) is the same
+          # class as grafana/prometheus above — a legitimate service, not a
+          # post-install script. k3s-server carries its own slice of the same
+          # rule (16/window) — added on the second pass over the 6.2 window,
+          # where it was invisible in the finding's per-comm table.
           values: ["apt", "dpkg", "rpm", "yum", "dnf", "pip", "pip3",
                    "npm", "yarn", "gem", "cargo", "go", "gradle", "mvn",
                    "grafana", "prometheus"]
@@ -100,6 +106,62 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1195.002, initial-access, supply-chain]
+    exceptions:
+      # Волна 6.2.1, продакшен-ужесточение (№220/№221). Фон ноды исключается
+      # ТОЛЬКО в хостовом контексте: comm процесс назначает себе сам
+      # (prctl(PR_SET_NAME), exec -a), а пустые container_id/pod_name приходят
+      # из cgroup и означают «задача не в контейнере». Полезная нагрузка в
+      # поде, назвавшая себя "k3s-server", под исключение не попадает и правило
+      # её поднимает.
+      - name: node-host-daemon
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["k3s-server"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Волна 6.2.1, слой 2 (№220/№221): образ демона. Ось из cgroup выше
+            # отвечает только «процесс НЕ в контейнере» и у всех хостовых процессов
+            # пуста одинаково — она не отличает демона ноды от чего угодно,
+            # запущенного на ней под root с тем же comm. /proc/<pid>/exe ставит ядро
+            # в execve: prctl(PR_SET_NAME) и `exec -a` меняют comm и argv[0] и эту
+            # ссылку не трогают. Условие СТОИТ ПОСЛЕДНИМ намеренно: группа "and"
+            # вычисляется по порядку с коротким замыканием, поэтому readlink
+            # случается только там, где имя демона уже совпало.
+            #
+            # Проверяется КАТАЛОГ образа, а не точный путь, потому что точный путь
+            # k3s/containerd зависит от способа установки, а вписать сюда догадку —
+            # значит рискнуть тем, что исключение молча перестанет применяться.
+            # Ужесточение до точных путей — после того, как контроль 6.2.1.8
+            # напечатает фактические exe_path демонов этого стенда. Уже в этой
+            # редакции обход требует записи в системный каталог (root + срабатывание
+            # evasion_system_binary_replace), а не `cp` в /tmp.
+            #
+            # Пустой exe_path (процесс умер, нет доступа к /proc) под prefix не
+            # подходит — исключение не применяется, правило срабатывает: отказ
+            # открытый, в сторону шума, который видно.
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
+      # Волна 6.2.1, продакшен-ужесточение (№220/№221). Системный под ноды
+      # исключается по СВОЕМУ namespace: его процесс себе не назначит, а имя
+      # "coredns" — назначит. Под в чужом namespace исключения не получает.
+      - name: kube-system-pod
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["coredns"]
+            - field: k8s.namespace
+              op: eq
+              values: ["kube-system"]
 
   # MITRE ATT&CK: T1133 — External Remote Services
   - id: initial_vpn_unexpected_access

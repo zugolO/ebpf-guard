@@ -706,6 +706,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// Волна 6.2.1, слой 2: включить разрешение proc.exe_path. Резолвер общий
+	// на процесс, а не на RuleEngine, — горячая перезагрузка правил создаёт
+	// новый движок, и хранение его в движке выключало бы слой при первом же
+	// reload. До этого вызова поле пусто у всех событий, и всякое исключение,
+	// опирающееся на него, не применяется: слой выключен в сторону шума.
+	correlator.SetExePathResolver(correlator.ProcExePathResolver{})
+
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 		slog.Warn("correlation engine: failed to register Prometheus metrics",

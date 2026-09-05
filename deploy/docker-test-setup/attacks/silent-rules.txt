@@ -127,6 +127,16 @@ sigma_prctl_dumpable a
 sigma_seccomp_filter_install a
 web_blind_sqli_heuristic a
 
+# Волна 6.2.1 (находка №225, снята на прогоне 6.2 04.09.2026): kmod
+# cgroup-escape коллектор не поднимается на ядре 5.15.0-187 — журнал печатает
+# "kmod: cgroup escape collector unavailable" (internal/collector/lsm.go),
+# причина — cgroup_attach_task LSM hook не поддержан этим ядром. Это не
+# rule_id и в список выше (категория а) не входит по формату файла; строка
+# здесь — регистрация самого факта немоты, чтобы преflight 6.2.1.6 имел что
+# сверять, а реплей архивов на этом ядре не читал отсутствие cgroup-escape
+# детекта потерей. Снимается только сменой ядра/дистрибутива стенда, не
+# правкой продукта.
+
 # 2026-08-30 (после замера №6.0): escape_pivot_root выделен из
 # drift_dangerous_syscall. pivot_root(new_root, put_old) несёт только
 # указатели в userspace, скалярного аргумента для сигнатуры базовой линии у

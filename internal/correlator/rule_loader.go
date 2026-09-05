@@ -17,6 +17,13 @@ import (
 
 // Valid field names for each event type. These are the single source of truth
 // for field name validation — keep in sync with getFieldValue in rules.go.
+//
+// Workload identity (container_id / pod_name / namespace and their dotted
+// aliases) is NOT listed per type: init() below injects it into every set,
+// because getFieldValue resolves it from Event.Enrichment before the per-type
+// switch and it is therefore valid on every event type (wave 6.2.1, №220/№221 —
+// until then only file rules could be scoped by identity, which is why every
+// narrowing for the node's background had to key on the forgeable comm).
 var (
 	validNetworkFields = map[string]bool{
 		"dport": true, "sport": true, "daddr": true, "saddr": true, "proto": true, "family": true,
@@ -58,11 +65,6 @@ var (
 		"proc.comm":        true,
 		"proc.ppid":        true,
 		"proc.parent_comm": true,
-		// Kubernetes/container enrichment (wave 6.0f, №200): populated by
-		// internal/k8s before rule evaluation, see cmd/ebpf-guard/main.go's
-		// "enrich before rule evaluation" ordering comment.
-		"container_id": true, "pod_name": true,
-		"container.id": true, "k8s.pod": true,
 	}
 	validSyscallFields = map[string]bool{
 		"nr": true, "ret": true,
@@ -600,6 +602,33 @@ func validateCondition(cond *RuleCondition, eventType types.EventType) error {
 }
 
 // validateFieldName checks if a field name is valid for the given event type.
+// identityFields are valid on every event type — see the comment above the
+// field-set block. Kept in one place so a new event type cannot silently miss
+// the axis that scopes rules to a workload.
+var identityFields = []string{
+	"container_id", "container.id",
+	"pod_name", "k8s.pod",
+	"namespace", "k8s.namespace",
+	// Слой 2 волны 6.2.1: образ процесса. Валиден везде по той же причине,
+	// что и ось из cgroup, — ключ идентичности не должен зависеть от типа
+	// события, иначе очередной тип события молча останется без него и
+	// исключения для него снова придётся писать по comm.
+	"exe_path", "proc.exe_path",
+}
+
+func init() {
+	for _, set := range []map[string]bool{
+		validNetworkFields, validFileFields, validSyscallFields, validDNSFields,
+		validTLSFields, validHTTPPlaintextFields, validPrivescFields, validNetCloseFields,
+		validGPUFields, validCgroupEscFields, validKmodFields, validLSMAuditFields,
+		validSequenceFields, validIOUringFields, validCloudAuditFields, validBpfProgramFields,
+	} {
+		for _, f := range identityFields {
+			set[f] = true
+		}
+	}
+}
+
 func validateFieldName(field string, eventType types.EventType) error {
 	if field == "" {
 		return fmt.Errorf("field name is required")

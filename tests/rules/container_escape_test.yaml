@@ -43,14 +43,43 @@ tests:
     expect: alert
     expect_severity: warning
 
-  - name: "access to /host/ prefix fires container_escape_host_mount"
+  - name: "access to /host/ prefix from a container fires container_escape_host_mount"
     rule_id: container_escape_host_mount
+    # 6.2.1 (#220): the rule was split along the identity axis — the container
+    # half now requires container.id/k8s.pod to be non-empty, and a fixture
+    # without identity falls to container_escape_host_mount_from_host instead.
+    # An escape is asserted from inside a container, so the identity is set.
     event:
       type: file
+      comm: "app"
+      container_id: "3f1c9a0b2d4e"
       file:
         filename: "/host/etc/passwd"
         op: open
     expect: alert
+
+  - name: "access to /host/ prefix from the host fires container_escape_host_mount_from_host"
+    rule_id: container_escape_host_mount_from_host
+    # The host half of the same split (6.2.1, #220): no container identity, and
+    # a comm that is not one of the runtime daemons the rule excludes by name.
+    event:
+      type: file
+      comm: "app"
+      file:
+        filename: "/host/etc/passwd"
+        op: open
+    expect: alert
+
+  - name: "runtime daemon reading /var/lib/containerd does not fire container_escape_host_mount_from_host"
+    # The exclusion that makes the host half affordable on a k8s node: the
+    # runtime's own daemons do this as ordinary work.
+    event:
+      type: file
+      comm: "containerd"
+      file:
+        filename: "/var/lib/containerd/io.containerd.runtime/state"
+        op: open
+    expect: no_alert
 
   - name: "write to /proc/sysrq-trigger fires container_escape_sysrq_trigger"
     rule_id: container_escape_sysrq_trigger

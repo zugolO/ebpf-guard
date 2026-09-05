@@ -379,8 +379,13 @@ rules:
   # ============================================================================
 
   - id: sigma_log_deletion
-    name: "System log files deleted"
-    description: "Files in /var/log/ were deleted or truncated — log tampering to remove attack evidence."
+    name: "System log files written"
+    description: >
+      A file under /var/log/ was written to by a process outside the known
+      logging daemons. The collector cannot observe unlink/truncate/rename
+      directly (fileaccess.bpf.c hooks open/read/write/chmod only — see wave
+      6.2.2, находка №234) so this cannot distinguish an actual delete/truncate
+      from an ordinary write; it is the closest available proxy for tampering.
     event_type: file
     condition_group:
       operator: and
@@ -396,6 +401,19 @@ rules:
           # systemd-journald ("systemd-journal", same truncation) route
           # through here on every write, same class as sshd/cron below.
           values: ["sshd", "cron", "rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
+        - field: op
+          op: in
+          # Волна 6.2.2, находка №234: условие не проверяло op вовсе, хотя
+          # описание обещало "deleted or truncated" — любой READ (journalctl
+          # читающий /var/log/journal) поднимал critical. Ни unlink, ни
+          # truncate, ни rename не существуют как FileEvent.Op (см. fileOpNames
+          # в rules.go и FILE_OP_* в bpf/common.h — только open/read/write/
+          # chmod); "write" — единственный доступный сегодня сигнал именно
+          # МОДИФИКАЦИИ содержимого, а не одного лишь чтения. Полноценное
+          # обнаружение unlink/truncate требует нового BPF-хука (sys_enter_
+          # unlink{,at}/truncate/rename*) — вне объёма этой волны, записано в
+          # открытые вопросы plan.md.
+          values: ["write"]
     severity: critical
     action: alert
     tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion]
@@ -411,6 +429,17 @@ rules:
       # outright and is counted in ruleExceptionsTotal instead. Scoped to comm
       # AND path like ebpf-guard-self below: k3s-server touching /var/log/auth.log
       # or any other log outside /var/log/pods/ still alerts.
+      #
+      # Волна 6.2.2, находка №233: на прогоне 6.2.1 k3s ротировал symlink-
+      # каталог /var/log/containers (10 из 14 нодовых алертов окна, 71%
+      # остатка) — исключение, привязанное только к /var/log/pods по архиву
+      # 6.2, эту ротацию не покрывало. Второй префикс добавлен рядом, а не
+      # заменяет первый: обе директории — часть штатной ротации k3s
+      # (/var/log/containers — плоский каталог symlink'ов на файлы под
+      # /var/log/pods/<ns>_<pod>_<uid>/<container>/*.log), и урок shире правки
+      # — исключение по одному пути проверено ровно на одном архиве и
+      # переживёт следующую ротацию так же тихо, если её структура снова
+      # изменится.
       - name: k3s-pod-log-rotation
         condition_group:
           operator: and
@@ -420,7 +449,7 @@ rules:
               values: [k3s-server]
             - field: filename
               op: prefix
-              values: ["/var/log/pods"]
+              values: ["/var/log/pods", "/var/log/containers"]
             # Волна 6.2.1, продакшен-ужесточение: исключение действует только в
             # хостовом контексте — под, назвавший себя "k3s-server", чистить
             # чужие логи молча не сможет (comm подделывается, cgroup — нет).
@@ -1278,14 +1307,22 @@ rules:
     name: "iptables flush or chain delete"
     description: "iptables -F or iptables --flush executed — removing firewall rules to enable C2 communication."
     event_type: syscall
+    # Волна 6.2.2, пункт 4 «правило совпадает не шире своего имени» (третье из
+    # трёх, рядом с №231 и №234). ".*" между именем команды и флагом пересекает
+    # границу команды: `sh -c "grep iptables /etc/rc.local; tar -F ..."` совпадал
+    # с правилом, которое обещает "iptables -F executed". Класс символов
+    # [^;|&] держит совпадение внутри ОДНОЙ команды и не трогает ни одного
+    # истинного вызова: `iptables -t nat -F`, `/sbin/ip6tables --flush`,
+    # `iptables -w 5 -X CHAIN` совпадают по-прежнему (юнит на обе половины —
+    # wave6_2_2_rule_narrowing_test.go).
     condition_group:
       operator: and
       conditions:
         - field: proc.args
           op: regex
           values:
-            - "ip6?tables.*(^|\\s)(-F|--flush)(\\s|$)"
-            - "ip6?tables.*(^|\\s)(-X|--delete-chain)(\\s|$)"
+            - "ip6?tables[^;|&]*(^|\\s)(-F|--flush)(\\s|$)"
+            - "ip6?tables[^;|&]*(^|\\s)(-X|--delete-chain)(\\s|$)"
             - "ufw disable"
             - "systemctl stop firewalld"
             - "systemctl disable firewalld"
@@ -1415,6 +1452,16 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # 5.9.3b (#47): the rule name promises a web-server ancestor but the
+        # condition never checked it — any shell on the box matched.
+        #
+        # Wave 6.2.2 (finding №244): parent_comm moved first — same AND
+        # result, but it's an 8-entry `in` scan versus a regex, and most
+        # events on the box have no web-server parent at all, so this now
+        # skips the regex on the overwhelming majority of syscall events.
+        - field: parent_comm
+          op: in
+          values: ["nginx", "apache2", "httpd", "php-fpm", "gunicorn", "uwsgi", "node", "java"]
         - field: comm
           op: regex
           values:
@@ -1423,11 +1470,6 @@ rules:
             - "^dash$"
             - "^zsh$"
             - "^ksh$"
-        # 5.9.3b (#47): the rule name promises a web-server ancestor but the
-        # condition never checked it — any shell on the box matched.
-        - field: parent_comm
-          op: in
-          values: ["nginx", "apache2", "httpd", "php-fpm", "gunicorn", "uwsgi", "node", "java"]
     severity: critical
     action: alert
     tags: [mitre:T1190, sigma, rce, webshell, web-server]

@@ -882,6 +882,9 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				// buffer, so without this short-lived PIDs leak ~24 KB each
 				// for the lifetime of the process.
 				globalConnFrequency.Cleanup(10 * time.Minute)
+				// Evict (pid, daddr, dport) beacon-interval keys the same way —
+				// see BeaconIntervalTracker (finding №231).
+				globalBeaconInterval.Cleanup(10 * time.Minute)
 				// Evict (ruleID, pid) burst-tracker keys with no matches in
 				// the last 10 minutes — same rationale as globalConnFrequency
 				// above, for rule.Threshold's per-PID ring buffers.
@@ -1803,6 +1806,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	// ruleset rather than on traffic. getFieldValue now only reads the count.
 	if e.Type == types.EventTCPConnect && e.Network != nil {
 		globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(e))
+		globalBeaconInterval.Record(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(e))
 	}
 
 	// Add event to per-process buffer. Gated: the buffer has no production

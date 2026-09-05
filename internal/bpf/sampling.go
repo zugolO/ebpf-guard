@@ -289,8 +289,12 @@ func (rl *RateLimiter) SetSamplingRate(eventType string, rate float64) {
 // DefaultMonitoredSyscalls returns the syscall numbers that should be monitored
 // by default: execve/execveat, ptrace, capset, setns, unshare, memfd_create,
 // mount, umount2, pivot_root, chroot, process_vm_writev, process_vm_readv,
-// perf_event_open, chmod/fchmod/fchmodat, init_module/finit_module/delete_module,
-// bpf, setuid.
+// perf_event_open, init_module/finit_module/delete_module, bpf, setuid.
+//
+// chmod/fchmod/fchmodat (90/91/268) were removed in wave 6.2.2 (finding #243):
+// wave 6.2.1 layer 3 moved every chmod rule onto event_type: file
+// (fileaccess.bpf.c tracepoints), leaving the syscall-side events with no
+// consumer — each chmod produced a second, unread ring-buffer event.
 func DefaultMonitoredSyscalls() []int {
 	return []int{
 		59,  // execve
@@ -307,9 +311,6 @@ func DefaultMonitoredSyscalls() []int {
 		311, // process_vm_writev
 		310, // process_vm_readv
 		298, // perf_event_open (was 241/semtimedop — wave 5.9.2b, finding #39)
-		90,  // chmod
-		91,  // fchmod
-		268, // fchmodat
 		175, // init_module
 		313, // finit_module
 		176, // delete_module

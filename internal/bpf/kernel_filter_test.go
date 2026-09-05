@@ -42,6 +42,27 @@ func TestDefaultMonitoredSyscalls(t *testing.T) {
 	}
 }
 
+// TestDefaultMonitoredSyscalls_ChmodExcluded is the wave 6.2.2 (finding #243)
+// regression guard: chmod/fchmod/fchmodat (90/91/268) must NOT be in the
+// syscall-side allowlist. Wave 6.2.1 layer 3 moved every chmod rule onto
+// event_type: file, hooked directly in fileaccess.bpf.c — a chmod syscall
+// still listed here would be admitted twice past the BPF-side kernel filter
+// (once as a syscall event nobody reads, once as the file event rules
+// actually consume), doubling the ring-buffer cost of every chmod for no
+// consumer.
+func TestDefaultMonitoredSyscalls_ChmodExcluded(t *testing.T) {
+	excluded := map[int]string{
+		90:  "chmod",
+		91:  "fchmod",
+		268: "fchmodat",
+	}
+	for _, nr := range DefaultMonitoredSyscalls() {
+		if name, isChmod := excluded[nr]; isChmod {
+			t.Fatalf("syscall %s (%d) must not be monitored on the syscall axis — it is handled exclusively by the file-event chmod hooks (finding #243)", name, nr)
+		}
+	}
+}
+
 func TestDefaultCommDenylist(t *testing.T) {
 	list := DefaultCommDenylist()
 	assert.NotEmpty(t, list, "default comm denylist must not be empty")

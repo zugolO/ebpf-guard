@@ -30,6 +30,12 @@ var (
 		// conn_rate_1m: computed behavioral field — connection attempts to the
 		// same (pid, dport) within the trailing 60s window. See ConnFrequencyTracker.
 		"conn_rate_1m": true,
+		// conn_periodic_count_5m / conn_periodic_cv_5m: computed behavioral
+		// fields for periodicity — sample count and coefficient of variation
+		// of inter-arrival intervals to the same (pid, daddr, dport) within
+		// the trailing 5m window. See BeaconIntervalTracker (wave 6.2.2, №231).
+		"conn_periodic_count_5m": true,
+		"conn_periodic_cv_5m":    true,
 		// proc enrichment: command-line args populated from BPF proc_args_map or /proc fallback
 		"proc.args":           true,
 		"proc.args_truncated": true,

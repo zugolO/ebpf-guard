@@ -61,6 +61,24 @@ rules:
         - field: network.dport
           op: not_in
           values: ["22", "53", "80", "123", "443", "3306", "5432", "6379", "5353"]
+        # Волна 6.2.2 (открытый вопрос 4 к находкам №230/№231): у этого правила
+        # был ровно тот же дефект, что у c2_periodic_beacon_pattern — имя и
+        # описание обещают "repeated ... at fixed intervals", а условие
+        # проверяло только порт и comm, то есть поднималось и на ОДНОМ
+        # соединении. Волна 6.2.1 лечила это списком исключений (ниже), что
+        # заглушает фон, но не отличает бикон от разового коннекта: полезная
+        # нагрузка, назвавшая себя иначе, поднимала critical одним connect'ом.
+        # Условие периодичности берётся из того же BeaconIntervalTracker, что
+        # уже пишется на каждом TCP-connect (beacon_periodicity.go) — на
+        # горячем пути это чтение уже посчитанной величины, не новая работа.
+        # Исключения ОСТАЮТСЯ: k3s-server/coredns периодичны по построению и
+        # условие периодичности их не снимает.
+        - field: conn_periodic_count_5m
+          op: gt
+          values: ["2"]
+        - field: conn_periodic_cv_5m
+          op: lt
+          values: ["0.35"]
         - field: proc.comm
           op: not_in
           # Wave 6.2.1 (№220): coredns's periodic upstream forwarding and
@@ -132,12 +150,34 @@ rules:
               values: ["kube-system"]
 
   # MITRE ATT&CK: T1132.001 — Data Encoding: Standard Encoding
+  #
+  # Wave 6.2.2 (№230/№231). Before this revision the condition below was the
+  # entire rule: any single TCP connect to a non-standard port from a
+  # non-collector comm — no periodicity, no repetition, no short-lived-ness,
+  # despite the name and description promising all three. On the 6.2.1
+  # measurement window it fired 602 times (98 exported + 504 rate-limiter
+  # cut), 71% of every real rule match in the run, entirely on one-off
+  # control-plane connections (6443/10250/2379/2380) that happen once and
+  # never repeat — the opposite of a beacon. Because the rule is `info`
+  # severity it never reached the store, so the exception list built from
+  # the store (wave 6.2's narrowing, №220) could not see it either (№230):
+  # narrowing and measurement were reading different axes.
+  #
+  # The fix is a real periodicity condition, not another exception —
+  # an exception on this rule would also silence a genuine beacon that
+  # happens to share a comm/port with legitimate traffic. conn_periodic_count_5m
+  # and conn_periodic_cv_5m (BeaconIntervalTracker, beacon_periodicity.go)
+  # require at least 3 connections to the SAME (pid, daddr, dport) within 5
+  # minutes with a regular cadence (coefficient of variation < 0.35) before
+  # this rule fires at all. A single connection — the k3s-server/control-plane
+  # case — now has conn_periodic_count_5m < 3 and does not match.
   - id: c2_periodic_beacon_pattern
     name: "Periodic small outbound connection — C2 beacon pattern"
     description: >
-      Very short-lived outbound TCP connections at regular intervals.
-      C2 beaconing typically uses short keep-alive connections to check
-      for tasking without generating sustained bandwidth.
+      Repeated outbound TCP connections to the same destination at a
+      regular cadence (low interval variance). C2 beaconing typically uses
+      short keep-alive connections at a fixed or jittered-but-bounded
+      interval to check for tasking without generating sustained bandwidth.
     event_type: network
     condition_group:
       operator: and
@@ -151,6 +191,12 @@ rules:
                    "npm", "yarn", "gem", "cargo", "go", "gradle", "mvn",
                    "prometheus", "grafana", "node_exporter", "telegraf",
                    "filebeat", "fluentd", "vector"]
+        - field: conn_periodic_count_5m
+          op: gt
+          values: ["2"]
+        - field: conn_periodic_cv_5m
+          op: lt
+          values: ["0.35"]
     severity: info
     action: alert
     tags: [mitre:T1132.001, command-and-control, beaconing]

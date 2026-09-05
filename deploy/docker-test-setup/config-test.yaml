@@ -5,6 +5,7 @@ server:
   metrics_path: "/metrics"
   health_path: "/health"
   enable_debug: true  # нужен /debug/state, который используют attacks/run-all-attacks.sh и analyze-alerts.py
+  enable_pprof: true  # волна 6.2.2, находка #244: /debug/pprof ни разу не снимался за всю историю проекта — по умолчанию выключен (server.enable_pprof: false), README его описывает, но стенд его не включал
 
 bpf:
   map_sizes:

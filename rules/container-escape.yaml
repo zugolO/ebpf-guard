@@ -623,6 +623,16 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # Wave 6.2.2 (finding №244): cheap eq checks first — AND is
+        # order-independent for the result, but a regex evaluated on every
+        # /dev event whose container fields already fail is pure waste
+        # (regex backtracking was 44.88% cum CPU on this event type).
+        - field: container.id
+          op: eq
+          values: [""]
+        - field: k8s.pod
+          op: eq
+          values: [""]
         - field: filename
           op: regex
           values:
@@ -633,12 +643,6 @@ rules:
             - "/dev/xvd[a-z][0-9]*"
             - "/dev/mapper/"
             - "/dev/dm-[0-9]+"
-        - field: container.id
-          op: eq
-          values: [""]
-        - field: k8s.pod
-          op: eq
-          values: [""]
     severity: warning
     action: alert
     tags: [container-escape, host-device, block-device, host]

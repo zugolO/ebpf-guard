@@ -49,12 +49,15 @@ bpf:
   #   87  = unlink(2)    — ransomware_backup_delete
   #  263  = unlinkat(2)  — ransomware_backup_delete (used by 'find -delete')
   # Wave 5.9.2b (finding #39) added:
-  #   90/91/268 = chmod/fchmod/fchmodat        — sigma_sensitive_file_chmod and friends
   #   175/313/176 = init_module/finit_module/delete_module — rootkit_*_module_syscall
   #   321 = bpf(2)                              — rootkit_bpf_*, ebpf_subversion_*
   #   105 = setuid                              — sigma_setuid_syscall
   # and fixed 241 (semtimedop) -> 298 (perf_event_open): the number here never
   # matched its own comment, so rootkit_perf_event_open was mute by construction.
+  # Wave 6.2.2 (finding #243) removed 90/91/268 (chmod/fchmod/fchmodat): wave
+  # 6.2.1 layer 3 moved every chmod rule onto event_type: file (fileaccess.bpf.c
+  # tracepoints), so the syscall-side events had no remaining consumer — each
+  # chmod produced two ring-buffer events, the second discarded unread.
   kernel_filter:
     enabled: true
     monitored_syscalls:
@@ -75,9 +78,6 @@ bpf:
       - 82   # rename
       - 87   # unlink
       - 263  # unlinkat
-      - 90   # chmod
-      - 91   # fchmod
-      - 268  # fchmodat
       - 175  # init_module
       - 313  # finit_module
       - 176  # delete_module

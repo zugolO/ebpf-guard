@@ -154,12 +154,47 @@ const (
 // attacker tools (see attack-manifest.json), so trusting it would blind the
 // `bash → curl` attack path; its idle-noise share (3/9) is a rule-level
 // problem, not a trust-gate one.
+//
+// Волна 6.2.2 (находка №235, прогон 6.2.1): семь `incident_confirmed_attack`
+// в архиве, ни один не атака. Два добавления сюда закрывают пять из семи:
+//
+//   - "runc:[0:PARENT]"/"runc:[1:CHILD]"/"runc:[2:INIT]" — bracketed thread
+//     names runc gives its OWN process during the three re-exec stages of
+//     container init (mount/pivot_root/cap_sys_admin/proc_modules_read —
+//     exactly the container-escape/rootkit/cis rule families). Deliberately
+//     separate from the bare "runc" entry in containerSupervisorComms: that
+//     one is a shim seen THROUGH to judge a different child underneath
+//     (находка №160); these three ARE the actor, doing routine namespace
+//     setup on every pod start, not a proxy for anything else. Three
+//     consecutive incidents in the 6.2.1 window (19/18/15 alerts from
+//     10-13 rules apiece) were this pattern, once per pod start — the same
+//     oborot-podov cost already sized without a verdict in находка №236.
+//   - "flannel" — the CNI daemon's own plumbing (route/iptables/netlink
+//     setup for each pod's network namespace) fans out across network and
+//     sandbox-detection rules the same way grafana's self-introspection did
+//     in 5.7 ("292 alerts from 15 rules across 3 MITRE tactics" in one
+//     6.2.1 incident). Same shape, same fix: trusted root, still loses the
+//     gate the moment a real network signal or untrusted comm joins it (see
+//     TestIncidentTracker_TrustGate_GrafanaWithNetworkSignalStillPromotes).
+//
+// The remaining two of seven — one root `find`, one root `bash` belonging to
+// the measurement harness itself — are NOT fixed here. Trusting bash/find by
+// comm would blind the same attack path curl's exclusion above protects
+// (an attacker's `bash -c` looks identical); the correct fix is the
+// observer-tree PID exclusion (engine.go, находки №27/№28) actually covering
+// the control script for its full lifetime, which is a pipeline timing
+// question, not a incident-scoring one. Left open — see plan.md 6.2.2 open
+// questions.
 var defaultTrustedComms = map[string]struct{}{
 	"sshd":            {},
 	"cron":            {},
 	"landscape-sysin": {},
 	"systemd-logind":  {},
 	"grafana":         {},
+	"flannel":         {},
+	"runc:[0:PARENT]": {},
+	"runc:[1:CHILD]":  {},
+	"runc:[2:INIT]":   {},
 }
 
 // IncidentScoringConfig tunes how incidents are scored and when they are
@@ -272,9 +307,9 @@ type IncidentTracker struct {
 	// procReconClusterTag (or any rule id, itself, for rules without it) —
 	// see procReconClusterTag and recalculateScore's use of it (5.8f).
 	ruleClusterKeys map[string]string
-	open        map[incidentKey]*types.Incident // active incidents (last alert within window)
-	byID        map[string]*types.Incident      // all incidents for ID-based lookups
-	seq         atomic.Uint64
+	open            map[incidentKey]*types.Incident // active incidents (last alert within window)
+	byID            map[string]*types.Incident      // all incidents for ID-based lookups
+	seq             atomic.Uint64
 }
 
 // newIncidentTracker creates an IncidentTracker with the given sliding window.

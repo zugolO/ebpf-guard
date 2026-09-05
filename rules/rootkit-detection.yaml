@@ -442,11 +442,9 @@ rules:
     condition_group:
       operator: and
       conditions:
-        - field: filename
-          op: regex
-          values:
-            - "^/dev/\\.[^/]+$"
-            - "^/dev/[a-z]{6,}$"
+        # Wave 6.2.2 (finding №244): the not_in exclusion below moved first —
+        # same AND result, but it's a short literal-list scan versus a regex,
+        # so it now runs before backtracking is invoked at all.
         # Standard kernel-provided nodes whose bare names are 6+ lowercase
         # letters and so match the second regex legitimately. /dev/pts and
         # /dev/shm need no entry: they are shorter than {6,} and anything
@@ -476,6 +474,11 @@ rules:
             - "/dev/userfaultfd"
             - "/dev/snapshot"
             - "/dev/sequencer"
+        - field: filename
+          op: regex
+          values:
+            - "^/dev/\\.[^/]+$"
+            - "^/dev/[a-z]{6,}$"
     severity: warning
     action: alert
     tags: [mitre:T1014, mitre:T1564.001, rootkit, hidden-dir]
@@ -528,15 +531,17 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # Wave 6.2.2 (finding №244): cheap eq check first — same AND result,
+        # skips the regex on every non-write open/read of the file.
+        - field: op
+          op: eq
+          values: ["write"]
         - field: filename
           op: regex
           values:
             - ".*/\\.ssh/authorized_keys$"
             - "/root/\\.ssh/authorized_keys$"
             - "/etc/ssh/authorized_keys$"
-        - field: op
-          op: eq
-          values: ["write"]
     severity: critical
     action: alert
     tags: [mitre:T1098.004, rootkit, ssh-backdoor, persistence]

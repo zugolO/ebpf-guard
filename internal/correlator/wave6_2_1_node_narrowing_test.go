@@ -101,6 +101,16 @@ func w621FileIn(comm, path string, id *types.EnrichmentInfo) types.Event {
 	return e
 }
 
+// w621FileOp is w621File with an explicit FileEvent.Op — needed for
+// sigma_log_deletion (wave 6.2.2, находка №234), whose condition now
+// distinguishes write from read/open (see fileOpNames in rules.go: 0=open,
+// 1=read, 2=write, 3=chmod).
+func w621FileOp(comm, path string, op uint8) types.Event {
+	e := w621File(comm, path, "")
+	e.File.Op = op
+	return e
+}
+
 func w621Net(comm string, dport uint16, daddr string) types.Event {
 	e := types.Event{Type: types.EventTCPConnect, PID: 4242, Network: &types.NetworkEvent{Dport: dport, Family: types.AFInet}}
 	copy(e.Comm[:], comm)
@@ -242,14 +252,31 @@ func TestWave6_2_1FileNarrowings(t *testing.T) {
 		// the comm into the info-severity twin: criterion 6.2.1.1 sums
 		// alerts_total + alerts_filtered_total, so a twin renames volume
 		// instead of removing it (wave 5.1's lesson).
-		assert.Empty(t, e.Evaluate(w621File("k3s-server",
-			"/var/log/pods/kube-system_coredns-54996dc9b4-tq8rc_a581786b/coredns/0.log", "")))
-		assert.Empty(t, e.Evaluate(w621File("k3s-server", "/var/log/pods", "")))
+		assert.Empty(t, e.Evaluate(w621FileOp("k3s-server",
+			"/var/log/pods/kube-system_coredns-54996dc9b4-tq8rc_a581786b/coredns/0.log", 2)))
+		assert.Empty(t, e.Evaluate(w621FileOp("k3s-server", "/var/log/pods", 2)))
+		// Волна 6.2.2, находка №233: та же ротация показывается ещё и через
+		// symlink-каталог /var/log/containers на прогоне 6.2.1 (10 из 14
+		// нодовых алертов окна) — второй префикс исключения покрывает и его.
+		assert.Empty(t, e.Evaluate(w621FileOp("k3s-server",
+			"/var/log/containers/coredns-54996dc9b4-tq8rc_kube-system_coredns-a581786b.log", 2)))
 		// Scoped to comm AND path: log tampering outside /var/log/pods alerts.
-		assert.NotEmpty(t, e.Evaluate(w621File("k3s-server", "/var/log/auth.log", "")))
-		assert.NotEmpty(t, e.Evaluate(w621File("sh", "/var/log/pods/kube-system_coredns/coredns/0.log", "")))
-		assert.NotEmpty(t, e.Evaluate(w621FileIn("k3s-server", "/var/log/pods/kube-system_coredns/coredns/0.log", w621Pod("default", "evil-7f9"))),
+		assert.NotEmpty(t, e.Evaluate(w621FileOp("k3s-server", "/var/log/auth.log", 2)))
+		assert.NotEmpty(t, e.Evaluate(w621FileOp("sh", "/var/log/pods/kube-system_coredns/coredns/0.log", 2)))
+		evilPodEvent := w621FileOp("k3s-server", "/var/log/pods/kube-system_coredns/coredns/0.log", 2)
+		evilPodEvent.Enrichment = w621Pod("default", "evil-7f9")
+		assert.NotEmpty(t, e.Evaluate(evilPodEvent),
 			"a pod renaming itself k3s-server must not get to wipe pod logs silently")
+
+		// Волна 6.2.2, находка №234: условие раньше не смотрело на op вовсе, и
+		// READ (journalctl, читающий /var/log/journal) поднимал critical.
+		// Ни один из доступных op'ов, кроме write, больше не матчит.
+		assert.Empty(t, e.Evaluate(w621FileOp("journalctl", "/var/log/journal", 1)),
+			"journalctl reading /var/log/journal must stay silent — read is not tampering")
+		assert.Empty(t, e.Evaluate(w621FileOp("sh", "/var/log/auth.log", 0)),
+			"a bare open (no write) must not by itself raise a log-tampering critical")
+		assert.NotEmpty(t, e.Evaluate(w621FileOp("sh", "/var/log/auth.log", 2)),
+			"a write to a system log outside the daemon/exception list must still alert")
 
 		daemon := w621Rule(t, "../../rules/sigma-linux.yaml", "sigma_log_deletion_daemon")
 		assert.Empty(t, daemon.Evaluate(w621File("k3s-server",
@@ -306,6 +333,7 @@ func TestWave6_2_1IptablesNarrowings(t *testing.T) {
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			e := w621Rule(t, tc.file, tc.id)
+
 			for _, args := range flannel {
 				assert.Empty(t, e.Evaluate(w621Exec("iptables", args)),
 					"flannel's chain-membership check is not a flush: %s", args)
@@ -331,28 +359,48 @@ func TestWave6_2_1NetworkNarrowings(t *testing.T) {
 		hostActors []string // excluded only in host context
 		podActors  []string // excluded only inside kube-system
 		stillFire  string
+		// periodic primes globalBeaconInterval for this case: wave 6.2.2
+		// (open question 4) made beacon_fixed_interval require an actual
+		// cadence, so every half of this table — background AND attack —
+		// has to be a repeated connection before the exclusions are what
+		// decides the verdict. Same shape as TestWave6_2_1HighFrequencyNarrowing
+		// priming globalConnFrequency below.
+		periodic bool
 	}{
 		{"../../rules/cryptominer.yaml", "cryptominer_pool_ports", 8080, "10.42.0.10",
-			[]string{"k3s-server"}, []string{"coredns"}, "xmrig"},
+			[]string{"k3s-server"}, []string{"coredns"}, "xmrig", false},
 		{"../../rules/network-intrusion.yaml", "netintr_socks_proxy_port", 8080, "10.42.0.10",
-			[]string{"k3s-server"}, []string{"coredns"}, "nc"},
+			[]string{"k3s-server"}, []string{"coredns"}, "nc", false},
 		{"../../rules/initial-access.yaml", "initial_package_postinstall_network", 8080, "10.42.0.10",
-			[]string{"k3s-server"}, []string{"coredns"}, "postinst.sh"},
+			[]string{"k3s-server"}, []string{"coredns"}, "postinst.sh", false},
 		{"../../rules/exfiltration-extended.yaml", "exfil_large_http_post", 8080, "10.42.0.10",
-			[]string{"k3s-server"}, []string{"coredns"}, "curl"},
+			[]string{"k3s-server"}, []string{"coredns"}, "curl", false},
 		{"../../rules/command-and-control.yaml", "beacon_fixed_interval", 4444, "10.42.0.10",
-			[]string{"k3s-server"}, []string{"coredns"}, "beacon"},
+			[]string{"k3s-server"}, []string{"coredns"}, "beacon", true},
 		{"../../rules/exfiltration-extended.yaml", "exfil_repeated_outbound_to_same_ip", 8080, "10.42.0.10",
-			[]string{"k3s-server"}, nil, "tar"},
+			[]string{"k3s-server"}, nil, "tar", false},
 		{"../../rules/web-attacks-enhanced.yaml", "web_internal_recon", 10250, "10.42.0.10",
-			[]string{"k3s-server"}, nil, "php"},
+			[]string{"k3s-server"}, nil, "php", false},
 		{"../../rules/webshell-detection.yaml", "webshell_ssrf_internal_network", 10250, "10.42.0.10",
-			[]string{"k3s-server"}, nil, "php"},
+			[]string{"k3s-server"}, nil, "php", false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
 			e := w621Rule(t, tc.file, tc.id)
+
+			if tc.periodic {
+				globalBeaconInterval = NewBeaconIntervalTracker()
+				t.Cleanup(func() { globalBeaconInterval = NewBeaconIntervalTracker() })
+				var daddr [16]byte
+				copy(daddr[:], net.ParseIP(tc.daddr).To4())
+				now := time.Now()
+				for _, pid := range []uint32{4242, w621ExeSpoofPID} {
+					for i := 0; i < 4; i++ {
+						globalBeaconInterval.Record(pid, daddr, tc.dport, now.Add(time.Duration(i)*30*time.Second))
+					}
+				}
+			}
 
 			for _, comm := range tc.hostActors {
 				// The daemon as it actually runs: on the host, no cgroup identity.

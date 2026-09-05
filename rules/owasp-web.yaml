@@ -278,6 +278,11 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # Wave 6.2.2 (finding №244): cheap not_in first — same AND result,
+        # skips the regex once the comm exclusion already fails the group.
+        - field: proc.comm
+          op: not_in
+          values: ["rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
         - field: filename
           op: regex
           values:
@@ -285,9 +290,6 @@ rules:
             - "/var/log/nginx/"
             - "/var/log/apache2/"
             - "/var/log/httpd/"
-        - field: proc.comm
-          op: not_in
-          values: ["rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
     severity: warning
     action: alert
     tags: [owasp, log-tampering, a09-logging-failures]
@@ -299,6 +301,11 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # Wave 6.2.2 (finding №244): cheap in-check first — same AND result,
+        # skips the regex once the comm check already fails the group.
+        - field: proc.comm
+          op: in
+          values: ["rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
         - field: filename
           op: regex
           values:
@@ -306,9 +313,6 @@ rules:
             - "/var/log/nginx/"
             - "/var/log/apache2/"
             - "/var/log/httpd/"
-        - field: proc.comm
-          op: in
-          values: ["rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
     severity: info
     action: alert
     tags: [owasp, log-tampering, a09-logging-failures, needs-content-analysis]

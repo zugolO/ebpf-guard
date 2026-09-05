@@ -11,10 +11,8 @@ rules:
     condition_group:
       operator: and
       conditions:
-        - field: file.path
-          op: regex
-          values:
-            - ".+\\.timer$"
+        # Wave 6.2.2 (finding №244): cheap conditions first — same AND
+        # result, skips the regex once prefix/op/comm already fail the group.
         - field: file.path
           op: prefix
           values:
@@ -30,6 +28,10 @@ rules:
           op: not_in
           values: ["dpkg", "rpm", "apt", "yum", "dnf", "zypper", "pacman",
                    "systemctl", "ansible", "puppet", "chef", "salt"]
+        - field: file.path
+          op: regex
+          values:
+            - ".+\\.timer$"
     severity: warning
     action: alert
     tags: [mitre:T1543.002, persistence, systemd]
@@ -268,9 +270,8 @@ rules:
     condition_group:
       operator: and
       conditions:
-        - field: file.path
-          op: regex
-          values: [".+\\.path$"]
+        # Wave 6.2.2 (finding №244): cheap conditions first — same AND
+        # result, skips the regex once prefix/op/comm already fail the group.
         - field: file.path
           op: prefix
           values:
@@ -284,6 +285,9 @@ rules:
           op: not_in
           values: ["dpkg", "rpm", "apt", "yum", "dnf", "ansible",
                    "puppet", "chef", "salt", "systemctl"]
+        - field: file.path
+          op: regex
+          values: [".+\\.path$"]
     severity: warning
     action: alert
     tags: [mitre:T1053.006, persistence, systemd]

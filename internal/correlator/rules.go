@@ -191,6 +191,16 @@ type RuleCondition struct {
 	// opCode is the precomputed numeric code for Op. evaluateCondition switches
 	// on this integer (jump-table, ~2 ns) instead of Op string (~10 ns).
 	opCode condOpCode
+	// regexes holds the compiled pattern for each entry of Values, in the same
+	// order, for OpRegex conditions. Direct pointers so matchesRegex avoids
+	// hashing the whole pattern string for a re.regexCache lookup on every
+	// event. Set by compileCondPtr; never serialized.
+	regexes []*regexp.Regexp
+	// regexLiterals holds, per pattern, a set of literals of which any matching
+	// string must contain at least one, or nil when none could be derived
+	// (wave 6.2.2, finding №244). When no literal of the set occurs in the
+	// value, matchesRegex skips the regex entirely.
+	regexLiterals [][]string
 }
 
 // RuleConditionGroup allows combining multiple conditions with AND/OR logic.
@@ -693,14 +703,29 @@ func (re *RuleEngine) compilePatterns() error {
 func (re *RuleEngine) compileCondPtr(cond *RuleCondition) error {
 	switch cond.Op {
 	case OpRegex:
-		for _, pattern := range cond.Values {
+		cond.regexes = make([]*regexp.Regexp, len(cond.Values))
+		cond.regexLiterals = make([][]string, len(cond.Values))
+		for i, pattern := range cond.Values {
 			if _, exists := re.regexCache[pattern]; !exists {
+				// The cache is keyed by the pattern as written in the rule,
+				// but holds the compiled NORMALIZED pattern — same language,
+				// see normalizeRegexPattern. Compile the original first so a
+				// malformed pattern is still reported against what the author
+				// wrote, and fall back to it if normalization somehow yields
+				// something that does not compile.
 				compiled, err := regexp.Compile(pattern)
 				if err != nil {
 					return fmt.Errorf("rule compile: invalid regex pattern %q: %w", pattern, err)
 				}
+				if normalized := normalizeRegexPattern(pattern); normalized != pattern {
+					if alt, altErr := regexp.Compile(normalized); altErr == nil {
+						compiled = alt
+					}
+				}
 				re.regexCache[pattern] = compiled
 			}
+			cond.regexes[i] = re.regexCache[pattern]
+			cond.regexLiterals[i] = requiredLiterals(pattern)
 		}
 	case OpInCIDR, OpNotInCIDR:
 		for _, cidr := range cond.Values {
@@ -1213,7 +1238,7 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsA
 		}
 		return true
 	case condOpRegex:
-		return re.matchesRegex(cond.Values, value)
+		return re.matchesRegex(cond, value)
 	case condOpGT:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a > b })
 	case condOpLT:
@@ -1442,6 +1467,21 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			// connection once per rule referencing this field.
 			count := globalConnFrequency.Rate(e.PID, e.Network.Dport, eventTime(e))
 			return formatConnRate(count)
+		case "conn_periodic_count_5m":
+			// Behavioral signal for periodicity (wave 6.2.2, finding №231):
+			// number of connections seen to this exact (pid, daddr, dport)
+			// destination in the trailing 5 minutes. Read-only, same
+			// once-per-event Record() rationale as conn_rate_1m above.
+			count, _ := globalBeaconInterval.Stats(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(e))
+			return formatBeaconCount(count)
+		case "conn_periodic_cv_5m":
+			// Coefficient of variation of inter-arrival intervals to this
+			// destination. Low value = regular cadence (beacon-like); returns
+			// beaconInsufficientDataCV when there is not yet enough data to
+			// say either way, so a "lt <threshold>" condition fails rather
+			// than mistaking absence of evidence for regularity.
+			_, cv := globalBeaconInterval.Stats(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(e))
+			return formatBeaconCV(cv)
 		case "proc.args":
 			return e.ProcArgs
 		case "proc.args_truncated":
@@ -1806,13 +1846,31 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 	return fieldNotFound
 }
 
-// matchesRegex checks if value matches any of the regex patterns.
-func (re *RuleEngine) matchesRegex(patterns []string, value string) bool {
-	for _, pattern := range patterns {
-		if re, exists := re.regexCache[pattern]; exists {
-			if re.MatchString(value) {
+// matchesRegex checks if value matches any of the condition's regex patterns.
+//
+// Two load-time optimizations carry the cost of this path (wave 6.2.2, finding
+// №244 — regex backtracking was 44.88% of agent CPU in the first profile):
+// cond.regexes holds compiled patterns directly, so no map lookup hashes the
+// pattern string per event; cond.regexLiterals holds, per pattern, a literal
+// the pattern cannot match without, so a strings.Contains settles the common
+// no-match case without entering the backtracker at all.
+func (re *RuleEngine) matchesRegex(cond *RuleCondition, value string) bool {
+	// Conditions built directly in tests never went through compileCondPtr and
+	// have no precompiled slice; fall back to the pattern-keyed cache.
+	if cond.regexes == nil {
+		for _, pattern := range cond.Values {
+			if compiled, exists := re.regexCache[pattern]; exists && compiled.MatchString(value) {
 				return true
 			}
+		}
+		return false
+	}
+	for i, compiled := range cond.regexes {
+		if !containsAny(value, cond.regexLiterals[i]) {
+			continue
+		}
+		if compiled.MatchString(value) {
+			return true
 		}
 	}
 	return false
@@ -1987,6 +2045,60 @@ func (re *RuleEngine) UnreachableSyscallRules(allowlist []int) []string {
 			}
 		}
 		if hasNumericNr && !reachable {
+			out = append(out, rule.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// UnreachableFileOpRules returns the IDs of loaded EventFileAccess rules whose
+// "op" condition (eq/in) names only operations no BPF hook in this build can
+// ever produce, i.e. values outside fileOpNames.
+//
+// Wave 6.2.2 (open question 7, found while closing №234). Four rules —
+// evasion_log_clear and its siblings in ransomware.yaml,
+// credential-and-defense-gaps.yaml, collection-and-evasion-gaps.yaml and
+// impact-gaps.yaml — require op in [unlink, truncate, rename, rmdir], while
+// fileaccess.bpf.c hooks only openat/read/write/chmod. They have never matched
+// anything and never will. rule_loader.go could not catch it: "op" is a valid
+// FIELD NAME, and nothing checked its value domain — the same shape as
+// findings #2/#39 on the syscall axis, which is why this reports the same way
+// UnreachableSyscallRules does instead of failing the load. Rewriting the
+// conditions is not this function's business: narrowing them to "write" would
+// make rules that watch whole directories (/var/log/, /etc/) fire on every
+// ordinary write, which is a noise decision with a measured gate attached to
+// it, not a mechanical fix.
+//
+// The result is sorted for stable output.
+func (re *RuleEngine) UnreachableFileOpRules() []string {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	producible := make(map[string]struct{}, len(fileOpNames))
+	for _, name := range fileOpNames {
+		producible[name] = struct{}{}
+	}
+
+	var out []string
+	for _, rule := range re.rules {
+		if rule.EventType != types.EventFileAccess {
+			continue
+		}
+		hasOpCondition := false
+		reachable := false
+		for _, cond := range re.getAllConditions(rule) {
+			if normaliseFieldName(cond.Field) != "op" || (cond.Op != OpEquals && cond.Op != OpIn) {
+				continue
+			}
+			hasOpCondition = true
+			for _, v := range cond.Values {
+				if _, ok := producible[strings.TrimSpace(v)]; ok {
+					reachable = true
+				}
+			}
+		}
+		if hasOpCondition && !reachable {
 			out = append(out, rule.ID)
 		}
 	}

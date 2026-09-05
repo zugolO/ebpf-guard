@@ -141,7 +141,13 @@ func TestEngine_IncidentTrustedComms_ConfigOverride(t *testing.T) {
 // чтобы каждое новое доверенное имя проходило через ревизию, а не через
 // правку литерала.
 func TestDefaultTrustedComms_Wave57Membership(t *testing.T) {
-	want := []string{"sshd", "cron", "landscape-sysin", "systemd-logind", "grafana"}
+	want := []string{
+		"sshd", "cron", "landscape-sysin", "systemd-logind", "grafana",
+		// Волна 6.2.2, находка №235: runc's own bracketed thread names during
+		// container init, and the flannel CNI daemon's own plumbing — see the
+		// doc comment on defaultTrustedComms for the full incident shapes.
+		"flannel", "runc:[0:PARENT]", "runc:[1:CHILD]", "runc:[2:INIT]",
+	}
 
 	got := make([]string, 0, len(defaultTrustedComms))
 	for comm := range defaultTrustedComms {
@@ -209,4 +215,62 @@ func TestIncidentTracker_TrustGate_GrafanaWithNetworkSignalStillPromotes(t *test
 	require.Len(t, incidents, 1)
 	assert.Equal(t, types.VerdictAttack, incidents[0].Verdict,
 		"доверие не должно глушить grafana с сетевым сигналом — иначе скомпрометированный процесс станет невидим")
+}
+
+// TestIncidentTracker_TrustGate_Wave622PodStartAndCNI_StayNonAttack —
+// регрессия на находку №235 (прогон 6.2.1, архив collect-6.2.1): семь
+// incident_confirmed_attack за прогон, ни один не атака. Пять из семи имели
+// эту форму — root process делает СВОЁ дело (runc:[2:INIT] выполняет
+// mount/pivot_root/cap_sys_admin при старте пода, flannel — netlink/iptables
+// при настройке пода в сеть), это поднимает 10-15 правил container-escape/
+// rootkit/cis/net_* с разных исходных событий (колпак P1-13 по source events
+// здесь тоже не срабатывает), и без trust-гейта сумма честно переваливает
+// attackScoreThreshold.
+func TestIncidentTracker_TrustGate_Wave622PodStartAndCNI_StayNonAttack(t *testing.T) {
+	for pid, comm := range map[uint32]string{
+		5001: "runc:[0:PARENT]",
+		5002: "runc:[1:CHILD]",
+		5003: "runc:[2:INIT]",
+		5004: "flannel",
+	} {
+		t.Run(comm, func(t *testing.T) {
+			tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+			now := time.Now()
+			for i, id := range []string{"r1", "r2", "r3", "r4", "r5"} {
+				tr.Add(makeAlertWithComm(id, pid, "prod", types.SeverityCritical,
+					now.Add(time.Duration(i)*time.Second), comm))
+			}
+
+			incidents := tr.GetAll("", "", 0)
+			require.Len(t, incidents, 1)
+			assert.NotEqual(t, types.VerdictAttack, incidents[0].Verdict,
+				"штатный старт пода/настройка CNI не должны подтверждать атаку без сетевого или недоверенного сигнала")
+		})
+	}
+}
+
+// TestIncidentTracker_TrustGate_FlannelWithNetworkSignalStillPromotes —
+// доверие к flannel не должно прятать реальный сетевой сигнал в том же
+// инциденте (тот же эскейп-люк, что и у grafana в 5.7, на новом имени):
+// flannel штатно управляет сетью подов через netlink/iptables, но не через
+// исходящий TCP-connect, так что появление такого события — уже не «своя
+// работа CNI».
+func TestIncidentTracker_TrustGate_FlannelWithNetworkSignalStillPromotes(t *testing.T) {
+	tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+	now := time.Now()
+	for i, id := range []string{"r1", "r2", "r3", "r4"} {
+		tr.Add(makeAlertWithComm(id, 5005, "prod", types.SeverityCritical,
+			now.Add(time.Duration(i)*time.Second), "flannel"))
+	}
+	netAlert := makeAlertWithComm("r5", 5005, "prod", types.SeverityCritical,
+		now.Add(4*time.Second), "flannel")
+	netAlert.Event.Type = types.EventTCPConnect
+	tr.Add(netAlert)
+
+	incidents := tr.GetAll("", "", 0)
+	require.Len(t, incidents, 1)
+	assert.Equal(t, types.VerdictAttack, incidents[0].Verdict,
+		"доверие не должно глушить flannel с сетевым сигналом — иначе скомпрометированный процесс станет невидим")
 }

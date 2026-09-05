@@ -311,7 +311,10 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 		{"PAM config access", "/etc/pam.d/sshd", opOpen, "sigma_failed_login_syscall", "sigma_failed_login_syscall_daemon"},
 		{"library load", "/usr/lib/security/pam_unix.so", opOpen, "drift_new_library_in_system_dir", "drift_new_library_in_system_dir_daemon"},
 		{"PAM module config", "/etc/pam.d/common-auth", opOpen, "rootkit_pam_module_added", "rootkit_pam_module_added_daemon"},
-		{"log touch", "/var/log/auth.log", opOpen, "sigma_log_deletion", "sigma_log_deletion_daemon"},
+		// Волна 6.2.2, находка №234: sigma_log_deletion теперь требует op=write
+		// (READ, e.g. journalctl, поднимал ложный critical) — opWrite здесь, а
+		// не opOpen, отражает реальное условие правила после правки.
+		{"log touch", "/var/log/auth.log", opWrite, "sigma_log_deletion", "sigma_log_deletion_daemon"},
 		{"utmp write", "/var/run/utmp", opWrite, "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon"},
 	}
 

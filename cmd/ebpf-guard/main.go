@@ -272,6 +272,16 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					slog.Any("rule_ids", unreachable))
 			}
 		}
+
+		// Wave 6.2.2 (open question 7): the same decay on the file axis —
+		// rules requiring file.op in [unlink, truncate, rename, rmdir], which
+		// no BPF hook in this build produces. Four of them had been silently
+		// dead since they were written.
+		if unreachable := correlator.NewRuleEngine(rules).UnreachableFileOpRules(); len(unreachable) > 0 {
+			slog.Warn("rules: file rules whose op condition names no operation any hook produces",
+				slog.Int("count", len(unreachable)),
+				slog.Any("rule_ids", unreachable))
+		}
 	}
 
 	// ── BTF source resolution ──────────────────────────────────────────────────

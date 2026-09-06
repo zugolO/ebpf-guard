@@ -1422,9 +1422,19 @@ rules:
   # this rule only ever proxies "PAM config touched", not an actual failed
   # login (that distinction needs content analysis eBPF doesn't have).
   # plan.md wave 5.1: downgrade, don't suppress.
+  #
+  # Wave 6.2.3, item 4 (№248): downgrading to severity=info renamed the volume
+  # without removing it — formula (а) counts info (decision 1, №232), and this
+  # rule alone gave 3090/2400 alerts/window on the two 6.2.2 archives, the
+  # single largest source in the (в) breakdown (6.2.3.2). The axis that's
+  # actually exhausted isn't severity, it's op: every login/cron run reads
+  # /etc/pam.d/*, but sshd/cron REWRITING their own PAM config is not routine
+  # under any circumstance — that's the "auth failure"-adjacent case eBPF can
+  # actually see without content inspection. Narrowed to op=write; routine
+  # read/open traffic is silent, not downgraded.
   - id: sigma_failed_login_syscall_daemon
-    name: "PAM config accessed by login/cron daemon"
-    description: "sshd or cron accessed PAM configuration — usually routine login/job accounting, but content is not inspected."
+    name: "PAM config written by login/cron daemon"
+    description: "sshd or cron wrote to PAM configuration — daemons don't rewrite their own auth config as part of routine login/job accounting; content is not inspected."
     event_type: file
     condition_group:
       operator: and
@@ -1437,6 +1447,9 @@ rules:
         - field: proc.comm
           op: in
           values: ["sshd", "cron"]
+        - field: op
+          op: in
+          values: ["write"]
     severity: info
     action: alert
     tags: [mitre:T1110, sigma, pam, auth-failure, needs-content-analysis]

@@ -1973,11 +1973,38 @@ func (re *RuleEngine) ReferencedSyscalls() []uint32 {
 // argN exclusion or restriction) is the *right* context, only whether the
 // rule has any at all beyond the syscall number.
 //
+// Context counted here is the rule's matching condition set PLUS the
+// conditions of its named exceptions (wave 6.2.3, open question 7). An
+// exception is scoping: an event matching only "nr" but excluded by a named,
+// counted exception is not alerted on, which is exactly what "the rule has
+// context" means for this check. Reading only the match side pushed rule
+// authors toward encoding identity as a `comm not_in [...]` inside the
+// condition — which scopes the rule but does it INVISIBLY (a caller matching
+// the literal produces no match, no alert, and no metric anywhere) and
+// SPOOFABLY (one comm string evades the whole rule). The five container-escape
+// rules of wave 6.2.3 moved that identity into exceptions, where each
+// suppression is counted by name in ebpf_guard_rule_exceptions_total; this
+// function has to recognise that shape as context or it would push the next
+// author straight back to the invisible one.
+//
+// Exception conditions are read through their own walk, not getAllConditions:
+// that helper feeds UnreachableSyscallRules, where an "nr" inside an exception
+// would wrongly count as a syscall the rule can match.
+//
 // The result is sorted for stable output. See plan.md wave 5.9.3c for the
 // full accounting of the remainder.
 func (re *RuleEngine) ContextEmptySyscallRules() []string {
 	re.mu.RLock()
 	defer re.mu.RUnlock()
+
+	onlyNr := func(conds []RuleCondition) bool {
+		for _, cond := range conds {
+			if normaliseFieldName(cond.Field) != "nr" {
+				return false
+			}
+		}
+		return true
+	}
 
 	var out []string
 	for _, rule := range re.rules {
@@ -1988,18 +2015,39 @@ func (re *RuleEngine) ContextEmptySyscallRules() []string {
 		if len(conds) == 0 {
 			continue
 		}
-		onlyNr := true
-		for _, cond := range conds {
-			if normaliseFieldName(cond.Field) != "nr" {
-				onlyNr = false
+		if !onlyNr(conds) {
+			continue
+		}
+		hasExceptionContext := false
+		for i := range rule.Exceptions {
+			exc := &rule.Exceptions[i]
+			excConds := collectGroupConditions(exc.ConditionGroup)
+			if exc.Condition.Field != "" {
+				excConds = append(excConds, exc.Condition)
+			}
+			if len(excConds) > 0 && !onlyNr(excConds) {
+				hasExceptionContext = true
 				break
 			}
 		}
-		if onlyNr {
+		if !hasExceptionContext {
 			out = append(out, rule.ID)
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// collectGroupConditions flattens a condition group and its nested subgroups
+// into a single slice. nil returns nil.
+func collectGroupConditions(g *RuleConditionGroup) []RuleCondition {
+	if g == nil {
+		return nil
+	}
+	out := append([]RuleCondition(nil), g.Conditions...)
+	for i := range g.SubGroups {
+		out = append(out, collectGroupConditions(&g.SubGroups[i])...)
+	}
 	return out
 }
 

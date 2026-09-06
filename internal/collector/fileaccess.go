@@ -335,6 +335,43 @@ func (c *FileaccessCollector) attachPrograms() error {
 				c.links = append(c.links, lClose)
 			}
 		}
+
+		// Волна 6.2.3, №249/решение 4: dup/dup2/dup3 переносят fd_path_map на
+		// новый fd. Без этого `cmd >> file` (shell dup2()'ит открытый fd на
+		// fd 1/2 перед write()) оставляет запись в write() с пустым путём —
+		// правила с префиксом пути (sigma_log_deletion и ещё 46 op=write
+		// правил) молчат не потому, что записи не было, а потому что путь не
+		// разрешился. Неудача привязки не тихая — тот же счётчик
+		// ebpf_guard_file_hook_attach_total, что и у chmod-хуков ниже.
+		dupHooks := []struct {
+			enterTP, exitTP     string
+			enterProg, exitProg *ebpf.Program
+		}{
+			{"sys_enter_dup", "sys_exit_dup", c.objs.TraceDup, c.objs.TraceDupExit},
+			{"sys_enter_dup2", "sys_exit_dup2", c.objs.TraceDup2, c.objs.TraceDup2Exit},
+			{"sys_enter_dup3", "sys_exit_dup3", c.objs.TraceDup3, c.objs.TraceDup3Exit},
+		}
+		for _, h := range dupHooks {
+			if h.enterProg == nil || h.exitProg == nil {
+				exporter.RecordFileHookAttach(h.enterTP, "missing")
+				continue
+			}
+			lEnter, err := link.Tracepoint("syscalls", h.enterTP, h.enterProg, nil)
+			if err != nil {
+				exporter.RecordFileHookAttach(h.enterTP, "error")
+				c.logger.Warn("failed to attach dup hook", "tracepoint", h.enterTP, "error", err)
+				continue
+			}
+			lExit, err := link.Tracepoint("syscalls", h.exitTP, h.exitProg, nil)
+			if err != nil {
+				exporter.RecordFileHookAttach(h.enterTP, "error")
+				c.logger.Warn("failed to attach dup exit hook", "tracepoint", h.exitTP, "error", err)
+				lEnter.Close()
+				continue
+			}
+			exporter.RecordFileHookAttach(h.enterTP, "ok")
+			c.links = append(c.links, lEnter, lExit)
+		}
 	}
 
 	if c.trackRead {

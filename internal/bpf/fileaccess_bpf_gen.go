@@ -40,6 +40,12 @@ type FileaccessMaps struct {
 type FileaccessPrograms struct {
 	TraceChmod       *ebpf.Program `ebpf:"trace_chmod"`
 	TraceClose       *ebpf.Program `ebpf:"trace_close"`
+	TraceDup         *ebpf.Program `ebpf:"trace_dup"`
+	TraceDup2        *ebpf.Program `ebpf:"trace_dup2"`
+	TraceDup2Exit    *ebpf.Program `ebpf:"trace_dup2_exit"`
+	TraceDup3        *ebpf.Program `ebpf:"trace_dup3"`
+	TraceDup3Exit    *ebpf.Program `ebpf:"trace_dup3_exit"`
+	TraceDupExit     *ebpf.Program `ebpf:"trace_dup_exit"`
 	TraceFchmod      *ebpf.Program `ebpf:"trace_fchmod"`
 	TraceFchmodat    *ebpf.Program `ebpf:"trace_fchmodat"`
 	TraceOpen        *ebpf.Program `ebpf:"trace_open"`
@@ -63,6 +69,24 @@ func (o *FileaccessObjects) Close() error {
 	}
 	if o.TraceClose != nil {
 		errs = append(errs, o.TraceClose.Close())
+	}
+	if o.TraceDup != nil {
+		errs = append(errs, o.TraceDup.Close())
+	}
+	if o.TraceDup2 != nil {
+		errs = append(errs, o.TraceDup2.Close())
+	}
+	if o.TraceDup2Exit != nil {
+		errs = append(errs, o.TraceDup2Exit.Close())
+	}
+	if o.TraceDup3 != nil {
+		errs = append(errs, o.TraceDup3.Close())
+	}
+	if o.TraceDup3Exit != nil {
+		errs = append(errs, o.TraceDup3Exit.Close())
+	}
+	if o.TraceDupExit != nil {
+		errs = append(errs, o.TraceDupExit.Close())
 	}
 	if o.TraceFchmod != nil {
 		errs = append(errs, o.TraceFchmod.Close())

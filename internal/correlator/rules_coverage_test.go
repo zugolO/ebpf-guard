@@ -475,15 +475,23 @@ func TestContextEmptySyscallRules(t *testing.T) {
 // never counted by this check) and wave 5.9.3c closed 29 more, from 39 down
 // to the 4 below — one under the ≤5 target.
 //
-// The 4 that remain use only "nr" because the real distinguishing signal —
-// whether the memfd/anon-fd this syscall touches is later exec'd, or whether
-// the chmod target path was under /tmp — needs correlation across multiple
-// events (fd lifecycle, path resolution at the syscall layer) that a single
-// condition on a single event cannot express. Giving them a comm/parent_comm
-// allowlist would not add real context: memfd_create and chmod are used by
-// enough ordinary software (browsers, systemd, package managers) that an
-// allowlist would either chase an ever-growing list or exclude away most of
-// the signal. See plan.md wave 5.9.3c for the full writeup.
+// Wave 6.2.3 (open question 7) then took the count from 4 to 0 WITHOUT
+// touching those four rules: ContextEmptySyscallRules now counts the
+// conditions of a rule's named exceptions as context, and all four already
+// carried a real systemd-sandbox-child exception on ppid/comm. The map below
+// is kept, not deleted — it is the documented landing zone for anything that
+// falls back out, and its four entries still describe why those rules cannot
+// express their scoping on the match side:
+//
+// they use only "nr" there because the real distinguishing signal — whether
+// the memfd/anon-fd this syscall touches is later exec'd, or whether the chmod
+// target path was under /tmp — needs correlation across multiple events (fd
+// lifecycle, path resolution at the syscall layer) that a single condition on
+// a single event cannot express. Giving them a comm/parent_comm allowlist
+// would not add real context: memfd_create and chmod are used by enough
+// ordinary software (browsers, systemd, package managers) that an allowlist
+// would either chase an ever-growing list or exclude away most of the signal.
+// See plan.md wave 5.9.3c for the full writeup.
 var contextEmptySyscallRulesRemainder = map[string]string{
 	"integrity_proc_self_exe_exec": "memfd_create/memfd_secret alone; the actual signal (exec of that fd) needs fd-lifecycle correlation, not a single-event field",
 	"proc_inject_memfd_create":     "same memfd_create limitation as integrity_proc_self_exe_exec — pervasive legitimate use (browsers, systemd, JVM), no single-event field distinguishes staging from routine anonymous-file use",
@@ -524,6 +532,47 @@ func TestContextEmptySyscallRules_RepoRuleCount(t *testing.T) {
 	})
 	canary := NewRuleEngine(augmented).ContextEmptySyscallRules()
 	assert.Contains(t, canary, "zz_canary_context_empty")
+
+	// Wave 6.2.3, open question 7: exceptions count as context — but only when
+	// they actually ADD context. An exception that constrains nothing but "nr"
+	// scopes nothing, and must not buy a bare rule its way out of this check;
+	// otherwise the credit introduced above becomes a blanket exemption anyone
+	// can claim with an empty gesture.
+	augmented2 := append(append([]Rule{}, rules...),
+		Rule{
+			ID:        "zz_canary_exception_no_context",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"9002"}},
+			Action:    ActionAlert,
+			Exceptions: []RuleException{{
+				Name:      "nr-only-exception",
+				Condition: RuleCondition{Field: "syscall.nr", Op: OpEquals, Values: []string{"9002"}},
+			}},
+		},
+		Rule{
+			ID:        "zz_canary_exception_with_context",
+			EventType: types.EventSyscall,
+			Condition: RuleCondition{Field: "nr", Op: OpEquals, Values: []string{"9003"}},
+			Action:    ActionAlert,
+			Exceptions: []RuleException{{
+				Name: "parent-scoped-exception",
+				ConditionGroup: &RuleConditionGroup{
+					Operator: "and",
+					Conditions: []RuleCondition{
+						{Field: "comm", Op: OpIn, Values: []string{"runc"}},
+						{Field: "parent_comm", Op: OpIn, Values: []string{"containerd-shim"}},
+					},
+				},
+			}},
+		},
+	)
+	canary2 := NewRuleEngine(augmented2).ContextEmptySyscallRules()
+	assert.Contains(t, canary2, "zz_canary_exception_no_context",
+		"an exception constraining only nr adds no context and must not exempt the rule")
+	assert.NotContains(t, canary2, "zz_canary_exception_with_context",
+		"an exception scoped on comm/parent_comm is context — that is where the five "+
+			"container-escape rules of wave 6.2.3 keep their runtime identity, and it is "+
+			"counted per suppression in ebpf_guard_rule_exceptions_total")
 }
 
 // effectiveAllowlist resolves a config file the way cmd/ebpf-guard/main.go

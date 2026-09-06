@@ -595,9 +595,18 @@ rules:
   # sshd/cron read/touch PAM config on every login/job run (account/session
   # module lookup) — the base rule has no op filter, so this is read
   # traffic, not modification. plan.md wave 5.1: downgrade, don't suppress.
+  #
+  # Wave 6.2.3, item 4 (№248): same fix as sigma_failed_login_syscall_daemon
+  # above — 2970/2280 alerts/window on the two 6.2.2 archives, second-largest
+  # (в) source, and severity=info still counts under formula (а). The rule is
+  # literally named "PAM module ADDED", which requires a write; the daemon
+  # twin had no op filter and fired on every read. Narrowed to op=write:
+  # sshd/cron reading their own PAM stack on login is silent now, sshd/cron
+  # WRITING to it (e.g. malicious module injection via a compromised daemon,
+  # or a config-management tool spoofing the daemon's identity) still alerts.
   - id: rootkit_pam_module_added_daemon
-    name: "PAM module configuration accessed by login/cron daemon"
-    description: "sshd or cron accessed a PAM config file — usually routine login/job accounting, but content is not inspected."
+    name: "PAM module configuration written by login/cron daemon"
+    description: "sshd or cron wrote to a PAM config file — daemons don't modify their own auth stack as part of routine login/job accounting; content is not inspected."
     event_type: file
     condition_group:
       operator: and
@@ -610,6 +619,9 @@ rules:
         - field: proc.comm
           op: in
           values: ["sshd", "cron"]
+        - field: op
+          op: in
+          values: ["write"]
     severity: info
     action: alert
     tags: [mitre:T1556.003, rootkit, pam, credential-capture, needs-content-analysis]

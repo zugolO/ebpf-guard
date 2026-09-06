@@ -308,9 +308,16 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 		daemonRule string
 	}{
 		{"passwd/shadow read", "/etc/passwd", opOpen, "sigma_passwd_shadow_read", "sigma_passwd_shadow_read_daemon"},
-		{"PAM config access", "/etc/pam.d/sshd", opOpen, "sigma_failed_login_syscall", "sigma_failed_login_syscall_daemon"},
+		// Волна 6.2.3, item 4 (№248): sigma_failed_login_syscall_daemon и
+		// rootkit_pam_module_added_daemon теперь требуют op=write (были: любой
+		// read/open от sshd|cron — 3090/2400 и 2970/2280 алертов/окно на двух
+		// архивах 6.2.2, первые два источника разбивки (в)). opWrite здесь, а
+		// не opOpen, отражает реальное условие правила после сужения; фон
+		// (рутинное чтение PAM на каждом логине) теперь молчит — это
+		// проверяется живым контролем 6.2.3.13, не этой фикстурой.
+		{"PAM config access", "/etc/pam.d/sshd", opWrite, "sigma_failed_login_syscall", "sigma_failed_login_syscall_daemon"},
 		{"library load", "/usr/lib/security/pam_unix.so", opOpen, "drift_new_library_in_system_dir", "drift_new_library_in_system_dir_daemon"},
-		{"PAM module config", "/etc/pam.d/common-auth", opOpen, "rootkit_pam_module_added", "rootkit_pam_module_added_daemon"},
+		{"PAM module config", "/etc/pam.d/common-auth", opWrite, "rootkit_pam_module_added", "rootkit_pam_module_added_daemon"},
 		// Волна 6.2.2, находка №234: sigma_log_deletion теперь требует op=write
 		// (READ, e.g. journalctl, поднимал ложный critical) — opWrite здесь, а
 		// не opOpen, отражает реальное условие правила после правки.

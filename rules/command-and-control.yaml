@@ -200,6 +200,49 @@ rules:
     severity: info
     action: alert
     tags: [mitre:T1132.001, command-and-control, beaconing]
+    exceptions:
+      # Волна 6.2.3, item 5 (№247, решение 2). Этому правилу не хватало
+      # исключения фона ноды, которое beacon_fixed_interval уже получил в
+      # волне 6.2.1 (см. node-host-daemon/kube-system-pod выше в этом файле):
+      # k3s-server/coredns периодичны по построению (count>2, cv<0.35 —
+      # ровно условие правила), и правка №231 (условие периодичности) объём
+      # не тронула, потому что ось «периодичность» тут уже исчерпана —
+      # трафик УЖЕ периодичен, будучи легитимным. 985 совпадений/окно на
+      # обоих архивах 6.2.2. Понижение severity отклонено решением 1
+      # (переименование объёма); исключение переводит объём в
+      # ebpf_guard_rule_exceptions_total, где он виден числом и поимённо.
+      - name: node-host-daemon
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["k3s-server"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Слой 2 (образец — beacon_fixed_interval выше): cgroup-ось
+            # отвечает только «не в контейнере», не «это настоящий демон» —
+            # у любого хостового root-процесса она пуста так же. exe_path —
+            # образ, назначенный ядром в execve; comm/argv[0] подделываются,
+            # эта ссылка нет. Условие стоит последним (короткое замыкание
+            # "and": readlink только для событий с уже совпавшим comm).
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
+      - name: kube-system-pod
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: ["coredns"]
+            - field: k8s.namespace
+              op: eq
+              values: ["kube-system"]
 
   # MITRE ATT&CK: T1090.001 — Proxy: Internal Proxy
   - id: c2_connect_to_tor_port

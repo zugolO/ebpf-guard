@@ -421,6 +421,165 @@ int trace_fchmod(struct trace_event_raw_sys_enter *ctx)
 }
 
 /*
+ * dup_scratch — per-thread oldfd between sys_enter_dup{,2,3} and its sys_exit.
+ * key: pid_tgid, value: oldfd. dup2/dup3 also carry newfd at enter, but dup()
+ * only learns its new fd from the return value, so all three share the same
+ * enter/exit split as openat (fd_scratch_map/fd_commit above) rather than
+ * dup2/dup3 acting eagerly at enter — acting at enter would wire fd_path_map
+ * ahead of a syscall that can still fail (EBADF, EMFILE).
+ *
+ * LRU_HASH, not HASH: an entry is written at enter and deleted at exit, so the
+ * live set is bounded by the threads currently inside a dup syscall — but a
+ * thread killed between the two (SIGKILL on a blocked/preempted task, or an
+ * exit tracepoint the kernel never delivers) leaks its key forever. A plain
+ * HASH at max_entries then fills, bpf_map_update_elem starts returning -E2BIG,
+ * and fd→path transfer dies SILENTLY on every subsequent dup — the same class
+ * of mute instrument this wave exists to remove (fd_path_map above is LRU for
+ * the same reason). LRU evicts the oldest leak instead of refusing new work.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u64);
+	__type(value, __u32);
+} dup_scratch SEC(".maps");
+
+/*
+ * dup_enter — record oldfd for the exit hook, but ONLY when the exit hook can
+ * actually have work to do.
+ *
+ * dup2() is on the hot path of every shell fork (`cmd | cmd`, every redirect,
+ * every daemon double-fork wiring /dev/null onto 0/1/2), so this runs
+ * system-wide at process-spawn rates. The overwhelmingly common shape is
+ * dup2(pipe_or_tty_fd, 0|1|2) where NEITHER fd has a path in fd_path_map:
+ * nothing to transfer, nothing stale to clear. Testing that here costs one
+ * read-only LRU lookup and skips the map WRITE at enter, the lookup+delete at
+ * exit, and the fd_path_map write at commit.
+ *
+ * Two cases must be recorded:
+ *   1. oldfd has a known path        → the path must move to newfd (the
+ *                                      `cmd >> file` case this hook exists for);
+ *   2. newfd has a known path        → dup2/dup3 silently close newfd first, so
+ *      (dup2/dup3 only — dup()        that entry is about to go stale and must
+ *       picks an unused fd)           not misattribute the next write().
+ *
+ * has_newfd distinguishes the two callers; dup() passes 0 because its result
+ * is a fd the kernel guarantees was unused, i.e. already evicted by trace_close.
+ */
+static __always_inline void dup_enter(unsigned int oldfd, unsigned int newfd,
+				      bool has_newfd)
+{
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	__u32 tgid = (__u32)(pid_tgid >> 32);
+	__u64 key = ((__u64)tgid << 32) | (__u64)oldfd;
+	__u32 v = oldfd;
+
+	if (!bpf_map_lookup_elem(&fd_path_map, &key)) {
+		if (!has_newfd)
+			return;
+		key = ((__u64)tgid << 32) | (__u64)newfd;
+		if (!bpf_map_lookup_elem(&fd_path_map, &key))
+			return;
+	}
+
+	bpf_map_update_elem(&dup_scratch, &pid_tgid, &v, BPF_ANY);
+}
+
+/*
+ * dup_commit — wave 6.2.3, №249/decision 4. A shell's `cmd >> file` redirect
+ * opens the target with its own openat() (populating fd_path_map under that
+ * fd) and then dup2()s it onto fd 1/2 before the write() the rule cares
+ * about; without this, sys_enter_write on fd 1 finds no fd_path_map entry —
+ * trace_write emits an event with an empty filename, which silently fails
+ * every filename-prefix rule watching that path (`sigma_log_deletion` and
+ * 46 other op=write rules — measured 6.2.3.5/6.2.3.6 by submitting `echo …
+ * >> path` alongside `dd of=path`, which opens its own fd and needs no dup).
+ */
+static __always_inline void dup_commit(__u32 tgid, __u32 oldfd, long ret)
+{
+	__u64 old_key, new_key;
+	struct fd_path *fdp;
+
+	if (ret < 0 || (__u32)ret == oldfd)
+		return;
+
+	old_key = ((__u64)tgid << 32) | (__u64)oldfd;
+	new_key = ((__u64)tgid << 32) | (__u64)(unsigned int)ret;
+
+	fdp = bpf_map_lookup_elem(&fd_path_map, &old_key);
+	if (fdp)
+		bpf_map_update_elem(&fd_path_map, &new_key, fdp, BPF_ANY);
+	else
+		/* oldfd has no known path (opened before the agent started, or
+		 * evicted from the LRU) — the stale entry newfd may already
+		 * hold (e.g. it was open and dup2 silently closed it first)
+		 * must not linger and misattribute the next write(). */
+		bpf_map_delete_elem(&fd_path_map, &new_key);
+}
+
+static __always_inline void dup_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	__u64 pid_tgid = bpf_get_current_pid_tgid();
+	__u32 tgid = (__u32)(pid_tgid >> 32);
+	__u32 *oldfd_p = bpf_map_lookup_elem(&dup_scratch, &pid_tgid);
+
+	/* No entry means dup_enter decided neither fd carried a path — the
+	 * common case. Skipping the delete keeps that path at a single map
+	 * lookup instead of a lookup plus a failing delete. */
+	if (!oldfd_p)
+		return;
+
+	dup_commit(tgid, *oldfd_p, ctx->ret);
+	bpf_map_delete_elem(&dup_scratch, &pid_tgid);
+}
+
+/* args[0]=oldfd. dup() returns the lowest unused fd, so there is no newfd to
+ * invalidate — has_newfd is false. */
+SEC("tp/syscalls/sys_enter_dup")
+int trace_dup(struct trace_event_raw_sys_enter *ctx)
+{
+	dup_enter((unsigned int)ctx->args[0], 0, false);
+	return 0;
+}
+
+SEC("tp/syscalls/sys_exit_dup")
+int trace_dup_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	dup_exit(ctx);
+	return 0;
+}
+
+/* args[0]=oldfd, args[1]=newfd */
+SEC("tp/syscalls/sys_enter_dup2")
+int trace_dup2(struct trace_event_raw_sys_enter *ctx)
+{
+	dup_enter((unsigned int)ctx->args[0], (unsigned int)ctx->args[1], true);
+	return 0;
+}
+
+SEC("tp/syscalls/sys_exit_dup2")
+int trace_dup2_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	dup_exit(ctx);
+	return 0;
+}
+
+/* args[0]=oldfd, args[1]=newfd, args[2]=flags */
+SEC("tp/syscalls/sys_enter_dup3")
+int trace_dup3(struct trace_event_raw_sys_enter *ctx)
+{
+	dup_enter((unsigned int)ctx->args[0], (unsigned int)ctx->args[1], true);
+	return 0;
+}
+
+SEC("tp/syscalls/sys_exit_dup3")
+int trace_dup3_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	dup_exit(ctx);
+	return 0;
+}
+
+/*
  * Tracepoint for sys_enter_read — emit event with fd-resolved filename.
  * args[0]=fd.  Raw context avoids "invalid bpf_context access off=0 size=8"
  * that BPF_PROG causes on kernels lacking trace_event_raw_sys_enter_read BTF.

@@ -171,16 +171,152 @@ rules:
         - field: nr
           op: in
           values: ["308"]   # __NR_setns (x86-64)
-        # 5.9.3c (#47): the description already names the legitimate
-        # callers — encode them as an exclusion instead of leaving the
-        # syscall unscoped.
+        # 5.9.3c (#47): nsenter(1) is the tool this rule's own description
+        # names as a legitimate caller during normal `kubectl exec`/`docker
+        # exec` sessions (same predicate as container_escape_nsenter in
+        # container-escape.yaml, which does NOT exclude nsenter — that rule
+        # exists specifically to catch nsenter used as an escape technique;
+        # this one is the setns() primitive itself). Left as a plain comm
+        # exclusion, unrelated to item 6/№250 below.
         - field: comm
           op: not_in
-          values: ["nsenter", "runc", "containerd-shim",
-                    "containerd-shim-runc-v2", "dockerd", "conmon", "crun"]
+          values: ["nsenter"]
     severity: critical
     action: alert
     tags: [mitre:T1611, mitre:T1548.002, privesc, setns, namespace-escape, container-escape]
+    exceptions:
+      # Волна 6.2.3, item 6 (№250, решение 5). comm not_in, ранее стоявший в
+      # condition_group выше, ловил только ЛИТЕРАЛЬНОЕ "runc"/"containerd-shim"
+      # и молчал на "runc:[1:CHILD]"/"runc:[2:INIT]" — comm, который реально
+      # несёт namespace-setup child рантайма (W623_NODE_ACTORS,
+      # wave6.2.3-controls.sh). Штатный жизненный цикл контейнера уже сегодня
+      # поднимал этот алерт, и инцидентный слой засчитывал его подтверждённой
+      # атакой (finding №250). Перенесено сюда: объём виден в
+      # ebpf_guard_rule_exceptions_total, а не тонет немым исключением внутри
+      # условия; ключ — cgroup-идентичность (container.id/k8s.pod), без
+      # exe_path-слоя (см. комментарий внутри блока: короткоживущие процессы).
+      - name: container-runtime-lifecycle
+        condition_group:
+          operator: and
+          conditions:
+            - field: comm
+              op: in
+              values: ["runc", "runc:[0:PARENT]", "runc:[1:CHILD]",
+                       "runc:[2:INIT]", "containerd-shim",
+                       "containerd-shim-runc-v2", "containerd",
+                       "dockerd", "conmon", "crun"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Слой 2 (exe_path) НЕ добавлен здесь, в отличие от node-host-daemon
+            # (command-and-control.yaml) — живая проверка на ebaka2 06.09.2026
+            # показала, что "runc:[1:CHILD]"/"runc:[2:INIT]" успевают
+            # завершиться до асинхронного вычисления исключения: live
+            # readlink "/proc/<pid>/exe" находит уже ничего, resolveExePath
+            # возвращает "" и по документированному fail-open (rules.go)
+            # исключение НЕ применяется — то есть слой 2 в этом виде не
+            # подавлял НИ ОДНОГО реального runc:[1:CHILD]/[2:INIT] на живом
+            # узле (0 из 5 таких алертов ушли в exceptions). Защита от
+            # хостового спуфа здесь остаётся только на comm+cgroup — тот же
+            # класс обхода, что уже открыт для литерального comm-списка в
+            # главном condition_group (открытый вопрос 7, plan.md).
+      # Волна 6.2.3, ОТКРЫТЫЙ ВОПРОС 2 (№250, живая проверка item 6 на ebaka2
+      # 06.09.2026). container-runtime-lifecycle выше ключуется на ПУСТЫХ
+      # container.id/k8s.pod — и эта ось живьём оказалась нестабильной ровно
+      # в том окне, ради которого её брали: у runc:[1:CHILD]/[2:INIT]
+      # cgroup-привязка пуста на РАННИХ syscall'ах установки контейнера
+      # (unshare) и уже ЗАПОЛНЕНА целевым container_id к моменту поздних
+      # (pivot_root — по построению ПОСЛЕДНИЙ шаг переключения rootfs, часть
+      # setns — уже после привязки к cgroup). Живой под дал
+      # container_escape_pivot_root 2 алерта / 0 подавлений (0%,
+      # систематически) и privesc_setns_syscall 5 / 12 (частично). Процесс,
+      # который САМ ПРЯМО СЕЙЧАС строит cgroup-принадлежность контейнера,
+      # не опознаётся по её отсутствию — она у него меняется по ходу.
+      #
+      # Ось этого исключения — РОДИТЕЛЬ, а не cgroup. parent_comm читается в
+      # ядре из task_struct->real_parent на каждом событии
+      # (bpf/common.h, fill_common_fields): поле УЖЕ в событии, стоит ноль
+      # дополнительных syscall'ов при вычислении исключения и не зависит от
+      # того, жив ли ещё процесс к моменту асинхронной корреляции. Это и был
+      # дефект отвергнутого слоя proc.exe_path — resolveExePath делает live
+      # readlink("/proc/<pid>/exe"), на короткоживущем child'е получает
+      # ENOENT и по fail-open не применяет исключение (0 из 5 живых случаев).
+      # Namespace-setup child рантайма всегда форкнут своим же рантаймом:
+      # runc:[2:INIT] ← runc:[1:CHILD] ← runc:[0:PARENT] ← containerd-shim.
+      #
+      # ОТДЕЛЬНЫМ ИМЕНЕМ, а не расширением container-runtime-lifecycle:
+      # ebpf_guard_rule_exceptions_total разделяет их по label exception, и
+      # прогон видит числом, сколько сняла каждая ось — ранняя фаза (cgroup)
+      # против поздней (родитель). Порядок тоже часть контракта: lifecycle
+      # стоит ПЕРВЫМ, поэтому счётчик lineage показывает ровно тот остаток,
+      # который cgroup-ось не взяла, — величину, которой эта правка и
+      # доказывается. Слияние в одно имя спрятало бы её.
+      - name: container-runtime-lineage
+        condition_group:
+          operator: and
+          conditions:
+            - field: comm
+              op: in
+              values: ["runc", "runc:[0:PARENT]", "runc:[1:CHILD]",
+                       "runc:[2:INIT]", "containerd-shim",
+                       "containerd-shim-runc-v2", "containerd",
+                       "dockerd", "conmon", "crun"]
+            - field: parent_comm
+              op: in
+              values: ["runc", "runc:[0:PARENT]", "runc:[1:CHILD]",
+                       "runc:[2:INIT]", "containerd-shim",
+                       "containerd-shim-runc-v2", "containerd",
+                       "dockerd", "conmon", "crun"]
+      # Волна 6.2.3, ОТКРЫТЫЙ ВОПРОС 2(б) — побочный источник, вскрытый живой
+      # проверкой item 6 и НЕ входивший в пять правил решения 5.
+      #
+      # Тот же пятисекундный отрезок создания пода, что дал runc-шум, дал
+      # ещё 4 алерта этого правила с comm=bridge и comm=loopback — CNI-плагины
+      # flannel. setns(2) — их штатный механизм: kubelet/containerd вызывает
+      # плагин, тот входит в сетевой namespace пода, чтобы подключить туда
+      # veth-конец, и выходит. Класс шума ровно тот же, что решение 5 закрывает
+      # для runc/containerd-shim — легитимный жизненный цикл пода, — но
+      # плагины в список решения 5 не входили и находкой №250 не именовались,
+      # поэтому оно их не сняло бы никогда.
+      #
+      # Решено внести их в scope волны ОТДЕЛЬНЫМ ИМЕНЕМ, а не расширять
+      # container-runtime-lifecycle: источники разные (сеть пода против его
+      # rootfs/namespace'ов), и разбивка 6.2.3.2 обязана показывать их
+      # раздельно — иначе снижение по одной оси спрячет рост по другой.
+      #
+      # Три слоя, все три — поля, уже лежащие в событии (ноль syscall'ов на
+      # вычисление, в отличие от отвергнутого proc.exe_path):
+      #   1. comm — имя плагина по спецификации CNI (это имя бинаря в
+      #      /opt/cni/bin, а не произвольная строка);
+      #   2. parent_comm — плагин ВСЕГДА форкнут своим вызывающим
+      #      (containerd/flanneld/kubelet), сам себя не запускает;
+      #   3. container.id пуст — плагин работает В ХОСТОВОЙ cgroup вызывающего,
+      #      а не в cgroup пода. Здесь эта ось СТАБИЛЬНА, в отличие от
+      #      runc:[1:CHILD] (открытый вопрос 2): плагин не строит
+      #      cgroup-привязку контейнера, он только входит в его сетевой
+      #      namespace, поэтому его собственная cgroup за время вызова не
+      #      меняется. Именно поэтому cgroup-слой оставлен здесь и убран там.
+      - name: cni-plugin-lifecycle
+        condition_group:
+          operator: and
+          conditions:
+            - field: comm
+              op: in
+              values: ["bridge", "loopback", "host-local", "portmap",
+                       "bandwidth", "firewall", "tuning", "ptp", "vlan",
+                       "macvlan", "ipvlan", "flannel", "host-device",
+                       "static", "dhcp", "sbr", "vrf"]
+            - field: parent_comm
+              op: in
+              values: ["containerd", "containerd-shim", "containerd-shim-runc-v2",
+                       "flanneld", "flannel", "kubelet", "k3s-server", "k3s-agent",
+                       "dockerd", "crio", "multus", "calico-node"]
+            - field: container.id
+              op: eq
+              values: [""]
 
   # unshare(2) creates new namespaces for the calling process.  Creating a new
   # user namespace (CLONE_NEWUSER) gives the process root inside it — enabling
@@ -200,16 +336,118 @@ rules:
         - field: nr
           op: in
           values: ["272"]   # __NR_unshare (x86-64)
-        # 5.9.3c (#47): the description already restricts legitimate use to
-        # container runtime setup — encode that as an exclusion.
-        - field: comm
-          op: not_in
-          values: ["runc", "containerd-shim", "containerd-shim-runc-v2",
-                    "dockerd", "conmon", "crun"]
+        # 5.9.3c (#47) стоял здесь как `comm not_in ["runc", ...]` и снят
+        # волной 6.2.3 (ОТКРЫТЫЙ ВОПРОС 7). Он ловил только ЛИТЕРАЛЬНОЕ имя,
+        # и это был не сузивший, а ОБХОДИМЫЙ фильтр: под, назвавший свой
+        # процесс буквально "runc", не поднимал это правило ВООБЩЕ — условие
+        # не совпадало, до исключений дело не доходило, и обход не оставлял
+        # следа ни в одной метрике. Немой обход хуже видимого шума.
+        #
+        # Вся идентичность рантайма перенесена в exceptions ниже
+        # (container-runtime-lifecycle + container-runtime-lineage). Разница
+        # принципиальная, а не стилистическая:
+        #   * подавление теперь СЧИТАЕТСЯ поимённо в
+        #     ebpf_guard_rule_exceptions_total{exception=...} — величина видна,
+        #     а не исчезает (решение 1 волны 6.2.3: сужение не имеет права
+        #     работать сокрытием);
+        #   * спуфящему поду мало назвать себя "runc": исключение требует
+        #     ЛИБО пустой cgroup-привязки (её у процесса внутри пода нет),
+        #     ЛИБО родителя из того же списка рантаймов. Ни одно из двух
+        #     изнутри пода не выполняется, и правило поднимается — то есть
+        #     обход закрыт, а не перенесён.
+        # Цена: базовое условие теперь совпадает на каждом вызове этого
+        # syscall'а, а не только на не-рантаймовых, и исключения считаются
+        # чаще. Синтетика: unshare/pivot_root/setns происходят на старте
+        # контейнера, единицы в секунду на ноде, а исключение — два сравнения
+        # строк по полям, уже лежащим в событии (никаких readlink/proc).
     severity: warning
     action: alert
     tags: [mitre:T1611, mitre:T1548.002, privesc, unshare, user-namespace, container-escape]
     exceptions:
+      # Волна 6.2.3, item 6 (№250, решение 5). comm not_in above catches only
+      # the LITERAL "runc" and stayed silent on "runc:[1:CHILD]"/
+      # "runc:[2:INIT]" — the comm the runtime's own namespace-setup child
+      # actually reports (W623_NODE_ACTORS, wave6.2.3-controls.sh). Штатный
+      # жизненный цикл контейнера уже сегодня поднимал этот алерт, и
+      # инцидентный слой засчитывал его подтверждённой атакой (finding №250).
+      # Перенесено сюда: объём виден в ebpf_guard_rule_exceptions_total, а не
+      # тонет немым исключением внутри условия; ключ — cgroup-идентичность
+      # (container.id/k8s.pod), без exe_path-слоя (см. комментарий внутри блока).
+      - name: container-runtime-lifecycle
+        condition_group:
+          operator: and
+          conditions:
+            - field: comm
+              op: in
+              values: ["runc", "runc:[0:PARENT]", "runc:[1:CHILD]",
+                       "runc:[2:INIT]", "containerd-shim",
+                       "containerd-shim-runc-v2", "containerd",
+                       "dockerd", "conmon", "crun"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            # Слой 2 (exe_path) НЕ добавлен здесь, в отличие от node-host-daemon
+            # (command-and-control.yaml) — живая проверка на ebaka2 06.09.2026
+            # показала, что "runc:[1:CHILD]"/"runc:[2:INIT]" успевают
+            # завершиться до асинхронного вычисления исключения: live
+            # readlink "/proc/<pid>/exe" находит уже ничего, resolveExePath
+            # возвращает "" и по документированному fail-open (rules.go)
+            # исключение НЕ применяется — то есть слой 2 в этом виде не
+            # подавлял НИ ОДНОГО реального runc:[1:CHILD]/[2:INIT] на живом
+            # узле (0 из 5 таких алертов ушли в exceptions). Защита от
+            # хостового спуфа здесь остаётся только на comm+cgroup — тот же
+            # класс обхода, что уже открыт для литерального comm-списка в
+            # главном condition_group (открытый вопрос 7, plan.md).
+      # Волна 6.2.3, ОТКРЫТЫЙ ВОПРОС 2 (№250, живая проверка item 6 на ebaka2
+      # 06.09.2026). container-runtime-lifecycle выше ключуется на ПУСТЫХ
+      # container.id/k8s.pod — и эта ось живьём оказалась нестабильной ровно
+      # в том окне, ради которого её брали: у runc:[1:CHILD]/[2:INIT]
+      # cgroup-привязка пуста на РАННИХ syscall'ах установки контейнера
+      # (unshare) и уже ЗАПОЛНЕНА целевым container_id к моменту поздних
+      # (pivot_root — по построению ПОСЛЕДНИЙ шаг переключения rootfs, часть
+      # setns — уже после привязки к cgroup). Живой под дал
+      # container_escape_pivot_root 2 алерта / 0 подавлений (0%,
+      # систематически) и privesc_setns_syscall 5 / 12 (частично). Процесс,
+      # который САМ ПРЯМО СЕЙЧАС строит cgroup-принадлежность контейнера,
+      # не опознаётся по её отсутствию — она у него меняется по ходу.
+      #
+      # Ось этого исключения — РОДИТЕЛЬ, а не cgroup. parent_comm читается в
+      # ядре из task_struct->real_parent на каждом событии
+      # (bpf/common.h, fill_common_fields): поле УЖЕ в событии, стоит ноль
+      # дополнительных syscall'ов при вычислении исключения и не зависит от
+      # того, жив ли ещё процесс к моменту асинхронной корреляции. Это и был
+      # дефект отвергнутого слоя proc.exe_path — resolveExePath делает live
+      # readlink("/proc/<pid>/exe"), на короткоживущем child'е получает
+      # ENOENT и по fail-open не применяет исключение (0 из 5 живых случаев).
+      # Namespace-setup child рантайма всегда форкнут своим же рантаймом:
+      # runc:[2:INIT] ← runc:[1:CHILD] ← runc:[0:PARENT] ← containerd-shim.
+      #
+      # ОТДЕЛЬНЫМ ИМЕНЕМ, а не расширением container-runtime-lifecycle:
+      # ebpf_guard_rule_exceptions_total разделяет их по label exception, и
+      # прогон видит числом, сколько сняла каждая ось — ранняя фаза (cgroup)
+      # против поздней (родитель). Порядок тоже часть контракта: lifecycle
+      # стоит ПЕРВЫМ, поэтому счётчик lineage показывает ровно тот остаток,
+      # который cgroup-ось не взяла, — величину, которой эта правка и
+      # доказывается. Слияние в одно имя спрятало бы её.
+      - name: container-runtime-lineage
+        condition_group:
+          operator: and
+          conditions:
+            - field: comm
+              op: in
+              values: ["runc", "runc:[0:PARENT]", "runc:[1:CHILD]",
+                       "runc:[2:INIT]", "containerd-shim",
+                       "containerd-shim-runc-v2", "containerd",
+                       "dockerd", "conmon", "crun"]
+            - field: parent_comm
+              op: in
+              values: ["runc", "runc:[0:PARENT]", "runc:[1:CHILD]",
+                       "runc:[2:INIT]", "containerd-shim",
+                       "containerd-shim-runc-v2", "containerd",
+                       "dockerd", "conmon", "crun"]
       # 5.9.9.F.3c (№133): systemd sandboxing (PrivateTmp/PrivateDevices/
       # ProtectSystem) makes every unit's forked child call unshare() to
       # build its own namespace at startup — same structural predicate as

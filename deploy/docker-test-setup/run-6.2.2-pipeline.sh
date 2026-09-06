@@ -43,7 +43,7 @@ SMOKE="${SMOKE:-0}"
 if [ "$SMOKE" = "1" ]; then
     PROLOGUE="${PROLOGUE:-60}"
     WINDOW="${WINDOW:-60}"
-    ART="${ART:-/root/wave6.2.2-smoke-artifacts}"
+    ART="${ART:-/var/lib/w622-smoke-artifacts}"
     OUT="${OUT:-/root/run-6.2.2-smoke.log}"
     COLLECT="${COLLECT:-/root/collect-6.2.2-smoke}"
     DONE_MARK="${DONE_MARK:-/root/PIPELINE-6.2.2-SMOKE-DONE}"
@@ -51,7 +51,7 @@ if [ "$SMOKE" = "1" ]; then
 else
     PROLOGUE="${PROLOGUE:-1800}"
     WINDOW="${WINDOW:-600}"
-    ART="${ART:-/root/wave6.2.2-artifacts}"
+    ART="${ART:-/var/lib/w622-artifacts}"
     OUT="${OUT:-/root/run-6.2.2.log}"
     COLLECT="${COLLECT:-/root/collect-6.2.2}"
     DONE_MARK="${DONE_MARK:-/root/PIPELINE-6.2.2-DONE}"
@@ -151,7 +151,7 @@ echo "k8s-энричер поднят"
 # Немота по среде фиксируется здесь же, пока журнал стартовых строк свеж
 # (находка №225). Файловая ось (№234/открытый вопрос 7) — рядом с syscall'ной.
 journalctl -u "$SVC" --since "@$(cat /root/agent-start-6.2.2.epoch)" --no-pager \
-    | grep -E 'no reachable nr in the kernel allowlist|cgroup escape collector unavailable|file rules with an op no hook produces' \
+    | grep -E 'no reachable nr in the kernel allowlist|cgroup escape collector unavailable|file rules whose op condition names no operation any hook produces' \
     > /root/env-muteness-6.2.2.txt 2>/dev/null
 echo "немота по среде записана: /root/env-muteness-6.2.2.txt ($(wc -l < /root/env-muteness-6.2.2.txt) строк)"
 

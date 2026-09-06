@@ -88,11 +88,21 @@ W622_POS_TIMEOUT="${W622_POS_TIMEOUT:-120}"
 W622_CHURN="${W622_CHURN:-3}"
 W622_SVC="${W622_SVC:-ebpf-guard-test.service}"
 W622_VERDICTS="${W622_VERDICTS:-/root/wave6.2.2-controls-verdicts.txt}"
-W622_ART="${W622_ART:-/root/wave6.2.2-artifacts}"
+# КАТАЛОГ АРТЕФАКТОВ — ВНЕ /root/, и это не вкусовщина, а вторая половина
+# критерия 6.2.2.5 (открытый вопрос 16). drift_new_file_dir_sensitive стоит на
+# префиксах /root/, /home/, /var/spool/cron/, /etc/cron.d/, /etc/systemd/system/
+# (rules/drift-rules.txt), то есть КАЖДАЯ запись снимка метрик в /root/… по
+# построению производит алерт, который контроль потом считает частью
+# измеренной величины. Смок 06.09.2026 это и напечатал. Порядок операций
+# (правка №242) сужает окно гонки, но не убирает источник; убирает его путь.
+# /var/lib/ вне всех файловых префиксов правил (проверено grep по rules/:
+# waagent/tomcat/mysql/…/docker/containerd/rancher/kubelet — ни один не наш).
+W622_ART="${W622_ART:-/var/lib/w622-artifacts}"
 W622_REPO="${W622_REPO:-/opt/ebpf-guard}"
 W622_GO="${W622_GO:-/usr/local/go/bin/go}"
 W622_SMOKE="${W622_SMOKE:-0}"
 W622_QUIET_LEAD="${W622_QUIET_LEAD:-70}"
+W622_OPEN_SETTLE="${W622_OPEN_SETTLE:-15}"
 
 WAVE622_FAILS=0
 # Артефакты пишутся в КАТАЛОГ ЭТОГО ПРОГОНА и он очищается на старте
@@ -131,6 +141,17 @@ if [ -r "$W622_LIB" ]; then
     # shellcheck source=/dev/null
     . "$W622_LIB" && W622_LIB_OK=1
 fi
+# ВОССТАНОВЛЕНИЕ РЕЖИМА ОБОЛОЧКИ — не косметика, а дефект, пойманный смоком
+# 06.09.2026 ДО прогона. wave6.2.2-metrics-lib.sh объявляет `set -euo pipefail`
+# (правильно для самостоятельного файла со своим --self-test), но `source`
+# переносит этот режим В ВЫЗЫВАЮЩИЙ скрипт. Контроли построены на том, что
+# `grep`/`jq` без совпадения возвращают 1 и это НОРМАЛЬНЫЙ исход измерения
+# («такого в журнале нет»), а не сбой: под `set -e` первый же такой grep убивал
+# контроли МОЛЧА, посреди 6.2.1.6, и пайплайн спокойно собирал архив без
+# единого критерия. Ровно тот класс, который ловит сама волна: измеритель,
+# печатающий готовый вердикт по неполному прогону.
+set +e +o pipefail
+set -u
 [ "$W622_LIB_OK" -eq 1 ] || die "6.2.2.2 НЕИЗМЕРИМ: не подключилась $W622_LIB — список срезанных правил и разбивка величины строились бы снова по стору, то есть воспроизвели бы дефекты №238/№239"
 
 # Правила, для которых нода — единственный вход.
@@ -220,6 +241,7 @@ if [ "$W622_SMOKE" = "1" ]; then
     W622_SETTLE=5
     W622_POS_TIMEOUT=30
     W622_QUIET_LEAD=10
+    W622_OPEN_SETTLE=5
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,14 +264,14 @@ fi
 _w622_cfg="${W622_CONFIG:-$W622_SETUP/config-test.yaml}"
 _w622_k8s_block=$(awk '/^kubernetes:/{f=1;next} f && /^[a-zA-Z#]/{exit} f' "$_w622_cfg" 2>/dev/null)
 _w622_drift_cfg=$(awk '/drift_baseline:/{f=1;next} f && /^[a-zA-Z]/{exit} f' "$_w622_cfg" 2>/dev/null)
-echo "$_w622_k8s_block" | grep -qE '^\s*enabled:\s*true\s*$' \
+echo "$_w622_k8s_block" | grep -qE '^[[:space:]]*enabled:[[:space:]]*true[[:space:]]*(#.*)?$' \
     && pass "6.2.2 преflight: kubernetes.enabled: true в $_w622_cfg" \
     || die "6.2.2 преflight ПРОВАЛЕН: kubernetes.enabled НЕ true — энричер не конструируется, pod_name пуст по построению (находка №216)"
 
 # pprof: без него критерий 6.2.2.10 нереализуем в принципе (находка №244:
 # enable_pprof по умолчанию false, и config-test.yaml её никогда не включал —
 # /debug/pprof/* 404-ил на живом стенде).
-grep -qE '^\s*enable_pprof:\s*true\s*$' "$_w622_cfg" 2>/dev/null \
+grep -qE '^[[:space:]]*enable_pprof:[[:space:]]*true[[:space:]]*(#.*)?$' "$_w622_cfg" 2>/dev/null \
     && pass "6.2.2 преflight: enable_pprof: true — окно профиля 6.2.2.10 реализуемо" \
     || die "6.2.2.10 НЕИЗМЕРИМ: enable_pprof не true в $_w622_cfg — /debug/pprof/* ответит 404, профиль снять нечем (находка №244)"
 
@@ -297,7 +319,7 @@ echo "  kmod cgroup-escape коллектор недоступен: $([ "${_w622
 # №234/открытый вопрос 7: файловые правила, чей op не производит ни один хук
 # сборки, теперь печатаются агентом при старте (UnreachableFileOpRules).
 # Это немота ПО ПОСТРОЕНИЮ, и реплей обязан читать её так же, как syscall-ось.
-_w622_unreach_f=$(journalctl -u "$W622_SVC" --since "$_w622_jsince" --no-pager 2>/dev/null | grep -o '"msg":"rules: file rules with an op no hook produces".*' | tail -1)
+_w622_unreach_f=$(journalctl -u "$W622_SVC" --since "$_w622_jsince" --no-pager 2>/dev/null | grep -o '"msg":"rules: file rules whose op condition names no operation any hook produces".*' | tail -1)
 echo "  файловых правил с недостижимым op: ${_w622_unreach_f:-строки нет}"
 
 _w622_registry="$W622_SETUP/attacks/silent-rules.txt"
@@ -371,6 +393,15 @@ sleep "$W622_QUIET_LEAD"
 _w622_metrics > "$W622_ART/metrics-window-start.txt"
 _w622_jdrops0=$(_w622_journal_drops)
 _w622_drift_print "открытие" "$W622_ART/metrics-window-start.txt"
+# ОСЕДАНИЕ ПЕРЕД ФИКСАЦИЕЙ t0 (открытый вопрос 16, вторая половина). Перенос
+# t0 в конец последовательности (правка №242) убирает СЕКУНДЫ выполнения
+# curl/journalctl из окна, но не убирает задержку конвейера: событие
+# предоткрывающего curl'а проходит ring buffer → корреляцию → стор уже после
+# того, как команда вернулась, и его метка времени может лечь ПОСЛЕ t0.
+# Смок 06.09.2026 напечатал ровно это (curl:1 внутри окна при верном
+# порядке). Пауза даёт конвейеру осесть; величина взята с запасом от
+# наблюдённой латентности (91–183 мкс на событие, но стор пишется пачками).
+sleep "$W622_OPEN_SETTLE"
 _w622_t0=$(_w622_epoch)
 echo "  окно открыто $(date -u -d "@$_w622_t0" +%FT%TZ) — до закрытия НЕ ПОДАВАТЬ вход (память ebpf-guard-measurement-hygiene, п.2/п.5)"
 sleep "$W622_WINDOW"
@@ -972,16 +1003,29 @@ journalctl -u "$W622_SVC" --since "-1 min" --no-pager >/dev/null 2>&1
 sleep "$W622_SETTLE"
 _w622_ld_read=$(_w622_alerts | jq --argjson t "$_w622_ld_t" '[.[]|select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and (.rule_id=="sigma_log_deletion") and (.comm=="journalctl"))]|length' 2>/dev/null || echo 0)
 _w622_lw_t=$(_w622_epoch)
-setsid /bin/sh -c 'echo w622-log-probe >> /var/log/w622-probe.log' >/dev/null 2>&1
+# Пачкой, а не одной записью: одиночная запись неотличима от потерянной
+# сэмплированием (file_rate), и ноль был бы приборным.
+setsid /bin/sh -c 'i=0; while [ $i -lt 300 ]; do echo w622-log-probe >> /var/log/w622-probe.log; i=$((i+1)); done' >/dev/null 2>&1
 sleep "$W622_SETTLE"
 _w622_ld_write=$(_w622_alerts | jq --argjson t "$_w622_lw_t" '[.[]|select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and (.rule_id=="sigma_log_deletion"))]|length' 2>/dev/null || echo 0)
+# РАЗЛИЧИТЕЛЬ ПРИЧИНЫ. owasp_log_tampering стоит на том же пути, но БЕЗ
+# условия на op. Если он поднялся, а sigma_log_deletion нет — событие дошло
+# до движка, и немота у правила именно в оси op, а не в потере события,
+# сэмплировании, исключении наблюдателя или неразрешённом пути. Без этой
+# строки вердикт называл бы симптом и оставлял четыре объяснения.
+_w622_ld_proof=$(_w622_alerts | jq --argjson t "$_w622_lw_t" '[.[]|select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and (.rule_id=="owasp_log_tampering") and ((.details["file.path"] // "")|test("w622-probe")))]|length' 2>/dev/null || echo 0)
 rm -f /var/log/w622-probe.log 2>/dev/null
 echo "    journalctl читает /var/log/journal → алертов sigma_log_deletion: $_w622_ld_read (обязан быть 0)"
-echo "    запись в /var/log/w622-probe.log   → алертов sigma_log_deletion: $_w622_ld_write (обязан быть ≥ 1)"
+echo "    300 записей в /var/log/w622-probe.log → алертов sigma_log_deletion: $_w622_ld_write (обязан быть ≥ 1)"
+echo "    различитель: owasp_log_tampering на том же пути (условия на op НЕ имеет): ${_w622_ld_proof:-0}"
 if [ "${_w622_ld_read:-0}" -gt 0 ]; then
     die "6.2.2.6 ПРОВАЛЕН (половина «фон молчит», №234): journalctl, ЧИТАЮЩИЙ /var/log/journal, поднял sigma_log_deletion $_w622_ld_read раз — правило по-прежнему совпадает шире своего имени"
 elif [ "${_w622_ld_write:-0}" -lt 1 ]; then
-    die "6.2.2.6 ПРОВАЛЕН (половина «своё правило поднимается», №234): запись в /var/log не подняла sigma_log_deletion — сужение до op=write превратилось в немоту"
+    if [ "${_w622_ld_proof:-0}" -gt 0 ]; then
+        die "6.2.2.6 ПРОВАЛЕН (половина «своё правило поднимается», №234): 300 записей в /var/log НЕ подняли sigma_log_deletion, при том что owasp_log_tampering на ТОМ ЖЕ пути поднялся $_w622_ld_proof раз. Событие дошло до движка с разрешённым путём — значит немота ровно в оси op: ни одно файловое событие этого пути не приходит с op=write, и сужение №234 сделало правило немым НА ЖИВОМ СТЕНДЕ, оставшись зелёным на юните (юнит строит событие с Op=write сам). Это находка о ПРОДУКТЕ, а не о контроле, и она же ставит под вопрос всякое правило вида «op in [write] + filename prefix»"
+    else
+        die "6.2.2.6 ПРОВАЛЕН (половина «своё правило поднимается», №234): 300 записей в /var/log не подняли ни sigma_log_deletion, ни owasp_log_tampering на том же пути — событие до движка не дошло вовсе (потеря, сэмплирование, исключение наблюдателя или неразрешённый путь), и ось op здесь ни при чём. Это НЕИЗМЕРИМОСТЬ подачи, а не вердикт правилу"
+    fi
 else
     pass "6.2.2.6 ДОСТИГНУТО (обе половины №234): чтение молчит ($_w622_ld_read), запись поднимает ($_w622_ld_write)"
 fi

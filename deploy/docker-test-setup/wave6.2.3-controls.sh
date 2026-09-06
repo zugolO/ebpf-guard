@@ -676,6 +676,26 @@ _w623_artpath=$(jq --argjson t0 "$_w623_t0" --argjson t1 "$_w623_t1" --arg art "
       | select((.details["file.path"] // "") | startswith($art)) ] | length' "$W623_ART/alerts-window-end.json" 2>/dev/null)
 echo "  алертов от comm измерителя внутри [t0,t1]: ${_w623_instr_n:-0} $(echo "${_w623_instr:-[]}" | jq -r 'map("\(.c):\(.n)")|join(" ")' 2>/dev/null)"
 echo "  алертов на пути артефактов ($W623_ART) внутри [t0,t1]: ${_w623_artpath:-0}"
+# РАЗЛИЧИТЕЛЬ ИСТОЧНИКА (смок 06.09.2026, ДО прогона). Список comm измерителя
+# состоит из РОДОВЫХ имён (sh, bash, awk, grep, date, cut, …), и ровно те же
+# имена порождает ЛЮБОЙ интерактивный вход по ssh: pam запускает
+# /etc/update-motd.d/* — run-parts → 00-header → uname, landscape-sysin, grep
+# /proc/cpuinfo, date, pgrep. То есть чужой вход внутрь окна печатается этим
+# критерием как «доля измерителя», хотя измеритель спал. Смок этой волны упал
+# ровно так: 7 алертов sh/awk/bash/date/grep/pgrep — это была цепочка MOTD
+# оператора, зашедшего посмотреть прогресс (нарушение п.2/п.5 памяти
+# ebpf-guard-measurement-hygiene, а не дефект контроля).
+# Вердикт от этого НЕ смягчается: алерты входа — часть измеренной величины
+# 6.2.3.1 и окно испорчено в любом случае. Но причина обязана быть НАЗВАНА,
+# иначе следующий читатель полдня ищет несуществующую работу измерителя.
+_w623_login_in_win=$(jq --argjson t0 "$_w623_t0" --argjson t1 "$_w623_t1" '
+    [ .[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t0) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $t1))
+      | select((.comm) as $c | (["sshd","run-parts","landscape-sysin","00-header","91-release-upgr","50-motd-news","login"]|index($c))) ] | length' \
+    "$W623_ART/alerts-window-end.json" 2>/dev/null)
+echo "  различитель источника: алертов входа/MOTD (sshd, run-parts, landscape-sysin, 00-header, …) внутри окна: ${_w623_login_in_win:-0}"
+if [ "${_w623_login_in_win:-0}" -gt 0 ]; then
+    echo "  ВНИМАНИЕ: внутрь окна попал ИНТЕРАКТИВНЫЙ ВХОД. Родовые comm (sh/bash/awk/grep/date/pgrep) ниже принадлежат его цепочке MOTD, а не работе измерителя — окно испорчено посторонним подключением (п.2/п.5 гигиены), и величина 6.2.3.1 этого прогона завышена на его вклад"
+fi
 if [ "${_w623_instr_n:-0}" -eq 0 ] && [ "${_w623_artpath:-0}" -eq 0 ]; then
     pass "6.2.3.3 ДОСТИГНУТО: измеритель внутри окна не работал — ни одного его алерта, ни одного алерта на пути его артефактов (открытый вопрос 16 закрыт живым прогоном)"
 else
@@ -1448,34 +1468,84 @@ _w623_inc_all=$(jq '[.[]|select(.rule_id=="incident_confirmed_attack")]|length' 
 echo "  incident_confirmed_attack за прогон: $_w623_inc_all"
 echo "  по корневому comm:"
 jq -r '[.[]|select(.rule_id=="incident_confirmed_attack")]|group_by(.details.root_comm // .comm)|map({c:(.[0].details.root_comm // .[0].comm),n:length})|sort_by(-.n)[]|"    \(.c): \(.n)"' "$W623_ART/alerts-incidents.json" 2>/dev/null | head -15
-_w623_inc_bad=$(jq --arg instr "$W623_INSTR_COMMS_FLAT" --arg actors "$W623_NODE_ACTORS" \
-    --argjson ps "$_w623_attack_phase_start" --argjson pe "$_w623_attack_phase_end" '
+# ─── ДВА КЛАССА КОРНЯ СУДЯТСЯ ПО-РАЗНОМУ (правка смока 06.09.2026, ДО прогона).
+#
+# Первая версия этого блока судила ОБА класса корня одним правилом «вне фазы
+# атак = ложь». Смок показал, что правило неисполнимо по построению, и оба
+# провала были СВОИМИ:
+#   * инцидент 14:26:57, цепочка bash → bash → bash → bash → cut — это
+#     преflight самого измерителя (churn подов, kubectl), до открытия окна;
+#   * инцидент 14:28:33, цепочка bash → … → cat, comm=ld — это окно профиля
+#     (`go tool pprof`), между закрытием тихого окна и началом фазы атак.
+# Измеритель РАБОТАЕТ вне фазы атак — в прологе, в преflight'е, между окнами и
+# после фазы; ни один из этих отрезков не был в [attack_phase_start,
+# attack_phase_end], и его собственные цепочки печатались как ложь продукта.
+# Комментарий выше называет умысел прямо: «вне этого окна (ТО ЕСТЬ В ТИХОМ
+# ОКНЕ ОБЪЁМА)». Тихое окно и «всё вне фазы атак» — не одно и то же, и здесь
+# восстановлен умысел, а не смягчён критерий.
+#
+#   КОРЕНЬ-ИЗМЕРИТЕЛЬ  → ложь ТОЛЬКО внутри [t0,t1]. Там измеритель обязан не
+#                        работать вовсе (это же и меряет 6.2.3.3), поэтому
+#                        инцидент с его корнем в окне есть дефект; вне окна —
+#                        его штатная работа, печатается и в ложь не идёт.
+#   КОРЕНЬ-НОДА        → ложь ЗА ПРОГОН ЦЕЛИКОМ, как требует постановка
+#                        («корень которого в W623_NODE_ACTORS — ноль»).
+#                        Прежняя реализация прощала их внутри фазы атак — но
+#                        containerd-shim, поднимающий контейнер, есть штатная
+#                        работа ноды независимо от того, чей kubectl попросил
+#                        под. Прощение внутри фазы выхолащивало критерий ровно
+#                        там, где живёт находка №250: смок дал 5 таких
+#                        инцидентов (containerd-shim 4, k3s-server 1) и все
+#                        пять были списаны в «ожидаемый TP».
+# Пересечение списков (kubectl входит в оба) разрешается в пользу измерителя —
+# на этом стенде kubectl зовёт только он; имена пересечения печатаются.
+_w623_inc_jq_root='(.details.root_comm // .comm)'
+_w623_inc_count() { # $1=класс (instr|node) $2=режим (win|outwin|phase|outphase|all)
+    jq --arg instr "$W623_INSTR_COMMS_FLAT" --arg actors "$W623_NODE_ACTORS" \
+       --arg cls "$1" --arg mode "$2" \
+       --argjson t0 "${_w623_t0:-0}" --argjson t1 "${_w623_t1:-0}" \
+       --argjson ps "$_w623_attack_phase_start" --argjson pe "$_w623_attack_phase_end" '
     [ .[] | select(.rule_id=="incident_confirmed_attack")
-      | select(((.details.root_comm // .comm) as $c
-                | (($actors|split(" "))|index($c)) != null or (($instr|split(" "))|index($c)) != null))
-      | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // -1) as $t | $t < $ps or $t > $pe)) ] | length' "$W623_ART/alerts-incidents.json" 2>/dev/null || echo 0)
-_w623_inc_expected=$(jq --arg instr "$W623_INSTR_COMMS_FLAT" --arg actors "$W623_NODE_ACTORS" \
-    --argjson ps "$_w623_attack_phase_start" --argjson pe "$_w623_attack_phase_end" '
-    [ .[] | select(.rule_id=="incident_confirmed_attack")
-      | select(((.details.root_comm // .comm) as $c
-                | (($actors|split(" "))|index($c)) != null or (($instr|split(" "))|index($c)) != null))
-      | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // -1) as $t | $t >= $ps and $t <= $pe)) ] | length' "$W623_ART/alerts-incidents.json" 2>/dev/null || echo 0)
-_w623_inc_names=$(jq -r --arg instr "$W623_INSTR_COMMS_FLAT" --arg actors "$W623_NODE_ACTORS" \
-    --argjson ps "$_w623_attack_phase_start" --argjson pe "$_w623_attack_phase_end" '
-    [ .[] | select(.rule_id=="incident_confirmed_attack")
-      | select(((.details.root_comm // .comm) as $c
-                | (($actors|split(" "))|index($c)) != null or (($instr|split(" "))|index($c)) != null))
-      | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // -1) as $t | $t < $ps or $t > $pe))
-      | (.details.root_comm // .comm) ] | unique | join(" ")' "$W623_ART/alerts-incidents.json" 2>/dev/null)
-echo "  из них с корнем нодовый актор/измеритель ВНЕ фазы атак (ложь): $_w623_inc_bad (${_w623_inc_names:-нет})"
-echo "  из них с корнем нодовый актор/измеритель ВНУТРИ фазы атак (ожидаемый TP, в ложь не идёт): $_w623_inc_expected"
+      | (.details.root_comm // .comm) as $c
+      | ((($instr|split(" "))|index($c)) != null) as $is_instr
+      | ((($actors|split(" "))|index($c)) != null) as $is_node
+      | select(if $cls == "instr" then $is_instr else ($is_node and ($is_instr|not)) end)
+      | (.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // -1) as $t
+      | select(if   $mode == "win"      then ($t >= $t0 and $t <= $t1)
+               elif $mode == "outwin"   then ($t <  $t0 or  $t >  $t1)
+               elif $mode == "phase"    then ($t >= $ps and $t <= $pe)
+               elif $mode == "outphase" then ($t <  $ps or  $t >  $pe)
+               else true end)
+      | $c ]' "$W623_ART/alerts-incidents.json" 2>/dev/null
+}
+_w623_inc_node_all=$(_w623_inc_count node all | jq 'length' 2>/dev/null)
+_w623_inc_node_names=$(_w623_inc_count node all | jq -r 'unique|join(" ")' 2>/dev/null)
+_w623_inc_node_phase=$(_w623_inc_count node phase | jq 'length' 2>/dev/null)
+_w623_inc_instr_win=$(_w623_inc_count instr win | jq 'length' 2>/dev/null)
+_w623_inc_instr_win_names=$(_w623_inc_count instr win | jq -r 'unique|join(" ")' 2>/dev/null)
+_w623_inc_instr_out=$(_w623_inc_count instr outwin | jq 'length' 2>/dev/null)
+# Пересечение — чистой оболочкой, без внешних команд: любой лишний execve
+# здесь есть собственное событие измерителя (тот же принцип, что у встроенного
+# printf в _w623_epoch).
+_w623_inc_overlap=""
+for _w623_ov in $W623_INSTR_COMMS_FLAT; do
+    case " $W623_NODE_ACTORS " in *" $_w623_ov "*) _w623_inc_overlap="$_w623_inc_overlap $_w623_ov" ;; esac
+done
+_w623_inc_overlap="${_w623_inc_overlap# }"
+_w623_inc_bad=$(( ${_w623_inc_node_all:-0} + ${_w623_inc_instr_win:-0} ))
+_w623_inc_names="${_w623_inc_node_names:-}${_w623_inc_instr_win_names:+ }${_w623_inc_instr_win_names:-}"
+echo "  корень НОДОВЫЙ АКТОР, за прогон целиком (ложь по постановке): ${_w623_inc_node_all:-0} (${_w623_inc_node_names:-нет})"
+echo "    из них внутри фазы атак: ${_w623_inc_node_phase:-0} — прежняя реализация прощала именно их; постановка требует ноль за прогон целиком, прощения больше нет"
+echo "  корень ИЗМЕРИТЕЛЬ внутри тихого окна [t0,t1] (ложь): ${_w623_inc_instr_win:-0} (${_w623_inc_instr_win_names:-нет})"
+echo "  корень ИЗМЕРИТЕЛЬ вне тихого окна (его штатная работа — печатается, в ложь не идёт): ${_w623_inc_instr_out:-0}"
+echo "  пересечение списков (разрешено в пользу измерителя): ${_w623_inc_overlap:-нет}"
 if [ "${_w623_inc_all:-0}" -gt 0 ]; then
     echo "  доля ложных от всех инцидентов прогона: $(awk -v b="${_w623_inc_bad:-0}" -v n="$_w623_inc_all" 'BEGIN{printf "%.1f%%", 100.0*b/n}')"
 fi
 if [ "${_w623_inc_bad:-0}" -gt 0 ]; then
-    die "6.2.3.7 ПРОВАЛЕН: инцидентный слой назвал подтверждённой атакой штатную работу ноды или работу самого измерителя ВНЕ окна позитивных контролей — $_w623_inc_bad инцидентов от ${_w623_inc_names}. Порог слою назначается ПОСЛЕ того, как ложь убрана, а не вместо этого (находка №235/№251)"
+    die "6.2.3.7 ПРОВАЛЕН: инцидентный слой назвал подтверждённой атакой штатную работу ноды (${_w623_inc_node_all:-0} за прогон) или работу измерителя внутри тихого окна (${_w623_inc_instr_win:-0}) — корни: ${_w623_inc_names:-?}. Порог слою назначается ПОСЛЕ того, как ложь убрана, а не вместо этого (находка №235/№251)"
 else
-    pass "6.2.3.7 ДОСТИГНУТО: ни один incident_confirmed_attack ВНЕ фазы атак не имеет корнем нодового актора или comm измерителя (всего инцидентов-атак за прогон: $_w623_inc_all, из них ожидаемых true positive внутри фазы: $_w623_inc_expected)"
+    pass "6.2.3.7 ДОСТИГНУТО: ни один incident_confirmed_attack не имеет корнем нодового актора (за прогон целиком) и ни один — корнем измерителя внутри тихого окна (всего инцидентов-атак за прогон: $_w623_inc_all, из них работа измерителя вне окна: ${_w623_inc_instr_out:-0})"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

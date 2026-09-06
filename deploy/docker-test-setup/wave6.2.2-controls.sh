@@ -71,6 +71,7 @@
 #                        временах; длинные ожидания укорочены, НИ ОДИН блок
 #                        не пропускается (память smoke-only-does-not-cover-attack-window)
 set -u
+export TZ=UTC   # см. _w622_epoch/_w622_utc: встроенный printf вместо внешнего `date`
 
 VPS_IP="${VPS_IP:-localhost}"
 W622_API="${W622_API:-http://${VPS_IP}:19090}"
@@ -167,7 +168,14 @@ W622_INSTR_COMMS_FLAT="curl jq bash head sed awk date tr sort systemctl journalc
 _w622_curl() { curl -s --max-time 30 -H "Authorization: Bearer $W622_TOKEN" "$@"; }
 _w622_alerts() { _w622_curl "$W622_API/api/v1/alerts?limit=200000"; }
 _w622_metrics() { _w622_curl "$W622_API/metrics"; }
-_w622_epoch() { date -u +%s; }
+# ЭПОХА — ВСТРОЕННЫМ printf, а не `date`. Каждый вызов внешнего `date` —
+# это execve, а значит собственное событие измерителя: на прогоне 06.09.2026
+# критерий 6.2.2.5 упал ровно на двух алертах comm=date, которые породил сам
+# контроль строкой «окно открыто …» СРАЗУ ПОСЛЕ фиксации t0. Встроенный
+# printf процесса не создаёт вовсе, поэтому источник исчезает, а не сдвигается.
+# TZ=UTC экспортирован выше — форматы ниже эквивалентны `date -u`.
+_w622_epoch() { local _e; printf -v _e '%(%s)T' -1; printf '%s' "$_e"; }
+_w622_utc() { printf '%(%Y-%m-%dT%H:%M:%SZ)T' "$1"; }
 
 # Сумма метрики по срезу. Прямая дельта двух срезов, а не строка таблицы:
 # строка индексирована срезом лимитера (память f6b-table-indexed-by-limiter-cut).
@@ -403,7 +411,7 @@ _w622_drift_print "открытие" "$W622_ART/metrics-window-start.txt"
 # наблюдённой латентности (91–183 мкс на событие, но стор пишется пачками).
 sleep "$W622_OPEN_SETTLE"
 _w622_t0=$(_w622_epoch)
-echo "  окно открыто $(date -u -d "@$_w622_t0" +%FT%TZ) — до закрытия НЕ ПОДАВАТЬ вход (память ebpf-guard-measurement-hygiene, п.2/п.5)"
+echo "  окно открыто $(_w622_utc "$_w622_t0") — до закрытия НЕ ПОДАВАТЬ вход (память ebpf-guard-measurement-hygiene, п.2/п.5)"
 sleep "$W622_WINDOW"
 _w622_t1=$(_w622_epoch)
 _w622_metrics > "$W622_ART/metrics-window-end.txt"
@@ -622,7 +630,13 @@ echo "--- 6.2.2.10: окно профиля ${W622_PROFILE_SECS}s (ОТДЕЛЬ�
 mkdir -p "$W622_ART/profile" 2>/dev/null
 _w622_pcpu0=$(_w622_metric_raw process_cpu_seconds_total "$W622_ART/metrics-window-end.txt")
 _w622_pt0=$(_w622_epoch)
-_w622_curl "$W622_API/debug/pprof/profile?seconds=$W622_PROFILE_SECS" > "$W622_ART/profile/cpu.pprof" 2>/dev/null
+# СОБСТВЕННЫЙ ТАЙМАУТ, а не общий. `_w622_curl` несёт --max-time 30, и запрос
+# профиля на 30 с в него НЕ УКЛАДЫВАЕТСЯ по построению: сервер держит
+# соединение ровно PROFILE_SECS и только потом отдаёт тело. Прогон 06.09.2026
+# привёз из-за этого cpu.pprof НУЛЕВОГО РАЗМЕРА при исправном pprof (смок на
+# 5 с проходил — дефект виден только на боевой длине окна).
+curl -s --max-time "$(( W622_PROFILE_SECS + 60 ))" -H "Authorization: Bearer $W622_TOKEN" \
+    "$W622_API/debug/pprof/profile?seconds=$W622_PROFILE_SECS" > "$W622_ART/profile/cpu.pprof" 2>/dev/null
 _w622_curl "$W622_API/debug/pprof/heap" > "$W622_ART/profile/heap.pprof" 2>/dev/null
 _w622_curl "$W622_API/debug/pprof/goroutine?debug=1" > "$W622_ART/profile/goroutine.txt" 2>/dev/null
 _w622_metrics > "$W622_ART/profile/metrics-profile-end.txt"

@@ -328,6 +328,37 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1497.001, vm-detection, dmi, sandbox-evasion]
+    exceptions:
+      # Волна 6.2.4, №253/п. 2в (запас до гейта). На прогоне 6.2.3 это правило
+      # дало 2 алерта за 10-минутное окно, все — k3s-server, читающий DMI/SMBIOS
+      # при подсчёте ёмкости ноды. Идиома та же, что node-host-daemon в
+      # cis-k8s.yaml: слой 1 (cgroup) отвечает «процесс НЕ в контейнере», слой 2
+      # (образ) отличает демона ноды от чего угодно с тем же comm под root.
+      # exe_path СТОИТ ПОСЛЕДНИМ: "and" считается по порядку с коротким
+      # замыканием, readlink случается только после совпадения имени.
+      # prefix, а не точный путь: путь установки k3s/containerd зависит от
+      # способа установки, и вписать сюда догадку — значит рискнуть тем, что
+      # исключение молча перестанет применяться. Пустой exe_path под prefix не
+      # подходит: исключение не применится, правило сработает.
+      - name: node-host-daemon
+        condition_group:
+          operator: and
+          conditions:
+            # Только k3s-server: он и есть наблюдённый источник. Список
+            # «родственных» демонов сюда не вписывается — исключение по
+            # догадке глушит то, чего замер не показывал.
+            - field: proc.comm
+              op: eq
+              values: ["k3s-server"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
 
   # ============================================================================
   # T1518 — Software Discovery

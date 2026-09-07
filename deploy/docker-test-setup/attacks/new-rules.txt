@@ -211,3 +211,9 @@ privesc_setns_syscall	20260906	6.2.3/№250 добавлено exceptions contai
 #    прежде (все они затем разбираются исключениями и считаются поимённо).
 #    Мотив — литерал был немым обходом: под, назвавший процесс "runc", не
 #    поднимал правило вовсе и не оставлял следа ни в одной метрике.
+sigma_passwd_shadow_read_daemon	20260907	6.2.4/№253 исход (г): exceptions verified-daemon-image на proc.exe_path, severity info->warning
+sensitive_file_read_daemon	20260907	6.2.4/№253 исход (г): exceptions verified-daemon-image на proc.exe_path, severity info->warning
+sigma_log_deletion_daemon	20260907	6.2.4/№253 исход (г): exceptions verified-daemon-image на proc.exe_path, severity info->warning
+sigma_utmp_wtmp_modified_daemon	20260907	6.2.4/№253 исход (г): exceptions verified-daemon-image на proc.exe_path, severity info->warning
+sigma_cpu_info_access	20260907	6.2.4/№253 п.2в: k3s-server-meminfo-poll -> k3s-server-node-capacity-poll, добавлен /proc/cpuinfo и слой exe_path
+mitre_vm_detect_dmi_read	20260907	6.2.4/№253 п.2в: добавлено exceptions node-host-daemon (k3s-server, cgroup + exe_path)

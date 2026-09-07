@@ -391,6 +391,38 @@ func TestDriftBaselineSignatureCapFreezesBaseline(t *testing.T) {
 		"a signature dropped by the cap must alert, not be silently trusted")
 }
 
+// TestDriftBaselineSignatureCapReachedTotalIsPerComm — wave 6.2.4, №256: a
+// control measuring "does MaxSignaturesPerWorkload freeze under MY load"
+// needs to isolate its own freeze from any other workload saturating on the
+// same node in the same window (criterion 6.2.4.11 explicitly rules out
+// counting growth from bash/sshd toward that control's verdict). Before this
+// wave signatureCapReachedTotal was a single unlabelled Counter — global
+// growth, comm indistinguishable. This pins the per-comm attribution: two
+// workloads independently saturating must produce two independent series,
+// each incrementing only for its own comm.
+func TestDriftBaselineSignatureCapReachedTotalIsPerComm(t *testing.T) {
+	p := NewDriftBaselineProfiler(DriftBaselineConfig{
+		Enabled: true, LearningPeriod: 60, MinSamples: 1, PerWorkload: true,
+		MaxSignaturesPerWorkload: 2,
+	}, slog.Default())
+
+	for i := 0; i < 5; i++ {
+		p.Observe("drift_exec_from_system_bin",
+			syscallEventForExec("w624sig", 59, fmt.Sprintf("/usr/bin/w624-%d", i)))
+	}
+	assert.Greaterf(t, testutil.ToFloat64(p.signatureCapReachedTotal.WithLabelValues("w624sig")), float64(0),
+		"the control's own workload (w624sig) must show a nonzero freeze count")
+	assert.Equalf(t, float64(0), testutil.ToFloat64(p.signatureCapReachedTotal.WithLabelValues("bash")),
+		"a comm that never saturated must read exactly zero, not inherit another workload's count")
+
+	for i := 0; i < 5; i++ {
+		p.Observe("drift_exec_from_system_bin",
+			syscallEventForExec("bash", 59, fmt.Sprintf("/usr/bin/bash-%d", i)))
+	}
+	assert.Greaterf(t, testutil.ToFloat64(p.signatureCapReachedTotal.WithLabelValues("bash")), float64(0),
+		"bash saturating afterwards must show up on its OWN series")
+}
+
 // syscallEventWithArgs builds a syscall event carrying register arguments,
 // the way the collector delivers ptrace/mount/bpf/... events (no proc.args).
 func syscallEventWithArgs(comm string, nr int, args ...uint64) types.Event {

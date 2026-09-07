@@ -223,9 +223,26 @@ func TestStage1_LoopbackNotExfiltration(t *testing.T) {
 // instead requires downgrading severity for the daemon triple while every
 // other process (a real attacker) still gets critical.
 //
-// sigma_utmp_wtmp_modified_daemon expects info, not warning: wave 5.1
-// (замер №2) found it still gave 656 alerts/71min at warning, so its
-// severity was corrected — see TestStage1_5_1_ClusterDaemonWritesDowngraded.
+// sigma_utmp_wtmp_modified_daemon прошло два пересмотра. Волна 5.1 (замер №2)
+// опустила его warning -> info: на warning оно давало 656 алертов/71 мин, и
+// одна только severity объём не снимала. Волна 6.2.4 (находка №253) вернула
+// warning, но по другой причине и вместе с другим механизмом: правило
+// получило именованное исключение verified-daemon-image на proc.exe_path,
+// после чего штатный sshd/cron из своего образа не поднимает алерт вовсе
+// (подавление считается в ebpf_guard_rule_exceptions_total, вне обеих формул
+// гейта), а срабатывание означает подделку имени демона — сигнал, которому
+// info мало.
+//
+// Это НЕ отменяет вывод открытого вопроса 10, отвергавший исключение как
+// таковое («это редкий высокоценный сигнал»): исключение 6.2.4 построено на
+// ОБРАЗЕ, а не на имени, поэтому высокоценный случай — процесс, назвавшийся
+// sshd/cron, — не подавляется, а как раз и остаётся единственным, что правило
+// теперь печатает. Подавление, подделка и открытый отказ проверяются в
+// wave6_2_4_daemon_image_test.go.
+//
+// Здесь двойник по-прежнему срабатывает, потому что фикстура не ставит
+// разрешатель образа: proc.exe_path пуст, исключение не применяется.
+//
 // The other three keep the original P1-6 warning level; they weren't part
 // of the wave 5.1 cluster.
 func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
@@ -243,7 +260,7 @@ func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
 		{"passwd", "/etc/passwd", "fim_passwd_write", "fim_passwd_write_daemon", types.SeverityWarning},
 		{"shadow", "/etc/shadow", "fim_shadow_write", "fim_shadow_write_daemon", types.SeverityWarning},
 		{"passwd-or-shadow (rootkit)", "/etc/passwd", "rootkit_passwd_modified", "rootkit_passwd_modified_daemon", types.SeverityWarning},
-		{"utmp", "/var/run/utmp", "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon", types.Severity("info")},
+		{"utmp", "/var/run/utmp", "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon", types.SeverityWarning},
 	}
 
 	for _, tc := range testCases {
@@ -294,6 +311,27 @@ func TestStage1_P1_6_DaemonWritesDowngradedNotSuppressed(t *testing.T) {
 // замер №2 showed sigma_utmp_wtmp_modified_daemon at warning still gave 656
 // alerts/71min, so a severity-only downgrade does not solve volume for a
 // cluster this size.
+//
+// ВОЛНА 6.2.4 (находка №253) меняет режим ТРЁХ из шести строк —
+// sigma_passwd_shadow_read_daemon, sigma_log_deletion_daemon и
+// sigma_utmp_wtmp_modified_daemon: их severity поднята info -> warning,
+// потому что на чистом фоне они больше не срабатывают вовсе. Разбивка
+// прогона 6.2.3 показала, что вчетвером (плюс sensitive_file_read_daemon)
+// они дают 91% величины гейта, а сужать их было нечем — путь, op и comm уже
+// точечные. Каждое получило именованное исключение verified-daemon-image на
+// proc.exe_path: штатный демон из своего образа подавляется и считается в
+// ebpf_guard_rule_exceptions_total, а процесс, назвавшийся демоном из чужого
+// образа, срабатывает — то есть правило из info-маркера штатной работы стало
+// детектором подделки имени, и severity выше здесь уместна.
+//
+// Здесь двойники всё равно СРАБАТЫВАЮТ, и это не противоречие: фикстура не
+// ставит разрешатель образа (SetExePathResolver), поэтому proc.exe_path пуст,
+// исключение не применяется, правило поднимается. Это ровно контракт
+// «отказ открытый» — см. TestWave6_2_4UnresolvedImageFailsOpen. Подавление и
+// подделка проверяются там же, в wave6_2_4_daemon_image_test.go.
+//
+// Остальные три строки (PAM, library, rootkit) волной 6.2.4 не тронуты и
+// остаются на прежнем info.
 func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 	engine := correlator.NewRuleEngine(loadStage1Rules(t))
 
@@ -306,8 +344,9 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 		op         uint8
 		baseRule   string
 		daemonRule string
+		daemonSev  types.Severity
 	}{
-		{"passwd/shadow read", "/etc/passwd", opOpen, "sigma_passwd_shadow_read", "sigma_passwd_shadow_read_daemon"},
+		{"passwd/shadow read", "/etc/passwd", opOpen, "sigma_passwd_shadow_read", "sigma_passwd_shadow_read_daemon", types.SeverityWarning},
 		// Волна 6.2.3, item 4 (№248): sigma_failed_login_syscall_daemon и
 		// rootkit_pam_module_added_daemon теперь требуют op=write (были: любой
 		// read/open от sshd|cron — 3090/2400 и 2970/2280 алертов/окно на двух
@@ -315,14 +354,14 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 		// не opOpen, отражает реальное условие правила после сужения; фон
 		// (рутинное чтение PAM на каждом логине) теперь молчит — это
 		// проверяется живым контролем 6.2.3.13, не этой фикстурой.
-		{"PAM config access", "/etc/pam.d/sshd", opWrite, "sigma_failed_login_syscall", "sigma_failed_login_syscall_daemon"},
-		{"library load", "/usr/lib/security/pam_unix.so", opOpen, "drift_new_library_in_system_dir", "drift_new_library_in_system_dir_daemon"},
-		{"PAM module config", "/etc/pam.d/common-auth", opWrite, "rootkit_pam_module_added", "rootkit_pam_module_added_daemon"},
+		{"PAM config access", "/etc/pam.d/sshd", opWrite, "sigma_failed_login_syscall", "sigma_failed_login_syscall_daemon", types.Severity("info")},
+		{"library load", "/usr/lib/security/pam_unix.so", opOpen, "drift_new_library_in_system_dir", "drift_new_library_in_system_dir_daemon", types.Severity("info")},
+		{"PAM module config", "/etc/pam.d/common-auth", opWrite, "rootkit_pam_module_added", "rootkit_pam_module_added_daemon", types.Severity("info")},
 		// Волна 6.2.2, находка №234: sigma_log_deletion теперь требует op=write
 		// (READ, e.g. journalctl, поднимал ложный critical) — opWrite здесь, а
 		// не opOpen, отражает реальное условие правила после правки.
-		{"log touch", "/var/log/auth.log", opWrite, "sigma_log_deletion", "sigma_log_deletion_daemon"},
-		{"utmp write", "/var/run/utmp", opWrite, "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon"},
+		{"log touch", "/var/log/auth.log", opWrite, "sigma_log_deletion", "sigma_log_deletion_daemon", types.SeverityWarning},
+		{"utmp write", "/var/run/utmp", opWrite, "sigma_utmp_wtmp_modified", "sigma_utmp_wtmp_modified_daemon", types.SeverityWarning},
 	}
 
 	for _, tc := range testCases {
@@ -344,10 +383,9 @@ func TestStage1_5_1_ClusterDaemonWritesDowngraded(t *testing.T) {
 				require.True(t, ok, "%s did not fire for daemon comm %q — the wave 5.1 daemon "+
 					"variant must still alert (downgrade, not suppress)",
 					tc.daemonRule, daemonComm)
-				assert.Equal(t, types.Severity("info"), a.Severity,
-					"%s fired at %v for daemon comm %q, want info (wave 5.1 correction: "+
-						"warning alone did not cut volume for sigma_utmp_wtmp_modified_daemon)",
-					tc.daemonRule, a.Severity, daemonComm)
+				assert.Equal(t, tc.daemonSev, a.Severity,
+					"%s fired at %v for daemon comm %q, want %v",
+					tc.daemonRule, a.Severity, daemonComm, tc.daemonSev)
 			}
 
 			// A non-daemon process (attacker) must still get the base rule at its

@@ -274,3 +274,52 @@ func TestIncidentTracker_TrustGate_FlannelWithNetworkSignalStillPromotes(t *test
 	assert.Equal(t, types.VerdictAttack, incidents[0].Verdict,
 		"доверие не должно глушить flannel с сетевым сигналом — иначе скомпрометированный процесс станет невидим")
 }
+
+// TestIncidentTracker_TrustGate_TwoHopContainerInitStaysNonAttack — регрессия
+// на находку №255 (архив collect-6.2.3, волна 6.2.4): 4 из 12
+// incident_confirmed_attack прогона были рутинной инициализацией пода,
+// корень которой ПРОЦЕСС ЧЕРЕЗ ДВА супервизорских хопа — containerd-shim ->
+// runc (голое имя, ДО переименования в бракетную стадию) -> runc:[2:INIT], а
+// не через один, как проверяла TestIncidentTracker_TrustGate_Wave622PodStartAndCNI_StayNonAttack.
+// Живые алерты правил container_escape_mount/nsenter/cap_sys_admin,
+// escape_pivot_root, rootkit_bpf_map_create_suspicious/prog_load_suspicious,
+// cis_5_2_5_privilege_escalation в этом архиве шли с comm="runc" (голым) на
+// части событий и comm="runc:[N:STAGE]" на других — до этой правки голое
+// "runc" само по себе (containerSupervisorComms, но не defaultTrustedComms)
+// защёлкивало HasUntrustedSignal, и trustedIncidentRoot останавливался на
+// первом хопе тоже. Обе половины fix'а (isSupervisorHop в Add — на листе,
+// многохоповый обход в trustedIncidentRoot — на корне) нужны одновременно:
+// снятие только одной оставляет либо HasUntrustedSignal, либо
+// isPeriodicBackground/incidentsTrustedRootTotal неверными.
+func TestIncidentTracker_TrustGate_TwoHopContainerInitStaysNonAttack(t *testing.T) {
+	tr := newIncidentTracker(60*time.Second, nil, scoringRules())
+
+	chain := []types.ProcessNode{
+		{PID: 4000, PPID: 1, Comm: "containerd-shim"},
+		{PID: 4001, PPID: 4000, Comm: "runc"},
+		{PID: 4002, PPID: 4001, Comm: "runc:[2:INIT]"},
+	}
+	now := time.Now()
+	// Форма архива: r1/r2 приходят пока процесс ещё несёт голое имя "runc",
+	// r3..r5 — уже после переименования в бракетную стадию. Пять правил, как
+	// и в архиве (шесть-одиннадцать в реальном прогоне, здесь минимум для
+	// перехода порога).
+	for i, id := range []string{"r1", "r2"} {
+		a := makeAlertWithComm(id, 4001, "prod", types.SeverityCritical,
+			now.Add(time.Duration(i)*time.Second), "runc")
+		a.ProcessTree = chain
+		tr.Add(a)
+	}
+	for i, id := range []string{"r3", "r4", "r5"} {
+		a := makeAlertWithComm(id, 4002, "prod", types.SeverityCritical,
+			now.Add(time.Duration(2+i)*time.Second), "runc:[2:INIT]")
+		a.ProcessTree = chain
+		tr.Add(a)
+	}
+
+	incidents := tr.GetAll("", "", 0)
+	require.Len(t, incidents, 1)
+	assert.NotEqualf(t, types.VerdictAttack, incidents[0].Verdict,
+		"container-init через containerd-shim -> runc -> runc:[2:INIT] — рутина "+
+			"старта пода, а не побег (verdict=%v)", incidents[0].Verdict)
+}

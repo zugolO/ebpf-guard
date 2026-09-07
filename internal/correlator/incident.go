@@ -197,6 +197,42 @@ var defaultTrustedComms = map[string]struct{}{
 	"runc:[2:INIT]":   {},
 }
 
+// verifiedDaemonImages is the incident-layer half of wave 6.2.4's finding
+// №254 (вторая половина №250): "исключения на листьях, промоушен по корню
+// цепочки". The rule layer stopped trusting sshd/cron/rsyslogd/systemd-journald
+// by comm alone in wave 6.2.4 (№253, rules/sigma-linux.yaml и
+// rules/credential-access.yaml, exceptions "verified-daemon-image") — `exec -a
+// cron` no longer buys silence there, because the exception also checks
+// proc.exe_path. defaultTrustedComms above still trusted these same names by
+// comm ALONE at the incident layer: an alert whose comm is "cron" cannot set
+// HasUntrustedSignal regardless of what image produced it, so the very spoof
+// the rule layer is now built to catch — `cp /bin/cat /tmp/cron && exec -a
+// cron /tmp/cron /etc/shadow` — would fire the correct alert at the rule
+// layer and then have that alert neutered at the incident layer by the same
+// comm string. This map carries the exact images the rule layer already
+// established (same values as the YAML exceptions, not a new guess), and
+// isImageVerifiedComm requires them for exactly these five comms; every
+// other entry in defaultTrustedComms (grafana, flannel, landscape-sysin,
+// systemd-logind, the runc:[...] container-init stages) has no exe_path
+// evidence behind it at this layer and keeps the plain comm check.
+var verifiedDaemonImages = map[string]map[string]struct{}{
+	"sshd": {"/usr/sbin/sshd": {}},
+	"cron": {
+		"/usr/sbin/cron":  {},
+		"/usr/sbin/crond": {},
+		"/usr/bin/crond":  {},
+	},
+	"rsyslogd": {"/usr/sbin/rsyslogd": {}},
+	"systemd-journald": {
+		"/usr/lib/systemd/systemd-journald": {},
+		"/lib/systemd/systemd-journald":     {},
+	},
+	"systemd-journal": {
+		"/usr/lib/systemd/systemd-journald": {},
+		"/lib/systemd/systemd-journald":     {},
+	},
+}
+
 // IncidentScoringConfig tunes how incidents are scored and when they are
 // promoted to an "attack" verdict. Weights are per-unit contributions; the
 // scorer applies no hidden multipliers on top of them.
@@ -456,6 +492,46 @@ func (t *IncidentTracker) isTrustedComm(comm string) bool {
 	return ok
 }
 
+// isImageVerifiedComm reports whether a process is trusted, additionally
+// requiring image (proc.exe_path) confirmation for the five comms wave
+// 6.2.4/№254 named in verifiedDaemonImages, on top of the plain comm check
+// everything else still uses.
+//
+// Unresolved evidence (no resolver installed — every test in this package,
+// and any platform without procfs — or the live "process already gone"
+// case) falls back to the pre-6.2.4 comm-only trust rather than flipping to
+// untrusted: the rule layer's exceptions can afford "unresolved = fails
+// open toward an alert" because the blast radius is one extra alert on one
+// rule (exepath.go's documented contract), but doing the same here would
+// mean every environment that has not wired a resolver — which includes
+// this package's own test suite (TestIncidentTracker_CronTick_*,
+// TestIncidentsTrustedRootMetric) — stops coalescing cron/sshd background
+// noise at all. Only a RESOLVED, mismatching image — the actual spoof this
+// finding is about, `exec -a cron ... /etc/shadow` from a copied binary —
+// withdraws trust.
+//
+// Only comms with a real recorded image (the same paths already written into
+// rules/sigma-linux.yaml and rules/credential-access.yaml) are guarded at
+// all; extending this to containerd-shim/flannel/grafana/etc. on a guess
+// would be exactly the mistake wave 6.2.4 §2в rejected for k3s-server's
+// cpuinfo path — narrowing without evidence just moves where the mute
+// bypass lives.
+func (t *IncidentTracker) isImageVerifiedComm(comm string, pid uint32) bool {
+	if !t.isTrustedComm(comm) {
+		return false
+	}
+	imgs, guarded := verifiedDaemonImages[comm]
+	if !guarded {
+		return true
+	}
+	exe := resolveExePath(pid)
+	if exe == "" {
+		return true
+	}
+	_, ok := imgs[exe]
+	return ok
+}
+
 // isTrustedRootShell reports whether comm is a shell interpreter acting as a
 // trusted root's own job-execution mechanism, rather than a foreign process
 // that happens to share its tree — 5.9.9.F.5d (находка №158), variant 1 of
@@ -499,6 +575,25 @@ var containerSupervisorComms = map[string]struct{}{
 	"conmon":          {},
 }
 
+// isSupervisorHop reports whether comm is container-runtime plumbing
+// (containerSupervisorComms) rather than any process that could itself be a
+// workload — attacker or legitimate. Wave 6.2.4/№255 (archive collect-6.2.3):
+// container init routinely fires alerts while its OWN comm is still the bare
+// "runc" transitional name, before it renames itself to a bracketed
+// runc:[N:STAGE] stage name (already in defaultTrustedComms). "runc" bare is
+// untrusted by the plain comm check, so those interim alerts alone were
+// enough to latch HasUntrustedSignal and promote container-init noise to
+// "attack" even though the eventual, fully-resolved root (runc:[2:INIT]) was
+// already trusted. Used only to keep a plumbing hop from supplying the
+// untrusted-comm HALF of hasQualifyingSignal on its own — it grants nothing
+// else: an actual attacker process (xmrig, curl, …) sitting under
+// containerd-shim still has its own, different comm, which is untested by
+// this function and still promotes as before.
+func isSupervisorHop(comm string) bool {
+	_, ok := containerSupervisorComms[comm]
+	return ok
+}
+
 // trustedIncidentRoot reports whether the incident's *semantic* root process is
 // in the trusted allowlist, seeing through one layer of container-runtime
 // supervisor — 5.9.9.F.5j (находка №160), the narrowed form of candidate 1 из
@@ -530,7 +625,12 @@ var containerSupervisorComms = map[string]struct{}{
 //
 // Caller must hold at least the read lock.
 func (t *IncidentTracker) trustedIncidentRoot(inc *types.Incident) bool {
-	if t.isTrustedComm(inc.RootComm) {
+	// №254: verify image, not just name, for the root PID itself — the one
+	// place in this function where a PID is actually available. The
+	// pass-through below (ProcessChain[1] under a container-runtime shim)
+	// keeps the plain comm check: the chain records names only, no PID per
+	// hop, so there is nothing to resolve an image against.
+	if t.isImageVerifiedComm(inc.RootComm, inc.RootPID) {
 		return true
 	}
 	if _, isShim := containerSupervisorComms[inc.RootComm]; !isShim {
@@ -543,7 +643,37 @@ func (t *IncidentTracker) trustedIncidentRoot(inc *types.Incident) bool {
 	if len(inc.ProcessChain) < 2 || inc.ProcessChain[0] != inc.RootComm {
 		return false
 	}
-	return t.isTrustedComm(inc.ProcessChain[1])
+	// №255 (archive collect-6.2.3, wave 6.2.4): walk PAST every consecutive
+	// container-runtime supervisor hop, not just the first one. A shim
+	// re-execing through runc is still plumbing at every hop, and container
+	// init routinely produces containerd-shim -> runc -> runc:[1:CHILD|
+	// 2:INIT] — two supervisor hops, not one. The single-hop version of this
+	// check (5.9.9.F.5j, находка №160) stopped at "runc" (itself a
+	// containerSupervisorComms entry, untrusted on its own) instead of
+	// reaching runc:[2:INIT], which IS the trusted actor doing the actual
+	// namespace setup. Four of the five false incident_confirmed_attack
+	// incidents in that archive were exactly this shape: rules
+	// container_escape_mount/nsenter/cap_sys_admin, escape_pivot_root,
+	// rootkit_bpf_map_create_suspicious/prog_load_suspicious,
+	// rootkit_proc_modules_read — routine container-init namespace setup
+	// (mount/pivot_root/cap_sys_admin/proc_modules_read), not an escape; see
+	// the comment on defaultTrustedComms for the same rule family flagged in
+	// wave 6.2.2/№235. A REAL escape (nsenter into the host namespace,
+	// pivot_root outside container setup) does not arrive rooted at
+	// containerd-shim in the first place — it is the pod's own compromised
+	// application process acting alone — so widening the walk here does not
+	// touch criterion 6.2.4.7's positive half.
+	i := 1
+	for i < len(inc.ProcessChain) {
+		if _, isSupervisor := containerSupervisorComms[inc.ProcessChain[i]]; !isSupervisor {
+			break
+		}
+		i++
+	}
+	if i >= len(inc.ProcessChain) {
+		return false
+	}
+	return t.isTrustedComm(inc.ProcessChain[i])
 }
 
 // isPeriodicBackground reports whether inc is recurring trusted-daemon
@@ -720,7 +850,13 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		inc.SourceEvents = make(map[uint64]struct{}, 4)
 	}
 	inc.SourceEvents[sourceEventKey(alert)] = struct{}{}
-	if !t.isTrustedComm(alert.Comm) && !t.isTrustedRootShell(alert.Comm, inc.RootComm) {
+	// №254: image-verified, not name-verified, for the five comms in
+	// verifiedDaemonImages — see isImageVerifiedComm. Everywhere else this is
+	// exactly the old isTrustedComm check (unresolved evidence falls back to
+	// it too), so cron/sshd background coalescing is unaffected until a
+	// resolver is installed AND actually returns a mismatching image.
+	if !t.isImageVerifiedComm(alert.Comm, alert.PID) && !t.isTrustedRootShell(alert.Comm, inc.RootComm) &&
+		!isSupervisorHop(alert.Comm) {
 		inc.HasUntrustedSignal = true
 	}
 	if isNetworkSignal(alert.Event.Type) {

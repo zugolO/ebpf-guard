@@ -498,9 +498,37 @@ rules:
           # alerts_filtered_total), so listing it here would rename the 60
           # alerts/window, not remove them.
           values: ["sshd", "cron", "rsyslogd", "rs:main Q:Reg", "systemd-journal", "systemd-journald"]
-    severity: info
+    # Волна 6.2.4, №253: info -> warning. На чистом фоне правило молчит
+    # (исключение ниже), срабатывает только на подделке имени демона.
+    severity: warning
     action: alert
     tags: [mitre:T1070.002, sigma, log-deletion, defense-evasion, needs-content-analysis]
+    exceptions:
+      # Волна 6.2.4, №253/исход (г). Полное обоснование оси — в комментарии
+      # к exceptions правила sigma_passwd_shadow_read_daemon (то же имя
+      # исключения, тот же контракт): ось — ОБРАЗ процесса, а не его имя;
+      # пути точные, а не prefix; условие на exe_path стоит последним
+      # (короткое замыкание "and" удерживает readlink на редком пути);
+      # пустой exe_path = исключение не применяется = правило срабатывает.
+      #
+      # Это правило давало 100 совпадений за окно прогона 6.2.3.
+      - name: verified-daemon-image
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: [sshd, cron, rsyslogd, "rs:main Q:Reg", systemd-journal, systemd-journald]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/sbin/crond"
+                - "/usr/bin/crond"
+                - "/usr/sbin/rsyslogd"
+                - "/usr/lib/systemd/systemd-journald"
+                - "/lib/systemd/systemd-journald"
 
   - id: sigma_history_file_cleared
     name: "Shell history file cleared or deleted"
@@ -567,9 +595,34 @@ rules:
         - field: proc.comm
           op: in
           values: ["sshd", "cron"]
-    severity: info
+    # Волна 6.2.4, №253: info -> warning. На чистом фоне правило молчит
+    # (исключение ниже), срабатывает только на подделке имени демона.
+    severity: warning
     action: alert
     tags: [mitre:T1070, sigma, utmp, session-hiding, needs-content-analysis]
+    exceptions:
+      # Волна 6.2.4, №253/исход (г). Полное обоснование оси — в комментарии
+      # к exceptions правила sigma_passwd_shadow_read_daemon (то же имя
+      # исключения, тот же контракт): ось — ОБРАЗ процесса, а не его имя;
+      # пути точные, а не prefix; условие на exe_path стоит последним
+      # (короткое замыкание "and" удерживает readlink на редком пути);
+      # пустой exe_path = исключение не применяется = правило срабатывает.
+      #
+      # Это правило давало 50 совпадений за окно прогона 6.2.3.
+      - name: verified-daemon-image
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: [sshd, cron]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/sbin/crond"
+                - "/usr/bin/crond"
 
   # ============================================================================
   # T1218 — System Binary Proxy Execution
@@ -828,10 +881,26 @@ rules:
               values: ["/proc/cpuinfo", "/proc/meminfo", "/proc/version"]
       # Wave 6.2.1, №220: k3s-server polls /proc/meminfo as part of its node
       # resource-pressure check (60/window on the 6.2 baseline). Scoped to
-      # comm AND path like the two exceptions above — enumeration of
-      # /proc/cpuinfo or the /proc/sys/kernel/* entries by k3s-server would
-      # be out of character and still alerts.
-      - name: k3s-server-meminfo-poll
+      # comm AND path like the two exceptions above.
+      #
+      # Волна 6.2.4, №253/п. 2в (запас до гейта). Прежняя редакция утверждала,
+      # что чтение /proc/cpuinfo этим же демоном «would be out of character» —
+      # разбивка прогона 6.2.3 это опровергла: 2 алерта за 10-минутное окно,
+      # все k3s-server на /proc/cpuinfo (подсчёт ёмкости ноды читает обе
+      # величины, а не одну). Путь добавлен ПО ФАКТУ замера, а не расширением
+      # «на всякий случай»: /proc/version и /proc/sys/kernel/* по-прежнему
+      # поднимают алерт для этого же демона. Исключение переименовано
+      # (meminfo-poll -> node-capacity-poll), потому что старое имя стало
+      # неверным; имя исключения — метка метрики, а не rule_id, реестры
+      # реплеев (renamed-rules.txt/silent-rules.txt) им не индексируются.
+      #
+      # Слой образа добавлен той же волной: без него `exec -a k3s-server`
+      # из любого /tmp получает это исключение даром. exe_path СТОИТ
+      # ПОСЛЕДНИМ — "and" считается по порядку с коротким замыканием, поэтому
+      # readlink случается только после совпадения comm и пути. prefix, а не
+      # точный путь: каталог установки k3s зависит от способа установки,
+      # догадка о точном пути молча выключила бы исключение.
+      - name: k3s-server-node-capacity-poll
         condition_group:
           operator: and
           conditions:
@@ -840,7 +909,7 @@ rules:
               values: [k3s-server]
             - field: filename
               op: in
-              values: ["/proc/meminfo"]
+              values: ["/proc/meminfo", "/proc/cpuinfo"]
             # Волна 6.2.1: только хостовой контекст (см. sigma_log_deletion).
             - field: container.id
               op: eq
@@ -848,7 +917,9 @@ rules:
             - field: k8s.pod
               op: eq
               values: [""]
-
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
   - id: sigma_kernel_version_read
     name: "Kernel version file read"
     description: "Process read /proc/version or /etc/os-release — OS fingerprinting for exploit selection."
@@ -1028,9 +1099,64 @@ rules:
         - field: proc.comm
           op: in
           values: ["sshd", "cron"]
-    severity: info
+    # Волна 6.2.4, №253: info -> warning. На чистом фоне правило теперь молчит
+    # (исключение ниже), а срабатывает только на подделке имени демона — такое
+    # событие не должно тонуть в срезе store.min_severity.
+    severity: warning
     action: alert
     tags: [mitre:T1087.001, sigma, credential-access, account-discovery, needs-content-analysis]
+    exceptions:
+      # Волна 6.2.4, №253/исход (г) — ОСЬ ИСКЛЮЧЕНИЯ ЭТО ОБРАЗ, А НЕ ИМЯ.
+      #
+      # До этой правки правило было info-двойником: оно ловило штатную работу
+      # sshd/cron и существовало только чтобы отделить её от подачи. Разбивка
+      # прогона 6.2.3 показала, что так оно даёт 458 совпадений за 10-минутное
+      # окно и вместе с тремя такими же собирает 91% величины гейта, а сужать
+      # его нечем: путь, op и comm уже точечные.
+      #
+      # Исключение снимает объём из ОБЕИХ формул гейта (совпадение с exceptions
+      # возвращает false из matchesTyped — алерт не создаётся, подавление
+      # считается поимённо в ebpf_guard_rule_exceptions_total), а правило
+      # остаётся живым и МЕНЯЕТ СМЫСЛ: теперь оно срабатывает ровно тогда,
+      # когда процесс НАЗВАЛСЯ демоном, но запущен не из его образа.
+      #
+      # Почему exe_path, а не comm/cgroup: comm процесс назначает себе сам
+      # (prctl(PR_SET_NAME), `exec -a`), а cgroup-ось у всех хостовых процессов
+      # пуста одинаково. /proc/<pid>/exe ставит ядро в execve, и ни exec -a, ни
+      # prctl её не трогают — см. exepath.go. Позитивный контроль подделки:
+      #
+      #   cp /bin/cat /tmp/w624/cron && exec -a cron /tmp/w624/cron /etc/shadow
+      #
+      # — comm станет "cron", exe_path останется /tmp/w624/cron, исключение НЕ
+      # применится, правило ОБЯЗАНО сработать.
+      #
+      # Пути ТОЧНЫЕ (op: in), а не prefix: prefix "/usr/" отдал бы исключение
+      # любому образу в /usr/bin. Обход при точном пути требует перезаписи
+      # системного бинаря, то есть срабатывания evasion_system_binary_replace.
+      #
+      # Условие на exe_path стоит ПОСЛЕДНИМ намеренно: группа "and" считается
+      # по порядку с коротким замыканием (evaluateConditionGroup), а
+      # resolveExePath делает живой readlink без кэша — так он случается только
+      # там, где имя демона уже совпало. Порядок — часть контракта, не стиль.
+      #
+      # Пустой exe_path (процесс умер, нет /proc, резолвер не установлен) не
+      # совпадёт с точным путём: исключение не применится, правило сработает.
+      # Отказ открытый, в сторону шума, который видно. Доля таких событий
+      # видна в ebpf_guard_exe_path_lookups_total{result="unresolved"}.
+      - name: verified-daemon-image
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: [sshd, cron]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/sbin/crond"
+                - "/usr/bin/crond"
 
   - id: sigma_sudo_config_read
     name: "Sudoers configuration read"

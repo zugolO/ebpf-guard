@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -23,7 +24,24 @@ import (
 var (
 	preScrapeMu    sync.RWMutex
 	preScrapeHooks []func()
+	// preScrapeDisabled is set once, at graceful-shutdown start (before BPF
+	// collectors close their maps), so a scrape landing in the shutdown
+	// window no longer runs hooks that read those now-closed maps (№259:
+	// "kernel_counter: failed to read counter ... bad file descriptor").
+	// A plain bool guarded by preScrapeMu would work too, but the hot path
+	// (every scrape) reads this far more often than DisablePreScrapeHooks
+	// writes it, so atomic avoids taking the lock on the common case.
+	preScrapeDisabled atomic.Bool
 )
+
+// DisablePreScrapeHooks stops runPreScrapeHooks from calling any registered
+// hook. Idempotent and safe to call from graceful shutdown before the BPF
+// collectors whose maps those hooks read are closed — a scrape that lands
+// after this call still returns the last values recorded, just without the
+// one final on-demand refresh.
+func DisablePreScrapeHooks() {
+	preScrapeDisabled.Store(true)
+}
 
 // RegisterPreScrapeHook adds fn to the set of callbacks run immediately
 // before /metrics is rendered. Hooks must be cheap and non-blocking — they
@@ -43,6 +61,9 @@ func RegisterPreScrapeHook(fn func()) {
 // channel of the whole agent, and a scrape that returns stale kernel counters
 // is far better than a scrape that returns nothing.
 func runPreScrapeHooks() {
+	if preScrapeDisabled.Load() {
+		return
+	}
 	preScrapeMu.RLock()
 	hooks := make([]func(), len(preScrapeHooks))
 	copy(hooks, preScrapeHooks)

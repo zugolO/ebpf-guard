@@ -671,6 +671,17 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		Name: "ebpf_guard_events_excluded_total",
 		Help: "Events dropped before rule evaluation, by reason (5.9a: reason=\"observer_tree\" is the measurement harness's own process tree in test runs).",
 	}, []string{"reason"})
+	// №260 (wave 6.2.4): a CounterVec label nobody has incremented yet does
+	// not appear in a scrape at all, so an ABSENT observer_tree series and a
+	// GENUINE zero (filter armed but nothing excluded) render identically —
+	// an archive cannot tell "observer_exclude never fired" from "the series
+	// was never touched because harness code that increments it never ran".
+	// Pre-registering the label here, unconditionally (not gated on
+	// config.ObserverExcludeEnabled), makes the series print an explicit 0
+	// from the first scrape regardless of whether the filter is armed, so
+	// its absence in an archive is itself evidence of a broken pipeline
+	// rather than an ambiguous non-signal.
+	eventsExcludedTotal.WithLabelValues("observer_tree")
 	slog.Info("correlator: observer-tree exclusion filter (5.9a, test-only)",
 		slog.Bool("enabled", config.ObserverExcludeEnabled))
 

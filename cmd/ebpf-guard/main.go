@@ -2473,10 +2473,15 @@ func processEvent(
 }
 
 // gracefulShutdown orchestrates an ordered, time-bounded shutdown sequence:
-//  1. Stop BPF collectors so no new events enter the pipeline.
-//  2. Drain the PID-partitioned ingest worker pool so every event already
+//  0. Disable pre-scrape hooks so a /metrics request landing anywhere in this
+//     sequence stops refreshing the kernel-side counters below — otherwise a
+//     scrape racing the collector Close() calls in step 2 reads through an
+//     already-closed BPF map and logs "kernel_counter: failed to read
+//     counter ... bad file descriptor" (№259).
+//  1. Drain the PID-partitioned ingest worker pool so every event already
 //     queued via IngestAsync finishes processing (and its alerts land in
 //     pending) before anything downstream is drained or flushed.
+//  2. Stop BPF collectors so no new events enter the pipeline.
 //  3. Drain enforcement queue (up to 5 s) — let in-flight kill/block tasks finish.
 //  4. Drain the correlation engine's async Rego evaluation queue.
 //  5. Flush pending alerts from the correlation engine into the store.
@@ -2484,6 +2489,16 @@ func processEvent(
 //  7. Flush pending Alertmanager webhook deliveries.
 //  8. Cleanup nftables/iptables chains left by the enforcer (if active).
 //  9. Shutdown the HTTP server.
+//
+// Steps 1 and 2 were swapped from their original order (collectors closed
+// first, pool drained second — found in the wave 6.2.4 archive, №259): with
+// collectors closed first, a ring-buffer reader that is mid-forward when
+// Close() runs can still hand a final batch to the pool after the maps
+// behind it are gone, and any code that keys off "collectors closed" as
+// "pipeline quiescent" reads that as true earlier than it actually is.
+// Draining the pool while collectors are still open lets that final batch
+// finish normally; step 0 above closes the remaining scrape-vs-Close race
+// that reordering alone does not.
 //
 // enableKernelFilter populates a collector's BPF-side content filter (comm
 // denylist + syscall allowlist + agent self-exclusion PID) and turns it on.
@@ -2708,8 +2723,27 @@ func gracefulShutdown(
 		simCollector.PrintReport(os.Stdout)
 	}
 
-	// Step 1: close BPF ring-buffer readers to stop new events from entering
-	// the pipeline. This must happen before draining queues downstream.
+	// Step 0: stop refreshing the kernel-side counters on scrape. A /metrics
+	// request landing anywhere after this point still renders the last
+	// values recorded, instead of racing step 2's collector Close() calls
+	// for a map that scrape is about to read (№259).
+	exporter.DisablePreScrapeHooks()
+
+	// Step 1: drain the PID-partitioned ingest worker pool. Events dispatched
+	// via IngestAsync before collectors stop may still be queued in a
+	// worker's channel; wait for them to finish processing so their alerts
+	// (and any enforcement/Rego tasks they submit) exist before the queues
+	// below are drained. Skipping this would let those events surface only
+	// after Close() runs much later — past the point where anything flushes
+	// pending to the store again. Doing this before closing collectors (not
+	// after, as the original order had it) lets a ring-buffer reader that is
+	// mid-forward finish handing its last batch to the pool instead of racing
+	// its own Close() call in step 2.
+	slog.Info("graceful shutdown: draining ingest worker pool")
+	engine.DrainIngestPool(shutdownCtx)
+
+	// Step 2: close BPF ring-buffer readers so no new events enter the
+	// pipeline. Runs after the pool drain above, not before it (№259).
 	slog.Info("graceful shutdown: stopping BPF collectors")
 	for _, c := range collectors {
 		if err := c.Close(); err != nil {
@@ -2717,16 +2751,6 @@ func gracefulShutdown(
 				slog.String("name", c.Name()), slog.Any("error", err))
 		}
 	}
-
-	// Step 2: drain the PID-partitioned ingest worker pool. Events dispatched
-	// via IngestAsync before collectors stopped may still be queued in a
-	// worker's channel; wait for them to finish processing so their alerts
-	// (and any enforcement/Rego tasks they submit) exist before the queues
-	// below are drained. Skipping this would let those events surface only
-	// after Close() runs much later — past the point where anything flushes
-	// pending to the store again.
-	slog.Info("graceful shutdown: draining ingest worker pool")
-	engine.DrainIngestPool(shutdownCtx)
 
 	// Step 3: drain the enforcement worker queue so in-flight kill/block/throttle
 	// tasks are not abandoned mid-execution.

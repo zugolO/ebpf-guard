@@ -178,7 +178,18 @@ type DriftBaselineProfiler struct {
 	// evictions_total/profiles (the MaxWorkloads ceiling) declared the
 	// instrument healthy while the baseline was silently freezing on the
 	// MaxSignatures ceiling instead.
-	signatureCapReachedTotal prometheus.Counter
+	//
+	// Labelled by comm (wave 6.2.4, №256): a criterion measuring "does the
+	// cap freeze under a synthetic load" needs to tell that load's own
+	// freeze apart from any other workload saturating on the same node at
+	// the same time — a plain Counter cannot distinguish the two, so growth
+	// from bash/sshd's own ordinary signature diversity would count toward
+	// a control's "my workload froze" assertion. key.Comm is already read at
+	// the increment site for the log line above; the label costs nothing
+	// new. Cardinality stays bounded by "workloads that actually saturate
+	// MaxSignaturesPerWorkload", which criterion 6.2.4.12 expects to be a
+	// short, printed list, not the full process population of the node.
+	signatureCapReachedTotal *prometheus.CounterVec
 	log                      *slog.Logger
 }
 
@@ -252,10 +263,10 @@ func NewDriftBaselineProfiler(cfg DriftBaselineConfig, log *slog.Logger) *DriftB
 			Name: "ebpf_guard_drift_baseline_evictions_total",
 			Help: "Total drift baseline profiles evicted because the workload cap was reached.",
 		}),
-		signatureCapReachedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+		signatureCapReachedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ebpf_guard_drift_baseline_signature_cap_reached_total",
-			Help: "Total number of times a workload profile's signature set hit MaxSignaturesPerWorkload and its baseline froze incomplete. Cumulative — unlike saturated_profiles, does not fall back to zero when a frozen profile is later evicted (wave 6.2.1, finding №223).",
-		}),
+			Help: "Total number of times a workload profile's signature set hit MaxSignaturesPerWorkload and its baseline froze incomplete, by comm. Cumulative — unlike saturated_profiles, does not fall back to zero when a frozen profile is later evicted (wave 6.2.1, finding №223). Labelled by comm (wave 6.2.4, №256) so a control's own synthetic load can be told apart from any other workload saturating concurrently.",
+		}, []string{"comm"}),
 	}
 }
 
@@ -461,7 +472,7 @@ func (p *DriftBaselineProfiler) learnSignatureLocked(prof *driftWorkloadProfile,
 	if p.maxSignatures > 0 && len(prof.signatures) >= p.maxSignatures {
 		if !prof.saturated {
 			prof.saturated = true
-			p.signatureCapReachedTotal.Inc()
+			p.signatureCapReachedTotal.WithLabelValues(key.Comm).Inc()
 			p.log.Warn("drift-baseline: workload signature cap reached, baseline frozen incomplete",
 				"workload", key.Comm, "namespace", key.Namespace,
 				"max_signatures", p.maxSignatures)

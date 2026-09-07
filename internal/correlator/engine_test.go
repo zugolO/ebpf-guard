@@ -514,6 +514,26 @@ func TestCorrelationEngine_ObserverExclusion(t *testing.T) {
 		assert.Equal(t, before+7, after,
 			"kernel-side exclusions must accumulate on ebpf_guard_events_excluded_total{reason=\"observer_tree\"}, the same series 5.9a published from userspace")
 	})
+
+	// №260 (wave 6.2.4): a CounterVec label that nothing has incremented yet
+	// is absent from a scrape, not zero — an archive with no observer_tree
+	// series could mean either "the filter never excluded anything" or "the
+	// code path that would have incremented it never ran at all", and those
+	// are opposite verdicts for measurability. The series must exist (and
+	// read exactly 0) from construction, before ObserverExcludeEnabled is
+	// even consulted, so its absence in a real archive is unambiguous
+	// evidence of a broken pipeline rather than a quiet filter.
+	t.Run("observer_tree series exists at zero even when the filter is disabled and nothing fired", func(t *testing.T) {
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = rules
+		cfg.ObserverExcludeEnabled = false
+		engine := NewCorrelationEngineWithConfig(cfg)
+
+		got := testutil.ToFloat64(engine.eventsExcludedTotal.WithLabelValues("observer_tree"))
+
+		assert.Equal(t, float64(0), got,
+			"ebpf_guard_events_excluded_total{reason=\"observer_tree\"} must be pre-registered at 0, not absent, so a real archive can distinguish a quiet filter from a filter that never ran")
+	})
 }
 
 // TestCorrelationEngine_ConfirmedAttackAlertCountsInStats is the regression

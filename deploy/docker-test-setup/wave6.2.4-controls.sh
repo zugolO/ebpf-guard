@@ -626,7 +626,6 @@ _w624_reaped() {
     set -- ${_st#*") "}
     _W624_REAPED=$(( ${14:-0} + ${15:-0} ))
 }
-_w624_reaped; _w624_reaped0=$_W624_REAPED
 
 sleep "$W624_OPEN_SETTLE"
 _w624_t0=$(_w624_epoch)
@@ -643,6 +642,10 @@ echo "  окно открыто $(_w624_utc "$_w624_t0") — до закрыти
 # дескриптор, не даёт EOF (запись всегда возможна, раз писатель — сам
 # процесс), и `read -u` блокируется РОВНО на таймаут — ни одного execve
 # внутри окна, 0% CPU, exec/read — синтаксис шелла, не новый процесс.
+# Съём сторожа — ВПЛОТНУЮ к ожиданию, ПОСЛЕ всех подстановок команд выше:
+# `sleep` осадки и $( ) метки t0 сами суть пожатые потомки, и захват раньше
+# приписал бы их тики окну (смок 07.09.2026 напечатал ровно этот ложный +1).
+_w624_reaped; _w624_reaped0=$_W624_REAPED
 if [ -p "$W624_QUIET_FIFO" ]; then
     exec 8<>"$W624_QUIET_FIFO"
     read -r -t "$W624_WINDOW" -u 8 _w624_qdummy
@@ -652,8 +655,8 @@ else
     SECONDS=0
     while [ "$SECONDS" -lt "$W624_WINDOW" ]; do :; done
 fi
-_w624_t1=$(_w624_epoch)
 _w624_reaped; _w624_reaped1=$_W624_REAPED
+_w624_t1=$(_w624_epoch)
 _w624_metrics > "$W624_ART/metrics-window-end.txt"
 _w624_jdrops1=$(_w624_journal_drops)
 _w624_drift_print "закрытие" "$W624_ART/metrics-window-end.txt"

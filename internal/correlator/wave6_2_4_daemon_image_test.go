@@ -2,6 +2,7 @@ package correlator
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -275,6 +276,15 @@ func TestWave6_2_4GateArithmeticOnArchive(t *testing.T) {
 	headroom := map[string]bool{
 		"sigma_cpu_info_access":    true,
 		"mitre_vm_detect_dmi_read": true,
+	}
+
+	// Каталог server-logs/ — локальный каталог разбора (в .gitignore), на
+	// стенде его нет и быть не может. Сторож офлайн-разбора не вправе красить
+	// прогон тестов на стенде в красный: там его вход отсутствует ПО УСТРОЙСТВУ,
+	// а не по недосмотру. Отсутствие самого каталога — пропуск с явной причиной;
+	// каталог есть, а разбивки нет — по-прежнему жёсткий провал.
+	if _, statErr := os.Stat(filepath.Dir(filepath.Dir(filepath.Dir(archive)))); os.IsNotExist(statErr) {
+		t.Skip("каталог server-logs/ отсутствует (стенд не хранит архивы офлайн-разбора) — сторож величины гейта неприменим")
 	}
 
 	raw, err := os.ReadFile(archive)

@@ -1922,27 +1922,50 @@ echo "  (1) негативная: алертов четырёх двойнико
 # годится как подтверждение, но не как источник нуля — поэтому дельта
 # `alerts_total` + `alerts_filtered_total` по обоим родителям снимается
 # всегда и именно она выносит вердикт.
+#
+# ТРЕТЬЯ правка того же места (смок №2): ноль стора здесь оказался СРЕЗОМ
+# ЛИМИТЕРА, а не отставанием записи — за подачу лимитер срезал 26 алертов
+# родительских правил (память control-after-attacks-hits-filled-limiter:
+# ноль контроля, идущего после атак, может быть срезом, а не вердиктом).
+# Поэтому подача ПОВТОРЯЕТСЯ через окно лимитера (10 алертов/правило/60 с),
+# а ноль атрибутируется поимённо: срез → НЕИЗМЕРИМ, немота метрики → ПРОВАЛ.
+#
+# Про метрику честно: `alerts_total` НЕ несёт лейбла comm, поэтому её
+# приращение доказывает лишь, что правила не немы ГЛОБАЛЬНО, и не может
+# доказать, что сработала ИМЕННО эта подача. Comm-адресный источник здесь
+# один — стор; метрика отделяет «правило молчит» от «алерт не дошёл».
 cp /bin/cat "$W625_ART/w625shadow" 2>/dev/null
 chmod +x "$W625_ART/w625shadow" 2>/dev/null
-_w625_h2_m0=$(( $(_w625_metric_sum ebpf_guard_alerts_total "$W625_TWIN_PARENT_RULES") \
-              + $(_w625_metric_sum ebpf_guard_alerts_filtered_total "$W625_TWIN_PARENT_RULES") ))
-_w625_h2_rl0=$(_w625_ratelimited "$W625_TWIN_PARENT_RULES")
-_w625_h2_bytes=$("$W625_ART/w625shadow" /etc/shadow 2>/dev/null | wc -c)
-_w625_h2_hits=0; _w625_h2_waited=0
-while [ "$_w625_h2_waited" -lt "$W625_POS_TIMEOUT" ]; do
-    sleep "$W625_SETTLE"; _w625_h2_waited=$(( _w625_h2_waited + W625_SETTLE ))
-    _w625_h2_hits=$(_w625_alerts | jq --arg ids "$W625_TWIN_PARENT_RULES" --argjson t "$_w625_t45_start" \
-        '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and (.comm=="w625shadow"))]|length' 2>/dev/null || echo 0)
+_w625_h2_tries=$([ "$W625_SMOKE" = "1" ] && echo 2 || echo 3)
+_w625_h2_hits=0; _w625_h2_waited=0; _w625_h2_md=0; _w625_h2_rld=0; _w625_h2_try=0
+while [ "$_w625_h2_try" -lt "$_w625_h2_tries" ]; do
+    _w625_h2_try=$(( _w625_h2_try + 1 ))
+    _w625_h2_m0=$(( $(_w625_metric_sum ebpf_guard_alerts_total "$W625_TWIN_PARENT_RULES") \
+                  + $(_w625_metric_sum ebpf_guard_alerts_filtered_total "$W625_TWIN_PARENT_RULES") ))
+    _w625_h2_rl0=$(_w625_ratelimited "$W625_TWIN_PARENT_RULES")
+    _w625_h2_bytes=$("$W625_ART/w625shadow" /etc/shadow 2>/dev/null | wc -c)
+    _w625_h2_w=0
+    while [ "$_w625_h2_w" -lt "$W625_POS_TIMEOUT" ]; do
+        sleep "$W625_SETTLE"; _w625_h2_w=$(( _w625_h2_w + W625_SETTLE ))
+        _w625_h2_hits=$(_w625_alerts | jq --arg ids "$W625_TWIN_PARENT_RULES" --argjson t "$_w625_t45_start" \
+            '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and (.comm=="w625shadow"))]|length' 2>/dev/null || echo 0)
+        [ "${_w625_h2_hits:-0}" -gt 0 ] && break
+    done
+    _w625_h2_m1=$(( $(_w625_metric_sum ebpf_guard_alerts_total "$W625_TWIN_PARENT_RULES") \
+                  + $(_w625_metric_sum ebpf_guard_alerts_filtered_total "$W625_TWIN_PARENT_RULES") ))
+    _w625_h2_rl1=$(_w625_ratelimited "$W625_TWIN_PARENT_RULES")
+    _w625_h2_md=$(( _w625_h2_md + _w625_h2_m1 - _w625_h2_m0 ))
+    _w625_h2_rld=$(( _w625_h2_rld + _w625_h2_rl1 - _w625_h2_rl0 ))
+    _w625_h2_waited=$(( _w625_h2_waited + _w625_h2_w ))
     [ "${_w625_h2_hits:-0}" -gt 0 ] && break
+    # Ноль не от лимитера — повтор его не изменит, ждать 60 с незачем.
+    [ "$(( _w625_h2_rl1 - _w625_h2_rl0 ))" -gt 0 ] || break
+    echo "      (подача $_w625_h2_try дала 0 при срезе лимитера $(( _w625_h2_rl1 - _w625_h2_rl0 )) — пережидаю окно лимитера 60с и повторяю)"
+    sleep 60
 done
-_w625_h2_m1=$(( $(_w625_metric_sum ebpf_guard_alerts_total "$W625_TWIN_PARENT_RULES") \
-              + $(_w625_metric_sum ebpf_guard_alerts_filtered_total "$W625_TWIN_PARENT_RULES") ))
-_w625_h2_rl1=$(_w625_ratelimited "$W625_TWIN_PARENT_RULES")
-_w625_h2_md=$(( _w625_h2_m1 - _w625_h2_m0 ))
-_w625_h2_rld=$(( _w625_h2_rl1 - _w625_h2_rl0 ))
-echo "  (2) позитивная: обычный процесс (comm=w625shadow) прочитал ${_w625_h2_bytes}Б /etc/shadow → алертов родительских правил: ${_w625_h2_hits:-0} (стор, ожидание ${_w625_h2_waited}s)"
-echo "      вердиктная величина — МЕТРИКА: приращение alerts_total+alerts_filtered_total по ($W625_TWIN_PARENT_RULES) = $_w625_h2_md; срез лимитера за подачу = $_w625_h2_rld"
-echo "      (info-родитель sigma_passwd_shadow_read при store.min_severity=warning в стор не попадает по построению — ноль стора сам по себе ничего не судит)"
+echo "  (2) позитивная: обычный процесс (comm=w625shadow) прочитал ${_w625_h2_bytes}Б /etc/shadow → алертов родительских правил: ${_w625_h2_hits:-0} (стор, подач $_w625_h2_try, ожидание ${_w625_h2_waited}s)"
+echo "      срез лимитера за подачи = $_w625_h2_rld; приращение alerts_total+alerts_filtered_total по ($W625_TWIN_PARENT_RULES) = $_w625_h2_md"
+echo "      (метрика без лейбла comm — доказывает лишь ненемоту правил, не факт этой подачи; info-родитель sigma_passwd_shadow_read при store.min_severity=warning в стор не попадает по построению)"
 
 # ---- половины (3) и (4, отрицательная сторона): подделка ИМЕНИ демона ----
 # comm задаёт basename ПУТИ execve, а не argv[0] (память
@@ -1953,6 +1976,7 @@ cp /bin/cat "$W625_ART/cron" 2>/dev/null
 chmod +x "$W625_ART/cron" 2>/dev/null
 _w625_h3_m0=$(( $(_w625_metric_sum ebpf_guard_alerts_total "$W625_TWIN_RULES") \
               + $(_w625_metric_sum ebpf_guard_alerts_filtered_total "$W625_TWIN_RULES") ))
+_w625_h3_rl0=$(_w625_ratelimited "$W625_TWIN_RULES")
 _w625_h3_bytes=$("$W625_ART/cron" /etc/shadow 2>/dev/null | wc -c)
 # Тот же ложный ноль, что и у половины (2): ждать результата циклом, а не
 # фиксированным sleep. В смоке 6.2.5 эта половина дала 1 по везению — стор
@@ -1966,11 +1990,13 @@ while [ "$_w625_h3_waited" -lt "$W625_POS_TIMEOUT" ]; do
 done
 _w625_h3_m1=$(( $(_w625_metric_sum ebpf_guard_alerts_total "$W625_TWIN_RULES") \
               + $(_w625_metric_sum ebpf_guard_alerts_filtered_total "$W625_TWIN_RULES") ))
+_w625_h3_rl1=$(_w625_ratelimited "$W625_TWIN_RULES")
 _w625_h3_md=$(( _w625_h3_m1 - _w625_h3_m0 ))
+_w625_h3_rld=$(( _w625_h3_rl1 - _w625_h3_rl0 ))
 _w625_h3_comm=$(_w625_alerts | jq -r --argjson t "$_w625_t45_spoof" \
     '[.[]|select((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t)|.comm]|unique|join(" ")' 2>/dev/null)
 echo "  (3) на подделку: копия /bin/cat с именем cron прочитала ${_w625_h3_bytes}Б /etc/shadow → алертов двойников с comm=cron: ${_w625_h3_hits:-0} (ожидание ${_w625_h3_waited}s; comm алертов периода: ${_w625_h3_comm:-нет})"
-echo "      метрика двойников за подачу (подтверждение, не вердикт): приращение alerts_total+alerts_filtered_total = $_w625_h3_md"
+echo "      метрика двойников за подачу (подтверждение, не вердикт): приращение alerts_total+alerts_filtered_total = $_w625_h3_md; срез лимитера = $_w625_h3_rld"
 
 # ---- половина (4): ШТАТНЫЙ короткоживущий потомок демона ----
 # Подача — настоящий cron: задание в /etc/cron.d заставляет его форкаться
@@ -2037,22 +2063,26 @@ fi
 # --- половина (2): вердикт по МЕТРИКЕ, стор — подтверждение ---
 if [ "${_w625_h2_bytes:-0}" -lt 1 ]; then
     :   # неизмерима, уже записано выше
+elif [ "${_w625_h2_hits:-0}" -gt 0 ]; then
+    echo "  (2) ВЗЯТА: обычный процесс поднимает родительские правила (стор $_w625_h2_hits за $_w625_h2_try подач)"
+elif [ "${_w625_h2_rld:-0}" -gt 0 ]; then
+    _w625_t45_unmeas="$_w625_t45_unmeas [2] за $_w625_h2_try подач стор дал 0, но лимитер срезал $_w625_h2_rld алертов родительских правил — ноль здесь СРЕЗ, а не вердикт (память control-after-attacks-hits-filled-limiter); немотой сужения №253 это НЕ является;"
 elif [ "${_w625_h2_md:-0}" -lt 1 ]; then
-    _w625_t45_fails="$_w625_t45_fails [2] обычный процесс прочитал /etc/shadow (${_w625_h2_bytes}Б), а родительские правила ($W625_TWIN_PARENT_RULES) не поднялись НИ ОДНИМ совпадением по метрике (приращение $_w625_h2_md, срез лимитера $_w625_h2_rld) — сужение №253 выродилось в немоту всего класса, а не в исключение фона ноды;"
-elif [ "${_w625_h2_hits:-0}" -lt 1 ]; then
-    _w625_t45_unmeas="$_w625_t45_unmeas [2] правило сработало (метрика +$_w625_h2_md), но за ${_w625_h2_waited}s алерт не доехал до стора — половина неизмерима по стору, немотой правила это НЕ является;"
+    _w625_t45_fails="$_w625_t45_fails [2] обычный процесс прочитал /etc/shadow (${_w625_h2_bytes}Б), лимитер не срезал ничего, а родительские правила ($W625_TWIN_PARENT_RULES) не выросли НИ НА ОДНО совпадение по метрике — сужение №253 выродилось в немоту всего класса, а не в исключение фона ноды;"
 else
-    echo "  (2) ВЗЯТА: обычный процесс поднимает родительские правила (метрика +$_w625_h2_md, стор $_w625_h2_hits)"
+    _w625_t45_unmeas="$_w625_t45_unmeas [2] правила не немы (метрика +$_w625_h2_md, без лейбла comm), лимитер не резал, но за ${_w625_h2_waited}s алерт ЭТОЙ подачи в стор не доехал — половина неизмерима по стору;"
 fi
 # --- половина (3) ---
 if [ "${_w625_h3_bytes:-0}" -lt 1 ]; then
     :
-elif [ "${_w625_h3_hits:-0}" -lt 1 ] && [ "${_w625_h3_md:-0}" -lt 1 ]; then
-    _w625_t45_fails="$_w625_t45_fails [3] подделка носила ИМЯ демона (comm=cron) при чужом образе ($W625_ART/cron) и прочитала ${_w625_h3_bytes}Б /etc/shadow, а двойники не поднялись (стор 0, метрика $_w625_h3_md) — исключение идёт за ИМЕНЕМ, а не за образом (немой обход, память comm-not-in-is-a-mute-bypass);"
-elif [ "${_w625_h3_hits:-0}" -lt 1 ]; then
-    _w625_t45_unmeas="$_w625_t45_unmeas [3] двойник сработал (метрика +$_w625_h3_md), но за ${_w625_h3_waited}s алерт не доехал до стора;"
-else
+elif [ "${_w625_h3_hits:-0}" -gt 0 ]; then
     echo "  (3) ВЗЯТА: подделка имени демона поднимает двойника (стор $_w625_h3_hits, метрика +$_w625_h3_md)"
+elif [ "${_w625_h3_rld:-0}" -gt 0 ]; then
+    _w625_t45_unmeas="$_w625_t45_unmeas [3] стор дал 0, но лимитер срезал $_w625_h3_rld алертов двойников — ноль здесь СРЕЗ, а не вердикт;"
+elif [ "${_w625_h3_md:-0}" -lt 1 ]; then
+    _w625_t45_fails="$_w625_t45_fails [3] подделка носила ИМЯ демона (comm=cron) при чужом образе ($W625_ART/cron) и прочитала ${_w625_h3_bytes}Б /etc/shadow, а двойники не поднялись (стор 0, метрика 0, лимитер не резал) — исключение идёт за ИМЕНЕМ, а не за образом (немой обход, память comm-not-in-is-a-mute-bypass);"
+else
+    _w625_t45_unmeas="$_w625_t45_unmeas [3] двойники не немы (метрика +$_w625_h3_md, без лейбла comm), но за ${_w625_h3_waited}s алерт этой подделки в стор не доехал;"
 fi
 # --- половина (4), №261: ГЛАВНАЯ проверка волны ---
 if [ "$_w625_cron_lineage_d" -lt 1 ]; then

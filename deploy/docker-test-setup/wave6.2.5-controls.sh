@@ -1121,8 +1121,18 @@ else
         echo "  [$_w625_st] закрытие: $(_w625_drift_names "$_w625_ds1" "$_w625_st" | cut -c1-400)"
     done
     # Переходы ВНУТРИ тихого окна — из журнала, поимённо (item 4).
+    #
+    # ПРОГОН 6.2.5 (08.09.2026): здесь разбор искал LOGFMT (`workload=cron`), а
+    # агент пишет JSON (`"workload":"cron"`), и критерий объявил РАБОТАЮЩУЮ
+    # правку item 4 «не задеплоенной». В журнале прогона при этом лежало 47
+    # именных переходов, из них РОВНО 6 внутри окна — в точности тот рост, о
+    # котором вердикт сказал «не разбирается поимённо». Ноль был приборным,
+    # а причина в вердикте — выдуманной. Разбор понимает обе формы: JSON —
+    # рабочая, logfmt — на случай смены хендлера логгера.
     _w625_stuck_j=$(journalctl -u "$W625_SVC" --since "@$_w625_t0" --until "@$_w625_t1" --no-pager 2>/dev/null \
-        | grep 'entering stuck (blind spot)' | grep -oE 'workload=[^ ]+' | sed 's/^workload=//' | sort | uniq -c | awk '{printf "%s×%s ", $1, $2}')
+        | grep 'entering stuck (blind spot)' \
+        | grep -oE '"workload":"[^"]+"|workload=[^ ,}]+' \
+        | sed 's/^"workload":"//; s/"$//; s/^workload=//' | sort | uniq -c | awk '{printf "%s×%s ", $1, $2}')
     _w625_stuck_m0=$(_w625_metric_sum ebpf_guard_drift_baseline_stuck_learning_workloads "" "$W625_ART/metrics-window-start.txt")
     _w625_stuck_m1=$(_w625_metric_sum ebpf_guard_drift_baseline_stuck_learning_workloads "" "$W625_ART/metrics-window-end.txt")
     echo "  переходы в stuck ВНУТРИ окна (журнал, поимённо): ${_w625_stuck_j:-нет}"
@@ -1152,7 +1162,9 @@ _w625_agent_epoch=$(cat /root/agent-start-6.2.5.epoch 2>/dev/null)
 _w625_cap_first=$(journalctl -u "$W625_SVC" --since "$(_w625_journal_since)" --no-pager -o short-unix 2>/dev/null \
     | grep -m1 'workload signature cap reached' | awk '{printf "%d", $1}')
 _w625_cap_names=$(journalctl -u "$W625_SVC" --since "$(_w625_journal_since)" --no-pager 2>/dev/null \
-    | grep 'workload signature cap reached' | grep -oE 'workload=[^ ]+' | sed 's/^workload=//' | sort -u | tr '\n' ' ')
+    | grep 'workload signature cap reached' \
+    | grep -oE '"workload":"[^"]+"|workload=[^ ,}]+' \
+    | sed 's/^"workload":"//; s/"$//; s/^workload=//' | sort -u | tr '\n' ' ')
 _w625_cap_metric=$(awk '/^ebpf_guard_drift_baseline_signature_cap_reached_total\{/{
         if (match($0, /comm="[^"]*"/)) printf "%s=%s ", substr($0, RSTART+6, RLENGTH-7), $NF }' \
     "$W625_ART/metrics-window-end.txt" 2>/dev/null)

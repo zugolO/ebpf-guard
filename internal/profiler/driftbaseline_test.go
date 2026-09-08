@@ -1,6 +1,7 @@
 package profiler
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -302,6 +303,55 @@ func TestDriftBaselineProfiler_StuckVsOverdueDiverge(t *testing.T) {
 	// own 2h deadline (which started when IT began learning, at base+1h).
 	assert.Equal(t, 1, p.StuckLearningWorkloads(), "only logrotate is a live blind spot; cron's deadline has already passed")
 	assert.Equal(t, 2, p.LearningOverdueWorkloads(), "both are learning past one period under the old, deadline-agnostic count")
+}
+
+// TestDriftBaselineProfiler_LogsNamedTransitionIntoStuck — wave 6.2.5,
+// findings №265/№266 (archive collect-6.2.4): stuck_learning_workloads moved
+// 0 -> 2 during ten quiet minutes with no way to name which workloads. The
+// crossing is a pure function of elapsed time, driven by no event, so this
+// must land from the periodic sweep (UpdateLearningGauge), same as
+// PromoteExpiredWorkloads. Pins: the log line names the workload exactly
+// once, not once per tick, and a workload that never goes stuck (still
+// learning, or already enforcing) never gets one.
+func TestDriftBaselineProfiler_LogsNamedTransitionIntoStuck(t *testing.T) {
+	cfg := DriftBaselineConfig{
+		Enabled:                true,
+		LearningPeriod:         3600, // 1h
+		MinSamples:             20,   // never reached by this workload's traffic
+		PerWorkload:            true,
+		EnforceDeadlinePeriods: 3, // deadline = 3h
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	p := NewDriftBaselineProfiler(cfg, log)
+
+	base := time.Now()
+	current := base
+	p.nowFn = func() time.Time { return current }
+
+	require.True(t, p.Observe("drift_rule", fileEventForPath("stuckwl", "/etc/cron.d/job")))
+	require.True(t, p.Observe("drift_rule", fileEventForPath("freshwl", "/etc/cron.d/other")))
+
+	// Still inside the first LearningPeriod for both: no transition yet.
+	current = base.Add(30 * time.Minute)
+	p.UpdateLearningGauge()
+	assert.NotContains(t, buf.String(), "entering stuck")
+
+	// "stuckwl" crosses one LearningPeriod (idle, no new events); "freshwl"
+	// gets a fresh event that resets nothing (profiles never reset startedAt)
+	// but stays inside its own period relative to a later check below.
+	current = base.Add(90 * time.Minute)
+	p.UpdateLearningGauge()
+	logged := buf.String()
+	assert.Contains(t, logged, "entering stuck", "the sweep must print a named transition, not just update the aggregate gauge")
+	assert.Contains(t, logged, "workload=stuckwl")
+	assert.Contains(t, logged, "workload=freshwl", "freshwl is equally past its own LearningPeriod by this point and must be named too")
+
+	// A second sweep at the same instant must not repeat the line for a
+	// workload already logged.
+	buf.Reset()
+	p.UpdateLearningGauge()
+	assert.NotContains(t, buf.String(), "entering stuck", "each workload's transition into stuck is printed once, not every tick")
 }
 
 func TestNormalizeDriftPath(t *testing.T) {

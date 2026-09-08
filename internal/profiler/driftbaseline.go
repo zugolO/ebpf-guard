@@ -117,6 +117,11 @@ type driftWorkloadProfile struct {
 	// workload, so a drift is alerted once rather than on every recurrence.
 	// Allocated lazily: most profiles never report anything.
 	reported map[string]struct{}
+	// stuckLogged records that logNewlyStuckWorkloads already printed the
+	// named transition into "stuck" for this profile, so the periodic sweep
+	// does not repeat the same line on every tick until the workload leaves
+	// learning (wave 6.2.5, №265/№266 — see logNewlyStuckWorkloads).
+	stuckLogged bool
 }
 
 // DriftBaselineProfiler learns, per workload, which drift-class rule matches
@@ -593,6 +598,47 @@ func (p *DriftBaselineProfiler) PromoteExpiredWorkloads() int {
 	return promoted
 }
 
+// logNewlyStuckWorkloads prints a named log line, once per profile, the first
+// time a workload is observed to have crossed from "learning" into "stuck"
+// (past one LearningPeriod, enforcement deadline not yet elapsed) — wave
+// 6.2.5, findings №265/№266 (archive collect-6.2.4): `stuck_learning_workloads`
+// moved 0 → 2 during ten minutes of otherwise quiet traffic, and nothing in
+// the agent could say which two workloads. All three learning states
+// (learning/stuck/overdue) are pure functions of elapsed wall-clock time —
+// no event drives the crossing — so, like PromoteExpiredWorkloads, this must
+// run from the periodic sweep rather than from Observe(). Called after
+// PromoteExpiredWorkloads in the same tick so a profile that reached its
+// deadline this instant is already enforcing and correctly skipped, matching
+// StuckLearningWorkloads()'s own exclusion of deadline-elapsed profiles.
+func (p *DriftBaselineProfiler) logNewlyStuckWorkloads() {
+	learningPeriod := time.Duration(p.config.LearningPeriod) * time.Second
+	if learningPeriod <= 0 {
+		return
+	}
+	now := p.nowFn()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key, prof := range p.profiles {
+		if prof.enforcing || prof.stuckLogged {
+			continue
+		}
+		if now.Sub(prof.startedAt) <= learningPeriod {
+			continue
+		}
+		if p.enforceDeadline > 0 && now.Sub(prof.startedAt) >= p.enforceDeadline {
+			continue // already past its deadline this tick; PromoteExpiredWorkloads owns that transition
+		}
+		prof.stuckLogged = true
+		comm := key
+		if i := strings.IndexByte(comm, '|'); i >= 0 {
+			comm = comm[:i]
+		}
+		p.log.Warn("drift-baseline: workload past one LearningPeriod without enforcing, entering stuck (blind spot)",
+			"workload", comm, "samples", prof.sampleCount, "min_samples", p.config.MinSamples,
+			"unique_signatures", len(prof.signatures))
+	}
+}
+
 // ProfileCount returns the number of per-workload profiles currently held.
 func (p *DriftBaselineProfiler) ProfileCount() int {
 	p.mu.RLock()
@@ -609,6 +655,7 @@ func (p *DriftBaselineProfiler) ProfileCount() int {
 // later.
 func (p *DriftBaselineProfiler) UpdateLearningGauge() {
 	p.PromoteExpiredWorkloads()
+	p.logNewlyStuckWorkloads()
 	p.learningGauge.Set(float64(p.LearningWorkloads()))
 	p.profilesGauge.Set(float64(p.ProfileCount()))
 	p.stuckGauge.Set(float64(p.StuckLearningWorkloads()))

@@ -1349,6 +1349,8 @@ func normaliseFieldName(field string) string {
 		return "namespace"
 	case "proc.exe_path":
 		return "exe_path"
+	case "proc.parent_exe_path":
+		return "parent_exe_path"
 	case "network.dport":
 		return "dport"
 	case "network.sport":
@@ -1434,6 +1436,21 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		// событий, у которых имя демона уже совпало, — единицы в секунду, а
 		// не поток. Порядок в rules/*.yaml — часть контракта, а не стиль.
 		return resolveExePath(e.PID)
+	case "parent_exe_path":
+		// Волна 6.2.5, №261/исход (б). Тот же резолвер, тот же readlink,
+		// применённый к PPID вместо PID: у форкнутого потомка демона (comm
+		// унаследован от родителя, execve не было) образ САМОГО процесса
+		// резолвится редко — он умирает за единицы миллисекунд, — а образ
+		// родителя нет: родитель — долгоживущий демон. Родителя себе не
+		// выбирают (PPID проставляет ядро в fork/clone), поэтому антиспуф
+		// сохраняется так же, как у exe_path: `cp /bin/cat /tmp/cron &&
+		// exec -a cron /tmp/cron /etc/shadow` из интерактивной оболочки
+		// даёт parent_exe_path=/bin/bash (или интерпретатор запускающей
+		// оболочки), не /usr/sbin/cron — исключение не применяется, правило
+		// срабатывает. Условие на parent_exe_path в exceptions обязано, как
+		// и exe_path, стоять ПОСЛЕДНИМ в "and" — тот же контракт короткого
+		// замыкания, тот же readlink без кэша.
+		return resolveExePath(e.PPID)
 	}
 
 	switch e.Type {

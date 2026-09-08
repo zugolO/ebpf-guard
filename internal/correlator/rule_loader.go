@@ -620,6 +620,10 @@ var identityFields = []string{
 	// события, иначе очередной тип события молча останется без него и
 	// исключения для него снова придётся писать по comm.
 	"exe_path", "proc.exe_path",
+	// Волна 6.2.5, №261/исход (б): вторая ось на образ РОДИТЕЛЯ, закрывающая
+	// гонку readlink у короткоживущего форка демона — см. resolveExePath /
+	// getFieldValue("parent_exe_path") в rules.go.
+	"parent_exe_path", "proc.parent_exe_path",
 }
 
 func init() {

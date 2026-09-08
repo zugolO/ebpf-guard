@@ -575,6 +575,50 @@ var containerSupervisorComms = map[string]struct{}{
 	"conmon":          {},
 }
 
+// containerRootPlumbingComms lists node-level container-runtime hosts that
+// EMBED a supervisor instead of being spawned by one, and therefore show up
+// as the *root* of a truncated container tree with the supervisor one hop
+// BELOW them — wave 6.2.5, №262, second archive form (root "k3s-server",
+// chain k3s-server → containerd → flannel → bridge, leaves "mount"/
+// "loopback").
+//
+// Deliberately a separate map from containerSupervisorComms rather than a new
+// entry in it, and deliberately NOT used by isSupervisorHop:
+//
+//   - containerSupervisorComms is also what isSupervisorHop reads, and that
+//     function grants a comm the right not to set HasUntrustedSignal on its
+//     own. k3s-server is the node's whole control plane, not a two-hop
+//     re-exec of container init: a process that manages to run under that
+//     name must keep latching the untrusted half exactly as it does today
+//     (the anti-spoof axis this cluster of waves is built on — see
+//     exepath.go's `exec -a k3s-server` example и находка №247).
+//   - containerInitTrustedRoot still requires the walk to END at a genuinely
+//     trusted comm, so k3s-server → containerd → xmrig resolves to nothing
+//     and stays untrusted-rooted. The entry only says "this root is plumbing
+//     that may hide a real actor behind it", never "trust whatever runs
+//     under it".
+//
+// The narrower alternatives were weighed in plan.md 6.2.5 (открытый вопрос
+// 1b): adding k3s-server to defaultTrustedComms would trust the name itself
+// everywhere (§2в: narrowing without evidence), and "find the first
+// supervisor anywhere in the chain" would drop the requirement that the root
+// be plumbing at all, letting an attacker whose first hop happens to be
+// named like a supervisor inherit the pass.
+var containerRootPlumbingComms = map[string]struct{}{
+	"k3s-server": {},
+}
+
+// isContainerTreeRoot reports whether comm may head a container tree that is
+// truncated at the runtime boundary: either the supervisor itself
+// (containerd-shim/runc/...) or a runtime host that embeds one (k3s-server).
+func isContainerTreeRoot(comm string) bool {
+	if _, ok := containerSupervisorComms[comm]; ok {
+		return true
+	}
+	_, ok := containerRootPlumbingComms[comm]
+	return ok
+}
+
 // isSupervisorHop reports whether comm is container-runtime plumbing
 // (containerSupervisorComms) rather than any process that could itself be a
 // workload — attacker or legitimate. Wave 6.2.4/№255 (archive collect-6.2.3):
@@ -633,7 +677,29 @@ func (t *IncidentTracker) trustedIncidentRoot(inc *types.Incident) bool {
 	if t.isImageVerifiedComm(inc.RootComm, inc.RootPID) {
 		return true
 	}
-	if _, isShim := containerSupervisorComms[inc.RootComm]; !isShim {
+	return t.containerInitTrustedRoot(inc)
+}
+
+// containerInitTrustedRoot reports whether inc's root is container-runtime
+// plumbing (containerSupervisorComms, or a runtime host that embeds one —
+// containerRootPlumbingComms) whose recorded chain resolves, after
+// walking past every consecutive supervisor hop, to a genuinely trusted
+// actor — the shim/runc/containerd-init half of trustedIncidentRoot, split
+// out on its own (wave 6.2.5, №262) so the promotion gate in Add() can lean
+// on it WITHOUT also picking up trustedIncidentRoot's other half (a root
+// that is directly trusted by name, e.g. cron/sshd). That distinction is
+// load-bearing: cron/sshd spawning an attacker binary (xmrig) must keep
+// setting HasUntrustedSignal from the child alone — see
+// TestIncidentTracker_AttackInDaemon_DoesNotCoalesce — while a container-init
+// helper (cat/mount/loopback) spawned during namespace setup under a
+// shim/runc chain that already resolved to a trusted actor should not.
+// isImageVerifiedComm(RootComm) returns true for EVERY incident rooted at
+// cron regardless of what runs under it, so folding this into the same gate
+// Add() uses would silently blind that detection path.
+//
+// Caller must hold at least the read lock.
+func (t *IncidentTracker) containerInitTrustedRoot(inc *types.Incident) bool {
+	if !isContainerTreeRoot(inc.RootComm) {
 		return false
 	}
 	// Only ever look through the shim when the recorded chain actually starts
@@ -855,8 +921,23 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 	// exactly the old isTrustedComm check (unresolved evidence falls back to
 	// it too), so cron/sshd background coalescing is unaffected until a
 	// resolver is installed AND actually returns a mismatching image.
+	//
+	// №262 (archive collect-6.2.4): this guard used to fire for ANY comm not
+	// individually recognised, including a bare namespace-setup helper (cat,
+	// mount, loopback) spawned while a shim/runc chain does routine container
+	// init — the guard is scoped to the ALERT's own comm and never asked
+	// whether the incident it is being folded into already resolved to a
+	// trusted actor through containerInitTrustedRoot. Two of the six
+	// incidents in that archive (containerd-shim -> runc -> runc:[1:CHILD],
+	// leaf "cat"; k3s-server chain under containerd/flannel, leaves "mount"/
+	// "loopback" — see plan.md 6.2.5 item 2) were promoted to "attack" this
+	// way. containerInitTrustedRoot, not the broader trustedIncidentRoot, is
+	// the check here on purpose: trustedIncidentRoot also returns true for
+	// any incident rooted directly at cron/sshd by name, and folding that in
+	// would blind xmrig-spawned-by-cron detection (see the comment on
+	// containerInitTrustedRoot).
 	if !t.isImageVerifiedComm(alert.Comm, alert.PID) && !t.isTrustedRootShell(alert.Comm, inc.RootComm) &&
-		!isSupervisorHop(alert.Comm) {
+		!isSupervisorHop(alert.Comm) && !t.containerInitTrustedRoot(inc) {
 		inc.HasUntrustedSignal = true
 	}
 	if isNetworkSignal(alert.Event.Type) {

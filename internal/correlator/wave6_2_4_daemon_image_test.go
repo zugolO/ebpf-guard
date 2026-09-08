@@ -101,10 +101,26 @@ func w624Engine(t *testing.T, file string, ids ...string) *RuleEngine {
 	return NewRuleEngine(out)
 }
 
+// w624NoLineagePPID — PPID нарочно вне трёх специальных pid'ов резолвера
+// (w624GenuinePID/w624SpoofPID/w624DeadPID): резолвер отдаёт для него ветку
+// по умолчанию ("/usr/bin/"+comm), которая не совпадает ни с одним путём в
+// verified-daemon-lineage (волна 6.2.5, №261/исход (б)). Без этого PID=0 у
+// w624GenuinePID и незаданный (нулевой) PPID событий совпали бы, и новая ось
+// молча подмешивалась бы в тесты старой оси exe_path.
+const w624NoLineagePPID uint32 = 999999
+
 // w624File — файловое событие. op: 0=open, 1=read, 2=write, 3=chmod
-// (fileOpNames в rules.go).
+// (fileOpNames в rules.go). PPID — генуинный форк (см. w624NoLineagePPID):
+// эти тесты проверяют ось exe_path в изоляции, родословная не участвует.
 func w624File(pid uint32, comm, path string, op uint8) types.Event {
-	e := types.Event{Type: types.EventFileAccess, PID: pid, File: &types.FileEvent{Op: op}}
+	return w624FileWithPPID(pid, w624NoLineagePPID, comm, path, op)
+}
+
+// w624FileWithPPID — как w624File, но с явным PPID, для тестов оси
+// verified-daemon-lineage (волна 6.2.5, №261/исход (б)), где родословная как
+// раз и решает, применяется исключение или нет.
+func w624FileWithPPID(pid, ppid uint32, comm, path string, op uint8) types.Event {
+	e := types.Event{Type: types.EventFileAccess, PID: pid, PPID: ppid, File: &types.FileEvent{Op: op}}
 	copy(e.Comm[:], comm)
 	copy(e.File.Filename[:], path)
 	return e
@@ -178,7 +194,13 @@ func TestWave6_2_4SpoofedDaemonNameStillAlerts(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			w624WithExe(t, c.comm)
 			e := w624Engine(t, c.file, c.twin, c.parent)
-			fired := w624Fired(e, w624File(w624SpoofPID, c.comm, c.path, c.op))
+			// PPID тоже w624SpoofPID: подделка образа целиком, включая
+			// родословную — иначе тест доказывал бы только то, что
+			// verified-daemon-lineage не сработала бы, а не то, что ни одно
+			// исключение не сработало (родитель подделки — не демон, см.
+			// verified-daemon-lineage: реальный родитель-cron у атакующей
+			// оболочки не появляется).
+			fired := w624Fired(e, w624FileWithPPID(w624SpoofPID, w624SpoofPID, c.comm, c.path, c.op))
 			assert.Containsf(t, fired, c.twin,
 				"`exec -a %s /tmp/w624/%s` подделывает comm, но не образ — %s обязано сработать",
 				c.comm, c.comm, c.twin)
@@ -211,7 +233,12 @@ func TestWave6_2_4UnresolvedImageFailsOpen(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			w624WithExe(t, c.comm)
 			e := w624Engine(t, c.file, c.twin, c.parent)
-			assert.Containsf(t, w624Fired(e, w624File(w624DeadPID, c.comm, c.path, c.op)), c.twin,
+			// PPID тоже w624DeadPID: резолвер недоступен целиком (нет procfs,
+			// оба readlink'а — на pid и на ppid — падают одинаково), а не
+			// только для события. Иначе тест проверял бы только гонку
+			// verified-daemon-image и не проверял бы, что при полном отказе
+			// резолвера lineage-ось тоже не закрывает отказ тишиной.
+			assert.Containsf(t, w624Fired(e, w624FileWithPPID(w624DeadPID, w624DeadPID, c.comm, c.path, c.op)), c.twin,
 				"неразрешённый образ обязан ОТКРЫТЬ отказ (шум, который видно), а не закрыть его тишиной")
 		})
 	}

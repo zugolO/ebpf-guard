@@ -529,6 +529,22 @@ rules:
                 - "/usr/sbin/rsyslogd"
                 - "/usr/lib/systemd/systemd-journald"
                 - "/lib/systemd/systemd-journald"
+      # Волна 6.2.5, №261/исход (б) — см. sigma_passwd_shadow_read_daemon
+      # выше для полного обоснования оси. Ось только на cron: он один среди
+      # перечисленных демонов минутно форкается на короткоживущий процесс.
+      - name: verified-daemon-lineage
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [cron]
+            - field: proc.parent_exe_path
+              op: in
+              values:
+                - "/usr/sbin/cron"
+                - "/usr/sbin/crond"
+                - "/usr/bin/crond"
 
   - id: sigma_history_file_cleared
     name: "Shell history file cleared or deleted"
@@ -620,6 +636,21 @@ rules:
               op: in
               values:
                 - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/sbin/crond"
+                - "/usr/bin/crond"
+      # Волна 6.2.5, №261/исход (б) — см. sigma_passwd_shadow_read_daemon
+      # выше для полного обоснования оси.
+      - name: verified-daemon-lineage
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [cron]
+            - field: proc.parent_exe_path
+              op: in
+              values:
                 - "/usr/sbin/cron"
                 - "/usr/sbin/crond"
                 - "/usr/bin/crond"
@@ -1154,6 +1185,26 @@ rules:
               op: in
               values:
                 - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/sbin/crond"
+                - "/usr/bin/crond"
+      # Волна 6.2.5, №261/исход (б) — тот же контракт, что у
+      # credential-access.yaml/sensitive_file_read_daemon: verified-daemon-image
+      # проигрывает гонку readlink на ежеминутном forked-потомке cron
+      # (PAM/NSS lookup читает /etc/passwd ДО execve, pid живёт единицы
+      # миллисекунд). Родитель форка — долгоживущий /usr/sbin/cron, PPID
+      # процесс себе не выбирает. Ось только на cron: у sshd форк на сессию
+      # живёт дольше и этой гонки не показывает в архиве 6.2.4.
+      - name: verified-daemon-lineage
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [cron]
+            - field: proc.parent_exe_path
+              op: in
+              values:
                 - "/usr/sbin/cron"
                 - "/usr/sbin/crond"
                 - "/usr/bin/crond"

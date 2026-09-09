@@ -199,6 +199,40 @@ rules:
             - field: filename
               op: suffix
               values: [".canary"]
+      # Волна 6.2.6, item 6 (№282). Единственный источник этого правила в
+      # архиве 6.2.5, не принадлежащий дереву измерителя: sshd читает
+      # /root/.ssh/authorized_keys при аутентификации root-входа. Остальной
+      # объём правила в архиве (bash/cat/curl на /root/*) — сам измеритель,
+      # и лечится он переездом артефактов из /root, а не исключением
+      # ([[control-artifacts-must-live-outside-root]]).
+      #
+      # Сужение не открывает персистенцию: условие правила и так
+      # op == "open", запись в authorized_keys им никогда не ловилась
+      # ([[write-rules-blind-to-shell-redirect]]); а подделка имени "sshd"
+      # не помогает — образ сверяется точными путями и стоит
+      # последним. Любой другой путь под /root/ этому же sshd
+      # по-прежнему поднимает алерт.
+      - name: sshd-authorized-keys
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [sshd]
+            - field: filename
+              op: in
+              values: ["/root/.ssh/authorized_keys"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/bin/sshd"
 
   # ── New network peer drift ─────────────────────────────────────────────────
   - id: drift_new_network_common_c2_ports

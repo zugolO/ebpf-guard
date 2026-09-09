@@ -953,6 +953,47 @@ rules:
             - field: proc.exe_path
               op: prefix
               values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
+      # Волна 6.2.6, item 6 (№282). Разбивка прогона 6.2.5 показала, что
+      # источник этого правила СМЕНИЛСЯ: k3s-server-node-capacity-poll выше
+      # больше не срабатывает (см. постановку item 6 — «исключение есть и не
+      # сработало»), а наблюдённый в архиве 6.2.5 источник — landscape-sysinfo,
+      # генератор MOTD, читающий /proc/meminfo при входе по ssh и по таймеру
+      # motd-news. Идиома та же, что у node-host-daemon: слой 1 (cgroup+pod)
+      # отвечает «процесс НЕ в контейнере», слой 2 (образ) отличает демона ноды
+      # от чего угодно с тем же comm. exe_path СТОИТ ПОСЛЕДНИМ — "and" считается
+      # по порядку с коротким замыканием, readlink случается только после
+      # совпадения comm и пути.
+      #
+      # comm здесь — усечённое ядром до 15 байт "landscape-sysinfo", а exe_path
+      # у него — интерпретатор (/usr/bin/python3), а не сам скрипт
+      # ([[shebang-control-comm-is-interpreter]]); поэтому слой образа взят
+      # prefix "/usr/", а не точным путём: точный путь тут был бы догадкой,
+      # которая молча выключила бы исключение.
+      #
+      # Путь ровно один — /proc/meminfo, ровно тот, который замер показал.
+      # /proc/cpuinfo этому же comm НЕ добавлен, хотя landscape-sysinfo его
+      # почти наверняка тоже читает: отказ открытый, такое чтение поднимет
+      # алерт и попадёт в разбивку следующего прогона, а исключение по догадке
+      # глушит то, чего замер не показывал.
+      - name: node-motd-sysinfo
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [landscape-sysin]
+            - field: filename
+              op: in
+              values: ["/proc/meminfo"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/"]
   - id: sigma_kernel_version_read
     name: "Kernel version file read"
     description: "Process read /proc/version or /etc/os-release — OS fingerprinting for exploit selection."

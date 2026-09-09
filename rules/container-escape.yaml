@@ -964,6 +964,105 @@ rules:
             - field: filename
               op: eq
               values: ["/proc/1/cgroup"]
+      # Волна 6.2.6, item 6 (№282). Четыре наблюдённых в архиве 6.2.5
+      # источника, все — фоновые акторы ноды, все по идиоме node-host-daemon
+      # (cgroup + pod + exe_path, образ последним, путь ровно наблюдённый).
+      # Ни одно из четырёх не открывает /proc/1/{environ,mem,maps,root} и не
+      # трогает ветку /proc/self/root/proc/1/ — примитивы побега из контейнера
+      # остаются под правилом для тех же самых comm.
+      #
+      # (1) landscape-sysinfo читает /proc/1/cmdline, собирая MOTD.
+      - name: node-motd-sysinfo
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [landscape-sysin]
+            - field: filename
+              op: in
+              values: ["/proc/1/cmdline"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/"]
+      # (2) systemd-logind читает /proc/1/cgroup — тот же случай, что
+      #     закрывает pid1-self выше, но выполненный демоном сессий, а не
+      #     самим pid 1. Точные пути образа, обе раскладки.
+      - name: systemd-logind-session-cgroup
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [systemd-logind]
+            - field: filename
+              op: in
+              values: ["/proc/1/cgroup"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/lib/systemd/systemd-logind"
+                - "/lib/systemd/systemd-logind"
+      # (3) sshd читает /proc/1/limits при установке сессии — сверяет
+      #     наследуемые rlimit'ы с лимитами init. Только этот путь.
+      - name: sshd-session-limits
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [sshd]
+            - field: filename
+              op: in
+              values: ["/proc/1/limits"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/bin/sshd"
+      # (4) k3s-server читает /proc/1/net/dev — это опрос интерфейсов в
+      #     СЕТЕВОМ namespace хоста через /proc/1/net, а не чтение свойств
+      #     процесса init; к побегу из контейнера отношения не имеет.
+      #     Список prefix'ов образа — тот же, что у k3s-server-node-capacity-poll
+      #     в sigma-linux.yaml: каталог установки k3s зависит от способа
+      #     установки, точный путь был бы догадкой.
+      - name: k3s-server-node-netdev-poll
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [k3s-server]
+            - field: filename
+              op: in
+              values: ["/proc/1/net/dev"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
 
   # prometheus/grafana routinely read /proc/1/* metadata as PID 1 of their
   # own container namespace — legitimate self-introspection, not escape.

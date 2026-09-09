@@ -267,6 +267,61 @@ rules:
             - field: filename
               op: eq
               values: ["/proc/1/cgroup"]
+      # Волна 6.2.6, item 6 (№282). Два наблюдённых в архиве 6.2.5 источника,
+      # оба — фоновые акторы ноды, оба по идиоме node-host-daemon
+      # (cgroup + pod + exe_path, образ последним).
+      #
+      # (1) landscape-sysinfo читает /proc/uptime, собирая MOTD. Только этот
+      #     путь: /proc/1/{environ,status,cgroup} — настоящие примитивы
+      #     разведки хоста — этому же comm по-прежнему поднимают алерт.
+      - name: node-motd-sysinfo
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [landscape-sysin]
+            - field: filename
+              op: in
+              values: ["/proc/uptime"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: prefix
+              values: ["/usr/"]
+      # (2) systemd-logind читает /proc/1/cgroup, разрешая cgroup лидера
+      #     сессии — то же самообследование, что уже закрыто предикатом
+      #     pid1-self для самого pid 1, но выполненное демоном сессий.
+      #     Здесь exe_path взят ТОЧНЫМИ путями, а не prefix: у systemd-logind
+      #     раскладка стабильна и известна, и точный путь — сильнейшая из
+      #     доступных антиспуф-осей ([[exe-path-is-the-antispoof-axis]]).
+      #     Обе раскладки (usr-merged и нет) перечислены; если стенд окажется
+      #     с третьей, исключение просто не применится и алерт будет виден.
+      - name: systemd-logind-session-cgroup
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [systemd-logind]
+            - field: filename
+              op: in
+              values: ["/proc/1/cgroup"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/lib/systemd/systemd-logind"
+                - "/lib/systemd/systemd-logind"
 
   # pgrep's routine per-PID matching pass reads /proc/1/{cgroup,environ,status}
   # as a side effect of scanning every running process, not sandbox-detection

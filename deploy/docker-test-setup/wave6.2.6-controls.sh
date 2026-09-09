@@ -2778,37 +2778,93 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- 6.2.4.7: побег из-под пода по-прежнему промотируется (долг 6.2.4) ---"
 W626_ESCAPE_SUBMITTERS="nsenter unshare cat"
-_w626_esc_hits=$(jq --arg ids "$W626_ESCAPE_RULES" --argjson t "$_w626_t47" \
-    '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t))]|length' \
+# ВЕРХНЯЯ ГРАНИЦА ОКНА ПОДАЧИ (№288, найдено смоком 09.09.2026). Прежде счёт
+# шёл с ОТКРЫТЫМ верхним концом (`timestamp >= t47`), а сразу за подачей побега
+# идёт подача старта пода — и весь её шум (container_escape_nsenter от
+# containerd/loopback/bridge/runc:[1:CHILD], escape_pivot_root и
+# rootkit_proc_modules_read от runc:[2:INIT]) попадал в тот же счёт. На смоке
+# из 28 «алертов побега» подаче измерителя принадлежал ОДИН
+# (rootkit_proc_modules_read, comm=cat), остальные 27 — инициализация
+# контейнера. То есть доказательство «детект жив» у критерия было почти
+# целиком ЧУЖИМ — ровно форма находки №278 («половину доказательства составил
+# инцидент, который тот же прогон называет ложью»), только на половине алертов,
+# а не инцидентов. Граница — начало подачи 6.2.6.16: два окна перестают
+# смешиваться, и каждое доказывает своё.
+_w626_t47_end="$_w626_t516"
+_w626_esc_hits=$(jq --arg ids "$W626_ESCAPE_RULES" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te))]|length' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
-_w626_esc_rules=$(jq -r --arg ids "$W626_ESCAPE_RULES" --argjson t "$_w626_t47" \
-    '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t))|.rule_id]|unique|join(" ")' \
+_w626_esc_rules=$(jq -r --arg ids "$W626_ESCAPE_RULES" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te))|.rule_id]|unique|join(" ")' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
-_w626_esc_inc_all=$(jq --argjson t "$_w626_t47" \
-    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t))]|length' \
+# ПОИМЁННО ПО comm — сторож результата подачи (№288, вторая половина).
+# Число алертов само по себе не говорит, СКОЛЬКО из них принадлежит подаче, а
+# сколько фону: на смоке из 28 (старая форма) подаче принадлежали 5
+# — `nsenter:2 unshare:2 cat:1`, — то есть 82% «доказательства детекта» были
+# чужими. Разделение обязано быть видно числом, а не выводиться из суммы:
+# ноль от подающих процессов при непустом окне означает «правила не увидели
+# САМУ подачу», и это НЕ вердикт об item 2, а неизмеримость (ветка ниже).
+_w626_esc_comms=$(jq -r --arg ids "$W626_ESCAPE_RULES" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te))]
+     | group_by(.comm)|map("\(.[0].comm):\(length)")|join(" ")' "$W626_ART/alerts-incidents.json" 2>/dev/null)
+_w626_esc_own=$(jq -r --arg subs "$W626_ESCAPE_SUBMITTERS" --arg ids "$W626_ESCAPE_RULES" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te))
+       | select((.comm) as $c | ($subs|split(" "))|index($c)) ]|length' "$W626_ART/alerts-incidents.json" 2>/dev/null)
+_w626_esc_inc_all=$(jq --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te))]|length' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
-_w626_esc_inc_all_roots=$(jq -r --argjson t "$_w626_t47" \
-    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t))|(.details.root_comm // .comm)]|unique|join(" ")' \
+_w626_esc_inc_all_roots=$(jq -r --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te))|(.details.root_comm // .comm)]|unique|join(" ")' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
-_w626_esc_inc=$(jq --arg subs "$W626_ESCAPE_SUBMITTERS" --argjson t "$_w626_t47" \
-    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t)
-        and (((.details.root_comm // .comm) as $c|($subs|split(" "))|index($c)) != null))]|length' \
+# КОРЕНЬ ИЛИ ЦЕПОЧКА (№288, третья половина). Постановка item 7 требовала
+# «инцидент С КОРНЕМ подающего процесса», и список корней (nsenter/unshare/cat)
+# был выведен ИЗ ЧТЕНИЯ КОДА ПОДАЧИ, а не из живого root_comm — открытый вопрос
+# 15(а) назвал это непроверенным числом. Смок ответил: IncidentTracker пишет в
+# root_comm КОРЕНЬ ДЕРЕВА (`bash` скрипта подачи, `sshd`, `cron`), а подающий
+# процесс стоит ЛИСТОМ цепочки. Буквальный список корней поэтому не совпадает
+# никогда, и критерий не мог быть взят ПО ПОСТРОЕНИЮ. Признание подачи своей
+# идёт теперь по ЦЕПОЧКЕ (подающий comm где угодно в process_chain) — это
+# сохраняет смысл сужения №278 (инцидент обязан быть НАШЕЙ подачей, а не
+# посторонним) и перестаёт требовать того, чего слой не пишет.
+#
+# ЧЕСТНО ПРО ГРАНИЦУ ЭТОЙ ПРАВКИ: на смоке она вердикт НЕ ПЕРЕВЕРНУЛА — по
+# цепочке в окне подачи тоже 0. Единственный инцидент окна — `bash[…,curl]`
+# (бикон соседнего контроля), а во всём прогоне подающий comm несёт лишь
+# `cron[cron,cron,sh,cat]` от половины (4) критерия 6.2.4.5. То есть подача
+# побега подняла 5 алертов и НЕ ПОРОДИЛА инцидента вовсе. Правка убирает
+# ложное основание вердикта (чужие алерты и несуществующий корень), а сам
+# вердикт оставляет ПРОВАЛОМ — и это теперь честный провал по существу, а не
+# артефакт разметки окна. Разбор причины (порог score на трёх
+# короткоживущих процессах против промоушена) — за прогоном, не здесь.
+_w626_esc_inc=$(jq --arg subs "$W626_ESCAPE_SUBMITTERS" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te)
+        and ((([(.details.root_comm // .comm)] + (.details.process_chain // [])) | any(. as $c | ($subs|split(" "))|index($c) != null))))]|length' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
-_w626_esc_inc_roots=$(jq -r --arg subs "$W626_ESCAPE_SUBMITTERS" --argjson t "$_w626_t47" \
-    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t)
-        and (((.details.root_comm // .comm) as $c|($subs|split(" "))|index($c)) != null))|(.details.root_comm // .comm)]|unique|join(" ")' \
+_w626_esc_inc_roots=$(jq -r --arg subs "$W626_ESCAPE_SUBMITTERS" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
+    '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te)
+        and ((([(.details.root_comm // .comm)] + (.details.process_chain // [])) | any(. as $c | ($subs|split(" "))|index($c) != null))))
+      | "\((.details.root_comm // .comm))[\(.details.process_chain // [] | join("→"))]"]|unique|join(" ")' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
-echo "  подач состоялось: ${_w626_esc_done:-0}; алертов правил побега после подачи: ${_w626_esc_hits:-0} (${_w626_esc_rules:-нет})"
-echo "  incident_confirmed_attack после подачи, ВСЕ корни (справочно): ${_w626_esc_inc_all:-0} (${_w626_esc_inc_all_roots:-нет})"
-echo "  incident_confirmed_attack после подачи, корень — ПОДАЮЩИЙ процесс (${W626_ESCAPE_SUBMITTERS}), вердиктная величина: ${_w626_esc_inc:-0} (${_w626_esc_inc_roots:-нет})"
+echo "  окно подачи побега [$(_w626_utc "$_w626_t47"), $(_w626_utc "$_w626_t47_end")] — верхняя граница есть начало подачи 6.2.6.16 (№288: без неё в счёт шёл шум старта пода)"
+echo "  подач состоялось: ${_w626_esc_done:-0}; алертов правил побега В ОКНЕ подачи: ${_w626_esc_hits:-0} (${_w626_esc_rules:-нет})"
+echo "  из них от САМИХ подающих процессов (${W626_ESCAPE_SUBMITTERS}): ${_w626_esc_own:-0}; поимённо по comm: ${_w626_esc_comms:-нет}"
+echo "  incident_confirmed_attack в окне подачи, ВСЕ корни (справочно): ${_w626_esc_inc_all:-0} (${_w626_esc_inc_all_roots:-нет})"
+echo "  incident_confirmed_attack в окне подачи, подающий процесс В ЦЕПОЧКЕ (№288 — root_comm пишет КОРЕНЬ дерева, подающий стоит листом), вердиктная величина: ${_w626_esc_inc:-0} (${_w626_esc_inc_roots:-нет})"
 if [ "${_w626_esc_done:-0}" -lt 1 ]; then
     die "6.2.4.7 НЕИЗМЕРИМ: ни одна подача побега не состоялась (нет nsenter/unshare, /proc/modules не прочитан) — ноль алертов приборный, а не вердикт"
+elif [ "${_w626_esc_own:-0}" -lt 1 ]; then
+    # НОВАЯ ВЕТКА (№288). Отделяет «подача состоялась, но правила её НЕ УВИДЕЛИ»
+    # от «правила видят чужое». На смоке ${_w626_esc_hits} было 28 при нуле от
+    # подающих процессов: все 28 принадлежали старту пода. Прежняя цепочка
+    # ветвей объявила бы это ПРОВАЛОМ item 2 — то есть обвинила бы правку в
+    # вырезанном детекте по чужим алертам.
+    die "6.2.4.7 НЕИЗМЕРИМ (№288): подача состоялась (${_w626_esc_done} из трёх), в окне ${_w626_esc_hits} алертов класса побега, но НИ ОДИН не принадлежит подающим процессам (${W626_ESCAPE_SUBMITTERS}) — поимённо по comm: ${_w626_esc_comms:-нет}. Правила класса побега не увидели САМУ подачу (nsenter/unshare без своего execve-хука либо чтение вне покрытия), и всё, что в окне есть, — фон. Вердикта об item 2 из этого не следует НИКАКОГО: инцидентному слою нечего было промотировать из НАШЕЙ подачи"
 elif [ "${_w626_esc_hits:-0}" -lt 1 ]; then
     die "6.2.4.7 НЕИЗМЕРИМ: подача побега состоялась (${_w626_esc_done} из трёх), а ни одно правило класса побега не поднялось. Это неизмеримость ПОДАЧИ (нет привязки хука setns/файлового чтения), а не вердикт item 2: инцидентному слою нечего было промотировать"
 elif [ "${_w626_esc_inc:-0}" -lt 1 ]; then
-    die "6.2.4.7 ПРОВАЛЕН: правила побега поднялись (${_w626_esc_hits} алертов: ${_w626_esc_rules}), но НИ ОДИН инцидент с корнем подающего процесса не промотирован в attack (посторонних корней за то же окно: ${_w626_esc_inc_all:-0}, ${_w626_esc_inc_all_roots:-нет} — справочно, в вердикт не идут) — правка item 2 (containerInitTrustedRoot в шлюзе Add) вырезала ДЕТЕКТ, а не ложь. Это ровно тот исход, ради которого критерий заведён отдельной меткой"
+    die "6.2.4.7 ПРОВАЛЕН: правила побега увидели САМУ подачу (${_w626_esc_own} алертов от ${W626_ESCAPE_SUBMITTERS} из ${_w626_esc_hits} в окне: ${_w626_esc_rules}), но НИ ОДИН инцидент с подающим процессом в цепочке не промотирован в attack (посторонних корней за то же окно: ${_w626_esc_inc_all:-0}, ${_w626_esc_inc_all_roots:-нет} — справочно, в вердикт не идут) — правка item 2 (containerInitTrustedRoot в шлюзе Add) вырезала ДЕТЕКТ, а не ложь. Это ровно тот исход, ради которого критерий заведён отдельной меткой"
 else
-    pass "6.2.4.7 ДОСТИГНУТО: подача побега подняла ${_w626_esc_hits} алертов (${_w626_esc_rules}) и дала ${_w626_esc_inc} incident_confirmed_attack с корнем подающего процесса (${_w626_esc_inc_roots}) — сужение шлюза промоушена детект не вырезало (item 7 №278: посторонних корней за то же окно ${_w626_esc_inc_all:-0}, в вердикт не включены)"
+    pass "6.2.4.7 ДОСТИГНУТО: подача побега поднята и УЗНАНА (${_w626_esc_own} алертов от самих подающих процессов из ${_w626_esc_hits} в окне: ${_w626_esc_rules}) и дала ${_w626_esc_inc} incident_confirmed_attack с подающим процессом в цепочке (${_w626_esc_inc_roots}) — сужение шлюза промоушена детект не вырезало (item 7 №278: посторонних корней за то же окно ${_w626_esc_inc_all:-0}, в вердикт не включены)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

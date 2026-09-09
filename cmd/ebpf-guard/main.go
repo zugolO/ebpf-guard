@@ -2173,6 +2173,20 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		// The filter runs before aggregation so a filtered alert cannot re-enter
 		// through a window summary, and admitted alerts keep flowing to
 		// forwardAlerts unchanged.
+		//
+		// Wave 6.2.6, item 1 (№281/№282): record the rule_id×comm volume axis
+		// for EVERY dispatched alert, ahead of the min_severity filter below, so
+		// both severity tiers are covered. alerts_total's namespace/pod/node
+		// labels and the alert store (blind to info, lagging, and indexed on a
+		// different window than the metric — №281) cannot name which comm is
+		// driving a rule's volume; this counter can. Off by default
+		// (exporter.volume_by_source) — a measurement instrument for narrowing
+		// the gate, not a production identity axis.
+		if cfg.Exporter.VolumeBySource {
+			for _, a := range dispatched {
+				exporter.RecordAlertVolumeBySource(a.RuleID, a.Comm)
+			}
+		}
 		admitted := exporter.FilterAlertsForIntake(dispatched, storeMinSeverity)
 		for _, a := range admitted {
 			podName, namespace, node := a.Enrichment.PodName, a.Enrichment.Namespace, a.Enrichment.NodeName

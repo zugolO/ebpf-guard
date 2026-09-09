@@ -68,6 +68,45 @@ func TestRecordAlert(t *testing.T) {
 	assert.Equal(t, 1.0, rule2Count)
 }
 
+// TestRecordAlertVolumeBySource covers wave 6.2.6 item 1's product half: the
+// rule_id×comm counter that names which comm drives a rule's volume when the
+// store is blind (info tier) or lagging (№281/№282).
+func TestRecordAlertVolumeBySource(t *testing.T) {
+	AlertVolumeBySource.Reset()
+
+	RecordAlertVolumeBySource("sigma_passwd_shadow_read_daemon", "cron")
+	RecordAlertVolumeBySource("sigma_passwd_shadow_read_daemon", "cron")
+	RecordAlertVolumeBySource("anomaly_detection", "xmrig")
+
+	assert.Equal(t, 2.0, testutil.ToFloat64(AlertVolumeBySource.WithLabelValues("sigma_passwd_shadow_read_daemon", "cron")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(AlertVolumeBySource.WithLabelValues("anomaly_detection", "xmrig")))
+}
+
+// TestRecordAlertVolumeBySource_OverflowIsCounted proves the cardinality
+// overflow is printed, not silent (same requirement as
+// drift_baseline_evictions_total in 6.2.5): once the limiter's cap is
+// reached, new comms collapse to "other" AND AlertVolumeBySourceOverflow
+// increments, so the breakdown's incompleteness is itself a metric.
+func TestRecordAlertVolumeBySource_OverflowIsCounted(t *testing.T) {
+	AlertVolumeBySource.Reset()
+	before := testutil.ToFloat64(AlertVolumeBySourceOverflow)
+
+	limiter := NewCardinalityLimiter(5)
+	restore := alertVolumeCardinalityLimiter
+	alertVolumeCardinalityLimiter = limiter
+	defer func() { alertVolumeCardinalityLimiter = restore }()
+
+	for i := 0; i < 10; i++ {
+		RecordAlertVolumeBySource("rule_x", fmt.Sprintf("comm-%02d", i))
+	}
+
+	after := testutil.ToFloat64(AlertVolumeBySourceOverflow)
+	assert.Greater(t, after, before, "overflow counter must move once the comm axis exceeds the cardinality cap")
+
+	otherCount := testutil.ToFloat64(AlertVolumeBySource.WithLabelValues("rule_x", "other"))
+	assert.Greater(t, otherCount, 0.0, "collapsed series must still be counted under comm=\"other\", not dropped")
+}
+
 func TestSetAnomalyScoreWithGuard(t *testing.T) {
 	ProfilerAnomalyScore.Reset()
 	// Reset global guard for clean test

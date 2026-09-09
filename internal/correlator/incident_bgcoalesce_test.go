@@ -71,7 +71,7 @@ func TestIncidentTracker_CronTick_CoalescesIntoOneIncident(t *testing.T) {
 	inc := incidents[0]
 	// Nothing is hidden (пункт 8): every alert still accrued to the incident.
 	assert.Equal(t, 11, inc.AlertCount, "all eleven alerts stay visible on the single incident")
-	assert.False(t, inc.HasUntrustedSignal,
+	assert.Empty(t, inc.UntrustedComms,
 		"cron's own job shell (comm=sh) must not be treated as a foreign process — 5.9.9.F.5d variant 1")
 	assert.NotEqual(t, types.VerdictAttack, inc.Verdict,
 		"pure cron background must not promote to attack")
@@ -128,7 +128,7 @@ func TestIncidentTracker_AttackInDaemon_DoesNotCoalesce(t *testing.T) {
 	first := tr.GetAll("", "", 0)
 	require.Len(t, first, 1, "both alerts share a PID and must be one incident")
 	require.Equal(t, "cron", first[0].RootComm, "incident is rooted at the trusted daemon")
-	require.True(t, first[0].HasUntrustedSignal, "xmrig must mark the incident untrusted")
+	require.Contains(t, first[0].UntrustedComms, "xmrig", "xmrig must mark the incident untrusted")
 
 	// A later alert past the plain 60s window must open a NEW incident: the
 	// untrusted signal disqualified the extended background window.
@@ -216,7 +216,7 @@ func TestIncidentTracker_AttackBehindShim_DoesNotCoalesce(t *testing.T) {
 	a1.ProcessTree = shimRoot
 	tr.Add(a1)
 
-	require.True(t, tr.GetAll("", "", 0)[0].HasUntrustedSignal,
+	require.Contains(t, tr.GetAll("", "", 0)[0].UntrustedComms, "xmrig",
 		"an untrusted comm behind the shim must mark the incident untrusted")
 
 	a2 := makeAlertWithComm("r2", 4242, "prod", types.SeverityCritical,

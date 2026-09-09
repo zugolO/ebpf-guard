@@ -374,6 +374,19 @@ type Rule struct {
 	// before the rule alerts. Nil (default) alerts on every match. See
 	// RuleThreshold.
 	Threshold *RuleThreshold `yaml:"threshold,omitempty"`
+	// Synthetic marks a rule that carries only Exceptions, for scoping alerts
+	// a detector synthesizes outside the YAML condition-match path (wave
+	// 6.2.6 item 4, №283: anomaly_detection is built by the profiler in
+	// engine.go, not matched by matchesTyped). A synthetic rule has no
+	// EventType/Condition/ConditionGroup requirement, is never added to
+	// byType, and is never evaluated by Evaluate/EvaluateInto — it is only
+	// reachable via RuleEngine.EvaluateNamedExceptions(ruleID, event), which
+	// a detector calls explicitly with the underlying event of its alert.
+	// Exception field names on a synthetic rule are restricted to
+	// identityFields (exe_path/parent_exe_path/container_id/namespace/pod) —
+	// the axes proven across waves 6.2.1…6.2.5 to be spoof-resistant and
+	// valid regardless of which event type ends up carrying the anomaly.
+	Synthetic bool `yaml:"synthetic,omitempty"`
 }
 
 // RuleSet contains all loaded rules.
@@ -420,6 +433,11 @@ type RuleEngine struct {
 	// hash/compare overhead of a map lookup on the hot path.
 	// Rebuilt on hot-reload via buildTypeIndex.
 	byType [byTypeSize][]Rule
+	// rulesByID indexes every loaded rule (including Synthetic ones, which
+	// byType excludes) by ID, for EvaluateNamedExceptions. Built once in
+	// buildTypeIndex and never mutated afterward — read without re.mu, same
+	// as byType (see the "No lock is acquired" note on EvaluateInto).
+	rulesByID map[string]*Rule
 	// compiled regex patterns for performance
 	regexCache map[string]*regexp.Regexp
 	// compiled CIDR ranges
@@ -638,17 +656,75 @@ func (re *RuleEngine) Sampler() *RuleSampler { return re.sampler }
 // NewRuleEngineWithCache). Not thread-safe on its own — must be called before
 // the engine is published to other goroutines.
 func (re *RuleEngine) buildTypeIndex() {
+	re.rulesByID = make(map[string]*Rule, len(re.rules))
 	for i := range re.rules {
 		r := &re.rules[i]
+		re.rulesByID[r.ID] = r
 		// Precompute whether this rule needs sampler access on every event.
 		// A rule with no configured rate (or rate ≥ 1.0) can skip the three
 		// RLock acquisitions in HasSampling+Mode+ShouldEvaluate when no adaptive
-		// override is active, reducing hot-path lock traffic to zero.
+		// override is active, reducing lock traffic for the overwhelmingly
+		// common case of fully-evaluated (rate=1.0) rules.
 		r.skipSampler = r.SampleRate <= 0 || r.SampleRate >= 1.0
+		// Synthetic rules (Exceptions-only, scoped via EvaluateNamedExceptions)
+		// are deliberately excluded from byType: they have no EventType/
+		// Condition of their own to dispatch on, and must never be matched by
+		// the normal Evaluate/EvaluateInto path.
+		if r.Synthetic {
+			continue
+		}
 		if t := int(r.EventType); t > 0 && t < byTypeSize {
 			re.byType[t] = append(re.byType[t], *r)
 		}
 	}
+}
+
+// EvaluateNamedExceptions checks event e against the named exceptions of the
+// rule identified by ruleID (looked up via rulesByID, so this works for both
+// Synthetic and ordinary rules) and reports whether any exception matched.
+// A match is counted in ebpf_guard_rule_exceptions_total{rule_id,
+// exception_name} exactly as matchesTyped counts a YAML rule's own
+// exceptions — from the metric's point of view there is no difference
+// between the two paths.
+//
+// This is the hook a detector that synthesizes alerts outside the YAML
+// condition-match path (wave 6.2.6 item 4, №283: anomaly_detection) calls
+// with the underlying event that produced its alert, so the alert can still
+// be scoped by the same named-exception mechanism as every YAML rule. A
+// ruleID with no matching rule (not loaded, e.g. rules/anomaly.yaml missing
+// from the configured rules directory) is not an error — it returns false,
+// i.e. nothing is suppressed, so a missing exceptions file degrades to "no
+// exceptions" rather than silently dropping alerts.
+//
+// No lock is acquired: rulesByID, like byType, is built once at construction
+// and never mutated — hot-reload publishes a whole new RuleEngine instead
+// (see the "No lock is acquired" note on EvaluateInto).
+func (re *RuleEngine) EvaluateNamedExceptions(ruleID string, e types.Event) bool {
+	rule := re.rulesByID[ruleID]
+	if rule == nil || len(rule.Exceptions) == 0 {
+		return false
+	}
+
+	var dnsAnalysis *DomainAnalysis
+	if e.Type == types.EventDNS && e.DNS != nil {
+		a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+		dnsAnalysis = &a
+	}
+
+	for i := range rule.Exceptions {
+		exc := &rule.Exceptions[i]
+		var excMatched bool
+		if exc.ConditionGroup != nil {
+			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis)
+		} else {
+			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis)
+		}
+		if excMatched {
+			ruleExceptionsTotal.WithLabelValues(rule.ID, exc.Name).Inc()
+			return true
+		}
+	}
+	return false
 }
 
 // GetRules returns a copy of the loaded rules.
@@ -1435,7 +1511,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		// (evaluateConditionGroup), так что readlink случается только для
 		// событий, у которых имя демона уже совпало, — единицы в секунду, а
 		// не поток. Порядок в rules/*.yaml — часть контракта, а не стиль.
-		return resolveExePath(e.PID)
+		return resolveExePath(e.PID, exePathFieldSelf)
 	case "parent_exe_path":
 		// Волна 6.2.5, №261/исход (б). Тот же резолвер, тот же readlink,
 		// применённый к PPID вместо PID: у форкнутого потомка демона (comm
@@ -1450,7 +1526,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		// срабатывает. Условие на parent_exe_path в exceptions обязано, как
 		// и exe_path, стоять ПОСЛЕДНИМ в "and" — тот же контракт короткого
 		// замыкания, тот же readlink без кэша.
-		return resolveExePath(e.PPID)
+		return resolveExePath(e.PPID, exePathFieldParent)
 	}
 
 	switch e.Type {

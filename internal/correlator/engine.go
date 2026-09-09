@@ -2053,6 +2053,20 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 				}
 			}
 
+			// Wave 6.2.6 item 4 (№283): anomaly_detection is synthesized by the
+			// profiler outside the YAML condition-match path (matchesTyped), so
+			// it never ran through a rule's exception check. It is scoped the
+			// same way here: a named rule "anomaly_detection" (rules/anomaly.yaml)
+			// carries only exceptions, evaluated against the same underlying
+			// event that produced the anomaly score. Suppression is counted in
+			// ebpf_guard_rule_exceptions_total exactly like a YAML rule's — the
+			// alert is neither generated nor dropped, it never existed. The axis
+			// stays image (exe_path/lineage), not comm, so spoofing a trusted
+			// daemon's name still raises the anomaly (6.2.6.20 positive half).
+			if isAnomaly && rulesSnapshot != nil && rulesSnapshot.EvaluateNamedExceptions("anomaly_detection", e) {
+				isAnomaly = false
+			}
+
 			if isAnomaly {
 				details := getDetailsMap()
 				if result.Namespace != "" {

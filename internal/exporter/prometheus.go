@@ -51,6 +51,10 @@ func init() {
 var (
 	eventsCardinalityLimiter = NewCardinalityLimiter(5000)  // 5K pod × 50 event types = conservative
 	alertsCardinalityLimiter = NewCardinalityLimiter(10000) // 1K rule IDs × 10 namespaces
+	// alertVolumeCardinalityLimiter guards ebpf_guard_alert_volume_by_source_total,
+	// whose comm label is attacker-controlled and unbounded (wave 6.2.6, item 1,
+	// №281/№282).
+	alertVolumeCardinalityLimiter = NewCardinalityLimiter(10000)
 )
 
 var (
@@ -171,6 +175,35 @@ var (
 			Help: "Alerts excluded from ebpf_guard_alerts_total and the alert store by store.min_severity. The rule still fired; this is the suppressed volume, kept visible so filtering cannot be mistaken for lost detection.",
 		},
 		[]string{"rule_id", "severity"},
+	)
+
+	// AlertVolumeBySource counts every alert by rule_id and comm, incremented at
+	// the same point as AlertsTotal/AlertsFiltered — before store.min_severity
+	// filtering and for both severity tiers — so the comm axis is available for
+	// narrowing volume that alerts_total's namespace/pod/node labels cannot name
+	// (wave 6.2.6, item 1, №281/№282: the store carries comm but is blind to
+	// info-tier alerts, lags the metric, and indexes a different window).
+	// Cardinality is bounded by alertVolumeCardinalityLimiter; overflow collapses
+	// comm to "other" and is counted in AlertVolumeBySourceOverflow rather than
+	// happening silently.
+	AlertVolumeBySource = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_alert_volume_by_source_total",
+			Help: "Total alerts by rule_id and comm, recorded before store.min_severity filtering and for both severity tiers. comm collapses to \"other\" past the cardinality limit; see ebpf_guard_alert_volume_by_source_overflow_total.",
+		},
+		[]string{"rule_id", "comm"},
+	)
+
+	// AlertVolumeBySourceOverflow counts series collapsed into comm="other" by
+	// the cardinality limiter on AlertVolumeBySource. Nonzero means the
+	// rule_id×comm breakdown is incomplete for at least one series in the
+	// window — this must be printed, not silent (same requirement as
+	// drift_baseline_evictions_total in 6.2.5).
+	AlertVolumeBySourceOverflow = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_alert_volume_by_source_overflow_total",
+			Help: "Number of alert-volume-by-source series collapsed into comm=\"other\" because the cardinality limiter reached its cap.",
+		},
 	)
 
 	// ProfilerAnomalyScore tracks anomaly scores per process.
@@ -580,6 +613,21 @@ func RecordAlert(ruleID, severity, namespace, podName, node string) {
 // bounded by the ruleset, so unlike RecordAlert this needs no cardinality guard.
 func RecordAlertFiltered(ruleID, severity string) {
 	AlertsFiltered.WithLabelValues(ruleID, severity).Inc()
+}
+
+// RecordAlertVolumeBySource increments ebpf_guard_alert_volume_by_source_total
+// for rule_id and comm. comm is attacker-controlled and sanitized the same way
+// as ProfilerAnomalyScore's comm label (arbitrary bytes from the kernel would
+// otherwise panic the Prometheus client on invalid UTF-8). Called for every
+// dispatched alert, before FilterAlertsForIntake, so both severity tiers are
+// covered (wave 6.2.6, item 1).
+func RecordAlertVolumeBySource(ruleID, comm string) {
+	comm = SanitizeLabelValue(comm)
+	labels := alertVolumeCardinalityLimiter.Normalize([]string{ruleID, comm}, 1)
+	if labels[1] == "other" && comm != "other" {
+		AlertVolumeBySourceOverflow.Inc()
+	}
+	AlertVolumeBySource.WithLabelValues(labels[0], labels[1]).Inc()
 }
 
 // FilterAlertsForIntake splits alerts into those admitted to

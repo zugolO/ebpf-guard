@@ -524,7 +524,7 @@ func (t *IncidentTracker) isImageVerifiedComm(comm string, pid uint32) bool {
 	if !guarded {
 		return true
 	}
-	exe := resolveExePath(pid)
+	exe := resolveExePath(pid, exePathFieldSelf)
 	if exe == "" {
 		return true
 	}
@@ -742,6 +742,30 @@ func (t *IncidentTracker) containerInitTrustedRoot(inc *types.Incident) bool {
 	return t.isTrustedComm(inc.ProcessChain[i])
 }
 
+// hasQualifyingUntrustedComm reports whether inc currently carries an
+// untrusted-comm signal strong enough to matter for scoring/promotion. It
+// re-derives the containerInitTrustedRoot gate against inc's CURRENT process
+// chain every time it is called, rather than trusting a decision latched at
+// the moment any one comm in UntrustedComms first arrived — see the №276
+// comment on UntrustedComms and on the Add() call site that populates it.
+//
+// This means an incident created with a truncated chain (root ==
+// containerSupervisorComms member, first alert's comm not yet resolved
+// through to a trusted actor) that later grows a chain resolving to one no
+// longer counts ANY of its recorded untrusted comms toward promotion, even
+// the one that arrived before the chain grew: containerInitTrustedRoot is a
+// property of the incident's tree shape, not of which alert happened to
+// arrive first, so once the tree resolves to a trusted actor the comms
+// collected along the way are namespace-init noise, not evidence.
+//
+// Caller must hold at least the read lock.
+func (t *IncidentTracker) hasQualifyingUntrustedComm(inc *types.Incident) bool {
+	if len(inc.UntrustedComms) == 0 {
+		return false
+	}
+	return !t.containerInitTrustedRoot(inc)
+}
+
 // isPeriodicBackground reports whether inc is recurring trusted-daemon
 // background rather than a developing incident: rooted at a trusted comm, with
 // no untrusted-comm and no network signal anywhere in it, and never having
@@ -771,7 +795,7 @@ func (t *IncidentTracker) isPeriodicBackground(inc *types.Incident) bool {
 	if inc == nil {
 		return false
 	}
-	if inc.HasUntrustedSignal || inc.HasNetworkSignal {
+	if t.hasQualifyingUntrustedComm(inc) || inc.HasNetworkSignal {
 		return false
 	}
 	if !t.trustedIncidentRoot(inc) {
@@ -925,20 +949,29 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 	// №262 (archive collect-6.2.4): this guard used to fire for ANY comm not
 	// individually recognised, including a bare namespace-setup helper (cat,
 	// mount, loopback) spawned while a shim/runc chain does routine container
-	// init — the guard is scoped to the ALERT's own comm and never asked
+	// init — the guard was scoped to the ALERT's own comm and never asked
 	// whether the incident it is being folded into already resolved to a
-	// trusted actor through containerInitTrustedRoot. Two of the six
-	// incidents in that archive (containerd-shim -> runc -> runc:[1:CHILD],
-	// leaf "cat"; k3s-server chain under containerd/flannel, leaves "mount"/
-	// "loopback" — see plan.md 6.2.5 item 2) were promoted to "attack" this
-	// way. containerInitTrustedRoot, not the broader trustedIncidentRoot, is
-	// the check here on purpose: trustedIncidentRoot also returns true for
-	// any incident rooted directly at cron/sshd by name, and folding that in
-	// would blind xmrig-spawned-by-cron detection (see the comment on
-	// containerInitTrustedRoot).
+	// trusted actor through containerInitTrustedRoot.
+	//
+	// №276 (archive collect-6.2.5): gating on containerInitTrustedRoot(inc)
+	// HERE, at the moment this one alert arrives, does not fix that — it only
+	// moves the race. ProcessChain is still being assembled: the incident's
+	// creating alert can carry a truncated chain (['k3s-server','mount']) that
+	// containerInitTrustedRoot rejects, and the chain only grows to the form
+	// that resolves to a trusted actor (['k3s-server','containerd','flannel',
+	// 'bridge']) on a LATER alert, 0,7s afterwards. A bool latched against
+	// today's chain can never be revisited once tomorrow's chain would have
+	// cleared it. So this comm is recorded unconditionally — the
+	// containerInitTrustedRoot gate moves to scoring time (recalculateScore /
+	// isPeriodicBackground, via hasQualifyingUntrustedComm), where it is
+	// re-evaluated against whatever chain the incident holds AT THAT MOMENT,
+	// not the chain that existed when this particular comm first showed up.
 	if !t.isImageVerifiedComm(alert.Comm, alert.PID) && !t.isTrustedRootShell(alert.Comm, inc.RootComm) &&
-		!isSupervisorHop(alert.Comm) && !t.containerInitTrustedRoot(inc) {
-		inc.HasUntrustedSignal = true
+		!isSupervisorHop(alert.Comm) {
+		if inc.UntrustedComms == nil {
+			inc.UntrustedComms = make(map[string]struct{}, 2)
+		}
+		inc.UntrustedComms[alert.Comm] = struct{}{}
 	}
 	if isNetworkSignal(alert.Event.Type) {
 		inc.HasNetworkSignal = true
@@ -1106,7 +1139,15 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 	// network corroboration — that combination is background noise dressed up
 	// as five rules, not evidence of compromise. Score-qualifying incidents
 	// that fail this check are held at "suspicious" instead of promoted.
-	hasQualifyingSignal := inc.HasUntrustedSignal || inc.HasNetworkSignal
+	//
+	// №276: the untrusted-comm half is evaluated fresh, against inc's chain as
+	// it stands right now, at every scoring pass — see
+	// hasQualifyingUntrustedComm. recalculateScore already runs after every
+	// Add(), so a chain that grows on the very next alert (the 0,7s
+	// k3s-server -> containerd/flannel/bridge case) is judged on its own
+	// current shape here, not on whatever the chain looked like when the
+	// first untrusted comm arrived.
+	hasQualifyingSignal := t.hasQualifyingUntrustedComm(inc) || inc.HasNetworkSignal
 
 	// 5.7e: VerdictNone, not "", when score never qualifies — an all-info
 	// incident (5.5a) is expected to land here, not to look like scoring never

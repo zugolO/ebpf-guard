@@ -69,9 +69,17 @@ type Incident struct {
 	// used for the time-density score so an info-only burst cannot inflate
 	// density either — see ScoringRuleIDs.
 	ScoringAlertCount int `json:"-"`
-	// HasUntrustedSignal is true once an alert from a comm outside the trusted
-	// allowlist (see defaultTrustedComms) has contributed to this incident.
-	HasUntrustedSignal bool `json:"-"`
+	// UntrustedComms is the set of distinct comms that have contributed an
+	// alert from outside the trusted allowlist (see defaultTrustedComms) to
+	// this incident. A set rather than a latched bool (wave 6.2.6, №276): the
+	// container-init trust gate (containerInitTrustedRoot) depends on the
+	// incident's process chain, which grows across alerts arriving
+	// milliseconds apart — a bool decided once, at the comm's own arrival,
+	// cannot be revisited once the chain later resolves to a trusted actor.
+	// Whether a comm here still qualifies as an untrusted signal is
+	// recomputed against the CURRENT chain at every scoring pass — see
+	// IncidentTracker.hasQualifyingUntrustedComm.
+	UntrustedComms map[string]struct{} `json:"-"`
 	// HasNetworkSignal is true once an alert whose triggering event is a
 	// network/dns/tls event has contributed to this incident.
 	HasNetworkSignal bool `json:"-"`

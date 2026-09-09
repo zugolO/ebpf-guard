@@ -328,7 +328,7 @@ func validateRule(rule *Rule) error {
 	if rule.Name == "" {
 		return fmt.Errorf("rule name is required")
 	}
-	if rule.EventType == 0 {
+	if rule.EventType == 0 && !rule.Synthetic {
 		return fmt.Errorf("event type is required")
 	}
 	if rule.Action == "" {
@@ -431,11 +431,43 @@ func validateRule(rule *Rule) error {
 		}
 	}
 
-	// Validate conditions (including every exception's condition/condition_group).
-	conditions := getAllConditions(rule)
-	for _, cond := range conditions {
-		if err := validateCondition(&cond, rule.EventType); err != nil {
-			return fmt.Errorf("condition validation failed: %w", err)
+	// A Synthetic rule (wave 6.2.6 item 4, №283) has no EventType of its own —
+	// it is never dispatched via Evaluate/EvaluateInto, only reached through
+	// EvaluateNamedExceptions with whatever event type the calling detector
+	// happens to hand it. Its top-level Condition/ConditionGroup is therefore
+	// not just unused but unvalidatable (there is no single EventType to check
+	// field names against), so it is required to be empty, and its exception
+	// conditions are restricted to identityFields — the axes proven spoof-
+	// resistant and valid on every event type across waves 6.2.1…6.2.5 — via
+	// validateIdentityCondition instead of the per-type validateCondition.
+	if rule.Synthetic {
+		if rule.Condition.Field != "" || rule.ConditionGroup != nil {
+			return fmt.Errorf("rule %s: synthetic rule must not have condition/condition_group (exceptions only)", rule.ID)
+		}
+		if len(rule.Exceptions) == 0 {
+			return fmt.Errorf("rule %s: synthetic rule has no exceptions (would suppress nothing)", rule.ID)
+		}
+		for i := range rule.Exceptions {
+			exc := &rule.Exceptions[i]
+			var conds []RuleCondition
+			if exc.ConditionGroup != nil {
+				conds = getConditionsFromGroup(exc.ConditionGroup)
+			} else {
+				conds = []RuleCondition{exc.Condition}
+			}
+			for _, cond := range conds {
+				if err := validateIdentityCondition(&cond); err != nil {
+					return fmt.Errorf("condition validation failed: %w", err)
+				}
+			}
+		}
+	} else {
+		// Validate conditions (including every exception's condition/condition_group).
+		conditions := getAllConditions(rule)
+		for _, cond := range conditions {
+			if err := validateCondition(&cond, rule.EventType); err != nil {
+				return fmt.Errorf("condition validation failed: %w", err)
+			}
 		}
 	}
 
@@ -451,6 +483,27 @@ func validateRule(rule *Rule) error {
 	}
 
 	return nil
+}
+
+// validateIdentityCondition validates a condition on a Synthetic rule: field
+// name must be one of identityFields (valid on every event type by
+// construction, see the init() field-set merge below), everything else is the
+// same operator-specific validation as validateCondition.
+func validateIdentityCondition(cond *RuleCondition) error {
+	if cond.Field == "" {
+		return fmt.Errorf("field name is required")
+	}
+	isIdentityField := false
+	for _, f := range identityFields {
+		if cond.Field == f {
+			isIdentityField = true
+			break
+		}
+	}
+	if !isIdentityField {
+		return fmt.Errorf("invalid field name %q for synthetic rule, valid fields: %v", cond.Field, identityFields)
+	}
+	return validateCondition(cond, types.EventSyscall)
 }
 
 // normaliseSyscallNrValues rewrites syscall names in `nr` conditions of an

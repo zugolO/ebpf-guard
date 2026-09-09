@@ -1179,6 +1179,14 @@ type LineageTrackerConfig struct {
 type ExporterConfig struct {
 	// Enabled enables the metrics exporter
 	Enabled bool `mapstructure:"enabled"`
+	// VolumeBySource enables ebpf_guard_alert_volume_by_source_total, a
+	// rule_id×comm breakdown of alert volume recorded before store.min_severity
+	// filtering (wave 6.2.6, item 1, №281/№282). comm is a measurement-tuning
+	// axis, not an identity boundary (see [[exclusions-key-on-cgroup-not-comm]]);
+	// it is off by default so a measurement instrument doesn't ride into
+	// production config unasked, and is meant to be turned on for the duration
+	// of a wave's stand run.
+	VolumeBySource bool `mapstructure:"volume_by_source"`
 }
 
 // AlertingConfig holds Alertmanager integration settings.
@@ -2114,6 +2122,7 @@ func setDefaults(v *viper.Viper) {
 
 	// Exporter defaults
 	v.SetDefault("exporter.enabled", true)
+	v.SetDefault("exporter.volume_by_source", false)
 
 	// Alerting defaults
 	v.SetDefault("alerting.enabled", false)

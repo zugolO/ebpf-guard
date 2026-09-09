@@ -63,19 +63,33 @@ import (
 var exePathLookups = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "ebpf_guard_exe_path_lookups_total",
-		Help: "proc.exe_path resolutions attempted by rule conditions, by result (resolved, unresolved)",
+		Help: "proc.exe_path resolutions attempted by rule conditions, by result (resolved, unresolved) and field (exe_path, parent_exe_path)",
 	},
-	[]string{"result"},
+	[]string{"result", "field"},
+)
+
+// exePathLookupFields перечисляет обе оси разрешения образа — волна 6.2.6,
+// №277: до этой правки `exe_path` (само событие, execve только что случился)
+// и `parent_exe_path` (форкнутый потомок демона без своего execve) шли через
+// один и тот же счётчик без лейбла поля, и «unresolved=375» на архиве 6.2.5
+// было смесью двух разных гонок с разными причинами и разными починками —
+// см. exepath.go выше про readlink-гонку execve vs долгоживущего родителя.
+const (
+	exePathFieldSelf   = "exe_path"
+	exePathFieldParent = "parent_exe_path"
 )
 
 func init() {
-	// Материализуем оба исхода с нуля: прогон, где ни одно исключение не
-	// спрашивало exe_path, должен отличаться в /metrics от бинаря, который
-	// счётчика не знает вовсе. Иначе "unresolved = 0" читается как «ключ
-	// разрешается всегда», хотя может значить «инструмента нет» — ровно та
-	// двусмысленность, которую 6.0j уже закрывал для proc.args.
-	exePathLookups.WithLabelValues("resolved")
-	exePathLookups.WithLabelValues("unresolved")
+	// Материализуем все четыре исхода с нуля: прогон, где ни одно исключение
+	// не спрашивало exe_path/parent_exe_path, должен отличаться в /metrics от
+	// бинаря, который счётчика не знает вовсе. Иначе "unresolved = 0"
+	// читается как «ключ разрешается всегда», хотя может значить «инструмента
+	// нет» — ровно та двусмысленность, которую 6.0j уже закрывал для
+	// proc.args.
+	for _, field := range []string{exePathFieldSelf, exePathFieldParent} {
+		exePathLookups.WithLabelValues("resolved", field)
+		exePathLookups.WithLabelValues("unresolved", field)
+	}
 }
 
 // ExePathResolver возвращает путь к образу процесса pid, или "" если образ
@@ -129,19 +143,22 @@ func SetExePathResolver(r ExePathResolver) {
 	exeResolver.Store(exeResolverHolder{r: r})
 }
 
-// resolveExePath возвращает значение поля proc.exe_path для события.
-func resolveExePath(pid uint32) string {
+// resolveExePath возвращает значение поля proc.exe_path/proc.parent_exe_path
+// для события. field — одна из exePathFieldSelf/exePathFieldParent, она идёт
+// только в лейбл метрики и не влияет на разрешение: вызывающая сторона уже
+// выбрала PID или PPID.
+func resolveExePath(pid uint32, field string) string {
 	h, _ := exeResolver.Load().(exeResolverHolder)
 	v := h.r
 	if v == nil {
-		exePathLookups.WithLabelValues("unresolved").Inc()
+		exePathLookups.WithLabelValues("unresolved", field).Inc()
 		return ""
 	}
 	p := v.ResolveExePath(pid)
 	if p == "" {
-		exePathLookups.WithLabelValues("unresolved").Inc()
+		exePathLookups.WithLabelValues("unresolved", field).Inc()
 		return ""
 	}
-	exePathLookups.WithLabelValues("resolved").Inc()
+	exePathLookups.WithLabelValues("resolved", field).Inc()
 	return p
 }

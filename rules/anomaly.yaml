@@ -1,0 +1,66 @@
+# Wave 6.2.6, item 4 (№283) — anomaly_detection is not a YAML condition rule:
+# it is synthesized by the profiler (internal/correlator/engine.go, the
+# EWMA/behavioral-anomaly branch of ProcessEvent) outside the matchesTyped
+# condition-match path, so it never went through a rule's own exception
+# check. Waves 6.2.1…6.2.5 called this the "floor" of the gate — a detector
+# no antispoof exclusion in the ruleset touches — and by 6.2.5 it carried
+# half of the gate's remaining budget (8 of 16 alerts/window).
+#
+# This file gives it exactly one rule, id "anomaly_detection", flagged
+# synthetic: true. A synthetic rule has no event_type/condition of its own —
+# it is never matched by Evaluate/EvaluateInto — and exists only to carry
+# Exceptions, reached by the profiler via
+# RuleEngine.EvaluateNamedExceptions("anomaly_detection", event) with the
+# same underlying event that produced the anomaly score. A suppressed
+# anomaly is counted in ebpf_guard_rule_exceptions_total{rule_id=
+# "anomaly_detection", exception_name=...} exactly like a YAML rule's own
+# exception — the volume moves there, it does not disappear (6.2.6.20).
+#
+# Deliberately keyed on exe_path/parent_exe_path alone, NOT comm: this is
+# the positive half of 6.2.6.20 — a process that spoofs a trusted daemon's
+# name (comm) but is not that daemon's binary must still raise the anomaly.
+# Same two axes, same binary/parent-image lists, as the verified-daemon-
+# image / verified-daemon-lineage exceptions already proven across waves
+# 6.2.1…6.2.5 in rules/sigma-linux.yaml and rules/credential-access.yaml —
+# see resolveExePath / getFieldValue("exe_path"|"parent_exe_path") in
+# internal/correlator/rules.go for the antispoof argument (PID's own exe_path
+# is kernel-assigned at execve; PPID's is not process-chosen either).
+
+rules:
+  - id: anomaly_detection
+    name: "Behavioral Anomaly Detected"
+    synthetic: true
+    severity: warning
+    action: alert
+    exceptions:
+      # Long-lived, previously-verified daemon binaries: the profiler's own
+      # baseline should already suppress most of their steady-state
+      # behaviour, but a workload that just left its learning window, or an
+      # EWMA baseline reset by a restart, can still flag a known-clean
+      # daemon on ordinary behaviour that simply looks new to it.
+      - name: verified-daemon-image
+        condition:
+          field: proc.exe_path
+          op: in
+          values:
+            - "/usr/sbin/sshd"
+            - "/usr/sbin/cron"
+            - "/usr/sbin/crond"
+            - "/usr/bin/crond"
+            - "/usr/sbin/rsyslogd"
+            - "/usr/lib/systemd/systemd-journald"
+            - "/lib/systemd/systemd-journald"
+      # Short-lived forked children of a verified daemon (wave 6.2.5, №261
+      # outcome (б)): the child's own exe_path resolution loses the readlink
+      # race before the anomaly is scored (it can exit in single-digit
+      # milliseconds), but its parent — the long-lived daemon — does not.
+      # PPID is kernel-assigned at fork/clone, not process-chosen, so this
+      # stays antispoof for the same reason proc.exe_path does.
+      - name: verified-daemon-lineage
+        condition:
+          field: proc.parent_exe_path
+          op: in
+          values:
+            - "/usr/sbin/cron"
+            - "/usr/sbin/crond"
+            - "/usr/bin/crond"

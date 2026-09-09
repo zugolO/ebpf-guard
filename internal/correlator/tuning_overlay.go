@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/zugolO/ebpf-guard/pkg/types"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,14 +89,24 @@ func ApplyTuningOverlay(rules []Rule, overlay *TuningOverlay) (unknownRuleIDs []
 			continue
 		}
 		rule := &rules[idx]
+		// A Synthetic rule (wave 6.2.6 item 4) has no EventType of its own —
+		// validateCondition would reject every field with "unknown event
+		// type: 0". Its exceptions are restricted to identityFields instead,
+		// same as at load time (see validateIdentityCondition).
+		validate := validateCondition
+		if rule.Synthetic {
+			validate = func(cond *RuleCondition, _ types.EventType) error {
+				return validateIdentityCondition(cond)
+			}
+		}
 		for _, exc := range o.Exceptions {
 			if exc.ConditionGroup != nil {
 				for _, cond := range getConditionsFromGroup(exc.ConditionGroup) {
-					if verr := validateCondition(&cond, rule.EventType); verr != nil {
+					if verr := validate(&cond, rule.EventType); verr != nil {
 						return nil, fmt.Errorf("tuning overlay: rule %q exception %q: %w", o.RuleID, exc.Name, verr)
 					}
 				}
-			} else if verr := validateCondition(&exc.Condition, rule.EventType); verr != nil {
+			} else if verr := validate(&exc.Condition, rule.EventType); verr != nil {
 				return nil, fmt.Errorf("tuning overlay: rule %q exception %q: %w", o.RuleID, exc.Name, verr)
 			}
 		}

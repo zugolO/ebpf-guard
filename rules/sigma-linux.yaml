@@ -529,8 +529,9 @@ rules:
                 - "/usr/sbin/rsyslogd"
                 - "/usr/lib/systemd/systemd-journald"
                 - "/lib/systemd/systemd-journald"
-      # Волна 6.2.5, №261/исход (б) — см. sigma_passwd_shadow_read_daemon
-      # выше для полного обоснования оси. Ось только на cron: он один среди
+      # Волна 6.2.5, №261/исход (б) + волна 6.2.6, item 5 (№285: ось
+      # переведена на ancestor_exe_path — многопоколенный форк cron) — см.
+      # sigma_passwd_shadow_read_daemon выше для полного обоснования оси. Ось только на cron: он один среди
       # перечисленных демонов минутно форкается на короткоживущий процесс.
       - name: verified-daemon-lineage
         condition_group:
@@ -539,7 +540,7 @@ rules:
             - field: proc.comm
               op: eq
               values: [cron]
-            - field: proc.parent_exe_path
+            - field: proc.ancestor_exe_path
               op: in
               values:
                 - "/usr/sbin/cron"
@@ -639,8 +640,9 @@ rules:
                 - "/usr/sbin/cron"
                 - "/usr/sbin/crond"
                 - "/usr/bin/crond"
-      # Волна 6.2.5, №261/исход (б) — см. sigma_passwd_shadow_read_daemon
-      # выше для полного обоснования оси.
+      # Волна 6.2.5, №261/исход (б) + волна 6.2.6, item 5 (№285: ось
+      # переведена на ancestor_exe_path — многопоколенный форк cron) — см.
+      # sigma_passwd_shadow_read_daemon выше для полного обоснования оси.
       - name: verified-daemon-lineage
         condition_group:
           operator: and
@@ -648,7 +650,7 @@ rules:
             - field: proc.comm
               op: eq
               values: [cron]
-            - field: proc.parent_exe_path
+            - field: proc.ancestor_exe_path
               op: in
               values:
                 - "/usr/sbin/cron"
@@ -1188,8 +1190,8 @@ rules:
                 - "/usr/sbin/cron"
                 - "/usr/sbin/crond"
                 - "/usr/bin/crond"
-      # Волна 6.2.5, №261/исход (б) — тот же контракт, что у
-      # credential-access.yaml/sensitive_file_read_daemon: verified-daemon-image
+      # Волна 6.2.5, №261/исход (б) + волна 6.2.6, item 5 (№285) — тот же
+      # контракт, что у credential-access.yaml/sensitive_file_read_daemon: verified-daemon-image
       # проигрывает гонку readlink на ежеминутном forked-потомке cron
       # (PAM/NSS lookup читает /etc/passwd ДО execve, pid живёт единицы
       # миллисекунд). Родитель форка — долгоживущий /usr/sbin/cron, PPID
@@ -1202,7 +1204,7 @@ rules:
             - field: proc.comm
               op: eq
               values: [cron]
-            - field: proc.parent_exe_path
+            - field: proc.ancestor_exe_path
               op: in
               values:
                 - "/usr/sbin/cron"

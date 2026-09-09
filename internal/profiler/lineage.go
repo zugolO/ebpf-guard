@@ -711,6 +711,38 @@ func (lt *LineageTracker) Cleanup(now time.Time) {
 	}
 }
 
+// ParentOf returns the parent PID of pid and that parent's comm, as recorded
+// from the kernel-supplied pid/ppid/parent_comm of an earlier event. Волна
+// 6.2.6, item 5 (№277/№285).
+//
+// Отличия от GetLineage, ради которых заведён отдельный метод:
+//   - возвращает КОПИЮ, а не указатель в шард. GetLineage отдаёт *parentInfo,
+//     живущий в карте под мьютексом и возвращаемый в пул из Cleanup, — читать
+//     его вне пакета значит гоняться с уборкой;
+//   - не ходит в /proc. Вызывающая сторона (обход родословной в
+//     correlator/exepath.go) работает по ЗАВЕДОМО МЁРТВЫМ pid'ам — в этом весь
+//     смысл обхода, — и фолбэк на readProcStatus там был бы syscall'ом,
+//     заведомо возвращающим ENOENT, на горячем пути разбора правил.
+//
+// ok=false означает «про этот pid ничего не записано», а не «у него нет
+// родителя»: карта живёт TTL Cleanup'а, и очень старая цепочка из неё уходит.
+func (lt *LineageTracker) ParentOf(pid uint32) (ppid uint32, parentComm string, ok bool) {
+	if pid == 0 {
+		return 0, "", false
+	}
+	s := lt.shardFor(pid)
+	s.mu.RLock()
+	info, found := s.lineage[pid]
+	if found {
+		ppid, parentComm = info.PPID, info.ParentComm
+	}
+	s.mu.RUnlock()
+	if !found || ppid == 0 {
+		return 0, "", false
+	}
+	return ppid, parentComm, true
+}
+
 // GetLineage returns the parent info for a PID (for testing).
 func (lt *LineageTracker) GetLineage(pid uint32) (*parentInfo, bool) {
 	s := lt.shardFor(pid)

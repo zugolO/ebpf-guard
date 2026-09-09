@@ -694,6 +694,13 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	if lt == nil {
 		lt = profiler.NewLineageTracker(profiler.DefaultLineageConfig(), slog.Default())
 	}
+	// Волна 6.2.6, item 5 (№285): тот же трекер, который наполняется на каждом
+	// событии ради ProcessTree, становится источником родословной для поля
+	// proc.ancestor_exe_path. Регистрация здесь, а не в main.go рядом с
+	// SetExePathResolver, потому что трекер создаётся именно тут и может
+	// прийти из конфига — иначе прогон с собственным LineageTracker получил бы
+	// ось предка, смотрящую в чужую карту.
+	SetAncestryResolver(lt)
 
 	enforceWorkers := config.EnforceWorkerCount
 	if enforceWorkers <= 0 {

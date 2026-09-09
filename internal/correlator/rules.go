@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
-	"log/slog"
 	"math/rand"
 	"net"
 	"regexp"
@@ -1428,6 +1427,8 @@ func normaliseFieldName(field string) string {
 		return "exe_path"
 	case "proc.parent_exe_path":
 		return "parent_exe_path"
+	case "proc.ancestor_exe_path":
+		return "ancestor_exe_path"
 	case "network.dport":
 		return "dport"
 	case "network.sport":
@@ -1512,11 +1513,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		// (evaluateConditionGroup), так что readlink случается только для
 		// событий, у которых имя демона уже совпало, — единицы в секунду, а
 		// не поток. Порядок в rules/*.yaml — часть контракта, а не стиль.
-		v := resolveExePath(e.PID, exePathFieldSelf)
-		slog.Debug("wave6.2.6 item5: exe_path lookup",
-			slog.Uint64("pid", uint64(e.PID)), slog.Uint64("ppid", uint64(e.PPID)),
-			slog.String("comm", util.BytesToString(e.Comm[:])), slog.String("exe_path", v))
-		return v
+		return resolveExePath(e.PID, exePathFieldSelf)
 	case "parent_exe_path":
 		// Волна 6.2.5, №261/исход (б). Тот же резолвер, тот же readlink,
 		// применённый к PPID вместо PID: у форкнутого потомка демона (comm
@@ -1531,11 +1528,19 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		// срабатывает. Условие на parent_exe_path в exceptions обязано, как
 		// и exe_path, стоять ПОСЛЕДНИМ в "and" — тот же контракт короткого
 		// замыкания, тот же readlink без кэша.
-		v := resolveExePath(e.PPID, exePathFieldParent)
-		slog.Debug("wave6.2.6 item5: parent_exe_path lookup",
-			slog.Uint64("pid", uint64(e.PID)), slog.Uint64("ppid", uint64(e.PPID)),
-			slog.String("comm", util.BytesToString(e.Comm[:])), slog.String("parent_exe_path", v))
-		return v
+		return resolveExePath(e.PPID, exePathFieldParent)
+	case "ancestor_exe_path":
+		// Волна 6.2.6, item 5 (№285). Третья ось на тот же образ, закрывающая
+		// случай, до которого не дотягиваются первые две: демон форкает задачу
+		// в НЕСКОЛЬКО поколений, и алертует не первое. Разрешается ближайший
+		// предок, начиная с родителя; дальше родителя — только по непрерывному
+		// участку одного comm, то есть по процессам, заведомо делящим один
+		// mm->exe_file. Полный разбор антиспуфа и цены — в exepath.go.
+		//
+		// Контракт порядка условий тот же, что у exe_path/parent_exe_path:
+		// условие на эту ось обязано стоять ПОСЛЕДНИМ в группе "and".
+		return resolveAncestorExePath(e.PID, e.PPID,
+			util.BytesToString(e.Comm[:]), util.BytesToString(e.ParentComm[:]))
 	}
 
 	switch e.Type {

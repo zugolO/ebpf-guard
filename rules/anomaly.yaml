@@ -16,15 +16,18 @@
 # "anomaly_detection", exception_name=...} exactly like a YAML rule's own
 # exception — the volume moves there, it does not disappear (6.2.6.20).
 #
-# Deliberately keyed on exe_path/parent_exe_path alone, NOT comm: this is
+# Deliberately keyed on exe_path/ancestor_exe_path alone, NOT comm: this is
 # the positive half of 6.2.6.20 — a process that spoofs a trusted daemon's
 # name (comm) but is not that daemon's binary must still raise the anomaly.
 # Same two axes, same binary/parent-image lists, as the verified-daemon-
 # image / verified-daemon-lineage exceptions already proven across waves
 # 6.2.1…6.2.5 in rules/sigma-linux.yaml and rules/credential-access.yaml —
-# see resolveExePath / getFieldValue("exe_path"|"parent_exe_path") in
+# see resolveExePath / getFieldValue("exe_path"|"ancestor_exe_path") in
 # internal/correlator/rules.go for the antispoof argument (PID's own exe_path
-# is kernel-assigned at execve; PPID's is not process-chosen either).
+# is kernel-assigned at execve; PPID's is not process-chosen either, and the
+# ancestor axis walks past the parent only along an unbroken same-comm run —
+# processes that never execve'd and therefore share one image; wave 6.2.6
+# item 5, №285).
 
 rules:
   - id: anomaly_detection
@@ -58,7 +61,7 @@ rules:
       # stays antispoof for the same reason proc.exe_path does.
       - name: verified-daemon-lineage
         condition:
-          field: proc.parent_exe_path
+          field: proc.ancestor_exe_path
           op: in
           values:
             - "/usr/sbin/cron"

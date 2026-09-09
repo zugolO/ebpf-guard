@@ -677,6 +677,10 @@ var identityFields = []string{
 	// гонку readlink у короткоживущего форка демона — см. resolveExePath /
 	// getFieldValue("parent_exe_path") в rules.go.
 	"parent_exe_path", "proc.parent_exe_path",
+	// Волна 6.2.6, item 5 (№285): третья ось на тот же образ. Ось предка
+	// дотягивается через многопоколенный форк демона, до которого не
+	// дотягиваются первые две, — см. resolveAncestorExePath в exepath.go.
+	"ancestor_exe_path", "proc.ancestor_exe_path",
 }
 
 func init() {

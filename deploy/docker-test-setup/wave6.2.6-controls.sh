@@ -808,9 +808,20 @@ printf 't0=%s\nt1=%s\n' "$_w626_t0" "$_w626_t1" > "$W626_ART/window-epoch.txt"
 echo "--- 6.2.6.19: разъезд метрики и стора, drain подбирается снимками (№281) ---"
 W626_DRAIN_STEP="${W626_DRAIN_STEP:-$([ "$W626_SMOKE" = "1" ] && echo 5 || echo 10)}"
 W626_DRAIN_MAX="${W626_DRAIN_MAX:-$([ "$W626_SMOKE" = "1" ] && echo 20 || echo 60)}"
+# НАЙДЕНО №293 (разбор архива collect-6.2.6, 10.09.2026): `sub(...)|
+# fromdateiso8601` отрезал дробную часть ДО парсинга, поэтому весь
+# промежуток [t1.000, t1.999] читался как «= t1» и проходил `<= t1`.
+# На архиве это дало ложное drain=10с — 6 строк, которые «доехали после
+# слива», были на деле собственными алертами КОНТРОЛЯ на t1+0,16…0,25с
+# (curl/cp/cut/jq читают метрики контроля сразу после открытия окна) и
+# были В ОКНЕ уже на снимке РОВНО на t1 при точном сравнении. `w626ts`
+# сохраняет дробную часть как float-эпоху, так что `<= $t1` (целое)
+# отбрасывает всё, что позже t1 хоть на миллисекунду.
 _w626_store_in_window() { # $1=файл снимка стора → число строк в границах [t0,t1]
     jq --argjson t0 "$_w626_t0" --argjson t1 "$_w626_t1" \
-       '[.[]|select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t0) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $t1))]|length' \
+       'def w626ts: (.timestamp | capture("^(?<i>[^.]+)(\\.(?<f>[0-9]+))?Z$")) as $c
+          | ($c.i + "Z" | fromdateiso8601) + (($c.f // "0") | ("0." + .) | tonumber);
+        [.[]|select((w626ts >= $t0) and (w626ts <= $t1))]|length' \
        "$1" 2>/dev/null || echo 0
 }
 cp "$W626_ART/alerts-window-end.json" "$W626_ART/alerts-window-end-t1.json" 2>/dev/null
@@ -848,7 +859,9 @@ echo "  дальше ВСЕ сторовые контроли читают сн�
 
 # ---- построчный разъезд по rule_id: метрика против стора ----
 _w626_store_by_rule=$(jq -r --argjson t0 "$_w626_t0" --argjson t1 "$_w626_t1" \
-    '[.[]|select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t0) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $t1))]
+    'def w626ts: (.timestamp | capture("^(?<i>[^.]+)(\\.(?<f>[0-9]+))?Z$")) as $c
+       | ($c.i + "Z" | fromdateiso8601) + (($c.f // "0") | ("0." + .) | tonumber);
+     [.[]|select((w626ts >= $t0) and (w626ts <= $t1))]
      | group_by(.rule_id)|map("\(.[0].rule_id) \(length)")|.[]' "$W626_ART/alerts-window-end.json" 2>/dev/null | sort)
 if [ "$W626_LIB_OK" -eq 1 ]; then
     _w626_metric_by_rule=$(w626_volume_by_rule "$W626_ART/metrics-window-start.txt" "$W626_ART/metrics-window-end.txt" | sort)
@@ -2853,33 +2866,37 @@ _w626_esc_inc_all=$(jq --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
 _w626_esc_inc_all_roots=$(jq -r --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
     '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te))|(.details.root_comm // .comm)]|unique|join(" ")' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
-# КОРЕНЬ ИЛИ ЦЕПОЧКА (№288, третья половина). Постановка item 7 требовала
-# «инцидент С КОРНЕМ подающего процесса», и список корней (nsenter/unshare/cat)
-# был выведен ИЗ ЧТЕНИЯ КОДА ПОДАЧИ, а не из живого root_comm — открытый вопрос
-# 15(а) назвал это непроверенным числом. Смок ответил: IncidentTracker пишет в
-# root_comm КОРЕНЬ ДЕРЕВА (`bash` скрипта подачи, `sshd`, `cron`), а подающий
-# процесс стоит ЛИСТОМ цепочки. Буквальный список корней поэтому не совпадает
-# никогда, и критерий не мог быть взят ПО ПОСТРОЕНИЮ. Признание подачи своей
-# идёт теперь по ЦЕПОЧКЕ (подающий comm где угодно в process_chain) — это
-# сохраняет смысл сужения №278 (инцидент обязан быть НАШЕЙ подачей, а не
-# посторонним) и перестаёт требовать того, чего слой не пишет.
+# КОРЕНЬ, ЦЕПОЧКА ИЛИ СОСТАВ (№294, разбор архива collect-6.2.6,
+# 10.09.2026). Правка №288 (комментарий выше) перешла с root_comm на
+# process_chain — но process_chain у incident_confirmed_attack есть ОДНА
+# ветвь предков КОРНЯ (`bash→bash→…→curl`), а не список участников
+# инцидента. Подающие процессы (nsenter/unshare/cat) в дереве стоят
+# БРАТЬЯМИ друг другу и корню, не предками — ни один не попадает в
+# process_chain никогда, и критерий 6.2.4.7 был обречён на «ПРОВАЛЕН»
+# структурно, тем же способом, каким №288 был обречён на root_comm.
 #
-# ЧЕСТНО ПРО ГРАНИЦУ ЭТОЙ ПРАВКИ: на смоке она вердикт НЕ ПЕРЕВЕРНУЛА — по
-# цепочке в окне подачи тоже 0. Единственный инцидент окна — `bash[…,curl]`
-# (бикон соседнего контроля), а во всём прогоне подающий comm несёт лишь
-# `cron[cron,cron,sh,cat]` от половины (4) критерия 6.2.4.5. То есть подача
-# побега подняла 5 алертов и НЕ ПОРОДИЛА инцидента вовсе. Правка убирает
-# ложное основание вердикта (чужие алерты и несуществующий корень), а сам
-# вердикт оставляет ПРОВАЛОМ — и это теперь честный провал по существу, а не
-# артефакт разметки окна. Разбор причины (порог score на трёх
-# короткоживущих процессах против промоушена) — за прогоном, не здесь.
+# Архив прогона это подтвердил числом: инцидент
+# alert-inc-1788970459168-60-attack (16:14:19.466Z, score 51) содержит
+# 5 ИЗ 7 алертов окна подачи (пересечение alert_ids), но
+# process_chain=[bash,bash,bash,bash,bash,bash,curl] не несёт ни nsenter,
+# ни unshare, ни cat — их несёт details.comms (участники инцидента
+# ПЛОСКИМ списком, без древесной позиции): comms=[curl,cat,nsenter,true,
+# unshare]. Именно это поле IncidentTracker пишет как состав, и по нему
+# признание подачи своей взаимодействует с реальными данными, а не с
+# гаданием по одной ветви.
+#
+# ПОЧЕМУ .details.comms, А НЕ ПЕРЕСЕЧЕНИЕ alert_ids. Оба поля дают
+# одинаковый ответ на этом архиве, но alert_ids требует пересечения с
+# отдельно собранным списком id алертов подачи — лишняя зависимость от
+# другого запроса того же окна. comms — минимальный самодостаточный вход:
+# сам инцидент отвечает на вопрос «наш ли участник внутри».
 _w626_esc_inc=$(jq --arg subs "$W626_ESCAPE_SUBMITTERS" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
     '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te)
-        and ((([(.details.root_comm // .comm)] + (.details.process_chain // [])) | any(. as $c | ($subs|split(" "))|index($c) != null))))]|length' \
+        and ((.details.comms // []) | any(. as $c | ($subs|split(" "))|index($c) != null)))]|length' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
 _w626_esc_inc_roots=$(jq -r --arg subs "$W626_ESCAPE_SUBMITTERS" --argjson t "$_w626_t47" --argjson te "$_w626_t47_end" \
     '[.[]|select(.rule_id=="incident_confirmed_attack" and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $te)
-        and ((([(.details.root_comm // .comm)] + (.details.process_chain // [])) | any(. as $c | ($subs|split(" "))|index($c) != null))))
+        and ((.details.comms // []) | any(. as $c | ($subs|split(" "))|index($c) != null)))
       | "\((.details.root_comm // .comm))[\(.details.process_chain // [] | join("→"))]"]|unique|join(" ")' \
     "$W626_ART/alerts-incidents.json" 2>/dev/null)
 echo "  окно подачи побега [$(_w626_utc "$_w626_t47"), $(_w626_utc "$_w626_t47_end")] — верхняя граница есть начало подачи 6.2.6.16 (№288: без неё в счёт шёл шум старта пода)"
@@ -2946,8 +2963,8 @@ _w626_init_attack_roots=$(jq -r --argjson t0 "$_w626_t516" --argjson t1 "$_w626_
 # «цена старта пода», здесь обязано быть suspicious.
 _w626_init_attack_churn=$(jq --argjson t0 "${_w626_pod_start_phase_start:-0}" --argjson t1 "${_w626_pod_start_phase_end:-0}" --arg actors "$W626_NODE_ACTORS"     '[.[]|select(.rule_id=="incident_confirmed_attack"
         and ($t1 > 0)
-        and ((.timestamp|sub("\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t0)
-        and ((.timestamp|sub("\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $t1)
+        and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t0)
+        and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) <= $t1)
         and (((.details.root_comm // .comm) as $c | (($actors|split(" "))|index($c))) != null))]|length'     "$W626_ART/alerts-incidents.json" 2>/dev/null)
 echo "  окно подачи [$(_w626_utc "$_w626_t516"), $(_w626_utc "$_w626_t516_end")]"
 echo "  incident_confirmed_attack с корнем-нодовым актором внутри окна стартов подов 6.2.6.10 (item 3 вычел их из 6.2.4.6 — судятся здесь): ${_w626_init_attack_churn:-0}"

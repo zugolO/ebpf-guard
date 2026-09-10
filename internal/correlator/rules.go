@@ -47,6 +47,20 @@ var (
 		},
 		[]string{"rule_id", "exception_name"},
 	)
+	// ruleExceptionEvaluationsTotal counts every call to
+	// EvaluateNamedExceptions for ruleID, whether or not any exception
+	// matched. It exists so a zero ruleExceptionsTotal can be told apart
+	// from "the exception layer was never reached" (wave 6.2.6, №283/№289:
+	// 6.2.6.20 read a zero suppression delta as "not deployed or not
+	// called" when the layer had suppressed 57 alerts earlier the same
+	// run — the zero was a population mismatch, not a wiring gap).
+	ruleExceptionEvaluationsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_rule_exception_evaluations_total",
+			Help: "Calls to EvaluateNamedExceptions for a rule, regardless of whether any exception matched",
+		},
+		[]string{"rule_id"},
+	)
 )
 
 // alertsPool recycles the backing arrays of []types.Alert slices returned by
@@ -704,6 +718,7 @@ func (re *RuleEngine) EvaluateNamedExceptions(ruleID string, e types.Event) bool
 	if rule == nil || len(rule.Exceptions) == 0 {
 		return false
 	}
+	ruleExceptionEvaluationsTotal.WithLabelValues(ruleID).Inc()
 
 	var dnsAnalysis *DomainAnalysis
 	if e.Type == types.EventDNS && e.DNS != nil {

@@ -320,6 +320,7 @@ func (s *SQLiteStore) initSchema() error {
 		count INTEGER,
 		first_seen DATETIME,
 		last_seen DATETIME,
+		process_tree TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -367,6 +368,7 @@ func (s *SQLiteStore) migrateAggregationColumns() error {
 		{"count", "ALTER TABLE alerts ADD COLUMN count INTEGER"},
 		{"first_seen", "ALTER TABLE alerts ADD COLUMN first_seen DATETIME"},
 		{"last_seen", "ALTER TABLE alerts ADD COLUMN last_seen DATETIME"},
+		{"process_tree", "ALTER TABLE alerts ADD COLUMN process_tree TEXT"},
 	}
 	for _, m := range migrations {
 		if existing[m.col] {
@@ -386,19 +388,20 @@ func (s *SQLiteStore) migrateAggregationColumns() error {
 // same last-write-wins upsert semantics the memory store already uses, so the
 // aggregated count is persisted instead of lost.
 const alertUpsertSQL = `
-	INSERT INTO alerts (id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels, count, first_seen, last_seen)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO alerts (id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels, count, first_seen, last_seen, process_tree)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		timestamp=excluded.timestamp,
 		message=excluded.message,
 		details=excluded.details,
 		count=excluded.count,
 		first_seen=excluded.first_seen,
-		last_seen=excluded.last_seen
+		last_seen=excluded.last_seen,
+		process_tree=excluded.process_tree
 `
 
 // alertSelectColumns is the column list shared by Query and QueryByID.
-const alertSelectColumns = "id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels, count, first_seen, last_seen"
+const alertSelectColumns = "id, timestamp, rule_id, severity, pid, comm, message, details, trace_id, pod_name, namespace, container_id, labels, count, first_seen, last_seen, process_tree"
 
 // nullTime returns a sql argument that stores t, or NULL when t is the zero
 // time, so unaggregated alerts don't persist a bogus 0001-01-01 first/last_seen.
@@ -418,6 +421,10 @@ func (s *SQLiteStore) Store(ctx context.Context, alert types.Alert) error {
 	detailsJSON, err := json.Marshal(alert.Details)
 	if err != nil {
 		return fmt.Errorf("marshal details: %w", err)
+	}
+	processTreeJSON, err := json.Marshal(alert.ProcessTree)
+	if err != nil {
+		return fmt.Errorf("marshal process_tree: %w", err)
 	}
 
 	message := alert.Message
@@ -440,7 +447,7 @@ func (s *SQLiteStore) Store(ctx context.Context, alert types.Alert) error {
 		alert.ID, alert.Timestamp, alert.RuleID, string(alert.Severity), alert.PID, alert.Comm,
 		message, storedDetails, alert.TraceID, alert.Enrichment.PodName,
 		alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels,
-		alert.Count, nullTime(alert.FirstSeen), nullTime(alert.LastSeen))
+		alert.Count, nullTime(alert.FirstSeen), nullTime(alert.LastSeen), string(processTreeJSON))
 	if err != nil {
 		return fmt.Errorf("insert alert: %w", err)
 	}
@@ -470,6 +477,10 @@ func (s *SQLiteStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 		if err != nil {
 			return fmt.Errorf("marshal details for alert %s: %w", alert.ID, err)
 		}
+		processTreeJSON, err := json.Marshal(alert.ProcessTree)
+		if err != nil {
+			return fmt.Errorf("marshal process_tree for alert %s: %w", alert.ID, err)
+		}
 
 		message := alert.Message
 		storedDetails := string(detailsJSON)
@@ -491,7 +502,7 @@ func (s *SQLiteStore) StoreBatch(ctx context.Context, alerts []types.Alert) erro
 			string(alert.Severity), alert.PID, alert.Comm, message,
 			storedDetails, alert.TraceID, alert.Enrichment.PodName,
 			alert.Enrichment.Namespace, alert.Enrichment.ContainerID, storedLabels,
-			alert.Count, nullTime(alert.FirstSeen), nullTime(alert.LastSeen)); err != nil {
+			alert.Count, nullTime(alert.FirstSeen), nullTime(alert.LastSeen), string(processTreeJSON)); err != nil {
 			return fmt.Errorf("insert alert: %w", err)
 		}
 	}
@@ -743,6 +754,7 @@ func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 		var alert types.Alert
 		var severityStr string
 		var detailsJSON, labelsJSON []byte
+		var processTreeJSON sql.NullString
 		var count sql.NullInt64
 		var firstSeen, lastSeen sql.NullTime
 
@@ -751,7 +763,7 @@ func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 			&alert.PID, &alert.Comm, &alert.Message, &detailsJSON,
 			&alert.TraceID, &alert.Enrichment.PodName, &alert.Enrichment.Namespace,
 			&alert.Enrichment.ContainerID, &labelsJSON,
-			&count, &firstSeen, &lastSeen,
+			&count, &firstSeen, &lastSeen, &processTreeJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan alert: %w", err)
@@ -780,6 +792,11 @@ func (s *SQLiteStore) scanAlerts(rows *sql.Rows) ([]types.Alert, error) {
 				slog.Warn("sqlite: failed to unmarshal alert labels", slog.String("alert_id", alert.ID), slog.Any("error", err))
 			}
 		}
+		if processTreeJSON.Valid && processTreeJSON.String != "" {
+			if err := json.Unmarshal([]byte(processTreeJSON.String), &alert.ProcessTree); err != nil {
+				slog.Warn("sqlite: failed to unmarshal alert process_tree", slog.String("alert_id", alert.ID), slog.Any("error", err))
+			}
+		}
 
 		alerts = append(alerts, alert)
 	}
@@ -795,6 +812,7 @@ func (s *SQLiteStore) QueryByID(ctx context.Context, alertID string) (*types.Ale
 	var alert types.Alert
 	var severityStr string
 	var detailsJSON, labelsJSON []byte
+	var processTreeJSON sql.NullString
 	var count sql.NullInt64
 	var firstSeen, lastSeen sql.NullTime
 
@@ -803,7 +821,7 @@ func (s *SQLiteStore) QueryByID(ctx context.Context, alertID string) (*types.Ale
 		&alert.PID, &alert.Comm, &alert.Message, &detailsJSON,
 		&alert.TraceID, &alert.Enrichment.PodName, &alert.Enrichment.Namespace,
 		&alert.Enrichment.ContainerID, &labelsJSON,
-		&count, &firstSeen, &lastSeen,
+		&count, &firstSeen, &lastSeen, &processTreeJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("alert not found: %s", alertID)
@@ -833,6 +851,11 @@ func (s *SQLiteStore) QueryByID(ctx context.Context, alertID string) (*types.Ale
 	if len(labelsJSON) > 0 {
 		if err := json.Unmarshal(labelsJSON, &alert.Enrichment.Labels); err != nil {
 			slog.Warn("sqlite: failed to unmarshal alert labels", slog.String("alert_id", alert.ID), slog.Any("error", err))
+		}
+	}
+	if processTreeJSON.Valid && processTreeJSON.String != "" {
+		if err := json.Unmarshal([]byte(processTreeJSON.String), &alert.ProcessTree); err != nil {
+			slog.Warn("sqlite: failed to unmarshal alert process_tree", slog.String("alert_id", alert.ID), slog.Any("error", err))
 		}
 	}
 

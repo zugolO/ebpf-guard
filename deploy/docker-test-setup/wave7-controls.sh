@@ -21,22 +21,22 @@
 #   6.0k -> критерии 6.0.16 / 6.0.17
 #   6.0l -> критерий  6.0.18
 #
-# ИЗВЕСТНЫЙ ДЕФЕКТ, КОТОРЫЙ ОБЯЗАН БЫТЬ ПОЧИНЕН ДО ПЕРВОГО ЗАПУСКА (находка
-# №215): у 6.0.14 НЕТ СТОРОЖА РЕЗУЛЬТАТА. Он подаёт
+# ПОЧИНЕНО волной 6.2.9.F (item 5, 11.09.2026): у 6.0.14 НЕ БЫЛО СТОРОЖА
+# РЕЗУЛЬТАТА (находка №215). Старый вход
 #   dd if=/dev/zero of=/dev/vda1 bs=512 count=0
-# и требует критикала impact_raw_disk_write_from_container. Правило требует
+# требует критикала impact_raw_disk_write_from_container. Правило требует
 # file.op == "write", а FILE_OP_WRITE ставится ТОЛЬКО в хуке sys_enter_write
 # (bpf/fileaccess.bpf.c:426); из флагов открытия write не выводится нигде.
 # `dd count=0` открывает устройство и не делает ни одного write(2) — события
-# с op=write в потоке не существует, и ноль контроля не измеряет ничего.
+# с op=write в потоке не существует, и ноль контроля не измерял ничего.
 # Именно на нём умер замер №6.0j.
-#   Честный вход: count=1 — но он затрёт первые 512 байт устройства. На
-#   /dev/vda1 это суперблок рабочего раздела стенда, поэтому в фикстуре и
-#   стоял count=0. Чинить так: свой узел mknod на loop-устройство под теми же
-#   префиксами правила (/dev/sd|nvme|xvd|vd), плюс сторож ФАКТА write(2)
-#   (например сверка счётчика записей устройства или strace-сентинел), а не
-#   только счётчика алертов. Ниже, у 6.0.18, образец такого сторожа уже стоит
-#   («6.0.18 НЕ ИСПОЛНЕН: dumpe2fs вернул rc=...»).
+#   Честный вход (count=1) на /dev/vda1 недопустим — это суперблок рабочего
+#   раздела стенда. Починка ниже (6.0.14) использует свой узел mknod на
+#   loop-устройство под именем /dev/vdw215 (совпадает с префиксом правила
+#   /dev/vd*), плюс сторож ФАКТА write(2) — sectors-written счётчик самого
+#   loop-устройства (/sys/block/<loop>/stat, поле 7). Ниже, у 6.0.18, был уже
+#   образец такого сторожа для другого правила («6.0.18 НЕ ИСПОЛНЕН: dumpe2fs
+#   вернул rc=...») — приём тот же.
 #
 # ЗАПУСК. Скрипт не самостоятелен: он требует живого агента и тех же двух
 # переменных, что и пайплайн. Зовётся из своего окна, ПОСЛЕ снятия снимков
@@ -102,18 +102,61 @@ fi
 echo "6.0.13 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
 echo "6.0.13 доказан живьём в $(date -u +%H:%M:%S) UTC: штатный dumpe2fs -h не поднимает критикал ни по одному из двух правил №200"
 
-# 6.0.14 — позитивный: count=0 — устройство открывается на запись, ни один
-# байт не пишется физически, откат не нужен по построению.
-_impact_pos_before=$(_impact_critical_count impact_raw_disk_write_from_container)
-dd if=/dev/zero of=/dev/vda1 bs=512 count=0 >/dev/null 2>&1 || true
-sleep 15
-_impact_pos_after=$(_impact_critical_count impact_raw_disk_write_from_container)
-echo "  6.0.14 позитивный контроль: dd if=/dev/zero of=/dev/vda1 bs=512 count=0 -> impact_raw_disk_write_from_container критикалов: ${_impact_pos_before:-0} -> ${_impact_pos_after:-0} ($(date -u +%H:%M:%S) UTC)"
-if [ "$((${_impact_pos_after:-0} - ${_impact_pos_before:-0}))" -lt 1 ]; then
-    die "6.0.14 ПРОВАЛЕН: dd (comm=dd, op=write, count=0) на /dev/vda1 не подняло ни одного критикала impact_raw_disk_write_from_container (было ${_impact_pos_before:-0}, стало ${_impact_pos_after:-0}) — правка №200 сузила правило до немоты вместо сужения FP, находка №200 не закрыта"
+# 6.0.14 — позитивный. ПОЧИНЕНО волной 6.2.9.F (item 5, находка №215): старый
+# вход `count=0` открывает устройство на запись, но не делает НИ ОДНОГО
+# write(2) (dd с count=0 не пишет ни одного блока) — правило требует
+# file.op=="write", которое ставится только в sys_enter_write
+# (bpf/fileaccess.bpf.c:426), и ноль критикалов не измерял ничего. Честный
+# вход (count=1 на /dev/vda1) недопустим — это суперблок рабочего раздела
+# стенда. Чиним собственным loop-устройством с именем из префикса правила
+# (/dev/vd*), сторож ФАКТА write(2) — sectors-written счётчик самого loop-
+# устройства (/sys/block/<loop>/stat, поле 7), а не только счётчик алертов.
+_impact14_img="/root/.wave7-impact14-disk.img"
+_impact14_loop=""
+_impact14_dev="/dev/vdw215"    # искусственное имя под префикс правила /dev/vd*
+_impact14_cleanup() {
+    [ -e "$_impact14_dev" ] && rm -f "$_impact14_dev" 2>/dev/null
+    [ -n "$_impact14_loop" ] && losetup -d "$_impact14_loop" >/dev/null 2>&1
+    rm -f "$_impact14_img" 2>/dev/null
+}
+if ! command -v losetup >/dev/null 2>&1 || ! command -v mknod >/dev/null 2>&1; then
+    die "6.0.14 НЕ ИСПОЛНИМ: losetup или mknod недоступны на этом стенде — реальный write(2) на псевдо-vd*-устройстве нечем исполнить (count=0 не годится, находка №215)"
+else
+    dd if=/dev/zero of="$_impact14_img" bs=1M count=8 >/dev/null 2>&1
+    _impact14_loop=$(losetup -f --show "$_impact14_img" 2>/dev/null)
+    if [ -z "$_impact14_loop" ]; then
+        die "6.0.14 НЕ ИСПОЛНИМ: losetup -f --show не выдал loop-устройство под $_impact14_img — нечем исполнить контроль"
+        _impact14_cleanup
+    else
+        _impact14_majmin=$(stat -c '%t:%T' "$_impact14_loop" 2>/dev/null)
+        _impact14_maj=$((16#${_impact14_majmin%%:*}))
+        _impact14_min=$((16#${_impact14_majmin##*:}))
+        rm -f "$_impact14_dev" 2>/dev/null
+        if [ -z "$_impact14_majmin" ] || ! mknod "$_impact14_dev" b "$_impact14_maj" "$_impact14_min" 2>/dev/null; then
+            die "6.0.14 НЕ ИСПОЛНИМ: mknod $_impact14_dev b $_impact14_maj $_impact14_min не удался (major:min=$_impact14_majmin от $_impact14_loop) — нечем исполнить контроль без узла с именем vd*"
+            _impact14_cleanup
+        else
+            _impact14_loopname=$(basename "$_impact14_loop")
+            _impact14_wsec_before=$(awk '{print $7}' "/sys/block/$_impact14_loopname/stat" 2>/dev/null)
+            _impact_pos_before=$(_impact_critical_count impact_raw_disk_write_from_container)
+            dd if=/dev/zero of="$_impact14_dev" bs=512 count=1 conv=fsync >/dev/null 2>&1
+            _impact14_wsec_after=$(awk '{print $7}' "/sys/block/$_impact14_loopname/stat" 2>/dev/null)
+            sleep 15
+            _impact_pos_after=$(_impact_critical_count impact_raw_disk_write_from_container)
+            echo "  6.0.14 сторож факта write(2): sectors-written на $_impact14_loopname: ${_impact14_wsec_before:-?} -> ${_impact14_wsec_after:-?}"
+            echo "  6.0.14 позитивный контроль: dd if=/dev/zero of=$_impact14_dev bs=512 count=1 conv=fsync -> impact_raw_disk_write_from_container критикалов: ${_impact_pos_before:-0} -> ${_impact_pos_after:-0} ($(date -u +%H:%M:%S) UTC)"
+            if [ -z "${_impact14_wsec_before:-}" ] || [ -z "${_impact14_wsec_after:-}" ] || [ "${_impact14_wsec_after}" = "${_impact14_wsec_before}" ]; then
+                die "6.0.14 НЕ ИСПОЛНЕН: dd на $_impact14_dev не увеличил sectors-written у $_impact14_loopname (было ${_impact14_wsec_before:-?}, стало ${_impact14_wsec_after:-?}) — сам write(2) не состоялся, ноль критикалов ниже был бы приборным (тот же класс, что и сама находка №215)"
+            elif [ "$((${_impact_pos_after:-0} - ${_impact_pos_before:-0}))" -lt 1 ]; then
+                die "6.0.14 ПРОВАЛЕН: реальный write(2) (comm=dd, op=write, путь совпадает с префиксом /dev/vd*), подтверждённый сторожем sectors-written, не поднял ни одного критикала impact_raw_disk_write_from_container (было ${_impact_pos_before:-0}, стало ${_impact_pos_after:-0}) — правка №200 сузила правило до немоты вместо сужения FP, находка №200 не закрыта"
+            else
+                echo "6.0.14 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+                echo "6.0.14 доказан живьём в $(date -u +%H:%M:%S) UTC: реальный write(2) на loop-устройстве с именем /dev/vd* по-прежнему поднимает критикал (находка №215 закрыта)"
+            fi
+            _impact14_cleanup
+        fi
+    fi
 fi
-echo "6.0.14 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
-echo "6.0.14 доказан живьём в $(date -u +%H:%M:%S) UTC: dd на raw-устройство по-прежнему поднимает критикал"
 
 # 6.0.15 — позитивный контроль подмножества (б) на container_escape_proc_write
 # (№205, находка №193). sysctl -w того же значения — идемпотентно по

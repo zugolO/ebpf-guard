@@ -51,6 +51,70 @@ func TestSQLiteStore_StoreQueryByID(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestSQLiteStore_ProcessTreeRoundTrip pins down that the ancestry chain the
+// correlation engine attaches to an alert (internal/correlator/engine.go,
+// alert.ProcessTree = getProcessTree()) survives a Store/QueryByID round trip.
+// Before this column existed, /api/v1/alerts silently dropped process_tree —
+// see [[alerts-api-has-no-process-chain]] — which left tree-based attribution
+// (wave 6.2.9.F item 3, finding №293) with no data to attribute by.
+func TestSQLiteStore_ProcessTreeRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newSQLiteAlertStore(t)
+
+	tree := types.ProcessTree{
+		{PID: 1, PPID: 0, Comm: "systemd"},
+		{PID: 100, PPID: 1, Comm: "bash"},
+		{PID: 101, PPID: 100, Comm: "curl"},
+	}
+	alert := types.Alert{
+		ID:          "a-tree-1",
+		Timestamp:   time.Now(),
+		RuleID:      "sensitive_file_read",
+		Severity:    types.SeverityWarning,
+		PID:         101,
+		Comm:        "curl",
+		Message:     "read /etc/passwd",
+		ProcessTree: tree,
+	}
+	require.NoError(t, s.Store(ctx, alert))
+
+	got, err := s.QueryByID(ctx, "a-tree-1")
+	require.NoError(t, err)
+	assert.Equal(t, tree, got.ProcessTree)
+
+	// An alert with no recorded ancestry (Track() never saw the parent) must
+	// round-trip as an empty tree, not fail to unmarshal.
+	noTree := types.Alert{
+		ID:        "a-tree-2",
+		Timestamp: time.Now(),
+		RuleID:    "sensitive_file_read",
+		Severity:  types.SeverityWarning,
+		PID:       202,
+		Comm:      "ps",
+	}
+	require.NoError(t, s.Store(ctx, noTree))
+	got2, err := s.QueryByID(ctx, "a-tree-2")
+	require.NoError(t, err)
+	assert.Empty(t, got2.ProcessTree)
+
+	// StoreBatch must carry the same field through.
+	require.NoError(t, s.StoreBatch(ctx, []types.Alert{
+		{ID: "a-tree-3", Timestamp: time.Now(), RuleID: "r", Severity: types.SeverityWarning, PID: 303, Comm: "cat", ProcessTree: tree},
+	}))
+	got3, err := s.QueryByID(ctx, "a-tree-3")
+	require.NoError(t, err)
+	assert.Equal(t, tree, got3.ProcessTree)
+
+	// Query (used by /api/v1/alerts) must also carry it, not just QueryByID.
+	queried, err := s.Query(ctx, QueryFilters{})
+	require.NoError(t, err)
+	byID := map[string]types.Alert{}
+	for _, a := range queried {
+		byID[a.ID] = a
+	}
+	assert.Equal(t, tree, byID["a-tree-1"].ProcessTree)
+}
+
 func TestSQLiteStore_StoreBatchAndCount(t *testing.T) {
 	ctx := context.Background()
 	s := newSQLiteAlertStore(t)

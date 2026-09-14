@@ -836,6 +836,22 @@ _W626_FORCE_AT=0
 _W626_FORCE_SCHEDULED=0
 if [ "${W626_FORCE_NODE_EVENT:-0}" = "1" ]; then
     _w626_force_off=$(( W626_OPEN_SETTLE + W626_WINDOW / 3 ))
+    # ПРОГОН 14.09.2026 (19:23Z) ПОТЕРЯЛ НА ЭТОМ ГЛАВНУЮ ВЕЛИЧИНУ ВОЛНЫ.
+    # `reset-failed` снимает только СБОЙНОЕ состояние, а транзиентный юнит с
+    # RemainAfterExit=yes (сам же №302 его и потребовал) остаётся
+    # `active (exited)` и мусорщиком НЕ собирается — вместе с ним живёт и его
+    # .timer. Следующий `systemd-run --unit=<то же имя>` отказывает: «Unit
+    # w626-force-node-event.timer already exists», и 6.2.9.F.8 выносит
+    # НЕИЗМЕРИМ, то есть волна остаётся без форсированного события ноды.
+    # Смок этого поймать НЕ МОГ по построению: первый запуск на чистом стенде
+    # проходит всегда, отказывает ВТОРОЙ — а смок и был первым. Остаток
+    # снимается ЯВНО (stop обоих юнитов) и, если он был, ПЕЧАТАЕТСЯ: молчаливая
+    # уборка превратила бы повторение дефекта в невидимое.
+    if systemctl cat "${_W626_FORCE_UNIT}.timer" >/dev/null 2>&1 || systemctl cat "${_W626_FORCE_UNIT}.service" >/dev/null 2>&1; then
+        echo "  6.2.9.F.8: НАЙДЕН ОСТАТОК прошлого прогона ($_W626_FORCE_UNIT, .service=$(systemctl show -p ActiveState --value "${_W626_FORCE_UNIT}.service" 2>/dev/null) .timer=$(systemctl show -p ActiveState --value "${_W626_FORCE_UNIT}.timer" 2>/dev/null)) — снимается до постановки таймера"
+    fi
+    systemctl stop "${_W626_FORCE_UNIT}.timer" >/dev/null 2>&1
+    systemctl stop "${_W626_FORCE_UNIT}.service" >/dev/null 2>&1
     systemctl reset-failed "${_W626_FORCE_UNIT}.timer" >/dev/null 2>&1
     systemctl reset-failed "${_W626_FORCE_UNIT}.service" >/dev/null 2>&1
     # AccuracySec=1s ОБЯЗАТЕЛЕН, и это не гигиена. У systemd-таймеров точность
@@ -854,12 +870,32 @@ if [ "${W626_FORCE_NODE_EVENT:-0}" = "1" ]; then
     # Свойство идёт на .service транзиентного запуска (--property), а не на
     # его .timer (--timer-property) — держать надо тот юнит, чей ExecMainPID
     # читается.
-    if systemd-run --quiet --on-active="${_w626_force_off}s" --timer-property=AccuracySec=1s --property=RemainAfterExit=yes --unit="$_W626_FORCE_UNIT" /usr/bin/systemctl start "$_W626_FORCE_TARGET" >/dev/null 2>&1; then
+    # Отказ systemd-run печатается ПРИЧИНОЙ, а не одним словом: прогон
+    # 14.09.2026 сообщил «НЕ поставил таймер» и не назвал, что именно сказал
+    # systemd, — диагноз пришлось снимать со стенда руками уже после прогона.
+    _w626_force_err=$(systemd-run --quiet --on-active="${_w626_force_off}s" --timer-property=AccuracySec=1s --property=RemainAfterExit=yes --unit="$_W626_FORCE_UNIT" /usr/bin/systemctl start "$_W626_FORCE_TARGET" 2>&1)
+    if [ $? -eq 0 ]; then
         _W626_FORCE_SCHEDULED=1
         _W626_FORCE_AT=$(( $(_w626_epoch) + _w626_force_off ))
-        echo "  6.2.9.F.8: событие ноды ($_W626_FORCE_TARGET) поставлено на $(_w626_utc "$_W626_FORCE_AT") — через ${_w626_force_off}с, то есть примерно t0 + $(( W626_WINDOW / 3 ))с. Таймер транзиентный ($_W626_FORCE_UNIT), дерево повиснет на systemd, а не на измерителе"
+        # ФАКТ ВЗВЕДЕНИЯ, а не код возврата: `systemd-run` может вернуть 0, а
+        # таймер не иметь следующего срабатывания вовсе. Тот же приём, что у
+        # самого критерия (сначала ФАКТ, потом цена) и у починки 6.0.14.
+        # СВОЙСТВО ИМЕННО МОНОТОННОЕ. `--on-active` ставит МОНОТОННЫЙ таймер, и
+        # NextElapseUSecRealtime у него ПУСТ всегда — сторож, читающий его,
+        # объявил бы «не взведён» на исправно взведённом таймере и сам снял бы
+        # величину волны. Проверено на стенде 14.09.2026 до коммита:
+        # Realtime='' при NextElapseUSecMonotonic='6h 7.241891s' и
+        # `list-timers`, показывающем срабатывание через 4min 59s.
+        _w626_force_next=$(systemctl show -p NextElapseUSecMonotonic --value "${_W626_FORCE_UNIT}.timer" 2>/dev/null)
+        [ -z "${_w626_force_next:-}" ] && _w626_force_next=$(systemctl show -p NextElapseUSecRealtime --value "${_W626_FORCE_UNIT}.timer" 2>/dev/null)
+        if [ -z "${_w626_force_next:-}" ] || [ "${_w626_force_next}" = "n/a" ]; then
+            _W626_FORCE_SCHEDULED=0
+            echo "  6.2.9.F.8: таймер поставлен, но следующее срабатывание НЕ ВЗВЕДЕНО (NextElapseUSecRealtime='${_w626_force_next:-пусто}') — событие в окно не вводится (вердикт ниже)"
+        else
+            echo "  6.2.9.F.8: событие ноды ($_W626_FORCE_TARGET) поставлено на $(_w626_utc "$_W626_FORCE_AT") — через ${_w626_force_off}с, то есть примерно t0 + $(( W626_WINDOW / 3 ))с. Таймер транзиентный ($_W626_FORCE_UNIT), взведён на «${_w626_force_next}», дерево повиснет на systemd, а не на измерителе"
+        fi
     else
-        echo "  6.2.9.F.8: systemd-run НЕ поставил таймер — событие в окно не вводится, величина снова зависит от фазы (вердикт ниже)"
+        echo "  6.2.9.F.8: systemd-run НЕ поставил таймер — событие в окно не вводится, величина снова зависит от фазы (вердикт ниже). Причина от systemd: ${_w626_force_err:-без сообщения}"
     fi
 else
     echo "  6.2.9.F.8: форсирование выключено (W626_FORCE_NODE_EVENT не 1) — окно ловит то, что нода даст сама"
@@ -3940,6 +3976,15 @@ echo "--- уборка ---"
 rm -f /usr/local/bin/w626hostcat /usr/local/bin/w626sig /usr/local/bin/w626beacon 2>/dev/null
 rm -rf /root/w626-sig /tmp/w626-bypass /tmp/w626-chmod 2>/dev/null
 rm -f /etc/cron.d/w626-lineage 2>/dev/null   # подача половины (4) критерия 6.2.4.5
+# Транзиентные юниты форсирования события ноды (6.2.9.F.8): с
+# RemainAfterExit=yes они переживают собственный выход и блокируют СЛЕДУЮЩИЙ
+# прогон по имени. Уборка здесь — вторая защита; первая стоит перед
+# постановкой таймера, потому что стенд может остаться грязным и от прогона,
+# прерванного до этой строки.
+systemctl stop "w626-force-node-event.timer" >/dev/null 2>&1
+systemctl stop "w626-force-node-event.service" >/dev/null 2>&1
+systemctl reset-failed "w626-force-node-event.timer" >/dev/null 2>&1
+systemctl reset-failed "w626-force-node-event.service" >/dev/null 2>&1
 
 echo
 echo "=== ИТОГ КОНТРОЛЕЙ ВОЛНЫ 6.2.6: проваленных $WAVE624_FAILS ==="

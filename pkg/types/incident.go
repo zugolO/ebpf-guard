@@ -32,6 +32,16 @@ type Incident struct {
 	RootPID      uint32          `json:"root_pid,omitempty"`      // root ancestor PID from process tree
 	RootComm     string          `json:"root_comm,omitempty"`     // root ancestor comm; P1-27
 	ProcessChain []string        `json:"process_chain,omitempty"` // ordered list of process names in the chain
+	// ProcessTree is the SAME chain as ProcessChain, but carrying the pid of
+	// every hop (wave 6.2.9.F.1, item 5 / №262). ProcessChain records names
+	// only, so any trust decision taken while walking it can be taken on a
+	// NAME — and a name is spoofable (`exec -a flannel`). The pid-bearing
+	// form lets containerInitTrustedRoot verify a plumbing hop by its IMAGE
+	// (readlink /proc/<pid>/exe) instead, which is the anti-spoof axis this
+	// cluster of waves is built on. Internal bookkeeping: the exported shape
+	// of an incident does not change, and consumers keep reading
+	// process_chain.
+	ProcessTree ProcessTree `json:"-"`
 	Comms        []string        `json:"comms,omitempty"`         // distinct process names across grouped alerts (only when >1); P1-27
 	Verdict      IncidentVerdict `json:"verdict,omitempty"`       // "suspicious" | "attack" based on scoring
 	Score        float64         `json:"score,omitempty"`         // incident score (0-100+)
@@ -83,4 +93,17 @@ type Incident struct {
 	// HasNetworkSignal is true once an alert whose triggering event is a
 	// network/dns/tls event has contributed to this incident.
 	HasNetworkSignal bool `json:"-"`
+	// RootUnit is the systemd unit the incident's ROOT process belongs to,
+	// resolved once from /proc/<RootPID>/cgroup at the moment the incident is
+	// created (wave 6.2.9.F.1, item 4 — criterion 6.2.4.6). Empty when the
+	// root has no unit, has already exited, or no resolver is wired: an empty
+	// value means "the unit axis does not apply", never "trusted".
+	RootUnit string `json:"root_unit,omitempty"`
+	// HasHardEvidence is true once an alert that no periodic-task allowlist
+	// may excuse has contributed: a rule tagged container-escape / persistence
+	// / impact / rootkit, or a process executing out of a world-writable
+	// directory. An attack INSIDE a trusted unit stays detectable — only the
+	// soft recon/enum/anomaly shape loses its automatic "confirmed attack"
+	// label. Internal bookkeeping.
+	HasHardEvidence bool `json:"-"`
 }

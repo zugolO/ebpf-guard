@@ -531,21 +531,37 @@ rules:
                 - "/lib/systemd/systemd-journald"
       # Волна 6.2.5, №261/исход (б) + волна 6.2.6, item 5 (№285: ось
       # переведена на ancestor_exe_path — многопоколенный форк cron) — см.
-      # sigma_passwd_shadow_read_daemon выше для полного обоснования оси. Ось только на cron: он один среди
-      # перечисленных демонов минутно форкается на короткоживущий процесс.
+      # sigma_passwd_shadow_read_daemon выше для полного обоснования оси.
+      # ОГОВОРКА «ось только на cron: он один среди перечисленных демонов
+      # минутно форкается на короткоживущий процесс» ОПРОВЕРГНУТА архивом
+      # collect-6.2.9.F.1 — см. №303 ниже.
+      # №303 (волна 6.2.9.F.1, 14.09.2026): ось РАСШИРЕНА НА sshd. Прогон
+      # 14.09.2026 провалил критерий 6.2.4.5 ОДНИМ алертом тихого окна —
+      # sigma_passwd_shadow_read_daemon, comm=sshd, pid 17013 под мастер-sshd
+      # 749 (process_tree: {749, ppid 1, sshd} → {17013, ppid 749, sshd}).
+      # Это дословно механизм №261/исход (б), но у sshd: форкнутый сессионный
+      # потомок читает /etc/shadow из PAM/NSS ДО execve, свой exe_path
+      # гоночно пуст, verified-daemon-image не применяется. Прежний
+      # комментарий утверждал обратное («у sshd форк на сессию живёт дольше и
+      # этой гонки не показывает в архиве 6.2.4») — утверждение опровергнуто
+      # архивом collect-6.2.9.F.1. Ось при этом не меняется:
+      # ancestor_exe_path идёт по НЕПРЕРЫВНОМУ участку одного comm, пара
+      # sshd(749)→sshd(17013) его не покидает, и значение поля остаётся
+      # строгим надмножеством parent_exe_path по тому же участку.
       - name: verified-daemon-lineage
         condition_group:
           operator: and
           conditions:
             - field: proc.comm
-              op: eq
-              values: [cron]
+              op: in
+              values: [cron, sshd]
             - field: proc.ancestor_exe_path
               op: in
               values:
                 - "/usr/sbin/cron"
                 - "/usr/sbin/crond"
                 - "/usr/bin/crond"
+                - "/usr/sbin/sshd"
 
   - id: sigma_history_file_cleared
     name: "Shell history file cleared or deleted"
@@ -643,19 +659,33 @@ rules:
       # Волна 6.2.5, №261/исход (б) + волна 6.2.6, item 5 (№285: ось
       # переведена на ancestor_exe_path — многопоколенный форк cron) — см.
       # sigma_passwd_shadow_read_daemon выше для полного обоснования оси.
+      # №303 (волна 6.2.9.F.1, 14.09.2026): ось РАСШИРЕНА НА sshd. Прогон
+      # 14.09.2026 провалил критерий 6.2.4.5 ОДНИМ алертом тихого окна —
+      # sigma_passwd_shadow_read_daemon, comm=sshd, pid 17013 под мастер-sshd
+      # 749 (process_tree: {749, ppid 1, sshd} → {17013, ppid 749, sshd}).
+      # Это дословно механизм №261/исход (б), но у sshd: форкнутый сессионный
+      # потомок читает /etc/shadow из PAM/NSS ДО execve, свой exe_path
+      # гоночно пуст, verified-daemon-image не применяется. Прежний
+      # комментарий утверждал обратное («у sshd форк на сессию живёт дольше и
+      # этой гонки не показывает в архиве 6.2.4») — утверждение опровергнуто
+      # архивом collect-6.2.9.F.1. Ось при этом не меняется:
+      # ancestor_exe_path идёт по НЕПРЕРЫВНОМУ участку одного comm, пара
+      # sshd(749)→sshd(17013) его не покидает, и значение поля остаётся
+      # строгим надмножеством parent_exe_path по тому же участку.
       - name: verified-daemon-lineage
         condition_group:
           operator: and
           conditions:
             - field: proc.comm
-              op: eq
-              values: [cron]
+              op: in
+              values: [cron, sshd]
             - field: proc.ancestor_exe_path
               op: in
               values:
                 - "/usr/sbin/cron"
                 - "/usr/sbin/crond"
                 - "/usr/bin/crond"
+                - "/usr/sbin/sshd"
 
   # ============================================================================
   # T1218 — System Binary Proxy Execution
@@ -1236,21 +1266,36 @@ rules:
       # проигрывает гонку readlink на ежеминутном forked-потомке cron
       # (PAM/NSS lookup читает /etc/passwd ДО execve, pid живёт единицы
       # миллисекунд). Родитель форка — долгоживущий /usr/sbin/cron, PPID
-      # процесс себе не выбирает. Ось только на cron: у sshd форк на сессию
-      # живёт дольше и этой гонки не показывает в архиве 6.2.4.
+      # процесс себе не выбирает. ОГОВОРКА «ось только на cron: у sshd форк
+      # на сессию живёт дольше и этой гонки не показывает в архиве 6.2.4»
+      # ОПРОВЕРГНУТА архивом collect-6.2.9.F.1 — см. №303 ниже.
+      # №303 (волна 6.2.9.F.1, 14.09.2026): ось РАСШИРЕНА НА sshd. Прогон
+      # 14.09.2026 провалил критерий 6.2.4.5 ОДНИМ алертом тихого окна —
+      # sigma_passwd_shadow_read_daemon, comm=sshd, pid 17013 под мастер-sshd
+      # 749 (process_tree: {749, ppid 1, sshd} → {17013, ppid 749, sshd}).
+      # Это дословно механизм №261/исход (б), но у sshd: форкнутый сессионный
+      # потомок читает /etc/shadow из PAM/NSS ДО execve, свой exe_path
+      # гоночно пуст, verified-daemon-image не применяется. Прежний
+      # комментарий утверждал обратное («у sshd форк на сессию живёт дольше и
+      # этой гонки не показывает в архиве 6.2.4») — утверждение опровергнуто
+      # архивом collect-6.2.9.F.1. Ось при этом не меняется:
+      # ancestor_exe_path идёт по НЕПРЕРЫВНОМУ участку одного comm, пара
+      # sshd(749)→sshd(17013) его не покидает, и значение поля остаётся
+      # строгим надмножеством parent_exe_path по тому же участку.
       - name: verified-daemon-lineage
         condition_group:
           operator: and
           conditions:
             - field: proc.comm
-              op: eq
-              values: [cron]
+              op: in
+              values: [cron, sshd]
             - field: proc.ancestor_exe_path
               op: in
               values:
                 - "/usr/sbin/cron"
                 - "/usr/sbin/crond"
                 - "/usr/bin/crond"
+                - "/usr/sbin/sshd"
 
   - id: sigma_sudo_config_read
     name: "Sudoers configuration read"

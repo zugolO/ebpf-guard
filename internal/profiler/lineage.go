@@ -10,8 +10,31 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
+
+// lineageProvisionalComms считает узлы со скобочным comm в снимках дерева —
+// находка №301. Сторож нужен ровно затем, чтобы «ноль скобочных корней» на
+// следующем прогоне отличался от «нормализация не вызывалась»: тот же класс,
+// что счётчик попыток исключений (№292) и «ленивый промоушен» базы дрейфа
+// (память drift-stuck-is-lazily-evaluated).
+var lineageProvisionalComms = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_lineage_provisional_comm_total",
+		Help: "Process-tree nodes carrying systemd's transitional \"(name)\" comm, by outcome (seen, renormalized, unresolved).",
+	},
+	[]string{"outcome"},
+)
+
+func init() {
+	// Материализация с нуля: прогон, где ни одного скобочного имени не было,
+	// обязан отличаться в /metrics от бинаря, который про них не знает.
+	for _, outcome := range []string{"seen", "renormalized", "unresolved"} {
+		lineageProvisionalComms.WithLabelValues(outcome)
+	}
+}
 
 // parentInfoPool reduces per-event heap allocations for parentInfo structs.
 var parentInfoPool = sync.Pool{
@@ -333,7 +356,86 @@ func (lt *LineageTracker) GetProcessTree(pid uint32) types.ProcessTree {
 	result := make(types.ProcessTree, len(chain))
 	copy(result, chain)
 	s.mu.RUnlock()
+	lt.normalizeProvisionalComms(result)
 	return result
+}
+
+// --- Волна 6.2.9.F.1, находка №301: скобочный comm корня -------------------
+//
+// ЧТО ИЗМЕРЕНО (архив collect-6.2.9.F.1). Один и тот же pid с ppid==1 приходит
+// в окне под ДВУМЯ-ТРЕМЯ разными comm:
+//
+//	16094  (fwupdmgr) | fwupdmgr | pool-fwupdmgr
+//	16763  (ystemctl) | systemctl
+//	16764  (otd-news) | 50-motd-news
+//
+// Скобочная форма — НЕ дефект нашего событийного пути: это настоящий comm,
+// который systemd ставит форкнутому потомку между fork() и execve(). Буфер
+// под имя — 11 байт («(» + имя + «)» + NUL), при переполнении держится ХВОСТ
+// имени, отсюда «(50-motd-news)» → «(otd-news)» и «(systemctl)» →
+// «(ystemctl)». Правило совпадает с наблюдением побайтово.
+//
+// БОЛЬНО ДРУГОЕ: ключ дерева — comm КОРНЯ, а он у одного процесса меняется на
+// его жизни. Из-за этого дробится вход сужения (состав величины по корню:
+// «(fwupdmgr) 3» и «fwupdmgr 6» — разные строки), одно событие ноды получает
+// два разных Incident.RootComm, и база дрейфа, ключ которой тоже comm
+// (память drift-workload-key-is-comm), заводит две «молодые» нагрузки на один
+// процесс.
+//
+// ПОЧЕМУ НОРМАЛИЗАЦИЯ НА ЧТЕНИИ, А НЕ НА ЗАПИСИ. Ancestry пишется с тем comm,
+// который известен в момент события, и копируется в цепочки потомков;
+// переписывать задним числом все уже собранные цепочки дорого и гонко. Снимок
+// же строится редко (на алерт), и переразрешение затрагивает только узлы со
+// скобочным именем.
+//
+// ОТКАЗ ОТКРЫТЫЙ: не разрешилось — узел остаётся как есть. Ноль вместо лжи.
+
+// isProvisionalComm reports whether comm is systemd's transitional
+// «(name)» form, set with prctl(PR_SET_NAME) between fork() and execve().
+// Форма именно КРУГЛЫХ скобок: runc:[2:INIT] и прочие квадратные имена —
+// настоящие и постоянные.
+func isProvisionalComm(comm string) bool {
+	return len(comm) > 2 && comm[0] == '(' && comm[len(comm)-1] == ')'
+}
+
+// normalizeProvisionalComms переразрешает узлы со скобочным comm по
+// procCache и /proc. Правит КОПИЮ снимка: запись в ancestry не трогается.
+func (lt *LineageTracker) normalizeProvisionalComms(tree types.ProcessTree) {
+	for i := range tree {
+		if !isProvisionalComm(tree[i].Comm) {
+			continue
+		}
+		lineageProvisionalComms.WithLabelValues("seen").Inc()
+		resolved := lt.resolveCurrentComm(tree[i].PID)
+		if resolved == "" || isProvisionalComm(resolved) {
+			lineageProvisionalComms.WithLabelValues("unresolved").Inc()
+			continue
+		}
+		tree[i].Comm = resolved
+		lineageProvisionalComms.WithLabelValues("renormalized").Inc()
+	}
+}
+
+// resolveCurrentComm отдаёт последнее известное имя процесса: сперва кэш
+// /proc этого шарда, потом сам /proc. Скобочное значение кэша ответом не
+// считается — иначе нормализация «разрешала» бы имя в него же самого.
+func (lt *LineageTracker) resolveCurrentComm(pid uint32) string {
+	if pid == 0 {
+		return ""
+	}
+	s := lt.shardFor(pid)
+	s.mu.RLock()
+	entry, ok := s.procCache[pid]
+	var cached string
+	if ok && entry != nil {
+		cached = entry.comm
+	}
+	s.mu.RUnlock()
+	if cached != "" && !isProvisionalComm(cached) {
+		return cached
+	}
+	comm, _ := readProcStatus(pid)
+	return comm
 }
 
 // buildAncestry extends the ancestry chain for pid. It is deadlock-free under

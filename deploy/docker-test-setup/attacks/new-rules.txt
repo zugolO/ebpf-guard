@@ -230,3 +230,24 @@ sigma_cpu_info_access	20260909	6.2.6/№282 item 6: добавлено exception
 mitre_sandbox_detect_proc_read	20260909	6.2.6/№282 item 6: добавлены exceptions node-motd-sysinfo (/proc/uptime) и systemd-logind-session-cgroup (/proc/1/cgroup)
 container_escape_init_proc	20260909	6.2.6/№282 item 6: добавлены exceptions node-motd-sysinfo (/proc/1/cmdline), systemd-logind-session-cgroup (/proc/1/cgroup), sshd-session-limits (/proc/1/limits), k3s-server-node-netdev-poll (/proc/1/net/dev)
 drift_new_file_dir_sensitive	20260909	6.2.6/№282 item 6: добавлено exceptions sshd-authorized-keys (/root/.ssh/authorized_keys, cgroup + exe_path)
+
+# ── Волна 6.2.9.F.1, находка №303 (разбор архива collect-6.2.9.F.1) ─────────
+# У четырёх правил-двойников №253 исключение verified-daemon-lineage было
+# заведено ТОЛЬКО на cron (волна 6.2.6, item 5 / №285) с оговоркой «у sshd
+# форк на сессию живёт дольше и этой гонки не показывает». Оговорка
+# опровергнута прогоном 14.09.2026: критерий 6.2.4.5 провален ОДНИМ алертом
+# тихого окна — sigma_passwd_shadow_read_daemon, comm=sshd, pid 17013 под
+# мастер-sshd 749; сессионный потомок читает /etc/shadow из PAM/NSS ДО
+# execve и проигрывает гонку readlink ровно как потомок cron.
+# Ось НЕ меняется и доверие НЕ расширяется: proc.ancestor_exe_path идёт по
+# непрерывному участку ОДНОГО comm (sshd → sshd), то есть по процессам, ни
+# один из которых не звал execve и которые делят один mm->exe_file
+# ([[same-comm-fork-run-shares-one-image]]). Это СУЖЕНИЕ совпадения: на
+# архивах старше 14.09.2026 те же правила законно поднимали алерты, которые
+# новая ветка exceptions уводит в ebpf_guard_rule_exceptions_total. rule_id
+# не менялся ни у одного — запись идёт сюда, а не в renamed-rules.txt
+# ([[narrowed-rule-goes-to-new-rules]]; renamed дал бы ПРЕФЛАЙТ FAIL №170).
+sigma_passwd_shadow_read_daemon	20260914	6.2.9.F.1/№303: verified-daemon-lineage расширено на sshd (proc.comm in [cron, sshd], ancestor_exe_path += /usr/sbin/sshd)
+sensitive_file_read_daemon	20260914	6.2.9.F.1/№303: verified-daemon-lineage расширено на sshd (proc.comm in [cron, sshd], ancestor_exe_path += /usr/sbin/sshd)
+sigma_log_deletion_daemon	20260914	6.2.9.F.1/№303: verified-daemon-lineage расширено на sshd (proc.comm in [cron, sshd], ancestor_exe_path += /usr/sbin/sshd)
+sigma_utmp_wtmp_modified_daemon	20260914	6.2.9.F.1/№303: verified-daemon-lineage расширено на sshd (proc.comm in [cron, sshd], ancestor_exe_path += /usr/sbin/sshd)

@@ -233,6 +233,67 @@ var verifiedDaemonImages = map[string]map[string]struct{}{
 	},
 }
 
+// hardEvidenceTags — теги правил, которые список доверенных юнитов (item 4
+// волны 6.2.9.F.1, критерий 6.2.4.6) НЕ имеет права прощать. Периодическая
+// задача ноды по своему назначению читает /proc, дёргает dpkg и ходит в сеть
+// — это мягкий состав. Она НЕ монтирует чужие namespace, не ставит
+// persistence и не грузит руткиты; правило с таким тегом внутри доверенного
+// юнита означает «атака ВНУТРИ штатной задачи», и ярлык confirmed_attack там
+// остаётся.
+var hardEvidenceTags = map[string]struct{}{
+	"container-escape": {},
+	"persistence":      {},
+	"impact":           {},
+	"rootkit":          {},
+}
+
+// worldWritableExecDirs — вторая половина того же карантина: процесс,
+// исполняющийся из каталога, куда писать может кто угодно, не бывает частью
+// штатного юнита ноды, как бы ни назывался его comm.
+var worldWritableExecDirs = []string{"/tmp/", "/dev/shm/", "/var/tmp/"}
+
+// buildRuleHardEvidence derives ruleID → «улика твёрдая» from rule tags.
+func buildRuleHardEvidence(rules []Rule) map[string]bool {
+	m := make(map[string]bool, len(rules))
+	for i := range rules {
+		for _, tag := range rules[i].Tags {
+			if _, hard := hardEvidenceTags[strings.ToLower(tag)]; hard {
+				m[rules[i].ID] = true
+				break
+			}
+		}
+	}
+	return m
+}
+
+// Исходы проверки plumbing-хопа (item 5 волны 6.2.9.F.1, №262). Материализуются
+// с нуля в init(): «verified = 0» обязано отличаться в /metrics от «бинарь про
+// эту проверку не знает» — тот же контракт, что у exe_path_lookups_total.
+const (
+	plumbingHopVerified   = "verified"   // имя в списке И образ совпал — хоп пройден
+	plumbingHopMismatch   = "mismatch"   // образ разрешён, но НЕ из allowlist — возможен спуф имени
+	plumbingHopUnresolved = "unresolved" // образ не разрешился (гонка readlink), хоп НЕ пройден
+	plumbingHopNoPID      = "no_pid"     // у хопа нет pid: инцидент несёт только имена
+	plumbingHopNotListed  = "not_listed" // имя не из списка сетевого plumbing — обычный обрыв обхода
+)
+
+var incidentPlumbingHops = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_incident_plumbing_hop_total",
+		Help: "CNI plumbing hops examined by the container-init trust walk, by outcome (verified, mismatch, unresolved, no_pid, not_listed).",
+	},
+	[]string{"outcome"},
+)
+
+func init() {
+	for _, outcome := range []string{
+		plumbingHopVerified, plumbingHopMismatch, plumbingHopUnresolved,
+		plumbingHopNoPID, plumbingHopNotListed,
+	} {
+		incidentPlumbingHops.WithLabelValues(outcome)
+	}
+}
+
 // IncidentScoringConfig tunes how incidents are scored and when they are
 // promoted to an "attack" verdict. Weights are per-unit contributions; the
 // scorer applies no hidden multipliers on top of them.
@@ -343,9 +404,18 @@ type IncidentTracker struct {
 	// procReconClusterTag (or any rule id, itself, for rules without it) —
 	// see procReconClusterTag and recalculateScore's use of it (5.8f).
 	ruleClusterKeys map[string]string
-	open            map[incidentKey]*types.Incident // active incidents (last alert within window)
-	byID            map[string]*types.Incident      // all incidents for ID-based lookups
-	seq             atomic.Uint64
+	// ruleHardEvidence maps ruleID → whether the rule carries a tag no
+	// trusted-unit allowlist may excuse (item 4 волны 6.2.9.F.1).
+	ruleHardEvidence map[string]bool
+	// trustedUnits lists systemd units (glob allowed) whose ROUTINE work must
+	// not be labelled a confirmed attack. EMPTY BY DEFAULT: the axis is off
+	// until an operator names units, and the names are printed into the run
+	// archive by the control — otherwise "the product stopped lying" cannot be
+	// told apart from "the list was padded before the run".
+	trustedUnits []string
+	open         map[incidentKey]*types.Incident // active incidents (last alert within window)
+	byID         map[string]*types.Incident      // all incidents for ID-based lookups
+	seq          atomic.Uint64
 }
 
 // newIncidentTracker creates an IncidentTracker with the given sliding window.
@@ -357,14 +427,15 @@ func newIncidentTracker(window time.Duration, lineageTracker *profiler.LineageTr
 		window = 60 * time.Second
 	}
 	t := &IncidentTracker{
-		window:          window,
-		lineageTracker:  lineageTracker,
-		scoringConfig:   DefaultIncidentScoringConfig(),
-		trustedComms:    defaultTrustedComms,
-		ruleTactics:     buildRuleTactics(rules),
-		ruleClusterKeys: buildRuleClusterKeys(rules),
-		open:            make(map[incidentKey]*types.Incident),
-		byID:            make(map[string]*types.Incident),
+		window:           window,
+		lineageTracker:   lineageTracker,
+		scoringConfig:    DefaultIncidentScoringConfig(),
+		trustedComms:     defaultTrustedComms,
+		ruleTactics:      buildRuleTactics(rules),
+		ruleClusterKeys:  buildRuleClusterKeys(rules),
+		ruleHardEvidence: buildRuleHardEvidence(rules),
+		open:             make(map[incidentKey]*types.Incident),
+		byID:             make(map[string]*types.Incident),
 	}
 	return t
 }
@@ -405,10 +476,82 @@ func buildRuleClusterKeys(rules []Rule) map[string]string {
 func (t *IncidentTracker) SetRules(rules []Rule) {
 	nextTactics := buildRuleTactics(rules)
 	nextClusters := buildRuleClusterKeys(rules)
+	nextHard := buildRuleHardEvidence(rules)
 	t.mu.Lock()
 	t.ruleTactics = nextTactics
 	t.ruleClusterKeys = nextClusters
+	t.ruleHardEvidence = nextHard
 	t.mu.Unlock()
+}
+
+// SetTrustedUnits replaces the systemd units whose routine work may not be
+// labelled a confirmed attack (item 4 волны 6.2.9.F.1, критерий 6.2.4.6).
+// Empty disables the axis entirely.
+func (t *IncidentTracker) SetTrustedUnits(units []string) {
+	next := make([]string, 0, len(units))
+	for _, u := range units {
+		if u = strings.TrimSpace(u); u != "" {
+			next = append(next, u)
+		}
+	}
+	t.mu.Lock()
+	t.trustedUnits = next
+	t.mu.Unlock()
+}
+
+// isHardEvidence reports whether this alert is evidence no trusted-unit
+// allowlist may excuse — см. hardEvidenceTags. The image check is last, so the
+// readlink stays on the rare path (the same short-circuit contract the rule
+// layer's exceptions carry).
+//
+// Caller must hold at least the read lock.
+func (t *IncidentTracker) isHardEvidence(alert types.Alert) bool {
+	if t.ruleHardEvidence[alert.RuleID] {
+		return true
+	}
+	if alert.PID == 0 {
+		return false
+	}
+	// РЕВИЗИЯ 14.09.2026. Комментарий выше обещает readlink «на редком пути»,
+	// но без этой проверки он делался на КАЖДОМ алерте каждого инцидента — и
+	// в том числе при ПУСТОМ списке доверенных юнитов, то есть когда весь
+	// результат заведомо не будет прочитан ни разу: HasHardEvidence читается
+	// РОВНО в одной ветке recalculateScore, и та начинается с
+	// trustedUnitRoot(), который при пустом списке всегда false. По умолчанию
+	// (и в продуктовом конфиге) список ПУСТ — значит правка item 4 в этом
+	// виде добавляла syscall на горячий путь корреляции всем, ничего за него
+	// не получая. Тег правила проверяется по-прежнему безусловно: он
+	// бесплатен, а защёлка от этого остаётся полной на любом прогоне, где
+	// ось включена с самого старта (SetTrustedUnits зовётся один раз, при
+	// создании движка).
+	if len(t.trustedUnits) == 0 {
+		return false
+	}
+	exe := rawResolveExePath(alert.PID)
+	if exe == "" {
+		return false
+	}
+	for _, dir := range worldWritableExecDirs {
+		if strings.HasPrefix(exe, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedUnitRoot reports whether the incident's root process belongs to a unit
+// the operator listed as routine node work. Caller must hold at least the read
+// lock.
+func (t *IncidentTracker) trustedUnitRoot(inc *types.Incident) bool {
+	if inc.RootUnit == "" || len(t.trustedUnits) == 0 {
+		return false
+	}
+	for _, pattern := range t.trustedUnits {
+		if matchUnitPattern(pattern, inc.RootUnit) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetScoringConfig replaces the scoring configuration. Zero-valued fields fall
@@ -619,6 +762,76 @@ func isContainerTreeRoot(comm string) bool {
 	return ok
 }
 
+// cniPlumbingImages lists the CNI plugins that sit BETWEEN the container
+// runtime and the container's own root process while a pod's network is being
+// wired up, together with the exact images they are allowed to run from —
+// wave 6.2.9.F.1, item 5 (№262, archive collect-6.2.9.F.1).
+//
+// WHAT THE ARCHIVE SHOWED. The single incident that failed criterion 6.2.6.16
+// on the 14.09.2026 run was rooted at k3s-server with the chain
+// k3s-server → containerd → flannel → bridge (score 62.6, rules
+// container_escape_mount/cap_sys_admin/nsenter/proc_write,
+// rootkit_proc_sysctl_write, …) — i.e. routine pod-network setup, every rule
+// of it a mount/ioctl/sysctl the CNI plugins perform by design. The walk in
+// containerInitTrustedRoot stopped at "flannel": it is not a supervisor, so
+// the loop broke there and isTrustedComm("flannel") decided the incident.
+// The gate did exactly what it says — the hop list simply did not know
+// network plumbing.
+//
+// WHY IMAGES AND NOT NAMES. Adding flannel/bridge/loopback to
+// containerSupervisorComms (or to defaultTrustedComms) would trust the NAME,
+// and `exec -a flannel /tmp/x` costs an attacker one line — the mute bypass
+// this whole cluster of waves has been removing (see exepath.go's
+// `exec -a k3s-server` example, находка №247). A hop only counts as plumbing
+// when its image resolves to one of the paths below, which no unprivileged
+// process can fake: the kernel writes /proc/<pid>/exe, not the process.
+//
+// Unresolved is NOT a pass: a hop whose image does not resolve keeps the walk
+// stopped, so the incident stays untrusted-rooted and promotes exactly as it
+// does today. That is the open-refusal contract of the exe_path axis
+// (exepath.go) applied here — this layer can afford it because the cost of
+// refusing is one extra incident, while the cost of passing on an unverified
+// name is a blind spot.
+var cniPlumbingImages = map[string]map[string]struct{}{
+	"flannel":    {"/opt/cni/bin/flannel": {}},
+	"bridge":     {"/opt/cni/bin/bridge": {}},
+	"loopback":   {"/opt/cni/bin/loopback": {}},
+	"portmap":    {"/opt/cni/bin/portmap": {}},
+	"host-local": {"/opt/cni/bin/host-local": {}},
+}
+
+// k3sDataBinPrefix covers k3s's own copy of the same plugins, which lives
+// under a content-addressed directory: /var/lib/rancher/k3s/data/<hash>/bin/
+// <plugin>. The hash changes with every k3s release, so it cannot be an exact
+// path — but the shape is still exact: prefix, ONE path segment, then
+// "/bin/<comm>". A path with extra segments (…/data/x/y/bin/flannel) does not
+// match, so this is not a prefix pass on the whole data directory.
+const k3sDataBinPrefix = "/var/lib/rancher/k3s/data/"
+
+// isCNIPlumbingImage reports whether exe is an image comm is allowed to run
+// from as container-network plumbing.
+func isCNIPlumbingImage(comm, exe string) bool {
+	if comm == "" || exe == "" {
+		return false
+	}
+	imgs, listed := cniPlumbingImages[comm]
+	if !listed {
+		return false
+	}
+	if _, ok := imgs[exe]; ok {
+		return true
+	}
+	if !strings.HasPrefix(exe, k3sDataBinPrefix) {
+		return false
+	}
+	rest := exe[len(k3sDataBinPrefix):]
+	slash := strings.Index(rest, "/")
+	if slash <= 0 {
+		return false
+	}
+	return rest[slash:] == "/bin/"+comm
+}
+
 // isSupervisorHop reports whether comm is container-runtime plumbing
 // (containerSupervisorComms) rather than any process that could itself be a
 // workload — attacker or legitimate. Wave 6.2.4/№255 (archive collect-6.2.3):
@@ -729,17 +942,152 @@ func (t *IncidentTracker) containerInitTrustedRoot(inc *types.Incident) bool {
 	// containerd-shim in the first place — it is the pod's own compromised
 	// application process acting alone — so widening the walk here does not
 	// touch criterion 6.2.4.7's positive half.
+	//
+	// ITEM 5 ВОЛНЫ 6.2.9.F.1 (№262, archive collect-6.2.9.F.1): the walk also
+	// passes a CNI plumbing hop (flannel/bridge/loopback/portmap/host-local),
+	// but ONLY when that hop's image resolves to an allowlisted path — see
+	// cniPlumbingImages. Supervisor hops keep passing on the name alone,
+	// unchanged: that decision predates this wave and has its own evidence
+	// (№255), and re-keying it on images would silently stop coalescing
+	// container init on every node whose runtime lives somewhere unexpected.
 	i := 1
+	lastWasVerifiedCNI := false
 	for i < len(inc.ProcessChain) {
-		if _, isSupervisor := containerSupervisorComms[inc.ProcessChain[i]]; !isSupervisor {
-			break
+		if _, isSupervisor := containerSupervisorComms[inc.ProcessChain[i]]; isSupervisor {
+			lastWasVerifiedCNI = false
+			i++
+			continue
 		}
-		i++
+		pass, spoofed := t.verifiedPlumbingHop(inc, i)
+		if pass {
+			lastWasVerifiedCNI = true
+			i++
+			continue
+		}
+		if spoofed {
+			// A resolved image that is NOT on the allowlist is the spoof this
+			// check exists for (`exec -a flannel /tmp/x`). It must not fall
+			// back on the name at the stop below.
+			return false
+		}
+		break
 	}
 	if i >= len(inc.ProcessChain) {
-		return false
+		// The chain is plumbing all the way down. That is trusted ONLY when
+		// the last hop was a CNI plugin whose IMAGE was verified: pod-network
+		// setup legitimately ends at bridge/loopback with nothing else under
+		// it, and there is no "real actor" hop to test. Exhausting a chain of
+		// supervisors alone still returns false, unchanged — those hops pass
+		// on their NAME, and letting a name-only chain end the walk in a pass
+		// would trust `exec -a containerd` outright.
+		return lastWasVerifiedCNI
 	}
+	// The walk stopped at a hop that is neither a supervisor nor verified CNI
+	// plumbing, and whose image did NOT resolve to something foreign. Its NAME
+	// decides, exactly as before this wave: unresolved evidence falls back to
+	// comm-only trust rather than flipping to untrusted — the same contract
+	// isImageVerifiedComm documents for this layer, and for the same reason
+	// (every environment without a wired resolver, this package's own test
+	// suite included, would otherwise stop coalescing container init at all).
+	// Only a RESOLVED, mismatching image withdraws trust, and that case has
+	// already returned false above.
 	return t.isTrustedComm(inc.ProcessChain[i])
+}
+
+// verifiedPlumbingHop reports whether hop i of inc's chain is container-network
+// plumbing whose IMAGE confirms it — wave 6.2.9.F.1, item 5 (№262).
+//
+// The name is checked first and the image last, deliberately: the map lookup
+// is free and the readlink is not, so `&&` short-circuits the syscall onto the
+// rare path. That is the same ordering contract the rule layer's exceptions
+// carry (rules/sigma-linux.yaml, verified-daemon-image).
+//
+// Every outcome is counted. A zero here has to be distinguishable from "this
+// code never ran" — the class of defect that cost wave 6.2.6 a run twice
+// (№292's exception-attempt counter, the drift "stuck" reading) — and the
+// split between unresolved and mismatch is what says whether a future
+// non-coalescing incident is a readlink race or an actual spoof.
+//
+// Caller must hold at least the read lock.
+// Returns (pass, spoofed): pass says the hop is verified plumbing and the walk
+// may continue through it; spoofed says the hop's image RESOLVED to something
+// outside the allowlist, which must not fall back on the name.
+func (t *IncidentTracker) verifiedPlumbingHop(inc *types.Incident, i int) (bool, bool) {
+	comm := inc.ProcessChain[i]
+	if _, listed := cniPlumbingImages[comm]; !listed {
+		incidentPlumbingHops.WithLabelValues(plumbingHopNotListed).Inc()
+		return false, false
+	}
+	node, ok := treeNodeForChainIndex(inc, i)
+	if !ok || node.PID == 0 {
+		// No pid for this hop: the incident carries names only (an alert that
+		// arrived without a process tree, or a tree shorter than the chain).
+		// Nothing to verify an image against — refuse, do not guess.
+		incidentPlumbingHops.WithLabelValues(plumbingHopNoPID).Inc()
+		return false, false
+	}
+	exe := rawResolveExePath(node.PID)
+	if exe == "" {
+		// Readlink race: CNI plugins live milliseconds. The fallback is the
+		// same axis item 5 of wave 6.2.6 built for cron (№285): a CONTIGUOUS
+		// run of one comm shares one mm->exe_file, because no execve happened
+		// between those processes, so a live relative of the hop answers for
+		// the hop's own image. Walking a comm BOUNDARY would be a different
+		// claim entirely, and is not done.
+		exe = t.sameCommRunImage(inc, i)
+	}
+	if exe == "" {
+		incidentPlumbingHops.WithLabelValues(plumbingHopUnresolved).Inc()
+		return false, false
+	}
+	if !isCNIPlumbingImage(comm, exe) {
+		incidentPlumbingHops.WithLabelValues(plumbingHopMismatch).Inc()
+		return false, true
+	}
+	incidentPlumbingHops.WithLabelValues(plumbingHopVerified).Inc()
+	return true, false
+}
+
+// sameCommRunImage resolves the image of hop i by asking its neighbours in the
+// SAME contiguous same-comm run of the tree — never across a comm boundary.
+// Returns "" when nothing in the run resolves.
+func (t *IncidentTracker) sameCommRunImage(inc *types.Incident, i int) string {
+	comm := inc.ProcessChain[i]
+	for j := i - 1; j >= 0; j-- {
+		node, ok := treeNodeForChainIndex(inc, j)
+		if !ok || node.Comm != comm {
+			break
+		}
+		if exe := rawResolveExePath(node.PID); exe != "" {
+			return exe
+		}
+	}
+	for j := i + 1; j < len(inc.ProcessChain); j++ {
+		node, ok := treeNodeForChainIndex(inc, j)
+		if !ok || node.Comm != comm {
+			break
+		}
+		if exe := rawResolveExePath(node.PID); exe != "" {
+			return exe
+		}
+	}
+	return ""
+}
+
+// treeNodeForChainIndex returns the pid-bearing node of hop i. Both ProcessChain
+// and ProcessTree are built from the same alert with the same filter, so index i
+// addresses the same hop in both — the comm is re-checked anyway, because a tree
+// carried over from another alert would otherwise silently answer for a hop it
+// does not belong to.
+func treeNodeForChainIndex(inc *types.Incident, i int) (types.ProcessNode, bool) {
+	if i < 0 || i >= len(inc.ProcessTree) || i >= len(inc.ProcessChain) {
+		return types.ProcessNode{}, false
+	}
+	node := inc.ProcessTree[i]
+	if node.Comm != inc.ProcessChain[i] {
+		return types.ProcessNode{}, false
+	}
+	return node, true
 }
 
 // hasQualifyingUntrustedComm reports whether inc currently carries an
@@ -834,6 +1182,23 @@ func (t *IncidentTracker) getProcessChain(alert types.Alert) []string {
 	return chain
 }
 
+// getProcessTree returns the alert's ancestry with the pid of every hop,
+// filtered by exactly the same rule getProcessChain applies to names (nodes
+// with an empty comm are dropped) so that index i means the same hop in both.
+// Wave 6.2.9.F.1, item 5 (№262): see the comment on types.Incident.ProcessTree.
+func (t *IncidentTracker) getProcessTree(alert types.Alert) types.ProcessTree {
+	if len(alert.ProcessTree) == 0 {
+		return nil
+	}
+	tree := make(types.ProcessTree, 0, len(alert.ProcessTree))
+	for _, node := range alert.ProcessTree {
+		if node.Comm != "" {
+			tree = append(tree, node)
+		}
+	}
+	return tree
+}
+
 // rootComm returns the root ancestor's comm for the alert. Prefers the attached
 // ProcessTree's root node; falls back to the alert's own comm when no lineage is
 // available (single-process incident). Used to populate Incident.RootComm so an
@@ -895,6 +1260,11 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 			RootPID:      rootPID,
 			RootComm:     t.rootComm(alert, rootPID),
 			ProcessChain: t.getProcessChain(alert),
+			ProcessTree:  t.getProcessTree(alert),
+			// Юнит корня снимается ЗДЕСЬ, при создании инцидента, а не на
+			// промоушене: корень разовой задачи живёт секунды, и к моменту
+			// вердикта /proc/<pid>/cgroup уже не существует.
+			RootUnit:     unitForPID(rootPID),
 			SourceEvents: make(map[uint64]struct{}, 4),
 		}
 		// Seed the distinct-comm set with the creating alert's comm. Kept only
@@ -906,9 +1276,16 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		t.open[key] = inc
 		t.byID[id] = inc
 	} else {
-		// Update process chain if this alert provides a longer chain
+		// Update process chain if this alert provides a longer chain. The
+		// pid-bearing form is replaced TOGETHER with the names (item 5,
+		// №262): a tree belonging to one alert and a chain belonging to
+		// another would let containerInitTrustedRoot verify hop i's name
+		// against hop i's pid from a different process, i.e. apply a trust
+		// decision to the wrong process — the exact failure mode the
+		// exe_path axis exists to prevent.
 		if chain := t.getProcessChain(alert); len(chain) > len(inc.ProcessChain) {
 			inc.ProcessChain = chain
+			inc.ProcessTree = t.getProcessTree(alert)
 		}
 		// The most recent alert's comm is the actionable leaf process.
 		if alert.Comm != "" {
@@ -975,6 +1352,14 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 	}
 	if isNetworkSignal(alert.Event.Type) {
 		inc.HasNetworkSignal = true
+	}
+	// Твёрдая улика взводится ЗАЩЁЛКОЙ и не пересматривается: в отличие от
+	// недоверенного comm (чья квалификация зависит от формы дерева, которая
+	// растёт — №276), «правило с тегом container-escape сработало» и «процесс
+	// исполнялся из /tmp» — свойства уже случившегося события. Пересчитывать
+	// их не по чему, а забывать нельзя.
+	if !inc.HasHardEvidence && t.isHardEvidence(alert) {
+		inc.HasHardEvidence = true
 	}
 
 	// 5.5a: info-severity alerts stay in RuleIDs/AlertIDs/SourceEvents above
@@ -1148,6 +1533,21 @@ func (t *IncidentTracker) recalculateScore(inc *types.Incident) bool {
 	// current shape here, not on whatever the chain looked like when the
 	// first untrusted comm arrived.
 	hasQualifyingSignal := t.hasQualifyingUntrustedComm(inc) || inc.HasNetworkSignal
+
+	// ITEM 4 ВОЛНЫ 6.2.9.F.1 (критерий 6.2.4.6). Корень инцидента принадлежит
+	// юниту, который оператор назвал штатной периодической работой ноды, и
+	// НИ ОДНОЙ твёрдой улики в инциденте нет — ярлык "подтверждённая атака"
+	// снимается. Снимаются ОБЕ половины сразу, и это не запас: одной
+	// недоверенной comm мало (dpkg под юнитом — это и есть его работа),
+	// сетевого сигнала тоже мало (юнит, который по назначению качает,
+	// качает). Инцидент при этом никуда не девается — он остаётся
+	// "suspicious", счёт, правила и все его алерты копятся как прежде, и
+	// объём алертов эта ветка не двигает ни на один
+	// (память info-twin-renames-volume: путать снятие ярлыка с сужением
+	// правил нельзя).
+	if hasQualifyingSignal && !inc.HasHardEvidence && t.trustedUnitRoot(inc) {
+		hasQualifyingSignal = false
+	}
 
 	// 5.7e: VerdictNone, not "", when score never qualifies — an all-info
 	// incident (5.5a) is expected to land here, not to look like scoring never
@@ -1455,6 +1855,12 @@ func buildConfirmedAttackAlert(inc types.Incident) types.Alert {
 	}
 	if inc.RootComm != "" {
 		details["root_comm"] = inc.RootComm
+	}
+	// Юнит корня печатается рядом с его comm: без него критерий 6.2.4.6 не
+	// может назвать поимённо, чей юнит промотирован, и вердикт остаётся
+	// нечитаемым (память drift-baseline-has-no-per-workload-observability).
+	if inc.RootUnit != "" {
+		details["root_unit"] = inc.RootUnit
 	}
 
 	return types.Alert{

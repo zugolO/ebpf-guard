@@ -501,6 +501,11 @@ type CorrelationEngineConfig struct {
 	// built-in default (see defaultTrustedComms).
 	IncidentTrustedComms []string
 
+	// IncidentTrustedUnits lists systemd units whose routine work may not be
+	// labelled a confirmed attack — wave 6.2.9.F.1, item 4 (criterion
+	// 6.2.4.6). Empty → the axis is off entirely.
+	IncidentTrustedUnits []string
+
 	// AllowlistProfiler enables deny-unknown syscall enforcement.
 	// When set, every syscall event is checked against the learned allowlist
 	// and generates an alert (or enforced action) when unknown.
@@ -834,6 +839,12 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	// gate's allowlist is tunable without a rebuild. Empty keeps the default.
 	if len(config.IncidentTrustedComms) > 0 {
 		ce.incidentTracker.SetTrustedComms(config.IncidentTrustedComms)
+	}
+	// Which periodic units a node runs is deployment-specific too, and unlike
+	// trusted_comms this list has NO built-in default: the axis stays off
+	// until an operator names units (item 4 волны 6.2.9.F.1).
+	if len(config.IncidentTrustedUnits) > 0 {
+		ce.incidentTracker.SetTrustedUnits(config.IncidentTrustedUnits)
 	}
 
 	// Emit a synthetic critical alert the first time an incident is judged an

@@ -988,6 +988,24 @@ type CorrelatorConfig struct {
 	// systemd-logind, grafana). Which daemons are noisy is deployment-specific,
 	// so this must be tunable without a rebuild.
 	TrustedComms []string `mapstructure:"trusted_comms"`
+	// TrustedUnits lists systemd units (globs allowed, e.g. "apt-daily*.service")
+	// whose ROUTINE work must not be labelled a confirmed attack by the
+	// incident layer — wave 6.2.9.F.1, item 4 (criterion 6.2.4.6: the run of
+	// 14.09.2026 promoted /etc/update-motd.d/50-motd-news doing dpkg-query +
+	// wget into incident_confirmed_attack).
+	//
+	// The axis is the unit taken from /proc/<root pid>/cgroup, not the process
+	// name: cgroup placement is written by systemd, and an unprivileged
+	// process cannot assign itself somebody else's unit — unlike a comm, which
+	// `exec -a` forges for free.
+	//
+	// EMPTY BY DEFAULT. Naming a unit here suppresses only the automatic
+	// "confirmed attack" label on a SOFT incident (recon/enum/anomaly): an
+	// alert from a rule tagged container-escape/persistence/impact/rootkit, or
+	// from a process executing out of /tmp, /dev/shm or /var/tmp, still
+	// promotes exactly as before. Alert volume is not affected at all — every
+	// rule keeps firing and every alert keeps being stored.
+	TrustedUnits []string `mapstructure:"trusted_units"`
 	// SelfExclude configures the 5.8e self-exclusion filter: events from the
 	// agent's own process tree are dropped before rule evaluation.
 	SelfExclude SelfExcludeConfig `mapstructure:"self_exclude"`

@@ -412,6 +412,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Duration("learning_period", engineCfg.LearningPeriod))
 	}
 	engineCfg.IncidentTrustedComms = cfg.Correlator.TrustedComms
+	engineCfg.IncidentTrustedUnits = cfg.Correlator.TrustedUnits
 	engineCfg.EnableRateLimit = cfg.Rules.RateLimitAlerts
 	engineCfg.RateLimitWindow = time.Duration(cfg.Rules.RateLimitWindow) * time.Second
 	engineCfg.MaxAlertsPerWindow = cfg.Rules.MaxAlertsPerWindow
@@ -722,6 +723,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// reload. До этого вызова поле пусто у всех событий, и всякое исключение,
 	// опирающееся на него, не применяется: слой выключен в сторону шума.
 	correlator.SetExePathResolver(correlator.ProcExePathResolver{})
+
+	// Волна 6.2.9.F.1, item 4: ось systemd-юнита корня инцидента. Ставится
+	// ВСЕГДА, независимо от того, назван ли хоть один доверенный юнит, — тогда
+	// details.root_unit печатается у КАЖДОГО подтверждённого инцидента, и
+	// "ноль ложных" на прогоне читается вместе с именем юнита, а не вместо
+	// него. Без резолвера ось выключена целиком (unitForPID возвращает "").
+	correlator.SetUnitResolver(correlator.ProcCgroupUnitResolver{})
 
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {

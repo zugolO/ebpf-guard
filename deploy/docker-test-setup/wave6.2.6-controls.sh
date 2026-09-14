@@ -828,7 +828,15 @@ if [ "${W626_FORCE_NODE_EVENT:-0}" = "1" ]; then
     _w626_force_off=$(( W626_OPEN_SETTLE + W626_WINDOW / 3 ))
     systemctl reset-failed "${_W626_FORCE_UNIT}.timer" >/dev/null 2>&1
     systemctl reset-failed "${_W626_FORCE_UNIT}.service" >/dev/null 2>&1
-    if systemd-run --quiet --on-active="${_w626_force_off}s"             --unit="$_W626_FORCE_UNIT"             /usr/bin/systemctl start "$_W626_FORCE_TARGET" >/dev/null 2>&1; then
+    # AccuracySec=1s ОБЯЗАТЕЛЕН, и это не гигиена. У systemd-таймеров точность
+    # по умолчанию — 1 МИНУТА: systemd сдвигает срабатывание в пределах окна
+    # точности, чтобы группировать пробуждения. Смок 14.09.2026 напечатал ровно
+    # это: таймер планировался на t0+20с, а юнит стартовал на t0+36с — при окне
+    # 60 с событие едва не выпало наружу. На боевом окне 600 с смещение до
+    # минуты безвредно, но оно превращает «событие введено по построению» в
+    # «введено, если повезло с округлением» — то есть возвращает зависимость от
+    # фазы, ради снятия которой блок и заведён.
+    if systemd-run --quiet --on-active="${_w626_force_off}s" --timer-property=AccuracySec=1s --unit="$_W626_FORCE_UNIT" /usr/bin/systemctl start "$_W626_FORCE_TARGET" >/dev/null 2>&1; then
         _W626_FORCE_SCHEDULED=1
         _W626_FORCE_AT=$(( $(_w626_epoch) + _w626_force_off ))
         echo "  6.2.9.F.8: событие ноды ($_W626_FORCE_TARGET) поставлено на $(_w626_utc "$_W626_FORCE_AT") — через ${_w626_force_off}с, то есть примерно t0 + $(( W626_WINDOW / 3 ))с. Таймер транзиентный ($_W626_FORCE_UNIT), дерево повиснет на systemd, а не на измерителе"

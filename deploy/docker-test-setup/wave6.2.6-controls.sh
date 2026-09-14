@@ -3360,6 +3360,21 @@ _w626_fake_attack=0
 _w626_fake_ran=0
 echo "--- 6.2.4.6 положительный контроль (item 4): атака ВНУТРИ доверенного юнита обязана промотироваться ---"
 if [ -n "${_w626_units:-}" ] || grep -qE '^[[:space:]]*trusted_units:' "$_w626_cfg" 2>/dev/null; then
+    # ВТОРОЙ ТРАНЗИЕНТНЫЙ ЮНИТ ПАЙПЛАЙНА — ТОТ ЖЕ КЛАСС №304 (найдено аудитом
+    # 14.09.2026, находка №316). Он тоже ставится с RemainAfterExit=yes, то
+    # есть тоже остаётся `active (exited)` и мусорщиком не собирается, а перед
+    # постановкой снимался ОДНИМ `reset-failed` — который снимает только
+    # СБОЙНОЕ состояние. Уборка в конце блока (stop + reset-failed) спасает
+    # лишь прогон, дошедший до неё: прерванный прогон оставляет остаток, и
+    # СЛЕДУЮЩИЙ `systemd-run --unit=w626-fake-motd` отказывает — контроль
+    # печатает «юнит НЕ запустился», половина «детект жив» условия 2 не
+    # снимается, и ноль ложных инцидентов остаётся без своего положительного
+    # контроля. Остаток снимается явно и ПЕЧАТАЕТСЯ (память
+    # transient-unit-survives-and-blocks-next-run).
+    if systemctl cat "${_W626_FAKE_UNIT}.service" >/dev/null 2>&1; then
+        echo "  6.2.4.6: НАЙДЕН ОСТАТОК прошлого прогона (${_W626_FAKE_UNIT}.service=$(systemctl show -p ActiveState --value "${_W626_FAKE_UNIT}.service" 2>/dev/null)) — снимается до постановки юнита"
+    fi
+    systemctl stop "${_W626_FAKE_UNIT}.service" >/dev/null 2>&1
     systemctl reset-failed "${_W626_FAKE_UNIT}.service" >/dev/null 2>&1
     cp /bin/bash /tmp/w626fakemotd 2>/dev/null && chmod 755 /tmp/w626fakemotd 2>/dev/null
     # ДВЕ ПРАВКИ ПОЛЕЗНОЙ НАГРУЗКИ (ревизия 14.09.2026, до прогона):

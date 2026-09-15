@@ -1503,6 +1503,43 @@ else
     pass "6.2.2.2 ДОСТИГНУТО: $_w63_rl_n правил со срезом напечатаны поимённо при сумме среза $_w63_rl (6.2.1 печатала «нет» при срезе +530)"
 fi
 
+# ---- 6.2.6.1: ВЕРДИКТ по объёму тихого окна ----
+# ВОССТАНОВЛЕНО 15.09.2026 (фаза 1, смок на стенде). Форк item 6 вырезал
+# ВЕРДИКТ этого критерия вместе с единицей «цена одного события ноды»
+# (6.2.9.F.7/6.2.9.F.8 — она отвечала на вопрос гейта куста 6.2.x, которого у
+# волны 6.3 нет), но ВЕЛИЧИНУ оставил: строка «← ВЕЛИЧИНА КРИТЕРИЯ 6.2.6.1»
+# выше печаталась на каждом прогоне, а вердиктного слова не выносил никто.
+# Смок 15.09.2026 встал на этом ОТКАЗОМ СОБРАТЬ АРХИВ — ровно то, ради чего
+# страж полноты и заводился (№269/№270).
+#
+# ПОЧЕМУ ИЗМЕРЕНО, А НЕ «ГЕЙТ ВЗЯТ/НЕ ВЗЯТ». Единица «алертов/ч» снята
+# решением владельца 11.09.2026 (исход А, находка №297): она получалась
+# домножением оконного счёта на 3600/окно, а потока, который такое
+# домножение предполагает, у ноды нет. Порог 100/ч НЕ двигается и НЕ
+# воскрешается — он снят как единица, и вердикт по нему не выносится.
+# Заменившая его величина (цена одного события ноды) в волне 6.3 не
+# снимается ВООБЩЕ — её механизм вырезан форком осознанно. Поэтому честный
+# вердикт здесь ровно один: величина ИЗМЕРЕНА и напечатана, порог ей не
+# назначается (правило 5.9.6).
+#
+# ВЕРХНЯЯ ОЦЕНКА, А НЕ ВЕЛИЧИНА ПРОДУКТА. Доля самого замера в объёме окна на
+# архивах куста 6.2.x доходила до 100% (gate-value-can-be-entirely-measurer),
+# поэтому число ниже читается только сверху, а его разделение по дереву
+# печатает 6.2.9.F.3 выше — на него и ссылается вердикт.
+echo "  запас гейта (справочно, единица СНЯТА решением 11.09.2026): ≤ ${W63_GATE_MARGIN}/ч (${_w63_margin_abs} алертов за окно ${W63_WINDOW}с), фактически ${_w63_vol_hour}/ч (${_w63_vol} за окно)"
+_w63_gate_rel="в пределах снятого порога"
+[ "${_w63_vol_hour:-0}" -gt "$W63_GATE" ] && _w63_gate_rel="ВЫШЕ снятого порога"
+echo "  справочно (вердикт по единице НЕ выносится): величина (а) ${_w63_vol_hour}/ч — ${_w63_gate_rel} ${W63_GATE}/ч"
+if [ ! -s "$W63_ART/metrics-window-start.txt" ] || [ ! -s "$W63_ART/metrics-window-end.txt" ]; then
+    die "6.2.6.1 НЕИЗМЕРИМ: один из снимков границы окна пуст или отсутствует — объём считать не из чего, и ноль здесь был бы приборным"
+elif [ "$_w63_vol" -lt 0 ] || [ "$_w63_v_total" -lt 0 ]; then
+    die "6.2.6.1 НЕИЗМЕРИМ: дельта метрик отрицательна (объём $_w63_vol, сумма слоёв $_w63_v_total) — между снимками агент перезапускался, счётчики обнулены, окно не сравнивает себя с собой"
+elif [ "${_w63_rl_n:-0}" -gt 0 ]; then
+    pass "6.2.6.1 ИЗМЕРЕНО (порог не назначается, правило 5.9.6; единица «алертов/ч» снята №297) — ВЕРХНЯЯ оценка объёма тихого окна: (а) ${_w63_vol} алертов за окно (${_w63_vol_hour}/ч), (в) все четыре слоя ${_w63_v_total} (${_w63_v_hour}/ч). Прибор УПЁРСЯ: ${_w63_rl_n} правил со срезом лимитера за окно (поимённо выше, сумма ${_w63_rl}) — настоящее число срабатываний не меньше напечатанного. Доля замера в величине разделена по дереву в 6.2.9.F.3 выше, отдельным числом"
+else
+    pass "6.2.6.1 ИЗМЕРЕНО (порог не назначается, правило 5.9.6; единица «алертов/ч» снята №297) — ВЕРХНЯЯ оценка объёма тихого окна: (а) ${_w63_vol} алертов за окно (${_w63_vol_hour}/ч), (в) все четыре слоя ${_w63_v_total} (${_w63_v_hour}/ч). Срез лимитера за окно нулевой — величина не упёрлась в потолок прибора. Доля замера в величине разделена по дереву в 6.2.9.F.3 выше, отдельным числом"
+fi
+
 # ---- 6.2.2.3: разбивка величины покрывает её саму (№239) ----
 echo "--- 6.2.2.3: разбивка величины по правилам (по метрике) ---"
 if [ "$W63_LIB_OK" -eq 1 ]; then
@@ -1851,6 +1888,55 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 6.2.6.8 ОКНО ПРОФИЛЯ (№244). ОТДЕЛЬНОЕ окно, сразу ПОСЛЕ окна объёма:
+# `curl /debug/pprof/profile?seconds=N` — действие ИЗМЕРИТЕЛЯ, и внутри окна
+# объёма оно нарушило бы 6.2.6.3.
+#
+# ВОССТАНОВЛЕНО 15.09.2026 (фаза 1, смок на стенде) ровно по той же причине,
+# что и 6.2.6.9 выше: форк item 6 вырезал ТЕЛО критерия, оставив в преflight'е
+# проверку enable_pprof («6.2.6.8 НЕИЗМЕРИМ: enable_pprof не true…»), то есть
+# единственную строку с этой меткой, способную вынести вердикт — и ТОЛЬКО на
+# сломанном конфиге. На здоровом конфиге метка молчала весь прогон. Статическая
+# сверка --scan этого не показывала: она видела вердиктное слово в тексте
+# преflight-die и считала критерий реализованным — дефект самой сверки, он
+# починен этой же правкой (страж требует вердиктное слово ВПЛОТНУЮ к метке и
+# не читает комментарии и фикстуры самопроверки).
+# ═════════════════════════════════════════════════════════════════════════════
+echo "--- 6.2.6.8: окно профиля ${W63_PROFILE_SECS}s (ОТДЕЛЬНОЕ, после окна объёма) ---"
+mkdir -p "$W63_ART/profile" 2>/dev/null
+_w63_pcpu0=$(_w63_metric_raw process_cpu_seconds_total "$W63_ART/metrics-window-end.txt")
+_w63_pt0=$(_w63_epoch)
+# СОБСТВЕННЫЙ ТАЙМАУТ, а не общий. `_w63_curl` несёт --max-time 30, и запрос
+# профиля на 30 с в него НЕ УКЛАДЫВАЕТСЯ по построению: сервер держит
+# соединение ровно PROFILE_SECS и только потом отдаёт тело. Прогон 06.09.2026
+# привёз из-за этого cpu.pprof НУЛЕВОГО РАЗМЕРА при исправном pprof (смок на
+# 5 с проходил — дефект виден только на боевой длине окна).
+curl -s --max-time "$(( W63_PROFILE_SECS + 60 ))" -H "Authorization: Bearer $W63_TOKEN" \
+    "$W63_API/debug/pprof/profile?seconds=$W63_PROFILE_SECS" > "$W63_ART/profile/cpu.pprof" 2>/dev/null
+_w63_curl "$W63_API/debug/pprof/heap" > "$W63_ART/profile/heap.pprof" 2>/dev/null
+_w63_curl "$W63_API/debug/pprof/goroutine?debug=1" > "$W63_ART/profile/goroutine.txt" 2>/dev/null
+_w63_metrics > "$W63_ART/profile/metrics-profile-end.txt"
+_w63_pt1=$(_w63_epoch)
+_w63_pcpu1=$(_w63_metric_raw process_cpu_seconds_total "$W63_ART/profile/metrics-profile-end.txt")
+_w63_psize=$(wc -c < "$W63_ART/profile/cpu.pprof" 2>/dev/null | tr -d ' ')
+echo "  профиль снят: cpu.pprof ${_w63_psize:-0} байт, heap.pprof $(wc -c < "$W63_ART/profile/heap.pprof" 2>/dev/null | tr -d ' ') байт"
+echo "  дельта process_cpu_seconds_total за окно профиля: $(awk -v a="${_w63_pcpu0:-0}" -v b="${_w63_pcpu1:-0}" -v t="$(( _w63_pt1 - _w63_pt0 ))" 'BEGIN{if(t>0) printf "%.2f с за %d с = %.1f%% ядра", b-a, t, 100.0*(b-a)/t; else printf "НЕИЗМЕРИМА"}')"
+if [ "${_w63_psize:-0}" -lt 1000 ]; then
+    die "6.2.6.8 ПРОВАЛЕН: профиль не снят (cpu.pprof ${_w63_psize:-0} байт). «34% ядра» без разбора — не величина, а незнание (находка №244); отсутствие профиля в архиве есть провал критерия, а не оговорка"
+else
+    echo "  top-10 функций по CPU:"
+    if [ -x "$W63_GO" ]; then
+        "$W63_GO" tool pprof -top -nodecount=10 "$W63_REPO/build/ebpf-guard" "$W63_ART/profile/cpu.pprof" 2>/dev/null \
+            | tee "$W63_ART/profile/top10.txt" | sed 's/^/    /'
+    fi
+    if [ -s "$W63_ART/profile/top10.txt" ]; then
+        pass "6.2.6.8 ДОСТИГНУТО: профиль снят в отдельном окне и разобран top-10 (порог не назначается — запрет 5.9.6)"
+    else
+        die "6.2.6.8 ПРОВАЛЕН (половина «разбор»): профиль снят (${_w63_psize} байт), но top-10 не построен — go tool pprof недоступен ($W63_GO) или бинарь $W63_REPO/build/ebpf-guard не совпал с профилем. Профиль без разбора вердикта не даёт"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 # КРИТЕРИИ ВОЛНЫ 6.3 (DNS-коллектор), item 6 постановки, plan.md §6.3.
 #
 # Всё выше этой точки — унаследованная машинерия куста 6.2.x (границы окна,
@@ -2140,29 +2226,84 @@ _w63_k3s_d_before_spoof=$(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_
 # живьём 15.09.2026, item 7: alert.comm="w63-k3s-spoof", granted/denied оба
 # 0 не потому, что антиспуф сработал, а потому что спуф не собрал нужный comm
 # вовсе. Чинится тем, что сам ФАЙЛ называется k3s-server.
-mkdir -p /tmp/w63-k3s-spoof-dir 2>/dev/null
-cp /bin/bash /tmp/w63-k3s-spoof-dir/k3s-server 2>/dev/null
-if [ -x /tmp/w63-k3s-spoof-dir/k3s-server ]; then
-    _w63_k3s_apiserver_host="${W63_K3S_APISERVER%:*}"
-    _w63_k3s_apiserver_port="${W63_K3S_APISERVER##*:}"
-    ( /tmp/w63-k3s-spoof-dir/k3s-server -c "exec 9<>/dev/tcp/${_w63_k3s_apiserver_host}/${_w63_k3s_apiserver_port}" ) >/dev/null 2>&1
-    echo "    подача выполнена: /tmp/w63-k3s-spoof-dir/k3s-server (comm=k3s-server по имени файла) -> $W63_K3S_APISERVER"
-else
-    echo "    ⚠ /tmp/w63-k3s-spoof-dir/k3s-server не создан — подача спуфа пропущена"
-fi
-rm -rf /tmp/w63-k3s-spoof-dir 2>/dev/null
-sleep "$W63_SETTLE"
-_w63_metrics > "$W63_ART/metrics-w636-spoof.txt"
-_w63_k3s_d_spoof=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-w636-spoof.txt") - ${_w63_k3s_d_before_spoof:-0} ))
-_w63_k3s_g_spoof=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-w636-spoof.txt") \
-                    - $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-w636-now.txt") ))
-echo "    приращение denied от подачи: ${_w63_k3s_d_spoof:-0}; приращение granted от подачи (обязано быть 0): ${_w63_k3s_g_spoof:-0}"
-if [ "${_w63_k3s_g_d:-0}" -le 0 ] && [ "${_w63_k3s_d_d:-0}" -le 0 ] && [ "${_w63_k3s_d_spoof:-0}" -le 0 ]; then
+# ПОДАЧА С ПОВТОРОМ И РАЗБОРОМ КЛАССА НУЛЯ (смок 15.09.2026, фаза 1).
+# Первая редакция подавала спуф ОДИН раз и на нуле печатала НЕИЗМЕРИМ с двумя
+# гипотезами — «порт недоступен» или «правило не сработало». Смок показал
+# ТРЕТИЙ класс, которого в списке не было и который стоял тут же в метрике:
+# алерт спуфа РОДИЛСЯ и был СРЕЗАН ПЕР-ПРАВИЛЬНЫМ ЛИМИТЕРОМ
+# (alerts_ratelimited_by_rule_total{rule_id=k8s_kubectl_apiserver_exec}: нет
+# строки → 1), при том что прочие правила на том же процессе отработали
+# (exec_from_tmp, lolbin_bash_dev_tcp, sigma_binary_in_tmp_executed — то есть
+# процесс был отлично виден). Ровно память control-after-attacks-hits-filled-limiter
+# и per-rule-rate-limit-ceiling: контроль, поданный после фазы атак, попадает
+# в заполненный лимитер, и его ноль — срез, а не вердикт.
+# Отсюда три правки: (1) подача повторяется, пережидая окно лимитера (60с);
+# (2) срез лимитера читается ПОИМЁННО по этому правилу и печатается; (3) рядом
+# печатается свидетель видимости процесса — приращение алертов ЛЮБЫХ ДРУГИХ
+# правил на comm=k3s-server за подачу. Ноль при живом свидетеле и нулевом срезе
+# — это уже вердикт, а не слепота.
+_w63_k3s_spoof_tries="${W63_K3S_SPOOF_TRIES:-3}"
+_w63_k3s_rl_wait="${W63_K3S_SPOOF_RL_WAIT:-65}"
+_w63_k3s_d_spoof=0; _w63_k3s_g_spoof=0; _w63_k3s_rl_spoof=0; _w63_k3s_wit=0
+_w63_k3s_submitted=0
+_w63_k3s_other_vol() { # $1=файл среза: алерты ВСЕХ ПРОЧИХ правил на comm=k3s-server
+    awk '/^ebpf_guard_alert_volume_by_source_total\{/ && /comm="k3s-server"/ && !/rule_id="k8s_kubectl_apiserver_exec"/ { s += $NF } END { printf "%d", s+0 }' "$1" 2>/dev/null
+}
+_w63_k3s_try=1
+while [ "$_w63_k3s_try" -le "$_w63_k3s_spoof_tries" ]; do
+    _w63_metrics > "$W63_ART/metrics-w636-try${_w63_k3s_try}-before.txt"
+    _w63_k3s_d0=$(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-w636-try${_w63_k3s_try}-before.txt")
+    _w63_k3s_g0=$(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-w636-try${_w63_k3s_try}-before.txt")
+    _w63_k3s_rl0=$(_w63_ratelimited "k8s_kubectl_apiserver_exec" "$W63_ART/metrics-w636-try${_w63_k3s_try}-before.txt")
+    _w63_k3s_w0=$(_w63_k3s_other_vol "$W63_ART/metrics-w636-try${_w63_k3s_try}-before.txt")
+    mkdir -p /tmp/w63-k3s-spoof-dir 2>/dev/null
+    cp /bin/bash /tmp/w63-k3s-spoof-dir/k3s-server 2>/dev/null
+    if [ -x /tmp/w63-k3s-spoof-dir/k3s-server ]; then
+        _w63_k3s_apiserver_host="${W63_K3S_APISERVER%:*}"
+        _w63_k3s_apiserver_port="${W63_K3S_APISERVER##*:}"
+        ( /tmp/w63-k3s-spoof-dir/k3s-server -c "exec 9<>/dev/tcp/${_w63_k3s_apiserver_host}/${_w63_k3s_apiserver_port}" ) >/dev/null 2>&1
+        _w63_k3s_conn_rc=$?
+        _w63_k3s_submitted=1
+        echo "    попытка ${_w63_k3s_try}/${_w63_k3s_spoof_tries}: подача выполнена (/tmp/w63-k3s-spoof-dir/k3s-server, comm=k3s-server по имени файла) -> $W63_K3S_APISERVER, код подключения ${_w63_k3s_conn_rc}"
+    else
+        echo "    ⚠ /tmp/w63-k3s-spoof-dir/k3s-server не создан — подача спуфа пропущена"
+    fi
+    rm -rf /tmp/w63-k3s-spoof-dir 2>/dev/null
+    sleep "$W63_SETTLE"
+    _w63_metrics > "$W63_ART/metrics-w636-spoof.txt"
+    cp "$W63_ART/metrics-w636-spoof.txt" "$W63_ART/metrics-w636-try${_w63_k3s_try}-after.txt" 2>/dev/null
+    _w63_k3s_d_try=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-w636-spoof.txt") - ${_w63_k3s_d0:-0} ))
+    _w63_k3s_g_try=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-w636-spoof.txt") - ${_w63_k3s_g0:-0} ))
+    _w63_k3s_rl_try=$(( $(_w63_ratelimited "k8s_kubectl_apiserver_exec" "$W63_ART/metrics-w636-spoof.txt") - ${_w63_k3s_rl0:-0} ))
+    _w63_k3s_w_try=$(( $(_w63_k3s_other_vol "$W63_ART/metrics-w636-spoof.txt") - ${_w63_k3s_w0:-0} ))
+    _w63_k3s_d_spoof=$(( _w63_k3s_d_spoof + _w63_k3s_d_try ))
+    _w63_k3s_g_spoof=$(( _w63_k3s_g_spoof + _w63_k3s_g_try ))
+    _w63_k3s_rl_spoof=$(( _w63_k3s_rl_spoof + _w63_k3s_rl_try ))
+    _w63_k3s_wit=$(( _w63_k3s_wit + _w63_k3s_w_try ))
+    echo "      → denied +${_w63_k3s_d_try}, granted +${_w63_k3s_g_try}, срез лимитера по k8s_kubectl_apiserver_exec +${_w63_k3s_rl_try}, свидетель видимости (прочие правила на comm=k3s-server) +${_w63_k3s_w_try}"
+    [ "${_w63_k3s_d_try:-0}" -gt 0 ] && break
+    [ "${_w63_k3s_g_try:-0}" -gt 0 ] && break
+    if [ "${_w63_k3s_rl_try:-0}" -gt 0 ] && [ "$_w63_k3s_try" -lt "$_w63_k3s_spoof_tries" ]; then
+        echo "      подача СРЕЗАНА ЛИМИТЕРОМ правила — пережидаем окно лимитера ${_w63_k3s_rl_wait}с и подаём снова (окно лимитера — 60с и укорочению смоком не подлежит: оно живёт в продукте, а не в измерителе)"
+        sleep "$_w63_k3s_rl_wait"
+    else
+        break
+    fi
+    _w63_k3s_try=$(( _w63_k3s_try + 1 ))
+done
+echo "    ИТОГО по подачам: denied +${_w63_k3s_d_spoof:-0}; granted (обязано быть 0) +${_w63_k3s_g_spoof:-0}; срез лимитера по правилу +${_w63_k3s_rl_spoof:-0}; свидетель видимости процесса +${_w63_k3s_wit:-0} алертов прочих правил на comm=k3s-server"
+if [ "${_w63_k3s_g_d:-0}" -le 0 ] && [ "${_w63_k3s_d_d:-0}" -le 0 ] && [ "${_w63_k3s_d_spoof:-0}" -le 0 ] && [ "${_w63_k3s_rl_spoof:-0}" -le 0 ]; then
     die "6.3.6 НЕИЗМЕРИМ: ни один из трёх сигналов (granted/denied естественного трафика, denied спуфа) не сдвинулся за прогон — механизм не вызывался вовсе (правило k8s_kubectl_apiserver_exec молчало на этой ноде) либо не задеплоен"
 elif [ "${_w63_k3s_g_spoof:-0}" -gt 0 ]; then
     die "6.3.6 ПРОВАЛЕН: спуф-подача (comm=k3s-server, образ /tmp/w63-k3s-spoof) дала granted +${_w63_k3s_g_spoof} — антиспуф-ось exe_path не держит, побег из-под защёлки"
+elif [ "${_w63_k3s_submitted:-0}" -ne 1 ]; then
+    die "6.3.6 НЕИЗМЕРИМ: подача спуфа не состоялась вовсе (копия /bin/bash под именем k3s-server не создана) — отрицательного контроля на этом прогоне нет, и ноль читать нечем"
+elif [ "${_w63_k3s_d_spoof:-0}" -lt 1 ] && [ "${_w63_k3s_rl_spoof:-0}" -gt 0 ]; then
+    die "6.3.6 НЕИЗМЕРИМ (класс НАЗВАН, смок 15.09.2026): алерт спуфа РОЖДАЛСЯ и был СРЕЗАН ПЕР-ПРАВИЛЬНЫМ ЛИМИТЕРОМ — срез по k8s_kubectl_apiserver_exec за подачи +${_w63_k3s_rl_spoof} при denied +${_w63_k3s_d_spoof:-0}, и ${_w63_k3s_spoof_tries} попыток с ожиданием окна лимитера его не пережили. Это НЕ «правило не сработало» и НЕ «порт недоступен»: процесс был виден (свидетель +${_w63_k3s_wit:-0} алертов прочих правил на comm=k3s-server). Отрицательный контроль упёрся в потолок прибора (память per-rule-rate-limit-ceiling), а не в механизм"
+elif [ "${_w63_k3s_d_spoof:-0}" -lt 1 ] && [ "${_w63_k3s_wit:-0}" -le 0 ]; then
+    die "6.3.6 НЕИЗМЕРИМ: подача не видна агенту ВООБЩЕ — ни целевое правило (denied +${_w63_k3s_d_spoof:-0}), ни одно другое правило на comm=k3s-server (свидетель +0) не сдвинулись, срез лимитера нулевой. Класс — слепота к самому процессу (срез дерева измерителя, потери событий или несостоявшееся подключение), а не отказ механизма"
 elif [ "${_w63_k3s_d_spoof:-0}" -lt 1 ]; then
-    die "6.3.6 НЕИЗМЕРИМ: спуф-подача не подтверждена результатом (denied от подачи = ${_w63_k3s_d_spoof:-0}) — либо 127.0.0.1:6443 недоступен на этой ноде, либо правило k8s_kubectl_apiserver_exec не сработало на этой подаче; естественный трафик (${_w63_k3s_g_d}/${_w63_k3s_d_d}) не заменяет отрицательный контроль"
+    die "6.3.6 НЕИЗМЕРИМ: спуф-подача не подтверждена результатом (denied +${_w63_k3s_d_spoof:-0}) ПРИ ВИДИМОМ процессе (свидетель +${_w63_k3s_wit} алертов прочих правил на comm=k3s-server) и НУЛЕВОМ срезе лимитера — остаются две причины, и обе требуют разбора: ${W63_K3S_APISERVER} не принял подключение, либо правило k8s_kubectl_apiserver_exec не сработало на этой подаче. Естественный трафик (${_w63_k3s_g_d}/${_w63_k3s_d_d}) отрицательный контроль не заменяет"
 else
     pass "6.3.6 ДОСТИГНУТО: механизм №262/№307 задеплоен и работает — granted Δ=${_w63_k3s_g_d} denied Δ=${_w63_k3s_d_d} за прогон, спуф-подача подтверждена (+${_w63_k3s_d_spoof} denied, +${_w63_k3s_g_spoof:-0} granted)"
 fi

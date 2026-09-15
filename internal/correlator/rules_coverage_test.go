@@ -863,30 +863,36 @@ func TestDNSLongLabelControlRules_MatchOnQNameLengthAlone(t *testing.T) {
 
 	cases := []struct {
 		id     string
-		thresh int // expected qname_length threshold, reviewed against the attack step's label
+		thresh int // expected qname_max_label_len threshold, reviewed against the attack step's label
 	}{
-		{"dns_tunneling_long_domain", 50},
-		{"exfil_dns_txt_long_label", 60},
-		{"netintr_dns_long_label", 100},
-		{"webshell_dns_exfil_long_subdomain", 60},
+		{"dns_tunneling_long_domain", 40},
+		{"exfil_dns_txt_long_label", 45},
+		{"netintr_dns_long_label", 50},
+		{"webshell_dns_exfil_long_subdomain", 45},
 	}
 
-	// The attack step builds a MULTI-LABEL name, not one long label: RFC 1035
-	// caps a single label at 63 octets and dig refuses to send a query that
-	// breaks it, so the length that clears these thresholds has to come from
-	// several labels — filler(60) + "." + filler(60) + "." +
-	// "ebpfguard-5951c-" + TIMESTAMP(>=15) + ".dns-tunnel-canary.invalid"(26),
-	// i.e. >= 60+1+60+1+16+15+26 = 179 chars, every label under 63 and the
-	// whole name under the 253-octet limit. 150 keeps a safety margin without
-	// this test having to reproduce run-all-attacks.sh's exact TIMESTAMP format.
-	const attackLabelMinLength = 150
+	// Wave 6.3, finding №329: these four rules moved from qname_length (the
+	// whole dotted name) to qname_max_label_len (the longest single label).
+	// A whole-name threshold fires on routine cluster traffic — an ordinary
+	// k8s FQDN reaches 66 characters on service and namespace names plus the
+	// fixed ".svc.cluster.local" suffix — while a tunnel's length is the length
+	// of its data carrier. This is what finding №83 already established these
+	// rules reason about.
+	//
+	// The control still holds, and on a tighter number than before: the attack
+	// step builds a MULTI-LABEL name out of two 60-character fillers (RFC 1035
+	// caps one label at 63 octets and dig refuses to send a query that breaks
+	// it), so the guaranteed LONGEST LABEL is 60 — not the >= 179 characters of
+	// whole name the previous constant leaned on. Every threshold above must
+	// stay below 60 or the positive control stops proving anything.
+	const attackLabelMinLength = 60
 
 	for _, c := range cases {
 		r, ok := byID[c.id]
 		require.Truef(t, ok, "control rule %q not found among loaded rules — 5.9.5c's positive control has no target left", c.id)
 		assert.Equalf(t, types.EventDNS, r.EventType, "%s must be event_type: dns", c.id)
-		require.Nilf(t, r.ConditionGroup, "%s must use a single condition (field: qname_length), not condition_group — a condition_group could hide a comm gate the attack step doesn't satisfy", c.id)
-		assert.Equalf(t, "qname_length", r.Condition.Field, "%s must condition on qname_length alone", c.id)
+		require.Nilf(t, r.ConditionGroup, "%s must use a single condition (field: qname_max_label_len), not condition_group — a condition_group could hide a comm gate the attack step doesn't satisfy", c.id)
+		assert.Equalf(t, "qname_max_label_len", r.Condition.Field, "%s must condition on qname_max_label_len alone", c.id)
 		assert.Equalf(t, OpGreaterThan, r.Condition.Op, "%s must use op: gt", c.id)
 		require.Len(t, r.Condition.Values, 1)
 		thresh, convErr := strconv.Atoi(r.Condition.Values[0])

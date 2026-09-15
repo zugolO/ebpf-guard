@@ -403,10 +403,17 @@ rules:
     name: "DNS query with unusually high entropy subdomain"
     description: "High-entropy subdomain in DNS query — possible DNS tunneling or DGA-based C2 beacon."
     event_type: dns
-    condition:
-      field: qname_entropy
-      op: gt
-      values: ["4.0"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: qname_max_label_entropy
+          op: gt
+          values: ["4.0"]
+        # Entropy alone separates nothing — see the comment on
+        # dns_dga_high_entropy. The bigram model is the second half.
+        - field: qname_dga_score
+          op: gt
+          values: ["0.5"]
     severity: critical
     action: alert
     tags: [mitre:T1048.001, mitre:T1568, dns-tunnel, high-entropy]
@@ -427,10 +434,18 @@ rules:
     name: "Extremely long DNS query name (tunneling)"
     description: "DNS query name exceeding 100 characters — data encoding in DNS label for covert exfiltration."
     event_type: dns
+    # Finding №329 (wave 6.3): scored on the longest single LABEL, not on the
+    # whole dotted name. An ordinary k8s FQDN reaches 66 characters on service
+    # and namespace names plus the fixed ".svc.cluster.local" suffix
+    # ("ingress-nginx-controller-admission.ingress-nginx.svc.cluster.local" is
+    # 66 characters of nothing), so a whole-name threshold fires on routine
+    # cluster traffic. The longest label is what finding №83 established these
+    # rules actually reason about. Measured legitimate labels top out at 34;
+    # carriers pack toward the RFC 1035 cap of 63.
     condition:
-      field: qname_length
+      field: qname_max_label_len
       op: gt
-      values: ["100"]
+      values: ["50"]
     severity: critical
     action: alert
     tags: [mitre:T1048.001, dns-tunnel, long-label]

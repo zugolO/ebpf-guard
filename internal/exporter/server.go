@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -35,6 +36,16 @@ type CollectorStatus struct {
 	Name    string `json:"name"`
 	Healthy bool   `json:"healthy"`
 	Error   string `json:"error,omitempty"`
+	// Stale is true when the collector is attached and healthy but has
+	// produced no events (or, for collectors that opt in, events below a
+	// configured rate floor) for longer than that collector's own
+	// staleness window. Deliberately NOT folded into Healthy — a stale
+	// collector is not broken, per the P0-26/№328 distinction — set via
+	// SetCollectorStale rather than SetCollectorStatus so a periodic
+	// staleness poll does not need to know or re-assert Healthy/Error.
+	// Omitted (false, the zero value) for collectors that do not report
+	// staleness at all — see SetCollectorStale.
+	Stale bool `json:"stale,omitempty"`
 }
 
 // Server provides HTTP endpoints for metrics and health checks.
@@ -383,6 +394,24 @@ func (s *Server) SetCollectorStatus(status CollectorStatus) {
 	s.collectorStatuses[status.Name] = status
 }
 
+// SetCollectorStale updates only the Stale field of a previously-registered
+// collector's status, preserving Healthy/Error (open question 4, №328).
+// A separate setter rather than folding into SetCollectorStatus: staleness
+// is polled independently and periodically (e.g. DNSCollector.Stale(),
+// dns.go's watchForStaleness), and that poll has no reason to also know or
+// re-assert the collector's Healthy/Error state. If name has not been
+// registered via SetCollectorStatus yet, this creates an entry with
+// Healthy left at its zero value (false) — callers are expected to call
+// SetCollectorStatus first, as main.go does at collector startup.
+func (s *Server) SetCollectorStale(name string, stale bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.collectorStatuses[name]
+	st.Name = name
+	st.Stale = stale
+	s.collectorStatuses[name] = st
+}
+
 // SetRequiredCollectors declares which collectors must be healthy for the
 // /health/ready endpoint to return 200. Call before Start.
 func (s *Server) SetRequiredCollectors(names []string) {
@@ -718,6 +747,13 @@ type HealthStatus struct {
 	// or "unhealthy". Kept alongside the booleans rather than replacing them so
 	// existing consumers of Healthy/Ready are unaffected.
 	Status string `json:"status"`
+	// Collectors is the per-collector breakdown (open question 4, №328):
+	// before this, only GET /health/ready carried CollectorStatus, and it
+	// omitted Stale entirely — a collector could be attached, healthy, and
+	// producing events at an implausible or zero rate with nothing in
+	// /health saying so. Same slice shape as /health/ready for one
+	// consistent representation across both endpoints.
+	Collectors []CollectorStatus `json:"collectors,omitempty"`
 }
 
 // Health status values reported in HealthStatus.Status.
@@ -737,6 +773,10 @@ func (s *Server) getHealthStatus() HealthStatus {
 	rulesProviderFn := s.rulesProviderFn
 	visibilityReduced := s.visibilityReduced
 	degradedQueues := s.degradedQueues
+	collectors := make([]CollectorStatus, 0, len(s.collectorStatuses))
+	for _, status := range s.collectorStatuses {
+		collectors = append(collectors, status)
+	}
 	s.mu.RUnlock()
 
 	var memStats runtime.MemStats
@@ -760,6 +800,8 @@ func (s *Server) getHealthStatus() HealthStatus {
 		statusStr = HealthStatusDegraded
 	}
 
+	sort.Slice(collectors, func(i, j int) bool { return collectors[i].Name < collectors[j].Name })
+
 	return HealthStatus{
 		Healthy:           healthy,
 		Ready:             ready,
@@ -772,5 +814,6 @@ func (s *Server) getHealthStatus() HealthStatus {
 		VisibilityReduced: visibilityReduced,
 		DegradedQueues:    degradedQueues,
 		Status:            statusStr,
+		Collectors:        collectors,
 	}
 }

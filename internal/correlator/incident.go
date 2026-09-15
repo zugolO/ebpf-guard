@@ -57,6 +57,25 @@ var (
 		},
 		[]string{"verdict"},
 	)
+
+	// k3sControlPlaneNetworkSignalTotal is the attempt counter for
+	// isK3sControlPlaneNetworkSignal (item 9(б) of wave 6.2.9.F.2, №262,
+	// executed in wave 6.3 per plan.md §6.3 debt table). "granted" is every
+	// k8s_kubectl_apiserver_exec alert whose own process image verified as
+	// k3s under k3sControlPlaneExeDirs and therefore did NOT set
+	// HasNetworkSignal; "denied" is every such alert whose image did not
+	// verify (comm claimed k3s-server, exe_path did not — the spoof this
+	// finding is required to reject) and therefore set HasNetworkSignal as
+	// normal. Both labels increment only when the rule actually fired,
+	// which is what makes this an ATTEMPT counter rather than a pass-rate
+	// with no denominator — see [[positive-control-needs-result-sentinel]].
+	k3sControlPlaneNetworkSignalTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_incident_k3s_control_plane_signal_total",
+			Help: "Attempts to exempt k8s_kubectl_apiserver_exec alerts from qualifying incident promotion as a network signal, by result (granted: verified k3s image, exempted; denied: image did not verify, alert still counts as a network signal).",
+		},
+		[]string{"result"},
+	)
 )
 
 const (
@@ -675,6 +694,61 @@ func (t *IncidentTracker) isImageVerifiedComm(comm string, pid uint32) bool {
 	return ok
 }
 
+// k8sKubectlAPIServerExecRuleID is the one rule item 9(б) exempts — not
+// network signals in general, only k3s-server's own control-plane traffic
+// to its embedded apiserver (dport 6443/8443/16443, rules/k8s-attacks.yaml).
+const k8sKubectlAPIServerExecRuleID = "k8s_kubectl_apiserver_exec"
+
+// isK3sControlPlaneNetworkSignal reports whether alert is k3s-server's own,
+// verified control-plane connection to its embedded apiserver, and records
+// the attempt and its result in k3sControlPlaneNetworkSignalTotal.
+//
+// Item 9(б), wave 6.2.9.F.2 (№262/№307), executed in wave 6.3 (plan.md §6.3
+// debt table). containerInitTrustedRoot already stops k3s-server's
+// namespace-setup plumbing (mount/pivot_root/…) from promoting a container
+// escape it did not commit; this closes the other half of the same
+// finding: k3s-server's OWN kubectl_apiserver_exec alert — the very rule
+// this finding is named for — otherwise sets HasNetworkSignal on every
+// incident it belongs to, including ones whose root already resolved to a
+// genuinely trusted container-init chain (archive collect-6.2.5: an
+// incident rooted ['k3s-server','mount'], growing to
+// ['k3s-server','containerd','flannel','bridge'], promoted to "suspicious"
+// on this one alert alone). It is qualifying-network evidence on its own,
+// score zero elsewhere, for traffic k3s generates continuously by design.
+//
+// What this deliberately does NOT do, per the decision recorded in
+// plan.md: it does not suppress the alert (still counted in RuleIDs/
+// AlertIDs/alerts_total, still visible, severity untouched — this is not
+// rules.go's `exceptions:` mechanism, which drops the matching alert
+// entirely) and it does not widen past this one rule_id — a k3s-server
+// process triggering any OTHER network rule still sets HasNetworkSignal as
+// normal.
+//
+// Antispoof axis is proc.exe_path, not comm, for the same reason
+// isImageVerifiedComm requires it for the five verifiedDaemonImages comms:
+// comm is attacker-chosen (exec -a k3s-server, prctl(PR_SET_NAME)),
+// exe_path is kernel-assigned at execve. Shape check is isK3sDataBinPath —
+// the same content-addressed-directory match isCNIPlumbingImage already
+// uses for k3s's bundled CNI plugins, applied here to k3s's own binary
+// (…/data/<hash>/bin/k3s) instead of a plugin name. Unlike isImageVerifiedComm, an
+// UNRESOLVED exe_path here DENIES rather than grants — fails open toward
+// the alert counting as a network signal (the pre-existing default,
+// visible), never toward an attacker's short-lived process winning the
+// readlink race and being exempted from promotion by exhaustion.
+func isK3sControlPlaneNetworkSignal(alert types.Alert) bool {
+	if alert.RuleID != k8sKubectlAPIServerExecRuleID || alert.Comm != "k3s-server" {
+		return false
+	}
+	exe := resolveExePath(alert.PID, exePathFieldSelf)
+	granted := isK3sDataBinPath(exe, "k3s")
+	if granted {
+		k3sControlPlaneNetworkSignalTotal.WithLabelValues("granted").Inc()
+	} else {
+		k3sControlPlaneNetworkSignalTotal.WithLabelValues("denied").Inc()
+	}
+	return granted
+}
+
 // isTrustedRootShell reports whether comm is a shell interpreter acting as a
 // trusted root's own job-execution mechanism, rather than a foreign process
 // that happens to share its tree — 5.9.9.F.5d (находка №158), variant 1 of
@@ -808,6 +882,24 @@ var cniPlumbingImages = map[string]map[string]struct{}{
 // match, so this is not a prefix pass on the whole data directory.
 const k3sDataBinPrefix = "/var/lib/rancher/k3s/data/"
 
+// isK3sDataBinPath reports whether exe has the shape k3sDataBinPrefix +
+// "<exactly one path segment>/bin/" + binName — k3s's own copy of a bundled
+// binary, content-addressed under a directory whose name changes with every
+// release, so it cannot be an exact path, but whose SHAPE is still exact.
+// A path with extra segments (…/data/x/y/bin/flannel) does not match, so
+// this is not a prefix pass on the whole data directory.
+func isK3sDataBinPath(exe, binName string) bool {
+	if exe == "" || !strings.HasPrefix(exe, k3sDataBinPrefix) {
+		return false
+	}
+	rest := exe[len(k3sDataBinPrefix):]
+	slash := strings.Index(rest, "/")
+	if slash <= 0 {
+		return false
+	}
+	return rest[slash:] == "/bin/"+binName
+}
+
 // isCNIPlumbingImage reports whether exe is an image comm is allowed to run
 // from as container-network plumbing.
 func isCNIPlumbingImage(comm, exe string) bool {
@@ -821,15 +913,7 @@ func isCNIPlumbingImage(comm, exe string) bool {
 	if _, ok := imgs[exe]; ok {
 		return true
 	}
-	if !strings.HasPrefix(exe, k3sDataBinPrefix) {
-		return false
-	}
-	rest := exe[len(k3sDataBinPrefix):]
-	slash := strings.Index(rest, "/")
-	if slash <= 0 {
-		return false
-	}
-	return rest[slash:] == "/bin/"+comm
+	return isK3sDataBinPath(exe, comm)
 }
 
 // isSupervisorHop reports whether comm is container-runtime plumbing
@@ -1350,7 +1434,7 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		}
 		inc.UntrustedComms[alert.Comm] = struct{}{}
 	}
-	if isNetworkSignal(alert.Event.Type) {
+	if isNetworkSignal(alert.Event.Type) && !isK3sControlPlaneNetworkSignal(alert) {
 		inc.HasNetworkSignal = true
 	}
 	// Твёрдая улика взводится ЗАЩЁЛКОЙ и не пересматривается: в отличие от

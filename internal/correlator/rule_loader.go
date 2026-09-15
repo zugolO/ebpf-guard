@@ -99,7 +99,8 @@ var (
 	validDNSFields = map[string]bool{
 		"qname": true, "qtype": true, "rcode": true, "direction": true,
 		// Enriched fields computed on demand from qname
-		"qname_length": true, "qname_entropy": true, "qname_dga_score": true,
+		"qname_length": true, "qname_entropy": true, "qname_max_label_entropy": true,
+		"qname_max_label_len": true, "qname_dga_score": true,
 		"qname_digit_ratio": true, "qname_subdomain_count": true, "qname_is_dga": true,
 		// Alias: "dns.qname" is accepted as a more explicit form of "qname"
 		"dns.qname": true,

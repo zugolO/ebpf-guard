@@ -70,6 +70,15 @@ var (
 // alerts don't sit needlessly long on top of that existing batching delay.
 const pendingFlushInterval = 100 * time.Millisecond
 
+// dnsStalenessReporter is implemented by collectors that track their own
+// staleness (currently only *collector.DNSCollector, via watchForStaleness)
+// and can report it on demand for GET /health (open question 4, №328) —
+// separate from the Collector interface itself so collectors that don't
+// track staleness need not grow a no-op method.
+type dnsStalenessReporter interface {
+	Stale() bool
+}
+
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
 		os.Exit(1)
@@ -1538,7 +1547,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			if err := dc.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 				slog.Warn("dns: register metrics failed", slog.Any("error", err))
 			}
-			collectors = append(collectors, dc.WithBackpressureStrategy(bpStrategy))
+			collectors = append(collectors, dc.WithBackpressureStrategy(bpStrategy).
+				WithMinEventsPerStaleWindow(cfg.Collectors.DNS.MinEventsPerStaleWindow))
 			slog.Info("dns: collector enabled", slog.Bool("enabled", cfg.Collectors.DNS.Enabled))
 		}
 
@@ -1720,6 +1730,31 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				}{c.Name(), err}
 			}
 		}(c)
+	}
+
+	// Open question 4 (№328), wave 6.3 item 4: surface per-collector
+	// staleness in GET /health, not only Prometheus. Polled from the
+	// unwrapped collector (not priorityCollectors — NewPriorityEventCollector
+	// wraps the Collector interface and would hide any extra method) so
+	// only collectors that actually track staleness (currently DNS) are
+	// polled; everything else is silently skipped, not an error.
+	for _, c := range collectors {
+		sr, ok := c.(dnsStalenessReporter)
+		if !ok {
+			continue
+		}
+		go func(name string, sr dnsStalenessReporter) {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					srv.SetCollectorStale(name, sr.Stale())
+				}
+			}
+		}(c.Name(), sr)
 	}
 
 	// fail-closed: if a required collector fails before the context is done, abort.

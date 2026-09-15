@@ -52,6 +52,16 @@ type DNSCollector struct {
 	// hypotheses (stand silence, parse regression, or collector regression)
 	// it actually is.
 	decodeErrorLoggers map[string]*malformedLogger
+	// minEventsPerStaleWindow is the floor watchForStaleness enforces on
+	// events accumulated over the trailing dnsStaleThreshold window, on top
+	// of the pre-existing zero-events check. 0 (the default) disables it —
+	// see the doc comment on watchForStaleness for why a universal non-zero
+	// default would be a guess this package has no basis for.
+	minEventsPerStaleWindow int
+	// stale mirrors metrics.stale without requiring a Prometheus registry
+	// read — SetCollectorStale (open question 4, №328) polls this directly
+	// so per-collector staleness reaches GET /health, not only /metrics.
+	stale atomic.Bool
 }
 
 // dnsMetrics holds Prometheus metrics for DNS collection.
@@ -76,6 +86,13 @@ type dnsMetrics struct {
 	// (the exact failure the idle-hour gate needs to catch). A monotonic
 	// counter lets the gate require zero over the whole window instead.
 	staleTransitions prometheus.Counter
+	// socketMapBackfilled counts dns_socket_map entries seeded at startup
+	// from sockets already connect()ed to port 53 (№328) — the mechanism
+	// that closes the coredns-persistent-upstream-socket blind spot. Zero
+	// is a legitimate reading (no pre-connected DNS sockets existed at
+	// startup); this metric exists so 6.3.0 can tell "the mechanism ran
+	// and found nothing" apart from "the mechanism didn't run".
+	socketMapBackfilled prometheus.Counter
 }
 
 // NewDNSCollector creates a new DNS collector.
@@ -110,6 +127,10 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 			Name: "ebpf_guard_dns_collector_stale_transitions_total",
 			Help: "Total number of times the DNS collector transitioned into the stale state. A gate can require zero over a window without depending on the state at snapshot time.",
 		}),
+		socketMapBackfilled: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_dns_socket_map_backfilled_total",
+			Help: "Total number of dns_socket_map entries seeded at startup from UDP sockets already connected to port 53 (sockets a resolver opened before the agent started, which trace_connect alone would never see).",
+		}),
 	}
 
 	decodeErrorLoggers := make(map[string]*malformedLogger, len(dnsDecodeReasons))
@@ -130,6 +151,27 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 func (c *DNSCollector) WithBackpressureStrategy(s BackpressureStrategy) *DNSCollector {
 	c.strategy = s
 	return c
+}
+
+// WithMinEventsPerStaleWindow sets the minimum number of events
+// watchForStaleness requires over the trailing dnsStaleThreshold window
+// before it stops treating the collector as stale-by-rate (№328, item 4 of
+// wave 6.3's Фаза 0). n <= 0 disables the check, which is also the
+// zero-value default — this package has no basis for guessing a universal
+// "plausible DNS rate" floor across deployments; an operator who knows
+// their node's traffic sets it via collectors.dns.min_events_per_stale_window.
+func (c *DNSCollector) WithMinEventsPerStaleWindow(n int) *DNSCollector {
+	c.minEventsPerStaleWindow = n
+	return c
+}
+
+// Stale reports the collector's current staleness state — the same value
+// published as ebpf_guard_dns_collector_stale, but readable without a
+// Prometheus registry so GET /health can surface it per-collector (open
+// question 4). Safe to call concurrently; false before the first
+// watchForStaleness tick.
+func (c *DNSCollector) Stale() bool {
+	return c.stale.Load()
 }
 
 // RegisterMetrics registers Prometheus metrics.
@@ -159,7 +201,10 @@ func (c *DNSCollector) RegisterMetrics(reg prometheus.Registerer) error {
 	if err := reg.Register(c.metrics.stale); err != nil {
 		return err
 	}
-	return reg.Register(c.metrics.staleTransitions)
+	if err := reg.Register(c.metrics.staleTransitions); err != nil {
+		return err
+	}
+	return reg.Register(c.metrics.socketMapBackfilled)
 }
 
 // Start begins collecting DNS events.
@@ -195,6 +240,21 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 		return fmt.Errorf("dns: load objects: %w", err)
 	}
 	c.objs = objs
+
+	// №328/plan.md §6.3: seed dns_socket_map with sockets already
+	// connect()ed to port 53 before trace_connect could see them — see
+	// backfillDNSSocketMap's doc comment (dns_backfill.go) for why this
+	// exists. Best-effort: a failure here is a narrower blind spot
+	// (falls back to the pre-existing "sockets connected before start are
+	// invisible" behaviour), not a reason to abort startup.
+	if n, err := backfillDNSSocketMap(c.objs.DnsSocketMap); err != nil {
+		slog.Warn("dns: dns_socket_map backfill failed — sockets connected before agent start will stay invisible until they reconnect", slog.Any("error", err))
+	} else {
+		slog.Info("dns: dns_socket_map backfilled from /proc/net/udp", slog.Int("sockets", n))
+		if c.metrics != nil {
+			c.metrics.socketMapBackfilled.Add(float64(n))
+		}
+	}
 
 	links, err := c.attachTracepoints()
 	if err != nil {
@@ -390,6 +450,16 @@ const dnsStaleThreshold = 10 * time.Minute
 // silence instead of tick alignment.
 const dnsStalePollInterval = 30 * time.Second
 
+// dnsRateStale reports whether the events-per-window rate check fires,
+// pulled out of watchForStaleness's ticker loop so the decision is
+// testable without waiting on real wall-clock time. minEventsPerStaleWindow
+// <= 0 always returns false (disabled); windowFull is false until the
+// trailing-window history buffer has accumulated dnsStaleThreshold worth of
+// samples, before which there is no complete window to judge yet.
+func dnsRateStale(minEventsPerStaleWindow int, windowFull bool, windowEvents uint64) bool {
+	return minEventsPerStaleWindow > 0 && windowFull && windowEvents < uint64(minEventsPerStaleWindow)
+}
+
 // watchForStaleness reports "attached but seeing nothing" as a distinct state.
 //
 // P0-26's real defect was not that DNS saw no traffic — it may legitimately see
@@ -397,12 +467,33 @@ const dnsStalePollInterval = 30 * time.Second
 // was indistinguishable from success: the collector logged "starting", reported
 // healthy:true, and never said otherwise. Staleness is deliberately NOT
 // unhealthy — the collector is not broken — but it must be visible.
+//
+// №328, item 4 of wave 6.3's Фаза 0: absolute silence is not the only shape
+// degraded visibility takes. A node running coredns that reports 8 DNS
+// events every 10 minutes forever never crosses silentFor — it is not
+// silent, it is producing events at a rate implausible for that resolver
+// (the mechanism turned out to be exactly the blind spot backfillDNSSocketMap
+// closes, dns_backfill.go — but nss-resolve/AF_UNIX, TCP-DNS and IPv6
+// remain, see the startup log's blind_spots field). The optional rate check
+// below adds a second, independent trigger for the same stale state:
+// events accumulated over the trailing dnsStaleThreshold window falling
+// under minEventsPerStaleWindow. It stays off by default (0) because this
+// package has no basis for guessing a "plausible" DNS rate for every
+// deployment — an operator who knows their node's traffic sets the floor
+// via collectors.dns.min_events_per_stale_window.
 func (c *DNSCollector) watchForStaleness(ctx context.Context) {
 	ticker := time.NewTicker(dnsStalePollInterval)
 	defer ticker.Stop()
 
 	start := time.Now()
 	var reportedStale bool
+
+	// windowTicks polls span dnsStaleThreshold; history holds one eventsSeen
+	// snapshot per tick so windowEvents = current - history[0] once full is
+	// "events seen in the trailing dnsStaleThreshold window". Unused (and
+	// left empty) when minEventsPerStaleWindow is 0.
+	windowTicks := int(dnsStaleThreshold / dnsStalePollInterval)
+	history := make([]uint64, 0, windowTicks)
 
 	for {
 		select {
@@ -421,12 +512,23 @@ func (c *DNSCollector) watchForStaleness(ctx context.Context) {
 				silentFor = time.Since(time.Unix(0, lastEvent))
 			}
 
-			if silentFor < dnsStaleThreshold {
+			history = append(history, count)
+			if len(history) > windowTicks {
+				history = history[1:]
+			}
+			var windowEvents uint64
+			if len(history) == windowTicks {
+				windowEvents = count - history[0]
+			}
+			rateStale := dnsRateStale(c.minEventsPerStaleWindow, len(history) == windowTicks, windowEvents)
+
+			if silentFor < dnsStaleThreshold && !rateStale {
 				if reportedStale {
 					slog.Info("dns: collector recovered, events flowing again",
 						slog.Uint64("events_total", count))
 					reportedStale = false
 					c.metrics.stale.Set(0)
+					c.stale.Store(false)
 				}
 				continue
 			}
@@ -435,6 +537,23 @@ func (c *DNSCollector) watchForStaleness(ctx context.Context) {
 				reportedStale = true
 				c.metrics.stale.Set(1)
 				c.metrics.staleTransitions.Inc()
+				c.stale.Store(true)
+
+				// Rate-triggered and silence-triggered are reported with
+				// different messages: "no new events" would be false (and
+				// confusing to a human debugging it) for a collector that
+				// IS producing events, just too few of them.
+				if silentFor < dnsStaleThreshold {
+					slog.Warn("dns: events arriving far below the configured floor — visibility into DNS may be partially absent",
+						slog.Uint64("events_in_window", windowEvents),
+						slog.Int("min_events_per_stale_window", c.minEventsPerStaleWindow),
+						slog.Duration("window", dnsStaleThreshold),
+						slog.Uint64("events_total", count),
+						slog.String("likely_causes", "systemd-resolved answering over AF_UNIX (nss-resolve/varlink), IPv6 or TCP DNS, or resolver sockets connected before the agent started"),
+						slog.String("verify", "run `dig example.com @8.8.8.8` repeatedly and compare ebpf_guard_dns_queries_total growth against the resolver's own query log"))
+					continue
+				}
+
 				var lastSeenMsg string
 				if lastEvent == 0 {
 					lastSeenMsg = "never"

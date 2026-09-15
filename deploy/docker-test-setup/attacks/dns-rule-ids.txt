@@ -1,0 +1,49 @@
+# Манифест rule_id с event_type: dns, волна 6.3 (находка №327/пункт 4 постановки).
+#
+# Зачем манифест. Без оси разреза по source `alerts_total`/`alerts_filtered_total`
+# несут только `rule_id` — событие DNS нельзя отличить от любого другого иначе, как
+# сверкой по списку. Манифест — единственный способ прочитать объём DNS волны 6.3
+# (6.3.3/6.3.4) и единственный способ отличить «DNS дал 0» от «список устарел».
+#
+# Как получен. Сгенерирован из rules/*.yaml (кроме rules/rego/) по
+# `event_type: dns`, generate-dns-rule-manifest.sh, 15.09.2026. 30 id: 11 в
+# dns-threats.yaml, 19 в девяти остальных файлах (netintr_dns_*, exfil_dns_*,
+# webshell_dns_*, mitre_dns_c2_high_frequency, cryptominer_dns_pool,
+# supply_chain_pkg_dga_dns, appexploit_log4shell_jndi_lookup, c2_paste_site_access).
+#
+# Как обновлять. Правило с event_type: dns, добавленное ПОСЛЕ снятия манифеста,
+# молча падает в корзину «старого шума» — тот же механизм, что
+# [[new-rule-breaks-replays]]. generate-dns-rule-manifest.sh --check сверяет
+# текущие rules/*.yaml с этим файлом и падает при расхождении (новый/пропавший
+# id). Обновлять файл ТОЛЬКО вместе с записью в plan.md о том, какая волна и
+# почему изменила состав.
+appexploit_log4shell_jndi_lookup
+c2_paste_site_access
+cryptominer_dns_pool
+dns_any_query
+dns_dga_high_entropy
+dns_dga_ngram
+dns_doh_detected
+dns_dynamic_dns
+dns_nxdomain_flood
+dns_ptr_recon
+dns_suspicious_tld_emercoin
+dns_suspicious_tld_onion
+dns_tunneling_long_domain
+dns_txt_suspicious
+exfil_dns_deep_subdomain
+exfil_dns_dga_high_score
+exfil_dns_high_entropy_txt
+exfil_dns_high_query_rate
+exfil_dns_txt_long_label
+mitre_dns_c2_high_frequency
+mitre_ngrok_dns_query
+netintr_dga_domain_query
+netintr_dns_high_digit_ratio
+netintr_dns_high_entropy_query
+netintr_dns_long_label
+netintr_dns_many_subdomains
+supply_chain_pkg_dga_dns
+supply_chain_suspicious_registry_dns
+webshell_dns_exfil_long_subdomain
+webshell_dns_high_entropy

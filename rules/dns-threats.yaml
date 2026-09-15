@@ -3,16 +3,36 @@
 # and suspicious query patterns.
 
 rules:
-  # DGA (Domain Generation Algorithm) Detection — Shannon entropy
-  # High entropy domains are characteristic of malware using DGAs
+  # DGA (Domain Generation Algorithm) Detection — Shannon entropy PER LABEL.
+  # High entropy labels are characteristic of malware using DGAs.
+  #
+  # Finding №329 (wave 6.3, item 7): the field used here was qname_entropy,
+  # which is computed over every label except the TLD *concatenated together*
+  # (extractBaseDomain). That value grows with the number of levels in a name,
+  # not with its randomness, so it put this rule the wrong way round against
+  # its own threshold: ordinary k8s service names sat above it
+  # (kubernetes.default.svc.cluster.local → 3.574,
+  # prometheus.monitoring.svc.cluster.local → 3.781) while a genuinely random
+  # 8-character DGA label sat at 3.000 and was never caught. Scored per label
+  # the two populations separate the right way round: the same k8s names peak
+  # at 3.12, kq3v9zw7mrl2.net at 3.585. Short random labels stay below any
+  # Shannon threshold by construction (entropy ≤ log2(len)) — those are the
+  # job of dns_dga_ngram below, not of this rule.
   - id: dns_dga_high_entropy
     name: "DGA Domain Detected (High Entropy)"
-    description: "Domain name exhibits high entropy characteristics typical of DGA malware"
+    description: "A single DNS label exhibits high entropy characteristics typical of DGA malware"
     event_type: dns
-    condition:
-      field: qname_entropy
-      op: gt
-      values: ["3.5"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: qname_max_label_entropy
+          op: gt
+          values: ["3.5"]
+        # Entropy alone separates nothing at any threshold (see above);
+        # the bigram model is the half that does.
+        - field: qname_dga_score
+          op: gt
+          values: ["0.5"]
     severity: critical
     action: alert
     tags: [dns, dga, malware]
@@ -25,6 +45,18 @@ rules:
   # DGA Detection — N-gram character bigram model
   # Catches modern DGAs that deliberately produce normal Shannon entropy profiles
   # by scoring against a bigram language model trained on legitimate domain names.
+  # Finding №329 (wave 6.3): this rule could not fire. Its threshold of 0.70 sat
+  # above every measured DGA sample (0.56–0.63 over eight random names of 8 to
+  # 48 characters), and the model scored only the SLD, so it never looked at the
+  # labels where DGA subdomains and tunnel carriers actually live — every
+  # "*.svc.cluster.local" scored 0.2703, the score of "cluster". Score() is now
+  # per label, above a label-length floor (ngramMinLabelLen — short labels are
+  # where the model's legitimate samples score highest, and the floor has to sit
+  # in the scorer so that length and score are read off the SAME label), and the
+  # threshold is set where the populations actually part: no legitimate label of
+  # ten characters or more measured above 0.515, no random one below 0.558.
+  # That margin is thin by construction — negative control 6.3.2 on the stand is
+  # what keeps watching it.
   - id: dns_dga_ngram
     name: "DGA Domain Detected (N-gram Model)"
     description: "Domain name scores high on bigram DGA model — unusual character sequences typical of algorithm-generated names"
@@ -32,7 +64,7 @@ rules:
     condition:
       field: qname_dga_score
       op: gt
-      values: ["0.70"]
+      values: ["0.55"]
     severity: critical
     action: alert
     tags: [dns, dga, malware, ngram]
@@ -44,14 +76,25 @@ rules:
 
   # DNS Tunneling Detection
   # Excessively long domain names may indicate data exfiltration via DNS
+  # Finding №329 (wave 6.3): the condition was qname_length > 50, the length of
+  # the WHOLE name. A tunnel's length is the length of its data CARRIER, and an
+  # ordinary k8s FQDN passes 50 characters on service and namespace names plus
+  # the fixed ".svc.cluster.local" suffix alone —
+  # "ebpf-guard-alertmanager.monitoring.svc.cluster.local" is 52 characters of
+  # nothing. Scored on the longest single label instead, which is what finding
+  # №83 already established these rules reason about (it has been in the alert
+  # Details map as dns.max_label_len since then, just not available as a rule
+  # field). Threshold from the measured spread: legitimate labels topped out at
+  # 34 ("ingress-nginx-controller-admission"), carriers pack toward the RFC 1035
+  # cap of 63.
   - id: dns_tunneling_long_domain
     name: "DNS Tunneling Detected"
-    description: "Unusually long domain name suggesting DNS tunneling or data exfiltration"
+    description: "Unusually long DNS label suggesting DNS tunneling or data exfiltration"
     event_type: dns
     condition:
-      field: qname_length
+      field: qname_max_label_len
       op: gt
-      values: ["50"]
+      values: ["40"]
     severity: critical
     action: alert
     tags: [dns, tunneling, exfiltration]

@@ -21,7 +21,8 @@ import (
 
 // DNSMaps holds the BPF maps exported by bpf/dns.bpf.c.
 type DNSMaps struct {
-	DnsEvents *ebpf.Map `ebpf:"dns_events"`
+	DnsEvents    *ebpf.Map `ebpf:"dns_events"`
+	DnsSocketMap *ebpf.Map `ebpf:"dns_socket_map"`
 }
 
 // DNSPrograms holds the BPF programs exported by bpf/dns.bpf.c.
@@ -91,6 +92,9 @@ func (o *DNSObjects) Close() error {
 	}
 	if o.DnsEvents != nil {
 		errs = append(errs, o.DnsEvents.Close())
+	}
+	if o.DnsSocketMap != nil {
+		errs = append(errs, o.DnsSocketMap.Close())
 	}
 	return errors.Join(errs...)
 }

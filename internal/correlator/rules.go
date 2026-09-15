@@ -1151,7 +1151,7 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 	}
 
 	// Lazily compute DNS analysis once per rule evaluation so that multiple
-	// enriched DNS fields (qname_entropy, qname_dga_score, qname_digit_ratio,
+	// enriched DNS fields (qname_entropy, qname_max_label_entropy, qname_dga_score, qname_digit_ratio,
 	// qname_subdomain_count, qname_is_dga) all share the same DomainAnalysis
 	// result instead of calling AnalyzeDomain up to 5 times per event.
 	var dnsAnalysis *DomainAnalysis
@@ -1405,7 +1405,7 @@ func capNameToBit(name string) (uint, bool) {
 // Hot path: uses strconv instead of fmt.Sprintf for numeric fields to avoid
 // interface boxing allocations. dnsAnalysis is precomputed once per rule
 // evaluation (in matchesTyped) so that multiple enriched DNS fields
-// (qname_entropy, qname_dga_score, qname_digit_ratio, qname_subdomain_count,
+// (qname_entropy, qname_max_label_entropy, qname_dga_score, qname_digit_ratio, qname_subdomain_count,
 // qname_is_dga) all reuse the same DomainAnalysis without recomputing entropy,
 // n-gram scores, and digit ratio for the same QName.
 // normaliseFieldName maps dotted-name aliases used in rule YAML files to their
@@ -1744,6 +1744,18 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			}
 			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
 			return strconv.FormatFloat(a.Entropy, 'f', 4, 64)
+		case "qname_max_label_entropy":
+			if dnsAnalysis != nil {
+				return strconv.FormatFloat(dnsAnalysis.MaxLabelEntropy, 'f', 4, 64)
+			}
+			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			return strconv.FormatFloat(a.MaxLabelEntropy, 'f', 4, 64)
+		case "qname_max_label_len":
+			if dnsAnalysis != nil {
+				return strconv.Itoa(dnsAnalysis.MaxLabelLen)
+			}
+			a := globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
+			return strconv.Itoa(a.MaxLabelLen)
 		case "qname_dga_score":
 			if dnsAnalysis != nil {
 				return strconv.FormatFloat(dnsAnalysis.NgramScore, 'f', 4, 64)

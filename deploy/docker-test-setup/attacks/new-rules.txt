@@ -251,3 +251,42 @@ sigma_passwd_shadow_read_daemon	20260914	6.2.9.F.1/№303: verified-daemon-linea
 sensitive_file_read_daemon	20260914	6.2.9.F.1/№303: verified-daemon-lineage расширено на sshd (proc.comm in [cron, sshd], ancestor_exe_path += /usr/sbin/sshd)
 sigma_log_deletion_daemon	20260914	6.2.9.F.1/№303: verified-daemon-lineage расширено на sshd (proc.comm in [cron, sshd], ancestor_exe_path += /usr/sbin/sshd)
 sigma_utmp_wtmp_modified_daemon	20260914	6.2.9.F.1/№303: verified-daemon-lineage расширено на sshd (proc.comm in [cron, sshd], ancestor_exe_path += /usr/sbin/sshd)
+
+# ── Волна 6.3, находка №329 (живой прогон 15.09.2026, item 7) ──────────────
+# dns_dga_high_entropy сменил ПОЛЕ условия: qname_entropy (Шеннон по склейке
+# всех меток кроме TLD, extractBaseDomain) → qname_max_label_entropy (Шеннон
+# по одной, самой «случайной» метке). Порог 3.5 не тронут, rule_id не менялся.
+# Склейка растила алфавит по числу уровней имени, а не по случайности его
+# содержимого: kubernetes.default.svc.cluster.local давало 3.574 и поднимало
+# алерт в КАЖДОМ k8s-кластере, а настоящая 8-символьная DGA-метка — 3.000 и
+# не ловилась вовсе. Это СУЖЕНИЕ совпадения: на архивах старше 15.09.2026
+# правило законно поднимало алерты на легитимных многоуровневых именах,
+# которых новое поле больше не даёт. Запись идёт сюда, а не в
+# renamed-rules.txt ([[narrowed-rule-goes-to-new-rules]]; renamed дал бы
+# ПРЕФЛАЙТ FAIL №170) и не в silent-rules.txt — стенд сценарий воспроизводит,
+# позитивный контроль 6.3.1 (высокоэнтропийный qname из busybox-пода) обязан
+# поднимать это правило и после правки.
+dns_dga_high_entropy	20260915	6.3/№329 item 8: qname_entropy (склейка меток) → конъюнкция qname_max_label_entropy>3.5 И qname_dga_score>0.5
+netintr_dns_high_entropy_query	20260915	6.3/№329 item 8: то же сужение, порог энтропии 4.0 без изменений
+webshell_dns_high_entropy	20260915	6.3/№329 item 8: то же сужение, порог энтропии 3.8 без изменений
+supply_chain_pkg_dga_dns	20260915	6.3/№329 item 8: то же сужение, порог энтропии 3.8 без изменений
+exfil_dns_high_query_rate	20260915	6.3/№329 item 8: qname_entropy → qname_max_label_entropy внутри condition_group (порог 3.5, остальные условия не тронуты)
+exfil_dns_high_entropy_txt	20260915	6.3/№329 item 8: qname_entropy → qname_max_label_entropy внутри condition_group (порог 3.8)
+exfil_dns_deep_subdomain	20260915	6.3/№329 item 8: qname_entropy → qname_max_label_entropy внутри condition_group (порог 3.2)
+# Семья ДЛИНЫ — тот же корень, другая половина находки №329: длина считалась по
+# ВСЕМУ имени, а обычный k8s-FQDN добирает её служебным хвостом
+# «.svc.cluster.local» (ingress-nginx-controller-admission.ingress-nginx.svc.
+# cluster.local — 66 символов ни о чём). Переведены на длину САМОЙ ДЛИННОЙ
+# МЕТКИ (qname_max_label_len — то, о чём эти правила рассуждают по находке №83).
+# Позитивный контроль 5.9.5c не тронут: run_dns_long_label_attack шлёт метки по
+# 60 символов, все четыре порога ниже.
+dns_tunneling_long_domain	20260915	6.3/№329 item 8: qname_length>50 → qname_max_label_len>40
+exfil_dns_txt_long_label	20260915	6.3/№329 item 8: qname_length>60 → qname_max_label_len>45
+webshell_dns_exfil_long_subdomain	20260915	6.3/№329 item 8: qname_length>60 → qname_max_label_len>45
+netintr_dns_long_label	20260915	6.3/№329 item 8: qname_length>100 → qname_max_label_len>50
+# dns_dga_ngram шёл в обратную сторону — не сужение, а РАСШИРЕНИЕ: порог 0.70
+# был выше любого измеренного DGA (правило не могло сработать), Score() читал
+# только SLD. Запись здесь для полноты провенанса: на архивах старше 15.09.2026
+# правило молчало ВСЕГДА, и его молчание там — не потеря детекта, а исходное
+# состояние.
+dns_dga_ngram	20260915	6.3/№329 item 8: Score() по меткам (было — только SLD), порог 0.70 → 0.55, пол длины метки 10 внутри скорера

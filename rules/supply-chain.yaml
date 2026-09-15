@@ -148,10 +148,17 @@ rules:
       package manager activity this may indicate a malicious package making
       C2 contact via algorithmically-generated domains to evade blocklists.
     event_type: dns
-    condition:
-      field: qname_entropy
-      op: gt
-      values: ["3.8"]
+    condition_group:
+      operator: and
+      conditions:
+        - field: qname_max_label_entropy
+          op: gt
+          values: ["3.8"]
+        # Entropy alone separates nothing — see the comment on
+        # dns_dga_high_entropy. The bigram model is the second half.
+        - field: qname_dga_score
+          op: gt
+          values: ["0.5"]
     severity: warning
     action: alert
     tags: [mitre-t1195, mitre-t1071, supply-chain, dga, dns, c2]

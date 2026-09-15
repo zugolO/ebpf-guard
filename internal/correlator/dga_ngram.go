@@ -153,8 +153,40 @@ func (d *NgramDGADetector) train() {
 // Sigmoid offset −3.5: the decision boundary sits at an average ln-probability
 // of −3.5, which empirically separates legitimate from DGA domains well when the
 // model is trained on the embedded corpus.
+// Scored PER LABEL, taking the maximum. Finding №329 (wave 6.3): scoring only
+// the SLD made the model blind to exactly where DGA subdomains and DNS tunnel
+// carriers live — every "*.svc.cluster.local" scored identically (0.2703, the
+// score of "cluster") no matter what sat in front of it. The maximum is the
+// right reduction: one algorithm-generated label anywhere in the name is the
+// signal, and ordinary labels cannot drag it back down.
 func (d *NgramDGADetector) Score(domain string) float64 {
-	sld := ngramExtractSLD(domain)
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	max := 0.0
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) < ngramMinLabelLen {
+			continue
+		}
+		if sc := d.scoreLabel(label); sc > max {
+			max = sc
+		}
+	}
+	return max
+}
+
+// ngramMinLabelLen is the shortest label the model is allowed to judge.
+// Measured 15.09.2026 (wave 6.3): the model's worst legitimate scores all come
+// from SHORT labels — "my-svc" 0.654, "traefik" 0.580, "snapcraft" 0.535 —
+// while no legitimate label of ten characters or more scored above 0.515
+// ("kafka-broker-0") against a floor of 0.558 for random ones. A few characters
+// carry too few bigrams to place a name either way, and scoring them anyway is
+// what let a plain "my-svc.my-namespace.svc.cluster.local" clear the rule
+// threshold. The floor lives here rather than in a rule condition because the
+// two must apply to THE SAME label: as separate conditions of one rule, the
+// length is read off one label and the score off another.
+const ngramMinLabelLen = 10
+
+// scoreLabel scores one DNS label against the bigram model.
+func (d *NgramDGADetector) scoreLabel(sld string) float64 {
 	if len(sld) < 4 {
 		return 0 // too short to score reliably
 	}

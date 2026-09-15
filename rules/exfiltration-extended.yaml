@@ -12,7 +12,7 @@ rules:
     condition_group:
       operator: and
       conditions:
-        - field: qname_entropy
+        - field: qname_max_label_entropy
           op: gt
           values: ["3.5"]    # high entropy subdomain = encoded data
         - field: qname_subdomain_count

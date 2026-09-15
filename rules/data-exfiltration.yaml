@@ -19,10 +19,18 @@ rules:
       data in the leftmost label and use TXT record responses to carry
       replies. Combined with high entropy this is a strong T1048 indicator.
     event_type: dns
+    # Finding №329 (wave 6.3): scored on the longest single LABEL, not on the
+    # whole dotted name. An ordinary k8s FQDN reaches 66 characters on service
+    # and namespace names plus the fixed ".svc.cluster.local" suffix
+    # ("ingress-nginx-controller-admission.ingress-nginx.svc.cluster.local" is
+    # 66 characters of nothing), so a whole-name threshold fires on routine
+    # cluster traffic. The longest label is what finding №83 established these
+    # rules actually reason about. Measured legitimate labels top out at 34;
+    # carriers pack toward the RFC 1035 cap of 63.
     condition:
-      field: qname_length
+      field: qname_max_label_len
       op: gt
-      values: ["60"]
+      values: ["45"]
     severity: critical
     action: alert
     tags: [mitre-t1048, mitre-t1048.001, data-exfiltration, dns-tunnel, txt-exfil]
@@ -43,7 +51,7 @@ rules:
         - field: qtype
           op: equals
           values: ["16"]
-        - field: qname_entropy
+        - field: qname_max_label_entropy
           op: gt
           values: ["3.8"]
     severity: critical
@@ -71,7 +79,7 @@ rules:
         - field: qname_subdomain_count
           op: gt
           values: ["6"]
-        - field: qname_entropy
+        - field: qname_max_label_entropy
           op: gt
           values: ["3.2"]
     severity: critical

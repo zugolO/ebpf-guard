@@ -615,6 +615,13 @@ type DNSCollectorConfig struct {
 	// Use to suppress false positives on CDN or internal naming patterns.
 	// Example: ["clarity", "akamaiedge", "r2", "azureedge", "trafficmanager"]
 	DGAWhitelist []string `mapstructure:"dga_whitelist"`
+	// MinEventsPerStaleWindow, when > 0, is the minimum number of DNS events
+	// the collector must see over the trailing 10-minute window before it
+	// reports itself stale — on top of the pre-existing zero-events check.
+	// 0 (default) disables the rate check: this package has no basis for
+	// guessing a universally "plausible" DNS rate, so an operator who knows
+	// their node's expected traffic sets the floor explicitly (№328).
+	MinEventsPerStaleWindow int `mapstructure:"min_events_per_stale_window"`
 }
 
 // IOUringCollectorConfig holds io_uring monitoring settings.
@@ -2233,6 +2240,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.dns.tunneling_min_length", 50)
 	v.SetDefault("collectors.dns.high_frequency_threshold", 100)
 	v.SetDefault("collectors.dns.dga_whitelist", []string{})
+	v.SetDefault("collectors.dns.min_events_per_stale_window", 0)
 	v.SetDefault("collectors.iouring.enabled", false)
 	v.SetDefault("collectors.bpf_monitor.enabled", false)
 	v.SetDefault("collectors.tls_fingerprint.enabled", false)

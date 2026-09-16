@@ -167,23 +167,16 @@ if [ "${_r63_orph:-0}" -gt 0 ]; then
     exit 1
 fi
 
-# ── Шаг 0а (решение владельца 15.09.2026, item 8(б)). A/B ВОЗВРАЩАЕТ ПРОЛОГ.
-#    6.2.6.A принят НЕПРИМЕНИМЫМ к волне 6.3 условно: пока A/B выключен, волна
-#    нового дрейф-пути не вводит. Но DNS-события доходят до профилировщика
-#    (engine.go, ad.ProcessEvent на общем пути ingest; eventTypeSamplingKey
-#    знает "dns"), то есть тумблер dns.enabled в 6.3.4/6.3.5 двигает ТУ ЖЕ
-#    базу дрейфа — и окно B, снятое без пролога, померяет ОБУЧЕНИЕ, а не
-#    базовую линию (пункт А «Переноса в 6.1…6.4», пришедший с другой стороны).
-#    Условие проверяется здесь, а не в контролях: контроли видят пролог уже
-#    состоявшимся и не могут его потребовать.
-if [ "${AB_ENABLED:-0}" = "1" ] && [ "$SMOKE" != "1" ] && [ "${PROLOGUE:-0}" -lt 1200 ]; then
-    echo "СТОП ДО ПРОГОНА: AB_ENABLED=1 при прологе ${PROLOGUE}s < 1200s."
-    echo "  Включение A/B (6.3.4/6.3.5) перезапускает агента с другим составом коллекторов и"
-    echo "  тем самым возвращает требование 6.2.6.A: пролог обязан быть длиннее"
-    echo "  learning_period × enforce_deadline_periods, иначе окно B меряет обучение базы дрейфа."
-    echo "  Решение владельца 15.09.2026 (item 8(б)). Агент не тронут, стор не очищен."
-    exit 1
-fi
+# ── Шаг 0а — РЕТИРОВАН (волна 6.3.1, item 6, решение владельца 16.09.2026,
+#    вариант ii). Раньше здесь стоял гейт AB_ENABLED=1 требующий пролог
+#    ≥1200с: A/B dns.enabled перезапускал агента, и без пролога окно B мерило
+#    бы обучение базы дрейфа, а не базовую линию (6.2.6.A). Разбор архива
+#    collect-6.3-ab (16.09.2026, находки №335/№336) показал, что даже с этим
+#    прологом A/B не измерял то, ради чего заводился: вклад DNS утонул в
+#    конфаундерах рестарта (форсированное событие ноды только в окне A,
+#    обнуление базы дрейфа). A/B удалён из wave6.3-controls.sh целиком;
+#    6.3.4/6.3.5 теперь читают ось event_type внутри уже снятого тихого
+#    окна, рестарта агента больше не требуют, и этот шаг стал мёртвым кодом.
 
 # ── Шаг 0б (ITEM 6, №270). СТАТИЧЕСКАЯ СВЕРКА ПОЛНОТЫ — ДО РЕСТАРТА АГЕНТА.
 #    Тот же страж, тот же список меток, но вопрос задаётся ДО прогона: есть
@@ -317,6 +310,12 @@ fi
 echo "--- стор ---"
 kubectl -n "$NS" delete pod --all --ignore-not-found --wait=true >/dev/null 2>&1
 rm -rf "$ART" 2>/dev/null
+# Отметка ДО остановки: барьер готовности ниже требует
+# process_start_time_seconds СТРОГО больше неё. Брать отметку ПОСЛЕ
+# `systemctl start` нельзя — старт возвращает управление уже после fork'а
+# юнита, и PST нового процесса бывает МЕНЬШЕ такой отметки на доли секунды,
+# то есть барьер ложно не сходился бы на здоровом агенте.
+_r63_pre_restart=$(date -u +%s)
 systemctl stop "$SVC"
 rm -f /var/lib/ebpf-guard/test-events.db /var/lib/ebpf-guard/test-events.db-wal /var/lib/ebpf-guard/test-events.db-shm
 systemctl start "$SVC"
@@ -329,7 +328,44 @@ echo "агент поднят $(cat /root/agent-start-6.3.txt) (эпоха $(cat
 
 # ── Шаг 2. Приборность до пролога: ждать пролог ради неизмеримого прогона
 #    незачем (память die-only-for-unmeasurable-run).
-sleep 30
+#
+# БАРЬЕР ГОТОВНОСТИ ВМЕСТО СЛЕПОГО sleep (№337, item 4 волны 6.3.1). Прежде
+# здесь стоял ровно `sleep 30` — то есть ДОПУЩЕНИЕ о длительности старта, а не
+# его проверка; находка №337 показала цену такого допущения в соседнем месте
+# (вердикт 6.3.6 был вынесен по пустому снимку с агента, который ещё не
+# отвечал). Барьер спрашивает ДВЕ вещи: /health отвечает 200 И
+# process_start_time_seconds БОЛЬШЕ отметки, снятой до рестарта — /health
+# поднимается раньше, чем экспортёр публикует свежий process_start_time, и
+# одна половина без другой прочитала бы старый снимок как новый.
+#
+# Сюда он и переехал: после решения item 6 (вариант ii, A/B снят) рестарта
+# внутри wave6.3-controls.sh не осталось НИ ОДНОГО, и барьер, написанный
+# item 4, оказался без единой точки вызова. Единственный рестарт прогона —
+# этот, в Шаге 1 пайплайна.
+_r63_ready_tries="${R63_READY_TRIES:-30}"
+_r63_ready_wait="${R63_READY_WAIT:-3}"
+_r63_metrics_url="${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}"
+_r63_tok="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
+_r63_ready=0
+_r63_n=1
+while [ "$_r63_n" -le "$_r63_ready_tries" ]; do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Authorization: Bearer $_r63_tok" "$_r63_metrics_url/health" 2>/dev/null)" = "200" ]; then
+        _r63_pst=$(curl -s --max-time 10 -H "Authorization: Bearer $_r63_tok" "$_r63_metrics_url/metrics" 2>/dev/null \
+            | awk '$1=="process_start_time_seconds"{print $2; exit}')
+        if [ -n "${_r63_pst:-}" ] && awk -v a="${_r63_pst:-0}" -v b="${_r63_pre_restart:-0}" 'BEGIN{exit !(a>b)}'; then
+            echo "барьер готовности: агент поднят за $(( (_r63_n - 1) * _r63_ready_wait ))с (process_start_time_seconds=${_r63_pst}, попытка ${_r63_n}/${_r63_ready_tries})"
+            _r63_ready=1
+            break
+        fi
+    fi
+    sleep "$_r63_ready_wait"
+    _r63_n=$(( _r63_n + 1 ))
+done
+if [ "$_r63_ready" -ne 1 ]; then
+    echo "СТОП: барьер готовности НЕ ПРОЙДЕН — за $(( _r63_ready_tries * _r63_ready_wait ))с после рестарта /health и/или process_start_time_seconds не подтвердили поднятого агента. Прогон неизмерим по построению; пролога ждать незачем (память die-only-for-unmeasurable-run)"
+    date -u +%FT%TZ > "$DONE_MARK"
+    exit 1
+fi
 if ! journalctl -u "$SVC" --since "@$(cat /root/agent-start-6.3.epoch)" --no-pager | grep -q 'k8s enricher active'; then
     echo "СТОП: k8s-энричер не поднялся после рестарта — прогон неизмерим"
     date -u +%FT%TZ > "$DONE_MARK"
@@ -351,14 +387,36 @@ else
     date -u +%FT%TZ > "$DONE_MARK"
     exit 1
 fi
-_r63_bf=$(curl -s --max-time 30 -H "Authorization: Bearer ${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
-    "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}/metrics" 2>/dev/null \
-    | awk '$1=="ebpf_guard_dns_socket_map_backfilled_total"{print $2+0; exit}')
+_r63_bf_metrics=$(curl -s --max-time 30 -H "Authorization: Bearer ${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
+    "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}/metrics" 2>/dev/null)
+_r63_bf=$(printf '%s\n' "$_r63_bf_metrics" | awk '$1=="ebpf_guard_dns_socket_map_backfilled_total"{print $2+0; exit}')
+_r63_bf_cand=$(printf '%s\n' "$_r63_bf_metrics" | awk '$1=="ebpf_guard_dns_socket_map_backfill_candidates_total"{print $2+0; exit}')
 if [ -z "${_r63_bf:-}" ]; then
     echo "  бэкфилл сокетов (item 5): МЕТРИКА НЕ НАЙДЕНА — на стенде бинарь без правки item 5 либо экспортёр её не публикует; слепота coredns этим прогоном не снята"
 else
-    echo "  бэкфилл сокетов (item 5): $_r63_bf сокетов внесено в dns_socket_map (ноль законен — значит на старте не было уже-подключённых сокетов)"
+    echo "  бэкфилл сокетов (item 5): $_r63_bf сокетов внесено в dns_socket_map, кандидатов найдено (item 2 волны 6.3.1) ${_r63_bf_cand:-НЕ НАЙДЕНА} (ноль законен — значит на старте не было уже-подключённых сокетов; candidates>backfilled — часть найденных не сматчилась/не вставилась)"
 fi
+
+# ДЕПЛОЙ ПРАВОК ВОЛНЫ 6.3.1 — ПРОВЕРЯЕТСЯ ДО ПРОЛОГА, а не в контролях через
+# полтора часа. Три новые метрики (items 1/2, item 3, item 6) регистрируются
+# при конструировании коллектора/профилировщика/экспортёра, до первого
+# события: их строки есть в /metrics даже при нулевом значении. Отсутствие
+# любой означает ровно одно — на ноде бинарь без правок волны, и три критерия
+# (6.3.1.1/6.3.1.2/6.3.4) выдали бы приборные нули, читаемые как продуктовые
+# (память rule-fields-and-binary-ship-together). Цена проверки — ноль секунд,
+# цена пропуска — весь прогон.
+_r63_missing_new=""
+for _r63_m in ebpf_guard_dns_socket_map_backfill_candidates_total \
+              ebpf_guard_comm_preexec_normalized_total \
+              ebpf_guard_alert_volume_by_event_type_total; do
+    printf '%s\n' "$_r63_bf_metrics" | grep -qE "^${_r63_m}[{ ]" || _r63_missing_new="$_r63_missing_new $_r63_m"
+done
+if [ -n "${_r63_missing_new# }" ]; then
+    echo "СТОП: в /metrics нет метрик${_r63_missing_new} — на ноде поднят бинарь БЕЗ правок волны 6.3.1 (items 1/2/3/6). Критерии 6.3.1.1/6.3.1.2/6.3.4 на нём дали бы нули, неотличимые от продуктовых. Выкатывать бинарь и правила одним заходом"
+    date -u +%FT%TZ > "$DONE_MARK"
+    exit 1
+fi
+echo "  деплой волны 6.3.1: все три новые метрики присутствуют в /metrics (items 1/2/3/6 на ноде)"
 
 # Немота по среде фиксируется здесь же, пока журнал стартовых строк свеж
 # (находка №225). Файловая ось (№234/открытый вопрос 7) — рядом с syscall'ной.
@@ -396,7 +454,6 @@ W63_CHURN=3 W63_GATE=100 W63_GATE_FORMULA="$GATE_FORMULA" \
 W63_PROFILE_SECS="$PROFILE_SECS" W63_SMOKE="$SMOKE" \
 W63_VERDICTS="$VERDICTS" \
 W63_FORCE_NODE_EVENT="${FORCE_NODE_EVENT:-1}" \
-W63_AB_ENABLED="${AB_ENABLED:-0}" \
 W63_PROLOGUE_METRICS="/root/metrics-prologue-start-6.3.txt" \
     bash "$SETUP/wave6.3-controls.sh"
 
@@ -469,7 +526,14 @@ fi
 #    прерывает пайплайн ДО Шага 5: архив, который не измеряет то, ради чего
 #    запущен, не должен выглядеть как собранный архив.
 echo "--- 6.3.8: страж полноты пайплайна (item 6) ---"
-if ! bash "$SETUP/wave6.3-completeness-guard.sh" --check "$OUT"; then
+# Реестр меток ($ART/emitted-labels.txt) пишет сам рантайм контролей
+# (`_w63_record_label`), строками «<метка> OK|FAIL|NOTREQ». Передаётся стражу
+# вторым аргументом, чтобы КЛАСС вердикта брался из него, а не восстанавливался
+# регэкспом по словам вердиктного текста (item 9, открытый вопрос 2 —
+# эвристика верна ровно до первого критерия, чьё объяснение упомянет чужое
+# вердиктное слово). Существование вердикта по-прежнему определяется ЛОГОМ:
+# аргумент необязателен, и его отсутствие стража не ломает.
+if ! bash "$SETUP/wave6.3-completeness-guard.sh" --check "$OUT" "$ART/emitted-labels.txt"; then
     echo "=== ПРОГОН 6.3 ОСТАНОВЛЕН: 6.3.8 ОТКАЗАЛСЯ СОБРАТЬ АРХИВ (расхождение таблицы меток постановки со списком вынесенных вердиктов, №269/№270) ==="
     {
         echo "критерий=6.3.8"

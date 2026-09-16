@@ -49,25 +49,86 @@ type dnsSocketMapUpdater interface {
 // blind to sockets it never saw connect().
 //
 // This is a startup-only scan, not a running mechanism: it reads
-// /proc/net/udp once for entries connected to remote port 53, matches
-// their inodes against every process's open file descriptors, and inserts
-// the resulting (tgid, fd) pairs directly — the same write trace_connect
-// would have made had it been attached at the time. It cannot see a
-// socket that connects during the scan itself (the window between
-// listing /proc/net/udp and attaching tracepoints); that residual race is
+// /proc/<pid>/net/udp once per distinct network namespace (finding №340 —
+// the host's own /proc/net/udp only sees the host netns, and coredns's
+// upstream socket lives inside the pod's netns and never appears there)
+// for entries connected to remote port 53, matches their inodes against
+// every process's open file descriptors, and inserts the resulting
+// (tgid, fd) pairs directly — the same write trace_connect would have
+// made had it been attached at the time. It cannot see a socket that
+// connects during the scan itself (the window between listing
+// /proc/<pid>/net/udp and attaching tracepoints); that residual race is
 // the same one the collector always had for its own startup and is not
 // new here. IPv4 only, matching is_dns_packet's current AF_INET-only
-// scope — /proc/net/udp6 is a separately tracked blind spot (6.3.7), not
-// silently extended by this scan.
-func backfillDNSSocketMap(m dnsSocketMapUpdater) (int, error) {
-	inodes, err := connectedPort53Inodes("/proc/net/udp")
+// scope — /proc/<pid>/net/udp6 is a separately tracked blind spot
+// (6.3.7), not silently extended by this scan.
+//
+// candidates is the number of distinct connected-to-:53 socket inodes
+// found across all namespaces, BEFORE matching them against process fds —
+// finding №341: backfilled==0 alone cannot distinguish "nothing to seed"
+// from "found sockets but failed to match/insert them", so the caller
+// publishes candidates and backfilled as two separate counters.
+func backfillDNSSocketMap(m dnsSocketMapUpdater) (candidates, backfilled int, err error) {
+	inodes, err := connectedPort53InodesAllNamespaces("/proc")
 	if err != nil {
-		return 0, fmt.Errorf("read /proc/net/udp: %w", err)
+		return 0, 0, fmt.Errorf("scan network namespaces under /proc: %w", err)
 	}
-	if len(inodes) == 0 {
-		return 0, nil
+	candidates = len(inodes)
+	if candidates == 0 {
+		return 0, 0, nil
 	}
-	return seedSocketMapFromProcFDs(m, "/proc", inodes)
+	n, err := seedSocketMapFromProcFDs(m, "/proc", inodes)
+	return candidates, n, err
+}
+
+// connectedPort53InodesAllNamespaces returns the union of
+// connectedPort53Inodes across every distinct network namespace reachable
+// from procRoot, reading each namespace's udp table exactly once
+// regardless of how many processes share it. Socket inodes are allocated
+// from the kernel's global anonymous-inode pool, not per-namespace, so
+// inodes from different namespaces never collide when merged into one
+// set — the same assumption seedSocketMapFromProcFDs already relies on
+// when it matches these inodes against fds across ALL processes.
+//
+// A process that exits mid-scan, or whose ns/net this agent cannot read
+// (permission, already gone), is skipped — same best-effort tolerance as
+// seedSocketMapFromProcFDs.
+func connectedPort53InodesAllNamespaces(procRoot string) (map[string]struct{}, error) {
+	procDir, err := os.Open(procRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer procDir.Close()
+
+	names, err := procDir.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+
+	seenNS := make(map[string]struct{})
+	inodes := make(map[string]struct{})
+	for _, name := range names {
+		if _, err := strconv.ParseUint(name, 10, 32); err != nil {
+			continue // not a pid directory
+		}
+		nsTarget, err := os.Readlink(filepath.Join(procRoot, name, "ns", "net"))
+		if err != nil {
+			continue // exited between listing and reading, or no permission
+		}
+		if _, ok := seenNS[nsTarget]; ok {
+			continue // this namespace's udp table was already read via another pid
+		}
+		seenNS[nsTarget] = struct{}{}
+
+		ns, err := connectedPort53Inodes(filepath.Join(procRoot, name, "net", "udp"))
+		if err != nil {
+			continue // net/udp unreadable for this pid (exited, permission) — best-effort
+		}
+		for inode := range ns {
+			inodes[inode] = struct{}{}
+		}
+	}
+	return inodes, nil
 }
 
 // connectedPort53Inodes parses /proc/net/udp and returns the socket inodes

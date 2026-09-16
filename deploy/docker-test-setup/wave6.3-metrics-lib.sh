@@ -738,6 +738,42 @@ w63_volume_by_source() { # $1=срез-начало $2=срез-конец [$3=r
 }
 
 # ---------------------------------------------------------------------------
+# ВОЛНА 6.3.1, ITEM 6 (№327/№335). Разбивка объёма по паре {event_type,
+# rule_id} — счётчик ebpf_guard_alert_volume_by_event_type_total, ось,
+# которой ни у alerts_total, ни у alert_volume_by_source_total нет (Alert.Event
+# несёт json:"-", стор её не видит вовсе). Заводилась как замена A/B
+# dns.enabled (6.3.4/6.3.5): даёт вклад ЛЮБОГО event_type в ЛЮБОЕ правило,
+# включая anomaly_detection, который принимает все типы событий без своей
+# оси — внутри ОДНОГО окна, без рестарта. Тот же шаблон, что
+# w63_volume_by_source выше.
+#
+# Печатает "<event_type> <rule_id> <Δ>" по убыванию. Фильтры необязательны:
+# $3 — event_type (точное значение), $4 — список rule_id через пробел.
+# ---------------------------------------------------------------------------
+w63_volume_by_event_type() { # $1=срез-начало $2=срез-конец [$3=event_type] [$4=rule_id…]
+    awk -v want_et="${3:-}" -v ids="${4:-}" '
+        function val(line, name,   p) {
+            if (match(line, name "=\"[^\"]*\"")) {
+                p = substr(line, RSTART, RLENGTH)
+                sub(name "=\"", "", p); sub("\"$", "", p)
+                return p
+            }
+            return ""
+        }
+        BEGIN { n = split(ids, want, " ") }
+        /^ebpf_guard_alert_volume_by_event_type_total\{/ {
+            et = val($0, "event_type"); r = val($0, "rule_id")
+            if (et == "") next
+            if (want_et != "" && et != want_et) next
+            if (n > 0) { ok = 0; for (i = 1; i <= n; i++) if (want[i] == r) ok = 1; if (!ok) next }
+            k = et " " r
+            if (FILENAME == ARGV[1]) a[k] += $NF; else { b[k] += $NF; seen[k] = 1 }
+        }
+        END { for (k in seen) { d = b[k] - (k in a ? a[k] : 0); if (d > 0) printf "%s %d\n", k, d } }
+    ' "$1" "$2" | sort -k3 -rn
+}
+
+# ---------------------------------------------------------------------------
 # ITEM 6 (№282, открытый вопрос 13, подпункт критерия 6.2.6.1). Приращение
 # rule_exceptions_total по КАЖДОЙ из восьми пар (rule_id, exception_name),
 # заведённых item 6 по идиоме node-host-daemon.
@@ -1866,6 +1902,10 @@ ebpf_guard_alert_volume_by_source_total{comm="cron",rule_id="sigma_passwd_shadow
 ebpf_guard_alert_volume_by_source_total{comm="sshd",rule_id="sigma_passwd_shadow_read_daemon"} 3
 ebpf_guard_rule_exceptions_total{exception_name="verified-daemon-image",rule_id="anomaly_detection"} 2
 ebpf_guard_rule_exceptions_total{exception_name="node-motd-sysinfo",rule_id="sigma_cpu_info_access"} 1
+ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="dns_dga_ngram"} 4
+ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="anomaly_detection"} 1
+ebpf_guard_alert_volume_by_event_type_total{event_type="syscall",rule_id="anomaly_detection"} 40
+ebpf_guard_alert_volume_by_event_type_total{rule_id="dns_tunnel_long_qname",event_type="dns"} 7
 EOF
     cat > "$e" <<'EOF'
 ebpf_guard_exe_path_lookups_total{field="exe_path",result="resolved"} 180
@@ -1883,6 +1923,10 @@ ebpf_guard_alert_volume_by_source_total{comm="cron",rule_id="sigma_passwd_shadow
 ebpf_guard_alert_volume_by_source_total{comm="sshd",rule_id="sigma_passwd_shadow_read_daemon"} 9
 ebpf_guard_rule_exceptions_total{exception_name="verified-daemon-image",rule_id="anomaly_detection"} 9
 ebpf_guard_rule_exceptions_total{exception_name="node-motd-sysinfo",rule_id="sigma_cpu_info_access"} 4
+ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="dns_dga_ngram"} 15
+ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="anomaly_detection"} 3
+ebpf_guard_alert_volume_by_event_type_total{event_type="syscall",rule_id="anomaly_detection"} 55
+ebpf_guard_alert_volume_by_event_type_total{rule_id="dns_tunnel_long_qname",event_type="dns"} 7
 EOF
 
     echo "=== синтетика: ключ реестра вердиктов и чтение «метка взята» (вход условий 1/2 критерия 6.2.6.21) ==="
@@ -1977,6 +2021,37 @@ EOF
         echo "  OK: фильтр по comm=cron даёт пусто — утечка двойников с comm=cron за окно = 0 (форма вердикта 6.2.6.22в)"
     else
         echo "  ПРОВАЛ: фильтр по comm вернул строки при нулевой дельте: $out"; rc=1
+    fi
+
+    # Волна 6.3.1, item 6 + аудит 16.09.2026 (открытый вопрос 2 items 5/6):
+    # новая ось event_type не появляется НИ В ОДНОМ архиве server-logs/collect-*
+    # (они физически старше правки), поэтому --self-test-all её не трогает и
+    # трогать не может. Синтетическая фикстура — единственный способ проверить
+    # разбор ДО первого живого архива; проверяются ровно те три свойства, на
+    # которых стоит вердикт 6.3.4: дельта, фильтр по event_type и
+    # независимость от ПОРЯДКА лейблов (client_golang сортирует их сам —
+    # [[metric-label-added-breaks-awk-anchors]], последняя строка фикстуры
+    # намеренно записана в обратном порядке).
+    echo "=== синтетика: объём по паре {event_type, rule_id} (item 6 волны 6.3.1, 6.3.4) ==="
+    out=$(w63_volume_by_event_type "$s" "$e" "dns")
+    echo "$out" | sed 's/^/    /'
+    if printf '%s' "$out" | grep -q '^dns dns_dga_ngram 11$' \
+       && printf '%s' "$out" | grep -q '^dns anomaly_detection 2$' \
+       && ! printf '%s' "$out" | grep -q 'syscall'; then
+        echo "  OK: фильтр event_type=dns даёт только DNS-строки, дельта по каждому rule_id верна"
+    else
+        echo "  ПРОВАЛ: разбивка по {event_type, rule_id} не совпала с ожидаемой"; rc=1
+    fi
+    if printf '%s' "$out" | grep -q 'dns_tunnel_long_qname'; then
+        echo "  ПРОВАЛ: пара с нулевой дельтой напечатана (правило печатать только d>0 нарушено)"; rc=1
+    else
+        echo "  OK: пара с нулевой дельтой (обратный порядок лейблов) прочитана и НЕ напечатана — значит лейблы разобраны, а не сматчены позиционно"
+    fi
+    out=$(w63_volume_by_event_type "$s" "$e")
+    if printf '%s' "$out" | grep -q '^syscall anomaly_detection 15$'; then
+        echo "  OK: без фильтра видны все типы — вклад DNS в anomaly_detection (2) отделён от прочего (15)"
+    else
+        echo "  ПРОВАЛ: без фильтра разбивка по типам не совпала с ожидаемой"; rc=1
     fi
 
     echo "=== синтетика: исключения item 6 и item 4 поимённо ==="

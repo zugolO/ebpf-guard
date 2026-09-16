@@ -162,12 +162,28 @@ func (ad *AnomalyDetector) ProcessEvent(e types.Event, ruleConfirmed bool) *Anom
 		return nil
 	}
 
+	// Wave 6.3.1, finding №342: an ambiguous pre-exec comm tail that no
+	// resolver could tie back to a real image names a workload that does not
+	// exist. Baselining it guarantees a false positive — the phantom is always
+	// new, so it is always learning and always anomalous — and the alert it
+	// raises carries the truncated comm as its identity. One event's worth of
+	// sample is the price of not inventing a workload; the resolved and
+	// unambiguous cases (the overwhelming majority) are unaffected. Skipping
+	// here and not inside the key derivation is deliberate: rule-matched
+	// detections on a pre-exec process are real evidence and keep their raw
+	// comm, it is only the profiler's SYNTHESIZED anomaly that must not be
+	// manufactured out of an unknown identity.
+	key, identified := workloadKeyFromEventResolved(e)
+	if !identified {
+		return nil
+	}
+
 	// During the learning phase, fold the event into the baseline — but skip
 	// events already confirmed malicious by rule/IOC detection so that active
 	// attacks present during startup do not get embedded in the EWMA baseline.
 	if !ad.IsLearningComplete() {
 		if !ruleConfirmed {
-			ad.profileManager.RecordEvent(e)
+			ad.profileManager.recordEventWithKey(key, e)
 		}
 		// Apply BPF sampling correction: if the ring-buffer adaptive sampler is
 		// dropping N-1 out of every N events, count each seen event as N samples
@@ -191,8 +207,8 @@ func (ad *AnomalyDetector) ProcessEvent(e types.Event, ruleConfirmed bool) *Anom
 	// the "new port / new behavior" detection.
 	//
 	// Profile is keyed by workload class (comm + namespace + pod app label) so
-	// all replicas of the same workload share one baseline.
-	key := WorkloadKeyFromEvent(e)
+	// all replicas of the same workload share one baseline. The key was
+	// derived once at the top of this method.
 	profile := ad.profileManager.GetByKey(key)
 	var result *AnomalyResult
 	if profile != nil {
@@ -201,7 +217,7 @@ func (ad *AnomalyDetector) ProcessEvent(e types.Event, ruleConfirmed bool) *Anom
 	}
 
 	// Now fold the event into the profile so the baseline keeps adapting.
-	ad.profileManager.RecordEvent(e)
+	ad.profileManager.recordEventWithKey(key, e)
 
 	return result
 }

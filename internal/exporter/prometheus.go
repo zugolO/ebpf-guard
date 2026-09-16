@@ -206,6 +206,28 @@ var (
 		},
 	)
 
+	// AlertVolumeByEventType counts every dispatched alert by the triggering
+	// event's type and rule_id — the axis missing per №327 (wave 6.3.1, item
+	// 6): Alert.Event carries json:"-" so the store and every metric derived
+	// from it (alerts_total, alert_volume_by_source_total) are blind to which
+	// event type produced an alert. This is what lets anomaly_detection's
+	// contribution from DNS events (it accepts every event type and always
+	// files rule_id="anomaly_detection", regardless of event type) be told
+	// apart from its contribution from everything else, IN THE SAME WINDOW, with no
+	// restart and no second window — replacing the A/B dns.enabled toggle
+	// (6.3.4/6.3.5, retired: the toggle's restart confounded its own delta
+	// with drift-baseline reset and window-phase noise, findings №335/№336).
+	// Both labels are bounded by fixed enums (EventTypeLabel's closed switch;
+	// the loaded ruleset) — no cardinality limiter needed, same reasoning as
+	// AlertsTotal's rule_id label.
+	AlertVolumeByEventType = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_alert_volume_by_event_type_total",
+			Help: "Total alerts by triggering event type and rule_id, recorded before store.min_severity filtering and for both severity tiers. Lets any rule's (including anomaly_detection's) contribution from a given event type be measured within one window.",
+		},
+		[]string{"event_type", "rule_id"},
+	)
+
 	// ProfilerAnomalyScore tracks anomaly scores per process.
 	ProfilerAnomalyScore = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -628,6 +650,15 @@ func RecordAlertVolumeBySource(ruleID, comm string) {
 		AlertVolumeBySourceOverflow.Inc()
 	}
 	AlertVolumeBySource.WithLabelValues(labels[0], labels[1]).Inc()
+}
+
+// RecordAlertVolumeByEventType increments ebpf_guard_alert_volume_by_event_type_total
+// for the triggering event's type and rule_id. Called alongside
+// RecordAlertVolumeBySource, for every dispatched alert, before
+// FilterAlertsForIntake, so both severity tiers are covered (wave 6.3.1,
+// item 6, №327/№335).
+func RecordAlertVolumeByEventType(eventType, ruleID string) {
+	AlertVolumeByEventType.WithLabelValues(eventType, ruleID).Inc()
 }
 
 // FilterAlertsForIntake splits alerts into those admitted to

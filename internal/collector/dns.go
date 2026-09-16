@@ -93,6 +93,12 @@ type dnsMetrics struct {
 	// startup); this metric exists so 6.3.0 can tell "the mechanism ran
 	// and found nothing" apart from "the mechanism didn't run".
 	socketMapBackfilled prometheus.Counter
+	// socketMapBackfillCandidates counts connected-to-:53 socket inodes
+	// found across all network namespaces BEFORE matching them against
+	// process fds (№341) — backfilled alone cannot tell "nothing to seed"
+	// (candidates==0) apart from "found sockets but the fd match/insert
+	// step lost them" (candidates>0, backfilled<candidates).
+	socketMapBackfillCandidates prometheus.Counter
 }
 
 // NewDNSCollector creates a new DNS collector.
@@ -130,6 +136,10 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 		socketMapBackfilled: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "ebpf_guard_dns_socket_map_backfilled_total",
 			Help: "Total number of dns_socket_map entries seeded at startup from UDP sockets already connected to port 53 (sockets a resolver opened before the agent started, which trace_connect alone would never see).",
+		}),
+		socketMapBackfillCandidates: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "ebpf_guard_dns_socket_map_backfill_candidates_total",
+			Help: "Total number of UDP sockets connected to port 53 found across all network namespaces at startup, before matching them to process file descriptors. Compare against ebpf_guard_dns_socket_map_backfilled_total: candidates==0 means nothing to seed, candidates>backfilled means sockets were found but not all could be matched/inserted.",
 		}),
 	}
 
@@ -204,7 +214,10 @@ func (c *DNSCollector) RegisterMetrics(reg prometheus.Registerer) error {
 	if err := reg.Register(c.metrics.staleTransitions); err != nil {
 		return err
 	}
-	return reg.Register(c.metrics.socketMapBackfilled)
+	if err := reg.Register(c.metrics.socketMapBackfilled); err != nil {
+		return err
+	}
+	return reg.Register(c.metrics.socketMapBackfillCandidates)
 }
 
 // Start begins collecting DNS events.
@@ -247,11 +260,12 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	// exists. Best-effort: a failure here is a narrower blind spot
 	// (falls back to the pre-existing "sockets connected before start are
 	// invisible" behaviour), not a reason to abort startup.
-	if n, err := backfillDNSSocketMap(c.objs.DnsSocketMap); err != nil {
+	if candidates, n, err := backfillDNSSocketMap(c.objs.DnsSocketMap); err != nil {
 		slog.Warn("dns: dns_socket_map backfill failed — sockets connected before agent start will stay invisible until they reconnect", slog.Any("error", err))
 	} else {
-		slog.Info("dns: dns_socket_map backfilled from /proc/net/udp", slog.Int("sockets", n))
+		slog.Info("dns: dns_socket_map backfilled from all network namespaces' /proc/<pid>/net/udp", slog.Int("candidates", candidates), slog.Int("sockets", n))
 		if c.metrics != nil {
+			c.metrics.socketMapBackfillCandidates.Add(float64(candidates))
 			c.metrics.socketMapBackfilled.Add(float64(n))
 		}
 	}

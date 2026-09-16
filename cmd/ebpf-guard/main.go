@@ -733,6 +733,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// опирающееся на него, не применяется: слой выключен в сторону шума.
 	correlator.SetExePathResolver(correlator.ProcExePathResolver{})
 
+	// Волна 6.3.1, находка №342: разрешатель обрезанного pre-exec comm
+	// (буфер systemd на 8 символов хвоста). До этого вызова обрезки длиной
+	// >= 8 символов остаются в скобочной форме как ключ — изолированно,
+	// без слияния с чужой нагрузкой, но и без нормализации.
+	profiler.SetPreExecCommResolver(profiler.ProcPreExecCommResolver{})
+
 	// Волна 6.2.9.F.1, item 4: ось systemd-юнита корня инцидента. Ставится
 	// ВСЕГДА, независимо от того, назван ли хоть один доверенный юнит, — тогда
 	// details.root_unit печатается у КАЖДОГО подтверждённого инцидента, и
@@ -2228,6 +2234,11 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if cfg.Exporter.VolumeBySource {
 			for _, a := range dispatched {
 				exporter.RecordAlertVolumeBySource(a.RuleID, a.Comm)
+				// Wave 6.3.1, item 6 (№327/№335): the event-type axis that
+				// replaces the A/B dns.enabled toggle — same gate as the
+				// comm axis above, since both are measurement instruments,
+				// not a production identity axis.
+				exporter.RecordAlertVolumeByEventType(exporter.EventTypeLabel(a.Event.Type), a.RuleID)
 			}
 		}
 		admitted := exporter.FilterAlertsForIntake(dispatched, storeMinSeverity)

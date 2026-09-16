@@ -143,6 +143,104 @@ func TestSeedSocketMapFromProcFDs_UpdateFailureSkipped(t *testing.T) {
 	}
 }
 
+// fakeNamespacedProcTree builds <root>/<pid>/ns/net -> ns:[<nsInode>] and
+// <root>/<pid>/net/udp shaped like the fixture in TestConnectedPort53Inodes,
+// so connectedPort53InodesAllNamespaces can be exercised against several
+// pids sharing and not sharing namespaces without a real kernel.
+func fakeNamespacedProcTree(t *testing.T, pids map[string]struct {
+	ns      string
+	udpBody string
+}) string {
+	t.Helper()
+	root := t.TempDir()
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+	for pid, spec := range pids {
+		nsDir := filepath.Join(root, pid, "ns")
+		if err := os.MkdirAll(nsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("net:["+spec.ns+"]", filepath.Join(nsDir, "net")); err != nil {
+			t.Fatal(err)
+		}
+		netDir := filepath.Join(root, pid, "net")
+		if err := os.MkdirAll(netDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(netDir, "udp"), []byte(header+spec.udpBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestConnectedPort53InodesAllNamespaces_DedupsByNamespace(t *testing.T) {
+	hostUDP := "   0: 00000000:8A3C 08080808:0035 01 00000000:00000000 00:00000000 00000000     0        0 20001 2 0000000000000000 0\n"
+	podUDP := "   0: 00000000:9000 08080404:0035 01 00000000:00000000 00:00000000 00000000     0        0 20002 2 0000000000000000 0\n"
+	root := fakeNamespacedProcTree(t, map[string]struct {
+		ns      string
+		udpBody string
+	}{
+		"1":   {ns: "4026531840", udpBody: hostUDP}, // host netns, PID 1
+		"100": {ns: "4026531840", udpBody: hostUDP}, // shares host netns with PID 1 — must not be read twice
+		"200": {ns: "4026532200", udpBody: podUDP},  // distinct pod netns
+	})
+
+	inodes, err := connectedPort53InodesAllNamespaces(root)
+	if err != nil {
+		t.Fatalf("connectedPort53InodesAllNamespaces: %v", err)
+	}
+	want := map[string]struct{}{"20001": {}, "20002": {}}
+	if len(inodes) != len(want) {
+		t.Fatalf("got %v, want %v", inodes, want)
+	}
+	for k := range want {
+		if _, ok := inodes[k]; !ok {
+			t.Errorf("missing inode %s in %v", k, inodes)
+		}
+	}
+}
+
+func TestConnectedPort53InodesAllNamespaces_SkipsUnreadableNamespace(t *testing.T) {
+	root := t.TempDir()
+	// PID 1: readable ns + udp table with one connected socket.
+	hostUDP := "   0: 00000000:8A3C 08080808:0035 01 00000000:00000000 00:00000000 00000000     0        0 30001 2 0000000000000000 0\n"
+	nsDir := filepath.Join(root, "1", "ns")
+	if err := os.MkdirAll(nsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("net:[4026531840]", filepath.Join(nsDir, "net")); err != nil {
+		t.Fatal(err)
+	}
+	netDir := filepath.Join(root, "1", "net")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+	if err := os.WriteFile(filepath.Join(netDir, "udp"), []byte(header+hostUDP), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// PID 2: no ns/net symlink at all — simulates "exited between listing
+	// and reading" or a permission failure; must be skipped, not fatal.
+	if err := os.MkdirAll(filepath.Join(root, "2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Non-pid entry must be skipped.
+	if err := os.MkdirAll(filepath.Join(root, "self", "ns"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	inodes, err := connectedPort53InodesAllNamespaces(root)
+	if err != nil {
+		t.Fatalf("connectedPort53InodesAllNamespaces: %v", err)
+	}
+	if len(inodes) != 1 {
+		t.Fatalf("got %v, want exactly {30001}", inodes)
+	}
+	if _, ok := inodes["30001"]; !ok {
+		t.Errorf("missing inode 30001 in %v", inodes)
+	}
+}
+
 func TestBackfillDNSSocketMap_NoConnectedSockets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "udp")
 	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"

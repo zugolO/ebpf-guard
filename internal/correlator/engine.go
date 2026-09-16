@@ -2056,7 +2056,21 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// Always report the score (even non-anomalous) so the cardinality-guarded
 			// Prometheus gauge tracks all active processes, not only anomaly triggers.
 			if ce.scoreReporter != nil {
-				ce.scoreReporter(strconv.FormatUint(uint64(e.PID), 10), util.InternBytes(e.Comm[:]), result.Score)
+				// The series belongs to the PROFILE that was scored, so its
+				// comm is the profile's, not the raw event's. Wave 6.3.1,
+				// finding №342: with the raw comm, every pre-exec event of a
+				// known workload published a second, phantom series
+				// (profiler_anomaly_score{comm="(ystemctl)"}) for a baseline
+				// that was never keyed under that name — the gauge said a
+				// workload existed that the profiler had no profile for.
+				// result.Comm IS profile.Comm (set in calculateAnomalyScore);
+				// for every non-pre-exec comm the two are byte-identical, so
+				// no existing label value changes.
+				reportComm := result.Comm
+				if reportComm == "" {
+					reportComm = util.InternBytes(e.Comm[:])
+				}
+				ce.scoreReporter(strconv.FormatUint(uint64(e.PID), 10), reportComm, result.Score)
 			}
 
 			// Cross-node amplification (Feature F): if a peer node fired a critical

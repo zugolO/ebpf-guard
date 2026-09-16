@@ -3,7 +3,9 @@ package profiler
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // readSystemPIDMax reads /proc/sys/kernel/pid_max and returns its value.
@@ -75,31 +78,171 @@ func internComm(comm [16]byte) string {
 // so all processes with the same comm share one baseline (non-K8s fallback).
 // The comm string is interned to avoid heap allocation on repeated calls.
 func WorkloadKeyFromEvent(e types.Event) WorkloadKey {
-	comm := stripPreExecCommParens(internComm(e.Comm))
+	key, _ := workloadKeyFromEventResolved(e)
+	return key
+}
+
+// workloadKeyFromEventResolved is WorkloadKeyFromEvent plus the answer to
+// "is this key a real workload identity?". ok is false for exactly one case:
+// an ambiguous pre-exec comm tail (>= preExecTailCap) that no resolver could
+// tie back to a real image, which leaves the key in its parenthesized form.
+// Such a key names nothing that exists, so it is always new, always learning
+// and therefore always anomalous — wave 6.3.1, finding №342 measured two such
+// guaranteed false positives inside one 600s window. Callers that would
+// CREATE a baseline from the key must honour ok; callers that only read an
+// existing profile may ignore it.
+func workloadKeyFromEventResolved(e types.Event) (WorkloadKey, bool) {
+	comm := resolvePreExecComm(e.PID, internComm(e.Comm))
+	ok := !IsUnresolvedPreExecComm(comm)
 	if e.Enrichment == nil {
-		return WorkloadKey{Comm: comm}
+		return WorkloadKey{Comm: comm}, ok
 	}
 	return WorkloadKey{
 		Comm:      comm,
 		Namespace: e.Enrichment.Namespace,
 		AppLabel:  e.Enrichment.Labels["app"],
+	}, ok
+}
+
+// IsUnresolvedPreExecComm reports whether a comm that has already been through
+// resolvePreExecComm is still in the parenthesized pre-exec form — i.e. an
+// ambiguous truncated tail that could not be resolved to a real image. Only
+// resolution failure can produce this: an unambiguous tail is returned bare,
+// and a resolved one is replaced by the real name.
+func IsUnresolvedPreExecComm(comm string) bool {
+	return len(comm) >= 2 && comm[0] == '(' && comm[len(comm)-1] == ')'
+}
+
+// preExecTailCap is the capacity of systemd's transitional "(name)" buffer,
+// set with prctl(PR_SET_NAME) between fork() and execve(): '(' + up to 8
+// name bytes + ')' + NUL = 11 bytes. A name of 8 bytes or more overflows the
+// buffer and keeps only its TAIL — "50-motd-news" becomes "(otd-news)",
+// "systemctl" becomes "(ystemctl)". Wave 6.3.1, finding №342, established the
+// mechanism byte-for-byte (see the matching comment on isProvisionalComm in
+// lineage.go, found independently by wave 6.2.x for the same buffer): a name
+// shorter than the cap is NEVER truncated, so its parenthesized form is the
+// real, complete name; a name at-or-over the cap is ambiguous — it could be
+// an exact 8-byte name or the tail of a longer one — and can only be
+// resolved by asking the kernel what the process actually became.
+const preExecTailCap = 8
+
+// commPreExecNormalizedTotal counts pre-exec comm resolutions by outcome, so
+// a run where the tail always resolves cleanly is distinguishable in
+// /metrics from a run where resolution never ran at all. Finding №342: the
+// prior fix (blind paren-stripping) silently merged a truncated tail into
+// whatever workload happened to share that suffix — "(ystemctl)" collapsed
+// into "ystemctl", a name that does not exist and is therefore always new,
+// always learning, always anomalous. "seen" counts every ambiguous
+// (>=preExecTailCap) tail encountered; "resolved" counts those matched to a
+// real image via /proc; "unresolved" counts those left in their
+// parenthesized form rather than guessed wrong.
+var commPreExecNormalizedTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_comm_preexec_normalized_total",
+		Help: "Pre-exec comm resolution ATTEMPTS against a truncated systemd transitional name, by outcome (seen, resolved, unresolved). Counted per resolution call, not per event: one event whose key is derived by several profilers counts once per profiler. All three series exist from startup, so their absence in /metrics means the binary predates wave 6.3.1, not that no truncated comm occurred.",
+	},
+	[]string{"outcome"},
+)
+
+func init() {
+	for _, outcome := range []string{"seen", "resolved", "unresolved"} {
+		commPreExecNormalizedTotal.WithLabelValues(outcome)
 	}
 }
 
-// stripPreExecCommParens removes the parenthesization the kernel applies to
-// comm during the pre-exec window ("(find)" while a process is still
-// transitioning into the image named "find" — see task_struct comment in
-// fs/exec.c). Wave 6.0d, finding №197: without this, a workload's
-// preparation phase and its post-exec phase land in two different
-// WorkloadKeys, splitting the sample that most needs a single baseline —
-// the moment right before a process becomes the thing an attacker chose it
-// to become. Applied ONLY to the key: the raw comm (with parens intact) is
-// left untouched everywhere else (events, alerts), since that parenthesized
-// form is itself evidence the action happened pre-exec.
-func stripPreExecCommParens(comm string) string {
-	if len(comm) >= 2 && comm[0] == '(' && comm[len(comm)-1] == ')' {
-		return comm[1 : len(comm)-1]
+// PreExecCommResolver resolves the real names a PID is known by — used to
+// recover the identity behind a truncated pre-exec comm tail. Returns the
+// candidates most authoritative first; an empty slice means the identity
+// cannot be determined (process already exited, no /proc, no permission),
+// which is the expected answer, not an error, and callers must treat it as
+// "cannot normalize", not "process has no name".
+//
+// Two sources are needed, not one, and they cover each other's blind spot:
+//   - the post-exec comm (/proc/<pid>/comm) is what the kernel actually named
+//     the task, so it is the only source that works for a SCRIPT — the finding's
+//     own example, /etc/update-motd.d/50-motd-news, execs the interpreter, so
+//     its exe basename is "dash" and never suffix-matches the tail "otd-news"
+//     ([[shebang-control-comm-is-interpreter]]);
+//   - the exe basename is uncapped, so it is the only source that works for a
+//     name longer than TASK_COMM_LEN-1 (15), where /proc/<pid>/comm is itself
+//     truncated at the HEAD of the name and cannot contain the tail.
+type PreExecCommResolver interface {
+	ResolveNames(pid uint32) []string
+}
+
+// ProcPreExecCommResolver resolves via /proc/<pid>/comm and
+// readlink("/proc/<pid>/exe"). On platforms without procfs (darwin
+// builds/tests) both reads fail and the resolver returns nil, which is the
+// same as "no resolver installed".
+type ProcPreExecCommResolver struct{}
+
+// ResolveNames implements PreExecCommResolver.
+func (ProcPreExecCommResolver) ResolveNames(pid uint32) []string {
+	if pid == 0 {
+		return nil
 	}
+	var names []string
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
+		// A still-pre-exec process answers with the same parenthesized form
+		// we are trying to resolve; that is not an answer, it is the question.
+		if c := strings.TrimSpace(string(b)); c != "" && !IsUnresolvedPreExecComm(c) {
+			names = append(names, c)
+		}
+	}
+	if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
+		target = strings.TrimSuffix(target, " (deleted)")
+		if base := path.Base(target); base != "" && base != "." && base != "/" {
+			names = append(names, base)
+		}
+	}
+	return names
+}
+
+// preExecResolver is an atomic holder so hot-path reads from many ingest
+// workers never race the one-time SetPreExecCommResolver call at startup
+// (or a test swapping it). atomic.Value panics on a nil interface, so the
+// holder struct makes "no resolver installed" — the default, and the state
+// every test starts from — expressible as a stored zero value.
+var preExecResolver atomic.Value // preExecResolverHolder
+
+type preExecResolverHolder struct{ r PreExecCommResolver }
+
+// SetPreExecCommResolver installs the resolver used to recover a truncated
+// pre-exec comm's real name. Until called, ambiguous tails are left
+// unresolved (parenthesized form kept as the key) rather than guessed.
+func SetPreExecCommResolver(r PreExecCommResolver) {
+	preExecResolver.Store(preExecResolverHolder{r: r})
+}
+
+// resolvePreExecComm returns the WorkloadKey comm for comm as observed on
+// pid. A non-parenthesized comm passes through unchanged. A parenthesized
+// tail shorter than preExecTailCap is complete by construction and is
+// returned bare. A tail at-or-over the cap is ambiguous: it is resolved
+// against the process's current exe basename by suffix match (covers both
+// the truncated case and the exact-length untruncated case, since a bare
+// name suffix-matches itself), and left in its parenthesized form — never
+// merged into a guessed name — when resolution fails or does not match.
+func resolvePreExecComm(pid uint32, comm string) string {
+	if len(comm) < 2 || comm[0] != '(' || comm[len(comm)-1] != ')' {
+		return comm
+	}
+	tail := comm[1 : len(comm)-1]
+	if len(tail) < preExecTailCap {
+		return tail
+	}
+	commPreExecNormalizedTotal.WithLabelValues("seen").Inc()
+	h, _ := preExecResolver.Load().(preExecResolverHolder)
+	if h.r == nil {
+		commPreExecNormalizedTotal.WithLabelValues("unresolved").Inc()
+		return comm
+	}
+	for _, name := range h.r.ResolveNames(pid) {
+		if len(name) >= len(tail) && strings.HasSuffix(name, tail) {
+			commPreExecNormalizedTotal.WithLabelValues("resolved").Inc()
+			return name
+		}
+	}
+	commPreExecNormalizedTotal.WithLabelValues("unresolved").Inc()
 	return comm
 }
 
@@ -296,7 +439,14 @@ func (wpm *WorkloadProfileManager) GetOrCreateByKey(key WorkloadKey) *ProcessPro
 // released before the profile update runs under the per-profile mutex.
 // This avoids holding the shard lock across the (potentially slower) EWMA update.
 func (wpm *WorkloadProfileManager) RecordEvent(e types.Event) {
-	key := WorkloadKeyFromEvent(e)
+	wpm.recordEventWithKey(WorkloadKeyFromEvent(e), e)
+}
+
+// recordEventWithKey is RecordEvent for a caller that already derived the key
+// (and, with it, already paid the one pre-exec resolution this event needs —
+// wave 6.3.1 item 3: resolving twice would double-count
+// ebpf_guard_comm_preexec_normalized_total for a single event).
+func (wpm *WorkloadProfileManager) recordEventWithKey(key WorkloadKey, e types.Event) {
 	sh := wpm.shardFor(key)
 
 	// Evict BEFORE acquiring shard lock to avoid RWMutex reentrancy:

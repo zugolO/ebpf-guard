@@ -27,8 +27,9 @@
 #   item 6 — критерии 6.3.0…6.3.7 (секция «КРИТЕРИИ ВОЛНЫ 6.3» ниже),
 #     использующие манифест item 1 (dns-rule-ids.txt), продуктовую правку
 #     item 3 (isK3sControlPlaneNetworkSignal) и механизм item 5 (бэкфилл
-#     dns_socket_map). 6.3.4/6.3.5 (A/B dns.enabled) выключены по умолчанию
-#     (W63_AB_ENABLED=0) — цена два полных окна + пролог рестарта.
+#     dns_socket_map). 6.3.4/6.3.5 мерили A/B dns.enabled true/false — волна
+#     6.3.1 (item 6) РЕТИРОВАЛА A/B и заменила его осью event_type внутри
+#     одного окна (см. блок 6.3.4/6.3.5 ниже).
 # НЕ СДЕЛАНО: страж полноты пайплайна (аналог wave6.2.6-completeness-guard.sh)
 # для 6.3 не форкнут — реестр $W63_EMITTED пишется, но никто его не сверяет
 # с постановкой автоматически; пока это делает разбор архива руками.
@@ -257,14 +258,11 @@ W63_OPEN_SETTLE="${W63_OPEN_SETTLE:-15}"
 # sleep(W63_APPARATUS_SETTLE) -> опорный снимок -> sleep(W63_OPEN_SETTLE) -> t0.
 W63_APPARATUS_SETTLE="${W63_APPARATUS_SETTLE:-5}"
 # Критерии 6.3.0…6.3.7 (DNS), item 6 постановки волны 6.3.
-W63_AB_ENABLED="${W63_AB_ENABLED:-0}"
-# Пролог второго окна A/B (6.3.4/6.3.5) не короче learning_period ×
-# enforce_deadline_periods, иначе окно B меряет обучение после рестарта, а
-# не базовую линию (пункт А переноса 6.0→6.1/6.2, plan.md). config-test.yaml
-# несёт 600×2=1200с на profiler.sequence; значение здесь — независимая
-# настройка стенда, не читается из YAML (парсер вложенных ключей без yq
-# ненадёжен, см. generate-dns-rule-manifest.sh), с тем же умолчанием.
-W63_AB_PROLOGUE="${W63_AB_PROLOGUE:-1200}"
+# A/B dns.enabled (W63_AB_ENABLED/W63_AB_PROLOGUE) РЕТИРОВАН волной 6.3.1
+# (item 6, решение владельца 16.09.2026, вариант ii — см. блок 6.3.4/6.3.5
+# ниже): рестарт агента, который тумблер требовал, обнулял базу дрейфа и
+# путал вклад DNS с ценой свежей базы (находки №335/№336). Замена — ось
+# event_type внутри уже снятого тихого окна, без рестарта.
 W63_DNS_MANIFEST="${W63_DNS_MANIFEST:-$W63_SETUP/attacks/dns-rule-ids.txt}"
 W63_DNS_PROBE_POD="${W63_DNS_PROBE_POD:-w63-dns-probe}"
 # Адрес, на который 6.3.6 подаёт спуф-подключение (comm=k3s-server, чужой
@@ -348,7 +346,8 @@ die() {
 }
 pass() { echo "OK: $*"; _w63_record_label OK "$*"; }
 # notreq — ТРЕТЬЕ состояние реестра: критерий не запрошен ПОСТАНОВКОЙ (сейчас
-# только 6.3.4/6.3.5 при W63_AB_ENABLED=0). Нужно ровно потому, что страж
+# только 6.3.5, отменённый вместе с A/B — волна 6.3.1, item 6, вариант ii).
+# Нужно ровно потому, что страж
 # полноты (wave6.3-completeness-guard.sh, метка 6.3.8) спрашивает не «взят ли
 # критерий», а «заговорила ли метка»: ветка, печатающая «НЕ ЗАПРОШЕН» без
 # вердиктного слова, для стража неотличима от НЕ РЕАЛИЗОВАННОГО критерия и
@@ -440,7 +439,7 @@ W63_NODE_ACTORS="k3s-server kubelet containerd containerd-shim containerd-shim-r
 # требования теперь тоже исключена из самоскана (см. ниже) — сама
 # возможность такого самосовпадения снята, а не просто её текущий след.)
 # ---------------------------------------------------------------------------
-W63_INSTR_CANDIDATES="curl jq bash sh head sed awk date tr sort systemctl journalctl cat tail stat find wc cut grep sleep setsid dd printf cp chmod mkdir rm seq pgrep readlink kubectl go"
+W63_INSTR_CANDIDATES="curl jq bash sh head sed awk date tr sort systemctl journalctl cat tail stat find wc cut grep sleep setsid dd printf cp chmod mkdir rm seq pgrep readlink kubectl go ss nsenter"
 W63_INSTR_COMMS_FLAT=""
 W63_SELF="$W63_SETUP/wave6.3-controls.sh"
 if [ -r "$W63_SELF" ]; then
@@ -474,7 +473,120 @@ W63_INSTR_COMMS=$(printf '%s\n' $W63_INSTR_COMMS_FLAT | jq -R . | jq -s -c . 2>/
 
 _w63_curl() { curl -s --max-time 30 -H "Authorization: Bearer $W63_TOKEN" "$@"; }
 _w63_alerts() { _w63_curl "$W63_API/api/v1/alerts?limit=200000"; }
-_w63_metrics() { _w63_curl "$W63_API/metrics"; }
+# №337: голый curl без сторожа отдавал ПУСТОЙ файл как снимок метрик, когда
+# агент ещё не поднялся после рестарта (6.3.6, разбор 16.09.2026) —
+# `_w63_metric_sum` по такому файлу молча даёт 0, неотличимый от «счётчик и
+# правда нулевой». `_w63_metrics` теперь проверяет ответ (непуст И несёт
+# `ebpf_guard_alerts_total`), повторяет с паузой и падает С НАЗВАННОЙ
+# ПРИЧИНОЙ (не прерывая прогон — див. die()), а не молча отдаёт пустоту.
+_w63_metrics() {
+    _w63_mtries="${W63_METRICS_TRIES:-5}"
+    _w63_mwait="${W63_METRICS_RETRY_WAIT:-3}"
+    _w63_mn=1
+    while [ "$_w63_mn" -le "$_w63_mtries" ]; do
+        _w63_mbody=$(_w63_curl "$W63_API/metrics")
+        if [ -n "$_w63_mbody" ] && printf '%s' "$_w63_mbody" | grep -q '^ebpf_guard_alerts_total'; then
+            printf '%s\n' "$_w63_mbody"
+            return 0
+        fi
+        [ "$_w63_mn" -lt "$_w63_mtries" ] && sleep "$_w63_mwait"
+        _w63_mn=$(( _w63_mn + 1 ))
+    done
+    # АУДИТ 6.3.1 (заход 16.09.2026): `die` НЕ прерывает прогон (см. die()
+    # выше — она печатает, считает и возвращает 0), поэтому строкой ниже
+    # невалидный снимок всё равно уходил вызывающей стороне, и та считала по
+    # нему дельты как раньше. Обещание «не отдаёт пустоту» выполнено быть не
+    # может — вернуть нечего; выполнимо ДРУГОЕ: сделать факт невалидности
+    # ВЕЛИЧИНОЙ, которую обязан прочитать отдельный критерий. Счётчик ниже
+    # читает 6.3.1.3 («ни один вердикт прогона не вынесен по снимку, не
+    # прошедшему сторож валидности») — то есть инфраструктурный сбой теперь
+    # ложится РОВНО на одну метку, а не только на общий WAVE624_FAILS
+    # (открытый вопрос 4 items 3/4).
+    _W63_BAD_SNAPSHOTS=$(( ${_W63_BAD_SNAPSHOTS:-0} + 1 ))
+    _W63_BAD_SNAPSHOT_WHY="${_W63_BAD_SNAPSHOT_WHY:+$_W63_BAD_SNAPSHOT_WHY; }$_w63_mtries попыток по ${_w63_mwait}с без ebpf_guard_alerts_total"
+    die "СНИМОК МЕТРИК НЕВАЛИДЕН (№337): $_w63_mtries попыток по ${_w63_mwait}с, $W63_API/metrics не вернул непустой ответ с ebpf_guard_alerts_total — агент не отвечал (рестарт ещё не завершился, HTTP-сервер не поднялся), а НЕ 'все счётчики нулевые'. Любой вердикт, построенный на этом снимке, недействителен (учтён в 6.3.1.3)"
+    printf '%s\n' "${_w63_mbody:-}"
+}
+_W63_BAD_SNAPSHOTS=0
+_W63_BAD_SNAPSHOT_WHY=""
+
+# ПРИСУТСТВИЕ МЕТРИКИ ≠ ЕЁ НУЛЬ. `_w63_metric_sum` по построению печатает 0
+# и тогда, когда строки метрики в срезе НЕТ ВООБЩЕ — то есть «счётчик равен
+# нулю» и «бинарь этой метрики не знает» дают одно и то же число
+# ([[empty-metric-snapshot-is-silently-zero]], тот же класс, что №311
+# `not_listed`). Для ТРЁХ новых метрик волны 6.3.1 цена этой неразличимости
+# — вердикт наоборот: выкаченный старый бинарь напечатал бы
+# `candidates_total=0` против ненулевого ss-счёта и получил бы
+# «бэкфилл смотрел не туда» вместо «правка не выкачена»
+# ([[rule-fields-and-binary-ship-together]]). Возвращает 0/1, ничего не печатая.
+_w63_metric_present() { # $1=имя метрики [$2=файл среза]
+    if [ -n "${2:-}" ]; then
+        grep -qE "^$1[{ ]" "$2" 2>/dev/null
+    else
+        _w63_metrics | grep -qE "^$1[{ ]"
+    fi
+}
+
+# ВНИМАНИЕ (аудит 16.09.2026): В ТЕКУЩЕМ ПАЙПЛАЙНЕ У ЭТОЙ ФУНКЦИИ НЕТ НИ ОДНОЙ
+# ТОЧКИ ВЫЗОВА. Она написана item 4 волны 6.3.1 под две ветки рестарта A/B
+# (тумблер dns.enabled и восстановление конфига), а item 6 той же волны снял
+# A/B целиком — рестарта внутри контролей не осталось вовсе. Барьер НЕ
+# удалён, потому что его работа — инвариант, а не шаг: любой будущий рестарт
+# внутри прогона обязан пройти через него. Но и «проверен» он не был ни разу
+# и не будет проверен смоком: ветки, которую можно было бы прогнать, больше
+# нет ([[self-test-fixtures-miss-live-log-shape]] — функция, которую нечем
+# исполнить, не становится рабочей от того, что она написана). Живой барьер
+# ЕДИНСТВЕННОГО рестарта прогона — рестарта агента на Шаге 1 — переехал в
+# run-6.3-pipeline.sh, где он заменил слепой `sleep 30`.
+#
+# №337: барьер готовности после ЛЮБОГО рестарта агента внутри прогона.
+# $1 = эпоха ДО рестарта (секунды). Ждёт /health И
+# process_start_time_seconds > $1 — обе стороны нужны, потому что /health
+# отвечает раньше, чем экспортёр публикует свежий process_start_time
+# (гонка, которой посвящена wave6.3.1 item 4), а голый process_start_time
+# без /health читал бы старый снимок как новый на медленно поднимающемся
+# сервере. Падает С НАЗВАННОЙ ПРИЧИНОЙ и не прерывает прогон.
+_w63_wait_ready() {
+    _w63_pre_epoch="$1"
+    _w63_rtries="${W63_READY_TRIES:-20}"
+    _w63_rwait="${W63_READY_WAIT:-3}"
+    _w63_rn=1
+    while [ "$_w63_rn" -le "$_w63_rtries" ]; do
+        _w63_r_health=$(_w63_curl -o /dev/null -w '%{http_code}' "$W63_API/health" 2>/dev/null)
+        if [ "$_w63_r_health" = "200" ]; then
+            _w63_r_pst=$(_w63_curl "$W63_API/metrics" 2>/dev/null | awk '$1=="process_start_time_seconds"{print $2; exit}')
+            if [ -n "${_w63_r_pst:-}" ] && awk -v a="$_w63_r_pst" -v b="$_w63_pre_epoch" 'BEGIN{exit !(a>b)}'; then
+                echo "  барьер готовности: агент поднят (process_start_time_seconds=${_w63_r_pst} > ${_w63_pre_epoch}), попытка ${_w63_rn}/${_w63_rtries}"
+                return 0
+            fi
+        fi
+        sleep "$_w63_rwait"
+        _w63_rn=$(( _w63_rn + 1 ))
+    done
+    die "БАРЬЕР ГОТОВНОСТИ НЕ ПРОЙДЕН (№337): после рестарта $W63_API/health и/или process_start_time_seconds не подтвердили новый агент за $(( _w63_rtries * _w63_rwait ))с — все снимки метрик, взятые после этой точки, недействительны до ручной проверки"
+    return 1
+}
+
+# №337: инвариант — любая дельта двух снимков метрик обязана сверить их
+# process_start_time_seconds. Расхождение значит, что между снимками агент
+# перезапускался и счётчики обнулились: дельта в этом случае не число, а
+# НЕИЗМЕРИМО (сравнение до/после рестарта бессмысленно в любом знаке).
+# $1=файл_A $2=файл_B — печатает "ok" или "restarted:PST_A:PST_B" в stdout.
+_w63_pst_of() { awk '$1=="process_start_time_seconds"{print $2; exit}' "$1" 2>/dev/null; }
+_w63_delta_guard() {
+    _w63_dg_a=$(_w63_pst_of "$1")
+    _w63_dg_b=$(_w63_pst_of "$2")
+    if [ -z "${_w63_dg_a:-}" ] || [ -z "${_w63_dg_b:-}" ]; then
+        echo "unknown"
+        return 1
+    fi
+    if [ "$_w63_dg_a" != "$_w63_dg_b" ]; then
+        echo "restarted:${_w63_dg_a}:${_w63_dg_b}"
+        return 1
+    fi
+    echo "ok"
+    return 0
+}
 # ЭПОХА — ВСТРОЕННЫМ printf, а не `date`. Каждый вызов внешнего `date` —
 # это execve, а значит собственное событие измерителя: на прогоне 06.09.2026
 # критерий 6.2.6.3 упал ровно на двух алертах comm=date, которые породил сам
@@ -697,6 +809,40 @@ elif [ "${_w63_ms_want:-0}" -gt 0 ] && [ "${_w63_ms:-0}" -ne "${_w63_ms_want:-0}
     die "6.2.1.9 (№243) ПРОВАЛЕН: агент поднят на бинаре с ${_w63_ms} syscall'ами, а дерево описывает ${_w63_ms_want}. Правка №243 (снятие chmod с syscall-оси) НЕ задеплоена: chmod по-прежнему даёт второе, никем не читаемое событие, и цена ring buffer в 6.2.6.1 измеряется НЕ на том коде, что лежит в дереве"
 else
     pass "6.2.1.9 (№243) ДОСТИГНУТО (половина «деплой»): monitored_syscalls=${_w63_ms} совпадает с деревом — chmod снят с syscall-оси на живом бинаре"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ДЕПЛОЙ ПРАВОК ВОЛНЫ 6.3.1 — ТОТ ЖЕ ВОПРОС, ЧТО №243, ДЛЯ ТРЁХ НОВЫХ МЕТРИК.
+#
+# Все три критерия волны, опирающиеся на продуктовые правки (6.3.1.1 — items
+# 1/2, 6.3.1.2 — item 3, 6.3.4 — item 6), читают метрики, которых старый
+# бинарь не публикует ВООБЩЕ. `_w63_metric_sum` по отсутствующей метрике даёт
+# 0 — то есть невыкаченная правка неотличима от «механизм отработал и нашёл
+# ноль», и вердикт получается не просто неверный, а ПЕРЕВЁРНУТЫЙ: 6.3.1.1 на
+# старом бинаре объявил бы «бэкфилл смотрел не туда». Снимок берётся ОДИН и
+# проверяется трижды: [[rule-fields-and-binary-ship-together]],
+# [[empty-metric-snapshot-is-silently-zero]].
+#
+# Метрики выбраны так, чтобы присутствие было ДОКАЗАТЕЛЬСТВОМ, а не
+# совпадением: `comm_preexec_normalized_total` инициализирует все три исхода
+# на старте (init() в workload.go), а counter'ы коллектора DNS и экспортёра
+# регистрируются при конструировании, до первого события, — то есть строки
+# есть даже при нулевом значении, и их ОТСУТСТВИЕ означает ровно одно.
+# ─────────────────────────────────────────────────────────────────────────────
+_w63_deploy_snap="$W63_ART/metrics-deploy-check.txt"
+_w63_metrics > "$_w63_deploy_snap"
+_w63_missing_new=""
+for _w63_m in ebpf_guard_dns_socket_map_backfill_candidates_total \
+              ebpf_guard_comm_preexec_normalized_total \
+              ebpf_guard_alert_volume_by_event_type_total; do
+    _w63_metric_present "$_w63_m" "$_w63_deploy_snap" || _w63_missing_new="$_w63_missing_new $_w63_m"
+done
+_W63_NEW_METRICS_OK=1
+if [ -n "${_w63_missing_new# }" ]; then
+    _W63_NEW_METRICS_OK=0
+    die "6.2.2 преflight ПРОВАЛЕН (деплой волны 6.3.1): в /metrics нет метрик${_w63_missing_new} — на ноде поднят бинарь БЕЗ правок items 1/2/3/6. Все нижние вердикты 6.3.1.1/6.3.1.2/6.3.4 на нём были бы приборными нулями, читаемыми как продуктовые; выкатывать бинарь и правила одним заходом"
+else
+    pass "6.2.2 преflight (деплой волны 6.3.1): все три новые метрики присутствуют в /metrics — items 1/2/3/6 задеплоены, ноль в них читается как величина, а не как отсутствие правки"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1484,6 +1630,50 @@ echo "  срез лимитера за окно (alerts_ratelimited_by_rule_tota
 echo "  нижняя оценка РЕАЛЬНОГО числа срабатываний (а+срез лимитера): $(( _w63_vol + _w63_rl )) → $_w63_true_hour/ч"
 echo "  ← ВЕЛИЧИНА (в) [решение 1, №248, БЕЗ ПОРОГА]: слой1+слой2+слой3+слой4 = $_w63_v_total → ${_w63_v_hour}/ч"
 
+# ═════════════════════════════════════════════════════════════════════════════
+# №334 (item 7 волны 6.3.1) — ВЕЛИЧИНА ОБЯЗАНА НАЗЫВАТЬ, ЧТО ОНА ТАКОЕ.
+#
+# «228/ч» на архиве 6.2.9.F оказалось делением ОДНОГО события ноды (25
+# сторовых алертов одного штампа `03:25:49.55…57`, форсированное
+# motd-news.service) на длину окна — при сдвиге фазы таймера та же нода дала
+# бы 0/ч. Единица «/ч» уже снята (№297), но само число (а) по-прежнему может
+# читаться как темп, если рядом не напечатано, СКОЛЬКО РАЗЛИЧИМЫХ ВО ВРЕМЕНИ
+# событий его составляют. Кластер — алерты стора внутри окна, разделённые не
+# более чем 1с; новый кластер начинается при разрыве > 1с.
+# ═════════════════════════════════════════════════════════════════════════════
+echo "--- 6.2.6.1 (№334): разложение величины по временным кластерам ---"
+_w63_win_ts=$(jq -r --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" \
+    "$_w63_tree_q"'[.[]|select((w63ts >= $t0) and (w63ts < $t1))|w63ts]|sort|.[]' \
+    "$W63_ART/alerts-window-end.json" 2>/dev/null)
+_w63_win_ts_n=$(printf '%s\n' "$_w63_win_ts" | grep -c . || true)
+if [ "${_w63_win_ts_n:-0}" -gt 0 ]; then
+    read -r _w63_clusters _w63_cluster_max _w63_cluster_total <<EOF
+$(printf '%s\n' "$_w63_win_ts" | awk '
+    NF==0 { next }
+    { t=$1+0
+      if (n==0) { clusters=1; csz=1 }
+      else if (t - prev > 1.0) { clusters++; if (csz>maxc) maxc=csz; csz=1 }
+      else { csz++ }
+      prev=t; n++
+    }
+    END{ if (csz>maxc) maxc=csz; printf "%d %d %d", clusters+0, maxc+0, n+0 }')
+EOF
+    _w63_cluster_share=$(awk -v m="${_w63_cluster_max:-0}" -v t="${_w63_cluster_total:-0}" 'BEGIN{ if (t>0) printf "%.1f", 100.0*m/t; else print "0.0" }')
+else
+    _w63_clusters=0; _w63_cluster_max=0; _w63_cluster_total=0; _w63_cluster_share="0.0"
+fi
+if [ "${_W63_FORCE_SCHEDULED:-0}" -eq 1 ] && [ "${_W63_FORCE_AT:-0}" -gt 0 ]; then
+    _w63_outside_forced=$(jq --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" --argjson fa "$_W63_FORCE_AT" \
+        "$_w63_tree_q"'[.[]|select((w63ts >= $t0) and (w63ts < $t1))|select((w63ts < $fa) or (w63ts >= ($fa + 2)))]|length' \
+        "$W63_ART/alerts-window-end.json" 2>/dev/null)
+    echo "  кластеров окна (сторовые алерты, разрыв > 1с = новый кластер): ${_w63_clusters}; крупнейший = ${_w63_cluster_max} из ${_w63_cluster_total} (${_w63_cluster_share}% сторовой величины окна); вне форсированного события ноды ([${_w63_force_off:-?}с]): ${_w63_outside_forced:-?}"
+else
+    echo "  кластеров окна (сторовые алерты, разрыв > 1с = новый кластер): ${_w63_clusters}; крупнейший = ${_w63_cluster_max} из ${_w63_cluster_total} (${_w63_cluster_share}% сторовой величины окна); форсированное событие ноды НЕ ВЗВЕДЕНО этим прогоном — «вне события» неотличимо от «всего окна»"
+fi
+if [ "${_w63_clusters:-0}" -le 1 ] && [ "${_w63_cluster_total:-0}" -gt 0 ]; then
+    echo "  ⚠ №334: величина (а) состоит из ОДНОГО временного кластера — читать её как темп («N/ч») нельзя, единица снята (№297) именно поэтому; при сдвиге фазы той же ноды число могло быть другим на порядок"
+fi
+
 # ---- 6.2.2.2: список срезанных правил ПО МЕТРИКЕ (№238) ----
 echo "--- 6.2.2.2: правила со срезом лимитера за окно (по метрике, не по стору) ---"
 _w63_rl_list=""
@@ -1716,39 +1906,34 @@ echo "  остальные родовые comm — фон ноды (не изм�
 _w63_reap_delta=$(( ${_w63_reaped1:-0} - ${_w63_reaped0:-0} ))
 echo "  сторож ложного нуля: приращение cutime+cstime оболочки контроля за окно = ${_w63_reap_delta} тиков (>0 ⇒ измеритель ПОРОДИЛ процесс внутри окна, и pid-набор его не увидел бы)"
 echo "  алертов на пути артефактов ($W63_ART) внутри [t0,t1]: ${_w63_artpath:-0}"
-# РАЗЛИЧИТЕЛЬ ИСТОЧНИКА (смок 06.09.2026, ДО прогона). Список comm измерителя
-# состоит из РОДОВЫХ имён (sh, bash, awk, grep, date, cut, …), и ровно те же
-# имена порождает ЛЮБОЙ интерактивный вход по ssh: pam запускает
-# /etc/update-motd.d/* — run-parts → 00-header → uname, landscape-sysin, grep
-# /proc/cpuinfo, date, pgrep. То есть чужой вход внутрь окна печатается этим
-# критерием как «доля измерителя», хотя измеритель спал. Смок этой волны упал
-# ровно так: 7 алертов sh/awk/bash/date/grep/pgrep — это была цепочка MOTD
-# оператора, зашедшего посмотреть прогресс (нарушение п.2/п.5 памяти
-# ebpf-guard-measurement-hygiene, а не дефект контроля).
-# Вердикт от этого НЕ смягчается: алерты входа — часть измеренной величины
-# 6.2.6.1 и окно испорчено в любом случае. Но причина обязана быть НАЗВАНА,
-# иначе следующий читатель полдня ищет несуществующую работу измерителя.
-_w63_login_in_win=$(jq --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" --argjson self "$_w63_self_pid" \
-    "$_w63_tree_q"'
+# РАЗЛИЧИТЕЛЬ ИСТОЧНИКА (item 7 волны 6.3.1, №334 — ось ПЕРЕВЕДЕНА С comm НА
+# root_comm). Старая ось судила по СОБСТВЕННОМУ comm каждого алерта против
+# списка родовых имён шагов MOTD (sshd, run-parts, 00-header, …) — и
+# систематически недосчитывала: реальные листья цепочки (uname, grep, date,
+# cut, pgrep, systemctl, dpkg — см. №339) в список не входят, и на разборе
+# архива collect-6.3-ab различитель напечатал «алертов входа/MOTD: 2» при
+# 25 сторовых алертах ОДНОГО дерева `50-motd-news` (одна и та же путаница осей,
+# что и №242/№321: comm листа ≠ принадлежность дерева). Дерево для этого уже
+# снято рядом (predicate `own`/`process_tree`, №293) — здесь используется
+# КОРЕНЬ дерева (`process_tree[0].comm`, оба листа chain'а sshd/systemd) и
+# членство в дереве `50-motd-news`, а не имя самого алерта.
+_w63_root_q='def rootc: ((.process_tree // [])[0].comm) // .comm; def in_motd_tree: (.process_tree // []) | any(.comm == "50-motd-news");'
+_w63_login_ssh=$(jq --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" \
+    "$_w63_tree_q$_w63_root_q"'
     [ .[] | select((w63ts >= $t0) and (w63ts < $t1))
-      | select((.comm) as $c | (["sshd","run-parts","landscape-sysin","00-header","91-release-upgr","50-motd-news","login"]|index($c))) ] | length' \
+      | select(rootc == "sshd" or rootc == "login") ] | length' \
     "$W63_ART/alerts-window-end.json" 2>/dev/null)
-echo "  различитель источника: алертов входа/MOTD (sshd, run-parts, landscape-sysin, 00-header, …) внутри окна: ${_w63_login_in_win:-0}"
-# MOTD-цепочку порождает не только вход: `motd-news.timer` дёргает
-# /etc/update-motd.d/50-motd-news по расписанию, БЕЗ всякого ssh (смок
-# 07.09.2026: таймер сработал в 19:27:02 ровно внутри окна). Поэтому
-# «вход» отделяется от «таймера» по наличию sshd/login: иначе штатный фон
-# ноды объявляется нарушением гигиены и следующий читатель ищет
-# несуществующее подключение.
-_w63_login_ssh=$(jq --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" --argjson self "$_w63_self_pid" \
-    "$_w63_tree_q"'
+_w63_motd_timer_in_win=$(jq --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" \
+    "$_w63_tree_q$_w63_root_q"'
     [ .[] | select((w63ts >= $t0) and (w63ts < $t1))
-      | select((.comm) as $c | (["sshd","login"]|index($c))) ] | length' \
+      | select(in_motd_tree and (rootc != "sshd") and (rootc != "login")) ] | length' \
     "$W63_ART/alerts-window-end.json" 2>/dev/null)
+_w63_login_in_win=$(( ${_w63_login_ssh:-0} + ${_w63_motd_timer_in_win:-0} ))
+echo "  различитель источника (ось дерева, root_comm — не comm листа): вход/логин (root=sshd|login): ${_w63_login_ssh:-0}; MOTD-таймер (дерево содержит 50-motd-news, root≠sshd/login): ${_w63_motd_timer_in_win:-0}; итого: ${_w63_login_in_win}"
 if [ "${_w63_login_ssh:-0}" -gt 0 ]; then
-    echo "  ВНИМАНИЕ: внутрь окна попал ИНТЕРАКТИВНЫЙ ВХОД (алертов sshd/login: ${_w63_login_ssh}). Родовые comm (sh/bash/awk/grep/date/pgrep) принадлежат его цепочке MOTD, а не работе измерителя — окно испорчено посторонним подключением (п.2/п.5 гигиены), и величина 6.2.6.1 этого прогона завышена на его вклад"
-elif [ "${_w63_login_in_win:-0}" -gt 0 ]; then
-    echo "  примечание: MOTD-цепочка внутри окна есть, а sshd/login нет — это systemd-таймер ноды (motd-news.timer и соседи), штатный фон, а не чужой вход и не измеритель"
+    echo "  ВНИМАНИЕ: внутрь окна попал ИНТЕРАКТИВНЫЙ ВХОД (root_comm=sshd/login для ${_w63_login_ssh} алертов, включая ВСЕ листья его дерева, а не только шаги, названные по имени) — окно испорчено посторонним подключением (п.2/п.5 гигиены), и величина 6.2.6.1 этого прогона завышена на его вклад"
+elif [ "${_w63_motd_timer_in_win:-0}" -gt 0 ]; then
+    echo "  примечание: MOTD-цепочка внутри окна есть (дерево ${_w63_motd_timer_in_win} алертов, root≠sshd/login), а интерактивного входа нет — это systemd-таймер ноды (motd-news.timer и соседи), штатный фон, а не чужой вход и не измеритель"
 fi
 # СВЕРКА ДВУХ ОСЕЙ (№321). Расхождение печатается ВСЕГДА, в том числе при
 # нуле по обеим: молчаливое совпадение и молчаливое расхождение неразличимы,
@@ -1758,6 +1943,48 @@ if [ "${_w63_instr_own_n:-0}" -ne "$_w63_instr_tree_n" ]; then
 else
     echo "  №321: оси СОШЛИСЬ (обе ${_w63_instr_tree_n}) — на этом прогоне статический набор потомков на границах окна не потерял"
 fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# №339 (item 8 волны 6.3.1) — АТРИБУЦИЯ ПЕРЕЕЗЖАЕТ НА МЕТРИЧЕСКИЙ ЯРУС.
+#
+# Обе оси выше (статический набор pid и дерево, №321) читают СТОР, а величина
+# (а) — метрика. На разборе архива collect-6.3-ab это дало (а)=38 по метрике
+# против 25 по стору: 13 алертов (34% величины) не были ни измерителем, ни
+# фоном ноды ни по одной сторовой оси — они СОСТАВЛЯЛИ разницу между метрикой
+# и стором (severity=info, которого стор не хранит, — store.min_severity), и
+# вердикт «измеритель — 0» печатался рядом с необъяснённой третью величины.
+# Метрическая ось {rule_id, comm} (w63_volume_by_source, item 1/№282) уже
+# доказала покрытие ≥95% величины (в) в 6.2.6.2 выше — она и берётся как
+# ПЕРВАЯ, полная ось; дерево стора остаётся ВТОРЫМ, более точным (но неполным
+# по построению) срезом. Третье число — остаток метрики (а), которому не
+# нашлось ни одной строки в сторовом окне: он либо 0, либо назван поимённо
+# осью {rule_id, comm} метрики, а не молчаливо приписан «измерителю — 0».
+# ═════════════════════════════════════════════════════════════════════════════
+echo "--- 6.2.6.3 (№339, item 8): доля измерителя по метрике {rule_id,comm}, стор — второй, более точный срез ---"
+_w63_instr_metric_n=0
+if [ -s "$W63_ART/volume-by-source.txt" ]; then
+    _w63_instr_metric_n=$(awk -v list="${W63_INSTR_COMMS_FLAT:-}" '
+        BEGIN { n = split(list, want, " ") }
+        { for (i = 1; i <= n; i++) if ($2 == want[i]) { s += $3; next } }
+        END { printf "%d", s + 0 }
+    ' "$W63_ART/volume-by-source.txt" 2>/dev/null)
+fi
+_w63_instr_metric_n=${_w63_instr_metric_n:-0}
+_w63_store_win_total_n=$(jq --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" \
+    "$_w63_tree_q"'[.[]|select((w63ts >= $t0) and (w63ts < $t1))]|length' \
+    "$W63_ART/alerts-window-end.json" 2>/dev/null)
+_w63_store_win_total_n=${_w63_store_win_total_n:-0}
+_w63_unattr_n=$(( _w63_vol_all - _w63_store_win_total_n ))
+echo "  доля измерителя ПО МЕТРИКЕ {rule_id,comm} (полная ось, покрытие доказано 6.2.6.2): ${_w63_instr_metric_n}; по дереву стора (вторая, более точная, но неполная ось, №321): ${_w63_instr_tree_n}"
+echo "  величина (а) по метрике: ${_w63_vol_all}; та же величина по стору внутри [t0,t1): ${_w63_store_win_total_n}; АЛЕРТОВ ВЕЛИЧИНЫ БЕЗ АТРИБУЦИИ НИ ОДНОЙ СТОРОВОЙ ОСЬЮ (№339): ${_w63_unattr_n}"
+if [ "$_w63_unattr_n" -lt 0 ]; then
+    echo "  ⚠ №339: стор внутри окна ПРЕВЫШАЕТ метрику (${_w63_store_win_total_n} > ${_w63_vol_all}) — окна метрики и стора не тождественны на этом прогоне (см. сторож границ №319 выше), остаток без атрибуции не определён"
+elif [ "$_w63_unattr_n" -gt 0 ]; then
+    echo "  №339: ${_w63_unattr_n} алертов величины стор не несёт ВООБЩЕ (ни как измеритель, ни как фон ноды) — это, как правило, severity=info (store.min_severity=warning), а не молчаливый ноль; поимённая раскладка остатка — метрическая разбивка по (в) в 6.2.6.2 выше (volume-by-source.txt), а не стор"
+else
+    echo "  №339: метрика и стор внутри окна сошлись (${_w63_vol_all} = ${_w63_store_win_total_n}) — остатка без атрибуции нет"
+fi
+
 if [ "${_W63_TREE_SELF_OK:-1}" -eq 0 ]; then
     die "6.2.6.3 НЕИЗМЕРИМ (№321): pid измерителя = ${_w63_self_pid} — предикат «своё» по ppid совпал бы с КАЖДЫМ корнем дерева, и вердикт о доле измерителя в этом окружении недостижим ни в какую сторону"
 elif [ "$_w63_instr_tree_n" -eq 0 ] && [ "${_w63_artpath:-0}" -eq 0 ] && [ "${_w63_reap_delta:-0}" -le 0 ]; then
@@ -1954,10 +2181,12 @@ fi
 #   6.3.0/6.3.1/6.3.2 — items, требующие пода с dig/nslookup (busybox);
 #   6.3.3 — переиспользует volume-by-rule.txt/ratelimited-slice, уже снятые
 #           выше по тихому окну, фильтруя их по манифесту item 1;
-#   6.3.4/6.3.5 — A/B dns.enabled true/false, ВЫКЛЮЧЕН по умолчанию
-#           (W63_AB_ENABLED), потому что удваивает время прогона на пролог
-#           обучения (W63_AB_PROLOGUE) — оговорка постановки принята явно,
-#           а не обнаружена в разборе;
+#   6.3.4/6.3.5 — вклад DNS осью event_type внутри окна A (волна 6.3.1, item 6,
+#           вариант ii); A/B dns.enabled true/false РЕТИРОВАН тем же решением
+#           (находки №335/№336: рестарт тумблера обнулял базу дрейфа, вклад
+#           DNS был неотличим от цены свежей базы) — 6.3.5 печатается
+#           НЕ ЗАПРОШЕН, старую величину (доля дерева измерителя до/после)
+#           повторить нечем без event_type в сторе;
 #   6.3.6 — item 3 (isK3sControlPlaneNetworkSignal, internal/correlator/incident.go);
 #   6.3.7 — слепые зоны, предъявленные числом там, где стенд это позволяет.
 #
@@ -2018,7 +2247,97 @@ echo "--- 6.3.0: видимость — форсированный резолв 
 _w63_dq0=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
 _w63_dns_stale0=$(_w63_metric_sum ebpf_guard_dns_collector_stale "")
 _w63_dns_backfilled=$(_w63_metric_sum ebpf_guard_dns_socket_map_backfilled_total "")
-echo "  на старте: dns_queries_total=${_w63_dq0:-?}, dns_collector_stale=${_w63_dns_stale0:-?}, dns_socket_map_backfilled_total=${_w63_dns_backfilled:-?} (0 законно — значит на старте агента не было заранее соединённых DNS-сокетов, [[positive-control-needs-result-sentinel]])"
+_w63_dns_bf_cand=$(_w63_metric_sum ebpf_guard_dns_socket_map_backfill_candidates_total "")
+echo "  на старте: dns_queries_total=${_w63_dq0:-?}, dns_collector_stale=${_w63_dns_stale0:-?}, dns_socket_map_backfilled_total=${_w63_dns_backfilled:-?}, dns_socket_map_backfill_candidates_total=${_w63_dns_bf_cand:-?} (0/0 законно — значит на старте агента не было заранее соединённых DNS-сокетов, [[positive-control-needs-result-sentinel]])"
+
+# №341 (item 2 волны 6.3.1): пара backfilled/candidates различает «нечего
+# было вносить» и «не смогли вставить», но НЕ различает «нечего вносить» и
+# «смотрели не туда» — обе дают 0/0. Третий, независимый от бэкфилла счёт:
+# ss по КАЖДОМУ отдельному netns узла (те же namespace'ы, что обходит
+# connectedPort53InodesAllNamespaces — дедуп по /proc/<pid>/ns/net), минуя
+# и /proc/net/udp-парсер агента, и dns_socket_map целиком. Расхождение
+# любых двух из трёх чисел — вердикт, а не примечание.
+_w63_ss_independent_count() {
+    if ! command -v ss >/dev/null 2>&1; then
+        echo "НЕДОСТУПНО(ss)"
+        return
+    fi
+    if ! command -v nsenter >/dev/null 2>&1; then
+        echo "НЕДОСТУПНО(nsenter)"
+        return
+    fi
+    # СТОРОЖ РЕЗУЛЬТАТА (аудит 16.09.2026, открытый вопрос 2 items 1/2).
+    # Прежняя редакция глушила stderr и брала `grep -c .` от ПУСТОГО вывода:
+    # отказ `nsenter` (нет CAP_SYS_ADMIN на чужой pod-netns, namespace исчез
+    # вместе с процессом) давал 0, неотличимый от «в этом netns сокетов на :53
+    # нет». Ровно тот приборный ноль, ради которого весь item 2 и заводился —
+    # [[positive-control-needs-result-sentinel]]. Теперь код возврата nsenter
+    # читается отдельно от вывода, а число отказов возвращается ВМЕСТЕ с
+    # суммой: «12/13 netns прочитаны» — величина, «13 отказов» — недоступность.
+    local seen="" total=0 ok_ns=0 fail_ns=0 pid ns out rc
+    for pid in /proc/[0-9]*; do
+        pid=${pid#/proc/}
+        ns=$(readlink "/proc/$pid/ns/net" 2>/dev/null) || continue
+        case " $seen " in *" $ns "*) continue ;; esac
+        seen="$seen $ns"
+        out=$(nsenter -t "$pid" -n ss -uH -p state connected '( dport = :53 )' 2>/dev/null); rc=$?
+        if [ "$rc" -ne 0 ]; then
+            fail_ns=$(( fail_ns + 1 ))
+            continue
+        fi
+        ok_ns=$(( ok_ns + 1 ))
+        total=$(( total + $(printf '%s\n' "$out" | grep -c . || true) ))
+    done
+    if [ "$ok_ns" -eq 0 ]; then
+        echo "НЕДОСТУПНО(nsenter отказал во всех ${fail_ns} netns)"
+        return
+    fi
+    # Формат: "<сумма> <прочитано_netns> <отказов_netns>" — вызывающая сторона
+    # обязана прочитать ВСЕ ТРИ, а не только первое число.
+    echo "$total $ok_ns $fail_ns"
+}
+_w63_ss_ok_ns=0; _w63_ss_fail_ns=0
+if [ "$(id -u)" -eq 0 ] 2>/dev/null; then
+    _w63_ss_raw=$(_w63_ss_independent_count)
+    case "$_w63_ss_raw" in
+        НЕДОСТУПНО*) _w63_ss_count="$_w63_ss_raw" ;;
+        *) read -r _w63_ss_count _w63_ss_ok_ns _w63_ss_fail_ns <<EOF
+$_w63_ss_raw
+EOF
+           ;;
+    esac
+else
+    _w63_ss_count="НЕДОСТУПНО(не root)"
+fi
+echo "  независимый счёт (item 2, ss по всем netns, мимо dns_socket_map): $_w63_ss_count (прочитано netns: ${_w63_ss_ok_ns:-0}, отказов nsenter: ${_w63_ss_fail_ns:-0})"
+# КЛАСС РАСХОЖДЕНИЯ, А НЕ ЕГО ВЕЛИЧИНА (аудит 16.09.2026, открытый вопрос 4
+# items 1/2). Точного совпадения двух независимых снятий на живом узле не
+# бывает: сокет резолвера успевает закрыться и переоткрыться между чтением
+# агента (СТАРТ агента) и чтением контроля (СЕЙЧАС) — это разные моменты
+# времени, а не разные приборы. Назначать порог расхождению запрещает правило
+# 5.9.6, и он тут не нужен: вопрос №341 бинарный — «смотрели ли в ту сторону
+# вообще». Различаются ТРИ класса, и только один из них находка.
+_W63_BF_CLASS="неизмеримо"
+case "$_w63_ss_count" in
+    НЕДОСТУПНО*)
+        echo "  ⚠ независимый сторож бэкфилла НЕИЗМЕРИМ на этом узле ($_w63_ss_count) — читать только пару backfilled/candidates; вердикт 6.3.1.1 ниже"
+        ;;
+    *)
+        if [ "${_w63_dns_bf_cand:-0}" -gt 0 ] && [ "${_w63_ss_count:-0}" -gt 0 ]; then
+            _W63_BF_CLASS="оба_ненулевые"
+            echo "  оба счёта ненулевые (candidates_total=${_w63_dns_bf_cand}, ss=${_w63_ss_count}) — бэкфилл смотрит в ту же сторону, что ss; разница чисел ($(( _w63_dns_bf_cand - _w63_ss_count ))) — разные МОМЕНТЫ снятия (старт агента против сейчас), порог ей не назначается (правило 5.9.6)"
+        elif [ "${_w63_dns_bf_cand:-0}" -eq 0 ] && [ "${_w63_ss_count:-0}" -eq 0 ]; then
+            _W63_BF_CLASS="оба_нулевые"
+            echo "  оба счёта нулевые — ноль бэкфилла ПОДТВЕРЖДЁН независимым способом: на узле нет соединённых UDP-сокетов на :53 ни в одном netns (класс «нечего было вносить», а не «смотрели не туда»)"
+        elif [ "${_w63_dns_bf_cand:-0}" -eq 0 ]; then
+            _W63_BF_CLASS="слепота"
+            echo "  ⚠ РАСХОЖДЕНИЕ КЛАССА (item 2/№341): candidates_total=0 против независимого ss-счёта=${_w63_ss_count} — бэкфилл СМОТРЕЛ НЕ ТУДА, а не «нечего было вносить»"
+        else
+            _W63_BF_CLASS="ss_пуст"
+            echo "  ⚠ РАСХОЖДЕНИЕ КЛАССА (обратное): candidates_total=${_w63_dns_bf_cand} против ss-счёта=0 — слеп НЕЗАВИСИМЫЙ счёт (nsenter/ss не видят того, что видит агент), величина бэкфилла при этом предъявлена"
+        fi
+        ;;
+esac
 _w63_node_dig=""
 if command -v dig >/dev/null 2>&1; then
     _w63_node_dig=$(dig +short +time=3 +tries=2 example.com 2>/dev/null | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | head -1)
@@ -2131,85 +2450,70 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6.3.4/6.3.5 — ВЕРХНЯЯ ОЦЕНКА ОБЪЁМА (A/B dns.enabled true/false) и ДОЛЯ
-# ДЕРЕВА ИЗМЕРИТЕЛЯ до/после (пункт Ж переноса). Единственный доступ к
-# вкладу DNS в anomaly/drift/инцидентный слой — эти слои не несут оси
-# event_type (№327) и не читаются манифестом. ВЫКЛЮЧЕН по умолчанию: цена —
-# рестарт агента + пролог не короче learning_period×enforce_deadline_periods
-# (иначе окно B меряет обучение, а не базовую линию — тот же дефект пункта
-# А, пришедший с другой стороны), и это принято явно, а не обнаружено в
-# разборе (постановка волны 6.3).
+# 6.3.4/6.3.5 — ВКЛАД DNS ОСЬЮ event_type ВНУТРИ ОДНОГО ОКНА. Заменяет A/B
+# dns.enabled true/false (решение владельца 16.09.2026, волна 6.3.1, item 6,
+# вариант (ii)). Причина отказа от A/B — находки №335/№336 разбора архива
+# collect-6.3-ab: тумблер идёт через рестарт, а рестарт обнуляет базу
+# дрейфа (drift_baseline_profiles/learning_workloads) и сбрасывает
+# process_start_time_seconds — вычесть «DNS» из разницы двух окон, где один
+# из конфаундеров (созревшая vs свежая база) больше самого DNS-вклада,
+# нельзя. Вариант (i) (полная симметрия окон A/B, пролог 6.2.6.A на оба)
+# был отвергнут как ~1,5ч стенда ради величины, чья главная компонента —
+# форсированное событие ноды (№334), вносимое самим измерителем.
+#
+# Метрика ebpf_guard_alert_volume_by_event_type_total{event_type,rule_id}
+# (item 6, internal/exporter/prometheus.go) размечает КАЖДЫЙ диспетчеризуемый
+# алерт типом ЗАПУСТИВШЕГО его события — та самая ось, которой не хватало
+# №327 (Alert.Event несёт json:"-", стор её не видит вовсе). Даёт то, ради
+# чего заводился A/B: вклад DNS в anomaly_detection (он принимает ЛЮБОЙ тип
+# события без собственной оси — [[anomaly-detection-bypasses-rule-layer]]) —
+# НО внутри уже снятого тихого окна A, без рестарта и без второго окна.
+# Гейт — тот же, что у comm-оси (exporter.volume_by_source, item 1 волны
+# 6.2.6) — обе оси одного назначения: измерительный инструмент, не
+# продуктовая идентификационная ось.
+#
+# 6.3.5 (доля дерева измерителя до/после DNS) СНЯТА этим решением, а не
+# заменена: per-alert event_type не долетает до стора (та же причина №327),
+# поэтому "какая доля дерева измерителя приходится именно на DNS-алерты"
+# новой метрикой не восстановима — она несёт только агрегат по
+# {event_type, rule_id}, без comm/pid. Симметрия окон A/B как единица
+# измерения этим самым отменяется — критерий 6.3.1.5 печатается
+# НЕ ЗАПРОШЕН, как и допускает постановка волны 6.3.1 при выборе варианта (ii).
 # ─────────────────────────────────────────────────────────────────────────────
-echo "--- 6.3.4/6.3.5: A/B dns.enabled true/false (объём — верхняя оценка; доля дерева измерителя до/после) ---"
-if [ "${W63_AB_ENABLED:-0}" -ne 1 ]; then
-    notreq "6.3.4 НЕИЗМЕРИМ: W63_AB_ENABLED≠1 — A/B удваивает время прогона (окно + пролог рестарта ≥ ${W63_AB_PROLOGUE}s) и не входит в короткий прогон по умолчанию; ВКЛЮЧЕНИЕ этой пары возвращает требование 6.2.6.A (пролог ≥1200с обязателен, иначе окно B меряет обучение, а не базовую линию — решение владельца 15.09.2026, item 8(б))"
-    notreq "6.3.5 НЕИЗМЕРИМ: зависит от той же пары окон, что 6.3.4"
-    echo "  справочно (одно окно, DNS включён): доля дерева измерителя — нода=${_w63_tree_node_n:-?}, измеритель=${_w63_tree_own_n:-?}, неатрибутируемо=${_w63_tree_unattr_n:-?}"
+echo "--- 6.3.4/6.3.5: вклад DNS осью event_type внутри окна A (замена A/B, item 6 волны 6.3.1, вариант ii) ---"
+if [ "$W63_LIB_OK" -ne 1 ]; then
+    die "6.3.4 НЕИЗМЕРИМ: библиотека не подключилась — w63_volume_by_event_type недоступна"
+elif [ ! -s "$W63_ART/metrics-window-start.txt" ] || [ ! -s "$W63_ART/metrics-window-end.txt" ]; then
+    die "6.3.4 НЕИЗМЕРИМ: снимки тихого окна не сняты — сравнивать нечего"
 else
-    _w63_ab_cfg_bak="$W63_ART/config-test.yaml.ab-orig"
-    cp "$_w63_cfg" "$_w63_ab_cfg_bak" 2>/dev/null
-    _w63_ab_restore() {
-        if [ -f "$_w63_ab_cfg_bak" ]; then
-            cp "$_w63_ab_cfg_bak" "$_w63_cfg" 2>/dev/null
-            systemctl restart "$W63_SVC" 2>/dev/null
-            echo "  A/B: конфиг восстановлен из $_w63_ab_cfg_bak, агент перезапущен"
-        fi
-    }
-    trap '_w63_ab_restore' EXIT
-    # Переключатель ограничен блоком "  dns:\n    enabled: <bool>" —
-    # безусловный sed по "enabled: true" задел бы КАЖДЫЙ коллектор с этим
-    # ключом (tls/lsm/…), не только dns.
-    _w63_toggle_dns() { # $1=true|false
-        awk -v want="$1" '
-            /^  dns:[[:space:]]*$/ { print; indns=1; next }
-            indns==1 && /^    enabled:/ { print "    enabled: " want; indns=0; next }
-            /^  [a-zA-Z]/ && !/^  dns:[[:space:]]*$/ { indns=0 }
-            { print }
-        ' "$_w63_cfg" > "$_w63_cfg.w63ab.tmp" && mv "$_w63_cfg.w63ab.tmp" "$_w63_cfg"
-    }
-    echo "  A/B шаг 1: dns.enabled=false, рестарт, пролог ${W63_AB_PROLOGUE}s"
-    _w63_toggle_dns false
-    systemctl restart "$W63_SVC" 2>/dev/null
-    sleep "$W63_AB_PROLOGUE"
-    _w63_abB_t0=$(_w63_epoch)
-    _w63_metrics > "$W63_ART/metrics-abB-start.txt"
-    # Тот же приём, что у основного тихого окна (№258): ФИФО, а не `sleep`
-    # или busy-wait — ни execve, ни CPU. Узел один и тот же, открывается
-    # повторно.
-    if [ -p "$W63_QUIET_FIFO" ]; then
-        exec 8<>"$W63_QUIET_FIFO"
-        read -r -t "$W63_WINDOW" -u 8 _w63_ab_qdummy
-        exec 8<&-
+    _w63_evt_dns_lines=$(w63_volume_by_event_type "$W63_ART/metrics-window-start.txt" "$W63_ART/metrics-window-end.txt" "dns")
+    _w63_evt_dns_vol=$(printf '%s\n' "${_w63_evt_dns_lines:-}" | awk '{s+=$3} END{print s+0}')
+    _w63_evt_dns_anom=$(printf '%s\n' "${_w63_evt_dns_lines:-}" | awk '$2=="anomaly_detection"{print $3+0}')
+    _w63_anom_total=$(( $(_w63_metric_sum ebpf_guard_alerts_total "anomaly_detection" "$W63_ART/metrics-window-end.txt") \
+                       - $(_w63_metric_sum ebpf_guard_alerts_total "anomaly_detection" "$W63_ART/metrics-window-start.txt") ))
+    echo "  разбивка объёма по {event_type=dns, rule_id} за окно:"
+    if [ -n "${_w63_evt_dns_lines:-}" ]; then printf '%s\n' "$_w63_evt_dns_lines" | sed 's/^/    /'; else echo "    (пусто)"; fi
+    echo "  вклад DNS в anomaly_detection: ${_w63_evt_dns_anom:-0} из ${_w63_anom_total:-0} алертов anomaly_detection за то же окно"
+    echo "  для сравнения: общий объём окна (все источники) = ${_w63_vol_all:-?}; объём DNS манифестом (6.3.3, нижняя оценка) = ${_w63_dns_vol:-?}"
+    # ИНВАРИАНТ ДВУХ ОСЕЙ (аудит 16.09.2026, открытый вопрос 4 items 5/6).
+    # Манифест 6.3.3 — подмножество правил, чей event_type в YAML равен dns;
+    # ось event_type видит ИХ ЖЕ плюс правила без собственной DNS-оси
+    # (anomaly_detection и прочие общие), поэтому сумма по {event_type=dns}
+    # обязана быть НЕ МЕНЬШЕ. Нарушение — находка (либо метрика недосчитывает,
+    # либо манифест шире реального event_type), и печататься оно обязано
+    # словом, а не «рядом текстом»: соседство двух чисел без явного
+    # утверждения читатель пропускает ([[elif-verdict-masks-independent-halves]]).
+    if [ "${_w63_evt_dns_vol:-0}" -lt "${_w63_dns_vol:-0}" ]; then
+        echo "  ⚠ НАРУШЕН ИНВАРИАНТ ОСЕЙ: {event_type=dns} = ${_w63_evt_dns_vol:-0} МЕНЬШЕ манифестного объёма 6.3.3 = ${_w63_dns_vol:-0}. Ось event_type обязана покрывать манифест целиком и добавлять сверху общие правила — значит либо RecordAlertVolumeByEventType вызывается не на всех диспетчеризуемых алертах, либо в манифесте есть rule_id, чей event_type на самом деле не dns. Это находка прогона, а не примечание"
     else
-        SECONDS=0
-        while [ "$SECONDS" -lt "$W63_WINDOW" ]; do :; done
+        echo "  инвариант осей соблюдён: {event_type=dns} = ${_w63_evt_dns_vol:-0} ≥ манифест 6.3.3 = ${_w63_dns_vol:-0} (разница $(( ${_w63_evt_dns_vol:-0} - ${_w63_dns_vol:-0} )) — правила без собственной DNS-оси, прежде всего anomaly_detection)"
     fi
-    _w63_abB_t1=$(_w63_epoch)
-    _w63_metrics > "$W63_ART/metrics-abB-end.txt"
-    _w63_alerts > "$W63_ART/alerts-abB-end.json"
-
-    _w63_ab_restore
-    trap - EXIT
-
-    _w63_abB_vol=$(( $(_w63_volume_all "$W63_ART/metrics-abB-end.txt") - $(_w63_volume_all "$W63_ART/metrics-abB-start.txt") ))
-    _w63_abA_vol=${_w63_vol_all:-0}
-    _w63_ab_delta=$(( _w63_abA_vol - _w63_abB_vol ))
-    echo "  окно A (dns.enabled=true, измерено выше как тихое окно): объём=${_w63_abA_vol}"
-    echo "  окно B (dns.enabled=false, только что): объём=${_w63_abB_vol}"
-    echo "  вклад DNS (A−B, верхняя оценка вклада в anomaly/drift/инцидентный слой): ${_w63_ab_delta}"
-    if [ "$_w63_abB_vol" -le 0 ] && [ "$_w63_abA_vol" -le 0 ]; then
-        die "6.3.4 НЕИЗМЕРИМ: оба окна дали объём 0 — сравнение неотличимо от общей тишины ноды, а не от вклада DNS"
+    if [ "${_w63_vol_all:-0}" -le 0 ]; then
+        die "6.3.4 НЕИЗМЕРИМ: окно дало объём 0 — вклад DNS неотличим от общей тишины ноды"
     else
-        pass "6.3.4 ИЗМЕРЕНО (первое измерение, порог не назначается — правило 5.9.6): A=${_w63_abA_vol}, B=${_w63_abB_vol}, вклад DNS (верхняя оценка) = ${_w63_ab_delta}"
+        pass "6.3.4 ИЗМЕРЕНО (первое измерение, порог не назначается — правило 5.9.6): вклад DNS осью event_type = ${_w63_evt_dns_vol:-0} алертов за окно, из них ${_w63_evt_dns_anom:-0} — в anomaly_detection (вне манифеста rule_id, вне слоя правил)"
     fi
-
-    _w63_ab_tree_total=$(jq --argjson t0 "$_w63_abB_t0" --argjson t1 "$_w63_abB_t1" \
-        "$_w63_tree_q"'[.[]|select((w63ts >= $t0) and (w63ts < $t1))]|length' "$W63_ART/alerts-abB-end.json" 2>/dev/null)
-    _w63_ab_tree_own=$(jq --argjson t0 "$_w63_abB_t0" --argjson t1 "$_w63_abB_t1" --argjson self "$_w63_self_pid" --argjson comms "$W63_INSTR_COMMS" \
-        "$_w63_tree_q"'[.[]|select((w63ts >= $t0) and (w63ts < $t1))|select(own)]|length' "$W63_ART/alerts-abB-end.json" 2>/dev/null)
-    echo "  доля дерева измерителя — окно A (DNS вкл.): нода=${_w63_tree_node_n:-?} измеритель=${_w63_tree_own_n:-?} неатрибутируемо=${_w63_tree_unattr_n:-?}"
-    echo "  доля дерева измерителя — окно B (DNS выкл.): всего=${_w63_ab_tree_total:-?} измеритель=${_w63_ab_tree_own:-?}"
-    pass "6.3.5 ИЗМЕРЕНО (пункт Ж переноса): доля дерева измерителя напечатана ДО и ПОСЛЕ включения DNS, отдельной величиной для каждого окна"
+    notreq "6.3.5 НЕИЗМЕРИМ (НЕ ЗАПРОШЕН постановкой, решение владельца 16.09.2026, вариант ii): доля дерева измерителя до/после DNS отменена вместе с A/B — per-alert event_type не в сторе (№327), новая метрика несёт только {event_type,rule_id} без comm/pid, повторить старую величину нечем"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2217,12 +2521,35 @@ fi
 # internal/correlator/incident.go: isK3sControlPlaneNetworkSignal). Признак
 # снят на оси exe_path, счётчик попыток растёт, спуф-контроль не проходит.
 # ─────────────────────────────────────────────────────────────────────────────
+_W63_636_CLASS=""
 echo "--- 6.3.6: продуктовый долг 6.2.6.16/№262/№307 взят (item 3 волны 6.3) ---"
 _w63_metrics > "$W63_ART/metrics-w636-now.txt"
-_w63_k3s_g_d=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-w636-now.txt") \
-                - $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-window-start.txt") ))
-_w63_k3s_d_d=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-w636-now.txt") \
-                - $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-window-start.txt") ))
+# №337: A/B (6.3.4/6.3.5) больше не рестартует агента (item 6 волны 6.3.1,
+# вариант ii) — 6.3.6 теперь измеряется на том же самом процессе, что снял
+# metrics-window-start.txt, а не на 20-секундном агенте после тумблера. Guard
+# оставлен как общий инвариант: ЛЮБОЙ будущий источник рестарта между
+# снимками (смена конфига, падение systemd-юнита) дал бы ту же артефактную
+# Δ, и process_start_time_seconds ловит это независимо от причины.
+_w63_w636_guard=$(_w63_delta_guard "$W63_ART/metrics-window-start.txt" "$W63_ART/metrics-w636-now.txt")
+if [ "$_w63_w636_guard" = "unknown" ]; then
+    # АУДИТ 16.09.2026: третий исход сторожа (`unknown` — в одном из снимков
+    # НЕТ process_start_time_seconds вовсе) прежде проваливался в ветку
+    # «сравнение допустимо» и считал дельту по снимку, про который известно
+    # только то, что он неполный. Для сторожа валидности это ровно та дыра,
+    # которую он закрывает у соседей.
+    die "6.3.6 НЕИЗМЕРИМ (№337): в одном из снимков (metrics-window-start.txt / metrics-w636-now.txt) нет process_start_time_seconds — сторож не может подтвердить, что оба сняты с ОДНОГО процесса агента; дельта естественного трафика не вычисляется"
+elif [ "${_w63_w636_guard%%:*}" = "restarted" ]; then
+    _w63_w636_pst_a="${_w63_w636_guard#*:}"; _w63_w636_pst_a="${_w63_w636_pst_a%%:*}"
+    _w63_w636_pst_b="${_w63_w636_guard##*:}"
+    die "6.3.6 НЕИЗМЕРИМ (№337): агент перезапускался между снимками (process_start_time_seconds ${_w63_w636_pst_a} → ${_w63_w636_pst_b}) — Δ granted/denied естественного трафика между metrics-window-start.txt и metrics-w636-now.txt не число, а артефакт рестарта; сравнение пропущено"
+    _w63_k3s_g_d=0
+    _w63_k3s_d_d=0
+else
+    _w63_k3s_g_d=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-w636-now.txt") \
+                    - $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "granted" "$W63_ART/metrics-window-start.txt") ))
+    _w63_k3s_d_d=$(( $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-w636-now.txt") \
+                    - $(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-window-start.txt") ))
+fi
 echo "  за прогон (естественный трафик k3s-server): granted Δ=${_w63_k3s_g_d:-0}, denied Δ=${_w63_k3s_d_d:-0}"
 echo "  отрицательный контроль на спуф (comm=k3s-server, чужой образ, попытка подключения на $W63_K3S_APISERVER):"
 _w63_k3s_d_before_spoof=$(_w63_metric_sum ebpf_guard_incident_k3s_control_plane_signal_total "denied" "$W63_ART/metrics-w636-now.txt")
@@ -2301,19 +2628,39 @@ while [ "$_w63_k3s_try" -le "$_w63_k3s_spoof_tries" ]; do
     _w63_k3s_try=$(( _w63_k3s_try + 1 ))
 done
 echo "    ИТОГО по подачам: denied +${_w63_k3s_d_spoof:-0}; granted (обязано быть 0) +${_w63_k3s_g_spoof:-0}; срез лимитера по правилу +${_w63_k3s_rl_spoof:-0}; свидетель видимости процесса +${_w63_k3s_wit:-0} алертов прочих правил на comm=k3s-server"
-if [ "${_w63_k3s_g_d:-0}" -le 0 ] && [ "${_w63_k3s_d_d:-0}" -le 0 ] && [ "${_w63_k3s_d_spoof:-0}" -le 0 ] && [ "${_w63_k3s_rl_spoof:-0}" -le 0 ]; then
-    die "6.3.6 НЕИЗМЕРИМ: ни один из трёх сигналов (granted/denied естественного трафика, denied спуфа) не сдвинулся за прогон — механизм не вызывался вовсе (правило k8s_kubectl_apiserver_exec молчало на этой ноде) либо не задеплоен"
-elif [ "${_w63_k3s_g_spoof:-0}" -gt 0 ]; then
+# Item 5 (№338, волна 6.3.1): ПОРЯДОК ВЕТОК. Ветки с НАЗВАННЫМ классом
+# (срез лимитера, свидетель видимости) обязаны читаться ПЕРЕД обобщающей —
+# иначе обобщающая перехватывает случаи, для которых уже есть более точный
+# диагноз. Старый порядок ставил "ни один из сигналов не сдвинулся" ПЕРВОЙ
+# веткой без проверки свидетеля: она молчаливо поглощала и срез-лимитера, и
+# witness>0-случаи всякий раз, когда естественный трафик тоже был тих —
+# печатая "механизм не вызывался вовсе либо не задеплоен" поверх
+# зарегистрированного видимого процесса. Здесь: приоритетные (провал,
+# несостоявшаяся подача) — первыми как и раньше; далее НАЗВАННЫЕ классы
+# (срез лимитера, слепота к процессу) — ПЕРЕД обобщающей; обобщающая теперь
+# требует явно и свидетеля=0, и естественный трафик=0 — то есть срабатывает
+# ТОЛЬКО когда все четыре сигнала синхронно молчат, а не как перехватчик по
+# умолчанию.
+if [ "${_w63_k3s_g_spoof:-0}" -gt 0 ]; then
+    _W63_636_CLASS="провал_антиспуфа"
     die "6.3.6 ПРОВАЛЕН: спуф-подача (comm=k3s-server, образ /tmp/w63-k3s-spoof) дала granted +${_w63_k3s_g_spoof} — антиспуф-ось exe_path не держит, побег из-под защёлки"
 elif [ "${_w63_k3s_submitted:-0}" -ne 1 ]; then
+    _W63_636_CLASS="подача_не_состоялась"
     die "6.3.6 НЕИЗМЕРИМ: подача спуфа не состоялась вовсе (копия /bin/bash под именем k3s-server не создана) — отрицательного контроля на этом прогоне нет, и ноль читать нечем"
 elif [ "${_w63_k3s_d_spoof:-0}" -lt 1 ] && [ "${_w63_k3s_rl_spoof:-0}" -gt 0 ]; then
+    _W63_636_CLASS="срез_лимитера"
     die "6.3.6 НЕИЗМЕРИМ (класс НАЗВАН, смок 15.09.2026): алерт спуфа РОЖДАЛСЯ и был СРЕЗАН ПЕР-ПРАВИЛЬНЫМ ЛИМИТЕРОМ — срез по k8s_kubectl_apiserver_exec за подачи +${_w63_k3s_rl_spoof} при denied +${_w63_k3s_d_spoof:-0}, и ${_w63_k3s_spoof_tries} попыток с ожиданием окна лимитера его не пережили. Это НЕ «правило не сработало» и НЕ «порт недоступен»: процесс был виден (свидетель +${_w63_k3s_wit:-0} алертов прочих правил на comm=k3s-server). Отрицательный контроль упёрся в потолок прибора (память per-rule-rate-limit-ceiling), а не в механизм"
+elif [ "${_w63_k3s_d_spoof:-0}" -lt 1 ] && [ "${_w63_k3s_wit:-0}" -le 0 ] && [ "${_w63_k3s_g_d:-0}" -le 0 ] && [ "${_w63_k3s_d_d:-0}" -le 0 ]; then
+    _W63_636_CLASS="обобщение_все_сигналы_молчат"
+    die "6.3.6 НЕИЗМЕРИМ: ни один из сигналов не сдвинулся за прогон — ни естественный трафик (granted/denied), ни спуф, ни свидетель видимости (прочие правила на comm=k3s-server) — механизм не вызывался вовсе (правило k8s_kubectl_apiserver_exec молчало на этой ноде) либо не задеплоен"
 elif [ "${_w63_k3s_d_spoof:-0}" -lt 1 ] && [ "${_w63_k3s_wit:-0}" -le 0 ]; then
-    die "6.3.6 НЕИЗМЕРИМ: подача не видна агенту ВООБЩЕ — ни целевое правило (denied +${_w63_k3s_d_spoof:-0}), ни одно другое правило на comm=k3s-server (свидетель +0) не сдвинулись, срез лимитера нулевой. Класс — слепота к самому процессу (срез дерева измерителя, потери событий или несостоявшееся подключение), а не отказ механизма"
+    _W63_636_CLASS="слепота_к_процессу"
+    die "6.3.6 НЕИЗМЕРИМ: подача не видна агенту ВООБЩЕ (свидетель +0 при естественном трафике granted Δ=${_w63_k3s_g_d:-0} denied Δ=${_w63_k3s_d_d:-0}) — ни целевое правило (denied +${_w63_k3s_d_spoof:-0}), ни одно другое правило на comm=k3s-server не сдвинулись на подаче, срез лимитера нулевой. Класс — слепота к самому процессу подачи (срез дерева измерителя, потери событий или несостоявшееся подключение), а не отказ механизма"
 elif [ "${_w63_k3s_d_spoof:-0}" -lt 1 ]; then
+    _W63_636_CLASS="видим_но_без_результата"
     die "6.3.6 НЕИЗМЕРИМ: спуф-подача не подтверждена результатом (denied +${_w63_k3s_d_spoof:-0}) ПРИ ВИДИМОМ процессе (свидетель +${_w63_k3s_wit} алертов прочих правил на comm=k3s-server) и НУЛЕВОМ срезе лимитера — остаются две причины, и обе требуют разбора: ${W63_K3S_APISERVER} не принял подключение, либо правило k8s_kubectl_apiserver_exec не сработало на этой подаче. Естественный трафик (${_w63_k3s_g_d}/${_w63_k3s_d_d}) отрицательный контроль не заменяет"
 else
+    _W63_636_CLASS="взят"
     pass "6.3.6 ДОСТИГНУТО: механизм №262/№307 задеплоен и работает — granted Δ=${_w63_k3s_g_d} denied Δ=${_w63_k3s_d_d} за прогон, спуф-подача подтверждена (+${_w63_k3s_d_spoof} denied, +${_w63_k3s_g_spoof:-0} granted)"
 fi
 
@@ -2358,6 +2705,161 @@ else
     echo "  nss-resolve: getent недоступен — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go)"
 fi
 pass "6.3.7 ИЗМЕРЕНО: три слепые зоны предъявлены (TCP Δ=${_w63_tcp_delta}, IPv6 Δ=${_w63_v6_delta}, nss Δ=${_w63_nss_delta:-не измерено}) — там, где измерить не удалось на этом стенде, ограничение остаётся записанным, а не молчаливым"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# КРИТЕРИИ ВОЛНЫ 6.3.1 (постановка plan.md §«Критерии волны 6.3.1»).
+#
+# Заводятся ЗДЕСЬ, а не в соседнем скрипте, по той же причине, по которой
+# страж полноты читает ОДИН лог: «критерий существует» и «критерий вынес
+# вердикт на этом прогоне» — разные вопросы, и второй отвечается только
+# строкой в логе прогона. До этого захода семь меток постановки не выносил
+# НИКТО: критерий выхода волны («все семь меток вынесли вердикт на ОДНОМ
+# прогоне») был недостижим по построению, а страж полноты о них не знал —
+# ровно класс №270 (форк унаследовал механику и не получил новых критериев).
+#
+# Ни одна метка НЕ переименована ([[criteria-index-pins-replay-labels]]):
+# 6.3.1.N — новые номера, метка 6.3.1 (позитивный DNS-контроль волны 6.3)
+# остаётся собой. Регэксп реестра и стража требует вердиктного слова ВПЛОТНУЮ
+# за меткой, поэтому «6.3.1.1 ДОСТИГНУТО» под метку «6.3.1» не подставляется.
+# ═════════════════════════════════════════════════════════════════════════════
+echo
+echo "=== КРИТЕРИИ ВОЛНЫ 6.3.1 (6.3.1.1 … 6.3.1.7) ==="
+
+# ─── 6.3.1.1: бэкфилл видит то, что обязан ───────────────────────────────────
+# «кандидатов > 0 при работающем coredns, ЛИБО ноль, подтверждённый
+# независимым счётом; events_total{type=dns} за тихое окно предъявлено рядом
+# как размер эффекта» (величина порога не получает — правило 5.9.6).
+echo "--- 6.3.1.1: бэкфилл dns_socket_map видит то, что обязан (№340/№341) ---"
+_w63_dnsev_win=$(( $(_w63_metric_sum ebpf_guard_events_total "dns" "$W63_ART/metrics-window-end.txt") \
+                  - $(_w63_metric_sum ebpf_guard_events_total "dns" "$W63_ART/metrics-window-start.txt") ))
+echo "  размер эффекта рядом с вердиктом: events_total{type=dns} за тихое окно ${W63_WINDOW}с = ${_w63_dnsev_win} (порог не назначается, правило 5.9.6); dns_queries_total на старте контролей = ${_w63_dq0:-?}"
+echo "  candidates_total=${_w63_dns_bf_cand:-?}, backfilled_total=${_w63_dns_backfilled:-?}, независимый ss-счёт=${_w63_ss_count:-?}, класс=${_W63_BF_CLASS:-?}"
+if [ "${_W63_NEW_METRICS_OK:-0}" -ne 1 ]; then
+    die "6.3.1.1 НЕИЗМЕРИМ: метрики items 1/2 отсутствуют в /metrics — на ноде старый бинарь (см. преflight деплоя выше); ноль candidates_total на нём приборный, а не продуктовый"
+elif [ "${_w63_dns_bf_cand:-0}" -gt 0 ]; then
+    pass "6.3.1.1 ДОСТИГНУТО: бэкфилл нашёл ${_w63_dns_bf_cand} кандидатов на :53 по ВСЕМ netns узла (из них вставлено в dns_socket_map ${_w63_dns_backfilled:-0}); №340 закрыт — правка item 1 видит сокеты вне хостового netns, а не перемещена. Независимый ss-счёт: ${_w63_ss_count}"
+elif [ "${_W63_BF_CLASS:-}" = "оба_нулевые" ]; then
+    pass "6.3.1.1 ДОСТИГНУТО (ноль ПОДТВЕРЖДЁН): candidates_total=0 и независимый ss-счёт=0 по ${_w63_ss_ok_ns} прочитанным netns — на узле в момент старта агента не было соединённых UDP-сокетов на :53 ни в одном namespace. Это класс «нечего было вносить», названный ДВУМЯ приборами, а не приборный ноль одного ([[positive-control-needs-result-sentinel]])"
+elif [ "${_W63_BF_CLASS:-}" = "слепота" ]; then
+    die "6.3.1.1 ПРОВАЛЕН (№340 НЕ закрыт, лишь перемещён): candidates_total=0 при независимом ss-счёте=${_w63_ss_count} — бэкфилл по-прежнему смотрит не туда, обход /proc/<pid>/net/udp по namespace'ам не нашёл того, что видит nsenter+ss"
+else
+    die "6.3.1.1 НЕИЗМЕРИМ: candidates_total=0, а независимый счёт недоступен (${_w63_ss_count}) — различить «нечего было вносить» и «смотрели не туда» на этом прогоне нечем; это ровно тот приборный ноль, ради которого №341 и заводился"
+fi
+
+# ─── 6.3.1.2: предэкзековый comm не создаёт нагрузок ─────────────────────────
+echo "--- 6.3.1.2: предэкзековый comm не создаёт нагрузок (№342) ---"
+_w63_paren_alerts=$(jq --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" \
+    "$_w63_tree_q"'[.[]|select((w63ts >= $t0) and (w63ts < $t1))|select((.comm // "")|startswith("("))]' \
+    "$W63_ART/alerts-window-end.json" 2>/dev/null)
+_w63_paren_n=$(printf '%s' "${_w63_paren_alerts:-[]}" | jq 'length' 2>/dev/null)
+_w63_paren_by_rule=$(printf '%s' "${_w63_paren_alerts:-[]}" | jq -r '.[]|"\(.rule_id) \(.comm)"' 2>/dev/null | sort | uniq -c | sort -rn)
+_w63_paren_series=$(grep -c '^ebpf_guard_profiler_anomaly_score{.*comm="(' "$W63_ART/metrics-window-end.txt" 2>/dev/null || true)
+for _w63_o in seen resolved unresolved; do
+    printf '  ebpf_guard_comm_preexec_normalized_total{outcome="%s"} = %s\n' "$_w63_o" \
+        "$(_w63_metric_sum ebpf_guard_comm_preexec_normalized_total "$_w63_o" "$W63_ART/metrics-window-end.txt")"
+done
+echo "  алертов окна [t0,t1) с comm на «(»: ${_w63_paren_n:-0}; серий profiler_anomaly_score с comm на «(»: ${_w63_paren_series:-0}"
+[ -n "${_w63_paren_by_rule:-}" ] && printf '%s\n' "$_w63_paren_by_rule" | sed 's/^/    /'
+if [ "${_W63_NEW_METRICS_OK:-0}" -ne 1 ]; then
+    die "6.3.1.2 НЕИЗМЕРИМ: ebpf_guard_comm_preexec_normalized_total нет в /metrics — item 3 не задеплоен, и ноль фантомных нагрузок читался бы как результат правки, которой на ноде нет"
+elif [ "${_w63_paren_n:-0}" -eq 0 ] && [ "${_w63_paren_series:-0}" -eq 0 ]; then
+    pass "6.3.1.2 ДОСТИГНУТО: за окно ни одного алерта и ни одной серии profiler_anomaly_score с comm на «(» — неразрешённый предэкзековый обрезок нагрузки не заводит (item 3: скобочный ключ помечен неразрешённым и профилировщиком не баселайнится), счётчик нормализации предъявлен по всем трём исходам выше"
+else
+    die "6.3.1.2 ПРОВАЛЕН: за окно ${_w63_paren_n:-0} алертов и ${_w63_paren_series:-0} серий profiler_anomaly_score с comm на «(» — фантомная нагрузка из обрезанного предэкзекового имени жива. Поимённая раскладка по {rule_id, comm} напечатана выше: если это anomaly_detection — правка item 3 не держит; если ДРУГОЕ правило — это НОВЫЙ класс (матч правила на предэкзековом процессе), и его raw comm сохранён намеренно, разбирать офлайн"
+fi
+
+# ─── 6.3.1.3: ни один вердикт не вынесен по невалидному снимку ───────────────
+echo "--- 6.3.1.3: валидность снимков и отсутствие кросс-рестартных дельт (№337) ---"
+_w63_snap_bad=""; _w63_snap_pst=""; _w63_snap_n=0
+for _w63_f in "$W63_ART"/metrics-*.txt; do
+    [ -e "$_w63_f" ] || continue
+    _w63_snap_n=$(( _w63_snap_n + 1 ))
+    if [ ! -s "$_w63_f" ] || ! grep -q '^ebpf_guard_alerts_total' "$_w63_f" 2>/dev/null; then
+        _w63_snap_bad="$_w63_snap_bad $(basename "$_w63_f"):невалиден"
+        continue
+    fi
+    _w63_p=$(_w63_pst_of "$_w63_f")
+    if [ -z "${_w63_p:-}" ]; then
+        _w63_snap_bad="$_w63_snap_bad $(basename "$_w63_f"):без_pst"
+    elif [ -z "${_w63_snap_pst:-}" ]; then
+        _w63_snap_pst="$_w63_p"
+    elif [ "$_w63_p" != "$_w63_snap_pst" ]; then
+        _w63_snap_bad="$_w63_snap_bad $(basename "$_w63_f"):pst=$_w63_p≠$_w63_snap_pst"
+    fi
+done
+echo "  снимков метрик за прогон: ${_w63_snap_n}; process_start_time_seconds (общий для всех): ${_w63_snap_pst:-НЕ УСТАНОВЛЕН}"
+echo "  невалидных снимков, отданных _w63_metrics после исчерпания попыток: ${_W63_BAD_SNAPSHOTS:-0}${_W63_BAD_SNAPSHOT_WHY:+ (${_W63_BAD_SNAPSHOT_WHY})}"
+if [ "${_w63_snap_n:-0}" -eq 0 ]; then
+    die "6.3.1.3 НЕИЗМЕРИМ: в $W63_ART нет ни одного снимка metrics-*.txt — проверять валидность нечего, и это само по себе значит, что прогон не собрал вход для остальных критериев"
+elif [ "${_W63_BAD_SNAPSHOTS:-0}" -gt 0 ] || [ -n "${_w63_snap_bad# }" ]; then
+    die "6.3.1.3 ПРОВАЛЕН: невалидных снимков ${_W63_BAD_SNAPSHOTS:-0}, расхождений сторожа:${_w63_snap_bad:- нет}. Любая дельта, посчитанная по этим файлам, пересекает рестарт агента либо взята с пустого ответа — вердикты, на ней построенные, недействительны (№337)"
+else
+    pass "6.3.1.3 ДОСТИГНУТО: все ${_w63_snap_n} снимков метрик непусты, несут ebpf_guard_alerts_total и ОДИН И ТОТ ЖЕ process_start_time_seconds=${_w63_snap_pst} — ни одна дельта прогона не пересекает рестарт агента, сторож валидности не сработал ни разу"
+fi
+
+# ─── 6.3.1.4: 6.3.6 измерен на агенте окна A с НАЗВАННЫМ классом нуля ────────
+echo "--- 6.3.1.4: 6.3.6 измерен на агенте окна A, класс нуля назван (№338) ---"
+_w63_636_same_agent=$(_w63_delta_guard "$W63_ART/metrics-window-start.txt" "$W63_ART/metrics-w636-now.txt")
+echo "  агент 6.3.6 против агента окна A: ${_w63_636_same_agent}; класс вердикта 6.3.6: ${_W63_636_CLASS:-НЕ УСТАНОВЛЕН}"
+if [ "$_w63_636_same_agent" != "ok" ]; then
+    die "6.3.1.4 ПРОВАЛЕН: 6.3.6 измерялся НЕ на агенте окна A (сторож: ${_w63_636_same_agent}) — ровно находка №337, ради которой A/B и был снят item 6"
+elif [ -z "${_W63_636_CLASS:-}" ]; then
+    die "6.3.1.4 НЕИЗМЕРИМ: 6.3.6 не вынес вердикта вовсе (класс не установлен) — ветвление классов не отработало, читать нечего"
+elif [ "${_W63_636_CLASS}" = "обобщение_все_сигналы_молчат" ]; then
+    die "6.3.1.4 ПРОВАЛЕН (№338): 6.3.6 закрыт ОБОБЩАЮЩЕЙ веткой («механизм не вызывался вовсе либо не задеплоен»), а постановка требует НАЗВАННОГО класса. Обобщение легитимно только когда все четыре сигнала синхронно молчат — проверить свидетеля (+${_w63_k3s_wit:-0}) и срез лимитера (+${_w63_k3s_rl_spoof:-0}) в блоке 6.3.6 выше"
+else
+    pass "6.3.1.4 ДОСТИГНУТО: 6.3.6 измерен на том же процессе агента, что открыл окно A (process_start_time_seconds совпал), и его вердикт несёт НАЗВАННЫЙ класс «${_W63_636_CLASS}», а не обобщение"
+fi
+
+# ─── 6.3.1.5: симметрия окон A/B либо отказ от A−B как величины ──────────────
+echo "--- 6.3.1.5: симметрия окон A/B (снята вместе с A/B, item 6, вариант ii) ---"
+notreq "6.3.1.5 НЕИЗМЕРИМ (НЕ ЗАПРОШЕН постановкой, решение владельца 16.09.2026, вариант ii): величина A−B снята вместе с A/B-тумблером dns.enabled, второго окна на этом прогоне нет вовсе — рестарта в пайплайне волны не осталось (см. 6.3.4: вклад DNS мерится осью event_type ВНУТРИ одного окна). Постановка допускает ровно это: «либо A−B не печатается вовсе как величина»"
+
+# ─── 6.3.1.6: величина тихого окна разложена ────────────────────────────────
+echo "--- 6.3.1.6: разложение величины тихого окна (№334) ---"
+echo "  кластеров: ${_w63_clusters:-?}; крупнейший: ${_w63_cluster_max:-?} из ${_w63_cluster_total:-?} (${_w63_cluster_share:-?}% сторовой величины окна); вне форсированного события ноды: ${_w63_outside_forced:-не взводилось}"
+if [ -z "${_w63_clusters:-}" ]; then
+    die "6.3.1.6 НЕИЗМЕРИМ: разложение по кластерам не посчитано — блок 6.2.6.1 (№334) не отработал, сторовых отметок времени окна нет"
+elif [ "${_w63_cluster_total:-0}" -eq 0 ]; then
+    pass "6.3.1.6 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): сторовая величина окна = 0, кластеров 0 — раскладывать нечего, и это сам по себе результат: узел за ${W63_WINDOW}с не дал ни одного алерта уровня стора. Метрическая величина (а) = ${_w63_vol_all:-?} при этом читается ТОЛЬКО через остаток без атрибуции (6.3.1.7 ниже)"
+else
+    pass "6.3.1.6 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): кластеров ${_w63_clusters}, крупнейший ${_w63_cluster_max} из ${_w63_cluster_total} (${_w63_cluster_share}%), вне форсированного события ноды ${_w63_outside_forced:-«событие не взводилось — неотличимо от всего окна»}. При одном кластере величину нельзя читать как темп: та же нода в другой фазе таймера дала бы другое число на порядок (№334)"
+fi
+
+# ─── 6.3.1.7: неатрибутированный остаток величины ───────────────────────────
+echo "--- 6.3.1.7: неатрибутированный остаток величины, поимённо (№339) ---"
+# ПОИМЁННО — значит разностью ДВУХ ОСЕЙ по одному ключу, а не «вот вам общая
+# разбивка, ищите сами». Метрика {rule_id, comm} за окно (volume-by-source.txt,
+# покрытие ≥95% доказано 6.2.6.2) минус тот же ключ из стора за тот же
+# полуинтервал: положительный остаток по ключу и есть то, чего стор не несёт
+# (как правило severity=info, [[narrowing-input-must-be-metric-not-store]]).
+_w63_unattr_named=""
+if [ -s "$W63_ART/volume-by-source.txt" ] && [ -s "$W63_ART/alerts-window-end.json" ]; then
+    jq -r --argjson t0 "$_w63_t0" --argjson t1 "$_w63_t1" \
+        "$_w63_tree_q"'.[]|select((w63ts >= $t0) and (w63ts < $t1))|"\(.rule_id) \(.comm)"' \
+        "$W63_ART/alerts-window-end.json" 2>/dev/null | sort | uniq -c \
+        | awk '{print $2" "$3" "$1}' > "$W63_ART/store-by-source.txt" 2>/dev/null
+    _w63_unattr_named=$(awk '
+        NR==FNR { store[$1" "$2] = $3; next }
+        { d = $3 - (($1" "$2) in store ? store[$1" "$2] : 0); if (d > 0) printf "%s %s %d\n", $1, $2, d }
+    ' "$W63_ART/store-by-source.txt" "$W63_ART/volume-by-source.txt" 2>/dev/null | sort -k3 -rn)
+fi
+echo "  остаток без атрибуции (величина (а) по метрике ${_w63_vol_all:-?} − стор внутри [t0,t1) ${_w63_store_win_total_n:-?}): ${_w63_unattr_n:-?}"
+if [ -n "${_w63_unattr_named:-}" ]; then
+    echo "  поимённо по {rule_id, comm} (метрика минус стор, только положительные):"
+    printf '%s\n' "$_w63_unattr_named" | sed 's/^/    /'
+fi
+if [ -z "${_w63_unattr_n:-}" ]; then
+    die "6.3.1.7 НЕИЗМЕРИМ: остаток не посчитан — блок 6.2.6.3 (№339, item 8) не отработал"
+elif [ "${_w63_unattr_n:-0}" -lt 0 ]; then
+    die "6.3.1.7 НЕИЗМЕРИМ: стор внутри окна (${_w63_store_win_total_n}) ПРЕВЫШАЕТ метрику (${_w63_vol_all}) — окна двух осей не тождественны на этом прогоне (сторож границ №319), и остаток не определён ни в каком знаке"
+elif [ "${_w63_unattr_n:-0}" -eq 0 ]; then
+    pass "6.3.1.7 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): остаток без атрибуции = 0 — метрическая и сторовая оси окна сошлись точно, вся величина названа"
+elif [ -n "${_w63_unattr_named:-}" ]; then
+    pass "6.3.1.7 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): остаток без атрибуции = ${_w63_unattr_n}, назван поимённо по {rule_id, comm} выше ($(printf '%s\n' "$_w63_unattr_named" | grep -c .) ключей) — разностью двух осей, а не общей разбивкой"
+else
+    die "6.3.1.7 ПРОВАЛЕН: остаток ${_w63_unattr_n} НЕ НАЗВАН — поимённая разность осей пуста (volume-by-source.txt или alerts-window-end.json не снят). Ровно тот случай, ради которого критерий заведён: число есть, имён нет"
+fi
 
 echo "--- уборка ---"
 "$W63_KUBECTL" -n "$W63_NS" delete pod "$W63_DNS_PROBE_POD" --ignore-not-found --wait=false >/dev/null 2>&1

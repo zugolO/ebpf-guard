@@ -2884,16 +2884,24 @@ echo "  candidates_total=${_w63_dns_bf_cand:-?}, backfilled_total=${_w63_dns_bac
 # исходе — четыре прогона подряд закрывали №340 нулём, ни разу не предъявив
 # ни одной вставки. Положительный случай создаёт пайплайн: держит
 # соединённый UDP-сокет на :53 через рестарт агента и пишет сюда класс.
+# Путь приходит ОТ ПАЙПЛАЙНА и лежит ВНЕ $W63_ART: этот скрипт чистит
+# $W63_ART в своей шапке, и файл, записанный пайплайном получасом раньше, до
+# сюда не доживал (смок 18.09.2026 — класс печатался «не_снят» при фактическом
+# «взят»). Два исхода отсутствия РАЗЛИЧАЮТСЯ: нет файла — контроль не
+# исполнялся; файл есть, а класса нет — исполнялся и не вынес.
+_W63_BFPOS_FILE="${W63_BFPOS_FILE:-/var/lib/w63-backfill-positive.txt}"
 _W63_BFPOS_CLASS="не_снят"
 _W63_BFPOS_PRE="?"
 _W63_BFPOS_TARGET="?"
-if [ -r "$W63_ART/w63-backfill-positive.txt" ]; then
-    _W63_BFPOS_CLASS=$(awk -F= '$1=="class"{print $2; exit}' "$W63_ART/w63-backfill-positive.txt")
-    _W63_BFPOS_PRE=$(awk -F= '$1=="precondition"{print $2; exit}' "$W63_ART/w63-backfill-positive.txt")
-    _W63_BFPOS_TARGET=$(awk -F= '$1=="target"{print $2; exit}' "$W63_ART/w63-backfill-positive.txt")
-    _W63_BFPOS_CLASS="${_W63_BFPOS_CLASS:-не_снят}"
+if [ -r "$_W63_BFPOS_FILE" ]; then
+    _W63_BFPOS_CLASS=$(awk -F= '$1=="class"{print $2; exit}' "$_W63_BFPOS_FILE")
+    _W63_BFPOS_PRE=$(awk -F= '$1=="precondition"{print $2; exit}' "$_W63_BFPOS_FILE")
+    _W63_BFPOS_TARGET=$(awk -F= '$1=="target"{print $2; exit}' "$_W63_BFPOS_FILE")
+    _W63_BFPOS_CLASS="${_W63_BFPOS_CLASS:-класс_не_записан}"
+else
+    _W63_BFPOS_CLASS="файл_не_найден"
 fi
-echo "  положительный случай (№340, держатель соединённого :53 через рестарт): вход=${_W63_BFPOS_PRE:-?} (${_W63_BFPOS_TARGET:-?}:53), класс=${_W63_BFPOS_CLASS}"
+echo "  положительный случай (№340, держатель соединённого :53 через рестарт): вход=${_W63_BFPOS_PRE:-?} (${_W63_BFPOS_TARGET:-?}:53), класс=${_W63_BFPOS_CLASS} (файл: $_W63_BFPOS_FILE)"
 if [ "${_W63_NEW_METRICS_OK:-0}" -ne 1 ]; then
     die "6.3.1.1 НЕИЗМЕРИМ: метрики items 1/2 отсутствуют в /metrics — на ноде старый бинарь (см. преflight деплоя выше); ноль candidates_total на нём приборный, а не продуктовый"
 elif [ "${_W63_BFPOS_CLASS}" = "слеп" ]; then

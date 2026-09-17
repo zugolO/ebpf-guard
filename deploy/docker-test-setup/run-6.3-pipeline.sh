@@ -351,9 +351,17 @@ rm -rf "$ART" 2>/dev/null
 #    /proc/<holder>/net/udp и требует увидеть там порт назначения 0035.
 #    Без этого «candidates=0» снова был бы неотличим от «держать сокет не
 #    удалось» ([[positive-control-needs-result-sentinel]]).
+# ВХОД КОНТРОЛЯ ЛЕЖИТ ВНЕ $ART. Смок 18.09.2026 показал почему:
+# wave6.3-controls.sh чистит $W63_ART при СВОЁМ старте (`rm -rf` в его шапке),
+# а пайплайн пишет сюда за полчаса до него — файл до читателя не доживал, и
+# 6.3.1.1 печатал класс «не_снят» при фактическом «взят» (candidates=1,
+# backfilled=1). То есть положительный случай был снят и потерян по дороге:
+# приборный ноль ровно того класса, ради которого контроль и заводился.
+# Путь передаётся контролям явно, а не угадывается обеими сторонами.
 mkdir -p "$ART" 2>/dev/null
-_r63_bfpos="$ART/w63-backfill-positive.txt"
-_r63_bfpos_ready="$ART/.w63-bf-holder.ready"
+W63_BFPOS_FILE="${W63_BFPOS_FILE:-/var/lib/w63-backfill-positive.txt}"
+_r63_bfpos="$W63_BFPOS_FILE"
+_r63_bfpos_ready="/var/lib/.w63-bf-holder.ready"
 rm -f "$_r63_bfpos_ready"
 # Потолок жизни держателя: он нужен только до чтения метрик бэкфилла (десятки
 # секунд после рестарта). Смок гоняет те же ветки на коротких временах.
@@ -610,6 +618,7 @@ sleep "$PROLOGUE"
 # ── Шаг 4. Контроли. ──────────────────────────────────────────────────────
 echo "--- контроли волны 6.3 ---"
 W63_WINDOW="$WINDOW" W63_NS="$NS" W63_ART="$ART" W63_SVC="$SVC" \
+W63_BFPOS_FILE="$W63_BFPOS_FILE" \
 W63_CHURN=3 W63_GATE=100 W63_GATE_FORMULA="$GATE_FORMULA" \
 W63_PROFILE_SECS="$PROFILE_SECS" W63_SMOKE="$SMOKE" \
 W63_VERDICTS="$VERDICTS" \
@@ -650,18 +659,42 @@ _nd63="/root/noise-diag-6.3.jsonl"
 grep -a 'noise-diag: bucket' "$_j63" > "$_nd63" 2>/dev/null
 _nd63_lines=$(wc -l < "$_nd63" 2>/dev/null)
 
-# СРЕЗ СТРОГО ПО ОКНУ ЗАМЕРА. Весь прогон — это пролог, окно и контроли с их
-# собственными подачами; смешивать их в одну разбивку значит мерить не окно.
-# Границы берутся тем же файлом-мостом, что у остальных критериев, а вырезает
-# срез сам journald — своей меткой времени, а не разбором RFC3339 в mawk.
+# СРЕЗ ПО ОКНУ ЗАМЕРА — ТОЧНОЕ ПОДМНОЖЕСТВО, А НЕ «ПРИМЕРНО ОКНО».
+#
+# Смок 18.09.2026 напечатал «0 сводок в окне замера» при 381 за прогон, и это
+# не отсутствие шума: сводка ФЛАШИТСЯ раз в W секунд и покрывает интервал
+# [T-W, T), а границы окна замера ни с чем не выровнены. Наивный срез
+# `--since @t0 --until @t1` теряет бакет, закрывшийся сразу после t1, и
+# ВТЯГИВАЕТ бакет, начавшийся до t0, то есть даёт не окно, а смесь с прологом.
+# На 60-секундном окне смока он не поймал ни одного.
+#
+# Берутся бакеты, чей интервал ЦЕЛИКОМ внутри окна: T в [t0+W, t1]. Покрытие
+# при этом не всё окно, и оно печатается числом, а не подразумевается: доля,
+# о которой не сказано, читается как целое.
 _nd63w="/root/noise-diag-window-6.3.jsonl"
 : > "$_nd63w"
+_nd_cov="не определено"
+# W берётся из того же конфига, что читает агент, а не из константы здесь:
+# разъехаться они не вправе.
+_nd_win=$(awk '
+    /^correlator:/{c=1; next}
+    c && /^[A-Za-z#]/{exit}
+    c && /^[[:space:]]{2}[a-z_]+:[[:space:]]*$/ { n = ($1 == "noise_diag:") ? 1 : 0; next }
+    c && n && /^[[:space:]]+window:[[:space:]]*[0-9]+/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }' \
+    "$_r63_cfg" 2>/dev/null)
+_nd_win="${_nd_win:-60}"
 if [ -s "$ART/window-epoch.txt" ]; then
     _ndt0=$(grep '^t0=' "$ART/window-epoch.txt" | cut -d= -f2)
     _ndt1=$(grep '^t1=' "$ART/window-epoch.txt" | cut -d= -f2)
     if [ -n "${_ndt0:-}" ] && [ -n "${_ndt1:-}" ]; then
-        journalctl -u "$SVC" --since "@${_ndt0}" --until "@${_ndt1}" --no-pager 2>/dev/null \
-            | grep -a 'noise-diag: bucket' > "$_nd63w"
+        _nd_from=$(( _ndt0 + _nd_win ))
+        if [ "$_nd_from" -lt "$_ndt1" ]; then
+            journalctl -u "$SVC" --since "@${_nd_from}" --until "@${_ndt1}" --no-pager 2>/dev/null \
+                | grep -a 'noise-diag: bucket' > "$_nd63w"
+            _nd_cov="$(( _ndt1 - _nd_from ))s из $(( _ndt1 - _ndt0 ))s окна (шаг сводки ${_nd_win}s)"
+        else
+            _nd_cov="ноль: шаг сводки ${_nd_win}s не меньше окна $(( _ndt1 - _ndt0 ))s"
+        fi
     fi
 fi
 _nd63w_lines=$(wc -l < "$_nd63w" 2>/dev/null)
@@ -671,6 +704,7 @@ _nd63_omitted=$(printf '%s\n' "$(curl -s --max-time 30 -H "Authorization: Bearer
 
 echo "--- 6.3.9.0: диагностика шума (волна 6.3.9, разрез объёма по слоям подавления) ---"
 echo "  сводок в журнале: ${_nd63_lines:-0} за весь прогон, ${_nd63w_lines:-0} в окне замера [${_ndt0:-?}, ${_ndt1:-?}]"
+echo "  покрытие среза по окну: ${_nd_cov} — берутся только бакеты, чей интервал ЦЕЛИКОМ внутри окна"
 echo "  алертов УЧТЕНО, но НЕ АТРИБУТИРОВАНО (ключ не поместился в потолок): ${_nd63_omitted:-НЕТ МЕТРИКИ} — из счёта не теряется ни один"
 
 # РАЗБОР НЕ ЗАВИСИТ НИ ОТ ПОРЯДКА ПОЛЕЙ, НИ ОТ ПРОБЕЛОВ. Якорь вида
@@ -818,6 +852,7 @@ cp "$VERDICTS" "$COLLECT/controls/" 2>/dev/null
 cp /root/agent-start-6.3.txt /root/agent-start-6.3.epoch /root/env-muteness-6.3.txt "$COLLECT/" 2>/dev/null
 cp /root/metrics-prologue-start-6.3.txt "$COLLECT/" 2>/dev/null
 cp /root/noise-diag-6.3.jsonl /root/noise-diag-window-6.3.jsonl "$COLLECT/" 2>/dev/null
+cp "$W63_BFPOS_FILE" "$COLLECT/" 2>/dev/null
 cp "$SETUP/config-test.yaml" "$SETUP/wave6.3-controls.sh" "$SETUP/wave6.3-metrics-lib.sh" "$SETUP/wave6.3-completeness-guard.sh" "$SETUP/run-6.3-pipeline.sh" "$COLLECT/" 2>/dev/null
 # Манифест DNS и его генератор (item 1) — часть провенанса величины 6.3.3:
 # без манифеста через сутки нельзя сказать, ПО КАКИМ правилам был отфильтрован

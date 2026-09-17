@@ -418,6 +418,18 @@ fi
 } > "$_r63_bfpos"
 
 _r63_pre_restart=$(date -u +%s)
+# PST ПРЕЖНЕГО агента — опорная величина барьера готовности ниже. Сравнение с
+# ОТМЕТКОЙ ВРЕМЕНИ здесь не работает, и смок 18.09.2026 показал это на здоровом
+# агенте: остановка и старт уложились в одну секунду, а
+# process_start_time_seconds считается как btime + starttime/HZ, где btime —
+# целые секунды из /proc/stat со своей погрешностью. Новый агент получил
+# PST=1789688593.97 при отметке 1789688594, строгое «больше» не выполнилось
+# НИКОГДА, и барьер убил здоровый прогон на 90-й секунде. Неравенство двух
+# ЧТЕНИЙ ОДНОЙ И ТОЙ ЖЕ величины от арифметики часов не зависит вовсе.
+_r63_pst_old=$(curl -s --max-time 10 \
+    -H "Authorization: Bearer ${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
+    "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}/metrics" 2>/dev/null \
+    | awk '$1=="process_start_time_seconds"{print $2; exit}')
 systemctl stop "$SVC"
 rm -f /var/lib/ebpf-guard/test-events.db /var/lib/ebpf-guard/test-events.db-wal /var/lib/ebpf-guard/test-events.db-shm
 systemctl start "$SVC"
@@ -454,8 +466,11 @@ while [ "$_r63_n" -le "$_r63_ready_tries" ]; do
     if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Authorization: Bearer $_r63_tok" "$_r63_metrics_url/health" 2>/dev/null)" = "200" ]; then
         _r63_pst=$(curl -s --max-time 10 -H "Authorization: Bearer $_r63_tok" "$_r63_metrics_url/metrics" 2>/dev/null \
             | awk '$1=="process_start_time_seconds"{print $2; exit}')
-        if [ -n "${_r63_pst:-}" ] && awk -v a="${_r63_pst:-0}" -v b="${_r63_pre_restart:-0}" 'BEGIN{exit !(a>b)}'; then
-            echo "барьер готовности: агент поднят за $(( (_r63_n - 1) * _r63_ready_wait ))с (process_start_time_seconds=${_r63_pst}, попытка ${_r63_n}/${_r63_ready_tries})"
+        # Условие: PST непуст И ОТЛИЧАЕТСЯ от PST прежнего агента. Когда
+        # прежнего чтения нет (агент лежал, метрика недоступна), достаточно
+        # непустого — отличать нечего и не от чего.
+        if [ -n "${_r63_pst:-}" ] && { [ -z "${_r63_pst_old:-}" ] || [ "${_r63_pst}" != "${_r63_pst_old}" ]; }; then
+            echo "барьер готовности: агент поднят за $(( (_r63_n - 1) * _r63_ready_wait ))с (process_start_time_seconds=${_r63_pst}, прежний=${_r63_pst_old:-нет}, попытка ${_r63_n}/${_r63_ready_tries})"
             _r63_ready=1
             break
         fi
@@ -464,7 +479,7 @@ while [ "$_r63_n" -le "$_r63_ready_tries" ]; do
     _r63_n=$(( _r63_n + 1 ))
 done
 if [ "$_r63_ready" -ne 1 ]; then
-    echo "СТОП: барьер готовности НЕ ПРОЙДЕН — за $(( _r63_ready_tries * _r63_ready_wait ))с после рестарта /health и/или process_start_time_seconds не подтвердили поднятого агента. Прогон неизмерим по построению; пролога ждать незачем (память die-only-for-unmeasurable-run)"
+    echo "СТОП: барьер готовности НЕ ПРОЙДЕН — за $(( _r63_ready_tries * _r63_ready_wait ))с после рестарта /health не ответил 200 либо process_start_time_seconds не отличился от прежнего (${_r63_pst_old:-нет}, последнее чтение: ${_r63_pst:-нет}). Прогон неизмерим по построению; пролога ждать незачем (память die-only-for-unmeasurable-run)"
     date -u +%FT%TZ > "$DONE_MARK"
     exit 1
 fi

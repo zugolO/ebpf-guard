@@ -316,3 +316,37 @@ func TestWave6_3_9_EngineEmitsDiagFromTheSuppressionFunnels(t *testing.T) {
 		"ТРИ срезанных лимитером обязаны быть учтены — ради них диагностика и заведена; "+
 			"их нет ни в сторе, ни где-либо ещё")
 }
+
+// Интервал бакета печатается ЕГО СОБСТВЕННЫМИ числами, а не выводится
+// читателем из шага. Смок 18.09.2026 дважды дал «0 сводок в окне замера» при
+// сотнях за прогон: флаш событийный, и на тихом узле бакет покрывает не шаг, а
+// всё время с прошлого флаша. Срез по окну строится на этих полях, поэтому
+// они обязаны быть и обязаны расти монотонно от бакета к бакету.
+func TestWave6_3_9_BucketCarriesItsOwnInterval(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	nd := NewNoiseDiagnostics(true, 100, 20*time.Millisecond, log)
+	require.NoError(t, nd.Register(prometheus.NewRegistry()))
+
+	nd.Emit(diagAlert("anomaly_detection", "cp"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	time.Sleep(40 * time.Millisecond)
+	nd.Emit(diagAlert("anomaly_detection", "mv"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	nd.Flush()
+
+	var prevTo float64
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.Len(t, lines, 2, "два окна — две сводки")
+	for i, l := range lines {
+		var line map[string]any
+		require.NoError(t, json.Unmarshal([]byte(l), &line))
+		from, okF := line["window_from_ms"].(float64)
+		to, okT := line["window_to_ms"].(float64)
+		require.True(t, okF && okT, "бакет обязан нести свой интервал")
+		require.LessOrEqual(t, from, to, "интервал не может идти вспять")
+		if i > 0 {
+			require.GreaterOrEqual(t, from, prevTo,
+				"интервалы соседних сводок не перекрываются: иначе срез по окну посчитал бы покрытие дважды")
+		}
+		prevTo = to
+	}
+}

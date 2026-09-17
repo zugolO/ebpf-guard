@@ -199,9 +199,9 @@ func (nd *NoiseDiagnostics) Emit(a *types.Alert, outcome string, extra noiseDiag
 		nd.windowStart = now
 	}
 	if now.Sub(nd.windowStart) >= nd.window {
-		due := nd.takeLocked(now)
+		due, from, to := nd.takeLocked(now)
 		nd.mu.Unlock()
-		nd.flush(due)
+		nd.flush(due, from, to)
 		nd.mu.Lock()
 	}
 
@@ -285,13 +285,22 @@ func (nd *NoiseDiagnostics) Emit(a *types.Alert, outcome string, extra noiseDiag
 	nd.mu.Unlock()
 }
 
-// takeLocked забирает накопленное и начинает новое окно. Вызывается под
-// мьютексом.
-func (nd *NoiseDiagnostics) takeLocked(now time.Time) map[noiseAggKey]*noiseAggVal {
+// takeLocked забирает накопленное и начинает новое окно, возвращая ИНТЕРВАЛ,
+// который забранные бакеты реально покрывают. Интервал возвращается, а не
+// подразумевается: флаш СОБЫТИЙНЫЙ (случается на следующем Emit после
+// истечения шага), поэтому при редком трафике бакет покрывает не «шаг», а всё
+// время с прошлого флаша — и читатель, считающий интервал равным шагу,
+// ошибётся тем сильнее, чем тише узел. Смок 18.09.2026 поймал это срезом по
+// окну, давшим 0 бакетов при 532 за прогон.
+func (nd *NoiseDiagnostics) takeLocked(now time.Time) (map[noiseAggKey]*noiseAggVal, time.Time, time.Time) {
 	due := nd.agg
+	from := nd.windowStart
+	if from.IsZero() {
+		from = now
+	}
 	nd.agg = make(map[noiseAggKey]*noiseAggVal, len(due))
 	nd.windowStart = now
-	return due
+	return due, from, now
 }
 
 // Flush печатает накопленное немедленно. Зовётся при остановке движка, иначе
@@ -302,12 +311,12 @@ func (nd *NoiseDiagnostics) Flush() {
 		return
 	}
 	nd.mu.Lock()
-	due := nd.takeLocked(time.Now())
+	due, from, to := nd.takeLocked(time.Now())
 	nd.mu.Unlock()
-	nd.flush(due)
+	nd.flush(due, from, to)
 }
 
-func (nd *NoiseDiagnostics) flush(due map[noiseAggKey]*noiseAggVal) {
+func (nd *NoiseDiagnostics) flush(due map[noiseAggKey]*noiseAggVal, from, to time.Time) {
 	for k, v := range due {
 		nd.accounted.Add(float64(v.n))
 		nd.lines.WithLabelValues(k.outcome).Add(float64(v.n))
@@ -315,6 +324,15 @@ func (nd *NoiseDiagnostics) flush(due map[noiseAggKey]*noiseAggVal) {
 			slog.String("outcome", k.outcome),
 			slog.String("rule_id", k.rule),
 			slog.Uint64("count", v.n),
+			// Интервал, который бакет ПОКРЫВАЕТ, — своими числами. Срез по
+			// окну замера берёт бакеты, чей [from, to) целиком внутри окна,
+			// и ему не нужно ничего допускать о шаге.
+			//
+			// МИЛЛИСЕКУНДЫ, а не секунды: усечение границы до секунды уже
+			// однажды втянуло в окно собственные алерты измерителя (№291), и
+			// повторять это в новом приборе незачем.
+			slog.Int64("window_from_ms", from.UnixMilli()),
+			slog.Int64("window_to_ms", to.UnixMilli()),
 			slog.String("message", k.message),
 			slog.Uint64("exe_sampled", v.exeSampled),
 			slog.Uint64("exe_resolved", v.exeResolved),

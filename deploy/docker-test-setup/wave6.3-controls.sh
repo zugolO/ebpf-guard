@@ -2750,8 +2750,10 @@ if command -v dig >/dev/null 2>&1; then
     #    потому, что его нет, а потому, что он не попадает в эту серию.
     #    Сама серия заведена с нуля при старте, поэтому её ОТСУТСТВИЕ читается
     #    как «бинарь до №357», а не как ноль ([[positive-control-needs-result-sentinel]]).
-    _w63_tcp_pre=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="tcp"')
-    _w63_udp_pre=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="udp"')
+    # Фильтр _w63_metric_sum — ЗНАЧЕНИЕ лейбла в кавычках, а не пара
+    # ключ=значение: 'transport="tcp"' даёт молчаливый ноль, а не ошибку.
+    _w63_tcp_pre=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total tcp)
+    _w63_udp_pre=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total udp)
     if ! _w63_metric_present ebpf_guard_dns_messages_by_transport_total; then
         _w63_tcp_class="НЕИЗМЕРИМО(нет_серии_транспорта)"
         _w63_tcp_delta="серия отсутствует"
@@ -2761,8 +2763,8 @@ if command -v dig >/dev/null 2>&1; then
             dig +tcp +short +time=3 +tries=1 example.com >/dev/null 2>&1
         done
         sleep "$_W63_DNS_PROBE_SECS"
-        _w63_tcp_post=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="tcp"')
-        _w63_udp_post=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="udp"')
+        _w63_tcp_post=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total tcp)
+        _w63_udp_post=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total udp)
         _w63_tcp_delta=$(( ${_w63_tcp_post:-0} - ${_w63_tcp_pre:-0} ))
         _w63_udp_delta=$(( ${_w63_udp_post:-0} - ${_w63_udp_pre:-0} ))
         if [ "${_w63_tcp_delta:-0}" -gt 0 ]; then

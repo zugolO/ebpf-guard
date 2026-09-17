@@ -1906,6 +1906,8 @@ ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="dns_dga_ng
 ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="anomaly_detection"} 1
 ebpf_guard_alert_volume_by_event_type_total{event_type="syscall",rule_id="anomaly_detection"} 40
 ebpf_guard_alert_volume_by_event_type_total{rule_id="dns_tunnel_long_qname",event_type="dns"} 7
+ebpf_guard_dns_messages_by_transport_total{transport="udp"} 100
+ebpf_guard_dns_messages_by_transport_total{transport="tcp"} 3
 EOF
     cat > "$e" <<'EOF'
 ebpf_guard_exe_path_lookups_total{field="exe_path",result="resolved"} 180
@@ -1927,6 +1929,8 @@ ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="dns_dga_ng
 ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="anomaly_detection"} 3
 ebpf_guard_alert_volume_by_event_type_total{event_type="syscall",rule_id="anomaly_detection"} 55
 ebpf_guard_alert_volume_by_event_type_total{rule_id="dns_tunnel_long_qname",event_type="dns"} 7
+ebpf_guard_dns_messages_by_transport_total{transport="udp"} 140
+ebpf_guard_dns_messages_by_transport_total{transport="tcp"} 8
 EOF
 
     echo "=== синтетика: ключ реестра вердиктов и чтение «метка взята» (вход условий 1/2 критерия 6.2.6.21) ==="
@@ -1973,6 +1977,31 @@ EOF
         echo "  OK: ссылка на чужую метку внутри текста не переписывает ключ; метки 6.2.9.F.* доезжают до реестра под собой"
     else
         echo "  ПРОВАЛ: ключ взят не из начала строки либо метка 6.2.9.F.* потеряна (пустой ключ = молчаливый пропуск, №269)"; rc=1
+    fi
+
+    # ── №357: КАК ИМЕННО фильтруется ось транспорта. Контроль 6.3.7 сначала
+    #    звал w63_metric_sum_file с 'transport="tcp"' — то есть парой
+    #    ключ=значение — и получал МОЛЧАЛИВЫЙ НОЛЬ вместо ошибки: контракт
+    #    фильтра — совпадение по ЗНАЧЕНИЮ лейбла в кавычках. Прогон напечатал
+    #    «слеп_к_TCP» при работающем продукте (прямой замер давал +1 в 4
+    #    раундах из 5). Фикстура удерживает обе половины контракта.
+    echo "=== синтетика: ось транспорта DNS и контракт фильтра по значению (№357) ==="
+    local tcp_start tcp_end udp_start udp_end trap_sum
+    tcp_start=$(w63_metric_sum_file ebpf_guard_dns_messages_by_transport_total tcp "$s")
+    tcp_end=$(w63_metric_sum_file ebpf_guard_dns_messages_by_transport_total tcp "$e")
+    udp_start=$(w63_metric_sum_file ebpf_guard_dns_messages_by_transport_total udp "$s")
+    udp_end=$(w63_metric_sum_file ebpf_guard_dns_messages_by_transport_total udp "$e")
+    trap_sum=$(w63_metric_sum_file ebpf_guard_dns_messages_by_transport_total 'transport="tcp"' "$e")
+    echo "    tcp: ${tcp_start} → ${tcp_end} (Δ$((tcp_end - tcp_start))); udp: ${udp_start} → ${udp_end} (Δ$((udp_end - udp_start))); фильтр парой ключ=значение даёт ${trap_sum}"
+    if [ "$((tcp_end - tcp_start))" -eq 5 ] && [ "$((udp_end - udp_start))" -eq 40 ]; then
+        echo "  OK: дельты по транспорту читаются раздельно (tcp 5, udp 40)"
+    else
+        echo "  ПРОВАЛ: дельты по транспорту разъехались — ось TCP снова неизмерима"; rc=1
+    fi
+    if [ "${trap_sum:-0}" -eq 0 ]; then
+        echo "  OK: фильтр парой ключ=значение даёт ноль — ловушка предъявлена, звать фильтр ЗНАЧЕНИЕМ"
+    else
+        echo "  ПРОВАЛ: пара ключ=значение неожиданно сработала — контракт фильтра изменился, проверить всех вызывающих"; rc=1
     fi
 
     echo "=== синтетика: три оси exe_path_lookups_total, лейблы в РАЗНОМ порядке на границах ==="

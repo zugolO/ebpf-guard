@@ -21,6 +21,12 @@ import (
 // алерты, срезанные лимитером. Их 18…42 за тихое окно против 38 напечатанных,
 // все — `anomaly_detection`, и в стор они не попадают, поэтому ни вклада, ни
 // осей у них нет нигде.
+//
+// Форма — СВОДКА, а не строка на алерт: смок на стенде 18.09.2026 показал
+// 1944 напечатанных строки против 33 996 не напечатанных по потолку, причём
+// усечение смещено к началу каждого окна. Тесты ниже держат главное свойство
+// новой формы: НИ ОДИН алерт не выпадает из счёта, даже когда его ключ не
+// поместился в потолок атрибуции.
 
 func newTestDiag(t *testing.T, enabled bool, cap int) (*NoiseDiagnostics, *bytes.Buffer) {
 	t.Helper()
@@ -59,82 +65,137 @@ func diagAlert(rule, comm string) *types.Alert {
 	return a
 }
 
-// Главная половина: срезанный алерт обязан быть напечатан со СВОИМ слоем и
+// Главная половина: срезанный алерт обязан попасть в сводку СО СВОИМ слоем и
 // нести то, чего нет в сторе — вклад, оси и состояние профиля.
-func TestWave6_3_9_NoiseDiagPrintsSuppressedAlertWithItsLayer(t *testing.T) {
+func TestWave6_3_9_NoiseDiagSummarisesSuppressedAlertsWithTheirLayer(t *testing.T) {
 	nd, buf := newTestDiag(t, true, 100)
 
-	nd.Emit(diagAlert("anomaly_detection", "mktemp"), noiseDiagOutcomeRateLimit,
-		noiseDiagExtra{hasProfile: true, profileAgeMs: 1200, profileSamples: 1})
+	for i := 0; i < 3; i++ {
+		nd.Emit(diagAlert("anomaly_detection", "mktemp"), noiseDiagOutcomeRateLimit,
+			noiseDiagExtra{hasProfile: true, profileAgeMs: 1200, profileSamples: 1})
+	}
+	nd.Emit(diagAlert("anomaly_detection", "mktemp"), noiseDiagOutcomeEmitted,
+		noiseDiagExtra{hasProfile: true, profileAgeMs: 900000, profileSamples: 120})
+	nd.Flush()
+
+	byOutcome := map[string]map[string]any{}
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var line map[string]any
+		require.NoError(t, json.Unmarshal([]byte(l), &line))
+		byOutcome[line["outcome"].(string)] = line
+	}
+
+	cut := byOutcome["rate_limit"]
+	require.NotNil(t, cut, "срезанные лимитером обязаны иметь свой бакет — ради них прибор и заведён")
+	require.EqualValues(t, 3, cut["count"], "счёт точный, а не выборочный")
+	require.Equal(t, "anomaly_detection", cut["rule_id"])
+	require.Contains(t, cut["message"], "extension=.cache",
+		"вклад аномалии — единственный ответ на «за что именно»")
+	require.Equal(t, "mktemp", cut["example_comm"])
+	require.Equal(t, "bash", cut["example_parent_comm"])
+
+	// Гипотеза №363 читается этой гистограммой: три аномалии вынесены против
+	// базы из одного наблюдения.
+	require.EqualValues(t, 3, cut["samples_le1"])
+	require.EqualValues(t, 3, cut["age_lt10s"])
+
+	// Прошедший алерт лежит в СВОЁМ бакете и в гистограмме зрелого профиля —
+	// иначе «стало меньше» было бы неотличимо от «переехало в другой ярус».
+	passed := byOutcome["emitted"]
+	require.NotNil(t, passed)
+	require.EqualValues(t, 1, passed["count"])
+	require.EqualValues(t, 1, passed["samples_gt50"])
+	require.EqualValues(t, 1, passed["age_ge5m"])
+
+	require.EqualValues(t, 4, diagCounterValue(t, nd.accounted))
+	require.EqualValues(t, 0, diagCounterValue(t, nd.overflow))
+}
+
+// Знаменатель доли разрешённых осей печатается рядом с ней: readlink делается
+// на выборку, и доля без своего знаменателя была бы величиной ни о чём.
+func TestWave6_3_9_NoiseDiagPrintsExeSampleDenominator(t *testing.T) {
+	nd, buf := newTestDiag(t, true, 100)
+
+	for i := 0; i < 20; i++ {
+		nd.Emit(diagAlert("recon_system_info", "uname"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	}
+	nd.Flush()
 
 	var line map[string]any
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &line))
-
-	require.Equal(t, "rate_limit", line["outcome"],
-		"слой подавления обязан стоять в строке: без него «стало меньше» неотличимо от «переехало в другой ярус»")
-	require.Equal(t, "anomaly_detection", line["rule_id"])
-	require.Equal(t, "mktemp", line["comm"])
-	require.Equal(t, "bash", line["parent_comm"])
-	require.Equal(t, "file", line["event_type"])
-	require.Contains(t, line["message"], "extension=.cache",
-		"вклад аномалии — единственный ответ на «за что именно», и он живёт в message")
-
-	// Гипотеза №363 проверяется ровно этой парой чисел.
-	require.EqualValues(t, 1200, line["profile_age_ms"])
-	require.EqualValues(t, 1, line["profile_samples"])
-
-	// Ось сужения печатается ВКЛЮЧАЯ пустое значение, названное словом:
-	// доля unresolved и есть ответ, применима ли ось к этому шуму вообще.
-	require.Contains(t, []any{"resolved", "unresolved"}, line["exe_path_state"])
-
-	require.EqualValues(t, 1, diagCounterValue(t, nd.emitted))
-	require.EqualValues(t, 0, diagCounterValue(t, nd.omitted))
+	require.EqualValues(t, 20, line["count"])
+	require.EqualValues(t, noiseDiagExeSamplesPerKey, line["exe_sampled"],
+		"выборка осей ограничена и её размер напечатан")
+	require.EqualValues(t, line["exe_sampled"],
+		line["exe_resolved"].(float64)+line["exe_unresolved"].(float64),
+		"разрешённые и неразрешённые обязаны складываться в знаменатель")
 }
 
-// Алерт слоя правил профиля не имеет, и поля профиля не печатаются ВОВСЕ, а не
-// печатаются нулями: ноль возраста — осмысленная величина, «нет профиля» — нет.
-func TestWave6_3_9_NoiseDiagOmitsProfileFieldsWhenThereIsNoProfile(t *testing.T) {
+// Алерт слоя правил профиля не имеет — гистограммы профиля остаются нулевыми,
+// а не выдумывают нагрузке возраст.
+func TestWave6_3_9_NoiseDiagProfileHistogramsStayZeroWithoutProfile(t *testing.T) {
 	nd, buf := newTestDiag(t, true, 100)
 
 	nd.Emit(diagAlert("recon_system_info", "uname"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	nd.Flush()
 
 	var line map[string]any
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &line))
-	require.NotContains(t, line, "profile_age_ms")
-	require.NotContains(t, line, "profile_samples")
-	require.Equal(t, "emitted", line["outcome"])
+	require.EqualValues(t, 1, line["count"])
+	for _, k := range []string{"samples_le1", "samples_2_5", "samples_6_50", "samples_gt50",
+		"age_lt10s", "age_lt5m", "age_ge5m"} {
+		require.EqualValues(t, 0, line[k], "поле %s не должно заполняться без профиля", k)
+	}
 }
 
-// Диагностика не вправе сама стать шумом — и обязана СКАЗАТЬ, что усечена.
-// Усечённая печать, о усечении которой не сказано, читается как полная
-// картина, и это тот же класс, что пустой снимок метрик, молча ставший нулями.
-func TestWave6_3_9_NoiseDiagCapIsCountedNotSilent(t *testing.T) {
+// ГЛАВНОЕ СВОЙСТВО ФОРМЫ: потолок ограничивает АТРИБУЦИЮ, а не учёт. Алерт,
+// чей ключ не поместился, обязан остаться посчитанным — это прямое следствие
+// ограничения «ни один алерт не потерян». Прежняя форма теряла 95% строк по
+// потолку и не говорила о них ничего, кроме их числа.
+func TestWave6_3_9_NoiseDiagKeyCapLosesAttributionNeverTheCount(t *testing.T) {
 	nd, buf := newTestDiag(t, true, 2)
 
-	for i := 0; i < 5; i++ {
-		nd.Emit(diagAlert("anomaly_detection", "sed"), noiseDiagOutcomeDedup, noiseDiagExtra{})
+	nd.Emit(diagAlert("rule_a", "a"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	nd.Emit(diagAlert("rule_b", "b"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	for i := 0; i < 7; i++ {
+		nd.Emit(diagAlert("rule_c", "c"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
 	}
+	nd.Flush()
 
-	require.Equal(t, 2, strings.Count(strings.TrimSpace(buf.String()), "\n")+1,
-		"строк напечатано ровно по потолку")
-	require.EqualValues(t, 2, diagCounterValue(t, nd.emitted))
-	require.EqualValues(t, 3, diagCounterValue(t, nd.omitted),
-		"три ненапечатанные строки обязаны быть предъявлены числом, а не пропасть")
+	total := 0.0
+	overflowSeen := false
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var line map[string]any
+		require.NoError(t, json.Unmarshal([]byte(l), &line))
+		total += line["count"].(float64)
+		if line["rule_id"] == noiseDiagOverflowKey {
+			overflowSeen = true
+			require.EqualValues(t, 7, line["count"])
+		}
+	}
+	require.EqualValues(t, 9, total, "сумма по бакетам обязана равняться числу учтённых алертов")
+	require.True(t, overflowSeen, "непоместившиеся ключи обязаны иметь свой названный бакет")
+	require.EqualValues(t, 9, diagCounterValue(t, nd.accounted))
+	require.EqualValues(t, 7, diagCounterValue(t, nd.overflow),
+		"неатрибутированные обязаны быть предъявлены числом")
 }
 
-// Окно потолка сдвигается, а не исчерпывается навсегда.
-func TestWave6_3_9_NoiseDiagCapResetsWithTheWindow(t *testing.T) {
+// Окно сводки закрывается временем: накопленное печатается и счёт начинается
+// заново, а не растёт до конца прогона одной строкой.
+func TestWave6_3_9_NoiseDiagFlushesOnWindowRollover(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
-	nd := NewNoiseDiagnostics(true, 1, time.Millisecond, log)
+	nd := NewNoiseDiagnostics(true, 100, time.Millisecond, log)
 	require.NoError(t, nd.Register(prometheus.NewRegistry()))
 
 	nd.Emit(diagAlert("anomaly_detection", "cp"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
 	time.Sleep(3 * time.Millisecond)
 	nd.Emit(diagAlert("anomaly_detection", "mv"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	nd.Flush()
 
-	require.EqualValues(t, 2, diagCounterValue(t, nd.emitted))
-	require.EqualValues(t, 0, diagCounterValue(t, nd.omitted))
+	require.Equal(t, 2, strings.Count(strings.TrimSpace(buf.String()), "\n")+1,
+		"два окна — две сводки")
+	require.EqualValues(t, 2, diagCounterValue(t, nd.accounted))
 }
 
 // ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: выключенная диагностика не печатает ничего и не
@@ -145,10 +206,11 @@ func TestWave6_3_9_NoiseDiagDisabledPrintsNothing(t *testing.T) {
 
 	nd.Emit(diagAlert("anomaly_detection", "mktemp"), noiseDiagOutcomeRateLimit,
 		noiseDiagExtra{hasProfile: true, profileAgeMs: 5, profileSamples: 1})
+	nd.Flush()
 
 	require.Empty(t, strings.TrimSpace(buf.String()))
-	require.EqualValues(t, 0, diagCounterValue(t, nd.emitted))
-	require.EqualValues(t, 0, diagCounterValue(t, nd.omitted))
+	require.EqualValues(t, 0, diagCounterValue(t, nd.accounted))
+	require.EqualValues(t, 0, diagCounterValue(t, nd.overflow))
 }
 
 func TestWave6_3_9_NoiseDiagCountersRegisterEvenWhenDisabled(t *testing.T) {
@@ -163,19 +225,20 @@ func TestWave6_3_9_NoiseDiagCountersRegisterEvenWhenDisabled(t *testing.T) {
 		names[f.GetName()] = true
 	}
 	// Ноль значения при наличии серии означает «правка есть, шума нет»;
-	// отсутствие серии — «бинарь до правки». Разные вещи, и преflight
-	// стенда обязан их различать ([[rule-fields-and-binary-ship-together]]).
+	// отсутствие серии — «бинарь до правки». Разные вещи, и преflight стенда
+	// обязан их различать ([[rule-fields-and-binary-ship-together]]).
 	require.True(t, names["ebpf_guard_noise_diag_emitted_total"])
 	require.True(t, names["ebpf_guard_noise_diag_omitted_total"])
 }
 
 // nil-получатель безопасен: движок, собранный без диагностики, зовёт те же
-// воронки подавления.
+// воронки подавления и тот же Flush на остановке.
 func TestWave6_3_9_NoiseDiagNilReceiverIsSafe(t *testing.T) {
 	var nd *NoiseDiagnostics
 	require.False(t, nd.Enabled())
 	require.NotPanics(t, func() {
 		nd.Emit(diagAlert("x", "y"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+		nd.Flush()
 	})
 	require.NoError(t, nd.Register(prometheus.NewRegistry()))
 }
@@ -216,7 +279,6 @@ func TestWave6_3_9_EngineEmitsDiagFromTheSuppressionFunnels(t *testing.T) {
 	cfg.NoiseDiagWindow = time.Minute
 
 	engine := NewCorrelationEngineWithConfig(cfg)
-	defer engine.Close()
 
 	ctx := context.Background()
 	for pid := uint32(100); pid < 105; pid++ {
@@ -227,8 +289,11 @@ func TestWave6_3_9_EngineEmitsDiagFromTheSuppressionFunnels(t *testing.T) {
 			Network: &types.NetworkEvent{Dport: 443},
 		})
 	}
+	// Close печатает последнее неполное окно: без этого сводка замера
+	// осталась бы в памяти агента, а прогон — без своих чисел.
+	engine.Close()
 
-	var emitted, limited int
+	var emitted, limited float64
 	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
 		if !strings.Contains(l, "noise-diag") {
 			continue
@@ -240,14 +305,14 @@ func TestWave6_3_9_EngineEmitsDiagFromTheSuppressionFunnels(t *testing.T) {
 		}
 		switch line["outcome"] {
 		case noiseDiagOutcomeEmitted:
-			emitted++
+			emitted += line["count"].(float64)
 		case noiseDiagOutcomeRateLimit:
-			limited++
+			limited += line["count"].(float64)
 		}
 	}
 
-	require.Equal(t, 2, emitted, "два прошедших алерта обязаны быть напечатаны")
-	require.Equal(t, 3, limited,
-		"ТРИ срезанных лимитером обязаны быть напечатаны — ради них диагностика и заведена; "+
+	require.EqualValues(t, 2, emitted, "два прошедших алерта обязаны быть учтены")
+	require.EqualValues(t, 3, limited,
+		"ТРИ срезанных лимитером обязаны быть учтены — ради них диагностика и заведена; "+
 			"их нет ни в сторе, ни где-либо ещё")
 }

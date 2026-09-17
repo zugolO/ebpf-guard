@@ -636,79 +636,109 @@ _j63_lines=$(wc -l < "$_j63" 2>/dev/null)
 echo "  журнал агента: $_j63_lines строк (код возврата journalctl $_j63_rc)"
 [ -s /root/journal-agent-6.3.err ] && sed 's/^/    journalctl stderr: /' /root/journal-agent-6.3.err
 
-# ── ДИАГНОСТИКА ШУМА (6.3.9.0): строки вынимаются из журнала в свой файл и
-#    разбираются ЗДЕСЬ, а не глазами через сутки.
+# ── ДИАГНОСТИКА ШУМА (6.3.9.0). Сводки вынимаются из журнала и разбираются
+#    ЗДЕСЬ, а не глазами через сутки.
+#
+#    Форма — СВОДКА на ключ за минуту (правка после смока 18.09.2026: строчная
+#    печать дала 1944 строки против 33 996 усечённых, причём усечение смещено
+#    к началу каждого окна). Поэтому величины СУММИРУЮТСЯ по полю count, а не
+#    считаются строками: строка — это бакет, а не алерт.
 #
 #    grep -a обязателен: журнал архива уже однажды оказался невалиден в UTF-8,
 #    и обычный grep молча дал бы ноль на разборе.
 _nd63="/root/noise-diag-6.3.jsonl"
-grep -a 'noise-diag: alert accounted' "$_j63" > "$_nd63" 2>/dev/null
+grep -a 'noise-diag: bucket' "$_j63" > "$_nd63" 2>/dev/null
 _nd63_lines=$(wc -l < "$_nd63" 2>/dev/null)
+
+# СРЕЗ СТРОГО ПО ОКНУ ЗАМЕРА. Весь прогон — это пролог, окно и контроли с их
+# собственными подачами; смешивать их в одну разбивку значит мерить не окно.
+# Границы берутся тем же файлом-мостом, что у остальных критериев, а вырезает
+# срез сам journald — своей меткой времени, а не разбором RFC3339 в mawk.
+_nd63w="/root/noise-diag-window-6.3.jsonl"
+: > "$_nd63w"
+if [ -s "$ART/window-epoch.txt" ]; then
+    _ndt0=$(grep '^t0=' "$ART/window-epoch.txt" | cut -d= -f2)
+    _ndt1=$(grep '^t1=' "$ART/window-epoch.txt" | cut -d= -f2)
+    if [ -n "${_ndt0:-}" ] && [ -n "${_ndt1:-}" ]; then
+        journalctl -u "$SVC" --since "@${_ndt0}" --until "@${_ndt1}" --no-pager 2>/dev/null \
+            | grep -a 'noise-diag: bucket' > "$_nd63w"
+    fi
+fi
+_nd63w_lines=$(wc -l < "$_nd63w" 2>/dev/null)
 _nd63_omitted=$(printf '%s\n' "$(curl -s --max-time 30 -H "Authorization: Bearer ${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
     "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}/metrics" 2>/dev/null)" \
     | awk '$1=="ebpf_guard_noise_diag_omitted_total"{print $2+0; exit}')
+
 echo "--- 6.3.9.0: диагностика шума (волна 6.3.9, разрез объёма по слоям подавления) ---"
-echo "  строк диагностики в журнале: ${_nd63_lines:-0}; НЕнапечатано по потолку: ${_nd63_omitted:-НЕТ МЕТРИКИ}"
-if [ "${_nd63_lines:-0}" -gt 0 ]; then
-    echo "  по слоям подавления (outcome):"
-    grep -ao '"outcome":"[a-z_]*"' "$_nd63" | sort | uniq -c | sed 's/^/    /'
-    # РАЗБОР НЕ ЗАВИСИТ НИ ОТ ПОРЯДКА ПОЛЕЙ, НИ ОТ ПРОБЕЛОВ. Якорь вида
-    # `"outcome":"…","rule_id":"…"` совпадает, только пока между полями никто
-    # ничего не вставил, и молча даёт НОЛЬ, когда вставят, — тот же класс, что
-    # уже ломал awk-якоря по лейблам метрик. Значение достаётся по КЛЮЧУ.
-    # asorti/gensub не используются: на ноде mawk, а не gawk.
-    _nd_jawk='
-        function jstr(line, key,   re, s) {
-            re = "\"" key "\"[[:space:]]*:[[:space:]]*\""
-            if (!match(line, re)) return ""
-            s = substr(line, RSTART + RLENGTH)
-            if (!match(s, /^[^"]*/)) return ""
-            return substr(s, 1, RLENGTH)
-        }
-        function jnum(line, key,   re, s) {
-            re = "\"" key "\"[[:space:]]*:[[:space:]]*"
-            if (!match(line, re)) return ""
-            s = substr(line, RSTART + RLENGTH)
-            if (!match(s, /^-?[0-9]+/)) return ""
-            return substr(s, 1, RLENGTH)
-        }
-    '
-    echo "  верхушка {rule_id, outcome}:"
-    awk "$_nd_jawk"'{ o = jstr($0, "outcome"); r = jstr($0, "rule_id");
-                      if (o != "" && r != "") print r, o }' "$_nd63" \
-        | sort | uniq -c | sort -rn | head -12 | sed 's/^/    /'
-    echo "  верхушка вкладов (за что именно), первые 10:"
-    awk "$_nd_jawk"'{ m = jstr($0, "message"); if (m != "") print m }' "$_nd63" \
-        | sort | uniq -c | sort -rn | head -10 | sed 's/^/    /'
-    echo "  ось сужения — доля разрешённого exe_path:"
-    awk "$_nd_jawk"'{ x = jstr($0, "exe_path_state"); if (x != "") print x }' "$_nd63" \
-        | sort | uniq -c | sed 's/^/    /'
+echo "  сводок в журнале: ${_nd63_lines:-0} за весь прогон, ${_nd63w_lines:-0} в окне замера [${_ndt0:-?}, ${_ndt1:-?}]"
+echo "  алертов УЧТЕНО, но НЕ АТРИБУТИРОВАНО (ключ не поместился в потолок): ${_nd63_omitted:-НЕТ МЕТРИКИ} — из счёта не теряется ни один"
+
+# РАЗБОР НЕ ЗАВИСИТ НИ ОТ ПОРЯДКА ПОЛЕЙ, НИ ОТ ПРОБЕЛОВ. Якорь вида
+# `"outcome":"…","rule_id":"…"` совпадает, только пока между полями никто
+# ничего не вставил, и молча даёт НОЛЬ, когда вставят, — тот же класс, что уже
+# ломал awk-якоря по лейблам метрик. Значение достаётся по КЛЮЧУ.
+# asorti/gensub не используются: на ноде mawk, а не gawk.
+_nd_jawk='
+    function jstr(line, key,   re, s) {
+        re = "\"" key "\"[[:space:]]*:[[:space:]]*\""
+        if (!match(line, re)) return ""
+        s = substr(line, RSTART + RLENGTH)
+        if (!match(s, /^[^"]*/)) return ""
+        return substr(s, 1, RLENGTH)
+    }
+    function jnum(line, key,   re, s) {
+        re = "\"" key "\"[[:space:]]*:[[:space:]]*"
+        if (!match(line, re)) return ""
+        s = substr(line, RSTART + RLENGTH)
+        if (!match(s, /^-?[0-9]+/)) return ""
+        return substr(s, 1, RLENGTH) + 0
+    }
+'
+_w63_nd_report() { # $1 = файл сводок, $2 = подпись
+    [ -s "$1" ] || { echo "    (пусто)"; return; }
+    echo "  [$2] по слоям подавления:"
+    awk "$_nd_jawk"'{ o = jstr($0, "outcome"); c = jnum($0, "count"); if (o != "" && c != "") s[o] += c }
+         END { for (k in s) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn
+    echo "  [$2] верхушка {rule_id, outcome}:"
+    awk "$_nd_jawk"'{ o = jstr($0, "outcome"); r = jstr($0, "rule_id"); c = jnum($0, "count")
+                      if (o != "" && r != "" && c != "") s[r " " o] += c }
+         END { for (k in s) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn | head -12
+    echo "  [$2] верхушка вкладов (за что именно):"
+    awk "$_nd_jawk"'{ m = jstr($0, "message"); c = jnum($0, "count"); if (m != "" && c != "") s[m] += c }
+         END { for (k in s) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn | head -10
+    echo "  [$2] ось сужения exe_path (по выборке, знаменатель предъявлен):"
+    awk "$_nd_jawk"'{ r = jnum($0, "exe_resolved"); u = jnum($0, "exe_unresolved")
+                      if (r != "") R += r; if (u != "") U += u }
+         END { printf "    resolved=%d unresolved=%d из выборки %d\n", R, U, R + U }' "$1"
     # Гипотеза №363 читается ОДНОЙ величиной: сколько аномалий вынесено против
-    # базы, в которой наблюдений единицы. Если таких большинство — шум держит
-    # отсутствие поюкладного разогрева; если меньшинство — правка разогрева
-    # промахнётся, и решать надо другое.
-    echo "  состояние профиля у аномалий (наблюдений × возраст):"
-    awk "$_nd_jawk"'{
-        a = jnum($0, "profile_age_ms"); n = jnum($0, "profile_samples")
-        if (a == "" || n == "") next
-        b = (n + 0 <= 1 ? "samples<=1" : (n + 0 <= 5 ? "samples_2-5" : (n + 0 <= 50 ? "samples_6-50" : "samples>50")))
-        g = (a + 0 < 10000 ? "age<10s" : (a + 0 < 300000 ? "age<5m" : "age>=5m"))
-        print b, g
-    }' "$_nd63" | sort | uniq -c | sort -rn | sed 's/^/    /' 
+    # базы, в которой наблюдений единицы. Много — шум держит отсутствие
+    # поюкладного разогрева; мало — правка разогрева промахнётся, и чинить
+    # надо трактовку пролога загрузчика (№364).
+    echo "  [$2] состояние профиля у аномалий (наблюдений на момент скоринга):"
+    awk "$_nd_jawk"'{ for (i = 1; i <= 4; i++) {
+                          k = (i == 1 ? "samples_le1" : (i == 2 ? "samples_2_5" : (i == 3 ? "samples_6_50" : "samples_gt50")))
+                          v = jnum($0, k); if (v != "") s[k] += v } }
+         END { for (k in s) if (s[k] > 0) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn
+    echo "  [$2] возраст профиля у аномалий:"
+    awk "$_nd_jawk"'{ for (i = 1; i <= 3; i++) {
+                          k = (i == 1 ? "age_lt10s" : (i == 2 ? "age_lt5m" : "age_ge5m"))
+                          v = jnum($0, k); if (v != "") s[k] += v } }
+         END { for (k in s) if (s[k] > 0) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn
+}
+if [ "${_nd63_lines:-0}" -gt 0 ]; then
+    _w63_nd_report "$_nd63" "весь прогон"
+    _w63_nd_report "$_nd63w" "окно замера"
 fi
 if [ "$_r63_nd_want" != "on" ]; then
-    # Форма строки — канон 6.3.5/6.3.1.5: вердиктное слово ВПЛОТНУЮ за
-    # меткой, а «НЕ ЗАПРОШЕН» — внутри текста, откуда страж и берёт класс
-    # NOTREQ. Первая версия писала «6.3.9.0 НЕ ЗАПРОШЕН…», и --scan увидел
-    # у метки только FAIL,OK: при выключенной диагностике метка молчала бы,
-    # а страж отказался бы собирать архив после целого прогона.
+    # Форма строки — канон 6.3.5/6.3.1.5: вердиктное слово ВПЛОТНУЮ за меткой,
+    # а «НЕ ЗАПРОШЕН» — внутри текста, откуда страж и берёт класс NOTREQ.
     echo "НЕ ЗАПРОШЕН ПОСТАНОВКОЙ: 6.3.9.0 НЕИЗМЕРИМ (НЕ ЗАПРОШЕН постановкой): correlator.noise_diag.enabled не true — разрез объёма по слоям на этом прогоне не снимался"
 elif [ "${_nd63_lines:-0}" -lt 1 ]; then
-    echo "FAIL: 6.3.9.0 ПРОВАЛЕН: диагностика включена конфигом, а строк в журнале НОЛЬ — печать не дошла до журнала (уровень логирования, ротация journald или воронки подавления её не зовут). Это приборный ноль, а не «шума не было»"
-elif ! grep -aq '"outcome":"rate_limit"' "$_nd63" && [ "${_nd63_omitted:-0}" -eq 0 ]; then
-    echo "OK: 6.3.9.0 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): ${_nd63_lines} строк, ни одной строки rate_limit — лимитер на этом прогоне не резал НИЧЕГО, и это утверждение, а не пробел: строки прохода напечатаны, значит эмиттер жив"
+    echo "FAIL: 6.3.9.0 ПРОВАЛЕН: диагностика включена конфигом, а сводок в журнале НОЛЬ — печать не дошла до журнала (уровень логирования, ротация journald или воронки подавления её не зовут). Это приборный ноль, а не «шума не было»"
+elif ! grep -aq '"outcome":"rate_limit"' "$_nd63"; then
+    echo "OK: 6.3.9.0 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): ${_nd63_lines} сводок, ни одного бакета rate_limit — лимитер за прогон не срезал НИЧЕГО, и это утверждение, а не пробел: бакеты прохода напечатаны, значит учёт жив"
 else
-    echo "OK: 6.3.9.0 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): ${_nd63_lines} строк диагностики, срезанные лимитером предъявлены поимённо выше (НЕнапечатано по потолку: ${_nd63_omitted:-0} — при ненулевом числе разбивки читать НИЖНИМИ оценками)"
+    echo "OK: 6.3.9.0 ИЗМЕРЕНО (порог не назначается, правило 5.9.6): ${_nd63_lines} сводок за прогон и ${_nd63w_lines:-0} в окне замера; срезанные лимитером учтены и разобраны выше поимённо. Неатрибутированных (ключ вне потолка): ${_nd63_omitted:-0} — из счёта не потерян ни один алерт"
 fi
 
 # Критерий 6.2.6.4: непустота И покрытие окна. Сторож живёт В ПАЙПЛАЙНЕ, а не
@@ -787,7 +817,7 @@ cp -r "$ART" "$COLLECT/controls/artifacts" 2>/dev/null
 cp "$VERDICTS" "$COLLECT/controls/" 2>/dev/null
 cp /root/agent-start-6.3.txt /root/agent-start-6.3.epoch /root/env-muteness-6.3.txt "$COLLECT/" 2>/dev/null
 cp /root/metrics-prologue-start-6.3.txt "$COLLECT/" 2>/dev/null
-cp /root/noise-diag-6.3.jsonl "$COLLECT/" 2>/dev/null
+cp /root/noise-diag-6.3.jsonl /root/noise-diag-window-6.3.jsonl "$COLLECT/" 2>/dev/null
 cp "$SETUP/config-test.yaml" "$SETUP/wave6.3-controls.sh" "$SETUP/wave6.3-metrics-lib.sh" "$SETUP/wave6.3-completeness-guard.sh" "$SETUP/run-6.3-pipeline.sh" "$COLLECT/" 2>/dev/null
 # Манифест DNS и его генератор (item 1) — часть провенанса величины 6.3.3:
 # без манифеста через сутки нельзя сказать, ПО КАКИМ правилам был отфильтрован

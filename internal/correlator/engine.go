@@ -1553,6 +1553,11 @@ func (ce *CorrelationEngine) DrainIngestPool(ctx context.Context) {
 // It attempts to drain pending work with a 5-second timeout to prevent hangs.
 // Returns without error even if workers don't finish within the timeout.
 func (ce *CorrelationEngine) Close() {
+	// Волна 6.3.9: последнее неполное окно сводки печатается ДО остановки —
+	// иначе ненапечатанным осталось бы ровно то окно, ради которого прибор и
+	// заводился (замер живёт в последних минутах прогона).
+	ce.noiseDiag.Flush()
+
 	// Signal all background goroutines to stop via context cancellation.
 	ce.cancelCleanup()
 

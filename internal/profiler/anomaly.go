@@ -99,6 +99,17 @@ type AnomalyResult struct {
 	IsAnomaly     bool
 	Contributions []AnomalyContribution
 	Timestamp     time.Time
+
+	// Состояние ПРОФИЛЯ на момент скоринга (волна 6.3.9, гипотеза №363).
+	// Скоринг гейтится одним ГЛОБАЛЬНЫМ IsLearningComplete(), поюкладного
+	// разогрева нет: профиль, созданный секунду назад, сравнивается со
+	// ВТОРОГО своего события против базы из одного наблюдения, где новым
+	// оказывается всё. Отличить эту причину шума от любой другой можно
+	// только двумя числами — возрастом профиля и числом наблюдений в нём на
+	// момент сравнения, — и оба известны ТОЛЬКО здесь. Потребитель —
+	// диагностика шума в корреляторе; вердиктов эти поля не меняют.
+	ProfileAgeMs   int64
+	ProfileSamples uint64
 }
 
 // AnomalyContribution describes which aspect contributed to the anomaly score.
@@ -344,6 +355,26 @@ func (ad *AnomalyDetector) calculateAnomalyScore(profile *ProcessProfile, event 
 	result.Score = 0
 	result.IsAnomaly = false
 	result.Contributions = result.Contributions[:0] // reset length, keep backing array
+
+	// Волна 6.3.9: возраст профиля и число наблюдений — под тем же
+	// profile.mu, что уже взят выше, без второй блокировки и без обхода карт.
+	// Наблюдения берутся по ИЗМЕРЯЕМОМУ измерению (тому, по которому сейчас
+	// скорят): общая сумма по всем измерениям ответила бы не на тот вопрос —
+	// профиль может быть богат сетевыми наблюдениями и пуст файловыми, а
+	// шумит как раз пустое измерение.
+	result.ProfileAgeMs = time.Since(profile.CreatedAt).Milliseconds()
+	switch event.Type {
+	case types.EventTCPConnect:
+		result.ProfileSamples = profile.NetworkProfile.TotalConnections
+	case types.EventFileAccess:
+		result.ProfileSamples = profile.FileProfile.TotalOperations
+	case types.EventSyscall:
+		result.ProfileSamples = profile.SyscallProfile.TotalSyscalls
+	case types.EventGPU:
+		result.ProfileSamples = profile.GPUProfile.TotalOps
+	default:
+		result.ProfileSamples = 0
+	}
 
 	var totalScore float64
 

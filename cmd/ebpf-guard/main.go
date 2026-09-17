@@ -438,6 +438,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// self-exclusion above so an operator's explicit config value takes
 	// effect either direction.
 	engineCfg.ObserverExcludeEnabled = cfg.Correlator.ObserverExclude.Enabled
+	// Волна 6.3.9: диагностика шума. Копируется безусловно тем же способом,
+	// что self/observer-exclude выше — дефолт живёт в viper, не в нулевом
+	// значении bool, поэтому явный `true` оператора вступает в силу.
+	engineCfg.NoiseDiagEnabled = cfg.Correlator.NoiseDiag.Enabled
+	engineCfg.NoiseDiagMaxLinesPerWindow = cfg.Correlator.NoiseDiag.MaxLinesPerWindow
+	engineCfg.NoiseDiagWindow = time.Duration(cfg.Correlator.NoiseDiag.Window) * time.Second
+	if cfg.Correlator.NoiseDiag.Enabled {
+		slog.Warn("correlator: noise diagnostics ENABLED — one journal line per alert, including alerts suppressed by dedup and the rate limiter. This is a wave 6.3.9 measurement instrument; leave it off in production",
+			slog.Int("max_lines_per_window", cfg.Correlator.NoiseDiag.MaxLinesPerWindow),
+			slog.Int("window_seconds", cfg.Correlator.NoiseDiag.Window))
+	}
 
 	// Wire the anomaly score reporter so profiler scores are published to
 	// ebpf_guard_profiler_anomaly_score via the cardinality-guarded gauge.

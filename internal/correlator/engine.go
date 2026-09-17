@@ -192,6 +192,15 @@ type CorrelationEngine struct {
 	// stopped firing.
 	alertsRateLimitedByRule *prometheus.CounterVec
 
+	// noiseDiag — диагностика шума волны 6.3.9, выключена по умолчанию.
+	// Счётчики выше говорят, СКОЛЬКО срезано по каждому правилу, но не
+	// говорят НИЧЕГО о самих срезанных алертах: в стор они не попадают, и за
+	// четыре прогона 6.3 срез лимитера (18…42 за тихое окно, весь —
+	// anomaly_detection) не разобран поимённо ни разу. Диагностика печатает
+	// по строке на алерт в точке его гибели или прохода; вердиктов и
+	// счётчиков не меняет.
+	noiseDiag *NoiseDiagnostics
+
 	// Rule-based enforcement (optional)
 	actionExecutor  ActionExecutor
 	enforceCooldown time.Duration
@@ -491,6 +500,19 @@ type CorrelationEngineConfig struct {
 	// DedupWindow is the deduplication suppression window.
 	// Zero → 5 seconds.
 	DedupWindow time.Duration
+
+	// NoiseDiagEnabled включает диагностику шума волны 6.3.9: по одной
+	// структурной строке журнала на алерт с слоем подавления, вкладом,
+	// состоянием профиля и осями exe_path/parent_comm. Выключена по
+	// умолчанию — это инструмент замера, а не режим работы.
+	NoiseDiagEnabled bool
+
+	// NoiseDiagMaxLinesPerWindow — потолок строк за NoiseDiagWindow, чтобы
+	// диагностика сама не стала шумом. Ноль → 500.
+	NoiseDiagMaxLinesPerWindow int
+
+	// NoiseDiagWindow — окно потолка. Ноль → минута.
+	NoiseDiagWindow time.Duration
 
 	// IncidentWindow is the sliding time window for grouping alerts from the
 	// same (pid, namespace) into an Incident. Zero → 60 seconds.
@@ -800,6 +822,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		alertsDedupDropped:       alertsDedupDropped,
 		alertsDedupDroppedByRule: alertsDedupDroppedByRule,
 		alertsRateLimitedByRule:  alertsRateLimitedByRule,
+		noiseDiag: NewNoiseDiagnostics(config.NoiseDiagEnabled, config.NoiseDiagMaxLinesPerWindow,
+			config.NoiseDiagWindow, slog.Default()),
 		actionExecutor:           config.ActionExecutor,
 		enforceCooldown:          enforceCooldown,
 		cooldowns:                newShardedCooldowns(),
@@ -1407,21 +1431,39 @@ func (ce *CorrelationEngine) checkDup(ruleID string, pid uint32, comm string) bo
 // per rule (5.8b). Every dedup drop site must go through here — a site that
 // increments only the aggregate reopens exactly the attribution gap that left
 // finding №21 unresolved.
-func (ce *CorrelationEngine) recordDedupDrop(ruleID string) {
+func (ce *CorrelationEngine) recordDedupDrop(a *types.Alert, extra ...noiseDiagExtra) {
 	ce.alertsDedupDropped.Add(1)
 	if ce.alertsDedupDroppedByRule != nil {
-		ce.alertsDedupDroppedByRule.WithLabelValues(ruleID).Inc()
+		ce.alertsDedupDroppedByRule.WithLabelValues(a.RuleID).Inc()
 	}
+	ce.emitNoiseDiag(a, noiseDiagOutcomeDedup, extra...)
 }
 
 // recordRateLimitDrop counts one alert suppressed by the per-rule rate
 // limiter, broken down by rule (5.9.9.F.5n, №164). Every per-rule limiter
 // drop site must go through here — the aggregate alertsDropped counter alone
 // cannot distinguish "rule hit its 10/60s ceiling" from any other drop cause.
-func (ce *CorrelationEngine) recordRateLimitDrop(ruleID string) {
+func (ce *CorrelationEngine) recordRateLimitDrop(a *types.Alert, extra ...noiseDiagExtra) {
 	if ce.alertsRateLimitedByRule != nil {
-		ce.alertsRateLimitedByRule.WithLabelValues(ruleID).Inc()
+		ce.alertsRateLimitedByRule.WithLabelValues(a.RuleID).Inc()
 	}
+	ce.emitNoiseDiag(a, noiseDiagOutcomeRateLimit, extra...)
+}
+
+// emitNoiseDiag — единственный мост от воронок подавления к диагностике
+// (волна 6.3.9). Отдельной функцией, а не строкой в каждой воронке: точка
+// гибели алерта обязана быть ОДНА на слой, иначе часть срезанных алертов
+// молча не попадёт в печать — ровно та форма, из-за которой №21 остался
+// неразобранным, а срез лимитера четырёх прогонов 6.3 неизвестен поимённо.
+func (ce *CorrelationEngine) emitNoiseDiag(a *types.Alert, outcome string, extra ...noiseDiagExtra) {
+	if !ce.noiseDiag.Enabled() || a == nil {
+		return
+	}
+	var ex noiseDiagExtra
+	if len(extra) > 0 {
+		ex = extra[0]
+	}
+	ce.noiseDiag.Emit(a, outcome, ex)
 }
 
 // markDedup records that (ruleID, pid, comm) was emitted at now.
@@ -1623,7 +1665,28 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 			return err
 		}
 	}
+	// Счётчики диагностики публикуются ДАЖЕ выключенной: их отсутствие в
+	// /metrics обязано означать «бинарь без правки», а не «правка выключена»
+	// ([[rule-fields-and-binary-ship-together]]).
+	if err := ce.noiseDiag.Register(reg); err != nil {
+		return err
+	}
 	return nil
+}
+
+// noiseDiagExtraFromResult достаёт из результата скоринга то, что знает только
+// профилировщик: возраст профиля и число наблюдений в измерении, по которому
+// шло сравнение. Это и есть проверка гипотезы №363 — шумит ли профиль,
+// созданный секунду назад с базой из одного наблюдения.
+func noiseDiagExtraFromResult(result *profiler.AnomalyResult) noiseDiagExtra {
+	if result == nil {
+		return noiseDiagExtra{}
+	}
+	return noiseDiagExtra{
+		hasProfile:     true,
+		profileAgeMs:   result.ProfileAgeMs,
+		profileSamples: result.ProfileSamples,
+	}
 }
 
 // Ingest processes a single event synchronously and returns any alerts it
@@ -1896,7 +1959,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			if !isDup {
 				// Per-rule rate limit check (only for non-deduped alerts).
 				if !ce.rateLimiter.Allow(alert.RuleID) {
-					ce.recordRateLimitDrop(alert.RuleID)
+					ce.recordRateLimitDrop(&alert)
 					ce.alertsDropped.Add(1)
 					return
 				}
@@ -1968,7 +2031,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			}
 
 			if isDup {
-				ce.recordDedupDrop(alert.RuleID)
+				ce.recordDedupDrop(&alert)
 				ce.alertsDropped.Add(1)
 				return
 			}
@@ -1979,6 +2042,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			}
 			alerts = append(alerts, alert)
 			ce.alertsGenerated.Add(1)
+			ce.emitNoiseDiag(&alert, noiseDiagOutcomeEmitted)
 		})
 	}
 
@@ -1987,12 +2051,12 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		wasmAlerts := ce.wasmEngine.Evaluate(ctx, e)
 		for _, alert := range wasmAlerts {
 			if ce.enableDedup && ce.checkDup(alert.RuleID, alert.PID, alert.Comm) {
-				ce.recordDedupDrop(alert.RuleID)
+				ce.recordDedupDrop(&alert)
 				ce.alertsDropped.Add(1)
 				continue
 			}
 			if !ce.rateLimiter.Allow(alert.RuleID) {
-				ce.recordRateLimitDrop(alert.RuleID)
+				ce.recordRateLimitDrop(&alert)
 				ce.alertsDropped.Add(1)
 				continue
 			}
@@ -2012,6 +2076,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			}
 			alerts = append(alerts, alert)
 			ce.alertsGenerated.Add(1)
+			ce.emitNoiseDiag(&alert, noiseDiagOutcomeEmitted)
 		}
 	}
 
@@ -2023,7 +2088,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 				iocAlert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
 			}
 			if ce.enableDedup && ce.checkDup(iocAlert.RuleID, iocAlert.PID, iocAlert.Comm) {
-				ce.recordDedupDrop(iocAlert.RuleID)
+				ce.recordDedupDrop(iocAlert)
 				ce.alertsDropped.Add(1)
 			} else {
 				perRuleOK := ce.rateLimiter.Allow(iocAlert.RuleID)
@@ -2034,10 +2099,11 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					}
 					alerts = append(alerts, *iocAlert)
 					ce.alertsGenerated.Add(1)
+					ce.emitNoiseDiag(iocAlert, noiseDiagOutcomeEmitted)
 				} else {
 					ce.alertsDropped.Add(1)
 					if !perRuleOK {
-						ce.recordRateLimitDrop(iocAlert.RuleID)
+						ce.recordRateLimitDrop(iocAlert)
 					}
 					if !globalOK {
 						ce.alertsDroppedGlobal.Add(1)
@@ -2159,7 +2225,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 
 				// Dedup check before rate-limiter (same ordering as rule/WASM/IOC paths).
 				if ce.enableDedup && ce.checkDup(anomalyAlert.RuleID, anomalyAlert.PID, anomalyAlert.Comm) {
-					ce.recordDedupDrop(anomalyAlert.RuleID)
+					ce.recordDedupDrop(&anomalyAlert, noiseDiagExtraFromResult(result))
 					ce.alertsDropped.Add(1)
 				} else {
 					perRuleOK := ce.rateLimiter.Allow(anomalyAlert.RuleID)
@@ -2170,6 +2236,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 						}
 						alerts = append(alerts, anomalyAlert)
 						ce.alertsGenerated.Add(1)
+						ce.emitNoiseDiag(&anomalyAlert, noiseDiagOutcomeEmitted, noiseDiagExtraFromResult(result))
 						// 1.75b: bump the detector's workload-profile AlertCount in
 						// lock-step with the published-anomaly path. main.go will
 						// call exporter.RecordAnomaly for the Prometheus counter on
@@ -2183,7 +2250,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					} else {
 						ce.alertsDropped.Add(1)
 						if !perRuleOK {
-							ce.recordRateLimitDrop(anomalyAlert.RuleID)
+							ce.recordRateLimitDrop(&anomalyAlert, noiseDiagExtraFromResult(result))
 						}
 						if !globalOK {
 							ce.alertsDroppedGlobal.Add(1)
@@ -2238,7 +2305,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 				allowlistAlert.Enrichment = *e.Enrichment
 			}
 			if ce.enableDedup && ce.checkDup(allowlistAlert.RuleID, allowlistAlert.PID, allowlistAlert.Comm) {
-				ce.recordDedupDrop(allowlistAlert.RuleID)
+				ce.recordDedupDrop(&allowlistAlert)
 				ce.alertsDropped.Add(1)
 			} else {
 				perRuleOK := ce.rateLimiter.Allow(allowlistAlert.RuleID)
@@ -2249,10 +2316,11 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					}
 					alerts = append(alerts, allowlistAlert)
 					ce.alertsGenerated.Add(1)
+					ce.emitNoiseDiag(&allowlistAlert, noiseDiagOutcomeEmitted)
 				} else {
 					ce.alertsDropped.Add(1)
 					if !perRuleOK {
-						ce.recordRateLimitDrop(allowlistAlert.RuleID)
+						ce.recordRateLimitDrop(&allowlistAlert)
 					}
 					if !globalOK {
 						ce.alertsDroppedGlobal.Add(1)

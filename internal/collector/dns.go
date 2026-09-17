@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -241,6 +242,71 @@ func (c *DNSCollector) RegisterMetrics(reg prometheus.Registerer) error {
 	return reg.Register(c.metrics.socketMapBackfillCandidates)
 }
 
+// Что коллектор видит и чего не видит — ОДНОЙ записью на весь пакет.
+//
+// Находка №359 (разбор прогона #4, 18.09.2026): после №357 строка
+// blind_spots продолжала называть TCP-DNS слепой зоной, причём в той же
+// строке журнала, где visibility уже объявляла TCP поддержанным, — и то же
+// устаревшее утверждение стояло в двух likely_causes сторожа немоты и в
+// комментарии к нему. Критерий 6.3.7 держит половину IPv6 на формуле
+// «ограничение остаётся ЗАПИСАННЫМ (startup-лог dns.go)», то есть ссылается
+// именно на эти строки: пока они лгут про один транспорт, ими нельзя
+// доказывать ограничение по другому.
+//
+// Запись СОБИРАЕТСЯ из машинно-читаемого объявления ниже, а не пишется
+// литералом рядом с ним: первая версия этой правки хранила обе строки
+// константами, и сторож немедленно нашёл в ней собственный дефект того же
+// класса — подстрока «udp» в пути `/proc/<pid>/net/udp` неотличима от
+// заявления о транспорте UDP. Ось проверки не может быть подстрокой
+// свободного текста ([[verdict-class-must-come-from-content-not-label]]),
+// поэтому транспорты объявлены списком, а текст — производная от него.
+//
+// Сверху сторож TestWave6_3_9_BlindSpotRecordMatchesParserBehaviour: он
+// спрашивает ПАРСЕР, что тот умеет, и требует, чтобы объявление этому не
+// противоречило.
+
+// dnsParsedTransports — транспорты, сообщение по которым становится
+// СОБЫТИЕМ. Единственное место, где продукт это заявляет.
+var dnsParsedTransports = []string{"UDP", "TCP"}
+
+// dnsBlindTransports — транспорты, по которым коллектор слеп. Пуст с №357;
+// поле оставлено, потому что следующий транспорт добавят так же, как TCP, и
+// тогда запись обязана поехать вместе с продуктом, а не отстать от него.
+var dnsBlindTransports = []string{}
+
+// dnsNonTransportBlindSpots — слепые зоны, не сводящиеся к транспорту.
+// Каждая проверяема отдельно и НЕ закрыта ничем на сегодня.
+var dnsNonTransportBlindSpots = []string{
+	"IPv6 (AF_INET6, and /proc/<pid>/net/udp6 for the startup backfill)",
+	"resolution via systemd-resolved's AF_UNIX varlink path (nss-resolve)",
+	"sockets connected before the agent started that no network namespace listed at startup",
+}
+
+// dnsVisibilityRecord — что коллектор видит.
+func dnsVisibilityRecord() string {
+	return "AF_INET (IPv4) port 53, " + strings.Join(dnsParsedTransports, " and ") +
+		" (TCP framing per RFC 1035 §4.2.2 — волна 6.3.1, №357)"
+}
+
+// dnsBlindSpotsRecord — чего не видит. Транспортная часть берётся из
+// dnsBlindTransports, поэтому поддержанный транспорт попасть сюда не может.
+func dnsBlindSpotsRecord() string {
+	parts := make([]string, 0, len(dnsBlindTransports)+len(dnsNonTransportBlindSpots))
+	for _, t := range dnsBlindTransports {
+		parts = append(parts, t+" DNS")
+	}
+	parts = append(parts, dnsNonTransportBlindSpots...)
+	return strings.Join(parts, "; ")
+}
+
+// dnsMutenessLikelyCauses — те же зоны в форме гипотез для сторожа немоты.
+// Собираются из того же объявления: поддержанный транспорт не может быть
+// причиной НЕДОБОРА событий, потому что сообщение по нему — событие, а не
+// ошибка декода.
+func dnsMutenessLikelyCauses() string {
+	return "likely: " + dnsBlindSpotsRecord()
+}
+
 // Start begins collecting DNS events.
 func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	if !c.enabled {
@@ -253,8 +319,8 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	// working, so its blind spots have to be stated where they will be seen.
 	slog.Info("dns: starting collector",
 		slog.String("strategy", string(c.strategy)),
-		slog.String("visibility", "AF_INET (IPv4) port 53, UDP and TCP (TCP framing per RFC 1035 §4.2.2 — волна 6.3.1, №357)"),
-		slog.String("blind_spots", "IPv6 and TCP DNS; resolution via systemd-resolved's AF_UNIX varlink path (nss-resolve); sockets connected before the agent started"),
+		slog.String("visibility", dnsVisibilityRecord()),
+		slog.String("blind_spots", dnsBlindSpotsRecord()),
 	)
 
 	objs := &bpf.DNSObjects{}
@@ -509,8 +575,8 @@ func dnsRateStale(minEventsPerStaleWindow int, windowFull bool, windowEvents uin
 // events every 10 minutes forever never crosses silentFor — it is not
 // silent, it is producing events at a rate implausible for that resolver
 // (the mechanism turned out to be exactly the blind spot backfillDNSSocketMap
-// closes, dns_backfill.go — but nss-resolve/AF_UNIX, TCP-DNS and IPv6
-// remain, see the startup log's blind_spots field). The optional rate check
+// closes, dns_backfill.go — but nss-resolve/AF_UNIX and IPv6 remain, see
+// dnsBlindSpotsRecord; TCP-DNS stopped being one of them in №357). The optional rate check
 // below adds a second, independent trigger for the same stale state:
 // events accumulated over the trailing dnsStaleThreshold window falling
 // under minEventsPerStaleWindow. It stays off by default (0) because this
@@ -585,7 +651,7 @@ func (c *DNSCollector) watchForStaleness(ctx context.Context) {
 						slog.Int("min_events_per_stale_window", c.minEventsPerStaleWindow),
 						slog.Duration("window", dnsStaleThreshold),
 						slog.Uint64("events_total", count),
-						slog.String("likely_causes", "systemd-resolved answering over AF_UNIX (nss-resolve/varlink), IPv6 or TCP DNS, or resolver sockets connected before the agent started"),
+						slog.String("likely_causes", dnsMutenessLikelyCauses()),
 						slog.String("verify", "run `dig example.com @8.8.8.8` repeatedly and compare ebpf_guard_dns_queries_total growth against the resolver's own query log"))
 					continue
 				}
@@ -603,7 +669,7 @@ func (c *DNSCollector) watchForStaleness(ctx context.Context) {
 					slog.Duration("silent_for", silentFor.Round(time.Second)),
 					slog.String("last_seen", lastSeenMsg),
 					slog.Uint64("events_total", count),
-					slog.String("likely_causes", "systemd-resolved answering over AF_UNIX (nss-resolve/varlink), IPv6 or TCP DNS, or resolver sockets connected before the agent started — or the host has genuinely not resolved anything in dnsStaleThreshold"),
+					slog.String("likely_causes", dnsMutenessLikelyCauses()+" — or the host has genuinely not resolved anything in dnsStaleThreshold"),
 					slog.String("verify", "run `dig example.com @8.8.8.8` and re-check ebpf_guard_events_total{type=\"dns\"}"))
 			}
 		}

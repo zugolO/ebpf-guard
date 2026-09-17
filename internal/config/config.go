@@ -1020,6 +1020,27 @@ type CorrelatorConfig struct {
 	// events from the measurement harness's process tree are dropped before
 	// rule evaluation. Test-only.
 	ObserverExclude ObserverExcludeConfig `mapstructure:"observer_exclude"`
+	// NoiseDiag configures the wave 6.3.9 noise diagnostics. Off by default:
+	// it is a measurement instrument, not a mode of operation.
+	NoiseDiag NoiseDiagConfig `mapstructure:"noise_diag"`
+}
+
+// NoiseDiagConfig configures the noise diagnostics of wave 6.3.9.
+//
+// Зачем: объём тихого окна состоит из напечатанных алертов И срезанных
+// лимитером, и вторых больше (18…42 против 38 за окно прогонов 6.3, весь срез
+// — anomaly_detection). Срезанный алерт в стор не попадает, поэтому ни его
+// вклада, ни его осей не знает никто. Диагностика печатает по строке на алерт
+// в точке гибели или прохода; вердиктов и счётчиков подавления не меняет.
+type NoiseDiagConfig struct {
+	// Enabled включает печать. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// MaxLinesPerWindow — потолок строк за Window, чтобы диагностика сама не
+	// стала шумом. Число НЕнапечатанных строк публикуется счётчиком
+	// ebpf_guard_noise_diag_omitted_total. Default: 500.
+	MaxLinesPerWindow int `mapstructure:"max_lines_per_window"`
+	// Window — окно потолка, в секундах. Default: 60.
+	Window int `mapstructure:"window"`
 }
 
 // SelfExcludeConfig configures the correlator's self-exclusion filter (5.8e,
@@ -2104,6 +2125,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("correlator.self_exclude.enabled", true)
 	v.SetDefault("correlator.observer_exclude.enabled", false)
 	v.SetDefault("correlator.observer_exclude.root_pid_file", "/var/lib/ebpf-guard/observer-root-pid")
+	v.SetDefault("correlator.noise_diag.enabled", false)
+	v.SetDefault("correlator.noise_diag.max_lines_per_window", 500)
+	v.SetDefault("correlator.noise_diag.window", 60)
 
 	// Profiler defaults
 	v.SetDefault("profiler.enabled", true)

@@ -2117,7 +2117,18 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					Message:   formatAnomalyDescription(result),
 					Severity:  types.SeverityWarning,
 					PID:       e.PID,
-					Comm:      util.InternBytes(e.Comm[:]),
+					// Wave 6.3.1, находка №353 (боевой прогон 17.09.2026): the
+					// alert's subject is the PROFILE that scored anomalous, so
+					// its identity must be the profile's comm — the same
+					// reasoning that fixed the score series (№345), in the
+					// field the fix had missed. With the raw comm the store
+					// carried anomaly_detection{comm="(otd-news)"} while the
+					// baseline it came from was keyed "50-motd-news": the alert
+					// named a workload the profiler has no profile for, which
+					// is exactly the phantom №342 set out to remove. The raw
+					// pre-exec comm is not lost — Event below carries it
+					// verbatim as evidence of what the kernel saw.
+					Comm:      anomalyAlertComm(result, e),
 					Details:   details,
 					Event:     e,
 				}
@@ -2911,4 +2922,20 @@ func formatAnomalyDescription(result *profiler.AnomalyResult) string {
 		b.WriteString(contrib.Value)
 	}
 	return b.String()
+}
+
+// anomalyAlertComm returns the identity an anomaly alert must carry: the comm
+// of the profile that was scored, falling back to the raw event comm when the
+// profiler produced no name (only possible if a result reaches here without a
+// profile, which calculateAnomalyScore does not do — the fallback exists so a
+// future path cannot silently publish an empty comm).
+//
+// Wave 6.3.1, находка №353. Identical in shape to the scoreReporter fix (№345);
+// for every comm that is not a truncated pre-exec buffer the two sources are
+// byte-identical, so no existing alert's comm value changes.
+func anomalyAlertComm(result *profiler.AnomalyResult, e types.Event) string {
+	if result != nil && result.Comm != "" {
+		return result.Comm
+	}
+	return util.InternBytes(e.Comm[:])
 }

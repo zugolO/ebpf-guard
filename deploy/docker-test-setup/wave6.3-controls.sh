@@ -2671,40 +2671,73 @@ fi
 # а не молчаливо пропускается.
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- 6.3.7: слепые зоны предъявлены (TCP-DNS / IPv6 / nss-resolve) ---"
+
+# ─── №354 (боевой прогон 17.09.2026): дельта ЧУЖОГО счётчика без фона ────────
+# ebpf_guard_dns_queries_total — величина УЗЛА, а не пробы: её растит любой
+# резолв на ноде, а нода эта — k3s с coredns, где DNS идёт непрерывно. Проба
+# брала дельту за 3 с и печатала её как «TCP-путь виден / слепая зона снята».
+# Что даёт такой прибор, видно по двум прогонам ОДНОЙ И ТОЙ ЖЕ пробы 17.09.2026:
+# смок TCP Δ=0, боевой TCP Δ=1 — разница целиком в том, легла ли в интервал
+# чужая запись, а не в способности коллектора видеть TCP.
+#
+# Лечится не порогом (запрет 5.9.6), а КОНТРОЛЬНЫМ ИНТЕРВАЛОМ: ровно столько же
+# секунд непосредственно ПЕРЕД пробой, ничего не запуская. Печатаются обе
+# величины и класс, а не одно число: «виден_сверх_фона» требует Δ пробы строго
+# больше Δ фона, иначе — «неотличимо_от_фона», что и есть вид слепого пути.
+_W63_DNS_PROBE_SECS=3
+_w63_dns_delta_over() { # $1=секунды тишины; печатает дельту счётчика за них
+    local _a _b
+    _a=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
+    sleep "$1"
+    _b=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
+    echo $(( ${_b:-0} - ${_a:-0} ))
+}
+_w63_dns_probe_class() { # $1=Δ пробы $2=Δ фона
+    if [ "${1:-0}" -gt "${2:-0}" ]; then echo "виден_сверх_фона"; else echo "неотличимо_от_фона"; fi
+}
 _w63_tcp_delta="не измерено"
 _w63_v6_delta="не измерено"
+_w63_tcp_class="не измерено"
+_w63_v6_class="не измерено"
+_w63_nss_class="не измерено"
 if command -v dig >/dev/null 2>&1; then
+    _w63_tcp_bg=$(_w63_dns_delta_over "$_W63_DNS_PROBE_SECS")
     _w63_dq_pre=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     dig +tcp +short +time=3 +tries=1 example.com >/dev/null 2>&1
-    sleep 3
+    sleep "$_W63_DNS_PROBE_SECS"
     _w63_dq_tcp=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     _w63_tcp_delta=$(( ${_w63_dq_tcp:-0} - ${_w63_dq_pre:-0} ))
-    echo "  TCP-DNS (dig +tcp): dns_queries_total Δ=${_w63_tcp_delta} (0 ожидаем — коллектор ловит только UDP; >0 значило бы, что путь уже виден и ограничение снято)"
+    _w63_tcp_class=$(_w63_dns_probe_class "$_w63_tcp_delta" "$_w63_tcp_bg")
+    echo "  TCP-DNS (dig +tcp): dns_queries_total Δ=${_w63_tcp_delta} при фоне Δ=${_w63_tcp_bg} за такой же интервал тишины → ${_w63_tcp_class} (№354: счётчик узловой, одна дельта без фона читалась как «путь виден»)"
     if command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+        _w63_v6_bg=$(_w63_dns_delta_over "$_W63_DNS_PROBE_SECS")
         _w63_dq_pre2=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
         dig -6 +short +time=3 +tries=1 example.com >/dev/null 2>&1
-        sleep 3
+        sleep "$_W63_DNS_PROBE_SECS"
         _w63_dq_v6=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
         _w63_v6_delta=$(( ${_w63_dq_v6:-0} - ${_w63_dq_pre2:-0} ))
-        echo "  IPv6 (dig -6): dns_queries_total Δ=${_w63_v6_delta} (0 ожидаем — is_dns_packet AF_INET-only)"
+        _w63_v6_class=$(_w63_dns_probe_class "$_w63_v6_delta" "$_w63_v6_bg")
+        echo "  IPv6 (dig -6): dns_queries_total Δ=${_w63_v6_delta} при фоне Δ=${_w63_v6_bg} → ${_w63_v6_class} (0 ожидаем — is_dns_packet AF_INET-only)"
     else
         echo "  IPv6: нет глобального IPv6-адреса на стенде — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go), а не молчаливым"
     fi
 else
     echo "  TCP-DNS/IPv6: dig недоступен на ноде — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go)"
 fi
-_w63_dq_pre3=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
 if command -v getent >/dev/null 2>&1; then
+    _w63_nss_bg=$(_w63_dns_delta_over "$_W63_DNS_PROBE_SECS")
+    _w63_dq_pre3=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     getent hosts example.com >/dev/null 2>&1
-    sleep 3
+    sleep "$_W63_DNS_PROBE_SECS"
     _w63_dq_nss=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     _w63_nss_delta=$(( ${_w63_dq_nss:-0} - ${_w63_dq_pre3:-0} ))
-    echo "  nss-resolve/systemd-resolved (getent hosts): dns_queries_total Δ=${_w63_nss_delta} (0 согласуется с гипотезой varlink/AF_UNIX №328; >0 значит резолвер этой ноды НЕ уходит через systemd-resolved, и слепая зона здесь неприменима)"
+    _w63_nss_class=$(_w63_dns_probe_class "$_w63_nss_delta" "$_w63_nss_bg")
+    echo "  nss-resolve/systemd-resolved (getent hosts): dns_queries_total Δ=${_w63_nss_delta} при фоне Δ=${_w63_nss_bg} → ${_w63_nss_class} (неотличимо_от_фона согласуется с гипотезой varlink/AF_UNIX №328; виден_сверх_фона значит, что резолвер этой ноды НЕ уходит через systemd-resolved, и слепая зона здесь неприменима)"
 else
     _w63_nss_delta="не измерено"
     echo "  nss-resolve: getent недоступен — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go)"
 fi
-pass "6.3.7 ИЗМЕРЕНО: три слепые зоны предъявлены (TCP Δ=${_w63_tcp_delta}, IPv6 Δ=${_w63_v6_delta}, nss Δ=${_w63_nss_delta:-не измерено}) — там, где измерить не удалось на этом стенде, ограничение остаётся записанным, а не молчаливым"
+pass "6.3.7 ИЗМЕРЕНО: три слепые зоны предъявлены КЛАССОМ ПРОТИВ ФОНА, а не голой дельтой узлового счётчика (№354) — TCP ${_w63_tcp_class} (Δ=${_w63_tcp_delta}), IPv6 ${_w63_v6_class} (Δ=${_w63_v6_delta}), nss ${_w63_nss_class} (Δ=${_w63_nss_delta:-не измерено}); там, где измерить не удалось на этом стенде, ограничение остаётся записанным, а не молчаливым"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # КРИТЕРИИ ВОЛНЫ 6.3.1 (постановка plan.md §«Критерии волны 6.3.1»).

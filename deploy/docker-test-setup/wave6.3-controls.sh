@@ -834,7 +834,8 @@ _w63_metrics > "$_w63_deploy_snap"
 _w63_missing_new=""
 for _w63_m in ebpf_guard_dns_socket_map_backfill_candidates_total \
               ebpf_guard_comm_preexec_normalized_total \
-              ebpf_guard_alert_volume_by_event_type_total; do
+              ebpf_guard_alert_volume_by_event_type_total \
+              ebpf_guard_dns_messages_by_transport_total; do
     _w63_metric_present "$_w63_m" "$_w63_deploy_snap" || _w63_missing_new="$_w63_missing_new $_w63_m"
 done
 _W63_NEW_METRICS_OK=1
@@ -842,7 +843,7 @@ if [ -n "${_w63_missing_new# }" ]; then
     _W63_NEW_METRICS_OK=0
     die "6.2.2 преflight ПРОВАЛЕН (деплой волны 6.3.1): в /metrics нет метрик${_w63_missing_new} — на ноде поднят бинарь БЕЗ правок items 1/2/3/6. Все нижние вердикты 6.3.1.1/6.3.1.2/6.3.4 на нём были бы приборными нулями, читаемыми как продуктовые; выкатывать бинарь и правила одним заходом"
 else
-    pass "6.2.2 преflight (деплой волны 6.3.1): все три новые метрики присутствуют в /metrics — items 1/2/3/6 задеплоены, ноль в них читается как величина, а не как отсутствие правки"
+    pass "6.2.2 преflight (деплой волны 6.3.1): все четыре новые метрики присутствуют в /metrics — items 1/2/3/6 и правка TCP-DNS (№357) задеплоены, ноль в них читается как величина, а не как отсутствие правки"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2740,12 +2741,37 @@ _w63_tcp_class="не измерено"
 _w63_v6_class="не измерено"
 _w63_nss_class="не измерено"
 if command -v dig >/dev/null 2>&1; then
-    read -r _w63_tcp_hit _w63_tcp_bghit _w63_tcp_n _w63_tcp_list _w63_tcp_bg_list <<EOF_W63_TCP
-$(_w63_dns_paired_probe dig +tcp +short +time=3 +tries=1 example.com)
-EOF_W63_TCP
-    _w63_tcp_delta="${_w63_tcp_hit}/${_w63_tcp_n} раундов"
-    _w63_tcp_class=$(_w63_dns_probe_class "$_w63_tcp_hit" "$_w63_tcp_bghit" "$_w63_tcp_n")
-    echo "  TCP-DNS (dig +tcp, ${_w63_tcp_n} парных раундов по ${_W63_DNS_PROBE_SECS}с): проба ${_w63_tcp_hit}/${_w63_tcp_n} ненулевых (${_w63_tcp_list}), фон ${_w63_tcp_bghit}/${_w63_tcp_n} (${_w63_tcp_bg_list}) → ${_w63_tcp_class} (№356: видимость пути дала бы ненулевую дельту В КАЖДОМ раунде; одиночное попадание — чужая запись)"
+    # ── №357: у TCP-пути ТЕПЕРЬ ЕСТЬ СВОЙ СЧЁТЧИК, и мерить его дельтой узлового
+    #    ebpf_guard_dns_queries_total больше незачем. Парные раунды с фоном
+    #    (№354…№356) были ответом на НЕАТРИБУТИРУЕМОСТЬ величины; атрибутируемая
+    #    величина снимает вопрос целиком: серия
+    #    ebpf_guard_dns_messages_by_transport_total{transport="tcp"} растёт
+    #    ТОЛЬКО от TCP-DNS и ни от чего другого на узле. Фон здесь не нужен не
+    #    потому, что его нет, а потому, что он не попадает в эту серию.
+    #    Сама серия заведена с нуля при старте, поэтому её ОТСУТСТВИЕ читается
+    #    как «бинарь до №357», а не как ноль ([[positive-control-needs-result-sentinel]]).
+    _w63_tcp_pre=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="tcp"')
+    _w63_udp_pre=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="udp"')
+    if ! _w63_metric_present ebpf_guard_dns_messages_by_transport_total; then
+        _w63_tcp_class="НЕИЗМЕРИМО(нет_серии_транспорта)"
+        _w63_tcp_delta="серия отсутствует"
+        echo "  TCP-DNS: серии ebpf_guard_dns_messages_by_transport_total НЕТ — на ноде бинарь до правки №357, видимость TCP этим прогоном не измеряется"
+    else
+        for _w63_i in 1 2 3 4 5; do
+            dig +tcp +short +time=3 +tries=1 example.com >/dev/null 2>&1
+        done
+        sleep "$_W63_DNS_PROBE_SECS"
+        _w63_tcp_post=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="tcp"')
+        _w63_udp_post=$(_w63_metric_sum ebpf_guard_dns_messages_by_transport_total 'transport="udp"')
+        _w63_tcp_delta=$(( ${_w63_tcp_post:-0} - ${_w63_tcp_pre:-0} ))
+        _w63_udp_delta=$(( ${_w63_udp_post:-0} - ${_w63_udp_pre:-0} ))
+        if [ "${_w63_tcp_delta:-0}" -gt 0 ]; then
+            _w63_tcp_class="виден_своим_счётчиком"
+        else
+            _w63_tcp_class="слеп_к_TCP"
+        fi
+        echo "  TCP-DNS (5 запросов dig +tcp): {transport=tcp} Δ=${_w63_tcp_delta}, для сверки {transport=udp} Δ=${_w63_udp_delta} за тот же промежуток → ${_w63_tcp_class} (№357: величина атрибутируемая, фон в неё не попадает по построению)"
+    fi
     if command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
         read -r _w63_v6_hit _w63_v6_bghit _w63_v6_n _w63_v6_list _w63_v6_bg_list <<EOF_W63_V6
 $(_w63_dns_paired_probe dig -6 +short +time=3 +tries=1 example.com)
@@ -2770,7 +2796,7 @@ else
     _w63_nss_delta="не измерено"
     echo "  nss-resolve: getent недоступен — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go)"
 fi
-pass "6.3.7 ИЗМЕРЕНО: три слепые зоны предъявлены классом по ПОВТОРЯЕМОСТИ парных раундов, а не дельтой узлового счётчика (№354/№355/№356) — TCP ${_w63_tcp_class} (попаданий ${_w63_tcp_delta}), IPv6 ${_w63_v6_class} (попаданий ${_w63_v6_delta}), nss ${_w63_nss_class} (попаданий ${_w63_nss_delta:-не измерено}); там, где измерить не удалось на этом стенде, ограничение остаётся записанным, а не молчаливым"
+pass "6.3.7 ИЗМЕРЕНО: TCP ${_w63_tcp_class} (своя серия, Δ=${_w63_tcp_delta} — №357), IPv6 ${_w63_v6_class} (попаданий ${_w63_v6_delta}), nss ${_w63_nss_class} (попаданий ${_w63_nss_delta:-не измерено}, класс по повторяемости парных раундов — №354/№355/№356); там, где измерить не удалось на этом стенде, ограничение остаётся записанным, а не молчаливым"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # КРИТЕРИИ ВОЛНЫ 6.3.1 (постановка plan.md §«Критерии волны 6.3.1»).

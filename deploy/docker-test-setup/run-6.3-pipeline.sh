@@ -421,7 +421,8 @@ fi
 _r63_missing_new=""
 for _r63_m in ebpf_guard_dns_socket_map_backfill_candidates_total \
               ebpf_guard_comm_preexec_normalized_total \
-              ebpf_guard_alert_volume_by_event_type_total; do
+              ebpf_guard_alert_volume_by_event_type_total \
+              ebpf_guard_dns_messages_by_transport_total; do
     printf '%s\n' "$_r63_bf_metrics" | grep -qE "^${_r63_m}[{ ]" || _r63_missing_new="$_r63_missing_new $_r63_m"
 done
 if [ -n "${_r63_missing_new# }" ]; then
@@ -429,7 +430,7 @@ if [ -n "${_r63_missing_new# }" ]; then
     date -u +%FT%TZ > "$DONE_MARK"
     exit 1
 fi
-echo "  деплой волны 6.3.1: все три новые метрики присутствуют в /metrics (items 1/2/3/6 на ноде)"
+echo "  деплой волны 6.3.1: все четыре новые метрики присутствуют в /metrics (items 1/2/3/6 и TCP-DNS №357 на ноде)"
 
 # Немота по среде фиксируется здесь же, пока журнал стартовых строк свеж
 # (находка №225). Файловая ось (№234/открытый вопрос 7) — рядом с syscall'ной.

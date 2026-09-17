@@ -76,6 +76,15 @@ type dnsMetrics struct {
 	// exactly the ambiguity that left four DNS rules silent on №2.9.4 without
 	// anyone being able to say which of those it was.
 	decodeErrors *prometheus.CounterVec
+
+	// messagesByTransport separates UDP from TCP DNS (волна 6.3.1, №357).
+	// Its point is ATTRIBUTION: ebpf_guard_dns_queries_total is a node-wide
+	// величина, so a probe asking "is the TCP path visible?" could only read a
+	// delta over it and hope nothing else on the node resolved a name in the
+	// same seconds — which is exactly how three runs of 17.09.2026 flipped the
+	// same verdict three times (№354/№355/№356). A transport-labelled counter
+	// answers that question directly, without a background control.
+	messagesByTransport *prometheus.CounterVec
 	// stale is 1 while the collector has produced no events for staleThreshold
 	// despite being enabled and attached. This is the metric that would have
 	// surfaced P0-26 (7 events for an entire run, reported as healthy:true).
@@ -125,6 +134,10 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 			Name: "ebpf_guard_dns_decode_errors_total",
 			Help: "Total number of DNS event decode errors, by reason (too_short, not_a_query, bad_qname, payload_too_large, truncated_payload, compression_loop, bad_header, unparseable)",
 		}, []string{"reason"}),
+		messagesByTransport: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ebpf_guard_dns_messages_by_transport_total",
+			Help: "Total number of successfully decoded DNS messages by wire transport (udp, tcp). Both series exist from startup, so tcp=0 means no TCP DNS was seen, not that the build cannot see it. TCP messages are framed per RFC 1035 §4.2.2 with a two-byte length prefix; before wave 6.3.1 (finding №357) they were rejected as bad_header decode errors.",
+		}, []string{"transport"}),
 		stale: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_dns_collector_stale",
 			Help: "1 when the DNS collector has seen no events for an extended period despite being attached",
@@ -208,6 +221,14 @@ func (c *DNSCollector) RegisterMetrics(reg prometheus.Registerer) error {
 	for _, reason := range dnsDecodeReasons {
 		c.metrics.decodeErrors.WithLabelValues(reason)
 	}
+	if err := reg.Register(c.metrics.messagesByTransport); err != nil {
+		return err
+	}
+	// Both transports exist from startup: an absent series would read as "this
+	// binary cannot see TCP", which is precisely the ambiguity №357 removed.
+	for _, transport := range dnsTransports {
+		c.metrics.messagesByTransport.WithLabelValues(transport)
+	}
 	if err := reg.Register(c.metrics.stale); err != nil {
 		return err
 	}
@@ -232,7 +253,7 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	// working, so its blind spots have to be stated where they will be seen.
 	slog.Info("dns: starting collector",
 		slog.String("strategy", string(c.strategy)),
-		slog.String("visibility", "AF_INET (IPv4) UDP port 53 only"),
+		slog.String("visibility", "AF_INET (IPv4) port 53, UDP and TCP (TCP framing per RFC 1035 §4.2.2 — волна 6.3.1, №357)"),
 		slog.String("blind_spots", "IPv6 and TCP DNS; resolution via systemd-resolved's AF_UNIX varlink path (nss-resolve); sockets connected before the agent started"),
 	)
 
@@ -378,7 +399,7 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 
 		c.eventsSeen.Add(1)
 		c.lastEventUnixNano.Store(time.Now().UnixNano())
-		event, reason := decodeDNSEvent(record.RawSample)
+		event, transport, reason := decodeDNSEventWithTransport(record.RawSample)
 		if event == nil {
 			c.metrics.decodeErrors.WithLabelValues(reason).Inc()
 			if logger := c.decodeErrorLoggers[reason]; logger != nil {
@@ -422,6 +443,7 @@ func (c *DNSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 		}
 
 		// Update metrics
+		c.metrics.messagesByTransport.WithLabelValues(transport).Inc()
 		c.metrics.queriesTotal.WithLabelValues(
 			qtypeToString(event.DNS.QType),
 			rcodeToString(event.DNS.RCode),

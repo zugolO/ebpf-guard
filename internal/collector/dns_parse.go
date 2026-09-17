@@ -100,6 +100,9 @@ var dnsDecodeReasons = []string{
 // (a TLS record header, in particular) produces by coincidence.
 const dnsMaxOpcode = 6
 
+// dnsHeaderLen is the fixed DNS header size (RFC 1035 §4.1.1).
+const dnsHeaderLen = 12
+
 // validateDNSHeader is the second, independent guard against non-DNS bytes
 // reaching the QNAME walk, on top of the dns_socket_map key fix in
 // dns.bpf.c (plan.md 5.9.8a, №94, запрет №6: the kernel-side fix and this
@@ -181,9 +184,86 @@ func dnsHeaderDiagFields(raw []byte) (direction byte, payloadLen uint16, ok bool
 // usable DNS event; the second return is always "" on success and one of the
 // dnsDecodeReason* constants on failure, so the caller can attribute the drop
 // instead of only counting it (5.9.5c).
+// dnsTransport names how a DNS message was framed on the wire. The vocabulary
+// is closed, like dnsDecodeReasons, so the metric's series are primed once and
+// no caller re-derives the set.
+//
+// Волна 6.3.1, находка №357 (боевой прогон 17.09.2026). Until then TCP DNS was
+// recorded as "not yet supported, filtered out in BPF" — and neither half was
+// true. dns.bpf.c keys dns_socket_map by destination port 53 alone
+// (is_dns_packet checks AF_INET and the port, never the protocol), so a TCP
+// socket connected to :53 lands in the map like any other and its read/write
+// payloads reach this parser. What rejected them was this file: RFC 1035 §4.2.2
+// frames a DNS message over TCP with a two-byte length prefix, which lands
+// exactly where the parser expects the message ID, so every TCP DNS exchange
+// became one bad_header decode error and one WARN line. The evidence is in the
+// stand's own journal: a 72-byte prefix followed by a valid response
+// (qd=1 an=2 for example.com), which reads as qd=33184 from offset 0.
+//
+// Consequence for detection, and the reason this is not cosmetic: every DNS
+// rule keys on the QUERY (qname, entropy, label length, DGA score). A client
+// that opens TCP instead of UDP — one socket option — was invisible to all 30
+// of them, while the traffic that most needs TCP (large TXT answers, anything
+// retried after a TC=1 truncation, AXFR) is precisely what those rules target.
+const (
+	dnsTransportUDP = "udp"
+	dnsTransportTCP = "tcp"
+)
+
+var dnsTransports = []string{dnsTransportUDP, dnsTransportTCP}
+
+// tcpFramedPayload returns the message inside an RFC 1035 §4.2.2 TCP frame.
+//
+// The only accepted shape is "the two-byte prefix declares a length this buffer
+// does not exceed": equal for a whole capture, greater when the kernel-side
+// capture limit cut the message short. A prefix SMALLER than the bytes present
+// is not framing — it is a coincidence — and is rejected.
+func tcpFramedPayload(payload []byte) ([]byte, bool) {
+	const prefixLen = 2
+	if len(payload) < prefixLen+dnsHeaderLen {
+		return nil, false
+	}
+	declared := int(binary.BigEndian.Uint16(payload[:prefixLen]))
+	if declared < dnsHeaderLen || declared < len(payload)-prefixLen {
+		return nil, false
+	}
+	return payload[prefixLen:], true
+}
+
+// parseDNSMessageAnyTransport parses a payload that may be framed for TCP,
+// returning the transport it turned out to be.
+//
+// Ordering is the safety property, not an optimisation: the unframed parse is
+// tried FIRST and its success ends the matter, so no message that parsed as UDP
+// before this function existed can now be re-read as TCP. The framed parse is
+// reached only for bytes the parser was already rejecting, which is why adding
+// it cannot change any existing verdict — it can only turn a decode error into
+// an event.
+func parseDNSMessageAnyTransport(payload []byte) (dnsWireMessage, string, string) {
+	msg, reason := parseDNSWireMessage(payload)
+	if reason == "" {
+		return msg, dnsTransportUDP, ""
+	}
+	if framed, ok := tcpFramedPayload(payload); ok {
+		if framedMsg, framedReason := parseDNSWireMessage(framed); framedReason == "" {
+			return framedMsg, dnsTransportTCP, ""
+		}
+	}
+	// Report the UDP-path reason: it is the one that describes the bytes as
+	// they arrived, and the framed attempt is a fallback, not a second opinion.
+	return msg, dnsTransportUDP, reason
+}
+
+// decodeDNSEvent decodes a raw ring-buffer record. It is the two-value form of
+// decodeDNSEventWithTransport for callers that do not account transports.
 func decodeDNSEvent(raw []byte) (*types.Event, string) {
+	event, _, reason := decodeDNSEventWithTransport(raw)
+	return event, reason
+}
+
+func decodeDNSEventWithTransport(raw []byte) (*types.Event, string, string) {
 	if len(raw) < dnsRawEventFixedLen {
-		return nil, dnsDecodeReasonTooShort
+		return nil, dnsTransportUDP, dnsDecodeReasonTooShort
 	}
 
 	// Parse the fixed dns_event header. Layout matches struct dns_event in
@@ -195,7 +275,7 @@ func decodeDNSEvent(raw []byte) (*types.Event, string) {
 	offset += 4
 
 	if eventType != uint32(types.EventDNS) {
-		return nil, dnsDecodeReasonUnparseable
+		return nil, dnsTransportUDP, dnsDecodeReasonUnparseable
 	}
 
 	// timestamp (8 bytes)
@@ -242,16 +322,16 @@ func decodeDNSEvent(raw []byte) (*types.Event, string) {
 	// produces one — distinct from a plausible payload_len whose bytes simply
 	// aren't all present, which is a message truncated in flight.
 	if int(payloadLen) > dnsMaxPayload {
-		return nil, dnsDecodeReasonPayloadTooLarge
+		return nil, dnsTransportUDP, dnsDecodeReasonPayloadTooLarge
 	}
 	if offset+int(payloadLen) > len(raw) {
-		return nil, dnsDecodeReasonTruncatedPayload
+		return nil, dnsTransportUDP, dnsDecodeReasonTruncatedPayload
 	}
 	payload := raw[offset : offset+int(payloadLen)]
 
-	msg, reason := parseDNSWireMessage(payload)
+	msg, transport, reason := parseDNSMessageAnyTransport(payload)
 	if reason != "" {
-		return nil, reason
+		return nil, transport, reason
 	}
 
 	return &types.Event{
@@ -270,7 +350,7 @@ func decodeDNSEvent(raw []byte) (*types.Event, string) {
 			Direction:   direction,
 			ResponseIPs: msg.responseIPs,
 		},
-	}, ""
+	}, transport, ""
 }
 
 // dnsWireMessage holds the fields the rest of the system cares about,

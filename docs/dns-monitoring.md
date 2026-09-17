@@ -223,14 +223,25 @@ DNS monitoring is designed for minimal overhead:
 
 ### Optimization Strategies
 
-1. **Early filtering in BPF**: Only UDP port 53 traffic is processed
+1. **Early filtering in BPF**: only traffic on port 53 is processed (the fd is
+   admitted to `dns_socket_map` by destination port; the transport is decided in
+   userspace, see finding №357 below)
 2. **Ring buffer batching**: Events are batched for efficient userspace delivery
 3. **Lazy entropy calculation**: Only computed when needed for rule evaluation
 
 ## Limitations
 
 1. **IPv4 only**: Currently supports IPv4 DNS queries only
-2. **UDP only**: TCP DNS (large responses) not yet supported
+2. ~~**UDP only**~~ — **supported since wave 6.3.1 (finding №357)**. TCP DNS is
+   framed with a two-byte length prefix (RFC 1035 §4.2.2); the parser now strips
+   it and accounts the message as
+   `ebpf_guard_dns_messages_by_transport_total{transport="tcp"}`. Note what the
+   earlier wording got wrong: TCP packets were never filtered out in BPF —
+   `is_dns_packet` checks `AF_INET` and the port only, so TCP payloads always
+   reached userspace and were discarded there as `bad_header` decode errors.
+   Until this was fixed, a client that opened TCP instead of UDP — one socket
+   option — was invisible to every qname-based rule. A message longer than the
+   kernel capture limit is still truncated, as it is over UDP
 3. **No DNSSEC validation**: Only monitors queries, doesn't validate responses
 4. **Encrypted DNS**: Cannot inspect DNS-over-HTTPS (DoH) or DNS-over-TLS (DoT)
 

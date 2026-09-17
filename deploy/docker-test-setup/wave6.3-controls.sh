@@ -2684,7 +2684,17 @@ echo "--- 6.3.7: слепые зоны предъявлены (TCP-DNS / IPv6 / 
 # секунд непосредственно ПЕРЕД пробой, ничего не запуская. Печатаются обе
 # величины и класс, а не одно число: «виден_сверх_фона» требует Δ пробы строго
 # больше Δ фона, иначе — «неотличимо_от_фона», что и есть вид слепого пути.
+#
+# №355 (прогон #2 того же дня): ОДНОГО контрольного интервала мало. Фон узла
+# рваный, и это видно в самом прогоне, который его ввёл: два интервала ОДНОЙ
+# длины дали Δ=0 (перед TCP-пробой) и Δ=8 (перед nss-пробой). Сравнение с
+# единственным образцом, попавшим в тихую секунду, объявляет «виден_сверх_фона»
+# по Δ=1 — то есть по одной чужой записи. Поэтому фон снимается НЕСКОЛЬКИМИ
+# интервалами, а сравнение идёт с МАКСИМУМОМ (не со средним: вопрос в том,
+# отличима ли проба от самого шумного молчания, а не от типичного). Это
+# по-прежнему сравнение, а не порог (5.9.6) — печатаются все образцы.
 _W63_DNS_PROBE_SECS=3
+_W63_DNS_BG_SAMPLES=3
 _w63_dns_delta_over() { # $1=секунды тишины; печатает дельту счётчика за них
     local _a _b
     _a=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
@@ -2692,7 +2702,16 @@ _w63_dns_delta_over() { # $1=секунды тишины; печатает де�
     _b=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     echo $(( ${_b:-0} - ${_a:-0} ))
 }
-_w63_dns_probe_class() { # $1=Δ пробы $2=Δ фона
+_w63_dns_bg_max() { # печатает "<максимум> <все образцы через запятую>"
+    local _i _d _max=0 _list=""
+    for _i in $(seq 1 "$_W63_DNS_BG_SAMPLES"); do
+        _d=$(_w63_dns_delta_over "$_W63_DNS_PROBE_SECS")
+        [ "${_d:-0}" -gt "$_max" ] && _max=$_d
+        _list="${_list}${_list:+,}${_d}"
+    done
+    echo "$_max $_list"
+}
+_w63_dns_probe_class() { # $1=Δ пробы $2=максимум фона
     if [ "${1:-0}" -gt "${2:-0}" ]; then echo "виден_сверх_фона"; else echo "неотличимо_от_фона"; fi
 }
 _w63_tcp_delta="не измерено"
@@ -2701,23 +2720,27 @@ _w63_tcp_class="не измерено"
 _w63_v6_class="не измерено"
 _w63_nss_class="не измерено"
 if command -v dig >/dev/null 2>&1; then
-    _w63_tcp_bg=$(_w63_dns_delta_over "$_W63_DNS_PROBE_SECS")
+    read -r _w63_tcp_bg _w63_tcp_bg_list <<EOF_W63_TCP_BG
+$(_w63_dns_bg_max)
+EOF_W63_TCP_BG
     _w63_dq_pre=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     dig +tcp +short +time=3 +tries=1 example.com >/dev/null 2>&1
     sleep "$_W63_DNS_PROBE_SECS"
     _w63_dq_tcp=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     _w63_tcp_delta=$(( ${_w63_dq_tcp:-0} - ${_w63_dq_pre:-0} ))
     _w63_tcp_class=$(_w63_dns_probe_class "$_w63_tcp_delta" "$_w63_tcp_bg")
-    echo "  TCP-DNS (dig +tcp): dns_queries_total Δ=${_w63_tcp_delta} при фоне Δ=${_w63_tcp_bg} за такой же интервал тишины → ${_w63_tcp_class} (№354: счётчик узловой, одна дельта без фона читалась как «путь виден»)"
+    echo "  TCP-DNS (dig +tcp): dns_queries_total Δ=${_w63_tcp_delta} при фоне Δмакс=${_w63_tcp_bg} из образцов ${_w63_tcp_bg_list} (интервалы тишины той же длины) → ${_w63_tcp_class} (№354: счётчик узловой, одна дельта без фона читалась как «путь виден»)"
     if command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
-        _w63_v6_bg=$(_w63_dns_delta_over "$_W63_DNS_PROBE_SECS")
+        read -r _w63_v6_bg _w63_v6_bg_list <<EOF_W63_V6_BG
+$(_w63_dns_bg_max)
+EOF_W63_V6_BG
         _w63_dq_pre2=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
         dig -6 +short +time=3 +tries=1 example.com >/dev/null 2>&1
         sleep "$_W63_DNS_PROBE_SECS"
         _w63_dq_v6=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
         _w63_v6_delta=$(( ${_w63_dq_v6:-0} - ${_w63_dq_pre2:-0} ))
         _w63_v6_class=$(_w63_dns_probe_class "$_w63_v6_delta" "$_w63_v6_bg")
-        echo "  IPv6 (dig -6): dns_queries_total Δ=${_w63_v6_delta} при фоне Δ=${_w63_v6_bg} → ${_w63_v6_class} (0 ожидаем — is_dns_packet AF_INET-only)"
+        echo "  IPv6 (dig -6): dns_queries_total Δ=${_w63_v6_delta} при фоне Δмакс=${_w63_v6_bg} из образцов ${_w63_v6_bg_list} → ${_w63_v6_class} (0 ожидаем — is_dns_packet AF_INET-only)"
     else
         echo "  IPv6: нет глобального IPv6-адреса на стенде — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go), а не молчаливым"
     fi
@@ -2725,14 +2748,16 @@ else
     echo "  TCP-DNS/IPv6: dig недоступен на ноде — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go)"
 fi
 if command -v getent >/dev/null 2>&1; then
-    _w63_nss_bg=$(_w63_dns_delta_over "$_W63_DNS_PROBE_SECS")
+    read -r _w63_nss_bg _w63_nss_bg_list <<EOF_W63_NSS_BG
+$(_w63_dns_bg_max)
+EOF_W63_NSS_BG
     _w63_dq_pre3=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     getent hosts example.com >/dev/null 2>&1
     sleep "$_W63_DNS_PROBE_SECS"
     _w63_dq_nss=$(_w63_metric_sum ebpf_guard_dns_queries_total "")
     _w63_nss_delta=$(( ${_w63_dq_nss:-0} - ${_w63_dq_pre3:-0} ))
     _w63_nss_class=$(_w63_dns_probe_class "$_w63_nss_delta" "$_w63_nss_bg")
-    echo "  nss-resolve/systemd-resolved (getent hosts): dns_queries_total Δ=${_w63_nss_delta} при фоне Δ=${_w63_nss_bg} → ${_w63_nss_class} (неотличимо_от_фона согласуется с гипотезой varlink/AF_UNIX №328; виден_сверх_фона значит, что резолвер этой ноды НЕ уходит через systemd-resolved, и слепая зона здесь неприменима)"
+    echo "  nss-resolve/systemd-resolved (getent hosts): dns_queries_total Δ=${_w63_nss_delta} при фоне Δмакс=${_w63_nss_bg} из образцов ${_w63_nss_bg_list} → ${_w63_nss_class} (неотличимо_от_фона согласуется с гипотезой varlink/AF_UNIX №328; виден_сверх_фона значит, что резолвер этой ноды НЕ уходит через systemd-resolved, и слепая зона здесь неприменима)"
 else
     _w63_nss_delta="не измерено"
     echo "  nss-resolve: getent недоступен — НЕ ИЗМЕРЕНО, ограничение остаётся ЗАПИСАННЫМ (README/startup-лог dns.go)"

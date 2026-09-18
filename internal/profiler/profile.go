@@ -72,8 +72,43 @@ type FileProfile struct {
 	Directories map[string]*EWMA
 	// File extensions accessed
 	Extensions map[string]*EWMA
+	// SeededPairs holds (directory, extension) combinations pre-approved as
+	// known-benign dynamic-loader-prologue noise (finding #364: 72% of
+	// anomaly-layer alerts in a quiet window were ld.so.cache/libc*.so.N
+	// lookups on process startup, identical across unrelated workloads).
+	// Unlike Directories/Extensions this map is never written by
+	// RecordFileEvent and is not walked by persistence.go, so seeding never
+	// counts as a learned observation. It is keyed by directory then
+	// extension — NOT by directory alone — so a seeded directory does not
+	// become known on its own: "/etc/shadow" (dir "/etc/", no ".cache"
+	// extension) still scores as unknown even though "/etc/" is seeded for
+	// ".cache" (finding #371 — Directories and Extensions are independent
+	// sets, so seeding the directory alone would have blinded it).
+	SeededPairs map[string]map[string]struct{}
 	// Total file operations
 	TotalOperations uint64
+}
+
+// seededLoaderExtensions are the extensions produced by the dynamic loader's
+// startup prologue on any exec: the cache file itself plus the
+// version-suffixed shared objects it resolves (libc-2.x style "libfoo.so.N").
+var seededLoaderExtensions = []string{".cache", ".0", ".1", ".2", ".6", ".so"}
+
+// defaultSeededDirExtPairs is the process-wide default for FileProfile.SeededPairs,
+// shared read-only across all profiles (it is never mutated after init, so
+// concurrent reads from multiple profiles are safe without locking).
+var defaultSeededDirExtPairs = map[string]map[string]struct{}{
+	"/etc/":                      extSet(".cache"),
+	"/lib/x86_64-linux-gnu/":     extSet(seededLoaderExtensions...),
+	"/usr/lib/x86_64-linux-gnu/": extSet(seededLoaderExtensions...),
+}
+
+func extSet(exts ...string) map[string]struct{} {
+	m := make(map[string]struct{}, len(exts))
+	for _, e := range exts {
+		m[e] = struct{}{}
+	}
+	return m
 }
 
 // SyscallProfile tracks syscall patterns.
@@ -128,6 +163,7 @@ func NewProcessProfile(pid uint32, comm string) *ProcessProfile {
 		FileProfile: FileProfile{
 			Directories: make(map[string]*EWMA),
 			Extensions:  make(map[string]*EWMA),
+			SeededPairs: defaultSeededDirExtPairs,
 		},
 		SyscallProfile: SyscallProfile{
 			Syscalls: make(map[int64]*EWMA),
@@ -154,6 +190,7 @@ func NewProcessProfileForWorkload(key WorkloadKey) *ProcessProfile {
 		FileProfile: FileProfile{
 			Directories: make(map[string]*EWMA),
 			Extensions:  make(map[string]*EWMA),
+			SeededPairs: defaultSeededDirExtPairs,
 		},
 		SyscallProfile: SyscallProfile{
 			Syscalls: make(map[int64]*EWMA),

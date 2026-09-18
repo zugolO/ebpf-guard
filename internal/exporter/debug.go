@@ -125,6 +125,11 @@ type ProfilerStats struct {
 	ProfilesActive      int     `json:"profiles_active"`
 	AnomaliesTotal      uint64  `json:"anomalies_total"`
 	LearningSampleCount uint64  `json:"learning_sample_count"`
+	// SeededObservationsTotal counts loader-prologue (directory, extension)
+	// pairs suppressed by profiler seeding (wave 6.3.9.F item 5, finding
+	// #371). Paired with AnomaliesTotal to distinguish "seeding ran and
+	// anomalies still fire" from a silent double-zero.
+	SeededObservationsTotal uint64 `json:"seeded_observations_total"`
 }
 
 // EnrichmentStats contains K8s enrichment statistics.

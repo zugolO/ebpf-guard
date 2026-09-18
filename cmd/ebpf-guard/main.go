@@ -1206,11 +1206,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			dbg.SetProfilerProvider(exporter.ProfilerStatsFunc(func() exporter.ProfilerStats {
 				st := engine.ProfilerStats()
 				return exporter.ProfilerStats{
-					LearningComplete:    st.LearningComplete,
-					LearningProgress:    st.LearningProgress,
-					ProfilesActive:      st.ProfilesActive,
-					AnomaliesTotal:      st.AnomaliesTotal,
-					LearningSampleCount: st.LearningSampleCount,
+					LearningComplete:        st.LearningComplete,
+					LearningProgress:        st.LearningProgress,
+					ProfilesActive:          st.ProfilesActive,
+					AnomaliesTotal:          st.AnomaliesTotal,
+					LearningSampleCount:     st.LearningSampleCount,
+					SeededObservationsTotal: st.SeededObservationsTotal,
 				}
 			}))
 		}

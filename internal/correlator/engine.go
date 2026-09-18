@@ -2623,11 +2623,12 @@ func (ce *CorrelationEngine) ProfilerStats() profiler.ProfilerStats {
 		learningProgress = 1.0
 	}
 	return profiler.ProfilerStats{
-		LearningComplete:    learningComplete,
-		LearningProgress:    learningProgress,
-		ProfilesActive:      profilesActive,
-		AnomaliesTotal:      anomaliesTotal,
-		LearningSampleCount: sampleCount,
+		LearningComplete:        learningComplete,
+		LearningProgress:        learningProgress,
+		ProfilesActive:          profilesActive,
+		AnomaliesTotal:          anomaliesTotal,
+		LearningSampleCount:     sampleCount,
+		SeededObservationsTotal: profiler.SeededSuppressionsTotal(),
 	}
 }
 

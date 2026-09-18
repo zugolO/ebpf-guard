@@ -49,6 +49,11 @@ type ProfilerStats struct {
 	ProfilesActive      int     `json:"profiles_active"`
 	AnomaliesTotal      uint64  `json:"anomalies_total"`
 	LearningSampleCount uint64  `json:"learning_sample_count"`
+	// SeededObservationsTotal counts directory contributions suppressed by the
+	// #364/#371 loader-prologue seeding (see SeededSuppressionsTotal). Paired
+	// with AnomaliesTotal so a caller can tell "seeding ran and anomalies
+	// still fire" from a silent double-zero (6.3.9.3).
+	SeededObservationsTotal uint64 `json:"seeded_observations_total"`
 }
 
 // ProfilerConfig holds configuration for all profiler components.
@@ -363,10 +368,11 @@ func (p *Profiler) GetStats() ProfilerStats {
 	}
 
 	return ProfilerStats{
-		LearningComplete: p.IsLearningComplete(),
-		LearningProgress: p.LearningProgress(),
-		ProfilesActive:   profilesActive,
-		AnomaliesTotal:   anomaliesTotal,
+		LearningComplete:        p.IsLearningComplete(),
+		LearningProgress:        p.LearningProgress(),
+		ProfilesActive:          profilesActive,
+		AnomaliesTotal:          anomaliesTotal,
+		SeededObservationsTotal: SeededSuppressionsTotal(),
 	}
 }
 

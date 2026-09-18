@@ -480,6 +480,7 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 	// may outlive the event buffer).
 	filenameUnsafe := util.UnsafeBytesToString(event.Filename[:])
 	dir := extractDirectory(filenameUnsafe)
+	ext := extractExtension(filenameUnsafe)
 
 	// Check directory access
 	if dir != "" {
@@ -497,7 +498,7 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 				})
 				score += dirScore * 0.6
 			}
-		} else {
+		} else if !seededDirExtMatch(profile, dir, ext) {
 			*out = append(*out, AnomalyContribution{
 				Category:     "file",
 				Field:        "directory",
@@ -511,7 +512,6 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 	}
 
 	// Check file extension
-	ext := extractExtension(filenameUnsafe)
 	if ext != "" {
 		if extEWMA, exists := profile.FileProfile.Extensions[ext]; exists {
 			freq := extEWMA.Value()
@@ -541,6 +541,45 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 	}
 
 	return math.Min(score, 1.0)
+}
+
+// seededSuppressionsTotal counts directory contributions suppressed by
+// seededDirExtMatch across every profile in the process (item 5 of wave
+// 6.3.9.F / finding #371). It is process-wide rather than per-profile because
+// criterion 6.3.9.3 reads it paired with AnomaliesTotal (also a process-wide
+// sum, via CountAlertTotal) to rule out the double-zero failure mode: seeding
+// silently suppressing everything would show as anomalies_total==0 with no
+// way to tell "layer is dead" from "layer has nothing left to flag". A
+// nonzero seededSuppressionsTotal alongside a nonzero AnomaliesTotal is the
+// evidence that the seeding layer ran AND anomaly detection kept working.
+var seededSuppressionsTotal uint64
+
+// SeededSuppressionsTotal returns the number of (directory, extension) pairs
+// that matched a seeded loader-prologue entry and had their directory
+// contribution suppressed, summed across every profile since process start.
+func SeededSuppressionsTotal() uint64 {
+	return atomic.LoadUint64(&seededSuppressionsTotal)
+}
+
+// seededDirExtMatch reports whether (dir, ext) is a pre-approved loader-prologue
+// pair for this profile (finding #364/#371). It is deliberately keyed on the
+// PAIR, not the directory alone: a directory seeded for one extension must
+// still score as unknown for any other extension observed in it, so seeding
+// "/etc/" for ".cache" does not also make "/etc/shadow" (no matching
+// extension) known.
+func seededDirExtMatch(profile *ProcessProfile, dir, ext string) bool {
+	if ext == "" || profile.FileProfile.SeededPairs == nil {
+		return false
+	}
+	exts, ok := profile.FileProfile.SeededPairs[dir]
+	if !ok {
+		return false
+	}
+	if _, ok = exts[ext]; !ok {
+		return false
+	}
+	atomic.AddUint64(&seededSuppressionsTotal, 1)
+	return true
 }
 
 // gpuOpNames maps GPUOpType constants to human-readable names, matching the

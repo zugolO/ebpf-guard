@@ -350,3 +350,42 @@ func TestWave6_3_9_BucketCarriesItsOwnInterval(t *testing.T) {
 		prevTo = to
 	}
 }
+
+// Флаш ПО ТАЙМЕРУ, а не на следующем алерте. Боевой прогон 18.09.2026 показал
+// цену событийного флаша прямо: за тихое окно 600с не закрылся НИ ОДИН бакет,
+// единственный охватил промежуток от пролога до контролей, и срез по окну дал
+// покрытие 0с из 600с — окно замера не измерялось вовсе.
+func TestWave6_3_9_TimerFlushClosesBucketsWithoutTraffic(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	nd := NewNoiseDiagnostics(true, 100, 30*time.Millisecond, log)
+	require.NoError(t, nd.Register(prometheus.NewRegistry()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nd.Start(ctx)
+
+	nd.Emit(diagAlert("anomaly_detection", "cp"), noiseDiagOutcomeEmitted, noiseDiagExtra{})
+	// Тишина: ни одного Emit. Событийный флаш здесь не закрыл бы ничего.
+	time.Sleep(120 * time.Millisecond)
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.GreaterOrEqual(t, len(lines), 2,
+		"таймер обязан закрывать бакеты и без трафика — иначе тихое окно остаётся неизмеренным")
+
+	var silence, withCount int
+	for _, l := range lines {
+		var line map[string]any
+		require.NoError(t, json.Unmarshal([]byte(l), &line))
+		require.Contains(t, line, "window_from_ms")
+		if line["rule_id"] == "__none__" {
+			silence++
+			require.EqualValues(t, 0, line["count"])
+		} else {
+			withCount++
+		}
+	}
+	require.GreaterOrEqual(t, silence, 1,
+		"интервал без алертов обязан быть ЗАПИСАН: иначе он неотличим от интервала, в котором прибор не работал")
+	require.Equal(t, 1, withCount, "единственный алерт учтён ровно один раз")
+}

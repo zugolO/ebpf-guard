@@ -758,15 +758,16 @@ _nd_jawk='
 '
 _w63_nd_report() { # $1 = файл сводок, $2 = подпись
     [ -s "$1" ] || { echo "    (пусто)"; return; }
+    echo "  [$2] интервалов без единого алерта (маркеры тишины): $(grep -ac '"rule_id":"__none__"' "$1" 2>/dev/null || echo 0)"
     echo "  [$2] по слоям подавления:"
-    awk "$_nd_jawk"'{ o = jstr($0, "outcome"); c = jnum($0, "count"); if (o != "" && c != "") s[o] += c }
+    awk "$_nd_jawk"'{ o = jstr($0, "outcome"); c = jnum($0, "count"); if (o != "" && c > 0) s[o] += c }
          END { for (k in s) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn
     echo "  [$2] верхушка {rule_id, outcome}:"
     awk "$_nd_jawk"'{ o = jstr($0, "outcome"); r = jstr($0, "rule_id"); c = jnum($0, "count")
-                      if (o != "" && r != "" && c != "") s[r " " o] += c }
+                      if (o != "" && r != "" && c > 0) s[r " " o] += c }
          END { for (k in s) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn | head -12
     echo "  [$2] верхушка вкладов (за что именно):"
-    awk "$_nd_jawk"'{ m = jstr($0, "message"); c = jnum($0, "count"); if (m != "" && c != "") s[m] += c }
+    awk "$_nd_jawk"'{ m = jstr($0, "message"); c = jnum($0, "count"); if (m != "" && c > 0) s[m] += c }
          END { for (k in s) printf "    %8d  %s\n", s[k], k }' "$1" | sort -rn | head -10
     echo "  [$2] ось сужения exe_path (по выборке, знаменатель предъявлен):"
     awk "$_nd_jawk"'{ r = jnum($0, "exe_resolved"); u = jnum($0, "exe_unresolved")

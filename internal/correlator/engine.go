@@ -824,6 +824,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		alertsRateLimitedByRule:  alertsRateLimitedByRule,
 		noiseDiag: NewNoiseDiagnostics(config.NoiseDiagEnabled, config.NoiseDiagMaxLinesPerWindow,
 			config.NoiseDiagWindow, slog.Default()),
+		// Start ниже, после того как ce собран: таймеру нужен ctx движка.
 		actionExecutor:           config.ActionExecutor,
 		enforceCooldown:          enforceCooldown,
 		cooldowns:                newShardedCooldowns(),
@@ -1056,6 +1057,12 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 
 	// Update the gauge periodically so it reflects the live state count.
 	go ce.updateRLGaugeLoop(ctx)
+
+	// Волна 6.3.9: сводка диагностики закрывается ПО ТАЙМЕРУ, а не на
+	// следующем алерте. Событийный флаш на тихом окне не закрывает ни одного
+	// бакета, и окно замера — ровно то, ради чего прибор заведён, — остаётся
+	// неизмеренным (боевой прогон 18.09.2026: покрытие 0с из 600с).
+	ce.noiseDiag.Start(ctx)
 
 	return ce
 }

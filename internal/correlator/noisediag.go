@@ -1,6 +1,7 @@
 package correlator
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -316,7 +317,49 @@ func (nd *NoiseDiagnostics) Flush() {
 	nd.flush(due, from, to)
 }
 
+// Start запускает флаш ПО ТАЙМЕРУ. Без него флаш событийный — случается на
+// следующем алерте после истечения шага, — и боевой прогон 18.09.2026 показал
+// цену этого прямо: за тихое окно 600с не закрылся НИ ОДИН бакет, единственный
+// охватил промежуток от пролога до контролей, и срез по окну дал покрытие 0с
+// из 600с. То есть окно замера — ровно то, ради чего прибор и заведён, — не
+// измерялось вовсе.
+//
+// Таймер останавливается вместе с ctx движка.
+func (nd *NoiseDiagnostics) Start(ctx context.Context) {
+	if !nd.Enabled() {
+		return
+	}
+	go func() {
+		t := time.NewTicker(nd.window)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				nd.Flush()
+			}
+		}
+	}()
+}
+
 func (nd *NoiseDiagnostics) flush(due map[noiseAggKey]*noiseAggVal, from, to time.Time) {
+	// ТИШИНА ТОЖЕ ЗАПИСЫВАЕТСЯ. Пустой интервал без строки неотличим от
+	// интервала, в котором прибор не работал, а читателю среза по окну нужна
+	// именно разница: «за эти 30с алертов не было» против «за эти 30с никто не
+	// смотрел». Плюс без маркера покрытие окна считалось бы только по шумным
+	// промежуткам и завышало бы долю шума.
+	if len(due) == 0 {
+		nd.log.Info("noise-diag: bucket",
+			slog.String("outcome", "none"),
+			slog.String("rule_id", "__none__"),
+			slog.Uint64("count", 0),
+			slog.String("message", ""),
+			slog.Int64("window_from_ms", from.UnixMilli()),
+			slog.Int64("window_to_ms", to.UnixMilli()),
+		)
+		return
+	}
 	for k, v := range due {
 		nd.accounted.Add(float64(v.n))
 		nd.lines.WithLabelValues(k.outcome).Add(float64(v.n))

@@ -64,6 +64,21 @@ else
     PROFILE_SECS="${PROFILE_SECS:-30}"
 fi
 NS="${NS:-w63}"
+# ── АДРЕС API — ОДНОЙ ПЕРЕМЕННОЙ, А НЕ ПАРОЙ ПОДСТАНОВОК (правка 18.09.2026,
+#    стоила запуска прогона B).
+#
+#    Было: "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}"
+#    — идиома, верная РОВНО пока VPS_IP пуст или содержит адрес. Запуск с
+#    VPS_IP=localhost (совершенно законный: именно так зовутся контроли, см.
+#    wave6.3-controls.sh:210) склеивает ОБЕ половины в
+#    «http://localhost:19090localhost/metrics». curl молча отдаёт пустоту,
+#    process_start_time_seconds читается пустым, и барьер готовности убивает
+#    ЗДОРОВЫЙ прогон через 90 с после рестарта агента, напечатав «прогон
+#    неизмерим» — тот же класс ложного «неизмеримо», что уже ловился у этого
+#    барьера в №337. Адрес резолвится ОДИН раз, тем же способом, что у
+#    контролей, и все пять мест читают его.
+VPS_IP="${VPS_IP:-}"
+W63_PIPE_API="${W63_PIPE_API:-http://${VPS_IP:-localhost}:19090}"
 GATE_FORMULA="${GATE_FORMULA:-all}"
 VERDICTS="${VERDICTS:-/root/wave6.3-controls-verdicts.txt}"
 
@@ -428,7 +443,7 @@ _r63_pre_restart=$(date -u +%s)
 # ЧТЕНИЙ ОДНОЙ И ТОЙ ЖЕ величины от арифметики часов не зависит вовсе.
 _r63_pst_old=$(curl -s --max-time 10 \
     -H "Authorization: Bearer ${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
-    "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}/metrics" 2>/dev/null \
+    "${W63_PIPE_API}/metrics" 2>/dev/null \
     | awk '$1=="process_start_time_seconds"{print $2; exit}')
 systemctl stop "$SVC"
 rm -f /var/lib/ebpf-guard/test-events.db /var/lib/ebpf-guard/test-events.db-wal /var/lib/ebpf-guard/test-events.db-shm
@@ -458,7 +473,7 @@ echo "агент поднят $(cat /root/agent-start-6.3.txt) (эпоха $(cat
 # этот, в Шаге 1 пайплайна.
 _r63_ready_tries="${R63_READY_TRIES:-30}"
 _r63_ready_wait="${R63_READY_WAIT:-3}"
-_r63_metrics_url="${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}"
+_r63_metrics_url="${W63_PIPE_API}"
 _r63_tok="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
 _r63_ready=0
 _r63_n=1
@@ -505,7 +520,7 @@ else
     exit 1
 fi
 _r63_bf_metrics=$(curl -s --max-time 30 -H "Authorization: Bearer ${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
-    "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}/metrics" 2>/dev/null)
+    "${W63_PIPE_API}/metrics" 2>/dev/null)
 _r63_bf=$(printf '%s\n' "$_r63_bf_metrics" | awk '$1=="ebpf_guard_dns_socket_map_backfilled_total"{print $2+0; exit}')
 _r63_bf_cand=$(printf '%s\n' "$_r63_bf_metrics" | awk '$1=="ebpf_guard_dns_socket_map_backfill_candidates_total"{print $2+0; exit}')
 if [ -z "${_r63_bf:-}" ]; then
@@ -616,7 +631,7 @@ echo "немота по среде записана: /root/env-muteness-6.3.txt 
 #    вердикт этого не отразил (находка №257). Пишется ВНЕ $ART — контроли
 #    очищают и пересоздают $ART при старте (находка №228) и стёрли бы файл,
 #    попади он туда раньше их запуска.
-_r63_api="${VPS_IP:+http://${VPS_IP}:19090}"; _r63_api="${_r63_api:-http://localhost:19090}"
+_r63_api="$W63_PIPE_API"
 _r63_token="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
 if curl -s --max-time 30 -H "Authorization: Bearer $_r63_token" "$_r63_api/metrics" > /root/metrics-prologue-start-6.3.txt 2>/dev/null \
     && [ -s /root/metrics-prologue-start-6.3.txt ]; then
@@ -755,7 +770,7 @@ if [ -s "$ART/window-epoch.txt" ]; then
 fi
 _nd63w_lines=$(wc -l < "$_nd63w" 2>/dev/null)
 _nd63_omitted=$(printf '%s\n' "$(curl -s --max-time 30 -H "Authorization: Bearer ${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
-    "${VPS_IP:+http://${VPS_IP}:19090}${VPS_IP:-http://localhost:19090}/metrics" 2>/dev/null)" \
+    "${W63_PIPE_API}/metrics" 2>/dev/null)" \
     | awk '$1=="ebpf_guard_noise_diag_omitted_total"{print $2+0; exit}')
 
 echo "--- 6.3.9.0: диагностика шума (волна 6.3.9, разрез объёма по слоям подавления) ---"

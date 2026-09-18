@@ -125,18 +125,52 @@ _rule_count() { # $1=rule_id
 
 echo
 echo "--- 6.0.13…6.0.18 (container_escape_proc_write=6.0.15, argv[0]-спуф=6.0.16/6.0.17): переиспользуем wave7-controls.sh как есть ---"
+# ГРУППА ПИШЕТСЯ ПОКРИТЕРИЙНО, А НЕ ОДНОЙ ЗАПИСЬЮ (правка 18.09.2026, найдена
+# первым же боевым снятием опорного набора — находка №376). Раньше все шесть
+# контролей сворачивались в ОДИН класс под ключом «6.0.13»: один провалившийся
+# контроль уводил в FAIL всю шестёрку, и в сравнении прогона B не участвовал
+# НИ ОДИН из пяти взятых — то есть цена одного самоизрасходованного контроля
+# была слепота критерия 6.3.9.5 по всей группе. Класс каждого берётся из ДВУХ
+# источников: запись «критерий=<id>» в вердиктах wave7 (провал — приоритетнее)
+# и сторож результата «<id> доказан живьём» в его же логе
+# ([[positive-control-needs-result-sentinel]]); отсутствие обоих — тоже FAIL,
+# но с НАЗВАННЫМ классом «не исполнился», а не молчанием.
+_w3_w7_group="6.0.13 6.0.14 6.0.15 6.0.16 6.0.17 6.0.18"
 if [ -r "$SETUP/wave7-controls.sh" ]; then
     W3_W7_VERDICTS="$W3_ART/wave7-verdicts-$W3_TAG.txt"
+    W3_W7_LOG="$W3_ART/wave7-log-$W3_TAG.txt"
     DRIFT_PC_API="$W3_API" DRIFT_PC_TOKEN="$W3_TOKEN" WAVE7_VERDICTS="$W3_W7_VERDICTS" \
-        bash "$SETUP/wave7-controls.sh" 2>&1 | sed 's/^/  [6.0h\/k\/l] /'
-    if [ -s "$W3_W7_VERDICTS" ] && grep -q '^критерий=' "$W3_W7_VERDICTS"; then
-        _w7_fail_ids=$(grep '^критерий=' "$W3_W7_VERDICTS" | cut -d= -f2 | sort -u | tr '\n' ' ')
-        die "6.0.13…6.0.18: wave7-controls.sh записал провалы/неизмеримость по: ${_w7_fail_ids}(подробности — $W3_W7_VERDICTS)"
-    else
-        pass "6.0.13…6.0.18 ДОСТИГНУТО: wave7-controls.sh отработал без единой записи провала (container_escape_proc_write=6.0.15, argv[0]-спуф=6.0.16/6.0.17 включены в этот же прогон)"
-    fi
+        bash "$SETUP/wave7-controls.sh" > "$W3_W7_LOG" 2>&1
+    sed 's/^/  [6.0h\/k\/l] /' "$W3_W7_LOG"
+    for _w7c in $_w3_w7_group; do
+        if grep -q "^критерий=${_w7c}$" "$W3_W7_VERDICTS" 2>/dev/null; then
+            # ПРОВАЛ ПЕРЕВЕШИВАЕТ СТОРОЖА. wave7-controls.sh печатает «доказан
+            # живьём» и ПОСЛЕ собственного die (его die не прерывает ветку) —
+            # на 6.0.15 это видно прямо в логе: две строки, противоположные по
+            # смыслу. Класс берётся из записи о провале, а не из строки успеха.
+            _w3_label "$_w7c" FAIL
+            W3_FAILS=$((W3_FAILS + 1))
+            echo "  $_w7c FAIL (запись о провале в $W3_W7_VERDICTS)"
+        elif grep -q "${_w7c} доказан живьём" "$W3_W7_LOG" 2>/dev/null; then
+            _w3_label "$_w7c" OK
+            echo "  $_w7c OK (сторож результата: «доказан живьём»)"
+        else
+            _w3_label "$_w7c" FAIL
+            W3_FAILS=$((W3_FAILS + 1))
+            echo "  $_w7c FAIL (класс НАЗВАН: контроль не исполнился — ни записи о провале, ни сторожа результата в логе)"
+        fi
+    done
+    {
+        echo "6.0.13…6.0.18: классы записаны покритерийно, см. $W3_LABELS"
+        echo "время_UTC=$(date -u +%FT%TZ)"
+        echo "---"
+    } >> "$W3_VERDICTS" 2>/dev/null || true
 else
-    die "6.0.13…6.0.18 НЕИЗМЕРИМ: $SETUP/wave7-controls.sh не найден на стенде"
+    for _w7c in $_w3_w7_group; do
+        _w3_label "$_w7c" FAIL
+        W3_FAILS=$((W3_FAILS + 1))
+    done
+    echo "=== ОПОРНЫЙ КОНТРОЛЬ НЕИЗМЕРИМ: $SETUP/wave7-controls.sh не найден на стенде — все шесть критериев группы без класса ==="
 fi
 
 echo

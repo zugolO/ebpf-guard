@@ -101,6 +101,21 @@ var defaultSeededDirExtPairs = map[string]map[string]struct{}{
 	"/etc/":                      extSet(".cache"),
 	"/lib/x86_64-linux-gnu/":     extSet(seededLoaderExtensions...),
 	"/usr/lib/x86_64-linux-gnu/": extSet(seededLoaderExtensions...),
+	// glibc-hwcaps: the loader probes these microarchitecture subdirectories
+	// BEFORE the plain library directory on every exec, so they are the same
+	// ld.so prologue the seeding targets — the first live run with seeding
+	// enabled (wave 6.3.9.F, run B) still showed
+	// "/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/ + .2" in the window
+	// because the set missed the path, not the class. Enumerated explicitly
+	// rather than prefix-matched: a prefix would silently cover any future
+	// subdirectory, which is exactly the directory-wide blinding that finding
+	// #371 forbade.
+	"/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v2/":     extSet(seededLoaderExtensions...),
+	"/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/":     extSet(seededLoaderExtensions...),
+	"/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v4/":     extSet(seededLoaderExtensions...),
+	"/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v2/": extSet(seededLoaderExtensions...),
+	"/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/": extSet(seededLoaderExtensions...),
+	"/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v4/": extSet(seededLoaderExtensions...),
 }
 
 func extSet(exts ...string) map[string]struct{} {

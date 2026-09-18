@@ -131,3 +131,47 @@ func TestWave639F_Item5_SeedingSurvivesRestore(t *testing.T) {
 		}
 	}
 }
+
+// TestWave639F_SeededHwcaps_FromRunB covers the gap the first live run with
+// seeding enabled exposed: the loader probes glibc-hwcaps microarchitecture
+// subdirectories before the plain library directory, so
+// "/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libfoo.so.2" is the same ld.so
+// prologue as the paths already seeded — it just was not in the set, and run B
+// still scored it. The negative half guards the pair semantics: an extension
+// outside the loader set must still score as unknown in that same directory.
+func TestWave639F_SeededHwcaps_FromRunB(t *testing.T) {
+	ad := NewAnomalyDetector(0.5, time.Hour, 0.3)
+
+	for _, path := range []string{
+		"/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libfoo.so.2",
+		"/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v2/libbar.so.6",
+		"/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v4/libbaz.so.1",
+	} {
+		profile := NewProcessProfile(5151, "sleep")
+		event := &types.FileEvent{}
+		copy(event.Filename[:], path)
+		var out []AnomalyContribution
+		ad.analyzeFileBehavior(profile, event, &out)
+		for _, c := range out {
+			if c.Field == "directory" {
+				t.Fatalf("%s: seeded hwcaps pair must not emit a directory contribution, got %+v", path, c)
+			}
+		}
+	}
+
+	// Negative control: same seeded directory, extension outside the loader set.
+	profile := NewProcessProfile(5152, "sleep")
+	event := &types.FileEvent{}
+	copy(event.Filename[:], "/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/payload.sh")
+	var out []AnomalyContribution
+	ad.analyzeFileBehavior(profile, event, &out)
+	found := false
+	for _, c := range out {
+		if c.Field == "directory" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a non-loader extension in a seeded hwcaps directory must still score as an unknown directory")
+	}
+}

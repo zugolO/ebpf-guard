@@ -95,6 +95,16 @@ _w3_rego_layer_class() { # печатает хвост класса для НЕ�
 }
 
 if [ "${1:-}" = "--self-test" ]; then
+    # ГЕРМЕТИЧНОСТЬ САМОТЕСТА. Пайплайн зовёт его СВОИМ окружением — тем самым,
+    # которым потом побежит боевой набор (W3_IPV6_DNS=1, W3_REGO_PROBE=1,
+    # W3_SEND_PROBE=1, VPS_IP=…). Эти значения протекают в фикстурные прогоны:
+    # F11 ждёт от 6.3u.1 «класс=не запрошен», а контроль при W3_IPV6_DNS=1
+    # реально поднимал бы слушателя на ::1:53 и звал dig — фикстура проверяла
+    # бы не ту ветку и падала бы ровно тогда, когда её зовёт пайплайн, и только
+    # тогда. Опт-ины нормализуются ЗДЕСЬ, один раз; фикстура, которой нужна
+    # включённая ветка, включает её себе сама (F15).
+    export W3_IPV6_DNS=0 W3_REGO_PROBE=0 W3_SEND_PROBE=0
+    unset VPS_IP W3_FORCE W3_LABELS W3_VERDICTS W3_DONE W3_TOKEN_FILE 2>/dev/null || true
     # ФИКСТУРНЫЙ РЕЖИМ (item 5 волны 6.3-up, Д5). Проверяет ВЕТКИ вердиктов
     # (pass/die), реестр ролей (baseline|check, отказ невалидной роли) и отказ
     # перезаписи (реестра меток и файла вердиктов по тегу) — то есть ровно то,
@@ -311,7 +321,11 @@ W7EOF
 
     # ── F10: отсутствующий токен — die() записывает набор_целиком, а не молчит.
     F10="$ST_WORK/f10"; mkdir -p "$F10"
-    OUT=$(W3_ROLE=baseline W3_ART="$F10" W3_TAG=notoken W3_TOKEN="" W3_API="$ST_API" \
+    # W3_TOKEN_FILE указывается на заведомо несуществующий путь: иначе на
+    # стенде токен найдётся в /var/lib/ebpf-guard/token и ветка «токена нет»
+    # не исполнится вовсе (фикстура проверяла бы окружение, а не код).
+    OUT=$(W3_ROLE=baseline W3_ART="$F10" W3_TAG=notoken W3_TOKEN="" \
+          W3_TOKEN_FILE="$ST_WORK/no-such-token-file" W3_API="$ST_API" \
           SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" bash "$SELF" 2>&1)
     echo "--- F10: отсутствующий bearer-токен фиксируется как набор_целиком FAIL"
     if [ -r "$F10/baseline-labels-baseline.txt" ] && grep -q '^набор_целиком FAIL$' "$F10/baseline-labels-baseline.txt"; then
@@ -416,7 +430,7 @@ MEOF
     F15B_DIR="$ST_WORK/f15b"; mkdir -p "$F15B_DIR"
     : > "$STUB_METRICS"
     OUT=$(W3_ROLE=baseline W3_ART="$F15B_DIR" W3_TAG=t15b W3_TOKEN=x W3_API="$ST_API" \
-          SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" bash "$SELF" 2>&1)
+          W3_SEND_PROBE=1 SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" bash "$SELF" 2>&1)
     F15B=$(printf '%s' "$OUT" | grep -E '6\.3u\.6 (НЕИЗМЕРИМ|ПРОВАЛЕН|ДОСТИГНУТО)' | head -1)
     if printf '%s' "$F15A" | grep -q 'НЕИЗМЕРИМ: класс=не запрошен' \
         && printf '%s' "$F15B" | grep -q 'НЕИЗМЕРИМ: класс=серия ebpf_guard_events_total не прочитана'; then
@@ -437,7 +451,15 @@ fi
 SETUP="${SETUP:-/opt/ebpf-guard/deploy/docker-test-setup}"
 VPS_IP="${VPS_IP:-localhost}"
 W3_API="${W3_API:-http://${VPS_IP}:19090}"
-W3_TOKEN="${W3_TOKEN:-${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}}"
+# Путь к файлу токена — ПЕРЕМЕННАЯ, и это не украшение. Фикстура F10 проверяет
+# ветку «токена нет вовсе», подавая W3_TOKEN="", но `${W3_TOKEN:-…}` считает
+# пустую строку неустановленной и падает на чтение файла. На маке файла нет, и
+# фикстура проходила; на СТЕНДЕ он есть всегда — токен находился, набор
+# исполнялся целиком, и F10 объявлял расхождение. То есть фикстура проверяла
+# ОКРУЖЕНИЕ, а не код, и с заведением преflight'а (run-6.3-pipeline.sh, шаг 0б3)
+# эта разница стала жёстким стопом прогона — стоила запуска 19.09.2026.
+W3_TOKEN_FILE="${W3_TOKEN_FILE:-/var/lib/ebpf-guard/token}"
+W3_TOKEN="${W3_TOKEN:-${EBPF_GUARD_TOKEN:-$(grep '^admin=' "$W3_TOKEN_FILE" 2>/dev/null | cut -d= -f2)}}"
 W3_KUBECTL="${W3_KUBECTL:-/usr/local/bin/kubectl}"
 W3_NS="${W3_NS:-w639f3}"
 W3_POD="${W3_POD:-w639f3-dns-probe}"

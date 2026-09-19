@@ -404,12 +404,33 @@ MEOF
         _st_fail "F14: без серии=$F14A (ждали 1), с серией=$F14B (ждали 0), нечитаем=$F14C (ждали 2)"
     fi
 
+    # ── F15: 6.3u.6 (№390/№392) — обе ветки НЕИЗМЕРИМ называют класс.
+    # Живьём метка требует агента и резолвера; офлайн проверяется то, что
+    # проверяемо и что уже однажды стоило прогона: метка не молчит и не
+    # притворяется вердиктом о продукте, когда прибор не отвечает.
+    echo "--- F15: 6.3u.6 без запроса и без читаемого /metrics — НЕИЗМЕРИМ с классом"
+    F15="$ST_WORK/f15"; mkdir -p "$F15"
+    OUT=$(W3_ROLE=baseline W3_ART="$F15" W3_TAG=t15a W3_TOKEN=x W3_API="$ST_API" \
+          W3_SEND_PROBE=0 SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" bash "$SELF" 2>&1)
+    F15A=$(printf '%s' "$OUT" | grep -E '6\.3u\.6 (НЕИЗМЕРИМ|ПРОВАЛЕН|ДОСТИГНУТО)' | head -1)
+    F15B_DIR="$ST_WORK/f15b"; mkdir -p "$F15B_DIR"
+    : > "$STUB_METRICS"
+    OUT=$(W3_ROLE=baseline W3_ART="$F15B_DIR" W3_TAG=t15b W3_TOKEN=x W3_API="$ST_API" \
+          SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" bash "$SELF" 2>&1)
+    F15B=$(printf '%s' "$OUT" | grep -E '6\.3u\.6 (НЕИЗМЕРИМ|ПРОВАЛЕН|ДОСТИГНУТО)' | head -1)
+    if printf '%s' "$F15A" | grep -q 'НЕИЗМЕРИМ: класс=не запрошен' \
+        && printf '%s' "$F15B" | grep -q 'НЕИЗМЕРИМ: класс=серия ebpf_guard_events_total не прочитана'; then
+        echo "    OK  обе ветки называют класс, ни одна не выносит вердикт о продукте"
+    else
+        _st_fail "F15: без запроса: ${F15A:-<пусто>}; без метрик: ${F15B:-<пусто>}"
+    fi
+
     echo
     if [ "$ST_FAILS" -gt 0 ]; then
         echo "САМОТЕСТ ПРОВАЛЕН: расхождений $ST_FAILS"
         exit 1
     fi
-    echo "САМОТЕСТ ПРОЙДЕН: 13 фикстур, расхождений 0"
+    echo "САМОТЕСТ ПРОЙДЕН: 14 фикстур, расхождений 0"
     exit 0
 fi
 
@@ -852,7 +873,29 @@ _w3_rego_hits() { # $1 = rule_id, $2 = подстрока message
         '[.[]|select(.rule_id==$r)|select((.message//"")|contains($m))]|length' 2>/dev/null || echo 0
 }
 
-echo "--- 6.3u.3: №384 — dns.rego is_dga_domain достижим (зеркало предиката в префильтре) ---"
+echo "--- 6.3u.3: №384+№394 — dga_domain достижим НА ИЗМЕРЕННОЙ ШКАЛЕ (два зонда) ---"
+# ПРЕДМЕТ МЕТКИ ПОСЛЕ КАЛИБРОВКИ №394. Предикат dns.rego is_dga_domain стал
+# конъюнкцией структурной половины (длина первой метки, отсутствие словарного
+# куска, цифра) и оценки биграммной модели (details.dns_ngram_score >= 0.55).
+# Поэтому одного зонда мало: положительный доказывает, что правило достижимо,
+# отрицательный — что калибровка ДЕЙСТВУЕТ. У обоих структура ИСТИНА, и
+# различает их ровно шкала:
+#
+#   положительный  a7f3k9x2m5p8q1z4.…  оценка 0.612  -> dga_domain обязан быть
+#   отрицательный  server1234567890.…  оценка 0.430  -> обязан НЕ быть
+#
+# Ноль отрицательного значим ТОЛЬКО рядом с единицей положительного: сам по
+# себе он неотличим от мёртвого слоя, ненастроенного агента и неушедшего
+# зонда ([[positive-control-needs-result-sentinel]]). Поэтому вердикт метки
+# читает ОБЕ величины, а не каждую по отдельности.
+#
+# Суффикс — РОВНО 4 шестнадцатеричных знака, и это не косметика: модель берёт
+# МАКСИМУМ по меткам имени и не судит метки короче ngramMinLabelLen (10). С 8
+# знаками метка «w63u3<tag>» становится 13-символьной случайной строкой и сама
+# набирает 0.55…0.64 — отрицательный зонд перестал бы быть отрицательным и
+# метка выносила бы ложный ПРОВАЛ калибровки. Офлайн-сторож
+# TestWave6_3u_StandProbeFixturesStayAttributable перебирает суффиксы и
+# пришпиливает ОБА зонда: на стенде такая поломка выглядит как вердикт.
 if [ "$W3_REGO_PROBE" != "1" ]; then
     die "6.3u.3 НЕИЗМЕРИМ: класс=не запрошен (W3_REGO_PROBE=0)"
 elif ! command -v python3 >/dev/null 2>&1; then
@@ -862,45 +905,38 @@ elif ! command -v jq >/dev/null 2>&1; then
 elif [ -z "${W3_PROBE_PY:-}" ] || [ ! -s "$W3_PROBE_PY" ]; then
     die "6.3u.3 НЕИЗМЕРИМ: класс=тело зонда не собрано (mktemp в ${TMPDIR:-/tmp})"
 else
-    # Имя зонда: первая метка 16 символов, с цифрами, без словарного куска —
-    # is_dga_domain(dns.rego) ИСТИНА. Измерено 19.09.2026: n-gram 0.430,
-    # IsDGA=false, длина 30 (<50), TLD не подозрительный — то есть НИ ОДНА
-    # другая проверка префильтра его не форвардит. Суффикс случайный: он и
-    # есть ключ атрибуции в message обогащённого алерта.
-    # РОВНО 4 шестнадцатеричных знака, и это не косметика. Модель n-gram
-    # берёт МАКСИМУМ по меткам имени, а метки короче ngramMinLabelLen (10)
-    # не судит вовсе. С 8 знаками вторая метка «w63u3<tag>» становится
-    # 13-символьной случайной строкой и сама набирает 0.55…0.64 — измерено
-    # 19.09.2026, — то есть событие форвардилось бы по ОБЩЕЙ ветке n-gram, а
-    # не по зеркалу is_dga_domain, и метка 6.3u.3 зачла бы себе чужой
-    # механизм. С 4 знаками метка девятисимвольная, модель её пропускает, и
-    # оценка всего имени остаётся 0.430 — ниже порога, единственный путь
-    # форварда — предикат №384.
     _w3u3_tag=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 4)
-    _w3u3_qname="server1234567890.w63u3${_w3u3_tag}.invalid"
+    _w3u3_pos="a7f3k9x2m5p8q1z4.w63u3${_w3u3_tag}.invalid"
+    _w3u3_neg="server1234567890.w63u3${_w3u3_tag}.invalid"
     _w3u3_base_before=$(_rule_count dns_any_query)
-    _w3u3_pid=$(python3 "$W3_PROBE_PY" "$_w3u3_qname" 2>/dev/null)
+    _w3u3_pid=$(python3 "$W3_PROBE_PY" "$_w3u3_pos" 2>/dev/null)
     _w3u3_rc=$?
+    _w3u3_negpid=$(python3 "$W3_PROBE_PY" "$_w3u3_neg" 2>/dev/null)
+    _w3u3_negrc=$?
     sleep "${W3_593C_SLEEP:-15}"
     _w3u3_base_after=$(_rule_count dns_any_query)
-    _w3u3_enriched=$(_w3_rego_hits dga_domain "$_w3u3_qname")
+    _w3u3_enriched=$(_w3_rego_hits dga_domain "$_w3u3_pos")
+    _w3u3_negenriched=$(_w3_rego_hits dga_domain "$_w3u3_neg")
     _w3_rego_layer_wired; _w3u3_layer=$?
-    echo "  зонд qname=$_w3u3_qname (pid=${_w3u3_pid:-?}, rc=$_w3u3_rc), dns_any_query ${_w3u3_base_before:-0}->${_w3u3_base_after:-0}, алертов dga_domain с этим qname: ${_w3u3_enriched:-0}, слой Rego: $(_w3_rego_layer_class "$_w3u3_layer")"
-    if [ "$_w3u3_rc" -ne 0 ] || [ -z "${_w3u3_pid:-}" ]; then
-        # Сторож результата ВПЕРЕДИ вердикта: не состоявшийся send(2) даёт
+    _w3u3_base_delta=$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))
+    echo "  зонд+ $_w3u3_pos (pid=${_w3u3_pid:-?}, rc=$_w3u3_rc) -> dga_domain ${_w3u3_enriched:-0}"
+    echo "  зонд− $_w3u3_neg (pid=${_w3u3_negpid:-?}, rc=$_w3u3_negrc) -> dga_domain ${_w3u3_negenriched:-0}"
+    echo "  dns_any_query ${_w3u3_base_before:-0}->${_w3u3_base_after:-0} (Δ$_w3u3_base_delta), слой Rego: $(_w3_rego_layer_class "$_w3u3_layer")"
+    if [ "$_w3u3_rc" -ne 0 ] || [ -z "${_w3u3_pid:-}" ] || [ "$_w3u3_negrc" -ne 0 ] || [ -z "${_w3u3_negpid:-}" ]; then
+        # Сторож результата ВПЕРЕДИ вердикта: не состоявшаяся запись даёт
         # приборный ноль, а не ответ о детекте ([[positive-control-needs-result-sentinel]]).
-        die "6.3u.3 НЕИЗМЕРИМ: класс=зонд не отправлен (rc=$_w3u3_rc) — ноль ниже был бы приборным"
+        die "6.3u.3 НЕИЗМЕРИМ: класс=зонд не отправлен (rc+=$_w3u3_rc, rc−=$_w3u3_negrc) — нули ниже были бы приборными"
+    elif [ "${_w3u3_enriched:-0}" -gt 0 ] && [ "${_w3u3_negenriched:-0}" -eq 0 ]; then
+        pass "6.3u.3 ДОСТИГНУТО: dga_domain поднят по зонду с оценкой 0.612 и НЕ поднят по зонду с 0.430 при одинаковой структуре — правило достижимо (№384) И судит по измеренной шкале (№394)"
     elif [ "${_w3u3_enriched:-0}" -gt 0 ]; then
-        pass "6.3u.3 ДОСТИГНУТО: алерт по зонду $_w3u3_qname несёт rule_id=dga_domain из Rego — префильтр больше не глушит собственный предикат dns.rego (№384 закрыта живьём)"
-    elif [ "$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))" -gt 0 ] && [ "$_w3u3_layer" -ne 0 ]; then
-        # Базовый алерт есть, обогащения нет — но и спрашивать не у кого:
-        # предмет метки (префильтр) стоит ЗА слоем, которого на этом бинаре
-        # нет. Класс №389 идёт ВПЕРЕДИ вердикта о префильтре.
-        die "6.3u.3 НЕИЗМЕРИМ: класс=$(_w3_rego_layer_class "$_w3u3_layer"); базовый алерт при этом поднят (dns_any_query +$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))) — зонд дошёл, вопрос №384 остаётся незаданным"
-    elif [ "$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))" -gt 0 ]; then
-        die "6.3u.3 ПРОВАЛЕН: базовый алерт поднят (dns_any_query +$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))), но обогащения dga_domain по этому qname НЕТ — зеркало is_dga_domain в префильтре не работает на этом бинаре (проверить, что на ноде бинарь с правкой №384, и что policy.rego.enabled не выключен конфигом)"
+        die "6.3u.3 ПРОВАЛЕН: правило достижимо (зонд+ дал $_w3u3_enriched), но зонд− с оценкой 0.430 ТОЖЕ поднял dga_domain ($_w3u3_negenriched) — на ноде бинарь/правила без калибровки №394, и класс ложных срабатываний на кластерных именах жив"
+    elif [ "$_w3u3_layer" -ne 0 ]; then
+        # Предмет метки стоит ЗА слоем Rego: без него вопрос не задан вовсе.
+        die "6.3u.3 НЕИЗМЕРИМ: класс=$(_w3_rego_layer_class "$_w3u3_layer"); базовых алертов за окно Δ=$_w3u3_base_delta — зонды дошли, вопрос о dga_domain остаётся незаданным"
+    elif [ "$_w3u3_base_delta" -gt 0 ]; then
+        die "6.3u.3 ПРОВАЛЕН: базовый алерт поднят (dns_any_query +$_w3u3_base_delta) и слой Rego подключён, но dga_domain по зонду+ (оценка 0.612) НЕТ. Читать в порядке: details.dns_ngram_score не кладётся в алерт (правка №394 не в сборке — предикат тогда неопределён и правило молчит ВСЕГДА) ЛИБО префильтр выбрасывает событие до Rego"
     else
-        die "6.3u.3 НЕИЗМЕРИМ: класс=базовый YAML-алерт не поднялся вовсе (dns_any_query не вырос) — вопрос о префильтре не задан: коллектор не увидел запрос ЛИБО правило dns_any_query сужено/молчит. Читать вместе с 6.3.0/6.3.1 этого же прогона"
+        die "6.3u.3 НЕИЗМЕРИМ: класс=базовый YAML-алерт не поднялся вовсе (dns_any_query не вырос) — вопрос о dga_domain не задан: коллектор не увидел запрос ЛИБО правило dns_any_query сужено/молчит. Читать вместе с 6.3.0/6.3.1 и 6.3u.6 этого же прогона"
     fi
 fi
 
@@ -1020,6 +1056,123 @@ time.sleep(40)
         else
             die "6.3u.5 ПРОВАЛЕН: собственный сокет на ::1:53 жив, а разбор udp6 по всем netns дал 0 inode'ов — либо формат таблицы на этом ядре иной, чем предполагает connectedPort53Inodes, либо сокет не попал ни в одну прочитанную таблицу. Пока так, бэкфилл по udp6 на этой ноде не добавляет НИЧЕГО, и величины IPv6 нельзя приписывать №383"
         fi
+    fi
+fi
+
+echo
+echo "--- 6.3u.6: №390/№392 — send(2) и sendmsg(msg_name=NULL) на присоединённом DNS-сокете видны ---"
+# ЧТО МЕРИТСЯ. Три способа записи в ОДИН и тот же по устройству присоединённый
+# UDP-сокет, каждый своим процессом и своим сокетом, каждый — парой равных
+# соседних окон «фон / проба» по ebpf_guard_events_total{type=dns}:
+#
+#   write(2)                     — путь, видимый и ДО правок №390/№392;
+#   send(2)  = sendto(…, NULL)   — слеп до №390;
+#   sendmsg(msg_name=NULL)       — слеп до №392, и так шлёт настоящий резолвер.
+#
+# ПОЧЕМУ write ИДЁТ ПЕРВЫМ И ЯВЛЯЕТСЯ СТОРОЖЕМ. Ноль по send сам по себе
+# неотличим от «DNS-коллектор на этой ноде не видит ничего» — нет резолвера,
+# не поднят коллектор, не тот порт. write(2) отвечает на этот вопрос ОТДЕЛЬНО
+# и в том же прогоне: пока он не дал прироста, вердикт метки — НЕИЗМЕРИМ с
+# названным классом, а не ПРОВАЛ продукта
+# ([[positive-control-needs-result-sentinel]]).
+#
+# ПОЧЕМУ ПАРНЫЕ ОКНА. Фон снимается непосредственно перед пробой и той же
+# длины — та же дисциплина, какой снималась IPv6-слепота (№354…№356). Свои же
+# чтения /metrics курлом попадают в ОБА окна одинаково, поэтому разность от
+# них не зависит; величина вердикта — проба минус фон, а не абсолют.
+W3_SEND_PROBE="${W3_SEND_PROBE:-1}"
+W3_SEND_WIN="${W3_SEND_WIN:-8}"
+W3_SEND_N="${W3_SEND_N:-5}"
+if [ "$W3_SEND_PROBE" != "1" ]; then
+    die "6.3u.6 НЕИЗМЕРИМ: класс=не запрошен (W3_SEND_PROBE=0)"
+elif ! command -v python3 >/dev/null 2>&1; then
+    die "6.3u.6 НЕИЗМЕРИМ: класс=python3 недоступен — нечем послать зонд тремя способами записи"
+elif ! command -v curl >/dev/null 2>&1; then
+    die "6.3u.6 НЕИЗМЕРИМ: класс=curl недоступен — /metrics не прочитать"
+else
+    _w3u6_dir=$(mktemp -d "${TMPDIR:-/tmp}/w63u6.XXXXXX" 2>/dev/null)
+    if [ -z "${_w3u6_dir:-}" ]; then
+        die "6.3u.6 НЕИЗМЕРИМ: класс=mktemp в ${TMPDIR:-/tmp} не сработал"
+    else
+        cat > "$_w3u6_dir/probe.py" <<'W63U6PY'
+import os, random, socket, struct, sys
+
+method, count, qname = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+q = b"".join(bytes([len(p)]) + p.encode() for p in qname.split(".")) + b"\x00"
+pkt = struct.pack("!HHHHHH", random.randint(0, 65535), 0x0100, 1, 0, 0, 0) + q + struct.pack("!HH", 1, 1)
+
+ns = "127.0.0.53"
+try:
+    with open("/etc/resolv.conf") as f:
+        for line in f:
+            if line.startswith("nameserver"):
+                ns = line.split()[1]
+                break
+except OSError:
+    pass
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    # connect() обязателен: он и кладёт fd в dns_socket_map (trace_connect),
+    # а весь предмет находок №390/№392 — узнаёт ли ядро сокет по fd, когда
+    # адреса в самом вызове нет.
+    s.connect((ns, 53))
+    for _ in range(count):
+        if method == "send":
+            s.send(pkt)              # -> sendto(fd, …, NULL, 0)
+        elif method == "sendmsg":
+            s.sendmsg([pkt])         # -> sendmsg(fd, {msg_name=NULL}, 0)
+        elif method == "write":
+            os.write(s.fileno(), pkt)
+        else:
+            raise SystemExit("unknown method %s" % method)
+    print(os.getpid())
+except OSError as e:
+    print("ERR %s" % e, file=sys.stderr)
+    sys.exit(1)
+finally:
+    s.close()
+W63U6PY
+        # Чтение серии — ТОТ ЖЕ читатель, что у 6.3u.1 (№391): полное имя
+        # серии и отличие «серии нет» от «серия равна нулю».
+        _w3u6_read() {
+            curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" \
+                >"$_w3u6_dir/m.txt" 2>/dev/null
+            [ -s "$_w3u6_dir/m.txt" ] || return 2
+            _w3_dns_events_sum <"$_w3u6_dir/m.txt"
+        }
+        _w3u6_bad=""
+        _w3u6_line=""
+        for _w3u6_m in write send sendmsg; do
+            _w3u6_a=$(_w3u6_read); _w3u6_rc=$?
+            [ "$_w3u6_rc" -eq 0 ] || { _w3u6_bad="$_w3u6_rc"; break; }
+            sleep "$W3_SEND_WIN"
+            _w3u6_b=$(_w3u6_read); _w3u6_rc=$?
+            [ "$_w3u6_rc" -eq 0 ] || { _w3u6_bad="$_w3u6_rc"; break; }
+            _w3u6_pid=$(python3 "$_w3u6_dir/probe.py" "$_w3u6_m" "$W3_SEND_N" \
+                "w63u6-${_w3u6_m}-$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n').invalid" 2>/dev/null)
+            _w3u6_prc=$?
+            sleep "$W3_SEND_WIN"
+            _w3u6_c=$(_w3u6_read); _w3u6_rc=$?
+            [ "$_w3u6_rc" -eq 0 ] || { _w3u6_bad="$_w3u6_rc"; break; }
+            eval "_w3u6_bg_$_w3u6_m=\$(( \${_w3u6_b:-0} - \${_w3u6_a:-0} ))"
+            eval "_w3u6_pr_$_w3u6_m=\$(( \${_w3u6_c:-0} - \${_w3u6_b:-0} ))"
+            eval "_w3u6_prc_$_w3u6_m=$_w3u6_prc"
+            eval "_w3u6_line=\"\$_w3u6_line $_w3u6_m: фон \$_w3u6_bg_$_w3u6_m / проба \$_w3u6_pr_$_w3u6_m (pid=${_w3u6_pid:-?}, rc=$_w3u6_prc);\""
+        done
+        echo "  окна по ${W3_SEND_WIN}с, по $W3_SEND_N пакетов на способ:$_w3u6_line"
+        if [ -n "$_w3u6_bad" ]; then
+            die "6.3u.6 НЕИЗМЕРИМ: класс=серия ebpf_guard_events_total не прочитана (rc=$_w3u6_bad: 1 — серии нет в срезе, 2 — срез пуст) — все величины ниже были бы анкерными (№391)"
+        elif [ "${_w3u6_prc_write:-1}" -ne 0 ] || [ "${_w3u6_prc_send:-1}" -ne 0 ] || [ "${_w3u6_prc_sendmsg:-1}" -ne 0 ]; then
+            die "6.3u.6 НЕИЗМЕРИМ: класс=зонд не отработал (rc write=${_w3u6_prc_write:-?}, send=${_w3u6_prc_send:-?}, sendmsg=${_w3u6_prc_sendmsg:-?}) — нули ниже были бы приборными"
+        elif [ "${_w3u6_pr_write:-0}" -le "${_w3u6_bg_write:-0}" ]; then
+            die "6.3u.6 НЕИЗМЕРИМ: класс=DNS-коллектор не видит даже write(2) (проба ${_w3u6_pr_write:-0} против фона ${_w3u6_bg_write:-0}) — вопрос про send(2)/sendmsg() на этой ноде не задан вовсе: нет резолвера на порту 53, не поднят dns-коллектор либо агент без правки №328"
+        elif [ "${_w3u6_pr_send:-0}" -gt "${_w3u6_bg_send:-0}" ] && [ "${_w3u6_pr_sendmsg:-0}" -gt "${_w3u6_bg_sendmsg:-0}" ]; then
+            pass "6.3u.6 ДОСТИГНУТО: все три способа записи в присоединённый сокет видны — write ${_w3u6_pr_write}/фон ${_w3u6_bg_write}, send ${_w3u6_pr_send}/фон ${_w3u6_bg_send}, sendmsg ${_w3u6_pr_sendmsg}/фон ${_w3u6_bg_sendmsg} (№390 и №392 сняты живьём: trace_sendto и trace_sendmsg падают в dns_socket_map при NULL-адресе)"
+        else
+            die "6.3u.6 ПРОВАЛЕН: write(2) виден (${_w3u6_pr_write} против фона ${_w3u6_bg_write}), а send=${_w3u6_pr_send:-0}/фон ${_w3u6_bg_send:-0}, sendmsg=${_w3u6_pr_sendmsg:-0}/фон ${_w3u6_bg_sendmsg:-0}. Ноль по send — находка №390, ноль по sendmsg — №392; на ноде бинарь без этих правок ЛИБО make generate собрал старый bpf/dns.bpf.c (правки лежат в C, не в Go)"
+        fi
+        rm -rf "$_w3u6_dir" 2>/dev/null || true
     fi
 fi
 

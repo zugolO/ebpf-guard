@@ -88,7 +88,30 @@ rules[{"rule_id": "miner_dns_query", "severity": "critical", "message": msg, "ac
 	msg := sprintf("DNS query from miner %s: %s", [input.comm, input.event.dns.qname])
 }
 
-# Helper: Check if domain looks like DGA (high entropy)
+# Helper: Check if domain looks like DGA.
+#
+# №394 (волна 6.3-up, 19.09.2026): предикат переведён на ИЗМЕРЕННУЮ шкалу.
+# Структурная часть (длина первой метки, отсутствие словарного куска, наличие
+# цифры) осталась как была, но САМА ПО СЕБЕ она не про алгоритмическую
+# генерацию, а про форму имени — и матчила штатные кластерные имена:
+# prometheus-k8s-0, elasticsearch-data-2, redis-master-0, kafka-broker-0,
+# node-000000000001 — все до одного проходили её целиком.
+#
+# Добавлен конъюнкт по биграммной модели (input.details.dns_ngram_score,
+# считается в Go тем же детектором, что питает правило dns_dga_ngram; порог
+# 0.55 — тот же, что у правила и у префильтра, новых чисел не заведено).
+# Измерено 19.09.2026 на 25 именах: 18 штатных дают 0.310…0.542, 7
+# DGA-подобных — 0.551…0.625. Порог 0.55 разделяет выборку целиком; зазор
+# узкий (0.542 против 0.551), и это свойство выборки, а не гарантия.
+#
+# Новый предикат — СТРОГОЕ ПОДМНОЖЕСТВО старого: конъюнкт только добавлен.
+# Поэтому изменение не может потерять ни одного имени, которое правило ловило
+# раньше, — оно может только перестать поднимать ложные.
+#
+# Отсутствие поля details.dns_ngram_score делает предикат НЕОПРЕДЕЛЁННЫМ, то
+# есть правило не срабатывает. Отказ закрытый и осознанный: поле кладёт тот же
+# бинарь, что несёт этот файл ([[rule-fields-and-binary-ship-together]]), а
+# ложный поток dga_domain на кластерных именах дороже пропуска.
 is_dga_domain(domain) {
 	# Remove TLD
 	parts := split(domain, ".")
@@ -101,6 +124,9 @@ is_dga_domain(domain) {
 	# Check entropy (simplified - high entropy indicator)
 	not contains_dictionary_word(name)
 	contains_digit(name)
+
+	# Measured scale (№394): bigram model score, computed in Go.
+	input.details.dns_ngram_score >= 0.55
 }
 
 # Helper: Check if domain contains dictionary word

@@ -2413,6 +2413,15 @@ func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []
 				enhancedAlerts = append(enhancedAlerts, alert)
 				continue
 			}
+			// №394: dns.rego's is_dga_domain is expressed on the MEASURED
+			// scale (the bigram model that feeds dns_dga_ngram), and Rego has
+			// no way to compute it — so the score travels in the alert
+			// details, which alertToInput already hands to OPA. Attached only
+			// for events that actually reach Rego: the analyzer is cached, but
+			// the field would otherwise be paid for on every DNS alert.
+			// Visible in the store afterwards on purpose — the value a verdict
+			// turned on must be readable next to the verdict.
+			alert = withDNSNgramScore(alert)
 		}
 
 		// Evaluate alert against Rego policies

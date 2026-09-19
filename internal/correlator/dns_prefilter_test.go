@@ -257,38 +257,134 @@ func BenchmarkDNSPrefilter(b *testing.B) {
 	})
 }
 
-// Finding №384 (wave 6.3 item 1, plan.md ревизия 19.09.2026). dns.rego's own
-// is_dga_domain is a length+digit heuristic and is NOT the n-gram model: it
-// fires on names whose n-gram score is nowhere near any usable threshold. The
-// prefilter gated the whole dga_domain rule on the n-gram score alone, so this
-// entire class was silently dropped at EVERY value of dgaThreshold — the
-// threshold fix of item 1 could not reach it. Each name below was measured on
-// DefaultDNSPrefilter's analyzer, 19.09.2026; the score is recorded so a later
-// model change shows up here as a changed comment, not as silent regression.
-func TestDNSPrefilter_ForwardsRegoOwnDGAHeuristic(t *testing.T) {
+// Finding №384 → №394. dns.rego's is_dga_domain WAS a length+digit heuristic
+// that the n-gram score neither implies nor is implied by, and the prefilter
+// gated the whole dga_domain rule on the score alone — that class was dropped
+// at EVERY value of dgaThreshold (№384). №394 closed it from the other end:
+// the predicate now carries the score as a conjunct, so it became a strict
+// subset of the prefilter's n-gram gate, and coverage holds by construction
+// rather than by a mirrored branch.
+//
+// This test proves the subset relation directly, on both halves of the
+// measured table: names the calibration REMOVED from the rule (score < 0.55)
+// and names it KEPT (score >= 0.55). Scores were measured 19.09.2026 on
+// DefaultDNSPrefilter's analyzer and are pinned here, so a model change shows
+// up as a failing assertion rather than as a silently different product.
+func TestWave6_3up_RegoDGAIsSubsetOfPrefilterGate(t *testing.T) {
 	f := DefaultDNSPrefilter()
-	for _, tc := range []struct {
+
+	// Штатные кластерные имена: структурная половина предиката ИСТИНА на
+	// каждом, и до №394 правило dga_domain поднималось на всех них.
+	benign := []struct {
 		qname string
 		ngram float64
 	}{
-		{"server1234567890.example.com", 0.430},
-		{"node-000000000001.cluster.local", 0.525},
 		{"prometheus-k8s-0.monitoring.svc.cluster.local", 0.398},
-	} {
-		if !dnsRegoDGAHeuristic(tc.qname) {
-			t.Fatalf("%q: fixture no longer satisfies dns.rego is_dga_domain — "+
-				"pick another name, the test has stopped testing anything", tc.qname)
-		}
-		if score := DefaultNgramDGADetector().Score(tc.qname); score > f.dgaThreshold {
-			t.Fatalf("%q: n-gram score %v now clears dgaThreshold %v on its own — "+
-				"the fixture no longer demonstrates the gap (measured %v on 19.09.2026)",
-				tc.qname, score, f.dgaThreshold, tc.ngram)
-		}
-		ev := &types.DNSEvent{QName: tc.qname, QType: 1, Direction: types.DNSDirectionQuery}
-		if !f.ShouldEvaluate(ev, "curl", "systemd") {
-			t.Errorf("%q: dropped before Rego, but dns.rego's dga_domain rule matches it", tc.qname)
-		}
+		{"elasticsearch-data-2.logging.svc.cluster.local", 0.310},
+		{"redis-master-0.default.svc.cluster.local", 0.316},
+		{"postgres-primary-1.db.svc.cluster.local", 0.353},
+		{"kafka-broker-0.kafka.svc.cluster.local", 0.515},
+		{"node-000000000001.cluster.local", 0.525},
+		{"server1234567890.example.com", 0.430},
+		{"grafana-agent-7d9f8b6c4-x2m5p.monitoring.svc", 0.523},
+		{"ip-10-0-14-233.eu-central-1.compute.internal", 0.542},
+		{"worker-node-12.internal.example.com", 0.410},
+		{"user1234-workspace-42.dev.example.com", 0.407},
+		{"backup-2026-09-19.storage.example.com", 0.471},
+		{"cache-node-0f3a91.internal", 0.497},
+		{"argocd-repo-server-6b5.argocd.svc.cluster.local", 0.460},
+		{"otel-collector-7c9.observability.svc", 0.440},
 	}
+	// DGA-подобные: и структура, и шкала. Эти правило ловило и ловит.
+	dga := []struct {
+		qname string
+		ngram float64
+	}{
+		{"a7f3k9x2m5p8q1z4.com", 0.612},
+		{"xkqjw3mzp9vbn2ld.net", 0.618},
+		{"q9z8x7c6v5b4n3m2.info", 0.611},
+		{"zxcvbnmasdfgh123.org", 0.551},
+		{"h7g2k9p4m1n8b3v6.biz", 0.619},
+		{"kqwmdlrpxbqmzz12.com", 0.625},
+		{"1z2x3c4v5b6n7m8q.top", 0.611},
+	}
+
+	// Порог один на три читателя: здесь, в префильтре и в rules/rego/dns.rego.
+	require.InDelta(t, dnsRegoNgramThreshold, f.dgaThreshold, 1e-9,
+		"порог префильтра разошёлся с порогом предиката dns.rego — "+
+			"инвариант подмножества перестал держаться")
+
+	for _, tc := range benign {
+		score := DefaultNgramDGADetector().Score(tc.qname)
+		require.InDelta(t, tc.ngram, score, 0.002,
+			"%q: измеренная оценка сдвинулась (было %.3f, стало %.3f) — "+
+				"модель изменилась, таблицу калибровки №394 надо переснять", tc.qname, tc.ngram, score)
+		require.True(t, dnsRegoDGAHeuristic(tc.qname),
+			"%q: структурная половина перестала матчить — имя больше не показывает "+
+				"класс ложных срабатываний, ради которого стоит в таблице", tc.qname)
+		require.Less(t, score, dnsRegoNgramThreshold,
+			"%q: штатное имя перешагнуло порог — калибровка №394 больше не "+
+				"убирает этот ложный класс", tc.qname)
+	}
+
+	for _, tc := range dga {
+		score := DefaultNgramDGADetector().Score(tc.qname)
+		require.InDelta(t, tc.ngram, score, 0.002,
+			"%q: измеренная оценка сдвинулась (было %.3f, стало %.3f)", tc.qname, tc.ngram, score)
+		require.True(t, dnsRegoDGAHeuristic(tc.qname),
+			"%q: структурная половина не матчит — имя не может поднять dga_domain "+
+				"ни при какой оценке", tc.qname)
+		require.GreaterOrEqual(t, score, dnsRegoNgramThreshold,
+			"%q: DGA-имя не добирает до порога — калибровка №394 потеряла бы его", tc.qname)
+
+		// ИНВАРИАНТ ПОКРЫТИЯ: всё, на чём срабатывает предикат Rego, обязано
+		// доехать до Rego. Проверяется на comm/parent_comm, которые сами по
+		// себе не форвардят ничего.
+		ev := &types.DNSEvent{QName: tc.qname, QType: 1, Direction: types.DNSDirectionQuery}
+		require.True(t, f.ShouldEvaluate(ev, "curl", "systemd"),
+			"%q: предикат dns.rego истинен, а префильтр событие выбрасывает — "+
+				"дыра класса №384 вернулась", tc.qname)
+	}
+}
+
+// Граница читается ОДИНАКОВО по обе стороны: Rego сравнивает `>= 0.55`, и
+// префильтр обязан форвардить ровно от того же значения. Пока сравнение здесь
+// было строгим `>`, имя с оценкой в точности 0.55 удовлетворяло бы правилу и
+// никогда до него не доезжало — та же дыра №384 шириной в одну точку.
+func TestWave6_3up_PrefilterForwardsExactlyAtThreshold(t *testing.T) {
+	f := NewDNSPrefilter(3.5, 0.55, nil)
+	analysis := f.analyzer.AnalyzeDomain("zxcvbnmasdfgh123.org")
+	require.GreaterOrEqual(t, analysis.NgramScore, f.dgaThreshold)
+	require.True(t, f.ShouldEvaluate(
+		&types.DNSEvent{QName: "zxcvbnmasdfgh123.org", QType: 1, Direction: types.DNSDirectionQuery},
+		"curl", "systemd"))
+
+	// И обратная сторона: имя ПОД порогом со структурой предиката больше не
+	// форвардится вовсе — цена калибровки, которую №384 платил наоборот.
+	require.False(t, f.ShouldEvaluate(
+		&types.DNSEvent{QName: "prometheus-k8s-0.monitoring.svc.cluster.local", QType: 1, Direction: types.DNSDirectionQuery},
+		"curl", "systemd"),
+		"штатное кластерное имя снова уезжает в OPA — калибровка не даёт выигрыша, ради которого делалась")
+}
+
+// withDNSNgramScore кладёт в детали ИМЕННО ту величину, по которой судит
+// dns.rego: без неё предикат неопределён и правило не срабатывает вовсе
+// ([[rule-fields-and-binary-ship-together]] — поле условия и бинарь едут
+// вместе, и здесь это одна и та же сборка).
+func TestWave6_3up_NgramScoreTravelsInAlertDetails(t *testing.T) {
+	alert := types.Alert{Event: types.Event{Type: types.EventDNS, DNS: &types.DNSEvent{
+		QName: "a7f3k9x2m5p8q1z4.com", QType: 1, Direction: types.DNSDirectionQuery,
+	}}}
+	got := withDNSNgramScore(alert)
+	score, ok := got.Details["dns_ngram_score"].(float64)
+	require.True(t, ok, "поле dns_ngram_score не положено в details — предикат dns.rego "+
+		"останется неопределённым, и dga_domain не сработает НИ РАЗУ")
+	require.InDelta(t, 0.612, score, 0.002)
+	require.GreaterOrEqual(t, score, dnsRegoNgramThreshold)
+
+	// Не-DNS алерт не трогается вовсе.
+	plain := types.Alert{Event: types.Event{Type: types.EventSyscall}}
+	require.Nil(t, withDNSNgramScore(plain).Details)
 }
 
 // The mirror must stay a mirror, not a superset: ordinary cluster names that
@@ -364,26 +460,44 @@ func TestDNSPrefilter_ForwardsLineageReachableParents(t *testing.T) {
 func TestWave6_3u_StandProbeFixturesStayAttributable(t *testing.T) {
 	f := DefaultDNSPrefilter()
 
-	// ── 6.3u.3: форвард обязан идти ТОЛЬКО через зеркало is_dga_domain.
-	// Перебор суффиксов покрывает случайность зонда: у контроля их 65536,
-	// и «обычно проходит» здесь не годится.
+	// ── 6.3u.3 после калибровки №394 — ДВА зонда, и оба обязаны остаться
+	// тем, чем задуманы, при любом из 65536 суффиксов контроля.
+	//
+	//   положительный: структура ∧ оценка >= 0.55  -> dga_domain обязан подняться;
+	//   отрицательный: структура ∧ оценка <  0.55  -> обязан НЕ подниматься.
+	//
+	// Отрицательный зонд и есть контроль самой калибровки: до №394 он поднимал
+	// dga_domain (это и был класс ложных срабатываний на кластерных именах), и
+	// его ноль на стенде значим только рядом с единицей положительного — иначе
+	// это ноль неизвестного происхождения ([[positive-control-needs-result-sentinel]]).
 	for _, tag := range []string{"a1b2", "ffff", "0f1e", "0000", "dead", "9c4e"} {
-		qname := "server1234567890.w63u3" + tag + ".invalid"
-		ev := &types.DNSEvent{QName: qname, QType: 255, Direction: types.DNSDirectionQuery}
+		pos := "a7f3k9x2m5p8q1z4.w63u3" + tag + ".invalid"
+		neg := "server1234567890.w63u3" + tag + ".invalid"
 
-		require.True(t, dnsRegoDGAHeuristic(qname),
-			"%q: зонд 6.3u.3 перестал удовлетворять предикату dns.rego is_dga_domain — "+
-				"контроль на стенде вынесет НЕИЗМЕРИМ и потратит прогон", qname)
-		require.True(t, f.ShouldEvaluate(ev, "python3", "bash"),
-			"%q: зонд 6.3u.3 не форвардится вовсе", qname)
+		for _, qname := range []string{pos, neg} {
+			require.True(t, dnsRegoDGAHeuristic(qname),
+				"%q: зонд 6.3u.3 перестал удовлетворять структурной половине "+
+					"is_dga_domain — контроль перестал спрашивать про калибровку", qname)
+			require.LessOrEqual(t, len(qname), 50,
+				"%q: имя переросло 50 символов — форвард пойдёт по long_dns_query", qname)
+		}
 
-		analysis := f.analyzer.AnalyzeDomain(qname)
-		require.False(t, analysis.IsDGA || analysis.NgramScore > f.dgaThreshold,
-			"%q: имя форвардится ещё и по ветке n-gram (score=%.3f, IsDGA=%v) — "+
-				"6.3u.3 зачтёт себе чужой механизм и НЕ докажет №384. Суффикс обязан "+
-				"оставаться короче ngramMinLabelLen", qname, analysis.NgramScore, analysis.IsDGA)
-		require.LessOrEqual(t, len(qname), 50,
-			"%q: имя переросло 50 символов — форвард пойдёт по long_dns_query", qname)
+		posScore := DefaultNgramDGADetector().Score(pos)
+		require.GreaterOrEqual(t, posScore, dnsRegoNgramThreshold,
+			"%q: положительный зонд не добирает до порога (%.3f) — 6.3u.3 недостижим "+
+				"по построению и потратит прогон", pos, posScore)
+		require.True(t, f.ShouldEvaluate(
+			&types.DNSEvent{QName: pos, QType: 255, Direction: types.DNSDirectionQuery}, "python3", "bash"),
+			"%q: положительный зонд не форвардится вовсе", pos)
+
+		negScore := DefaultNgramDGADetector().Score(neg)
+		require.Less(t, negScore, dnsRegoNgramThreshold,
+			"%q: отрицательный зонд перешагнул порог (%.3f) — он перестал быть "+
+				"контролем калибровки и его ноль на стенде нечего будет читать", neg, negScore)
+		require.False(t, f.ShouldEvaluate(
+			&types.DNSEvent{QName: neg, QType: 255, Direction: types.DNSDirectionQuery}, "python3", "bash"),
+			"%q: отрицательный зонд всё ещё уезжает в OPA — калибровка №394 не "+
+				"даёт выигрыша, и её контроль это не заметит", neg)
 	}
 
 	// ── 6.3u.4: имя доброкачественное во ВСЕХ смыслах, форвард даёт только

@@ -14,10 +14,14 @@
 // regoPartitionModules (internal/policy/rego_enabled.go), which is
 // {base.rego, dns.rego, LINEAGE.REGO} — not dns.rego alone.  Wave 6.3 item 1,
 // findings №384/№385 (plan.md, ревизия 19.09.2026) found this claim false on
-// two counts and both are covered here now: dns.rego's own is_dga_domain is a
-// length+digit heuristic that the n-gram score does not imply (№384), and
-// lineage.rego's parent_comm rules fire on a DNS event whose qname is entirely
-// benign (№385).
+// two counts: dns.rego's own is_dga_domain was a length+digit heuristic that
+// the n-gram score does not imply (№384), and lineage.rego's parent_comm rules
+// fire on a DNS event whose qname is entirely benign (№385).  №385 is covered
+// by an explicit check here; №384 was closed from the other side by №394 —
+// is_dga_domain now carries the n-gram score as a conjunct, which makes it a
+// strict subset of this file's n-gram gate, so the coverage claim for that rule
+// is a proved invariant (TestWave6_3up_RegoDGAIsSubsetOfPrefilterGate) rather
+// than a mirrored branch.
 package correlator
 
 import (
@@ -136,24 +140,25 @@ func (f *DNSPrefilter) ShouldEvaluate(dns *types.DNSEvent, comm, parentComm stri
 		return true
 	}
 
-	// ── dga_domain rule, dns.rego's OWN predicate (finding №384) ─────────────
-	// dns.rego's is_dga_domain is a length+digit heuristic, NOT the n-gram
-	// model: first label > 12 chars, no dictionary substring, at least one
-	// digit. The n-gram score does not imply it and is not implied by it —
-	// "server1234567890.example.com" scores 0.430 (far under any usable
-	// n-gram threshold) yet satisfies the Rego rule exactly. Checking the
-	// n-gram score alone, as this prefilter did until wave 6.3 item 1, meant
-	// dga_domain could never fire on such a name however the threshold was
-	// set. Allocation-free, and short-circuits the analyzer below.
-	if dns.Direction == types.DNSDirectionQuery && dnsRegoDGAHeuristic(qname) {
-		return true
-	}
-
-	// ── DGA / entropy checks (dga_domain rule in dns.rego + base.rego) ───────
+	// ── DGA checks: dns.rego's dga_domain and the n-gram gate ───────────────
 	// AnalyzeDomain uses the shared 512-entry FIFO cache; repeated queries for
 	// the same domain cost only a map lookup (~50 ns, 0 allocs).
+	//
+	// Finding №384 added a separate branch here that mirrored dns.rego's
+	// is_dga_domain (a length+digit heuristic the n-gram score neither implies
+	// nor is implied by). №394 removed the need for it: is_dga_domain now
+	// carries the n-gram score as a conjunct, so the Rego predicate became a
+	// STRICT SUBSET of this gate and the mirror branch could never forward
+	// anything this one does not. The mirror itself (dnsRegoDGAHeuristic)
+	// stays as the reference the coverage invariant is proved against —
+	// TestWave6_3up_RegoDGAIsSubsetOfPrefilterGate walks it directly, so the
+	// claim is a test, not a comment.
+	//
+	// The comparison is >=, not >, ON PURPOSE: Rego compares the same score
+	// against the same 0.55 with >=, and a domain scoring exactly at the
+	// threshold would otherwise satisfy the rule while never reaching it.
 	analysis := f.analyzer.AnalyzeDomain(qname)
-	if analysis.IsDGA || analysis.NgramScore > f.dgaThreshold {
+	if analysis.IsDGA || analysis.NgramScore >= f.dgaThreshold {
 		return true
 	}
 
@@ -235,7 +240,7 @@ func isMinerComm(comm string) bool {
 		strings.Contains(lower, "xmr")
 }
 
-// dnsRegoDGAHeuristic mirrors dns.rego's is_dga_domain helper exactly:
+// dnsRegoDGAHeuristic mirrors the STRUCTURAL half of dns.rego's is_dga_domain:
 //
 //	parts := split(domain, "."); count(parts) > 1
 //	name  := parts[0]; count(name) > 12
@@ -255,11 +260,15 @@ func isMinerComm(comm string) bool {
 // lowering the threshold, which is all item 1 originally did, never reached
 // this class at all.
 //
-// Deliberately an EXACT mirror rather than a looser superset: the dictionary
-// list is what keeps this from forwarding most ordinary long hostnames, and a
-// superset here would move real volume onto OPA for no added coverage. The
-// length test uses len() (bytes) against OPA's count() (runes), which can only
-// over-forward on a non-ASCII label — the safe direction for a prefilter.
+// №394 added the second half — `input.details.dns_ngram_score >= 0.55` — after
+// the names in that table turned out to be exactly what the rule was firing on
+// in a normal cluster. This function stays the STRUCTURAL half alone, and the
+// full predicate is structural ∧ score >= threshold. It is no longer a branch
+// of ShouldEvaluate (the n-gram gate there subsumes it); it is the reference
+// the coverage invariant is proved against in the tests.
+//
+// The length test uses len() (bytes) against OPA's count() (runes), which can
+// only over-forward on a non-ASCII label — the safe direction for a prefilter.
 func dnsRegoDGAHeuristic(qname string) bool {
 	dot := strings.IndexByte(qname, '.')
 	if dot < 0 {
@@ -331,4 +340,26 @@ func isRegoShellComm(comm string) bool {
 		return true
 	}
 	return false
+}
+
+// dnsRegoNgramThreshold is the n-gram score at or above which dns.rego's
+// is_dga_domain treats a name as algorithm-generated (№394). It is the SAME
+// number as the dns_dga_ngram rule's threshold and as DefaultDNSPrefilter's
+// dgaThreshold — one measured scale, one boundary, three readers. Changing it
+// here without changing rules/rego/dns.rego breaks the subset invariant, and
+// TestWave6_3up_RegoDGAIsSubsetOfPrefilterGate says so.
+const dnsRegoNgramThreshold = 0.55
+
+// withDNSNgramScore attaches the bigram-model score of the query name to the
+// alert's details so dns.rego can compare against it (№394). Returns the alert
+// unchanged for non-DNS events.
+func withDNSNgramScore(alert types.Alert) types.Alert {
+	if alert.Event.DNS == nil {
+		return alert
+	}
+	if alert.Details == nil {
+		alert.Details = getDetailsMap()
+	}
+	alert.Details["dns_ngram_score"] = globalDNSAnalyzer.AnalyzeDomain(alert.Event.DNS.QName).NgramScore
+	return alert
 }

@@ -26,8 +26,12 @@
  * fds in dns_socket_map; trace_sendmmsg, trace_write, trace_writev,
  * trace_recvmsg_enter/exit, trace_read_enter/exit, and
  * trace_recvfrom_enter/exit all consult that map to recognize DNS traffic
- * on those fds. trace_sendmsg/trace_sendto are kept for callers that do
- * pass an explicit destination address.
+ * on those fds. trace_sendmsg/trace_sendto take EITHER path: an explicit
+ * destination address when the caller passes one, and the same
+ * dns_socket_map lookup when it does not (№390 — send(2) is sendto(2) with
+ * a NULL address, and sendmsg() on a connected socket carries
+ * msg_name=NULL; both used to return early and were invisible whatever the
+ * socket was).
  */
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
@@ -595,14 +599,25 @@ int trace_sendmsg(struct trace_event_raw_sys_enter *ctx)
 	if (!msg)
 		return 0;
 
-	/* Get destination address */
+	/* EARLY FILTER: Only process DNS packets (UDP port 53).
+	 *
+	 * Two admissible ways in, and NEITHER may be skipped (№390):
+	 *   - msg_name != NULL — an unconnected socket naming its destination
+	 *     per message, filtered by address as before;
+	 *   - msg_name == NULL — a CONNECTED socket, which is what sendmsg()
+	 *     on a resolver socket actually looks like. Returning early here
+	 *     made every such query invisible no matter what fd it went out
+	 *     on, exactly as it did in trace_sendto below. The fd is the only
+	 *     identity such a call carries, and dns_socket_map already holds
+	 *     it (trace_connect, plus the userspace backfill).
+	 */
 	bpf_probe_read_user(&addr, sizeof(addr), &msg->msg_name);
-	if (!addr)
+	if (addr) {
+		if (!is_dns_packet(addr, true))
+			return 0;
+	} else if (!is_dns_socket_fd((__u32)ctx->args[0])) {
 		return 0;
-
-	/* EARLY FILTER: Only process DNS packets (UDP port 53) */
-	if (!is_dns_packet(addr, true))
-		return 0;
+	}
 
 	/* Get IO vector */
 	bpf_probe_read_user(&iov, sizeof(iov), &msg->msg_iov);
@@ -628,14 +643,26 @@ int trace_sendto(struct trace_event_raw_sys_enter *ctx)
 	void *buf;
 	int len;
 
-	/* Get destination address from syscall argument */
+	/* EARLY FILTER: Only process DNS packets (UDP port 53).
+	 *
+	 * №390, измерено на ОДНОМ сокете тремя способами записи: send(2) Δ=0,
+	 * write(2) Δ=1, sendto(2) с адресом Δ=1. На Linux send(fd, buf, len,
+	 * flags) — это ровно sendto(fd, buf, len, flags, NULL, 0): glibc
+	 * (и Python-ий socket.send) не имеет отдельного номера syscall'а для
+	 * send. Прежний `if (!addr) return 0;` означал, что резолвер,
+	 * пишущий в присоединённый сокет через send(), невидим целиком —
+	 * ровно та же слепота, что у coredns до №328, и не пойманная
+	 * прежними контролями только потому, что dig шлёт sendmmsg+write.
+	 * Адрес — не единственная идентичность вызова: fd её несёт всегда, и
+	 * карта dns_socket_map уже заполнена trace_connect'ом и бэкфиллом.
+	 */
 	addr = (struct sockaddr *)ctx->args[4];
-	if (!addr)
+	if (addr) {
+		if (!is_dns_packet(addr, true))
+			return 0;
+	} else if (!is_dns_socket_fd((__u32)ctx->args[0])) {
 		return 0;
-
-	/* EARLY FILTER: Only process DNS packets (UDP port 53) */
-	if (!is_dns_packet(addr, true))
-		return 0;
+	}
 
 	/* Get buffer and length */
 	buf = (void *)ctx->args[1];

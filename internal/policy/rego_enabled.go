@@ -17,6 +17,16 @@ import (
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
+// Supported reports whether Rego/OPA evaluation is actually compiled into this
+// binary. It is true here — built WITH the `rego` build tag: policies are loaded, compiled and evaluated.
+//
+// №389 (волна 6.3-up): without this constant the two build variants are
+// indistinguishable at run time — NewRegoEngine succeeds either way, the stub
+// silently answers "no decisions", and `policy.rego.enabled: true` reads as a
+// working layer in the config while nothing evaluates. Callers use it to say so
+// out loud rather than to change behaviour.
+const Supported = true
+
 // PolicyDecision represents the result of evaluating an alert against Rego policies.
 type PolicyDecision struct {
 	RuleID         string

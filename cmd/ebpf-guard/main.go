@@ -40,6 +40,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/k8s"
 	"github.com/zugolO/ebpf-guard/internal/migration"
 	"github.com/zugolO/ebpf-guard/internal/osint"
+	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
@@ -448,6 +449,54 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Warn("correlator: noise diagnostics ENABLED — one journal line per alert, including alerts suppressed by dedup and the rate limiter. This is a wave 6.3.9 measurement instrument; leave it off in production",
 			slog.Int("max_lines_per_window", cfg.Correlator.NoiseDiag.MaxLinesPerWindow),
 			slog.Int("window_seconds", cfg.Correlator.NoiseDiag.Window))
+	}
+
+	// Rego/OPA post-filter layer (policy.rego.*).
+	//
+	// №389 (волна 6.3-up): до этой правки слой не подключался к движку
+	// ВООБЩЕ. `policy.rego.enabled` читался из конфига (дефолт — true),
+	// движок нигде не строился, engineCfg.RegoEngine и
+	// engineCfg.EnableRegoEval оставались нулевыми, и весь
+	// evaluateRegoPolicies за условием `if ce.enableRegoEval &&
+	// ce.regoEngine != nil` не исполнялся ни разу. Ни один алерт прогона
+	// collect-6.3-up не нёс details.rego_action — при включённом конфиге.
+	//
+	// Две половины мёртвости были независимы, и вторая переживает первую:
+	// даже подключённый движок в бинаре БЕЗ тега `rego` — заглушка
+	// (internal/policy/rego_disabled.go), чей Evaluate всегда возвращает
+	// nil. `make build` собирает именно такой бинарь; Rego живёт только в
+	// `make build-rego`/`build-full`. Поэтому слой подключается только
+	// когда он действительно есть, а несовпадение конфига со сборкой
+	// объявляется вслух: молчаливая заглушка неотличима от работающего
+	// слоя, и ровно это стоило волне одного прогона
+	// ([[rule-fields-and-binary-ship-together]]).
+	if cfg.Policy.Rego.Enabled {
+		switch {
+		case !policy.Supported:
+			slog.Warn("policy/rego: policy.rego.enabled=true, but this binary is built WITHOUT the `rego` build tag — no policy is evaluated and no alert will carry rego_action. Rebuild with `make build-rego` (or set policy.rego.enabled=false to silence this)",
+				slog.String("rules_dir", cfg.Policy.Rego.RulesDir))
+		default:
+			regoRulesDir := cfg.Policy.Rego.RulesDir
+			if regoRulesDir == "" {
+				regoRulesDir = "rules/rego"
+			}
+			regoEngine, err := policy.NewRegoEngine(policy.RegoEngineConfig{
+				Enabled:  true,
+				RulesDir: regoRulesDir,
+			})
+			if err != nil {
+				// Не фатально: Rego — обогащение поверх YAML-правил, и без
+				// него агент детектит ровно то же, что детектил. Но и молчать
+				// нельзя — это ровно тот класс, что находка №389.
+				slog.Error("policy/rego: engine init failed; alerts continue WITHOUT Rego enrichment",
+					slog.String("rules_dir", regoRulesDir), slog.Any("error", err))
+			} else {
+				engineCfg.RegoEngine = regoEngine
+				engineCfg.EnableRegoEval = true
+				slog.Info("policy/rego: policy layer wired to the correlation engine",
+					slog.String("rules_dir", regoRulesDir))
+			}
+		}
 	}
 
 	// Wire the anomaly score reporter so profiler scores are published to

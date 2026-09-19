@@ -36,6 +36,64 @@
 set -u
 export PATH="$PATH:/usr/local/bin:/usr/local/go/bin"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ЧТЕНИЕ СЕРИИ /metrics — ОДНА ФУНКЦИЯ, И САМОТЕСТ ЗОВЁТ ЕЁ ЖЕ.
+#
+# №391 (прогон collect-6.3-up). Метка 6.3u.1 читала серию якорем
+# `/^events_total\{/`, а публикуется она как `ebpf_guard_events_total`
+# (internal/exporter/prometheus.go): якорь не совпадал НИКОГДА, Δ=0 печаталась
+# при любом состоянии продукта, и метка была недостижима по построению —
+# ровно класс [[verdict-line-that-can-only-say-unmeasurable]], только наизнанку
+# (строка, способная только на ПРОВАЛ). Вскрылось противоречием двух величин
+# одного вердикта: Δ событий = 0 при Δ алертов манифеста = 7.
+#
+# Поэтому читатель:
+#   • несёт ПОЛНОЕ имя серии (префикс ebpf_guard_ — часть имени, не украшение);
+#   • ОТЛИЧАЕТ «серии нет в срезе» от «серия есть и равна нулю» кодом возврата:
+#     первое — приборная слепота (не тот бинарь, не тот якорь, пустой срез),
+#     второе — вердикт о продукте ([[empty-metric-snapshot-is-silently-zero]]);
+#   • живёт ВЫШЕ фикстурного блока, чтобы самотест звал ИМЕННО ЕГО, а не свою
+#     копию awk ([[self-test-fixtures-miss-live-log-shape]]).
+# rc=0 — серия найдена (stdout = сумма по type="dns"); rc=1 — серии нет вовсе.
+_w3_dns_events_sum() { # stdin = срез /metrics
+    awk -F'[{} ]' '
+        /^ebpf_guard_events_total\{/ { seen = 1; if ($0 ~ /type="dns"/) s += $NF }
+        END { print s+0; exit (seen ? 0 : 1) }'
+}
+
+# СЛОЙ REGO ПОДКЛЮЧЁН К ДВИЖКУ ИЛИ НЕТ — ОТДЕЛЬНЫЙ КЛАСС, А НЕ ОТТЕНОК ПРОВАЛА.
+#
+# №389 (прогон collect-6.3-up): `engineCfg.RegoEngine`/`EnableRegoEval` не
+# присваивались в main.go ВООБЩЕ, движок строился дефолтным конфигом с обоими
+# нулевыми полями, и `evaluateRegoPolicies` за условием
+# `if ce.enableRegoEval && ce.regoEngine != nil` не исполнялся ни разу. На
+# таком бинаре 6.3u.3/6.3u.4 обязаны сказать НЕИЗМЕРИМ с этим классом: вопрос
+# «глушит ли префильтр» на нём не задан вовсе, а прежний текст ПРОВАЛЕНА звал
+# проверять правку №384 в сборке — то есть честно врал о причине каждый прогон
+# ([[verdict-class-must-come-from-content-not-label]]).
+#
+# Различитель — серия `ebpf_guard_rego_queue_occupancy`: engine.go создаёт и
+# регистрирует её ТОЛЬКО внутри `if config.EnableRegoEval && config.RegoEngine
+# != nil` (RegisterMetrics пропускает nil-коллекторы). Её присутствие в
+# /metrics и есть «слой подключён», и это свойство БИНАРЯ И КОНФИГА, а не
+# нашего предположения о них. Отсутствие всего среза — третий исход, и он
+# тоже не ПРОВАЛ.
+# rc=0 — слой подключён; rc=1 — не подключён; rc=2 — срез /metrics не читается.
+_w3_rego_layer_wired() {
+    local snap
+    snap=$(curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" 2>/dev/null)
+    [ -n "$snap" ] || return 2
+    printf '%s\n' "$snap" | grep -q '^ebpf_guard_rego_queue_occupancy' || return 1
+    return 0
+}
+_w3_rego_layer_class() { # печатает хвост класса для НЕИЗМЕРИМ
+    case "$1" in
+        1) printf '%s' "слой Rego НЕ подключён к движку на этом бинаре (серии ebpf_guard_rego_queue_occupancy нет в /metrics — №389: engineCfg.RegoEngine/EnableRegoEval не присваиваются, либо бинарь собран без -tags rego, либо policy.rego.enabled=false). Про префильтр вопрос не задан" ;;
+        2) printf '%s' "срез /metrics не читается — подключённость слоя Rego не установлена" ;;
+        *) printf '%s' "слой Rego подключён" ;;
+    esac
+}
+
 if [ "${1:-}" = "--self-test" ]; then
     # ФИКСТУРНЫЙ РЕЖИМ (item 5 волны 6.3-up, Д5). Проверяет ВЕТКИ вердиктов
     # (pass/die), реестр ролей (baseline|check, отказ невалидной роли) и отказ
@@ -76,6 +134,20 @@ def count():
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # /metrics отдаётся из файла STUB_METRICS, читаемого НА КАЖДЫЙ запрос —
+        # фикстура F14 меняет его между вызовами (item 6 волны 6.3-up, №389).
+        if self.path.startswith("/metrics"):
+            try:
+                with open(os.environ.get("STUB_METRICS", "/nonexistent"), "rb") as f:
+                    body = f.read()
+            except Exception:
+                body = b""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if not self.path.startswith("/api/v1/alerts"):
             self.send_response(404); self.end_headers(); return
         n = count()
@@ -91,6 +163,11 @@ srv.serve_forever()
 PYEOF
     export STUB_STATE="$ST_WORK/stub-state"
     echo 0 > "$STUB_STATE"
+    # Экспорт ДО запуска стаба: дочерний процесс наследует окружение один раз,
+    # при старте. Заданный позже, STUB_METRICS не доехал бы до него вовсе, и
+    # F14 читала бы пустой срез (rc=2) на всех трёх ветках.
+    export STUB_METRICS="$ST_WORK/stub-metrics.txt"
+    : > "$STUB_METRICS"
     python3 "$ST_WORK/stub.py" > "$ST_WORK/stub-port.txt" 2>"$ST_WORK/stub-err.txt" &
     ST_STUB_PID=$!
     ST_PORT=""
@@ -273,12 +350,66 @@ W7EOF
         _st_fail "F12: вывод: $(printf '%s' "$OUT" | grep '6\.3u\.2')"
     fi
 
+    # ── F13: читатель серии events_total — ТРИ исхода, не два (№391).
+    # Фикстура зовёт _w3_dns_events_sum, а не свою копию awk: дефект №391 жил
+    # ИМЕННО в тексте якоря, и сторож, несущий собственный awk, пропустил бы
+    # его снова ([[self-test-fixtures-miss-live-log-shape]]).
+    cat > "$ST_WORK/metrics-real.txt" <<'MEOF'
+# HELP ebpf_guard_events_total Total number of kernel events processed
+# TYPE ebpf_guard_events_total counter
+ebpf_guard_events_total{namespace="",node="ebaka2",pod="",type="dns"} 41
+ebpf_guard_events_total{namespace="",node="ebaka2",pod="",type="syscall"} 9123
+ebpf_guard_events_total{namespace="ns1",node="ebaka2",pod="p1",type="dns"} 1
+ebpf_guard_alerts_total{rule_id="dns_any_query",severity="warning"} 7
+MEOF
+    cat > "$ST_WORK/metrics-nodns.txt" <<'MEOF'
+ebpf_guard_events_total{namespace="",node="ebaka2",pod="",type="syscall"} 9123
+MEOF
+    cat > "$ST_WORK/metrics-noseries.txt" <<'MEOF'
+ebpf_guard_alerts_total{rule_id="dns_any_query",severity="warning"} 7
+go_goroutines 42
+MEOF
+    echo "--- F13: читатель ebpf_guard_events_total — сумма / ноль серии / отсутствие серии"
+    F13SUM=$(_w3_dns_events_sum <"$ST_WORK/metrics-real.txt"); F13RC=$?
+    F13Z=$(_w3_dns_events_sum <"$ST_WORK/metrics-nodns.txt"); F13ZRC=$?
+    F13N=$(_w3_dns_events_sum <"$ST_WORK/metrics-noseries.txt"); F13NRC=$?
+    # Тот самый прежний якорь: на боевом срезе он обязан не совпасть НИ РАЗУ —
+    # это и есть воспроизведение №391 в фикстуре, а не пересказ его словами.
+    F13OLD=$(awk -F'[{} ]' '/^events_total\{/ && /type="dns"/{s+=$NF} END{print s+0}' "$ST_WORK/metrics-real.txt")
+    if [ "$F13SUM" = "42" ] && [ "$F13RC" -eq 0 ] \
+        && [ "$F13Z" = "0" ] && [ "$F13ZRC" -eq 0 ] \
+        && [ "$F13N" = "0" ] && [ "$F13NRC" -eq 1 ] \
+        && [ "$F13OLD" = "0" ]; then
+        echo "    OK  сумма=42 (rc=0), серия без dns=0 (rc=0), серии нет=rc1; прежний якорь на том же срезе даёт 0 — №391 воспроизведена"
+    else
+        _st_fail "F13: сумма=$F13SUM/rc=$F13RC, без dns=$F13Z/rc=$F13ZRC, без серии=$F13N/rc=$F13NRC, прежний якорь=$F13OLD"
+    fi
+
+    # ── F14: различитель подключённости слоя Rego (№389) — три исхода.
+    # Стаб отдаёт /metrics из файла, содержимое которого фикстура меняет между
+    # вызовами, поэтому проверяется ИМЕННО та функция, что зовут 6.3u.3/6.3u.4.
+    echo "--- F14: _w3_rego_layer_wired различает подключён / не подключён / срез нечитаем"
+    W3_TOKEN=x
+    W3_API="$ST_API"
+    printf 'ebpf_guard_alerts_total{rule_id="x"} 1\n' > "$STUB_METRICS"
+    _w3_rego_layer_wired; F14A=$?
+    printf 'ebpf_guard_rego_queue_occupancy 0\nebpf_guard_alerts_total{rule_id="x"} 1\n' > "$STUB_METRICS"
+    _w3_rego_layer_wired; F14B=$?
+    W3_API="http://127.0.0.1:1" _w3_rego_layer_wired; F14C=$?
+    W3_API="$ST_API"
+    if [ "$F14A" -eq 1 ] && [ "$F14B" -eq 0 ] && [ "$F14C" -eq 2 ] \
+        && printf '%s' "$(_w3_rego_layer_class 1)" | grep -q '№389'; then
+        echo "    OK  без серии=1, с серией=0, срез нечитаем=2, класс называет №389"
+    else
+        _st_fail "F14: без серии=$F14A (ждали 1), с серией=$F14B (ждали 0), нечитаем=$F14C (ждали 2)"
+    fi
+
     echo
     if [ "$ST_FAILS" -gt 0 ]; then
         echo "САМОТЕСТ ПРОВАЛЕН: расхождений $ST_FAILS"
         exit 1
     fi
-    echo "САМОТЕСТ ПРОЙДЕН: 11 фикстур, расхождений 0"
+    echo "САМОТЕСТ ПРОЙДЕН: 13 фикстур, расхождений 0"
     exit 0
 fi
 
@@ -545,11 +676,13 @@ PYEOF
         if ! kill -0 "$_631u1_listener_pid" 2>/dev/null; then
             die "6.3u.1 НЕИЗМЕРИМ: класс=слушатель ::1:53 не поднялся ($(cat "$_631u1_stub_dir/listener.log" 2>/dev/null | tr '\n' ' ' | cut -c1-200))"
         else
-            _631u1_metrics_total() {
-                curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" 2>/dev/null \
-                    | awk -F'[{} ]' '/^events_total\{/ && /type="dns"/{s+=$NF} END{print s+0}'
+            _631u1_snap() { # $1 = файл среза
+                curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" \
+                    >"$1" 2>/dev/null
             }
-            _631u1_before=$(_631u1_metrics_total)
+            _631u1_snap "$_631u1_stub_dir/metrics-before.txt"
+            _631u1_before=$(_w3_dns_events_sum <"$_631u1_stub_dir/metrics-before.txt")
+            _631u1_series_rc=$?
             # Опорный счёт алертов манифеста берётся ДО зонда: ревизия
             # 19.09.2026 нашла, что метка считала алерты манифеста
             # АБСОЛЮТНЫМ числом по всему стору. На непустом сторе (а к этому
@@ -566,13 +699,29 @@ PYEOF
             sleep "${W3_593C_SLEEP:-15}"
             kill "$_631u1_listener_pid" >/dev/null 2>&1
             wait "$_631u1_listener_pid" 2>/dev/null
-            _631u1_after=$(_631u1_metrics_total)
+            _631u1_snap "$_631u1_stub_dir/metrics-after.txt"
+            _631u1_after=$(_w3_dns_events_sum <"$_631u1_stub_dir/metrics-after.txt")
+            # rc снимается СЛЕДУЮЩЕЙ строкой, до любой другой команды: `[ ... ]
+            # || x=$?` подставил бы код возврата самого теста, а не читателя.
+            _631u1_after_rc=$?
+            [ "$_631u1_series_rc" -eq 0 ] && _631u1_series_rc=$_631u1_after_rc
             _631u1_delta=$(( ${_631u1_after:-0} - ${_631u1_before:-0} ))
             _631u1_hits_after=$(_alerts | jq --arg ids "$_631u1_ids" \
                 '[.[]|select(.rule_id as $r|($ids|split(" "))|index($r))]|length' 2>/dev/null)
             _631u1_hits=$(( ${_631u1_hits_after:-0} - ${_631u1_hits_before:-0} ))
-            echo "  ::1:53 слушатель pid=$_631u1_listener_pid, dig -6 rc=$_631u1_rc, events_total{type=dns} ${_631u1_before:-0}->${_631u1_after:-0} (Δ$_631u1_delta), алертов манифеста ${_631u1_hits_before:-0}->${_631u1_hits_after:-0} (Δ$_631u1_hits)"
-            if [ "$_631u1_rc" -ne 0 ]; then
+            echo "  ::1:53 слушатель pid=$_631u1_listener_pid, dig -6 rc=$_631u1_rc, ebpf_guard_events_total{type=dns} ${_631u1_before:-0}->${_631u1_after:-0} (Δ$_631u1_delta), алертов манифеста ${_631u1_hits_before:-0}->${_631u1_hits_after:-0} (Δ$_631u1_hits)"
+            if [ ! -s "$_631u1_stub_dir/metrics-before.txt" ] || [ ! -s "$_631u1_stub_dir/metrics-after.txt" ]; then
+                # Пустой срез молча становится нулями по ОБЕИМ границам, и
+                # дельта 0 читалась бы как вердикт о детекте
+                # ([[empty-metric-snapshot-is-silently-zero]]).
+                die "6.3u.1 НЕИЗМЕРИМ: класс=срез /metrics пуст (curl к $W3_API/metrics не отдал тела — токен, порт или агент) — обе величины ниже приборные"
+            elif [ "$_631u1_series_rc" -ne 0 ]; then
+                # №391: серии нет в срезе ВООБЩЕ. Отличать это от её нуля
+                # обязана метка, а не читатель отчёта: ноль отсутствующей
+                # серии — свойство прибора (не тот бинарь, не то имя), ноль
+                # присутствующей — свойство продукта.
+                die "6.3u.1 НЕИЗМЕРИМ: класс=серия ebpf_guard_events_total отсутствует в срезе /metrics — ноль по событиям был бы анкерным, а не вердиктом (так метка и стояла до №391: якорь /^events_total{/ не совпадал ни с одной строкой ни при каком состоянии продукта)"
+            elif [ "$_631u1_rc" -ne 0 ]; then
                 # СТОРОЖ РЕЗУЛЬТАТА ВПЕРЕДИ ВЕРДИКТА. Слушатель отвечает на
                 # любой пакет, поэтому rc!=0 означает, что запрос НЕ ушёл
                 # (нет ::1 на lo, IPv6 выключен в ядре, dig без поддержки -6).
@@ -581,9 +730,9 @@ PYEOF
                 # ([[positive-control-needs-result-sentinel]]).
                 die "6.3u.1 НЕИЗМЕРИМ: класс=IPv6-запрос не ушёл (dig -6 @::1 rc=$_631u1_rc) — величины ниже приборные, а не вердикт о детекте"
             elif [ "${_631u1_delta:-0}" -gt 0 ] && [ "${_631u1_hits:-0}" -gt 0 ]; then
-                pass "6.3u.1 ДОСТИГНУТО: events_total{type=dns} вырос на $_631u1_delta И алертов манифеста стало на $_631u1_hits больше — IPv6-запрос дошёл до коллектора и до правил (правка №388: is_dns_packet больше не AF_INET-only)"
+                pass "6.3u.1 ДОСТИГНУТО: ebpf_guard_events_total{type=dns} вырос на $_631u1_delta И алертов манифеста стало на $_631u1_hits больше — IPv6-запрос дошёл до коллектора и до правил (правка №388: is_dns_packet больше не AF_INET-only)"
             else
-                die "6.3u.1 ПРОВАЛЕН: запрос ушёл (rc=0), но events_total{type=dns} Δ=$_631u1_delta, алертов манифеста Δ=$_631u1_hits — обе величины обязаны быть >0. Читать так: ноль по обеим = trace_connect не принял AF_INET6 (на ноде бинарь без правки №388, либо make generate собрал старый bpf/dns.bpf.c); events>0 при Δалертов=0 = событие видно, а правила по нему молчат"
+                die "6.3u.1 ПРОВАЛЕН: запрос ушёл (rc=0), но ebpf_guard_events_total{type=dns} Δ=$_631u1_delta, алертов манифеста Δ=$_631u1_hits — обе величины обязаны быть >0. Читать так: ноль по обеим = trace_connect не принял AF_INET6 (на ноде бинарь без правки №388, либо make generate собрал старый bpf/dns.bpf.c); events>0 при Δалертов=0 = событие видно, а правила по нему молчат"
             fi
         fi
     fi
@@ -678,7 +827,15 @@ except OSError:
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
     s.connect((ns, 53))
-    s.send(pkt)
+    # ЗАПИСЬ ИМЕННО write(2), а не s.send(). №390: send(2) на Linux — это
+    # sendto(2) с NULL-адресом, и trace_sendto выходил на `if (!addr)`, не
+    # заглянув в dns_socket_map. Измерено на ОДНОМ сокете: send Δ=0,
+    # write Δ=1, sendto(addr) Δ=1. Пока на ноде крутится бинарь без правки
+    # №390, s.send() давал бы этим контролям ПРИБОРНЫЙ ноль и класс
+    # «базовый YAML-алерт не поднялся» — то есть контроль назвал бы своё
+    # собственное слепое пятно свойством продукта. write(2) видят ОБА
+    # бинаря, и вопрос остаётся про префильтр, а не про коллектор.
+    os.write(s.fileno(), pkt)
     print(os.getpid())
 except OSError as e:
     print("ERR %s" % e, file=sys.stderr)
@@ -727,13 +884,19 @@ else
     sleep "${W3_593C_SLEEP:-15}"
     _w3u3_base_after=$(_rule_count dns_any_query)
     _w3u3_enriched=$(_w3_rego_hits dga_domain "$_w3u3_qname")
-    echo "  зонд qname=$_w3u3_qname (pid=${_w3u3_pid:-?}, rc=$_w3u3_rc), dns_any_query ${_w3u3_base_before:-0}->${_w3u3_base_after:-0}, алертов dga_domain с этим qname: ${_w3u3_enriched:-0}"
+    _w3_rego_layer_wired; _w3u3_layer=$?
+    echo "  зонд qname=$_w3u3_qname (pid=${_w3u3_pid:-?}, rc=$_w3u3_rc), dns_any_query ${_w3u3_base_before:-0}->${_w3u3_base_after:-0}, алертов dga_domain с этим qname: ${_w3u3_enriched:-0}, слой Rego: $(_w3_rego_layer_class "$_w3u3_layer")"
     if [ "$_w3u3_rc" -ne 0 ] || [ -z "${_w3u3_pid:-}" ]; then
         # Сторож результата ВПЕРЕДИ вердикта: не состоявшийся send(2) даёт
         # приборный ноль, а не ответ о детекте ([[positive-control-needs-result-sentinel]]).
         die "6.3u.3 НЕИЗМЕРИМ: класс=зонд не отправлен (rc=$_w3u3_rc) — ноль ниже был бы приборным"
     elif [ "${_w3u3_enriched:-0}" -gt 0 ]; then
         pass "6.3u.3 ДОСТИГНУТО: алерт по зонду $_w3u3_qname несёт rule_id=dga_domain из Rego — префильтр больше не глушит собственный предикат dns.rego (№384 закрыта живьём)"
+    elif [ "$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))" -gt 0 ] && [ "$_w3u3_layer" -ne 0 ]; then
+        # Базовый алерт есть, обогащения нет — но и спрашивать не у кого:
+        # предмет метки (префильтр) стоит ЗА слоем, которого на этом бинаре
+        # нет. Класс №389 идёт ВПЕРЕДИ вердикта о префильтре.
+        die "6.3u.3 НЕИЗМЕРИМ: класс=$(_w3_rego_layer_class "$_w3u3_layer"); базовый алерт при этом поднят (dns_any_query +$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))) — зонд дошёл, вопрос №384 остаётся незаданным"
     elif [ "$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))" -gt 0 ]; then
         die "6.3u.3 ПРОВАЛЕН: базовый алерт поднят (dns_any_query +$(( ${_w3u3_base_after:-0} - ${_w3u3_base_before:-0} ))), но обогащения dga_domain по этому qname НЕТ — зеркало is_dga_domain в префильтре не работает на этом бинаре (проверить, что на ноде бинарь с правкой №384, и что policy.rego.enabled не выключен конфигом)"
     else
@@ -789,12 +952,17 @@ else
         _w3u4_base_after=$(_rule_count dns_any_query)
         _w3u4_enriched=0
         [ -n "${_w3u4_pid:-}" ] && _w3u4_enriched=$(_w3_rego_hits reverse_shell_webserver "pid=${_w3u4_pid}")
-        echo "  зонд qname=$_w3u4_qname из python3 (pid=${_w3u4_pid:-?}, rc=$_w3u4_rc) под родителем comm=nginx ($_w3u4_dir/nginx), dns_any_query ${_w3u4_base_before:-0}->${_w3u4_base_after:-0}, алертов reverse_shell_webserver с этим pid: ${_w3u4_enriched:-0}"
+        _w3_rego_layer_wired; _w3u4_layer=$?
+        echo "  зонд qname=$_w3u4_qname из python3 (pid=${_w3u4_pid:-?}, rc=$_w3u4_rc) под родителем comm=nginx ($_w3u4_dir/nginx), dns_any_query ${_w3u4_base_before:-0}->${_w3u4_base_after:-0}, алертов reverse_shell_webserver с этим pid: ${_w3u4_enriched:-0}, слой Rego: $(_w3_rego_layer_class "$_w3u4_layer")"
         rm -rf "$_w3u4_dir" 2>/dev/null || true
         if [ "$_w3u4_rc" -ne 0 ] || [ -z "${_w3u4_pid:-}" ]; then
             die "6.3u.4 НЕИЗМЕРИМ: класс=зонд не отправлен (rc=$_w3u4_rc) — ноль ниже был бы приборным"
         elif [ "${_w3u4_enriched:-0}" -gt 0 ]; then
             pass "6.3u.4 ДОСТИГНУТО: алерт DNS-события от python3 под родителем nginx несёт rule_id=reverse_shell_webserver (pid=$_w3u4_pid) — партиция dns компилирует lineage.rego, и префильтр больше не выбрасывает такие события по доброкачественности имени (№385 закрыта живьём)"
+        elif [ "$(( ${_w3u4_base_after:-0} - ${_w3u4_base_before:-0} ))" -gt 0 ] && [ "$_w3u4_layer" -ne 0 ]; then
+            # Тот же порядок, что у 6.3u.3: класс №389 идёт ВПЕРЕДИ вердикта
+            # о префильтре — за неподключённым слоем предмет метки не виден.
+            die "6.3u.4 НЕИЗМЕРИМ: класс=$(_w3_rego_layer_class "$_w3u4_layer"); базовый алерт при этом поднят (dns_any_query +$(( ${_w3u4_base_after:-0} - ${_w3u4_base_before:-0} ))) — зонд дошёл, вопрос №385 остаётся незаданным"
         elif [ "$(( ${_w3u4_base_after:-0} - ${_w3u4_base_before:-0} ))" -gt 0 ]; then
             die "6.3u.4 ПРОВАЛЕН: базовый алерт поднят (dns_any_query +$(( ${_w3u4_base_after:-0} - ${_w3u4_base_before:-0} ))), но обогащения reverse_shell_webserver по pid=$_w3u4_pid НЕТ. Читать в порядке: parent_comm в событии пуст (тогда ось не доехала из ядра — проверить bpf/common.h и поле parent_comm) ЛИБО передача parentComm в ShouldEvaluate отсутствует в этом бинаре (правка №385 не в сборке)"
         else

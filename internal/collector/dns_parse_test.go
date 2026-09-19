@@ -290,3 +290,62 @@ func TestParseDNSWireMessage_ValidHeaderNotRejected(t *testing.T) {
 	assert.Empty(t, reason)
 	assert.Equal(t, "example.com", msg.qname)
 }
+
+// buildDNSResponseWithAAAA — тот же кадр, что buildDNSResponseWithA, но с
+// AAAA-записью (TYPE 28, RDLENGTH 16). Находка №388 (волна 6.3 item 2,
+// ревизия 19.09.2026): до правки этот кадр разбирался БЕЗ ошибки и давал
+// пустой responseIPs — то есть имя, резолвящееся только по IPv6, было
+// неотличимо от имени, не резолвящегося вовсе.
+func buildDNSResponseWithAAAA(name string, ip [16]byte) []byte {
+	hdr := make([]byte, 12)
+	binary.BigEndian.PutUint16(hdr[0:], 0x1234)
+	binary.BigEndian.PutUint16(hdr[2:], 0x8180)
+	binary.BigEndian.PutUint16(hdr[4:], 1)
+	binary.BigEndian.PutUint16(hdr[6:], 1)
+
+	q := encodeDNSName(name)
+	q = appendBE16(q, 28) // QTYPE AAAA
+	q = appendBE16(q, 1)  // QCLASS IN
+
+	msg := make([]byte, 0, len(hdr)+len(q))
+	msg = append(msg, hdr...)
+	msg = append(msg, q...)
+
+	var ans []byte
+	ans = appendBE16(ans, 0xC00C)       // pointer to offset 12
+	ans = appendBE16(ans, 28)           // TYPE AAAA
+	ans = appendBE16(ans, 1)            // CLASS IN
+	ans = append(ans, 0, 0, 0x01, 0x2c) // TTL = 300
+	ans = appendBE16(ans, 16)           // RDLENGTH
+	ans = append(ans, ip[:]...)
+
+	return append(msg, ans...)
+}
+
+func TestParseDNS_AAAAAnswerIP(t *testing.T) {
+	// 2606:2800:220:1:248:1893:25c8:1946 — адрес example.com на момент
+	// написания; важна не его актуальность, а форма записи в ответе.
+	ip := [16]byte{0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0x00, 0x01,
+		0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46}
+	msg, reason := parseDNSWireMessage(buildDNSResponseWithAAAA("example.com", ip))
+	require.Equal(t, "", reason, "AAAA-ответ обязан разбираться без ошибки")
+	require.Len(t, msg.responseIPs, 1,
+		"AAAA-запись не попала в responseIPs — находка №388 вернулась: ответ по IPv6 "+
+			"неотличим от отсутствия ответа")
+	assert.Equal(t, "2606:2800:220:1:248:1893:25c8:1946", msg.responseIPs[0])
+}
+
+// Длина обязана проверяться ПО ТИПУ, а не приниматься на веру: запись с
+// TYPE 28 и RDLENGTH 4 — это не укороченный IPv6, это битый ответ, и
+// превращать его в адрес нельзя. Ровно так же ведёт себя ветка A.
+func TestParseDNS_AAAAWrongRDLengthIgnored(t *testing.T) {
+	frame := buildDNSResponseWithAAAA("example.com", [16]byte{})
+	// Переписать RDLENGTH последней записи на 4 и обрезать RDATA до 4 байт.
+	binary.BigEndian.PutUint16(frame[len(frame)-18:], 4)
+	frame = frame[:len(frame)-12]
+
+	msg, reason := parseDNSWireMessage(frame)
+	require.Equal(t, "", reason)
+	assert.Empty(t, msg.responseIPs,
+		"AAAA с RDLENGTH=4 принята за адрес — длина не сверяется с типом")
+}

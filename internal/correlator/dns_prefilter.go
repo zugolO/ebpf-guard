@@ -8,8 +8,16 @@
 // allocs for cached domains) so Rego is only invoked for the ≈5% of events
 // that show at least one suspicious signal.
 //
-// Coverage: every DNS Rego rule in dns.rego has a corresponding Go check here,
-// so no rule can fire on an event that ShouldEvaluate returns false for.
+// Coverage: every Rego rule REACHABLE FROM A DNS EVENT has a corresponding Go
+// check here, so no rule can fire on an event that ShouldEvaluate returns false
+// for.  "Reachable from a DNS event" is the whole "dns" partition of
+// regoPartitionModules (internal/policy/rego_enabled.go), which is
+// {base.rego, dns.rego, LINEAGE.REGO} — not dns.rego alone.  Wave 6.3 item 1,
+// findings №384/№385 (plan.md, ревизия 19.09.2026) found this claim false on
+// two counts and both are covered here now: dns.rego's own is_dga_domain is a
+// length+digit heuristic that the n-gram score does not imply (№384), and
+// lineage.rego's parent_comm rules fire on a DNS event whose qname is entirely
+// benign (№385).
 package correlator
 
 import (
@@ -27,8 +35,16 @@ type DNSPrefilter struct {
 	entropyThreshold float64
 
 	// dgaThreshold is the minimum NgramDGA score [0,1] that marks a domain as
-	// algorithm-generated.  A value of 0.8 gives <1% false-positive rate on
-	// benign traffic per NgramDGADetector benchmarks.
+	// algorithm-generated. Must sit at or below the dns_dga_ngram rule's own
+	// threshold (0.55, rules/dns-threats.yaml) — this prefilter's job is to
+	// guarantee that every event able to trigger a Rego/rule-engine match gets
+	// forwarded, so it can never be stricter than the rule it feeds.
+	//
+	// Finding wave-6.3 item 1 (plan.md, 19.09.2026): the previous 0.8 default
+	// was picked from a "<1% FP" code comment, not a measurement. Measured
+	// DefaultNgramDGADetector().Score() on explicit DGA strings tops out at
+	// 0.612 (a7f3k9x2m5p8q1z4) — below 0.8 for every case — so DGA domains
+	// never cleared this gate and were never forwarded.
 	dgaThreshold float64
 
 	// analyzer is the shared DNS analysis engine with its 512-entry FIFO cache.
@@ -38,11 +54,12 @@ type DNSPrefilter struct {
 
 // DefaultDNSPrefilter returns a DNSPrefilter with production-ready defaults:
 //   - entropyThreshold: 3.5 bits/char  (matches DNSEntropyCalculator.DGAThreshold)
-//   - dgaThreshold:     0.8            (NgramDGA score; <1% FP rate)
+//   - dgaThreshold:     0.55           (NgramDGA score; matches dns_dga_ngram
+//     rule threshold — the measured scale, see field comment above)
 func DefaultDNSPrefilter() *DNSPrefilter {
 	return &DNSPrefilter{
 		entropyThreshold: 3.5,
-		dgaThreshold:     0.8,
+		dgaThreshold:     0.55,
 		analyzer:         globalDNSAnalyzer,
 	}
 }
@@ -66,10 +83,16 @@ func NewDNSPrefilter(entropyThreshold, dgaThreshold float64, analyzer *DNSEntrop
 //
 // comm is the process command name (Event.Comm, trimmed of null bytes).
 // It is needed to cover the miner_dns_query and nxdomain_response rules.
+// parentComm is Event.ParentComm, trimmed the same way; it is needed to cover
+// lineage.rego, which is compiled into the same "dns" partition and whose
+// rules read input.event.parent_comm and never look at the qname at all
+// (finding №385).  Pass "" only where no parent is known — never as a
+// convenience: an empty parentComm matches no lineage rule, so it silently
+// narrows coverage back to what №385 found broken.
 //
 // Performance: ~1.5 µs/call for cached domains, ~6 µs for uncached.
 // Zero allocations for domains already in the 512-entry analysis cache.
-func (f *DNSPrefilter) ShouldEvaluate(dns *types.DNSEvent, comm string) bool {
+func (f *DNSPrefilter) ShouldEvaluate(dns *types.DNSEvent, comm, parentComm string) bool {
 	if dns == nil {
 		return true
 	}
@@ -97,6 +120,32 @@ func (f *DNSPrefilter) ShouldEvaluate(dns *types.DNSEvent, comm string) bool {
 
 	// ── miner_dns_query rule ─────────────────────────────────────────────────
 	if isMinerComm(comm) {
+		return true
+	}
+
+	// ── lineage.rego rules reachable from a DNS event (finding №385) ─────────
+	// lineage.rego is compiled into the SAME "dns" partition as dns.rego, and
+	// five of its rules need nothing but comm and parent_comm: a shell that
+	// resolves a perfectly ordinary name, spawned by nginx/postgres/init/cron/
+	// apt, is exactly the reverse-shell shape those rules exist to catch. The
+	// file-based lineage rules (container_escape_proc, sudoers_modification,
+	// ssh_key_access) require input.event.file and cannot fire here.
+	// Pure string comparisons — cheaper than the analyzer call below, so this
+	// sits in front of it.
+	if dnsRegoLineageReachable(comm, parentComm) {
+		return true
+	}
+
+	// ── dga_domain rule, dns.rego's OWN predicate (finding №384) ─────────────
+	// dns.rego's is_dga_domain is a length+digit heuristic, NOT the n-gram
+	// model: first label > 12 chars, no dictionary substring, at least one
+	// digit. The n-gram score does not imply it and is not implied by it —
+	// "server1234567890.example.com" scores 0.430 (far under any usable
+	// n-gram threshold) yet satisfies the Rego rule exactly. Checking the
+	// n-gram score alone, as this prefilter did until wave 6.3 item 1, meant
+	// dga_domain could never fire on such a name however the threshold was
+	// set. Allocation-free, and short-circuits the analyzer below.
+	if dns.Direction == types.DNSDirectionQuery && dnsRegoDGAHeuristic(qname) {
 		return true
 	}
 
@@ -184,4 +233,102 @@ func isMinerComm(comm string) bool {
 		lower == "bfgminer" ||
 		strings.Contains(lower, "miner") ||
 		strings.Contains(lower, "xmr")
+}
+
+// dnsRegoDGAHeuristic mirrors dns.rego's is_dga_domain helper exactly:
+//
+//	parts := split(domain, "."); count(parts) > 1
+//	name  := parts[0]; count(name) > 12
+//	not contains_dictionary_word(name); contains_digit(name)
+//
+// Finding №384 (wave 6.3 item 1, plan.md ревизия 19.09.2026). This predicate
+// is INDEPENDENT of NgramDGADetector: it knows nothing about bigram
+// likelihood, and the n-gram score knows nothing about label length or
+// digits. Measured on the analyzer, 19.09.2026:
+//
+//	server1234567890.example.com                  ngram 0.430  rego DGA ✓
+//	node-000000000001.cluster.local               ngram 0.525  rego DGA ✓
+//	prometheus-k8s-0.monitoring.svc.cluster.local ngram 0.398  rego DGA ✓
+//
+// — every one of them was dropped by the prefilter before this check, so the
+// dga_domain rule could not fire on them at ANY dgaThreshold. Raising or
+// lowering the threshold, which is all item 1 originally did, never reached
+// this class at all.
+//
+// Deliberately an EXACT mirror rather than a looser superset: the dictionary
+// list is what keeps this from forwarding most ordinary long hostnames, and a
+// superset here would move real volume onto OPA for no added coverage. The
+// length test uses len() (bytes) against OPA's count() (runes), which can only
+// over-forward on a non-ASCII label — the safe direction for a prefilter.
+func dnsRegoDGAHeuristic(qname string) bool {
+	dot := strings.IndexByte(qname, '.')
+	if dot < 0 {
+		return false // count(parts) > 1
+	}
+	name := qname[:dot]
+	if len(name) <= 12 {
+		return false
+	}
+	// contains_digit before contains_dictionary_word: one pass over a short
+	// label, against fourteen substring scans. Rego evaluates the conjuncts in
+	// the other order, but a conjunction has no order — and most long benign
+	// labels carry no digit, so this is where the common case exits. Measured:
+	// puts the prefilter's suspicious/dga_cached benchmark back at ~35 ns/op
+	// instead of ~109 with the dictionary scan first.
+	if !strings.ContainsAny(name, "0123456789") {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, w := range dnsRegoDictionaryWords {
+		if strings.Contains(lower, w) {
+			return false // contains_dictionary_word
+		}
+	}
+	return true
+}
+
+// dnsRegoDictionaryWords mirrors the contains_dictionary_word helper in
+// dns.rego. Order matters only for speed; "ns" and "api" are the two that
+// actually carry most of the exclusions on cluster-internal names.
+var dnsRegoDictionaryWords = []string{
+	"www", "mail", "ftp", "smtp", "pop", "imap", "ns", "dns",
+	"api", "cdn", "app", "blog", "shop", "news",
+}
+
+// dnsRegoLineageReachable reports whether a DNS event with this comm/parentComm
+// pair can satisfy any lineage.rego rule — that is, any rule in the "dns" Rego
+// partition that reads parent_comm and never touches the qname.
+//
+// Finding №385 (wave 6.3 item 1). The five reachable rules are
+// reverse_shell_webserver, shell_from_database, init_spawns_shell,
+// cron_spawns_shell and package_manager_shell; all five require is_shell(comm)
+// first, so that test gates the rest and the common case costs one failed
+// switch. Comparisons are exact and un-lowered because lineage.rego's helpers
+// are exact string equality, and a looser match here would forward events no
+// rule can fire on.
+func dnsRegoLineageReachable(comm, parentComm string) bool {
+	if parentComm == "" || !isRegoShellComm(comm) {
+		return false
+	}
+	switch parentComm {
+	case "init", "cron": // init_spawns_shell, cron_spawns_shell
+		return true
+	case "nginx", "apache", "apache2", "httpd", "lighttpd", "caddy": // is_webserver
+		return true
+	case "mysql", "postgres", "mongodb", "redis-server": // is_database
+		return true
+	case "apt", "apt-get", "yum", "dnf", "pip", "pip3", "npm": // is_package_manager
+		return true
+	}
+	return false
+}
+
+// isRegoShellComm mirrors the is_shell helper, which dns.rego (nxdomain_response)
+// and lineage.rego define identically.
+func isRegoShellComm(comm string) bool {
+	switch comm {
+	case "bash", "sh", "zsh", "dash", "fish", "python", "python3", "perl", "ruby":
+		return true
+	}
+	return false
 }

@@ -234,8 +234,10 @@ config:
   # Entropy threshold for DGA detection (bits per character)
   dga_entropy_threshold: 3.5
 
-  # N-gram DGA score threshold [0,1]
-  dga_ngram_threshold: 0.70
+  # N-gram DGA score threshold [0,1] (matches dns_dga_ngram rule and the
+  # DNSPrefilter default, see internal/correlator/dns_prefilter.go — measured
+  # scale, wave 6.3 item 1, 19.09.2026, was 0.70)
+  dga_ngram_threshold: 0.55
 
   # Minimum domain length for DGA detection
   dga_min_length: 10

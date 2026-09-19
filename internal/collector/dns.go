@@ -277,15 +277,29 @@ var dnsBlindTransports = []string{}
 // dnsNonTransportBlindSpots — слепые зоны, не сводящиеся к транспорту.
 // Каждая проверяема отдельно и НЕ закрыта ничем на сегодня.
 var dnsNonTransportBlindSpots = []string{
-	"IPv6 (AF_INET6, and /proc/<pid>/net/udp6 for the startup backfill)",
 	"resolution via systemd-resolved's AF_UNIX varlink path (nss-resolve)",
 	"sockets connected before the agent started that no network namespace listed at startup",
 }
 
+// dnsClosedButUnproven — ТРЕТИЙ класс, заведённый ревизией 19.09.2026
+// (находка №388). Зона, которую продукт закрыл, но живой контроль ещё не
+// предъявил, не является ни слепой, ни доказанной: записать её в
+// dnsNonTransportBlindSpots значило бы соврать в сторону занижения (кода,
+// который её закрывает, уже нет в слепых), а молча убрать — соврать в
+// сторону завышения видимости, ровно то, чего постановка 6.3.7 требует не
+// делать («измерить или записать, но НЕ молча»). Поэтому класс назван
+// отдельно и печатается отдельной оговоркой.
+//
+// Запись отсюда уходит ровно тогда, когда соответствующая метка вынесла
+// ДОСТИГНУТО на стенде, а не когда правка написана.
+var dnsClosedButUnproven = []string{
+	"IPv6 (AF_INET6): is_dns_packet принимает обе семьи с правки №388, бэкфилл читает udp6 (№383), парсер берёт AAAA (№388) — живьём ждёт критерия 6.3u.1 на стенде с ::1:53",
+}
+
 // dnsVisibilityRecord — что коллектор видит.
 func dnsVisibilityRecord() string {
-	return "AF_INET (IPv4) port 53, " + strings.Join(dnsParsedTransports, " and ") +
-		" (TCP framing per RFC 1035 §4.2.2 — волна 6.3.1, №357)"
+	return "AF_INET/AF_INET6 port 53, " + strings.Join(dnsParsedTransports, " and ") +
+		" (TCP framing per RFC 1035 §4.2.2 — волна 6.3.1, №357; IPv6 — №388, живьём ждёт 6.3u.1)"
 }
 
 // dnsBlindSpotsRecord — чего не видит. Транспортная часть берётся из
@@ -296,6 +310,9 @@ func dnsBlindSpotsRecord() string {
 		parts = append(parts, t+" DNS")
 	}
 	parts = append(parts, dnsNonTransportBlindSpots...)
+	for _, z := range dnsClosedButUnproven {
+		parts = append(parts, "закрыто кодом, НЕ подтверждено живьём: "+z)
+	}
 	return strings.Join(parts, "; ")
 }
 

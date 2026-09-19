@@ -2401,11 +2401,15 @@ func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []
 
 	for _, alert := range alerts {
 		// DNS pre-filter: skip Rego for benign DNS events (issue #69).
-		// ShouldEvaluate covers every dns.rego rule in Go (~1.5 µs, 0 allocs for
-		// cached domains) so no rule can fire on an event we bypass here.
+		// ShouldEvaluate covers every rule of the "dns" Rego partition in Go
+		// (~1.5 µs, 0 allocs for cached domains) so no rule can fire on an
+		// event we bypass here. That partition is {base, dns, lineage}, which
+		// is why parent_comm is passed as well — lineage.rego's rules read it
+		// and never look at the qname (finding №385, wave 6.3 item 1).
 		if alert.Event.Type == types.EventDNS && alert.Event.DNS != nil {
 			comm := util.InternBytes(alert.Event.Comm[:])
-			if !ce.dnsPrefilter.ShouldEvaluate(alert.Event.DNS, comm) {
+			parentComm := util.InternBytes(alert.Event.ParentComm[:])
+			if !ce.dnsPrefilter.ShouldEvaluate(alert.Event.DNS, comm, parentComm) {
 				enhancedAlerts = append(enhancedAlerts, alert)
 				continue
 			}

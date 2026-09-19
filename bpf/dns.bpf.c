@@ -97,13 +97,44 @@ static __always_inline bool is_dns_packet(struct sockaddr *addr, bool is_outboun
 	__u16 family;
 	__u16 port;
 
-	/* Only handle AF_INET for now (IPv4 DNS) */
 	if (bpf_probe_read_user(&family, sizeof(family), &addr->sa_family))
 		return false;
-	if (family != AF_INET)
+
+	/* Wave 6.3, item 2 / finding №388 (plan.md, ревизия 19.09.2026).
+	 * Until this change the filter was AF_INET-only, and because every
+	 * address-carrying path in this file goes through this one helper
+	 * (trace_connect, trace_sendmsg, trace_sendto), that single condition
+	 * made the WHOLE collector blind to IPv6: an IPv6 resolver socket was
+	 * never inserted into dns_socket_map by trace_connect, so the fd-based
+	 * paths (write/read/sendmmsg/recvmsg) never recognized it either. The
+	 * startup backfill (dns_backfill.go, №383) could only cover sockets
+	 * that were ALREADY connected when the agent started; anything that
+	 * connected afterwards stayed invisible for its whole life.
+	 *
+	 * Reading the port for both families costs nothing, because the socket
+	 * ABI puts it at the same place in both structures:
+	 *
+	 *   struct sockaddr_in  { sa_family_t sin_family;  in_port_t sin_port;  ... }
+	 *   struct sockaddr_in6 { sa_family_t sin6_family; in_port_t sin6_port; ... }
+	 *
+	 * — sa_family_t and in_port_t are both __u16, so the port sits at
+	 * offset 2 in either case, in network byte order. That is uapi, fixed
+	 * by the syscall ABI and not a layout coincidence this file may
+	 * observe today and lose tomorrow. Keeping the read expressed through
+	 * sockaddr_in deliberately: it needs no `struct sockaddr_in6` in
+	 * vmlinux.h, so widening the family check cannot turn into a CO-RE
+	 * build failure on a stand whose BTF happens not to carry that type.
+	 *
+	 * What this does NOT claim: the address itself is still not read or
+	 * emitted for either family — only the port is inspected, and the DNS
+	 * payload that follows is address-family agnostic. So there is no v6
+	 * parsing to get wrong downstream.
+	 */
+	if (family != AF_INET && family != AF_INET6)
 		return false;
 
-	/* sin_port is at the same offset for both inbound and outbound use. */
+	/* sin_port is at the same offset for both inbound and outbound use,
+	 * and (see above) for both address families. */
 	if (bpf_probe_read_user(&port, sizeof(port), &sin->sin_port))
 		return false;
 

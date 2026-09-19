@@ -202,7 +202,8 @@ fi
 #    может и не исполниться, и только лог говорит, что вердикт РЕАЛЬНО вынесен.
 echo "--- 6.3.8 (статическая сверка полноты, до прогона) ---"
 if ! bash "$SETUP/wave6.3-completeness-guard.sh" --scan \
-        "$SETUP/wave6.3-controls.sh" "$SETUP/run-6.3-pipeline.sh" "$SETUP/wave6.3-metrics-lib.sh"; then
+        "$SETUP/wave6.3-controls.sh" "$SETUP/run-6.3-pipeline.sh" "$SETUP/wave6.3-metrics-lib.sh" \
+        "$SETUP/wave6.3.9f-item3-baseline-controls.sh"; then
     echo "СТОП ДО ПРОГОНА: пайплайн не покрывает таблицу меток постановки волны 6.3 (№269/№270)."
     echo "  Агент не тронут, стор не очищен — прогон не начат."
     exit 1
@@ -1244,7 +1245,7 @@ cp /root/agent-start-6.3.txt /root/agent-start-6.3.epoch /root/env-muteness-6.3.
 cp /root/metrics-prologue-start-6.3.txt "$COLLECT/" 2>/dev/null
 cp /root/noise-diag-6.3.jsonl /root/noise-diag-window-6.3.jsonl "$COLLECT/" 2>/dev/null
 cp "$W63_BFPOS_FILE" "$COLLECT/" 2>/dev/null
-cp "$SETUP/config-test.yaml" "$SETUP/wave6.3-controls.sh" "$SETUP/wave6.3-metrics-lib.sh" "$SETUP/wave6.3-completeness-guard.sh" "$SETUP/run-6.3-pipeline.sh" "$COLLECT/" 2>/dev/null
+cp "$SETUP/config-test.yaml" "$SETUP/wave6.3-controls.sh" "$SETUP/wave6.3-metrics-lib.sh" "$SETUP/wave6.3-completeness-guard.sh" "$SETUP/run-6.3-pipeline.sh" "$SETUP/wave6.3.9f-item3-baseline-controls.sh" "$COLLECT/" 2>/dev/null
 # Манифест DNS и его генератор (item 1) — часть провенанса величины 6.3.3:
 # без манифеста через сутки нельзя сказать, ПО КАКИМ правилам был отфильтрован
 # объём окна. Реестр сужений (item 8) — по той же причине: он объясняет, почему

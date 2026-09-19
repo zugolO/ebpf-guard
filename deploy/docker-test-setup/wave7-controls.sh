@@ -97,10 +97,12 @@ _impact_neg_after2=$(_impact_critical_count container_escape_host_device)
 echo "  6.0.13 негативный контроль: dumpe2fs -h /dev/vda1 -> impact_raw_disk_write_from_container критикалов: ${_impact_neg_before1:-0} -> ${_impact_neg_after1:-0}, container_escape_host_device критикалов: ${_impact_neg_before2:-0} -> ${_impact_neg_after2:-0} ($(date -u +%H:%M:%S) UTC)"
 if [ "$((${_impact_neg_after1:-0} - ${_impact_neg_before1:-0}))" -ne 0 ] \
    || [ "$((${_impact_neg_after2:-0} - ${_impact_neg_before2:-0}))" -ne 0 ]; then
+    echo "6.0.13 FAIL $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
     die "6.0.13 ПРОВАЛЕН: dumpe2fs -h /dev/vda1 (read-only open, с хоста) подняло новых критикалов: impact_raw_disk_write_from_container +$((${_impact_neg_after1:-0} - ${_impact_neg_before1:-0})), container_escape_host_device +$((${_impact_neg_after2:-0} - ${_impact_neg_before2:-0})) — правка №200 не сузила хотя бы одно из двух правил, либо агент крутит старые правила (проверить рестарт [5/14]), либо container.id/k8s.pod ошибочно непусты на этом хосте (проверить enrichment)"
+else
+    echo "6.0.13 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    echo "6.0.13 доказан живьём в $(date -u +%H:%M:%S) UTC: штатный dumpe2fs -h не поднимает критикал ни по одному из двух правил №200"
 fi
-echo "6.0.13 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
-echo "6.0.13 доказан живьём в $(date -u +%H:%M:%S) UTC: штатный dumpe2fs -h не поднимает критикал ни по одному из двух правил №200"
 
 # 6.0.14 — позитивный. ПОЧИНЕНО волной 6.2.9.F (item 5, находка №215): старый
 # вход `count=0` открывает устройство на запись, но не делает НИ ОДНОГО
@@ -159,30 +161,69 @@ else
 fi
 
 # 6.0.15 — позитивный контроль подмножества (б) на container_escape_proc_write
-# (№205, находка №193). sysctl -w того же значения — идемпотентно по
-# построению, откат не нужен. comm=sysctl не входит в список исключений
-# правила (systemd, systemd-sysctl, irqbalance).
+# (№205, находка №193). ПЕРЕАРМИРОВАНО волной 6.3-up (item 4, долг Д4/№376):
+# правило несёт `drift_novel_workload: alert` — алерт зависит от того, что
+# профилировщик считает воркложд НОВЫМ. Системный `sysctl` — ОДИН И ТОТ ЖЕ
+# comm на каждом прогоне, и после первого исполнения в жизни базы дрейфа он
+# для профилировщика уже не новый: находка №376 воспроизвела это
+# экспериментом (FAIL в 12:25 -> OK в 14:04 ПОСЛЕ РЕСТАРТА, который обнулил
+# базу). Контроль расходовал свой собственный предмет — новизну — первым же
+# запуском, и его FAIL при повторе без рестарта неотличим от потери детекта
+# ([[novelty-consuming-control-is-one-shot]]). Починка — тот же приём, что у
+# 6.0.16: копия РЕАЛЬНОГО исполняемого файла под СВЕЖИМ именем на каждый
+# запуск, вместо системного бинаря с постоянным comm.
 _procwrite_count() {
     curl -s --max-time 15 -H "Authorization: Bearer $DRIFT_PC_TOKEN" "$DRIFT_PC_API/api/v1/alerts" 2>/dev/null \
         | jq '[.[]|select(.rule_id=="container_escape_proc_write")]|length' 2>/dev/null || echo 0
 }
-_procwrite_before=$(_procwrite_count)
+SP15_TEE=""
+for _sp15_cand in /usr/bin/tee /bin/tee; do
+    if [ -f "$_sp15_cand" ] && [ -x "$_sp15_cand" ]; then SP15_TEE="$_sp15_cand"; break; fi
+done
 _pid_max_current=$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo "")
-if [ -n "$_pid_max_current" ]; then
-    sysctl -w kernel.pid_max="$_pid_max_current" >/dev/null 2>&1 || true
-fi
-sleep 15
-_procwrite_after=$(_procwrite_count)
-echo "  6.0.15 позитивный контроль: sysctl -w kernel.pid_max=$_pid_max_current -> container_escape_proc_write алертов: ${_procwrite_before:-0} -> ${_procwrite_after:-0} ($(date -u +%H:%M:%S) UTC)"
-if [ -z "$_pid_max_current" ]; then
+# Объявлен ДО ветвления: уборка в конце шага безусловна, а присваивание живёт
+# только в ветке else — без этого `rm -rf "$SP15_WORKDIR"` на провальной ветке
+# разворачивается в `rm -rf ""` (безвредно, но молча) и падает под set -u.
+SP15_WORKDIR=""
+if [ -z "$SP15_TEE" ]; then
+    die "6.0.15 НЕ ИСПОЛНИМ: ни /usr/bin/tee, ни /bin/tee не оказались исполняемым обычным файлом — свежий примитив контроля нечем собрать (тот же класс, что у 6.0k/№176)"
+elif [ -z "$_pid_max_current" ]; then
     die "6.0.15 НЕ ИСПОЛНИМ: /proc/sys/kernel/pid_max не читается на этом стенде — контроль нечем исполнить. Постановка требует либо 6.0.15 ДОСТИГНУТО, либо явный вывод container_escape_proc_write из подмножества (б) с записью причины в plan.md — третьего исхода нет"
+else
+    SP15_WORKDIR=/usr/local/bin/sp15-work
+    mkdir -p "$SP15_WORKDIR" 2>/dev/null || die "6.0.15: не удалось создать $SP15_WORKDIR"
+    _sp15_hex=$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    _sp15_comm="sysctl-${_sp15_hex}"
+    _sp15_comm="${_sp15_comm:0:15}"    # ядро усечёт comm длиннее 15 символов
+    _sp15_bin="$SP15_WORKDIR/$_sp15_comm"
+    cp "$SP15_TEE" "$_sp15_bin" 2>/dev/null || die "6.0.15: не удалось подготовить $_sp15_bin из $SP15_TEE"
+    chmod +x "$_sp15_bin" || die "6.0.15: не удалось сделать $_sp15_bin исполняемым"
+    if [ ! -x "$_sp15_bin" ]; then
+        die "6.0.15: $_sp15_bin не исполняем после chmod (noexec на /usr/local?) — execve упадёт до write(2), и контроль получит ложный ноль (класс находки №176)"
+    else
+        _procwrite_before=$(_procwrite_count)
+        # write(2) того же значения через tee — идемпотентно по построению,
+        # откат не нужен; comm=$_sp15_comm свежий на этой базе дрейфа и не
+        # входит в список исключений правила (systemd, systemd-sysctl, irqbalance).
+        _sp15_out=$(printf '%s' "$_pid_max_current" | "$_sp15_bin" /proc/sys/kernel/pid_max 2>&1)
+        _sp15_rc=$?
+        sleep 15
+        _procwrite_after=$(_procwrite_count)
+        echo "  6.0.15 позитивный контроль: comm=$_sp15_comm (свежая копия tee) пишет kernel.pid_max=$_pid_max_current -> container_escape_proc_write алертов: ${_procwrite_before:-0} -> ${_procwrite_after:-0} ($(date -u +%H:%M:%S) UTC)"
+        rm -f "$_sp15_bin"
+        if [ "$_sp15_rc" -ne 0 ]; then
+            die "6.0.15 НЕ ИСПОЛНЕН: $_sp15_bin /proc/sys/kernel/pid_max вернул rc=$_sp15_rc ($_sp15_out) — write(2) не состоялся, ноль алертов ниже был бы приборным, а не вердиктом (сторож результата, память «позитивный контроль по результату»)"
+        elif [ "$((${_procwrite_after:-0} - ${_procwrite_before:-0}))" -lt 1 ]; then
+            echo "6.0.15 FAIL $(date -u +%FT%TZ) comm=$_sp15_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+            die "6.0.15 ПРОВАЛЕН: write(2) на /proc/sys/kernel/pid_max под СВЕЖИМ comm=$_sp15_comm (execve состоялся — rc=0 выше, и этот comm новый на текущей базе дрейфа, значит находка №376 переармированием закрыта, а не маскирует провал) не поднял ни одного алерта container_escape_proc_write (было ${_procwrite_before:-0}, стало ${_procwrite_after:-0}) — проводка флага drift_novel_workload:alert на этом правиле мертва, находка №193 закрыта только на drift_dangerous_syscall"
+        else
+            echo "6.0.15 PASS $(date -u +%FT%TZ) comm=$_sp15_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+            echo "6.0.15 доказан живьём в $(date -u +%H:%M:%S) UTC: свежий воркложд (comm=$_sp15_comm) поднимает container_escape_proc_write — предмет контроля (новизна) больше не расходуется первым запуском (находка №376 закрыта)"
+        fi
+    fi
 fi
-if [ "$((${_procwrite_after:-0} - ${_procwrite_before:-0}))" -lt 1 ]; then
-    echo "6.0.15 FAIL $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
-    die "6.0.15 ПРОВАЛЕН: sysctl -w kernel.pid_max=<текущее значение> (comm=sysctl, op=write, filename=/proc/sys/kernel/pid_max) не подняло ни одного алерта container_escape_proc_write (было ${_procwrite_before:-0}, стало ${_procwrite_after:-0}) — проводка флага drift_novel_workload:alert на этом правиле мертва, находка №193 закрыта только на drift_dangerous_syscall"
-fi
-echo "6.0.15 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
-echo "6.0.15 доказан живьём в $(date -u +%H:%M:%S) UTC: sysctl -w поднимает container_escape_proc_write"
+[ -n "$SP15_WORKDIR" ] && rm -rf "$SP15_WORKDIR" 2>/dev/null
+true
 
 echo "--- 6.0k: контроли находки №210 — детект под спуфом argv[0] и ровно один алерт на обычный exec (критерии 6.0.16 и 6.0.17) ---"
 # Буквы i и j пропущены: `6.0i` — метка шага-таблицы выше, `6.0j` — имя ВОЛНЫ,
@@ -295,9 +336,10 @@ if [ "$((${_sp16_after:-0} - ${_sp16_before:-0}))" -lt 1 ]; then
     echo "6.0.16 FAIL $(date -u +%FT%TZ) comm=$_sp16_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
     rm -rf "$SP_WORKDIR" "$SP_SEEDDIR"
     die "6.0.16 ПРОВАЛЕН: execve с подменённым argv[0]=$_sp16_spoof (реальный образ — другой файл, comm=$_sp16_comm) не дал ни одного алерта drift_exec_from_system_bin с этим proc.args (было ${_sp16_before:-0}, стало ${_sp16_after:-0}); сам вызов состоялся — сторож результата выше зелёный. Читать в порядке: срез лимитера за попытку +$(( ${_sp16_lim_after:-0} - ${_sp16_lim_before:-0} )) (ненулевой после повтора = причина приборная); прирост proc_args_dropped_total{reason=\"argv0_mismatch\"} = проводка идёт резервным путём (/proc/PID/cmdline, ядро без BTF), где эвристика argv[0] сохранена сознательно и слепота остаётся известным ограничением; прирост {reason=\"stale_exec\"} без алертов = exec_ts прикрепил argv не к той записи; ноль по обоим счётчикам и ноль алертов = правка №210 не в ядре, то есть `make generate` на шаге [3/14] собрал bpf/common.h без поля exec_ts, и контроль мерит старый бинарь"
+else
+    echo "6.0.16 PASS $(date -u +%FT%TZ) comm=$_sp16_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    echo "6.0.16 доказан живьём в $(date -u +%H:%M:%S) UTC: детект класса proc.args пережил подмену argv[0] (находка №210 закрыта)"
 fi
-echo "6.0.16 PASS $(date -u +%FT%TZ) comm=$_sp16_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
-echo "6.0.16 доказан живьём в $(date -u +%H:%M:%S) UTC: детект класса proc.args пережил подмену argv[0] (находка №210 закрыта)"
 
 # --- 6.0.17: негативный, антирегресс ----------------------------------------
 # Ровно один алерт на один обычный execve. Именно это обеспечивала сверка
@@ -342,9 +384,10 @@ if [ "$((${_sp17_after:-0} - ${_sp17_before:-0}))" -ne 1 ]; then
     echo "6.0.17 FAIL $(date -u +%FT%TZ) comm=$_sp17_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
     rm -rf "$SP_WORKDIR" "$SP_SEEDDIR"
     die "6.0.17 ПРОВАЛЕН: один execve $_sp17_bin дал $((${_sp17_after:-0} - ${_sp17_before:-0})) алертов drift_exec_from_system_bin с этим proc.args вместо ровно 1, срез лимитера за попытку +$(( ${_sp17_lim_after:-0} - ${_sp17_lim_before:-0} )). Читать так: 2 и больше = снятие сверки commMatchesArgv0 с основного пути вернуло алерт на записи sys_enter, то есть exec_ts прикрепляет argv к обеим записям (проверить, что bpf/common.h собран с полем exec_ts и что userspace сравнивает его с меткой события, а не с нулём) — слепота снята ценой двойного алерта на КАЖДЫЙ exec, и это обмен одного дефекта на другой, а не исправление; 0 при нулевом срезе лимитера = правило не сматчило вовсе, и 6.0.16 выше засчитан по чужому алерту"
+else
+    echo "6.0.17 PASS $(date -u +%FT%TZ) comm=$_sp17_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    echo "6.0.17 доказан живьём в $(date -u +%H:%M:%S) UTC: один exec — ровно один алерт, двойного срабатывания за execve нет"
 fi
-echo "6.0.17 PASS $(date -u +%FT%TZ) comm=$_sp17_comm" >> /root/drift-controls-6.0.txt 2>/dev/null || true
-echo "6.0.17 доказан живьём в $(date -u +%H:%M:%S) UTC: один exec — ровно один алерт, двойного срабатывания за execve нет"
 rm -rf "$SP_WORKDIR" "$SP_SEEDDIR"
 
 echo "--- 6.0l: позитивный контроль container_escape_host_device_from_host (критерий 6.0.18, №211) ---"
@@ -425,20 +468,20 @@ fi
 if [ "$(( ${_hd18_warn_after:-0} - ${_hd18_warn_before:-0} ))" -lt 1 ]; then
     echo "6.0.18 FAIL $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
     die "6.0.18 ПРОВАЛЕН: dumpe2fs -h $_hd_dev с хоста (rc=0, устройство прочитано) не подняло ни одного алерта container_escape_host_device_from_host уровня warning (было ${_hd18_warn_before:-0}, стало ${_hd18_warn_after:-0}), срез лимитера за попытку +$(( ${_hd18_lim_after:-0} - ${_hd18_lim_before:-0} )). Читать в порядке: ненулевой срез после повтора = причина приборная; нулевой срез = хостовая половина разведения №200 нема продуктово, то есть волна 6.0f завела правило, которое не поднимается на СВОЁМ сценарии — проверить предикаты container.id/k8s.pod (op: eq, values: [\"\"]) против обогащения этого хоста и то, что агент крутит новые правила (рестарт [5/14]). Третьего исхода у 6.0.18 нет: правило без исполнившегося контроля возвращается в состояние, из-за которого волна 6.0j и заведена"
-fi
 # Вторая сторона разведения: тот же примитив не смеет поднять критикал НИ ПО
 # ОДНОМУ из двух id. Это не дубль 6.0.13 (он мерил свой собственный вызов
 # dumpe2fs на шаге 6.0h): здесь проверяется, что критикал не пришёл ИМЕННО
 # от того вызова, который дал warning, — иначе «детект не потерян» было бы
 # куплено ценой возврата ложного критикала, ради устранения которого №200 и
 # разводило правило.
-if [ "$(( ${_hd18_c1_after:-0} - ${_hd18_c1_before:-0} ))" -ne 0 ] \
+elif [ "$(( ${_hd18_c1_after:-0} - ${_hd18_c1_before:-0} ))" -ne 0 ] \
    || [ "$(( ${_hd18_c2_after:-0} - ${_hd18_c2_before:-0} ))" -ne 0 ]; then
     echo "6.0.18 FAIL $(date -u +%FT%TZ) (критикал на позитивном примитиве)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
     die "6.0.18 ПРОВАЛЕН: тот же dumpe2fs -h $_hd_dev, что дал warning хостового правила, поднял и критикал: container_escape_host_device +$(( ${_hd18_c1_after:-0} - ${_hd18_c1_before:-0} )), container_escape_host_device_from_host +$(( ${_hd18_c2_after:-0} - ${_hd18_c2_before:-0} )). Разведение №200 не состоялось: хостовой случай снова критикал-first, и 6.0.13 на шаге 6.0h выше засчитан по случайности, а не по сужению. Правило _from_host обязано быть severity: warning (rules/container-escape.yaml), контейнерное — обязано требовать непустой container.id/k8s.pod"
+else
+    echo "6.0.18 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
+    echo "6.0.18 доказан живьём в $(date -u +%H:%M:%S) UTC: container_escape_host_device_from_host поднимается на своём сценарии (warning, без критикалов) — правило перестало быть немым, оба FAIL гейта №6.0f2 закрыты продуктом, а не реестром"
 fi
-echo "6.0.18 PASS $(date -u +%FT%TZ)" >> /root/drift-controls-6.0.txt 2>/dev/null || true
-echo "6.0.18 доказан живьём в $(date -u +%H:%M:%S) UTC: container_escape_host_device_from_host поднимается на своём сценарии (warning, без критикалов) — правило перестало быть немым, оба FAIL гейта №6.0f2 закрыты продуктом, а не реестром"
 
 echo "=== wave7-controls.sh завершён: проваленных контролей $WAVE7_FAILS, вердикты в $WAVE7_VERDICTS ==="
 exit 0

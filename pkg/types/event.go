@@ -374,7 +374,11 @@ type DNSEvent struct {
 	RCode uint16
 	// Direction indicates query (outbound) or response (inbound).
 	Direction DNSDirection
-	// ResponseIPs contains IPv4 addresses from A record responses.
+	// ResponseIPs contains the addresses from A (IPv4) and AAAA (IPv6)
+	// record responses, in the order they appear in the answer section.
+	// AAAA was added by finding №388 (wave 6.3 item 2, 19.09.2026): until
+	// then a name resolving only over IPv6 produced an empty list here,
+	// which reads identically to "resolved to nothing".
 	ResponseIPs []string
 }
 

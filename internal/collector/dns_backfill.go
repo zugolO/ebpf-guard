@@ -59,9 +59,22 @@ type dnsSocketMapUpdater interface {
 // connects during the scan itself (the window between listing
 // /proc/<pid>/net/udp and attaching tracepoints); that residual race is
 // the same one the collector always had for its own startup and is not
-// new here. IPv4 only, matching is_dns_packet's current AF_INET-only
-// scope — /proc/<pid>/net/udp6 is a separately tracked blind spot
-// (6.3.7), not silently extended by this scan.
+// new here.
+//
+// Wave 6.3 item 2 (plan.md, ревизия 19.09.2026): this scan also reads
+// /proc/<pid>/net/udp6 (finding №383) and seeds dns_socket_map from it the
+// same way. That closes a real, if partial, part of the IPv6 gap:
+// is_dns_socket_fd (bpf/dns.bpf.c) gates read()/write()/sendmmsg() purely on
+// fd membership in dns_socket_map, with no address-family check — a fd
+// seeded here from an IPv6 socket is indistinguishable from one seeded off
+// udp, and later traffic on it is parsed like any other. What this does NOT
+// close, because it needs a BPF program change this offline pass cannot
+// build or measure without a Linux stand: trace_connect (bpf/dns.bpf.c,
+// ~line 100) filters sa_family==AF_INET before insertion, so a NEW IPv6
+// connection made after this agent starts still never reaches
+// dns_socket_map on its own — only a socket already connected at startup,
+// caught by this scan, benefits. See dnsNonTransportBlindSpots in dns.go
+// for the record of what remains open.
 //
 // candidates is the number of distinct connected-to-:53 socket inodes
 // found across all namespaces, BEFORE matching them against process fds —
@@ -83,8 +96,9 @@ func backfillDNSSocketMap(m dnsSocketMapUpdater) (candidates, backfilled int, er
 
 // connectedPort53InodesAllNamespaces returns the union of
 // connectedPort53Inodes across every distinct network namespace reachable
-// from procRoot, reading each namespace's udp table exactly once
-// regardless of how many processes share it. Socket inodes are allocated
+// from procRoot, reading each namespace's udp and udp6 tables once
+// regardless of how many processes share it (up to maxNSReadAttempts pids
+// when the chosen pid's table could not be read at all). Socket inodes are allocated
 // from the kernel's global anonymous-inode pool, not per-namespace, so
 // inodes from different namespaces never collide when merged into one
 // set — the same assumption seedSocketMapFromProcFDs already relies on
@@ -105,7 +119,20 @@ func connectedPort53InodesAllNamespaces(procRoot string) (map[string]struct{}, e
 		return nil, err
 	}
 
-	seenNS := make(map[string]struct{})
+	// attempts counts how many pids were tried per network namespace, and
+	// doneNS records the ones whose tables were actually read (or are known
+	// absent). Finding №386 (wave 6.3, ревизия 19.09.2026): marking a
+	// namespace seen BEFORE the read succeeded made one unlucky pid — one
+	// that exited between the ns/net readlink and the table open — blind the
+	// WHOLE namespace for the entire scan, even though every other process
+	// sharing it would have served the same table. That is a resolver's
+	// upstream socket silently missing from the backfill, which is exactly
+	// the class of blindness this whole file exists to remove (№328/№340).
+	// Retrying costs one open() per extra pid and is capped, so a namespace
+	// this agent genuinely cannot read (permission, not running as root)
+	// cannot turn into a scan of every pid on the node.
+	attempts := make(map[string]int)
+	doneNS := make(map[string]struct{})
 	inodes := make(map[string]struct{})
 	for _, name := range names {
 		if _, err := strconv.ParseUint(name, 10, 32); err != nil {
@@ -115,27 +142,61 @@ func connectedPort53InodesAllNamespaces(procRoot string) (map[string]struct{}, e
 		if err != nil {
 			continue // exited between listing and reading, or no permission
 		}
-		if _, ok := seenNS[nsTarget]; ok {
-			continue // this namespace's udp table was already read via another pid
+		if _, ok := doneNS[nsTarget]; ok {
+			continue // this namespace's tables were already read via another pid
 		}
-		seenNS[nsTarget] = struct{}{}
+		if attempts[nsTarget] >= maxNSReadAttempts {
+			continue // tried enough pids for this namespace; do not walk them all
+		}
+		attempts[nsTarget]++
 
-		ns, err := connectedPort53Inodes(filepath.Join(procRoot, name, "net", "udp"))
-		if err != nil {
-			continue // net/udp unreadable for this pid (exited, permission) — best-effort
+		// udp and udp6 are read INDEPENDENTLY (finding №386): an unreadable or
+		// absent udp table must not suppress udp6, nor the other way round.
+		// Wave 6.3 item 2, finding №383: the line format /proc/net/udp6 uses is
+		// identical to udp — a continuous hex address with no internal colons —
+		// so connectedPort53Inodes parses it unchanged. udp6 missing entirely
+		// (IPv6 disabled in the kernel) is normal, not an error.
+		// net/udp decides whether this namespace counts as read: it exists for
+		// every live process, so failing to open it means the pid went away (or
+		// this agent may not read it), not that the namespace has nothing to
+		// offer — another pid sharing the namespace can still serve it.
+		udpOK := false
+		if ns, err := connectedPort53Inodes(filepath.Join(procRoot, name, "net", "udp")); err == nil {
+			udpOK = true
+			for inode := range ns {
+				inodes[inode] = struct{}{}
+			}
 		}
-		for inode := range ns {
-			inodes[inode] = struct{}{}
+		// net/udp6 is purely additive and read INDEPENDENTLY (finding №386):
+		// an unreadable udp must not suppress it, and its own absence — IPv6
+		// disabled in the kernel — is normal rather than an error.
+		if ns6, err := connectedPort53Inodes(filepath.Join(procRoot, name, "net", "udp6")); err == nil {
+			for inode := range ns6 {
+				inodes[inode] = struct{}{}
+			}
+		}
+		if udpOK {
+			doneNS[nsTarget] = struct{}{}
 		}
 	}
 	return inodes, nil
 }
 
-// connectedPort53Inodes parses /proc/net/udp and returns the socket inodes
-// of entries connected to remote port 53. "Connected" means the kernel
-// recorded a specific non-zero remote address — exactly what connect() to
-// a resolver address produces, and a merely bound-but-unconnected socket
-// does not.
+// maxNSReadAttempts caps how many processes are tried per network namespace
+// before giving up on it. A retry only happens when NEITHER udp nor udp6 could
+// be read through the chosen pid — a pid that exited mid-scan, or one this
+// agent may not read — and three tries is enough to survive that race while
+// keeping a namespace this agent structurally cannot read (no CAP_SYS_PTRACE,
+// not root) from costing one open() per process on the node.
+const maxNSReadAttempts = 3
+
+// connectedPort53Inodes parses /proc/net/udp or /proc/net/udp6 and returns
+// the socket inodes of entries connected to remote port 53. "Connected"
+// means the kernel recorded a specific non-zero remote address — exactly
+// what connect() to a resolver address produces, and a merely
+// bound-but-unconnected socket does not. Both files share the same column
+// layout, including the address encoding (continuous hex, no colons within
+// the address itself), so one parser covers both.
 func connectedPort53Inodes(path string) (map[string]struct{}, error) {
 	f, err := os.Open(path)
 	if err != nil {

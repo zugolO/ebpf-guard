@@ -52,6 +52,93 @@ func TestConnectedPort53Inodes(t *testing.T) {
 	}
 }
 
+// Wave 6.3 item 2 (plan.md, ревизия 19.09.2026, finding №383): /proc/net/udp6
+// uses the same column layout as udp, with the address written as a
+// continuous 32-hex-digit string (no colons inside it) rather than standard
+// IPv6 notation — this fixture is a real sample shape, not a simplification.
+func TestConnectedPort53Inodes_UDP6(t *testing.T) {
+	content := "" +
+		"  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n" +
+		"   0: 00000000000000000000000000000000:C7B4 20010DB8000000000000000000000001:0035 01 00000000:00000000 00:00000000 00000000     0        0 40001 2 0000000000000000 0\n" + // connected to [::53] equivalent
+		"   1: 00000000000000000000000000000000:9E10 00000000000000000000000000000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 40002 2 0000000000000000 0\n" // not connected
+	path := filepath.Join(t.TempDir(), "udp6")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inodes, err := connectedPort53Inodes(path)
+	if err != nil {
+		t.Fatalf("connectedPort53Inodes(udp6): %v", err)
+	}
+	if len(inodes) != 1 {
+		t.Fatalf("got %v, want exactly {40001}", inodes)
+	}
+	if _, ok := inodes["40001"]; !ok {
+		t.Errorf("missing inode 40001 in %v", inodes)
+	}
+}
+
+// A namespace where net/udp6 is absent (IPv6 disabled in the kernel) must
+// not affect the IPv4-only result — best-effort, same as an unreadable udp
+// table.
+func TestConnectedPort53InodesAllNamespaces_NoUDP6IsFine(t *testing.T) {
+	hostUDP := "   0: 00000000:8A3C 08080808:0035 01 00000000:00000000 00:00000000 00000000     0        0 50001 2 0000000000000000 0\n"
+	root := fakeNamespacedProcTree(t, map[string]struct {
+		ns      string
+		udpBody string
+	}{
+		"1": {ns: "4026531840", udpBody: hostUDP},
+	})
+
+	inodes, err := connectedPort53InodesAllNamespaces(root)
+	if err != nil {
+		t.Fatalf("connectedPort53InodesAllNamespaces: %v", err)
+	}
+	if len(inodes) != 1 {
+		t.Fatalf("got %v, want exactly {50001}", inodes)
+	}
+}
+
+// The union of udp and udp6 for the same namespace must include inodes
+// from both — the actual behaviour finding №383 adds.
+func TestConnectedPort53InodesAllNamespaces_UnionsUDPAndUDP6(t *testing.T) {
+	root := t.TempDir()
+	nsDir := filepath.Join(root, "1", "ns")
+	if err := os.MkdirAll(nsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("net:[4026531840]", filepath.Join(nsDir, "net")); err != nil {
+		t.Fatal(err)
+	}
+	netDir := filepath.Join(root, "1", "net")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+	udpBody := "   0: 00000000:8A3C 08080808:0035 01 00000000:00000000 00:00000000 00000000     0        0 60001 2 0000000000000000 0\n"
+	udp6Body := "   0: 00000000000000000000000000000000:C7B4 20010DB8000000000000000000000001:0035 01 00000000:00000000 00:00000000 00000000     0        0 60002 2 0000000000000000 0\n"
+	if err := os.WriteFile(filepath.Join(netDir, "udp"), []byte(header+udpBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(netDir, "udp6"), []byte(header+udp6Body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inodes, err := connectedPort53InodesAllNamespaces(root)
+	if err != nil {
+		t.Fatalf("connectedPort53InodesAllNamespaces: %v", err)
+	}
+	want := map[string]struct{}{"60001": {}, "60002": {}}
+	if len(inodes) != len(want) {
+		t.Fatalf("got %v, want %v", inodes, want)
+	}
+	for k := range want {
+		if _, ok := inodes[k]; !ok {
+			t.Errorf("missing inode %s in %v", k, inodes)
+		}
+	}
+}
+
 func TestConnectedPort53Inodes_MissingFile(t *testing.T) {
 	if _, err := connectedPort53Inodes(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
 		t.Fatal("expected error for missing file")
@@ -253,5 +340,78 @@ func TestBackfillDNSSocketMap_NoConnectedSockets(t *testing.T) {
 	}
 	if len(inodes) != 0 {
 		t.Fatalf("got %v, want empty", inodes)
+	}
+}
+
+// Finding №386 (wave 6.3, ревизия 19.09.2026): a namespace was marked "seen"
+// BEFORE its udp table was read, so a pid that vanished between the ns/net
+// readlink and the table open blinded the whole namespace for the entire
+// scan — no other process sharing it was ever tried. Here pid 1 has a net
+// directory with no tables at all (the shape a vanished pid leaves), pid 2
+// shares its namespace and has the table; the inode must still be found.
+func TestConnectedPort53InodesAllNamespaces_RetriesNamespaceAfterUnreadablePid(t *testing.T) {
+	root := t.TempDir()
+	const ns = "net:[4026531840]"
+	for _, pid := range []string{"1", "2"} {
+		nsDir := filepath.Join(root, pid, "ns")
+		if err := os.MkdirAll(nsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(ns, filepath.Join(nsDir, "net")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, pid, "net"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+	body := "   0: 00000000:8A3C 08080808:0035 01 00000000:00000000 00:00000000 00000000     0        0 70001 2 0000000000000000 0\n"
+	// Only pid 2 can serve the table. Readdirnames order is filesystem order,
+	// not sorted, so this exercises the retry whenever pid 1 comes first — it
+	// can never fail for the fixed code, and never passes for the old code in
+	// that order. maxNSReadAttempts (3) leaves room for the second pid.
+	if err := os.WriteFile(filepath.Join(root, "2", "net", "udp"), []byte(header+body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inodes, err := connectedPort53InodesAllNamespaces(root)
+	if err != nil {
+		t.Fatalf("connectedPort53InodesAllNamespaces: %v", err)
+	}
+	if _, ok := inodes["70001"]; !ok {
+		t.Fatalf("got %v, want inode 70001 — an unreadable first pid must not "+
+			"retire the namespace for the rest of the scan (finding №386)", inodes)
+	}
+}
+
+// Finding №386, the other half: udp and udp6 are read independently, so a
+// namespace whose udp table cannot be read still contributes its udp6 inodes.
+func TestConnectedPort53InodesAllNamespaces_UDP6SurvivesUnreadableUDP(t *testing.T) {
+	root := t.TempDir()
+	nsDir := filepath.Join(root, "1", "ns")
+	if err := os.MkdirAll(nsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("net:[4026531999]", filepath.Join(nsDir, "net")); err != nil {
+		t.Fatal(err)
+	}
+	netDir := filepath.Join(root, "1", "net")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+	udp6Body := "   0: 00000000000000000000000000000000:C7B4 20010DB8000000000000000000000001:0035 01 00000000:00000000 00:00000000 00000000     0        0 70002 2 0000000000000000 0\n"
+	// net/udp deliberately absent; net/udp6 present.
+	if err := os.WriteFile(filepath.Join(netDir, "udp6"), []byte(header+udp6Body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inodes, err := connectedPort53InodesAllNamespaces(root)
+	if err != nil {
+		t.Fatalf("connectedPort53InodesAllNamespaces: %v", err)
+	}
+	if _, ok := inodes["70002"]; !ok {
+		t.Fatalf("got %v, want inode 70002 — an unreadable udp table must not "+
+			"suppress udp6 for the same namespace (finding №386)", inodes)
 	}
 }

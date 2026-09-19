@@ -71,13 +71,34 @@ func TestWave6_3_9_BlindSpotRecordMatchesParserBehaviour(t *testing.T) {
 func TestWave6_3_9_UnclosedBlindSpotsStayNamed(t *testing.T) {
 	record := dnsBlindSpotsRecord()
 	for _, must := range []string{
-		"IPv6",                     // ни is_dns_packet, ни бэкфилл не читают udp6
 		"nss-resolve",              // AF_UNIX/varlink мимо порта 53
 		"before the agent started", // остаток №328, бэкфилл закрывает лишь часть
 	} {
 		require.Contains(t, record, must,
 			"незакрытая слепая зона %q пропала из записи — расширение области видимости молчанием", must)
 	}
+
+	// IPv6 сменил КЛАСС, а не исчез (ревизия 19.09.2026, находка №388):
+	// is_dns_packet принимает обе семьи, бэкфилл читает udp6, парсер берёт
+	// AAAA — но живого контроля ещё не было, и до него запись обязана
+	// стоять в dnsClosedButUnproven, а не пропасть и не остаться слепой.
+	// Сторож спрашивает ИМЕННО КЛАСС: проверка «в записи есть подстрока
+	// IPv6» прошла бы в обоих случаях и не отличила бы честную оговорку от
+	// невынутой слепой зоны ([[verdict-class-must-come-from-content-not-label]]).
+	require.Contains(t, record, "IPv6",
+		"IPv6 пропал из записи целиком — это расширение области видимости молчанием, "+
+			"даже когда код закрыт: живого контроля (6.3u.1) ещё не было")
+	require.Contains(t, record, "закрыто кодом, НЕ подтверждено живьём",
+		"IPv6 обязан стоять именно третьим классом, а не среди слепых зон или нигде")
+	var ipv6Blind bool
+	for _, z := range dnsNonTransportBlindSpots {
+		if strings.Contains(z, "IPv6") {
+			ipv6Blind = true
+		}
+	}
+	require.False(t, ipv6Blind,
+		"IPv6 остался в dnsNonTransportBlindSpots, хотя код его закрыл (№388) — "+
+			"запись отстала от продукта в сторону ЗАНИЖЕНИЯ, тот же класс №359")
 
 	// Сторож немоты обязан нести те же зоны: до №359 он перечислял TCP как
 	// вероятную причину недобора событий, то есть предлагал человеку

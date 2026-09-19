@@ -414,11 +414,21 @@ func parseDNSWireMessage(payload []byte) (dnsWireMessage, string) {
 }
 
 // decodeDNSAnswerIPs walks anCount answer records starting at pos and
-// returns the A-record (IPv4) addresses found. A malformed answer name or
-// record stops the walk (returning whatever IPs were found so far) rather
-// than failing the whole message — the question section already parsed
-// cleanly, and this loop's own failure reason is not surfaced to
-// dns_decode_errors_total, only the top-level parse failure is.
+// returns the A-record (IPv4) and AAAA-record (IPv6) addresses found. A
+// malformed answer name or record stops the walk (returning whatever IPs
+// were found so far) rather than failing the whole message — the question
+// section already parsed cleanly, and this loop's own failure reason is not
+// surfaced to dns_decode_errors_total, only the top-level parse failure is.
+//
+// Wave 6.3 item 2, finding №388 (plan.md, ревизия 19.09.2026): AAAA was the
+// second, independent half of the IPv6 blindness, and it lived here rather
+// than in BPF. The walk already stepped over every record type correctly
+// (rdlen is honoured for all of them), so an AAAA answer was parsed and then
+// silently dropped on the floor: a name that resolves only over IPv6 produced
+// an event whose response_ips was empty, indistinguishable from a name that
+// resolved to nothing at all. Type 28 with rdlen 16 is the whole change; the
+// length is checked against the type rather than trusted, exactly as the A
+// branch checks for 4.
 func decodeDNSAnswerIPs(payload []byte, pos int, anCount uint16) []string {
 	var ips []string
 
@@ -440,8 +450,17 @@ func decodeDNSAnswerIPs(payload []byte, pos int, anCount uint16) []string {
 		if pos+rdlen > len(payload) {
 			break
 		}
-		if rtype == 1 && rdlen == 4 { // A record
+		switch {
+		case rtype == 1 && rdlen == 4: // A record
 			ips = append(ips, net.IPv4(payload[pos], payload[pos+1], payload[pos+2], payload[pos+3]).String())
+		case rtype == 28 && rdlen == 16: // AAAA record (finding №388)
+			// net.IP over a COPY of the slice: payload is the collector's
+			// reusable read buffer, and String() is called now, but the
+			// intermediate net.IP must not alias a buffer that the next
+			// event will overwrite.
+			var v6 [16]byte
+			copy(v6[:], payload[pos:pos+16])
+			ips = append(ips, net.IP(v6[:]).String())
 		}
 		pos += rdlen
 	}

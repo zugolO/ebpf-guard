@@ -52,5 +52,5 @@ func TestNewDNSPrefilter(t *testing.T) {
 
 	dns := &types.DNSEvent{QName: "example.com", QType: 1}
 	// Just exercise the decision path; either outcome is acceptable.
-	_ = pf.ShouldEvaluate(dns, "curl")
+	_ = pf.ShouldEvaluate(dns, "curl", "")
 }

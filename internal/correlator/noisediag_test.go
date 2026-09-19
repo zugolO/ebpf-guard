@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -356,8 +357,13 @@ func TestWave6_3_9_BucketCarriesItsOwnInterval(t *testing.T) {
 // единственный охватил промежуток от пролога до контролей, и срез по окну дал
 // покрытие 0с из 600с — окно замера не измерялось вовсе.
 func TestWave6_3_9_TimerFlushClosesBucketsWithoutTraffic(t *testing.T) {
-	var buf bytes.Buffer
-	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	// Единственный тест файла, который поднимает ФОНОВЫЙ флашер: писать в
+	// голый bytes.Buffer из его горутины и читать из тела теста — гонка,
+	// которую -race ловил на каждом прогоне (и которая делала `make test`
+	// красным независимо от предмета правки). Буфер под мьютексом, чтение —
+	// через String() того же типа.
+	buf := &lockedBuffer{}
+	log := slog.New(slog.NewJSONHandler(buf, nil))
 	nd := NewNoiseDiagnostics(true, 100, 30*time.Millisecond, log)
 	require.NoError(t, nd.Register(prometheus.NewRegistry()))
 
@@ -388,4 +394,23 @@ func TestWave6_3_9_TimerFlushClosesBucketsWithoutTraffic(t *testing.T) {
 	require.GreaterOrEqual(t, silence, 1,
 		"интервал без алертов обязан быть ЗАПИСАН: иначе он неотличим от интервала, в котором прибор не работал")
 	require.Equal(t, 1, withCount, "единственный алерт учтён ровно один раз")
+}
+
+// lockedBuffer — io.Writer поверх bytes.Buffer с мьютексом: slog.Handler
+// пишет в него из фоновой горутины флашера, тест читает из своей.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

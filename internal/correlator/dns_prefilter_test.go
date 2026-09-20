@@ -500,6 +500,24 @@ func TestWave6_3u_StandProbeFixturesStayAttributable(t *testing.T) {
 				"даёт выигрыша, и её контроль это не заметит", neg)
 	}
 
+	// ── 6.3u.1 (№399): имя IPv6-зонда обязано быть ДОБРОКАЧЕСТВЕННЫМ.
+	// Метка судит по счётчику базового правила dns_any_query, а обогащение
+	// Rego ПЕРЕИМЕНОВЫВАЕТ алерт (engine.go: enhancedAlert.RuleID =
+	// decision.RuleID). Прежнее имя зонда набирало 0.552 — выше порога — и
+	// матчило dga_domain: алерт поднимался, но под чужим rule_id, счётчик
+	// базового правила стоял, и метка выносила ПРОВАЛ при видимом событии.
+	// Здесь пришпилено то, что на стенде выглядит как вердикт о продукте.
+	for _, tag := range []string{"a1b2", "ffff", "0f1e", "0000", "dead", "9c4e"} {
+		u1 := "w63u1-dns-probe.p" + tag + ".invalid"
+		require.False(t, dnsRegoDGAHeuristic(u1),
+			"%q: зонд 6.3u.1 удовлетворяет структурной половине is_dga_domain — "+
+				"при оценке выше порога Rego переименует его алерт и метка ослепнет", u1)
+		require.False(t, f.ShouldEvaluate(
+			&types.DNSEvent{QName: u1, QType: 255, Direction: types.DNSDirectionQuery}, "dig", "bash"),
+			"%q: зонд 6.3u.1 уезжает в Rego — любое правило партиции может переименовать "+
+				"его алерт, и счёт по dns_any_query перестанет его видеть", u1)
+	}
+
 	// ── 6.3u.4: имя доброкачественное во ВСЕХ смыслах, форвард даёт только
 	// пара (comm из is_shell, parent_comm из множества lineage.rego).
 	const u4 = "control-probe.w63u4.invalid"

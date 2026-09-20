@@ -8,6 +8,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Wave 6.3-rid, item 2 (№400/№401): BaseRuleID recovers the suppression-axis
+// identity of an alert Rego enrichment renamed, and follows the convention
+// named explicitly for one it never renamed — no Details key, RuleID itself
+// already is the base id.
+func TestAlert_BaseRuleID(t *testing.T) {
+	renamed := Alert{
+		RuleID:  "dga_domain",
+		Details: map[string]interface{}{BaseRuleIDDetailsKey: "long_dns_query"},
+	}
+	assert.Equal(t, "long_dns_query", renamed.BaseRuleID())
+
+	unrenamed := Alert{RuleID: "dns_rule"}
+	assert.Equal(t, "dns_rule", unrenamed.BaseRuleID())
+
+	unrenamedWithOtherDetails := Alert{
+		RuleID:  "dns_rule",
+		Details: map[string]interface{}{"rego_action": "alert"},
+	}
+	assert.Equal(t, "dns_rule", unrenamedWithOtherDetails.BaseRuleID())
+}
+
 func TestBPFCmdName(t *testing.T) {
 	cases := []struct {
 		cmd  uint32

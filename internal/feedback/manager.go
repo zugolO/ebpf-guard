@@ -154,6 +154,15 @@ func (m *Manager) IsSuppressed(ruleID, comm string) bool {
 
 // FilterAlerts removes alerts whose (ruleID, comm) pair is suppressed.
 // It returns the subset of alerts that should still be emitted.
+//
+// An alert Rego renamed is matched on BOTH identities (wave 6.3-rid, №401):
+// this filter runs downstream of evaluateRegoPolicies, so a.RuleID is already
+// the Rego decision's name, and a suppression an analyst recorded against the
+// YAML rule that actually fired would otherwise never apply — the base name
+// stops existing at this point in the pipeline. The renamed key is still
+// checked first, so nothing an existing suppression matches today stops
+// matching; the second lookup happens only for alerts that were renamed at
+// all (BaseRuleID returns RuleID itself otherwise).
 func (m *Manager) FilterAlerts(alerts []types.Alert) []types.Alert {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -167,6 +176,16 @@ func (m *Manager) FilterAlerts(alerts []types.Alert) []types.Alert {
 				slog.String("comm", a.Comm),
 			)
 			continue
+		}
+		if base := a.BaseRuleID(); base != a.RuleID {
+			if _, suppressed := m.suppressions[suppressKey{ruleID: base, comm: a.Comm}]; suppressed {
+				m.logger.Debug("feedback: suppressed alert by base rule_id",
+					slog.String("rule_id", a.RuleID),
+					slog.String("base_rule_id", base),
+					slog.String("comm", a.Comm),
+				)
+				continue
+			}
 		}
 		if a.RuleID == anomalyRuleID {
 			if _, suppressed := m.anomalySuppressions[a.Comm]; suppressed {

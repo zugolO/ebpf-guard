@@ -228,6 +228,32 @@ var (
 		[]string{"event_type", "rule_id"},
 	)
 
+	// AlertRuleIDRenamed counts alerts whose rule_id was rewritten by a Rego
+	// decision, keyed on BOTH names at once (wave 6.3-rid, №400/№401, item 2
+	// decision б). It is the only series that carries the join: the
+	// suppression layers upstream of Rego (drift baseline, dedup, rate
+	// limiter, engine.go:1961/1969/1973) key on base_rule_id, every reporting
+	// layer downstream (store, alerts_total, alert_volume_by_*) keys on the
+	// renamed rule_id, and without this pair the limiter cut cannot be joined
+	// to the volume of the same alert.
+	//
+	// Deliberately a SEPARATE series rather than a base_rule_id label added to
+	// AlertVolumeByEventType/AlertVolumeBySource: adding a label to an
+	// existing series silently breaks every anchored reader of it (the
+	// client sorts labels, so `{event_type="dns",rule_id=…}` stops matching),
+	// and wave 6.3's readers are anchored awk. Cost is zero when nothing is
+	// renamed — no rename, no series, and the caller does not even reach
+	// WithLabelValues. Both labels are bounded by the loaded rulesets (YAML
+	// ids × Rego ids that actually co-occur), so no cardinality limiter is
+	// needed, same reasoning as AlertsTotal's rule_id label.
+	AlertRuleIDRenamed = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_alert_rule_id_renamed_total",
+			Help: "Total alerts whose rule_id was rewritten by a Rego decision, by the pre-Rego base_rule_id and the resulting rule_id. Joins the suppression layers (keyed on base_rule_id) to the reporting layers (keyed on rule_id).",
+		},
+		[]string{"base_rule_id", "rule_id"},
+	)
+
 	// ProfilerAnomalyScore tracks anomaly scores per process.
 	ProfilerAnomalyScore = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -659,6 +685,16 @@ func RecordAlertVolumeBySource(ruleID, comm string) {
 // item 6, №327/№335).
 func RecordAlertVolumeByEventType(eventType, ruleID string) {
 	AlertVolumeByEventType.WithLabelValues(eventType, ruleID).Inc()
+}
+
+// RecordAlertRuleIDRename increments ebpf_guard_alert_rule_id_renamed_total for
+// an alert Rego renamed: baseRuleID is the pre-Rego name the suppression layers
+// keyed on, ruleID the name every reporting layer sees afterwards. Callers must
+// only invoke it when the two actually differ (types.Alert.BaseRuleID returns
+// RuleID itself when Rego never renamed the alert) — an equal pair would create
+// one series per rule for no information (wave 6.3-rid, item 2, метка 6.3r.2).
+func RecordAlertRuleIDRename(baseRuleID, ruleID string) {
+	AlertRuleIDRenamed.WithLabelValues(baseRuleID, ruleID).Inc()
 }
 
 // FilterAlertsForIntake splits alerts into those admitted to

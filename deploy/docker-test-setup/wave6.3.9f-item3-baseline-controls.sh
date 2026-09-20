@@ -127,6 +127,15 @@ if [ "${1:-}" = "--self-test" ]; then
     trap _st_cleanup EXIT
     _st_fail() { echo "    ПРОВАЛ: $*"; ST_FAILS=$((ST_FAILS + 1)); }
 
+    # nosetup несёт РЕАЛЬНЫЙ wave6.3-metrics-lib.sh (не свою копию логики) —
+    # 5.9.5c/6.3.1 после item 3 волны 6.3-rid читают ось {event_type=dns}
+    # ЧЕРЕЗ w63_volume_by_event_type, и фикстуры обязаны звать ТУ САМУЮ
+    # функцию, которой пользуется прогон, а не переписывать её awk'ом
+    # (память self-test-fixtures-miss-live-log-shape). Присутствие файла не
+    # меняет исход фикстур, не читающих 5.9.5c/6.3.1 (F1/F9/F10/F11/F12/F15).
+    mkdir -p "$ST_WORK/nosetup"
+    cp "$(dirname "$SELF")/wave6.3-metrics-lib.sh" "$ST_WORK/nosetup/" 2>/dev/null || true
+
     # ── Локальный HTTP-стаб /api/v1/alerts. Число алертов под STUB_RULE
     # читается из файла STUB_STATE ПРИ КАЖДОМ запросе — фикстуры меняют
     # содержимое файла между двумя вызовами _rule_count(), и это даёт
@@ -206,8 +215,14 @@ PYEOF
         _st_fail "F1: rc=$RC, вывод: $(printf '%s' "$OUT" | head -3)"
     fi
 
+    # Базовая точка серии {event_type=dns,rule_id} для 5.9.5c/6.3.1 после item 3
+    # волны 6.3-rid (w63_volume_by_event_type читает эту серию, не /api/v1/alerts) —
+    # ОДНА функция, дважды печатающая либо статичную (FAIL-ветка), либо
+    # растущую (PASS-ветка, через фоновый флип) точку.
+    _st_593c_base() { printf 'ebpf_guard_alert_volume_by_event_type_total{event_type="dns",rule_id="dns_tunneling_long_domain"} %s\n' "${1:-0}" > "$STUB_METRICS"; }
+
     # ── F2: первый заход создаёт реестр роли; без сети/kubectl всё уходит в FAIL.
-    echo 0 > "$STUB_STATE"
+    echo 0 > "$STUB_STATE"; _st_593c_base 0
     F2="$ST_WORK/f2"; mkdir -p "$F2"
     OUT=$(W3_ROLE=baseline W3_ART="$F2" W3_TAG=t1 W3_TOKEN=x W3_API="$ST_API" \
           SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" W3_593C_SLEEP=1 bash "$SELF" 2>&1)
@@ -236,8 +251,8 @@ PYEOF
     fi
 
     # ── F4: W3_FORCE=1 позволяет перезаписать реестр той же роли (PASS-ветка тоже жива).
-    echo 0 > "$STUB_STATE"
-    ( sleep 0.3; echo 1 > "$STUB_STATE" ) & disown
+    _st_593c_base 0
+    ( sleep 0.3; _st_593c_base 1 ) & disown
     OUT=$(W3_ROLE=baseline W3_ART="$F2" W3_TAG=t3 W3_FORCE=1 W3_TOKEN=x W3_API="$ST_API" \
           SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" W3_593C_SLEEP=1 bash "$SELF" 2>&1)
     RC=$?
@@ -265,8 +280,8 @@ PYEOF
     fi
 
     # ── F6/F7: явные PASS/FAIL ветки 5.9.5c по отдельности (не только внутри F2/F4).
-    echo 0 > "$STUB_STATE"
-    ( sleep 0.3; echo 1 > "$STUB_STATE" ) & disown
+    _st_593c_base 0
+    ( sleep 0.3; _st_593c_base 1 ) & disown
     F6="$ST_WORK/f6"; mkdir -p "$F6"
     OUT=$(W3_ROLE=baseline W3_ART="$F6" W3_TAG=passtag W3_TOKEN=x W3_API="$ST_API" \
           SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" W3_593C_SLEEP=1 bash "$SELF" 2>&1)
@@ -277,7 +292,7 @@ PYEOF
         _st_fail "F6: ветка ДОСТИГНУТО не напечатана: $(printf '%s' "$OUT" | grep '5\.9\.5c')"
     fi
 
-    echo 0 > "$STUB_STATE"
+    _st_593c_base 0
     F7="$ST_WORK/f7"; mkdir -p "$F7"
     OUT=$(W3_ROLE=baseline W3_ART="$F7" W3_TAG=failtag W3_TOKEN=x W3_API="$ST_API" \
           SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" W3_593C_SLEEP=1 bash "$SELF" 2>&1)
@@ -287,6 +302,26 @@ PYEOF
     else
         _st_fail "F7: ветка ПРОВАЛЕН не напечатана: $(printf '%s' "$OUT" | grep '5\.9\.5c')"
     fi
+
+    # ── F16: ОСИ НЕТ ВОВСЕ (серия под флагом exporter.volume_by_source) —
+    # 5.9.5c обязана сказать НЕИЗМЕРИМ с названным классом, а НЕ ПРОВАЛЕН.
+    # Сторож ровно против той подмены, которую создала миграция item 3:
+    # ПРОВАЛЕН у 5.9.5c — это вход метки 6.3r.1, а она объявлена продуктовым
+    # долгом, отменяющим закрытие куста 6.3. Выдать выключенный прибор за
+    # потерю детекта здесь стоило бы дороже всего замера.
+    printf 'ebpf_guard_alerts_total{rule_id="x",severity="warning",namespace="",pod="",node=""} 1\n' > "$STUB_METRICS"
+    F16="$ST_WORK/f16"; mkdir -p "$F16"
+    OUT=$(W3_ROLE=baseline W3_ART="$F16" W3_TAG=noaxis W3_TOKEN=x W3_API="$ST_API" \
+          SETUP="$ST_WORK/nosetup" W3_MANIFEST="$ST_NOMANIFEST" W3_593C_SLEEP=1 bash "$SELF" 2>&1)
+    echo "--- F16: серии alert_volume_by_event_type_total нет вовсе — НЕИЗМЕРИМ с классом, не ПРОВАЛЕН"
+    if printf '%s' "$OUT" | grep -q '5\.9\.5c НЕИЗМЕРИМ (класс НАЗВАН: оси нет вовсе)' \
+       && printf '%s' "$OUT" | grep -q 'exporter.volume_by_source' \
+       && ! printf '%s' "$OUT" | grep -q '5\.9\.5c ПРОВАЛЕН'; then
+        echo "    OK  выключенный прибор назван прибором, продуктовый вердикт не выдан"
+    else
+        _st_fail "F16: отсутствие оси не отделено от потери детекта: $(printf '%s' "$OUT" | grep '5\.9\.5c')"
+    fi
+    _st_593c_base 0
 
     # ── F9: классификация группы 6.0.13...6.0.18 по ДВУМ источникам (die-запись
     # приоритетнее сторожа результата; отсутствие обоих — FAIL с названным
@@ -444,7 +479,7 @@ MEOF
         echo "САМОТЕСТ ПРОВАЛЕН: расхождений $ST_FAILS"
         exit 1
     fi
-    echo "САМОТЕСТ ПРОЙДЕН: 14 фикстур, расхождений 0"
+    echo "САМОТЕСТ ПРОЙДЕН: 15 фикстур, расхождений 0"
     exit 0
 fi
 
@@ -464,6 +499,46 @@ W3_KUBECTL="${W3_KUBECTL:-/usr/local/bin/kubectl}"
 W3_NS="${W3_NS:-w639f3}"
 W3_POD="${W3_POD:-w639f3-dns-probe}"
 W3_MANIFEST="${W3_MANIFEST:-$SETUP/attacks/dns-rule-ids.txt}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ИЗМЕРИТЕЛЬНАЯ БИБЛИОТЕКА (item 3 волны 6.3-rid, №400/№401/№402). 5.9.5c и
+# 6.3.1 до этой правки читали СТОР по ЧЕТЫРЁМ/manifest-именованным rule_id —
+# ровно та ось, которую переименование Rego обнуляет молча (14 из 16
+# DNS-алертов прогона collect-6.3-up2 уехали под именем `dga_domain`, манифест
+# увидел 2 из 16). w63_volume_by_event_type (wave6.3-metrics-lib.sh) читает
+# {event_type=dns} по ВСЕМ rule_id сразу — ось, которой переименование не
+# видно вовсе, потому что она не фильтрует по имени. Библиотека берётся
+# source'ом, а не копией — та же причина, что у wave6.3-controls.sh: у копии
+# нет офлайн-сторожа (--self-test), у этого файла он есть.
+# ─────────────────────────────────────────────────────────────────────────────
+W3_LIB="${SETUP}/wave6.3-metrics-lib.sh"
+W3_LIB_OK=0
+if [ -r "$W3_LIB" ]; then
+    # shellcheck source=/dev/null
+    . "$W3_LIB" && W3_LIB_OK=1
+fi
+# wave6.3-metrics-lib.sh объявляет `set -euo pipefail` для своего собственного
+# --self-test; source переносит этот режим в ЭТОТ файл, чей die()/pass()
+# требует, чтобы «grep/jq не нашли совпадения» было нормальным исходом
+# измерения (rc=1), а не тихим убийством набора (память sourcing-lib-leaks-set-e).
+set +e +o pipefail
+set -u
+
+# СТОРОЖ ПРИСУТСТВИЯ ОСИ (item 3 волны 6.3-rid). Ось {event_type=dns} живёт в
+# серии ebpf_guard_alert_volume_by_event_type_total, а та пишется в main.go
+# ПОД ФЛАГОМ exporter.volume_by_source: с выключенным флагом серии нет вовсе,
+# дельта по ней тождественно 0, и 5.9.5c/6.3.1 напечатали бы ПРОВАЛЕН —
+# продуктовый вердикт («детект длинной метки потерян», вход метки 6.3r.1 и
+# отмена закрытия куста 6.3) из приборного нуля. До миграции такой формы
+# отказа не существовало: старая ось читала стор, который есть всегда.
+# Отсутствие серии ЦЕЛИКОМ и её ноль — разные исходы, и различать их обязан
+# сам прибор ([[verdict-zero-needs-its-class-presented]], фикстура F13
+# библиотеки на ту же форму). Якорь несёт ПОЛНОЕ имя серии с префиксом
+# ebpf_guard_ ([[metric-anchor-must-carry-full-series-name]]).
+# rc=0 — серия есть, rc=1 — серии нет в срезе.
+_w3_evt_axis_present() { # $1=срез /metrics
+    grep -q '^ebpf_guard_alert_volume_by_event_type_total{' "$1" 2>/dev/null
+}
 
 # Артефакты вне /root/ (память control-artifacts-must-live-outside-root).
 W3_ART="${W3_ART:-/var/lib/w639f3-item3-artifacts}"
@@ -493,8 +568,19 @@ case "$W3_ROLE" in
     *) echo "=== ОТКАЗ: W3_ROLE=$W3_ROLE — допустимы baseline (прогон A2, БЕЗ досева) и check (прогон B, С досевом) ==="; exit 2 ;;
 esac
 W3_LABELS="${W3_LABELS:-$W3_ART/baseline-labels-$W3_ROLE.txt}"
+W3_VERDICTS="${W3_VERDICTS:-$W3_ART/baseline-controls-verdicts-$W3_TAG.txt}"
+# ОБА ОТКАЗА — ДО ПЕРВОЙ ЗАПИСИ, А НЕ МЕЖДУ НИМИ. Прежний порядок усекал
+# реестр роли (`: > "$W3_LABELS"`) и только ПОТОМ проверял коллизию тега
+# вердиктов: заход с уже занятым W3_TAG выходил с rc=2, УЖЕ стерев тот самый
+# снимок, ради защиты которого отказ и написан, и оставлял пустой файл — а
+# пустой реестр читается потребителями (6.3.9.5, 6.3r.1, 6.3r.5) как «роль не
+# снята», то есть цена гонки часов была молчаливой потерей опорного снимка.
 if [ -e "$W3_LABELS" ] && [ "${W3_FORCE:-0}" != "1" ]; then
     echo "=== ОТКАЗ: реестр роли $W3_ROLE уже существует ($W3_LABELS). Перезапись стёрла бы снимок, с которым сравнивается 6.3.9.5; W3_FORCE=1 — только осознанно ==="
+    exit 2
+fi
+if [ -e "$W3_VERDICTS" ]; then
+    echo "=== ОТКАЗ: $W3_VERDICTS уже существует — запуск с тем же W3_TAG затёр бы опорный снимок, с которым сравнивается 6.3.9.5. Задайте другой W3_TAG ==="
     exit 2
 fi
 : > "$W3_LABELS" 2>/dev/null || true
@@ -503,12 +589,20 @@ _w3_label() { # $1 = критерий (может не вычлениться и
     # бы как «критерий без имени потерян» — безымянная запись обязана иметь имя.
     printf '%s %s\n' "${1:-набор_целиком}" "$2" >> "$W3_LABELS" 2>/dev/null || true
 }
-W3_VERDICTS="${W3_VERDICTS:-$W3_ART/baseline-controls-verdicts-$W3_TAG.txt}"
-if [ -e "$W3_VERDICTS" ]; then
-    echo "=== ОТКАЗ: $W3_VERDICTS уже существует — запуск с тем же W3_TAG затёр бы опорный снимок, с которым сравнивается 6.3.9.5. Задайте другой W3_TAG ==="
-    exit 2
-fi
 : > "$W3_VERDICTS" 2>/dev/null || true
+# ПРОВЕНАНС РОЛИ (волна 6.3-rid): на каком бинаре и на каком заходе снят этот
+# реестр. Без него 6.3.9.5 не может назвать, ЧТО именно она сравнила: до item 5
+# роли снимались ДВУМЯ прогонами на РАЗНЫХ бинарях («потерян ли детект от
+# правки»), после item 5 — одним прогоном на ОДНОМ («воспроизводим ли набор
+# внутри прогона»). Это две разные величины под одной меткой, и не назвать
+# разницу значит подписать ложный PASS именем более сильного утверждения
+# (память verdict-class-must-come-from-content-not-label).
+{
+    echo "роль=$W3_ROLE"
+    echo "тег=$W3_TAG"
+    echo "время_UTC=$(date -u +%FT%TZ)"
+    echo "HEAD=$(cd "$SETUP/../.." 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo '?')"
+} > "$W3_ART/baseline-provenance-$W3_ROLE.txt" 2>/dev/null || true
 W3_DONE="${W3_DONE:-$W3_ART/DONE-$W3_TAG}"
 rm -f "$W3_DONE" 2>/dev/null || true
 
@@ -601,15 +695,15 @@ else
 fi
 
 echo
-echo "--- 5.9.5c: длинная/высокоэнтропийная DNS-метка с ноды ---"
+echo "--- 5.9.5c: длинная/высокоэнтропийная DNS-метка с ноды (item 3 волны 6.3-rid, №400: ось {event_type=dns} по ВСЕМ rule_id — четыре именованных счётчика теряли переименованные Rego-алерты) ---"
 if ! command -v dig >/dev/null 2>&1; then
     die "5.9.5c НЕИЗМЕРИМ: dig недоступен на стенде"
+elif [ "$W3_LIB_OK" -ne 1 ]; then
+    die "5.9.5c НЕИЗМЕРИМ: wave6.3-metrics-lib.sh не подключилась — w63_volume_by_event_type недоступна"
 else
-    _593c_rules="dns_tunneling_long_domain exfil_dns_txt_long_label netintr_dns_long_label webshell_dns_exfil_long_subdomain"
-    for r in $_593c_rules; do
-        v=$(_rule_count "$r")
-        eval "_593c_before_${r}=\${v:-0}"
-    done
+    _593c_m0="$W3_ART/593c-metrics-before-$W3_TAG.txt"
+    _593c_m1="$W3_ART/593c-metrics-after-$W3_TAG.txt"
+    curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" >"$_593c_m0" 2>/dev/null
     _593c_filler_a=$(printf 'x%.0s' $(seq 1 60))
     _593c_filler_b=$(printf 'y%.0s' $(seq 1 60))
     _593c_qname="${_593c_filler_a}.${_593c_filler_b}.ebpfguard-5951c-w639f3.dns-tunnel-canary.invalid"
@@ -617,26 +711,30 @@ else
     _593c_rc=$?
     echo "  dig на $_593c_qname выполнен (rc=$_593c_rc, длина qname: ${#_593c_qname})"
     sleep "${W3_593C_SLEEP:-15}"
-    _593c_hit=0
-    _593c_named=""
-    for r in $_593c_rules; do
-        after=$(_rule_count "$r")
-        eval "before=\${_593c_before_${r}:-0}"
-        d=$(( ${after:-0} - ${before:-0} ))
-        echo "  $r: ${before:-0} -> ${after:-0} (Δ$d)"
-        if [ "$d" -gt 0 ]; then _593c_hit=$((_593c_hit + 1)); _593c_named="$_593c_named $r"; fi
-    done
-    if [ "$_593c_hit" -lt 1 ]; then
-        die "5.9.5c ПРОВАЛЕН: длинная метка подана (dig rc=$_593c_rc), ни одно из четырёх правил манифеста не поднялось"
+    curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" >"$_593c_m1" 2>/dev/null
+    if [ ! -s "$_593c_m0" ] || [ ! -s "$_593c_m1" ]; then
+        die "5.9.5c НЕИЗМЕРИМ: срез /metrics пуст (curl к $W3_API/metrics не отдал тела до или после пробы) — величина ниже была бы приборной"
+    elif ! _w3_evt_axis_present "$_593c_m0" && ! _w3_evt_axis_present "$_593c_m1"; then
+        die "5.9.5c НЕИЗМЕРИМ (класс НАЗВАН: оси нет вовсе): серии ebpf_guard_alert_volume_by_event_type_total нет НИ В ОДНОМ из двух срезов — она пишется под флагом exporter.volume_by_source (config-test.yaml), и с выключенным флагом дельта по ней тождественно ноль. Это отсутствие прибора, а НЕ потеря детекта длинной метки: напечатать здесь ПРОВАЛЕН значило бы выдать продуктовый долг (вход метки 6.3r.1) за приборный ноль"
     else
-        pass "5.9.5c ДОСТИГНУТО: сработали $_593c_hit/4 правил ($_593c_named)"
+        _593c_lines=$(w63_volume_by_event_type "$_593c_m0" "$_593c_m1" "dns")
+        _593c_delta=$(printf '%s\n' "${_593c_lines:-}" | awk '{s+=$3} END{print s+0}')
+        echo "  разбивка {event_type=dns, rule_id} за пробу (ось не фильтрует по имени — переименование Rego её не слепит, №400/№401):"
+        if [ -n "${_593c_lines:-}" ]; then printf '%s\n' "$_593c_lines" | sed 's/^/    /'; else echo "    (пусто)"; fi
+        if [ "${_593c_delta:-0}" -lt 1 ]; then
+            die "5.9.5c ПРОВАЛЕН: длинная метка подана (dig rc=$_593c_rc), объём {event_type=dns} за пробу не вырос (Δ=0 по всем rule_id, включая переименованные Rego)"
+        else
+            pass "5.9.5c ДОСТИГНУТО: длинная метка подана (dig rc=$_593c_rc), объём {event_type=dns} вырос на ${_593c_delta} алертов, состав поимённо выше"
+        fi
     fi
 fi
 
 echo
-echo "--- 6.3.1: DNS-манифест — длинный/DGA-подобный qname из пода busybox ---"
+echo "--- 6.3.1: DNS-манифест — длинный/DGA-подобный qname из пода busybox (item 3 волны 6.3-rid: ось {event_type=dns} по ВСЕМ rule_id — манифест остаётся диагностикой, не вердиктом) ---"
 if [ ! -r "$W3_MANIFEST" ]; then
     die "6.3.1 НЕИЗМЕРИМ: манифест $W3_MANIFEST не читается"
+elif [ "$W3_LIB_OK" -ne 1 ]; then
+    die "6.3.1 НЕИЗМЕРИМ: wave6.3-metrics-lib.sh не подключилась — w63_volume_by_event_type недоступна"
 else
     _631_ids=$(grep -v '^#' "$W3_MANIFEST" | grep -v '^[[:space:]]*$')
     _631_ids_sp=$(printf '%s' "$_631_ids" | tr '\n' ' ')
@@ -652,21 +750,37 @@ else
         [ -z "${_631_label:-}" ] && _631_label="x7k2qv9zwmrl4bnt8pd3jf6hs1ce5ay0gu3kv8wz2mqr7nxb"
         _631_domain="${_631_label}.w639f3-dga-probe.invalid"
         _631_t0=$(date -u +%s)
+        _631_m0="$W3_ART/631-metrics-before-$W3_TAG.txt"
+        _631_m1="$W3_ART/631-metrics-after-$W3_TAG.txt"
+        curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" >"$_631_m0" 2>/dev/null
         _631_out=$("$W3_KUBECTL" -n "$W3_NS" exec "$W3_POD" -- nslookup "$_631_domain" 2>&1)
         echo "  запрошено: $_631_domain (${#_631_domain} симв.)"
         echo "  вывод nslookup (обрезан): $(printf '%s' "${_631_out:-}" | tr '\n' ' ' | cut -c1-200)"
         sleep 15
+        curl -s --max-time 10 -H "Authorization: Bearer $W3_TOKEN" "$W3_API/metrics" >"$_631_m1" 2>/dev/null
+        # диагностика (старая манифестная+под ось, справочно) — теряет
+        # переименованные Rego-алерты (№400) и не участвует в вердикте.
         _631_hit=$(_alerts | jq --arg ids "$_631_ids_sp" --arg pod "$W3_POD" --argjson t "$_631_t0" \
             '[.[]|select((.rule_id as $r|($ids|split(" "))|index($r)) and ((.enrichment.pod_name // "")==$pod) and ((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t))]' 2>/dev/null)
         _631_n=$(printf '%s' "${_631_hit:-[]}" | jq 'length' 2>/dev/null)
         _631_rules=$(printf '%s' "${_631_hit:-[]}" | jq -r '.[].rule_id' 2>/dev/null | sort -u | tr '\n' ' ')
-        echo "  алертов из манифеста от $W3_POD: ${_631_n:-0} (правила: ${_631_rules:-нет})"
-        if [ -z "${_631_out:-}" ]; then
-            die "6.3.1 НЕИЗМЕРИМ: exec в под не дал вывода — подача не подтверждена"
-        elif [ "${_631_n:-0}" -lt 1 ]; then
-            die "6.3.1 ПРОВАЛЕН: qname подан ($_631_domain), ни одно правило манифеста не поднялось"
+        echo "  диагностика (манифест+под, старая ось, теряет переименование Rego, №400): ${_631_n:-0} алертов (правила: ${_631_rules:-нет})"
+        if [ ! -s "$_631_m0" ] || [ ! -s "$_631_m1" ]; then
+            die "6.3.1 НЕИЗМЕРИМ: срез /metrics пуст (curl к $W3_API/metrics не отдал тела до или после пробы) — величина ниже была бы приборной"
+        elif ! _w3_evt_axis_present "$_631_m0" && ! _w3_evt_axis_present "$_631_m1"; then
+            die "6.3.1 НЕИЗМЕРИМ (класс НАЗВАН: оси нет вовсе): серии ebpf_guard_alert_volume_by_event_type_total нет НИ В ОДНОМ из двух срезов — она пишется под флагом exporter.volume_by_source (config-test.yaml). Приборный ноль, а не «правило манифеста не поднялось»"
         else
-            pass "6.3.1 ДОСТИГНУТО: ${_631_n} алертов из манифеста подняты ($_631_rules)"
+            _631_lines=$(w63_volume_by_event_type "$_631_m0" "$_631_m1" "dns")
+            _631_delta=$(printf '%s\n' "${_631_lines:-}" | awk '{s+=$3} END{print s+0}')
+            echo "  разбивка {event_type=dns, rule_id} за пробу (ось не фильтрует по имени — переименование Rego её не слепит):"
+            if [ -n "${_631_lines:-}" ]; then printf '%s\n' "$_631_lines" | sed 's/^/    /'; else echo "    (пусто)"; fi
+            if [ -z "${_631_out:-}" ]; then
+                die "6.3.1 НЕИЗМЕРИМ: exec в под не дал вывода — подача не подтверждена"
+            elif [ "${_631_delta:-0}" -lt 1 ]; then
+                die "6.3.1 ПРОВАЛЕН: qname подан ($_631_domain), объём {event_type=dns} за пробу не вырос (Δ=0 по всем rule_id, включая переименованные Rego)"
+            else
+                pass "6.3.1 ДОСТИГНУТО: qname подан ($_631_domain), объём {event_type=dns} вырос на ${_631_delta} алертов, состав поимённо выше"
+            fi
         fi
     fi
     "$W3_KUBECTL" -n "$W3_NS" delete pod "$W3_POD" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -1235,14 +1349,44 @@ W63U6PY
         echo "  окна по ${W3_SEND_WIN}с, по $W3_SEND_N пакетов на способ:$_w3u6_line"
         if [ -n "$_w3u6_bad" ]; then
             die "6.3u.6 НЕИЗМЕРИМ: класс=серия ebpf_guard_events_total не прочитана (rc=$_w3u6_bad: 1 — серии нет в срезе, 2 — срез пуст) — все величины ниже были бы анкерными (№391)"
-        elif [ "${_w3u6_prc_write:-1}" -ne 0 ] || [ "${_w3u6_prc_send:-1}" -ne 0 ] || [ "${_w3u6_prc_sendmsg:-1}" -ne 0 ]; then
-            die "6.3u.6 НЕИЗМЕРИМ: класс=зонд не отработал (rc write=${_w3u6_prc_write:-?}, send=${_w3u6_prc_send:-?}, sendmsg=${_w3u6_prc_sendmsg:-?}) — нули ниже были бы приборными"
-        elif [ "${_w3u6_pr_write:-0}" -lt "$W3_SEND_N" ]; then
-            die "6.3u.6 НЕИЗМЕРИМ: класс=DNS-коллектор не видит даже write(2) (проба ${_w3u6_pr_write:-0} из $W3_SEND_N посланных, фон ${_w3u6_bg_write:-0}) — вопрос про send(2)/sendmsg() на этой ноде не задан вовсе: нет резолвера на порту 53, не поднят dns-коллектор либо агент без правки №328"
-        elif [ "${_w3u6_pr_send:-0}" -ge "$W3_SEND_N" ] && [ "${_w3u6_pr_sendmsg:-0}" -ge "$W3_SEND_N" ]; then
-            pass "6.3u.6 ДОСТИГНУТО: все три способа записи в присоединённый сокет видны, каждый дал не меньше $W3_SEND_N событий на $W3_SEND_N пакетов — write ${_w3u6_pr_write} (фон ${_w3u6_bg_write}), send ${_w3u6_pr_send} (фон ${_w3u6_bg_send}), sendmsg ${_w3u6_pr_sendmsg} (фон ${_w3u6_bg_sendmsg}) (№390 и №392 сняты живьём: trace_sendto и trace_sendmsg падают в dns_socket_map при NULL-адресе)"
         else
-            die "6.3u.6 ПРОВАЛЕН: write(2) виден (${_w3u6_pr_write} из $W3_SEND_N), а send=${_w3u6_pr_send:-0}, sendmsg=${_w3u6_pr_sendmsg:-0} при $W3_SEND_N посланных пакетах (фоны: write ${_w3u6_bg_write}, send ${_w3u6_bg_send}, sendmsg ${_w3u6_bg_sendmsg}). Недобор по send — находка №390, по sendmsg — №392; на ноде бинарь без этих правок ЛИБО make generate собрал старый bpf/dns.bpf.c (правки лежат в C, не в Go)"
+            # ТРИ НЕЗАВИСИМЫЕ ПОЛОВИНЫ (item 4 волны 6.3-rid, №402/№403 разбор).
+            # Прежняя elif-цепочка гасила печать send/sendmsg нулём write:
+            # на прогоне 20.09 write упал в фон (8 чужих запросов в окне) и
+            # метка напечатала «вопрос про send/sendmsg не задан вовсе» НА 30
+            # СИМВОЛОВ НИЖЕ строки, где ответ уже был — send 5/5, sendmsg 5/5
+            # (память elif-verdict-masks-independent-halves). Каждый способ
+            # получает СВОЙ вердикт, и все три печатаются БЕЗУСЛОВНО, ДО
+            # разбора общего исхода — ноль одного не гасит печать двух других.
+            _w3u6_verdict_one() { # $1=метод $2=rc зонда $3=проба $4=фон → "СЛОВО|текст", СЛОВО∈{НЕИЗМЕРИМ,НЕДОБОР,OK}
+                local m="$1" prc="$2" pr="${3:-0}" bg="${4:-0}"
+                if [ "$prc" -ne 0 ]; then
+                    printf 'НЕИЗМЕРИМ|%s: зонд не отработал (rc=%s)' "$m" "$prc"
+                elif [ "$pr" -lt "$W3_SEND_N" ]; then
+                    printf 'НЕДОБОР|%s: проба %s из %s, фон %s' "$m" "$pr" "$W3_SEND_N" "$bg"
+                else
+                    printf 'OK|%s: проба %s из %s, фон %s' "$m" "$pr" "$W3_SEND_N" "$bg"
+                fi
+            }
+            _w3u6_r_write=$(_w3u6_verdict_one write "${_w3u6_prc_write:-1}" "${_w3u6_pr_write:-0}" "${_w3u6_bg_write:-0}")
+            _w3u6_r_send=$(_w3u6_verdict_one send "${_w3u6_prc_send:-1}" "${_w3u6_pr_send:-0}" "${_w3u6_bg_send:-0}")
+            _w3u6_r_sendmsg=$(_w3u6_verdict_one sendmsg "${_w3u6_prc_sendmsg:-1}" "${_w3u6_pr_sendmsg:-0}" "${_w3u6_bg_sendmsg:-0}")
+            _w3u6_w_write="${_w3u6_r_write%%|*}"; _w3u6_t_write="${_w3u6_r_write#*|}"
+            _w3u6_w_send="${_w3u6_r_send%%|*}"; _w3u6_t_send="${_w3u6_r_send#*|}"
+            _w3u6_w_sendmsg="${_w3u6_r_sendmsg%%|*}"; _w3u6_t_sendmsg="${_w3u6_r_sendmsg#*|}"
+            echo "  три независимые половины (item 4 волны 6.3-rid, печатаются безусловно):"
+            echo "    write:   $_w3u6_w_write ($_w3u6_t_write)"
+            echo "    send:    $_w3u6_w_send ($_w3u6_t_send)"
+            echo "    sendmsg: $_w3u6_w_sendmsg ($_w3u6_t_sendmsg)"
+            if [ "$_w3u6_w_write" != "OK" ]; then
+                die "6.3u.6 НЕИЗМЕРИМ: класс=DNS-коллектор не видит даже write(2) ($_w3u6_t_write) — вопрос про send(2)/sendmsg() на этой ноде не задан вовсе: нет резолвера на порту 53, не поднят dns-коллектор либо агент без правки №328; ответы по send/sendmsg напечатаны выше как независимые половины и этим не отменены"
+            elif [ "$_w3u6_w_send" = "НЕИЗМЕРИМ" ] || [ "$_w3u6_w_sendmsg" = "НЕИЗМЕРИМ" ]; then
+                die "6.3u.6 НЕИЗМЕРИМ: класс=зонд не отработал ($_w3u6_t_send; $_w3u6_t_sendmsg) — нули были бы приборными"
+            elif [ "$_w3u6_w_send" = "OK" ] && [ "$_w3u6_w_sendmsg" = "OK" ]; then
+                pass "6.3u.6 ДОСТИГНУТО: все три способа записи в присоединённый сокет видны — write($_w3u6_t_write); send($_w3u6_t_send); sendmsg($_w3u6_t_sendmsg) (№390 и №392 сняты живьём: trace_sendto и trace_sendmsg падают в dns_socket_map при NULL-адресе)"
+            else
+                die "6.3u.6 ПРОВАЛЕН: write($_w3u6_t_write) виден; send=$_w3u6_w_send ($_w3u6_t_send), sendmsg=$_w3u6_w_sendmsg ($_w3u6_t_sendmsg). Недобор по send — находка №390, по sendmsg — №392; на ноде бинарь без этих правок ЛИБО make generate собрал старый bpf/dns.bpf.c (правки лежат в C, не в Go)"
+            fi
         fi
         rm -rf "$_w3u6_dir" 2>/dev/null || true
     fi
@@ -1261,3 +1405,34 @@ cp "$W3_VERDICTS" "$W3_ART/baseline-controls-verdicts-latest.txt" 2>/dev/null ||
 echo "  последний снимок: $W3_ART/baseline-controls-verdicts-latest.txt (копия $W3_VERDICTS)"
 echo "  реестр классов роли $W3_ROLE: $W3_LABELS"
 sed 's/^/    /' "$W3_LABELS" 2>/dev/null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПРОВЕНАНС ПОСТ-АРХИВНЫХ ЗАПУСКОВ (item 4 волны 6.3-rid, №403). Три метки
+# куста 6.3-up (6.3u.1, 6.3u.2, 6.3u.6) на прогоне collect-6.3-up2 были сняты
+# отдельными заходами набора ПОСЛЕ того, как run-6.3-pipeline.sh уже собрал
+# архив — законно (набор не требует пролога), но артефактов этих заходов в
+# архиве не оказалось вовсе: реестр роли baseline в архиве нёс три FAIL, а
+# фактические PASS этих меток офлайн-реплеем архива не воспроизводились.
+#
+# W3_ARCHIVE_COLLECT — опт-ин: указывает на УЖЕ собранный архив
+# (каталог run-6.3-pipeline.sh, несущий controls/). Заход дописывает туда
+# СВОИ файлы под именем, несущим тег и время, ничего не перезаписывая —
+# провенанс печатается словом, чтобы «снято позже» не читалось как «снято
+# этим прогоном» (тот же принцип, каким run-6.3-pipeline.sh уже метит
+# заведомо старый опорный снимок при первичной сборке архива).
+if [ -n "${W3_ARCHIVE_COLLECT:-}" ] && [ -d "${W3_ARCHIVE_COLLECT}/controls" ]; then
+    _w3_postrun_dir="${W3_ARCHIVE_COLLECT}/controls/baseline-item3/postrun-${W3_TAG}"
+    mkdir -p "$_w3_postrun_dir" 2>/dev/null
+    cp "$W3_VERDICTS" "$_w3_postrun_dir/" 2>/dev/null
+    cp "$W3_LABELS" "$_w3_postrun_dir/" 2>/dev/null
+    {
+        echo "провенанс=пост-архивный заход набора (item 4 волны 6.3-rid, №403)"
+        echo "роль=$W3_ROLE тег=$W3_TAG"
+        echo "время_UTC=$(date -u +%FT%TZ)"
+        echo "HEAD=$(cd "$SETUP/../.." 2>/dev/null && git rev-parse --short HEAD 2>/dev/null || echo '?')"
+        echo "архив был собран РАНЬШЕ этого файла — не путать реестр роли ${W3_ROLE} внутри postrun-${W3_TAG}/ с реестром, собранным вместе с архивом"
+    } > "$_w3_postrun_dir/PROVENANCE.txt" 2>/dev/null
+    echo "  пост-архивный заход дописан в архив: $_w3_postrun_dir"
+else
+    echo "  W3_ARCHIVE_COLLECT не задан — если архив уже собран, ЭТОТ заход в нём виден не будет (задайте W3_ARCHIVE_COLLECT=<каталог архива> для пост-архивных запусков, №403)"
+fi

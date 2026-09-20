@@ -2292,8 +2292,22 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		// driving a rule's volume; this counter can. Off by default
 		// (exporter.volume_by_source) — a measurement instrument for narrowing
 		// the gate, not a production identity axis.
-		if cfg.Exporter.VolumeBySource {
-			for _, a := range dispatched {
+		for _, a := range dispatched {
+			// Wave 6.3-rid, item 2 (№400/№401), метка 6.3r.2: publish the
+			// base_rule_id ↔ rule_id pair for every alert Rego renamed. NOT
+			// behind Exporter.VolumeBySource: the volume axes above are
+			// measurement instruments, but this one is the join key between
+			// the suppression layers (keyed on the pre-Rego name) and every
+			// reporting layer (keyed on the renamed one) — without it the
+			// limiter cut cannot be joined to the volume of the same alert in
+			// a production deployment either. Cost when Rego renames nothing
+			// (Rego disabled, or no decision changed the id): one lookup of a
+			// missing key in an already-allocated Details map, no series, no
+			// WithLabelValues.
+			if base := a.BaseRuleID(); base != a.RuleID {
+				exporter.RecordAlertRuleIDRename(base, a.RuleID)
+			}
+			if cfg.Exporter.VolumeBySource {
 				exporter.RecordAlertVolumeBySource(a.RuleID, a.Comm)
 				// Wave 6.3.1, item 6 (№327/№335): the event-type axis that
 				// replaces the A/B dns.enabled toggle — same gate as the

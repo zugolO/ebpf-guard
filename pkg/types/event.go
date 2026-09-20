@@ -494,6 +494,27 @@ type Alert struct {
 	DriftNovelWorkload bool `json:"-"`
 }
 
+// BaseRuleIDDetailsKey is the Details map key holding the alert's pre-Rego
+// rule_id, set only when Rego enrichment renamed RuleID away from it
+// (wave 6.3-rid, №400/№401: base_rule_id is the one axis rate limiter, dedup
+// and drift baseline already key on — they run before Rego). Its absence is
+// the explicit convention for an alert Rego never renamed: RuleID already IS
+// the base id, so BaseRuleID() falls back to it.
+const BaseRuleIDDetailsKey = "base_rule_id"
+
+// BaseRuleID returns the rule_id this alert had before any Rego enrichment
+// renamed it, restoring the one identity the suppression layers (drift
+// baseline, dedup, rate limiter) already key on. Callers that need to join a
+// reporting-side alert (store, metrics, notifications — all keyed on the
+// possibly-renamed RuleID) back onto that suppression axis must use this
+// instead of reading RuleID directly.
+func (a Alert) BaseRuleID() string {
+	if v, ok := a.Details[BaseRuleIDDetailsKey].(string); ok && v != "" {
+		return v
+	}
+	return a.RuleID
+}
+
 // TraceContext holds OpenTelemetry trace context for propagation.
 // Fields follow W3C Trace Context spec (https://www.w3.org/TR/trace-context/).
 type TraceContext struct {

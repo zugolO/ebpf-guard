@@ -2447,15 +2447,24 @@ func (ce *CorrelationEngine) evaluateRegoPolicies(ctx context.Context, alerts []
 
 		// Enhance alert with Rego decision
 		enhancedAlert := alert
-		enhancedAlert.RuleID = decision.RuleID
+		if enhancedAlert.Details == nil {
+			enhancedAlert.Details = getDetailsMap()
+		}
+		// №400/№401 (wave 6.3-rid, item 2, decision б): renaming stays —
+		// existing dashboards built on Rego rule names must not break — but
+		// the pre-rename id travels in Details so the suppression axis
+		// (drift baseline/dedup/rate limiter, all keyed on it already,
+		// upstream of this function) is recoverable from a reporting-side
+		// alert. See types.Alert.BaseRuleID.
+		if decision.RuleID != "" && decision.RuleID != enhancedAlert.RuleID {
+			enhancedAlert.Details[types.BaseRuleIDDetailsKey] = enhancedAlert.RuleID
+			enhancedAlert.RuleID = decision.RuleID
+		}
 		if decision.Severity != "" {
 			enhancedAlert.Severity = decision.Severity
 		}
 		if decision.Message != "" {
 			enhancedAlert.Message = decision.Message
-		}
-		if enhancedAlert.Details == nil {
-			enhancedAlert.Details = getDetailsMap()
 		}
 		enhancedAlert.Details["rego_action"] = decision.Action
 		enhancedAlert.Details["mitre_technique"] = decision.MitreTechnique

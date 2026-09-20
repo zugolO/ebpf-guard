@@ -736,8 +736,23 @@ PYEOF
             # дельта, как и у events_total рядом.
             _631u1_hits_before=$(_alerts | jq --arg ids "$_631u1_ids" \
                 '[.[]|select(.rule_id as $r|($ids|split(" "))|index($r))]|length' 2>/dev/null)
+            # №397 (прогон collect-6.3-up2). ВТОРАЯ ВЕЛИЧИНА ВЕРДИКТА БЫЛА
+            # НЕАТРИБУТИРУЕМА. «Алертов манифеста» — счёт по ВСЕМ 30 правилам
+            # DNS по всему стору: на прогоне 19.09 он дал Δ=7 и метка считала
+            # это своим успехом, хотя ни один из семи не был поднят зондом; на
+            # прогоне 20.09 при тихом стенде дал Δ=0 — и метка вынесла ПРОВАЛ,
+            # когда событие IPv6 было ВИДНО (Δ событий = 2). Обе величины
+            # мерили фон, а не зонд.
+            #
+            # Зонд теперь спрашивает qtype=ANY, и вердикт читает ОДНО НАЗВАННОЕ
+            # правило — dns_any_query, — которое на этот qtype и срабатывает.
+            # Фон у него нулевой (измерено на том же прогоне: 0 до зонда
+            # 6.3u.3, 1 после — то есть ровно его собственный). Счёт манифеста
+            # остаётся ПЕЧАТАТЬСЯ рядом как контекст, но вердикта больше не
+            # несёт: величина, не отличающая зонд от фона, не вправе решать.
+            _631u1_any_before=$(_rule_count dns_any_query)
             _631u1_domain="w63u1-ipv6-probe-$(head -c 32 /dev/urandom 2>/dev/null | base64 2>/dev/null | tr -dc 'a-z0-9' | head -c 20).invalid"
-            dig +short +time=2 +tries=1 -6 @::1 -p 53 "$_631u1_domain" >/dev/null 2>&1
+            dig +short +time=2 +tries=1 -6 @::1 -p 53 "$_631u1_domain" ANY >/dev/null 2>&1
             _631u1_rc=$?
             sleep "${W3_593C_SLEEP:-15}"
             kill "$_631u1_listener_pid" >/dev/null 2>&1
@@ -752,7 +767,9 @@ PYEOF
             _631u1_hits_after=$(_alerts | jq --arg ids "$_631u1_ids" \
                 '[.[]|select(.rule_id as $r|($ids|split(" "))|index($r))]|length' 2>/dev/null)
             _631u1_hits=$(( ${_631u1_hits_after:-0} - ${_631u1_hits_before:-0} ))
-            echo "  ::1:53 слушатель pid=$_631u1_listener_pid, dig -6 rc=$_631u1_rc, ebpf_guard_events_total{type=dns} ${_631u1_before:-0}->${_631u1_after:-0} (Δ$_631u1_delta), алертов манифеста ${_631u1_hits_before:-0}->${_631u1_hits_after:-0} (Δ$_631u1_hits)"
+            _631u1_any_after=$(_rule_count dns_any_query)
+            _631u1_any=$(( ${_631u1_any_after:-0} - ${_631u1_any_before:-0} ))
+            echo "  ::1:53 слушатель pid=$_631u1_listener_pid, dig -6 ANY rc=$_631u1_rc, ebpf_guard_events_total{type=dns} ${_631u1_before:-0}->${_631u1_after:-0} (Δ$_631u1_delta), dns_any_query ${_631u1_any_before:-0}->${_631u1_any_after:-0} (Δ$_631u1_any), алертов манифеста (контекст, не вердикт) ${_631u1_hits_before:-0}->${_631u1_hits_after:-0} (Δ$_631u1_hits)"
             if [ ! -s "$_631u1_stub_dir/metrics-before.txt" ] || [ ! -s "$_631u1_stub_dir/metrics-after.txt" ]; then
                 # Пустой срез молча становится нулями по ОБЕИМ границам, и
                 # дельта 0 читалась бы как вердикт о детекте
@@ -772,10 +789,14 @@ PYEOF
                 # ПРОВАЛЕН: детект об этом не спрашивали
                 # ([[positive-control-needs-result-sentinel]]).
                 die "6.3u.1 НЕИЗМЕРИМ: класс=IPv6-запрос не ушёл (dig -6 @::1 rc=$_631u1_rc) — величины ниже приборные, а не вердикт о детекте"
-            elif [ "${_631u1_delta:-0}" -gt 0 ] && [ "${_631u1_hits:-0}" -gt 0 ]; then
-                pass "6.3u.1 ДОСТИГНУТО: ebpf_guard_events_total{type=dns} вырос на $_631u1_delta И алертов манифеста стало на $_631u1_hits больше — IPv6-запрос дошёл до коллектора и до правил (правка №388: is_dns_packet больше не AF_INET-only)"
+            elif ! printf '%s' " $_631u1_ids " | grep -q ' dns_any_query '; then
+                # Правило, по которому судим, обязано быть в манифесте этого
+                # прогона — иначе его ноль ничего не значит.
+                die "6.3u.1 НЕИЗМЕРИМ: класс=dns_any_query отсутствует в манифесте $W3_MANIFEST — зонд qtype=ANY атрибутировать нечем (события: Δ=$_631u1_delta)"
+            elif [ "${_631u1_delta:-0}" -gt 0 ] && [ "${_631u1_any:-0}" -gt 0 ]; then
+                pass "6.3u.1 ДОСТИГНУТО: ebpf_guard_events_total{type=dns} вырос на $_631u1_delta И dns_any_query поднялся на $_631u1_any по СВОЕМУ зонду (qtype=ANY) — IPv6-запрос дошёл и до коллектора, и до правил (правка №388: is_dns_packet больше не AF_INET-only)"
             else
-                die "6.3u.1 ПРОВАЛЕН: запрос ушёл (rc=0), но ebpf_guard_events_total{type=dns} Δ=$_631u1_delta, алертов манифеста Δ=$_631u1_hits — обе величины обязаны быть >0. Читать так: ноль по обеим = trace_connect не принял AF_INET6 (на ноде бинарь без правки №388, либо make generate собрал старый bpf/dns.bpf.c); events>0 при Δалертов=0 = событие видно, а правила по нему молчат"
+                die "6.3u.1 ПРОВАЛЕН: запрос ушёл (rc=0), но ebpf_guard_events_total{type=dns} Δ=$_631u1_delta, dns_any_query Δ=$_631u1_any — обе величины обязаны быть >0. Читать так: ноль по обеим = trace_connect не принял AF_INET6 (на ноде бинарь без правки №388, либо make generate собрал старый bpf/dns.bpf.c); events>0 при Δdns_any_query=0 = событие видно, а правила по нему молчат"
             fi
         fi
     fi
@@ -1098,10 +1119,18 @@ echo "--- 6.3u.6: №390/№392 — send(2) и sendmsg(msg_name=NULL) на пр�
 # названным классом, а не ПРОВАЛ продукта
 # ([[positive-control-needs-result-sentinel]]).
 #
-# ПОЧЕМУ ПАРНЫЕ ОКНА. Фон снимается непосредственно перед пробой и той же
-# длины — та же дисциплина, какой снималась IPv6-слепота (№354…№356). Свои же
-# чтения /metrics курлом попадают в ОБА окна одинаково, поэтому разность от
-# них не зависит; величина вердикта — проба минус фон, а не абсолют.
+# ПОЧЕМУ ПАРНЫЕ ОКНА И ПОЧЕМУ ВЕРДИКТ НЕ ПО НИМ (№396, прогон collect-6.3-up2).
+# Фон снимается непосредственно перед пробой и той же длины — та же
+# дисциплина, какой снималась IPv6-слепота (№354…№356), — и ПЕЧАТАЕТСЯ всегда.
+# Но сравнивать «проба > фон» нельзя: фон — чужой трафик ноды, он не обязан
+# быть тихим. На прогоне 20.09 три пары дали write 5 при фоне 8, send 5 при
+# фоне 0, sendmsg 5 при фоне 0: продукт отработал ИДЕАЛЬНО (ровно по 5 событий
+# на 5 пакетов каждым способом), а метка вынесла «коллектор не видит даже
+# write(2)» — потому что в фоновое окно write попало 8 чужих запросов.
+#
+# Правильная величина точна и известна заранее: зонд шлёт РОВНО $W3_SEND_N
+# пакетов в присоединённый сокет, значит прирост серии обязан быть НЕ МЕНЬШЕ
+# $W3_SEND_N. Это и есть вердикт; фон остаётся контекстом для читателя.
 W3_SEND_PROBE="${W3_SEND_PROBE:-1}"
 W3_SEND_WIN="${W3_SEND_WIN:-8}"
 W3_SEND_N="${W3_SEND_N:-5}"
@@ -1187,12 +1216,12 @@ W63U6PY
             die "6.3u.6 НЕИЗМЕРИМ: класс=серия ebpf_guard_events_total не прочитана (rc=$_w3u6_bad: 1 — серии нет в срезе, 2 — срез пуст) — все величины ниже были бы анкерными (№391)"
         elif [ "${_w3u6_prc_write:-1}" -ne 0 ] || [ "${_w3u6_prc_send:-1}" -ne 0 ] || [ "${_w3u6_prc_sendmsg:-1}" -ne 0 ]; then
             die "6.3u.6 НЕИЗМЕРИМ: класс=зонд не отработал (rc write=${_w3u6_prc_write:-?}, send=${_w3u6_prc_send:-?}, sendmsg=${_w3u6_prc_sendmsg:-?}) — нули ниже были бы приборными"
-        elif [ "${_w3u6_pr_write:-0}" -le "${_w3u6_bg_write:-0}" ]; then
-            die "6.3u.6 НЕИЗМЕРИМ: класс=DNS-коллектор не видит даже write(2) (проба ${_w3u6_pr_write:-0} против фона ${_w3u6_bg_write:-0}) — вопрос про send(2)/sendmsg() на этой ноде не задан вовсе: нет резолвера на порту 53, не поднят dns-коллектор либо агент без правки №328"
-        elif [ "${_w3u6_pr_send:-0}" -gt "${_w3u6_bg_send:-0}" ] && [ "${_w3u6_pr_sendmsg:-0}" -gt "${_w3u6_bg_sendmsg:-0}" ]; then
-            pass "6.3u.6 ДОСТИГНУТО: все три способа записи в присоединённый сокет видны — write ${_w3u6_pr_write}/фон ${_w3u6_bg_write}, send ${_w3u6_pr_send}/фон ${_w3u6_bg_send}, sendmsg ${_w3u6_pr_sendmsg}/фон ${_w3u6_bg_sendmsg} (№390 и №392 сняты живьём: trace_sendto и trace_sendmsg падают в dns_socket_map при NULL-адресе)"
+        elif [ "${_w3u6_pr_write:-0}" -lt "$W3_SEND_N" ]; then
+            die "6.3u.6 НЕИЗМЕРИМ: класс=DNS-коллектор не видит даже write(2) (проба ${_w3u6_pr_write:-0} из $W3_SEND_N посланных, фон ${_w3u6_bg_write:-0}) — вопрос про send(2)/sendmsg() на этой ноде не задан вовсе: нет резолвера на порту 53, не поднят dns-коллектор либо агент без правки №328"
+        elif [ "${_w3u6_pr_send:-0}" -ge "$W3_SEND_N" ] && [ "${_w3u6_pr_sendmsg:-0}" -ge "$W3_SEND_N" ]; then
+            pass "6.3u.6 ДОСТИГНУТО: все три способа записи в присоединённый сокет видны, каждый дал не меньше $W3_SEND_N событий на $W3_SEND_N пакетов — write ${_w3u6_pr_write} (фон ${_w3u6_bg_write}), send ${_w3u6_pr_send} (фон ${_w3u6_bg_send}), sendmsg ${_w3u6_pr_sendmsg} (фон ${_w3u6_bg_sendmsg}) (№390 и №392 сняты живьём: trace_sendto и trace_sendmsg падают в dns_socket_map при NULL-адресе)"
         else
-            die "6.3u.6 ПРОВАЛЕН: write(2) виден (${_w3u6_pr_write} против фона ${_w3u6_bg_write}), а send=${_w3u6_pr_send:-0}/фон ${_w3u6_bg_send:-0}, sendmsg=${_w3u6_pr_sendmsg:-0}/фон ${_w3u6_bg_sendmsg:-0}. Ноль по send — находка №390, ноль по sendmsg — №392; на ноде бинарь без этих правок ЛИБО make generate собрал старый bpf/dns.bpf.c (правки лежат в C, не в Go)"
+            die "6.3u.6 ПРОВАЛЕН: write(2) виден (${_w3u6_pr_write} из $W3_SEND_N), а send=${_w3u6_pr_send:-0}, sendmsg=${_w3u6_pr_sendmsg:-0} при $W3_SEND_N посланных пакетах (фоны: write ${_w3u6_bg_write}, send ${_w3u6_bg_send}, sendmsg ${_w3u6_bg_sendmsg}). Недобор по send — находка №390, по sendmsg — №392; на ноде бинарь без этих правок ЛИБО make generate собрал старый bpf/dns.bpf.c (правки лежат в C, не в Go)"
         fi
         rm -rf "$_w3u6_dir" 2>/dev/null || true
     fi

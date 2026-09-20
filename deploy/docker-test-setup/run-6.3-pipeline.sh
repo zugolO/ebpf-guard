@@ -1264,6 +1264,13 @@ echo "=== ВОЛНА 6.3-rid: одно имя алерта на весь кон�
 _w63r_rego_dns_ids="dga_domain suspicious_tld dns_txt_query mining_pool_dns tor_dns_query long_dns_query dynamic_dns_query nxdomain_response miner_dns_query"
 _w63r_api="$W63_PIPE_API"
 _w63r_token="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"
+# ЧИСЛО ИЛИ НЕ ЧИСЛО — ТРЕТИЙ ИСХОД, А НЕ НОЛЬ (№412, найдена смоком 20.09.2026).
+# jq-запросы ниже зовутся с 2>/dev/null: упавший запрос отдаёт ПУСТО, а
+# ${v:-0} превращает пустоту в ноль, неотличимый от измеренного нуля. На смоке
+# это стоило метки: 6.3r.4 напечатала «за прогон ни одного DNS-алерта» при 97
+# реальных DNS-алертах в сторе. Числовой результат обязан быть проверен как
+# число, и его отсутствие — назваться классом.
+_w63r_is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 _w63r_alerts=""
 if command -v jq >/dev/null 2>&1; then
     _w63r_alerts=$(curl -s --max-time 30 -H "Authorization: Bearer $_w63r_token" "$_w63r_api/api/v1/alerts?limit=200000" 2>/dev/null)
@@ -1305,16 +1312,22 @@ echo "--- 6.3r.2: базовое имя доезжает в сторе И в м�
 if [ -z "${_w63r_alerts:-}" ]; then
     echo "НЕИЗМЕРИМ: 6.3r.2 НЕИЗМЕРИМ (класс НАЗВАН: jq недоступен либо /api/v1/alerts не опросить/не JSON) — сверка details.base_rule_id невозможна"
 else
+    # `$r | index(.rule_id)` ЧИТАЕТ .rule_id У МАССИВА $r, а не у алерта (№412):
+    # пайп переназначает `.`, jq падает «Cannot index array with string», stderr
+    # съеден, результат пуст ⇒ ноль. Алерт захватывается в $a ДО пайпа.
     _w63r_rego_no_base=$(printf '%s' "$_w63r_alerts" | jq --arg rego "$_w63r_rego_dns_ids" '
         ($rego | split(" ")) as $r
-        | [.[] | select(($r | index(.rule_id))) | select(.details.base_rule_id == null or .details.base_rule_id == "")] | length' 2>/dev/null)
+        | [.[] | . as $a | select($r | index($a.rule_id))
+               | select($a.details.base_rule_id == null or $a.details.base_rule_id == "")] | length' 2>/dev/null)
     _w63r_renamed_n=$(printf '%s' "$_w63r_alerts" | jq '[.[] | select(.details.base_rule_id != null and .details.base_rule_id != "")] | length' 2>/dev/null)
-    echo "  алертов с известным Rego rule_id и ПУСТЫМ details.base_rule_id: ${_w63r_rego_no_base:-0}"
-    echo "  алертов с непустым details.base_rule_id в сторе (всего): ${_w63r_renamed_n:-0}"
+    echo "  алертов с известным Rego rule_id и ПУСТЫМ details.base_rule_id: ${_w63r_rego_no_base:-(запрос не дал числа)}"
+    echo "  алертов с непустым details.base_rule_id в сторе (всего): ${_w63r_renamed_n:-(запрос не дал числа)}"
     _w63r_metrics_now=$(curl -s --max-time 30 -H "Authorization: Bearer $_w63r_token" "$_w63r_api/metrics" 2>/dev/null)
     _w63r_metric_has_base=$(printf '%s' "${_w63r_metrics_now:-}" | grep -c 'base_rule_id=' || true)
     echo "  серий /metrics с лейблом base_rule_id: ${_w63r_metric_has_base:-0}"
-    if [ "${_w63r_rego_no_base:-0}" -gt 0 ]; then
+    if ! _w63r_is_num "${_w63r_rego_no_base:-}" || ! _w63r_is_num "${_w63r_renamed_n:-}"; then
+        echo "НЕИЗМЕРИМ: 6.3r.2 НЕИЗМЕРИМ (класс НАЗВАН: jq-запрос не дал ЧИСЛА) — сверка невозможна, и пустой ответ НЕ засчитывается нулём (№412)"
+    elif [ "${_w63r_rego_no_base:-0}" -gt 0 ]; then
         echo "FAIL: 6.3r.2 ПРОВАЛЕН: ${_w63r_rego_no_base} алертов с именем Rego-правила НЕ несут details.base_rule_id — правка item 2 не задеплоена либо поле теряется на пути к стору"
     elif [ "${_w63r_renamed_n:-0}" -lt 1 ]; then
         echo "НЕИЗМЕРИМ: 6.3r.2 НЕИЗМЕРИМ (класс НАЗВАН: за прогон ни один алерт не переименован Rego) — сверять нечего"
@@ -1380,17 +1393,30 @@ elif [ ! -s "$_w63r_manifest_path" ]; then
     echo "НЕИЗМЕРИМ: 6.3r.4 НЕИЗМЕРИМ (класс НАЗВАН: манифест DNS не прочитан) — $_w63r_manifest_path"
 else
     _w63r_manifest_ids=$(grep -v '^#' "$_w63r_manifest_path" | grep -v '^[[:space:]]*$')
+    # №412: алерт захватывается в $a ДО пайпа в index — иначе `.rule_id`
+    # читается у массива $r, jq падает, и ПУСТОЙ вывод даёт знаменатель 0,
+    # то есть метка объявляет «DNS-алертов не было» ровно тогда, когда их 97.
     _w63r_dns_calc=$(printf '%s' "$_w63r_alerts" | jq -r --arg rego "$_w63r_rego_dns_ids" '
         ($rego | split(" ")) as $r
         | .[]
-        | (.details.base_rule_id // .rule_id) as $eff
-        | select(($r | index(.rule_id)) or ($r | index($eff)))
+        | . as $a
+        | (($a.details.base_rule_id) // $a.rule_id) as $eff
+        | select(($r | index($a.rule_id)) or ($r | index($eff)))
         | $eff' 2>/dev/null)
+    _w63r_dns_jq_rc=$?
     _w63r_dns_total=$(printf '%s\n' "${_w63r_dns_calc:-}" | grep -c . || true)
+    # Сторож знаменателя: у стора алертов БОЛЬШЕ нуля, а DNS-срез пуст И
+    # запрос вернул ненулевой код — это отказ запроса, а не отсутствие DNS.
+    if [ "${_w63r_dns_jq_rc:-0}" -ne 0 ] && [ "${_w63r_dns_total:-0}" -lt 1 ]; then
+        echo "  ⚠ jq-запрос DNS-среза вернул код ${_w63r_dns_jq_rc} при пустом выводе — знаменатель НЕ засчитывается нулём (№412)"
+        _w63r_dns_total=-1
+    fi
     _w63r_dns_outside=$(printf '%s\n' "${_w63r_dns_calc:-}" | grep -vFxf <(printf '%s\n' "$_w63r_manifest_ids") 2>/dev/null | grep -c . || true)
     echo "  DNS-алертов за прогон (identified по набору Rego-правил dns.rego, effective_id): ${_w63r_dns_total:-0}"
     echo "  из них вне манифеста YAML ($_w63r_manifest_path): ${_w63r_dns_outside:-0}"
-    if [ "${_w63r_dns_total:-0}" -lt 1 ]; then
+    if [ "${_w63r_dns_total:-0}" -lt 0 ]; then
+        echo "НЕИЗМЕРИМ: 6.3r.4 НЕИЗМЕРИМ (класс НАЗВАН: jq-запрос DNS-среза не исполнился) — знаменатель неизвестен, нулём он НЕ объявляется (№412)"
+    elif [ "${_w63r_dns_total:-0}" -lt 1 ]; then
         echo "НЕИЗМЕРИМ: 6.3r.4 НЕИЗМЕРИМ (класс НАЗВАН: за прогон ни одного DNS-алерта) — доля не определена на пустом знаменателе"
     elif [ "${_w63r_dns_outside:-0}" -eq 0 ]; then
         echo "OK: 6.3r.4 ДОСТИГНУТО: 0 из ${_w63r_dns_total} DNS-алертов вне манифеста (вход волны — 87,5%)"

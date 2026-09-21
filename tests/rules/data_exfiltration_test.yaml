@@ -1,12 +1,21 @@
 suite: data_exfiltration
 rules_path: ../../rules/data-exfiltration.yaml
 tests:
-  - name: "DNS query with oversized label (>60 chars) fires exfil_dns_txt_long_label"
+  # Волна 6.3.L.1, item 3 (№424). Фикстура была написана под ПРЕЖНЮЮ редакцию
+  # правила (`qname_length > 60`, то есть длина ВСЕГО имени) и после №329
+  # ловила собственную устарелость: правило считает самый длинный ОДИН ЛЕЙБЛ
+  # (`qname_max_label_len > 45`) — именно потому, что обычный FQDN k8s берёт
+  # 66 символов целиком и порог по всему имени срабатывал на штатном трафике
+  # кластера. Прежний qname давал 62 символа всего и 35 в самом длинном
+  # лейбле, то есть был НИЖЕ порога правила; срабатывал на нём сосед по файлу
+  # (exfil_dns_high_entropy_txt), и красный тест держался на верном продукте.
+  # Лейбл ниже — 51 символ, ровно то, что правило и описывает.
+  - name: "DNS query with oversized label (>45 chars) fires exfil_dns_txt_long_label"
     rule_id: exfil_dns_txt_long_label
     event:
       type: dns
       dns:
-        qname: "aHR0cHM6Ly9leGFtcGxlLmNvbS9zZWNyZXQ.exfil.attacker.example.com"
+        qname: "aHR0cHM6Ly9leGFtcGxlLmNvbS9zZWNyZXQvdG9rZW4vZXhmaWw.exfil.attacker.example.com"
         qtype: 16
     expect: alert
     expect_severity: critical

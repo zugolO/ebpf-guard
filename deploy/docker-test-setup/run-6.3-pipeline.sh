@@ -282,6 +282,58 @@ if ! bash "$SETUP/wave6.3-probe-selftest.sh"; then
     exit 1
 fi
 
+# ── Шаг 0б4 (волна 6.3.L.1, item 3, №424). ФИКСТУРЫ ПРАВИЛ — ЖЁСТКИМ СТОПОМ,
+#    ДО РЕСТАРТА АГЕНТА.
+#
+#    `tests/TestRuleFixtures` — единственное место, где утверждение «правило
+#    ловит ровно то, что описывает» проверяется на событии, а не на чтении
+#    YAML. На стенде он был КРАСНЫМ (фикстура exfil_dns_txt_long_label ждала
+#    своё правило, срабатывало соседнее exfil_dns_high_entropy_txt), красным
+#    он был и на `b7250a8` — то есть долг ехал через волны 6.3-up/rid молча:
+#    пайплайн 6.3 `go test ./tests/...` не гонял вовсе, хотя пайплайн
+#    2.9.9.F.5 гонял его жёстким стопом. Правка правил, ломающая детект,
+#    доезжала до стенда и печаталась как «правило молчит».
+#
+#    Класс отказа ОБЯЗАН различать три исхода, а не два: зелёно, красно с
+#    названной фикстурой и «go на ноде нет» — третий это неизмеримость
+#    прибора, а не провал продукта, и убивать им прогон нельзя
+#    ([[die-only-for-unmeasurable-run]]). Класс кладётся в переменную и
+#    читается меткой 6.3L1.3 ниже: пайплайн — один процесс.
+echo "--- фикстуры правил (go test ./tests/…, item 3 волны 6.3.L.1, до прогона) ---"
+_w63l1_tests_class="неизмерим_go_нет"
+_w63l1_tests_detail=""
+_w63l1_repo="${W63_REPO:-/opt/ebpf-guard}"
+_w63l1_go=""
+for _w63l1_c in "$(command -v go 2>/dev/null)" /usr/local/go/bin/go; do
+    [ -n "$_w63l1_c" ] && [ -x "$_w63l1_c" ] && { _w63l1_go="$_w63l1_c"; break; }
+done
+if [ -z "$_w63l1_go" ]; then
+    echo "  go не найден ни в PATH, ни в /usr/local/go/bin — фикстуры правил не прогнать"
+    _w63l1_tests_detail="go не найден"
+elif [ ! -d "$_w63l1_repo/tests" ]; then
+    echo "  каталог $_w63l1_repo/tests отсутствует — фикстур нет"
+    _w63l1_tests_detail="нет $_w63l1_repo/tests"
+else
+    _w63l1_tests_out=$(cd "$_w63l1_repo" && "$_w63l1_go" test ./tests/... 2>&1)
+    _w63l1_tests_rc=$?
+    if [ "$_w63l1_tests_rc" -eq 0 ]; then
+        _w63l1_tests_class="зелено"
+        echo "  OK: go test ./tests/... зелёный"
+    else
+        _w63l1_tests_class="красно"
+        # Называется ИМЕННО фикстура, а не хвост вывода: стоп без имени
+        # оператор снимает вторым заходом руками.
+        _w63l1_tests_detail=$(printf '%s\n' "$_w63l1_tests_out" | grep -E '^\s+--- FAIL' | sed 's/^[[:space:]]*--- FAIL: //' | tr '\n' ' ')
+        [ -z "$_w63l1_tests_detail" ] && _w63l1_tests_detail=$(printf '%s\n' "$_w63l1_tests_out" | grep -E '^--- FAIL' | head -3 | tr '\n' ' ')
+        printf '%s\n' "$_w63l1_tests_out" | grep -E 'FAIL|fixture_runner' | head -8 | sed 's/^/      /'
+        echo "СТОП ДО ПРОГОНА: фикстуры правил КРАСНЫЕ (№424): ${_w63l1_tests_detail:-имя фикстуры не извлечено}"
+        echo "  Правило и фикстура разошлись — детект на стенде будет измеряться правилами,"
+        echo "  про которые известно, что они ловят не то, что описывают."
+        echo "  Агент не тронут, стор не очищен — прогон не начат."
+        exit 1
+    fi
+fi
+
 # ── Шаг 0в. ВХОД ИЗМЕРЕНИЯ СУЩЕСТВУЕТ. Четыре вещи, каждая из которых,
 #    будучи забытой, даёт НЕ провал, а тихую неизмеримость главной части
 #    волны — то есть час стенда ради лога, из которого ничего не следует.
@@ -1690,6 +1742,247 @@ else
     echo "НЕИЗМЕРИМ: 6.3L.6 НЕИЗМЕРИМ (класс НАЗВАН: ось ЖИВА (${_w63l_axis_series} серий, сумма ${_w63l_axis_any}), но лейбла tls на ней нет — TLS-коллектор молчит: ${_w63l_tls_enabled:-состояние неизвестно}). Это вход волны 6.4 (№379…№382, [[tls-collector-dead-on-stock-ubuntu]]), а не провал 6.3.L: ось проверена живьём на ДРУГИХ типах событий, и приборного нуля в 6.4 больше не будет"
 fi
 # <<< W63L-EMITTERS-END
+
+# >>> W63L1-EMITTERS-START
+# Волна 6.3.L.1 (долг прогона collect-6.3-L, находки №422…№425). Четыре
+# метки. Все величины снимаются ПОСЛЕ закрытия измеряемого окна: ни один
+# блок ниже не вправе двигать числа критериев волны 6.3 — ни объём (тумблер
+# агрегации включается на СВОЁ окно и выключается обратно), ни базы
+# профиля (переключение слоёв идёт БЕЗ рестарта, [[ab-toggle-measures-the-restart]]).
+echo "=== ВОЛНА 6.3.L.1: долг прогона collect-6.3-L (№422…№425) ==="
+
+_w63l1_api="$_w63r_api"
+_w63l1_tok="$_w63r_token"
+if [ "$SMOKE" = "1" ]; then
+    _w63l1_ab="${W63L1_AB_WINDOW:-20}"
+else
+    _w63l1_ab="${W63L1_AB_WINDOW:-120}"
+fi
+
+# Снимок метрик в файл; пустой снимок молча становится нулями
+# ([[empty-metric-snapshot-is-silently-zero]]), поэтому непустота проверяется
+# вызывающей стороной по размеру файла, а не предполагается.
+_w63l1_snap() { # $1 = файл
+    curl -s --max-time 30 -H "Authorization: Bearer $_w63l1_tok" "$_w63l1_api/metrics" > "$1" 2>/dev/null
+}
+_w63l1_rss() {  # $1 = файл снимка → МиБ с одним знаком
+    awk '$1 == "process_resident_memory_bytes" { printf "%.1f", $2/1048576; f=1; exit } END { if (!f) printf "" }' "$1" 2>/dev/null
+}
+_w63l1_drops() { # $1 = файл снимка → суммарные потери (без path_denylist)
+    awk '
+        /^ebpf_guard_events_dropped_total\{/ && !/reason="path_denylist"/ { s += $NF }
+        /^ebpf_guard_event_queue_dropped_total/ { s += $NF }
+        END { printf "%d", s+0 }' "$1" 2>/dev/null
+}
+_w63l1_alerts_total() { # $1 = файл снимка → сумма ebpf_guard_alerts_total
+    awk '/^ebpf_guard_alerts_total[{ ]/ { s += $NF } END { printf "%d", s+0 }' "$1" 2>/dev/null
+}
+
+# ── 6.3L1.1 (№422): аналитик может сузить КРУПНЕЙШИЙ источник шума.
+#    Мишень выбирается из живого прогона, а не из головы: если Rego что-то
+#    переименовал и база переименования — правило, которое comm сузить не
+#    может, берётся ИМЯ REGO (тогда метка проверяет обе половины разом:
+#    резолв имени и ось). Иначе берётся само `anomaly_detection` — оно
+#    загружено всегда и несёт половину объёма куста
+#    ([[anomaly-layer-is-half-the-noise]]), так что метка не становится
+#    заложницей того, переименовал ли Rego что-нибудь за окно.
+echo "--- 6.3L1.1: сужение доступно для источника, дающего половину объёма (№422) ---"
+_w63l1_target="anomaly_detection"
+_w63l1_target_class="базовое правило anomaly_detection (Rego за прогон ничего не переименовал в него)"
+case " ${_w63l_base_of:-} " in
+    *" anomaly_detection "*)
+        _w63l1_target="${_w63l_renamed_name:-anomaly_detection}"
+        _w63l1_target_class="ЖИВОЕ имя Rego «${_w63l_renamed_name}» с базой anomaly_detection"
+        ;;
+esac
+echo "  мишень: $_w63l1_target — $_w63l1_target_class"
+_w63l1_c1=$(curl -s -o "$ART/w63l1-1-comm.json" -w '%{http_code}' --max-time 30 \
+    -X POST -H "Authorization: Bearer $_w63l1_tok" -H 'Content-Type: application/json' \
+    -d "$(printf '{"rule_id":"%s","name":"w63l1-probe","comm":"w63l1-nonexistent-comm","persist":false}' "$_w63l1_target")" \
+    "$_w63l1_api/api/v1/tuning/exceptions" 2>/dev/null)
+echo "  подача осью comm → ${_w63l1_c1:-(нет ответа)}; ответ: $(head -c 300 "$ART/w63l1-1-comm.json" 2>/dev/null)"
+case "${_w63l1_c1:-000}" in
+    200)
+        echo "OK: 6.3L1.1 ДОСТИГНУТО: исключение для «$_w63l1_target» построено прямо осью comm (ответ несёт поле axes с именем оси) — аппарат сужения доступен"
+        ;;
+    400)
+        echo "FAIL: 6.3L1.1 ПРОВАЛЕН (№422 жив): API ответило 400 на «$_w63l1_target» — крупнейший источник шума нельзя сузить ни из дашборда, ни из curl, и ось, которой его сужать, не названа"
+        ;;
+    422)
+        # Отказ ОБЯЗАН нести НАЗВАННУЮ ось, и названная ось обязана
+        # РАБОТАТЬ: «назвали и не сработало» — тот же тупик, что 400,
+        # только вежливее.
+        _w63l1_axis=$(jq -r '.supported_axes[]? | select(. == "proc.exe_path")' "$ART/w63l1-1-comm.json" 2>/dev/null | head -1)
+        _w63l1_reason=$(jq -r '.reason // ""' "$ART/w63l1-1-comm.json" 2>/dev/null)
+        if [ -z "${_w63l1_axis:-}" ]; then
+            echo "FAIL: 6.3L1.1 ПРОВАЛЕН: отказ 422 не назвал ни одной оси сужения (reason=${_w63l1_reason:-нет}) — аналитик видит вежливый тупик вместо грубого"
+        else
+            _w63l1_c2=$(curl -s -o "$ART/w63l1-1-axis.json" -w '%{http_code}' --max-time 30 \
+                -X POST -H "Authorization: Bearer $_w63l1_tok" -H 'Content-Type: application/json' \
+                -d "$(printf '{"rule_id":"%s","name":"w63l1-probe-axis","axis":"%s","axis_value":"/usr/bin/w63l1-nonexistent-binary","persist":false}' "$_w63l1_target" "$_w63l1_axis")" \
+                "$_w63l1_api/api/v1/tuning/exceptions" 2>/dev/null)
+            echo "  подача НАЗВАННОЙ осью ($_w63l1_axis) → ${_w63l1_c2:-(нет ответа)}; ответ: $(head -c 300 "$ART/w63l1-1-axis.json" 2>/dev/null)"
+            _w63l1_axis_named=$(jq -r '.axes | to_entries[]? | "\(.key)=\(.value)"' "$ART/w63l1-1-axis.json" 2>/dev/null | tr '\n' ' ')
+            if [ "${_w63l1_c2:-000}" = "200" ] && [ -n "${_w63l1_axis_named:-}" ]; then
+                echo "OK: 6.3L1.1 ДОСТИГНУТО: comm для «$_w63l1_target» отвергнут НАЗВАННОЙ причиной (reason=${_w63l1_reason:-?}, код 422, не 400), названная ось $_w63l1_axis отработала и перечислила правила поимённо ($_w63l1_axis_named) — сужение доступно и видимо"
+            else
+                echo "FAIL: 6.3L1.1 ПРОВАЛЕН: ось $_w63l1_axis названа в отказе, но подача по ней дала ${_w63l1_c2:-нет ответа} — названная ось не работает, и это тот же тупик, что 400"
+            fi
+        fi
+        ;;
+    404)
+        echo "НЕИЗМЕРИМ: 6.3L1.1 НЕИЗМЕРИМ (класс НАЗВАН: 404 на «$_w63l1_target») — имя не резолвится ни как загруженное правило, ни через индекс переименований; это шлюз №413, а не ось сужения"
+        ;;
+    *)
+        echo "НЕИЗМЕРИМ: 6.3L1.1 НЕИЗМЕРИМ (класс НАЗВАН: код ответа ${_w63l1_c1:-нет}) — ответ не про ось сужения (роль токена/формат тела/сеть), и судить по нему №422 нельзя"
+        ;;
+esac
+
+# ── 6.3L1.2 (№423): цена инцидентного слоя A/B на ОДНОМ бинаре.
+#    Три СМЕЖНЫХ РАВНЫХ окна ON→OFF→ON ([[ab-smoke-on-adjacent-equal-windows]]):
+#    два включённых окна берут выключенное в скобки, поэтому монотонный дрейф
+#    RSS (куча только растёт) виден и не выдаётся за цену слоя. Рестарта
+#    между окнами нет — он обнулил бы базы и кучу и измерил бы сам себя.
+echo "--- 6.3L1.2: цена инцидентного слоя, A/B на одном бинаре (№423) ---"
+_w63l1_sw_get=$(curl -s -o "$ART/w63l1-sw.json" -w '%{http_code}' --max-time 20 \
+    -H "Authorization: Bearer $_w63l1_tok" "$_w63l1_api/api/v1/tuning/incident-ingest" 2>/dev/null)
+if [ "${_w63l1_sw_get:-000}" = "503" ]; then
+    echo "НЕИЗМЕРИМ: 6.3L1.2 НЕИЗМЕРИМ (класс НАЗВАН: тумблера инцидентного слоя нет в ЭТОМ бинаре — 503) — бинарь прогона старше правки item 2; A/B невозможен, цена слоя остаётся догадкой"
+elif [ "${_w63l1_sw_get:-000}" != "200" ]; then
+    echo "НЕИЗМЕРИМ: 6.3L1.2 НЕИЗМЕРИМ (класс НАЗВАН: GET тумблера ответил ${_w63l1_sw_get:-нет}) — состояние слоя неизвестно, окна A/B заводить не на чем"
+else
+    _w63l1_ab_ok=1
+    _w63l1_ab_report=""
+    # $1 = имя окна, $2 = желаемое состояние слоя (true/false)
+    # $1 = ASCII-идентификатор окна (идёт в ИМЕНА ФАЙЛОВ), $2 = состояние
+    # слоя, $3 = человекочитаемая подпись для строки вердикта.
+    _w63l1_ab_window() {
+        local name="$1" want="$2" title="$3" code
+        code=$(curl -s -o "$ART/w63l1-sw-$name.json" -w '%{http_code}' --max-time 20 \
+            -X POST -H "Authorization: Bearer $_w63l1_tok" -H 'Content-Type: application/json' \
+            -d "{\"enabled\":$want}" "$_w63l1_api/api/v1/tuning/incident-ingest" 2>/dev/null)
+        if [ "${code:-000}" != "200" ]; then
+            echo "  окно $title: тумблер не переключён (код ${code:-нет}) — окно не считается"
+            _w63l1_ab_ok=0
+            return
+        fi
+        _w63l1_snap "$ART/w63l1-ab-$name-start.txt"
+        sleep "$_w63l1_ab"
+        _w63l1_snap "$ART/w63l1-ab-$name-end.txt"
+        if [ ! -s "$ART/w63l1-ab-$name-start.txt" ] || [ ! -s "$ART/w63l1-ab-$name-end.txt" ]; then
+            echo "  окно $title: снимок метрик ПУСТ — нули такого снимка не величина ([[empty-metric-snapshot-is-silently-zero]])"
+            _w63l1_ab_ok=0
+            return
+        fi
+        local rss0 rss1 dr0 dr1 al0 al1
+        rss0=$(_w63l1_rss "$ART/w63l1-ab-$name-start.txt"); rss1=$(_w63l1_rss "$ART/w63l1-ab-$name-end.txt")
+        dr0=$(_w63l1_drops "$ART/w63l1-ab-$name-start.txt"); dr1=$(_w63l1_drops "$ART/w63l1-ab-$name-end.txt")
+        al0=$(_w63l1_alerts_total "$ART/w63l1-ab-$name-start.txt"); al1=$(_w63l1_alerts_total "$ART/w63l1-ab-$name-end.txt")
+        if [ -z "${rss0:-}" ] || [ -z "${rss1:-}" ]; then
+            echo "  окно $title: process_resident_memory_bytes не прочитан — RSS не величина этого окна"
+            _w63l1_ab_ok=0
+            return
+        fi
+        echo "  окно $title (слой=$want, ${_w63l1_ab}s): RSS ${rss0} → ${rss1} МиБ (Δ $(awk -v a="$rss0" -v b="$rss1" 'BEGIN{printf "%+.1f", b-a}')), потери $(( dr1 - dr0 )), объём $(( al1 - al0 )) алертов"
+        _w63l1_ab_report="${_w63l1_ab_report}${title}:RSS=${rss1};Δпотерь=$(( dr1 - dr0 ));Δобъёма=$(( al1 - al0 )) "
+    }
+    _w63l1_ab_window a1 true  "A1 (слой включён)"
+    _w63l1_ab_window b  false "B (слой выключен)"
+    _w63l1_ab_window a2 true  "A2 (слой включён)"
+    # Слой возвращается ВКЛЮЧЁННЫМ безусловно: измеритель не вправе оставить
+    # после себя выключенный продуктовый слой.
+    curl -s -o /dev/null --max-time 20 -X POST -H "Authorization: Bearer $_w63l1_tok" \
+        -H 'Content-Type: application/json' -d '{"enabled":true}' \
+        "$_w63l1_api/api/v1/tuning/incident-ingest" 2>/dev/null
+    _w63l1_limit_mib="${W63L1_CHART_LIMIT_MIB:-256}"
+    _w63l1_rss_last=$(_w63l1_rss "$ART/w63l1-ab-a2-end.txt" 2>/dev/null)
+    if [ "$_w63l1_ab_ok" -ne 1 ]; then
+        echo "НЕИЗМЕРИМ: 6.3L1.2 НЕИЗМЕРИМ (класс НАЗВАН: не все три окна A/B сняты — см. строки выше) — цена слоя не отделена от цены бинаря, и решение по лимиту чарта принимать не на чем"
+    else
+        echo "  сводка A/B: ${_w63l1_ab_report}"
+        echo "  лимит чарта: ${_w63l1_limit_mib} МиБ; RSS на закрытии последнего окна: ${_w63l1_rss_last:-?} МиБ"
+        echo "  РЕШЕНИЕ по лимиту записано в plan.md, раздел «Волна 6.3.L.1 → №423»: величины этого A/B — его вход, а не иллюстрация"
+        echo "OK: 6.3L1.2 ДОСТИГНУТО: три смежных равных окна на ОДНОМ бинаре дали RSS, потери и объём по каждому (${_w63l1_ab_report}) — цена инцидентного слоя отделена от цены сборки, и вилка ON-OFF-ON показывает монотонный дрейф RSS отдельно от вклада слоя"
+    fi
+fi
+
+# ── 6.3L1.3 (№424): красная фикстура правил не доезжает до стенда молча.
+#    Величина снята ПРЕФЛАЙТОМ этого же прогона (Шаг 0б4) — здесь печатается
+#    его класс. Красный исход сюда не доходит по построению: преflight
+#    останавливает прогон ДО рестарта агента, и это его работа.
+echo "--- 6.3L1.3: фикстуры правил в преflight'е жёстким стопом (№424) ---"
+case "${_w63l1_tests_class:-неизмерим_go_нет}" in
+    зелено)
+        echo "OK: 6.3L1.3 ДОСТИГНУТО: go test ./tests/... прогнан ПЕРЕД прогоном и зелёный — правка правил, ломающая фикстуру, больше не доезжает до стенда молча (жёсткий стоп в Шаге 0б4)"
+        ;;
+    красно)
+        echo "FAIL: 6.3L1.3 ПРОВАЛЕН: фикстуры красные (${_w63l1_tests_detail:-имя не извлечено}) — и этот прогон не должен был дойти до сюда: преflight обязан был остановить его"
+        ;;
+    *)
+        echo "НЕИЗМЕРИМ: 6.3L1.3 НЕИЗМЕРИМ (класс НАЗВАН: ${_w63l1_tests_detail:-go недоступен}) — фикстуры на этой ноде не прогнать, и это неизмеримость ПРИБОРА, а не провал продукта; жёсткий стоп сохраняется для нод, где go есть"
+        ;;
+esac
+
+# ── 6.3L1.4 (№425): 6.3L.3 на ВКЛЮЧЁННОМ слое агрегации.
+#    Слой включается на СВОЁ окно и выключается обратно: оставить его
+#    включённым на весь прогон значило бы сдвинуть сторовые величины всех
+#    остальных критериев волны.
+echo "--- 6.3L1.4: агрегация не объявляет разные базовые правила повторами, слой ВКЛЮЧЁН (№425) ---"
+_w63l1_agg_on=$(curl -s -o "$ART/w63l1-agg-on.json" -w '%{http_code}' --max-time 20 \
+    -X POST -H "Authorization: Bearer $_w63l1_tok" -H 'Content-Type: application/json' \
+    -d '{"enabled":true}' "$_w63l1_api/api/v1/tuning/alert-aggregation" 2>/dev/null)
+if [ "${_w63l1_agg_on:-000}" = "503" ]; then
+    echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: тумблера агрегации нет в ЭТОМ бинаре — 503) — бинарь старше правки item 4; утверждение №415 живьём по-прежнему не проверено"
+elif [ "${_w63l1_agg_on:-000}" != "200" ]; then
+    echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: включение агрегации ответило ${_w63l1_agg_on:-нет}) — слой в известное состояние не приведён"
+else
+    _w63l1_agg_t0=$(date -u +%s)
+    sleep "$_w63l1_ab"
+    _w63l1_agg_alerts=$(curl -s --max-time 60 -H "Authorization: Bearer $_w63l1_tok" "$_w63l1_api/api/v1/alerts?limit=200000" 2>/dev/null)
+    printf '%s' "$_w63l1_agg_alerts" | jq -e . >/dev/null 2>&1 || _w63l1_agg_alerts=""
+    # Слой возвращается в исходное (выключенное) состояние безусловно и ДО
+    # вердикта: включённая агрегация, оставленная измерителем, исказила бы
+    # всё, что печатается после него.
+    curl -s -o /dev/null --max-time 20 -X POST -H "Authorization: Bearer $_w63l1_tok" \
+        -H 'Content-Type: application/json' -d '{"enabled":false}' \
+        "$_w63l1_api/api/v1/tuning/alert-aggregation" 2>/dev/null
+    echo "  окно агрегации ${_w63l1_ab}s снято, слой выключен обратно"
+    if [ -z "${_w63l1_agg_alerts:-}" ]; then
+        echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: /api/v1/alerts не опрошен либо не JSON) — искать пару не в чем"
+    else
+        _w63l1_pairs=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" '
+            [.[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t)
+                          and .details.base_rule_id != null and .details.base_rule_id != "")]
+            | group_by(.rule_id)
+            | map(select((map(.details.base_rule_id) | unique | length) > 1)
+                  | {rule_id: .[0].rule_id, bases: (map(.details.base_rule_id) | unique),
+                     rows: length, counts: (map(.count // 1))})
+            | .[] | "\(.rule_id) <- \(.bases | join(",")) — записей \(.rows), count каждой: \(.counts | join(","))"' 2>/dev/null)
+        _w63l1_folded=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" '
+            [.[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.count // 1) > 1))] | length' 2>/dev/null)
+        _w63l1_bad=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" '
+            [.[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t)
+                          and .details.base_rule_id != null and .details.base_rule_id != "")]
+            | group_by(.rule_id)
+            | map(select((map(.details.base_rule_id) | unique | length) > 1))
+            | flatten | map(select((.count // 1) > 1)) | length' 2>/dev/null)
+        echo "  за окно с включённым слоем: свёрнутых записей (count>1) всего ${_w63l1_folded:-0}"
+        if [ -n "${_w63l1_pairs:-}" ]; then
+            echo "  имена, под которые приехали РАЗНЫЕ базовые правила:"
+            printf '%s\n' "$_w63l1_pairs" | sed 's/^/    /'
+        fi
+        if [ "${_w63l1_bad:-0}" -gt 0 ]; then
+            echo "FAIL: 6.3L1.4 ПРОВАЛЕН (№415 жив): ${_w63l1_bad} записей с РАЗНЫМИ base_rule_id под одним rule_id несут count>1 при ВКЛЮЧЁННОМ слое — продукт объявляет разные детекты повторами одного"
+        elif [ -z "${_w63l1_pairs:-}" ]; then
+            echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: за окно включённого слоя не нашлось ни одного имени, под которое приехали разные базовые правила; свёрнутых записей ${_w63l1_folded:-0}) — схлопывать было нечего, и ноль здесь про нагрузку окна, а не про агрегацию"
+        elif [ "${_w63l1_folded:-0}" -lt 1 ]; then
+            echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: слой ВКЛЮЧЁН и пара с разными base_rule_id за окно есть, но слой не свернул НИ ОДНОЙ записи — повторов в окне не было) — утверждение №415 проверено на паре, но положительный контроль самого слоя за это окно не предъявлен"
+        else
+            echo "OK: 6.3L1.4 ДОСТИГНУТО: слой агрегации ВКЛЮЧЁН и живой (свёрнутых записей ${_w63l1_folded}), пара с разными base_rule_id под одним rule_id за окно есть, и НИ ОДНА такая запись не свёрнута (count>1 среди них: 0) — разные детекты не объявлены повторами"
+        fi
+    fi
+fi
+# <<< W63L1-EMITTERS-END
 
 # Критерий 6.2.6.4: непустота И покрытие окна. Сторож живёт В ПАЙПЛАЙНЕ, а не
 # в глазах читателя архива через сутки: пустой журнал = прогон объявляет себя

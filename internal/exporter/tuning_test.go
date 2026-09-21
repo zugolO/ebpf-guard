@@ -17,37 +17,52 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TestCommFieldForEventType pins the axis lookup to the LOADER's allowlists
+// (wave 6.3.L.1, item 1, №422): the exporter no longer keeps its own switch of
+// three event types, so every type whose rules may say comm/proc.comm can be
+// narrowed by comm — DNS and TLS among them, which the old copy refused.
 func TestCommFieldForEventType(t *testing.T) {
-	field, ok := commFieldForEventType(types.EventSyscall)
-	assert.True(t, ok)
-	assert.Equal(t, "comm", field)
-
-	field, ok = commFieldForEventType(types.EventTCPConnect)
+	field, ok := correlator.CommFieldForEventType(types.EventSyscall)
 	assert.True(t, ok)
 	assert.Equal(t, "proc.comm", field)
 
-	field, ok = commFieldForEventType(types.EventFileAccess)
+	field, ok = correlator.CommFieldForEventType(types.EventTCPConnect)
 	assert.True(t, ok)
 	assert.Equal(t, "proc.comm", field)
 
-	_, ok = commFieldForEventType(types.EventDNS)
+	field, ok = correlator.CommFieldForEventType(types.EventFileAccess)
+	assert.True(t, ok)
+	assert.Equal(t, "proc.comm", field)
+
+	// The two types the old hard-coded switch refused although their rules
+	// accept proc.comm — this is the half of №422 that was a stale copy.
+	field, ok = correlator.CommFieldForEventType(types.EventDNS)
+	assert.True(t, ok)
+	assert.Equal(t, "proc.comm", field)
+
+	_, ok = correlator.CommFieldForEventType(types.EventTLS)
+	assert.True(t, ok)
+
+	// Cloud-audit events carry no process at all: there is nothing to forge a
+	// comm from, and the refusal must say so rather than emit a dead condition.
+	_, ok = correlator.CommFieldForEventType(types.EventCloudAudit)
 	assert.False(t, ok)
 }
 
 func TestBuildException(t *testing.T) {
 	t.Run("simple comm condition", func(t *testing.T) {
-		exc, err := buildException(TuningExceptionRequest{Name: "fp1", Comm: "systemd"}, types.EventSyscall)
-		require.NoError(t, err)
+		exc, refusal := buildException(TuningExceptionRequest{Name: "fp1", Comm: "systemd"}, correlator.Rule{ID: "r", EventType: types.EventSyscall})
+		require.Nil(t, refusal)
 		assert.Equal(t, "fp1", exc.Name)
 		assert.Nil(t, exc.ConditionGroup)
-		assert.Equal(t, "comm", exc.Condition.Field)
+		assert.Equal(t, "proc.comm", exc.Condition.Field)
 		assert.Equal(t, correlator.OpEquals, exc.Condition.Op)
 		assert.Equal(t, []string{"systemd"}, exc.Condition.Values)
 	})
 
 	t.Run("comm + path prefix on file rule", func(t *testing.T) {
-		exc, err := buildException(TuningExceptionRequest{Name: "fp2", Comm: "app", PathPrefix: "/tmp/"}, types.EventFileAccess)
-		require.NoError(t, err)
+		exc, refusal := buildException(TuningExceptionRequest{Name: "fp2", Comm: "app", PathPrefix: "/tmp/"}, correlator.Rule{ID: "r", EventType: types.EventFileAccess})
+		require.Nil(t, refusal)
 		require.NotNil(t, exc.ConditionGroup)
 		assert.Equal(t, "and", exc.ConditionGroup.Operator)
 		require.Len(t, exc.ConditionGroup.Conditions, 2)
@@ -57,14 +72,36 @@ func TestBuildException(t *testing.T) {
 	})
 
 	t.Run("path prefix ignored on non-file rule", func(t *testing.T) {
-		exc, err := buildException(TuningExceptionRequest{Name: "fp3", Comm: "app", PathPrefix: "/tmp/"}, types.EventSyscall)
-		require.NoError(t, err)
+		exc, refusal := buildException(TuningExceptionRequest{Name: "fp3", Comm: "app", PathPrefix: "/tmp/"}, correlator.Rule{ID: "r", EventType: types.EventSyscall})
+		require.Nil(t, refusal)
 		assert.Nil(t, exc.ConditionGroup)
 	})
 
-	t.Run("unsupported event type", func(t *testing.T) {
-		_, err := buildException(TuningExceptionRequest{Name: "fp4", Comm: "app"}, types.EventDNS)
-		assert.Error(t, err)
+	// №422: a synthetic rule (anomaly_detection — the single largest source of
+	// volume) refuses comm, but the refusal must NAME the axes it does take,
+	// and the same request with one of those axes must succeed.
+	t.Run("synthetic rule refuses comm and names the identity axes", func(t *testing.T) {
+		_, refusal := buildException(TuningExceptionRequest{Name: "fp5", Comm: "app"}, correlator.Rule{ID: "anomaly_detection", Synthetic: true})
+		require.NotNil(t, refusal)
+		assert.Equal(t, "synthetic_rule_needs_identity_axis", refusal.Reason)
+		assert.True(t, refusal.Synthetic)
+		assert.Contains(t, refusal.SupportedAxes, "proc.exe_path")
+	})
+
+	t.Run("synthetic rule narrows on the identity axis", func(t *testing.T) {
+		exc, refusal := buildException(
+			TuningExceptionRequest{Name: "fp6", Axis: "proc.exe_path", AxisValue: "/usr/bin/containerd"},
+			correlator.Rule{ID: "anomaly_detection", Synthetic: true})
+		require.Nil(t, refusal)
+		assert.Equal(t, "proc.exe_path", exc.Condition.Field)
+		assert.Equal(t, []string{"/usr/bin/containerd"}, exc.Condition.Values)
+	})
+
+	t.Run("event type without a comm field names the axes", func(t *testing.T) {
+		_, refusal := buildException(TuningExceptionRequest{Name: "fp7", Comm: "app"}, correlator.Rule{ID: "r", EventType: types.EventCloudAudit})
+		require.NotNil(t, refusal)
+		assert.Equal(t, "event_type_has_no_comm_field", refusal.Reason)
+		assert.NotEmpty(t, refusal.SupportedAxes)
 	})
 }
 
@@ -113,12 +150,62 @@ func TestHandleTuningExceptions(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 
-	t.Run("unsupported event type", func(t *testing.T) {
+	// №422: a DNS rule IS narrowable by comm — the old three-type switch said
+	// otherwise and answered 400 to the analyst.
+	t.Run("dns rule is narrowable by comm", func(t *testing.T) {
 		srv := newTestServer()
 		srv.SetRulesProvider(func() []correlator.Rule {
 			return []correlator.Rule{{ID: "r1", EventType: types.EventDNS}}
 		})
 		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "r1", Name: "n", Comm: "c"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.handleTuningExceptions(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		var resp TuningExceptionResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "proc.comm", resp.Axes["r1"])
+	})
+
+	// The live shape of №422: the analyst posts the name the dashboard shows,
+	// it resolves to the synthetic anomaly_detection, and the answer must be a
+	// 422 that names the axis — never the bare 400 that ended the trail.
+	t.Run("synthetic rule answers 422 and names the axis", func(t *testing.T) {
+		srv := newTestServer()
+		srv.SetRulesProvider(func() []correlator.Rule {
+			return []correlator.Rule{{ID: "anomaly_detection", Synthetic: true}}
+		})
+		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "anomaly_detection", Name: "n", Comm: "c"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.handleTuningExceptions(w, req)
+		require.Equal(t, http.StatusUnprocessableEntity, w.Code)
+
+		var refusal TuningAxisRefusal
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &refusal))
+		assert.Equal(t, "synthetic_rule_needs_identity_axis", refusal.Reason)
+		assert.Equal(t, "anomaly_detection", refusal.RuleID)
+		assert.Contains(t, refusal.SupportedAxes, "proc.exe_path")
+
+		// …and the axis it named actually works, on the same endpoint.
+		body2, _ := json.Marshal(TuningExceptionRequest{
+			RuleID: "anomaly_detection", Name: "n",
+			Axis: "proc.exe_path", AxisValue: "/usr/bin/containerd",
+		})
+		req2 := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body2))
+		w2 := httptest.NewRecorder()
+		srv.handleTuningExceptions(w2, req2)
+		require.Equal(t, http.StatusOK, w2.Code)
+		var resp TuningExceptionResponse
+		require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &resp))
+		assert.Equal(t, "proc.exe_path", resp.Axes["anomaly_detection"])
+		assert.Contains(t, resp.YAML, "/usr/bin/containerd")
+	})
+
+	t.Run("unknown axis is a 400", func(t *testing.T) {
+		srv := newTestServer()
+		srv.SetRulesProvider(rulesProviderWithSyscallRule("r1"))
+		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "r1", Name: "n", Axis: "comm", AxisValue: "bash"})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
 		w := httptest.NewRecorder()
 		srv.handleTuningExceptions(w, req)

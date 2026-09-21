@@ -241,6 +241,15 @@ type CorrelationEngine struct {
 	// sliding window into Incident records for higher-level attack correlation.
 	incidentTracker *IncidentTracker
 
+	// incidentIngestEnabled gates the two call sites that feed alerts to
+	// incidentTracker (the synchronous path in ingestWithAD and the Rego
+	// worker). Atomic, and read on the alert path only — one Load per alert,
+	// not per event. See CorrelationEngineConfig.IncidentIngestEnabled for
+	// why the switch exists at all (wave 6.3.L.1, №423: attributing +14.4 MiB
+	// of RSS and ×73 ring-buffer losses to the layer requires two windows on
+	// ONE running process).
+	incidentIngestEnabled atomic.Bool
+
 	// PID-partitioned ingest worker pool.  Each worker holds an isolated
 	// AnomalyDetector so ProcessEvent is always called from a single goroutine
 	// per instance.  IngestAsync routes events here; Ingest bypasses the pool.
@@ -555,6 +564,25 @@ type CorrelationEngineConfig struct {
 	// own PID).
 	SelfPID uint32
 
+	// IncidentIngestDisabled stops generated alerts from being fed to the
+	// incident tracker — wave 6.3.L.1, item 2 (№423). NEGATIVE on purpose:
+	// the zero value keeps the layer ON, so neither an existing caller that
+	// builds this struct field by field nor a future one can turn the
+	// incident layer off by forgetting a line. №418 was exactly that class of
+	// silence and cost the cluster two archives with no incidents at all.
+	//
+	// It exists because the cost of that layer had to be ATTRIBUTED, not
+	// guessed: restoring it (№418) coincided with RSS 254.9 → 269.3 MiB —
+	// above the chart's 256Mi limit, i.e. an OOM-kill in a DaemonSet — and
+	// with ring-buffer losses 41 → 3005, but the two archives differed by a
+	// whole binary. A/B on ONE binary is the only measurement that separates
+	// "the incident layer costs this" from "this build costs this"
+	// ([[ab-toggle-measures-the-restart]]), so the switch is config- and
+	// runtime-driven (SetIncidentIngestEnabled), never a code edit: flipping
+	// it must not restart the process, or the A/B measures the restart —
+	// baselines reset, profiler state cleared, RSS re-grown from zero.
+	IncidentIngestDisabled bool
+
 	// ObserverExcludeEnabled activates the 5.9a observer-tree exclusion
 	// filter: events from the measurement harness's process tree (root PID
 	// set live via SetObserverRoot) are dropped before rule evaluation.
@@ -855,6 +883,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 		eventsExcludedTotal:      eventsExcludedTotal,
 		alertsSuppressedTotal:    alertsSuppressedTotal,
 	}
+
+	ce.incidentIngestEnabled.Store(!config.IncidentIngestDisabled)
 
 	initialRuleEngine := NewRuleEngine(config.Rules)
 	initialRuleEngine.SetChainGroupResolver(ce.chainGroup)
@@ -1429,7 +1459,7 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 			// Tracking here rather than before the queue keeps the pre-existing
 			// ordering contract: incidents are built from alerts that survived
 			// analyst feedback suppression, exactly as on the synchronous path.
-			if ce.incidentTracker != nil {
+			if ce.incidentTracker != nil && ce.incidentIngestEnabled.Load() {
 				for i := range enriched {
 					ce.incidentTracker.Add(enriched[i])
 				}
@@ -2404,9 +2434,13 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		}
 	}
 
-	// Group alerts into incidents.
-	for i := range alerts {
-		ce.incidentTracker.Add(alerts[i])
+	// Group alerts into incidents. Gated by the wave 6.3.L.1 A/B switch — see
+	// CorrelationEngineConfig.IncidentIngestEnabled; with the layer off the
+	// alerts themselves are untouched, only their promotion to incidents is.
+	if ce.incidentIngestEnabled.Load() {
+		for i := range alerts {
+			ce.incidentTracker.Add(alerts[i])
+		}
 	}
 
 	// Return alerts to caller for per-worker buffered flush (P1-4).
@@ -2883,9 +2917,24 @@ func (ce *CorrelationEngine) UpdateRateLimiter(window time.Duration, maxAlerts i
 	ce.rateLimiter.SetEnabled(enabled)
 }
 
+// SetIncidentIngestEnabled turns alert → incident ingestion on or off in a
+// RUNNING engine (wave 6.3.L.1, item 2). Used by the A/B window of the
+// measurement pipeline and by POST /api/v1/tuning/incident-ingest; the
+// incident tracker itself is left in place, so turning the layer back on
+// resumes grouping with no restart and no lost baselines.
+func (ce *CorrelationEngine) SetIncidentIngestEnabled(enabled bool) {
+	ce.incidentIngestEnabled.Store(enabled)
+}
+
+// IncidentIngestEnabled reports whether alerts are currently fed to the
+// incident layer.
+func (ce *CorrelationEngine) IncidentIngestEnabled() bool {
+	return ce.incidentIngestEnabled.Load()
+}
+
 // IncidentTracker returns the engine's incident tracker so callers (e.g. the
-// HTTP server) can serve incident query results without coupling to the engine's
-// internals.
+// HTTP server) can serve incident query results without coupling to the
+// engine's internals.
 func (ce *CorrelationEngine) IncidentTracker() *IncidentTracker {
 	return ce.incidentTracker
 }

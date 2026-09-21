@@ -439,6 +439,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// self-exclusion above so an operator's explicit config value takes
 	// effect either direction.
 	engineCfg.ObserverExcludeEnabled = cfg.Correlator.ObserverExclude.Enabled
+	// Волна 6.3.L.1, item 2 (№423): инцидентный слой. Дефолт живёт в viper
+	// (correlator.incident_tracking.enabled = true), не в нулевом значении
+	// bool, поэтому значение конфига копируется безусловно — как у
+	// self/observer-exclude выше. Поле движка НЕГАТИВНОЕ (IncidentIngestDisabled),
+	// чтобы забытая строка нигде не гасила слой молча.
+	engineCfg.IncidentIngestDisabled = !cfg.Correlator.IncidentTracking.Enabled
+	if !cfg.Correlator.IncidentTracking.Enabled {
+		slog.Warn("correlator: incident layer DISABLED by config (correlator.incident_tracking.enabled=false) — alerts are still detected, stored and exported, but no incidents, promotions or attack verdicts are produced. This is the wave 6.3.L.1 A/B switch for the layer's memory cost (№423), not a production mode")
+	}
 	// Волна 6.3.9: диагностика шума. Копируется безусловно тем же способом,
 	// что self/observer-exclude выше — дефолт живёт в viper, не в нулевом
 	// значении bool, поэтому явный `true` оператора вступает в силу.
@@ -1123,6 +1132,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return engine.GetRules()
 	})
 	srv.SetIncidentTracker(engine.IncidentTracker())
+	// Волна 6.3.L.1, item 2 (№423): рантайм-ручка инцидентного слоя. A/B его
+	// цены (RSS, потери кольцевого буфера) обязан идти на ОДНОМ бинаре и без
+	// рестарта — рестарт обнулил бы базы и кучу и измерил бы себя.
+	srv.SetRuntimeSwitch("incident-ingest", engine.IncidentIngestEnabled, engine.SetIncidentIngestEnabled)
 	// Wires POST /api/v1/tuning/exceptions to append operator-generated
 	// exceptions (from the dashboard's false-positive flow, issue #308) into
 	// the same overlay file the rule loader already reads on startup/reload.
@@ -2216,6 +2229,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		Enabled: cfg.Correlator.AlertAggregation.Enabled,
 		Window:  alertAggWindow,
 	})
+	// Волна 6.3.L.1, item 4 (№425): слой агрегации включается на ОДНО окно
+	// замера и выключается обратно — держать его включённым весь прогон
+	// значило бы сдвинуть сторовые величины всех остальных критериев.
+	srv.SetRuntimeSwitch("alert-aggregation", alertAggregator.Enabled, alertAggregator.SetEnabled)
 
 	// storeMinSeverity gates admission to ebpf_guard_alerts_total and the alert
 	// store (wave 5.1a). Default "info" admits everything, so an unset or empty
@@ -2386,7 +2403,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// within its window. The first occurrence of a key already went out
 	// immediately via dispatchAlerts; this ticker is what turns "216 more
 	// alerts suppressed" into one visible summary instead of silence.
-	if cfg.Correlator.AlertAggregation.Enabled {
+	// Волна 6.3.L.1, item 4 (№425): тикер заводится БЕЗУСЛОВНО, потому что
+	// слой теперь включается и на ходу (POST /api/v1/tuning/alert-aggregation),
+	// а тикер, заведённый по конфигу старта, оставил бы такое включение без
+	// дожатия окон — свёрнутые повторы не вышли бы никогда. При выключенном
+	// слое Reap возвращает nil, то есть цена тикера — один select в полминуты.
+	{
 		reapInterval := alertAggWindow / 2
 		if reapInterval < time.Second {
 			reapInterval = time.Second

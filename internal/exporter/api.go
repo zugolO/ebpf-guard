@@ -54,6 +54,11 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// Tuning exception generation (admin-only to persist; see issue #308)
 	mux.HandleFunc("/api/v1/tuning/exceptions", s.handleTuningExceptions)
 
+	// Incident-layer runtime switch (wave 6.3.L.1, item 2, №423) — the A/B
+	// handle that lets its memory cost be attributed on ONE binary.
+	mux.HandleFunc("/api/v1/tuning/incident-ingest", s.handleIncidentIngest)
+	mux.HandleFunc("/api/v1/tuning/alert-aggregation", s.handleAlertAggregation)
+
 	// Swagger UI — served without auth so API consumers can explore the spec.
 	// Assets are embedded at build time to eliminate the unpkg.com CDN dependency.
 	mux.Handle("/swaggerui/", swaggerui.Handler())

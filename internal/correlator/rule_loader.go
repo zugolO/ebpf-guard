@@ -697,11 +697,14 @@ func init() {
 	}
 }
 
-func validateFieldName(field string, eventType types.EventType) error {
-	if field == "" {
-		return fmt.Errorf("field name is required")
-	}
-
+// validFieldSetFor returns the condition-field allowlist for eventType, or
+// nil when the type has none (unknown type / a Synthetic rule, which has no
+// EventType of its own). Split out of validateFieldName so callers outside
+// rule loading — the exception-generation API of wave 6.3.L.1, item 1 (№422) —
+// can ASK which axes a rule of this type can be narrowed by instead of
+// carrying their own hand-maintained copy of the answer: a second list is a
+// list that drifts, and the drift shows up as a 400 on the analyst's screen.
+func validFieldSetFor(eventType types.EventType) map[string]bool {
 	var validFields map[string]bool
 	switch eventType {
 	case types.EventTCPConnect:
@@ -737,6 +740,52 @@ func validateFieldName(field string, eventType types.EventType) error {
 	case types.EventHTTPPlaintext:
 		validFields = validHTTPPlaintextFields
 	default:
+		return nil
+	}
+	return validFields
+}
+
+// CommFieldForEventType returns the condition field carrying the process name
+// for eventType, and whether such a field exists at all. The answer is read
+// from the loader's own allowlists (validFieldSetFor), not from a switch
+// written from memory: every event type whose rules may legally say "comm" or
+// "proc.comm" can therefore be narrowed by comm through the exception API, and
+// a type that gains the field later gains the narrowing with it.
+//
+// "proc.comm" is preferred over the bare "comm" when a type accepts both: it
+// is the dotted form the rule files use, and normaliseFieldName maps them to
+// the same value.
+func CommFieldForEventType(eventType types.EventType) (string, bool) {
+	fields := validFieldSetFor(eventType)
+	if fields == nil {
+		return "", false
+	}
+	if fields["proc.comm"] {
+		return "proc.comm", true
+	}
+	if fields["comm"] {
+		return "comm", true
+	}
+	return "", false
+}
+
+// IdentityFieldNames returns the identity axes valid on EVERY event type —
+// the container/pod/namespace keys and the exe_path family — including on a
+// Synthetic rule, whose exceptions are restricted to exactly this set
+// (validateIdentityCondition). This is the answer to "then what DO I narrow
+// this rule by" that wave 6.3.L.1 requires the API to name instead of a bare
+// 400 (№422).
+func IdentityFieldNames() []string {
+	return append([]string(nil), identityFields...)
+}
+
+func validateFieldName(field string, eventType types.EventType) error {
+	if field == "" {
+		return fmt.Errorf("field name is required")
+	}
+
+	validFields := validFieldSetFor(eventType)
+	if validFields == nil {
 		return fmt.Errorf("unknown event type: %d", eventType)
 	}
 

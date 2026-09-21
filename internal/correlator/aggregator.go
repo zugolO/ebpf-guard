@@ -3,6 +3,7 @@ package correlator
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/util"
@@ -46,6 +47,14 @@ type AlertAggregator struct {
 	mu      sync.Mutex
 	cfg     AlertAggregationConfig
 	entries map[string]*aggregateEntry
+	// enabled mirrors cfg.Enabled and can be flipped in a RUNNING agent
+	// (wave 6.3.L.1, item 4, №425). The aggregation layer's product claim —
+	// that it does not declare different base rules to be repeats of one —
+	// had never been checked live with the layer ON, because turning it on
+	// for a whole run moves every store-read quantity of that run. A window
+	// switch keeps the check where it belongs: on one window, on the same
+	// process.
+	enabled atomic.Bool
 }
 
 // NewAlertAggregator creates an AlertAggregator with the given configuration.
@@ -53,11 +62,22 @@ func NewAlertAggregator(cfg AlertAggregationConfig) *AlertAggregator {
 	if cfg.Window <= 0 {
 		cfg.Window = 60 * time.Second
 	}
-	return &AlertAggregator{
+	a := &AlertAggregator{
 		cfg:     cfg,
 		entries: make(map[string]*aggregateEntry),
 	}
+	a.enabled.Store(cfg.Enabled)
+	return a
 }
+
+// SetEnabled turns aggregation on or off in a running agent (wave 6.3.L.1,
+// item 4). Turning it OFF leaves open windows behind in entries; they are
+// reaped as usual once it is on again, and are never forwarded while it is
+// off — Reap returns nothing in that state.
+func (a *AlertAggregator) SetEnabled(enabled bool) { a.enabled.Store(enabled) }
+
+// Enabled reports whether aggregation is currently folding repeats.
+func (a *AlertAggregator) Enabled() bool { return a.enabled.Load() }
 
 // Ingest processes freshly generated alerts and returns only the alerts that
 // should be forwarded to storage/notifications immediately: alerts whose
@@ -69,7 +89,7 @@ func NewAlertAggregator(cfg AlertAggregationConfig) *AlertAggregator {
 // the input slice *before* calling Ingest, since aggregation intentionally
 // reduces what gets forwarded downstream.
 func (a *AlertAggregator) Ingest(alerts []types.Alert, now time.Time) []types.Alert {
-	if !a.cfg.Enabled || len(alerts) == 0 {
+	if !a.enabled.Load() || len(alerts) == 0 {
 		return alerts
 	}
 
@@ -112,7 +132,7 @@ func (a *AlertAggregator) Ingest(alerts []types.Alert, now time.Time) []types.Al
 // every Window/2) and forward the result through the same downstream path
 // used for fresh alerts.
 func (a *AlertAggregator) Reap(now time.Time) []types.Alert {
-	if !a.cfg.Enabled {
+	if !a.enabled.Load() {
 		return nil
 	}
 

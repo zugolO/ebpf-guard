@@ -1023,6 +1023,31 @@ type CorrelatorConfig struct {
 	// NoiseDiag configures the wave 6.3.9 noise diagnostics. Off by default:
 	// it is a measurement instrument, not a mode of operation.
 	NoiseDiag NoiseDiagConfig `mapstructure:"noise_diag"`
+	// IncidentTracking gates the incident layer — grouping alerts into
+	// incidents, promotion, attack verdicts. ON by default; see
+	// IncidentTrackingConfig for why it can be turned off at all.
+	IncidentTracking IncidentTrackingConfig `mapstructure:"incident_tracking"`
+}
+
+// IncidentTrackingConfig controls the incident layer (wave 6.3.L.1, item 2,
+// №423).
+//
+// Зачем тумблер вообще существует. Восстановление слоя (№418 — до него
+// инцидентный слой с живым Rego не получал НИ ОДНОГО алерта) совпало с ростом
+// RSS 254,9 → 269,3 МиБ при лимите чарта 256Mi, то есть с OOM-kill в
+// DaemonSet, и с ростом потерь кольцевого буфера 41 → 3005 за пролог. Но
+// между двумя архивами сменился весь бинарь, и «виноват слой» оставалось
+// ДОГАДКОЙ. Цена слоя измеряется только A/B на ОДНОМ бинаре: два окна одной
+// ноды, три величины (RSS, потери, объём). Тумблер обязан быть конфигом и
+// рантайм-ручкой, а не правкой кода, иначе A/B меряет пересборку и рестарт
+// ([[ab-toggle-measures-the-restart]]).
+//
+// Выключение НЕ трогает ни детект, ни объём алертов: алерты порождаются,
+// подавляются и экспортируются ровно так же — не строятся только инциденты
+// (и, соответственно, молчат incidents_total и вердикт attack).
+type IncidentTrackingConfig struct {
+	// Enabled — default: true.
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // NoiseDiagConfig configures the noise diagnostics of wave 6.3.9.
@@ -2120,6 +2145,7 @@ func setDefaults(v *viper.Viper) {
 	// per-process history. 256 events × ~208 B ≈ 53 KB/PID keeps memory bounded.
 	v.SetDefault("correlator.buffer_size", 256)
 	v.SetDefault("correlator.max_alerts_per_second", 10000)
+	v.SetDefault("correlator.incident_tracking.enabled", true)
 	v.SetDefault("correlator.alert_aggregation.enabled", false)
 	v.SetDefault("correlator.alert_aggregation.window", "60s")
 	v.SetDefault("correlator.self_exclude.enabled", true)

@@ -107,6 +107,19 @@ type Server struct {
 	// "save exception" requests cannot race and drop one another's entry.
 	tuningWriteMu sync.Mutex
 
+	// runtimeSwitches are the named on/off handles a measurement window may
+	// flip WITHOUT restarting the agent (wave 6.3.L.1): "incident-ingest"
+	// (item 2, №423 — attributing the incident layer's memory cost) and
+	// "alert-aggregation" (item 4, №425 — taking a verdict on the aggregation
+	// layer while it is actually on). Function values rather than component
+	// pointers: the exporter keeps out of the engine's internals, and a window
+	// needs exactly two verbs — read the state, flip it.
+	//
+	// A restart instead of a flip would measure the restart: cleared
+	// baselines, a re-grown heap, a fresh profiler
+	// ([[ab-toggle-measures-the-restart]]).
+	runtimeSwitches map[string]runtimeSwitch
+
 	// alertSilencer holds operator-created silence windows consulted on the
 	// alert dispatch path (wave 6.3.L, №420). nil means no silencing layer.
 	alertSilencer *AlertSilencer
@@ -450,6 +463,26 @@ func (s *Server) SetIncidentTracker(t *correlator.IncidentTracker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.incidentTracker = t
+}
+
+// runtimeSwitch is one named on/off handle; see Server.runtimeSwitches.
+type runtimeSwitch struct {
+	get func() bool
+	set func(bool)
+}
+
+// SetRuntimeSwitch wires the named runtime switch so
+// GET/POST /api/v1/tuning/<name> are served (wave 6.3.L.1). Without it both
+// verbs answer 503: a measurement window must be able to tell "the switch is
+// not in this binary" from "the layer is off" — the two are the same zero on
+// every reading that follows.
+func (s *Server) SetRuntimeSwitch(name string, get func() bool, set func(bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runtimeSwitches == nil {
+		s.runtimeSwitches = make(map[string]runtimeSwitch, 2)
+	}
+	s.runtimeSwitches[name] = runtimeSwitch{get: get, set: set}
 }
 
 // SetLocalTuningPath wires the local-tuning overlay YAML file that

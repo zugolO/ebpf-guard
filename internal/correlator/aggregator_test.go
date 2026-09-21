@@ -178,3 +178,41 @@ func TestAggregationKey_PathPrefixCollapsesNumericSegments(t *testing.T) {
 
 	assert.Equal(t, aggregationKey(a1), aggregationKey(a2))
 }
+
+// Волна 6.3.L.1, item 4 (№425): слой включается НА ХОДУ, и метка 6.3L1.4
+// читает его работу по полю count в сторе. Проверяется вся цепочка тумблера:
+// выключенный слой не сворачивает и ничего не накапливает, включённый на ходу
+// сворачивает повторы, и выключенный обратно перестаёт отдавать агрегаты —
+// измеритель обязан уметь вернуть продукт в исходное состояние.
+//
+// Отдельно закрепляется то, на чём смок 21.09 споткнулся: count>1 появляется
+// ТОЛЬКО после закрытия окна (Reap), а не в момент повтора. Чтение стора
+// раньше этого момента — вердикт о тайминге, а не о слое.
+func TestAlertAggregator_RuntimeSwitchFoldsAndStops(t *testing.T) {
+	agg := NewAlertAggregator(AlertAggregationConfig{Enabled: false, Window: time.Minute})
+	now := time.Now()
+	alert := testAlert("dns_dga_ngram", "dig", "default", "")
+
+	require.False(t, agg.Enabled())
+	out := agg.Ingest([]types.Alert{alert, alert}, now)
+	assert.Len(t, out, 2, "выключенный слой пропускает всё как есть")
+
+	agg.SetEnabled(true)
+	first := agg.Ingest([]types.Alert{alert}, now.Add(time.Second))
+	require.Len(t, first, 1)
+	assert.Equal(t, 1, first[0].Count, "первое вхождение уходит немедленно с count=1")
+	for i := 0; i < 4; i++ {
+		assert.Empty(t, agg.Ingest([]types.Alert{alert}, now.Add(time.Duration(8*(i+1))*time.Second)))
+	}
+	assert.Empty(t, agg.Reap(now.Add(30*time.Second)), "до закрытия окна дожимать нечего — ровно то, что прочитал смок")
+
+	closed := agg.Reap(now.Add(2 * time.Minute))
+	require.Len(t, closed, 1)
+	assert.Equal(t, 5, closed[0].Count)
+
+	// Выключенный обратно слой не отдаёт агрегатов и не сворачивает.
+	agg.SetEnabled(false)
+	after := agg.Ingest([]types.Alert{alert, alert}, now.Add(3*time.Minute))
+	assert.Len(t, after, 2)
+	assert.Empty(t, agg.Reap(now.Add(4*time.Minute)))
+}

@@ -1937,6 +1937,15 @@ elif [ "${_w63l1_agg_on:-000}" != "200" ]; then
     echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: включение агрегации ответило ${_w63l1_agg_on:-нет}) — слой в известное состояние не приведён"
 else
     _w63l1_agg_t0=$(date -u +%s)
+    # ОЖИДАЕМЫЙ НАБОР БАЗОВЫХ ПРАВИЛ БЕРЁТСЯ ИЗ МЕТРИКИ, А НЕ ИЗ СТОРА.
+    # Схлопывание (№415) выглядит НЕ как count>1 у записи — count>1 это
+    # свёртка собственных повторов ОДНОГО базового правила, ради которой слой
+    # и заведён, — а как ИСЧЕЗНУВШЕЕ базовое правило: его алерты попали в
+    # чужое ведро и своей записи в сторе не получили. Значит нужны ДВА
+    # набора: ожидаемый (кто реально сработал за окно — дельта
+    # ebpf_guard_alert_rule_id_renamed_total) и наблюдаемый (у кого есть своя
+    # запись). Вход сужения — метрика, не стор ([[narrowing-input-must-be-metric-not-store]]).
+    _w63l1_snap "$ART/w63l1-agg-m0.txt"
     # ПОЛОЖИТЕЛЬНЫЙ СЛУЧАЙ СОЗДАЁТСЯ, А НЕ ВЫЖИДАЕТСЯ (№340 в том же кусте,
     # [[coredns-holds-no-persistent-dns-socket]]). Метке нужны РАЗОМ три
     # вещи, которых тихое окно idle-ноды не даёт: имя Rego, под которое
@@ -1992,6 +2001,7 @@ else
         echo "  dig не найден — положительный случай не подан, окно измеряет только фон ноды"
     fi
     sleep "$_w63l1_agg_wait"
+    _w63l1_snap "$ART/w63l1-agg-m1.txt"
     _w63l1_agg_alerts=$(curl -s --max-time 60 -H "Authorization: Bearer $_w63l1_tok" "$_w63l1_api/api/v1/alerts?limit=200000" 2>/dev/null)
     printf '%s' "$_w63l1_agg_alerts" | jq -e . >/dev/null 2>&1 || _w63l1_agg_alerts=""
     # Слой возвращается в исходное (выключенное) состояние безусловно и ДО
@@ -2004,35 +2014,59 @@ else
     if [ -z "${_w63l1_agg_alerts:-}" ]; then
         echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: /api/v1/alerts не опрошен либо не JSON) — искать пару не в чем"
     else
-        _w63l1_pairs=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" '
-            [.[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t)
-                          and .details.base_rule_id != null and .details.base_rule_id != "")]
-            | group_by(.rule_id)
-            | map(select((map(.details.base_rule_id) | unique | length) > 1)
-                  | {rule_id: .[0].rule_id, bases: (map(.details.base_rule_id) | unique),
-                     rows: length, counts: (map(.count // 1))})
-            | .[] | "\(.rule_id) <- \(.bases | join(",")) — записей \(.rows), count каждой: \(.counts | join(","))"' 2>/dev/null)
+        # (1) ОЖИДАЕМЫЙ набор: пары (имя Rego → базовое правило), чей счётчик
+        #     переименований вырос ЗА ОКНО. Дельта, а не абсолют: правило,
+        #     переименованное часом раньше и молчавшее в окне, ложно попало бы
+        #     в ожидаемые и дало бы ложный ПРОВАЛ.
+        _w63l1_expect=$(awk '
+            FNR==NR {
+                if ($0 ~ /^ebpf_guard_alert_rule_id_renamed_total\{/) { v0[$1] = $NF }
+                next
+            }
+            /^ebpf_guard_alert_rule_id_renamed_total\{/ {
+                d = $NF - (($1 in v0) ? v0[$1] : 0)
+                if (d > 0) {
+                    rid = base = ""
+                    if (match($1, /[,{]rule_id="[^"]*"/)) rid = substr($1, RSTART+10, RLENGTH-11)
+                    if (match($1, /base_rule_id="[^"]*"/)) base = substr($1, RSTART+14, RLENGTH-15)
+                    if (rid != "" && base != "") print rid, base
+                }
+            }' "$ART/w63l1-agg-m0.txt" "$ART/w63l1-agg-m1.txt" 2>/dev/null | sort -u)
+        # Имя Rego с НАИБОЛЬШИМ числом базовых правил за окно — на нём №415 и
+        # проверяется; остальные печатаются рядом.
+        _w63l1_name=$(printf '%s\n' "${_w63l1_expect:-}" | awk 'NF {c[$1]++} END {m=0; for (k in c) if (c[k] > m) {m=c[k]; n=k} if (m >= 2) print n}')
+        _w63l1_exp_bases=$(printf '%s\n' "${_w63l1_expect:-}" | awk -v n="${_w63l1_name:-}" '$1 == n {print $2}' | sort -u)
+        _w63l1_exp_n=$(printf '%s\n' "${_w63l1_exp_bases:-}" | grep -c . || true)
+        # (2) НАБЛЮДАЕМЫЙ набор: у кого есть СВОЯ запись в сторе за окно.
+        _w63l1_obs_bases=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" --arg n "${_w63l1_name:-}" '
+            .[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and (.rule_id == $n))
+            | .details.base_rule_id // empty' 2>/dev/null | sort -u)
+        _w63l1_obs_n=$(printf '%s\n' "${_w63l1_obs_bases:-}" | grep -c . || true)
+        _w63l1_counts=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" --arg n "${_w63l1_name:-}" '
+            [.[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and (.rule_id == $n))]
+            | map("\(.details.base_rule_id // "?")=count:\(.count // 1)") | join(", ")' 2>/dev/null)
+        # (3) ЖИВОСТЬ СЛОЯ: свернул ли он хоть что-нибудь за окно. Без этой
+        #     величины «ничего не схлопнулось» снова читалось бы как
+        #     достижение, а не как выключенный прибор (класс 6.3L.3).
         _w63l1_folded=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" '
             [.[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t) and ((.count // 1) > 1))] | length' 2>/dev/null)
-        _w63l1_bad=$(printf '%s' "$_w63l1_agg_alerts" | jq -r --argjson t "$_w63l1_agg_t0" '
-            [.[] | select(((.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601? // 0) >= $t)
-                          and .details.base_rule_id != null and .details.base_rule_id != "")]
-            | group_by(.rule_id)
-            | map(select((map(.details.base_rule_id) | unique | length) > 1))
-            | flatten | map(select((.count // 1) > 1)) | length' 2>/dev/null)
+        _w63l1_missing=""
+        for _w63l1_b in ${_w63l1_exp_bases:-}; do
+            printf '%s\n' "${_w63l1_obs_bases:-}" | grep -qx "$_w63l1_b" || _w63l1_missing="${_w63l1_missing}${_w63l1_b} "
+        done
         echo "  за окно с включённым слоем: подач положительного случая ${_w63l1_agg_fired}, свёрнутых записей (count>1) всего ${_w63l1_folded:-0}"
-        if [ -n "${_w63l1_pairs:-}" ]; then
-            echo "  имена, под которые приехали РАЗНЫЕ базовые правила:"
-            printf '%s\n' "$_w63l1_pairs" | sed 's/^/    /'
-        fi
-        if [ "${_w63l1_bad:-0}" -gt 0 ]; then
-            echo "FAIL: 6.3L1.4 ПРОВАЛЕН (№415 жив): ${_w63l1_bad} записей с РАЗНЫМИ base_rule_id под одним rule_id несут count>1 при ВКЛЮЧЁННОМ слое — продукт объявляет разные детекты повторами одного"
-        elif [ -z "${_w63l1_pairs:-}" ]; then
-            echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: за окно включённого слоя не нашлось ни одного имени, под которое приехали разные базовые правила; подач положительного случая ${_w63l1_agg_fired}, свёрнутых записей ${_w63l1_folded:-0}) — схлопывать было нечего, и ноль здесь про нагрузку окна, а не про агрегацию"
+        echo "  имя Rego под проверкой: ${_w63l1_name:-(нет имени с двумя базовыми правилами за окно)}"
+        echo "  базовые правила, сработавшие за окно (дельта метрики переименований): ${_w63l1_exp_n:-0} — $(printf '%s' "${_w63l1_exp_bases:-}" | tr '\n' ' ')"
+        echo "  базовые правила со СВОЕЙ записью в сторе:                              ${_w63l1_obs_n:-0} — $(printf '%s' "${_w63l1_obs_bases:-}" | tr '\n' ' ')"
+        [ -n "${_w63l1_counts:-}" ] && echo "  count по записям: ${_w63l1_counts}"
+        if [ -z "${_w63l1_name:-}" ] || [ "${_w63l1_exp_n:-0}" -lt 2 ]; then
+            echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: за окно включённого слоя НИ ОДНО имя Rego не получило двух и более базовых правил — подач ${_w63l1_agg_fired}) — схлопывать было нечего, и ноль здесь про нагрузку окна, а не про агрегацию"
+        elif [ -n "${_w63l1_missing:-}" ]; then
+            echo "FAIL: 6.3L1.4 ПРОВАЛЕН (№415 жив): базовые правила «${_w63l1_missing}» сработали за окно (метрика переименований это печатает), но СВОЕЙ записи под именем «${_w63l1_name}» не получили — их алерты ушли в чужое ведро агрегации, то есть разные детекты объявлены повторами одного"
         elif [ "${_w63l1_folded:-0}" -lt 1 ]; then
-            echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: слой ВКЛЮЧЁН, пара с разными base_rule_id за окно есть, подач положительного случая ${_w63l1_agg_fired}, дожатие ${_w63l1_agg_wait}s > окна слоя ${_w63l1_agg_win}s — то есть тайминг чтения исключён, — и всё равно НИ ОДНОЙ свёрнутой записи: повторы не дошли до слоя, их съел предшествующий слой подавления) — утверждение №415 проверено на паре, но положительный контроль самого слоя за это окно не предъявлен"
+            echo "НЕИЗМЕРИМ: 6.3L1.4 НЕИЗМЕРИМ (класс НАЗВАН: слой ВКЛЮЧЁН, ${_w63l1_exp_n} базовых правил под именем «${_w63l1_name}» получили свои записи, но слой не свернул НИ ОДНОЙ записи за окно при дожатии ${_w63l1_agg_wait}s > окна слоя ${_w63l1_agg_win}s — тайминг чтения исключён, повторы до слоя не дошли) — разделение проверено, живость самого слоя за это окно НЕ предъявлена"
         else
-            echo "OK: 6.3L1.4 ДОСТИГНУТО: слой агрегации ВКЛЮЧЁН и живой (свёрнутых записей ${_w63l1_folded}), пара с разными base_rule_id под одним rule_id за окно есть, и НИ ОДНА такая запись не свёрнута (count>1 среди них: 0) — разные детекты не объявлены повторами"
+            echo "OK: 6.3L1.4 ДОСТИГНУТО: слой агрегации ВКЛЮЧЁН и ЖИВОЙ (свёрнутых записей ${_w63l1_folded}, count по записям: ${_w63l1_counts}), под именем «${_w63l1_name}» за окно сработали ${_w63l1_exp_n} РАЗНЫХ базовых правил, и КАЖДОЕ получило свою запись в сторе (${_w63l1_obs_n} из ${_w63l1_exp_n}) — свёртка идёт по base_rule_id, разные детекты повторами не объявлены (№415 закрыт живьём, а не регрессией)"
         fi
     fi
 fi

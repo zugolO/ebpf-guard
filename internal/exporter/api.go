@@ -47,6 +47,10 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// BPF live-update endpoint (admin-only)
 	mux.HandleFunc("/api/v1/bpf/reload", s.handleBPFReload)
 
+	// Alert silencing (admin-only to create/lift; wave 6.3.L, №420)
+	mux.HandleFunc("/api/v1/alerts/silence", s.handleAlertSilence)
+	mux.HandleFunc("/api/v1/alerts/silence/", s.handleAlertSilenceByKey)
+
 	// Tuning exception generation (admin-only to persist; see issue #308)
 	mux.HandleFunc("/api/v1/tuning/exceptions", s.handleTuningExceptions)
 

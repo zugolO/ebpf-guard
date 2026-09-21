@@ -114,30 +114,58 @@ func (s *Server) handleTuningExceptions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var target *correlator.Rule
-	for _, rule := range s.getRules() {
-		if rule.ID == req.RuleID {
-			r := rule
-			target = &r
-			break
+	rules := s.getRules()
+	// №413 (wave 6.3.L, item 1): req.RuleID is what the analyst SEES, and
+	// after Rego enrichment that is the renamed name, not any YAML id — none
+	// of the four live Rego-decision names appear in rules/*.yaml at all. So
+	// the name is resolved on BOTH identities and the results are UNIONED:
+	// as a loaded rule id, and through the reverse rename index (renameIndex,
+	// fed live by RecordAlertRuleIDRename) as a Rego-visible name. The union
+	// matters because the two namespaces are not disjoint by construction —
+	// nothing stops a future Rego decision from reusing an existing YAML id,
+	// and resolving only the direct hit would then leave the base rule that
+	// actually fired untouched: №413 again, one indirection deeper. A 404 is
+	// reserved for a name unknown as EITHER identity, and says which lookup
+	// missed.
+	bases := BaseRuleIDsForRenamed(req.RuleID)
+	wanted := make(map[string]struct{}, len(bases)+1)
+	wanted[req.RuleID] = struct{}{}
+	for _, base := range bases {
+		wanted[base] = struct{}{}
+	}
+	var targets []correlator.Rule
+	for _, rule := range rules {
+		if _, ok := wanted[rule.ID]; ok {
+			targets = append(targets, rule)
 		}
 	}
-	if target == nil {
-		http.Error(w, fmt.Sprintf("rule %q not found", req.RuleID), http.StatusNotFound)
+	if len(targets) == 0 {
+		if len(bases) == 0 {
+			http.Error(w, fmt.Sprintf("rule %q not found: unknown both as a loaded rule id and as a Rego-renamed name", req.RuleID), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("rule %q is known as a Rego rename of %v, but none of those base rules are currently loaded", req.RuleID, bases), http.StatusNotFound)
 		return
 	}
-
-	exc, err := buildException(req, target.EventType)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	// A renamed name can be shared by several base rules (wave 6.3.L input:
+	// dns_dga_ngram and dns_dga_high_entropy both rename to dga_domain). The
+	// exception is generated against every matching base rule, explicitly —
+	// the analyst asked to suppress what the dashboard shows under this name,
+	// and every rule capable of producing it must stop firing for the
+	// exception to hold.
+	overlay := &correlator.TuningOverlay{}
+	for _, target := range targets {
+		exc, err := buildException(req, target.EventType)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		overlay.Overlays = append(overlay.Overlays, correlator.RuleTuningOverlay{
+			RuleID:     target.ID,
+			Exceptions: []correlator.RuleException{exc},
+		})
 	}
 
-	overlay := &correlator.TuningOverlay{
-		Overlays: []correlator.RuleTuningOverlay{
-			{RuleID: req.RuleID, Exceptions: []correlator.RuleException{exc}},
-		},
-	}
 	data, err := yaml.Marshal(overlay)
 	if err != nil {
 		s.logger.Error("tuning: failed to marshal exception snippet", "error", err)
@@ -148,7 +176,12 @@ func (s *Server) handleTuningExceptions(w http.ResponseWriter, r *http.Request) 
 	resp := TuningExceptionResponse{YAML: string(data)}
 
 	if req.Persist {
-		persisted, perr := s.persistTuningException(req.RuleID, exc)
+		// One load → validate → write → reload for the WHOLE overlay, not one
+		// per target (wave 6.3.L review): a per-target loop rewrote the file and
+		// re-read every rule N times for one request, and a failure on target
+		// number two left target number one already persisted and hot-reloaded —
+		// a half-applied exception nobody asked for and no response reported.
+		persisted, perr := s.persistTuningExceptions(overlay.Overlays)
 		if perr != nil {
 			http.Error(w, "Failed to persist exception: "+perr.Error(), http.StatusInternalServerError)
 			return
@@ -162,11 +195,27 @@ func (s *Server) handleTuningExceptions(w http.ResponseWriter, r *http.Request) 
 }
 
 // persistTuningException appends exc to the rule_id entry in the local-tuning
-// overlay file (creating the entry if this is the first exception for that
-// rule), validates the resulting overlay against the currently loaded rules,
-// and writes it back to disk. Returns false without error if no overlay path
-// is configured — the caller still gets the YAML snippet to copy manually.
+// overlay file. Thin wrapper over persistTuningExceptions for the single-rule
+// case; see there for the contract.
 func (s *Server) persistTuningException(ruleID string, exc correlator.RuleException) (bool, error) {
+	return s.persistTuningExceptions([]correlator.RuleTuningOverlay{
+		{RuleID: ruleID, Exceptions: []correlator.RuleException{exc}},
+	})
+}
+
+// persistTuningExceptions appends every exception in additions to its rule_id
+// entry in the local-tuning overlay file (creating entries as needed),
+// validates the RESULTING overlay against the currently loaded rules, and
+// writes it back to disk — once, for all of them. Returns false without error
+// if no overlay path is configured; the caller still gets the YAML snippet to
+// copy manually.
+//
+// All-or-nothing on purpose (wave 6.3.L): one Rego-visible name can resolve to
+// several base rules (№413), and an exception that landed on three of nine
+// rules would suppress an arbitrary part of what the analyst asked about while
+// the response reported a single boolean. Validation runs on the merged
+// overlay, the file is written once, and the rules are reloaded once.
+func (s *Server) persistTuningExceptions(additions []correlator.RuleTuningOverlay) (bool, error) {
 	s.mu.RLock()
 	path := s.localTuningPath
 	s.mu.RUnlock()
@@ -185,19 +234,21 @@ func (s *Server) persistTuningException(ruleID string, exc correlator.RuleExcept
 		overlay = &correlator.TuningOverlay{}
 	}
 
-	found := false
-	for i := range overlay.Overlays {
-		if overlay.Overlays[i].RuleID == ruleID {
-			overlay.Overlays[i].Exceptions = append(overlay.Overlays[i].Exceptions, exc)
-			found = true
-			break
+	for _, add := range additions {
+		found := false
+		for i := range overlay.Overlays {
+			if overlay.Overlays[i].RuleID == add.RuleID {
+				overlay.Overlays[i].Exceptions = append(overlay.Overlays[i].Exceptions, add.Exceptions...)
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		overlay.Overlays = append(overlay.Overlays, correlator.RuleTuningOverlay{
-			RuleID:     ruleID,
-			Exceptions: []correlator.RuleException{exc},
-		})
+		if !found {
+			overlay.Overlays = append(overlay.Overlays, correlator.RuleTuningOverlay{
+				RuleID:     add.RuleID,
+				Exceptions: append([]correlator.RuleException(nil), add.Exceptions...),
+			})
+		}
 	}
 
 	// Validate against a deep copy of the live rules — ApplyTuningOverlay

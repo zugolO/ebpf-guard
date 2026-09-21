@@ -193,6 +193,48 @@ components:
           description: True when the rule action was executed by the enforcer
           example: false
 
+    SilenceRequest:
+      type: object
+      required: [rule_id, duration]
+      properties:
+        rule_id:
+          type: string
+          description: Rule id from rules/*.yaml, or the Rego decision name shown in the dashboard.
+          example: dga_domain
+        severity:
+          type: string
+          description: Limits the silence to one tier. Omitted silences info, warning and critical.
+          enum: [info, warning, critical]
+        duration:
+          type: string
+          description: Go duration string.
+          example: 30m
+        reason:
+          type: string
+          example: known-good batch job
+    SilenceResponse:
+      type: object
+      properties:
+        keys:
+          type: array
+          description: Every silence key created, one per (base rule id, severity).
+          items:
+            type: string
+          example: ["dns_dga_ngram:critical", "dns_dga_high_entropy:critical"]
+        until:
+          type: string
+          format: date-time
+    SilenceWindow:
+      type: object
+      properties:
+        key:
+          type: string
+          example: dns_dga_ngram:critical
+        until:
+          type: string
+          format: date-time
+        reason:
+          type: string
     FeedbackRequest:
       type: object
       required: [verdict]
@@ -674,6 +716,97 @@ paths:
           description: Feedback not configured
         "503":
           description: Alert store not configured
+
+  /api/v1/alerts/silence:
+    get:
+      tags: [alerts]
+      summary: List active silence windows
+      description: |
+        Returns the silence windows currently registered on this agent. Each key
+        is `<base_rule_id>:<severity>` — the base (pre-Rego) rule id, which is the
+        identity every suppression layer keys on.
+      operationId: listAlertSilences
+      security:
+        - bearerViewer: []
+        - bearerAdmin: []
+      responses:
+        "200":
+          description: Active silence windows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SilenceWindow"
+        "401":
+          description: Missing or invalid Bearer token
+        "503":
+          description: Alert silencer not enabled on this agent
+    post:
+      tags: [alerts]
+      summary: Silence alerts for a rule
+      description: |
+        Withholds matching alerts from the forwarding path (alert store,
+        notifications, Alertmanager) for the given duration. Detection is
+        unaffected: the rule keeps firing, the alert is still counted in
+        `ebpf_guard_alerts_total`, and the silenced volume is published as
+        `ebpf_guard_alerts_silenced_total`.
+
+        `rule_id` may be a rule id from `rules/*.yaml` OR the (possibly renamed)
+        name a Rego decision produced — the name an analyst actually sees in the
+        dashboard. A renamed name is resolved to every base rule it can stand
+        for, and the response lists every key created, so widening a silence
+        across a Rego-name family is always explicit.
+      operationId: silenceAlerts
+      security:
+        - bearerAdmin: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SilenceRequest"
+      responses:
+        "200":
+          description: Silence windows created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SilenceResponse"
+        "400":
+          description: Missing rule_id/duration, or duration is not a positive Go duration
+        "401":
+          description: Missing or invalid Bearer token
+        "403":
+          description: Admin role required
+        "404":
+          description: rule_id unknown both as a loaded rule id and as a Rego-renamed name
+        "503":
+          description: Alert silencer not enabled on this agent
+
+  /api/v1/alerts/silence/{key}:
+    delete:
+      tags: [alerts]
+      summary: Lift one silence window
+      operationId: removeAlertSilence
+      security:
+        - bearerAdmin: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Silence key as returned by POST/GET, `<base_rule_id>:<severity>`.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Window removed (idempotent — removing an unknown key also returns 204)
+        "401":
+          description: Missing or invalid Bearer token
+        "403":
+          description: Admin role required
+        "503":
+          description: Alert silencer not enabled on this agent
 
   /api/v1/alerts/export/cef:
     get:

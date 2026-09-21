@@ -1127,6 +1127,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// exceptions (from the dashboard's false-positive flow, issue #308) into
 	// the same overlay file the rule loader already reads on startup/reload.
 	srv.SetLocalTuningPath(cfg.Rules.LocalTuningPath)
+	// Волна 6.3.L (№420): слой сайленса подключается к API и к пути доставки.
+	// До этого AlertSilencer существовал как код с юнит-тестами и не вызывался
+	// НИОТКУДА — аналитик не мог завести окно ни из дашборда, ни из curl, а
+	// починка его ключа (№414) не могла быть ни проверена живьём, ни
+	// использована. Слой инертен, пока окон нет: IsSilenced выходит по
+	// атомарному счётчику активных окон, не трогая мьютекс.
+	alertSilencer := exporter.NewAlertSilencer()
+	srv.SetAlertSilencer(alertSilencer)
+	go alertSilencer.Start(ctx)
 
 	if gossipMgr != nil {
 		srv.RegisterGossipRoutes(gossip.Handler(gossipMgr))
@@ -2327,7 +2336,27 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				exporter.RecordAnomaly()
 			}
 		}
-		forwardAlerts(alertAggregator.Ingest(admitted, time.Now()))
+		// Слой сайленса — ПЯТЫЙ слой подавления, и стоит он ПОСЛЕ
+		// exporter.RecordAlert: окно оператора меняет то, что ДОСТАВЛЕНО
+		// (стор, нотификации, Alertmanager), и никогда — то, что
+		// ЗАДЕТЕКТИРОВАНО. Срезанный объём читается своей серией
+		// ebpf_guard_alerts_silenced_total, иначе сайленс неотличим от
+		// потери детекта ([[dedup-is-third-suppression-layer]] — та же
+		// причина, по которой у каждого слоя есть своя величина).
+		// Ни одного окна — ни цикла, ни аллокации: обычное состояние агента.
+		forwarded := admitted
+		if alertSilencer != nil && alertSilencer.Active() {
+			kept := forwarded[:0:0]
+			for _, a := range admitted {
+				if alertSilencer.IsSilenced(a) {
+					exporter.RecordAlertSilenced(a.RuleID, string(a.Severity))
+					continue
+				}
+				kept = append(kept, a)
+			}
+			forwarded = kept
+		}
+		forwardAlerts(alertAggregator.Ingest(forwarded, time.Now()))
 	}
 
 	// dispatchAsync runs dispatchAlerts in a bounded goroutine pool to prevent

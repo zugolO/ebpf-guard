@@ -261,6 +261,20 @@ fi
 #    чужих записей в узловой счётчик. Логика класса проверяется на фиксированных
 #    сценариях ДО прогона и жёстким стопом: час стенда дешевле ложного снятия
 #    ограничения.
+# ── Самопроверка классификатора 6.3.6 (item 5 волны 6.3.L, №417). Заведена
+#    той же волной и до сих пор никем не запускалась: `--self-test` проверяет
+#    детерминизм _w63_636_classify и порядок её веток на девяти фикстурах,
+#    стенда не требует и стоит доли секунды. Жёсткий стоп по той же причине,
+#    что у пробы 6.3.7: класс 6.3.6 — утверждение о ПРОДУКТЕ, и метка 6.3L.4
+#    сравнивает два таких класса между собой.
+echo "--- самопроверка классификатора 6.3.6 (item 5 волны 6.3.L, до прогона) ---"
+if ! bash "$SETUP/wave6.3-controls.sh" --self-test; then
+    echo "СТОП ДО ПРОГОНА: фикстуры классификатора 6.3.6 не проходят (№417) — класс,"
+    echo "  который сравнивает метка 6.3L.4, недетерминирован в самом коде."
+    echo "  Агент не тронут, стор не очищен — прогон не начат."
+    exit 1
+fi
+
 echo "--- самопроверка пробы 6.3.7 (до прогона) ---"
 if ! bash "$SETUP/wave6.3-probe-selftest.sh"; then
     echo "СТОП ДО ПРОГОНА: логика класса пробы слепых зон 6.3.7 не проходит свои сценарии (№356)."
@@ -1470,6 +1484,177 @@ else
     esac
 fi
 # <<< W63RID-EMITTERS-END
+
+# >>> W63L-EMITTERS-START
+# Волна 6.3.L (сбор долга куста перед TLS): четыре метки, чьи величины живут
+# в API/метриках агента, а не в контролях. 6.3L.4 и 6.3L.5 выносятся
+# wave6.3-controls.sh — там, где лежат их числа.
+echo "=== ВОЛНА 6.3.L: третий класс потребителей rule_id — тот, что аналитик трогает РУКАМИ ==="
+
+# ── 6.3L.1 (№413): аналитик может сузить ПЕРЕИМЕНОВАННЫЙ алерт. Имя берётся
+#    не из головы, а из живой серии ebpf_guard_alert_rule_id_renamed_total
+#    ЭТОГО прогона — обратный индекс резолвера живёт В ПРОЦЕССЕ агента
+#    ([[rename-index-lives-in-process.md]]), и имя из прошлого прогона дало бы
+#    404 законно, то есть ложный ПРОВАЛ. Persist НЕ просится: метка про то,
+#    что аппарат отвечает и называет базовое правило, а не про запись в
+#    оверлей — писать исключение в боевой конфиг внутри замера значит менять
+#    прибор во время замера.
+echo "--- 6.3L.1: POST исключения с ПЕРЕИМЕНОВАННЫМ rule_id не отвечает 404 (№413) ---"
+_w63l_metrics=$(curl -s --max-time 30 -H "Authorization: Bearer $_w63r_token" "$_w63r_api/metrics" 2>/dev/null)
+_w63l_renamed_name=$(printf '%s' "${_w63l_metrics:-}" | awk '
+    /^ebpf_guard_alert_rule_id_renamed_total\{/ && $NF+0 > 0 {
+        if (match($0, /[,{]rule_id="[^"]*"/)) print substr($0, RSTART+10, RLENGTH-11)
+    }' | head -1)
+_w63l_base_of=$(printf '%s' "${_w63l_metrics:-}" | awk -v r="${_w63l_renamed_name:-}" '
+    /^ebpf_guard_alert_rule_id_renamed_total\{/ && $NF+0 > 0 {
+        rid = ""; base = ""
+        if (match($0, /[,{]rule_id="[^"]*"/)) rid = substr($0, RSTART+10, RLENGTH-11)
+        if (match($0, /base_rule_id="[^"]*"/)) base = substr($0, RSTART+14, RLENGTH-15)
+        if (rid == r) print base
+    }' | tr '\n' ' ')
+if [ -z "${_w63l_renamed_name:-}" ]; then
+    echo "НЕИЗМЕРИМ: 6.3L.1 НЕИЗМЕРИМ (класс НАЗВАН: за прогон Rego не переименовал ни одного алерта — серия alert_rule_id_renamed_total пуста) — подавать в API нечего, и 404 на выдуманное имя был бы законным, а не находкой"
+else
+    echo "  переименованное имя этого прогона: ${_w63l_renamed_name} (базовые: ${_w63l_base_of:-?})"
+    _w63l_body=$(printf '{"rule_id":"%s","name":"w63l-probe","comm":"w63l-nonexistent-comm","persist":false}' "$_w63l_renamed_name")
+    _w63l_code=$(curl -s -o "$ART/w63l1-response.json" -w '%{http_code}' --max-time 30 \
+        -X POST -H "Authorization: Bearer $_w63r_token" -H 'Content-Type: application/json' \
+        -d "$_w63l_body" "$_w63r_api/api/v1/tuning/exceptions" 2>/dev/null)
+    echo "  код ответа: ${_w63l_code:-(нет ответа)}"
+    [ -s "$ART/w63l1-response.json" ] && head -c 400 "$ART/w63l1-response.json" | sed 's/^/    /'
+    echo
+    if [ "${_w63l_code:-000}" = "404" ]; then
+        echo "FAIL: 6.3L.1 ПРОВАЛЕН (№413 жив): API исключений ответило 404 на имя «${_w63l_renamed_name}», которое агент сам же и показывает аналитику — аппарат сужения шума недоступен для всего, что трогает Rego"
+    elif [ "${_w63l_code:-000}" != "200" ]; then
+        echo "НЕИЗМЕРИМ: 6.3L.1 НЕИЗМЕРИМ (класс НАЗВАН: код ответа ${_w63l_code:-нет} — не 200 и не 404) — ответ не про резолв имени (роль токена/формат тела/сеть), и судить по нему №413 нельзя"
+    else
+        _w63l_got_base=0
+        for _w63l_b in ${_w63l_base_of:-}; do
+            grep -q "$_w63l_b" "$ART/w63l1-response.json" 2>/dev/null && _w63l_got_base=$(( _w63l_got_base + 1 ))
+        done
+        if [ "$_w63l_got_base" -lt 1 ]; then
+            echo "FAIL: 6.3L.1 ПРОВАЛЕН: ответ 200, но в сгенерированном оверлее нет НИ ОДНОГО базового правила (${_w63l_base_of:-?}) — имя резолвится во что-то, чего не существует в rules/*.yaml, и исключение не применится ни к чему"
+        else
+            echo "OK: 6.3L.1 ДОСТИГНУТО: исключение по переименованному имени «${_w63l_renamed_name}» сгенерировано на ${_w63l_got_base} базовых правил (${_w63l_base_of}) — аппарат сужения доступен для переименованных алертов"
+        fi
+    fi
+fi
+
+# ── 6.3L.2 (№414 + №420): сайленс заводится ОДНИМ (базовым) именем и не
+#    расширяется молча. До ревизии 21.09.2026 у AlertSilencer не было НИ
+#    ОДНОЙ точки входа (ни хендлера, ни вызова из main.go), и метка могла
+#    вынести только НЕИЗМЕРИМ — то есть критерий выхода волны был недостижим
+#    по построению ([[verdict-line-that-can-only-say-unmeasurable]]). Точка
+#    входа заведена (POST /api/v1/alerts/silence), и метка снимается двумя
+#    подачами: базовым именем (обязано резолвиться в себя) и именем Rego
+#    (обязано резолвиться в СВОИ базовые правила и НАЗВАТЬ их в ответе).
+#    Окно берётся коротким (5s) и снимается DELETE — измеритель не вправе
+#    оставить после себя подавляющий слой в боевом конфиге.
+echo "--- 6.3L.2: сайленс заводится базовым именем и называет каждый ключ (№414/№420) ---"
+_w63l_base_probe=$(printf '%s' "${_w63l_base_of:-}" | awk '{print $1}')
+if [ -z "${_w63l_base_probe:-}" ]; then
+    echo "НЕИЗМЕРИМ: 6.3L.2 НЕИЗМЕРИМ (класс НАЗВАН: за прогон Rego не переименовал ни одного алерта) — базового имени, про которое известно, что оно живое, у метки нет; выдуманное имя дало бы законный 404, а не вердикт"
+else
+    _w63l_sil_code=$(curl -s -o "$ART/w63l2-base.json" -w '%{http_code}' --max-time 20 \
+        -X POST -H "Authorization: Bearer $_w63r_token" -H 'Content-Type: application/json' \
+        -d "$(printf '{"rule_id":"%s","severity":"warning","duration":"5s","reason":"w63l2-probe"}' "$_w63l_base_probe")" \
+        "$_w63r_api/api/v1/alerts/silence" 2>/dev/null)
+    _w63l_sil_rego_code=$(curl -s -o "$ART/w63l2-rego.json" -w '%{http_code}' --max-time 20 \
+        -X POST -H "Authorization: Bearer $_w63r_token" -H 'Content-Type: application/json' \
+        -d "$(printf '{"rule_id":"%s","severity":"warning","duration":"5s","reason":"w63l2-probe"}' "${_w63l_renamed_name:-$_w63l_base_probe}")" \
+        "$_w63r_api/api/v1/alerts/silence" 2>/dev/null)
+    echo "  POST по БАЗОВОМУ имени ($_w63l_base_probe) → ${_w63l_sil_code:-нет}; ответ: $(head -c 200 "$ART/w63l2-base.json" 2>/dev/null)"
+    echo "  POST по имени Rego (${_w63l_renamed_name:-?}) → ${_w63l_sil_rego_code:-нет}; ответ: $(head -c 200 "$ART/w63l2-rego.json" 2>/dev/null)"
+    _w63l_keys_named=$(grep -c '"keys"' "$ART/w63l2-rego.json" 2>/dev/null || true)
+    _w63l_base_in_keys=0
+    for _w63l_b in ${_w63l_base_of:-}; do
+        grep -q "\"$_w63l_b:" "$ART/w63l2-rego.json" 2>/dev/null && _w63l_base_in_keys=$(( _w63l_base_in_keys + 1 ))
+    done
+    # Снятие окон — безусловно, и ДО вердикта: подавляющий слой, оставленный
+    # измерителем, исказил бы всё, что печатается после него.
+    for _w63l_b in $_w63l_base_probe ${_w63l_base_of:-}; do
+        curl -s -o /dev/null --max-time 10 -X DELETE -H "Authorization: Bearer $_w63r_token" \
+            "$_w63r_api/api/v1/alerts/silence/${_w63l_b}:warning" 2>/dev/null
+    done
+    echo "  окна сняты DELETE по каждому заведённому ключу (измеритель не оставляет подавляющего слоя)"
+    if [ "${_w63l_sil_code:-000}" = "404" ] || [ "${_w63l_sil_rego_code:-000}" = "404" ]; then
+        echo "FAIL: 6.3L.2 ПРОВАЛЕН: точка входа отвечает 404 (базовое ${_w63l_sil_code}, имя Rego ${_w63l_sil_rego_code}) — резолвер сайленса не повторяет логику item 1, и аналитик не может погасить то, что видит"
+    elif [ "${_w63l_sil_code:-000}" = "503" ] || [ "${_w63l_sil_rego_code:-000}" = "503" ]; then
+        echo "НЕИЗМЕРИМ: 6.3L.2 НЕИЗМЕРИМ (класс НАЗВАН: агент отвечает 503 — слой сайленса не подключён в ЭТОМ бинаре, бинарь прогона старше правки №420) — ключ и резолвер проверяются только юнит-тестами"
+    elif [ "${_w63l_sil_code:-000}" != "200" ] || [ "${_w63l_sil_rego_code:-000}" != "200" ]; then
+        echo "НЕИЗМЕРИМ: 6.3L.2 НЕИЗМЕРИМ (класс НАЗВАН: коды ответов ${_w63l_sil_code:-нет}/${_w63l_sil_rego_code:-нет} — не 200, не 404 и не 503) — ответ не про резолв имени (роль токена/формат тела/сеть)"
+    elif [ "${_w63l_keys_named:-0}" -lt 1 ] || [ "$_w63l_base_in_keys" -lt 1 ]; then
+        echo "FAIL: 6.3L.2 ПРОВАЛЕН: ответ 200, но заведённые ключи НЕ названы поимённо (базовых правил имени Rego в ответе: ${_w63l_base_in_keys} из $(printf '%s\n' ${_w63l_base_of:-} | grep -c .)) — расширение сайленса на семью имени осталось молчаливым, ровно вторая половина №414"
+    else
+        echo "OK: 6.3L.2 ДОСТИГНУТО: сайленс заводится и базовым именем ($_w63l_base_probe), и именем Rego (${_w63l_renamed_name}), ключи строятся на БАЗОВЫХ именах и перечислены в ответе поимённо (${_w63l_base_in_keys} из $(printf '%s\n' ${_w63l_base_of:-} | grep -c .)) — ни недоподавления, ни молчаливого переподавления"
+    fi
+fi
+
+# ── 6.3L.3 (№415): агрегация не схлопывает разные базовые правила. Величина
+#    читается из стора: пара алертов с РАЗНЫМИ base_rule_id и ОДНИМ rule_id
+#    обязана лежать РАЗНЫМИ записями, а не одной с count>1.
+echo "--- 6.3L.3: агрегация не объявляет разные базовые правила повторами (№415) ---"
+# Включён ли слой агрегации, видно по самим алертам стора: поле count>1
+# ставит ТОЛЬКО он (types.Alert.Count, omitempty — при выключенной агрегации
+# его нет ни у одного алерта). Отдельной серии /metrics у слоя нет, и
+# выдумывать её здесь нельзя: метка читала бы имя, которого не существует
+# ([[metric-anchor-must-carry-full-series-name]]).
+if [ -z "${_w63r_alerts:-}" ]; then
+    echo "НЕИЗМЕРИМ: 6.3L.3 НЕИЗМЕРИМ (класс НАЗВАН: jq недоступен либо /api/v1/alerts не опросить/не JSON) — пару с одним rule_id и разными base_rule_id искать не в чем"
+else
+    _w63l_pairs=$(printf '%s' "$_w63r_alerts" | jq -r '
+        [.[] | select(.details.base_rule_id != null and .details.base_rule_id != "")]
+        | group_by(.rule_id)
+        | map(select((map(.details.base_rule_id) | unique | length) > 1)
+              | {rule_id: .[0].rule_id, bases: (map(.details.base_rule_id) | unique), n: length})
+        | .[] | "\(.rule_id) <- \(.bases | join(",")) (\(.n) алертов)"' 2>/dev/null)
+    if [ -z "${_w63l_pairs:-}" ]; then
+        echo "НЕИЗМЕРИМ: 6.3L.3 НЕИЗМЕРИМ (класс НАЗВАН: за прогон НЕ нашлось ни одного имени Rego, под которое приехали РАЗНЫЕ базовые правила) — схлопывать было нечего, и ноль здесь про нагрузку прогона, а не про агрегацию"
+    else
+        echo "  имена Rego, делимые несколькими базовыми правилами:"
+        printf '%s\n' "$_w63l_pairs" | sed 's/^/    /'
+        # Свёрнутый алерт — это count>1 (types.Alert.Count, ставит ТОЛЬКО
+        # агрегатор). Ищется он среди тех самых пар: разные base_rule_id,
+        # одно имя Rego.
+        _w63l_collapsed=$(printf '%s' "$_w63r_alerts" | jq -r '
+            [.[] | select(.details.base_rule_id != null and .details.base_rule_id != "")]
+            | group_by(.rule_id)
+            | map(select((map(.details.base_rule_id) | unique | length) > 1))
+            | flatten | map(select((.count // 1) > 1)) | length' 2>/dev/null)
+        _w63l_agg_any=$(printf '%s' "$_w63r_alerts" | jq -r '[.[] | select((.count // 1) > 1)] | length' 2>/dev/null)
+        echo "  алертов со свёрткой (count>1) за прогон всего: ${_w63l_agg_any:-0}; из них на именах с несколькими базовыми правилами: ${_w63l_collapsed:-0}"
+        if [ "${_w63l_agg_any:-0}" -lt 1 ]; then
+            echo "OK: 6.3L.3 ДОСТИГНУТО (слой агрегации не свернул за прогон НИ ОДНОГО алерта — correlator.alert_aggregation выключен либо повторов не было): разные базовые правила приехали в стор ОТДЕЛЬНЫМИ записями под одним именем Rego; ключ агрегации переведён на base_rule_id и покрыт регрессией TestAlertAggregator_DifferentBaseRuleIDsDoNotCollapse. Живьём с ВКЛЮЧЁННОЙ агрегацией величина не снята — это named-класс, а не молчание"
+        elif [ "${_w63l_collapsed:-0}" -gt 0 ]; then
+            echo "FAIL: 6.3L.3 ПРОВАЛЕН (№415 жив): ${_w63l_collapsed} алертов с РАЗНЫМИ base_rule_id под одним именем Rego несут aggregated_count>1 — продукт объявляет разные детекты повторами одного"
+        else
+            echo "OK: 6.3L.3 ДОСТИГНУТО: слой агрегации включён, имена Rego с несколькими базовыми правилами за прогон есть, и ни один такой алерт не свёрнут в повтор (aggregated_count>1: 0)"
+        fi
+    fi
+fi
+
+# ── 6.3L.6 (item 4/№416): ось {event_type="tls"} отвечает ДО волны 6.4.
+#    Серия под флагом exporter.volume_by_source — отсутствие серии ВООБЩЕ и
+#    отсутствие ЛЕЙБЛА tls при живой серии это РАЗНЫЕ классы (№410,
+#    [[gated-metric-cannot-carry-product-verdict]]), и вердикт обязан их
+#    различать, иначе 6.4 войдёт в приборный ноль вслепую.
+echo "--- 6.3L.6: ось {event_type=\"tls\"} отвечает ДО волны 6.4 (item 4, №416) ---"
+_w63l_axis_series=$(printf '%s' "${_w63l_metrics:-}" | grep -c '^ebpf_guard_alert_volume_by_event_type_total' || true)
+_w63l_axis_tls=$(printf '%s' "${_w63l_metrics:-}" | awk '/^ebpf_guard_alert_volume_by_event_type_total\{/ && /event_type="tls"/ { s += $NF } END { printf "%d", s+0 }')
+_w63l_axis_any=$(printf '%s' "${_w63l_metrics:-}" | awk '/^ebpf_guard_alert_volume_by_event_type_total\{/ { s += $NF } END { printf "%d", s+0 }')
+# Полное имя серии обязательно ([[metric-anchor-must-carry-full-series-name]]):
+# ebpf_guard_collector_up{collector="tls"} — 1/0, а ОТСУТСТВИЕ строки это
+# третий исход («коллектор не зарегистрирован вовсе»), а не ноль.
+_w63l_tls_enabled=$(printf '%s' "${_w63l_metrics:-}" | awk '/^ebpf_guard_collector_up\{/ && /collector="tls"/ { print "collector_up=" $NF; f=1 } END { if (!f) print "серии collector_up{collector=\"tls\"} нет — коллектор не зарегистрирован" }' | head -1)
+echo "  серий оси event_type: ${_w63l_axis_series:-0}; сумма по оси: ${_w63l_axis_any:-0}; из них {event_type=tls}: ${_w63l_axis_tls:-0}; коллектор tls: ${_w63l_tls_enabled:-?}"
+if [ "${_w63l_axis_series:-0}" -lt 1 ]; then
+    echo "НЕИЗМЕРИМ: 6.3L.6 НЕИЗМЕРИМ (класс НАЗВАН: серии ebpf_guard_alert_volume_by_event_type_total НЕТ ВООБЩЕ — флаг exporter.volume_by_source выключен на этом прогоне) — это отсутствие ПРИБОРА, а не ноль продукта (№410); волна 6.4 обязана включить флаг ПЕРВЫМ шагом"
+elif [ "${_w63l_axis_tls:-0}" -gt 0 ]; then
+    echo "OK: 6.3L.6 ДОСТИГНУТО: ось приняла лейбл tls — {event_type=\"tls\"} = ${_w63l_axis_tls} за прогон; объём TLS волны 6.4 читается ЭТОЙ осью, а не манифестом rule_id (утверждение №327 снято item 4)"
+else
+    echo "НЕИЗМЕРИМ: 6.3L.6 НЕИЗМЕРИМ (класс НАЗВАН: ось ЖИВА (${_w63l_axis_series} серий, сумма ${_w63l_axis_any}), но лейбла tls на ней нет — TLS-коллектор молчит: ${_w63l_tls_enabled:-состояние неизвестно}). Это вход волны 6.4 (№379…№382, [[tls-collector-dead-on-stock-ubuntu]]), а не провал 6.3.L: ось проверена живьём на ДРУГИХ типах событий, и приборного нуля в 6.4 больше не будет"
+fi
+# <<< W63L-EMITTERS-END
 
 # Критерий 6.2.6.4: непустота И покрытие окна. Сторож живёт В ПАЙПЛАЙНЕ, а не
 # в глазах читателя архива через сутки: пустой журнал = прогон объявляет себя

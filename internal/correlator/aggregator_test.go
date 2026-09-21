@@ -79,6 +79,25 @@ func TestAlertAggregator_DistinctKeysDoNotCollapse(t *testing.T) {
 	assert.Len(t, out, len(cases), "each distinct key must be forwarded on first occurrence")
 }
 
+// TestAlertAggregator_DifferentBaseRuleIDsDoNotCollapse is the regression
+// test for wave 6.3.L item 3 (№415): two different base rules renamed by
+// Rego to the same reported RuleID (e.g. dns_dga_ngram and
+// dns_dga_high_entropy both -> "dga_domain") must land in different
+// aggregation buckets — the product must not report them as repeats of one
+// detect.
+func TestAlertAggregator_DifferentBaseRuleIDsDoNotCollapse(t *testing.T) {
+	agg := NewAlertAggregator(AlertAggregationConfig{Enabled: true, Window: time.Minute})
+	now := time.Now()
+
+	a := testAlert("dga_domain", "coredns", "default", "pod-1")
+	a.Details = map[string]interface{}{types.BaseRuleIDDetailsKey: "dns_dga_ngram"}
+	b := testAlert("dga_domain", "coredns", "default", "pod-1")
+	b.Details = map[string]interface{}{types.BaseRuleIDDetailsKey: "dns_dga_high_entropy"}
+
+	out := agg.Ingest([]types.Alert{a, b}, now)
+	assert.Len(t, out, 2, "different base_rule_id must forward as distinct detects, even under the same reported RuleID")
+}
+
 func TestAlertAggregator_NewWindowAfterExpiry(t *testing.T) {
 	agg := NewAlertAggregator(AlertAggregationConfig{Enabled: true, Window: time.Second})
 	now := time.Now()

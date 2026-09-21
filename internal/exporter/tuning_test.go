@@ -212,4 +212,134 @@ func TestHandleTuningExceptions(t *testing.T) {
 		srv.handleTuningExceptions(w, req)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
+
+	// №413 (wave 6.3.L, item 1): the analyst only ever sees the Rego-renamed
+	// name, which never appears in rules/*.yaml — resolving it through the
+	// reverse rename index is what makes the exception API usable at all for
+	// a renamed alert.
+	t.Run("renamed rule_id resolves to its base rule via rename index", func(t *testing.T) {
+		srv := newTestServer()
+		srv.SetRulesProvider(rulesProviderWithSyscallRule("w63l1_base"))
+		RecordAlertRuleIDRename("w63l1_base", "w63l1_renamed")
+
+		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "w63l1_renamed", Name: "fp_test", Comm: "bash"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.handleTuningExceptions(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp TuningExceptionResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Contains(t, resp.YAML, "w63l1_base")
+	})
+
+	// A renamed name shared by several base rules (dga_domain live pattern)
+	// generates an exception against every one of them, not just the first.
+	t.Run("renamed rule_id shared by several base rules resolves to all of them", func(t *testing.T) {
+		srv := newTestServer()
+		srv.SetRulesProvider(func() []correlator.Rule {
+			return []correlator.Rule{
+				{ID: "w63l1_base_a", EventType: types.EventSyscall},
+				{ID: "w63l1_base_b", EventType: types.EventSyscall},
+			}
+		})
+		RecordAlertRuleIDRename("w63l1_base_a", "w63l1_shared")
+		RecordAlertRuleIDRename("w63l1_base_b", "w63l1_shared")
+
+		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "w63l1_shared", Name: "fp_test", Comm: "bash"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.handleTuningExceptions(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp TuningExceptionResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		var overlay correlator.TuningOverlay
+		require.NoError(t, yaml.Unmarshal([]byte(resp.YAML), &overlay))
+		require.Len(t, overlay.Overlays, 2)
+		gotIDs := []string{overlay.Overlays[0].RuleID, overlay.Overlays[1].RuleID}
+		assert.ElementsMatch(t, []string{"w63l1_base_a", "w63l1_base_b"}, gotIDs)
+	})
+
+	// Ревизия волны 6.3.L: два пространства имён (YAML-id и имена решений
+	// Rego) не разделены по построению — имя, которое одновременно и
+	// загруженное правило, и цель переименования, обязано разрешаться в ОБА,
+	// иначе базовое правило, которое реально сработало, останется нетронутым.
+	t.Run("name that is both a loaded rule and a rename target resolves to both", func(t *testing.T) {
+		srv := newTestServer()
+		srv.SetRulesProvider(func() []correlator.Rule {
+			return []correlator.Rule{
+				{ID: "w63l1_collide", EventType: types.EventSyscall},
+				{ID: "w63l1_collide_base", EventType: types.EventSyscall},
+			}
+		})
+		RecordAlertRuleIDRename("w63l1_collide_base", "w63l1_collide")
+
+		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "w63l1_collide", Name: "fp_test", Comm: "bash"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.handleTuningExceptions(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp TuningExceptionResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		var overlay correlator.TuningOverlay
+		require.NoError(t, yaml.Unmarshal([]byte(resp.YAML), &overlay))
+		require.Len(t, overlay.Overlays, 2)
+		assert.ElementsMatch(t, []string{"w63l1_collide", "w63l1_collide_base"},
+			[]string{overlay.Overlays[0].RuleID, overlay.Overlays[1].RuleID})
+	})
+
+	// Персист разделённого имени — ОДНА запись файла на весь запрос: оба
+	// базовых правила оказываются в оверлее, перезагрузка правил зовётся один
+	// раз, половинчатого применения не бывает.
+	t.Run("persist of a split name writes every base rule in one pass", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "local-tuning.yaml")
+
+		srv := newTestServer()
+		srv.SetRulesProvider(func() []correlator.Rule {
+			return []correlator.Rule{
+				{ID: "w63l1_p_a", EventType: types.EventSyscall},
+				{ID: "w63l1_p_b", EventType: types.EventSyscall},
+			}
+		})
+		srv.SetLocalTuningPath(path)
+		reloads := 0
+		srv.SetRulesReloadHandler(func() error { reloads++; return nil })
+
+		RecordAlertRuleIDRename("w63l1_p_a", "w63l1_p_shared")
+		RecordAlertRuleIDRename("w63l1_p_b", "w63l1_p_shared")
+
+		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "w63l1_p_shared", Name: "fp_test", Comm: "bash", Persist: true})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.handleTuningExceptions(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp TuningExceptionResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.True(t, resp.Persisted)
+		assert.Equal(t, 1, reloads, "одна перезагрузка правил на запрос, а не по одной на каждое базовое правило")
+
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		var overlay correlator.TuningOverlay
+		require.NoError(t, yaml.Unmarshal(data, &overlay))
+		require.Len(t, overlay.Overlays, 2)
+		assert.ElementsMatch(t, []string{"w63l1_p_a", "w63l1_p_b"},
+			[]string{overlay.Overlays[0].RuleID, overlay.Overlays[1].RuleID})
+	})
+
+	// A name unknown as either a loaded rule id or a rename target still 404s.
+	t.Run("rule_id unknown as both base and renamed name 404s", func(t *testing.T) {
+		srv := newTestServer()
+		srv.SetRulesProvider(rulesProviderWithSyscallRule("other_rule"))
+		body, _ := json.Marshal(TuningExceptionRequest{RuleID: "w63l1_unknown", Name: "n", Comm: "c"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tuning/exceptions", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.handleTuningExceptions(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Contains(t, w.Body.String(), "unknown both as a loaded rule id and as a Rego-renamed name")
+	})
 }

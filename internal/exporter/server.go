@@ -107,6 +107,10 @@ type Server struct {
 	// "save exception" requests cannot race and drop one another's entry.
 	tuningWriteMu sync.Mutex
 
+	// alertSilencer holds operator-created silence windows consulted on the
+	// alert dispatch path (wave 6.3.L, №420). nil means no silencing layer.
+	alertSilencer *AlertSilencer
+
 	// agentHealthFn supplies the agent-health snapshot (CPU pressure,
 	// sampling rates, drift-learning progress, hardware profile) surfaced by
 	// GET /api/v1/status. Optional; nil means the status response omits it.
@@ -816,4 +820,19 @@ func (s *Server) getHealthStatus() HealthStatus {
 		Status:            statusStr,
 		Collectors:        collectors,
 	}
+}
+
+// SetAlertSilencer attaches the silencer consulted by the dispatch path and
+// driven by POST /api/v1/alerts/silence. Passing nil disables the layer.
+func (s *Server) SetAlertSilencer(sil *AlertSilencer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alertSilencer = sil
+}
+
+// AlertSilencer returns the attached silencer, or nil when none is.
+func (s *Server) AlertSilencer() *AlertSilencer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.alertSilencer
 }

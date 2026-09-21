@@ -525,7 +525,12 @@ func (t *IncidentTracker) SetTrustedUnits(units []string) {
 //
 // Caller must hold at least the read lock.
 func (t *IncidentTracker) isHardEvidence(alert types.Alert) bool {
-	if t.ruleHardEvidence[alert.RuleID] {
+	// BaseRuleID, not RuleID (wave 6.3.L, №419): ruleHardEvidence is keyed on
+	// YAML rule ids, and by the time an alert reaches the tracker Rego may have
+	// renamed it to a name no rules/*.yaml holds — the lookup would then miss
+	// silently and hard evidence would stop being hard. Same axis as the
+	// silencer (№414) and the aggregator (№415).
+	if t.ruleHardEvidence[alert.BaseRuleID()] {
 		return true
 	}
 	if alert.PID == 0 {
@@ -736,7 +741,10 @@ const k8sKubectlAPIServerExecRuleID = "k8s_kubectl_apiserver_exec"
 // visible), never toward an attacker's short-lived process winning the
 // readlink race and being exempted from promotion by exhaustion.
 func isK3sControlPlaneNetworkSignal(alert types.Alert) bool {
-	if alert.RuleID != k8sKubectlAPIServerExecRuleID || alert.Comm != "k3s-server" {
+	// BaseRuleID (wave 6.3.L, №419): the gate names a YAML rule id, and a Rego
+	// decision that renames this alert would otherwise turn the exemption off
+	// without a word — re-opening №262 the moment the Rego layer is enabled.
+	if alert.BaseRuleID() != k8sKubectlAPIServerExecRuleID || alert.Comm != "k3s-server" {
 		return false
 	}
 	exe := resolveExePath(alert.PID, exePathFieldSelf)
@@ -1455,7 +1463,14 @@ func (t *IncidentTracker) Add(alert types.Alert) {
 		if inc.ScoringRuleIDs == nil {
 			inc.ScoringRuleIDs = make(map[string]struct{}, 4)
 		}
-		inc.ScoringRuleIDs[alert.RuleID] = struct{}{}
+		// BaseRuleID (wave 6.3.L, №419): ScoringRuleIDs feeds uniqueRules,
+		// the cluster de-duplication (ruleClusterKeys) and extractTactics —
+		// all three keyed on YAML rule ids. Under the renamed name the
+		// cluster/tactic lookups miss, and nine base rules sharing one Rego
+		// name (dga_domain) collapse into a single "unique rule", suppressing
+		// promotion. inc.RuleIDs below deliberately keeps the reported
+		// (possibly renamed) name — decision (b) of wave 6.3-rid.
+		inc.ScoringRuleIDs[alert.BaseRuleID()] = struct{}{}
 		if inc.ScoringSourceEvents == nil {
 			inc.ScoringSourceEvents = make(map[uint64]struct{}, 4)
 		}

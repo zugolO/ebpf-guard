@@ -131,12 +131,19 @@ func (a *AlertAggregator) Reap(now time.Time) []types.Alert {
 	return out
 }
 
-// aggregationKey builds the composite aggregation key: rule_id + comm +
+// aggregationKey builds the composite aggregation key: base_rule_id + comm +
 // normalized path prefix + namespace + pod. Distinct keys never collapse
 // into one another.
+//
+// Keyed on BaseRuleID(), not RuleID (wave 6.3.L, item 3, №415): Ingest runs
+// after evaluateRegoPolicies, so two different base rules renamed to the same
+// Rego decision name (e.g. dns_dga_ngram and dns_dga_high_entropy both -> "dga_domain")
+// would otherwise collapse into one aggregation bucket and be reported as
+// repeats of a single detect. The reported RuleID on the folded alert is left
+// untouched — only the key changes, per 6.3-rid decision (b).
 func aggregationKey(alert types.Alert) string {
 	var sb strings.Builder
-	sb.WriteString(alert.RuleID)
+	sb.WriteString(alert.BaseRuleID())
 	sb.WriteByte('|')
 	sb.WriteString(alert.Comm)
 	sb.WriteByte('|')

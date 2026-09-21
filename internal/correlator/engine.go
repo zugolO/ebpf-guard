@@ -1414,6 +1414,27 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 				}
 			}
 
+			// Group alerts into incidents — wave 6.3.L, №418. ingestWithAD
+			// returns regoQueued=true the moment a task lands on regoQueue and
+			// therefore SKIPS its own incidentTracker.Add loop; until the Rego
+			// layer was actually wired (wave 6.3-up, №398/№399) every alert took
+			// the fall-through path and the gap was invisible. With Rego live,
+			// this worker is the ONLY place the alerts still exist, so without
+			// this loop the whole incident layer — promotion, attack verdicts,
+			// process_chain — receives nothing at all. Measured: archives
+			// collect-6.3-up2 and collect-6.3-rid carry no ebpf_guard_incidents_total
+			// series whatsoever, while collect-6.3-run7 (same node, Rego not yet
+			// wired) has suspicious=28/attack=3.
+			//
+			// Tracking here rather than before the queue keeps the pre-existing
+			// ordering contract: incidents are built from alerts that survived
+			// analyst feedback suppression, exactly as on the synchronous path.
+			if ce.incidentTracker != nil {
+				for i := range enriched {
+					ce.incidentTracker.Add(enriched[i])
+				}
+			}
+
 			localPending = append(localPending, enriched...)
 			if len(localPending) >= localFlushBatch {
 				ce.flushPending(&localPending)

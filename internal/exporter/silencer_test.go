@@ -89,12 +89,45 @@ func TestAlertSilencer_Cleanup(t *testing.T) {
 
 func TestAlertSilencer_makeKey(t *testing.T) {
 	silencer := NewAlertSilencer()
-	
+
 	alert := types.Alert{
 		RuleID:   "rule_001",
 		Severity: types.SeverityCritical,
 	}
-	
+
 	key := silencer.makeKey(alert)
 	assert.Equal(t, "rule_001:critical", key)
+}
+
+// №414 (wave 6.3.L, item 2): a silence created against the base rule that
+// actually fired must still gate the alert once Rego has renamed it, since
+// the base rule_id is the only identity the analyst can name for a rule that
+// does not exist under its Rego-visible name in rules/*.yaml.
+func TestAlertSilencer_SilenceOnBaseRuleGatesRenamedAlert(t *testing.T) {
+	silencer := NewAlertSilencer()
+
+	silencer.Silence("dns_dga_ngram:critical", 1*time.Hour, "known false positive")
+
+	renamed := types.Alert{
+		RuleID:   "dga_domain",
+		Severity: types.SeverityCritical,
+		Details:  map[string]any{types.BaseRuleIDDetailsKey: "dns_dga_ngram"},
+	}
+	assert.True(t, silencer.IsSilenced(renamed))
+}
+
+// The symmetric failure mode: a silence keyed on the Rego-visible name must
+// NOT silently expand to gate every base rule that happens to share it — two
+// base rules renaming to the same name are independent detects.
+func TestAlertSilencer_SilenceOnRenamedNameDoesNotExpandToSiblingBaseRules(t *testing.T) {
+	silencer := NewAlertSilencer()
+
+	silencer.Silence("dga_domain:critical", 1*time.Hour, "attempt to silence by dashboard name")
+
+	fromOtherBase := types.Alert{
+		RuleID:   "dga_domain",
+		Severity: types.SeverityCritical,
+		Details:  map[string]any{types.BaseRuleIDDetailsKey: "dns_dga_high_entropy"},
+	}
+	assert.False(t, silencer.IsSilenced(fromOtherBase))
 }

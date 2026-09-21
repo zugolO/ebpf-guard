@@ -2,6 +2,7 @@
 package exporter
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -173,6 +174,22 @@ var (
 		prometheus.CounterOpts{
 			Name: "ebpf_guard_alerts_filtered_total",
 			Help: "Alerts excluded from ebpf_guard_alerts_total and the alert store by store.min_severity. The rule still fired; this is the suppressed volume, kept visible so filtering cannot be mistaken for lost detection.",
+		},
+		[]string{"rule_id", "severity"},
+	)
+
+	// AlertsSilenced counts alerts held out of the forwarding path (store,
+	// notifications, Alertmanager) by an operator silence window (wave 6.3.L,
+	// №420). Labelled by rule_id and severity for the same reason
+	// AlertsFiltered is: a suppression layer that cannot be read is
+	// indistinguishable from detection stopping, and this is the FIFTH such
+	// layer after dedup, the rate limiter, feedback and min_severity. The
+	// alert is still counted in ebpf_guard_alerts_total — silencing changes
+	// what is delivered, never what was detected.
+	AlertsSilenced = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_alerts_silenced_total",
+			Help: "Alerts withheld from forwarding by an operator silence window. The rule still fired and is still counted in ebpf_guard_alerts_total; this is the silenced volume, kept visible so a silence cannot be mistaken for lost detection.",
 		},
 		[]string{"rule_id", "severity"},
 	)
@@ -663,6 +680,13 @@ func RecordAlertFiltered(ruleID, severity string) {
 	AlertsFiltered.WithLabelValues(ruleID, severity).Inc()
 }
 
+// RecordAlertSilenced counts one alert withheld by a silence window. rule_id is
+// the REPORTED (possibly Rego-renamed) name, matching every other reporting
+// series; the window itself is keyed on the base name (see AlertSilencer.makeKey).
+func RecordAlertSilenced(ruleID, severity string) {
+	AlertsSilenced.WithLabelValues(ruleID, severity).Inc()
+}
+
 // RecordAlertVolumeBySource increments ebpf_guard_alert_volume_by_source_total
 // for rule_id and comm. comm is attacker-controlled and sanitized the same way
 // as ProfilerAnomalyScore's comm label (arbitrary bytes from the kernel would
@@ -693,8 +717,52 @@ func RecordAlertVolumeByEventType(eventType, ruleID string) {
 // only invoke it when the two actually differ (types.Alert.BaseRuleID returns
 // RuleID itself when Rego never renamed the alert) — an equal pair would create
 // one series per rule for no information (wave 6.3-rid, item 2, метка 6.3r.2).
+//
+// It also feeds renameIndex, the in-process reverse index of the same pairs
+// (wave 6.3.L, items 1/2, №413/№414): the Prometheus series is write-only from
+// the product's own perspective, but tuning.go and silencer.go need to answer
+// "which base rule(s) does this Rego-visible name come from" at request time,
+// not at scrape time.
 func RecordAlertRuleIDRename(baseRuleID, ruleID string) {
 	AlertRuleIDRenamed.WithLabelValues(baseRuleID, ruleID).Inc()
+
+	renameIndexMu.Lock()
+	set, ok := renameIndex[ruleID]
+	if !ok {
+		set = make(map[string]struct{}, 1)
+		renameIndex[ruleID] = set
+	}
+	set[baseRuleID] = struct{}{}
+	renameIndexMu.Unlock()
+}
+
+// renameIndex maps a Rego-renamed rule_id to the set of pre-Rego base rule_ids
+// observed to have been renamed to it. Populated live from RecordAlertRuleIDRename,
+// so it only knows about renames this process has actually seen — the same
+// scope as the Prometheus series it mirrors.
+var (
+	renameIndexMu sync.RWMutex
+	renameIndex   = make(map[string]map[string]struct{})
+)
+
+// BaseRuleIDsForRenamed returns the base rule_ids this process has observed
+// Rego renaming to ruleID, sorted for determinism. Empty when ruleID has never
+// been seen as a rename target (including when it is itself a base id that was
+// never renamed — callers distinguish that case by checking the loaded ruleset
+// first, as tuning.go does).
+func BaseRuleIDsForRenamed(ruleID string) []string {
+	renameIndexMu.RLock()
+	defer renameIndexMu.RUnlock()
+	set, ok := renameIndex[ruleID]
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for base := range set {
+		out = append(out, base)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // FilterAlertsForIntake splits alerts into those admitted to

@@ -1463,6 +1463,11 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 				for i := range enriched {
 					ce.incidentTracker.Add(enriched[i])
 				}
+				incidentIngestTotal.WithLabelValues(incidentIngestAccepted).Add(float64(len(enriched)))
+			} else if ce.incidentTracker != nil {
+				// №428: выключенный слой обязан быть ВИДЕН отдельной величиной,
+				// иначе «тумблер сработал» и «нагрузки не было» неразличимы.
+				incidentIngestTotal.WithLabelValues(incidentIngestGated).Add(float64(len(enriched)))
 			}
 
 			localPending = append(localPending, enriched...)
@@ -2441,6 +2446,10 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 		for i := range alerts {
 			ce.incidentTracker.Add(alerts[i])
 		}
+		incidentIngestTotal.WithLabelValues(incidentIngestAccepted).Add(float64(len(alerts)))
+	} else {
+		// №428: см. ту же ветку на асинхронном пути выше.
+		incidentIngestTotal.WithLabelValues(incidentIngestGated).Add(float64(len(alerts)))
 	}
 
 	// Return alerts to caller for per-worker buffered flush (P1-4).

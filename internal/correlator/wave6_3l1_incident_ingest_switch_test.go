@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -71,5 +72,31 @@ func TestWave6_3L1_IncidentIngestSwitch(t *testing.T) {
 		ce.SetIncidentIngestEnabled(true)
 		require.Len(t, ce.Ingest(context.Background(), ev), 1)
 		assert.Len(t, ce.IncidentTracker().GetAll("", "", 0), 1, "окно A: слой возвращается без рестарта")
+	})
+
+	// №428: A/B прогона collect-6.3-L1 прошёл БЕЗ положительного контроля
+	// тумблера — incidents_total стояла на 4 во всех шести снимках, то есть
+	// ни одно окно не предъявило, что переключение вообще что-то делает.
+	// Сторож — счётчик подачи с ОБЕИМИ ветками: «оба нуля» обязаны читаться
+	// как отсутствие нагрузки, а не как работа тумблера.
+	t.Run("both outcomes are counted so an empty window cannot pass for a working switch", func(t *testing.T) {
+		ce := newEngine(false)
+		defer ce.Close()
+
+		read := func(outcome string) float64 {
+			return testutil.ToFloat64(incidentIngestTotal.WithLabelValues(outcome))
+		}
+		on0, gated0 := read(incidentIngestAccepted), read(incidentIngestGated)
+
+		require.Len(t, ce.Ingest(context.Background(), ev), 1)
+		onA, gatedA := read(incidentIngestAccepted), read(incidentIngestGated)
+		assert.Greater(t, onA, on0, "окно A: включённый слой обязан двигать ingested")
+		assert.Equal(t, gated0, gatedA, "окно A: gated стоит")
+
+		ce.SetIncidentIngestEnabled(false)
+		require.Len(t, ce.Ingest(context.Background(), ev), 1)
+		onB, gatedB := read(incidentIngestAccepted), read(incidentIngestGated)
+		assert.Equal(t, onA, onB, "окно B: выключенный слой НЕ двигает ingested")
+		assert.Greater(t, gatedB, gatedA, "окно B: gated обязан вырасти — иначе окно было пустым, а не выключенным")
 	})
 }

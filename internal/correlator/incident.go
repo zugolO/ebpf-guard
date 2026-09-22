@@ -313,6 +313,33 @@ func init() {
 	}
 }
 
+// Исходы ПОДАЧИ алерта в инцидентный слой (№428, волна 6.3.L.1). Тумблер
+// A/B (incidentIngestEnabled) гасит ровно две точки вызова IncidentTracker.Add,
+// и до этого счётчика «слой выключен» было неотличимо от «нагрузки не было»:
+// прогон collect-6.3-L1 дал incidents_total=4 во ВСЕХ шести снимках A/B, то
+// есть ни одно окно не предъявило, что тумблер вообще что-то переключает.
+// Обе ветки считаются намеренно: ingested растёт только при включённом слое,
+// gated — только при выключенном, и их сумма есть нагрузка окна. Поэтому
+// «оба нуля» читается как отсутствие подачи, а не как работа тумблера.
+const (
+	incidentIngestAccepted = "ingested" // слой включён: алерт ушёл в IncidentTracker.Add
+	incidentIngestGated    = "gated"    // слой выключен: алерт до Add не дошёл
+)
+
+var incidentIngestTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_incident_ingest_total",
+		Help: "Alerts offered to the incident layer, by outcome (ingested when the layer is on, gated when the A/B switch is off). Their sum is the window's alert load.",
+	},
+	[]string{"outcome"},
+)
+
+func init() {
+	for _, outcome := range []string{incidentIngestAccepted, incidentIngestGated} {
+		incidentIngestTotal.WithLabelValues(outcome)
+	}
+}
+
 // IncidentScoringConfig tunes how incidents are scored and when they are
 // promoted to an "attack" verdict. Weights are per-unit contributions; the
 // scorer applies no hidden multipliers on top of them.

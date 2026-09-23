@@ -1,0 +1,22 @@
+suite: mitre_additional
+rules_path: ../../rules/mitre-additional.yaml
+# Wave 6.4 item 7: offline coverage for the one mitre-additional.yaml rule in
+# the TLS manifest (attacks/tls-rule-ids.txt, plaintext section). Only this
+# rule is in scope here — the rest of mitre-additional.yaml is untouched by
+# wave 6.4 and out of scope for this fixture file.
+tests:
+  - name: "HTTP C2 beacon cookie in TLS fires mitre_http_c2_beacon_pattern"
+    rule_id: mitre_http_c2_beacon_pattern
+    event:
+      type: tls
+      tls:
+        data: "GET /update HTTP/1.1\r\nCookie: SID=1a2b3c4d\r\nHost: cdn.example\r\n"
+    expect: alert
+    expect_severity: warning
+
+  - name: "normal TLS HTTP response does not fire mitre_http_c2_beacon_pattern"
+    event:
+      type: tls
+      tls:
+        data: "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+    expect: no_alert

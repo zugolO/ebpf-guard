@@ -71,6 +71,24 @@ tests:
     expect: alert
     expect_severity: warning
 
+  - name: "SQL error message in TLS fires tls_sql_patterns"
+    rule_id: tls_sql_patterns
+    event:
+      type: tls
+      tls:
+        data: "HTTP/1.1 500 Internal Server Error\r\n\r\nPostgreSQL. ERROR:  syntax error at or near \"SELECT\""
+    expect: alert
+    expect_severity: warning
+
+  - name: "bearer JWT token in TLS fires tls_api_key_exposure"
+    rule_id: tls_api_key_exposure
+    event:
+      type: tls
+      tls:
+        data: "Authorization: bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0\r\n"
+    expect: alert
+    expect_severity: warning
+
   - name: "normal JSON API response does not fire any TLS rule"
     event:
       type: tls

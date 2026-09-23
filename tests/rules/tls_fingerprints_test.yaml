@@ -1,0 +1,106 @@
+suite: tls_fingerprints
+rules_path: ../../rules/tls-fingerprints.yaml
+# Wave 6.4 item 7: offline coverage for the 10 tls_ja3_* rules in the TLS
+# manifest (attacks/tls-rule-ids.txt, ja3 section). This family is fed by
+# collectors.tls_fingerprint (kprobe sendto), a different collector than the
+# plaintext family covered by tls_patterns_test.yaml — see plan.md §6.4,
+# item 4/№381: the ja3 family is out of scope for wave 6.4's A/B measurement
+# (collector reads the wrong syscall), but the rule *condition* logic itself
+# is still exercised here against the real rules/tls-fingerprints.yaml tree.
+tests:
+  - name: "Cobalt Strike default JA3 fires tls_ja3_cobalt_strike_default"
+    rule_id: tls_ja3_cobalt_strike_default
+    event:
+      type: tls
+      tls:
+        ja3: "a0e9f5d64349fb13191bc781f81f42e1"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Cobalt Strike malleable-profile JA3 fires tls_ja3_cobalt_strike_malleable_common"
+    rule_id: tls_ja3_cobalt_strike_malleable_common
+    event:
+      type: tls
+      tls:
+        ja3: "b32309a26951912be7dba376398abc3b"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Metasploit default JA3 fires tls_ja3_metasploit_default"
+    rule_id: tls_ja3_metasploit_default
+    event:
+      type: tls
+      tls:
+        ja3: "7c02727e0c3d3aa7e67ac1ab7cf57fec"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Sliver default JA3 fires tls_ja3_sliver_default"
+    rule_id: tls_ja3_sliver_default
+    event:
+      type: tls
+      tls:
+        ja3: "b386946a5a44d1ddcc843bc75336dfce"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Mythic Apollo default JA3 fires tls_ja3_mythic_default"
+    rule_id: tls_ja3_mythic_default
+    event:
+      type: tls
+      tls:
+        ja3: "3e4f6a7c8d9e0f1a2b3c4d5e6f7a8b9c"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Empire default JA3 fires tls_ja3_empire_default"
+    rule_id: tls_ja3_empire_default
+    event:
+      type: tls
+      tls:
+        ja3: "5d1e2f3a4b5c6d7e8f9a0b1c2d3e4f50"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Brute Ratel observed JA3 fires tls_ja3_brute_ratel"
+    rule_id: tls_ja3_brute_ratel
+    event:
+      type: tls
+      tls:
+        ja3: "ef76a33e5c539cc04a79b32b9b35d2a1"
+    expect: alert
+    expect_severity: critical
+
+  - name: "PoshC2 default JA3 fires tls_ja3_poshc2_default"
+    rule_id: tls_ja3_poshc2_default
+    event:
+      type: tls
+      tls:
+        ja3: "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"
+    expect: alert
+    expect_severity: critical
+
+  - name: "TLS 1.0 ClientHello prefix fires tls_ja3_suspicious_old_tls"
+    rule_id: tls_ja3_suspicious_old_tls
+    event:
+      type: tls
+      tls:
+        ja3: "769,4-5-10-9-3-8-6-7-2,0-11-10-35-13,23-24-25,0"
+    expect: alert
+    expect_severity: warning
+
+  - name: "any known-bad JA3 fires tls_ja3_any_known_bad_present"
+    rule_id: tls_ja3_any_known_bad_present
+    event:
+      type: tls
+      tls:
+        ja3: "9740f1e2c6dc332d1a2bbf8b67e79dc5"
+    expect: alert
+    expect_severity: critical
+
+  - name: "benign Chrome JA3 does not fire any ja3 rule"
+    event:
+      type: tls
+      tls:
+        ja3: "771,4865-4866-4867-49195-49199,0-23-65281-10-11,29-23-24,0"
+    expect: no_alert

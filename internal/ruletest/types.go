@@ -103,6 +103,10 @@ type TLSSpec struct {
 	DataLen uint32 `yaml:"data_len,omitempty"`
 	// Direction is "write" (outbound, default) or "read" (inbound).
 	Direction string `yaml:"direction,omitempty"`
+	// JA3 is the JA3 TLS client fingerprint hash, for the tls_ja3_* rule family
+	// (collectors.tls_fingerprint), as opposed to the plaintext Data payload
+	// (collectors.tls) exercised by the fields above.
+	JA3 string `yaml:"ja3,omitempty"`
 }
 
 // SyscallSpec describes a syscall event payload.
@@ -295,6 +299,7 @@ func (s EventSpec) Build() (types.Event, error) {
 			default:
 				te.Direction = types.TLSDirectionWrite
 			}
+			te.JA3 = s.TLS.JA3
 		}
 		e.TLS = te
 

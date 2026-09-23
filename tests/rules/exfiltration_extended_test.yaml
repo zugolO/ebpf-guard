@@ -60,3 +60,39 @@ tests:
       syscall:
         nr: 257
     expect: no_alert
+
+  # Wave 6.4 item 7: offline coverage for exfil_large_tls_upload (TLS
+  # manifest, plaintext section). №435: direction resolver returns "0"/"1"
+  # (types.TLSDirectionWrite/Read), not "egress"/"ingress" — the rule's
+  # `values: ["egress"]` could never match; fixed to `values: ["0"]`.
+  - name: "1MB+ egress TLS write from unlisted comm fires exfil_large_tls_upload"
+    rule_id: exfil_large_tls_upload
+    event:
+      type: tls
+      comm: "vulnweb"
+      tls:
+        data: "large upload payload"
+        data_len: 2000000
+        direction: write
+    expect: alert
+    expect_severity: warning
+
+  - name: "1MB+ egress TLS write from backup tool comm does not fire exfil_large_tls_upload"
+    event:
+      type: tls
+      comm: "restic"
+      tls:
+        data: "large upload payload"
+        data_len: 2000000
+        direction: write
+    expect: no_alert
+
+  - name: "1MB+ ingress TLS read does not fire exfil_large_tls_upload"
+    event:
+      type: tls
+      comm: "vulnweb"
+      tls:
+        data: "large download payload"
+        data_len: 2000000
+        direction: read
+    expect: no_alert

@@ -55,3 +55,23 @@ tests:
         qname: "google.com"
         qtype: 1
     expect: no_alert
+
+  # Wave 6.4 item 7: offline coverage for the two cryptominer rules in the
+  # TLS manifest (attacks/tls-rule-ids.txt, plaintext section).
+  - name: "Stratum mining.subscribe handshake in TLS fires cryptominer_stratum_protocol"
+    rule_id: cryptominer_stratum_protocol
+    event:
+      type: tls
+      tls:
+        data: "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[]}"
+    expect: alert
+    expect_severity: critical
+
+  - name: "Monero wallet address in TLS fires cryptominer_wallet_address"
+    rule_id: cryptominer_wallet_address
+    event:
+      type: tls
+      tls:
+        data: "wallet=48123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789ABCDEFGHJKLMNPQRSTUVWXYZab"
+    expect: alert
+    expect_severity: critical

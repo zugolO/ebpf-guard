@@ -3,10 +3,14 @@ package collector
 
 import (
 	"bytes"
+	"debug/elf"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -383,4 +387,54 @@ func TestTLSCollectorCleanupDeadPIDs(t *testing.T) {
 
 	assert.True(t, hasLive, "live PID should remain after cleanup")
 	assert.False(t, hasDead, "dead PID should be removed after cleanup")
+}
+
+// TestResolveSSLSymbols_StrippedLibrary reproduces finding №379: a shared
+// library with .symtab stripped out (as stock Ubuntu's libssl.so.3 ships)
+// still exposes SSL_write/SSL_read via .dynsym, and resolveSSLSymbols must
+// find them there instead of failing the way f.Symbols() alone does.
+// Requires gcc + strip (Linux only — builds a real stripped ELF .so).
+func TestResolveSSLSymbols_StrippedLibrary(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("skipping: ELF shared-library build requires Linux (gcc+strip)")
+	}
+	gcc, err := exec.LookPath("gcc")
+	if err != nil {
+		t.Skip("skipping: gcc not available")
+	}
+	stripTool, err := exec.LookPath("strip")
+	if err != nil {
+		t.Skip("skipping: strip not available")
+	}
+
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "fakessl.c")
+	soPath := filepath.Join(dir, "libfakessl.so")
+	require.NoError(t, os.WriteFile(srcPath, []byte(`
+int SSL_write(void *ssl, const void *buf, int num) { return num; }
+int SSL_read(void *ssl, void *buf, int num) { return num; }
+`), 0o644))
+
+	build := exec.Command(gcc, "-shared", "-fPIC", "-o", soPath, srcPath)
+	out, err := build.CombinedOutput()
+	require.NoErrorf(t, err, "gcc build failed: %s", out)
+
+	// Strip .symtab (what DynamicSymbols() does NOT need) while leaving
+	// .dynsym intact — this is exactly the shape of stock Ubuntu's libssl.so.3.
+	strip := exec.Command(stripTool, "--strip-debug", "--strip-unneeded", soPath)
+	out, err = strip.CombinedOutput()
+	require.NoErrorf(t, err, "strip failed: %s", out)
+
+	f, err := elf.Open(soPath)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// Confirm the fixture actually has no .symtab, or this test proves nothing.
+	_, symErr := f.Symbols()
+	require.Error(t, symErr, "fixture must have .symtab stripped for this test to be meaningful")
+
+	hasWrite, hasRead, err := resolveSSLSymbols(f)
+	require.NoError(t, err)
+	assert.True(t, hasWrite, "resolveSSLSymbols must find SSL_write via .dynsym on a stripped library")
+	assert.True(t, hasRead, "resolveSSLSymbols must find SSL_read via .dynsym on a stripped library")
 }

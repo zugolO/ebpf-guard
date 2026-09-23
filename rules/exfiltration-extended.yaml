@@ -64,7 +64,7 @@ rules:
       conditions:
         - field: direction
           op: equals
-          values: ["egress"]
+          values: ["0"]     # types.TLSDirectionWrite (outbound/egress); resolver returns "0"/"1", not "egress"/"ingress" — found by wave 6.4 item 7 offline run, №435
         - field: data_len
           op: gt
           values: ["1048576"]    # 1 MB in a single write

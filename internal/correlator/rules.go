@@ -1807,6 +1807,8 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			return e.TLS.JA4
 		case "ja3s":
 			return e.TLS.JA3S
+		case "comm":
+			return util.BytesToString(e.Comm[:])
 		}
 	case types.EventHTTPPlaintext:
 		if e.HTTPPlaintext == nil {

@@ -1,0 +1,41 @@
+# Манифест rule_id с event_type: tls, волна 6.4 (plan.md §6.4, item 1).
+#
+# Зачем манифест. Ровно довод №327: без оси event_type в сторе/метриках разрез
+# по источнику события возможен только манифестом rule_id в слое правил.
+# Манифест — единственный способ отличить «TLS дал 0» от «список устарел».
+#
+# Два семейства правил кормятся ДВУМЯ разными коллекторами и тумблерами:
+# секция "plaintext" (13 id) — collectors.tls, uprobe SSL_write/SSL_read;
+# секция "ja3" (10 id) — collectors.tls_fingerprint, kprobe sendto. Развилка
+# item 4 закрыта исходом (б) 23.09.2026 (№433, bpftrace-измерение на ebaka2:
+# SSL_write не видит ClientHello — исход (в) физически невозможен): секция
+# ja3 остаётся в манифесте (правила существуют и слепы по №381), но НЕ входит
+# в предмет измерения прогонов A/B волны 6.4 — только секция plaintext.
+#
+# Как получен. Сгенерирован из rules/*.yaml по event_type: tls + наличию
+# field: ja3 внутри блока правила, generate-tls-rule-manifest.sh, 23.09.2026.
+# plaintext (13)
+appexploit_java_deser_ysoserial
+appexploit_php_deser_chain
+cryptominer_stratum_protocol
+cryptominer_wallet_address
+exfil_large_tls_upload
+mitre_http_c2_beacon_pattern
+tls_api_key_exposure
+tls_data_exfil_patterns
+tls_http_basic_auth
+tls_reverse_shell_indicator
+tls_sql_patterns
+tls_suspicious_user_agent
+tls_unexpected_large_transfer
+# ja3 (10)
+tls_ja3_any_known_bad_present
+tls_ja3_brute_ratel
+tls_ja3_cobalt_strike_default
+tls_ja3_cobalt_strike_malleable_common
+tls_ja3_empire_default
+tls_ja3_metasploit_default
+tls_ja3_mythic_default
+tls_ja3_poshc2_default
+tls_ja3_sliver_default
+tls_ja3_suspicious_old_tls

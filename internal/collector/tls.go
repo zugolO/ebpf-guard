@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -24,12 +25,22 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
+	"golang.org/x/sys/unix"
 )
 
 var tlsTrackedPIDsGauge = promauto.NewGauge(prometheus.GaugeOpts{
 	Name: "ebpf_guard_tls_tracked_pids_total",
 	Help: "Current number of PIDs tracked by the TLS collector (processes with libssl uprobes attached).",
 })
+
+// tlsAttachFailuresCounter tracks why the TLS collector failed to attach to a
+// process, split by reason. Volume 6.4 finding №379: with no counter, "collector
+// never attached to anyone" and "no TLS traffic on this node" were the same log
+// line (silence at debug level) — indistinguishable without a stand.
+var tlsAttachFailuresCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ebpf_guard_tls_attach_failures_total",
+	Help: "TLS uprobe attach failures by reason (no_symbols, no_elf, no_symbol_found, attach_failed, libssl_mismatch).",
+}, []string{"reason"})
 
 // TLSCollector collects TLS plaintext events using eBPF uprobes on libssl.
 // It attaches to SSL_write and SSL_read functions to capture data before encryption
@@ -389,12 +400,10 @@ func (c *TLSCollector) scanAndAttach() {
 
 		// Try to attach uprobes
 		if err := c.attachToPID(uint32(pid), libsslPath); err != nil {
-			if c.logger.Enabled(c.ctx, slog.LevelDebug) {
-				c.logger.Debug("failed to attach uprobes",
-					slog.Uint64("pid", pid),
-					slog.String("libssl", libsslPath),
-					slog.Any("error", err))
-			}
+			c.logger.Warn("failed to attach TLS uprobes",
+				slog.Uint64("pid", pid),
+				slog.String("libssl", libsslPath),
+				slog.Any("error", err))
 			continue
 		}
 
@@ -439,64 +448,76 @@ func (c *TLSCollector) findLibsslInPID(pid uint32) string {
 }
 
 // attachToPID attaches uprobes to SSL_write and SSL_read in a process.
+//
+// libsslPath, as found by findLibsslInPID, is read from /proc/<pid>/maps —
+// a path inside the PROCESS's mount namespace, not the host's. For a
+// containerized process that path is opened here at /proc/<pid>/root/<path>
+// (finding №380): opening it as a host-rooted path either misses (ENOENT) or,
+// worse, silently resolves to a different, host-side file at the same path,
+// which would attach the uprobe at the wrong offset. A device/inode identity
+// check against what the process itself has mapped (from /proc/<pid>/maps)
+// guards against that silent mismatch.
 func (c *TLSCollector) attachToPID(pid uint32, libsslPath string) error {
 	if c.objs == nil {
 		return fmt.Errorf("eBPF objects not loaded")
 	}
 
-	// Open the ELF file to find symbol offsets
-	f, err := elf.Open(libsslPath)
+	nsPath := fmt.Sprintf("/proc/%d/root%s", pid, libsslPath)
+
+	if err := verifyLibraryIdentity(nsPath, pid, libsslPath); err != nil {
+		tlsAttachFailuresCounter.WithLabelValues("libssl_mismatch").Inc()
+		return fmt.Errorf("libssl identity check: %w", err)
+	}
+
+	// Open the ELF file to find symbol offsets. DynamicSymbols() reads
+	// .dynsym, which every shared library exports by construction;
+	// Symbols() reads .symtab, which stripped libraries (stock Ubuntu
+	// libssl.so.3, among others) do not carry at all (finding №379).
+	f, err := elf.Open(nsPath)
 	if err != nil {
-		return fmt.Errorf("open elf: %w", err)
+		tlsAttachFailuresCounter.WithLabelValues("no_elf").Inc()
+		return fmt.Errorf("open elf %s: %w", nsPath, err)
 	}
 	defer f.Close()
 
-	symbols, err := f.Symbols()
+	hasWrite, hasRead, err := resolveSSLSymbols(f)
 	if err != nil {
+		tlsAttachFailuresCounter.WithLabelValues("no_symbols").Inc()
 		return fmt.Errorf("get symbols: %w", err)
 	}
-
-	var sslWriteOffset, sslReadOffset uint64
-	for _, sym := range symbols {
-		if sym.Name == "SSL_write" {
-			sslWriteOffset = sym.Value
-		}
-		if sym.Name == "SSL_read" {
-			sslReadOffset = sym.Value
-		}
+	if !hasWrite && !hasRead {
+		tlsAttachFailuresCounter.WithLabelValues("no_symbol_found").Inc()
+		return fmt.Errorf("SSL_write and SSL_read symbols not found in %s", nsPath)
 	}
-
-	if sslWriteOffset == 0 && sslReadOffset == 0 {
-		return fmt.Errorf("SSL_write and SSL_read symbols not found")
-	}
-
-	exePath := fmt.Sprintf("/proc/%d/exe", pid)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Attach SSL_write uprobe
-	if sslWriteOffset != 0 && c.objs.TraceSslWrite != nil {
-		l, err := c.attachUprobe(exePath, sslWriteOffset, c.objs.TraceSslWrite)
+	if hasWrite && c.objs.TraceSslWrite != nil {
+		l, err := c.attachUprobe(nsPath, "SSL_write", c.objs.TraceSslWrite)
 		if err != nil {
+			tlsAttachFailuresCounter.WithLabelValues("attach_failed").Inc()
 			return fmt.Errorf("attach SSL_write: %w", err)
 		}
 		c.links = append(c.links, l)
 	}
 
 	// Attach SSL_read entry uprobe
-	if sslReadOffset != 0 && c.objs.TraceSslReadEntry != nil {
-		l, err := c.attachUprobe(exePath, sslReadOffset, c.objs.TraceSslReadEntry)
+	if hasRead && c.objs.TraceSslReadEntry != nil {
+		l, err := c.attachUprobe(nsPath, "SSL_read", c.objs.TraceSslReadEntry)
 		if err != nil {
+			tlsAttachFailuresCounter.WithLabelValues("attach_failed").Inc()
 			return fmt.Errorf("attach SSL_read entry: %w", err)
 		}
 		c.links = append(c.links, l)
 	}
 
 	// Attach SSL_read return uprobe
-	if sslReadOffset != 0 && c.objs.TraceSslReadRet != nil {
-		l, err := c.attachUretprobe(exePath, sslReadOffset, c.objs.TraceSslReadRet)
+	if hasRead && c.objs.TraceSslReadRet != nil {
+		l, err := c.attachUretprobe(nsPath, "SSL_read", c.objs.TraceSslReadRet)
 		if err != nil {
+			tlsAttachFailuresCounter.WithLabelValues("attach_failed").Inc()
 			return fmt.Errorf("attach SSL_read ret: %w", err)
 		}
 		c.links = append(c.links, l)
@@ -505,16 +526,121 @@ func (c *TLSCollector) attachToPID(pid uint32, libsslPath string) error {
 	return nil
 }
 
-// attachUprobe attaches a uprobe to the specified offset.
-func (c *TLSCollector) attachUprobe(exePath string, offset uint64, prog *ebpf.Program) (link.Link, error) {
-	// Use link.Kprobe as a base for uprobe attachment
-	// In production, this would use link.Uprobe
-	return nil, fmt.Errorf("uprobe attachment not fully implemented")
+// resolveSSLSymbols locates SSL_write/SSL_read in an opened libssl ELF file.
+// DynamicSymbols() reads .dynsym, which every shared library exports by
+// construction (it's how the dynamic linker resolves the symbol at load
+// time); Symbols() reads .symtab, which stripped libraries — stock Ubuntu's
+// libssl.so.3 among them — do not carry at all (finding №379). Falling back
+// to Symbols() only when DynamicSymbols() comes up empty keeps this working
+// on libraries that DO ship a full symbol table too.
+func resolveSSLSymbols(f *elf.File) (hasWrite, hasRead bool, err error) {
+	symbols, err := f.DynamicSymbols()
+	if err != nil || len(symbols) == 0 {
+		symbols, err = f.Symbols()
+	}
+	if err != nil {
+		return false, false, err
+	}
+	for _, sym := range symbols {
+		if sym.Name == "SSL_write" {
+			hasWrite = true
+		}
+		if sym.Name == "SSL_read" {
+			hasRead = true
+		}
+	}
+	return hasWrite, hasRead, nil
 }
 
-// attachUretprobe attaches a uretprobe to the specified offset.
-func (c *TLSCollector) attachUretprobe(exePath string, offset uint64, prog *ebpf.Program) (link.Link, error) {
-	return nil, fmt.Errorf("uretprobe attachment not fully implemented")
+// verifyLibraryIdentity confirms that the mount-ns-resolved library file
+// (nsPath, e.g. /proc/<pid>/root/usr/lib/.../libssl.so.3) is the SAME file the
+// process actually has mapped, by comparing device+inode against the entry in
+// /proc/<pid>/maps for libsslPath. A mismatch means the host-visible file at
+// that path is a different build than what the process is running — attaching
+// there would place the uprobe at the wrong offset without any visible error.
+func verifyLibraryIdentity(nsPath string, pid uint32, libsslPath string) error {
+	nsInfo, err := os.Stat(nsPath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", nsPath, err)
+	}
+
+	mapsPath := fmt.Sprintf("/proc/%d/maps", pid)
+	file, err := os.Open(mapsPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", mapsPath, err)
+	}
+	defer file.Close()
+
+	// /proc/<pid>/maps device/inode fields are the identity the kernel itself
+	// resolved for this mapping in the process's mount namespace — comparing
+	// against them (rather than re-stat-ing by path a second time) is what
+	// makes this a genuine identity check and not just a second path lookup.
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasSuffix(line, libsslPath) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		devField := fields[3] // "major:minor"
+		devParts := strings.SplitN(devField, ":", 2)
+		if len(devParts) != 2 {
+			continue
+		}
+		major, errMaj := strconv.ParseUint(devParts[0], 16, 32)
+		minor, errMin := strconv.ParseUint(devParts[1], 16, 32)
+		if errMaj != nil || errMin != nil {
+			continue
+		}
+		// dev 0:0 means the mapping isn't backed by a regular block device
+		// (e.g. overlayfs quirks) — skip the check rather than false-reject.
+		if major == 0 && minor == 0 {
+			return nil
+		}
+		if sysInfo, ok := nsInfo.Sys().(*syscall.Stat_t); ok {
+			gotMajor := uint64(unix.Major(uint64(sysInfo.Dev)))
+			gotMinor := uint64(unix.Minor(uint64(sysInfo.Dev)))
+			if gotMajor == major && gotMinor == minor {
+				return nil
+			}
+			return fmt.Errorf("libssl device mismatch: process maps dev %d:%d, host-visible file at %s is dev %d:%d",
+				major, minor, nsPath, gotMajor, gotMinor)
+		}
+		return nil
+	}
+
+	// libsslPath not found in maps anymore (process may have exited); not a
+	// mismatch, just nothing left to verify against.
+	return nil
+}
+
+// attachUprobe attaches a uprobe to the named symbol in libPath.
+func (c *TLSCollector) attachUprobe(libPath string, symbol string, prog *ebpf.Program) (link.Link, error) {
+	ex, err := link.OpenExecutable(libPath)
+	if err != nil {
+		return nil, fmt.Errorf("open executable %s: %w", libPath, err)
+	}
+	l, err := ex.Uprobe(symbol, prog, nil)
+	if err != nil {
+		return nil, fmt.Errorf("attach uprobe %s: %w", symbol, err)
+	}
+	return l, nil
+}
+
+// attachUretprobe attaches a uretprobe to the named symbol in libPath.
+func (c *TLSCollector) attachUretprobe(libPath string, symbol string, prog *ebpf.Program) (link.Link, error) {
+	ex, err := link.OpenExecutable(libPath)
+	if err != nil {
+		return nil, fmt.Errorf("open executable %s: %w", libPath, err)
+	}
+	l, err := ex.Uretprobe(symbol, prog, nil)
+	if err != nil {
+		return nil, fmt.Errorf("attach uretprobe %s: %w", symbol, err)
+	}
+	return l, nil
 }
 
 // readLoop reads events from the ring buffer and sends them to the output channel.

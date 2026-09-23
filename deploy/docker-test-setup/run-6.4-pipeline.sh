@@ -922,6 +922,31 @@ if [ "$_w63_blc" != "off" ]; then
     fi
 fi
 
+# ── ITEMS 5/6 ВОЛНЫ 6.4 (plan.md §6.4): положительный plaintext-контроль
+#    долгоживущим процессом и контейнерный случай в mount-ns пода. ТА ЖЕ
+#    ПРИЧИНА МЕСТА, ЧТО У ОПОРНОГО НАБОРА item 3 ВЫШЕ: оба контроля подают
+#    НАСТОЯЩИЙ TLS-обмен, а внутри окна он вошёл бы в измеряемую цену
+#    события ноды — поэтому ПОСЛЕ того, как журнал окна уже снят в $_j63.
+#    Ставятся ТОЛЬКО на прогоне B (tls-поток есть только там) и только по
+#    логическому тумблеру W64_TLS_CONTROLS (умолчание off — старый архив без
+#    этой правки не ломается, 6.4.3/6.4.4 назовут класс сами). Сторожевые
+#    файлы читают 6.4.3 ($ART/tls-control-plaintext.txt) и 6.4.4
+#    ($ART/tls-control-container.txt) ниже по файлу.
+if [ "${_w648_role:-B}" = "B" ] && [ "${W64_TLS_CONTROLS:-off}" != "off" ]; then
+    if [ -r "$SETUP/wave6.4-item5-item6-tls-controls.sh" ]; then
+        W64_ART="$ART" W64_API="$W63_PIPE_API" \
+            W64_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
+            W64_NS="$NS" W64_CONTROLS="$W64_TLS_CONTROLS" \
+            bash "$SETUP/wave6.4-item5-item6-tls-controls.sh" 2>&1 | sed 's/^/  [items5-6] /'
+    else
+        echo "--- items 5/6 волны 6.4: СКРИПТ НЕ НАЙДЕН в $SETUP — 6.4.3/6.4.4 останутся без входа ---"
+    fi
+elif [ "${_w648_role:-B}" = "A" ]; then
+    echo "--- items 5/6 волны 6.4: прогон A (tls.enabled: false) — контроли ставятся только на прогоне B ---"
+else
+    echo "--- items 5/6 волны 6.4: W64_TLS_CONTROLS=off — не поставлены, 6.4.3/6.4.4 назовут класс сами ---"
+fi
+
 # ── ДИАГНОСТИКА ШУМА (6.3.9.0). Сводки вынимаются из журнала и разбираются
 #    ЗДЕСЬ, а не глазами через сутки.
 #
@@ -2561,7 +2586,8 @@ cp /root/noise-diag-6.3.jsonl /root/noise-diag-window-6.3.jsonl "$COLLECT/" 2>/d
 cp "$W63_BFPOS_FILE" "$COLLECT/" 2>/dev/null
 cp "$SETUP/config-test.yaml" "$SETUP/wave6.3-controls.sh" "$SETUP/wave6.3-metrics-lib.sh" \
    "$SETUP/wave6.4-completeness-guard.sh" "$SETUP/wave6.4-emitter-fixtures.sh" \
-   "$SETUP/run-6.4-pipeline.sh" "$SETUP/wave6.3.9f-item3-baseline-controls.sh" "$COLLECT/" 2>/dev/null
+   "$SETUP/run-6.4-pipeline.sh" "$SETUP/wave6.3.9f-item3-baseline-controls.sh" \
+   "$SETUP/wave6.4-item5-item6-tls-controls.sh" "$COLLECT/" 2>/dev/null
 # Манифест TLS и его генератор (item 1 постановки 6.4) — часть провенанса
 # величины 6.4.6: без манифеста через сутки нельзя сказать, ПО КАКИМ правилам
 # был отфильтрован объём окна манифеста. Копируются, только если существуют

@@ -295,6 +295,62 @@ _mk_metrics "$N/metrics-window-end.txt"   "" "" 0 0 0
 _check "привязок за жизнь процесса ноль при предъявленных отказах" "$(_run "$N" B off)" \
     6.4.0=OK 6.4.1=OK 6.4.2=FAIL 6.4.8=OK
 
+# ── 15…17. №455: ТРИ РАЗНЫХ МИРА ЗА ОДНИМ «event=no» у 6.4.4. До №455 все
+#    три печатали один ПРОВАЛЕН, и вердикт волны не мог отличить «обмена в
+#    поде не было» от «событие дошло, детекта нет» и от «алерт подавлен
+#    дедупом». Класс проверяется ПО ТЕКСТУ, потому что все три — класс FAIL:
+#    различие несёт именно формулировка, и непроверенная формулировка есть
+#    непроверенная ветка (№451).
+_w648_cc_case() { # <имя> <строки сторожевого файла> <обязательная подстрока>
+    local name="$1" body="$2" want="$3"
+    local art="$WORK/art-$(echo "$name" | tr -cd '[:alnum:]')"
+    mkdir -p "$art"
+    _mk_metrics "$art/metrics-live.txt" 0 "" "" "" "" 3
+    _mk_metrics "$art/metrics-window-start.txt" "" "" 10 2 5
+    _mk_metrics "$art/metrics-window-end.txt"   "" "" 30 3 8
+    printf '%s\n' "$body" > "$art/tls-control-container.txt"
+    local out line
+    out="$(_run "$art" B off)"
+    line=$(printf '%s\n' "$out" | grep -E "(^|[^0-9.])6\.4\.4[[:space:]]+(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ|ИЗМЕРЕНО)" | tail -1)
+    echo "--- фикстура: $name"
+    if printf '%s' "$line" | grep -q "$want"; then
+        echo "    OK  6.4.4 назвала класс «${want}»"
+    else
+        _efail "№455/${name}: 6.4.4 обязана назвать класс «${want}» — строка: $(printf '%s' "$line" | cut -c1-190)"
+    fi
+}
+
+echo
+echo "=== №455: три мира за «event=no» у метки 6.4.4 ==="
+_w648_cc_case "алерт пода схлопнут дедупом" \
+    "bound=yes
+identity_match=yes
+event=no
+events_delta=6
+dedup_delta=2" \
+    "СХЛОПНУТ ДЕДУПОМ"
+_w648_cc_case "событие дошло, детекта нет — класс продуктовый" \
+    "bound=yes
+identity_match=yes
+event=no
+events_delta=6
+dedup_delta=0" \
+    "класс ПРОДУКТОВЫЙ"
+_w648_cc_case "обмен в поде не дошёл до коллектора вовсе" \
+    "bound=yes
+identity_match=yes
+event=no
+events_delta=0
+dedup_delta=0" \
+    "события TLS за обмен = 0"
+_w648_cc_case "все три условия выполнены — величины напечатаны" \
+    "bound=yes
+identity_match=yes
+event=yes
+events_delta=6
+dedup_delta=0" \
+    "ДОСТИГНУТО"
+
 echo
 echo "--- сторож №373: способна ли каждая метка (кроме законно-постоянной 6.4.5) вынести годную величину хоть на одном входе"
 _all_out="$(_run "$A" A off)
@@ -587,4 +643,4 @@ if [ "$FAILS" -gt 0 ]; then
     echo "СТОРОЖ ЭМИТТЕРОВ ПРОВАЛЕН: расхождений $FAILS"
     exit 1
 fi
-echo "СТОРОЖ ЭМИТТЕРОВ ПРОЙДЕН: 14 фикстур 6.4.x + 11 фикстур 6.4.B + два сторожа №373 + 6 проверок достижимости, расхождений 0"
+echo "СТОРОЖ ЭМИТТЕРОВ ПРОЙДЕН: 14 фикстур 6.4.x + 4 фикстуры классов 6.4.4 (№455) + 11 фикстур 6.4.B + два сторожа №373 + 6 проверок достижимости, расхождений 0"

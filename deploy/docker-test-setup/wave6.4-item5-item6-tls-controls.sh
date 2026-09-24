@@ -63,6 +63,13 @@ _w64_is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 # нуля ([[gated-metric-cannot-carry-product-verdict]] — нет серии ≠ ноль).
 _w64_tracked() { _w64_metrics | awk '$1=="ebpf_guard_tls_tracked_pids_total"{print $2+0; f=1} END{if(!f) print ""}'; }
 _w64_mismatch_failures() { _w64_metrics | awk '/^ebpf_guard_tls_attach_failures_total\{/ && /reason="libssl_mismatch"/{s+=$NF; f=1} END{print (f? s+0 : "")}'; }
+
+# Дедуп по правилу (№455). Дедуп стоит ПЕРЕД лимитером и ключуется
+# {rule_id,pid,comm}: два обмена одного правила с РАЗНЫХ pid не схлопываются,
+# но повторы одного pid — схлопываются. Контроль обязан читать этот срез, иначе
+# «алертов 0» неотличимо от «алерт был и подавлен слоем»
+# ([[control-after-attacks-hits-filled-limiter]], [[dedup-is-third-suppression-layer]]).
+_w64_dedup_rule() { _w64_metrics | awk -v r="$1" '$0 ~ /^ebpf_guard_alerts_dedup_dropped_by_rule_total\{/ && index($0, "rule_id=\"" r "\"") {print $NF+0; f=1} END{if(!f) print 0}'; }
 _w64_events_tls() { _w64_metrics | awk '/^ebpf_guard_events_total\{/ && /type="tls"/{print $NF; f=1} END{if(!f) print 0}'; }
 
 # ── ПОИМЁННАЯ ПРИВЯЗКА (№453). Оба контроля судили себя ГЛОБАЛЬНЫМ гейджем
@@ -341,12 +348,32 @@ _w64_item6() {
         fi
     fi
 
-    local event="no"
+    local event="no" pod_ev_delta="" pod_dedup_delta=""
     if [ "$bound" = "yes" ]; then
+        # №455: item 6 обязан мерить СОБЫТИЯ и СРЕЗ ДЕДУПА, как item 5 мерит
+        # события. Без них «event=no» неатрибутируем: «в поде обмена не было»
+        # и «событие дошло, алерт не поднялся» — разные миры, и вердикт волны
+        # не вправе их смешивать.
+        #
+        # Credential ОТЛИЧАЕТСЯ от item 5 намеренно: контроли с байт-в-байт
+        # одинаковым payload неразличимы в сторе, а их алерты попадают под
+        # один ключ дедупа при совпадении pid/comm.
+        local ev0_pod ev1_pod dd0_pod dd1_pod
+        ev0_pod=$(_w64_events_tls)
+        dd0_pod=$(_w64_dedup_rule tls_http_basic_auth)
         kubectl -n "$W64_NS" exec "$pod" -- sh -c \
-            "printf 'GET / HTTP/1.0\r\nAuthorization: Basic dGVzdDp0ZXN0\r\n\r\n' | openssl s_client -quiet -connect 127.0.0.1:$port >/tmp/client.log 2>&1" \
+            "printf 'GET /item6 HTTP/1.0\r\nAuthorization: Basic dzY0aXRlbTY6cG9k\r\n\r\n' | openssl s_client -quiet -connect 127.0.0.1:$port >/tmp/client.log 2>&1" \
             >/dev/null 2>&1
         sleep 5
+        ev1_pod=$(_w64_events_tls)
+        dd1_pod=$(_w64_dedup_rule tls_http_basic_auth)
+        if _w64_is_num "$ev0_pod" && _w64_is_num "$ev1_pod"; then
+            pod_ev_delta=$(( ev1_pod - ev0_pod ))
+        fi
+        if _w64_is_num "$dd0_pod" && _w64_is_num "$dd1_pod"; then
+            pod_dedup_delta=$(( dd1_pod - dd0_pod ))
+        fi
+        echo "  item6: обмен в поде проведён — события TLS за обмен: ${pod_ev_delta:-НЕИЗМЕРИМО}, срез дедупа по tls_http_basic_auth: ${pod_dedup_delta:-НЕИЗМЕРИМО}"
         if command -v jq >/dev/null 2>&1; then
             local alerts_json hit
             alerts_json=$(curl -s --max-time 30 -H "Authorization: Bearer $W64_TOKEN" "$W64_API/api/v1/alerts?limit=200000" 2>/dev/null)
@@ -397,6 +424,8 @@ _w64_item6() {
         echo "bound=$bound"
         echo "identity_match=$identity"
         echo "event=$event"
+        echo "events_delta=${pod_ev_delta:-НЕИЗМЕРИМО}"
+        echo "dedup_delta=${pod_dedup_delta:-НЕИЗМЕРИМО}"
     } > "$out"
     echo "  item6: bound=$bound, identity_match=$identity, event=$event (под $pod, неймспейс $W64_NS)"
 }

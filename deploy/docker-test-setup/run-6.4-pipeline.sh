@@ -2522,7 +2522,12 @@ echo "--- 6.4.0…6.4.8: вердиктные строки постановки 
 # ── 6.4.0: ПРИБОРНОСТЬ — tracked_pids и attach_failures{reason} напечатаны.
 _w648_tracked=$(printf '%s\n' "${_w63l_metrics:-}" | awk '/^ebpf_guard_tls_tracked_pids_total[[:space:]]/{print $NF; f=1} END{if(!f) print ""}')
 _w648_fail_total=$(printf '%s\n' "${_w63l_metrics:-}" | awk '/^ebpf_guard_tls_attach_failures_total\{/{s+=$NF; f=1} END{if(f) printf "%d", s+0; else print ""}')
-_w648_fail_reasons=$(printf '%s\n' "${_w63l_metrics:-}" | awk -F'"' '/^ebpf_guard_tls_attach_failures_total\{/{printf "%s=%s ", $2, $NF}')
+# №458 (24.09.2026). Разбор серии НЕЛЬЗЯ вести с -F'"': при таком FS поле $NF
+# это хвост «} 0», а не величина. Здесь это печатало «attach_failed=} 0»
+# (читаемо, но врёт формой), а на соседней метке 6.4B.2 — ложный ИМЕНОВАННЫЙ
+# состав, см. ниже. Величина берётся при FS по умолчанию ($NF), имя лейбла —
+# якорем ПО ИМЕНИ лейбла, а не по номеру поля: [[metric-label-added-breaks-awk-anchors]].
+_w648_fail_reasons=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_tls_attach_failures_total\{/ { if (split($1, a, /reason="/) > 1) { split(a[2], b, "\""); printf "%s=%s ", b[1], $NF } }')
 # №449: МОНОТОННАЯ величина привязки. tracked_pids — МГНОВЕННЫЙ гейдж: PID,
 # который вышел, снимается cleanupDeadPIDs, и гейдж падает в ноль. А вердикты
 # 6.4.0/6.4.1/6.4.2 РЕТРОСПЕКТИВНЫ («привязка удалась минимум к одному
@@ -2806,7 +2811,15 @@ fi
 _w64b_up_tot=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_collector_up\{/{n++} END{print n+0}')
 _w64b_up_one=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_collector_up\{/ && $NF+0 == 1 {n++} END{print n+0}')
 _w64b_up_zero=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_collector_up\{/ && $NF+0 == 0 {n++} END{print n+0}')
-_w64b_up_zname=$(printf '%s\n' "${_w63l_metrics:-}" | awk -F'"' '$0 ~ /^ebpf_guard_collector_up\{/ && $NF+0 == 0 {printf "%s ", $2}')
+# №458. ЭТА строка — доказательство вердикта 6.4B.2, и она печатала не то, что
+# считают три строки выше. С -F'"' поле $NF равно «} 1» либо «} 0», то есть
+# $NF+0 == 0 ИСТИННО ДЛЯ ЛЮБОЙ серии: закрывающий прогон 24.09.2026 вынес
+# «единиц 6, нулей 1 (нули у: dns fileaccess kmod lsm network syscall tls)» —
+# счёт верен, ИМЕНОВАННЫЙ состав лжив, а методика волны судит именно по
+# названному составу. Прогон с нулём у tls выглядел бы точно так же.
+_w64b_up_zname=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_collector_up\{/ && $NF+0 == 0 { if (split($1, a, /collector="/) > 1) { split(a[2], b, "\""); printf "%s ", b[1] } }')
+# Единицы называются ТОЖЕ: состав обеих сторон оси, а не одной (№458).
+_w64b_up_oname=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_collector_up\{/ && $NF+0 == 1 { if (split($1, a, /collector="/) > 1) { split(a[2], b, "\""); printf "%s ", b[1] } }')
 if [ "${_w64b_up_tot:-0}" -eq 0 ]; then
     _w64b_note 6.4B.2 FAIL
     echo "НЕИЗМЕРИМ: 6.4B.2 НЕИЗМЕРИМ (класс НАЗВАН: серии ebpf_guard_collector_up нет в снимке вовсе) — отсутствие серии не есть её ноль"
@@ -2815,7 +2828,7 @@ elif [ "${_w64b_up_one:-0}" -eq 0 ]; then
     echo "FAIL: 6.4B.2 ПРОВАЛЕН: из ${_w64b_up_tot} серий collector_up НИ ОДНА не равна единице — ни один коллектор не поднялся, приборность прогона под вопросом целиком"
 elif [ "${_w64b_up_zero:-0}" -ge 1 ]; then
     _w64b_note 6.4B.2 OK
-    echo "OK: 6.4B.2 ДОСТИГНУТО: ось предъявлена ОБЕИМИ сторонами в одном прогоне — из ${_w64b_up_tot} серий collector_up единиц ${_w64b_up_one}, нулей ${_w64b_up_zero} (нули у: ${_w64b_up_zname:-?}); единица больше не безусловна"
+    echo "OK: 6.4B.2 ДОСТИГНУТО: ось предъявлена ОБЕИМИ сторонами в одном прогоне — из ${_w64b_up_tot} серий collector_up единиц ${_w64b_up_one} (${_w64b_up_oname:-?}), нулей ${_w64b_up_zero} (${_w64b_up_zname:-?}); единица больше не безусловна"
 elif [ "${_w64b_stub_any:-unknown}" = "yes" ]; then
     _w64b_note 6.4B.2 FAIL
     echo "FAIL: 6.4B.2 ПРОВАЛЕН (класс НАЗВАН: серия ЛЖЁТ единицей): журнал этого прогона говорит, что в stub mode ушли коллекторы [${_w64b_stub_names:-?}], а все ${_w64b_up_tot} серий collector_up равны единице. Отрицательный случай нодой ПРЕДЪЯВЛЕН, и метрика его не показала — №438 на этих коллекторах НЕ закрыт (репортёр не подключён либо не зовётся на stub-пути)"
@@ -2828,7 +2841,7 @@ fi
 #    Счётчик заводится в init() пакета коллектора, то есть серии обязаны быть
 #    на ЛЮБОМ бинаре с правкой, независимо от того, включён ли TLS конфигом.
 _w64b_reason_n=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_tls_attach_failures_total\{/{n++} END{print n+0}')
-_w64b_reason_l=$(printf '%s\n' "${_w63l_metrics:-}" | awk -F'"' '$0 ~ /^ebpf_guard_tls_attach_failures_total\{/{printf "%s ", $2}')
+_w64b_reason_l=$(printf '%s\n' "${_w63l_metrics:-}" | awk '$1 ~ /^ebpf_guard_tls_attach_failures_total\{/ { if (split($1, a, /reason="/) > 1) { split(a[2], b, "\""); printf "%s ", b[1] } }')
 if [ "${_w64b_reason_n:-0}" -eq 0 ]; then
     _w64b_note 6.4B.3 FAIL
     echo "FAIL: 6.4B.3 ПРОВАЛЕН: серий ebpf_guard_tls_attach_failures_total{reason} в /metrics НЕТ НИ ОДНОЙ — бинарь без №439; «ноль отказов» на этом прогоне снова читался бы по отсутствующей серии"

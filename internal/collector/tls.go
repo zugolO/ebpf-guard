@@ -963,10 +963,46 @@ var sensitiveHeaderPrefixes = [][]byte{
 	[]byte("proxy-authorization:"),
 }
 
+// schemeBearingHeaders are the sensitive headers whose value starts with an
+// auth SCHEME token (RFC 7235: "Authorization: <scheme> <credentials>"). For
+// these the scheme is preserved and only the credentials are masked.
+//
+// Finding №454: masking the whole value destroyed the only substring the
+// detection rules match on. `tls_http_basic_auth` looks for
+// "Authorization: Basic " and the mask turned that into "Authorization:****",
+// so the rule could not fire on ANY node — the product blinded its own
+// detection, and the offline fixture run of item 7 could not see it because
+// fixtures build a TLSEvent directly and never pass through this readLoop.
+//
+// The scheme is not a secret and it IS the signal: "a Basic credential
+// traveled here" is exactly what the alert reports. The base64 blob after it
+// is the secret and stays masked, so the privacy guarantee of this function
+// ("credentials never propagate beyond the TLS collector") is unchanged.
+var schemeBearingHeaders = [][]byte{
+	[]byte("authorization:"),
+	[]byte("proxy-authorization:"),
+}
+
+// headerBearsScheme reports whether the value of this header name begins with
+// an auth scheme token that must survive masking.
+func headerBearsScheme(prefix []byte) bool {
+	for _, h := range schemeBearingHeaders {
+		if string(h) == string(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // maskSensitiveHeaders overwrites the value portion of sensitive HTTP headers
 // found in buf with asterisks ('*'). The buffer is modified in-place so that
 // credentials never propagate beyond the TLS collector into rules, alerts, or
 // the store.
+//
+// For scheme-bearing headers (Authorization, Proxy-Authorization) the auth
+// SCHEME survives and only the credentials after it are masked — see
+// schemeBearingHeaders and finding №454. Everything else keeps its entire
+// value masked, because there the value IS the secret.
 //
 // Only HTTP/1.x header format (header-name ":" SP value CRLF) is handled.
 // Binary TLS records that don't contain HTTP headers are left unchanged.
@@ -995,8 +1031,41 @@ func maskSensitiveHeaders(buf []byte) {
 				}
 			}
 			if string(headerPart) == string(prefix) {
-				// Overwrite everything after the colon (including leading space).
-				for k := start + len(prefix); k < i; k++ {
+				// Where the masking starts. By default: everything after the
+				// colon, including the leading space.
+				maskFrom := start + len(prefix)
+				if headerBearsScheme(prefix) {
+					// №454: keep "<SP>scheme<SP>" and mask only the
+					// credentials after it. The scheme token is the first
+					// run of non-space bytes after the colon; masking begins
+					// at the space that follows it, so the rule-visible text
+					// stays exactly "Authorization: Basic " and the base64
+					// credential is still destroyed.
+					j := maskFrom
+					for j < i && (buf[j] == ' ' || buf[j] == '\t') {
+						j++ // leading whitespace before the scheme
+					}
+					schemeEnd := j
+					for schemeEnd < i && buf[schemeEnd] != ' ' && buf[schemeEnd] != '\t' && buf[schemeEnd] != '\r' {
+						schemeEnd++
+					}
+					// The separator whitespace between scheme and credentials
+					// must SURVIVE: the rule matches "Authorization: Basic "
+					// including that trailing space, so masking starts at the
+					// credential itself, not at the separator.
+					credStart := schemeEnd
+					for credStart < i && (buf[credStart] == ' ' || buf[credStart] == '\t') {
+						credStart++
+					}
+					// Preserve the scheme only when a real credential follows
+					// it. A lone token before CRLF IS the value (no scheme at
+					// all) and must be masked whole — otherwise a header like
+					// "Authorization: <secret>" would leak entirely.
+					if schemeEnd > j && credStart < i && buf[credStart] != '\r' {
+						maskFrom = credStart
+					}
+				}
+				for k := maskFrom; k < i; k++ {
 					if buf[k] != '\r' {
 						buf[k] = '*'
 					}

@@ -567,3 +567,76 @@ int SSL_read(void *ssl, void *buf, int num) { return num; }
 	assert.True(t, hasWrite, "resolveSSLSymbols must find SSL_write via .dynsym on a stripped library")
 	assert.True(t, hasRead, "resolveSSLSymbols must find SSL_read via .dynsym on a stripped library")
 }
+
+// TestMaskSensitiveHeaders_SchemeSurvivesCredentialDoesNot — находка №454.
+// Маска работает в readLoop коллектора, ДО корреляции, и раньше затирала всю
+// величину заголовка: "Authorization: Basic dGVzdDp0ZXN0" превращалось в
+// "Authorization:*********************", то есть уничтожалась ровно та
+// подстрока, по которой матчит манифестное правило tls_http_basic_auth
+// ("Authorization: Basic "). Правило не могло сработать НИ НА КАКОЙ ноде, а
+// офлайн-прогон фикстур (item 7 волны 6.4) этого не видел: фикстуры строят
+// types.TLSEvent напрямую и через readLoop не проходят.
+//
+// Тест судит ОБА требования одновременно: детект видит схему, стор не видит
+// секрет. Одно без другого — либо слепое правило, либо утечка.
+func TestMaskSensitiveHeaders_SchemeSurvivesCredentialDoesNot(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          string
+		mustContain []string
+		mustNotHave []string
+	}{
+		{
+			name:        "Basic: схема видна правилу, base64 затёрт",
+			in:          "GET / HTTP/1.0\r\nAuthorization: Basic dGVzdDp0ZXN0\r\n\r\n",
+			mustContain: []string{"Authorization: Basic "},
+			mustNotHave: []string{"dGVzdDp0ZXN0"},
+		},
+		{
+			name:        "Bearer: схема видна, JWT затёрт",
+			in:          "GET / HTTP/1.1\r\nAuthorization: Bearer eyJhbGciOi.payload.sig\r\n\r\n",
+			mustContain: []string{"Authorization: Bearer "},
+			mustNotHave: []string{"eyJhbGciOi", "payload.sig"},
+		},
+		{
+			name:        "Proxy-Authorization: тот же контракт",
+			in:          "GET / HTTP/1.1\r\nProxy-Authorization: Basic c2VjcmV0\r\n\r\n",
+			mustContain: []string{"Proxy-Authorization: Basic "},
+			mustNotHave: []string{"c2VjcmV0"},
+		},
+		{
+			name:        "Cookie: величина ЦЕЛИКОМ секрет — схемы нет, маскируется вся",
+			in:          "GET / HTTP/1.1\r\nCookie: session=abc123def\r\n\r\n",
+			mustContain: []string{"Cookie:"},
+			mustNotHave: []string{"session=abc123def", "abc123def"},
+		},
+		{
+			name:        "X-API-Key: та же полная маска",
+			in:          "GET / HTTP/1.1\r\nX-API-Key: sk-0123456789abcdef\r\n\r\n",
+			mustContain: []string{"X-API-Key:"},
+			mustNotHave: []string{"sk-0123456789abcdef"},
+		},
+		{
+			name: "Authorization без credentials — одинокий токен САМ есть величина, маскируется",
+			in:   "GET / HTTP/1.1\r\nAuthorization: dGVzdDp0ZXN0\r\n\r\n",
+			// Схема не выделяется: за токеном ничего не следует, значит это
+			// и есть величина. Имя заголовка остаётся, секрет — нет.
+			mustContain: []string{"Authorization:"},
+			mustNotHave: []string{"dGVzdDp0ZXN0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := []byte(tt.in)
+			maskSensitiveHeaders(buf)
+			got := string(buf)
+			for _, want := range tt.mustContain {
+				assert.Contains(t, got, want, "детект обязан видеть это: %q", got)
+			}
+			for _, secret := range tt.mustNotHave {
+				assert.NotContains(t, got, secret, "секрет обязан быть затёрт: %q", got)
+			}
+		})
+	}
+}

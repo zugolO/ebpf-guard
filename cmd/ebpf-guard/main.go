@@ -1718,8 +1718,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if lc, lcErr := collector.NewLSMCollector(lsmCfg, slog.Default()); lcErr != nil {
 			slog.Warn("lsm: collector creation failed (kernel 5.7+ required)", slog.Any("error", lcErr))
 		} else {
-			collectors = append(collectors, lc)
-			slog.Info("lsm: collector enabled")
+			// №457: lsm получает настоящий репортёр. На ядре без LSM BPF
+			// коллектор честно уходит в stub mode и пишет это в лог — а серия
+			// до этой правки оставалась оптимистической единицей, то есть
+			// №438 был объявлен закрытым при одной по-прежнему лгущей серии.
+			collectors = append(collectors, lc.WithStatusReporter(collectorUpReporter(lc.Name(), nil)))
+			slog.Info("lsm: collector enabled", slog.Bool("lsm_bpf_available", lc.IsAvailable()))
 		}
 
 		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {

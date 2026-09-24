@@ -23,11 +23,11 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/audit"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // fnv32a returns the FNV-1a 32-bit hash of s. This must produce the same
@@ -42,8 +42,9 @@ func fnv32a(s string) uint32 {
 // lsmAuditEventRaw mirrors struct lsm_audit_event from bpf/common.h.
 // The struct is __attribute__((packed)), so fields are at fixed byte offsets with no padding.
 // Layout (107 bytes total):
-//   type(4) + timestamp_ns(8) + pid(4) + target_pid(4) + uid(4) +
-//   action(1) + hook(1) + sig(1) + comm(16) + path(64)
+//
+//	type(4) + timestamp_ns(8) + pid(4) + target_pid(4) + uid(4) +
+//	action(1) + hook(1) + sig(1) + comm(16) + path(64)
 type lsmAuditEventRaw struct {
 	Type      uint32
 	Timestamp uint64
@@ -67,14 +68,14 @@ func parseLSMAuditEventRaw(raw []byte) (lsmAuditEventRaw, error) {
 		return lsmAuditEventRaw{}, fmt.Errorf("lsm_audit_event too short: %d < %d", len(raw), lsmAuditEventSize)
 	}
 	var e lsmAuditEventRaw
-	e.Type      = binary.LittleEndian.Uint32(raw[0:4])
+	e.Type = binary.LittleEndian.Uint32(raw[0:4])
 	e.Timestamp = binary.LittleEndian.Uint64(raw[4:12])
-	e.PID       = binary.LittleEndian.Uint32(raw[12:16])
+	e.PID = binary.LittleEndian.Uint32(raw[12:16])
 	e.TargetPID = binary.LittleEndian.Uint32(raw[16:20])
-	e.UID       = binary.LittleEndian.Uint32(raw[20:24])
-	e.Action    = raw[24]
-	e.Hook      = raw[25]
-	e.Sig       = raw[26]
+	e.UID = binary.LittleEndian.Uint32(raw[20:24])
+	e.Action = raw[24]
+	e.Hook = raw[25]
+	e.Sig = raw[26]
 	copy(e.Comm[:], raw[27:43])
 	copy(e.Path[:], raw[43:107])
 	return e, nil
@@ -138,6 +139,12 @@ type LSMCollector struct {
 	links     []link.Link
 	available bool
 	mu        sync.RWMutex
+	// status publishes the collector's real up/down state. Finding №457:
+	// without it collector_up{lsm} kept the optimistic pre-Start 1 forever,
+	// so on a kernel without LSM BPF the series reported a healthy collector
+	// that had in fact entered stub mode and said so in the log. №438 was
+	// declared closed while this one series still lied.
+	status StatusReporter
 
 	// configPathKeys tracks the FNV-32a keys loaded from the config-driven
 	// lsm_path_blocklist so SetPathBlocklist can remove stale entries on reload.
@@ -181,6 +188,8 @@ func NewLSMCollector(config LSMConfig, logger *slog.Logger) (*LSMCollector, erro
 			lc.blocksTotal.WithLabelValues(hook, action)
 		}
 	}
+
+	lc.status = NoopStatusReporter{}
 
 	// Check availability
 	available := lc.checkAvailability()
@@ -378,10 +387,16 @@ func (lc *LSMCollector) IsAvailable() bool {
 // LSM hooks are loaded once and run continuously; no event reading needed.
 func (lc *LSMCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	if !lc.available {
+		// №457: stub mode is PUBLISHED, not only logged. The kernel without
+		// LSM BPF is a legitimate node property — but "collector_up=1" while
+		// no hook is attached is an instrument that cannot be believed.
+		lc.status.SetUp("lsm", false)
 		// Stub mode: just wait for context cancellation
 		<-ctx.Done()
 		return ctx.Err()
 	}
+
+	lc.status.SetUp("lsm", true)
 
 	// LSM hooks run in kernel space; we just need to keep the BPF objects loaded
 	lc.logger.Info("lsm: LSM hooks active, waiting for shutdown")
@@ -403,6 +418,16 @@ func (lc *LSMCollector) startStatsCollector(ctx context.Context) *time.Ticker {
 // Name returns the collector name.
 func (lc *LSMCollector) Name() string {
 	return "lsm"
+}
+
+// WithStatusReporter sets the StatusReporter used to signal up/down state
+// (№457). Without it collector_up{lsm} carried main's optimistic pre-Start
+// default and could never read 0, even on a kernel that has no LSM BPF at all.
+func (lc *LSMCollector) WithStatusReporter(r StatusReporter) *LSMCollector {
+	if r != nil {
+		lc.status = r
+	}
+	return lc
 }
 
 // Close unloads LSM BPF programs.

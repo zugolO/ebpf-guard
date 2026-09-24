@@ -1134,6 +1134,7 @@ if [ "${_w648_role:-B}" = "B" ] && [ "${W64_TLS_CONTROLS:-off}" != "off" ]; then
             W64_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
             W64_NS="$NS" W64_CONTROLS="$W64_TLS_CONTROLS" \
             W64_SCAN_INTERVAL_S="${_w64b_scan_s:-${W64_SCAN_INTERVAL_S:-30}}" \
+            W64_SVC="$SVC" \
             bash "$SETUP/wave6.4-item5-item6-tls-controls.sh" 2>&1 | sed 's/^/  [items5-6] /'
     else
         echo "--- items 5/6 волны 6.4: СКРИПТ НЕ НАЙДЕН в $SETUP — 6.4.3/6.4.4 останутся без входа ---"

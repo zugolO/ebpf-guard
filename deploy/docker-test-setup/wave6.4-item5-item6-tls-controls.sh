@@ -44,6 +44,9 @@ W64_TOKEN="${W64_TOKEN:-}"
 W64_NS="${W64_NS:-w64}"
 W64_CONTROLS="${W64_CONTROLS:-off}"
 W64_SCAN_INTERVAL_S="${W64_SCAN_INTERVAL_S:-30}"
+# Журнал агента — единственный источник ПОИМЁННОЙ привязки (№453). Имя юнита
+# передаёт пайплайн; умолчание совпадает с его собственным.
+W64_SVC="${W64_SVC:-ebpf-guard-test.service}"
 
 if [ "$W64_CONTROLS" = "off" ]; then
     echo "--- items 5/6 волны 6.4: W64_CONTROLS=off — контроли не поставлены, 6.4.3/6.4.4 назовут класс сами ---"
@@ -61,6 +64,47 @@ _w64_is_num() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 _w64_tracked() { _w64_metrics | awk '$1=="ebpf_guard_tls_tracked_pids_total"{print $2+0; f=1} END{if(!f) print ""}'; }
 _w64_mismatch_failures() { _w64_metrics | awk '/^ebpf_guard_tls_attach_failures_total\{/ && /reason="libssl_mismatch"/{s+=$NF; f=1} END{print (f? s+0 : "")}'; }
 _w64_events_tls() { _w64_metrics | awk '/^ebpf_guard_events_total\{/ && /type="tls"/{print $NF; f=1} END{if(!f) print 0}'; }
+
+# ── ПОИМЁННАЯ ПРИВЯЗКА (№453). Оба контроля судили себя ГЛОБАЛЬНЫМ гейджем
+#    tls_tracked_pids_total, и это неверно дважды:
+#    (а) гейдж не нулевой на любой живой ноде — здесь 2 процесса с libssl
+#        (sshd и systemd) привязаны с первой секунды, поэтому проверка
+#        «tracked >= 1» выходила из цикла ожидания МГНОВЕННО с waited=0, и
+#        собственное же условие «waited >= scan_interval» объявляло контроль
+#        НЕИЗМЕРИМЫМ. На этом стенде контроль не мог пройти НИКОГДА;
+#    (б) дельта гейджа неатрибутируема: нода под постоянным ssh-брутфорсом
+#        (732–1885 соединений/час) даёт привязки sshd непрерывно, а
+#        cleanupDeadPIDs одновременно снимает вышедшие PID — рост на «свой»
+#        и падение на «чужой» схлопываются в ноль
+#        ([[generic-comm-attribution-is-node-background]], №449 на другом
+#        уровне: гейдж вместо монотонной величины).
+#    Журнал агента печатает привязку С PID'ом, и это единственная
+#    неподделываемая атрибуция, доступная внешнему скрипту.
+_w64_journal_since() { journalctl -u "$W64_SVC" --since "@${1}" --no-pager 2>/dev/null; }
+
+# Привязался ли агент К ЭТОМУ pid после эпохи $2.
+_w64_attached_pid() {
+    _w64_journal_since "$2" | grep -a 'attached TLS uprobes' | grep -aq "\"pid\":${1}[,}]"
+}
+
+# Привязался ли агент к libssl, которой НА ХОСТЕ НЕТ, после эпохи $2 —
+# доказательство привязки в чужом mount-ns (№380). Путь берётся из журнала и
+# проверяется на существование здесь же: alpine-под несёт /lib/libssl.so.3,
+# которой на этом хосте не существует, и подделать это изнутри пода нельзя.
+_w64_attached_foreign_libssl() {
+    local line pathv
+    while IFS= read -r line; do
+        pathv=$(printf '%s' "$line" | sed -n 's/.*"libssl":"\([^"]*\)".*/\1/p')
+        [ -n "$pathv" ] || continue
+        if [ ! -e "$pathv" ]; then
+            printf '%s' "$pathv"
+            return 0
+        fi
+    done <<EOF_FOREIGN
+$(_w64_journal_since "$1" | grep -a 'attached TLS uprobes')
+EOF_FOREIGN
+    return 1
+}
 
 # ─── ITEM 5: plaintext-контроль долгоживущим процессом ────────────────────
 _w64_item5() {
@@ -84,6 +128,10 @@ _w64_item5() {
     # почему-то не случится (страховка от осиротевшего процесса, тот же
     # приём, что таймаут `exec sleep N` у положительного контроля бэкфилла
     # №340).
+    # Эпоха ДО старта держателя: окно журнала, в котором ищется привязка
+    # именно к нему (№453). Секунда назад — страховка от того, что привязка
+    # попадёт в ту же секунду, что и запуск.
+    local t_hold0=$(( $(date -u +%s) - 1 ))
     openssl s_server -quiet -naccept 1 -accept "$port" \
         -cert "$work/cert.pem" -key "$work/key.pem" \
         >"$work/server.log" 2>&1 &
@@ -96,23 +144,28 @@ _w64_item5() {
     fi
     echo "  item5: держатель поднят (pid=$srv_pid, порт $port), жду > ${W64_SCAN_INTERVAL_S}с (scan_interval) с подтверждением tls_tracked_pids_total"
 
-    local waited=0 tracked="" tries=0 max_tries=$(( (W64_SCAN_INTERVAL_S + 30) / 3 + 5 ))
+    # №453: ждём привязку К СВОЕМУ pid по журналу, а не роста глобального
+    # гейджа. Условие «waited >= scan_interval» сохранено: сценарий постановки
+    # требует, чтобы держатель ПЕРЕЖИЛ интервал сканирования, — но теперь оно
+    # ДОПОЛНЯЕТ доказательство привязки, а не заменяет его.
+    local waited=0 tries=0 max_tries=$(( (W64_SCAN_INTERVAL_S * 3) / 3 + 10 ))
+    local attached="no"
     while [ "$tries" -lt "$max_tries" ]; do
-        tracked=$(_w64_tracked)
-        if _w64_is_num "$tracked" && [ "$tracked" -ge 1 ]; then
-            break
-        fi
         sleep 3
         waited=$(( waited + 3 ))
         tries=$(( tries + 1 ))
+        if [ "$waited" -ge "$W64_SCAN_INTERVAL_S" ] && _w64_attached_pid "$srv_pid" "$t_hold0"; then
+            attached="yes"
+            break
+        fi
     done
-    if [ "$waited" -lt "$W64_SCAN_INTERVAL_S" ] || ! _w64_is_num "$tracked" || [ "$tracked" -lt 1 ]; then
+    if [ "$attached" != "yes" ]; then
         kill "$srv_pid" 2>/dev/null
-        echo "class=привязка не подтверждена за ${waited}с ожидания (tls_tracked_pids_total=${tracked:-НЕТ}, порог >${W64_SCAN_INTERVAL_S}с) — сканер не взял держателя pid=$srv_pid до обмена" > "$out"
-        echo "  item5: НЕИЗМЕРИМ — привязка не подтверждена за ${waited}с"
+        echo "class=привязка К ДЕРЖАТЕЛЮ pid=$srv_pid не подтверждена за ${waited}с ожидания (порог >${W64_SCAN_INTERVAL_S}с; в журнале $W64_SVC нет строки «attached TLS uprobes» с этим pid) — сканер не взял держателя до обмена. Глобальный tls_tracked_pids_total=$(_w64_tracked) к вердикту НЕ относится: на живой ноде он не нулевой и без нашего держателя (№453)" > "$out"
+        echo "  item5: НЕИЗМЕРИМ — привязка к своему pid не подтверждена за ${waited}с"
         return
     fi
-    echo "  item5: привязка подтверждена за ${waited}с (tls_tracked_pids_total=$tracked)"
+    echo "  item5: привязка К СВОЕМУ держателю подтверждена за ${waited}с (журнал: attached TLS uprobes pid=$srv_pid)"
 
     local ev0 ev1
     ev0=$(_w64_events_tls)
@@ -227,29 +280,50 @@ _w64_item6() {
     # через nohup/setsid, чтобы пережить конец exec-сессии (сама
     # exec-сессия не PID 1 контейнера, процесс без отвязки от неё умер бы
     # вместе с ней).
+    # Эпоха ДО старта держателя в поде — окно журнала для сторожа привязки
+    # в чужом mount-ns (№453).
+    local t_pod0=$(( $(date -u +%s) - 1 ))
     kubectl -n "$W64_NS" exec "$pod" -- sh -c \
         "setsid openssl s_server -quiet -naccept 1 -accept $port -cert /tmp/cert.pem -key /tmp/key.pem >/tmp/server.log 2>&1 < /dev/null &" \
         >/dev/null 2>&1
     sleep 2
 
-    local mm0 tracked0
+    local mm0
     mm0=$(_w64_mismatch_failures)
-    tracked0=$(_w64_tracked)
 
-    local waited=0 tracked="" tries=0 max_tries=$(( (W64_SCAN_INTERVAL_S + 30) / 3 + 5 ))
+    # №453: привязка в mount-ns пода доказывается ПУТЁМ БИБЛИОТЕКИ, которого
+    # НА ХОСТЕ НЕ СУЩЕСТВУЕТ. Под — alpine (musl), его libssl лежит в
+    # /lib/libssl.so.3; на этом хосте такого файла нет вовсе (хостовая —
+    # /usr/lib/x86_64-linux-gnu/libssl.so.3). Строка журнала «attached TLS
+    # uprobes» с несуществующим на хосте путём не может возникнуть ни от
+    # одного хостового процесса — это ровно то, что item 6 и обязан
+    # предъявить, и подделать её изнутри пода нельзя.
+    #
+    # Прежний прибор — рост ГЛОБАЛЬНОГО гейджа tracked_pids — не годился
+    # дважды: он неатрибутируем (нода под ssh-брутфорсом привязывает sshd
+    # непрерывно, а cleanupDeadPIDs одновременно снимает вышедшие PID, и
+    # «+1 свой / −1 чужой» схлопывается в ноль) и на смоке 24.09.2026 дал
+    # «tracked до=3, после=3» при том, что привязка К ПОДУ в журнале БЫЛА
+    # (pid=1287186 libssl=/lib/libssl.so.3) — то есть контроль провалил
+    # успешный продукт. Окно ожидания расширено до трёх интервалов
+    # сканирования: держатель в поде появляется после `apk add`, и двух
+    # интервалов на медленной сети не хватало.
+    local waited=0 tries=0 max_tries=$(( (W64_SCAN_INTERVAL_S * 3) / 3 + 10 ))
+    local foreign=""
     while [ "$tries" -lt "$max_tries" ]; do
-        tracked=$(_w64_tracked)
-        if _w64_is_num "$tracked" && _w64_is_num "$tracked0" && [ "$tracked" -gt "$tracked0" ]; then
-            break
-        fi
         sleep 3
         waited=$(( waited + 3 ))
         tries=$(( tries + 1 ))
+        if [ "$waited" -ge "$W64_SCAN_INTERVAL_S" ]; then
+            foreign=$(_w64_attached_foreign_libssl "$t_pod0") && break
+            foreign=""
+        fi
     done
 
     local bound="no" identity="no"
-    if [ "$waited" -ge "$W64_SCAN_INTERVAL_S" ] && _w64_is_num "$tracked" && _w64_is_num "$tracked0" && [ "$tracked" -gt "$tracked0" ]; then
+    if [ -n "$foreign" ]; then
         bound="yes"
+        echo "  item6: привязка в mount-ns пода подтверждена — libssl=$foreign, которой на хосте НЕТ (ожидание ${waited}с)"
         local mm1
         mm1=$(_w64_mismatch_failures)
         # identity_match: сторож тождества (verifyLibraryIdentity,
@@ -297,7 +371,7 @@ _w64_item6() {
     kubectl -n "$W64_NS" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1
 
     if [ "$bound" != "yes" ]; then
-        echo "class=привязка не подтверждена за ${waited}с ожидания (tracked до=${tracked0:-НЕТ}, после=${tracked:-НЕТ}, порог >${W64_SCAN_INTERVAL_S}с) — сканер не взял держателя в поде $pod до обмена" > "$out"
+        echo "class=привязка в mount-ns пода не подтверждена за ${waited}с ожидания (порог >${W64_SCAN_INTERVAL_S}с; в журнале $W64_SVC нет строки «attached TLS uprobes» с путём libssl, отсутствующим на хосте) — сканер не взял держателя в поде $pod до обмена. Глобальный tracked_pids к вердикту НЕ относится (№453)" > "$out"
         echo "  item6: НЕИЗМЕРИМ — привязка не подтверждена"
         return
     fi

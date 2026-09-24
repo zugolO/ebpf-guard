@@ -605,8 +605,15 @@ fi
 #    осмысленна ТОЛЬКО если оба сняты одним бинарём — а доказать это постфактум
 #    сегодня нечем: sha в архиве нет. Снимок берётся ДО рестарта, кладётся в
 #    $ART (значит попадает в архив) и печатается в лог.
-_r63_binid="$ART/binary-identity.txt"
-mkdir -p "$ART" 2>/dev/null
+#    №459 (24.09.2026): писать это ПРЯМО в $ART нельзя — шаг 1 ниже делает
+#    `rm -rf "$ART"`, и файл, объявленный в логе, исчезает через секунды.
+#    Парные прогоны B (11:30Z) и A (16:00Z) прошли с этой дырой: доказательством
+#    пары остался ОДИН лог, где sha напечатана обрезанной до 16 знаков, а
+#    комментарий выше утверждал «кладётся в $ART, значит попадает в архив».
+#    Снимок берётся здесь (ДО рестарта — бинарь судится тот, что войдёт в
+#    прогон), хранится вне $ART и возвращается в $ART сразу после очистки.
+_r63_binid_src="/tmp/w64-binary-identity.$$.txt"
+_r63_binid="$_r63_binid_src"
 {
     echo "path=$_r63_bin"
     if [ -x "$_r63_bin" ]; then
@@ -621,7 +628,7 @@ mkdir -p "$ART" 2>/dev/null
     echo "role=${_w648_role:-?}"
     echo "intent=${W64_INTENT:-probe}"
 } > "$_r63_binid" 2>/dev/null
-echo "  тождество бинаря записано в $_r63_binid: sha256=$(awk -F= '/^sha256=/{print substr($2,1,16)}' "$_r63_binid" 2>/dev/null)… (пара A/B метки 6.4.6 осмысленна только при СОВПАДЕНИИ этой величины в обоих архивах)"
+echo "  тождество бинаря снято ДО рестарта (в архив ляжет как $ART/binary-identity.txt после очистки, №459): sha256=$(awk -F= '/^sha256=/{print substr($2,1,16)}' "$_r63_binid" 2>/dev/null)… (пара A/B метки 6.4.6 осмысленна только при СОВПАДЕНИИ этой величины в обоих архивах)"
 
 if [ "$_r63_in_fail" -ne 0 ]; then
     echo "СТОП ДО ПРОГОНА: вход измерения неполон (см. строки выше). Агент не тронут, стор не очищен."
@@ -632,6 +639,15 @@ fi
 echo "--- стор ---"
 kubectl -n "$NS" delete pod --all --ignore-not-found --wait=true >/dev/null 2>&1
 rm -rf "$ART" 2>/dev/null
+# №459. Тождество бинаря возвращается в $ART СРАЗУ после очистки — иначе
+# оно живёт только в логе, обрезанное до 16 знаков, и пара A/B недоказуема.
+mkdir -p "$ART" 2>/dev/null
+if [ -s "${_r63_binid_src:-}" ]; then
+    cp "$_r63_binid_src" "$ART/binary-identity.txt" 2>/dev/null && rm -f "$_r63_binid_src" 2>/dev/null
+    echo "  тождество бинаря в архиве: $ART/binary-identity.txt ($(wc -l < "$ART/binary-identity.txt" 2>/dev/null | tr -d " ") строк)"
+else
+    echo "  ВНИМАНИЕ: тождество бинаря НЕ попало в архив — пара A/B метки 6.4.6 будет недоказуема (№459)"
+fi
 # Отметка ДО остановки: барьер готовности ниже требует
 # process_start_time_seconds СТРОГО больше неё. Брать отметку ПОСЛЕ
 # `systemctl start` нельзя — старт возвращает управление уже после fork'а
@@ -2982,6 +2998,16 @@ fi
 echo "--- сборка архива ---"
 rm -rf "$COLLECT"; mkdir -p "$COLLECT/controls" "$COLLECT/node"
 cp -r "$ART" "$COLLECT/controls/artifacts" 2>/dev/null
+# №459. Сторож на СОБСТВЕННОЕ обещание: строка про тождество бинаря
+# печаталась на каждом прогоне, а файла в архиве не было — его стирал
+# `rm -rf "$ART"` через секунды после записи. Пара A/B метки 6.4.6 держится
+# ровно на этом файле, поэтому его отсутствие называется вслух ЗДЕСЬ, а не
+# обнаруживается через месяцы при попытке свести два архива.
+if [ -s "$COLLECT/controls/artifacts/binary-identity.txt" ]; then
+    echo "  тождество бинаря В АРХИВЕ: $(awk -F= '/^sha256=/{print substr($2,1,16)}' "$COLLECT/controls/artifacts/binary-identity.txt" 2>/dev/null)… (пара A/B доказуема)"
+else
+    echo "  ВНИМАНИЕ (№459): binary-identity.txt в архиве ОТСУТСТВУЕТ — пара A/B метки 6.4.6 по этому архиву НЕДОКАЗУЕМА"
+fi
 cp "$VERDICTS" "$COLLECT/controls/" 2>/dev/null
 cp /root/agent-start-6.4.txt /root/agent-start-6.4.epoch /root/env-muteness-6.4.txt "$COLLECT/" 2>/dev/null
 cp /root/metrics-prologue-start-6.4.txt "$COLLECT/" 2>/dev/null

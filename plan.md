@@ -9473,13 +9473,13 @@ go build -tags rego -o build/ebpf-guard ./cmd/ebpf-guard
 ./build/ebpf-guard version   # ждём: rego=true, tls_attach_failures=true http_plaintext_loader=true
 
 # 2. Смок на роли B — те же ветки за ~3 минуты, свои пути, боевой маркер не трогает.
-SMOKE=1 W64_TLS_CONTROLS=both W64_INTENT=probe \
+SMOKE=1 W64_TLS_CONTROLS=on W64_INTENT=probe \
   bash deploy/docker-test-setup/run-6.4-pipeline.sh
 
 # 3. Закрывающий прогон. W64_INTENT=close — обещание, которое пайплайн
 #    проверяет ДО пролога: при выключенном тумблере он умрёт за секунды,
 #    а не через сорок минут.
-SMOKE=0 W64_INTENT=close W64_TLS_CONTROLS=both W63_BASELINE_CONTROLS=on \
+SMOKE=0 W64_INTENT=close W64_TLS_CONTROLS=on W63_BASELINE_CONTROLS=on \
   bash deploy/docker-test-setup/run-6.4-pipeline.sh
 ```
 

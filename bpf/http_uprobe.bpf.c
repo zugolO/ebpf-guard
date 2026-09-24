@@ -94,11 +94,20 @@ static __always_inline void fill_http_process_info(struct http_event *e)
 	e->timestamp = bpf_ktime_get_ns();
 
 	task = (struct task_struct *)bpf_get_current_task();
-	parent = task->real_parent;
-	if (parent) {
-		e->ppid = parent->tgid;
+	/* №452: real_parent читается bpf_probe_read_kernel, а НЕ разыменованием.
+	 * bpf_get_current_task() отдаёт __u64 — для верификатора это скаляр
+	 * ('inv'), и прямое `task->real_parent` он отвергает:
+	 *   load program: permission denied: (79) r3 = *(u64 *)(r0 +2512):
+	 *   R0 invalid mem access 'inv'
+	 * (2512 — смещение real_parent в task_struct этого ядра). Дефект был
+	 * НЕВИДИМ, пока Go-загрузчик оставался заглушкой (№436): программа
+	 * компилировалась, но ни разу не подавалась ядру. Идиома взята у
+	 * соседей, которые на этом ядре грузятся, — tls_clienthello.bpf.c:85,
+	 * bpf_monitor.bpf.c:100, iouring.bpf.c:66. */
+	if (bpf_probe_read_kernel(&parent, sizeof(parent), &task->real_parent) == 0 && parent) {
+		e->ppid = (__u32)BPF_CORE_READ(parent, tgid);
 		bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm),
-			&parent->comm);
+			parent->comm);
 	} else {
 		e->ppid = 0;
 		__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));

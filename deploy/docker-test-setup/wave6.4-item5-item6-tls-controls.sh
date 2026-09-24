@@ -70,7 +70,29 @@ _w64_mismatch_failures() { _w64_metrics | awk '/^ebpf_guard_tls_attach_failures_
 # «алертов 0» неотличимо от «алерт был и подавлен слоем»
 # ([[control-after-attacks-hits-filled-limiter]], [[dedup-is-third-suppression-layer]]).
 _w64_dedup_rule() { _w64_metrics | awk -v r="$1" '$0 ~ /^ebpf_guard_alerts_dedup_dropped_by_rule_total\{/ && index($0, "rule_id=\"" r "\"") {print $NF+0; f=1} END{if(!f) print 0}'; }
-_w64_events_tls() { _w64_metrics | awk '/^ebpf_guard_events_total\{/ && /type="tls"/{print $NF; f=1} END{if(!f) print 0}'; }
+# №456: СУММА по сериям, а не печать каждой. Серия events_total расщепляется
+# лейблами {namespace,node,pod}: пока пода нет — одна строка, как только под
+# отдал событие — ДВЕ, и прежняя форма печатала два числа, из которых
+# _w64_is_num делал НЕИЗМЕРИМО. Дефект латентный: у item 5 (до пода) помощник
+# работал, у item 6 (после) — нет, то есть он ломался ровно на том контроле,
+# ради которого заведён ([[metric-label-added-breaks-awk-anchors]] в форме
+# «выросло ЧИСЛО серий, а не порядок лейблов»).
+_w64_events_tls() { _w64_metrics | awk '/^ebpf_guard_events_total\{/ && /type="tls"/{s+=$NF; f=1} END{if(f) printf "%d", s+0; else print 0}'; }
+
+# События TLS, атрибутированные К ПОДУ. Это и есть «событие» метки 6.4.4 по
+# постановке волны («привязка + тождество библиотеки + СОБЫТИЕ»), и это
+# САМЫЙ устойчивый из доступных приборов: держатель в поде долгоживущий,
+# поэтому резолв pid→pod успевает; у короткоживущего s_client он проигрывает
+# гонку и алерт приезжает с pod=null (№456).
+_w64_events_tls_pod() { _w64_metrics | awk -v p="$1" '$0 ~ /^ebpf_guard_events_total\{/ && /type="tls"/ && index($0, "pod=\"" p "\"") {s+=$NF; f=1} END{if(f) printf "%d", s+0; else print 0}'; }
+
+# Алерты правила за весь стор — по rule_id, БЕЗ требования атрибуции к поду.
+_w64_alerts_rule() {
+    local j
+    j=$(curl -s --max-time 30 -H "Authorization: Bearer $W64_TOKEN" "$W64_API/api/v1/alerts?limit=200000" 2>/dev/null)
+    printf '%s' "$j" | jq -e . >/dev/null 2>&1 || { echo ""; return; }
+    printf '%s' "$j" | jq --arg r "$1" '[.[] | select(.rule_id==$r or (.details.base_rule_id? == $r))] | length' 2>/dev/null
+}
 
 # ── ПОИМЁННАЯ ПРИВЯЗКА (№453). Оба контроля судили себя ГЛОБАЛЬНЫМ гейджем
 #    tls_tracked_pids_total, и это неверно дважды:
@@ -348,51 +370,51 @@ _w64_item6() {
         fi
     fi
 
-    local event="no" pod_ev_delta="" pod_dedup_delta=""
+    local event="no" pod_ev_delta="" pod_dedup_delta="" pod_ev_labeled="" alert_rule_delta=""
     if [ "$bound" = "yes" ]; then
-        # №455: item 6 обязан мерить СОБЫТИЯ и СРЕЗ ДЕДУПА, как item 5 мерит
-        # события. Без них «event=no» неатрибутируем: «в поде обмена не было»
-        # и «событие дошло, алерт не поднялся» — разные миры, и вердикт волны
-        # не вправе их смешивать.
+        # №455/№456: контроль печатает ЧЕТЫРЕ величины, а не одну.
         #
-        # Credential ОТЛИЧАЕТСЯ от item 5 намеренно: контроли с байт-в-байт
-        # одинаковым payload неразличимы в сторе, а их алерты попадают под
-        # один ключ дедупа при совпадении pid/comm.
-        local ev0_pod ev1_pod dd0_pod dd1_pod
+        # «event» метки 6.4.4 — это СОБЫТИЕ по постановке волны («привязка в
+        # mount-ns пода + тождество библиотеки + событие»), и мерится оно
+        # серией events_total С ЛЕЙБЛОМ ПОДА. Прежняя реализация требовала
+        # АЛЕРТ с атрибуцией к поду — величину строго сильнее той, что просит
+        # постановка, и структурно недостижимую: uprobe встаёт на INODE
+        # библиотеки, а не на процесс, поэтому заголовок Authorization платит
+        # короткоживущий s_client, чей резолв pid→pod проигрывает гонку с его
+        # собственным выходом, и алерт приезжает с pod=null. Держатель в поде
+        # долгоживущий, его события размечены правильно — этим и судим.
+        #
+        # Алерт правила остаётся ДОПОЛНИТЕЛЬНОЙ величиной (alert_rule_delta),
+        # но вердикта не гейтит: он уже предъявлен меткой 6.4.3 на хосте.
+        local ev0_pod ev1_pod dd0_pod dd1_pod al0 al1
         ev0_pod=$(_w64_events_tls)
         dd0_pod=$(_w64_dedup_rule tls_http_basic_auth)
+        al0=$(_w64_alerts_rule tls_http_basic_auth)
         kubectl -n "$W64_NS" exec "$pod" -- sh -c \
             "printf 'GET /item6 HTTP/1.0\r\nAuthorization: Basic dzY0aXRlbTY6cG9k\r\n\r\n' | openssl s_client -quiet -connect 127.0.0.1:$port >/tmp/client.log 2>&1" \
             >/dev/null 2>&1
         sleep 5
         ev1_pod=$(_w64_events_tls)
         dd1_pod=$(_w64_dedup_rule tls_http_basic_auth)
+        al1=$(_w64_alerts_rule tls_http_basic_auth)
+        pod_ev_labeled=$(_w64_events_tls_pod "$pod")
         if _w64_is_num "$ev0_pod" && _w64_is_num "$ev1_pod"; then
             pod_ev_delta=$(( ev1_pod - ev0_pod ))
         fi
         if _w64_is_num "$dd0_pod" && _w64_is_num "$dd1_pod"; then
             pod_dedup_delta=$(( dd1_pod - dd0_pod ))
         fi
-        echo "  item6: обмен в поде проведён — события TLS за обмен: ${pod_ev_delta:-НЕИЗМЕРИМО}, срез дедупа по tls_http_basic_auth: ${pod_dedup_delta:-НЕИЗМЕРИМО}"
-        if command -v jq >/dev/null 2>&1; then
-            local alerts_json hit
-            alerts_json=$(curl -s --max-time 30 -H "Authorization: Bearer $W64_TOKEN" "$W64_API/api/v1/alerts?limit=200000" 2>/dev/null)
-            if printf '%s' "$alerts_json" | jq -e . >/dev/null 2>&1; then
-                hit=$(printf '%s' "$alerts_json" | jq --arg pod "$pod" \
-                    '[.[] | select(.pod == $pod) | select(.rule_id=="tls_http_basic_auth" or (.details.base_rule_id? == "tls_http_basic_auth"))] | length' 2>/dev/null)
-                if _w64_is_num "$hit" && [ "$hit" -ge 1 ]; then
-                    event="yes"
-                elif _w64_is_num "$hit"; then
-                    event="no"
-                else
-                    event="неизмерим_jq_не_число"
-                fi
-            else
-                event="неизмерим_alerts_api"
-            fi
-        else
-            event="неизмерим_jq_недоступен"
+        if _w64_is_num "$al0" && _w64_is_num "$al1"; then
+            alert_rule_delta=$(( al1 - al0 ))
         fi
+        if _w64_is_num "$pod_ev_labeled" && [ "$pod_ev_labeled" -ge 1 ]; then
+            event="yes"
+        elif _w64_is_num "$pod_ev_labeled" ; then
+            event="no"
+        else
+            event="неизмерим_серии_с_лейблом_пода_нет"
+        fi
+        echo "  item6: обмен проведён — события TLS с лейблом пода: ${pod_ev_labeled:-НЕИЗМЕРИМО}, события TLS всего за обмен: ${pod_ev_delta:-НЕИЗМЕРИМО}, алертов правила за обмен: ${alert_rule_delta:-НЕИЗМЕРИМО}, срез дедупа: ${pod_dedup_delta:-НЕИЗМЕРИМО}"
     fi
 
     kubectl -n "$W64_NS" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -424,7 +446,9 @@ _w64_item6() {
         echo "bound=$bound"
         echo "identity_match=$identity"
         echo "event=$event"
+        echo "pod_events=${pod_ev_labeled:-НЕИЗМЕРИМО}"
         echo "events_delta=${pod_ev_delta:-НЕИЗМЕРИМО}"
+        echo "alert_delta=${alert_rule_delta:-НЕИЗМЕРИМО}"
         echo "dedup_delta=${pod_dedup_delta:-НЕИЗМЕРИМО}"
     } > "$out"
     echo "  item6: bound=$bound, identity_match=$identity, event=$event (под $pod, неймспейс $W64_NS)"

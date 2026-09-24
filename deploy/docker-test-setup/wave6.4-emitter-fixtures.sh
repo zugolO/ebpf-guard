@@ -326,28 +326,36 @@ _w648_cc_case "алерт пода схлопнут дедупом" \
     "bound=yes
 identity_match=yes
 event=no
+pod_events=3
 events_delta=6
+alert_delta=0
 dedup_delta=2" \
     "СХЛОПНУТ ДЕДУПОМ"
 _w648_cc_case "событие дошло, детекта нет — класс продуктовый" \
     "bound=yes
 identity_match=yes
 event=no
+pod_events=3
 events_delta=6
+alert_delta=0
 dedup_delta=0" \
     "класс ПРОДУКТОВЫЙ"
 _w648_cc_case "обмен в поде не дошёл до коллектора вовсе" \
     "bound=yes
 identity_match=yes
 event=no
+pod_events=0
 events_delta=0
+alert_delta=0
 dedup_delta=0" \
-    "события TLS за обмен = 0"
+    "события TLS С ЛЕЙБЛОМ ПОДА = 0"
 _w648_cc_case "все три условия выполнены — величины напечатаны" \
     "bound=yes
 identity_match=yes
 event=yes
+pod_events=4
 events_delta=6
+alert_delta=1
 dedup_delta=0" \
     "ДОСТИГНУТО"
 

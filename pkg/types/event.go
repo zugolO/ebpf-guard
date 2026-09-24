@@ -316,7 +316,23 @@ type TLSEvent struct {
 	// Direction indicates whether this is outbound (write) or inbound (read) data.
 	Direction TLSDirection
 	// DataLen is the actual length of the TLS record (may exceed len(Data)).
+	// It is the record length reported by the kernel, NOT the number of bytes
+	// present in Data — see CapturedLen. Rules like `data_len gt 1MB` rely on
+	// it staying the true record size even when collectors.tls.max_data_size
+	// windows the captured bytes.
 	DataLen uint32
+	// CapturedLen is how many bytes of Data are meaningful after the
+	// collector's max_data_size window is applied (≤ len(Data)). String fields
+	// over the payload must slice via CapturedData, never Data[:DataLen].
+	CapturedLen uint32
+	// CapturedSet distinguishes "the producer filled CapturedLen" from "the
+	// field was never touched". Finding №443: without it, zero carried both
+	// meanings at once — the collector zeroes Data and sets CapturedLen=0 when
+	// the kernel could not read the userspace buffer, while fixtures and
+	// replayed events leave CapturedLen unset with a meaningful DataLen. Only
+	// a producer that owns the capture length sets this; CapturedData falls
+	// back to DataLen exactly when it is false.
+	CapturedSet bool
 	// Data contains the captured plaintext (first 256 bytes).
 	Data [256]byte
 	// JA3 is the JA3 TLS client fingerprint hash (MD5 hex) computed from the
@@ -328,6 +344,37 @@ type TLSEvent struct {
 	// JA3S is the JA3S server-side fingerprint hash (MD5 hex) computed from the
 	// TLS ServerHello handshake message.
 	JA3S string
+}
+
+// CapturedData returns the bytes of Data that are meaningful for this event:
+// Data[:CapturedLen] when a producer set CapturedSet, otherwise DataLen
+// clamped to len(Data) for events built by tests, fixtures or replay. String
+// consumers over the payload (rules, Rego) must use this rather than
+// Data[:DataLen], so a lowered collectors.tls.max_data_size windows the
+// payload without exposing NUL padding — and so a capture the kernel could
+// not read (CapturedSet with CapturedLen == 0) reads as empty rather than as
+// DataLen zero bytes (№443).
+func (e *TLSEvent) CapturedData() []byte {
+	if e == nil {
+		return nil
+	}
+	return e.Data[:capturedWindow(e.CapturedLen, e.CapturedSet, e.DataLen, len(e.Data))]
+}
+
+// capturedWindow resolves the payload window shared by TLSEvent and HTTPEvent:
+// the producer-set captured length when it is authoritative, otherwise the
+// record length, always clamped to the buffer. Both event types carry the same
+// two-field contract, so the resolution lives in one place — finding №443 was
+// a single overloaded zero, and two copies of the rule would drift apart.
+func capturedWindow(capturedLen uint32, capturedSet bool, dataLen uint32, bufLen int) uint32 {
+	l := capturedLen
+	if !capturedSet {
+		l = dataLen
+	}
+	if l > uint32(bufLen) {
+		l = uint32(bufLen)
+	}
+	return l
 }
 
 // HTTPDirection indicates the direction of captured plaintext HTTP data.
@@ -348,10 +395,31 @@ const (
 type HTTPEvent struct {
 	// Direction indicates whether this is a request (read) or response (write).
 	Direction HTTPDirection
-	// DataLen is the actual length of the captured read/write (may exceed len(Data)).
+	// DataLen is the actual length of the captured read/write (may exceed
+	// len(Data)). It is the true read()/recv() length, NOT the number of bytes
+	// present in Data — see CapturedLen — so `data_len` rules keep working
+	// when collectors.http_plaintext.max_data_size windows the payload.
 	DataLen uint32
+	// CapturedLen is how many bytes of Data are meaningful after the
+	// collector's max_data_size window is applied (≤ len(Data)).
+	CapturedLen uint32
+	// CapturedSet marks CapturedLen as authoritative — see TLSEvent.CapturedSet
+	// and finding №443. Finding №444: until this pair existed, HTTPEventRaw
+	// already carried the kernel's captured_len and ToTypesEvent dropped it, so
+	// collectors.http_plaintext.max_data_size could not narrow anything.
+	CapturedSet bool
 	// Data contains the captured plaintext (first 256 bytes).
 	Data [256]byte
+}
+
+// CapturedData returns the meaningful bytes of Data for this event, by the same
+// contract as TLSEvent.CapturedData. String consumers over the plaintext HTTP
+// payload (rules, Rego) must use it rather than Data[:DataLen].
+func (e *HTTPEvent) CapturedData() []byte {
+	if e == nil {
+		return nil
+	}
+	return e.Data[:capturedWindow(e.CapturedLen, e.CapturedSet, e.DataLen, len(e.Data))]
 }
 
 // DNSDirection indicates the direction of DNS traffic.

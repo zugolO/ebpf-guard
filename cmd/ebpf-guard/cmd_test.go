@@ -42,6 +42,18 @@ func TestNewVersionCmd(t *testing.T) {
 	if !strings.Contains(out, Commit) {
 		t.Errorf("version output = %q, want it to contain commit %q", out, Commit)
 	}
+	// №441: the pipeline preflight judges the BINARY, not the source tree, via
+	// this machine-readable marker. Its value depends on whether the real
+	// bpf/tls_uprobe object was compiled in (false on a stub/no-generate
+	// build), so assert the marker is present, not that it is true.
+	if !strings.Contains(out, "build-features: tls_attach_failures=") {
+		t.Errorf("version output = %q, want it to carry a build-features: tls_attach_failures= marker (pipeline preflight №441)", out)
+	}
+	// №442 / метка 6.4B.4: решение по http_plaintext предъявляется тем же
+	// машинно-читаемым признаком, иначе метка судила бы исходник.
+	if !strings.Contains(out, "http_plaintext_loader=") {
+		t.Errorf("version output = %q, want it to carry an http_plaintext_loader= marker (finding №442)", out)
+	}
 }
 
 func TestNewVersionCmd_WithBuildTime(t *testing.T) {

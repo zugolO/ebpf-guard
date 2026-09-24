@@ -163,3 +163,60 @@ func TestEventTypeString(t *testing.T) {
 		assert.NotEqual(t, "unknown", et.String(), "EventType %d needs a canonical name", et)
 	}
 }
+
+// Wave 6.4.B item 7 + finding №443: CapturedData is the single payload-window
+// contract shared by rules and Rego. CapturedSet — not a zero length — is what
+// makes the window authoritative; without that flag an explicit "the kernel
+// captured nothing" was indistinguishable from "this fixture never set the
+// field", and the payload read back as DataLen NUL bytes.
+func TestTLSEvent_CapturedData(t *testing.T) {
+	var nilEvent *TLSEvent
+	assert.Nil(t, nilEvent.CapturedData())
+
+	raw := [256]byte{'a', 'b', 'c', 'd', 'e'}
+
+	// A producer-set window is authoritative (the max_data_size window).
+	e := &TLSEvent{DataLen: 5, CapturedLen: 2, CapturedSet: true, Data: raw}
+	assert.Equal(t, []byte("ab"), e.CapturedData())
+
+	// №443: an authoritative zero reads as empty, NOT as DataLen zero bytes.
+	e0 := &TLSEvent{DataLen: 5, CapturedLen: 0, CapturedSet: true, Data: [256]byte{}}
+	assert.Empty(t, e0.CapturedData())
+
+	// Fixtures/replay never set the flag and fall back to DataLen.
+	e2 := &TLSEvent{DataLen: 3, Data: raw}
+	assert.Equal(t, []byte("abc"), e2.CapturedData())
+
+	// A fixture that happens to carry CapturedLen without the flag still reads
+	// by DataLen — one field decides, so the two cannot disagree silently.
+	e2b := &TLSEvent{DataLen: 5, CapturedLen: 2, Data: raw}
+	assert.Equal(t, []byte("abcde"), e2b.CapturedData())
+
+	// Out-of-range values clamp to len(Data), never panic.
+	e3 := &TLSEvent{DataLen: 1000, CapturedLen: 999, CapturedSet: true, Data: raw}
+	assert.Len(t, e3.CapturedData(), len(raw))
+	e4 := &TLSEvent{DataLen: 1000, Data: raw}
+	assert.Len(t, e4.CapturedData(), len(raw))
+}
+
+// Finding №444: HTTPEvent carries the same contract, because the plaintext HTTP
+// collector is the same mechanism one file over — and its max_data_size was a
+// no-op until CapturedLen/CapturedSet reached the type.
+func TestHTTPEvent_CapturedData(t *testing.T) {
+	var nilEvent *HTTPEvent
+	assert.Nil(t, nilEvent.CapturedData())
+
+	raw := [256]byte{'G', 'E', 'T', ' ', '/'}
+
+	e := &HTTPEvent{DataLen: 5, CapturedLen: 3, CapturedSet: true, Data: raw}
+	assert.Equal(t, []byte("GET"), e.CapturedData())
+
+	e0 := &HTTPEvent{DataLen: 5, CapturedSet: true, Data: [256]byte{}}
+	assert.Empty(t, e0.CapturedData())
+
+	e2 := &HTTPEvent{DataLen: 5, Data: raw}
+	assert.Equal(t, []byte("GET /"), e2.CapturedData())
+
+	e3 := &HTTPEvent{DataLen: 1000, CapturedLen: 999, CapturedSet: true, Data: raw}
+	assert.Len(t, e3.CapturedData(), len(raw))
+}

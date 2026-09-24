@@ -1792,11 +1792,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		}
 		switch field {
 		case "tls_data", "data":
-			l := e.TLS.DataLen
-			if l > uint32(len(e.TLS.Data)) {
-				l = uint32(len(e.TLS.Data))
-			}
-			return string(e.TLS.Data[:l])
+			return string(e.TLS.CapturedData())
 		case "direction":
 			return strconv.FormatUint(uint64(e.TLS.Direction), 10)
 		case "data_len":
@@ -1816,11 +1812,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		}
 		switch field {
 		case "http_data", "data":
-			l := e.HTTPPlaintext.DataLen
-			if l > uint32(len(e.HTTPPlaintext.Data)) {
-				l = uint32(len(e.HTTPPlaintext.Data))
-			}
-			return string(e.HTTPPlaintext.Data[:l])
+			return string(e.HTTPPlaintext.CapturedData())
 		case "direction":
 			return strconv.FormatUint(uint64(e.HTTPPlaintext.Direction), 10)
 		case "data_len":

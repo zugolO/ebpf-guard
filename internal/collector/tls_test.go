@@ -3,8 +3,10 @@ package collector
 
 import (
 	"bytes"
+	"context"
 	"debug/elf"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,9 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zugolO/ebpf-guard/pkg/types"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // TestTLSEventRawToTypesEvent verifies conversion from raw BPF event to types.Event.
@@ -52,9 +56,10 @@ func TestTLSEventRawToTypesEvent(t *testing.T) {
 				Comm:       [16]byte{'c', 'u', 'r', 'l'},
 				ParentComm: [16]byte{'b', 'a', 's', 'h'},
 				TLS: &types.TLSEvent{
-					Direction: types.TLSDirectionWrite,
-					DataLen:   100,
-					Data:      [256]byte{'G', 'E', 'T', ' ', '/'},
+					Direction:   types.TLSDirectionWrite,
+					DataLen:     100,
+					CapturedLen: 100,
+					Data:        [256]byte{'G', 'E', 'T', ' ', '/'},
 				},
 			},
 		},
@@ -84,9 +89,10 @@ func TestTLSEventRawToTypesEvent(t *testing.T) {
 				Comm:       [16]byte{'n', 'g', 'i', 'n', 'x'},
 				ParentComm: [16]byte{'s', 'y', 's', 't', 'e', 'm', 'd'},
 				TLS: &types.TLSEvent{
-					Direction: types.TLSDirectionRead,
-					DataLen:   2048,
-					Data:      [256]byte{'H', 'T', 'T', 'P', '/', '1', '.', '1'},
+					Direction:   types.TLSDirectionRead,
+					DataLen:     2048,
+					CapturedLen: 256,
+					Data:        [256]byte{'H', 'T', 'T', 'P', '/', '1', '.', '1'},
 				},
 			},
 		},
@@ -183,6 +189,48 @@ func TestTLSCollectorStubMode(t *testing.T) {
 	col.loadError = fmt.Errorf("simulated load failure")
 	assert.False(t, col.IsHealthy())
 	assert.NotNil(t, col.LoadError())
+}
+
+// TestTLSAttachFailureReasonsMaterialized verifies №439: every reason label is
+// present in /metrics from process startup, so a zero means "the binary knows
+// this counter and it is zero" rather than "this series does not exist" — the
+// reading that made "0 attach failures" indistinguishable from №436's dead
+// code path.
+func TestTLSAttachFailureReasonsMaterialized(t *testing.T) {
+	reasons := tlsAttachFailureReasons
+	require.NotEmpty(t, reasons)
+
+	got := testutil.CollectAndCount(tlsAttachFailuresCounter)
+	assert.Equal(t, len(reasons), got,
+		"every reason must be materialized at init; a missing series reads as no failures attempted")
+}
+
+// TestTLSCollectorStart_StubModeIsVisible — рецепт №326 (обнаруживать дефект
+// по дереву, а не по стенду): №436 был невидим, потому что Start() уходил в
+// stub mode СТРОКОЙ ВЫШЕ discoveryLoop, а collector_up{tls} при этом врала
+// единицей (№438), а счётчик отказов не трогался (№439). Тест поднимает
+// коллектор с заведомо-нерабочей загрузкой и требует, чтобы оба сигнала
+// показали выключенный прибор.
+func TestTLSCollectorStart_StubModeIsVisible(t *testing.T) {
+	before := testutil.ToFloat64(tlsAttachFailuresCounter.WithLabelValues("objects_not_loaded"))
+
+	col, err := NewTLSCollector(slog.Default(), true)
+	require.NoError(t, err)
+	// Force the exact stub path (№436) without a kernel or generated BPF object.
+	col.loadObjectsFn = func() error { return errors.New("injected load failure") }
+	// The production reporter bridge: exporter.CollectorStatusReporter writes
+	// into ebpf_guard_collector_up, the same series the pipeline guard reads.
+	col.WithStatusReporter(exporter.CollectorStatusReporter{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // stub mode parks on <-ctx.Done(); a cancelled ctx returns at once.
+	require.NoError(t, col.Start(ctx, make(chan types.Event, 1)))
+
+	up := testutil.ToFloat64(exporter.CollectorUp.WithLabelValues("tls"))
+	assert.Zero(t, up, "collector_up{tls} must be 0 in stub mode, not an optimistic 1 (№438)")
+	after := testutil.ToFloat64(tlsAttachFailuresCounter.WithLabelValues("objects_not_loaded"))
+	assert.GreaterOrEqual(t, after, before+1,
+		"a stub-mode load must be visible as objects_not_loaded, not indistinguishable from zero attempts (№439)")
 }
 
 // TestTLSEventPatternMatching verifies TLS data pattern detection logic.
@@ -347,6 +395,87 @@ func TestTLSCollectorScanInterval(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 30*time.Second, col.scanInterval)
+	assert.Equal(t, 256, col.maxDataSize)
+}
+
+// TestTLSCollectorConfigReachesCollector — item 7 волны 6.4.B: values from
+// collectors.tls must reach the collector instead of being silently ignored.
+func TestTLSCollectorConfigReachesCollector(t *testing.T) {
+	col, err := NewTLSCollector(slog.Default(), true)
+	require.NoError(t, err)
+
+	col.WithScanInterval(5 * time.Second).WithMaxDataSize(64)
+	assert.Equal(t, 5*time.Second, col.scanInterval)
+	assert.Equal(t, 64, col.maxDataSize)
+
+	// Non-positive overrides must not clobber the defaults.
+	col.WithScanInterval(0).WithMaxDataSize(-1)
+	assert.Equal(t, 5*time.Second, col.scanInterval)
+	assert.Equal(t, 64, col.maxDataSize)
+}
+
+// TestTLSCollectorMaxDataSizeWindow verifies that collectors.tls.max_data_size
+// narrows the exposed payload via CapturedLen while preserving DataLen (the
+// true record length that `data_len gt N` rules depend on).
+func TestTLSCollectorMaxDataSizeWindow(t *testing.T) {
+	col, err := NewTLSCollector(slog.Default(), true)
+	require.NoError(t, err)
+
+	raw := [256]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+
+	// Default 256: no truncation; CapturedLen follows the record length.
+	e := &types.TLSEvent{DataLen: 10, CapturedLen: 10, Data: raw}
+	assert.Equal(t, uint32(10), col.applyMaxDataSize(e))
+	assert.Equal(t, uint32(10), e.DataLen)
+	assert.Equal(t, uint32(10), e.CapturedLen)
+
+	// Configured window smaller than the record: bytes zeroed, DataLen (the
+	// true record length) preserved, CapturedLen clamped to the window.
+	col.WithMaxDataSize(4)
+	e2 := &types.TLSEvent{DataLen: 10, CapturedLen: 10, Data: raw}
+	assert.Equal(t, uint32(4), col.applyMaxDataSize(e2))
+	assert.Equal(t, uint32(10), e2.DataLen, "record length must survive so data_len gt N rules keep working")
+	assert.Equal(t, uint32(4), e2.CapturedLen)
+	assert.Equal(t, [256]byte{1, 2, 3, 4}, e2.Data)
+
+	// Record shorter than the window is untouched.
+	e3 := &types.TLSEvent{DataLen: 3, CapturedLen: 3, Data: raw}
+	assert.Equal(t, uint32(3), col.applyMaxDataSize(e3))
+	assert.Equal(t, uint32(3), e3.DataLen)
+
+	// An explicit CapturedLen==0 from the kernel (read failure/empty write)
+	// must NOT fall back to DataLen: stale Data bytes are zeroed, not exposed.
+	e4 := &types.TLSEvent{DataLen: 10, Data: raw}
+	assert.Equal(t, uint32(0), col.applyMaxDataSize(e4))
+	assert.Equal(t, uint32(10), e4.DataLen)
+	assert.Equal(t, [256]byte{}, e4.Data)
+
+	// №443: every path leaves the window authoritative, so the reader sees an
+	// empty payload here instead of DataLen NUL bytes. Asserting on
+	// CapturedData (what rules and Rego actually call) rather than on the
+	// fields is the point: the earlier pair of assertions was satisfied while
+	// the payload still read back as ten zero bytes one function away.
+	assert.True(t, e4.CapturedSet)
+	assert.Empty(t, e4.CapturedData(), "a capture the kernel could not read must read as empty, not as DataLen NUL bytes")
+	assert.True(t, e2.CapturedSet)
+	assert.Equal(t, []byte{1, 2, 3, 4}, e2.CapturedData())
+}
+
+// TestTLSScanCounterMovesWithoutLibssl verifies №445: a discovery scan is
+// measurable even when it attaches to nothing. Before the counter, the only
+// evidence that scanAndAttach ran was tracked_pids > 0 — a property of the
+// node, not of the collector, so a live collector on a node without libssl and
+// the dead stub-mode one of №436 printed the same zero.
+func TestTLSScanCounterMovesWithoutLibssl(t *testing.T) {
+	col, err := NewTLSCollector(slog.Default(), true)
+	require.NoError(t, err)
+
+	before := testutil.ToFloat64(tlsScansCounter)
+	col.scanAndAttach()
+	after := testutil.ToFloat64(tlsScansCounter)
+
+	assert.Equal(t, before+1, after,
+		"a scan must be counted even when it attaches to nothing and even when /proc is unreadable (non-Linux)")
 }
 
 // TestTLSCollectorCleanupDeadPIDs verifies that dead PIDs are removed from libsslPaths.

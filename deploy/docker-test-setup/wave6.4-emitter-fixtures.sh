@@ -73,10 +73,15 @@ _cls() {
 # — гейдж без меток; attach_failures — счётчик с меткой reason; events_total
 # — счётчик с меткой type; alert_volume_by_event_type_total — счётчик с
 # меткой event_type. Отсутствующий аргумент = серии в снимке НЕТ ВООБЩЕ.
+# СЕДЬМОЙ аргумент (необязательный) — ebpf_guard_tls_attach_success_total,
+# МОНОТОННАЯ величина привязки (№449). Необязательный ровно затем, чтобы
+# двенадцать уже написанных фикстур продолжали описывать бинарь БЕЗ №449 и
+# проверяли ветку отката на мгновенный tracked_pids.
 _mk_metrics() {
-    local f="$1" tracked="$2" fails="$3" ev="$4" avol_tls="$5" avol_any="$6"
+    local f="$1" tracked="$2" fails="$3" ev="$4" avol_tls="$5" avol_any="$6" att="${7:-}"
     : > "$f"
     [ -n "$tracked" ] && echo "ebpf_guard_tls_tracked_pids_total $tracked" >> "$f"
+    [ -n "$att" ] && echo "ebpf_guard_tls_attach_success_total $att" >> "$f"
     if [ -n "${fails:-}" ]; then
         local reason count
         for pair in $fails; do
@@ -262,6 +267,34 @@ _mk_metrics "$L/metrics-window-end.txt"   "" "" 20  5  30
 _check "счётчик events_total убыл внутри окна (рестарт)" "$(_run "$L" B off)" \
     6.4.1=FAIL 6.4.8=OK
 
+# ── 13. №449: СНИМОК ВЗЯТ ПОСЛЕ КОНТРОЛЕЙ items 5/6, которые убили своего
+#    держателя. Мгновенный tracked_pids=0, монотонная привязка = 3. Это
+#    ПРОДУКТОВО УСПЕШНЫЙ прогон: 6.4.2 обязана быть ДОСТИГНУТО, а 6.4.1 —
+#    назвать свой ноль ПРОДУКТОВЫМ, а не приборным. До №449 ровно этот вход
+#    читался как «не привязались ни разу» и ронял критерий выхода (2).
+M="$WORK/artM"; mkdir -p "$M"
+_mk_metrics "$M/metrics-live.txt" 0 "" "" "" "" 3
+_mk_metrics "$M/metrics-window-start.txt" "" "" 10 2 5
+_mk_metrics "$M/metrics-window-end.txt"   "" "" 10 2 5
+_w648_m_out="$(_run "$M" B off)"
+_check "снимок после контролей: tracked_pids=0 при attach_success_total=3 (№449)" "$_w648_m_out" \
+    6.4.0=OK 6.4.1=OK 6.4.2=OK 6.4.8=OK
+if printf '%s\n' "$_w648_m_out" | grep -qE '6\.4\.1[[:space:]]+ИЗМЕРЕНО.*ПРОДУКТОВЫЙ'; then
+    echo "    OK  6.4.1 назвала ноль ПРОДУКТОВЫМ (привязка была), а не приборным"
+else
+    _efail "№449: 6.4.1 при attach_success_total=3 обязана назвать ноль ПРОДУКТОВЫМ — строка: $(printf '%s\n' "$_w648_m_out" | grep -E '6\.4\.1[[:space:]]+ИЗМЕРЕНО' | cut -c1-200)"
+fi
+
+# ── 14. НИ ОДНОЙ ПРИВЯЗКИ ЗА ЖИЗНЬ ПРОЦЕССА при живой серии — это по-прежнему
+#    ПРОВАЛЕН, и монотонный счётчик не смягчает вердикт, а делает его
+#    непробиваемым: ноль здесь уже не спишешь на убитого держателя.
+N="$WORK/artN"; mkdir -p "$N"
+_mk_metrics "$N/metrics-live.txt" 0 "no_elf=2" "" "" "" 0
+_mk_metrics "$N/metrics-window-start.txt" "" "" 0 0 0
+_mk_metrics "$N/metrics-window-end.txt"   "" "" 0 0 0
+_check "привязок за жизнь процесса ноль при предъявленных отказах" "$(_run "$N" B off)" \
+    6.4.0=OK 6.4.1=OK 6.4.2=FAIL 6.4.8=OK
+
 echo
 echo "--- сторож №373: способна ли каждая метка (кроме законно-постоянной 6.4.5) вынести годную величину хоть на одном входе"
 _all_out="$(_run "$A" A off)
@@ -285,9 +318,273 @@ done
 # исключённая из этого же сторожа по решению владельца, находка №372).
 echo "    (6.4.5 исключена намеренно: развилка item 4 закрыта исходом (б), №433 — предмета нет ни на одном прогоне)"
 
+# ═════════════════════════════════════════════════════════════════════════════
+# БЛОК W64B — метки волны 6.4.B (6.4B.0…6.4B.5, долг прогона collect-6.4-B).
+#
+# ЗАЧЕМ ВТОРОЙ БЛОК, А НЕ ФИКСТУРЫ В ПЕРВОМ. У блока W648 инвариант И1 —
+# «ровно девять вердиктных строк»; дописывание меток 6.4.B в него сломало бы и
+# его, и счётчик метки 6.4.8. Блоки разделены в пайплайне, разделены и здесь.
+#
+# ЧЕМ ОТЛИЧАЕТСЯ ВХОД. Блок W64B читает не только /metrics, но и БИНАРЬ
+# (`"$_r63_bin" version`, признак №441/№442) — поэтому гарнесс подкладывает
+# исполняемый файл-двойник, печатающий нужную строку. Это ровно то, что
+# [[entry-guard-must-read-runtime-not-config]] требует от самого пайплайна:
+# судится рантайм, и фикстура обязана уметь подделать именно рантайм.
+# ═════════════════════════════════════════════════════════════════════════════
+if ! grep -q 'W64B-EMITTERS-BEGIN' "$PIPE" || ! grep -q 'W64B-EMITTERS-END' "$PIPE"; then
+    echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: в $PIPE нет маркеров W64B-EMITTERS-BEGIN/END — метки волны 6.4.B вынимать нечем"
+    exit 2
+fi
+sed -n '/W64B-EMITTERS-BEGIN/,/W64B-EMITTERS-END/p' "$PIPE" > "$WORK/blockb.sh"
+_blockb_lines=$(wc -l < "$WORK/blockb.sh")
+if [ "${_blockb_lines:-0}" -lt 40 ]; then
+    echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: между маркерами W64B всего ${_blockb_lines} строк — блок вынут не тот"
+    exit 2
+fi
+bash -n "$WORK/blockb.sh" || { echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: блок W64B не разбирается bash -n"; exit 2; }
+
+# _mk_metrics_b <файл> <scans|""> <candidates|""> <"reason=N ..."|""> <"collector=V ..."|"">
+# Отсутствующий аргумент = серии в снимке НЕТ ВООБЩЕ (а не ноль — ровно та
+# развилка, ради которой заведены №439/№446).
+_mk_metrics_b() {
+    local f="$1" scans="$2" cand="$3" reasons="$4" ups="$5"
+    : > "$f"
+    [ -n "$scans" ] && echo "ebpf_guard_tls_scans_total $scans" >> "$f"
+    [ -n "$cand" ] && echo "ebpf_guard_tls_scan_candidates $cand" >> "$f"
+    local pair
+    for pair in ${reasons:-}; do
+        echo "ebpf_guard_tls_attach_failures_total{reason=\"${pair%%=*}\"} ${pair##*=}" >> "$f"
+    done
+    for pair in ${ups:-}; do
+        echo "ebpf_guard_collector_up{collector=\"${pair%%=*}\"} ${pair##*=}" >> "$f"
+    done
+}
+
+_ALL6="objects_not_loaded=0 no_elf=0 no_symbols=0 no_symbol_found=0 libssl_mismatch=0 attach_failed=0"
+
+# _mk_bin <путь> <строка build-features или "">
+_mk_bin() {
+    local f="$1" feat="$2"
+    { echo '#!/usr/bin/env bash'
+      echo 'echo "ebpf-guard version test"'
+      [ -n "$feat" ] && echo "echo \"build-features: $feat\""
+      echo 'exit 0'
+    } > "$f"
+    chmod +x "$f"
+}
+
+# _runb <снимок /metrics> <role> <entry_class> <бинарь> <http_enabled yes|no>
+_runb() {
+    local met="$1" role="$2" ec="$3" bin="$4" httpen="$5"
+    cat > "$WORK/harnessb.sh" <<EOF
+set -u
+_w648_role="$role"
+_w64b_entry_class="$ec"
+_w64b_entry_msg="синтетический вход фикстуры"
+_w64b_http_enabled="$httpen"
+_r63_bin="$bin"
+_w648_tracked=0
+_w648_att=2
+_w63l_metrics="\$(cat "$met" 2>/dev/null)"
+EOF
+    cat "$WORK/blockb.sh" >> "$WORK/harnessb.sh"
+    bash "$WORK/harnessb.sh" 2>&1
+}
+
+# _checkb — те же инварианты И1/И2/И3, своя таблица меток (шесть).
+_checkb() {
+    local name="$1" out="$2"; shift 2
+    echo "--- фикстура 6.4.B: $name"
+    local lbl exp got line n
+    n=0
+    for lbl in 6.4B.0 6.4B.1 6.4B.2 6.4B.3 6.4B.4 6.4B.5; do
+        line=$(printf '%s\n' "$out" | grep -cE "(^|[^0-9.])${lbl//./\\.}[[:space:]]+(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ|ИЗМЕРЕНО)")
+        [ "${line:-0}" -eq 1 ] || _efail "$name: метка $lbl напечатала ${line:-0} вердиктных строк вместо одной (И2/И3)"
+        n=$((n + line))
+    done
+    [ "$n" -eq 6 ] || _efail "$name: вердиктных строк всего $n вместо шести (И1)"
+    for exp in "$@"; do
+        lbl="${exp%%=*}"; exp="${exp##*=}"
+        line=$(printf '%s\n' "$out" | grep -E "(^|[^0-9.])${lbl//./\\.}[[:space:]]+(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ|ИЗМЕРЕНО)" | tail -1)
+        got=$(_cls "$line")
+        if [ "$got" = "$exp" ]; then
+            echo "    OK  $lbl = $got"
+        else
+            _efail "$name: $lbl дал класс $got, ожидался $exp — строка: $(printf '%s' "$line" | cut -c1-160)"
+        fi
+    done
+}
+
+echo
+echo "=== ФИКСТУРНЫЙ ПРОГОН ВЕРДИКТНЫХ ВЕТОК 6.4B.0…6.4B.5 (блок из $PIPE, ${_blockb_lines} строк) ==="
+
+BIN_OK="$WORK/bin-ok";    _mk_bin "$BIN_OK"    "tls_attach_failures=true http_plaintext_loader=true"
+BIN_NOGEN="$WORK/bin-ng"; _mk_bin "$BIN_NOGEN" "tls_attach_failures=false http_plaintext_loader=false"
+BIN_OLD="$WORK/bin-old";  _mk_bin "$BIN_OLD"   ""
+
+# ── B1. ЗДОРОВЫЙ ПРОГОН B: сканы идут, ось collector_up предъявлена обеими
+#    сторонами, все шесть reason материализованы, бинарь несёт оба признака.
+MB1="$WORK/mb1.txt"; _mk_metrics_b "$MB1" 7 2 "$_ALL6" "tls=1 http_plaintext=1 iouring=0"
+_checkb "здоровый прогон B (сканы идут, ось предъявлена обеими сторонами)" \
+    "$(_runb "$MB1" B OK "$BIN_OK" yes)" \
+    6.4B.0=OK 6.4B.1=OK 6.4B.2=OK 6.4B.3=OK 6.4B.4=OK 6.4B.5=OK
+
+# ── B2. ПРОГОН A: приборность TLS не судится (сторож и discoveryLoop не
+#    запускаются по построению), но метки о БИНАРЕ и о честности метрики
+#    обязаны выносить вердикт и здесь — они не про TLS-поток.
+MB2="$WORK/mb2.txt"; _mk_metrics_b "$MB2" "" "" "$_ALL6" "dns=1 syscall=1 iouring=0"
+_checkb "прогон A (TLS выключен конфигом)" \
+    "$(_runb "$MB2" A NOTREQ "$BIN_OK" no)" \
+    6.4B.0=NOTREQ 6.4B.1=NOTREQ 6.4B.2=OK 6.4B.3=OK 6.4B.4=OK 6.4B.5=OK
+
+# ── B3. ПОДПИСЬ №436: серия сканов есть и равна нулю — discoveryLoop не
+#    сделал ни одного прохода за жизнь процесса. Это ПРОВАЛЕН, а не
+#    НЕИЗМЕРИМ: прибор ответил, и ответ отрицательный.
+MB3="$WORK/mb3.txt"; _mk_metrics_b "$MB3" 0 0 "$_ALL6" "tls=0 dns=1"
+_checkb "подпись №436 (сканов ноль при живой серии)" \
+    "$(_runb "$MB3" B OK "$BIN_OK" no)" \
+    6.4B.1=FAIL 6.4B.2=OK 6.4B.5=OK
+
+# ── B4. БИНАРЬ БЕЗ №445: серии сканов нет вовсе — «скан шёл» неотличимо от
+#    «Start ушёл в stub mode выше цикла». Отсутствие серии обязано читаться
+#    как НЕИЗМЕРИМ с названным классом, а не как ноль сканов.
+MB4="$WORK/mb4.txt"; _mk_metrics_b "$MB4" "" "" "$_ALL6" "tls=1 iouring=0"
+_checkb "бинарь без №445 (серии сканов нет)" \
+    "$(_runb "$MB4" B OK "$BIN_OK" no)" \
+    6.4B.1=FAIL 6.4B.5=OK
+
+# ── B5. ОТРИЦАТЕЛЬНЫЙ СЛУЧАЙ НОДОЙ НЕ ПРЕДЪЯВЛЕН: все collector_up равны
+#    единице. Это НЕ «метрика честна» — до №438 так выглядел и сломанный
+#    прибор ([[collector-up-is-not-a-health-signal]]), поэтому класс —
+#    НЕИЗМЕРИМ, а не ДОСТИГНУТО.
+MB5="$WORK/mb5.txt"; _mk_metrics_b "$MB5" 3 1 "$_ALL6" "tls=1 dns=1 syscall=1"
+_checkb "все collector_up равны единице (отрицательный случай не предъявлен)" \
+    "$(_runb "$MB5" B OK "$BIN_OK" no)" \
+    6.4B.1=OK 6.4B.2=FAIL 6.4B.5=OK
+
+# ── B6. СЕРИИ collector_up НЕТ ВОВСЕ — отсутствие серии не есть её ноль
+#    ([[metric-anchor-must-carry-full-series-name]]).
+MB6="$WORK/mb6.txt"; _mk_metrics_b "$MB6" 3 1 "$_ALL6" ""
+_checkb "серии collector_up нет в снимке" \
+    "$(_runb "$MB6" B OK "$BIN_OK" no)" \
+    6.4B.2=FAIL 6.4B.5=OK
+
+# ── B7. REASON МАТЕРИАЛИЗОВАНЫ ЧАСТИЧНО (три из шести) — недостающие
+#    по-прежнему читаются отсутствием серии как ноль отказов (№439).
+MB7="$WORK/mb7.txt"; _mk_metrics_b "$MB7" 3 1 "no_elf=0 no_symbols=0 attach_failed=1" "tls=1 iouring=0"
+_checkb "материализованы три reason из шести" \
+    "$(_runb "$MB7" B OK "$BIN_OK" no)" \
+    6.4B.3=FAIL 6.4B.5=OK
+
+# ── B8. СЕРИЙ attach_failures НЕТ ВОВСЕ — бинарь без №439.
+MB8="$WORK/mb8.txt"; _mk_metrics_b "$MB8" 3 1 "" "tls=1 iouring=0"
+_checkb "серий attach_failures нет вовсе (бинарь без №439)" \
+    "$(_runb "$MB8" B OK "$BIN_OK" no)" \
+    6.4B.3=FAIL 6.4B.5=OK
+
+# ── B9. БИНАРЬ БЕЗ ПРИЗНАКА http_plaintext_loader — решение по №442 этим
+#    прогоном не предъявлено (судится БИНАРЬ, не исходник, №441).
+MB9="$WORK/mb9.txt"; _mk_metrics_b "$MB9" 3 1 "$_ALL6" "tls=1 iouring=0"
+_checkb "бинарь без признака http_plaintext_loader" \
+    "$(_runb "$MB9" B OK "$BIN_OLD" no)" \
+    6.4B.4=FAIL 6.4B.5=OK
+
+# ── B10. БИНАРЬ СОБРАН БЕЗ make generate: признак есть и равен false —
+#    загрузчик заявлен, но объектов в сборке нет.
+_checkb "бинарь без make generate (http_plaintext_loader=false)" \
+    "$(_runb "$MB9" B OK "$BIN_NOGEN" yes)" \
+    6.4B.4=FAIL 6.4B.5=OK
+
+# ── B11. ВХОДНОЙ СТОРОЖ НЕ ОСТАВИЛ КЛАССА (ветка item 4 не исполнялась) —
+#    6.4B.0 обязана назвать этот класс, а не молчать и не притвориться OK.
+_checkb "входной сторож не оставил класса" \
+    "$(_runb "$MB1" B "" "$BIN_OK" yes)" \
+    6.4B.0=FAIL 6.4B.5=OK
+
+echo
+echo "--- сторож №373 для меток 6.4.B: каждая обязана вынести годную величину хоть на одном входе"
+_allb_out="$(_runb "$MB1" B OK "$BIN_OK" yes)
+$(_runb "$MB2" A NOTREQ "$BIN_OK" no)
+$(_runb "$MB3" B OK "$BIN_OK" no)
+$(_runb "$MB5" B OK "$BIN_OK" no)
+$(_runb "$MB9" B OK "$BIN_OLD" no)"
+for lbl in 6.4B.0 6.4B.1 6.4B.2 6.4B.3 6.4B.4 6.4B.5; do
+    if printf '%s\n' "$_allb_out" | grep -qE "(^|[^0-9.])${lbl//./\\.}[[:space:]]+(ДОСТИГНУТО|ИЗМЕРЕНО)"; then
+        echo "    OK  $lbl способна вынести годную величину"
+    else
+        _efail "№373: $lbl НИ НА ОДНОМ входе не смогла напечатать ДОСТИГНУТО/ИЗМЕРЕНО — строка неспособна сказать ничего, кроме отказа"
+    fi
+done
+# Исключений в этой таблице НЕТ: в отличие от 6.4.5, у каждой метки волны
+# 6.4.B есть предмет, способный дать годную величину на прогоне B.
+
+# ═════════════════════════════════════════════════════════════════════════════
+# БЛОК W64-REACHABILITY — сторож ДОСТИЖИМОСТИ критерия выхода (№451).
+#
+# ЗАЧЕМ ОТДЕЛЬНО. У блока один исход, стоящий денег: `die` до пролога, когда
+# заход объявлен закрывающим (W64_INTENT=close), а тумблеры закрыть волну не
+# позволяют. Ветка `die`, проверенная только глазами, — ровно та форма, из-за
+# которой волна 6.4 уже потеряла прогон: офлайн-зелёное там означало «я прочёл
+# код», а не «ветка исполнялась» ([[self-test-fixtures-miss-live-log-shape]],
+# [[invariants-find-what-fixtures-cannot]]).
+#
+# Проверяется КОД ВЫХОДА, а не текст: die обязан быть 1, разведочный заход — 0.
+if ! grep -q 'W64-REACHABILITY-BEGIN' "$PIPE" || ! grep -q 'W64-REACHABILITY-END' "$PIPE"; then
+    echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: в $PIPE нет маркеров W64-REACHABILITY-BEGIN/END"
+    exit 2
+fi
+sed -n '/W64-REACHABILITY-BEGIN/,/W64-REACHABILITY-END/p' "$PIPE" > "$WORK/reach.sh"
+bash -n "$WORK/reach.sh" || { echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: блок W64-REACHABILITY не разбирается bash -n"; exit 2; }
+
+# _reach <role> <W64_TLS_CONTROLS> <W63_BASELINE_CONTROLS> <W64_INTENT>
+# Печатает «<код выхода>|<первая строка вывода>».
+_reach() {
+    local out rc
+    out=$( set +e; env -i bash -c '
+        set -u
+        _w648_role="'"$1"'"
+        W64_TLS_CONTROLS="'"$2"'"
+        W63_BASELINE_CONTROLS="'"$3"'"
+        W64_INTENT="'"$4"'"
+        _r63_cfg="/tmp/w64-fixture-config.yaml"
+        . "'"$WORK"'/reach.sh"
+    ' 2>&1 )
+    rc=$?
+    printf '%s|%s' "$rc" "$(printf '%s\n' "$out" | head -1)"
+}
+
+_checkreach() { # <имя> <ожидаемый код> <ожидаемый маркер в строке> <role> <ctl> <blc> <intent>
+    local name="$1" exp_rc="$2" exp_txt="$3"; shift 3
+    local res rc line
+    res=$(_reach "$@")
+    rc="${res%%|*}"; line="${res#*|}"
+    if [ "$rc" != "$exp_rc" ]; then
+        _efail "достижимость/$name: код выхода $rc вместо $exp_rc — строка: $(printf '%s' "$line" | cut -c1-140)"
+    elif ! printf '%s' "$line" | grep -q "$exp_txt"; then
+        _efail "достижимость/$name: код $rc верный, но строка не несёт «$exp_txt» — $(printf '%s' "$line" | cut -c1-140)"
+    else
+        echo "    OK  $name → код $rc, класс назван"
+    fi
+}
+
+echo
+echo "=== СТОРОЖ ДОСТИЖИМОСТИ КРИТЕРИЯ ВЫХОДА (блок W64-REACHABILITY) ==="
+_checkreach "закрывающий заход со всеми тумблерами → идёт дальше" \
+    0 "ДОСТИЖИМОСТЬ КРИТЕРИЯ ВЫХОДА" B both on close
+_checkreach "закрывающий заход БЕЗ контролей items 5/6 → die" \
+    1 "СТОП ДО ПРОЛОГА" B off on close
+_checkreach "закрывающий заход БЕЗ опорного набора → die" \
+    1 "СТОП ДО ПРОЛОГА" B both off close
+_checkreach "закрывающий заход на роли A → die (TLS выключен конфигом)" \
+    1 "СТОП ДО ПРОЛОГА" A both on close
+_checkreach "разведочный заход с теми же тумблерами → предупреждение, НЕ die" \
+    0 "ВНИМАНИЕ" B off off probe
+_checkreach "мусорное намерение → отказ с кодом 2, а не молчаливый probe" \
+    2 "W64_INTENT" B both on nonsense
+
 echo
 if [ "$FAILS" -gt 0 ]; then
     echo "СТОРОЖ ЭМИТТЕРОВ ПРОВАЛЕН: расхождений $FAILS"
     exit 1
 fi
-echo "СТОРОЖ ЭМИТТЕРОВ ПРОЙДЕН: 12 фикстур + сторож №373, расхождений 0"
+echo "СТОРОЖ ЭМИТТЕРОВ ПРОЙДЕН: 14 фикстур 6.4.x + 11 фикстур 6.4.B + два сторожа №373 + 6 проверок достижимости, расхождений 0"

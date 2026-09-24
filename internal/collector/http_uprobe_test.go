@@ -47,9 +47,11 @@ func TestHTTPEventRawToTypesEvent(t *testing.T) {
 				Comm:       [16]byte{'n', 'g', 'i', 'n', 'x'},
 				ParentComm: [16]byte{'s', 'y', 's', 't', 'e', 'm', 'd'},
 				HTTPPlaintext: &types.HTTPEvent{
-					Direction: types.HTTPDirectionRequest,
-					DataLen:   100,
-					Data:      [256]byte{'G', 'E', 'T', ' ', '/', 'a', 'p', 'i'},
+					Direction:   types.HTTPDirectionRequest,
+					DataLen:     100,
+					CapturedLen: 100,
+					CapturedSet: true,
+					Data:        [256]byte{'G', 'E', 'T', ' ', '/', 'a', 'p', 'i'},
 				},
 			},
 		},
@@ -79,9 +81,11 @@ func TestHTTPEventRawToTypesEvent(t *testing.T) {
 				Comm:       [16]byte{'a', 'p', 'a', 'c', 'h', 'e', '2'},
 				ParentComm: [16]byte{'s', 'y', 's', 't', 'e', 'm', 'd'},
 				HTTPPlaintext: &types.HTTPEvent{
-					Direction: types.HTTPDirectionResponse,
-					DataLen:   2048,
-					Data:      [256]byte{'H', 'T', 'T', 'P', '/', '1', '.', '1', ' ', '2', '0', '0'},
+					Direction:   types.HTTPDirectionResponse,
+					DataLen:     2048,
+					CapturedLen: 256,
+					CapturedSet: true,
+					Data:        [256]byte{'H', 'T', 'T', 'P', '/', '1', '.', '1', ' ', '2', '0', '0'},
 				},
 			},
 		},
@@ -373,4 +377,51 @@ func (m *mockStatusReporter) SetUp(component string, isUp bool) {
 
 func (m *mockStatusReporter) IsUp(component string) bool {
 	return m.up.Load()
+}
+
+// TestHTTPCollectorConfigReachesCollector — finding №444: the twin of item 7 of
+// wave 6.4.B. collectors.http_plaintext.scan_interval and max_data_size were
+// declared in config and silently dropped, so any attempt to tune the
+// plaintext HTTP collector by config produced an instrument-side zero.
+func TestHTTPCollectorConfigReachesCollector(t *testing.T) {
+	col, err := NewHTTPCollector(slog.Default(), true, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, 30*time.Second, col.scanInterval)
+	assert.Equal(t, 256, col.maxDataSize)
+
+	col.WithScanInterval(5 * time.Second).WithMaxDataSize(64)
+	assert.Equal(t, 5*time.Second, col.scanInterval)
+	assert.Equal(t, 64, col.maxDataSize)
+
+	// Non-positive overrides must not clobber the defaults.
+	col.WithScanInterval(0).WithMaxDataSize(-1)
+	assert.Equal(t, 5*time.Second, col.scanInterval)
+	assert.Equal(t, 64, col.maxDataSize)
+}
+
+// TestHTTPCollectorMaxDataSizeWindow verifies the payload window contract is
+// the same one TLS carries: DataLen keeps the true read()/recv() length,
+// CapturedLen/CapturedSet carry the window, and a capture the kernel could not
+// read reads as empty rather than as DataLen NUL bytes (№443).
+func TestHTTPCollectorMaxDataSizeWindow(t *testing.T) {
+	col, err := NewHTTPCollector(slog.Default(), true, nil)
+	require.NoError(t, err)
+
+	raw := [256]byte{'G', 'E', 'T', ' ', '/', 'a', 'p', 'i', '/', 'v'}
+
+	e := &types.HTTPEvent{DataLen: 10, CapturedLen: 10, Data: raw}
+	assert.Equal(t, uint32(10), col.applyMaxDataSize(e))
+	assert.Equal(t, []byte("GET /api/v"), e.CapturedData())
+
+	col.WithMaxDataSize(3)
+	e2 := &types.HTTPEvent{DataLen: 10, CapturedLen: 10, Data: raw}
+	assert.Equal(t, uint32(3), col.applyMaxDataSize(e2))
+	assert.Equal(t, uint32(10), e2.DataLen, "record length must survive so data_len rules keep working")
+	assert.Equal(t, []byte("GET"), e2.CapturedData())
+
+	e3 := &types.HTTPEvent{DataLen: 10, Data: raw}
+	assert.Equal(t, uint32(0), col.applyMaxDataSize(e3))
+	assert.Equal(t, uint32(10), e3.DataLen)
+	assert.Empty(t, e3.CapturedData())
 }

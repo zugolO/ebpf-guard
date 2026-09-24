@@ -1491,6 +1491,49 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// collector's own goroutine, concurrently with the poller starting.
 	var pathFilterCtrl atomic.Pointer[internalbpf.PathFilterController]
 
+	// selfReportingCollectors records the collectors that publish their own
+	// up/down state through WithStatusReporter (finding №438). For these the
+	// pre-Start optimistic SetCollectorUp(true) is skipped: the collector's
+	// own load outcome is authoritative, so a stub-mode collector (which
+	// returns nil from Start) cannot leave a stale collector_up=1 behind.
+	// Collectors absent from this set (cloud-audit, synthetic, DNS/LSM — the
+	// latter have no reporter hook yet) keep the optimistic default, which
+	// the post-Start error path corrects if Start returns an error.
+	selfReportingCollectors := map[string]bool{}
+
+	// collectorUpReporter returns a StatusReporter that mirrors a collector's
+	// own signal into the collector_up metric and GET /health, then runs extra
+	// only when the collector reports itself up (per-collector map
+	// registration). This is what makes collector_up mean "loaded", not
+	// "constructed" (№438).
+	collectorUpReporter := func(name string, extra func()) collector.StatusReporter {
+		selfReportingCollectors[name] = true
+		return collector.StatusReporterFunc(func(n string, up bool) {
+			exporter.SetCollectorUp(n, up)
+			srv.SetCollectorStatus(exporter.CollectorStatus{Name: n, Healthy: up})
+			if up && extra != nil {
+				extra()
+			}
+		})
+	}
+
+	// collectorScanInterval parses a collectors.<name>.scan_interval string and
+	// reports whether it is usable. An unparsable or non-positive value keeps
+	// the collector default and says so — silently ignoring the field is what
+	// item 7 of wave 6.4.B was filed about (finding №444 for the HTTP twin).
+	collectorScanInterval := func(name, raw string) (time.Duration, bool) {
+		if raw == "" {
+			return 0, false
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			slog.Warn(name+": invalid scan_interval, keeping collector default",
+				slog.String("value", raw), slog.Any("error", err))
+			return 0, false
+		}
+		return d, true
+	}
+
 	var collectors []collector.Collector
 	if dryRun {
 		slog.Info("dry-run mode: using synthetic event generator")
@@ -1502,10 +1545,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if sc, scErr := collector.NewSyscallCollector(slog.Default()); scErr != nil {
 			slog.Warn("syscall: collector creation failed", slog.Any("error", scErr))
 		} else {
-			sc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
-				if name != "syscall" || !up {
-					return
-				}
+			sc.WithStatusReporter(collectorUpReporter(sc.Name(), func() {
 				ringbufFullTrackers.register("syscall", sc.RingbufFullMap())
 				emittedTrackers.register("syscall", sc.EmittedMap())
 				wd.RegisterDropTracker(sc)
@@ -1545,10 +1585,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			// 5.9.6a: also needed unconditionally to register the kernel-side
 			// ringbuf_full counter, so the reporter is now always attached.
 			{
-				nc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
-					if name != "network" || !up {
-						return
-					}
+				nc.WithStatusReporter(collectorUpReporter(nc.Name(), func() {
 					ringbufFullTrackers.register("network", nc.RingbufFullMap())
 					emittedTrackers.register("network", nc.EmittedMap())
 					wd.RegisterDropTracker(nc)
@@ -1574,10 +1611,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			// ringbuf_full counter, not only for the sampling/filter/observer
 			// options below.
 			{
-				fc.WithStatusReporter(collector.StatusReporterFunc(func(name string, up bool) {
-					if name != "fileaccess" || !up {
-						return
-					}
+				fc.WithStatusReporter(collectorUpReporter(fc.Name(), func() {
 					ringbufFullTrackers.register("fileaccess", fc.RingbufFullMap())
 					emittedTrackers.register("fileaccess", fc.EmittedMap())
 					wd.RegisterDropTracker(fc)
@@ -1645,8 +1679,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			if tc, tcErr := collector.NewTLSCollector(slog.Default(), true); tcErr != nil {
 				slog.Warn("tls: collector creation failed", slog.Any("error", tcErr))
 			} else {
-				collectors = append(collectors, tc.WithBackpressureStrategy(bpStrategy))
-				slog.Info("tls: collector enabled")
+				// item 7 волны 6.4.B: collectors.tls.scan_interval и max_data_size
+				// раньше не доезжали до коллектора (оба поля молча
+				// игнорировались, scanInterval был захардкожен 30 с).
+				if d, ok := collectorScanInterval("tls", cfg.Collectors.TLS.ScanInterval); ok {
+					tc = tc.WithScanInterval(d)
+				}
+				tc = tc.WithMaxDataSize(cfg.Collectors.TLS.MaxDataSize)
+				collectors = append(collectors, tc.WithStatusReporter(collectorUpReporter(tc.Name(), nil)).WithBackpressureStrategy(bpStrategy))
+				slog.Info("tls: collector enabled",
+					slog.String("scan_interval", cfg.Collectors.TLS.ScanInterval),
+					slog.Int("max_data_size", cfg.Collectors.TLS.MaxDataSize))
 			}
 		}
 
@@ -1654,8 +1697,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			if hc, hcErr := collector.NewHTTPCollector(slog.Default(), true, cfg.Collectors.HTTPPlaintext.ServerComms); hcErr != nil {
 				slog.Warn("http_plaintext: collector creation failed", slog.Any("error", hcErr))
 			} else {
-				collectors = append(collectors, hc.WithBackpressureStrategy(bpStrategy))
-				slog.Info("http_plaintext: collector enabled")
+				// №444: тот же дефект, что item 7 волны 6.4.B закрыл у TLS —
+				// collectors.http_plaintext.scan_interval и max_data_size
+				// объявлены конфигом и молча выбрасывались.
+				if d, ok := collectorScanInterval("http_plaintext", cfg.Collectors.HTTPPlaintext.ScanInterval); ok {
+					hc = hc.WithScanInterval(d)
+				}
+				hc = hc.WithMaxDataSize(cfg.Collectors.HTTPPlaintext.MaxDataSize)
+				collectors = append(collectors, hc.WithStatusReporter(collectorUpReporter(hc.Name(), nil)).WithBackpressureStrategy(bpStrategy))
+				slog.Info("http_plaintext: collector enabled",
+					slog.String("scan_interval", cfg.Collectors.HTTPPlaintext.ScanInterval),
+					slog.Int("max_data_size", cfg.Collectors.HTTPPlaintext.MaxDataSize))
 			}
 		}
 
@@ -1673,7 +1725,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {
 			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
 		} else {
-			collectors = append(collectors, kc.WithBackpressureStrategy(bpStrategy))
+			collectors = append(collectors, kc.WithStatusReporter(collectorUpReporter(kc.Name(), nil)).WithBackpressureStrategy(bpStrategy))
 			slog.Info("kmod: collector enabled")
 		}
 	}
@@ -1702,7 +1754,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if iocErr != nil {
 			slog.Warn("iouring: collector creation failed, skipping", slog.Any("error", iocErr))
 		} else {
-			ioc = ioc.WithBackpressureStrategy(bpStrategy)
+			ioc = ioc.WithStatusReporter(collectorUpReporter(ioc.Name(), nil)).WithBackpressureStrategy(bpStrategy)
 			collectors = append(collectors, ioc)
 			slog.Info("iouring: collector enabled")
 		}
@@ -1712,7 +1764,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if bmErr != nil {
 			slog.Warn("bpf_monitor: collector creation failed, skipping", slog.Any("error", bmErr))
 		} else {
-			bmc = bmc.WithBackpressureStrategy(bpStrategy)
+			bmc = bmc.WithStatusReporter(collectorUpReporter(bmc.Name(), nil)).WithBackpressureStrategy(bpStrategy)
 			collectors = append(collectors, bmc)
 			slog.Info("bpf_monitor: collector enabled")
 		}
@@ -1722,7 +1774,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if tfErr != nil {
 			slog.Warn("tls_fingerprint: collector creation failed, skipping", slog.Any("error", tfErr))
 		} else {
-			tfc = tfc.WithBackpressureStrategy(bpStrategy)
+			tfc = tfc.WithStatusReporter(collectorUpReporter(tfc.Name(), nil)).WithBackpressureStrategy(bpStrategy)
 			collectors = append(collectors, tfc)
 			slog.Info("tls_fingerprint: collector enabled")
 		}
@@ -1805,8 +1857,23 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	}
 
 	for _, c := range priorityCollectors {
-		exporter.SetCollectorUp(c.Name(), true)
-		srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: true})
+		// Only non-self-reporting collectors get the optimistic pre-Start default;
+		// self-reporting ones publish their real state from inside Start (№438).
+		//
+		// №446: a self-reporting collector is still seeded with an explicit
+		// FALSE rather than left absent. "Series missing" and "series is zero"
+		// are different readings — the first is unmeasurable, the second is a
+		// verdict ([[metric-anchor-must-carry-full-series-name]]) — and until
+		// Start() reaches its load outcome there IS no health to report, so
+		// zero is the honest value. It is the same materialization №439 applied
+		// to tls_attach_failures_total one layer down.
+		if !selfReportingCollectors[c.Name()] {
+			exporter.SetCollectorUp(c.Name(), true)
+			srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: true})
+		} else {
+			exporter.SetCollectorUp(c.Name(), false)
+			srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false})
+		}
 		go func(c collector.Collector) {
 			// The wrapper routes internally; this argument is unused by it.
 			if err := c.Start(ctx, lowPriorityEventCh); err != nil && ctx.Err() == nil {
@@ -3169,6 +3236,31 @@ func newVersionCmd() *cobra.Command {
 			// стенда. Спрашивать состав обязан преflight у ТОГО САМОГО бинаря,
 			// который он собирается запустить, — а не читатель журнала потом.
 			fmt.Printf("build-tags: rego=%t\n", policy.Supported)
+			// Отдельная строка (не в составе build-tags): признак
+			// tls_attach_failures в выводе `version` — машинно-читаемое
+			// свидетельство, что бинарь собран из дерева с items 1/3 волны
+			// 6.4.B (загрузчик TLS + счётчик отказов привязки). Старый бинарь
+			// эту строку не печатает, и входной сторож пайплайна (№441) может
+			// судить БИНАРЬ, а не исходник.
+			//
+			// Значение берётся из того, СКОМПИЛИРОВАН ли настоящий объект
+			// bpf/tls_uprobe: стаб `LoadTlsUprobe()` всегда возвращает ошибку,
+			// сгенерированный bpf2go — разбирает встроенный ELF-спек и
+			// возвращает nil. Поэтому `go build` без `make generate` честно
+			// печатает false, а не заявляет загрузчик, которого нет.
+			tlsLoader := "false"
+			if _, err := internalbpf.LoadTlsUprobe(); err == nil {
+				tlsLoader = "true"
+			}
+			// №442/6.4B.4: у HTTP-plaintext был тождественный дефект загрузчика,
+			// и решение по нему («чинить») обязано быть предъявлено тем же
+			// машинно-читаемым признаком, иначе метка 6.4B.4 судит исходник.
+			httpLoader := "false"
+			if _, err := internalbpf.LoadHttpUprobe(); err == nil {
+				httpLoader = "true"
+			}
+			fmt.Printf("build-features: tls_attach_failures=%s http_plaintext_loader=%s\n",
+				tlsLoader, httpLoader)
 		},
 	}
 }

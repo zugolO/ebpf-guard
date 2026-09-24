@@ -381,7 +381,7 @@ func eventToInput(event types.Event) map[string]interface{} {
 		result["tls"] = map[string]interface{}{
 			"direction": int(event.TLS.Direction),
 			"data_len":  event.TLS.DataLen,
-			"data":      string(trimNullBytes(event.TLS.Data[:])),
+			"data":      string(trimNullBytes(event.TLS.CapturedData())),
 		}
 	}
 

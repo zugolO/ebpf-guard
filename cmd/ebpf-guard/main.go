@@ -1496,9 +1496,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// pre-Start optimistic SetCollectorUp(true) is skipped: the collector's
 	// own load outcome is authoritative, so a stub-mode collector (which
 	// returns nil from Start) cannot leave a stale collector_up=1 behind.
-	// Collectors absent from this set (cloud-audit, synthetic, DNS/LSM — the
-	// latter have no reporter hook yet) keep the optimistic default, which
-	// the post-Start error path corrects if Start returns an error.
+	// Collectors absent from this set (cloud-audit, synthetic) keep the
+	// optimistic default, which the post-Start error path corrects if Start
+	// returns an error. DNS and LSM were in that group until item 6 волны 6.5
+	// and №457 gave them reporters.
 	selfReportingCollectors := map[string]bool{}
 
 	// collectorUpReporter returns a StatusReporter that mirrors a collector's
@@ -1670,7 +1671,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			if err := dc.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 				slog.Warn("dns: register metrics failed", slog.Any("error", err))
 			}
-			collectors = append(collectors, dc.WithBackpressureStrategy(bpStrategy).
+			// Item 6 волны 6.5: dns reports its own load outcome like every
+			// other collector. It is constructed even when disabled, so
+			// without a reporter its collector_up kept the optimistic 1 —
+			// the only series that lied unconditionally in a run.
+			collectors = append(collectors, dc.WithStatusReporter(collectorUpReporter(dc.Name(), nil)).
+				WithBackpressureStrategy(bpStrategy).
 				WithMinEventsPerStaleWindow(cfg.Collectors.DNS.MinEventsPerStaleWindow))
 			slog.Info("dns: collector enabled", slog.Bool("enabled", cfg.Collectors.DNS.Enabled))
 		}
@@ -2702,6 +2708,7 @@ func processEvent(
 		evtNode = metricsNodeName
 	}
 	exporter.RecordEventWithLabels(exporter.EventTypeLabel(event.Type), evtPod, evtNamespace, evtNode)
+	exporter.RecordTLSFamily(&event)
 
 	// plan.md 5.9.8b (№91): counting-control canary events get their own
 	// series, so criterion 20 can read a count that is background-free by

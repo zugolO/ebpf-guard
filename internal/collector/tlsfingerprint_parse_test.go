@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -100,4 +101,21 @@ func TestDecodeTLSClientHello_TooShort(t *testing.T) {
 	_, err := decodeTLSClientHello(make([]byte, 10))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "too small")
+}
+
+// TestTLSFamily_RealProducerIsJA3 closes item 7 волны 6.5 on the producer side.
+// The metric classifier lives in internal/exporter and was written blind: it
+// required TLS.DataLen == 0 for the ja3 family, while this decoder sets
+// DataLen to the ClientHello record length. The assertion that matters is not
+// that the classifier is self-consistent, but that the ONE producer of JA3
+// events lands in the ja3 series.
+func TestTLSFamily_RealProducerIsJA3(t *testing.T) {
+	hello := buildMinimalClientHello()
+	evt, err := decodeTLSClientHello(buildTLSRaw(4242, "curl", hello))
+	require.NoError(t, err)
+	require.NotNil(t, evt.TLS)
+	require.NotZero(t, evt.TLS.DataLen, "a real ClientHello event carries a non-zero record length")
+
+	assert.Equal(t, exporter.TLSFamilyJA3, exporter.TLSFamily(evt.TLS),
+		"the fingerprint collector's own event must count as family=ja3")
 }

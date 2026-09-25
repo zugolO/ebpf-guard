@@ -18,7 +18,21 @@ func TestEventTypeLabel(t *testing.T) {
 	assert.Equal(t, "syscall", EventTypeLabel(types.EventSyscall))
 	assert.Equal(t, "dns", EventTypeLabel(types.EventDNS))
 	assert.Equal(t, "bpf_program", EventTypeLabel(types.EventBPFProgram))
+	assert.Equal(t, "http_plaintext", EventTypeLabel(types.EventHTTPPlaintext))
 	assert.Equal(t, "other", EventTypeLabel(types.EventType(9999)))
+
+	// №468: ни один ТИП, у которого есть каноническое имя, не имеет права
+	// уходить в "other" — иначе его объём неотличим от чужого, а метка,
+	// читающая его ось, печатает приборный ноль. Список берётся из types, а не
+	// зашит здесь: новый тип попадает под проверку сам.
+	for i := 0; i < 64; i++ {
+		et := types.EventType(i)
+		if et.String() == "unknown" {
+			continue // не заведён в types — "other" для него законен
+		}
+		assert.NotEqualf(t, "other", EventTypeLabel(et),
+			"EventType(%d)=%q имеет каноническое имя, но EventTypeLabel отдаёт other", i, et.String())
+	}
 }
 
 // TestMetricRecorders exercises the package-level metric helper functions.

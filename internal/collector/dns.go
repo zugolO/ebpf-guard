@@ -34,6 +34,12 @@ type DNSCollector struct {
 	reader     *ringbuf.Reader
 	metrics    *dnsMetrics
 	enabled    bool
+	// status publishes this collector's own load outcome into
+	// ebpf_guard_collector_up. Item 6 волны 6.5: dns was the last collector
+	// registered in main without a reporter, so its series kept main's
+	// optimistic pre-Start 1 forever — including when config disabled it, the
+	// one case where the 1 is provably false ([[collector-up-is-not-a-health-signal]]).
+	status     StatusReporter
 	dropLogger *dropLogger
 	strategy   BackpressureStrategy
 	lostTotal  atomic.Uint64
@@ -114,7 +120,7 @@ type dnsMetrics struct {
 // NewDNSCollector creates a new DNS collector.
 func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 	if !enabled {
-		return &DNSCollector{enabled: false, dropLogger: newDropLogger(5 * time.Second)}, nil
+		return &DNSCollector{enabled: false, status: NoopStatusReporter{}, dropLogger: newDropLogger(5 * time.Second)}, nil
 	}
 
 	// Remove memory limit for eBPF
@@ -164,11 +170,22 @@ func NewDNSCollector(enabled bool) (*DNSCollector, error) {
 
 	return &DNSCollector{
 		enabled:            enabled,
+		status:             NoopStatusReporter{},
 		metrics:            metrics,
 		dropLogger:         newDropLogger(5 * time.Second),
 		strategy:           StrategyDrop,
 		decodeErrorLoggers: decodeErrorLoggers,
 	}, nil
+}
+
+// WithStatusReporter wires the collector's own up/down signal (finding №438,
+// item 6 волны 6.5). Without it the collector keeps NoopStatusReporter and
+// collector_up{dns} is whatever the caller seeded before Start.
+func (c *DNSCollector) WithStatusReporter(r StatusReporter) *DNSCollector {
+	if r != nil {
+		c.status = r
+	}
+	return c
 }
 
 // WithBackpressureStrategy sets the backpressure strategy for the event channel.
@@ -328,6 +345,10 @@ func dnsMutenessLikelyCauses() string {
 func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	if !c.enabled {
 		slog.Info("dns: collector disabled, skipping")
+		// Not "up but idle": nothing is loaded, so the honest reading is 0.
+		// The series still exists, so 0 stays distinguishable from "this build
+		// knows nothing about dns" ([[gated-metric-cannot-carry-product-verdict]]).
+		c.status.SetUp("dns", false)
 		return nil
 	}
 
@@ -354,6 +375,7 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 				slog.Error("dns: wrote full verifier log to /tmp/dns_verifier.log")
 			}
 		}
+		c.status.SetUp("dns", false)
 		return fmt.Errorf("dns: load objects: %w", err)
 	}
 	c.objs = objs
@@ -377,6 +399,7 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	links, err := c.attachTracepoints()
 	if err != nil {
 		c.objs.Close()
+		c.status.SetUp("dns", false)
 		return fmt.Errorf("dns: attach tracepoints: %w", err)
 	}
 	c.links = links
@@ -384,9 +407,13 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	reader, err := ringbuf.NewReader(c.objs.DnsEvents)
 	if err != nil {
 		c.Close()
+		c.status.SetUp("dns", false)
 		return fmt.Errorf("dns: create ringbuf reader: %w", err)
 	}
 	c.reader = reader
+
+	// "up" only here: programs loaded, tracepoints attached, ring buffer open.
+	c.status.SetUp("dns", true)
 
 	readLoopDone := runReadLoop(func() { c.readLoop(ctx, out) })
 

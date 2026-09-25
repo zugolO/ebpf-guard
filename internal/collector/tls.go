@@ -197,6 +197,10 @@ type TLSEventRaw struct {
 	Dport       uint16
 }
 
+// tlsEventRawSize is the wire size of struct tls_event (bpf/tls_uprobe.bpf.c,
+// packed) — derived from the Go mirror above, never a literal (№471).
+var tlsEventRawSize = binary.Size(TLSEventRaw{})
+
 // ToTypesEvent converts a raw TLS event to the public types.Event.
 func (e *TLSEventRaw) ToTypesEvent() types.Event {
 	var direction types.TLSDirection
@@ -912,8 +916,13 @@ func (c *TLSCollector) parseEvent(raw []byte) (*types.Event, error) {
 		return nil, fmt.Errorf("unexpected event type: %d", eventType)
 	}
 
-	if len(raw) < 340 { // Minimum size for TLS event
-		return nil, fmt.Errorf("TLS event too short: %d bytes", len(raw))
+	// №471: та же дисциплина, что у http_plaintext — граница ВЫЧИСЛЯЕТСЯ из
+	// структуры. Здесь литерал 340 был не фатален (tls_event весит 362, то есть
+	// проверка просто пропускала короткий буфер дальше, в binary.Read с менее
+	// внятной ошибкой), но именно ОТСЮДА он был скопирован в http_uprobe.go,
+	// где стал приборным нулём целого коллектора ([[fixes-must-migrate-to-sibling-controls]]).
+	if len(raw) < tlsEventRawSize {
+		return nil, fmt.Errorf("TLS event too short: %d bytes (need %d)", len(raw), tlsEventRawSize)
 	}
 
 	var rawEvent TLSEventRaw

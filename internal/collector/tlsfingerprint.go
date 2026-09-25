@@ -69,6 +69,8 @@ func (c *TLSFingerprintCollector) Name() string {
 // Start attaches eBPF programs and begins sending events.
 func (c *TLSFingerprintCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	c.logger.Info("starting tlsfingerprint collector")
+	// Item 4 волны 6.5: инертность объявляется вслух, а не выводится из нуля.
+	c.logger.Warn("tlsfingerprint: hook covers sendto only; ClientHello sent via write(2) (OpenSSL, curl, wget) is not seen, tls_ja3_* rules are inert by construction")
 
 	if err := c.loadObjects(); err != nil {
 		c.loadError = err

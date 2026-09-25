@@ -3,16 +3,55 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
+
+// Miss reasons for enrichMissByReason (item 9 волны 6.5). "proc_gone" is the
+// pid→pod race: the process exited before /proc/<pid>/cgroup could be read,
+// so a millisecond-lived pod process leaves no attribution. It used to be
+// indistinguishable from "no_container" (a host process, which is normal).
+const (
+	MissProcGone    = "proc_gone"
+	MissNoContainer = "no_container"
+	MissNoWatcher   = "no_watcher"
+)
+
+var enrichMissByReason = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ebpf_guard_k8s_enrichment_miss_by_reason_total",
+	Help: "Enrichment lookups that produced no container attribution, by reason (proc_gone = pid→pod race).",
+}, []string{"reason"})
+
+func init() {
+	for _, r := range []string{MissProcGone, MissNoContainer, MissNoWatcher} {
+		enrichMissByReason.WithLabelValues(r)
+	}
+}
+
+// missReason classifies a container-ID lookup failure.
+//
+// ESRCH is checked alongside ENOENT: /proc/<pid>/cgroup answers ENOENT when
+// the directory is already gone, but a task that exits between opendir and
+// read answers ESRCH instead. Without it exactly the fastest processes — the
+// ones item 9 exists for — would land in no_container and read as normal host
+// traffic, which is the undercount this counter was added to make visible.
+func missReason(err error) string {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+		return MissProcGone
+	}
+	return MissNoContainer
+}
 
 // EnricherMetrics holds optional Prometheus instruments wired in by the caller.
 // Any nil field is silently ignored.
@@ -242,6 +281,7 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 
 	// Lookup pod info from watcher (nil watcher = enricher not yet started)
 	if e.watcher == nil {
+		enrichMissByReason.WithLabelValues(MissNoWatcher).Inc()
 		e.missCount.Add(1)
 		return nil
 	}
@@ -254,6 +294,7 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 		// as a rule axis even without full pod metadata.
 		containerID, cErr := e.watcher.getContainerIDFromPID(pid)
 		if cErr != nil {
+			enrichMissByReason.WithLabelValues(missReason(cErr)).Inc()
 			e.missCount.Add(1)
 			return nil
 		}

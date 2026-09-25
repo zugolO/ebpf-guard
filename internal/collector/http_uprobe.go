@@ -142,6 +142,23 @@ type HTTPEventRaw struct {
 	Data        [256]byte
 }
 
+// httpEventRawSize is the wire size of struct http_event (bpf/http_uprobe.bpf.c,
+// __attribute__((packed))). It is DERIVED from the Go mirror above and is never
+// written as a literal.
+//
+// №471 (25.09.2026, первый живой прогон коллектора за историю проекта). Здесь
+// стояло `len(raw) < 340` с комментарием «same layout as TLS event» — но
+// tls_event несёт ещё 37 байт информации о соединении (has_conn_info, saddr,
+// daddr, sport, dport), а http_event весит ровно 325. Ring buffer отдавал
+// 325-байтовые события, проверка длины отбивала КАЖДОЕ, и
+// ebpf_guard_events_dropped_total{collector="http_plaintext",reason="parse_error"}
+// рос при нуле в events_total. Ни одного события за всю историю — при живом
+// хуке, живом ring buffer и совпадающей раскладке: `binary.Read` читает без
+// выравнивания и разобрал бы эти 325 байт без правок. Величина, от которой
+// зависит вердикт, обязана вычисляться из структуры, а не повторяться цифрой
+// ([[verdict-input-must-be-computed-by-emitter]] в приборной форме).
+var httpEventRawSize = binary.Size(HTTPEventRaw{})
+
 // ToTypesEvent converts a raw plaintext HTTP event to the public types.Event.
 func (e *HTTPEventRaw) ToTypesEvent() types.Event {
 	var direction types.HTTPDirection
@@ -715,8 +732,8 @@ func (c *HTTPCollector) parseEvent(raw []byte) (*types.Event, error) {
 		return nil, fmt.Errorf("unexpected event type: %d", eventType)
 	}
 
-	if len(raw) < 340 { // Minimum size for HTTP event (same layout as TLS event)
-		return nil, fmt.Errorf("HTTP event too short: %d bytes", len(raw))
+	if len(raw) < httpEventRawSize {
+		return nil, fmt.Errorf("HTTP event too short: %d bytes (need %d)", len(raw), httpEventRawSize)
 	}
 
 	var rawEvent HTTPEventRaw

@@ -396,6 +396,17 @@ config:
       insecure_skip_verify: false
 
   collectors:
+    # Collectors that must report collector_up=1 for /health/ready to answer
+    # 200. An EMPTY list means "every registered collector is required", and
+    # that default cannot hold: lsm/kmod report 0 on any kernel without BPF
+    # LSM (a legitimate node property, findings №457 and item 6 волны 6.5), so
+    # with the default readinessProbe the DaemonSet pod on such a node would
+    # never become Ready and the rollout would stall. The list names the
+    # collectors whose failure really means this agent is not watching.
+    required:
+      - syscall
+      - network
+      - fileaccess
     tls:
       enabled: false
       scan_interval: 30s

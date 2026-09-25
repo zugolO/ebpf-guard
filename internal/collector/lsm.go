@@ -559,7 +559,10 @@ func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error
 		c.logger.Warn("kmod: cgroup escape collector unavailable", "error", err)
 	}
 
-	c.status.SetUp("kmod", true)
+	// Item 6 волны 6.5: «up» означает «хотя бы один ридер поднят», а не
+	// «Start дошёл до этой строки» — иначе без LSM BPF и cgroup-программы
+	// серия лжёт единицей при нуле работающих хуков (№438).
+	c.status.SetUp("kmod", c.kmodReader != nil || c.cgroupReader != nil)
 
 	var kmodDone, cgroupDone <-chan struct{}
 	if c.kmodReader != nil {

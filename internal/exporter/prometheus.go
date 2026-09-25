@@ -68,6 +68,21 @@ var (
 		[]string{"type", "pod", "namespace", "node"},
 	)
 
+	// TLSEventsByFamily splits the {type="tls"} axis of EventsTotal by the
+	// producer family (item 7 волны 6.5): "payload" (SSL_write/SSL_read
+	// uprobes) versus "ja3" (ClientHello fingerprinting). A SEPARATE series,
+	// not a label on EventsTotal — a new label re-sorts the exposition and
+	// silently breaks every anchored reader of it (см. AlertRuleIDRenamed).
+	// Both series are materialized at init so a zero is a reading, not an
+	// absent series.
+	TLSEventsByFamily = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_tls_events_by_family_total",
+			Help: "TLS events by producer family: payload (uprobe plaintext) or ja3 (ClientHello fingerprint).",
+		},
+		[]string{"family"},
+	)
+
 	// EventsDropped counts dropped events by collector and reason.
 	EventsDropped = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -477,6 +492,61 @@ func RecordEventWithLabels(eventType, podName, namespace, node string) {
 	EventsTotal.WithLabelValues(labels[0], labels[1], labels[2], labels[3]).Inc()
 }
 
+// TLS event families for TLSEventsByFamily.
+const (
+	TLSFamilyPayload = "payload"
+	TLSFamilyJA3     = "ja3"
+	// TLSFamilyUnknown is a TLS event with no TLS detail at all (TLS == nil).
+	// Its own series rather than silence or a default family: dropping it
+	// would make sum(by_family) drift from events_total{type="tls"} with
+	// nothing naming the difference, and folding it into "payload" is the
+	// №458 pattern — a count that is right under a name that is wrong.
+	TLSFamilyUnknown = "unknown"
+)
+
+func init() {
+	TLSEventsByFamily.WithLabelValues(TLSFamilyPayload)
+	TLSEventsByFamily.WithLabelValues(TLSFamilyJA3)
+	TLSEventsByFamily.WithLabelValues(TLSFamilyUnknown)
+}
+
+// TLSFamily classifies a TLS event by its producer.
+//
+// The only producer of JA3/JA4 is the ClientHello fingerprint collector
+// (decodeTLSClientHello); the SSL_write/SSL_read payload uprobes never fill
+// those fields, so their presence IS the family.
+//
+// It deliberately does NOT look at DataLen. The first version of this
+// classifier required DataLen == 0 on the assumption that a fingerprint event
+// carries no bytes — but TlsClientHelloRawEvent.ToTypesEvent sets
+// DataLen = OriginalLen, the ClientHello record length, which is never zero on
+// a real event. That predicate could not match the producer at all: every JA3
+// event would have been counted as "payload", and family="ja3" would have
+// stayed at zero for a structural reason while reading as a detection verdict
+// ([[gated-metric-cannot-carry-product-verdict]]).
+//
+// Residual, named on purpose: a ClientHello whose handshake bytes do not parse
+// yields empty JA3/JA4 (fingerprinting is best-effort) and is counted as
+// payload. The undercount is bounded by tls_fingerprint parse failures, which
+// have their own series (RecordDropped("tlsfingerprint", "parse_error")).
+func TLSFamily(t *types.TLSEvent) string {
+	switch {
+	case t == nil:
+		return TLSFamilyUnknown
+	case t.JA3 != "" || t.JA4 != "":
+		return TLSFamilyJA3
+	default:
+		return TLSFamilyPayload
+	}
+}
+
+// RecordTLSFamily counts a TLS event under its family. No-op for other types.
+func RecordTLSFamily(e *types.Event) {
+	if e.Type == types.EventTLS {
+		TLSEventsByFamily.WithLabelValues(TLSFamily(e.TLS)).Inc()
+	}
+}
+
 // EventTypeLabel converts an EventType to the short string used as the
 // "type" label on ebpf_guard_events_total. Both TCP connect and close collapse
 // to "network" so the metric groups connection lifecycle under one label; every
@@ -490,7 +560,14 @@ func EventTypeLabel(t types.EventType) string {
 	case types.EventSyscall, types.EventFileAccess, types.EventTLS, types.EventDNS,
 		types.EventPrivesc, types.EventKmodLoad, types.EventCgroupEsc, types.EventGPU,
 		types.EventLSMAudit, types.EventSequence, types.EventCloudAudit, types.EventIOUring,
-		types.EventBPFProgram:
+		types.EventBPFProgram,
+		// №468, item 5 волны 6.5: EventHTTPPlaintext имеет каноническое имя в
+		// types, но в этот switch не входил — и уходил в "other". Прогон с
+		// включённым http_plaintext измерял бы объём по оси, где события
+		// неотличимы от любого другого неперечисленного типа: приборный ноль
+		// по построению ([[rule-fields-and-binary-ship-together]] в другой
+		// форме — ось и прогон обязаны ехать вместе).
+		types.EventHTTPPlaintext:
 		return t.String()
 	default:
 		return "other"

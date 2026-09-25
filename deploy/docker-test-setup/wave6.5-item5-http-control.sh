@@ -58,6 +58,13 @@ W65_CONTROL="${W65_CONTROL:-off}"
 W65_SCAN_INTERVAL_S="${W65_SCAN_INTERVAL_S:-30}"
 W65_PORT="${W65_PORT:-18085}"
 W65_REQUESTS="${W65_REQUESTS:-3}"
+# Item 8 волны 6.6 (№479): вторая точка снимается ПОСЛЕ осадки, не сразу после
+# обмена. Событие, пришедшее позже 3с, при чтении «сразу» записывалось НИКОМУ
+# (39 событий за прогон, объяснено 9). W65_SVC/W65_START_EPOCH — чтобы назвать
+# привязавшиеся процессы по журналу агента.
+W65_SETTLE_S="${W65_SETTLE_S:-30}"
+W65_SVC="${W65_SVC:-}"
+W65_START_EPOCH="${W65_START_EPOCH:-0}"
 
 _W65_OUT="$W65_ART/http-control-plaintext.txt"
 
@@ -200,6 +207,38 @@ _w65_d1_sum=${_w65_d1%% *}
 _w65_d1_names=${_w65_d1#* }
 _w65_drops_delta=$(awk -v a="$_w65_d0_sum" -v b="$_w65_d1_sum" 'BEGIN{ d = b - a; printf "%d", (d > 0 ? d : 0) }')
 
+# ── Item 8 волны 6.6 (№479). ОСТАТОК после осадки и НА КОГО он записан.
+#    Ось comm/pid у события есть в структуре и нет в метрике, поэтому назвать
+#    можно только процессы, к которым коллектор ПРИВЯЗАЛСЯ за время контроля
+#    (журнал: «attached plaintext HTTP uprobes» pid=…), с comm из /proc в момент
+#    чтения. Названные — КАНДИДАТЫ, а не доказательство: метрика не различает,
+#    чьё событие. Остаток без единого названного процесса — НЕИЗМЕРИМ по атрибуции.
+_w65_holder_c=$_w65_delta
+sleep "$W65_SETTLE_S"
+_w65_m2=$(_w65_metrics)
+_w65_v2=$(_w65_series "$_w65_m2" "ebpf_guard_events_total{" 'type="http_plaintext"')
+_w65_v2_named=1
+if [ -z "${_w65_v2:-}" ]; then _w65_v2_named=0; _w65_v2=0; fi
+_w65_settled=$(awk -v a="$_w65_v0" -v b="$_w65_v2" 'BEGIN{ d = b - a; printf "%d", (d > 0 ? d : 0) }')
+_w65_resid=$(( _w65_settled - _w65_holder_c )); [ "$_w65_resid" -lt 0 ] && _w65_resid=0
+_w65_trk2=$(_w65_series "$_w65_m2" "ebpf_guard_http_plaintext_tracked_pids_total" "")
+_w65_others=""
+if [ -n "$W65_SVC" ] && command -v journalctl >/dev/null 2>&1; then
+    for _p in $(journalctl -u "$W65_SVC" --since "@$W65_START_EPOCH" --no-pager 2>/dev/null \
+            | grep -a 'attached plaintext HTTP uprobes' | grep -aoE 'pid[=":]+ *[0-9]+' | grep -oE '[0-9]+$' | sort -un); do
+        [ "$_p" = "$_w65_pid" ] && continue
+        _w65_others="${_w65_others}${_w65_others:+,}${_p}:$(cat /proc/$_p/comm 2>/dev/null || echo '?')"
+    done
+fi
+{
+    echo "settled_delta=$_w65_settled"
+    echo "settled_after_s=$W65_SETTLE_S"
+    echo "residual=$_w65_resid"
+    echo "settled_series_present=$_w65_v2_named"
+    echo "tracked_pids_settled=${_w65_trk2:--}"
+    echo "other_attached=${_w65_others:--}"
+} > "$_W65_OUT.attr"
+
 {
     echo "events_delta=$_w65_delta"
     echo "drops_delta=$_w65_drops_delta"
@@ -214,5 +253,6 @@ _w65_drops_delta=$(awk -v a="$_w65_d0_sum" -v b="$_w65_d1_sum" 'BEGIN{ d = b - a
 } > "$_W65_OUT"
 
 echo "  item 5 волны 6.5: events_delta=$_w65_delta (было $_w65_v0, стало $_w65_v1), отбраковано за обмен $_w65_drops_delta (причины: ${_w65_d1_names:--}), запросов 200 = $_w65_ok из $W65_REQUESTS, tracked_pids=$_w65_tracked"
+echo "  item 8 волны 6.6: после осадки ${W65_SETTLE_S}с событий $_w65_settled = объяснено контролем $_w65_holder_c + остаток $_w65_resid; другие привязавшиеся: ${_w65_others:--}"
 echo "  сторожевой файл: $_W65_OUT (класс вердикта выносит эмиттер 6.5.1, не контроль)"
 exit 0

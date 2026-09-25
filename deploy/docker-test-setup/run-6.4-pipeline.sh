@@ -1213,12 +1213,29 @@ if [ "${W65_HTTP_CONTROL:-off}" != "off" ]; then
             W65_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
             W65_CONTROL="$W65_HTTP_CONTROL" \
             W65_SCAN_INTERVAL_S="${W65_SCAN_INTERVAL_S:-30}" \
+            W65_SVC="$SVC" W65_START_EPOCH="$(cat /root/agent-start-6.4.epoch 2>/dev/null || echo 0)" \
             bash "$SETUP/wave6.5-item5-http-control.sh" 2>&1 | sed 's/^/  [w65-item5] /'
     else
         echo "--- item 5 волны 6.5: СКРИПТ НЕ НАЙДЕН в $SETUP — 6.5.1 останется без входа ---"
     fi
 else
     echo "--- item 5 волны 6.5: W65_HTTP_CONTROL=off — контроль не поставлен, 6.5.1 назовёт класс сам ---"
+fi
+
+# ── ЖИВОЙ ДВОЙНИК kmod (item 7 волны 6.6, №478). ПОСЛЕ окна, тем же приёмом.
+#    Тумблер W66_KMOD_CONTROL (умолчание off): старый прогон не ломается, метка
+#    6.6.5 честно печатает НЕ ЗАПРОШЕН.
+if [ "${W66_KMOD_CONTROL:-off}" != "off" ]; then
+    if [ -r "$SETUP/wave6.6-kmod-control.sh" ]; then
+        W66_ART="$ART" W66_API="$W63_PIPE_API" \
+            W66_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}" \
+            W66_KMOD_CONTROL="$W66_KMOD_CONTROL" \
+            bash "$SETUP/wave6.6-kmod-control.sh" 2>&1 | sed 's/^/  [w66-kmod] /'
+    else
+        echo "--- item 7 волны 6.6: СКРИПТ НЕ НАЙДЕН в $SETUP — 6.6.5 останется без входа ---"
+    fi
+else
+    echo "--- item 7 волны 6.6: W66_KMOD_CONTROL=off — контроль не поставлен, 6.6.5 назовёт класс сам ---"
 fi
 
 # ── ДИАГНОСТИКА ШУМА (6.3.9.0). Сводки вынимаются из журнала и разбираются
@@ -2108,7 +2125,7 @@ echo "  серий оси event_type: ${_w63l_axis_series:-0}; сумма по �
 if [ "${_w63l_axis_series:-0}" -lt 1 ]; then
     echo "НЕИЗМЕРИМ: 6.3L.6 НЕИЗМЕРИМ (класс НАЗВАН: серии ebpf_guard_alert_volume_by_event_type_total НЕТ ВООБЩЕ — флаг exporter.volume_by_source выключен на этом прогоне) — это отсутствие ПРИБОРА, а не ноль продукта (№410); волна 6.4 обязана включить флаг ПЕРВЫМ шагом"
 elif [ "${_w63l_axis_tls:-0}" -gt 0 ]; then
-    echo "OK: 6.3L.6 ДОСТИГНУТО: ось приняла лейбл tls — {event_type=\"tls\"} = ${_w63l_axis_tls} за прогон; объём TLS волны 6.4 читается ЭТОЙ осью, а не манифестом rule_id (утверждение №327 снято item 4)"
+    echo "OK: 6.3L.6 ДОСТИГНУТО: ось приняла лейбл tls — АЛЕРТОВ оси {event_type=\"tls\"} = ${_w63l_axis_tls} за прогон; объём TLS волны 6.4 читается ЭТОЙ осью, а не манифестом rule_id (утверждение №327 снято item 4)"
 else
     echo "НЕИЗМЕРИМ: 6.3L.6 НЕИЗМЕРИМ (класс НАЗВАН: ось ЖИВА (${_w63l_axis_series} серий, сумма ${_w63l_axis_any}), но лейбла tls на ней нет — TLS-коллектор молчит: ${_w63l_tls_enabled:-состояние неизвестно}). Это вход волны 6.4 (№379…№382, [[tls-collector-dead-on-stock-ubuntu]]), а не провал 6.3.L: ось проверена живьём на ДРУГИХ типах событий, и приборного нуля в 6.4 больше не будет"
 fi
@@ -2623,8 +2640,27 @@ if [ ! -s "$ART/metrics-window-start.txt" ] || [ ! -s "$ART/metrics-window-end.t
     _w648_note 6.4.1 FAIL
     echo "НЕИЗМЕРИМ: 6.4.1 НЕИЗМЕРИМ (класс НАЗВАН: снимки метрик на границах окна не сняты) — вход ноды {type=\"tls\"} не считается без пары \$ART/metrics-window-start.txt / metrics-window-end.txt"
 else
-    _w648_ev0=$(awk '/^ebpf_guard_events_total\{/ && /type="tls"/{print $NF; f=1} END{if(!f)print 0}' "$ART/metrics-window-start.txt" 2>/dev/null)
-    _w648_ev1=$(awk '/^ebpf_guard_events_total\{/ && /type="tls"/{print $NF; f=1} END{if(!f)print 0}' "$ART/metrics-window-end.txt" 2>/dev/null)
+    # СУММА по всем сериям {type="tls"}: у events_total лейблы pod/namespace/node
+    # (RecordEventWithLabels), серий с type="tls" может быть несколько.
+    _w648_ev0=$(awk '/^ebpf_guard_events_total\{/ && /type="tls"/{s+=$NF} END{printf "%d", s+0}' "$ART/metrics-window-start.txt" 2>/dev/null)
+    _w648_ev1=$(awk '/^ebpf_guard_events_total\{/ && /type="tls"/{s+=$NF} END{printf "%d", s+0}' "$ART/metrics-window-end.txt" 2>/dev/null)
+    # Разрез по семействам (item 3 волны 6.6): дельта серии tls_events_by_family_total
+    # по окну. «нет серии» печатается словом, не нулём.
+    _w648_fam=$(awk '
+        FNR == 1 { f++ }
+        $1 ~ /^ebpf_guard_tls_events_by_family_total\{family="[^"]*"\}$/ {
+            k = $1; sub(/^ebpf_guard_tls_events_by_family_total\{family="/, "", k); sub(/"\}$/, "", k)
+            v[f, k] = $NF + 0; h[f, k] = 1
+        }
+        END {
+            n = split("payload ja3 unknown", fs, " ")
+            for (i = 1; i <= n; i++) {
+                k = fs[i]
+                if (!h[2, k]) { out = out k "=СЕРИИ НЕТ "; continue }
+                out = out k "=" (v[2, k] - (h[1, k] ? v[1, k] : 0)) " "
+            }
+            printf "%s", out
+        }' "$ART/metrics-window-start.txt" "$ART/metrics-window-end.txt" 2>/dev/null)
     _w648_ev0="${_w648_ev0:-0}"; _w648_ev1="${_w648_ev1:-0}"
     if [ "$_w648_ev1" -lt "$_w648_ev0" ]; then
         _w648_note 6.4.1 FAIL
@@ -2633,15 +2669,15 @@ else
         _w648_delta=$(( _w648_ev1 - _w648_ev0 ))
         _w648_note 6.4.1 OK
         if [ "$_w648_delta" -gt 0 ]; then
-            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды {event_type=\"tls\"} за окно = ${_w648_delta} (${_w648_ev0}→${_w648_ev1}); серия единая (JA3-семейство эту серию не кормит — см. 6.4.5), раздельного разреза по семействам эта ось не даёт"
+            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды, СОБЫТИЙ оси {event_type=\"tls\"} за окно = ${_w648_delta} (${_w648_ev0}→${_w648_ev1}); разрез по семействам (дельта tls_events_by_family_total за окно): ${_w648_fam:-снимки не разобраны} — ja3=0 есть СТРУКТУРНЫЙ ноль (JA3-правила инертны, см. 6.4.5), а не вердикт детекта; инвариант суммы судит 6.6.3"
         elif [ "${_w648_role:-B}" = "A" ]; then
-            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды {event_type=\"tls\"} за окно = 0 — класс ПРИБОРНЫЙ (прогон A, collectors.tls.enabled: false)"
+            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды, СОБЫТИЙ оси {event_type=\"tls\"} за окно = 0 — класс ПРИБОРНЫЙ (прогон A, collectors.tls.enabled: false)"
         elif [ "${_w648_att:-0}" -ge 1 ]; then
-            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды {event_type=\"tls\"} за окно = 0 — класс ПРОДУКТОВЫЙ (привязка БЫЛА: attach_success_total=${_w648_att}, №449; TLS-трафика в окне не было). Мгновенный tracked_pids=${_w648_tracked:-0} к этому моменту законно нулевой"
+            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды, СОБЫТИЙ оси {event_type=\"tls\"} за окно = 0 — класс ПРОДУКТОВЫЙ (привязка БЫЛА: attach_success_total=${_w648_att}, №449; TLS-трафика в окне не было). Мгновенный tracked_pids=${_w648_tracked:-0} к этому моменту законно нулевой"
         elif [ -z "${_w648_att:-}" ] && [ "${_w648_tracked:-0}" -ge 1 ]; then
-            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды {event_type=\"tls\"} за окно = 0 — класс ПРОДУКТОВЫЙ (бинарь без №449, судим по мгновенному tracked_pids=${_w648_tracked}; TLS-трафика в окне не было)"
+            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды, СОБЫТИЙ оси {event_type=\"tls\"} за окно = 0 — класс ПРОДУКТОВЫЙ (бинарь без №449, судим по мгновенному tracked_pids=${_w648_tracked}; TLS-трафика в окне не было)"
         else
-            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды {event_type=\"tls\"} за окно = 0 — класс ПРИБОРНЫЙ (привязок за жизнь процесса ${_w648_att:-СЕРИИ НЕТ}, сейчас привязано ${_w648_tracked:-0}, отказов ${_w648_fail_total:-0} — привязки не было)"
+            echo "OK: 6.4.1 ИЗМЕРЕНО: вход ноды, СОБЫТИЙ оси {event_type=\"tls\"} за окно = 0 — класс ПРИБОРНЫЙ (привязок за жизнь процесса ${_w648_att:-СЕРИИ НЕТ}, сейчас привязано ${_w648_tracked:-0}, отказов ${_w648_fail_total:-0} — привязки не было)"
         fi
     fi
 fi
@@ -3127,6 +3163,297 @@ else
     echo "--- потери за весь прогон: снимок на закрытии НЕ взят, итог не печатается (нулём он не становится) ---"
 fi
 
+# Снимок пролога — ПЕРВЫЙ снимок прогона (шаг пролога выше); блок W66 читает его
+# вместе со снимками окна и run-end, снятыми выше.
+_w66_pro=/root/metrics-prologue-start-6.4.txt
+# >>> W66-EMITTERS-BEGIN — метки волны 6.6 (ярус A). ОТДЕЛЬНЫЙ блок от
+#     W648/W64B/W65: у тех инварианты «ровно девять/пять/одна» метки. Метки
+#     `6.6.N`, не подпункты занятых ([[subclause-verdicts-poison-label-registry]]);
+#     ни одна прежняя не переименована ([[criteria-index-pins-replay-labels]]).
+#     Блок стоит ПОСЛЕ снимка run-end: обе метки читают его.
+#
+#     Входы: $_w66_pro — снимок пролога (первый снимок прогона; в пайплайне
+#     /root/metrics-prologue-start-6.4.txt, в архиве — корень), $ART/metrics-
+#     window-start.txt, metrics-window-end.txt, metrics-run-end.txt.
+#     Отсутствие файла — ЗАКОННЫЙ вход и печатается словом, а не нулём
+#     ([[empty-metric-snapshot-is-silently-zero]]).
+#
+# ── 6.6.1: СТАРТОВЫЙ ВСПЛЕСК ПОТЕРЬ ПОЛУЧАЕТ ВЕРДИКТ (item 1, №473/№475).
+#    Интервал [старт процесса, первый снимок) — единственный, ни в одну дельту
+#    не входящий. Счётчик до старта процесса не существует, поэтому абсолют
+#    первого снимка И ЕСТЬ потери этого интервала (при условии, что
+#    process_start_time_seconds не менялся: иначе абсолют чужого процесса).
+#    Порог не назначается (правило 5.9.6): класс ИЗМЕРЕНО с величиной, но ноль
+#    отличим от «снимка не было» — оба снимка обязаны быть в руках. Тождество
+#    четырёх интервалов с абсолютом run-end читается ИЗ ТЕХ ЖЕ снимков, что и
+#    сами интервалы (одно вычисление, одна разборка — образец №458); отрицательная
+#    дельта или серия, пропавшая из промежуточного снимка, рвёт тождество
+#    ЗАРАНЕЕ, а не молча (сумма считается по зажатым в ноль дельтам).
+#    Величина берётся МЕТРИКОЙ, не журналом (№474: журнал недосчитывает на
+#    три порядка). path_denylist — фильтр, а не потеря, и не входит.
+_w66_pro="${_w66_pro:-}"
+_w66_s="$ART/metrics-window-start.txt"
+_w66_e="$ART/metrics-window-end.txt"
+_w66_r="$ART/metrics-run-end.txt"
+_w66_miss=""
+[ -s "$_w66_pro" ] || _w66_miss="${_w66_miss}снимок пролога (первый снимок прогона) "
+[ -s "$_w66_r" ]   || _w66_miss="${_w66_miss}metrics-run-end.txt "
+[ -s "$_w66_s" ]   || _w66_miss="${_w66_miss}metrics-window-start.txt "
+[ -s "$_w66_e" ]   || _w66_miss="${_w66_miss}metrics-window-end.txt "
+_w66_row=""
+if [ -z "$_w66_miss" ]; then
+    _w66_row=$(awk '
+        # Ключ серии — всё имя с метками без префикса ebpf_guard_; коллектор и
+        # причина вынимаются ПО ИМЕНИ ЛЕЙБЛА, не по разделителю кавычек.
+        FNR == 1 { f++ }
+        $1 ~ /^process_start_time_seconds$/ { pst[f] = $NF; next }
+        ($1 ~ /^ebpf_guard_events_dropped_total\{/ && $1 !~ /reason="path_denylist"/) || $1 ~ /^ebpf_guard_event_queue_dropped_total$/ {
+            k = $1; sub(/^ebpf_guard_/, "", k)
+            if (!(k in seen)) { seen[k] = 1; nk++; key[nk] = k }
+            v[f, k] = $NF + 0; has[f, k] = 1; ns[f]++
+        }
+        END {
+            for (i = 2; i <= nk; i++) { t = key[i]; j = i - 1; while (j >= 1 && key[j] > t) { key[j+1] = key[j]; j-- } key[j+1] = t }
+            for (i = 1; i <= nk; i++) {
+                k = key[i]
+                if (match(k, /collector="[^"]*"/)) { c = substr(k, RSTART + 11, RLENGTH - 12) } else { c = "" }
+                if (match(k, /reason="[^"]*"/)) { rs = substr(k, RSTART + 8, RLENGTH - 9) } else { rs = "" }
+                if (c != "") { name = c "/" rs; queue = (c == "fileaccess" ? "bulk" : "protected") } else { name = "event_queue"; queue = "очередь не названа" }
+                p = v[1, k] + 0; s = v[2, k] + 0; e = v[3, k] + 0; r = v[4, k] + 0
+                d[1] = p; d[2] = s - p; d[3] = e - s; d[4] = r - e
+                for (q = 1; q <= 4; q++) {
+                    if (d[q] < 0) { defect = defect name "(интервал " q ": " d[q] ") "; d[q] = 0 }
+                    tot[q] += d[q]
+                }
+                if (!has[1, k] || !has[2, k] || !has[3, k] || !has[4, k]) defect = defect name "(нет в части снимков) "
+                totR += r
+                if (d[1] > 0) burst = burst name "=" d[1] " [очередь " queue "] "
+                if (d[2] + d[3] + d[4] > 0) later = later name "=" d[2] "/" d[3] "/" d[4] " "
+            }
+            pstok = (pst[1] == "" || pst[4] == "") ? -1 : (pst[1] == pst[4] ? 1 : 0)
+            printf "%d%c%d%c%d%c%d%c%d%c%d%c%d%c%d%c%s%c%s%c%s", ns[1]+0, 31, ns[4]+0, 31, pstok, 31, tot[1]+0, 31, tot[2]+0, 31, tot[3]+0, 31, tot[4]+0, 31, totR+0, 31, (burst == "" ? "-" : burst), 31, (defect == "" ? "-" : defect), 31, (later == "" ? "-" : later)
+        }
+    ' "$_w66_pro" "$_w66_s" "$_w66_e" "$_w66_r" 2>/dev/null)
+fi
+# Разделитель 0x1f, а не таб: таб пробельный и `read` схлопнул бы пустое поле.
+IFS=$'\x1f' read -r _w66_nP _w66_nR _w66_pst _w66_t0 _w66_t1 _w66_t2 _w66_t3 _w66_tR _w66_burst _w66_defect _w66_later <<<"$_w66_row"
+_w66_sum=$(( ${_w66_t0:-0} + ${_w66_t1:-0} + ${_w66_t2:-0} + ${_w66_t3:-0} ))
+if [ -n "$_w66_miss" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.1 НЕИЗМЕРИМ (класс НАЗВАН: снимка не было — нет ${_w66_miss}): стартовый всплеск потерь берётся абсолютом первого снимка, а тождество интервалов — четырьмя снимками; «снимка не было» неотличимо от нуля и нулём не печатается"
+elif [ "${_w66_nP:-0}" -eq 0 ] || [ "${_w66_nR:-0}" -eq 0 ]; then
+    echo "НЕИЗМЕРИМ: 6.6.1 НЕИЗМЕРИМ (класс НАЗВАН: серий потерь нет в снимке — в снимке пролога ${_w66_nP:-0}, в run-end ${_w66_nR:-0}): отсутствие серии не есть ноль потерь"
+elif [ "${_w66_pst:-0}" -ne 1 ]; then
+    echo "НЕИЗМЕРИМ: 6.6.1 НЕИЗМЕРИМ (класс НАЗВАН: process_start_time_seconds ${_w66_pst:--1} — у пролога и run-end разный процесс либо строки нет; абсолют первого снимка принадлежит не тому процессу, что закрыл прогон; величина первого снимка ${_w66_t0})"
+elif [ "$_w66_defect" != "-" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.1 НЕИЗМЕРИМ (класс НАЗВАН: тождество интервалов не сошлось — ${_w66_defect}; старт ${_w66_t0} + пролог ${_w66_t1} + окно ${_w66_t2} + после окна ${_w66_t3} = ${_w66_sum} против абсолюта run-end ${_w66_tR}): интервал потерян снова"
+elif [ "$_w66_sum" -ne "${_w66_tR:-0}" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.1 НЕИЗМЕРИМ (класс НАЗВАН: тождество интервалов не сошлось — старт ${_w66_t0} + пролог ${_w66_t1} + окно ${_w66_t2} + после окна ${_w66_t3} = ${_w66_sum} против абсолюта run-end ${_w66_tR}): интервал потерян снова"
+else
+    echo "OK: 6.6.1 ИЗМЕРЕНО: стартовый всплеск потерь [старт процесса, первый снимок) = ${_w66_t0} событий (абсолют первого снимка, серий потерь в нём ${_w66_nP}; process_start_time не менялся) — разрез по {collector/reason}: ${_w66_burst}; очередь хопа названа рядом (№475: fileaccess — bulk, остальные — protected); за пролог ${_w66_t1}, за окно ${_w66_t2}, после окна ${_w66_t3}; тождество сошлось: старт ${_w66_t0} + пролог ${_w66_t1} + окно ${_w66_t2} + после окна ${_w66_t3} = ${_w66_sum} = абсолют run-end ${_w66_tR}; ненулевые серии вне старта (пролог/окно/после): ${_w66_later}; порог не назначен (правило 5.9.6); величина читается величиной, а ноль нулём, потому что снимок пролога ВЗЯТ"
+fi
+#
+# ── 6.6.2: parse_error КРАСНЕЕТ САМ (item 2, №476, класс №471). Для каждого
+#    коллектора с collector_up=1 — дельта events_dropped_total{reason=
+#    "parse_error"} за прогон (снимок пролога → run-end). Коллектор, теряющий
+#    разбор, обязан краснеть без человека с curl. Серии материализуются при init
+#    (ParseErrorCollectors в internal/exporter/prometheus.go), поэтому «серии
+#    нет» — свойство БИНАРЯ и печатается словом, а не нулём: ни у одного
+#    коллектора серии нет ни ДО, ни ПОСЛЕ → НЕИЗМЕРИМ «бинарь без
+#    материализации». Отсутствие серии только в снимке ДО называется словом и
+#    даёт дельту = значение ПОСЛЕ (серия родилась за прогон). Коллектор с up=1
+#    вне списка ниже (dns: свой счётчик) — структурно без серии, называется
+#    поимённо и не судится. Список зеркалит ParseErrorCollectors; фикстурный
+#    сторож сверяет их ТЕКСТОМ.
+_w66_pe_expected="bpfmonitor fileaccess gpu http_plaintext iouring network privesc syscall tls tlsfingerprint"
+_w66_prow=""
+if [ -s "$_w66_pro" ] && [ -s "$_w66_r" ]; then
+    _w66_prow=$(awk -v exp_list="$_w66_pe_expected" '
+        BEGIN { ne = split(exp_list, ea, " "); for (i = 1; i <= ne; i++) isexp[ea[i]] = 1 }
+        FNR == 1 { f++ }
+        f == 2 && $1 ~ /^ebpf_guard_collector_up\{collector="[^"]*"\}$/ {
+            c = $1; sub(/^ebpf_guard_collector_up\{collector="/, "", c); sub(/"\}$/, "", c)
+            if (!(c in upseen)) { upseen[c] = 1; nc++; cn[nc] = c }
+            up[c] = $NF + 0
+        }
+        $1 ~ /^ebpf_guard_events_dropped_total\{collector="[^"]*",reason="parse_error"\}$/ {
+            c = $1; sub(/^ebpf_guard_events_dropped_total\{collector="/, "", c); sub(/",reason="parse_error"\}$/, "", c)
+            pe[f, c] = $NF + 0; hp[f, c] = 1
+            if (!(c in peseen)) { peseen[c] = 1; np++; pn[np] = c }
+        }
+        END {
+            for (i = 2; i <= nc; i++) { t = cn[i]; j = i - 1; while (j >= 1 && cn[j] > t) { cn[j+1] = cn[j]; j-- } cn[j+1] = t }
+            for (i = 2; i <= np; i++) { t = pn[i]; j = i - 1; while (j >= 1 && pn[j] > t) { pn[j+1] = pn[j]; j-- } pn[j+1] = t }
+            for (i = 1; i <= nc; i++) {
+                c = cn[i]
+                if (up[c] != 1) continue
+                nup++; uplist = uplist c " "
+                if (!(c in isexp)) { struct_ = struct_ c " "; continue }
+                if (!hp[2, c]) { nojudge = nojudge c " "; continue }
+                judged++
+                if (!hp[1, c]) born = born c " "
+            }
+            for (i = 1; i <= np; i++) {
+                c = pn[i]
+                if (!hp[2, c]) continue
+                # АБСОЛЮТ снимка пролога — это отбраковка за интервал [старт
+                # процесса, первый снимок), тот самый №473: дельта его не видит
+                # по построению, и без этой строки коллектор, отбивающий разбор
+                # С ПЕРВОГО СОБЫТИЯ, дал бы дельту 0 и класс ДОСТИГНУТО —
+                # ровно №471 обратно ([[losses-before-first-snapshot-are-unmeasured]],
+                # [[fixes-must-migrate-to-sibling-controls]]: починка 6.6.1
+                # перенесена в сиблинг).
+                if (hp[1, c] && pe[1, c] > 0) sfail = sfail c "=" pe[1, c] " "
+                d = pe[2, c] - pe[1, c]
+                if (d < 0) { fail = fail c "(счётчик УМЕНЬШИЛСЯ " pe[1, c] "→" pe[2, c] ", рестарт?) "; continue }
+                if (d > 0) fail = fail c "=+" d "(ДО " (hp[1, c] ? pe[1, c] : "серии нет") ", ПОСЛЕ " pe[2, c] ", collector_up " (c in up ? up[c] : "серии нет") ") "
+                totd += d
+            }
+            printf "%d%c%s%c%s%c%s%c%s%c%s%c%d%c%d%c%s", nup+0, 31, (uplist == "" ? "-" : uplist), 31, (fail == "" ? "-" : fail), 31, (nojudge == "" ? "-" : nojudge), 31, (struct_ == "" ? "-" : struct_), 31, (born == "" ? "-" : born), 31, judged+0, 31, np+0, 31, (sfail == "" ? "-" : sfail)
+        }
+    ' "$_w66_pro" "$_w66_r" 2>/dev/null)
+fi
+IFS=$'\x1f' read -r _w66_nup _w66_uplist _w66_fail _w66_nojudge _w66_struct _w66_born _w66_judged _w66_npe _w66_sfail <<<"$_w66_prow"
+if [ ! -s "$_w66_pro" ] || [ ! -s "$_w66_r" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.2 НЕИЗМЕРИМ (класс НАЗВАН: снимка не было — нет снимка пролога либо metrics-run-end.txt): дельта parse_error без пары снимков не считается и нулём не печатается"
+elif [ "$_w66_fail" != "-" ] || [ "${_w66_sfail:--}" != "-" ]; then
+    # ОБЕ величины в одной строке: интервал до первого снимка и дельта прогона —
+    # независимые половины, и elif по одной из них спрятал бы другую
+    # ([[elif-verdict-masks-independent-halves]]).
+    echo "FAIL: 6.6.2 ПРОВАЛЕН: коллектор теряет РАЗБОР событий — parse_error за прогон (дельта пролог→run-end): ${_w66_fail}; ДО ПЕРВОГО СНИМКА, абсолютом снимка пролога — интервал [старт процесса, первый снимок), которого дельты не видят (№473, его величину печатает 6.6.1): ${_w66_sfail:--}— класс ПРОДУКТОВЫЙ (№471: коллектор отбивал 100% своих событий, и виден был только отсутствием events_total); коллекторов с collector_up=1: ${_w66_nup} (${_w66_uplist})"
+elif [ "${_w66_nup:-0}" -eq 0 ]; then
+    echo "НЕИЗМЕРИМ: 6.6.2 НЕИЗМЕРИМ (класс НАЗВАН: ни у одного коллектора нет collector_up=1 в снимке run-end — судить нечего, ось пуста)"
+elif [ "${_w66_judged:-0}" -eq 0 ]; then
+    echo "НЕИЗМЕРИМ: 6.6.2 НЕИЗМЕРИМ (класс НАЗВАН: бинарь без материализации серий parse_error, №476 — ни у одного из ${_w66_nup} коллекторов с collector_up=1 (${_w66_uplist}) серии нет в снимке run-end, серий parse_error в снимках всего ${_w66_npe}): «нет серии» неотличимо от нуля, судить им разбор нельзя"
+elif [ "$_w66_nojudge" != "-" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.2 НЕИЗМЕРИМ (класс НАЗВАН: у коллекторов с collector_up=1 нет серии parse_error в снимке run-end — ${_w66_nojudge}— бинарь материализует не все; судимы ${_w66_judged} из ${_w66_nup})"
+else
+    echo "OK: 6.6.2 ДОСТИГНУТО: дельта parse_error за прогон = 0 у КАЖДОГО из ${_w66_judged} коллекторов с серией и collector_up=1 (collector_up=1 всего ${_w66_nup}: ${_w66_uplist}); серия в снимке ДО отсутствовала у: ${_w66_born}; up=1 без серии по построению (свой счётчик разбора): ${_w66_struct}; серии материализованы при init, ноль здесь есть ноль ЧИТАННОЙ серии; абсолют снимка пролога (интервал [старт процесса, первый снимок), №473) тоже НОЛЬ у каждого судимого — отбраковка разбора не спряталась до первого снимка"
+fi
+# ── 6.6.3: РАЗРЕЗ ОСИ TLS ПО СЕМЕЙСТВАМ ПОЛУЧАЕТ ЧИТАТЕЛЯ (item 3, долг item 7
+#    волны 6.5). Серия ebpf_guard_tls_events_by_family_total{family} — ОТДЕЛЬНАЯ
+#    от events_total (новый лейбл на events_total пересортировал бы экспозицию и
+#    молча сломал бы якоря читателей). Читается: дельта каждого семейства за
+#    окно (window-start → window-end) и АБСОЛЮТ run-end. Инвариант:
+#    sum(by_family) = сумма events_total{type="tls"} по ВСЕМ сериям (у неё
+#    лейблы pod/namespace/node) — и по абсолюту run-end, и по дельте окна.
+#    Расхождение — НЕИЗМЕРИМ с обеими величинами, а не тишина. ja3=0 подаётся
+#    как СТРУКТУРНЫЙ ноль (JA3-правила инертны, 6.4.5), а не вердикт детекта
+#    ([[gated-metric-cannot-carry-product-verdict]]). Серии нет ни в одном
+#    снимке (бинарь до волны 6.5) — НЕИЗМЕРИМ, «нет серии» не есть ноль.
+#    Роль A (collectors.tls.enabled: false): серии материализованы при init,
+#    поэтому ожидаются НУЛИ по построению — ненулевое семейство при выключенном
+#    коллекторе называется провалом входа, а не ошибкой прибора.
+_w66_role="${_w648_role:-B}"
+_w66_f3=""
+if [ -s "$ART/metrics-window-start.txt" ] && [ -s "$ART/metrics-window-end.txt" ] && [ -s "$_w66_r" ]; then
+    _w66_f3=$(awk '
+        FNR == 1 { f++ }
+        $1 ~ /^ebpf_guard_tls_events_by_family_total\{family="[^"]*"\}$/ {
+            k = $1; sub(/^ebpf_guard_tls_events_by_family_total\{family="/, "", k); sub(/"\}$/, "", k)
+            v[f, k] = $NF + 0; h[f, k] = 1; if (!(k in seen)) { seen[k] = 1; nk++; kn[nk] = k }
+        }
+        $1 ~ /^ebpf_guard_events_total\{/ && $1 ~ /type="tls"/ { ev[f] += $NF + 0 }
+        END {
+            for (i = 2; i <= nk; i++) { t = kn[i]; j = i - 1; while (j >= 1 && kn[j] > t) { kn[j+1] = kn[j]; j-- } kn[j+1] = t }
+            n = split("payload ja3 unknown", fs, " ")
+            for (i = 1; i <= n; i++) {
+                k = fs[i]
+                if (!h[3, k]) { miss = miss k " "; continue }
+                have++
+                d = v[3, k] - (h[2, k] ? v[2, k] : 0)
+                dw = v[2, k] - (h[1, k] ? v[1, k] : 0)
+                if (dw < 0) neg = neg k "(" v[1, k] "→" v[2, k] ") "
+                cut = cut k "=" dw " "
+                abs = abs k "=" v[3, k] " "
+                sumw += dw; suma += v[3, k]
+            }
+            for (i = 1; i <= nk; i++) { k = kn[i]; if (!(k == "payload" || k == "ja3" || k == "unknown")) extra = extra k " " }
+            printf "%d%c%s%c%s%c%s%c%s%c%s%c%d%c%d%c%d%c%d%c%d%c%d", have+0, 31, (miss == "" ? "-" : miss), 31, (cut == "" ? "-" : cut), 31, (abs == "" ? "-" : abs), 31, (neg == "" ? "-" : neg), 31, (extra == "" ? "-" : extra), 31, sumw+0, 31, suma+0, 31, ev[2] - ev[1], 31, ev[3]+0, 31, (v[3, "ja3"]+0), 31, (v[3, "unknown"]+0)
+        }
+    ' "$ART/metrics-window-start.txt" "$ART/metrics-window-end.txt" "$_w66_r" 2>/dev/null)
+fi
+IFS=$'\x1f' read -r _w66_fhave _w66_fmiss _w66_fcut _w66_fabs _w66_fneg _w66_fextra _w66_fsumw _w66_fsuma _w66_fevw _w66_feva _w66_fja3 _w66_funk <<<"$_w66_f3"
+if [ ! -s "$ART/metrics-window-start.txt" ] || [ ! -s "$ART/metrics-window-end.txt" ] || [ ! -s "$_w66_r" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: снимка не было — нет одного из metrics-window-start.txt / metrics-window-end.txt / metrics-run-end.txt): разрез по семействам без трёх снимков не считается и нулём не печатается"
+elif [ "${_w66_fhave:-0}" -eq 0 ]; then
+    echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: серии tls_events_by_family_total нет в снимке run-end вовсе — бинарь до item 7 волны 6.5): «нет серии» неотличимо от нуля, разрез не читается"
+elif [ "$_w66_fmiss" != "-" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: у части семейств нет серии в снимке run-end — ${_w66_fmiss}— материализуются все три при init, значит бинарь чужой)"
+elif [ "$_w66_fneg" != "-" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: счётчик семейства убыл внутри окна — ${_w66_fneg}— агент рестартовал, дельта через рестарт бессмысленна)"
+elif [ "${_w66_fsuma:-0}" -ne "${_w66_feva:-0}" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: инвариант суммы не сошёлся по абсолюту run-end — sum(by_family)=${_w66_fsuma} (${_w66_fabs}) против events_total{type=\"tls\"}=${_w66_feva} событий): часть TLS-событий считается одной серией и не считается другой, разрез судить нельзя"
+elif [ "${_w66_fsumw:-0}" -ne "${_w66_fevw:-0}" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: инвариант суммы не сошёлся по дельте окна — sum(by_family)=${_w66_fsumw} (${_w66_fcut}) против events_total{type=\"tls\"}=${_w66_fevw} событий за окно)"
+elif [ "${_w66_role}" = "A" ] && { [ "${_w66_fsuma:-0}" -ne 0 ] || [ "${_w66_fsumw:-0}" -ne 0 ]; }; then
+    echo "FAIL: 6.6.3 ПРОВАЛЕН: прогон A (collectors.tls.enabled: false), а TLS-события идут — по абсолюту ${_w66_fabs}, за окно ${_w66_fcut}: вход прогона A загрязнён, пара A/B недоказуема"
+else
+    _w66_fnote="ja3=${_w66_fja3:-0} — СТРУКТУРНЫЙ ноль (JA3-правила инертны, 6.4.5), а не вердикт детекта"
+    [ "${_w66_fja3:-0}" -gt 0 ] && _w66_fnote="ja3=${_w66_fja3} за прогон (JA3-семейство кормится, 6.4.5 читать отдельно)"
+    [ "${_w66_funk:-0}" -gt 0 ] && _w66_fnote="${_w66_fnote}; unknown=${_w66_funk} — TLS-событий БЕЗ TLS-деталей (свой ряд, не payload), продюсер шлёт событие без полезной нагрузки"
+    echo "OK: 6.6.3 ИЗМЕРЕНО: разрез СОБЫТИЙ оси {event_type=\"tls\"} по семействам за окно: ${_w66_fcut}(событий; сумма ${_w66_fsumw} = events_total ${_w66_fevw}); абсолют run-end: ${_w66_fabs}(сумма ${_w66_fsuma} = events_total ${_w66_feva}); прогон ${_w66_role}; ${_w66_fnote}; инвариант sum(by_family)=events_total{type=\"tls\"} сошёлся дважды (абсолют и окно)"
+fi
+
+# ── 6.6.4: ОБЪЁМ http_plaintext АТРИБУТИРУЕТСЯ ИЛИ ОБЪЯВЛЯЕТСЯ НЕАТРИБУТИРУЕМЫМ
+#    (item 8, №479). Читает сторожевой файл контроля 6.5 ($ART/http-control-
+#    plaintext.txt) и его .attr (снимок ПОСЛЕ осадки). Три числа: объяснённые
+#    контролем, остаток, на кого записан. Остаток без названного процесса —
+#    НЕИЗМЕРИМ по атрибуции, а не «цена коллектора». Флаг
+#    collectors.http_plaintext.enabled остаётся false по умолчанию, пока остаток
+#    не назван. Вакуумного ДОСТИГНУТО нет: без событий контроля атрибутировать нечего.
+_w66_hc="$ART/http-control-plaintext.txt"
+_w66_ha="$ART/http-control-plaintext.txt.attr"
+_w66_h4=$(cat "$_w66_hc" "$_w66_ha" 2>/dev/null | awk -F= '
+    $1 == "class" { cls = $2 } $1 == "events_delta" { ed = $2 }
+    $1 == "settled_delta" { sd = $2 } $1 == "residual" { rs = $2 } $1 == "settled_after_s" { st = $2 }
+    $1 == "other_attached" { oa = $2 } $1 == "tracked_pids_settled" { tp = $2 }
+    END { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s", cls, 31, ed, 31, sd, 31, rs, 31, st, 31, oa, 31, tp }
+')
+IFS=$'\x1f' read -r _w66_hcls _w66_hed _w66_hsd _w66_hrs _w66_hst _w66_hoa _w66_htp <<<"$_w66_h4"
+if [ ! -s "$_w66_hc" ]; then
+    echo "НЕ ЗАПРОШЕН ПОСТАНОВКОЙ: 6.6.4 НЕИЗМЕРИМ (НЕ ЗАПРОШЕН: контроль http_plaintext не поставлен — W65_HTTP_CONTROL=off либо скрипт не найден): атрибуция остатка объёма требует захода 3 с collectors.http_plaintext.enabled: true; вакуумное ДОСТИГНУТО запрещено; флаг остаётся false по умолчанию"
+elif [ -n "${_w66_hcls:-}" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.4 НЕИЗМЕРИМ (класс НАЗВАН контролем: ${_w66_hcls}): объём http_plaintext не измерялся, атрибутировать нечего"
+elif [ ! -s "$_w66_ha" ] || [ -z "${_w66_hsd:-}" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.4 НЕИЗМЕРИМ (класс НАЗВАН: снимка ПОСЛЕ осадки не было — нет ${_w66_ha##*/}, контроль без правки item 8 волны 6.6): величина сразу после обмена (${_w66_hed:-?}) берётся до осадки — ровно так №479 недосчитал 30 событий из 39"
+elif [ "${_w66_hed:-0}" -eq 0 ]; then
+    echo "НЕИЗМЕРИМ: 6.6.4 НЕИЗМЕРИМ (класс НАЗВАН: контроль не дал ни одного события за обмен — объяснённых 0; после осадки ${_w66_hst}с событий ${_w66_hsd}, остаток ${_w66_hrs}): без объяснённой части остаток атрибутировать не от чего"
+elif [ "${_w66_hrs:-0}" -eq 0 ]; then
+    echo "OK: 6.6.4 ИЗМЕРЕНО: объём http_plaintext за контроль после осадки ${_w66_hst}с = ${_w66_hsd} событий = объяснённых контролем ${_w66_hed} + остаток 0; остатка нет — атрибутировать нечего; tracked_pids на осадке ${_w66_htp}; флаг enabled остаётся false по умолчанию (одна проба не назначает цену)"
+elif [ "${_w66_hoa:--}" = "-" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.4 НЕИЗМЕРИМ (класс НАЗВАН: остаток НЕ АТРИБУТИРУЕМ — после осадки ${_w66_hst}с событий ${_w66_hsd} = объяснённых контролем ${_w66_hed} + остаток ${_w66_hrs}, привязавшихся процессов кроме держателя в журнале нет, у серии events_total нет оси comm/pid, №479): остаток без имени — НЕ «цена коллектора»; флаг enabled остаётся false"
+else
+    echo "OK: 6.6.4 ИЗМЕРЕНО: после осадки ${_w66_hst}с событий ${_w66_hsd} = объяснённых контролем ${_w66_hed} + остаток ${_w66_hrs}; остаток записан на КАНДИДАТОВ (привязались за прогон, pid:comm): ${_w66_hoa} — кандидаты, не доказательство: метрика не различает, чьё событие; tracked_pids на осадке ${_w66_htp}; флаг enabled остаётся false до доказательного разреза"
+fi
+
+# ── 6.6.5: kmod — ИНЕРТНОСТЬ ОБЪЯВЛЕНА И ПРЕДЪЯВЛЕН ЖИВОЙ ДВОЙНИК (item 7, №478).
+#    Две половины: (а) collector_up{kmod} согласован со списком LSM ядра;
+#    (б) finit_module(-1,"",0) → EBADF, а rootkit_init_module_syscall сработало.
+#    (а) без (б) — декларация: класс НЕИЗМЕРИМ, не ДОСТИГНУТО.
+_w66_kc="$ART/kmod-control.txt"
+_w66_k5=$(awk -F= '
+    $1 == "class" { cls = $2 } $1 == "kmod_up" { up = $2 } $1 == "lsm" { lsm = $2 }
+    $1 == "errno" { er = $2 } $1 == "errno_name" { en = $2 } $1 == "comm" { cm = $2 }
+    $1 == "alerts_before" { ab = $2 } $1 == "alerts_after" { aa = $2 } $1 == "alerts_delta" { ad = $2 }
+    END { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c%s%c%s", cls, 31, up, 31, lsm, 31, er, 31, en, 31, cm, 31, ab, 31, aa, 31, ad }
+' "$_w66_kc" 2>/dev/null)
+IFS=$'\x1f' read -r _w66_kcls _w66_kup _w66_klsm _w66_ker _w66_ken _w66_kcm _w66_kab _w66_kaa _w66_kad <<<"$_w66_k5"
+case ",${_w66_klsm}," in *,bpf,*) _w66_kbpf=1 ;; *) _w66_kbpf=0 ;; esac
+if [ ! -s "$_w66_kc" ]; then
+    echo "НЕ ЗАПРОШЕН ПОСТАНОВКОЙ: 6.6.5 НЕИЗМЕРИМ (НЕ ЗАПРОШЕН: контроль kmod не поставлен — W66_KMOD_CONTROL=off либо скрипт не найден): половина (а) без (б) — декларация, а не предъявление; вакуумное ДОСТИГНУТО запрещено"
+elif [ -n "${_w66_kcls:-}" ]; then
+    echo "НЕИЗМЕРИМ: 6.6.5 НЕИЗМЕРИМ (класс НАЗВАН контролем: ${_w66_kcls}): ноль у двойника есть свойство ПОСТАНОВКИ контроля, а не продукта"
+elif [ "${_w66_kup:-}" = "1" ] && [ "$_w66_kbpf" -eq 0 ]; then
+    echo "FAIL: 6.6.5 ПРОВАЛЕН: collector_up{kmod}=1 на ядре БЕЗ bpf в списке LSM (${_w66_klsm}) — серия лжёт единицей при нуле работающих хуков (№438/№478)"
+elif [ "${_w66_kup:-}" = "0" ] && [ "$_w66_kbpf" -eq 1 ]; then
+    echo "FAIL: 6.6.5 ПРОВАЛЕН: collector_up{kmod}=0 при bpf в списке LSM (${_w66_klsm}) — ридеры должны были подняться, класс ПРОДУКТОВЫЙ (загрузка LSM-программ отказала)"
+elif [ "${_w66_kad:-0}" -gt 0 ]; then
+    echo "OK: 6.6.5 ДОСТИГНУТО: обе половины предъявлены — (а) collector_up{kmod}=${_w66_kup}, LSM ядра: ${_w66_klsm} (bpf: $([ "$_w66_kbpf" -eq 1 ] && echo есть || echo НЕТ) — 7 правил event_type: kmod и 2 cgroup_esc $([ "$_w66_kbpf" -eq 1 ] && echo живы || echo ИНЕРТНЫ, объявлено в шапках правил)); (б) живой двойник на syscall-оси: finit_module(-1,\"\",0) вернул errno=${_w66_ker} (${_w66_ken}, модуль НЕ загружен), comm=${_w66_kcm}, алертов rootkit_init_module_syscall ${_w66_kab}→${_w66_kaa} (+${_w66_kad})"
+else
+    echo "FAIL: 6.6.5 ПРОВАЛЕН: (а) collector_up{kmod}=${_w66_kup}, LSM ${_w66_klsm}; (б) finit_module(-1,\"\",0) дошёл до ядра (errno=${_w66_ker} ${_w66_ken}, comm=${_w66_kcm}), а алертов rootkit_init_module_syscall не прибавилось (${_w66_kab}→${_w66_kaa}) — класс ПРОДУКТОВЫЙ: двойник, на который опирается инертность kmod, мёртв, и загрузка модуля НЕ детектируется совсем (проверить nr 313 в аллоулисте sampling.go, dedup, rate-limit)"
+fi
+# <<< W66-EMITTERS-END
+
 if ! bash "$SETUP/wave6.4-completeness-guard.sh" --check "$OUT" "$ART/emitted-labels.txt"; then
     echo "=== ПРОГОН 6.4 ОСТАНОВЛЕН: 6.4.8 ОТКАЗАЛСЯ СОБРАТЬ АРХИВ (расхождение таблицы меток постановки со списком вынесенных вердиктов, item 8 по образцу №269/№270) ==="
     {
@@ -3169,7 +3496,7 @@ cp "$SETUP/config-test.yaml" "$SETUP/wave6.3-controls.sh" "$SETUP/wave6.3-metric
    "$SETUP/wave6.4-completeness-guard.sh" "$SETUP/wave6.4-emitter-fixtures.sh" \
    "$SETUP/run-6.4-pipeline.sh" "$SETUP/wave6.3.9f-item3-baseline-controls.sh" \
    "$SETUP/wave6.4-item5-item6-tls-controls.sh" "$SETUP/wave6.5-archive-manifest.txt" \
-   "$SETUP/wave6.5-item5-http-control.sh" "$COLLECT/" 2>/dev/null
+   "$SETUP/wave6.5-item5-http-control.sh" "$SETUP/wave6.6-kmod-control.sh" "$COLLECT/" 2>/dev/null
 # Манифест TLS и его генератор (item 1 постановки 6.4) — часть провенанса
 # величины 6.4.6: без манифеста через сутки нельзя сказать, ПО КАКИМ правилам
 # был отфильтрован объём окна манифеста. Копируются, только если существуют

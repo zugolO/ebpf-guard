@@ -135,9 +135,12 @@ type GPUEventRaw struct {
 	Size       uint64
 }
 
-// gpuEventRawSize is the wire size expected from the ring buffer.
-// 4+8+4+4+4+4+16+16+1+8+8+8 = 85 bytes (packed, no padding).
-const gpuEventRawSize = 85
+// gpuEventRawSize is the wire size expected from the ring buffer, derived
+// from the Go mirror above (№477): a hand-typed literal sat between the
+// collector and a zero-event history exactly as http_event's 340 did (№471).
+// binary.Size counts packed fields with no padding, which is what the C
+// struct gpu_event (85 bytes) is; wire_size_test.go pins both numbers.
+var gpuEventRawSize = binary.Size(GPUEventRaw{})
 
 // ToTypesEvent converts a raw BPF GPU event to the canonical types.Event.
 func (e *GPUEventRaw) ToTypesEvent() types.Event {

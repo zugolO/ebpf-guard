@@ -92,18 +92,28 @@ func sendEvent(ctx context.Context, out chan<- types.Event, e types.Event, strat
 // dropLogger throttles "event dropped" log lines to at most one per interval,
 // aggregating the drop count so operators see "dropped N events in last 5s"
 // instead of one log line per dropped event (which itself causes CPU overhead).
+//
+// The window is CLOSED BY A TIMER, not by the next drop (№474). The earlier
+// design compared "now" with a zero-initialised lastLogTime on every drop, so
+// the very first drop always logged alone (dropped_count=1) and the rest sat
+// in pending until a LATER drop happened after the interval — a burst that
+// ended within a fraction of a second was reported as 1 of 3656 and the other
+// 3655 were never printed. Now the first drop of a window arms a one-shot
+// timer; when it fires it prints everything accumulated. Nothing is left
+// behind, and a window is always closed within one interval.
 type dropLogger struct {
-	interval    time.Duration
-	lastLogTime atomic.Int64 // Unix nanoseconds of last log emission
-	pending     atomic.Int64 // events dropped since last log
+	interval time.Duration
+	armed    atomic.Bool  // a flush timer is pending for the current window
+	pending  atomic.Int64 // events dropped since last log
 }
 
 func newDropLogger(interval time.Duration) *dropLogger {
 	return &dropLogger{interval: interval}
 }
 
-// record increments the pending drop counter. If the throttle interval has
-// elapsed since the last emission, it logs the aggregated count and resets.
+// record increments the pending drop counter. The first drop of a window arms
+// a timer that logs the aggregated count when the interval elapses; drops in
+// between only bump the counter. A non-positive interval logs synchronously.
 //
 // logger is expected to already carry a "collector" attribute (bound via
 // .With, the same convention every collector's c.logger already follows) —
@@ -119,15 +129,22 @@ func newDropLogger(interval time.Duration) *dropLogger {
 func (d *dropLogger) record(logger *slog.Logger, hop string) {
 	d.pending.Add(1)
 
-	now := time.Now().UnixNano()
-	last := d.lastLogTime.Load()
-	if now-last < d.interval.Nanoseconds() {
+	if d.interval <= 0 {
+		d.flush(logger, hop)
 		return
 	}
-	// Try to become the goroutine that logs (CAS last → now).
-	if !d.lastLogTime.CompareAndSwap(last, now) {
+	if !d.armed.CompareAndSwap(false, true) {
 		return
 	}
+	time.AfterFunc(d.interval, func() {
+		// Disarm BEFORE swapping the counter: a drop landing between the two
+		// re-arms a fresh timer instead of being stranded in pending.
+		d.armed.Store(false)
+		d.flush(logger, hop)
+	})
+}
+
+func (d *dropLogger) flush(logger *slog.Logger, hop string) {
 	count := d.pending.Swap(0)
 	if count > 0 {
 		logger.Warn("event channel full, dropping events",

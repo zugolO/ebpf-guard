@@ -628,3 +628,38 @@ func TestCacheExpiryEdgeCases(t *testing.T) {
 	_, exists = e.enrichmentCache[2]
 	assert.True(t, exists, "entry within TTL should remain")
 }
+
+// Item 10 wave 6.6: a pid that is gone (watcher-less pid path misses) is
+// resolved through the in-kernel cgroup id remembered from an earlier hit.
+func TestEnrichEvent_CgroupRecoversProcGone(t *testing.T) {
+	e := &Enricher{cacheTTL: time.Minute, enrichmentCache: map[uint32]*EnrichmentInfo{}}
+	info := &EnrichmentInfo{PodName: "web", Namespace: "d", ContainerID: "abc", CachedAt: time.Now()}
+
+	e.rememberCgroup(77, info)
+	ev := &types.Event{PID: 999999, CgroupID: 77}
+	e.EnrichEvent(ev)
+	if ev.Enrichment == nil || ev.Enrichment.PodName != "web" {
+		t.Fatalf("cgroup id did not recover the attribution: %+v", ev.Enrichment)
+	}
+
+	// Unknown cgroup and cgroup 0 (old BPF object) stay unattributed.
+	for _, id := range []uint64{78, 0} {
+		ev := &types.Event{PID: 999999, CgroupID: id}
+		e.EnrichEvent(ev)
+		if ev.Enrichment != nil {
+			t.Fatalf("cgroup %d must not resolve: %+v", id, ev.Enrichment)
+		}
+	}
+
+	// A host process (no container, no pod) never poisons a cgroup.
+	e.rememberCgroup(1, &EnrichmentInfo{CachedAt: time.Now()})
+	if e.lookupCgroup(1) != nil {
+		t.Fatal("empty attribution was remembered under cgroup 1")
+	}
+
+	// Expired entries are not served.
+	e.rememberCgroup(79, &EnrichmentInfo{PodName: "old", CachedAt: time.Now().Add(-2 * time.Minute)})
+	if e.lookupCgroup(79) != nil {
+		t.Fatal("expired cgroup entry served")
+	}
+}

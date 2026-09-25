@@ -1094,6 +1094,9 @@ rules:
   # Cgroup Namespace Escape (Sprint 33.0)
   # ============================================================================
 
+  # INERT WITHOUT BPF LSM (item 7 wave 6.6, #478): both event_type: cgroup_esc
+  # rules below need the cgroup_attach_task LSM hook; on a kernel without BPF LSM
+  # collector_up{collector="kmod"} = 0 and they cannot fire.
   # Process migrated to a cgroup outside its initial container cgroup hierarchy.
   # This is the classic cgroup escape technique: move the process into the root
   # cgroup before executing a command via cgroup v1 release_agent.

@@ -23,6 +23,22 @@ import (
 // legitimate event to hand to the correlator.
 const EventTypeSyscall uint32 = 1
 
+// EventCgroupIDOffset is offsetof(struct event, cgroup_id) in bpf/common.h: the
+// 60-byte header plus the 272-byte union (its 266-byte file payload is padded
+// to 268 and the union aligned to 8 — measured with offsetof, not summed from
+// the field list; the parsers' 326-byte minimum is a read bound, not this
+// offset). cgroup_id (item 10 wave 6.6) is the 8 bytes AT it; a record shorter
+// than EventCgroupIDOffset+8 comes from an older BPF object and yields 0.
+const EventCgroupIDOffset = 332
+
+// cgroupIDTail reads the trailing in-kernel cgroup id, 0 if the record lacks it.
+func cgroupIDTail(raw []byte) uint64 {
+	if len(raw) < EventCgroupIDOffset+8 {
+		return 0
+	}
+	return binary.LittleEndian.Uint64(raw[EventCgroupIDOffset:])
+}
+
 // SyscallEvent matches the C struct event from common.h
 // Layout matches packed C struct exactly
 // SyscallEvent matches the C struct event for syscall events.
@@ -53,6 +69,8 @@ type SyscallEvent struct {
 	Nr   int64
 	Ret  int64
 	Args [6]uint64
+	// CgroupID is the record's trailing cgroup_id (offset EventCgroupIDOffset).
+	CgroupID uint64
 }
 
 // NetworkEvent matches the C struct event for network events.
@@ -88,6 +106,8 @@ type NetworkEvent struct {
 	Dport  uint16
 	Proto  uint8
 	Family uint8 // Address family: 2=AF_INET, 10=AF_INET6
+	// CgroupID is the record's trailing cgroup_id (offset EventCgroupIDOffset).
+	CgroupID uint64
 }
 
 // FileaccessEvent matches the C struct event for file events.
@@ -120,6 +140,7 @@ type FileaccessEvent struct {
 	Mode        uint32
 	Op          uint8
 	FDTruncated uint8
+	CgroupID    uint64 // trailing cgroup_id (offset EventCgroupIDOffset)
 }
 
 // PrivescRawEvent is the wire-format event for EVENT_TYPE_PRIVESC.
@@ -379,6 +400,7 @@ func ParseSyscallEventInto(raw []byte, out *SyscallEvent) error {
 		out.Args[i] = binary.LittleEndian.Uint64(raw[offset:])
 		offset += 8
 	}
+	out.CgroupID = cgroupIDTail(raw)
 	return nil
 }
 
@@ -425,6 +447,7 @@ func ParseNetworkEventInto(raw []byte, out *NetworkEvent) error {
 	out.Proto = raw[offset]
 	offset++
 	out.Family = raw[offset]
+	out.CgroupID = cgroupIDTail(raw)
 	return nil
 }
 
@@ -470,6 +493,7 @@ func ParseFileaccessEventInto(raw []byte, out *FileaccessEvent) error {
 	out.Op = raw[off]
 	off++
 	out.FDTruncated = raw[off]
+	out.CgroupID = cgroupIDTail(raw)
 	return nil
 }
 
@@ -803,6 +827,7 @@ func (e *SyscallEvent) ToTypesEvent() types.Event {
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
+		CgroupID:   e.CgroupID,
 		UID:        e.UID,
 		Comm:       e.Comm,
 		ParentComm: e.ParentComm,
@@ -822,6 +847,7 @@ func (e *NetworkEvent) ToTypesEvent() types.Event {
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
+		CgroupID:   e.CgroupID,
 		UID:        e.UID,
 		Comm:       e.Comm,
 		ParentComm: e.ParentComm,
@@ -847,6 +873,7 @@ func (e *FileaccessEvent) ToTypesEvent() types.Event {
 		PID:        e.PID,
 		TGID:       e.TGID,
 		PPID:       e.PPID,
+		CgroupID:   e.CgroupID,
 		UID:        e.UID,
 		Comm:       e.Comm,
 		ParentComm: e.ParentComm,

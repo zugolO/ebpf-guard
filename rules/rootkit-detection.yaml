@@ -2,6 +2,16 @@
 # Detects kernel rootkit installation, LD_PRELOAD hijacking, and kernel subversion
 # MITRE ATT&CK: T1014, T1547.006, T1574.006, T1620
 
+# INERT WITHOUT BPF LSM (declared, item 7 wave 6.6, #478): the 2 event_type: kmod
+# rules below (rootkit_kmod_unsigned_load, rootkit_kmod_suspicious_name) (and the 2 event_type: cgroup_esc rules in container-escape.yaml)
+# are fed only by the LSM-hook readers in internal/collector/lsm.go. On a kernel
+# without BPF LSM (e.g. 5.15.0-191 on the test stand) neither reader starts,
+# collector_up{collector="kmod"} = 0, and these rules can never fire.
+# Module loading is NOT undetected there: its live twin is on the syscall axis —
+# rootkit_init_module_syscall (nr 175/313) and rootkit_delete_module_syscall
+# (nr 176) in rootkit-detection.yaml — proven by the wave-6.6 control (label
+# 6.6.5): finit_module(-1, "", 0) fails EBADF, no module loads, sys_enter fires.
+
 rules:
   # ============================================================================
   # T1547.006 — Boot or Logon Autostart: Kernel Modules

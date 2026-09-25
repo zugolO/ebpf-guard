@@ -1153,7 +1153,7 @@ _check460_complete() { # <файл> <имя>
 # Метка берётся из строки: 6.4.N, 6.4B.N и метки волны 6.5 (6.5.N). Список
 # префиксов расширяется ВМЕСТЕ с таблицей меток — иначе новая метка проходит
 # сверку текста «мимо» и №461 читает это как «сверена».
-_line_label() { printf '%s' "$1" | grep -oE '6\.(4B?|5)\.[0-9]+' | head -1; }
+_line_label() { printf '%s' "$1" | grep -oE '6\.(4B?|5|6)\.[0-9]+' | head -1; }
 
 # _TEXT_SEEN — реестр меток, чей НАПЕЧАТАННЫЙ ТЕКСТ сверён (№461).
 _TEXT_SEEN=""
@@ -1611,6 +1611,454 @@ _need_text "6.5.1 продуктовый провал: события отбит
 _need_text "6.5.1 продуктовый провал: плоскость данных не доходит" "$_t65_prod0" \
     "tracked_pids=1" "events_delta=0" "обмен 0" "причины: -"
 
+# ── ФИКСТУРНЫЙ ПРОГОН БЛОКА W66 (метки 6.6.1 и 6.6.2, ярус A волны 6.6). Отдельный
+#    блок и харнесс: у W648/W64B/W65 свои инварианты числа меток.
+if ! grep -q 'W66-EMITTERS-BEGIN' "$PIPE" || ! grep -q 'W66-EMITTERS-END' "$PIPE"; then
+    echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: в $PIPE нет маркеров W66-EMITTERS-BEGIN/END — метки 6.6.1/6.6.2 вынимать нечем"
+    exit 2
+fi
+sed -n '/W66-EMITTERS-BEGIN/,/W66-EMITTERS-END/p' "$PIPE" > "$WORK/block66.sh"
+_block66_lines=$(wc -l < "$WORK/block66.sh")
+if [ "${_block66_lines:-0}" -lt 40 ]; then
+    echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: между маркерами W66 всего ${_block66_lines} строк — блок вынут не тот"
+    exit 2
+fi
+bash -n "$WORK/block66.sh" || { echo "СТОРОЖ ЭМИТТЕРОВ НЕИЗМЕРИМ: блок W66 не разбирается bash -n"; exit 2; }
+
+# _run66 <каталог-ART> <файл снимка пролога> — гоняет блок W66. Отсутствие любого
+# из файлов — ЗАКОННЫЙ вход (класс «снимка не было»).
+_run66() {
+    cat > "$WORK/harness66.sh" <<EOF66
+set -u
+ART="$1"
+_w66_pro="$2"
+_w648_role="${W66_TEST_ROLE:-B}"
+EOF66
+    cat "$WORK/block66.sh" >> "$WORK/harness66.sh"
+    bash "$WORK/harness66.sh" 2>&1
+}
+
+# _check66 <метка> <имя> <вывод> <ожидаемый класс> — ровно одна вердиктная строка
+# метки (И2/И3) и её класс; возвращает вердиктную строку.
+_check66() {
+    local lbl="$1" name="$2" out="$3" exp="$4" line got n
+    echo "--- фикстура ${lbl}: $name" >&2
+    n=$(printf '%s\n' "$out" | grep -cE "(^|[^0-9.])${lbl//./\\.}[[:space:]]+(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ|ИЗМЕРЕНО)")
+    [ "${n:-0}" -eq 1 ] || _efail "$name: метка $lbl напечатала ${n:-0} вердиктных строк вместо одной (И2/И3)"
+    line=$(_line_of "$out" "$lbl")
+    got=$(_cls "$line")
+    if [ "$got" = "$exp" ]; then
+        echo "    OK  $lbl = $got" >&2
+    else
+        _efail "$name: $lbl дал класс $got, ожидался $exp — строка: $(printf '%s' "$line" | cut -c1-200)" >&2
+    fi
+    printf '%s' "$line"
+}
+
+# _mk_drops <файл> <pst|-> <syscall_rr> <fileaccess_rr> <dns_rr> [parse_error-пары "коллектор=N …"] [up-пары "коллектор=N …"]
+# Снимок /metrics ровно с теми сериями, что читает блок W66. pst «-» — строки
+# process_start_time_seconds нет; пары parse_error пусты — серий нет ВООБЩЕ.
+_mk_drops() {
+    local f="$1" pst="$2" sy="$3" fa="$4" dn="$5" pe="${6:-}" up="${7:-}" pair
+    : > "$f"
+    [ "$pst" != "-" ] && echo "process_start_time_seconds $pst" >> "$f"
+    echo "ebpf_guard_event_queue_dropped_total 0" >> "$f"
+    echo "ebpf_guard_events_dropped_total{collector=\"dns\",reason=\"ringbuf_to_router\"} $dn" >> "$f"
+    echo "ebpf_guard_events_dropped_total{collector=\"fileaccess\",reason=\"path_denylist\"} 99999" >> "$f"
+    echo "ebpf_guard_events_dropped_total{collector=\"fileaccess\",reason=\"ringbuf_to_router\"} $fa" >> "$f"
+    echo "ebpf_guard_events_dropped_total{collector=\"syscall\",reason=\"ringbuf_to_router\"} $sy" >> "$f"
+    for pair in $pe; do
+        echo "ebpf_guard_events_dropped_total{collector=\"${pair%%=*}\",reason=\"parse_error\"} ${pair##*=}" >> "$f"
+    done
+    for pair in $up; do
+        echo "ebpf_guard_collector_up{collector=\"${pair%%=*}\"} ${pair##*=}" >> "$f"
+    done
+}
+
+echo
+echo "=== ФИКСТУРНЫЙ ПРОГОН ВЕРДИКТНЫХ ВЕТОК 6.6.1 и 6.6.2 (блок из $PIPE, ${_block66_lines} строк) ==="
+
+# mk661 <каталог> — четыре снимка с заданными потерями: старт(пролог) → окно → после.
+# Ожидаемая сумма для «здоровой» пары: syscall 3656 на старте, окно +5, после +0;
+# fileaccess 0 → 0 → 0 → 452.
+_A661="$WORK/art661"; mkdir -p "$_A661"
+_mk_drops "$WORK/pro661.txt"                  1790305396 3656 0   0
+_mk_drops "$_A661/metrics-window-start.txt"   1790305396 3656 0   0
+_mk_drops "$_A661/metrics-window-end.txt"     1790305396 3661 0   0
+_mk_drops "$_A661/metrics-run-end.txt"        1790305396 3661 452 0
+_t661_ok=$(_check66 6.6.1 "всплеск 3656 на старте, тождество сходится — ИЗМЕРЕНО с величиной" \
+    "$(_run66 "$_A661" "$WORK/pro661.txt")" OK)
+_need_text "6.6.1 стартовый всплеск: величина, разрез, очередь, тождество" "$_t661_ok" \
+    "= 3656 событий" "syscall/ringbuf_to_router=3656" "очередь protected" \
+    "старт 3656 + пролог 0 + окно 5 + после окна 452 = 4113 = абсолют run-end 4113" \
+    "fileaccess/ringbuf_to_router=0/0/452"
+
+# Всплеск в bulk-очереди: хоп называет очередь, а не «protected» по умолчанию.
+_A661B="$WORK/art661b"; mkdir -p "$_A661B"
+_mk_drops "$WORK/pro661b.txt"                  7 0 41 0
+_mk_drops "$_A661B/metrics-window-start.txt"   7 0 41 0
+_mk_drops "$_A661B/metrics-window-end.txt"     7 0 41 0
+_mk_drops "$_A661B/metrics-run-end.txt"        7 0 41 0
+_t661_bulk=$(_check66 6.6.1 "всплеск в fileaccess — очередь bulk названа рядом" \
+    "$(_run66 "$_A661B" "$WORK/pro661b.txt")" OK)
+_need_text "6.6.1 очередь bulk" "$_t661_bulk" "= 41 событий" "fileaccess/ringbuf_to_router=41" "очередь bulk"
+
+# Ноль ВЗЯТОГО снимка — тоже ИЗМЕРЕНО, но с числом серий: отличим от «снимка не было».
+_A661Z="$WORK/art661z"; mkdir -p "$_A661Z"
+_mk_drops "$WORK/pro661z.txt"                  7 0 0 0
+for _f in metrics-window-start metrics-window-end metrics-run-end; do _mk_drops "$_A661Z/$_f.txt" 7 0 0 0; done
+_t661_zero=$(_check66 6.6.1 "нулевой всплеск при взятом снимке — ИЗМЕРЕНО, ноль читается нулём" \
+    "$(_run66 "$_A661Z" "$WORK/pro661z.txt")" OK)
+_need_text "6.6.1 ноль взятого снимка (величина и основание)" "$_t661_zero" "= 0 событий" "серий потерь в нём 4" "снимок пролога ВЗЯТ"
+
+_A661N="$WORK/art661n"; mkdir -p "$_A661N"
+_check66 6.6.1 "снимка пролога нет — НЕИЗМЕРИМ, а не ноль" \
+    "$(_run66 "$_A661" "$WORK/net-takogo-fajla.txt")" FAIL >/dev/null
+_t661_nowe=$(_check66 6.6.1 "нет metrics-window-end.txt — НЕИЗМЕРИМ с названным файлом" \
+    "$(_run66 "$_A661N" "$WORK/pro661.txt")" FAIL)
+_need_text "6.6.1 названа нехватка снимка" "$_t661_nowe" "снимка не было" "metrics-window-end.txt" "неотличимо от нуля"
+
+_A661R="$WORK/art661r"; mkdir -p "$_A661R"
+_mk_drops "$WORK/pro661r.txt"                  1790305396 3656 0 0
+_mk_drops "$_A661R/metrics-window-start.txt"   1790305396 3656 0 0
+_mk_drops "$_A661R/metrics-window-end.txt"     1790305396 3656 0 0
+_mk_drops "$_A661R/metrics-run-end.txt"        1790399999 12   0 0
+_t661_rst=$(_check66 6.6.1 "рестарт агента между снимками — НЕИЗМЕРИМ (абсолют чужого процесса)" \
+    "$(_run66 "$_A661R" "$WORK/pro661r.txt")" FAIL)
+_need_text "6.6.1 рестарт назван" "$_t661_rst" "process_start_time_seconds" "разный процесс" "3656"
+
+_A661G="$WORK/art661g"; mkdir -p "$_A661G"
+_mk_drops "$WORK/pro661g.txt"                  5 100 0 0
+_mk_drops "$_A661G/metrics-window-start.txt"   5 100 0 0
+_mk_drops "$_A661G/metrics-window-end.txt"     5 90  0 0
+_mk_drops "$_A661G/metrics-run-end.txt"        5 100 0 0
+_t661_neg=$(_check66 6.6.1 "счётчик уменьшился внутри снимков — тождество не сходится, НЕИЗМЕРИМ" \
+    "$(_run66 "$_A661G" "$WORK/pro661g.txt")" FAIL)
+_need_text "6.6.1 нарушение тождества названо серией" "$_t661_neg" "тождество интервалов не сошлось" "syscall/ringbuf_to_router" "интервал потерян снова"
+
+_A661S="$WORK/art661s"; mkdir -p "$_A661S"
+printf 'process_start_time_seconds 5\n' > "$WORK/pro661s.txt"
+for _f in metrics-window-start metrics-window-end metrics-run-end; do cp "$WORK/pro661s.txt" "$_A661S/$_f.txt"; done
+_t661_nos=$(_check66 6.6.1 "серий потерь в снимке нет вовсе — НЕИЗМЕРИМ, отсутствие серии не ноль" \
+    "$(_run66 "$_A661S" "$WORK/pro661s.txt")" FAIL)
+_need_text "6.6.1 нет серий" "$_t661_nos" "серий потерь нет в снимке" "не есть ноль"
+
+# ── 6.6.2. Один прогон — три снимка: ДО (пролог) и ПОСЛЕ (run-end) читает блок.
+_UP="syscall=1 network=1 tls=1 dns=1 kmod=0"
+_A662="$WORK/art662"; mkdir -p "$_A662"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662.txt"            5 0 0 0 "syscall=0 network=0 tls=0 fileaccess=0" "$_UP"
+_mk_drops "$_A662/metrics-run-end.txt"  5 0 0 0 "syscall=0 network=0 tls=0 fileaccess=0" "$_UP"
+_t662_ok=$(_check66 6.6.2 "ноль у всех коллекторов с up=1, серии материализованы — ДОСТИГНУТО" \
+    "$(_run66 "$_A662" "$WORK/pro662.txt")" OK)
+_need_text "6.6.2 состав по коллекторам" "$_t662_ok" \
+    "у КАЖДОГО из 3 коллекторов" "collector_up=1 всего 4" "network" "syscall" "tls" "свой счётчик разбора): dns"
+
+_A662F="$WORK/art662f"; mkdir -p "$_A662F"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662F/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662f.txt"            5 0 0 0 "syscall=0 network=0 tls=0" "$_UP"
+_mk_drops "$_A662F/metrics-run-end.txt"  5 0 0 0 "syscall=0 network=39 tls=0" "$_UP"
+_t662_fail=$(_check66 6.6.2 "подложенный parse_error>0 у network — ПРОВАЛЕН с именем коллектора" \
+    "$(_run66 "$_A662F" "$WORK/pro662f.txt")" FAIL)
+_need_text "6.6.2 провал называет коллектора и дельту" "$_t662_fail" \
+    "network=+39" "ДО 0" "ПОСЛЕ 39" "collector_up 1" "ПРОДУКТОВЫЙ"
+# Красный не должен прятаться в классе неизмеримости: слово вердикта — ПРОВАЛЕН.
+printf '%s' "$_t662_fail" | grep -q 'ПРОВАЛЕН' || _efail "6.6.2: подложенный parse_error>0 вынес не ПРОВАЛЕН — строка: $(printf '%s' "$_t662_fail" | cut -c1-160)"
+
+# Тот же класс, что №473, но у parse_error: коллектор отбивает разбор С ПЕРВОГО
+# СОБЫТИЯ, всплеск целиком укладывается ДО снимка пролога, и дельта прогона
+# равна НУЛЮ. До правки эта фикстура получала ДОСТИГНУТО — то есть метка,
+# заведённая ловить №471, на самом остром случае №471 печатала зелёное
+# ([[losses-before-first-snapshot-are-unmeasured]]). Именно на эту ветку
+# опирается смок item 10: рассинхрон 332→340 байт отбивает разбор с первого
+# события, а не за окно.
+_A662S="$WORK/art662s"; mkdir -p "$_A662S"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662S/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662s.txt"            5 0 0 0 "syscall=3656 network=0 tls=0" "$_UP"
+_mk_drops "$_A662S/metrics-run-end.txt"  5 0 0 0 "syscall=3656 network=0 tls=0" "$_UP"
+_t662_start=$(_check66 6.6.2 "отбраковка разбора ДО первого снимка (дельта 0, абсолют 3656) — ПРОВАЛЕН, а не ДОСТИГНУТО" \
+    "$(_run66 "$_A662S" "$WORK/pro662s.txt")" FAIL)
+_need_text "6.6.2 всплеск разбора до первого снимка" "$_t662_start" \
+    "syscall=3656" "ДО ПЕРВОГО СНИМКА" "№473" "ПРОДУКТОВЫЙ"
+printf '%s' "$_t662_start" | grep -q 'ПРОВАЛЕН' || _efail "6.6.2: parse_error ДО первого снимка вынес не ПРОВАЛЕН — дельта слепа к интервалу №473, строка: $(printf '%s' "$_t662_start" | cut -c1-200)"
+# И обратная половина: зелёная строка обязана СКАЗАТЬ, что этот интервал
+# проверен, иначе ноль дельты снова читается как ноль всего прогона.
+_need_text "6.6.2 зелёная строка называет проверенный интервал" "$_t662_ok" \
+    "абсолют снимка пролога" "№473"
+
+_A662O="$WORK/art662o"; mkdir -p "$_A662O"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662O/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662o.txt"            5 0 0 0 "" "$_UP"
+_mk_drops "$_A662O/metrics-run-end.txt"  5 0 0 0 "" "$_UP"
+_t662_old=$(_check66 6.6.2 "серий parse_error нет ни ДО, ни ПОСЛЕ (бинарь до №476) — НЕИЗМЕРИМ, не ноль" \
+    "$(_run66 "$_A662O" "$WORK/pro662o.txt")" FAIL)
+_need_text "6.6.2 бинарь без материализации" "$_t662_old" "без материализации" "№476" "неотличимо от нуля" "syscall"
+
+_A662P="$WORK/art662p"; mkdir -p "$_A662P"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662P/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662p.txt"            5 0 0 0 "network=0 tls=0" "$_UP"
+_mk_drops "$_A662P/metrics-run-end.txt"  5 0 0 0 "network=0 tls=0" "$_UP"
+_t662_part=$(_check66 6.6.2 "у syscall (up=1) серии нет, у остальных есть — НЕИЗМЕРИМ с именем" \
+    "$(_run66 "$_A662P" "$WORK/pro662p.txt")" FAIL)
+_need_text "6.6.2 частичная материализация" "$_t662_part" "нет серии parse_error" "syscall" "судимы 2 из 4"
+
+_A662B="$WORK/art662b"; mkdir -p "$_A662B"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662B/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662b.txt"            5 0 0 0 "network=0 tls=0" "$_UP"
+_mk_drops "$_A662B/metrics-run-end.txt"  5 0 0 0 "network=0 tls=0 syscall=7" "$_UP"
+_t662_born=$(_check66 6.6.2 "серии нет в снимке ДО, родилась за прогон со значением 7 — ПРОВАЛЕН, ДО названо словом" \
+    "$(_run66 "$_A662B" "$WORK/pro662b.txt")" FAIL)
+_need_text "6.6.2 отсутствие серии ДО названо" "$_t662_born" "syscall=+7" "ДО серии нет" "ПОСЛЕ 7"
+
+_A662Q="$WORK/art662q"; mkdir -p "$_A662Q"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662Q/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662q.txt"            5 0 0 0 "network=0 tls=0" "$_UP"
+_mk_drops "$_A662Q/metrics-run-end.txt"  5 0 0 0 "network=0 tls=0 syscall=0" "$_UP"
+_t662_born0=$(_check66 6.6.2 "серии нет в снимке ДО, ПОСЛЕ нуль — ДОСТИГНУТО, отсутствие ДО названо" \
+    "$(_run66 "$_A662Q" "$WORK/pro662q.txt")" OK)
+_need_text "6.6.2 ДО отсутствовала, ноль" "$_t662_born0" "серия в снимке ДО отсутствовала у: syscall"
+
+_check66 6.6.2 "снимка пролога нет — НЕИЗМЕРИМ" \
+    "$(_run66 "$_A662" "$WORK/net-takogo-fajla.txt")" FAIL >/dev/null
+_A662U="$WORK/art662u"; mkdir -p "$_A662U"
+for _f in metrics-window-start metrics-window-end; do _mk_drops "$_A662U/$_f.txt" 5 0 0 0; done
+_mk_drops "$WORK/pro662u.txt"            5 0 0 0 "network=0" "network=0 syscall=0"
+_mk_drops "$_A662U/metrics-run-end.txt"  5 0 0 0 "network=0" "network=0 syscall=0"
+_check66 6.6.2 "ни у одного коллектора up=1 — НЕИЗМЕРИМ, ось пуста" \
+    "$(_run66 "$_A662U" "$WORK/pro662u.txt")" FAIL >/dev/null
+
+# Список коллекторов эмиттера обязан совпадать с ParseErrorCollectors в Go (тот же
+# набор, что и вызовы RecordDropped(…, "parse_error"), закреплён Go-тестом).
+_go_pe=$(awk '/^var ParseErrorCollectors = \[\]string\{/,/^\}/' "$SETUP/../../internal/exporter/prometheus.go" 2>/dev/null \
+    | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort | tr '\n' ' ')
+_sh_pe=$(sed -n 's/^_w66_pe_expected="\(.*\)"$/\1/p' "$WORK/block66.sh" | tr ' ' '\n' | sort | tr '\n' ' ')
+if [ ! -s "$SETUP/../../internal/exporter/prometheus.go" ]; then
+    echo "    --  сверка списка parse_error с Go пропущена: internal/exporter/prometheus.go рядом нет (архив копия, не дерево)"
+elif [ -z "$_go_pe" ]; then
+    _efail "6.6.2: список ParseErrorCollectors в Go не разобран — сверять нечем"
+elif [ "$_go_pe" != "$_sh_pe" ]; then
+    _efail "6.6.2: список коллекторов эмиттера (${_sh_pe}) расходится с ParseErrorCollectors в Go (${_go_pe})"
+else
+    echo "    OK  6.6.2: список коллекторов эмиттера = ParseErrorCollectors в Go (${_go_pe})"
+fi
+
+# ── 6.6.3: разрез оси TLS по семействам (item 3). Снимки: window-start / window-end /
+# run-end с сериями by_family и events_total{type="tls"}; events_total даётся ДВУМЯ
+# сериями (лейблы pod/namespace/node) — читатель обязан СУММИРОВАТЬ.
+# _mk_fam <файл> <payload> <ja3> <unknown> <events_a> <events_b> [-]: «-» вместо числа — серии нет.
+_mk_fam() {
+    local f="$1"; : > "$f"
+    [ "$2" != "-" ] && echo "ebpf_guard_tls_events_by_family_total{family=\"payload\"} $2" >> "$f"
+    [ "$3" != "-" ] && echo "ebpf_guard_tls_events_by_family_total{family=\"ja3\"} $3" >> "$f"
+    [ "$4" != "-" ] && echo "ebpf_guard_tls_events_by_family_total{family=\"unknown\"} $4" >> "$f"
+    echo "ebpf_guard_events_total{type=\"tls\",pod=\"\",namespace=\"\",node=\"n1\"} $5" >> "$f"
+    echo "ebpf_guard_events_total{type=\"tls\",pod=\"web\",namespace=\"d\",node=\"n1\"} $6" >> "$f"
+    echo "ebpf_guard_events_total{type=\"syscall\",pod=\"\",namespace=\"\",node=\"n1\"} 99999" >> "$f"
+}
+_A663="$WORK/art663"; mkdir -p "$_A663"
+_mk_fam "$_A663/metrics-window-start.txt" 2 0 0 1 1
+_mk_fam "$_A663/metrics-window-end.txt"   8 0 0 4 4
+_mk_fam "$_A663/metrics-run-end.txt"      9 0 0 4 5
+_t663_ok=$(_check66 6.6.3 "разрез payload=6 ja3=0 unknown=0, сумма сходится (две серии events_total) — ИЗМЕРЕНО" \
+    "$(_run66 "$_A663" "")" OK)
+_need_text "6.6.3 разрез, инвариант, структурный ноль ja3" "$_t663_ok" \
+    "payload=6 ja3=0 unknown=0" "сумма 6 = events_total 6" "сумма 9 = events_total 9" \
+    "СТРУКТУРНЫЙ ноль" "6.4.5" "не вердикт детекта" "СОБЫТИЙ оси"
+
+_A663J="$WORK/art663j"; mkdir -p "$_A663J"
+_mk_fam "$_A663J/metrics-window-start.txt" 2 0 0 1 1
+_mk_fam "$_A663J/metrics-window-end.txt"   6 3 1 5 5
+_mk_fam "$_A663J/metrics-run-end.txt"      6 3 1 5 5
+_t663_j=$(_check66 6.6.3 "ja3=3, unknown=1 — ИЗМЕРЕНО, unknown назван отдельным рядом" \
+    "$(_run66 "$_A663J" "")" OK)
+_need_text "6.6.3 ja3 кормится, unknown назван" "$_t663_j" "ja3=3" "unknown=1" "БЕЗ TLS-деталей" "JA3-семейство кормится"
+
+_A663D="$WORK/art663d"; mkdir -p "$_A663D"
+_mk_fam "$_A663D/metrics-window-start.txt" 2 0 0 1 1
+_mk_fam "$_A663D/metrics-window-end.txt"   8 0 0 4 4
+_mk_fam "$_A663D/metrics-run-end.txt"      9 0 0 4 9
+_t663_d=$(_check66 6.6.3 "sum(by_family)=9 против events_total=13 — НЕИЗМЕРИМ, расхождение названо числами" \
+    "$(_run66 "$_A663D" "")" FAIL)
+_need_text "6.6.3 расхождение суммы названо" "$_t663_d" "инвариант суммы не сошёлся" "sum(by_family)=9" "events_total{type=\"tls\"}=13"
+
+_A663W="$WORK/art663w"; mkdir -p "$_A663W"
+_mk_fam "$_A663W/metrics-window-start.txt" 2 0 0 1 1
+_mk_fam "$_A663W/metrics-window-end.txt"   8 0 0 2 2
+_mk_fam "$_A663W/metrics-run-end.txt"      8 0 0 2 2
+_check66 6.6.3 "абсолют сходится, дельта окна нет (окно 6 против 2) — НЕИЗМЕРИМ" \
+    "$(_run66 "$_A663W" "")" FAIL >/dev/null
+
+_A663O="$WORK/art663o"; mkdir -p "$_A663O"
+for _f in metrics-window-start metrics-window-end metrics-run-end; do
+    echo 'ebpf_guard_events_total{type="tls",pod="",namespace="",node="n1"} 3' > "$_A663O/$_f.txt"
+done
+_t663_o=$(_check66 6.6.3 "серии by_family нет ни в одном снимке (бинарь до волны 6.5) — НЕИЗМЕРИМ, не ноль" \
+    "$(_run66 "$_A663O" "")" FAIL)
+_need_text "6.6.3 бинарь без серии" "$_t663_o" "серии tls_events_by_family_total нет" "неотличимо от нуля"
+
+_A663P="$WORK/art663p"; mkdir -p "$_A663P"
+_mk_fam "$_A663P/metrics-window-start.txt" 2 0 - 1 1
+_mk_fam "$_A663P/metrics-window-end.txt"   2 0 - 1 1
+_mk_fam "$_A663P/metrics-run-end.txt"      2 0 - 1 1
+_t663_p=$(_check66 6.6.3 "нет серии unknown при двух других — НЕИЗМЕРИМ с именем семейства" \
+    "$(_run66 "$_A663P" "")" FAIL)
+_need_text "6.6.3 частичная серия" "$_t663_p" "нет серии" "unknown"
+
+_A663R="$WORK/art663r"; mkdir -p "$_A663R"
+_mk_fam "$_A663R/metrics-window-start.txt" 5 0 0 1 4
+_mk_fam "$_A663R/metrics-window-end.txt"   2 0 0 1 1
+_mk_fam "$_A663R/metrics-run-end.txt"      2 0 0 1 1
+_t663_r=$(_check66 6.6.3 "счётчик payload убыл 5→2 (рестарт) — НЕИЗМЕРИМ" \
+    "$(_run66 "$_A663R" "")" FAIL)
+_need_text "6.6.3 рестарт назван" "$_t663_r" "убыл внутри окна" "payload(5→2)"
+
+_check66 6.6.3 "нет metrics-run-end.txt — НЕИЗМЕРИМ, а не ноль" \
+    "$(_run66 "$WORK/art663_missing" "")" FAIL >/dev/null
+
+_A663A="$WORK/art663a"; mkdir -p "$_A663A"
+_mk_fam "$_A663A/metrics-window-start.txt" 0 0 0 0 0
+_mk_fam "$_A663A/metrics-window-end.txt"   0 0 0 0 0
+_mk_fam "$_A663A/metrics-run-end.txt"      0 0 0 0 0
+_t663_a=$(_check66 6.6.3 "роль A, TLS выключен: серии материализованы, нули по построению — ИЗМЕРЕНО" \
+    "$(W66_TEST_ROLE=A _run66 "$_A663A" "")" OK)
+_need_text "6.6.3 роль A" "$_t663_a" "прогон A" "payload=0 ja3=0 unknown=0"
+_mk_fam "$_A663A/metrics-window-end.txt"   3 0 0 3 0
+_mk_fam "$_A663A/metrics-run-end.txt"      3 0 0 3 0
+_check66 6.6.3 "роль A, а TLS-события идут — ПРОВАЛЕН (вход загрязнён)" \
+    "$(W66_TEST_ROLE=A _run66 "$_A663A" "")" FAIL >/dev/null
+
+# ── 6.6.4 (item 8, №479): атрибуция остатка объёма http_plaintext. Вход — сторожевой
+# файл контроля 6.5 и его .attr (снимок после осадки).
+# _mk_h664 <каталог> <events_delta|-> <settled|-> <residual|-> <other|-> [class]
+_mk_h664() {
+    local d="$1"; mkdir -p "$d"; rm -f "$d/http-control-plaintext.txt" "$d/http-control-plaintext.txt.attr"
+    if [ "${6:-}" != "" ]; then echo "class=$6" > "$d/http-control-plaintext.txt"; return; fi
+    printf 'events_delta=%s\ntracked_pids=1\nrequests_ok=3\nholder_comm=python3\n' "$2" > "$d/http-control-plaintext.txt"
+    [ "$3" = "-" ] || printf 'settled_delta=%s\nsettled_after_s=30\nresidual=%s\nother_attached=%s\ntracked_pids_settled=1\n' "$3" "$4" "$5" > "$d/http-control-plaintext.txt.attr"
+}
+_A664="$WORK/art664"
+rm -rf "$_A664"; mkdir -p "$_A664"
+_check66 6.6.4 "контроль не поставлен — НЕ ЗАПРОШЕН, не ДОСТИГНУТО" "$(_run66 "$_A664" "")" NOTREQ >/dev/null
+_mk_h664 "$_A664" - - - - "коллектор_выключен_конфигом_серии_нет"
+_t664_c=$(_check66 6.6.4 "класс назван контролем — НЕИЗМЕРИМ" "$(_run66 "$_A664" "")" FAIL)
+_need_text "6.6.4 класс контроля" "$_t664_c" "класс НАЗВАН контролем" "коллектор_выключен_конфигом"
+_mk_h664 "$_A664" 9 -
+_t664_n=$(_check66 6.6.4 "нет снимка после осадки — НЕИЗМЕРИМ" "$(_run66 "$_A664" "")" FAIL)
+_need_text "6.6.4 нет осадки" "$_t664_n" "снимка ПОСЛЕ осадки не было" "недосчитал 30 событий из 39"
+_mk_h664 "$_A664" 0 0 0 -
+_check66 6.6.4 "контроль событий не дал — НЕИЗМЕРИМ" "$(_run66 "$_A664" "")" FAIL >/dev/null
+_mk_h664 "$_A664" 9 9 0 -
+_t664_z=$(_check66 6.6.4 "остаток 0 — ИЗМЕРЕНО, флаг false" "$(_run66 "$_A664" "")" OK)
+_need_text "6.6.4 остаток 0" "$_t664_z" "9 событий" "объяснённых контролем 9" "остаток 0" "остаётся false"
+_mk_h664 "$_A664" 9 39 30 -
+_t664_u=$(_check66 6.6.4 "остаток 30 без имени (№479: 39 из 9) — НЕИЗМЕРИМ по атрибуции" "$(_run66 "$_A664" "")" FAIL)
+_need_text "6.6.4 остаток без имени" "$_t664_u" "НЕ АТРИБУТИРУЕМ" "остаток 30" "объяснённых контролем 9" "НЕ «цена коллектора»" "остаётся false"
+_mk_h664 "$_A664" 9 39 30 "4242:node,4250:nginx"
+_t664_a=$(_check66 6.6.4 "остаток 30 с кандидатами — ИЗМЕРЕНО, кандидаты названы" "$(_run66 "$_A664" "")" OK)
+_need_text "6.6.4 кандидаты" "$_t664_a" "остаток 30" "4242:node,4250:nginx" "КАНДИДАТОВ" "не доказательство"
+
+# ── 6.6.5 (item 7, №478): kmod. _mk_k665 <каталог> <up> <lsm> <errno> <before> <after> [class]
+_mk_k665() {
+    local d="$1"; mkdir -p "$d"; rm -f "$d/kmod-control.txt"
+    if [ "${7:-}" != "" ]; then echo "class=$7" > "$d/kmod-control.txt"; return; fi
+    printf 'kmod_up=%s\nlsm=%s\nerrno=%s\nerrno_name=Bad_file_descriptor\nrc=-1\ncomm=python3\nrule=rootkit_init_module_syscall\nalerts_before=%s\nalerts_after=%s\nalerts_delta=%s\n' \
+        "$2" "$3" "$4" "$5" "$6" "$(( $6 - $5 ))" > "$d/kmod-control.txt"
+}
+_A665="$WORK/art665"; rm -rf "$_A665"; mkdir -p "$_A665"
+_check66 6.6.5 "контроль не поставлен — НЕ ЗАПРОШЕН" "$(_run66 "$_A665" "")" NOTREQ >/dev/null
+_mk_k665 "$_A665" - - - - - "нагрузка_не_напечатала_errno_вызов_не_дошёл_до_ядра"
+_t665_c=$(_check66 6.6.5 "класс назван контролем — НЕИЗМЕРИМ" "$(_run66 "$_A665" "")" FAIL)
+_need_text "6.6.5 класс контроля" "$_t665_c" "класс НАЗВАН контролем" "не_напечатала_errno"
+_mk_k665 "$_A665" 0 "lockdown,capability,landlock,yama,apparmor" 9 3 4
+_t665_ok=$(_check66 6.6.5 "up=0 без bpf в LSM, EBADF, +1 алерт двойника — ДОСТИГНУТО (обе половины)" "$(_run66 "$_A665" "")" OK)
+_need_text "6.6.5 обе половины" "$_t665_ok" "обе половины предъявлены" "collector_up{kmod}=0" "bpf: НЕТ" "ИНЕРТНЫ" "errno=9" "Bad_file_descriptor" "модуль НЕ загружен" "3→4"
+_mk_k665 "$_A665" 0 "lockdown,capability,yama" 9 3 3
+_t665_d=$(_check66 6.6.5 "EBADF дошёл, алертов не прибавилось — ПРОВАЛЕН (двойник мёртв)" "$(_run66 "$_A665" "")" FAIL)
+_need_text "6.6.5 двойник мёртв" "$_t665_d" "двойник" "мёртв" "НЕ детектируется совсем" "3→3"
+_mk_k665 "$_A665" 1 "lockdown,capability,yama" 9 3 4
+_t665_l=$(_check66 6.6.5 "up=1 без bpf в LSM — ПРОВАЛЕН (лжёт единицей)" "$(_run66 "$_A665" "")" FAIL)
+_need_text "6.6.5 ложная единица" "$_t665_l" "лжёт единицей" "№438"
+_mk_k665 "$_A665" 0 "lockdown,bpf,yama" 9 3 4
+_check66 6.6.5 "up=0 при bpf в LSM — ПРОВАЛЕН (ридеры не поднялись)" "$(_run66 "$_A665" "")" FAIL >/dev/null
+_mk_k665 "$_A665" 1 "lockdown,bpf,yama" 9 3 4
+_t665_b=$(_check66 6.6.5 "ядро с bpf-LSM, up=1 — ДОСТИГНУТО, инертность не объявляется" "$(_run66 "$_A665" "")" OK)
+_need_text "6.6.5 bpf есть" "$_t665_b" "bpf: есть" "живы"
+# Нечитаемый список LSM: половина (а) судится СРАВНЕНИЕМ up со списком, поэтому
+# пустой список — не «bpf нет», а отсутствие свойства мира на руках. Класс
+# обязан назвать КОНТРОЛЬ (у него список в руках), а не эмиттер — поэтому тут
+# проверяются обе стороны: ветка эмиттера на класс и сама строка отказа в
+# контроле ([[verdict-zero-needs-its-class-presented]]).
+_mk_k665 "$_A665" - - - - - "список_LSM_ядра_не_прочитан_sys_kernel_security_lsm_недоступен"
+_t665_nolsm=$(_check66 6.6.5 "список LSM ядра не прочитан — НЕИЗМЕРИМ, а не «bpf нет»" "$(_run66 "$_A665" "")" FAIL)
+_need_text "6.6.5 список LSM не прочитан" "$_t665_nolsm" "класс НАЗВАН контролем" "список_LSM_ядра_не_прочитан"
+_KMODC="$(dirname "$PIPE")/wave6.6-kmod-control.sh"
+if [ -r "$_KMODC" ]; then
+    grep -q 'список_LSM_ядра_не_прочитан' "$_KMODC" \
+        || _efail "6.6.5: контроль kmod НЕ называет класс при нечитаемом /sys/kernel/security/lsm — пустой список уйдёт в эмиттер и прочитается как «bpf отсутствует»"
+    echo "    OK  6.6.5: контроль kmod называет класс при нечитаемом списке LSM (не выдаёт пустое за «bpf нет»)"
+else
+    _efail "6.6.5: $_KMODC не найден — сторож на нечитаемый список LSM проверить нечем"
+fi
+
+# ── item 4 (№480): единица величины стоит рядом с осью. Каждое упоминание
+# {event_type="tls"} в вердиктной строке echo обязано иметь слово «алертов»/«событий»
+# (регистр не важен) в 40 символах ДО него — иначе одна и та же запись оси значит 2 и 6
+# в одном логе. Источник читается ТЕКСТОМ (6.3L.6, 6.4.1, 6.4.6, 6.6.3 разом).
+_w480_check() { # <файл> → печатает строки-нарушители
+    grep -nE '^[[:space:]]*echo "(OK|FAIL|НЕИЗМЕРИМ|НЕ ЗАПРОШЕН[^:]*): 6\.' "$1" \
+      | grep -F 'event_type=\"tls\"}' \
+      | grep -viE '(алертов|событий)[^{]{0,40}\{event_type=\\"tls\\"\}' || true
+}
+_w480_bad=$(_w480_check "$PIPE")
+if [ -z "$_w480_bad" ]; then
+    echo "    OK  №480: у каждой вердиктной строки с {event_type=\"tls\"} единица (алертов/событий) стоит рядом с осью"
+else
+    _efail "№480: {event_type=\"tls\"} без слова «алертов»/«событий» рядом — $(printf '%s' "$_w480_bad" | cut -c1-160 | head -3)"
+fi
+_w480_mut="$WORK/w480-mut.sh"
+sed 's/вход ноды, СОБЫТИЙ оси {event_type/вход ноды {event_type/' "$PIPE" > "$_w480_mut"
+if [ -n "$(_w480_check "$_w480_mut")" ]; then
+    echo "    OK  №480-негатив: снятое слово единицы у 6.4.1 краснеет"
+else
+    _efail "№480-негатив: сторож не покраснел на 6.4.1 без слова единицы — он бесполезен"
+fi
+
+# ── РЕПЛЕЙ НА РЕАЛЬНЫХ АРХИВАХ 6.5 (критерий выхода 1 и 2 волны 6.6): 6.6.1 обязана
+#    напечатать 908 и 3656; 6.6.2 на этих архивах — НЕИЗМЕРИМ «без материализации»
+#    (бинарь 6.5 серий не заводил), а подложенный parse_error её краснит.
+_REPO_LOGS="${W66_ARCHIVES_DIR:-$SETUP/../../server-logs}"
+_rep66_done=0
+for _pair in "item8:908" "item5:3656"; do
+    _arc="$_REPO_LOGS/collect-6.5-${_pair%%:*}"; _want="${_pair##*:}"
+    if [ ! -s "$_arc/metrics-prologue-start-6.4.txt" ] || [ ! -s "$_arc/controls/artifacts/metrics-run-end.txt" ]; then
+        echo "    --  реплей на архиве collect-6.5-${_pair%%:*} пропущен: архива нет на этой машине (${_arc})"
+        continue
+    fi
+    _rep66_done=$((_rep66_done + 1))
+    _rout=$(_run66 "$_arc/controls/artifacts" "$_arc/metrics-prologue-start-6.4.txt")
+    _l1=$(_check66 6.6.1 "реплей collect-6.5-${_pair%%:*}: стартовый всплеск ${_want}" "$_rout" OK)
+    _text_ok "$_l1" "= ${_want} событий" "syscall/ringbuf_to_router=${_want}" "очередь protected" \
+        && echo "    OK  реплей collect-6.5-${_pair%%:*}: 6.6.1 напечатала ${_want}" \
+        || _efail "реплей collect-6.5-${_pair%%:*}: 6.6.1 не напечатала ${_want} — строка: $(printf '%s' "$_l1" | cut -c1-200)"
+    _l2=$(_check66 6.6.2 "реплей collect-6.5-${_pair%%:*}: бинарь 6.5 без серий parse_error — НЕИЗМЕРИМ по построению" "$_rout" FAIL)
+    _text_ok "$_l2" "без материализации" || _efail "реплей collect-6.5-${_pair%%:*}: 6.6.2 не назвала класс «без материализации» — строка: $(printf '%s' "$_l2" | cut -c1-200)"
+    # Негативный реплей: на копии архива подкладываем parse_error>0 (и нули для
+    # прочих) — метка обязана покраснеть и назвать коллектор по имени.
+    _neg="$WORK/rep66neg-${_pair%%:*}"; rm -rf "$_neg"; mkdir -p "$_neg"
+    cp "$_arc/controls/artifacts/"metrics-window-*.txt "$_arc/controls/artifacts/metrics-run-end.txt" "$_neg/"
+    cp "$_arc/metrics-prologue-start-6.4.txt" "$_neg/pro.txt"
+    for _c in syscall network tls; do echo "ebpf_guard_events_dropped_total{collector=\"$_c\",reason=\"parse_error\"} 0" >> "$_neg/pro.txt"; done
+    cp "$_neg/metrics-run-end.txt" "$_neg/re.txt"
+    for _c in syscall tls; do echo "ebpf_guard_events_dropped_total{collector=\"$_c\",reason=\"parse_error\"} 0" >> "$_neg/metrics-run-end.txt"; done
+    echo "ebpf_guard_events_dropped_total{collector=\"network\",reason=\"parse_error\"} 12" >> "$_neg/metrics-run-end.txt"
+    _nl=$(_check66 6.6.2 "негативный реплей collect-6.5-${_pair%%:*}: подложенный parse_error network=12" "$(_run66 "$_neg" "$_neg/pro.txt")" FAIL)
+    if printf '%s' "$_nl" | grep -q 'ПРОВАЛЕН' && _text_ok "$_nl" "network=+12"; then
+        echo "    OK  негативный реплей collect-6.5-${_pair%%:*}: 6.6.2 краснеет и называет network"
+    else
+        _efail "негативный реплей collect-6.5-${_pair%%:*}: подложенный parse_error не дал ПРОВАЛЕН с network — строка: $(printf '%s' "$_nl" | cut -c1-200)"
+    fi
+done
+
 # ── ITEM 2. Сверка НАПЕЧАТАННОГО ТЕКСТА. Один здоровый прогон B даёт все
 #    девять строк 6.4.x; отдельный снимок 6.4.B — все шесть строк 6.4B.x. У
 #    КАЖДОЙ строки требуются содержательные имена и числа, а не общий класс.
@@ -1692,7 +2140,7 @@ fi
 # _W64_TEXT_LABELS — ЕДИНЫЙ источник полного состава (SUGGESTION): раньше список
 # пятнадцати меток был вписан в _guard461 буквально и был вторым независимым
 # источником. Теперь и проверка, и её негативы читают одну константу.
-_W64_TEXT_LABELS="6.4.0 6.4.1 6.4.2 6.4.3 6.4.4 6.4.5 6.4.6 6.4.7 6.4.8 6.4B.0 6.4B.1 6.4B.2 6.4B.3 6.4B.4 6.4B.5 6.5.1"
+_W64_TEXT_LABELS="6.4.0 6.4.1 6.4.2 6.4.3 6.4.4 6.4.5 6.4.6 6.4.7 6.4.8 6.4B.0 6.4B.1 6.4B.2 6.4B.3 6.4B.4 6.4B.5 6.5.1 6.6.1 6.6.2 6.6.3 6.6.4 6.6.5"
 _guard461() { # <реестр> → 0 и число сверок, либо 1 и список пропущенных
     local seen="$1" lbl missing="" n
     for lbl in $_W64_TEXT_LABELS; do
@@ -1816,9 +2264,23 @@ else
     _efail "№469: реестр архива не требует controls/artifacts/binary-identity.txt — послепрогонного слоя нет"
 fi
 
+# №474: величину потерь даёт ТОЛЬКО метрика. Ни один живой контроль потерь не
+# вправе судить величину по журналу (dropLogger недосчитывал 1 из 3656).
+# Текстовой сторож: в живой половине «потери» нет ветки, где журнал один даёт
+# ПРОВАЛ по величине, и нет формулировки «ни метрика, ни журнал».
+for _f474 in wave6.3-controls.sh wave6.2.6-controls.sh; do
+    if grep -q 'ни метрика, ни журнал' "$SETUP/$_f474" && ! grep -q '№474: ВЕЛИЧИНУ' "$SETUP/$_f474"; then
+        _efail "№474: $_f474 судит потери «метрика ИЛИ журнал» — журнал не счётчик"
+    elif grep -Eq '\[ "\$_w(63|626)_dr" -gt 0 \] \|\| \[ "\$_w(63|626)_jdr" -gt 0 \]' "$SETUP/$_f474"; then
+        _efail "№474: $_f474 снова берёт величину потерь как «метрика ИЛИ журнал»"
+    else
+        echo "    OK  №474: $_f474 — величину потерь даёт метрика, журнал только сэмпл причины"
+    fi
+done
+
 echo
 if [ "$FAILS" -gt 0 ]; then
     echo "СТОРОЖ ЭМИТТЕРОВ ПРОВАЛЕН: расхождений $FAILS"
     exit 1
 fi
-echo "СТОРОЖ ЭМИТТЕРОВ ПРОЙДЕН: 14 фикстур 6.4.x + 4 фикстуры классов 6.4.4 (№455) + 13 фикстур 6.4.B (включая именованный состав оси, №458) + ${_g461_n} сверок НАПЕЧАТАННОГО ТЕКСТА (№461, включая 6.5.1) с реестром реплея + 9 негативных образцов №460 (одно- и многострочный дубль, повторное вычисление, гибрид read+awk с пробелом и без, разное написание предиката, переставленные и одинаковые ветки awk, раннее закрытие тела в кавычке уносило хвост с печатной величиной) + 1 негатив полноты разбора №460 (незакрытое тело: печатная серийная величина выпала из подписи) + 1 негатив КРАСНОЙ ВЕТКИ полноты разбора №460 (_check460_complete на незакрытом теле: ненулевой код и красная формулировка, зелёная ветка запрещена — чувствителен к удалению return 1) + 1 позитив #-комментариев (тело с НЕПАРНОЙ ( в комментарии закрывается НАСТОЯЩЕЙ скобкой) + 9 прямых сверок #-комментариев в _paren_delta (скобка в комментарии тело не закрывает и не открывает; # внутри слова/кавычек — не комментарий; __#__ после ), >, < — тоже комментарий) + 1 позитивная сверка №460 на label-селектор (агрегат ≠ именованная выборка, ложного красного нет) + 2 самопроверки полноты разбора (пункт 3: живой блок разобран целиком) + 2 сверки полноты подписи (ВСЕ печатные серийные величины в разборе, а не зашитый список) + ${_rep_n} негативных реплеев текста по РЕАЛЬНЫМ ожиданиям (включая №455 и №457) + 2 негативные самопроверки механизма сверки (пустой набор, пропуск подстроки) + 2 негатива №461 (пропущенная метка, пустой реестр) + два сторожа №373 + 6 проверок достижимости + 5 проверок №469 (тождество бинаря вне \$ART, копия на сборке, имя от роли, негатив на исторической строке, реестр архива), расхождений 0"
+echo "СТОРОЖ ЭМИТТЕРОВ ПРОЙДЕН: 8 фикстур 6.6.1 + 10 фикстур 6.6.2 (включая всплеск разбора ДО первого снимка, №473-класс) + 10 проверок 6.6.3 (разрез, инвариант суммы, бинарь без серии, роль A) + сторож единицы №480 с негативом (включая подложенный parse_error и бинарь без материализации) + сверка списка коллекторов с Go + реплей 6.6.1/6.6.2 на реальных архивах 6.5 (908, 3656) с негативным реплеем + 14 фикстур 6.4.x + 4 фикстуры классов 6.4.4 (№455) + 13 фикстур 6.4.B (включая именованный состав оси, №458) + ${_g461_n} сверок НАПЕЧАТАННОГО ТЕКСТА (№461, включая 6.5.1) с реестром реплея + 9 негативных образцов №460 (одно- и многострочный дубль, повторное вычисление, гибрид read+awk с пробелом и без, разное написание предиката, переставленные и одинаковые ветки awk, раннее закрытие тела в кавычке уносило хвост с печатной величиной) + 1 негатив полноты разбора №460 (незакрытое тело: печатная серийная величина выпала из подписи) + 1 негатив КРАСНОЙ ВЕТКИ полноты разбора №460 (_check460_complete на незакрытом теле: ненулевой код и красная формулировка, зелёная ветка запрещена — чувствителен к удалению return 1) + 1 позитив #-комментариев (тело с НЕПАРНОЙ ( в комментарии закрывается НАСТОЯЩЕЙ скобкой) + 9 прямых сверок #-комментариев в _paren_delta (скобка в комментарии тело не закрывает и не открывает; # внутри слова/кавычек — не комментарий; __#__ после ), >, < — тоже комментарий) + 1 позитивная сверка №460 на label-селектор (агрегат ≠ именованная выборка, ложного красного нет) + 2 самопроверки полноты разбора (пункт 3: живой блок разобран целиком) + 2 сверки полноты подписи (ВСЕ печатные серийные величины в разборе, а не зашитый список) + ${_rep_n} негативных реплеев текста по РЕАЛЬНЫМ ожиданиям (включая №455 и №457) + 2 негативные самопроверки механизма сверки (пустой набор, пропуск подстроки) + 2 негатива №461 (пропущенная метка, пустой реестр) + два сторожа №373 + 6 проверок достижимости + 5 проверок №469 (тождество бинаря вне \$ART, копия на сборке, имя от роли, негатив на исторической строке, реестр архива), расхождений 0"

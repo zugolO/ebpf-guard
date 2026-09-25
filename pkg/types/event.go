@@ -207,6 +207,10 @@ type Event struct {
 	UID        uint32
 	Comm       [16]byte // process name from BPF
 	ParentComm [16]byte // parent process name (if available)
+	// CgroupID is the cgroup id read in-kernel by fill_process_info (item 10 wave
+	// 6.6); 0 means the record did not carry it (older BPF object). Unlike PID it
+	// outlives the process, so pid→pod enrichment can resolve through it.
+	CgroupID uint64
 	// Type-specific fields below (union-style, only one populated)
 	Syscall   *SyscallEvent
 	Network   *NetworkEvent

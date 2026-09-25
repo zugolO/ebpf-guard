@@ -121,7 +121,22 @@ struct event {
 			__u8  fd_path_truncated; /* 1 if filename was truncated at 256 bytes */
 		} file;
 	};
+	/* Item 10 wave 6.6 (#465): cgroup id of the emitting task, read IN THE KERNEL.
+	 * It sits AFTER the union on purpose: every existing offset (payload starts
+	 * at 60) and the bytes the Go parsers read are unchanged, so an old parser
+	 * reading a new record — or a new parser reading an old one — still decodes
+	 * everything it knew. The pid->pod race (process gone before
+	 * /proc/<pid>/cgroup is read) is then closed by cgroup_id, which outlives
+	 * the process. Offset = 60 + sizeof(union) = 332: the union is 272 bytes,
+	 * not 266 — its anonymous member structs are not packed, so the file
+	 * payload (266) is padded to 268 and the union aligned to 8 (measured with
+	 * offsetof on host clang, not derived from the field list). */
+	__u64 cgroup_id;
 } __attribute__((packed));
+
+#define EVENT_CGROUP_ID_OFFSET 332 /* offsetof(struct event, cgroup_id); sizeof(struct event) = 340 */
+_Static_assert(__builtin_offsetof(struct event, cgroup_id) == EVENT_CGROUP_ID_OFFSET,
+	       "struct event layout moved: Go parsers (internal/bpf/events.go) read cgroup_id at this offset");
 
 /*
  * struct kmod_event - Sent when a kernel module is loaded.
@@ -997,6 +1012,7 @@ static __always_inline void fill_process_info(struct event *e)
 
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->timestamp = bpf_ktime_get_ns();
+	e->cgroup_id = bpf_get_current_cgroup_id();
 }
 
 #endif /* __EBPF_GUARD_COMMON_H */

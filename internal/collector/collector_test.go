@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -440,4 +441,62 @@ func BenchmarkEventPool(b *testing.B) {
 			eventPool.Put(e)
 		}
 	})
+}
+
+// TestDropLogger_BurstIsFullyReportedWithoutALaterDrop pins №474: a burst that
+// ends before the throttle interval must still be printed IN FULL when the
+// window closes. The old design logged the first drop alone (count=1) and left
+// the rest in pending until a later drop that never came (1 of 3656 printed).
+func TestDropLogger_BurstIsFullyReportedWithoutALaterDrop(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil)).With(slog.String("collector", "syscall"))
+
+	d := newDropLogger(50 * time.Millisecond)
+	const burst = 3656
+	for i := 0; i < burst; i++ {
+		d.record(logger, "ringbuf_to_router")
+	}
+	assert.Empty(t, buf.String(), "nothing may be printed before the window closes — the first drop must not go out alone")
+
+	require.Eventually(t, func() bool { return buf.String() != "" }, 2*time.Second, 5*time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // a second, stray line would show up here
+
+	var total int64
+	lines := 0
+	for _, l := range bytes.Split(bytes.TrimSpace([]byte(buf.String())), []byte("\n")) {
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(l, &m), "%s", l)
+		total += int64(m["dropped_count"].(float64))
+		lines++
+	}
+	assert.Equal(t, int64(burst), total, "every dropped event must be accounted for in the log")
+	assert.Equal(t, 1, lines, "one burst inside one window is one line")
+}
+
+// A drop arriving after the window closed opens a new window and is reported.
+func TestDropLogger_DropAfterFlushOpensNewWindow(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	d := newDropLogger(20 * time.Millisecond)
+	d.record(logger, "ringbuf_to_router")
+	require.Eventually(t, func() bool { return strings.Count(buf.String(), "\n") == 1 }, 2*time.Second, 5*time.Millisecond)
+	d.record(logger, "ringbuf_to_router")
+	require.Eventually(t, func() bool { return strings.Count(buf.String(), "\n") == 2 }, 2*time.Second, 5*time.Millisecond)
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

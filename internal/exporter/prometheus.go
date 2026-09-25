@@ -510,6 +510,29 @@ func init() {
 	TLSEventsByFamily.WithLabelValues(TLSFamilyUnknown)
 }
 
+// ParseErrorCollectors are the collectors that call
+// RecordDropped(<name>, "parse_error") when a ring-buffer record fails to
+// decode. Item 2 волны 6.6 (№476): each of these series is materialized at
+// init, so "no series" in a /metrics snapshot means "binary predates the
+// series", never "no parse errors". Before this, a collector that rejected
+// 100% of its own events (№471, http_plaintext) was visible only as the
+// ABSENCE of events_total — a zero indistinguishable from an unmaterialized
+// series ([[metric-anchor-must-carry-full-series-name]]).
+//
+// The list is pinned to the call sites by TestParseErrorCollectorsMatchCallSites;
+// the wave-6.6 emitter (label 6.6.2, run-6.4-pipeline.sh) carries the same set and
+// wave6.4-emitter-fixtures.sh compares the two textually.
+var ParseErrorCollectors = []string{
+	"bpfmonitor", "fileaccess", "gpu", "http_plaintext", "iouring",
+	"network", "privesc", "syscall", "tls", "tlsfingerprint",
+}
+
+func init() {
+	for _, c := range ParseErrorCollectors {
+		EventsDropped.WithLabelValues(c, "parse_error")
+	}
+}
+
 // TLSFamily classifies a TLS event by its producer.
 //
 // The only producer of JA3/JA4 is the ClientHello fingerprint collector

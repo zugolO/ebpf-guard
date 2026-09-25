@@ -15,7 +15,25 @@ import (
 // parent_comm(16) + direction(1) + payload_len(2) = 63. The struct is
 // packed, so there is no padding. ppid/parent_comm added by plan.md 5.9.4i
 // (debt from 5.9.3d) so DNS-triggered alerts carry a process_chain.
-const dnsRawEventFixedLen = 4 + 8 + 4 + 4 + 4 + 16 + 4 + 16 + 1 + 2
+//
+// Derived from dnsEventHeaderRaw, the Go mirror of that fixed prefix (№477),
+// not a hand-summed constant; wire_size_test.go pins 63.
+var dnsRawEventFixedLen = binary.Size(dnsEventHeaderRaw{})
+
+// dnsEventHeaderRaw mirrors struct dns_event in bpf/dns.bpf.c up to (but not
+// including) the payload bytes. Packed, no padding.
+type dnsEventHeaderRaw struct {
+	Type       uint32
+	Timestamp  uint64
+	PID        uint32
+	TGID       uint32
+	UID        uint32
+	Comm       [16]byte
+	PPID       uint32
+	ParentComm [16]byte
+	Direction  uint8
+	PayloadLen uint16
+}
 
 // dnsMaxPayload mirrors DNS_MAX_PAYLOAD in dns.bpf.c — the kernel side
 // always reserves this many payload bytes in the ring buffer record,

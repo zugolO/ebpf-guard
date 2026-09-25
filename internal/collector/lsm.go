@@ -58,7 +58,8 @@ type lsmAuditEventRaw struct {
 	Path      [64]byte
 }
 
-const lsmAuditEventSize = 4 + 8 + 4 + 4 + 4 + 1 + 1 + 1 + 16 + 64 // 107 bytes
+// lsmAuditEventSize is derived from the Go mirror (№477); wire_size_test.go pins 107.
+var lsmAuditEventSize = binary.Size(lsmAuditEventRaw{})
 
 var lsmHookNames = [3]string{"file_open", "socket_connect", "task_kill"}
 
@@ -551,7 +552,7 @@ func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error
 			c.available = false
 		}
 	} else {
-		c.logger.Info("kmod: LSM BPF unavailable, kernel module load detection disabled (no tracepoint fallback exists)")
+		c.logger.Info("kmod: LSM BPF unavailable — the 7 event_type=kmod rules are inert on this kernel; module loads are still seen on the syscall axis (rootkit_init_module_syscall nr 175/313, rootkit_delete_module_syscall nr 176) when the syscall collector is enabled")
 	}
 
 	if err := c.loadCgroup(); err != nil {

@@ -147,6 +147,13 @@ func (c *TLSFingerprintCollector) Reload() error {
 
 // Close releases all eBPF resources.
 func (c *TLSFingerprintCollector) Close() error {
+	// Wave 6.6 revision item 6: print whatever the drop-log window has
+	// accumulated. Its window is closed by a 5s timer, so a run that ends
+	// sooner than that after its last drop lost the count from the log
+	// entirely — the metric still had it, but the log is where the HOP of
+	// the loss is named (№474).
+	c.dropLogger.flushOnClose()
+
 	c.logger.Info("closing tlsfingerprint collector")
 	if c.reader != nil {
 		c.reader.Close()

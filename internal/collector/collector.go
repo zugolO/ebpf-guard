@@ -105,10 +105,45 @@ type dropLogger struct {
 	interval time.Duration
 	armed    atomic.Bool  // a flush timer is pending for the current window
 	pending  atomic.Int64 // events dropped since last log
+	// site remembers the logger and hop of the drop that ARMED the current
+	// window, so flushOnClose can print the window when the process stops
+	// before the timer fires (wave 6.6 revision item 6). record receives both
+	// per call and the struct otherwise kept neither, so a shutdown had nothing
+	// to print with. Stored only on arming — at most one allocation per
+	// interval, not one per dropped event.
+	site atomic.Pointer[dropSite]
+}
+
+// dropSite is the logger/hop pair of the drop that opened a window.
+type dropSite struct {
+	logger *slog.Logger
+	hop    string
 }
 
 func newDropLogger(interval time.Duration) *dropLogger {
 	return &dropLogger{interval: interval}
+}
+
+// flushOnClose prints whatever the current window has accumulated. It is called
+// from a collector's Close(): the window is closed by a 5s timer, so a process
+// exiting sooner than that after its last drop used to lose the count entirely —
+// the losses were in the metric but never in the log, and the log is the only
+// place the HOP of the loss is named (№474). Flushing at Close makes the log's
+// sample of the cause complete for the run, without making it a counter.
+//
+// Safe to call twice and safe to call on a dropLogger that never recorded
+// anything: the count is swapped to zero and an empty window prints nothing.
+func (d *dropLogger) flushOnClose() {
+	site := d.site.Load()
+	if site == nil {
+		// Nothing was ever recorded through this dropLogger, so there is no
+		// logger to print with — and, by the same token, nothing to print.
+		return
+	}
+	// Disarm so a pending timer that fires after Close finds an empty window
+	// rather than printing a second line for the same drops.
+	d.armed.Store(false)
+	d.flush(site.logger, site.hop)
 }
 
 // record increments the pending drop counter. The first drop of a window arms
@@ -136,6 +171,8 @@ func (d *dropLogger) record(logger *slog.Logger, hop string) {
 	if !d.armed.CompareAndSwap(false, true) {
 		return
 	}
+	// The window is open: remember where it came from so Close() can print it.
+	d.site.Store(&dropSite{logger: logger, hop: hop})
 	time.AfterFunc(d.interval, func() {
 		// Disarm BEFORE swapping the counter: a drop landing between the two
 		// re-arms a fresh timer instead of being stranded in pending.

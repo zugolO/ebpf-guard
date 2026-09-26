@@ -66,6 +66,13 @@ func (a *AzureMonitorCollector) Name() string { return "azure_monitor" }
 
 // Close waits for the collector to stop.
 func (a *AzureMonitorCollector) Close() error {
+	// Wave 6.6 revision item 6: print whatever the drop-log window has
+	// accumulated. Its window is closed by a 5s timer, so a run that ends
+	// sooner than that after its last drop lost the count from the log
+	// entirely — the metric still had it, but the log is where the HOP of
+	// the loss is named (№474).
+	a.dropLogger.flushOnClose()
+
 	<-a.stopped
 	return nil
 }

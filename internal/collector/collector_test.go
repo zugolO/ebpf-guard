@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -499,4 +500,98 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// TestDropLogger_FlushOnCloseBeforeWindowCloses pins wave 6.6 revision item 6:
+// a run that stops sooner than the 5s window after its last drop must still
+// print the count. Before flushOnClose the accumulated window was simply lost
+// on exit — the metric kept the value, the log printed nothing, and the log is
+// the only place the HOP of the loss is named (№474).
+func TestDropLogger_FlushOnCloseBeforeWindowCloses(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil)).With(slog.String("collector", "syscall"))
+
+	// An interval far longer than the test: only flushOnClose can print here,
+	// so a green result cannot come from the timer firing by luck.
+	d := newDropLogger(10 * time.Minute)
+	const burst = 88
+	for i := 0; i < burst; i++ {
+		d.record(logger, "ringbuf_to_router")
+	}
+	require.Empty(t, buf.String(), "the window is still open — nothing printed yet")
+
+	d.flushOnClose()
+
+	line := strings.TrimSpace(buf.String())
+	require.NotEmpty(t, line, "Close must print the accumulated window")
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(line), &m), "%s", line)
+	assert.Equal(t, float64(burst), m["dropped_count"], "the whole window, not one line per drop")
+	assert.Equal(t, "ringbuf_to_router", m["hop"], "the hop of the drop that opened the window must survive to Close")
+	assert.Equal(t, "syscall", m["collector"], "the collector-bound logger of that drop must survive to Close")
+}
+
+// A second Close, and a timer firing after Close, must not print the same drops
+// twice: the count is swapped out, and the window is disarmed.
+func TestDropLogger_FlushOnCloseIsIdempotent(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	d := newDropLogger(30 * time.Millisecond)
+	d.record(logger, "router_to_queue")
+	d.flushOnClose()
+	require.Equal(t, 1, strings.Count(buf.String(), "\n"))
+
+	d.flushOnClose()
+	time.Sleep(120 * time.Millisecond) // the armed timer would fire in here
+	assert.Equal(t, 1, strings.Count(buf.String(), "\n"), "drops already printed by Close must not be printed again")
+}
+
+// A dropLogger that never recorded anything has no logger to print with — and
+// nothing to print. Close must stay silent rather than panic on the nil site.
+func TestDropLogger_FlushOnCloseWithoutDropsIsSilent(t *testing.T) {
+	d := newDropLogger(5 * time.Second)
+	d.flushOnClose() // must not panic
+	assert.Equal(t, int64(0), d.pending.Load())
+}
+
+// TestEveryDropLoggerOwnerFlushesOnClose keeps wave 6.6 revision item 6 from
+// decaying. The fix is spread over sixteen Close() methods, and nothing
+// otherwise stops a seventeenth collector from holding a dropLogger and
+// dropping its last window on exit — the failure would be silent, visible only
+// as a log that undercounts against the metric (№474). The check reads the
+// package's own sources: a type with a dropLogger field must call
+// flushOnClose() in its Close().
+func TestEveryDropLoggerOwnerFlushesOnClose(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+
+	ownerRe := regexp.MustCompile(`(?s)type (\w+) struct \{(.*?)\n\}`)
+	fieldRe := regexp.MustCompile(`\bdropLogger\s+\*dropLogger\b`)
+
+	owners := map[string]string{} // тип -> файл
+	sources := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(e.Name())
+		require.NoError(t, err)
+		sources[e.Name()] = string(b)
+		for _, m := range ownerRe.FindAllStringSubmatch(string(b), -1) {
+			if fieldRe.MatchString(m[2]) {
+				owners[m[1]] = e.Name()
+			}
+		}
+	}
+	require.GreaterOrEqual(t, len(owners), 16,
+		"fewer dropLogger owners found than the sixteen item 6 wired — the scan itself is broken, not the code")
+
+	for typ, file := range owners {
+		closeRe := regexp.MustCompile(`(?s)func \((\w+) \*` + typ + `\) Close\(\) error \{(.*?)\n\}`)
+		m := closeRe.FindStringSubmatch(sources[file])
+		require.NotNil(t, m, "%s (%s) holds a dropLogger but has no Close() error to flush it in", typ, file)
+		assert.Contains(t, m[2], "dropLogger.flushOnClose()",
+			"%s.Close() (%s) does not flush its dropLogger: a run ending inside the window loses the count from the log",
+			typ, file)
+	}
 }

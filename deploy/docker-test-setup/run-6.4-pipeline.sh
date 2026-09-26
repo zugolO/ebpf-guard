@@ -3207,6 +3207,17 @@ if [ -z "$_w66_miss" ]; then
         # причина вынимаются ПО ИМЕНИ ЛЕЙБЛА, не по разделителю кавычек.
         FNR == 1 { f++ }
         $1 ~ /^process_start_time_seconds$/ { pst[f] = $NF; next }
+        # Пункт 12 ревизии 6.6: соответствие очередь↔коллектор берётся ОТДЕЛЬНОЙ
+        # серией ebpf_guard_events_dropped_by_queue_total (лейбл к events_dropped_total
+        # пересортировал бы экспозицию и сломал бы якоря читателей). Читается абсолют
+        # run-end: счётчики монотонны, так что он покрывает и пролог, и окно.
+        f == 4 && $1 ~ /^ebpf_guard_events_dropped_by_queue_total\{/ {
+            qhave = 1
+            qc = $1; if (match(qc, /collector="[^"]*"/)) { qcn = substr(qc, RSTART + 11, RLENGTH - 12) } else { qcn = "" }
+            if (match(qc, /queue="[^"]*"/)) { qqn = substr(qc, RSTART + 7, RLENGTH - 8) } else { qqn = "" }
+            if (qcn != "" && qqn != "") qv[qcn, qqn] = $NF + 0
+            next
+        }
         ($1 ~ /^ebpf_guard_events_dropped_total\{/ && $1 !~ /reason="path_denylist"/) || $1 ~ /^ebpf_guard_event_queue_dropped_total$/ {
             k = $1; sub(/^ebpf_guard_/, "", k)
             if (!(k in seen)) { seen[k] = 1; nk++; key[nk] = k }
@@ -3218,7 +3229,30 @@ if [ -z "$_w66_miss" ]; then
                 k = key[i]
                 if (match(k, /collector="[^"]*"/)) { c = substr(k, RSTART + 11, RLENGTH - 12) } else { c = "" }
                 if (match(k, /reason="[^"]*"/)) { rs = substr(k, RSTART + 8, RLENGTH - 9) } else { rs = "" }
-                if (c != "") { name = c "/" rs; queue = (c == "fileaccess" ? "bulk" : "protected") } else { name = "event_queue"; queue = "очередь не названа" }
+                if (c != "") {
+                    name = c "/" rs
+                    # Зашитая карта — ЗЕРКАЛО defaultEventPriority (priority.go) и
+                    # остаётся только как запас для бинаря без новой серии. Источник
+                    # называется в строке: «зашито» и «метрика» не выдаются друг за друга.
+                    hardq = (c == "fileaccess" ? "bulk" : "protected")
+                    metq = ""
+                    if ((c SUBSEP "protected") in qv && qv[c, "protected"] > 0) metq = "protected"
+                    if ((c SUBSEP "bulk") in qv && qv[c, "bulk"] > 0) metq = (metq == "" ? "bulk" : metq "+bulk")
+                    if (!qhave) {
+                        queue = hardq; qsrc_none = 1
+                    } else if (metq == "") {
+                        # Ноль потерь за весь прогон атрибутировать нечем и не нужно:
+                        # в список «очередь взята зеркалом» попадают только разрезы,
+                        # у которых потери ЕСТЬ (абсолют run-end > 0), иначе источник
+                        # у здорового прогона читался бы смешанным на пустом месте.
+                        queue = hardq
+                        if (v[4, k] + 0 > 0) qsrc_zero = qsrc_zero name " "
+                    } else {
+                        queue = metq
+                        qsrc_met = 1
+                        if (metq != hardq) qstale = qstale c "(метрика " metq ", зеркало эмиттера " hardq ") "
+                    }
+                } else { name = "event_queue"; queue = "очередь не названа" }
                 p = v[1, k] + 0; s = v[2, k] + 0; e = v[3, k] + 0; r = v[4, k] + 0
                 d[1] = p; d[2] = s - p; d[3] = e - s; d[4] = r - e
                 for (q = 1; q <= 4; q++) {
@@ -3231,12 +3265,22 @@ if [ -z "$_w66_miss" ]; then
                 if (d[2] + d[3] + d[4] > 0) later = later name "=" d[2] "/" d[3] "/" d[4] " "
             }
             pstok = (pst[1] == "" || pst[4] == "") ? -1 : (pst[1] == pst[4] ? 1 : 0)
-            printf "%d%c%d%c%d%c%d%c%d%c%d%c%d%c%d%c%s%c%s%c%s", ns[1]+0, 31, ns[4]+0, 31, pstok, 31, tot[1]+0, 31, tot[2]+0, 31, tot[3]+0, 31, tot[4]+0, 31, totR+0, 31, (burst == "" ? "-" : burst), 31, (defect == "" ? "-" : defect), 31, (later == "" ? "-" : later)
+            # Источник соответствия — в СВОЁМ поле, чтобы строка называла его словом.
+            if (!qhave) {
+                qsrc = "ЗАШИТО В ЭМИТТЕР: серии ebpf_guard_events_dropped_by_queue_total в снимке run-end НЕТ (бинарь до пункта 12), карта — зеркало defaultEventPriority"
+            } else if (qsrc_met && qsrc_zero == "") {
+                qsrc = "МЕТРИКА ebpf_guard_events_dropped_by_queue_total (рантайм, не зеркало кода)"
+            } else if (qsrc_met) {
+                qsrc = "МЕТРИКА ebpf_guard_events_dropped_by_queue_total, кроме [" qsrc_zero "] — у них в серии нули, там очередь ЗАШИТА зеркалом кода"
+            } else {
+                qsrc = "серия ebpf_guard_events_dropped_by_queue_total ЕСТЬ, но у всех коллекторов разреза в ней нули — очередь ЗАШИТА зеркалом кода"
+            }
+            printf "%d%c%d%c%d%c%d%c%d%c%d%c%d%c%d%c%s%c%s%c%s%c%s%c%s", ns[1]+0, 31, ns[4]+0, 31, pstok, 31, tot[1]+0, 31, tot[2]+0, 31, tot[3]+0, 31, tot[4]+0, 31, totR+0, 31, (burst == "" ? "-" : burst), 31, (defect == "" ? "-" : defect), 31, (later == "" ? "-" : later), 31, qsrc, 31, (qstale == "" ? "-" : qstale)
         }
     ' "$_w66_pro" "$_w66_s" "$_w66_e" "$_w66_r" 2>/dev/null)
 fi
 # Разделитель 0x1f, а не таб: таб пробельный и `read` схлопнул бы пустое поле.
-IFS=$'\x1f' read -r _w66_nP _w66_nR _w66_pst _w66_t0 _w66_t1 _w66_t2 _w66_t3 _w66_tR _w66_burst _w66_defect _w66_later <<<"$_w66_row"
+IFS=$'\x1f' read -r _w66_nP _w66_nR _w66_pst _w66_t0 _w66_t1 _w66_t2 _w66_t3 _w66_tR _w66_burst _w66_defect _w66_later _w66_qsrc _w66_qstale <<<"$_w66_row"
 _w66_sum=$(( ${_w66_t0:-0} + ${_w66_t1:-0} + ${_w66_t2:-0} + ${_w66_t3:-0} ))
 if [ -n "$_w66_miss" ]; then
     echo "НЕИЗМЕРИМ: 6.6.1 НЕИЗМЕРИМ (класс НАЗВАН: снимка не было — нет ${_w66_miss}): стартовый всплеск потерь берётся абсолютом первого снимка, а тождество интервалов — четырьмя снимками; «снимка не было» неотличимо от нуля и нулём не печатается"
@@ -3249,7 +3293,7 @@ elif [ "$_w66_defect" != "-" ]; then
 elif [ "$_w66_sum" -ne "${_w66_tR:-0}" ]; then
     echo "НЕИЗМЕРИМ: 6.6.1 НЕИЗМЕРИМ (класс НАЗВАН: тождество интервалов не сошлось — старт ${_w66_t0} + пролог ${_w66_t1} + окно ${_w66_t2} + после окна ${_w66_t3} = ${_w66_sum} против абсолюта run-end ${_w66_tR}): интервал потерян снова"
 else
-    echo "OK: 6.6.1 ИЗМЕРЕНО: стартовый всплеск потерь [старт процесса, первый снимок) = ${_w66_t0} событий (абсолют первого снимка, серий потерь в нём ${_w66_nP}; process_start_time не менялся) — разрез по {collector/reason}: ${_w66_burst}; очередь хопа названа рядом (№475: fileaccess — bulk, остальные — protected); за пролог ${_w66_t1}, за окно ${_w66_t2}, после окна ${_w66_t3}; тождество сошлось: старт ${_w66_t0} + пролог ${_w66_t1} + окно ${_w66_t2} + после окна ${_w66_t3} = ${_w66_sum} = абсолют run-end ${_w66_tR}; ненулевые серии вне старта (пролог/окно/после): ${_w66_later}; порог не назначен (правило 5.9.6); величина читается величиной, а ноль нулём, потому что снимок пролога ВЗЯТ"
+    echo "OK: 6.6.1 ИЗМЕРЕНО: стартовый всплеск потерь [старт процесса, первый снимок) = ${_w66_t0} событий (абсолют первого снимка, серий потерь в нём ${_w66_nP}; process_start_time не менялся) — разрез по {collector/reason}: ${_w66_burst}; очередь хопа названа рядом у каждого разреза, ИСТОЧНИК соответствия очередь↔коллектор — ${_w66_qsrc}; зеркало эмиттера разошлось с рантаймом у: ${_w66_qstale} («-» = не разошлось, пункт 12 ревизии 6.6); за пролог ${_w66_t1}, за окно ${_w66_t2}, после окна ${_w66_t3}; тождество сошлось: старт ${_w66_t0} + пролог ${_w66_t1} + окно ${_w66_t2} + после окна ${_w66_t3} = ${_w66_sum} = абсолют run-end ${_w66_tR}; ненулевые серии вне старта (пролог/окно/после): ${_w66_later}; порог не назначен (правило 5.9.6); величина читается величиной, а ноль нулём, потому что снимок пролога ВЗЯТ"
 fi
 #
 # ── 6.6.2: parse_error КРАСНЕЕТ САМ (item 2, №476, класс №471). Для каждого

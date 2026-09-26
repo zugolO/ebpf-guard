@@ -92,6 +92,33 @@ var (
 		[]string{"collector", "reason"},
 	)
 
+	// EventsDroppedByQueue counts the same drops as EventsDropped, but keyed by
+	// the PRIORITY QUEUE the event was routed to (protected / bulk) instead of by
+	// hop. It exists because the queue↔collector correspondence was otherwise
+	// readable only from the Go source: the wave-6.6 emitter (label 6.6.1) had to
+	// hardwire "fileaccess = bulk, everything else = protected", mirroring
+	// defaultEventPriority, and an edit to that function would have silently
+	// diverged the emitter from the code (plan.md, wave 6.6 revision item 12).
+	//
+	// It is a SEPARATE series rather than a `queue` label on
+	// ebpf_guard_events_dropped_total on purpose: client_golang sorts labels
+	// inside a series, so adding one reorders the exposition and silently breaks
+	// the awk anchors of every reader of that series
+	// ([[metric-label-added-breaks-awk-anchors]]). Cardinality is bounded by
+	// collectors × 2.
+	//
+	// Every RecordEventDrop call site already knows the routing decision — it is
+	// defaultEventPriority(event.Type) at the ringbuf hop and the router's own
+	// isHighPriority at the queue hop — so this series reports the decision the
+	// runtime ACTUALLY made, not a restatement of the mapping.
+	EventsDroppedByQueue = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_events_dropped_by_queue_total",
+			Help: "Dropped events by collector and the priority queue they were routed to (protected = high priority, bulk = low priority).",
+		},
+		[]string{"collector", "queue"},
+	)
+
 	// EventsEmittedKernel counts events the kernel actually produced — a
 	// successful bpf_ringbuf_reserve() on the shared `events` ring buffer —
 	// by collector. This is the left-hand side of 5.9.6b's (№72) event
@@ -597,6 +624,17 @@ func EventTypeLabel(t types.EventType) string {
 	}
 }
 
+// QueueNameForPriority maps the routing decision to the queue name used by the
+// EventsDroppedByQueue label and by the wave-6.6 emitter of label 6.6.1. The
+// names are the ones the degradation log already prints in degraded_queues, so
+// the metric and the log agree on wording.
+func QueueNameForPriority(highPriority bool) string {
+	if highPriority {
+		return "protected"
+	}
+	return "bulk"
+}
+
 // RecordDropped increments the dropped events counter with reason.
 func RecordDropped(collector, reason string) {
 	EventsDropped.WithLabelValues(collector, reason).Inc()
@@ -711,6 +749,7 @@ var (
 // at.
 func RecordEventDrop(collector, hop string, highPriority bool) {
 	EventsDropped.WithLabelValues(collector, hop).Inc()
+	EventsDroppedByQueue.WithLabelValues(collector, QueueNameForPriority(highPriority)).Inc()
 
 	now := time.Now().UnixNano()
 	if highPriority {

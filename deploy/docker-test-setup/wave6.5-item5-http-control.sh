@@ -89,6 +89,44 @@ _w65_series() { # $1 = снимок, $2 = полное имя серии (с «{
         }'
 }
 
+# Item 7 ревизии волны 6.6: РАЗРЕЗ объёма http_plaintext по comm. Ось comm у
+# events_total отсутствует по построению, поэтому остаток был неатрибутируем и
+# метка 6.6.4 не могла вынести ничего кроме НЕИЗМЕРИМ. Разрез даёт ОТДЕЛЬНАЯ
+# серия ebpf_guard_http_plaintext_events_by_comm_total (лейбл к events_total
+# пересортировал бы экспозицию и сломал бы якоря читателей).
+# Значение лейбла вынимается ПО ИМЕНИ ЛЕЙБЛА, а не разделителем кавычек:
+# awk -F" сделал бы фильтр по величине всегда истинным
+# ([[named-set-must-be-extracted-by-label-name]]).
+_w65_by_comm() { # $1 = снимок → «comm=N comm=N …» (пусто = серии в снимке НЕТ)
+    printf '%s\n' "$1" | awk '
+        index($1, "ebpf_guard_http_plaintext_events_by_comm_total{") == 1 {
+            k = $1
+            if (match(k, /comm="[^"]*"/)) {
+                c = substr(k, RSTART + 6, RLENGTH - 7)
+                if (c == "") c = "(пусто)"
+                printf "%s=%d ", c, $NF + 0
+            }
+        }'
+}
+
+# Дельта разреза между двумя снимками. Печатает только ВЫРОСШИЕ comm — упавший
+# счётчик невозможен без рестарта, и он называется отдельно.
+_w65_comm_delta() { # $1 = разрез ДО, $2 = разрез ПОСЛЕ → «comm=+N …», «-» если пусто
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        n = split(a, A, " "); for (i = 1; i <= n; i++) { if (A[i] == "") continue; p = index(A[i], "="); before[substr(A[i], 1, p-1)] = substr(A[i], p+1) + 0 }
+        n = split(b, B, " "); out = ""; nk = 0
+        for (i = 1; i <= n; i++) {
+            if (B[i] == "") continue
+            p = index(B[i], "="); k = substr(B[i], 1, p-1); v = substr(B[i], p+1) + 0
+            d = v - (k in before ? before[k] : 0)
+            if (d > 0) { keys[++nk] = k; dl[k] = d }
+        }
+        for (i = 2; i <= nk; i++) { t = keys[i]; j = i - 1; while (j >= 1 && keys[j] > t) { keys[j+1] = keys[j]; j-- } keys[j+1] = t }
+        for (i = 1; i <= nk; i++) out = out keys[i] "=" dl[keys[i]] " "
+        printf "%s", (out == "" ? "-" : out)
+    }'
+}
+
 _w65_class() { # $1 = имя класса неизмеримости
     printf 'class=%s\n' "$1" > "$_W65_OUT"
     echo "  item 5 волны 6.5: КЛАСС НАЗВАН — $1 (6.5.1 напечатает НЕИЗМЕРИМ с этим классом)"
@@ -166,7 +204,13 @@ echo "  привязка подтверждена прибором коллек�
 # лейблами, он создаётся первым принятым событием, и до первого события серии
 # нет по построению. Поэтому ноль подставляется, но НАЗЫВАЕТСЯ словом, а не
 # подменяет показание тихо.
-_w65_v0=$(_w65_series "$(_w65_metrics)" "ebpf_guard_events_total{" 'type="http_plaintext"')
+_w65_m0=$(_w65_metrics)
+_w65_v0=$(_w65_series "$_w65_m0" "ebpf_guard_events_total{" 'type="http_plaintext"')
+# Item 7 ревизии 6.6: разрез по comm берётся из ТОГО ЖЕ снимка, что и
+# events_total — иначе две величины лежат в разных моментах и остаток не
+# вычитается ([[metric-window-lower-bound-leaks-launcher]]).
+_w65_bc0=$(_w65_by_comm "$_w65_m0")
+_w65_ovf0=$(_w65_series "$_w65_m0" "ebpf_guard_http_plaintext_comm_overflow_total" "")
 if [ -z "${_w65_v0:-}" ]; then
     echo "  снимок ДО: серии ebpf_guard_events_total{type=\"http_plaintext\"} нет — законно, счётчик с лейблами создаётся ПЕРВЫМ принятым событием; принято за 0"
     _w65_v0=0
@@ -222,6 +266,19 @@ if [ -z "${_w65_v2:-}" ]; then _w65_v2_named=0; _w65_v2=0; fi
 _w65_settled=$(awk -v a="$_w65_v0" -v b="$_w65_v2" 'BEGIN{ d = b - a; printf "%d", (d > 0 ? d : 0) }')
 _w65_resid=$(( _w65_settled - _w65_holder_c )); [ "$_w65_resid" -lt 0 ] && _w65_resid=0
 _w65_trk2=$(_w65_series "$_w65_m2" "ebpf_guard_http_plaintext_tracked_pids_total" "")
+# Item 7 ревизии 6.6: РАЗРЕЗ ПО comm за тот же интервал, что settled_delta.
+# Пустой разрез при непустом settled_delta значит, что серии в снимке НЕТ ВООБЩЕ
+# (бинарь до item 7) — это печатается СЛОВОМ, а не нулём: «нет серии» и
+# «ни одного comm» ведут к разным вердиктам 6.6.4.
+_w65_bc2=$(_w65_by_comm "$_w65_m2")
+_w65_bc_present=1; [ -z "$_w65_bc2" ] && _w65_bc_present=0
+_w65_bc_delta=$(_w65_comm_delta "$_w65_bc0" "$_w65_bc2")
+# Сумма разреза — та же популяция, что settled_delta: расхождение означает, что
+# часть событий счёт по comm не увидела, и остаток по нему считать нельзя.
+_w65_bc_sum=$(printf '%s' "$_w65_bc_delta" | awk '{ n = split($0, A, " "); s = 0; for (i = 1; i <= n; i++) { if (A[i] == "" || A[i] == "-") continue; p = index(A[i], "="); s += substr(A[i], p+1) + 0 } printf "%d", s }')
+_w65_ovf2=$(_w65_series "$_w65_m2" "ebpf_guard_http_plaintext_comm_overflow_total" "")
+_w65_ovf_delta=$(awk -v a="${_w65_ovf0:-0}" -v b="${_w65_ovf2:-0}" 'BEGIN{ d = b - a; printf "%d", (d > 0 ? d : 0) }')
+_w65_ovf_present=1; { [ -z "${_w65_ovf0:-}" ] && [ -z "${_w65_ovf2:-}" ]; } && _w65_ovf_present=0
 _w65_others=""
 if [ -n "$W65_SVC" ] && command -v journalctl >/dev/null 2>&1; then
     for _p in $(journalctl -u "$W65_SVC" --since "@$W65_START_EPOCH" --no-pager 2>/dev/null \
@@ -237,6 +294,11 @@ fi
     echo "settled_series_present=$_w65_v2_named"
     echo "tracked_pids_settled=${_w65_trk2:--}"
     echo "other_attached=${_w65_others:--}"
+    echo "by_comm_present=$_w65_bc_present"
+    echo "by_comm_delta=${_w65_bc_delta}"
+    echo "by_comm_sum=$_w65_bc_sum"
+    echo "comm_overflow_present=$_w65_ovf_present"
+    echo "comm_overflow_delta=$_w65_ovf_delta"
 } > "$_W65_OUT.attr"
 
 {

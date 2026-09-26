@@ -708,6 +708,16 @@ func (c *HTTPCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			maskSensitiveHeaders(event.HTTPPlaintext.Data[:capturedLen])
 		}
 
+		// Wave 6.6 revision item 7: the comm axis label 6.6.4 needs. Counted
+		// HERE, on the emit path, so the population is the same one
+		// events_total{type="http_plaintext"} counts — a count taken anywhere
+		// else would be a different величина and the residual would not
+		// subtract. Before this, 6.6.4 was unmeasurable by construction:
+		// events_total has no comm or pid axis, so the residual after the
+		// control's own exchange could only be guessed from which PIDs were
+		// attached.
+		exporter.RecordHTTPPlaintextComm(nullTermString(event.Comm[:]))
+
 		if c.logger.Enabled(ctx, slog.LevelDebug) {
 			c.logger.Debug("plaintext HTTP event",
 				slog.Uint64("pid", uint64(event.PID)),

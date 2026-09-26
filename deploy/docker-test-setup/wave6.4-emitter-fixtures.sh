@@ -2154,14 +2154,24 @@ _t663_z3=$(_check66 6.6.3 "роль B, нули, серий здоровья Н�
     "$(_run66 "$_A663Z3" "")" OK)
 _need_text "6.6.3 отсутствие серии здоровья названо" "$_t663_z3" "привязок за жизнь процесса СЕРИИ НЕТ" "collector_up{tls}=СЕРИИ НЕТ"
 
-# ── 6.6.4 (item 8, №479): атрибуция остатка объёма http_plaintext. Вход — сторожевой
-# файл контроля 6.5 и его .attr (снимок после осадки).
-# _mk_h664 <каталог> <events_delta|-> <settled|-> <residual|-> <other|-> [class]
+# ── 6.6.4 (item 8, №479; ось comm — item 7 ревизии 6.6): атрибуция остатка
+# объёма http_plaintext. Вход — сторожевой файл контроля 6.5 и его .attr
+# (снимок после осадки, включая РАЗРЕЗ ПО comm).
+# _mk_h664 <каталог> <events_delta|-> <settled|-> <residual|-> <other|-> [class] [by_comm|-] [ovf_delta]
+# by_comm «-» значит: серии ebpf_guard_http_plaintext_events_by_comm_total в
+# снимке НЕТ ВООБЩЕ (бинарь до item 7) — это законный вход и отдельный класс.
 _mk_h664() {
     local d="$1"; mkdir -p "$d"; rm -f "$d/http-control-plaintext.txt" "$d/http-control-plaintext.txt.attr"
     if [ "${6:-}" != "" ]; then echo "class=$6" > "$d/http-control-plaintext.txt"; return; fi
     printf 'events_delta=%s\ntracked_pids=1\nrequests_ok=3\nholder_comm=python3\n' "$2" > "$d/http-control-plaintext.txt"
-    [ "$3" = "-" ] || printf 'settled_delta=%s\nsettled_after_s=30\nresidual=%s\nother_attached=%s\ntracked_pids_settled=1\n' "$3" "$4" "$5" > "$d/http-control-plaintext.txt.attr"
+    [ "$3" = "-" ] && return
+    local bc="${7:--}" ovf="${8:-0}" present=1 sum=0
+    [ "$bc" = "-" ] && present=0
+    if [ "$present" = "1" ]; then
+        sum=$(printf '%s' "$bc" | awk '{ n = split($0, A, " "); s = 0; for (i = 1; i <= n; i++) { if (A[i] == "") continue; p = index(A[i], "="); s += substr(A[i], p+1) + 0 } printf "%d", s }')
+    fi
+    printf 'settled_delta=%s\nsettled_after_s=30\nresidual=%s\nother_attached=%s\ntracked_pids_settled=1\nby_comm_present=%s\nby_comm_delta=%s\nby_comm_sum=%s\ncomm_overflow_present=1\ncomm_overflow_delta=%s\n' \
+        "$3" "$4" "$5" "$present" "$bc" "$sum" "$ovf" > "$d/http-control-plaintext.txt.attr"
 }
 _A664="$WORK/art664"
 rm -rf "$_A664"; mkdir -p "$_A664"
@@ -2174,15 +2184,41 @@ _t664_n=$(_check66 6.6.4 "нет снимка после осадки — НЕИ
 _need_text "6.6.4 нет осадки" "$_t664_n" "снимка ПОСЛЕ осадки не было" "недосчитал 30 событий из 39"
 _mk_h664 "$_A664" 0 0 0 -
 _check66 6.6.4 "контроль событий не дал — НЕИЗМЕРИМ" "$(_run66 "$_A664" "")" FAIL >/dev/null
-_mk_h664 "$_A664" 9 9 0 -
+_mk_h664 "$_A664" 9 9 0 - "" "python3=9"
 _t664_z=$(_check66 6.6.4 "остаток 0 — ИЗМЕРЕНО, флаг false" "$(_run66 "$_A664" "")" OK)
 _need_text "6.6.4 остаток 0" "$_t664_z" "9 событий" "объяснённых контролем 9" "остаток 0" "остаётся false"
-_mk_h664 "$_A664" 9 39 30 -
-_t664_u=$(_check66 6.6.4 "остаток 30 без имени (№479: 39 из 9) — НЕИЗМЕРИМ по атрибуции" "$(_run66 "$_A664" "")" FAIL)
-_need_text "6.6.4 остаток без имени" "$_t664_u" "НЕ АТРИБУТИРУЕМ" "остаток 30" "объяснённых контролем 9" "НЕ «цена коллектора»" "остаётся false"
-_mk_h664 "$_A664" 9 39 30 "4242:node,4250:nginx"
-_t664_a=$(_check66 6.6.4 "остаток 30 с кандидатами — ИЗМЕРЕНО, кандидаты названы" "$(_run66 "$_A664" "")" OK)
-_need_text "6.6.4 кандидаты" "$_t664_a" "остаток 30" "4242:node,4250:nginx" "КАНДИДАТОВ" "не доказательство"
+
+# Item 7 ревизии 6.6, ветка 1: остаток есть, а СЕРИИ разреза нет вовсе. Это не
+# «остаток не назван», а «назвать его нечем в принципе» — класс обязан отличаться.
+_mk_h664 "$_A664" 9 39 30 "4242:node,4250:nginx" "" "-"
+_t664_nos=$(_check66 6.6.4 "остаток 30, серии by_comm нет — НЕИЗМЕРИМ, названо отсутствие серии" "$(_run66 "$_A664" "")" FAIL)
+_need_text "6.6.4 нет серии разреза" "$_t664_nos" \
+    "серии ebpf_guard_http_plaintext_events_by_comm_total в снимке НЕТ" "бинарь до item 7" \
+    "неатрибутируем В ПРИНЦИПЕ" "остаток 30" "кандидаты из журнала привязок: 4242:node,4250:nginx"
+
+# Ветка 2: разрез ЕСТЬ, но лимитер свернул часть в comm="other" — «не назван» и
+# «назван, да имя потеряно» неотличимы, поэтому не ДОСТИГНУТО.
+_mk_h664 "$_A664" 9 39 30 - "" "python3=9 other=30" 7
+_t664_ovf=$(_check66 6.6.4 "разрез свёрнут лимитером — НЕИЗМЕРИМ, число свёрнутых названо" "$(_run66 "$_A664" "")" FAIL)
+_need_text "6.6.4 разрез неполон" "$_t664_ovf" \
+    "разрез по comm НЕПОЛОН" "лимитер свернул 7 серий" "ebpf_guard_http_plaintext_comm_overflow_total" \
+    "атрибутирован-но-свёрнут" "python3=9 other=30"
+
+# Ветка 3: сумма разреза не равна settled_delta — разрез считает ДРУГУЮ
+# популяцию, и вычитать остаток из несходящихся величин нельзя.
+_mk_h664 "$_A664" 9 39 30 - "" "python3=9 node=12"
+_t664_pop=$(_check66 6.6.4 "сумма разреза ≠ settled_delta — НЕИЗМЕРИМ, обе величины названы" "$(_run66 "$_A664" "")" FAIL)
+_need_text "6.6.4 разрез про другую популяцию" "$_t664_pop" \
+    "считает ДРУГУЮ популяцию" "сумма разреза 21 против settled_delta 39" "вычитать остаток из несходящихся величин нельзя"
+
+# Ветка 4 — ТА, РАДИ КОТОРОЙ ЗАВЕДЁН item 7: остаток НАЗВАН осью comm, разрез
+# полон и сходится с settled_delta. Метка впервые способна вынести ДОСТИГНУТО.
+_mk_h664 "$_A664" 9 39 30 "4242:node,4250:nginx" "" "nginx=18 node=12 python3=9"
+_t664_ok=$(_check66 6.6.4 "остаток назван осью comm, разрез полон — ДОСТИГНУТО" "$(_run66 "$_A664" "")" OK)
+_need_text "6.6.4 остаток назван осью comm" "$_t664_ok" \
+    "6.6.4 ДОСТИГНУТО" "остаток НАЗВАН осью comm" "остаток 30" \
+    "nginx=18 node=12 python3=9" "сумма разреза 39 = settled_delta 39" "разрез ПОЛОН" \
+    "свёрнутых в comm=\"other\" за интервал 0" "метрикой, а не догадкой"
 
 # ── 6.6.5 (item 7, №478): kmod. _mk_k665 <каталог> <up> <lsm> <errno> <before> <after> [class]
 _mk_k665() {

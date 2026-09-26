@@ -56,6 +56,16 @@ var (
 	// whose comm label is attacker-controlled and unbounded (wave 6.2.6, item 1,
 	// №281/№282).
 	alertVolumeCardinalityLimiter = NewCardinalityLimiter(10000)
+	// httpPlaintextCommLimiter guards ebpf_guard_http_plaintext_events_by_comm_total,
+	// whose comm label is attacker-controlled and unbounded, exactly like
+	// AlertVolumeBySource's (wave 6.6 revision item 7). The cap is DELIBERATELY
+	// lower than 10000: this series is cut by comm ALONE, so 10000 would be a
+	// tenth of the process table's worth of distinct names before anything is
+	// said out loud, and the whole point of the series is to NAME a residual of
+	// a few events. A cap of 1000 reaches comm="other" sooner, and reaching it
+	// is reported by HTTPPlaintextCommOverflow rather than happening silently
+	// ([[gated-metric-cannot-carry-product-verdict]]).
+	httpPlaintextCommLimiter = NewCardinalityLimiter(1000)
 )
 
 var (
@@ -90,6 +100,40 @@ var (
 			Help: "Total number of events dropped by reason",
 		},
 		[]string{"collector", "reason"},
+	)
+
+	// HTTPPlaintextEventsByComm counts http_plaintext events by the comm of the
+	// process that produced them. It exists because label 6.6.4 was unmeasurable
+	// BY CONSTRUCTION: ebpf_guard_events_total has type/pod/namespace/node and no
+	// comm or pid axis at all, so the residual left after the control's own
+	// exchange could never be named — only guessed at from which PIDs happened
+	// to be attached ([[alert-has-no-event-type-axis]] is the same shape of
+	// blindness one axis over).
+	//
+	// A SEPARATE series, not a comm label on events_total: client_golang sorts
+	// labels within a series, so a new label reorders the exposition and
+	// silently breaks the awk anchors of every reader of that series
+	// ([[metric-label-added-breaks-awk-anchors]]) — and events_total is read by
+	// most of the pipeline. Cardinality is bounded by httpPlaintextCommLimiter;
+	// overflow collapses comm to "other" and is counted, never silent.
+	HTTPPlaintextEventsByComm = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_http_plaintext_events_by_comm_total",
+			Help: "Plaintext HTTP events by producing process comm. comm collapses to \"other\" past the cardinality limit; see ebpf_guard_http_plaintext_comm_overflow_total.",
+		},
+		[]string{"comm"},
+	)
+
+	// HTTPPlaintextCommOverflow counts series collapsed into comm="other" by the
+	// cardinality limiter on HTTPPlaintextEventsByComm. Nonzero means the comm
+	// breakdown is INCOMPLETE for the window, so a residual that reads as
+	// unattributed may in fact be attributed-but-collapsed — label 6.6.4 has to
+	// print this number, not assume it is zero.
+	HTTPPlaintextCommOverflow = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_http_plaintext_comm_overflow_total",
+			Help: "Number of http-plaintext-by-comm series collapsed into comm=\"other\" because the cardinality limiter reached its cap.",
+		},
 	)
 
 	// EventsDroppedByQueue counts the same drops as EventsDropped, but keyed by
@@ -839,6 +883,24 @@ func RecordAlertVolumeBySource(ruleID, comm string) {
 		AlertVolumeBySourceOverflow.Inc()
 	}
 	AlertVolumeBySource.WithLabelValues(labels[0], labels[1]).Inc()
+}
+
+// RecordHTTPPlaintextComm increments ebpf_guard_http_plaintext_events_by_comm_total
+// for one plaintext HTTP event's producing comm. comm is attacker-controlled and
+// sanitized the same way as RecordAlertVolumeBySource's (arbitrary kernel bytes
+// would otherwise panic the Prometheus client on invalid UTF-8).
+//
+// Called on the collector's emit path, so the count is of events the collector
+// PRODUCED — the same population events_total{type="http_plaintext"} counts,
+// which is what makes the two comparable and the residual nameable (wave 6.6
+// revision item 7, label 6.6.4).
+func RecordHTTPPlaintextComm(comm string) {
+	comm = SanitizeLabelValue(comm)
+	labels := httpPlaintextCommLimiter.Normalize([]string{comm}, 0)
+	if labels[0] == "other" && comm != "other" {
+		HTTPPlaintextCommOverflow.Inc()
+	}
+	HTTPPlaintextEventsByComm.WithLabelValues(labels[0]).Inc()
 }
 
 // RecordAlertVolumeByEventType increments ebpf_guard_alert_volume_by_event_type_total

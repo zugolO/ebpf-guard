@@ -369,6 +369,9 @@ int BPF_PROG(lsm_kernel_module_request, char *kmod_name)
 		__builtin_memset(&e->mod_name, 0, sizeof(e->mod_name));
 
 	e->from_tmpfs = 0; /* not path-based; kernel_read_file hook handles path check */
+	/* Item 8 ревизии 6.6: cgroup id читается В ЯДРЕ, пока задача ещё жива —
+	 * восстановление pid->pod иначе промахивается на короткоживущем событии. */
+	e->cgroup_id = bpf_get_current_cgroup_id();
 
 	bpf_ringbuf_submit(e, 0);
 	return 0;
@@ -430,6 +433,9 @@ int BPF_PROG(lsm_kernel_read_file, struct file *file, enum kernel_read_file_id i
 	    ((e->mod_name[1] == 't' && e->mod_name[2] == 'm' && e->mod_name[3] == 'p') ||
 	     (e->mod_name[1] == 'd' && e->mod_name[2] == 'e' && e->mod_name[3] == 'v')))
 		e->from_tmpfs = 1;
+
+	/* Item 8 ревизии 6.6: см. комментарий у первого эмиттера kmod выше. */
+	e->cgroup_id = bpf_get_current_cgroup_id();
 
 	bpf_ringbuf_submit(e, 0);
 	return 0;

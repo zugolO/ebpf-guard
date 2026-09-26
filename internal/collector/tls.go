@@ -939,6 +939,13 @@ func (c *TLSCollector) parseEvent(raw []byte) (*types.Event, error) {
 	}
 
 	result := rawEvent.ToTypesEvent()
+	// Wave 6.6 revision item 8: the trailing in-kernel cgroup id. Read by
+	// offset rather than added to TLSEventRaw on purpose: tlsEventRawSize is
+	// derived from that mirror and gates binary.Read above, so a new field
+	// there would make a record from an older BPF object fail to parse at all
+	// instead of simply carrying no cgroup id. 0 means "no cgroup id", never
+	// "cgroup zero" — the recovery path in internal/k8s skips 0 explicitly.
+	result.CgroupID = bpf.TLSCgroupIDFromRecord(raw)
 	return &result, nil
 }
 

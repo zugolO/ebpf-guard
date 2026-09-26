@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -361,6 +362,13 @@ func decodeDNSEventWithTransport(raw []byte) (*types.Event, string, string) {
 		UID:        uid,
 		Comm:       comm,
 		ParentComm: parentComm,
+		// Wave 6.6 revision item 8: the trailing in-kernel cgroup id. It sits
+		// AFTER the payload, at a fixed offset (the kernel side always reserves
+		// dnsMaxPayload bytes), so it is read by offset rather than from the
+		// running `offset` cursor, which stops at payload_len. 0 on a record
+		// from a BPF object built before item 8 — and 0 means "no cgroup id",
+		// never "cgroup zero": the recovery path skips 0 explicitly.
+		CgroupID: bpf.DNSCgroupIDFromRecord(raw),
 		DNS: &types.DNSEvent{
 			QName:       msg.qname,
 			QType:       msg.qtype,

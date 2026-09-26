@@ -82,7 +82,20 @@ struct dns_event {
 	__u8  direction;                  /* 0 = query (outbound), 1 = response (inbound) */
 	__u16 payload_len;                /* Number of valid bytes in payload (<= DNS_MAX_PAYLOAD) */
 	__u8  payload[DNS_MAX_PAYLOAD];   /* Raw UDP payload, starting at the DNS header */
+	/* Wave 6.6 revision item 8: cgroup id of the emitting task, read IN THE
+	 * KERNEL, as struct event carries it. Appended LAST so every existing
+	 * offset stays put and an old parser reading a new record still decodes
+	 * everything it knew. Without it DNS events go past the pid->pod recovery
+	 * in internal/k8s/enricher.go. */
+	__u64 cgroup_id;
 } __attribute__((packed));
+
+/* Offset measured with offsetof on host clang, not derived from the field list
+ * (the method bpf/common.h's struct event assert was built with). */
+#define DNS_EVENT_CGROUP_ID_OFFSET 319 /* sizeof(struct dns_event) = 327 */
+_Static_assert(__builtin_offsetof(struct dns_event, cgroup_id) == DNS_EVENT_CGROUP_ID_OFFSET,
+	       "struct dns_event layout moved: Go parser (internal/bpf/events.go) reads cgroup_id at this offset");
+_Static_assert(sizeof(struct dns_event) == 327, "struct dns_event size moved: update the Go parser's minSize");
 
 /* Ring buffer for DNS events */
 struct {
@@ -159,6 +172,8 @@ static __always_inline void fill_dns_process_info(struct dns_event *e)
 	e->timestamp = bpf_ktime_get_ns();
 
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+	/* Item 8 ревизии 6.6: cgroup id читается В ЯДРЕ, пока задача жива. */
+	e->cgroup_id = bpf_get_current_cgroup_id();
 
 	/* Parent identity, read from task_struct->real_parent — same approach
 	 * as fill_process_info() in common.h (plan.md wave 5.9.2g), carried

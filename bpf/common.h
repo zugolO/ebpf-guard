@@ -152,7 +152,23 @@ struct kmod_event {
 	__u32 ppid;
 	__u8  mod_name[KMOD_NAME_LEN]; /* module name or path */
 	__u8  from_tmpfs;              /* 1 if path is in /tmp or /dev/shm */
+	/* Wave 6.6 revision item 8: cgroup id of the emitting task, read IN THE
+	 * KERNEL, exactly as struct event carries it. Appended LAST so every
+	 * existing offset is unchanged and an old Go parser reading a new record —
+	 * or a new parser reading an old one — still decodes everything it knew.
+	 * Without it a kmod event goes past the pid->pod recovery in
+	 * internal/k8s/enricher.go: when the loading process is gone before
+	 * /proc/<pid>/cgroup is read, the container identity is unrecoverable, and
+	 * a module load is exactly the short-lived event where that happens. */
+	__u64 cgroup_id;
 } __attribute__((packed));
+
+/* Offsets measured with offsetof on host clang, not derived from the field
+ * list — the same method the struct event assert above was built with. */
+#define KMOD_EVENT_CGROUP_ID_OFFSET 121 /* sizeof(struct kmod_event) = 129 */
+_Static_assert(__builtin_offsetof(struct kmod_event, cgroup_id) == KMOD_EVENT_CGROUP_ID_OFFSET,
+	       "struct kmod_event layout moved: Go parser (internal/bpf/events.go) reads cgroup_id at this offset");
+_Static_assert(sizeof(struct kmod_event) == 129, "struct kmod_event size moved: update the Go parser's minSize");
 
 /*
  * struct cgroup_escape_event - Sent when a process migrates to a different
@@ -168,6 +184,16 @@ struct cgroup_escape_event {
 	__u32 ppid;
 	__u64 init_cgroup_id; /* cgroup id recorded at exec */
 	__u64 new_cgroup_id;  /* cgroup id at migration time */
+	/* Wave 6.6 revision item 8 deliberately adds NO cgroup_id field here, and
+	 * the reason is not thrift (finding №486). The hook is
+	 * cgroup_attach_task, where the CURRENT task is the one performing the
+	 * attach — a shell writing to cgroup.procs — not the task being migrated.
+	 * bpf_get_current_cgroup_id() would therefore record the ATTACHER's
+	 * cgroup and hand the pid->pod recovery a confidently wrong container.
+	 * new_cgroup_id above is the migrating leader's destination cgroup, read
+	 * from dst_cgrp->kn->id in the same units bpf_get_current_cgroup_id()
+	 * returns, so it is both correct and already on the wire: the recovery
+	 * path consumes IT (internal/collector, cgroupEscapeToTypesEvent). */
 } __attribute__((packed));
 
 /*

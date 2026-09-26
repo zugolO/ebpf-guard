@@ -31,12 +31,61 @@ const EventTypeSyscall uint32 = 1
 // than EventCgroupIDOffset+8 comes from an older BPF object and yields 0.
 const EventCgroupIDOffset = 332
 
+// Wave 6.6 revision item 8: the same trailing cgroup_id, appended to the event
+// structs that struct event's item 10 did not cover, so kmod, DNS and both TLS
+// producers stop going past the pid->pod recovery in internal/k8s/enricher.go.
+// Each offset is a LITERAL measured with offsetof on host clang against the
+// struct in bpf/, and each has a _Static_assert on the C side: a moved field and
+// a moved constant here cannot agree by construction.
+const (
+	// KmodEventCgroupIDOffset is offsetof(struct kmod_event, cgroup_id)
+	// (bpf/common.h); sizeof(struct kmod_event) = 129.
+	KmodEventCgroupIDOffset = 121
+	// DNSEventCgroupIDOffset is offsetof(struct dns_event, cgroup_id)
+	// (bpf/dns.bpf.c); sizeof(struct dns_event) = 327.
+	DNSEventCgroupIDOffset = 319
+	// TLSEventCgroupIDOffset is offsetof(struct tls_event, cgroup_id)
+	// (bpf/tls_uprobe.bpf.c); sizeof(struct tls_event) = 370.
+	TLSEventCgroupIDOffset = 362
+	// TLSClientHelloCgroupIDOffset is
+	// offsetof(struct tls_clienthello_event, cgroup_id)
+	// (bpf/tls_clienthello.bpf.c); sizeof = 588. Finding №487: that struct was
+	// the only event struct in bpf/ missing __attribute__((packed)) while this
+	// package's parser always walked packed offsets — the attribute is now
+	// there, and the offsets are asserted in C rather than described in a
+	// comment.
+	TLSClientHelloCgroupIDOffset = 580
+)
+
 // cgroupIDTail reads the trailing in-kernel cgroup id, 0 if the record lacks it.
 func cgroupIDTail(raw []byte) uint64 {
-	if len(raw) < EventCgroupIDOffset+8 {
+	return cgroupIDTailAt(raw, EventCgroupIDOffset)
+}
+
+// DNSCgroupIDFromRecord reads the trailing in-kernel cgroup id of a raw
+// struct dns_event record (wave 6.6 revision item 8), 0 if the record is from a
+// BPF object built before it. The DNS collector decodes its records itself
+// rather than through a RawEvent mirror, so the read is exported here — the
+// offset stays in one place, next to the offsets it is asserted against in C.
+func DNSCgroupIDFromRecord(raw []byte) uint64 {
+	return cgroupIDTailAt(raw, DNSEventCgroupIDOffset)
+}
+
+// TLSCgroupIDFromRecord reads the trailing in-kernel cgroup id of a raw
+// struct tls_event record (wave 6.6 revision item 8), 0 if absent.
+func TLSCgroupIDFromRecord(raw []byte) uint64 {
+	return cgroupIDTailAt(raw, TLSEventCgroupIDOffset)
+}
+
+// cgroupIDTailAt reads a trailing in-kernel cgroup id at a given offset. A record
+// shorter than off+8 comes from an older BPF object and yields 0 — which is why
+// every caller treats 0 as "this record carries no cgroup id", never as "cgroup
+// zero": the recovery path in internal/k8s/enricher.go skips 0 explicitly.
+func cgroupIDTailAt(raw []byte, off int) uint64 {
+	if len(raw) < off+8 {
 		return 0
 	}
-	return binary.LittleEndian.Uint64(raw[EventCgroupIDOffset:])
+	return binary.LittleEndian.Uint64(raw[off:])
 }
 
 // SyscallEvent matches the C struct event from common.h
@@ -201,6 +250,9 @@ type KmodRawEvent struct {
 	PPID       uint32
 	ModName    [64]byte
 	FromTmpfs  uint8
+	// CgroupID is the trailing cgroup_id (offset KmodEventCgroupIDOffset),
+	// 0 on a record from a BPF object built before wave 6.6 revision item 8.
+	CgroupID uint64
 }
 
 // CgroupEscapeRawEvent is the wire-format event for EVENT_TYPE_CGROUP_ESC.
@@ -319,6 +371,9 @@ type TlsClientHelloRawEvent struct {
 	CapturedLen uint16
 	OriginalLen uint32
 	Data        [512]byte
+	// CgroupID is the trailing cgroup_id (offset TLSClientHelloCgroupIDOffset),
+	// 0 on a record from a BPF object built before wave 6.6 revision item 8.
+	CgroupID uint64
 }
 
 // -----------------------------------------------------------------------
@@ -646,6 +701,7 @@ func ParseKmodEventInto(raw []byte, out *KmodRawEvent) error {
 	copy(out.ModName[:], raw[off:off+64])
 	off += 64
 	out.FromTmpfs = raw[off]
+	out.CgroupID = cgroupIDTailAt(raw, KmodEventCgroupIDOffset)
 	return nil
 }
 
@@ -805,6 +861,7 @@ func ParseTlsClientHelloEventInto(raw []byte, out *TlsClientHelloRawEvent) error
 		out.CapturedLen = 512
 	}
 	copy(out.Data[:], raw[off:off+int(out.CapturedLen)])
+	out.CgroupID = cgroupIDTailAt(raw, TLSClientHelloCgroupIDOffset)
 	return nil
 }
 
@@ -950,6 +1007,11 @@ func (e *KmodRawEvent) ToTypesEvent() types.Event {
 			ModName:   string(name),
 			FromTmpfs: e.FromTmpfs != 0,
 		},
+		// Wave 6.6 revision item 8: in-kernel cgroup id, 0 if the record came
+		// from a BPF object built before it. A module load is exactly the
+		// short-lived event whose pid is gone before /proc/<pid>/cgroup is
+		// read, so this is the field that makes its container recoverable.
+		CgroupID: e.CgroupID,
 	}
 }
 
@@ -992,6 +1054,15 @@ func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
 			InitCgroupID: e.InitCgroupID,
 			NewCgroupID:  e.NewCgroupID,
 		},
+		// Wave 6.6 revision item 8, finding №486: this event carries NO
+		// bpf_get_current_cgroup_id() and must not. Its hook is
+		// cgroup_attach_task, where the current task is the one PERFORMING the
+		// attach (a shell writing cgroup.procs), not the task being migrated —
+		// the current cgroup there would name the attacker's container, not the
+		// victim's. NewCgroupID is the migrating leader's destination cgroup,
+		// read from dst_cgrp->kn->id in the same units, so the pid->pod
+		// recovery is fed from IT.
+		CgroupID: e.NewCgroupID,
 	}
 }
 
@@ -1073,6 +1144,9 @@ func (e *TlsClientHelloRawEvent) ToTypesEvent() types.Event {
 		TLS: &types.TLSEvent{
 			DataLen: e.OriginalLen,
 		},
+		// Wave 6.6 revision item 8: in-kernel cgroup id, 0 if the record came
+		// from a BPF object built before it.
+		CgroupID: e.CgroupID,
 	}
 }
 

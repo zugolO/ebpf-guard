@@ -53,7 +53,17 @@ struct tls_event {
 	__u8  daddr[16];
 	__u16 sport;
 	__u16 dport;
+	/* Wave 6.6 revision item 8: cgroup id of the emitting task, read IN THE
+	 * KERNEL, as struct event carries it. Appended LAST: existing offsets
+	 * unchanged, old parser on a new record still decodes what it knew. */
+	__u64 cgroup_id;
 } __attribute__((packed));
+
+/* Offset measured with offsetof on host clang, not derived from the field list. */
+#define TLS_EVENT_CGROUP_ID_OFFSET 362 /* sizeof(struct tls_event) = 370 */
+_Static_assert(__builtin_offsetof(struct tls_event, cgroup_id) == TLS_EVENT_CGROUP_ID_OFFSET,
+	       "struct tls_event layout moved: Go parser (internal/bpf/events.go) reads cgroup_id at this offset");
+_Static_assert(sizeof(struct tls_event) == 370, "struct tls_event size moved: update the Go parser's minSize");
 
 /* Ring buffer for TLS events */
 struct {
@@ -77,6 +87,8 @@ static __always_inline void fill_tls_process_info(struct tls_event *e)
 	e->uid = (__u32)uid_gid;
 	
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+	/* Item 8 ревизии 6.6: cgroup id читается В ЯДРЕ, пока задача жива. */
+	e->cgroup_id = bpf_get_current_cgroup_id();
 	e->timestamp = bpf_ktime_get_ns();
 	
 	/* Get parent process info */

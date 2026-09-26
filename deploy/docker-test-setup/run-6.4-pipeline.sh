@@ -3353,6 +3353,14 @@ if [ -s "$ART/metrics-window-start.txt" ] && [ -s "$ART/metrics-window-end.txt" 
             v[f, k] = $NF + 0; h[f, k] = 1; if (!(k in seen)) { seen[k] = 1; nk++; kn[nk] = k }
         }
         $1 ~ /^ebpf_guard_events_total\{/ && $1 ~ /type="tls"/ { ev[f] += $NF + 0 }
+        # Здоровье коллектора — ТЕМ ЖЕ проходом и ИЗ ТОГО ЖЕ снимка run-end, что
+        # и разрез (№458: два независимых чтения одной величины разъезжаются).
+        # Нужны обе: collector_up{tls} лжёт единицей у заглушки
+        # ([[collector-up-is-not-a-health-signal]]), а attach_success_total —
+        # монотонный счётчик привязок за жизнь процесса (№449), и ноль у него
+        # при включённом коллекторе есть «ни к кому не привязался».
+        f == 3 && $1 ~ /^ebpf_guard_collector_up\{/ && $1 ~ /collector="tls"/ { cu = $NF + 0; cuh = 1 }
+        f == 3 && $1 == "ebpf_guard_tls_attach_success_total" { att = $NF + 0; atth = 1 }
         END {
             for (i = 2; i <= nk; i++) { t = kn[i]; j = i - 1; while (j >= 1 && kn[j] > t) { kn[j+1] = kn[j]; j-- } kn[j+1] = t }
             n = split("payload ja3 unknown", fs, " ")
@@ -3368,11 +3376,17 @@ if [ -s "$ART/metrics-window-start.txt" ] && [ -s "$ART/metrics-window-end.txt" 
                 sumw += dw; suma += v[3, k]
             }
             for (i = 1; i <= nk; i++) { k = kn[i]; if (!(k == "payload" || k == "ja3" || k == "unknown")) extra = extra k " " }
-            printf "%d%c%s%c%s%c%s%c%s%c%s%c%d%c%d%c%d%c%d%c%d%c%d", have+0, 31, (miss == "" ? "-" : miss), 31, (cut == "" ? "-" : cut), 31, (abs == "" ? "-" : abs), 31, (neg == "" ? "-" : neg), 31, (extra == "" ? "-" : extra), 31, sumw+0, 31, suma+0, 31, ev[2] - ev[1], 31, ev[3]+0, 31, (v[3, "ja3"]+0), 31, (v[3, "unknown"]+0)
+            printf "%d%c%s%c%s%c%s%c%s%c%s%c%d%c%d%c%d%c%d%c%d%c%d%c%s%c%s", have+0, 31, (miss == "" ? "-" : miss), 31, (cut == "" ? "-" : cut), 31, (abs == "" ? "-" : abs), 31, (neg == "" ? "-" : neg), 31, (extra == "" ? "-" : extra), 31, sumw+0, 31, suma+0, 31, ev[2] - ev[1], 31, ev[3]+0, 31, (v[3, "ja3"]+0), 31, (v[3, "unknown"]+0), 31, (cuh ? cu "" : "-"), 31, (atth ? att "" : "-")
         }
     ' "$ART/metrics-window-start.txt" "$ART/metrics-window-end.txt" "$_w66_r" 2>/dev/null)
 fi
-IFS=$'\x1f' read -r _w66_fhave _w66_fmiss _w66_fcut _w66_fabs _w66_fneg _w66_fextra _w66_fsumw _w66_fsuma _w66_fevw _w66_feva _w66_fja3 _w66_funk <<<"$_w66_f3"
+IFS=$'\x1f' read -r _w66_fhave _w66_fmiss _w66_fcut _w66_fabs _w66_fneg _w66_fextra _w66_fsumw _w66_fsuma _w66_fevw _w66_feva _w66_fja3 _w66_funk _w66_fcu _w66_fatt <<<"$_w66_f3"
+# «-» от awk означает ОТСУТСТВИЕ серии, и печатать его дефисом нельзя: дефис
+# читается как величина. Отсутствие называется словами, ОДНОЙ переменной на обе
+# ветки — класс и доказательство обязаны читать одно и то же (образец №458,
+# [[metric-anchor-must-carry-full-series-name]]).
+_w66_fattp="${_w66_fatt:--}"; [ "$_w66_fattp" = "-" ] && _w66_fattp="СЕРИИ НЕТ"
+_w66_fcup="${_w66_fcu:--}"; [ "$_w66_fcup" = "-" ] && _w66_fcup="СЕРИИ НЕТ"
 if [ ! -s "$ART/metrics-window-start.txt" ] || [ ! -s "$ART/metrics-window-end.txt" ] || [ ! -s "$_w66_r" ]; then
     echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: снимка не было — нет одного из metrics-window-start.txt / metrics-window-end.txt / metrics-run-end.txt): разрез по семействам без трёх снимков не считается и нулём не печатается"
 elif [ "${_w66_fhave:-0}" -eq 0 ]; then
@@ -3387,8 +3401,21 @@ elif [ "${_w66_fsumw:-0}" -ne "${_w66_fevw:-0}" ]; then
     echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: инвариант суммы не сошёлся по дельте окна — sum(by_family)=${_w66_fsumw} (${_w66_fcut}) против events_total{type=\"tls\"}=${_w66_fevw} событий за окно)"
 elif [ "${_w66_role}" = "A" ] && { [ "${_w66_fsuma:-0}" -ne 0 ] || [ "${_w66_fsumw:-0}" -ne 0 ]; }; then
     echo "FAIL: 6.6.3 ПРОВАЛЕН: прогон A (collectors.tls.enabled: false), а TLS-события идут — по абсолюту ${_w66_fabs}, за окно ${_w66_fcut}: вход прогона A загрязнён, пара A/B недоказуема"
+elif [ "${_w66_role}" = "B" ] && [ "${_w66_fsuma:-0}" -eq 0 ] && [ "${_w66_fatt:--}" = "0" ]; then
+    # Роль B, разрез весь в нулях, привязок за жизнь процесса НОЛЬ. Такая строка
+    # в форме ИЗМЕРЕНО читалась бы «TLS был тихий», хотя мёртвый коллектор даёт
+    # ровно тот же вид — это класс №471/№436 ([[collector-loadobjects-is-a-stub]],
+    # [[collector-up-is-not-a-health-signal]]), переехавший из «нет серии» в
+    # «читаемый ноль». Разрешать его соседними метками значит поручать сведение
+    # двух строк человеку, а вердикт обязан быть читаем изнутри своей строки.
+    echo "НЕИЗМЕРИМ: 6.6.3 НЕИЗМЕРИМ (класс НАЗВАН: роль B, разрез весь в нулях, а привязок за жизнь процесса ebpf_guard_tls_attach_success_total=0 при collector_up{tls}=${_w66_fcup}): нулевой разрез НЕ есть «тишина TLS» — коллектор не привязался ни к одному процессу, и ноль здесь про прибор, а не про трафик (6.4.0 судит привязку отдельно)"
 else
     _w66_fnote="ja3=${_w66_fja3:-0} — СТРУКТУРНЫЙ ноль (JA3-правила инертны, 6.4.5), а не вердикт детекта"
+    # Ноль при живой привязке — уже величина, но и она обязана предъявить, ЧЕМ
+    # отличается от мёртвого коллектора, в своей же строке.
+    if [ "${_w66_role}" = "B" ] && [ "${_w66_fsuma:-0}" -eq 0 ]; then
+        _w66_fnote="${_w66_fnote}; роль B и разрез ВЕСЬ в нулях — это тишина TLS, а НЕ мёртвый коллектор: привязок за жизнь процесса ${_w66_fattp} (монотонно, №449) при collector_up{tls}=${_w66_fcup}"
+    fi
     [ "${_w66_fja3:-0}" -gt 0 ] && _w66_fnote="ja3=${_w66_fja3} за прогон (JA3-семейство кормится, 6.4.5 читать отдельно)"
     [ "${_w66_funk:-0}" -gt 0 ] && _w66_fnote="${_w66_fnote}; unknown=${_w66_funk} — TLS-событий БЕЗ TLS-деталей (свой ряд, не payload), продюсер шлёт событие без полезной нагрузки"
     echo "OK: 6.6.3 ИЗМЕРЕНО: разрез СОБЫТИЙ оси {event_type=\"tls\"} по семействам за окно: ${_w66_fcut}(событий; сумма ${_w66_fsumw} = events_total ${_w66_fevw}); абсолют run-end: ${_w66_fabs}(сумма ${_w66_fsuma} = events_total ${_w66_feva}); прогон ${_w66_role}; ${_w66_fnote}; инвариант sum(by_family)=events_total{type=\"tls\"} сошёлся дважды (абсолют и окно)"

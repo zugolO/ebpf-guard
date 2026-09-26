@@ -60,7 +60,7 @@ struct tls_clienthello_event {
 	 * KERNEL, as struct event carries it. Appended LAST, so existing offsets
 	 * stay put. Offset measured with offsetof on host clang, not derived. */
 	__u64 cgroup_id;
-	/* Finding №487: this struct was the ONLY event struct in bpf/ without
+	/* Finding №488: this struct was the ONLY event struct in bpf/ without
 	 * __attribute__((packed)), while its Go parser
 	 * (ParseTlsClientHelloEventInto) walks PACKED offsets and its doc comment
 	 * says "packed, little-endian ... Total: 580 bytes". Unpacked, the __u64
@@ -81,9 +81,9 @@ _Static_assert(__builtin_offsetof(struct tls_clienthello_event, cgroup_id) == TL
 _Static_assert(sizeof(struct tls_clienthello_event) == 588,
 	       "struct tls_clienthello_event size moved: update the Go parser's minSize");
 _Static_assert(__builtin_offsetof(struct tls_clienthello_event, timestamp) == 4,
-	       "struct tls_clienthello_event is not packed: the Go parser reads timestamp at 4 (finding №487)");
+	       "struct tls_clienthello_event is not packed: the Go parser reads timestamp at 4 (finding №488)");
 _Static_assert(__builtin_offsetof(struct tls_clienthello_event, data) == 68,
-	       "struct tls_clienthello_event is not packed: the Go parser reads data at 68 (finding №487)");
+	       "struct tls_clienthello_event is not packed: the Go parser reads data at 68 (finding №488)");
 
 /* Dedicated ring buffer for ClientHello events */
 struct {

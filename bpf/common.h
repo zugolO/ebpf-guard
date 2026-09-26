@@ -185,7 +185,7 @@ struct cgroup_escape_event {
 	__u64 init_cgroup_id; /* cgroup id recorded at exec */
 	__u64 new_cgroup_id;  /* cgroup id at migration time */
 	/* Wave 6.6 revision item 8 deliberately adds NO cgroup_id field here, and
-	 * the reason is not thrift (finding №486). The hook is
+	 * the reason is not thrift (finding №487). The hook is
 	 * cgroup_attach_task, where the CURRENT task is the one performing the
 	 * attach — a shell writing to cgroup.procs — not the task being migrated.
 	 * bpf_get_current_cgroup_id() would therefore record the ATTACHER's

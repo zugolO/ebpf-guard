@@ -49,7 +49,7 @@ const (
 	TLSEventCgroupIDOffset = 362
 	// TLSClientHelloCgroupIDOffset is
 	// offsetof(struct tls_clienthello_event, cgroup_id)
-	// (bpf/tls_clienthello.bpf.c); sizeof = 588. Finding №487: that struct was
+	// (bpf/tls_clienthello.bpf.c); sizeof = 588. Finding №488: that struct was
 	// the only event struct in bpf/ missing __attribute__((packed)) while this
 	// package's parser always walked packed offsets — the attribute is now
 	// there, and the offsets are asserted in C rather than described in a
@@ -1054,7 +1054,7 @@ func (e *CgroupEscapeRawEvent) ToTypesEvent() types.Event {
 			InitCgroupID: e.InitCgroupID,
 			NewCgroupID:  e.NewCgroupID,
 		},
-		// Wave 6.6 revision item 8, finding №486: this event carries NO
+		// Wave 6.6 revision item 8, finding №487: this event carries NO
 		// bpf_get_current_cgroup_id() and must not. Its hook is
 		// cgroup_attach_task, where the current task is the one PERFORMING the
 		// attach (a shell writing cgroup.procs), not the task being migrated —

@@ -127,7 +127,7 @@ func TestTLSClientHelloCgroupTail(t *testing.T) {
 		assert.Equal(t, uint32(4321), ch.PID)
 	})
 
-	// Finding №487: the C struct was the only event struct in bpf/ without
+	// Finding №488: the C struct was the only event struct in bpf/ without
 	// __attribute__((packed)), while this parser has always walked packed
 	// offsets. Unpacked, timestamp would sit at 8 and pid at 16, so a record
 	// built to the PACKED layout — which is what the parser and every fixture

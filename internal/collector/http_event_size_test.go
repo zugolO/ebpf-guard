@@ -99,7 +99,11 @@ func TestHTTPEventCgroupID_RoundTripsAndOldRecordStillParses(t *testing.T) {
 		require.NoError(t, binary.Write(&buf, binary.LittleEndian, &base))
 		raw := buf.Bytes()
 		raw = append(raw, make([]byte, 8)...)
-		binary.LittleEndian.PutUint64(raw[bpf.HTTPEventCgroupIDOffset:], 0xC0FFEE)
+		// Литерал, а не bpf.HTTPEventCgroupIDOffset: записью по той же
+		// константе, которой читает разбор, сдвинутая константа согласилась бы
+		// сама с собой (образец cgroup_tail_test.go).
+		binary.LittleEndian.PutUint64(raw[325:], 0xC0FFEE)
+		require.Equal(t, 325, bpf.HTTPEventCgroupIDOffset)
 
 		ev, err := c.parseEvent(raw)
 		require.NoError(t, err)

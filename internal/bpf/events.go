@@ -58,9 +58,8 @@ const (
 	// HTTPEventCgroupIDOffset is offsetof(struct http_event, cgroup_id)
 	// (bpf/http_uprobe.bpf.c); sizeof(struct http_event) = 333. Task 1 of the
 	// wave 6.6 revision follow-up list: item 8 named kmod/dns/tls but not this
-	// collector's own struct, even though its producer (an HTTP client/server
-	// read()/recv() call) is the shortest-lived of all of them — exactly the
-	// pid->pod race the field exists to close.
+	// collector's own struct. Without it an HTTP event whose process has exited
+	// before /proc/<pid>/cgroup is read loses its container identity.
 	HTTPEventCgroupIDOffset = 325
 )
 

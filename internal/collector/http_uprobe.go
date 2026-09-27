@@ -766,8 +766,7 @@ func (c *HTTPCollector) parseEvent(raw []byte) (*types.Event, error) {
 	// there would make a record from an older BPF object fail to parse at all
 	// instead of simply carrying no cgroup id. 0 means "no cgroup id", never
 	// "cgroup zero" — the recovery path in internal/k8s/enricher.go skips 0
-	// explicitly. This producer is the shortest-lived of all four item-8/task-1
-	// producers, so it is exactly where the pid->pod race is worst.
+	// explicitly.
 	result.CgroupID = bpf.HTTPCgroupIDFromRecord(raw)
 	return &result, nil
 }

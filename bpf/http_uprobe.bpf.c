@@ -71,10 +71,8 @@ struct http_event {
 	 * (bpf/common.h) and as kmod/dns/tls got it in the same item. Appended
 	 * LAST so every existing offset stays put and a parser reading a record
 	 * from a BPF object built before this field still decodes everything it
-	 * knew. The producer here (an HTTP client/server read()/recv() call) is
-	 * the shortest-lived process of all the item-8 producers — exactly the
-	 * pid->pod race internal/k8s/enricher.go loses when /proc/<pid>/cgroup is
-	 * read after the process has already exited. */
+	 * knew. Without it internal/k8s/enricher.go loses the container of any
+	 * producer that exits before /proc/<pid>/cgroup is read. */
 	__u64 cgroup_id;
 } __attribute__((packed));
 
@@ -110,8 +108,8 @@ static __always_inline void fill_http_process_info(struct http_event *e)
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->timestamp = bpf_ktime_get_ns();
 	/* Item 8 ревизии 6.6 (задача 1): cgroup id читается В ЯДРЕ, пока задача
-	 * ещё жива — восстановление pid->pod иначе промахивается на этом самом
-	 * короткоживущем продюсере. */
+	 * ещё жива — восстановление pid->pod иначе промахивается на процессе,
+	 * успевшем выйти до чтения /proc/<pid>/cgroup. */
 	e->cgroup_id = bpf_get_current_cgroup_id();
 
 	task = (struct task_struct *)bpf_get_current_task();

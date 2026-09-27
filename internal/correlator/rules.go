@@ -2061,11 +2061,8 @@ func (re *RuleEngine) ReferencedSyscalls() []uint32 {
 		}
 		conds := re.getAllConditions(rule)
 		for _, cond := range conds {
-			if cond.Field != "nr" {
-				continue
-			}
-			// Only eq and in operators name specific syscall numbers.
-			if cond.Op != OpEquals && cond.Op != OpIn {
+			// Only eq/equals and in operators name specific syscall numbers.
+			if !namesLiteralValues(cond, "nr") {
 				continue
 			}
 			for _, v := range cond.Values {
@@ -2179,6 +2176,25 @@ func collectGroupConditions(g *RuleConditionGroup) []RuleCondition {
 	return out
 }
 
+// namesLiteralValues reports whether cond constrains the normalised field name
+// want by enumerating literal values, i.e. with an equality or set-membership
+// operator.
+//
+// It exists because the reachability audits below must read a condition the way
+// evaluateCondition does, not the way it happens to be spelled. Two aliases the
+// evaluator accepts were previously invisible here: the dotted field form
+// (`syscall.nr`, normalised by normaliseFieldName) and the short equality
+// operator `eq` (accepted alongside OpEquals at the OpEquals case of
+// evaluateCondition and by validateCondition). A predicate that tests
+// `cond.Field != "nr"` and `cond.Op != OpEquals` silently skips every rule
+// written in either form, so the audit under-reports instead of failing.
+func namesLiteralValues(cond RuleCondition, want string) bool {
+	if normaliseFieldName(cond.Field) != want {
+		return false
+	}
+	return cond.Op == OpIn || cond.Op == OpEquals || cond.Op == "eq"
+}
+
 // UnreachableSyscallRules returns the IDs of loaded EventSyscall rules whose
 // "nr" condition (eq/in) names only syscall numbers absent from allowlist —
 // i.e. rules the in-kernel filter can never forward an event for. Rules with
@@ -2206,7 +2222,7 @@ func (re *RuleEngine) UnreachableSyscallRules(allowlist []int) []string {
 		hasNumericNr := false
 		reachable := false
 		for _, cond := range re.getAllConditions(rule) {
-			if cond.Field != "nr" || (cond.Op != OpEquals && cond.Op != OpIn) {
+			if !namesLiteralValues(cond, "nr") {
 				continue
 			}
 			for _, v := range cond.Values {
@@ -2264,7 +2280,7 @@ func (re *RuleEngine) UnreachableFileOpRules() []string {
 		hasOpCondition := false
 		reachable := false
 		for _, cond := range re.getAllConditions(rule) {
-			if normaliseFieldName(cond.Field) != "op" || (cond.Op != OpEquals && cond.Op != OpIn) {
+			if !namesLiteralValues(cond, "op") {
 				continue
 			}
 			hasOpCondition = true

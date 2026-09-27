@@ -1294,6 +1294,103 @@ else
     echo "  6.2.9.F.8: форсирование выключено (W63_FORCE_NODE_EVENT не 1) — окно ловит то, что нода даст сама"
 fi
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 6.6.7 (item 1 остатка волны 6.6, находка №490) — ДЕРЖАТЕЛЬ `http_plaintext`
+# ВНУТРИ ОКНА, ФИКСИРОВАННОЕ ЧИСЛО ЗАПРОСОВ.
+#
+# ЗАЧЕМ. №490: единица цены `http_plaintext` заменена на «за один HTTP-запрос»
+# ([[gate-unit-replaced-by-price-per-node-event]] — тот же приём). Пол уже
+# стоит (run-6.4-pipeline.sh, справочная строка «№490, пол цены»), но прибора,
+# который бы НАЗНАЧАЛ саму цену, не было: положительный контроль item 5 волны
+# 6.5 (wave6.5-item5-http-control.sh) поднимает держатель ПОСЛЕ окна нарочно
+# ([[metric-window-lower-bound-leaks-launcher]]) — он предъявляет ЖИВОЕ
+# событие, а не цену пары окон. №490 требует ОБРАТНОГО: держатель обязан ЖИТЬ
+# ВСЁ ОКНО, а число запросов быть ОДИНАКОВЫМ в обеих ролях пары (роль A:
+# коллектор выключен, роль B: включён; нагрузка одна и та же, тумблер — только
+# флаг конфига), иначе разность объёма окна несёт цену РАЗНОЙ нагрузки, а не
+# цену коллектора ([[toggle-needs-both-branches-counted]]).
+#
+# ПОЧЕМУ ДЕРЖАТЕЛЬ СТАРТУЕТ ЗДЕСЬ (ДО ОСАДКИ/ОПОРНОГО СНИМКА). Его собственный
+# запуск — execve — обязан остаться ценой ПОДГОТОВКИ (№319), а не просочиться
+# в объём окна. comm держателя — `python3`, первый из defaultHTTPServerComms
+# (http_uprobe.go:40), тот же выбор, что у wave6.5-item5-http-control.sh, по
+# той же причине: живёт дольше интервала скана, читает через libc recv(2).
+#
+# ПОЧЕМУ ЗАПРОСЫ ИДУТ ЧЕРЕЗ systemd-run, А НЕ ПРЯМЫМ curl ИЗ ЭТОГО СКРИПТА.
+# Прямой вызов внутри тихого окна — execve ИЗМЕРИТЕЛЯ, дерево легло бы на наш
+# pid и утонуло бы в предикате «своё» (6.2.9.F.3/6.2.9.F.7), а холостое окно
+# (ФИФО-ожидание ниже) обязано остаться БЕЗ execve измерителя. Тот же приём,
+# что форсирование события ноды (6.2.9.F.8) чуть выше: транзиентный таймер
+# ставится ДО t0, срабатывает ВНУТРИ окна, дерево висит на systemd, а не на нас.
+#
+# МОМЕНТ ВЫБРАН С ЗАПАСОМ С ОБЕИХ СТОРОН: t0 + окно/2 — не раньше, чтобы
+# держатель точно успел привязаться (scan_interval по умолчанию 30с, запас
+# кратно больше при окне 600с), не позже, чтобы дельта успела дойти до
+# метрики к снимку на t1 (тот же лаг, что у №295/№324). Отсчёт офсета идёт от
+# ЭТОЙ точки, то есть включает ОБЕ осадки ниже (аппаратную и предоконную) —
+# иначе таймер сработал бы раньше t0 + окно/2 на их сумму.
+#
+# ЧИСЛО ЗАПРОСОВ ФИКСИРОВАНО (W66_HTTP_PRICE_REQUESTS, умолчание 5) и ОБЯЗАНО
+# быть НАЗВАНО ОДНИМ И ТЕМ ЖЕ на обоих прогонах пары — это часть ПОСТАНОВКИ,
+# не измеряемая величина, и оно печатается в артефакте, чтобы эмиттер 6.6.7
+# (run-6.4-pipeline.sh) мог его сверить и отказать при расхождении.
+#
+# Тумблер W66_HTTP_PRICE_CONTROL (умолчание off): старый прогон не ломается,
+# метка 6.6.7 честно печатает НЕ ЗАПРОШЕН.
+# ═════════════════════════════════════════════════════════════════════════════
+_W667_UNIT="w66-http-price-fire"
+_W667_PORT="${W66_HTTP_PRICE_PORT:-18086}"
+_W667_REQUESTS="${W66_HTTP_PRICE_REQUESTS:-5}"
+_W667_HOLDER_PID=0
+_W667_SCHEDULED=0
+_W667_FIRE_AT=0
+_w667_holder_comm=""
+_W667_OUT="$W63_ART/http-price-control.txt"
+rm -f "$_W667_OUT"
+if [ "${W66_HTTP_PRICE_CONTROL:-off}" != "off" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        # Остаток прошлого прогона снимается ЯВНО — транзиентный юнит с
+        # RemainAfterExit=yes мусорщиком не собирается
+        # ([[transient-unit-survives-and-blocks-next-run]]), как и у 6.2.9.F.8
+        # выше.
+        if systemctl cat "${_W667_UNIT}.timer" >/dev/null 2>&1 || systemctl cat "${_W667_UNIT}.service" >/dev/null 2>&1; then
+            echo "  6.6.7: НАЙДЕН ОСТАТОК прошлого прогона ($_W667_UNIT) — снимается до постановки"
+        fi
+        systemctl stop "${_W667_UNIT}.timer" >/dev/null 2>&1
+        systemctl stop "${_W667_UNIT}.service" >/dev/null 2>&1
+        systemctl reset-failed "${_W667_UNIT}.timer" >/dev/null 2>&1
+        systemctl reset-failed "${_W667_UNIT}.service" >/dev/null 2>&1
+
+        _w667_root="$W63_ART/http-price-holder-root"
+        mkdir -p "$_w667_root" 2>/dev/null
+        printf 'ebpf-guard item 1 остатка волны 6.6 (№490) держатель\n' > "$_w667_root/index.html" 2>/dev/null
+        python3 -m http.server "$_W667_PORT" --bind 127.0.0.1 --directory "$_w667_root" \
+            > "$W63_ART/http-price-holder.log" 2>&1 &
+        _W667_HOLDER_PID=$!
+        _w667_holder_comm=$(cat "/proc/$_W667_HOLDER_PID/comm" 2>/dev/null)
+        echo "  6.6.7: держатель поднят ДО опорного снимка (цена подготовки): pid=$_W667_HOLDER_PID comm=${_w667_holder_comm:-?} порт=$_W667_PORT"
+
+        # Офсет включает ОБЕ осадки (аппаратную ниже + предоконную перед t0) —
+        # см. комментарий выше «Отсчёт офсета…».
+        _w667_off=$(( W63_APPARATUS_SETTLE + W63_OPEN_SETTLE + W63_WINDOW / 2 ))
+        _w667_log="$W63_ART/http-price-requests.log"
+        : > "$_w667_log"
+        _w667_err=$(systemd-run --quiet --on-active="${_w667_off}s" --timer-property=AccuracySec=1s --property=RemainAfterExit=yes --unit="$_W667_UNIT" \
+            /bin/bash -c "for i in \$(seq 1 $_W667_REQUESTS); do curl -s -o /dev/null -w '%{http_code}\n' --max-time 5 http://127.0.0.1:$_W667_PORT/index.html >> '$_w667_log'; done" 2>&1)
+        if [ $? -eq 0 ]; then
+            _W667_SCHEDULED=1
+            _W667_FIRE_AT=$(( $(_w63_epoch) + _w667_off ))
+            echo "  6.6.7: $_W667_REQUESTS запросов поставлены транзиентным таймером на $(_w63_utc "$_W667_FIRE_AT") (t0 + окно/2), дерево повиснет на systemd"
+        else
+            echo "  6.6.7: systemd-run НЕ поставил таймер запросов — 6.6.7 назовёт класс сам. Причина: ${_w667_err:-без сообщения}"
+        fi
+    else
+        echo "  6.6.7: держатель_недоступен_python3_нет — 6.6.7 назовёт класс сам"
+    fi
+else
+    echo "--- 6.6.7 (item 1 остатка волны 6.6, №490): W66_HTTP_PRICE_CONTROL=off — контроль не поставлен ---"
+fi
+
 # №324(б) — ОСАДКА ПЕРЕД ОПОРНЫМ СНИМКОМ, А НЕ ПОСЛЕ. Весь пусковой аппарат
 # выше (набор pid'ов, systemctl×N/systemd-run) уже случился; эта пауза даёт
 # ЕГО алертам дойти до стора ДО того, как берётся опорный снимок ниже — то
@@ -1383,6 +1480,54 @@ _w63_tree_q='def w63ts: (.timestamp | capture("^(?<i>[^.]+)(\\.(?<f>[0-9]+))?Z$"
 _W63_TREE_SELF_OK=1
 [ "${_w63_self_pid:-1}" -le 1 ] && _W63_TREE_SELF_OK=0
 _w63_metrics > "$W63_ART/metrics-window-end.txt"
+
+# ── 6.6.7, финал: держатель снимается, факты собираются в артефакт ──────────
+# tracked_pids/collector_up читаются из УЖЕ СНЯТОГО metrics-window-end.txt, а
+# не отдельным запросом — отдельный curl здесь был бы ЕЩЁ ОДНИМ execve
+# измерителя внутри окна, тем же дефектом, которого весь блок избегает.
+if [ "${W66_HTTP_PRICE_CONTROL:-off}" != "off" ]; then
+    _w667_alive=0
+    if [ "${_W667_HOLDER_PID:-0}" -gt 0 ] && kill -0 "$_W667_HOLDER_PID" 2>/dev/null; then
+        _w667_alive=1
+    fi
+    _w667_trk=$(awk '/^ebpf_guard_http_plaintext_tracked_pids_total/{v=$NF; f=1} END{print (f?v:"")}' "$W63_ART/metrics-window-end.txt" 2>/dev/null)
+    _w667_up=$(awk '/^ebpf_guard_collector_up\{/ && /collector="http_plaintext"/{v=$NF; f=1} END{print (f?v:"")}' "$W63_ART/metrics-window-end.txt" 2>/dev/null)
+    _w667_fire_result="-"
+    _w667_fire_exit="-"
+    if [ "${_W667_SCHEDULED:-0}" -eq 1 ]; then
+        _w667_fire_result=$(systemctl show -p Result --value "${_W667_UNIT}.service" 2>/dev/null)
+        _w667_fire_exit=$(systemctl show -p ExecMainStatus --value "${_W667_UNIT}.service" 2>/dev/null)
+    fi
+    _w667_ok=0
+    if [ -s "$W63_ART/http-price-requests.log" ]; then
+        _w667_ok=$(grep -c '^200$' "$W63_ART/http-price-requests.log" 2>/dev/null || echo 0)
+    fi
+    {
+        echo "requests_planned=$_W667_REQUESTS"
+        echo "requests_ok=${_w667_ok:-0}"
+        echo "scheduled=${_W667_SCHEDULED:-0}"
+        echo "fire_at=${_W667_FIRE_AT:-0}"
+        echo "fire_result=${_w667_fire_result:--}"
+        echo "fire_exit=${_w667_fire_exit:--}"
+        echo "holder_pid=${_W667_HOLDER_PID:-0}"
+        echo "holder_comm=${_w667_holder_comm:-?}"
+        echo "holder_alive_at_window_end=$_w667_alive"
+        echo "tracked_pids_at_window_end=${_w667_trk:--}"
+        echo "collector_up_at_window_end=${_w667_up:--}"
+    } > "$_W667_OUT"
+    echo "  6.6.7: держатель alive_at_window_end=$_w667_alive, запросов 200 = ${_w667_ok:-0} из $_W667_REQUESTS, таймер result=${_w667_fire_result:--} exit=${_w667_fire_exit:--}, tracked_pids=${_w667_trk:--}, collector_up=${_w667_up:--}"
+    # Держатель и юнит больше не нужны — снимаются здесь ЯВНО, а не трапом:
+    # этот файл выполняется отдельным `bash wave6.3-controls.sh`-процессом, и
+    # орфан, переживший его выход, блокирует порт следующего прогона
+    # ([[transient-unit-survives-and-blocks-next-run]]).
+    if [ "${_W667_HOLDER_PID:-0}" -gt 0 ]; then
+        kill "$_W667_HOLDER_PID" 2>/dev/null
+        wait "$_W667_HOLDER_PID" 2>/dev/null
+    fi
+    systemctl stop "${_W667_UNIT}.timer" >/dev/null 2>&1
+    systemctl stop "${_W667_UNIT}.service" >/dev/null 2>&1
+fi
+
 # 6.2.9.F.2 (№295, item 2): ЦЕНА ЧТЕНИЯ ИЗМЕРЯЕТСЯ, А НЕ ПРЕДПОЛАГАЕТСЯ.
 # Сам curl, снимающий метрику РОВНО на t1, инструментирован тем же агентом —
 # его execve/syscalls обрабатываются correlator'ом асинхронно и могут попасть

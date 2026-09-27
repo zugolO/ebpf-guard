@@ -360,6 +360,46 @@ func TestUnreachableSyscallRules(t *testing.T) {
 	assert.ElementsMatch(t, []string{"unreachable_single", "unreachable_group"}, unreachable)
 }
 
+// TestUnreachableSyscallRules_FieldAndOpAliases guards the blind spot found by
+// the wave 7 item 1 revision: the predicate must read a condition the way
+// evaluateCondition does, not the way it is spelled. Eight real rules were mute
+// from the day they were written yet invisible to this audit (9 reported
+// instead of 17) because every one of them used the dotted `syscall.nr` alias,
+// which normaliseFieldName resolves and the audit did not. The short `eq`
+// operator, valid per validateCondition, was the second blind half.
+//
+// Each spelling below is also asserted reachable-when-in-allowlist, so a
+// "normalise everything to unreachable" regression cannot pass this test.
+func TestUnreachableSyscallRules_FieldAndOpAliases(t *testing.T) {
+	rules := []Rule{
+		{ID: "dotted_field_in", EventType: types.EventSyscall, Condition: RuleCondition{Field: "syscall.nr", Op: OpIn, Values: []string{"999"}}, Action: ActionAlert},
+		{ID: "dotted_field_equals", EventType: types.EventSyscall, Condition: RuleCondition{Field: "syscall.nr", Op: OpEquals, Values: []string{"999"}}, Action: ActionAlert},
+		{ID: "short_eq_operator", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: "eq", Values: []string{"999"}}, Action: ActionAlert},
+		{ID: "dotted_field_short_eq", EventType: types.EventSyscall, Condition: RuleCondition{Field: "syscall.nr", Op: "eq", Values: []string{"999"}}, Action: ActionAlert},
+		{ID: "dotted_reachable", EventType: types.EventSyscall, Condition: RuleCondition{Field: "syscall.nr", Op: OpIn, Values: []string{"59"}}, Action: ActionAlert},
+		{ID: "short_eq_reachable", EventType: types.EventSyscall, Condition: RuleCondition{Field: "nr", Op: "eq", Values: []string{"59"}}, Action: ActionAlert},
+	}
+
+	unreachable := NewRuleEngine(rules).UnreachableSyscallRules([]int{59, 322, 101})
+
+	assert.ElementsMatch(t, []string{
+		"dotted_field_in", "dotted_field_equals", "short_eq_operator", "dotted_field_short_eq",
+	}, unreachable)
+}
+
+// TestUnreachableFileOpRules_ShortEqAlias is the file-axis half of the same
+// blind spot. The field alias was already normalised here, so only `eq` was
+// unreadable; no rule in the tree uses it today, which is exactly why it would
+// have decayed unnoticed.
+func TestUnreachableFileOpRules_ShortEqAlias(t *testing.T) {
+	rules := []Rule{
+		{ID: "short_eq_dead_op", EventType: types.EventFileAccess, Condition: RuleCondition{Field: "file.op", Op: "eq", Values: []string{"unlink"}}, Action: ActionAlert},
+		{ID: "short_eq_live_op", EventType: types.EventFileAccess, Condition: RuleCondition{Field: "file.op", Op: "eq", Values: []string{"write"}}, Action: ActionAlert},
+	}
+
+	assert.ElementsMatch(t, []string{"short_eq_dead_op"}, NewRuleEngine(rules).UnreachableFileOpRules())
+}
+
 // TestUnreachableSyscallRules_RepoRuleCount is a regression guard for finding
 // #39: it loads the real rules/*.yaml tree and fails if the count of
 // syscall rules with no reachable "nr" grows past the wave 5.9.2b ceiling

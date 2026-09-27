@@ -156,3 +156,50 @@ web_sql_injection_files
 # под /dev живьём и ТРЕБУЕТ Δ>=1, иначе замер останавливается. Строка ниже
 # снимается, как только волна 6 заведёт в манифест шаг с /dev/.<hidden>.
 rootkit_hidden_dir_dev
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Волна 7, ревизия item 1 (2026-09-27). Восемь syscall-правил, которые были
+# немы по тому же признаку, что список 5.9.2b выше, но НЕ печатались агентом и
+# НЕ роняли этот тест, потому что предикат UnreachableSyscallRules сверял
+# `cond.Field != "nr"` буквально. Все восемь написаны дотовым алиасом
+# `syscall.nr`, который оценщик нормализует (normaliseFieldName), а проверка —
+# нет; тот же предикат не принимал короткий `op: eq`. Оба алиаса теперь
+# нормализуются через namesLiteralValues, и штатный счёт немых syscall-правил
+# вырос с 9 до 17 — это не новая потеря детекта, а снятие слепоты прибора:
+# правила были немы с момента написания.
+#
+# Причина по каждому — здесь, в комментарии, строка правила остаётся без
+# хвостового текста (run-gate.sh сравнивает через `comm -12`):
+#
+#   c2_raw_socket_shell            — nr=41 (socket), нет attack-шага. Тот же
+#       номер и та же причина, что у mitre_arp_spoof_raw_socket выше.
+#   exfil_raw_socket_by_non_root   — nr=41 (socket), то же.
+#   evasion_auditd_stop            — nr=62/37/238 (kill/tkill/tgkill), нет
+#       attack-шага: остановки auditd манифест атак не содержит.
+#   ransomware_backup_tool_kill    — nr=62/37 (kill/tkill), ransomware-сценария
+#       на стенде нет вовсе — та же причина, что у ransomware_mass_rename и
+#       ransomware_backup_delete выше.
+#   evasion_self_delete            — nr=87/263 (unlink/unlinkat). Немо ТОЛЬКО
+#       под config-test.yaml: стенд не задаёт monitored_syscalls и работает на
+#       DefaultMonitoredSyscalls(), где 87/263 нет, тогда как в
+#       config/config.yaml они есть. Ровно тот же разъезд двух allowlist'ов,
+#       что уже описан выше для ransomware_backup_delete.
+#   evasion_timestamp_modify       — nr=132/235/280 (utime/utimes/utimensat),
+#       нет attack-шага (timestomping манифест не выполняет).
+#   persist_systemd_wants_symlink  — nr=88 (symlink), нет attack-шага.
+#   impact_fork_bomb_pattern       — nr=56/57 (clone/fork) — случай
+#       rootkit_anonymous_exec_memory и sigma_mprotect_exec_heap: syscall
+#       слишком общий, открыть его целиком означало бы отменить волну 0.5
+#       (5800→226 соб./с) ради правила без attack-шага.
+#
+# Ни одно условие не правилось: волна 7 item 1 — анализ, а не правка семантики
+# детекта. Решение «открыть номер или сузить условие» остаётся за владельцем
+# (plan.md, пункт 8); эти строки фиксируют, что ноль объяснён, а не незамечен.
+c2_raw_socket_shell
+exfil_raw_socket_by_non_root
+evasion_auditd_stop
+ransomware_backup_tool_kill
+evasion_self_delete
+evasion_timestamp_modify
+persist_systemd_wants_symlink
+impact_fork_bomb_pattern

@@ -1095,6 +1095,9 @@ W63_PROFILE_SECS="$PROFILE_SECS" W63_SMOKE="$SMOKE" \
 W63_VERDICTS="$VERDICTS" \
 W63_FORCE_NODE_EVENT="${FORCE_NODE_EVENT:-1}" \
 W63_PROLOGUE_METRICS="/root/metrics-prologue-start-6.4.txt" \
+W66_HTTP_PRICE_CONTROL="${W66_HTTP_PRICE_CONTROL:-off}" \
+W66_HTTP_PRICE_PORT="${W66_HTTP_PRICE_PORT:-18086}" \
+W66_HTTP_PRICE_REQUESTS="${W66_HTTP_PRICE_REQUESTS:-5}" \
     bash "$SETUP/wave6.3-controls.sh"
 
 # ── Шаг 4.4 (правка 08.09.2026, дефект порядка). ЖУРНАЛ И ВЕРДИКТ 6.2.6.4 —
@@ -2881,6 +2884,43 @@ if [ -s "$ART/metrics-window-start.txt" ] && [ -s "$ART/metrics-window-end.txt" 
         echo "СПРАВОЧНО (№490, пол цены): событий http_plaintext ЗА ОКНО = 0 (collector_up{http_plaintext}=${_w490_up:-СЕРИИ НЕТ}) — разность суммарного объёма окна между парными прогонами НЕ ЕСТЬ цена этого коллектора: измеряемого в измеряемом интервале не было. Цена назначается только при НЕНУЛЕВОМ числе событий коллектора внутри окна (нагрузка с comm из defaultHTTPServerComms, живущая всё окно)"
     else
         echo "СПРАВОЧНО (№490, пол цены): событий http_plaintext ЗА ОКНО = ${_w490_evd} (collector_up{http_plaintext}=${_w490_up:-СЕРИИ НЕТ}) — пол взят, разность суммарного объёма окна между парными прогонами читается ценой на ЭТУ нагрузку, и единица у неё «на событие/на запрос», а не «за окно»"
+    fi
+fi
+
+# ── 6.6.7 (item 1 остатка волны 6.6, №490) — ЦЕНА `http_plaintext` НА ОДИН
+#    HTTP-ЗАПРОС. Носитель решения (в) волны 6.6: держатель `python3` внутри
+#    окна (wave6.3-controls.sh, блок «6.6.7 … ДЕРЖАТЕЛЬ ВНУТРИ ОКНА») плюс
+#    ФИКСИРОВАННОЕ число запросов, поставленных транзиентным systemd-таймером
+#    на t0+окно/2 — той же осью, что форсирование события ноды (6.2.9.F.8).
+#    Метка НЕ выносит порог: №490 заменила ЕДИНИЦУ, а не ввела гейт, поэтому
+#    вердиктное слово при годной величине — ИЗМЕРЕНО, а не ДОСТИГНУТО/ПРОВАЛЕН
+#    ([[gate-unit-replaced-by-price-per-node-event]]). Цена читается парой
+#    прогонов СНАРУЖИ этого лога (роль A/роль B, requests_planned ОБЯЗАН
+#    совпасть) — здесь печатается только величина ЭТОГО прогона.
+_w667_pc="$ART/http-price-control.txt"
+if [ "${W66_HTTP_PRICE_CONTROL:-off}" = "off" ] || [ ! -s "$_w667_pc" ]; then
+    echo "НЕ ЗАПРОШЕН ПОСТАНОВКОЙ: 6.6.7 НЕИЗМЕРИМ (НЕ ЗАПРОШЕН: держатель внутри окна не поставлен — W66_HTTP_PRICE_CONTROL=off либо \$ART/http-price-control.txt не создан): цена на запрос требует держателя, живущего ВСЁ окно, и не назначается вакуумно"
+else
+    _w667_req_planned=$(grep '^requests_planned=' "$_w667_pc" | cut -d= -f2)
+    _w667_req_ok=$(grep '^requests_ok=' "$_w667_pc" | cut -d= -f2)
+    _w667_sched=$(grep '^scheduled=' "$_w667_pc" | cut -d= -f2)
+    _w667_alive=$(grep '^holder_alive_at_window_end=' "$_w667_pc" | cut -d= -f2)
+    _w667_hcomm=$(grep '^holder_comm=' "$_w667_pc" | cut -d= -f2-)
+    _w667_hpid=$(grep '^holder_pid=' "$_w667_pc" | cut -d= -f2)
+    _w667_fres=$(grep '^fire_result=' "$_w667_pc" | cut -d= -f2-)
+    _w667_trk=$(grep '^tracked_pids_at_window_end=' "$_w667_pc" | cut -d= -f2-)
+    _w667_up=$(grep '^collector_up_at_window_end=' "$_w667_pc" | cut -d= -f2-)
+    if [ "${_w667_sched:-0}" != "1" ]; then
+        echo "НЕИЗМЕРИМ: 6.6.7 НЕИЗМЕРИМ (класс НАЗВАН: таймер_запросов_не_поставлен): systemd-run отказал держателю до открытия окна — см. http-price-holder.log в архиве"
+    elif [ "${_w667_alive:-0}" != "1" ]; then
+        echo "НЕИЗМЕРИМ: 6.6.7 НЕИЗМЕРИМ (класс НАЗВАН: держатель_не_дожил_до_конца_окна, pid=${_w667_hpid:-?} comm=${_w667_hcomm:-?}): держатель обязан жить ВСЁ окно — величина без него неотличима от нагрузки, оборвавшейся посередине ([[control-payload-must-outlive-its-readlink]])"
+    elif [ -z "${_w667_req_ok:-}" ] || [ "${_w667_req_ok:-0}" -eq 0 ]; then
+        echo "НЕИЗМЕРИМ: 6.6.7 НЕИЗМЕРИМ (класс НАЗВАН: ни_один_запрос_не_получил_200, таймер result=${_w667_fres:--}, планировалось ${_w667_req_planned:-?}): ноль успешных запросов неотличим от ноля нагрузки, а не от нуля цены ([[positive-control-needs-result-sentinel]])"
+    elif [ -z "${_w490_evd:-}" ]; then
+        echo "НЕИЗМЕРИМ: 6.6.7 НЕИЗМЕРИМ (класс НАЗВАН: снимки границ окна не сняты): объём http_plaintext за окно не посчитан (см. соседнюю справочную строку №490) — цена на запрос не делится ни на что"
+    else
+        _w667_price=$(awk -v e="$_w490_evd" -v r="$_w667_req_ok" 'BEGIN{ printf "%.3f", (r>0)? e/r : 0 }')
+        echo "ИЗМЕРЕНО: 6.6.7 ИЗМЕРЕНО (цена http_plaintext НА ЗАПРОС, не порог): событий за окно ${_w490_evd} / успешных запросов ${_w667_req_ok} (из ${_w667_req_planned:-?} запланированных) = ${_w667_price} событий/запрос; держатель pid=${_w667_hpid:-?} comm=${_w667_hcomm:-?} дожил до конца окна, tracked_pids=${_w667_trk:--}, collector_up=${_w667_up:--}. Цена этого прогона сравнивается ВНЕШНЕ с парным (роль A/роль B, requests_planned ОБЯЗАН совпасть на обоих)"
     fi
 fi
 

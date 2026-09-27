@@ -1094,9 +1094,24 @@ rules:
   # Cgroup Namespace Escape (Sprint 33.0)
   # ============================================================================
 
-  # INERT WITHOUT BPF LSM (item 7 wave 6.6, #478): both event_type: cgroup_esc
-  # rules below need the cgroup_attach_task LSM hook; on a kernel without BPF LSM
-  # collector_up{collector="kmod"} = 0 and they cannot fire.
+  # INERT ON EVERY KERNEL, NOT ONLY WITHOUT BPF LSM (#494, 27.09.2026).
+  #
+  # Both event_type: cgroup_esc rules below are fed by bpf/cgroup.bpf.c, which
+  # attaches at SEC("lsm/cgroup_attach_task"). THERE IS NO SUCH LSM HOOK: the
+  # kernel's include/linux/lsm_hook_defs.h contains zero hooks whose name holds
+  # "cgroup" in v5.15 (242 hooks), v6.1 (247), v6.12 (272) or current master
+  # (281). cgroup_attach_task is an internal function of kernel/cgroup/cgroup.c,
+  # never an LSM hook, so the program cannot load anywhere — the stand's
+  # "cgroup_attach_task LSM hook not supported" is the hook missing, not the
+  # kernel being old.
+  #
+  # Enabling bpf in the kernel's active LSM list therefore does NOT revive these
+  # two rules (it does revive the 7 event_type: kmod rules, whose hooks —
+  # file_open, task_kill, socket_connect, bpf — do exist). Reviving cgroup_esc
+  # needs a different producer: a kprobe on the cgroup_attach_task symbol, or
+  # userspace comparison of the cgroup_id now carried by ordinary events.
+  # Until then these two are structurally inert and must be registered as such,
+  # not as "inert in this environment".
   # Process migrated to a cgroup outside its initial container cgroup hierarchy.
   # This is the classic cgroup escape technique: move the process into the root
   # cgroup before executing a command via cgroup v1 release_agent.

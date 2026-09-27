@@ -3,7 +3,7 @@
 # MITRE ATT&CK: T1014, T1547.006, T1574.006, T1620
 
 # INERT WITHOUT BPF LSM (declared, item 7 wave 6.6, #478): the 2 event_type: kmod
-# rules below (rootkit_kmod_unsigned_load, rootkit_kmod_suspicious_name) (and the 2 event_type: cgroup_esc rules in container-escape.yaml)
+# rules below (rootkit_kmod_unsigned_load, rootkit_kmod_suspicious_name)
 # are fed only by the LSM-hook readers in internal/collector/lsm.go. On a kernel
 # without BPF LSM (e.g. 5.15.0-191 on the test stand) neither reader starts,
 # collector_up{collector="kmod"} = 0, and these rules can never fire.

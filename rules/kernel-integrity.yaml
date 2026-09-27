@@ -3,8 +3,11 @@
 # Sprint 33.0: Kernel Module Load & Container Cgroup Escape
 
 # INERT WITHOUT BPF LSM (declared, item 7 wave 6.6, #478): the 5 event_type: kmod
-# rules below (and the 2 event_type: cgroup_esc rules in container-escape.yaml)
-# are fed only by the LSM-hook readers in internal/collector/lsm.go. On a kernel
+# rules below are fed only by the LSM-hook readers in internal/collector/lsm.go.
+# The 2 event_type: cgroup_esc rules in container-escape.yaml are a DIFFERENT
+# class and no longer named together with these: their hook
+# (lsm/cgroup_attach_task) does not exist in any kernel, so enabling bpf in the
+# active LSM list revives the kmod rules here and NOT those two (#494). On a kernel
 # without BPF LSM (e.g. 5.15.0-191 on the test stand) neither reader starts,
 # collector_up{collector="kmod"} = 0, and these rules can never fire.
 # Module loading is NOT undetected there: its live twin is on the syscall axis —

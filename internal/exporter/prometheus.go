@@ -384,6 +384,28 @@ var (
 		[]string{"map_name"},
 	)
 
+	// ConsumerStartDelay — интервал между запуском коллекторов и входом
+	// главного потребителя в свой цикл, в секундах (находка №473).
+	//
+	// ЗАЧЕМ ОТДЕЛЬНАЯ СЕРИЯ. Потери интервала [старт процесса, первый снимок)
+	// метка 6.6.1 печатает абсолютом первого снимка, и величина эта ШАТКАЯ: на
+	// одном бинаре подряд вышло 0 и 150 — она зависит от того, сколько событий
+	// успело прийти, пока `main` доходит до `for { select … }`. Судить правку
+	// порядка старта по такому числу значит судить по фазе фона
+	// (тот же класс, что [[gate-value-is-node-timer-phase]]).
+	//
+	// Эта серия измеряет ПРИЧИНУ, а не следствие: она детерминирована (не
+	// зависит от нагрузки), выставляется РОВНО ОДИН раз за жизнь процесса и
+	// потому сравнима между прогонами напрямую. Ноль означает, что потребитель
+	// уже читал очереди, когда первый коллектор начал в них писать, — то есть
+	// окно, в котором события падали в никуда, закрыто.
+	ConsumerStartDelay = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_consumer_start_delay_seconds",
+			Help: "Seconds between starting the collectors and the main event consumer entering its loop (finding #473: events that arrive in this interval can only be dropped).",
+		},
+	)
+
 	// TrackedPIDs tracks the number of processes currently monitored by the profiler.
 	TrackedPIDs = promauto.NewGauge(
 		prometheus.GaugeOpts{

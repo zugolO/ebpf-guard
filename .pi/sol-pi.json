@@ -2,7 +2,9 @@
 	"version": 1,
 	"actionFusion": true,
 	"observationPack": true,
-	"evidencePreservingReducer": false,
-	"onlineContextCompact": false,
+	"evidencePreservingReducer": true,
+	"evidencePreservingReducerProvider": "deepseek",
+	"evidencePreservingReducerModel": "deepseek-flash",
+	"onlineContextCompact": true,
 	"cacheWriteReadRatio": 12.5
 }

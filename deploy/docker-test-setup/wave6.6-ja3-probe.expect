@@ -1,0 +1,19 @@
+# wave6.6-ja3-probe.expect — ОЖИДАЕМЫЕ отпечатки нагрузки зонда №488.
+#
+# Величины НЕ назначены рукой: их пересчитывает из самой нагрузки офлайн-тест
+# internal/ja3/ja3_probe_payload_test.go тем же кодом, которым их считает
+# продукт (ja3.ComputeJA3/ComputeJA4 — ровно то, что зовёт
+# decodeTLSClientHello). Расхождение этого файла с нагрузкой роняет тест на
+# mac, без стенда ([[gate-offline-replay-on-mac]]).
+#
+# Зонд КОПИРУЕТ этот файл в архив ($ART/ja3-probe-expect.txt): эмиттер метки
+# 6.6.6 сверяет наблюдённое с ожидаемым И ПРИ ОФЛАЙН-РЕПЛЕЕ, где каталога
+# deploy/ рядом с архивом нет ([[verdict-input-must-be-computed-by-emitter]]).
+#
+# payload_sha256 — тождество байтов нагрузки: если нагрузку подменят, отпечатки
+# останутся «ожидаемыми» для ДРУГИХ байт, и сверка стала бы пустой
+# ([[archive-must-carry-binary-identity]] в применении к нагрузке).
+ja3=047bfa6321a7921f57d5b91d04dcedaf
+ja4=t12d3810ed599f3404_a37c57a66442
+payload_len=210
+payload_sha256=3e8ed4ef9ebb3c7cce6bbd232fc8f75971fff0c84fa18c4838ec4fb173d4355a

@@ -1866,6 +1866,33 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			collector.NewPriorityEventCollector(c, highPriorityEventCh, lowPriorityEventCh, bpStrategy, recordEventDrop, recordEventAccepted, slog.Default()))
 	}
 
+	// №473: ЗАПУСК КОЛЛЕКТОРОВ ОТЛОЖЕН ДО ГОТОВНОСТИ ПОТРЕБИТЕЛЯ.
+	//
+	// Здоровье коллекторов (`collector_up`, статус в /health) засевается ЗДЕСЬ,
+	// как раньше: материализация серий и их значения к порядку старта не
+	// относятся, а их перенос сдвинул бы момент, на который смотрят метки
+	// готовности (№446, [[empty-required-collectors-blocks-readiness]]).
+	// Сами `Start()` собираются в замыкание и исполняются НЕПОСРЕДСТВЕННО перед
+	// входом в цикл потребителя, в конце этой функции.
+	//
+	// ПОЧЕМУ. Раньше `Start()` уходили в горутины здесь, а единственный
+	// потребитель очередей входил в свой `for { select … }` на ~700 строк ниже,
+	// после подъёма энричера, канареек, дрейфа и HTTP-сервера. Всё, что
+	// коллекторы успевали прислать в этом промежутке, могло только пропасть:
+	// очередь конечна, читателя нет. Прогон 27.09.2026 заплатил 150 событий
+	// `syscall/ringbuf_to_router` ДО первого снимка, а соседний прогон на том же
+	// бинаре — ноль: величина зависит от фона, а не от кода
+	// ([[losses-before-first-snapshot-are-unmeasured]]).
+	//
+	// Слепое окно агента от переноса НЕ РАСТЁТ: до готовности пути алертов
+	// событие всё равно не было бы обработано — раньше оно попадало в очередь и
+	// выбрасывалось, теперь не собирается вовсе. Разница в том, что счётчик
+	// потерь перестаёт лгать о потере того, что и не было бы разобрано, а
+	// очередь на входе в цикл больше не приходит переполненной (переполненная
+	// продолжала терять уже НАСТОЯЩИЕ события, пока не сольётся).
+	collectorsStartedAt := time.Time{}
+	toStart := make([]collector.Collector, 0, len(priorityCollectors))
+
 	for _, c := range priorityCollectors {
 		// Only non-self-reporting collectors get the optimistic pre-Start default;
 		// self-reporting ones publish their real state from inside Start (№438).
@@ -1884,18 +1911,26 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			exporter.SetCollectorUp(c.Name(), false)
 			srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false})
 		}
-		go func(c collector.Collector) {
-			// The wrapper routes internally; this argument is unused by it.
-			if err := c.Start(ctx, lowPriorityEventCh); err != nil && ctx.Err() == nil {
-				slog.Error("collector error", slog.String("name", c.Name()), slog.Any("error", err))
-				exporter.SetCollectorUp(c.Name(), false)
-				srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false, Error: err.Error()})
-				startupErrCh <- struct {
-					name string
-					err  error
-				}{c.Name(), err}
-			}
-		}(c)
+		toStart = append(toStart, c)
+	}
+
+	// Собственно запуск — одно место, вызывается перед циклом потребителя.
+	startCollectors := func() {
+		collectorsStartedAt = time.Now()
+		for _, c := range toStart {
+			go func(c collector.Collector) {
+				// The wrapper routes internally; this argument is unused by it.
+				if err := c.Start(ctx, lowPriorityEventCh); err != nil && ctx.Err() == nil {
+					slog.Error("collector error", slog.String("name", c.Name()), slog.Any("error", err))
+					exporter.SetCollectorUp(c.Name(), false)
+					srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false, Error: err.Error()})
+					startupErrCh <- struct {
+						name string
+						err  error
+					}{c.Name(), err}
+				}
+			}(c)
+		}
 	}
 
 	// Open question 4 (№328), wave 6.3 item 4: surface per-collector
@@ -2608,6 +2643,22 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 		}
 	}()
+
+	// №473: коллекторы стартуют ЗДЕСЬ — путь алертов собран, потребитель входит
+	// в цикл следующей строкой. Ширина интервала «пишут, а читателя нет»
+	// публикуется серией и печатается в журнал: она выставляется РОВНО ОДИН раз
+	// за жизнь процесса, поэтому читается снимком, а не дельтой
+	// ([[losses-before-first-snapshot-are-unmeasured]]: дельты этого интервала
+	// не видят по построению). Занятость очередей печатается рядом: ноль
+	// величины при непустой очереди означал бы, что порядок починен, а потери
+	// пришли откуда-то ещё.
+	startCollectors()
+	consumerStartDelay := time.Since(collectorsStartedAt)
+	exporter.ConsumerStartDelay.Set(consumerStartDelay.Seconds())
+	slog.Info("event consumer entering loop",
+		slog.Duration("consumer_start_delay", consumerStartDelay),
+		slog.Int("queued_high", len(highPriorityEventCh)),
+		slog.Int("queued_low", len(lowPriorityEventCh)))
 
 	for {
 		select {

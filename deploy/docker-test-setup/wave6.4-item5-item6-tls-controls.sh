@@ -31,8 +31,9 @@
 # тумблер, что W63_BASELINE_CONTROLS у item 3, стар архив без этой правки не
 # ломается).
 #
-# Выход: $W64_ART/tls-control-plaintext.txt (events_delta=/manifest_alerts=
-# ЛИБО class=), $W64_ART/tls-control-container.txt (bound=/identity_match=/
+# Выход: $W64_ART/tls-control-plaintext.txt (events_delta=/manifest_alerts=/
+# manifest_alerts_delta=/manifest_alerts_since=/cut_epoch=/dedup_delta=/
+# ratelimit_delta= ЛИБО class=; три последние — ось подавления, №493), $W64_ART/tls-control-container.txt (bound=/identity_match=/
 # event= ЛИБО class=) — формат, который уже читают 6.4.3/6.4.4.
 
 set +e +o pipefail
@@ -92,6 +93,40 @@ _w64_alerts_rule() {
     j=$(curl -s --max-time 30 -H "Authorization: Bearer $W64_TOKEN" "$W64_API/api/v1/alerts?limit=200000" 2>/dev/null)
     printf '%s' "$j" | jq -e . >/dev/null 2>&1 || { echo ""; return; }
     printf '%s' "$j" | jq --arg r "$1" '[.[] | select(.rule_id==$r or (.details.base_rule_id? == $r))] | length' 2>/dev/null
+}
+
+# Лимитер по правилу (№493). Третий слой подавления после дедупа: 10 алертов
+# на правило за 60 с ([[per-rule-rate-limit-ceiling]]). Контроль ставится ПОСЛЕ
+# окна атак, то есть в уже наполненный лимитер
+# ([[control-after-attacks-hits-filled-limiter]]), и без этого среза «алертов 0»
+# неотличимо от «алерт был и срезан потолком».
+_w64_ratelimited_rule() { _w64_metrics | awk -v r="$1" '$0 ~ /^ebpf_guard_alerts_ratelimited_by_rule_total\{/ && index($0, "rule_id=\"" r "\"") {print $NF+0; f=1} END{if(!f) print 0}'; }
+
+# Алерты правила СТРОГО ПОСЛЕ момента $2 (эпоха с дробной частью). Граница —
+# тот же предикат `w626ts`, что у 6.2.6/6.2.9.F.3: точное сравнение с дробными
+# секундами, без усечения до секунды ([[store-window-jq-truncates-to-second]] —
+# усечение втянуло бы в отсечку алерты той же секунды ДО обмена).
+_w64_alerts_rule_since() {
+    local j
+    j=$(curl -s --max-time 30 -H "Authorization: Bearer $W64_TOKEN" "$W64_API/api/v1/alerts?limit=200000" 2>/dev/null)
+    printf '%s' "$j" | jq -e . >/dev/null 2>&1 || { echo ""; return; }
+    printf '%s' "$j" | jq --arg r "$1" --argjson t "$2" '
+        def w626ts: (.timestamp | capture("^(?<i>[^.]+)(\\.(?<f>[0-9]+))?Z$")) as $c
+            | ($c.i + "Z" | fromdateiso8601) + (($c.f // "0") | ("0." + .) | tonumber);
+        [.[] | select((.rule_id == $r or (.details.base_rule_id? == $r)) and (w626ts >= $t))] | length' 2>/dev/null
+}
+
+# Эпоха с дробной частью. GNU date умеет %N; на дате без %N (busybox) строка
+# приходит с буквальным «N», и тогда берётся целая секунда МИНУС 1 — отсечка
+# смещается НАЗАД, то есть в худшую для вердикта сторону (лишний алерт может
+# войти), но никогда не отрезает свой собственный.
+_w64_epoch_frac() {
+    local e
+    e=$(date -u +%s.%N 2>/dev/null)
+    case "$e" in
+        *N*|'') printf '%s' "$(( $(date -u +%s) - 1 ))" ;;
+        *) printf '%s' "$e" ;;
+    esac
 }
 
 # ── ПОИМЁННАЯ ПРИВЯЗКА (№453). Оба контроля судили себя ГЛОБАЛЬНЫМ гейджем
@@ -196,8 +231,19 @@ _w64_item5() {
     fi
     echo "  item5: привязка К СВОЕМУ держателю подтверждена за ${waited}с (журнал: attached TLS uprobes pid=$srv_pid)"
 
-    local ev0 ev1
+    # №493: контроль печатает ПЯТЬ величин, а не две. Прежние две (рост
+    # событий и алерты манифеста ЗА ВЕСЬ СТОР) не различали «детекта нет» и
+    # «детект был и подавлен»: у соседнего item 6 эта ось есть с №455, а здесь
+    # её не было, и 6 событий при нуле алертов читались как продуктовый провал
+    # ([[control-643-has-no-suppression-axis]], [[dedup-is-third-suppression-layer]]).
+    local ev0 ev1 dd0 dd1 rl0 rl1 al0 al1 t_ex
     ev0=$(_w64_events_tls)
+    dd0=$(_w64_dedup_rule tls_http_basic_auth)
+    rl0=$(_w64_ratelimited_rule tls_http_basic_auth)
+    al0=$(_w64_alerts_rule tls_http_basic_auth)
+    # Отсечка берётся ДО обмена: изолированная дельта стора считается по ней, а
+    # не по «всему стору» ([[metric-window-lower-bound-leaks-launcher]]).
+    t_ex=$(_w64_epoch_frac)
 
     # Обмен: платит manifest-правило tls_http_basic_auth
     # (rules/tls-patterns.yaml:19..29) — предикат "содержит 'Authorization:
@@ -237,12 +283,34 @@ _w64_item5() {
         return
     fi
 
+    # ── ОСЬ ПОДАВЛЕНИЯ (№493). Три величины, каждая — свой слой:
+    #    dedup_delta   — дедуп {rule_id,pid,comm}, стоит ПЕРЕД лимитером;
+    #    ratelimit_delta — потолок 10 алертов/правило/60 с;
+    #    manifest_alerts_since — изолированная дельта стора ПО ОТСЕЧКЕ, а не
+    #    «весь стор»: именно она отвечает на вопрос постановки «дал ли ЭТОТ
+    #    обмен алерт», и именно её читает эмиттер 6.4.3.
+    dd1=$(_w64_dedup_rule tls_http_basic_auth)
+    rl1=$(_w64_ratelimited_rule tls_http_basic_auth)
+    local since dd_delta rl_delta al_delta
+    since=$(_w64_alerts_rule_since tls_http_basic_auth "$t_ex")
+    _w64_is_num "$dd0" && _w64_is_num "$dd1" && dd_delta=$(( dd1 - dd0 ))
+    _w64_is_num "$rl0" && _w64_is_num "$rl1" && rl_delta=$(( rl1 - rl0 ))
+    _w64_is_num "$al0" && al_delta=$(( hit - al0 ))
+
     {
         echo "events_delta=$ev_delta"
+        # manifest_alerts — ПРЕЖНИЙ ключ и прежняя величина (весь стор): его
+        # читают эмиттеры старых архивов, и переопределять смысл имени нельзя
+        # ([[f6b-table-indexed-by-limiter-cut]] — то же про «одно имя, две
+        # величины»). Изолированная величина приходит ПОД СВОИМ именем.
         echo "manifest_alerts=$hit"
+        echo "manifest_alerts_delta=${al_delta:-НЕИЗМЕРИМО}"
+        echo "manifest_alerts_since=${since:-НЕИЗМЕРИМО}"
+        echo "cut_epoch=$t_ex"
+        echo "dedup_delta=${dd_delta:-НЕИЗМЕРИМО}"
+        echo "ratelimit_delta=${rl_delta:-НЕИЗМЕРИМО}"
     } > "$out"
-    echo "  item5: events_delta=$ev_delta, manifest_alerts(tls_http_basic_auth)=$hit"
-    echo "  ⚠ item5 сверяет манифест ЗА ВЕСЬ СТОР, без отсечки по времени начала обмена — при повторном запуске контроля в том же архиве старые срабатывания tls_http_basic_auth (если были) считаются тоже; на одиночном заходе это не занижает и не завышает вердикт 6.4.3, но не читать эту величину как строго изолированную дельту"
+    echo "  item5: events_delta=$ev_delta, manifest_alerts(весь стор)=$hit, за обмен по отсечке=${since:-НЕИЗМЕРИМО}, дельта стора=${al_delta:-НЕИЗМЕРИМО}, срез дедупа=${dd_delta:-НЕИЗМЕРИМО}, срез лимитера=${rl_delta:-НЕИЗМЕРИМО}"
 }
 
 # ─── ITEM 6: контейнерный случай (mount-ns пода, находка №380) ────────────

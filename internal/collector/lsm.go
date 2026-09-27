@@ -728,7 +728,11 @@ func (c *KmodCollector) parseKmodOrFallback(raw []byte) (*types.Event, error) {
 			if err != nil {
 				return nil, fmt.Errorf("kmod: lsm audit event: %w", err)
 			}
-			if logErr := c.auditLogger.Log(ae.toAuditEntry()); logErr != nil {
+			entry := ae.toAuditEntry()
+			// Хвост пункта 8 ревизии 6.6: cgroup id по смещению, мимо зеркала
+			// (его размер 107 гейтит разбор); 0 на записи старого объекта.
+			entry.CgroupID = bpf.LSMAuditCgroupIDFromRecord(raw)
+			if logErr := c.auditLogger.Log(entry); logErr != nil {
 				c.logger.Warn("kmod: audit log write failed", "error", logErr)
 			}
 		}

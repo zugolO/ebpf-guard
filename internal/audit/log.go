@@ -25,6 +25,10 @@ type Entry struct {
 	TargetPID uint32    `json:"target_pid,omitempty"` // signal target PID (task_kill only)
 	Path      string    `json:"path,omitempty"`      // file path (file_open only)
 	UID       uint32    `json:"uid,omitempty"`       // effective UID of the acting process
+	// CgroupID is the in-kernel cgroup id of the acting process (lsm_audit
+	// entries from a BPF object carrying it); omitted when 0, which means
+	// «no cgroup id», never «cgroup zero».
+	CgroupID uint64 `json:"cgroup_id,omitempty"`
 }
 
 // Logger writes enforcement audit entries to an append-only JSONL file.

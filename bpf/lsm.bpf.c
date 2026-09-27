@@ -175,6 +175,7 @@ int BPF_PROG(lsm_file_open, struct file *file)
 			ae->action       = LSM_ACTION_DENY;
 			ae->hook         = LSM_HOOK_FILE_OPEN;
 			ae->sig          = 0;
+			ae->cgroup_id    = bpf_get_current_cgroup_id(); /* хвост п. 8 ревизии 6.6 */
 			bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
 			bpf_probe_read_kernel_str(&ae->path, sizeof(ae->path), path_buf);
 			bpf_ringbuf_submit(ae, 0);
@@ -255,6 +256,7 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 				ae->action       = LSM_ACTION_DENY;
 				ae->hook         = LSM_HOOK_SOCKET_CONNECT;
 				ae->sig          = 0;
+				ae->cgroup_id    = bpf_get_current_cgroup_id(); /* хвост п. 8 ревизии 6.6 */
 				bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
 				__builtin_memset(&ae->path, 0, sizeof(ae->path));
 				bpf_ringbuf_submit(ae, 0);
@@ -283,6 +285,7 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 		ae->action       = LSM_ACTION_DENY;
 		ae->hook         = LSM_HOOK_SOCKET_CONNECT;
 		ae->sig          = 0;
+		ae->cgroup_id    = bpf_get_current_cgroup_id(); /* хвост п. 8 ревизии 6.6 */
 		bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
 		__builtin_memset(&ae->path, 0, sizeof(ae->path));
 		bpf_ringbuf_submit(ae, 0);
@@ -315,6 +318,7 @@ int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *i
 		ae->action       = LSM_ACTION_AUDIT;
 		ae->hook         = LSM_HOOK_TASK_KILL;
 		ae->sig          = (__u8)sig;
+		ae->cgroup_id    = bpf_get_current_cgroup_id(); /* хвост п. 8 ревизии 6.6 */
 		bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
 		__builtin_memset(&ae->path, 0, sizeof(ae->path));
 		bpf_ringbuf_submit(ae, 0);

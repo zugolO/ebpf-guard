@@ -61,6 +61,10 @@ const (
 	// collector's own struct. Without it an HTTP event whose process has exited
 	// before /proc/<pid>/cgroup is read loses its container identity.
 	HTTPEventCgroupIDOffset = 325
+	// LSMAuditEventCgroupIDOffset is offsetof(struct lsm_audit_event, cgroup_id)
+	// (bpf/common.h); sizeof = 115. The id is the CURRENT task's — the pid the
+	// record names (on task_kill the signal SENDER, not target_pid).
+	LSMAuditEventCgroupIDOffset = 107
 )
 
 // cgroupIDTail reads the trailing in-kernel cgroup id, 0 if the record lacks it.
@@ -93,6 +97,15 @@ func TLSCgroupIDFromRecord(raw []byte) uint64 {
 // carrying no cgroup id.
 func HTTPCgroupIDFromRecord(raw []byte) uint64 {
 	return cgroupIDTailAt(raw, HTTPEventCgroupIDOffset)
+}
+
+// LSMAuditCgroupIDFromRecord reads the trailing in-kernel cgroup id of a raw
+// struct lsm_audit_event record, 0 if the record is from a BPF object built
+// before it. Read by offset for the same reason as HTTPCgroupIDFromRecord:
+// lsmAuditEventSize (internal/collector) is derived from its mirror and gates
+// the parse, so a mirror field would make a 107-byte record unparseable.
+func LSMAuditCgroupIDFromRecord(raw []byte) uint64 {
+	return cgroupIDTailAt(raw, LSMAuditEventCgroupIDOffset)
 }
 
 // cgroupIDTailAt reads a trailing in-kernel cgroup id at a given offset. A record

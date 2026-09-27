@@ -3,8 +3,10 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"testing"
@@ -362,4 +364,51 @@ func TestPathBlocklist_HotReload(t *testing.T) {
 	assert.False(t, isBlocked("/etc/shadow"), "removed config path must be unblocked")
 	assert.True(t, isBlocked("/proc/sysrq-trigger"), "new config path must be blocked")
 	assert.True(t, isBlocked("/tmp/evil"), "dynamic path must survive hot-reload")
+}
+
+// TestKmodCollector_LSMAuditCgroupIDReachesAuditLog — хвост пункта 8 ревизии
+// 6.6. lsm_audit_event идёт в audit-журнал, а не в types.Event, поэтому поле
+// обязано доехать ДО ЖУРНАЛА, иначе оно мёртвый груз на проводе. Хвост пишется
+// ЛИТЕРАЛОМ 107, а не константой, которой читает разбор.
+func TestKmodCollector_LSMAuditCgroupIDReachesAuditLog(t *testing.T) {
+	build := func(n int) []byte {
+		raw := make([]byte, n)
+		binary.LittleEndian.PutUint32(raw[0:4], 11) // EVENT_TYPE_LSM_AUDIT
+		binary.LittleEndian.PutUint32(raw[12:16], 4242)
+		raw[24] = 1
+		copy(raw[27:43], "attacker\x00")
+		if n >= 115 {
+			binary.LittleEndian.PutUint64(raw[107:], 0xABCDEF01)
+		}
+		return raw
+	}
+	logOf := func(t *testing.T, raw []byte) map[string]any {
+		path := t.TempDir() + "/audit.jsonl"
+		al, err := audit.New(path)
+		require.NoError(t, err)
+		c, err := NewKmodCollector(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+		require.NoError(t, err)
+		c.WithAuditLogger(al)
+		ev, err := c.parseKmodOrFallback(raw)
+		require.NoError(t, err)
+		require.Nil(t, ev)
+		require.NoError(t, al.Close())
+		b, err := os.ReadFile(path)
+		require.NoError(t, err)
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(bytes.TrimSpace(b), &m))
+		return m
+	}
+
+	t.Run("new 115-byte record carries cgroup_id into the audit log", func(t *testing.T) {
+		m := logOf(t, build(115))
+		assert.Equal(t, float64(0xABCDEF01), m["cgroup_id"])
+		assert.Equal(t, float64(4242), m["pid"], "existing offsets unchanged")
+	})
+	t.Run("old 107-byte record still parses, cgroup_id omitted", func(t *testing.T) {
+		m := logOf(t, build(107))
+		_, present := m["cgroup_id"]
+		assert.False(t, present, "0 is «no cgroup id» and must not be printed as cgroup zero")
+		assert.Equal(t, float64(4242), m["pid"])
+	})
 }

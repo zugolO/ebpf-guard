@@ -24,6 +24,7 @@ func TestItem8CgroupTailOffsets(t *testing.T) {
 	require.Equal(t, 362, TLSEventCgroupIDOffset)
 	require.Equal(t, 580, TLSClientHelloCgroupIDOffset)
 	require.Equal(t, 325, HTTPEventCgroupIDOffset, "task 1 of the wave 6.6 revision follow-up list")
+	require.Equal(t, 107, LSMAuditEventCgroupIDOffset, "хвост пункта 8: lsm_audit_event")
 }
 
 func TestKmodEventCgroupTail(t *testing.T) {
@@ -161,4 +162,13 @@ func TestTLSClientHelloCgroupTail(t *testing.T) {
 		assert.Equal(t, uint64(0x7777777777777777), ch.Timestamp)
 		assert.Equal(t, uint32(99), ch.PID, "pid at 12 — an unpacked producer would put it at 16")
 	})
+}
+
+func TestLSMAuditCgroupTailFromRecord(t *testing.T) {
+	const wantID = 0x2468ACE013579BDF
+	full := make([]byte, 115)
+	binary.LittleEndian.PutUint64(full[107:], wantID)
+	assert.Equal(t, uint64(wantID), LSMAuditCgroupIDFromRecord(full))
+	assert.Zero(t, LSMAuditCgroupIDFromRecord(make([]byte, 107)), "107-byte record from an older object yields 0")
+	assert.Zero(t, LSMAuditCgroupIDFromRecord(nil))
 }

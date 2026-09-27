@@ -212,7 +212,21 @@ struct lsm_audit_event {
 	__u8  sig;            /* signal number (task_kill only, 0 otherwise) */
 	char  comm[16];
 	char  path[64];       /* file path (file_open only, NUL-terminated) */
+	/* Хвост пункта 8 ревизии 6.6: cgroup id ТЕКУЩЕЙ задачи, прочитанный В
+	 * ЯДРЕ. Текущая задача — та, чей pid записан выше (на task_kill это
+	 * ОТПРАВИТЕЛЬ сигнала, не target_pid), поэтому id и pid называют один
+	 * процесс — не случай №487 у cgroup_escape_event. Appended LAST: every
+	 * existing offset stays put and a 107-byte record from an older object
+	 * still parses. Событие идёт в audit-журнал, не в types.Event, поэтому
+	 * Go-сторона несёт id в audit.Entry. На ядре без BPF LSM путь инертен. */
+	__u64 cgroup_id;
 } __attribute__((packed));
+
+/* Offsets measured with offsetof on host clang (bpf/.vendor frontend). */
+#define LSM_AUDIT_EVENT_CGROUP_ID_OFFSET 107 /* sizeof(struct lsm_audit_event) = 115 */
+_Static_assert(__builtin_offsetof(struct lsm_audit_event, cgroup_id) == LSM_AUDIT_EVENT_CGROUP_ID_OFFSET,
+	       "struct lsm_audit_event layout moved: Go parser (internal/bpf/events.go) reads cgroup_id at this offset");
+_Static_assert(sizeof(struct lsm_audit_event) == 115, "struct lsm_audit_event size moved: update the Go offset constant");
 
 /*
  * struct proc_args - cached process command-line arguments.

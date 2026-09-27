@@ -88,6 +88,29 @@ var tlsAttachSuccessCounter = promauto.NewCounter(prometheus.CounterOpts{
 	Help: "Successful libssl uprobe attachments since start (monotonic; unlike tracked_pids it survives the process exiting).",
 })
 
+// tlsAttachReusedCounter counts scans that found a process whose libssl is
+// ALREADY instrumented and therefore attached no second set of uprobes
+// (находка №497). A uprobe opened with nil link options is attached to the
+// library INODE, system-wide — it already reports every process mapping that
+// file — but attachToPID used to be called once per PID, so N processes
+// sharing one libssl produced N identical link sets and N copies of every
+// SSL_read/SSL_write event. The duplication was invisible: it inflates
+// events_total{type="tls"} by a factor nothing publishes, which is what made
+// the event count of the 6.4.3 positive control uninterpretable (6 events on
+// the host against 3 for the same exchange in a pod, collect-6.6-japrobe).
+var tlsAttachReusedCounter = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "ebpf_guard_tls_attach_reused_total",
+	Help: "Processes adopted into the tracked set without attaching new uprobes because their libssl inode was already instrumented (system-wide uprobes, no duplicate events).",
+})
+
+// tlsAttachedLibsGauge reports how many DISTINCT libssl images carry uprobes.
+// Read next to tls_tracked_pids_total it answers "how many link sets does one
+// tracked PID cost" — the величина №497 removed.
+var tlsAttachedLibsGauge = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "ebpf_guard_tls_attached_libs",
+	Help: "Distinct libssl images (device:inode) with TLS uprobes attached.",
+})
+
 // tlsScanCandidatesGauge reports how many processes the last scan saw mapping
 // libssl. It separates "the scan ran and the node has no TLS" from "the scan
 // ran and attachment failed" without reading attach_failures.
@@ -109,13 +132,21 @@ var tlsScanCandidatesGauge = promauto.NewGauge(prometheus.GaugeOpts{
 //   - May miss data if buffer spans multiple calls
 //   - Does not capture Go's native TLS implementation
 type TLSCollector struct {
-	logger          *slog.Logger
-	objs            *tlsObjects
-	links           []link.Link
-	reader          *ringbuf.Reader
-	loadError       error
-	enabled         bool
-	libsslPaths     map[uint32]string // pid -> libssl path
+	logger      *slog.Logger
+	objs        *tlsObjects
+	links       []link.Link
+	reader      *ringbuf.Reader
+	loadError   error
+	enabled     bool
+	libsslPaths map[uint32]string // pid -> libssl path
+	// attachedLibs is the set of libssl images (device:inode of the file as
+	// resolved in the process's mount namespace) that already carry uprobes.
+	// Uprobes are attached per IMAGE, not per PID: a link opened with nil
+	// options fires for every process mapping that inode, so a second link set
+	// for the same image would only duplicate events (№497). Keyed on identity
+	// rather than on the path string because the same path means different
+	// files in different mount namespaces — which is the whole point of №380.
+	attachedLibs    map[string]bool
 	mu              sync.RWMutex
 	scanInterval    time.Duration
 	cleanupInterval time.Duration
@@ -244,6 +275,7 @@ func NewTLSCollector(logger *slog.Logger, enabled bool) (*TLSCollector, error) {
 		logger:          logger.With("collector", "tls"),
 		enabled:         enabled,
 		libsslPaths:     make(map[uint32]string),
+		attachedLibs:    make(map[string]bool),
 		scanInterval:    30 * time.Second,
 		cleanupInterval: 60 * time.Second,
 		maxDataSize:     256,
@@ -404,6 +436,13 @@ func (c *TLSCollector) Close() error {
 		l.Close()
 	}
 	c.links = nil
+	// №497: the set of instrumented images is the bookkeeping of those links —
+	// it must die with them. Left behind, it would report images as
+	// instrumented after their uprobes are gone (the gauge lying by the same
+	// shape collector_up lies by, [[collector-up-is-not-a-health-signal]]) and
+	// would make a restarted collector skip every attach as "already done".
+	c.attachedLibs = make(map[string]bool)
+	tlsAttachedLibsGauge.Set(0)
 	c.mu.Unlock()
 
 	if c.objs != nil {
@@ -642,14 +681,41 @@ func (c *TLSCollector) attachToPID(pid uint32, libsslPath string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// №497: one link set per libssl IMAGE, not per PID. The links below are
+	// opened with nil options, i.e. attached to the inode and fired for EVERY
+	// process that maps it — a second set for the same image adds no coverage
+	// and duplicates every event. The PID is still adopted by the caller (and
+	// still logged and counted, which is what the positive controls of items
+	// 5/6 read, №453), only the redundant attach is skipped.
+	if libKey := libraryIdentityKey(nsPath); libKey != "" {
+		if c.attachedLibs[libKey] {
+			tlsAttachReusedCounter.Inc()
+			return nil
+		}
+	}
+
+	// Links are published to c.links (and the image marked instrumented) only
+	// once ALL of them are up. A partial attach left behind would be counted as
+	// an instrumented image while one direction is blind — the exact shape of
+	// "the producer is half dead and nothing says so" this wave exists to
+	// close — and the retry on the next scan would duplicate whatever did
+	// attach.
+	var fresh []link.Link
+	closeFresh := func() {
+		for _, l := range fresh {
+			_ = l.Close()
+		}
+	}
+
 	// Attach SSL_write uprobe
 	if hasWrite && c.objs.TraceSslWrite != nil {
 		l, err := c.attachUprobe(nsPath, "SSL_write", c.objs.TraceSslWrite)
 		if err != nil {
 			tlsAttachFailuresCounter.WithLabelValues("attach_failed").Inc()
+			closeFresh()
 			return fmt.Errorf("attach SSL_write: %w", err)
 		}
-		c.links = append(c.links, l)
+		fresh = append(fresh, l)
 	}
 
 	// Attach SSL_read entry uprobe
@@ -657,9 +723,10 @@ func (c *TLSCollector) attachToPID(pid uint32, libsslPath string) error {
 		l, err := c.attachUprobe(nsPath, "SSL_read", c.objs.TraceSslReadEntry)
 		if err != nil {
 			tlsAttachFailuresCounter.WithLabelValues("attach_failed").Inc()
+			closeFresh()
 			return fmt.Errorf("attach SSL_read entry: %w", err)
 		}
-		c.links = append(c.links, l)
+		fresh = append(fresh, l)
 	}
 
 	// Attach SSL_read return uprobe
@@ -667,9 +734,16 @@ func (c *TLSCollector) attachToPID(pid uint32, libsslPath string) error {
 		l, err := c.attachUretprobe(nsPath, "SSL_read", c.objs.TraceSslReadRetFull)
 		if err != nil {
 			tlsAttachFailuresCounter.WithLabelValues("attach_failed").Inc()
+			closeFresh()
 			return fmt.Errorf("attach SSL_read ret: %w", err)
 		}
-		c.links = append(c.links, l)
+		fresh = append(fresh, l)
+	}
+
+	c.links = append(c.links, fresh...)
+	if libKey := libraryIdentityKey(nsPath); libKey != "" {
+		c.attachedLibs[libKey] = true
+		tlsAttachedLibsGauge.Set(float64(len(c.attachedLibs)))
 	}
 
 	return nil
@@ -764,6 +838,24 @@ func verifyLibraryIdentity(nsPath string, pid uint32, libsslPath string) error {
 	// libsslPath not found in maps anymore (process may have exited); not a
 	// mismatch, just nothing left to verify against.
 	return nil
+}
+
+// libraryIdentityKey returns "device:inode" for the mount-ns-resolved library
+// file — the identity a uprobe is actually attached to. An empty string means
+// the file could not be stat-ed or the platform does not expose the fields; the
+// caller then falls back to attaching, because a MISSING identity must never
+// silently skip instrumentation (a duplicate link set is waste, no link set is
+// blindness).
+func libraryIdentityKey(nsPath string) string {
+	info, err := os.Stat(nsPath)
+	if err != nil {
+		return ""
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", uint64(st.Dev), uint64(st.Ino))
 }
 
 // attachUprobe attaches a uprobe to the named symbol in libPath.
@@ -883,6 +975,12 @@ func (c *TLSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			// cookies. We overwrite the value bytes in-place so no secret ever leaves
 			// this function.
 			maskSensitiveHeaders(event.TLS.Data[:capturedLen])
+			// №496 (разбор №493): назвать ЧИСЛОМ то, что до сих пор было
+			// неотличимо от «правило не сматчило» — событие, у которого
+			// полезной нагрузки нет вовсе. Считается ПОСЛЕ applyMaxDataSize,
+			// то есть ровно по тому окну, которое увидит слой правил, и до
+			// отправки в роутер.
+			exporter.RecordTLSPayloadCapture(event.TLS.Direction, capturedLen)
 		}
 
 		// Debug logging

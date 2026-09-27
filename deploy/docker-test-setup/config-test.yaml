@@ -34,8 +34,10 @@ bpf:
     #   - /proc/* НЕ годится целиком: cred_proc_maps_mass_read
     #     (credential-access.yaml) стоит на prefix "/proc/" — денилист любого
     #     /proc-пути ослепил бы credential-детект;
-    #   - /var/log/ НЕ годится, хотя это пример из operations.md:
-    #     sigma_log_deletion алертит на любое касание /var/log/ (найдено P1-17);
+    #   - /var/log/ НЕ годится: sigma_log_deletion алертит на любое касание
+    #     /var/log/ (найдено P1-17). Раньше был примером в operations.md,
+    #     с волны 7 (item 2) там прямо помечен как "not safe", а этот
+    #     файл и config/config.yaml держат его в списке запрещённых;
     #   - /sys/devices/ целиком НЕ годится: container_escape_* смотрит на
     #     /sys/devices/virtual/net/ — поэтому сужено до /sys/devices/system/.
     #
@@ -264,6 +266,17 @@ collectors:
   # здесь). Пайплайн читает его ОДИН раз шагом 0в и печатает роль вслух.
   # Для парной величины 6.4.6 нужны ОБА прогона на ОДНОМ бинаре — тождество
   # сверяется по $ART/binary-identity.txt (№450).
+  # ФЛАГ JA3 ОБЪЯВЛЕН ЯВНО (волна 7, ревизия перед заходом). В конфиге его не
+  # было вовсе, а умолчание кода — false (config.go:2300
+  # collectors.tls_fingerprint.enabled). На архиве collect-6.6-ja3short его
+  # пришлось включать РУКАМИ прямо на стенде, то есть прогон уходил на замер с
+  # невидимым флагом: зонд 6.6.6 при нём печатает НЕ ЗАПРОШЕН, и «ноль JA3»
+  # неотличим от «коллектор мёртв» ([[gated-metric-cannot-carry-product-verdict]],
+  # [[run-intent-must-be-declared]]). Величина здесь — РЕШЕНИЕ ЗАХОДА: true
+  # обязателен для прогона, который несёт метку 6.6.6, и его цена в окне
+  # отдельным A/B не измерена.
+  tls_fingerprint:
+    enabled: false
   tls:
     enabled: true
     # Доезжают до коллектора с item 7 волны 6.4.B (до неё оба поля молча

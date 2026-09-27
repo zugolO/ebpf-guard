@@ -888,7 +888,7 @@ type KernelFilterConfig struct {
 	// SECURITY NOTE: comm names can be spoofed via prctl(PR_SET_NAME).
 	NoisyDaemonDenylist []string `mapstructure:"noisy_daemon_denylist"`
 
-	// PathDenylist lists file path prefixes (e.g. "/var/log/") whose
+	// PathDenylist lists file path prefixes (e.g. "/sys/devices/system/") whose
 	// open/read/write events are discarded in the kernel before they reach
 	// the ring buffer (P1-18b). Matching is longest-prefix, byte-wise, up to
 	// bpf.PathFilterPrefixLen (128) bytes.
@@ -901,11 +901,15 @@ type KernelFilterConfig struct {
 	// attack scenario (not just idle) after any change — see P1-18b
 	// acceptance criteria in ISSUES-attack-run-2026-08-03.md.
 	//
-	// Known-noisy directories worth considering: log rotation targets
-	// (/var/log), package manager caches, container runtime overlay churn.
-	// Do NOT add /proc, /etc, /root/.ssh, /usr/bin, or /var/www — these
-	// carry the file-based attack signal the plan explicitly protects
+	// Known-noisy directories worth considering: cpu/node topology polls
+	// (/sys/devices/system/), block device statistics (/sys/block/), tzdata
+	// re-reads (/usr/share/zoneinfo/), package manager caches, container
+	// runtime overlay churn.
+	// Do NOT add /proc, /etc, /root/.ssh, /usr/bin, /var/www, or /var/log/ —
+	// these carry the file-based attack signal the plan explicitly protects
 	// (fim_*/canary_*/cred_* rules, credential theft, container escape).
+	// /var/log/ specifically is not safe: sigma_log_deletion matches any
+	// access under /var/log/, so denying it removes that rule's only input.
 	PathDenylist []string `mapstructure:"path_denylist"`
 }
 

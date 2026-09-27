@@ -93,10 +93,15 @@ bpf:
     # criteria: after enabling, re-run an attack scenario (not just idle)
     # and confirm file-based detections are unchanged.
     #
-    # Do NOT list /proc, /etc, /root/.ssh, /usr/bin, or /var/www — these
-    # carry the file-based attack signal the detection rules depend on.
+    # Do NOT list /proc, /etc, /root/.ssh, /usr/bin, /var/www, or
+    # /var/log/ — these carry the file-based attack signal the detection
+    # rules depend on. /var/log/ specifically is not safe: sigma_log_deletion
+    # matches any access under /var/log/, so denying it removes that rule's
+    # only input.
     # Safe candidates are narrowly-scoped noise sources, e.g.:
-    #   - "/var/log/"   — log rotation churn
+    #   - "/sys/devices/system/"   — cpu/node topology, polled by monitoring
+    #   - "/sys/block/"            — block device statistics
+    #   - "/usr/share/zoneinfo/"   — tzdata, re-read by every process at startup
     path_denylist: []
 
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling

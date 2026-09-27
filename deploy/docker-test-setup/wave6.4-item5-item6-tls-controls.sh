@@ -102,6 +102,29 @@ _w64_alerts_rule() {
 # неотличимо от «алерт был и срезан потолком».
 _w64_ratelimited_rule() { _w64_metrics | awk -v r="$1" '$0 ~ /^ebpf_guard_alerts_ratelimited_by_rule_total\{/ && index($0, "rule_id=\"" r "\"") {print $NF+0; f=1} END{if(!f) print 0}'; }
 
+# Ось ПРОДЮСЕРА (№496, разбор №493). Четыре величины одной серии
+# ebpf_guard_tls_payload_capture_total{direction,result}: событие, у которого
+# захват нагрузки не удался (result="empty"), доезжает до слоя правил с ПУСТОЙ
+# нагрузкой, но считается в events_total как полноценное — и «нагрузка пришла,
+# ни одно правило не подошло» читается снаружи ровно так же, как «нагрузки не
+# было вовсе». Снимается ОДНИМ проходом по одному снимку: четыре отдельных
+# curl'а дали бы четыре разных момента. Пустая строка = серии нет вовсе
+# (бинарь до №496), и это НЕ ноль ([[gated-metric-cannot-carry-product-verdict]]).
+_w64_payload_quad() {
+    _w64_metrics | awk '
+        /^ebpf_guard_tls_payload_capture_total\{/ {
+            f = 1; v = $NF + 0
+            if (index($0, "direction=\"write\"")) {
+                if (index($0, "result=\"captured\"")) wc += v
+                else if (index($0, "result=\"empty\"")) we += v
+            } else if (index($0, "direction=\"read\"")) {
+                if (index($0, "result=\"captured\"")) rc += v
+                else if (index($0, "result=\"empty\"")) re += v
+            }
+        }
+        END { if (f) printf "%d %d %d %d", wc, we, rc, re; else print "" }'
+}
+
 # Алерты правила СТРОГО ПОСЛЕ момента $2 (эпоха с дробной частью). Граница —
 # тот же предикат `w626ts`, что у 6.2.6/6.2.9.F.3: точное сравнение с дробными
 # секундами, без усечения до секунды ([[store-window-jq-truncates-to-second]] —
@@ -238,6 +261,8 @@ _w64_item5() {
     # ([[control-643-has-no-suppression-axis]], [[dedup-is-third-suppression-layer]]).
     local ev0 ev1 dd0 dd1 rl0 rl1 al0 al1 t_ex
     ev0=$(_w64_events_tls)
+    local pc0 pc1
+    pc0=$(_w64_payload_quad)
     dd0=$(_w64_dedup_rule tls_http_basic_auth)
     rl0=$(_w64_ratelimited_rule tls_http_basic_auth)
     al0=$(_w64_alerts_rule tls_http_basic_auth)
@@ -253,6 +278,7 @@ _w64_item5() {
         | openssl s_client -quiet -connect "127.0.0.1:$port" >"$work/client.log" 2>&1
     sleep 5
     ev1=$(_w64_events_tls)
+    pc1=$(_w64_payload_quad)
     kill "$srv_pid" 2>/dev/null
 
     if ! _w64_is_num "$ev0" || ! _w64_is_num "$ev1"; then
@@ -297,6 +323,20 @@ _w64_item5() {
     _w64_is_num "$rl0" && _w64_is_num "$rl1" && rl_delta=$(( rl1 - rl0 ))
     _w64_is_num "$al0" && al_delta=$(( hit - al0 ))
 
+    # №496: ось продюсера считается ТОЛЬКО когда обе стороны — числа; иначе
+    # печатается класс, а не ноль.
+    local pay_axis="НЕТ_СЕРИИ" pay_cap="НЕИЗМЕРИМО" pay_empty="НЕИЗМЕРИМО" pay_detail="НЕИЗМЕРИМО"
+    if [ -n "$pc0" ] && [ -n "$pc1" ]; then
+        # shellcheck disable=SC2086
+        set -- $pc0; local wc0=$1 we0=$2 rc0=$3 re0=$4
+        # shellcheck disable=SC2086
+        set -- $pc1; local wc1=$1 we1=$2 rc1=$3 re1=$4
+        pay_axis="есть"
+        pay_cap=$(( (wc1 - wc0) + (rc1 - rc0) ))
+        pay_empty=$(( (we1 - we0) + (re1 - re0) ))
+        pay_detail="write_captured=$(( wc1 - wc0 )),write_empty=$(( we1 - we0 )),read_captured=$(( rc1 - rc0 )),read_empty=$(( re1 - re0 ))"
+    fi
+
     {
         echo "events_delta=$ev_delta"
         # manifest_alerts — ПРЕЖНИЙ ключ и прежняя величина (весь стор): его
@@ -309,8 +349,15 @@ _w64_item5() {
         echo "cut_epoch=$t_ex"
         echo "dedup_delta=${dd_delta:-НЕИЗМЕРИМО}"
         echo "ratelimit_delta=${rl_delta:-НЕИЗМЕРИМО}"
+        # Ось ПРОДЮСЕРА (№496): сколько событий обмена донесли до слоя правил
+        # хоть один байт нагрузки, и сколько пришли пустыми. Без неё «событие
+        # есть, детекта нет» имеет две причины, неразличимые снаружи.
+        echo "payload_axis=$pay_axis"
+        echo "payload_captured_delta=$pay_cap"
+        echo "payload_empty_delta=$pay_empty"
+        echo "payload_detail=$pay_detail"
     } > "$out"
-    echo "  item5: events_delta=$ev_delta, manifest_alerts(весь стор)=$hit, за обмен по отсечке=${since:-НЕИЗМЕРИМО}, дельта стора=${al_delta:-НЕИЗМЕРИМО}, срез дедупа=${dd_delta:-НЕИЗМЕРИМО}, срез лимитера=${rl_delta:-НЕИЗМЕРИМО}"
+    echo "  item5: events_delta=$ev_delta, manifest_alerts(весь стор)=$hit, за обмен по отсечке=${since:-НЕИЗМЕРИМО}, дельта стора=${al_delta:-НЕИЗМЕРИМО}, срез дедупа=${dd_delta:-НЕИЗМЕРИМО}, срез лимитера=${rl_delta:-НЕИЗМЕРИМО}, нагрузка захвачена=${pay_cap}/пусто=${pay_empty} (ось: $pay_axis)"
 }
 
 # ─── ITEM 6: контейнерный случай (mount-ns пода, находка №380) ────────────

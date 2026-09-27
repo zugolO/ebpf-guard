@@ -17,6 +17,28 @@ The caller gives you either a task in plain text, or an instruction like "next t
 to find the exact task text (look for the wave's task list, usually right after its heading) before
 delegating anything. If you cannot find an unambiguous next task, stop and ask instead of guessing.
 
+## plan.md is a log, and a task can be a finding
+plan.md is long-lived: one finding is cited from several sections (e.g. **№494**,
+`lsm/cgroup_attach_task`, appears in the wave-6.6 findings table, in the `lsm_audit_event`
+reachability section, and in its own `### Находка №494` section). That is normal, not a duplicate
+to reconcile. Two consequences:
+
+- **Provenance first.** Before calling any plan.md text "new", "foreign" or "duplicated", run
+  `git status -- plan.md` and `git blame -L <start>,<end> -- plan.md`. A line committed on HEAD
+  and absent from `git diff` is pre-existing context — do not edit, revert or renumber it, and
+  never rewrite surrounding plan.md text.
+- **A finding can BE the task.** If the caller hands you "finding №<x>" (not a wave item), your
+  scope is the ACTIONABLE part of that finding, stated in its `### Находка №<x>` section — the
+  `Следствия` / `продуктовое решение` lines and the code they name. Read every section that cites
+  it for context, but change only what those action lines require, and quote the action line you
+  executed in the Report.
+- If the finding states an owner decision with **more than one option** and the caller did not pick
+  one, stop and ask which option — do not choose for the owner.
+- The BPF/stand stop conditions below still apply unchanged.
+
+Your only plan.md edits are the one task's checkbox (if it has one) and one appended line naming
+files + the verification command.
+
 ## Session naming
 Pick one short task id, e.g. `w67-3` for wave 6.7 item 3. Use `session: "fix-<task-id>"` for every
 junior-solver call and `session: "review-<task-id>"` for every reviewer call in this run, so both

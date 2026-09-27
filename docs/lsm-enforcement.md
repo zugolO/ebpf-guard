@@ -10,7 +10,7 @@ Traditional kprobe-based enforcement can only react to events after they happen.
 2. **Block network connections** before they are established (`lsm/bpf_socket_connect`)
 3. **Audit and optionally block** process termination (`lsm/bpf_task_kill`)
 4. **Detect kernel module loads** before execution (`lsm/kernel_module_request`, `lsm/kernel_read_file`) — Sprint 33.0
-5. **Detect container cgroup escape** at the moment of cgroup migration (`lsm/cgroup_attach_task`) — Sprint 33.0
+5. **Detect container cgroup escape** at the moment of cgroup migration (`lsm/cgroup_attach_task`) — Sprint 33.0 — **NOT IMPLEMENTED: this hook does not exist in any kernel (#494).** `bpf/cgroup.bpf.c` cannot load anywhere, and the two `event_type: cgroup_esc` rules in `rules/container-escape.yaml` are structurally inert on every kernel. A live producer (kprobe on the `cgroup_attach_task` symbol, or a userspace `cgroup_id` comparison) is an open owner decision (plan item 8).
 
 ## Hook Summary
 
@@ -22,7 +22,7 @@ Traditional kprobe-based enforcement can only react to events after they happen.
 | `lsm/kernel_module_request` | `lsm.bpf.c` | Detect automatic module load requests | 33.0 |
 | `lsm/kernel_read_file` | `lsm.bpf.c` | Detect module file reads (insmod path) | 33.0 |
 | `tp/sched/sched_process_exec` | `lsm.bpf.c` | Record initial cgroup ID per PID at exec | 33.0 |
-| `lsm/cgroup_attach_task` | `cgroup.bpf.c` | Detect process migration to different cgroup | 33.0 |
+| `lsm/cgroup_attach_task` | `cgroup.bpf.c` | **Does not exist in any kernel (#494) — the program cannot load and the two `event_type: cgroup_esc` rules are structurally inert. No live producer yet (owner decision, item 8).** | 33.0 (intended) |
 
 ## Comparison: LSM vs kprobe Enforcement
 
@@ -279,14 +279,17 @@ MITRE ATT&CK: **T1547** (Boot or Logon Autostart Execution: Kernel Modules and E
 
 ### Container Cgroup Escape Detection
 
-`bpf/cgroup.bpf.c` implements `lsm/cgroup_attach_task`. At exec time, `lsm.bpf.c` records each PID's cgroup ID in `pid_initial_cgroup`. When `cgroup_attach_task` fires, it compares the destination cgroup ID to the recorded initial ID. Any divergence emits a `cgroup_escape_event` (type `EVENT_TYPE_CGROUP_ESC`) to the `cgroup_events` ring buffer.
+> **NOT IMPLEMENTED — STRUCTURALLY INERT ON EVERY KERNEL (#494, 27.09.2026).**
+> `bpf/cgroup.bpf.c` attaches at `SEC("lsm/cgroup_attach_task")`, but there is **no such LSM hook in any kernel**: `include/linux/lsm_hook_defs.h` contains zero hooks whose name holds "cgroup" (v5.15 = 242 hooks, v6.1 = 247, v6.12 = 272, current master = 281), and `cgroup_attach_task` is an internal function of `kernel/cgroup/cgroup.c`, never an LSM hook. The program therefore cannot load anywhere, and both `event_type: cgroup_esc` rules in `rules/container-escape.yaml` can never fire. Enabling `bpf` in the kernel's active LSM list does **not** change this (it revives the 7 `event_type: kmod` rules, whose hooks do exist). Reviving `cgroup_esc` requires a **different producer** — a kprobe on the `cgroup_attach_task` symbol, or a userspace comparison of the `cgroup_id` now carried by ordinary events — which is an open owner decision (plan item 8), not an environment fix. The design below is the original Sprint 33.0 description, kept as a specification of what such a producer would have to feed.
 
-This detects the **CVE-2022-0492** class of escapes:
+`bpf/cgroup.bpf.c` was intended to implement `lsm/cgroup_attach_task`. At exec time, `lsm.bpf.c` records each PID's cgroup ID in `pid_initial_cgroup`. When `cgroup_attach_task` fires, it compares the destination cgroup ID to the recorded initial ID. Any divergence emits a `cgroup_escape_event` (type `EVENT_TYPE_CGROUP_ESC`) to the `cgroup_events` ring buffer.
+
+This was meant to detect the **CVE-2022-0492** class of escapes:
 
 ```
 Container process
   → writes to /sys/fs/cgroup/memory/release_agent
-  → moves itself to root cgroup  ← DETECTED HERE by cgroup_attach_task
+  → moves itself to root cgroup  ← would be detected here, but no hook fires
   → triggers release_agent (executes as root on host)
 ```
 
@@ -297,15 +300,15 @@ Container process
 | `init_cgroup_id` | Cgroup ID recorded at exec time (container's cgroup) |
 | `new_cgroup_id` | Destination cgroup ID (root cgroup = 1) |
 
-**Detection rules** — `rules/container-escape.yaml`:
+**Detection rules** — `rules/container-escape.yaml` (both structurally inert on every kernel, #494):
 
 | Rule ID | Severity | Action | Description |
 |---------|----------|--------|-------------|
 | `container_escape_cgroup_migrate` | critical | alert | Any cgroup migration |
 | `container_escape_cgroup_to_root` | critical | **block** | Migration to root cgroup (ID=1) |
 
-The `block` action on `container_escape_cgroup_to_root` returns `-EPERM` from the LSM hook before the migration completes, preventing the release_agent technique entirely.
+**The `block` action on `container_escape_cgroup_to_root` is not live.** It would return `-EPERM` from the LSM hook before the migration completes, but since no hook fires the migration is neither detected nor blocked; the release_agent technique is currently not prevented by this feature, and the rule id stays declared `action: block` only as the intended behaviour for a future producer (owner decision, item 8).
 
 ### BPF Map Sharing
 
-`pid_initial_cgroup` is written by `lsm.bpf.c` (exec tracepoint) and read by `cgroup.bpf.c` (attach hook). The Go loader pins both maps to the same kernel map object so the write-at-exec / read-at-migrate pattern works across BPF object boundaries.
+`pid_initial_cgroup` is written by `lsm.bpf.c` (exec tracepoint) and read by `cgroup.bpf.c` (attach hook). The Go loader pins both maps to the same kernel map object so the write-at-exec / read-at-migrate pattern works across BPF object boundaries. Note the reader half never attaches: `cgroup.bpf.c`'s hook does not exist in any kernel (#494), so no read-at-migrate ever happens.

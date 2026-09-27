@@ -93,6 +93,31 @@ var (
 		[]string{"family"},
 	)
 
+	// TLSPayloadCapture splits payload-family TLS events by DIRECTION and by
+	// whether the uprobe actually captured any plaintext (находка №496, разбор
+	// №493). The BPF programs submit the event even when the userspace read
+	// came back empty — bpf_probe_read_user failed, or SSL_write was called
+	// with num <= 0 — and applyMaxDataSize then zeroes Data, so the rule layer
+	// is handed an EMPTY payload while events_total counts a full event.
+	//
+	// Without this series "событие есть, детекта нет" has two causes that read
+	// identically from outside: the payload arrived and matched no rule, or the
+	// payload never arrived at all. That ambiguity is exactly what made the
+	// positive control of label 6.4.3 unable to tell a product failure of the
+	// RULE layer from a product failure of the PRODUCER (6 events, 0 alerts,
+	// both suppression layers zero — collect-6.6-japrobe, 27.09.2026).
+	//
+	// A separate series rather than labels on events_total, for the reason
+	// TLSEventsByFamily states. All four series are materialized at init so a
+	// zero is a reading and never an absent series.
+	TLSPayloadCapture = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_tls_payload_capture_total",
+			Help: "Payload-family TLS events by direction (read/write) and capture result: captured (plaintext bytes reached the rule layer) or empty (the uprobe submitted an event with no payload).",
+		},
+		[]string{"direction", "result"},
+	)
+
 	// EventsDropped counts dropped events by collector and reason.
 	EventsDropped = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -597,7 +622,36 @@ const (
 	TLSFamilyUnknown = "unknown"
 )
 
+// TLS payload capture label values (see TLSPayloadCapture).
+const (
+	TLSDirectionWriteLabel = "write"
+	TLSDirectionReadLabel  = "read"
+	TLSCaptureCaptured     = "captured"
+	TLSCaptureEmpty        = "empty"
+)
+
+// RecordTLSPayloadCapture counts one payload-family TLS event under its
+// direction and capture result. capturedLen is the window applyMaxDataSize
+// computed — the very slice the rule layer will see — so "captured" here means
+// the rules got bytes, not merely that the kernel reserved a record.
+func RecordTLSPayloadCapture(direction types.TLSDirection, capturedLen uint32) {
+	dirLabel := TLSDirectionWriteLabel
+	if direction == types.TLSDirectionRead {
+		dirLabel = TLSDirectionReadLabel
+	}
+	result := TLSCaptureCaptured
+	if capturedLen == 0 {
+		result = TLSCaptureEmpty
+	}
+	TLSPayloadCapture.WithLabelValues(dirLabel, result).Inc()
+}
+
 func init() {
+	for _, dir := range []string{TLSDirectionWriteLabel, TLSDirectionReadLabel} {
+		for _, res := range []string{TLSCaptureCaptured, TLSCaptureEmpty} {
+			TLSPayloadCapture.WithLabelValues(dir, res)
+		}
+	}
 	TLSEventsByFamily.WithLabelValues(TLSFamilyPayload)
 	TLSEventsByFamily.WithLabelValues(TLSFamilyJA3)
 	TLSEventsByFamily.WithLabelValues(TLSFamilyUnknown)

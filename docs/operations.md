@@ -523,7 +523,7 @@ Before adding a prefix, grep the rule set for it — including any *broader* pre
 would cover it. The three above were chosen that way and are the list the test stand runs
 with. Two obvious-looking candidates did not survive that check:
 
-- `/var/log/` (this document's earlier example) is **not** safe: `sigma_log_deletion`
+- `/var/log/` is **not** safe: `sigma_log_deletion`
   matches any access under `/var/log/`, so denying it removes a detection rule's only
   input.
 - `/proc/...` is not safe at any depth: `cred_proc_maps_mass_read` is anchored on the

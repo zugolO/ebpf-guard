@@ -23,6 +23,7 @@ func TestItem8CgroupTailOffsets(t *testing.T) {
 	require.Equal(t, 319, DNSEventCgroupIDOffset)
 	require.Equal(t, 362, TLSEventCgroupIDOffset)
 	require.Equal(t, 580, TLSClientHelloCgroupIDOffset)
+	require.Equal(t, 325, HTTPEventCgroupIDOffset, "task 1 of the wave 6.6 revision follow-up list")
 }
 
 func TestKmodEventCgroupTail(t *testing.T) {
@@ -90,6 +91,23 @@ func TestTLSEventCgroupTailFromRecord(t *testing.T) {
 
 	assert.Zero(t, TLSCgroupIDFromRecord(make([]byte, 362)), "pre-item-8 record yields 0")
 	assert.Zero(t, TLSCgroupIDFromRecord(make([]byte, 4)))
+}
+
+func TestHTTPEventCgroupTailFromRecord(t *testing.T) {
+	const wantID = 0x1357924680ABCDEF
+	full := make([]byte, 333)
+	binary.LittleEndian.PutUint64(full[HTTPEventCgroupIDOffset:], wantID)
+	assert.Equal(t, uint64(wantID), HTTPCgroupIDFromRecord(full))
+
+	// The 325-byte record is the SHAPE http_plaintext actually produced until
+	// this task: parsing it must still succeed and yield 0, not garbage or an
+	// error — the collector's own binary.Read gate (httpEventRawSize) is
+	// unaffected because HTTPEventRaw was deliberately left untouched, exactly
+	// as TLSEventRaw was for the sibling above.
+	old := make([]byte, 325)
+	assert.Zero(t, HTTPCgroupIDFromRecord(old), "a record from a pre-task-1 object yields 0, not garbage")
+	assert.Zero(t, HTTPCgroupIDFromRecord(nil))
+	assert.Zero(t, HTTPCgroupIDFromRecord(make([]byte, 4)), "short header only")
 }
 
 func TestTLSClientHelloCgroupTail(t *testing.T) {

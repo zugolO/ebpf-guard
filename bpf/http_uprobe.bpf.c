@@ -66,7 +66,24 @@ struct http_event {
 	__u32 data_len;          /* Actual data length (may be > HTTP_DATA_MAX) */
 	__u32 captured_len;      /* Bytes actually captured (<= HTTP_DATA_MAX) */
 	__u8  data[HTTP_DATA_MAX]; /* Captured plaintext data */
+	/* Wave 6.6 revision item 8 (task 1 of the follow-up list): cgroup id of the
+	 * emitting task, read IN THE KERNEL, exactly as struct event carries it
+	 * (bpf/common.h) and as kmod/dns/tls got it in the same item. Appended
+	 * LAST so every existing offset stays put and a parser reading a record
+	 * from a BPF object built before this field still decodes everything it
+	 * knew. The producer here (an HTTP client/server read()/recv() call) is
+	 * the shortest-lived process of all the item-8 producers — exactly the
+	 * pid->pod race internal/k8s/enricher.go loses when /proc/<pid>/cgroup is
+	 * read after the process has already exited. */
+	__u64 cgroup_id;
 } __attribute__((packed));
+
+/* Offset measured with offsetof on host clang, not derived from the field list
+ * (the method bpf/common.h's struct event assert was built with). */
+#define HTTP_EVENT_CGROUP_ID_OFFSET 325 /* sizeof(struct http_event) = 333 */
+_Static_assert(__builtin_offsetof(struct http_event, cgroup_id) == HTTP_EVENT_CGROUP_ID_OFFSET,
+	       "struct http_event layout moved: Go parser (internal/bpf/events.go) reads cgroup_id at this offset");
+_Static_assert(sizeof(struct http_event) == 333, "struct http_event size moved: update the Go parser's offset constant");
 
 /* Ring buffer for plaintext HTTP events */
 struct {
@@ -92,6 +109,10 @@ static __always_inline void fill_http_process_info(struct http_event *e)
 
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->timestamp = bpf_ktime_get_ns();
+	/* Item 8 ревизии 6.6 (задача 1): cgroup id читается В ЯДРЕ, пока задача
+	 * ещё жива — восстановление pid->pod иначе промахивается на этом самом
+	 * короткоживущем продюсере. */
+	e->cgroup_id = bpf_get_current_cgroup_id();
 
 	task = (struct task_struct *)bpf_get_current_task();
 	/* №452: real_parent читается bpf_probe_read_kernel, а НЕ разыменованием.

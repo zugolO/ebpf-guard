@@ -55,6 +55,13 @@ const (
 	// there, and the offsets are asserted in C rather than described in a
 	// comment.
 	TLSClientHelloCgroupIDOffset = 580
+	// HTTPEventCgroupIDOffset is offsetof(struct http_event, cgroup_id)
+	// (bpf/http_uprobe.bpf.c); sizeof(struct http_event) = 333. Task 1 of the
+	// wave 6.6 revision follow-up list: item 8 named kmod/dns/tls but not this
+	// collector's own struct, even though its producer (an HTTP client/server
+	// read()/recv() call) is the shortest-lived of all of them — exactly the
+	// pid->pod race the field exists to close.
+	HTTPEventCgroupIDOffset = 325
 )
 
 // cgroupIDTail reads the trailing in-kernel cgroup id, 0 if the record lacks it.
@@ -75,6 +82,18 @@ func DNSCgroupIDFromRecord(raw []byte) uint64 {
 // struct tls_event record (wave 6.6 revision item 8), 0 if absent.
 func TLSCgroupIDFromRecord(raw []byte) uint64 {
 	return cgroupIDTailAt(raw, TLSEventCgroupIDOffset)
+}
+
+// HTTPCgroupIDFromRecord reads the trailing in-kernel cgroup id of a raw
+// struct http_event record (wave 6.6 revision follow-up, task 1), 0 if the
+// record is from a BPF object built before it. Read by offset rather than
+// added to HTTPEventRaw on purpose, exactly as TLSCgroupIDFromRecord is kept
+// out of TLSEventRaw: httpEventRawSize is derived from that mirror and gates
+// binary.Read in HTTPCollector.parseEvent, so a new mirror field would make a
+// record from an older BPF object fail to parse at all instead of simply
+// carrying no cgroup id.
+func HTTPCgroupIDFromRecord(raw []byte) uint64 {
+	return cgroupIDTailAt(raw, HTTPEventCgroupIDOffset)
 }
 
 // cgroupIDTailAt reads a trailing in-kernel cgroup id at a given offset. A record

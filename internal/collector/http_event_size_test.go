@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -58,6 +59,53 @@ func TestHTTPEventWireSize_MatchesBPFStruct(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "324")
 	require.Contains(t, err.Error(), "325")
+}
+
+// TestHTTPEventCgroupID_RoundTripsAndOldRecordStillParses — task 1 of the
+// wave 6.6 revision follow-up list. HTTPEventRaw is deliberately left
+// untouched (no CgroupID field, httpEventRawSize stays 325 — exactly what
+// TestHTTPEventWireSize_MatchesBPFStruct above pins), so a record that grew a
+// trailing cgroup_id still passes the same binary.Read gate, and a record of
+// the OLD 325-byte size still parses and yields CgroupID 0 rather than an
+// error — the failure mode this collector already lost a live run to once
+// (№471) is exactly "this record no longer parses at all".
+func TestHTTPEventCgroupID_RoundTripsAndOldRecordStillParses(t *testing.T) {
+	c := &HTTPCollector{logger: slog.Default()}
+
+	base := HTTPEventRaw{
+		Type:        uint32(types.EventHTTPPlaintext),
+		Timestamp:   1,
+		PID:         4242,
+		Direction:   0,
+		DataLen:     4,
+		CapturedLen: 4,
+	}
+	copy(base.Comm[:], "curl")
+	copy(base.Data[:], "GET ")
+
+	t.Run("old 325-byte record parses and yields CgroupID 0", func(t *testing.T) {
+		var buf bytes.Buffer
+		require.NoError(t, binary.Write(&buf, binary.LittleEndian, &base))
+		require.Equal(t, 325, buf.Len())
+
+		ev, err := c.parseEvent(buf.Bytes())
+		require.NoError(t, err, "a pre-task-1 record must still decode everything it knew")
+		require.Zero(t, ev.CgroupID, "absent is 0, and 0 means «no cgroup id», never «cgroup zero»")
+		require.Equal(t, uint32(4242), ev.PID)
+	})
+
+	t.Run("new 333-byte record carries the cgroup id through to types.Event", func(t *testing.T) {
+		var buf bytes.Buffer
+		require.NoError(t, binary.Write(&buf, binary.LittleEndian, &base))
+		raw := buf.Bytes()
+		raw = append(raw, make([]byte, 8)...)
+		binary.LittleEndian.PutUint64(raw[bpf.HTTPEventCgroupIDOffset:], 0xC0FFEE)
+
+		ev, err := c.parseEvent(raw)
+		require.NoError(t, err)
+		require.Equal(t, uint64(0xC0FFEE), ev.CgroupID)
+		require.Equal(t, uint32(4242), ev.PID, "existing offsets unchanged")
+	})
 }
 
 // TestTLSEventWireSize_MatchesBPFStruct — сиблинг №471: литерал 340 пришёл

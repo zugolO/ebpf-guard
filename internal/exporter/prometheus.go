@@ -113,7 +113,7 @@ var (
 	TLSPayloadCapture = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ebpf_guard_tls_payload_capture_total",
-			Help: "Payload-family TLS events by direction (read/write) and capture result: captured (plaintext bytes reached the rule layer) or empty (the uprobe submitted an event with no payload).",
+			Help: "Payload-family TLS events by direction (read/write) and capture result: captured (plaintext bytes reached the rule layer), empty_zero_len (the call carried no bytes at all — SSL_write(num<=0)), empty_read_failed (the call carried bytes but bpf_probe_read_user captured none).",
 		},
 		[]string{"direction", "result"},
 	)
@@ -627,28 +627,66 @@ const (
 	TLSDirectionWriteLabel = "write"
 	TLSDirectionReadLabel  = "read"
 	TLSCaptureCaptured     = "captured"
-	TLSCaptureEmpty        = "empty"
+	// TLSCaptureEmptyZeroLen — событие, у которого НЕЧЕГО было доносить:
+	// ядро увидело SSL_write(ssl, buf, num<=0) (или SSL_read с нулевой
+	// длиной), записало data_len=0 и отдало запись. Это НЕ дефект продюсера:
+	// таких вызовов у openssl большинство — они гоняют рукопожатие и флаш.
+	//
+	// Величина, ради которой разрез и заведён (№504, ebaka2, 28.09.2026,
+	// bpftrace на том же libssl-иноде, тот же обмен, что у контроля item 5):
+	//   SSL_write вызван 5 раз — 4 раза с num=0 и один раз с num=53.
+	// То есть 4 из 5 записей семейства payload пусты ПО ПОСТРОЕНИЮ. Пока обе
+	// причины считались одним словом "empty", эти четыре читались как отказ
+	// bpf_probe_read_user, и эмиттер 6.4.3 объявлял по ним ПРОДУКТОВЫЙ дефект
+	// продюсера ([[tls-event-can-arrive-with-empty-payload]]).
+	TLSCaptureEmptyZeroLen = "empty_zero_len"
+	// TLSCaptureEmptyReadFailed — ядро видело num > 0, но захватило НОЛЬ байт:
+	// bpf_probe_read_user не прочитал пользовательский буфер. ЭТО и есть
+	// дефект продюсера, и только он даёт право на продуктовый вердикт.
+	TLSCaptureEmptyReadFailed = "empty_read_failed"
 )
 
 // RecordTLSPayloadCapture counts one payload-family TLS event under its
 // direction and capture result. capturedLen is the window applyMaxDataSize
 // computed — the very slice the rule layer will see — so "captured" here means
 // the rules got bytes, not merely that the kernel reserved a record.
-func RecordTLSPayloadCapture(direction types.TLSDirection, capturedLen uint32) {
+//
+// kernelDataLen is the length the KERNEL saw on the call (struct tls_event's
+// data_len: `num` at SSL_write entry, the return value at SSL_read exit). It
+// is what separates the two empties, and it must come from the record rather
+// than from the post-mask window — see the constants above.
+func RecordTLSPayloadCapture(direction types.TLSDirection, capturedLen uint32, kernelDataLen uint32) {
 	dirLabel := TLSDirectionWriteLabel
 	if direction == types.TLSDirectionRead {
 		dirLabel = TLSDirectionReadLabel
 	}
 	result := TLSCaptureCaptured
 	if capturedLen == 0 {
-		result = TLSCaptureEmpty
+		// Порядок ветвей — это и есть разрез №504. «Нечего было нести»
+		// проверяется ПЕРВЫМ: только при kernelDataLen > 0 ноль захваченных
+		// байт означает отказ чтения, и только тогда вердикт вправе назвать
+		// класс продуктовым.
+		if kernelDataLen == 0 {
+			result = TLSCaptureEmptyZeroLen
+		} else {
+			result = TLSCaptureEmptyReadFailed
+		}
 	}
 	TLSPayloadCapture.WithLabelValues(dirLabel, result).Inc()
 }
 
+// TLSCaptureResults are every result= value TLSPayloadCapture can carry, in
+// the order the emitters print them. Pinned by test so a new branch in
+// RecordTLSPayloadCapture cannot ship a value that init() never materialized
+// — an unmaterialized series reads as "binary predates it", not as zero
+// ([[metric-anchor-must-carry-full-series-name]]).
+var TLSCaptureResults = []string{
+	TLSCaptureCaptured, TLSCaptureEmptyZeroLen, TLSCaptureEmptyReadFailed,
+}
+
 func init() {
 	for _, dir := range []string{TLSDirectionWriteLabel, TLSDirectionReadLabel} {
-		for _, res := range []string{TLSCaptureCaptured, TLSCaptureEmpty} {
+		for _, res := range TLSCaptureResults {
 			TLSPayloadCapture.WithLabelValues(dir, res)
 		}
 	}

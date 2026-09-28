@@ -980,7 +980,7 @@ func (c *TLSCollector) readLoop(ctx context.Context, out chan<- types.Event) {
 			// полезной нагрузки нет вовсе. Считается ПОСЛЕ applyMaxDataSize,
 			// то есть ровно по тому окну, которое увидит слой правил, и до
 			// отправки в роутер.
-			exporter.RecordTLSPayloadCapture(event.TLS.Direction, capturedLen)
+			exporter.RecordTLSPayloadCapture(event.TLS.Direction, capturedLen, event.TLS.DataLen)
 		}
 
 		// Debug logging

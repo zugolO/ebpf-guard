@@ -30,29 +30,69 @@ func counterValue(t *testing.T, vec *prometheus.CounterVec, labels ...string) fl
 // быть отличимо от события, чья нагрузка не подошла ни одному правилу. До этой
 // величины оба случая читались снаружи одинаково: events_total вырос, алертов
 // нет, слои подавления пусты.
-func TestRecordTLSPayloadCaptureSplitsEmptyFromCaptured(t *testing.T) {
-	before := map[string]float64{
-		"write/captured": counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionWriteLabel, exporter.TLSCaptureCaptured),
-		"write/empty":    counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionWriteLabel, exporter.TLSCaptureEmpty),
-		"read/captured":  counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionReadLabel, exporter.TLSCaptureCaptured),
-		"read/empty":     counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionReadLabel, exporter.TLSCaptureEmpty),
+//
+// №504 (28.09.2026): у «пусто» ДВЕ причины, и они разного класса. Ноль
+// захваченных байт при kernelDataLen==0 — это SSL_write(num<=0), вызов,
+// которому нечего было нести (на живом стенде таких 4 из 5); ноль при
+// kernelDataLen>0 — отказ bpf_probe_read_user, и только он даёт право на
+// продуктовый вердикт о продюсере. Одно слово "empty" на обе причины
+// заставляло эмиттер 6.4.3 объявлять продуктовый дефект по первой.
+func TestRecordTLSPayloadCaptureSplitsEmptyByCause(t *testing.T) {
+	read := func(dir, res string) float64 {
+		return counterValue(t, exporter.TLSPayloadCapture, dir, res)
+	}
+	type key struct{ dir, res string }
+	keys := []key{}
+	for _, d := range []string{exporter.TLSDirectionWriteLabel, exporter.TLSDirectionReadLabel} {
+		for _, r := range exporter.TLSCaptureResults {
+			keys = append(keys, key{d, r})
+		}
+	}
+	before := map[key]float64{}
+	for _, k := range keys {
+		before[k] = read(k.dir, k.res)
 	}
 
-	exporter.RecordTLSPayloadCapture(types.TLSDirectionWrite, 48)
-	exporter.RecordTLSPayloadCapture(types.TLSDirectionWrite, 0)
-	exporter.RecordTLSPayloadCapture(types.TLSDirectionRead, 0)
-	exporter.RecordTLSPayloadCapture(types.TLSDirectionRead, 0)
-
-	got := map[string]float64{
-		"write/captured": counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionWriteLabel, exporter.TLSCaptureCaptured) - before["write/captured"],
-		"write/empty":    counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionWriteLabel, exporter.TLSCaptureEmpty) - before["write/empty"],
-		"read/captured":  counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionReadLabel, exporter.TLSCaptureCaptured) - before["read/captured"],
-		"read/empty":     counterValue(t, exporter.TLSPayloadCapture, exporter.TLSDirectionReadLabel, exporter.TLSCaptureEmpty) - before["read/empty"],
+	// Ровно тот профиль вызовов, который bpftrace снял на ebaka2 28.09.2026 на
+	// обмене контроля item 5: четыре SSL_write с num=0 и один с num=53.
+	exporter.RecordTLSPayloadCapture(types.TLSDirectionWrite, 53, 53)
+	for i := 0; i < 4; i++ {
+		exporter.RecordTLSPayloadCapture(types.TLSDirectionWrite, 0, 0)
 	}
-	want := map[string]float64{"write/captured": 1, "write/empty": 1, "read/captured": 0, "read/empty": 2}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s: дельта %v, ожидалось %v", k, got[k], v)
+	// И отдельно — настоящий отказ чтения: ядро видело 48 байт, захватило ноль.
+	exporter.RecordTLSPayloadCapture(types.TLSDirectionRead, 0, 48)
+
+	want := map[key]float64{
+		{exporter.TLSDirectionWriteLabel, exporter.TLSCaptureCaptured}:        1,
+		{exporter.TLSDirectionWriteLabel, exporter.TLSCaptureEmptyZeroLen}:    4,
+		{exporter.TLSDirectionWriteLabel, exporter.TLSCaptureEmptyReadFailed}: 0,
+		{exporter.TLSDirectionReadLabel, exporter.TLSCaptureCaptured}:         0,
+		{exporter.TLSDirectionReadLabel, exporter.TLSCaptureEmptyZeroLen}:     0,
+		{exporter.TLSDirectionReadLabel, exporter.TLSCaptureEmptyReadFailed}:  1,
+	}
+	for _, k := range keys {
+		got := read(k.dir, k.res) - before[k]
+		if got != want[k] {
+			t.Errorf("%s/%s: дельта %v, ожидалось %v", k.dir, k.res, got, want[k])
+		}
+	}
+}
+
+// Каждое значение result=, которое способна выдать RecordTLSPayloadCapture,
+// обязано быть в TLSCaptureResults — иначе init() его не материализует, и
+// отсутствие ряда прочитается как «бинарь старее величины», а не как ноль.
+func TestTLSCaptureResultsCoverEveryBranch(t *testing.T) {
+	in := map[string]bool{}
+	for _, r := range exporter.TLSCaptureResults {
+		in[r] = true
+	}
+	for _, r := range []string{
+		exporter.TLSCaptureCaptured,
+		exporter.TLSCaptureEmptyZeroLen,
+		exporter.TLSCaptureEmptyReadFailed,
+	} {
+		if !in[r] {
+			t.Errorf("ветвь result=%q не объявлена в TLSCaptureResults — ряд не будет материализован", r)
 		}
 	}
 }

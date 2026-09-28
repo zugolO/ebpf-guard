@@ -110,19 +110,30 @@ _w64_ratelimited_rule() { _w64_metrics | awk -v r="$1" '$0 ~ /^ebpf_guard_alerts
 # было вовсе». Снимается ОДНИМ проходом по одному снимку: четыре отдельных
 # curl'а дали бы четыре разных момента. Пустая строка = серии нет вовсе
 # (бинарь до №496), и это НЕ ноль ([[gated-metric-cannot-carry-product-verdict]]).
-_w64_payload_quad() {
+# №504: шесть величин вместо четырёх. result="empty" распался на две причины
+# РАЗНОГО КЛАССА, и ровно на этом различии стоял ложный продуктовый вердикт
+# 6.4.3 на архиве w7A:
+#   empty_zero_len    — SSL_write(num<=0): вызову НЕЧЕГО было нести. Замер
+#                       bpftrace на ebaka2 28.09.2026 по тому же обмену: из
+#                       пяти вызовов SSL_write четыре с num=0 и один с num=53.
+#                       Такое событие — НЕ дефект;
+#   empty_read_failed — ядро видело num>0 и захватило ноль: отказ
+#                       bpf_probe_read_user. ТОЛЬКО это даёт продуктовый класс.
+# Старое значение result="empty" читается как zero_len: архив/бинарь до №504
+# не различал причин, а подавляющее большинство тех «empty» и были num=0.
+# Молча складывать его с read_failed нельзя — вердикт перевернётся.
+_w64_payload_sextet() {
     _w64_metrics | awk '
         /^ebpf_guard_tls_payload_capture_total\{/ {
             f = 1; v = $NF + 0
-            if (index($0, "direction=\"write\"")) {
-                if (index($0, "result=\"captured\"")) wc += v
-                else if (index($0, "result=\"empty\"")) we += v
-            } else if (index($0, "direction=\"read\"")) {
-                if (index($0, "result=\"captured\"")) rc += v
-                else if (index($0, "result=\"empty\"")) re += v
-            }
+            d = index($0, "direction=\"write\"") ? "w" : (index($0, "direction=\"read\"") ? "r" : "")
+            if (d == "") next
+            if (index($0, "result=\"captured\"")) c[d] += v
+            else if (index($0, "result=\"empty_zero_len\"")) z[d] += v
+            else if (index($0, "result=\"empty_read_failed\"")) x[d] += v
+            else if (index($0, "result=\"empty\"")) z[d] += v
         }
-        END { if (f) printf "%d %d %d %d", wc, we, rc, re; else print "" }'
+        END { if (f) printf "%d %d %d %d %d %d", c["w"], z["w"], x["w"], c["r"], z["r"], x["r"]; else print "" }'
 }
 
 # Алерты правила СТРОГО ПОСЛЕ момента $2 (эпоха с дробной частью). Граница —
@@ -262,7 +273,7 @@ _w64_item5() {
     local ev0 ev1 dd0 dd1 rl0 rl1 al0 al1 t_ex
     ev0=$(_w64_events_tls)
     local pc0 pc1
-    pc0=$(_w64_payload_quad)
+    pc0=$(_w64_payload_sextet)
     dd0=$(_w64_dedup_rule tls_http_basic_auth)
     rl0=$(_w64_ratelimited_rule tls_http_basic_auth)
     al0=$(_w64_alerts_rule tls_http_basic_auth)
@@ -274,11 +285,54 @@ _w64_item5() {
     # (rules/tls-patterns.yaml:19..29) — предикат "содержит 'Authorization:
     # Basic '" в РАСШИФРОВАННОМ тексте, тот же текст, что видит SSL_read/
     # SSL_write через uprobe независимо от TLS-провода.
-    printf 'GET / HTTP/1.0\r\nAuthorization: Basic dGVzdDp0ZXN0\r\n\r\n' \
-        | openssl s_client -quiet -connect "127.0.0.1:$port" >"$work/client.log" 2>&1
-    sleep 5
+    #
+    # №504: ОБМЕН ФЛАПАЕТ, И ЭТО ИЗМЕРЕНО, А НЕ ПРЕДПОЛОЖЕНО. На ebaka2
+    # 28.09.2026 одна и та же команда шесть раз подряд: в трёх заходах
+    # openssl s_client отдал свои 53 байта (bpftrace: W num=53), в трёх —
+    # НЕ отдал ни одного, завершив рукопожатие и закрыв соединение. Ровно
+    # это, а не продюсер, развело w7B (нагрузка захвачена) и w7A (не
+    # захвачена) и подсунуло 6.4.3 продуктовый вердикт.
+    #
+    # Починка — ПОВТОР, а не удлинение таймаута: величина, по которой
+    # повторяем, — та же ось продюсера, которую печатает контроль, то есть
+    # прибор судит сам себя своим же числом. Потолок 3: выше него отсутствие
+    # нагрузки перестаёт быть флапом и становится величиной, которую эмиттер
+    # обязан увидеть (attempts печатается в файл).
+    #
+    # ВАРИАНТ С УДЕРЖАНИЕМ stdin ОТВЕРГНУТ ЧИСЛОМ: `{ printf …; sleep 3; } |
+    # openssl s_client -ign_eof` дал 1 успех из 3 против 3 из 3 у простого
+    # пайпа. Идиома НЕ виновата — виновата гонка, и лечится она повтором.
+    local attempts=0 max_attempts=3
+    local _wc_a _zw_a _xw_a _rc_a _zr_a _xr_a
+    while [ "$attempts" -lt "$max_attempts" ]; do
+        attempts=$(( attempts + 1 ))
+        printf 'GET / HTTP/1.0\r\nAuthorization: Basic dGVzdDp0ZXN0\r\n\r\n' \
+            | openssl s_client -quiet -connect "127.0.0.1:$port" >"$work/client-$attempts.log" 2>&1
+        sleep 5
+        pc1=$(_w64_payload_sextet)
+        # Повторяем, только если ось продюсера читается и нагрузку не донёс
+        # НИ ОДИН вызов. Нечитаемая ось — не повод крутить обмен: это другой
+        # класс, и его назовёт разбор ниже.
+        [ -n "$pc0" ] && [ -n "$pc1" ] || break
+        # shellcheck disable=SC2086
+        set -- $pc0; _wc_a=$1 _zw_a=$2 _xw_a=$3 _rc_a=$4 _zr_a=$5 _xr_a=$6
+        # shellcheck disable=SC2086
+        set -- $pc1
+        [ $(( ($1 - _wc_a) + ($4 - _rc_a) )) -gt 0 ] && break
+        [ "$attempts" -lt "$max_attempts" ] && \
+            echo "  item5: попытка $attempts не донесла нагрузку (все вызовы SSL_write пусты) — повтор обмена (№504)"
+        # Держатель поднят с -naccept 1 и уже израсходован первым обменом:
+        # на повтор нужен новый accept, иначе вторая попытка стучится в
+        # закрытый порт и «ноль» станет приборным, а не измеренным.
+        if ! kill -0 "$srv_pid" 2>/dev/null; then
+            openssl s_server -quiet -naccept 1 -accept "$port" \
+                -cert "$work/cert.pem" -key "$work/key.pem" \
+                >>"$work/server.log" 2>&1 &
+            srv_pid=$!
+            sleep 1
+        fi
+    done
     ev1=$(_w64_events_tls)
-    pc1=$(_w64_payload_quad)
     kill "$srv_pid" 2>/dev/null
 
     if ! _w64_is_num "$ev0" || ! _w64_is_num "$ev1"; then
@@ -326,15 +380,21 @@ _w64_item5() {
     # №496: ось продюсера считается ТОЛЬКО когда обе стороны — числа; иначе
     # печатается класс, а не ноль.
     local pay_axis="НЕТ_СЕРИИ" pay_cap="НЕИЗМЕРИМО" pay_empty="НЕИЗМЕРИМО" pay_detail="НЕИЗМЕРИМО"
+    local pay_zero="НЕИЗМЕРИМО" pay_rdfail="НЕИЗМЕРИМО"
     if [ -n "$pc0" ] && [ -n "$pc1" ]; then
         # shellcheck disable=SC2086
-        set -- $pc0; local wc0=$1 we0=$2 rc0=$3 re0=$4
+        set -- $pc0; local wc0=$1 zw0=$2 xw0=$3 rc0=$4 zr0=$5 xr0=$6
         # shellcheck disable=SC2086
-        set -- $pc1; local wc1=$1 we1=$2 rc1=$3 re1=$4
+        set -- $pc1; local wc1=$1 zw1=$2 xw1=$3 rc1=$4 zr1=$5 xr1=$6
         pay_axis="есть"
         pay_cap=$(( (wc1 - wc0) + (rc1 - rc0) ))
-        pay_empty=$(( (we1 - we0) + (re1 - re0) ))
-        pay_detail="write_captured=$(( wc1 - wc0 )),write_empty=$(( we1 - we0 )),read_captured=$(( rc1 - rc0 )),read_empty=$(( re1 - re0 ))"
+        # №504: ДВЕ причины пустоты считаются врозь, а payload_empty_delta
+        # остаётся их суммой — прежнее имя, прежняя величина: его читают
+        # эмиттеры старых архивов, и переопределять смысл имени нельзя.
+        pay_zero=$(( (zw1 - zw0) + (zr1 - zr0) ))
+        pay_rdfail=$(( (xw1 - xw0) + (xr1 - xr0) ))
+        pay_empty=$(( pay_zero + pay_rdfail ))
+        pay_detail="write_captured=$(( wc1 - wc0 )),write_zero_len=$(( zw1 - zw0 )),write_read_failed=$(( xw1 - xw0 )),read_captured=$(( rc1 - rc0 )),read_zero_len=$(( zr1 - zr0 )),read_read_failed=$(( xr1 - xr0 ))"
     fi
 
     {
@@ -356,8 +416,18 @@ _w64_item5() {
         echo "payload_captured_delta=$pay_cap"
         echo "payload_empty_delta=$pay_empty"
         echo "payload_detail=$pay_detail"
+        # №504: две причины пустоты — врозь и ПОД СВОИМИ ИМЕНАМИ. Эмиттер
+        # 6.4.3 обязан объявлять продуктовый дефект продюсера ТОЛЬКО по
+        # payload_read_failed_delta; payload_zero_len_delta — это вызовы, у
+        # которых нагрузки не было вовсе, и по ним продуктового вердикта нет.
+        echo "payload_zero_len_delta=$pay_zero"
+        echo "payload_read_failed_delta=$pay_rdfail"
+        # Сколько раз пришлось повторять обмен, чтобы нагрузка вообще пошла.
+        # attempts>1 — это про КОНТРОЛЬ, а не про продукт.
+        echo "exchange_attempts=${attempts:-1}"
+        echo "exchange_max_attempts=${max_attempts:-1}"
     } > "$out"
-    echo "  item5: events_delta=$ev_delta, manifest_alerts(весь стор)=$hit, за обмен по отсечке=${since:-НЕИЗМЕРИМО}, дельта стора=${al_delta:-НЕИЗМЕРИМО}, срез дедупа=${dd_delta:-НЕИЗМЕРИМО}, срез лимитера=${rl_delta:-НЕИЗМЕРИМО}, нагрузка захвачена=${pay_cap}/пусто=${pay_empty} (ось: $pay_axis)"
+    echo "  item5: events_delta=$ev_delta, manifest_alerts(весь стор)=$hit, за обмен по отсечке=${since:-НЕИЗМЕРИМО}, дельта стора=${al_delta:-НЕИЗМЕРИМО}, срез дедупа=${dd_delta:-НЕИЗМЕРИМО}, срез лимитера=${rl_delta:-НЕИЗМЕРИМО}, нагрузка захвачена=${pay_cap}/пусто=${pay_empty} (из них нечего нести=${pay_zero}, отказ чтения=${pay_rdfail}; ось: $pay_axis), попыток обмена=${attempts:-1}"
 }
 
 # ─── ITEM 6: контейнерный случай (mount-ns пода, находка №380) ────────────

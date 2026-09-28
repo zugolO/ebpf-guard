@@ -136,6 +136,27 @@ _w64_payload_sextet() {
         END { if (f) printf "%d %d %d %d %d %d", c["w"], z["w"], x["w"], c["r"], z["r"], x["r"]; else print "" }'
 }
 
+# №504: РЕШЕНИЕ О ПОВТОРЕ ОБМЕНА — ИМЕНОВАННЫМ ПРЕДИКАТОМ, а не выражением
+# внутри цикла: у каждой ветви обязана быть фикстура, а выражение внутри
+# `while` невызываемо извне и потому непроверяемо. Живой заход 28.09.2026
+# взял ветвь «успех с первой попытки» (attempts=1); ветвь повтора живьём не
+# срабатывала ни разу — именно поэтому она и вынесена сюда.
+#
+# Печатает число событий, ДОНЁСШИХ нагрузку между двумя снимками секстета
+# (write_captured + read_captured), либо пустую строку, если ось не читается.
+# Пустая строка — НЕ ноль: нечитаемая ось не повод крутить обмен, это другой
+# класс, и его назовёт разбор ниже ([[gated-metric-cannot-carry-product-verdict]]).
+_w64_captured_delta() {
+    local before="$1" after="$2"
+    [ -n "$before" ] && [ -n "$after" ] || { printf ''; return; }
+    local b1 b4 a1 a4
+    # shellcheck disable=SC2086
+    set -- $before; [ "$#" -eq 6 ] || { printf ''; return; }; b1=$1 b4=$4
+    # shellcheck disable=SC2086
+    set -- $after;  [ "$#" -eq 6 ] || { printf ''; return; }; a1=$1 a4=$4
+    printf '%d' $(( (a1 - b1) + (a4 - b4) ))
+}
+
 # Алерты правила СТРОГО ПОСЛЕ момента $2 (эпоха с дробной частью). Граница —
 # тот же предикат `w626ts`, что у 6.2.6/6.2.9.F.3: точное сравнение с дробными
 # секундами, без усечения до секунды ([[store-window-jq-truncates-to-second]] —
@@ -303,7 +324,6 @@ _w64_item5() {
     # openssl s_client -ign_eof` дал 1 успех из 3 против 3 из 3 у простого
     # пайпа. Идиома НЕ виновата — виновата гонка, и лечится она повтором.
     local attempts=0 max_attempts=3
-    local _wc_a _zw_a _xw_a _rc_a _zr_a _xr_a
     while [ "$attempts" -lt "$max_attempts" ]; do
         attempts=$(( attempts + 1 ))
         printf 'GET / HTTP/1.0\r\nAuthorization: Basic dGVzdDp0ZXN0\r\n\r\n' \
@@ -313,12 +333,11 @@ _w64_item5() {
         # Повторяем, только если ось продюсера читается и нагрузку не донёс
         # НИ ОДИН вызов. Нечитаемая ось — не повод крутить обмен: это другой
         # класс, и его назовёт разбор ниже.
-        [ -n "$pc0" ] && [ -n "$pc1" ] || break
-        # shellcheck disable=SC2086
-        set -- $pc0; _wc_a=$1 _zw_a=$2 _xw_a=$3 _rc_a=$4 _zr_a=$5 _xr_a=$6
-        # shellcheck disable=SC2086
-        set -- $pc1
-        [ $(( ($1 - _wc_a) + ($4 - _rc_a) )) -gt 0 ] && break
+        local _cap_so_far
+        _cap_so_far=$(_w64_captured_delta "$pc0" "$pc1")
+        # Ось не читается — выходим без повтора: это другой класс.
+        [ -n "$_cap_so_far" ] || break
+        [ "$_cap_so_far" -gt 0 ] && break
         [ "$attempts" -lt "$max_attempts" ] && \
             echo "  item5: попытка $attempts не донесла нагрузку (все вызовы SSL_write пусты) — повтор обмена (№504)"
         # Держатель поднят с -naccept 1 и уже израсходован первым обменом:

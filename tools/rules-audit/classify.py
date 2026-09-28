@@ -336,7 +336,18 @@ def main():
                        "event for a number outside it")
             detail = (f"unsatisfiable `{dead_field}` condition: {why}; "
                       f"condition requires {dead_tokens}")
-            decision = "fix-condition"
+            # РАЗБОР ПО ОСЯМ (волна 7, item б1, 28.09.2026). До этой правки все
+            # три оси несли один `fix-condition`, и это склеивало ДВЕ РАЗНЫЕ
+            # работы. Ось `nr` действительно открывается ПРАВКОЙ КОНФИГА
+            # (kernel_filter.monitored_syscalls) и стоит измеримого шума — там
+            # правка условия есть настоящий долг. Оси `op` и `proto` не
+            # открываются ничем: продюсера нет, и «починка условия» для них
+            # означает заменить предмет детекта (правило об ICMP-туннеле,
+            # перекеенное на proto=6, ловит не ICMP-туннель). Такая немота —
+            # КЛАСС, и печатает его агент: UnreachableFileOpRules (ось op),
+            # UnreachableProtoRules (ось proto).
+            decision = ("fix-condition" if dead_field == "nr"
+                        else "document-as-structurally-inert")
         elif rid in ("cis_5_2_1_privileged_container", "cis_5_2_5_privilege_escalation"):
             reason = "condition-truly-doesnt-match"
             status = "condition-changed-since-3.0"
@@ -482,7 +493,11 @@ def write_md(rows, zsec, cur, snap):
     A("")
     A("**Decision vocabulary** (from plan.md item 1): `fix-condition` / "
       "`document-as-needing-environment` / `merge-with-duplicate`, plus `verify-after-fix` for "
-      "a 3.0 condition that waves 5–6 proved wrong. **No rule is deleted or edited by item 1.**")
+      "a 3.0 condition that waves 5–6 proved wrong, plus "
+      "`document-as-structurally-inert` (wave 7 item б1) for a condition standing on an axis "
+      "**no producer feeds at all** — neither a config change nor another environment turns it "
+      "on, so there is nothing for `fix-condition` to fix and nothing for "
+      "`document-as-needing-environment` to wait for. **No rule is deleted or edited by item 1.**")
     A("")
     A("## 2. Headline")
     A("")
@@ -571,13 +586,31 @@ def write_md(rows, zsec, cur, snap):
       "mute since they were written. The eight outside the 292 are recorded in "
       "`deploy/docker-test-setup/attacks/intentional-loss.txt`.")
     A("")
-    A(f"For all {by_status['structurally-dead']} the condition itself is the defect, so the recorded decision is "
-      "`fix-condition` — *not* `document-as-needing-environment`, because the missing input can "
-      "never exist. The fix is deliberately not applied in this wave: it changes detection "
-      "semantics (`op: unlink|rmdir|truncate|rename → drop`, `proto: 1,47,… → drop or re-key`, "
-      "`nr` → open the syscall in the allowlist and pay the noise, or re-key the rule) "
-      "and needs the stand to verify, which is what the owner decision (plan item 8) reserves. "
-      "**No condition is edited and no rule is deleted by this item.**")
+    A(f"For all {by_status['structurally-dead']} the condition itself is the defect, and none of them is "
+      "`document-as-needing-environment`, because the missing input can never exist. But they "
+      "split into **two different kinds of work**, and wave 7 item б1 separates them instead of "
+      "issuing one decision for all three axes:")
+    A("")
+    A(f"- **`fix-condition` — the {by_axis['nr']} `nr`-dead rules only.** This axis really does open: "
+      "the numbers are absent from `kernel_filter.monitored_syscalls`, and adding them is a "
+      "config change with a *measurable* price in noise (among the 19 required numbers are the "
+      "hot `nanosleep(35)`, `mprotect(10)`, `prctl(157)`, `clone(56)`, `fork(57)`). The price "
+      "is assigned by measurement (bpftrace on the stand) and the numbers are opened in "
+      "portions, cheapest first, each portion as an A/B pair — not applied wholesale here.")
+    A(f"- **`document-as-structurally-inert` — the {by_axis['op']} `op`-dead and {by_axis['proto']} `proto`-dead rules.** "
+      "These have **no producer at all**: `fileaccess.bpf.c` hooks openat/read/write/chmod and "
+      "`network.bpf.c` emits `IPPROTO_TCP` and nothing else. No toggle, no allowlist, no kernel "
+      "version turns them on, so a condition rewrite would not fix them — it would replace the "
+      "subject (an ICMP-tunnel rule re-keyed to `proto=6` is a TCP rule that still does not "
+      "detect ICMP tunnels; narrowing `op` to `write` makes rules watching whole directories "
+      "fire on every ordinary write). Their muteness is therefore recorded as a **class, "
+      "printed by the agent at every startup** — `UnreachableFileOpRules()` for the `op` axis "
+      "and `UnreachableProtoRules()` for the `proto` axis, alongside "
+      "`UnreachableSyscallRules()` and `UnproducibleEventTypeRules()` — rather than as prose "
+      "here. Opening them needs a new BPF hook, an owner decision with its own measured noise "
+      "price.")
+    A("")
+    A("**No condition is edited and no rule is deleted by this item.**")
     A("")
     A(f"Budget check on the 3.0 → rev 7 boundary: the {by_axis['op']} `op`-dead rules are `file` rules, "
       f"the {by_axis['proto']} `proto`-dead rules are `tcp_connect`/Z2 rules and the {by_axis['nr']} `nr`-dead rules are "
@@ -699,13 +732,16 @@ def write_md(rows, zsec, cur, snap):
     for d, n in by_decision.most_common():
         A(f"| {d} | {n} |")
     A("")
-    A(f"`fix-condition` = {by_decision['fix-condition']}: "
-      + " + ".join(f"{n} `{ax}`-dead" for ax, n in sorted(by_axis.items()))
-      + " rules, whose condition cannot "
-      "match the collector. The fix (drop/re-key the dead value set, or open the syscall and pay "
-      "the noise) changes detection "
-      "semantics and is deferred to the stand/owner (plan item 8) — this wave records the "
-      f"decision, it does not apply it. `verify-after-fix` = {len(cis)}: already corrected by waves 5–6, "
+    A(f"`fix-condition` = {by_decision['fix-condition']}: the {by_axis['nr']} `nr`-dead rules, and only "
+      "them — the axis opens with a config change whose price in noise is measurable, so the "
+      "debt is real. Opening is done in portions, cheapest syscall first, each portion judged "
+      "by an A/B pair; the hot numbers (`nanosleep`, `mprotect`, `prctl`, `clone`, `fork`) go "
+      "last and only if their measured price passes. "
+      f"`document-as-structurally-inert` = {by_decision['document-as-structurally-inert']}: "
+      + " + ".join(f"{n} `{ax}`-dead" for ax, n in sorted(by_axis.items()) if ax != "nr")
+      + " rules, whose axis has no producer at all — no condition edit can fix that, and their "
+      "muteness is printed by the agent itself (`UnreachableFileOpRules`, "
+      f"`UnreachableProtoRules`). `verify-after-fix` = {len(cis)}: already corrected by waves 5–6, "
       "needs a stand re-measure. The `document-as-needing-environment` bucket is the actionable "
       "backlog for a stand run (scenario per family), not a claim that those rules are wrong. "
       "**No rule was deleted, renamed or re-conditioned by this item.**")

@@ -2298,6 +2298,80 @@ func (re *RuleEngine) UnreachableFileOpRules() []string {
 	return out
 }
 
+// producibleNetworkProtos is the set of IP protocol numbers, as decimal
+// strings, that some BPF hook in this build can actually put into
+// NetworkEvent.Proto.
+//
+// It has exactly one member, and that is a property of the producer, not an
+// oversight of this list: bpf/network.bpf.c is the only source of network
+// events, and every one of its four assignments writes IPPROTO_TCP
+// (bpf/network.bpf.c:124,136,226,241). There is no UDP, ICMP, GRE or raw-socket
+// hook, so no event can ever carry any other value. Adding such a hook is what
+// would extend this list — editing the list alone would only move the lie.
+var producibleNetworkProtos = []string{"6"}
+
+// UnreachableProtoRules returns the IDs of loaded network rules whose "proto"
+// condition (eq/in) names only protocol numbers no BPF hook in this build can
+// ever produce, i.e. values outside producibleNetworkProtos.
+//
+// Wave 7, item б1 (28.09.2026). Fourth member of the family after
+// UnreachableSyscallRules (the nr axis, finding #39), UnreachableFileOpRules
+// (the file.op axis, wave 6.2.2 open question 7) and
+// UnproducibleEventTypeRules (the event-type axis, finding №494). Four rules —
+// c2_icmp_large_payload (ICMP 1), netintr_icmp_outbound_large (ICMP 1),
+// netintr_gre_tunnel (GRE 47) and netintr_raw_socket_connection (HOPOPT 255,
+// IPv6 41, IPv6-Route 43, GRE 47, ESP 50, AH 51) — have never matched anything
+// and never will.
+//
+// Why this is NOT the same class as the nr axis, even though both look like an
+// "unsatisfiable literal set". The nr axis opens with a CONFIG change
+// (kernel_filter.monitored_syscalls) and its price is a measurable amount of
+// noise; those twelve rules are therefore a fix-condition debt with a gate.
+// The proto axis has no producer AT ALL: no toggle, no allowlist, no kernel
+// version turns these four on. They are structurally inert, and the honest
+// record is the class, not a condition rewrite — rewriting `proto` to 6 would
+// turn an ICMP-tunnel rule into a TCP rule that detects something else and
+// still not detect ICMP tunnels ([[wave-criteria-need-an-emitter]]: the
+// registry belongs in the agent's output, not in prose nobody re-reads).
+//
+// Rules with no "proto" condition, and rules whose proto set INCLUDES a
+// producible value, are not reported — the same closed-refusal shape the three
+// siblings use. The result is sorted for stable output.
+func (re *RuleEngine) UnreachableProtoRules() []string {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	producible := make(map[string]struct{}, len(producibleNetworkProtos))
+	for _, p := range producibleNetworkProtos {
+		producible[p] = struct{}{}
+	}
+
+	var out []string
+	for _, rule := range re.rules {
+		if rule.EventType != types.EventTCPConnect {
+			continue
+		}
+		hasProtoCondition := false
+		reachable := false
+		for _, cond := range re.getAllConditions(rule) {
+			if !namesLiteralValues(cond, "proto") {
+				continue
+			}
+			hasProtoCondition = true
+			for _, v := range cond.Values {
+				if _, ok := producible[strings.TrimSpace(v)]; ok {
+					reachable = true
+				}
+			}
+		}
+		if hasProtoCondition && !reachable {
+			out = append(out, rule.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // destructiveRuleActions are the RuleAction values wave 5.9.4b treats as
 // capable of a real side effect against a live process or the network — the
 // set the machine inventory below audits. (lsm_block is not a valid

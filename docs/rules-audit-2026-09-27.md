@@ -20,7 +20,7 @@ Inputs, all in-tree: `docs/rules-audit-2026-08-06.md` (the Z1–Z4 lists), `docs
 - `no-input-data` — the condition is satisfiable on a live axis, but the four audited runs produced no matching event/value (scenario or environment absent).
 - `duplicates-other-rule` — recorded in the `duplicate_of` column: another rule in the catalog carries an identical normalised condition.
 
-**Decision vocabulary** (from plan.md item 1): `fix-condition` / `document-as-needing-environment` / `merge-with-duplicate`, plus `verify-after-fix` for a 3.0 condition that waves 5–6 proved wrong. **No rule is deleted or edited by item 1.**
+**Decision vocabulary** (from plan.md item 1): `fix-condition` / `document-as-needing-environment` / `merge-with-duplicate`, plus `verify-after-fix` for a 3.0 condition that waves 5–6 proved wrong, plus `document-as-structurally-inert` (wave 7 item б1) for a condition standing on an axis **no producer feeds at all** — neither a config change nor another environment turns it on, so there is nothing for `fix-condition` to fix and nothing for `document-as-needing-environment` to wait for. **No rule is deleted or edited by item 1.**
 
 ## 2. Headline
 
@@ -47,21 +47,21 @@ The point of the revision: the 3.0 bucket “292 silent, condition never matched
 
 | rule | ref | required dead token(s) | why it does not match | decision |
 |---|---|---|---|---|
-| `c2_icmp_large_payload` | `command-and-control.yaml:336` | `[1]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | fix-condition |
+| `c2_icmp_large_payload` | `command-and-control.yaml:336` | `[1]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | document-as-structurally-inert |
 | `c2_raw_socket_shell` | `command-and-control.yaml:24` | `[41]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
 | `cis_5_2_1_privileged_container` | `cis-k8s.yaml:86` | `—` | syscall number was wrong in 3.0; corrected in waves 5–6 | verify-after-fix |
 | `cis_5_2_5_privilege_escalation` | `cis-k8s.yaml:246` | `—` | syscall number was wrong in 3.0; corrected in waves 5–6 | verify-after-fix |
-| `defense_evasion_journald_log_clear` | `credential-and-defense-gaps.yaml:60` | `[rmdir,truncate,unlink]` | collector emits only open/read/write/chmod — `bpf/common.h` FILE_OP_* | fix-condition |
+| `defense_evasion_journald_log_clear` | `credential-and-defense-gaps.yaml:60` | `[rmdir,truncate,unlink]` | collector emits only open/read/write/chmod — `bpf/common.h` FILE_OP_* | document-as-structurally-inert |
 | `evasion_auditd_stop` | `defense-evasion.yaml:166` | `[37,62,238]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
-| `evasion_log_clear` | `defense-evasion.yaml:3` | `[rename,truncate,unlink]` | collector emits only open/read/write/chmod — `bpf/common.h` FILE_OP_* | fix-condition |
+| `evasion_log_clear` | `defense-evasion.yaml:3` | `[rename,truncate,unlink]` | collector emits only open/read/write/chmod — `bpf/common.h` FILE_OP_* | document-as-structurally-inert |
 | `evasion_timestamp_modify` | `defense-evasion.yaml:28` | `[132,235,280]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
 | `exfil_raw_socket_by_non_root` | `exfiltration-extended.yaml:175` | `[41]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
 | `impact_fork_bomb_pattern` | `impact-gaps.yaml:61` | `[56,57]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
-| `impact_mass_file_deletion_critical` | `impact-gaps.yaml:33` | `[rmdir,unlink]` | collector emits only open/read/write/chmod — `bpf/common.h` FILE_OP_* | fix-condition |
+| `impact_mass_file_deletion_critical` | `impact-gaps.yaml:33` | `[rmdir,unlink]` | collector emits only open/read/write/chmod — `bpf/common.h` FILE_OP_* | document-as-structurally-inert |
 | `mitre_sandbox_detect_cpuid` | `mitre-additional.yaml:351` | `[135]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
-| `netintr_gre_tunnel` | `network-intrusion.yaml:334` | `[47]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | fix-condition |
-| `netintr_icmp_outbound_large` | `network-intrusion.yaml:209` | `[1]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | fix-condition |
-| `netintr_raw_socket_connection` | `network-intrusion.yaml:322` | `[41,43,47,50,51,255]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | fix-condition |
+| `netintr_gre_tunnel` | `network-intrusion.yaml:334` | `[47]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | document-as-structurally-inert |
+| `netintr_icmp_outbound_large` | `network-intrusion.yaml:209` | `[1]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | document-as-structurally-inert |
+| `netintr_raw_socket_connection` | `network-intrusion.yaml:322` | `[41,43,47,50,51,255]` | collector emits only proto=6 (IPPROTO_TCP) — `bpf/network.bpf.c:124,136,226,241` | document-as-structurally-inert |
 | `persist_systemd_wants_symlink` | `persistence-extended.yaml:40` | `[88]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
 | `sigma_mprotect_exec_heap` | `sigma-linux.yaml:1475` | `[10]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
 | `sigma_prctl_dumpable` | `sigma-linux.yaml:1339` | `[157]` | syscall number outside the in-kernel allowlist — `bpf/syscall.bpf.c:52` | fix-condition |
@@ -77,7 +77,12 @@ Three dead axes occur in this set. **`op`** (3 rules): every file event is emitt
 
 This axis was missed by the first cut of revision 7.0, which asserted `nr` was live, and it was also under-reported by the product's own startup audit: `UnreachableSyscallRules` tested `cond.Field != "nr"` literally, so the 12 rules below — every one written with the dotted `syscall.nr` alias that `normaliseFieldName` resolves — were invisible to it, as was the short `eq` operator. Both aliases are now normalised through `namesLiteralValues`, and the product's count rose from 9 to 17 catalog-wide. That is not new lost detection: these rules have been mute since they were written. The eight outside the 292 are recorded in `deploy/docker-test-setup/attacks/intentional-loss.txt`.
 
-For all 19 the condition itself is the defect, so the recorded decision is `fix-condition` — *not* `document-as-needing-environment`, because the missing input can never exist. The fix is deliberately not applied in this wave: it changes detection semantics (`op: unlink|rmdir|truncate|rename → drop`, `proto: 1,47,… → drop or re-key`, `nr` → open the syscall in the allowlist and pay the noise, or re-key the rule) and needs the stand to verify, which is what the owner decision (plan item 8) reserves. **No condition is edited and no rule is deleted by this item.**
+For all 19 the condition itself is the defect, and none of them is `document-as-needing-environment`, because the missing input can never exist. But they split into **two different kinds of work**, and wave 7 item б1 separates them instead of issuing one decision for all three axes:
+
+- **`fix-condition` — the 12 `nr`-dead rules only.** This axis really does open: the numbers are absent from `kernel_filter.monitored_syscalls`, and adding them is a config change with a *measurable* price in noise (among the 19 required numbers are the hot `nanosleep(35)`, `mprotect(10)`, `prctl(157)`, `clone(56)`, `fork(57)`). The price is assigned by measurement (bpftrace on the stand) and the numbers are opened in portions, cheapest first, each portion as an A/B pair — not applied wholesale here.
+- **`document-as-structurally-inert` — the 3 `op`-dead and 4 `proto`-dead rules.** These have **no producer at all**: `fileaccess.bpf.c` hooks openat/read/write/chmod and `network.bpf.c` emits `IPPROTO_TCP` and nothing else. No toggle, no allowlist, no kernel version turns them on, so a condition rewrite would not fix them — it would replace the subject (an ICMP-tunnel rule re-keyed to `proto=6` is a TCP rule that still does not detect ICMP tunnels; narrowing `op` to `write` makes rules watching whole directories fire on every ordinary write). Their muteness is therefore recorded as a **class, printed by the agent at every startup** — `UnreachableFileOpRules()` for the `op` axis and `UnreachableProtoRules()` for the `proto` axis, alongside `UnreachableSyscallRules()` and `UnproducibleEventTypeRules()` — rather than as prose here. Opening them needs a new BPF hook, an owner decision with its own measured noise price.
+
+**No condition is edited and no rule is deleted by this item.**
 
 Budget check on the 3.0 → rev 7 boundary: the 3 `op`-dead rules are `file` rules, the 4 `proto`-dead rules are `tcp_connect`/Z2 rules and the 12 `nr`-dead rules are `syscall`/Z1 rules; the other 271 keep `no-input-data`. Rules that carry an unemitted token *alongside* a live one (e.g. `create` with `write`; see §5b) are **not** counted here, and neither are the 2 `verify-after-fix` rules whose dead condition was already replaced.
 
@@ -179,13 +184,13 @@ Grouped by reason, then by Z-section. Machine-readable twin: [`rules-audit-2026-
 | `sigma_seccomp_filter_install` | Z1 | syscall | `sigma-linux.yaml:1537` | yes | structurally-dead | fix-condition | nr in [317] AND comm not_in [runc,containerd-shim,containerd-shim-runc-v2,dockerd…] |
 | `sigma_world_writable_dir_created` | Z1 | syscall | `sigma-linux.yaml:792` | yes | structurally-dead | fix-condition | (nr eq [83] AND arg1 eq [511]) OR (nr eq [258] AND arg2 eq [511]) |
 | `web_blind_sqli_heuristic` | Z1 | syscall | `web-attacks-enhanced.yaml:78` | yes | structurally-dead | fix-condition | nr in [35,206,162] AND parent_comm in [nginx,apache2,httpd,php-fpm…] |
-| `c2_icmp_large_payload` | Z2 | tcp_connect | `command-and-control.yaml:336` | no | structurally-dead | fix-condition | network.proto equals [1] AND network.dport gt [200] |
-| `netintr_gre_tunnel` | Z2 | tcp_connect | `network-intrusion.yaml:334` | no | structurally-dead | fix-condition | proto in [47] |
-| `netintr_icmp_outbound_large` | Z2 | tcp_connect | `network-intrusion.yaml:209` | no | structurally-dead | fix-condition | proto in [1] |
-| `netintr_raw_socket_connection` | Z2 | tcp_connect | `network-intrusion.yaml:322` | no | structurally-dead | fix-condition | proto in [255,41,43,47…] |
-| `defense_evasion_journald_log_clear` | Z4 | file | `credential-and-defense-gaps.yaml:60` | no | structurally-dead | fix-condition | file.path prefix [/var/log/] AND file.op in [unlink,rmdir,truncate] AND proc.comm not_in [logrotate,logrotate.d,journalctl,rsyslogd…] |
-| `evasion_log_clear` | Z4 | file | `defense-evasion.yaml:3` | no | structurally-dead | fix-condition | file.path prefix [/var/log/] AND file.op in [unlink,truncate,rename] AND proc.comm not_in [logrotate,newsyslog,journald,rsyslog…] |
-| `impact_mass_file_deletion_critical` | Z4 | file | `impact-gaps.yaml:33` | no | structurally-dead | fix-condition | file.path prefix [/etc/,/var/log/,/boot/,/lib/modules/…] AND file.op in [unlink,rmdir] |
+| `c2_icmp_large_payload` | Z2 | tcp_connect | `command-and-control.yaml:336` | no | structurally-dead | document-as-structurally-inert | network.proto equals [1] AND network.dport gt [200] |
+| `netintr_gre_tunnel` | Z2 | tcp_connect | `network-intrusion.yaml:334` | no | structurally-dead | document-as-structurally-inert | proto in [47] |
+| `netintr_icmp_outbound_large` | Z2 | tcp_connect | `network-intrusion.yaml:209` | no | structurally-dead | document-as-structurally-inert | proto in [1] |
+| `netintr_raw_socket_connection` | Z2 | tcp_connect | `network-intrusion.yaml:322` | no | structurally-dead | document-as-structurally-inert | proto in [255,41,43,47…] |
+| `defense_evasion_journald_log_clear` | Z4 | file | `credential-and-defense-gaps.yaml:60` | no | structurally-dead | document-as-structurally-inert | file.path prefix [/var/log/] AND file.op in [unlink,rmdir,truncate] AND proc.comm not_in [logrotate,logrotate.d,journalctl,rsyslogd…] |
+| `evasion_log_clear` | Z4 | file | `defense-evasion.yaml:3` | no | structurally-dead | document-as-structurally-inert | file.path prefix [/var/log/] AND file.op in [unlink,truncate,rename] AND proc.comm not_in [logrotate,newsyslog,journald,rsyslog…] |
+| `impact_mass_file_deletion_critical` | Z4 | file | `impact-gaps.yaml:33` | no | structurally-dead | document-as-structurally-inert | file.path prefix [/etc/,/var/log/,/boot/,/lib/modules/…] AND file.op in [unlink,rmdir] |
 
 ### 6.2 `no-input-data` (271)
 
@@ -468,9 +473,10 @@ Grouped by reason, then by Z-section. Machine-readable twin: [`rules-audit-2026-
 | decision | count |
 |---|---:|
 | document-as-needing-environment | 262 |
-| fix-condition | 19 |
+| fix-condition | 12 |
 | merge-with-duplicate | 9 |
+| document-as-structurally-inert | 7 |
 | verify-after-fix | 2 |
 
-`fix-condition` = 19: 12 `nr`-dead + 3 `op`-dead + 4 `proto`-dead rules, whose condition cannot match the collector. The fix (drop/re-key the dead value set, or open the syscall and pay the noise) changes detection semantics and is deferred to the stand/owner (plan item 8) — this wave records the decision, it does not apply it. `verify-after-fix` = 2: already corrected by waves 5–6, needs a stand re-measure. The `document-as-needing-environment` bucket is the actionable backlog for a stand run (scenario per family), not a claim that those rules are wrong. **No rule was deleted, renamed or re-conditioned by this item.**
+`fix-condition` = 12: the 12 `nr`-dead rules, and only them — the axis opens with a config change whose price in noise is measurable, so the debt is real. Opening is done in portions, cheapest syscall first, each portion judged by an A/B pair; the hot numbers (`nanosleep`, `mprotect`, `prctl`, `clone`, `fork`) go last and only if their measured price passes. `document-as-structurally-inert` = 7: 3 `op`-dead + 4 `proto`-dead rules, whose axis has no producer at all — no condition edit can fix that, and their muteness is printed by the agent itself (`UnreachableFileOpRules`, `UnreachableProtoRules`). `verify-after-fix` = 2: already corrected by waves 5–6, needs a stand re-measure. The `document-as-needing-environment` bucket is the actionable backlog for a stand run (scenario per family), not a claim that those rules are wrong. **No rule was deleted, renamed or re-conditioned by this item.**
 

@@ -293,6 +293,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Any("rule_ids", unreachable))
 		}
 
+		// Item б1 волны 7 (28.09.2026): the same decay on the NETWORK axis —
+		// rules requiring proto in [ICMP 1, GRE 47, raw-socket 41/43/50/51/255],
+		// while bpf/network.bpf.c emits IPPROTO_TCP and nothing else. Unlike
+		// the nr axis above, no config opens these: there is no producer at
+		// all, so the record is the class, not a fix-condition debt.
+		if unreachable := correlator.NewRuleEngine(rules).UnreachableProtoRules(); len(unreachable) > 0 {
+			slog.Warn("rules: network rules whose proto condition names no protocol any hook produces",
+				slog.Int("count", len(unreachable)),
+				slog.Any("rule_ids", unreachable))
+		}
+
 		// Item 8 волны 7 (находка №494): the third axis of the same decay —
 		// a rule whose EVENT TYPE has no producer at all, so no condition
 		// check can ever see it. Reported here, next to its two siblings, so

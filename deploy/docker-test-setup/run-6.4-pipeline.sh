@@ -1045,10 +1045,53 @@ echo "  деплой волны 6.3.1: все четыре новые метри
 
 # Немота по среде фиксируется здесь же, пока журнал стартовых строк свеж
 # (находка №225). Файловая ось (№234/открытый вопрос 7) — рядом с syscall'ной.
-journalctl -u "$SVC" --since "@$(cat /root/agent-start-6.4.epoch)" --no-pager \
-    | grep -E 'no reachable nr in the kernel allowlist|cgroup escape collector unavailable|file rules whose op condition names no operation any hook produces' \
+#
+# ШАБЛОН ОТСТАВАЛ ОТ ЭМИТТЕРА, И ЭТО МОЛЧАЛИВАЯ ПОТЕРЯ (правка 28.09.2026,
+# волна 7 item б1). Семейств немоты у агента ЧЕТЫРЕ — ось `nr`
+# (UnreachableSyscallRules), ось `file.op` (UnreachableFileOpRules), ось
+# `proto` (UnreachableProtoRules, item б1) и ось ТИПА СОБЫТИЯ
+# (UnproducibleEventTypeRules, item 8/№494), — а альтернация ниже до сегодня
+# знала ТРИ шаблона и ни одного из них не было у семейства item 8. Агент печатал
+# его в журнал живьём (проверено на архиве collect-6.4-w504), но в
+# `env-muteness-6.4.txt` оно не попадало, и архив нёс реестр, из которого
+# читалось «семейств три». Ровно класс [[fixes-must-migrate-to-sibling-controls]]:
+# правка жила в эмиттере и не переехала в собиратель реестра.
+#
+# Сторож ниже закрывает СЛЕДУЮЩИЙ такой случай, а не только этот: он берёт из
+# журнала ВСЕ строки семейства `"msg":"rules: ` и называет те, которых в реестре
+# нет. Величина — число семейств в журнале против числа в реестре; расхождение
+# печатается ИМЕНАМИ, а не молчанием ([[muteness-registry-needs-an-emitter]]).
+_w7_mute_since="@$(cat /root/agent-start-6.4.epoch)"
+journalctl -u "$SVC" --since "$_w7_mute_since" --no-pager 2>/dev/null \
+    | grep -aE 'no reachable nr in the kernel allowlist|cgroup escape collector unavailable|file rules whose op condition names no operation any hook produces|proto condition names no protocol any hook produces|rules standing on an event type this build has no producer for' \
     > /root/env-muteness-6.4.txt 2>/dev/null
 echo "немота по среде записана: /root/env-muteness-6.4.txt ($(wc -l < /root/env-muteness-6.4.txt) строк)"
+# Сверка ПОЛНОТЫ реестра: каждое семейство `rules: …`, которое агент напечатал
+# на этом старте, обязано быть в реестре. Сообщения сравниваются по тексту
+# `msg`, а не по нашему шаблону — иначе сторож проверял бы сам себя
+# ([[guard-exculpating-token-must-not-be-its-own-comment]]).
+# _w7_mute_missing_families <файл журнала> <файл реестра> — печатает ИМЕНА
+# семейств `rules: …`, которые в журнале есть, а в реестре нет, по одному в
+# строке; пустой вывод значит «реестр полон». Именованный помощник, а не
+# выражение внутри echo: только так у сторожа есть фикстуры на обе ветки
+# ([[helper-called-before-definition-is-silent-pass]] — определение ОБЯЗАНО
+# стоять выше вызова, иначе сторож печатает зелёное всегда).
+_w7_mute_families() { grep -ao '"msg":"rules: [^"]*"' "$1" 2>/dev/null | sort -u; }
+_w7_mute_missing_families() {
+    comm -23 <(_w7_mute_families "$1") <(_w7_mute_families "$2")
+}
+_w7_mute_jrn="/root/env-muteness-6.4-journal.txt"
+journalctl -u "$SVC" --since "$_w7_mute_since" --no-pager > "$_w7_mute_jrn" 2>/dev/null
+_w7_mute_lost=$(_w7_mute_missing_families "$_w7_mute_jrn" /root/env-muteness-6.4.txt | grep -c . || true)
+_w7_mute_nj=$(_w7_mute_families "$_w7_mute_jrn" | grep -c . || true)
+_w7_mute_nr=$(_w7_mute_families /root/env-muteness-6.4.txt | grep -c . || true)
+if [ "${_w7_mute_lost:-0}" -eq 0 ]; then
+    echo "  реестр немоты ПОЛОН: семейств «rules: …» в журнале ${_w7_mute_nj}, в реестре ${_w7_mute_nr} — ни одно не потеряно"
+else
+    echo "  ВНИМАНИЕ (реестр немоты НЕПОЛОН, класс: шаблон собирателя отстал от эмиттера агента): семейств в журнале ${_w7_mute_nj}, в реестре ${_w7_mute_nr}, потеряно ${_w7_mute_lost} — $(_w7_mute_missing_families "$_w7_mute_jrn" /root/env-muteness-6.4.txt | tr '\n' ' ')"
+    echo "    Реестр в архиве будет читаться как полный и им не является. Дописать шаблон grep выше."
+fi
+rm -f "$_w7_mute_jrn"
 
 # ── Шаг 2б (№257, item 6 постановки 6.2.6). Снимок метрик СРАЗУ после
 #    старта агента — ДО 1800-секундного пролога, а не на границе t0

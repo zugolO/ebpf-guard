@@ -374,10 +374,22 @@ int BPF_PROG(lsm_kernel_module_request, char *kmod_name)
 
 	/* Fill parent info */
 	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-	struct task_struct *parent = task->real_parent;
-	if (parent) {
-		e->ppid = parent->tgid;
-		bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
+	struct task_struct *parent = NULL;
+	/* №452, ДОЖИВШИЙ ЗДЕСЬ ДО 28.09.2026: real_parent читается
+	 * bpf_probe_read_kernel, а НЕ разыменованием. bpf_get_current_task()
+	 * отдаёт __u64 — для верификатора это скаляр ('inv'), и прямое
+	 * `task->real_parent` он отвергает:
+	 *   load program: permission denied: (79) r3 = *(u64 *)(r0 +2512):
+	 *   R0 invalid mem access 'inv'
+	 * В шести соседних файлах это починено ещё №452. Здесь дефект выжил
+	 * потому, что объект Kmod вообще не доходил до верификатора: его роняли
+	 * имена хуков с лишним префиксом (№502). Тот же слоёный случай, что
+	 * [[stub-loader-hides-verifier-rejects]] — №436 прятал №452, здесь №502
+	 * прятал его же. Идиома взята у соседей, которые на этом ядре грузятся:
+	 * tls_clienthello.bpf.c, bpf_monitor.bpf.c, iouring.bpf.c. */
+	if (bpf_probe_read_kernel(&parent, sizeof(parent), &task->real_parent) == 0 && parent) {
+		e->ppid = (__u32)BPF_CORE_READ(parent, tgid);
+		bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), parent->comm);
 	} else {
 		e->ppid = 0;
 		__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));
@@ -431,10 +443,22 @@ int BPF_PROG(lsm_kernel_read_file, struct file *file, enum kernel_read_file_id i
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 
 	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-	struct task_struct *parent = task->real_parent;
-	if (parent) {
-		e->ppid = parent->tgid;
-		bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), &parent->comm);
+	struct task_struct *parent = NULL;
+	/* №452, ДОЖИВШИЙ ЗДЕСЬ ДО 28.09.2026: real_parent читается
+	 * bpf_probe_read_kernel, а НЕ разыменованием. bpf_get_current_task()
+	 * отдаёт __u64 — для верификатора это скаляр ('inv'), и прямое
+	 * `task->real_parent` он отвергает:
+	 *   load program: permission denied: (79) r3 = *(u64 *)(r0 +2512):
+	 *   R0 invalid mem access 'inv'
+	 * В шести соседних файлах это починено ещё №452. Здесь дефект выжил
+	 * потому, что объект Kmod вообще не доходил до верификатора: его роняли
+	 * имена хуков с лишним префиксом (№502). Тот же слоёный случай, что
+	 * [[stub-loader-hides-verifier-rejects]] — №436 прятал №452, здесь №502
+	 * прятал его же. Идиома взята у соседей, которые на этом ядре грузятся:
+	 * tls_clienthello.bpf.c, bpf_monitor.bpf.c, iouring.bpf.c. */
+	if (bpf_probe_read_kernel(&parent, sizeof(parent), &task->real_parent) == 0 && parent) {
+		e->ppid = (__u32)BPF_CORE_READ(parent, tgid);
+		bpf_probe_read_kernel(&e->parent_comm, sizeof(e->parent_comm), parent->comm);
 	} else {
 		e->ppid = 0;
 		__builtin_memset(&e->parent_comm, 0, sizeof(e->parent_comm));

@@ -129,6 +129,23 @@ static __always_inline __u32 fnv32a(const char *str)
 	return hash;
 }
 
+/* №502 (28.09.2026). Имена ТРЁХ хуков ниже несли лишний префикс `bpf_`:
+ * SEC("lsm/bpf_file_open"), SEC("lsm/bpf_socket_connect"),
+ * SEC("lsm/bpf_task_kill"). Точка привязки BPF LSM в ядре зовётся
+ * `bpf_lsm_<хук>`, поэтому эти три искали `bpf_lsm_bpf_file_open` и т.п. —
+ * символов, которых нет НИ НА ОДНОМ ядре (сверка /proc/kallsyms на
+ * ebaka2 5.15.0-194 с включённым lsm=bpf: bpf_lsm_file_open ЕСТЬ,
+ * bpf_lsm_bpf_file_open НЕТ).
+ *
+ * Цена опечатки была не три хука, а ВЕСЬ объект: все шесть программ этого
+ * файла компилируются в один объект Kmod, а attach_btf_id у LSM-программ
+ * резолвится на ЗАГРУЗКЕ. LoadKmodObjects падал целиком, и два ГОДНЫХ хука
+ * (kernel_module_request, kernel_read_file) — единственные, которые
+ * loadKmod() и привязывает — не привязывались никогда: collector_up{kmod}=0,
+ * семь правил event_type=kmod инертны, block_backend=lsm мёртв везде.
+ * Предъявлено меткой 6.6.5 живьём (ПРОВАЛЕН, класс ПРОДУКТОВЫЙ).
+ */
+
 /* LSM hook: file_open — called before opening a file
  * 
  * Return 0 to allow, -EPERM to block
@@ -136,7 +153,7 @@ static __always_inline __u32 fnv32a(const char *str)
  * Performance note: Fast path (non-blocked PID) is a single map lookup
  * and should complete in < 100ns.
  */
-SEC("lsm/bpf_file_open")
+SEC("lsm/file_open")
 int BPF_PROG(lsm_file_open, struct file *file)
 {
 	__u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -191,7 +208,7 @@ int BPF_PROG(lsm_file_open, struct file *file)
  *
  * Return 0 to allow, -EPERM to block
  */
-SEC("lsm/bpf_socket_connect")
+SEC("lsm/socket_connect")
 int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int addrlen)
 {
 	__u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -298,7 +315,7 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
  * Return 0 to allow, -EPERM to block
  * This hook is audit-only by default (always allows)
  */
-SEC("lsm/bpf_task_kill")
+SEC("lsm/task_kill")
 int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *info,
 	     int sig, const struct cred *cred)
 {

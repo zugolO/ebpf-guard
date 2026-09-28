@@ -543,6 +543,17 @@ func (c *KmodCollector) IsHealthy() bool { return c.loadError == nil }
 // load it on a kernel without BPF LSM support (no CONFIG_BPF_LSM / lsm=bpf)
 // fails outright — there is nothing to fall back to. When LSM is unavailable,
 // skip kmod load detection entirely rather than logging a misleading error.
+//
+// №502 (28.09.2026) — что этот комментарий ДОЛГО объяснял неверно. Загрузка
+// падала здесь и на ядре С поддержкой BPF LSM: три программы lsm.bpf.c несли
+// имена хуков с лишним префиксом (SEC("lsm/bpf_file_open") и два соседа), то
+// есть искали точки привязки bpf_lsm_bpf_file_open, которых нет нигде.
+// Поскольку attach_btf_id у LSM резолвится на ЗАГРУЗКЕ, а все шесть программ
+// лежат в одном объекте, падал объект целиком — и два ГОДНЫХ хука, которые
+// loadKmod() единственные и привязывает, не привязывались никогда. Отказ
+// списывался на «ядро без BPF LSM», хотя `/sys/kernel/security/lsm` содержал
+// bpf. Имена исправлены; ветка ниже остаётся законной для ядер, где BPF LSM
+// действительно выключен.
 func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error {
 	c.logger.Info("starting kmod collector", "lsm_available", c.available)
 

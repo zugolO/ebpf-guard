@@ -292,6 +292,34 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Int("count", len(unreachable)),
 				slog.Any("rule_ids", unreachable))
 		}
+
+		// Item 8 волны 7 (находка №494): the third axis of the same decay —
+		// a rule whose EVENT TYPE has no producer at all, so no condition
+		// check can ever see it. Reported here, next to its two siblings, so
+		// the muteness lives in the agent's own output instead of in prose
+		// nobody re-reads ([[wave-criteria-need-an-emitter]]).
+		if inert := correlator.NewRuleEngine(rules).UnproducibleEventTypeRules(); len(inert) > 0 {
+			ids := make([]string, 0, len(inert))
+			enforcing := make([]string, 0)
+			for _, r := range inert {
+				ids = append(ids, r.RuleID)
+				// An action that promises enforcement on an event that never
+				// arrives is a declaration of intent, not a capability, and
+				// the coverage tables read it as the latter.
+				if r.Action == "block" || r.Action == "kill" || r.Action == "throttle" {
+					enforcing = append(enforcing, r.RuleID+"="+r.Action)
+				}
+			}
+			slog.Warn("rules: rules standing on an event type this build has no producer for",
+				slog.Int("count", len(inert)),
+				slog.Any("rule_ids", ids),
+				slog.String("event_type", inert[0].EventType),
+				slog.String("reason", inert[0].Reason))
+			if len(enforcing) > 0 {
+				slog.Warn("rules: unproducible rules also declare an enforcing action that can never run",
+					slog.Any("rule_actions", enforcing))
+			}
+		}
 	}
 
 	// ── BTF source resolution ──────────────────────────────────────────────────

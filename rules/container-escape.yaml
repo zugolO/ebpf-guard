@@ -1129,7 +1129,22 @@ rules:
 
   # Process that was in a non-root cgroup migrated to cgroup ID 1 (root cgroup).
   # Moving to the root cgroup is almost always the precursor to a release_agent
-  # escape and should be treated as critical with immediate blocking.
+  # escape.
+  #
+  # action WAS "block" until 28.09.2026 (item 8 волны 7, финдинг №494).
+  # It was a promise of -EPERM that cannot be kept: event_type cgroup_esc has
+  # no producer in any build (bpf/cgroup.bpf.c hangs on lsm/cgroup_attach_task,
+  # a hook no released kernel defines), so the rule never matches and the
+  # action never runs. An enforcing action that can never run is not harmless
+  # documentation — coverage tables and the enforcement audit read the field as
+  # a capability. The INTENT is kept here in words, where it cannot be counted:
+  # if a producer for this axis ever lands (a kprobe on cgroup_attach_task, or
+  # a userspace comparison of the cgroup_id ordinary events already carry),
+  # this rule should go back to block.
+  #
+  # The rule itself is NOT deleted: it and its sibling are the only record that
+  # the migration step of the cgroup-escape technique is uncovered. The agent
+  # prints both at every start (UnproducibleEventTypeRules, cmd/ebpf-guard).
   - id: container_escape_cgroup_to_root
     name: "Container Escape: Process migrated to root cgroup"
     description: "A process was moved into cgroup ID 1 (root cgroup). This is the exact precursor step for the cgroup v1 release_agent escape technique."
@@ -1139,5 +1154,6 @@ rules:
       op: equals
       values: ["1"]
     severity: critical
-    action: block
+    # См. заголовок правила: block снят 28.09.2026 как неисполнимое обещание.
+    action: alert
     tags: [container-escape, cgroup, cgroup-escape, cve, mitre-t1611]

@@ -2428,3 +2428,75 @@ func hasPrefix(prefixes []string, value string) bool {
 	}
 	return false
 }
+
+// unproducibleEventTypes are event types NO producer in this build can ever
+// emit — not "not enabled here", not "needs a newer kernel", but structurally
+// absent. Each entry carries the evidence that made it structural, because an
+// entry added without it converts a configuration problem into a permanent
+// excuse and hides a real regression, exactly as an unjustified line in
+// intentional-loss.txt would.
+//
+// cgroup_esc (item 8 волны 7, находка №494): bpf/cgroup.bpf.c hangs on
+// lsm/cgroup_attach_task, and that hook exists in NO kernel. The LSM hook list
+// (include/linux/lsm_hook_defs.h) has never carried it in any released tree —
+// cgroup_attach_task is an internal function of kernel/cgroup/cgroup.c, not an
+// LSM hook. The agent's own journal says so on every start on ebaka2:
+// "cgroup_attach_task LSM hook not supported". Reviving the axis needs a
+// DIFFERENT producer (a kprobe on that symbol, or a userspace comparison of
+// the cgroup_id ordinary events already carry), not a newer kernel.
+var unproducibleEventTypes = map[types.EventType]string{
+	types.EventCgroupEsc: "bpf/cgroup.bpf.c attaches to lsm/cgroup_attach_task, a hook no released kernel defines (cgroup_attach_task is an internal kernel/cgroup/cgroup.c function, never an LSM hook)",
+}
+
+// UnproducibleEventTypeRule is one loaded rule whose event_type has no
+// producer at all in this build.
+type UnproducibleEventTypeRule struct {
+	RuleID    string
+	EventType string
+	Action    string
+	Reason    string
+}
+
+// UnproducibleEventTypeRules returns the loaded rules standing on an event
+// type from unproducibleEventTypes.
+//
+// Third member of the family after UnreachableSyscallRules (finding #39, the
+// nr axis) and UnreachableFileOpRules (open question 7, the file.op axis).
+// Those two catch a rule whose CONDITION can never be satisfied; this one
+// catches a rule whose PRODUCER does not exist, which no condition check can
+// see — rule_loader.go validates field names and the engine validates values,
+// and both are perfectly happy with a rule nothing will ever hand an event to.
+//
+// Why it reports instead of failing the load: the same reason its two
+// siblings do. These rules are the only record that a migration step of the
+// cgroup-escape technique is not covered, and deleting them would delete that
+// record. Until 28.09.2026 their muteness lived ONLY as prose in
+// attacks/silent-rules.txt:131 and was absent from the machine-readable audit
+// (docs/rules-audit-2026-09-27.csv: grep cgroup gives 0) — that is, it was
+// discoverable by a reader and by nothing else.
+//
+// Action is carried out deliberately: a rule with action "block" or "kill" on
+// an unproducible type promises enforcement that cannot happen, and that
+// promise is what a coverage table reads.
+//
+// The result is sorted by rule id for stable output.
+func (re *RuleEngine) UnproducibleEventTypeRules() []UnproducibleEventTypeRule {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+
+	var out []UnproducibleEventTypeRule
+	for _, rule := range re.rules {
+		reason, ok := unproducibleEventTypes[rule.EventType]
+		if !ok {
+			continue
+		}
+		out = append(out, UnproducibleEventTypeRule{
+			RuleID:    rule.ID,
+			EventType: rule.EventType.String(),
+			Action:    string(rule.Action),
+			Reason:    reason,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RuleID < out[j].RuleID })
+	return out
+}

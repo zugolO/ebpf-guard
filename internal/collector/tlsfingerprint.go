@@ -31,7 +31,40 @@ type TLSFingerprintCollector struct {
 	strategy    BackpressureStrategy
 	ringBufSize int
 	lostTotal   atomic.Uint64
+	// sampledAtInfo counts how many fingerprint events have already been
+	// logged at INFO. See tlsFingerprintInfoSample.
+	sampledAtInfo atomic.Uint64
 }
+
+// tlsFingerprintInfoSample is how many of this collector's first events are
+// logged at INFO instead of DEBUG.
+//
+// 6.6.6, половина (б), решение 28.09.2026. The label's input was the
+// "tlsfingerprint event" line, which only DEBUG printed — and the service runs
+// at --log-level=info. The label was taken once (collect-6.6-ja3short,
+// 27.09.2026) but on every STANDARD run half (b) would read НЕ СНЯТА: a debt
+// of the instrument, not of the verdict.
+//
+// Two rejected repairs and why:
+//   - the probe raises the log level for its own duration. Needs a service
+//     restart, and a restart is not separable from zeroing the drift baseline
+//     ([[ab-toggle-measures-the-restart]]) — the probe would pay for the whole
+//     run's other measurements;
+//   - pid and fingerprints move into a metric. JA3/JA4 are high-cardinality by
+//     construction; as label values they are an unbounded series set, which is
+//     what the cardinality guard exists to prevent.
+//
+// What half (b) actually needs is an IDENTITY SAMPLE (this pid produced this
+// fingerprint), not a величина — the величина is already
+// ebpf_guard_tls_events_by_family_total{family="ja3"}. That is exactly the
+// shape №474 settled for the whole project: метрика даёт величину, журнал —
+// образец причины. So the first N events print at INFO and the rest fall back
+// to DEBUG: bounded cost, available on every standard run, no restart, no new
+// series.
+//
+// N=20 is the probe's own need: it sends a handful of ClientHellos and matches
+// its pid among them. Beyond that the sample answers nothing new.
+const tlsFingerprintInfoSample = 20
 
 // NewTLSFingerprintCollector creates a new TLS fingerprint collector.
 func NewTLSFingerprintCollector(logger *slog.Logger) (*TLSFingerprintCollector, error) {
@@ -228,7 +261,18 @@ func (c *TLSFingerprintCollector) readLoop(ctx context.Context, out chan<- types
 			continue
 		}
 
-		if c.logger.Enabled(ctx, slog.LevelDebug) {
+		// Одна и та же строка и одни и те же поля на обоих уровнях: зонд
+		// 6.6.6 ищет её по имени, и расхождение текста между уровнями
+		// сделало бы половину (б) зависимой от уровня ЕЩЁ РАЗ.
+		if n := c.sampledAtInfo.Add(1); n <= tlsFingerprintInfoSample {
+			c.logger.Info("tlsfingerprint event",
+				slog.Uint64("pid", uint64(event.PID)),
+				slog.String("ja3", event.TLS.JA3),
+				slog.String("ja4", event.TLS.JA4),
+				slog.Uint64("info_sample", n),
+				slog.Int("info_sample_of", tlsFingerprintInfoSample),
+			)
+		} else if c.logger.Enabled(ctx, slog.LevelDebug) {
 			c.logger.Debug("tlsfingerprint event",
 				slog.Uint64("pid", uint64(event.PID)),
 				slog.String("ja3", event.TLS.JA3),

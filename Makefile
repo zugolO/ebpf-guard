@@ -1,7 +1,7 @@
 # ebpf-guard Makefile
 # Requires: go 1.23+, clang, llvm, kernel headers
 
-.PHONY: all generate build build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare pgo-profile pgo-update build-pgo package package-deb package-rpm
+.PHONY: all generate build build-core build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare pgo-profile pgo-update build-pgo package package-deb package-rpm
 
 # Variables
 BINARY_NAME := ebpf-guard
@@ -64,18 +64,40 @@ generate:
 	@echo "  Removing stub bindings now superseded by generated files..."
 	@rm -f internal/bpf/*_bpf_gen.go
 
-# Build the main binary (core only — no OPA, Kafka, or TUI).
+# Build the main binary — THE build that goes to the stand and to the image.
+#
+# -tags rego is NOT optional here. The product default is policy.rego.enabled:
+# true (internal/config), and a binary built without the tag answers that
+# config with a hard stop: the Rego engine is a build-tag-gated no-op, so the
+# shipped default configuration does not start. A `make build` that produced
+# such a binary meant the standard build was a configuration the product
+# itself refuses ([[make-build-drops-rego-tag]]) — and, worse, the service
+# unit on the stand launches $(BUILD_DIR)/$(BINARY_NAME) by that exact name,
+# so build-rego's separate $(BINARY_NAME)-rego artifact was never the thing
+# under test.
+#
+# Acceptance, and the reason this is one line and not a comment:
+#   make build && ./build/ebpf-guard version   # must print rego=true
+#
 # PGO is applied automatically when default.pgo exists in the module root.
 build:
-	@echo "Building $(BINARY_NAME) (core)..."
+	@echo "Building $(BINARY_NAME) (core + rego)..."
 	mkdir -p $(BUILD_DIR)
-	go build -pgo=auto -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
+	go build -tags rego -pgo=auto -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
+
+# Build without the Rego engine. Kept as its own target rather than as the
+# default: it is a legitimate artifact (smaller, no OPA dependency) but it is
+# only usable with policy.rego.enabled: false, so it must be asked for by name.
+build-core:
+	@echo "Building $(BINARY_NAME)-core (no rego)..."
+	mkdir -p $(BUILD_DIR)
+	go build -pgo=auto -o $(BUILD_DIR)/$(BINARY_NAME)-core ./cmd/ebpf-guard
 
 # Build with explicit PGO (same as build; useful for scripting / CI)
 build-pgo:
 	@echo "Building $(BINARY_NAME) with PGO..."
 	mkdir -p $(BUILD_DIR)
-	go build -pgo=auto -v -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
+	go build -tags rego -pgo=auto -v -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/ebpf-guard
 
 # Build with all optional subsystems enabled
 build-full:
@@ -83,11 +105,11 @@ build-full:
 	mkdir -p $(BUILD_DIR)
 	go build -tags rego,kafka,tui -o $(BUILD_DIR)/$(BINARY_NAME)-full ./cmd/ebpf-guard
 
-# Build with OPA/Rego policy engine only
-build-rego:
-	@echo "Building $(BINARY_NAME) (core + rego)..."
-	mkdir -p $(BUILD_DIR)
-	go build -tags rego -o $(BUILD_DIR)/$(BINARY_NAME)-rego ./cmd/ebpf-guard
+# Retained alias: `build` already carries -tags rego. Kept so existing scripts
+# and docs that call build-rego keep working, and pointed at the SAME artifact
+# name the service launches — the separate $(BINARY_NAME)-rego binary was the
+# defect, not the tag.
+build-rego: build
 
 # Build with Kafka exporter only
 build-kafka:

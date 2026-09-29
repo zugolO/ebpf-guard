@@ -95,9 +95,41 @@ func readPortionManifest(t *testing.T) portionFile {
 func TestWave7PortionManifestMatchesRuleset(t *testing.T) {
 	man := readPortionManifest(t)
 
-	assert.ElementsMatch(t, bpf.DefaultMonitoredSyscalls(), man.baseline,
-		"the manifest's baseline must be the allowlist the stand actually falls back to "+
-			"(config-test.yaml sets no monitored_syscalls)")
+	// The baseline is the PRE-б3 allowlist — the one item б2 measured the price
+	// against — and it stays that list as portions get opened permanently.
+	// Checking it against DefaultMonitoredSyscalls() outright would hold only
+	// until the first portion ships: the default would then already contain the
+	// portion's numbers, the portion would buy nothing, and the manifest would
+	// have to be regenerated into a table of empty portions.
+	//
+	// What must hold forever: the default equals the baseline plus exactly the
+	// numbers of the portions already opened, and never anything else.
+	opened := map[int]bool{}
+	for _, p := range man.portions {
+		for _, nr := range p.nrs {
+			opened[nr] = true
+		}
+	}
+	var extra []int
+	base := map[int]bool{}
+	for _, nr := range man.baseline {
+		base[nr] = true
+	}
+	for _, nr := range bpf.DefaultMonitoredSyscalls() {
+		if !base[nr] {
+			extra = append(extra, nr)
+			assert.True(t, opened[nr],
+				"number %d is in DefaultMonitoredSyscalls() but neither in the manifest's "+
+					"baseline nor in any portion — it was opened without a measured price", nr)
+		}
+	}
+	for _, nr := range man.baseline {
+		assert.Contains(t, bpf.DefaultMonitoredSyscalls(), nr,
+			"number %d is in the manifest's baseline but no longer in "+
+				"DefaultMonitoredSyscalls(): the baseline is a historical constant and "+
+				"a number cannot leave it", nr)
+	}
+	t.Logf("порций открыто постоянно: номеров сверх baseline %d (%v)", len(extra), extra)
 
 	rules, err := LoadRulesFromDir("../../rules")
 	require.NoError(t, err)

@@ -62,6 +62,26 @@ _name_of() {
     esac
 }
 
+# _w7p_calls <файл вывода bpftrace> <nr> — число вызовов номера за окно, СУММОЙ
+# по разрезу `comm`. Отдельной карты по id больше нет: bpftrace 0.14 на этом
+# ядре не грузит ни программу с предикатом из 19 сравнений («Error loading
+# program»), ни `BEGIN` для карты-фильтра («Could not resolve symbol:
+# BEGIN_trigger»), поэтому берётся ОДИН зонд без предиката, а разбор считает
+# сам. Сумма по comm тождественна счётчику по id: каждый посчитанный вызов
+# попадает ровно в одну ячейку (id, comm).
+_w7p_calls() {
+    awk -v nr="$2" '
+        {
+            if (match($0, /^@c\[[0-9]+,[ ]?/) != 1) next
+            id = $0; sub(/^@c\[/, "", id); sub(/,.*$/, "", id)
+            if (id + 0 != nr + 0) next
+            if (match($0, /\]:[ \t]+[0-9]+[ \t]*$/) == 0) next
+            cnt = substr($0, RSTART + 2); gsub(/[^0-9]/, "", cnt)
+            s += cnt
+        }
+        END { printf "%d", s + 0 }
+    ' "$1"
+}
 # _w7p_top_comms <файл вывода bpftrace> <nr> — три самых частых comm по номеру,
 # «comm:N,comm:N,comm:N». Разбирается ВСЯ строка, а не $1: многоключевую карту
 # bpftrace печатает как «@c[10, bash]: 5» — С ПРОБЕЛОМ после запятой, — и
@@ -90,8 +110,7 @@ _w7p_report() {
     echo "total_sys_enter=$total"
     echo "csv=$W7_PRICE_CSV"
     printf '%s\n' "$_NRS" | while read -r nr rules; do
-        calls=$(awk -v k="@n[$nr]:" '$1==k{print $2}' "$bt")
-        calls="${calls:-0}"
+        calls=$(_w7p_calls "$bt" "$nr")
         permin=$(awk -v c="$calls" -v s="$W7_PRICE_SECS" 'BEGIN{printf "%.1f", (s>0)? c*60.0/s : 0}')
         tops=$(_w7p_top_comms "$bt" "$nr")
         echo "nr=$nr name=$(_name_of "$nr") calls=$calls per_min=$permin rules=$rules top_comms=${tops:--}"
@@ -113,13 +132,12 @@ if [ "${1:-}" = "--self-test" ]; then
     cat > "$_st_dir/bt.txt" <<'BT'
 @all: 900
 
-@n[10]: 120
-@n[35]: 4
-
 @c[10, bash]: 20
 @c[10, ebpf-guard]: 90
 @c[10, sshd]: 10
+@c[10, cron]: 3
 @c[35, bpftrace]: 4
+@c[101, bash]: 777
 BT
     _st_out=$(_w7p_report "$_st_dir/bt.txt" 900)
     _st_chk() { # <имя> <ожидаемая подстрока>
@@ -131,8 +149,19 @@ BT
     }
     # Ключ с ПРОБЕЛОМ разобран, comm отсортированы по величине, срез — три.
     _st_chk "разрез по comm с пробелом в ключе" "top_comms=ebpf-guard:90,bash:20,sshd:10"
-    # per_min считается от окна, а не от минуты: 120 вызовов за 30с = 240/мин.
-    _st_chk "per_min от длины окна" "nr=10 name=mprotect calls=120 per_min=240.0"
+    # Число вызовов — СУММА по разрезу, а не одна ячейка: 20+90+10+3 = 123.
+    # Срез top_comms при этом остаётся ТРЁХ строк, и сумма ему не равна —
+    # частая ловушка «взять первое число из разреза за величину».
+    _st_chk "вызовы суммируются по всем comm, а не берутся из среза" "calls=123"
+    # per_min считается от окна, а не от минуты: 123 вызова за 30с = 246/мин.
+    _st_chk "per_min от длины окна" "nr=10 name=mprotect calls=123 per_min=246.0"
+    # Номер, которого НЕТ в списке аудита, в отчёт не попадает, даже если он
+    # самый частый в замере: мерится названный набор, а не что попало.
+    if printf '%s\n' "$_st_out" | grep -q "nr=101"; then
+        echo "    ПРОВАЛ: номер вне набора аудита попал в отчёт"; _st_fail=1
+    else
+        echo "    OK  номер вне набора аудита (101, 777 вызовов) в отчёт НЕ попал"
+    fi
     _st_chk "малая частота не теряется" "nr=35 name=nanosleep calls=4 per_min=8.0"
     # Номер, которого в замере НЕ БЫЛО: строка обязана быть, с нулём и прочерком
     # — «нет строки» читалось бы как «номер не мерили».
@@ -142,7 +171,7 @@ BT
     _st_chk "окно и знаменатель в отчёте" "total_sys_enter=900"
     rm -rf "$_st_dir"
     if [ "$_st_fail" = "0" ]; then
-        echo "САМОПРОВЕРКА РАЗБОРА ПРОЙДЕНА: 7 проверок, расхождений 0"
+        echo "САМОПРОВЕРКА РАЗБОРА ПРОЙДЕНА: 9 проверок, расхождений 0"
         exit 0
     fi
     echo "САМОПРОВЕРКА РАЗБОРА ПРОВАЛЕНА"
@@ -175,13 +204,20 @@ PY
 _N=$(printf '%s\n' "$_NRS" | grep -c .)
 echo "--- ЦЕНА ОСИ nr (item б2): ${_N} номеров из $(basename "$W7_PRICE_CSV"), окно ${W7_PRICE_SECS}с, bpftrace ---"
 
-# Предикат разреза по comm перечисляет РОВНО измеряемые номера: хеш по (id,comm)
-# на КАЖДОМ syscall'е ноды был бы вторым источником искажения самого замера.
-_PRED=$(printf '%s\n' "$_NRS" | awk '{printf "%sargs->id==%s", (NR>1 ? "||" : ""), $1}')
+# ОДИН ЗОНД, БЕЗ ПРЕДИКАТА И БЕЗ `BEGIN` — и это не упрощение, а вынужденная
+# форма, найденная на стенде (ebaka2, bpftrace v0.14.0). Две очевидные формы
+# отказывают ЖИВЬЁ: программа с предикатом из 19 сравнений `args->id==N||…` не
+# грузится вовсе («ERROR: Error loading program: tracepoint:raw_syscalls:
+# sys_enter»), а карта-фильтр, заполняемая в `BEGIN`, падает на самом
+# `BEGIN` («Could not resolve symbol: /proc/self/exe:BEGIN_trigger»). Обе
+# проверены по отдельности: минимальный зонд и ДВА зонда на одном tracepoint
+# работают, значит дело в предикате и в BEGIN, а не в tracepoint'е.
+# Отбор номеров перенесён в РАЗБОР: карта (id, comm) собирается по всем
+# syscall'ам, а нужные 19 берутся из неё суммой. Цена этой формы названа:
+# карта шире (на этой ноде 166 ячеек за 5 с), зато программа грузится.
 _BT="$W7_PRICE_ART/bpftrace-raw.txt"
 bpftrace -e "
-tracepoint:raw_syscalls:sys_enter { @all = count(); @n[args->id] = count(); }
-tracepoint:raw_syscalls:sys_enter /${_PRED}/ { @c[args->id, comm] = count(); }
+tracepoint:raw_syscalls:sys_enter { @all = count(); @c[args->id, comm] = count(); }
 interval:s:${W7_PRICE_SECS} { exit(); }
 " > "$_BT" 2>"$W7_PRICE_ART/bpftrace-err.txt"
 _rc=$?

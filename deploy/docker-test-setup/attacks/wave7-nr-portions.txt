@@ -1,0 +1,75 @@
+# wave7-nr-portions.txt — порции открытия оси `nr`, item б3 волны 7.
+# ГЕНЕРИРУЕТСЯ tools/rules-audit/nr-portions.py из rules/*.yaml.
+# Руками не правится: состав правил порции — следствие набора правил, а не решения.
+# Формат: <порция> <вид> <величина>. Вид: NR (номер), RULE (rule_id), PRICE (nr=вызовов/мин).
+#
+# Правило открывается ЛЮБЫМ своим номером, поэтому оно принадлежит ПЕРВОЙ
+# порции, содержащей хоть один из его номеров — той, чья цена его покупает.
+
+BASELINE NR 59,322,101,126,308,272,319,165,166,155,161,311,310,298,175,313,176,321,105
+EXCLUDED NR 35  # nanosleep: 22 775/мин доли ноды; web_blind_sqli_heuristic открывается через sync(162) даром
+
+# порция 1 (нулевая): 10 номеров, 7 правил
+P1 NR 57
+P1 PRICE 57=0  # fork
+P1 NR 132
+P1 PRICE 132=0  # utime
+P1 NR 135
+P1 PRICE 135=0  # personality
+P1 NR 162
+P1 PRICE 162=0  # sync
+P1 NR 206
+P1 PRICE 206=0  # io_setup
+P1 NR 235
+P1 PRICE 235=0  # utimes
+P1 NR 238
+P1 PRICE 238=0  # set_mempolicy
+P1 NR 258
+P1 PRICE 258=0  # mkdirat
+P1 NR 280
+P1 PRICE 280=0  # utimensat
+P1 NR 317
+P1 PRICE 317=0  # seccomp
+P1 RULE evasion_auditd_stop
+P1 RULE evasion_timestamp_modify
+P1 RULE impact_fork_bomb_pattern
+P1 RULE mitre_sandbox_detect_cpuid
+P1 RULE sigma_seccomp_filter_install
+P1 RULE sigma_world_writable_dir_created
+P1 RULE web_blind_sqli_heuristic
+
+# порция 2 (дешёвая): 5 номеров, 3 правил
+P2 NR 88
+P2 PRICE 88=3  # symlink
+P2 NR 37
+P2 PRICE 37=30  # alarm
+P2 NR 83
+P2 PRICE 83=37  # mkdir
+P2 NR 157
+P2 PRICE 157=50  # prctl
+P2 NR 62
+P2 PRICE 62=61  # kill
+P2 RULE persist_systemd_wants_symlink
+P2 RULE ransomware_backup_tool_kill
+P2 RULE sigma_prctl_dumpable
+
+# порция 3 (дорогая): 3 номеров, 4 правил
+P3 NR 56
+P3 PRICE 56=198  # clone
+P3 NR 41
+P3 PRICE 41=505  # socket
+P3 NR 10
+P3 PRICE 10=1668  # mprotect
+P3 RULE c2_raw_socket_shell
+P3 RULE exfil_raw_socket_by_non_root
+P3 RULE mitre_arp_spoof_raw_socket
+P3 RULE sigma_mprotect_exec_heap
+
+# НЕ ПОКУПАЕТСЯ НИ ОДНОЙ ПОРЦИЕЙ (цена номеров не мерена item'ом б2):
+UNBOUGHT RULE evasion_self_delete 87,263
+UNBOUGHT RULE ransomware_backup_delete 87,263
+UNBOUGHT RULE ransomware_mass_rename 82
+UNBOUGHT RULE rootkit_anonymous_exec_memory 9
+UNBOUGHT RULE rootkit_kexec_load 246,320
+UNBOUGHT RULE rootkit_userfaultfd_create 323
+# итого: правил оси `nr` немых на baseline 20, покупается порциями 14, остаётся 6

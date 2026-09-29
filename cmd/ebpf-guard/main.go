@@ -270,11 +270,22 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// is dropped before it reaches the rule engine. 27 rules accumulated in
 	// this state silently before this check existed. Report them once at
 	// startup rather than let them decay unnoticed again.
+	// Item б3 волны 7: the price of opening a syscall is read on that number's
+	// OWN axis inside one window, never as the difference of two window volumes
+	// between two runs (запрет №503). The axis is declared from the SAME
+	// effective allowlist that enableKernelFilter ships to the kernel, so a
+	// number open in the kernel and a number labelled in the series cannot
+	// drift apart. Declared unconditionally: with the filter disabled the
+	// allowlist stops gating events but still names which numbers are read
+	// individually, and everything else collapses into nr="other".
+	effectiveAllowlist := cfg.BPF.KernelFilter.MonitoredSyscalls
+	if len(effectiveAllowlist) == 0 {
+		effectiveAllowlist = internalbpf.DefaultMonitoredSyscalls()
+	}
+	exporter.SetSyscallNRAxis(effectiveAllowlist)
+
 	if len(rules) > 0 {
-		allowlist := cfg.BPF.KernelFilter.MonitoredSyscalls
-		if len(allowlist) == 0 {
-			allowlist = internalbpf.DefaultMonitoredSyscalls()
-		}
+		allowlist := effectiveAllowlist
 		if cfg.BPF.KernelFilter.Enabled {
 			if unreachable := correlator.NewRuleEngine(rules).UnreachableSyscallRules(allowlist); len(unreachable) > 0 {
 				slog.Warn("rules: syscall rules with no reachable nr in the kernel allowlist",
@@ -2799,6 +2810,7 @@ func processEvent(
 	}
 	exporter.RecordEventWithLabels(exporter.EventTypeLabel(event.Type), evtPod, evtNamespace, evtNode)
 	exporter.RecordTLSFamily(&event)
+	exporter.RecordSyscallNR(&event)
 
 	// plan.md 5.9.8b (№91): counting-control canary events get their own
 	// series, so criterion 20 can read a count that is background-free by

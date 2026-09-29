@@ -3,6 +3,7 @@ package exporter
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,6 +92,30 @@ var (
 			Help: "TLS events by producer family: payload (uprobe plaintext) or ja3 (ClientHello fingerprint).",
 		},
 		[]string{"family"},
+	)
+
+	// SyscallEventsByNR splits the {type="syscall"} axis of EventsTotal by the
+	// syscall number (item б3 волны 7). Opening a syscall in
+	// bpf.kernel_filter.monitored_syscalls costs events, and the ONLY reading
+	// of that cost that is not the difference of two window volumes between
+	// two runs (запрет №503) is the opened number's OWN axis: its delta inside
+	// the window of the run that opened it. Without this series the price of a
+	// portion could be named only by subtracting run A's {type="syscall"} from
+	// run B's — the exact reading the tls_fingerprint pair proved worthless
+	// (находка №507: −787 on one pair, +299 on another, both at zero real cost).
+	//
+	// A separate series rather than a label on EventsTotal, for the reason
+	// TLSEventsByFamily states. The label set is BOUNDED by declaration, not by
+	// the kernel: SetSyscallNRAxis materializes one series per allowed number
+	// and every other number collapses into nr="other". Undeclared, every event
+	// goes to nr="unset" — an explicit "the axis was never declared", never a
+	// zero that reads as "this syscall never happened".
+	SyscallEventsByNR = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_syscall_events_by_nr_total",
+			Help: "Syscall events by syscall number, restricted to the declared kernel-filter allowlist: nr=\"<number>\" for an allowed number, nr=\"other\" for any number outside it, nr=\"unset\" when no axis was declared.",
+		},
+		[]string{"nr"},
 	)
 
 	// TLSPayloadCapture splits payload-family TLS events by DIRECTION and by
@@ -753,6 +778,68 @@ func RecordTLSFamily(e *types.Event) {
 	if e.Type == types.EventTLS {
 		TLSEventsByFamily.WithLabelValues(TLSFamily(e.TLS)).Inc()
 	}
+}
+
+// SyscallNRLabelOther is the bucket for a syscall number outside the declared
+// allowlist; SyscallNRLabelUnset is the bucket used until an axis is declared.
+const (
+	SyscallNRLabelOther = "other"
+	SyscallNRLabelUnset = "unset"
+)
+
+var (
+	syscallNRAxisMu sync.RWMutex
+	syscallNRAxis   map[int64]string
+)
+
+// SetSyscallNRAxis declares the syscall numbers that get their own label value
+// on SyscallEventsByNR and materializes a series for each, so a zero there is a
+// reading ("this number was open and never fired") and not an absent series
+// ([[metric-anchor-must-carry-full-series-name]]). Numbers outside the
+// declaration collapse into nr="other", which bounds the cardinality of the
+// series at len(allowlist)+2 whatever the kernel sends.
+//
+// Called once at startup with the effective kernel-filter allowlist. Declaring
+// an empty list clears the axis: every event then counts under nr="unset".
+func SetSyscallNRAxis(allowed []int) {
+	axis := make(map[int64]string, len(allowed))
+	for _, nr := range allowed {
+		axis[int64(nr)] = strconv.Itoa(nr)
+	}
+
+	syscallNRAxisMu.Lock()
+	syscallNRAxis = axis
+	syscallNRAxisMu.Unlock()
+
+	for _, label := range axis {
+		SyscallEventsByNR.WithLabelValues(label)
+	}
+	SyscallEventsByNR.WithLabelValues(SyscallNRLabelOther)
+}
+
+// SyscallNRLabel maps a syscall number to its label value under the declared
+// axis.
+func SyscallNRLabel(nr int64) string {
+	syscallNRAxisMu.RLock()
+	axis := syscallNRAxis
+	syscallNRAxisMu.RUnlock()
+
+	if len(axis) == 0 {
+		return SyscallNRLabelUnset
+	}
+	if label, ok := axis[nr]; ok {
+		return label
+	}
+	return SyscallNRLabelOther
+}
+
+// RecordSyscallNR counts a syscall event under its number. No-op for other
+// types and for a syscall event that carries no syscall payload.
+func RecordSyscallNR(e *types.Event) {
+	if e == nil || e.Type != types.EventSyscall || e.Syscall == nil {
+		return
+	}
+	SyscallEventsByNR.WithLabelValues(SyscallNRLabel(e.Syscall.Nr)).Inc()
 }
 
 // EventTypeLabel converts an EventType to the short string used as the

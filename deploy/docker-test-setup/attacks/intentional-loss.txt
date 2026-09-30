@@ -74,16 +74,12 @@ netintr_syn_scan_pattern
 #       был бы чистым приростом idle-шума без единого срабатывания — ровно то,
 #       что запрещает запрет №1 волны 5.9.2. Разблокируется волной 6 вместе с
 #       ransomware-сценарием.
-mitre_sandbox_detect_cpuid
 mitre_arp_spoof_raw_socket
 rootkit_anonymous_exec_memory
 rootkit_userfaultfd_create
 rootkit_kexec_load
 sigma_mprotect_exec_heap
 sigma_prctl_dumpable
-sigma_seccomp_filter_install
-sigma_world_writable_dir_created
-web_blind_sqli_heuristic
 ransomware_mass_rename
 ransomware_backup_delete
 
@@ -197,9 +193,27 @@ rootkit_hidden_dir_dev
 # (plan.md, пункт 8); эти строки фиксируют, что ноль объяснён, а не незамечен.
 c2_raw_socket_shell
 exfil_raw_socket_by_non_root
-evasion_auditd_stop
 ransomware_backup_tool_kill
 evasion_self_delete
-evasion_timestamp_modify
 persist_systemd_wants_symlink
-impact_fork_bomb_pattern
+
+
+# ── СНЯТО С УЧЁТА 29.09.2026: ПОРЦИЯ 1 ОСИ `nr` ОТКРЫТА ПО СНЯТОЙ ЦЕНЕ.
+#    Семь правил ниже БОЛЬШЕ НЕ ЯВЛЯЮТСЯ намеренной потерей и потому убраны из
+#    списка id выше: их номера открыты в обоих аллоулистах (config/config.yaml и
+#    DefaultMonitoredSyscalls()), а значит их ноль — уже не свойство конструкции,
+#    а отсутствие attack-шага, и место такому нулю в silent-rules.txt, не здесь.
+#
+#      evasion_auditd_stop, evasion_timestamp_modify, impact_fork_bomb_pattern,
+#      mitre_sandbox_detect_cpuid, sigma_seccomp_filter_install,
+#      sigma_world_writable_dir_created, web_blind_sqli_heuristic
+#
+#    Цена открытия НАЗВАНА, а не оценена: пара A/B на одном бинаре
+#    (server-logs/collect-6.4-w669A и -w669B, окна по 600 с) дала 10 событий и
+#    1 алерт за окно на все десять номеров вместе; немота оси `nr` в живом
+#    реестре упала 20 → 13. Абзацы выше, описывающие эти правила, остаются как
+#    история разбора: утверждение «нет attack-шага» про них по-прежнему верно,
+#    неверным стало только слово «немо по конструкции».
+#
+#    Порции 2 и 3 НЕ открыты: каждая требует своей пары
+#    (deploy/docker-test-setup/attacks/wave7-nr-portions.txt).

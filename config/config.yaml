@@ -83,6 +83,20 @@ bpf:
       - 176  # delete_module
       - 321  # bpf
       - 105  # setuid
+      # Item б3 волны 7 (29.09.2026), порция 1 — открыта по цене, снятой парой
+      # A/B: 10 событий и 1 алерт за окно 600 с на все десять номеров вместе,
+      # немота оси `nr` 20 → 13. Порядок открытия дал bpftrace (item б2),
+      # вердикт о цене — пара (находка №509).
+      - 57   # fork
+      - 132  # utime
+      - 135  # personality
+      - 162  # sync
+      - 206  # io_setup
+      - 235  # utimes
+      - 238  # set_mempolicy
+      - 258  # mkdirat
+      - 280  # utimensat
+      - 317  # seccomp
 
     # P1-18b: path-prefix denylist for file open/read/write events, matched
     # in-kernel before the event reaches the ring buffer. Empty by default —

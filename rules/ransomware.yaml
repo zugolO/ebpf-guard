@@ -97,7 +97,7 @@ rules:
       conditions:
         - field: syscall.nr
           op: in
-          values: ["62", "37"]   # kill, tkill
+          values: ["62", "200"]  # kill, tkill (37 — это alarm, не tkill: №512)
         - field: proc.comm
           op: in
           values: ["bash", "sh", "python3", "python", "perl"]

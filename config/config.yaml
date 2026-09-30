@@ -97,6 +97,14 @@ bpf:
       - 258  # mkdirat
       - 280  # utimensat
       - 317  # seccomp
+    # ── Item б3 волны 7 (30.09.2026), порция 2 — открыта ЧАСТЬЮ по цене,
+    # снятой парой A/B (collect-6.4-w669P2A/-w669P2B, окна 600 с). Вся пятёрка
+    # стоила 10 936 событий за окно; открыты только те два номера, что покупают
+    # правило и не платят объёмом алертов. Отвергнуты: 88 symlink (правило
+    # persist_systemd_wants_symlink без условия на путь — 240 ложных/ч, №512),
+    # 37 alarm и 83 mkdir (0 новых правил, 4394 события впустую, №511).
+      - 62   # kill, 554 события/окно по замеру пары
+      - 157  # prctl, 5904 события/окно по замеру пары
 
     # P1-18b: path-prefix denylist for file open/read/write events, matched
     # in-kernel before the event reaches the ring buffer. Empty by default —

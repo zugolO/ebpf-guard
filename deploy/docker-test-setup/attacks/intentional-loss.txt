@@ -79,7 +79,6 @@ rootkit_anonymous_exec_memory
 rootkit_userfaultfd_create
 rootkit_kexec_load
 sigma_mprotect_exec_heap
-sigma_prctl_dumpable
 ransomware_mass_rename
 ransomware_backup_delete
 
@@ -193,7 +192,6 @@ rootkit_hidden_dir_dev
 # (plan.md, пункт 8); эти строки фиксируют, что ноль объяснён, а не незамечен.
 c2_raw_socket_shell
 exfil_raw_socket_by_non_root
-ransomware_backup_tool_kill
 evasion_self_delete
 persist_systemd_wants_symlink
 
@@ -217,3 +215,37 @@ persist_systemd_wants_symlink
 #
 #    Порции 2 и 3 НЕ открыты: каждая требует своей пары
 #    (deploy/docker-test-setup/attacks/wave7-nr-portions.txt).
+
+
+# ── ЧАСТИЧНО СНЯТО С УЧЁТА 30.09.2026: ПОРЦИЯ 2 ОСИ `nr` ОТКРЫТА ЧАСТЬЮ.
+#    Пара A/B (server-logs/collect-6.4-w669P2A и -w669P2B, один бинарь
+#    45317d06, окна по 600 с) сняла цену каждого из пяти номеров порознь, и
+#    решение по каждому принято величиной:
+#
+#      ОТКРЫТЫ. ransomware_backup_tool_kill (через kill 62, 554 события за окно)
+#      и sigma_prctl_dumpable (через prctl 157, 5904 события) убраны из списка
+#      id выше: их номера теперь в обоих аллоулистах, и их ноль — отсутствие
+#      attack-шага, а не свойство конструкции. Место такому нулю в
+#      silent-rules.txt.
+#
+#      ОСТАЛОСЬ НАМЕРЕННОЙ ПОТЕРЕЙ. persist_systemd_wants_symlink остаётся в
+#      списке id, но ПРИЧИНА У НЕГО ТЕПЕРЬ ДРУГАЯ, и она измерена (№512).
+#      Раньше строка читалась «немо, потому что symlink(88) не в аллоулисте».
+#      Пара открыла 88 и предъявила, что правило НЕ УМЕЕТ того, что написано в
+#      его имени и описании: у него нет условия на путь ВООБЩЕ — только
+#      `syscall.nr in [88]` и `proc.comm not_in [systemctl, dpkg, …]`. То есть
+#      оно ловит любой symlink(2) на ноде, а не symlink в каталоге .wants/.
+#      Живьём это 40 алертов за окно, ВСЕ pid 1 /usr/lib/systemd/systemd, ровно
+#      ~4/мин на протяжении всего прогона = 240 ложных/ч при нуле детекта.
+#      Условием на путь это не лечится: у события syscall есть только
+#      syscall.arg0…arg5 — сырые u64, пути в них нет, а `comm not_in` — известный
+#      немой обход. Правило требует переноса на файловую ось или снятия; до
+#      этого 88 закрыт СОЗНАТЕЛЬНО, и его ноль — намеренная потеря.
+#
+#      НЕ ОТКРЫТЫ И НИЧЕГО НЕ ТЕРЯЮТ. alarm(37) и mkdir(83): 3430 и 964 события
+#      за окно и ни одного нового правила. 37 стояло в
+#      ransomware_backup_tool_kill как «tkill», хотя tkill — это 200 (правило
+#      починено), а 83 покупает sigma_world_writable_dir_created, уже купленное
+#      mkdirat(258) порцией 1.
+#
+#    Порция 3 НЕ открыта: ей нужна своя пара.

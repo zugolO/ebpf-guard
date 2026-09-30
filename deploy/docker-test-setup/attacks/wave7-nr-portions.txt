@@ -76,6 +76,7 @@ P2 RULE sigma_prctl_dumpable
 # порция 3 (дорогая): 3 номеров, 4 правил
 P3 NR 56
 P3 PRICE 56=198  # clone
+P3 REJECTED 56  # clone: 0 новых правил: impact_fork_bomb_pattern уже куплено fork(57) порцией 1; 198 вызовов/мин по зонду — второй по цене номер порции 3, отвергнут каталогом ДО замера (№511)
 P3 NR 41
 P3 PRICE 41=505  # socket
 P3 NR 10

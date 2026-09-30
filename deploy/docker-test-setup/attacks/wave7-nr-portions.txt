@@ -1,7 +1,9 @@
 # wave7-nr-portions.txt — порции открытия оси `nr`, item б3 волны 7.
 # ГЕНЕРИРУЕТСЯ tools/rules-audit/nr-portions.py из rules/*.yaml.
 # Руками не правится: состав правил порции — следствие набора правил, а не решения.
-# Формат: <порция> <вид> <величина>. Вид: NR (номер), RULE (rule_id), PRICE (nr=вызовов/мин).
+# Формат: <порция> <вид> <величина>. Вид: NR (номер), RULE (rule_id),
+# PRICE (nr=вызовов/мин, ЗОНД item'а б2), MEASURED (nr=событий за окно, ПАРА A/B),
+# REJECTED (номер, чью цену пара сняла и по которой его НЕ открыли).
 #
 # Правило открывается ЛЮБЫМ своим номером, поэтому оно принадлежит ПЕРВОЙ
 # порции, содержащей хоть один из его номеров — той, чья цена его покупает.
@@ -12,24 +14,34 @@ EXCLUDED NR 35  # nanosleep: 22 775/мин доли ноды; web_blind_sqli_heu
 # порция 1 (нулевая): 10 номеров, 7 правил
 P1 NR 57
 P1 PRICE 57=0  # fork
+P1 MEASURED 57=0  # fork, событий за окно 600 с, пара A/B
 P1 NR 132
 P1 PRICE 132=0  # utime
+P1 MEASURED 132=0  # utime, событий за окно 600 с, пара A/B
 P1 NR 135
 P1 PRICE 135=0  # personality
+P1 MEASURED 135=0  # personality, событий за окно 600 с, пара A/B
 P1 NR 162
 P1 PRICE 162=0  # sync
+P1 MEASURED 162=0  # sync, событий за окно 600 с, пара A/B
 P1 NR 206
 P1 PRICE 206=0  # io_setup
+P1 MEASURED 206=0  # io_setup, событий за окно 600 с, пара A/B
 P1 NR 235
 P1 PRICE 235=0  # utimes
+P1 MEASURED 235=0  # utimes, событий за окно 600 с, пара A/B
 P1 NR 238
 P1 PRICE 238=0  # set_mempolicy
+P1 MEASURED 238=0  # set_mempolicy, событий за окно 600 с, пара A/B
 P1 NR 258
 P1 PRICE 258=0  # mkdirat
+P1 MEASURED 258=10  # mkdirat, событий за окно 600 с, пара A/B
 P1 NR 280
 P1 PRICE 280=0  # utimensat
+P1 MEASURED 280=0  # utimensat, событий за окно 600 с, пара A/B
 P1 NR 317
 P1 PRICE 317=0  # seccomp
+P1 MEASURED 317=0  # seccomp, событий за окно 600 с, пара A/B
 P1 RULE evasion_auditd_stop
 P1 RULE evasion_timestamp_modify
 P1 RULE impact_fork_bomb_pattern
@@ -41,14 +53,22 @@ P1 RULE web_blind_sqli_heuristic
 # порция 2 (дешёвая): 5 номеров, 3 правил
 P2 NR 88
 P2 PRICE 88=3  # symlink
+P2 MEASURED 88=84  # symlink, событий за окно 600 с, пара A/B
+P2 REJECTED 88  # symlink: покупает persist_systemd_wants_symlink, а у того НЕТ условия на путь (№512): 40 алертов за окно, все pid 1 systemd, ровно ~4/мин весь прогон = 240/ч ложных при нуле детекта
 P2 NR 37
 P2 PRICE 37=30  # alarm
+P2 MEASURED 37=3430  # alarm, событий за окно 600 с, пара A/B
+P2 REJECTED 37  # alarm: 0 новых правил: ransomware_backup_tool_kill открывается через kill(62), а само 37 — alarm, а не tkill, как считало правило (№512); 3430 событий за окно впустую
 P2 NR 83
 P2 PRICE 83=37  # mkdir
+P2 MEASURED 83=964  # mkdir, событий за окно 600 с, пара A/B
+P2 REJECTED 83  # mkdir: 0 новых правил: sigma_world_writable_dir_created уже куплено mkdirat(258) порцией 1; 964 события за окно впустую
 P2 NR 157
 P2 PRICE 157=50  # prctl
+P2 MEASURED 157=5904  # prctl, событий за окно 600 с, пара A/B
 P2 NR 62
 P2 PRICE 62=61  # kill
+P2 MEASURED 62=554  # kill, событий за окно 600 с, пара A/B
 P2 RULE persist_systemd_wants_symlink
 P2 RULE ransomware_backup_tool_kill
 P2 RULE sigma_prctl_dumpable

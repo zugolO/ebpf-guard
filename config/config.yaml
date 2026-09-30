@@ -105,6 +105,13 @@ bpf:
     # 37 alarm и 83 mkdir (0 новых правил, 4394 события впустую, №511).
       - 62   # kill, 554 события/окно по замеру пары
       - 157  # prctl, 5904 события/окно по замеру пары
+    # ── Item б3 волны 7 (30.09.2026), порция 3 «горячая» — открыта ОДНИМ номером
+    # из трёх по замеру пары collect-6.4-w669P3A/-w669P3B. mprotect стоит дороже
+    # всего в событиях, но ноль алертов по всем трём слоям подавления, дропы не
+    # выросли (обе половины +695) и аллокации +0,64%. Отвергнуты: 41 socket (его
+    # exfil_raw_socket_by_non_root заливает 7890 алертов/ч из пода coredns, №515)
+    # и 56 clone (0 новых правил, №511). nanosleep(35) не открывается вовсе.
+      - 10   # mprotect, 52 696 событий/окно по замеру пары
 
     # P1-18b: path-prefix denylist for file open/read/write events, matched
     # in-kernel before the event reaches the ring buffer. Empty by default —

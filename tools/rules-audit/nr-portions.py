@@ -68,7 +68,8 @@ EXCLUDED = {35: "22 775/мин доли ноды; web_blind_sqli_heuristic от�
 # mkdirat, а порции 2 — 181 вызов/мин на пять номеров, тогда как пара намерила
 # 10 936 событий за окно (≈1094/мин): зонд задаёт ПОРЯДОК, вердикт даёт пара.
 MEASURED = {57: 0, 132: 0, 135: 0, 162: 0, 206: 0, 235: 0, 238: 0, 258: 10,
-            280: 0, 317: 0, 88: 84, 37: 3430, 83: 964, 157: 5904, 62: 554}
+            280: 0, 317: 0, 88: 84, 37: 3430, 83: 964, 157: 5904, 62: 554,
+            41: 12081, 10: 52696}
 
 # Номера, чью цену пара сняла и по которой их НЕ открыли. Отказ — величина:
 # либо номер не покупает НИ ОДНОГО нового правила, либо купленное им правило
@@ -89,6 +90,11 @@ REJECTED = {
     56: "0 новых правил: impact_fork_bomb_pattern уже куплено fork(57) порцией 1; "
         "198 вызовов/мин по зонду — второй по цене номер порции 3, отвергнут "
         "каталогом ДО замера (№511)",
+    41: "покупает три правила, но одно из них — exfil_raw_socket_by_non_root — "
+        "заливает: истинный объём 1315 алертов за окно 600 с (101 выпущено + 209 "
+        "срезал лимитер + 1005 дедуп) = 7890/ч, и 100 из 101 выпущенных пришли из "
+        "пода coredns-54996dc9b4-tq8rc kube-system (№515). Объём АЛЕРТОВ уехал, а "
+        "это и есть условие отказа, записанное для порции 3 до её замера",
 }
 
 NAMES = {10: "mprotect", 35: "nanosleep", 37: "alarm", 41: "socket", 56: "clone",
@@ -164,7 +170,9 @@ def main():
         "# Руками не правится: состав правил порции — следствие набора правил, а не решения.",
         "# Формат: <порция> <вид> <величина>. Вид: NR (номер), RULE (rule_id),",
         "# PRICE (nr=вызовов/мин, ЗОНД item'а б2), MEASURED (nr=событий за окно, ПАРА A/B),",
-        "# REJECTED (номер, чью цену пара сняла и по которой его НЕ открыли).",
+        "# REJECTED (номер, чью цену сняли и по которой его НЕ открыли),",
+        "# MUTERULE (правило порции, остающееся немым ПО РЕШЕНИЮ — все его номера отвергнуты).",
+        "# RULE — правило, которое покупает ОТКРЫВАЕМАЯ часть порции, и только она.",
         "#",
         "# Правило открывается ЛЮБЫМ своим номером, поэтому оно принадлежит ПЕРВОЙ",
         "# порции, содержащей хоть один из его номеров — той, чья цена его покупает.",
@@ -177,10 +185,19 @@ def main():
 
     taken = set()
     for pid, label, nrs in PORTIONS:
-        opened = sorted(rid for rid, want in rules.items()
-                        if rid not in taken and any(n in nrs for n in want))
-        taken.update(opened)
-        lines.append("# порция %s (%s): %d номеров, %d правил" % (pid, label, len(nrs), len(opened)))
+        # Правила, которые покупает ВЕСЬ состав порции, и правила, которые
+        # покупает только ОТКРЫВАЕМАЯ её часть (состав минус отвергнутые). Их
+        # разность — правила, остающиеся немыми ПО РЕШЕНИЮ: у эмиттера метки
+        # 6.6.9 это не провал роли B, а исполненный отказ, и он обязан уметь
+        # отличать одно от другого (№514).
+        will_open = [n for n in nrs if n not in REJECTED]
+        all_rules = sorted(rid for rid, want in rules.items()
+                           if rid not in taken and any(n in nrs for n in want))
+        opened = sorted(rid for rid in all_rules if any(n in will_open for n in rules[rid]))
+        kept_mute = [rid for rid in all_rules if rid not in opened]
+        taken.update(all_rules)
+        lines.append("# порция %s (%s): %d номеров (открывается %d), правил %d (остаётся немыми по решению %d)"
+                     % (pid, label, len(nrs), len(will_open), len(opened), len(kept_mute)))
         for nr in nrs:
             lines.append("P%s NR %d" % (pid, nr))
             lines.append("P%s PRICE %d=%d  # %s" % (pid, nr, PRICE[nr], NAMES.get(nr, "?")))
@@ -191,6 +208,9 @@ def main():
                 lines.append("P%s REJECTED %d  # %s: %s" % (pid, nr, NAMES.get(nr, "?"), REJECTED[nr]))
         for rid in opened:
             lines.append("P%s RULE %s" % (pid, rid))
+        for rid in kept_mute:
+            lines.append("P%s MUTERULE %s  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты"
+                         % (pid, rid))
         lines.append("")
 
     # Rules no portion buys. Their numbers were never measured by item б2, and a

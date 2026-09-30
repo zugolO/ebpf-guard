@@ -17,10 +17,11 @@ import (
 const portionManifest = "../../deploy/docker-test-setup/attacks/wave7-nr-portions.txt"
 
 type nrPortion struct {
-	id       string
-	nrs      []int
-	rules    []string
-	rejected []int
+	id        string
+	nrs       []int
+	rules     []string
+	muteRules []string
+	rejected  []int
 }
 
 type portionFile struct {
@@ -79,6 +80,8 @@ func readPortionManifest(t *testing.T) portionFile {
 				out.portions[pos].nrs = append(out.portions[pos].nrs, n)
 			case "RULE":
 				out.portions[pos].rules = append(out.portions[pos].rules, value)
+			case "MUTERULE":
+				out.portions[pos].muteRules = append(out.portions[pos].muteRules, value)
 			case "REJECTED":
 				n, err := strconv.Atoi(value)
 				require.NoError(t, err)
@@ -150,9 +153,10 @@ func TestWave7PortionManifestMatchesRuleset(t *testing.T) {
 		after := re.UnreachableSyscallRules(open)
 
 		opened := setDifference(mute, after)
-		assert.ElementsMatch(t, p.rules, opened,
-			"portion %s opens numbers %v: the manifest claims it buys %v, the ruleset says %v",
-			p.id, p.nrs, p.rules, opened)
+		assert.ElementsMatch(t, append(append([]string{}, p.rules...), p.muteRules...), opened,
+			"portion %s opens numbers %v: the manifest claims it buys %v (plus %v left mute by "+
+				"decision), the ruleset says %v",
+			p.id, p.nrs, p.rules, p.muteRules, opened)
 
 		mute = after
 	}
@@ -162,6 +166,50 @@ func TestWave7PortionManifestMatchesRuleset(t *testing.T) {
 	for _, p := range man.portions {
 		assert.NotEmpty(t, p.rules, "portion %s buys no rule", p.id)
 	}
+}
+
+// MUTERULE — правило порции, чьи номера ОТВЕРГНУТЫ, и потому оно остаётся немым
+// по решению, а не по недосмотру. Утверждение проверяемое: открыв ВСЕ
+// неотвергнутые номера ВСЕХ порций, такое правило обязано остаться немым. Если
+// оно откроется другим путём, запись «остаётся немым по решению» станет ложью, а
+// эмиттер метки 6.6.9 ждёт его в реестре немоты и объявит роль B провалившейся.
+func TestWave7KeptMuteRulesStayMute(t *testing.T) {
+	man := readPortionManifest(t)
+
+	rules, err := LoadRulesFromDir("../../rules")
+	require.NoError(t, err)
+	re := NewRuleEngine(rules)
+
+	rej := map[int]bool{}
+	open := append([]int{}, man.baseline...)
+	var kept []string
+	for _, p := range man.portions {
+		for _, nr := range p.rejected {
+			rej[nr] = true
+		}
+		kept = append(kept, p.muteRules...)
+	}
+	for _, p := range man.portions {
+		for _, nr := range p.nrs {
+			if !rej[nr] {
+				open = append(open, nr)
+			}
+		}
+	}
+	require.NotEmpty(t, kept,
+		"ни одного MUTERULE: сторож остался бы зелёным на любом манифесте")
+
+	mute := map[string]bool{}
+	for _, rid := range re.UnreachableSyscallRules(open) {
+		mute[rid] = true
+	}
+	for _, rid := range kept {
+		assert.True(t, mute[rid],
+			"правило %s записано как остающееся немым ПО РЕШЕНИЮ, но при открытых "+
+				"неотвергнутых номерах всех порций оно ДОСТИЖИМО: запись лжёт, и эмиттер "+
+				"6.6.9 объявит роль B провалившейся, увидев его вне реестра немоты", rid)
+	}
+	t.Logf("немыми по решению остаются %d правил: %v", len(kept), kept)
 }
 
 // Порция может открыться ЧАСТЬЮ: цена снимается парой по КАЖДОМУ номеру, и

@@ -17,9 +17,10 @@ import (
 const portionManifest = "../../deploy/docker-test-setup/attacks/wave7-nr-portions.txt"
 
 type nrPortion struct {
-	id    string
-	nrs   []int
-	rules []string
+	id       string
+	nrs      []int
+	rules    []string
+	rejected []int
 }
 
 type portionFile struct {
@@ -78,6 +79,10 @@ func readPortionManifest(t *testing.T) portionFile {
 				out.portions[pos].nrs = append(out.portions[pos].nrs, n)
 			case "RULE":
 				out.portions[pos].rules = append(out.portions[pos].rules, value)
+			case "REJECTED":
+				n, err := strconv.Atoi(value)
+				require.NoError(t, err)
+				out.portions[pos].rejected = append(out.portions[pos].rejected, n)
 			}
 		}
 	}
@@ -157,6 +162,92 @@ func TestWave7PortionManifestMatchesRuleset(t *testing.T) {
 	for _, p := range man.portions {
 		assert.NotEmpty(t, p.rules, "portion %s buys no rule", p.id)
 	}
+}
+
+// Порция может открыться ЧАСТЬЮ: цена снимается парой по КАЖДОМУ номеру, и
+// номер, чья цена не прошла, помечается в манифесте строкой `P<n> REJECTED`.
+// Порция 2 (30.09.2026) — первый такой случай: из пяти номеров открыты два.
+// Сторож держит три следствия этого, каждое — на величине, а не на комментарии.
+func TestWave7RejectedNumbersStayClosed(t *testing.T) {
+	man := readPortionManifest(t)
+
+	def := map[int]bool{}
+	for _, nr := range bpf.DefaultMonitoredSyscalls() {
+		def[nr] = true
+	}
+
+	rules, err := LoadRulesFromDir("../../rules")
+	require.NoError(t, err)
+	re := NewRuleEngine(rules)
+
+	anyRejected := false
+	for _, p := range man.portions {
+		rejected := map[int]bool{}
+		for _, nr := range p.rejected {
+			rejected[nr] = true
+			anyRejected = true
+			// (1) Отвергнутый номер в аллоулист попасть не может: иначе его
+			// цена записана как непройденная, а платится она всё равно.
+			assert.False(t, def[nr],
+				"номер %d помечен в манифесте как REJECTED (порция %s), но он есть "+
+					"в DefaultMonitoredSyscalls(): отказ по цене и открытие одновременно",
+				nr, p.id)
+			assert.Contains(t, p.nrs, nr,
+				"номер %d отвергнут в порции %s, но в её составе его нет", nr, p.id)
+		}
+
+		// Порция считается ПОСТАВЛЕННОЙ, если хоть один её номер уже в
+		// аллоулисте. Дальше проверяем её только в этом случае: порция, ещё не
+		// поставленная (у неё цена не снята), ничего не обязана.
+		shipped := false
+		for _, nr := range p.nrs {
+			if def[nr] {
+				shipped = true
+				break
+			}
+		}
+		if !shipped {
+			continue
+		}
+
+		// (2) У поставленной порции каждый номер либо открыт, либо ОТВЕРГНУТ
+		// ИМЕНЕМ. Молча выпасть номер не может — иначе состав порции в
+		// манифесте разъезжается с тем, что реально несёт аллоулист.
+		var openedNrs []int
+		for _, nr := range p.nrs {
+			if def[nr] {
+				openedNrs = append(openedNrs, nr)
+				continue
+			}
+			assert.True(t, rejected[nr],
+				"порция %s поставлена, но номер %d не открыт и не помечен REJECTED: "+
+					"выпал молча", p.id, nr)
+		}
+
+		// (3) Открытая часть порции обязана покупать правило. Ровно этим
+		// провалились 37 и 83: 4394 события за окно и ни одного нового правила.
+		base := append([]int{}, man.baseline...)
+		for _, q := range man.portions {
+			if q.id == p.id {
+				break
+			}
+			for _, nr := range q.nrs {
+				if def[nr] {
+					base = append(base, nr)
+				}
+			}
+		}
+		before := re.UnreachableSyscallRules(base)
+		after := re.UnreachableSyscallRules(append(append([]int{}, base...), openedNrs...))
+		bought := setDifference(before, after)
+		assert.NotEmpty(t, bought,
+			"порция %s открыта номерами %v и не покупает НИ ОДНОГО правила: "+
+				"цена платится, немота не падает", p.id, openedNrs)
+		t.Logf("порция %s: открыто %v, куплено правил %d (%v)", p.id, openedNrs, len(bought), bought)
+	}
+	require.True(t, anyRejected,
+		"ни одного REJECTED в манифесте: сторож частичного открытия остался бы "+
+			"зелёным на любом составе")
 }
 
 // nanosleep(35) is named in the manifest as excluded, and the exclusion is only

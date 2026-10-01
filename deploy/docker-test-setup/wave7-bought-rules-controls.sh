@@ -88,9 +88,6 @@ sigma_mprotect_exec_heap|10|python3|_p_mprotect_exec
 exfil_raw_socket_by_non_root|41|python3|_p_rawsock_nonroot
 c2_raw_socket_shell|41|python3|_p_rawsock_root
 mitre_arp_spoof_raw_socket|41|python3|_p_packet_socket
-ransomware_mass_rename|82|python3|_p_rename
-evasion_self_delete|87|python3|_p_unlink
-ransomware_backup_delete|87|python3|_p_unlink
 rootkit_kexec_load|246|python3|_p_kexec_nonroot
 rootkit_userfaultfd_create|323|python3|_p_userfaultfd_nonroot
 rootkit_anonymous_exec_memory|9|python3|_p_mmap_anon_exec"
@@ -176,6 +173,8 @@ done(rc, en)')"; }
 _p_packet_socket() { python3 "$(_pyfile packet_socket 'rc, en = sc(41, 17, 3, 768)
 done(rc, en)')"; }
 
+# Нагрузки _p_rename/_p_unlink оставлены БЕЗ строк таблицы: 82 и 87 отвергнуты парой порции 4
+# (ложный объём), правила остаются немыми по решению и не «куплены». Строка вернётся с номером.
 # Порции 4 и 5. kexec_load и userfaultfd — ОТ НЕ-ROOT: kexec_load первым делом проверяет
 # CAP_SYS_BOOT и отвечает EPERM, ничего не трогая (от root вызов с нулём сегментов
 # выгрузил бы поставленный образ kexec), а userfaultfd у не-root безвреден. Правила

@@ -91,18 +91,25 @@ P3 MUTERULE c2_raw_socket_shell  # остаётся немым ПО РЕШЕНИ
 P3 MUTERULE exfil_raw_socket_by_non_root  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
 P3 MUTERULE mitre_arp_spoof_raw_socket  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
 
-# порция 4 (повторная и нулевые остатки): 7 номеров (открывается 5), правил 8 (остаётся немыми по решению 0)
+# порция 4 (повторная и нулевые остатки): 7 номеров (открывается 3), правил 5 (остаётся немыми по решению 3)
 P4 NR 41
 P4 PRICE 41=505  # socket
+P4 MEASURED 41=8281  # socket, событий за окно 600 с, пара A/B
 P4 REOPENED 41  # socket: правка №516: exfil_raw_socket_by_non_root и c2_raw_socket_shell проверяли только «вызван socket(2)», без SOCK_RAW в arg1 — отсюда 7890 алертов/ч от coredns (№515). Предикат типа добавлен в условие правил; исключение по exe_path НЕ заведено: оно лечило бы следствие и ослепило бы правило на скомпрометированный /coredns
 P4 NR 82
 P4 PRICE 82=2  # rename
+P4 MEASURED 82=44  # rename, событий за окно 600 с, пара A/B
+P4 REJECTED 82  # rename: покупает ransomware_mass_rename, у которого нет условия на расширение из описания (№520): 44 алерта за окно, 47 из 48 за прогон — pid 1 systemd, 264/ч ложных при нуле детекта; пара порции 4
 P4 NR 87
 P4 PRICE 87=2  # unlink
+P4 MEASURED 87=44  # unlink, событий за окно 600 с, пара A/B
+P4 REJECTED 87  # unlink: покупает evasion_self_delete (условие «любой unlink не из списка», а не «собственный бинарь», №520): 44 алерта за окно = 264/ч, 89 из 91 за прогон — grafana, ложных при нуле детекта; ransomware_backup_delete (тот же номер) молчит и остаётся немым; пара порции 4
 P4 NR 246
 P4 PRICE 246=0  # kexec_load
+P4 MEASURED 246=0  # kexec_load, событий за окно 600 с, пара A/B
 P4 NR 323
 P4 PRICE 323=0  # userfaultfd
+P4 MEASURED 323=0  # userfaultfd, событий за окно 600 с, пара A/B
 P4 NR 263
 P4 PRICE 263=3  # unlinkat
 P4 REJECTED 263  # unlinkat: 0 новых правил: evasion_self_delete и ransomware_backup_delete покупает unlink(87) той же порции, второй номер не покупает ничего (№511); отвергнут каталогом ДО замера. ЦЕНА ПОКРЫТИЯ, а не правила: правила названы оба номера, и без 263 они не видят `rm` (unlinkat), только unlink(2) — см. №517
@@ -110,13 +117,13 @@ P4 NR 320
 P4 PRICE 320=0  # kexec_file_load
 P4 REJECTED 320  # kexec_file_load: 0 новых правил: rootkit_kexec_load покупает kexec_load(246) той же порции; kexec_file_load — путь современных kexec-утилит, и без него правило не видит его (№517). Отвергнут каталогом ДО замера, цена 0 вызовов/мин
 P4 RULE c2_raw_socket_shell
-P4 RULE evasion_self_delete
 P4 RULE exfil_raw_socket_by_non_root
 P4 RULE mitre_arp_spoof_raw_socket
-P4 RULE ransomware_backup_delete
-P4 RULE ransomware_mass_rename
 P4 RULE rootkit_kexec_load
 P4 RULE rootkit_userfaultfd_create
+P4 MUTERULE evasion_self_delete  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
+P4 MUTERULE ransomware_backup_delete  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
+P4 MUTERULE ransomware_mass_rename  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
 
 # порция 5 (горячая): 1 номеров (открывается 1), правил 1 (остаётся немыми по решению 0)
 P5 NR 9
@@ -124,4 +131,4 @@ P5 PRICE 9=3433  # mmap
 P5 RULE rootkit_anonymous_exec_memory
 
 # НЕ ПОКУПАЕТСЯ НИ ОДНОЙ ПОРЦИЕЙ (цена номеров не мерена item'ом б2):
-# итого: правил оси `nr` немых на baseline 19, покупается порциями 19, немы по решению 0, не покупается 0
+# итого: правил оси `nr` немых на baseline 19, покупается порциями 16, немы по решению 3, не покупается 0

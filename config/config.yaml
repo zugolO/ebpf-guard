@@ -112,6 +112,12 @@ bpf:
     # exfil_raw_socket_by_non_root заливает 7890 алертов/ч из пода coredns, №515)
     # и 56 clone (0 новых правил, №511). nanosleep(35) не открывается вовсе.
       - 10   # mprotect, 52 696 событий/окно по замеру пары
+      # Порция 4 (пара collect-6.4-w669P4A/-w669P4B): 8369 событий за окно,
+      # дропы без path_denylist +0, аллокации +1,18%. Открыты 41 (повторно, после
+      # предиката SOCK_RAW, №516), 246, 323; 82 и 87 отвергнуты по ложному объёму.
+      - 41   # socket, 8281 событие/окно по замеру пары
+      - 246  # kexec_load, 0 событий/окно
+      - 323  # userfaultfd, 0 событий/окно
 
     # P1-18b: path-prefix denylist for file open/read/write events, matched
     # in-kernel before the event reaches the ring buffer. Empty by default —

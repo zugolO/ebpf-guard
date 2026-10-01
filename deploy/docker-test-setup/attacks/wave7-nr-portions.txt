@@ -92,19 +92,37 @@ P3 MUTERULE c2_raw_socket_shell  # остаётся немым ПО РЕШЕНИ
 P3 MUTERULE exfil_raw_socket_by_non_root  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
 P3 MUTERULE mitre_arp_spoof_raw_socket  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
 
-# порция 4 (повторная): 1 номеров (открывается 1), правил 3 (остаётся немыми по решению 0)
+# порция 4 (повторная и нулевые остатки): 7 номеров (открывается 5), правил 8 (остаётся немыми по решению 0)
 P4 NR 41
 P4 PRICE 41=505  # socket
 P4 REOPENED 41  # socket: правка №516: exfil_raw_socket_by_non_root и c2_raw_socket_shell проверяли только «вызван socket(2)», без SOCK_RAW в arg1 — отсюда 7890 алертов/ч от coredns (№515). Предикат типа добавлен в условие правил; исключение по exe_path НЕ заведено: оно лечило бы следствие и ослепило бы правило на скомпрометированный /coredns
+P4 NR 82
+P4 PRICE 82=2  # rename
+P4 NR 87
+P4 PRICE 87=2  # unlink
+P4 NR 246
+P4 PRICE 246=0  # kexec_load
+P4 NR 323
+P4 PRICE 323=0  # userfaultfd
+P4 NR 263
+P4 PRICE 263=3  # unlinkat
+P4 REJECTED 263  # unlinkat: 0 новых правил: evasion_self_delete и ransomware_backup_delete покупает unlink(87) той же порции, второй номер не покупает ничего (№511); отвергнут каталогом ДО замера. ЦЕНА ПОКРЫТИЯ, а не правила: правила названы оба номера, и без 263 они не видят `rm` (unlinkat), только unlink(2) — см. №517
+P4 NR 320
+P4 PRICE 320=0  # kexec_file_load
+P4 REJECTED 320  # kexec_file_load: 0 новых правил: rootkit_kexec_load покупает kexec_load(246) той же порции; kexec_file_load — путь современных kexec-утилит, и без него правило не видит его (№517). Отвергнут каталогом ДО замера, цена 0 вызовов/мин
 P4 RULE c2_raw_socket_shell
+P4 RULE evasion_self_delete
 P4 RULE exfil_raw_socket_by_non_root
 P4 RULE mitre_arp_spoof_raw_socket
+P4 RULE ransomware_backup_delete
+P4 RULE ransomware_mass_rename
+P4 RULE rootkit_kexec_load
+P4 RULE rootkit_userfaultfd_create
+
+# порция 5 (горячая): 1 номеров (открывается 1), правил 1 (остаётся немыми по решению 0)
+P5 NR 9
+P5 PRICE 9=3433  # mmap
+P5 RULE rootkit_anonymous_exec_memory
 
 # НЕ ПОКУПАЕТСЯ НИ ОДНОЙ ПОРЦИЕЙ (цена номеров не мерена item'ом б2):
-UNBOUGHT RULE evasion_self_delete 87,263
-UNBOUGHT RULE ransomware_backup_delete 87,263
-UNBOUGHT RULE ransomware_mass_rename 82
-UNBOUGHT RULE rootkit_anonymous_exec_memory 9
-UNBOUGHT RULE rootkit_kexec_load 246,320
-UNBOUGHT RULE rootkit_userfaultfd_create 323
-# итого: правил оси `nr` немых на baseline 20, покупается порциями 13, немы по решению 1, не покупается 6
+# итого: правил оси `nr` немых на baseline 20, покупается порциями 19, немы по решению 1, не покупается 0

@@ -87,7 +87,13 @@ sigma_prctl_dumpable|157|python3|_p_prctl_dumpable
 sigma_mprotect_exec_heap|10|python3|_p_mprotect_exec
 exfil_raw_socket_by_non_root|41|python3|_p_rawsock_nonroot
 c2_raw_socket_shell|41|python3|_p_rawsock_root
-mitre_arp_spoof_raw_socket|41|python3|_p_packet_socket"
+mitre_arp_spoof_raw_socket|41|python3|_p_packet_socket
+ransomware_mass_rename|82|python3|_p_rename
+evasion_self_delete|87|python3|_p_unlink
+ransomware_backup_delete|87|python3|_p_unlink
+rootkit_kexec_load|246|python3|_p_kexec_nonroot
+rootkit_userfaultfd_create|323|python3|_p_userfaultfd_nonroot
+rootkit_anonymous_exec_memory|9|python3|_p_mmap_anon_exec"
 
 # Общая шапка python-нагрузки: печатает ОДНУ строку-результат, по которой работает
 # результатный сторож (pid, comm из /proc/self/comm, rc, errno). Нагрузка пишется
@@ -168,6 +174,26 @@ done(rc, en)')"; }
 _p_rawsock_root() { python3 "$(_pyfile rawsock_root 'rc, en = sc(41, 2, 3, 255)
 done(rc, en)')"; }
 _p_packet_socket() { python3 "$(_pyfile packet_socket 'rc, en = sc(41, 17, 3, 768)
+done(rc, en)')"; }
+
+# Порции 4 и 5. kexec_load и userfaultfd — ОТ НЕ-ROOT: kexec_load первым делом проверяет
+# CAP_SYS_BOOT и отвечает EPERM, ничего не трогая (от root вызов с нулём сегментов
+# выгрузил бы поставленный образ kexec), а userfaultfd у не-root безвреден. Правила
+# срабатывают на входе в вызов, поэтому отказ ядра нагрузке не мешает.
+_p_rename() { python3 "$(_pyfile rename 'a = D + "/rn-%d.txt" % os.getpid(); open(a, "w").close()
+rc, en = sc(82, a.encode(), (a + ".bak").encode())
+done(rc, en)')"; }
+_p_unlink() { python3 "$(_pyfile unlink 'a = D + "/ul-%d.txt" % os.getpid(); open(a, "w").close()
+rc, en = sc(87, a.encode())
+done(rc, en)')"; }
+_p_kexec_nonroot() { python3 "$(_pyfile kexec 'os.setgroups([]); os.setgid(65534); os.setuid(65534)
+rc, en = sc(246, 0, 0, None, 0)
+done(rc, en)')"; }
+_p_userfaultfd_nonroot() { python3 "$(_pyfile userfaultfd 'os.setgroups([]); os.setgid(65534); os.setuid(65534)
+rc, en = sc(323, 0)
+done(rc, en)')"; }
+# PROT_READ|PROT_WRITE|PROT_EXEC=7, MAP_PRIVATE|MAP_ANONYMOUS=0x22, fd=-1 (arg4 = 2^64-1).
+_p_mmap_anon_exec() { python3 "$(_pyfile mmap 'rc, en = sc(9, 0, 4096, 7, 0x22, -1, 0)
 done(rc, en)')"; }
 
 _metrics() { curl -s --max-time 15 -H "Authorization: Bearer $W7B_TOKEN" "$W7B_API/metrics" 2>/dev/null; }

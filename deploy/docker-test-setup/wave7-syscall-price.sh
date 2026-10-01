@@ -32,8 +32,16 @@
 # потолок без этого разреза значит записать измеритель в цену
 # ([[gate-value-can-be-entirely-measurer]]).
 #
+# ЗАДАЧА Ц1 (01.10.2026): тот же зонд снимает цену НЕ ЗАКУПЛЕННЫХ номеров —
+# семи номеров правил, которых не купила ни одна порция (87 unlink, 263 unlinkat,
+# 82 rename, 9 mmap, 246 kexec_load, 320 kexec_file_load, 323 userfaultfd). Состав
+# берётся из строк `UNBOUGHT RULE` манифеста порций (W7_PRICE_MANIFEST), а не из
+# csv аудита: csv покрывает 292 правила редакции 3.0, а эти шесть правил живут вне
+# него (тот же дефект, что нашёл сторож дрейфа манифеста 29.09).
+#
 # Вход:  W7_PRICE_SECS (умолчание 60), W7_PRICE_ART (умолчание
-#        /var/lib/w7-syscall-price), W7_PRICE_CSV (умолчание — csv аудита в дереве).
+#        /var/lib/w7-syscall-price), W7_PRICE_CSV (умолчание — csv аудита в дереве),
+#        W7_PRICE_MANIFEST (если задан — состав номеров из UNBOUGHT манифеста).
 # Выход: $W7_PRICE_ART/syscall-price.txt — по строке на номер:
 #        nr=<n> name=<имя> calls=<N> per_min=<N/мин> rules=<id,…> top_comms=<comm:N,…>
 #        плюс total_sys_enter=<N> и window_s=<N>.
@@ -53,6 +61,8 @@ _class() { printf 'class=%s\n' "$1" > "$_OUT"; echo "  ЦЕНА ОСИ nr: КЛ�
 # Имена номеров — для читаемости отчёта, величину они не несут. x86_64.
 _name_of() {
     case "$1" in
+        9) echo mmap ;; 82) echo rename ;; 87) echo unlink ;; 246) echo kexec_load ;;
+        263) echo unlinkat ;; 320) echo kexec_file_load ;; 323) echo userfaultfd ;;
         10) echo mprotect ;; 35) echo nanosleep ;; 37) echo alarm ;; 41) echo socket ;;
         56) echo clone ;; 57) echo fork ;; 62) echo kill ;; 83) echo mkdir ;;
         88) echo symlink ;; 132) echo utime ;; 135) echo personality ;; 157) echo prctl ;;
@@ -60,6 +70,19 @@ _name_of() {
         258) echo mkdirat ;; 280) echo utimensat ;; 317) echo seccomp ;;
         *) echo "nr$1" ;;
     esac
+}
+
+# _nrs_from_manifest <манифест> — «<nr> <rule,rule>» по строкам UNBOUGHT RULE. Правило
+# с двумя номерами (87,263) входит в оба. Пустая строка манифеста и строка без номеров
+# пропускаются; порядок — по возрастанию номера.
+_nrs_from_manifest() {
+    awk '
+        $1 == "UNBOUGHT" && $2 == "RULE" && NF >= 4 {
+            n = split($4, a, ",")
+            for (i = 1; i <= n; i++) if (a[i] ~ /^[0-9]+$/) r[a[i] + 0] = r[a[i] + 0] (r[a[i] + 0] == "" ? "" : ",") $3
+        }
+        END { for (k in r) print k, r[k] }
+    ' "$1" | sort -n
 }
 
 # _w7p_calls <файл вывода bpftrace> <nr> — число вызовов номера за окно, СУММОЙ
@@ -169,9 +192,26 @@ BT
     _st_chk "у номера без вызовов разрез назван прочерком" "top_comms=-"
     _st_chk "вклад измерителя ВИДЕН в разрезе" "bpftrace:4"
     _st_chk "окно и знаменатель в отчёте" "total_sys_enter=900"
+    # Состав из манифеста: правило с двумя номерами входит в ОБА, строки порций (P3 RULE…)
+    # и комментарий с тем же вторым словом в состав НЕ входят.
+    cat > "$_st_dir/man.txt" <<'MAN'
+# RULE — комментарий шапки, не правило
+P3 RULE sigma_mprotect_exec_heap
+UNBOUGHT RULE evasion_self_delete 87,263
+UNBOUGHT RULE ransomware_backup_delete 87,263
+UNBOUGHT RULE rootkit_anonymous_exec_memory 9
+MAN
+    _st_man=$(_nrs_from_manifest "$_st_dir/man.txt")
+    if [ "$_st_man" = "9 rootkit_anonymous_exec_memory
+87 evasion_self_delete,ransomware_backup_delete
+263 evasion_self_delete,ransomware_backup_delete" ]; then
+        echo "    OK  состав из манифеста: двухномерное правило в обоих, порции и комментарий не входят"
+    else
+        echo "    ПРОВАЛ: состав из манифеста разобран неверно: $_st_man"; _st_fail=1
+    fi
     rm -rf "$_st_dir"
     if [ "$_st_fail" = "0" ]; then
-        echo "САМОПРОВЕРКА РАЗБОРА ПРОЙДЕНА: 9 проверок, расхождений 0"
+        echo "САМОПРОВЕРКА РАЗБОРА ПРОЙДЕНА: 10 проверок, расхождений 0"
         exit 0
     fi
     echo "САМОПРОВЕРКА РАЗБОРА ПРОВАЛЕНА"
@@ -185,6 +225,11 @@ command -v bpftrace >/dev/null 2>&1 || _class "bpftrace_не_установле�
 # СОСТАВ НОМЕРОВ БЕРЁТСЯ ИЗ АУДИТА, А НЕ ВЫПИСЫВАЕТСЯ РУКОЙ. Список, живущий в
 # скрипте копией, разъезжается с csv в первую же правку правил, и замер тогда
 # называет цену НЕ ТОГО набора ([[verdict-input-must-be-computed-by-emitter]]).
+if [ -n "${W7_PRICE_MANIFEST:-}" ]; then
+    [ -s "$W7_PRICE_MANIFEST" ] || _class "манифест_порций_не_найден_${W7_PRICE_MANIFEST##*/}_состав_номеров_брать_неоткуда"
+    _NRS=$(_nrs_from_manifest "$W7_PRICE_MANIFEST")
+    W7_PRICE_CSV="$W7_PRICE_MANIFEST"
+else
 [ -s "$W7_PRICE_CSV" ] || _class "csv_аудита_не_найден_${W7_PRICE_CSV##*/}_состав_номеров_брать_неоткуда"
 _NRS=$(python3 - "$W7_PRICE_CSV" <<'PY'
 import csv, sys, collections
@@ -200,6 +245,7 @@ for nr in sorted(need):
     print("%d %s" % (nr, ",".join(sorted(need[nr]))))
 PY
 )
+fi
 [ -n "$_NRS" ] || _class "в_csv_нет_ни_одной_строки_dead_axis_nr_нечего_мерить"
 _N=$(printf '%s\n' "$_NRS" | grep -c .)
 echo "--- ЦЕНА ОСИ nr (item б2): ${_N} номеров из $(basename "$W7_PRICE_CSV"), окно ${W7_PRICE_SECS}с, bpftrace ---"

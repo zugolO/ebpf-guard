@@ -126,6 +126,16 @@ chmod +x "$T/fakessh2"
 W7_SSH="$T/fakessh2" W7_SLEEP_CMD="$T/fakesleep" W7_NOW_CMD="cat $CLK" bash "$HERE/w7-pair-run.sh" 9 >/dev/null 2>&1; nrc=$?
 chk "без плана окон ожидатель отказывает (rc=1), вслепую не ждёт" "[ $nrc -eq 1 ]"
 
+echo "[отчёт пары воспроизводит величины порции 3, снятые руками]"
+SL="$HERE/../../server-logs"
+if [ -d "$SL/collect-6.4-w669P3A" ] && [ -d "$SL/collect-6.4-w669P3B" ]; then
+    rep=$(bash "$HERE/w7-pair-report.sh" "$SL/collect-6.4-w669P3A" "$SL/collect-6.4-w669P3B" 3 2>&1)
+    for want in "выпущено 101 + лимитер 209 + дедуп 1005 = 1315" "сумма оси за окно = 28427" "сумма оси за окно = 91441" "аллокации B относительно A: +0.64%" "БЕЗ path_denylist +0, С ним +695"; do
+        printf '%s' "$rep" | grep -qF -- "$want" && ok "отчёт: $want" || bad "отчёт не содержит «$want»"
+    done
+else
+    echo "  (архивов порции 3 нет на этой машине — сверка отчёта пропущена, и это сказано словом)"
+fi
 echo
 if [ "$FAIL" -eq 0 ]; then echo "w7-pair-fixtures: расхождений 0"; else echo "w7-pair-fixtures: ЕСТЬ РАСХОЖДЕНИЯ"; fi
 exit "$FAIL"

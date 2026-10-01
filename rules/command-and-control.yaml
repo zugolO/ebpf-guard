@@ -37,6 +37,13 @@ rules:
         - field: syscall.nr
           op: equals
           values: ["41"]   # socket
+        # Волна 7 (№516): то же отсутствие предиката типа, что у
+        # exfil_raw_socket_by_non_root. Без него правило срабатывало бы на любой
+        # сокет любого python3/bash — то есть на каждый скрипт, открывший TCP.
+        # arg1 — type с флагами: SOCK_RAW=3, |0x800 NONBLOCK, |0x80000 CLOEXEC.
+        - field: arg1
+          op: in
+          values: ["3", "2051", "524291", "526339"]
     severity: warning
     action: alert
     tags: [mitre:T1095, command-and-control]

@@ -51,6 +51,10 @@ PORTIONS = [
     ("1", "нулевая", [57, 132, 135, 162, 206, 235, 238, 258, 280, 317]),
     ("2", "дешёвая", [88, 37, 83, 157, 62]),
     ("3", "дорогая", [56, 41, 10]),
+    # Порция 4 (01.10.2026): socket(41) ПОВТОРНО — после правки предиката типа
+    # сокета (№516). Отказ порции 3 записан условием «объём алертов»; причина
+    # объёма устранена в самом правиле, а не исключением по coredns.
+    ("4", "повторная", [41]),
 ]
 
 # Measured calls/min per number, server-logs/w7-syscall-price-2026-09-29/.
@@ -74,7 +78,11 @@ MEASURED = {57: 0, 132: 0, 135: 0, 162: 0, 206: 0, 235: 0, 238: 0, 258: 10,
 # Номера, чью цену пара сняла и по которой их НЕ открыли. Отказ — величина:
 # либо номер не покупает НИ ОДНОГО нового правила, либо купленное им правило
 # платит объёмом алертов больше, чем даёт детекта (№511/№512, 30.09.2026).
-REJECTED = {
+# Ключ — (порция, номер): отказ принадлежит ПОРЦИИ, в которой цена снята, и более
+# поздняя порция вправе открыть тот же номер ТОЛЬКО через явную запись REOPENED
+# ниже. Прежний словарь по одному номеру не мог выразить «отказали по объёму
+# алертов, причину устранили, открываем снова».
+_REJECTED_RAW = {
     88: "покупает persist_systemd_wants_symlink, а у того НЕТ условия на путь "
         "(№512): 40 алертов за окно, все pid 1 systemd, ровно ~4/мин весь прогон "
         "= 240/ч ложных при нуле детекта",
@@ -95,6 +103,20 @@ REJECTED = {
         "срезал лимитер + 1005 дедуп) = 7890/ч, и 100 из 101 выпущенных пришли из "
         "пода coredns-54996dc9b4-tq8rc kube-system (№515). Объём АЛЕРТОВ уехал, а "
         "это и есть условие отказа, записанное для порции 3 до её замера",
+}
+
+REJECTED = {(pid, nr): _REJECTED_RAW[nr]
+            for pid, nrs in (("2", (88, 37, 83)), ("3", (56, 41))) for nr in nrs}
+
+# Номер, отвергнутый в ранней порции и открываемый в поздней, обязан иметь здесь
+# причину: отменять строку REJECTED молча нельзя. Метка 6.6.9 и сторож
+# TestWave7ReopenedNumbersAreExplained читают строки `P<n> REOPENED <nr>`.
+REOPENED = {
+    ("4", 41): "правка №516: exfil_raw_socket_by_non_root и c2_raw_socket_shell "
+               "проверяли только «вызван socket(2)», без SOCK_RAW в arg1 — отсюда 7890 "
+               "алертов/ч от coredns (№515). Предикат типа добавлен в условие правил; "
+               "исключение по exe_path НЕ заведено: оно лечило бы следствие и "
+               "ослепило бы правило на скомпрометированный /coredns",
 }
 
 NAMES = {10: "mprotect", 35: "nanosleep", 37: "alarm", 41: "socket", 56: "clone",
@@ -171,6 +193,7 @@ def main():
         "# Формат: <порция> <вид> <величина>. Вид: NR (номер), RULE (rule_id),",
         "# PRICE (nr=вызовов/мин, ЗОНД item'а б2), MEASURED (nr=событий за окно, ПАРА A/B),",
         "# REJECTED (номер, чью цену сняли и по которой его НЕ открыли),",
+        "# REOPENED (номер, отвергнутый в ранней порции и открываемый в этой — с причиной),",
         "# MUTERULE (правило порции, остающееся немым ПО РЕШЕНИЮ — все его номера отвергнуты).",
         "# RULE — правило, которое покупает ОТКРЫВАЕМАЯ часть порции, и только она.",
         "#",
@@ -184,28 +207,37 @@ def main():
     lines.append("")
 
     taken = set()
+    kept_all = set()
     for pid, label, nrs in PORTIONS:
         # Правила, которые покупает ВЕСЬ состав порции, и правила, которые
         # покупает только ОТКРЫВАЕМАЯ её часть (состав минус отвергнутые). Их
         # разность — правила, остающиеся немыми ПО РЕШЕНИЮ: у эмиттера метки
         # 6.6.9 это не провал роли B, а исполненный отказ, и он обязан уметь
         # отличать одно от другого (№514).
-        will_open = [n for n in nrs if n not in REJECTED]
+        will_open = [n for n in nrs if (pid, n) not in REJECTED]
         all_rules = sorted(rid for rid, want in rules.items()
                            if rid not in taken and any(n in nrs for n in want))
         opened = sorted(rid for rid in all_rules if any(n in will_open for n in rules[rid]))
         kept_mute = [rid for rid in all_rules if rid not in opened]
-        taken.update(all_rules)
+        # `taken` — только КУПЛЕННЫЕ правила. Правило, оставшееся немым по решению,
+        # свободно для более поздней порции, которая откроет его номер (порция 4).
+        taken.update(opened)
+        kept_all.update(kept_mute)
+        kept_all.difference_update(taken)
         lines.append("# порция %s (%s): %d номеров (открывается %d), правил %d (остаётся немыми по решению %d)"
                      % (pid, label, len(nrs), len(will_open), len(opened), len(kept_mute)))
         for nr in nrs:
             lines.append("P%s NR %d" % (pid, nr))
             lines.append("P%s PRICE %d=%d  # %s" % (pid, nr, PRICE[nr], NAMES.get(nr, "?")))
-            if nr in MEASURED:
+            # MEASURED — пара ЭТОЙ порции: у повторно открываемого номера прежний
+            # замер принадлежит порции, где он снят, и в новую не переписывается.
+            if nr in MEASURED and (pid, nr) not in REOPENED:
                 lines.append("P%s MEASURED %d=%d  # %s, событий за окно 600 с, пара A/B"
                              % (pid, nr, MEASURED[nr], NAMES.get(nr, "?")))
-            if nr in REJECTED:
-                lines.append("P%s REJECTED %d  # %s: %s" % (pid, nr, NAMES.get(nr, "?"), REJECTED[nr]))
+            if (pid, nr) in REJECTED:
+                lines.append("P%s REJECTED %d  # %s: %s" % (pid, nr, NAMES.get(nr, "?"), REJECTED[(pid, nr)]))
+            if (pid, nr) in REOPENED:
+                lines.append("P%s REOPENED %d  # %s: %s" % (pid, nr, NAMES.get(nr, "?"), REOPENED[(pid, nr)]))
         for rid in opened:
             lines.append("P%s RULE %s" % (pid, rid))
         for rid in kept_mute:
@@ -217,16 +249,17 @@ def main():
     # number without a measured price is not opened — that is the whole rule of
     # this item. Recorded by name so the residue is a named class and not a gap.
     lines.append("# НЕ ПОКУПАЕТСЯ НИ ОДНОЙ ПОРЦИЕЙ (цена номеров не мерена item'ом б2):")
-    left = sorted(set(rules) - taken)
+    left = sorted(set(rules) - taken - kept_all)
     for rid in left:
         lines.append("UNBOUGHT RULE %s %s" % (rid, ",".join(str(n) for n in rules[rid])))
-    lines.append("# итого: правил оси `nr` немых на baseline %d, покупается порциями %d, остаётся %d"
-                 % (len(rules), len(taken), len(left)))
+    lines.append("# итого: правил оси `nr` немых на baseline %d, покупается порциями %d, "
+                 "немы по решению %d, не покупается %d"
+                 % (len(rules), len(taken), len(kept_all), len(left)))
 
     with open(OUT, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
-    print("написано: %s (немых %d, покупается %d в %d порциях, остаётся %d)"
-          % (OUT, len(rules), len(taken), len(PORTIONS), len(left)))
+    print("написано: %s (немых %d, покупается %d в %d порциях, немы по решению %d, не покупается %d)"
+          % (OUT, len(rules), len(taken), len(PORTIONS), len(kept_all), len(left)))
 
 
 if __name__ == "__main__":

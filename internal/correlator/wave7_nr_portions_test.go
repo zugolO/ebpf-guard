@@ -22,6 +22,7 @@ type nrPortion struct {
 	rules     []string
 	muteRules []string
 	rejected  []int
+	reopened  []int
 }
 
 type portionFile struct {
@@ -86,11 +87,33 @@ func readPortionManifest(t *testing.T) portionFile {
 				n, err := strconv.Atoi(value)
 				require.NoError(t, err)
 				out.portions[pos].rejected = append(out.portions[pos].rejected, n)
+			case "REOPENED":
+				n, err := strconv.Atoi(value)
+				require.NoError(t, err)
+				out.portions[pos].reopened = append(out.portions[pos].reopened, n)
 			}
 		}
 	}
 	require.NoError(t, sc.Err())
 	require.NotEmpty(t, out.portions, "manifest carries no portion")
+	return out
+}
+
+// effective — номера порции, которые она РЕАЛЬНО открывает: состав минус отвергнутые
+// ИМЕННО В ЭТОЙ порции. Отказ принадлежит порции, где цена снята; более поздняя
+// порция может открыть тот же номер (порция 4 открывает socket(41) после правки
+// предиката, №516) — но только записью REOPENED, см. TestWave7ReopenedNumbersAreExplained.
+func (p nrPortion) effective() []int {
+	rej := map[int]bool{}
+	for _, n := range p.rejected {
+		rej[n] = true
+	}
+	var out []int
+	for _, n := range p.nrs {
+		if !rej[n] {
+			out = append(out, n)
+		}
+	}
 	return out
 }
 
@@ -114,7 +137,7 @@ func TestWave7PortionManifestMatchesRuleset(t *testing.T) {
 	// numbers of the portions already opened, and never anything else.
 	opened := map[int]bool{}
 	for _, p := range man.portions {
-		for _, nr := range p.nrs {
+		for _, nr := range p.effective() {
 			opened[nr] = true
 		}
 	}
@@ -149,14 +172,17 @@ func TestWave7PortionManifestMatchesRuleset(t *testing.T) {
 	for _, p := range man.portions {
 		require.NotEmpty(t, p.nrs, "portion %s opens no number", p.id)
 
-		open = append(open, p.nrs...)
+		open = append(open, p.effective()...)
 		after := re.UnreachableSyscallRules(open)
 
+		// Покупает портия только ОТКРЫВАЕМОЙ частью. Правила, оставшиеся немыми по
+		// решению (MUTERULE), не входят в купленное и обязаны остаться в `after`:
+		// это держит TestWave7KeptMuteRulesStayMute, а здесь — равенство состава.
 		opened := setDifference(mute, after)
-		assert.ElementsMatch(t, append(append([]string{}, p.rules...), p.muteRules...), opened,
-			"portion %s opens numbers %v: the manifest claims it buys %v (plus %v left mute by "+
-				"decision), the ruleset says %v",
-			p.id, p.nrs, p.rules, p.muteRules, opened)
+		assert.ElementsMatch(t, p.rules, opened,
+			"portion %s opens numbers %v: the manifest claims it buys %v, the ruleset says %v "+
+				"(left mute by decision: %v)",
+			p.id, p.effective(), p.rules, opened, p.muteRules)
 
 		mute = after
 	}
@@ -180,36 +206,65 @@ func TestWave7KeptMuteRulesStayMute(t *testing.T) {
 	require.NoError(t, err)
 	re := NewRuleEngine(rules)
 
-	rej := map[int]bool{}
+	// Проверка идёт ПО ПОРЦИЯМ, а не по итоговому состоянию: правило, оставшееся
+	// немым в порции 3 по решению, законно открывается порцией 4 (повторное
+	// открытие номера), и «немо в конце» стало бы ложной проверкой.
 	open := append([]int{}, man.baseline...)
-	var kept []string
+	kept := 0
 	for _, p := range man.portions {
-		for _, nr := range p.rejected {
-			rej[nr] = true
+		open = append(open, p.effective()...)
+		mute := map[string]bool{}
+		for _, rid := range re.UnreachableSyscallRules(open) {
+			mute[rid] = true
 		}
-		kept = append(kept, p.muteRules...)
+		for _, rid := range p.muteRules {
+			kept++
+			assert.True(t, mute[rid],
+				"правило %s записано как остающееся немым ПО РЕШЕНИЮ порции %s, но при открытых "+
+					"неотвергнутых номерах до неё включительно оно ДОСТИЖИМО: запись лжёт, и "+
+					"эмиттер 6.6.9 объявит роль B провалившейся, увидев его вне реестра немоты",
+				rid, p.id)
+		}
 	}
+	require.NotZero(t, kept,
+		"ни одного MUTERULE: сторож остался бы зелёным на любом манифесте")
+	t.Logf("правил, оставленных немыми по решению: %d", kept)
+}
+
+// «Не отменять строку REJECTED молча»: номер, отвергнутый в ранней порции и
+// присутствующий неотвергнутым в более поздней, обязан нести в поздней строку
+// REOPENED с причиной. Без неё манифест можно было бы перегенерировать так, что
+// отказ по цене исчез бы, а следа решения не осталось.
+func TestWave7ReopenedNumbersAreExplained(t *testing.T) {
+	man := readPortionManifest(t)
+
+	rejectedIn := map[int][]string{}
+	reopens := 0
 	for _, p := range man.portions {
-		for _, nr := range p.nrs {
-			if !rej[nr] {
-				open = append(open, nr)
+		eff := map[int]bool{}
+		for _, n := range p.effective() {
+			eff[n] = true
+		}
+		reopened := map[int]bool{}
+		for _, n := range p.reopened {
+			reopened[n] = true
+			reopens++
+			assert.NotEmpty(t, rejectedIn[n],
+				"порция %s: REOPENED %d, а ранее этот номер не отвергался — запись без предмета", p.id, n)
+			assert.True(t, eff[n], "порция %s: REOPENED %d, но номер в ней не открывается", p.id, n)
+		}
+		for n := range eff {
+			if len(rejectedIn[n]) > 0 {
+				assert.True(t, reopened[n],
+					"номер %d отвергнут в порции(ях) %v и открыт в порции %s БЕЗ строки REOPENED: "+
+						"отказ отменён молча", n, rejectedIn[n], p.id)
 			}
 		}
+		for _, n := range p.rejected {
+			rejectedIn[n] = append(rejectedIn[n], p.id)
+		}
 	}
-	require.NotEmpty(t, kept,
-		"ни одного MUTERULE: сторож остался бы зелёным на любом манифесте")
-
-	mute := map[string]bool{}
-	for _, rid := range re.UnreachableSyscallRules(open) {
-		mute[rid] = true
-	}
-	for _, rid := range kept {
-		assert.True(t, mute[rid],
-			"правило %s записано как остающееся немым ПО РЕШЕНИЮ, но при открытых "+
-				"неотвергнутых номерах всех порций оно ДОСТИЖИМО: запись лжёт, и эмиттер "+
-				"6.6.9 объявит роль B провалившейся, увидев его вне реестра немоты", rid)
-	}
-	t.Logf("немыми по решению остаются %d правил: %v", len(kept), kept)
+	require.NotZero(t, reopens, "ни одного REOPENED: сторож остался бы зелёным на любом манифесте")
 }
 
 // Порция может открыться ЧАСТЬЮ: цена снимается парой по КАЖДОМУ номеру, и
@@ -236,10 +291,14 @@ func TestWave7RejectedNumbersStayClosed(t *testing.T) {
 			anyRejected = true
 			// (1) Отвергнутый номер в аллоулист попасть не может: иначе его
 			// цена записана как непройденная, а платится она всё равно.
-			assert.False(t, def[nr],
-				"номер %d помечен в манифесте как REJECTED (порция %s), но он есть "+
-					"в DefaultMonitoredSyscalls(): отказ по цене и открытие одновременно",
-				nr, p.id)
+			// Номер может быть в аллоулисте, если более поздняя порция открыла его
+			// ЯВНО (REOPENED): тогда отказ ранней порции исполнен и снят решением.
+			if !reopenedLater(man, p.id, nr) {
+				assert.False(t, def[nr],
+					"номер %d помечен в манифесте как REJECTED (порция %s), но он есть "+
+						"в DefaultMonitoredSyscalls(): отказ по цене и открытие одновременно",
+					nr, p.id)
+			}
 			assert.Contains(t, p.nrs, nr,
 				"номер %d отвергнут в порции %s, но в её составе его нет", nr, p.id)
 		}
@@ -248,7 +307,7 @@ func TestWave7RejectedNumbersStayClosed(t *testing.T) {
 		// аллоулисте. Дальше проверяем её только в этом случае: порция, ещё не
 		// поставленная (у неё цена не снята), ничего не обязана.
 		shipped := false
-		for _, nr := range p.nrs {
+		for _, nr := range p.effective() {
 			if def[nr] {
 				shipped = true
 				break
@@ -263,7 +322,7 @@ func TestWave7RejectedNumbersStayClosed(t *testing.T) {
 		// манифесте разъезжается с тем, что реально несёт аллоулист.
 		var openedNrs []int
 		for _, nr := range p.nrs {
-			if def[nr] {
+			if def[nr] && !rejected[nr] {
 				openedNrs = append(openedNrs, nr)
 				continue
 			}
@@ -279,7 +338,7 @@ func TestWave7RejectedNumbersStayClosed(t *testing.T) {
 			if q.id == p.id {
 				break
 			}
-			for _, nr := range q.nrs {
+			for _, nr := range q.effective() {
 				if def[nr] {
 					base = append(base, nr)
 				}
@@ -330,6 +389,26 @@ func TestWave7ExcludedNumbersLeaveNoRuleMute(t *testing.T) {
 	withExcluded := append(append([]int{}, open...), man.excluded...)
 	assert.Subset(t, re.UnreachableSyscallRules(open), re.UnreachableSyscallRules(withExcluded),
 		"opening the excluded numbers as well must not make MORE rules mute")
+}
+
+// reopenedLater — открывает ли ПОЗДНЕЙШАЯ, чем from, порция номер nr записью REOPENED.
+func reopenedLater(man portionFile, from string, nr int) bool {
+	seen := false
+	for _, p := range man.portions {
+		if p.id == from {
+			seen = true
+			continue
+		}
+		if !seen {
+			continue
+		}
+		for _, n := range p.reopened {
+			if n == nr {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func allPortionRules(man portionFile) []string {

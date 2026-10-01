@@ -37,6 +37,7 @@ P9 PRICE 18=9  # pwrite64
 P9 NR 19
 P9 PRICE 19=1  # readv
 P9 REJECTED 19  # readv: отвергнут решением
+P9 REOPENED 18  # причина повторного открытия
 P9 RULE some_rule
 P1 NR 5
 MAN
@@ -60,6 +61,7 @@ term=$(awk '/monitored_syscalls:/{f=1;next} f&&/^ *[^ #-]/{f=0} f&&/^      - /{n
 chk "фикстура ВИДИТ ловушку: наивный счётчик ≠ 7 (втянул path_denylist), получил $naive" "[ '$naive' != 7 ]"
 chk "счётчик с терминатором = 7" "[ '$term' = 7 ]"
 chk "драйвер не считает состав по тексту конфига (Д3)" "! grep -q 'monitored_syscalls:/{f=1' '$HERE/w7-pair-driver.sh'"
+chk "драйвер передаёт пайплайну W7_BOUGHT_CONTROLS (метка 6.7.1 на обеих ролях)" "grep -q 'W7_BOUGHT_CONTROLS=\"\${W7_BOUGHT_CONTROLS:-on}\"' '$HERE/w7-pair-driver.sh'"
 chk "драйвер читает состав у рантайма (лейбл nr в снимке)" "grep -q 'ebpf_guard_syscall_events_by_nr_total{nr=' '$HERE/w7-pair-driver.sh'"
 # патчер, у которого счётчик возвращён к наивному, обязан падать на ассерте перечитывания
 python3 - "$HERE/w7-roleB-patch.py" "$T/mut.py" <<'PY'

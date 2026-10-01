@@ -84,7 +84,10 @@ sigma_seccomp_filter_install|317|python3|_p_seccomp
 sigma_world_writable_dir_created|258|python3|_p_mkdirat_ww
 web_blind_sqli_heuristic|162|python3|_p_sync_under_nginx
 sigma_prctl_dumpable|157|python3|_p_prctl_dumpable
-sigma_mprotect_exec_heap|10|python3|_p_mprotect_exec"
+sigma_mprotect_exec_heap|10|python3|_p_mprotect_exec
+exfil_raw_socket_by_non_root|41|python3|_p_rawsock_nonroot
+c2_raw_socket_shell|41|python3|_p_rawsock_root
+mitre_arp_spoof_raw_socket|41|python3|_p_packet_socket"
 
 # Общая шапка python-нагрузки: печатает ОДНУ строку-результат, по которой работает
 # результатный сторож (pid, comm из /proc/self/comm, rc, errno). Нагрузка пишется
@@ -153,6 +156,18 @@ _p_mprotect_exec() { python3 "$(_pyfile mprotect 'import mmap
 m = mmap.mmap(-1, 4096)
 addr = ctypes.addressof(ctypes.c_char.from_buffer(m))
 rc, en = sc(10, addr, 4096, 5)
+done(rc, en)')"; }
+
+# Порция 4 (socket 41). Нагрузки предъявляют ТО, ЧТО ПРОВЕРЯЕТ УСЛОВИЕ после №516:
+# тип сокета SOCK_RAW (arg1=3) и семейство AF_PACKET (arg0=17). Отказ ядра
+# (EPERM у не-root) не мешает: правило срабатывает на входе в вызов, а сторож
+# результата — «процесс дошёл до печати», а не «вызов удался».
+_p_rawsock_nonroot() { python3 "$(_pyfile rawsock_nonroot 'os.setgroups([]); os.setgid(65534); os.setuid(65534)
+rc, en = sc(41, 2, 3, 255)
+done(rc, en)')"; }
+_p_rawsock_root() { python3 "$(_pyfile rawsock_root 'rc, en = sc(41, 2, 3, 255)
+done(rc, en)')"; }
+_p_packet_socket() { python3 "$(_pyfile packet_socket 'rc, en = sc(41, 17, 3, 768)
 done(rc, en)')"; }
 
 _metrics() { curl -s --max-time 15 -H "Authorization: Bearer $W7B_TOKEN" "$W7B_API/metrics" 2>/dev/null; }

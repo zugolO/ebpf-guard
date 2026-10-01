@@ -53,11 +53,11 @@ P1 RULE sigma_seccomp_filter_install
 P1 RULE sigma_world_writable_dir_created
 P1 RULE web_blind_sqli_heuristic
 
-# порция 2 (дешёвая): 5 номеров (открывается 2), правил 2 (остаётся немыми по решению 1)
+# порция 2 (дешёвая): 5 номеров (открывается 2), правил 2 (остаётся немыми по решению 0)
 P2 NR 88
 P2 PRICE 88=3  # symlink
 P2 MEASURED 88=84  # symlink, событий за окно 600 с, пара A/B
-P2 REJECTED 88  # symlink: покупает persist_systemd_wants_symlink, а у того НЕТ условия на путь (№512): 40 алертов за окно, все pid 1 systemd, ровно ~4/мин весь прогон = 240/ч ложных при нуле детекта
+P2 REJECTED 88  # symlink: покупало persist_systemd_wants_symlink, а у того НЕТ условия на путь (№512): 40 алертов за окно, все pid 1 systemd, ровно ~4/мин весь прогон = 240/ч ложных при нуле детекта. Правило СНЯТО 01.10.2026 (№518, перенос на file-ось невозможен: хука на создание симлинка нет), номер больше не покупает ничего
 P2 NR 37
 P2 PRICE 37=30  # alarm
 P2 MEASURED 37=3430  # alarm, событий за окно 600 с, пара A/B
@@ -74,7 +74,6 @@ P2 PRICE 62=61  # kill
 P2 MEASURED 62=554  # kill, событий за окно 600 с, пара A/B
 P2 RULE ransomware_backup_tool_kill
 P2 RULE sigma_prctl_dumpable
-P2 MUTERULE persist_systemd_wants_symlink  # остаётся немым ПО РЕШЕНИЮ: его номера отвергнуты
 
 # порция 3 (дорогая): 3 номеров (открывается 1), правил 1 (остаётся немыми по решению 3)
 P3 NR 56
@@ -125,4 +124,4 @@ P5 PRICE 9=3433  # mmap
 P5 RULE rootkit_anonymous_exec_memory
 
 # НЕ ПОКУПАЕТСЯ НИ ОДНОЙ ПОРЦИЕЙ (цена номеров не мерена item'ом б2):
-# итого: правил оси `nr` немых на baseline 20, покупается порциями 19, немы по решению 1, не покупается 0
+# итого: правил оси `nr` немых на baseline 19, покупается порциями 19, немы по решению 0, не покупается 0

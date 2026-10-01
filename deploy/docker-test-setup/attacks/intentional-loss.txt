@@ -192,7 +192,6 @@ rootkit_hidden_dir_dev
 c2_raw_socket_shell
 exfil_raw_socket_by_non_root
 evasion_self_delete
-persist_systemd_wants_symlink
 
 
 # ── СНЯТО С УЧЁТА 29.09.2026: ПОРЦИЯ 1 ОСИ `nr` ОТКРЫТА ПО СНЯТОЙ ЦЕНЕ.

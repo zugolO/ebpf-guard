@@ -36,27 +36,22 @@ rules:
     action: alert
     tags: [mitre:T1543.002, persistence, systemd]
 
-  # MITRE ATT&CK: T1543.002 — Systemd service enabled via symlink
-  - id: persist_systemd_wants_symlink
-    name: "Systemd service enabled via wants/ symlink"
-    description: >
-      A symlink was created inside a systemd .wants/ directory, which is how
-      systemctl enable works. Creating .wants/ symlinks directly bypasses
-      systemctl and leaves no audit trail in the journal.
-    event_type: syscall
-    condition_group:
-      operator: and
-      conditions:
-        - field: syscall.nr
-          op: in
-          values: ["88"]   # symlink
-        - field: proc.comm
-          op: not_in
-          values: ["systemctl", "dpkg", "rpm", "apt", "yum", "dnf",
-                   "ansible", "puppet", "chef", "salt", "update-rc.d"]
-    severity: warning
-    action: alert
-    tags: [mitre:T1543.002, persistence, systemd]
+  # persist_systemd_wants_symlink СНЯТО 01.10.2026 (волна 7, задача С, №512/№518).
+  # Имя, описание и message обещали «симлинк создан в каталоге .wants/», а условие
+  # проверяло только syscall.nr == 88 и comm: любой symlink(2) любого процесса. На
+  # syscall-оси путь НЕ достаётся (arg0…arg5 — сырые u64-указатели), а пара порции 2
+  # показала цену этого: 40 алертов за окно, все от pid 1 systemd, ~4/мин = 240/ч
+  # ложных при нуле детекта. Перенос на event_type: file невозможен: у файлового
+  # коллектора нет хука на создание симлинка (openat, chmod/fchmodat/fchmod, read,
+  # write, dup*), а событие symlink(2) не открывает файл. Третьего пути нет, и
+  # правило снято, а не оставлено немым: немое правило, которое открыли бы ради
+  # метки, было бы ложным показанием покрытия.
+  # ЦЕНА ВОЗВРАТА: хук tracepoint sys_enter_symlink/symlinkat в fileaccess.bpf.c с
+  # копированием newname и новым FILE_OP_SYMLINK (по образцу FILE_OP_CHMOD) +
+  # правило на file.op=symlink и prefix пути. Событий — symlink(88) 3/мин по зонду б2,
+  # symlinkat(266) не мерен; затраты — код BPF, который на mac не проверить, и
+  # прогон на стенде. Покрытие T1543.002 остаётся за persist_systemd_timer_created,
+  # persistence_systemd_new_service и sigma_systemd_service_* (запись юнит-файла).
 
   # MITRE ATT&CK: T1546.004 — /etc/profile.d/ modification
   - id: persist_profile_d_write

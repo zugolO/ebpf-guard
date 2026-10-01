@@ -189,7 +189,14 @@ if [ "$W7B_MODE" = "run" ]; then
     : > "$_PAY"
     # ── глобальные предусловия: каждое — ОДНА строка class=…, неизмеримо целиком.
     _gcls=""
-    [ -e "$W7B_ORPF" ] && _gcls="observer_tree_armed"
+    # Файл МОЖЕТ существовать и быть выключенным: на стенде он стоит с 02.09 и
+    # содержит «0» (нет корня дерева — срезать нечего). Взведён он только при
+    # положительном pid; существование файла — не доказательство ([[observer-exclusion-blinds-controls]]).
+    if [ -e "$W7B_ORPF" ]; then
+        _orp=$(tr -dc '0-9' < "$W7B_ORPF" 2>/dev/null)
+        [ -n "$_orp" ] && [ "$_orp" -gt 0 ] 2>/dev/null && _gcls="observer_tree_armed"
+        [ -z "$_orp" ] && _gcls="observer_tree_file_unreadable"
+    fi
     [ -z "$_gcls" ] && [ "$(uname -m)" != "x86_64" ] && _gcls="arch_not_x86_64_nr_table_is_x86_64"
     [ -z "$_gcls" ] && ! command -v python3 >/dev/null 2>&1 && _gcls="python3_missing"
     if [ -z "$_gcls" ]; then

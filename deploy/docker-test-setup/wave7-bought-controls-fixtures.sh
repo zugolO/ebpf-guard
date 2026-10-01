@@ -87,9 +87,13 @@ _case miss; _met before 62 1; rm -f "$A/bought-metrics-after.txt"; _pay r_a 62 1
 o=$(_run); [ "$(printf '%s' "$o" | head -1)" = "class=input_missing_bought-metrics-after.txt" ] && ok "нет снимка после — class=input_missing_…, не нулевые классы" || bad "нет снимка после: '$o'"
 _case off; rm -f "$A/bought-rules-controls.txt"
 W7B_ART="$A" W7B_CONTROL=off bash "$CTL" >/dev/null 2>&1; [ ! -e "$A/bought-rules-controls.txt" ] && ok "W7B_CONTROL=off файла не пишет" || bad "off написал файл"
-_case observer; touch "$T/orp"
+_case observer; echo 4242 > "$T/orp"
 W7B_ART="$A" W7B_CONTROL=on W7B_ORPF="$T/orp" bash "$CTL" >/dev/null 2>&1
 [ "$(cat "$A/bought-rules-controls.txt" 2>/dev/null)" = "class=observer_tree_armed" ] && ok "observer-root-pid существует — class=observer_tree_armed, нагрузка не идёт" || bad "observer: '$(cat "$A/bought-rules-controls.txt" 2>/dev/null)'"
+# Парный негатив: файл есть, но содержит «0» (как на стенде с 02.09) — НЕ взведён, класса observer нет.
+_case observer_off; echo 0 > "$T/orp0"
+W7B_API=http://127.0.0.1:1 W7B_ART="$A" W7B_CONTROL=on W7B_ORPF="$T/orp0" bash "$CTL" >/dev/null 2>&1
+! grep -q 'observer_tree' "$A/bought-rules-controls.txt" 2>/dev/null && ok "observer-root-pid содержит 0 — не взведён, класса observer нет" || bad "файл с 0 принят за взведённый"
 if [ "$(uname -m)" != "x86_64" ]; then
     _case arch
     W7B_ART="$A" W7B_CONTROL=on W7B_ORPF="$T/nonexistent" bash "$CTL" >/dev/null 2>&1

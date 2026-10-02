@@ -75,9 +75,12 @@ bpf:
       - 311  # process_vm_writev
       - 310  # process_vm_readv
       - 298  # perf_event_open
+      # 87 unlink и 263 unlinkat УБРАНЫ 02.10.2026: стояли здесь с августа, хотя
+      # стенд (config-test.yaml → DefaultMonitoredSyscalls) их никогда не открывал,
+      # а пара порции 4 отвергла 87 по ложному объёму evasion_self_delete
+      # (264/ч, grafana, №520). Поставляемый конфиг открывал то, что замер отверг.
+      # 82 rename — открыт порцией 6 после порога у ransomware_mass_rename (№520).
       - 82   # rename
-      - 87   # unlink
-      - 263  # unlinkat
       - 175  # init_module
       - 313  # finit_module
       - 176  # delete_module
@@ -120,6 +123,11 @@ bpf:
       # Порция 5 (пара collect-6.4-w669P5A/-w669P5B): 39 594 события/окно, дропы
       # без path_denylist +0, аллокации +0,82%, 0 алертов по трём слоям.
       - 9    # mmap, 39 594 события/окно по замеру пары
+      # Порция 6 (пара collect-6.4-w669P6A/-w669P6B): 1964 события/окно, 0 алертов
+      # по трём слоям, дропы без path_denylist +0; 6.7.1 на роли B 17 из 17.
+      - 23   # select, 0 событий/окно
+      - 158  # arch_prctl, 1920 событий/окно
+      - 320  # kexec_file_load, 0 событий/окно
 
     # P1-18b: path-prefix denylist for file open/read/write events, matched
     # in-kernel before the event reaches the ring buffer. Empty by default —

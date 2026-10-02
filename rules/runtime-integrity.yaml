@@ -210,7 +210,8 @@ rules:
       conditions:
         - field: syscall.nr
           op: in
-          values: ["319", "279"]  # memfd_create, memfd_secret
+          # №519 (02.10.2026): было 279 — это move_pages; memfd_secret — 447.
+          values: ["319", "447"]  # memfd_create, memfd_secret
     severity: critical
     action: alert
     tags: [mitre:T1014, defense-evasion, execution, fileless, integrity]

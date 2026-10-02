@@ -75,14 +75,16 @@ mkdir -p "$W7B_ART" 2>/dev/null
 # ── ТАБЛИЦА: <rule_id>|<nr нагрузки>|<ожидаемый comm>|<функция нагрузки>
 # Правила — РОВНО те, что манифест порций называет купленными (строки RULE);
 # эмиттер сверяет состав, и правило без строки здесь получит класс БЕЗ КОНТРОЛЯ.
+# №519 (02.10.2026): строки mitre_sandbox_detect_cpuid (personality(135)) и
+# web_blind_sqli_heuristic (sync(162) под nginx) сняты вместе с покупкой. Нагрузка
+# предъявляла то, что написано в УСЛОВИИ, а условие называло чужой syscall:
+# SHOWN по ним доказывал правило, которое атака не включает никогда.
 _TABLE="evasion_auditd_stop|62|python3|_p_kill
 ransomware_backup_tool_kill|62|python3|_p_kill
 evasion_timestamp_modify|280|python3|_p_utimensat
 impact_fork_bomb_pattern|57|python3|_p_fork_nonroot
-mitre_sandbox_detect_cpuid|135|python3|_p_personality
 sigma_seccomp_filter_install|317|python3|_p_seccomp
 sigma_world_writable_dir_created|258|python3|_p_mkdirat_ww
-web_blind_sqli_heuristic|162|python3|_p_sync_under_nginx
 sigma_prctl_dumpable|157|python3|_p_prctl_dumpable
 sigma_mprotect_exec_heap|10|python3|_p_mprotect_exec
 exfil_raw_socket_by_non_root|41|python3|_p_rawsock_nonroot
@@ -95,7 +97,7 @@ rootkit_anonymous_exec_memory|9|python3|_p_mmap_anon_exec"
 # Общая шапка python-нагрузки: печатает ОДНУ строку-результат, по которой работает
 # результатный сторож (pid, comm из /proc/self/comm, rc, errno). Нагрузка пишется
 # в ФАЙЛ и зовётся `python3 файл`: так comm процесса — python3 (не интерпретатор
-# шебанга) и нет вложенных кавычек в `nginx -c`.
+# шебанга).
 export W7B_DIR
 _PYHEAD='import os, sys, time, ctypes
 libc = ctypes.CDLL(None, use_errno=True)
@@ -129,11 +131,6 @@ if rc == 0:
 if rc > 0:
     os.waitpid(rc, 0)
 done(rc, en)')"; }
-# Условие правила — arg0 in [4113, 4114] при nr=135, а это personality(2), не
-# arch_prctl(2): правило названо про cpuid, а ловит только такое persona-значение.
-# Нагрузка предъявляет то, что написано в УСЛОВИИ.
-_p_personality() { python3 "$(_pyfile personality 'rc, en = sc(135, 4113)
-done(rc, en)')"; }
 _p_seccomp() { python3 "$(_pyfile seccomp 'class F(ctypes.Structure): _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte), ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint)]
 class P(ctypes.Structure): _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(F))]
 sc(157, 38, 1, 0, 0, 0)
@@ -144,15 +141,6 @@ done(rc, en)')"; }
 _p_mkdirat_ww() { python3 "$(_pyfile mkdirat 'd = D + "/ww-%d" % os.getpid()
 rc, en = sc(258, -100, d.encode(), 0o777)
 done(rc, en)')"; }
-# parent_comm=nginx достигается копией bash под именем nginx: comm ребёнка —
-# python3, а родителя — nginx. Хвост `; exit $?` не даёт bash заменить себя на
-# единственную команду (exec-оптимизация убрала бы родителя).
-_p_sync_under_nginx() {
-    cp "$(command -v bash)" "$W7B_DIR/nginx" 2>/dev/null || { echo "RESULT pid=0 comm=- rc=-1 errno=-1 reason=copy_bash_failed"; return; }
-    local f; f=$(_pyfile sync 'rc, en = sc(162)
-done(rc, en)')
-    "$W7B_DIR/nginx" -c "python3 $f; exit \$?"
-}
 _p_prctl_dumpable() { python3 "$(_pyfile prctl 'rc, en = sc(157, 4, 0, 0, 0, 0)
 done(rc, en)')"; }
 _p_mprotect_exec() { python3 "$(_pyfile mprotect 'import mmap

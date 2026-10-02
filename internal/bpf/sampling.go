@@ -329,13 +329,16 @@ func DefaultMonitoredSyscalls() []int {
 		// (9, 82, 87, 246, 263, 320, 323) НЕ открыты: их цена не мерена, а номер
 		// без снятой цены не открывается — см. строки UNBOUGHT в
 		// deploy/docker-test-setup/attacks/wave7-nr-portions.txt.
+		//
+		// №519 (02.10.2026): 135 personality, 162 sync, 206 io_setup и 238
+		// set_mempolicy из этой порции ЗАКРЫТЫ снова. Их покупали правила,
+		// называвшие чужие номера (arch_prctl=158, select=23, clock_nanosleep=230,
+		// tgkill=234): номера в правилах исправлены, и эти четыре не покупают
+		// больше ничего. Цена у них снята парой — 0 событий за окно, поэтому
+		// закрытие базу шума не двигает. В манифесте — строки P1 REJECTED.
 		57,  // fork
 		132, // utime
-		135, // personality
-		162, // sync
-		206, // io_setup
 		235, // utimes
-		238, // set_mempolicy
 		258, // mkdirat
 		280, // utimensat
 		317, // seccomp

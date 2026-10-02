@@ -15,7 +15,8 @@ named syscall to the number at the same position, against the authoritative x86_
 table (golang.org/x/sys/unix zsysnum_linux_amd64.go, read from the module cache — no
 hand-typed table that could carry the same mistake).
 
-Exit code 1 if a mismatch is found, so it can sit in a pre-commit or CI step.
+Exit code 1 if a mismatch is found. Runs in CI (.github/workflows/rule-validation.yml)
+since 02.10.2026, after the six known mismatches were fixed.
 
     python3 tools/rules-audit/nr-name-check.py            # all rules/*.yaml
     python3 tools/rules-audit/nr-name-check.py --json

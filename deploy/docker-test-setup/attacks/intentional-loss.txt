@@ -74,6 +74,15 @@ netintr_syn_scan_pattern
 #       был бы чистым приростом idle-шума без единого срабатывания — ровно то,
 #       что запрещает запрет №1 волны 5.9.2. Разблокируется волной 6 вместе с
 #       ransomware-сценарием.
+#
+#   mitre_sandbox_detect_cpuid и web_blind_sqli_heuristic — ВОЗВРАЩЕНЫ
+#       02.10.2026 (№519). С 29.09 числились купленными порцией 1, но через
+#       чужие номера: personality(135) вместо arch_prctl(158), sync(162)/
+#       io_setup(206) вместо select(23)/clock_nanosleep(230). Номера в правилах
+#       исправлены; настоящие не в аллоулисте (цена не мерена, 230 и 35 горячие),
+#       оба правила немы по конструкции до своей порции.
+mitre_sandbox_detect_cpuid
+web_blind_sqli_heuristic
 mitre_arp_spoof_raw_socket
 rootkit_anonymous_exec_memory
 rootkit_userfaultfd_create
@@ -211,6 +220,14 @@ evasion_self_delete
 #    история разбора: утверждение «нет attack-шага» про них по-прежнему верно,
 #    неверным стало только слово «немо по конструкции».
 #
+#    ПОПРАВКА 02.10.2026 (№519): из семи двое куплены ЧУЖИМ номером и сняты с
+#    покупки. mitre_sandbox_detect_cpuid называло personality(135) «arch_prctl»
+#    (настоящий 158), web_blind_sqli_heuristic — sync(162)/io_setup(206) «select»/
+#    «clock_nanosleep» (настоящие 23/230). Номера в правилах исправлены, 135/162/
+#    206/238 закрыты в DefaultMonitoredSyscalls(), и оба правила СНОВА немы по
+#    конструкции (UNBOUGHT в wave7-nr-portions.txt). evasion_auditd_stop остался
+#    купленным — через kill(62) порции 2, а не через set_mempolicy(238).
+#
 #    Порции 2 и 3 НЕ открыты: каждая требует своей пары
 #    (deploy/docker-test-setup/attacks/wave7-nr-portions.txt).
 
@@ -280,3 +297,5 @@ evasion_self_delete
 #    nanosleep(35) не открывался и не открывается: 22 775 вызовов/мин доли ноды,
 #    а web_blind_sqli_heuristic получен даром через sync(162) в порции 1.
 #    ИТОГО по item б3: немота оси `nr` упала 20 → 10 правил.
+#    ПОПРАВКА 02.10.2026 (№519): «даром через sync(162)» держалось на чужом номере
+#    в правиле — после исправления web_blind_sqli_heuristic немо (35/230/23).

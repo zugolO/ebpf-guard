@@ -12,9 +12,9 @@
 # порции, содержащей хоть один из его номеров — той, чья цена его покупает.
 
 BASELINE NR 59,322,101,126,308,272,319,165,166,155,161,311,310,298,175,313,176,321,105
-EXCLUDED NR 35  # nanosleep: 22 775/мин доли ноды; web_blind_sqli_heuristic открывается через sync(162) даром
+EXCLUDED NR 35  # nanosleep: 22 775/мин доли ноды; web_blind_sqli_heuristic после №519 называет 35/230/23 и немо (UNBOUGHT): прежнее «открывается через sync(162) даром» держалось на чужом номере
 
-# порция 1 (нулевая): 10 номеров (открывается 10), правил 7 (остаётся немыми по решению 0)
+# порция 1 (нулевая): 10 номеров (открывается 6), правил 4 (остаётся немыми по решению 0)
 P1 NR 57
 P1 PRICE 57=0  # fork
 P1 MEASURED 57=0  # fork, событий за окно 600 с, пара A/B
@@ -24,18 +24,22 @@ P1 MEASURED 132=0  # utime, событий за окно 600 с, пара A/B
 P1 NR 135
 P1 PRICE 135=0  # personality
 P1 MEASURED 135=0  # personality, событий за окно 600 с, пара A/B
+P1 REJECTED 135  # personality: 0 правил после №519: mitre_sandbox_detect_cpuid называло его arch_prctl, а это personality(2) — правило ловило personality(4113/4114), чего атака не делает; номер в правиле исправлен на 158. Был открыт 29.09…02.10.2026, цена 0 событий за окно
 P1 NR 162
 P1 PRICE 162=0  # sync
 P1 MEASURED 162=0  # sync, событий за окно 600 с, пара A/B
+P1 REJECTED 162  # sync: 0 правил после №519: web_blind_sqli_heuristic называло его select, а это sync(2); номер исправлен на 23. Был открыт 29.09…02.10.2026, цена 0 событий за окно
 P1 NR 206
 P1 PRICE 206=0  # io_setup
 P1 MEASURED 206=0  # io_setup, событий за окно 600 с, пара A/B
+P1 REJECTED 206  # io_setup: 0 правил после №519: web_blind_sqli_heuristic называло его clock_nanosleep, а это io_setup(2); номер исправлен на 230. Был открыт 29.09…02.10.2026, цена 0 событий за окно
 P1 NR 235
 P1 PRICE 235=0  # utimes
 P1 MEASURED 235=0  # utimes, событий за окно 600 с, пара A/B
 P1 NR 238
 P1 PRICE 238=0  # set_mempolicy
 P1 MEASURED 238=0  # set_mempolicy, событий за окно 600 с, пара A/B
+P1 REJECTED 238  # set_mempolicy: 0 правил после №519: evasion_auditd_stop называло его tgkill, а это set_mempolicy(2); номер исправлен на 234, правило открыто kill(62) порции 2. Был открыт 29.09…02.10.2026, цена 0 событий за окно
 P1 NR 258
 P1 PRICE 258=0  # mkdirat
 P1 MEASURED 258=10  # mkdirat, событий за окно 600 с, пара A/B
@@ -45,15 +49,12 @@ P1 MEASURED 280=0  # utimensat, событий за окно 600 с, пара A/
 P1 NR 317
 P1 PRICE 317=0  # seccomp
 P1 MEASURED 317=0  # seccomp, событий за окно 600 с, пара A/B
-P1 RULE evasion_auditd_stop
 P1 RULE evasion_timestamp_modify
 P1 RULE impact_fork_bomb_pattern
-P1 RULE mitre_sandbox_detect_cpuid
 P1 RULE sigma_seccomp_filter_install
 P1 RULE sigma_world_writable_dir_created
-P1 RULE web_blind_sqli_heuristic
 
-# порция 2 (дешёвая): 5 номеров (открывается 2), правил 2 (остаётся немыми по решению 0)
+# порция 2 (дешёвая): 5 номеров (открывается 2), правил 3 (остаётся немыми по решению 0)
 P2 NR 88
 P2 PRICE 88=3  # symlink
 P2 MEASURED 88=84  # symlink, событий за окно 600 с, пара A/B
@@ -72,6 +73,7 @@ P2 MEASURED 157=5904  # prctl, событий за окно 600 с, пара A/B
 P2 NR 62
 P2 PRICE 62=61  # kill
 P2 MEASURED 62=554  # kill, событий за окно 600 с, пара A/B
+P2 RULE evasion_auditd_stop
 P2 RULE ransomware_backup_tool_kill
 P2 RULE sigma_prctl_dumpable
 
@@ -132,4 +134,6 @@ P5 MEASURED 9=39594  # mmap, событий за окно 600 с, пара A/B
 P5 RULE rootkit_anonymous_exec_memory
 
 # НЕ ПОКУПАЕТСЯ НИ ОДНОЙ ПОРЦИЕЙ (цена номеров не мерена item'ом б2):
-# итого: правил оси `nr` немых на baseline 19, покупается порциями 16, немы по решению 3, не покупается 0
+UNBOUGHT RULE mitre_sandbox_detect_cpuid 158
+UNBOUGHT RULE web_blind_sqli_heuristic 23,35,230
+# итого: правил оси `nr` немых на baseline 19, покупается порциями 14, немы по решению 3, не покупается 2

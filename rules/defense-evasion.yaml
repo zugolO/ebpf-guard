@@ -175,7 +175,10 @@ rules:
       conditions:
         - field: syscall.nr
           op: in
-          values: ["62", "37", "238"]  # kill, tkill, tgkill
+          # №519 (02.10.2026): было ["62", "37", "238"] — 37 это alarm, 238 —
+          # set_mempolicy; настоящие tkill/tgkill — 200/234. Оба не в аллоулисте
+          # (цена не мерена, tgkill горячий у Go-рантайма), правило открыто kill(62).
+          values: ["62", "200", "234"]  # kill, tkill, tgkill
         - field: proc.comm
           op: in
           values: ["bash", "sh", "zsh", "python3", "python", "perl",

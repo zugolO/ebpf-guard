@@ -2873,7 +2873,10 @@ _forbid_text "6.6.8 правило plaintext не в цене" "$_t668_j" "${_M6
 # состав порции генерируется tools/rules-audit/nr-portions.py и рукой не пишется.
 _MAN669="$(dirname "$PIPE")/attacks/wave7-nr-portions.txt"
 [ -s "$_MAN669" ] || _efail "6.6.9: боевого манифеста $_MAN669 нет — фикстурам нечего разбирать"
-_M669_NRS=$(awk '$1 == "P1" && $2 == "NR" { print $3 }' "$_MAN669")
+# Открываемый состав — NR минус REJECTED той же порции, как считает эмиттер (№514).
+# С 02.10.2026 у порции 1 есть отвергнутые: 135/162/206/238 закрыты снова (№519).
+_M669_NRS=$(awk '$1 == "P1" && $2 == "REJECTED" { rej[$3] = 1 } $1 == "P1" && $2 == "NR" { nr[++n] = $3 }
+    END { for (i = 1; i <= n; i++) if (!(nr[i] in rej)) print nr[i] }' "$_MAN669")
 _M669_RULES=$(awk '$1 == "P1" && $2 == "RULE" { print $3 }' "$_MAN669")
 _M669_NN=$(printf '%s\n' "$_M669_NRS" | grep -c . || true)
 _M669_NR=$(printf '%s\n' "$_M669_RULES" | grep -c . || true)

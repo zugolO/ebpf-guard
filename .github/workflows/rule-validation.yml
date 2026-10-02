@@ -7,11 +7,13 @@ on:
       - 'rules/**'
       - '.github/workflows/rule-validation.yml'
       - 'scripts/mitre-coverage.py'
+      - 'tools/rules-audit/nr-name-check.py'
   pull_request:
     branches: [main, develop]
     paths:
       - 'rules/**'
       - '.github/workflows/rule-validation.yml'
+      - 'tools/rules-audit/nr-name-check.py'
   schedule:
     # Nightly at 02:00 UTC — validate rules and check SigmaHQ for new linux rules
     - cron: '0 2 * * *'
@@ -66,6 +68,13 @@ jobs:
             echo "::error::Rule validation failed — see rule-validation.log"
             exit 1
           fi
+
+      # №519: a rule naming the wrong syscall number is mute or fires on the
+      # wrong call for its whole life, and no run notices. The checker compares
+      # each nr value with the syscall name its own comment gives, against the
+      # x86_64 table from golang.org/x/sys in the module cache (go mod download above).
+      - name: Syscall numbers match the names rules give them
+        run: python3 tools/rules-audit/nr-name-check.py
 
       - name: ValidateFull — duplicate IDs and partial-invalid reload
         run: |

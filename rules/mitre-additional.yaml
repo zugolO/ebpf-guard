@@ -357,7 +357,10 @@ rules:
       conditions:
         - field: nr
           op: in
-          values: ["135"]  # arch_prctl
+          # №519 (02.10.2026): было 135 — это personality(2), не arch_prctl(2);
+          # правило ловило personality(4113/4114), чего атака не делает. Номер
+          # arch_prctl — 158, и он не в аллоулисте: правило немо до своей порции.
+          values: ["158"]  # arch_prctl
         # 5.9.3c (#47): bare arch_prctl matched every process on the box —
         # every process calls it at startup with ARCH_SET_FS (0x1002) to
         # set the TLS base. The cpuid-faulting-control codes this rule is

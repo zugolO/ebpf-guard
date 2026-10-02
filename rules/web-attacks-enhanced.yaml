@@ -84,7 +84,10 @@ rules:
       conditions:
         - field: nr
           op: in
-          values: ["35", "206", "162"]  # nanosleep, clock_nanosleep, select (sleep syscalls)
+          # №519 (02.10.2026): было ["35", "206", "162"] — 206 это io_setup, 162 —
+          # sync; настоящие clock_nanosleep/select — 230/23. Ни один из трёх не в
+          # аллоулисте (35 исключён ценой), правило немо до своей порции.
+          values: ["35", "230", "23"]  # nanosleep, clock_nanosleep, select (sleep syscalls)
         # 5.9.3c (#47): sleep/select syscalls alone are near-universal —
         # every event loop and rate limiter uses them. The description's
         # "following database-adjacent file activity" isn't checkable from

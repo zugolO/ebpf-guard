@@ -357,10 +357,11 @@ func TestWave7RejectedNumbersStayClosed(t *testing.T) {
 			"зелёным на любом составе")
 }
 
-// nanosleep(35) is named in the manifest as excluded, and the exclusion is only
-// honest while the rule that names it opens through some other number. If
-// web_blind_sqli_heuristic ever became reachable ONLY through 35, the exclusion
-// would silently be a rule left mute rather than a price not paid.
+// nanosleep(35) is named in the manifest as excluded. An excluded number may not
+// be the reason a PORTION rule stays mute: a rule the manifest says is bought
+// must open without it. web_blind_sqli_heuristic used to open "for free" via
+// sync(162) — a wrong number in the rule (№519); after the fix it names 35/230/23
+// and is UNBOUGHT, which this guard allows because no portion claims it.
 func TestWave7ExcludedNumbersLeaveNoRuleMute(t *testing.T) {
 	man := readPortionManifest(t)
 	require.NotEmpty(t, man.excluded)

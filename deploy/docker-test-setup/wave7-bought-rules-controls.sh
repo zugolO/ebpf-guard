@@ -92,7 +92,10 @@ c2_raw_socket_shell|41|python3|_p_rawsock_root
 mitre_arp_spoof_raw_socket|41|python3|_p_packet_socket
 rootkit_kexec_load|246|python3|_p_kexec_nonroot
 rootkit_userfaultfd_create|323|python3|_p_userfaultfd_nonroot
-rootkit_anonymous_exec_memory|9|python3|_p_mmap_anon_exec"
+rootkit_anonymous_exec_memory|9|python3|_p_mmap_anon_exec
+mitre_sandbox_detect_cpuid|158|python3|_p_arch_prctl_cpuid
+web_blind_sqli_heuristic|23|python3|_p_select_under_nginx
+ransomware_mass_rename|82|python3|_p_rename_burst"
 
 # Общая шапка python-нагрузки: печатает ОДНУ строку-результат, по которой работает
 # результатный сторож (pid, comm из /proc/self/comm, rc, errno). Нагрузка пишется
@@ -140,6 +143,30 @@ rc, en = sc(317, 1, 0, ctypes.byref(prog))
 done(rc, en)')"; }
 _p_mkdirat_ww() { python3 "$(_pyfile mkdirat 'd = D + "/ww-%d" % os.getpid()
 rc, en = sc(258, -100, d.encode(), 0o777)
+done(rc, en)')"; }
+# Порция 6 (02.10.2026). Нагрузка — по ОПИСАНИЮ атаки, а не по условию (урок №519):
+# arch_prctl(ARCH_GET_CPUID=0x1011) — ровно запрос состояния cpuid-faulting.
+_p_arch_prctl_cpuid() { python3 "$(_pyfile arch_prctl 'rc, en = sc(158, 0x1011, 0)
+done(rc, en)')"; }
+# select(2) с нулевым таймаутом (не блокирует) из процесса под веб-сервером:
+# parent_comm=nginx — копия bash под этим именем, хвост `; exit $?` не даёт bash
+# заменить себя на единственную команду.
+_p_select_under_nginx() {
+    cp "$(command -v bash)" "$W7B_DIR/nginx" 2>/dev/null || { echo "RESULT pid=0 comm=- rc=-1 errno=-1 reason=copy_bash_failed"; return; }
+    local f; f=$(_pyfile select 'class TV(ctypes.Structure): _fields_ = [("s", ctypes.c_long), ("us", ctypes.c_long)]
+tv = TV(0, 0)
+rc, en = sc(23, 0, None, None, None, ctypes.byref(tv))
+done(rc, en)')
+    "$W7B_DIR/nginx" -c "python3 $f; exit \$?"
+}
+# Цикл переименований: 30 rename(2) за доли секунды одним pid — порог правила
+# 20 за 10 с (№520). Файл живёт в $W7B_DIR, не в /root.
+_p_rename_burst() { python3 "$(_pyfile rename 'a = (D + "/rn-%d.txt" % os.getpid()).encode(); b = a + b".encrypted"
+open(a, "w").close()
+for i in range(30):
+    rc, en = sc(82, a, b) if i % 2 == 0 else sc(82, b, a)
+    if rc != 0:
+        break
 done(rc, en)')"; }
 _p_prctl_dumpable() { python3 "$(_pyfile prctl 'rc, en = sc(157, 4, 0, 0, 0, 0)
 done(rc, en)')"; }

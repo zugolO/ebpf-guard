@@ -133,7 +133,23 @@ P5 PRICE 9=3433  # mmap
 P5 MEASURED 9=39594  # mmap, событий за окно 600 с, пара A/B
 P5 RULE rootkit_anonymous_exec_memory
 
+# порция 6 (возврат №519 и повторные): 5 номеров (открывается 4), правил 3 (остаётся немыми по решению 0)
+P6 NR 23
+P6 PRICE 23=0  # select
+P6 NR 158
+P6 PRICE 158=253  # arch_prctl
+P6 NR 230
+P6 PRICE 230=94  # clock_nanosleep
+P6 REJECTED 230  # clock_nanosleep: 0 новых правил: web_blind_sqli_heuristic покупает select(23) той же порции при цене 0 вызовов/мин, а clock_nanosleep стоит 94/мин (multipathd, sshd) и не покупает ничего сверх него — отвергнут каталогом ДО пары (№511)
+P6 NR 82
+P6 PRICE 82=2  # rename
+P6 REOPENED 82  # rename: правка №520: ransomware_mass_rename матчило ЛЮБОЙ rename(2) (44 алерта за окно, 47 из 48 — pid 1 systemd); условию добавлен порог 20 вызовов за 10 с одним pid (TestWave7MassRenameNeedsBurst), темп systemd (~4/мин) его не достигает. evasion_self_delete на 87 не задет
+P6 NR 320
+P6 PRICE 320=0  # kexec_file_load
+P6 REOPENED 320  # kexec_file_load: цена ПОКРЫТИЯ (№517): rootkit_kexec_load куплено kexec_load(246) порцией 4, но без 320 правило не видит kexec_file_load — путь современных kexec-утилит. 0 вызовов/мин по зонду Ц1; правила не покупает, второй путь закрывает
+P6 RULE mitre_sandbox_detect_cpuid
+P6 RULE ransomware_mass_rename
+P6 RULE web_blind_sqli_heuristic
+
 # НЕ ПОКУПАЕТСЯ НИ ОДНОЙ ПОРЦИЕЙ (цена номеров не мерена item'ом б2):
-UNBOUGHT RULE mitre_sandbox_detect_cpuid 158
-UNBOUGHT RULE web_blind_sqli_heuristic 23,35,230
-# итого: правил оси `nr` немых на baseline 19, покупается порциями 14, немы по решению 3, не покупается 2
+# итого: правил оси `nr` немых на baseline 19, покупается порциями 17, немы по решению 2, не покупается 0

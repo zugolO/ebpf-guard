@@ -3,12 +3,18 @@ rules:
   - id: ransomware_mass_rename
     name: "Mass file rename to encrypted extension"
     description: >
-      A process is calling rename(2) and its command line contains known
-      ransomware encryption extensions (.encrypted, .locked, .enc, .crypt).
-      The BPF syscall tracer captures rename(2) = syscall 82; the proc.args
-      regex matches when the process was launched with those extension strings
-      (e.g. a python -c script that renames .txt to .encrypted).
+      One process renames files in a burst — at least 20 rename(2) calls within
+      10 seconds — which is the encryption-in-place loop of ransomware
+      (read, encrypt, rename to .encrypted/.locked). The extension itself is
+      not checkable here: rename(2) arguments are raw user pointers on the
+      syscall axis, so the burst is the signal.
     event_type: syscall
+    # №520 (02.10.2026): the description used to promise a proc.args check for
+    # .encrypted/.locked that the condition never had, so the rule matched EVERY
+    # rename(2): pair of portion 4 (collect-6.4-w669P4B) — 44 alerts per 600 s
+    # window, 47 of 48 per run from pid 1 systemd, ~4/min. A burst gate separates
+    # the two: systemd's renames never reach 20 in 10 s from one pid, an
+    # encryption loop does in the first second.
     condition_group:
       operator: and
       conditions:
@@ -20,6 +26,9 @@ rules:
           values: ["mv", "rsync", "git", "dpkg", "rpm", "apt", "pip", "pip3",
                    "npm", "yarn", "cargo", "go", "vim", "emacs", "nano",
                    "cp", "install", "make", "cmake", "meson", "gradle"]
+    threshold:
+      count: 20
+      window_seconds: 10
     severity: critical
     action: alert
     tags: [mitre:T1486, ransomware, impact]

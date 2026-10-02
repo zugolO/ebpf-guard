@@ -301,7 +301,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if unreachable := correlator.NewRuleEngine(rules).UnreachableFileOpRules(); len(unreachable) > 0 {
 			slog.Warn("rules: file rules whose op condition names no operation any hook produces",
 				slog.Int("count", len(unreachable)),
-				slog.Any("rule_ids", unreachable))
+				slog.Any("rule_ids", unreachable),
+				slog.String("reason", mustMuteFamilyCost(correlator.MuteFamilyFileOp).Reason),
+				slog.String("producer_price", mustMuteFamilyCost(correlator.MuteFamilyFileOp).Price),
+				slog.String("price_source", mustMuteFamilyCost(correlator.MuteFamilyFileOp).Source))
 		}
 
 		// Item б1 волны 7 (28.09.2026): the same decay on the NETWORK axis —
@@ -312,7 +315,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if unreachable := correlator.NewRuleEngine(rules).UnreachableProtoRules(); len(unreachable) > 0 {
 			slog.Warn("rules: network rules whose proto condition names no protocol any hook produces",
 				slog.Int("count", len(unreachable)),
-				slog.Any("rule_ids", unreachable))
+				slog.Any("rule_ids", unreachable),
+				slog.String("reason", mustMuteFamilyCost(correlator.MuteFamilyProto).Reason),
+				slog.String("producer_price", mustMuteFamilyCost(correlator.MuteFamilyProto).Price),
+				slog.String("price_source", mustMuteFamilyCost(correlator.MuteFamilyProto).Source))
 		}
 
 		// Item 8 волны 7 (находка №494): the third axis of the same decay —
@@ -336,7 +342,9 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Int("count", len(inert)),
 				slog.Any("rule_ids", ids),
 				slog.String("event_type", inert[0].EventType),
-				slog.String("reason", inert[0].Reason))
+				slog.String("reason", inert[0].Reason),
+				slog.String("producer_price", mustMuteFamilyCost(correlator.MuteFamilyEventType).Price),
+				slog.String("price_source", mustMuteFamilyCost(correlator.MuteFamilyEventType).Source))
 			if len(enforcing) > 0 {
 				slog.Warn("rules: unproducible rules also declare an enforcing action that can never run",
 					slog.Any("rule_actions", enforcing))
@@ -5144,4 +5152,15 @@ func (r *kernelCounterRegistry) drain() {
 			r.sink(name, delta)
 		}
 	}
+}
+
+// mustMuteFamilyCost reads the recorded reason and price of a mute family for the
+// startup registry. A family without a record is a programming error: the registry
+// line would again name the class without its price.
+func mustMuteFamilyCost(family string) correlator.MuteFamilyCost {
+	c, ok := correlator.MuteFamilyCostFor(family)
+	if !ok {
+		panic("no recorded cost for mute family " + family)
+	}
+	return c
 }

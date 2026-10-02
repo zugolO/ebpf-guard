@@ -118,6 +118,9 @@ bpf:
       - 41   # socket, 8281 событие/окно по замеру пары
       - 246  # kexec_load, 0 событий/окно
       - 323  # userfaultfd, 0 событий/окно
+      # Порция 5 (пара collect-6.4-w669P5A/-w669P5B): 39 594 события/окно, дропы
+      # без path_denylist +0, аллокации +0,82%, 0 алертов по трём слоям.
+      - 9    # mmap, 39 594 события/окно по замеру пары
 
     # P1-18b: path-prefix denylist for file open/read/write events, matched
     # in-kernel before the event reaches the ring buffer. Empty by default —

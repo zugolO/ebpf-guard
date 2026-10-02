@@ -19,6 +19,13 @@ INTERVAL="${INTERVAL:-300}"        # 5 минут между срезами
 DURATION="${DURATION:-28800}"      # 8 часов
 SERVICE="${SERVICE:-ebpf-guard-test.service}"
 NO_RESTART="${NO_RESTART:-0}"
+# Замер №3 / волна 8.1: каждый HEAP_EVERY-й срез добавляет /debug/pprof/heap в
+# ТОТ ЖЕ curl (без gc=1 — принудительный GC раз в час двигал бы саму траекторию
+# кучи). 0 — выключено, прежнее поведение. STORE_DB — файл стора, чей размер
+# пишется в snapshots/store-size.tsv прямо stat'ом: метрика store_size_bytes на
+# стенде стоит в 0 и судить приёмку 4.5 не может.
+HEAP_EVERY="${HEAP_EVERY:-0}"
+STORE_DB="${STORE_DB:-}"
 # 5.9a (находки №27/№28): этот файл — канал, которым харнесс сообщает агенту
 # корень СВОЕГО дерева процессов, чтобы correlator.observer_exclude (см.
 # config-test.yaml) исключил его до оценки правил. Путь должен совпадать с
@@ -245,9 +252,23 @@ snapshot() {
     local t; t="$(date -u +%Y%m%dT%H%M%SZ)"
 
     # 5.9a половина 1: один curl-процесс на все три эндпоинта вместо трёх.
-    api_multi /metrics "$OUT/snapshots/metrics-$pad.txt" \
-              /api/v1/status "$OUT/snapshots/status-$pad.json" \
-              /debug/state "$OUT/snapshots/state-$pad.json"
+    if [[ "$HEAP_EVERY" -gt 0 && $(( n % HEAP_EVERY )) -eq 0 ]]; then
+        api_multi /metrics "$OUT/snapshots/metrics-$pad.txt" \
+                  /api/v1/status "$OUT/snapshots/status-$pad.json" \
+                  /debug/state "$OUT/snapshots/state-$pad.json" \
+                  /debug/pprof/heap "$OUT/snapshots/heap-$pad.pprof"
+    else
+        api_multi /metrics "$OUT/snapshots/metrics-$pad.txt" \
+                  /api/v1/status "$OUT/snapshots/status-$pad.json" \
+                  /debug/state "$OUT/snapshots/state-$pad.json"
+    fi
+    if [[ -n "$STORE_DB" ]]; then
+        # stat — builtin-free, но один короткий процесс; -L на случай симлинка.
+        # WAL-файл SQLite растёт отдельно от основного — пишутся оба.
+        printf '%s\t%s\t%s\t%s\n' "$t" "$n" \
+            "$(stat -L -c %s "$STORE_DB" 2>/dev/null || echo -1)" \
+            "$(stat -L -c %s "$STORE_DB-wal" 2>/dev/null || echo 0)" >> "$OUT/snapshots/store-size.tsv"
+    fi
 
     # RSS напрямую из /proc (уже не форкает ничего); CPU — через
     # proc_cpu_pct (bash read, без `ps`). Разбор снятых снимков (nseries,

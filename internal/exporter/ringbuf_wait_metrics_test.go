@@ -3,6 +3,7 @@ package exporter
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 )
@@ -66,4 +67,44 @@ func TestSetRingbufWaitMode_ExactlyOneBranchReadsOne(t *testing.T) {
 		}
 	}
 	SetRingbufWaitMode(c, RingbufWaitModeBlocking)
+}
+
+// TestEventsDroppedByQueueIsMaterialized: a run that drops nothing must still
+// expose the series, or the label-8.1.2 emitter can only ever say НЕИЗМЕРИМ and
+// point 4 of the wave 8.1 exit criterion ("потерь protected на idle ноль, и это
+// ноль с предъявленным прибором") is unreachable. The stand's smoke of
+// 03.10.2026 hit this: zero drops, no series, verdict withheld.
+func TestEventsDroppedByQueueIsMaterialized(t *testing.T) {
+	for _, c := range ParseErrorCollectors {
+		for _, q := range []string{QueueNameForPriority(true), QueueNameForPriority(false)} {
+			m, err := EventsDroppedByQueue.GetMetricWithLabelValues(c, q)
+			if err != nil {
+				t.Fatalf("GetMetricWithLabelValues(%q, %q): %v", c, q, err)
+			}
+			if v := testutil.ToFloat64(m); v < 0 {
+				t.Fatalf("series {%s,%s} reads %v", c, q, v)
+			}
+		}
+	}
+	// The series must be in the exposition, not merely constructible.
+	found := 0
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "ebpf_guard_events_dropped_by_queue_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "queue" && l.GetValue() == QueueNameForPriority(true) {
+					found++
+				}
+			}
+		}
+	}
+	if found != len(ParseErrorCollectors) {
+		t.Fatalf("protected series in the exposition: %d, want %d", found, len(ParseErrorCollectors))
+	}
 }

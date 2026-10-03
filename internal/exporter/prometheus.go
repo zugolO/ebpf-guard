@@ -741,6 +741,18 @@ func init() {
 	for _, c := range ParseErrorCollectors {
 		EventsDropped.WithLabelValues(c, "parse_error")
 	}
+	// EventsDroppedByQueue is materialized for the same collectors on both
+	// queues (wave 8.1, этап D). Without this the series appears only after the
+	// FIRST drop, so a healthy run has no series at all — and the emitter of
+	// label 8.1.2 ("потерь protected на idle ноль") could then never print
+	// anything but НЕИЗМЕРИМ, making point 4 of the wave's exit criterion
+	// unreachable by construction ([[verdict-line-that-can-only-say-unmeasurable]]).
+	// The smoke of 03.10.2026 printed exactly that: "серии нет ни в первом, ни в
+	// последнем снимке" on a run that dropped nothing at all.
+	for _, c := range ParseErrorCollectors {
+		EventsDroppedByQueue.WithLabelValues(c, QueueNameForPriority(true))
+		EventsDroppedByQueue.WithLabelValues(c, QueueNameForPriority(false))
+	}
 }
 
 // TLSFamily classifies a TLS event by its producer.

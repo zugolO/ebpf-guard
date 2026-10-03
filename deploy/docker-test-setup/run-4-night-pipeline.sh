@@ -141,6 +141,15 @@ for q in event_high event_low rego enforce; do
 done
 say "сторож: высшие отметки очередей печатаются (4 очереди)"
 
+# Серия потерь очереди обязана БЫТЬ при нулевых потерях: смок 03.10.2026 показал,
+# что на здоровом прогоне её нет вовсе, и метка 8.1.2 тогда печатает НЕИЗМЕРИМ
+# всегда — пункт 4 критерия выхода волны недостижим по построению
+# ([[verdict-line-that-can-only-say-unmeasurable]]). Проверяется здесь, а не
+# после восьми часов.
+dq=$(_m "$M0" ebpf_guard_events_dropped_by_queue_total 'queue="protected"')
+[ -n "$dq" ] || die "серии events_dropped_by_queue_total{queue=\"protected\"} нет при нулевых потерях — метка 8.1.2 была бы НЕИЗМЕРИМА все 8 часов"
+say "сторож: серия потерь очереди protected материализована (сумма $dq)"
+
 prof_bytes=$(_curl --max-time 20 -o "$ART/cpu-preflight.pprof" -w '%{size_download}' "$API/debug/pprof/profile?seconds=3")
 [ "${prof_bytes:-0}" -gt 1000 ] || die "CPU-профиль в преflight вернул ${prof_bytes:-0} Б — прибор item 8(б) мёртв, почасовые профили ночи были бы пустыми"
 say "сторож: CPU-профиль отвечает ($prof_bytes Б за 3 с)"

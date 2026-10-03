@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -82,6 +83,15 @@ func probeEpollable(fd int) error {
 type netpollRingWaiter struct {
 	file *os.File
 	conn syscall.RawConn
+	// closed is the waiter's own record of Close, and it is what shutdown is
+	// recognised by. The error a parked RawConn.Read comes back with after the
+	// file is closed is internal/poll's ErrFileClosing ("use of closed file")
+	// wrapped in a *PathError, and os.File.wrapErr compares it to ErrClosed by
+	// identity, not with errors.Is — so errors.Is(err, os.ErrClosed) is FALSE
+	// there. Without this flag a normal Stop would be classified as a wait
+	// failure and would "downgrade" a reader whose ring is already gone; the
+	// Linux test TestNewRingWaiter_CloseUnblocks is what caught it.
+	closed atomic.Bool
 }
 
 // WaitUntil parks until try takes a record.
@@ -106,6 +116,11 @@ func (w *netpollRingWaiter) WaitUntil(try func() (bool, error)) error {
 		return tryErr
 	}
 	if err != nil {
+		if w.closed.Load() {
+			// Shutdown, not a failure of the path: report the error the
+			// collectors' read loops already recognise.
+			return os.ErrClosed
+		}
 		if errors.Is(err, os.ErrClosed) || errors.Is(err, os.ErrDeadlineExceeded) {
 			return err
 		}
@@ -119,5 +134,6 @@ func (w *netpollRingWaiter) WaitUntil(try func() (bool, error)) error {
 }
 
 func (w *netpollRingWaiter) Close() error {
+	w.closed.Store(true)
 	return w.file.Close()
 }

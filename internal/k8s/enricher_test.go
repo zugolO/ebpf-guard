@@ -11,6 +11,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	cruntime "github.com/zugolO/ebpf-guard/internal/runtime"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -298,9 +299,9 @@ func TestCacheExpiryWithTTL(t *testing.T) {
 	// Populate cache with multiple entries
 	for i := uint32(1); i <= 10; i++ {
 		e.enrichmentCache[i] = &EnrichmentInfo{
-			PodName:     fmt.Sprintf("pod-%d", i),
-			Namespace:   "default",
-			CachedAt:    time.Now(),
+			PodName:   fmt.Sprintf("pod-%d", i),
+			Namespace: "default",
+			CachedAt:  time.Now(),
 		}
 	}
 
@@ -661,5 +662,88 @@ func TestEnrichEvent_CgroupRecoversProcGone(t *testing.T) {
 	e.rememberCgroup(79, &EnrichmentInfo{PodName: "old", CachedAt: time.Now().Add(-2 * time.Minute)})
 	if e.lookupCgroup(79) != nil {
 		t.Fatal("expired cgroup entry served")
+	}
+}
+
+// TestEnricher_DefaultsToSharedResolver pins wave 8.1 item 2 (в) on the k8s
+// side: the enricher must resolve through the same process-wide resolver the
+// runtime enricher uses, otherwise one event reads /proc twice.
+func TestEnricher_DefaultsToSharedResolver(t *testing.T) {
+	e := &Enricher{}
+	if e.containerResolver() != cruntime.DefaultContainerIDResolver() {
+		t.Fatal("k8s enricher must default to the shared cgroup-id resolver")
+	}
+}
+
+// TestEnricher_CgroupPathMatchesPIDPath is the wave 8.1 item 2 identity guard
+// on the k8s side: over one event stream the new cgroup-id-keyed path and the
+// old pid-keyed path must produce the same attribution. container_id/pod_name
+// are rule-exclusion axes ([[exclusions-key-on-cgroup-not-comm]]), so a change
+// here would be a detection change, not only a performance one.
+func TestEnricher_CgroupPathMatchesPIDPath(t *testing.T) {
+	const (
+		cidWithPod  = "3333333333333333333333333333333333333333333333333333333333333333"
+		cidNoPod    = "4444444444444444444444444444444444444444444444444444444444444444"
+		cidCgroupfs = "5555555555555555555555555555555555555555555555555555555555555555"
+	)
+	contentByPID := map[uint32]string{
+		4242: "0::/system.slice/cri-containerd-" + cidWithPod + ".scope",
+		4243: "0::/system.slice/docker-" + cidNoPod + ".scope",
+		// cgroupfs driver (classic k8s ≤1.21 via cri-dockerd): a container line
+		// with no runtime keyword, only /kubepods/. The pid-path parser matches
+		// it, so the cgroup-id path must too — otherwise attribution silently
+		// drifts on that layout and every exclusion keyed on container_id/
+		// pod_name stops matching.
+		4244: "12:devices:/kubepods/burstable/pod1234/" + cidCgroupfs,
+	}
+
+	w := newTestWatcher()
+	w.podCache[cidWithPod] = &PodInfo{
+		Name: "web-0", Namespace: "prod", UID: "uid-1", NodeName: "node-1",
+	}
+	w.podCache[cidCgroupfs] = &PodInfo{
+		Name: "cgroupfs-0", Namespace: "prod", UID: "uid-2", NodeName: "node-1",
+	}
+
+	e := &Enricher{
+		watcher:         w,
+		logger:          k8sQuietLogger(),
+		enrichmentCache: make(map[uint32]*EnrichmentInfo),
+		cacheTTL:        time.Minute,
+		resolver: cruntime.NewContainerIDResolverWithReader(time.Minute, func(pid uint32) (string, error) {
+			return contentByPID[pid], nil
+		}),
+	}
+
+	stream := []struct {
+		cgroupID uint64
+		pid      uint32
+		wantPod  string
+		wantCID  string
+	}{
+		{7, 4242, "web-0", ""},      // pod matched: runtime enricher fills container_id
+		{8, 4243, "", cidNoPod},     // no pod: bare cgroup container id
+		{9, 4244, "cgroupfs-0", ""}, // keyword-less kubepods layout, pod matched
+	}
+
+	for i, tc := range stream {
+		// Old path: k8s's own cgroup parser, then the same pod cache the pid
+		// path consulted (GetPodInfoByPID discarded the id, the fallback kept
+		// it, so container_id is empty exactly when a pod matched).
+		oldID, err := extractContainerID(contentByPID[tc.pid])
+		require.NoError(t, err)
+		if pod, ok := w.GetPodInfo(oldID); ok {
+			assert.Equal(t, tc.wantPod, pod.Name)
+		} else {
+			assert.Empty(t, tc.wantPod)
+			assert.Equal(t, tc.wantCID, oldID)
+		}
+
+		// New path: a single event carrying the kernel cgroup id.
+		ev := &types.Event{PID: tc.pid, CgroupID: tc.cgroupID}
+		e.EnrichEvent(ev)
+		require.NotNil(t, ev.Enrichment, "event %d must be attributed", i)
+		assert.Equal(t, tc.wantPod, ev.Enrichment.PodName)
+		assert.Equal(t, tc.wantCID, ev.Enrichment.ContainerID)
 	}
 }

@@ -1560,6 +1560,87 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// and №457 gave them reporters.
 	selfReportingCollectors := map[string]bool{}
 
+	// wave-8.1 item 4 (plan.md line 17030): cilium/ebpf caches ONE process-global
+	// kernel *btf.Spec — the vmlinux types parsed by btf.LoadKernelSpec on the
+	// first CO-RE relocation, LSM/tracing attach-target lookup or kfunc
+	// resolution, i.e. from nearly every collector's object load. On the stand
+	// that cache was 33,4 МиБ of live heap (36%), filled by bpf.LoadKmodObjects
+	// (KmodCollector.Start). Nothing needs it once the programs are in the
+	// kernel: loaded *ebpf.Program/*ebpf.Map values keep no reference to the
+	// spec, so dropping it returns the memory to the Go heap at the next GC.
+	//
+	// FlushKernelSpec also clears cilium/ebpf's kallsyms kernel-module cache
+	// (kallsyms.FlushKernelModuleCache, btf/kernel.go:24). That cache is read only
+	// while resolving a kprobe/fentry attach target (prog.go:183, kernelModule())
+	// and is rebuilt on demand from /proc/kallsyms; nothing in this repo touches
+	// kallsyms after startup, so dropping it here is harmless.
+	//
+	// The flush must happen after ALL loaders returned — flushing after each one
+	// would make the next loader parse vmlinux again, which is worse than not
+	// flushing at all. "All returned" is observed, not timed: every BPF-loading
+	// collector publishes its load outcome exactly once through
+	// collectorUpReporter (status.SetUp fires after load+attach, before the
+	// collector parks in its read loop), so the countdown armed in
+	// startCollectors reaches zero only after the last Start has loaded. The
+	// countdown de-duplicates by collector name on top of that, so a collector
+	// that reported a second time (a future up→down transition) cannot consume
+	// another collector's slot and fire the flush early.
+	//
+	// Is the kernel spec needed by loads that happen after startup?
+	//   (a) internal/bpf/live_update.go:38 (defaultCollectionLoader.Load) calls
+	//       ebpf.NewCollectionWithOptions, which goes through cilium/ebpf v0.16.0's
+	//       load-time btf.LoadKernelSpec sites (prog.go:1012 attach-target
+	//       resolution, linker.go:144 CO-RE relocations, linker.go:293 kfunc
+	//       fixups). DORMANT today: NewLiveUpdater has no production caller (the
+	//       config key exists, config.go:779-780/845-846, but nothing in cmd/ or
+	//       internal/ constructs it). A future live update pays one extra vmlinux
+	//       parse (~33 МиБ, tens of ms) per reload.
+	//   (a2) POST /api/v1/bpf/reload (route api.go:48, handler
+	//       handleBPFReload api.go:893) is the same live-update machinery behind
+	//       an admin endpoint: it calls s.bpfReloader (api.go:906). Also DORMANT:
+	//       the only setter, Server.SetBPFReloader (server.go:701), has no caller
+	//       in cmd/ or internal/, so the endpoint currently answers 503 "BPF live
+	//       update not configured". If it is ever wired, the same one-extra-parse
+	//       cost as (a) applies.
+	//   (b) TLS/HTTP uprobe reattach does NOT need it. loadObjects runs once, from
+	//       Start (tls.go:351, http_uprobe.go:321); TLS and HTTP have no Reload,
+	//       so nothing calls it again. scanAndAttach (tls.go:539,
+	//       http_uprobe.go:484) re-attaches the already-loaded program through
+	//       link.Uprobe/link.Uretprobe (tls.go:862, http_uprobe.go:644). The link
+	//       package never calls btf.LoadKernelSpec in v0.16.0, so no runtime attach
+	//       (uprobe/uretprobe, DNS tracepoint, AttachLSM, AttachXDP, AttachIter)
+	//       needs the cached spec.
+	//   (c) collector Reload() (syscall.go:185, network.go:142, fileaccess.go:242,
+	//       tlsfingerprint.go:165, iouring.go:132, bpfmonitor.go:131) calls
+	//       loadObjects() and would need it, but nothing calls Reload: its only
+	//       caller is watchdog.runLivenessChecks (watchdog.go:352), reachable only
+	//       through watchdog.RegisterChecker (watchdog.go:183), which has no caller
+	//       in cmd/ or internal/.
+	//   (d) Every other loader already ran before startCollectors() is called
+	//       (main.go:2829): feature detection / BTF resolution
+	//       (DetectFeatures/ResolveBTF, main.go:362-368), the enforcer's XDP
+	//       load (enforcer.go:271) and the hidden-process iterator
+	//       (hiddenDetector.Start, main.go:2234).
+	// Decision: flush anyway — the only live path that would re-parse is a (not
+	// yet wired) operator-triggered live update, and one vmlinux parse per update
+	// is cheaper than holding the cache for the whole process lifetime.
+	// The countdown, dedup-by-name and once semantics live in
+	// internalbpf.KernelBTFFlushGate (internal/bpf/btf_flush_gate.go) so the
+	// ordering invariants are unit-tested, not only read; this closure adds the
+	// release log.
+	//
+	// kernelBTFFlushWarnDelay is how long after startup startCollectors waits
+	// before warning that the countdown is still pending (a collector stalled
+	// before reporting). Collectors load within seconds; two minutes is far
+	// enough out that the warning means "stuck", not "slow".
+	const kernelBTFFlushWarnDelay = 2 * time.Minute
+	flushGate := internalbpf.NewKernelBTFFlushGate()
+	flushKernelBTFIfLast := func(name string) {
+		if flushGate.Report(name) {
+			slog.Info("bpf: released cilium/ebpf kernel BTF cache after all collectors loaded")
+		}
+	}
+
 	// collectorUpReporter returns a StatusReporter that mirrors a collector's
 	// own signal into the collector_up metric and GET /health, then runs extra
 	// only when the collector reports itself up (per-collector map
@@ -1573,6 +1654,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			if up && extra != nil {
 				extra()
 			}
+			// wave-8.1 item 4: this is the load outcome of one collector; the
+			// last one to report is the point after which the kernel BTF cache
+			// can be dropped. See flushGate above.
+			flushKernelBTFIfLast(name)
 		})
 	}
 
@@ -1974,6 +2059,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	// Собственно запуск — одно место, вызывается перед циклом потребителя.
 	startCollectors := func() {
+		// wave-8.1 item 4: arm the kernel-BTF flush countdown with the exact
+		// number of collectors that will publish a load outcome. Set here,
+		// after every collector was appended and before any Start goroutine
+		// exists, so no report can be lost. Each name consumes at most one
+		// slot (flushKernelBTFIfLast). Zero (dry-run/synthetic) leaves it
+		// disarmed: nothing is ever loaded, so there is no cache to release.
+		pendingLoaders := len(selfReportingCollectors)
+		flushGate.Arm(pendingLoaders)
+		if pendingLoaders > 0 {
+			slog.Debug("bpf: kernel BTF flush countdown armed",
+				slog.Int("pending_collectors", pendingLoaders))
+		}
 		collectorsStartedAt = time.Now()
 		for _, c := range toStart {
 			go func(c collector.Collector) {
@@ -1988,6 +2085,26 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					}{c.Name(), err}
 				}
 			}(c)
+		}
+		// wave-8.1 item 4: the fail-safe has a silent failure mode — if any
+		// self-reporting collector stalls before its single SetUp (KmodCollector
+		// loads kmods, dns.Start backfills its socket map, both before SetUp),
+		// the countdown never reaches zero, the flush never runs and the ~33,4 МиБ
+		// kernel BTF cache is held for the process lifetime. That direction is
+		// safe (never flush early) but must not be silent, so warn once well after
+		// startup instead of letting the task's win disappear without a trace.
+		if pendingLoaders > 0 {
+			go func() {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(kernelBTFFlushWarnDelay):
+				}
+				if remaining := flushGate.Pending(); remaining > 0 {
+					slog.Warn("bpf: kernel BTF cache not released: collectors have not reported a load outcome",
+						slog.Int64("pending_collectors", remaining))
+				}
+			}()
 		}
 	}
 

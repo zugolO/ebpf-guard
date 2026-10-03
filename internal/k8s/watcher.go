@@ -20,15 +20,17 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+
+	cruntime "github.com/zugolO/ebpf-guard/internal/runtime"
 )
 
 // Watcher watches for pod lifecycle events and maintains a local cache.
 type Watcher struct {
-	client    kubernetes.Interface
-	informer  cache.SharedIndexInformer
-	stopCh    chan struct{}
-	stopOnce  sync.Once // guards close(stopCh) against double-close panics
-	logger    *slog.Logger
+	client   kubernetes.Interface
+	informer cache.SharedIndexInformer
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards close(stopCh) against double-close panics
+	logger   *slog.Logger
 
 	// podCache maps container ID -> PodInfo
 	mu       sync.RWMutex
@@ -41,13 +43,13 @@ type Watcher struct {
 
 // PodInfo contains Kubernetes metadata for a pod.
 type PodInfo struct {
-	Name        string
-	Namespace   string
-	UID         string
-	Labels      map[string]string
-	Annotations map[string]string
+	Name         string
+	Namespace    string
+	UID          string
+	Labels       map[string]string
+	Annotations  map[string]string
 	ContainerIDs []string
-	NodeName    string
+	NodeName     string
 }
 
 // WatcherConfig holds configuration for the pod watcher.
@@ -138,7 +140,7 @@ func createK8sClient(kubeconfigPath string) (kubernetes.Interface, error) {
 				home = os.Getenv("USERPROFILE") // Windows
 			}
 			defaultKubeconfig := filepath.Join(home, ".kube", "config")
-			
+
 			if _, statErr := os.Stat(defaultKubeconfig); statErr == nil {
 				config, err = clientcmd.BuildConfigFromFlags("", defaultKubeconfig)
 				if err != nil {
@@ -189,7 +191,7 @@ func (w *Watcher) Stop() error {
 func (w *Watcher) GetPodInfo(containerID string) (*PodInfo, bool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	
+
 	info, ok := w.podCache[normalizeContainerID(containerID)]
 	return info, ok
 }
@@ -205,14 +207,18 @@ func (w *Watcher) GetPodInfoByPID(pid uint32) (*PodInfo, bool) {
 }
 
 // getContainerIDFromPID reads container ID from cgroup.
+//
+// The read and its error classification are shared with the cgroup-id resolver
+// (cruntime.ReadCgroupContent): a vanished process reports ErrProcGone, any
+// other read failure keeps its own error so the enricher files it as
+// no_container rather than the pid→pod race (wave 8.1 item 2 (г)).
 func (w *Watcher) getContainerIDFromPID(pid uint32) (string, error) {
-	cgroupPath := fmt.Sprintf("/proc/%d/cgroup", pid)
-	data, err := os.ReadFile(cgroupPath)
+	content, err := cruntime.ReadCgroupContent(pid)
 	if err != nil {
-		return "", fmt.Errorf("read cgroup: %w", err)
+		return "", err
 	}
 
-	return extractContainerID(string(data))
+	return extractContainerID(content)
 }
 
 // extractContainerID extracts container ID from cgroup content.
@@ -229,7 +235,7 @@ func extractContainerID(cgroupContent string) (string, error) {
 			part = strings.TrimPrefix(part, "cri-containerd-")
 			part = strings.TrimPrefix(part, "containerd-cri-")
 			part = strings.TrimSuffix(part, ".scope")
-			
+
 			// Check if it looks like a container ID (64 hex chars)
 			if len(part) == 64 {
 				isHex := true
@@ -245,7 +251,7 @@ func extractContainerID(cgroupContent string) (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("container ID not found in cgroup")
+	return "", cruntime.ErrNotContainer
 }
 
 // normalizeContainerID normalizes container ID for cache lookup.

@@ -64,9 +64,17 @@ resources:
 # keeps RSS under the cgroup limit and avoids OOM-kills under high event rates.
 # If resources.limits.memory is unset, GOMEMLIMIT is NOT injected (the runtime
 # stays unbounded). Set `override` to pin an explicit value (e.g. "230MiB").
+#
+# `reserveMiB` is the non-Go resident memory (BPF ring buffers, BTF, binary text,
+# libc) that counts against the pod cgroup but NOT against GOMEMLIMIT: measured
+# ≈62 MiB (wave 8.1). A plain 90% of 256Mi (230 MiB) plus that is already past
+# the limit, so GOMEMLIMIT = min(percent, limit - reserveMiB) = 192 MiB here.
+# The value is a measured lower bound, not a verdict: the stand run under this
+# exact GOMEMLIMIT (plan.md wave 8.1 item 5) decides whether 256Mi suffices.
 gomemlimit:
   enabled: true
   percent: 90
+  reserveMiB: 64
   override: ""
 
 # Liveness and readiness probes

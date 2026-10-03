@@ -433,3 +433,61 @@ func TestUpdateMetrics_NilMetricsNoOp(t *testing.T) {
 	// Must not panic with nil metrics.
 	e.updateMetrics()
 }
+
+// TestEnricher_DefaultsToSharedResolver pins wave 8.1 item 2 (в): both enrichers
+// must resolve through the one process-wide resolver, otherwise the same event
+// reads /proc twice (once per enricher).
+func TestEnricher_DefaultsToSharedResolver(t *testing.T) {
+	e := &Enricher{}
+	if e.containerResolver() != DefaultContainerIDResolver() {
+		t.Fatal("runtime enricher must default to the shared cgroup-id resolver")
+	}
+	if DefaultContainerIDResolver() != DefaultContainerIDResolver() {
+		t.Fatal("DefaultContainerIDResolver must be a single instance")
+	}
+}
+
+// Wave 8.1 item 2: an event carrying the in-kernel cgroup id is resolved
+// through the shared cgroup-id resolver — one /proc read per cgroup — not by
+// the pid cache. A host cgroup is negative-cached, so it costs no further
+// reads however many events share it.
+func TestEnrichEvent_CgroupIDPathUsesResolver(t *testing.T) {
+	const containerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	stub := &stubClient{containers: map[string]*ContainerInfo{
+		containerID: {ContainerID: containerID, ContainerName: "web", CachedAt: time.Now()},
+	}}
+	e := newTestEnricher(t, stub)
+	reads := 0
+	e.resolver = NewContainerIDResolverWithReader(time.Minute, func(pid uint32) (string, error) {
+		reads++
+		return "0::/system.slice/docker-" + containerID + ".scope", nil
+	})
+
+	// A pid absent from pidCache must not force a /proc read by itself: the
+	// cgroup id resolves it.
+	ev := &types.Event{PID: 999, CgroupID: 42}
+	e.EnrichEvent(ev)
+	require.NotNil(t, ev.Enrichment)
+	assert.Equal(t, containerID, ev.Enrichment.ContainerID)
+	assert.Equal(t, 1, reads, "first event for a cgroup pays one /proc read")
+
+	ev2 := &types.Event{PID: 1000, CgroupID: 42}
+	e.EnrichEvent(ev2)
+	require.NotNil(t, ev2.Enrichment)
+	assert.Equal(t, containerID, ev2.Enrichment.ContainerID)
+	assert.Equal(t, 1, reads, "repeat cgroup must be served from the cache")
+
+	// Host cgroup: negative-cached, so no per-event read.
+	hostReads := 0
+	host := newTestEnricher(t, stub)
+	host.resolver = NewContainerIDResolverWithReader(time.Minute, func(pid uint32) (string, error) {
+		hostReads++
+		return "0::/system.slice/sshd.service", nil
+	})
+	for i := 0; i < 3; i++ {
+		hostEv := &types.Event{PID: uint32(500 + i), CgroupID: 99}
+		host.EnrichEvent(hostEv)
+		assert.Nil(t, hostEv.Enrichment)
+	}
+	assert.Equal(t, 1, hostReads, "host cgroup is read once and negative-cached")
+}

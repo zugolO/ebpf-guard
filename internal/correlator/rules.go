@@ -726,13 +726,16 @@ func (re *RuleEngine) EvaluateNamedExceptions(ruleID string, e types.Event) bool
 		dnsAnalysis = &a
 	}
 
+	// One cache for the exception pass: a rule may carry several exceptions,
+	// each with several conditions.
+	cache := &eventFieldCache{}
 	for i := range rule.Exceptions {
 		exc := &rule.Exceptions[i]
 		var excMatched bool
 		if exc.ConditionGroup != nil {
-			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis)
+			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis, cache)
 		} else {
-			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis)
+			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis, cache)
 		}
 		if excMatched {
 			ruleExceptionsTotal.WithLabelValues(rule.ID, exc.Name).Inc()
@@ -921,11 +924,17 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 	}
 	rules := re.byType[t]
 	filePath := fileAccessPath(e)
+	// One string cache for the whole rule pass: Comm/ParentComm/Filename are
+	// materialised lazily but at most once per event, not once per rule
+	// (wave 8.1 item 3).
+	cache := &eventFieldCache{}
 	for i := range rules {
 		rule := &rules[i] // pointer avoids copying the ~300-byte Rule struct
-		if !re.matchesTyped(e, rule) {
+		if !re.matchesTypedCached(e, rule, cache) {
 			continue
 		}
+		// The rule itself did not read Comm, but the alert needs it; the cache
+		// hands back a copy either way (Alert outlives this call).
 		if rule.Action == ActionDrop {
 			continue
 		}
@@ -936,7 +945,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			Severity:           rule.Severity,
 			Message:            rule.Description,
 			PID:                e.PID,
-			Comm:               util.BytesToString(e.Comm[:]),
+			Comm:               eventComm(e, cache),
 			Event:              e,
 			Action:             string(rule.Action),
 			Class:              string(rule.Class),
@@ -963,9 +972,10 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 
 	rules := re.byType[t]
 	filePath := fileAccessPath(e)
+	cache := &eventFieldCache{}
 	for i := range rules {
 		rule := &rules[i]
-		if !re.matchesTyped(e, rule) {
+		if !re.matchesTypedCached(e, rule, cache) {
 			continue
 		}
 		if rule.Action == ActionDrop {
@@ -982,7 +992,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Severity:           rule.Severity,
 			Message:            rule.Description,
 			PID:                e.PID,
-			Comm:               util.BytesToString(e.Comm[:]),
+			Comm:               eventComm(e, cache),
 			Event:              e,
 			Action:             string(rule.Action),
 			Class:              string(rule.Class),
@@ -1133,7 +1143,17 @@ func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
 // matchesTyped checks if an event matches a rule, assuming e.Type == rule.EventType.
 // Takes *Rule to avoid copying the ~300-byte Rule struct on the hot path.
 // Called from EvaluateInto/Evaluate which already dispatch via byType.
+//
+// It builds a fresh per-event string cache, so callers evaluating one event
+// against the whole rule set must use matchesTypedCached with a single shared
+// cache instead: otherwise a field is re-materialised once per rule (wave 8.1
+// item 3). This wrapper remains for callers that check a single rule.
 func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
+	return re.matchesTypedCached(e, rule, &eventFieldCache{})
+}
+
+// matchesTypedCached is matchesTyped with a caller-owned per-event string cache.
+func (re *RuleEngine) matchesTypedCached(e types.Event, rule *Rule, cache *eventFieldCache) bool {
 	// Per-rule sampling gate.
 	// Fast path: rule.skipSampler (precomputed at load time) is true when no
 	// static rate is configured, and entryCount is 0 when no adaptive override
@@ -1163,9 +1183,9 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 	// Use condition group if present, otherwise use single condition.
 	var matched bool
 	if rule.ConditionGroup != nil {
-		matched = re.evaluateConditionGroup(e, rule.ConditionGroup, dnsAnalysis)
+		matched = re.evaluateConditionGroup(e, rule.ConditionGroup, dnsAnalysis, cache)
 	} else {
-		matched = re.evaluateCondition(e, &rule.Condition, dnsAnalysis)
+		matched = re.evaluateCondition(e, &rule.Condition, dnsAnalysis, cache)
 	}
 	if !matched {
 		return false
@@ -1177,9 +1197,9 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 		exc := &rule.Exceptions[i]
 		var excMatched bool
 		if exc.ConditionGroup != nil {
-			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis)
+			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis, cache)
 		} else {
-			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis)
+			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis, cache)
 		}
 		if excMatched {
 			ruleExceptionsTotal.WithLabelValues(rule.ID, exc.Name).Inc()
@@ -1206,7 +1226,8 @@ func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
 // dnsAnalysis is precomputed by matchesTyped when the event type is DNS — it is nil for all
 // other event types and passed through to evaluateCondition / getFieldValue to avoid calling
 // AnalyzeDomain multiple times for the same QName in different enriched DNS fields.
-func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleConditionGroup, dnsAnalysis *DomainAnalysis) bool {
+// cache is the per-event string cache threaded down to getFieldValueCached.
+func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleConditionGroup, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) bool {
 	if len(group.Conditions) == 0 && len(group.SubGroups) == 0 {
 		return true
 	}
@@ -1214,24 +1235,24 @@ func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleCondition
 	switch group.Operator {
 	case "or":
 		for i := range group.Conditions {
-			if re.evaluateCondition(e, &group.Conditions[i], dnsAnalysis) {
+			if re.evaluateCondition(e, &group.Conditions[i], dnsAnalysis, cache) {
 				return true
 			}
 		}
 		for i := range group.SubGroups {
-			if re.evaluateConditionGroup(e, &group.SubGroups[i], dnsAnalysis) {
+			if re.evaluateConditionGroup(e, &group.SubGroups[i], dnsAnalysis, cache) {
 				return true
 			}
 		}
 		return false
 	default: // "and" or ""
 		for i := range group.Conditions {
-			if !re.evaluateCondition(e, &group.Conditions[i], dnsAnalysis) {
+			if !re.evaluateCondition(e, &group.Conditions[i], dnsAnalysis, cache) {
 				return false
 			}
 		}
 		for i := range group.SubGroups {
-			if !re.evaluateConditionGroup(e, &group.SubGroups[i], dnsAnalysis) {
+			if !re.evaluateConditionGroup(e, &group.SubGroups[i], dnsAnalysis, cache) {
 				return false
 			}
 		}
@@ -1249,7 +1270,9 @@ const fieldNotFound = "\x00__field_not_found__"
 // Switches on cond.opCode (precomputed integer) instead of cond.Op (string)
 // for jump-table dispatch (~2 ns vs ~10 ns for string switch).
 // dnsAnalysis is precomputed by matchesTyped for DNS events — nil for other types.
-func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsAnalysis *DomainAnalysis) bool {
+// cache is the per-event string cache used to avoid re-materialising Comm /
+// ParentComm / Filename once per condition (wave 8.1 item 3).
+func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) bool {
 	// caps_gained / caps_dropped operate directly on the Privesc struct —
 	// they don't go through getFieldValue.
 	switch cond.opCode {
@@ -1263,7 +1286,7 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsA
 	// fieldNotFound means the field name is unknown for this event type —
 	// treat as no-match for all operators (rule is misconfigured but was
 	// already rejected at load time via validateFieldName).
-	value := re.getFieldValue(e, cond.Field, dnsAnalysis)
+	value := re.getFieldValueCached(e, cond.Field, dnsAnalysis, cache)
 	if value == fieldNotFound {
 		return false
 	}
@@ -1477,7 +1500,77 @@ func normaliseFieldName(field string) string {
 	}
 }
 
+// eventFieldCache caches the byte-array-derived string fields of a single event
+// for the duration of one rule pass (wave 8.1 item 3).
+//
+// util.BytesToString allocates a fresh string on every call, and getFieldValue is
+// invoked once per rule and once per condition inside a condition group. On the
+// night-#3 heap profile that made BytesToString 42.1% of allocated bytes and
+// 56.8% of objects (≈49 strings per event), all of it from this call site. The
+// cache is built lazily — only the fields a rule actually asks for are
+// materialised, and only once — and is confined to a single
+// EvaluateInto/Evaluate call, so no synchronisation is needed (one goroutine per
+// event). Alert construction copies the cached string into Alert.Comm, which
+// outlives the call; the cache itself is never handed to another goroutine.
+type eventFieldCache struct {
+	comm       string
+	commDone   bool
+	parentComm string
+	parentDone bool
+	filename   string
+	fileDone   bool
+}
+
+// eventComm returns e.Comm as a string, materialising it at most once per event.
+func eventComm(e types.Event, c *eventFieldCache) string {
+	if c == nil {
+		return util.BytesToString(e.Comm[:])
+	}
+	if !c.commDone {
+		c.comm = util.BytesToString(e.Comm[:])
+		c.commDone = true
+	}
+	return c.comm
+}
+
+// eventParentComm returns e.ParentComm as a string, at most once per event.
+func eventParentComm(e types.Event, c *eventFieldCache) string {
+	if c == nil {
+		return util.BytesToString(e.ParentComm[:])
+	}
+	if !c.parentDone {
+		c.parentComm = util.BytesToString(e.ParentComm[:])
+		c.parentDone = true
+	}
+	return c.parentComm
+}
+
+// eventFilename returns e.File.Filename as a string, at most once per event.
+func eventFilename(e types.Event, c *eventFieldCache) string {
+	if e.File == nil {
+		return ""
+	}
+	if c == nil {
+		return util.BytesToString(e.File.Filename[:])
+	}
+	if !c.fileDone {
+		c.filename = util.BytesToString(e.File.Filename[:])
+		c.fileDone = true
+	}
+	return c.filename
+}
+
+// getFieldValue extracts a field value from an event based on field name.
+// It is the uncached entry point used by tests and one-off callers; the per-rule
+// hot path goes through getFieldValueCached with a shared eventFieldCache.
 func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *DomainAnalysis) string {
+	return re.getFieldValueCached(e, field, dnsAnalysis, nil)
+}
+
+// getFieldValueCached is getFieldValue with a per-event string cache. A nil
+// cache degrades to the uncached path. Returns fieldNotFound if the field name
+// is not valid for the event type.
+func (re *RuleEngine) getFieldValueCached(e types.Event, field string, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) string {
 	// Normalise dotted-name aliases (file.path → filename, proc.comm → comm, etc.)
 	// to the canonical field names expected by the rest of getFieldValue.
 	field = normaliseFieldName(field)
@@ -1555,7 +1648,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		// Контракт порядка условий тот же, что у exe_path/parent_exe_path:
 		// условие на эту ось обязано стоять ПОСЛЕДНИМ в группе "and".
 		return resolveAncestorExePath(e.PID, e.PPID,
-			util.BytesToString(e.Comm[:]), util.BytesToString(e.ParentComm[:]))
+			eventComm(e, cache), eventParentComm(e, cache))
 	}
 
 	switch e.Type {
@@ -1612,13 +1705,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			}
 			return "false"
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		case "ppid":
 			return strconv.FormatUint(uint64(e.PPID), 10)
 		case "parent_comm":
-			return util.BytesToString(e.ParentComm[:])
+			return eventParentComm(e, cache)
 		}
 	case types.EventFileAccess:
 		if e.File == nil {
@@ -1626,7 +1719,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		}
 		switch field {
 		case "filename":
-			return util.BytesToString(e.File.Filename[:])
+			return eventFilename(e, cache)
 		case "fd.name":
 			return e.File.FDPath
 		case "fd.name_truncated":
@@ -1644,13 +1737,13 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			}
 			return strconv.FormatUint(uint64(e.File.Op), 10)
 		case "directory":
-			p := util.BytesToString(e.File.Filename[:])
+			p := eventFilename(e, cache)
 			if idx := strings.LastIndexByte(p, '/'); idx >= 0 {
 				return p[:idx]
 			}
 			return "/"
 		case "extension":
-			p := util.BytesToString(e.File.Filename[:])
+			p := eventFilename(e, cache)
 			if idx := strings.LastIndexByte(p, '.'); idx >= 0 {
 				return p[idx:]
 			}
@@ -1663,7 +1756,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			}
 			return "false"
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		case "pid":
@@ -1671,7 +1764,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "ppid":
 			return strconv.FormatUint(uint64(e.PPID), 10)
 		case "parent_comm":
-			return util.BytesToString(e.ParentComm[:])
+			return eventParentComm(e, cache)
 		}
 	case types.EventSyscall:
 		if e.Syscall == nil {
@@ -1688,7 +1781,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		case "arg0":
 			return strconv.FormatUint(e.Syscall.Args[0], 10)
 		case "arg1":
@@ -1720,7 +1813,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "ppid":
 			return strconv.FormatUint(uint64(e.PPID), 10)
 		case "parent_comm":
-			return util.BytesToString(e.ParentComm[:])
+			return eventParentComm(e, cache)
 		}
 	case types.EventDNS:
 		if e.DNS == nil {
@@ -1804,7 +1897,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "ja3s":
 			return e.TLS.JA3S
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		}
 	case types.EventHTTPPlaintext:
 		if e.HTTPPlaintext == nil {
@@ -1818,7 +1911,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "data_len":
 			return strconv.FormatUint(uint64(e.HTTPPlaintext.DataLen), 10)
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		}
 	case types.EventPrivesc:
 		// caps_gained / caps_dropped are handled before getFieldValue.
@@ -1827,7 +1920,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		case "caps":
 			if e.Privesc != nil {
 				return "0x" + strconv.FormatUint(e.Privesc.NewCaps, 16)
@@ -1857,7 +1950,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "duration_ms":
 			return strconv.FormatInt(e.NetClose.Duration.Milliseconds(), 10)
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		}
 	case types.EventGPU:
 		if e.GPU == nil {
@@ -1876,7 +1969,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "gpu_host_ptr":
 			return "0x" + strconv.FormatUint(e.GPU.HostPtr, 16)
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		}
@@ -1921,9 +2014,9 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 			}
 			return "false"
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		case "parent_comm":
-			return util.BytesToString(e.ParentComm[:])
+			return eventParentComm(e, cache)
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		case "fingerprint":
@@ -1946,7 +2039,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "to_submit":
 			return strconv.FormatUint(uint64(e.IOUring.ToSubmit), 10)
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		}
@@ -1968,7 +2061,7 @@ func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *Do
 		case "uid":
 			return strconv.FormatUint(uint64(e.UID), 10)
 		case "comm":
-			return util.BytesToString(e.Comm[:])
+			return eventComm(e, cache)
 		}
 	}
 	return fieldNotFound

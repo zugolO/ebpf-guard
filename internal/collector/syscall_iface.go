@@ -16,7 +16,7 @@ type syscallLoader interface {
 
 // ringbufReader abstracts reading from an eBPF ring buffer.
 type ringbufReader interface {
-	Read() (ringbuf.Record, error)
+	ReadInto(rec *ringbuf.Record) error
 	Close() error
 }
 

@@ -75,8 +75,9 @@ Release namespace (supports namespaceCreate=false with pre-existing ns).
 {{- end }}
 
 {{/*
-GOMEMLIMIT in bytes, computed as gomemlimit.percent (default 90) of
-.Values.resources.limits.memory. Gives the Go runtime a soft memory limit so GC
+GOMEMLIMIT in bytes, computed as the smaller of gomemlimit.percent (default 90)
+of .Values.resources.limits.memory and that limit minus gomemlimit.reserveMiB
+(non-Go resident memory), floored at 50% of the limit. Gives the Go runtime a soft memory limit so GC
 keeps RSS under the cgroup limit. Returns an empty string when no memory limit
 is configured, so callers can skip setting the env var entirely.
 
@@ -97,6 +98,16 @@ a bare number is treated as bytes.
 {{- else -}}{{- $bytes = $mem | float64 -}}
 {{- end -}}
 {{- $pct := .Values.gomemlimit.percent | default 90 -}}
-{{- printf "%d" (mulf $bytes (divf ($pct | float64) 100.0) | int64) -}}
+{{- $limit := mulf $bytes (divf ($pct | float64) 100.0) -}}
+{{- /* GOMEMLIMIT bounds only memory the Go runtime manages; the BPF rings, BTF
+       and the binary text count against the pod cgroup but not against it.
+       Cap at (limit - reserveMiB), never below half the limit so a small pod
+       cannot push the GC into a collect-continuously spiral. */ -}}
+{{- $reserve := mulf (.Values.gomemlimit.reserveMiB | default 0 | float64) 1048576.0 -}}
+{{- $capped := subf $bytes $reserve -}}
+{{- $floor := mulf $bytes 0.5 -}}
+{{- if lt $capped $floor -}}{{- $capped = $floor -}}{{- end -}}
+{{- if lt $capped $limit -}}{{- $limit = $capped -}}{{- end -}}
+{{- printf "%d" ($limit | int64) -}}
 {{- end -}}
 {{- end }}

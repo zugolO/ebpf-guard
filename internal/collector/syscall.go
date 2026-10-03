@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
 	"github.com/zugolO/ebpf-guard/internal/util"
@@ -289,6 +290,9 @@ func (c *SyscallCollector) attachPrograms() error {
 
 // readLoop reads events from the ring buffer and sends them to the output channel.
 func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event) {
+	// One Record for the life of the loop: ReadInto reuses its RawSample buffer
+	// (wave 8.1 item 12). parseEvent copies every field out of it.
+	var record ringbuf.Record
 	for {
 		select {
 		case <-ctx.Done():
@@ -296,8 +300,7 @@ func (c *SyscallCollector) readLoop(ctx context.Context, out chan<- types.Event)
 		default:
 		}
 
-		record, err := c.reader.Read()
-		if err != nil {
+		if err := c.reader.ReadInto(&record); err != nil {
 			if ctx.Err() != nil {
 				return
 			}

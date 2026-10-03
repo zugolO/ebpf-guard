@@ -44,7 +44,14 @@ type Enricher struct {
 	cacheTTL time.Duration
 	metrics  EnricherMetrics
 
-	// pidCache maps PID → container ID (cleared on each TTL tick).
+	// resolver maps an event's in-kernel cgroup id to its container id. When
+	// nil, DefaultContainerIDResolver() is used, which is shared with the k8s
+	// enricher so the same event resolves /proc at most once (wave 8.1 item 2).
+	resolver *ContainerIDResolver
+
+	// pidCache maps PID → container ID (cleared on each TTL tick). It is only
+	// consulted for events without a usable CgroupID (0, or the cgroup2 root on v1 hosts), where the
+	// cgroup-id resolver cannot help.
 	pidMu    sync.RWMutex
 	pidCache map[uint32]string
 
@@ -127,7 +134,7 @@ func (e *Enricher) EnrichEvent(event *types.Event) {
 	if event == nil {
 		return
 	}
-	info := e.lookupByPID(context.Background(), event.PID)
+	info := e.lookup(context.Background(), event.CgroupID, event.PID)
 	if info == nil {
 		return
 	}
@@ -142,7 +149,7 @@ func (e *Enricher) EnrichAlert(alert *types.Alert) {
 	if alert == nil {
 		return
 	}
-	info := e.lookupByPID(context.Background(), alert.Event.PID)
+	info := e.lookup(context.Background(), alert.Event.CgroupID, alert.Event.PID)
 	if info == nil {
 		return
 	}
@@ -184,23 +191,27 @@ func applyTo(dst *types.EnrichmentInfo, src *ContainerInfo, source string) {
 	}
 }
 
-// lookupByPID resolves a PID to a ContainerInfo via cgroup → runtime lookup.
-func (e *Enricher) lookupByPID(ctx context.Context, pid uint32) *ContainerInfo {
-	// Step 1: resolve PID → container ID via /proc/[pid]/cgroup.
-	e.pidMu.RLock()
-	containerID, ok := e.pidCache[pid]
-	e.pidMu.RUnlock()
+// containerResolver returns the shared cgroup-id resolver, falling back to the
+// process-wide default when none was injected.
+func (e *Enricher) containerResolver() *ContainerIDResolver {
+	if e.resolver != nil {
+		return e.resolver
+	}
+	return DefaultContainerIDResolver()
+}
 
-	if !ok {
-		var err error
-		containerID, err = extractContainerID(pid)
-		if err != nil || containerID == "" {
-			e.missCount.Add(1)
-			return nil
-		}
-		e.pidMu.Lock()
-		e.pidCache[pid] = containerID
-		e.pidMu.Unlock()
+// lookup resolves an event to a ContainerInfo via cgroup → runtime lookup.
+//
+// When the event carries an in-kernel cgroup id it is resolved through the
+// shared cgroup-id resolver: one /proc read per cgroup, with negative (host)
+// answers cached. Events from an older BPF object (CgroupID == 0) fall back to
+// the pid cache and a single /proc read.
+func (e *Enricher) lookup(ctx context.Context, cgroupID uint64, pid uint32) *ContainerInfo {
+	// Step 1: resolve event → container ID.
+	containerID, err := e.containerID(cgroupID, pid)
+	if err != nil || containerID == "" {
+		e.missCount.Add(1)
+		return nil
 	}
 
 	// Step 2: resolve container ID → metadata via cache or runtime query.
@@ -212,7 +223,7 @@ func (e *Enricher) lookupByPID(ctx context.Context, pid uint32) *ContainerInfo {
 		return info
 	}
 
-	info, err := e.client.GetContainerInfo(ctx, containerID)
+	info, err = e.client.GetContainerInfo(ctx, containerID)
 	if err != nil {
 		e.logger.Debug("runtime lookup failed, falling back to cgroup container ID",
 			slog.String("container_id", containerID[:min(12, len(containerID))]),
@@ -233,6 +244,34 @@ func (e *Enricher) lookupByPID(ctx context.Context, pid uint32) *ContainerInfo {
 	e.containerMu.Unlock()
 
 	return info
+}
+
+// containerID returns the container id for an event, using the cgroup-id
+// resolver when the kernel supplied a cgroup id and the pid fallback otherwise.
+func (e *Enricher) containerID(cgroupID uint64, pid uint32) (string, error) {
+	if UsableCgroupID(cgroupID) {
+		id, _, err := e.containerResolver().Resolve(cgroupID, pid)
+		return id, err
+	}
+
+	e.pidMu.RLock()
+	id, ok := e.pidCache[pid]
+	e.pidMu.RUnlock()
+	if ok {
+		return id, nil
+	}
+
+	id, err := extractContainerID(pid)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", ErrNotContainer
+	}
+	e.pidMu.Lock()
+	e.pidCache[pid] = id
+	e.pidMu.Unlock()
+	return id, nil
 }
 
 func min(a, b int) int {
@@ -263,6 +302,9 @@ func (e *Enricher) cleanupLoop(ctx context.Context) {
 			e.pidMu.Lock()
 			e.pidCache = make(map[uint32]string)
 			e.pidMu.Unlock()
+			// Drop expired cgroup-id entries so pod churn cannot grow the shared
+			// resolver's map without bound.
+			e.containerResolver().EvictExpired()
 		}
 	}
 }

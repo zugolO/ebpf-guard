@@ -37,7 +37,7 @@ func (a *fakeOkAttacher) Tracepoint(_, _ string, _ *ebpf.Program, _ *link.Tracep
 // fakeRingReader is a no-op ringbufReader; Read always reports closed.
 type fakeRingReader struct{}
 
-func (fakeRingReader) Read() (ringbuf.Record, error) { return ringbuf.Record{}, errors.New("closed") }
+func (fakeRingReader) ReadInto(*ringbuf.Record) error { return errors.New("closed") }
 func (fakeRingReader) Close() error                  { return nil }
 
 // fakeOkOpener hands back a fakeRingReader.

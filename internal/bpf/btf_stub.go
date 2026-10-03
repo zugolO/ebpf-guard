@@ -43,6 +43,12 @@ type BTFResult struct {
 	DisabledCollectors []string
 }
 
+// FlushKernelBTF is a no-op on non-Linux: there is no kernel BTF cache to drop
+// (ResolveBTF is unsupported here and no eBPF object is ever loaded). It exists
+// so callers can invoke the flush unconditionally, without importing
+// github.com/cilium/ebpf/btf or splitting on GOOS themselves.
+func FlushKernelBTF() {}
+
 // ResolveBTF is not supported on non-Linux platforms.
 func ResolveBTF(_ BTFResolutionConfig) (*BTFResult, error) {
 	return nil, fmt.Errorf("BTF resolution is only supported on Linux")

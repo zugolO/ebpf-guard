@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cilium/ebpf/btf"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -51,6 +52,31 @@ func init() {
 // RegisterBTFMetrics registers the BTF source gauge with the given Prometheus registerer.
 func RegisterBTFMetrics(reg prometheus.Registerer) {
 	_ = reg.Register(btfSourceGauge)
+}
+
+// FlushKernelBTF drops cilium/ebpf's process-global kernel BTF cache: the
+// *btf.Spec parsed from /sys/kernel/btf/vmlinux (plus any kernel module specs),
+// which btf.LoadKernelSpec fills on the first CO-RE relocation, LSM/tracing
+// attach-target lookup or kfunc resolution. That cache is only needed while BPF
+// objects are being loaded — the loaded *ebpf.Program/*ebpf.Map values keep no
+// reference to it — and it is tens of MiB of live heap (wave-8.1 item 4,
+// plan.md line 17030: 33,4 МиБ measured on the stand).
+//
+// btf.FlushKernelSpec also clears cilium/ebpf's kallsyms kernel-module cache
+// (kallsyms.FlushKernelModuleCache, btf/kernel.go:24). That cache is read only
+// while resolving a kprobe/fentry attach target (prog.go:183, kernelModule()),
+// is rebuilt on demand from /proc/kallsyms, and nothing in this repo touches
+// kallsyms after startup — so clearing it together with the spec is harmless.
+//
+// Call it once, after the LAST loader has returned. Calling it per loader is
+// worse than not calling it at all: the next loader would parse vmlinux again.
+//
+// Nothing in the running agent needs the cached spec: after the collectors are
+// up, the only loaders are the dormant live updater (internal/bpf/live_update.go)
+// and the collector Reload() paths, which have no caller — the evidence and the
+// decision are recorded at the call site in cmd/ebpf-guard/main.go.
+func FlushKernelBTF() {
+	btf.FlushKernelSpec()
 }
 
 // BTFResolutionConfig holds parameters for the BTF source resolution.

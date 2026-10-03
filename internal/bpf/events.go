@@ -438,6 +438,15 @@ func (r *RingbufReader) Read() (ringbuf.Record, error) {
 	return r.reader.Read()
 }
 
+// ReadInto reads the next event into rec, reusing rec's RawSample buffer
+// (wave 8.1 item 12). Read allocates a fresh Record, and so a fresh RawSample,
+// per ring-buffer record; at ~1300 events/s that was 2.5% of allocated bytes.
+// The caller must finish with rec.RawSample — parse it, copying everything that
+// outlives the call — before the next ReadInto overwrites it.
+func (r *RingbufReader) ReadInto(rec *ringbuf.Record) error {
+	return r.reader.ReadInto(rec)
+}
+
 // -----------------------------------------------------------------------
 // Parse functions
 // -----------------------------------------------------------------------

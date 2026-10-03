@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	cruntime "github.com/zugolO/ebpf-guard/internal/runtime"
 	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
@@ -33,10 +34,11 @@ var enrichMissByReason = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "Enrichment lookups that produced no container attribution, by reason (proc_gone = pid→pod race).",
 }, []string{"reason"})
 
-// enrichCgroupRecovered counts proc_gone misses that a cgroup-id lookup turned
-// back into an attribution — the direct measure of how much of the race item 10
-// closes; the remainder stays visible in enrichMissByReason{reason="proc_gone"}
-// (which still counts the pid-path miss BEFORE the recovery).
+// enrichCgroupRecovered counts events attributed from the cgroup-id-keyed
+// resolver cache without a /proc read. Under the pid-first design (item 10 wave
+// 6.6) it counted only confirmed proc_gone recoveries; with the cgroup id as the
+// cache key (wave 8.1 item 2) it is the direct measure of how much of the
+// pid→pod race the cgroup axis absorbs (night #3: 2.37M proc_gone, previously 0).
 var enrichCgroupRecovered = promauto.NewCounter(prometheus.CounterOpts{
 	Name: "ebpf_guard_k8s_enrichment_cgroup_recovered_total",
 	Help: "pid→pod misses recovered through the in-kernel cgroup id (item 10 wave 6.6).",
@@ -56,7 +58,9 @@ func init() {
 // ones item 9 exists for — would land in no_container and read as normal host
 // traffic, which is the undercount this counter was added to make visible.
 func missReason(err error) string {
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+	if errors.Is(err, cruntime.ErrProcGone) ||
+		errors.Is(err, fs.ErrNotExist) ||
+		errors.Is(err, syscall.ESRCH) {
 		return MissProcGone
 	}
 	return MissNoContainer
@@ -87,9 +91,16 @@ type Enricher struct {
 	// cgroupCache maps the in-kernel cgroup id (types.Event.CgroupID, item 10
 	// wave 6.6) to the attribution of the last pid that resolved in it. A pid
 	// that exited before /proc/<pid>/cgroup was read (MissProcGone, №465) is
-	// resolved through it: the cgroup outlives the process.
+	// resolved through it: the cgroup outlives the process. With the cgroup id
+	// as the primary cache key (wave 8.1 item 2) this is the normal path, not
+	// just a recovery.
 	cgroupCache map[uint64]*EnrichmentInfo
 	cacheTTL    time.Duration
+
+	// resolver maps an event's cgroup id to its container id. When nil,
+	// cruntime.DefaultContainerIDResolver() is used — the same instance the
+	// runtime enricher uses, so one event reads /proc at most once.
+	resolver *cruntime.ContainerIDResolver
 
 	// missCount is the number of enrichment lookups that found no pod.
 	// Exported to a Prometheus counter via the metrics update loop.
@@ -254,27 +265,98 @@ func (e *Enricher) EnrichEvent(event *types.Event) {
 		return
 	}
 
-	info := e.getEnrichmentInfo(event.PID)
+	info := e.enrichmentInfoFor(event.CgroupID, event.PID)
 	if info == nil {
-		// The pid path missed (typically proc_gone). The in-kernel cgroup id, if
-		// the record carried one, may still resolve to a container seen earlier.
-		if info = e.lookupCgroup(event.CgroupID); info == nil {
-			return
-		}
-		enrichCgroupRecovered.Inc()
-	} else {
-		e.rememberCgroup(event.CgroupID, info)
+		return
 	}
 
 	// Convert internal EnrichmentInfo to types.EnrichmentInfo
 	event.Enrichment = info.ToTypesEnrichment()
 }
 
+// containerResolver returns the shared cgroup-id resolver, falling back to the
+// process-wide default when none was injected.
+func (e *Enricher) containerResolver() *cruntime.ContainerIDResolver {
+	if e.resolver != nil {
+		return e.resolver
+	}
+	return cruntime.DefaultContainerIDResolver()
+}
+
+// enrichmentInfoFor resolves an event to pod metadata. When the kernel supplied
+// an in-kernel cgroup id it is the cache key (wave 8.1 item 2 (а)): the cgroup
+// outlives short-lived processes, so a process that exited before this ran is
+// still attributed. CgroupID==0 (older BPF object) falls back to the pid path.
+func (e *Enricher) enrichmentInfoFor(cgroupID uint64, pid uint32) *EnrichmentInfo {
+	if cruntime.UsableCgroupID(cgroupID) {
+		return e.enrichmentByCgroup(cgroupID, pid)
+	}
+	return e.getEnrichmentInfo(pid)
+}
+
+// enrichmentByCgroup resolves pod metadata via the shared cgroup-id resolver.
+// A host process (empty container id) is negative-cached by the resolver, so
+// the no_container case costs two map lookups per event, not a /proc read.
+func (e *Enricher) enrichmentByCgroup(cgroupID uint64, pid uint32) *EnrichmentInfo {
+	if info := e.lookupCgroup(cgroupID); info != nil {
+		// Attributed from the cgroup-id cache: no pid read, which is where the
+		// 2.37M proc_gone events of night #3 are absorbed.
+		enrichCgroupRecovered.Inc()
+		return info
+	}
+
+	if e.watcher == nil {
+		enrichMissByReason.WithLabelValues(MissNoWatcher).Inc()
+		e.missCount.Add(1)
+		return nil
+	}
+
+	containerID, cached, err := e.containerResolver().Resolve(cgroupID, pid)
+	if err != nil || containerID == "" {
+		enrichMissByReason.WithLabelValues(missReason(err)).Inc()
+		e.missCount.Add(1)
+		return nil
+	}
+	if cached {
+		enrichCgroupRecovered.Inc()
+	}
+
+	info := e.attributionFor(containerID)
+	e.rememberCgroup(cgroupID, info)
+	return info
+}
+
+// attributionFor builds the Kubernetes attribution for a container id. Pod
+// metadata is added when the container is in the pod watch; otherwise the bare
+// container id is returned so container.id stays a usable rule axis without a
+// k8s API server (wave 6.1). ContainerID is left empty when a pod matched, as
+// the pid path did, so the runtime enricher fills it without changing axes.
+func (e *Enricher) attributionFor(containerID string) *EnrichmentInfo {
+	if podInfo, ok := e.watcher.GetPodInfo(containerID); ok {
+		// Intern high-repetition strings (namespace, node name) so events
+		// sharing the same metadata share the same string pointer, reducing GC
+		// pressure on long-running DaemonSet deployments.
+		return &EnrichmentInfo{
+			PodName:     podInfo.Name,
+			Namespace:   util.InternString(podInfo.Namespace),
+			PodUID:      podInfo.UID,
+			NodeName:    util.InternString(podInfo.NodeName),
+			Labels:      copyMap(podInfo.Labels),
+			Annotations: copyMap(podInfo.Annotations),
+			CachedAt:    time.Now(),
+		}
+	}
+	return &EnrichmentInfo{
+		ContainerID: containerID,
+		CachedAt:    time.Now(),
+	}
+}
+
 // rememberCgroup records a successful pid resolution under the event's cgroup
 // id. Only entries that name a container are kept: a host process resolves to
 // nothing, so the host/root cgroup can never be poisoned with a pod's identity.
 func (e *Enricher) rememberCgroup(id uint64, info *EnrichmentInfo) {
-	if id == 0 || info == nil || (info.ContainerID == "" && info.PodName == "") {
+	if !cruntime.UsableCgroupID(id) || info == nil || (info.ContainerID == "" && info.PodName == "") {
 		return
 	}
 	e.mu.Lock()
@@ -287,7 +369,7 @@ func (e *Enricher) rememberCgroup(id uint64, info *EnrichmentInfo) {
 
 // lookupCgroup returns the unexpired attribution recorded for a cgroup id.
 func (e *Enricher) lookupCgroup(id uint64) *EnrichmentInfo {
-	if id == 0 {
+	if !cruntime.UsableCgroupID(id) {
 		return nil
 	}
 	e.mu.RLock()
@@ -304,7 +386,7 @@ func (e *Enricher) EnrichAlert(alert *types.Alert) {
 		return
 	}
 
-	info := e.getEnrichmentInfo(alert.Event.PID)
+	info := e.enrichmentInfoFor(alert.Event.CgroupID, alert.Event.PID)
 	if info == nil {
 		return
 	}
@@ -316,7 +398,10 @@ func (e *Enricher) EnrichAlert(alert *types.Alert) {
 	}
 }
 
-// getEnrichmentInfo gets or creates enrichment info for a PID.
+// getEnrichmentInfo gets or creates enrichment info for a PID (the CgroupID==0
+// fallback). /proc/<pid>/cgroup is read once here: the old code read it a
+// second time through GetPodInfoByPID + getContainerIDFromPID when no pod
+// matched (night #3: three reads per event).
 func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 	// Check cache first
 	e.mu.RLock()
@@ -334,49 +419,19 @@ func (e *Enricher) getEnrichmentInfo(pid uint32) *EnrichmentInfo {
 		e.missCount.Add(1)
 		return nil
 	}
-	podInfo, ok := e.watcher.GetPodInfoByPID(pid)
-	if !ok {
-		// No k8s pod matched — either there's no k8s API server (plain Docker
-		// stand, wave 6.1) or the container isn't tracked by the pod watch yet.
-		// GetPodInfoByPID discards the cgroup-derived container ID in that
-		// case; fall back to it directly so container.id is still available
-		// as a rule axis even without full pod metadata.
-		containerID, cErr := e.watcher.getContainerIDFromPID(pid)
-		if cErr != nil {
-			enrichMissByReason.WithLabelValues(missReason(cErr)).Inc()
-			e.missCount.Add(1)
-			return nil
-		}
-		info := &EnrichmentInfo{
-			ContainerID: containerID,
-			CachedAt:    time.Now(),
-		}
-		e.mu.Lock()
-		if existing, ok := e.enrichmentCache[pid]; ok && time.Since(existing.CachedAt) < e.cacheTTL {
-			info = existing
-		} else {
-			e.enrichmentCache[pid] = info
-		}
-		e.mu.Unlock()
-		return info
+
+	containerID, cErr := e.watcher.getContainerIDFromPID(pid)
+	if cErr != nil {
+		enrichMissByReason.WithLabelValues(missReason(cErr)).Inc()
+		e.missCount.Add(1)
+		return nil
 	}
 
-	// Create enrichment info. Intern high-repetition strings (namespace, node
-	// name) so events sharing the same metadata share the same string pointer,
-	// reducing GC pressure on long-running DaemonSet deployments.
-	info := &EnrichmentInfo{
-		PodName:     podInfo.Name,
-		Namespace:   util.InternString(podInfo.Namespace),
-		PodUID:      podInfo.UID,
-		NodeName:    util.InternString(podInfo.NodeName),
-		Labels:      copyMap(podInfo.Labels),
-		Annotations: copyMap(podInfo.Annotations),
-		CachedAt:    time.Now(),
-	}
+	info := e.attributionFor(containerID)
 
 	// Cache the result. Re-check under the write lock: another goroutine may
-	// have populated a fresh entry while we were calling GetPodInfoByPID.
-	// If so, prefer the existing entry to avoid overwriting more-recent data.
+	// have populated a fresh entry while we were reading /proc. If so, prefer
+	// the existing entry to avoid overwriting more-recent data.
 	e.mu.Lock()
 	if existing, ok := e.enrichmentCache[pid]; ok && time.Since(existing.CachedAt) < e.cacheTTL {
 		info = existing
@@ -436,8 +491,6 @@ func (e *Enricher) cacheCleanupLoop(ctx context.Context) {
 // cleanupCache removes expired entries from the enrichment cache.
 func (e *Enricher) cleanupCache() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	now := time.Now()
 	for pid, info := range e.enrichmentCache {
 		if now.Sub(info.CachedAt) > e.cacheTTL {
@@ -449,6 +502,11 @@ func (e *Enricher) cleanupCache() {
 			delete(e.cgroupCache, id)
 		}
 	}
+	e.mu.Unlock()
+
+	// Drop expired cgroup-id entries so pod churn cannot grow the shared
+	// resolver's map without bound.
+	e.containerResolver().EvictExpired()
 }
 
 // GetCachedPodCount returns the number of pods in the watcher cache.

@@ -51,9 +51,14 @@ ART="${NIGHT_ART:-/var/lib/night-4}"
 IDLE_SECS="${IDLE_SECS:-28800}"
 EXPECT_NR="${EXPECT_NR:?EXPECT_NR не задан — аллоулист прогона объявляется, а не угадывается}"
 EXPECT_GOMEMLIMIT="${EXPECT_GOMEMLIMIT:-201326592}"
-LOG="/root/run-4-night-pipeline.log"
-MARK="/root/PIPELINE-4-NIGHT-DONE"
-START_FILE="/root/agent-start-4-night.txt"
+# NIGHT_TAG разводит имена артефактов, чтобы смок приборов (короткий прогон на
+# 15 минут, этап B) не затирал лог, маркер и архив боевой ночи: ровно эта
+# коллизия стоила бы повторения восьми часов.
+NIGHT_TAG="${NIGHT_TAG:-4-night}"
+LOG="/root/run-$NIGHT_TAG-pipeline.log"
+MARK="/root/PIPELINE-$(printf '%s' "$NIGHT_TAG" | tr 'a-z-' 'A-Z_')-DONE"
+START_FILE="/root/agent-start-$NIGHT_TAG.txt"
+ARCHIVE="/root/collect-$NIGHT_TAG.tgz"
 export PATH=$PATH:/usr/local/go/bin
 
 rm -f "$MARK"
@@ -71,7 +76,7 @@ _m() {
         END { if (seen) printf "%.0f\n", s }' "$1" < /dev/null
 }
 
-say "=== ЗАМЕР №4 (этап D волны 8.1) стартовал; git $(git -C "$REPO" rev-parse --short HEAD) ==="
+say "=== ЗАМЕР №4 (этап D волны 8.1), tag=$NIGHT_TAG, idle=${IDLE_SECS} с; git $(git -C "$REPO" rev-parse --short HEAD) ==="
 rm -rf "$ART"; mkdir -p "$ART" || die "не создать $ART"
 
 # ── [1] преflight: что меряем ──────────────────────────────────────────────
@@ -213,7 +218,7 @@ _curl "$API/metrics" > "$ART/metrics-final.txt"
 _curl "$API/debug/pprof/heap" > "$ART/heap-final.pprof"
 read -r cg_end < "/sys/fs/cgroup$cgline/memory.current" 2>/dev/null || cg_end="?"
 echo "memory.current.end=$cg_end" >> "$ART/run-intent.txt"
-journalctl -u "$SERVICE" --since "$(date -d "$(cat "$START_FILE")" '+%F %T')" --no-pager -o cat > "$ART/journal-agent-4-night.log"
+journalctl -u "$SERVICE" --since "$(date -d "$(cat "$START_FILE")" '+%F %T')" --no-pager -o cat > "$ART/journal-agent-$NIGHT_TAG.log"
 cp "$SETUP/config-test.yaml" "$ART/config-test.yaml"
 cp "$START_FILE" "$ART/"
 cp "$0" "$ART/" 2>/dev/null
@@ -221,6 +226,6 @@ cp "$0" "$ART/" 2>/dev/null
 # версией, что считала этот прогон ([[archive-carries-its-own-guard-copy]]).
 cp "$SETUP/night-report.sh" "$SETUP/night-report-fixtures.sh" \
    "$SETUP/idle-run.sh" "$SETUP/idle-run-cgroup-fixtures.sh" "$ART/" 2>/dev/null
-tar czf /root/collect-4-night.tgz -C "$(dirname "$ART")" "$(basename "$ART")"
-say "=== ЗАМЕР №4 закончен; архив /root/collect-4-night.tgz ($(du -h /root/collect-4-night.tgz | cut -f1)) ==="
+tar czf "$ARCHIVE" -C "$(dirname "$ART")" "$(basename "$ART")"
+say "=== ЗАМЕР №4 закончен; архив $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1)) ==="
 [ -s "$MARK" ] || echo "done $(date -u +%FT%TZ)" > "$MARK"

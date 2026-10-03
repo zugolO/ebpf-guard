@@ -84,22 +84,27 @@ type netpollRingWaiter struct {
 	conn syscall.RawConn
 }
 
-// Wait parks until the ring fd is readable.
+// WaitUntil parks until try takes a record.
 //
-// RawConn.Read calls the callback first and only waits when it returns false
-// (internal/poll FD.RawRead), so the callback declines once to force the park
-// and accepts on the next pass. Readiness is latched by the poller, so a sample
-// committed between the caller's "ring is empty" and this park is not lost: the
-// epoll event is already in the ready list and the park returns at once.
-func (w *netpollRingWaiter) Wait() error {
-	parked := false
+// internal/poll's FD.RawRead is a loop: prepareRead (= runtime_pollReset, which
+// DISCARDS any readiness epoll had already latched), then the callback, then —
+// only if the callback returned false — waitRead. Running try as that callback
+// is therefore not a style choice but the correctness requirement: it is the
+// first check after the reset, and the BPF ring buffer will not notify twice
+// for the same data (see "THE LOST WAKEUP" in ringbuf_netpoll.go).
+func (w *netpollRingWaiter) WaitUntil(try func() (bool, error)) error {
+	var tryErr error
 	err := w.conn.Read(func(uintptr) bool {
-		if !parked {
-			parked = true
-			return false
+		ok, e := try()
+		if e != nil {
+			tryErr = e
+			return true
 		}
-		return true
+		return ok
 	})
+	if tryErr != nil {
+		return tryErr
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrClosed) || errors.Is(err, os.ErrDeadlineExceeded) {
 			return err

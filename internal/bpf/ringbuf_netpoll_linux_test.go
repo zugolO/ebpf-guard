@@ -5,6 +5,7 @@ package bpf
 import (
 	"errors"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,14 +32,34 @@ func TestNewRingWaiter_ParksAndWakes(t *testing.T) {
 	}
 	defer w.Close()
 
-	done := make(chan error, 1)
-	go func() { done <- w.Wait() }()
+	// try stands in for "drain the ring": it reads non-blockingly and reports
+	// whether it got anything. It must be called once before the park (and come
+	// back empty) and again when the fd becomes readable.
+	var tries int32
+	try := func() (bool, error) {
+		atomic.AddInt32(&tries, 1)
+		var b [1]byte
+		n, err := unix.Read(fds[0], b[:])
+		if n > 0 {
+			return true, nil
+		}
+		if err != nil && err != unix.EAGAIN && err != unix.EWOULDBLOCK {
+			return true, err
+		}
+		return false, nil
+	}
 
-	// The wait must actually park: nothing is readable yet.
+	done := make(chan error, 1)
+	go func() { done <- w.WaitUntil(try) }()
+
+	// The wait must actually park: nothing is readable yet, and try said empty.
 	select {
 	case err := <-done:
-		t.Fatalf("Wait returned %v before the fd was readable", err)
+		t.Fatalf("WaitUntil returned %v before the fd was readable", err)
 	case <-time.After(100 * time.Millisecond):
+	}
+	if atomic.LoadInt32(&tries) == 0 {
+		t.Fatal("try was never called inside the armed window — the record that arrives before the park would be lost")
 	}
 
 	if _, err := unix.Write(fds[1], []byte{1}); err != nil {
@@ -47,10 +68,57 @@ func TestNewRingWaiter_ParksAndWakes(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("Wait after write: %v", err)
+			t.Fatalf("WaitUntil after write: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Wait did not return after the fd became readable")
+		t.Fatal("WaitUntil did not return after the fd became readable")
+	}
+	if atomic.LoadInt32(&tries) < 2 {
+		t.Fatalf("try called %d times, want at least 2 (before the park and on readiness)", tries)
+	}
+}
+
+// TestNewRingWaiter_TakesDataLatchedBeforeArming is the pipe-level version of
+// the stand's defect: the data is already there when WaitUntil is called, and
+// nothing will ever become readable afterwards. The call must still return,
+// because try runs inside the armed window; a waiter that only waited for an
+// epoll event would hang here, exactly as both busy readers hung on the stand.
+func TestNewRingWaiter_TakesDataLatchedBeforeArming(t *testing.T) {
+	var fds [2]int
+	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC); err != nil {
+		t.Fatalf("pipe2: %v", err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+
+	w, err := newRingWaiter(fds[0])
+	if err != nil {
+		t.Fatalf("newRingWaiter: %v", err)
+	}
+	defer w.Close()
+
+	if _, err := unix.Write(fds[1], []byte{1}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Let any readiness notification be delivered and then discarded by the
+	// reset that WaitUntil's prepareRead does.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- w.WaitUntil(func() (bool, error) {
+			var b [1]byte
+			n, _ := unix.Read(fds[0], b[:])
+			return n > 0, nil
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitUntil: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitUntil hung on data that was latched before arming — the stall is back")
 	}
 }
 
@@ -71,7 +139,7 @@ func TestNewRingWaiter_CloseUnblocks(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- w.Wait() }()
+	go func() { done <- w.WaitUntil(func() (bool, error) { return false, nil }) }()
 	time.Sleep(50 * time.Millisecond)
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -80,7 +148,7 @@ func TestNewRingWaiter_CloseUnblocks(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, os.ErrClosed) {
-			t.Fatalf("Wait after Close = %v, want os.ErrClosed", err)
+			t.Fatalf("WaitUntil after Close = %v, want os.ErrClosed", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not unblock the park")

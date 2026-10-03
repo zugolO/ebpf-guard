@@ -549,13 +549,37 @@ func (r *RingbufReader) ReadInto(rec *ringbuf.Record) error {
 	}
 
 	for {
+		// Cheap first try, outside the poller: a busy ring usually has data and
+		// this costs one epoll_wait(0) inside cilium, no park at all.
 		err := r.reader.ReadInto(rec)
 		if !errors.Is(err, os.ErrDeadlineExceeded) {
 			return err
 		}
 
-		if werr := r.wait.Wait(); werr != nil {
+		// Empty. The re-check MUST happen inside the waiter's armed window —
+		// the first version of this loop checked here and parked after, and
+		// that stalled both busy readers on the stand within a minute (see
+		// "THE LOST WAKEUP" in ringbuf_netpoll.go).
+		got := false
+		werr := r.wait.WaitUntil(func() (bool, error) {
+			e := r.reader.ReadInto(rec)
+			switch {
+			case e == nil:
+				got = true
+				return true, nil
+			case errors.Is(e, os.ErrDeadlineExceeded):
+				return false, nil // still empty: keep waiting
+			default:
+				return true, e
+			}
+		})
+		if werr != nil {
 			if errors.Is(werr, os.ErrClosed) {
+				return werr
+			}
+			if !errors.Is(werr, errRingWaitUnsupported) {
+				// An error from the ring itself (not from waiting) belongs to
+				// the caller as it is.
 				return werr
 			}
 			// Unsupported fd, or any other wait failure: give the stream back
@@ -565,6 +589,9 @@ func (r *RingbufReader) ReadInto(rec *ringbuf.Record) error {
 		}
 		if r.onWait != nil {
 			r.onWait()
+		}
+		if got {
+			return nil
 		}
 	}
 }

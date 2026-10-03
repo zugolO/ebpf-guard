@@ -43,18 +43,49 @@ func (f *fakeRing) SetDeadline(t time.Time) { f.deadlines = append(f.deadlines, 
 func (f *fakeRing) Close() error            { f.closed = true; return nil }
 func (f *fakeRing) lastDeadline() time.Time { return f.deadlines[len(f.deadlines)-1] }
 
+// fakeWaiter stands in for the netpoller. It calls try exactly as
+// internal/poll's RawRead does — once per readiness, inside the armed window —
+// and models the kernel's single notification: whatever `arrive` adds to the
+// ring is added BEFORE the first try and never announced again. A waiter that
+// gave up on a false from try would therefore hang, which is the stall the
+// stand showed.
 type fakeWaiter struct {
-	waits  int
-	err    error
-	closed bool
+	waits   int
+	tries   int
+	err     error
+	closed  bool
+	arrive  func()
+	stalled bool
 }
 
-func (w *fakeWaiter) Wait() error {
+func (w *fakeWaiter) WaitUntil(try func() (bool, error)) error {
 	w.waits++
-	return w.err
+	if w.err != nil {
+		return w.err
+	}
+	if w.arrive != nil {
+		w.arrive()
+		w.arrive = nil
+	}
+	for {
+		w.tries++
+		ok, err := try()
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		// No second notification is coming: this is the kernel's contract for a
+		// BPF ring buffer, not a shortcut of the fake.
+		w.stalled = true
+		return errFakeStalled
+	}
 }
 
 func (w *fakeWaiter) Close() error { w.closed = true; return nil }
+
+var errFakeStalled = errors.New("fake waiter: parked with no further notification (stall)")
 
 type fallback struct {
 	reason string
@@ -105,7 +136,7 @@ func TestRingbufReader_BlockingPathUntouched(t *testing.T) {
 // the series that tells "the netpoll branch ran" from "the netpoll branch was
 // requested" ([[toggle-needs-both-branches-counted]]).
 func TestRingbufReader_NetpollParksOnEmptyRing(t *testing.T) {
-	ring := &fakeRing{seq: []error{os.ErrDeadlineExceeded, os.ErrDeadlineExceeded, nil}}
+	ring := &fakeRing{seq: []error{os.ErrDeadlineExceeded, nil}}
 	waiter := &fakeWaiter{}
 	parks := 0
 	fb := &fallback{}
@@ -125,8 +156,11 @@ func TestRingbufReader_NetpollParksOnEmptyRing(t *testing.T) {
 	if err := r.ReadInto(&rec); err != nil {
 		t.Fatalf("ReadInto: %v", err)
 	}
-	if waiter.waits != 2 || parks != 2 {
-		t.Fatalf("waits = %d, parks counted = %d, want 2 and 2", waiter.waits, parks)
+	if waiter.waits != 1 || parks != 1 {
+		t.Fatalf("waits = %d, parks counted = %d, want 1 and 1", waiter.waits, parks)
+	}
+	if waiter.tries != 1 {
+		t.Fatalf("try called %d times inside the armed window, want 1", waiter.tries)
 	}
 	if fb.count != 0 {
 		t.Fatalf("unexpected fallback: %+v", fb)
@@ -243,5 +277,59 @@ func TestNewRingWaiter_RejectsBadFD(t *testing.T) {
 	}
 	if !errors.Is(err, errRingWaitUnsupported) {
 		t.Fatalf("err = %v, want errRingWaitUnsupported", err)
+	}
+}
+
+// TestRingbufReader_TakesRecordThatArrivedBeforeThePark pins the defect the
+// stand found on 03.10.2026: a record committed in the gap between "the ring is
+// empty" and the park is announced by the kernel exactly once, and
+// internal/poll's prepareRead discards that announcement. The only place the
+// reader can still see such a record is the check INSIDE the armed window — so
+// the fake waiter here, like the kernel, never announces anything a second
+// time, and a reader that waited for a second notification would come back
+// with errFakeStalled instead of the record.
+func TestRingbufReader_TakesRecordThatArrivedBeforeThePark(t *testing.T) {
+	ring := &fakeRing{seq: []error{os.ErrDeadlineExceeded}} // empty, then records
+	waiter := &fakeWaiter{arrive: func() { ring.seq = nil }}
+	parks := 0
+	fb := &fallback{}
+	r := newRingbufReader(ring, 7, netpollOpts(&parks, fb), okWaiter(waiter))
+
+	var rec ringbuf.Record
+	if err := r.ReadInto(&rec); err != nil {
+		t.Fatalf("ReadInto = %v (a record that arrived before the park was lost)", err)
+	}
+	if waiter.stalled {
+		t.Fatal("reader waited for a second notification that the kernel never sends")
+	}
+	if len(rec.RawSample) == 0 {
+		t.Fatal("no record delivered")
+	}
+	if fb.count != 0 {
+		t.Fatalf("unexpected fallback: %+v", fb)
+	}
+}
+
+// TestRingbufReader_RingErrorInsideWindowReachesCaller: an error from the ring
+// (not from waiting) must not be mistaken for a wait failure and must not
+// downgrade the reader — a downgrade would hide a broken ring behind a slower
+// read path.
+func TestRingbufReader_RingErrorInsideWindowReachesCaller(t *testing.T) {
+	boom := errors.New("ring is broken")
+	ring := &fakeRing{seq: []error{os.ErrDeadlineExceeded, boom}}
+	waiter := &fakeWaiter{}
+	parks := 0
+	fb := &fallback{}
+	r := newRingbufReader(ring, 7, netpollOpts(&parks, fb), okWaiter(waiter))
+
+	var rec ringbuf.Record
+	if err := r.ReadInto(&rec); !errors.Is(err, boom) {
+		t.Fatalf("ReadInto = %v, want the ring's own error", err)
+	}
+	if fb.count != 0 {
+		t.Fatalf("ring error counted as a wait fallback: %+v", fb)
+	}
+	if r.Mode() != RingbufWaitModeNetpoll {
+		t.Fatalf("ring error downgraded the reader: mode = %q", r.Mode())
 	}
 }

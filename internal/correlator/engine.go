@@ -1699,6 +1699,23 @@ func (ce *CorrelationEngine) QueueDepth() float64 {
 	return float64(ce.queueDepthFn()) / float64(cap)
 }
 
+// RegoQueueLenCap returns len/cap of the Rego evaluation queue (0, 0 when Rego
+// is disabled). Used by the queue high-water-mark sampler (wave 8.1 item 9).
+func (ce *CorrelationEngine) RegoQueueLenCap() (int, int) {
+	if ce.regoQueue == nil {
+		return 0, 0
+	}
+	return len(ce.regoQueue), cap(ce.regoQueue)
+}
+
+// EnforceQueueLenCap returns len/cap of the enforcement queue.
+func (ce *CorrelationEngine) EnforceQueueLenCap() (int, int) {
+	if ce.enforceQueue == nil {
+		return 0, 0
+	}
+	return len(ce.enforceQueue), cap(ce.enforceQueue)
+}
+
 // RegisterMetrics registers the engine's Prometheus metrics with the given registerer.
 func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 	for _, c := range []prometheus.Collector{

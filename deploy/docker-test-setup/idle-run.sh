@@ -25,6 +25,27 @@ NO_RESTART="${NO_RESTART:-0}"
 # пишется в snapshots/store-size.tsv прямо stat'ом: метрика store_size_bytes на
 # стенде стоит в 0 и судить приёмку 4.5 не может.
 HEAP_EVERY="${HEAP_EVERY:-0}"
+# Волна 8.1 item 8(б): каждый CPU_PROFILE_EVERY-й срез снимает CPU-профиль
+# /debug/pprof/profile?seconds=CPU_PROFILE_SECS В ФОНЕ (curl блокируется на всё
+# окно профиля, а срез ждать нельзя). Сам профилировщик стоит ~несколько %% CPU
+# на эти секунды — раз в час на фоне 8 ч это шум, но судить по этим 30 с
+# CPU/событие нельзя. 0 — выключено. Файл cpu-NNNN.pprof в snapshots/.
+CPU_PROFILE_EVERY="${CPU_PROFILE_EVERY:-0}"
+CPU_PROFILE_SECS="${CPU_PROFILE_SECS:-30}"
+# Волна 8.1 item 5/13(а): cgroup-память агента на КАЖДОМ срезе
+# (snapshots/cgroup-mem.tsv). Пределом пода считается memory.current cgroup, а не
+# RSS: 03.10.2026 на стенде RSS был 276 МиБ при memory.current 290 — то есть под
+# лимитом 256Mi чарта это OOM-kill, а по RSS выходило «почти уложились». Внутри
+# memory.current нужен разрез на anon (куча Go) и file (страницы бинаря,
+# вытесняемые): вопрос ночи — растёт ли anon или это прогрев, и по RSS он не
+# отличим. Читается ТОЛЬКО bash-builtin'ами: ни одного процесса на срез.
+CGROUP_MEM="${CGROUP_MEM:-1}"
+# Корни ФС вынесены переменными ровно для того, чтобы прибор можно было прогнать
+# фикстурой на mac по подставному дереву: на macOS нет ни /proc, ни
+# /sys/fs/cgroup, и без этого цепочка «резолв → чтение → строка tsv» впервые
+# исполнялась бы на стенде ([[self-test-fixtures-miss-live-log-shape]]).
+CG_ROOT="${CG_ROOT:-/sys/fs/cgroup}"
+PROC_ROOT="${PROC_ROOT:-/proc}"
 STORE_DB="${STORE_DB:-}"
 # 5.9a (находки №27/№28): этот файл — канал, которым харнесс сообщает агенту
 # корень СВОЕГО дерева процессов, чтобы correlator.observer_exclude (см.
@@ -179,6 +200,23 @@ if [[ -z "$SERVICE_PID" || "$SERVICE_PID" == "0" ]]; then
     SERVICE_PID=""
 fi
 
+# cgroup агента резолвится ОДИН раз по /proc/<pid>/cgroup (строка "0::<путь>"), а
+# не собирается из имени юнита: у делегированных и слайсовых раскладок путь
+# другой, и собранный из имени он молча не существовал бы — прибор отдал бы
+# пустой файл, читаемый как ноль ([[empty-metric-snapshot-is-silently-zero]]).
+CG_DIR=""
+cgroup_resolve() {
+    local pid="$1" line path
+    CG_DIR=""
+    [[ -n "$pid" && -r "$PROC_ROOT/$pid/cgroup" ]] || return
+    while IFS= read -r line; do
+        [[ "$line" == 0::* ]] || continue
+        path="${line#0::}"
+        [[ -r "$CG_ROOT$path/memory.current" ]] && CG_DIR="$CG_ROOT$path"
+        break
+    done < "$PROC_ROOT/$pid/cgroup"
+}
+
 # 5.9.5f, вторая половина (замер №2.9.5): весь форкающий пролог окна —
 # сбор environment.txt (`systemctl list-timers`, `docker ps`, `crontab -l`) и
 # снятие MainPID выше — обязан отработать ДО стартового среза, и его следу
@@ -246,6 +284,42 @@ proc_cpu_pct() {
     PREV_CPU_TS="$now"
 }
 
+# cgroup_snapshot — одна строка в snapshots/cgroup-mem.tsv на срез. Все величины
+# в байтах, как их отдаёт ядро; МиБ считает эмиттер, а не прибор.
+#   current  memory.current — то, что считает лимит пода;
+#   anon     анонимная память (куча Go и стеки) — ось вопроса «прогрев или накопление»;
+#   file     страницы файлов (текст бинаря, стор) — к лимиту относятся, но давлением
+#            вытесняются, поэтому в вердикт идут отдельной колонкой;
+#   slab/pagetables/kernel_stack/sock — ядерные части, заряженные cgroup;
+#   max      memory.max ("max" на стенде = лимита нет; на поде это лимит чарта).
+# Остаток current − (anon+file+slab+pagetables+kernel_stack+sock) в memory.stat на
+# 5.15 НЕ назван — это память BPF-карт и прочие ядерные аллокации; эмиттер печатает
+# его отдельной величиной, потому что 03.10.2026 он был ≈127 МиБ, то есть половина
+# лимита чарта, и приписать его куче было бы ошибкой на вердикт.
+cgroup_snapshot() {
+    local n="$1" t="$2" cur max k v
+    [[ -n "$CG_DIR" ]] || return
+    cur=""
+    read -r cur < "$CG_DIR/memory.current" 2>/dev/null || return
+    [[ -n "$cur" ]] || return
+    max="?"
+    read -r max < "$CG_DIR/memory.max" 2>/dev/null || max="?"
+    local anon=0 file=0 slab=0 pt=0 ks=0 sock=0
+    while read -r k v; do
+        case "$k" in
+            anon)         anon="$v" ;;
+            file)         file="$v" ;;
+            slab)         slab="$v" ;;
+            pagetables)   pt="$v" ;;
+            kernel_stack) ks="$v" ;;
+            sock)         sock="$v" ;;
+        esac
+    done < "$CG_DIR/memory.stat"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$t" "$n" "$cur" "$anon" "$file" "$slab" "$pt" "$ks" "$sock" "$max" \
+        >> "$OUT/snapshots/cgroup-mem.tsv"
+}
+
 snapshot() {
     local n="$1" pad
     pad="$(printf '%04d' "$n")"
@@ -261,6 +335,13 @@ snapshot() {
         api_multi /metrics "$OUT/snapshots/metrics-$pad.txt" \
                   /api/v1/status "$OUT/snapshots/status-$pad.json" \
                   /debug/state "$OUT/snapshots/state-$pad.json"
+    fi
+    if [[ "$CPU_PROFILE_EVERY" -gt 0 && $(( n % CPU_PROFILE_EVERY )) -eq 0 ]]; then
+        curl -s --max-time $(( CPU_PROFILE_SECS + 30 )) -H "Authorization: Bearer $TOKEN" \
+            -o "$OUT/snapshots/cpu-$pad.pprof" "$API/debug/pprof/profile?seconds=$CPU_PROFILE_SECS" &
+    fi
+    if [[ "$CGROUP_MEM" == "1" ]]; then
+        cgroup_snapshot "$n" "$t"
     fi
     if [[ -n "$STORE_DB" ]]; then
         # stat — builtin-free, но один короткий процесс; -L на случай симлинка.
@@ -300,6 +381,18 @@ snapshot() {
 }
 
 printf 'timestamp\tn\trss_kb\tcpu_pct\tloadavg\tmem_avail_kb\n' > "$OUT/timeseries-raw.tsv"
+if [[ "$CGROUP_MEM" == "1" ]]; then
+    cgroup_resolve "$SERVICE_PID"
+    if [[ -n "$CG_DIR" ]]; then
+        printf 'timestamp\tn\tcurrent\tanon\tfile\tslab\tpagetables\tkernel_stack\tsock\tmax\n' \
+            > "$OUT/snapshots/cgroup-mem.tsv"
+        log "cgroup агента: $CG_DIR (memory.current пишется каждый срез)"
+    else
+        # Отсутствие прибора называется вслух: иначе пустой файл прочитается как
+        # ноль, а эмиттер вынесет вердикт по памяти, которой не мерил.
+        log "ВНИМАНИЕ: cgroup агента не определён (pid=${SERVICE_PID:-нет}) — cgroup-mem.tsv НЕ пишется, вопрос «прогрев или накопление» этим прогоном неизмерим"
+    fi
+fi
 
 END=$(( $(date +%s) + DURATION ))
 n=0
@@ -520,6 +613,7 @@ journalctl -u "$SERVICE" --since "@$(( $(date +%s) - DURATION - 600 ))" --no-pag
 cat "$OUT/SUMMARY.txt" | tee -a "$OUT/idle-run.log"
 
 ARCHIVE="$(dirname "$OUT")/idle-$TS.tar.gz"
+wait   # фоновые CPU-профили (CPU_PROFILE_EVERY), чтобы не обрезать файл в архиве
 tar czf "$ARCHIVE" -C "$(dirname "$OUT")" "$(basename "$OUT")"
 log "=== IDLE RUN DONE ==="
 log "архив: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"

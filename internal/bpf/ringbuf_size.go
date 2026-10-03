@@ -51,6 +51,21 @@ func ComputeRingBufSize(cfg RingBufSizeConfig) int {
 	return clampRingBuf(roundUpToPow2(roundUpToPage(sizeBytes)))
 }
 
+// ComputeUprobeRingBufSize sizes the ring of a uprobe collector (TLS plaintext,
+// HTTP plaintext). An explicit cfg.SizeBytes is honoured exactly like
+// ComputeRingBufSize; unset, it is the 4 MiB kernel minimum, NOT a fraction of
+// node RAM (wave 8.1 item 13). Those streams are near-empty on a typical node
+// (the stand's tls_events ring took 3 events in its whole life) while the
+// 1%-of-MemAvailable formula gave 32 MiB — ≈64 MiB of RSS, since the data
+// pages are mapped twice, all resident from map creation. The same 4 MiB is
+// what the syscall/file/network rings already run at.
+func ComputeUprobeRingBufSize(cfg RingBufSizeConfig) int {
+	if cfg.SizeBytes > 0 {
+		return ComputeRingBufSize(cfg)
+	}
+	return ringBufMinBytes
+}
+
 func clampRingBuf(n int) int {
 	if n < ringBufMinBytes {
 		return ringBufMinBytes

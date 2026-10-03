@@ -19,11 +19,20 @@ bad() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); }
 #   rss_grow=N    — RSS растёт на N МиБ за час (иначе плоский с колебанием)
 #   no_store=1    — store-size.tsv не писать
 #   zero_h2=1     — объём часа 2 нулевой
+#   cg=plateau|grow|none — cgroup-mem.tsv: anon выходит на плато / растёт линейно /
+#                   прибора нет вовсе (этап D волны 8.1, метка 8.1.1)
+#   cg_peak=N     — пик memory.current, МиБ (по умолчанию 231 — ниже лимита чарта)
+#   drops=N       — потери очереди protected за ночь (метка 8.1.2)
+#   no_hwm=1      — серий ebpf_guard_queue_depth_hwm нет (прибор очередей не предъявлен)
+#   no_dropseries=1 — серии потерь очереди нет вовсе
 _night() {
     local d="$1" H="$2" E="$3" RL="$4" DD="$5"; shift 5
     local vol8="" e8="" restart_at=-1 empty_at=-1 attack_at=-1 no_attack=0 rss_grow=0 no_store=0 zero_h2=0 kv
+    local cg=none cg_peak=231 drops=0 no_hwm=0 no_dropseries=0
     for kv in "$@"; do eval "local ${kv%%=*}=${kv#*=}"; done
     mkdir -p "$d/snapshots"
+    for kv in "$@"; do :; done
+    [ "$cg" = none ] || printf 'timestamp\tn\tcurrent\tanon\tfile\tslab\tpagetables\tkernel_stack\tsock\tmax\n' > "$d/snapshots/cgroup-mem.tsv"
     local n e=0 r=0 dd=0 att=0 start=1900000000 h es rs ds rss f
     for n in $(seq 0 $(( H * 12 ))); do
         if [ "$n" -gt 0 ]; then
@@ -53,8 +62,32 @@ _night() {
             echo "go_memstats_heap_inuse_bytes $(( rss / 2 ))"
             echo "go_memstats_heap_idle_bytes $(( rss / 4 ))"
             echo "go_memstats_heap_released_bytes $(( rss / 8 ))"
+            if [ "$no_dropseries" != 1 ]; then
+                echo "ebpf_guard_events_dropped_by_queue_total{collector=\"syscall\",queue=\"protected\"} $(( drops * n / (H * 12) ))"
+                echo "ebpf_guard_events_dropped_total{collector=\"syscall\",reason=\"ringbuf_to_router\"} $(( drops * n / (H * 12) ))"
+            fi
+            if [ "$no_hwm" != 1 ]; then
+                echo "ebpf_guard_queue_depth_hwm{queue=\"event_high\"} $(( n % 5 ))"
+                echo "ebpf_guard_queue_depth_hwm{queue=\"event_low\"} $(( n % 9 ))"
+                echo "ebpf_guard_queue_capacity{queue=\"event_high\"} 16384"
+                echo "ebpf_guard_queue_capacity{queue=\"event_low\"} 16384"
+            fi
         } > "$f"
         [ "$no_store" = 1 ] || printf '2026-10-02T00:00:00Z\t%s\t%s\t%s\n' "$n" $(( 1048576 * (10 + n) )) 0 >> "$d/snapshots/store-size.tsv"
+        if [ "$cg" != none ]; then
+            # anon: прогрев — логарифмическое насыщение (рост в первые часы, плато
+            # к концу); накопление — линейный рост теми же МиБ/ч до конца.
+            local an_mib cur_mib
+            if [ "$cg" = plateau ]; then
+                an_mib=$(awk -v n="$n" 'BEGIN { printf "%.0f", 100 + 40 * (1 - exp(-n / 24.0)) }')
+            else
+                an_mib=$(awk -v n="$n" 'BEGIN { printf "%.0f", 100 + 0.35 * n }')
+            fi
+            cur_mib=$(( cg_peak - 40 + an_mib - 100 ))
+            printf '2026-10-02T00:00:00Z\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" \
+                $(( cur_mib * 1048576 )) $(( an_mib * 1048576 )) $(( 2 * 1048576 )) \
+                1234567 1437696 1114112 0 max >> "$d/snapshots/cgroup-mem.tsv"
+        fi
     done
 }
 _case() { local name="$1"; shift; rm -rf "$T/$name"; _night "$T/$name" "$@"; bash "$R" "$T/$name" 300 < /dev/null 2>&1; }
@@ -116,6 +149,52 @@ _need "нет store-size — НЕИЗМЕРИМ с причиной" "$o" "STORE
 echo "[каталога снимков нет]"
 o=$(bash "$R" "$T/nothing" 300 < /dev/null 2>&1)
 _need "нет каталога — НЕИЗМЕРИМ" "$o" "НЕИЗМЕРИМ: 3.*"
+
+echo "[8.1.1: anon выходит на плато — прогрев]"
+o=$(_case cgflat 9 120 0 600 cg=plateau)
+_need "плато — ИЗМЕРЕНО с классом прогрев" "$o" "ИЗМЕРЕНО: 8.1.1" "класс прогрев"
+_need "пик current сравнён с лимитом чарта" "$o" "против лимита чарта 256.0 МиБ" "запас"
+_forbid "8.1.1 никогда не ДОСТИГНУТО" "$o" "ДОСТИГНУТО: 8.1.1"
+
+echo "[8.1.1: anon растёт до конца — накопление]"
+o=$(_case cggrow 9 120 0 600 cg=grow)
+_need "линейный рост — класс НАКОПЛЕНИЕ" "$o" "ИЗМЕРЕНО: 8.1.1" "класс НАКОПЛЕНИЕ"
+
+echo "[8.1.1: пик выше лимита чарта]"
+o=$(_case cgover 9 120 0 600 cg=plateau cg_peak=300)
+_need "перебор назван перебором" "$o" "перебор"
+_forbid "перебор не печатается как запас" "$o" "— запас"
+
+echo "[8.1.1: прибора cgroup нет]"
+o=$(_case cgnone 9 120 0 600)
+_need "нет tsv — НЕИЗМЕРИМ с причиной, не ноль" "$o" "НЕИЗМЕРИМ: 8.1.1" "cgroup-mem.tsv не снят"
+_forbid "нет прибора — нет ИЗМЕРЕНО" "$o" "ИЗМЕРЕНО: 8.1.1"
+
+echo "[8.1.1: ночь короче четырёх часов]"
+o=$(_case cgshort 3 120 0 600 cg=plateau)
+_need "3 часа — НЕИЗМЕРИМ, но пик напечатан" "$o" "НЕИЗМЕРИМ: 8.1.1" "пик memory.current"
+
+echo "[8.1.2: потерь нет, прибор очередей предъявлен]"
+o=$(_case drop0 9 120 0 600 cg=plateau)
+_need "ноль с прибором — ДОСТИГНУТО" "$o" "ДОСТИГНУТО: 8.1.2" "прибор очередей предъявлен"
+
+echo "[8.1.2: потерь нет, но прибора очередей нет]"
+o=$(_case drop0nohwm 9 120 0 600 no_hwm=1)
+_need "ноль без прибора — НЕИЗМЕРИМ" "$o" "НЕИЗМЕРИМ: 8.1.2" "прибор очередей не предъявлен"
+_forbid "ноль без прибора не даёт ДОСТИГНУТО" "$o" "ДОСТИГНУТО: 8.1.2"
+
+echo "[8.1.2: потери есть]"
+o=$(_case drops 9 120 0 600 drops=667)
+_need "потери — ПРОВАЛЕН с величиной и разрезом по часам" "$o" "ПРОВАЛЕН: 8.1.2" "за ночь 667" "час 1: protected +"
+
+echo "[8.1.2: серии потерь нет вовсе]"
+o=$(_case dropnoseries 9 120 0 600 no_dropseries=1)
+_need "нет серии — НЕИЗМЕРИМ, не 0" "$o" "НЕИЗМЕРИМ: 8.1.2" "нет серии ≠ 0"
+_forbid "нет серии не даёт ДОСТИГНУТО" "$o" "ДОСТИГНУТО: 8.1.2"
+
+echo "[8.1.2: рестарт внутри ночи]"
+o=$(_case droprestart 9 120 0 600 drops=10 restart_at=90)
+_need "рестарт — НЕИЗМЕРИМ (дельта через рестарт)" "$o" "НЕИЗМЕРИМ: 8.1.2"
 
 echo
 [ "$FAIL" -eq 0 ] && { echo "night-report-fixtures: расхождений 0"; exit 0; }

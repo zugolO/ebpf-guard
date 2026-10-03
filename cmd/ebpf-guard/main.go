@@ -42,6 +42,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/osint"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/internal/qhwm"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
 	"github.com/zugolO/ebpf-guard/internal/simple"
@@ -1520,6 +1521,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	engine.SetQueueDepthFn(func() int { return len(highPriorityEventCh) + len(lowPriorityEventCh) }, func() int { return cap(highPriorityEventCh) + cap(lowPriorityEventCh) })
 	exporter.RecordQueueDepth(0, eventQueueDepth*2)
 
+	// wave-8.1 item 9: peak depth of every pipeline queue, sampled at 1 Hz. The
+	// occupancy gauges are 30 s point readings and miss bursts.
+	if qh, qhErr := qhwm.New(prometheus.DefaultRegisterer); qhErr != nil {
+		slog.Warn("queue high-water-mark metrics unavailable", slog.Any("err", qhErr))
+	} else {
+		qh.Track("event_high", func() int { return len(highPriorityEventCh) }, func() int { return cap(highPriorityEventCh) })
+		qh.Track("event_low", func() int { return len(lowPriorityEventCh) }, func() int { return cap(lowPriorityEventCh) })
+		qh.Track("rego", func() int { l, _ := engine.RegoQueueLenCap(); return l }, func() int { _, c := engine.RegoQueueLenCap(); return c })
+		qh.Track("enforce", func() int { l, _ := engine.EnforceQueueLenCap(); return l }, func() int { _, c := engine.EnforceQueueLenCap(); return c })
+		go qh.Run(ctx)
+	}
+
 	// Determine overflow policy: BPF config takes precedence over the collector
 	// backpressure_strategy for the worker-pool overflow path.
 	overflowPolicy := cfg.BPF.OverflowPolicy
@@ -1678,6 +1691,25 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return d, true
 	}
 
+	// Wave 8.1 item 6 — the ring buffer wait path, OFF by default. The env
+	// override exists so the A/B pair can be flipped with a systemd drop-in on
+	// the stand, without rebuilding: both windows have to run ONE binary
+	// ([[archive-must-carry-binary-identity]], [[ab-toggle-measures-the-restart]]).
+	// What each reader ACTUALLY got is logged and gauged by the collector
+	// (ebpf_guard_ringbuf_wait_mode), never assumed from this flag.
+	ringbufNetpoll := cfg.BPF.RingbufNetpoll
+	if v, ok := os.LookupEnv("EBPF_GUARD_RINGBUF_NETPOLL"); ok {
+		if b, perr := strconv.ParseBool(v); perr == nil {
+			ringbufNetpoll = b
+			slog.Info("bpf: ring buffer wait path taken from EBPF_GUARD_RINGBUF_NETPOLL",
+				slog.Bool("netpoll", ringbufNetpoll))
+		} else {
+			slog.Warn("bpf: EBPF_GUARD_RINGBUF_NETPOLL is not a boolean, keeping the config value",
+				slog.String("value", v), slog.Bool("netpoll", ringbufNetpoll))
+		}
+	}
+	slog.Info("bpf: ring buffer wait path requested", slog.Bool("netpoll", ringbufNetpoll))
+
 	var collectors []collector.Collector
 	if dryRun {
 		slog.Info("dry-run mode: using synthetic event generator")
@@ -1714,6 +1746,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				diagAllowlist = internalbpf.DefaultMonitoredSyscalls()
 			}
 			sc.WithMalformedDiagnostics(diagAllowlist, cfg.BPF.KernelFilter.Enabled)
+			sc.WithRingbufNetpoll(ringbufNetpoll)
 			collectors = append(collectors, sc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("syscall: collector enabled")
 		}
@@ -1742,6 +1775,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					}
 				}))
 			}
+			nc.WithRingbufNetpoll(ringbufNetpoll)
 			collectors = append(collectors, nc.WithBackpressureStrategy(bpStrategy))
 			slog.Info("network: collector enabled")
 		}
@@ -1751,6 +1785,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		} else {
 			fo := cfg.Collectors.FileOps
 			fc.WithFileOps(fo.TrackOpen, fo.TrackRead, fo.TrackWrite)
+			fc.WithRingbufNetpoll(ringbufNetpoll)
 			// 5.9.6a: unconditionally attached now to register the kernel-side
 			// ringbuf_full counter, not only for the sampling/filter/observer
 			// options below.

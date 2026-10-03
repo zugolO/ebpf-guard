@@ -43,7 +43,9 @@ func (fakeRingReader) Close() error                  { return nil }
 // fakeOkOpener hands back a fakeRingReader.
 type fakeOkOpener struct{}
 
-func (fakeOkOpener) NewReader(_ *ebpf.Map) (ringbufReader, error) { return fakeRingReader{}, nil }
+func (fakeOkOpener) NewReader(_ *ebpf.Map, _ bool) (ringbufReader, error) {
+	return fakeRingReader{}, nil
+}
 
 // TestSyscallCollector_Start_HappyPath drives Start through the successful
 // load → attach (all three tracepoints) → open-ringbuf path using injected

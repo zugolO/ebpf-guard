@@ -27,6 +27,8 @@ type FileaccessCollector struct {
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
 
+	ringbufNetpoll bool // wave 8.1 item 6: netpoll wait path instead of blocking epoll_wait
+
 	trackOpen  bool // attach sys_enter_openat hooks
 	trackRead  bool // attach sys_enter_read hooks (high volume)
 	trackWrite bool // attach sys_enter_write hooks (high volume)
@@ -83,6 +85,16 @@ func (c *FileaccessCollector) WithRingBufSize(sizeBytes int) *FileaccessCollecto
 	return c
 }
 
+// WithRingbufNetpoll selects the ring buffer wait path (wave 8.1 item 6):
+// false (default) waits for samples in a blocking epoll_wait inside
+// cilium/ebpf, true parks on the Go runtime netpoller instead. The toggle
+// exists because the measured quantity — sysmon's 2678 wakeups/s — can only be
+// judged by an A/B pair on ONE binary ([[ab-toggle-measures-the-restart]]).
+func (c *FileaccessCollector) WithRingbufNetpoll(enabled bool) *FileaccessCollector {
+	c.ringbufNetpoll = enabled
+	return c
+}
+
 // Name returns the collector identifier.
 func (c *FileaccessCollector) Name() string {
 	return "fileaccess"
@@ -109,7 +121,7 @@ func (c *FileaccessCollector) Start(ctx context.Context, out chan<- types.Event)
 	}
 
 	// Create ring buffer reader
-	reader, err := bpf.NewRingbufReader(c.objs.Events)
+	reader, err := newEventRingReader(c.logger, "fileaccess", c.objs.Events, c.ringbufNetpoll)
 	if err != nil {
 		c.loadError = err
 		c.status.SetUp("fileaccess", false)
@@ -294,14 +306,12 @@ func (c *FileaccessCollector) Close() error {
 
 // loadObjects loads the eBPF objects using bpf2go generated code.
 func (c *FileaccessCollector) loadObjects() error {
-	ringSize := bpf.ComputeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
-	c.logger.Info("fileaccess collector ring buffer size", slog.Int("bytes", ringSize))
 	c.objs = &bpf.FileaccessObjects{}
 	opts := &ebpf.CollectionOptions{}
-	_ = ringSize // applied to spec.Maps["events"].MaxEntries in the real bpf2go loader
 	if err := bpf.LoadFileaccessObjects(c.objs, opts); err != nil {
 		return err
 	}
+	logLoadedRing(c.logger, "fileaccess", c.objs.Events, c.ringBufSize)
 	return nil
 }
 

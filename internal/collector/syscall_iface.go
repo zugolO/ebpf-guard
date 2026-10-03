@@ -1,6 +1,8 @@
 package collector
 
 import (
+	"log/slog"
+
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -20,9 +22,10 @@ type ringbufReader interface {
 	Close() error
 }
 
-// ringbufOpener abstracts creating a ringbufReader from an eBPF map.
+// ringbufOpener abstracts creating a ringbufReader from an eBPF map. netpoll
+// carries the wave 8.1 item 6 toggle down to the production implementation.
 type ringbufOpener interface {
-	NewReader(rb *ebpf.Map) (ringbufReader, error)
+	NewReader(rb *ebpf.Map, netpoll bool) (ringbufReader, error)
 }
 
 // linkAttacher abstracts attaching eBPF programs to kernel tracepoints.
@@ -39,11 +42,18 @@ func (defaultSyscallLoader) Load(objs *bpfpkg.SyscallObjects, opts *ebpf.Collect
 	return bpfpkg.LoadSyscallObjects(objs, opts)
 }
 
-// defaultRingbufOpener wraps bpf.NewRingbufReader.
-type defaultRingbufOpener struct{}
+// defaultRingbufOpener wraps newEventRingReader, which applies the netpoll
+// toggle and publishes the mode the reader actually got.
+type defaultRingbufOpener struct {
+	logger *slog.Logger
+}
 
-func (defaultRingbufOpener) NewReader(rb *ebpf.Map) (ringbufReader, error) {
-	return bpfpkg.NewRingbufReader(rb)
+func (o defaultRingbufOpener) NewReader(rb *ebpf.Map, netpoll bool) (ringbufReader, error) {
+	logger := o.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return newEventRingReader(logger, "syscall", rb, netpoll)
 }
 
 // defaultLinkAttacher calls the real link.Tracepoint.

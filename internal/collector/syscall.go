@@ -30,6 +30,8 @@ type SyscallCollector struct {
 	status      StatusReporter
 	strategy    BackpressureStrategy
 	ringBufSize int // 0 = auto-detect
+
+	ringbufNetpoll bool // wave 8.1 item 6: netpoll wait path instead of blocking epoll_wait
 	// injectable dependencies — set to production defaults in NewSyscallCollector.
 	loader   syscallLoader
 	opener   ringbufOpener
@@ -47,13 +49,14 @@ type SyscallCollector struct {
 
 // NewSyscallCollector creates a new syscall event collector.
 func NewSyscallCollector(logger *slog.Logger) (*SyscallCollector, error) {
+	log := logger.With("collector", "syscall")
 	return &SyscallCollector{
-		logger:     logger.With("collector", "syscall"),
+		logger:     log,
 		dropLogger: newDropLogger(5 * time.Second),
 		status:     NoopStatusReporter{},
 		strategy:   StrategyDrop,
 		loader:     defaultSyscallLoader{},
-		opener:     defaultRingbufOpener{},
+		opener:     defaultRingbufOpener{logger: log},
 		attacher:   defaultLinkAttacher{},
 		malformedLoggers: map[string]*malformedLogger{
 			"type_mismatch":    newMalformedLogger(5 * time.Second),
@@ -99,6 +102,16 @@ func (c *SyscallCollector) WithRingBufSize(sizeBytes int) *SyscallCollector {
 	return c
 }
 
+// WithRingbufNetpoll selects the ring buffer wait path (wave 8.1 item 6):
+// false (default) waits for samples in a blocking epoll_wait inside
+// cilium/ebpf, true parks on the Go runtime netpoller instead. The toggle
+// exists because the measured quantity — sysmon's 2678 wakeups/s — can only be
+// judged by an A/B pair on ONE binary ([[ab-toggle-measures-the-restart]]).
+func (c *SyscallCollector) WithRingbufNetpoll(enabled bool) *SyscallCollector {
+	c.ringbufNetpoll = enabled
+	return c
+}
+
 // Name returns the collector identifier.
 func (c *SyscallCollector) Name() string {
 	return "syscall"
@@ -125,7 +138,7 @@ func (c *SyscallCollector) Start(ctx context.Context, out chan<- types.Event) er
 	}
 
 	// Create ring buffer reader
-	reader, err := c.opener.NewReader(c.objs.Events)
+	reader, err := c.opener.NewReader(c.objs.Events, c.ringbufNetpoll)
 	if err != nil {
 		c.loadError = err
 		c.status.SetUp("syscall", false)
@@ -239,8 +252,6 @@ func (c *SyscallCollector) Close() error {
 // The ring buffer map ("events") is resized to the configured or auto-detected
 // size before loading so kernel memory usage scales with available RAM.
 func (c *SyscallCollector) loadObjects() error {
-	ringSize := bpf.ComputeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
-	c.logger.Info("syscall collector ring buffer size", slog.Int("bytes", ringSize))
 	c.objs = &bpf.SyscallObjects{}
 	// Pass the computed size via CollectionOptions.Maps so the bpf2go-generated
 	// loader can apply it when resizing the ring buffer map spec before pinning.
@@ -249,10 +260,10 @@ func (c *SyscallCollector) loadObjects() error {
 			PinPath: "", // no pinning; size is communicated via MapReplacements in full impl
 		},
 	}
-	_ = ringSize // applied to spec.Maps["events"].MaxEntries in the real bpf2go loader
 	if err := c.loader.Load(c.objs, opts); err != nil {
 		return err
 	}
+	logLoadedRing(c.logger, "syscall", c.objs.Events, c.ringBufSize)
 	return nil
 }
 

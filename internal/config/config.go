@@ -738,6 +738,16 @@ type BPFConfig struct {
 	// Non-multiples of the page size (4096) are rounded up automatically.
 	RingBufSize int `mapstructure:"ring_buf_size"`
 
+	// RingbufNetpoll selects how the syscall/fileaccess/network ring buffer
+	// readers wait for samples (wave 8.1 item 6). false (default) keeps
+	// cilium/ebpf's blocking epoll_wait; true parks the reading goroutine on
+	// the Go runtime netpoller instead, which stops those waits from resetting
+	// sysmon's sleep ramp to 20 us (2678 nanosleep/s, 16,8% of agent CPU,
+	// measured on the stand 03.10.2026). Off by default: the gain is a measured
+	// one or none at all, and this toggle is the switch of that A/B pair.
+	// Overridable at startup with EBPF_GUARD_RINGBUF_NETPOLL.
+	RingbufNetpoll bool `mapstructure:"ringbuf_netpoll"`
+
 	// KernelFilter configures BPF-side content-based event filtering.
 	// When enabled, events are dropped in the kernel before reaching the ring
 	// buffer, reducing userspace CPU overhead by 40-60% on typical workloads.
@@ -2116,6 +2126,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.connections", 32768)
 	v.SetDefault("bpf.map_sizes.fd_map_size", 65536)
 	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
+	v.SetDefault("bpf.ringbuf_netpoll", false)
 	// Event channel depth. Set explicitly so lowering correlator.buffer_size
 	// (the per-PID forensic ring buffer) never shrinks the ingest channel, which
 	// would increase drops under burst.

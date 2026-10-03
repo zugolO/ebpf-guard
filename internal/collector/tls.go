@@ -466,7 +466,7 @@ func (c *TLSCollector) loadObjects() error {
 	if c.loadObjectsFn != nil {
 		return c.loadObjectsFn()
 	}
-	ringSize := bpf.ComputeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
+	ringSize := bpf.ComputeUprobeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
 	c.logger.Info("TLS collector ring buffer size", slog.Int("bytes", ringSize))
 
 	spec, err := bpf.LoadTlsUprobe()

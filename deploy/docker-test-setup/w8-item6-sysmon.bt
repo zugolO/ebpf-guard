@@ -1,0 +1,44 @@
+#!/usr/bin/env bpftrace
+/*
+ * Wave 8.1 item 6 — the agent's nanosleep(2) rate and who makes the calls.
+ *
+ * Measured with this probe on 03.10.2026 (binary 32f1a6a3cac2, 60 s):
+ * 160 652 calls = 2678/s, of which 150 759 (94%) came from one thread,
+ * runtime.usleep <- runtime.sysmon <- mstart, costing 16,8% of the agent's CPU.
+ * That is Go's scheduler monitor ramping its sleep back to 20 us every time a
+ * blocking syscall is entered while it sleeps — see internal/bpf/ringbuf_netpoll.go.
+ *
+ * The verdict of the item 6 A/B is the RATE, not the stack: with the ring
+ * buffer readers off blocking epoll_wait, sysmon should reach its 10 ms deep
+ * sleep and the rate should fall by an order of magnitude. Run this probe for
+ * the same 60 s in both windows of the pair, on ONE binary, flipping only
+ * EBPF_GUARD_RINGBUF_NETPOLL ([[ab-toggle-measures-the-restart]]), and read
+ * ebpf_guard_ringbuf_wait_mode plus ebpf_guard_ringbuf_netpoll_parks_total in
+ * each window — a rate that did not move has two causes, and the metrics are
+ * what tell "the fix is wrong" from "the fix never ran".
+ *
+ * Kept deliberately small: bpftrace 0.14 on the stand rejects long predicates
+ * and BEGIN blocks ([[bpftrace-014-rejects-long-predicate-and-begin]]), and
+ * maps print themselves on exit.
+ *
+ *   bpftrace w8-item6-sysmon.bt > /root/w8-ab/item6-<window>.txt 2>&1
+ */
+
+tracepoint:syscalls:sys_enter_nanosleep
+/comm == "ebpf-guard"/
+{
+	@calls = count();
+	@by_tid[tid] = count();
+	@by_stack[ustack(perf, 4)] = count();
+}
+
+tracepoint:syscalls:sys_enter_clock_nanosleep
+/comm == "ebpf-guard"/
+{
+	@clock_calls = count();
+}
+
+interval:s:60
+{
+	exit();
+}

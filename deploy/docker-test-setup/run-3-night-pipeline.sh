@@ -85,9 +85,9 @@ got_nr=$(journalctl -u "$SERVICE" --since "$(date -d "$(cat "$START_FILE")" '+%F
 say "агент поднят: pid $pid, sha ${sha_file:0:16}, monitored_syscalls=$got_nr (объявлено $EXPECT_NR)"
 
 # ── [3] ночь ───────────────────────────────────────────────────────────────
-say "idle: ${IDLE_SECS} с, срез 300 с, heap каждый час, стор stat'ом"
+say "idle: ${IDLE_SECS} с, срез 300 с, heap и CPU-профиль каждый час, стор stat'ом"
 ( cd "$SETUP" && OUT_DIR="$ART/idle" DURATION="$IDLE_SECS" INTERVAL=300 NO_RESTART=1 \
-    HEAP_EVERY=12 STORE_DB="$DB" SERVICE="$SERVICE" bash ./idle-run.sh ) > "$ART/idle-run.out" 2>&1
+    HEAP_EVERY=12 CPU_PROFILE_EVERY=12 STORE_DB="$DB" SERVICE="$SERVICE" bash ./idle-run.sh ) > "$ART/idle-run.out" 2>&1
 say "idle закончен (rc=$?)"
 pid_now=$(systemctl show -p MainPID --value "$SERVICE")
 [ "$pid_now" = "$pid" ] || say "ВНИМАНИЕ: MainPID сменился за ночь ($pid → $pid_now) — 3.ATTACK/3.MEM это назовут"

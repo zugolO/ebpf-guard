@@ -32,6 +32,15 @@ bpf:
   max_concurrent_events: 1024
   overflow_policy: drop
 
+  # Ring buffer wait path for the syscall/fileaccess/network readers
+  # (wave 8.1 item 6). false = cilium/ebpf's blocking epoll_wait; true parks
+  # the reading goroutine on the Go runtime netpoller, which stops those waits
+  # from resetting the Go scheduler monitor's sleep to 20 us (measured on the
+  # stand: 2678 nanosleep/s, 16,8% of agent CPU, with the stream idle).
+  # Left off until an A/B pair on one binary says what it buys; override at
+  # startup with EBPF_GUARD_RINGBUF_NETPOLL=1.
+  ringbuf_netpoll: false
+
   # BPF-side sampling rates (1 in N events captured).
   # file_rate=1 ensures every file open/read/write is visible to the rule engine
   # during integration testing. On high-throughput production nodes raise file_rate

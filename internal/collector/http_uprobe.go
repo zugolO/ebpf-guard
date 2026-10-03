@@ -412,7 +412,7 @@ func (c *HTTPCollector) Close() error {
 // buffer size is applied to the spec BEFORE loading, because max_entries is
 // fixed at map-creation time.
 func (c *HTTPCollector) loadObjects() error {
-	ringSize := bpf.ComputeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
+	ringSize := bpf.ComputeUprobeRingBufSize(bpf.RingBufSizeConfig{SizeBytes: c.ringBufSize})
 	c.logger.Info("HTTP plaintext collector ring buffer size", slog.Int("bytes", ringSize))
 
 	spec, err := bpf.LoadHttpUprobe()

@@ -6,6 +6,7 @@ package bpf
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -413,29 +414,122 @@ type TlsClientHelloRawEvent struct {
 
 // RingbufReader wraps ringbuf.Reader for type-safe event reading.
 type RingbufReader struct {
-	reader *ringbuf.Reader
+	reader ringbufCore
+
+	// wait is non-nil only on the netpoll path (wave 8.1 item 6); see
+	// ringbuf_netpoll.go. nil means the plain blocking ringbuf.Reader, which is
+	// the default and the control branch of the A/B.
+	wait ringWaiter
+	name string
+	// onWait/onFallback report to /metrics. They are injected rather than
+	// called directly because internal/bpf must not import internal/exporter:
+	// exporter imports correlator, and correlator's in-package tests import
+	// internal/bpf, which would close an import cycle in that test binary.
+	onWait     func()
+	onFallback func(reason, detail string)
+
+	// ReadInto/Read are called from one goroutine per reader (the collector's
+	// readLoop), so the downgrade below needs no lock — same contract
+	// ringbuf.Reader's own buffer reuse already relies on.
+	fellBack bool
 }
 
-// NewRingbufReader creates a new ring buffer reader from an eBPF map.
+// RingbufReaderOptions configures a reader. The zero value is the blocking
+// reader this package has always returned.
+type RingbufReaderOptions struct {
+	// Name is the collector label used in logs and metrics.
+	Name string
+	// Netpoll asks for the netpoll wait path (wave 8.1 item 6). A platform or
+	// an fd that cannot support it is NOT an error: the reader downgrades to
+	// the blocking path and says so through OnFallback.
+	Netpoll bool
+	// OnWait is called once per park on the netpoll path.
+	OnWait func()
+	// OnFallback is called once if the netpoll path is refused or abandoned,
+	// with one of RingbufFallback* as reason and the full error text as detail.
+	OnFallback func(reason, detail string)
+}
+
+// NewRingbufReader creates a new ring buffer reader from an eBPF map, waiting
+// for samples in a blocking epoll_wait inside cilium/ebpf.
 func NewRingbufReader(events *ebpf.Map) (*RingbufReader, error) {
+	return NewRingbufReaderWithOptions(events, RingbufReaderOptions{})
+}
+
+// NewRingbufReaderWithOptions creates a reader and, if asked, puts its wait on
+// the Go runtime netpoller instead of a blocking syscall.
+func NewRingbufReaderWithOptions(events *ebpf.Map, opts RingbufReaderOptions) (*RingbufReader, error) {
 	reader, err := ringbuf.NewReader(events)
 	if err != nil {
 		return nil, err
 	}
-	return &RingbufReader{reader: reader}, nil
+
+	return newRingbufReader(reader, events.FD(), opts, newRingWaiter), nil
 }
 
-// Close closes the ring buffer reader.
-func (r *RingbufReader) Close() error {
-	if r.reader != nil {
-		return r.reader.Close()
+// newRingbufReader assembles a reader around an already-open ring. The waiter
+// factory is a parameter so the park loop and its downgrade can be tested
+// without a kernel: nothing on a developer machine can produce a real
+// ringbuf.Reader, and this loop is the one piece of the event path the fix
+// moves ([[self-test-fixtures-miss-live-log-shape]] — a fixture elsewhere
+// proves nothing about it).
+func newRingbufReader(core ringbufCore, fd int, opts RingbufReaderOptions, newWaiter func(int) (ringWaiter, error)) *RingbufReader {
+	r := &RingbufReader{
+		reader:     core,
+		name:       opts.Name,
+		onWait:     opts.OnWait,
+		onFallback: opts.OnFallback,
 	}
-	return nil
+	if !opts.Netpoll {
+		return r
+	}
+
+	waiter, werr := newWaiter(fd)
+	if werr != nil {
+		// Not fatal: the stream matters more than the optimisation.
+		r.reportFallback(RingbufFallbackUnsupported, werr.Error())
+		return r
+	}
+	r.wait = waiter
+	r.reader.SetDeadline(ringNoBlockDeadline)
+	return r
+}
+
+// Mode reports which wait path this reader actually runs, so a reading of the
+// toggle comes from the runtime and not from the config file
+// ([[entry-guard-must-read-runtime-not-config]]).
+func (r *RingbufReader) Mode() string {
+	if r.wait != nil {
+		return RingbufWaitModeNetpoll
+	}
+	return RingbufWaitModeBlocking
+}
+
+// Close closes the ring buffer reader. On the netpoll path it also closes the
+// poller file, which is what interrupts a parked ReadInto — closing only the
+// cilium reader would leave the collector's readLoop parked forever.
+func (r *RingbufReader) Close() error {
+	var waitErr error
+	if r.wait != nil {
+		waitErr = r.wait.Close()
+	}
+	var readErr error
+	if r.reader != nil {
+		readErr = r.reader.Close()
+	}
+	if readErr != nil {
+		return readErr
+	}
+	return waitErr
 }
 
 // Read reads the next event from the ring buffer.
 func (r *RingbufReader) Read() (ringbuf.Record, error) {
-	return r.reader.Read()
+	if r.wait == nil {
+		return r.reader.Read()
+	}
+	var rec ringbuf.Record
+	return rec, r.ReadInto(&rec)
 }
 
 // ReadInto reads the next event into rec, reusing rec's RawSample buffer
@@ -443,8 +537,58 @@ func (r *RingbufReader) Read() (ringbuf.Record, error) {
 // per ring-buffer record; at ~1300 events/s that was 2.5% of allocated bytes.
 // The caller must finish with rec.RawSample — parse it, copying everything that
 // outlives the call — before the next ReadInto overwrites it.
+//
+// On the netpoll path the reader holds a deadline in the past, so the inner
+// ReadInto drains the mmap'd ring and then reports os.ErrDeadlineExceeded
+// instead of blocking; that is the signal to park on the poller (wave 8.1
+// item 6). os.ErrDeadlineExceeded is therefore never returned to the caller
+// from this path.
 func (r *RingbufReader) ReadInto(rec *ringbuf.Record) error {
-	return r.reader.ReadInto(rec)
+	if r.wait == nil {
+		return r.reader.ReadInto(rec)
+	}
+
+	for {
+		err := r.reader.ReadInto(rec)
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			return err
+		}
+
+		if werr := r.wait.Wait(); werr != nil {
+			if errors.Is(werr, os.ErrClosed) {
+				return werr
+			}
+			// Unsupported fd, or any other wait failure: give the stream back
+			// to the blocking path for the rest of the process's life.
+			r.downgrade(werr.Error())
+			return r.reader.ReadInto(rec)
+		}
+		if r.onWait != nil {
+			r.onWait()
+		}
+	}
+}
+
+// downgrade abandons the netpoll path permanently and restores the blocking
+// reader (deadline cleared, poller file closed).
+func (r *RingbufReader) downgrade(reason string) {
+	if r.wait == nil {
+		return
+	}
+	_ = r.wait.Close()
+	r.wait = nil
+	r.reader.SetDeadline(time.Time{})
+	r.reportFallback(RingbufFallbackWaitError, reason)
+}
+
+func (r *RingbufReader) reportFallback(reason, detail string) {
+	if r.fellBack {
+		return
+	}
+	r.fellBack = true
+	if r.onFallback != nil {
+		r.onFallback(reason, detail)
+	}
 }
 
 // -----------------------------------------------------------------------

@@ -48,13 +48,13 @@ func TestWave8_1_EventFieldStringsMaterialisedOncePerEvent(t *testing.T) {
 	allocsFew := testing.AllocsPerRun(200, func() {
 		c := &eventFieldCache{}
 		for i := 0; i < 4; i++ {
-			_ = re.getFieldValueCached(e, "comm", nil, c)
+			_ = re.getFieldValueCached(&e, "comm", nil, c)
 		}
 	})
 	allocsMany := testing.AllocsPerRun(200, func() {
 		c := &eventFieldCache{}
 		for i := 0; i < 40; i++ {
-			_ = re.getFieldValueCached(e, "comm", nil, c)
+			_ = re.getFieldValueCached(&e, "comm", nil, c)
 		}
 	})
 
@@ -118,17 +118,17 @@ func TestWave8_1_EventFieldCacheMatchesUncached(t *testing.T) {
 
 	for _, f := range syscallFields {
 		c := &eventFieldCache{}
-		require.Equal(t, re.getFieldValue(syscall, f, nil), re.getFieldValueCached(syscall, f, nil, c), "syscall field %q", f)
+		require.Equal(t, re.getFieldValue(&syscall, f, nil), re.getFieldValueCached(&syscall, f, nil, c), "syscall field %q", f)
 	}
 	for _, f := range fileFields {
 		c := &eventFieldCache{}
-		require.Equal(t, re.getFieldValue(file, f, nil), re.getFieldValueCached(file, f, nil, c), "file field %q", f)
+		require.Equal(t, re.getFieldValue(&file, f, nil), re.getFieldValueCached(&file, f, nil, c), "file field %q", f)
 	}
 
 	// The derived fields share the same cached filename, so they must still be
 	// self-consistent when read from one cache.
 	c := &eventFieldCache{}
-	assert.Equal(t, "/usr/local/bin", re.getFieldValueCached(file, "directory", nil, c))
-	assert.Equal(t, ".sh", re.getFieldValueCached(file, "extension", nil, c))
-	assert.Equal(t, "/usr/local/bin/evil.sh", re.getFieldValueCached(file, "filename", nil, c))
+	assert.Equal(t, "/usr/local/bin", re.getFieldValueCached(&file, "directory", nil, c))
+	assert.Equal(t, ".sh", re.getFieldValueCached(&file, "extension", nil, c))
+	assert.Equal(t, "/usr/local/bin/evil.sh", re.getFieldValueCached(&file, "filename", nil, c))
 }

@@ -31,7 +31,7 @@ func TestConnRate_RecordedOncePerEventNotPerRule(t *testing.T) {
 		Timestamp: uint64(now.UnixNano()),
 		Network:   &types.NetworkEvent{Dport: 443},
 	}
-	globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(e)) // as the engine does, once
+	globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(&e)) // as the engine does, once
 	engine.Evaluate(e)
 
 	if got := globalConnFrequency.Rate(42, 443, now); got != 1 {
@@ -47,7 +47,7 @@ func TestConnRate_ZeroTimestampFallsBackToNow(t *testing.T) {
 	tr := NewConnFrequencyTracker()
 	e := types.Event{Type: types.EventTCPConnect, PID: 9, Timestamp: 0, Network: &types.NetworkEvent{Dport: 22}}
 	for i := 0; i < 40; i++ {
-		tr.Record(e.PID, e.Network.Dport, eventTime(e))
+		tr.Record(e.PID, e.Network.Dport, eventTime(&e))
 	}
 	if got := tr.Rate(9, 22, time.Now()); got != 40 {
 		t.Fatalf("rate with zero timestamps = %d, want 40", got)
@@ -162,7 +162,7 @@ func TestNetHighFrequencyConnectionsRule(t *testing.T) {
 		// The engine records each connection exactly once per event before rule
 		// evaluation (see ingestWithAD); Evaluate itself only reads the rate, so
 		// the count can't depend on how many rules reference conn_rate_1m.
-		globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(e))
+		globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(&e))
 		lastAlerts = engine.Evaluate(e)
 	}
 

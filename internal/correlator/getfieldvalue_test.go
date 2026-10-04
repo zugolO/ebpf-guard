@@ -108,7 +108,7 @@ func TestGetFieldValue(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := re.getFieldValue(tc.event, tc.field, nil)
+			got := re.getFieldValue(&tc.event, tc.field, nil)
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -136,17 +136,17 @@ func TestMatchesCaps(t *testing.T) {
 		OldCaps: 0,
 		NewCaps: 1 << 21,
 	}}
-	assert.True(t, re.matchesCaps(gained, []string{"CAP_SYS_ADMIN"}, true))
-	assert.False(t, re.matchesCaps(gained, []string{"CAP_SYS_ADMIN"}, false))
-	assert.False(t, re.matchesCaps(gained, []string{"CAP_NET_RAW"}, true))
+	assert.True(t, re.matchesCaps(&gained, []string{"CAP_SYS_ADMIN"}, true))
+	assert.False(t, re.matchesCaps(&gained, []string{"CAP_SYS_ADMIN"}, false))
+	assert.False(t, re.matchesCaps(&gained, []string{"CAP_NET_RAW"}, true))
 
 	// Dropped CAP_NET_RAW (bit 13).
 	dropped := types.Event{Type: types.EventPrivesc, Privesc: &types.PrivescEvent{
 		OldCaps: 1 << 13,
 		NewCaps: 0,
 	}}
-	assert.True(t, re.matchesCaps(dropped, []string{"CAP_NET_RAW"}, false))
+	assert.True(t, re.matchesCaps(&dropped, []string{"CAP_NET_RAW"}, false))
 
 	// No privesc payload → never matches.
-	assert.False(t, re.matchesCaps(types.Event{Type: types.EventPrivesc}, []string{"CAP_SYS_ADMIN"}, true))
+	assert.False(t, re.matchesCaps(&types.Event{Type: types.EventPrivesc}, []string{"CAP_SYS_ADMIN"}, true))
 }

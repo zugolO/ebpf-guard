@@ -1982,8 +1982,8 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	// conn_rate_1m — inflating the rate and making the threshold depend on the
 	// ruleset rather than on traffic. getFieldValue now only reads the count.
 	if e.Type == types.EventTCPConnect && e.Network != nil {
-		globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(e))
-		globalBeaconInterval.Record(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(e))
+		globalConnFrequency.Record(e.PID, e.Network.Dport, eventTime(&e))
+		globalBeaconInterval.Record(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(&e))
 	}
 
 	// Add event to per-process buffer. Gated: the buffer has no production

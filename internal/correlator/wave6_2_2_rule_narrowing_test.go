@@ -45,7 +45,7 @@ func TestWave6_2_2_BeaconFixedInterval_RequiresPeriodicity(t *testing.T) {
 		}
 		copy(e.Comm[:], comm)
 		copy(e.Network.Daddr[:], net.ParseIP(daddr).To4())
-		globalBeaconInterval.Record(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(e))
+		globalBeaconInterval.Record(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(&e))
 		return e
 	}
 

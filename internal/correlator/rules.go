@@ -497,7 +497,7 @@ func (re *RuleEngine) SetChainGroupResolver(fn func(pid uint32) (uint64, bool)) 
 // chain is unknown for this PID: an unknown chain must isolate the process, not
 // merge every unresolved PID into one shared bucket — that would let unrelated
 // processes push each other over the threshold.
-func (re *RuleEngine) burstGroup(rule *Rule, e types.Event) uint64 {
+func (re *RuleEngine) burstGroup(rule *Rule, e *types.Event) uint64 {
 	if rule.Threshold != nil && rule.Threshold.GroupBy == ThresholdGroupChain && re.chainGroupFn != nil {
 		if group, ok := re.chainGroupFn(e.PID); ok {
 			return group
@@ -733,9 +733,9 @@ func (re *RuleEngine) EvaluateNamedExceptions(ruleID string, e types.Event) bool
 		exc := &rule.Exceptions[i]
 		var excMatched bool
 		if exc.ConditionGroup != nil {
-			excMatched = re.evaluateConditionGroup(e, exc.ConditionGroup, dnsAnalysis, cache)
+			excMatched = re.evaluateConditionGroup(&e, exc.ConditionGroup, dnsAnalysis, cache)
 		} else {
-			excMatched = re.evaluateCondition(e, &exc.Condition, dnsAnalysis, cache)
+			excMatched = re.evaluateCondition(&e, &exc.Condition, dnsAnalysis, cache)
 		}
 		if excMatched {
 			ruleExceptionsTotal.WithLabelValues(rule.ID, exc.Name).Inc()
@@ -930,7 +930,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 	cache := &eventFieldCache{}
 	for i := range rules {
 		rule := &rules[i] // pointer avoids copying the ~300-byte Rule struct
-		if !re.matchesTypedCached(e, rule, cache) {
+		if !re.matchesTypedCached(&e, rule, cache) {
 			continue
 		}
 		// The rule itself did not read Comm, but the alert needs it; the cache
@@ -945,7 +945,7 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			Severity:           rule.Severity,
 			Message:            rule.Description,
 			PID:                e.PID,
-			Comm:               eventComm(e, cache),
+			Comm:               eventComm(&e, cache),
 			Event:              e,
 			Action:             string(rule.Action),
 			Class:              string(rule.Class),
@@ -975,7 +975,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 	cache := &eventFieldCache{}
 	for i := range rules {
 		rule := &rules[i]
-		if !re.matchesTypedCached(e, rule, cache) {
+		if !re.matchesTypedCached(&e, rule, cache) {
 			continue
 		}
 		if rule.Action == ActionDrop {
@@ -992,7 +992,7 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 			Severity:           rule.Severity,
 			Message:            rule.Description,
 			PID:                e.PID,
-			Comm:               eventComm(e, cache),
+			Comm:               eventComm(&e, cache),
 			Event:              e,
 			Action:             string(rule.Action),
 			Class:              string(rule.Class),
@@ -1137,7 +1137,7 @@ func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
 	if e.Type != rule.EventType {
 		return false
 	}
-	return re.matchesTyped(e, &rule)
+	return re.matchesTyped(&e, &rule)
 }
 
 // matchesTyped checks if an event matches a rule, assuming e.Type == rule.EventType.
@@ -1148,12 +1148,12 @@ func (re *RuleEngine) matches(e types.Event, rule Rule) bool {
 // against the whole rule set must use matchesTypedCached with a single shared
 // cache instead: otherwise a field is re-materialised once per rule (wave 8.1
 // item 3). This wrapper remains for callers that check a single rule.
-func (re *RuleEngine) matchesTyped(e types.Event, rule *Rule) bool {
+func (re *RuleEngine) matchesTyped(e *types.Event, rule *Rule) bool {
 	return re.matchesTypedCached(e, rule, &eventFieldCache{})
 }
 
 // matchesTypedCached is matchesTyped with a caller-owned per-event string cache.
-func (re *RuleEngine) matchesTypedCached(e types.Event, rule *Rule, cache *eventFieldCache) bool {
+func (re *RuleEngine) matchesTypedCached(e *types.Event, rule *Rule, cache *eventFieldCache) bool {
 	// Per-rule sampling gate.
 	// Fast path: rule.skipSampler (precomputed at load time) is true when no
 	// static rate is configured, and entryCount is 0 when no adaptive override
@@ -1227,7 +1227,7 @@ func (re *RuleEngine) matchesTypedCached(e types.Event, rule *Rule, cache *event
 // other event types and passed through to evaluateCondition / getFieldValue to avoid calling
 // AnalyzeDomain multiple times for the same QName in different enriched DNS fields.
 // cache is the per-event string cache threaded down to getFieldValueCached.
-func (re *RuleEngine) evaluateConditionGroup(e types.Event, group *RuleConditionGroup, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) bool {
+func (re *RuleEngine) evaluateConditionGroup(e *types.Event, group *RuleConditionGroup, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) bool {
 	if len(group.Conditions) == 0 && len(group.SubGroups) == 0 {
 		return true
 	}
@@ -1272,7 +1272,7 @@ const fieldNotFound = "\x00__field_not_found__"
 // dnsAnalysis is precomputed by matchesTyped for DNS events — nil for other types.
 // cache is the per-event string cache used to avoid re-materialising Comm /
 // ParentComm / Filename once per condition (wave 8.1 item 3).
-func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) bool {
+func (re *RuleEngine) evaluateCondition(e *types.Event, cond *RuleCondition, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) bool {
 	// caps_gained / caps_dropped operate directly on the Privesc struct —
 	// they don't go through getFieldValue.
 	switch cond.opCode {
@@ -1380,7 +1380,7 @@ func (re *RuleEngine) evaluateCondition(e types.Event, cond *RuleCondition, dnsA
 // matchesCaps evaluates caps_gained (gained=true) or caps_dropped (gained=false).
 // cond.Values contains capability names like ["CAP_SYS_ADMIN", "CAP_NET_RAW"].
 // Returns true if ANY of the listed caps appear in the relevant delta mask.
-func (re *RuleEngine) matchesCaps(e types.Event, capNames []string, gained bool) bool {
+func (re *RuleEngine) matchesCaps(e *types.Event, capNames []string, gained bool) bool {
 	if e.Privesc == nil {
 		return false
 	}
@@ -1522,7 +1522,7 @@ type eventFieldCache struct {
 }
 
 // eventComm returns e.Comm as a string, materialising it at most once per event.
-func eventComm(e types.Event, c *eventFieldCache) string {
+func eventComm(e *types.Event, c *eventFieldCache) string {
 	if c == nil {
 		return util.BytesToString(e.Comm[:])
 	}
@@ -1534,7 +1534,7 @@ func eventComm(e types.Event, c *eventFieldCache) string {
 }
 
 // eventParentComm returns e.ParentComm as a string, at most once per event.
-func eventParentComm(e types.Event, c *eventFieldCache) string {
+func eventParentComm(e *types.Event, c *eventFieldCache) string {
 	if c == nil {
 		return util.BytesToString(e.ParentComm[:])
 	}
@@ -1546,7 +1546,7 @@ func eventParentComm(e types.Event, c *eventFieldCache) string {
 }
 
 // eventFilename returns e.File.Filename as a string, at most once per event.
-func eventFilename(e types.Event, c *eventFieldCache) string {
+func eventFilename(e *types.Event, c *eventFieldCache) string {
 	if e.File == nil {
 		return ""
 	}
@@ -1563,14 +1563,14 @@ func eventFilename(e types.Event, c *eventFieldCache) string {
 // getFieldValue extracts a field value from an event based on field name.
 // It is the uncached entry point used by tests and one-off callers; the per-rule
 // hot path goes through getFieldValueCached with a shared eventFieldCache.
-func (re *RuleEngine) getFieldValue(e types.Event, field string, dnsAnalysis *DomainAnalysis) string {
+func (re *RuleEngine) getFieldValue(e *types.Event, field string, dnsAnalysis *DomainAnalysis) string {
 	return re.getFieldValueCached(e, field, dnsAnalysis, nil)
 }
 
 // getFieldValueCached is getFieldValue with a per-event string cache. A nil
 // cache degrades to the uncached path. Returns fieldNotFound if the field name
 // is not valid for the event type.
-func (re *RuleEngine) getFieldValueCached(e types.Event, field string, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) string {
+func (re *RuleEngine) getFieldValueCached(e *types.Event, field string, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) string {
 	// Normalise dotted-name aliases (file.path → filename, proc.comm → comm, etc.)
 	// to the canonical field names expected by the rest of getFieldValue.
 	field = normaliseFieldName(field)

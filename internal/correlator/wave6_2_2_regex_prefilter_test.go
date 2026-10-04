@@ -123,7 +123,7 @@ func TestWave6_2_2_RegexPrefilterAttribution(t *testing.T) {
 		const reps = 50
 		for r := 0; r < reps; r++ {
 			for j := range events {
-				engine.matchesTyped(events[j], &engine.rules[0])
+				engine.matchesTyped(&events[j], &engine.rules[0])
 			}
 		}
 		ns := time.Since(start).Nanoseconds() / int64(reps*len(events))
@@ -144,6 +144,116 @@ func TestWave6_2_2_RegexPrefilterAttribution(t *testing.T) {
 
 	assert.Lessf(t, total, int64(200_000),
 		"total per-event cost of all file rules regressed sharply (was ~5 µs after the wave 6.2.2 prefilter, ~49 µs before)")
+}
+
+// TestWave8_1_RegexRuleAttribution answers item 15 (б) of wave 8.1 offline:
+// which `op: regex` conditions the regexp-engine CPU actually belongs to.
+// pprof groups samples by engine function (`regexp.tryBacktrack`), not by rule,
+// so the split has to be measured per rule. It reuses the idle-node file-event
+// mix of the 6.2.2 attribution — the same mix the night profile is dominated
+// by — and times the engine's own regex entry point (matchesRegex, i.e. the
+// required-literal prefilter plus the compiled pattern) on the field value each
+// event produces. The result is ns/event per rule and per pattern, plus how
+// many event×pattern pairs get past the prefilter and actually reach the
+// regexp engine. This is an upper bound on each rule's live share: a condition
+// that sits behind an earlier false `and` term is timed here but never reached
+// in production. No stand is involved.
+func TestWave8_1_RegexRuleAttribution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing measurement; skipped under -short")
+	}
+	rules, err := LoadRulesFromDir("../../rules")
+	require.NoError(t, err)
+
+	events := idleNodeFileEvents()
+
+	type row struct {
+		id       string
+		regexNs  int64
+		totalNs  int64
+		patterns int
+		reached  int // event×pattern pairs the prefilter let through to MatchString
+	}
+	var rows []row
+	for i := range rules {
+		if rules[i].EventType != types.EventFileAccess {
+			continue
+		}
+		// Single-rule engine, like the 6.2.2 attribution: this is what makes the
+		// conditions carry their compiled regexes and prefilter literals.
+		engine := NewRuleEngine([]Rule{rules[i]})
+		conds := collectRegexConditions(&engine.rules[0])
+		if len(conds) == 0 {
+			continue
+		}
+
+		// Total rule cost over the mix (reachability included).
+		start := time.Now()
+		const reps = 50
+		for r := 0; r < reps; r++ {
+			for j := range events {
+				engine.matchesTyped(&events[j], &engine.rules[0])
+			}
+		}
+		totalNs := time.Since(start).Nanoseconds() / int64(reps*len(events))
+
+		var regexNs int64
+		patterns, reached := 0, 0
+		for _, cond := range conds {
+			values := make([]string, len(events))
+			for j := range events {
+				values[j] = engine.getFieldValue(&events[j], cond.Field, nil)
+			}
+			patterns += len(cond.Values)
+			// Mirror matchesRegex exactly, including its OR early-out: patterns
+			// after the first match are never tried.
+			for _, v := range values {
+				for k, compiled := range cond.regexes {
+					if !containsAny(v, cond.regexLiterals[k]) {
+						continue
+					}
+					reached++
+					if compiled.MatchString(v) {
+						break
+					}
+				}
+			}
+			start := time.Now()
+			const regexReps = 200
+			for r := 0; r < regexReps; r++ {
+				for _, v := range values {
+					_ = engine.matchesRegex(cond, v)
+				}
+			}
+			regexNs += time.Since(start).Nanoseconds() / int64(regexReps*len(events))
+		}
+		rows = append(rows, row{rules[i].ID, regexNs, totalNs, patterns, reached})
+	}
+	require.NotEmpty(t, rows, "the shipped ruleset must contain file rules with regex conditions")
+
+	sort.Slice(rows, func(a, b int) bool { return rows[a].regexNs > rows[b].regexNs })
+
+	var regexTotal int64
+	totalPatterns := 0
+	for _, r := range rows {
+		regexTotal += r.regexNs
+		totalPatterns += r.patterns
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "regex cost attributable to %d file rules (%d patterns) over %d events, %d ns/event in total\n",
+		len(rows), totalPatterns, len(events), regexTotal)
+	for i, r := range rows {
+		if i >= 15 {
+			break
+		}
+		// regexNs is measured on every event and is an upper bound: a condition
+		// behind an earlier false `and` term is timed here but not reached in
+		// production. totalNs is shown for scale only; the two come from
+		// independent timing runs, so no reachability is inferred from them.
+		fmt.Fprintf(&b, "  %6d ns regex  %4.1f%% of regex  %6d ns rule  %d pat  %d prefilter-pass  %s\n",
+			r.regexNs, 100*float64(r.regexNs)/float64(regexTotal), r.totalNs, r.patterns, r.reached, r.id)
+	}
+	t.Log("\n" + b.String())
 }
 
 // BenchmarkWave6_2_2_FileRuleset measures the whole file-rule set against the

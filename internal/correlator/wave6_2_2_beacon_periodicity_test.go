@@ -53,7 +53,7 @@ func TestWave6_2_2_C2PeriodicBeaconPattern(t *testing.T) {
 		// connect to the apiserver port, never repeated within the window.
 		e := w622Beacon("k3s-server", 6443, "10.0.0.1")
 		e.Timestamp = uint64(time.Now().UnixNano())
-		globalBeaconInterval.Record(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(e))
+		globalBeaconInterval.Record(e.PID, e.Network.Daddr, e.Network.Dport, eventTime(&e))
 		assert.Empty(t, engine.Evaluate(e),
 			"a single one-off connection must not be treated as a periodic beacon")
 	})

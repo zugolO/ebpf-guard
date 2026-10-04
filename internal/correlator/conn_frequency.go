@@ -136,7 +136,7 @@ func (c *ConnFrequencyTracker) Cleanup(maxAge time.Duration) int {
 // rate collapse to 1 for every event — silently disabling frequency rules on
 // any path where the timestamp is not populated (synthetic collector, replayed
 // events, tests).
-func eventTime(e types.Event) time.Time {
+func eventTime(e *types.Event) time.Time {
 	if e.Timestamp == 0 {
 		return time.Now()
 	}

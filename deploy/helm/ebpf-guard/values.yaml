@@ -53,7 +53,9 @@ securityContext:
 resources:
   limits:
     cpu: 500m
-    memory: 256Mi
+    # 384Mi: stand peak memory.current under the attack suite was 294-305 MiB
+    # (wave 8.1 stage E), above the former 256Mi.
+    memory: 384Mi
   requests:
     cpu: 100m
     memory: 128Mi

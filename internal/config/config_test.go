@@ -42,8 +42,8 @@ func TestNewManager_Defaults(t *testing.T) {
 	assert.Equal(t, 65536, cfg.BPF.MapSizes.Events)
 	assert.Equal(t, 16384, cfg.BPF.MapSizes.Processes)
 	assert.Equal(t, 32768, cfg.BPF.MapSizes.Connections)
-	// wave 8.1 item 10: two preallocated channels, 65536 slots were ~28 MiB heap.
-	assert.Equal(t, 16384, cfg.BPF.EventQueueDepth)
+	// wave 8.1 item 10: 16384 overflowed under attacks (stage E), stays 65536.
+	assert.Equal(t, 65536, cfg.BPF.EventQueueDepth)
 
 	// Check rules defaults
 	assert.Equal(t, "rules/", cfg.Rules.Path)

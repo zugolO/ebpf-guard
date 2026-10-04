@@ -779,7 +779,7 @@ type BPFConfig struct {
 	// EventQueueDepth is the size of the in-process event channel between
 	// collectors and the correlation engine. When the channel is full, the
 	// OverflowPolicy is applied. Defaults to the correlator.buffer_size when
-	// unset. Default 16384; two channels are allocated, 224 B per slot each.
+	// unset. Default 65536; two channels are allocated, 224 B per slot each.
 	EventQueueDepth int `mapstructure:"event_queue_depth"`
 
 	// OverflowPolicy controls what happens to events when the queue is full.
@@ -2129,12 +2129,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.ringbuf_netpoll", false)
 	// Event channel depth. Set explicitly so lowering correlator.buffer_size
 	// (the per-PID forensic ring buffer) never shrinks the ingest channel, which
-	// would increase drops under burst. Two channels of types.Event (224 B, with
-	// pointers the GC scans) are preallocated: 65536 each was ~28 MiB of live heap
-	// for a measured peak of 62 entries over 8 h (wave 8.1 item 10), so the default
-	// is 16384 (~7 MiB). Raise it via bpf.event_queue_depth if
-	// ebpf_guard_queue_depth_hwm{queue=~"event_.*"} approaches capacity.
-	v.SetDefault("bpf.event_queue_depth", 16384)
+	// would increase drops under burst. Two channels of types.Event (224 B) are
+	// preallocated (~28 MiB at 65536). Wave 8.1 item 10 tried 16384: idle peak is
+	// 1..62 entries, but under the attack suite event_low peaked at 15772/16384
+	// (router_to_queue drops 52290 vs 6315 at 65536, which itself peaks at 53247),
+	// so the default stays 65536.
+	v.SetDefault("bpf.event_queue_depth", 65536)
 	v.SetDefault("bpf.kernel_filter.enabled", true)
 	v.SetDefault("bpf.kernel_filter.disable_default_daemon_denylist", false)
 	v.SetDefault("bpf.kernel_filter.noisy_daemon_denylist", []string{})

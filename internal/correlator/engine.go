@@ -377,7 +377,16 @@ var workerTaskPool = sync.Pool{New: func() any { return new(workerTask) }}
 // isolated AnomalyDetector so ProcessEvent is always called from a single
 // goroutine per instance, satisfying the detector's thread-safety invariant.
 type workerState struct {
-	ch chan *workerTask
+	ch chan *workerTask // bulk (file) events
+	// chHi carries protected events (everything but file access). The worker
+	// drains it first, so a hot pid flooding ch never delays a protected event
+	// queued for the same worker (wave 8.1, №530).
+	chHi chan *workerTask
+	// Wave 8.1 (№529): how often and for how long a dispatcher found this
+	// worker's channel full and had to wait, per class (0 = bulk, 1 = protected).
+	// Read by CounterFuncs.
+	blocked      [2]atomic.Uint64
+	blockedNanos [2]atomic.Uint64
 	ad *profiler.AnomalyDetector // nil when anomaly detection is disabled
 }
 
@@ -962,10 +971,12 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				ce.lineageTracker.Cleanup(now)
 				ce.traceCtxCache.cleanup(now)
 				// Evict (pid, dport) keys with no connections in the last
-				// 10 minutes. Each live key holds a fixed 1024-entry ring
-				// buffer, so without this short-lived PIDs leak ~24 KB each
-				// for the lifetime of the process.
-				globalConnFrequency.Cleanup(10 * time.Minute)
+				// two windows — beyond connFreqWindow a key already counts
+				// zero, and the second window is slack for event timestamps
+				// lagging wall time under backlog. The old 10 minutes kept
+				// every short-lived PID's key alive through a whole attack
+				// window (wave 8.1 stage E).
+				globalConnFrequency.Cleanup(2 * connFreqWindow)
 				// Evict (pid, daddr, dport) beacon-interval keys the same way —
 				// see BeaconIntervalTracker (finding №231).
 				globalBeaconInterval.Cleanup(10 * time.Minute)
@@ -1075,7 +1086,8 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 				workerAD.SetSharedLearner(sharedLearner)
 			}
 			ce.ingestPool[i] = &workerState{
-				ch: make(chan *workerTask, ingestBufSize),
+				ch:   make(chan *workerTask, ingestBufSize),
+				chHi: make(chan *workerTask, ingestBufSize),
 				ad: workerAD,
 			}
 		}
@@ -1584,6 +1596,7 @@ func (ce *CorrelationEngine) closeIngestChannels() {
 	ce.closeIngestOnce.Do(func() {
 		for _, w := range ce.ingestPool {
 			close(w.ch)
+			close(w.chHi)
 		}
 	})
 }
@@ -1750,6 +1763,32 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 			return err
 		}
 	}
+	for i, w := range ce.ingestPool {
+		w := w
+		for cls, name := range []string{"bulk", "protected"} {
+			cls := cls
+			lbl := prometheus.Labels{"worker": strconv.Itoa(i), "class": name}
+			for _, c := range []prometheus.Collector{
+				prometheus.NewCounterFunc(prometheus.CounterOpts{
+					Name: "ebpf_guard_ingest_worker_blocked_total", ConstLabels: lbl,
+					Help: "Times a dispatcher found this ingest worker's channel full and waited.",
+				}, func() float64 { return float64(w.blocked[cls].Load()) }),
+				prometheus.NewCounterFunc(prometheus.CounterOpts{
+					Name: "ebpf_guard_ingest_worker_blocked_seconds_total", ConstLabels: lbl,
+					Help: "Seconds a dispatcher spent waiting on this ingest worker's full channel.",
+				}, func() float64 { return float64(w.blockedNanos[cls].Load()) / 1e9 }),
+			} {
+				if err := reg.Register(c); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if err := reg.Register(ingestEventAgeVec); err != nil {
+		if _, dup := err.(prometheus.AlreadyRegisteredError); !dup {
+			return err
+		}
+	}
 	// Счётчики диагностики публикуются ДАЖЕ выключенной: их отсутствие в
 	// /metrics обязано означать «бинарь без правки», а не «правка выключена»
 	// ([[rule-fields-and-binary-ship-together]]).
@@ -1803,6 +1842,15 @@ func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.
 // single-goroutine call invariant.  Blocks under backpressure (when the worker
 // channel is full) rather than dropping events; cancelled contexts abort the send.
 func (ce *CorrelationEngine) IngestAsync(ctx context.Context, e types.Event) {
+	ce.IngestAsyncPriority(ctx, e, false)
+}
+
+// IngestAsyncPriority is IngestAsync with the event's class: protected events
+// go to the worker's own channel, which the worker drains before the bulk one.
+// Ordering within a class and pid is preserved; across classes it is not (the
+// two classes already arrive over separate queues and rings, so no cross-class
+// order exists upstream to preserve).
+func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Event, protected bool) {
 	if len(ce.ingestPool) == 0 {
 		ce.Ingest(ctx, e)
 		return
@@ -1811,11 +1859,63 @@ func (ce *CorrelationEngine) IngestAsync(ctx context.Context, e types.Event) {
 	t := workerTaskPool.Get().(*workerTask)
 	t.ctx = ctx
 	t.event = e
+	ch, cls := w.ch, 0
+	if protected {
+		ch, cls = w.chHi, 1
+	}
 	select {
-	case w.ch <- t:
+	case ch <- t:
+		return
+	default:
+	}
+	// Channel full: this dispatcher now waits on this worker. Count it.
+	start := time.Now()
+	select {
+	case ch <- t:
 	case <-ctx.Done():
 		workerTaskPool.Put(t)
 	}
+	w.blocked[cls].Add(1)
+	w.blockedNanos[cls].Add(uint64(time.Since(start)))
+}
+
+const (
+	ingestAgeBulk      = 0
+	ingestAgeProtected = 1
+)
+
+// ingestEventAge is the wall-clock age of an event (kernel timestamp to now)
+// when an ingest worker picks it up — everything the event waited behind:
+// ring buffer, priority queue, dispatcher, worker channel (wave 8.1, №530).
+// Events without a timestamp (synthetic) read ~0.
+var ingestEventAgeVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "ebpf_guard_ingest_event_age_seconds",
+	Help:    "Wall-clock age of an event when an ingest worker picks it up, by class.",
+	Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+}, []string{"class"})
+
+var ingestEventAge = [2]prometheus.Observer{
+	ingestEventAgeVec.WithLabelValues("bulk"),
+	ingestEventAgeVec.WithLabelValues("protected"),
+}
+
+// IngestWorkerCount returns the number of ingest workers (0 when the pool is off).
+func (ce *CorrelationEngine) IngestWorkerCount() int { return len(ce.ingestPool) }
+
+// IngestWorkerQueueLenCap returns len/cap of ingest worker i's channel.
+func (ce *CorrelationEngine) IngestWorkerQueueLenCap(i int) (int, int) {
+	if i < 0 || i >= len(ce.ingestPool) {
+		return 0, 0
+	}
+	return len(ce.ingestPool[i].ch), cap(ce.ingestPool[i].ch)
+}
+
+// IngestWorkerHiQueueLenCap is IngestWorkerQueueLenCap for the protected channel.
+func (ce *CorrelationEngine) IngestWorkerHiQueueLenCap(i int) (int, int) {
+	if i < 0 || i >= len(ce.ingestPool) {
+		return 0, 0
+	}
+	return len(ce.ingestPool[i].chHi), cap(ce.ingestPool[i].chHi)
 }
 
 // runIngestWorker drains one worker channel until ctx is cancelled.
@@ -1835,22 +1935,55 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 	flushTicker := time.NewTicker(localFlushInterval)
 	defer flushTicker.Stop()
 
-	for {
-		select {
-		case task, ok := <-w.ch:
-			if !ok {
+	handle := func(task *workerTask) {
+		tctx, ev := task.ctx, task.event
+		workerTaskPool.Put(task)
+		// Age by event class (not by channel): comparable between split and
+		// legacy dispatch, where protected events share the bulk channel.
+		cls := ingestAgeBulk
+		if ev.Type != types.EventFileAccess {
+			cls = ingestAgeProtected
+		}
+		ingestEventAge[cls].Observe(time.Since(eventTime(&ev)).Seconds())
+		alerts, regoQueued := ce.ingestWithAD(tctx, ev, w.ad)
+		if len(alerts) > 0 && !regoQueued {
+			localPending = append(localPending, alerts...)
+			if len(localPending) >= localFlushBatch {
 				ce.flushPending(&localPending)
-				return
 			}
-			tctx, ev := task.ctx, task.event
-			workerTaskPool.Put(task)
-			alerts, regoQueued := ce.ingestWithAD(tctx, ev, w.ad)
-			if len(alerts) > 0 && !regoQueued {
-				localPending = append(localPending, alerts...)
-				if len(localPending) >= localFlushBatch {
-					ce.flushPending(&localPending)
+		}
+	}
+
+	// Both channels are closed together by closeIngestChannels; a closed one is
+	// set to nil (blocks forever in select) and the worker exits when both are.
+	hi, lo := w.chHi, w.ch
+	for hi != nil || lo != nil {
+		// Protected events first: never queue behind a bulk backlog.
+		if hi != nil {
+			select {
+			case task, ok := <-hi:
+				if !ok {
+					hi = nil
+					continue
 				}
+				handle(task)
+				continue
+			default:
 			}
+		}
+		select {
+		case task, ok := <-hi:
+			if !ok {
+				hi = nil
+				continue
+			}
+			handle(task)
+		case task, ok := <-lo:
+			if !ok {
+				lo = nil
+				continue
+			}
+			handle(task)
 		case <-flushTicker.C:
 			ce.flushPending(&localPending)
 		case <-ctx.Done():
@@ -1858,6 +1991,7 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 			return
 		}
 	}
+	ce.flushPending(&localPending)
 }
 
 // ingestWithAD is the core event processing pipeline.  ad is the AnomalyDetector

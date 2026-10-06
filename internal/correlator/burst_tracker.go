@@ -37,9 +37,10 @@ type burstKey struct {
 }
 
 type burstState struct {
-	ring []time.Time
-	head int
-	size int
+	*timeRing
+	// window is the widest sliding window any Record call used for this key;
+	// Cleanup may drop the key once its newest match is older than that.
+	window time.Duration
 }
 
 // NewBurstTracker creates an empty tracker.
@@ -61,40 +62,36 @@ func (b *BurstTracker) Record(ruleID string, group uint64, now time.Time, window
 
 	st, ok := b.state[key]
 	if !ok {
-		st = &burstState{ring: make([]time.Time, burstMaxSamples)}
+		st = &burstState{timeRing: newTimeRing(burstMaxSamples)}
 		b.state[key] = st
 	}
+	st.window = max(st.window, window)
 
-	cutoff := now.Add(-window)
-	for st.size > 0 && st.ring[st.head].Before(cutoff) {
-		st.head = (st.head + 1) % burstMaxSamples
-		st.size--
-	}
-
-	tail := (st.head + st.size) % burstMaxSamples
-	st.ring[tail] = now
-	if st.size < burstMaxSamples {
-		st.size++
-	} else {
-		// Ring is full: overwrite the oldest slot and advance head so the
-		// window keeps sliding instead of freezing at the cap.
-		st.head = (st.head + 1) % burstMaxSamples
-	}
-
+	st.prune(now.Add(-window))
+	st.push(now)
 	return st.size
 }
 
 // Cleanup removes tracked keys with no activity in the last maxAge, bounding
 // memory growth from short-lived PIDs and chains. Called periodically from the
 // same engine.go ticker that drives ConnFrequencyTracker.Cleanup.
+//
+// A key is also removed once its newest match is older than twice its own
+// window: every sample is then outside any window Record would count, so the
+// next match starts from one either way. The factor of two is slack for event
+// timestamps lagging wall time while the queues are backed up (stage E: up to
+// ~9 s at 53k queued events). Without this, a key lived the full maxAge
+// (10 minutes) after a one-match process exited.
 func (b *BurstTracker) Cleanup(maxAge time.Duration) int {
-	cutoff := time.Now().Add(-maxAge)
+	now := time.Now()
+	cutoff := now.Add(-maxAge)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	removed := 0
 	for key, st := range b.state {
-		if st.size == 0 || st.ring[(st.head+st.size-1)%burstMaxSamples].Before(cutoff) {
+		last, ok := st.newest()
+		if !ok || last.Before(cutoff) || (st.window > 0 && last.Before(now.Add(-2*st.window))) {
 			delete(b.state, key)
 			removed++
 		}

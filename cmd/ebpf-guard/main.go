@@ -1530,6 +1530,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		qh.Track("event_low", func() int { return len(lowPriorityEventCh) }, func() int { return cap(lowPriorityEventCh) })
 		qh.Track("rego", func() int { l, _ := engine.RegoQueueLenCap(); return l }, func() int { _, c := engine.RegoQueueLenCap(); return c })
 		qh.Track("enforce", func() int { l, _ := engine.EnforceQueueLenCap(); return l }, func() int { _, c := engine.EnforceQueueLenCap(); return c })
+		for i := 0; i < engine.IngestWorkerCount(); i++ {
+			i := i
+			qh.Track(fmt.Sprintf("ingest_worker_%d", i),
+				func() int { l, _ := engine.IngestWorkerQueueLenCap(i); return l },
+				func() int { _, c := engine.IngestWorkerQueueLenCap(i); return c })
+		}
+		for i := 0; i < engine.IngestWorkerCount(); i++ {
+			i := i
+			qh.Track(fmt.Sprintf("ingest_worker_%d_protected", i),
+				func() int { l, _ := engine.IngestWorkerHiQueueLenCap(i); return l },
+				func() int { _, c := engine.IngestWorkerHiQueueLenCap(i); return c })
+		}
 		go qh.Run(ctx)
 	}
 
@@ -2870,9 +2882,33 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		slog.Int("queued_high", len(highPriorityEventCh)),
 		slog.Int("queued_low", len(lowPriorityEventCh)))
 
+	// Wave 8.1 (№530): protected and bulk events have their own dispatcher
+	// goroutines. A single dispatcher used to block in IngestAsync on a hot
+	// pid's full worker channel (№529) and stop protected events behind it.
+	// Now only the bulk dispatcher can stall there, and the worker drains its
+	// protected channel first (CorrelationEngine.IngestAsyncPriority). Every
+	// component processEvent touches is already called from several
+	// goroutines (enrichers, drift detector, event log, exporter series).
+	hiDone := make(chan struct{})
+	go func() {
+		defer close(hiDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-highPriorityEventCh:
+				if !ok {
+					return
+				}
+				processEvent(ctx, event, true, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
+			<-hiDone
 			// Wait for all in-flight dispatch goroutines to finish before shutdown.
 			if aerr := workerSem.Acquire(ctx, maxConcurrent); aerr != nil {
 				slog.Debug("shutdown: worker pool drain interrupted", slog.Any("error", aerr))
@@ -2882,55 +2918,20 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				prof, cfg.Profiler.StatePersistence)
 			return nil
 
-		// P0-25: protected queue (network/dns/syscall/…) first.
-		//
-		// A plain two-case select would NOT prioritise: when both channels are
-		// ready Go picks a uniformly random case, so at 5800 file ev/s against
-		// 33 network ev/s the protected queue would still be serviced ~50% of
-		// the time only by luck of arrival. The non-blocking drain below makes
-		// the preference explicit — the bulk queue is only read once the
-		// protected queue is empty.
-		case event, ok := <-highPriorityEventCh:
-			if !ok {
-				return nil
-			}
-			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
-
 		case event, ok := <-lowPriorityEventCh:
 			if !ok {
 				return nil
 			}
-			// Before spending time on a bulk event, yield to anything that
-			// arrived on the protected queue in the meantime.
-			drained := 0
-		drain:
-			for drained < maxProtectedDrainBurst {
-				select {
-				case hi, hiOK := <-highPriorityEventCh:
-					if !hiOK {
-						return nil
-					}
-					processEvent(ctx, hi, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
-					drained++
-				default:
-					break drain
-				}
-			}
-			processEvent(ctx, event, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
+			processEvent(ctx, event, false, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
 		}
 	}
 }
-
-// maxProtectedDrainBurst caps how many protected-queue events are handled
-// before the already-dequeued bulk event is processed. Without a cap, a
-// sustained protected-queue burst could starve file events entirely; with it,
-// bulk throughput degrades gracefully instead of stopping.
-const maxProtectedDrainBurst = 64
 
 // processEvent handles a single event through the enrichment and correlation pipeline.
 func processEvent(
 	ctx context.Context,
 	event types.Event,
+	protected bool,
 	eventLog *store.EventLog,
 	k8sEnricher *k8s.Enricher,
 	runtimeEnricher *runtime.Enricher,
@@ -2989,7 +2990,7 @@ func processEvent(
 	// instead of serializing on this one. Resulting alerts land in
 	// engine.pending and are drained by the periodic flush above — do
 	// NOT also dispatch a return value here, or every alert double-fires.
-	engine.IngestAsync(ctx, event)
+	engine.IngestAsyncPriority(ctx, event, protected)
 
 	// Drift detection runs independently of the correlation engine's
 	// pending buffer, so its alerts are dispatched immediately.

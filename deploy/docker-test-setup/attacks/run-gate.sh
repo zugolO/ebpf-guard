@@ -251,6 +251,51 @@ latest_marker() {
 # управляемо на каждом архивном прогоне — вторая половина крит. 18 получает
 # достижимый PASS вместо постоянного SKIP.
 ringbuf_overflow_marker=$(latest_marker "$RESULTS_DIR" 'ringbuf-overflow-*.txt')
+
+# №531 (волна 8.1, задача 6): latest_marker берёт самый свежий маркер за ВСЮ
+# историю каталога и не связывает его с TIMESTAMP этого прогона. Если шаг
+# run_ringbuf_overflow в этом прогоне не запускался, критерий 22 читал маркер
+# прошлого прогона и печатал его числа (N, Δringbuf_full) как будто они
+# принадлежат этому окну; PASS судил только внутреннюю согласованность
+# старого файла. marker_age_sec возвращает возраст маркера относительно
+# TIMESTAMP прогона по YYYYmmdd_HHMMSS в имени; пусто — не удалось разобрать.
+marker_ts_epoch() {
+    local ts="$1" d t
+    d="${ts%%_*}"; t="${ts##*_}"
+    date -u -d "${d:0:4}-${d:4:2}-${d:6:2} ${t:0:2}:${t:2:2}:${t:4:2}" +%s 2>/dev/null \
+        || date -u -j -f '%Y%m%d%H%M%S' "${d}${t}" +%s 2>/dev/null
+}
+marker_age_sec() {
+    local marker="$1" mts rts me re
+    mts=$(basename "$marker" | sed -E 's/.*-([0-9]{8}_[0-9]{6})\.txt$/\1/')
+    rts="$TIMESTAMP"
+    case "$mts" in [0-9]*_[0-9]*) ;; *) return 0 ;; esac
+    case "$rts" in [0-9]*_[0-9]*) ;; *) return 0 ;; esac
+    me=$(marker_ts_epoch "$mts"); re=$(marker_ts_epoch "$rts")
+    [ -n "$me" ] && [ -n "$re" ] && echo $(( re - me ))
+}
+# Предел возраста: шаг идёт отдельным вызовом ДО окна замера (idle-час +
+# окно атак), поэтому законный маркер старше прогона на часы, не на сутки.
+GATE_CONTROL_MAX_AGE_SEC="${GATE_CONTROL_MAX_AGE_SEC:-43200}"
+# №534 (хвост №531): тот же приём для остальных читателей latest_marker
+# (критерии 14, 18 и DNS-контроли). marker_fresh: 0 — маркер не старше предела
+# (или возраст разобрать нельзя — тогда не фильтруем, как в критерии 22);
+# fresh_marker — latest_marker, который отбрасывает чужой прогон.
+marker_fresh() {
+    local m="$1" age
+    [ -n "$m" ] || return 0
+    age=$(marker_age_sec "$m")
+    [ -z "$age" ] || [ "$age" -le "$GATE_CONTROL_MAX_AGE_SEC" ]
+}
+fresh_marker() {
+    local m
+    m=$(latest_marker "$1" "$2")
+    if [ -n "$m" ] && ! marker_fresh "$m"; then
+        echo "RUN-GATE: маркер $(basename "$m") старше ${GATE_CONTROL_MAX_AGE_SEC} с относительно прогона — не читается (№534)" >&2
+        m=""
+    fi
+    echo "$m"
+}
 # 5.9.9.F.2b (№125): маркер наведённого CPU-давления с выдержкой
 # (run_cpu_pressure_control, run-all-attacks.sh) — даёт критерию 14
 # достижимую пару reduce↔recover вместо постоянного SKIP. Ищется ПО МАСКЕ,
@@ -260,7 +305,7 @@ ringbuf_overflow_marker=$(latest_marker "$RESULTS_DIR" 'ringbuf-overflow-*.txt')
 # dns-{negative,positive}-control-*.txt в секции 5.9.8a. По $TIMESTAMP
 # основного прогона этот маркер не нашёлся бы никогда, и критерий 14
 # остался бы в SKIP на живом стенде, как будто шаг не запускался.
-cpu_pressure_control_marker=$(latest_marker "$RESULTS_DIR" 'cpu-pressure-control-*.txt')
+cpu_pressure_control_marker=$(fresh_marker "$RESULTS_DIR" 'cpu-pressure-control-*.txt')
 # 5.9.9.Fb (находка №109): регистрация/подтверждение observer_root, написанные
 # run-all-attacks.sh (observer_root_register). Даёт критерию 16 времена,
 # которых раньше не было ни в одном артефакте: без них секция не может
@@ -1089,7 +1134,7 @@ fi
 # а нормальное поведение метрики для события, случившегося до открытия
 # любого измеряемого окна. Здесь — не диф "attack/idle/gap", а прямое
 # сравнение времени: маркер контроля старше снимка baseline_metrics.
-dns_ctl_marker=$(latest_marker "$RESULTS_DIR" 'dns-positive-control-*.txt')
+dns_ctl_marker=$(fresh_marker "$RESULTS_DIR" 'dns-positive-control-*.txt')
 dns_ctl_before_baseline=0
 if [ -n "$dns_ctl_marker" ] && [ -s "$baseline_metrics" ]; then
     # stat -f %m — BSD/macOS. Остальные четыре чтения mtime в этом файле
@@ -1811,8 +1856,8 @@ echo ""
 # вызовом скрипта со своим собственным TIMESTAMP.
 echo "=== 5.9.8a. DNS: негативный + позитивный контроль переиспользования fd (№94) ==="
 record_covered "=== 5.9.8a. DNS: негативный + позитивный контроль"
-dns_neg_marker=$(latest_marker "$RESULTS_DIR" 'dns-negative-control-*.txt')
-dns_pos_marker=$(latest_marker "$RESULTS_DIR" 'dns-positive-control-*.txt')
+dns_neg_marker=$(fresh_marker "$RESULTS_DIR" 'dns-negative-control-*.txt')
+dns_pos_marker=$(fresh_marker "$RESULTS_DIR" 'dns-positive-control-*.txt')
 
 if [ -z "$dns_neg_marker" ] && [ -z "$dns_pos_marker" ]; then
     skip "run-all-attacks.sh --dns-fd-reuse-controls не запускался — маркеры dns-{negative,positive}-control-*.txt отсутствуют; сборка/пайплайн старее 5.9.8a"
@@ -3661,7 +3706,7 @@ else
     # было и не могло быть собственного способа переполнить кольцо).
     induced_ok=0
     induced_source=""
-    if [ -n "$ringbuf_overflow_marker" ] && [ -f "$ringbuf_overflow_marker" ] && ! grep -q '^skipped=1' "$ringbuf_overflow_marker" 2>/dev/null; then
+    if [ -n "$ringbuf_overflow_marker" ] && [ -f "$ringbuf_overflow_marker" ] && marker_fresh "$ringbuf_overflow_marker" && ! grep -q '^skipped=1' "$ringbuf_overflow_marker" 2>/dev/null; then
         ro_ring_full_c18=$(awk -F= '$1=="ringbuf_full_delta"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
         if awk -v d="${ro_ring_full_c18:-0}" 'BEGIN{exit !(d>0)}'; then
             induced_ok=1
@@ -4155,7 +4200,11 @@ if [ -z "$ringbuf_overflow_marker" ] || [ ! -f "$ringbuf_overflow_marker" ]; the
 elif grep -q '^skipped=1' "$ringbuf_overflow_marker" 2>/dev/null; then
     c22_reason=$(awk -F= '$1=="skip_reason"{ $1=""; print substr($0,2)}' "$ringbuf_overflow_marker" 2>/dev/null)
     skip "run_ringbuf_overflow пропущен харнессом: ${c22_reason:-причина не записана}"
+elif c22_age=$(marker_age_sec "$ringbuf_overflow_marker"); [ -n "$c22_age" ] && [ "$c22_age" -gt "$GATE_CONTROL_MAX_AGE_SEC" ]; then
+    echo "  маркер $(basename "$ringbuf_overflow_marker"): возраст относительно прогона ${c22_age} с (предел ${GATE_CONTROL_MAX_AGE_SEC} с)"
+    skip "run_ringbuf_overflow не запускался в этом прогоне — найден только маркер другого прогона ($(basename "$ringbuf_overflow_marker")); его числа к этому окну не относятся (№531)"
 else
+    [ -n "${c22_age:-}" ] && echo "  маркер $(basename "$ringbuf_overflow_marker"), возраст относительно прогона ${c22_age} с"
     c22_n=$(awk -F= '$1=="n"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
     c22_events=$(awk -F= '$1=="events_delta"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)
     c22_drops=$(awk -F= '$1=="drops_delta"{print $2+0}' "$ringbuf_overflow_marker" 2>/dev/null)

@@ -196,3 +196,79 @@ func TestDefaultEventPriority(t *testing.T) {
 		assert.True(t, defaultEventPriority(et), "event type %v must be protected", et)
 	}
 }
+
+// strategyFakeCollector hands events to the wrapper through sendEvent with a
+// chosen first-hop strategy, as the real readers do.
+type strategyFakeCollector struct {
+	n        int
+	strategy BackpressureStrategy
+	lost     atomic.Int64
+	done     chan struct{}
+}
+
+func (f *strategyFakeCollector) Name() string { return "fake" }
+func (f *strategyFakeCollector) Close() error { return nil }
+func (f *strategyFakeCollector) Start(ctx context.Context, out chan<- types.Event) error {
+	for i := 0; i < f.n; i++ {
+		sendEvent(ctx, out, types.Event{Type: types.EventSyscall, PID: uint32(i)}, f.strategy, func() { f.lost.Add(1) })
+	}
+	close(f.done)
+	<-ctx.Done()
+	return nil
+}
+
+// TestFirstHopBlock_BurstIsWaitedNotLost: a burst larger than the hand-off
+// channel (1024) against a slow downstream queue. With StrategyBlock on the
+// first hop the reader waits and every event arrives in order; with Drop
+// (control) the same burst loses events. Wave 8.1 №534.
+func TestFirstHopBlock_BurstIsWaitedNotLost(t *testing.T) {
+	const n = 5000
+	run := func(strategy BackpressureStrategy) (got []uint32, lost int64) {
+		hi := make(chan types.Event, 16)
+		lo := make(chan types.Event, 16)
+		fc := &strategyFakeCollector{n: n, strategy: strategy, done: make(chan struct{})}
+		// router strategy stays Drop; the downstream queue is drained slowly
+		// enough that the router, not the reader, is never the one parked.
+		p := NewPriorityEventCollector(fc, hi, lo, StrategyBlock, nil, nil, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = p.Start(ctx, nil) }()
+		timeout := time.After(20 * time.Second)
+		for len(got) < n {
+			select {
+			case e := <-hi:
+				got = append(got, e.PID)
+				if len(got)%64 == 0 {
+					time.Sleep(time.Millisecond)
+				}
+			case <-fc.done:
+				if strategy == StrategyDrop {
+					// drain what is left and stop
+					for {
+						select {
+						case e := <-hi:
+							got = append(got, e.PID)
+						case <-time.After(200 * time.Millisecond):
+							cancel()
+							return got, fc.lost.Load()
+						}
+					}
+				}
+			case <-timeout:
+				cancel()
+				t.Fatalf("strategy %s: timed out with %d/%d events", strategy, len(got), n)
+			}
+		}
+		cancel()
+		return got, fc.lost.Load()
+	}
+
+	got, lost := run(StrategyBlock)
+	require.Equal(t, int64(0), lost, "block must not count a loss")
+	require.Len(t, got, n)
+	for i, pid := range got {
+		require.Equal(t, uint32(i), pid, "order must be preserved")
+	}
+
+	_, lostDrop := run(StrategyDrop)
+	assert.Greater(t, lostDrop, int64(0), "control: drop on the same burst loses events")
+}

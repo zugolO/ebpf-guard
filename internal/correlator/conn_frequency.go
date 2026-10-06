@@ -30,7 +30,7 @@ const connFreqMaxSamples = 1024
 // TLS-uprobe payload parser.
 type ConnFrequencyTracker struct {
 	mu    sync.Mutex
-	state map[connFreqKey]*connFreqState
+	state map[connFreqKey]*timeRing
 }
 
 type connFreqKey struct {
@@ -38,15 +38,9 @@ type connFreqKey struct {
 	dport uint16
 }
 
-type connFreqState struct {
-	ring []time.Time
-	head int
-	size int
-}
-
 // NewConnFrequencyTracker creates an empty tracker.
 func NewConnFrequencyTracker() *ConnFrequencyTracker {
-	return &ConnFrequencyTracker{state: make(map[connFreqKey]*connFreqState)}
+	return &ConnFrequencyTracker{state: make(map[connFreqKey]*timeRing)}
 }
 
 // globalConnFrequency is the package-level tracker used by getFieldValue to
@@ -64,26 +58,12 @@ func (c *ConnFrequencyTracker) Record(pid uint32, dport uint16, now time.Time) i
 
 	st, ok := c.state[key]
 	if !ok {
-		st = &connFreqState{ring: make([]time.Time, connFreqMaxSamples)}
+		st = newTimeRing(connFreqMaxSamples)
 		c.state[key] = st
 	}
 
-	cutoff := now.Add(-connFreqWindow)
-	for st.size > 0 && st.ring[st.head].Before(cutoff) {
-		st.head = (st.head + 1) % connFreqMaxSamples
-		st.size--
-	}
-
-	tail := (st.head + st.size) % connFreqMaxSamples
-	st.ring[tail] = now
-	if st.size < connFreqMaxSamples {
-		st.size++
-	} else {
-		// Ring is full: overwrite the oldest slot and advance head so the
-		// window keeps sliding instead of freezing at the cap.
-		st.head = (st.head + 1) % connFreqMaxSamples
-	}
-
+	st.prune(now.Add(-connFreqWindow))
+	st.push(now)
 	return st.size
 }
 
@@ -104,17 +84,15 @@ func (c *ConnFrequencyTracker) Rate(pid uint32, dport uint16, now time.Time) int
 
 	// Expire out-of-window samples so a key that stops receiving connections
 	// reports a decaying rate rather than a frozen one.
-	cutoff := now.Add(-connFreqWindow)
-	for st.size > 0 && st.ring[st.head].Before(cutoff) {
-		st.head = (st.head + 1) % connFreqMaxSamples
-		st.size--
-	}
+	st.prune(now.Add(-connFreqWindow))
 	return st.size
 }
 
 // Cleanup removes tracked keys with no activity in the last maxAge, bounding
 // memory growth from short-lived PIDs. Intended to be called periodically
-// (e.g. alongside RateLimiter.Cleanup).
+// (e.g. alongside RateLimiter.Cleanup). Any maxAge comfortably above
+// connFreqWindow leaves the counts unchanged: a key whose newest sample is
+// outside the window already reports zero.
 func (c *ConnFrequencyTracker) Cleanup(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge)
 	c.mu.Lock()
@@ -122,7 +100,7 @@ func (c *ConnFrequencyTracker) Cleanup(maxAge time.Duration) int {
 
 	removed := 0
 	for key, st := range c.state {
-		if st.size == 0 || st.ring[(st.head+st.size-1)%connFreqMaxSamples].Before(cutoff) {
+		if last, ok := st.newest(); !ok || last.Before(cutoff) {
 			delete(c.state, key)
 			removed++
 		}

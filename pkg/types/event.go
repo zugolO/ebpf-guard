@@ -297,7 +297,7 @@ type FileEvent struct {
 	Filename [256]byte
 	Flags    int32 // open(2) flags
 	Mode     uint32
-	Op       uint8 // 0=open, 1=read, 2=write, 3=chmod (FILE_OP_* в bpf/common.h)
+	Op       uint8 // 0=open, 1=read, 2=write, 3=chmod, 4=unlink, 5=rename, 6=truncate, 7=rmdir (FILE_OP_* в bpf/common.h)
 	// FDPath is the resolved file path for read/write events, populated via fd→path BPF map lookup.
 	// For open events FDPath matches Filename; for read/write events Filename would otherwise be empty.
 	FDPath string

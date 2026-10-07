@@ -3,12 +3,15 @@ package correlator
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -219,5 +222,87 @@ func TestIngestAsyncPriority_AnomalyIdentityVsLegacy(t *testing.T) {
 	legacy, split := run(false), run(true)
 	t.Logf("legacy=%v split=%v", legacy, split)
 	require.NotEmpty(t, legacy, "scoring phase must produce anomalies, otherwise the test proves nothing")
+	assert.Equal(t, legacy, split)
+}
+
+// Wave 8.1 (№530, хвост D): тождество для drift-класса. Профиль дрейфа
+// ключуется воркладом (comm), а не правилом, и общий для правил разных типов
+// событий: file-правило (bulk) и network-правило (protected) одной нагрузки
+// учатся в ОДИН профиль. Поэтому межклассовая перестановка может сдвинуть
+// только момент перехода профиля в enforcing (счёт MinSamples), и то лишь если
+// переход приходится на перемешанный участок. Тест фиксирует свойство, на
+// которое опирается раздельный путь: когда фазы разделены (обучение
+// закончилось до потока новизны — так устроен прод, обучение идёт минуты),
+// множество алертов дрейфа одинаково на обоих путях.
+func TestIngestAsyncPriority_DriftIdentityVsLegacy(t *testing.T) {
+	run := func(split bool) map[string]int {
+		dp := profiler.NewDriftBaselineProfiler(profiler.DriftBaselineConfig{
+			Enabled: true, LearningPeriod: 0, MinSamples: 40, PerWorkload: true,
+			MaxWorkloads: 100, MaxSignaturesPerWorkload: 256, EnforceDeadlinePeriods: 1,
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		cfg := DefaultCorrelationEngineConfig()
+		cfg.Rules = []Rule{
+			{ID: "drift_file", Name: "file", EventType: types.EventFileAccess,
+				Condition: RuleCondition{Field: "filename", Op: OpPrefix, Values: []string{"/etc/"}},
+				Severity:  types.SeverityWarning, Action: ActionAlert, Class: ClassDrift},
+			{ID: "drift_net", Name: "net", EventType: types.EventTCPConnect,
+				Condition: RuleCondition{Field: "dport", Op: OpGreaterThan, Values: []string{"0"}},
+				Severity:  types.SeverityWarning, Action: ActionAlert, Class: ClassDrift},
+		}
+		cfg.EnableAnomaly = false
+		cfg.EnableDedup = false
+		cfg.EnableRateLimit = false
+		cfg.IngestWorkerCount = 1
+		cfg.DriftBaselineProfiler = dp
+		eng := NewCorrelationEngineWithConfig(cfg)
+		defer eng.Close()
+
+		ctx := context.Background()
+		send := func(e types.Event) {
+			if !split {
+				eng.IngestAsync(ctx, e)
+				return
+			}
+			eng.IngestAsyncPriority(ctx, e, e.Type != types.EventFileAccess)
+		}
+		mk := func(pid uint32, port uint16, path string) (types.Event, types.Event) {
+			var comm [16]byte
+			copy(comm[:], "workload")
+			ne := types.Event{Type: types.EventTCPConnect, PID: pid, Comm: comm,
+				Network: &types.NetworkEvent{Dport: port}}
+			fe := &types.FileEvent{}
+			copy(fe.Filename[:], path)
+			return ne, types.Event{Type: types.EventFileAccess, PID: pid, Comm: comm, File: fe}
+		}
+		// обучение: устойчивые сигнатуры обоих классов, больше MinSamples
+		for i := 0; i < 60; i++ {
+			n, f := mk(uint32(100+i%5), 443, "/etc/app/app.conf")
+			send(n)
+			send(f)
+		}
+		time.Sleep(300 * time.Millisecond)
+		eng.Flush()
+		// поток новизны вперемешку с известным
+		for i := 0; i < 50; i++ {
+			n, f := mk(uint32(100+i%5), uint16(9000+i%10), fmt.Sprintf("/etc/novel-%d/x", i%10))
+			send(n)
+			send(f)
+			n, f = mk(uint32(100+i%5), 443, "/etc/app/app.conf")
+			send(n)
+			send(f)
+		}
+		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		eng.DrainIngestPool(dctx)
+		got := map[string]int{}
+		for _, a := range eng.Flush() {
+			got[a.RuleID]++
+		}
+		return got
+	}
+	legacy, split := run(false), run(true)
+	t.Logf("legacy=%v split=%v", legacy, split)
+	require.NotEmpty(t, legacy["drift_file"], "novel file signatures must alert, otherwise the test proves nothing")
+	require.NotEmpty(t, legacy["drift_net"], "novel network signatures must alert, otherwise the test proves nothing")
 	assert.Equal(t, legacy, split)
 }

@@ -150,6 +150,12 @@ dq=$(_m "$M0" ebpf_guard_events_dropped_by_queue_total 'queue="protected"')
 [ -n "$dq" ] || die "серии events_dropped_by_queue_total{queue=\"protected\"} нет при нулевых потерях — метка 8.1.2 была бы НЕИЗМЕРИМА все 8 часов"
 say "сторож: серия потерь очереди protected материализована (сумма $dq)"
 
+# Волна 8.1, этап H: прибор оси file.op (item 7) обязан быть в экспозиции ДО
+# восьми часов — иначе метка 8.1.4 печатала бы НЕИЗМЕРИМ всю ночь.
+fo=$(_m "$M0" ebpf_guard_file_events_by_op_total 'op="truncate"')
+[ -n "$fo" ] || die "серии ebpf_guard_file_events_by_op_total нет — бинарь без item 7, метка 8.1.4 была бы НЕИЗМЕРИМА все 8 часов"
+say "сторож: прибор оси file.op материализован (truncate сейчас $fo)"
+
 prof_bytes=$(_curl --max-time 20 -o "$ART/cpu-preflight.pprof" -w '%{size_download}' "$API/debug/pprof/profile?seconds=3")
 [ "${prof_bytes:-0}" -gt 1000 ] || die "CPU-профиль в преflight вернул ${prof_bytes:-0} Б — прибор item 8(б) мёртв, почасовые профили ночи были бы пустыми"
 say "сторож: CPU-профиль отвечает ($prof_bytes Б за 3 с)"
@@ -186,7 +192,7 @@ cat "$ART/night-report.txt"
 # в силе — но маркер прогона скажет die, чтобы неполнота не прочиталась как
 # успех при разборе.
 # GUARD-BEGIN
-REQUIRED_LABELS=(3.P1-19 3.MEM 3.ATTACK 3.STORE 8.1.1 8.1.2)
+REQUIRED_LABELS=(3.P1-19 3.MEM 3.ATTACK 3.STORE 8.1.1 8.1.2 8.1.3 8.1.4)
 label_completeness() {
     local report="$1" lbl missing=""
     for lbl in "${REQUIRED_LABELS[@]}"; do

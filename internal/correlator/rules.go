@@ -424,7 +424,10 @@ var syscallNrStrings [512]string
 // только как номер сисколла и приходит теперь файловым событием с
 // разрешённым путём. Порядок и значения обязаны совпадать с FILE_OP_* в
 // bpf/common.h — расхождение здесь переименует операцию, а не сломает сборку.
-var fileOpNames = [4]string{"open", "read", "write", "chmod"}
+// Индексы 4–7 — unlink/rename/truncate/rmdir (волна 8.1, item 7): у этих
+// операций появился продюсер, и UnreachableFileOpRules перестал печатать
+// четыре правила, стоявшие на них, немыми.
+var fileOpNames = [8]string{"open", "read", "write", "chmod", "unlink", "rename", "truncate", "rmdir"}
 
 // gpuOpNames maps GPUEvent.Op to a human-readable name.
 var gpuOpNames = [6]string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}

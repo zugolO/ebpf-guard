@@ -393,7 +393,7 @@ func TestUnreachableSyscallRules_FieldAndOpAliases(t *testing.T) {
 // have decayed unnoticed.
 func TestUnreachableFileOpRules_ShortEqAlias(t *testing.T) {
 	rules := []Rule{
-		{ID: "short_eq_dead_op", EventType: types.EventFileAccess, Condition: RuleCondition{Field: "file.op", Op: "eq", Values: []string{"unlink"}}, Action: ActionAlert},
+		{ID: "short_eq_dead_op", EventType: types.EventFileAccess, Condition: RuleCondition{Field: "file.op", Op: "eq", Values: []string{"link"}}, Action: ActionAlert}, // unlink стал достижим (8.1 item 7)
 		{ID: "short_eq_live_op", EventType: types.EventFileAccess, Condition: RuleCondition{Field: "file.op", Op: "eq", Values: []string{"write"}}, Action: ActionAlert},
 	}
 

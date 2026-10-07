@@ -144,6 +144,37 @@ func (c *FileaccessCollector) Start(ctx context.Context, out chan<- types.Event)
 	return nil
 }
 
+// SetDropUnresolvedRW writes rw_unresolved_cfg (волна 8.1, item 11): when on,
+// trace_read/trace_write drop events whose fd has no resolved path before
+// reserving a ring buffer slot. Called after load (status reporter hook).
+func (c *FileaccessCollector) SetDropUnresolvedRW(on bool) error {
+	if c.objs == nil || c.objs.RwUnresolvedCfg == nil {
+		return fmt.Errorf("collector/fileaccess: rw_unresolved_cfg unavailable")
+	}
+	var v uint32
+	if on {
+		v = 1
+	}
+	return c.objs.RwUnresolvedCfg.Update(uint32(0), v, ebpf.UpdateAny)
+}
+
+// UnresolvedRWDropped returns the cumulative in-kernel count of read/write
+// events dropped for an unresolved path, summed across CPUs.
+func (c *FileaccessCollector) UnresolvedRWDropped() (uint64, error) {
+	if c.objs == nil || c.objs.RwUnresolvedDrops == nil {
+		return 0, nil
+	}
+	var perCPU []uint64
+	if err := c.objs.RwUnresolvedDrops.Lookup(uint32(0), &perCPU); err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, v := range perCPU {
+		total += v
+	}
+	return total, nil
+}
+
 // IsHealthy returns true if the collector loaded successfully.
 func (c *FileaccessCollector) IsHealthy() bool {
 	return c.loadError == nil && c.objs != nil
@@ -229,9 +260,17 @@ func (c *FileaccessCollector) GetPrograms() map[string]*ebpf.Program {
 		progs["trace_open_exit"] = c.objs.TraceOpenExit
 	}
 	for name, p := range map[string]*ebpf.Program{
-		"trace_chmod":    c.objs.TraceChmod,
-		"trace_fchmodat": c.objs.TraceFchmodat,
-		"trace_fchmod":   c.objs.TraceFchmod,
+		"trace_chmod":     c.objs.TraceChmod,
+		"trace_fchmodat":  c.objs.TraceFchmodat,
+		"trace_fchmod":    c.objs.TraceFchmod,
+		"trace_unlink":    c.objs.TraceUnlink,
+		"trace_unlinkat":  c.objs.TraceUnlinkat,
+		"trace_rmdir":     c.objs.TraceRmdir,
+		"trace_truncate":  c.objs.TraceTruncate,
+		"trace_ftruncate": c.objs.TraceFtruncate,
+		"trace_rename":    c.objs.TraceRename,
+		"trace_renameat":  c.objs.TraceRenameat,
+		"trace_renameat2": c.objs.TraceRenameat2,
 	} {
 		if p != nil {
 			progs[name] = p
@@ -466,11 +505,52 @@ func (c *FileaccessCollector) attachPrograms() error {
 		}
 	}
 
+	// Волна 8.1, item 7: unlink/rmdir/truncate/rename — продюсер оси file.op,
+	// на которой четыре правила (evasion_log_clear, ransomware_log_wipe и
+	// соседи) стояли немыми. Включено без выключателя по той же причине, что
+	// chmod: объём мал (зонд Ц1 волны 7 — 42 события/мин на idle), а
+	// выключатель гасил бы правила молча. Промах привязки — штатно для arm64
+	// (нет unlink/rmdir/rename/truncate без -at), поэтому не ошибка, но счётчик.
+	// Пара A/B 06.10.2026: 8–9 событий/мин, 0 алертов idle, CPU неотличим.
+	mutHooks := []struct {
+		tp   string
+		prog *ebpf.Program
+	}{
+		{"sys_enter_unlink", c.objs.TraceUnlink},
+		{"sys_enter_unlinkat", c.objs.TraceUnlinkat},
+		{"sys_enter_rmdir", c.objs.TraceRmdir},
+		{"sys_enter_truncate", c.objs.TraceTruncate},
+		{"sys_enter_ftruncate", c.objs.TraceFtruncate},
+		{"sys_enter_rename", c.objs.TraceRename},
+		{"sys_enter_renameat", c.objs.TraceRenameat},
+		{"sys_enter_renameat2", c.objs.TraceRenameat2},
+	}
+	mutAttached := 0
+	for _, h := range mutHooks {
+		if h.prog == nil {
+			exporter.RecordFileHookAttach(h.tp, "missing")
+			continue
+		}
+		l, err := link.Tracepoint("syscalls", h.tp, h.prog, nil)
+		if err != nil {
+			exporter.RecordFileHookAttach(h.tp, "error")
+			c.logger.Warn("failed to attach file mutation hook", "tracepoint", h.tp, "error", err)
+			continue
+		}
+		exporter.RecordFileHookAttach(h.tp, "ok")
+		c.links = append(c.links, l)
+		mutAttached++
+	}
+	if mutAttached == 0 {
+		c.logger.Error("no file mutation hook attached: rules on file.op unlink/rename/truncate/rmdir cannot fire on this kernel")
+	}
+
 	c.logger.Info("fileaccess hooks attached",
 		slog.Bool("open", c.trackOpen),
 		slog.Bool("read", c.trackRead),
 		slog.Bool("write", c.trackWrite),
 		slog.Bool("chmod", c.trackChmod),
+		slog.Int("mutation_hooks", mutAttached),
 	)
 	return nil
 }
@@ -576,6 +656,9 @@ func (c *FileaccessCollector) parseEvent(raw []byte, event *types.Event) error {
 	// в опасных местах» от «правила молчат, потому что мы не узнали путь»
 	// держится ровно на этом счётчике: без него сужение слоя 3 выглядело бы
 	// успешным в обоих случаях.
+	if event.File != nil {
+		exporter.RecordFileOp(event.File.Op, event.File.Filename[0] != 0 || event.File.FDPath != "")
+	}
 	if event.Type == types.EventFileAccess && event.File != nil &&
 		event.File.Op == fileOpChmod && event.File.FDPath == "" {
 		exporter.RecordChmodUnresolved()

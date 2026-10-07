@@ -1555,6 +1555,22 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	if bpStrategy == "" {
 		bpStrategy = collector.StrategyDrop
 	}
+	// Волна 8.1, №534 (решение владельца 06.10.2026): первый хоп — читатель
+	// кольца → hand-off канал роутера (priorityRouterBuffer = 1024) — у
+	// коллекторов с protected-событиями блокирующий. Пачка из кольца ядра в
+	// первые 0,3–0,5 с после привязки переполняла этот канал (№533: 1 рестарт из
+	// 6…16 терял 165…1319 syscall-событий), хотя кольцо ядра (4 МиБ) держит её
+	// без потерь. Блокировка безопасна: единственный потребитель канала —
+	// роутер, и он сам не блокируется при drop; sendEvent выходит по ctx.Done().
+	// Пара 16+16 рестартов: 0 потерь против 1, ringbuf_full 0, цены в куче нет.
+	// Потеря, если случится, переезжает в ringbuf_full ядра — там она видна
+	// счётчиком. fileaccess (bulk, 87% потока) и облачные остаются на общей
+	// стратегии: блокировать их значило бы отдать всплеск файлового потока
+	// кольцу ядра целиком.
+	protectedFirstHop := bpStrategy
+	if bpStrategy == collector.StrategyDrop {
+		protectedFirstHop = collector.StrategyBlock
+	}
 
 	// Bounded worker pool: cap concurrent event-processing goroutines.
 	maxConcurrent := int64(cfg.BPF.MaxConcurrentEvents)
@@ -1573,6 +1589,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// path-filter drop count. atomic.Pointer because SetUp fires from the
 	// collector's own goroutine, concurrently with the poller starting.
 	var pathFilterCtrl atomic.Pointer[internalbpf.PathFilterController]
+	// Волна 8.1, item 11: источник счётчика ядерного сброса read/write без пути.
+	var unresolvedRWSource atomic.Pointer[collector.FileaccessCollector]
 
 	// selfReportingCollectors records the collectors that publish their own
 	// up/down state through WithStatusReporter (finding №438). For these the
@@ -1759,7 +1777,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 			sc.WithMalformedDiagnostics(diagAllowlist, cfg.BPF.KernelFilter.Enabled)
 			sc.WithRingbufNetpoll(ringbufNetpoll)
-			collectors = append(collectors, sc.WithBackpressureStrategy(bpStrategy))
+			collectors = append(collectors, sc.WithBackpressureStrategy(protectedFirstHop))
 			slog.Info("syscall: collector enabled")
 		}
 
@@ -1788,7 +1806,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				}))
 			}
 			nc.WithRingbufNetpoll(ringbufNetpoll)
-			collectors = append(collectors, nc.WithBackpressureStrategy(bpStrategy))
+			collectors = append(collectors, nc.WithBackpressureStrategy(protectedFirstHop))
 			slog.Info("network: collector enabled")
 		}
 
@@ -1823,6 +1841,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 							if pf := enablePathFilter("fileaccess", pathMap, dropCounters, cfg.BPF.KernelFilter.PathDenylist); pf != nil {
 								pathFilterCtrl.Store(pf)
 							}
+						}
+					}
+					// Волна 8.1, item 11: ронять read/write без разрешённого пути в ядре.
+					if fo.DropUnresolvedRW {
+						if err := fc.SetDropUnresolvedRW(true); err != nil {
+							slog.Warn("fileaccess: drop_unresolved_rw unavailable", slog.Any("error", err))
+						} else {
+							slog.Info("fileaccess: dropping read/write events with unresolved path in the kernel")
+							unresolvedRWSource.Store(fc)
 						}
 					}
 					if cfg.BPF.Sampling.Enabled {
@@ -1866,7 +1893,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			// without a reporter its collector_up kept the optimistic 1 —
 			// the only series that lied unconditionally in a run.
 			collectors = append(collectors, dc.WithStatusReporter(collectorUpReporter(dc.Name(), nil)).
-				WithBackpressureStrategy(bpStrategy).
+				WithBackpressureStrategy(protectedFirstHop).
 				WithMinEventsPerStaleWindow(cfg.Collectors.DNS.MinEventsPerStaleWindow))
 			slog.Info("dns: collector enabled", slog.Bool("enabled", cfg.Collectors.DNS.Enabled))
 		}
@@ -1882,7 +1909,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					tc = tc.WithScanInterval(d)
 				}
 				tc = tc.WithMaxDataSize(cfg.Collectors.TLS.MaxDataSize)
-				collectors = append(collectors, tc.WithStatusReporter(collectorUpReporter(tc.Name(), nil)).WithBackpressureStrategy(bpStrategy))
+				collectors = append(collectors, tc.WithStatusReporter(collectorUpReporter(tc.Name(), nil)).WithBackpressureStrategy(protectedFirstHop))
 				slog.Info("tls: collector enabled",
 					slog.String("scan_interval", cfg.Collectors.TLS.ScanInterval),
 					slog.Int("max_data_size", cfg.Collectors.TLS.MaxDataSize))
@@ -1900,7 +1927,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					hc = hc.WithScanInterval(d)
 				}
 				hc = hc.WithMaxDataSize(cfg.Collectors.HTTPPlaintext.MaxDataSize)
-				collectors = append(collectors, hc.WithStatusReporter(collectorUpReporter(hc.Name(), nil)).WithBackpressureStrategy(bpStrategy))
+				collectors = append(collectors, hc.WithStatusReporter(collectorUpReporter(hc.Name(), nil)).WithBackpressureStrategy(protectedFirstHop))
 				slog.Info("http_plaintext: collector enabled",
 					slog.String("scan_interval", cfg.Collectors.HTTPPlaintext.ScanInterval),
 					slog.Int("max_data_size", cfg.Collectors.HTTPPlaintext.MaxDataSize))
@@ -1925,7 +1952,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {
 			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
 		} else {
-			collectors = append(collectors, kc.WithStatusReporter(collectorUpReporter(kc.Name(), nil)).WithBackpressureStrategy(bpStrategy))
+			collectors = append(collectors, kc.WithStatusReporter(collectorUpReporter(kc.Name(), nil)).WithBackpressureStrategy(protectedFirstHop))
 			slog.Info("kmod: collector enabled")
 		}
 	}
@@ -1954,7 +1981,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if iocErr != nil {
 			slog.Warn("iouring: collector creation failed, skipping", slog.Any("error", iocErr))
 		} else {
-			ioc = ioc.WithStatusReporter(collectorUpReporter(ioc.Name(), nil)).WithBackpressureStrategy(bpStrategy)
+			ioc = ioc.WithStatusReporter(collectorUpReporter(ioc.Name(), nil)).WithBackpressureStrategy(protectedFirstHop)
 			collectors = append(collectors, ioc)
 			slog.Info("iouring: collector enabled")
 		}
@@ -1964,7 +1991,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if bmErr != nil {
 			slog.Warn("bpf_monitor: collector creation failed, skipping", slog.Any("error", bmErr))
 		} else {
-			bmc = bmc.WithStatusReporter(collectorUpReporter(bmc.Name(), nil)).WithBackpressureStrategy(bpStrategy)
+			bmc = bmc.WithStatusReporter(collectorUpReporter(bmc.Name(), nil)).WithBackpressureStrategy(protectedFirstHop)
 			collectors = append(collectors, bmc)
 			slog.Info("bpf_monitor: collector enabled")
 		}
@@ -1974,7 +2001,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if tfErr != nil {
 			slog.Warn("tls_fingerprint: collector creation failed, skipping", slog.Any("error", tfErr))
 		} else {
-			tfc = tfc.WithStatusReporter(collectorUpReporter(tfc.Name(), nil)).WithBackpressureStrategy(bpStrategy)
+			tfc = tfc.WithStatusReporter(collectorUpReporter(tfc.Name(), nil)).WithBackpressureStrategy(protectedFirstHop)
 			collectors = append(collectors, tfc)
 			slog.Info("tls_fingerprint: collector enabled")
 		}
@@ -2472,6 +2499,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// cumulative value every tick would double-count).
 	exporter.EventsDropped.WithLabelValues("fileaccess", "path_denylist")
 	var lastPathFilterDropTotal uint64
+	var lastUnresolvedRW uint64
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -2530,6 +2558,17 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					} else if delta := total - lastPathFilterDropTotal; delta > 0 {
 						exporter.RecordDroppedN("fileaccess", "path_denylist", delta)
 						lastPathFilterDropTotal = total
+					}
+				}
+
+				if fc := unresolvedRWSource.Load(); fc != nil {
+					if total, err := fc.UnresolvedRWDropped(); err == nil {
+						if total < lastUnresolvedRW {
+							lastUnresolvedRW = total
+						} else if delta := total - lastUnresolvedRW; delta > 0 {
+							exporter.FileUnresolvedRWFiltered.Add(float64(delta))
+							lastUnresolvedRW = total
+						}
 					}
 				}
 

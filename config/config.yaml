@@ -442,6 +442,9 @@ collectors:
     track_open: true    # sys_enter_openat — low volume, needed for sensitive-path detection
     track_read: false   # sys_enter_read   — very high volume (100K+/s on busy hosts); enable only if needed
     track_write: false  # sys_enter_write  — very high volume; enable only if needed
+    # Drop read/write on a descriptor with no resolved path (socket, pipe,
+    # eventfd) in the kernel: no file rule can match them (wave 8.1 item 11).
+    drop_unresolved_rw: true
   backpressure_strategy: drop   # drop | block | sample
   iouring:
     enabled: false               # Monitor io_uring activity (setup/enter) via kprobes

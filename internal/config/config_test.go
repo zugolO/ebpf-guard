@@ -44,6 +44,8 @@ func TestNewManager_Defaults(t *testing.T) {
 	assert.Equal(t, 32768, cfg.BPF.MapSizes.Connections)
 	// wave 8.1 item 10: 16384 overflowed under attacks (stage E), stays 65536.
 	assert.Equal(t, 65536, cfg.BPF.EventQueueDepth)
+	// Волна 8.1, item 11: read/write без разрешённого пути роняются в ядре по умолчанию.
+	assert.True(t, cfg.Collectors.FileOps.DropUnresolvedRW)
 
 	// Check rules defaults
 	assert.Equal(t, "rules/", cfg.Rules.Path)

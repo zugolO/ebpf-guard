@@ -20,6 +20,26 @@ rules:
           values: ["logrotate", "newsyslog", "journald", "rsyslog", "syslogd",
                    "systemd", "auditd", "fluentd", "filebeat", "vector",
                    "promtail", "loki", "telegraf"]
+    exceptions:
+      # Волна 8.1, item 7: у оси file.op появился продюсер (unlink/rename/
+      # truncate/rmdir), и правило перестало быть немым. Собственные демоны
+      # журналирования ноды делают ровно эти операции в /var/log штатно:
+      # systemd-journald — ftruncate своих файлов (зонд Ц1 волны 7: 34 события/мин
+      # на idle), logrotate — rename/unlink при ротации, rsyslogd — переоткрытие.
+      # Исключение по образу (/proc/<pid>/exe ставит ядро в execve), а не по comm:
+      # comm подделывается prctl/exec -a, и список comm в условии этого правила
+      # (оставлен как был) у journald даже не совпадал — его comm
+      # «systemd-journal», обрезанный до 15 байт. Пустой exe_path (процесс умер
+      # до readlink) под исключение не подходит — отказ открытый, в шум.
+      - name: log-daemon-image
+        condition:
+          field: proc.exe_path
+          op: in
+          values:
+            - "/usr/lib/systemd/systemd-journald"
+            - "/lib/systemd/systemd-journald"
+            - "/usr/sbin/logrotate"
+            - "/usr/sbin/rsyslogd"
     severity: warning
     action: alert
     tags: [mitre:T1070.002, defense-evasion]

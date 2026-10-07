@@ -29,9 +29,11 @@ func TestWave6_2_2_UnreachableFileOpRules_FlagsImpossibleOps(t *testing.T) {
 		}
 	}
 	engine := NewRuleEngine([]Rule{
-		mk("dead_unlink_only", []string{"unlink", "truncate", "rename"}),
+		// Волна 8.1, item 7: unlink/truncate/rename стали достижимы; немоту
+		// держат операции, которых нет ни у одного хука.
+		mk("dead_unlink_only", []string{"link", "mknod", "symlink"}),
 		mk("live_write", []string{"write"}),
-		mk("live_mixed", []string{"unlink", "write"}),
+		mk("live_mixed", []string{"link", "write"}),
 		{ID: "no_op_condition", EventType: types.EventFileAccess, Severity: types.SeverityWarning, Action: ActionAlert,
 			Condition: RuleCondition{Field: "filename", Op: OpPrefix, Values: []string{"/etc/"}}},
 	})
@@ -56,11 +58,8 @@ func TestWave6_2_2_UnreachableFileOpRules_ShippedRuleset(t *testing.T) {
 	// is an owner decision (a new BPF hook, or narrowing to "write" and
 	// accepting that every ordinary write to /var/log/ and /etc/ then matches)
 	// recorded in plan.md, not something to paper over here.
-	assert.ElementsMatch(t, []string{
-		"defense_evasion_journald_log_clear",
-		"evasion_log_clear",
-		"impact_mass_file_deletion_critical",
-		"ransomware_log_wipe",
-	}, unreachable,
+	// Волна 8.1, item 7: хуки unlink/rename/truncate/rmdir добавлены, четыре
+	// правила, стоявшие здесь с волны 6.2.2, достижимы. Набор пуст.
+	assert.Empty(t, unreachable,
 		"the set of op-unreachable rules changed: add the new one here after deciding what to do with it, or remove one that was fixed")
 }

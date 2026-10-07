@@ -1,0 +1,10 @@
+// Wave 8.1 item 11(a): who produces the file stream the fileaccess collector emits.
+// Counts the syscalls behind the read/write/openat/chmod hooks by comm, split
+// into stdio fds (0..2: pipes/ttys, the shell-redirect class) and the rest.
+// AGENT_PID is substituted by the runner (self-exclusion, as pid_is_agent()).
+// bpftrace 0.14: no BEGIN, short predicates only.
+tracepoint:syscalls:sys_enter_read /pid != AGENT_PID/ { @read[comm, args->fd < 3] = count(); }
+tracepoint:syscalls:sys_enter_write /pid != AGENT_PID/ { @write[comm, args->fd < 3] = count(); }
+tracepoint:syscalls:sys_enter_openat /pid != AGENT_PID/ { @openat[comm] = count(); }
+tracepoint:syscalls:sys_enter_fchmodat /pid != AGENT_PID/ { @chmod[comm] = count(); }
+interval:s:600 { exit(); }

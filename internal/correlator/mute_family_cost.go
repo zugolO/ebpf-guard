@@ -28,7 +28,7 @@ const (
 
 var muteFamilyCosts = map[string]MuteFamilyCost{
 	MuteFamilyFileOp: {
-		Reason: "bpf/fileaccess.bpf.c hooks openat, chmod/fchmodat/fchmod, read and write only (dup* just keep the fd-to-path map): no hook produces file.op unlink, rmdir, truncate or rename",
+		Reason: "bpf/fileaccess.bpf.c hooks openat, chmod/fchmodat/fchmod, read, write and (since wave 8.1 item 7) unlink/unlinkat/rmdir/truncate/ftruncate/rename/renameat/renameat2: a rule is mute on this axis only if it names an op outside open/read/write/chmod/unlink/rename/truncate/rmdir (link, mknod, symlink have no hook)",
 		Price: "events: the eight candidate syscalls (unlink 87, unlinkat 263, rmdir 84, truncate 76, ftruncate 77, rename 82, renameat 264, renameat2 316) are 42 calls/min on an idle node, 34 of them ftruncate by systemd-journal; pairs of portions 2-4 realised 2.4-6x the probe, so about 100-250 events/min. " +
 			"alerts are the real price: systemd-journal truncates journal files, the persistent journal is under /var/log/journal (3.2G), so ransomware_log_wipe (uid 0, no comm predicate) and evasion_log_clear (comm list says journald, the comm is systemd-journal) would alert about 33/min on the node's own journald unless an exe_path identity exclusion lands first. The path of those ftruncate calls was NOT measured (bpftrace counted by comm). Code: about 300 lines over bpf/common.h, bpf/fileaccess.bpf.c, the generated stubs, collector/fileaccess.go, pkg/types, metrics, plus a verifier run on the stand",
 		Source: "server-logs/w7-syscall-price-c1-2026-10-01 (300 s, idle) and server-logs/collect-6.4-w669P2A..P4B",

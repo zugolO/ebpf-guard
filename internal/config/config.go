@@ -411,6 +411,14 @@ type FileOpsConfig struct {
 	TrackRead bool `mapstructure:"track_read"`
 	// TrackWrite enables sys_enter_write hooks. Default: false (very high volume).
 	TrackWrite bool `mapstructure:"track_write"`
+	// DropUnresolvedRW drops read/write events whose fd has no resolved path
+	// (socket, pipe, eventfd, file opened before the agent) in the kernel,
+	// before the ring buffer. Волна 8.1, item 11: no file rule can match such
+	// an event; the drop is counted in
+	// ebpf_guard_file_unresolved_rw_filtered_total. Default: true — A/B pair
+	// 06.10.2026 on ebaka2: events −63…−72%, agent CPU 11.7% → 5.5% of a core,
+	// no rule lost on the attack pack, zero losses.
+	DropUnresolvedRW bool `mapstructure:"drop_unresolved_rw"`
 }
 
 // CollectorsConfig holds per-collector settings.
@@ -2316,6 +2324,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collectors.file_ops.track_open", true)
 	v.SetDefault("collectors.file_ops.track_read", false)
 	v.SetDefault("collectors.file_ops.track_write", false)
+	v.SetDefault("collectors.file_ops.drop_unresolved_rw", true)
 	v.SetDefault("collectors.cloudtrail.enabled", false)
 	v.SetDefault("collectors.gcp_audit.enabled", false)
 	v.SetDefault("collectors.azure_monitor.enabled", false)

@@ -146,6 +146,45 @@ struct {
 } fd_lookup_scratch SEC(".maps");
 
 /*
+ * Волна 8.1, item 11: read/write срабатывают на ЛЮБОЙ fd — сокет, pipe,
+ * eventfd, файл, открытый до старта агента. У таких событий путь не
+ * разрешается, и ни одно файловое правило на них не срабатывает (гард
+ * TestWave8_1_NoFileRuleFiresOnUnresolvedReadWrite), а профайлер аномалий
+ * получает от них только +1 к счёту образцов. На ebaka2 это поток k3s-server
+ * (61% файловых событий по разрезу 06.10.2026). rw_unresolved_cfg[0] = 1 —
+ * ронять их в ядре до резерва кольца; счётчик rw_unresolved_drops виден как
+ * ebpf_guard_file_unresolved_rw_filtered_total. Карты живут здесь, а не в
+ * common.h: иначе каждый объект получил бы свою мёртвую копию (№537).
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u32);
+} rw_unresolved_cfg SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} rw_unresolved_drops SEC(".maps");
+
+static __always_inline bool drop_unresolved_rw(void)
+{
+	__u32 zero = 0;
+	__u32 *on = bpf_map_lookup_elem(&rw_unresolved_cfg, &zero);
+	__u64 *cnt;
+
+	if (!on || !*on)
+		return false;
+	cnt = bpf_map_lookup_elem(&rw_unresolved_drops, &zero);
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+	return true;
+}
+
+/*
  * fd_path_lookup - look up fd→path without touching the ring buffer, copying
  * the result into a caller-owned snapshot. Used by trace_read/trace_write to
  * check the path-prefix denylist BEFORE reserving an event, so a filtered
@@ -303,7 +342,7 @@ int trace_close(struct trace_event_raw_sys_enter *ctx)
  * Первое отсекается префиксом в правиле, второе видно как алерт с пустым
  * file.path и считается отдельно на стороне userspace.
  */
-static __always_inline void chmod_emit(const char *path, __u8 truncated, umode_t mode)
+static __always_inline void file_op_emit(const char *path, __u8 truncated, __u8 op, umode_t mode)
 {
 	struct event *e;
 
@@ -319,11 +358,11 @@ static __always_inline void chmod_emit(const char *path, __u8 truncated, umode_t
 
 	fill_process_info(e);
 	e->type = EVENT_TYPE_FILE_ACCESS;
-	e->file.op = FILE_OP_CHMOD;
+	e->file.op = op;
 	e->file.flags = 0;
-	/* mode здесь — НОВЫЙ режим, который просит chmod, а не флаги открытия:
+	/* mode у chmod — НОВЫЙ режим, который просит chmod, а не флаги открытия:
 	 * единственное место, где правило может увидеть «выставлен бит
-	 * исполнения», не читая файл. */
+	 * исполнения», не читая файл. У прочих операций 0. */
 	e->file.mode = mode;
 	__builtin_memset(&e->file.filename, 0, sizeof(e->file.filename));
 	e->file.fd_path_truncated = truncated;
@@ -332,6 +371,11 @@ static __always_inline void chmod_emit(const char *path, __u8 truncated, umode_t
 		__builtin_memcpy(e->file.filename, path, FILENAME_LEN);
 
 	submit_event(e);
+}
+
+static __always_inline void chmod_emit(const char *path, __u8 truncated, umode_t mode)
+{
+	file_op_emit(path, truncated, FILE_OP_CHMOD, mode);
 }
 
 /*
@@ -580,6 +624,128 @@ int trace_dup3_exit(struct trace_event_raw_sys_exit *ctx)
 }
 
 /*
+ * Волна 8.1, item 7: unlink/rmdir/truncate/rename на файловой оси.
+ *
+ * Все хуки — sys_enter, то есть событие эмитится до исполнения: неуспешный
+ * unlink(2) тоже даёт событие. Так же устроен chmod; правилам «попытка
+ * стереть журнал» это и нужно. Относительный путь при dfd != AT_FDCWD
+ * остаётся относительным — то же ограничение, что у fchmodat.
+ *
+ * Привязка каждого хука считается в ebpf_guard_file_hook_attach_total: на
+ * arm64 нет unlink/rmdir/rename/truncate без -at, и промах там — штатное
+ * разнообразие ядер, а не поломка.
+ */
+static __always_inline int path_op_hook(const char *user_path, __u8 op)
+{
+	struct fd_path path = {};
+
+	if (pid_is_agent())
+		return 0;
+	if (kernel_filter_enabled() && comm_is_denied())
+		return 0;
+
+	filename_read(&path, user_path);
+	file_op_emit(path.path, path.truncated, op, 0);
+	return 0;
+}
+
+/* rename: два пути, один буфер — двух fd_path на стеке верификатор не даст
+ * (2 × 257 Б > 512). */
+static __always_inline int rename_hook(const char *oldp, const char *newp)
+{
+	struct fd_path path = {};
+
+	if (pid_is_agent())
+		return 0;
+	if (kernel_filter_enabled() && comm_is_denied())
+		return 0;
+
+	filename_read(&path, oldp);
+	file_op_emit(path.path, path.truncated, FILE_OP_RENAME, 0);
+	__builtin_memset(&path, 0, sizeof(path));
+	filename_read(&path, newp);
+	file_op_emit(path.path, path.truncated, FILE_OP_RENAME, 0);
+	return 0;
+}
+
+#define FA_AT_REMOVEDIR 0x200
+
+SEC("tp/syscalls/sys_enter_unlink")
+int trace_unlink(struct trace_event_raw_sys_enter *ctx)
+{
+	return path_op_hook((const char *)ctx->args[0], FILE_OP_UNLINK);
+}
+
+/* args[0]=dfd, args[1]=pathname, args[2]=flags; AT_REMOVEDIR — это rmdir. */
+SEC("tp/syscalls/sys_enter_unlinkat")
+int trace_unlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+	__u8 op = ((int)ctx->args[2] & FA_AT_REMOVEDIR) ? FILE_OP_RMDIR : FILE_OP_UNLINK;
+
+	return path_op_hook((const char *)ctx->args[1], op);
+}
+
+SEC("tp/syscalls/sys_enter_rmdir")
+int trace_rmdir(struct trace_event_raw_sys_enter *ctx)
+{
+	return path_op_hook((const char *)ctx->args[0], FILE_OP_RMDIR);
+}
+
+SEC("tp/syscalls/sys_enter_truncate")
+int trace_truncate(struct trace_event_raw_sys_enter *ctx)
+{
+	return path_op_hook((const char *)ctx->args[0], FILE_OP_TRUNCATE);
+}
+
+/* ftruncate(fd, len): путь из fd_path_map, как у fchmod. Это главный
+ * производитель оси на idle — systemd-journald (зонд Ц1 волны 7: 34 из 42
+ * событий/мин). */
+SEC("tp/syscalls/sys_enter_ftruncate")
+int trace_ftruncate(struct trace_event_raw_sys_enter *ctx)
+{
+	unsigned int fd = (unsigned int)ctx->args[0];
+	__u32 zero = 0;
+	struct fd_path *fdp;
+	__u32 tgid;
+
+	if (pid_is_agent())
+		return 0;
+	if (kernel_filter_enabled() && comm_is_denied())
+		return 0;
+
+	tgid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	fdp = bpf_map_lookup_elem(&fd_lookup_scratch, &zero);
+	if (!fdp)
+		return 0;
+
+	if (!fd_path_lookup(tgid, fd, fdp)) {
+		file_op_emit(NULL, 0, FILE_OP_TRUNCATE, 0);
+		return 0;
+	}
+	file_op_emit(fdp->path, fdp->truncated, FILE_OP_TRUNCATE, 0);
+	return 0;
+}
+
+SEC("tp/syscalls/sys_enter_rename")
+int trace_rename(struct trace_event_raw_sys_enter *ctx)
+{
+	return rename_hook((const char *)ctx->args[0], (const char *)ctx->args[1]);
+}
+
+/* renameat/renameat2: args[0]=olddfd, args[1]=old, args[2]=newdfd, args[3]=new. */
+SEC("tp/syscalls/sys_enter_renameat")
+int trace_renameat(struct trace_event_raw_sys_enter *ctx)
+{
+	return rename_hook((const char *)ctx->args[1], (const char *)ctx->args[3]);
+}
+
+SEC("tp/syscalls/sys_enter_renameat2")
+int trace_renameat2(struct trace_event_raw_sys_enter *ctx)
+{
+	return rename_hook((const char *)ctx->args[1], (const char *)ctx->args[3]);
+}
+
+/*
  * Tracepoint for sys_enter_read — emit event with fd-resolved filename.
  * args[0]=fd.  Raw context avoids "invalid bpf_context access off=0 size=8"
  * that BPF_PROG causes on kernels lacking trace_event_raw_sys_enter_read BTF.
@@ -629,6 +795,8 @@ int trace_read(struct trace_event_raw_sys_enter *ctx)
 
 	have_path = fd_path_lookup(tgid, fd, fdp);
 	if (kernel_filter_enabled() && have_path && path_is_denied(fdp->path))
+		return 0;
+	if (!have_path && drop_unresolved_rw())
 		return 0;
 
 	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
@@ -696,6 +864,8 @@ int trace_write(struct trace_event_raw_sys_enter *ctx)
 
 	have_path = fd_path_lookup(tgid, fd, fdp);
 	if (kernel_filter_enabled() && have_path && path_is_denied(fdp->path))
+		return 0;
+	if (!have_path && drop_unresolved_rw())
 		return 0;
 
 	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring

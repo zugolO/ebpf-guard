@@ -33,6 +33,8 @@ type FileaccessMaps struct {
 	PathFilterMap            *ebpf.Map `ebpf:"path_filter_map"`
 	RingbufFullCounters      *ebpf.Map `ebpf:"ringbuf_full_counters"`
 	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
+	RwUnresolvedCfg          *ebpf.Map `ebpf:"rw_unresolved_cfg"`
+	RwUnresolvedDrops        *ebpf.Map `ebpf:"rw_unresolved_drops"`
 	SyscallFilterMap         *ebpf.Map `ebpf:"syscall_filter_map"`
 }
 
@@ -52,6 +54,14 @@ type FileaccessPrograms struct {
 	TraceOpenExit    *ebpf.Program `ebpf:"trace_open_exit"`
 	TraceOpenat2Exit *ebpf.Program `ebpf:"trace_openat2_exit"`
 	TraceRead        *ebpf.Program `ebpf:"trace_read"`
+	TraceFtruncate   *ebpf.Program `ebpf:"trace_ftruncate"`
+	TraceRename      *ebpf.Program `ebpf:"trace_rename"`
+	TraceRenameat    *ebpf.Program `ebpf:"trace_renameat"`
+	TraceRenameat2   *ebpf.Program `ebpf:"trace_renameat2"`
+	TraceRmdir       *ebpf.Program `ebpf:"trace_rmdir"`
+	TraceTruncate    *ebpf.Program `ebpf:"trace_truncate"`
+	TraceUnlink      *ebpf.Program `ebpf:"trace_unlink"`
+	TraceUnlinkat    *ebpf.Program `ebpf:"trace_unlinkat"`
 	TraceWrite       *ebpf.Program `ebpf:"trace_write"`
 }
 
@@ -97,6 +107,30 @@ func (o *FileaccessObjects) Close() error {
 	if o.TraceOpen != nil {
 		errs = append(errs, o.TraceOpen.Close())
 	}
+	if o.TraceFtruncate != nil {
+		errs = append(errs, o.TraceFtruncate.Close())
+	}
+	if o.TraceRename != nil {
+		errs = append(errs, o.TraceRename.Close())
+	}
+	if o.TraceRenameat != nil {
+		errs = append(errs, o.TraceRenameat.Close())
+	}
+	if o.TraceRenameat2 != nil {
+		errs = append(errs, o.TraceRenameat2.Close())
+	}
+	if o.TraceRmdir != nil {
+		errs = append(errs, o.TraceRmdir.Close())
+	}
+	if o.TraceTruncate != nil {
+		errs = append(errs, o.TraceTruncate.Close())
+	}
+	if o.TraceUnlink != nil {
+		errs = append(errs, o.TraceUnlink.Close())
+	}
+	if o.TraceUnlinkat != nil {
+		errs = append(errs, o.TraceUnlinkat.Close())
+	}
 	if o.TraceOpenExit != nil {
 		errs = append(errs, o.TraceOpenExit.Close())
 	}
@@ -132,6 +166,12 @@ func (o *FileaccessObjects) Close() error {
 	}
 	if o.SamplingConfig != nil {
 		errs = append(errs, o.SamplingConfig.Close())
+	}
+	if o.RwUnresolvedCfg != nil {
+		errs = append(errs, o.RwUnresolvedCfg.Close())
+	}
+	if o.RwUnresolvedDrops != nil {
+		errs = append(errs, o.RwUnresolvedDrops.Close())
 	}
 	if o.SyscallFilterMap != nil {
 		errs = append(errs, o.SyscallFilterMap.Close())

@@ -74,6 +74,21 @@
  * для fchmod(2) — своя же таблица fd→путь (fd_path_map).
  */
 #define FILE_OP_CHMOD 3
+/*
+ * FILE_OP_UNLINK/RENAME/TRUNCATE/RMDIR — волна 8.1, item 7 (решение 3 владельца
+ * волны 7). Четыре правила (evasion_log_clear, ransomware_log_wipe и соседи в
+ * credential-and-defense-gaps/impact-gaps/collection-and-evasion-gaps) стояли
+ * на этих операциях, а продюсера не было: UnreachableFileOpRules печатал их
+ * немыми на каждом старте. Путь берётся так же, как у chmod: указатель на
+ * строку из аргумента сисколла (unlink/unlinkat/rmdir/truncate/rename*) или
+ * fd_path_map (ftruncate). rename эмитит ДВА события — старый и новый путь,
+ * op одна и та же: правило «удалили лог переименованием» смотрит на старый,
+ * «подменили бинарь» — на новый.
+ */
+#define FILE_OP_UNLINK   4
+#define FILE_OP_RENAME   5
+#define FILE_OP_TRUNCATE 6
+#define FILE_OP_RMDIR    7
 
 /* Address family codes - must match pkg/types/event.go */
 #define AF_INET   2

@@ -37,10 +37,18 @@ func init() {
 	// Та же причина для привязки chmod-хуков (6.2.1, слой 3): прогон, где ни
 	// один хук не привязался, обязан отличаться в /metrics от бинаря без
 	// счётчика — иначе тишина трёх правил читается как успешное сужение.
-	for _, h := range []string{"sys_enter_chmod", "sys_enter_fchmodat", "sys_enter_fchmod"} {
+	// Волна 8.1, item 7: те же три исхода у восьми хуков оси file.op.
+	for _, h := range []string{"sys_enter_chmod", "sys_enter_fchmodat", "sys_enter_fchmod",
+		"sys_enter_unlink", "sys_enter_unlinkat", "sys_enter_rmdir", "sys_enter_truncate",
+		"sys_enter_ftruncate", "sys_enter_rename", "sys_enter_renameat", "sys_enter_renameat2"} {
 		for _, r := range []string{"ok", "error", "missing"} {
 			FileHookAttach.WithLabelValues(h, r)
 		}
+	}
+
+	for _, op := range append(fileOpLabels[:], "other") {
+		FileEventsByOp.WithLabelValues(op, "resolved")
+		FileEventsByOp.WithLabelValues(op, "empty")
 	}
 
 	ProcArgsDropped.WithLabelValues("stale_exec")
@@ -943,6 +951,48 @@ var ChmodUnresolved = promauto.NewCounter(
 
 // RecordChmodUnresolved counts one chmod event with an unresolved path.
 func RecordChmodUnresolved() { ChmodUnresolved.Inc() }
+
+// FileEventsByOp counts file-collector events by file.op. Волна 8.1, items 7
+// и 11: цену оси unlink/rename/truncate/rmdir (≈1 событие/с) в общем
+// файловом потоке (≈1100/с) иначе не видно, а разрез потока по операции —
+// первый вход item 11. Лейбл path отделяет события с разрешённым путём от
+// пустых: read/write срабатывают на любой fd (сокет, pipe, eventfd), и такое
+// событие правилам с предикатом пути не подходит. Кардинальность 9 × 2.
+var FileEventsByOp = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_file_events_by_op_total",
+		Help: "File-collector events delivered to userspace, by file.op and whether the path resolved",
+	},
+	[]string{"op", "path"},
+)
+
+var fileOpLabels = [8]string{"open", "read", "write", "chmod", "unlink", "rename", "truncate", "rmdir"}
+
+// RecordFileOp counts one file event by its FILE_OP_* code and path presence.
+func RecordFileOp(op uint8, pathResolved bool) {
+	path := "empty"
+	if pathResolved {
+		path = "resolved"
+	}
+	if int(op) < len(fileOpLabels) {
+		FileEventsByOp.WithLabelValues(fileOpLabels[op], path).Inc()
+		return
+	}
+	FileEventsByOp.WithLabelValues("other", path).Inc()
+}
+
+// FileUnresolvedRWFiltered counts read/write events dropped in the kernel
+// because their fd had no resolved path (волна 8.1, item 11,
+// collectors.file_ops.drop_unresolved_rw). Deliberately NOT a reason of
+// events_dropped_total: it is filtering of events no rule can match, not a
+// loss, and gate criteria summing "drops except path_denylist" must not read
+// it as one.
+var FileUnresolvedRWFiltered = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_file_unresolved_rw_filtered_total",
+		Help: "read/write events dropped in the kernel because the fd had no resolved path",
+	},
+)
 
 // RecordFileHookAttach records one attach outcome for a file-collector hook.
 func RecordFileHookAttach(hook, result string) {

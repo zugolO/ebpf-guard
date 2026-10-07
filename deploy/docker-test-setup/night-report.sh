@@ -314,3 +314,54 @@ else
         done
     fi
 fi
+
+# ── 8.1.3: CPU на событие за ночь (пункт 3 критерия выхода волны 8.1) ──
+# База — 226 мкс/событие ночи №3, разброс срезов той ночи ±9%. Величину считает
+# ЭМИТТЕР одной формулой для любой ночи: Δprocess_cpu_seconds_total /
+# Δevents_total между первым и последним снимком ([[verdict-input-must-be-computed-by-emitter]]).
+# ДОСТИГНУТО — сдвиг вниз больше разброса базы (≤ 205,7 мкс); меньше — правки
+# волны от нуля не отличимы, ПРОВАЛЕН. Рядом печатается доля ядра против
+# 28,6% ночи №3: после item 11 (сброс read/write без пути) уходят ДЕШЁВЫЕ
+# события, и CPU на событие растёт при вдвое меньшем CPU в целом.
+c0=$(awk '/^process_cpu_seconds_total /{print $2}' "$f0" 2>/dev/null)
+cN=$(awk '/^process_cpu_seconds_total /{print $2}' "$fN" 2>/dev/null)
+e0=$(_val "$f0" ebpf_guard_events_total); eN=$(_val "$fN" ebpf_guard_events_total)
+if [ -z "$st0" ] || [ "$st0" != "$stN" ]; then
+    echo "НЕИЗМЕРИМ: 8.1.3 НЕИЗМЕРИМ (класс НАЗВАН: рестарт агента между первым и последним снимком)"
+elif [ -z "$c0" ] || [ -z "$cN" ] || [ -z "$e0" ] || [ -z "$eN" ]; then
+    echo "НЕИЗМЕРИМ: 8.1.3 НЕИЗМЕРИМ (класс НАЗВАН: нет серии process_cpu_seconds_total или ebpf_guard_events_total в первом/последнем снимке)"
+else
+    awk -v c0="$c0" -v cN="$cN" -v e0="$e0" -v eN="$eN" -v secs="$(( ${last:-0} * INTERVAL ))" 'BEGIN {
+        core = (secs > 0) ? sprintf("; доля ядра %.1f%% против 28,6%% ночи №3", 100 * (cN - c0) / secs) : ""
+        de = eN - e0; dc = cN - c0
+        if (de <= 0 || dc < 0) { printf "НЕИЗМЕРИМ: 8.1.3 НЕИЗМЕРИМ (класс НАЗВАН: событий за ночь %d, CPU %+.1f с)\n", de, dc; exit }
+        us = 1e6 * dc / de
+        if (us <= 226 * 0.91)
+            printf "ДОСТИГНУТО: 8.1.3 ДОСТИГНУТО (CPU на событие %.1f мкс против базы 226 мкс ночи №3, сдвиг %+.0f%% за пределами разброса базы ±9%%; CPU %.0f с на %d событий%s)\n", us, 100 * (us - 226) / 226, dc, de, core
+        else
+            printf "ПРОВАЛЕН: 8.1.3 ПРОВАЛЕН (CPU на событие %.1f мкс против базы 226 мкс, сдвиг %+.0f%% в пределах разброса ±9%% или выше — от нуля не отличим%s)\n", us, 100 * (us - 226) / 226, core
+    }' < /dev/null
+fi
+
+# ── 8.1.4: ось file.op жива (item 7: unlink/rename/truncate/rmdir) ──
+# Продюсер оси предъявляется событиями за ночь, а не конфигом: на любой ноде с
+# постоянным журналом systemd-journald делает ftruncate (зонд Ц1 волны 7 — 34/мин).
+# Нет серии — бинарь без прибора, НЕИЗМЕРИМ; хуки не привязались — ПРОВАЛЕН.
+m0=0; mN=0; seen=""
+for op in unlink rename truncate rmdir; do
+    a=$(_val "$f0" ebpf_guard_file_events_by_op_total "op=\"$op\""); b=$(_val "$fN" ebpf_guard_file_events_by_op_total "op=\"$op\"")
+    [ -n "$b" ] && seen=1
+    m0=$(( m0 + ${a:-0} )); mN=$(( mN + ${b:-0} ))
+done
+hooks_ok=$(awk '/^ebpf_guard_file_hook_attach_total\{/ && /result="ok"/ && /hook="sys_enter_(unlink|unlinkat|rmdir|truncate|ftruncate|rename|renameat|renameat2)"/ && $NF > 0 { n++ } END { print n + 0 }' "$fN" 2>/dev/null)
+if [ -z "$st0" ] || [ "$st0" != "$stN" ]; then
+    echo "НЕИЗМЕРИМ: 8.1.4 НЕИЗМЕРИМ (класс НАЗВАН: рестарт агента между первым и последним снимком)"
+elif [ -z "$seen" ]; then
+    echo "НЕИЗМЕРИМ: 8.1.4 НЕИЗМЕРИМ (класс НАЗВАН: серии ebpf_guard_file_events_by_op_total нет — бинарь без прибора оси, нет серии ≠ 0)"
+elif [ "${hooks_ok:-0}" -eq 0 ]; then
+    echo "ПРОВАЛЕН: 8.1.4 ПРОВАЛЕН (ни один из восьми хуков unlink/rename/truncate/rmdir не привязан — правила оси file.op немы)"
+elif [ $(( mN - m0 )) -le 0 ]; then
+    echo "ПРОВАЛЕН: 8.1.4 ПРОВАЛЕН (хуков привязано $hooks_ok из 8, но событий оси за ночь 0 — продюсер не доказан)"
+else
+    echo "ДОСТИГНУТО: 8.1.4 ДОСТИГНУТО (событий unlink/rename/truncate/rmdir за ночь $(( mN - m0 )); хуков привязано $hooks_ok из 8)"
+fi

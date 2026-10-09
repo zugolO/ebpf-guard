@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -11,8 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func writeConfigAtomic(t *testing.T, path string, data []byte) {
+// writeConfigChange rewrites the watched config the way production does on
+// Linux: an atomic rename over the old file (editors, ConfigMap-style saves),
+// which inotify reports as CREATE of the config name. On darwin kqueue reports
+// the same rename as REMOVE of the config name followed by CREATE; under
+// viper.WatchConfig that REMOVE ended the watch loop for good, so the helper
+// writes in place there (kqueue: WRITE). Since №551 Manager has its own
+// watcher that survives REMOVE — the rename and rm+create shapes are now
+// covered on every platform by TestManager_Watch_SurvivesRemove and
+// TestManager_Watch_AtomicRename; the helper keeps its split so the older
+// tests stay what they were.
+func writeConfigChange(t *testing.T, path string, data []byte) {
 	t.Helper()
+	if runtime.GOOS == "darwin" {
+		require.NoError(t, os.WriteFile(path, data, 0644))
+		return
+	}
 	tmp := path + ".tmp"
 	require.NoError(t, os.WriteFile(tmp, data, 0644))
 	require.NoError(t, os.Rename(tmp, path))
@@ -150,7 +165,7 @@ server:
 	err = mgr.Watch()
 	require.NoError(t, err)
 
-	writeConfigAtomic(t, configPath, []byte(`
+	writeConfigChange(t, configPath, []byte(`
 server:
   bind_address: ":8080"
 `))
@@ -161,6 +176,78 @@ server:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for config change")
 	}
+}
+
+// watchFixture starts a Manager on a fresh config with bind_address :9090 and
+// returns the config path and a channel of delivered configs.
+func watchFixture(t *testing.T) (*Manager, string, chan *Config) {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("server:\n  bind_address: \":9090\"\n"), 0644))
+	mgr, err := NewManager(configPath)
+	require.NoError(t, err)
+	t.Cleanup(mgr.Stop)
+	ch := make(chan *Config, 8)
+	mgr.OnChange(func(cfg *Config) { ch <- cfg })
+	require.NoError(t, mgr.Watch())
+	return mgr, configPath, ch
+}
+
+func waitBind(t *testing.T, ch chan *Config, want, what string) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case cfg := <-ch:
+			if cfg.Server.BindAddress == want {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for %s (bind_address %s)", what, want)
+		}
+	}
+}
+
+// №551: `rm config.yaml` and creating it again (not a rename) must not end
+// hot-reload. Under viper.WatchConfig the REMOVE ended the watch loop silently
+// until restart; later in-place writes were never delivered either.
+func TestManager_Watch_SurvivesRemove(t *testing.T) {
+	mgr, configPath, ch := watchFixture(t)
+
+	require.NoError(t, os.Remove(configPath))
+	time.Sleep(200 * time.Millisecond)
+	require.NoError(t, os.WriteFile(configPath, []byte("server:\n  bind_address: \":7070\"\n"), 0644))
+	waitBind(t, ch, ":7070", "change after rm + create")
+
+	// The watch is still alive: a plain in-place write afterwards is delivered too.
+	require.NoError(t, os.WriteFile(configPath, []byte("server:\n  bind_address: \":6060\"\n"), 0644))
+	waitBind(t, ch, ":6060", "in-place write after rm + create")
+	assert.Equal(t, ":6060", mgr.Get().Server.BindAddress)
+}
+
+// Atomic rename-over on every platform (kqueue delivers it as REMOVE+CREATE),
+// twice in a row: the second save proves the first did not end the watch.
+func TestManager_Watch_AtomicRename(t *testing.T) {
+	_, configPath, ch := watchFixture(t)
+	for _, bind := range []string{":7171", ":7272"} {
+		tmp := configPath + ".tmp"
+		require.NoError(t, os.WriteFile(tmp, []byte("server:\n  bind_address: \""+bind+"\"\n"), 0644))
+		require.NoError(t, os.Rename(tmp, configPath))
+		waitBind(t, ch, bind, "atomic rename "+bind)
+	}
+}
+
+// Stop ends the watch: a later change is not delivered.
+func TestManager_Watch_Stop(t *testing.T) {
+	mgr, configPath, ch := watchFixture(t)
+	mgr.Stop()
+	require.NoError(t, os.WriteFile(configPath, []byte("server:\n  bind_address: \":5050\"\n"), 0644))
+	select {
+	case cfg := <-ch:
+		t.Fatalf("change delivered after Stop: %s", cfg.Server.BindAddress)
+	case <-time.After(500 * time.Millisecond):
+	}
+	mgr.Stop() // idempotent
 }
 
 func TestNewManager_FileNotFound(t *testing.T) {
@@ -198,7 +285,7 @@ server:
 	err = mgr.Watch()
 	require.NoError(t, err)
 
-	writeConfigAtomic(t, configPath, []byte(`
+	writeConfigChange(t, configPath, []byte(`
 server:
   bind_address: ":8080"
   metrics_path: "/metrics"
@@ -216,7 +303,7 @@ server:
 	// Verify manager state updated
 	assert.Equal(t, ":8080", mgr.Get().Server.BindAddress)
 
-	writeConfigAtomic(t, configPath, []byte(`
+	writeConfigChange(t, configPath, []byte(`
 server:
   bind_address: ":8080"
   metrics_path: "/prometheus"
@@ -261,7 +348,7 @@ server:
 	err = mgr.Watch()
 	require.NoError(t, err)
 
-	writeConfigAtomic(t, configPath, []byte(`
+	writeConfigChange(t, configPath, []byte(`
 server:
   bind_address: ":8080"
 profiler:

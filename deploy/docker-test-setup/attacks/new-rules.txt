@@ -316,3 +316,43 @@ dns_dga_ngram	20260915	6.3/№329 item 8: Score() по меткам (было �
 # алерта ни по одной причине; вычитание по этой записи ничего не меняет для
 # них и защищает только будущие прогоны волны 6.4 от ложного ЖЁСТКОГО СТОПА.
 exfil_large_tls_upload	20260923	6.4/№435 item 7: direction "egress"→"0" (резолвер отдаёт числовую строку, не имя стороны)
+# ── Волна 8.1, №543 (07.10.2026): сужения после регрессии ночи H ─────────────
+# Хуки item 7 (op 4..7) молча расширили на мутации каждое файловое правило без
+# условия на op; ночь H (unattended-upgrades ставил ядро) дала
+# container_escape_module_access дедуп 169 655 и лимитер 67 468 на rename/
+# unlink/rmdir dpkg. Починка двумя частями: движок (Rule.legacyOpsOnly — правило
+# без op видит только open/read/write/chmod; это сужение класса из 136 правил,
+# но на архивах старше item 7 мутаций нет физически, и для них оно ничего не
+# меняет) и именованные исключения четырёх лог-правил (package-manager по
+# proc.exe_path=/usr/bin/dpkg, apt-planner-dump и package-transient-artifact —
+# по объекту). Записан тот, кто стоит в detection-baseline.txt
+# (container_escape_module_access), и четыре правила, у которых изменён набор
+# исключений. Место — здесь, не renamed-rules.txt (id не менялся, сторож №170
+# дал бы ПРЕФЛАЙТ FAIL) и не silent-rules.txt (бессрочное ослепление).
+# Дата 20261007 — день починки и ночи-повтора: архив ночи H (20261006)
+# покрыт, собственный прогон — нет.
+container_escape_module_access	20261008	8.1/№543: legacyOpsOnly; 8.1-долг/№545 (дата сдвинута с 20261007): сужено до контейнера (ветка A) и посадки модуля write/rename (ветка B), исключение host-module-tooling; вход пакета — run_module_plant_positive_control
+impact_mass_file_deletion_critical	20261007	8.1/№543: исключения package-manager, apt-planner-dump, package-transient-artifact
+evasion_log_clear	20261007	8.1/№543: исключения package-manager, apt-planner-dump
+defense_evasion_journald_log_clear	20261007	8.1/№543: исключения package-manager, apt-planner-dump
+ransomware_log_wipe	20261007	8.1/№543: исключения package-manager, apt-planner-dump
+# 8.1-долги (08.10.2026): №547 — integrity_container_runtime_modified получило
+# исключение package-manager (proc.exe_path in [/usr/bin/dpkg]). В
+# detection-baseline.txt правила нет; запись — по соглашению №543 (сужение
+# условия → new-rules.txt). №550 (.pre-conffile в package-transient-artifact
+# impact_mass_file_deletion_critical) второй строки не получает: правила нет в
+# detection-baseline.txt, а дубль id печатал бы «заведено» двумя строками.
+integrity_container_runtime_modified	20261008	8.1-долг/№547: исключение package-manager
+# 8.1-долги (09.10.2026): №549 (б) — семь read-only правил аппаратной разведки
+# получили исключение fwupd-hardware-probe (демон fwupd по образу
+# /usr/libexec/fwupd/fwupd, fwupdmgr — только на kernel_version; хост, op
+# open/read, O_RDONLY) и явный legacy-набор op в условии. В
+# detection-baseline.txt из семи стоят двое — они и записаны; вход пакета у
+# них не fwupd, исключение по точному образу его не задевает. Остальные пять
+# (kmem, dev_mem, kcore, proc_modules, dmi) в базе не стоят — по №550 не пишутся.
+sigma_kernel_version_read	20261009	8.1-долг/№549: исключение fwupd-hardware-probe (fwupd, fwupdmgr), явный op legacy-набора
+sigma_cpu_info_access	20261009	8.1-долг/№549: исключение fwupd-hardware-probe (fwupd), явный op legacy-набора
+# №549 (в), 09.10.2026: evasion_hidden_elf_in_tmp — исключение apt-gpgv-method-tmp
+# (образ /usr/lib/apt/methods/gpgv И объект /tmp/apt.{conf,sig,data}.XXXXXX). Вход
+# пакета — не метод apt, исключение его не задевает.
+evasion_hidden_elf_in_tmp	20261009	8.1-долг/№549 (в): исключение apt-gpgv-method-tmp

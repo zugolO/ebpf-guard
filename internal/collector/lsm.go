@@ -214,13 +214,18 @@ func NewLSMCollector(config LSMConfig, logger *slog.Logger) (*LSMCollector, erro
 	return lc, nil
 }
 
+// activeLSMListPath is the kernel's list of active LSMs; BPF LSM is usable when
+// it names "bpf". A variable so tests can present both kernels on any host
+// instead of asserting whatever kernel the test happens to run on.
+var activeLSMListPath = "/sys/kernel/security/lsm"
+
 // checkAvailability checks if the kernel supports LSM BPF.
 func (lc *LSMCollector) checkAvailability() bool {
 	// Check kernel version (5.7+)
 	// This is a simplified check; real implementation would parse uname
-	data, err := os.ReadFile("/sys/kernel/security/lsm")
+	data, err := os.ReadFile(activeLSMListPath)
 	if err != nil {
-		lc.logger.Debug("lsm: cannot read /sys/kernel/security/lsm", "error", err)
+		lc.logger.Debug("lsm: cannot read active LSM list", "path", activeLSMListPath, "error", err)
 		return false
 	}
 
@@ -503,7 +508,7 @@ func NewKmodCollector(logger *slog.Logger) (*KmodCollector, error) {
 		strategy:   StrategyDrop,
 	}
 	// Determine whether LSM BPF is available (same check as LSMCollector).
-	data, err := os.ReadFile("/sys/kernel/security/lsm")
+	data, err := os.ReadFile(activeLSMListPath)
 	if err == nil && strings.Contains(string(data), "bpf") {
 		c.available = true
 	}

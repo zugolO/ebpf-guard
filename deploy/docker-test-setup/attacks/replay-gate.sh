@@ -1454,7 +1454,18 @@ echo ""
 # final-metrics ebpf_guard_drift_baseline_suppressed_total у тех же трёх
 # rule_id обязан вернуть их в "потеряно" и уронить секцию — иначе разбивка по
 # reason ничего не доказывает, а просто маскирует реальную немоту молчаливо.
-echo "--- реплей 21/25: 5.9.7e/№194 — три drift-правила уходят из «потеряно» при живом suppressed_total, остаются FAIL при обнулённом (5.9.9.F.6d) ---"
+#
+# №548 (08.10.2026): с e82255a (09.09, 6.2.6/№282) container_escape_init_proc
+# сужен исключениями и записан в new-rules.txt датой 20260909. Реестр
+# new-rules вычитается в гейте РАНЬШЕ реестра дрейфа, поэтому на этом архиве
+# (20260830) init_proc уходит строкой «моложе архива» на обеих сторонах, и
+# строка «подавлено базовой линией» для него не печатается. Реплей ждал её и
+# с 09.09 давал MISMATCH; обнулённая сторона для init_proc при этом была
+# вакуумной — grep по имени ловил строку new-rules. Теперь №194 судится двумя
+# drift-правилами без записи в new-rules ПО ПОЗИЦИИ строки («не потеряно,
+# подавлено…» на живой стороне, «    - <id>» в списке «потеряно» на
+# обнулённой), а init_proc — строкой реестра new-rules на обеих сторонах.
+echo "--- реплей 21/25: 5.9.7e/№194 — два drift-правила уходят из «потеряно» при живом suppressed_total, возвращаются с FAIL при обнулённом; init_proc объяснён new-rules (№282, №548) (5.9.9.F.6d) ---"
 ts60b=$(find_ts "$C60B_DIR/attacks" 2>/dev/null || true)
 if [ -z "$ts60b" ]; then
     bad "collect-6.0b: baseline-state-*.json не найден в $C60B_DIR/attacks — реплей 21 недоступен"
@@ -1464,7 +1475,7 @@ else
     run_offline_gate "$C60B_DIR/attacks" "$ts60b"
     sec194_live=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 6\.' '^=== 7\.')
     named194=0
-    grep -qF 'container_escape_init_proc: не потеряно' <<< "$sec194_live" \
+    grep -qE '^    ~ container_escape_init_proc \(заведено 20260909 ' <<< "$sec194_live" \
         && grep -qF 'drift_dangerous_syscall: не потеряно' <<< "$sec194_live" \
         && grep -qF 'drift_new_library_in_system_dir: не потеряно' <<< "$sec194_live" \
         && grep -qE '\[PASS\].*5\.9\.7e: потеряно вне реестров' <<< "$sec194_live" && named194=1
@@ -1478,13 +1489,13 @@ else
     sec194_zeroed=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 6\.' '^=== 7\.')
     rm -rf "$tmp194"
     fails194=0
-    grep -qF 'container_escape_init_proc' <<< "$sec194_zeroed" \
-        && grep -qF 'drift_dangerous_syscall' <<< "$sec194_zeroed" \
-        && grep -qF 'drift_new_library_in_system_dir' <<< "$sec194_zeroed" \
+    grep -qE '^    ~ container_escape_init_proc \(заведено 20260909 ' <<< "$sec194_zeroed" \
+        && grep -qx '    - drift_dangerous_syscall' <<< "$sec194_zeroed" \
+        && grep -qx '    - drift_new_library_in_system_dir' <<< "$sec194_zeroed" \
         && grep -qE '\[FAIL\].*5\.9\.7e: потеряно вне реестров' <<< "$sec194_zeroed" && fails194=1
 
     if [ "$named194" -eq 1 ] && [ "$fails194" -eq 1 ]; then
-        ok "collect-6.0b (ts=$ts60b): три drift-правила поимённо ушли из «потеряно» в разбивку по reason при живом suppressed_total (PASS), и вернулись в «потеряно» с FAIL при обнулённом — четвёртый реестр №194 исполнен обеими сторонами впервые"
+        ok "collect-6.0b (ts=$ts60b): два drift-правила поимённо ушли из «потеряно» в разбивку по reason при живом suppressed_total (PASS) и вернулись в список «потеряно» с FAIL при обнулённом; container_escape_init_proc на обеих сторонах объяснён new-rules (сужение №282, №548)"
     else
         bad "collect-6.0b (ts=$ts60b): именование=$named194 (ожидалось 1), FAIL-при-обнулении=$fails194 (ожидалось 1) — секции:"$'\n'"живой:"$'\n'"$sec194_live"$'\n'"обнулённый:"$'\n'"$sec194_zeroed"
     fi

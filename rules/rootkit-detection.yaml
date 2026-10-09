@@ -216,16 +216,48 @@ rules:
     name: "Kernel module list read (/proc/modules)"
     description: "/proc/modules read — enumerating loaded kernel modules, often part of rootkit installation to avoid conflicts."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/proc/modules"
-        - "/proc/kallsyms"
-        - "/proc/kcore"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/proc/modules"
+            - "/proc/kallsyms"
+            - "/proc/kcore"
+        # №549: legacy-набор операций назван ЯВНО. Правило без op уже видело
+        # ровно его (Rule.legacyOpsOnly), но исключение ниже называет op, а
+        # правило, назвавшее op хоть где-то, флаг теряет и увидело бы
+        # unlink/rename/truncate/rmdir (rename /etc/os-release при обновлении
+        # base-files). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: warning
     action: alert
     tags: [mitre:T1014, rootkit, proc-modules, discovery]
+    exceptions:
+      # №549: см. container_escape_kmem_access (rules/container-escape.yaml) —
+      # демон fwupd, хост, только чтение O_RDONLY, точный образ последним.
+      - name: fwupd-hardware-probe
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/libexec/fwupd/fwupd]
 
   - id: rootkit_kallsyms_read
     name: "Kernel symbol table read (/proc/kallsyms)"
@@ -246,16 +278,48 @@ rules:
     name: "Access to /proc/kcore (kernel memory image)"
     description: "/proc/kcore opened — provides access to the kernel's virtual memory space, used by rootkits to patch memory."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/proc/kcore"
-        - "/dev/mem"
-        - "/dev/kmem"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/proc/kcore"
+            - "/dev/mem"
+            - "/dev/kmem"
+        # №549: legacy-набор операций назван ЯВНО. Правило без op уже видело
+        # ровно его (Rule.legacyOpsOnly), но исключение ниже называет op, а
+        # правило, назвавшее op хоть где-то, флаг теряет и увидело бы
+        # unlink/rename/truncate/rmdir (rename /etc/os-release при обновлении
+        # base-files). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: critical
     action: alert
     tags: [mitre:T1014, rootkit, kcore, kernel-memory]
+    exceptions:
+      # №549: см. container_escape_kmem_access (rules/container-escape.yaml) —
+      # демон fwupd, хост, только чтение O_RDONLY, точный образ последним.
+      - name: fwupd-hardware-probe
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/libexec/fwupd/fwupd]
 
   # ============================================================================
   # T1620 — Reflective Code Loading

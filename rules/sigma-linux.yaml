@@ -901,16 +901,26 @@ rules:
     name: "CPU/hardware info enumeration"
     description: "Access to /proc/cpuinfo, /proc/meminfo, or hardware info files — system reconnaissance."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/proc/cpuinfo"
-        - "/proc/meminfo"
-        - "/proc/version"
-        - "/proc/sys/kernel/hostname"
-        - "/proc/sys/kernel/osrelease"
-        - "/proc/sys/kernel/version"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/proc/cpuinfo"
+            - "/proc/meminfo"
+            - "/proc/version"
+            - "/proc/sys/kernel/hostname"
+            - "/proc/sys/kernel/osrelease"
+            - "/proc/sys/kernel/version"
+        # №549: legacy-набор операций назван ЯВНО. Правило без op уже видело
+        # ровно его (Rule.legacyOpsOnly), но исключение ниже называет op, а
+        # правило, назвавшее op хоть где-то, флаг теряет и увидело бы
+        # unlink/rename/truncate/rmdir (rename /etc/os-release при обновлении
+        # base-files). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: warning
     action: alert
     tags: [mitre:T1082, sigma, discovery, system-info, proc-recon-cluster]
@@ -1024,21 +1034,53 @@ rules:
             - field: proc.exe_path
               op: prefix
               values: ["/usr/"]
+      # №549: см. container_escape_kmem_access (rules/container-escape.yaml) —
+      # демон fwupd, хост, только чтение O_RDONLY, точный образ последним.
+      - name: fwupd-hardware-probe
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/libexec/fwupd/fwupd]
+
   - id: sigma_kernel_version_read
     name: "Kernel version file read"
     description: "Process read /proc/version or /etc/os-release — OS fingerprinting for exploit selection."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/proc/version"
-        - "/etc/os-release"
-        - "/etc/lsb-release"
-        - "/etc/debian_version"
-        - "/etc/redhat-release"
-        - "/etc/centos-release"
-        - "/etc/fedora-release"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/proc/version"
+            - "/etc/os-release"
+            - "/etc/lsb-release"
+            - "/etc/debian_version"
+            - "/etc/redhat-release"
+            - "/etc/centos-release"
+            - "/etc/fedora-release"
+        # №549: legacy-набор операций назван ЯВНО. Правило без op уже видело
+        # ровно его (Rule.legacyOpsOnly), но исключение ниже называет op, а
+        # правило, назвавшее op хоть где-то, флаг теряет и увидело бы
+        # unlink/rename/truncate/rmdir (rename /etc/os-release при обновлении
+        # base-files). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: warning
     action: alert
     tags: [mitre:T1082, sigma, discovery, os-fingerprinting]
@@ -1078,6 +1120,27 @@ rules:
             - field: k8s.pod
               op: eq
               values: [""]
+      # №549: см. container_escape_kmem_access (rules/container-escape.yaml) —
+      # демон fwupd, хост, только чтение O_RDONLY, точный образ последним.
+      - name: fwupd-hardware-probe
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/libexec/fwupd/fwupd, /usr/bin/fwupdmgr]
 
   # ============================================================================
   # T1083 — File and Directory Discovery
@@ -1619,16 +1682,48 @@ rules:
     name: "Direct memory device access (/dev/mem or /dev/kmem)"
     description: "Process opened /dev/mem or /dev/kmem for direct physical memory access — rootkit or advanced privilege escalation."
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/dev/mem"
-        - "/dev/kmem"
-        - "/dev/port"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/dev/mem"
+            - "/dev/kmem"
+            - "/dev/port"
+        # №549: legacy-набор операций назван ЯВНО. Правило без op уже видело
+        # ровно его (Rule.legacyOpsOnly), но исключение ниже называет op, а
+        # правило, назвавшее op хоть где-то, флаг теряет и увидело бы
+        # unlink/rename/truncate/rmdir (rename /etc/os-release при обновлении
+        # base-files). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: critical
     action: alert
     tags: [mitre:T1014, sigma, rootkit, memory-access]
+    exceptions:
+      # №549: см. container_escape_kmem_access (rules/container-escape.yaml) —
+      # демон fwupd, хост, только чтение O_RDONLY, точный образ последним.
+      - name: fwupd-hardware-probe
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/libexec/fwupd/fwupd]
 
   - id: sigma_proc_sysrq_write
     name: "Write to /proc/sysrq-trigger"

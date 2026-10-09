@@ -377,12 +377,22 @@ rules:
     name: "VM detection via DMI/SMBIOS read"
     description: "Process reading /sys/class/dmi or /sys/firmware — checking for virtualization vendor strings."
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/sys/class/dmi/id/"
-        - "/sys/firmware/dmi/"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/sys/class/dmi/id/"
+            - "/sys/firmware/dmi/"
+        # №549: legacy-набор операций назван ЯВНО. Правило без op уже видело
+        # ровно его (Rule.legacyOpsOnly), но исключение ниже называет op, а
+        # правило, назвавшее op хоть где-то, флаг теряет и увидело бы
+        # unlink/rename/truncate/rmdir (rename /etc/os-release при обновлении
+        # base-files). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: warning
     action: alert
     tags: [mitre:T1497.001, vm-detection, dmi, sandbox-evasion]
@@ -417,6 +427,53 @@ rules:
             - field: proc.exe_path
               op: prefix
               values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
+      # №549: см. container_escape_kmem_access (rules/container-escape.yaml) —
+      # демон fwupd, хост, только чтение O_RDONLY, точный образ последним.
+      - name: fwupd-hardware-probe
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/libexec/fwupd/fwupd]
+      # №549, пункт 4 (09.10.2026): systemd-detect-virt читает DMI — это его
+      # работа (определение виртуализации), а не разведка. В ночи H2 он поднимал
+      # правило в двух attack-деревьях обновления пакетов: snapd →
+      # systemd-detect-virt (06:39:43, score 50 ровно на пороге) и needrestart →
+      # systemd-detect-virt под unattended-upgrades. Форма fwupd-hardware-probe:
+      # хост, только чтение O_RDONLY, точный образ из пакета systemd последним;
+      # копия под тем же именем срабатывает (TestW549_DetectVirtSpoofFires).
+      - name: virt-detect-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/bin/systemd-detect-virt]
 
   # ============================================================================
   # T1518 — Software Discovery

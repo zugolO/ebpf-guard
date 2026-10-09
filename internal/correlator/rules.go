@@ -336,6 +336,17 @@ type Rule struct {
 	// overwhelmingly common case of fully-evaluated (rate=1.0) rules.
 	// Not serialized; set by RuleEngine.buildTypeIndex.
 	skipSampler bool
+	// legacyOpsOnly ограничивает файловое правило, которое НИГДЕ не называет
+	// op (ни в условии, ни в condition_group, ни в exceptions), операциями
+	// open/read/write/chmod — теми, что существовали, когда правило писалось.
+	// Волна 8.1, item 7: хуки unlink/rename/truncate/rmdir (op 4..7) молча
+	// расширили каждое такое правило на мутации. Ночь H (07.10.2026, 06:41–06:46,
+	// unattended-upgrades ставил ядро) дала container_escape_module_access
+	// (только префикс /lib/modules/, условия на op нет) дедуп 169 655 и срез
+	// лимитера 67 468 — на rename/unlink/rmdir dpkg, а не на доступе к модулям
+	// (находка №543). Правило, назвавшее op хотя бы в одной ветке, видит все
+	// операции: его автор о них знал. Not serialized; set by buildTypeIndex.
+	legacyOpsOnly bool
 	// Condition is a single condition (for simple rules)
 	Condition RuleCondition `yaml:"condition"`
 	// ConditionGroup allows complex AND/OR logic (takes precedence over Condition)
@@ -428,6 +439,11 @@ var syscallNrStrings [512]string
 // операций появился продюсер, и UnreachableFileOpRules перестал печатать
 // четыре правила, стоявшие на них, немыми.
 var fileOpNames = [8]string{"open", "read", "write", "chmod", "unlink", "rename", "truncate", "rmdir"}
+
+// fileOpFirstMutation — FILE_OP_UNLINK из bpf/common.h, первая операция,
+// которой не было до волны 8.1 (item 7). Файловое правило без условия на op
+// (Rule.legacyOpsOnly) видит только операции НИЖЕ этого порога.
+const fileOpFirstMutation uint8 = 4
 
 // gpuOpNames maps GPUEvent.Op to a human-readable name.
 var gpuOpNames = [6]string{"alloc", "free", "memcpy_htod", "memcpy_dtoh", "memcpy_dtod", "kernel_launch"}
@@ -651,6 +667,19 @@ func RulesRequiringFileOp(rules []Rule, op string) []string {
 	return ids
 }
 
+// ruleNamesFileOp сообщает, называет ли правило поле op (или его синоним
+// file.op) хотя бы в одной ветке: в условии, в condition_group на любой
+// глубине или в любом исключении. Оператор и значения не важны — `not_in
+// [read]` тоже решение автора об операциях, и такое правило видит все.
+func ruleNamesFileOp(r *Rule) bool {
+	for _, c := range extractAllRuleConditions(r) {
+		if normaliseFieldName(c.Field) == "op" {
+			return true
+		}
+	}
+	return false
+}
+
 // extractGroupConditions recursively collects conditions from a group and its subgroups.
 func extractGroupConditions(g *RuleConditionGroup) []RuleCondition {
 	if g == nil {
@@ -683,6 +712,10 @@ func (re *RuleEngine) buildTypeIndex() {
 		// override is active, reducing lock traffic for the overwhelmingly
 		// common case of fully-evaluated (rate=1.0) rules.
 		r.skipSampler = r.SampleRate <= 0 || r.SampleRate >= 1.0
+		// Волна 8.1, item 7 / №543: файловое правило без op — только старые
+		// операции. Считается здесь, до копирования в byType, и на каждой
+		// горячей перезагрузке заново.
+		r.legacyOpsOnly = r.EventType == types.EventFileAccess && !ruleNamesFileOp(r)
 		// Synthetic rules (Exceptions-only, scoped via EvaluateNamedExceptions)
 		// are deliberately excluded from byType: they have no EventType/
 		// Condition of their own to dispatch on, and must never be matched by
@@ -1157,6 +1190,12 @@ func (re *RuleEngine) matchesTyped(e *types.Event, rule *Rule) bool {
 
 // matchesTypedCached is matchesTyped with a caller-owned per-event string cache.
 func (re *RuleEngine) matchesTypedCached(e *types.Event, rule *Rule, cache *eventFieldCache) bool {
+	// Волна 8.1, item 7 / №543: правило, не назвавшее op, не видит мутаций
+	// (unlink/rename/truncate/rmdir). Стоит первой строкой — до сэмплера и
+	// счётчиков правила: для такого правила этих событий не существует.
+	if rule.legacyOpsOnly && e.File != nil && e.File.Op >= fileOpFirstMutation {
+		return false
+	}
 	// Per-rule sampling gate.
 	// Fast path: rule.skipSampler (precomputed at load time) is true when no
 	// static rate is configured, and entryCount is 0 when no adaptive override
@@ -2357,6 +2396,12 @@ func (re *RuleEngine) UnreachableSyscallRules(allowlist []int) []string {
 // make rules that watch whole directories (/var/log/, /etc/) fire on every
 // ordinary write, which is a noise decision with a measured gate attached to
 // it, not a mechanical fix.
+//
+// Rule.legacyOpsOnly (волна 8.1, №543) этот анализ не задевает: ограничение
+// ставится ровно тем правилам, у которых условия на op НЕТ, а их функция не
+// рассматривает; и сужает их до open/read/write/chmod, которые все
+// производимы. Правило, назвавшее op, legacyOpsOnly не получает и судится
+// здесь, как прежде.
 //
 // The result is sorted for stable output.
 func (re *RuleEngine) UnreachableFileOpRules() []string {

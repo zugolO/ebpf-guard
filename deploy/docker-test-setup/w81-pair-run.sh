@@ -1,8 +1,10 @@
 #!/bin/bash
 # Wave 8.1 items 7 and 11 — A/B pair on ONE binary, arms switched without
 # changing the image:
-#   MODE=item7  A: EBPF_GUARD_FILE_MUTATION_HOOKS=0 (no unlink/rename/truncate/rmdir hooks)
-#               B: hooks attached (default)
+#   MODE=item7  СНЯТ 07.10.2026: тумблер EBPF_GUARD_FILE_MUTATION_HOOKS удалён
+#               вместе с вердиктом пары (plan.md, «7 — ВЕРДИКТ пары»), плечо A
+#               на нынешнем бинаре не выключает хуки и мерило бы B против B.
+#               Исход на dpkg и контролях — w81-dpkg-smoke.sh (№543).
 #   MODE=item11 A: collectors.file_ops.drop_unresolved_rw=false
 #               B: collectors.file_ops.drop_unresolved_rw=true
 # Every arm: stop, clean store, start, warm-up, idle window (metrics at both
@@ -10,7 +12,8 @@
 # (result sentinel per step), item11 — attack pack without the induced drop.
 # Run detached; fetch $OUT with a separate short ssh afterwards.
 set -u
-MODE=${MODE:?item7|item11}
+MODE=${MODE:?item11}
+[ "$MODE" = item7 ] && { echo "MODE=item7 снят: тумблера хуков больше нет, см. w81-dpkg-smoke.sh"; exit 2; }
 BIN=${BIN:-/root/ebpf-guard-W81}
 SEQ=${SEQ:-"A B B A"}
 WARM=${WARM:-300}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"time"
@@ -1883,6 +1884,7 @@ type Manager struct {
 	mu              sync.RWMutex
 	onChange        func(*Config)
 	hardwareProfile HardwareProfileInfo
+	watcher         *fsnotify.Watcher
 }
 
 // HardwareProfileInfo describes how the active hardware profile was chosen
@@ -2499,39 +2501,107 @@ func (m *Manager) OnChange(fn func(*Config)) {
 
 // Watch starts watching for configuration file changes.
 // Call this after OnChange to receive notifications.
+//
+// №551 (09.10.2026). The watcher is Manager's own, not viper.WatchConfig:
+// viper (v1.21, viper.go:365) ends its watch loop for good on a Remove of the
+// config file — `rm config.yaml` followed by creating it again silently turned
+// hot-reload off until restart, with no error and no log line, and on macOS
+// kqueue an atomic rename-over is delivered as exactly that Remove+Create.
+// Same directory-level scheme as viper (the directory is watched so renames,
+// atomic saves and ConfigMap ..data symlink swaps are seen), but a Remove only
+// waits for the file to come back, and a watcher error is logged instead of
+// ending the loop.
 func (m *Manager) Watch() error {
-	m.viper.WatchConfig()
-	m.viper.OnConfigChange(func(e fsnotify.Event) {
-		m.mu.Lock()
-		defer m.mu.Unlock()
+	file := m.viper.ConfigFileUsed()
+	if file == "" {
+		return fmt.Errorf("config: no config file to watch")
+	}
+	configFile := filepath.Clean(file)
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("config: create watcher: %w", err)
+	}
+	if err := w.Add(filepath.Dir(configFile)); err != nil {
+		_ = w.Close()
+		return fmt.Errorf("config: watch %s: %w", filepath.Dir(configFile), err)
+	}
+	m.mu.Lock()
+	if m.watcher != nil {
+		_ = m.watcher.Close()
+	}
+	m.watcher = w
+	m.mu.Unlock()
 
-		var newConfig Config
-		if err := m.viper.Unmarshal(&newConfig); err != nil {
-			slog.Warn("config: hot-reload rejected, keeping previous config", slog.Any("error", err))
-			return
+	realFile, _ := filepath.EvalSymlinks(configFile)
+	go func() {
+		for {
+			select {
+			case ev, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				current, _ := filepath.EvalSymlinks(configFile)
+				named := filepath.Clean(ev.Name) == configFile
+				switch {
+				case (named && (ev.Has(fsnotify.Write) || ev.Has(fsnotify.Create))) ||
+					(current != "" && current != realFile):
+					realFile = current
+					m.reload()
+				case named && (ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename)):
+					slog.Info("config: file removed, hot-reload waits for it to reappear",
+						slog.String("path", configFile))
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				slog.Warn("config: watcher error, hot-reload continues", slog.Any("error", err))
+			}
 		}
-		normalizeSchemaAliases(&newConfig)
-
-		// viper.WatchConfig commonly fires OnConfigChange more than once for a
-		// single write (WRITE+CHMOD, atomic-rename saves, etc.). Skip callbacks
-		// when the effective config is unchanged so consumers don't see spurious
-		// duplicate reloads.
-		if m.config != nil && reflect.DeepEqual(m.config, &newConfig) {
-			return
-		}
-
-		m.config = &newConfig
-
-		if m.onChange != nil {
-			m.onChange(&newConfig)
-		}
-	})
-
+	}()
 	return nil
+}
+
+// reload re-reads the config file and, if the effective config changed,
+// installs it and calls the OnChange callback.
+func (m *Manager) reload() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.viper.ReadInConfig(); err != nil {
+		slog.Warn("config: hot-reload read failed, keeping previous config", slog.Any("error", err))
+		return
+	}
+	var newConfig Config
+	if err := m.viper.Unmarshal(&newConfig); err != nil {
+		slog.Warn("config: hot-reload rejected, keeping previous config", slog.Any("error", err))
+		return
+	}
+	normalizeSchemaAliases(&newConfig)
+
+	// A single save commonly produces more than one event (WRITE+CHMOD,
+	// atomic-rename saves, etc.). Skip callbacks when the effective config is
+	// unchanged so consumers don't see spurious duplicate reloads.
+	if m.config != nil && reflect.DeepEqual(m.config, &newConfig) {
+		return
+	}
+
+	m.config = &newConfig
+
+	if m.onChange != nil {
+		m.onChange(&newConfig)
+	}
 }
 
 // Stop stops watching for configuration changes.
 func (m *Manager) Stop() {
-	// viper doesn't have a direct stop method for watching
-	// The watcher will be cleaned up when the program exits
+	m.mu.Lock()
+	w := m.watcher
+	m.watcher = nil
+	m.mu.Unlock()
+	// Closed outside the lock: the event goroutine may be waiting for m.mu
+	// inside reload, and fsnotify's Close waits for its reader to exit.
+	if w != nil {
+		_ = w.Close()
+	}
 }

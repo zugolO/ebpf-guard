@@ -40,6 +40,34 @@ rules:
             - "/lib/systemd/systemd-journald"
             - "/usr/sbin/logrotate"
             - "/usr/sbin/rsyslogd"
+      # Волна 8.1, №543 (ночь H, 07.10.2026 06:41–06:46): unattended-upgrades
+      # ставил ядро, и dpkg сам делал rename/unlink/rmdir в /lib/modules, /boot
+      # и /var/log — десятки тысяч срабатываний за пять минут. Исключение по
+      # ОБРАЗУ, точный путь: копия /tmp/dpkg (comm=dpkg) не подходит и
+      # срабатывает. Потомков dpkg (rm под maintainer-скриптами) оно намеренно
+      # НЕ покрывает: proc.ancestor_exe_path разрешает только родителя, а ось
+      # «любой предок — dpkg» отдала бы исключение `dpkg --pre-invoke='rm …'`,
+      # то есть обход одной командой для root. Остаточный обход этой оси —
+      # собрать .deb, в котором журнал числится файлом пакета, и снять его
+      # dpkg --purge; он требует сборки и установки пакета и принят.
+      - name: package-manager
+        condition:
+          field: proc.exe_path
+          op: in
+          values:
+            - "/usr/bin/dpkg"
+      # Волна 8.1, №543: libapt (unattended-upgrades, apt, apt-get —
+      # любой фронтенд, поэтому не по образу) пересоздаёт свой дамп
+      # планировщика при каждом вызове dpkg и удаляет прежний. Это не журнал
+      # аудита: история установки остаётся в history.log, term.log и dpkg.log,
+      # которые правило видит по-прежнему. Ключ — ОБЪЕКТ, точный путь; удаление
+      # этого одного файла не прячет ничего.
+      - name: apt-planner-dump
+        condition:
+          field: file.path
+          op: in
+          values:
+            - "/var/log/apt/eipp.log.xz"
     severity: warning
     action: alert
     tags: [mitre:T1070.002, defense-evasion]
@@ -181,6 +209,33 @@ rules:
             - field: filename
               op: eq
               values: ["/tmp/.secret_key"]
+      # №549 (в), 09.10.2026: натуральный apt-daily (штамп сдвинут, смок
+      # w549-smoke) — вся величина правила в окне (дедуп 5 247 + лимитер 5 145
+      # + выпущено 8; в ночи H2 13 560 за час 00:30) — метод APT
+      # /usr/lib/apt/methods/gpgv: mkstemp-файлы /tmp/apt.conf.XXXXXX (дамп
+      # конфига для apt-key), /tmp/apt.sig.XXXXXX и /tmp/apt.data.XXXXXX
+      # (разрезанный InRelease). comm у метода — «gpgv», как у /usr/bin/gpgv;
+      # ось — ОБРАЗ метода (точный путь из пакета apt) И ОБЪЕКТ (точная форма
+      # имени: шесть символов mkstemp), exe_path последним, пустой — правило
+      # срабатывает. Запись apt-key/cp/touch в /tmp/apt-key-gpghome.*/ сюда НЕ
+      # входит: образы родовые (dash, cp, touch), а ось «по имени каталога»
+      # отдала бы обход одним mkdir (долг №549, записан в plan.md).
+      - name: apt-gpgv-method-tmp
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.path
+              op: regex
+              values: ['^/tmp/apt\.(conf|sig|data)\.[A-Za-z0-9]{6}$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/lib/apt/methods/gpgv]
 
   # MITRE ATT&CK: T1562.006 — Impair Defenses: Indicator Blocking
   - id: evasion_auditd_stop

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -24,37 +25,42 @@ func TestLSMConfig_Default(t *testing.T) {
 	assert.Equal(t, "auto", config.Enabled)
 }
 
+// TestNewLSMCollector covers both kernels on any host. It used to assert "no
+// kernel support" unconditionally, which held on macOS and on kernels without
+// BPF LSM but went red on the stand (5.15, `bpf` in the active list, collector
+// live since №502): there auto mode is available and forced mode loads. The
+// active-LSM list is now presented by the test (activeLSMListPath).
 func TestNewLSMCollector(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
+	dir := t.TempDir()
+	withBPF := filepath.Join(dir, "lsm-with-bpf")
+	withoutBPF := filepath.Join(dir, "lsm-without-bpf")
+	require.NoError(t, os.WriteFile(withBPF, []byte("lockdown,capability,landlock,yama,apparmor,bpf\n"), 0o644))
+	require.NoError(t, os.WriteFile(withoutBPF, []byte("lockdown,capability,landlock,yama,apparmor\n"), 0o644))
+	missing := filepath.Join(dir, "no-securityfs")
+
 	tests := []struct {
 		name      string
+		lsmList   string
 		config    LSMConfig
 		wantAvail bool
 		wantErr   bool
 	}{
-		{
-			name:      "auto mode with no kernel support",
-			config:    LSMConfig{Enabled: "auto"},
-			wantAvail: false,
-			wantErr:   false,
-		},
-		{
-			name:      "disabled mode",
-			config:    LSMConfig{Enabled: "false"},
-			wantAvail: false,
-			wantErr:   false,
-		},
-		{
-			name:      "forced mode with no kernel support",
-			config:    LSMConfig{Enabled: "true"},
-			wantAvail: false,
-			wantErr:   true,
-		},
+		{"auto mode with no kernel support", withoutBPF, LSMConfig{Enabled: "auto"}, false, false},
+		{"auto mode without securityfs", missing, LSMConfig{Enabled: "auto"}, false, false},
+		{"disabled mode with no kernel support", withoutBPF, LSMConfig{Enabled: "false"}, false, false},
+		{"forced mode with no kernel support", withoutBPF, LSMConfig{Enabled: "true"}, false, true},
+		{"auto mode with kernel support", withBPF, LSMConfig{Enabled: "auto"}, true, false},
+		{"disabled mode with kernel support", withBPF, LSMConfig{Enabled: "false"}, false, false},
+		{"forced mode with kernel support", withBPF, LSMConfig{Enabled: "true"}, true, false},
 	}
 
+	orig := activeLSMListPath
+	t.Cleanup(func() { activeLSMListPath = orig })
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			activeLSMListPath = tt.lsmList
 			lc, err := NewLSMCollector(tt.config, logger)
 			if tt.wantErr {
 				require.Error(t, err)

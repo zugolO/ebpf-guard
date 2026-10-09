@@ -361,31 +361,138 @@ rules:
     name: "Container Escape: Kernel memory device access"
     description: "Process accessed /dev/mem or /dev/kmem (direct kernel memory access)"
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/dev/mem"
-        - "/dev/kmem"
-        - "/dev/port"
-        - "/dev/kmsg"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/dev/mem"
+            - "/dev/kmem"
+            - "/dev/port"
+            - "/dev/kmsg"
+        # №549: legacy-набор операций назван ЯВНО. Правило без op уже видело
+        # ровно его (Rule.legacyOpsOnly), но исключение ниже называет op, а
+        # правило, назвавшее op хоть где-то, флаг теряет и увидело бы
+        # unlink/rename/truncate/rmdir (rename /etc/os-release при обновлении
+        # base-files). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: critical
     action: alert
     tags: [container-escape, kernel-memory, device-access]
+    exceptions:
+      # №549 (09.10.2026, решение владельца 08.10 — вариант (б)): таймер ноды
+      # fwupd-refresh поднимает attack-инцидент (score 56, замер w549-price,
+      # класс 23:02 ночи H2) одним проходом аппаратной разведки демона fwupd —
+      # /dev/mem, /proc/kcore, /proc/modules, DMI, /proc/version, /proc/cpuinfo.
+      # Исключение — по ОБРАЗУ, а не по comm (exec -a даёт comm даром) и не по
+      # дереву юнита (атакующий, закрепившийся systemd-сервисом, получил бы
+      # потолок на всё дерево; правка скоринга отвергнута владельцем):
+      #   - только хост (container.id и k8s.pod пусты);
+      #   - только чтение: op open/read И флаги open с режимом доступа O_RDONLY
+      #     (flags mod 4 = 0 — регулярка по двум последним десятичным цифрам,
+      #     битовой операции у условий нет). open(O_RDWR)+mmap на /dev/mem
+      #     записи не порождает вовсе — поэтому режим открытия, а не одно op;
+      #     write/chmod исключения не получают;
+      #   - образ — точный путь (op: in), exe_path ПОСЛЕДНИМ: "and" считается
+      #     по порядку, readlink только после совпадения остального; пустой
+      #     exe_path не совпадает — отказ открытый, правило срабатывает.
+      # Пути сверены живьём (ebaka2, fwupd 1.7.9, readlink /proc/<pid>/exe).
+      # Набор образов — по замеру: fwupdmgr читал только /proc/version и
+      # /etc/os-release (sigma_kernel_version_read), прочее — демон.
+      - name: fwupd-hardware-probe
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/libexec/fwupd/fwupd]
 
   # Access to kernel modules
+  #
+  # №545 (08.10.2026). До сужения — один префикс без оси контейнера и без op:
+  # правило срабатывало на КАЖДОЕ чтение модульной оси хостом. Ночь H: open
+  # /lib/modules/*/modules.* от modinfo/modprobe/cp/depmod под mkinitramfs —
+  # десятки тысяч за смену ядра, лимитер в потолок; ночь H2: 21 алерт на open
+  # /sys/module/* (aa-enabled, systemd), /proc/modules (fwupd), modules.softdep
+  # (systemd-udevd). Единственный вход пакета атак был того же класса: insmod
+  # читал modules.softdep. Хостовые чтения /proc/modules и /proc/kallsyms
+  # покрыты rootkit_proc_modules_read / rootkit_kallsyms_read, загрузка модуля
+  # — rootkit_init_module_syscall, rootkit_kmod_from_tmp,
+  # integrity_kernel_module_from_user_path. Здесь остаются две ветки:
+  #   A — процесс КОНТЕЙНЕРА трогает модульную ось (предмет правила: побег);
+  #   B — посадка модуля: write/rename в /lib/modules кем угодно.
+  # Исключение по образу kmod (вариант постановки) отвергнуто: insmod/modprobe
+  # — тот же /usr/bin/kmod, и оно сняло бы шум тем же движением, что вход
+  # пакета, оставив правило слепым к чтениям любого другого образа.
   - id: container_escape_module_access
     name: "Container Escape: Kernel module access"
-    description: "Process accessing kernel module interface"
+    description: "Container process accessing the kernel module interface, or a kernel module planted into /lib/modules"
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/sys/module/"
-        - "/lib/modules/"
-        - "/proc/kallsyms"
-        - "/proc/modules"
+    condition_group:
+      operator: or
+      subgroups:
+        - operator: and
+          conditions:
+            - field: filename
+              op: prefix
+              values:
+                - "/sys/module/"
+                - "/lib/modules/"
+                - "/proc/kallsyms"
+                - "/proc/modules"
+          subgroups:
+            - operator: or
+              conditions:
+                - field: container.id
+                  op: neq
+                  values: [""]
+                - field: k8s.pod
+                  op: neq
+                  values: [""]
+        - operator: and
+          conditions:
+            - field: filename
+              op: prefix
+              values: ["/lib/modules/"]
+            - field: file.op
+              op: in
+              values: ["write", "rename"]
+    exceptions:
+      # Ветка B на хосте: dpkg ставит модули ядра (write .dpkg-new + rename,
+      # №543), depmod (образ kmod) пишет modules.dep*/modules.alias* через
+      # .tmp + rename. Точные пути образа, exe_path последним; копия
+      # /tmp/dpkg или /tmp/kmod срабатывает. Только вне контейнера: ветку A
+      # исключение не трогает.
+      - name: host-module-tooling
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values:
+                - "/usr/bin/dpkg"
+                - "/usr/bin/kmod"
     severity: warning
     action: alert
     tags: [container-escape, kernel-module, rootkit]

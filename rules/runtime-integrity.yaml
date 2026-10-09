@@ -162,6 +162,20 @@ rules:
         - field: file.op
           op: in
           values: ["write", "create", "rename"]
+    exceptions:
+      # №547 (08.10.2026): обновление containerd/runc/docker через apt —
+      # это write в /usr/bin/<runtime>.dpkg-new и rename поверх бинаря, оба
+      # от самого dpkg (до item 7 волны 8.1 critical давал уже write). Ось
+      # образа, точный путь, как package-manager у лог-правил (№543): копия
+      # /tmp/dpkg (comm=dpkg) срабатывает. Потомки dpkg (maintainer-скрипты,
+      # dpkg --pre-invoke) исключения не получают — ancestor_exe_path до dpkg
+      # не дотягивается, а «любой предок dpkg» отдал бы обход одной командой.
+      - name: package-manager
+        condition:
+          field: proc.exe_path
+          op: in
+          values:
+            - "/usr/bin/dpkg"
     severity: critical
     action: alert
     tags: [mitre:T1601, defense-evasion, integrity, container]

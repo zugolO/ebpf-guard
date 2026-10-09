@@ -3552,6 +3552,11 @@ declare -A positive_control_rule_categories=(
     # существующим («4 из 70») — его не было; шаг
     # run_cred_proc_maps_positive_control добавлен вместе с этой строкой.
     [cred_proc_maps_mass_read]="cred_proc_maps_positive_control"
+    # №545 (08.10.2026): сужение container_escape_module_access до контейнера и
+    # посадки модуля сняло его единственный вход в пакете (insmod читал
+    # modules.softdep); шаг run_module_plant_positive_control добавлен вместе
+    # с этой строкой.
+    [container_escape_module_access]="module_plant_positive_control"
 )
 echo "=== 5.9.9c. Правила детект-базы с позитивным контролем в манифесте ==="
 # 5.9.9e: заголовок печатается голым echo (секция — наблюдение без порога, у

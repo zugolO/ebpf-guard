@@ -14,7 +14,8 @@
 #   8.1.2    потери очереди protected на idle — пункт 4 критерия выхода волны;
 #            ноль берётся ТОЛЬКО с предъявленным прибором очередей (item 9);
 #   3.MEM    наклон RSS/heap по часам (как в ночи №3, для сравнимости);
-#   3.P1-19  объём часа 8 против часа 2 — та же величина, что в ночи №3;
+#   3.P1-19  нарастание по фоновым часам (без стартов юнитов ноды, журнал PID 1)
+#            и цена каждого события ноды против прошлой ночи (NIGHT_PREV), №549;
 #   3.ATTACK инциденты verdict="attack" на idle;
 #   item 8   CPU-профиль раз в час: ⅔ CPU вне коррелятора в ночи №3 не разложены.
 #
@@ -40,7 +41,8 @@
 #
 # Вход: EXPECT_NR (обязателен), IDLE_SECS (умолчание 28800 = 8 ч),
 #       EXPECT_GOMEMLIMIT (умолчание 201326592 = 192 МиБ),
-#       NIGHT_RUN_ATTACKS=1 (по умолчанию атак НЕТ), NIGHT_ART (умолчание /var/lib/night-4).
+#       NIGHT_RUN_ATTACKS=1 (по умолчанию атак НЕТ), NIGHT_ART (умолчание /var/lib/night-4),
+#       NIGHT_PREV (каталог idle прошлой ночи — сравнение цен событий ноды).
 set -u
 SETUP="${SETUP:-/opt/ebpf-guard/deploy/docker-test-setup}"
 REPO="$(cd "$SETUP/../.." && pwd)"
@@ -175,8 +177,26 @@ say "idle закончен (rc=$?)"
 pid_now=$(systemctl show -p MainPID --value "$SERVICE")
 [ "$pid_now" = "$pid" ] || say "ВНИМАНИЕ: MainPID сменился за ночь ($pid → $pid_now) — метки 8.1.1/8.1.2/3.* это назовут классом «рестарт»"
 
+# ── [3a] старты юнитов ноды за ночь — вход 3.P1-19 (№549) ─────────────────
+# Метка судит нарастание по часам БЕЗ стартов юнитов; журнал PID 1 снимается
+# после окна (идёт после конца измерительного цикла, в объём часов не попадает).
+# Не снялся — файла нет, и метка печатает НЕИЗМЕРИМ с классом, а не «все часы
+# фоновые» ([[empty-metric-snapshot-is-silently-zero]]).
+journalctl _PID=1 -o json --since "$(date -d "$(cat "$START_FILE")" '+%F %T')" --no-pager \
+    > "$ART/idle/node-units-journal.json" 2>/dev/null
+if [ -s "$ART/idle/node-units-journal.json" ] \
+    && python3 "$SETUP/node-units-extract.py" < "$ART/idle/node-units-journal.json" > "$ART/idle/node-units.tsv.part"; then
+    mv "$ART/idle/node-units.tsv.part" "$ART/idle/node-units.tsv"
+    say "юниты ноды: стартов за ночь $(wc -l < "$ART/idle/node-units.tsv")"
+else
+    rm -f "$ART/idle/node-units.tsv.part"
+    say "ВНИМАНИЕ: журнал юнитов ноды не снят — 3.P1-19 будет НЕИЗМЕРИМ"
+fi
+
 # ── [4] отчёт ночи ─────────────────────────────────────────────────────────
-bash "$SETUP/night-report.sh" "$ART/idle" 300 > "$ART/night-report.txt" 2>&1
+# NIGHT_PREV — каталог idle прошлой ночи на стенде: цена каждого таймера
+# печатается рядом с ценой того же юнита прошлой ночи (решение владельца по №549).
+NIGHT_PREV="${NIGHT_PREV:-}" bash "$SETUP/night-report.sh" "$ART/idle" 300 > "$ART/night-report.txt" 2>&1
 cat "$ART/night-report.txt"
 
 # ── [4a] сторож полноты меток ──────────────────────────────────────────────
@@ -193,17 +213,41 @@ cat "$ART/night-report.txt"
 # успех при разборе.
 # GUARD-BEGIN
 REQUIRED_LABELS=(3.P1-19 3.MEM 3.ATTACK 3.STORE 8.1.1 8.1.2 8.1.3 8.1.4)
+# Момент ДОСТАВКИ эмиттера метки на стенд ([[label-since-means-delivery-not-mtime]]):
+# метка требуется от прогона, стартовавшего не раньше. 8.1.3/8.1.4 доставлены
+# между ночью №4 (старт 2026-10-03T19:18:59Z, отчёт их не печатал и печатать не
+# мог) и ночью H (2026-10-06T23:01:41Z, печатала). 3.P1-19 переопределена
+# 09.10.2026 под тем же именем — освобождения ей не нужно: старый эмиттер её
+# печатал, новый на архиве без журнала юнитов печатает НЕИЗМЕРИМ.
+LABELS_SINCE=("8.1.3 2026-10-06T12:00:00Z" "8.1.4 2026-10-06T12:00:00Z")
+# _label_since <метка> — момент из LABELS_SINCE или пусто.
+_label_since() { local e; for e in "${LABELS_SINCE[@]}"; do [ "${e%% *}" = "$1" ] && { printf '%s' "${e#* }"; return; }; done; }
+# label_completeness <отчёт> [старт прогона ISO] — метки без вердиктной строки.
+# Без старта метка требуется всегда (закрытый отказ): освобождение даёт только
+# предъявленный момент прогона раньше момента доставки.
 label_completeness() {
-    local report="$1" lbl missing=""
+    local report="$1" start="${2:-}" lbl since missing=""
     for lbl in "${REQUIRED_LABELS[@]}"; do
+        since=$(_label_since "$lbl")
+        if [ -n "$since" ] && [ -n "$start" ] && [[ "$start" < "$since" ]]; then continue; fi
         grep -aE "(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ|ИЗМЕРЕНО): *${lbl}( |$)" "$report" >/dev/null 2>&1 \
             || grep -aE "${lbl} (ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ|ИЗМЕРЕНО)" "$report" >/dev/null 2>&1 \
             || missing="$missing $lbl"
     done
     printf '%s' "$missing"
 }
+# label_exempt <старт прогона ISO> — освобождённые метки, печатаются вслух.
+label_exempt() {
+    local start="${1:-}" lbl since out=""
+    for lbl in "${REQUIRED_LABELS[@]}"; do
+        since=$(_label_since "$lbl")
+        [ -n "$since" ] && [ -n "$start" ] && [[ "$start" < "$since" ]] && out="$out $lbl(с $since)"
+    done
+    printf '%s' "$out"
+}
 # GUARD-END
-missing=$(label_completeness "$ART/night-report.txt")
+missing=$(label_completeness "$ART/night-report.txt" "$(cat "$START_FILE")")
+ex=$(label_exempt "$(cat "$START_FILE")"); [ -n "$ex" ] && say "сторож полноты: освобождены по моменту доставки:$ex"
 if [ -n "$missing" ]; then
     say "СТОРОЖ ПОЛНОТЫ: меток без вердиктной строки:$missing"
     echo "die: метки без вердикта:$missing" > "$MARK"
@@ -239,7 +283,7 @@ cp "$START_FILE" "$ART/"
 cp "$0" "$ART/" 2>/dev/null
 # Архив несёт СВОИ копии эмиттера и его фикстур: реплей обязан гоняться той
 # версией, что считала этот прогон ([[archive-carries-its-own-guard-copy]]).
-cp "$SETUP/night-report.sh" "$SETUP/night-report-fixtures.sh" \
+cp "$SETUP/night-report.sh" "$SETUP/night-report-fixtures.sh" "$SETUP/node-units-extract.py" \
    "$SETUP/idle-run.sh" "$SETUP/idle-run-cgroup-fixtures.sh" "$ART/" 2>/dev/null
 tar czf "$ARCHIVE" -C "$(dirname "$ART")" "$(basename "$ART")"
 say "=== ЗАМЕР №4 закончен; архив $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1)) ==="

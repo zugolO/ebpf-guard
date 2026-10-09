@@ -73,6 +73,54 @@ rules:
             - "/lib/systemd/systemd-journald"
             - "/usr/sbin/logrotate"
             - "/usr/sbin/rsyslogd"
+      # Волна 8.1, №543 (ночь H, 07.10.2026 06:41–06:46): unattended-upgrades
+      # ставил ядро, и dpkg сам делал rename/unlink/rmdir в /lib/modules, /boot
+      # и /var/log — десятки тысяч срабатываний за пять минут. Исключение по
+      # ОБРАЗУ, точный путь: копия /tmp/dpkg (comm=dpkg) не подходит и
+      # срабатывает. Потомков dpkg (rm под maintainer-скриптами) оно намеренно
+      # НЕ покрывает: proc.ancestor_exe_path разрешает только родителя, а ось
+      # «любой предок — dpkg» отдала бы исключение `dpkg --pre-invoke='rm …'`,
+      # то есть обход одной командой для root. Остаточный обход этой оси —
+      # собрать .deb, в котором журнал числится файлом пакета, и снять его
+      # dpkg --purge; он требует сборки и установки пакета и принят.
+      - name: package-manager
+        condition:
+          field: proc.exe_path
+          op: in
+          values:
+            - "/usr/bin/dpkg"
+      # Волна 8.1, №543: libapt (unattended-upgrades, apt, apt-get —
+      # любой фронтенд, поэтому не по образу) пересоздаёт свой дамп
+      # планировщика при каждом вызове dpkg и удаляет прежний. Это не журнал
+      # аудита: история установки остаётся в history.log, term.log и dpkg.log,
+      # которые правило видит по-прежнему. Ключ — ОБЪЕКТ, точный путь; удаление
+      # этого одного файла не прячет ничего.
+      - name: apt-planner-dump
+        condition:
+          field: file.path
+          op: in
+          values:
+            - "/var/log/apt/eipp.log.xz"
+      # Волна 8.1, №543: maintainer-скрипты ядра (rm под grub-mkconfig,
+      # linux-image postinst, update-initramfs) убирают свои ВРЕМЕННЫЕ
+      # артефакты. Ключ — ОБЪЕКТ без ценности для разрушения: временные копии
+      # dpkg (*.dpkg-new/-tmp/-bak/-old/-dist), черновик grub.cfg.new до
+      # переименования, маркер .fresh-install. Удаление initrd, vmlinuz,
+      # grub.cfg и модулей под исключение не попадает и срабатывает.
+      # №550 (ночь H2, 08.10.2026 06:39:22): sudo.preinst кладёт копию
+      # conffile в /etc/sudoers.pre-conffile, postinst её удаляет — 1 critical
+      # за ночь. Та же временная копия, что *.dpkg-old; якорь /etc (conffile
+      # живут там), так что приманка /var/log/<журнал>.pre-conffile
+      # исключения не получает. Сама /etc/sudoers срабатывает.
+      - name: package-transient-artifact
+        condition:
+          field: file.path
+          op: regex
+          values:
+            - "\\.dpkg-(new|tmp|bak|old|dist)$"
+            - "^/boot/grub/grub\\.cfg\\.new$"
+            - "^/lib/modules/[^/]+/\\.fresh-install$"
+            - "^/etc/.+\\.pre-conffile$"
     severity: critical
     action: alert
     tags: [mitre:T1485, impact, data-destruction, anti-forensics]

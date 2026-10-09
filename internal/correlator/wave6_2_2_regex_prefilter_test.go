@@ -142,8 +142,14 @@ func TestWave6_2_2_RegexPrefilterAttribution(t *testing.T) {
 	}
 	t.Log("\n" + b.String())
 
-	assert.Lessf(t, total, int64(200_000),
-		"total per-event cost of all file rules regressed sharply (was ~5 µs after the wave 6.2.2 prefilter, ~49 µs before)")
+	// The ceiling is for the plain build; under -race it scales by the
+	// detector's own cost (race_enabled_test.go), not by loosening the check.
+	ceiling := int64(200_000)
+	if raceEnabled {
+		ceiling *= raceCostFactor
+	}
+	assert.Lessf(t, total, ceiling,
+		"total per-event cost of all file rules regressed sharply (was ~5 µs after the wave 6.2.2 prefilter, ~49 µs before; race=%v)", raceEnabled)
 }
 
 // TestWave8_1_RegexRuleAttribution answers item 15 (б) of wave 8.1 offline:

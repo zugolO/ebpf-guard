@@ -2479,6 +2479,83 @@ PYEOF
 # tee/truncate, ни один из них не входит в исключения [rsyslogd, rs:main Q:Reg,
 # systemd-journal, systemd-journald]). Файл не существовал до атаки и удаляется
 # сразу после — ни один настоящий системный лог не тронут.
+# №545 (08.10.2026): позитивный контроль ветки «посадка модуля»
+# container_escape_module_access. До сужения правило срабатывало на любое
+# чтение модульной оси, и в пакете его единственным входом был insmod,
+# читающий modules.softdep (run_kmod_attack) — тот же класс, что шум
+# mkinitramfs/fwupd/udevd ночей H/H2. После сужения (ветка A — контейнер,
+# ветка B — write/rename в /lib/modules не от dpkg/kmod на хосте) этот вход
+# ушёл, и правило из detection-baseline.txt без шага стало бы потерей.
+#
+# Форма: заготовка в /var/tmp БЕЗ суффикса .ko (иначе rootkit_kmod_from_tmp),
+# копия mv под именем modplant переименовывает её в /lib/modules/<ядро>/*.ko —
+# rename, ветка B. Уборка — обратный rename той же копией и rm уже в /var/tmp:
+# unlink внутри /lib/modules поднял бы impact_mass_file_deletion_critical.
+# Условие шага — одна ФС у /var/tmp и /lib/modules (иначе mv — это
+# копирование и unlink, а не rename); не та же — шаг пропускается с
+# причиной в маркере. comm=modplant — не в harness_comms. Модуль не
+# загружается: файл пустой, depmod не зовётся.
+run_module_plant_positive_control() {
+    local marker="$RESULTS_DIR/module-plant-control-$TIMESTAMP.txt"
+
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ №545: посадка модуля в /lib/modules (rename, comm=modplant)"
+    log "==========================================="
+
+    local kdir="/lib/modules/$(uname -r)"
+    local tool_dir="/var/tmp/w545"
+    local tool="$tool_dir/modplant"
+    local stage="/var/tmp/ebpf-guard-plant-$TIMESTAMP"
+    local planted="$kdir/ebpf-guard-canary-$TIMESTAMP.ko"
+    if [ ! -d "$kdir" ] || ! mkdir -p "$tool_dir" 2>/dev/null || ! cp "$(command -v mv)" "$tool" 2>/dev/null; then
+        warn "не удалось подготовить $tool или нет $kdir — позитивный контроль №545 пропущен"
+        { echo "skipped=1"; echo "skip_reason=нет $kdir или cp mv $tool не удался"; } > "$marker"
+        echo ""
+        return
+    fi
+    if [ "$(stat -c %d /var/tmp)" != "$(stat -c %d "$kdir")" ]; then
+        warn "/var/tmp и $kdir на разных ФС — mv не будет rename, позитивный контроль №545 пропущен"
+        { echo "skipped=1"; echo "skip_reason=/var/tmp и $kdir на разных ФС"; } > "$marker"
+        rm -rf "$tool_dir"; echo ""; return
+    fi
+    : > "$stage" || { warn "не удалось создать $stage"; rm -rf "$tool_dir"; echo "skipped=1" > "$marker"; echo ""; return; }
+
+    local mp_done=0
+    mark_attack_window
+    if "$tool" "$stage" "$planted" 2>/dev/null && [ -e "$planted" ] && [ ! -e "$stage" ]; then
+        mp_done=1
+        log "$planted посажен comm=modplant (rename) — ожидается container_escape_module_access (ветка B)"
+    else
+        warn "rename $stage → $planted не удался — позитивный контроль №545 не исполнен"
+    fi
+    mark_attack_window
+
+    # Уборка: обратно на имя заготовки тем же rename (ФС одна — проверено
+    # выше), затем rm в /var/tmp; в /lib/modules unlink не делается.
+    [ -e "$planted" ] && "$tool" "$planted" "$stage" 2>/dev/null
+    rm -f "$stage" "$planted"
+    rm -rf "$tool_dir"
+
+    {
+        echo "skipped=0"
+        echo "done=$mp_done"
+        echo "comm=modplant"
+        echo "planted=$planted"
+        echo "left_behind=$( [ -e "$planted" ] || [ -e "$stage" ] && echo 1 || echo 0)"
+    } > "$marker"
+
+    if [ "$mp_done" -eq 1 ] && command -v jq &> /dev/null; then
+        mp_entry=$(jq -n --arg cat "module_plant_positive_control" --arg comm "modplant" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$mp_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$mp_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
 run_log_tamper_attack() {
     log "==========================================="
     log "ЗАПУСК LOG-TAMPER АТАКИ (5.9.1d в)"
@@ -3432,6 +3509,7 @@ interactive_mode() {
                 run_setuid_attack
                 run_bpf_attack
                 run_kmod_attack
+                run_module_plant_positive_control
                 run_dns_long_label_attack
                 run_kill_scenario
                 run_induced_drop
@@ -3468,6 +3546,7 @@ interactive_mode() {
                 run_setuid_attack
                 run_bpf_attack
                 run_kmod_attack
+                run_module_plant_positive_control
                 run_dns_long_label_attack
                 ;;
             7)
@@ -3531,6 +3610,7 @@ full_run() {
     run_setuid_attack
     run_bpf_attack
     run_kmod_attack
+    run_module_plant_positive_control
     run_dns_long_label_attack
     run_kill_scenario
     run_induced_drop
@@ -3601,6 +3681,10 @@ main() {
         # как у --counting-control).
         check_services || exit 1
         run_cred_proc_maps_positive_control
+    elif [ "$1" = "--module-plant-control" ]; then
+        # №545: позитивный контроль ветки посадки модуля отдельным шагом
+        # (предпрогон/смок), вне окна замера — как --cred-proc-maps-control.
+        run_module_plant_positive_control
     elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
         echo "Использование: $0 [опции]"
         echo ""

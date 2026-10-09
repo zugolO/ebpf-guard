@@ -1149,6 +1149,46 @@ if [ -n "$dns_ctl_marker" ] && [ -s "$baseline_metrics" ]; then
         dns_ctl_before_baseline=1
     fi
 fi
+# №552 (Р2, 09.10.2026): правило, переименованное Rego-решением, считается в
+# ebpf_guard_alerts_total под НОВЫМ rule_id, а серия по базовому имени остаётся
+# нулевой — критерий 6 читал это потерей детекта (8 из 12 «потерь» пакета).
+# Рост ebpf_guard_alert_rule_id_renamed_total{base_rule_id,rule_id} за окно —
+# свидетельство «сработало под именем Rego X». Печатает "base<TAB>rego<TAB>дельта".
+metric_renamed_grown() {
+    local startf="$1" endf="$2"
+    local files=("$endf")
+    if [ -n "$startf" ] && [ -s "$startf" ]; then
+        files=("$startf" "$endf")
+    else
+        startf=""
+    fi
+    awk -v startfile="$startf" '
+        function lab(line, key,   i, rest) {
+            i = index(line, key "=\"")
+            if (i == 0) return ""
+            rest = substr(line, i + length(key) + 2)
+            return substr(rest, 1, index(rest, "\"") - 1)
+        }
+        { gsub(/\r/, "") }
+        index($0, "ebpf_guard_alert_rule_id_renamed_total{") != 1 { next }
+        {
+            # "rule_id" входит в "base_rule_id" подстрокой — ищем с границей метки.
+            b = lab($0, "{base_rule_id"); if (b == "") b = lab($0, ",base_rule_id")
+            r = lab($0, ",rule_id"); if (r == "") r = lab($0, "{rule_id")
+            if (b == "" || r == "") next
+            k = b "\t" r
+            if (startfile != "" && FILENAME == startfile) { start[k] += $NF; next }
+            end[k] += $NF; seen[k] = 1
+        }
+        END {
+            for (k in seen) {
+                d = end[k] - (start[k] + 0)
+                if (d > 0) print k "\t" d
+            }
+        }
+    ' "${files[@]}" | sort
+}
+
 # Правило, уже сработавшее ДО снятия baseline_metrics (ABSOLUTE, не дельта),
 # растёт на 0 между baseline и final по конструкции delta = final - baseline —
 # оно живо, но невидимо ни одному из трёх окон (attack/idle/gap) ниже. Тот же
@@ -1227,6 +1267,29 @@ else
     # добавлено" при малейшем расхождении переводов строк между базой и выводом
     # jq (поймано при пересчёте 5.3 на Windows-сборке jq).
     expected_types=$(grep -vE '^\s*(#|$)' "$baseline_types_file" | tr -d '\r' | sort)
+    # №552 (Р2): зачёт «сработало под именем Rego X» — отдельной строкой и
+    # отдельным счётчиком. Зачитывается только база, которой нет в составе
+    # детекта прогона и которая есть в базе; рост берётся за окно атак.
+    rego_renamed_pairs=$(metric_renamed_grown "$basefile_arg" "$final_metrics")
+    rego_renamed_credited=""
+    rego_renamed_credited_lines=""
+    while IFS=$'\t' read -r rr_base rr_new rr_delta; do
+        [ -n "$rr_base" ] || continue
+        echo "$expected_types" | grep -qxF -- "$rr_base" || continue
+        echo "$detected_type_list" | grep -qxF -- "$rr_base" && continue
+        rego_renamed_credited="${rego_renamed_credited}${rr_base}"$'\n'
+        rego_renamed_credited_lines="${rego_renamed_credited_lines}    ~ ${rr_base} → ${rr_new} (+${rr_delta})"$'\n'
+    done <<< "$rego_renamed_pairs"
+    rego_renamed_credited_count=$(printf '%s' "$rego_renamed_credited" | grep -c . || true)
+    if [ "$rego_renamed_credited_count" -gt 0 ]; then
+        detected_type_list=$(printf '%s\n%s\n' "$detected_type_list" "$rego_renamed_credited" | grep -v '^$' | sort -u)
+        echo "  сработало под именем Rego, засчитано по ebpf_guard_alert_rule_id_renamed_total (+$rego_renamed_credited_count, рост за окно атак, №552):"
+        printf '%s' "$rego_renamed_credited_lines"
+        record_covered "сработало под именем Rego"
+    else
+        echo "  сработало под именем Rego, засчитано по ebpf_guard_alert_rule_id_renamed_total: 0 (рост за окно атак, №552)"
+        record_covered "сработало под именем Rego"
+    fi
     lost_types_raw=$(comm -23 <(echo "$expected_types") <(echo "$detected_type_list"))
     added_types=$(comm -13 <(echo "$expected_types") <(echo "$detected_type_list"))
     added_count=$(echo "$added_types" | grep -c . || true)
@@ -3557,6 +3620,14 @@ declare -A positive_control_rule_categories=(
     # modules.softdep); шаг run_module_plant_positive_control добавлен вместе
     # с этой строкой.
     [container_escape_module_access]="module_plant_positive_control"
+    # №552 (Р2, 09.10.2026): у chmod-пары и host_mount не было входа в пакете
+    # (канарейка run_chmod_attack лежит вне префиксов правил; хостовой
+    # containerd 6.0 ушёл с сужением на контейнер). Шаги
+    # run_chmod_sensitive_paths_positive_control / run_host_mount_positive_control
+    # добавлены вместе с этими строками.
+    [sigma_sensitive_file_chmod]="chmod_sensitive_positive_control"
+    [evasion_chmod_sensitive]="chmod_sensitive_positive_control"
+    [container_escape_host_mount]="host_mount_positive_control"
 )
 echo "=== 5.9.9c. Правила детект-базы с позитивным контролем в манифесте ==="
 # 5.9.9e: заголовок печатается голым echo (секция — наблюдение без порога, у

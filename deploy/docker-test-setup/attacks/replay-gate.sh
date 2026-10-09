@@ -1474,10 +1474,15 @@ elif [ ! -f "$C60B_DIR/attacks/final-metrics-$ts60b.txt" ]; then
 else
     run_offline_gate "$C60B_DIR/attacks" "$ts60b"
     sec194_live=$(extract_section "$OFFLINE_GATE_OUTPUT" '^=== 6\.' '^=== 7\.')
+    # Долг 8.1 / man-db (09.10.2026): drift_new_library_in_system_dir получил
+    # исключение mandb-self и запись в new-rules.txt (20261009) — как
+    # container_escape_init_proc (№282/№548) он теперь объяснён «моложе архива»
+    # на ОБЕИХ сторонах, раньше реестра дрейфа. Дрейфовый реестр на обнулённой
+    # стороне доказывает drift_dangerous_syscall; утверждения — по позиции строки.
     named194=0
     grep -qE '^    ~ container_escape_init_proc \(заведено 20260909 ' <<< "$sec194_live" \
         && grep -qF 'drift_dangerous_syscall: не потеряно' <<< "$sec194_live" \
-        && grep -qF 'drift_new_library_in_system_dir: не потеряно' <<< "$sec194_live" \
+        && grep -qE '^    ~ drift_new_library_in_system_dir \(заведено 20261009 ' <<< "$sec194_live" \
         && grep -qE '\[PASS\].*5\.9\.7e: потеряно вне реестров' <<< "$sec194_live" && named194=1
 
     tmp194=$(mktemp -d)
@@ -1491,7 +1496,7 @@ else
     fails194=0
     grep -qE '^    ~ container_escape_init_proc \(заведено 20260909 ' <<< "$sec194_zeroed" \
         && grep -qx '    - drift_dangerous_syscall' <<< "$sec194_zeroed" \
-        && grep -qx '    - drift_new_library_in_system_dir' <<< "$sec194_zeroed" \
+        && grep -qE '^    ~ drift_new_library_in_system_dir \(заведено 20261009 ' <<< "$sec194_zeroed" \
         && grep -qE '\[FAIL\].*5\.9\.7e: потеряно вне реестров' <<< "$sec194_zeroed" && fails194=1
 
     if [ "$named194" -eq 1 ] && [ "$fails194" -eq 1 ]; then
@@ -1747,6 +1752,57 @@ if [[ "$hyg_f2" == "ПРОВАЛЕНА(коллект однороден, но �
     ok "гигиена (№212): collect-6.0f2-aborted -> $hyg_f2 — архив аборта ловится ИМЕННО отсечкой по времени, сверка TIMESTAMP на нём зелена по построению (все артефакты от чужого прогона разом); collect-6.0d -> $hyg_60d; копия 6.0d с подложенным чужим TIMESTAMP -> $hyg_alien (файл назван поимённо). Обе половины шага [14.2/14] исполнены на реальных архивах, ни одна не подменяет другую"
 else
     bad "гигиена (№212): 6.0f2 -> ${hyg_f2:-?} (ожидалась ПРОВАЛЕНА по отсечке), 6.0d -> ${hyg_60d:-?} (ожидался СВЕЖИЙ), копия с чужим TIMESTAMP -> ${hyg_alien:-?} (ожидалась ПРОВАЛЕНА с именем report-6.0.txt) — половина шага [14.2/14], давшая не тот исход, не проверена ничем другим"
+fi
+echo ""
+
+# --- Реплей 26 (№552): «сработало под именем Rego» — по ПОЗИЦИИ строки -----
+# collect-3-night-2026-10-03 (ночь №3, до правок 8.1): 11 типов терялись, восемь
+# из них — Rego-переименования (ssh-ключи → authorized_keys_modify, DNS
+# long-label → long_dns_query). Живая сторона: восемь баз засчитаны отдельной
+# строкой, в «потеряно» остаются ровно три, входа пакета у которых нет.
+# Обнулённая сторона: серия renamed_total вырезана из final-metrics — те же
+# восемь обязаны вернуться в «потеряно» (счётчик 0), иначе зачёт вакуумен.
+# Утверждения — по ПОЗИЦИИ: «зачёт» читается внутри своего блока, «потеряно» —
+# внутри своего, а не grep по всему выводу (№548: имя правила встречается и в
+# строках реестров).
+echo "--- реплей №552: ночь №3 — восемь Rego-переименований засчитаны отдельной строкой, обнулённая серия возвращает их в «потеряно» ---"
+N3_DIR="${C3N_DIR:-$REPO_ROOT/server-logs/collect-3-night-2026-10-03/night-3}"
+if [ ! -d "$N3_DIR/attacks-results" ]; then
+    echo "[REPLAY-SKIP] нет архива $N3_DIR — реплей №552 не исполнен"
+else
+    n3_ts=$(find_ts "$N3_DIR/attacks-results" 2>/dev/null || true)
+    run_offline_gate "$N3_DIR/attacks-results" "$n3_ts"
+    n3_live="$OFFLINE_GATE_OUTPUT"
+    n3_zero_dir=$(mktemp -d)
+    for f in "$N3_DIR/attacks-results"/*; do ln -s "$f" "$n3_zero_dir/$(basename "$f")"; done
+    rm -f "$n3_zero_dir/final-metrics-$n3_ts.txt"
+    grep -v '^ebpf_guard_alert_rule_id_renamed_total{' "$N3_DIR/attacks-results/final-metrics-$n3_ts.txt" > "$n3_zero_dir/final-metrics-$n3_ts.txt"
+    run_offline_gate "$n3_zero_dir" "$n3_ts"
+    n3_zero="$OFFLINE_GATE_OUTPUT"
+    rm -rf "$n3_zero_dir"
+    n3_bases="credaccess_ssh_authorized_keys_modified fim_ssh_key_written persistence_ssh_authorized_keys rootkit_ssh_authorized_keys_modified dns_tunneling_long_domain exfil_dns_txt_long_label netintr_dns_long_label webshell_dns_exfil_long_subdomain"
+    n3_live_cred=$(extract_section "$n3_live" 'сработало под именем Rego' 'типов в прогоне')
+    n3_live_lost=$(extract_section "$n3_live" '^  потеряно [(]-' 'состав детекта')
+    n3_zero_cred=$(extract_section "$n3_zero" 'сработало под именем Rego' 'типов в прогоне')
+    n3_zero_lost=$(extract_section "$n3_zero" '^  потеряно [(]-' 'состав детекта')
+    n3_ok=1; n3_why=""
+    echo "$n3_live_cred" | grep -qF '(+8, рост за окно атак' || { n3_ok=0; n3_why="$n3_why; живая сторона не засчитала 8"; }
+    for b in $n3_bases; do
+        echo "$n3_live_cred" | grep -qE "^    ~ $b → (authorized_keys_modify|long_dns_query) " || { n3_ok=0; n3_why="$n3_why; нет зачёта $b"; }
+        echo "$n3_live_lost" | grep -qxF "    - $b" && { n3_ok=0; n3_why="$n3_why; $b остался в «потеряно»"; }
+        echo "$n3_zero_lost" | grep -qxF "    - $b" || { n3_ok=0; n3_why="$n3_why; обнулённая сторона не вернула $b"; }
+    done
+    echo "$n3_live_lost" | grep -qF 'потеряно (-3)' || { n3_ok=0; n3_why="$n3_why; в живой стороне потерь не 3"; }
+    for b in container_escape_host_mount evasion_chmod_sensitive sigma_sensitive_file_chmod; do
+        echo "$n3_live_lost" | grep -qxF "    - $b" || { n3_ok=0; n3_why="$n3_why; нет входа-потери $b"; }
+    done
+    echo "$n3_zero_cred" | grep -qF 'засчитано по ebpf_guard_alert_rule_id_renamed_total: 0' || { n3_ok=0; n3_why="$n3_why; обнулённая сторона не напечатала счётчик 0"; }
+    echo "$n3_zero_lost" | grep -qF 'потеряно (-11)' || { n3_ok=0; n3_why="$n3_why; в обнулённой стороне потерь не 11"; }
+    if [ "$n3_ok" -eq 1 ]; then
+        ok "№552 (ночь №3): живая сторона — восемь баз засчитаны отдельной строкой «сработало под именем Rego» и в «потеряно» остаются три (host_mount, chmod-пара — входа пакета нет); обнулённая серия renamed_total — счётчик 0 и те же восемь в «потеряно (-11)». Зачёт умеет и засчитывать, и не засчитывать"
+    else
+        bad "№552 (ночь №3): расхождение —$n3_why"
+    fi
 fi
 echo ""
 

@@ -209,6 +209,21 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1011.001, exfiltration, raw-socket]
+    exceptions:
+      # apt-method-net: см. dns_nxdomain_flood (rules/dns-threats.yaml) — образ метода APT http, хост, exe_path последним.
+      - name: apt-method-net
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/lib/apt/methods/http]
 
   # MITRE ATT&CK: T1052 — Exfiltration Over Physical Medium
   - id: exfil_usb_mount

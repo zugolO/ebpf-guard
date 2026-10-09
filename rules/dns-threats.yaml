@@ -171,6 +171,31 @@ rules:
     severity: warning
     action: alert
     tags: [dns, nxdomain, dga, scanning]
+    exceptions:
+      # Долг 8.1 / Р1 (09.10.2026, смок w81-h4 + ночь H3): таймеры apt-daily и
+      # apt-daily-upgrade поднимали attack (score 96…154, 111): сетевые
+      # эвристики срабатывали на метод APT, который качает репозиторий. Метод —
+      # дочерний apt-get, 1…10 с жизни, образ разрешается (noise-diag: resolved
+      # 4 из 4). /usr/lib/apt/methods/https — симлинк на http, поэтому
+      # /proc/<pid>/exe у обоих один и тот же /usr/lib/apt/methods/http
+      # (readlink -f и dpkg -S сверены на стенде). Исключение по ОБРАЗУ: хост,
+      # точный путь, exe_path последним, отказ открытый. Копия метода из /tmp и
+      # тот же образ в контейнере срабатывают (TestW81AptMethodNet*). Скоринг
+      # не тронут. Деревья python3-юнитов esm-cache/apt-news исключения не
+      # получают: сам python3 (exe = интерпретатор) оси не имеет.
+      - name: apt-method-net
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/lib/apt/methods/http]
 
   # PTR Query Detection
   # Reverse DNS queries may indicate reconnaissance

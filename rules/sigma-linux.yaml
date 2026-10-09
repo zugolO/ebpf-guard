@@ -1241,6 +1241,31 @@ rules:
     severity: info
     action: alert
     tags: [mitre:T1087.001, sigma, credential-access, account-discovery]
+    exceptions:
+      # man-db: см. drift_exec_from_system_bin (rules/drift-rules.yaml) — образ /usr/bin/mandb, хост, exe_path последним.
+      # Объекты: /etc/passwd, /etc/group (разрешение пользователя/группы man), только чтение.
+      - name: mandb-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: file.path
+              op: in
+              values: [/etc/passwd, /etc/group]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/bin/mandb]
 
   # sshd/cron routinely read passwd/shadow/group on every login/job run
   # (PAM account lookup). plan.md wave 5.1, closed question 10: this rule

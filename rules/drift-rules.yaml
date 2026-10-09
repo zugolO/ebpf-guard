@@ -63,6 +63,28 @@ rules:
       - "T1204.002"
       - "drift"
       - "payload-drop"
+    exceptions:
+      # Долг 8.1 / man-db (09.10.2026, смок w81-h4): таймер man-db.service
+      # поднимал attack-инцидент на пороге (score 50, шесть-семь правил на
+      # /usr/bin/mandb; ночь H3 01:38). Исключение по ОБРАЗУ: хост, образ — точный
+      # путь из пакета man-db, exe_path последним (отказ открытый). Короткоживущий
+      # дочерний (mandb) с предэкзековым comm образа не имеет и исключения не
+      # получает — остаётся suspicious. Копия под именем mandb из /var/tmp
+      # срабатывает (TestW81Mandb*).
+      # Событие — execve самого образа mandb (юнит man-db).
+      - name: mandb-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/bin/mandb]
 
   # ── New library loaded drift ──────────────────────────────────────────────
   - id: drift_new_library_in_system_dir
@@ -111,6 +133,30 @@ rules:
             - field: proc.comm
               op: regex
               values: ["^\\(.*\\)$"]
+      # man-db: см. drift_exec_from_system_bin (rules/drift-rules.yaml) — образ /usr/bin/mandb, хост, exe_path последним.
+      # Объект: собственные библиотеки mandb (RPATH /usr/lib/man-db/), только чтение.
+      - name: mandb-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: file.path
+              op: prefix
+              values: [/usr/lib/man-db/]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/bin/mandb]
 
   # sshd/cron dlopen PAM/NSS modules (pam_unix.so, libnss_*.so) on every
   # login/job run — legitimate dynamic loading, not injection. plan.md

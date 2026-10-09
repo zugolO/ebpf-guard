@@ -2556,6 +2556,107 @@ run_module_plant_positive_control() {
     echo ""
 }
 
+# №552 (Р2, 09.10.2026): входы пакета для трёх правил, у которых их не было.
+# Разбор №552: sigma_sensitive_file_chmod / evasion_chmod_sensitive молчали в
+# пакете, потому что канарейка run_chmod_attack лежит в /etc/ — вне префиксов
+# обоих правил (/etc/ssh/, /root/.ssh/… и /usr/local/bin/…); в 6.0 их поднимал
+# systemd-logind при ssh-входах оператора, то есть это был шум, а не вход.
+# Здесь одноразовые файлы создаются прямо под префиксами правил, chmod
+# выполняет внешняя команда (comm=chmod — вне исключений [sshd, cron] и списка
+# пакетных менеджеров), уборка — rm тех же файлов. Ничего в /root.
+run_chmod_sensitive_paths_positive_control() {
+    local marker="$RESULTS_DIR/chmod-sensitive-control-$TIMESTAMP.txt"
+
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ №552: chmod под /etc/ssh/ и /usr/local/bin/ (comm=chmod)"
+    log "==========================================="
+
+    local ssh_canary="/etc/ssh/.ebpf-guard-attack-canary-$TIMESTAMP"
+    local bin_canary="/usr/local/bin/.ebpf-guard-attack-canary-$TIMESTAMP"
+    local ch_ssh=0 ch_bin=0
+    mark_attack_window
+    if touch "$ssh_canary" 2>/dev/null; then
+        chmod 600 "$ssh_canary" 2>/dev/null && ch_ssh=1
+        rm -f "$ssh_canary"
+    else
+        warn "нет записи в /etc/ssh — ветка sigma_sensitive_file_chmod контроля №552 пропущена"
+    fi
+    if touch "$bin_canary" 2>/dev/null; then
+        chmod 755 "$bin_canary" 2>/dev/null && ch_bin=1
+        rm -f "$bin_canary"
+    else
+        warn "нет записи в /usr/local/bin — ветка evasion_chmod_sensitive контроля №552 пропущена"
+    fi
+    mark_attack_window
+    log "chmod: /etc/ssh → $ch_ssh (sigma_sensitive_file_chmod), /usr/local/bin → $ch_bin (evasion_chmod_sensitive)"
+
+    {
+        echo "skipped=$( [ "$ch_ssh" -eq 0 ] && [ "$ch_bin" -eq 0 ] && echo 1 || echo 0)"
+        echo "done_ssh=$ch_ssh"
+        echo "done_bin=$ch_bin"
+        echo "comm=chmod"
+        echo "left_behind=$( [ -e "$ssh_canary" ] || [ -e "$bin_canary" ] && echo 1 || echo 0)"
+    } > "$marker"
+
+    if { [ "$ch_ssh" -eq 1 ] || [ "$ch_bin" -eq 1 ]; } && command -v jq &> /dev/null; then
+        cs_entry=$(jq -n --arg cat "chmod_sensitive_positive_control" --arg comm "chmod" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$cs_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$cs_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
+# №552 (Р2): container_escape_host_mount после сужения на процесс контейнера
+# (container.id или k8s.pod не пусты) в пакете не имел входа: в 6.0 его давал
+# хостовой containerd. Вход — настоящий контейнер docker: каталог-приманка
+# монтируется read-only НА путь /var/lib/containerd внутри контейнера, и
+# busybox читает файл по этому пути (событие несёт filename как открыт —
+# /var/lib/containerd/…, и cgroup контейнера). Настоящий /var/lib/containerd
+# хоста (k3s) не монтируется и не читается. comm=busybox. Образ не тянется в
+# окне: нет локального busybox — шаг пропускается с причиной в маркере.
+run_host_mount_positive_control() {
+    local marker="$RESULTS_DIR/host-mount-control-$TIMESTAMP.txt"
+
+    log "==========================================="
+    log "ПОЗИТИВНЫЙ КОНТРОЛЬ №552: чтение /var/lib/containerd/ процессом контейнера (docker, comm=busybox)"
+    log "==========================================="
+
+    if ! command -v docker &> /dev/null || ! docker image inspect busybox >/dev/null 2>&1; then
+        warn "нет docker или локального образа busybox — позитивный контроль №552 (host_mount) пропущен"
+        { echo "skipped=1"; echo "skip_reason=docker=$(command -v docker || echo нет) busybox=$(docker image inspect busybox >/dev/null 2>&1 && echo есть || echo нет)"; } > "$marker"
+        echo ""
+        return
+    fi
+    local bait="/var/tmp/w552-ct-$TIMESTAMP"
+    mkdir -p "$bait" && echo "ebpf-guard №552 canary" > "$bait/canary" || { warn "не создан $bait"; echo "skipped=1" > "$marker"; echo ""; return; }
+
+    local hm_done=0 hm_rc=0
+    mark_attack_window
+    docker run --rm --pull=never -v "$bait:/var/lib/containerd:ro" busybox \
+        busybox cat /var/lib/containerd/canary >/dev/null 2>&1 || hm_rc=$?
+    [ "$hm_rc" -eq 0 ] && hm_done=1
+    mark_attack_window
+    log "docker run busybox cat /var/lib/containerd/canary rc=$hm_rc — ожидается container_escape_host_mount (контейнер, filename по префиксу)"
+    rm -rf "$bait"
+
+    { echo "skipped=0"; echo "done=$hm_done"; echo "rc=$hm_rc"; echo "comm=busybox"; } > "$marker"
+
+    if [ "$hm_done" -eq 1 ] && command -v jq &> /dev/null; then
+        hm_entry=$(jq -n --arg cat "host_mount_positive_control" --arg comm "busybox" --arg ts "$(date -Iseconds)" \
+            '{category: $cat, comm: $comm, timestamp: $ts}' 2>/dev/null)
+        if [ -n "$hm_entry" ] && [ -f "$MANIFEST_FILE" ]; then
+            jq --argjson e "$hm_entry" '. + [$e]' "$MANIFEST_FILE" > "$MANIFEST_FILE.tmp" 2>/dev/null \
+                && mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+        fi
+    fi
+
+    echo ""
+}
+
 run_log_tamper_attack() {
     log "==========================================="
     log "ЗАПУСК LOG-TAMPER АТАКИ (5.9.1d в)"
@@ -3510,6 +3611,8 @@ interactive_mode() {
                 run_bpf_attack
                 run_kmod_attack
                 run_module_plant_positive_control
+                run_chmod_sensitive_paths_positive_control
+                run_host_mount_positive_control
                 run_dns_long_label_attack
                 run_kill_scenario
                 run_induced_drop
@@ -3547,6 +3650,8 @@ interactive_mode() {
                 run_bpf_attack
                 run_kmod_attack
                 run_module_plant_positive_control
+                run_chmod_sensitive_paths_positive_control
+                run_host_mount_positive_control
                 run_dns_long_label_attack
                 ;;
             7)
@@ -3611,6 +3716,8 @@ full_run() {
     run_bpf_attack
     run_kmod_attack
     run_module_plant_positive_control
+    run_chmod_sensitive_paths_positive_control
+    run_host_mount_positive_control
     run_dns_long_label_attack
     run_kill_scenario
     run_induced_drop
@@ -3685,6 +3792,10 @@ main() {
         # №545: позитивный контроль ветки посадки модуля отдельным шагом
         # (предпрогон/смок), вне окна замера — как --cred-proc-maps-control.
         run_module_plant_positive_control
+    elif [ "$1" = "--chmod-sensitive-control" ]; then
+        # №552: позитивные контроли chmod-пары и host_mount отдельным шагом, вне окна замера.
+        run_chmod_sensitive_paths_positive_control
+        run_host_mount_positive_control
     elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
         echo "Использование: $0 [опции]"
         echo ""

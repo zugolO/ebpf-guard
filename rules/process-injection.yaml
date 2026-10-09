@@ -140,14 +140,47 @@ rules:
       the listed .so. Modifying it is the classic T1574.006 persistence and
       hooking primitive used by rootkits and credential stealers.
     event_type: file
-    condition:
-      field: filename
-      op: in
-      values:
-        - "/etc/ld.so.preload"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: in
+          values:
+            - "/etc/ld.so.preload"
+        # Долг 8.1 / man-db: legacy-набор операций назван ЯВНО. Правило без op
+        # видело ровно его (Rule.legacyOpsOnly), но исключение mandb-self ниже
+        # называет op, а правило, назвавшее op хоть где-то, флаг теряет и
+        # увидело бы unlink/rename/truncate/rmdir. Семантика условия прежняя.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: critical
     action: alert
     tags: [mitre-t1574, mitre-t1574.006, process-injection, ld-preload, persistence]
+    exceptions:
+      # man-db: см. drift_exec_from_system_bin (rules/drift-rules.yaml). mandb
+      # (setuid man) на старте ОТКРЫВАЕТ /etc/ld.so.preload на чтение (O_RDONLY,
+      # файла на стенде нет) — свидетель bpftrace смока: flags 0, не запись.
+      # Запись/любое открытие не на чтение тем же образом срабатывает.
+      - name: mandb-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/bin/mandb]
 
   # The dynamic linker also respects LD_PRELOAD set via the process environment.
   # Runtime setenv is captured at the file/proc layer: a process writing its

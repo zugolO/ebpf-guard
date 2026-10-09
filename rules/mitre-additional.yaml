@@ -669,6 +669,21 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1071.004, dns-c2, beacon, fast-flux]
+    exceptions:
+      # apt-method-net: см. dns_nxdomain_flood (rules/dns-threats.yaml) — образ метода APT http, хост, exe_path последним.
+      - name: apt-method-net
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/lib/apt/methods/http]
 
   # ============================================================================
   # T1021 — Remote Services

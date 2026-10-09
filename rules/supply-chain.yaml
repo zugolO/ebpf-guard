@@ -60,21 +60,54 @@ rules:
       from post-install scripts without explicit admin action — this is
       characteristic of a T1195.001 malicious package backdoor.
     event_type: file
-    condition:
-      field: filename
-      op: prefix
-      values:
-        - "/etc/profile.d/"
-        - "/etc/cron.d/"
-        - "/etc/cron.daily/"
-        - "/etc/cron.weekly/"
-        - "/etc/systemd/system/"
-        - "/etc/init.d/"
-        - "/etc/rc.local"
-        - "/etc/ld.so.preload"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: prefix
+          values:
+            - "/etc/profile.d/"
+            - "/etc/cron.d/"
+            - "/etc/cron.daily/"
+            - "/etc/cron.weekly/"
+            - "/etc/systemd/system/"
+            - "/etc/init.d/"
+            - "/etc/rc.local"
+            - "/etc/ld.so.preload"
+        # Долг 8.1 / man-db: legacy-набор op назван ЯВНО (см.
+        # proc_inject_ld_preload_file, rules/process-injection.yaml).
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: critical
     action: alert
     tags: [mitre-t1195, mitre-t1195.001, supply-chain, post-install, persistence]
+    exceptions:
+      # man-db: см. proc_inject_ld_preload_file (rules/process-injection.yaml) —
+      # чтение /etc/ld.so.preload образом mandb. Объект назван точно: чтение
+      # прочих путей правила и любая запись образом mandb срабатывают.
+      - name: mandb-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: file.path
+              op: in
+              values: [/etc/ld.so.preload]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/bin/mandb]
 
   # Post-install script staging payload in /tmp or /var/tmp.
   - id: supply_chain_pkg_tmp_staging

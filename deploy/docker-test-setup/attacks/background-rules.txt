@@ -97,6 +97,16 @@ drift_new_file_dir_sensitive	2.4:59
 drift_new_library_in_system_dir	2.4:23
 mitre_sandbox_detect_proc_read	2.4:519
 net_portscan_indicator	2.4:77
+# №552 (Р2, 09.10.2026, решение владельца): owasp_backup_config_access — фон
+# без окна. Алерты правила на стенде — это needrestart/tar/dpkg, читающие
+# *.old/*.orig/*.bak (в 6.0 — tar, в H2 — needrestart), а входа пакета у него
+# нет. ОГОВОРКА о величине: она ночная, а не часовая — по стору архивов
+# idle-ночей 8.1 (idle/alerts-end.json) правило дало H: 11, H2: 3, H3: 3 за
+# ВСЮ ночь, то есть меньше порога 10/ч из шапки этого файла. Строка поэтому
+# спасает правило в критерии 6 лишь на прогоне, где его idle-час вырос, и
+# честно печатается среди «не подтверждённых idle-часом» в остальные — это
+# наблюдение 5.9.9.Fe, не отказ. Величина = алертов за ночь, замер 8.1-H3.
+owasp_backup_config_access	8.1-H3:3
 owasp_log_tampering	2.4:184
 sensitive_file_read	2.4:73
 sigma_cpu_info_access	2.4:67

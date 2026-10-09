@@ -93,6 +93,22 @@ rules:
     severity: warning
     action: alert
     tags: [mitre:T1070.006, defense-evasion]
+    exceptions:
+      # man-db: см. drift_exec_from_system_bin (rules/drift-rules.yaml) — образ /usr/bin/mandb, хост, exe_path последним.
+      # mandb выставляет mtime записей кэша /var/cache/man (utimensat; пути на syscall-оси нет — ось только образ).
+      - name: mandb-self
+        condition_group:
+          operator: and
+          conditions:
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: proc.exe_path
+              op: in
+              values: [/usr/bin/mandb]
 
   # MITRE ATT&CK: T1222 — File and Directory Permissions Modification
   #

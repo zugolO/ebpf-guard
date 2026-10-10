@@ -29,6 +29,9 @@ cat /proc/"$P"/status > "$OUT/status"
 awk '/^[0-9a-f]+-[0-9a-f]+ /{name=$6; if(name=="")name="[anon]"} /^Rss:/{r[name]+=$2} END{for(n in r) printf "%10d KiB %s\n", r[n], n}' /proc/"$P"/smaps | sort -rn | head -25 > "$OUT/smaps_by_map.txt"
 bpftool -j map show > "$OUT/maps.json" 2>&1
 bpftool -j prog show > "$OUT/progs.json" 2>&1
+# Сырые строки — кольца выделяются vmap'ом без pages= (10.10.2026), эмиттер
+# берёт их объём из maps.json; сырьё нужно, чтобы это было проверяемо.
+grep bpf /proc/vmallocinfo > "$OUT/vmallocinfo-bpf.raw"
 grep bpf /proc/vmallocinfo | awk '{c=$3; p=0; for(i=4;i<=NF;i++) if($i ~ /^pages=/){split($i,a,"="); p=a[2]} pages[c]+=p; n[c]++} END{for(k in pages) printf "%8.1f MiB phys %4d %s\n", pages[k]*4/1024, n[k], k}' | sort -rn > "$OUT/bpf_vmalloc.txt"
 TOK=$(grep '^admin=' /var/lib/ebpf-guard/token | cut -d= -f2)
 curl -s -H "Authorization: Bearer $TOK" "$API/metrics" > "$OUT/metrics.txt"

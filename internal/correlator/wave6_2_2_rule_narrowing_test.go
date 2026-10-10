@@ -34,8 +34,8 @@ func loadRule(t *testing.T, file, id string) Rule {
 }
 
 func TestWave6_2_2_BeaconFixedInterval_RequiresPeriodicity(t *testing.T) {
-	globalBeaconInterval = NewBeaconIntervalTracker()
-	t.Cleanup(func() { globalBeaconInterval = NewBeaconIntervalTracker() })
+	globalBeaconInterval.resetForTest()
+	t.Cleanup(func() { globalBeaconInterval.resetForTest() })
 	engine := NewRuleEngine([]Rule{loadRule(t, "../../rules/command-and-control.yaml", "beacon_fixed_interval")})
 
 	connect := func(comm string, dport uint16, daddr string, at time.Time) types.Event {
@@ -58,7 +58,7 @@ func TestWave6_2_2_BeaconFixedInterval_RequiresPeriodicity(t *testing.T) {
 	})
 
 	t.Run("a regular cadence to one destination still alerts", func(t *testing.T) {
-		globalBeaconInterval = NewBeaconIntervalTracker()
+		globalBeaconInterval.resetForTest()
 		base := time.Now()
 		var last []types.Alert
 		for i := 0; i < 4; i++ {
@@ -69,7 +69,7 @@ func TestWave6_2_2_BeaconFixedInterval_RequiresPeriodicity(t *testing.T) {
 	})
 
 	t.Run("repeated but irregular connections stay quiet", func(t *testing.T) {
-		globalBeaconInterval = NewBeaconIntervalTracker()
+		globalBeaconInterval.resetForTest()
 		base := time.Now()
 		var last []types.Alert
 		for _, gap := range []time.Duration{0, 3 * time.Second, 51 * time.Second, 4 * time.Second} {

@@ -390,8 +390,8 @@ func TestWave6_2_1NetworkNarrowings(t *testing.T) {
 			e := w621Rule(t, tc.file, tc.id)
 
 			if tc.periodic {
-				globalBeaconInterval = NewBeaconIntervalTracker()
-				t.Cleanup(func() { globalBeaconInterval = NewBeaconIntervalTracker() })
+				globalBeaconInterval.resetForTest()
+				t.Cleanup(func() { globalBeaconInterval.resetForTest() })
 				var daddr [16]byte
 				copy(daddr[:], net.ParseIP(tc.daddr).To4())
 				now := time.Now()

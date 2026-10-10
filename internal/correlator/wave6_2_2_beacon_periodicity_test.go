@@ -32,8 +32,8 @@ func w622Beacon(comm string, dport uint16, daddr string) types.Event {
 }
 
 func TestWave6_2_2_C2PeriodicBeaconPattern(t *testing.T) {
-	globalBeaconInterval = NewBeaconIntervalTracker()
-	t.Cleanup(func() { globalBeaconInterval = NewBeaconIntervalTracker() })
+	globalBeaconInterval.resetForTest()
+	t.Cleanup(func() { globalBeaconInterval.resetForTest() })
 
 	rules, err := LoadRulesFromFile("../../rules/command-and-control.yaml")
 	require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestWave6_2_2_C2PeriodicBeaconPattern(t *testing.T) {
 	})
 
 	t.Run("regular-cadence connections to the same destination alert", func(t *testing.T) {
-		globalBeaconInterval = NewBeaconIntervalTracker()
+		globalBeaconInterval.resetForTest()
 		e := w622Beacon("evil-implant", 4444, "203.0.113.9")
 		base := time.Now()
 		// Four connections, 30s apart, to the same destination: the canonical
@@ -75,7 +75,7 @@ func TestWave6_2_2_C2PeriodicBeaconPattern(t *testing.T) {
 	})
 
 	t.Run("irregular repeated connections do not alert", func(t *testing.T) {
-		globalBeaconInterval = NewBeaconIntervalTracker()
+		globalBeaconInterval.resetForTest()
 		e := w622Beacon("chatty-app", 8081, "198.51.100.4")
 		base := time.Now()
 		gaps := []time.Duration{2 * time.Second, 47 * time.Second, 5 * time.Second}

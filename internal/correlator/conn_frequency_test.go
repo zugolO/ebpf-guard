@@ -14,8 +14,8 @@ import (
 // size of the ruleset instead of with actual traffic — a 2-rule ruleset
 // reached a "30 connections/min" threshold after 15 real connections.
 func TestConnRate_RecordedOncePerEventNotPerRule(t *testing.T) {
-	globalConnFrequency = NewConnFrequencyTracker()
-	defer func() { globalConnFrequency = NewConnFrequencyTracker() }()
+	globalConnFrequency.resetForTest()
+	defer func() { globalConnFrequency.resetForTest() }()
 
 	cond := RuleCondition{Field: "conn_rate_1m", Op: OpGreaterThan, Values: []string{"1000000"}}
 	engine := NewRuleEngine([]Rule{
@@ -143,8 +143,8 @@ func TestNetHighFrequencyConnectionsRule(t *testing.T) {
 	}
 	engine := NewRuleEngine(rules)
 
-	globalConnFrequency = NewConnFrequencyTracker()
-	defer func() { globalConnFrequency = NewConnFrequencyTracker() }()
+	globalConnFrequency.resetForTest()
+	defer func() { globalConnFrequency.resetForTest() }()
 
 	makeEvent := func(pid uint32, ts time.Time) types.Event {
 		return types.Event{

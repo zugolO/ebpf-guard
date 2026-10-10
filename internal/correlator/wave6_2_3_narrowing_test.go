@@ -23,8 +23,8 @@ import (
 func TestWave6_2_3C2PeriodicBeaconNodeExclusion(t *testing.T) {
 	e := w621Rule(t, "../../rules/command-and-control.yaml", "c2_periodic_beacon_pattern")
 
-	globalBeaconInterval = NewBeaconIntervalTracker()
-	t.Cleanup(func() { globalBeaconInterval = NewBeaconIntervalTracker() })
+	globalBeaconInterval.resetForTest()
+	t.Cleanup(func() { globalBeaconInterval.resetForTest() })
 	const dport = 4444
 	const daddr = "10.42.0.10"
 	prime := func(pid uint32) {

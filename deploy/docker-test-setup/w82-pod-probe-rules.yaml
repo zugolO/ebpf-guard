@@ -1,0 +1,21 @@
+# Волна 8.2, этап 4, п. 8.3.6 — проверочное правило оси proc.systemd_unit в поде.
+# syscall.nr идёт первым, поэтому поле юнита вычисляется для КАЖДОГО execve:
+# {resolved} — процесс в юните под system.slice, {unresolved} — вне его
+# (сессия ssh в user.slice, контейнер). Счётчик
+# ebpf_guard_systemd_unit_lookups_total растёт только от правил с этим полем.
+rules:
+  - id: w82_unit_probe
+    name: "w82 unit axis probe"
+    description: "execve из транзитного юнита w82-unit-probe.service (проверка оси юнита в поде)"
+    event_type: syscall
+    condition_group:
+      operator: and
+      conditions:
+        - field: syscall.nr
+          op: in
+          values: ["59"]
+        - field: proc.systemd_unit
+          op: eq
+          values: ["w82-unit-probe.service"]
+    severity: warning
+    action: alert

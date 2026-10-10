@@ -80,6 +80,7 @@ data:
         insecure_skip_verify: {{ .Values.config.store.opensearch.insecure_skip_verify }}
 
     collectors:
+      required: {{ .Values.config.collectors.required | default list | toJson }}
       tls:
         enabled: {{ .Values.config.collectors.tls.enabled }}
         scan_interval: {{ .Values.config.collectors.tls.scan_interval }}

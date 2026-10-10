@@ -53,9 +53,15 @@ securityContext:
 resources:
   limits:
     cpu: 500m
-    # 384Mi: stand peak memory.current under the attack suite was 294-305 MiB
-    # (wave 8.1 stage E), above the former 256Mi.
-    memory: 384Mi
+    # 192Mi = measured pod peak x 1.25 (wave 8.2 stage 4, item E). Pod
+    # memory.current peaked at 141.3 MiB at second 6 of the process (startup:
+    # BPF maps + BTF + cold binary text on the pod's own account) and at
+    # 101.6 MiB over a 10-minute attack pack; 141.3 x 1.25 = 176.6 -> 192Mi.
+    # It was 384Mi in wave 8.1 (294-305 MiB under attacks before B1-B3, C1-C4
+    # and the client-go/core-v1 build trim), 256Mi before that. The attack-window
+    # peak was still rising at the end of the window and the 8.2.1 verdict is the
+    # closing night's, so raise this with the evidence if the night exceeds 153 MiB.
+    memory: 192Mi
   requests:
     cpu: 100m
     memory: 128Mi
@@ -69,21 +75,30 @@ resources:
 #
 # `reserveMiB` is the non-Go resident memory that counts against the pod cgroup
 # but NOT against GOMEMLIMIT: BPF maps/rings/JIT in the kernel, page cache, slab
-# and the binary text. Wave 8.2 item C5 takes it from the A1 inventory
-# (w82-mem-report.sh, "GOMEMLIMIT под бюджет"), not from a guess: after B1-B3
-# the non-Go part measured 33.8 MiB (maps 20.0 + rings 13.1 + JIT 1.1) plus
-# 47.0 MiB of binary text (RSS of the mapped file, an upper bound for the pod
-# until A4 measures it) = 80.8, rounded up to 85. It was 64 in wave 8.1, a
-# lower bound measured before B1-B3 (see plan.md wave 8.2, stage 3 C5).
+# and the binary text. Wave 8.2 stage 4 took it from the A1 inventory taken INSIDE
+# the pod (w82-mem-report.sh, "GOMEMLIMIT под бюджет", pod mode): non-Go part of
+# the pod cgroup 53.2 MiB = memory.current 84.5 - Go under management 31.3
+# (sys - released); the 29.4 MiB of binary text is already inside memory.current
+# on the pod's account, so it is NOT added again (the host-unit formula in
+# wave 8.2 stage 3 added it: 33.8 + 47.0 -> 85). 53.2 rounded up to 5 -> 55.
 # GOMEMLIMIT = min(percent, limit - reserveMiB), floored at 50% of the limit;
-# 256Mi -> 171 MiB. Re-run the emitter after item D/E (limit, binary profile)
-# and move this number with it. GOGC stays untouched: the allocation flow is
-# 0.68 MB/s at 883 events/s, there is no GC pressure to trade against.
+# 192Mi -> 137 MiB, well above the GC-spiral floor (1.25 x heap_inuse = 23 MiB).
+# Re-run the emitter on a pod inventory after any change to the limit or binary.
+# GOGC stays untouched: the allocation flow is 0.16 MB/s at 227 events/s in the
+# pod, there is no GC pressure to trade against.
 gomemlimit:
   enabled: true
   percent: 90
-  reserveMiB: 85
+  reserveMiB: 55
   override: ""
+
+# Host tracefs. A privileged container does not inherit the host's tracefs/debugfs
+# mounts, so without this tracepoint and kprobe attach fail with "neither debugfs
+# nor tracefs are mounted" (syscall, dns, fileaccess collectors) and the pod
+# crash-loops. Found by the wave 8.2 stage 4 pod run (k3s, kernel 5.15).
+tracefs:
+  enabled: true
+  hostPath: /sys/kernel/tracing
 
 # Liveness and readiness probes
 livenessProbe:

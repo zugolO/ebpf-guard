@@ -18,7 +18,7 @@ case "${BASH_SOURCE[0]}" in
 esac
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
-EBPF_GUARD_API="http://${VPS_IP}:19090"
+EBPF_GUARD_API="${EBPF_GUARD_API:-http://${VPS_IP}:19090}"
 # admin token from config-test.yaml (auth.admin_token) — needed because auth.enabled=true;
 # /debug/state and /metrics require a bearer token. Override via env if changed.
 EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-}"

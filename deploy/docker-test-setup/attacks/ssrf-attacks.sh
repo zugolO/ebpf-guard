@@ -6,7 +6,7 @@ set -e
 
 VPS_IP="${VPS_IP:-localhost}"
 JUICE_SH_URL="http://${VPS_IP}:3000"
-EBPF_GUARD_API="http://${VPS_IP}:19090"
+EBPF_GUARD_API="${EBPF_GUARD_API:-http://${VPS_IP}:19090}"
 EBPF_GUARD_TOKEN="${EBPF_GUARD_TOKEN:-$(grep '^admin=' /var/lib/ebpf-guard/token 2>/dev/null | cut -d= -f2)}"  # persisted at /var/lib/ebpf-guard/token
 RESULTS_DIR="./ssrf-results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)

@@ -15,8 +15,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
@@ -24,9 +26,21 @@ import (
 	cruntime "github.com/zugolO/ebpf-guard/internal/runtime"
 )
 
+// podAPI is the slice of the core/v1 pods client the watcher needs. It is
+// satisfied by the typed clientset's PodInterface (tests inject the fake one)
+// and by restPods below. The watcher deliberately does NOT use
+// kubernetes.Interface: k8s.io/client-go/kubernetes and its scheme package
+// register every API group, which linked ~12 MiB of dead code (k8s.io/api,
+// client-go typed clients, gnostic) into the binary and into every pod's
+// memory account (wave 8.2 stage 4, item D).
+type podAPI interface {
+	List(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error)
+	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
+}
+
 // Watcher watches for pod lifecycle events and maintains a local cache.
 type Watcher struct {
-	client   kubernetes.Interface
+	pods     podAPI
 	informer cache.SharedIndexInformer
 	stopCh   chan struct{}
 	stopOnce sync.Once // guards close(stopCh) against double-close panics
@@ -66,19 +80,19 @@ type WatcherConfig struct {
 
 // NewWatcher creates a new pod lifecycle watcher.
 func NewWatcher(config WatcherConfig, logger *slog.Logger) (*Watcher, error) {
-	client, err := createK8sClient(config.KubeconfigPath)
+	pods, err := createK8sClient(config.KubeconfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("k8s/watcher: create client: %w", err)
 	}
-	return newWatcherWithClient(client, config, logger)
+	return newWatcherWithClient(pods, config, logger)
 }
 
-// newWatcherWithClient builds a Watcher from a pre-built kubernetes.Interface.
-// Extracted from NewWatcher so tests can inject a fake clientset without needing
-// a real kubeconfig or cluster.
-func newWatcherWithClient(client kubernetes.Interface, config WatcherConfig, logger *slog.Logger) (*Watcher, error) {
+// newWatcherWithClient builds a Watcher from a pre-built pods client.
+// Extracted from NewWatcher so tests can inject a fake clientset's pods without
+// needing a real kubeconfig or cluster.
+func newWatcherWithClient(pods podAPI, config WatcherConfig, logger *slog.Logger) (*Watcher, error) {
 	w := &Watcher{
-		client:   client,
+		pods:     pods,
 		stopCh:   make(chan struct{}),
 		logger:   logger.With("component", "k8s_watcher"),
 		podCache: make(map[string]*PodInfo),
@@ -91,23 +105,35 @@ func newWatcherWithClient(client kubernetes.Interface, config WatcherConfig, log
 		nodeName = os.Getenv("NODE_NAME")
 	}
 
-	// Build informer factory options. Scope to this node when known so the
-	// cache holds only on-node pods rather than the whole cluster.
-	opts := []informers.SharedInformerOption{
-		informers.WithNamespace(""), // all namespaces
-	}
+	// Scope to this node when known so the cache holds only on-node pods rather
+	// than the whole cluster.
+	var tweak func(*metav1.ListOptions)
 	if nodeName != "" {
-		opts = append(opts, informers.WithTweakListOptions(func(lo *metav1.ListOptions) {
+		tweak = func(lo *metav1.ListOptions) {
 			lo.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
-		}))
+		}
 		w.logger.Info("pod watcher scoped to node", "node", nodeName)
 	} else {
 		w.logger.Warn("pod watcher node name unknown; watching all cluster pods (set NODE_NAME for lower memory)")
 	}
-	factory := informers.NewSharedInformerFactoryWithOptions(client, config.ResyncPeriod, opts...)
+	lw := &cache.ListWatch{
+		ListFunc: func(lo metav1.ListOptions) (runtime.Object, error) {
+			if tweak != nil {
+				tweak(&lo)
+			}
+			return pods.List(context.Background(), lo)
+		},
+		WatchFunc: func(lo metav1.ListOptions) (watch.Interface, error) {
+			if tweak != nil {
+				tweak(&lo)
+			}
+			return pods.Watch(context.Background(), lo)
+		},
+	}
 
-	// Create pod informer
-	w.informer = factory.Core().V1().Pods().Informer()
+	// Create pod informer (all namespaces).
+	w.informer = cache.NewSharedIndexInformer(lw, &corev1.Pod{}, config.ResyncPeriod,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 
 	// Add event handlers
 	w.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -120,7 +146,7 @@ func newWatcherWithClient(client kubernetes.Interface, config WatcherConfig, log
 }
 
 // createK8sClient creates a Kubernetes client from config.
-func createK8sClient(kubeconfigPath string) (kubernetes.Interface, error) {
+func createK8sClient(kubeconfigPath string) (podAPI, error) {
 	var config *rest.Config
 	var err error
 
@@ -152,12 +178,46 @@ func createK8sClient(kubeconfigPath string) (kubernetes.Interface, error) {
 		}
 	}
 
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("create clientset: %w", err)
-	}
+	return newRestPods(config)
+}
 
-	return client, nil
+// restPods is a core/v1 pods client over a bare REST client with a scheme that
+// knows only core/v1 (see podAPI for why not the full clientset).
+type restPods struct {
+	c     rest.Interface
+	codec runtime.ParameterCodec
+}
+
+func newRestPods(config *rest.Config) (*restPods, error) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("register core/v1: %w", err)
+	}
+	metav1.AddToGroupVersion(scheme, schema.GroupVersion{Version: "v1"})
+
+	cfg := rest.CopyConfig(config)
+	cfg.GroupVersion = &corev1.SchemeGroupVersion
+	cfg.APIPath = "/api"
+	cfg.NegotiatedSerializer = serializer.NewCodecFactory(scheme).WithoutConversion()
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = rest.DefaultKubernetesUserAgent()
+	}
+	c, err := rest.RESTClientFor(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create rest client: %w", err)
+	}
+	return &restPods{c: c, codec: runtime.NewParameterCodec(scheme)}, nil
+}
+
+func (r *restPods) List(ctx context.Context, opts metav1.ListOptions) (*corev1.PodList, error) {
+	out := &corev1.PodList{}
+	err := r.c.Get().Resource("pods").VersionedParams(&opts, r.codec).Do(ctx).Into(out)
+	return out, err
+}
+
+func (r *restPods) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	opts.Watch = true
+	return r.c.Get().Resource("pods").VersionedParams(&opts, r.codec).Watch(ctx)
 }
 
 // Start begins watching pod events.

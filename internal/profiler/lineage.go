@@ -556,7 +556,11 @@ func readProcStatus(pid uint32) (comm string, ppid uint32) {
 		if strings.HasPrefix(line, "Name:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				comm = fields[1]
+				// Clone: fields[1] is a substring of string(data), and the comm
+				// outlives this call in the ancestry/proc caches. Without the
+				// copy every cached comm pins the whole ~1.3 KiB status file
+				// (wave 8.2 stage 4: 7 MiB of live heap after one attack pack).
+				comm = strings.Clone(fields[1])
 			}
 		} else if strings.HasPrefix(line, "PPid:") {
 			fields := strings.Fields(line)

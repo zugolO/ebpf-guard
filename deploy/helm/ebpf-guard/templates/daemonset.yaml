@@ -163,6 +163,10 @@ spec:
             - name: cgroup-fs
               mountPath: /sys/fs/cgroup
               readOnly: true
+            {{- if .Values.tracefs.enabled }}
+            - name: tracefs
+              mountPath: {{ .Values.tracefs.hostPath }}
+            {{- end }}
             - name: proc-fs
               mountPath: /proc
               readOnly: true
@@ -210,6 +214,12 @@ spec:
           hostPath:
             path: /sys/fs/cgroup
             type: Directory
+        {{- if .Values.tracefs.enabled }}
+        - name: tracefs
+          hostPath:
+            path: {{ .Values.tracefs.hostPath }}
+            type: Directory
+        {{- end }}
         - name: proc-fs
           hostPath:
             path: /proc

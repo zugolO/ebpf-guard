@@ -30,7 +30,16 @@ row() { printf '  %-34s %10s  %s\n' "$1" "$2" "${3:-}"; }
 echo "== w82 инвентарь: $D"
 [ -s "$D/meta.txt" ] && sed 's/^/  /' "$D/meta.txt"
 etimes=$(sed -n 's/.*etimes= *\([0-9]*\).*/\1/p' "$D/meta.txt" 2>/dev/null)
-echo "  учёт: cgroup юнита стенда, не под (текст бинаря на чужом счёте, №542 — судит A4)"
+# Учёт пода (этап 4, A4): cgroup контейнера kubepods — текст бинаря уже внутри
+# memory.current, и «не-Go + текст» считало бы его дважды.
+POD=0; grep -q 'cg=/kubepods' "$D/meta.txt" 2>/dev/null && POD=1
+if [ "$POD" = 1 ]; then
+    ACC="пода"
+    echo "  учёт: cgroup контейнера пода (текст бинаря на счету пода, A4)"
+else
+    ACC="юнита, не пода"
+    echo "  учёт: cgroup юнита стенда, не под (текст бинаря на чужом счёте, №542 — судит A4)"
+fi
 echo ""
 
 echo "-- cgroup (МиБ)"
@@ -124,17 +133,17 @@ c_text=$(awk '$NF ~ /\/ebpf-guard$/ { s += $1 } END { if (NR && s > 0) printf "%
 if [ -z "$cur" ] || [ -z "$c_sys" ] || [ -z "$c_rel" ] || [ -z "$c_inuse" ]; then
     echo "ИНФО: C5 НЕИЗМЕРИМ (класс НАЗВАН: нет memory.current или go_memstats sys/released/heap_inuse)"
 else
-    awk -v cur="$cur" -v sys="$c_sys" -v rel="$c_rel" -v inuse="$c_inuse" -v text="${c_text:-}" \
+    awk -v cur="$cur" -v sys="$c_sys" -v rel="$c_rel" -v inuse="$c_inuse" -v text="${c_text:-}" -v pod="$POD" \
         -v budget="$BUDGET_MIB" -v limit="$LIMIT_MIB" -v k="$SPIRAL_K" 'BEGIN {
         M = 1048576; go = (sys - rel) / M; nongo = cur / M - go; if (nongo < 0) nongo = 0
         t = (text == "") ? 0 : text / M
-        res = nongo + t; r5 = int((res + 4.999) / 5) * 5
+        res = (pod == 1) ? nongo : nongo + t; r5 = int((res + 4.999) / 5) * 5
         guard = k * inuse / M
         printf "  %-34s %10.1f  sys − released\n", "Go под управлением (МиБ)", go
         printf "  %-34s %10.1f  memory.current − Go\n", "не-Go часть cgroup (МиБ)", nongo
         if (text == "") printf "  %-34s %10s  нет строки бинаря в smaps_by_map.txt — считается 0\n", "текст бинаря в поде (МиБ)", "НЕИЗМЕРИМ"
-        else printf "  %-34s %10.1f  RSS файла бинаря: верхняя оценка, измерит A4\n", "текст бинаря в поде (МиБ)", t
-        printf "  %-34s %10d  не-Go + текст, вверх до 5 (→ gomemlimit.reserveMiB)\n", "резерв чарта (МиБ)", r5
+        else printf "  %-34s %10.1f  RSS файла бинаря: %s\n", "текст бинаря в поде (МиБ)", t, (pod == 1) ? "на счету пода, внутри memory.current (A4)" : "верхняя оценка, измерит A4"
+        printf "  %-34s %10d  %s, вверх до 5 (→ gomemlimit.reserveMiB)\n", "резерв чарта (МиБ)", r5, (pod == 1) ? "не-Go (текст внутри)" : "не-Go + текст"
         printf "  %-34s %10.1f  %.2f × heap_inuse (ниже — GC-спираль)\n", "пол GOMEMLIMIT (МиБ)", guard, k
         lp = limit - r5; lb = budget - r5
         printf "  %-34s %10.1f  лимит пода %d − резерв\n", "GOMEMLIMIT по лимиту пода (МиБ)", lp, limit
@@ -152,9 +161,9 @@ if [ -z "$cur" ]; then
 elif [ -z "$etimes" ] || [ "$etimes" -lt "$IDLE_MIN_S" ]; then
     echo "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: аптайм ${etimes:-?} с < $IDLE_MIN_S — idle судится через 30 мин); memory.current $(mib "$cur") МиБ"
 else
-    awk -v c="$cur" -v lim="$IDLE_MAX_MIB" 'BEGIN { v = c / 1048576
-        if (v <= lim) printf "ДОСТИГНУТО: 8.2.2 ДОСТИГНУТО (memory.current idle %.1f МиБ ≤ %d; учёт юнита, не пода)\n", v, lim
-        else printf "ПРОВАЛЕН: 8.2.2 ПРОВАЛЕН (memory.current idle %.1f МиБ > %d; учёт юнита, не пода)\n", v, lim }'
+    awk -v c="$cur" -v lim="$IDLE_MAX_MIB" -v acc="$ACC" 'BEGIN { v = c / 1048576
+        if (v <= lim) printf "ДОСТИГНУТО: 8.2.2 ДОСТИГНУТО (memory.current idle %.1f МиБ ≤ %d; учёт %s)\n", v, lim, acc
+        else printf "ПРОВАЛЕН: 8.2.2 ПРОВАЛЕН (memory.current idle %.1f МиБ > %d; учёт %s)\n", v, lim, acc }'
 fi
 if [ -z "$unref_n" ]; then
     echo "НЕИЗМЕРИМ: 8.2.4 НЕИЗМЕРИМ (класс НАЗВАН: нет maps.json/progs.json)"

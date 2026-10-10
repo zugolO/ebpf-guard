@@ -165,7 +165,7 @@ func TestNewWatcherWithClient_FakeK8s(t *testing.T) {
 	fakeClient := k8sfake.NewClientset()
 	cfg := WatcherConfig{ResyncPeriod: 0}
 
-	w, err := newWatcherWithClient(fakeClient, cfg, k8sQuietLogger())
+	w, err := newWatcherWithClient(fakeClient.CoreV1().Pods(metav1.NamespaceAll), cfg, k8sQuietLogger())
 	require.NoError(t, err)
 	require.NotNil(t, w)
 	assert.NotNil(t, w.informer)
@@ -176,7 +176,7 @@ func TestWatcher_StartStop_FakeK8s(t *testing.T) {
 	fakeClient := k8sfake.NewClientset()
 	cfg := WatcherConfig{ResyncPeriod: 0}
 
-	w, err := newWatcherWithClient(fakeClient, cfg, k8sQuietLogger())
+	w, err := newWatcherWithClient(fakeClient.CoreV1().Pods(metav1.NamespaceAll), cfg, k8sQuietLogger())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -218,7 +218,7 @@ func TestWatcher_StartStop_FakeK8s_WithPod(t *testing.T) {
 	fakeClient := k8sfake.NewClientset(pod)
 	cfg := WatcherConfig{ResyncPeriod: 0}
 
-	w, err := newWatcherWithClient(fakeClient, cfg, k8sQuietLogger())
+	w, err := newWatcherWithClient(fakeClient.CoreV1().Pods(metav1.NamespaceAll), cfg, k8sQuietLogger())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -249,7 +249,7 @@ func TestWatcher_NodeScopedInformer(t *testing.T) {
 	fakeClient := k8sfake.NewClientset()
 	cfg := WatcherConfig{ResyncPeriod: 0, NodeName: "node-42"}
 
-	w, err := newWatcherWithClient(fakeClient, cfg, k8sQuietLogger())
+	w, err := newWatcherWithClient(fakeClient.CoreV1().Pods(metav1.NamespaceAll), cfg, k8sQuietLogger())
 	require.NoError(t, err)
 	require.NotNil(t, w)
 }
@@ -419,7 +419,7 @@ func TestNewEnricherWithWatcher_MetricsWired(t *testing.T) {
 
 func TestEnricher_Start_FakeK8s(t *testing.T) {
 	fakeClient := k8sfake.NewClientset()
-	w, err := newWatcherWithClient(fakeClient, WatcherConfig{ResyncPeriod: 0}, k8sQuietLogger())
+	w, err := newWatcherWithClient(fakeClient.CoreV1().Pods(metav1.NamespaceAll), WatcherConfig{ResyncPeriod: 0}, k8sQuietLogger())
 	require.NoError(t, err)
 
 	e := newEnricherWithWatcher(w, EnricherConfig{}, k8sQuietLogger())
@@ -450,7 +450,7 @@ func TestEnricher_Start_FakeK8s_WithMetrics(t *testing.T) {
 	missTotal := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_k8s_start_miss_total"})
 
 	fakeClient := k8sfake.NewClientset()
-	w, err := newWatcherWithClient(fakeClient, WatcherConfig{ResyncPeriod: 0}, k8sQuietLogger())
+	w, err := newWatcherWithClient(fakeClient.CoreV1().Pods(metav1.NamespaceAll), WatcherConfig{ResyncPeriod: 0}, k8sQuietLogger())
 	require.NoError(t, err)
 
 	e := newEnricherWithWatcher(w, EnricherConfig{

@@ -46,6 +46,9 @@ mkgo() { # <каталог> <inuse МиБ> [текст КиБ]
 }
 mkgo c5ok 40 30720
 o=$(bash "$E" "$T/c5ok"); need "C5 резерв из не-Go и текста" "$o" "40.0  memory.current − Go" "30.0  RSS файла бинаря" "70  не-Go + текст" "122.0  лимит пода 192" "ИНФО: C5 GOMEMLIMIT по лимиту пода 122 МиБ ≥ пол 50.0 — годится (резерв 70)"
+# Под (A4): cg=/kubepods… — текст уже внутри memory.current, резерв = не-Go (40), не 70.
+mkgo c5pod 40 30720; echo "cg=/kubepods.slice/kubepods-burstable.slice/x.scope" >> "$T/c5pod/meta.txt"
+o=$(bash "$E" "$T/c5pod"); need "C5 под: текст не считается дважды" "$o" "учёт: cgroup контейнера пода" "40  не-Go (текст внутри)" "152.0  лимит пода 192"
 mkgo c5spiral 70 30720
 o=$(bash "$E" "$T/c5spiral"); need "C5 бюджет пика ниже пола" "$o" "ИНФО: C5 GOMEMLIMIT по бюджету пика 80 МиБ < пол 87.5 — держать пик 150 одним GC нельзя"
 mkgo c5notext 40

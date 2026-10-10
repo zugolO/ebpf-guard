@@ -16,7 +16,7 @@ COPY . .
 
 # Build the binary (CGO disabled for static binary)
 # Embed rules/ directory via Go embed.
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags rego \
     -ldflags="-w -s -X main.Version=$(git describe --tags --always || echo 'dev') -X main.Commit=$(git rev-parse --short HEAD || echo 'unknown') -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     -o ebpf-guard \
     ./cmd/ebpf-guard

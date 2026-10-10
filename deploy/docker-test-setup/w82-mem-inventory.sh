@@ -18,7 +18,8 @@ set -u
 OUT=${1:-/var/tmp/w82-inv}
 API=${API:-localhost:19090}
 mkdir -p "$OUT"
-P=$(pgrep -f "^/opt/ebpf-guard/build/ebpf-guard --config" | head -1)
+# Под (этап 4, A4): PID=<хостовый pid процесса в контейнере> TOK=<токен> API=<ip:порт>.
+P=${PID:-$(pgrep -f "^/opt/ebpf-guard/build/ebpf-guard --config" | head -1)}
 [ -n "$P" ] || { echo "agent not running" >&2; exit 1; }
 echo "pid=$P etimes=$(ps -o etimes= -p "$P") exe_sha=$(sha256sum /proc/"$P"/exe | cut -c1-12) kernel=$(uname -r) nproc=$(nproc)" > "$OUT/meta.txt"
 CG=$(awk -F: '$1=="0"{print $3}' /proc/"$P"/cgroup); echo "cg=$CG" >> "$OUT/meta.txt"
@@ -33,7 +34,7 @@ bpftool -j prog show > "$OUT/progs.json" 2>&1
 # берёт их объём из maps.json; сырьё нужно, чтобы это было проверяемо.
 grep bpf /proc/vmallocinfo > "$OUT/vmallocinfo-bpf.raw"
 grep bpf /proc/vmallocinfo | awk '{c=$3; p=0; for(i=4;i<=NF;i++) if($i ~ /^pages=/){split($i,a,"="); p=a[2]} pages[c]+=p; n[c]++} END{for(k in pages) printf "%8.1f MiB phys %4d %s\n", pages[k]*4/1024, n[k], k}' | sort -rn > "$OUT/bpf_vmalloc.txt"
-TOK=$(grep '^admin=' /var/lib/ebpf-guard/token | cut -d= -f2)
+TOK=${TOK:-$(grep '^admin=' /var/lib/ebpf-guard/token | cut -d= -f2)}
 curl -s -H "Authorization: Bearer $TOK" "$API/metrics" > "$OUT/metrics.txt"
 curl -s -H "Authorization: Bearer $TOK" "$API/debug/pprof/heap" > "$OUT/heap.pprof"
 curl -s -H "Authorization: Bearer $TOK" "$API/debug/pprof/allocs" > "$OUT/allocs.pprof"

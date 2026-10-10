@@ -158,10 +158,15 @@ const lineageShardMask = lineageShardCount - 1
 // lineageShard holds the lineage/ancestry/procCache maps for a subset of PIDs,
 // guarded by its own RWMutex.
 type lineageShard struct {
-	mu        sync.RWMutex
-	lineage   map[uint32]*parentInfo
-	ancestry  map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
-	procCache map[uint32]*procEntry          // pid → (comm, ppid, ts), avoids repeated /proc reads
+	mu       sync.RWMutex
+	lineage  map[uint32]*parentInfo
+	ancestry map[uint32][]types.ProcessNode // PID → full ancestor chain (root → PID)
+	// ancestryTS — своя метка времени записи ancestry. Запись по pid родителя без
+	// собственных событий (bootstrap из /proc) не имеет lineage[pid], и Cleanup,
+	// выселявший ancestry только вместе с lineage, её не удалял (волна 8.2,
+	// доводка T1: потолок был pid_max).
+	ancestryTS map[uint32]time.Time
+	procCache  map[uint32]*procEntry // pid → (comm, ppid, ts), avoids repeated /proc reads
 }
 
 // LineageTracker tracks process parent-child relationships and detects suspicious patterns.
@@ -196,9 +201,10 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 	}
 	for i := range lt.shards {
 		lt.shards[i] = &lineageShard{
-			lineage:   make(map[uint32]*parentInfo),
-			ancestry:  make(map[uint32][]types.ProcessNode),
-			procCache: make(map[uint32]*procEntry),
+			lineage:    make(map[uint32]*parentInfo),
+			ancestry:   make(map[uint32][]types.ProcessNode),
+			ancestryTS: make(map[uint32]time.Time),
+			procCache:  make(map[uint32]*procEntry),
 		}
 	}
 
@@ -251,6 +257,7 @@ func (lt *LineageTracker) store(pid, ppid uint32, parentComm, comm string) {
 		if chain := s.ancestry[pid]; len(chain) > 0 {
 			if last := chain[len(chain)-1]; last.PID == pid && last.PPID == ppid && last.Comm == comm {
 				info.Timestamp = now
+				s.ancestryTS[pid] = now
 				if entry, ok := s.procCache[pid]; ok {
 					entry.comm, entry.ppid, entry.timestamp = comm, ppid, now
 					// A BPF-supplied ppid supersedes an earlier failed /proc
@@ -453,11 +460,14 @@ func (lt *LineageTracker) buildAncestry(pid, ppid uint32, parentComm, comm strin
 		// We haven't seen the parent's events yet; try to bootstrap from /proc.
 		parentChain = lt.buildChainFromProc(ppid, lt.maxDepth-1)
 		// Cache so subsequent events with the same ppid skip /proc entirely.
-		if len(parentChain) > 0 {
+		// A chain of nodes with no comm and no ppid (dead parent: /proc miss) is
+		// not worth keeping — nothing in it can be reused.
+		if len(parentChain) > 0 && !chainIsEmpty(parentChain) {
 			ps.mu.Lock()
 			// Re-check: another goroutine may have built the chain meanwhile.
 			if existing := ps.ancestry[ppid]; len(existing) == 0 {
 				ps.ancestry[ppid] = parentChain
+				ps.ancestryTS[ppid] = time.Now()
 			} else {
 				parentChain = existing
 			}
@@ -486,7 +496,19 @@ func (lt *LineageTracker) buildAncestry(pid, ppid uint32, parentComm, comm strin
 	s := lt.shardFor(pid)
 	s.mu.Lock()
 	s.ancestry[pid] = newChain
+	s.ancestryTS[pid] = time.Now()
 	s.mu.Unlock()
+}
+
+// chainIsEmpty reports whether no node of chain carries any information
+// (comm=="" and ppid==0 everywhere), i.e. /proc had nothing for these pids.
+func chainIsEmpty(chain []types.ProcessNode) bool {
+	for _, n := range chain {
+		if n.Comm != "" || n.PPID != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // buildChainFromProc walks /proc to reconstruct up to maxDepth ancestors for pid.
@@ -800,10 +822,24 @@ func (lt *LineageTracker) Cleanup(now time.Time) {
 			if now.Sub(info.Timestamp) > lt.config.TTL {
 				delete(s.lineage, pid)
 				delete(s.ancestry, pid)
+				delete(s.ancestryTS, pid)
 				// Reset and return to pool to amortise allocations across long-lived processes.
 				info.PPID = 0
 				info.ParentComm = ""
 				parentInfoPool.Put(info)
+			}
+		}
+		// ancestry has its own clock: entries bootstrapped for parents without
+		// events have no lineage record. An entry with no timestamp (written
+		// directly) lives as long as its lineage did.
+		for pid := range s.ancestry {
+			if ts, ok := s.ancestryTS[pid]; ok {
+				if now.Sub(ts) > lt.config.TTL {
+					delete(s.ancestry, pid)
+					delete(s.ancestryTS, pid)
+				}
+			} else if _, alive := s.lineage[pid]; !alive {
+				delete(s.ancestry, pid)
 			}
 		}
 		// Evict procCache entries older than TTL rather than clearing wholesale.

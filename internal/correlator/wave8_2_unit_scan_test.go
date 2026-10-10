@@ -41,12 +41,29 @@ func TestW82UnitScan_MissStreamScansOnce(t *testing.T) {
 		assert.Empty(t, r.ResolveCgroupUnit(kube))
 		now = now.Add(cgroupUnitRescanInterval) // каждый раз можно было бы сканировать
 	}
-	assert.Equal(t, 1.0, testutil.ToFloat64(systemdUnitScans)-before,
-		"200 промахов одного id за 20 с (< TTL) — один скан")
+	assert.Equal(t, 2.0, testutil.ToFloat64(systemdUnitScans)-before,
+		"200 промахов одного id за 20 с (< TTL) — два скана (первый промах не подавляет, второй — да)")
 
 	now = now.Add(cgroupUnitMissTTL)
 	r.ResolveCgroupUnit(kube)
-	assert.Equal(t, 2.0, testutil.ToFloat64(systemdUnitScans)-before, "по TTL — повторный скан")
+	assert.Equal(t, 3.0, testutil.ToFloat64(systemdUnitScans)-before, "по TTL — повторный скан")
+}
+
+// Каталог юнита, появившийся ПОСЛЕ чтения system.slice сканом, не залипает
+// «промахом»: первый промах подавления не включает.
+func TestW82UnitScan_UnitBornDuringScanResolvesOnNextEvent(t *testing.T) {
+	root, mk := unitScanFixture(t)
+	mk("system.slice/a.service")
+	now := time.Unix(1_000_000, 0)
+	r := NewSystemSliceUnitResolver(root)
+	r.now = func() time.Time { return now }
+
+	// Предсказываем id каталога, который создадим после скана: промах, затем создание.
+	born := mk("system.slice/born.service")       // уже существует на диске, но скан его пропустит:
+	r.byID, r.lastScan = map[uint64]string{}, now // имитация скана, прочитавшего каталог до создания
+	r.miss[born] = unitMiss{at: now, strikes: 1}  // первый промах уже записан
+	now = now.Add(cgroupUnitRescanInterval)
+	assert.Equal(t, "born.service", r.ResolveCgroupUnit(born), "следующее событие после rescan-интервала разрешается")
 }
 
 // Обязательное условие: юнит, стартовавший после прошлого скана, разрешается

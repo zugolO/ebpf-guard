@@ -77,9 +77,15 @@ type CgroupUnitResolver interface {
 // большинство событий) 10 сканов/с давали 230 из 414 МБ всех аллокаций.
 const cgroupUnitRescanInterval = 100 * time.Millisecond
 
-// cgroupUnitMissTTL — сколько промах id помнится без повторного скана. Id нового
-// юнита в отрицательном кэше не бывает, поэтому он разрешается на первом же
-// своём событии (после rescan-интервала), как и раньше.
+// cgroupUnitMissTTL — сколько помнится ПОВТОРНЫЙ промах id без нового скана.
+// Id нового юнита в отрицательном кэше не бывает, поэтому он разрешается на
+// первом же своём событии (после rescan-интервала), как и раньше.
+//
+// Первый промах id не подавляет ничего (только rescan-интервал): каталог юнита
+// мог появиться уже ПОСЛЕ того, как скан прочитал system.slice, и тогда запись
+// «промах» на 30 с оставила бы живой юнит неразрешённым. Подавление включается
+// на втором промахе подряд — то есть id, которого после двух сканов всё ещё нет
+// (kubepods, сессии), стоит два скана на TTL, а не десять в секунду.
 const cgroupUnitMissTTL = 30 * time.Second
 
 // cgroupUnitMissCap ограничивает отрицательный кэш; при переполнении
@@ -104,11 +110,18 @@ type SystemSliceUnitResolver struct {
 
 	mu       sync.RWMutex
 	byID     map[uint64]string
-	miss     map[uint64]time.Time // id → момент промаха после скана
+	miss     map[uint64]unitMiss // id → промах после скана
 	lastScan time.Time
 	now      func() time.Time
 
 	scanning atomic.Bool
+}
+
+// unitMiss — запись отрицательного кэша: strikes — число подряд промахов после
+// скана; подавляет повторный скан только со второго.
+type unitMiss struct {
+	at      time.Time
+	strikes int
 }
 
 // NewSystemSliceUnitResolver возвращает резолвер над корнем cgroup2 root
@@ -117,7 +130,7 @@ func NewSystemSliceUnitResolver(root string) *SystemSliceUnitResolver {
 	return &SystemSliceUnitResolver{
 		root: root,
 		byID: map[uint64]string{},
-		miss: map[uint64]time.Time{},
+		miss: map[uint64]unitMiss{},
 		now:  time.Now,
 	}
 }
@@ -130,13 +143,13 @@ func (r *SystemSliceUnitResolver) ResolveCgroupUnit(cgroupID uint64) string {
 	now := r.now()
 	r.mu.RLock()
 	unit, ok := r.byID[cgroupID]
-	missAt, missed := r.miss[cgroupID]
+	miss, missed := r.miss[cgroupID]
 	recent := !r.lastScan.IsZero() && now.Sub(r.lastScan) < cgroupUnitRescanInterval
 	r.mu.RUnlock()
 	if ok {
 		return unit
 	}
-	if missed && now.Sub(missAt) < cgroupUnitMissTTL {
+	if missed && miss.strikes >= 2 && now.Sub(miss.at) < cgroupUnitMissTTL {
 		return ""
 	}
 	if recent || !r.scanning.CompareAndSwap(false, true) {
@@ -164,8 +177,8 @@ func (r *SystemSliceUnitResolver) ResolveCgroupUnit(cgroupID uint64) string {
 // просроченные, а затем самые старые записи.
 func (r *SystemSliceUnitResolver) rememberMissLocked(id uint64, now time.Time) {
 	if len(r.miss) >= cgroupUnitMissCap {
-		for k, t := range r.miss {
-			if now.Sub(t) >= cgroupUnitMissTTL {
+		for k, m := range r.miss {
+			if now.Sub(m.at) >= cgroupUnitMissTTL {
 				delete(r.miss, k)
 			}
 		}
@@ -173,15 +186,19 @@ func (r *SystemSliceUnitResolver) rememberMissLocked(id uint64, now time.Time) {
 			var oldestK uint64
 			var oldestT time.Time
 			first := true
-			for k, t := range r.miss {
-				if first || t.Before(oldestT) {
-					oldestK, oldestT, first = k, t, false
+			for k, m := range r.miss {
+				if first || m.at.Before(oldestT) {
+					oldestK, oldestT, first = k, m.at, false
 				}
 			}
 			delete(r.miss, oldestK)
 		}
 	}
-	r.miss[id] = now
+	strikes := 1
+	if _, again := r.miss[id]; again {
+		strikes = 2
+	}
+	r.miss[id] = unitMiss{at: now, strikes: strikes}
 }
 
 // scanSystemSlice строит inode → имя юнита для каждого каталога под

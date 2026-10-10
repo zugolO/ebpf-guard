@@ -78,7 +78,12 @@ grep -q 'rego=true' "$ART/binary-version.txt" || die "бинарь без тег
 [ -n "$TOKEN" ] || die "нет admin-токена"
 free_kb=$(df -Pk /var/lib | awk 'NR == 2 { print $4 }')
 [ "${free_kb:-0}" -gt 4194304 ] || die "свободно ${free_kb} КиБ на /var/lib — нужен запас под ночной стор и образ пода (≥ 4 ГиБ)"
-say "префлайт: агент один, бинарь rego, свободно $((free_kb / 1024)) МиБ"
+# kubelet чистит НЕИСПОЛЬЗУЕМЫЕ образы при диске ≥ 85% (imageGCHighThresholdPercent)
+# до 80%: на смоке 10.10.2026 образ пода, импортированный в префлайте, был удалён
+# за 25 минут до helm install (ErrImageNeverPull). Ночь живёт ≥ 8 ч — порог 80.
+used_pct=$(df -P / | awk 'NR == 2 { sub(/%/, "", $5); print $5 }')
+[ "${used_pct:-100}" -le 80 ] || die "диск / занят на ${used_pct}% > 80 — kubelet удалит образ пода до утра (go clean -cache, старые образы docker)"
+say "префлайт: агент один, бинарь rego, свободно $((free_kb / 1024)) МиБ, диск / ${used_pct}%"
 
 # ── [1a] префлайт пода — ДО восьми часов ──────────────────────────────────
 for c in helm kubectl docker k3s jq python3 go; do command -v "$c" >/dev/null || die "нет $c в PATH"; done
@@ -102,9 +107,14 @@ ENV GOMEMLIMIT=off
 ENTRYPOINT ["/usr/local/bin/ebpf-guard"]
 EOF
 docker build -q -t "zugolo/ebpf-guard:$POD_TAG" "$B" > "$ART/pod-image.log" 2>&1 || die "docker build образа пода: $(tail -3 "$ART/pod-image.log")"
-docker save "zugolo/ebpf-guard:$POD_TAG" | k3s ctr -n k8s.io images import - >> "$ART/pod-image.log" 2>&1 \
-    || die "импорт образа в k3s (без него ErrImageNeverPull)"
 rm -f "$B/ebpf-guard"
+# Импорт в k3s — НЕ здесь, а перед helm install (pod_image_import): до утра
+# неиспользуемый образ может удалить GC kubelet.
+pod_image_import() {
+    docker save "zugolo/ebpf-guard:$POD_TAG" | k3s ctr -n k8s.io images import - >> "$ART/pod-image.log" 2>&1
+    k3s ctr -n k8s.io images ls -q | grep -q "zugolo/ebpf-guard:$POD_TAG\$"
+}
+pod_image_import || die "импорт образа в k3s: образа нет в списке после импорта (без него ErrImageNeverPull)"
 { echo "pod_bin_sha12=$POD_SHA"; echo "pod_tag=$POD_TAG"; echo "git=$GIT_HEAD"; } > "$ART/pod-identity.txt"
 mkdir -p "$POD_STATE"
 python3 "$SETUP/w82-pod-night-values.py" "$SETUP/config-test.yaml" "$POD_TAG" "$POD_TOKEN" "$ART/pod-values.yaml" \
@@ -113,12 +123,15 @@ helm template "$REL" "$REPO/deploy/helm/ebpf-guard" -n "$NS" -f "$ART/pod-values
     || die "helm template: $(tail -3 "$ART/pod-template.err")"
 grep -q '/opt/ebpf-guard/rules/' "$ART/pod-rendered.yaml" || die "в отрисованном конфиге пода нет каталога правил /opt/ebpf-guard/rules/"
 grep -q 'workingDir: "/opt/ebpf-guard"' "$ART/pod-rendered.yaml" || die "в отрисованном поде нет workingDir — rules/rego не разрешится"
-say "префлайт пода: образ $POD_TAG импортирован, values и отрисовка чарта в порядке"
+say "префлайт пода: образ $POD_TAG собран и импортируется, values и отрисовка чарта в порядке"
 
 # ── [1b] 8.2.3 — A2 на коде HEAD (без -race/-short, как шаг CI) ───────────
 ( cd "$REPO" && go test -count=1 -v -run '^TestW82_AllocPerEvent' ./internal/correlator/ ) > "$ART/a2.txt" 2>&1
 grep -aqE '(ДОСТИГНУТО|ПРОВАЛЕН): 8\.2\.3 ' "$ART/a2.txt" || die "A2 не напечатал вердикт 8.2.3: $(tail -3 "$ART/a2.txt")"
 say "A2: $(grep -aoE '(ДОСТИГНУТО|ПРОВАЛЕН): 8\.2\.3 [^(]*' "$ART/a2.txt" | head -1)"
+# Сборка образа и A2 наращивают кэш Go на ГБ — вернуть диск ниже порога GC kubelet.
+go clean -cache
+say "кэш сборки очищен, диск / $(df -P / | awk 'NR == 2 { print $5 }')"
 
 # ── [2] стор с нуля и рестарт хоста ───────────────────────────────────────
 systemctl stop "$SERVICE"
@@ -231,7 +244,8 @@ pod_down() {
 }
 trap 'pod_down; archive' EXIT
 echo 0 > "$POD_STATE/observer-root-pid"   # не взведён: дерево пайплайна — это и атаки ([[observer-pid-file-with-zero-is-disarmed]])
-say "под: старт (helm install, 10 Гц × 90 с), образ $POD_TAG"
+pod_image_import || die "повторный импорт образа пода перед helm install не удался"
+say "под: старт (helm install, 10 Гц × 90 с), образ $POD_TAG (в k3s, диск / $(df -P / | awk 'NR == 2 { print $5 }'))"
 VALUES="$ART/pod-values.yaml" CHART="$REPO/deploy/helm/ebpf-guard" API_PORT=19091 TOKEN="$POD_TOKEN" DUR=90 UNIT_PROBE=0 \
     bash "$SETUP/w82-pod-run.sh" "$ART/pod-run" > "$ART/pod-run.log" 2>&1
 grep -q '^done' "$ART/pod-run/DONE" 2>/dev/null || die "старт пода: $(cat "$ART/pod-run/DONE" 2>/dev/null || tail -3 "$ART/pod-run.log")"

@@ -164,6 +164,12 @@ jobs:
       # uncovered, which structurally caps and understates the Codecov number.
       run: go test -v -race -short -coverpkg=./... -coverprofile=coverage.out ./...
 
+    - name: Allocation budget per event (wave 8.2, label 8.2.3)
+      # A2 skips under -short and under -race (the detector inflates
+      # allocations ~90x), so the run above never executes it. The threshold
+      # is calibrated for a plain build — run it here without either flag.
+      run: go test -count=1 -v -run '^TestW82_AllocPerEvent' ./internal/correlator/
+
     - name: Run tests with build tags (rego, tui)
       # Packages behind build tags are excluded from the main run above.
       # Re-run them explicitly so their coverage is captured separately and

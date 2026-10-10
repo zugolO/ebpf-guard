@@ -79,7 +79,7 @@ var w549ExplicitLegacyOpRules = strings.Fields(`
 container_escape_kmem_access mitre_vm_detect_dmi_read rootkit_kcore_access rootkit_proc_modules_read
 sigma_cpu_info_access sigma_dev_mem_access sigma_kernel_version_read
 proc_inject_ld_preload_file supply_chain_pkg_install_etc_write
-container_escape_init_proc
+container_escape_init_proc mitre_sandbox_detect_proc_read sigma_memory_proc_dump
 `)
 
 func w81FileEventPPID(pid, ppid uint32, comm, path string, op uint8) types.Event {

@@ -252,6 +252,70 @@ rules:
             - field: proc.exe_path
               op: in
               values: [/usr/lib/apt/methods/gpgv]
+      # Долги 8.3, п. 8.3.3 (10.10.2026): остаток объёма на натуральном тике
+      # apt-daily (ночь H4, час 5 — 11 631 алерт, выпущено 10): gpgv с
+      # НЕРАЗРЕШЁННЫМ exe (мс-процесс, readlink проигрывает гонку, образная ось
+      # apt-gpgv-method-tmp выше не применяется) и apt-key/cp/touch под
+      # /tmp/apt-key-gpghome.XXXXXXXXXX/ — образы родовые. Для них есть ось
+      # юнита: proc.systemd_unit = каталог ПРЯМО под system.slice по cgroup_id
+      # (cgroup_unit.go), его заводит systemd PID 1, а user.slice, контейнер и
+      # чужой юнит дают пустое/другое значение. Раньше «ось по имени каталога»
+      # отдавала обход одним mkdir — теперь обход требует положить процесс в
+      # cgroup apt-daily под root. Юниты — те же пять, что у node-timer-detect-virt:
+      # смок w83 (10.10.2026) на форсированном apt-daily и на прямом запуске
+      # esm-cache/apt-news показал остаток apt-key/cp/gpgv под тем же
+      # /tmp/apt-key-gpghome.* именно из apt-news/esm-cache (apt-get update их
+      # хука). Объект — ТОЧНАЯ форма mkstemp/mkdtemp
+      # (6 и 10 символов), comm — сужение до наблюдённого. Гарантия вердикта
+      # не меняется: правило мягкое (defense-evasion), не твёрдая улика.
+      - name: apt-gpgv-tmp-unit
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [gpgv]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.path
+              op: regex
+              values: ['^/tmp/apt\.(conf|sig|data)\.[A-Za-z0-9]{6}$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
+      - name: apt-key-gpghome-unit
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: [apt-key, cp, touch, gpg, gpgv]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.path
+              op: regex
+              values: ['^/tmp/apt-key-gpghome\.[A-Za-z0-9]{10}/[^/]+$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
 
   # MITRE ATT&CK: T1562.006 — Impair Defenses: Indicator Blocking
   - id: evasion_auditd_stop

@@ -55,6 +55,14 @@ rules:
     severity: critical
     action: alert
     tags: [mitre:T1489, impact, defense-evasion, service-stop, mitre:T1562.001]
+    # Долги 8.3, п. 8.3.1 (решение владельца 10.10.2026): исключения НЕТ.
+    # Остановка сервиса из prerm под dpkg (`deb-systemd-invoke stop`) — настоящая
+    # остановка и твёрдая улика; ось образа родителя для неё недоступна:
+    # deb-systemd-invoke — perl-скрипт, readlink("/proc/<pid>/exe") у процесса —
+    # /usr/bin/perl (смок w83). Исключение по `perl` + comm `deb-systemd-inv`
+    # обходится любым perl-скриптом с этим именем, то есть ослабило бы улику.
+    # Остаток держит доверие к юниту; ось «цепочка предков» — отдельная волна
+    # (plan.md, волна 8.3, п. 8.3.1).
 
   # MITRE ATT&CK: T1485 — Data Destruction (via file removal on Linux)
   # Covers rm -rf of critical directories, shred, dd overwrite.

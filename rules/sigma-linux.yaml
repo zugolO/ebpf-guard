@@ -1055,6 +1055,43 @@ rules:
             - field: proc.exe_path
               op: in
               values: [/usr/libexec/fwupd/fwupd]
+      # Долги 8.3, п. 8.3.2 (10.10.2026): systemd-detect-virt проверяет hypervisor-флаг и WSL по этим файлам.
+      #     Образ systemd-detect-virt мёртв живьём (мс-процесс, readlink
+      #     проигрывает гонку, virt-detect-self — 0 подавлений); ось — юнит
+      #     system.slice по cgroup_id (proc.systemd_unit), как у
+      #     node-timer-detect-virt в container_escape_init_proc. comm — сужение
+      #     до наблюдённого, антиспуф даёт юнит. Тот же comm в другом юните, в
+      #     user.slice, в контейнере или на запись — срабатывает.
+      - name: node-timer-detect-virt
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [systemd-detect-]
+            - field: filename
+              op: in
+              values: ["/proc/cpuinfo", "/proc/version", "/proc/sys/kernel/osrelease"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
 
   - id: sigma_kernel_version_read
     name: "Kernel version file read"
@@ -1459,23 +1496,31 @@ rules:
     name: "Process memory read via /proc/*/mem"
     description: "Process reading another process's memory via /proc/[pid]/mem — credential extraction or code injection."
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        # 5.9.9.F.1b (находка №111): /proc/[0-9]+/cmdline УБРАН. Чтение чужой
-        # командной строки не credential-примитива — в отличие от mem/maps
-        # (образ памяти) и environ (T1552, секреты в окружении). Замер
-        # №2.9.9.F: 19 алертов правила за прогон, истинный ОДИН
-        # (credscrape /proc/<pid>/maps, позитивный контроль 5.9.9.Fa),
-        # остальные 18 — landscape-sysinfo (/proc/1/cmdline ×9) и
-        # dbus-daemon (×9). Прежняя попытка чинить это исключением по comm
-        # (pgrep-cmdline-scan, волна 5.7a) не обобщилась на два новых демона
-        # и дала рост 3 → 19 за один замер: условие правится предикатом,
-        # список исключений не заменяет верного условия.
-        - "/proc/[0-9]+/mem"
-        - "/proc/[0-9]+/maps"
-        - "/proc/[0-9]+/environ"
+    condition_group:
+      operator: and
+      conditions:
+        - field: filename
+          op: regex
+          values:
+            # 5.9.9.F.1b (находка №111): /proc/[0-9]+/cmdline УБРАН. Чтение чужой
+            # командной строки не credential-примитива — в отличие от mem/maps
+            # (образ памяти) и environ (T1552, секреты в окружении). Замер
+            # №2.9.9.F: 19 алертов правила за прогон, истинный ОДИН
+            # (credscrape /proc/<pid>/maps, позитивный контроль 5.9.9.Fa),
+            # остальные 18 — landscape-sysinfo (/proc/1/cmdline ×9) и
+            # dbus-daemon (×9). Прежняя попытка чинить это исключением по comm
+            # (pgrep-cmdline-scan, волна 5.7a) не обобщилась на два новых демона
+            # и дала рост 3 → 19 за один замер: условие правится предикатом,
+            # список исключений не заменяет верного условия.
+            - "/proc/[0-9]+/mem"
+            - "/proc/[0-9]+/maps"
+            - "/proc/[0-9]+/environ"
+        # Долги 8.3, п. 8.3.2: legacy-набор операций назван ЯВНО — исключение
+        # node-timer-detect-virt ниже называет op (память
+        # op-in-exception-drops-legacy-flag). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: critical
     action: alert
     tags: [mitre:T1003, sigma, memory-dump, credential-access]
@@ -1508,6 +1553,41 @@ rules:
           field: proc.comm
           op: eq
           values: [ebpf-guard]
+      # Долги 8.3, п. 8.3.2 (10.10.2026): systemd-detect-virt читает
+      # /proc/1/environ (ищет container=). Образ мёртв живьём (мс-процесс),
+      # ось — юнит system.slice по cgroup_id (proc.systemd_unit), как у
+      # node-timer-detect-virt в container_escape_init_proc. Только этот путь:
+      # /proc/1/mem, maps и чужие environ поднимают алерт даже из этого юнита.
+      - name: node-timer-detect-virt
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [systemd-detect-]
+            - field: filename
+              op: eq
+              values: ["/proc/1/environ"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
 
   - id: sigma_ptrace_attach
     name: "ptrace PTRACE_ATTACH to another process"

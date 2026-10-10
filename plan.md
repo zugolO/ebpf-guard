@@ -18798,13 +18798,91 @@ maintainer-скрипта под dpkg (`deb-systemd-invoke stop`) исключа
 
 | # | item | почему не сейчас | как мерить |
 |---|---|---|---|
-| 8.3.1 | **Натуральный тик с установкой пакетов.** `deb-systemd-invoke stop` из postinst под `unattended-upgrades.service` — НАСТОЯЩАЯ остановка, правило `impact_systemd_service_disabled` (тег impact) обязано сработать и даст твёрдую улику под доверенным юнитом → attack. Плюс атрибуция падения цены apt-daily-upgrade 9 066 → 184 (H3 → H4) | форсированный apt-daily-upgrade ставить нечего (память apt-timers-are-stamp-gated); событие — только ночь с апгрейдом | **смок** `apt-get install --reinstall` пакета с сервисом (решение владельца 10.10); исключение по `proc.parent_exe_path` = `/usr/bin/deb-systemd-invoke`; натуральная ночь с апгрейдом — дополнительное подтверждение, если случится |
-| 8.3.2 | **Мягкие правила `systemd-detect-virt`**: `mitre_vm_detect_dmi_read`, `mitre_sandbox_detect_proc_read`, `sigma_memory_proc_dump`, `sigma_cpu_info_access` — на мёртвом `virt-detect-self` (ось образа, мс-процесс). Перевести на `proc.systemd_unit`, как `node-timer-detect-virt` | на 3.ATTACK не влияют при доверенном корне (мягкий состав); это объём | смок фазы E/A + счётчики исключений |
-| 8.3.3 | **Объём `evasion_hidden_elf_in_tmp` на apt-daily** (`gpgv` с неразрешённым exe, `apt-key`/`cp` — родовые): H4 час 5 — 11 631 алерт, выпущено 10. Ось юнита теперь есть (`apt-daily.service`) | объём, а не вердикт; 3.P1-19 ДОСТИГНУТО | смок A: дельта `alerts_filtered`/дедупа до и после |
+| 8.3.1 | ⛔ РЕШЕНО 10.10 владельцем: мёртвое исключение снято, ось «цепочка предков» → волна 8.4 (ниже). **Натуральный тик с установкой пакетов.** `deb-systemd-invoke stop` из postinst под `unattended-upgrades.service` — НАСТОЯЩАЯ остановка, правило `impact_systemd_service_disabled` (тег impact) обязано сработать и даст твёрдую улику под доверенным юнитом → attack. Плюс атрибуция падения цены apt-daily-upgrade 9 066 → 184 (H3 → H4) | форсированный apt-daily-upgrade ставить нечего (память apt-timers-are-stamp-gated); событие — только ночь с апгрейдом | **смок** `apt-get install --reinstall` пакета с сервисом (решение владельца 10.10); исключение по `proc.parent_exe_path` = `/usr/bin/deb-systemd-invoke`; натуральная ночь с апгрейдом — дополнительное подтверждение, если случится |
+| 8.3.2 | ✅ ЗАКРЫТ 10.10 смоком. **Мягкие правила `systemd-detect-virt`**: `mitre_vm_detect_dmi_read`, `mitre_sandbox_detect_proc_read`, `sigma_memory_proc_dump`, `sigma_cpu_info_access` — на мёртвом `virt-detect-self` (ось образа, мс-процесс). Перевести на `proc.systemd_unit`, как `node-timer-detect-virt` | на 3.ATTACK не влияют при доверенном корне (мягкий состав); это объём | смок фазы E/A + счётчики исключений |
+| 8.3.3 | ✅ ЗАКРЫТ 10.10 смоком. **Объём `evasion_hidden_elf_in_tmp` на apt-daily** (`gpgv` с неразрешённым exe, `apt-key`/`cp` — родовые): H4 час 5 — 11 631 алерт, выпущено 10. Ось юнита теперь есть (`apt-daily.service`) | объём, а не вердикт; 3.P1-19 ДОСТИГНУТО | смок A: дельта `alerts_filtered`/дедупа до и после |
 | 8.3.4 | `owasp_backup_config_access` — остаток №552 (у короткого драйвера нет idle-часа) | нужен idle-час | ночь / idle-run |
 | 8.3.5 | **№556** гонка `TestWave6_2_2_BeaconFixedInterval_RequiresPeriodicity` под `-race`: тест переприсваивает `globalBeaconInterval`, cleanup-горутина движка (`engine_test.go:621` не останавливает движок) читает его | тестовая гигиена | `go test -race` correlator целиком, 3 прогона подряд |
 | 8.3.6 | **Ось `proc.systemd_unit` в DaemonSet**: в поде без хостового `/sys/fs/cgroup` system.slice не виден — поле пусто (отказ в шум). Проверить чарт: монтирует ли хостовый cgroupfs | стенд — бинарь на хосте | `helm template` + под на k3s стенда, `systemd_unit_lookups_total{resolved}` |
 | 8.3.7 | `systemctl` читает `/proc/1/environ` (detect container) — `container_escape_init_proc`; в смоке — только мой триггер `systemctl start apt-daily.service`, в натуральных тиках H4 не наблюдался | не наблюдён у продукта | натуральная ночь: искать в дереве apt-daily |
+
+### Результат 8.3.1–8.3.3 (10.10.2026)
+
+Правки — только правила + тесты `internal/correlator/wave8_3_unit_axis_test.go`; смок —
+[w83-smoke.sh](deploy/docker-test-setup/w83-smoke.sh) (фазы A, E, I, P) и эмиттер
+[w83-smoke-report.sh](deploy/docker-test-setup/w83-smoke-report.sh); бинарь стенда `5d2873ae2e88`
+(правила с диска, бинарь не менялся — оси `proc.systemd_unit` и `proc.parent_exe_path` в нём уже были).
+Стенд: `/var/tmp/w83-smoke` (A, E, I, P) и `/var/tmp/w83-smoke-2` (A, E после правки списка юнитов).
+
+| пункт | правка | результат живьём |
+|---|---|---|
+| **8.3.2** | исключение `node-timer-detect-virt` (comm `systemd-detect-`, хост, O_RDONLY, `proc.systemd_unit` ∈ apt-daily/apt-daily-upgrade/apt-news/esm-cache/unattended-upgrades) на `mitre_vm_detect_dmi_read` (`/sys/class/dmi/id/`, `/sys/firmware/dmi/`), `mitre_sandbox_detect_proc_read` (`/proc/1/{environ,cgroup}`, `/proc/self/cgroup`), `sigma_memory_proc_dump` (только `/proc/1/environ`), `sigma_cpu_info_access` (`/proc/cpuinfo`, `/proc/version`, `/proc/sys/kernel/osrelease`); у `mitre_sandbox_detect_proc_read` и `sigma_memory_proc_dump` в условии назван legacy-набор op (память op-in-exception-drops-legacy-flag), оба — в `w549ExplicitLegacyOpRules`; `sigma_memory_proc_dump` переведено с `condition` на `condition_group` без смены семантики | **✅** подавлений на 4 из 4 правил в обеих фазах (3/3/3/5 в каждой), `systemd_unit_lookups{unresolved}` 0. Положительный контроль P4: `systemd-detect-virt` в недоверенном юните `w83-virt.service` дал `mitre_vm_detect_dmi_read` 1, `mitre_sandbox_detect_proc_read` 1, `sigma_memory_proc_dump` 1, `sigma_cpu_info_access` 0 (этот путь он не читает — не провал). Тесты: чужой юнит, user.slice, юнит не определён, контейнер, запись, другой comm, чужой путь, `/proc/1/mem` — срабатывают; мутаций правила не видят |
+| **8.3.3** | `evasion_hidden_elf_in_tmp`: исключения `apt-gpgv-tmp-unit` (comm `gpgv`, `/tmp/apt.(conf\|sig\|data).XXXXXX`) и `apt-key-gpghome-unit` (comm `apt-key/cp/touch/gpg/gpgv`, `/tmp/apt-key-gpghome.<10>/<файл>`), хост, `proc.systemd_unit` ∈ те же пять юнитов | **✅** форсированный apt-daily: первая редакция (три юнита) подавила 11 514 + 9, остаток 2 gpgv + 2 cp + apt-key под apt-news/esm-cache (хук `apt-get update`); юниты расширены до пяти → повтор: подавлено **11 186 + 13** (фаза A) и 4 (фаза E), дедуп до/после 434 → 0, выпущено 8 → 2, остаток — только `date` самого смока (запись в `/var/tmp/w83-smoke*`, приборный). Контроль P5/P6: запись `apt-key`-формы из ssh-сессии (user.slice) и из чужого юнита — срабатывает (2) |
+| **8.3.1** | исключение `deb-systemd-invoke-stop` на `impact_systemd_service_disabled` по решению владельца: comm `systemctl`, хост, `proc.parent_exe_path` = `/usr/bin/deb-systemd-invoke` последним | **❌ мертво живьём.** `/usr/bin/deb-systemd-invoke` — perl-скрипт (`#!/usr/bin/perl`), `readlink /proc/<pid>/exe` у его процесса — `/usr/bin/perl` (проверено контрольным perl-скриптом на стенде). Событие воспроизведено `dpkg -r irqbalance` (prerm remove → `deb-systemd-invoke stop`): `impact_systemd_service_disabled` выпущено **1** (`systemctl stop irqbalance.service`), подавлений исключением **0**, `exe_path_lookups{parent_exe_path,resolved}` +1. Спуф-контроли исправны: голый stop, stop из копии `deb-systemd-invoke` (perl под тем же именем) и из `/usr/bin/perl` — все срабатывают. Юнит-тест зелёный на подставном резолвере — тот же капкан, что у `virt-detect-self` |
+
+**Поправки к постановке 8.3.1.** (1) `apt-get install --reinstall` стоп НЕ даёт: prerm пакетов
+debhelper зовёт `deb-systemd-invoke stop` только при `$1 = remove`, postinst — `restart`/`start`
+(в `impact_systemd_service_disabled` не матчатся). Событие делается `dpkg -r` + `apt-get install`
+(irqbalance, 148 КБ). (2) Остановка из postinst под unattended-upgrades в наблюдении 8.1 — это
+другая форма (не из prerm remove); на каких пакетах она бывает, не установлено.
+
+**Решение владельца 10.10.2026 по п. 8.3.1: вариант (а) — исключение `deb-systemd-invoke-stop` УДАЛЕНО из `impact-gaps.yaml` (тест `TestW83_StopFiresUnderAnyParent`: stop срабатывает при любом родителе); ось «цепочка предков» (в) выносится в отдельную волну 8.4 — заведена ниже.** Остаток до неё: остановка сервиса из prerm под доверенным юнитом остаётся твёрдой уликой и может держать инцидент в attack (цена на смоке — 1 impact на остановку).
+
+**Открытые вопросы.**
+1. ~~8.3.1 — ось образа родителя недоступна для perl-скрипта~~ **ЗАКРЫТ решением выше.** Исходная развилка: Варианты: (а) убрать мёртвое
+   исключение, остаток держит твёрдая улика под доверенным юнитом, как до 8.3 (честно, шум
+   остаётся); (б) `proc.parent_exe_path` = `/usr/bin/perl` + `proc.parent_comm` =
+   `deb-systemd-inv` (у скрипта comm = имя файла, наблюдено: `irqbalance.post` у postinst) —
+   живьём сработает, но обход — perl-скрипт с этим именем из любого каталога (root-вызов
+   `systemctl stop auditd` из такого скрипта подавлен), то есть ослабление твёрдой улики, от
+   которого владелец отказался; (в) ось «цепочка предков» — поля нет (`ancestor_exe_path` —
+   не родословная, память ancestor-exe-path-is-not-lineage), нужна работа в коллекторе; (г)
+   доверенный юнит + `stop` из prerm — ослабление, как (б). Рекомендация: (а) сейчас, (в) — в
+   отдельную волну, если остановки из maintainer-скриптов окажутся значимой долей инцидентов
+   ночи.
+2. **8.3.1 — натуральная ночь с апгрейдом** остаётся дополнительным подтверждением; пока
+   апгрейд сервиса с остановкой на ночи не наблюдался, оценка «сколько стоит остаток» — по
+   смоку: 1 impact на остановку сервиса.
+3. **Остаток на `systemctl` и методах APT** (вне 8.3.2, наблюдён в тех же окнах): `systemctl`
+   читает `/proc/1/environ` и `/proc/sys/kernel/osrelease` (`sigma_memory_proc_dump`,
+   `mitre_sandbox_detect_proc_read`, `sigma_cpu_info_access`) — это 8.3.7; методы APT
+   `http`/`https` читают `/proc/1/cgroup` (`mitre_sandbox_detect_proc_read`) — оси юнита им
+   можно дать так же, как в `apt-method-init-cgroup-unit`, не сделано (вне пунктов).
+4. **Живьём вне юнита-таймера не проверено:** исключения 8.3.2/8.3.3 привязаны к пяти юнитам
+   по наблюдению; другой таймерный юнит (например `snapd`-обновление, `needrestart` под
+   unattended-upgrades уже в списке) их не получит — отказ в шум. Натуральный тик на ночи
+   закрытия покажет, не осталось ли `systemd-detect-virt` вне списка.
+5. **`go test -race ./internal/correlator/` красный на `TestW82_AllocPerEvent`** (32 КБ/событие
+   против потолка 860 Б) — красный и на коммите без моих правок (проверено `git stash`): под
+   `-race` аллокации раздуты, потолок A2 рассчитан на сборку без детектора; без `-race` тест
+   зелёный. Либо гонять A2 без `-race`, либо снять тест с `-race`-набора — решение за 8.2.
+6. `rules/checksums.sha256` не обновлялся: файл не поддерживается с 5.9.9.F.3c, проверка
+   контрольных сумм по умолчанию в тестах не участвует.
+
+
+---
+
+# Волна 8.4 — ось «цепочка предков» (заведена 10.10.2026, из п. 8.3.1)
+
+**Предмет.** Поле для правил, отвечающее «процесс потомок X» по настоящей родословной, а не по
+образу родителя: родитель maintainer-скрипта — `dash`/`perl` (`deb-systemd-invoke` —
+perl-скрипт, `exe` = `/usr/bin/perl`), `proc.ancestor_exe_path` — не родословная (хоп 1 +
+участок одного comm, память ancestor-exe-path-is-not-lineage). Нужна работа в коллекторе
+(родословная по `ppid`-цепочке с проверкой starttime, антиспуф: цепочка читается из ядра/`/proc`,
+а не из имени процесса).
+
+**Мотив.** `systemctl stop` из prerm/postinst под dpkg (`dpkg -r` → `deb-systemd-invoke stop`)
+— настоящая остановка, твёрдая улика (тег impact), пробивает доверие к
+`unattended-upgrades.service`. Исключение «предок — dpkg» без настоящей родословной
+обходится одной командой (`dpkg --pre-invoke=…`, память ancestor-exe-path-is-not-lineage) —
+нужен предок ДО dpkg по непрерывной цепочке, плюс спуф-контроли.
+
+**Постановка (не взята в работу, ждёт плана).**
+| # | item | как мерить |
+|---|---|---|
+| 8.4.1 | Поле `proc.lineage_exe_paths` (или оператор «предок с образом X»): цепочка до N хопов, starttime-валидация, счётчик исходов (resolved/broken/exhausted) | юнит-тесты на подставной цепочке + живая сверка с `/proc` на стенде |
+| 8.4.2 | Исключение `impact_systemd_service_disabled` для `systemctl stop` с предком `/usr/bin/dpkg` И родителем-скриптом из пакетного maintainer-пути (`/var/lib/dpkg/info/*.prerm`) | смок `dpkg -r` + `apt-get install` (скрипт w83-smoke.sh, фаза I; сэмплер образа родителя исправить — первый не поймал stop), спуф: `dpkg --pre-invoke`, копия perl-скрипта, `exec -a` |
+| 8.4.3 | Цена: сколько инцидентов ночей H2–H4 держала остановка из maintainer-скриптов (по архивам) | офлайн по `server-logs/` |
 
 ---
 

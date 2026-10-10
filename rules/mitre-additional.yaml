@@ -237,6 +237,13 @@ rules:
         - field: proc.comm
           op: not_in
           values: ["pgrep"]
+        # Долги 8.3, п. 8.3.2: legacy-набор операций назван ЯВНО — исключение
+        # node-timer-detect-virt ниже называет op, а правило, назвавшее op хоть
+        # где-то, теряет legacyOpsOnly (память op-in-exception-drops-legacy-flag).
+        # Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: warning
     action: alert
     tags: [mitre:T1497.001, sandbox-evasion, container-detect, evasion, proc-recon-cluster]
@@ -322,6 +329,43 @@ rules:
               values:
                 - "/usr/lib/systemd/systemd-logind"
                 - "/lib/systemd/systemd-logind"
+      # Долги 8.3, п. 8.3.2 (10.10.2026): systemd-detect-virt ищет container= в /proc/1/environ и читает cgroup.
+      #     Образ systemd-detect-virt мёртв живьём (мс-процесс, readlink
+      #     проигрывает гонку, virt-detect-self — 0 подавлений); ось — юнит
+      #     system.slice по cgroup_id (proc.systemd_unit), как у
+      #     node-timer-detect-virt в container_escape_init_proc. comm — сужение
+      #     до наблюдённого, антиспуф даёт юнит. Тот же comm в другом юните, в
+      #     user.slice, в контейнере или на запись — срабатывает.
+      - name: node-timer-detect-virt
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [systemd-detect-]
+            - field: filename
+              op: in
+              values: ["/proc/1/environ", "/proc/1/cgroup", "/proc/self/cgroup"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
 
   # pgrep's routine per-PID matching pass reads /proc/1/{cgroup,environ,status}
   # as a side effect of scanning every running process, not sandbox-detection
@@ -474,6 +518,43 @@ rules:
             - field: proc.exe_path
               op: in
               values: [/usr/bin/systemd-detect-virt]
+      # Долги 8.3, п. 8.3.2 (10.10.2026): systemd-detect-virt читает DMI под таймерным юнитом ноды.
+      #     Образ systemd-detect-virt мёртв живьём (мс-процесс, readlink
+      #     проигрывает гонку, virt-detect-self — 0 подавлений); ось — юнит
+      #     system.slice по cgroup_id (proc.systemd_unit), как у
+      #     node-timer-detect-virt в container_escape_init_proc. comm — сужение
+      #     до наблюдённого, антиспуф даёт юнит. Тот же comm в другом юните, в
+      #     user.slice, в контейнере или на запись — срабатывает.
+      - name: node-timer-detect-virt
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [systemd-detect-]
+            - field: filename
+              op: prefix
+              values: ["/sys/class/dmi/id/", "/sys/firmware/dmi/"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
 
   # ============================================================================
   # T1518 — Software Discovery

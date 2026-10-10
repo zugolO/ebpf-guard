@@ -25,9 +25,17 @@ curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" 
     sleep 0.1
   done ) > "$OUT/samples.tsv" &
 SP=$!
+# Куча по ходу окна, каждые 150 с (доводка 8.2, T1): «buildAncestry не растёт между
+# 5-й и 10-й минутой» без средней точки не судится — были только pre и post.
+( while [ ! -e "$OUT/STOP" ]; do
+    for _ in $(seq 1 15); do [ -e "$OUT/STOP" ] || sleep 10; done
+    [ -e "$OUT/STOP" ] && break
+    curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-mid-$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%04.0f", n - t }').pprof"
+  done ) &
+HP=$!
 ( cd "$SETUP/attacks" && EBPF_GUARD_API="http://$API" EBPF_GUARD_TOKEN="$TOKEN" SKIP_INDUCED_DROP=1 bash ./run-all-attacks.sh > "$OUT/attacks.log" 2>&1; echo "rc=$?" > "$OUT/attacks.rc" )
 sleep 30
-touch "$OUT/STOP"; wait $SP
+touch "$OUT/STOP"; wait $SP $HP
 M > "$OUT/m-post.txt"
 curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-post.pprof"
 cat "$cg/memory.stat" > "$OUT/memory.stat"

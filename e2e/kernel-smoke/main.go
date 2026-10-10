@@ -195,9 +195,8 @@ func probeObject(path string, feat FeatureReport, log *slog.Logger) Result {
 		Programs: ebpf.ProgramOptions{
 			// LogLevel 1 gives verifier output on failure — useful for debugging
 			// across kernel versions where the verifier may reject programs for
-			// different reasons.
+			// different reasons. Размер лога с cilium/ebpf v0.20 растёт сам.
 			LogLevel: ebpf.LogLevelInstruction,
-			LogSize:  4 * 1024 * 1024,
 		},
 	})
 	if err != nil {

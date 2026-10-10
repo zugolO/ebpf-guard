@@ -120,15 +120,17 @@ func (t *BPFTelemetry) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (t *BPFTelemetry) emitProgStats(ch chan<- prometheus.Metric, name string, prog *ebpf.Program) {
-	info, err := prog.Info()
+	// cilium/ebpf v0.20: счётчики отдаёт Program.Stats(), а не ProgramInfo.
+	// Как и раньше, нули при выключенном bpf_stats_enabled — не отсутствие поля.
+	stats, err := prog.Stats()
 	if err != nil {
-		t.logger.Debug("bpf_telemetry: prog.Info failed",
+		t.logger.Debug("bpf_telemetry: prog.Stats failed",
 			slog.String("program", name), slog.Any("error", err))
 		return
 	}
 
-	runTime, hasRunTime := info.Runtime()
-	runCount, hasRunCount := info.RunCount()
+	runTime, hasRunTime := stats.Runtime, true
+	runCount, hasRunCount := stats.RunCount, true
 
 	if hasRunTime {
 		ch <- prometheus.MustNewConstMetric(

@@ -161,8 +161,8 @@ prof_bytes=$(_curl --max-time 20 -o "$ART/cpu-preflight.pprof" -w '%{size_downlo
 cgline=$(awk -F: '$1 == "0" { print $3 }' "/proc/$pid/cgroup" 2>/dev/null | head -1)
 [ -n "$cgline" ] && [ -r "/sys/fs/cgroup$cgline/memory.current" ] || die "cgroup агента не читается"
 read -r cg_now < "/sys/fs/cgroup$cgline/memory.current"
-HOST_RULES=$(_m "$M0" ebpf_guard_rules_active)
-[ -n "$HOST_RULES" ] && [ "$HOST_RULES" -gt 0 ] || die "rules_active хоста = ${HOST_RULES:-нет серии} — сверять набор пода не с чем"
+HOST_RULES=$(_m "$M0" ebpf_guard_active_rules_total)
+[ -n "$HOST_RULES" ] && [ "$HOST_RULES" -gt 0 ] || die "active_rules_total хоста = ${HOST_RULES:-нет серии} — сверять набор пода не с чем"
 { echo "cgroup=$cgline"; echo "memory.current.start=$cg_now"; echo "gomemlimit=$gml"; echo "rules_active=$HOST_RULES"; } > "$ART/run-intent.txt"
 say "сторожа хоста: GOMEMLIMIT $gml, кольцо блокирующее, очереди и потери материализованы, cgroup $((cg_now / 1048576)) МиБ"
 
@@ -241,8 +241,8 @@ kubectl -n "$NS" logs ds/$REL-ebpf-guard > "$ART/pod-agent-start.log" 2>&1
 curl -s --max-time 30 -H "Authorization: Bearer $POD_TOKEN" localhost:19091/metrics > "$ART/pod-metrics-start.txt"
 # Сторож Г1: под обязан работать на ТОМ ЖЕ наборе, что хост. Пробный набор или
 # пустой каталог — 8.2.1 судил бы не продукт.
-POD_RULES=$(_m "$ART/pod-metrics-start.txt" ebpf_guard_rules_active)
-[ "${POD_RULES:-}" = "$HOST_RULES" ] || die "rules_active пода = ${POD_RULES:-нет серии}, хоста $HOST_RULES — под не на боевом наборе"
+POD_RULES=$(_m "$ART/pod-metrics-start.txt" ebpf_guard_active_rules_total)
+[ "${POD_RULES:-}" = "$HOST_RULES" ] || die "active_rules_total пода = ${POD_RULES:-нет серии}, хоста $HOST_RULES — под не на боевом наборе"
 echo "pod_rules_active=$POD_RULES" >> "$ART/pod-identity.txt"
 say "под: правил $POD_RULES (= хост), «released cilium/ebpf kernel BTF cache» $(grep -ac 'released cilium/ebpf kernel BTF cache' "$ART/pod-agent-start.log") раз"
 

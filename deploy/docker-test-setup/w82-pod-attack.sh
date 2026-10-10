@@ -17,7 +17,11 @@ M() { curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" "$API/metrics"; }
 M > "$OUT/m-pre.txt"
 curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-pre.pprof"
 ( while [ ! -e "$OUT/STOP" ]; do
-    v=$(cat "$cg/memory.current" 2>/dev/null) && echo "$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f", n - t }') $v"
+    v=$(cat "$cg/memory.current" 2>/dev/null) && {
+        ts=$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f", n - t }')
+        echo "$ts $v"
+        echo "$ts $v $(awk '$1=="inactive_file"{print $2}' "$cg/memory.stat" 2>/dev/null)" >> "$OUT/samples-ws.tsv"
+    }
     sleep 0.1
   done ) > "$OUT/samples.tsv" &
 SP=$!
@@ -28,5 +32,6 @@ M > "$OUT/m-post.txt"
 curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-post.pprof"
 cat "$cg/memory.stat" > "$OUT/memory.stat"
 awk 'NF == 2 && $2 > m { m = $2; t = $1 } END { printf "peak_mib=%.1f peak_s=%s\n", m / 1048576, t }' "$OUT/samples.tsv" > "$OUT/peak.txt"
+bash "$SETUP/w82-ws-peak.sh" "$OUT/samples-ws.tsv" >> "$OUT/peak.txt"
 awk 'NF == 2 { s = int($1 / 60); if ($2 > m[s]) m[s] = $2 } END { for (s in m) printf "%3d %.1f\n", s, m[s] / 1048576 }' "$OUT/samples.tsv" | sort -n > "$OUT/per-minute-mib.txt"
 echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"

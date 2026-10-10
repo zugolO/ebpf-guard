@@ -59,8 +59,12 @@ helm install "$REL" "$CHART" -n "$NS" -f "$VALUES" ${HELM_EXTRA:-} > "$OUT/helm-
             [ -n "$p" ] && cg=$(awk -F: '$1=="0"{print $3}' /proc/"$p"/cgroup) && echo "pid=$p cg=$cg" > "$OUT/cg.txt"
         fi
         if [ -n "$cg" ]; then
-            v=$(cat /sys/fs/cgroup"$cg"/memory.current 2>/dev/null) \
-                && echo "$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f", n - t }') $v"
+            v=$(cat /sys/fs/cgroup"$cg"/memory.current 2>/dev/null) && {
+                ts=$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f", n - t }')
+                echo "$ts $v"
+                # working set (T5): третья колонка — inactive_file из memory.stat, в отдельный файл
+                echo "$ts $v $(awk '$1=="inactive_file"{print $2}' /sys/fs/cgroup"$cg"/memory.stat 2>/dev/null)" >> "$OUT/samples-ws.tsv"
+            }
         fi
         sleep 0.1
     done
@@ -92,16 +96,17 @@ read -r pid cg < <(sed -n 's/^pid=\([0-9]*\) cg=\(.*\)$/\1 \2/p' "$OUT/cg.txt")
 { cat /sys/fs/cgroup"$cg"/memory.max; tr '\0' '\n' < /proc/"$pid"/environ | grep -E '^(GOMEMLIMIT|NODE_NAME)='; } > "$OUT/limits.txt"
 
 awk 'NF == 2 && $2 > m { m = $2; t = $1 } END { printf "peak_mib=%.1f peak_s=%s\n", m / 1048576, t }' "$OUT/samples.tsv" > "$OUT/peak.txt"
+bash "$(dirname "$0")/w82-ws-peak.sh" "$OUT/samples-ws.tsv" >> "$OUT/peak.txt"
 awk 'NF == 2 { s = int($1); if ($2 > m[s]) m[s] = $2 } END { for (s in m) printf "%3d %.1f\n", s, m[s] / 1048576 }' "$OUT/samples.tsv" | sort -n > "$OUT/per-second-mib.txt"
 
 # Инвентарь A1 внутри пода (60 с внутри): текст бинаря на счету пода.
 PID=$pid TOK=$TOKEN API=localhost:$API_PORT /root/w82-mem-inventory.sh "$OUT/inv" > "$OUT/inv.log" 2>&1
-grep -E '^ebpf_guard_systemd_unit_lookups_total' "$OUT/inv/metrics60.txt" > "$OUT/unit-lookups.txt" 2>/dev/null
+grep -E '^ebpf_guard_systemd_unit_(lookups|scans)_total' "$OUT/inv/metrics60.txt" > "$OUT/unit-lookups.txt" 2>/dev/null
 # 8.3.6: триггер из юнита system.slice и контроль вне его (сессия — user.slice).
 # Долгоживущий юнит: мс-юнит исчезает раньше ленивого рескана резолвера
 # (cgroupUnitRescanInterval) и честно даёт unresolved — как на хосте.
 unit_metrics() { curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "localhost:$API_PORT/metrics" \
-    | grep -E '^ebpf_guard_systemd_unit_lookups_total'; }
+    | grep -E '^ebpf_guard_systemd_unit_(lookups|scans)_total'; }
 unit_metrics > "$OUT/unit-before.txt"
 systemd-run --quiet --unit=w82-unit-probe /bin/sh -c 'for i in 1 2 3 4 5 6; do /bin/true; sleep 6; done' > "$OUT/unit-trigger.txt" 2>&1
 sleep 45

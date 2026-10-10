@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -196,5 +199,65 @@ func TestW82_AllocPerEvent(t *testing.T) {
 		verdict, verdict, perEvent, allocs, w82Budget, w82Measure)
 	if w82AllocCeiling > 0 && perEvent > w82AllocCeiling {
 		t.Fatalf("регресс потока аллокаций: %.0f Б/событие > потолка %.0f (A2, волна 8.2)", perEvent, w82AllocCeiling)
+	}
+}
+
+// TestW82_AllocPerEventWithUnitResolver — информационная строка доводки T4(б):
+// тот же микс, но с УСТАНОВЛЕННЫМ резолвером proc.systemd_unit над фейковым
+// деревом cgroup (≥200 каталогов) и потоком промахов (id микса 2..65 в дереве
+// не лежат — как kubepods/сессии на ноде). Порог 8.2.3 НЕ судит эту строку:
+// решение по порогу — за владельцем.
+func TestW82_AllocPerEventWithUnitResolver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("A2: полный микс с поставляемыми правилами")
+	}
+	if raceEnabled {
+		t.Skip("A2: под -race аллокации раздуты")
+	}
+	root := t.TempDir()
+	for i := 0; i < 60; i++ {
+		for _, sub := range []string{"", "/payload", "/payload/a"} {
+			if err := os.MkdirAll(fmt.Sprintf("%s/system.slice/u%02d.service%s", root, i, sub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	prev, _ := cgroupUnitResolver.Load().(cgroupUnitResolverHolder)
+	SetCgroupUnitResolver(NewSystemSliceUnitResolver(root))
+	defer SetCgroupUnitResolver(prev.r)
+
+	eng := w82Engine(t)
+	defer eng.Close()
+	ctx := context.Background()
+	mix := w82Mix(w82MixSize)
+	// Поле proc.systemd_unit считается только после предыдущих условий группы:
+	// каждое пятое файловое событие — чтение /proc/1/cgroup методом apt (comm=http),
+	// то есть доходит до оси юнита (apt-method-init-cgroup-unit) и даёт промах.
+	k := 0
+	for _, r := range mix {
+		if r.file == nil {
+			continue
+		}
+		if k++; k%5 == 0 {
+			r.file.Comm, r.file.Filename, r.file.Op, r.file.Flags = w82Comm("http"), [256]byte{}, 0, 0
+			copy(r.file.Filename[:], "/proc/1/cgroup")
+		}
+	}
+	scans0 := testutil.ToFloat64(systemdUnitScans)
+	look0 := testutil.ToFloat64(systemdUnitLookups.WithLabelValues("unresolved"))
+	ts := w82Run(ctx, eng, mix, 0, w82Warmup, 1_000_000_000)
+
+	runtime.GC()
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	w82Run(ctx, eng, mix, w82Warmup, w82Measure, ts)
+	runtime.ReadMemStats(&m1)
+
+	perEvent := float64(m1.TotalAlloc-m0.TotalAlloc) / w82Measure
+	t.Logf("ИНФО: 8.2.3 с резолвером unit (%.0f Б/событие, %.1f аллокаций/событие; 180 каталогов cgroup, поток промахов, сканов за прогон с прогревом %.0f, промахов резолвера %.0f; порог не судит)",
+		perEvent, float64(m1.Mallocs-m0.Mallocs)/w82Measure, testutil.ToFloat64(systemdUnitScans)-scans0,
+		testutil.ToFloat64(systemdUnitLookups.WithLabelValues("unresolved"))-look0)
+	if testutil.ToFloat64(systemdUnitLookups.WithLabelValues("unresolved"))-look0 == 0 {
+		t.Fatal("поток не дошёл до оси proc.systemd_unit — строка пустая")
 	}
 }

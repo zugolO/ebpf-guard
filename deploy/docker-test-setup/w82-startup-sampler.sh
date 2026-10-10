@@ -29,7 +29,11 @@ systemctl start --no-block $UNIT
 (
     end=$(awk -v t="$t0" -v d="$DUR" 'BEGIN { printf "%.0f", t + d }')
     while [ "$(date +%s)" -lt "$end" ]; do
-        v=$(cat "$CGDIR/memory.current" 2>/dev/null) && echo "$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f", n - t }') $v"
+        v=$(cat "$CGDIR/memory.current" 2>/dev/null) && {
+            ts=$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f", n - t }')
+            echo "$ts $v"
+            echo "$ts $v $(awk '$1=="inactive_file"{print $2}' "$CGDIR/memory.stat" 2>/dev/null)" >> "$OUT/samples-ws.tsv"
+        }
         sleep 0.1
     done
 ) > "$OUT/samples.tsv" &
@@ -58,5 +62,6 @@ awk 'NF == 2 && $2 > m { m = $2; t = $1 } END { printf "peak_mib=%.1f peak_s=%s\
 pk=$(sed -n 's/.*peak_s=\([0-9.]*\).*/\1/p' "$OUT/peak.txt")
 ls "$OUT/heap" | sed -n 's/^heap-\([0-9.]*\)\.pprof$/\1/p' \
     | awk -v p="$pk" '{ d = $1 - p; if (d < 0) d = -d; if (best == "" || d < bd) { best = $1; bd = d } } END { print "nearest_heap=heap-" best ".pprof delta_s=" bd }' >> "$OUT/peak.txt"
+bash "$(dirname "$0")/w82-ws-peak.sh" "$OUT/samples-ws.tsv" >> "$OUT/peak.txt"
 awk 'NF == 2 { s = int($1); if ($2 > m[s]) m[s] = $2 } END { for (s in m) printf "%3d %.1f\n", s, m[s] / 1048576 }' "$OUT/samples.tsv" | sort -n > "$OUT/per-second-mib.txt"
 echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"

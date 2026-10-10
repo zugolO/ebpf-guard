@@ -46,6 +46,12 @@ echo "-- cgroup (МиБ)"
 cur=$(cat "$D/memory.current" 2>/dev/null)
 if [ -n "$cur" ]; then row "memory.current" "$(mib "$cur")"; else row "memory.current" "НЕИЗМЕРИМ" "нет memory.current"; fi
 [ -s "$D/memory.current60" ] && row "memory.current через 60 с" "$(mib "$(cat "$D/memory.current60")")"
+if [ -n "$cur" ] && [ -n "$(stat_of inactive_file)" ]; then
+    # kubelet/OOM судят по working set = memory.current − inactive_file (T5, доводка 8.2).
+    row "working set (current − inactive_file)" "$(mib "$((cur - $(stat_of inactive_file)))")" "то, что видит kubelet; критерий 8.2.1 судит memory.current"
+elif [ -n "$cur" ]; then
+    row "working set (current − inactive_file)" "НЕИЗМЕРИМ" "нет inactive_file в memory.stat"
+fi
 [ -s "$D/memory.peak" ] && row "memory.peak (с начала cgroup)" "$(mib "$(cat "$D/memory.peak")")"
 if [ -s "$D/memory.stat" ]; then
     for k in anon file kernel_stack slab pagetables sock; do
@@ -110,13 +116,17 @@ for m in go_memstats_heap_inuse_bytes go_memstats_heap_idle_bytes go_memstats_he
 done
 a0=$(metric "$D/metrics.txt" go_memstats_alloc_bytes_total); a1=$(metric "$D/metrics60.txt" go_memstats_alloc_bytes_total)
 e0=$(metric "$D/metrics.txt" ebpf_guard_events_total); e1=$(metric "$D/metrics60.txt" ebpf_guard_events_total)
-if [ -n "$a0" ] && [ -n "$a1" ] && [ -n "$e0" ] && [ -n "$e1" ] && [ "$e1" -gt "$e0" ]; then
+# Первые 60 с процесса (загрузка BPF, холодные кэши) в поток не входят: первый
+# снимок обязан быть снят на аптайме ≥ 60 с, иначе строка НЕИЗМЕРИМ (T4).
+if [ -z "$a0" ] || [ -z "$a1" ] || [ -z "$e0" ] || [ -z "$e1" ] || [ "$e1" -le "$e0" ]; then
+    row "поток на стенде, Б/событие" "НЕИЗМЕРИМ" "нет пары metrics/metrics60 или событий 0"
+elif [ -z "$etimes" ] || [ "$etimes" -lt 60 ]; then
+    row "поток на стенде, Б/событие" "НЕИЗМЕРИМ" "первый снимок на аптайме ${etimes:-?} с < 60 — окно захватывает старт"
+else
     awk -v a="$((a1 - a0))" -v e="$((e1 - e0))" 'BEGIN {
         printf "  %-34s %10.2f  МБ/с\n", "поток аллокаций (60 с)", a / 60 / 1e6
         printf "  %-34s %10.0f  событий/с\n", "темп событий (60 с)", e / 60
-        printf "  %-34s %10.0f  Б/событие (стенд; судит A2)\n", "аллокаций на событие", a / e }'
-else
-    row "поток аллокаций" "НЕИЗМЕРИМ" "нет пары metrics/metrics60 или событий 0"
+        printf "  %-34s %10.0f  Б/событие (Δalloc_bytes_total / Δevents_total; информационно, порог 8.2.3 судит A2)\n", "поток на стенде, Б/событие", a / e }'
 fi
 echo ""
 

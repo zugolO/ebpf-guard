@@ -2,6 +2,8 @@
 # w82-pod-attack.sh [OUT] — волна 8.2, этап 4, item E: пик memory.current ПОДА под
 # пакетом атак (run-all-attacks.sh без наведённого дропа). Под уже поднят
 # w82-pod-run.sh; сэмплер 10 Гц по cgroup контейнера, отчёт — пик и пик по минутам.
+# HOLD_S (умолч. 30) — сколько секунд мерить после пакета; t-att1 — конец пакета
+# (с от t0), m-att1.txt — метрики на конце пакета (потери окна атак, 8.2.5).
 set -u
 OUT=${1:-/var/tmp/w82-pod-attack}
 SETUP=/opt/ebpf-guard/deploy/docker-test-setup
@@ -33,12 +35,27 @@ SP=$!
     curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-mid-$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%04.0f", n - t }').pprof"
   done ) &
 HP=$!
+ls "$SETUP/attacks/attack-results" 2>/dev/null | sort > "$OUT/results-before.lst"
 ( cd "$SETUP/attacks" && EBPF_GUARD_API="http://$API" EBPF_GUARD_TOKEN="$TOKEN" SKIP_INDUCED_DROP=1 bash ./run-all-attacks.sh > "$OUT/attacks.log" 2>&1; echo "rc=$?" > "$OUT/attacks.rc" )
-sleep 30
+awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f\n", n - t }' > "$OUT/t-att1"
+M > "$OUT/m-att1.txt"
+# Recall пода (8.2.5): манифест и снимки алертов ЭТОГО пакета — каталог
+# attack-results общий с пакетом гейта хоста, берутся только новые файлы.
+cp "$SETUP/attacks/attack-manifest.json" "$OUT/" 2>/dev/null
+ls "$SETUP/attacks/attack-results" 2>/dev/null | sort | comm -13 "$OUT/results-before.lst" - > "$OUT/results-new.lst"
+for f in $(grep -E '^(baseline|final)-alerts-.*\.json$' "$OUT/results-new.lst"); do cp "$SETUP/attacks/attack-results/$f" "$OUT/"; done
+# HOLD_S после пакета: сэмплер и куча продолжают идти. Ночь 8.2 держит 600 с —
+# выселение ancestry тиком Cleanup (TTL 5 мин + тик 5 мин) видно только после тика (T1).
+sleep "${HOLD_S:-30}"
 touch "$OUT/STOP"; wait $SP $HP
 M > "$OUT/m-post.txt"
 curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-post.pprof"
 cat "$cg/memory.stat" > "$OUT/memory.stat"
+# 8.2.1: рестарт контейнера за окно (OOM на лимите пода) — провал, не пропуск.
+export PATH=$PATH:/root/bin:/usr/local/bin KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
+kubectl -n ebpf-guard get pods -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' > "$OUT/restarts.txt" 2>/dev/null \
+    || rm -f "$OUT/restarts.txt"
+kubectl -n ebpf-guard get pods -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}' > "$OUT/last-state.txt" 2>/dev/null
 awk 'NF == 2 && $2 > m { m = $2; t = $1 } END { printf "peak_mib=%.1f peak_s=%s\n", m / 1048576, t }' "$OUT/samples.tsv" > "$OUT/peak.txt"
 bash "$SETUP/w82-ws-peak.sh" "$OUT/samples-ws.tsv" >> "$OUT/peak.txt"
 awk 'NF == 2 { s = int($1 / 60); if ($2 > m[s]) m[s] = $2 } END { for (s in m) printf "%3d %.1f\n", s, m[s] / 1048576 }' "$OUT/samples.tsv" | sort -n > "$OUT/per-minute-mib.txt"

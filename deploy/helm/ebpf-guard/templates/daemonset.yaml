@@ -108,6 +108,9 @@ spec:
         - name: {{ .Chart.Name }}
           image: {{ include "ebpf-guard.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.workingDir }}
+          workingDir: {{ . | quote }}
+          {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           args:

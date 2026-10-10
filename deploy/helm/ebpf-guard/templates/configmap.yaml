@@ -7,6 +7,9 @@ metadata:
     {{- include "ebpf-guard.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    {{- if .Values.configRaw }}
+    {{- .Values.configRaw | nindent 4 }}
+    {{- else }}
     server:
       bind_address: {{ .Values.config.server.bind_address | quote }}
       metrics_path: {{ .Values.config.server.metrics_path | quote }}
@@ -142,6 +145,7 @@ data:
       max_size_mb: 100
       include_rule_diffs: true
       {{- end }}
+    {{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

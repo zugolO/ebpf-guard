@@ -117,6 +117,17 @@ readinessProbe:
   periodSeconds: 5
   failureThreshold: 3
 
+# configRaw: when set, it is written to the agent's config.yaml VERBATIM and the
+# `config:` section below is ignored (except config.server.bind_address, which
+# still names the container port). Use it to run the agent with a config the
+# chart does not model — e.g. a host-tuned config with a rules directory mounted
+# through extraVolumes. Relative paths inside it resolve against workingDir.
+configRaw: ""
+
+# workingDir of the agent container. Empty keeps the image default (/). Relative
+# config paths (policy.rego.rules_dir defaults to "rules/rego") resolve against it.
+workingDir: ""
+
 # Additional volume mounts for the agent container
 extraVolumeMounts: []
 # - name: custom-rules

@@ -10,7 +10,8 @@
 # нагрузку; разрешено владельцем 10.10.2026). Скрипт его НЕ поднимает обратно —
 # это делает w82-pod-down.sh после всех запусков этапа.
 #
-# Переменные: VALUES (файл значений), LABEL (метка запуска), IDLE (с до снимка).
+# Переменные: VALUES (файл значений), DUR (с сэмплера старта), UNIT_PROBE (0 — без пробы оси юнита),
+# HELM_EXTRA (доп. аргументы helm install).
 # Запуск на стенде отсоединённо:
 #   setsid nohup /root/w82-pod-run.sh /var/tmp/w82-pod-1 > /root/w82-pod-1.log 2>&1 < /dev/null &
 set -u
@@ -100,17 +101,21 @@ bash "$(dirname "$0")/w82-ws-peak.sh" "$OUT/samples-ws.tsv" >> "$OUT/peak.txt"
 awk 'NF == 2 { s = int($1); if ($2 > m[s]) m[s] = $2 } END { for (s in m) printf "%3d %.1f\n", s, m[s] / 1048576 }' "$OUT/samples.tsv" | sort -n > "$OUT/per-second-mib.txt"
 
 # Инвентарь A1 внутри пода (60 с внутри): текст бинаря на счету пода.
-PID=$pid TOK=$TOKEN API=localhost:$API_PORT /root/w82-mem-inventory.sh "$OUT/inv" > "$OUT/inv.log" 2>&1
+PID=$pid TOK=$TOKEN API=localhost:$API_PORT bash "$(dirname "$0")/w82-mem-inventory.sh" "$OUT/inv" > "$OUT/inv.log" 2>&1
 grep -E '^ebpf_guard_systemd_unit_(lookups|scans)_total' "$OUT/inv/metrics60.txt" > "$OUT/unit-lookups.txt" 2>/dev/null
-# 8.3.6: триггер из юнита system.slice и контроль вне его (сессия — user.slice).
-# Долгоживущий юнит: мс-юнит исчезает раньше ленивого рескана резолвера
-# (cgroupUnitRescanInterval) и честно даёт unresolved — как на хосте.
-unit_metrics() { curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "localhost:$API_PORT/metrics" \
-    | grep -E '^ebpf_guard_systemd_unit_(lookups|scans)_total'; }
-unit_metrics > "$OUT/unit-before.txt"
-systemd-run --quiet --unit=w82-unit-probe /bin/sh -c 'for i in 1 2 3 4 5 6; do /bin/true; sleep 6; done' > "$OUT/unit-trigger.txt" 2>&1
-sleep 45
-unit_metrics > "$OUT/unit-after.txt"
-curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "localhost:$API_PORT/api/v1/alerts?limit=500" > "$OUT/alerts.json"
-grep -o 'w82_unit_probe' "$OUT/alerts.json" | wc -l > "$OUT/unit-probe-alerts.txt"
+# UNIT_PROBE=0 — без пробы оси юнита (ночь 8.2 на боевом наборе: правила
+# w82_unit_probe там нет, а транзитный юнит — лишний процесс в окне).
+if [ "${UNIT_PROBE:-1}" = 1 ]; then
+    # 8.3.6: триггер из юнита system.slice и контроль вне его (сессия — user.slice).
+    # Долгоживущий юнит: мс-юнит исчезает раньше ленивого рескана резолвера
+    # (cgroupUnitRescanInterval) и честно даёт unresolved — как на хосте.
+    unit_metrics() { curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "localhost:$API_PORT/metrics" \
+        | grep -E '^ebpf_guard_systemd_unit_(lookups|scans)_total'; }
+    unit_metrics > "$OUT/unit-before.txt"
+    systemd-run --quiet --unit=w82-unit-probe /bin/sh -c 'for i in 1 2 3 4 5 6; do /bin/true; sleep 6; done' > "$OUT/unit-trigger.txt" 2>&1
+    sleep 45
+    unit_metrics > "$OUT/unit-after.txt"
+    curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "localhost:$API_PORT/api/v1/alerts?limit=500" > "$OUT/alerts.json"
+    grep -o 'w82_unit_probe' "$OUT/alerts.json" | wc -l > "$OUT/unit-probe-alerts.txt"
+fi
 echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"

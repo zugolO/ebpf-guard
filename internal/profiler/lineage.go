@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -779,13 +780,11 @@ func matchesAny(s string, patterns []string) bool {
 }
 
 // cleanComm removes null bytes from comm string.
+//
+// Wave 8.2, C2 (№540): interned, not copied — comm is a handful of distinct
+// strings, and a copy per call was 20 B on every event (Track runs on all of them).
 func cleanComm(comm []byte) string {
-	for i := 0; i < len(comm); i++ {
-		if comm[i] == 0 {
-			return string(comm[:i])
-		}
-	}
-	return string(comm)
+	return util.InternBytes(comm)
 }
 
 // Cleanup removes stale lineage and ancestry entries across all shards.

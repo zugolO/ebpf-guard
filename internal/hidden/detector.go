@@ -196,7 +196,7 @@ func (d *Detector) loadIterator() error {
 	defer d.mu.Unlock()
 
 	objs := &bpf.HiddenProcessObjects{}
-	if err := bpf.LoadHiddenProcessObjects(objs, nil); err != nil {
+	if err := bpf.LoadHiddenProcessObjects(objs, bpf.WithSharedKernelTypes(nil)); err != nil {
 		d.loadErr = err
 		return fmt.Errorf("load hidden process BPF objects: %w", err)
 	}

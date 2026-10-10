@@ -2,6 +2,7 @@
 package correlator
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash"
@@ -1595,13 +1596,30 @@ func eventFilename(e *types.Event, c *eventFieldCache) string {
 		return ""
 	}
 	if c == nil {
-		return util.BytesToString(e.File.Filename[:])
+		return fileFilenameString(e.File)
 	}
 	if !c.fileDone {
-		c.filename = util.BytesToString(e.File.Filename[:])
+		c.filename = fileFilenameString(e.File)
 		c.fileDone = true
 	}
 	return c.filename
+}
+
+// fileFilenameString is Filename as a string. ToTypesEvent already built FDPath
+// from the same bytes, so when the two are equal FDPath is returned and the
+// per-event copy is skipped (wave 8.2, C2, №540); the comparison itself does not
+// allocate. Anything else — tests, read/write events whose FDPath was resolved
+// later — falls back to a copy, so the result is always equal to Filename.
+func fileFilenameString(f *types.FileEvent) string {
+	b := f.Filename[:]
+	n := bytes.IndexByte(b, 0)
+	if n < 0 {
+		n = len(b)
+	}
+	if f.FDPath != "" && f.FDPath == string(b[:n]) {
+		return f.FDPath
+	}
+	return string(b[:n])
 }
 
 // getFieldValue extracts a field value from an event based on field name.

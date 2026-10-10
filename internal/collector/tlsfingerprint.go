@@ -218,7 +218,7 @@ func (c *TLSFingerprintCollector) loadObjects() error {
 		},
 	}
 	_ = ringSize
-	if err := bpf.LoadTlsClientHelloObjects(c.objs, opts); err != nil {
+	if err := bpf.LoadTlsClientHelloObjects(c.objs, bpf.WithSharedKernelTypes(opts)); err != nil {
 		return fmt.Errorf("load tls_clienthello objects: %w", err)
 	}
 	return nil

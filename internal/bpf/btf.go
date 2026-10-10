@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -76,7 +77,18 @@ func RegisterBTFMetrics(reg prometheus.Registerer) {
 // and the collector Reload() paths, which have no caller — the evidence and the
 // decision are recorded at the call site in cmd/ebpf-guard/main.go.
 func FlushKernelBTF() {
+	// Wave 8.2, C3 (№541): the shared CO-RE target goes first — it holds a copy
+	// of the graph the cilium cache is about to drop.
+	releaseSharedKernelTypes()
 	btf.FlushKernelSpec()
+	// The released spec and every transient copy are garbage only now. Returning
+	// them to the OS right away, once, keeps the startup peak from setting the
+	// resident heap for the whole process lifetime (№541: heap_idle − released
+	// stayed at 31 МиБ twenty-five minutes after the peak).
+	go func() {
+		runtime.GC()
+		debug.FreeOSMemory()
+	}()
 }
 
 // BTFResolutionConfig holds parameters for the BTF source resolution.

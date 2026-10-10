@@ -1520,8 +1520,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// P0-25: Separate event queues by priority to prevent network/dns event loss.
 	// High-priority events (network, dns) get dedicated queues to protect security signal.
 	// Low-priority events (file, syscall) share a queue but are isolated from network/dns.
-	highPriorityEventCh := make(chan types.Event, eventQueueDepth)
-	lowPriorityEventCh := make(chan types.Event, eventQueueDepth)
+	// Wave 8.2, C1 (№539): the queues carry pooled *types.Event. Same depth, but a
+	// slot costs 8 bytes instead of sizeof(Event) until it is actually used.
+	highPriorityEventCh := make(chan *types.Event, eventQueueDepth)
+	lowPriorityEventCh := make(chan *types.Event, eventQueueDepth)
 
 	// Track queue depths for both priority levels
 	engine.SetQueueDepthFn(func() int { return len(highPriorityEventCh) + len(lowPriorityEventCh) }, func() int { return cap(highPriorityEventCh) + cap(lowPriorityEventCh) })
@@ -2155,7 +2157,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		for _, c := range toStart {
 			go func(c collector.Collector) {
 				// The wrapper routes internally; this argument is unused by it.
-				if err := c.Start(ctx, lowPriorityEventCh); err != nil && ctx.Err() == nil {
+				if err := c.Start(ctx, nil); err != nil && ctx.Err() == nil {
 					slog.Error("collector error", slog.String("name", c.Name()), slog.Any("error", err))
 					exporter.SetCollectorUp(c.Name(), false)
 					srv.SetCollectorStatus(exporter.CollectorStatus{Name: c.Name(), Healthy: false, Error: err.Error()})
@@ -2941,10 +2943,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			select {
 			case <-ctx.Done():
 				return
-			case event, ok := <-highPriorityEventCh:
+			case slot, ok := <-highPriorityEventCh:
 				if !ok {
 					return
 				}
+				event := *slot
+				types.PutEvent(slot)
 				processEvent(ctx, event, true, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
 			}
 		}
@@ -2963,10 +2967,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				prof, cfg.Profiler.StatePersistence)
 			return nil
 
-		case event, ok := <-lowPriorityEventCh:
+		case slot, ok := <-lowPriorityEventCh:
 			if !ok {
 				return nil
 			}
+			event := *slot
+			types.PutEvent(slot)
 			processEvent(ctx, event, false, eventLog, k8sEnricher, runtimeEnricher, metricsNodeName, engine, driftDetector, &driftSeq, cfg, dispatchAsync)
 		}
 	}

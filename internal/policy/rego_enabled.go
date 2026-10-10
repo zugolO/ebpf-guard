@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
@@ -77,9 +78,9 @@ var decisionsPool = sync.Pool{
 // monolithic full-namespace query.
 type RegoEngine struct {
 	mu          sync.RWMutex
-	prepared    *rego.PreparedEvalQuery            // full-namespace fallback query
-	partitioned map[string]*rego.PreparedEvalQuery // partition → targeted query
-	policies    map[string]string                  // filename -> content
+	partitioned map[string]*lazyQuery // partition → targeted query, compiled on first use
+	fallback    *lazyQuery            // full-namespace query for a partition that cannot compile
+	policies    map[string]string     // filename -> content
 	rulesDir    string
 	enabled     atomic.Bool
 
@@ -90,6 +91,41 @@ type RegoEngine struct {
 	evalTotal     atomic.Uint64
 	evalErrors    atomic.Uint64
 	reloadCounter atomic.Uint64
+}
+
+// lazyQuery is a PreparedEvalQuery compiled on first use. OPA keeps a full
+// compiler (all modules, indexes, type environment) behind every prepared
+// query, ≈1.5 MiB each on the shipped policy set; alerts reach only some event
+// classes, so a query nobody asks for is never built (wave 8.2, C4).
+type lazyQuery struct {
+	modules map[string]string // filename -> content
+	once    sync.Once
+	pq      *rego.PreparedEvalQuery
+	err     error
+}
+
+func newLazyQuery(modules map[string]string) *lazyQuery {
+	return &lazyQuery{modules: modules}
+}
+
+// get compiles the query on the first call; later calls return the same result.
+func (lq *lazyQuery) get(ctx context.Context) (*rego.PreparedEvalQuery, error) {
+	lq.once.Do(func() {
+		opts := make([]func(*rego.Rego), 0, len(lq.modules)+1)
+		for filename, content := range lq.modules {
+			opts = append(opts, rego.Module(filename, content))
+		}
+		opts = append(opts, rego.Query("data.ebpf_guard.decisions"))
+		// A cancelled caller context must not poison the cached result.
+		pq, err := rego.New(opts...).PrepareForEval(context.WithoutCancel(ctx))
+		if err != nil {
+			lq.err = err
+			return
+		}
+		lq.pq = &pq
+		lq.modules = nil // the compiler owns the parsed modules now
+	})
+	return lq.pq, lq.err
 }
 
 // DurationObserver is a callback that receives Evaluate latency measurements.
@@ -168,55 +204,54 @@ func (re *RegoEngine) loadPolicies() error {
 	return nil
 }
 
-// compile creates a prepared evaluation query from loaded policies and builds
-// per-event-type partitioned queries for faster hot-path evaluation.
-// Accepts a context so callers can cancel a long-running compilation (e.g.
+// compile validates the loaded policies and installs lazily compiled queries:
+// a full-namespace fallback and one per event-class partition (only modules
+// that can fire for that class). Validation is a single throw-away compile of
+// the full module set, so a broken policy still fails startup and hot-reload
+// instead of the first alert; the validated compiler is garbage afterwards.
+// Each query is then built by lazyQuery.get when an alert of its class first
+// reaches Evaluate — an empty rules dir builds none.
+// Accepts a context so callers can cancel a long-running validation (e.g.
 // during graceful shutdown or hot-reload with a deadline).
 func (re *RegoEngine) compile(ctx context.Context) error {
 	if len(re.policies) == 0 {
 		re.mu.Lock()
-		re.prepared = nil
+		re.fallback = nil
 		re.partitioned = nil
 		re.mu.Unlock()
 		return nil
 	}
 
-	// Full fallback query — includes all loaded modules.
-	fullOpts := make([]func(*rego.Rego), 0, len(re.policies)+1)
-	for filename, content := range re.policies {
-		fullOpts = append(fullOpts, rego.Module(filename, content))
+	if _, err := ast.CompileModules(re.policies); err != nil {
+		return fmt.Errorf("prepare for eval: %w", err)
 	}
-	fullOpts = append(fullOpts, rego.Query("data.ebpf_guard.decisions"))
-	fullPrepared, err := rego.New(fullOpts...).PrepareForEval(ctx)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("prepare for eval: %w", err)
 	}
 
-	// Per-event-type partitioned queries — only load the modules that can fire
-	// for that event class. OPA skips sub-packages that reference undefined
-	// documents (empty set semantics), so missing modules simply produce no rules.
-	partitioned := make(map[string]*rego.PreparedEvalQuery, len(regoPartitionModules))
+	// OPA skips sub-packages that reference undefined documents (empty set
+	// semantics), so a missing module simply produces no rules.
+	partitioned := make(map[string]*lazyQuery, len(regoPartitionModules))
 	for partition, filenames := range regoPartitionModules {
-		opts := make([]func(*rego.Rego), 0, len(filenames)+1)
+		mods := make(map[string]string, len(filenames))
 		for _, fn := range filenames {
 			if content, ok := re.policies[fn]; ok {
-				opts = append(opts, rego.Module(fn, content))
+				mods[fn] = content
 			}
 		}
-		if len(opts) == 0 {
+		if len(mods) == 0 {
 			continue
 		}
-		opts = append(opts, rego.Query("data.ebpf_guard.decisions"))
-		pq, err := rego.New(opts...).PrepareForEval(ctx)
-		if err != nil {
-			// Non-fatal: fall back to full query for this partition.
-			continue
-		}
-		partitioned[partition] = &pq
+		partitioned[partition] = newLazyQuery(mods)
+	}
+
+	all := make(map[string]string, len(re.policies))
+	for fn, content := range re.policies {
+		all[fn] = content
 	}
 
 	re.mu.Lock()
-	re.prepared = &fullPrepared
+	re.fallback = newLazyQuery(all)
 	re.partitioned = partitioned
 	re.mu.Unlock()
 
@@ -240,14 +275,24 @@ func (re *RegoEngine) Evaluate(ctx context.Context, alert types.Alert) ([]Policy
 	partition := eventTypePartition(alert.Event.Type)
 
 	re.mu.RLock()
-	prepared := re.prepared
-	if pq, ok := re.partitioned[partition]; ok {
-		prepared = pq
-	}
+	lq := re.partitioned[partition]
+	fallback := re.fallback
 	re.mu.RUnlock()
 
-	if prepared == nil {
+	if lq == nil {
+		lq = fallback
+	}
+	if lq == nil {
 		return nil, nil
+	}
+	prepared, err := lq.get(ctx)
+	if err != nil && fallback != nil && lq != fallback {
+		// A partition that cannot compile falls back to the full query.
+		prepared, err = fallback.get(ctx)
+	}
+	if err != nil {
+		re.evalErrors.Add(1)
+		return nil, fmt.Errorf("rego compile: %w", err)
 	}
 
 	start := time.Now()

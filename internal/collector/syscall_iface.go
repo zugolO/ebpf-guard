@@ -39,7 +39,7 @@ type linkAttacher interface {
 type defaultSyscallLoader struct{}
 
 func (defaultSyscallLoader) Load(objs *bpfpkg.SyscallObjects, opts *ebpf.CollectionOptions) error {
-	return bpfpkg.LoadSyscallObjects(objs, opts)
+	return bpfpkg.LoadSyscallObjects(objs, bpfpkg.WithSharedKernelTypes(opts))
 }
 
 // defaultRingbufOpener wraps newEventRingReader, which applies the netpoll

@@ -17,10 +17,11 @@ var _ Collector = (*PriorityEventCollector)(nil)
 
 // PriorityEventCollector wraps a collector and routes events to priority-specific channels.
 // High-priority events (network, dns) go to highPriorityCh, others to lowPriorityCh.
+// Both queues carry pooled *types.Event; the consumer must types.PutEvent each one.
 type PriorityEventCollector struct {
 	collector       Collector
-	highPriorityCh  chan<- types.Event
-	lowPriorityCh   chan<- types.Event
+	highPriorityCh  chan<- *types.Event
+	lowPriorityCh   chan<- *types.Event
 	eventPriorityFn func(types.EventType) bool
 	strategy        BackpressureStrategy
 	droppedFn       func(collectorName string, isHighPriority bool)
@@ -32,7 +33,7 @@ type PriorityEventCollector struct {
 // NewPriorityEventCollector creates a new priority-aware collector wrapper.
 // droppedFn and acceptedFn are both optional; together they let the caller
 // compute a loss fraction rather than only an absolute drop count.
-func NewPriorityEventCollector(c Collector, highPriorityCh, lowPriorityCh chan<- types.Event, strategy BackpressureStrategy, droppedFn, acceptedFn func(collectorName string, isHighPriority bool), logger *slog.Logger) *PriorityEventCollector {
+func NewPriorityEventCollector(c Collector, highPriorityCh, lowPriorityCh chan<- *types.Event, strategy BackpressureStrategy, droppedFn, acceptedFn func(collectorName string, isHighPriority bool), logger *slog.Logger) *PriorityEventCollector {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -157,7 +158,16 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 		}
 	}
 
-	sendEvent(ctx, targetCh, event, p.strategy, droppedFunc)
+	// Wave 8.2, C1 (№539): the queues carry pointers to pooled events. The
+	// consumer owns the slot after a successful send and returns it with
+	// types.PutEvent; a dropped event never reached the queue, so it goes back
+	// here. (Cancelled StrategyBlock sends leave the slot to the GC — shutdown.)
+	slot := types.GetEvent()
+	*slot = event
+	sendEvent(ctx, targetCh, slot, p.strategy, droppedFunc)
+	if dropped {
+		types.PutEvent(slot)
+	}
 
 	// sendEvent reports failure but not success, so acceptance is inferred from
 	// the drop callback not having fired. Safe here because routeEvent runs on

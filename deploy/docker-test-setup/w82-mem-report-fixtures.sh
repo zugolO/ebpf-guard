@@ -38,4 +38,18 @@ mk vmap 100 1900 0 1 20 0
 o=$(bash "$E" "$T/vmap"); need "кольца через vmap" "$o" "= размер колец (vmap без pages=" "ДОСТИГНУТО: 8.2.4 ДОСТИГНУТО (карт без программ 0, карты+кольца 24.0"
 mk empty 100 1900 0 1 20 10; : > "$T/empty/memory.current"; rm -f "$T/empty/maps.json"
 o=$(bash "$E" "$T/empty"); need "пустой снимок ≠ ноль" "$o" "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: нет memory.current)" "НЕИЗМЕРИМ: 8.2.4 НЕИЗМЕРИМ (класс НАЗВАН: нет maps.json"
+# C5: sys 100 − released 40 = 60 Go; current 100 → не-Go 40; текст 30 → резерв 70.
+mkgo() { # <каталог> <inuse МиБ> [текст КиБ]
+    mk "$1" 100 1900 0 1 20 10
+    printf 'go_memstats_sys_bytes %d\ngo_memstats_heap_released_bytes %d\ngo_memstats_heap_inuse_bytes %d\n' $((100*1048576)) $((40*1048576)) $(($2*1048576)) >> "$T/$1/metrics.txt"
+    [ -n "${3:-}" ] && printf '%10d KiB /opt/ebpf-guard/build/ebpf-guard\n     5 KiB /lib/libc.so\n' "$3" > "$T/$1/smaps_by_map.txt"
+}
+mkgo c5ok 40 30720
+o=$(bash "$E" "$T/c5ok"); need "C5 резерв из не-Go и текста" "$o" "40.0  memory.current − Go" "30.0  RSS файла бинаря" "70  не-Go + текст" "122.0  лимит пода 192" "ИНФО: C5 GOMEMLIMIT по лимиту пода 122 МиБ ≥ пол 50.0 — годится (резерв 70)"
+mkgo c5spiral 70 30720
+o=$(bash "$E" "$T/c5spiral"); need "C5 бюджет пика ниже пола" "$o" "ИНФО: C5 GOMEMLIMIT по бюджету пика 80 МиБ < пол 87.5 — держать пик 150 одним GC нельзя"
+mkgo c5notext 40
+o=$(bash "$E" "$T/c5notext"); need "C5 без текста — НЕИЗМЕРИМ, не ноль" "$o" "НЕИЗМЕРИМ  нет строки бинаря в smaps_by_map.txt — считается 0"
+mk c5nogo 100 1900 0 1 20 10
+o=$(bash "$E" "$T/c5nogo"); need "C5 без метрик Go" "$o" "ИНФО: C5 НЕИЗМЕРИМ (класс НАЗВАН"
 exit $fail

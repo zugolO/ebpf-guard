@@ -187,7 +187,7 @@ func (c *PrivescCollector) Close() error {
 
 func (c *PrivescCollector) loadObjects() error {
 	c.objs = &bpf.PrivescObjects{}
-	if err := bpf.LoadPrivescObjects(c.objs, &ebpf.CollectionOptions{}); err != nil {
+	if err := bpf.LoadPrivescObjects(c.objs, bpf.WithSharedKernelTypes(&ebpf.CollectionOptions{})); err != nil {
 		return err
 	}
 	return nil

@@ -28,14 +28,18 @@ const (
 	w82MixSize   = 4096
 	w82Warmup    = 20000
 	w82Measure   = 60000
-	w82Budget    = 300 // 8.2.3: ≤ 300 Б/событие
+	w82Budget    = 380 // 8.2.3: ≤ 380 Б/событие (решение владельца 10.10.2026; замер 359–361; снижение к 300 — 8.3.8)
 	w82TickNanos = 666_667
 )
 
 // w82AllocCeiling — потолок регресса для CI: измеренное значение на коммите
 // входа A2 плюс запас. Опускается вместе с каждой правкой C2, никогда не
 // поднимается без записи в plan.md.
-var w82AllocCeiling = 860.0 // вход A2 10.10.2026: 778–781 Б/событие (мак, 3 прогона) + 10%
+//
+// Вход A2 10.10.2026: 778–781 Б/событие → потолок 860. После C2 (№540, 10.10.2026):
+// 359 Б/событие (escape `e` в ingestWithAD, alert в воронках подавления, строки
+// comm/filename без копии, FileEvent 320 → 288 Б) → потолок 395 (+10%).
+var w82AllocCeiling = 395.0
 
 type w82Rec struct {
 	file *bpf.FileaccessEvent
@@ -166,6 +170,9 @@ func BenchmarkW82_MixIngest(b *testing.B) {
 func TestW82_AllocPerEvent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("A2: полный микс с поставляемыми правилами")
+	}
+	if raceEnabled {
+		t.Skip("A2: под -race аллокации раздуты (32 КБ/событие), потолок рассчитан на обычную сборку; без -race тест идёт")
 	}
 	eng := w82Engine(t)
 	defer eng.Close()

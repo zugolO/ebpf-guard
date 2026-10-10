@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -46,8 +48,8 @@ func (f *fakeCollector) Start(ctx context.Context, out chan<- types.Event) error
 // stream must land in a different queue from everything else, so it cannot
 // consume the capacity that network/dns events need.
 func TestPriorityRouting_SplitsByEventType(t *testing.T) {
-	hi := make(chan types.Event, 16)
-	lo := make(chan types.Event, 16)
+	hi := make(chan *types.Event, 16)
+	lo := make(chan *types.Event, 16)
 
 	fc := newFakeCollector("fake",
 		types.Event{Type: types.EventTCPConnect},
@@ -61,7 +63,7 @@ func TestPriorityRouting_SplitsByEventType(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = p.Start(ctx, lo) }()
+	go func() { _ = p.Start(ctx, nil) }()
 
 	select {
 	case <-fc.sent:
@@ -93,8 +95,8 @@ func TestPriorityRouting_SplitsByEventType(t *testing.T) {
 // event. Before the split, both shared one channel and network lost 52%.
 func TestPriorityRouting_FileFloodDoesNotDropNetwork(t *testing.T) {
 	// Bulk queue is deliberately tiny and never drained, so file events overflow.
-	hi := make(chan types.Event, 64)
-	lo := make(chan types.Event, 1)
+	hi := make(chan *types.Event, 64)
+	lo := make(chan *types.Event, 1)
 
 	events := make([]types.Event, 0, 1000)
 	for i := 0; i < 990; i++ {
@@ -118,7 +120,7 @@ func TestPriorityRouting_FileFloodDoesNotDropNetwork(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = p.Start(ctx, lo) }()
+	go func() { _ = p.Start(ctx, nil) }()
 
 	select {
 	case <-fc.sent:
@@ -136,8 +138,8 @@ func TestPriorityRouting_FileFloodDoesNotDropNetwork(t *testing.T) {
 // TestPriorityRouting_ReportsDropsAndAccepts covers the loss-fraction inputs:
 // a drop count without a denominator cannot express "52% of network events".
 func TestPriorityRouting_ReportsDropsAndAccepts(t *testing.T) {
-	hi := make(chan types.Event, 2)
-	lo := make(chan types.Event, 8)
+	hi := make(chan *types.Event, 2)
+	lo := make(chan *types.Event, 8)
 
 	var accepted, dropped atomic.Int64
 	fc := newFakeCollector("counting",
@@ -153,7 +155,7 @@ func TestPriorityRouting_ReportsDropsAndAccepts(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = p.Start(ctx, lo) }()
+	go func() { _ = p.Start(ctx, nil) }()
 
 	require.Eventually(t, func() bool { return accepted.Load() == 2 && dropped.Load() == 1 },
 		2*time.Second, 5*time.Millisecond,
@@ -164,15 +166,15 @@ func TestPriorityRouting_ReportsDropsAndAccepts(t *testing.T) {
 // parking forever on a full queue: with StrategyBlock, sendEvent must observe
 // the collector's context, not a background one.
 func TestPriorityRouting_BlockStrategyUnblocksOnCancel(t *testing.T) {
-	hi := make(chan types.Event) // unbuffered and never drained
-	lo := make(chan types.Event, 4)
+	hi := make(chan *types.Event) // unbuffered and never drained
+	lo := make(chan *types.Event, 4)
 
 	fc := newFakeCollector("blocking", types.Event{Type: types.EventTCPConnect})
 	p := NewPriorityEventCollector(fc, hi, lo, StrategyBlock, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- p.Start(ctx, lo) }()
+	go func() { done <- p.Start(ctx, nil) }()
 
 	// Give the router time to park on the unbuffered channel, then cancel.
 	time.Sleep(50 * time.Millisecond)
@@ -224,8 +226,8 @@ func (f *strategyFakeCollector) Start(ctx context.Context, out chan<- types.Even
 func TestFirstHopBlock_BurstIsWaitedNotLost(t *testing.T) {
 	const n = 5000
 	run := func(strategy BackpressureStrategy) (got []uint32, lost int64) {
-		hi := make(chan types.Event, 16)
-		lo := make(chan types.Event, 16)
+		hi := make(chan *types.Event, 16)
+		lo := make(chan *types.Event, 16)
 		fc := &strategyFakeCollector{n: n, strategy: strategy, done: make(chan struct{})}
 		// router strategy stays Drop; the downstream queue is drained slowly
 		// enough that the router, not the reader, is never the one parked.
@@ -271,4 +273,78 @@ func TestFirstHopBlock_BurstIsWaitedNotLost(t *testing.T) {
 
 	_, lostDrop := run(StrategyDrop)
 	assert.Greater(t, lostDrop, int64(0), "control: drop on the same burst loses events")
+}
+
+// Wave 8.2, C1 (№539): the queues carry pooled *types.Event. A consumer copies
+// the event out and returns the slot at once, so the slot is recycled while the
+// copy is still being processed. Identity: with slots recycled continuously
+// (queue depth 8 against 20 000 events), every event must arrive intact — the
+// same PID/payload pairs, none overwritten by a later event reusing its slot,
+// none lost on the Block path.
+func TestPriorityRouting_PooledSlotsKeepEventIdentity(t *testing.T) {
+	hi := make(chan *types.Event, 8)
+	lo := make(chan *types.Event, 8)
+
+	const n = 20000
+	events := make([]types.Event, 0, n)
+	for i := 0; i < n; i++ {
+		e := types.Event{PID: uint32(i + 1)}
+		if i%5 == 0 {
+			e.Type = types.EventTCPConnect
+			e.Network = &types.NetworkEvent{Dport: uint16(i%60000 + 1)}
+		} else {
+			e.Type = types.EventFileAccess
+			fe := &types.FileEvent{}
+			copy(fe.Filename[:], fmt.Sprintf("/f/%d", i+1))
+			e.File = fe
+		}
+		events = append(events, e)
+	}
+
+	fc := newFakeCollector("pool", events...)
+	p := NewPriorityEventCollector(fc, hi, lo, StrategyBlock, nil, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = p.Start(ctx, nil) }()
+
+	var bad, got atomic.Int64
+	check := func(slot *types.Event) {
+		e := *slot
+		types.PutEvent(slot) // recycled before the copy is inspected, as in main.go
+		got.Add(1)
+		switch e.Type {
+		case types.EventTCPConnect:
+			if e.Network == nil || int(e.Network.Dport) != int((e.PID-1)%60000)+1 || e.File != nil {
+				bad.Add(1)
+			}
+		case types.EventFileAccess:
+			if e.File == nil || e.Network != nil || util.BytesToString(e.File.Filename[:]) != fmt.Sprintf("/f/%d", e.PID) {
+				bad.Add(1)
+			}
+		default:
+			bad.Add(1)
+		}
+	}
+	var wg sync.WaitGroup
+	for _, ch := range []chan *types.Event{hi, lo} {
+		wg.Add(1)
+		go func(ch chan *types.Event) {
+			defer wg.Done()
+			for {
+				select {
+				case s := <-ch:
+					check(s)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(ch)
+	}
+
+	require.Eventually(t, func() bool { return got.Load() == n },
+		10*time.Second, 5*time.Millisecond, "received %d of %d", got.Load(), n)
+	cancel()
+	wg.Wait()
+	assert.Zero(t, bad.Load(), "events corrupted by slot reuse")
 }

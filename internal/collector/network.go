@@ -207,7 +207,7 @@ func (c *NetworkCollector) Close() error {
 // loadObjects loads the eBPF objects using bpf2go generated code.
 func (c *NetworkCollector) loadObjects() error {
 	c.objs = &bpf.NetworkObjects{}
-	opts := &ebpf.CollectionOptions{}
+	opts := bpf.WithSharedKernelTypes(&ebpf.CollectionOptions{})
 	if err := bpf.LoadNetworkObjects(c.objs, opts); err != nil {
 		return err
 	}

@@ -47,7 +47,7 @@ type BTFResult struct {
 // (ResolveBTF is unsupported here and no eBPF object is ever loaded). It exists
 // so callers can invoke the flush unconditionally, without importing
 // github.com/cilium/ebpf/btf or splitting on GOOS themselves.
-func FlushKernelBTF() {}
+func FlushKernelBTF() { releaseSharedKernelTypes() }
 
 // ResolveBTF is not supported on non-Linux platforms.
 func ResolveBTF(_ BTFResolutionConfig) (*BTFResult, error) {

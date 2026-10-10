@@ -184,7 +184,7 @@ func (c *BPFMonitorCollector) loadObjects() error {
 		},
 	}
 	_ = ringSize
-	if err := bpf.LoadBpfMonitorObjects(c.objs, opts); err != nil {
+	if err := bpf.LoadBpfMonitorObjects(c.objs, bpf.WithSharedKernelTypes(opts)); err != nil {
 		return fmt.Errorf("load bpf_monitor objects: %w", err)
 	}
 	return nil

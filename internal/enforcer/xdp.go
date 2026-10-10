@@ -89,7 +89,7 @@ func NewXDPManager(logger *slog.Logger, cfg XDPConfig) (*XDPManager, error) {
 // On any failure the manager remains functional in log-only mode.
 func (m *XDPManager) loadBPF() {
 	objs := &bpf.XDPObjects{}
-	if err := bpf.LoadXDPObjects(objs, &ebpf.CollectionOptions{}); err != nil {
+	if err := bpf.LoadXDPObjects(objs, bpf.WithSharedKernelTypes(&ebpf.CollectionOptions{})); err != nil {
 		m.logger.Warn("XDP: BPF program unavailable, using log-only mode",
 			slog.String("reason", err.Error()))
 		return

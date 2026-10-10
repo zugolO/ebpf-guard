@@ -4,6 +4,7 @@ package types
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -298,11 +299,15 @@ type FileEvent struct {
 	Flags    int32 // open(2) flags
 	Mode     uint32
 	Op       uint8 // 0=open, 1=read, 2=write, 3=chmod, 4=unlink, 5=rename, 6=truncate, 7=rmdir (FILE_OP_* в bpf/common.h)
+	// FDPathTruncated is true when the resolved path exceeded 255 bytes and was truncated.
+	// Declared before FDPath on purpose: with the two byte fields adjacent the struct is
+	// 288 bytes (a malloc size class) instead of 296 → 320 (wave 8.2, C2, №540: 32 bytes
+	// less on every file event, 87% of the stream). Do not reorder without re-running
+	// TestFileEventSizeClass.
+	FDPathTruncated bool
 	// FDPath is the resolved file path for read/write events, populated via fd→path BPF map lookup.
 	// For open events FDPath matches Filename; for read/write events Filename would otherwise be empty.
 	FDPath string
-	// FDPathTruncated is true when the resolved path exceeded 255 bytes and was truncated.
-	FDPathTruncated bool
 }
 
 // TLSDirection indicates the direction of TLS traffic.
@@ -788,4 +793,26 @@ type ProcessProfile struct {
 	AnomalyScore  float64            `json:"anomaly_score"`
 	SampleCount   int64              `json:"sample_count"`
 	Contributions map[string]float64 `json:"contributions,omitempty"`
+}
+
+// eventPool recycles *Event slots for the priority queues (wave 8.2, C1, №539).
+// A `chan types.Event` of depth 65 536 allocates 65 536 × sizeof(Event) up front
+// whether or not the queue is ever full (28 МиБ of live heap for two queues); a
+// channel of pointers costs 8 bytes a slot and pays for an Event only while it
+// sits in the queue.
+var eventPool = sync.Pool{New: func() any { return new(Event) }}
+
+// GetEvent returns a zeroed *Event from the pool.
+func GetEvent() *Event { return eventPool.Get().(*Event) }
+
+// PutEvent clears e and returns it to the pool. The caller must not touch e
+// afterwards and must have copied out anything it still needs by value: the
+// zeroing drops every pointer the slot held, so a pooled slot never pins the
+// payload of the event it carried.
+func PutEvent(e *Event) {
+	if e == nil {
+		return
+	}
+	*e = Event{}
+	eventPool.Put(e)
 }

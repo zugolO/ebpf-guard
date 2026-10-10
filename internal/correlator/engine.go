@@ -1538,7 +1538,12 @@ func (ce *CorrelationEngine) emitNoiseDiag(a *types.Alert, outcome string, extra
 	if len(extra) > 0 {
 		ex = extra[0]
 	}
-	ce.noiseDiag.Emit(a, outcome, ex)
+	// Wave 8.2, C2 (№540): Emit leaks its argument, which moved the caller's
+	// 400-byte alert to the heap for EVERY rule match, including the ones the
+	// limiter and dedup then drop. Diagnostics are off by default, so the copy
+	// is paid only when they are on.
+	ac := *a
+	ce.noiseDiag.Emit(&ac, outcome, ex)
 }
 
 // markDedup records that (ruleID, pid, comm) was emitted at now.
@@ -1824,7 +1829,7 @@ func noiseDiagExtraFromResult(result *profiler.AnomalyResult) noiseDiagExtra {
 // alert. For production ingestion, use IngestAsync (which does not return
 // alerts) together with a periodic Flush() to drain and dispatch pending.
 func (ce *CorrelationEngine) Ingest(ctx context.Context, e types.Event) []types.Alert {
-	alerts, regoQueued := ce.ingestWithAD(ctx, e, ce.anomalyDetector)
+	alerts, regoQueued := ce.ingestWithAD(ctx, &e, ce.anomalyDetector)
 	if len(alerts) > 0 && !regoQueued {
 		// Not rego-queued: the alerts aren't already headed to pending via the
 		// regoWorker, so buffer them here as well so Flush() stays consistent
@@ -1945,7 +1950,7 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 			cls = ingestAgeProtected
 		}
 		ingestEventAge[cls].Observe(time.Since(eventTime(&ev)).Seconds())
-		alerts, regoQueued := ce.ingestWithAD(tctx, ev, w.ad)
+		alerts, regoQueued := ce.ingestWithAD(tctx, &ev, w.ad)
 		if len(alerts) > 0 && !regoQueued {
 			localPending = append(localPending, alerts...)
 			if len(localPending) >= localFlushBatch {
@@ -2002,7 +2007,12 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 // Returns (alerts, regoQueued). When regoQueued is true, the alerts have been
 // dispatched to the async Rego evaluation queue; the caller MUST NOT buffer them
 // locally because the regoWorker will publish enriched versions to pending.
-func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad *profiler.AnomalyDetector) ([]types.Alert, bool) {
+func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, ad *profiler.AnomalyDetector) ([]types.Alert, bool) {
+	// Wave 8.2, C2 (№540): e is a stack copy; the closures below capture ep (a
+	// pointer, by value) instead of e. Capturing the 224-byte e by reference made
+	// the compiler move it to the heap on EVERY event (22% of the allocation
+	// stream). ep must stay valid until return — callers pass storage they own.
+	e := *ep
 	start := time.Now()
 
 	// Open an OTel span only when the event carries APM trace context (extracted
@@ -2143,7 +2153,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 	)
 	getProcessTree := func() types.ProcessTree {
 		if !processTreeCached {
-			processTreeVal = ce.lineageTracker.GetProcessTree(e.PID)
+			processTreeVal = ce.lineageTracker.GetProcessTree(ep.PID)
 			processTreeCached = true
 		}
 		return processTreeVal
@@ -2165,7 +2175,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// letting through signatures never seen for this workload before.
 			// nil profiler or a non-drift class alert pass through unchanged.
 			if alert.Class == string(ClassDrift) && ce.driftBaselineProfiler != nil {
-				if !ce.driftBaselineProfiler.ObserveRule(alert.RuleID, e, alert.DriftNovelWorkload) {
+				if !ce.driftBaselineProfiler.ObserveRule(alert.RuleID, *ep, alert.DriftNovelWorkload) {
 					return
 				}
 			}
@@ -2193,25 +2203,25 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// Append monotonic sequence number to guarantee uniqueness across
 			// concurrent alerts that share ruleID+timestamp+pid.
 			seq := ce.alertSeq.Add(1)
-			alert.ID = buildAlertID(alert.RuleID, e.Timestamp, e.PID, seq)
+			alert.ID = buildAlertID(alert.RuleID, ep.Timestamp, ep.PID, seq)
 
 			// Propagate trace context to the alert for APM correlation.
 			// Prefer the TLS-uprobe-extracted header context; fall back to /proc environ.
-			if e.TraceContext != nil {
-				alert.TraceID = e.TraceContext.TraceID
-				alert.SpanID = e.TraceContext.SpanID
-				tc := *e.TraceContext
+			if ep.TraceContext != nil {
+				alert.TraceID = ep.TraceContext.TraceID
+				alert.SpanID = ep.TraceContext.SpanID
+				tc := *ep.TraceContext
 				tc.Source = "tls_header"
 				alert.TraceContext = &tc
-			} else if tc := ce.traceCtxCache.lookup(e.PID, start); tc != nil {
+			} else if tc := ce.traceCtxCache.lookup(ep.PID, start); tc != nil {
 				alert.TraceID = tc.TraceID
 				alert.SpanID = tc.SpanID
 				alert.TraceContext = tc
 			}
 
 			// Carry Kubernetes enrichment from the event onto the alert.
-			if e.Enrichment != nil {
-				alert.Enrichment = *e.Enrichment
+			if ep.Enrichment != nil {
+				alert.Enrichment = *ep.Enrichment
 			}
 
 			// Attach full process tree for SOC triage.
@@ -2222,7 +2232,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 			// the top of ingestWithAD), so GetRecent returns the temporal context
 			// leading up to and including the trigger event — the attack kill chain.
 			if ce.enableEventBuffer {
-				alert.PreAlertContext = ce.buffer.GetRecent(e.PID, preAlertContextWindow)
+				alert.PreAlertContext = ce.buffer.GetRecent(ep.PID, preAlertContextWindow)
 			}
 
 			// Rule-based enforcement runs regardless of dedup: the action cooldown
@@ -2413,7 +2423,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, e types.Event, ad
 					// is exactly the phantom №342 set out to remove. The raw
 					// pre-exec comm is not lost — Event below carries it
 					// verbatim as evidence of what the kernel saw.
-					Comm:      anomalyAlertComm(result, e),
+					Comm:      anomalyAlertComm(result, e.Comm),
 					Details:   details,
 					Event:     e,
 				}
@@ -3266,9 +3276,9 @@ func formatAnomalyDescription(result *profiler.AnomalyResult) string {
 // Wave 6.3.1, находка №353. Identical in shape to the scoreReporter fix (№345);
 // for every comm that is not a truncated pre-exec buffer the two sources are
 // byte-identical, so no existing alert's comm value changes.
-func anomalyAlertComm(result *profiler.AnomalyResult, e types.Event) string {
+func anomalyAlertComm(result *profiler.AnomalyResult, comm [16]byte) string {
 	if result != nil && result.Comm != "" {
 		return result.Comm
 	}
-	return util.InternBytes(e.Comm[:])
+	return util.InternBytes(comm[:])
 }

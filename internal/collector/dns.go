@@ -362,7 +362,7 @@ func (c *DNSCollector) Start(ctx context.Context, out chan<- types.Event) error 
 	)
 
 	objs := &bpf.DNSObjects{}
-	if err := bpf.LoadDNSObjects(objs, nil); err != nil {
+	if err := bpf.LoadDNSObjects(objs, bpf.WithSharedKernelTypes(nil)); err != nil {
 		// The default Error() string only includes the last line or two of
 		// the verifier log. %+v with no width prints every line the kernel
 		// returned, which is what we need to see what's actually pushing

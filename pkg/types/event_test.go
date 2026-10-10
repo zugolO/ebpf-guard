@@ -2,6 +2,7 @@ package types
 
 import (
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,4 +220,19 @@ func TestHTTPEvent_CapturedData(t *testing.T) {
 
 	e3 := &HTTPEvent{DataLen: 1000, CapturedLen: 999, CapturedSet: true, Data: raw}
 	assert.Len(t, e3.CapturedData(), len(raw))
+}
+
+func TestPutEvent_ClearsSlot(t *testing.T) {
+	e := GetEvent()
+	e.PID = 42
+	e.File = &FileEvent{}
+	PutEvent(e)
+	assert.Equal(t, Event{}, *e, "a pooled slot must not pin the previous event's payload")
+	PutEvent(nil) // must not panic
+}
+
+// A FileEvent is allocated once per file event (87% of the stream). 288 is a
+// malloc size class; one byte over and every allocation rounds up to 320.
+func TestFileEventSizeClass(t *testing.T) {
+	assert.LessOrEqual(t, int(unsafe.Sizeof(FileEvent{})), 288)
 }

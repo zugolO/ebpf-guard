@@ -113,10 +113,25 @@ func (si *StringInterner) InternBytes(b []byte) string {
 		return ""
 	}
 	b = b[:n]
-	// UnsafeBytesToString gives a zero-allocation string view for the lookup.
-	// We never store this transient string — a real copy is made on cache miss.
-	key := UnsafeBytesToString(b)
-	return si.internKey(key, b)
+	// Wave 8.2, C2 (№540): no unsafe string view and no shared internKey path.
+	// The lookup converts with string(b) inside the map index, which the compiler
+	// does without copying, and a miss makes its own copy — so b provably never
+	// leaks. The previous shape (key view + raw) made escape analysis treat b as
+	// retained, which moved every caller's types.Event to the heap on each event.
+	sh := &si.shards[int(b[0])&(internerShards-1)]
+	sh.mu.Lock()
+	if elem, ok := sh.entries[string(b)]; ok {
+		sh.lru.MoveToFront(elem)
+		val := elem.Value.(string)
+		sh.mu.Unlock()
+		si.hits.Add(1)
+		return val
+	}
+	val := string(b)
+	si.insertLocked(sh, val)
+	sh.mu.Unlock()
+	si.misses.Add(1)
+	return val
 }
 
 // InternString returns a canonical copy of s from the cache.
@@ -124,13 +139,11 @@ func (si *StringInterner) InternString(s string) string {
 	if s == "" {
 		return ""
 	}
-	return si.internKey(s, nil)
+	return si.internKey(s)
 }
 
-// internKey performs the shard lookup and LRU insertion.
-// raw is the backing bytes for key when key is an unsafe string; nil means key
-// is already a real Go string and can be stored directly.
-func (si *StringInterner) internKey(key string, raw []byte) string {
+// internKey performs the shard lookup and LRU insertion for a real Go string.
+func (si *StringInterner) internKey(key string) string {
 	idx := int(key[0]) & (internerShards - 1)
 	sh := &si.shards[idx]
 
@@ -142,17 +155,18 @@ func (si *StringInterner) internKey(key string, raw []byte) string {
 		si.hits.Add(1)
 		return val
 	}
-	// Cache miss: make one canonical allocation.
-	var val string
-	if raw != nil {
-		val = string(raw) // copy from unsafe-backed key
-	} else {
-		val = key // key is already a safe Go string
-	}
+	si.insertLocked(sh, key)
+	sh.mu.Unlock()
+	si.misses.Add(1)
+	return key
+}
+
+// insertLocked adds val to shard sh and evicts the LRU entry when the shard is
+// full. The caller holds sh.mu and passes a string it owns.
+func (si *StringInterner) insertLocked(sh *internShard, val string) {
 	elem := sh.lru.PushFront(val)
 	sh.entries[val] = elem
 	sh.size++
-	// Evict LRU entry when shard is full.
 	if sh.size > si.perShard {
 		back := sh.lru.Back()
 		if back != nil {
@@ -162,9 +176,6 @@ func (si *StringInterner) internKey(key string, raw []byte) string {
 			sh.size--
 		}
 	}
-	sh.mu.Unlock()
-	si.misses.Add(1)
-	return val
 }
 
 // Stats returns a snapshot of hit/miss counts and total cached entries.

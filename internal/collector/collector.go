@@ -63,7 +63,7 @@ func runReadLoop(fn func()) <-chan struct{} {
 
 // sendEvent sends an event to the output channel according to the configured
 // backpressure strategy. It is called from each collector's readLoop.
-func sendEvent(ctx context.Context, out chan<- types.Event, e types.Event, strategy BackpressureStrategy, dropped func()) {
+func sendEvent[T any](ctx context.Context, out chan<- T, e T, strategy BackpressureStrategy, dropped func()) {
 	switch strategy {
 	case StrategyBlock:
 		select {

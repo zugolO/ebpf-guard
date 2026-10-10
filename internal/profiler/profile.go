@@ -5,10 +5,12 @@ import (
 	"container/heap"
 	"context"
 	"math/bits"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
+	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -266,7 +268,10 @@ func (p *ProcessProfile) recordFileEventLocked(e *types.FileEvent, weight float6
 	p.FileProfile.TotalOperations++
 
 	// Extract directory from filename
-	filename := string(bytesToString(e.Filename[:]))
+	// Wave 8.2, C2 (№540): a view over the event's own bytes, not a copy. dir and
+	// ext only look keys up in the maps below; the one that gets stored is
+	// cloned first, so no map key aliases the event.
+	filename := util.UnsafeBytesToString(bytesToString(e.Filename[:]))
 	dir := extractDirectory(filename)
 	if dir != "" {
 		if ewma := p.FileProfile.Directories[dir]; ewma != nil {
@@ -274,7 +279,7 @@ func (p *ProcessProfile) recordFileEventLocked(e *types.FileEvent, weight float6
 		} else if len(p.FileProfile.Directories) < maxProfileMapEntries {
 			ewma = NewEWMA(weight)
 			ewma.Update(1.0)
-			p.FileProfile.Directories[dir] = ewma
+			p.FileProfile.Directories[strings.Clone(dir)] = ewma
 		}
 	}
 
@@ -286,7 +291,7 @@ func (p *ProcessProfile) recordFileEventLocked(e *types.FileEvent, weight float6
 		} else if len(p.FileProfile.Extensions) < maxProfileMapEntries {
 			ewma = NewEWMA(weight)
 			ewma.Update(1.0)
-			p.FileProfile.Extensions[ext] = ewma
+			p.FileProfile.Extensions[strings.Clone(ext)] = ewma
 		}
 	}
 }

@@ -67,16 +67,22 @@ resources:
 # If resources.limits.memory is unset, GOMEMLIMIT is NOT injected (the runtime
 # stays unbounded). Set `override` to pin an explicit value (e.g. "230MiB").
 #
-# `reserveMiB` is the non-Go resident memory (BPF ring buffers, BTF, binary text,
-# libc) that counts against the pod cgroup but NOT against GOMEMLIMIT: measured
-# ≈62 MiB (wave 8.1). A plain 90% of 256Mi (230 MiB) plus that is already past
-# the limit, so GOMEMLIMIT = min(percent, limit - reserveMiB) = 192 MiB here.
-# The value is a measured lower bound, not a verdict: the stand run under this
-# exact GOMEMLIMIT (plan.md wave 8.1 item 5) decides whether 256Mi suffices.
+# `reserveMiB` is the non-Go resident memory that counts against the pod cgroup
+# but NOT against GOMEMLIMIT: BPF maps/rings/JIT in the kernel, page cache, slab
+# and the binary text. Wave 8.2 item C5 takes it from the A1 inventory
+# (w82-mem-report.sh, "GOMEMLIMIT под бюджет"), not from a guess: after B1-B3
+# the non-Go part measured 33.8 MiB (maps 20.0 + rings 13.1 + JIT 1.1) plus
+# 47.0 MiB of binary text (RSS of the mapped file, an upper bound for the pod
+# until A4 measures it) = 80.8, rounded up to 85. It was 64 in wave 8.1, a
+# lower bound measured before B1-B3 (see plan.md wave 8.2, stage 3 C5).
+# GOMEMLIMIT = min(percent, limit - reserveMiB), floored at 50% of the limit;
+# 256Mi -> 171 MiB. Re-run the emitter after item D/E (limit, binary profile)
+# and move this number with it. GOGC stays untouched: the allocation flow is
+# 0.68 MB/s at 883 events/s, there is no GC pressure to trade against.
 gomemlimit:
   enabled: true
   percent: 90
-  reserveMiB: 64
+  reserveMiB: 85
   override: ""
 
 # Liveness and readiness probes

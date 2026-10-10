@@ -349,7 +349,7 @@ func (c *FileaccessCollector) Close() error {
 // loadObjects loads the eBPF objects using bpf2go generated code.
 func (c *FileaccessCollector) loadObjects() error {
 	c.objs = &bpf.FileaccessObjects{}
-	opts := &ebpf.CollectionOptions{}
+	opts := bpf.WithSharedKernelTypes(&ebpf.CollectionOptions{})
 	if err := bpf.LoadFileaccessObjects(c.objs, opts); err != nil {
 		return err
 	}

@@ -14,6 +14,9 @@ D=${1:?каталог инвентаря (w82-mem-inventory.sh OUT)}
 IDLE_MIN_S=${IDLE_MIN_S:-1800}   # 8.2.2: idle через 30 мин
 IDLE_MAX_MIB=${IDLE_MAX_MIB:-120}
 BPF_MAX_MIB=${BPF_MAX_MIB:-40}   # 8.2.4: карты + кольца, физ. страницы
+BUDGET_MIB=${BUDGET_MIB:-150}    # C5: пик под атаками (8.2.1)
+LIMIT_MIB=${LIMIT_MIB:-192}      # C5: лимит пода (item E: пик × 1,25)
+SPIRAL_K=${SPIRAL_K:-1.25}       # C5: GOMEMLIMIT не ниже K × heap_inuse — иначе GC-спираль
 
 mib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1048576 }'; }
 stat_of() { awk -v k="$1" '$1 == k { print $2; f = 1 } END { if (!f) print "" }' "$D/memory.stat" 2>/dev/null; }
@@ -105,6 +108,41 @@ if [ -n "$a0" ] && [ -n "$a1" ] && [ -n "$e0" ] && [ -n "$e1" ] && [ "$e1" -gt "
         printf "  %-34s %10.0f  Б/событие (стенд; судит A2)\n", "аллокаций на событие", a / e }'
 else
     row "поток аллокаций" "НЕИЗМЕРИМ" "нет пары metrics/metrics60 или событий 0"
+fi
+echo ""
+
+echo "-- GOMEMLIMIT под бюджет (C5)"
+# GOMEMLIMIT считает только память под управлением Go: sys − released. Всё
+# остальное в cgroup — не-Go часть: карты/кольца/JIT ядра, page cache, слэб и
+# текст бинаря. Текст берётся из smaps (RSS файла бинаря) — в поде он ляжет на
+# счёт пода, на стенде записан на чужой cgroup (№542), поэтому это ВЕРХНЯЯ
+# оценка, измерит A4. Вход считает эмиттер, а не человек по таблице.
+c_sys=$(metric "$D/metrics.txt" go_memstats_sys_bytes)
+c_rel=$(metric "$D/metrics.txt" go_memstats_heap_released_bytes)
+c_inuse=$(metric "$D/metrics.txt" go_memstats_heap_inuse_bytes)
+c_text=$(awk '$NF ~ /\/ebpf-guard$/ { s += $1 } END { if (NR && s > 0) printf "%d", s * 1024 }' "$D/smaps_by_map.txt" 2>/dev/null)
+if [ -z "$cur" ] || [ -z "$c_sys" ] || [ -z "$c_rel" ] || [ -z "$c_inuse" ]; then
+    echo "ИНФО: C5 НЕИЗМЕРИМ (класс НАЗВАН: нет memory.current или go_memstats sys/released/heap_inuse)"
+else
+    awk -v cur="$cur" -v sys="$c_sys" -v rel="$c_rel" -v inuse="$c_inuse" -v text="${c_text:-}" \
+        -v budget="$BUDGET_MIB" -v limit="$LIMIT_MIB" -v k="$SPIRAL_K" 'BEGIN {
+        M = 1048576; go = (sys - rel) / M; nongo = cur / M - go; if (nongo < 0) nongo = 0
+        t = (text == "") ? 0 : text / M
+        res = nongo + t; r5 = int((res + 4.999) / 5) * 5
+        guard = k * inuse / M
+        printf "  %-34s %10.1f  sys − released\n", "Go под управлением (МиБ)", go
+        printf "  %-34s %10.1f  memory.current − Go\n", "не-Go часть cgroup (МиБ)", nongo
+        if (text == "") printf "  %-34s %10s  нет строки бинаря в smaps_by_map.txt — считается 0\n", "текст бинаря в поде (МиБ)", "НЕИЗМЕРИМ"
+        else printf "  %-34s %10.1f  RSS файла бинаря: верхняя оценка, измерит A4\n", "текст бинаря в поде (МиБ)", t
+        printf "  %-34s %10d  не-Go + текст, вверх до 5 (→ gomemlimit.reserveMiB)\n", "резерв чарта (МиБ)", r5
+        printf "  %-34s %10.1f  %.2f × heap_inuse (ниже — GC-спираль)\n", "пол GOMEMLIMIT (МиБ)", guard, k
+        lp = limit - r5; lb = budget - r5
+        printf "  %-34s %10.1f  лимит пода %d − резерв\n", "GOMEMLIMIT по лимиту пода (МиБ)", lp, limit
+        printf "  %-34s %10.1f  бюджет пика %d − резерв\n", "GOMEMLIMIT по бюджету пика (МиБ)", lb, budget
+        if (lp >= guard) printf "ИНФО: C5 GOMEMLIMIT по лимиту пода %.0f МиБ ≥ пол %.1f — годится (резерв %d)\n", lp, guard, r5
+        else printf "ИНФО: C5 GOMEMLIMIT по лимиту пода %.0f МиБ < пол %.1f — GC-спираль, резерв %d велик для лимита %d\n", lp, guard, r5, limit
+        if (lb >= guard) printf "ИНФО: C5 GOMEMLIMIT по бюджету пика %.0f МиБ ≥ пол %.1f — можно держать пик ≤ %d\n", lb, guard, budget
+        else printf "ИНФО: C5 GOMEMLIMIT по бюджету пика %.0f МиБ < пол %.1f — держать пик %d одним GC нельзя (спираль); пик судит 8.2.1\n", lb, guard, budget }'
 fi
 echo ""
 

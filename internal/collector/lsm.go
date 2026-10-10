@@ -641,7 +641,7 @@ func (c *KmodCollector) Close() error {
 
 func (c *KmodCollector) loadKmod() error {
 	c.kmodObjs = &bpf.KmodObjects{}
-	if err := bpf.LoadKmodObjects(c.kmodObjs, &ebpf.CollectionOptions{}); err != nil {
+	if err := bpf.LoadKmodObjects(c.kmodObjs, bpf.WithSharedKernelTypes(&ebpf.CollectionOptions{})); err != nil {
 		return err
 	}
 	// Attach LSM hooks.
@@ -675,7 +675,7 @@ func (c *KmodCollector) loadKmod() error {
 
 func (c *KmodCollector) loadCgroup() error {
 	c.cgroupObjs = &bpf.CgroupObjects{}
-	if err := bpf.LoadCgroupObjects(c.cgroupObjs, &ebpf.CollectionOptions{}); err != nil {
+	if err := bpf.LoadCgroupObjects(c.cgroupObjs, bpf.WithSharedKernelTypes(&ebpf.CollectionOptions{})); err != nil {
 		return err
 	}
 	l, err := link.AttachLSM(link.LSMOptions{Program: c.cgroupObjs.LsmCgroupAttachTask})

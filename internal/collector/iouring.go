@@ -185,7 +185,7 @@ func (c *IOUringCollector) loadObjects() error {
 		},
 	}
 	_ = ringSize
-	if err := bpf.LoadIouringObjects(c.objs, opts); err != nil {
+	if err := bpf.LoadIouringObjects(c.objs, bpf.WithSharedKernelTypes(opts)); err != nil {
 		return fmt.Errorf("load iouring objects: %w", err)
 	}
 	return nil

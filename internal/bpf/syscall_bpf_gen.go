@@ -21,7 +21,6 @@ import (
 
 // SyscallMaps holds the BPF maps exported by bpf/syscall.bpf.c.
 type SyscallMaps struct {
-	AgentPidMap              *ebpf.Map `ebpf:"agent_pid_map"`
 	CommFilterMap            *ebpf.Map `ebpf:"comm_filter_map"`
 	Events                   *ebpf.Map `ebpf:"events"`
 	EventsEmittedCounters    *ebpf.Map `ebpf:"events_emitted_counters"`
@@ -76,9 +75,6 @@ func (o *SyscallObjects) Close() error {
 	}
 	if o.TraceSysExit != nil {
 		errs = append(errs, o.TraceSysExit.Close())
-	}
-	if o.AgentPidMap != nil {
-		errs = append(errs, o.AgentPidMap.Close())
 	}
 	if o.CommFilterMap != nil {
 		errs = append(errs, o.CommFilterMap.Close())

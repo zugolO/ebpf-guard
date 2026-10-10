@@ -100,7 +100,7 @@ _Static_assert(sizeof(struct dns_event) == 327, "struct dns_event size moved: up
 /* Ring buffer for DNS events */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 4 * 1024 * 1024); /* 4MB ring buffer */
+	__uint(max_entries, 512 * 1024); /* 8.2 B3: было 4 МиБ; 327 Б/событие ≈ 1600 слотов */
 } dns_events SEC(".maps");
 
 /* Helper: check if this is a DNS packet (UDP port 53).

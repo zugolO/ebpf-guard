@@ -5,6 +5,15 @@
 
 /* linux/bpf.h and linux/ptrace.h are superseded by vmlinux.h (included via
  * common.h) when doing CO-RE compilation. Do not re-add them here. */
+/* 8.2 B1: карты из common.h, нужные этому объекту (см. шапку common.h). */
+#define EG_MAPS_PROC_ARGS
+#define EG_MAPS_SAMPLING
+#define EG_MAPS_MAP_FULL
+#define EG_MAPS_RINGBUF
+#define EG_MAPS_COMM_FILTER
+#define EG_MAPS_SYSCALL_FILTER
+#define EG_MAPS_KERNEL_FILTER
+#define EG_MAPS_OBSERVER
 #include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -27,14 +36,16 @@ struct sys_exit_args {
 /* Map to store syscall entry args for matching with exit.
  * LRU eviction ensures the map does not overflow under burst workloads,
  * dropping the oldest unfinished entry (least-used PID) rather than rejecting
- * new inserts with -E2BIG. 32K entries accommodates high-concurrency nodes.
+ * new inserts with -E2BIG. 4096 entries (8.2 B2, №538; было 32768 при 10
+ * живых записях): запись живёт от sys_enter до sys_exit одного вызова, то есть
+ * столько, сколько потоков одновременно сидят внутри отслеживаемого вызова.
  * Map-full drops (when all entries are in use) are tracked via
  * map_full_counters[MAP_FULL_IDX_SYSCALL_ARGS] and exported as
  * ebpf_guard_bpf_map_full_total{map_name="syscall_args"}.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 32768);
+	__uint(max_entries, 4096);
 	__type(key, __u64);   /* pid_tgid */
 	__type(value, struct sys_enter_args);
 } syscall_args SEC(".maps");

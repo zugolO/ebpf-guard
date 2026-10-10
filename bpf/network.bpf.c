@@ -6,6 +6,14 @@
 
 /* linux/ and net/ headers are superseded by vmlinux.h (included via common.h)
  * when doing CO-RE compilation. Do not re-add them here. */
+/* 8.2 B1: карты из common.h, нужные этому объекту (см. шапку common.h). */
+#define EG_MAPS_SAMPLING
+#define EG_MAPS_MAP_FULL
+#define EG_MAPS_RINGBUF
+/* 8.2 B3: tcp_connect — единицы событий в секунду на idle; 512 КиБ ≈ 1540 слотов. */
+#define EG_EVENTS_RING_BYTES (512 * 1024)
+#define EG_MAPS_OBSERVER
+#define EG_MAPS_NET_BLOCK
 #include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -19,7 +27,7 @@
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 65536);
+	__uint(max_entries, 8192); /* 8.2 B2 (№538): было 65536 при 2 живых записях */
 	__type(key, __u64);   /* sock pointer */
 	__type(value, __u64); /* connect timestamp (ns) */
 } conn_start_map SEC(".maps");
@@ -39,7 +47,7 @@ struct conn_tuple {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 65536);
+	__uint(max_entries, 8192); /* 8.2 B2 (№538): см. conn_start_map */
 	__type(key, __u64);              /* sock pointer */
 	__type(value, struct conn_tuple);
 } conn_meta_map SEC(".maps");

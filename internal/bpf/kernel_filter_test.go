@@ -3,6 +3,8 @@ package bpf
 import (
 	"testing"
 
+	"github.com/cilium/ebpf"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -90,6 +92,19 @@ func TestNewKernelFilterController_NilMaps(t *testing.T) {
 
 	// The error message should identify which map is nil.
 	assert.Contains(t, err.Error(), "comm_filter_map")
+}
+
+// Волна 8.2 B1: у fileaccess-объекта нет syscall_filter_map (его программы
+// список вызовов не читают), поэтому контроллер строится и без неё — а
+// запись в отсутствующую карту по-прежнему громкая ошибка.
+func TestNewKernelFilterController_SyscallMapOptional(t *testing.T) {
+	m := &ebpf.Map{}
+	kf, err := NewKernelFilterController(m, nil, m, nil)
+	require.NoError(t, err, "fileaccess collector has no syscall_filter_map")
+
+	err = kf.SetSyscallFilter(59, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "syscall_filter_map")
 }
 
 // TestKernelFilterController_AgentPID_NilMap covers the self-exclusion path

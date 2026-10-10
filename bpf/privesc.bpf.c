@@ -12,6 +12,10 @@
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
  * when doing CO-RE compilation. Do not re-add them here. */
+/* 8.2 B1: карты из common.h, нужные этому объекту (см. шапку common.h). */
+#define EG_MAPS_RINGBUF
+/* 8.2 B3: смена capability — редкое событие. */
+#define EG_EVENTS_RING_BYTES (512 * 1024)
 #include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

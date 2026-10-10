@@ -198,16 +198,19 @@ func (c *FileaccessCollector) SamplingConfigMap() *ebpf.Map {
 // kernel_filter_config, and agent_pid_map BPF maps backing this collector's
 // content filter, or nil maps if the collector has not loaded (stub mode).
 //
-// These maps are declared in bpf/common.h, so every BPF object file gets its
-// OWN instance of them — the fileaccess program does not see values written
-// into the syscall collector's copies. Wave 0.5 (kernel_filter + agent
-// self-exclusion in fileaccess.bpf.c) therefore requires populating this
+// These maps are declared in bpf/common.h, and each BPF object file gets its
+// OWN instance of the ones it opts into — the fileaccess program does not see
+// values written into the syscall collector's copies. Wave 0.5 (kernel_filter +
+// agent self-exclusion in fileaccess.bpf.c) therefore requires populating this
 // collector's maps separately; see enableKernelFilter in cmd/ebpf-guard.
+//
+// syscall is always nil: fileaccess.bpf.c has no syscall allowlist, and since
+// 8.2 B1 its object does not carry the map at all.
 func (c *FileaccessCollector) KernelFilterMaps() (comm, syscall, cfg, agentPid *ebpf.Map) {
 	if c.objs == nil {
 		return nil, nil, nil, nil
 	}
-	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, c.objs.AgentPidMap
+	return c.objs.CommFilterMap, nil, c.objs.KernelFilterConfig, c.objs.AgentPidMap
 }
 
 // PathFilterMaps returns the path_filter_map and path_filter_drop_counters

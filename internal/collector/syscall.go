@@ -443,11 +443,14 @@ func (c *SyscallCollector) MapFullCountersMap() *ebpf.Map {
 // KernelFilterMaps returns the comm_filter_map, syscall_filter_map,
 // kernel_filter_config, and agent_pid_map BPF maps backing this collector's
 // content filter, or nil maps if the collector has not loaded (stub mode).
+//
+// agentPid is always nil: syscall.bpf.c never consults agent_pid_map (only
+// fileaccess does), and since 8.2 B1 its object does not carry the map.
 func (c *SyscallCollector) KernelFilterMaps() (comm, syscall, cfg, agentPid *ebpf.Map) {
 	if c.objs == nil {
 		return nil, nil, nil, nil
 	}
-	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, c.objs.AgentPidMap
+	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, nil
 }
 
 // SamplingConfigMap returns the sampling_config BPF map backing this

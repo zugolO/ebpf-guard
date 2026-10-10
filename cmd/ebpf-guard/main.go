@@ -3104,9 +3104,13 @@ func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFi
 	if len(nrs) == 0 {
 		nrs = internalbpf.DefaultMonitoredSyscalls()
 	}
-	for _, nr := range nrs {
-		if err := kf.SetSyscallFilter(nr, true); err != nil {
-			slog.Warn("kernel_filter: set syscall filter failed", slog.Int("nr", nr), slog.Any("error", err))
+	// Разрешающий список вызовов читает только syscall-объект; у fileaccess
+	// карты нет (8.2 B1), и 330 предупреждений на старте ничего бы не сказали.
+	if maps.syscall != nil {
+		for _, nr := range nrs {
+			if err := kf.SetSyscallFilter(nr, true); err != nil {
+				slog.Warn("kernel_filter: set syscall filter failed", slog.Int("nr", nr), slog.Any("error", err))
+			}
 		}
 	}
 
@@ -3143,7 +3147,7 @@ func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFi
 				slog.Uint64("agent_pid", uint64(agentPID)))
 		}
 	} else {
-		slog.Warn("kernel_filter: agent_pid_map unavailable, self-exclusion inactive",
+		slog.Info("kernel_filter: agent self-exclusion not applicable to this collector (its programs do not consult agent_pid_map)",
 			slog.String("collector", name))
 	}
 }

@@ -16,7 +16,8 @@
  * in scratch. Pre-existing limitation, tracked separately from P1-18b — the
  * path filter inherits it rather than introducing it.
  *
- * Memory: LRU fd_path_map at 65536 entries × (8B key + 257B value) ≈ 17 MB.
+ * Memory: LRU fd_path_map at 8192 entries × (8B key + 257B value) ≈ 2,1 MB
+ *         (8.2 B2, №538: было 65536 ≈ 17 МБ при заполнении 3% — см. plan.md).
  *         Scratch map sized to max in-flight opens (4096 entries).
  *
  * P1-18b path-prefix filtering: path_filter_map (bpf/common.h) is an LPM-trie
@@ -37,6 +38,14 @@
 
 /* linux/ headers are superseded by vmlinux.h (included via common.h)
  * when doing CO-RE compilation. Do not re-add them here. */
+/* 8.2 B1: карты из common.h, нужные этому объекту (см. шапку common.h). */
+#define EG_MAPS_SAMPLING
+#define EG_MAPS_RINGBUF
+#define EG_MAPS_COMM_FILTER
+#define EG_MAPS_KERNEL_FILTER
+#define EG_MAPS_AGENT_PID
+#define EG_MAPS_OBSERVER
+#define EG_MAPS_PATH_FILTER
 #include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -65,10 +74,16 @@ struct {
  * key: (tgid << 32) | fd
  * value: struct fd_path
  * LRU eviction prevents map-full errors under high fd churn.
+ *
+ * Размер 8192 (8.2 B2, №538): на стенде живых записей 2000 на idle и меньше
+ * 8192 под пакетом атак (сэмплер w82-b2-pack.sh). Вытеснение превращает fd в
+ * «путь не разрешён» — для read/write это уже сегодняшний исход у сокетов и
+ * у файлов, открытых до старта; счётчик промахов —
+ * ebpf_guard_file_unresolved_rw_filtered_total.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 65536);
+	__uint(max_entries, 8192);
 	__type(key, __u64);
 	__type(value, struct fd_path);
 } fd_path_map SEC(".maps");

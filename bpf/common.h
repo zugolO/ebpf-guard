@@ -270,6 +270,21 @@ struct proc_args {
 };
 
 /*
+ * Волна 8.2, B1 (№537): common.h объявляет карты только по запросу объекта.
+ * Каждый BPF-объект, включающий этот заголовок, раньше получал СВОЮ копию всех
+ * 21 карты — ядро создаёт карту, даже если ни одна программа объекта на неё не
+ * ссылается, и на стенде жили по 5 экземпляров каждого имени (61 мёртвая карта,
+ * ≈26 МиБ memlock). Теперь объект перед `#include "common.h"` объявляет, что ему
+ * нужно: EG_MAPS_PROC_ARGS, _SAMPLING (sampling_config, event_counters,
+ * should_sample), _MAP_FULL, _RINGBUF (events и два счётчика резерва),
+ * _COMM_FILTER, _SYSCALL_FILTER, _KERNEL_FILTER, _AGENT_PID, _OBSERVER,
+ * _NET_BLOCK, _PATH_FILTER. Помощники, ссылающиеся на карту, живут под тем же
+ * флагом — вызов без флага не соберётся, а не создаст мёртвую карту. Гард:
+ * TestW82_NoDeadMapsInObjects (-tags bpfgen, `make generate`) — карт без
+ * программ в объектах 0.
+ */
+#ifdef EG_MAPS_PROC_ARGS
+/*
  * proc_args_map - LRU hash of per-TGID process cmdline arguments.
  * Written on sched_process_exec; read by userspace collector goroutines.
  * LRU eviction keeps memory bounded without explicit cleanup.
@@ -280,6 +295,7 @@ struct {
 	__type(key, __u32);                /* TGID */
 	__type(value, struct proc_args);
 } proc_args_map SEC(".maps");
+#endif /* EG_MAPS_PROC_ARGS */
 
 /* Sampling configuration - configurable per event type */
 struct sampling_config {
@@ -289,6 +305,7 @@ struct sampling_config {
 	__u32 enabled;        /* Global sampling enable flag */
 };
 
+#ifdef EG_MAPS_SAMPLING
 /* Sampling config map - writable from userspace */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -296,7 +313,9 @@ struct {
 	__type(key, __u32);
 	__type(value, struct sampling_config);
 } sampling_config SEC(".maps");
+#endif /* EG_MAPS_SAMPLING */
 
+#ifdef EG_MAPS_COMM_FILTER
 /*
  * comm_filter_map - per-comm allowlist/denylist.
  * key: comm string (up to 16 bytes, NUL-padded), value: 1 = pass, 0 = drop.
@@ -309,7 +328,9 @@ struct {
 	__type(key, char[COMM_LEN]);
 	__type(value, __u8);
 } comm_filter_map SEC(".maps");
+#endif /* EG_MAPS_COMM_FILTER */
 
+#ifdef EG_MAPS_SYSCALL_FILTER
 /*
  * syscall_filter_map - per-syscall-number monitoring switch.
  * key: syscall number (__u32), value: 1 = monitor, 0 = ignore.
@@ -322,7 +343,9 @@ struct {
 	__type(key, __u32);
 	__type(value, __u8);
 } syscall_filter_map SEC(".maps");
+#endif /* EG_MAPS_SYSCALL_FILTER */
 
+#ifdef EG_MAPS_KERNEL_FILTER
 /*
  * kernel_filter_config - global on/off switch for content-based filtering.
  * key 0: enabled flag (__u8, 1 = active).
@@ -334,7 +357,9 @@ struct {
 	__type(key, __u32);
 	__type(value, __u8);
 } kernel_filter_config SEC(".maps");
+#endif /* EG_MAPS_KERNEL_FILTER */
 
+#ifdef EG_MAPS_AGENT_PID
 /*
  * agent_pid_map - stores the PID of the ebpf-guard agent itself.
  * Events from this PID are filtered out in the kernel (self-exclusion).
@@ -349,7 +374,9 @@ struct {
 	__type(key, __u32);
 	__type(value, __u32);
 } agent_pid_map SEC(".maps");
+#endif /* EG_MAPS_AGENT_PID */
 
+#ifdef EG_MAPS_SAMPLING
 /* Per-CPU event counters for sampling */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -357,7 +384,9 @@ struct {
 	__type(key, __u32);
 	__type(value, __u64);
 } event_counters SEC(".maps");
+#endif /* EG_MAPS_SAMPLING */
 
+#ifdef EG_MAPS_MAP_FULL
 /*
  * map_full_counters - per-CPU counters incremented when a BPF map insert fails
  * because the map is at capacity.  Indexed by map ID:
@@ -388,13 +417,26 @@ static __always_inline void record_map_full(__u32 map_idx)
 	if (cnt)
 		__sync_fetch_and_add(cnt, 1);
 }
+#endif /* EG_MAPS_MAP_FULL */
 
+#ifdef EG_MAPS_RINGBUF
+/*
+ * Волна 8.2, B3: размер кольца `events` задаёт объект. Горячие коллекторы
+ * (syscall, fileaccess) держат 4 МиБ; редкие (network, privesc) объявляют
+ * меньше до include. Размер из Go не меняется (ring_log.go: bpf.ring_buf_size
+ * на это кольцо не действует), поэтому единственное место — здесь.
+ */
+#ifndef EG_EVENTS_RING_BYTES
+#define EG_EVENTS_RING_BYTES (4 * 1024 * 1024)
+#endif
 /* BPF map definitions using BTF-enabled maps (kernel 5.15+) */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 4 * 1024 * 1024); /* 4MB ring buffer */
+	__uint(max_entries, EG_EVENTS_RING_BYTES);
 } events SEC(".maps");
+#endif /* EG_MAPS_RINGBUF */
 
+#ifdef EG_MAPS_SAMPLING
 /* Helper: check if event should be sampled based on rate */
 static __always_inline bool should_sample(__u32 event_type, __u32 rate)
 {
@@ -444,7 +486,9 @@ static __always_inline bool should_sample(__u32 event_type, __u32 rate)
 	/* Sample 1 in 'rate' events */
 	return (new_count % rate) == 0;
 }
+#endif /* EG_MAPS_SAMPLING */
 
+#ifdef EG_MAPS_RINGBUF
 /*
  * ringbuf_full_counters - per-CPU counter for a failed bpf_ringbuf_reserve()
  * on the shared `events` ring buffer (syscall.bpf.c, network.bpf.c,
@@ -521,6 +565,7 @@ static __always_inline void record_event_emitted(void)
 	if (cnt)
 		__sync_fetch_and_add(cnt, 1);
 }
+#endif /* EG_MAPS_RINGBUF */
 
 /* Helper macro to reserve space in ring buffer with sampling check */
 #define reserve_event_with_sampling(event_type, sample_rate) \
@@ -551,6 +596,7 @@ static __always_inline void record_event_emitted(void)
 #define submit_event(e) \
 	bpf_ringbuf_submit(e, 0)
 
+#ifdef EG_MAPS_KERNEL_FILTER
 /*
  * kernel_filter_enabled - returns true when content-based BPF filtering is on.
  */
@@ -560,7 +606,9 @@ static __always_inline bool kernel_filter_enabled(void)
 	__u8 *val = bpf_map_lookup_elem(&kernel_filter_config, &key);
 	return val && *val;
 }
+#endif /* EG_MAPS_KERNEL_FILTER */
 
+#ifdef EG_MAPS_COMM_FILTER
 /*
  * comm_is_denied - returns true if the current task's comm is in the denylist
  * (present in comm_filter_map with value 0).  Returns false when the comm is
@@ -576,7 +624,9 @@ static __always_inline bool comm_is_denied(void)
 	/* val == NULL  → not in map → pass; val != NULL && *val == 0 → deny */
 	return val && (*val == 0);
 }
+#endif /* EG_MAPS_COMM_FILTER */
 
+#ifdef EG_MAPS_SYSCALL_FILTER
 /*
  * syscall_is_monitored - returns true if syscall number nr should be
  * forwarded.  Returns true when the syscall_filter_map entry is 1, false
@@ -594,7 +644,9 @@ static __always_inline bool syscall_is_monitored(__s64 nr)
 	val = bpf_map_lookup_elem(&syscall_filter_map, &key);
 	return val && (*val == 1);
 }
+#endif /* EG_MAPS_SYSCALL_FILTER */
 
+#ifdef EG_MAPS_AGENT_PID
 /*
  * pid_is_agent - returns true if the current process is the ebpf-guard agent.
  * This is used for self-exclusion: the agent's own I/O operations (SQLite,
@@ -625,6 +677,7 @@ static __always_inline bool pid_is_agent(void)
 
 	return tgid == *agent_pid;
 }
+#endif /* EG_MAPS_AGENT_PID */
 
 /*
  * Observer-tree exclusion (находка №34 / 5.9.2g) — in-kernel version.
@@ -663,6 +716,7 @@ static __always_inline bool pid_is_agent(void)
  * correlator.observer_exclude.enabled is on (config-test.yaml). On a
  * production deployment this is one array lookup returning 0.
  */
+#ifdef EG_MAPS_OBSERVER
 #define OBSERVER_MAX_DEPTH 12
 
 /* observer_root_pid — key 0 holds the harness root TGID, 0 = not configured. */
@@ -821,6 +875,7 @@ static __always_inline bool observer_should_drop(void)
 	record_observer_excluded();
 	return true;
 }
+#endif /* EG_MAPS_OBSERVER */
 
 /*
  * Network blocklist maps — in-kernel IP/subnet/port blocking.
@@ -846,6 +901,7 @@ struct lpm_key_v6 {
 	__u8  addr[16];   /* IPv6 address in network byte order */
 };
 
+#ifdef EG_MAPS_NET_BLOCK
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, 4096);
@@ -881,6 +937,7 @@ struct {
 	__type(key, __u32);
 	__type(value, __u64);
 } net_block_counters SEC(".maps");
+#endif /* EG_MAPS_NET_BLOCK */
 
 /* Copy IPv4 address from a __u32 (network byte order) into a 4-byte buffer. */
 static __always_inline void copy_ipv4_addr(__u8 *dst, __u32 src)
@@ -897,6 +954,7 @@ static __always_inline void copy_ipv6_addr(__u8 *dst, struct in6_addr *src)
 	bpf_probe_read_kernel(dst, 16, src);
 }
 
+#ifdef EG_MAPS_NET_BLOCK
 /* Increment the in-kernel network block drop counter (per-CPU). */
 static __always_inline void record_net_drop(void)
 {
@@ -905,6 +963,7 @@ static __always_inline void record_net_drop(void)
 	if (cnt)
 		__sync_fetch_and_add(cnt, 1);
 }
+#endif /* EG_MAPS_NET_BLOCK */
 
 /*
  * Path-prefix denylist (P1-18b) — in-kernel filtering of file events by path,
@@ -931,6 +990,7 @@ struct path_filter_key {
 	__u8  path[PATH_FILTER_PREFIX_LEN]; /* path prefix bytes */
 };
 
+#ifdef EG_MAPS_PATH_FILTER
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(max_entries, 1024);
@@ -1017,6 +1077,7 @@ static __always_inline bool path_is_denied(const char *path)
 	record_path_filter_drop();
 	return true;
 }
+#endif /* EG_MAPS_PATH_FILTER */
 
 /* Helper to get current process info */
 static __always_inline void fill_process_info(struct event *e)

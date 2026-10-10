@@ -35,7 +35,6 @@ type FileaccessMaps struct {
 	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
 	RwUnresolvedCfg          *ebpf.Map `ebpf:"rw_unresolved_cfg"`
 	RwUnresolvedDrops        *ebpf.Map `ebpf:"rw_unresolved_drops"`
-	SyscallFilterMap         *ebpf.Map `ebpf:"syscall_filter_map"`
 }
 
 // FileaccessPrograms holds the BPF programs exported by bpf/fileaccess.bpf.c.
@@ -172,9 +171,6 @@ func (o *FileaccessObjects) Close() error {
 	}
 	if o.RwUnresolvedDrops != nil {
 		errs = append(errs, o.RwUnresolvedDrops.Close())
-	}
-	if o.SyscallFilterMap != nil {
-		errs = append(errs, o.SyscallFilterMap.Close())
 	}
 	if o.ObserverExcludedCounters != nil {
 		errs = append(errs, o.ObserverExcludedCounters.Close())

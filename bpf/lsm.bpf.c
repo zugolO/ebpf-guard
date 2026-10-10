@@ -13,6 +13,8 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_endian.h>
 
+/* 8.2 B1: карты из common.h, нужные этому объекту (см. шапку common.h). */
+#define EG_MAPS_NET_BLOCK
 #include "common.h"
 
 #ifndef EACCES

@@ -503,13 +503,13 @@ type KernelFilterController struct {
 }
 
 // NewKernelFilterController creates a controller for the filter maps.
-// All maps except agentPidMap are required; agentPidMap is optional (nil = no self-exclusion).
+// commMap and cfgMap are required. syscallMap and agentPidMap are optional:
+// волна 8.2 B1 (№537) оставила каждому BPF-объекту только те карты фильтра,
+// которые читают его программы — syscall_filter_map есть лишь в syscall-объекте,
+// agent_pid_map лишь в fileaccess-объекте (nil = этот коллектор карту не имеет).
 func NewKernelFilterController(commMap, syscallMap, cfgMap, agentPidMap *ebpf.Map) (*KernelFilterController, error) {
 	if commMap == nil {
 		return nil, fmt.Errorf("bpf: comm_filter_map is nil")
-	}
-	if syscallMap == nil {
-		return nil, fmt.Errorf("bpf: syscall_filter_map is nil")
 	}
 	if cfgMap == nil {
 		return nil, fmt.Errorf("bpf: kernel_filter_config is nil")

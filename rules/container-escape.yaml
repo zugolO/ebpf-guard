@@ -1035,6 +1035,13 @@ rules:
         - field: proc.comm
           op: not_in
           values: ["prometheus", "grafana", "cron", "pgrep"]
+        # Долги 8.1, №549: legacy-набор операций назван ЯВНО — исключения
+        # apt-method-init-cgroup и node-timer-detect-virt ниже называют op, а
+        # правило, назвавшее op хоть где-то, теряет legacyOpsOnly (память
+        # op-in-exception-drops-legacy-flag). Семантика условия не меняется.
+        - field: file.op
+          op: in
+          values: [open, read, write, chmod]
     severity: warning
     action: alert
     class: drift
@@ -1170,6 +1177,112 @@ rules:
             - field: proc.exe_path
               op: prefix
               values: ["/usr/", "/bin/", "/sbin/", "/opt/", "/var/lib/rancher/"]
+      # Долги 8.1, остаток №549 (ночь H4, 10.10.2026 03:17:19). Тег правила —
+      # container-escape, то есть твёрдая улика, которую trusted_units не
+      # прощает: оба attack-инцидента ночи держались на ней после того, как
+      # impact_systemd_service_disabled получил свой предикат. Два источника,
+      # оба — чтение O_RDONLY с хоста, ни один не трогает environ/mem/root
+      # ЧУЖОГО процесса через /proc/self/root/ — примитивы побега остаются.
+      #
+      # (1) Метод APT http/https (один образ, память apt-method-http-https-
+      #     same-exe) читает /proc/1/cgroup. Живёт секунды — образ
+      #     разрешается (apt-method-net подавил 19 раз в ту же ночь).
+      - name: apt-method-init-cgroup
+        condition_group:
+          operator: and
+          conditions:
+            - field: filename
+              op: in
+              values: ["/proc/1/cgroup"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/lib/apt/methods/http]
+      # (1б) Тот же метод, проигравший гонку readlink. Смок w81-h5 (10.10.2026,
+      #      фаза A): 21 подавление по образу и ОДНА утечка — `https` под
+      #      apt-news.service (exe не разрешился), которая одна промотировала
+      #      инцидент юнита в attack (score 54). Ось — юнит system.slice по
+      #      cgroup_id, как у (2); comm — сужение до наблюдённого.
+      - name: apt-method-init-cgroup-unit
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: in
+              values: [http, https]
+            - field: filename
+              op: in
+              values: ["/proc/1/cgroup"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
+      # (2) systemd-detect-virt читает /proc/1/environ (ищет container=).
+      #     Живёт миллисекунды: ось образа мертва (virt-detect-self — 0
+      #     подавлений живьём), поэтому ось — юнит system.slice по cgroup_id
+      #     (proc.systemd_unit, cgroup_unit.go). Юниты — таймерные задачи
+      #     ноды, под которыми он наблюдался (esm-cache в H4; apt-daily,
+      #     unattended-upgrades в H2). comm — сужение до наблюдённого, а не
+      #     антиспуф: антиспуф даёт юнит, его назначает systemd, а не процесс.
+      #     Тот же comm в другом юните, в user.slice или в контейнере —
+      #     срабатывает (TestW81H5_DetectVirtUnitSpoofFires).
+      - name: node-timer-detect-virt
+        condition_group:
+          operator: and
+          conditions:
+            - field: proc.comm
+              op: eq
+              values: [systemd-detect-]
+            - field: filename
+              op: in
+              values: ["/proc/1/environ"]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.systemd_unit
+              op: in
+              values:
+                - apt-daily.service
+                - apt-daily-upgrade.service
+                - apt-news.service
+                - esm-cache.service
+                - unattended-upgrades.service
 
   # prometheus/grafana routinely read /proc/1/* metadata as PID 1 of their
   # own container namespace — legitimate self-introspection, not escape.

@@ -1509,6 +1509,8 @@ func normaliseFieldName(field string) string {
 		return "parent_exe_path"
 	case "proc.ancestor_exe_path":
 		return "ancestor_exe_path"
+	case "proc.systemd_unit":
+		return "systemd_unit"
 	case "network.dport":
 		return "dport"
 	case "network.sport":
@@ -1691,6 +1693,14 @@ func (re *RuleEngine) getFieldValueCached(e *types.Event, field string, dnsAnaly
 		// условие на эту ось обязано стоять ПОСЛЕДНИМ в группе "and".
 		return resolveAncestorExePath(e.PID, e.PPID,
 			eventComm(e, cache), eventParentComm(e, cache))
+	case "systemd_unit":
+		// Долги 8.1, №549 (см. cgroup_unit.go). Юнит system.slice по
+		// cgroup_id, записанному ядром в событие: разрешается и у процесса,
+		// умершего за миллисекунды, пока жив его юнит. Пусто вне
+		// system.slice и при промахе — исключение не применяется. Кэш по
+		// cgroup_id дешёвый, но промах пересканирует system.slice, поэтому
+		// условие на эту ось в "and" ставится ПОСЛЕ comm/пути, как exe_path.
+		return resolveSystemdUnit(e.CgroupID)
 	}
 
 	switch e.Type {

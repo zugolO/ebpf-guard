@@ -24,6 +24,34 @@ rules:
         - field: uid
           op: equals
           values: ["0"]
+      # Долги 8.1, №549 (ночь H4, 10.10.2026 03:17): до этой правки условие
+      # было «root исполнил systemctl» — любой вызов, включая чтение
+      # состояния. Натуральный тик apt-daily дал `systemctl is-active -q
+      # NetworkManager.service` и `systemctl start --no-block apt-news.service
+      # esm-cache.service`, тег impact сделал алерт твёрдой уликой, и она
+      # пробила доверие к apt-daily.service (correlator.trusted_units):
+      # инцидент score 59 промотирован в attack. Правило лечится предикатом из
+      # собственного имени (stop/disable/mask), а не исключением по юниту —
+      # исключение ослепило бы его на настоящей остановке auditd из-под
+      # скомпрометированного таймера (память fix-rule-predicate-not-exclusion).
+      #
+      # Пустой proc.args срабатывает намеренно: коллектор обнуляет аргументы,
+      # когда argv[0] не сходится с comm (`exec -a x systemctl stop auditd`,
+      # память exec-a-argv0-spoof-kills-proc-args). Без этой ветки сужение
+      # отдало бы обход одной командой; с ней спуф уходит в шум, а не в тишину.
+      subgroups:
+        - operator: or
+          conditions:
+            - field: proc.args
+              op: regex
+              values:
+                # Глагол целым токеном: `systemctl stop x`, `systemctl --now
+                # disable x`, `service x stop`. isolate останавливает всё, что
+                # не входит в цель; kill — сигнал юниту в обход stop.
+                - "(^|\\s)(stop|disable|mask|kill|isolate)(\\s|$)"
+            - field: proc.args
+              op: equals
+              values: [""]
     severity: critical
     action: alert
     tags: [mitre:T1489, impact, defense-evasion, service-stop, mitre:T1562.001]

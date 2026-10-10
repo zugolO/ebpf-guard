@@ -122,6 +122,12 @@ correlator:
   trusted_units:
     - motd-news.service
     - apt-daily.service
+    # Долги 8.1, №549 (ночь H4, 10.10.2026): apt.systemd.daily запускает их
+    # сам (`systemctl start --no-block apt-news.service esm-cache.service`),
+    # python3-дерево esm-cache дало attack score 50 только потому, что юнита
+    # не было в списке. Корень — свой юнит, а не apt-daily.service.
+    - apt-news.service
+    - esm-cache.service
     - apt-daily-upgrade.service
     - unattended-upgrades.service
     - fwupd.service

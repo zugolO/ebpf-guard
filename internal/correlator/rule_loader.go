@@ -682,6 +682,9 @@ var identityFields = []string{
 	// дотягивается через многопоколенный форк демона, до которого не
 	// дотягиваются первые две, — см. resolveAncestorExePath в exepath.go.
 	"ancestor_exe_path", "proc.ancestor_exe_path",
+	// Долги 8.1, №549: юнит system.slice по cgroup_id события — ось, которая
+	// переживает мс-процесс (cgroup_unit.go).
+	"systemd_unit", "proc.systemd_unit",
 }
 
 func init() {

@@ -1858,11 +1858,24 @@ else
     grown_dns_rules=$( { metric_grown_rules ebpf_guard_alerts_total "$basefile_arg" "$final_metrics"
                           metric_grown_rules ebpf_guard_alerts_filtered_total "$basefile_arg" "$final_metrics"; } | sort -u)
     dns_silent_registry="$GATE_SCRIPT_DIR/silent-rules.txt"
+    # №553 (долги 8.1, 10.10.2026): та же слепота, что №552 сняла с критерия
+    # 6. Rego переименовывает срабатывание (exfil_dns_txt_long_label →
+    # long_dns_query), alerts_total{rule_id=<база>} не растёт, и исправный
+    # детект печатался «0/4 … регресс разбора» (пакет w81-h4-attacks). Рост
+    # ebpf_guard_alert_rule_id_renamed_total по БАЗЕ — свидетельство
+    # срабатывания; засчитывается отдельной строкой, с именем Rego.
+    dns_rego_grown=$(metric_renamed_grown "$basefile_arg" "$final_metrics")
+    dns_rego_credited=0
 
     fired_count=0
     unexplained_dns=""
     for rid in $dns_target_rules; do
-        if echo "$grown_dns_rules" | grep -qx "$rid"; then
+        dns_rego_hit=$(printf '%s\n' "$dns_rego_grown" | awk -F'\t' -v id="$rid" '$1 == id { printf "%s%s (+%s)", (n++ ? ", " : ""), $2, $3 }')
+        if ! echo "$grown_dns_rules" | grep -qx "$rid" && [ -n "$dns_rego_hit" ]; then
+            fired_count=$((fired_count + 1))
+            dns_rego_credited=$((dns_rego_credited + 1))
+            echo "  $rid: сработало под именем Rego $dns_rego_hit — засчитано по ebpf_guard_alert_rule_id_renamed_total (№553)"
+        elif echo "$grown_dns_rules" | grep -qx "$rid"; then
             fired_count=$((fired_count + 1))
             chain_empty=0
             chain_total=0
@@ -1889,7 +1902,7 @@ else
     done
 
     if [ "$fired_count" -eq 4 ]; then
-        pass "все 4 DNS long-label правила сработали под позитивным контролем — молчание №2.9.4 было тишиной стенда, не регрессом разбора (находка №64 закрыта)"
+        pass "все 4 DNS long-label правила сработали под позитивным контролем (из них под именем Rego: $dns_rego_credited, №553) — молчание №2.9.4 было тишиной стенда, не регрессом разбора (находка №64 закрыта)"
     elif [ -n "$unexplained_dns" ]; then
         if [ "${dns_events_final%.*}" -eq 0 ] 2>/dev/null; then
             fail "events_total{type=\"dns\"}=0 за весь прогон — регресс DNS-коллектора (dns.bpf.c/dns.go), а не вопрос №64; чинить/откатывать коллектор до всего остального"
@@ -1993,13 +2006,23 @@ echo "=== 5.9.7e. Позитивный контроль сужения по ssh 
 if [ ! -s "$final_alerts" ] || ! jq -e 'type == "array"' "$final_alerts" >/dev/null 2>&1; then
     skip "final-alerts-$TIMESTAMP.json отсутствует или не JSON-массив — позитивный контроль 5.9.7e не проверен (5.9.7e: позитивный контроль)"
 else
-    ssh_ctl_hits=$(jq '[.[] | select(.rule_id == "rootkit_ssh_authorized_keys_modified")
+    # №553 (долги 8.1, 10.10.2026): правило судится по БАЗЕ, а не по
+    # rule_id стора. Rego переименовывает срабатывание в
+    # authorized_keys_modify, и сужение на rule_id печатало «не сработало ни
+    # разу» при живом детекте (пакет w81-h4-attacks: 0 по rule_id, 2 по базе).
+    # По Rego-имени считать нельзя: authorized_keys_modify собирает три базы
+    # (credaccess_/fim_/rootkit_), чужая база закрыла бы контроль ложно.
+    # details.base_rule_id стор несёт с волны 6.3.L; у непереименованного
+    # алерта его нет — тогда база = rule_id.
+    ssh_ctl_hits=$(jq '[.[] | select((.details.base_rule_id // .rule_id) == "rootkit_ssh_authorized_keys_modified")
         | select(.comm != "sshd")] | length' "$final_alerts" 2>/dev/null || echo 0)
-    ssh_ctl_sshd=$(jq '[.[] | select(.rule_id == "rootkit_ssh_authorized_keys_modified"
-        or .rule_id == "sigma_sensitive_dir_listing") | select(.comm == "sshd")] | length' "$final_alerts" 2>/dev/null || echo 0)
-    ssh_ctl_comms=$(jq -r '[.[] | select(.rule_id == "rootkit_ssh_authorized_keys_modified")
+    ssh_ctl_sshd=$(jq '[.[] | select((.details.base_rule_id // .rule_id) as $b | $b == "rootkit_ssh_authorized_keys_modified"
+        or $b == "sigma_sensitive_dir_listing") | select(.comm == "sshd")] | length' "$final_alerts" 2>/dev/null || echo 0)
+    ssh_ctl_comms=$(jq -r '[.[] | select((.details.base_rule_id // .rule_id) == "rootkit_ssh_authorized_keys_modified")
         | .comm] | unique | join(",")' "$final_alerts" 2>/dev/null || echo "")
-    echo "  алертов rootkit_ssh_authorized_keys_modified: comm != sshd — $ssh_ctl_hits, comm = sshd — по обоим правилам $ssh_ctl_sshd (comm'ы правила: ${ssh_ctl_comms:-нет})"
+    ssh_ctl_names=$(jq -r '[.[] | select((.details.base_rule_id // .rule_id) == "rootkit_ssh_authorized_keys_modified")
+        | .rule_id] | unique | join(",")' "$final_alerts" 2>/dev/null || echo "")
+    echo "  алертов rootkit_ssh_authorized_keys_modified (по базе, №553): comm != sshd — $ssh_ctl_hits, comm = sshd — по обоим правилам $ssh_ctl_sshd (comm'ы правила: ${ssh_ctl_comms:-нет}; имена в сторе: ${ssh_ctl_names:-нет})"
     if [ "$ssh_ctl_hits" -ge 1 ] && [ "$ssh_ctl_sshd" -eq 0 ]; then
         pass "запись в authorized_keys посторонним comm поднимает правило ($ssh_ctl_hits), sshd не поднимает ни одного — сужение не ослепило (5.9.7e: позитивный контроль)"
     elif [ "$ssh_ctl_hits" -eq 0 ]; then

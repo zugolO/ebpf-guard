@@ -1806,6 +1806,50 @@ else
 fi
 echo ""
 
+# --- Реплей 27 (№553): 5.9.5c и 5.9.7e судят Rego-переименование по базе ---
+# Тот же архив ночи №3. Живая сторона: четыре DNS long-label правила
+# засчитаны под именем long_dns_query по renamed_total, контроль ssh-ключей
+# — по details.base_rule_id (в сторе имя authorized_keys_modify). Обнулённая
+# сторона: серия renamed_total вырезана из final-metrics, base_rule_id — из
+# final-alerts; оба критерия обязаны вернуться в FAIL, иначе зачёт вакуумен.
+echo "--- реплей №553: ночь №3 — 5.9.5c и 5.9.7e засчитывают Rego по базе, обнулённые свидетельства возвращают FAIL ---"
+if [ ! -d "$N3_DIR/attacks-results" ]; then
+    echo "[REPLAY-SKIP] нет архива $N3_DIR — реплей №553 не исполнен"
+else
+    n553_ts=$(find_ts "$N3_DIR/attacks-results" 2>/dev/null || true)
+    run_offline_gate "$N3_DIR/attacks-results" "$n553_ts"
+    n553_live="$OFFLINE_GATE_OUTPUT"
+    n553_zero_dir=$(mktemp -d)
+    for f in "$N3_DIR/attacks-results"/*; do ln -s "$f" "$n553_zero_dir/$(basename "$f")"; done
+    rm -f "$n553_zero_dir/final-metrics-$n553_ts.txt" "$n553_zero_dir/final-alerts-$n553_ts.json"
+    grep -v '^ebpf_guard_alert_rule_id_renamed_total{' "$N3_DIR/attacks-results/final-metrics-$n553_ts.txt" > "$n553_zero_dir/final-metrics-$n553_ts.txt"
+    jq 'map(if (.details | type) == "object" then .details |= del(.base_rule_id) else . end)' \
+        "$N3_DIR/attacks-results/final-alerts-$n553_ts.json" > "$n553_zero_dir/final-alerts-$n553_ts.json"
+    run_offline_gate "$n553_zero_dir" "$n553_ts"
+    n553_zero="$OFFLINE_GATE_OUTPUT"
+    rm -rf "$n553_zero_dir"
+    n553_live_dns=$(extract_section "$n553_live" '^=== 5[.]9[.]5c[.]' '^=== ')
+    n553_live_ssh=$(extract_section "$n553_live" '^=== 5[.]9[.]7e[.]' '^=== ')
+    n553_zero_dns=$(extract_section "$n553_zero" '^=== 5[.]9[.]5c[.]' '^=== ')
+    n553_zero_ssh=$(extract_section "$n553_zero" '^=== 5[.]9[.]7e[.]' '^=== ')
+    n553_ok=1; n553_why=""
+    for b in dns_tunneling_long_domain exfil_dns_txt_long_label netintr_dns_long_label webshell_dns_exfil_long_subdomain; do
+        echo "$n553_live_dns" | grep -qF "  $b: сработало под именем Rego long_dns_query" || { n553_ok=0; n553_why="$n553_why; 5.9.5c не засчитал $b"; }
+    done
+    echo "$n553_live_dns" | grep -qF '[PASS]' || { n553_ok=0; n553_why="$n553_why; 5.9.5c живой стороны не PASS"; }
+    echo "$n553_live_ssh" | grep -qF 'имена в сторе: authorized_keys_modify' || { n553_ok=0; n553_why="$n553_why; 5.9.7e не прочитал базу под Rego-именем"; }
+    echo "$n553_live_ssh" | grep -qF '[PASS]' || { n553_ok=0; n553_why="$n553_why; 5.9.7e живой стороны не PASS"; }
+    echo "$n553_zero_dns" | grep -qF '[FAIL]' || { n553_ok=0; n553_why="$n553_why; 5.9.5c обнулённой стороны не FAIL"; }
+    echo "$n553_zero_dns" | grep -qF 'сработало под именем Rego' && { n553_ok=0; n553_why="$n553_why; 5.9.5c засчитал Rego без серии renamed_total"; }
+    echo "$n553_zero_ssh" | grep -qF 'не сработало ни разу' || { n553_ok=0; n553_why="$n553_why; 5.9.7e обнулённой стороны не FAIL"; }
+    if [ "$n553_ok" -eq 1 ]; then
+        ok "№553 (ночь №3): 5.9.5c — четыре DNS long-label засчитаны под long_dns_query, 5.9.7e — контроль ssh по details.base_rule_id (authorized_keys_modify) — оба PASS; без renamed_total и base_rule_id оба FAIL. Зачёт по базе умеет и засчитывать, и не засчитывать"
+    else
+        bad "№553 (ночь №3): расхождение —$n553_why"
+    fi
+fi
+echo ""
+
 echo "==========================================="
 if [ "$REPLAY_FAILED" -eq 0 ]; then
     echo -e "${GREEN}REPLAY-GATE: PASS${NC} — 5.9.6b/5.9.6c/5.9.7a воспроизведены на архиве с ожидаемыми исходами"

@@ -874,6 +874,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// него. Без резолвера ось выключена целиком (unitForPID возвращает "").
 	correlator.SetUnitResolver(correlator.ProcCgroupUnitResolver{})
 
+	// Долги 8.1, №549: поле правил proc.systemd_unit — юнит system.slice по
+	// cgroup_id события, а не по /proc/<pid>: переживает мс-процесс
+	// (systemd-detect-virt под esm-cache.service). В поде без хостового
+	// cgroupfs system.slice не виден — поле пусто, отказ в шум.
+	correlator.SetCgroupUnitResolver(correlator.NewSystemSliceUnitResolver("/sys/fs/cgroup"))
+
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 		slog.Warn("correlation engine: failed to register Prometheus metrics",

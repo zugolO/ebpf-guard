@@ -68,29 +68,58 @@ type CgroupUnitResolver interface {
 
 // cgroupUnitRescanInterval ограничивает пересканирование system.slice на
 // промахе. Промах — это cgroup не из system.slice (контейнер, сессия) или
-// юнит, стартовавший после прошлого скана. Скан — readdir одного каталога и
-// stat его поддерева (десятки записей на ноде); 100 мс держат цену в
-// единицах миллисекунд в секунду при потоке промахов и при этом успевают за
-// юнитом, стартовавшим за доли секунды до своего первого события.
+// юнит, стартовавший после прошлого скана. 100 мс успевают за юнитом,
+// стартовавшим за доли секунды до своего первого события.
+//
+// Цена скана ИЗМЕРЕНА (волна 8.2, под на k3s, 90 с): ≈255 КБ аллокаций на
+// скан, не «десятки записей» — WalkDir идёт по всему поддереву каждого
+// юнита, а на ноде их сотни каталогов. При потоке промахов (kubepods, сессии —
+// большинство событий) 10 сканов/с давали 230 из 414 МБ всех аллокаций.
 const cgroupUnitRescanInterval = 100 * time.Millisecond
+
+// cgroupUnitMissTTL — сколько промах id помнится без повторного скана. Id нового
+// юнита в отрицательном кэше не бывает, поэтому он разрешается на первом же
+// своём событии (после rescan-интервала), как и раньше.
+const cgroupUnitMissTTL = 30 * time.Second
+
+// cgroupUnitMissCap ограничивает отрицательный кэш; при переполнении
+// вытесняются самые старые записи.
+const cgroupUnitMissCap = 4096
+
+// systemdUnitScans считает сканы system.slice.
+var systemdUnitScans = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "ebpf_guard_systemd_unit_scans_total",
+	Help: "Full scans of system.slice performed by the proc.systemd_unit resolver.",
+})
 
 // SystemSliceUnitResolver разрешает cgroup id через inode каталогов под
 // <root>/system.slice. Карта строится сканом целиком и целиком же
 // заменяется, поэтому её размер ограничен числом живых cgroup system.slice —
 // ушедшие юниты из неё выпадают на следующем скане.
+//
+// Скан идёт БЕЗ удержания мьютекса (оценка правил на горячем пути), не более
+// одного одновременно; остальные промахи на время скана получают "".
 type SystemSliceUnitResolver struct {
 	root string
 
 	mu       sync.RWMutex
 	byID     map[uint64]string
+	miss     map[uint64]time.Time // id → момент промаха после скана
 	lastScan time.Time
 	now      func() time.Time
+
+	scanning atomic.Bool
 }
 
 // NewSystemSliceUnitResolver возвращает резолвер над корнем cgroup2 root
 // (на хосте — /sys/fs/cgroup).
 func NewSystemSliceUnitResolver(root string) *SystemSliceUnitResolver {
-	return &SystemSliceUnitResolver{root: root, byID: map[uint64]string{}, now: time.Now}
+	return &SystemSliceUnitResolver{
+		root: root,
+		byID: map[uint64]string{},
+		miss: map[uint64]time.Time{},
+		now:  time.Now,
+	}
 }
 
 // ResolveCgroupUnit implements CgroupUnitResolver.
@@ -98,25 +127,61 @@ func (r *SystemSliceUnitResolver) ResolveCgroupUnit(cgroupID uint64) string {
 	if cgroupID <= 1 { // 0 — старый BPF-объект, 1 — корень cgroup2
 		return ""
 	}
+	now := r.now()
 	r.mu.RLock()
 	unit, ok := r.byID[cgroupID]
+	missAt, missed := r.miss[cgroupID]
+	recent := !r.lastScan.IsZero() && now.Sub(r.lastScan) < cgroupUnitRescanInterval
 	r.mu.RUnlock()
 	if ok {
 		return unit
 	}
+	if missed && now.Sub(missAt) < cgroupUnitMissTTL {
+		return ""
+	}
+	if recent || !r.scanning.CompareAndSwap(false, true) {
+		return ""
+	}
+	defer r.scanning.Store(false)
+
+	systemdUnitScans.Inc()
+	byID := scanSystemSlice(r.root)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if unit, ok := r.byID[cgroupID]; ok {
+	r.byID = byID
+	r.lastScan = now
+	unit, ok = byID[cgroupID]
+	if ok {
+		delete(r.miss, cgroupID)
 		return unit
 	}
-	now := r.now()
-	if !r.lastScan.IsZero() && now.Sub(r.lastScan) < cgroupUnitRescanInterval {
-		return ""
+	r.rememberMissLocked(cgroupID, now)
+	return ""
+}
+
+// rememberMissLocked заносит id в отрицательный кэш, вытесняя при переполнении
+// просроченные, а затем самые старые записи.
+func (r *SystemSliceUnitResolver) rememberMissLocked(id uint64, now time.Time) {
+	if len(r.miss) >= cgroupUnitMissCap {
+		for k, t := range r.miss {
+			if now.Sub(t) >= cgroupUnitMissTTL {
+				delete(r.miss, k)
+			}
+		}
+		for len(r.miss) >= cgroupUnitMissCap {
+			var oldestK uint64
+			var oldestT time.Time
+			first := true
+			for k, t := range r.miss {
+				if first || t.Before(oldestT) {
+					oldestK, oldestT, first = k, t, false
+				}
+			}
+			delete(r.miss, oldestK)
+		}
 	}
-	r.byID = scanSystemSlice(r.root)
-	r.lastScan = now
-	return r.byID[cgroupID]
+	r.miss[id] = now
 }
 
 // scanSystemSlice строит inode → имя юнита для каждого каталога под

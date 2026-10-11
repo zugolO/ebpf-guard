@@ -102,7 +102,7 @@ func NewProfilerWithContext(ctx context.Context, cfg ProfilerConfig, logger *slo
 		lineageTTL = 5 * time.Minute
 	}
 	go func() {
-		ticker := time.NewTicker(lineageTTL)
+		ticker := time.NewTicker(lineageCleanupInterval(lineageTTL))
 		defer ticker.Stop()
 		for {
 			select {
@@ -115,6 +115,19 @@ func NewProfilerWithContext(ctx context.Context, cfg ProfilerConfig, logger *slo
 	}()
 
 	return p
+}
+
+// lineageCleanupInterval — тик уборки LineageTracker: TTL/5, не реже раза в 10 с.
+// Тик, равный TTL, держал запись до 2×TTL (10 мин): смок ночи 8.2 на боевом
+// наборе — пик пода 156 МиБ > 150, рост живой кучи за пакет атак на 58% —
+// LineageTracker. TTL (окно, в котором цепочка видна детекту) не меняется,
+// сокращается только хвост после него: удержание ≤ TTL + TTL/5.
+func lineageCleanupInterval(ttl time.Duration) time.Duration {
+	iv := ttl / 5
+	if iv < 10*time.Second {
+		iv = 10 * time.Second
+	}
+	return iv
 }
 
 // RegisterMetrics registers Prometheus metrics for all profiler components.

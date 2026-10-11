@@ -18926,7 +18926,7 @@ Go — офлайн-бенчем A2, стенд — минутами. Ночь �
 
 **Стенд после смока.** Хостовый бинарь пересобран на `512711a` (`make generate && make build`, sha `c4b0f56260d3…`). `ebpf-guard-test` active, агент один. Кэш Go очищен, старые образы `w82-*` удалены из docker и k3s. Диск / 79% (резерв, если понадобится: журнал 4,1 ГБ).
 
-**Запуск ночи (владелец).** Стенд, `/opt/ebpf-guard/deploy/docker-test-setup`, отвязано от ssh:
+**Ночь ПОСТАВЛЕНА 11.10.2026 08:07 UTC — отложенный старт в 22:57 UTC** (окно ночей H2–H4; `/root/night-8.2-at.sh` → `sleep` → пайплайн, ожидание в `/root/night-8.2-wait.txt`). Команда, которую он исполняет: Стенд, `/opt/ebpf-guard/deploy/docker-test-setup`, отвязано от ssh:
 ```
 cd /opt/ebpf-guard/deploy/docker-test-setup && \
   EXPECT_NR=36 NIGHT_TAG=8.2-night NIGHT_PREV=/var/lib/night-8.1H4/idle \

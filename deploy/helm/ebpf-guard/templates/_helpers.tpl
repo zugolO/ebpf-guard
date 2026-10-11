@@ -108,6 +108,15 @@ a bare number is treated as bytes.
 {{- $floor := mulf $bytes 0.5 -}}
 {{- if lt $capped $floor -}}{{- $capped = $floor -}}{{- end -}}
 {{- if lt $capped $limit -}}{{- $limit = $capped -}}{{- end -}}
+{{- /* peakBudgetMiB (0 = off): the pod's peak memory.current budget. Go may hold
+       at most (budget - reserveMiB), so Go + non-Go stays within the budget.
+       Not floored at 50% of the limit: the budget is an explicit number, and
+       the GC-spiral guard is checked against the live heap by the A1 emitter. */ -}}
+{{- $budget := mulf (.Values.gomemlimit.peakBudgetMiB | default 0 | float64) 1048576.0 -}}
+{{- if gt $budget 0.0 -}}
+{{- $bcap := subf $budget $reserve -}}
+{{- if and (gt $bcap 0.0) (lt $bcap $limit) -}}{{- $limit = $bcap -}}{{- end -}}
+{{- end -}}
 {{- printf "%d" ($limit | int64) -}}
 {{- end -}}
 {{- end }}

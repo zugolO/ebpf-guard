@@ -19042,6 +19042,8 @@ perl-скрипт, `exe` = `/usr/bin/perl`), `proc.ancestor_exe_path` — не �
 | 8.4.2 | Исключение `impact_systemd_service_disabled` для `systemctl stop` с предком `/usr/bin/dpkg` И родителем-скриптом из пакетного maintainer-пути (`/var/lib/dpkg/info/*.prerm`) | смок `dpkg -r` + `apt-get install` (скрипт w83-smoke.sh, фаза I; сэмплер образа родителя исправить — первый не поймал stop), спуф: `dpkg --pre-invoke`, копия perl-скрипта, `exec -a` |
 | 8.4.3 | Цена: сколько инцидентов ночей H2–H4 держала остановка из maintainer-скриптов (по архивам) | офлайн по `server-logs/` |
 
+**8.4.3 — результат (11.10.2026, офлайн по `server-logs/collect-8.1-H{2,3,4}`).** Алертов `impact_systemd_service_disabled` в сторе: 15 / 11 / 8. Глаголы: `status`, `is-active`, `start --no-block`, `show`; ни одного `stop`/`disable`/`mask`/`kill`/`isolate`, пустых `proc.args` 0. Все 34 — шум старого условия «root исполнил systemctl», его сузил №549. Текущее правило не дало бы ни одного. Настоящие апгрейды пакетов в окнах были: в H2 `deb-systemd-helper` ×8 и `dpkg-preconfigure --apt`, в H3 `dpkg-preconfigure --apt`. Но `deb-systemd-invoke stop` из prerm не встретился ни разу. **Цена остатка 8.3.1 на трёх ночах — 0 инцидентов**, и 8.4.2 пока лечит случай, наблюдённый только в смоке (`dpkg -r`). Приоритет 8.4 после 8.5 подтверждается. Если ночь 8.2 покажет остановку из prerm, пересчитать.
+
 **Зависимость от 8.5 (11.10.2026).** Родословную 8.4.1 строить на таблице процессов в ядре
 (item **P1** волны 8.5), а не на `LineageTracker`: starttime-валидация и антиспуф там
 бесплатны (fork/exec/exit видит ядро), а у Go-трекера найдена утечка `ancestry`

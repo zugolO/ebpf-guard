@@ -112,3 +112,14 @@ func SetSyscallCountsOccupancy(live, max uint32) {
 		SyscallCountsMapFill.Set(float64(live) / float64(max))
 	}
 }
+
+// RulesLoadErrors — файлы каталога правил, пропущенные загрузчиком (плохой
+// YAML, провал валидации, дубль id). Растёт на каждой попытке загрузки — старте
+// и каждой горячей перезагрузке; ось file ограничена числом файлов каталога.
+var RulesLoadErrors = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_rules_load_errors_total",
+		Help: "Rule files skipped by the tolerant loader at startup or hot reload (unreadable, invalid or duplicate rule IDs); the remaining files still load.",
+	},
+	[]string{"file"},
+)

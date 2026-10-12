@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -277,4 +279,25 @@ func TestKernelPredController_FinalFlushDrainsOnceAndStopsPolling(t *testing.T) 
 func TestKernelPredController_FinalFlushWithoutReaderIsNoop(t *testing.T) {
 	ctl := &kernelPredController{rules: &fakeRules{}}
 	ctl.FinalFlush() // не паникует: ядро не подключалось (dry-run)
+}
+
+// Решение 11 на пути агента (старт и горячая перезагрузка зовут одну функцию):
+// битый файл — ERROR-метрика, остальные правила живы.
+func TestW85_LoadRulesWithTuning_SkipsBadFileAndCountsIt(t *testing.T) {
+	dir := t.TempDir()
+	good := "rules:\n  - id: g1\n    name: g1\n    event_type: syscall\n    severity: warning\n    condition:\n      field: comm\n      op: eq\n      values: [\"x\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "good.yaml"), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.yaml"), []byte("rules: [ :::"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := testutil.ToFloat64(exporter.RulesLoadErrors.WithLabelValues("broken.yaml"))
+	rules, err := loadRulesWithTuning(dir, "")
+	if err != nil || len(rules) != 1 {
+		t.Fatalf("rules=%d err=%v", len(rules), err)
+	}
+	if got := testutil.ToFloat64(exporter.RulesLoadErrors.WithLabelValues("broken.yaml")) - before; got != 1 {
+		t.Fatalf("rules_load_errors_total{file=broken.yaml} вырос на %v, want 1", got)
+	}
 }

@@ -304,8 +304,7 @@ func LoadRulesFromDirWithChecksums(dir string, verifyChecksums bool, checksumFil
 			continue
 		}
 
-		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if ext != ".yaml" && ext != ".yml" {
+		if !isRuleFileName(entry.Name()) {
 			continue
 		}
 
@@ -838,4 +837,61 @@ func validateCIDRPatterns(cidrs []string) error {
 		}
 	}
 	return nil
+}
+
+// isRuleFileName — файл каталога правил: .yaml/.yml и не метаданные AppleDouble
+// (`._*` от macOS-tar: однажды обнулили набор правил на стенде, волна 8.5).
+func isRuleFileName(name string) bool {
+	if strings.HasPrefix(name, "._") {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".yaml" || ext == ".yml"
+}
+
+// RuleFileError — файл каталога правил, который не удалось загрузить.
+type RuleFileError struct {
+	File string // имя файла в каталоге
+	Err  error
+}
+
+// LoadRulesFromDirTolerant загружает каталог правил, ПРОПУСКАЯ плохие файлы
+// (решение владельца 12.10, вопрос 11): нечитаемый, непарсящийся, не прошедший
+// валидацию файл — или файл, чьи id уже занял более ранний, — в набор не входит,
+// остальные грузятся. Пропущенные возвращаются списком для журнала и метрики;
+// ошибка — только если нельзя прочитать сам каталог. Файлы `._*` игнорируются.
+//
+// Строгий LoadRulesFromDir остаётся для тестов, `rules check` и всего, что
+// обязано сообщать о плохом файле ошибкой: терпимый загрузчик прячет дефект.
+func LoadRulesFromDirTolerant(dir string) ([]Rule, []RuleFileError, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("correlator: read rules directory: %w", err)
+	}
+	var all []Rule
+	var failed []RuleFileError
+	owner := make(map[string]string) // id правила → файл, который его занял
+	for _, entry := range entries {
+		if entry.IsDir() || !isRuleFileName(entry.Name()) {
+			continue
+		}
+		rules, err := LoadRulesFromFile(filepath.Join(dir, entry.Name()))
+		if err == nil {
+			for i := range rules {
+				if other, dup := owner[rules[i].ID]; dup && rules[i].ID != "" {
+					err = fmt.Errorf("correlator: duplicate rule ID %q, already defined in %s", rules[i].ID, other)
+					break
+				}
+			}
+		}
+		if err != nil {
+			failed = append(failed, RuleFileError{File: entry.Name(), Err: err})
+			continue
+		}
+		for i := range rules {
+			owner[rules[i].ID] = entry.Name()
+		}
+		all = append(all, rules...)
+	}
+	return all, failed, nil
 }

@@ -5138,7 +5138,15 @@ func loadRulesWithTuning(path, tuningPath string) ([]correlator.Rule, error) {
 
 	var rules []correlator.Rule
 	if info.IsDir() {
-		rules, err = correlator.LoadRulesFromDir(path)
+		// Плохой файл пропускается, остальные грузятся (решение 12.10): один
+		// битый файл раньше обнулял весь набор при старте.
+		var failed []correlator.RuleFileError
+		rules, failed, err = correlator.LoadRulesFromDirTolerant(path)
+		for _, f := range failed {
+			exporter.RulesLoadErrors.WithLabelValues(f.File).Inc()
+			slog.Error("rules: file skipped, the rest of the directory still loads",
+				slog.String("file", f.File), slog.String("path", path), slog.Any("error", f.Err))
+		}
 	} else {
 		rules, err = correlator.LoadRulesFromFile(path)
 	}

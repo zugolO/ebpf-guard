@@ -605,6 +605,36 @@ rate(ebpf_guard_syscall_events_by_nr_total[5m])
 `by_nr + kernel_filtered` is the stream as it was before the predicate. Off by default until
 wave 8.5 closes.
 
+### Counter map, final drain, crash bound
+
+The drop counts live in `syscall_counts`, a plain `LRU_HASH` keyed by `(tgid, nr)` with atomic
+adds — its memory does not depend on the number of CPUs. `ebpf_guard_syscall_counts_map_fill_ratio`
+(live entries / `max_entries`, sampled at every drain) is the eviction gauge: near 1 the LRU
+evicts pairs and the profile is undercounted. The chart alerts at > 0.9 for 15 minutes.
+
+On a graceful stop the agent drains the counters one last time **before** any BPF object is
+closed. On a crash (SIGKILL, panic) whatever was dropped since the last read is lost: the bound is
+`counters_interval` (default 5 s).
+
+### The agent's own `bpf()` calls
+
+`bpf.kernel_filter.self_exclude_bpf_calls` (default `true`): the agent reads and writes its own
+maps, and the kernel used to show it every such call as a `nr=321` event. Service commands
+(`MAP_LOOKUP_ELEM`, `MAP_UPDATE_ELEM`, `MAP_GET_NEXT_KEY`, `MAP_LOOKUP_AND_DELETE_ELEM` and the
+`*_BATCH` forms) from the agent's own tgid are no longer sent to the ring buffer; they are counted
+(`ebpf_guard_syscall_self_excluded_total`) and folded into the agent's workload profile. Destructive
+commands `{0, 3, 5, 6, 9, 33}` from the agent, and **every** command from any other process, flow
+as before.
+
+## Rule files: one bad file does not blank the rule set
+
+At startup and on every hot reload a rule file that cannot be read, parsed or validated (or whose
+rule IDs collide with an earlier file) is **skipped**; the rest of the directory loads. Each skip is
+an `ERROR` in the journal and a step of `ebpf_guard_rules_load_errors_total{file}`. Files named
+`._*` (macOS AppleDouble, left by `tar` on a Mac) are ignored. Note the consequence for a hot reload:
+a file that turns invalid removes *its* rules from the live set until it is fixed — alert on the
+counter.
+
 ## Memory Pressure Auto-Tuning
 
 ebpf-guard monitors `/proc/meminfo` and automatically downgrades profiling when free RAM falls below configurable thresholds. There are three pressure levels:

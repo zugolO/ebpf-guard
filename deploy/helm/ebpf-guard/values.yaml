@@ -360,6 +360,19 @@ prometheusRule:
               off_no_rules — no loaded rule gives a checkable argument. The hot syscall
               numbers (mmap, mprotect, arch_prctl) are forwarded whole again, with the CPU
               and ring-buffer cost the predicates were meant to remove.
+        # Rule loader: a bad rule file is skipped (the rest still loads), so the failure
+        # must be visible somewhere other than the journal.
+        - alert: EbpfGuardRuleFileSkipped
+          expr: increase(ebpf_guard_rules_load_errors_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard skipped rule file {{ $labels.file }} on {{ $labels.node }}"
+            description: >-
+              The rule loader skipped {{ $labels.file }} (unreadable, invalid, or rule IDs
+              colliding with an earlier file). The remaining rule files are loaded, so the rules
+              of this file are NOT active. See the ERROR line in the agent journal.
         # Wave 8.5 (F2): near-full kernel counter map means LRU evictions undercount
         # the events the predicate dropped (anomaly profile input).
         - alert: EbpfGuardSyscallCountsMapNearFull

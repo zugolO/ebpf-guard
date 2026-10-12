@@ -69,6 +69,17 @@ func w82Comm(s string) (c [16]byte) { copy(c[:], s); return }
 
 // w82Mix строит детерминированный микс в пропорциях ночи №4.
 func w82Mix(n int) []w82Rec {
+	return w82MixSpec(n, w82MixProportions{fileMilli: 873, sysMilli: 126, nrs: []int64{56, 56, 56, 59, 59, 41, 41, 42, 42, 157, 62, 105}})
+}
+
+// w82MixProportions — доли микса в тысячных (остаток — network) и набор номеров
+// syscall-событий. Волна 8.5, A1: тот же генератор на МЕРЕНЫХ после F1 пропорциях.
+type w82MixProportions struct {
+	fileMilli, sysMilli int
+	nrs                 []int64
+}
+
+func w82MixSpec(n int, prop w82MixProportions) []w82Rec {
 	rng := rand.New(rand.NewSource(82))
 	comms := []struct {
 		comm   string
@@ -93,13 +104,13 @@ func w82Mix(n int) []w82Rec {
 		"/run/containerd/io.containerd.runtime.v2.task/k8s.io/%d/rootfs/etc/hosts",
 		"/var/log/syslog", "/tmp/tmp.%d", "/etc/passwd",
 	}
-	sysNrs := []int64{56, 56, 56, 59, 59, 41, 41, 42, 42, 157, 62, 105}
+	sysNrs := prop.nrs
 	out := make([]w82Rec, 0, n)
 	for i := 0; i < n; i++ {
 		pid := uint32(1000 + rng.Intn(1000))
 		comm := pickComm()
 		switch x := rng.Intn(1000); {
-		case x < 873:
+		case x < prop.fileMilli:
 			f := &bpf.FileaccessEvent{PID: pid, TGID: pid, PPID: 1, Comm: w82Comm(comm),
 				ParentComm: w82Comm("systemd"), Flags: 0o2000000, CgroupID: uint64(2 + rng.Intn(64))}
 			p := paths[rng.Intn(len(paths))]
@@ -118,7 +129,7 @@ func w82Mix(n int) []w82Rec {
 				f.Op = uint8(4 + rng.Intn(4))
 			}
 			out = append(out, w82Rec{file: f})
-		case x < 999:
+		case x < prop.fileMilli+prop.sysMilli:
 			s := &bpf.SyscallEvent{PID: pid, TGID: pid, PPID: 1, Comm: w82Comm(comm),
 				ParentComm: w82Comm("systemd"), Nr: sysNrs[rng.Intn(len(sysNrs))], CgroupID: uint64(2 + rng.Intn(64))}
 			out = append(out, w82Rec{sys: s})

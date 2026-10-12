@@ -38,7 +38,7 @@ func TestWave6_1ContainerAxis(t *testing.T) {
 			File: &types.FileEvent{Op: opOpen},
 		}
 		copy(e.Comm[:], comm)
-		copy(e.File.Filename[:], path)
+		e.File.Filename = path
 		if containerID != "" {
 			e.Enrichment = &types.EnrichmentInfo{ContainerID: containerID}
 		}

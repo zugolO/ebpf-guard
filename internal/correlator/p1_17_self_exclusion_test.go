@@ -26,7 +26,7 @@ func p117FileEvent(pid uint32, procComm, path string, op uint8) types.Event {
 		Comm: p117Comm(procComm),
 		File: &types.FileEvent{Op: op},
 	}
-	copy(e.File.Filename[:], path)
+	e.File.Filename = path
 	return e
 }
 

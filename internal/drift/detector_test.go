@@ -43,8 +43,8 @@ func makeNetEvent(cid, ip string, port uint16) types.Event {
 
 func makeFileEvent(cid, path string) types.Event {
 	e := makeEvent(types.EventFileAccess, cid, "default", "mypod")
-	var fn [256]byte
-	copy(fn[:], path)
+	var fn string
+	fn = path
 	e.File = &types.FileEvent{Filename: fn}
 	return e
 }

@@ -15,8 +15,8 @@ import (
 )
 
 func fileEventForPath(comm string, path string) types.Event {
-	var filename [256]byte
-	copy(filename[:], path)
+	var filename string
+	filename = path
 	return types.Event{
 		Type: types.EventFileAccess,
 		Comm: commBytes(comm),

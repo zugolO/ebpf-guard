@@ -409,7 +409,7 @@ func idleNodeFileEvents() []types.Event {
 	for i, path := range idleNodePaths {
 		for j, comm := range idleNodeComms {
 			fe := &types.FileEvent{Op: uint8((i + j) % 3), FDPath: path}
-			copy(fe.Filename[:], path)
+			fe.Filename = path
 			e := types.Event{
 				Type:      types.EventFileAccess,
 				Timestamp: now,

@@ -254,7 +254,7 @@ func newBenchFileAlert() types.Alert {
 	var comm [16]byte
 	copy(comm[:], "cat")
 	fe := &types.FileEvent{Flags: 0, Mode: 0o644}
-	copy(fe.Filename[:], "/etc/nginx/nginx.conf")
+	fe.Filename = "/etc/nginx/nginx.conf"
 	return types.Alert{
 		ID:       "bench-file-001",
 		RuleID:   "file_access",

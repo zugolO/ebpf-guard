@@ -101,10 +101,10 @@ func TestCanaryExceptionBlocksSelfPIDEvents(t *testing.T) {
 		PID:  selfPID,
 		Comm: [16]byte{'e', 'b', 'p', 'f', '-', 'g', 'u', 'a', 'r', 'd'},
 		File: &types.FileEvent{
-			Filename: [256]byte{},
+			Filename: "",
 		},
 	}
-	copy(testEvent.File.Filename[:], canaryPath)
+	testEvent.File.Filename = canaryPath
 
 	alerts := engine.Evaluate(testEvent)
 	if len(alerts) > 0 {

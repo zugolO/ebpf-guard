@@ -231,11 +231,8 @@ func (s EventSpec) Build() (types.Event, error) {
 		e.Type = types.EventFileAccess
 		fe := &types.FileEvent{}
 		if s.File != nil {
-			copy(fe.Filename[:], s.File.Filename)
+			fe.Filename = s.File.Filename
 			fe.FDPath = s.File.FDName
-			if fe.FDPath == "" {
-				fe.FDPath = s.File.Filename
-			}
 			fe.Flags = s.File.Flags
 			fe.Mode = s.File.Mode
 			switch strings.ToLower(s.File.Op) {

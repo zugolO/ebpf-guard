@@ -395,11 +395,7 @@ func commBytes(s string) [16]byte {
 	return b
 }
 
-func filenameBytes(s string) [256]byte {
-	var b [256]byte
-	copy(b[:], s)
-	return b
-}
+func filenameBytes(s string) string { return s }
 
 func ipv4Bytes(a, b, c, d byte) [16]byte {
 	var buf [16]byte

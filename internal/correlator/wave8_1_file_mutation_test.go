@@ -48,7 +48,7 @@ func w81FileEvent(pid uint32, comm, path string, op uint8) types.Event {
 	var c [16]byte
 	copy(c[:], comm)
 	fe := &types.FileEvent{Op: op}
-	copy(fe.Filename[:], path)
+	fe.Filename = path
 	return types.Event{Type: types.EventFileAccess, PID: pid, UID: 0, Comm: c, File: fe}
 }
 

@@ -415,7 +415,7 @@ func eventToInput(event types.Event) map[string]interface{} {
 
 	if event.File != nil {
 		result["file"] = map[string]interface{}{
-			"filename": string(trimNullBytes(event.File.Filename[:])),
+			"filename": event.File.Filename,
 			"flags":    event.File.Flags,
 			"mode":     event.File.Mode,
 			"op":       event.File.Op,

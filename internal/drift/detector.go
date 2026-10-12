@@ -240,7 +240,7 @@ func (d *Detector) record(bl *ContainerBaseline, e types.Event) {
 		}
 	case types.EventFileAccess:
 		if e.File != nil {
-			path := util.BytesToString(e.File.Filename[:])
+			path := e.File.Filename
 			if path == "" {
 				return
 			}
@@ -287,7 +287,7 @@ func (d *Detector) checkDrift(bl *ContainerBaseline, e types.Event, comm string)
 
 	case types.EventFileAccess:
 		if e.File != nil {
-			path := util.BytesToString(e.File.Filename[:])
+			path := e.File.Filename
 			if path == "" {
 				break
 			}

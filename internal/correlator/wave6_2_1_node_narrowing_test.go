@@ -88,7 +88,7 @@ func w621Pod(namespace, pod string) *types.EnrichmentInfo {
 func w621File(comm, path, containerID string) types.Event {
 	e := types.Event{Type: types.EventFileAccess, PID: 4242, File: &types.FileEvent{Op: 0}}
 	copy(e.Comm[:], comm)
-	copy(e.File.Filename[:], path)
+	e.File.Filename = path
 	if containerID != "" {
 		e.Enrichment = &types.EnrichmentInfo{ContainerID: containerID}
 	}
@@ -542,7 +542,7 @@ func w621Chmod(comm, path string, mode uint32) types.Event {
 	e := types.Event{Type: types.EventFileAccess, PID: 4242,
 		File: &types.FileEvent{Op: 3, Mode: mode, FDPath: path}}
 	copy(e.Comm[:], comm)
-	copy(e.File.Filename[:], path)
+	e.File.Filename = path
 	return e
 }
 
@@ -691,7 +691,7 @@ func TestWave6_2_1SATokenDriftBehaviour(t *testing.T) {
 			File:       &types.FileEvent{Op: 1, FDPath: tokenPath},
 			Enrichment: w621Pod("default", "app-7f9")}
 		copy(e.Comm[:], comm)
-		copy(e.File.Filename[:], tokenPath)
+		e.File.Filename = tokenPath
 		return e
 	}
 

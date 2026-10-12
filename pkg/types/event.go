@@ -2,6 +2,8 @@
 package types
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -295,7 +297,10 @@ type NetworkEvent struct {
 
 // FileEvent contains file access data.
 type FileEvent struct {
-	Filename [256]byte
+	// Filename — путь из события ядра (без хвоста NUL). До волны 8.5 A1 это был
+	// [256]byte (+256 Б на каждое файловое событие); теперь строка. JSON-форма
+	// прежняя — массив из 256 чисел (см. MarshalJSON), читаются обе.
+	Filename string
 	Flags    int32 // open(2) flags
 	Mode     uint32
 	Op       uint8 // 0=open, 1=read, 2=write, 3=chmod, 4=unlink, 5=rename, 6=truncate, 7=rmdir (FILE_OP_* в bpf/common.h)
@@ -306,8 +311,70 @@ type FileEvent struct {
 	// TestFileEventSizeClass.
 	FDPathTruncated bool
 	// FDPath is the resolved file path for read/write events, populated via fd→path BPF map lookup.
-	// For open events FDPath matches Filename; for read/write events Filename would otherwise be empty.
+	// Для open-событий НЕ заполняется (волна 8.5 A1 (в), решение 12.10): путь уже в Filename,
+	// а второе поле стоило лишней строки на каждое событие. Читать путь надо через Path().
 	FDPath string
+}
+
+// Path — путь файла события: разрешённый по fd (read/write), иначе Filename (open).
+func (f *FileEvent) Path() string {
+	if f.FDPath != "" {
+		return f.FDPath
+	}
+	return f.Filename
+}
+
+// fileEventWire — прежняя JSON-форма FileEvent: Filename массивом из 256 байт.
+// Сохранённые алерты SQLite/OpenSearch (PreAlertContext) лежат именно так.
+type fileEventWire struct {
+	Filename        [256]byte
+	Flags           int32
+	Mode            uint32
+	Op              uint8
+	FDPathTruncated bool
+	FDPath          string
+}
+
+// MarshalJSON пишет СТАРУЮ форму (массив из 256 чисел): смена формы API —
+// отдельное решение вне волны 8.5.
+func (f FileEvent) MarshalJSON() ([]byte, error) {
+	w := fileEventWire{Flags: f.Flags, Mode: f.Mode, Op: f.Op, FDPathTruncated: f.FDPathTruncated, FDPath: f.FDPath}
+	copy(w.Filename[:], f.Filename)
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON принимает обе формы Filename: массив чисел (старые алерты) и строку.
+func (f *FileEvent) UnmarshalJSON(data []byte) error {
+	var w struct {
+		Filename        json.RawMessage
+		Flags           int32
+		Mode            uint32
+		Op              uint8
+		FDPathTruncated bool
+		FDPath          string
+	}
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*f = FileEvent{Flags: w.Flags, Mode: w.Mode, Op: w.Op, FDPathTruncated: w.FDPathTruncated, FDPath: w.FDPath}
+	raw := bytes.TrimSpace(w.Filename)
+	switch {
+	case len(raw) == 0 || bytes.Equal(raw, []byte("null")):
+	case raw[0] == '"':
+		return json.Unmarshal(raw, &f.Filename)
+	case raw[0] == '[':
+		var arr []uint8
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return fmt.Errorf("types: FileEvent.Filename array: %w", err)
+		}
+		if n := bytes.IndexByte(arr, 0); n >= 0 {
+			arr = arr[:n]
+		}
+		f.Filename = string(arr)
+	default:
+		return fmt.Errorf("types: FileEvent.Filename: unsupported JSON form %.20q", raw)
+	}
+	return nil
 }
 
 // TLSDirection indicates the direction of TLS traffic.

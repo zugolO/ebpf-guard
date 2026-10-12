@@ -111,7 +111,7 @@ func (s *Session) Ingest(e types.Event) {
 		}
 	case types.EventFileAccess:
 		if e.File != nil {
-			path := util.BytesToString(e.File.Filename[:])
+			path := e.File.Filename
 			if path != "" {
 				s.filePaths[path] = struct{}{}
 				dir := extractDir(path)

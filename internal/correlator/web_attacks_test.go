@@ -52,10 +52,10 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 				event := types.Event{
 					Type: types.EventFileAccess,
 					File: &types.FileEvent{
-						Filename: [256]byte{},
+						Filename: "",
 					},
 				}
-				copy(event.File.Filename[:], tc.filename)
+				event.File.Filename = tc.filename
 
 				alerts := engine.Evaluate(event)
 				hasSQLiAlert := false
@@ -96,10 +96,10 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 				event := types.Event{
 					Type: types.EventFileAccess,
 					File: &types.FileEvent{
-						Filename: [256]byte{},
+						Filename: "",
 					},
 				}
-				copy(event.File.Filename[:], tc.filename)
+				event.File.Filename = tc.filename
 
 				alerts := engine.Evaluate(event)
 				hasXSSAlert := false
@@ -149,11 +149,11 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 				event := types.Event{
 					Type: types.EventFileAccess,
 					File: &types.FileEvent{
-						Filename: [256]byte{},
+						Filename: "",
 					},
 				}
 				copy(event.Comm[:], tc.comm)
-				copy(event.File.Filename[:], tc.filename)
+				event.File.Filename = tc.filename
 
 				alerts := engine.Evaluate(event)
 				hasTraversalAlert := false
@@ -194,10 +194,10 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 				event := types.Event{
 					Type: types.EventFileAccess,
 					File: &types.FileEvent{
-						Filename: [256]byte{},
+						Filename: "",
 					},
 				}
-				copy(event.File.Filename[:], tc.filename)
+				event.File.Filename = tc.filename
 
 				alerts := engine.Evaluate(event)
 				hasInclusionAlert := false
@@ -238,10 +238,10 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 				event := types.Event{
 					Type: types.EventFileAccess,
 					File: &types.FileEvent{
-						Filename: [256]byte{},
+						Filename: "",
 					},
 				}
-				copy(event.File.Filename[:], tc.filename)
+				event.File.Filename = tc.filename
 
 				alerts := engine.Evaluate(event)
 				hasTemplateAlert := false
@@ -330,10 +330,10 @@ func TestWebAttacksEnhancedRules(t *testing.T) {
 				event := types.Event{
 					Type: types.EventFileAccess,
 					File: &types.FileEvent{
-						Filename: [256]byte{},
+						Filename: "",
 					},
 				}
-				copy(event.File.Filename[:], tc.filename)
+				event.File.Filename = tc.filename
 
 				alerts := engine.Evaluate(event)
 				hasCombinedAlert := false

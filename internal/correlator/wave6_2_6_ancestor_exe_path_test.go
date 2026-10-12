@@ -101,7 +101,7 @@ func w626Event(pid, ppid uint32, comm, parentComm, path string, op uint8) types.
 	e := types.Event{Type: types.EventFileAccess, PID: pid, PPID: ppid, File: &types.FileEvent{Op: op}}
 	copy(e.Comm[:], comm)
 	copy(e.ParentComm[:], parentComm)
-	copy(e.File.Filename[:], path)
+	e.File.Filename = path
 	return e
 }
 

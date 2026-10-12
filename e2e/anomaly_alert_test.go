@@ -200,7 +200,7 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 			Enrichment: podEnrichment,
 			File: &types.FileEvent{
 				// Baseline: app normally reads its own log directory.
-				Filename: [256]byte{'/', 'v', 'a', 'r', '/', 'l', 'o', 'g', '/', 'a', 'p', 'p', '.', 'l', 'o', 'g'},
+				Filename: "/var/log/app.log",
 				Flags:    0,
 				Mode:     0644,
 				Op:       0,
@@ -223,7 +223,7 @@ func TestAnomalyAlertWithK8sEnrichment(t *testing.T) {
 		Comm:      [16]byte{'a', 'p', 'p'},
 		Enrichment: podEnrichment,
 		File: &types.FileEvent{
-			Filename: [256]byte{'/', 'e', 't', 'c', '/', 's', 'h', 'a', 'd', 'o', 'w'},
+			Filename: "/etc/shadow",
 			Flags:    0,
 			Mode:     0644,
 			Op:       0,

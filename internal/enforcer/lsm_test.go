@@ -123,8 +123,8 @@ func (f *fakeLSM) hasPath(path string) bool {
 
 // fileAlert builds a file-access alert whose FileEvent.Filename holds path.
 func fileAlert(ruleID, path string, pid, uid uint32) types.Alert {
-	var fn [256]byte
-	copy(fn[:], path)
+	var fn string
+	fn = path
 	return types.Alert{
 		RuleID: ruleID,
 		Event: types.Event{

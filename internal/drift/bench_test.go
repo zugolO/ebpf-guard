@@ -173,8 +173,8 @@ func makeBenchSyscallEvent(nr int64, cid string) types.Event {
 func makeBenchFileEvent(path, cid string) types.Event {
 	var comm [16]byte
 	copy(comm[:], "nginx")
-	var fn [256]byte
-	copy(fn[:], path)
+	var fn string
+	fn = path
 	return types.Event{
 		Type: types.EventFileAccess,
 		PID:  1234,

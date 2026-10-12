@@ -305,7 +305,7 @@ func SerializeEvent(e types.Event) ([]byte, error) {
 	}
 	if e.File != nil {
 		m["file"] = map[string]interface{}{
-			"filename": strings.TrimRight(string(e.File.Filename[:]), "\x00"),
+			"filename": e.File.Filename,
 			"flags":    e.File.Flags,
 			"mode":     e.File.Mode,
 			"op":       e.File.Op,

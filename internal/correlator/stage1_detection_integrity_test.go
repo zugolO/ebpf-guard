@@ -66,7 +66,7 @@ func stage1FileEvent(procComm, path string, op uint8) types.Event {
 		Comm: stage1Comm(procComm),
 		File: &types.FileEvent{Op: op},
 	}
-	copy(e.File.Filename[:], path)
+	e.File.Filename = path
 	return e
 }
 

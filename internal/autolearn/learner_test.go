@@ -45,8 +45,8 @@ func makeNetworkEvent(ip string, port uint16) types.Event {
 func makeFileEvent(path string) types.Event {
 	var comm [16]byte
 	copy(comm[:], "nginx")
-	var fn [256]byte
-	copy(fn[:], path)
+	var fn string
+	fn = path
 	return types.Event{
 		Type: types.EventFileAccess,
 		PID:  1000,

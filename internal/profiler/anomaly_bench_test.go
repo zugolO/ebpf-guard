@@ -74,7 +74,7 @@ func BenchmarkProcessEventFileAccess(b *testing.B) {
 		PID:  1234,
 		Comm: [16]byte{'t', 'e', 's', 't'},
 		File: &types.FileEvent{
-			Filename: [256]byte{'/', 'e', 't', 'c', '/', 'h', 'o', 's', 't', 's'},
+			Filename: "/etc/hosts",
 			Op:       0,
 		},
 	}
@@ -90,7 +90,7 @@ func BenchmarkProcessEventFileAccess(b *testing.B) {
 		PID:  1234,
 		Comm: [16]byte{'t', 'e', 's', 't'},
 		File: &types.FileEvent{
-			Filename: [256]byte{'/', 'u', 's', 'r', '/', 's', 'h', 'a', 'r', 'e'},
+			Filename: "/usr/share",
 			Op:       0,
 		},
 	}

@@ -10,7 +10,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -271,7 +270,7 @@ func (p *ProcessProfile) recordFileEventLocked(e *types.FileEvent, weight float6
 	// Wave 8.2, C2 (№540): a view over the event's own bytes, not a copy. dir and
 	// ext only look keys up in the maps below; the one that gets stored is
 	// cloned first, so no map key aliases the event.
-	filename := util.UnsafeBytesToString(bytesToString(e.Filename[:]))
+	filename := e.Filename
 	dir := extractDirectory(filename)
 	if dir != "" {
 		if ewma := p.FileProfile.Directories[dir]; ewma != nil {

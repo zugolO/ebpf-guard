@@ -595,7 +595,7 @@ func (c *FileaccessCollector) readLoop(ctx context.Context, out chan<- types.Eve
 			// has to be attributed to the canary series right here, or the
 			// canary series would systematically undercount relative to N
 			// under the very mode (drop) it exists to measure.
-			if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.FDPath) {
+			if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.Path()) {
 				exporter.RecordCountingCanary("dropped")
 			}
 		})
@@ -660,7 +660,7 @@ func (c *FileaccessCollector) parseEvent(raw []byte, event *types.Event) error {
 	// держится ровно на этом счётчике: без него сужение слоя 3 выглядело бы
 	// успешным в обоих случаях.
 	if event.File != nil {
-		exporter.RecordFileOp(event.File.Op, event.File.Filename[0] != 0 || event.File.FDPath != "")
+		exporter.RecordFileOp(event.File.Op, event.File.Filename != "" || event.File.FDPath != "")
 	}
 	if event.Type == types.EventFileAccess && event.File != nil &&
 		event.File.Op == fileOpChmod && event.File.FDPath == "" {

@@ -478,7 +478,7 @@ func (ad *AnomalyDetector) analyzeFileBehavior(profile *ProcessProfile, event *t
 	// Use zero-alloc string for map lookups and comparison; only allocate a heap
 	// string when we need to store the value in an AnomalyContribution (which
 	// may outlive the event buffer).
-	filenameUnsafe := util.UnsafeBytesToString(event.Filename[:])
+	filenameUnsafe := event.Filename
 	dir := extractDirectory(filenameUnsafe)
 	ext := extractExtension(filenameUnsafe)
 

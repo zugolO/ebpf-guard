@@ -1130,11 +1130,19 @@ func (e *NetworkEvent) ToTypesEvent() types.Event {
 	}
 }
 
+// fileOpOpen — FILE_OP_OPEN из bpf/common.h.
+const fileOpOpen uint8 = 0
+
 // ToTypesEvent converts a FileaccessEvent to types.Event.
-// FDPath is populated for all ops: for open events it mirrors Filename; for
-// read/write events the BPF program resolved it via the fd→path map.
+// Filename и FDPath — одна строка (одна аллокация на событие). FDPath не
+// заполняется у open (волна 8.5 A1 (в)): путь уже в Filename; для остальных
+// операций его разрешила BPF-программа через карту fd→path. Читать — Path().
 func (e *FileaccessEvent) ToTypesEvent() types.Event {
-	fdPath := nullTerminatedString(e.Filename[:])
+	path := nullTerminatedString(e.Filename[:])
+	fdPath := path
+	if e.Op == fileOpOpen {
+		fdPath = ""
+	}
 	return types.Event{
 		Type:       types.EventFileAccess,
 		Timestamp:  types.KtimeToEpoch(e.Timestamp),
@@ -1146,7 +1154,7 @@ func (e *FileaccessEvent) ToTypesEvent() types.Event {
 		Comm:       e.Comm,
 		ParentComm: e.ParentComm,
 		File: &types.FileEvent{
-			Filename:        e.Filename,
+			Filename:        path,
 			Flags:           e.Flags,
 			Mode:            e.Mode,
 			Op:              e.Op,

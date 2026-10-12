@@ -69,11 +69,7 @@ func ipv4(addr string) [16]byte {
 	return b
 }
 
-func filename(path string) [256]byte {
-	var b [256]byte
-	copy(b[:], path)
-	return b
-}
+func filename(path string) string { return path }
 
 // ── scenarios ─────────────────────────────────────────────────────────────────
 

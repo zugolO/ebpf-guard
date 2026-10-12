@@ -199,7 +199,7 @@ func legacyMutationHits(t *testing.T, engine *RuleEngine) (hits map[string]int, 
 					}
 					for _, op := range w81MutationOps {
 						e.File = &types.FileEvent{Op: op}
-						copy(e.File.Filename[:], p)
+						e.File.Filename = p
 						if len(single.Evaluate(e)) > 0 {
 							hits[r.ID]++
 						}

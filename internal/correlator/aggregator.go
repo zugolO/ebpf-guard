@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -182,7 +181,7 @@ func alertPath(alert types.Alert) string {
 		if alert.Event.File.FDPath != "" {
 			return alert.Event.File.FDPath
 		}
-		return util.BytesToString(alert.Event.File.Filename[:])
+		return alert.Event.File.Filename
 	}
 	return ""
 }

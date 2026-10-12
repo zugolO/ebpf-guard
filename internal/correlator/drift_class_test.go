@@ -164,8 +164,8 @@ func TestCorrelationEngine_DriftClassSuppressedDuringLearning(t *testing.T) {
 
 	ctx := context.Background()
 	fileEvent := func(comm string, path string) types.Event {
-		var filename [256]byte
-		copy(filename[:], path)
+		var filename string
+		filename = path
 		var commBytes [16]byte
 		copy(commBytes[:], comm)
 		return types.Event{
@@ -218,8 +218,8 @@ func TestCorrelationEngine_DriftClassAlertsWhenProfilerNotConfigured(t *testing.
 	ce := NewCorrelationEngineWithConfig(cfg)
 	defer ce.Close()
 
-	var filename [256]byte
-	copy(filename[:], "/etc/passwd")
+	var filename string
+	filename = "/etc/passwd"
 	alerts := ce.Ingest(context.Background(), types.Event{
 		Type: types.EventFileAccess,
 		File: &types.FileEvent{Filename: filename},

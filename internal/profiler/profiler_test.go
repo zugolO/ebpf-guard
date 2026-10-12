@@ -118,8 +118,8 @@ func TestProcessProfile(t *testing.T) {
 	assert.Equal(t, uint64(1), profile.NetworkProfile.TotalConnections)
 
 	// Test file event recording
-	var filename [256]byte
-	copy(filename[:], "/etc/passwd")
+	var filename string
+	filename = "/etc/passwd"
 	fileEvent := &types.FileEvent{
 		Filename: filename,
 	}
@@ -202,8 +202,8 @@ func TestProfileManager_RecordEvent(t *testing.T) {
 	assert.Equal(t, uint64(1), profile.NetworkProfile.TotalConnections)
 
 	// Record file event
-	var filename [256]byte
-	copy(filename[:], "/tmp/test.txt")
+	var filename string
+	filename = "/tmp/test.txt"
 	fileEvent := types.Event{
 		Type: types.EventFileAccess,
 		PID:  1234,
@@ -340,8 +340,8 @@ func TestAnomalyDetector_FileBehavior(t *testing.T) {
 
 	// Learn normal file access
 	for i := 0; i < 150; i++ {
-		var filename [256]byte
-		copy(filename[:], "/tmp/normal.txt")
+		var filename string
+		filename = "/tmp/normal.txt"
 		event := types.Event{
 			Type: types.EventFileAccess,
 			PID:  1234,
@@ -356,8 +356,8 @@ func TestAnomalyDetector_FileBehavior(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Anomalous file access
-	var filename [256]byte
-	copy(filename[:], "/etc/shadow")
+	var filename string
+	filename = "/etc/shadow"
 	event := types.Event{
 		Type: types.EventFileAccess,
 		PID:  1234,

@@ -44,7 +44,7 @@ func TestIngestAsyncPriority_BothClassesDeliveredOnDrain(t *testing.T) {
 			Type: types.EventTCPConnect, PID: pid, Network: &types.NetworkEvent{Dport: 8888},
 		}, true)
 		fe := &types.FileEvent{}
-		copy(fe.Filename[:], "/etc/prio-test")
+		fe.Filename = "/etc/prio-test"
 		eng.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: pid, File: fe}, false)
 	}
 
@@ -127,7 +127,7 @@ func TestIngestAsyncPriority_AlertIdentityVsLegacy(t *testing.T) {
 				send(types.Event{Type: types.EventTCPConnect, PID: pid, Network: &types.NetworkEvent{Dport: uint16(4440 + i%8)}})
 			case 1:
 				fe := &types.FileEvent{}
-				copy(fe.Filename[:], []string{"/etc/id-test", "/tmp/x"}[i%2])
+				fe.Filename = []string{"/etc/id-test", "/tmp/x"}[i%2]
 				send(types.Event{Type: types.EventFileAccess, PID: pid, File: fe})
 			default:
 				send(types.Event{Type: types.EventSyscall, PID: pid, Syscall: &types.SyscallEvent{Nr: int64(57 + i%4)}})
@@ -182,7 +182,7 @@ func TestIngestAsyncPriority_AnomalyIdentityVsLegacy(t *testing.T) {
 			ne := types.Event{Type: types.EventTCPConnect, PID: uint32(100 + i%5), Comm: comm,
 				Network: &types.NetworkEvent{Dport: port}}
 			fe := &types.FileEvent{}
-			copy(fe.Filename[:], path)
+			fe.Filename = path
 			return ne, types.Event{Type: types.EventFileAccess, PID: uint32(100 + i%5), Comm: comm, File: fe}
 		}
 		// learning: stable behaviour, run past the learning period
@@ -271,7 +271,7 @@ func TestIngestAsyncPriority_DriftIdentityVsLegacy(t *testing.T) {
 			ne := types.Event{Type: types.EventTCPConnect, PID: pid, Comm: comm,
 				Network: &types.NetworkEvent{Dport: port}}
 			fe := &types.FileEvent{}
-			copy(fe.Filename[:], path)
+			fe.Filename = path
 			return ne, types.Event{Type: types.EventFileAccess, PID: pid, Comm: comm, File: fe}
 		}
 		// обучение: устойчивые сигнатуры обоих классов, больше MinSamples

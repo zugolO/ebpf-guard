@@ -668,7 +668,7 @@ func TestFalcoImporter_RoundTrip_File(t *testing.T) {
 		File: &types.FileEvent{
 			Op:       0, // "open"
 			FDPath:   "/etc/shadow",
-			Filename: [256]byte{},
+			Filename: "",
 		},
 	}
 	alerts := engine.Evaluate(event)

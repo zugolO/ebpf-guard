@@ -14,8 +14,7 @@ func extractFilePath(alert types.Alert) string {
 	if alert.Event.File == nil {
 		return ""
 	}
-	raw := bytesToString(alert.Event.File.Filename[:])
-	p := string(raw)
+	p := alert.Event.File.Filename
 	if p == "" {
 		return ""
 	}

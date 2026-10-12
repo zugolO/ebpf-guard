@@ -63,7 +63,7 @@ func TestSerializeEvent_DNS(t *testing.T) {
 func TestSerializeEvent_File(t *testing.T) {
 	ev := buildEvent(types.EventFileAccess)
 	ev.File = &types.FileEvent{Flags: 2, Op: 1}
-	copy(ev.File.Filename[:], "/etc/shadow")
+	ev.File.Filename = "/etc/shadow"
 
 	data, err := SerializeEvent(ev)
 	require.NoError(t, err)

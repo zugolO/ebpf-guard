@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -829,7 +828,7 @@ func driftSignatureTarget(e types.Event) string {
 		if e.File != nil {
 			path := e.File.FDPath
 			if path == "" {
-				path = util.BytesToString(e.File.Filename[:])
+				path = e.File.Filename
 			}
 			return normalizeDriftPath(path)
 		}

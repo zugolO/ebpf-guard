@@ -183,7 +183,7 @@ func TestProfileManager_ConcurrentDifferentEventTypes(t *testing.T) {
 					Type: types.EventFileAccess,
 					PID:  uint32(id),
 					File: &types.FileEvent{
-						Filename: [256]byte{'/', 'e', 't', 'c', '/', 'p', 'a', 's', 's', 'w', 'd'},
+						Filename: "/etc/passwd",
 					},
 				}
 				pm.RecordEvent(event)

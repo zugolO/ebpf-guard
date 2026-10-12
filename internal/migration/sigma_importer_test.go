@@ -620,8 +620,8 @@ level: high
 
 	engine := correlator.NewRuleEngine(rules)
 
-	fname := [256]byte{}
-	copy(fname[:], "/etc/shadow")
+	fname := ""
+	fname = "/etc/shadow"
 	event := types.Event{
 		Type: types.EventFileAccess,
 		File: &types.FileEvent{Filename: fname},

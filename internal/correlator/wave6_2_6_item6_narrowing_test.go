@@ -82,7 +82,7 @@ func w626i6Rule(t *testing.T, file, id string) *RuleEngine {
 func w626i6File(pid uint32, comm, path string, id *types.EnrichmentInfo) types.Event {
 	e := types.Event{Type: types.EventFileAccess, PID: pid, File: &types.FileEvent{Op: 0}}
 	copy(e.Comm[:], comm)
-	copy(e.File.Filename[:], path)
+	e.File.Filename = path
 	e.Enrichment = id
 	return e
 }

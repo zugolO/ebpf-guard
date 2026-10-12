@@ -153,7 +153,7 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 		// loss as an unexplained one — the inverse of the background bias
 		// 5.9.8b exists to remove. Counted here rather than in main.go
 		// because an event dropped at this hop never reaches processEvent.
-		if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.FDPath) {
+		if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.Path()) {
 			exporter.RecordCountingCanary("dropped")
 		}
 	}

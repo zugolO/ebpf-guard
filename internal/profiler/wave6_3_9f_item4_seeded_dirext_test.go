@@ -17,7 +17,7 @@ func TestWave639F_Item4_SeededPair_SuppressesLoaderPrologueNoise(t *testing.T) {
 	profile := NewProcessProfile(4242, "sleep")
 
 	event := &types.FileEvent{}
-	copy(event.Filename[:], "/etc/ld.so.cache")
+	event.Filename = "/etc/ld.so.cache"
 
 	var out []AnomalyContribution
 	ad.analyzeFileBehavior(profile, event, &out)
@@ -39,7 +39,7 @@ func TestWave639F_Item4_SeededDirectory_DoesNotBlindOtherExtensions(t *testing.T
 	profile := NewProcessProfile(4242, "sleep")
 
 	event := &types.FileEvent{}
-	copy(event.Filename[:], "/etc/shadow")
+	event.Filename = "/etc/shadow"
 
 	var out []AnomalyContribution
 	ad.analyzeFileBehavior(profile, event, &out)
@@ -84,7 +84,7 @@ func TestWave639F_Item5_SeededSuppressionsCounted(t *testing.T) {
 	before := SeededSuppressionsTotal()
 
 	event := &types.FileEvent{}
-	copy(event.Filename[:], "/etc/ld.so.cache")
+	event.Filename = "/etc/ld.so.cache"
 	var out []AnomalyContribution
 	ad.analyzeFileBehavior(profile, event, &out)
 
@@ -95,7 +95,7 @@ func TestWave639F_Item5_SeededSuppressionsCounted(t *testing.T) {
 
 	// A non-seeded pair must not move the counter.
 	event2 := &types.FileEvent{}
-	copy(event2.Filename[:], "/etc/shadow")
+	event2.Filename = "/etc/shadow"
 	var out2 []AnomalyContribution
 	ad.analyzeFileBehavior(profile, event2, &out2)
 
@@ -122,7 +122,7 @@ func TestWave639F_Item5_SeedingSurvivesRestore(t *testing.T) {
 
 	ad := NewAnomalyDetector(0.5, time.Hour, 0.3)
 	event := &types.FileEvent{}
-	copy(event.Filename[:], "/etc/ld.so.cache")
+	event.Filename = "/etc/ld.so.cache"
 	var out []AnomalyContribution
 	ad.analyzeFileBehavior(restored, event, &out)
 	for _, c := range out {
@@ -149,7 +149,7 @@ func TestWave639F_SeededHwcaps_FromRunB(t *testing.T) {
 	} {
 		profile := NewProcessProfile(5151, "sleep")
 		event := &types.FileEvent{}
-		copy(event.Filename[:], path)
+		event.Filename = path
 		var out []AnomalyContribution
 		ad.analyzeFileBehavior(profile, event, &out)
 		for _, c := range out {
@@ -162,7 +162,7 @@ func TestWave639F_SeededHwcaps_FromRunB(t *testing.T) {
 	// Negative control: same seeded directory, extension outside the loader set.
 	profile := NewProcessProfile(5152, "sleep")
 	event := &types.FileEvent{}
-	copy(event.Filename[:], "/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/payload.sh")
+	event.Filename = "/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/payload.sh"
 	var out []AnomalyContribution
 	ad.analyzeFileBehavior(profile, event, &out)
 	found := false

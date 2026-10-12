@@ -192,10 +192,18 @@ func TestFileaccessEvent_ToTypesEvent(t *testing.T) {
 	assert.Equal(t, types.EventFileAccess, result.Type)
 	assert.Equal(t, uint32(100), result.PPID)
 	assert.NotNil(t, result.File)
-	assert.Equal(t, evt.Filename, result.File.Filename)
+	assert.Equal(t, "/tmp/test", result.File.Filename)
 	assert.Equal(t, evt.Mode, result.File.Mode)
-	assert.Equal(t, "/tmp/test", result.File.FDPath)
+	// A1 (в): у open FDPath не заполняется, путь читается через Path().
+	assert.Equal(t, "", result.File.FDPath)
+	assert.Equal(t, "/tmp/test", result.File.Path())
 	assert.False(t, result.File.FDPathTruncated)
+
+	// У read/write путь разрешён по fd — FDPath заполнен (той же строкой).
+	evt.Op = 1
+	rw := evt.ToTypesEvent()
+	assert.Equal(t, "/tmp/test", rw.File.FDPath)
+	assert.Equal(t, "/tmp/test", rw.File.Filename)
 }
 
 func TestFileaccessEvent_ToTypesEvent_Truncated(t *testing.T) {

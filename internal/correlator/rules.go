@@ -2,7 +2,6 @@
 package correlator
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash"
@@ -1053,10 +1052,7 @@ func fileAccessPath(e types.Event) string {
 	if e.Type != types.EventFileAccess || e.File == nil {
 		return ""
 	}
-	if e.File.FDPath != "" {
-		return e.File.FDPath
-	}
-	return util.BytesToString(e.File.Filename[:])
+	return e.File.Path()
 }
 
 // filePathDetails wraps path into the alert Details map, or returns nil when
@@ -1605,21 +1601,9 @@ func eventFilename(e *types.Event, c *eventFieldCache) string {
 	return c.filename
 }
 
-// fileFilenameString is Filename as a string. ToTypesEvent already built FDPath
-// from the same bytes, so when the two are equal FDPath is returned and the
-// per-event copy is skipped (wave 8.2, C2, №540); the comparison itself does not
-// allocate. Anything else — tests, read/write events whose FDPath was resolved
-// later — falls back to a copy, so the result is always equal to Filename.
+// fileFilenameString — Filename события. После A1 (б) это уже строка, копии нет.
 func fileFilenameString(f *types.FileEvent) string {
-	b := f.Filename[:]
-	n := bytes.IndexByte(b, 0)
-	if n < 0 {
-		n = len(b)
-	}
-	if f.FDPath != "" && f.FDPath == string(b[:n]) {
-		return f.FDPath
-	}
-	return string(b[:n])
+	return f.Filename
 }
 
 // getFieldValue extracts a field value from an event based on field name.
@@ -1791,7 +1775,7 @@ func (re *RuleEngine) getFieldValueCached(e *types.Event, field string, dnsAnaly
 		case "filename":
 			return eventFilename(e, cache)
 		case "fd.name":
-			return e.File.FDPath
+			return e.File.Path()
 		case "fd.name_truncated":
 			if e.File.FDPathTruncated {
 				return "true"

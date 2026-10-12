@@ -13,11 +13,7 @@ func mkComm(s string) [16]byte {
 	return b
 }
 
-func mkFilename(s string) [256]byte {
-	var b [256]byte
-	copy(b[:], s)
-	return b
-}
+func mkFilename(s string) string { return s }
 
 // TestGetFieldValue exercises the per-event-type field extraction switch.
 func TestGetFieldValue(t *testing.T) {

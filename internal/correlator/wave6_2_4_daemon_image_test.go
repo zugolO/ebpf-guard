@@ -122,7 +122,7 @@ func w624File(pid uint32, comm, path string, op uint8) types.Event {
 func w624FileWithPPID(pid, ppid uint32, comm, path string, op uint8) types.Event {
 	e := types.Event{Type: types.EventFileAccess, PID: pid, PPID: ppid, File: &types.FileEvent{Op: op}}
 	copy(e.Comm[:], comm)
-	copy(e.File.Filename[:], path)
+	e.File.Filename = path
 	return e
 }
 

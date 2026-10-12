@@ -111,7 +111,7 @@ func TestWave8_1_EventFieldCacheMatchesUncached(t *testing.T) {
 	var file types.Event
 	file.Type = types.EventFileAccess
 	file.File = &types.FileEvent{}
-	copy(file.File.Filename[:], "/usr/local/bin/evil.sh")
+	file.File.Filename = "/usr/local/bin/evil.sh"
 
 	syscallFields := []string{"comm", "parent_comm"}
 	fileFields := []string{"filename", "directory", "extension"}

@@ -154,7 +154,7 @@ contains_path(s, substr) {
 					PID:  1236,
 					Comm: [16]byte{'c', 'a', 't', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 					File: &types.FileEvent{
-						Filename: [256]byte{'/', 'e', 't', 'c', '/', 's', 'h', 'a', 'd', 'o', 'w', 0},
+						Filename: "/etc/shadow",
 						Op:       0,
 					},
 				},

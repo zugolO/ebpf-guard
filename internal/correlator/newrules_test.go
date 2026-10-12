@@ -48,7 +48,7 @@ func nrSyscall(nr int64) types.Event {
 
 func nrFile(path string) types.Event {
 	fe := &types.FileEvent{}
-	copy(fe.Filename[:], path)
+	fe.Filename = path
 	return types.Event{
 		Type:      types.EventFileAccess,
 		Timestamp: 1,

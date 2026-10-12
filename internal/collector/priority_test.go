@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -295,7 +294,7 @@ func TestPriorityRouting_PooledSlotsKeepEventIdentity(t *testing.T) {
 		} else {
 			e.Type = types.EventFileAccess
 			fe := &types.FileEvent{}
-			copy(fe.Filename[:], fmt.Sprintf("/f/%d", i+1))
+			fe.Filename = fmt.Sprintf("/f/%d", i+1)
 			e.File = fe
 		}
 		events = append(events, e)
@@ -319,7 +318,7 @@ func TestPriorityRouting_PooledSlotsKeepEventIdentity(t *testing.T) {
 				bad.Add(1)
 			}
 		case types.EventFileAccess:
-			if e.File == nil || e.Network != nil || util.BytesToString(e.File.Filename[:]) != fmt.Sprintf("/f/%d", e.PID) {
+			if e.File == nil || e.Network != nil || e.File.Filename != fmt.Sprintf("/f/%d", e.PID) {
 				bad.Add(1)
 			}
 		default:

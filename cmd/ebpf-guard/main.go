@@ -3061,7 +3061,7 @@ func processEvent(
 	// in BPF (risk №3 of постановка №2.9.8: a path-prefix compare in the
 	// fileaccess hot path risked the 3M-events/10min throughput this
 	// collector already runs at).
-	if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.FDPath) {
+	if event.Type == types.EventFileAccess && event.File != nil && exporter.IsCountingCanaryPath(event.File.Path()) {
 		exporter.RecordCountingCanary("events")
 	}
 

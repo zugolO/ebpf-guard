@@ -46,7 +46,7 @@ func (s *w85Stream) next() types.Event {
 	case r < 9:
 		e.Type = types.EventFileAccess
 		fe := &types.FileEvent{}
-		copy(fe.Filename[:], []string{"/etc/passwd", "/var/log/syslog", "/tmp/x.sh"}[s.rng.Intn(3)])
+		fe.Filename = []string{"/etc/passwd", "/var/log/syslog", "/tmp/x.sh"}[s.rng.Intn(3)]
 		e.File = fe
 	default:
 		e.Type = types.EventTCPConnect

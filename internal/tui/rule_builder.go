@@ -374,7 +374,7 @@ func rbGetFieldValue(e types.Event, field string) string {
 		}
 		switch field {
 		case "filename", "fd.name":
-			f := strings.TrimRight(string(e.File.Filename[:]), "\x00")
+			f := e.File.Filename
 			if f == "" {
 				f = e.File.FDPath
 			}
@@ -544,7 +544,7 @@ func extractEventFields(e types.Event) (eventType string, conds []ConditionDraft
 	case types.EventFileAccess:
 		eventType = "file"
 		if e.File != nil {
-			filename := strings.TrimRight(string(e.File.Filename[:]), "\x00")
+			filename := e.File.Filename
 			if filename == "" {
 				filename = e.File.FDPath
 			}
@@ -629,7 +629,7 @@ func formatEventDesc(e types.Event) string {
 		}
 	case types.EventFileAccess:
 		if e.File != nil {
-			fname := strings.TrimRight(string(e.File.Filename[:]), "\x00")
+			fname := e.File.Filename
 			if fname == "" {
 				fname = e.File.FDPath
 			}

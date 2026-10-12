@@ -59,7 +59,7 @@ func TestEngineIngest_MatchingRules(t *testing.T) {
 	// Matching file event → alert.
 	fileAlerts := ce.Ingest(ctx, types.Event{
 		Type: types.EventFileAccess, PID: 12, Comm: mkComm16("cat"),
-		File: &types.FileEvent{Filename: func() [256]byte { var b [256]byte; copy(b[:], "/etc/shadow"); return b }()},
+		File: &types.FileEvent{Filename: "/etc/shadow"},
 	})
 	require.NotEmpty(t, fileAlerts)
 	assert.Equal(t, "r-file", fileAlerts[0].RuleID)

@@ -44,7 +44,7 @@ func TestReplay_MatchesRule(t *testing.T) {
 		{
 			Type: types.EventFileAccess,
 			PID:  1234,
-			File: &types.FileEvent{Filename: [256]byte{}},
+			File: &types.FileEvent{Filename: ""},
 		},
 		{
 			Type: types.EventFileAccess,
@@ -53,7 +53,7 @@ func TestReplay_MatchesRule(t *testing.T) {
 		},
 	}
 	// Set canary filename on first event.
-	copy(events[0].File.Filename[:], "/etc/shadow.canary")
+	events[0].File.Filename = "/etc/shadow.canary"
 
 	result := Replay(context.Background(), engine, events, time.Hour, "/fake", 20)
 	if result.TotalEvents != 2 {
@@ -89,7 +89,7 @@ func TestReplay_SampleLimit(t *testing.T) {
 	events := make([]types.Event, 30)
 	for i := range events {
 		fe := &types.FileEvent{}
-		copy(fe.Filename[:], "/etc/shadow.canary")
+		fe.Filename = "/etc/shadow.canary"
 		events[i] = types.Event{Type: types.EventFileAccess, PID: uint32(i), File: fe}
 	}
 

@@ -1702,7 +1702,7 @@ func (re *RuleEngine) getFieldValueCached(e *types.Event, field string, dnsAnaly
 		// system.slice и при промахе — исключение не применяется. Кэш по
 		// cgroup_id дешёвый, но промах пересканирует system.slice, поэтому
 		// условие на эту ось в "and" ставится ПОСЛЕ comm/пути, как exe_path.
-		return resolveSystemdUnit(e.CgroupID)
+		return resolveSystemdUnit(e.CgroupID, e.UnitCgroupID)
 	}
 
 	switch e.Type {

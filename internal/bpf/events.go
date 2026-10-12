@@ -32,6 +32,18 @@ const EventTypeSyscall uint32 = 1
 // than EventCgroupIDOffset+8 comes from an older BPF object and yields 0.
 const EventCgroupIDOffset = 332
 
+// EventUnitCgroupIDOffset is offsetof(struct event, unit_cgroup_id) (wave 8.5, U1):
+// the id of the level-2 ancestor cgroup (directly under system.slice for the
+// host hierarchy), right after cgroup_id; sizeof(struct event) = 348. A record
+// shorter than EventUnitCgroupIDOffset+8 comes from an older BPF object and
+// yields 0 — the resolver then falls back to the per-cgroup-id path.
+const EventUnitCgroupIDOffset = 340
+
+// unitCgroupIDTail reads the trailing level-2 ancestor cgroup id, 0 if absent.
+func unitCgroupIDTail(raw []byte) uint64 {
+	return cgroupIDTailAt(raw, EventUnitCgroupIDOffset)
+}
+
 // Wave 6.6 revision item 8: the same trailing cgroup_id, appended to the event
 // structs that struct event's item 10 did not cover, so kmod, DNS and both TLS
 // producers stop going past the pid->pod recovery in internal/k8s/enricher.go.
@@ -152,6 +164,8 @@ type SyscallEvent struct {
 	Args [6]uint64
 	// CgroupID is the record's trailing cgroup_id (offset EventCgroupIDOffset).
 	CgroupID uint64
+	// UnitCgroupID is the level-2 ancestor cgroup id (offset EventUnitCgroupIDOffset), 0 if absent.
+	UnitCgroupID uint64
 }
 
 // NetworkEvent matches the C struct event for network events.
@@ -189,6 +203,8 @@ type NetworkEvent struct {
 	Family uint8 // Address family: 2=AF_INET, 10=AF_INET6
 	// CgroupID is the record's trailing cgroup_id (offset EventCgroupIDOffset).
 	CgroupID uint64
+	// UnitCgroupID is the level-2 ancestor cgroup id (offset EventUnitCgroupIDOffset), 0 if absent.
+	UnitCgroupID uint64
 }
 
 // FileaccessEvent matches the C struct event for file events.
@@ -222,6 +238,8 @@ type FileaccessEvent struct {
 	Op          uint8
 	FDTruncated uint8
 	CgroupID    uint64 // trailing cgroup_id (offset EventCgroupIDOffset)
+	// UnitCgroupID is the level-2 ancestor cgroup id (offset EventUnitCgroupIDOffset), 0 if absent.
+	UnitCgroupID uint64
 }
 
 // PrivescRawEvent is the wire-format event for EVENT_TYPE_PRIVESC.
@@ -667,6 +685,7 @@ func ParseSyscallEventInto(raw []byte, out *SyscallEvent) error {
 		offset += 8
 	}
 	out.CgroupID = cgroupIDTail(raw)
+	out.UnitCgroupID = unitCgroupIDTail(raw)
 	return nil
 }
 
@@ -714,6 +733,7 @@ func ParseNetworkEventInto(raw []byte, out *NetworkEvent) error {
 	offset++
 	out.Family = raw[offset]
 	out.CgroupID = cgroupIDTail(raw)
+	out.UnitCgroupID = unitCgroupIDTail(raw)
 	return nil
 }
 
@@ -760,6 +780,7 @@ func ParseFileaccessEventInto(raw []byte, out *FileaccessEvent) error {
 	off++
 	out.FDTruncated = raw[off]
 	out.CgroupID = cgroupIDTail(raw)
+	out.UnitCgroupID = unitCgroupIDTail(raw)
 	return nil
 }
 
@@ -1090,15 +1111,16 @@ func ParseTlsClientHelloEvent(raw []byte) (*TlsClientHelloRawEvent, error) {
 // ToTypesEvent converts a SyscallEvent to types.Event.
 func (e *SyscallEvent) ToTypesEvent() types.Event {
 	return types.Event{
-		Type:       types.EventSyscall,
-		Timestamp:  types.KtimeToEpoch(e.Timestamp),
-		PID:        e.PID,
-		TGID:       e.TGID,
-		PPID:       e.PPID,
-		CgroupID:   e.CgroupID,
-		UID:        e.UID,
-		Comm:       e.Comm,
-		ParentComm: e.ParentComm,
+		Type:         types.EventSyscall,
+		Timestamp:    types.KtimeToEpoch(e.Timestamp),
+		PID:          e.PID,
+		TGID:         e.TGID,
+		PPID:         e.PPID,
+		CgroupID:     e.CgroupID,
+		UnitCgroupID: e.UnitCgroupID,
+		UID:          e.UID,
+		Comm:         e.Comm,
+		ParentComm:   e.ParentComm,
 		Syscall: &types.SyscallEvent{
 			Nr:   e.Nr,
 			Ret:  e.Ret,
@@ -1110,15 +1132,16 @@ func (e *SyscallEvent) ToTypesEvent() types.Event {
 // ToTypesEvent converts a NetworkEvent to types.Event.
 func (e *NetworkEvent) ToTypesEvent() types.Event {
 	return types.Event{
-		Type:       types.EventTCPConnect,
-		Timestamp:  types.KtimeToEpoch(e.Timestamp),
-		PID:        e.PID,
-		TGID:       e.TGID,
-		PPID:       e.PPID,
-		CgroupID:   e.CgroupID,
-		UID:        e.UID,
-		Comm:       e.Comm,
-		ParentComm: e.ParentComm,
+		Type:         types.EventTCPConnect,
+		Timestamp:    types.KtimeToEpoch(e.Timestamp),
+		PID:          e.PID,
+		TGID:         e.TGID,
+		PPID:         e.PPID,
+		CgroupID:     e.CgroupID,
+		UnitCgroupID: e.UnitCgroupID,
+		UID:          e.UID,
+		Comm:         e.Comm,
+		ParentComm:   e.ParentComm,
 		Network: &types.NetworkEvent{
 			Saddr:  e.Saddr,
 			Daddr:  e.Daddr,
@@ -1144,15 +1167,16 @@ func (e *FileaccessEvent) ToTypesEvent() types.Event {
 		fdPath = ""
 	}
 	return types.Event{
-		Type:       types.EventFileAccess,
-		Timestamp:  types.KtimeToEpoch(e.Timestamp),
-		PID:        e.PID,
-		TGID:       e.TGID,
-		PPID:       e.PPID,
-		CgroupID:   e.CgroupID,
-		UID:        e.UID,
-		Comm:       e.Comm,
-		ParentComm: e.ParentComm,
+		Type:         types.EventFileAccess,
+		Timestamp:    types.KtimeToEpoch(e.Timestamp),
+		PID:          e.PID,
+		TGID:         e.TGID,
+		PPID:         e.PPID,
+		CgroupID:     e.CgroupID,
+		UnitCgroupID: e.UnitCgroupID,
+		UID:          e.UID,
+		Comm:         e.Comm,
+		ParentComm:   e.ParentComm,
 		File: &types.FileEvent{
 			Filename:        path,
 			Flags:           e.Flags,

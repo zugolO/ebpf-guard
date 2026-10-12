@@ -147,11 +147,26 @@ struct event {
 	 * payload (266) is padded to 268 and the union aligned to 8 (measured with
 	 * offsetof on host clang, not derived from the field list). */
 	__u64 cgroup_id;
+	/* Волна 8.5, U1: id каталога-предка на уровне 2 иерархии cgroup2 — для
+	 * корня /sys/fs/cgroup это каталог ПРЯМО под system.slice (system.slice —
+	 * уровень 1), то есть юнит. Пусть у задачи cgroup глубже (вложенный
+	 * payload юнита) — id всё равно юнита верхнего уровня; для задачи выше
+	 * уровня 2 ядро отдаёт 0. Что уровень-2 каталог лежит именно под
+	 * system.slice, ядро не проверяет: userspace мапит id на имя одним ReadDir
+	 * system.slice, и id из чужого поддерева (kubepods.slice, user.slice) в
+	 * этой карте просто нет. Хвостом после cgroup_id, как и сам cgroup_id:
+	 * прежние смещения не двигаются, старая запись даёт 0. */
+	__u64 unit_cgroup_id;
 } __attribute__((packed));
 
-#define EVENT_CGROUP_ID_OFFSET 332 /* offsetof(struct event, cgroup_id); sizeof(struct event) = 340 */
+#define EVENT_CGROUP_ID_OFFSET 332 /* offsetof(struct event, cgroup_id) */
 _Static_assert(__builtin_offsetof(struct event, cgroup_id) == EVENT_CGROUP_ID_OFFSET,
 	       "struct event layout moved: Go parsers (internal/bpf/events.go) read cgroup_id at this offset");
+#define EVENT_UNIT_CGROUP_ID_OFFSET 340 /* offsetof(struct event, unit_cgroup_id); sizeof(struct event) = 348 */
+_Static_assert(__builtin_offsetof(struct event, unit_cgroup_id) == EVENT_UNIT_CGROUP_ID_OFFSET,
+	       "struct event layout moved: Go parsers (internal/bpf/events.go) read unit_cgroup_id at this offset");
+_Static_assert(sizeof(struct event) == EVENT_UNIT_CGROUP_ID_OFFSET + 8,
+	       "struct event grew past unit_cgroup_id: update EventUnitCgroupIDOffset and the parser minimums");
 
 /*
  * struct kmod_event - Sent when a kernel module is loaded.
@@ -1129,6 +1144,7 @@ static __always_inline void fill_process_info(struct event *e)
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->timestamp = bpf_ktime_get_ns();
 	e->cgroup_id = bpf_get_current_cgroup_id();
+	e->unit_cgroup_id = bpf_get_current_ancestor_cgroup_id(2);
 }
 
 #endif /* __EBPF_GUARD_COMMON_H */

@@ -214,6 +214,11 @@ type Event struct {
 	// 6.6); 0 means the record did not carry it (older BPF object). Unlike PID it
 	// outlives the process, so pid→pod enrichment can resolve through it.
 	CgroupID uint64
+	// UnitCgroupID is the id of the level-2 ancestor cgroup read in-kernel (wave 8.5 U1):
+	// for the host hierarchy the directory directly under system.slice, i.e. the
+	// systemd unit. 0 — the record did not carry it (older BPF object, collector
+	// without the field, task above level 2): the resolver falls back to CgroupID.
+	UnitCgroupID uint64
 	// Type-specific fields below (union-style, only one populated)
 	Syscall   *SyscallEvent
 	Network   *NetworkEvent

@@ -341,6 +341,37 @@ prometheusRule:
               processes are running outside containers, the pod watcher cache is lagging, or
               container IDs cannot be extracted from cgroups. Alerts from these events will
               lack namespace/label enrichment.
+        # Wave 8.5 (F1): in-kernel syscall argument predicates. off_config is the
+        # operator's own choice (the default until the closing night of 8.5), so it
+        # is NOT alerted; every other off_* state means the predicates were wanted
+        # but are silently inactive and the hot syscall numbers flow whole again.
+        - alert: EbpfGuardKernelPredicatesOff
+          expr: ebpf_guard_kernel_predicate_state{state=~"off_.+", state!="off_config"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard kernel predicates are off ({{ $labels.state }}) on {{ $labels.node }}"
+            description: >-
+              bpf.kernel_filter.arg_predicates is enabled but the in-kernel predicates are
+              inactive on {{ $labels.node }} (state {{ $labels.state }}): off_training_consumer —
+              a learning consumer (syscall_allowlist / drift) is on; off_no_counters — the
+              kernel counters have no reader; off_no_map — the predicate map is not usable;
+              off_no_rules — no loaded rule gives a checkable argument. The hot syscall
+              numbers (mmap, mprotect, arch_prctl) are forwarded whole again, with the CPU
+              and ring-buffer cost the predicates were meant to remove.
+        # Wave 8.5 (F2): near-full kernel counter map means LRU evictions undercount
+        # the events the predicate dropped (anomaly profile input).
+        - alert: EbpfGuardSyscallCountsMapNearFull
+          expr: ebpf_guard_syscall_counts_map_fill_ratio > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "ebpf-guard syscall_counts map is {{ $value | humanizePercentage }} full on {{ $labels.node }}"
+            description: >-
+              The kernel syscall_counts LRU map on {{ $labels.node }} is close to max_entries;
+              evicted (tgid, nr) pairs restart from one and the anomaly profile is undercounted.
 
 # VerticalPodAutoscaler
 vpa:

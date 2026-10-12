@@ -2993,7 +2993,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			}
 			gracefulShutdown(engine, collectors, alertStore, srv, enf, simCollector, alertmanagerClient, fanout, shutdownDuration,
 				cfg.Server.ShutdownTimeout, cfg.Server.ShutdownDrainEnforcement, cfg.Server.ShutdownDrainRego,
-				prof, cfg.Profiler.StatePersistence)
+				prof, cfg.Profiler.StatePersistence, kpred.FinalFlush)
 			return nil
 
 		case slot, ok := <-lowPriorityEventCh:
@@ -3093,6 +3093,8 @@ func processEvent(
 //     scrape racing the collector Close() calls in step 2 reads through an
 //     already-closed BPF map and logs "kernel_counter: failed to read
 //     counter ... bad file descriptor" (№259).
+//     Right after it, the kernel syscall counters (wave 8.5) get their final
+//     drain into the anomaly profiles, before anything closes a BPF object.
 //  1. Drain the PID-partitioned ingest worker pool so every event already
 //     queued via IngestAsync finishes processing (and its alerts land in
 //     pending) before anything downstream is drained or flushed.
@@ -3317,6 +3319,7 @@ func gracefulShutdown(
 	totalTimeout, drainEnforcementTimeout, drainRegoTimeout time.Duration,
 	prof *profiler.Profiler,
 	statePersistence config.StatePersistenceConfig,
+	finalKernelFlush func(),
 ) {
 	if totalTimeout <= 0 {
 		totalTimeout = 30 * time.Second
@@ -3348,6 +3351,14 @@ func gracefulShutdown(
 	// values recorded, instead of racing step 2's collector Close() calls
 	// for a map that scrape is about to read (№259).
 	exporter.DisablePreScrapeHooks()
+
+	// Step 0b (wave 8.5, решение 10): последний слив счётчиков ядра в профили
+	// нагрузок, пока объекты BPF открыты. Без него отброшенное предикатом с
+	// последнего 5-секундного чтения пропало бы. Граница аварийного падения
+	// (SIGKILL, паника) — те же ≤ counters_interval (5 с) недосчёта.
+	if finalKernelFlush != nil {
+		finalKernelFlush()
+	}
 
 	// Step 1: drain the PID-partitioned ingest worker pool. Events dispatched
 	// via IngestAsync before collectors stop may still be queued in a

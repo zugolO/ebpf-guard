@@ -68,6 +68,12 @@ type kernelPredController struct {
 	// на смежных окнах: рестарт между окнами измерил бы рестарт).
 	enabled atomic.Bool
 
+	// flushMu сериализует слив: читатель карты не потокобезопасен, а слить
+	// могут и периодический цикл, и остановка агента.
+	flushMu sync.Mutex
+	enrich  func(*types.Event)
+	stopped bool
+
 	mu     sync.Mutex
 	kf     kernelPredProgrammer
 	counts kernelCountPoller
@@ -214,6 +220,9 @@ func (c *kernelPredController) runCounters(ctx context.Context, enrich func(*typ
 	if interval <= 0 {
 		interval = defaultKernelPredPeriod
 	}
+	c.flushMu.Lock()
+	c.enrich = enrich
+	c.flushMu.Unlock()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -232,7 +241,36 @@ func (c *kernelPredController) runCounters(ctx context.Context, enrich func(*typ
 	}
 }
 
+// FinalFlush — последний слив при штатной остановке: до закрытия объектов BPF.
+// После него периодический цикл больше не читает карту. Идемпотентен.
+func (c *kernelPredController) FinalFlush() {
+	c.mu.Lock()
+	poller := c.counts
+	c.mu.Unlock()
+	c.flushMu.Lock()
+	defer c.flushMu.Unlock()
+	if c.stopped {
+		return
+	}
+	c.stopped = true
+	if poller == nil {
+		return
+	}
+	slog.Info("kernel_pred: final drain of syscall counters before BPF objects close")
+	c.drain(poller, c.enrich)
+}
+
 func (c *kernelPredController) flushCounters(poller kernelCountPoller, enrich func(*types.Event)) {
+	c.flushMu.Lock()
+	defer c.flushMu.Unlock()
+	if c.stopped {
+		return // финальный слив уже прошёл, карта может быть закрыта
+	}
+	c.drain(poller, enrich)
+}
+
+// drain читает приращения и складывает их; вызывающий держит flushMu.
+func (c *kernelPredController) drain(poller kernelCountPoller, enrich func(*types.Event)) {
 	deltas, err := poller.Poll()
 	if err != nil {
 		slog.Warn("kernel_pred: reading syscall counters failed", slog.Any("error", err))

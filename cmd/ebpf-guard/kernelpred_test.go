@@ -253,3 +253,28 @@ func TestKernelPredController_FlushPublishesMapOccupancy(t *testing.T) {
 		t.Fatalf("live_entries = %v, want 6144", got)
 	}
 }
+
+// Решение 10: при штатной остановке последние приращения доезжают в профиль;
+// после финального слива карту больше не читают (объекты BPF закрываются).
+func TestKernelPredController_FinalFlushDrainsOnceAndStopsPolling(t *testing.T) {
+	rules := &fakeRules{anomaly: true}
+	ctl := &kernelPredController{rules: rules}
+	fp := &fakePoller{d: []internalbpf.SyscallCountDelta{{PID: 7, Nr: 9, N: 41}}}
+	ctl.counts = fp
+	ctl.FinalFlush()
+	if len(rules.ingest) != 1 || rules.ingest[0][0].N != 41 {
+		t.Fatalf("финальный слив не дошёл до профиля: %+v", rules.ingest)
+	}
+	// Периодический тик после остановки не читает карту.
+	fp.d = []internalbpf.SyscallCountDelta{{PID: 7, Nr: 9, N: 5}}
+	ctl.flushCounters(fp, nil)
+	ctl.FinalFlush()
+	if len(rules.ingest) != 1 || len(fp.d) != 1 {
+		t.Fatalf("карту читали после финального слива: ingest=%d left=%d", len(rules.ingest), len(fp.d))
+	}
+}
+
+func TestKernelPredController_FinalFlushWithoutReaderIsNoop(t *testing.T) {
+	ctl := &kernelPredController{rules: &fakeRules{}}
+	ctl.FinalFlush() // не паникует: ядро не подключалось (dry-run)
+}

@@ -20,10 +20,16 @@ k3s стенда работает на БОЕВОМ конфиге хостов�
   collectors.required                → как в чарте, если в конфиге нет (иначе kmod/lsm=0
                                        на ядре стенда держат под не-Ready, находка 2 этапа 4)
 
+Волна 8.5 (D1): W85_ARG_PREDICATES=1 включает bpf.kernel_filter.arg_predicates
+(F1 по умолчанию выключен до ночи закрытия, поэтому включается явно на прогон);
+W85_REPO=<каталог> — hostPath репозитория вместо /opt/ebpf-guard (бинарь и правила
+из КОММИТА, стендовое дерево и рабочий агент не трогаются; внутри пода путь прежний).
+
 Любой оставшийся путь хоста (/var/lib/ebpf-guard/, /run/, /var/log/, /etc/rancher/)
 — отказ: молча переехавший путь дал бы под, пишущий в стор хоста или падающий
 на запись (память die-only-for-unmeasurable-run — это неизмеримый прогон).
 """
+import os
 import sys
 
 import yaml
@@ -72,6 +78,11 @@ def build(cfg, tag, token):
     setp(cfg, "enforcement.audit_log", POD_DIR + "/audit.jsonl")
     setp(cfg, "notifications.unix_socket.path", POD_DIR + "/alerts.sock")
     setp(cfg, "kubernetes.kubeconfig_path", "")
+    if os.environ.get("W85_ARG_PREDICATES") == "1":
+        kf = cfg.get("bpf", {}).get("kernel_filter")
+        if not isinstance(kf, dict):
+            die("в конфиге нет bpf.kernel_filter — F1 включить некуда")
+        kf["arg_predicates"] = {"enabled": True, "counters_interval": "5s"}
     col = cfg.setdefault("collectors", {})
     if not col.get("required"):
         col["required"] = list(CHART_REQUIRED)
@@ -85,7 +96,7 @@ def build(cfg, tag, token):
         "config": {"server": {"bind_address": ":19091", "enable_pprof": True}},
         "workingDir": "/opt/ebpf-guard",
         "extraVolumes": [
-            {"name": "repo", "hostPath": {"path": "/opt/ebpf-guard", "type": "Directory"}},
+            {"name": "repo", "hostPath": {"path": os.environ.get("W85_REPO", "/opt/ebpf-guard"), "type": "Directory"}},
             {"name": "pod-state", "hostPath": {"path": POD_DIR, "type": "DirectoryOrCreate"}},
         ],
         "extraVolumeMounts": [

@@ -6,7 +6,7 @@
 # (с от t0), m-att1.txt — метрики на конце пакета (потери окна атак, 8.2.5).
 set -u
 OUT=${1:-/var/tmp/w82-pod-attack}
-SETUP=/opt/ebpf-guard/deploy/docker-test-setup
+SETUP=${SETUP:-/opt/ebpf-guard/deploy/docker-test-setup}
 TOKEN=${TOKEN:-w82-stage4-pod-token}
 API=localhost:${API_PORT:-19091}
 rm -rf "$OUT"; mkdir -p "$OUT"
@@ -51,6 +51,16 @@ touch "$OUT/STOP"; wait $SP $HP
 M > "$OUT/m-post.txt"
 curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-post.pprof"
 cat "$cg/memory.stat" > "$OUT/memory.stat"
+# 8.5 сторож F1: состояние предикатов и kernel_filtered на трёх снимках окна.
+for s in pre att1 post; do
+    grep -aE '^ebpf_guard_(kernel_predicate_state|syscall_events_kernel_filtered_total|syscall_counts_folded_total)' "$OUT/m-$s.txt" | sed "s/^/$s /" >> "$OUT/f1.txt"
+done
+f1post=$(grep -a '^post ebpf_guard_kernel_predicate_state' "$OUT/f1.txt" | grep -a ' 1$' | sed 's/.*state="\([^"]*\)".*/\1/')
+f1pre=$(grep -a '^pre ebpf_guard_kernel_predicate_state' "$OUT/f1.txt" | grep -a ' 1$' | sed 's/.*state="\([^"]*\)".*/\1/')
+echo "f1_state pre=${f1pre:-НЕТ СЕРИИ} post=${f1post:-НЕТ СЕРИИ} requested=${ARG_PREDICATES:-0}" | tee -a "$OUT/f1.txt"
+if [ "${ARG_PREDICATES:-0}" = 1 ] && { [ "$f1pre" != active ] || [ "$f1post" != active ]; }; then
+    echo "die: F1 запрошен, а за окно атак состояние pre=${f1pre:-нет} post=${f1post:-нет}" > "$OUT/DONE"; exit 1
+fi
 # 8.2.1: рестарт контейнера за окно (OOM на лимите пода) — провал, не пропуск.
 export PATH=$PATH:/root/bin:/usr/local/bin KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
 kubectl -n ebpf-guard get pods -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' > "$OUT/restarts.txt" 2>/dev/null \

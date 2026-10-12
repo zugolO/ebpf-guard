@@ -18,6 +18,8 @@ set -u
 OUT=${1:-/var/tmp/w82-pod}
 VALUES=${VALUES:-/root/w82-pod/values-stand.yaml}
 CHART=${CHART:-/root/w82-pod/deploy/helm/ebpf-guard}
+# Волна 8.5: ARG_PREDICATES=1 — пода судят с включённым F1; сторож в конце прогона
+# требует kernel_predicate_state=active (иначе прогон не измеряет F1 — die).
 NS=ebpf-guard
 REL=w82
 API_PORT=${API_PORT:-19091}
@@ -89,6 +91,16 @@ SAMPLER=$!
 PROFILER=$!
 wait $SAMPLER $PROFILER
 
+# 8.5 сторож F1: состояние предикатов и kernel_filtered из последних метрик прогона.
+lastm=$(ls "$OUT"/heap/metrics-*.txt 2>/dev/null | tail -1)
+if [ -n "$lastm" ] && [ -s "$lastm" ]; then
+    grep -aE '^ebpf_guard_(kernel_predicate_state|syscall_events_kernel_filtered_total|syscall_counts_folded_total|syscall_counts_map_fill_ratio)' "$lastm" > "$OUT/f1.txt"
+fi
+f1state=$(grep -a '^ebpf_guard_kernel_predicate_state' "$OUT/f1.txt" 2>/dev/null | grep -a ' 1$' | sed 's/.*state="\([^"]*\)".*/\1/')
+echo "f1_state=${f1state:-НЕТ СЕРИИ} arg_predicates_requested=${ARG_PREDICATES:-0}" | tee -a "$OUT/f1.txt"
+if [ "${ARG_PREDICATES:-0}" = 1 ] && [ "$f1state" != active ]; then
+    die "F1 запрошен, а kernel_predicate_state=${f1state:-нет серии} — прогон не измеряет F1"
+fi
 kubectl -n "$NS" get pods -o wide > "$OUT/pods.txt" 2>&1
 kubectl -n "$NS" describe pod > "$OUT/describe.txt" 2>&1
 kubectl -n "$NS" logs ds/$REL-ebpf-guard --tail=200 > "$OUT/pod.log" 2>&1

@@ -97,6 +97,11 @@ struct {
  * так же, как поштучно приходили события): профиль из счётчиков тождественен
  * профилю из событий. LRU: переполнение вытесняет самую старую пару, а не
  * отказывает во вставке.
+ *
+ * Не per-CPU (решение владельца 12.10, вопрос 7): память карты не зависит от
+ * числа CPU (на 64 CPU per-CPU вариант стоил бы ≈17 МиБ). Счёт растёт атомарным
+ * сложением; конкуренцию на горячих ключах (один tgid+nr с разных CPU) судит
+ * CPU агента в паре A/B.
  */
 struct syscall_count_key {
 	__u32 tgid;
@@ -109,8 +114,13 @@ struct syscall_count_val {
 	__u8  comm[COMM_LEN];
 };
 
+_Static_assert(sizeof(struct syscall_count_key) == 8,
+	       "syscall_count_key layout is mirrored by bpf.SyscallCountKey");
+_Static_assert(sizeof(struct syscall_count_val) == 8 + 8 + COMM_LEN,
+	       "syscall_count_val layout is mirrored by bpf.SyscallCountValue");
+
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 8192);
 	__type(key, struct syscall_count_key);
 	__type(value, struct syscall_count_val);
@@ -193,20 +203,22 @@ static __always_inline void syscall_count_filtered(__s64 nr)
 	k.tgid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 	k.nr = (__u32)nr;
 	v = bpf_map_lookup_elem(&syscall_counts, &k);
-	if (v) {
-		v->n++;
-		/* comm меняется на exec: хранится последний, иначе счёт ушёл бы в чужую нагрузку */
-		bpf_get_current_comm(v->comm, sizeof(v->comm));
-		return;
-	}
-	{
+	if (!v) {
 		struct syscall_count_val nv = {};
 
 		nv.n = 1;
 		nv.cgroup_id = bpf_get_current_cgroup_id();
 		bpf_get_current_comm(nv.comm, sizeof(nv.comm));
-		bpf_map_update_elem(&syscall_counts, &k, &nv, BPF_NOEXIST);
+		if (bpf_map_update_elem(&syscall_counts, &k, &nv, BPF_NOEXIST) == 0)
+			return;
+		/* другой CPU вставил ту же пару первым: считаем в его запись */
+		v = bpf_map_lookup_elem(&syscall_counts, &k);
+		if (!v)
+			return;
 	}
+	__sync_fetch_and_add(&v->n, 1);
+	/* comm меняется на exec: хранится последний, иначе счёт ушёл бы в чужую нагрузку */
+	bpf_get_current_comm(v->comm, sizeof(v->comm));
 }
 
 SEC("tp/raw_syscalls/sys_enter")

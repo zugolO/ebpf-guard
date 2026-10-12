@@ -8,8 +8,9 @@ import (
 )
 
 // Волна 8.5, F2: чтение счётчиков отброшенного предикатом (syscall_counts в
-// bpf/syscall.bpf.c). Карта — LRU per-CPU hash (tgid, nr) → {n, cgroup, comm};
-// ядро только растит счёт. Приращения считаются здесь: помним прошлую сумму по
+// bpf/syscall.bpf.c). Карта — LRU hash (tgid, nr) → {n, cgroup, comm}, НЕ per-CPU
+// (решение 12.10: память не зависит от числа CPU); ядро растит n атомарным
+// сложением. Приращения считаются здесь: помним прошлую сумму по
 // ключу и отдаём разность. Запись, вытесненная LRU и заведённая заново, начнёт
 // с единицы — сумма станет МЕНЬШЕ прежней, и тогда приращение — вся сумма.
 
@@ -19,7 +20,7 @@ type SyscallCountKey struct {
 	Nr   uint32
 }
 
-// SyscallCountValue — struct syscall_count_val (по одному на CPU).
+// SyscallCountValue — struct syscall_count_val.
 type SyscallCountValue struct {
 	N        uint64
 	CgroupID uint64
@@ -37,7 +38,7 @@ type SyscallCountDelta struct {
 
 // countSource обходит карту; подменяется в тестах.
 type countSource interface {
-	Each(fn func(k SyscallCountKey, perCPU []SyscallCountValue)) error
+	Each(fn func(k SyscallCountKey, v SyscallCountValue)) error
 }
 
 type mapCountSource struct{ m *ebpf.Map }
@@ -52,23 +53,21 @@ const syscallCountBatch = 512
 // за окно. Пакет в 512 записей — единицы вызовов на опрос. Без пакетного API
 // (ядро < 5.6) или при любой его ошибке — обход Iterate; повторно отданные
 // записи отсекает Poll.
-func (s mapCountSource) Each(fn func(k SyscallCountKey, perCPU []SyscallCountValue)) error {
-	if cpus, err := ebpf.PossibleCPU(); err == nil && cpus > 0 {
-		if err := s.eachBatch(cpus, fn); err == nil {
-			return nil
-		}
+func (s mapCountSource) Each(fn func(k SyscallCountKey, v SyscallCountValue)) error {
+	if err := s.eachBatch(fn); err == nil {
+		return nil
 	}
 	return s.eachIterate(fn)
 }
 
-func (s mapCountSource) eachBatch(cpus int, fn func(k SyscallCountKey, perCPU []SyscallCountValue)) error {
+func (s mapCountSource) eachBatch(fn func(k SyscallCountKey, v SyscallCountValue)) error {
 	keys := make([]SyscallCountKey, syscallCountBatch)
-	vals := make([]SyscallCountValue, syscallCountBatch*cpus)
+	vals := make([]SyscallCountValue, syscallCountBatch)
 	var cursor ebpf.MapBatchCursor
 	for {
 		n, err := s.m.BatchLookup(&cursor, keys, vals, nil)
 		for i := 0; i < n; i++ {
-			fn(keys[i], vals[i*cpus:(i+1)*cpus])
+			fn(keys[i], vals[i])
 		}
 		if err != nil {
 			if errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -82,12 +81,12 @@ func (s mapCountSource) eachBatch(cpus int, fn func(k SyscallCountKey, perCPU []
 	}
 }
 
-func (s mapCountSource) eachIterate(fn func(k SyscallCountKey, perCPU []SyscallCountValue)) error {
+func (s mapCountSource) eachIterate(fn func(k SyscallCountKey, v SyscallCountValue)) error {
 	it := s.m.Iterate()
 	var k SyscallCountKey
-	var vs []SyscallCountValue
-	for it.Next(&k, &vs) {
-		fn(k, vs)
+	var v SyscallCountValue
+	for it.Next(&k, &v) {
+		fn(k, v)
 	}
 	return it.Err()
 }
@@ -97,14 +96,21 @@ func (s mapCountSource) eachIterate(fn func(k SyscallCountKey, perCPU []SyscallC
 type SyscallCountReader struct {
 	src  countSource
 	last map[SyscallCountKey]uint64
+	// live и max — прибор вытеснений: живых записей на последнем обходе и
+	// max_entries карты. Близко к max — LRU вытесняет пары, приращения
+	// пересоздаются с единицы и недосчёт растёт.
+	live, max uint32
 }
+
+// Occupancy — живых записей на последнем Poll и max_entries карты.
+func (r *SyscallCountReader) Occupancy() (live, max uint32) { return r.live, r.max }
 
 // NewSyscallCountReader создаёт читателя карты syscall_counts.
 func NewSyscallCountReader(m *ebpf.Map) (*SyscallCountReader, error) {
 	if m == nil {
 		return nil, fmt.Errorf("bpf: syscall_counts map is nil")
 	}
-	return &SyscallCountReader{src: mapCountSource{m: m}, last: make(map[SyscallCountKey]uint64)}, nil
+	return &SyscallCountReader{src: mapCountSource{m: m}, last: make(map[SyscallCountKey]uint64), max: m.MaxEntries()}, nil
 }
 
 // Poll возвращает приращения по парам, чей счёт вырос. Пары, исчезнувшие из
@@ -112,22 +118,9 @@ func NewSyscallCountReader(m *ebpf.Map) (*SyscallCountReader, error) {
 func (r *SyscallCountReader) Poll() ([]SyscallCountDelta, error) {
 	var out []SyscallCountDelta
 	seen := make(map[SyscallCountKey]uint64, len(r.last))
-	err := r.src.Each(func(k SyscallCountKey, perCPU []SyscallCountValue) {
-		var total, best uint64
-		d := SyscallCountDelta{PID: k.Tgid, Nr: k.Nr}
-		for i := range perCPU {
-			v := &perCPU[i]
-			total += v.N
-			// comm и cgroup — с того CPU, где счёт больше: он обновлялся чаще
-			// и ближе к последнему состоянию нагрузки.
-			if v.N > best || (v.N == best && d.CgroupID == 0) {
-				best = v.N
-				d.Comm = v.Comm
-				if v.CgroupID != 0 {
-					d.CgroupID = v.CgroupID
-				}
-			}
-		}
+	err := r.src.Each(func(k SyscallCountKey, v SyscallCountValue) {
+		d := SyscallCountDelta{PID: k.Tgid, Nr: k.Nr, CgroupID: v.CgroupID, Comm: v.Comm}
+		total := v.N
 		if _, dup := seen[k]; dup {
 			// Пакетный обход при одновременной вставке мог отдать ключ дважды.
 			return
@@ -148,5 +141,6 @@ func (r *SyscallCountReader) Poll() ([]SyscallCountDelta, error) {
 		return nil, fmt.Errorf("bpf: iterate syscall_counts: %w", err)
 	}
 	r.last = seen
+	r.live = uint32(len(seen))
 	return out, nil
 }

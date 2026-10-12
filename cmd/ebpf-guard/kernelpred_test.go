@@ -234,3 +234,22 @@ func TestKernelPredController_RuntimeSwitch(t *testing.T) {
 		t.Fatalf("включение при drift.enabled: state=%s предикатов=%d", ctl2.State(), len(fp2.preds))
 	}
 }
+
+type occPoller struct {
+	fakePoller
+	live, max uint32
+}
+
+func (o *occPoller) Occupancy() (uint32, uint32) { return o.live, o.max }
+
+// Прибор вытеснений: заполненность печатается и на сливе без приращений.
+func TestKernelPredController_FlushPublishesMapOccupancy(t *testing.T) {
+	ctl := &kernelPredController{rules: &fakeRules{}}
+	ctl.flushCounters(&occPoller{live: 6144, max: 8192}, nil)
+	if got := testutil.ToFloat64(exporter.SyscallCountsMapFill); got != 0.75 {
+		t.Fatalf("fill_ratio = %v, want 0.75", got)
+	}
+	if got := testutil.ToFloat64(exporter.SyscallCountsMapLive); got != 6144 {
+		t.Fatalf("live_entries = %v, want 6144", got)
+	}
+}

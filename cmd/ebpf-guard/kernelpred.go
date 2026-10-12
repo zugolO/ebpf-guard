@@ -238,6 +238,9 @@ func (c *kernelPredController) flushCounters(poller kernelCountPoller, enrich fu
 		slog.Warn("kernel_pred: reading syscall counters failed", slog.Any("error", err))
 		return
 	}
+	if occ, ok := poller.(interface{ Occupancy() (live, max uint32) }); ok {
+		exporter.SetSyscallCountsOccupancy(occ.Occupancy())
+	}
 	if len(deltas) == 0 {
 		return
 	}

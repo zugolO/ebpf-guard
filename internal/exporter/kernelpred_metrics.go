@@ -36,6 +36,20 @@ var (
 		[]string{"outcome"},
 	)
 
+	// SyscallCountsMapFill — заполненность карты счётчиков ядра при сливе:
+	// живых записей / max_entries. Прибор вытеснений (LRU): у потолка пары
+	// вытесняются и счёт пересоздаётся с единицы.
+	SyscallCountsMapFill = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_syscall_counts_map_fill_ratio",
+		Help: "Live entries / max_entries of the kernel syscall_counts LRU map at the last drain (wave 8.5 F2). Near 1 means LRU evictions undercount the dropped events.",
+	})
+
+	// SyscallCountsMapLive — живых записей карты счётчиков на последнем сливе.
+	SyscallCountsMapLive = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ebpf_guard_syscall_counts_map_live_entries",
+		Help: "Live entries of the kernel syscall_counts map at the last drain (wave 8.5 F2).",
+	})
+
 	// KernelPredicateState — состояние предикатов ядра. Ровно одна серия
 	// state=<причина> равна 1: active — предикаты запрограммированы; off_* —
 	// карта пуста, номера идут целиком, как до F1. Отсутствие серии в /metrics
@@ -89,4 +103,12 @@ func SetKernelPredicateNrs(candidates []uint32, active map[uint32]bool) {
 // RecordSyscallKernelFiltered добавляет n отброшенных ядром событий номера nr.
 func RecordSyscallKernelFiltered(nr int64, n uint64) {
 	SyscallEventsKernelFiltered.WithLabelValues(SyscallNRLabel(nr)).Add(float64(n))
+}
+
+// SetSyscallCountsOccupancy выставляет заполненность карты счётчиков.
+func SetSyscallCountsOccupancy(live, max uint32) {
+	SyscallCountsMapLive.Set(float64(live))
+	if max > 0 {
+		SyscallCountsMapFill.Set(float64(live) / float64(max))
+	}
 }

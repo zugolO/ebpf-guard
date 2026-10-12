@@ -54,6 +54,8 @@
 #   NIGHT_UNITS — старты юнитов ноды (умолчание <каталог>/node-units.tsv,
 #                 строки «start_epoch<TAB>end_epoch<TAB>unit», node-units-extract.py);
 #   NIGHT_PREV  — каталог idle-run прошлой ночи для сравнения цен по юнитам.
+#   NIGHT_LATER_METRICS — снимок /metrics того же процесса ПОСЛЕ окна (после
+#               атак): предъявляет класс для 3.ATTACK, когда серии attack нет.
 set -u
 D="${1:?каталог idle-run не задан}"
 INTERVAL="${2:-${NIGHT_INTERVAL:-300}}"
@@ -304,7 +306,18 @@ s0=$(_val "$(_snap 0)" process_start_time_seconds); sN=$(_val "$(_snap "$last")"
 if [ -z "$s0" ] || [ "$s0" != "$sN" ]; then
     echo "НЕИЗМЕРИМ: 3.ATTACK НЕИЗМЕРИМ (класс НАЗВАН: рестарт агента между первым и последним снимком, или снимок пуст)"
 elif [ -z "$a0" ] && [ -z "$aN" ]; then
-    echo "НЕИЗМЕРИМ: 3.ATTACK НЕИЗМЕРИМ (класс НАЗВАН: серии incidents_total{verdict=\"attack\"} нет ни в первом, ни в последнем снимке — нет серии ≠ 0)"
+    # Подпись attack у CounterVec появляется только с первым инкрементом:
+    # «нет серии» у живого процесса и есть ноль, но предъявить это можно лишь
+    # снимком ТОГО ЖЕ процесса, где серия уже есть (позже, после пакета атак —
+    # NIGHT_LATER_METRICS). Без такого снимка «нет серии» остаётся ≠ 0.
+    lf="${NIGHT_LATER_METRICS:-}"
+    aL=$(_val "$lf" ebpf_guard_incidents_total 'verdict="attack"')
+    sL=$(_val "$lf" process_start_time_seconds)
+    if [ -n "$aL" ] && [ "$aL" -gt 0 ] && [ "$sL" = "$sN" ]; then
+        echo "ДОСТИГНУТО: 3.ATTACK ДОСТИГНУТО (инцидентов verdict=\"attack\" за ночь 0: серии нет ни в первом, ни в последнем снимке, а тот же процесс позже завёл её — $aL после пакета атак, класс предъявлен)"
+    else
+        echo "НЕИЗМЕРИМ: 3.ATTACK НЕИЗМЕРИМ (класс НАЗВАН: серии incidents_total{verdict=\"attack\"} нет ни в первом, ни в последнем снимке — нет серии ≠ 0; снимка того же процесса с серией нет)"
+    fi
 else
     da=$(( ${aN:-0} - ${a0:-0} ))
     if [ "$da" -eq 0 ]; then

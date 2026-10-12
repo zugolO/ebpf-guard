@@ -218,6 +218,19 @@ o=$(_case noattack 9 120 0 600 no_attack=1)
 _need "нет серии — НЕИЗМЕРИМ, не 0" "$o" "НЕИЗМЕРИМ: 3.ATTACK" "нет серии ≠ 0"
 _forbid "нет серии не даёт ДОСТИГНУТО" "$o" "ДОСТИГНУТО: 3.ATTACK"
 
+echo "[серии attack нет, тот же процесс позже завёл её]"
+_later() { printf '%s\n' "ebpf_guard_incidents_total{verdict=\"attack\"} $2" "process_start_time_seconds $3" > "$1"; }
+st=$(awk '/^process_start_time_seconds/ { print $2; exit }' "$(ls "$T"/noattack/snapshots/metrics-*.txt | head -1)")
+_later "$T/later-ok.txt" 4 "$st"
+o=$(NIGHT_LATER_METRICS="$T/later-ok.txt" _case noattack2 9 120 0 600 no_attack=1)
+_need "серия позже у того же процесса — ДОСТИГНУТО" "$o" "ДОСТИГНУТО: 3.ATTACK" "класс предъявлен"
+_later "$T/later-other.txt" 4 1900009999
+o=$(NIGHT_LATER_METRICS="$T/later-other.txt" _case noattack3 9 120 0 600 no_attack=1)
+_need "серия позже у ДРУГОГО процесса — НЕИЗМЕРИМ" "$o" "НЕИЗМЕРИМ: 3.ATTACK"
+_later "$T/later-zero.txt" 0 "$st"
+o=$(NIGHT_LATER_METRICS="$T/later-zero.txt" _case noattack4 9 120 0 600 no_attack=1)
+_need "серия позже = 0 — НЕИЗМЕРИМ" "$o" "НЕИЗМЕРИМ: 3.ATTACK"
+
 echo "[час 2 нулевой]"
 o=$(_case zero2 9 120 0 600 zero_h2=1)
 _need "нулевой первый фоновый час — отношение не определено, рост сверх шума" "$o" "ПРОВАЛЕН: 3.P1-19 ПРОВАЛЕН (класс НАРАСТАНИЕ" "отношение не определено"

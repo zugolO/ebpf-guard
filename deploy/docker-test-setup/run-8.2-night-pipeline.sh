@@ -215,6 +215,10 @@ else
     cp "$SETUP/attacks/attack-manifest.json" "$ART/attack-manifest-host.json" 2>/dev/null
 fi
 _curl "$API/metrics" > "$ART/metrics-final.txt"
+# 3.ATTACK: серии attack на idle нет, пока нет ни одного такого инцидента —
+# ноль предъявляет снимок того же процесса после атак (night-report.sh).
+NIGHT_PREV="${NIGHT_PREV:-}" NIGHT_LATER_METRICS="$ART/metrics-final.txt" \
+    bash "$SETUP/night-report.sh" "$ART/idle" 300 > "$ART/night-report.txt" 2>&1
 _curl "$API/debug/pprof/heap" > "$ART/heap-final.pprof"
 read -r cg_end < "/sys/fs/cgroup$cgline/memory.current" 2>/dev/null || cg_end="?"
 echo "memory.current.end=$cg_end" >> "$ART/run-intent.txt"

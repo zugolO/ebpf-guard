@@ -1,8 +1,8 @@
 #!/bin/bash
 # w85-podonly.sh <SRC> [N=3] — волна 8.5, D1 (метка 8.5.7): N прогонов пода с F1.
 # Каждый прогон, как w82-podonly: старт → 5 мин idle → пакет атак → 10 мин удержания.
-# SRC — каталог сборки из коммита (w85-ship.sh): бинарь SRC/build/ebpf-guard,
-# правила и чарт — оттуда же; /opt/ebpf-guard и рабочий агент не меняются (хостовый
+# SRC — каталог исходников коммита (w85-ship.sh): статический бинарь пода собирается
+# отсюда же, правила и чарт — оттуда же; /opt/ebpf-guard и рабочий агент не меняются (хостовый
 # ebpf-guard-test остановлен на время каждого прогона и поднят после).
 # Выход: $A/run-<i>/{pod-run,pod-attack,report.txt}, $A/d1-summary.txt; маркер конца — $MARK.
 # Запуск отсоединённо, скрипт — файлом (не pkill -f / pgrep -f с литералом в ssh):
@@ -14,11 +14,18 @@ S=$SRC/deploy/docker-test-setup
 export PATH=$PATH:/usr/local/go/bin:/root/bin:/usr/local/bin KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 rm -f "$MARK"; rm -rf "$A"; mkdir -p "$A/img"
 fin() { echo "$1" > "$MARK"; exit "${2:-0}"; }
-[ -x "$SRC/build/ebpf-guard" ] && [ -s "$SRC/BINARY-SHA256" ] || fin "die: нет собранного бинаря из коммита в $SRC" 1
-[ "$(sha256sum "$SRC/build/ebpf-guard" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$SRC/BINARY-SHA256")" ] || fin "die: бинарь не тот, что записан в BINARY-SHA256" 1
-cp "$SRC/build/ebpf-guard" "$A/img/ebpf-guard"
+[ -s "$SRC/GIT-HEAD" ] || fin "die: в $SRC нет GIT-HEAD — исходники не из w85-ship.sh" 1
+# Образ distroless/static: бинарь обязан быть статическим (make build собирает
+# динамический — под с ним падает «exec /usr/local/bin/ebpf-guard: no such file»).
+# Собирается из ТЕХ ЖЕ исходников коммита (SRC — распакованный git archive), тегом rego.
+cp "$SRC/GIT-HEAD" "$A/git-head.txt"
+( cd "$SRC" && CGO_ENABLED=0 go build -tags rego -trimpath -o "$A/img/ebpf-guard" ./cmd/ebpf-guard ) > "$A/build.log" 2>&1 \
+    || fin "die: статическая сборка пода: $(tail -3 "$A/build.log")" 1
+go clean -cache > /dev/null 2>&1
+file "$A/img/ebpf-guard" 2>/dev/null | grep -q 'statically linked' || ldd "$A/img/ebpf-guard" 2>&1 | grep -q 'not a dynamic' \
+    || fin "die: бинарь пода не статический" 1
 TAG=w85d1-$(sha256sum "$A/img/ebpf-guard" | cut -c1-12)
-cp "$SRC/GIT-HEAD" "$A/git-head.txt"; sha256sum "$A/img/ebpf-guard" > "$A/binary-sha.txt"
+sha256sum "$A/img/ebpf-guard" > "$A/binary-sha.txt"
 printf "FROM gcr.io/distroless/static:debug\nCOPY ebpf-guard /usr/local/bin/ebpf-guard\nENV GOMEMLIMIT=off\nENTRYPOINT [\"/usr/local/bin/ebpf-guard\"]\n" > "$A/img/Dockerfile"
 docker build -q -t zugolo/ebpf-guard:$TAG "$A/img" > "$A/img.log" 2>&1
 docker save zugolo/ebpf-guard:$TAG | k3s ctr -n k8s.io images import - >> "$A/img.log" 2>&1

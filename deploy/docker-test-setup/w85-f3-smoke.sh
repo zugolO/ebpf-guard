@@ -68,16 +68,24 @@ APID=$!
 for i in $(seq 1 60); do grep -q "kernel_filter: agent self-exclusion enabled" "$RUN/agent.log" 2>/dev/null && break
     kill -0 $APID 2>/dev/null || { echo "AGENT DIED"; tail -20 "$RUN/agent.log"; exit 3; }; sleep 1; done
 sleep 4
-# карта pid именно syscall-объекта: у fileaccess-объекта такая же по имени
-PROG=$(bpftool prog show name trace_sys_enter 2>/dev/null | head -1 | cut -d: -f1)
-MAPID=""
-for id in $(bpftool prog show id "$PROG" 2>/dev/null | sed -n 's/.*map_ids \(.*\)/\1/p' | tr ',' ' '); do
-    [ "$(bpftool map show id "$id" 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "name") print $(i + 1) }')" = agent_pid_map ] && MAPID=$id
-done
-[ -n "$MAPID" ] || { echo "НЕИЗМЕРИМ: F3 НЕИЗМЕРИМ (класс НАЗВАН: в программе trace_sys_enter нет карты agent_pid_map — объект без F3)"; kill $APID; exit 0; }
-CNT=$(for id in $(bpftool prog show id "$PROG" | sed -n 's/.*map_ids \(.*\)/\1/p' | tr ',' ' '); do
-    [ "$(bpftool map show id "$id" | awk '{ for (i = 1; i <= NF; i++) if ($i == "name") print $(i + 1) }')" = syscall_counts ] && echo $id; done)
-[ -n "$CNT" ] || { echo "НЕИЗМЕРИМ: F3 НЕИЗМЕРИМ (класс НАЗВАН: нет карты syscall_counts)"; kill $APID; exit 0; }
+# Карты именно ЭТОГО агента: на стенде работает и хостовый агент со своей программой trace_sys_enter
+# (объект без F3), поэтому программа выбирается по картам — той, у кого есть и agent_pid_map, и
+# syscall_counts, и она единственна (после старта второго агента таких программ — одна).
+read -r PROG MAPID CNT < <(python3 - <<'PY'
+import json, subprocess
+progs = json.loads(subprocess.check_output(["bpftool", "-j", "prog", "show"]))
+maps = {m["id"]: m.get("name", "") for m in json.loads(subprocess.check_output(["bpftool", "-j", "map", "show"]))}
+found = []
+for p in progs:
+    if p.get("name") != "trace_sys_enter":
+        continue
+    names = {maps.get(i, ""): i for i in p.get("map_ids", [])}
+    if "agent_pid_map" in names and "syscall_counts" in names:
+        found.append((p["id"], names["agent_pid_map"], names["syscall_counts"]))
+print(*found[-1]) if found else print("- - -")
+PY
+)
+[ "$PROG" != "-" ] || { echo "НЕИЗМЕРИМ: F3 НЕИЗМЕРИМ (класс НАЗВАН: ни у одной программы trace_sys_enter нет agent_pid_map вместе с syscall_counts — объект без F3)"; kill $APID; exit 0; }
 echo "agent pid $APID prog $PROG agent_pid_map id $MAPID syscall_counts id $CNT"
 # P: процесс-«агент». Стартует, ждёт файл-сигнал, делает N служебных + PROG_LOAD; его pid пишется в карту ДО сигнала.
 python3 "$CTL" "$RUN/go-p" "$N" > "$RUN/p.out" 2>&1 & P=$!

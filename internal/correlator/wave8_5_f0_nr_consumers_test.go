@@ -37,7 +37,7 @@ var w85KnownNrConsumers = map[string]string{
 	// НАСТОЯЩИЙ новый читатель.
 	"cmd/ebpf-guard/kernelpred.go|Apply":                       "F1: контроллер предикатов (Nr предиката)",
 	"cmd/ebpf-guard/kernelpred.go|decide":                      "F1: контроллер предикатов (Nr предиката)",
-	"cmd/ebpf-guard/kernelpred.go|drain":               "F2: слив счётчиков ядра (Nr счётчика)",
+	"cmd/ebpf-guard/kernelpred.go|drain":                       "F2: слив счётчиков ядра (Nr счётчика)",
 	"cmd/ebpf-guard/kernelpred.go|predNrs":                     "F1: контроллер предикатов (Nr предиката)",
 	"internal/bpf/syscall_counts.go|Poll":                      "F2: читатель счётчиков ядра (Nr ключа карты)",
 	"internal/bpf/syscall_pred.go|EncodeSyscallPred":           "F1: запись карты предикатов (Nr предиката)",

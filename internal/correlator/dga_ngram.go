@@ -214,15 +214,21 @@ func (d *NgramDGADetector) scoreLabel(sld string) float64 {
 	return 1.0 / (1.0 + math.Exp(avgLnP+3.5))
 }
 
+// isWhitelisted reports whether the domain's SLD is in the whitelist.
+func (d *NgramDGADetector) isWhitelisted(domain string) bool {
+	if len(d.whitelist) == 0 {
+		return false
+	}
+	_, ok := d.whitelist[ngramExtractSLD(domain)]
+	return ok
+}
+
 // IsDGA returns true when the domain's N-gram score is at or above the detector
 // threshold. Short or non-qualifying domains always return false.
 // Domains whose SLD appears in the whitelist always return false.
 func (d *NgramDGADetector) IsDGA(domain string) bool {
-	if len(d.whitelist) > 0 {
-		sld := ngramExtractSLD(domain)
-		if _, ok := d.whitelist[sld]; ok {
-			return false
-		}
+	if d.isWhitelisted(domain) {
+		return false
 	}
 	return d.Score(domain) >= d.threshold
 }

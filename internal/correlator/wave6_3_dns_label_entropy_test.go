@@ -218,3 +218,23 @@ func TestRuleSet_NoDNSRuleScoresConcatenatedEntropy(t *testing.T) {
 		"these rules score qname_entropy (labels concatenated — finding №329); "+
 			"use qname_max_label_entropy: %s", strings.Join(offenders, ", "))
 }
+
+// TestQnameIsDGAGetter_HonoursWhitelist: the getter must agree with
+// NgramDGADetector.IsDGA(), including the SLD whitelist and the per-label
+// length floor, instead of comparing NgramScore to the threshold itself.
+func TestQnameIsDGAGetter_HonoursWhitelist(t *testing.T) {
+	re := NewRuleEngine(nil)
+	get := func(q string) string {
+		ev := types.Event{Type: types.EventDNS, DNS: &types.DNSEvent{QName: q}}
+		return re.getFieldValue(&ev, "qname_is_dga", nil)
+	}
+	assert.Equal(t, "false", get("example.com"))
+
+	d := DefaultNgramDGADetector()
+	q := "xkqzjvwpmtrbhgnfdlcs.net"
+	require.Equal(t, "true", get(q), "fixture must be flagged before whitelisting")
+	prev := d.whitelist
+	t.Cleanup(func() { d.whitelist = prev })
+	d.SetWhitelist([]string{ngramExtractSLD(q)})
+	assert.Equal(t, "false", get(q))
+}

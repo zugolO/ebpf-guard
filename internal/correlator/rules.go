@@ -1944,7 +1944,8 @@ func (re *RuleEngine) getFieldValueCached(e *types.Event, field string, dnsAnaly
 			} else {
 				a = globalDNSAnalyzer.AnalyzeDomain(e.DNS.QName)
 			}
-			if a.IsDGA || a.NgramScore >= DefaultNgramDGADetector().threshold {
+			// The whitelist vetoes both detectors; a bare threshold compare skipped it.
+			if det := DefaultNgramDGADetector(); !det.isWhitelisted(a.Domain) && (a.IsDGA || det.IsDGA(a.Domain)) {
 				return "true"
 			}
 			return "false"

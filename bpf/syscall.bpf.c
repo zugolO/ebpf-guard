@@ -14,6 +14,7 @@
 #define EG_MAPS_SYSCALL_FILTER
 #define EG_MAPS_KERNEL_FILTER
 #define EG_MAPS_OBSERVER
+#define EG_MAPS_AGENT_PID
 #include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -126,6 +127,56 @@ struct {
 	__type(value, struct syscall_count_val);
 } syscall_counts SEC(".maps");
 
+/*
+ * Волна 8.5, F3: самоисключение служебных bpf() агента. Агент читает и пишет
+ * собственные карты (lookup/update/get_next_key/batch) — ядро показывает ему же
+ * каждый такой вызов событием nr=321 (enter и exit), которое он сам разбирает.
+ * От СВОЕГО tgid (agent_pid_map, программируется из Go) служебные cmd не
+ * отправляются в кольцо; считаются в syscall_counts (профиль нагрузки агента
+ * получает их счётчиком, как отброшенное предикатом) и в syscall_self_excluded.
+ *
+ * Служебные cmd — список ПОЗИТИВНО: 1 MAP_LOOKUP_ELEM, 2 MAP_UPDATE_ELEM,
+ * 4 MAP_GET_NEXT_KEY, 21 MAP_LOOKUP_AND_DELETE_ELEM, 24 MAP_LOOKUP_BATCH,
+ * 25 MAP_LOOKUP_AND_DELETE_BATCH, 26 MAP_UPDATE_BATCH, 27 MAP_DELETE_BATCH.
+ * Всё остальное — в том числе разрушительные {0,3,5,6,9,33}, которые читают
+ * правила ebpf-subversion / rootkit_bpf_* / drift_dangerous_syscall, — идёт
+ * как раньше. 3 (MAP_DELETE_ELEM) в служебные НЕ входит: он в списке
+ * разрушительных у владельца.
+ *
+ * Метка в syscall_args: enter исключённого вызова кладёт запись с magic в
+ * args[5] (у bpf() шестого аргумента нет), exit по ней же узнаёт «это мой» и
+ * тоже молчит — а не по отсутствию записи, которое бывает и у обычного вызова,
+ * выпавшего из выборки.
+ */
+#define EG_SELF_EXCL_NR_BPF 321
+#define EG_SELF_EXCL_MAGIC 0x4547f3f3f3f3f3f3UL
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} syscall_self_excluded SEC(".maps");
+
+static __always_inline bool bpf_cmd_is_service(unsigned long cmd)
+{
+	switch (cmd) {
+	case 1: case 2: case 4: case 21: case 24: case 25: case 26: case 27:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static __always_inline void syscall_self_excluded_inc(void)
+{
+	__u32 key = 0;
+	__u64 *v = bpf_map_lookup_elem(&syscall_self_excluded, &key);
+
+	if (v)
+		__sync_fetch_and_add(v, 1);
+}
+
 static __always_inline struct syscall_pred *syscall_pred_lookup(__s64 nr)
 {
 	__u32 key;
@@ -236,6 +287,20 @@ int trace_sys_enter(struct sys_enter_args *ctx)
 			return 0;
 		/* 8.5 F1: предикат аргументов номера (карта программируется из правил). */
 		pred_rejects = syscall_pred_rejects_enter(ctx);
+		/* 8.5 F3: служебный bpf() самого агента — не событие. */
+		if (ctx->syscall_nr == EG_SELF_EXCL_NR_BPF && bpf_cmd_is_service(ctx->args[0]) &&
+		    pid_is_agent()) {
+			struct sys_enter_args mark = {};
+			__u64 key = bpf_get_current_pid_tgid();
+
+			mark.syscall_nr = ctx->syscall_nr;
+			mark.args[0] = ctx->args[0];
+			mark.args[5] = EG_SELF_EXCL_MAGIC;
+			bpf_map_update_elem(&syscall_args, &key, &mark, BPF_ANY);
+			syscall_self_excluded_inc();
+			syscall_count_filtered(ctx->syscall_nr);
+			return 0;
+		}
 	}
 
 	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
@@ -325,6 +390,18 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 	entry_args = bpf_map_lookup_elem(&syscall_args, &pid_tgid);
 	if (has_pred && (!entry_args || entry_args->syscall_nr != ctx->syscall_nr)) {
 		/* Запись чужого вызова (enter без exit: execve, exit_group) — не наша. */
+		syscall_count_filtered(ctx->syscall_nr);
+		return 0;
+	}
+
+	/* 8.5 F3: exit служебного bpf() агента — по метке, оставленной enter. */
+	/* pid_is_agent() обязателен и здесь: args[5] у настоящего вызова — регистр r9
+	 * пользователя, и чужой процесс мог бы выставить magic и спрятать свой exit. */
+	if (entry_args && entry_args->syscall_nr == ctx->syscall_nr &&
+	    ctx->syscall_nr == EG_SELF_EXCL_NR_BPF &&
+	    entry_args->args[5] == EG_SELF_EXCL_MAGIC && pid_is_agent()) {
+		bpf_map_delete_elem(&syscall_args, &pid_tgid);
+		syscall_self_excluded_inc();
 		syscall_count_filtered(ctx->syscall_nr);
 		return 0;
 	}

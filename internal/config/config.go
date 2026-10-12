@@ -933,6 +933,13 @@ type KernelFilterConfig struct {
 
 	// ArgPredicates — предикаты аргументов syscall в ядре (волна 8.5, F1).
 	ArgPredicates ArgPredicatesConfig `mapstructure:"arg_predicates"`
+
+	// SelfExcludeBPFCalls — служебные bpf() самого агента (lookup/update/
+	// get_next_key/batch) не отправляются в кольцо (волна 8.5, F3): агент читает
+	// собственные карты, и ядро показывало ему каждый вызов событием nr=321.
+	// Разрушительные cmd {0,3,5,6,9,33} от агента идут как раньше. Работает при
+	// включённом kernel_filter. Default: true.
+	SelfExcludeBPFCalls bool `mapstructure:"self_exclude_bpf_calls"`
 }
 
 // ArgPredicatesConfig управляет отбором событий горячих syscall-номеров в ядре
@@ -2178,6 +2185,7 @@ func setDefaults(v *viper.Viper) {
 	// list — see the PathDenylist field doc for why this is opt-in only.
 	v.SetDefault("bpf.kernel_filter.path_denylist", []string{})
 	// Волна 8.5, F1: выключено до ночи закрытия волны.
+	v.SetDefault("bpf.kernel_filter.self_exclude_bpf_calls", true)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.enabled", false)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.nrs", []int{9, 10, 158})
 	v.SetDefault("bpf.kernel_filter.arg_predicates.counters_interval", 5*time.Second)

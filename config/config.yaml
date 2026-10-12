@@ -169,6 +169,12 @@ bpf:
     # (profiler.syscall_allowlist) или детектор дрейфа контейнера (drift.enabled):
     # они учатся на поштучном потоке. Состояние — ebpf_guard_kernel_predicate_state.
     # Выключено по умолчанию до ночи закрытия волны 8.5.
+    # Волна 8.5, F3: служебные bpf() самого агента (lookup/update/get_next_key/
+    # batch) не уходят в кольцо — агент читает собственные карты и видел каждый
+    # такой вызов событием nr=321. Разрушительные cmd {0,3,5,6,9,33} от агента
+    # идут как раньше, чужие процессы не затронуты. Отброшенное:
+    # ebpf_guard_syscall_self_excluded_total.
+    self_exclude_bpf_calls: true
     arg_predicates:
       enabled: false
       nrs: [9, 10, 158]   # 321 (bpf) не допускается: drift_dangerous_syscall смотрит все cmd

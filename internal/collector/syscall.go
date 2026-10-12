@@ -444,13 +444,23 @@ func (c *SyscallCollector) MapFullCountersMap() *ebpf.Map {
 // kernel_filter_config, and agent_pid_map BPF maps backing this collector's
 // content filter, or nil maps if the collector has not loaded (stub mode).
 //
-// agentPid is always nil: syscall.bpf.c never consults agent_pid_map (only
-// fileaccess does), and since 8.2 B1 its object does not carry the map.
+// agentPid — карта pid агента для самоисключения служебных bpf() (волна 8.5,
+// F3): до F3 syscall.bpf.c карту не читал и с 8.2 B1 её не имел, теперь читает
+// (pid_is_agent в sys_enter/sys_exit для nr=321). Программируется из Go только
+// при bpf.kernel_filter.self_exclude_bpf_calls.
 func (c *SyscallCollector) KernelFilterMaps() (comm, syscall, cfg, agentPid *ebpf.Map) {
 	if c.objs == nil {
 		return nil, nil, nil, nil
 	}
-	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, nil
+	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, c.objs.AgentPidMap
+}
+
+// SelfExcludedMap returns the syscall_self_excluded counter (F3), nil in stub mode.
+func (c *SyscallCollector) SelfExcludedMap() *ebpf.Map {
+	if c.objs == nil {
+		return nil
+	}
+	return c.objs.SyscallSelfExcluded
 }
 
 // KernelPredMaps returns the syscall_pred_map (wave 8.5 F1: per-number argument

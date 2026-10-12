@@ -37,6 +37,9 @@ type SyscallMaps struct {
 	// Волна 8.5: предикат аргументов номера (F1) и счётчики отброшенного (F2).
 	SyscallPredMap *ebpf.Map `ebpf:"syscall_pred_map"`
 	SyscallCounts  *ebpf.Map `ebpf:"syscall_counts"`
+	// Волна 8.5, F3: pid агента для самоисключения служебных bpf() и счётчик исключённого.
+	AgentPidMap         *ebpf.Map `ebpf:"agent_pid_map"`
+	SyscallSelfExcluded *ebpf.Map `ebpf:"syscall_self_excluded"`
 }
 
 // SyscallProcArgs mirrors `struct proc_args` (bpf/common.h): the argv the
@@ -105,6 +108,12 @@ func (o *SyscallObjects) Close() error {
 	}
 	if o.SyscallCounts != nil {
 		errs = append(errs, o.SyscallCounts.Close())
+	}
+	if o.AgentPidMap != nil {
+		errs = append(errs, o.AgentPidMap.Close())
+	}
+	if o.SyscallSelfExcluded != nil {
+		errs = append(errs, o.SyscallSelfExcluded.Close())
 	}
 	if o.ObserverExcludedCounters != nil {
 		errs = append(errs, o.ObserverExcludedCounters.Close())

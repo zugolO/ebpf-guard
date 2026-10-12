@@ -50,6 +50,17 @@ var (
 		Help: "Live entries of the kernel syscall_counts map at the last drain (wave 8.5 F2).",
 	})
 
+	// SyscallSelfExcluded — события, которые ядро не отправило в кольцо из-за
+	// самоисключения служебных bpf() агента (F3). Единица — события (enter и exit
+	// по отдельности), как у by_nr; серия nr="321" заведена нулём сразу.
+	SyscallSelfExcluded = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ebpf_guard_syscall_self_excluded_total",
+			Help: "Syscall events the kernel did not forward because they were the agent's own service bpf() calls (lookup/update/get_next_key/batch), wave 8.5 F3. Destructive commands from the agent are not excluded.",
+		},
+		[]string{"nr"},
+	)
+
 	// KernelPredicateState — состояние предикатов ядра. Ровно одна серия
 	// state=<причина> равна 1: active — предикаты запрограммированы; off_* —
 	// карта пуста, номера идут целиком, как до F1. Отсутствие серии в /metrics
@@ -103,6 +114,13 @@ func SetKernelPredicateNrs(candidates []uint32, active map[uint32]bool) {
 // RecordSyscallKernelFiltered добавляет n отброшенных ядром событий номера nr.
 func RecordSyscallKernelFiltered(nr int64, n uint64) {
 	SyscallEventsKernelFiltered.WithLabelValues(SyscallNRLabel(nr)).Add(float64(n))
+}
+
+func init() { SyscallSelfExcluded.WithLabelValues("321") }
+
+// RecordSyscallSelfExcluded добавляет n исключённых событий bpf() агента.
+func RecordSyscallSelfExcluded(n uint64) {
+	SyscallSelfExcluded.WithLabelValues("321").Add(float64(n))
 }
 
 // SetSyscallCountsOccupancy выставляет заполненность карты счётчиков.

@@ -1774,11 +1774,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				wd.RegisterDropTracker(sc)
 				if cfg.BPF.KernelFilter.Enabled {
 					comm, sys, kfCfg, agentPID := sc.KernelFilterMaps()
+					if !cfg.BPF.KernelFilter.SelfExcludeBPFCalls {
+						agentPID = nil // F3 выключен: карта pid остаётся нулевой, pid_is_agent() = false
+					}
 					if kf := enableKernelFilter("syscall", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter); kf != nil {
 						predMap, countsMap := sc.KernelPredMaps()
 						kf.SetPredicateMap(predMap)
 						var counts kernelCountPoller
 						if r, rErr := internalbpf.NewSyscallCountReader(countsMap); rErr == nil {
+							r.SetSelfExcludedMap(sc.SelfExcludedMap())
 							counts = r
 						}
 						kpred.attach(kf, counts)

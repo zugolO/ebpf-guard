@@ -100,7 +100,20 @@ type SyscallCountReader struct {
 	// max_entries карты. Близко к max — LRU вытесняет пары, приращения
 	// пересоздаются с единицы и недосчёт растёт.
 	live, max uint32
+
+	// F3: счётчик служебных bpf() агента, не ушедших в кольцо (карта из одной
+	// записи); selfLast — прошлое чтение, selfDelta — приращение последнего Poll.
+	selfMap   *ebpf.Map
+	selfLast  uint64
+	selfDelta uint64
 }
+
+// SetSelfExcludedMap подключает счётчик самоисключения (syscall_self_excluded).
+func (r *SyscallCountReader) SetSelfExcludedMap(m *ebpf.Map) { r.selfMap = m }
+
+// SelfExcludedDelta — сколько событий самоисключение отбросило с предыдущего Poll
+// (enter и exit по отдельности, та же единица, что у by_nr).
+func (r *SyscallCountReader) SelfExcludedDelta() uint64 { return r.selfDelta }
 
 // Occupancy — живых записей на последнем Poll и max_entries карты.
 func (r *SyscallCountReader) Occupancy() (live, max uint32) { return r.live, r.max }
@@ -142,5 +155,30 @@ func (r *SyscallCountReader) Poll() ([]SyscallCountDelta, error) {
 	}
 	r.last = seen
 	r.live = uint32(len(seen))
+	r.pollSelfExcluded()
 	return out, nil
+}
+
+// pollSelfExcluded читает счётчик самоисключения и считает приращение; ошибка
+// чтения оставляет приращение нулём (не теряя прошлую сумму).
+func (r *SyscallCountReader) pollSelfExcluded() {
+	r.selfDelta = 0
+	if r.selfMap == nil {
+		return
+	}
+	var cur uint64
+	if err := r.selfMap.Lookup(uint32(0), &cur); err != nil {
+		return
+	}
+	r.selfDelta = selfExcludedDelta(r.selfLast, cur)
+	r.selfLast = cur
+}
+
+// selfExcludedDelta — приращение монотонного счётчика; меньше прежнего (карту
+// пересоздали) — вся новая сумма.
+func selfExcludedDelta(prev, cur uint64) uint64 {
+	if cur >= prev {
+		return cur - prev
+	}
+	return cur
 }

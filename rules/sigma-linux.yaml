@@ -270,11 +270,20 @@ rules:
     name: "Process masquerading as kernel thread"
     description: "User-space process using square-bracket notation like kernel threads (e.g. [kworker]) — process name masquerading."
     event_type: syscall
-    condition:
-      field: comm
-      op: regex
-      values:
-        - "^\\[.*\\]$"
+    # Волна 8.5 F1 (решение (1), 12.10.2026): правило по comm совпадало на ЛЮБОМ
+    # номере вызова и этим снимало ядерный предикат со всех горячих номеров.
+    # mmap/mprotect/arch_prctl вынуты: процесс с таким comm виден по остальным
+    # вызовам (execve, connect, open...).
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: not_in
+          values: ["9", "10", "158"]
+        - field: comm
+          op: regex
+          values:
+            - "^\\[.*\\]$"
     severity: warning
     action: alert
     tags: [mitre:T1036, sigma, masquerade, process-hiding]
@@ -1930,6 +1939,10 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # Волна 8.5 F1 (решение (1)): см. sigma_masquerade_kernel_thread.
+        - field: nr
+          op: not_in
+          values: ["9", "10", "158"]
         # 5.9.3b (#47): the rule name promises a web-server ancestor but the
         # condition never checked it — any shell on the box matched.
         #

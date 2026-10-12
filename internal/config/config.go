@@ -930,6 +930,32 @@ type KernelFilterConfig struct {
 	// /var/log/ specifically is not safe: sigma_log_deletion matches any
 	// access under /var/log/, so denying it removes that rule's only input.
 	PathDenylist []string `mapstructure:"path_denylist"`
+
+	// ArgPredicates — предикаты аргументов syscall в ядре (волна 8.5, F1).
+	ArgPredicates ArgPredicatesConfig `mapstructure:"arg_predicates"`
+}
+
+// ArgPredicatesConfig управляет отбором событий горячих syscall-номеров в ядре
+// по значению аргумента (волна 8.5, F1). Предикат ГЕНЕРИРУЕТСЯ из загруженных
+// правил (correlator.DeriveKernelPredicates) и перепрограммируется при каждой
+// перезагрузке правил; руками значений не задают. Отброшенное считается в ядре и
+// складывается в профиль нагрузки (F2), поэтому слой anomaly не теряет вход.
+//
+// Предикаты НЕ программируются (карта пуста, номера идут целиком), пока включён
+// любой потребитель, которому нужен поштучный поток номеров: deny-unknown
+// profiler.syscall_allowlist и детектор дрейфа контейнера drift.enabled
+// (решение (3), 12.10.2026). Причина — в метрике ebpf_guard_kernel_predicate_state.
+type ArgPredicatesConfig struct {
+	// Enabled включает вывод и запись предикатов. Default: false — до ночи
+	// закрытия волны 8.5; владелец переключает по её итогам.
+	Enabled bool `mapstructure:"enabled"`
+	// Nrs — номера-кандидаты. Default: [9 mmap, 10 mprotect, 158 arch_prctl].
+	// bpf (321) не кандидат: drift_dangerous_syscall смотрит все cmd (решение (2)).
+	Nrs []int `mapstructure:"nrs"`
+	// CountersInterval — как часто счётчики ядра сливаются в профиль. Между
+	// сливами профиль отстаёт на этот интервал: номер, впервые увиденный у
+	// нагрузки внутри него, оценивается как «новый». Default: 5s.
+	CountersInterval time.Duration `mapstructure:"counters_interval"`
 }
 
 // MapSizeConfig holds BPF map size settings.
@@ -2151,6 +2177,10 @@ func setDefaults(v *viper.Viper) {
 	// P1-18b: empty by default, deliberately not populated from a built-in
 	// list — see the PathDenylist field doc for why this is opt-in only.
 	v.SetDefault("bpf.kernel_filter.path_denylist", []string{})
+	// Волна 8.5, F1: выключено до ночи закрытия волны.
+	v.SetDefault("bpf.kernel_filter.arg_predicates.enabled", false)
+	v.SetDefault("bpf.kernel_filter.arg_predicates.nrs", []int{9, 10, 158})
+	v.SetDefault("bpf.kernel_filter.arg_predicates.counters_interval", 5*time.Second)
 	v.SetDefault("bpf.sampling.enabled", true)
 	v.SetDefault("bpf.sampling.syscall_rate", 1)
 	v.SetDefault("bpf.sampling.network_rate", 1)

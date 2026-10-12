@@ -58,6 +58,10 @@ func (s *Server) RegisterAPIRoutes(mux *http.ServeMux) {
 	// handle that lets its memory cost be attributed on ONE binary.
 	mux.HandleFunc("/api/v1/tuning/incident-ingest", s.handleIncidentIngest)
 	mux.HandleFunc("/api/v1/tuning/alert-aggregation", s.handleAlertAggregation)
+	// In-kernel syscall argument predicates (wave 8.5, F1): the A/B handle for
+	// the pair on adjacent equal windows — flipping in place, because a restart
+	// between the windows would measure the restart.
+	mux.HandleFunc("/api/v1/tuning/kernel-predicates", s.handleKernelPredicates)
 
 	// Swagger UI — served without auth so API consumers can explore the spec.
 	// Assets are embedded at build time to eliminate the unpkg.com CDN dependency.

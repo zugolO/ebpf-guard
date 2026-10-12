@@ -7,10 +7,19 @@ rules:
     name: "CIS 5.1.1: Cluster-admin role usage"
     description: "Detects processes using cluster-admin privileges"
     event_type: syscall
-    condition:
-      field: comm
-      op: regex
-      values: ["kubectl", "helm"]
+    # Волна 8.5 F1 (решение (1), 12.10.2026): правило по comm совпадало на ЛЮБОМ
+    # номере вызова и этим снимало ядерный предикат со всех горячих номеров.
+    # mmap/mprotect/arch_prctl вынуты: процесс с таким comm виден по остальным
+    # вызовам (execve, connect, open...).
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: not_in
+          values: ["9", "10", "158"]
+        - field: comm
+          op: regex
+          values: ["kubectl", "helm"]
     severity: warning
     action: alert
 

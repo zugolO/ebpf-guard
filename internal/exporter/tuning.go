@@ -433,6 +433,17 @@ func (s *Server) handleAlertAggregation(w http.ResponseWriter, r *http.Request) 
 	s.serveRuntimeSwitch(w, r, "alert-aggregation")
 }
 
+// handleKernelPredicates serves GET/POST /api/v1/tuning/kernel-predicates —
+// the runtime switch for the in-kernel syscall argument predicates (wave 8.5,
+// F1). Same shape and contract as the other measurement switches: the state
+// after the call, and whether this call moved it. Turning it on does not
+// override the reasons that keep the predicates off (a learning consumer, no
+// counters, no rules): the state label of ebpf_guard_kernel_predicate_state
+// says which one applies.
+func (s *Server) handleKernelPredicates(w http.ResponseWriter, r *http.Request) {
+	s.serveRuntimeSwitch(w, r, "kernel-predicates")
+}
+
 func (s *Server) serveRuntimeSwitch(w http.ResponseWriter, r *http.Request, name string) {
 	s.mu.RLock()
 	sw, wired := s.runtimeSwitches[name]

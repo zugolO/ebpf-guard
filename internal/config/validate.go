@@ -52,6 +52,23 @@ func ValidateConfig(cfg *Config) error {
 		add(fmt.Errorf("profiler.learning_period: must be > 0, got %d", cfg.Profiler.LearningPeriod))
 	}
 
+	// ── BPF: предикаты аргументов (волна 8.5, F1) ────────────────────────────
+	if ap := cfg.BPF.KernelFilter.ArgPredicates; ap.Enabled {
+		for _, nr := range ap.Nrs {
+			if nr < 0 || nr >= 512 {
+				add(fmt.Errorf("bpf.kernel_filter.arg_predicates.nrs: %d out of range [0, 512)", nr))
+			}
+			// bpf (321) — решение (2): drift_dangerous_syscall смотрит все cmd, предикат
+			// на нём невозможен; конфиг, который его просит, ошибка, а не молчаливый отказ.
+			if nr == 321 {
+				add(fmt.Errorf("bpf.kernel_filter.arg_predicates.nrs: 321 (bpf) is not eligible — drift_dangerous_syscall reads every cmd"))
+			}
+		}
+		if ap.CountersInterval < time.Second || ap.CountersInterval > time.Minute {
+			add(fmt.Errorf("bpf.kernel_filter.arg_predicates.counters_interval: must be in [1s, 1m], got %s", ap.CountersInterval))
+		}
+	}
+
 	// ── Rules ────────────────────────────────────────────────────────────────
 	if cfg.Rules.RateLimitAlerts && cfg.Rules.RateLimitWindow <= 0 {
 		add(fmt.Errorf("rules.rate_limit_window: must be > 0 when rate_limit_alerts is true, got %d",

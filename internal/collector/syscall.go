@@ -453,6 +453,16 @@ func (c *SyscallCollector) KernelFilterMaps() (comm, syscall, cfg, agentPid *ebp
 	return c.objs.CommFilterMap, c.objs.SyscallFilterMap, c.objs.KernelFilterConfig, nil
 }
 
+// KernelPredMaps returns the syscall_pred_map (wave 8.5 F1: per-number argument
+// predicate programmed from the rules) and the syscall_counts map (F2: what the
+// predicate dropped, counted per (tgid, nr)), or nil maps in stub mode.
+func (c *SyscallCollector) KernelPredMaps() (pred, counts *ebpf.Map) {
+	if c.objs == nil {
+		return nil, nil
+	}
+	return c.objs.SyscallPredMap, c.objs.SyscallCounts
+}
+
 // SamplingConfigMap returns the sampling_config BPF map backing this
 // collector's static sample-rate filter, or nil in stub mode.
 func (c *SyscallCollector) SamplingConfigMap() *ebpf.Map {

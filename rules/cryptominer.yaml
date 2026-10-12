@@ -105,10 +105,19 @@ rules:
     name: "Cryptominer: Known mining binary detected"
     description: "Process with name matching known cryptocurrency mining software"
     event_type: syscall
-    condition:
-      field: comm
-      op: regex
-      values: ["^(xmrig|minerd|cgminer|bfgminer|cpuminer|ethminer|nbminer|teamredminer|phoenixminer|trexminer|lolminer| gminer|excavator)$"]
+    # Волна 8.5 F1 (решение (1), 12.10.2026): правило по comm совпадало на ЛЮБОМ
+    # номере вызова и этим снимало ядерный предикат со всех горячих номеров.
+    # mmap/mprotect/arch_prctl вынуты: процесс с таким comm виден по остальным
+    # вызовам (execve, connect, open...).
+    condition_group:
+      operator: and
+      conditions:
+        - field: nr
+          op: not_in
+          values: ["9", "10", "158"]
+        - field: comm
+          op: regex
+          values: ["^(xmrig|minerd|cgminer|bfgminer|cpuminer|ethminer|nbminer|teamredminer|phoenixminer|trexminer|lolminer| gminer|excavator)$"]
     severity: critical
     action: alert
     tags: [cryptominer, crypto, mining, process]

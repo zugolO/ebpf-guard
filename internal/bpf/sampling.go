@@ -500,6 +500,12 @@ type KernelFilterController struct {
 	kernelFilterConfig *ebpf.Map // kernel_filter_config: key uint32, value uint8
 	agentPidMap        *ebpf.Map // agent_pid_map: key uint32, value uint32
 	hasBatch           bool
+
+	// Волна 8.5, F1: предикаты аргументов номера (syscall_pred_map), только у
+	// syscall-объекта. predNrs — что сейчас записано в карту, чтобы пересчёт
+	// после перезагрузки правил писал только изменившиеся слоты.
+	predWriter predSlotWriter
+	predNrs    map[uint32]SyscallPredRaw
 }
 
 // NewKernelFilterController creates a controller for the filter maps.

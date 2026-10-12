@@ -886,6 +886,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Any("error", err))
 	}
 
+	// Волна 8.5, F1/F2: предикаты аргументов в ядре и счётчики отброшенного.
+	// Контроллер создаётся сразу за движком (карты ядра появятся позже, из отчёта
+	// коллектора), а на перезагрузку правил подписывается сразу: предикат не
+	// должен пережить правила, из которых он выведен.
+	kpred := newKernelPredController(cfg, engine)
+	engine.SetKernelPredicateUpdater(kpred.Apply)
+
 	// 5.9a: poll the harness's root-PID file rather than read it once at
 	// startup, because the measurement harness (idle-run.sh) is started
 	// separately from — and typically well after — this process, so its PID
@@ -1201,6 +1208,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// цены (RSS, потери кольцевого буфера) обязан идти на ОДНОМ бинаре и без
 	// рестарта — рестарт обнулил бы базы и кучу и измерил бы себя.
 	srv.SetRuntimeSwitch("incident-ingest", engine.IncidentIngestEnabled, engine.SetIncidentIngestEnabled)
+	// Волна 8.5, F1: переключатель предикатов ядра для пары A/B на одном бинаре.
+	srv.SetRuntimeSwitch("kernel-predicates", kpred.Enabled, kpred.SetEnabled)
 	// Wires POST /api/v1/tuning/exceptions to append operator-generated
 	// exceptions (from the dashboard's false-positive flow, issue #308) into
 	// the same overlay file the rule loader already reads on startup/reload.
@@ -1765,7 +1774,15 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				wd.RegisterDropTracker(sc)
 				if cfg.BPF.KernelFilter.Enabled {
 					comm, sys, kfCfg, agentPID := sc.KernelFilterMaps()
-					enableKernelFilter("syscall", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter)
+					if kf := enableKernelFilter("syscall", kernelFilterMapSet{comm, sys, kfCfg, agentPID}, cfg.BPF.KernelFilter); kf != nil {
+						predMap, countsMap := sc.KernelPredMaps()
+						kf.SetPredicateMap(predMap)
+						var counts kernelCountPoller
+						if r, rErr := internalbpf.NewSyscallCountReader(countsMap); rErr == nil {
+							counts = r
+						}
+						kpred.attach(kf, counts)
+					}
 				}
 				if cfg.BPF.Sampling.Enabled {
 					enableSampling("syscall", sc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "syscall")
@@ -2403,6 +2420,18 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.String("source", runtimeEnricher.Source()))
 		}
 	}
+
+	// Волна 8.5, F2: слив счётчиков ядра (то, что отбросил предикат) в профили
+	// нагрузок. Запускается после энричеров: счётчик получает те же метки k8s и
+	// контейнера, что и поштучное событие.
+	go kpred.runCounters(ctx, func(ev *types.Event) {
+		if k8sEnricher != nil {
+			k8sEnricher.EnrichEvent(ev)
+		}
+		if runtimeEnricher != nil {
+			runtimeEnricher.EnrichEvent(ev)
+		}
+	})
 
 	// Container drift detector — when enabled, compares runtime behaviour against
 	// per-container baselines. In ImageManifest mode, the baseline is pre-seeded
@@ -3098,12 +3127,12 @@ func processEvent(
 // maps does nothing for the fileaccess programs, so this must be called once
 // per collector whose programs consult the filter — hence the `name` label and
 // the map arguments rather than a concrete collector type.
-func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFilterConfig) {
+func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFilterConfig) *internalbpf.KernelFilterController {
 	kf, err := internalbpf.NewKernelFilterController(maps.comm, maps.syscall, maps.cfg, maps.agentPid)
 	if err != nil {
 		slog.Warn("kernel_filter: maps unavailable, events forwarded unfiltered",
 			slog.String("collector", name), slog.Any("error", err))
-		return
+		return nil
 	}
 
 	nrs := fc.MonitoredSyscalls
@@ -3129,7 +3158,7 @@ func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFi
 
 	if err := kf.Enable(); err != nil {
 		slog.Error("kernel_filter: failed to enable BPF-side filtering", slog.Any("error", err))
-		return
+		return nil
 	}
 	slog.Info("kernel_filter: enabled BPF-side syscall/comm filtering",
 		slog.String("collector", name),
@@ -3156,6 +3185,7 @@ func enableKernelFilter(name string, maps kernelFilterMapSet, fc config.KernelFi
 		slog.Info("kernel_filter: agent self-exclusion not applicable to this collector (its programs do not consult agent_pid_map)",
 			slog.String("collector", name))
 	}
+	return kf
 }
 
 // enablePathFilter populates path_filter_map with the configured path-prefix

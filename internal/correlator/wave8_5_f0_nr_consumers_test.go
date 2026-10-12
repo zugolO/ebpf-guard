@@ -32,8 +32,20 @@ var w85KnownNrConsumers = map[string]string{
 	"internal/collector/syscall.go|readLoop":                  "proc.args только для 59/322",
 	"internal/collector/syscall.go|parseEvent":                "зеркало ядерного allowlist номеров",
 	"internal/policy/rego_enabled.go|eventToInput":            "Rego: только события алертов",
-	"internal/bpf/events.go|ParseSyscallEventInto":            "разбор кольца (производитель)",
-	"internal/bpf/events.go|ToTypesEvent":                     "разбор кольца (производитель)",
+	// Инфраструктура F1/F2: поле Nr — номер предиката или счётчика ядра, а не
+	// Syscall.Nr живого события; записаны, чтобы сторож оставался красным на
+	// НАСТОЯЩИЙ новый читатель.
+	"cmd/ebpf-guard/kernelpred.go|Apply":                       "F1: контроллер предикатов (Nr предиката)",
+	"cmd/ebpf-guard/kernelpred.go|decide":                      "F1: контроллер предикатов (Nr предиката)",
+	"cmd/ebpf-guard/kernelpred.go|flushCounters":               "F2: слив счётчиков ядра (Nr счётчика)",
+	"cmd/ebpf-guard/kernelpred.go|predNrs":                     "F1: контроллер предикатов (Nr предиката)",
+	"internal/bpf/syscall_counts.go|Poll":                      "F2: читатель счётчиков ядра (Nr ключа карты)",
+	"internal/bpf/syscall_pred.go|EncodeSyscallPred":           "F1: запись карты предикатов (Nr предиката)",
+	"internal/bpf/syscall_pred.go|SetSyscallPredicates":        "F1: запись карты предикатов (Nr предиката)",
+	"internal/profiler/kernelcounts.go|IngestSyscallCounts":    "F2: счётчики ядра → EWMA-профиль (поле Nr счётчика, не события)",
+	"internal/correlator/kernelpred.go|DeriveKernelPredicates": "F1: вывод предикатов; Nr — номер предиката, а не поле события",
+	"internal/bpf/events.go|ParseSyscallEventInto":             "разбор кольца (производитель)",
+	"internal/bpf/events.go|ToTypesEvent":                      "разбор кольца (производитель)",
 	// Офлайн/CLI — живой поток агента не читают.
 	"internal/autolearn/learner.go|Ingest":            "ebpf-guard learn: профиль из живого потока",
 	"internal/tui/rule_builder.go|rbGetFieldValue":    "TUI",

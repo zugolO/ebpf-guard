@@ -563,6 +563,48 @@ The denylist is applied at `open()` and again at `read()`/`write()` (against the
 resolved for that file descriptor), so filtering is not defeated by a process that opens a
 file once and then reads it in a loop.
 
+## In-Kernel Syscall Argument Predicates (syscall event volume)
+
+Four syscalls make up ≈95% of the syscall stream — `mmap`, `mprotect`, `bpf`, `arch_prctl` —
+while the rules that read them need a narrow argument (`mmap`: executable anonymous mapping;
+`mprotect`: `PROT_EXEC`; `arch_prctl`: the cpuid codes). `bpf.kernel_filter.arg_predicates`
+drops the rest **in the kernel**, before the ring buffer.
+
+```yaml
+bpf:
+  kernel_filter:
+    arg_predicates:
+      enabled: true
+      nrs: [9, 10, 158]        # mmap, mprotect, arch_prctl; 321 (bpf) is rejected by validation
+      counters_interval: 5s
+```
+
+The predicate is **generated from the loaded rules**, never written by hand, and re-derived on
+every rule reload. A number gets one only if *every* syscall rule that can match it requires
+the same argument (`in`/`eq`); a single rule without such a condition keeps the number whole.
+A rule that matches by `comm` on any syscall number must exclude the hot numbers
+(`nr not_in [9, 10, 158]`) or it blocks the predicate for all of them.
+
+What the kernel drops it also counts, per `(pid, nr)`, and the counts are folded into the
+anomaly layer's workload profile every `counters_interval` — so the profile is the one the
+individual events would have built.
+
+Predicates are **not programmed** while a consumer that learns from the per-event stream is
+enabled (`profiler.syscall_allowlist` deny-unknown, `drift.enabled`): a number dropped during
+learning would later look like a violation. The state and the reason are in
+`ebpf_guard_kernel_predicate_state{state}` (`active`, `off_config`, `off_training_consumer`,
+`off_no_counters`, `off_no_map`, `off_no_rules`) and the per-number view in
+`ebpf_guard_kernel_predicate_nr{nr}`.
+
+```promql
+# What the predicate removed, next to what still reaches userspace
+rate(ebpf_guard_syscall_events_kernel_filtered_total[5m])
+rate(ebpf_guard_syscall_events_by_nr_total[5m])
+```
+
+`by_nr + kernel_filtered` is the stream as it was before the predicate. Off by default until
+wave 8.5 closes.
+
 ## Memory Pressure Auto-Tuning
 
 ebpf-guard monitors `/proc/meminfo` and automatically downgrades profiling when free RAM falls below configurable thresholds. There are three pressure levels:

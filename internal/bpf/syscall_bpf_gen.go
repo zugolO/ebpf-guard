@@ -34,6 +34,9 @@ type SyscallMaps struct {
 	RingbufFullCounters      *ebpf.Map `ebpf:"ringbuf_full_counters"`
 	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
 	SyscallFilterMap         *ebpf.Map `ebpf:"syscall_filter_map"`
+	// Волна 8.5: предикат аргументов номера (F1) и счётчики отброшенного (F2).
+	SyscallPredMap *ebpf.Map `ebpf:"syscall_pred_map"`
+	SyscallCounts  *ebpf.Map `ebpf:"syscall_counts"`
 }
 
 // SyscallProcArgs mirrors `struct proc_args` (bpf/common.h): the argv the
@@ -96,6 +99,12 @@ func (o *SyscallObjects) Close() error {
 	}
 	if o.SyscallFilterMap != nil {
 		errs = append(errs, o.SyscallFilterMap.Close())
+	}
+	if o.SyscallPredMap != nil {
+		errs = append(errs, o.SyscallPredMap.Close())
+	}
+	if o.SyscallCounts != nil {
+		errs = append(errs, o.SyscallCounts.Close())
 	}
 	if o.ObserverExcludedCounters != nil {
 		errs = append(errs, o.ObserverExcludedCounters.Close())

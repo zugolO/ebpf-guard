@@ -50,11 +50,171 @@ struct {
 	__type(value, struct sys_enter_args);
 } syscall_args SEC(".maps");
 
+/*
+ * Волна 8.5, F1: предикат аргументов номера, ГЕНЕРИРУЕМЫЙ userspace'ом из
+ * загруженных правил (internal/correlator/kernelpred.go). Номер без записи
+ * (nterms == 0) идёт целиком, как до F1. Событие номера с предикатом уходит в
+ * кольцо, только если выполнены ВСЕ конъюнкты: args[arg] ∈ vals[0..nvals).
+ * Предикат — необходимое условие совпадения правила, поэтому ядро не теряет
+ * ни одного совпадения; остальное дочищает userspace. Невалидная запись
+ * (arg > 5, nvals == 0) отключает отбор для номера — отказ в сторону «пропустить».
+ *
+ * Раскладка обязана совпадать с internal/bpf/syscall_pred.go (SyscallPred).
+ */
+#define EG_PRED_TERMS  2
+#define EG_PRED_VALUES 8
+
+struct syscall_pred_term {
+	__u8  arg;
+	__u8  nvals;
+	__u8  pad[6];
+	__u64 vals[EG_PRED_VALUES];
+};
+
+struct syscall_pred {
+	__u8  nterms;
+	__u8  pad[7];
+	struct syscall_pred_term terms[EG_PRED_TERMS];
+};
+
+_Static_assert(sizeof(struct syscall_pred_term) == 8 + 8 * EG_PRED_VALUES,
+	       "syscall_pred_term layout drifted from internal/bpf/syscall_pred.go");
+_Static_assert(sizeof(struct syscall_pred) == 8 + EG_PRED_TERMS * (8 + 8 * EG_PRED_VALUES),
+	       "syscall_pred layout drifted from internal/bpf/syscall_pred.go");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 512);
+	__type(key, __u32);
+	__type(value, struct syscall_pred);
+} syscall_pred_map SEC(".maps");
+
+/*
+ * Волна 8.5, F2: счётчик того, что предикат отбросил. Профайлер слоя anomaly
+ * знает о номере вызова «бывал ли он у этой нагрузки» и сколько наблюдений
+ * набрано; без поштучных событий он берёт это отсюда (profiler.IngestSyscallCounts).
+ * Считаем КАЖДЫЙ отброшенный вызов программы (enter и exit по отдельности —
+ * так же, как поштучно приходили события): профиль из счётчиков тождественен
+ * профилю из событий. LRU: переполнение вытесняет самую старую пару, а не
+ * отказывает во вставке.
+ */
+struct syscall_count_key {
+	__u32 tgid;
+	__u32 nr;
+};
+
+struct syscall_count_val {
+	__u64 n;
+	__u64 cgroup_id;
+	__u8  comm[COMM_LEN];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	__uint(max_entries, 8192);
+	__type(key, struct syscall_count_key);
+	__type(value, struct syscall_count_val);
+} syscall_counts SEC(".maps");
+
+static __always_inline struct syscall_pred *syscall_pred_lookup(__s64 nr)
+{
+	__u32 key;
+	struct syscall_pred *p;
+
+	if (nr < 0 || nr >= 512)
+		return NULL;
+	key = (__u32)nr;
+	p = bpf_map_lookup_elem(&syscall_pred_map, &key);
+	if (!p || p->nterms == 0)
+		return NULL;
+	return p;
+}
+
+/* args[idx] константными смещениями: переменный индекс в ctx верификатор не пустит. */
+static __always_inline unsigned long pred_arg(const unsigned long *a, __u8 idx)
+{
+	if (idx == 0) return a[0];
+	if (idx == 1) return a[1];
+	if (idx == 2) return a[2];
+	if (idx == 3) return a[3];
+	if (idx == 4) return a[4];
+	return a[5];
+}
+
+static __always_inline bool syscall_pred_match(const struct syscall_pred *p, const unsigned long *a)
+{
+	int t, i;
+
+#pragma unroll
+	for (t = 0; t < EG_PRED_TERMS; t++) {
+		const struct syscall_pred_term *term;
+		unsigned long v;
+		bool hit = false;
+
+		if (t >= p->nterms)
+			break;
+		term = &p->terms[t];
+		if (term->arg > 5 || term->nvals == 0 || term->nvals > EG_PRED_VALUES)
+			continue; /* невалидный конъюнкт не отбрасывает ничего */
+		v = pred_arg(a, term->arg);
+#pragma unroll
+		for (i = 0; i < EG_PRED_VALUES; i++) {
+			if (i >= term->nvals)
+				break;
+			if (term->vals[i] == v) {
+				hit = true;
+				break;
+			}
+		}
+		if (!hit)
+			return false;
+	}
+	return true;
+}
+
+/* true: у номера есть предикат и аргументы этого вызова его НЕ выполняют. */
+static __always_inline bool syscall_pred_rejects_enter(struct sys_enter_args *ctx)
+{
+	struct syscall_pred *p = syscall_pred_lookup(ctx->syscall_nr);
+	unsigned long a[6];
+
+	if (!p)
+		return false;
+	if (bpf_probe_read_kernel(&a, sizeof(a), &ctx->args) < 0)
+		return false;
+	return !syscall_pred_match(p, a);
+}
+
+static __always_inline void syscall_count_filtered(__s64 nr)
+{
+	struct syscall_count_key k = {};
+	struct syscall_count_val *v;
+
+	k.tgid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	k.nr = (__u32)nr;
+	v = bpf_map_lookup_elem(&syscall_counts, &k);
+	if (v) {
+		v->n++;
+		/* comm меняется на exec: хранится последний, иначе счёт ушёл бы в чужую нагрузку */
+		bpf_get_current_comm(v->comm, sizeof(v->comm));
+		return;
+	}
+	{
+		struct syscall_count_val nv = {};
+
+		nv.n = 1;
+		nv.cgroup_id = bpf_get_current_cgroup_id();
+		bpf_get_current_comm(nv.comm, sizeof(nv.comm));
+		bpf_map_update_elem(&syscall_counts, &k, &nv, BPF_NOEXIST);
+	}
+}
+
 SEC("tp/raw_syscalls/sys_enter")
 int trace_sys_enter(struct sys_enter_args *ctx)
 {
 	struct event *e;
 	__u64 pid_tgid;
+	bool pred_rejects = false;
 
 	/* BPF-side content filtering: drop before touching the ring buffer */
 	if (kernel_filter_enabled()) {
@@ -62,6 +222,8 @@ int trace_sys_enter(struct sys_enter_args *ctx)
 			return 0;
 		if (!syscall_is_monitored(ctx->syscall_nr))
 			return 0;
+		/* 8.5 F1: предикат аргументов номера (карта программируется из правил). */
+		pred_rejects = syscall_pred_rejects_enter(ctx);
 	}
 
 	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
@@ -70,6 +232,14 @@ int trace_sys_enter(struct sys_enter_args *ctx)
 	 * emitted", which is what 5.9a's userspace counter meant. */
 	if (observer_should_drop())
 		return 0;
+
+	/* 8.5 F1/F2: отброшено предикатом — считаем и не трогаем кольцо. Счёт
+	 * после observer_should_drop: поддерево измерителя в ядре и так не
+	 * доезжало бы до профайлера. */
+	if (pred_rejects) {
+		syscall_count_filtered(ctx->syscall_nr);
+		return 0;
+	}
 
 	/* Reserve space in ring buffer with sampling */
 	e = reserve_event_with_sampling(EVENT_TYPE_SYSCALL, 0);
@@ -114,6 +284,7 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 	struct event *e;
 	struct sys_enter_args *entry_args;
 	__u64 pid_tgid;
+	bool has_pred = false;
 
 	/* BPF-side content filtering: drop before touching the ring buffer */
 	if (kernel_filter_enabled()) {
@@ -121,6 +292,7 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 			return 0;
 		if (!syscall_is_monitored(ctx->syscall_nr))
 			return 0;
+		has_pred = syscall_pred_lookup(ctx->syscall_nr) != NULL;
 	}
 
 	/* 5.9.2g: measurement-harness tree, dropped in the kernel before the ring
@@ -129,6 +301,21 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 	 * emitted", which is what 5.9a's userspace counter meant. */
 	if (observer_should_drop())
 		return 0;
+
+	/* Args stored by the matching sys_enter. For a number with a predicate the
+	 * entry exists only when enter PASSED the predicate (it stores after its
+	 * filters), so a missing entry means "enter was rejected": the exit is
+	 * rejected with it, and counted like the enter was (8.5 F1/F2); an entry left
+	 * by another syscall (enter without exit) counts as missing. Numbers
+	 * without a predicate keep the old behaviour — exit is emitted with zero
+	 * args when the entry is gone. */
+	pid_tgid = bpf_get_current_pid_tgid();
+	entry_args = bpf_map_lookup_elem(&syscall_args, &pid_tgid);
+	if (has_pred && (!entry_args || entry_args->syscall_nr != ctx->syscall_nr)) {
+		/* Запись чужого вызова (enter без exit: execve, exit_group) — не наша. */
+		syscall_count_filtered(ctx->syscall_nr);
+		return 0;
+	}
 
 	/* Reserve space in ring buffer with sampling */
 	e = reserve_event_with_sampling(EVENT_TYPE_SYSCALL, 0);
@@ -143,9 +330,6 @@ int trace_sys_exit(struct sys_exit_args *ctx)
 	e->syscall.nr = ctx->syscall_nr;
 	e->syscall.ret = ctx->ret;
 
-	/* Try to get stored entry args */
-	pid_tgid = bpf_get_current_pid_tgid();
-	entry_args = bpf_map_lookup_elem(&syscall_args, &pid_tgid);
 	if (entry_args) {
 		bpf_probe_read_kernel(&e->syscall.args, sizeof(e->syscall.args),
 			&entry_args->args);

@@ -158,6 +158,22 @@ bpf:
     #   - "/usr/share/zoneinfo/"   — tzdata, re-read by every process at startup
     path_denylist: []
 
+    # Волна 8.5, F1: предикаты аргументов горячих syscall в ядре. mmap, mprotect
+    # и arch_prctl дают ≈ 95% syscall-потока, а правилам нужен узкий признак
+    # (mmap: prot ∈ {4..7} и fd = -1; mprotect: prot ∈ {4..7}; arch_prctl:
+    # code ∈ {4113, 4114}). Предикат ГЕНЕРИРУЕТСЯ из загруженных правил и
+    # перепрограммируется при каждой перезагрузке правил — значений здесь нет и
+    # быть не должно. Отброшенное считается в ядре и складывается в профиль
+    # нагрузки слоя anomaly, так что профиль тот же, что из поштучных событий.
+    # Предикаты не включаются, пока включён deny-unknown
+    # (profiler.syscall_allowlist) или детектор дрейфа контейнера (drift.enabled):
+    # они учатся на поштучном потоке. Состояние — ebpf_guard_kernel_predicate_state.
+    # Выключено по умолчанию до ночи закрытия волны 8.5.
+    arg_predicates:
+      enabled: false
+      nrs: [9, 10, 158]   # 321 (bpf) не допускается: drift_dangerous_syscall смотрит все cmd
+      counters_interval: 5s
+
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling
   # rates for high-volume syscall/file events when the event channel starts
   # filling up, preventing silent kernel-side ring-buffer drops.

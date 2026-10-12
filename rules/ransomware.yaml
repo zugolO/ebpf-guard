@@ -82,6 +82,10 @@ rules:
     condition_group:
       operator: and
       conditions:
+        # Волна 8.5 F1 (решение (1)): см. sigma_masquerade_kernel_thread.
+        - field: nr
+          op: not_in
+          values: ["9", "10", "158"]
         - field: proc.comm
           op: in
           values: ["vssadmin", "wmic", "wbadmin", "bcdedit", "diskshadow",

@@ -47,6 +47,29 @@ func (e *EWMA) Update(observation float64) {
 	e.count++
 }
 
+// UpdateN folds n identical observations into the average — the same state n
+// sequential Update(observation) calls leave behind (wave 8.5 F2: the kernel
+// counts events it filters out, and the profile must end up exactly as if
+// each one had arrived). Closed form for the n-1 smoothing steps after the
+// first observation: v ← o + (v − o)·(1−w)^(n−1).
+func (e *EWMA) UpdateN(observation float64, n uint64) {
+	if n == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	rest := n
+	if e.count == 0 {
+		e.value = observation
+		rest--
+	}
+	if rest > 0 {
+		e.value = observation + (e.value-observation)*math.Pow(1-e.weight, float64(rest))
+	}
+	e.count += n
+}
+
 // Value returns the current EWMA value.
 func (e *EWMA) Value() float64 {
 	e.mu.RLock()
@@ -99,6 +122,17 @@ func (bl *BaselineLearner) RecordSample() {
 	bl.mu.Lock()
 	defer bl.mu.Unlock()
 	bl.sampleCount++
+}
+
+// RecordSamples records n samples at once (wave 8.5 F2: events the kernel
+// counted instead of delivering).
+func (bl *BaselineLearner) RecordSamples(n uint64) {
+	if n == 0 {
+		return
+	}
+	bl.mu.Lock()
+	defer bl.mu.Unlock()
+	bl.sampleCount += n
 }
 
 // IsLearningComplete checks if the learning phase is complete.

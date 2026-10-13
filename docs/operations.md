@@ -657,6 +657,9 @@ no ancestry leak, and events dropped in the kernel (F1) no longer leave a chain 
   resolves. `readlink /proc/<pid>/exe` stays as the fallback: `ebpf_guard_exe_path_image_total{result}` (cached, proc,
   filename, stale, unresolved, no_record, no_inode, no_table) and `ebpf_guard_exe_path_readlink_fallback_total{result}`.
   A hard link to the same file resolves to the first path the agent saw for that inode (same file, same content).
+  In a pod with `hostPID` the image paths reported by the kernel are host paths while `stat` sees the pod filesystem, so the
+  `dev/ino` check goes through `/proc/1/root` (the host root; detected at start by comparing it with `/`, logged as
+  `image paths are verified through the host root`). Without it every image in a pod would fall back to readlink.
 * `GET /debug/lineage?pid=N` (debug endpoints enabled): what the agent sees for the ancestors of a pid — for a
   live comparison with `/proc`.
 

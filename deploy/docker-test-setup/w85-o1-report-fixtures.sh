@@ -12,7 +12,7 @@ bad() { echo "FAIL $1"; fails=$((fails + 1)); }
 #   ctl — «ПРАВИЛО=A:B» через пробел, по умолчанию все socket-правила 3:3, fork_bomb 0:4
 mk() {
     local n=$1; shift
-    local a41=5000 b41=5010 a56=0 b56=900 anA=20 anB=22 drA=695 drB=695 cpuA=40 cpuB=41 alA=7000000000 alB=7100000000 done=yes win=600 dropf="" btv=ok ctlA="" ctlB="" nodrops=0
+    local a41=5000 b41=5010 a56=0 b56=900 anA=20 anB=22 drA=695 drB=695 cpuA=40 cpuB=41 alA=7000000000 alB=7100000000 done=yes win=600 dropf="" btv=ok ctlA="" ctlB="" nodrops=0 b321=0 a321=0 a56none=1 nocfgA=0 anom0none=0 anom1none=0
     for kv in "$@"; do eval "${kv%%=*}='${kv#*=}'"; done
     local d=$T/$n; mkdir -p "$d/A" "$d/B"
     [ "$done" = yes ] && echo "done 2026-10-13T00:00:00Z" > "$d/DONE" || echo "die: x" > "$d/DONE"
@@ -25,6 +25,7 @@ mk() {
             echo "ebpf_guard_syscall_events_by_nr_total{nr=\"41\"} 100"
             echo "ebpf_guard_syscall_events_by_nr_total{nr=\"56\"} 0"
             echo "ebpf_guard_syscall_events_by_nr_total{nr=\"59\"} 10"
+            echo "ebpf_guard_syscall_events_by_nr_total{nr=\"321\"} 0"
             echo "ebpf_guard_alert_volume_by_event_type_total{event_type=\"syscall\",rule_id=\"anomaly_detection\"} 100"
             [ $nodrops = 1 ] || echo "ebpf_guard_events_dropped_total{collector=\"fileaccess\",reason=\"path_denylist\"} 1000"
             echo "process_cpu_seconds_total 500"
@@ -34,6 +35,7 @@ mk() {
             echo "ebpf_guard_syscall_events_by_nr_total{nr=\"41\"} $((100 + e41))"
             echo "ebpf_guard_syscall_events_by_nr_total{nr=\"56\"} $e56"
             echo "ebpf_guard_syscall_events_by_nr_total{nr=\"59\"} 60"
+            echo "ebpf_guard_syscall_events_by_nr_total{nr=\"321\"} $([ $r = B ] && echo $b321 || echo $a321)"
             echo "ebpf_guard_alert_volume_by_event_type_total{event_type=\"syscall\",rule_id=\"anomaly_detection\"} $((100 + an))"
             [ $nodrops = 1 ] || echo "ebpf_guard_events_dropped_total{collector=\"fileaccess\",reason=\"path_denylist\"} $((1000 + dr))"
             echo "process_cpu_seconds_total $((500 + cpu))"
@@ -44,6 +46,14 @@ mk() {
         for kv in $o; do eval "${kv%%=*}='${kv#*=}'"; done
         printf 'c2_raw_socket_shell %s\nexfil_raw_socket_by_non_root %s\nmitre_arp_spoof_raw_socket %s\nimpact_fork_bomb_pattern %s\n' "$c2" "$ex" "$arp" "$fb" > "$d/$r/ctl.txt"
     done
+    # конфиги ролей: A без 56, B с 56 (allowlist, как у w85-o1-cfg.py)
+    echo "    monitored_syscalls: [59, 41, 9]" > "$d/A/config.yaml"; echo "    monitored_syscalls: [59, 41, 9, 56]" > "$d/B/config.yaml"
+    [ "$nocfgA" = 1 ] && rm -f "$d/A/config.yaml"
+    # у роли A, где clone не в allowlist, серии nr=56 нет вовсе (рождается только для перечисленных номеров)
+    [ "$a56none" = 1 ] && { grep -av 'nr="56"' "$d/A/m0.txt" > "$d/A/m0.tmp"; mv "$d/A/m0.tmp" "$d/A/m0.txt"; grep -av 'nr="56"' "$d/A/m1.txt" > "$d/A/m1.tmp"; mv "$d/A/m1.tmp" "$d/A/m1.txt"; }
+    # счётчик anomaly рождается при первом алерте: в m0 его может не быть
+    [ "$anom0none" = 1 ] && { for r in A B; do grep -av 'anomaly_detection' "$d/$r/m0.txt" > "$d/$r/m0.tmp"; mv "$d/$r/m0.tmp" "$d/$r/m0.txt"; done; }
+    [ "$anom1none" = 1 ] && { grep -av 'anomaly_detection' "$d/B/m1.txt" > "$d/B/m1.tmp"; mv "$d/B/m1.tmp" "$d/B/m1.txt"; }
     case "$btv" in
         ok)      printf '@s[2, 1]: 9000\n@s[2, 3]: 20\n@s[17, 2]: 5\n@s[1, 1]: 975\n@cl[0]: 500\n@cl[65534]: 12\n' > "$d/bt.txt" ;;
         nosock)  printf '@cl[0]: 500\n' > "$d/bt.txt" ;;
@@ -67,6 +77,15 @@ want floor-off      "$(mk flooroff anA=64 anB=82)"                     '^ПРО�
 want drops          "$(mk drops drB=696)"                              '^ПРОВАЛЕН: 8\.5\.O1p .*дропы B 696 > A 695'
 want alloc-edge     "$(mk alle alA=1000000000 alB=1040000000)"         '^ДОСТИГНУТО: 8\.5\.O1p '
 want alloc-over     "$(mk allo alA=1000000000 alB=1040000001)"         '^ПРОВАЛЕН: 8\.5\.O1p .*аллокации'
+want a56-absent-class "$(mk a56abs)"                                 '^ДОСТИГНУТО: 8\.5\.O1p '
+want a56-absent-noproof "$(mk a56np nocfgA=1)"                       '^НЕИЗМЕРИМ: 8\.5\.O1p .*e56a'
+want a56-in-allowlist-silent "$(mk a56sil a56none=1 nocfgA=0)"       '^ДОСТИГНУТО: 8\.5\.O1p '
+want anom-born-in-window "$(mk anomborn anom0none=1)"                '^  anomaly_detection: A 120, B 122,'
+want anom-absent-at-end "$(mk anomend anom1none=1)"                   '^НЕИЗМЕРИМ: 8\.5\.O1p .*b1\(anomaly\)'
+want cross-bpf       "$(mk xbpf b321=70000 alA=1000000000 alB=1100000000)"   '^ДОСТИГНУТО: 8\.5\.O1p '
+want cross-bpf-note  "$(mk xbpf2 b321=70000 alA=1000000000 alB=1100000000)"  '^  аллокации и CPU парой НЕ судятся: поток ролей расходится на 70000'
+want cross-bpf-anom  "$(mk xbpf3 b321=70000 anA=100 anB=140)"               '^ПРОВАЛЕН: 8\.5\.O1p .*anomaly_detection'
+want small-flow-diff "$(mk sfd b321=100 alA=1000000000 alB=1100000000)"      '^ПРОВАЛЕН: 8\.5\.O1p .*аллокации'
 want no-drop-series "$(mk nodrop nodrops=1)"                           '^НЕИЗМЕРИМ: 8\.5\.O1p .*da'
 want ctl-socket-dead "$(mk cdead ctlB='ex=0')"                         '^ПРОВАЛЕН: 8\.5\.O1c .*exfil_raw_socket_by_non_root у B не сработало'
 want ctl-fork-B-mute "$(mk cfb ctlB='fb=0')"                           '^ПРОВАЛЕН: 8\.5\.O1c .*impact_fork_bomb_pattern у B'
@@ -90,6 +109,7 @@ if [ "${1:-}" = --mutate ]; then
     mut floor-apply    's/\[ "\$AB_NULL_GAP" -gt "\$band" \] \&\& band=\$AB_NULL_GAP/true/'
     mut drops-gate     's/\[ "\$db" -le "\$da" \] || fail=/true || fail=/'
     mut alloc-gate     's/awk -v a="\$la" -v b="\$lb" -v p="\$ALLOC_NOISE_PCT" .BEGIN { exit !(b <= a \* (1 + p \/ 100)) }. || fail=/true || fail=/'
+    mut flow-gate      's/if \[ \$((unexpl \* 20)) -gt "\$ta" \]; then/if false; then/'
     mut alloc-noise    's/ALLOC_NOISE_PCT=\${ALLOC_NOISE_PCT:-4}/ALLOC_NOISE_PCT=${ALLOC_NOISE_PCT:-40}/'
     mut ctl-socket     's/\[ "\$v" -ge 1 \] || fail="\$fail; \$rule у \$r не сработало"/true/'
     mut ctl-fork-B     's/\[ "\$vb" -ge 1 \] || fail=/true || fail=/'

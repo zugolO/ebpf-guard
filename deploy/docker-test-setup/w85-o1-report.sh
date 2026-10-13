@@ -3,7 +3,8 @@
 # положительные контроли. Считает эмиттер; включение номеров решает владелец, порогов продукта у метки нет.
 #   OUT=<каталог w85-o1-pair.sh> [AB_NULL_GAP=19] bash w85-o1-report.sh
 #   8.5.O1p — ДОСТИГНУТО: anomaly_detection B ≤ A + max(2·√A, AB_NULL_GAP) (решение 13.10 п. 5), дропы B ≤ A, аллокации B ≤ A·1,04
-#             (пол шума соседних окон ±4%). Печатается и CPU (userspace, с/с), события по номерам.
+#             (пол шума соседних окон ±4%) — если поток ролей по номерам равен с точностью 5% за вычетом открытых 41/56; иначе
+#             (два агента видят bpf() друг друга) аллокации и CPU пара не судит, это печатается. CPU (userspace, с/с) — справочно.
 #   8.5.O1c — ДОСТИГНУТО: правила socket (3) сработали у ОБОИХ агентов, clone: B ≥ 1, A = 0 (мало того что B видит — A немой).
 #   8.5.O1s — ИЗМЕРЕНО: доля вызовов socket, которую оставил бы предикат (type&15 = SOCK_RAW или family = AF_PACKET), по bpftrace.
 # Нет серии/файла — НЕИЗМЕРИМ с названным классом.
@@ -44,11 +45,28 @@ if [ -n "$cls" ]; then echo "НЕИЗМЕРИМ: 8.5.O1 НЕИЗМЕРИМ (кл
 
 # ── цена (8.5.O1p) ──
 NR=ebpf_guard_syscall_events_by_nr_total
-e41a=$(dlt "$OUT/A/m0.txt" "$OUT/A/m1.txt" $NR nr=41); e41b=$(dlt "$OUT/B/m0.txt" "$OUT/B/m1.txt" $NR nr=41)
-e56a=$(dlt "$OUT/A/m0.txt" "$OUT/A/m1.txt" $NR nr=56); e56b=$(dlt "$OUT/B/m0.txt" "$OUT/B/m1.txt" $NR nr=56)
+# серия by_nr по номеру рождается при старте агента ТОЛЬКО для номеров его allowlist: отсутствие серии у роли, чей конфиг номер не
+# перечисляет, — ноль с названным классом («не в allowlist»); отсутствие без такого доказательства — «?» (НЕИЗМЕРИМ), не ноль
+in_allowlist() { # <роль> <nr> — 0, если номер перечислен в monitored_syscalls конфига роли
+    [ -s "$OUT/$1/config.yaml" ] || return 2
+    sed -n 's/^ *monitored_syscalls: *\[\(.*\)\].*/\1/p' "$OUT/$1/config.yaml" | tr ',' '\n' | tr -d ' ' | grep -qx "$2"
+}
+nrd() { # <роль> <nr>
+    local r=$1 n=$2 a b
+    a=$(val "$OUT/$r/m0.txt" $NR nr=$n); b=$(val "$OUT/$r/m1.txt" $NR nr=$n)
+    if [ -z "$b" ]; then
+        if [ -z "$a" ]; then in_allowlist "$r" "$n"; [ $? -eq 1 ] && { echo 0; return; }; fi
+        echo "?"; return
+    fi
+    awk -v a="${a:-0}" -v b="$b" 'BEGIN { printf "%.0f", b - a }'
+}
+e41a=$(nrd A 41); e41b=$(nrd B 41); e56a=$(nrd A 56); e56b=$(nrd B 56)
 ta=$(dsum $NR "$OUT/A/m0.txt" "$OUT/A/m1.txt"); tb=$(dsum $NR "$OUT/B/m0.txt" "$OUT/B/m1.txt")
 anom() { awk '/^ebpf_guard_alert_volume_by_event_type_total\{/ && index($1, "rule_id=\"anomaly_detection\"") { s += $NF; seen = 1 } END { if (seen) printf "%.0f\n", s }' "$1" < /dev/null; }
 a0=$(anom "$OUT/A/m0.txt"); a1=$(anom "$OUT/A/m1.txt"); b0=$(anom "$OUT/B/m0.txt"); b1=$(anom "$OUT/B/m1.txt")
+# счётчик рождается при первом алерте: нет в начале окна, есть в конце — старт 0 (родился в окне); нет в конце — НЕИЗМЕРИМ
+[ -z "$a0" ] && [ -n "$a1" ] && a0=0
+[ -z "$b0" ] && [ -n "$b1" ] && b0=0
 da=$(dsum ebpf_guard_events_dropped_total "$OUT/A/m0.txt" "$OUT/A/m1.txt"); db=$(dsum ebpf_guard_events_dropped_total "$OUT/B/m0.txt" "$OUT/B/m1.txt")
 ca=$(fdel "$OUT/A/m0.txt" "$OUT/A/m1.txt" process_cpu_seconds_total); cb=$(fdel "$OUT/B/m0.txt" "$OUT/B/m1.txt" process_cpu_seconds_total)
 la=$(fdel "$OUT/A/m0.txt" "$OUT/A/m1.txt" go_memstats_alloc_bytes_total); lb=$(fdel "$OUT/B/m0.txt" "$OUT/B/m1.txt" go_memstats_alloc_bytes_total)
@@ -65,7 +83,14 @@ else
     fail=""
     [ "$B" -le $((A + band)) ] || fail="$fail; anomaly_detection B $B > A $A + полоса $band"
     [ "$db" -le "$da" ] || fail="$fail; дропы B $db > A $da"
-    awk -v a="$la" -v b="$lb" -v p="$ALLOC_NOISE_PCT" 'BEGIN { exit !(b <= a * (1 + p / 100)) }' || fail="$fail; аллокации B выше A больше чем на $ALLOC_NOISE_PCT%"
+    # два агента на одном узле видят bpf() друг друга (F3 исключает только СВОИ вызовы): поток ролей расходится не из-за открытого
+    # номера, и аллокации/CPU судить парой нельзя. Невязка потока = разность всех событий по номерам минус цена открытого (clone) и 41.
+    unexpl=$(( (tb - ta) - (e56b - e56a) - (e41b - e41a) )); [ "$unexpl" -ge 0 ] || unexpl=$((-unexpl))
+    if [ $((unexpl * 20)) -gt "$ta" ]; then
+        echo "  аллокации и CPU парой НЕ судятся: поток ролей расходится на $unexpl событий (> 5% потока A $ta) не из-за открытого номера — перекрёстные bpf() двух одновременных агентов (по номерам: $(for r in A B; do echo -n "$r nr=321 $(nrd $r 321) "; done)); числа выше — справочно"
+    else
+        awk -v a="$la" -v b="$lb" -v p="$ALLOC_NOISE_PCT" 'BEGIN { exit !(b <= a * (1 + p / 100)) }' || fail="$fail; аллокации B выше A больше чем на $ALLOC_NOISE_PCT%"
+    fi
     if [ -z "$fail" ]; then echo "ДОСТИГНУТО: 8.5.O1p ДОСТИГНУТО (цена clone(56): +$e56b событий за ${W} с, в шуме пары по anomaly/дропам/аллокациям)"
     else echo "ПРОВАЛЕН: 8.5.O1p ПРОВАЛЕН (${fail#;})"; fi
 fi

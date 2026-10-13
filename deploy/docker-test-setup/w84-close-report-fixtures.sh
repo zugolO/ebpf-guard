@@ -12,13 +12,16 @@ R=impact_systemd_service_disabled; X=dpkg-maintainer-script-stop
 # sc <OUT> <NN-имя> <expect> [wit=1 alerts=0 exc=0 total=0 dedup=0 rl=0 noparse=0 cmdlog=<текст>]
 sc() {
     local out=$1 name=$2 expect=$3; shift 3
-    local wit=1 alerts=0 exc=0 total=0 dedup=0 rl=0 noparse=0 cmdlog=""
+    local wit=1 alerts=0 exc=0 total=0 dedup=0 rl=0 noparse=0 cmdlog="" stale=0
     for kv in "$@"; do eval "${kv%%=*}='${kv#*=}'"; done
     local d=$out/$name; mkdir -p "$d"
-    echo "$expect" > "$d/expect"; echo "заметка" > "$d/note"
+    echo "$expect" > "$d/expect"; echo "заметка" > "$d/note"; echo 1791875720 > "$d/t0"
     : > "$d/witness.txt"; local i; for ((i = 1; i <= wit; i++)); do echo "SYSTEMCTL pid=$i file=/usr/bin/systemctl p1=1:sh:dash" >> "$d/witness.txt"; done
     if [ "$noparse" = 1 ]; then echo 'не json' > "$d/alerts.json"; else
-        { echo '['; for ((i = 1; i <= alerts; i++)); do [ "$i" -gt 1 ] && echo ','; echo "{\"rule_id\":\"$R\",\"comm\":\"systemctl\"}"; done; echo ']'; } > "$d/alerts.json"
+        local objs=() ts="2026-10-13T07:15:30.123456789Z" old="2026-10-13T07:15:10.177146816Z"
+        for ((i = 1; i <= alerts; i++)); do objs+=("{\"rule_id\":\"$R\",\"comm\":\"systemctl\",\"timestamp\":\"$ts\"}"); done
+        for ((i = 1; i <= stale; i++)); do objs+=("{\"rule_id\":\"$R\",\"comm\":\"systemctl\",\"timestamp\":\"$old\"}"); done
+        { printf '['; local first=1 o; for o in "${objs[@]+"${objs[@]}"}"; do [ $first = 1 ] || printf ','; first=0; printf '%s' "$o"; done; printf ']\n'; } > "$d/alerts.json"
     fi
     { echo "ebpf_guard_rule_exceptions_total{exception_name=\"$X\",rule_id=\"$R\"} 5"
       echo "ebpf_guard_alerts_total{rule_id=\"$R\"} 10"
@@ -44,6 +47,10 @@ want() { # want <имя> <OUT> <шаблон>
 
 good "$T/good"; want good "$T/good" '^ДОСТИГНУТО: 8\.4\.x .*без алерта 2.*спуфов с алертом 5'
 good "$T/fp"; sc "$T/fp" 01-L1-dpkg-remove silent alerts=1 exc=1; want false-positive "$T/fp" '^ПРОВАЛЕН: 8\.4\.x .*01-L1-dpkg-remove: ЛОЖНЫЙ алерт'
+# алерт ДО окна (уборка прошлого сценария): в сценарий не входит — легитимная остановка остаётся тихой
+good "$T/stale"; sc "$T/stale" 01-L1-dpkg-remove silent stale=1 exc=1; want stale-alert-before-window "$T/stale" '^ДОСТИГНУТО: 8\.4\.x '
+# тот же алерт ВНУТРИ окна — ложный
+good "$T/fresh"; sc "$T/fresh" 01-L1-dpkg-remove silent alerts=1 exc=1; want fresh-alert-in-window "$T/fresh" '^ПРОВАЛЕН: 8\.4\.x '
 good "$T/spoofquiet"; sc "$T/spoofquiet" 05-X3-prerm-outside-info alert; want spoof-silent "$T/spoofquiet" '^ПРОВАЛЕН: 8\.4\.x .*05-X3-prerm-outside-info: СПУФ ушёл в тишину'
 good "$T/spoofdedup"; sc "$T/spoofdedup" 05-X3-prerm-outside-info alert dedup=1; want spoof-dedup "$T/spoofdedup" '^НЕИЗМЕРИМ: 8\.4\.x .*дедуп \+1'
 good "$T/spoofrl"; sc "$T/spoofrl" 05-X3-prerm-outside-info alert rl=3; want spoof-ratelimited "$T/spoofrl" '^НЕИЗМЕРИМ: 8\.4\.x .*лимитер \+3'
@@ -76,6 +83,7 @@ if [ "${1:-}" = "--mutate" ]; then
     mut x5-reuse-not-needed 's/if grep -aq .\^REUSED pid=. "\$x5\/cmd.log" 2>\/dev\/null; then/if true; then/'
     mut done-guard        's/if \[ ! -s "\$OUT\/DONE" \] || ! grep -q .\^done. "\$OUT\/DONE" 2>\/dev\/null; then/if false; then/'
     mut skip-as-ok        's/echo "  \$name: НЕ ИСПОЛНЕН (\$(cat "\$d\/note" 2>\/dev\/null))"; cls="\$cls; \$name не исполнен"; continue/ok=$((ok + 1)); continue/'
+    mut t0-filter-off     's/select(((.timestamp \/\/ .Timestamp \/\/ "1970-01-01T00:00:00Z") | sub("\\\\.\[0-9\]+Z\$"; "Z") | fromdateiso8601) >= \$t0)/select(true)/'
     mut counter-alt-off   's/if \[ "\$na" -gt 0 \] || { \[ "\$dt" != "?" \] \&\& \[ "\$dt" -gt 0 \]; }; then/if [ "$na" -gt 0 ]; then/'
 fi
 echo "-- fails=$fails"

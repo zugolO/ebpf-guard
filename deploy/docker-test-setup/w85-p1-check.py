@@ -102,6 +102,26 @@ def compare(api, token, n, procroot):
     print("  образ звена совпал с readlink exe: %d/%d сверимых (%.1f%%)" % (img_ok, img_hops, 100.0 * img_ok / max(img_hops, 1)))
     for b in bad[:8]:
         print("   расхождение:", b)
+    # причины пустого образа у ЖИВЫХ звеньев (экспертиза: dev/ino, записанные ядром, против stat(/proc/<pid>/exe))
+    shown = 0
+    for pid in pids:
+        if shown >= 6:
+            break
+        try:
+            got = api_get(api, token, pid)
+        except Exception:
+            continue
+        for a in got.get("ancestors") or []:
+            if a.get("image") or a.get("exited"):
+                continue
+            try:
+                st = os.stat("%s/%d/exe" % (procroot, a["pid"]))
+                real = "stat dev=%#x ino=%d" % (st.st_dev, st.st_ino)
+            except OSError as e:
+                real = "stat exe: %s" % e.__class__.__name__
+            print("   пустой образ у живого звена pid=%d comm=%s: агент exe_dev=%#x exe_ino=%d seeded=%s; %s" % (a["pid"], a["comm"], a.get("exe_dev", 0), a.get("exe_ino", 0), a.get("seeded"), real))
+            shown += 1
+            break
     if 100.0 * pid_ok / seen >= 98.0:
         print("ДОСТИГНУТО: P1-live ДОСТИГНУТО (цепочка pid/ppid таблицы ядра = /proc у %d/%d живых процессов; comm %.1f%%, образ %.1f%%)" % (pid_ok, seen, 100.0 * comm_hops / max(hops, 1), 100.0 * img_ok / max(img_hops, 1)))
     else:

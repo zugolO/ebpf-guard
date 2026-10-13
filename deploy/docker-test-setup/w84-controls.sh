@@ -44,10 +44,12 @@ scenario() {
     bpftrace "$HERE/w84-chain-witness.bt" > "$D/witness.txt" 2>&1 &
     local BT=$!
     sleep 3
-    M > "$D/m0.txt"; local t0; t0=$(date +%s)
+    M > "$D/m0.txt"; local t0; t0=$(date +%s); echo "$t0" > "$D/t0"
     ( "$@" ) > "$D/cmd.log" 2>&1; echo "rc=$?" >> "$D/cmd.log"
     sleep "$WIN"
     M > "$D/m1.txt"
+    # снимок берётся с запасом 5 с назад, а эмиттер отбрасывает алерты старше t0: чужие systemctl до окна (уборка
+    # прошлого сценария, пробы смока) в сценарий не входят
     A $(( $(date +%s) - t0 + 5 )) > "$D/alerts.json"
     kill $BT 2> /dev/null; wait $BT 2> /dev/null
     echo "[$(date -u +%T)] $D: $(grep -c '^SYSTEMCTL' "$D/witness.txt") systemctl в окне, expect=$expect"

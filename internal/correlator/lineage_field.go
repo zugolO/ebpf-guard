@@ -176,6 +176,8 @@ type LineageHopInfo struct {
 	StartNs      uint64 `json:"start_boottime_ns"`
 	Exited       bool   `json:"exited"`
 	Seeded       bool   `json:"seeded"`
+	ExeDev       uint32 `json:"exe_dev"` // что записало ядро: по ним образ сверяется с stat(путь)
+	ExeIno       uint64 `json:"exe_ino"`
 }
 
 // LineageDescription — что агент видит про предков pid: то же, что читают дерево инцидента и поля
@@ -203,6 +205,7 @@ func DescribeLineage(pid uint32, r LineageChainResolver, tree func(uint32) []str
 		d.Ancestors = append(d.Ancestors, LineageHopInfo{
 			PID: rec.PID, PPID: rec.PPID, Comm: rec.Comm, Image: img, ImageHow: how, ExecFilename: rec.Filename,
 			StartNs: rec.StartBoottimeNs, Exited: rec.Exited(), Seeded: rec.Flags&procinfo.FlagSeeded != 0,
+			ExeDev: rec.ExeDev, ExeIno: rec.ExeIno,
 		})
 	}
 	if tree != nil {

@@ -4,7 +4,8 @@
 # (память verdict-zero-needs-its-class-presented). Сценарии — подкаталоги OUT/NN-имя/ (expect, alerts.json,
 # m0.txt/m1.txt, witness.txt):
 #   silent — легитимная остановка из maintainer-скрипта под dpkg (L*): алерта НЕТ. Засчитывается ТОЛЬКО если
-#            (а) свидетель видел systemctl в окне (класс предъявлен), (б) исключение dpkg-maintainer-script-stop
+#            (а) свидетель видел systemctl в окне (класс предъявлен), алерт засчитывается, только если его timestamp ≥ t0
+#            сценария (снимок API берётся с запасом назад), (б) исключение dpkg-maintainer-script-stop
 #            ПРИМЕНИЛОСЬ (rule_exceptions_total вырос) — иначе тишина могла прийти от дедупа/лимитера.
 #   alert  — спуф (X*): алерт ЕСТЬ. Засчитывается ТОЛЬКО при (а); тишина при выросших dedup/ratelimit — НЕИЗМЕРИМ
 #            (другой слой подавления), а не «спуф прошёл».
@@ -58,7 +59,11 @@ for d in "${dirs[@]}"; do
         echo "  $name: снимок алертов не разобран"; cls="$cls; $name без разбираемого снимка алертов"; continue
     fi
     wit=$(grep -ac '^SYSTEMCTL' "$d/witness.txt" 2>/dev/null); wit=${wit:-0}
-    na=$(jq -r --arg r "$RULE" '[(if type == "array" then . else .alerts // [] end)[] | select((.rule_id // .RuleID) == $r)] | length' "$d/alerts.json" 2>/dev/null)
+    # только алерты окна: timestamp ≥ t0 сценария (снимок берётся с запасом назад — чужой systemctl до окна не в счёт)
+    t0=$(cat "$d/t0" 2>/dev/null); t0=${t0:-0}
+    na=$(jq -r --arg r "$RULE" --argjson t0 "$t0" '[(if type == "array" then . else .alerts // [] end)[]
+        | select((.rule_id // .RuleID) == $r)
+        | select(((.timestamp // .Timestamp // "1970-01-01T00:00:00Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) >= $t0)] | length' "$d/alerts.json" 2>/dev/null)
     de=$(delta "$d/m0.txt" "$d/m1.txt" "ebpf_guard_rule_exceptions_total{exception_name=\"$EXC\",rule_id=\"$RULE\"}")
     dt=$(delta "$d/m0.txt" "$d/m1.txt" "ebpf_guard_alerts_total{rule_id=\"$RULE\"}")
     dd=$(delta "$d/m0.txt" "$d/m1.txt" "ebpf_guard_alerts_dedup_dropped_by_rule_total{rule_id=\"$RULE\"}")

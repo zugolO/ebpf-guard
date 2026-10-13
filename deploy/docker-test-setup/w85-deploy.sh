@@ -14,7 +14,10 @@ SHA=$(git rev-parse "$REV"); SHORT=$(git rev-parse --short=12 "$REV")
 BASE=$($SSH 'git -C /opt/ebpf-guard rev-parse HEAD' </dev/null)
 git cat-file -e "$BASE^{commit}" 2> /dev/null || { echo "die: коммит стенда $BASE неизвестен локально" >&2; exit 1; }
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-git bundle create "$TMP/w85.bundle" "$BASE..$SHA" > /dev/null 2>&1 || { echo "die: bundle $BASE..$SHA" >&2; exit 1; }
+# в bundle нужен именованный ref: временный тег на коммите
+git tag -f w85-deploy-tmp "$SHA" > /dev/null
+git bundle create "$TMP/w85.bundle" "$BASE..refs/tags/w85-deploy-tmp" > /dev/null 2>&1 || { git tag -d w85-deploy-tmp > /dev/null; echo "die: bundle $BASE..$SHA" >&2; exit 1; }
+git tag -d w85-deploy-tmp > /dev/null
 scp -q -i "$KEY" "$TMP/w85.bundle" "$HOST:/root/w85-deploy.bundle"
 $SSH "set -eu; export PATH=\$PATH:/usr/local/go/bin
 TS=\$(date -u +%Y%m%dT%H%M%SZ); BK=/root/ebpf-guard-backups/pre-8.5-night-\$TS; mkdir -p \$BK
@@ -26,9 +29,10 @@ cp -a /var/lib/ebpf-guard/profiler-state.json \$BK/profiler-state-before-F1.json
 cp -a /var/lib/ebpf-guard/token \$BK/ 2>/dev/null || true
 ls -la /var/lib/ebpf-guard/ > \$BK/var-lib-before.txt
 echo \"бэкап: \$BK\"
-git fetch -q /root/w85-deploy.bundle $SHA
+git fetch -q /root/w85-deploy.bundle refs/tags/w85-deploy-tmp
+git rev-parse FETCH_HEAD | grep -qx $SHA || { echo \"die: FETCH_HEAD не $SHA\"; exit 5; }
 git checkout -q -- bpf/vmlinux.h internal/bpf/xdp_bpf_gen.go deploy/docker-test-setup/attacks/run-gate.sh 2>/dev/null || true
-git reset -q --hard $SHA
+git reset -q --hard FETCH_HEAD
 rm -f /root/w85-deploy.bundle
 echo $SHORT > GIT-HEAD
 make generate > /root/w85-deploy-generate.log 2>&1 || { tail -20 /root/w85-deploy-generate.log; exit 3; }

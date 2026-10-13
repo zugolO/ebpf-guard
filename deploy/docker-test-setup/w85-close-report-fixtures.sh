@@ -139,6 +139,50 @@ wantab2 ab-floor-below-band  "$(mkab ab-fb a0=100 ab=200 b1=330)" 10 '^ПРОВ�
 wantab2 ab-floor-zero        "$(mkab ab-f0 a0=100 ab=200 b1=330)" 0  '^ПРОВАЛЕН: 8\.5\.3 '
 wantab2 ab-floor-still-fails "$(mkab ab-fs a0=100 ab=200 b1=345)" 40 '^ПРОВАЛЕН: 8\.5\.3 .*B 145 > A 100 \+ полоса 40'
 
+
+# ── cpu (8.5.4): idle ≤ 0,6 × база; пакет — ИНФО ──
+wantc() { # wantc <имя> <IDLE> <BASE_IDLE> <ATT> <BASE_ATT> <шаблон>
+    local out; out=$(IDLE=$2 BASE_IDLE=$3 ATT=$4 BASE_ATT=$5 bash "$EMIT" cpu 2>&1)
+    if echo "$out" | grep -aqE "$6"; then ok "$1"; else bad "$1 — нет «${6}»"; echo "$out" | sed 's/^/    | /' | head -12; fi
+}
+CB=$(mkcpuidle cb c0=3 c1=1635.3 snaps=97)           # 8.2: 1632,3 с за 28 800 с = 0,0567
+CBA=$(mkcpuatt cba c0=147.01 c1=349.71 t=689.8)       # 8.2: 0,2939 с/с
+wantc cpu-good      "$(mkcpuidle cg c0=3 c1=900 snaps=97)"            "$CB" "$(mkcpuatt cga c0=100 c1=250 t=600)" "$CBA" '^ДОСТИГНУТО: 8\.5\.4 .*idle 0\.0312 с/с = 3\.1% ядра, 55% базы 0\.0567'
+wantc cpu-edge      "$(mkcpuidle ce c0=0 c1=864 snaps=97)"            "$(mkcpuidle ceb c0=0 c1=1440 snaps=97)" "$(mkcpuatt cea)" "$CBA" '^ДОСТИГНУТО: 8\.5\.4 '
+wantc cpu-edge-over "$(mkcpuidle ceo c0=0 c1=865 snaps=97)"          "$(mkcpuidle cebo c0=0 c1=1440 snaps=97)" "$(mkcpuatt ceoa)" "$CBA" '^ПРОВАЛЕН: 8\.5\.4 '
+wantc cpu-over      "$(mkcpuidle co c0=3 c1=1100 snaps=97)"           "$CB" "$(mkcpuatt coa)" "$CBA" '^ПРОВАЛЕН: 8\.5\.4 .*idle 0\.0381 с/с = 67% базы'
+wantc cpu-same      "$CB" "$CB" "$(mkcpuatt csa)" "$CBA" '^ПРОВАЛЕН: 8\.5\.4 .*= 100% базы'
+wantc cpu-pack-info "$(mkcpuidle cp c0=3 c1=900 snaps=97)"            "$CB" "$(mkcpuatt cpa c0=100 c1=500 t=600)" "$CBA" 'пакет \(ИНФО, порога у метки нет\): 0\.6667 с/с'
+# высокий пакет не валит метку (порога нет), но и не прячется
+wantc cpu-pack-high "$(mkcpuidle cph c0=3 c1=900 snaps=97)"           "$CB" "$(mkcpuatt cpha c0=100 c1=500 t=600)" "$CBA" '^ДОСТИГНУТО: 8\.5\.4 '
+wantc cpu-restart   "$(mkcpuidle cr c0=3 c1=900 s1=2000 snaps=97)"    "$CB" "$(mkcpuatt cra)" "$CBA" '^НЕИЗМЕРИМ: 8\.5\.4 .*рестарт агента внутри окна'
+wantc cpu-no-series "$(mkcpuidle cn series=no snaps=97)"              "$CB" "$(mkcpuatt cna)" "$CBA" '^НЕИЗМЕРИМ: 8\.5\.4 .*нет серии process_cpu_seconds_total'
+wantc cpu-no-base   "$(mkcpuidle cnb c0=3 c1=900 snaps=97)"           "$T/нет-такого" "$(mkcpuatt cnba)" "$CBA" '^НЕИЗМЕРИМ: 8\.5\.4 .*idle базы: снимков 0'
+wantc cpu-one-snap  "$(mkcpuidle c1s snaps=1)"                         "$CB" "$(mkcpuatt c1a)" "$CBA" '^НЕИЗМЕРИМ: 8\.5\.4 .*снимков 1 < 2'
+wantc cpu-pack-lost "$(mkcpuidle cpl c0=3 c1=900 snaps=97)"           "$CB" "$(mkcpuatt cpla t=none)" "$CBA" '^ДОСТИГНУТО: 8\.5\.4 .*пакет не измерен: пакет ночи: нет m-pre'
+wantc cpu-pack-restart "$(mkcpuidle cpr c0=3 c1=900 snaps=97)"        "$CB" "$(mkcpuatt cpra s1=5)" "$CBA" '^ДОСТИГНУТО: 8\.5\.4 .*пакет не измерен: пакет ночи: рестарт'
+wantc cpu-counter-down "$(mkcpuidle cd c0=900 c1=3 snaps=97)"         "$CB" "$(mkcpuatt cda)" "$CBA" '^НЕИЗМЕРИМ: 8\.5\.4 .*убыл'
+
+# ── mem (8.5.6): BPF memlock + кольца ≤ 40 МиБ, пик ≤ 147,1 ──
+wantmem() { # wantmem <имя> <INV> <RUN> <ATT> <шаблон>
+    local out; out=$(INV=$2 RUN=$3 ATT=$4 bash "$EMIT" mem 2>&1)
+    if echo "$out" | grep -aqE "$5"; then ok "$1"; else bad "$1 — нет «${5}»"; echo "$out" | sed 's/^/    | /' | head -12; fi
+}
+mkrun() { # mkrun <имя> <peak МиБ> — печатает «RUN ATT»
+    local d; d=$(mk "$1" peak="$2"); echo "$d"
+}
+read -r MR MA <<< "$(mkrun mem-ok 140)"
+wantmem mem-good      "$(mkinv mi-good ml=9 ring=22)"       "$MR" "$MA" '^ДОСТИГНУТО: 8\.5\.6 .*BPF карты\+кольца 31\.0 МиБ ≤ 40'
+wantmem mem-edge      "$(mkinv mi-edge ml=18 ring=22)"      "$MR" "$MA" '^ДОСТИГНУТО: 8\.5\.6 .*40\.0 МиБ'
+wantmem mem-bpf-over  "$(mkinv mi-over ml=19 ring=22)"      "$MR" "$MA" '^ПРОВАЛЕН: 8\.5\.6 .*карты\+кольца 41\.0 МиБ > 40'
+wantmem mem-rings-count "$(mkinv mi-rc ml=5 ring=36)"       "$MR" "$MA" '^ПРОВАЛЕН: 8\.5\.6 .*карты\+кольца 41\.0 МиБ > 40'
+read -r MR2 MA2 <<< "$(mkrun mem-hi 150)"
+wantmem mem-peak-over "$(mkinv mi-p ml=9 ring=22)"          "$MR2" "$MA2" '^ПРОВАЛЕН: 8\.5\.6 .*пик 150\.0 МиБ > 147\.1'
+wantmem mem-not-85    "$(mkinv mi-n85 counts=no)"           "$MR" "$MA" '^НЕИЗМЕРИМ: 8\.5\.6 .*нет карты syscall_counts'
+wantmem mem-no-maps   "$T/нет-инвентаря"                    "$MR" "$MA" '^НЕИЗМЕРИМ: 8\.5\.6 .*нет разбираемого maps\.json'
+wantmem mem-no-samples "$(mkinv mi-ns ml=9 ring=22)"        "$T/нет" "$T/нет" '^НЕИЗМЕРИМ: 8\.5\.6 .*нет сэмплов memory\.current'
+wantmem mem-fail-and-unmeasurable "$(mkinv mi-fu ml=19 ring=22)" "$T/нет" "$T/нет" '^ПРОВАЛЕН: 8\.5\.6 .*неизмеримо также'
+
 wantctl() { # wantctl <имя> <каталог> <шаблон>
     local d=$2 out
     out=$(CTL_ALERTS=$d/alerts.json CTL_STATE=$d/state.txt GATE=$d/gate.txt bash "$EMIT" controls 2>&1)
@@ -187,6 +231,13 @@ if [ "${1:-}" = "--mutate" ]; then
     mut null-outside-off 's/if \[ "\$gap" -gt "\$band" \]; then mark=ВНЕ;/if false; then mark=ВНЕ;/'
     mut null-first-pair  's/\[ -n "\$first" \] || first=/first=/'
     mut null-reset-guard 's/\[ \$((vals\[k + 1\])) -ge \$((vals\[k\])) \] || {/true || {/'
+    mut cpu-frac         's/CPU_FRAC=\${CPU_FRAC:-0.6}/CPU_FRAC=${CPU_FRAC:-0.9}/'
+    mut cpu-restart      's/\[ "\$s0" = "\$s1" \] || { echo "ERR рестарт агента внутри окна \$1/true || { echo "ERR рестарт агента внутри окна $1/'
+    mut cpu-pack-judged  's/if \[ -z "\$ni" \] || \[ -z "\$bi" \]; then/if [ -z "$ni" ] || [ -z "$bi" ] || [ -z "$na" ]; then/'
+    mut mem-ring-blind   's/(if (.bytes_memlock \/\/ 0) > 0 then .bytes_memlock else .max_entries end)/(.bytes_memlock \/\/ 0)/'
+    mut mem-bpf-limit    's/awk -v v="\$bpf" -v l="\$BPF_MAX_MIB" .BEGIN { exit !(v <= l) }. || fail=/true || fail=/'
+    mut mem-peak-limit   's/awk -v p="\$pm" -v l="\$PEAK_MAX_MIB" .BEGIN { exit !(p <= l) }. || fail="\$fail; пик \$pm МиБ/true || fail="$fail; пик $pm МиБ/'
+    mut mem-not85        's/elif ! jq -e .any(.\[\]; .name == "syscall_counts"). "\$INV\/maps.json"/elif false/'
     mut anomaly-absent   's/\[ -n "\$s0" \] \&\& \[ -n "\$s1" \] || cls=/true || cls=/'
 fi
 echo "-- fails=$fails"

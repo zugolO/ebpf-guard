@@ -21,7 +21,7 @@ echo "[вырезано ${#REQUIRED_LABELS[@]} меток: ${REQUIRED_LABELS[*]}
 
 # Метки волны 8.5, у которых ЕСТЬ эмиттер, обязаны стоять в таблице сторожа — иначе цикл ниже,
 # идущий по самой таблице, не заметил бы вычеркнутую метку.
-for lbl in 8.5.1 8.5.2 8.5.3 8.5.3a 8.5.7 8.5.8; do
+for lbl in 8.5.1 8.5.2 8.5.3 8.5.3a 8.5.4 8.5.6 8.5.7 8.5.8; do
     case " ${REQUIRED_LABELS[*]} " in *" $lbl "*) ;; *) bad "метка $lbl с эмиттером не стоит в REQUIRED_LABELS"; esac
 done
 
@@ -49,11 +49,17 @@ BASE=$(mkidle base by=1000 kf=none state=none)
 NEW=$(mkidle new by=150)
 D1RUNS=""; for i in 1 2 3 4 5; do dirs=$(mk d1good$i r2r=$((1000 * i))); D1RUNS="$D1RUNS ${dirs% *}:${dirs#* }"; done
 CTL=$(mkctl ctlgood)
+CPUB=$(mkcpuidle cpub c0=3 c1=1635.3 snaps=97); CPUN=$(mkcpuidle cpun c0=3 c1=900 snaps=97)
+CPUBA=$(mkcpuatt cpuba c0=147.01 c1=349.71 t=689.8); CPUA=$(mkcpuatt cpua c0=100 c1=250 t=600)
+MEMINV=$(mkinv meminv ml=9 ring=22)
+dirs=$(mk memrun peak=140); D1RUN1=${dirs% *}; D1ATT1=${dirs#* }
 {
     IDLE=$NEW BASE_IDLE=$BASE bash "$EMIT" flow
     IDLE=$NEW BASE_IDLE=$BASE bash "$EMIT" anomaly-hour
     AB_DIR=$(mkab abgood) bash "$EMIT" ab
     CTL_ALERTS=$CTL/alerts.json CTL_STATE=$CTL/state.txt GATE=$CTL/gate.txt bash "$EMIT" controls
+    IDLE=$CPUN BASE_IDLE=$CPUB ATT=$CPUA BASE_ATT=$CPUBA bash "$EMIT" cpu
+    INV=$MEMINV RUN=$D1RUN1 ATT=$D1ATT1 bash "$EMIT" mem
     D1_RUNS="$D1RUNS" bash "$EMIT" d1-median
     ( cd "$ROOT" && go test -count=1 -v -run '^TestW85_A1_AllocPerEventPostF1Mix' ./internal/correlator/ 2>&1 | grep -aoE '(ДОСТИГНУТО|ПРОВАЛЕН): 8\.5\.8 .*' | head -1 )
 } > "$T/close-report-85.txt" 2>&1

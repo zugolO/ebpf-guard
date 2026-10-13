@@ -27,6 +27,7 @@
 #       8.5-night), NIGHT_ART, NIGHT_PREV (idle прошлой ночи для 3.P1-19), POD_IDLE_SECS (1830),
 #       POD_HOLD_SECS (600), AB_SECS (3600; 0 — без пары, 8.5.3 неизмерима), BASE_IDLE (каталог
 #       idle ночи 8.2 — база 8.5.1 и 8.5.3a; обязателен), SKIP_HOST_ATTACKS=1 (только смок),
+#       BASE_ATT (pod-attack ночи 8.2 — база пакета 8.5.4; без него пакет не измерен, idle судится),
 #       AB_NULL_GAP (разрыв нулевой пары, 0 — полоса 2·√A; решение 13.10 п. 6),
 #       D1_PRIOR_RUNS («RUN:ATT» через пробел — прогоны пода прошлых заходов для медианы 8.5.7;
 #       каталоги из server-logs/collect-8.5-d1/ надо привезти на стенд; без них 8.5.7 НЕИЗМЕРИМА).
@@ -345,6 +346,10 @@ cat "$ART/close-report.txt"
     CTL_ALERTS="$ART/controls-alerts.json" CTL_STATE="$ART/metrics-controls.txt" GATE="$ART/gate.txt" bash "$SETUP/w85-close-report.sh" controls
     # 8.5.7 — медиана ≥ 5 прогонов пода (решение владельца 13.10): прогоны прошлых заходов — D1_PRIOR_RUNS
     # («RUN:ATT» через пробел), прогон этой ночи — последний. Без прогонов заходов метка НЕИЗМЕРИМА.
+    # 8.5.4 — CPU агента с/с: idle хоста ночи против idle ночи 8.2; пакет — окно атак пода против BASE_ATT (ИНФО)
+    IDLE="$ART/idle" BASE_IDLE="$BASE_IDLE" ATT="$ART/pod-attack" BASE_ATT="${BASE_ATT:-}" bash "$SETUP/w85-close-report.sh" cpu
+    # 8.5.6 — BPF карты+кольца (bpftool memlock) + пик memory.current пода
+    INV="$ART/pod-inv" RUN="$ART/pod-run" ATT="$ART/pod-attack" bash "$SETUP/w85-close-report.sh" mem
     RUN="$ART/pod-run" ATT="$ART/pod-attack" bash "$SETUP/w85-close-report.sh" d1
     D1_RUNS="${D1_PRIOR_RUNS:-} $ART/pod-run:$ART/pod-attack" bash "$SETUP/w85-close-report.sh" d1-median
     grep -aoE '(ДОСТИГНУТО|ПРОВАЛЕН): 8\.5\.8 .*' "$ART/a2.txt" | head -1
@@ -355,7 +360,7 @@ cat "$ART/close-report-85.txt"
 # Читает ОТЧЁТЫ (night-report + close-report), не plan.md. Фикстура —
 # run-8.5-night-guard-fixtures.sh, вырезает блок между маркерами.
 # GUARD-BEGIN
-REQUIRED_LABELS=(3.P1-19 3.MEM 3.ATTACK 3.STORE 8.1.1 8.1.2 8.1.3 8.1.4 8.2.1 8.2.2 8.2.3 8.2.4 8.2.5 8.5.1 8.5.2 8.5.3 8.5.3a 8.5.7 8.5.8)
+REQUIRED_LABELS=(3.P1-19 3.MEM 3.ATTACK 3.STORE 8.1.1 8.1.2 8.1.3 8.1.4 8.2.1 8.2.2 8.2.3 8.2.4 8.2.5 8.5.1 8.5.2 8.5.3 8.5.3a 8.5.4 8.5.6 8.5.7 8.5.8)
 # Пайплайн новый: прогонов раньше доставки его меток нет, освобождений не нужно.
 LABELS_SINCE=()
 _label_since() { local e; for e in "${LABELS_SINCE[@]+"${LABELS_SINCE[@]}"}"; do [ "${e%% *}" = "$1" ] && { printf '%s' "${e#* }"; return; }; done; }

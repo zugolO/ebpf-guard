@@ -130,3 +130,53 @@ mkctl() { # mkctl <имя> [miss=<rule_id>] [state=active|...] [gate=PASS|FAIL|n
     esac
     echo "$D"
 }
+
+# ── cpu (8.5.4) и mem (8.5.6) ─────────────────────────────────────────────────
+# mkcpuidle <имя> [c0=3 c1=100 s0=1000 s1=1000 snaps=25 series=yes|no] — idle с process_cpu_seconds_total в крайних снимках
+mkcpuidle() {
+    local n=$1; shift
+    local c0=3 c1=100 s0=1000 s1=1000 snaps=25 series=yes
+    for kv in "$@"; do eval "${kv%%=*}='${kv#*=}'"; done
+    local D=$T/$n/idle; mkdir -p "$D/snapshots"
+    local i last=$((snaps - 1)) f
+    for i in $(seq 0 "$last"); do
+        f=$D/snapshots/$(printf 'metrics-%04d.txt' "$i")
+        : > "$f"
+        [ "$series" = yes ] || continue
+        if [ "$i" = 0 ]; then printf 'process_cpu_seconds_total %s\nprocess_start_time_seconds %s\n' "$c0" "$s0" > "$f"
+        elif [ "$i" = "$last" ]; then printf 'process_cpu_seconds_total %s\nprocess_start_time_seconds %s\n' "$c1" "$s1" > "$f"
+        else printf 'process_cpu_seconds_total %s\nprocess_start_time_seconds %s\n' "$(awk -v a="$c0" -v b="$c1" -v i="$i" -v l="$last" 'BEGIN { print a + (b - a) * i / l }')" "$s0" > "$f"
+        fi
+    done
+    echo "$D"
+}
+# mkcpuatt <имя> [c0=100 c1=300 t=600 s0=1000 s1=1000 series=yes|no] — окно атак пода: m-pre, m-att1, t-att1
+mkcpuatt() {
+    local n=$1; shift
+    local c0=100 c1=300 t=600 s0=1000 s1=1000 series=yes
+    for kv in "$@"; do eval "${kv%%=*}='${kv#*=}'"; done
+    local D=$T/$n/att; mkdir -p "$D"
+    : > "$D/m-pre.txt"; : > "$D/m-att1.txt"
+    if [ "$series" = yes ]; then
+        printf 'process_cpu_seconds_total %s\nprocess_start_time_seconds %s\n' "$c0" "$s0" > "$D/m-pre.txt"
+        printf 'process_cpu_seconds_total %s\nprocess_start_time_seconds %s\n' "$c1" "$s1" > "$D/m-att1.txt"
+    fi
+    [ "$t" = none ] || echo "$t" > "$D/t-att1"
+    echo "$D"
+}
+# mkinv <имя> [ml=<МиБ карт> ring=<МиБ колец> counts=yes|no raw=<файл содержимого вместо maps.json>] — инвентарь пода (bpftool -j map show)
+mkinv() {
+    local n=$1; shift
+    local ml=9 ring=13 counts=yes
+    for kv in "$@"; do eval "${kv%%=*}='${kv#*=}'"; done
+    local D=$T/$n/inv; mkdir -p "$D"
+    awk -v ml="$ml" -v ring="$ring" -v counts="$counts" 'BEGIN {
+        printf "["
+        printf "{\"id\":1,\"type\":\"hash\",\"name\":\"fd_path_map\",\"bytes_memlock\":%d},", (ml - 1) * 1048576
+        if (counts == "yes") printf "{\"id\":2,\"type\":\"hash\",\"name\":\"syscall_counts\",\"bytes_memlock\":%d},", 1048576
+        else printf "{\"id\":2,\"type\":\"hash\",\"name\":\"other_map\",\"bytes_memlock\":%d},", 1048576
+        printf "{\"id\":3,\"type\":\"ringbuf\",\"name\":\"events\",\"max_entries\":%d,\"bytes_memlock\":0},", ring * 1048576 / 2
+        printf "{\"id\":4,\"type\":\"ringbuf\",\"name\":\"events2\",\"max_entries\":%d,\"bytes_memlock\":0}", ring * 1048576 / 2
+        printf "]\n" }' > "$D/maps.json"
+    echo "$D"
+}

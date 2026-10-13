@@ -380,6 +380,100 @@ ab_null() {
     echo "ИЗМЕРЕНО: 8.5.3n нулевая пара в позиции настоящей (окна 0→1): A=$fa B=$fb, 2·√A=$fband, разрыв B−A=$fgap — $fmark полосы; $rec. По всем $pairs смежным парам ночи вне полосы $outside, максимальный положительный разрыв $maxgap (ИНФО: ряд не пуассоновский)"
 }
 
+# cpu — метка 8.5.4 (решение владельца 13.10, п. 7): CPU агента, с/с, дельтой process_cpu_seconds_total.
+#   idle: первый → последний снимок idle (IDLE/snapshots, шаг SNAP_INTERVAL) против BASE_IDLE (ночь 8.2);
+#         ВЕРДИКТ — idle ≤ CPU_FRAC (0,6, предложение таблицы метки) × база.
+#   пакет: окно атак пода m-pre → m-att1 за t-att1 секунд (ATT, как в w82-pod-attack.sh) против BASE_ATT;
+#         у таблицы метки порога под пакетом НЕТ — печатается как факт с отношением, не судится.
+#   Рестарт агента внутри окна (process_start_time_seconds разный) и нулевое окно — НЕИЗМЕРИМ.
+CPU_FRAC=${CPU_FRAC:-0.6}
+ATT=${ATT:-}; BASE_ATT=${BASE_ATT:-}
+_pcpu() { awk '/^process_cpu_seconds_total / { print $2; exit }' "$1" 2>/dev/null; }
+_pstart() { awk '/^process_start_time_seconds / { print $2; exit }' "$1" 2>/dev/null; }
+# _idle_cps <idle-dir> — «с/с cpu_с окно_с»; «ERR причина» без серии/при рестарте/нулевом окне
+_idle_cps() {
+    local snaps n c0 c1 s0 s1 secs
+    mapfile -t snaps < <(_snaps "$1")
+    n=${#snaps[@]}
+    [ "$n" -ge 2 ] || { echo "ERR снимков $n < 2 в $1/snapshots"; return; }
+    c0=$(_pcpu "${snaps[0]}"); c1=$(_pcpu "${snaps[$((n - 1))]}")
+    s0=$(_pstart "${snaps[0]}"); s1=$(_pstart "${snaps[$((n - 1))]}")
+    [ -n "$c0" ] && [ -n "$c1" ] && [ -n "$s0" ] && [ -n "$s1" ] || { echo "ERR нет серии process_cpu_seconds_total/process_start_time_seconds в крайних снимках $1"; return; }
+    [ "$s0" = "$s1" ] || { echo "ERR рестарт агента внутри окна $1 (process_start_time_seconds $s0 → $s1)"; return; }
+    secs=$(( (n - 1) * SNAP_INTERVAL ))
+    awk -v a="$c0" -v b="$c1" -v t="$secs" 'BEGIN { if (b < a) { print "ERR process_cpu_seconds_total убыл"; exit } printf "%.5f %.2f %d\n", (b - a) / t, b - a, t }'
+}
+# _att_cps <att-dir> — то же по окну атак пода
+_att_cps() {
+    local c0 c1 s0 s1 t
+    c0=$(_pcpu "$1/m-pre.txt"); c1=$(_pcpu "$1/m-att1.txt"); s0=$(_pstart "$1/m-pre.txt"); s1=$(_pstart "$1/m-att1.txt")
+    t=$(cat "$1/t-att1" 2>/dev/null)
+    [ -n "$c0" ] && [ -n "$c1" ] && [ -n "$s0" ] && [ -n "$s1" ] && [ -n "$t" ] || { echo "ERR нет m-pre/m-att1/t-att1 с process_cpu_seconds_total в $1"; return; }
+    [ "$s0" = "$s1" ] || { echo "ERR рестарт агента внутри окна атак $1"; return; }
+    awk -v a="$c0" -v b="$c1" -v t="$t" 'BEGIN { if (t <= 0 || b < a) { print "ERR нулевое окно или счётчик убыл"; exit } printf "%.5f %.2f %.0f\n", (b - a) / t, b - a, t }'
+}
+cpu() {
+    echo "== w85 8.5.4: IDLE=${IDLE:-—} BASE_IDLE=${BASE_IDLE:-—} ATT=${ATT:-—} BASE_ATT=${BASE_ATT:-—}"
+    local cls="" ni bi na ba
+    ni=$(_idle_cps "$IDLE"); bi=$(_idle_cps "$BASE_IDLE")
+    case "$ni" in ERR*) cls="$cls; idle ночи: ${ni#ERR }"; ni="" ;; esac
+    case "$bi" in ERR*) cls="$cls; idle базы: ${bi#ERR }"; bi="" ;; esac
+    na=$(_att_cps "$ATT"); ba=$(_att_cps "$BASE_ATT")
+    case "$na" in ERR*) cls="$cls; пакет ночи: ${na#ERR }"; na="" ;; esac
+    case "$ba" in ERR*) cls="$cls; пакет базы: ${ba#ERR }"; ba="" ;; esac
+    if [ -n "$na" ] && [ -n "$ba" ]; then
+        awk -v n="$na" -v b="$ba" 'BEGIN { split(n, x, " "); split(b, y, " ")
+            printf "  пакет (ИНФО, порога у метки нет): %.4f с/с = %.1f%% ядра (CPU %.1f с за %d с); база ночи 8.2 %.4f с/с; отношение %.2f\n", x[1], 100 * x[1], x[2], x[3], y[1], x[1] / y[1] }'
+    fi
+    if [ -z "$ni" ] || [ -z "$bi" ]; then
+        echo "НЕИЗМЕРИМ: 8.5.4 НЕИЗМЕРИМ (класс НАЗВАН:${cls#;})"; return
+    fi
+    awk -v n="$ni" -v b="$bi" -v f="$CPU_FRAC" -v cls="${cls#; }" 'BEGIN { split(n, x, " "); split(b, y, " ")
+        r = x[1] / y[1]; lim = f * y[1]
+        extra = (cls != "") ? "; пакет не измерен: " cls : ""
+        if (x[1] <= lim * (1 + 1e-9)) printf "ДОСТИГНУТО: 8.5.4 ДОСТИГНУТО (idle %.4f с/с = %.1f%% ядра, %.0f%% базы %.4f с/с ≤ %.0f%%; CPU %.1f с за %d с%s)\n", x[1], 100 * x[1], 100 * r, y[1], 100 * f, x[2], x[3], extra
+        else printf "ПРОВАЛЕН: 8.5.4 ПРОВАЛЕН (idle %.4f с/с = %.0f%% базы %.4f с/с > %.0f%%; CPU %.1f с за %d с%s)\n", x[1], 100 * r, y[1], 100 * f, x[2], x[3], extra }'
+}
+
+# mem — метка 8.5.6 (решение владельца 13.10, п. 7): BPF карты+кольца по bpftool memlock + пик
+#   memory.current пода. INV — каталог w82-mem-inventory.sh (maps.json, progs.json); RUN/ATT — как в d1.
+#   BPF = Σ bytes_memlock карт + Σ max_entries колец (на 5.15 у ringbuf bytes_memlock = 0 — размер кольца
+#   берётся из bpftool, как в w82-mem-report.sh) ≤ BPF_MAX_MIB (40); пик ≤ PEAK_MAX_MIB (147,1 — верх ночи 8.2).
+#   Инвентарь без карты syscall_counts — не из сборки 8.5 (НЕИЗМЕРИМ: ноль без предъявленного класса).
+INV=${INV:-}; BPF_MAX_MIB=${BPF_MAX_MIB:-40}
+mem() {
+    echo "== w85 8.5.6: INV=${INV:-—} RUN=${RUN:-—} ATT=${ATT:-—}"
+    local cls="" fail="" ml="" bpf="" pa pb pm
+    if [ ! -s "$INV/maps.json" ] || ! jq -e 'type == "array"' "$INV/maps.json" > /dev/null 2>&1; then
+        cls="$cls; нет разбираемого maps.json инвентаря"
+    elif ! jq -e 'any(.[]; .name == "syscall_counts")' "$INV/maps.json" > /dev/null 2>&1; then
+        cls="$cls; в инвентаре нет карты syscall_counts — инвентарь не из сборки 8.5 (или bpftool не видит карты агента)"
+    else
+        read -r ml rn rsz mn < <(jq -r '[ (map(select(.type != "ringbuf") | .bytes_memlock // 0) | add // 0),
+            (map(select(.type == "ringbuf")) | length),
+            (map(select(.type == "ringbuf") | (if (.bytes_memlock // 0) > 0 then .bytes_memlock else .max_entries end)) | add // 0),
+            length ] | @tsv' "$INV/maps.json")
+        bpf=$(awk -v a="$ml" -v b="$rsz" 'BEGIN { printf "%.1f", (a + b) / 1048576 }')
+        echo "  BPF по bpftool: карт $mn; memlock карт $(awk -v a="$ml" 'BEGIN { printf "%.1f", a / 1048576 }') МиБ + колец $rn × размер $(awk -v a="$rsz" 'BEGIN { printf "%.1f", a / 1048576 }') МиБ = $bpf МиБ (предел $BPF_MAX_MIB)"
+        awk -v v="$bpf" -v l="$BPF_MAX_MIB" 'BEGIN { exit !(v <= l) }' || fail="$fail; карты+кольца $bpf МиБ > $BPF_MAX_MIB"
+    fi
+    pa=$(_peak "$RUN/samples.tsv"); pb=$(_peak "$ATT/samples.tsv")
+    if [ -z "$pa" ] || [ -z "$pb" ]; then
+        cls="$cls; нет сэмплов memory.current старта или окна атак"
+    else
+        pm=$(awk -v a="$pa" -v b="$pb" 'BEGIN { print (a > b) ? a : b }')
+        echo "  пик memory.current пода: $pm МиБ (старт $pa, атаки $pb; предел $PEAK_MAX_MIB — верх ночи 8.2)"
+        awk -v p="$pm" -v l="$PEAK_MAX_MIB" 'BEGIN { exit !(p <= l) }' || fail="$fail; пик $pm МиБ > $PEAK_MAX_MIB"
+    fi
+    if [ -n "$fail" ]; then
+        echo "ПРОВАЛЕН: 8.5.6 ПРОВАЛЕН (${fail#; }${cls:+; неизмеримо также:$cls})"
+    elif [ -n "$cls" ]; then
+        echo "НЕИЗМЕРИМ: 8.5.6 НЕИЗМЕРИМ (класс НАЗВАН:${cls#;})"
+    else
+        echo "ДОСТИГНУТО: 8.5.6 ДОСТИГНУТО (BPF карты+кольца $bpf МиБ ≤ $BPF_MAX_MIB по bpftool; пик memory.current $pm МиБ ≤ $PEAK_MAX_MIB)"
+    fi
+}
+
 # controls — метка 8.5.2: положительные контроли трёх номеров ПРИ ВКЛЮЧЁННОМ F1 (w85-ctl.py
 #   сырым syscall: mmap RWX anonymous, mprotect → RWX, arch_prctl(ARCH_GET_CPUID)) + состав
 #   детекта на пакете атак (прокси — recall гейта хоста по манифесту = база 1; полного
@@ -429,5 +523,7 @@ case "$MODE" in
     anomaly-hour) anomaly_hour ;;
     ab) ab ;;
     ab-null) ab_null ;;
-    *) echo "usage: w85-close-report.sh d1|d1-median|flow|anomaly-hour|ab|ab-null|controls" >&2; exit 2 ;;
+    cpu) cpu ;;
+    mem) mem ;;
+    *) echo "usage: w85-close-report.sh d1|d1-median|flow|anomaly-hour|ab|ab-null|cpu|mem|controls" >&2; exit 2 ;;
 esac

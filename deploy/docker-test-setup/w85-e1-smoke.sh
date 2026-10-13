@@ -73,6 +73,6 @@ PY
 phase before 19211
 phase after 19212
 rm -rf /var/tmp/w85e1
+echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"
 echo "== E1"
 OUT=$OUT bash "$HERE/w85-e1-report.sh" | tee "$OUT/report.txt"
-echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"

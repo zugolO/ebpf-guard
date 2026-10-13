@@ -51,6 +51,6 @@ for r in A B; do api=$APIA; [ $r = B ] && api=$APIB; : > "$OUT/$r/ctl.txt"
 done
 cat "$OUT/ctl-run.txt"; echo "A:"; cat "$OUT/A/ctl.txt"; echo "B:"; cat "$OUT/B/ctl.txt"
 mf "$APIA" > "$OUT/A/m2.txt"; mf "$APIB" > "$OUT/B/m2.txt"
+echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"
 echo "== O1"
 OUT=$OUT bash "$HERE/w85-o1-report.sh" | tee "$OUT/report.txt"
-echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"

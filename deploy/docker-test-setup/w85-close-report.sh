@@ -2,18 +2,27 @@
 # w85-close-report.sh <режим> — эмиттер волны 8.5. Вердикт считает ЭМИТТЕР, не человек:
 # «нет серии» ≠ 0 — отсутствие входа даёт НЕИЗМЕРИМ с названным классом.
 #
-# Режим d1 — метка 8.5.7 по ОДНОМУ прогону пода (w85-podonly.sh):
+# Режим d1 — ОДИН прогон пода (w85-podonly.sh), СПРАВОЧНО: строка «8.5.7r», вердикт метки
+#   8.5.7 даёт только d1-median (решение владельца 13.10: медиана ≥ 5 прогонов).
 #   RUN  каталог w82-pod-run.sh (старт: samples.tsv, f1.txt)
 #   ATT  каталог w82-pod-attack.sh (samples.tsv, t-att1, m-pre/m-att1, f1.txt, манифест,
 #        baseline/final-alerts-*.json)
-#   Три половины судятся НЕЗАВИСИМО и печатаются каждая:
+#   Три половины печатаются каждая и судятся НЕЗАВИСИМО:
 #   (а) recall пода по comm = RECALL_TOTAL/RECALL_TOTAL (16/16);
 #   (б) fileaccess ringbuf_to_router за окно атак (m-pre → m-att1) ≤ R2R_FRAC × BASE_R2R
-#       (база ночи 8.2 — 15 196, доля 0,5 — владелец);
+#       (база ночи 8.2 — 15 196, доля 0,5 — владелец) — по одному прогону справочно;
 #   (в) пик memory.current пода (старт и окно атак) ≤ PEAK_MAX_MIB (147,1 — верх ночи 8.2 и
 #       повторов 11.10) — условие метки, а не её замена: 8.2.1 судится своим эмиттером.
 #   Условие: F1 был active в начале и в конце окна атак (f1.txt) — иначе прогон не про F1,
-#   НЕИЗМЕРИМ, а не «достигнуто на выключенном F1».
+#   НЕИЗМЕРИМ, а не «достигнуто на выключенном F1». Последняя строка перед вердиктом —
+#   «REC …»: машинная запись прогона для d1-median.
+#
+# Режим d1-median — метка 8.5.7 (решение владельца 13.10.2026):
+#   D1_RUNS  список «RUN:ATT» через пробел (каталоги прогонов пода, по одному на прогон)
+#   (б) судится МЕДИАНОЙ ringbuf_to_router по ≥ D1_MIN_RUNS (5) прогонам: медиана ≤ R2R_FRAC × BASE_R2R,
+#       и НИ ОДИН прогон не выше BASE_R2R. Чётное число прогонов — медиана = среднее двух средних.
+#       (а) recall и (в) пик, F1 active — на КАЖДОМ прогоне, как прежде. Порог 50% не менялся.
+#       Прогонов меньше минимума или повтор одного и того же каталога — НЕИЗМЕРИМ.
 set -u
 MODE=${1:-}
 BASE_R2R=${BASE_R2R:-15196}
@@ -21,6 +30,7 @@ R2R_FRAC=${R2R_FRAC:-0.5}
 PEAK_MAX_MIB=${PEAK_MAX_MIB:-147.1}
 RECALL_TOTAL=${RECALL_TOTAL:-16}
 RUN=${RUN:-}; ATT=${ATT:-}
+D1_MIN_RUNS=${D1_MIN_RUNS:-5}; D1_RUNS=${D1_RUNS:-}
 
 # _m <файл> <метрика> [подстрока лейблов] — сумма серий; ПУСТО, если серии нет.
 _m() {
@@ -43,7 +53,7 @@ _f1() {
 
 d1() {
     echo "== w85 D1 (8.5.7): RUN=${RUN:-—} ATT=${ATT:-—}"
-    local cls="" fail=""
+    local cls="" fail="" failb="" r2rd="-" pm=""
     local s0 s1
     s0=$(_f1 pre); s1=$(_f1 post)
     echo "  F1: состояние в начале окна атак=${s0:-НЕТ СЕРИИ}, в конце=${s1:-НЕТ СЕРИИ}"
@@ -88,8 +98,9 @@ d1() {
     if [ -z "$r0" ] || [ -z "$r1" ]; then
         cls="$cls; (б) нет серии fileaccess/ringbuf_to_router в m-pre/m-att1"; echo "  (б) fileaccess ringbuf_to_router за окно атак: НЕТ СЕРИИ"
     else
-        echo "  (б) fileaccess ringbuf_to_router за окно атак: $((r1 - r0)) (база ночи 8.2 $BASE_R2R, предел $lim = ${R2R_FRAC} базы)"
-        [ $((r1 - r0)) -le "$lim" ] || fail="$fail; (б) ringbuf_to_router $((r1 - r0)) > $lim"
+        r2rd=$((r1 - r0))
+        echo "  (б) fileaccess ringbuf_to_router за окно атак: $r2rd (база ночи 8.2 $BASE_R2R, предел одного прогона $lim = ${R2R_FRAC} базы; метку судит медиана — d1-median)"
+        [ "$r2rd" -le "$lim" ] || failb="; (б) ringbuf_to_router $r2rd > $lim"
     fi
     # (в) пик memory.current
     local pa pb pm
@@ -101,12 +112,70 @@ d1() {
         echo "  (в) пик memory.current пода: $pm МиБ (старт $pa, атаки $pb; предел $PEAK_MAX_MIB)"
         awk -v p="$pm" -v l="$PEAK_MAX_MIB" 'BEGIN { exit !(p <= l) }' || fail="$fail; (в) пик $pm > $PEAK_MAX_MIB"
     fi
+    # машинная запись прогона: d1-median читает её, а не печатный текст вердикта
+    echo "REC r2r=$r2rd rec=${rd:--}/${rt:--} peak=${pm:--} afail=$(printf '%s' "$fail" | tr '|' '/') cls=$(printf '%s' "$cls" | tr '|' '/')"
+    fail="$fail$failb"
+    if [ -n "$fail" ]; then
+        echo "ПРОВАЛЕН: 8.5.7r ПРОВАЛЕН одного прогона (${fail#; }${cls:+; неизмеримо также:$cls}) — справочно, метку судит d1-median"
+    elif [ -n "$cls" ]; then
+        echo "НЕИЗМЕРИМ: 8.5.7r НЕИЗМЕРИМ (класс НАЗВАН:${cls#;}) — справочно, метку судит d1-median"
+    else
+        echo "ДОСТИГНУТО: 8.5.7r ДОСТИГНУТО одного прогона (F1 active, recall $RECALL_TOTAL/$RECALL_TOTAL, ringbuf_to_router ≤ $lim, пик ≤ $PEAK_MAX_MIB МиБ) — справочно, метку судит d1-median"
+    fi
+}
+
+# _median <числа по одному в строке> — медиана; чётное n — среднее двух средних
+_median() {
+    sort -n | awk '{ a[NR] = $1 } END { if (!NR) exit; if (NR % 2) printf "%.0f\n", a[(NR + 1) / 2]; else printf "%.1f\n", (a[NR / 2] + a[NR / 2 + 1]) / 2 }'
+}
+
+d1_median() {
+    echo "== w85 D1 (8.5.7) по медиане: D1_RUNS=${D1_RUNS:-—} (минимум $D1_MIN_RUNS прогонов)"
+    local cls="" fail="" pair run att n=0 out rec seen="" k=0
+    local vals="" lim
+    lim=$(awk -v b="$BASE_R2R" -v f="$R2R_FRAC" 'BEGIN { printf "%.0f", b * f }')
+    for pair in $D1_RUNS; do
+        run=${pair%%:*}; att=${pair#*:}
+        k=$((k + 1))
+        if [ ! -d "$att" ]; then cls="$cls; прогон $k: нет каталога атак $att"; continue; fi
+        # повтор одного прогона раздул бы число прогонов — считаем по настоящему пути каталога атак
+        local key; key=$(cd "$att" && pwd -P)
+        case " $seen " in *" $key "*) cls="$cls; прогон $k повторяет уже учтённый каталог $att"; continue ;; esac
+        seen="$seen $key"
+        out=$(RUN="$run" ATT="$att" bash "$0" d1 2>&1)
+        rec=$(printf '%s\n' "$out" | grep -a '^REC ' | tail -1)
+        if [ -z "$rec" ]; then cls="$cls; прогон $k: эмиттер d1 не выдал REC ($att)"; continue; fi
+        local r2r afail pcls
+        r2r=$(printf '%s' "$rec" | sed -n 's/^REC r2r=\([^ ]*\) .*/\1/p')
+        afail=$(printf '%s' "$rec" | sed -n 's/.* afail=\(.*\) cls=.*/\1/p')
+        pcls=$(printf '%s' "$rec" | sed -n 's/.* cls=\(.*\)$/\1/p')
+        n=$((n + 1))
+        echo "  прогон $k ($att): ringbuf_to_router $r2r; $(printf '%s' "$rec" | sed -n 's/.* rec=\([^ ]*\) peak=\([^ ]*\) .*/recall \1, пик \2 МиБ/p')${afail:+; провал: ${afail#; }}${pcls:+; неизмеримо:$pcls}"
+        [ -z "$afail" ] || fail="$fail; прогон $k:$afail"
+        [ -z "$pcls" ] || cls="$cls; прогон $k:$pcls"
+        case "$r2r" in
+            ''|-|*[!0-9]*) ;;   # нет серии — класс уже назван прогоном (pcls); в медиану не идёт
+            *) vals="$vals$r2r"$'\n'
+               [ "$r2r" -le "$BASE_R2R" ] || fail="$fail; прогон $k: ringbuf_to_router $r2r выше базы ночи 8.2 $BASE_R2R" ;;
+        esac
+    done
+    local nv med
+    nv=$(printf '%s' "$vals" | grep -c .)
+    if [ "$nv" -lt "$D1_MIN_RUNS" ]; then
+        cls="$cls; прогонов с измеренным ringbuf_to_router $nv < $D1_MIN_RUNS (учтено прогонов $n)"
+        echo "  медиана: НЕ СЧИТАЕТСЯ — измеренных прогонов $nv < $D1_MIN_RUNS"
+    else
+        med=$(printf '%s' "$vals" | _median)
+        echo "  ringbuf_to_router по прогонам (отсортировано): $(printf '%s' "$vals" | sort -n | tr '\n' ' ')— медиана $med, предел медианы $lim = ${R2R_FRAC} базы $BASE_R2R"
+        awk -v m="$med" -v l="$lim" 'BEGIN { exit !(m <= l) }' || fail="$fail; (б) медиана ringbuf_to_router $med > $lim"
+        med="медиана $med ≤ $lim по $nv прогонам"
+    fi
     if [ -n "$fail" ]; then
         echo "ПРОВАЛЕН: 8.5.7 ПРОВАЛЕН (${fail#; }${cls:+; неизмеримо также:$cls})"
     elif [ -n "$cls" ]; then
         echo "НЕИЗМЕРИМ: 8.5.7 НЕИЗМЕРИМ (класс НАЗВАН:${cls#;})"
     else
-        echo "ДОСТИГНУТО: 8.5.7 ДОСТИГНУТО (F1 active, recall $RECALL_TOTAL/$RECALL_TOTAL, ringbuf_to_router ≤ $lim, пик ≤ $PEAK_MAX_MIB МиБ)"
+        echo "ДОСТИГНУТО: 8.5.7 ДОСТИГНУТО ($med; ни один прогон не выше базы $BASE_R2R; F1 active, recall $RECALL_TOTAL/$RECALL_TOTAL, пик ≤ $PEAK_MAX_MIB МиБ на каждом)"
     fi
 }
 
@@ -303,8 +372,9 @@ controls() {
 case "$MODE" in
     controls) controls ;;
     d1) d1 ;;
+    d1-median) d1_median ;;
     flow) flow ;;
     anomaly-hour) anomaly_hour ;;
     ab) ab ;;
-    *) echo "usage: w85-close-report.sh d1|flow|anomaly-hour|ab|controls" >&2; exit 2 ;;
+    *) echo "usage: w85-close-report.sh d1|d1-median|flow|anomaly-hour|ab|controls" >&2; exit 2 ;;
 esac

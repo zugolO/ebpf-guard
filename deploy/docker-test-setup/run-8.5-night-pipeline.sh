@@ -26,7 +26,9 @@
 # Вход: EXPECT_NR (обязателен), IDLE_SECS (умолч. 28800), EXPECT_GOMEMLIMIT, NIGHT_TAG (умолч.
 #       8.5-night), NIGHT_ART, NIGHT_PREV (idle прошлой ночи для 3.P1-19), POD_IDLE_SECS (1830),
 #       POD_HOLD_SECS (600), AB_SECS (3600; 0 — без пары, 8.5.3 неизмерима), BASE_IDLE (каталог
-#       idle ночи 8.2 — база 8.5.1 и 8.5.3a; обязателен), SKIP_HOST_ATTACKS=1 (только смок).
+#       idle ночи 8.2 — база 8.5.1 и 8.5.3a; обязателен), SKIP_HOST_ATTACKS=1 (только смок),
+#       D1_PRIOR_RUNS («RUN:ATT» через пробел — прогоны пода прошлых заходов для медианы 8.5.7;
+#       каталоги из server-logs/collect-8.5-d1/ надо привезти на стенд; без них 8.5.7 НЕИЗМЕРИМА).
 set -u
 SETUP="${SETUP:-/opt/ebpf-guard/deploy/docker-test-setup}"
 REPO="$(cd "$SETUP/../.." && pwd)"
@@ -338,7 +340,10 @@ cat "$ART/close-report.txt"
     PROFILE_BEFORE="$PROFILE_BEFORE" IDLE="$ART/idle" BASE_IDLE="$BASE_IDLE" bash "$SETUP/w85-close-report.sh" anomaly-hour
     AB_DIR="$ART/ab" bash "$SETUP/w85-close-report.sh" ab
     CTL_ALERTS="$ART/controls-alerts.json" CTL_STATE="$ART/metrics-controls.txt" GATE="$ART/gate.txt" bash "$SETUP/w85-close-report.sh" controls
+    # 8.5.7 — медиана ≥ 5 прогонов пода (решение владельца 13.10): прогоны прошлых заходов — D1_PRIOR_RUNS
+    # («RUN:ATT» через пробел), прогон этой ночи — последний. Без прогонов заходов метка НЕИЗМЕРИМА.
     RUN="$ART/pod-run" ATT="$ART/pod-attack" bash "$SETUP/w85-close-report.sh" d1
+    D1_RUNS="${D1_PRIOR_RUNS:-} $ART/pod-run:$ART/pod-attack" bash "$SETUP/w85-close-report.sh" d1-median
     grep -aoE '(ДОСТИГНУТО|ПРОВАЛЕН): 8\.5\.8 .*' "$ART/a2.txt" | head -1
 } > "$ART/close-report-85.txt" 2>&1
 cat "$ART/close-report-85.txt"

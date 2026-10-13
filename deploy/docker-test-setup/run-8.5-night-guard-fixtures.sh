@@ -47,14 +47,14 @@ EMIT=$HERE/w85-close-report.sh
 source "$HERE/w85-fixture-lib.sh"
 BASE=$(mkidle base by=1000 kf=none state=none)
 NEW=$(mkidle new by=150)
-dirs=$(mk d1good); D1RUN=${dirs% *}; D1ATT=${dirs#* }
+D1RUNS=""; for i in 1 2 3 4 5; do dirs=$(mk d1good$i r2r=$((1000 * i))); D1RUNS="$D1RUNS ${dirs% *}:${dirs#* }"; done
 CTL=$(mkctl ctlgood)
 {
     IDLE=$NEW BASE_IDLE=$BASE bash "$EMIT" flow
     IDLE=$NEW BASE_IDLE=$BASE bash "$EMIT" anomaly-hour
     AB_DIR=$(mkab abgood) bash "$EMIT" ab
     CTL_ALERTS=$CTL/alerts.json CTL_STATE=$CTL/state.txt GATE=$CTL/gate.txt bash "$EMIT" controls
-    RUN=$D1RUN ATT=$D1ATT bash "$EMIT" d1
+    D1_RUNS="$D1RUNS" bash "$EMIT" d1-median
     ( cd "$ROOT" && go test -count=1 -v -run '^TestW85_A1_AllocPerEventPostF1Mix' ./internal/correlator/ 2>&1 | grep -aoE '(ДОСТИГНУТО|ПРОВАЛЕН): 8\.5\.8 .*' | head -1 )
 } > "$T/close-report-85.txt" 2>&1
 cat "$T/night-report.txt" "$T/close-report.txt" "$T/close-report-85.txt" > "$T/all.txt"

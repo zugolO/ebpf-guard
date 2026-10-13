@@ -5,6 +5,8 @@
 #       стором, аудитом, состоянием профиля, токенами и каталогом правил (по умолчанию SRC/rules); unix_socket и
 #       observer_exclude выключены (сокет и файл observer-pid иначе общие с рабочим). Выставляет SA_PID, SA_TOKEN, SA_API.
 #   SA_PROC_TABLE=off — выключить таблицу процессов ядра (тот же бинарь, прежний путь трекера).
+#   SA_UNIT=<имя> — запустить агента как транзитный юнит systemd (systemd-run, MemoryAccounting): у него СВОЯ cgroup,
+#       можно читать memory.current, а не VmHWM (пара A3/A4 волны 8.5). Выставляет SA_CG (каталог cgroup).
 #   SA_CFG_PATCH=<скрипт.py> — после генерации конфига: python3 <скрипт.py> <config.yaml> (роли пар A/B, O1).
 #   sa_stop                                  — останавливает его
 #   sa_metrics                               — /metrics второго агента
@@ -43,8 +45,18 @@ PY
     # без setsid и без «&&» перед nohup: `cd && cmd &` уводит в фон ВСЮ цепочку, и $! — pid подоболочки. setsid форкает, и $! становится pid обёртки, а не агента (найдено на часе cmd 3: pid второго агента
     # в сводке был на единицу меньше настоящего, и его вызовы bpf() не попали в итог). Отсоединение — nohup и
     # перенаправления; скрипты-вызыватели сами запущены отсоединённо.
-    (cd "$RUN"; nohup "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
-    SA_PID=$(cat "$RUN/pid")
+    if [ -n "${SA_UNIT:-}" ]; then
+        systemctl stop "$SA_UNIT" 2> /dev/null; systemctl reset-failed "$SA_UNIT" 2> /dev/null
+        systemd-run --quiet --unit="$SA_UNIT" --collect --property=MemoryAccounting=yes --property=WorkingDirectory="$RUN" \
+            --property=StandardOutput=file:"$RUN/agent.log" --property=StandardError=file:"$RUN/agent.log" \
+            "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > /dev/null 2>&1 || { echo "systemd-run FAIL"; return 6; }
+        sleep 1
+        SA_PID=$(systemctl show -p MainPID --value "$SA_UNIT"); echo "$SA_PID" > "$RUN/pid"
+        SA_CG=/sys/fs/cgroup$(awk -F: '$1 == "0" { print $3 }' /proc/$SA_PID/cgroup 2> /dev/null | head -1)
+    else
+        (cd "$RUN"; nohup "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
+        SA_PID=$(cat "$RUN/pid")
+    fi
     local i
     for i in $(seq 1 60); do
         grep -q "syscall: collector enabled" "$RUN/agent.log" 2>/dev/null && break
@@ -60,4 +72,7 @@ PY
     fi
 }
 sa_metrics() { curl -s --max-time 10 -H "Authorization: Bearer $SA_TOKEN" "$SA_API/metrics"; }
-sa_stop() { kill "$SA_PID" 2>/dev/null; sleep 2; kill -9 "$SA_PID" 2>/dev/null; return 0; }
+sa_stop() {
+    if [ -n "${SA_UNIT:-}" ]; then systemctl stop "$SA_UNIT" 2> /dev/null; sleep 1; fi
+    kill "$SA_PID" 2>/dev/null; sleep 2; kill -9 "$SA_PID" 2>/dev/null; return 0
+}

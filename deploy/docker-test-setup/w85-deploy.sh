@@ -37,6 +37,10 @@ rm -f /root/w85-deploy.bundle
 echo $SHORT > GIT-HEAD
 if [ \"\${SKIP_BUILD:-0}\" = 1 ]; then
   echo \"SKIP_BUILD: бинарь не пересобирается; собран из \$(cat BINARY-SRC-REV 2>/dev/null || echo ?)\"
+  # reset --hard вернул ЗАГЛУШКИ internal/bpf/*_bpf_gen.go рядом со сгенерированными *_x86_bpfel.go (DNSObjects redeclared — найдено
+  # репетицией ночи: сборка статического бинаря пода в префлайте пайплайна падала). Генерация — обязательна и без пересборки бинаря.
+  make generate > /root/w85-deploy-generate.log 2>&1 || { tail -20 /root/w85-deploy-generate.log; exit 3; }
+  go build -tags rego -o /dev/null ./cmd/ebpf-guard > /root/w85-deploy-compile.log 2>&1 || { tail -20 /root/w85-deploy-compile.log; exit 6; }
 else
   make generate > /root/w85-deploy-generate.log 2>&1 || { tail -20 /root/w85-deploy-generate.log; exit 3; }
   make build > /root/w85-deploy-build.log 2>&1 || { tail -20 /root/w85-deploy-build.log; exit 4; }

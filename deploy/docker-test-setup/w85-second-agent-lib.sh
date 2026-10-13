@@ -38,10 +38,10 @@ if os.environ.get('SA_PROC_TABLE') == 'off':
 open(run + '/config.yaml', 'w').write(s)
 PY
     SA_API=http://127.0.0.1:$PORT
-    # без setsid: setsid форкает, и $! становится pid обёртки, а не агента (найдено на часе cmd 3: pid второго агента
+    # без setsid и без «&&» перед nohup: `cd && cmd &` уводит в фон ВСЮ цепочку, и $! — pid подоболочки. setsid форкает, и $! становится pid обёртки, а не агента (найдено на часе cmd 3: pid второго агента
     # в сводке был на единицу меньше настоящего, и его вызовы bpf() не попали в итог). Отсоединение — nohup и
     # перенаправления; скрипты-вызыватели сами запущены отсоединённо.
-    (cd "$RUN" && nohup "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
+    (cd "$RUN"; nohup "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
     SA_PID=$(cat "$RUN/pid")
     local i
     for i in $(seq 1 60); do

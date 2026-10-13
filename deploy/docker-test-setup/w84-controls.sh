@@ -35,6 +35,17 @@ cleanup() { dpkg -r w84svc > /dev/null 2>&1; dpkg -P w84svc > /dev/null 2>&1; rm
 trap cleanup EXIT
 start_svc() { systemd-run --quiet --unit=w84svc-run /bin/sleep 100000 > /dev/null 2>&1; }
 
+# bpftrace гасится SIGINT (штатный выход с печатью карт) и добивается -9 через 5 с: на одном из прогонов SIGTERM
+# оставил его висеть в ep_poll, а «wait» держал весь контроль 19 минут.
+stop_bt() {
+    local p=$1 i
+    kill -INT "$p" 2> /dev/null
+    for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$p" 2> /dev/null || break; sleep 0.5; done
+    kill -9 "$p" 2> /dev/null
+    wait "$p" 2> /dev/null
+    return 0
+}
+
 N=0
 # scenario <имя> <silent|alert> <заметка> <команда…> — окно: свидетель → команда → пауза → алерты и метрики
 scenario() {
@@ -51,7 +62,7 @@ scenario() {
     # снимок берётся с запасом 5 с назад, а эмиттер отбрасывает алерты старше t0: чужие systemctl до окна (уборка
     # прошлого сценария, пробы смока) в сценарий не входят
     A $(( $(date +%s) - t0 + 5 )) > "$D/alerts.json"
-    kill $BT 2> /dev/null; wait $BT 2> /dev/null
+    stop_bt "$BT"
     echo "[$(date -u +%T)] $D: $(grep -c '^SYSTEMCTL' "$D/witness.txt") systemctl в окне, expect=$expect"
 }
 

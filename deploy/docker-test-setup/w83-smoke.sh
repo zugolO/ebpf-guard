@@ -154,7 +154,7 @@ if has I; then
     systemd-run --quiet --wait --unit=w83-pkg --collect /bin/sh -c 'dpkg -r irqbalance; echo "dpkg -r rc=$?"; apt-get install -y irqbalance; echo "apt-get install rc=$?"' > "$D/pkg.log" 2>&1
     echo "systemd-run rc=$?" >> "$D/pkg.log"
     sleep $(( W > 60 ? W - 60 : 30 ))
-    kill $BTPID 2>/dev/null; wait $BTPID 2>/dev/null; sleep 1; kill $SAMP 2>/dev/null; wait $SAMP 2>/dev/null
+    kill -INT $BTPID 2>/dev/null; for _i in 1 2 3 4 5 6 7 8 9 10; do kill -0 $BTPID 2>/dev/null || break; sleep 0.5; done; kill -9 $BTPID 2>/dev/null; wait $BTPID 2>/dev/null; sleep 1; kill $SAMP 2>/dev/null; wait $SAMP 2>/dev/null
     M > "$D/mE1.txt"; date +%s > "$D/tE1"
     A $(( $(date +%s) - $(cat "$D/tC0") + 5 )) > "$D/alerts-CE.json"
     I > "$D/incidents.json"

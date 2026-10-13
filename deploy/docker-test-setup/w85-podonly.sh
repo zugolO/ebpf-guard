@@ -47,11 +47,23 @@ for i in $(seq 1 "$N"); do
     # ждём 5 мин аптайма процесса пода (idle до пакета); опрос — ps, не ssh в окно
     while [ -n "$p" ] && [ "$(ps -o etimes= -p $p | tr -d ' ')" -lt 300 ]; do sleep 10; done
     ARG_PREDICATES=1 SETUP=$S TOKEN=$TOK API_PORT=19091 HOLD_S=600 bash "$S/w82-pod-attack.sh" "$R/pod-attack" > "$R/pod-attack.log" 2>&1
+    # P1 в поде (шаг 3 части 2): инциденты и метрики пода ДО его удаления — состояние таблицы и доля инцидентов с process_chain
+    curl -s --max-time 60 -H "Authorization: Bearer $TOK" "http://127.0.0.1:19091/api/v1/incidents?limit=1000" > "$R/pod-incidents.json"
+    curl -s --max-time 30 -H "Authorization: Bearer $TOK" "http://127.0.0.1:19091/metrics" > "$R/pod-m-end.txt"
+    kubectl -n ebpf-guard logs "$(kubectl -n ebpf-guard get pods -o name 2> /dev/null | head -1)" --tail=-1 2> /dev/null | grep -a "proc table" > "$R/pod-proc-table.log" 2>&1
     helm uninstall w82 -n ebpf-guard > /dev/null 2>&1
     for k in $(seq 1 60); do [ "$(ps -eo cmd | grep -c '[e]bpf-guard --config')" -eq 0 ] && break; sleep 2; done
     systemctl start ebpf-guard-test.service; sleep 5
     RUN=$R/pod-run ATT=$R/pod-attack bash "$S/w85-close-report.sh" d1 > "$R/report.txt" 2>&1
+    {
+        echo "== P1 в поде (решение 1, часть 2): состояние таблицы, цепочки в инцидентах пода"
+        echo "  состояние: $(awk '/^ebpf_guard_proc_table_state/ && $NF == 1 { x = $1; sub(/.*state="/, "", x); sub(/".*/, "", x); print x }' "$R/pod-m-end.txt" 2> /dev/null | tr '\n' ' ')"
+        grep -a "proc table" "$R/pod-proc-table.log" 2> /dev/null | cut -c1-260 | head -4 | sed 's/^/  журнал: /'
+        INC="$R/pod-incidents.json" BASE_INC="${BASE_INC:-/root/w85-base/final-incidents-20261012_070020.json}" CH_M0="$R/pod-attack/m-pre.txt" CH_M1="$R/pod-attack/m-att1.txt" \
+            bash "$S/w85-close-report.sh" chain
+    } >> "$R/report.txt" 2>&1
     grep -aE '^(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ): 8\.5\.7' "$R/report.txt" | sed "s/^/run $i: /" >> "$A/d1-summary.txt"
+    grep -aE '^  (состояние|инцидентов с process_chain|таблица процессов|\(а\)|\(б\)|\(в\))|^(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ): 8\.5\.5' "$R/report.txt" | sed "s/^/run $i: /" >> "$A/d1-summary.txt"
     go clean -cache > /dev/null 2>&1
 done
 fin "done agents=$(ps -eo cmd | grep -c '[e]bpf-guard --config')"

@@ -42,7 +42,7 @@ phase() { # <before|after> <порт>
     sa_metrics > "$d/m1.txt"
     alerts_since "$t0" > "$d/alerts.txt"; echo "$ph: алертов $RULE от systemd-detect-* за окно: $(cat "$d/alerts.txt")"
     if [ "$ph" = after ]; then
-        mkdir -p /var/tmp/w85e1; cp /usr/bin/systemd-detect-virt /var/tmp/w85e1/systemd-detect-virt; cp /usr/bin/systemd-detect-virt /var/tmp/w85e1/dv2
+        mkdir -p /var/tmp/w85e1; mkdir -p /var/tmp/w85e1/b; cp /usr/bin/systemd-detect-virt /var/tmp/w85e1/systemd-detect-virt; cp /usr/bin/systemd-detect-virt /var/tmp/w85e1/b/systemd-detect-virt
         # контроль 1: копия под тем же именем в другом каталоге
         spoof() { # <имя> <команда…>
             local n=$1; shift; sleep 62; local t; t=$(date +%s)
@@ -51,7 +51,8 @@ phase() { # <before|after> <порт>
         }
         : > "$OUT/spoof.txt"
         spoof copy-same-name /var/tmp/w85e1/systemd-detect-virt
-        spoof exec-a bash -c 'exec -a /usr/bin/systemd-detect-virt /var/tmp/w85e1/dv2'
+        # comm берётся из имени ФАЙЛА, а не argv[0] — копия называется так же, чтобы comm остался systemd-detect-
+        spoof exec-a bash -c 'exec -a /usr/bin/systemd-detect-virt /var/tmp/w85e1/b/systemd-detect-virt'
         # comm-спуф сырым syscall: PR_SET_NAME + openat(AT_FDCWD, DMI, O_RDONLY|O_CLOEXEC); образ — python3
         cat > /var/tmp/w85e1/commspoof.py <<'PY'
 import ctypes

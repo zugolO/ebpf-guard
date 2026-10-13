@@ -301,3 +301,51 @@ func TestW85_LoadRulesWithTuning_SkipsBadFileAndCountsIt(t *testing.T) {
 		t.Fatalf("rules_load_errors_total{file=broken.yaml} вырос на %v, want 1", got)
 	}
 }
+
+// №557: на пути агента (старт → горячая перезагрузка → починка) битый на перезагрузке
+// файл держит свои правила, gauge rules_file_stale = 1 до починки, ошибка в метрике остаётся.
+func TestW85_LoadRulesWithTuning_HotReloadHoldsLastGoodVersion(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(id string) string {
+		return "rules:\n  - id: " + id + "\n    name: " + id + "\n    event_type: syscall\n    severity: warning\n    condition:\n      field: comm\n      op: eq\n      values: [\"x\"]\n"
+	}
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := func() float64 { return testutil.ToFloat64(exporter.RulesFileStale.WithLabelValues("hold557.yaml")) }
+	write("hold557.yaml", mk("hold_v1"))
+	write("other557.yaml", mk("other_1"))
+
+	rules, err := loadRulesWithTuning(dir, "") // старт
+	if err != nil || len(rules) != 2 || stale() != 0 {
+		t.Fatalf("старт: rules=%d err=%v stale=%v", len(rules), err, stale())
+	}
+	errs0 := testutil.ToFloat64(exporter.RulesLoadErrors.WithLabelValues("hold557.yaml"))
+
+	write("hold557.yaml", "rules: [ :::") // перезагрузка с битым файлом
+	rules, err = loadRulesWithTuning(dir, "")
+	if err != nil || len(rules) != 2 {
+		t.Fatalf("перезагрузка: правила битого файла должны жить, rules=%d err=%v", len(rules), err)
+	}
+	if stale() != 1 {
+		t.Fatalf("rules_file_stale{hold557.yaml} = %v, want 1", stale())
+	}
+	if got := testutil.ToFloat64(exporter.RulesLoadErrors.WithLabelValues("hold557.yaml")) - errs0; got != 1 {
+		t.Fatalf("rules_load_errors_total вырос на %v, want 1 (ошибка остаётся)", got)
+	}
+
+	write("hold557.yaml", mk("hold_v2")) // починен
+	rules, err = loadRulesWithTuning(dir, "")
+	ids := map[string]bool{}
+	for _, r := range rules {
+		ids[r.ID] = true
+	}
+	if err != nil || len(rules) != 2 || !ids["hold_v2"] || ids["hold_v1"] {
+		t.Fatalf("после починки ждали hold_v2: ids=%v err=%v", ids, err)
+	}
+	if stale() != 0 {
+		t.Fatalf("rules_file_stale после починки = %v, want 0", stale())
+	}
+}

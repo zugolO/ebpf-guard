@@ -631,9 +631,14 @@ as before.
 At startup and on every hot reload a rule file that cannot be read, parsed or validated (or whose
 rule IDs collide with an earlier file) is **skipped**; the rest of the directory loads. Each skip is
 an `ERROR` in the journal and a step of `ebpf_guard_rules_load_errors_total{file}`. Files named
-`._*` (macOS AppleDouble, left by `tar` on a Mac) are ignored. Note the consequence for a hot reload:
-a file that turns invalid removes *its* rules from the live set until it is fixed — alert on the
-counter.
+`._*` (macOS AppleDouble, left by `tar` on a Mac) are ignored.
+
+On a **hot reload** a file that turns invalid does *not* take its rules out of the live set: the
+loader holds the **last good version of that file**. The `ERROR` and the counter step still happen,
+and `ebpf_guard_rules_file_stale{file}` is `1` while the old version is held (`0` once the file
+loads again; Helm alert `EbpfGuardRuleFileStale`). Edits to a stale file are *not* applied until it
+loads. At startup there is no earlier version, so a bad file is simply skipped. A deleted file is
+never held. The held version is the last one that loaded in this process — a restart forgets it.
 
 ## Memory Pressure Auto-Tuning
 

@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"strconv"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -141,3 +142,39 @@ var RulesLoadErrors = promauto.NewCounterVec(
 	},
 	[]string{"file"},
 )
+
+// RulesFileStale — 1, пока для файла каталога правил держится ПОСЛЕДНЯЯ УДАЧНАЯ
+// версия, потому что текущее содержимое не загрузилось (№557): правила файла
+// живы, но не из того, что лежит на диске. 0 — файл вновь загружается нормально
+// (или исчез из каталога). Ось file ограничена файлами, которые когда-либо стали плохими.
+var RulesFileStale = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "ebpf_guard_rules_file_stale",
+		Help: "1 while the hot reload holds the last good version of a rule file because its current content failed to load; 0 once it loads again.",
+	},
+	[]string{"file"},
+)
+
+var (
+	staleMu       sync.Mutex
+	staleReported = map[string]bool{}
+)
+
+// SetRulesFileStale выставляет gauge по результату очередной загрузки каталога:
+// files — файлы, которые держатся старой версией СЕЙЧАС. Ранее отмеченные и
+// больше не державшиеся сбрасываются в 0.
+func SetRulesFileStale(files []string) {
+	staleMu.Lock()
+	defer staleMu.Unlock()
+	now := make(map[string]bool, len(files))
+	for _, f := range files {
+		now[f] = true
+		RulesFileStale.WithLabelValues(f).Set(1)
+	}
+	for f := range staleReported {
+		if !now[f] {
+			RulesFileStale.WithLabelValues(f).Set(0)
+		}
+	}
+	staleReported = now
+}

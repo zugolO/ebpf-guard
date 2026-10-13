@@ -5125,6 +5125,11 @@ func parseDuration(s string, defaultDur time.Duration) time.Duration {
 	return d
 }
 
+// ruleFileCache — последние удачные версии файлов каталога правил процесса
+// (№557). Старт кладёт в него загруженное, горячая перезагрузка держится за него,
+// когда файл стал плохим. На старте кэш пуст: плохой файл просто пропускается.
+var ruleFileCache = correlator.NewRuleFileCache()
+
 // loadRules loads rules from a file or directory path.
 func loadRules(path string) ([]correlator.Rule, error) {
 	return loadRulesWithTuning(path, "")
@@ -5145,12 +5150,22 @@ func loadRulesWithTuning(path, tuningPath string) ([]correlator.Rule, error) {
 		// Плохой файл пропускается, остальные грузятся (решение 12.10): один
 		// битый файл раньше обнулял весь набор при старте.
 		var failed []correlator.RuleFileError
-		rules, failed, err = correlator.LoadRulesFromDirTolerant(path)
+		rules, failed, err = correlator.LoadRulesFromDirKeepLast(path, ruleFileCache)
+		var stale []string
 		for _, f := range failed {
 			exporter.RulesLoadErrors.WithLabelValues(f.File).Inc()
+			if f.Stale {
+				// Горячая перезагрузка: файл стал плохим, но его правила живы — держится
+				// последняя удачная версия (№557).
+				stale = append(stale, f.File)
+				slog.Error("rules: file failed to load, holding its last good version; fix the file",
+					slog.String("file", f.File), slog.String("path", path), slog.Any("error", f.Err))
+				continue
+			}
 			slog.Error("rules: file skipped, the rest of the directory still loads",
 				slog.String("file", f.File), slog.String("path", path), slog.Any("error", f.Err))
 		}
+		exporter.SetRulesFileStale(stale)
 	} else {
 		rules, err = correlator.LoadRulesFromFile(path)
 	}

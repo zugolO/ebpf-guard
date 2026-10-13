@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/zugolO/ebpf-guard/internal/autolearn"
 	"github.com/zugolO/ebpf-guard/pkg/types"
@@ -240,7 +241,11 @@ func LoadRulesFromFile(path string) ([]Rule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("correlator: read rules file: %w", err)
 	}
+	return parseRuleFile(data)
+}
 
+// parseRuleFile разбирает и полностью валидирует содержимое одного файла правил.
+func parseRuleFile(data []byte) ([]Rule, error) {
 	var ruleSet RuleSet
 	if err := yaml.Unmarshal(data, &ruleSet); err != nil {
 		return nil, fmt.Errorf("correlator: unmarshal rules: %w", err)
@@ -853,6 +858,48 @@ func isRuleFileName(name string) bool {
 type RuleFileError struct {
 	File string // имя файла в каталоге
 	Err  error
+	// Stale — загрузчик ДЕРЖИТ последнюю удачную версию этого файла (решение
+	// владельца 13.10, №557): его правила в наборе, но не из текущего содержимого.
+	Stale bool
+}
+
+// RuleFileCache — последняя удачно загруженная версия каждого файла каталога
+// правил. Хранит БАЙТЫ, а не разобранные правила: ApplyTuningOverlay дописывает
+// исключения в срезы правил, и общий разобранный набор был бы испорчен вторым
+// наложением. Ключ — полный путь файла (разные каталоги не смешиваются).
+type RuleFileCache struct {
+	mu   sync.Mutex
+	good map[string][]byte
+}
+
+// NewRuleFileCache создаёт пустой кэш. Пустой кэш = поведение «плохой файл
+// пропускается» (старт агента).
+func NewRuleFileCache() *RuleFileCache { return &RuleFileCache{good: make(map[string][]byte)} }
+
+func (c *RuleFileCache) get(path string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b, ok := c.good[path]
+	return b, ok
+}
+
+func (c *RuleFileCache) put(path string, data []byte) {
+	c.mu.Lock()
+	c.good[path] = data
+	c.mu.Unlock()
+}
+
+// retain забывает файлы каталога dir, которых в нём больше нет: удалённый файл
+// не может «держаться» старой версией.
+func (c *RuleFileCache) retain(dir string, present map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prefix := dir + string(filepath.Separator)
+	for path := range c.good {
+		if strings.HasPrefix(path, prefix) && !strings.Contains(path[len(prefix):], string(filepath.Separator)) && !present[path] {
+			delete(c.good, path)
+		}
+	}
 }
 
 // LoadRulesFromDirTolerant загружает каталог правил, ПРОПУСКАЯ плохие файлы
@@ -860,10 +907,21 @@ type RuleFileError struct {
 // валидацию файл — или файл, чьи id уже занял более ранний, — в набор не входит,
 // остальные грузятся. Пропущенные возвращаются списком для журнала и метрики;
 // ошибка — только если нельзя прочитать сам каталог. Файлы `._*` игнорируются.
+// Это поведение СТАРТА (кэша последней удачной версии ещё нет).
 //
 // Строгий LoadRulesFromDir остаётся для тестов, `rules check` и всего, что
 // обязано сообщать о плохом файле ошибкой: терпимый загрузчик прячет дефект.
 func LoadRulesFromDirTolerant(dir string) ([]Rule, []RuleFileError, error) {
+	return LoadRulesFromDirKeepLast(dir, nil)
+}
+
+// LoadRulesFromDirKeepLast — то же, но при ПЕРЕЗАГРУЗКЕ файл, ставший плохим, не
+// снимает свои правила: держится его последняя удачная версия из cache (решение
+// владельца 13.10, №557). В списке ошибок такой файл идёт с Stale = true — ERROR и
+// метрика остаются, плюс gauge «держится старая версия». Старой версии нет (файл
+// плохой с самого начала) или её id заняты другим файлом — пропуск, как при старте.
+// Удачно загруженный файл заменяет версию в кэше. cache == nil — без удержания.
+func LoadRulesFromDirKeepLast(dir string, cache *RuleFileCache) ([]Rule, []RuleFileError, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("correlator: read rules directory: %w", err)
@@ -871,27 +929,57 @@ func LoadRulesFromDirTolerant(dir string) ([]Rule, []RuleFileError, error) {
 	var all []Rule
 	var failed []RuleFileError
 	owner := make(map[string]string) // id правила → файл, который его занял
+	present := make(map[string]bool)
+	// claim — id файла свободны? иначе ошибка о первом занятом.
+	claim := func(rules []Rule) error {
+		for i := range rules {
+			if other, dup := owner[rules[i].ID]; dup && rules[i].ID != "" {
+				return fmt.Errorf("correlator: duplicate rule ID %q, already defined in %s", rules[i].ID, other)
+			}
+		}
+		return nil
+	}
 	for _, entry := range entries {
 		if entry.IsDir() || !isRuleFileName(entry.Name()) {
 			continue
 		}
-		rules, err := LoadRulesFromFile(filepath.Join(dir, entry.Name()))
+		path := filepath.Join(dir, entry.Name())
+		present[path] = true
+		data, rerr := os.ReadFile(path)
+		var rules []Rule
+		err := rerr
+		if rerr != nil {
+			err = fmt.Errorf("correlator: read rules file: %w", rerr)
+		} else if rules, err = parseRuleFile(data); err == nil {
+			err = claim(rules)
+		}
 		if err == nil {
 			for i := range rules {
-				if other, dup := owner[rules[i].ID]; dup && rules[i].ID != "" {
-					err = fmt.Errorf("correlator: duplicate rule ID %q, already defined in %s", rules[i].ID, other)
-					break
+				owner[rules[i].ID] = entry.Name()
+			}
+			if cache != nil {
+				cache.put(path, data)
+			}
+			all = append(all, rules...)
+			continue
+		}
+		fe := RuleFileError{File: entry.Name(), Err: err}
+		if cache != nil {
+			if old, ok := cache.get(path); ok {
+				// Свежий разбор последней удачной версии: правила не делят срезы с прошлым набором.
+				if oldRules, perr := parseRuleFile(old); perr == nil && claim(oldRules) == nil {
+					for i := range oldRules {
+						owner[oldRules[i].ID] = entry.Name()
+					}
+					all = append(all, oldRules...)
+					fe.Stale = true
 				}
 			}
 		}
-		if err != nil {
-			failed = append(failed, RuleFileError{File: entry.Name(), Err: err})
-			continue
-		}
-		for i := range rules {
-			owner[rules[i].ID] = entry.Name()
-		}
-		all = append(all, rules...)
+		failed = append(failed, fe)
+	}
+	if cache != nil {
+		cache.retain(dir, present)
 	}
 	return all, failed, nil
 }

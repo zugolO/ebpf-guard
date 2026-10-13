@@ -37,6 +37,7 @@ func TestW85_ChartAlertsReferenceRealMetrics(t *testing.T) {
 	for alert, metric := range map[string]string{
 		"EbpfGuardKernelPredicatesOff":      "ebpf_guard_kernel_predicate_state",
 		"EbpfGuardSyscallCountsMapNearFull": "ebpf_guard_syscall_counts_map_fill_ratio",
+		"EbpfGuardRuleFileStale":            "ebpf_guard_rules_file_stale",
 	} {
 		expr, ok := exprs[alert]
 		if !ok {

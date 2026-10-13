@@ -19,7 +19,7 @@ git tag -f w85-deploy-tmp "$SHA" > /dev/null
 git bundle create "$TMP/w85.bundle" "$BASE..refs/tags/w85-deploy-tmp" > /dev/null 2>&1 || { git tag -d w85-deploy-tmp > /dev/null; echo "die: bundle $BASE..$SHA" >&2; exit 1; }
 git tag -d w85-deploy-tmp > /dev/null
 scp -q -i "$KEY" "$TMP/w85.bundle" "$HOST:/root/w85-deploy.bundle"
-$SSH "set -eu; export PATH=\$PATH:/usr/local/go/bin
+$SSH "set -eu; export SKIP_BUILD=${SKIP_BUILD:-0}; export PATH=\$PATH:/usr/local/go/bin
 TS=\$(date -u +%Y%m%dT%H%M%SZ); BK=/root/ebpf-guard-backups/pre-8.5-night-\$TS; mkdir -p \$BK
 cd /opt/ebpf-guard
 used=\$(df -P / | awk 'NR == 2 { sub(/%/, \"\", \$5); print \$5 }'); [ \"\$used\" -le 80 ] || { echo \"die: диск \$used%\"; exit 2; }
@@ -35,8 +35,13 @@ git checkout -q -- bpf/vmlinux.h internal/bpf/xdp_bpf_gen.go deploy/docker-test-
 git reset -q --hard FETCH_HEAD
 rm -f /root/w85-deploy.bundle
 echo $SHORT > GIT-HEAD
-make generate > /root/w85-deploy-generate.log 2>&1 || { tail -20 /root/w85-deploy-generate.log; exit 3; }
-make build > /root/w85-deploy-build.log 2>&1 || { tail -20 /root/w85-deploy-build.log; exit 4; }
+if [ \"\${SKIP_BUILD:-0}\" = 1 ]; then
+  echo \"SKIP_BUILD: бинарь не пересобирается; собран из \$(cat BINARY-SRC-REV 2>/dev/null || echo ?)\"
+else
+  make generate > /root/w85-deploy-generate.log 2>&1 || { tail -20 /root/w85-deploy-generate.log; exit 3; }
+  make build > /root/w85-deploy-build.log 2>&1 || { tail -20 /root/w85-deploy-build.log; exit 4; }
+  echo $SHORT > BINARY-SRC-REV
+fi
 sha256sum build/ebpf-guard | tee BINARY-SHA256
 build/ebpf-guard version 2>&1 | head -3
 go clean -cache

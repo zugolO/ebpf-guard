@@ -38,7 +38,10 @@ if os.environ.get('SA_PROC_TABLE') == 'off':
 open(run + '/config.yaml', 'w').write(s)
 PY
     SA_API=http://127.0.0.1:$PORT
-    (cd "$RUN" && setsid nohup "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
+    # без setsid: setsid форкает, и $! становится pid обёртки, а не агента (найдено на часе cmd 3: pid второго агента
+    # в сводке был на единицу меньше настоящего, и его вызовы bpf() не попали в итог). Отсоединение — nohup и
+    # перенаправления; скрипты-вызыватели сами запущены отсоединённо.
+    (cd "$RUN" && nohup "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > "$RUN/agent.log" 2>&1 < /dev/null & echo $! > "$RUN/pid")
     SA_PID=$(cat "$RUN/pid")
     local i
     for i in $(seq 1 60); do
@@ -47,6 +50,12 @@ PY
         sleep 1
     done
     sleep 8
+    # тождество pid: тот, что агент сам назвал в журнале, обязан совпасть с SA_PID (иначе всё, что считается «по pid агента», слепо)
+    local logged
+    logged=$(grep -a '"msg":"correlator: self-exclusion filter"' "$RUN/agent.log" | head -1 | sed -n 's/.*"self_pid":\([0-9]*\).*/\1/p')
+    if [ -n "$logged" ] && [ "$logged" != "$SA_PID" ]; then
+        echo "PID MISMATCH: журнал агента self_pid=$logged, SA_PID=$SA_PID"; kill "$logged" 2> /dev/null; return 4
+    fi
 }
 sa_metrics() { curl -s --max-time 10 -H "Authorization: Bearer $SA_TOKEN" "$SA_API/metrics"; }
 sa_stop() { kill "$SA_PID" 2>/dev/null; sleep 2; kill -9 "$SA_PID" 2>/dev/null; return 0; }

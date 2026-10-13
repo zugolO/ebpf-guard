@@ -201,6 +201,7 @@ func NewServerWithMultiTenant(bindAddress, metricsPath, healthPath string, enabl
 		slog.Info("exporter/server: enabling debug endpoints at /debug/state")
 		s.debugHandler = NewDebugHandler("dev", s)
 		mux.HandleFunc("/debug/state", s.debugHandler.ServeHTTP)
+		mux.HandleFunc("/debug/lineage", s.debugHandler.ServeLineage)
 	}
 
 	s.RegisterAPIRoutes(mux)

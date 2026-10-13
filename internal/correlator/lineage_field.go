@@ -164,3 +164,51 @@ func resolveLineageField(pid uint32, field string) string {
 	}
 	return sb.String()
 }
+
+// LineageHopInfo — одно звено цепочки в отладочном ответе.
+type LineageHopInfo struct {
+	PID          uint32 `json:"pid"`
+	PPID         uint32 `json:"ppid"`
+	Comm         string `json:"comm"`
+	Image        string `json:"image"`
+	ImageHow     string `json:"image_how"`
+	ExecFilename string `json:"exec_filename"`
+	StartNs      uint64 `json:"start_boottime_ns"`
+	Exited       bool   `json:"exited"`
+	Seeded       bool   `json:"seeded"`
+}
+
+// LineageDescription — что агент видит про предков pid: то же, что читают дерево инцидента и поля
+// proc.lineage*. Для живой сверки с /proc на стенде (GET /debug/lineage?pid=N).
+type LineageDescription struct {
+	PID             uint32           `json:"pid"`
+	Table           bool             `json:"table"`
+	Outcome         string           `json:"outcome"`
+	Ancestors       []LineageHopInfo `json:"ancestors"` // от корня к родителю
+	Tree            []string         `json:"tree_comms"`
+	Lineage         string           `json:"lineage"`
+	LineageExePaths string           `json:"lineage_exe_paths"`
+}
+
+// DescribeLineage собирает описание для pid; r — тот же резолвер цепочки, что у поля.
+func DescribeLineage(pid uint32, r LineageChainResolver, tree func(uint32) []string) LineageDescription {
+	d := LineageDescription{PID: pid, Ancestors: []LineageHopInfo{}}
+	if r == nil {
+		return d
+	}
+	anc, out, ok := r.AncestorChain(pid)
+	d.Table, d.Outcome = ok, string(out)
+	for _, rec := range anc {
+		img, how := lineageImages.Resolve(rec)
+		d.Ancestors = append(d.Ancestors, LineageHopInfo{
+			PID: rec.PID, PPID: rec.PPID, Comm: rec.Comm, Image: img, ImageHow: how, ExecFilename: rec.Filename,
+			StartNs: rec.StartBoottimeNs, Exited: rec.Exited(), Seeded: rec.Flags&procinfo.FlagSeeded != 0,
+		})
+	}
+	if tree != nil {
+		d.Tree = tree(pid)
+	}
+	d.Lineage = resolveLineageField(pid, lineageFieldFull)
+	d.LineageExePaths = resolveLineageField(pid, lineageFieldImages)
+	return d
+}

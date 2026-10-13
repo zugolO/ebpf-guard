@@ -27,9 +27,11 @@ func (f *fakeProcTable) Lookup(pid uint32) (procinfo.Record, procinfo.Result) {
 	}
 	return r, procinfo.Found
 }
-func (f *fakeProcTable) Counters() (map[string]uint64, error) { return map[string]uint64{"fork_ok": 7}, nil }
-func (f *fakeProcTable) LookupErrors() uint64                 { return 0 }
-func (f *fakeProcTable) Capacity() (uint32, uint32)           { return 16384, 16384 }
+func (f *fakeProcTable) Counters() (map[string]uint64, error) {
+	return map[string]uint64{"fork_ok": 7}, nil
+}
+func (f *fakeProcTable) LookupErrors() uint64       { return 0 }
+func (f *fakeProcTable) Capacity() (uint32, uint32) { return 16384, 16384 }
 func (f *fakeProcTable) Seed(recs []internalbpf.SeedRecord) (int, int, int) {
 	f.seeded = recs
 	return len(recs), 0, 0

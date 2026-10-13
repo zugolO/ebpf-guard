@@ -1,0 +1,16 @@
+// w84-chain-witness.bt — второй свидетель родословной systemctl (ядро, не агент и не /proc-цикл).
+// Прежний сэмплер w83 (цикл pgrep + readlink в bash) не поймал ни одного stop: за итерацию он
+// форкает ≈10 процессов, а живёт systemctl десятки мс. Здесь строка печатается ВНУТРИ exec-хука:
+// pid, три предка (tgid:comm:basename образа) и exec-filename самого systemctl.
+// bpftrace 0.14: один зонд, короткий предикат, без BEGIN.
+tracepoint:sched:sched_process_exec /comm == "systemctl"/
+{
+  $t = (struct task_struct *)curtask;
+  $p1 = $t->real_parent;
+  $p2 = $p1->real_parent;
+  $p3 = $p2->real_parent;
+  printf("SYSTEMCTL pid=%d file=%s p1=%d:%s:%s p2=%d:%s:%s p3=%d:%s:%s\n", pid, str(args->filename),
+    $p1->tgid, $p1->comm, str($p1->mm->exe_file->f_path.dentry->d_name.name),
+    $p2->tgid, $p2->comm, str($p2->mm->exe_file->f_path.dentry->d_name.name),
+    $p3->tgid, $p3->comm, str($p3->mm->exe_file->f_path.dentry->d_name.name));
+}

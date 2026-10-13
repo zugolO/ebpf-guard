@@ -1,6 +1,6 @@
 #!/bin/bash
 # w83-smoke.sh — смок долгов 8.3 (10.10.2026): п. 8.3.1, 8.3.2, 8.3.3.
-#   8.3.1 — impact_systemd_service_disabled: исключение deb-systemd-invoke-stop
+#   8.3.1 — impact_systemd_service_disabled: исключение dpkg-maintainer-script-stop
 #           по образу РОДИТЕЛЯ (proc.parent_exe_path = /usr/bin/deb-systemd-invoke).
 #           Событие — `dpkg -r` + `apt-get install` пакета с сервисом в
 #           транзиентном юните: prerm remove зовёт deb-systemd-invoke stop
@@ -56,7 +56,7 @@ CFG=$(ps -eo cmd | sed -n 's/.*[e]bpf-guard --config[= ]\([^ ]*\).*/\1/p' | head
 echo "$CFG" > "$OUT/config-path.txt"
 awk '/^[[:space:]]*trusted_units:/{f=1;next} f&&/^[[:space:]]*(#|$)/{next} f&&/^[[:space:]]*-/{print;next} f{exit}' "$CFG" > "$OUT/trusted-units.txt"
 grep -q 'esm-cache.service' "$OUT/trusted-units.txt" || die "esm-cache.service нет в trusted_units ($CFG)"
-for x in "node-timer-detect-virt:rules/mitre-additional.yaml" "node-timer-detect-virt:rules/sigma-linux.yaml" "apt-gpgv-tmp-unit:rules/defense-evasion.yaml" "apt-key-gpghome-unit:rules/defense-evasion.yaml" "deb-systemd-invoke-stop:rules/impact-gaps.yaml"; do
+for x in "node-timer-detect-virt:rules/mitre-additional.yaml" "node-timer-detect-virt:rules/sigma-linux.yaml" "apt-gpgv-tmp-unit:rules/defense-evasion.yaml" "apt-key-gpghome-unit:rules/defense-evasion.yaml" "dpkg-maintainer-script-stop:rules/impact-gaps.yaml"; do
     grep -q "name: ${x%%:*}" "$REPO/${x#*:}" || die "правила на диске без ${x%%:*} (${x#*:})"
 done
 
@@ -135,18 +135,26 @@ if has I; then
     readlink -f /usr/bin/perl >> "$D/invoke-shebang.txt"
     sleep 60
     M > "$D/mC0.txt"; date +%s > "$D/tC0"; sleep "$W"; M > "$D/mC1.txt"; date +%s > "$D/tC1"
-    # сэмплер образа родителя у каждого systemctl (второй свидетель, не агент)
-    ( while :; do
-        for p in $(pgrep -x systemctl 2>/dev/null); do
-            pp=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null)
-            [ -n "$pp" ] && echo "$(date +%s.%N) systemctl=$p args=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null) ppid=$pp parent_exe=$(readlink /proc/$pp/exe 2>/dev/null) parent_comm=$(cat /proc/$pp/comm 2>/dev/null)"
-        done; sleep 0.01; done ) > "$D/parent-sampler.txt" 2>&1 &
+    # Свидетель родословной systemctl (второй свидетель, не агент). Прежний сэмплер — цикл pgrep+readlink
+    # в bash — НЕ ПОЙМАЛ ни одного stop: за итерацию он форкает ≈10 процессов, а systemctl живёт десятки мс.
+    # Теперь строка рождается ВНУТРИ exec-хука ядра (bpftrace, w84-chain-witness.bt), а cmdline и образ
+    # родителя дочитываются из /proc по pid из этой строки — сразу, а не по обходу. Сырой поток — witness-raw.txt;
+    # parent-sampler.txt сохраняет прежний формат строки (его читает w83-smoke-report.sh).
+    mkfifo "$D/witness.fifo"
+    bpftrace "$(dirname "$0")/w84-chain-witness.bt" > "$D/witness.fifo" 2> "$D/witness-err.txt" &
+    BTPID=$!
+    ( tee "$D/witness-raw.txt" < "$D/witness.fifo" | while read -r _ pidf _ p1f _; do
+        p=${pidf#pid=}; pp=${p1f#p1=}; ppid=${pp%%:*}; pbase=${pp##*:}
+        args=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null); pe=$(readlink /proc/$ppid/exe 2>/dev/null)
+        echo "$(date +%s.%N) systemctl=$p args=${args:-?} ppid=$ppid parent_exe=${pe:-<exited:$pbase>} parent_comm=$(cat /proc/$ppid/comm 2>/dev/null || echo "?:$pbase")"
+    done ) > "$D/parent-sampler.txt" 2>&1 &
     SAMP=$!
+    sleep 3
     M > "$D/mE0.txt"; date +%s > "$D/tE0"
     systemd-run --quiet --wait --unit=w83-pkg --collect /bin/sh -c 'dpkg -r irqbalance; echo "dpkg -r rc=$?"; apt-get install -y irqbalance; echo "apt-get install rc=$?"' > "$D/pkg.log" 2>&1
     echo "systemd-run rc=$?" >> "$D/pkg.log"
     sleep $(( W > 60 ? W - 60 : 30 ))
-    kill $SAMP 2>/dev/null; wait $SAMP 2>/dev/null
+    kill $BTPID 2>/dev/null; wait $BTPID 2>/dev/null; sleep 1; kill $SAMP 2>/dev/null; wait $SAMP 2>/dev/null
     M > "$D/mE1.txt"; date +%s > "$D/tE1"
     A $(( $(date +%s) - $(cat "$D/tC0") + 5 )) > "$D/alerts-CE.json"
     I > "$D/incidents.json"

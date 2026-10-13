@@ -242,6 +242,13 @@ mkdir -p /tmp/w85 && cp /usr/bin/python3 /tmp/w85/xmrig && /tmp/w85/xmrig -c 'pa
 sleep 20
 _curl "$API/api/v1/alerts?limit=2000" > "$ART/controls-alerts.json"
 
+# ── [3c] контроли 8.4.2: остановка из maintainer-скрипта под dpkg (алерта нет) и спуфы (алерт есть) ─────
+# До пакета атак: тестовый пакет w84svc ставится и снимается, рабочие пакеты не трогаются (apt-сценарий —
+# W84_APT_PKG, умолч. irqbalance). Вердикт — w84-close-report.sh (метка 8.4.x).
+say "контроли 8.4.2: dpkg -r + спуфы (w84-controls.sh)"
+API="$API" TOKEN="$TOKEN" bash "$SETUP/w84-controls.sh" "$ART/w84" > "$ART/w84.log" 2>&1
+grep -q '^done' "$ART/w84/DONE" 2>/dev/null || say "ВНИМАНИЕ: контроли 8.4.2: $(cat "$ART/w84/DONE" 2>/dev/null || tail -3 "$ART/w84.log") — 8.4.x будет НЕИЗМЕРИМ"
+
 # ── [4] атаки и гейт хоста ─────────────────────────────────────────────────
 if [ "${SKIP_HOST_ATTACKS:-0}" = 1 ]; then
     say "SKIP_HOST_ATTACKS=1 (смок): атак и гейта на хосте нет — 8.2.5 (в) будет НЕИЗМЕРИМ"
@@ -277,7 +284,8 @@ archive() {
     cp "$SETUP/night-report.sh" "$SETUP/night-report-fixtures.sh" "$SETUP/node-units-extract.py" "$SETUP/idle-run.sh" \
        "$SETUP/w82-close-report.sh" "$SETUP/w82-close-report-fixtures.sh" "$SETUP/w82-mem-report.sh" \
        "$SETUP/w82-mem-report-fixtures.sh" "$SETUP/w82-ws-peak.sh" "$SETUP/w82-pod-night-values.py" \
-       "$SETUP/w85-close-report.sh" "$SETUP/w85-close-report-fixtures.sh" "$SETUP/w85-ab-pair.sh" "$SETUP/w85-ctl.py" "$ART/" 2>/dev/null
+       "$SETUP/w85-close-report.sh" "$SETUP/w85-close-report-fixtures.sh" "$SETUP/w85-ab-pair.sh" "$SETUP/w85-ctl.py" \
+       "$SETUP/w84-controls.sh" "$SETUP/w84-close-report.sh" "$SETUP/w84-chain-witness.bt" "$SETUP/w84-pidreuse.py" "$ART/" 2>/dev/null
     tar czf "$ARCHIVE" -C "$(dirname "$ART")" "$(basename "$ART")"
     say "архив $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 }
@@ -350,6 +358,8 @@ cat "$ART/close-report.txt"
     IDLE="$ART/idle" BASE_IDLE="$BASE_IDLE" ATT="$ART/pod-attack" BASE_ATT="${BASE_ATT:-}" bash "$SETUP/w85-close-report.sh" cpu
     # 8.5.6 — BPF карты+кольца (bpftool memlock) + пик memory.current пода
     INV="$ART/pod-inv" RUN="$ART/pod-run" ATT="$ART/pod-attack" bash "$SETUP/w85-close-report.sh" mem
+    # 8.4.x — родословная на таблице ядра: dpkg -r + спуф-контроли (w84-controls.sh, шаг [3c])
+    bash "$SETUP/w84-close-report.sh" "$ART/w84"
     RUN="$ART/pod-run" ATT="$ART/pod-attack" bash "$SETUP/w85-close-report.sh" d1
     D1_RUNS="${D1_PRIOR_RUNS:-} $ART/pod-run:$ART/pod-attack" bash "$SETUP/w85-close-report.sh" d1-median
     grep -aoE '(ДОСТИГНУТО|ПРОВАЛЕН): 8\.5\.8 .*' "$ART/a2.txt" | head -1
@@ -360,7 +370,7 @@ cat "$ART/close-report-85.txt"
 # Читает ОТЧЁТЫ (night-report + close-report), не plan.md. Фикстура —
 # run-8.5-night-guard-fixtures.sh, вырезает блок между маркерами.
 # GUARD-BEGIN
-REQUIRED_LABELS=(3.P1-19 3.MEM 3.ATTACK 3.STORE 8.1.1 8.1.2 8.1.3 8.1.4 8.2.1 8.2.2 8.2.3 8.2.4 8.2.5 8.5.1 8.5.2 8.5.3 8.5.3a 8.5.4 8.5.6 8.5.7 8.5.8)
+REQUIRED_LABELS=(3.P1-19 3.MEM 3.ATTACK 3.STORE 8.1.1 8.1.2 8.1.3 8.1.4 8.2.1 8.2.2 8.2.3 8.2.4 8.2.5 8.4.x 8.5.1 8.5.2 8.5.3 8.5.3a 8.5.4 8.5.6 8.5.7 8.5.8)
 # Пайплайн новый: прогонов раньше доставки его меток нет, освобождений не нужно.
 LABELS_SINCE=()
 _label_since() { local e; for e in "${LABELS_SINCE[@]+"${LABELS_SINCE[@]}"}"; do [ "${e%% *}" = "$1" ] && { printf '%s' "${e#* }"; return; }; done; }

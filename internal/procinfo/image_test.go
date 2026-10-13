@@ -74,7 +74,7 @@ func TestImage_ExitedProcessFallsBackToExecFilenameWithInodeCheck(t *testing.T) 
 // Шебанг-скрипт: exec-filename — путь скрипта, inode другой (образ — интерпретатор) → в образ НЕ принимается.
 func TestImage_ShebangScriptFilenameIsNotTheImage(t *testing.T) {
 	f, c := newFS()
-	f.stat["/var/lib/dpkg/info/pkg.prerm"] = [2]uint64{7, 1000} // скрипт
+	f.stat["/var/lib/dpkg/info/pkg.prerm"] = [2]uint64{7, 1000}                                        // скрипт
 	rec := Record{PID: 9, ExitTS: 5, ExeDev: 7, ExeIno: 200, Filename: "/var/lib/dpkg/info/pkg.prerm"} // exe = /bin/dash, ino 200
 	if p, how := c.Resolve(rec); p != "" || how != ImageUnresolved {
 		t.Fatalf("скрипт принят за образ: %q %q", p, how)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -153,6 +154,7 @@ type DebugHandler struct {
 	server           *Server
 	hardwareProfile  HardwareProfileState
 	driftBaselineFn  DriftBaselineFunc
+	lineageFn        LineageFunc
 }
 
 // SilenceProvider interface for getting active silences.
@@ -314,7 +316,36 @@ func (h *DebugHandler) buildState() DebugState {
 	return state
 }
 
+// LineageFunc отвечает на GET /debug/lineage?pid=N: что агент видит про предков pid (волна 8.5, P1).
+type LineageFunc func(pid uint32) any
+
+// SetLineageProvider подключает ответ /debug/lineage. Не задан — 404.
+func (h *DebugHandler) SetLineageProvider(fn LineageFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lineageFn = fn
+}
+
+// ServeLineage реализует GET /debug/lineage?pid=N — для живой сверки таблицы процессов ядра с /proc.
+func (h *DebugHandler) ServeLineage(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	fn := h.lineageFn
+	h.mu.RUnlock()
+	if fn == nil {
+		http.NotFound(w, r)
+		return
+	}
+	pid, err := strconv.ParseUint(r.URL.Query().Get("pid"), 10, 32)
+	if err != nil || pid == 0 {
+		http.Error(w, "pid=<number> required", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(fn(uint32(pid)))
+}
+
 // RegisterRoutes registers debug endpoints with the provided mux.
 func (h *DebugHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/debug/state", h.ServeHTTP)
+	mux.HandleFunc("/debug/lineage", h.ServeLineage)
 }

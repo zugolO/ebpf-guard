@@ -1334,6 +1334,19 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			})
 		}
 
+		// Волна 8.5, P1: GET /debug/lineage?pid=N — что агент видит про предков pid (таблица
+		// процессов ядра): для живой сверки с /proc на стенде.
+		dbg.SetLineageProvider(func(pid uint32) any {
+			lt := engine.LineageTracker()
+			return correlator.DescribeLineage(pid, lt, func(p uint32) []string {
+				var out []string
+				for _, n := range lt.GetProcessTree(p) {
+					out = append(out, n.Comm)
+				}
+				return out
+			})
+		})
+
 		// Providers are closures, not snapshots: /debug/state must agree with
 		// /metrics at request time (P1-10).
 		dbg.SetEngineProvider(exporter.EngineStatsFunc(func() exporter.EngineStats {

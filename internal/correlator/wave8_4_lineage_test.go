@@ -208,3 +208,20 @@ func TestW84_FieldsAreAcceptedByTheLoaderAndUnknownOnesAreNot(t *testing.T) {
 		Condition: RuleCondition{Field: "proc.lineage_typo", Op: OpContains, Values: []string{"x"}}}}
 	require.Error(t, ValidateFull(rules), "неизвестное поле отвергается: поле и бинарь едут вместе")
 }
+
+func TestW84_DescribeLineage(t *testing.T) {
+	withImages(t, stdImages())
+	withLineage(t, legitChain(), true)
+	d := DescribeLineage(4242, &lineageFake{anc: legitChain(), out: procinfo.OutcomeResolved, ok: true}, func(uint32) []string { return []string{"a", "b"} })
+	require.True(t, d.Table)
+	require.Len(t, d.Ancestors, 4)
+	assert.Equal(t, "/usr/bin/dpkg", d.Ancestors[1].Image)
+	assert.Equal(t, procinfo.ImageCached, d.Ancestors[1].ImageHow)
+	assert.Equal(t, "/var/lib/dpkg/info/mypkg.prerm", d.Ancestors[2].ExecFilename)
+	assert.Equal(t, []string{"a", "b"}, d.Tree)
+	assert.Contains(t, d.Lineage, "/usr/bin/dpkg\t/usr/bin/dpkg")
+	assert.Equal(t, "resolved", d.Outcome)
+	empty := DescribeLineage(1, nil, nil)
+	assert.False(t, empty.Table)
+	assert.Empty(t, empty.Ancestors)
+}

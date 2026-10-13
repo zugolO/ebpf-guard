@@ -32,7 +32,7 @@ alerts() { echo "ebpf_guard_alerts_total{rule_id=\"$1\"}"; }
 dedup() { echo "ebpf_guard_alerts_dedup_dropped_by_rule_total{rule_id=\"$1\"}"; }
 rl() { echo "ebpf_guard_alerts_ratelimited_by_rule_total{rule_id=\"$1\"}"; }
 SOFT="mitre_vm_detect_dmi_read mitre_sandbox_detect_proc_read sigma_memory_proc_dump sigma_cpu_info_access"
-EXCS="mitre_vm_detect_dmi_read:node-timer-detect-virt mitre_sandbox_detect_proc_read:node-timer-detect-virt sigma_memory_proc_dump:node-timer-detect-virt sigma_cpu_info_access:node-timer-detect-virt evasion_hidden_elf_in_tmp:apt-gpgv-tmp-unit evasion_hidden_elf_in_tmp:apt-key-gpghome-unit evasion_hidden_elf_in_tmp:apt-gpgv-method-tmp impact_systemd_service_disabled:deb-systemd-invoke-stop"
+EXCS="mitre_vm_detect_dmi_read:node-timer-detect-virt mitre_sandbox_detect_proc_read:node-timer-detect-virt sigma_memory_proc_dump:node-timer-detect-virt sigma_cpu_info_access:node-timer-detect-virt evasion_hidden_elf_in_tmp:apt-gpgv-tmp-unit evasion_hidden_elf_in_tmp:apt-key-gpghome-unit evasion_hidden_elf_in_tmp:apt-gpgv-method-tmp impact_systemd_service_disabled:dpkg-maintainer-script-stop"
 
 # Объём «правило выпущено + дедуп + лимитер» (цена правила) в окне и подавления исключениями.
 phase_report() { # <фаза> <каталог>
@@ -92,11 +92,11 @@ if [ -d "$D" ]; then
     grep -E 'args=[^ ]* *(--[a-z-]+ )*stop' "$D/parent-sampler.txt" | sed 's/^[0-9.]* //' | sort | uniq -c | sort -rn | head -5 | sed 's/^/    /'
     stops=$(grep -cE 'args=[^ ]* *(--[a-z-]+ )*stop' "$D/parent-sampler.txt")
     img=$(grep -E 'args=[^ ]* *(--[a-z-]+ )*stop' "$D/parent-sampler.txt" | sed -n 's/.*parent_exe=\([^ ]*\).*/\1/p' | sort | uniq -c | sort -rn | head -3 | tr '\n' ';')
-    s=$(delta "$D/mE0.txt" "$D/mE1.txt" "$(exc impact_systemd_service_disabled deb-systemd-invoke-stop)")
+    s=$(delta "$D/mE0.txt" "$D/mE1.txt" "$(exc impact_systemd_service_disabled dpkg-maintainer-script-stop)")
     i=$(delta "$D/mE0.txt" "$D/mE1.txt" "$(alerts impact_systemd_service_disabled)")
     echo "  замечено systemctl stop сэмплером: $stops; образы родителя: ${img:-нет}"
     if [ "$stops" -eq 0 ]; then echo "  ВЕРДИКТ 8.3.1: НЕИЗМЕРИМ (сэмплер не поймал stop — событие не воспроизведено)"; fail=1
-    elif [ "${s:-0}" != НЕИЗМ ] && [ "${s:-0}" -ge 1 ] && [ "${i:-0}" = 0 ]; then echo "  ВЕРДИКТ 8.3.1: ДОСТИГНУТО (исключение deb-systemd-invoke-stop подавило $s, impact выпущено 0)"
+    elif [ "${s:-0}" != НЕИЗМ ] && [ "${s:-0}" -ge 1 ] && [ "${i:-0}" = 0 ]; then echo "  ВЕРДИКТ 8.3.1: ДОСТИГНУТО (исключение dpkg-maintainer-script-stop подавило $s, impact выпущено 0)"
     else echo "  ВЕРДИКТ 8.3.1: ПРОВАЛЕН (исключение подавило ${s:-?}, impact выпущено ${i:-?}; образ родителя — см. выше: ожидали /usr/bin/deb-systemd-invoke)"; fail=1; fi
 fi
 

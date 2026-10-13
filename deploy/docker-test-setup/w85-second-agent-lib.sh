@@ -5,6 +5,7 @@
 #       стором, аудитом, состоянием профиля, токенами и каталогом правил (по умолчанию SRC/rules); unix_socket и
 #       observer_exclude выключены (сокет и файл observer-pid иначе общие с рабочим). Выставляет SA_PID, SA_TOKEN, SA_API.
 #   SA_PROC_TABLE=off — выключить таблицу процессов ядра (тот же бинарь, прежний путь трекера).
+#   SA_CFG_PATCH=<скрипт.py> — после генерации конфига: python3 <скрипт.py> <config.yaml> (роли пар A/B, O1).
 #   sa_stop                                  — останавливает его
 #   sa_metrics                               — /metrics второго агента
 # Ждёт «syscall: collector enabled» до 60 с; умер — «AGENT DIED» и код 3.
@@ -37,6 +38,7 @@ if os.environ.get('SA_PROC_TABLE') == 'off':
     s = s.replace('\nbpf:\n', '\nbpf:\n  proc_table:\n    enabled: false\n', 1)
 open(run + '/config.yaml', 'w').write(s)
 PY
+    if [ -n "${SA_CFG_PATCH:-}" ]; then python3 "$SA_CFG_PATCH" "$RUN/config.yaml" "$SRC" || { echo "CFG PATCH FAIL"; return 5; }; fi
     SA_API=http://127.0.0.1:$PORT
     # без setsid и без «&&» перед nohup: `cd && cmd &` уводит в фон ВСЮ цепочку, и $! — pid подоболочки. setsid форкает, и $! становится pid обёртки, а не агента (найдено на часе cmd 3: pid второго агента
     # в сводке был на единицу меньше настоящего, и его вызовы bpf() не попали в итог). Отсоединение — nohup и

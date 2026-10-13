@@ -52,12 +52,14 @@ POD_TOKEN="${POD_TOKEN:-w85-night-pod-token}"
 POD_STATE=/var/lib/ebpf-guard-pod
 NS=ebpf-guard; REL=w82
 LOG="/root/run-$NIGHT_TAG-pipeline.log"
+[ -n "${REPLAY_ART:-}" ] && LOG=/dev/stdout
 MARK="/root/PIPELINE-$(printf '%s' "$NIGHT_TAG" | tr 'a-z.-' 'A-Z__')-DONE"
 START_FILE="/root/agent-start-$NIGHT_TAG.txt"
 ARCHIVE="/root/collect-$NIGHT_TAG.tgz"
 export PATH=$PATH:/usr/local/go/bin:/root/bin:/usr/local/bin
 export KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
 
+[ -n "${REPLAY_ART:-}" ] && MARK="${REPLAY_ART}/PIPELINE-REPLAY-MARK"
 rm -f "$MARK"
 exec >>"$LOG" 2>&1
 say() { echo "[$(date -u +%FT%TZ)] $*"; }
@@ -73,6 +75,7 @@ _m() {
 }
 n_agents() { ps -eo cmd | grep -c "[e]bpf-guard --config"; }
 
+if [ -z "${REPLAY_ART:-}" ]; then   # ── живые этапы [1]–[5]; в режиме реплея (REPLAY_ART) пропускаются ──
 say "=== НОЧЬ ЗАКРЫТИЯ 8.5, tag=$NIGHT_TAG, idle=${IDLE_SECS} с, под: idle ${POD_IDLE_SECS} с, удержание ${POD_HOLD_SECS} с; git $(git -C "$REPO" rev-parse --short HEAD) ==="
 rm -rf "$ART"; mkdir -p "$ART" || die "не создать $ART"
 GIT_HEAD=$(git -C "$REPO" rev-parse HEAD)
@@ -341,6 +344,16 @@ trap - EXIT
 pod_down
 [ "$(n_agents)" -eq 1 ] || say "ВНИМАНИЕ: после возврата хоста агентов $(n_agents)"
 
+else
+    # РЕПЛЕЙ (мак, gate-offline-replay-on-mac): только отчётная часть [6]–[6a] на КОПИИ архива ночи (REPLAY_ART). Те же
+    # команды эмиттеров, тот же сторож полноты; живых этапов нет — метки, чьих входов в архиве нет, дают НЕИЗМЕРИМ с
+    # названным классом, а не пропадают. Архив в репозитории не меняется: каталог — копия, её готовит run-8.5-night-replay.sh.
+    ART="$REPLAY_ART"; [ -d "$ART" ] || { echo "REPLAY_ART=$ART не каталог"; exit 2; }
+    START_FILE="$ART/${REPLAY_START_FILE:-agent-start-8.2-night.txt}"
+    PROFILE_BEFORE="${PROFILE_BEFORE:-present}"
+    say "=== РЕПЛЕЙ отчётов 8.5 на $ART (живые этапы пропущены) ==="
+fi
+
 # ── [6] отчёт 8.2 ──────────────────────────────────────────────────────────
 RUN="$ART/pod-run" ATT="$ART/pod-attack" INV="$ART/pod-inv" GATE="$ART/gate.txt" A2="$ART/a2.txt" \
     bash "$SETUP/w82-close-report.sh" > "$ART/close-report.txt" 2>&1
@@ -401,6 +414,10 @@ fi
 say "сторож полноты: $(( ${#REQUIRED_LABELS[@]} - $(printf '%s' "$missing" | wc -w) ))/${#REQUIRED_LABELS[@]} меток вынесли вердикт"
 
 # ── [7] архив ──────────────────────────────────────────────────────────────
+if [ -n "${REPLAY_ART:-}" ]; then
+    say "=== РЕПЛЕЙ закончен: ${missing:+меток без вердикта:$missing}${missing:-все метки вынесли вердикт} ==="
+    [ -z "$missing" ]; exit $?
+fi
 archive
 say "=== НОЧЬ ЗАКРЫТИЯ 8.5 закончена ==="
 [ -s "$MARK" ] || echo "done $(date -u +%FT%TZ)" > "$MARK"

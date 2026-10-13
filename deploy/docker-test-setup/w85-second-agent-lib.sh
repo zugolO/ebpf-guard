@@ -47,7 +47,7 @@ PY
     # перенаправления; скрипты-вызыватели сами запущены отсоединённо.
     if [ -n "${SA_UNIT:-}" ]; then
         systemctl stop "$SA_UNIT" 2> /dev/null; systemctl reset-failed "$SA_UNIT" 2> /dev/null
-        systemd-run --quiet --unit="$SA_UNIT" --collect --property=MemoryAccounting=yes --property=WorkingDirectory="$RUN" \
+        systemd-run --quiet --unit="$SA_UNIT" --collect --property=MemoryAccounting=yes --property=LimitMEMLOCK=infinity --property=LimitNOFILE=65536 --property=WorkingDirectory="$RUN" \
             --property=StandardOutput=file:"$RUN/agent.log" --property=StandardError=file:"$RUN/agent.log" \
             "$SRC/build/ebpf-guard" --config "$RUN/config.yaml" --log-level=info > /dev/null 2>&1 || { echo "systemd-run FAIL"; return 6; }
         sleep 1

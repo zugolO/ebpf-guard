@@ -180,3 +180,29 @@ mkinv() {
         printf "]\n" }' > "$D/maps.json"
     echo "$D"
 }
+
+# ── chain (8.5.5) ─────────────────────────────────────────────────────────────
+# mkinc <имя> <с_цепочкой> <всего> — снимок инцидентов
+mkinc() {
+    local n=$1 w=$2 t=$3 i
+    local f=$T/$n.json
+    { echo '['; for ((i = 1; i <= t; i++)); do
+        [ "$i" -gt 1 ] && echo ','
+        if [ "$i" -le "$w" ]; then echo "{\"id\":\"i$i\",\"process_chain\":[\"nginx\",\"bash\"]}"; else echo "{\"id\":\"i$i\",\"process_chain\":[]}"; fi
+      done; echo ']'; } > "$f"
+    echo "$f"
+}
+# mkchm <имя> [reads0=10 reads1=10 ev0=1000 ev1=900000 state=active series=yes] — снимки метрик окна; печатает «M0 M1»
+mkchm() {
+    local n=$1; shift
+    local reads0=10 reads1=10 ev0=1000 ev1=900000 state=active series=yes
+    for kv in "$@"; do eval "${kv%%=*}='${kv#*=}'"; done
+    local a=$T/$n-m0.txt b=$T/$n-m1.txt
+    : > "$a"; : > "$b"
+    if [ "$series" = yes ]; then
+        echo "ebpf_guard_lineage_proc_reads_total $reads0" >> "$a"; echo "ebpf_guard_lineage_proc_reads_total $reads1" >> "$b"
+        echo "ebpf_guard_events_total{type=\"syscall\"} $ev0" >> "$a"; echo "ebpf_guard_events_total{type=\"syscall\"} $ev1" >> "$b"
+    fi
+    [ "$state" != none ] && echo "ebpf_guard_proc_table_state{state=\"$state\"} 1" >> "$b"
+    echo "$a $b"
+}

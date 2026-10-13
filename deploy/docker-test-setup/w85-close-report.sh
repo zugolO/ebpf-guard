@@ -51,6 +51,23 @@ _f1() {
     awk -v s="$1" '$1 == s && $2 ~ /^ebpf_guard_kernel_predicate_state/ && $NF == 1 { x = $2; sub(/.*state="/, "", x); sub(/".*/, "", x); print x; exit }' "$ATT/f1.txt"
 }
 
+# _recall <каталог пакета> — «пойманных всего непойманные-через-запятую»; ПУСТО — нет манифеста/снимков алертов.
+# Формула секции 7 гейта: категория поймана, если среди НОВЫХ (относительно baseline) алертов есть comm любого её процесса.
+_recall() {
+    local att=$1 man="$1/attack-manifest.json" base fin
+    base=$(ls "$att"/baseline-alerts-*.json 2>/dev/null | tail -1)
+    fin=$(ls "$att"/final-alerts-*.json 2>/dev/null | tail -1)
+    [ -s "$man" ] && [ -n "$base" ] && [ -n "$fin" ] || return 0
+    jq -r -s --argjson c "$(jq -c '[.[] | select(.transit != true) | {category, comm}] | unique' "$man")" '
+        (.[0] // []) as $b | (.[1] // []) as $f |
+        ($b | map(.id) | unique) as $bids |
+        ($f | map(select(.id as $id | ($bids | index($id)) | not)) | map(.comm) | unique) as $nc |
+        ($c | map(. as $x | {category: $x.category, d: ($nc | index($x.comm) != null)}) | group_by(.category)
+            | map({category: .[0].category, d: (map(.d) | any)})) as $pc |
+        "\($pc | map(select(.d)) | length) \($pc | length) \($pc | map(select(.d | not) | .category) | join(","))"
+    ' "$base" "$fin" 2>/dev/null
+}
+
 d1() {
     echo "== w85 D1 (8.5.7): RUN=${RUN:-—} ATT=${ATT:-—}"
     local cls="" fail="" failb="" r2rd="-" pm=""
@@ -67,20 +84,11 @@ d1() {
     else echo "  kernel_filtered за окно атак: НЕТ СЕРИИ"; cls="$cls; нет серии kernel_filtered в m-pre/m-att1"; fi
 
     # (а) recall по comm — формула секции 7 гейта (как w82-close-report.sh)
-    local man="$ATT/attack-manifest.json" base fin rec rd rt rm
-    base=$(ls "$ATT"/baseline-alerts-*.json 2>/dev/null | tail -1)
-    fin=$(ls "$ATT"/final-alerts-*.json 2>/dev/null | tail -1)
-    if [ ! -s "$man" ] || [ -z "$base" ] || [ -z "$fin" ]; then
+    local man="$ATT/attack-manifest.json" rec rd rt rm
+    rec=$(_recall "$ATT")
+    if [ -z "$rec" ]; then
         cls="$cls; (а) нет манифеста или снимков алертов пакета пода"; echo "  (а) recall пода по comm: НЕИЗМЕРИМ"
     else
-        rec=$(jq -r -s --argjson c "$(jq -c '[.[] | select(.transit != true) | {category, comm}] | unique' "$man")" '
-            (.[0] // []) as $b | (.[1] // []) as $f |
-            ($b | map(.id) | unique) as $bids |
-            ($f | map(select(.id as $id | ($bids | index($id)) | not)) | map(.comm) | unique) as $nc |
-            ($c | map(. as $x | {category: $x.category, d: ($nc | index($x.comm) != null)}) | group_by(.category)
-                | map({category: .[0].category, d: (map(.d) | any)})) as $pc |
-            "\($pc | map(select(.d)) | length) \($pc | length) \($pc | map(select(.d | not) | .category) | join(","))"
-        ' "$base" "$fin" 2>/dev/null)
         read -r rd rt rm <<< "$rec"
         if [ -z "${rt:-}" ] || [ "$rt" != "$RECALL_TOTAL" ]; then
             cls="$cls; (а) в манифесте ${rt:-?} категорий, ожидалось $RECALL_TOTAL — знаменатель не тот"
@@ -435,6 +443,57 @@ cpu() {
         else printf "ПРОВАЛЕН: 8.5.4 ПРОВАЛЕН (idle %.4f с/с = %.0f%% базы %.4f с/с > %.0f%%; CPU %.1f с за %d с%s)\n", x[1], 100 * r, y[1], 100 * f, x[2], x[3], extra }'
 }
 
+# chain — метка 8.5.5 (решение владельца 13.10, п. 7; P1): доля инцидентов с process_chain и чтения /proc трекером родословной.
+#   INC — снимок инцидентов ПОСЛЕ пакета атак этой ночи (/api/v1/incidents), BASE_INC — тот же снимок ночи 8.2;
+#   CH_M0/CH_M1 — /metrics в начале и конце окна, в котором считаются чтения /proc (idle + пакет).
+#   (а) доля инцидентов с непустым process_chain ≥ доли базы (по дробям, без округления);
+#   (б) ebpf_guard_lineage_proc_reads_total за окно = 0 на горячем пути И таблица процессов active в конце окна:
+#       ненулевой прирост при active — трекер ходит в /proc мимо таблицы; при выключенной таблице чтения — ожидаемый
+#       прежний путь, и метка неизмерима «про таблицу», а не «достигнута».
+#   Чтений на событие = Δreads / Δ(ebpf_guard_events_total) печатается.
+INC=${INC:-}; BASE_INC=${BASE_INC:-}; CH_M0=${CH_M0:-}; CH_M1=${CH_M1:-}
+_share() { # <incidents.json> — «с_цепочкой всего»; пусто, если файл не разбирается или пуст
+    [ -s "$1" ] || return 0
+    jq -r 'if type == "array" then . else (.incidents // []) end | "\([.[] | select((.process_chain // []) | length > 0)] | length) \(length)"' "$1" 2> /dev/null
+}
+chain() {
+    echo "== w85 8.5.5: INC=${INC:-—} BASE_INC=${BASE_INC:-—}"
+    local cls="" fail="" w t bw bt
+    read -r w t <<< "$(_share "$INC")"; read -r bw bt <<< "$(_share "$BASE_INC")"
+    if [ -z "${t:-}" ] || [ "$t" -eq 0 ]; then cls="$cls; нет инцидентов ночи (${t:-нет снимка}) — доля не определена"
+    elif [ -z "${bt:-}" ] || [ "$bt" -eq 0 ]; then cls="$cls; нет базы ночи 8.2 (${bt:-нет снимка})"
+    else
+        echo "  инцидентов с process_chain: сейчас $w из $t ($(awk -v a="$w" -v b="$t" 'BEGIN { printf "%.1f", 100 * a / b }')%), база ночи 8.2 $bw из $bt ($(awk -v a="$bw" -v b="$bt" 'BEGIN { printf "%.1f", 100 * a / b }')%)"
+        # a/b ≥ c/d  ⇔  a·d ≥ c·b (целые, без округления)
+        [ $((w * bt)) -ge $((bw * t)) ] || fail="$fail; (а) доля с process_chain $w/$t ниже базы $bw/$bt"
+    fi
+    local r0 r1 e0 e1 st
+    r0=$(_m "$CH_M0" ebpf_guard_lineage_proc_reads_total); r1=$(_m "$CH_M1" ebpf_guard_lineage_proc_reads_total)
+    e0=$(_m "$CH_M0" ebpf_guard_events_total); e1=$(_m "$CH_M1" ebpf_guard_events_total)
+    st=$(awk '/^ebpf_guard_proc_table_state/ && $NF == 1 { x = $1; sub(/.*state="/, "", x); sub(/".*/, "", x); print x; exit }' "${CH_M1:-/dev/null}" 2> /dev/null)
+    if [ -z "$r0" ] || [ -z "$r1" ] || [ -z "$e0" ] || [ -z "$e1" ]; then
+        cls="$cls; нет серии lineage_proc_reads_total/events_total в снимках окна (бинарь без прибора 8.5.5)"
+    elif [ "$e1" -le "$e0" ]; then
+        cls="$cls; событий за окно $((e1 - e0)) — на событие делить нечего"
+    elif [ "$r1" -lt "$r0" ]; then
+        cls="$cls; счётчик чтений /proc упал ($r0 → $r1) — рестарт внутри окна"
+    else
+        echo "  таблица процессов в конце окна: ${st:-НЕТ СЕРИИ}; чтений /proc трекером за окно $((r1 - r0)) на $((e1 - e0)) событий ($(awk -v r="$((r1 - r0))" -v e="$((e1 - e0))" 'BEGIN { printf "%.6f", r / e }') на событие)"
+        if [ "$st" != active ]; then
+            cls="$cls; таблица процессов не active в конце окна (${st:-нет серии}) — «0 чтений» относилось бы не к таблице"
+        elif [ "$((r1 - r0))" -ne 0 ]; then
+            fail="$fail; (б) чтений /proc при активной таблице: $((r1 - r0)) (цель 0)"
+        fi
+    fi
+    if [ -n "$fail" ]; then
+        echo "ПРОВАЛЕН: 8.5.5 ПРОВАЛЕН (${fail#; }${cls:+; неизмеримо также:$cls})"
+    elif [ -n "$cls" ]; then
+        echo "НЕИЗМЕРИМ: 8.5.5 НЕИЗМЕРИМ (класс НАЗВАН:${cls#;})"
+    else
+        echo "ДОСТИГНУТО: 8.5.5 ДОСТИГНУТО (доля инцидентов с process_chain $w/$t ≥ база $bw/$bt; чтений /proc трекером 0 на $((e1 - e0)) событий при active таблице)"
+    fi
+}
+
 # mem — метка 8.5.6 (решение владельца 13.10, п. 7): BPF карты+кольца по bpftool memlock + пик
 #   memory.current пода. INV — каталог w82-mem-inventory.sh (maps.json, progs.json); RUN/ATT — как в d1.
 #   BPF = Σ bytes_memlock карт + Σ max_entries колец (на 5.15 у ringbuf bytes_memlock = 0 — размер кольца
@@ -524,6 +583,8 @@ case "$MODE" in
     ab) ab ;;
     ab-null) ab_null ;;
     cpu) cpu ;;
+    chain) chain ;;
+    recall) _recall "$ATT" ;;
     mem) mem ;;
-    *) echo "usage: w85-close-report.sh d1|d1-median|flow|anomaly-hour|ab|ab-null|cpu|mem|controls" >&2; exit 2 ;;
+    *) echo "usage: w85-close-report.sh d1|d1-median|flow|anomaly-hour|ab|ab-null|cpu|chain|mem|controls" >&2; exit 2 ;;
 esac

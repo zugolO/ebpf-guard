@@ -183,6 +183,29 @@ wantmem mem-no-maps   "$T/нет-инвентаря"                    "$MR" "$
 wantmem mem-no-samples "$(mkinv mi-ns ml=9 ring=22)"        "$T/нет" "$T/нет" '^НЕИЗМЕРИМ: 8\.5\.6 .*нет сэмплов memory\.current'
 wantmem mem-fail-and-unmeasurable "$(mkinv mi-fu ml=19 ring=22)" "$T/нет" "$T/нет" '^ПРОВАЛЕН: 8\.5\.6 .*неизмеримо также'
 
+
+# ── chain (8.5.5): доля инцидентов с process_chain ≥ база; чтений /proc при активной таблице — 0 ──
+wantch() { # wantch <имя> <INC> <BASE_INC> <M0 M1> <шаблон>
+    local out; read -r m0 m1 <<< "$4"
+    out=$(INC=$2 BASE_INC=$3 CH_M0=$m0 CH_M1=$m1 bash "$EMIT" chain 2>&1)
+    if echo "$out" | grep -aqE "$5"; then ok "$1"; else bad "$1 — нет «${5}»"; echo "$out" | sed 's/^/    | /' | head -12; fi
+}
+CBASE=$(mkinc cbase 10 11)
+CM=$(mkchm cm-good)
+wantch chain-good      "$(mkinc c-good 12 13)" "$CBASE" "$CM" '^ДОСТИГНУТО: 8\.5\.5 .*12/13 ≥ база 10/11.*чтений /proc трекером 0 на 899000 событий'
+wantch chain-equal     "$(mkinc c-eq 10 11)"   "$CBASE" "$CM" '^ДОСТИГНУТО: 8\.5\.5 '
+wantch chain-lower     "$(mkinc c-low 9 11)"   "$CBASE" "$CM" '^ПРОВАЛЕН: 8\.5\.5 .*\(а\) доля с process_chain 9/11 ниже базы 10/11'
+wantch chain-frac-no-rounding "$(mkinc c-fr 109 120)" "$CBASE" "$CM" '^ПРОВАЛЕН: 8\.5\.5 .*\(а\) доля с process_chain 109/120'
+wantch chain-reads     "$(mkinc c-rd 12 13)"   "$CBASE" "$(mkchm cm-rd reads1=15)" '^ПРОВАЛЕН: 8\.5\.5 .*\(б\) чтений /proc при активной таблице: 5'
+wantch chain-table-off "$(mkinc c-off 12 13)"  "$CBASE" "$(mkchm cm-off reads1=15 state=off_load_failed)" '^НЕИЗМЕРИМ: 8\.5\.5 .*таблица процессов не active'
+wantch chain-no-state  "$(mkinc c-ns 12 13)"   "$CBASE" "$(mkchm cm-ns state=none)" '^НЕИЗМЕРИМ: 8\.5\.5 .*таблица процессов не active'
+wantch chain-no-series "$(mkinc c-nser 12 13)" "$CBASE" "$(mkchm cm-nser series=no)" '^НЕИЗМЕРИМ: 8\.5\.5 .*нет серии lineage_proc_reads_total'
+wantch chain-no-events "$(mkinc c-ne 12 13)"   "$CBASE" "$(mkchm cm-ne ev1=1000)" '^НЕИЗМЕРИМ: 8\.5\.5 .*событий за окно 0'
+wantch chain-restart   "$(mkinc c-rs 12 13)"   "$CBASE" "$(mkchm cm-rs reads0=500 reads1=3)" '^НЕИЗМЕРИМ: 8\.5\.5 .*рестарт внутри окна'
+wantch chain-no-incidents "$(mkinc c-0 0 0)"   "$CBASE" "$CM" '^НЕИЗМЕРИМ: 8\.5\.5 .*нет инцидентов ночи'
+wantch chain-no-base   "$(mkinc c-nb 12 13)"   "$T/нет"  "$CM" '^НЕИЗМЕРИМ: 8\.5\.5 .*нет базы ночи 8\.2'
+wantch chain-fail-and-unmeasurable "$(mkinc c-fu 9 11)" "$CBASE" "$(mkchm cm-fu series=no)" '^ПРОВАЛЕН: 8\.5\.5 .*неизмеримо также'
+
 wantctl() { # wantctl <имя> <каталог> <шаблон>
     local d=$2 out
     out=$(CTL_ALERTS=$d/alerts.json CTL_STATE=$d/state.txt GATE=$d/gate.txt bash "$EMIT" controls 2>&1)
@@ -238,6 +261,11 @@ if [ "${1:-}" = "--mutate" ]; then
     mut mem-bpf-limit    's/awk -v v="\$bpf" -v l="\$BPF_MAX_MIB" .BEGIN { exit !(v <= l) }. || fail=/true || fail=/'
     mut mem-peak-limit   's/awk -v p="\$pm" -v l="\$PEAK_MAX_MIB" .BEGIN { exit !(p <= l) }. || fail="\$fail; пик \$pm МиБ/true || fail="$fail; пик $pm МиБ/'
     mut mem-not85        's/elif ! jq -e .any(.\[\]; .name == "syscall_counts"). "\$INV\/maps.json"/elif false/'
+    mut chain-share-gate  's/\[ \$((w \* bt)) -ge \$((bw \* t)) \] || fail=/true || fail=/'
+    mut chain-share-round 's/\[ \$((w \* bt)) -ge \$((bw \* t)) \]/[ $((100 * w \/ t)) -ge $((100 * bw \/ bt)) ]/'
+    mut chain-reads-gate  's/elif \[ "\$((r1 - r0))" -ne 0 \]; then/elif false; then/'
+    mut chain-state-guard 's/if \[ "\$st" != active \]; then/if false; then/'
+    mut chain-no-events   's/elif \[ "\$e1" -le "\$e0" \]; then/elif false; then/'
     mut anomaly-absent   's/\[ -n "\$s0" \] \&\& \[ -n "\$s1" \] || cls=/true || cls=/'
 fi
 echo "-- fails=$fails"

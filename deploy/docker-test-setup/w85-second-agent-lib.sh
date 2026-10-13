@@ -4,6 +4,7 @@
 #   sa_start <SRC> <RUN> <PORT> [RULES_DIR]  — конфиг из SRC/deploy/docker-test-setup/config-test.yaml со СВОИМИ портом,
 #       стором, аудитом, состоянием профиля, токенами и каталогом правил (по умолчанию SRC/rules); unix_socket и
 #       observer_exclude выключены (сокет и файл observer-pid иначе общие с рабочим). Выставляет SA_PID, SA_TOKEN, SA_API.
+#   SA_PROC_TABLE=off — выключить таблицу процессов ядра (тот же бинарь, прежний путь трекера).
 #   sa_stop                                  — останавливает его
 #   sa_metrics                               — /metrics второго агента
 # Ждёт «syscall: collector enabled» до 60 с; умер — «AGENT DIED» и код 3.
@@ -29,6 +30,11 @@ sub('admin_token: ""', 'admin_token: "w85u1smoketoken0123456789abcdef012"')
 sub('viewer_token: ""', 'viewer_token: "w85u1viewertoken0123456789abcdef01"')
 sub('unix_socket:\n    enabled: true', 'unix_socket:\n    enabled: false')
 sub('observer_exclude:\n    enabled: true', 'observer_exclude:\n    enabled: false')
+import os
+if os.environ.get('SA_PROC_TABLE') == 'off':
+    # таблица процессов выключена конфигом: тот же бинарь на прежнем пути трекера (Go-карты и /proc) — вторая половина A/B
+    assert s.count('\nbpf:\n') == 1, 'в конфиге нет единственной секции bpf:'
+    s = s.replace('\nbpf:\n', '\nbpf:\n  proc_table:\n    enabled: false\n', 1)
 open(run + '/config.yaml', 'w').write(s)
 PY
     SA_API=http://127.0.0.1:$PORT

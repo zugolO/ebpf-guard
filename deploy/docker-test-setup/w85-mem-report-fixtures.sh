@@ -35,14 +35,15 @@ want() { # <имя> <каталог> <шаблон> [ENV…]
     if echo "$out" | grep -aqE "$pat"; then ok "$name"; else bad "$name — нет «${pat}»"; echo "$out" | sed 's/^/    | /' | head -20; fi
 }
 want identical     "$(mk same)"                                                            '^ИЗМЕРЕНО: 8\.5\.A34 разницы вне ±4% во всех 3 повторах нет'
-want real-inuse    "$(mk real inuse1_on=44 inuse2_on=44 inuse3_on=44)"                     '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА: heap_inuse \(\+10\.0% \+10\.0% \+10\.0%\)'
+want real-inuse    "$(mk real inuse1_on=44 inuse2_on=44 inuse3_on=44)"                     '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА, с P1 БОЛЬШЕ: heap_inuse \(\+10\.0% \+10\.0% \+10\.0%\).*убрать декодирование Filename'
 want two-of-three  "$(mk two inuse1_on=44 inuse2_on=44 inuse3_on=40.4)"                   '^ИЗМЕРЕНО: 8\.5\.A34 разницы вне ±4%'
 want edge-4pct     "$(mk edge inuse1_on=41.6 inuse2_on=41.6 inuse3_on=41.6)"               '^ИЗМЕРЕНО: 8\.5\.A34 разницы вне ±4%'
-want just-over     "$(mk over inuse1_on=41.7 inuse2_on=41.7 inuse3_on=41.7)"               '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА: heap_inuse'
+want just-over     "$(mk over inuse1_on=41.7 inuse2_on=41.7 inuse3_on=41.7)"               '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА, с P1 БОЛЬШЕ: heap_inuse'
 want sign-flips    "$(mk flip inuse1_on=44 inuse2_off=44 inuse3_on=44)"                    '^ИЗМЕРЕНО: 8\.5\.A34 разницы вне ±4%'
-want lower-is-real "$(mk lower alloc1_on=27 alloc2_on=27 alloc3_on=27)"                    '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА: heap_alloc \(-10\.0% -10\.0% -10\.0%\)'
-want start-peak    "$(mk sp start1_on=110 start2_on=110 start3_on=110)"                    '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА: пик старта memory.current'
-want mem-peak      "$(mk mp mem1_on=160 mem2_on=160 mem3_on=160)"                          '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА: пик memory.current \('
+want lower-is-real "$(mk lower alloc1_on=27 alloc2_on=27 alloc3_on=27)"                    '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА, с P1 МЕНЬШЕ: heap_alloc \(-10\.0% -10\.0% -10\.0%\).*правка Filename не требуется'
+want start-peak    "$(mk sp start1_on=110 start2_on=110 start3_on=110)"                    '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА, с P1 БОЛЬШЕ: пик старта memory.current'
+want mem-peak      "$(mk mp mem1_on=160 mem2_on=160 mem3_on=160)"                          '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА, с P1 БОЛЬШЕ: пик memory.current \('
+want mixed-up-down "$(mk mixed inuse1_on=44 inuse2_on=44 inuse3_on=44 alloc1_on=27 alloc2_on=27 alloc3_on=27)" '^ИЗМЕРЕНО: 8\.5\.A34 разница РЕАЛЬНА, с P1 БОЛЬШЕ: heap_inuse .*; с P1 меньше: heap_alloc'
 want not-done      "$(mk nd done=no)"                                                      '^НЕИЗМЕРИМ: 8\.5\.A34 .*серия не завершена'
 want no-dir-pair   "$(mk nodir drop=r2-off)"                                               '^НЕИЗМЕРИМ: 8\.5\.A34 .*нет каталога r2-off'
 want no-heap       "$(mk noheap R=3 drop=r1-on/m-end.txt)"                                 '^НЕИЗМЕРИМ: 8\.5\.A34 .*r1-on: нет go_memstats_heap_'
@@ -59,6 +60,7 @@ if [ "${1:-}" = --mutate ]; then
     mut all-repeats   's/\[ "\$sign" = "\$sg" \] || allout=0/true/'
     mut abs-only      "s/if (d < 0) d = -d; //"
     mut done-guard    's/if ! grep -q .\^done. "\$OUT\/DONE" 2>\/dev\/null; then/if false; then/'
+    mut direction      's/if \[ "\$sign" = "+" \]; then real_up=/if true; then real_up=/'
     mut strict-gt     's/exit !(d > n) }/exit !(d >= n) }/'
     mut missing-heap  's/\[ -n "\$hi" \] \&\& \[ -n "\$ha" \] || cls=/true || cls=/'
 fi

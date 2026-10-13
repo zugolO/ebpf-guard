@@ -4,7 +4,8 @@
 # Метрики на повтор (on = таблица процессов, off = без неё; один бинарь): пик memory.current старта (выборка 10 Гц), пик
 # memory.current за пакет атак, heap_inuse и heap_alloc после пакета. Разница РЕАЛЬНА по метрике, если во ВСЕХ R повторах
 # |on − off| / off > NOISE_PCT% и знак один и тот же (решение: «вне ±4% во всех трёх»). Критерия по памяти от P1 нет —
-# эмиттер только называет, нужна ли правка (убрать декодирование Filename из чтения дерева) и перемер.
+# эмиттер только называет, нужна ли правка (убрать декодирование Filename из чтения дерева) и перемер. Правка нужна ТОЛЬКО если
+# реальная разница в сторону БОЛЬШЕ памяти с P1 (знак «+»): разница «P1 дешевле» (знак «−») правки не требует, но печатается.
 # Нет файла/серии — НЕИЗМЕРИМ с названным классом.
 set -u
 OUT=${OUT:-}; R=${R:-3}; NOISE_PCT=${NOISE_PCT:-4}
@@ -31,7 +32,7 @@ for k in $(seq 1 "$R"); do
     done
 done
 if [ -n "$cls" ]; then echo "НЕИЗМЕРИМ: 8.5.A34 НЕИЗМЕРИМ (класс НАЗВАН:${cls#;})"; exit 0; fi
-real=""; summary=""
+real_up=""; real_down=""
 for m in start mem inuse alloc; do
     case $m in start) nm="пик старта memory.current";; mem) nm="пик memory.current";; inuse) nm="heap_inuse";; alloc) nm="heap_alloc";; esac
     allout=1; sign=""; diffs=""
@@ -45,11 +46,15 @@ for m in start mem inuse alloc; do
             [ -z "$sign" ] && sign=$sg; [ "$sign" = "$sg" ] || allout=0 ;;
         esac
     done
-    if [ "$allout" = 1 ]; then real="$real; $nm (${diffs# })"; fi
+    if [ "$allout" = 1 ]; then
+        if [ "$sign" = "+" ]; then real_up="$real_up; $nm (${diffs# })"; else real_down="$real_down; $nm (${diffs# })"; fi
+    fi
     echo "  разница on−off, $nm:${diffs}$([ "$allout" = 1 ] && echo '  ← ВНЕ ±'$NOISE_PCT'% во всех повторах')"
 done
-if [ -n "$real" ]; then
-    echo "ИЗМЕРЕНО: 8.5.A34 разница РЕАЛЬНА: ${real#; } — по решению 2: убрать декодирование Filename из чтения дерева и перемерить"
+if [ -n "$real_up" ]; then
+    echo "ИЗМЕРЕНО: 8.5.A34 разница РЕАЛЬНА, с P1 БОЛЬШЕ: ${real_up#; }${real_down:+; с P1 меньше: ${real_down#; }} — по решению 2: убрать декодирование Filename из чтения дерева и перемерить"
+elif [ -n "$real_down" ]; then
+    echo "ИЗМЕРЕНО: 8.5.A34 разница РЕАЛЬНА, с P1 МЕНЬШЕ: ${real_down#; } — таблица процессов памяти не добавляет, правка Filename не требуется; остальные величины вне ±${NOISE_PCT}% во всех $R повторах не выходят"
 else
     echo "ИЗМЕРЕНО: 8.5.A34 разницы вне ±${NOISE_PCT}% во всех $R повторах нет ни по одной из четырёх величин — правка Filename не требуется"
 fi

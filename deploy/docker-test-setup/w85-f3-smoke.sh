@@ -21,8 +21,8 @@ verdict() {
     pn=$(jq -r --argjson p "$P" '[.[] | select((.formatted // .).key.tgid == $p and (.formatted // .).key.nr == 321) | (.formatted // .).value.n] | add // 0' "$D/counts.json" 2>/dev/null)
     qn=$(jq -r --argjson q "$Q" '[.[] | select((.formatted // .).key.tgid == $q and (.formatted // .).key.nr == 321) | (.formatted // .).value.n] | add // 0' "$D/counts.json" 2>/dev/null)
     case "$pn$qn" in *[!0-9]*|'') echo "НЕИЗМЕРИМ: F3 НЕИЗМЕРИМ (класс НАЗВАН: syscall_counts не разобран jq)"; return ;; esac
-    pa=$(jq -r --argjson p "$P" '[(.alerts // .)[] | select((.rule_id // .RuleID) == "rootkit_bpf_prog_load_suspicious" and ((.pid // .PID) == $p))] | length' "$D/alerts.json" 2>/dev/null)
-    qa=$(jq -r --argjson q "$Q" '[(.alerts // .)[] | select((.rule_id // .RuleID) == "rootkit_bpf_prog_load_suspicious" and ((.pid // .PID) == $q))] | length' "$D/alerts.json" 2>/dev/null)
+    pa=$(jq -r --argjson p "$P" '[(if type == "array" then . else .alerts end)[] | select((.rule_id // .RuleID) == "rootkit_bpf_prog_load_suspicious" and ((.pid // .PID) == $p))] | length' "$D/alerts.json" 2>/dev/null)
+    qa=$(jq -r --argjson q "$Q" '[(if type == "array" then . else .alerts end)[] | select((.rule_id // .RuleID) == "rootkit_bpf_prog_load_suspicious" and ((.pid // .PID) == $q))] | length' "$D/alerts.json" 2>/dev/null)
     echo "  N служебных вызовов на процесс: $N (событий enter+exit: $((2 * N)))"
     echo "  P («агент», pid $P): счётчик ядра syscall_counts(tgid,321) = $pn (ожидается $((2 * N))), алертов PROG_LOAD: ${pa:-?}"
     echo "  Q (чужой, pid $Q): счётчик ядра syscall_counts(tgid,321) = $qn (ожидается 0), алертов PROG_LOAD: ${qa:-?}"

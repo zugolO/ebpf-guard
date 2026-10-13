@@ -25,7 +25,7 @@ al = []
 al += [{"rule_id": "rootkit_bpf_prog_load_suspicious", "pid": 111, "comm": "python3"}] * int(pa)
 al += [{"rule_id": "rootkit_bpf_prog_load_suspicious", "pid": 222, "comm": "python3"}] * int(qa)
 al += [{"rule_id": "rootkit_bpf_prog_load_suspicious", "pid": 333, "comm": "python3"}]   # чужой pid не засчитывается
-json.dump({"alerts": al}, open(D + "/alerts.json", "w"))
+json.dump(al if shape == "plain" else {"alerts": al}, open(D + "/alerts.json", "w"))
 PY
     [ -n "$drop" ] && rm -f "$D/$drop"
     echo "$D"

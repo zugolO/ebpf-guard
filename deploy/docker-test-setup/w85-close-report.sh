@@ -276,11 +276,11 @@ controls() {
         cls="$cls; нет снимка алертов контролей"
     else
         for rid in rootkit_anonymous_exec_memory sigma_mprotect_exec_heap mitre_sandbox_detect_cpuid; do
-            hit=$(jq -r --arg r "$rid" --arg c "$CTL_COMM" '[(.alerts // .)[] | select((.rule_id // .RuleID) == $r and ((.comm // .Comm) == $c))] | length' "$CTL_ALERTS" 2>/dev/null)
+            hit=$(jq -r --arg r "$rid" --arg c "$CTL_COMM" '[(if type == "array" then . else .alerts end)[] | select((.rule_id // .RuleID) == $r and ((.comm // .Comm) == $c))] | length' "$CTL_ALERTS" 2>/dev/null)
             echo "  контроль $rid (comm $CTL_COMM): ${hit:-?} алертов"
             case "${hit:-}" in ''|*[!0-9]*) cls="$cls; снимок алертов не разобран jq ($rid)" ;; 0) fail="$fail; контроль $rid не сработал" ;; *) n=$((n + 1)) ;; esac
         done
-        hit=$(jq -r --arg c xmrig '[(.alerts // .)[] | select((.rule_id // .RuleID) == "cryptominer_binary_name" and ((.comm // .Comm) == $c))] | length' "$CTL_ALERTS" 2>/dev/null)
+        hit=$(jq -r --arg c xmrig '[(if type == "array" then . else .alerts end)[] | select((.rule_id // .RuleID) == "cryptominer_binary_name" and ((.comm // .Comm) == $c))] | length' "$CTL_ALERTS" 2>/dev/null)
         echo "  ИНФО: суженное comm-правило cryptominer_binary_name (comm xmrig): ${hit:-?} алертов"
     fi
     local g

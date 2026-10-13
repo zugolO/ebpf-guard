@@ -34,8 +34,45 @@ type ImageCache struct {
 	mu   sync.RWMutex
 	m    map[imageKey]string
 	max  int
+	root string // префикс корня ХОСТА для stat (под с hostPID: /proc/1/root); "" — тот же корень
 	stat func(path string) (dev uint32, ino uint64, ok bool)
 	link func(path string) (string, error)
+}
+
+// HostRootPath — путь к корню хоста из mount-namespace агента: «/proc/1/root», когда агент в поде с hostPID (pid 1 — init
+// хоста, его корень — корень хоста), иначе пусто. Пути образов, которые отдаёт ядро (readlink /proc/<pid>/exe, exec-filename),
+// — пути ХОСТА, а stat из namespace пода видит свою файловую систему: без префикса сверка по dev/ino в поде не сходится никогда.
+const HostRootPath = "/proc/1/root"
+
+// DetectHostRoot возвращает HostRootPath, если корень pid 1 — другая файловая система, чем «/» агента (под с hostPID), и «»,
+// если это один корень (агент на хосте, либо под без hostPID: pid 1 — сам под) или корень pid 1 не читается.
+func DetectHostRoot() string { return DetectHostRootWith(statIDs) }
+
+// DetectHostRootWith — DetectHostRoot с подставным stat (шов для тестов).
+func DetectHostRootWith(stat func(string) (uint32, uint64, bool)) string {
+	rd, ri, ok := stat("/")
+	if !ok {
+		return ""
+	}
+	hd, hi, ok := stat(HostRootPath + "/")
+	if !ok || (hd == rd && hi == ri) {
+		return ""
+	}
+	return HostRootPath
+}
+
+// SetHostRoot задаёт префикс корня хоста для сверки stat (см. HostRootPath).
+func (c *ImageCache) SetHostRoot(prefix string) {
+	c.mu.Lock()
+	c.root = strings.TrimRight(prefix, "/")
+	c.mu.Unlock()
+}
+
+func (c *ImageCache) hostStat(path string) (uint32, uint64, bool) {
+	c.mu.RLock()
+	root := c.root
+	c.mu.RUnlock()
+	return c.stat(root + path)
 }
 
 // NewImageCache создаёт кэш на maxEntries (≤ 0 — 4096) с реальными stat/readlink.
@@ -115,14 +152,14 @@ func (c *ImageCache) Resolve(rec Record) (path, how string) {
 	}
 	if !rec.Exited() && rec.PID != 0 {
 		if target, err := c.link(fmt.Sprintf("/proc/%d/exe", rec.PID)); err == nil && !strings.HasSuffix(target, " (deleted)") {
-			if dev, ino, ok := c.stat(target); ok && dev == rec.ExeDev && ino == rec.ExeIno {
+			if dev, ino, ok := c.hostStat(target); ok && dev == rec.ExeDev && ino == rec.ExeIno {
 				c.Put(rec.ExeDev, rec.ExeIno, target)
 				return target, ImageProc
 			}
 		}
 	}
 	if strings.HasPrefix(rec.Filename, "/") && rec.Flags&FlagFnameTrunc == 0 {
-		if dev, ino, ok := c.stat(rec.Filename); ok && dev == rec.ExeDev && ino == rec.ExeIno {
+		if dev, ino, ok := c.hostStat(rec.Filename); ok && dev == rec.ExeDev && ino == rec.ExeIno {
 			c.Put(rec.ExeDev, rec.ExeIno, rec.Filename)
 			return rec.Filename, ImageFilename
 		}
@@ -155,7 +192,7 @@ func (c *ImageCache) ResolveChecked(rec Record) (path, how string) {
 	p, ok := c.m[k]
 	c.mu.RUnlock()
 	if ok {
-		if dev, ino, sok := c.stat(p); sok && dev == rec.ExeDev && ino == rec.ExeIno {
+		if dev, ino, sok := c.hostStat(p); sok && dev == rec.ExeDev && ino == rec.ExeIno {
 			return p, ImageCached
 		}
 		c.forget(k, p)

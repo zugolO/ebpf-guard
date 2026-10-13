@@ -52,6 +52,12 @@ func startProcTable(cfg *config.Config, lt *profiler.LineageTracker, dryRun bool
 		internalbpf.SetProcTableState(internalbpf.ProcTableOffNoLineage)
 		return noop
 	}
+	// E1: путь образа хоста сверяется stat'ом по dev/ino; в поде с hostPID — через /proc/1/root (корень хоста), иначе
+	// сверка по пути пода не сходится никогда и ось образа молча уходит на запасной readlink
+	if hr := procinfo.DetectHostRoot(); hr != "" {
+		correlator.LineageImages().SetHostRoot(hr)
+		slog.Info("proc table: image paths are verified through the host root", slog.String("host_root", hr))
+	}
 	t, err := open(internalbpf.ProcTableConfig{
 		LiveEntries:   uint32(cfg.BPF.ProcTable.LiveEntries),
 		ExitedEntries: uint32(cfg.BPF.ProcTable.ExitedEntries),

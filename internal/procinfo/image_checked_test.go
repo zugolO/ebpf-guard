@@ -66,3 +66,49 @@ func TestImage_CacheBytesAtCapacity(t *testing.T) {
 	}
 	runtime.KeepAlive(c)
 }
+
+// Под с hostPID: stat из его mount-namespace видит свою ФС, образ хоста сверяется через /proc/1/root.
+func TestImage_HostRootPrefixVerifiesHostPaths(t *testing.T) {
+	f, c := newFS()
+	// «ФС пода»: по тому же пути лежит ДРУГОЙ файл (образ пода), у хоста — настоящий
+	f.stat["/usr/bin/cat"] = [2]uint64{50, 9}               // файл в ФС пода
+	f.stat[HostRootPath+"/usr/bin/cat"] = [2]uint64{7, 555} // файл хоста
+	rec := Record{PID: 1, ExitTS: 3, ExeDev: 7, ExeIno: 555, Filename: "/usr/bin/cat"}
+	if p, how := c.ResolveChecked(rec); p != "" || how != ImageUnresolved {
+		t.Fatalf("без префикса образ хоста по пути пода сверяться не должен: %q %q", p, how)
+	}
+	c.SetHostRoot(HostRootPath)
+	if p, how := c.ResolveChecked(rec); p != "/usr/bin/cat" || how != ImageFilename {
+		t.Fatalf("с префиксом хоста: %q %q", p, how)
+	}
+	if p, how := c.ResolveChecked(rec); p != "/usr/bin/cat" || how != ImageCached {
+		t.Fatalf("из кэша со сверкой через префикс: %q %q", p, how)
+	}
+	// файл хоста заменили — кэш устарел и через префикс
+	f.stat[HostRootPath+"/usr/bin/cat"] = [2]uint64{7, 556}
+	if p, how := c.ResolveChecked(rec); p != "" || how != ImageStale {
+		t.Fatalf("замена файла хоста: %q %q", p, how)
+	}
+}
+
+func TestDetectHostRoot(t *testing.T) {
+	mk := func(m map[string][2]uint64) func(string) (uint32, uint64, bool) {
+		return func(p string) (uint32, uint64, bool) { v, ok := m[p]; return uint32(v[0]), v[1], ok }
+	}
+	// под с hostPID: корень pid 1 — другая ФС
+	if got := DetectHostRootWith(mk(map[string][2]uint64{"/": {50, 2}, HostRootPath + "/": {7, 2}})); got != HostRootPath {
+		t.Fatalf("под с hostPID: %q", got)
+	}
+	// агент на хосте (или под без hostPID): тот же корень
+	if got := DetectHostRootWith(mk(map[string][2]uint64{"/": {7, 2}, HostRootPath + "/": {7, 2}})); got != "" {
+		t.Fatalf("тот же корень: %q", got)
+	}
+	// корень pid 1 не читается (нет прав)
+	if got := DetectHostRootWith(mk(map[string][2]uint64{"/": {7, 2}})); got != "" {
+		t.Fatalf("нечитаемый корень: %q", got)
+	}
+	// нет даже «/» — не гадать
+	if got := DetectHostRootWith(mk(nil)); got != "" {
+		t.Fatalf("нет «/»: %q", got)
+	}
+}

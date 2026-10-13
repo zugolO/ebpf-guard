@@ -626,6 +626,48 @@ maps, and the kernel used to show it every such call as a `nr=321` event. Servic
 commands `{0, 3, 5, 6, 9, 33}` from the agent, and **every** command from any other process, flow
 as before.
 
+## In-kernel process table (wave 8.5, P1)
+
+`bpf.proc_table.enabled` (default `true`): `fork`/`exec`/`exit` hooks (`bpf/proctable.bpf.c`, a separate BPF object —
+a verifier rejection leaves the other collectors alone) keep one record per process in the kernel:
+`ppid`, start time (`task->start_boottime`), `comm`, executable `dev/ino`, the **exec filename**
+(`bprm->filename` — for a shebang script this is the script's own path) and `exit_ts`. The lineage tracker
+reads ancestor chains from it with point lookups instead of Go maps and `/proc`: no per-event work, no TTL sweep,
+no ancestry leak, and events dropped in the kernel (F1) no longer leave a chain stale.
+
+* Two maps: `proc_live` (HASH, live processes — a full map counts `fork_live_full`, it never evicts anyone) and
+  `proc_exited` (LRU, exited processes with `exit_ts`, so a millisecond-lived parent — `nginx → bash → curl` — is
+  still readable after it died; readers drop records older than `profiler.lineage.ttl`). Sizes: `live_entries` /
+  `exited_entries` (default 16384 each, ≈ 0.23 KiB per entry, both preallocated). `exited_entries` must cover the
+  processes that exit within the TTL, or chains of short-lived processes are lost before the TTL.
+* Processes older than the agent are seeded from `/proc` once at start; records written by the kernel after the
+  hooks attach are never overwritten by the seed.
+* Chain read outcomes: `ebpf_guard_proc_chain_reads_total{consumer,outcome}` — `resolved` (reached the root, every
+  hop present and consistent), `broken` (a parent started after its child: the pid was reused), `exhausted`
+  (depth limit), `evicted` (a hop's record is absent: LRU eviction, past its TTL, or older than the agent).
+* `ebpf_guard_proc_table_state{state}`: `active`, or `off_config` / `off_dry_run` / `off_load_failed` /
+  `off_no_lineage` — then the tracker stays on its Go maps and `/proc`
+  (`ebpf_guard_lineage_proc_reads_total` counts those reads and stays flat while the table is active).
+  Hook outcomes: `ebpf_guard_proc_table_events_total{event}`.
+* `GET /debug/lineage?pid=N` (debug endpoints enabled): what the agent sees for the ancestors of a pid — for a
+  live comparison with `/proc`.
+
+### Rule fields `proc.lineage` and `proc.lineage_exe_paths` (wave 8.4.1)
+
+The real ancestor chain from the table, **ancestors only** (the process itself is not included), root → parent,
+one hop per line:
+
+* `proc.lineage` — `<image path>\t<exec filename>` per hop; `proc.lineage_exe_paths` — `<image path>` per hop.
+* The image path is verified by inode (`stat` must give the dev/ino the kernel recorded): `exec -a dpkg` or a
+  renamed `comm` do not change it. A script's image is its interpreter; its exec filename is the script path.
+  `?` — not resolved. Control characters in names are replaced with `?` (a file name is attacker data).
+* The chain is continuous: a missing, expired or inconsistent hop (pid reuse) cuts off everything above it.
+* No process table → the field is empty and exceptions on it do not apply (the rule fires).
+* Put a condition on these fields **last** in an `and` group: reading the chain is a lookup per hop. Use the
+  `regex` operator for ordered conditions, e.g. `impact_systemd_service_disabled` → exception
+  `dpkg-maintainer-script-stop` (`systemctl stop` whose chain has `/usr/bin/dpkg` and, below it, an exec filename
+  `/var/lib/dpkg/info/*.{prerm,postrm,preinst,postinst}`).
+
 ## Rule files: one bad file does not blank the rule set
 
 At startup and on every hot reload a rule file that cannot be read, parsed or validated (or whose

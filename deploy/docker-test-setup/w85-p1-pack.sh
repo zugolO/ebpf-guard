@@ -22,11 +22,17 @@ echo "состояние таблицы: $state"
 [ "$MODE" = on ] && [ "$state" != active ] && die "режим on, а таблица $state"
 [ "$MODE" = off ] && [ "$state" = active ] && die "режим off, а таблица active"
 sleep 60
+# память агента (A3/A4): VmHWM — пик RSS процесса за жизнь, ядро ведёт сам (на 5.15 нет memory.peak у cgroup); куча Go — из /metrics
+memsnap() { # <метка>
+    { echo "-- $1 ($(date -u +%T)) pid=$SA_PID"; grep -aE '^(VmHWM|VmRSS):' /proc/$SA_PID/status; sa_metrics | grep -aE '^go_memstats_(heap_inuse|heap_alloc|heap_sys|heap_released|alloc)_bytes '; } >> "$OUT/mem.txt"
+}
+memsnap "через 60 с после старта (пик старта + idle)"
 sa_metrics > "$OUT/m0.txt"; T0=$(date +%s)
 A="$SRC/deploy/docker-test-setup/attacks"
 ls "$A/attack-results" 2> /dev/null | sort > "$OUT/results-before.lst"
 ( cd "$A" && EBPF_GUARD_API="$SA_API" EBPF_GUARD_TOKEN="$SA_TOKEN" SKIP_INDUCED_DROP=1 bash ./run-all-attacks.sh > "$OUT/attacks.log" 2>&1; echo "rc=$?" > "$OUT/attacks.rc" )
 sleep 30
+memsnap "после пакета атак"
 sa_metrics > "$OUT/m1.txt"
 curl -s --max-time 60 -H "Authorization: Bearer $SA_TOKEN" "$SA_API/api/v1/incidents?limit=1000" > "$OUT/incidents.json"
 cp "$A/attack-manifest.json" "$OUT/" 2> /dev/null
@@ -36,6 +42,7 @@ cp /root/w85-run-pack-$MODE/agent.log "$OUT/agent.log"
 echo "== 8.5.5 (доля инцидентов с process_chain, чтения /proc)"
 INC="$OUT/incidents.json" BASE_INC="$BASE_INC" CH_M0="$OUT/m0.txt" CH_M1="$OUT/m1.txt" bash "$HERE/w85-close-report.sh" chain | tee "$OUT/chain.txt"
 echo "== recall по comm: $(ATT=$OUT bash "$HERE/w85-close-report.sh" recall)"
+echo "== память агента"; cat "$OUT/mem.txt"
 echo "== счётчики"
 grep -aE '^ebpf_guard_(proc_chain_reads_total|lineage_proc_reads_total|proc_table_events_total|lineage_field_total)' "$OUT/m1.txt" | tee "$OUT/counters.txt"
 echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"

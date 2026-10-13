@@ -14,7 +14,6 @@ mkdir -p "$DST"; $SSH "cat /root/collect-8.5-night.tgz" </dev/null > "$DST/colle
 tar xzf "$DST/collect-8.5-night.tgz" -C "$DST" 2> /dev/null; A=$(ls -d "$DST"/night-8.5-night 2> /dev/null | head -1)
 [ -d "$A" ] || { echo "архив не распакован"; exit 3; }
 echo "== тождество: $(cat "$A/binary-identity.txt" 2>/dev/null | tr '\n' ' ')"
-echo "== пайплайн: $(grep -a 'сторож полноты\|СТОРОЖ' "$A/../../../run-8.5-night-pipeline.log" 2>/dev/null | tail -2)"
 echo "== вердикты по меткам (из отчётов архива)"
 grep -aE '^(ДОСТИГНУТО|ПРОВАЛЕН|НЕИЗМЕРИМ|ИЗМЕРЕНО): ' "$A/all-reports.txt" | cut -c1-400
 echo "== сторож полноты"; $SSH "grep -a 'сторож полноты' /root/run-8.5-night-pipeline.log | tail -1" </dev/null

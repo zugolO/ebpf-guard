@@ -116,6 +116,29 @@ wantab ab-b-not-on   "$(mkab ab-bnot stb=off_no_rules)"         '^НЕИЗМЕР
 wantab ab-no-series  "$(mkab ab-nos b1=none)"                   '^НЕИЗМЕРИМ: 8\.5\.3 .*нет серии anomaly_detection'
 wantab ab-no-file    "$(mkab ab-nof drop=m-ab.txt)"             '^НЕИЗМЕРИМ: 8\.5\.3 .*нет m-ab\.txt'
 
+
+# ── ab-null: нулевая пара полосы (решение владельца 13.10, п. 6) ──
+wantn() { # wantn <имя> <idle> <шаблон> — шаблон ищется в выводе ab-null
+    local out; out=$(IDLE=$2 bash "$EMIT" ab-null 2>&1)
+    if echo "$out" | grep -aqE "$3"; then ok "$1"; else bad "$1 — нет «${3}»"; echo "$out" | sed 's/^/    | /' | head -14; fi
+}
+wantn null-inside   "$(mkidlew n-in 20 16 4)"        '^ИЗМЕРЕНО: 8\.5\.3n .*A=20 B=16, 2·√A=9, разрыв B−A=-4 — внутри полосы; полоса остаётся 2·√A'
+wantn null-outside  "$(mkidlew n-out 4 11 30)"       '^ИЗМЕРЕНО: 8\.5\.3n .*A=4 B=11, 2·√A=4, разрыв B−A=7 — ВНЕ полосы; полоса = max\(2·√A=4, разрыв 7\) = 7 → AB_NULL_GAP=7'
+wantn null-edge     "$(mkidlew n-edge 100 120 5)"    '^ИЗМЕРЕНО: 8\.5\.3n .*разрыв B−A=20 — внутри полосы'
+wantn null-all      "$(mkidlew n-all 20 16 4 11)"    'По всем 3 смежным парам ночи вне полосы 1, максимальный положительный разрыв 7'
+wantn null-short    "$(mkidlew n-short 20)"          '^НЕИЗМЕРИМ: 8\.5\.3n .*меньше двух окон'
+wantn null-reset    "$(mkidlew n-reset 20 16r 4)"    '^НЕИЗМЕРИМ: 8\.5\.3n .*упал'
+wantn null-noseries "$(mkidle n-ns anomhr=none snaps=40)" '^НЕИЗМЕРИМ: 8\.5\.3n .*нет серии'
+wantab2() { # wantab2 <имя> <AB_DIR> <NULL_GAP> <шаблон>
+    local out; out=$(AB_NULL_GAP=$3 AB_DIR=$2 bash "$EMIT" ab 2>&1)
+    if echo "$out" | grep -aqE "$4"; then ok "$1"; else bad "$1 — нет «${4}»"; echo "$out" | sed 's/^/    | /' | head -12; fi
+}
+# A=100: 2·√A = 20; B=130 вне полосы 20, но внутри пола нулевой пары 40
+wantab2 ab-floor-lifts-band  "$(mkab ab-fl a0=100 ab=200 b1=330)" 40 '^ДОСТИГНУТО: 8\.5\.3 .*полоса 40'
+wantab2 ab-floor-below-band  "$(mkab ab-fb a0=100 ab=200 b1=330)" 10 '^ПРОВАЛЕН: 8\.5\.3 .*B 130 > A 100 \+ полоса 20'
+wantab2 ab-floor-zero        "$(mkab ab-f0 a0=100 ab=200 b1=330)" 0  '^ПРОВАЛЕН: 8\.5\.3 '
+wantab2 ab-floor-still-fails "$(mkab ab-fs a0=100 ab=200 b1=345)" 40 '^ПРОВАЛЕН: 8\.5\.3 .*B 145 > A 100 \+ полоса 40'
+
 wantctl() { # wantctl <имя> <каталог> <шаблон>
     local d=$2 out
     out=$(CTL_ALERTS=$d/alerts.json CTL_STATE=$d/state.txt GATE=$d/gate.txt bash "$EMIT" controls 2>&1)
@@ -160,6 +183,10 @@ if [ "${1:-}" = "--mutate" ]; then
     mut median-no-limit  's/awk -v m="\$med" -v l="\$lim" .BEGIN { exit !(m <= l) }. || fail=/true || fail=/'
     mut median-peak-per-run 's/\[ -z "\$afail" \] || fail=/true || fail=/'
     mut median-cls-per-run  's/\[ -z "\$pcls" \] || cls=/true || cls=/'
+    mut ab-floor-off     's/if \[ "\${AB_NULL_GAP:-0}" -gt "\$band" \] 2>\/dev\/null; then/if false; then/'
+    mut null-outside-off 's/if \[ "\$gap" -gt "\$band" \]; then mark=ВНЕ;/if false; then mark=ВНЕ;/'
+    mut null-first-pair  's/\[ -n "\$first" \] || first=/first=/'
+    mut null-reset-guard 's/\[ \$((vals\[k + 1\])) -ge \$((vals\[k\])) \] || {/true || {/'
     mut anomaly-absent   's/\[ -n "\$s0" \] \&\& \[ -n "\$s1" \] || cls=/true || cls=/'
 fi
 echo "-- fails=$fails"

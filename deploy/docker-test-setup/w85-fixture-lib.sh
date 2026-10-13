@@ -72,6 +72,26 @@ mkidle() {
     echo "$D"
 }
 
+# mkidlew <имя> <окно1> <окно2> … — idle только с anomaly_detection: приращения за окна (12 снимков на окно, линейно);
+#   окно «r» после числа — сброс счётчика (рестарт): «20 16r 4»
+mkidlew() {
+    local n=$1; shift
+    local D=$T/$n/idle; mkdir -p "$D/snapshots"
+    local cur=100 idx=0 w reset i base
+    echo "ebpf_guard_alert_volume_by_event_type_total{event_type=\"syscall\",rule_id=\"anomaly_detection\"} $cur" > "$D/snapshots/metrics-0000.txt"
+    for w in "$@"; do
+        reset=0; case "$w" in *r) reset=1; w=${w%r} ;; esac
+        base=$cur
+        for i in $(seq 1 12); do
+            idx=$((idx + 1))
+            cur=$(awk -v b="$base" -v w="$w" -v i="$i" 'BEGIN { printf "%.0f", b + w * i / 12 }')
+            [ "$reset" = 1 ] && [ "$i" -ge 6 ] && cur=3
+            echo "ebpf_guard_alert_volume_by_event_type_total{event_type=\"syscall\",rule_id=\"anomaly_detection\"} $cur" > "$D/snapshots/$(printf 'metrics-%04d.txt' "$idx")"
+        done
+    done
+    echo "$D"
+}
+
 # mkab <имя> [ключ=значение…]: A (a0→ab), B (ab→b1); stA/stB — состояния F1; drop=<файл> — не создавать
 mkab() {
     local n=$1; shift

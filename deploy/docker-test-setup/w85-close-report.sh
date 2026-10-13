@@ -321,11 +321,63 @@ ab() {
     A=$((ab_ - a0)); B=$((b1 - ab_))
     band=$(awk -v a="$A" 'BEGIN { printf "%.0f", 2 * sqrt(a) }')
     echo "  anomaly_detection: A (F1 выкл) $A, B (F1 вкл) $B, полоса шума 2·√A = $band"
+    # решение владельца 13.10, п. 6: если НУЛЕВАЯ пара (ab-null на смежных равных idle-окнах) вышла
+    # за 2·√A, полоса = max(2·√A, наблюдённый разрыв нулевой пары). AB_NULL_GAP — этот разрыв.
+    if [ "${AB_NULL_GAP:-0}" -gt "$band" ] 2>/dev/null; then
+        echo "  полоса поднята до разрыва нулевой пары: max(2·√A = $band, AB_NULL_GAP = $AB_NULL_GAP)"
+        band=$AB_NULL_GAP
+    fi
     if [ "$B" -le $((A + band)) ]; then
         echo "ДОСТИГНУТО: 8.5.3 ДОСТИГНУТО (B $B ≤ A $A + полоса $band; смежные равные окна одного бинаря, переключатель без рестарта)"
     else
         echo "ПРОВАЛЕН: 8.5.3 ПРОВАЛЕН (B $B > A $A + полоса $band)"
     fi
+}
+
+# ab-null — НУЛЕВАЯ пара полосы 8.5.3 (решение владельца 13.10, п. 6): те же смежные равные окна
+#   AB_SECS, но на idle БЕЗ переключения (архив ночи 8.2: F1 там не было). Печатает пару в позиции
+#   настоящей пары (первые два окна) и все смежные пары ночи. Разрыв = B − A (критерий односторонний:
+#   B не выше A + полоса). Нулевая пара вне 2·√A → полоса = max(2·√A, разрыв); число уходит в
+#   AB_NULL_GAP эмиттера ab. ИНФО (метка 8.5.3n), в REQUIRED_LABELS не входит.
+ab_null() {
+    echo "== w85 8.5.3n (нулевая пара): IDLE=${IDLE:-—} окно ${AB_SECS:-3600} с"
+    local per=$(( ${AB_SECS:-3600} / SNAP_INTERVAL )) snaps n w i a b band gap out="" first="" outside=0 pairs=0 maxgap=0
+    mapfile -t snaps < <(_snaps "$IDLE")
+    n=${#snaps[@]}
+    if [ "$n" -le $((2 * per)) ]; then
+        echo "НЕИЗМЕРИМ: 8.5.3n НЕИЗМЕРИМ (класс НАЗВАН: снимков $n — меньше двух окон по $per интервалов)"; return
+    fi
+    local vals=()
+    for ((i = 0; i * per < n; i++)); do
+        w=$(_anomaly "${snaps[$((i * per))]}")
+        [ -n "$w" ] || { echo "НЕИЗМЕРИМ: 8.5.3n НЕИЗМЕРИМ (класс НАЗВАН: нет серии anomaly_detection в снимке $((i * per)))"; return; }
+        vals+=("$w")
+    done
+    # окна — разности соседних границ; последняя неполная граница отбрасывается
+    local wins=() k
+    for ((k = 0; k + 1 < ${#vals[@]}; k++)); do
+        [ $((vals[k + 1])) -ge $((vals[k])) ] || { echo "НЕИЗМЕРИМ: 8.5.3n НЕИЗМЕРИМ (класс НАЗВАН: счётчик anomaly_detection упал в окне $k — рестарт агента)"; return; }
+        wins+=($((vals[k + 1] - vals[k])))
+    done
+    [ "${#wins[@]}" -ge 2 ] || { echo "НЕИЗМЕРИМ: 8.5.3n НЕИЗМЕРИМ (класс НАЗВАН: полных окон ${#wins[@]} < 2)"; return; }
+    echo "  окна anomaly_detection (по $per интервалов): ${wins[*]}"
+    for ((k = 0; k + 1 < ${#wins[@]}; k++)); do
+        a=${wins[k]}; b=${wins[k + 1]}
+        band=$(awk -v a="$a" 'BEGIN { printf "%.0f", 2 * sqrt(a) }')
+        gap=$((b - a))
+        pairs=$((pairs + 1))
+        local mark=внутри
+        if [ "$gap" -gt "$band" ]; then mark=ВНЕ; outside=$((outside + 1)); fi
+        [ "$gap" -gt "$maxgap" ] && maxgap=$gap
+        echo "    пара ${k}→$((k + 1)): A=$a B=$b 2·√A=$band разрыв B−A=$gap — $mark полосы"
+        [ -n "$first" ] || first="$a $b $band $gap $mark"
+    done
+    local fa fb fband fgap fmark
+    read -r fa fb fband fgap fmark <<< "$first"
+    local rec
+    if [ "$fmark" = ВНЕ ]; then rec="полоса = max(2·√A=$fband, разрыв $fgap) = $fgap → AB_NULL_GAP=$fgap"
+    else rec="полоса остаётся 2·√A (нулевая пара внутри; AB_NULL_GAP=0)"; fi
+    echo "ИЗМЕРЕНО: 8.5.3n нулевая пара в позиции настоящей (окна 0→1): A=$fa B=$fb, 2·√A=$fband, разрыв B−A=$fgap — $fmark полосы; $rec. По всем $pairs смежным парам ночи вне полосы $outside, максимальный положительный разрыв $maxgap (ИНФО: ряд не пуассоновский)"
 }
 
 # controls — метка 8.5.2: положительные контроли трёх номеров ПРИ ВКЛЮЧЁННОМ F1 (w85-ctl.py
@@ -376,5 +428,6 @@ case "$MODE" in
     flow) flow ;;
     anomaly-hour) anomaly_hour ;;
     ab) ab ;;
-    *) echo "usage: w85-close-report.sh d1|d1-median|flow|anomaly-hour|ab|controls" >&2; exit 2 ;;
+    ab-null) ab_null ;;
+    *) echo "usage: w85-close-report.sh d1|d1-median|flow|anomaly-hour|ab|ab-null|controls" >&2; exit 2 ;;
 esac

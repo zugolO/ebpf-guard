@@ -30,7 +30,7 @@ func w82Specs(t *testing.T) map[string]*ebpf.CollectionSpec {
 		"bpfmonitor": LoadBpfMonitor, "kmod": LoadKmod, "cgroup": LoadCgroup,
 		"hiddenprocess": LoadHiddenProcess, "tlsclienthello": LoadTlsClientHello,
 		"tlsuprobe": LoadTlsUprobe, "httpuprobe": LoadHttpUprobe,
-		"xdp": LoadXDP, "gpuuprobe": LoadGpuUprobe,
+		"xdp": LoadXDP, "gpuuprobe": LoadGpuUprobe, "proctable": LoadProcTable,
 	}
 	out := make(map[string]*ebpf.CollectionSpec, len(loaders))
 	for name, load := range loaders {

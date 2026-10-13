@@ -69,6 +69,16 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 
+	// ── BPF: таблица процессов (волна 8.5, P1) ───────────────────────────────
+	if pt := cfg.BPF.ProcTable; pt.Enabled {
+		if pt.LiveEntries < 1024 || pt.LiveEntries > 4_194_304 {
+			add(fmt.Errorf("bpf.proc_table.live_entries: must be in [1024, 4194304], got %d", pt.LiveEntries))
+		}
+		if pt.ExitedEntries < 1024 || pt.ExitedEntries > 4_194_304 {
+			add(fmt.Errorf("bpf.proc_table.exited_entries: must be in [1024, 4194304], got %d", pt.ExitedEntries))
+		}
+	}
+
 	// ── Rules ────────────────────────────────────────────────────────────────
 	if cfg.Rules.RateLimitAlerts && cfg.Rules.RateLimitWindow <= 0 {
 		add(fmt.Errorf("rules.rate_limit_window: must be > 0 when rate_limit_alerts is true, got %d",

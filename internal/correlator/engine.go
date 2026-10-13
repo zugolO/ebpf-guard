@@ -3133,6 +3133,10 @@ func (ce *CorrelationEngine) RecordReloadFailure() {
 	}
 }
 
+// LineageTracker возвращает трекер родословной, который движок использует (общий с профайлером
+// или собственный) — к нему main подключает таблицу процессов ядра (волна 8.5, P1).
+func (ce *CorrelationEngine) LineageTracker() *profiler.LineageTracker { return ce.lineageTracker }
+
 // GetRules returns the currently loaded rules.
 // Returns nil if no rules have been loaded yet (before the first UpdateRules call).
 func (ce *CorrelationEngine) GetRules() []Rule {

@@ -886,6 +886,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Any("error", err))
 	}
 
+	// Волна 8.5, P1: таблица процессов в ядре. Открывается ДО коллекторов — пока общий
+	// BTF-spec ядра ещё не освобождён (FlushKernelBTF ждёт последнего загрузчика).
+	closeProcTable := startProcTable(cfg, engine.LineageTracker(), dryRun, openProcTableKernel,
+		func() ([]internalbpf.SeedRecord, error) { return internalbpf.ReadProcSeed("/proc") }, prometheus.DefaultRegisterer)
+	defer closeProcTable()
+
 	// Волна 8.5, F1/F2: предикаты аргументов в ядре и счётчики отброшенного.
 	// Контроллер создаётся сразу за движком (карты ядра появятся позже, из отчёта
 	// коллектора), а на перезагрузку правил подписывается сразу: предикат не

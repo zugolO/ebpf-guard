@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -176,6 +177,12 @@ type LineageTracker struct {
 	shards   [lineageShardCount]*lineageShard
 	maxDepth int
 	onMatch  func(LineageMatch)
+
+	// table — таблица процессов в ядре (волна 8.5, P1). Пока источник установлен, трекер —
+	// тонкое чтение карты: Track не делает ничего, дерево и родитель читаются точечным lookup
+	// по ppid, /proc не трогается, TTL-уборки у него нет (см. lineage_table.go). Без источника
+	// (ядро без поддержки, dry-run, сбой загрузки) работает прежний путь на Go-картах и /proc.
+	table atomic.Pointer[procSourceBox]
 }
 
 // shardFor returns the shard owning pid.
@@ -211,6 +218,9 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 	return lt
 }
 
+// Enabled — включён ли трекер (LineageConfig.Enabled).
+func (lt *LineageTracker) Enabled() bool { return lt.config.Enabled }
+
 // SetMatchHandler sets the callback for lineage pattern matches.
 func (lt *LineageTracker) SetMatchHandler(handler func(LineageMatch)) {
 	lt.onMatch = handler
@@ -231,6 +241,11 @@ func (lt *LineageTracker) SetMatchHandler(handler func(LineageMatch)) {
 // eliminate this per-event cost entirely.
 func (lt *LineageTracker) Track(e types.Event) {
 	if !lt.config.Enabled {
+		return
+	}
+	if lt.table.Load() != nil {
+		// Родословную ведёт ядро (fork/exec/exit): событию, отфильтрованному в ядре (F1),
+		// не нужно «освежать» цепочку, а Go-карт и /proc здесь больше нет.
 		return
 	}
 	ppid, parentComm := lt.getParentInfo(e)
@@ -308,16 +323,26 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 		return nil
 	}
 
-	// Extract parent info from event or /proc
-	ppid, parentComm := lt.getParentInfo(e)
-	if ppid == 0 {
-		return nil
-	}
-
+	var ppid uint32
+	var parentComm string
 	comm := cleanComm(e.Comm[:])
+	if box := lt.table.Load(); box != nil {
+		// Таблица ядра: родитель — из события (его проставило ядро) или из записи таблицы;
+		// ничего не сохраняется — хранилище и есть таблица.
+		ppid, parentComm = lt.tableParentInfo(box.src, e)
+		if ppid == 0 {
+			return nil
+		}
+	} else {
+		// Extract parent info from event or /proc
+		ppid, parentComm = lt.getParentInfo(e)
+		if ppid == 0 {
+			return nil
+		}
 
-	// Store lineage info and update the ancestry chain (sharded by PID).
-	lt.store(e.PID, ppid, parentComm, comm)
+		// Store lineage info and update the ancestry chain (sharded by PID).
+		lt.store(e.PID, ppid, parentComm, comm)
+	}
 
 	// Check for pattern match
 	match := lt.checkPattern(e, parentComm, comm)
@@ -354,6 +379,9 @@ func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
 // oldest known ancestor to pid itself.  Returns nil if no ancestry has been
 // recorded for the PID.
 func (lt *LineageTracker) GetProcessTree(pid uint32) types.ProcessTree {
+	if box := lt.table.Load(); box != nil {
+		return lt.tableTree(box.src, pid)
+	}
 	s := lt.shardFor(pid)
 	s.mu.RLock()
 	chain := s.ancestry[pid]
@@ -570,6 +598,7 @@ func (lt *LineageTracker) buildChainFromProc(pid uint32, maxDepth int) []types.P
 // in a single syscall, replacing the separate readProcComm + readProcPPID calls
 // that previously required two /proc reads per level.
 func readProcStatus(pid uint32) (comm string, ppid uint32) {
+	lineageProcReads.Inc() // 8.5.5: чтений /proc трекером; на пути с таблицей ядра их быть не должно
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
 		return "", 0
@@ -871,6 +900,9 @@ func (lt *LineageTracker) ParentOf(pid uint32) (ppid uint32, parentComm string, 
 	if pid == 0 {
 		return 0, "", false
 	}
+	if box := lt.table.Load(); box != nil {
+		return lt.tableParentOf(box.src, pid)
+	}
 	s := lt.shardFor(pid)
 	s.mu.RLock()
 	info, found := s.lineage[pid]
@@ -895,6 +927,9 @@ func (lt *LineageTracker) GetLineage(pid uint32) (*parentInfo, bool) {
 
 // Size returns the number of tracked processes across all shards.
 func (lt *LineageTracker) Size() int {
+	if lt.table.Load() != nil {
+		return 0 // записи живут в ядре, не в Go
+	}
 	n := 0
 	for _, s := range lt.shards {
 		s.mu.RLock()

@@ -53,3 +53,4 @@ package bpf
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" HttpUprobe ../../bpf/http_uprobe.bpf.c
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" XDP ../../bpf/xdp_block.bpf.c
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" GpuUprobe ../../bpf/gpu_uprobe.bpf.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -target amd64 -cflags "-O2 -g -Wall -I/usr/include -I../../bpf" ProcTable ../../bpf/proctable.bpf.c

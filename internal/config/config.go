@@ -762,6 +762,9 @@ type BPFConfig struct {
 	// buffer, reducing userspace CPU overhead by 40-60% on typical workloads.
 	KernelFilter KernelFilterConfig `mapstructure:"kernel_filter"`
 
+	// ProcTable — таблица процессов в ядре (волна 8.5, P1).
+	ProcTable ProcTableConfig `mapstructure:"proc_table"`
+
 	// BTFPath is an explicit path to an external BTF file.
 	// Leave empty to use auto-detection (local → btf_hub → headers → none).
 	BTFPath string `mapstructure:"btf_path"`
@@ -963,6 +966,23 @@ type ArgPredicatesConfig struct {
 	// сливами профиль отстаёт на этот интервал: номер, впервые увиденный у
 	// нагрузки внутри него, оценивается как «новый». Default: 5s.
 	CountersInterval time.Duration `mapstructure:"counters_interval"`
+}
+
+// ProcTableConfig — таблица процессов в ядре (волна 8.5, P1): хуки fork/exec/exit ведут запись
+// pid → {ppid, start_time, comm, exe, exec filename, exit_ts}, LineageTracker читает цепочку
+// предков точечным lookup'ом вместо Go-карт и /proc. Нет поддержки (ядро без BTF/tp_btf,
+// отказ верификатора, --dry-run) — трекер остаётся на прежнем пути, причина в
+// ebpf_guard_proc_table_state.
+type ProcTableConfig struct {
+	// Enabled включает таблицу. Default: true; нужна работающая родословная (profiler.lineage.enabled).
+	Enabled bool `mapstructure:"enabled"`
+	// LiveEntries — ёмкость карты живых процессов (HASH; переполнение считается, никого не вытесняет).
+	// Живое число процессов узла с запасом; ≈ 0,23 КиБ на запись. Default: 16384.
+	LiveEntries int `mapstructure:"live_entries"`
+	// ExitedEntries — ёмкость карты вышедших (LRU: самые давние вытесняются сами). Должна покрывать число
+	// процессов, завершающихся за profiler.lineage.ttl, иначе цепочка мс-процесса теряется раньше TTL.
+	// Default: 16384.
+	ExitedEntries int `mapstructure:"exited_entries"`
 }
 
 // MapSizeConfig holds BPF map size settings.
@@ -2189,6 +2209,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.kernel_filter.arg_predicates.enabled", false)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.nrs", []int{9, 10, 158})
 	v.SetDefault("bpf.kernel_filter.arg_predicates.counters_interval", 5*time.Second)
+	v.SetDefault("bpf.proc_table.enabled", true)
+	v.SetDefault("bpf.proc_table.live_entries", 16384)
+	v.SetDefault("bpf.proc_table.exited_entries", 16384)
 	v.SetDefault("bpf.sampling.enabled", true)
 	v.SetDefault("bpf.sampling.syscall_rate", 1)
 	v.SetDefault("bpf.sampling.network_rate", 1)

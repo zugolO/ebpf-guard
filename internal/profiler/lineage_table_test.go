@@ -2,8 +2,10 @@ package profiler
 
 import (
 	"log/slog"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -379,4 +381,51 @@ func TestW85_P1_SetProcSourceIsRaceFree(t *testing.T) {
 		lt.SetProcSource(nil)
 	}
 	wg.Wait()
+}
+
+// Цена прежнего пути в куче Go — числом (A4 офлайн): Track 20 000 процессов (по четыре звена цепочки на процесс),
+// затем та же нагрузка при активной таблице ядра. Печатает обе величины; тест требует, чтобы путь с таблицей
+// не держал в куче Go ничего, пропорционального числу процессов.
+func TestW85_P1_GoHeapPerTrackedProcess_LegacyVsTable(t *testing.T) {
+	const n = 20000
+	heap := func() uint64 {
+		runtime.GC()
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.HeapAlloc
+	}
+	feed := func(lt *LineageTracker) {
+		for i := uint32(0); i < n; i++ {
+			pid := 100000 + i*4
+			for hop := uint32(0); hop < 4; hop++ {
+				e := types.Event{PID: pid + hop, PPID: pid + hop - 1}
+				if hop == 0 {
+					e.PPID = 1
+				}
+				copy(e.Comm[:], "worker")
+				copy(e.ParentComm[:], "parent")
+				lt.Track(e)
+			}
+		}
+	}
+	base := heap()
+	legacy := NewLineageTracker(LineageConfig{Enabled: true, MaxDepth: 8, TTL: time.Hour}, slog.Default())
+	feed(legacy)
+	legacyBytes := int64(heap()) - int64(base)
+	runtime.KeepAlive(legacy)
+	legacy = nil
+	base2 := heap()
+	tbl := newTableTracker(t, 8, newFakeTable())
+	feed(tbl)
+	tableBytes := int64(heap()) - int64(base2)
+	runtime.KeepAlive(tbl)
+	t.Logf("куча Go после Track %d процессов (×4 звена): прежний путь %+d Б (≈ %d Б на процесс), таблица ядра %+d Б",
+		n, legacyBytes, legacyBytes/n, tableBytes)
+	if legacyBytes < 1<<20 {
+		t.Fatalf("прежний путь не накопил состояния (%d Б) — измерение пустое", legacyBytes)
+	}
+	if tableBytes > legacyBytes/20 {
+		t.Fatalf("с таблицей куча выросла на %d Б (прежний %d Б)", tableBytes, legacyBytes)
+	}
 }

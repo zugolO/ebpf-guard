@@ -37,7 +37,7 @@ func openProcTableKernel(c internalbpf.ProcTableConfig) (procTableHandle, error)
 // привязки → переключение трекера (иначе в окне между ними цепочки старых демонов были бы пусты).
 // Возвращает функцию закрытия (может быть no-op).
 func startProcTable(cfg *config.Config, lt *profiler.LineageTracker, dryRun bool, open procTableOpener,
-	readSeed func() ([]internalbpf.SeedRecord, error), reg prometheus.Registerer) func() {
+	readSeed func() ([]internalbpf.SeedRecord, error), images *procinfo.ImageCache, reg prometheus.Registerer) func() {
 
 	noop := func() {}
 	switch {
@@ -67,6 +67,12 @@ func startProcTable(cfg *config.Config, lt *profiler.LineageTracker, dryRun bool
 		slog.Warn("proc table: reading /proc for the seed failed — processes older than the agent have no records until they exec",
 			slog.Any("error", rerr))
 	} else {
+		// кэш образов: путь известен из readlink /proc/<pid>/exe, сделанного при чтении засева
+		if images != nil {
+			for _, r := range recs {
+				images.Put(r.ExeDev, r.ExeIno, r.ExePath)
+			}
+		}
 		seeded, existing, failed := t.Seed(recs)
 		slog.Info("proc table: seeded with processes older than the agent",
 			slog.Int("seeded", seeded), slog.Int("already_recorded_by_kernel", existing), slog.Int("failed", failed))

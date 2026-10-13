@@ -1508,6 +1508,10 @@ func normaliseFieldName(field string) string {
 		return "ancestor_exe_path"
 	case "proc.systemd_unit":
 		return "systemd_unit"
+	case "proc.lineage":
+		return "lineage"
+	case "proc.lineage_exe_paths":
+		return "lineage_exe_paths"
 	case "network.dport":
 		return "dport"
 	case "network.sport":
@@ -1695,6 +1699,10 @@ func (re *RuleEngine) getFieldValueCached(e *types.Event, field string, dnsAnaly
 		// условие на эту ось обязано стоять ПОСЛЕДНИМ в группе "and".
 		return resolveAncestorExePath(e.PID, e.PPID,
 			eventComm(e, cache), eventParentComm(e, cache))
+	case "lineage", "lineage_exe_paths":
+		// Волна 8.4.1 (см. lineage_field.go): настоящая цепочка предков из таблицы процессов
+		// ядра. Условие на это поле — ПОСЛЕДНЕЕ в группе "and", как у exe_path.
+		return resolveLineageField(e.PID, field)
 	case "systemd_unit":
 		// Долги 8.1, №549 (см. cgroup_unit.go). Юнит system.slice по
 		// cgroup_id, записанному ядром в событие: разрешается и у процесса,

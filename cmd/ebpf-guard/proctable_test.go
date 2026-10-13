@@ -78,7 +78,7 @@ func TestW85_P1_StartProcTable_OffStatesLeaveTheTrackerOnTheOldPath(t *testing.T
 			if c.noLT {
 				lt = profiler.NewLineageTracker(profiler.LineageConfig{Enabled: false}, slog.Default())
 			}
-			closeFn := startProcTable(cfg, lt, dry, neverOpen(t), noSeed, nil)
+			closeFn := startProcTable(cfg, lt, dry, neverOpen(t), noSeed, nil, nil)
 			closeFn()
 			if lt.HasProcSource() {
 				t.Fatal("трекер переключён на таблицу в состоянии off_*")
@@ -94,7 +94,7 @@ func TestW85_P1_StartProcTable_LoadFailureKeepsTheFallback(t *testing.T) {
 	lt := ptTracker()
 	closeFn := startProcTable(ptConfig(), lt, false, func(internalbpf.ProcTableConfig) (procTableHandle, error) {
 		return nil, errors.New("verifier: permission denied")
-	}, noSeed, nil)
+	}, noSeed, nil, nil)
 	closeFn()
 	if lt.HasProcSource() || ptState(internalbpf.ProcTableOffLoadFailed) != 1 {
 		t.Fatalf("has=%v state=%v", lt.HasProcSource(), ptState(internalbpf.ProcTableOffLoadFailed))
@@ -109,12 +109,13 @@ func TestW85_P1_StartProcTable_ActiveSeedsThenSwitchesAndClosesBack(t *testing.T
 	lt := ptTracker()
 	var gotCfg internalbpf.ProcTableConfig
 	reg := prometheus.NewRegistry()
+	imgs := procinfo.NewImageCache(16)
 	closeFn := startProcTable(ptConfig(), lt, false, func(c internalbpf.ProcTableConfig) (procTableHandle, error) {
 		gotCfg = c
 		return ft, nil
 	}, func() ([]internalbpf.SeedRecord, error) {
-		return []internalbpf.SeedRecord{{PID: 100, PPID: 1, Comm: "nginx"}}, nil
-	}, reg)
+		return []internalbpf.SeedRecord{{PID: 100, PPID: 1, Comm: "nginx", ExeDev: 7, ExeIno: 99, ExePath: "/usr/sbin/nginx"}}, nil
+	}, imgs, reg)
 	if gotCfg.LiveEntries != 16384 || gotCfg.ExitedEntries != 16384 || gotCfg.TTL.Seconds() != 300 {
 		t.Fatalf("параметры загрузки: %+v", gotCfg)
 	}
@@ -123,6 +124,9 @@ func TestW85_P1_StartProcTable_ActiveSeedsThenSwitchesAndClosesBack(t *testing.T
 	}
 	if !lt.HasProcSource() || ptState(internalbpf.ProcTableActive) != 1 {
 		t.Fatal("таблица не включена")
+	}
+	if imgs.Len() != 1 {
+		t.Fatalf("засев не наполнил кэш образов: %d", imgs.Len())
 	}
 	tree := lt.GetProcessTree(101)
 	if len(tree) != 2 || tree[0].Comm != "nginx" || tree[1].Comm != "bash" {
@@ -143,7 +147,7 @@ func TestW85_P1_StartProcTable_SeedReadFailureStillActivates(t *testing.T) {
 	ft := &fakeProcTable{}
 	lt := ptTracker()
 	startProcTable(ptConfig(), lt, false, func(internalbpf.ProcTableConfig) (procTableHandle, error) { return ft, nil },
-		func() ([]internalbpf.SeedRecord, error) { return nil, errors.New("/proc unreadable") }, nil)()
+		func() ([]internalbpf.SeedRecord, error) { return nil, errors.New("/proc unreadable") }, nil, nil)()
 	// closeFn вызван — состояние active уже было выставлено до него
 	if ptState(internalbpf.ProcTableActive) != 1 {
 		t.Fatal("засев не должен блокировать включение")

@@ -775,6 +775,7 @@ func NewCorrelationEngineWithConfig(config CorrelationEngineConfig) *Correlation
 	// прийти из конфига — иначе прогон с собственным LineageTracker получил бы
 	// ось предка, смотрящую в чужую карту.
 	SetAncestryResolver(lt)
+	SetLineageChainResolver(lt)
 
 	enforceWorkers := config.EnforceWorkerCount
 	if enforceWorkers <= 0 {

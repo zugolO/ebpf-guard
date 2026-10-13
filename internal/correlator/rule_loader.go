@@ -689,6 +689,9 @@ var identityFields = []string{
 	// Долги 8.1, №549: юнит system.slice по cgroup_id события — ось, которая
 	// переживает мс-процесс (cgroup_unit.go).
 	"systemd_unit", "proc.systemd_unit",
+	// Волна 8.4.1: настоящая цепочка предков из таблицы процессов ядра (lineage_field.go).
+	"lineage", "proc.lineage",
+	"lineage_exe_paths", "proc.lineage_exe_paths",
 }
 
 func init() {

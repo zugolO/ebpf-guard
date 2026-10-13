@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/zugolO/ebpf-guard/internal/procinfo"
 )
 
 // SeedRecord — процесс, существовавший до привязки хуков таблицы (демоны, старше агента).
@@ -23,14 +25,8 @@ type SeedRecord struct {
 // пользователя неизменно 100).
 const procClockTickNs = 10_000_000
 
-// kernelDevFromStat переводит st_dev (кодировка userspace: new_encode_dev —
-// (minor & 0xff) | major<<8 | (minor & ^0xff)<<12) в кодировку ядра s_dev (major<<20 | minor),
-// которую пишет ядро в запись таблицы.
-func kernelDevFromStat(dev uint64) uint32 {
-	major := (dev >> 8) & 0xfff
-	minor := (dev & 0xff) | ((dev >> 12) & 0xfff00)
-	return uint32(major<<20 | minor)
-}
+// kernelDevFromStat — обёртка над procinfo.KernelDevFromStat (кодировка s_dev ядра).
+func kernelDevFromStat(dev uint64) uint32 { return procinfo.KernelDevFromStat(dev) }
 
 // parseProcStat разбирает /proc/<pid>/stat: comm в скобках может содержать пробелы и скобки,
 // поэтому поля считаются после ПОСЛЕДНЕЙ «)». Поле 4 — ppid, поле 22 — starttime (тики от старта системы).

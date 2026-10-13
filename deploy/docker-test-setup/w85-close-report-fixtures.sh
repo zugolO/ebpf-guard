@@ -136,6 +136,10 @@ wantab2() { # wantab2 <имя> <AB_DIR> <NULL_GAP> <шаблон>
 # A=100: 2·√A = 20; B=130 вне полосы 20, но внутри пола нулевой пары 40
 wantab2 ab-floor-lifts-band  "$(mkab ab-fl a0=100 ab=200 b1=330)" 40 '^ДОСТИГНУТО: 8\.5\.3 .*полоса 40'
 wantab2 ab-floor-below-band  "$(mkab ab-fb a0=100 ab=200 b1=330)" 10 '^ПРОВАЛЕН: 8\.5\.3 .*B 130 > A 100 \+ полоса 20'
+# решение 13.10 п. 5: пол 19 по умолчанию (AB_NULL_GAP не задан). A=64: 2·√A = 16 < 18; разрыв 18 → в полосе 19
+wantab ab-floor19-gap18     "$(mkab ab-f18 a0=100 ab=164 b1=246)"  '^ДОСТИГНУТО: 8\.5\.3 .*полоса 19'
+wantab ab-floor19-gap19     "$(mkab ab-f19 a0=100 ab=164 b1=247)"  '^ДОСТИГНУТО: 8\.5\.3 .*полоса 19'
+wantab ab-floor19-gap20     "$(mkab ab-f20 a0=100 ab=164 b1=248)"  '^ПРОВАЛЕН: 8\.5\.3 .*B 84 > A 64 \+ полоса 19'
 wantab2 ab-floor-zero        "$(mkab ab-f0 a0=100 ab=200 b1=330)" 0  '^ПРОВАЛЕН: 8\.5\.3 '
 wantab2 ab-floor-still-fails "$(mkab ab-fs a0=100 ab=200 b1=345)" 40 '^ПРОВАЛЕН: 8\.5\.3 .*B 145 > A 100 \+ полоса 40'
 
@@ -250,7 +254,8 @@ if [ "${1:-}" = "--mutate" ]; then
     mut median-no-limit  's/awk -v m="\$med" -v l="\$lim" .BEGIN { exit !(m <= l) }. || fail=/true || fail=/'
     mut median-peak-per-run 's/\[ -z "\$afail" \] || fail=/true || fail=/'
     mut median-cls-per-run  's/\[ -z "\$pcls" \] || cls=/true || cls=/'
-    mut ab-floor-off     's/if \[ "\${AB_NULL_GAP:-0}" -gt "\$band" \] 2>\/dev\/null; then/if false; then/'
+    mut ab-floor-off     's/if \[ "\${AB_NULL_GAP:-19}" -gt "\$band" \] 2>\/dev\/null; then/if false; then/'
+    mut ab-floor-default 's/\${AB_NULL_GAP:-19}/${AB_NULL_GAP:-0}/g'
     mut null-outside-off 's/if \[ "\$gap" -gt "\$band" \]; then mark=ВНЕ;/if false; then mark=ВНЕ;/'
     mut null-first-pair  's/\[ -n "\$first" \] || first=/first=/'
     mut null-reset-guard 's/\[ \$((vals\[k + 1\])) -ge \$((vals\[k\])) \] || {/true || {/'

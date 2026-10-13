@@ -28,7 +28,7 @@
 #       POD_HOLD_SECS (600), AB_SECS (3600; 0 — без пары, 8.5.3 неизмерима), BASE_IDLE (каталог
 #       idle ночи 8.2 — база 8.5.1 и 8.5.3a; обязателен), SKIP_HOST_ATTACKS=1 (только смок),
 #       BASE_ATT (pod-attack ночи 8.2 — база пакета 8.5.4; без него пакет не измерен, idle судится),
-#       AB_NULL_GAP (разрыв нулевой пары, 0 — полоса 2·√A; решение 13.10 п. 6),
+#       AB_NULL_GAP (пол полосы, по умолчанию 19 — решение 13.10 ч.2 п. 5),
 #       BASE_INC (final-incidents-*.json ночи 8.2 — база доли инцидентов с process_chain, 8.5.5),
 #       D1_PRIOR_RUNS («RUN:ATT» через пробел — прогоны пода прошлых заходов для медианы 8.5.7;
 #       каталоги из server-logs/collect-8.5-d1/ надо привезти на стенд; без них 8.5.7 НЕИЗМЕРИМА).
@@ -351,7 +351,7 @@ cat "$ART/close-report.txt"
     PROFILE_BEFORE="$PROFILE_BEFORE" IDLE="$ART/idle" BASE_IDLE="$BASE_IDLE" bash "$SETUP/w85-close-report.sh" anomaly-hour
     # нулевая пара полосы (решение владельца 13.10, п. 6): на idle ночи 8.2; AB_NULL_GAP — разрыв, если пара вне 2·√A
     IDLE="$BASE_IDLE" AB_SECS="$AB_SECS" bash "$SETUP/w85-close-report.sh" ab-null
-    AB_NULL_GAP="${AB_NULL_GAP:-0}" AB_DIR="$ART/ab" bash "$SETUP/w85-close-report.sh" ab
+    AB_NULL_GAP="${AB_NULL_GAP:-19}" AB_DIR="$ART/ab" bash "$SETUP/w85-close-report.sh" ab
     CTL_ALERTS="$ART/controls-alerts.json" CTL_STATE="$ART/metrics-controls.txt" GATE="$ART/gate.txt" bash "$SETUP/w85-close-report.sh" controls
     # 8.5.7 — медиана ≥ 5 прогонов пода (решение владельца 13.10): прогоны прошлых заходов — D1_PRIOR_RUNS
     # («RUN:ATT» через пробел), прогон этой ночи — последний. Без прогонов заходов метка НЕИЗМЕРИМА.

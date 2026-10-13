@@ -649,6 +649,14 @@ no ancestry leak, and events dropped in the kernel (F1) no longer leave a chain 
   `off_no_lineage` — then the tracker stays on its Go maps and `/proc`
   (`ebpf_guard_lineage_proc_reads_total` counts those reads and stays flat while the table is active).
   Hook outcomes: `ebpf_guard_proc_table_events_total{event}`.
+* Image for `proc.exe_path` / `parent_exe_path` / `ancestor_exe_path` (wave 8.5, E1): while the table is active, the image
+  of a process is taken from the table record (exe dev/ino written at `sched_process_exec`) through an inode → path
+  cache (≤ 4096 entries, ≈ 0.5 MiB at capacity, `ebpf_guard_exe_image_cache_entries`); a path enters the cache only
+  after `stat` returns the same dev/ino, and every cache hit is re-checked, so a file removed or replaced at the same
+  path is not an image (the kernel would show `(deleted)`). A process that exited before the rule was evaluated still
+  resolves. `readlink /proc/<pid>/exe` stays as the fallback: `ebpf_guard_exe_path_image_total{result}` (cached, proc,
+  filename, stale, unresolved, no_record, no_inode, no_table) and `ebpf_guard_exe_path_readlink_fallback_total{result}`.
+  A hard link to the same file resolves to the first path the agent saw for that inode (same file, same content).
 * `GET /debug/lineage?pid=N` (debug endpoints enabled): what the agent sees for the ancestors of a pid — for a
   live comparison with `/proc`.
 

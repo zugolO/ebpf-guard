@@ -7,6 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/zugolO/ebpf-guard/internal/procinfo"
 )
 
 // Wave 6.2.1, слой 2 продакшен-решения (№220/№221).
@@ -159,12 +161,6 @@ func SetExePathResolver(r ExePathResolver) {
 // только в лейбл метрики и не влияет на разрешение: вызывающая сторона уже
 // выбрала PID или PPID.
 func resolveExePath(pid uint32, field string) string {
-	h, _ := exeResolver.Load().(exeResolverHolder)
-	v := h.r
-	if v == nil {
-		exePathLookups.WithLabelValues("unresolved", field).Inc()
-		return ""
-	}
 	p := rawResolveExePath(pid)
 	if p == "" {
 		exePathLookups.WithLabelValues("unresolved", field).Inc()
@@ -174,19 +170,128 @@ func resolveExePath(pid uint32, field string) string {
 	return p
 }
 
-// rawResolveExePath — разрешение без счётчика. Обход родословной ниже делает
+// rawResolveExePath — разрешение без счётчика lookups. Обход родословной ниже делает
 // до maxAncestorExePathHops попыток на ОДНО вычисление поля, и если бы каждая
 // попытка инкрементила exePathLookups, доля unresolved по оси
 // ancestor_exe_path считала бы хопы, а не поля, — та же подмена величины,
 // из-за которой №277 вообще появился (один счётчик на две оси). Поэтому
 // exePathLookups{field="ancestor_exe_path"} инкрементится РОВНО ОДИН РАЗ на
 // вычисление поля, а внутренняя механика обхода живёт в своём счётчике.
+//
+// Волна 8.5, E1: сперва образ из таблицы процессов ядра (dev/ino на
+// sched_process_exec → кэш «inode → путь»), и только если он не ответил —
+// прежний readlink /proc/<pid>/exe (fallback со своим счётчиком). Мс-процесс,
+// успевший выйти до разбора правила, образ в таблице оставляет — readlink его
+// уже не видит (память short-lived-detect-virt-exe-unresolved).
 func rawResolveExePath(pid uint32) string {
+	if p := resolveExePathByImage(pid); p != "" {
+		return p
+	}
 	h, _ := exeResolver.Load().(exeResolverHolder)
 	if h.r == nil {
 		return ""
 	}
-	return h.r.ResolveExePath(pid)
+	p := h.r.ResolveExePath(pid)
+	if p == "" {
+		exePathReadlinkFallback.WithLabelValues("unresolved").Inc()
+	} else {
+		exePathReadlinkFallback.WithLabelValues("resolved").Inc()
+	}
+	return p
+}
+
+// --- Волна 8.5, E1: образ по dev/ino из таблицы процессов --------------------------------------
+//
+// Идентичность образа процесса пишет ядро в sched_process_exec (P1: exe dev/ino в записи
+// pid). Userspace держит кэш «inode → путь» (procinfo.ImageCache, сотни записей), поэтому на
+// оценке правила не нужен ни readlink, ни живой процесс: достаточно записи таблицы. Путь в кэш
+// попадает только проверенный stat'ом по dev/ino записи (ImageCache.Resolve), а попадание в кэш
+// сверяется заново (ResolveChecked): удалённый/заменённый по тому же пути файл — НЕ образ, как
+// и у прежнего readlink с суффиксом « (deleted)».
+//
+// Антиспуф тот же, что у readlink: comm и argv[0] (prctl, exec -a) образ не меняют, копия бинаря
+// под другим именем — другой inode и другой путь.
+
+// exeImageHolder оборачивает источник записей таблицы процессов (atomic.Value не принимает nil-интерфейс).
+type exeImageHolder struct{ src procinfo.Source }
+
+var exeImageSource atomic.Value // exeImageHolder
+
+// SetExeImageSource подключает таблицу процессов ядра к оси exe_path. nil отключает (ось идёт
+// прежним readlink).
+func SetExeImageSource(src procinfo.Source) {
+	exeImageSource.Store(exeImageHolder{src: src})
+}
+
+// Исходы image-оси exe_path: cached/proc/filename — путь получен (как у procinfo.ImageCache);
+// stale — кэш знал путь, но файл изменился; unresolved — запись есть, проверяемого пути нет;
+// no_record — записи pid нет (вытеснена, процесс старше агента, ядро-поток); no_inode — запись без
+// образа; no_table — таблицы нет (прежний путь).
+const (
+	exeImageNoRecord = "no_record"
+	exeImageNoInode  = "no_inode"
+	exeImageNoTable  = "no_table"
+)
+
+var exePathImage = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_exe_path_image_total",
+		Help: "proc.exe_path resolutions through the kernel process table (E1) by outcome: cached, proc, filename (a path verified by dev/ino), stale (the cached file changed or was removed), unresolved, no_record, no_inode, no_table. Anything but cached/proc/filename falls back to readlink /proc/<pid>/exe",
+	},
+	[]string{"result"},
+)
+
+var exePathReadlinkFallback = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_exe_path_readlink_fallback_total",
+		Help: "readlink /proc/<pid>/exe taken because the process table did not answer (E1 fallback), by result",
+	},
+	[]string{"result"},
+)
+
+var _ = promauto.NewGaugeFunc(
+	prometheus.GaugeOpts{
+		Name: "ebpf_guard_exe_image_cache_entries",
+		Help: "Entries of the inode→path image cache shared by proc.exe_path and proc.lineage (≤ 4096)",
+	},
+	func() float64 { return float64(lineageImages.Len()) },
+)
+
+func init() {
+	for _, r := range []string{
+		procinfo.ImageCached, procinfo.ImageProc, procinfo.ImageFilename, procinfo.ImageStale,
+		procinfo.ImageUnresolved, exeImageNoRecord, exeImageNoInode, exeImageNoTable,
+	} {
+		exePathImage.WithLabelValues(r)
+	}
+	exePathReadlinkFallback.WithLabelValues("resolved")
+	exePathReadlinkFallback.WithLabelValues("unresolved")
+}
+
+// resolveExePathByImage — образ pid по записи таблицы процессов; "" — не ответила (вызывающая
+// сторона идёт на readlink).
+func resolveExePathByImage(pid uint32) string {
+	h, _ := exeImageSource.Load().(exeImageHolder)
+	if h.src == nil {
+		exePathImage.WithLabelValues(exeImageNoTable).Inc()
+		return ""
+	}
+	if pid == 0 {
+		return ""
+	}
+	rec, res := h.src.Lookup(pid)
+	if res != procinfo.Found {
+		exePathImage.WithLabelValues(exeImageNoRecord).Inc()
+		return ""
+	}
+	if rec.ExeIno == 0 {
+		exePathImage.WithLabelValues(exeImageNoInode).Inc()
+		return ""
+	}
+	rec.PID = pid
+	p, how := lineageImages.ResolveChecked(rec)
+	exePathImage.WithLabelValues(how).Inc()
+	return p
 }
 
 // --- Волна 6.2.6, item 5 (№261 → №277 → №285): ось предка ----------------

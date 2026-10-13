@@ -8,6 +8,7 @@ import (
 
 	internalbpf "github.com/zugolO/ebpf-guard/internal/bpf"
 	"github.com/zugolO/ebpf-guard/internal/config"
+	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/procinfo"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 )
@@ -83,11 +84,14 @@ func startProcTable(cfg *config.Config, lt *profiler.LineageTracker, dryRun bool
 		}
 	}
 	lt.SetProcSource(t)
+	// E1: образ процесса для proc.exe_path — по dev/ino из таблицы, readlink остаётся запасным путём
+	correlator.SetExeImageSource(t)
 	internalbpf.SetProcTableState(internalbpf.ProcTableActive)
 	slog.Info("proc table: active — ancestor chains are read from the kernel, no /proc on the event path",
 		slog.Int("live_entries", cfg.BPF.ProcTable.LiveEntries), slog.Int("exited_entries", cfg.BPF.ProcTable.ExitedEntries),
 		slog.Duration("ttl", time.Duration(cfg.Profiler.Lineage.TTL)*time.Second))
 	return func() {
+		correlator.SetExeImageSource(nil)
 		lt.SetProcSource(nil)
 		_ = t.Close()
 	}

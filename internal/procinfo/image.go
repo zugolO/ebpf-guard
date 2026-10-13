@@ -92,6 +92,7 @@ const (
 	ImageProc       = "proc"       // живой процесс: readlink /proc/<pid>/exe, сверен по inode
 	ImageFilename   = "filename"   // путь exec-filename из таблицы, сверен по inode
 	ImageUnresolved = "unresolved" // проверяемого пути нет
+	ImageStale      = "stale"      // кэш знал путь, но файл по нему теперь другой/удалён (ResolveChecked)
 )
 
 // Resolve отдаёт путь образа процесса rec и способ, которым он получен. Пусто — не разрешился
@@ -127,4 +128,38 @@ func (c *ImageCache) Resolve(rec Record) (path, how string) {
 		}
 	}
 	return "", ImageUnresolved
+}
+
+// forget удаляет запись образа, если она всё ещё указывает на path.
+func (c *ImageCache) forget(k imageKey, path string) {
+	c.mu.Lock()
+	if c.m[k] == path {
+		delete(c.m, k)
+	}
+	c.mu.Unlock()
+}
+
+// ResolveChecked — Resolve для оси exe_path (волна 8.5, E1): попадание в кэш сверяется stat по
+// dev/ino записи. Файл, удалённый или заменённый по тому же пути (новый inode), даёт ImageStale и
+// пустой путь, а запись выбрасывается: ядро для такого образа показывает «<путь> (deleted)», и
+// исключение по образу к нему не применяется (самоудаляющийся дроппер не получает исключение
+// демона, см. correlator/exepath.go). Вызывающая сторона при пустом пути идёт прежним readlink,
+// который вернёт ровно то, что видит ядро. Кэш для lineage (Resolve) остаётся без сверки: ему
+// нужен образ звена на момент exec, а не нынешнее состояние файла.
+func (c *ImageCache) ResolveChecked(rec Record) (path, how string) {
+	if rec.ExeIno == 0 {
+		return "", ImageUnresolved
+	}
+	k := imageKey{rec.ExeDev, rec.ExeIno}
+	c.mu.RLock()
+	p, ok := c.m[k]
+	c.mu.RUnlock()
+	if ok {
+		if dev, ino, sok := c.stat(p); sok && dev == rec.ExeDev && ino == rec.ExeIno {
+			return p, ImageCached
+		}
+		c.forget(k, p)
+		return "", ImageStale
+	}
+	return c.Resolve(rec)
 }

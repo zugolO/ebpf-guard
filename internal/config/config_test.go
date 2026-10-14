@@ -580,6 +580,33 @@ func TestKernelFilterConfig_PathDenylistDefaultEmpty(t *testing.T) {
 	assert.Empty(t, cfg.BPF.KernelFilter.PathDenylist)
 }
 
+// Волна 8.5, решение 5: F1 включён по умолчанию с ночи закрытия 8.5. Сторожит
+// все три пути: пустой конфиг (умолчание Go), поставляемый config/config.yaml и
+// частичный блок, какой рендерит чарт (только arg_predicates), — выключение там
+// не должно снимать kernel_filter.enabled.
+func TestKernelFilterConfig_ArgPredicatesDefaultOn(t *testing.T) {
+	tmpDir := t.TempDir()
+	empty := filepath.Join(tmpDir, "empty.yaml")
+	require.NoError(t, os.WriteFile(empty, []byte(""), 0644))
+	mgr, err := NewManager(empty)
+	require.NoError(t, err)
+	defer mgr.Stop()
+	assert.True(t, mgr.Get().BPF.KernelFilter.ArgPredicates.Enabled, "умолчание Go")
+
+	shipped, err := NewManagerSkipPermCheck(filepath.Join("..", "..", "config", "config.yaml"))
+	require.NoError(t, err)
+	defer shipped.Stop()
+	assert.True(t, shipped.Get().BPF.KernelFilter.ArgPredicates.Enabled, "config/config.yaml")
+
+	off := filepath.Join(tmpDir, "off.yaml")
+	require.NoError(t, os.WriteFile(off, []byte("bpf:\n  kernel_filter:\n    arg_predicates:\n      enabled: false\n"), 0644))
+	mgrOff, err := NewManager(off)
+	require.NoError(t, err)
+	defer mgrOff.Stop()
+	assert.False(t, mgrOff.Get().BPF.KernelFilter.ArgPredicates.Enabled)
+	assert.True(t, mgrOff.Get().BPF.KernelFilter.Enabled, "частичный блок не снимает kernel_filter")
+}
+
 func TestKernelFilterConfig_PathDenylistOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

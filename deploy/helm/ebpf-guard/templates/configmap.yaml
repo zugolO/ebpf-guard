@@ -21,6 +21,9 @@ data:
         events: {{ .Values.config.bpf.map_sizes.events }}
         processes: {{ .Values.config.bpf.map_sizes.processes }}
         connections: {{ .Values.config.bpf.map_sizes.connections }}
+      kernel_filter:
+        arg_predicates:
+          enabled: {{ dig "kernel_filter" "arg_predicates" "enabled" true .Values.config.bpf }}
 
     rules:
       path: {{ .Values.config.rules.path | quote }}

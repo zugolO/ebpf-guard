@@ -342,8 +342,8 @@ prometheusRule:
               container IDs cannot be extracted from cgroups. Alerts from these events will
               lack namespace/label enrichment.
         # Wave 8.5 (F1): in-kernel syscall argument predicates. off_config is the
-        # operator's own choice (the default until the closing night of 8.5), so it
-        # is NOT alerted; every other off_* state means the predicates were wanted
+        # operator's own choice (enabled by default since the closing night of 8.5),
+        # so it is NOT alerted; every other off_* state means the predicates were wanted
         # but are silently inactive and the hot syscall numbers flow whole again.
         - alert: EbpfGuardKernelPredicatesOff
           expr: ebpf_guard_kernel_predicate_state{state=~"off_.+", state!="off_config"} == 1
@@ -427,6 +427,13 @@ config:
       events: 65536
       processes: 16384
       connections: 32768
+    # Wave 8.5 (F1): in-kernel argument predicates for hot syscalls (mmap,
+    # mprotect, arch_prctl), derived from the loaded rules. Inactive while
+    # profiler.syscall_allowlist or drift is on (state in
+    # ebpf_guard_kernel_predicate_state). false = every number flows whole.
+    kernel_filter:
+      arg_predicates:
+        enabled: true
     # BTF CO-RE portability settings (kernels 5.4+ without /sys/kernel/btf/vmlinux)
     btf_path: ""                              # explicit BTF file override; empty = auto-detect
     btf_hub_enabled: true                     # download from BTF hub on first run if local BTF absent

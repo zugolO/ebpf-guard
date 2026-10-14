@@ -956,8 +956,8 @@ type KernelFilterConfig struct {
 // profiler.syscall_allowlist и детектор дрейфа контейнера drift.enabled
 // (решение (3), 12.10.2026). Причина — в метрике ebpf_guard_kernel_predicate_state.
 type ArgPredicatesConfig struct {
-	// Enabled включает вывод и запись предикатов. Default: false — до ночи
-	// закрытия волны 8.5; владелец переключает по её итогам.
+	// Enabled включает вывод и запись предикатов. Default: true — с ночи
+	// закрытия волны 8.5 (14.10.2026: тождество детекта, контроли 3/3).
 	Enabled bool `mapstructure:"enabled"`
 	// Nrs — номера-кандидаты. Default: [9 mmap, 10 mprotect, 158 arch_prctl].
 	// bpf (321) не кандидат: drift_dangerous_syscall смотрит все cmd (решение (2)).
@@ -2206,7 +2206,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.kernel_filter.path_denylist", []string{})
 	// Волна 8.5, F1: выключено до ночи закрытия волны.
 	v.SetDefault("bpf.kernel_filter.self_exclude_bpf_calls", true)
-	v.SetDefault("bpf.kernel_filter.arg_predicates.enabled", false)
+	v.SetDefault("bpf.kernel_filter.arg_predicates.enabled", true)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.nrs", []int{9, 10, 158})
 	v.SetDefault("bpf.kernel_filter.arg_predicates.counters_interval", 5*time.Second)
 	v.SetDefault("bpf.proc_table.enabled", true)

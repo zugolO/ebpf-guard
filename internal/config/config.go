@@ -2204,7 +2204,7 @@ func setDefaults(v *viper.Viper) {
 	// P1-18b: empty by default, deliberately not populated from a built-in
 	// list — see the PathDenylist field doc for why this is opt-in only.
 	v.SetDefault("bpf.kernel_filter.path_denylist", []string{})
-	// Волна 8.5, F1: выключено до ночи закрытия волны.
+	// Волна 8.5: F3 (самоисключение bpf()), F1 (включён с ночи закрытия 8.5), P1.
 	v.SetDefault("bpf.kernel_filter.self_exclude_bpf_calls", true)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.enabled", true)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.nrs", []int{9, 10, 158})

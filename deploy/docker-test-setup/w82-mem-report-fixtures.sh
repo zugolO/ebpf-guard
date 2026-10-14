@@ -45,6 +45,20 @@ mk vmap 100 1900 0 1 20 0
 o=$(bash "$E" "$T/vmap"); need "кольца через vmap" "$o" "= размер колец (vmap без pages=" "ДОСТИГНУТО: 8.2.4 ДОСТИГНУТО (карт без программ 0, карты+кольца 24.0"
 mk empty 100 1900 0 1 20 10; : > "$T/empty/memory.current"; rm -f "$T/empty/maps.json"
 o=$(bash "$E" "$T/empty"); need "пустой снимок ≠ ноль" "$o" "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: нет memory.current)" "НЕИЗМЕРИМ: 8.2.4 НЕИЗМЕРИМ (класс НАЗВАН: нет maps.json"
+# 8.2.2 (№560): карты P1 вычитаются из memory.current; две таблицы на ноде — НЕИЗМЕРИМ.
+p1maps() { # <каталог> <число таблиц>
+    local d="$T/$1" j='{"id":1,"type":"hash","name":"live","bytes_memlock":4096},{"id":2,"type":"ringbuf","name":"events","max_entries":4194304,"bytes_memlock":0}' i
+    for i in $(seq 1 "$2"); do j="$j,{\"id\":$((20+i)),\"type\":\"hash\",\"name\":\"proc_live\",\"bytes_memlock\":3145728},{\"id\":$((30+i)),\"type\":\"lru_hash\",\"name\":\"proc_exited\",\"bytes_memlock\":3145728},{\"id\":$((40+i)),\"type\":\"percpu_array\",\"name\":\"proc_table_coun\",\"bytes_memlock\":4096}"; done
+    echo "[$j]" > "$d/maps.json"
+}
+mk p1 124 1900 0 1 20 10; p1maps p1 1
+o=$(bash "$E" "$T/p1"); need "8.2.2 минус карты P1" "$o" "ДОСТИГНУТО: 8.2.2 ДОСТИГНУТО (memory.current idle 124.0 − карты P1 6.0 = 118.0 МиБ ≤ 120, запас 2.0"
+mk p1big 127 1900 0 1 20 10; p1maps p1big 1
+o=$(bash "$E" "$T/p1big"); need "8.2.2 сверх порога и после вычета" "$o" "ПРОВАЛЕН: 8.2.2 ПРОВАЛЕН (memory.current idle 127.0 − карты P1 6.0 = 121.0 МиБ > 120"
+mk p1two 110 1900 0 1 20 10; p1maps p1two 2
+o=$(bash "$E" "$T/p1two"); need "8.2.2 две таблицы — НЕИЗМЕРИМ, не вычет обеих" "$o" "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: таблиц процессов на ноде 2"
+mk p1nomaps 110 1900 0 1 20 10; rm -f "$T/p1nomaps/maps.json"
+o=$(bash "$E" "$T/p1nomaps"); need "8.2.2 без maps.json — НЕИЗМЕРИМ, не сырой current" "$o" "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: нет maps.json — цену карт P1 вычесть нечем"
 # C5: sys 100 − released 40 = 60 Go; current 100 → не-Go 40; текст 30 → резерв 70.
 mkgo() { # <каталог> <inuse МиБ> [текст КиБ]
     mk "$1" 100 1900 0 1 20 10

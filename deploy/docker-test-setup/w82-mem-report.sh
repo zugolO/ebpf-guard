@@ -17,6 +17,9 @@ BPF_MAX_MIB=${BPF_MAX_MIB:-40}   # 8.2.4: карты + кольца, физ. с�
 BUDGET_MIB=${BUDGET_MIB:-150}    # C5: пик под атаками (8.2.1)
 LIMIT_MIB=${LIMIT_MIB:-192}      # C5: лимит пода (item E: пик × 1,25)
 SPIRAL_K=${SPIRAL_K:-1.25}       # C5: GOMEMLIMIT не ниже K × heap_inuse — иначе GC-спираль
+# 8.2.2 (№560, решение 14.10.2026): idle судится как memory.current − memlock карт
+# таблицы процессов P1 — цена P1 в memcg, а не рост. Имена bpftool усечены до 15.
+P1_MAPS=${P1_MAPS:-'^(proc_live|proc_exited|proc_table_coun)$'}
 
 mib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1048576 }'; }
 stat_of() { awk -v k="$1" '$1 == k { print $2; f = 1 } END { if (!f) print "" }' "$D/memory.stat" 2>/dev/null; }
@@ -166,14 +169,26 @@ fi
 echo ""
 
 echo "-- метки"
+# Цена P1 — memlock её карт из maps.json ТОГО ЖЕ снимка. Две таблицы на ноде (два
+# агента) — чья заряжена в этот cgroup, bpftool 5.15 не говорит (pid в JSON нет).
+p1_live=""; p1_ml=""
+if [ -s "$D/maps.json" ] && jq -e 'type == "array"' "$D/maps.json" > /dev/null 2>&1; then
+    read -r p1_live p1_ml < <(jq -r --arg re "$P1_MAPS" '[ (map(select(.name == "proc_live")) | length),
+        (map(select((.name // "") | test($re)) | .bytes_memlock // 0) | add // 0) ] | @tsv' "$D/maps.json")
+fi
 if [ -z "$cur" ]; then
     echo "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: нет memory.current)"
 elif [ -z "$etimes" ] || [ "$etimes" -lt "$IDLE_MIN_S" ]; then
     echo "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: аптайм ${etimes:-?} с < $IDLE_MIN_S — idle судится через 30 мин); memory.current $(mib "$cur") МиБ"
+elif [ -z "$p1_live" ]; then
+    echo "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: нет maps.json — цену карт P1 вычесть нечем); memory.current $(mib "$cur") МиБ"
+elif [ "$p1_live" -gt 1 ]; then
+    echo "НЕИЗМЕРИМ: 8.2.2 НЕИЗМЕРИМ (класс НАЗВАН: таблиц процессов на ноде $p1_live — чья в этом cgroup, не различить); memory.current $(mib "$cur") МиБ"
 else
-    awk -v c="$cur" -v lim="$IDLE_MAX_MIB" -v acc="$ACC" 'BEGIN { v = c / 1048576
-        if (v <= lim) printf "ДОСТИГНУТО: 8.2.2 ДОСТИГНУТО (memory.current idle %.1f МиБ ≤ %d; учёт %s)\n", v, lim, acc
-        else printf "ПРОВАЛЕН: 8.2.2 ПРОВАЛЕН (memory.current idle %.1f МиБ > %d; учёт %s)\n", v, lim, acc }'
+    awk -v c="$cur" -v p="$p1_ml" -v lim="$IDLE_MAX_MIB" -v acc="$ACC" 'BEGIN { M = 1048576; v = (c - p) / M
+        d = sprintf("memory.current idle %.1f − карты P1 %.1f = %.1f МиБ", c / M, p / M, v)
+        if (v <= lim) printf "ДОСТИГНУТО: 8.2.2 ДОСТИГНУТО (%s ≤ %d, запас %.1f; учёт %s)\n", d, lim, lim - v, acc
+        else printf "ПРОВАЛЕН: 8.2.2 ПРОВАЛЕН (%s > %d; учёт %s)\n", d, lim, acc }'
 fi
 if [ -z "$unref_n" ]; then
     echo "НЕИЗМЕРИМ: 8.2.4 НЕИЗМЕРИМ (класс НАЗВАН: нет maps.json/progs.json)"

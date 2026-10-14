@@ -39,7 +39,6 @@ func TestProfiler_AccessorsAndMetrics(t *testing.T) {
 	assert.LessOrEqual(t, prog, 1.0)
 
 	// Lineage match handler can be registered.
-	p.SetLineageMatchHandler(func(LineageMatch) {})
 
 	// Cleanup with the current time is a safe no-op on an empty profiler.
 	p.Cleanup(time.Now())

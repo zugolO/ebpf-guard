@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"math"
 	"math/rand"
 	"path/filepath"
@@ -229,53 +228,70 @@ func TestW85_F2_EWMAUpdateNMatchesSequential(t *testing.T) {
 	}
 }
 
-// Вывод этапа 1 (F2): Марков/SequenceProfiler живёт ТОЛЬКО за Profiler.Ingest,
-// а у него в живом пути агента нет вызывающих — события идут через
-// CorrelationEngine, у которого свои AnomalyDetector'ы по воркерам. Поэтому
-// F1 Марков не задевает и перенос на счётчики ему не нужен. Сторож: если
-// кто-то подключит Profiler.Ingest к живому пути, этот тест красный — тогда
-// отбор в ядре снова теряет вход Маркова молча, и F2 надо расширять
-// (пары переходов в ядре либо исключение отобранных номеров из модели).
-func TestW85_F2_NoLiveCallerOfProfilerIngest(t *testing.T) {
-	fset := token.NewFileSet()
-	var callers []string
-	for _, dir := range []string{"cmd", "internal", "pkg"} {
-		_ = filepath.WalkDir(filepath.Join("../..", dir), func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			if strings.Contains(filepath.ToSlash(path), "internal/profiler/") {
-				return nil
-			}
-			f, perr := parser.ParseFile(fset, path, nil, 0)
-			if perr != nil {
-				return nil
-			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Ingest" {
-					return true
-				}
-				var x string
-				switch v := sel.X.(type) {
-				case *ast.Ident:
-					x = v.Name
-				case *ast.SelectorExpr:
-					x = v.Sel.Name
-				}
-				if x == "prof" || x == "profiler" || x == "Profiler" {
-					callers = append(callers, path)
-				}
-				return true
-			})
-			return nil
-		})
+// Волна 8.6, Д4 (№558): Profiler.Ingest и всё, что жило только через него, удалено.
+// Сторож заменяет прежний «нет живого вызывающего» (8.5, F2): тот проверял, что
+// вход не подключён; этот — что СИМВОЛОВ нет, подключить нечего. Вернуть любой из
+// них — значит вернуть мёртвый слой (Марков/EWMA-вход мимо движка, зашитые
+// паттерны цепочек) и ложное чувство покрытия: живой детект цепочек — правила.
+func TestW86_D4_DeadIngestSymbolsAreGone(t *testing.T) {
+	banned := map[string]string{
+		"Profiler.Ingest":                 "вход профайлера мимо CorrelationEngine",
+		"Profiler.allowlistCheck":         "обёртка allowlist только для Ingest (движок зовёт Record/Check сам)",
+		"Profiler.buildAllowlistAnomaly":  "только для Ingest",
+		"Profiler.SetLineageMatchHandler": "колбэк совпадений паттернов",
+		"LineageTracker.Update":           "зашитые паттерны цепочек",
+		"LineageTracker.SetMatchHandler":  "колбэк совпадений паттернов",
+		"LineageTracker.checkPattern":     "зашитые паттерны цепочек",
+		"LineageTracker.tableParentInfo":  "только для Update",
+		"evaluateLineageCondition":        "зашитые паттерны цепочек",
+		"matchesAny":                      "зашитые паттерны цепочек",
+		"Anomaly":                         "тип результата Ingest",
+		"AnomalyType":                     "тип результата Ingest",
+		"LineagePattern":                  "зашитые паттерны цепочек",
+		"LineageCondition":                "зашитые паттерны цепочек",
+		"LineageMatch":                    "зашитые паттерны цепочек",
 	}
-	if len(callers) != 0 {
-		t.Fatalf("Profiler.Ingest подключён к живому пути (%v): SequenceProfiler/Марков теперь читают номер вызова — F2 обязан дать им вход (plan.md, 8.5 F2)", callers)
+	fset := token.NewFileSet()
+	found := map[string]bool{}
+	entries, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range entries {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		for _, d := range f.Decls {
+			switch dd := d.(type) {
+			case *ast.FuncDecl:
+				name := dd.Name.Name
+				if dd.Recv != nil && len(dd.Recv.List) == 1 {
+					switch rt := dd.Recv.List[0].Type.(type) {
+					case *ast.StarExpr:
+						if id, ok := rt.X.(*ast.Ident); ok {
+							name = id.Name + "." + name
+						}
+					case *ast.Ident:
+						name = rt.Name + "." + name
+					}
+				}
+				found[name] = true
+			case *ast.GenDecl:
+				for _, sp := range dd.Specs {
+					if ts, ok := sp.(*ast.TypeSpec); ok {
+						found[ts.Name.Name] = true
+					}
+				}
+			}
+		}
+	}
+	for sym, why := range banned {
+		if found[sym] {
+			t.Errorf("символ %s вернулся (%s): план 8.6 Д4 — удалён, живой детект цепочек — правила", sym, why)
+		}
 	}
 }

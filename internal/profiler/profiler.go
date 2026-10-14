@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
 // Profiler provides high-level behavioral profiling and anomaly detection.
@@ -20,27 +19,6 @@ type Profiler struct {
 	weight    float64
 	ttl       time.Duration
 }
-
-// Anomaly represents a detected behavioral anomaly.
-type Anomaly struct {
-	PID           uint32
-	Comm          string
-	Namespace     string // K8s namespace; empty for non-K8s processes
-	AppLabel      string // pod label "app"; empty when absent
-	Score         float64
-	Contributions map[string]interface{}
-	Type          AnomalyType
-}
-
-// AnomalyType identifies the type of anomaly detected.
-type AnomalyType string
-
-const (
-	AnomalyTypeBehavior  AnomalyType = "behavior"  // EWMA-based anomaly
-	AnomalyTypeSequence  AnomalyType = "sequence"  // Syscall sequence anomaly
-	AnomalyTypeLineage   AnomalyType = "lineage"   // Process lineage anomaly
-	AnomalyTypeAllowlist AnomalyType = "allowlist" // Syscall allowlist violation
-)
 
 // ProfilerStats contains profiler learning statistics for the debug endpoint.
 type ProfilerStats struct {
@@ -141,170 +119,6 @@ func (p *Profiler) RegisterMetrics(reg prometheus.Registerer) error {
 		}
 	}
 	return nil
-}
-
-// Ingest processes an event and returns anomalies if detected.
-// May return multiple anomalies from different detectors. When both the EWMA
-// anomaly detector and the syscall allowlist profiler flag the same event,
-// their scores are combined into a single boosted AnomalyTypeAllowlist anomaly.
-func (p *Profiler) Ingest(e types.Event) []*Anomaly {
-	var anomalies []*Anomaly
-
-	// Run EWMA-based anomaly detection
-	ewmaResult := p.detector.ProcessEvent(e, false)
-
-	// Run syscall allowlist: always record (for learning), check for violations.
-	allowlistViolation := p.allowlistCheck(e)
-
-	// Collect per-event anomaly info for cross-detector combination.
-	var behaviorAnomaly *Anomaly
-	if ewmaResult != nil && ewmaResult.IsAnomaly {
-		contributions := make(map[string]interface{})
-		for _, c := range ewmaResult.Contributions {
-			contributions[c.Field] = map[string]interface{}{
-				"category": c.Category,
-				"value":    c.Value,
-				"score":    c.Contribution,
-			}
-		}
-		behaviorAnomaly = &Anomaly{
-			PID:           ewmaResult.PID,
-			Comm:          ewmaResult.Comm,
-			Namespace:     ewmaResult.Namespace,
-			AppLabel:      ewmaResult.AppLabel,
-			Score:         ewmaResult.Score,
-			Contributions: contributions,
-			Type:          AnomalyTypeBehavior,
-		}
-	}
-
-	var allowlistAnomaly *Anomaly
-	if allowlistViolation != nil {
-		allowlistAnomaly = p.buildAllowlistAnomaly(e, allowlistViolation)
-	}
-
-	// ── Cross-detector signal fusion ──
-	// When both the EWMA anomaly detector AND the syscall allowlist flag the
-	// same event, combine the signals into a single boosted anomaly instead of
-	// emitting two separate alerts. The combined score is a weighted blend:
-	//   combined = max(ewmaScore, 1.0) * 0.5 + 0.5   (boosts allowlist certainty)
-	// This catches novel attacks where the syscall itself was never seen AND
-	// the behavioral profile also looks unusual.
-	if behaviorAnomaly != nil && allowlistAnomaly != nil {
-		boosted := behaviorAnomaly.Score
-		if boosted < 1.0 {
-			boosted = 1.0 // unknown syscall gives full baseline weight
-		}
-		allowlistAnomaly.Score = boosted*0.5 + 0.5
-		allowlistAnomaly.Contributions["ewma_score"] = behaviorAnomaly.Score
-		allowlistAnomaly.Contributions["ewma_contributions"] = behaviorAnomaly.Contributions
-		allowlistAnomaly.Type = AnomalyTypeAllowlist
-		anomalies = append(anomalies, allowlistAnomaly)
-	} else if behaviorAnomaly != nil {
-		anomalies = append(anomalies, behaviorAnomaly)
-	} else if allowlistAnomaly != nil {
-		anomalies = append(anomalies, allowlistAnomaly)
-	}
-
-	// Run sequence anomaly detection
-	if dist, isAnomaly := p.sequence.Update(e); isAnomaly {
-		ns, app := "", ""
-		if e.Enrichment != nil {
-			ns = e.Enrichment.Namespace
-			app = e.Enrichment.Labels["app"]
-		}
-		anomalies = append(anomalies, &Anomaly{
-			PID:       e.PID,
-			Comm:      cleanComm(e.Comm[:]),
-			Namespace: ns,
-			AppLabel:  app,
-			Score:     dist,
-			Contributions: map[string]interface{}{
-				"sequence_distance": dist,
-				"threshold":         p.sequence.config.Threshold,
-			},
-			Type: AnomalyTypeSequence,
-		})
-	}
-
-	// Run lineage tracking
-	if match := p.lineage.Update(e); match != nil {
-		severity := 0.8
-		if match.Pattern.Severity == "critical" {
-			severity = 1.0
-		}
-		ns, app := "", ""
-		if e.Enrichment != nil {
-			ns = e.Enrichment.Namespace
-			app = e.Enrichment.Labels["app"]
-		}
-		anomalies = append(anomalies, &Anomaly{
-			PID:       e.PID,
-			Comm:      match.Comm,
-			Namespace: ns,
-			AppLabel:  app,
-			Score:     severity,
-			Contributions: map[string]interface{}{
-				"pattern":     match.Pattern.Name,
-				"description": match.Pattern.Description,
-				"parent":      match.ParentComm,
-				"parent_pid":  match.PPID,
-				"severity":    match.Pattern.Severity,
-			},
-			Type: AnomalyTypeLineage,
-		})
-	}
-
-	return anomalies
-}
-
-// allowlistCheck records the event for learning and checks for violations.
-// Returns nil when allowlist is disabled, during learning, or for permitted syscalls.
-// Audit-mode violations are logged but not returned (no alert generated).
-func (p *Profiler) allowlistCheck(e types.Event) *AllowlistViolation {
-	p.allowlist.Record(e)
-	v := p.allowlist.Check(e)
-	if v != nil && v.Action == AllowlistActionAudit {
-		slog.Info("allowlist: audit violation (no alert)",
-			"workload", v.WorkloadKey.String(),
-			"syscall", v.SyscallNr,
-			"source", v.Source,
-		)
-		return nil
-	}
-	return v
-}
-
-// buildAllowlistAnomaly constructs an Anomaly from an AllowlistViolation.
-func (p *Profiler) buildAllowlistAnomaly(e types.Event, v *AllowlistViolation) *Anomaly {
-	ns, app := "", ""
-	if e.Enrichment != nil {
-		ns = e.Enrichment.Namespace
-		app = e.Enrichment.Labels["app"]
-	}
-	score := 0.8
-	if v.Source == "global_deny" {
-		score = 1.0
-	}
-	return &Anomaly{
-		PID:       e.PID,
-		Comm:      cleanComm(e.Comm[:]),
-		Namespace: ns,
-		AppLabel:  app,
-		Score:     score,
-		Contributions: map[string]interface{}{
-			"syscall_nr": v.SyscallNr,
-			"source":     v.Source,
-			"action":     string(v.Action),
-			"workload":   v.WorkloadKey.String(),
-		},
-		Type: AnomalyTypeAllowlist,
-	}
-}
-
-// SetLineageMatchHandler sets the callback for lineage pattern matches.
-func (p *Profiler) SetLineageMatchHandler(handler func(LineageMatch)) {
-	p.lineage.SetMatchHandler(handler)
 }
 
 // IsLearningComplete returns true if the learning phase is complete.

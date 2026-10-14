@@ -273,32 +273,6 @@ func TestW85_P1_ParentOf(t *testing.T) {
 	}
 }
 
-// Update с таблицей: паттерн ловится по parent_comm из события; и по таблице, если ядро не проставило.
-func TestW85_P1_UpdateDetectsPatternsWithoutStoring(t *testing.T) {
-	ft := newFakeTable().
-		proc(100, 1, "nginx", 1000, false).
-		proc(101, 100, "bash", 2000, false)
-	lt := NewLineageTracker(DefaultLineageConfig(), slog.Default())
-	lt.SetProcSource(ft)
-	e := types.Event{PID: 101, PPID: 100}
-	copy(e.Comm[:], "bash")
-	if m := lt.Update(e); m == nil || m.Pattern.Name != "web_shell_spawn" {
-		t.Fatalf("паттерн по таблице: %+v", m)
-	}
-	e2 := types.Event{PID: 101, PPID: 100}
-	copy(e2.Comm[:], "bash")
-	copy(e2.ParentComm[:], "nginx")
-	if m := lt.Update(e2); m == nil {
-		t.Fatal("паттерн по parent_comm события не пойман")
-	}
-	if _, ok := lt.GetLineage(101); ok {
-		t.Fatal("Update сохранил запись в Go-карту")
-	}
-	if len(lt.shardFor(101).ancestry) != 0 {
-		t.Fatal("Update построил ancestry в Go-карте")
-	}
-}
-
 // AncestorChain: предки без самого pid, от корня к родителю; обрыв отрезает корневую сторону.
 func TestW85_P1_AncestorChain(t *testing.T) {
 	ft := newFakeTable().
@@ -427,5 +401,24 @@ func TestW85_P1_GoHeapPerTrackedProcess_LegacyVsTable(t *testing.T) {
 	}
 	if tableBytes > legacyBytes/20 {
 		t.Fatalf("с таблицей куча выросла на %d Б (прежний %d Б)", tableBytes, legacyBytes)
+	}
+}
+
+// С таблицей ядра Track ничего не сохраняет: ни lineage, ни ancestry в Go-картах.
+func TestW85_P1_TrackWithTableDoesNotStore(t *testing.T) {
+	ft := newFakeTable().
+		proc(100, 1, "nginx", 1000, false).
+		proc(101, 100, "bash", 2000, false)
+	lt := NewLineageTracker(DefaultLineageConfig(), slog.Default())
+	lt.SetProcSource(ft)
+	e := types.Event{PID: 101, PPID: 100}
+	copy(e.Comm[:], "bash")
+	copy(e.ParentComm[:], "nginx")
+	lt.Track(e)
+	if _, ok := lt.GetLineage(101); ok {
+		t.Fatal("Track сохранил запись в Go-карту")
+	}
+	if len(lt.shardFor(101).ancestry) != 0 {
+		t.Fatal("Track построил ancestry в Go-карте")
 	}
 }

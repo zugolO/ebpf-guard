@@ -64,9 +64,6 @@ func TestShouldEscalate_ReverseShell(t *testing.T) {
 		"c2_raw_socket_shell",
 		"c2_connect_to_tor_port",
 		"c2_remote_access_tool",
-		"web_shell_spawn",
-		"shell_network_tool",
-		"database_shell_spawn",
 		"container_escape_attempt",
 	}
 
@@ -347,8 +344,8 @@ func TestBuildPlainNotification_Webshell(t *testing.T) {
 	m := New(cfg, slog.Default())
 
 	alert := types.Alert{
-		RuleID:   "web_shell_spawn",
-		RuleName: "Web Server Shell Spawn",
+		RuleID:   "webshell_upload",
+		RuleName: "Webshell Upload",
 		PID:      1234,
 		Comm:     "bash",
 	}
@@ -394,4 +391,21 @@ func TestNew_AppliesDefaults(t *testing.T) {
 	assert.Equal(t, 1, m.cfg.MaxKillsPerMinute)
 	assert.Contains(t, m.cfg.AllowlistPIDs, uint32(1))
 	assert.Contains(t, m.cfg.AllowlistComms, "systemd")
+}
+
+// Д4 (волна 8.6, №558): id зашитых паттернов трекера (их порождал только
+// Profiler.Ingest, без вызывающих) не должны возвращаться в списки simple mode —
+// правило с таким id в наборе не существует, запись ложно обещала покрытие.
+func TestW86_D4_NoPhantomLineageRuleIDs(t *testing.T) {
+	for _, id := range []string{"web_shell_spawn", "shell_network_tool", "database_shell_spawn", "shell_recon_tool"} {
+		for _, list := range [][]string{autoEnforceRulePrefixes, lineageRequiredPrefixes} {
+			for _, p := range list {
+				assert.NotEqualf(t, id, p, "id %s вернулся в список simple mode", id)
+			}
+		}
+		m := New(DefaultConfig(), slog.Default())
+		alert := types.Alert{RuleID: id, Severity: types.SeverityCritical,
+			ProcessTree: types.ProcessTree{{PID: 1, Comm: "nginx"}, {PID: 2, PPID: 1, Comm: "bash"}}}
+		assert.Falsef(t, m.shouldEscalate(alert), "%s не автоэскалируется", id)
+	}
 }

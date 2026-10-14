@@ -105,28 +105,6 @@ func (lt *LineageTracker) tableParentOf(src procinfo.Source, pid uint32) (uint32
 	return rec.PPID, prec.Comm, true
 }
 
-// tableParentInfo — родитель и его comm для события e (контракт getParentInfo без /proc):
-// сперва то, что проставило ядро в самом событии, затем запись таблицы.
-func (lt *LineageTracker) tableParentInfo(src procinfo.Source, e types.Event) (uint32, string) {
-	ppid := e.PPID
-	if ppid == 0 {
-		rec, res := src.Lookup(e.PID)
-		if res != procinfo.Found {
-			return 0, ""
-		}
-		ppid = rec.PPID
-		if ppid == 0 {
-			return 0, ""
-		}
-	} else if comm := cleanComm(e.ParentComm[:]); comm != "" {
-		return ppid, comm
-	}
-	if prec, res := src.Lookup(ppid); res == procinfo.Found {
-		return ppid, prec.Comm
-	}
-	return ppid, ""
-}
-
 // AncestorChain отдаёт непрерывную цепочку ПРЕДКОВ pid (без самого pid) — от корня к родителю —
 // вместе с исходом обхода. Для полей proc.lineage*: звенья за первым несогласованным/отсутствующим
 // не возвращаются, поэтому «предок X по непрерывной цепочке» не может опереться на разрыв.

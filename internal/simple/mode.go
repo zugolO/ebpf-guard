@@ -124,12 +124,6 @@ var autoEnforceRulePrefixes = []string{
 	// Reverse shell from rules/command-and-control.yaml
 	"c2_reverse_shell_",
 	"c2_raw_socket_shell",
-	// Lineage-based webshell/reverse shell: hardcoded LineageTracker patterns
-	// (DefaultLineageConfig). Dead on the live path — fed only by Profiler.Ingest,
-	// which has no live caller (plan.md №558).
-	"web_shell_spawn",
-	"shell_network_tool",
-	"database_shell_spawn",
 	"container_escape_attempt",
 	// Additional reverse shell patterns
 	"c2_connect_to_tor_",
@@ -206,9 +200,6 @@ var lineageRequiredPrefixes = []string{
 	"webshell_",
 	"c2_reverse_shell_",
 	"c2_raw_socket_shell",
-	"web_shell_spawn",
-	"shell_network_tool",
-	"database_shell_spawn",
 	"container_escape_attempt",
 	"c2_connect_to_tor_",
 	"c2_remote_access_",
@@ -288,12 +279,6 @@ func (m *Mode) buildPlainNotification(alert types.Alert, dryRun bool) string {
 		category = "webshell activity (likely exploited web server)"
 	case strings.HasPrefix(alert.RuleID, "c2_reverse_shell_") || strings.HasPrefix(alert.RuleID, "c2_raw_socket_shell"):
 		category = "reverse shell connection"
-	case alert.RuleID == "web_shell_spawn":
-		category = "a web server unexpectedly spawned a shell"
-	case alert.RuleID == "shell_network_tool":
-		category = "a shell spawned a network tool (likely reverse shell)"
-	case alert.RuleID == "database_shell_spawn":
-		category = "a database spawned a shell (possible SQL injection)"
 	case alert.RuleID == "container_escape_attempt":
 		category = "attempting container escape"
 	}
@@ -312,12 +297,9 @@ func (m *Mode) buildPlainNotification(alert types.Alert, dryRun bool) string {
 	case strings.HasPrefix(alert.RuleID, "cryptominer_"):
 		b.WriteString("This process was using CPU for cryptocurrency mining without authorization. " +
 			"Recommended: check how the binary was deployed — it was likely dropped through an exploit or CI/CD pipeline compromise.")
-	case strings.HasPrefix(alert.RuleID, "webshell_") || alert.RuleID == "web_shell_spawn" || alert.RuleID == "shell_network_tool":
+	case strings.HasPrefix(alert.RuleID, "webshell_"):
 		b.WriteString("This usually means a web application was exploited and an attacker gained shell access. " +
 			"Recommended: restart the container, check web server logs, and look for unpatched dependencies.")
-	case alert.RuleID == "database_shell_spawn":
-		b.WriteString("This usually means a SQL injection attack succeeded and an attacker spawned a shell from the database process. " +
-			"Recommended: restart the container, audit SQL queries, and sanitize inputs.")
 	case alert.RuleID == "container_escape_attempt":
 		b.WriteString("An attacker is attempting to escape the container. " +
 			"Recommended: restart the container immediately, check for privilege escalation paths, and audit container security context.")

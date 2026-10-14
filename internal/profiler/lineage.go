@@ -1,4 +1,4 @@
-// Package profiler provides process lineage tracking for detecting suspicious parent-child relationships.
+// Package profiler provides process lineage tracking (ancestry chains).
 package profiler
 
 import (
@@ -43,71 +43,27 @@ var parentInfoPool = sync.Pool{
 	New: func() any { return &parentInfo{} },
 }
 
-// LineageCondition defines an additional constraint that must be satisfied
-// for a lineage pattern to fire. It is evaluated against the child process
-// event after the parent/child comm lists have already matched.
-//
-// Supported fields: comm, parent_comm, uid, pid, ppid.
-// Supported ops:    in, not_in, eq (equals), neq (not_equals).
-type LineageCondition struct {
-	Field  string   `yaml:"field"`
-	Op     string   `yaml:"op"`
-	Values []string `yaml:"values"`
-}
-
-// LineagePattern defines a suspicious parent-child relationship pattern.
-type LineagePattern struct {
-	Name        string            `yaml:"name"`
-	Description string            `yaml:"description"`
-	ParentComms []string          `yaml:"parent_comms"`
-	ChildComms  []string          `yaml:"child_comms"`
-	Severity    string            `yaml:"severity"`
-	Condition   *LineageCondition `yaml:"condition,omitempty"`
-}
-
 // LineageConfig holds configuration for lineage tracking.
 type LineageConfig struct {
-	// Enabled controls whether lineage tracking is active. When false, both
-	// Track() (ancestry building) and Update() (pattern detection) are no-ops.
-	// Disable this if process tree enrichment is not needed to avoid the
-	// per-event cost (~2.3 µs/op, 442 B, 4 allocs for Update).
-	Enabled  bool             `yaml:"enabled"`
-	TTL      time.Duration    `yaml:"ttl"`
-	Patterns []LineagePattern `yaml:"patterns"`
+	// Enabled controls whether lineage tracking is active. When false,
+	// Track() (ancestry building) is a no-op. Disable this if process tree
+	// enrichment is not needed to avoid the per-event cost (~2.3 µs/op, 442 B,
+	// 4 allocs on a changed PPID/comm).
+	Enabled bool          `yaml:"enabled"`
+	TTL     time.Duration `yaml:"ttl"`
 	// MaxDepth is the maximum number of ancestors stored per process.
 	// Zero or negative values default to 16.
 	MaxDepth int `yaml:"max_depth"`
 }
 
 // DefaultLineageConfig returns default lineage configuration.
+// Волна 8.6, Д4 (№558): зашитых паттернов цепочек больше нет — детект «веб-сервер
+// → шелл» и прочие цепочки живут правилами (proc.lineage, parent_comm).
 func DefaultLineageConfig() LineageConfig {
 	return LineageConfig{
 		Enabled:  true,
 		TTL:      5 * time.Minute,
 		MaxDepth: 8,
-		Patterns: []LineagePattern{
-			{
-				Name:        "web_shell_spawn",
-				Description: "Web server spawning shell - potential RCE or webshell",
-				ParentComms: []string{"nginx", "apache2", "httpd", "node", "nodejs", "python", "python3", "gunicorn", "uwsgi"},
-				ChildComms:  []string{"sh", "bash", "dash", "zsh", "fish"},
-				Severity:    "critical",
-			},
-			{
-				Name:        "shell_network_tool",
-				Description: "Shell spawning network tool - potential data exfil or lateral movement",
-				ParentComms: []string{"sh", "bash", "dash", "zsh", "fish"},
-				ChildComms:  []string{"curl", "wget", "nc", "netcat", "ncat", "python", "python3", "ruby", "perl"},
-				Severity:    "critical",
-			},
-			{
-				Name:        "shell_recon_tool",
-				Description: "Shell spawning reconnaissance tool",
-				ParentComms: []string{"sh", "bash", "dash", "zsh", "fish"},
-				ChildComms:  []string{"nmap", "masscan", "zmap", "dig", "nslookup"},
-				Severity:    "warning",
-			},
-		},
 	}
 }
 
@@ -138,16 +94,6 @@ type procEntry struct {
 	ppidMissing bool
 }
 
-// LineageMatch represents a detected suspicious lineage pattern.
-type LineageMatch struct {
-	Pattern    LineagePattern
-	PID        uint32
-	Comm       string
-	PPID       uint32
-	ParentComm string
-	Timestamp  time.Time
-}
-
 // lineageShardCount is the number of PID-keyed shards the tracker is split into.
 // A single global mutex previously serialised every per-event Track call across
 // the entire PID-partitioned ingest worker pool, negating its parallelism.
@@ -170,13 +116,11 @@ type lineageShard struct {
 	procCache  map[uint32]*procEntry // pid → (comm, ppid, ts), avoids repeated /proc reads
 }
 
-// LineageTracker tracks process parent-child relationships and detects suspicious patterns.
+// LineageTracker tracks process parent-child relationships (ancestry chains).
 type LineageTracker struct {
 	config   LineageConfig
-	logger   *slog.Logger
 	shards   [lineageShardCount]*lineageShard
 	maxDepth int
-	onMatch  func(LineageMatch)
 
 	// table — таблица процессов в ядре (волна 8.5, P1). Пока источник установлен, трекер —
 	// тонкое чтение карты: Track не делает ничего, дерево и родитель читаются точечным lookup
@@ -191,7 +135,9 @@ func (lt *LineageTracker) shardFor(pid uint32) *lineageShard {
 }
 
 // NewLineageTracker creates a new lineage tracker.
-func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracker {
+// logger не используется с Д4 (волна 8.6): паттерны, которым он писал, удалены;
+// параметр оставлен ради вызывающих.
+func NewLineageTracker(config LineageConfig, _ *slog.Logger) *LineageTracker {
 	if config.TTL <= 0 {
 		config.TTL = 5 * time.Minute
 	}
@@ -202,9 +148,7 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 
 	lt := &LineageTracker{
 		config:   config,
-		logger:   logger,
 		maxDepth: maxDepth,
-		onMatch:  func(m LineageMatch) {}, // no-op default
 	}
 	for i := range lt.shards {
 		lt.shards[i] = &lineageShard{
@@ -221,13 +165,7 @@ func NewLineageTracker(config LineageConfig, logger *slog.Logger) *LineageTracke
 // Enabled — включён ли трекер (LineageConfig.Enabled).
 func (lt *LineageTracker) Enabled() bool { return lt.config.Enabled }
 
-// SetMatchHandler sets the callback for lineage pattern matches.
-func (lt *LineageTracker) SetMatchHandler(handler func(LineageMatch)) {
-	lt.onMatch = handler
-}
-
-// Track records the process ancestry for e without performing pattern detection.
-// It is safe to call concurrently with Update.
+// Track records the process ancestry for e.
 // CorrelationEngine calls this on every event so that GetProcessTree can later
 // return the full ancestor chain when enriching alerts.
 //
@@ -257,7 +195,6 @@ func (lt *LineageTracker) Track(e types.Event) {
 }
 
 // store records lineage/procCache for pid and (re)builds its ancestry chain.
-// Shared by Track and Update.
 //
 // Steady state fast path: a long-lived process emits a stream of events with
 // the same PID/PPID/comm on every call. When the recorded lineage and the
@@ -314,65 +251,6 @@ func (lt *LineageTracker) store(pid, ppid uint32, parentComm, comm string) {
 	s.mu.Unlock()
 
 	lt.buildAncestry(pid, ppid, parentComm, comm)
-}
-
-// Update processes an event, updates lineage information, and returns a match if
-// a suspicious pattern is detected.
-func (lt *LineageTracker) Update(e types.Event) *LineageMatch {
-	if !lt.config.Enabled {
-		return nil
-	}
-
-	var ppid uint32
-	var parentComm string
-	comm := cleanComm(e.Comm[:])
-	if box := lt.table.Load(); box != nil {
-		// Таблица ядра: родитель — из события (его проставило ядро) или из записи таблицы;
-		// ничего не сохраняется — хранилище и есть таблица.
-		ppid, parentComm = lt.tableParentInfo(box.src, e)
-		if ppid == 0 {
-			return nil
-		}
-	} else {
-		// Extract parent info from event or /proc
-		ppid, parentComm = lt.getParentInfo(e)
-		if ppid == 0 {
-			return nil
-		}
-
-		// Store lineage info and update the ancestry chain (sharded by PID).
-		lt.store(e.PID, ppid, parentComm, comm)
-	}
-
-	// Check for pattern match
-	match := lt.checkPattern(e, parentComm, comm)
-	if match != nil {
-		result := LineageMatch{
-			Pattern:    *match,
-			PID:        e.PID,
-			Comm:       comm,
-			PPID:       ppid,
-			ParentComm: parentComm,
-			Timestamp:  time.Now(),
-		}
-
-		lt.logger.Warn("lineage: suspicious parent-child relationship detected",
-			slog.String("pattern", match.Name),
-			slog.String("parent", parentComm),
-			slog.String("child", comm),
-			slog.Uint64("ppid", uint64(ppid)),
-			slog.Uint64("pid", uint64(e.PID)),
-			slog.String("severity", match.Severity),
-		)
-
-		if lt.onMatch != nil {
-			lt.onMatch(result)
-		}
-
-		return &result
-	}
-
-	return nil
 }
 
 // GetProcessTree returns the full ancestor chain for pid, ordered from the
@@ -749,89 +627,6 @@ func (lt *LineageTracker) lookupOwnPPID(pid uint32) uint32 {
 	}
 	s.mu.Unlock()
 	return ppid
-}
-
-// checkPattern checks if the parent-child combination matches any pattern,
-// including evaluating any structured condition attached to the pattern.
-func (lt *LineageTracker) checkPattern(e types.Event, parentComm, childComm string) *LineagePattern {
-	for i := range lt.config.Patterns {
-		pattern := &lt.config.Patterns[i]
-
-		if matchesAny(parentComm, pattern.ParentComms) &&
-			matchesAny(childComm, pattern.ChildComms) &&
-			evaluateLineageCondition(e, parentComm, pattern.Condition) {
-			return pattern
-		}
-	}
-	return nil
-}
-
-// evaluateLineageCondition returns true when cond is nil (unconditional) or when
-// the condition is satisfied by event e. Supported fields: comm, parent_comm,
-// uid, pid, ppid. Supported ops: in, not_in, eq, neq.
-func evaluateLineageCondition(e types.Event, parentComm string, cond *LineageCondition) bool {
-	if cond == nil {
-		return true
-	}
-
-	var value string
-	switch cond.Field {
-	case "comm":
-		value = cleanComm(e.Comm[:])
-	case "parent_comm":
-		value = parentComm
-	case "uid":
-		value = strconv.FormatUint(uint64(e.UID), 10)
-	case "pid":
-		value = strconv.FormatUint(uint64(e.PID), 10)
-	case "ppid":
-		value = strconv.FormatUint(uint64(e.PPID), 10)
-	default:
-		return false
-	}
-
-	switch strings.ToLower(cond.Op) {
-	case "in":
-		for _, v := range cond.Values {
-			if value == v {
-				return true
-			}
-		}
-		return false
-	case "not_in":
-		for _, v := range cond.Values {
-			if value == v {
-				return false
-			}
-		}
-		return true
-	case "eq", "equals":
-		return len(cond.Values) > 0 && value == cond.Values[0]
-	case "neq", "not_equals":
-		return len(cond.Values) == 0 || value != cond.Values[0]
-	default:
-		return false
-	}
-}
-
-// matchesAny checks if a string matches any pattern in the list.
-// Exact matches always succeed. Prefix matches succeed only when the
-// character immediately after the pattern is a hyphen or ASCII digit —
-// allowing nginx-worker and python3 to match their base names while
-// preventing false positives such as "node_exporter" matching "node".
-func matchesAny(s string, patterns []string) bool {
-	for _, p := range patterns {
-		if s == p {
-			return true
-		}
-		if strings.HasPrefix(s, p) && len(s) > len(p) {
-			next := s[len(p)]
-			if next == '-' || (next >= '0' && next <= '9') {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // cleanComm removes null bytes from comm string.

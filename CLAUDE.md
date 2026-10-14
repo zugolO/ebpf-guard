@@ -118,7 +118,7 @@ rules:
 
 Condition operators are implemented in `internal/correlator/rules.go`. Regex patterns are compiled at rule load time (RE2). Unknown `field` names in conditions are rejected at load time.
 
-Built-in rule sets: `cis-k8s.yaml`, `owasp-web.yaml`, `container-escape.yaml`, `cryptominer.yaml`, `dns-threats.yaml`, `tls-patterns.yaml`, `lineage-patterns.yaml`. Rego policies live in `rules/rego/`.
+Built-in rule sets: `cis-k8s.yaml`, `owasp-web.yaml`, `container-escape.yaml`, `cryptominer.yaml`, `dns-threats.yaml`, `tls-patterns.yaml`. Rego policies live in `rules/rego/`.
 
 ### Configuration (`internal/config/`)
 

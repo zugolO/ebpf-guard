@@ -124,7 +124,9 @@ var autoEnforceRulePrefixes = []string{
 	// Reverse shell from rules/command-and-control.yaml
 	"c2_reverse_shell_",
 	"c2_raw_socket_shell",
-	// Lineage-based webshell/reverse shell from rules/lineage-patterns.yaml
+	// Lineage-based webshell/reverse shell: hardcoded LineageTracker patterns
+	// (DefaultLineageConfig). Dead on the live path — fed only by Profiler.Ingest,
+	// which has no live caller (plan.md №558).
 	"web_shell_spawn",
 	"shell_network_tool",
 	"database_shell_spawn",

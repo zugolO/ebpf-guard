@@ -100,7 +100,7 @@ helm install ebpf-guard oci://ghcr.io/zugolO/charts/ebpf-guard \
 - **JA3 / JA4 TLS fingerprinting** — socket-level kprobe captures TLS ClientHello; computes JA3, JA3S, and JA4 fingerprints for C2 framework detection (Cobalt Strike, Sliver, Mythic, etc.).
 - **W3C Trace Context extraction** — parses `traceparent`/`tracestate` headers from TLS plaintext so security alerts can be correlated with distributed traces in your observability stack.
 - **Behavioral profiling** — per-process EWMA baseline + syscall sequence frequency vectors (cosine distance); anomaly scores emitted as Prometheus gauges.
-- **Process lineage tracking** — detects attack chains like `nginx → bash → curl → python3`; configurable patterns in `rules/lineage-patterns.yaml`.
+- **Process lineage tracking** — builds the ancestor chain (`proc.lineage`, `proc.lineage_exe_paths`) from the in-kernel process table; rules match on it and on `parent_comm`.
 - **Container drift detection** — captures a per-container behavioral baseline at startup; any new executable, network peer, or file path appearing after the baseline window is flagged as drift.
 - **Hidden process detection** — compares the kernel task list (BPF `iter/task`, kernel 5.8+) against `/proc` enumeration; any PID present in the kernel but absent from `/proc` indicates a rootkit.
 - **Canary / honeypot files** — synthetic lure files at attacker-probed paths (e.g. `/etc/shadow.canary`); any access generates a high-confidence critical alert.
@@ -427,7 +427,6 @@ profiler:
     threshold: 0.3
   lineage:
     enabled: true
-    patterns_file: rules/lineage-patterns.yaml
 
 policy:
   rego:
@@ -524,7 +523,6 @@ rules:
 | `rules/cryptominer.yaml` | Cryptominer detection (mining pool ports/IPs, process names) |
 | `rules/dns-threats.yaml` | DNS DGA, tunneling, C2 TLD, high-frequency queries |
 | `rules/tls-patterns.yaml` | TLS plaintext credential leak, suspicious User-Agent |
-| `rules/lineage-patterns.yaml` | Process lineage attack chains (configurable) |
 | `rules/rego/` | Rego/OPA policies with built-in unit tests |
 
 ### Condition operators

@@ -11,8 +11,8 @@ rules:
 
   # CI/CD runner processes (GitHub Actions, GitLab Runner, Drone, Tekton, etc.)
   # spawning shells that then reach out to the network is a strong indicator
-  # of pipeline injection (T1195.002).  Covered via lineage-patterns.yaml
-  # parent-child detection; this rule catches direct network connections from
+  # of pipeline injection (T1195.002).  Parent-child detection is NOT covered
+  # (lineage patterns are dead on the live path, plan.md №558); this rule catches direct network connections from
   # runner child processes.
   - id: supply_chain_cicd_runner_network
     name: "Supply Chain: CI/CD runner making external network connection"

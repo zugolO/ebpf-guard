@@ -1187,6 +1187,34 @@ rules:
             - field: proc.exe_path
               op: in
               values: [/usr/libexec/fwupd/fwupd, /usr/bin/fwupdmgr]
+      # №562 / Д16: гостевой агент qemu-ga раз в минуту читает /etc/os-release
+      # (опрос guest-get-osinfo со стороны гипервизора) — 477 из 693 алертов
+      # idle ночи 8.5. Форма fwupd-hardware-probe: хост, только чтение
+      # O_RDONLY, точный образ последним (путь сверен на ebaka2:
+      # readlink /proc/<pid>/exe = /usr/sbin/qemu-ga), только os-release.
+      # /proc/version и прочие файлы релиза от qemu-ga по-прежнему алертят.
+      - name: qemu-ga-os-release
+        condition_group:
+          operator: and
+          conditions:
+            - field: filename
+              op: eq
+              values: [/etc/os-release]
+            - field: container.id
+              op: eq
+              values: [""]
+            - field: k8s.pod
+              op: eq
+              values: [""]
+            - field: file.op
+              op: in
+              values: [open, read]
+            - field: file.flags
+              op: regex
+              values: ['^([0-9]*[02468][048]|[0-9]*[13579][26]|[048])$']
+            - field: proc.exe_path
+              op: in
+              values: [/usr/sbin/qemu-ga]
 
   # ============================================================================
   # T1083 — File and Directory Discovery

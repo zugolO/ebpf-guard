@@ -93,3 +93,23 @@ func TestReadChecksumFile_SkipsBlankLinesAndComments(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, digest, result["rule.yaml"])
 }
+
+// TestShippedRuleChecksumsMatch — поставляемый rules/checksums.sha256 обязан
+// сходиться с файлами правил и перечислять каждый из них: при
+// rules.verify_checksums=true расхождение валит старт агента. До 14.10.2026
+// файл не обновлялся с 26.08 и не сходился у 30 из 48 файлов — этого не ловил
+// ни один тест. Пересчёт: make rules-checksums.
+func TestShippedRuleChecksumsMatch(t *testing.T) {
+	dir := filepath.Join("..", "..", "rules")
+	sums, err := ComputeRuleFileChecksums(dir)
+	require.NoError(t, err)
+	if os.Getenv("UPDATE_RULE_CHECKSUMS") == "1" {
+		require.NoError(t, WriteChecksumFile(filepath.Join(dir, "checksums.sha256"), sums))
+	}
+	require.NoError(t, VerifyRuleChecksums(dir, ""), "make rules-checksums")
+	listed, err := readChecksumFile(filepath.Join(dir, "checksums.sha256"))
+	require.NoError(t, err)
+	for name := range sums {
+		assert.Contains(t, listed, name, "файл правил не в checksums.sha256 — make rules-checksums")
+	}
+}

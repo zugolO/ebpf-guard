@@ -261,6 +261,11 @@ package-rpm:
 			$(NFPM) package --config packaging/nfpm.yaml --packager rpm --target dist/; \
 	done
 
+# Regenerate rules/checksums.sha256 after any rule file change (guarded by
+# TestShippedRuleChecksumsMatch).
+rules-checksums:
+	UPDATE_RULE_CHECKSUMS=1 go test -count=1 -run TestShippedRuleChecksumsMatch ./internal/correlator/
+
 # Update the SHA-256 checksums in scripts/install.sh for the current build.
 checksums:
 	@echo "Computing checksums for install.sh..."

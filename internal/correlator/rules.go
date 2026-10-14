@@ -2169,14 +2169,27 @@ func (re *RuleEngine) matchesRegex(cond *RuleCondition, value string) bool {
 	}
 	for i, compiled := range cond.regexes {
 		if !containsAny(value, cond.regexLiterals[i]) {
+			if regexProbe != nil {
+				regexProbe(cond, i, false, false)
+			}
 			continue
 		}
-		if compiled.MatchString(value) {
+		matched := compiled.MatchString(value)
+		if regexProbe != nil {
+			regexProbe(cond, i, true, matched)
+		}
+		if matched {
 			return true
 		}
 	}
 	return false
 }
+
+// regexProbe — измерительный крючок G0(в): вызывается на каждый разбираемый
+// шаблон regex-условия с исходом префильтра (литерал прошёл) и самого regex.
+// Ставится только в тестах/бенче до запуска движка; в бою nil, цена — одна
+// проверка указателя на шаблон.
+var regexProbe func(cond *RuleCondition, pattern int, literalPassed, matched bool)
 
 // compareNumeric parses numeric values and compares them.
 func (re *RuleEngine) compareNumeric(value string, thresholds []string, cmp func(a, b float64) bool) bool {

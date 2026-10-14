@@ -121,3 +121,47 @@ func minimalRuleYAML(id string) string {
       values: ["1"]
 `
 }
+
+// Д5 (№561, остаток): .yaml, которого нет в списке сумм, при проверке — ошибка,
+// а не молчаливая загрузка без проверки.
+func TestVerifyRuleChecksums_UnlistedFileRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "test_001.yaml", minimalRuleYAML("test_001"))
+	checksums, err := ComputeRuleFileChecksums(dir)
+	require.NoError(t, err)
+	checksumFile := filepath.Join(dir, "checksums.sha256")
+	require.NoError(t, WriteChecksumFile(checksumFile, checksums))
+	require.NoError(t, VerifyRuleChecksums(dir, checksumFile))
+
+	for _, name := range []string{"planted.yaml", "planted.YML"} {
+		writeRule(t, dir, name, minimalRuleYAML("planted"))
+		err = VerifyRuleChecksums(dir, checksumFile)
+		require.Errorf(t, err, "%s: неперечисленный файл правил обязан отвергаться", name)
+		assert.Contains(t, err.Error(), name+": not listed in checksum file")
+		require.NoError(t, os.Remove(filepath.Join(dir, name)))
+	}
+
+	// Не-правила и подкаталоги проверку не ломают: загрузчик их не берёт.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "._test_001.yaml"), []byte("appledouble"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "rego"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "rego", "extra.yaml"), []byte("x"), 0o644))
+	assert.NoError(t, VerifyRuleChecksums(dir, checksumFile))
+}
+
+// Загрузка с verify_checksums=true отказывает на неперечисленном файле целиком.
+func TestLoadRulesFromDirWithChecksums_UnlistedFileRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "test_001.yaml", minimalRuleYAML("test_001"))
+	checksums, err := ComputeRuleFileChecksums(dir)
+	require.NoError(t, err)
+	require.NoError(t, WriteChecksumFile(filepath.Join(dir, "checksums.sha256"), checksums))
+	writeRule(t, dir, "planted.yaml", minimalRuleYAML("planted"))
+
+	_, err = LoadRulesFromDirWithChecksums(dir, true, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not listed in checksum file")
+	rules, err := LoadRulesFromDirWithChecksums(dir, false, "")
+	require.NoError(t, err, "без verify_checksums поведение прежнее")
+	assert.Len(t, rules, 2)
+}

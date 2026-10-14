@@ -14,7 +14,9 @@ import (
 
 // VerifyRuleChecksums reads a sha256sum-format checksum file and verifies each
 // listed rule file. It returns an error if any file is missing, tampered, or
-// if the checksum file itself cannot be read.
+// if the checksum file itself cannot be read, and — Д5 — if the directory holds
+// a rule file (.yaml/.yml the loader would pick up) that the checksum file does
+// not list.
 //
 // The checksum file format is identical to sha256sum(1) output:
 //
@@ -45,6 +47,22 @@ func VerifyRuleChecksums(rulesDir, checksumFile string) error {
 		}
 		if gotHex != wantHex {
 			errs = append(errs, fmt.Sprintf("%s: checksum mismatch (got %s, want %s)", name, gotHex, wantHex))
+		}
+	}
+
+	// Д5 (№561, остаток): файл, который загрузчик подхватит, но которого нет в
+	// списке сумм, — дыра целостности: подложенный .yaml грузился бы без проверки.
+	// Состав — тот же, что берёт LoadRulesFromDir (isRuleFileName).
+	entries, err := os.ReadDir(rulesDir)
+	if err != nil {
+		return fmt.Errorf("correlator: read rules dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !isRuleFileName(e.Name()) {
+			continue
+		}
+		if _, listed := expected[e.Name()]; !listed {
+			errs = append(errs, fmt.Sprintf("%s: not listed in checksum file", e.Name()))
 		}
 	}
 

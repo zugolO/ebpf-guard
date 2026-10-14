@@ -880,6 +880,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// cgroupfs system.slice не виден — поле пусто, отказ в шум.
 	correlator.SetCgroupUnitResolver(correlator.NewSystemSliceUnitResolver("/sys/fs/cgroup"))
 
+	// Волна 8.6, G0(а): метки pprof event_type (и rule_file/rule_id) на проходе
+	// RuleEngine.EvaluateInto — до создания движка, метки правил строятся в нём.
+	correlator.SetProfileLabels(cfg.Server.EnablePprof, cfg.Server.EnablePprof && cfg.Server.PprofRuleLabels)
+
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 		slog.Warn("correlation engine: failed to register Prometheus metrics",

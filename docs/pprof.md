@@ -133,3 +133,16 @@ helm upgrade ebpf-guard ./deploy/helm/ebpf-guard \
   scrape timeout of Prometheus. Reduce the duration with `?seconds=N`.
 - Re-disable pprof (`enable_pprof: false`) and roll out the change as soon as the
   profiling session is complete.
+
+## CPU по типу события и по правилу (волна 8.6, G0)
+
+С `server.enable_pprof: true` профиль CPU несёт метку `event_type` на проходе
+`RuleEngine.EvaluateInto`:
+
+```bash
+go tool pprof -tagfocus=event_type=file -top http://localhost:9090/debug/pprof/profile?seconds=60
+go tool pprof -tagroot=event_type -top ...   # разбивка по типу
+```
+
+`server.pprof_rule_labels: true` добавляет `rule_file` и `rule_id` (метка ставится
+на каждое правило — режим измерения, на боевом агенте не включать).

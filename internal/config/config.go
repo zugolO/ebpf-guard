@@ -131,6 +131,11 @@ type ServerConfig struct {
 	HealthPath  string `mapstructure:"health_path"`
 	// EnablePprof enables pprof debugging endpoints at /debug/pprof
 	EnablePprof bool `mapstructure:"enable_pprof"`
+	// PprofRuleLabels (волна 8.6, G0) добавляет к профилю CPU метки rule_file и
+	// rule_id на проходе по каждому правилу (event_type ставится при enable_pprof
+	// всегда). Измерительный режим: установка меток на каждое правило заметно
+	// дороже. Действует только вместе с enable_pprof.
+	PprofRuleLabels bool `mapstructure:"pprof_rule_labels"`
 	// EnableDebug enables debug endpoints at /debug/state
 	EnableDebug bool `mapstructure:"enable_debug"`
 	// ShutdownTimeout is the total time budget for graceful shutdown. Valid range: [5s, 300s]. Default: 30s.
@@ -2175,6 +2180,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.metrics_path", "/metrics")
 	v.SetDefault("server.health_path", "/health")
 	v.SetDefault("server.enable_pprof", false)
+	v.SetDefault("server.pprof_rule_labels", false)
 	v.SetDefault("server.enable_debug", false)
 	v.SetDefault("server.shutdown_timeout", "30s")
 	v.SetDefault("server.shutdown_drain_enforcement", "5s")

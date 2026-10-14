@@ -241,7 +241,16 @@ func LoadRulesFromFile(path string) ([]Rule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("correlator: read rules file: %w", err)
 	}
-	return parseRuleFile(data)
+	rules, err := parseRuleFile(data)
+	setRuleSource(rules, filepath.Base(path))
+	return rules, err
+}
+
+// setRuleSource запоминает файл-источник правил (метка pprof rule_file).
+func setRuleSource(rules []Rule, name string) {
+	for i := range rules {
+		rules[i].sourceFile = name
+	}
 }
 
 // parseRuleFile разбирает и полностью валидирует содержимое одного файла правил.
@@ -278,6 +287,7 @@ func LoadRulesFromEmbedded(files map[string][]byte) ([]Rule, error) {
 		if err := yaml.Unmarshal(data, &ruleSet); err != nil {
 			return nil, fmt.Errorf("correlator: unmarshal rules from %s: %w", name, err)
 		}
+		setRuleSource(ruleSet.Rules, name)
 		allRules = append(allRules, ruleSet.Rules...)
 	}
 
@@ -954,6 +964,7 @@ func LoadRulesFromDirKeepLast(dir string, cache *RuleFileCache) ([]Rule, []RuleF
 		if rerr != nil {
 			err = fmt.Errorf("correlator: read rules file: %w", rerr)
 		} else if rules, err = parseRuleFile(data); err == nil {
+			setRuleSource(rules, entry.Name())
 			err = claim(rules)
 		}
 		if err == nil {
@@ -971,6 +982,7 @@ func LoadRulesFromDirKeepLast(dir string, cache *RuleFileCache) ([]Rule, []RuleF
 			if old, ok := cache.get(path); ok {
 				// Свежий разбор последней удачной версии: правила не делят срезы с прошлым набором.
 				if oldRules, perr := parseRuleFile(old); perr == nil && claim(oldRules) == nil {
+					setRuleSource(oldRules, entry.Name())
 					for i := range oldRules {
 						owner[oldRules[i].ID] = entry.Name()
 					}

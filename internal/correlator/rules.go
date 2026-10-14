@@ -2,6 +2,7 @@
 package correlator
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash"
@@ -9,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"regexp"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -347,6 +349,12 @@ type Rule struct {
 	// (находка №543). Правило, назвавшее op хотя бы в одной ветке, видит все
 	// операции: его автор о них знал. Not serialized; set by buildTypeIndex.
 	legacyOpsOnly bool
+	// sourceFile — имя файла правил (базовое), из которого правило загружено;
+	// метка pprof rule_file (G0). Not serialized; set by the loaders.
+	sourceFile string
+	// profCtx — контекст меток pprof правила; строится в buildTypeIndex только
+	// при включённых метках правил (SetProfileLabels(_, true)).
+	profCtx *context.Context
 	// Condition is a single condition (for simple rules)
 	Condition RuleCondition `yaml:"condition"`
 	// ConditionGroup allows complex AND/OR logic (takes precedence over Condition)
@@ -716,6 +724,9 @@ func (re *RuleEngine) buildTypeIndex() {
 		// операции. Считается здесь, до копирования в byType, и на каждой
 		// горячей перезагрузке заново.
 		r.legacyOpsOnly = r.EventType == types.EventFileAccess && !ruleNamesFileOp(r)
+		if profileRuleLabels.Load() {
+			r.profCtx = ruleProfileCtx(r)
+		}
 		// Synthetic rules (Exceptions-only, scoped via EvaluateNamedExceptions)
 		// are deliberately excluded from byType: they have no EventType/
 		// Condition of their own to dispatch on, and must never be matched by
@@ -964,8 +975,12 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 	// materialised lazily but at most once per event, not once per rule
 	// (wave 8.1 item 3).
 	cache := &eventFieldCache{}
+	prof := profileEnter(t)
 	for i := range rules {
 		rule := &rules[i] // pointer avoids copying the ~300-byte Rule struct
+		if rule.profCtx != nil {
+			pprof.SetGoroutineLabels(*rule.profCtx)
+		}
 		if !re.matchesTypedCached(&e, rule, cache) {
 			continue
 		}
@@ -988,6 +1003,9 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 			DriftNovelWorkload: rule.DriftNovelWorkload == "alert",
 			Details:            alertDetails(e, filePath),
 		})
+	}
+	if prof {
+		profileLeave()
 	}
 }
 

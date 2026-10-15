@@ -1,5 +1,13 @@
 # eBPF LSM Enforcement
 
+> **Status (15.10.2026): the blocking half is not verified.** On kernel 5.15 with `lsm=bpf` the
+> `file_open`, `socket_connect` and `task_kill` programs load and pass the verifier, but they were
+> never attached to the kernel and `enforcement.lsm_path_blocklist` / `network_blocklist` never
+> reached their maps (finding №563), so `enforcer.block_backend: lsm` blocked nothing. Do not rely
+> on LSM blocking; use `block_backend: nftables`. Only the kernel-module detection hooks
+> (`kernel_module_request`, `kernel_read_file`) are live. This notice is removed when the
+> blocking smoke passes on 5.15.
+
 This document describes the eBPF LSM (Linux Security Module) enforcement feature introduced in Sprint 22.0. LSM hooks provide **pre-execution** enforcement, allowing the agent to block operations before they occur, unlike kprobes which only observe after the fact.
 
 ## Overview

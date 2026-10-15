@@ -365,7 +365,7 @@ rules:
 
   - id: web_combined_attack
     name: "Web Attack: Combined multi-vector attack indicators"
-    description: "Multiple web attack vectors from the same process within short time window (correlated attack detection)"
+    description: "File name carries two attack markers at once: an SQLi, XSS or SSTI marker plus a path-traversal or file-inclusion marker (single-path pattern match; no per-process or time-window correlation)"
     event_type: file
     condition:
       field: filename

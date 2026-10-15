@@ -369,3 +369,7 @@ netintr_large_upload_port	20261009	8.1-долг/Р1: исключение apt-me
 impact_systemd_service_disabled	20261013	8.4.2: исключение dpkg-maintainer-script-stop (systemctl stop из maintainer-скрипта под dpkg, proc.lineage на таблице ядра)
 # №562/Д16, 14.10.2026: qemu-ga читает /etc/os-release раз в минуту (477 алертов ночи 8.5). Сужение УСЛОВИЯ (id тот же) — вход пакета атак (не qemu-ga) его не задевает.
 sigma_kernel_version_read	20261014	8.6-Д16/№562: исключение qemu-ga-os-release (образ /usr/sbin/qemu-ga, хост, O_RDONLY, только /etc/os-release)
+# Волна 8.6 заход B, шаг 1 (15.10.2026): три правила из топа G0 приведены к описанию ПРЕДИКАТОМ. Сужение условия (id тот же); вход пакета атак их не поднимает, но на архивах старше правки их срабатывания считались по прежнему условию.
+web_path_traversal_process	20261015	8.6-B/1: процесс — веб-воркер (proc.comm) И путь — обход; имя сервера в пути больше не считается
+container_escape_cgroup_v1_release_agent	20261015	8.6-B/1: изменение (write или open с режимом записи) файла release_agent, любая точка монтирования; чтение не считается
+privesc_cgroup_notify_on_release	20261015	8.6-B/1: то же для notify_on_release/release_agent; действие block не тронуто

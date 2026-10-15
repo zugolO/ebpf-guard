@@ -73,13 +73,16 @@ sigma_utmp_wtmp_modified_daemon supply_chain_build_tool_rootwrite
 // op, и флаг legacyOpsOnly у правила снимается (долг 8.1 / man-db — то же для
 // proc_inject_ld_preload_file и supply_chain_pkg_install_etc_write: исключение
 // mandb-self называет op; остаток №549 — container_escape_init_proc,
-// исключения apt-method-init-cgroup и node-timer-detect-virt). Мутаций они не видят по
+// исключения apt-method-init-cgroup и node-timer-detect-virt; волна 8.6 B,
+// шаг 1: container_escape_cgroup_v1_release_agent и privesc_cgroup_notify_on_release
+// называют op [open, write] в самом условии). Мутаций они не видят по
 // условию, а не по флагу — проверено TestW549_FwupdRulesIgnoreMutations.
 var w549ExplicitLegacyOpRules = strings.Fields(`
 container_escape_kmem_access mitre_vm_detect_dmi_read rootkit_kcore_access rootkit_proc_modules_read
 sigma_cpu_info_access sigma_dev_mem_access sigma_kernel_version_read
 proc_inject_ld_preload_file supply_chain_pkg_install_etc_write
 container_escape_init_proc mitre_sandbox_detect_proc_read sigma_memory_proc_dump
+container_escape_cgroup_v1_release_agent privesc_cgroup_notify_on_release
 `)
 
 func w81FileEventPPID(pid, ppid uint32, comm, path string, op uint8) types.Event {

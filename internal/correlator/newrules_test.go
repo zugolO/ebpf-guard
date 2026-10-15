@@ -199,17 +199,25 @@ func TestPrivesc_UnshareDetected(t *testing.T) {
 func TestPrivesc_CgroupNotifyOnRelease(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/privesc.yaml")
 
-	alerts := re.Evaluate(nrFile("/sys/fs/cgroup/memory/notify_on_release"))
+	// Волна 8.6 B, шаг 1: «записал» — это open с режимом записи (или write), а не
+	// любое открытие файла. Чтение того же пути правило не поднимает.
+	w := nrFile("/sys/fs/cgroup/memory/notify_on_release")
+	w.File.Flags = 0o1101 // O_WRONLY|O_CREAT|O_TRUNC
+	alerts := re.Evaluate(w)
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "privesc_cgroup_notify_on_release")
+	assert.NotContains(t, nrAlertIDs(re.Evaluate(nrFile("/sys/fs/cgroup/memory/notify_on_release"))), "privesc_cgroup_notify_on_release")
 }
 
 func TestPrivesc_CgroupReleaseAgent(t *testing.T) {
 	re := nrLoadRules(t, "../../rules/privesc.yaml")
 
-	alerts := re.Evaluate(nrFile("/sys/fs/cgroup/rdma/release_agent"))
+	w := nrFile("/sys/fs/cgroup/rdma/release_agent")
+	w.File.Flags = 0o2 // O_RDWR
+	alerts := re.Evaluate(w)
 	assert.NotEmpty(t, alerts)
 	assert.Contains(t, nrAlertIDs(alerts), "privesc_cgroup_notify_on_release")
+	assert.NotContains(t, nrAlertIDs(re.Evaluate(nrFile("/sys/fs/cgroup/rdma/release_agent"))), "privesc_cgroup_notify_on_release")
 }
 
 // 5.9.9.F.3b (#132) moved privesc_suid_suspicious_path from file events

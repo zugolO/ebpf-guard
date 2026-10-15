@@ -562,12 +562,40 @@ rules:
       cgroup, and the release_agent runs on the host with root privileges.
       Corresponds to CVE-2022-0492 and related cgroup escape CVEs.
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/sys/fs/cgroup/.*/notify_on_release"
-        - "/sys/fs/cgroup/.*/release_agent"
+    # Волна 8.6, заход B, шаг 1 (15.10.2026). Описание — «процесс ЗАПИСАЛ в
+    # notify_on_release / release_agent», условие было regex по пути
+    # `/sys/fs/cgroup/.*/…` без op: читал ли файл `cat`, писал ли он — один
+    # исход, а PoC CVE-2022-0492 (cgroup смонтирован в /tmp/cgrp) не ловился
+    # вовсе. G0: литерал `/sys/fs/cgroup/` проходил 45 750 раз из 194 366, regex
+    # ни разу не совпал (2,8% CPU движка). Предикат: точное имя файла (suffix) и
+    # изменение — write либо open с режимом записи (flags mod 4 != 0);
+    # shell-редирект даёт write без пути, поэтому open — основной вход. Действие
+    # block не тронуто. Сужение по op и расширение по каталогу, id тот же →
+    # attacks/new-rules.txt.
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.op
+          op: in
+          values: [open, write]
+        - field: filename
+          op: suffix
+          values: ["/notify_on_release", "/release_agent"]
+      subgroups:
+        - operator: or
+          conditions:
+            - field: file.op
+              op: eq
+              values: [write]
+          subgroups:
+            - operator: and
+              conditions:
+                - field: file.op
+                  op: eq
+                  values: [open]
+                - field: file.flags
+                  op: regex
+                  values: ['^([0-9]*[02468][1235679]|[0-9]*[13579][01345789]|[1235679])$']
     severity: critical
     action: block
     tags: [mitre:T1611, privesc, cgroup, cgroup-escape, container-escape, cve]

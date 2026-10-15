@@ -734,17 +734,47 @@ rules:
   # ============================================================================
 
   # cgroup v1 release_agent escape
+  #
+  # Волна 8.6, заход B, шаг 1 (15.10.2026). Описание — «процесс ИЗМЕНИЛ
+  # release_agent», а условие было regex по пути `/sys/fs/cgroup/.*release_agent`
+  # без op: срабатывало на любое чтение файла с таким хвостом, а на пути
+  # любой другой точки монтирования (PoC CVE-2022-0492 монтирует cgroup в
+  # /tmp/cgrp) — нет. По G0 литерал `/sys/fs/cgroup/` проходил на 45 750 из
+  # 291 549 вызовов, regex ни разу не совпал (3,4% CPU движка). Предикат:
+  # точное имя файла (`suffix /release_agent`, без regex) и изменение —
+  # write либо open с режимом записи (flags mod 4 != 0: O_WRONLY/O_RDWR;
+  # shell-редирект пишет в dup2-копию fd, write-событие у него без пути,
+  # поэтому open с режимом записи — основной вход). Условия идут от дешёвых
+  # к дорогим. Сужение по op и расширение по каталогу, id тот же →
+  # attacks/new-rules.txt.
   - id: container_escape_cgroup_v1_release_agent
     name: "Container Escape: cgroup v1 release_agent modification"
     description: "Process modified cgroup release_agent (known escape vector)"
     event_type: file
-    condition:
-      field: filename
-      op: regex
-      values:
-        - "/sys/fs/cgroup/.*release_agent"
-        - "/sys/fs/cgroup/memory/release_agent"
-        - "/sys/fs/cgroup/rdma/release_agent"
+    condition_group:
+      operator: and
+      conditions:
+        - field: file.op
+          op: in
+          values: [open, write]
+        - field: filename
+          op: suffix
+          values: ["/release_agent"]
+      subgroups:
+        - operator: or
+          conditions:
+            - field: file.op
+              op: eq
+              values: [write]
+          subgroups:
+            - operator: and
+              conditions:
+                - field: file.op
+                  op: eq
+                  values: [open]
+                - field: file.flags
+                  op: regex
+                  values: ['^([0-9]*[02468][1235679]|[0-9]*[13579][01345789]|[1235679])$']
     severity: critical
     action: alert
     tags: [container-escape, cgroup, release-agent, cve]

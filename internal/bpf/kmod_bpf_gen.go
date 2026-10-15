@@ -21,11 +21,23 @@ import (
 
 // KmodMaps holds the BPF maps exported by bpf/lsm.bpf.c.
 type KmodMaps struct {
-	LsmEvents *ebpf.Map `ebpf:"lsm_events"`
+	LsmEvents         *ebpf.Map `ebpf:"lsm_events"`
+	LsmBlocklist      *ebpf.Map `ebpf:"lsm_blocklist"`
+	PathBlocklist     *ebpf.Map `ebpf:"path_blocklist"`
+	LsmAgentWhitelist *ebpf.Map `ebpf:"lsm_agent_whitelist"`
+	LsmStats          *ebpf.Map `ebpf:"lsm_stats"`
+	PidInitialCgroup  *ebpf.Map `ebpf:"pid_initial_cgroup"`
+	NetBlockIpv4      *ebpf.Map `ebpf:"net_block_ipv4"`
+	NetBlockIpv6      *ebpf.Map `ebpf:"net_block_ipv6"`
+	NetBlockPorts     *ebpf.Map `ebpf:"net_block_ports"`
+	NetBlockCounters  *ebpf.Map `ebpf:"net_block_counters"`
 }
 
 // KmodPrograms holds the BPF programs exported by bpf/lsm.bpf.c.
 type KmodPrograms struct {
+	LsmFileOpen            *ebpf.Program `ebpf:"lsm_file_open"`
+	LsmSocketConnect       *ebpf.Program `ebpf:"lsm_socket_connect"`
+	LsmTaskKill            *ebpf.Program `ebpf:"lsm_task_kill"`
 	LsmKernelModuleRequest *ebpf.Program `ebpf:"lsm_kernel_module_request"`
 	LsmKernelReadFile      *ebpf.Program `ebpf:"lsm_kernel_read_file"`
 	TraceExecRecordCgroup  *ebpf.Program `ebpf:"trace_exec_record_cgroup"`
@@ -40,17 +52,17 @@ type KmodObjects struct {
 // Close releases all BPF resources held by the objects.
 func (o *KmodObjects) Close() error {
 	var errs []error
-	if o.LsmKernelModuleRequest != nil {
-		errs = append(errs, o.LsmKernelModuleRequest.Close())
+	for _, p := range []*ebpf.Program{o.LsmFileOpen, o.LsmSocketConnect, o.LsmTaskKill,
+		o.LsmKernelModuleRequest, o.LsmKernelReadFile, o.TraceExecRecordCgroup} {
+		if p != nil {
+			errs = append(errs, p.Close())
+		}
 	}
-	if o.LsmKernelReadFile != nil {
-		errs = append(errs, o.LsmKernelReadFile.Close())
-	}
-	if o.TraceExecRecordCgroup != nil {
-		errs = append(errs, o.TraceExecRecordCgroup.Close())
-	}
-	if o.LsmEvents != nil {
-		errs = append(errs, o.LsmEvents.Close())
+	for _, m := range []*ebpf.Map{o.LsmEvents, o.LsmBlocklist, o.PathBlocklist, o.LsmAgentWhitelist, o.LsmStats,
+		o.PidInitialCgroup, o.NetBlockIpv4, o.NetBlockIpv6, o.NetBlockPorts, o.NetBlockCounters} {
+		if m != nil {
+			errs = append(errs, m.Close())
+		}
 	}
 	return errors.Join(errs...)
 }

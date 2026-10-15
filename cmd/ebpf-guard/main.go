@@ -793,6 +793,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 	// Open the append-only enforcement audit log when configured.
 	var auditCh chan enforcer.AuditEntry
+	// Д14а: тот же журнал принимает события lsm_audit (отказы и аудит ядра).
+	var enforceAuditLog *audit.Logger
 	if cfg.Enforcement.AuditLog != "" {
 		al, alErr := audit.New(cfg.Enforcement.AuditLog)
 		if alErr != nil {
@@ -801,6 +803,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				slog.Any("error", alErr))
 		} else {
 			defer al.Close()
+			enforceAuditLog = al
 			auditCh = make(chan enforcer.AuditEntry, 256)
 			go func() {
 				for entry := range auditCh {
@@ -824,6 +827,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// asynchronously via the engine's bounded worker pool.
 	// In simple mode, enforcement and kill are force-enabled regardless of config.
 	var enf *enforcer.Enforcer
+	var lsmMgr *collector.LSMCollector // Д14а: менеджер блокирующей половины (nil — не создан)
 	forceEnforce := enableSimple || cfg.SimpleMode.Enabled
 	if cfg.Enforcement.Enabled || forceEnforce {
 		enableKill := cfg.Enforcement.EnableKill || forceEnforce
@@ -2008,20 +2012,51 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		if cfg.Enforcement.BlockBackend == "lsm" {
 			lsmCfg.Enabled = "true"
 		}
+		// Д14а / №563: блокирующая половина LSM. Объект BPF грузит и привязывает
+		// KmodCollector (все программы lsm.bpf.c — в одном объекте), LSMCollector —
+		// менеджер его карт. Блокирующие хуки привязываются только при
+		// enforcer.block_backend: lsm и enforcement.dry_run: false — иначе
+		// политика из конфига блокировала бы вопреки dry_run.
+		kc, kcErr := collector.NewKmodCollector(slog.Default())
+		if kcErr != nil {
+			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
+		} else {
+			wantBlock := cfg.Enforcement.BlockBackend == "lsm" && !cfg.Enforcement.DryRun
+			kc.WithBlockHooks(wantBlock)
+			if enforceAuditLog != nil {
+				kc.WithAuditLogger(enforceAuditLog)
+			}
+			if enf != nil {
+				kc.WithLSMDenyObserver(enf.RecordLSMDeny)
+			}
+		}
 		if lc, lcErr := collector.NewLSMCollector(lsmCfg, slog.Default()); lcErr != nil {
 			slog.Warn("lsm: collector creation failed (kernel 5.7+ required)", slog.Any("error", lcErr))
 		} else {
-			// №457: lsm получает настоящий репортёр. На ядре без LSM BPF
-			// коллектор честно уходит в stub mode и пишет это в лог — а серия
-			// до этой правки оставалась оптимистической единицей, то есть
-			// №438 был объявлен закрытым при одной по-прежнему лгущей серии.
+			lsmMgr = lc
+			if kc != nil {
+				lc.BindKmod(kc)
+				if err := lc.Load(); err != nil {
+					slog.Warn("lsm: blocking half not loaded", slog.Any("error", err))
+				} else if lc.IsAvailable() {
+					if enf != nil {
+						enf.SetLSMManager(lc)
+					}
+					if err := lc.ApplyPolicy(cfg.Enforcement.LSMPathBlocklist, lsmNetworkPolicy(cfg)); err != nil {
+						slog.Warn("lsm: policy not loaded; blocking inactive", slog.Any("error", err))
+					}
+				}
+			}
+			if err := lc.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+				slog.Warn("lsm: failed to register metrics", slog.Any("error", err))
+			}
+			// №457: lsm получает настоящий репортёр. collector_up{lsm}=1 только при
+			// привязанных хуках и загруженной политике (Д14а).
 			collectors = append(collectors, lc.WithStatusReporter(collectorUpReporter(lc.Name(), nil)))
 			slog.Info("lsm: collector enabled", slog.Bool("lsm_bpf_available", lc.IsAvailable()))
 		}
 
-		if kc, kcErr := collector.NewKmodCollector(slog.Default()); kcErr != nil {
-			slog.Warn("kmod: collector creation failed", slog.Any("error", kcErr))
-		} else {
+		if kc != nil {
 			collectors = append(collectors, kc.WithStatusReporter(collectorUpReporter(kc.Name(), nil)).WithBackpressureStrategy(protectedFirstHop))
 			slog.Info("kmod: collector enabled")
 		}
@@ -2314,6 +2349,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					slog.Int("old_count", oldCount))
 				engine.RecordReloadFailure()
 				return
+			}
+
+			// Д14а: политика блокировки LSM перезаливается вместе с конфигом.
+			if lsmMgr != nil && lsmMgr.IsAvailable() {
+				if err := lsmMgr.ApplyPolicy(newCfg.Enforcement.LSMPathBlocklist, lsmNetworkPolicy(newCfg)); err != nil {
+					slog.Warn("lsm: policy reload failed; blocking inactive", slog.Any("error", err))
+				}
 			}
 
 			// Phase 2: atomic swap — only reached after full validation.

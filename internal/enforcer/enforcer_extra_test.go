@@ -791,3 +791,22 @@ func TestGetProcessStartTime(t *testing.T) {
 	_, err = GetProcessStartTime(999999)
 	require.Error(t, err)
 }
+
+// Д14а/№563: lsm_block считает отказ ядра, а не алерт. Исполнение действия
+// (запись пути в карту политики) счётчик не двигает; RecordLSMDeny — двигает.
+func TestLSMBlockCounter_CountsKernelDenialNotAlert(t *testing.T) {
+	t.Parallel()
+	f := newFakeLSM(true)
+	e, err := NewEnforcer(testLogger(), Config{LSMManager: f})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = e.Close() })
+
+	c := e.actionsTotal.WithLabelValues("lsm_block")
+	require.NoError(t, e.Execute(context.Background(), ActionLSMBlock, fileAlert("r", "/etc/shadow", 100, 0)))
+	assert.True(t, f.hasPath("/etc/shadow"))
+	assert.Zero(t, testutil.ToFloat64(c), "алерт с действием lsm_block не является отказом ядра")
+
+	e.RecordLSMDeny("file_open")
+	e.RecordLSMDeny("socket_connect")
+	assert.Equal(t, float64(2), testutil.ToFloat64(c))
+}

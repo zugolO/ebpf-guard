@@ -572,10 +572,21 @@ done:
 		if e.dryrunTotal != nil {
 			e.dryrunTotal.WithLabelValues("lsm_block").Inc()
 		}
-	} else if entry.Success && e.actionsTotal != nil {
+	}
+	// Д14а/№563: enforcement_actions_total{action="lsm_block"} здесь НЕ растёт.
+	// Алерт с действием lsm_block лишь ставит запись в карту политики (или уходит
+	// в nftables/iptables); отказом это становится, когда ядро отказывает
+	// вызову, — это считает RecordLSMDeny по событию lsm_audit.
+	return execErr
+}
+
+// RecordLSMDeny считает отказ ядра: хук (file_open / socket_connect) вернул
+// ошибку вызову. Единственный источник enforcement_actions_total{lsm_block}.
+func (e *Enforcer) RecordLSMDeny(hook string) {
+	if e.actionsTotal != nil {
 		e.actionsTotal.WithLabelValues("lsm_block").Inc()
 	}
-	return execErr
+	e.logger.Debug("LSM kernel denial counted", "hook", hook)
 }
 
 // executeNetworkPolicy generates (and optionally applies) a Kubernetes NetworkPolicy.

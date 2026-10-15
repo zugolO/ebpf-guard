@@ -120,14 +120,13 @@ foreign=$(ps -eo pid,cmd | grep -E '[w]8[0-9]-[a-z0-9-]*\.sh|[r]un-[0-9.]+-night
 [ -z "$foreign" ] || die "чужие циклы стенда: $(echo "$foreign" | tr '\n' ';' | cut -c1-200)"
 tr_units=$(ls /run/systemd/transient/ 2>/dev/null | grep -vE '^(cri-containerd|docker-|kubepods|session-|snap\.lxd)' | grep -E '\.(service|scope)$' | head -3)
 [ -z "$tr_units" ] || die "транзитные юниты: $(echo "$tr_units" | tr '\n' ' ')"
-# LSM-программы второго агента из смоков должны быть отвязаны: у lsm-программ нет владельцев, кроме рабочего агента
-mainpid=$(systemctl show -p MainPID --value "$SERVICE")
-lsm_owners=$(bpftool -j prog show 2>/dev/null | jq -r '[.[] | select(.type == "lsm") | (.pids // [])[] | .pid] | unique | map(tostring) | join(",")' 2>/dev/null)
-case ",${lsm_owners}," in
-    ",,"|",${mainpid},") ;;
-    *) die "LSM-программы чужих процессов (pid ${lsm_owners}; рабочий агент $mainpid) — второй агент из смоков не отвязан" ;;
-esac
-say "префлайт: агент один, бинарь rego, свободно $((free_kb / 1024)) МиБ, диск / ${used_pct}%, чужих циклов и транзитных юнитов нет, владельцы LSM-программ: ${lsm_owners:-нет}"
+# LSM-программы второго агента из смоков должны быть отвязаны. bpftool 5.15 владельцев (pids) не печатает — считаются
+# ПРОГРАММЫ типа lsm: у одинокого рабочего агента их EXPECT_LSM_PROGS (5; смок Д14а: «программ 10 → 5 как до агента»).
+lsm_n=$(bpftool -j prog show 2>/dev/null | jq -r '[.[] | select(.type == "lsm")] | length' 2>/dev/null)
+[ -n "$lsm_n" ] || die "bpftool не показал программы — LSM-хвост второго агента не проверить"
+[ "$lsm_n" = "${EXPECT_LSM_PROGS:-5}" ] || die "программ типа lsm $lsm_n, у одинокого рабочего агента ${EXPECT_LSM_PROGS:-5} — второй агент из смоков не отвязан (bpftool link show)"
+lsm_owners="$lsm_n программ lsm (ожидалось ${EXPECT_LSM_PROGS:-5})"
+say "префлайт: агент один, бинарь rego, свободно $((free_kb / 1024)) МиБ, диск / ${used_pct}%, чужих циклов и транзитных юнитов нет, ${lsm_owners}"
 
 # ── [1a] префлайт пода — ДО двенадцати часов ──────────────────────────────
 for c in helm kubectl docker k3s jq python3 go bpftool; do command -v "$c" >/dev/null || die "нет $c в PATH"; done

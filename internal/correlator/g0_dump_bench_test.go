@@ -26,7 +26,7 @@ func BenchmarkG0Dump(b *testing.B) {
 		name    string
 		reorder bool
 		lit     bool
-	}{{"s1+s2", true, false}, {"+G1", true, true}} {
+	}{{"s1", false, false}, {"s1+s2", true, false}, {"s1+s2+G1", true, true}} {
 		b.Run(mode.name, func(b *testing.B) {
 			var re *RuleEngine
 			withReorder(mode.reorder, func() {

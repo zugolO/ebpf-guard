@@ -136,6 +136,13 @@ type ServerConfig struct {
 	// всегда). Измерительный режим: установка меток на каждое правило заметно
 	// дороже. Действует только вместе с enable_pprof.
 	PprofRuleLabels bool `mapstructure:"pprof_rule_labels"`
+	// EventDumpPath (волна 8.6, заход B) — файл JSONL, куда пишется выборка событий,
+	// дошедших до движка правил: вход офлайн-бенча G0. Пусто — выключено (цена —
+	// одна атомарная загрузка на событие). Файл содержит comm, пути и аргументы
+	// процессов хоста (права 0600).
+	EventDumpPath string `mapstructure:"event_dump_path"`
+	// EventDumpEvery — писать каждое N-е событие (< 1 считается за 1).
+	EventDumpEvery int `mapstructure:"event_dump_every"`
 	// EnableDebug enables debug endpoints at /debug/state
 	EnableDebug bool `mapstructure:"enable_debug"`
 	// ShutdownTimeout is the total time budget for graceful shutdown. Valid range: [5s, 300s]. Default: 30s.
@@ -2181,6 +2188,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.health_path", "/health")
 	v.SetDefault("server.enable_pprof", false)
 	v.SetDefault("server.pprof_rule_labels", false)
+	v.SetDefault("server.event_dump_path", "")
+	v.SetDefault("server.event_dump_every", 1)
 	v.SetDefault("server.enable_debug", false)
 	v.SetDefault("server.shutdown_timeout", "30s")
 	v.SetDefault("server.shutdown_drain_enforcement", "5s")

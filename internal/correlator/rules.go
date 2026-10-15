@@ -969,6 +969,9 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 	if uint(t) >= byTypeSize {
 		return
 	}
+	if d := eventDump.Load(); d != nil {
+		d.sample(&e)
+	}
 	rules := re.byType[t]
 	filePath := fileAccessPath(e)
 	// One string cache for the whole rule pass: Comm/ParentComm/Filename are

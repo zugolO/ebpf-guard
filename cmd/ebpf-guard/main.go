@@ -884,6 +884,23 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// RuleEngine.EvaluateInto — до создания движка, метки правил строятся в нём.
 	correlator.SetProfileLabels(cfg.Server.EnablePprof, cfg.Server.EnablePprof && cfg.Server.PprofRuleLabels)
 
+	// Волна 8.6, заход B: дамп событий движка (режим измерения, по умолчанию выключен).
+	if cfg.Server.EventDumpPath != "" {
+		stopDump, err := correlator.EnableEventDump(cfg.Server.EventDumpPath, cfg.Server.EventDumpEvery)
+		if err != nil {
+			return fmt.Errorf("event dump: %w", err)
+		}
+		slog.Warn("event dump enabled (measurement mode)", slog.String("path", cfg.Server.EventDumpPath),
+			slog.Int("every", cfg.Server.EventDumpEvery))
+		defer func() {
+			w, e := correlator.EventDumpStats()
+			if err := stopDump(); err != nil {
+				slog.Warn("event dump: close failed", slog.Any("error", err))
+			}
+			slog.Info("event dump stopped", slog.Uint64("written", w), slog.Uint64("errors", e))
+		}()
+	}
+
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 		slog.Warn("correlation engine: failed to register Prometheus metrics",

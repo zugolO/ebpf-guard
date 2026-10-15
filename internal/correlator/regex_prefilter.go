@@ -198,6 +198,22 @@ func fixedAlternativesOf(re *syntax.Regexp) []string {
 		return out
 	case syntax.OpCapture:
 		return fixedAlternativesOf(re.Sub[0])
+	case syntax.OpConcat:
+		// Волна 8.6 B: «2[ef]» внутри альтернации — тоже конечный набор. Без этого
+		// «%(?:2[ef]|5c)» (так парсер выносит общий «%») не перечислялся, и
+		// обязательным становилось слабое «2e», встречающееся в hex-идентификаторах.
+		var out []string
+		for _, sub := range re.Sub {
+			alts := fixedAlternativesOf(sub)
+			if len(alts) == 0 {
+				return nil
+			}
+			out = crossProduct(out, alts)
+			if len(out) == 0 {
+				return nil
+			}
+		}
+		return out
 	case syntax.OpAlternate:
 		var out []string
 		for _, sub := range re.Sub {
@@ -337,3 +353,103 @@ func containsAny(value string, literals []string) bool {
 	return false
 }
 
+
+// requiredLiteralSets — обязательные литералы шаблона в виде КНФ: шаблон может
+// совпасть, только если в строке найден хотя бы один литерал КАЖДОГО набора.
+// requiredLiterals отдаёт один, самый селективный набор; здесь — все (волна 8.6 B,
+// G1): «(union|or|drop).*(\.\.|%2e)» требует и {union,or,drop}, и {.., %2e}, а
+// пропускал по слабому «or». Пробельный класс \s даёт набор из однобайтовых
+// пробелов: путь с пробелом встречается редко, это сильный фильтр для SQL-шаблонов
+// «INSERT\s+INTO». Набор годится только для автомата по filename (один проход),
+// containsAny по другим полям им не пользуется.
+func requiredLiteralSets(pattern string) [][]string {
+	re, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return nil
+	}
+	var sets [][]string
+	collectLiteralSets(re.Simplify(), &sets)
+	// без повторов: одинаковые наборы не удешевляют фильтр
+	var out [][]string
+	seen := map[string]bool{}
+	for _, s := range sets {
+		k := strings.Join(s, "\x00")
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+var whitespaceLiteralSet = []string{" ", "\t", "\n", "\f", "\r"}
+
+func isWhitespaceClass(re *syntax.Regexp) bool {
+	if re.Op != syntax.OpCharClass {
+		return false
+	}
+	have := map[rune]bool{}
+	for i := 0; i+1 < len(re.Rune); i += 2 {
+		for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
+			if r > 0x7f {
+				return false
+			}
+			have[r] = true
+		}
+	}
+	// \s Go = [\t\n\f\r ]: каждый символ класса — пробельный, класс не шире
+	for r := range have {
+		switch r {
+		case ' ', '\t', '\n', '\f', '\r':
+		default:
+			return false
+		}
+	}
+	return len(have) > 0
+}
+
+func collectLiteralSets(re *syntax.Regexp, out *[][]string) {
+	switch re.Op {
+	case syntax.OpLiteral:
+		if set := literalAlternatives(re); usableLiteralSet(set) {
+			*out = append(*out, set)
+		}
+	case syntax.OpCapture, syntax.OpPlus:
+		collectLiteralSets(re.Sub[0], out)
+	case syntax.OpRepeat:
+		if re.Min >= 1 {
+			collectLiteralSets(re.Sub[0], out)
+		}
+	case syntax.OpCharClass:
+		if isWhitespaceClass(re) {
+			*out = append(*out, whitespaceLiteralSet)
+		}
+	case syntax.OpAlternate:
+		if set := requiredLiteralsOf(re); usableLiteralSet(set) {
+			*out = append(*out, set)
+		}
+	case syntax.OpConcat:
+		var run []string
+		flush := func() {
+			if usableLiteralSet(run) {
+				*out = append(*out, run)
+			}
+			run = nil
+		}
+		for _, sub := range re.Sub {
+			collectLiteralSets(sub, out)
+			alts := fixedAlternativesOf(sub)
+			if len(alts) == 0 {
+				flush()
+				continue
+			}
+			extended := crossProduct(run, alts)
+			if len(extended) == 0 {
+				flush()
+				extended = alts
+			}
+			run = extended
+		}
+		flush()
+	}
+}

@@ -217,6 +217,11 @@ type RuleCondition struct {
 	// (wave 6.2.2, finding №244). When no literal of the set occurs in the
 	// value, matchesRegex skips the regex entirely.
 	regexLiterals [][]string
+	// litIdx/litIDs (волна 8.6 B, G1): автомат литералов движка и id литералов
+	// каждого шаблона. Действуют, только пока litIdx == re.fileLits — условия
+	// общие у нескольких движков, чужой автомат отбрасывается проверкой указателя.
+	litIdx *literalIndex
+	litIDs [][][]int32 // шаблон → набор → id (КНФ, см. requiredLiteralSets)
 }
 
 // RuleConditionGroup allows combining multiple conditions with AND/OR logic.
@@ -355,6 +360,9 @@ type Rule struct {
 	// profCtx — контекст меток pprof правила; строится в buildTypeIndex только
 	// при включённых метках правил (SetProfileLabels(_, true)).
 	profCtx *context.Context
+	// litGate (волна 8.6 B, G1) — правило не может совпасть, пока в имени файла нет
+	// ни одного литерала его обязательного regex-условия; строится buildLiteralIndexes.
+	litGate *ruleLitGate
 	// Condition is a single condition (for simple rules)
 	Condition RuleCondition `yaml:"condition"`
 	// ConditionGroup allows complex AND/OR logic (takes precedence over Condition)
@@ -502,6 +510,8 @@ type RuleEngine struct {
 	// be nil in production; it is a defence-in-depth check so compile failures
 	// cannot silently drop patterns from the cache.
 	compilePatternsError error
+	// fileLits — автомат литералов regex-условий по filename (G1); nil — G1 выключен.
+	fileLits *literalIndex
 }
 
 // CompileErrors returns any pattern compilation error from the last compilePatterns call.
@@ -560,6 +570,7 @@ func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 	if err := re.compilePatterns(); err != nil {
 		re.compilePatternsError = err
 	}
+	re.buildLiteralIndexes()
 	re.buildTypeIndex()
 	return re
 }
@@ -1243,6 +1254,15 @@ func (re *RuleEngine) matchesTypedCached(e *types.Event, rule *Rule, cache *even
 		dnsAnalysis = &a
 	}
 
+	// G1: обязательное regex-условие правила по filename не прошло литеральный
+	// префильтр ни одним шаблоном — правило совпасть не может.
+	if g := rule.litGate; g != nil && g.idx == re.fileLits && cache != nil && e.File != nil {
+		fn := eventFilename(e, cache)
+		if !g.passes(cache.fileLitHits(g.idx, fn)) {
+			return false
+		}
+	}
+
 	// Use condition group if present, otherwise use single condition.
 	var matched bool
 	if rule.ConditionGroup != nil {
@@ -1415,6 +1435,9 @@ func (re *RuleEngine) evaluateCondition(e *types.Event, cond *RuleCondition, dns
 		}
 		return true
 	case condOpRegex:
+		if cond.litIdx != nil && cond.litIdx == re.fileLits && cache != nil {
+			return re.matchesRegexIdx(cond, value, cache)
+		}
 		return re.matchesRegex(cond, value)
 	case condOpGT:
 		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a > b })
@@ -1588,6 +1611,12 @@ type eventFieldCache struct {
 	parentDone bool
 	filename   string
 	fileDone   bool
+	// G1: найденные в имени файла литералы (см. literal_index.go).
+	litDone bool
+	litIdx  *literalIndex
+	litSrc  string
+	litBig  []uint64 // только если литералов больше 64*litHitsSmallWords
+	litBuf  [litHitsSmallWords]uint64
 }
 
 // eventComm returns e.Comm as a string, materialising it at most once per event.
@@ -2175,6 +2204,28 @@ func (re *RuleEngine) matchesRegex(cond *RuleCondition, value string) bool {
 	}
 	for i, compiled := range cond.regexes {
 		if !containsAny(value, cond.regexLiterals[i]) {
+			if regexProbe != nil {
+				regexProbe(cond, i, false, false)
+			}
+			continue
+		}
+		matched := compiled.MatchString(value)
+		if regexProbe != nil {
+			regexProbe(cond, i, true, matched)
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesRegexIdx — matchesRegex с литералами из общего автомата (G1): шаблон
+// «литерал прошёл» ⇔ в множестве найденных в имени файла есть любой его id.
+func (re *RuleEngine) matchesRegexIdx(cond *RuleCondition, value string, cache *eventFieldCache) bool {
+	hits := cache.fileLitHits(cond.litIdx, value)
+	for i, compiled := range cond.regexes {
+		if sets := cond.litIDs[i]; len(sets) > 0 && !patternPasses(hits, sets) {
 			if regexProbe != nil {
 				regexProbe(cond, i, false, false)
 			}

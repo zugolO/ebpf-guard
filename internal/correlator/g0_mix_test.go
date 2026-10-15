@@ -271,8 +271,10 @@ func TestG0MixProfile(t *testing.T) {
 	profile("cpu-labels.pprof", true)
 	SetProfileLabels(false, false)
 
-	// G0(в): исход префильтра и regex по правилу, один полный проход потока.
-	re := NewRuleEngine(rules)
+	// G0(в): исход префильтра и regex по правилу, один полный проход потока
+	// (без автомата литералов и ворот правил — «вызовов шаблона» считаются все).
+	var re *RuleEngine
+	withLiteralIndex(false, func() { re = NewRuleEngine(rules) })
 	own := g0Owners(re)
 	type st struct{ calls, lit, match int }
 	stats := map[string]*st{}
@@ -325,7 +327,10 @@ func TestRegexProbe_CountsLiteralPassAndMatch(t *testing.T) {
 		Condition: RuleCondition{Field: "filename", Op: OpRegex, Values: []string{`secret.*key`}},
 		Severity:  types.SeverityWarning, Action: ActionAlert,
 	}
-	re := NewRuleEngine([]Rule{rule})
+	// G1 (ворота правила) отсекает правило до вызова шаблона и «calls» не посчитает:
+	// счёт G0(в) снимается без автомата; lit/match при автомате те же (проверка ниже).
+	var re *RuleEngine
+	withLiteralIndex(false, func() { re = NewRuleEngine([]Rule{rule}) })
 	own := g0Owners(re)
 	type st struct{ calls, lit, match int }
 	got := map[string]*st{}
@@ -348,4 +353,27 @@ func TestRegexProbe_CountsLiteralPassAndMatch(t *testing.T) {
 	}
 	require.NotNil(t, got["g0_probe"], "владелец условия должен находиться по указателю")
 	require.Equal(t, st{calls: 3, lit: 2, match: 1}, *got["g0_probe"])
+
+	// С автоматом: ворота правила и КНФ-наборы («secret» И «key») снимают шаблон до
+	// вызова; доходит только «/a/secret_key», и он совпадает.
+	reG1 := NewRuleEngine([]Rule{rule})
+	ownG1 := g0Owners(reG1)
+	got1 := map[string]*st{}
+	regexProbe = func(c *RuleCondition, _ int, lit, m bool) {
+		id := ownG1[c]
+		if got1[id] == nil {
+			got1[id] = &st{}
+		}
+		got1[id].calls++
+		if lit {
+			got1[id].lit++
+		}
+		if m {
+			got1[id].match++
+		}
+	}
+	for _, p := range []string{"/a/other", "/a/secret_x", "/a/secret_key"} {
+		reG1.EvaluateInto(w81FileEvent(1, "cat", p, 0), func(types.Alert) {})
+	}
+	require.Equal(t, st{calls: 1, lit: 1, match: 1}, *got1["g0_probe"])
 }

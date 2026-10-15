@@ -25,13 +25,16 @@ func BenchmarkG0Dump(b *testing.B) {
 	for _, mode := range []struct {
 		name    string
 		reorder bool
-	}{{"reorder=on", true}, {"reorder=off", false}} {
+		lit     bool
+	}{{"s1+s2", true, false}, {"+G1", true, true}} {
 		b.Run(mode.name, func(b *testing.B) {
 			var re *RuleEngine
 			withReorder(mode.reorder, func() {
-				rules, err := LoadRulesFromDir("../../rules")
-				require.NoError(b, err)
-				re = NewRuleEngine(rules)
+				withLiteralIndex(mode.lit, func() {
+					rules, err := LoadRulesFromDir("../../rules")
+					require.NoError(b, err)
+					re = NewRuleEngine(rules)
+				})
 			})
 			sink := func(types.Alert) {}
 			for i := range evs[:min(len(evs), 20000)] { // прогрев

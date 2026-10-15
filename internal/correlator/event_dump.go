@@ -241,3 +241,6 @@ func LoadEventDump(path string) ([]types.Event, error) {
 	}
 	return out, sc.Err()
 }
+
+// EventDumpActive — дамп событий включён в рантайме (а не только задан в конфиге).
+func EventDumpActive() bool { return eventDump.Load() != nil }

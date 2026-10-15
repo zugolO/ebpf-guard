@@ -904,6 +904,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			slog.Info("event dump stopped", slog.Uint64("written", w), slog.Uint64("errors", e))
 		}()
 	}
+	// Флаги рантайма (после включения дампа и меток): входной сторож ночи читает их из /metrics.
+	publishRuntimeFlags(cfg)
 
 	engine := correlator.NewCorrelationEngineWithConfig(engineCfg)
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {

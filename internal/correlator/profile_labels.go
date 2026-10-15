@@ -39,6 +39,12 @@ func SetProfileLabels(eventType, rule bool) {
 	profileRuleLabels.Store(rule)
 }
 
+// ProfileLabelsState — РАНТАЙМ-состояние меток (а не конфиг): метки типа события
+// и метки правил. Читается экспортёром флагов рантайма (ночь 8.6 сверяет по нему).
+func ProfileLabelsState() (eventLabels, ruleLabels bool) {
+	return profileEventLabels.Load(), profileRuleLabels.Load()
+}
+
 // ruleProfileCtx строит контекст меток правила: event_type + rule_file + rule_id.
 func ruleProfileCtx(r *Rule) *context.Context {
 	file := r.sourceFile

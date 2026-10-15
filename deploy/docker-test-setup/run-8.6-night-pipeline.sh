@@ -116,7 +116,7 @@ free_kb=$(df -Pk /var/lib | awk 'NR == 2 { print $4 }')
 used_pct=$(df -P / | awk 'NR == 2 { sub(/%/, "", $5); print $5 }')
 [ "${used_pct:-100}" -le 80 ] || die "диск / занят на ${used_pct}% > 80 — kubelet удалит образ пода до утра (go clean -cache, старые образы docker)"
 # чужие циклы и транзитные юниты (память transient-unit-survives-and-blocks-next-run, harness-pkill-f)
-foreign=$(ps -eo pid,cmd | grep -E '[w]8[0-9]-[a-z0-9-]*\.sh|[r]un-[0-9.]+-night|[i]dle-run\.sh|[r]un-all-attacks|[w]82-pod-(run|attack)|[w]86-c0-stand|[w]86-d1' | grep -v "run-8.6-night-pipeline" | head -3)
+foreign=$(ps -eo pid,cmd | grep -E '[w]8[0-9]-[a-z0-9-]*\.sh|[r]un-[0-9.]+-night|[i]dle-run\.sh|[r]un-all-attacks|[w]82-pod-(run|attack)|[w]86-c0-stand|[w]86-d1' | grep -vE "run-8\.6-night-pipeline|w86-rehearsal\.sh|w86-night-set\.sh" | head -3)
 [ -z "$foreign" ] || die "чужие циклы стенда: $(echo "$foreign" | tr '\n' ';' | cut -c1-200)"
 tr_units=$(ls /run/systemd/transient/ 2>/dev/null | grep -vE '^(cri-containerd|docker-|kubepods|session-|snap\.lxd)' | grep -E '\.(service|scope)$' | head -3)
 [ -z "$tr_units" ] || die "транзитные юниты: $(echo "$tr_units" | tr '\n' ' ')"

@@ -232,3 +232,33 @@ func TestCondOrder_ShippedRulesetSameAlerts(t *testing.T) {
 	require.Empty(t, diff, "наборы алертов разошлись")
 	t.Logf("событий %d, алертов %d", len(evs), len(a))
 }
+
+// Механизм перестановки работает там, где порядок плох: правило «regex по пути,
+// затем eq по comm» на потоке, где comm почти никогда не совпадает. На боевом наборе
+// такого порядка почти нет (2 группы из 312), поэтому выигрыш показывает этот бенч,
+// а не бенч на дампе. Тождество алертов — в TestCondOrder_PropertyResultUnchanged.
+func BenchmarkCondOrder_RegexBeforeCheap(b *testing.B) {
+	mk := func() []Rule {
+		return []Rule{{ID: "r", Name: "n", EventType: types.EventFileAccess, Severity: "warning", Action: ActionAlert,
+			ConditionGroup: &RuleConditionGroup{Operator: "and", Conditions: []RuleCondition{
+				{Field: "filename", Op: OpRegex, Values: []string{`^/var/lib/[a-z0-9_-]+/(cache|state)/[a-z0-9._-]+\.(db|json|lock)$`}},
+				{Field: "proc.comm", Op: OpIn, Values: []string{"rarely-seen-daemon"}},
+			}}}}
+	}
+	e := types.Event{Type: types.EventFileAccess, PID: 1, File: &types.FileEvent{Filename: "/var/lib/containerd/cache/snapshots-1234.db"}}
+	copy(e.Comm[:], "bash")
+	for _, on := range []bool{false, true} {
+		name := "reorder=off"
+		if on {
+			name = "reorder=on"
+		}
+		b.Run(name, func(b *testing.B) {
+			var re *RuleEngine
+			withReorder(on, func() { re = NewRuleEngine(mk()) })
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				re.EvaluateInto(e, func(types.Alert) {})
+			}
+		})
+	}
+}

@@ -174,6 +174,9 @@ mkmem() { # <имя> <anon_наклон МиБ/ч> [memstats=yes] — 49 сни�
 w 8.1.1r-slope '^ИЗМЕРЕНО: 8\.1\.1r .*anon=\+2\.00 file=\+0\.00 heap_inuse=\+0\.00' "$(IDLE=$(mkmem ms 2) em memsplit)"
 w 8.1.1r-flat '^ИЗМЕРЕНО: 8\.1\.1r .*anon=\+0\.00' "$(IDLE=$(mkmem ms0 0) em memsplit)"
 w 8.1.1r-no-memstats '^НЕИЗМЕРИМ: 8\.1\.1r .*нет go_memstats' "$(IDLE=$(mkmem msn 1 no) em memsplit)"
+mkmem_short() { local D=$T/short/idle; mkdir -p "$D/snapshots"; printf 'timestamp\tn\tcurrent\tanon\tfile\tslab\tpagetables\tkernel_stack\tsock\tmax\n' > "$D/snapshots/cgroup-mem.tsv"
+    local i=0; while [ "$i" -lt 6 ]; do printf 't\t%d\t100\t60\t30\t0\t0\t0\t0\tmax\n' "$i" >> "$D/snapshots/cgroup-mem.tsv"; printf 'go_memstats_heap_inuse_bytes 1\ngo_memstats_heap_idle_bytes 1\ngo_memstats_heap_released_bytes 1\ngo_memstats_stack_inuse_bytes 1\ngo_memstats_sys_bytes 1\n' > "$D/snapshots/$(printf 'metrics-%04d.txt' "$i")"; i=$((i + 1)); done; echo "$D"; }
+w 8.1.1r-short-idle '^НЕИЗМЕРИМ: 8\.1\.1r .*снимков после часа прогрева меньше трёх' "$(IDLE=$(mkmem_short) em memsplit)"
 w 8.1.1r-no-cgroup '^НЕИЗМЕРИМ: 8\.1\.1r .*нет cgroup-mem\.tsv' "$(IDLE=$T/нет em memsplit)"
 
 # ── 8.6.Д ─────────────────────────────────────────────────────────────────────

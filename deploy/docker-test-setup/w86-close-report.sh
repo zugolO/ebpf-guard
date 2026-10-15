@@ -397,6 +397,7 @@ memsplit() {
     grep -v '^SLOPES' "$T/out"
     local sl; sl=$(grep '^SLOPES' "$T/out" | sed 's/^SLOPES //')
     rm -rf "$T"
+    case "$sl" in *current=NA*|*anon=NA*|*file=NA*) cls="$cls; снимков после часа прогрева меньше трёх (всего $n) — наклон не считается" ;; esac
     if [ -n "$cls" ]; then echo "НЕИЗМЕРИМ: 8.1.1r НЕИЗМЕРИМ (класс НАЗВАН:${cls#;}; наклоны МиБ/ч после 1 ч: $sl)"
     else echo "ИЗМЕРЕНО: 8.1.1r ИЗМЕРЕНО (наклоны МиБ/ч после 1 ч прогрева: $sl; снимков $n по 300 с; вердикт 8.1.1 — night-report.sh)"; fi
 }

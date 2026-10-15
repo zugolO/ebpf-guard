@@ -913,6 +913,9 @@ func (re *RuleEngine) compileGroupPatterns(g *RuleConditionGroup) error {
 			return err
 		}
 	}
+	// Волна 8.6 B, шаг 2: дешёвые условия раньше regex (cond_order.go). После
+	// компиляции — классу цены нужен opCode.
+	orderGroupConditions(g)
 	return nil
 }
 

@@ -221,8 +221,9 @@ func g0Run(re *RuleEngine, stream []types.Event, dur time.Duration) (evals int, 
 
 func TestG0MixProfile(t *testing.T) {
 	pathsFile := os.Getenv("G0_PATHS")
-	if pathsFile == "" {
-		t.Skip("G0_PATHS не задан: гистограмма comm+путь со стенда")
+	dumpFile := os.Getenv("G0_DUMP")
+	if pathsFile == "" && dumpFile == "" {
+		t.Skip("ни G0_DUMP (дамп событий движка, заход B), ни G0_PATHS (гистограмма со стенда) не заданы")
 	}
 	out := os.Getenv("G0_OUT")
 	require.NotEmpty(t, out, "G0_OUT обязателен")
@@ -233,8 +234,17 @@ func TestG0MixProfile(t *testing.T) {
 	}
 	dur := time.Duration(secs) * time.Second
 
-	pairs := g0LoadPairs(t, pathsFile)
-	stream := g0BuildStream(t, pairs, 200000)
+	var pairs []g0Pair
+	var stream []types.Event
+	if dumpFile != "" {
+		// Заход B: настоящий вход — дамп событий движка (server.event_dump_path).
+		var err error
+		stream, err = LoadEventDump(dumpFile)
+		require.NoError(t, err)
+	} else {
+		pairs = g0LoadPairs(t, pathsFile)
+		stream = g0BuildStream(t, pairs, 200000)
+	}
 	rules, err := LoadRulesFromDir("../../rules")
 	require.NoError(t, err)
 

@@ -340,7 +340,7 @@ archive() {
 # ── [5] сегмент пода: ≥ 5 прогонов ЭТОЙ ночи, один бинарь ────────────────────
 pod_down() {
     helm uninstall "$REL" -n "$NS" >/dev/null 2>&1
-    for i in $(seq 1 60); do [ "$(n_agents)" -eq 0 ] && break; sleep 2; done
+    local k; for k in $(seq 1 60); do [ "$(n_agents)" -eq 0 ] && break; sleep 2; done
     systemctl is-active --quiet "$SERVICE" || systemctl start "$SERVICE"
     sleep 5
     say "под снят, хостовый агент: $(systemctl is-active "$SERVICE"), агентов $(n_agents)"
@@ -403,12 +403,12 @@ pod_run_one() {
     return 0
 }
 # засчитанных прогонов должно быть POD_RUNS_N; сорвавшийся прогон повторяется (запас — две попытки сверх)
-i=0; tries=0
+ridx=0; tries=0
 while [ "$(wc -l < "$ART/pod-runs.list" | tr -d ' ')" -lt "$POD_RUNS_N" ] && [ "$tries" -lt $((POD_RUNS_N + 2)) ]; do
-    i=$((i + 1)); tries=$((tries + 1))
-    if [ "$i" = 1 ]; then pod_run_one 1 "$POD_IDLE_SECS"; else pod_run_one "$i" "$POD_SHORT_IDLE_SECS"; fi
+    ridx=$((ridx + 1)); tries=$((tries + 1))
+    if [ "$ridx" = 1 ]; then pod_run_one 1 "$POD_IDLE_SECS"; else pod_run_one "$ridx" "$POD_SHORT_IDLE_SECS"; fi
     pod_down
-    [ "$(n_agents)" -eq 1 ] || say "ВНИМАНИЕ: после снятия пода $i агентов $(n_agents)"
+    [ "$(n_agents)" -eq 1 ] || say "ВНИМАНИЕ: после снятия пода $ridx агентов $(n_agents)"
 done
 say "прогонов пода засчитано: $(wc -l < "$ART/pod-runs.list" | tr -d ' ') из $POD_RUNS_N (попыток $tries)"
 trap - EXIT

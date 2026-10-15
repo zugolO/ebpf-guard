@@ -82,7 +82,7 @@ def build(cfg, tag, token):
         kf = cfg.get("bpf", {}).get("kernel_filter")
         if not isinstance(kf, dict):
             die("в конфиге нет bpf.kernel_filter — F1 включить некуда")
-        kf["arg_predicates"] = {"enabled": True, "counters_interval": "5s"}
+        kf["arg_predicates"] = {"enabled": True, "counters_interval": "15s"}
     col = cfg.setdefault("collectors", {})
     if not col.get("required"):
         col["required"] = list(CHART_REQUIRED)

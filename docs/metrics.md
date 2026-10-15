@@ -449,6 +449,35 @@ groups:
 
 ---
 
+#### `ebpf_guard_runtime_flag`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | `flag` (event_dump\|pprof_event_labels\|pprof_rule_labels\|enable_pprof\|arg_predicates_config) |
+| **Description** | Runtime state of measurement and cost flags in this process (1 = on), read from the process, not from the config file. A measurement run checks that `event_dump` and `pprof_rule_labels` are 0 (wave 8.6). |
+
+---
+
+#### `ebpf_guard_runtime_counters_interval_seconds`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Description** | Effective interval of the kernel syscall counters drain (wave 8.5 F2), seconds; the configured value, or the default (15 s) when unset. |
+
+---
+
+#### `ebpf_guard_runtime_block_backend`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | `backend` (the effective `enforcement.block_backend`) |
+| **Description** | Exactly one backend label is 1: the enforcer block backend this process runs with. |
+
+---
+
 #### `ebpf_guard_memory_pressure_mode`
 
 | Attribute | Value |

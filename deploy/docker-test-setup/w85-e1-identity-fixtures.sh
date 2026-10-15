@@ -22,6 +22,12 @@ al "$T/e.json" r1:sqlmap:3 r2:xmrig:1 r3:sqlmap:1
 want gained-attack "$T/e.json" "$T/b.json" "$T/man.json" "" '^ПРОВАЛЕН: 8\.5\.E1i .*только в новом r3\(атака 1\)'
 al "$T/f.json" r1:sqlmap:30 r2:xmrig:1
 want volume-bg     "$T/f.json" "$T/b.json" "$T/man.json" "" 'объём разошёлся > 3× \(фон окон\): r1 4→30'
+# реестр заведённых позже базы правил (8.6): расширение по дате — не провал; дата позже ночи или не позже базы — провал
+printf 'r3\t20261015\t8.6-B\n' > "$T/reg.txt"
+rg() { local out; out=$(NEW_RULES=$T/reg.txt NIGHT_DATE=$1 BASE_DATE=$2 bash "$EMIT" "$T/e.json" "$T/b.json" "$T/man.json" 2>&1); if echo "$out" | grep -aqE "$3"; then ok "$4"; else bad "$4 — нет «$3»"; echo "$out" | sed 's/^/    | /' | head -8; fi; }
+rg 20261016 20261014 '^ДОСТИГНУТО: 8\.5\.E1i .*ожидаемое расширение по реестру: r3\(атака 1, реестр 20261015\)' registry-by-date
+rg 20261014 20261013 '^ПРОВАЛЕН: 8\.5\.E1i .*только в новом r3\(атака 1\)' registry-date-after-night
+rg 20261016 20261015 '^ПРОВАЛЕН: 8\.5\.E1i .*только в новом r3\(атака 1\)' registry-date-not-after-base
 echo '[]' > "$T/empty.json"
 want empty         "$T/empty.json" "$T/b.json" "$T/man.json" "" '^НЕИЗМЕРИМ: 8\.5\.E1i .*ноль правил'
 want no-file       "$T/нет.json" "$T/b.json" "$T/man.json" "" '^НЕИЗМЕРИМ: 8\.5\.E1i .*нет или не разобран'
@@ -29,9 +35,11 @@ want no-manifest   "$T/a.json" "$T/b.json" "$T/нет.json" "" '^НЕИЗМЕР�
 if [ "${1:-}" = --mutate ]; then
     mut() { local f; f=$(mktemp); sed "$2" "$EMIT" > "$f"; if cmp -s "$f" "$EMIT"; then bad "мутация $1 не применилась"; rm -f "$f"; return; fi
         if EMITTER=$f bash "$0" 2>/dev/null | grep -q '^FAIL'; then ok "мутация $1 покраснила фикстуры"; else bad "мутация $1 НЕ покраснила фикстуры"; fi; rm -f "$f"; }
-    mut manifest-blind 's/if \[ "\$a" -gt 0 \]; then only_new=/if true; then only_new=/'
+    mut manifest-blind 's/a=\$(atk "\$N" "\$r")$/a=1/'
     mut old-side       's/a=\$(atk "\$O" "\$r"); if \[ "\$a" -gt 0 \]; then only_old=/a=0; if [ "$a" -gt 0 ]; then only_old=/'
     mut verdict-new    's/if \[ -z "\$only_new" \] \&\& \[ -z "\$only_old" \]; then/if [ -z "$only_new" ]; then/'
+    mut registry-late  's/\[ "\$d" -le "\$NIGHT_DATE" \]/true/'
+    mut registry-base  's/\[ "\$d" -gt "\$BASE_DATE" \] \&\& //'
     mut empty-guard    's/if \[ "\$tn" -eq 0 \] || \[ "\$to" -eq 0 \]; then/if false; then/'
 fi
 echo "-- fails=$fails"; [ "$fails" = 0 ]

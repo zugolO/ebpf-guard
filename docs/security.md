@@ -83,7 +83,7 @@ securityContext:
 
 config:
   enforcer:
-    block_backend: nftables   # (block_backend: lsm is not verified yet — docs/lsm-enforcement.md)
+    block_backend: lsm   # verified on 5.15 with lsm=bpf (docs/lsm-enforcement.md)
 ```
 
 ```yaml
@@ -568,7 +568,7 @@ Use this checklist before deploying ebpf-guard to a production cluster.
 
 ### Capability minimization
 - [ ] `CAP_SYS_PTRACE` removed if TLS inspection disabled (`collectors.tls.enabled: false`)
-- [ ] `CAP_NET_ADMIN` removed if nftables enforcement not used (`enforcer.block_backend: lsm` is not a supported alternative yet)
+- [ ] `CAP_NET_ADMIN` removed if nftables enforcement not used (`enforcer.block_backend: lsm`)
 
 ### Config & secrets
 - [ ] Config file permissions: `0640` owned by `root`

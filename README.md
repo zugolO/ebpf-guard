@@ -113,7 +113,7 @@ helm install ebpf-guard oci://ghcr.io/zugolO/charts/ebpf-guard \
 - **Sigma rule import** — `sigma2ebpfguard` standalone binary converts Sigma open-standard detection rules to ebpf-guard YAML (`process_creation`, `network_connection`, `file_event`, `dns_query` logsources; all Sigma modifiers supported).
 - **DNS monitoring** — BPF socket filter for DNS packets; DGA detection via Shannon entropy, DNS tunneling detection, C2 TLD rules.
 - **TLS inspection** — uprobes on `SSL_write`/`SSL_read` capture plaintext before encryption (opt-in, requires `CAP_SYS_PTRACE`).
-- **eBPF LSM detection** — kernel 5.7+ `lsm/kernel_module_request` and `lsm/kernel_read_file` hooks report kernel-module loads. The *blocking* LSM hooks (`file_open`, `socket_connect`) are **not verified and not enabled by default**; use `enforcer.block_backend: nftables` for blocking. See [docs/lsm-enforcement.md](docs/lsm-enforcement.md).
+- **eBPF LSM detection** — kernel 5.7+ `lsm/kernel_module_request` and `lsm/kernel_read_file` hooks report kernel-module loads. The blocking hooks (`file_open`, `socket_connect`) are enabled with `enforcer.block_backend: lsm`: LSM blocking verified on kernel 5.15 with `lsm=bpf` (see [docs/lsm-enforcement.md](docs/lsm-enforcement.md)).
 - **nftables enforcement** — `google/nftables` netlink-based network blocking (no fork/exec); `CAP_NET_ADMIN` required.
 - **Simulate mode** — `--simulate` flag runs the full enforcement pipeline but prints what would have been blocked/killed instead of executing any action; safe to run in production for policy evaluation.
 - **Cryptominer detection** — outbound mining pool port/IP matching in BPF map; xmrig/minerd process name detection; DNS TXT query detection.
@@ -464,7 +464,7 @@ store:
     path: /var/lib/ebpf-guard/events.db
 
 enforcer:
-  block_backend: log            # log | nftables  (lsm: blocking hooks not verified yet, see docs/lsm-enforcement.md)
+  block_backend: log            # log | nftables | lsm  (lsm: verified on 5.15 with lsm=bpf)
   dry_run: false
 
 auth:

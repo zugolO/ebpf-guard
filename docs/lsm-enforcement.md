@@ -1,12 +1,14 @@
 # eBPF LSM Enforcement
 
-> **Status (15.10.2026): the blocking half is not verified.** On kernel 5.15 with `lsm=bpf` the
-> `file_open`, `socket_connect` and `task_kill` programs load and pass the verifier, but they were
-> never attached to the kernel and `enforcement.lsm_path_blocklist` / `network_blocklist` never
-> reached their maps (finding №563), so `enforcer.block_backend: lsm` blocked nothing. Do not rely
-> on LSM blocking; use `block_backend: nftables`. Only the kernel-module detection hooks
-> (`kernel_module_request`, `kernel_read_file`) are live. This notice is removed when the
-> blocking smoke passes on 5.15.
+> **Status (15.10.2026): verified on kernel 5.15.0-194 with `lsm=bpf`** (second-agent smoke, 5/5):
+> `open` of a blocklisted file → `EACCES` + `lsm_audit` (deny, file_open) entry in the audit log; `connect` to a blocklisted
+> port → `EPERM` + `lsm_audit` entry; `task_kill` is **audit only** (signal delivered, entry written); neighbouring file/port pass;
+> after the agent stops the hooks are detached and the block is gone. `enforcement_actions_total{action="lsm_block"}` counts
+> kernel refusals (not alerts); `collector_up{lsm}` is 1 only when the blocking hooks are attached and the policy is loaded.
+> Blocking hooks are attached only with `enforcer.block_backend: lsm` and `enforcement.dry_run: false`; the policy comes from
+> `enforcement.lsm_path_blocklist` and `enforcement.network_blocklist` (hot-reloaded). Cost measured with `kernel.bpf_stats_enabled`:
+> `file_open` ≈ 1.1 µs per open, `task_kill` ≈ 11 µs per signal (audit event) — about 0.025% of one core each on an idle node.
+> `task_kill` audit entries are written for every signal (≈5/s on the test node).
 
 This document describes the eBPF LSM (Linux Security Module) enforcement feature introduced in Sprint 22.0. LSM hooks provide **pre-execution** enforcement, allowing the agent to block operations before they occur, unlike kprobes which only observe after the fact.
 

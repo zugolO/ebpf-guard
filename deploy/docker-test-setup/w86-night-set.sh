@@ -15,7 +15,7 @@ BASE=${W85_BASE:-/root/w85-base}
 W86=${W86_BASE:-/root/w86-base}
 EXPECT_NR=${EXPECT_NR:-36}
 IDLE_SECS=${IDLE_SECS:-43200}
-EST_AFTER_IDLE_SECS=${EST_AFTER_IDLE_SECS:-17400}
+EST_AFTER_IDLE_SECS=${EST_AFTER_IDLE_SECS:-13500}
 LAUNCH=/root/night-8.6-at.sh
 target=$(date -u -d "$DAY $START" +%s); now=$(date +%s)
 [ "$target" -gt "$now" ] || { echo "die: старт $DAY $START UTC уже прошёл (сейчас $(date -u +%FT%T))"; exit 1; }

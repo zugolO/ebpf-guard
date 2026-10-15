@@ -222,6 +222,11 @@ type RuleCondition struct {
 	// общие у нескольких движков, чужой автомат отбрасывается проверкой указателя.
 	litIdx *literalIndex
 	litIDs [][][]int32 // шаблон → набор → id (КНФ, см. requiredLiteralSets)
+	// fieldNorm/fieldID (волна 8.6 C0, G3): каноническое имя поля и его код,
+	// посчитанные при компиляции условия. Пусто — условие не компилировалось
+	// (тест строит его руками): тогда имя нормализуется на лету.
+	fieldNorm string
+	fieldID   condFieldID
 }
 
 // RuleConditionGroup allows combining multiple conditions with AND/OR logic.
@@ -512,6 +517,9 @@ type RuleEngine struct {
 	compilePatternsError error
 	// fileLits — автомат литералов regex-условий по filename (G1); nil — G1 выключен.
 	fileLits *literalIndex
+	// dispatch — индекс правил по номеру syscall и операции файла (G3);
+	// nil — выключен. Строится из загруженных правил (buildDispatchIndex).
+	dispatch *dispatchIndex
 }
 
 // CompileErrors returns any pattern compilation error from the last compilePatterns call.
@@ -572,6 +580,7 @@ func NewRuleEngineWithCache(rules []Rule, prior *RuleEngine) *RuleEngine {
 	}
 	re.buildLiteralIndexes()
 	re.buildTypeIndex()
+	re.buildDispatchIndex()
 	return re
 }
 
@@ -906,6 +915,8 @@ func (re *RuleEngine) compileCondPtr(cond *RuleCondition) error {
 	// Precompute the numeric opcode so evaluateCondition uses an integer switch
 	// (jump table, ~2 ns) instead of switching on the Op string (~10 ns).
 	cond.opCode = opCodeOf(cond.Op)
+	cond.fieldNorm = normaliseFieldName(cond.Field)
+	cond.fieldID = fieldIDOf(cond.fieldNorm)
 	return nil
 }
 
@@ -993,7 +1004,17 @@ func (re *RuleEngine) EvaluateInto(e types.Event, fn func(types.Alert)) {
 	// (wave 8.1 item 3).
 	cache := &eventFieldCache{}
 	prof := profileEnter(t)
-	for i := range rules {
+	// G3: кандидаты по nr/op; при indexed == false — перебор всех правил.
+	cand, indexed := re.candidateRules(&e)
+	n := len(rules)
+	if indexed {
+		n = len(cand)
+	}
+	for k := 0; k < n; k++ {
+		i := k
+		if indexed {
+			i = int(cand[k])
+		}
 		rule := &rules[i] // pointer avoids copying the ~300-byte Rule struct
 		if rule.profCtx != nil {
 			pprof.SetGoroutineLabels(*rule.profCtx)
@@ -1044,7 +1065,16 @@ func (re *RuleEngine) Evaluate(e types.Event) []types.Alert {
 	rules := re.byType[t]
 	filePath := fileAccessPath(e)
 	cache := &eventFieldCache{}
-	for i := range rules {
+	cand, indexed := re.candidateRules(&e)
+	n := len(rules)
+	if indexed {
+		n = len(cand)
+	}
+	for k := 0; k < n; k++ {
+		i := k
+		if indexed {
+			i = int(cand[k])
+		}
 		rule := &rules[i]
 		if !re.matchesTypedCached(&e, rule, cache) {
 			continue
@@ -1369,7 +1399,7 @@ func (re *RuleEngine) evaluateCondition(e *types.Event, cond *RuleCondition, dns
 	// fieldNotFound means the field name is unknown for this event type —
 	// treat as no-match for all operators (rule is misconfigured but was
 	// already rejected at load time via validateFieldName).
-	value := re.getFieldValueCached(e, cond.Field, dnsAnalysis, cache)
+	value := re.condValue(e, cond, dnsAnalysis, cache)
 	if value == fieldNotFound {
 		return false
 	}
@@ -1676,7 +1706,14 @@ func (re *RuleEngine) getFieldValue(e *types.Event, field string, dnsAnalysis *D
 func (re *RuleEngine) getFieldValueCached(e *types.Event, field string, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) string {
 	// Normalise dotted-name aliases (file.path → filename, proc.comm → comm, etc.)
 	// to the canonical field names expected by the rest of getFieldValue.
-	field = normaliseFieldName(field)
+	return re.getFieldValueNorm(e, normaliseFieldName(field), dnsAnalysis, cache)
+}
+
+// getFieldValueNorm — getFieldValueCached для УЖЕ нормализованного имени поля
+// (волна 8.6 C0, G3): условие хранит каноническое имя, посчитанное при
+// компиляции (RuleCondition.fieldNorm), и горячий путь не гоняет
+// normaliseFieldName на каждое условие каждого события.
+func (re *RuleEngine) getFieldValueNorm(e *types.Event, field string, dnsAnalysis *DomainAnalysis, cache *eventFieldCache) string {
 
 	// Workload identity is resolved BEFORE the per-type switch, so it is
 	// available on every event type rather than only on file events.

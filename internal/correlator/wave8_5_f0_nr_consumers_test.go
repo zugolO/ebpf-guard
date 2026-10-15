@@ -19,7 +19,9 @@ import (
 // отфильтрован в ядре) и дописать сюда вместе с решением в plan.md (8.5 F0).
 var w85KnownNrConsumers = map[string]string{
 	// Живой путь агента — теряют вход при отборе в ядре.
-	"internal/correlator/rules.go|getFieldValueCached":        "правила: поле nr",
+	"internal/correlator/rules.go|getFieldValueNorm":          "правила: поле nr",
+	"internal/correlator/dispatch_index.go|condValue":         "правила: поле nr, быстрый путь (G3, 8.6 C0)",
+	"internal/correlator/dispatch_index.go|candidateRules":    "правила: индекс по nr (G3, 8.6 C0) — те же правила, что видят nr",
 	"internal/profiler/profile.go|recordSyscallEventLocked":   "EWMA-профиль (anomaly), включён",
 	"internal/profiler/anomaly.go|analyzeSyscallBehavior":     "EWMA-скоринг (anomaly), включён",
 	"internal/profiler/sequence.go|Update":                    "Марков, включён профилем balanced",

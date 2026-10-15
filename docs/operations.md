@@ -576,7 +576,7 @@ bpf:
     arg_predicates:
       enabled: true
       nrs: [9, 10, 158]        # mmap, mprotect, arch_prctl; 321 (bpf) is rejected by validation
-      counters_interval: 5s
+      counters_interval: 15s
 ```
 
 The predicate is **generated from the loaded rules**, never written by hand, and re-derived on
@@ -614,7 +614,7 @@ evicts pairs and the profile is undercounted. The chart alerts at > 0.9 for 15 m
 
 On a graceful stop the agent drains the counters one last time **before** any BPF object is
 closed. On a crash (SIGKILL, panic) whatever was dropped since the last read is lost: the bound is
-`counters_interval` (default 5 s).
+`counters_interval` (default 15 s; was 5 s before wave 8.6 — the poll costs one batch read of the whole map, 0.23 s of 13.6 s idle CPU at 5 s).
 
 ### The agent's own `bpf()` calls
 

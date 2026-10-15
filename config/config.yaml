@@ -178,7 +178,7 @@ bpf:
     arg_predicates:
       enabled: true
       nrs: [9, 10, 158]   # 321 (bpf) не допускается: drift_dangerous_syscall смотрит все cmd
-      counters_interval: 5s
+      counters_interval: 15s
 
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling
   # rates for high-volume syscall/file events when the event channel starts

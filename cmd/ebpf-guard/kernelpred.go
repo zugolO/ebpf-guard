@@ -34,7 +34,7 @@ const (
 	kpStateOffNoCounters    = "off_no_counters"
 	kpStateOffNoMap         = "off_no_map"
 	kpStateOffNoRules       = "off_no_rules"
-	defaultKernelPredPeriod = 5 * time.Second
+	defaultKernelPredPeriod = 15 * time.Second
 )
 
 // kernelPredProgrammer — то, чем контроллер пишет в ядро (*bpf.KernelFilterController).

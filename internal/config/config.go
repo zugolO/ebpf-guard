@@ -976,7 +976,8 @@ type ArgPredicatesConfig struct {
 	Nrs []int `mapstructure:"nrs"`
 	// CountersInterval — как часто счётчики ядра сливаются в профиль. Между
 	// сливами профиль отстаёт на этот интервал: номер, впервые увиденный у
-	// нагрузки внутри него, оценивается как «новый». Default: 5s.
+	// нагрузки внутри него, оценивается как «новый». Default: 15s (волна 8.6 B, G4: цена
+	// опроса растёт обратно пропорционально интервалу; 0,23 с из 13,62 на 5 с).
 	CountersInterval time.Duration `mapstructure:"counters_interval"`
 }
 
@@ -2223,7 +2224,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.kernel_filter.self_exclude_bpf_calls", true)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.enabled", true)
 	v.SetDefault("bpf.kernel_filter.arg_predicates.nrs", []int{9, 10, 158})
-	v.SetDefault("bpf.kernel_filter.arg_predicates.counters_interval", 5*time.Second)
+	v.SetDefault("bpf.kernel_filter.arg_predicates.counters_interval", 15*time.Second)
 	v.SetDefault("bpf.proc_table.enabled", true)
 	v.SetDefault("bpf.proc_table.live_entries", 16384)
 	v.SetDefault("bpf.proc_table.exited_entries", 16384)

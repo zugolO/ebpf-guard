@@ -146,3 +146,27 @@ go tool pprof -tagroot=event_type -top ...   # разбивка по типу
 
 `server.pprof_rule_labels: true` добавляет `rule_file` и `rule_id` (метка ставится
 на каждое правило — режим измерения, на боевом агенте не включать).
+
+## Дамп событий движка (волна 8.6, заход B)
+
+Для офлайн-бенча движка на настоящем потоке (а не на замене из распределений)
+агент умеет писать выборку событий, дошедших до `RuleEngine.EvaluateInto`:
+
+```yaml
+server:
+  event_dump_path: /var/lib/ebpf-guard/events.jsonl   # пусто (по умолчанию) — выключено
+  event_dump_every: 1                                  # каждое N-е событие
+```
+
+Режим измерения. Выключенный стоит одну атомарную загрузку на событие; включённый —
+счётчик на событие и сериализацию каждого N-го под мьютексом. Файл содержит comm,
+пути и аргументы процессов хоста (права `0600`) — наружу не отдавать. Формат —
+JSONL, читается `correlator.LoadEventDump`; бенч: 
+
+```bash
+W86_DUMP=events.jsonl go test ./internal/correlator -run xxx -bench BenchmarkG0Dump -benchtime=1000000x
+G0_DUMP=events.jsonl G0_OUT=out go test ./internal/correlator -run TestG0MixProfile -v   # профили и таблица правил
+W86_DUMP=events.jsonl go test ./internal/correlator -run TestG0CutAfterG1 -v               # какие regex ещё доходят до regexp
+```
+
+Бенч — сравнение до/после на одном потоке; секунды ночи он не предсказывает.

@@ -730,6 +730,10 @@ func (c *KmodCollector) Start(ctx context.Context, out chan<- types.Event) error
 		if err := c.EnsureLoaded(); err != nil {
 			c.logger.Warn("kmod: LSM load failed, kernel module load detection disabled", "error", err)
 		}
+	} else if c.loadErr != nil {
+		// Объект грузил LSMCollector.Load() раньше старта и упал: причина уже в его
+		// журнале, здесь — только итог для kmod-хуков.
+		c.logger.Warn("kmod: LSM load failed earlier, kernel module load detection disabled", "error", c.loadErr)
 	} else {
 		c.logger.Info("kmod: LSM BPF unavailable — the 7 event_type=kmod rules are inert on this kernel; module loads are still seen on the syscall axis (rootkit_init_module_syscall nr 175/313, rootkit_delete_module_syscall nr 176) when the syscall collector is enabled")
 	}

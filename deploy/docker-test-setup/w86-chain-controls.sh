@@ -17,12 +17,19 @@ t0=$(date +%s); echo "$t0" > "$OUT/t0"
 i=0
 while [ "$i" -lt "$K" ]; do
     i=$((i + 1))
-    # nginx живёт 8 с (родитель обязан пережить bash), bash выходит сразу, curl — фоном на 6 с
-    $W/nginx -c "$W/bash -c '/usr/bin/curl -s --max-time 6 -o /dev/null http://10.255.255.1/ & exit 0'; sleep 8" &
-    echo "[$(date -u +%FT%TZ)] прогон $i pid=$!"
+    # Каждый прогон — СВОЙ транзитный юнит: дерево растёт от systemd, а не от этого скрипта. Иначе все прогоны —
+    # потомки одного bash драйвера и сливаются в ОДИН инцидент с корнем bash (репетиция 15.10: 1 инцидент из 6).
+    # nginx живёт 8 с (родитель обязан пережить bash), bash выходит сразу, curl — фоном на 6 с; --collect снимает юнит.
+    systemd-run --quiet --collect --unit="w86chain-$i-$t0" --property=Type=exec -- \
+        $W/nginx -c "$W/bash -c '/usr/bin/curl -s --max-time 6 -o /dev/null http://10.255.255.1/ & exit 0'; sleep 8" \
+        || die "systemd-run прогона $i не удался"
+    echo "[$(date -u +%FT%TZ)] прогон $i юнит w86chain-$i-$t0"
     sleep "$GAP"
 done
-wait
+sleep 12
+# транзитных юнитов быть не должно (память transient-unit-survives-and-blocks-next-run)
+left=$(systemctl list-units --all --no-legend "w86chain-*" 2>/dev/null | wc -l)
+echo "остались юниты w86chain-*: $left"
 sleep 20
 curl -s --max-time 60 -H "Authorization: Bearer $TOKEN" "$API/api/v1/incidents?limit=1000" > "$OUT/ctl-incidents.json"
 curl -s --max-time 60 -H "Authorization: Bearer $TOKEN" "$API/api/v1/alerts?limit=5000" > "$OUT/ctl-alerts.json"

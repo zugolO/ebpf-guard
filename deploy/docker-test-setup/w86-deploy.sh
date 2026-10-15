@@ -1,0 +1,55 @@
+#!/bin/bash
+# w86-deploy.sh [rev] — выкладка HEAD на стенд для ночи закрытия 8.6 (заход C, шаг 7). Копия w85-deploy.sh: те же сторожа; make generate после reset обязателен (reset возвращает заглушки *_bpf_gen.go — память deploy-reset-restores-bpf-gen-stubs).
+# push не нужен: коммиты едут git bundle в /opt/ebpf-guard (ветка testing стенда сбрасывается на rev), бинарь собирается НА СТЕНДЕ из этого
+# коммита (make generate → make build), рабочий агент перезапускается на нём. Профиль до F1 (profiler-state.json) копируется в бэкап и
+# НЕ удаляется/не обнуляется; конфиг агента не меняется этим скриптом (F1 по умолчанию выключен — включает пайплайн ночи).
+# Сторожа: агент после — один, active, sha процесса = sha файла, правила загружены, состояние таблицы процессов active, состояние F1 off_config.
+set -eu
+REV=${1:-HEAD}
+HOST=${W85_HOST:-root@89.125.2.154}; KEY=${W85_KEY:-$HOME/.ssh/id_ed25519_ebaka2}
+SSH="ssh -i $KEY -o BatchMode=yes -o ConnectTimeout=15 $HOST"
+cd "$(git rev-parse --show-toplevel)"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "die: незакоммиченные правки — выкладка только из коммита" >&2; exit 1; }
+SHA=$(git rev-parse "$REV"); SHORT=$(git rev-parse --short=12 "$REV")
+BASE=$($SSH 'git -C /opt/ebpf-guard rev-parse HEAD' </dev/null)
+git cat-file -e "$BASE^{commit}" 2> /dev/null || { echo "die: коммит стенда $BASE неизвестен локально" >&2; exit 1; }
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# в bundle нужен именованный ref: временный тег на коммите
+git tag -f w86-deploy-tmp "$SHA" > /dev/null
+git bundle create "$TMP/w85.bundle" "$BASE..refs/tags/w86-deploy-tmp" > /dev/null 2>&1 || { git tag -d w86-deploy-tmp > /dev/null; echo "die: bundle $BASE..$SHA" >&2; exit 1; }
+git tag -d w86-deploy-tmp > /dev/null
+scp -q -i "$KEY" "$TMP/w85.bundle" "$HOST:/root/w86-deploy.bundle"
+$SSH "set -eu; export SKIP_BUILD=${SKIP_BUILD:-0}; export PATH=\$PATH:/usr/local/go/bin
+TS=\$(date -u +%Y%m%dT%H%M%SZ); BK=/root/ebpf-guard-backups/pre-8.6-night-\$TS; mkdir -p \$BK
+cd /opt/ebpf-guard
+used=\$(df -P / | awk 'NR == 2 { sub(/%/, \"\", \$5); print \$5 }'); [ \"\$used\" -le 80 ] || { echo \"die: диск \$used%\"; exit 2; }
+[ \"\$(ps -eo cmd | grep -c '[e]bpf-guard --config')\" -eq 1 ] || { echo 'die: агентов не 1'; exit 2; }
+cp -a build/ebpf-guard \$BK/ebpf-guard.bin; cp -a deploy/docker-test-setup/config-test.yaml \$BK/
+cp -a /var/lib/ebpf-guard/profiler-state.json \$BK/profiler-state-before-F1.json; sha256sum \$BK/profiler-state-before-F1.json | tee \$BK/profiler-state.sha256
+cp -a /var/lib/ebpf-guard/token \$BK/ 2>/dev/null || true
+ls -la /var/lib/ebpf-guard/ > \$BK/var-lib-before.txt
+echo \"бэкап: \$BK\"
+git fetch -q /root/w86-deploy.bundle refs/tags/w86-deploy-tmp
+git rev-parse FETCH_HEAD | grep -qx $SHA || { echo \"die: FETCH_HEAD не $SHA\"; exit 5; }
+git checkout -q -- bpf/vmlinux.h internal/bpf/xdp_bpf_gen.go deploy/docker-test-setup/attacks/run-gate.sh 2>/dev/null || true
+git reset -q --hard FETCH_HEAD
+rm -f /root/w86-deploy.bundle
+echo $SHORT > GIT-HEAD
+if [ \"\${SKIP_BUILD:-0}\" = 1 ]; then
+  echo \"SKIP_BUILD: бинарь не пересобирается; собран из \$(cat BINARY-SRC-REV 2>/dev/null || echo ?)\"
+  # reset --hard вернул ЗАГЛУШКИ internal/bpf/*_bpf_gen.go рядом со сгенерированными *_x86_bpfel.go (DNSObjects redeclared — найдено
+  # репетицией ночи: сборка статического бинаря пода в префлайте пайплайна падала). Генерация — обязательна и без пересборки бинаря.
+  make generate > /root/w86-deploy-generate.log 2>&1 || { tail -20 /root/w86-deploy-generate.log; exit 3; }
+  go build -tags rego -o /dev/null ./cmd/ebpf-guard > /root/w86-deploy-compile.log 2>&1 || { tail -20 /root/w86-deploy-compile.log; exit 6; }
+else
+  make generate > /root/w86-deploy-generate.log 2>&1 || { tail -20 /root/w86-deploy-generate.log; exit 3; }
+  make build > /root/w86-deploy-build.log 2>&1 || { tail -20 /root/w86-deploy-build.log; exit 4; }
+  echo $SHORT > BINARY-SRC-REV
+fi
+sha256sum build/ebpf-guard | tee BINARY-SHA256
+build/ebpf-guard version 2>&1 | head -3
+go clean -cache
+df -h / | tail -1
+git log --oneline -1
+echo \"\$BK\" > /root/w86-last-backup.txt"
+echo "ok: /opt/ebpf-guard на $SHORT собран, агент ещё НЕ перезапущен (перезапуск — отдельным шагом)"

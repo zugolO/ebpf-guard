@@ -449,6 +449,16 @@ groups:
 
 ---
 
+#### `ebpf_guard_rules_loaded` / `ebpf_guard_rules_live` / `ebpf_guard_rules_unreachable` / `ebpf_guard_rule_unreachable`
+
+| Attribute | Value |
+|-----------|-------|
+| **Type** | Gauge |
+| **Labels** | `axis` (event_type\|nr\|file_op\|proto) on `rules_unreachable`; `rule_id`, `axis`, `event_type` on `rule_unreachable` (value 1 per rule) |
+| **Description** | Wave 8.7 Д19. Loaded rules that cannot fire in this run: the event type has no producer (not built, or its collector is disabled in the config: cloud_audit, gpu, io_uring, http_plaintext, cgroup_esc), the syscall `nr` is outside the kernel allowlist, or no hook produces the file op / protocol. `rules_live = rules_loaded - sum(rules_unreachable)`; coverage reports count live rules only. `GET /api/v1/rules` carries the same as `live` / `dead_axis`. Recomputed at start and after every hot reload. |
+
+---
+
 #### `ebpf_guard_runtime_flag`
 
 | Attribute | Value |

@@ -75,6 +75,7 @@ type Server struct {
 
 	// Rules provider for REST API
 	rulesProviderFn func() []correlator.Rule
+	deadRulesFn     func() map[string]string // Д19: правило → ось, по которой оно не может сработать
 
 	// Rules reload handler
 	rulesReloadFn func() error

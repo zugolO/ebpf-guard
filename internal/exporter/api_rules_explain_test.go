@@ -1,6 +1,7 @@
 package exporter
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,4 +100,21 @@ func TestExplainAlert(t *testing.T) {
 		srv.explainAlert(w, httptest.NewRequest(http.MethodGet, "/x", nil), "alert-1")
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
+}
+
+// Д19: GET /rules отдаёт live и dead_axis; отчёты покрытия считают live.
+func TestHandleRulesMarksDeadRules(t *testing.T) {
+	s := &Server{}
+	s.SetRulesProvider(func() []correlator.Rule {
+		return []correlator.Rule{{ID: "a"}, {ID: "b"}}
+	})
+	s.SetDeadRulesProvider(func() map[string]string { return map[string]string{"b": "event_type"} })
+	rec := httptest.NewRecorder()
+	s.handleRules(rec, httptest.NewRequest(http.MethodGet, "/api/v1/rules", nil))
+	var got []RuleAPIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 2)
+	require.True(t, got[0].Live)
+	require.False(t, got[1].Live)
+	require.Equal(t, "event_type", got[1].DeadAxis)
 }

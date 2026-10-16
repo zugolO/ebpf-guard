@@ -460,9 +460,15 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 	rules := s.getRules()
 
 	// Convert to API response format
+	dead := s.getDeadRules()
 	response := make([]RuleAPIResponse, 0, len(rules))
 	for _, rule := range rules {
-		response = append(response, convertRuleToAPI(rule))
+		rr := convertRuleToAPI(rule)
+		rr.Live = true
+		if axis, isDead := dead[rule.ID]; isDead {
+			rr.Live, rr.DeadAxis = false, axis
+		}
+		response = append(response, rr)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -505,6 +511,11 @@ type RuleAPIResponse struct {
 	Severity    string   `json:"severity"`
 	Action      string   `json:"action"`
 	Tags        []string `json:"tags,omitempty"`
+	// Live — правило может сработать в этом запуске (Д19, №565). false: нет
+	// продюсера типа события или условие недостижимо; DeadAxis называет ось.
+	// Отчёты покрытия считают только Live.
+	Live     bool   `json:"live"`
+	DeadAxis string `json:"dead_axis,omitempty"`
 	// Tactics are the canonical MITRE tactics this rule's tags resolve to, as
 	// computed by the same mapping the incident scorer uses. Reported by the
 	// server so clients (the dashboard coverage view) don't have to duplicate
@@ -595,6 +606,24 @@ func (s *Server) getRules() []correlator.Rule {
 		return fn()
 	}
 	return nil
+}
+
+// getDeadRules — правило → ось, по которой оно не может сработать (Д19).
+func (s *Server) getDeadRules() map[string]string {
+	s.mu.RLock()
+	fn := s.deadRulesFn
+	s.mu.RUnlock()
+	if fn == nil {
+		return nil
+	}
+	return fn()
+}
+
+// SetDeadRulesProvider задаёт источник мёртвых правил для GET /rules.
+func (s *Server) SetDeadRulesProvider(fn func() map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deadRulesFn = fn
 }
 
 // SetRulesProvider sets the function that provides loaded rules

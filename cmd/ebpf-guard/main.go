@@ -353,6 +353,16 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 	}
 
+	// Волна 8.7, Д19 (№565): единый итог — какие правила в этом запуске не могут
+	// сработать (все четыре оси) и сколько живых. Тот же вызов — после перезагрузки.
+	if len(rules) > 0 {
+		var nrAL []int
+		if cfg.BPF.KernelFilter.Enabled {
+			nrAL = effectiveAllowlist
+		}
+		reportDeadRules(rules, cfg, nrAL, dryRun)
+	}
+
 	// ── BTF source resolution ──────────────────────────────────────────────────
 	// Detect which BTF strategy is available before loading any eBPF programs.
 	// This must run before collector initialisation so collectors that require
@@ -1237,6 +1247,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	srv.SetRulesProvider(func() []correlator.Rule {
 		return engine.GetRules()
 	})
+	srv.SetDeadRulesProvider(currentDeadRules)
 	srv.SetIncidentTracker(engine.IncidentTracker())
 	// Волна 6.3.L.1, item 2 (№423): рантайм-ручка инцидентного слоя. A/B его
 	// цены (RSS, потери кольцевого буфера) обязан идти на ОДНОМ бинаре и без
@@ -2362,6 +2373,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 
 			// Phase 2: atomic swap — only reached after full validation.
 			engine.ReloadRules(newRules)
+			{
+				var nrAL []int
+				if newCfg.BPF.KernelFilter.Enabled {
+					nrAL = effectiveAllowlist
+				}
+				reportDeadRules(newRules, newCfg, nrAL, dryRun)
+			}
 			// Keep /debug/state's rule list in sync with the engine (P1-10).
 			if dbg := srv.GetDebugHandler(); dbg != nil {
 				dbg.SetRules(convertRulesToDebugState(newRules))

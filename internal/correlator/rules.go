@@ -2806,6 +2806,9 @@ func hasPrefix(prefixes []string, value string) bool {
 // DIFFERENT producer (a kprobe on that symbol, or a userspace comparison of
 // the cgroup_id ordinary events already carry), not a newer kernel.
 var unproducibleEventTypes = map[types.EventType]string{
+	// Волна 8.7, Д19 (№565): GPU-коллектор написан (collector/gpu.go), но
+	// NewGPUCollector не вызывается из cmd/ebpf-guard — продюсера в сборке нет.
+	types.EventGPU:       "collector.NewGPUCollector is never constructed by cmd/ebpf-guard: no code path starts the GPU/CUDA uprobe collector, so no event_type gpu event is ever produced",
 	types.EventCgroupEsc: "bpf/cgroup.bpf.c attaches to lsm/cgroup_attach_task, a hook no released kernel defines (cgroup_attach_task is an internal kernel/cgroup/cgroup.c function, never an LSM hook)",
 }
 

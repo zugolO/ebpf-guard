@@ -21,6 +21,7 @@ var w85KnownNrConsumers = map[string]string{
 	// Живой путь агента — теряют вход при отборе в ядре.
 	"internal/correlator/rules.go|getFieldValueNorm":          "правила: поле nr",
 	"internal/correlator/dispatch_index.go|condValue":         "правила: поле nr, быстрый путь (G3, 8.6 C0)",
+	"internal/correlator/field_value.go|getFieldValueByID":    "правила: поле nr по коду поля (П4, 8.7) — то же значение, что getFieldValueNorm",
 	"internal/correlator/dispatch_index.go|candidateRules":    "правила: индекс по nr (G3, 8.6 C0) — те же правила, что видят nr",
 	"internal/profiler/profile.go|recordSyscallEventLocked":   "EWMA-профиль (anomaly), включён",
 	"internal/profiler/anomaly.go|analyzeSyscallBehavior":     "EWMA-скоринг (anomaly), включён",

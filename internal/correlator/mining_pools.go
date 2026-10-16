@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -30,6 +31,10 @@ type MiningPoolDetector struct {
 	pools []MiningPoolEntry
 	// domainSet for O(1) domain lookups
 	domainSet map[string]struct{}
+	// pfx — CIDR-записи как netip.Prefix (волна 8.7, П4); pfxOK == false, если хоть
+	// одну запись netip разбирает иначе, чем net.ParseCIDR (4in6): тогда прежний перебор.
+	pfx   []netip.Prefix
+	pfxOK bool
 	// mu protects pools and domainSet for read/write access
 	mu sync.RWMutex
 	// reloadMu serializes concurrent Reload() calls so two simultaneous
@@ -164,6 +169,18 @@ func (d *MiningPoolDetector) Reload() error {
 	d.mu.Lock()
 	d.pools = newPools
 	d.domainSet = newDomains
+	d.pfx, d.pfxOK = nil, true
+	for _, p := range newPools {
+		if p.Type != "cidr" {
+			continue
+		}
+		pf, perr := netip.ParsePrefix(p.Value)
+		if perr != nil || pf.Addr().Is4In6() || pf.Addr().Zone() != "" {
+			d.pfx, d.pfxOK = nil, false
+			break
+		}
+		d.pfx = append(d.pfx, pf)
+	}
 	d.lastReload = time.Now()
 	d.mu.Unlock()
 
@@ -179,6 +196,21 @@ func (d *MiningPoolDetector) IsMiningPoolIP(ipStr string) bool {
 
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+
+	// П4: набор префиксов (netip), прежний перебор IPNet — запасной путь.
+	if d.pfxOK {
+		a, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			return false
+		}
+		a = a.Unmap()
+		for i := range d.pfx {
+			if d.pfx[i].Contains(a) {
+				return true
+			}
+		}
+		return false
+	}
 
 	for _, pool := range d.pools {
 		if pool.Type == "cidr" && pool.IPNet != nil {

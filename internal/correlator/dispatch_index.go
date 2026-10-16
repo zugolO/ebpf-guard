@@ -40,6 +40,10 @@ const nrIndexSize = 512
 // читается при построении движка.
 var dispatchEnabled = true
 
+// fieldByIDEnabled — выключатель П4 (значение поля по коду): бенч «до/после» и тест
+// тождества алерт-в-алерт на дампе (волна 8.7).
+var fieldByIDEnabled = true
+
 // condFieldID — код поля условия для быстрого пути evaluateCondition.
 type condFieldID uint8
 
@@ -47,17 +51,65 @@ const (
 	fidOther condFieldID = iota
 	fidNr
 	fidOp
+	// Волна 8.7, П4: полный код поля для горячих типов (file, syscall, network) и
+	// осей идентичности. Незнакомое поле — fidOther: значение берёт строковая
+	// версия getFieldValueNorm (редкие типы: dns-обогащения, tls, gpu, cloud, …).
+	fidContainerID
+	fidPodName
+	fidNamespace
+	fidExePath
+	fidParentExePath
+	fidAncestorExePath
+	fidLineage
+	fidLineageExePaths
+	fidSystemdUnit
+	fidFilename
+	fidFDName
+	fidFDNameTrunc
+	fidFlags
+	fidMode
+	fidDirectory
+	fidExtension
+	fidProcArgs
+	fidProcArgsTrunc
+	fidComm
+	fidUID
+	fidPID
+	fidPPID
+	fidParentComm
+	fidRet
+	fidArg0
+	fidArg1
+	fidArg2
+	fidArg3
+	fidArg4
+	fidArg5
+	fidDport
+	fidSport
+	fidDaddr
+	fidSaddr
+	fidProto
+	fidFamily
+	fidConnRate
+	fidConnPeriodicCount
+	fidConnPeriodicCV
 )
 
-func fieldIDOf(norm string) condFieldID {
-	switch norm {
-	case "nr":
-		return fidNr
-	case "op":
-		return fidOp
-	}
-	return fidOther
+var fieldIDByName = map[string]condFieldID{
+	"nr": fidNr, "op": fidOp,
+	"container_id": fidContainerID, "pod_name": fidPodName, "namespace": fidNamespace,
+	"exe_path": fidExePath, "parent_exe_path": fidParentExePath, "ancestor_exe_path": fidAncestorExePath,
+	"lineage": fidLineage, "lineage_exe_paths": fidLineageExePaths, "systemd_unit": fidSystemdUnit,
+	"filename": fidFilename, "fd.name": fidFDName, "fd.name_truncated": fidFDNameTrunc,
+	"flags": fidFlags, "mode": fidMode, "directory": fidDirectory, "extension": fidExtension,
+	"proc.args": fidProcArgs, "proc.args_truncated": fidProcArgsTrunc,
+	"comm": fidComm, "uid": fidUID, "pid": fidPID, "ppid": fidPPID, "parent_comm": fidParentComm,
+	"ret": fidRet, "arg0": fidArg0, "arg1": fidArg1, "arg2": fidArg2, "arg3": fidArg3, "arg4": fidArg4, "arg5": fidArg5,
+	"dport": fidDport, "sport": fidSport, "daddr": fidDaddr, "saddr": fidSaddr, "proto": fidProto, "family": fidFamily,
+	"conn_rate_1m": fidConnRate, "conn_periodic_count_5m": fidConnPeriodicCount, "conn_periodic_cv_5m": fidConnPeriodicCV,
 }
+
+func fieldIDOf(norm string) condFieldID { return fieldIDByName[norm] }
 
 // condValue — значение поля условия. Быстрый путь для nr (syscall) и op (file):
 // те же строки, что отдаёт getFieldValueNorm, без разбора имени поля.
@@ -77,8 +129,12 @@ func (re *RuleEngine) condValue(e *types.Event, cond *RuleCondition, dnsAnalysis
 	field := cond.fieldNorm
 	if field == "" {
 		field = normaliseFieldName(cond.Field)
+		return re.getFieldValueNorm(e, field, dnsAnalysis, cache)
 	}
-	return re.getFieldValueNorm(e, field, dnsAnalysis, cache)
+	if !fieldByIDEnabled {
+		return re.getFieldValueNorm(e, field, dnsAnalysis, cache)
+	}
+	return re.getFieldValueByID(e, cond.fieldID, field, dnsAnalysis, cache)
 }
 
 // dispatchIndex — кандидаты по ключу события; значения — позиции в re.byType[t].

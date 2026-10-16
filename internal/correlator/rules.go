@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"math/rand"
 	"net"
+	"net/netip"
 	"regexp"
 	"runtime/pprof"
 	"sort"
@@ -227,6 +228,16 @@ type RuleCondition struct {
 	// (тест строит его руками): тогда имя нормализуется на лету.
 	fieldNorm string
 	fieldID   condFieldID
+
+	// Волна 8.7, П4: разобранное при компиляции условия. numThr/numOK — порог
+	// gt/lt/gte/lte (раньше ParseFloat порога на каждый вызов); cidrPfx — префиксы
+	// in_cidr/not_in_cidr как netip.Prefix (раньше net.ParseIP строки на каждый вызов).
+	// numParsed/cidrPfx пусты у условия, собранного руками без компиляции: тогда
+	// работает прежний путь.
+	numThr    float64
+	numOK     bool
+	numParsed bool
+	cidrPfx   []netip.Prefix
 }
 
 // RuleConditionGroup allows combining multiple conditions with AND/OR logic.
@@ -917,6 +928,7 @@ func (re *RuleEngine) compileCondPtr(cond *RuleCondition) error {
 	cond.opCode = opCodeOf(cond.Op)
 	cond.fieldNorm = normaliseFieldName(cond.Field)
 	cond.fieldID = fieldIDOf(cond.fieldNorm)
+	cond.compileNumericAndCIDR()
 	return nil
 }
 
@@ -1395,6 +1407,17 @@ func (re *RuleEngine) evaluateCondition(e *types.Event, cond *RuleCondition, dns
 		return re.matchesCaps(e, cond.Values, false)
 	}
 
+	// П4: сетевой адрес в CIDR-условии берётся из байт события, без форматирования в
+	// строку и разбора обратно.
+	if cond.cidrPfx != nil && (cond.opCode == condOpInCIDR || cond.opCode == condOpNotInCIDR) &&
+		e.Type == types.EventTCPConnect && e.Network != nil && (cond.fieldID == fidDaddr || cond.fieldID == fidSaddr) {
+		b := &e.Network.Daddr
+		if cond.fieldID == fidSaddr {
+			b = &e.Network.Saddr
+		}
+		return cidrMatchAddr(cond.cidrPfx, netipFromEvent(b, e.Network.Family), cond.opCode == condOpInCIDR)
+	}
+
 	// Get field value based on event type and field name.
 	// fieldNotFound means the field name is unknown for this event type —
 	// treat as no-match for all operators (rule is misconfigured but was
@@ -1470,13 +1493,13 @@ func (re *RuleEngine) evaluateCondition(e *types.Event, cond *RuleCondition, dns
 		}
 		return re.matchesRegex(cond, value)
 	case condOpGT:
-		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a > b })
+		return cond.numericCmp(re, value, 0)
 	case condOpLT:
-		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a < b })
+		return cond.numericCmp(re, value, 1)
 	case condOpGTE:
-		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a >= b })
+		return cond.numericCmp(re, value, 2)
 	case condOpLTE:
-		return re.compareNumeric(value, cond.Values, func(a, b float64) bool { return a <= b })
+		return cond.numericCmp(re, value, 3)
 	case condOpContains:
 		for _, v := range cond.Values {
 			if strings.Contains(value, v) {
@@ -1485,8 +1508,14 @@ func (re *RuleEngine) evaluateCondition(e *types.Event, cond *RuleCondition, dns
 		}
 		return false
 	case condOpInCIDR:
+		if cond.cidrPfx != nil {
+			return cidrMatchString(cond.cidrPfx, value, true)
+		}
 		return re.matchesCIDR(value, cond.Values, true)
 	case condOpNotInCIDR:
+		if cond.cidrPfx != nil {
+			return cidrMatchString(cond.cidrPfx, value, false)
+		}
 		return re.matchesCIDR(value, cond.Values, false)
 	default:
 		return false

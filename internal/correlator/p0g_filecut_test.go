@@ -173,3 +173,194 @@ func TestP0gFileCut(t *testing.T) {
 			100*float64(s.n-s.kept)/float64(s.n), len(s.rules), top)
 	}
 }
+
+// ── П1: что из «не может совпасть» выразимо в ядре префиксами ─────────────────
+//
+// Верхняя оценка отсечения в ядре, если смотреть ТОЛЬКО на правила (профайлер не
+// учитывается): множество префиксов пути и множество op выводятся из условий
+// правил; условие, не сводимое к префиксу/имени/op (regex без якоря, contains,
+// suffix, любое другое поле), открывает правило целиком (ANY).
+type kPred struct {
+	any    bool // путь не ограничен
+	prefix []string
+}
+
+func kUnion(a, b kPred) kPred {
+	if a.any || b.any {
+		return kPred{any: true}
+	}
+	return kPred{prefix: append(append([]string{}, a.prefix...), b.prefix...)}
+}
+
+func kAnd(a, b kPred) kPred {
+	switch {
+	case a.any:
+		return b
+	case b.any:
+		return a
+	case len(a.prefix) <= len(b.prefix):
+		return a
+	default:
+		return b
+	}
+}
+
+func kLeaf(c *RuleCondition) kPred {
+	f := c.fieldNorm
+	if f == "" {
+		f = normaliseFieldName(c.Field)
+	}
+	if f != "filename" && f != "fd.name" {
+		return kPred{any: true}
+	}
+	switch c.opCode {
+	case condOpPrefix, condOpIn, condOpEquals:
+		return kPred{prefix: c.Values}
+	case condOpRegex:
+		var ps []string
+		for _, v := range c.Values {
+			lit := ""
+			if strings.HasPrefix(v, "^/") {
+				for _, r := range v[1:] {
+					if strings.ContainsRune(`\.[](){}*+?|^$`, r) {
+						break
+					}
+					lit += string(r)
+				}
+			}
+			if len(lit) < 2 {
+				return kPred{any: true}
+			}
+			ps = append(ps, lit)
+		}
+		return kPred{prefix: ps}
+	}
+	return kPred{any: true}
+}
+
+func kGroup(g *RuleConditionGroup) kPred {
+	if len(g.Conditions) == 0 && len(g.SubGroups) == 0 {
+		return kPred{any: true}
+	}
+	var parts []kPred
+	for i := range g.Conditions {
+		parts = append(parts, kLeaf(&g.Conditions[i]))
+	}
+	for i := range g.SubGroups {
+		parts = append(parts, kGroup(&g.SubGroups[i]))
+	}
+	acc := parts[0]
+	for _, p := range parts[1:] {
+		if g.Operator == "or" {
+			acc = kUnion(acc, p)
+		} else {
+			acc = kAnd(acc, p)
+		}
+	}
+	return acc
+}
+
+func TestP1KernelExpressibleCut(t *testing.T) {
+	p := os.Getenv("W87_DUMP")
+	if p == "" {
+		t.Skip()
+	}
+	evs, err := LoadEventDump(p)
+	require.NoError(t, err)
+	rules, err := LoadRulesFromDir("../../rules")
+	require.NoError(t, err)
+	re := NewRuleEngine(rules)
+	frs := re.byType[types.EventFileAccess]
+	var union kPred
+	anyRules := 0
+	for i := range frs {
+		var kp kPred
+		if frs[i].ConditionGroup != nil {
+			kp = kGroup(frs[i].ConditionGroup)
+		} else {
+			kp = kLeaf(&frs[i].Condition)
+		}
+		if kp.any {
+			anyRules++
+		}
+		if i == 0 {
+			union = kp
+		} else {
+			union = kUnion(union, kp)
+		}
+	}
+	total, kept := 0, 0
+	for i := range evs {
+		e := &evs[i]
+		if e.Type != types.EventFileAccess || e.File == nil {
+			continue
+		}
+		total++
+		if union.any {
+			kept++
+			continue
+		}
+		fn := e.File.Path()
+		if fn == "" {
+			fn = e.File.Filename
+		}
+		for _, pre := range union.prefix {
+			if strings.HasPrefix(fn, pre) {
+				kept++
+				break
+			}
+		}
+	}
+	fmt.Printf("P1| file-правил=%d, из них не сводимых к префиксу пути (ANY)=%d; объединение открыто=%v префиксов=%d\n", len(frs), anyRules, union.any, len(union.prefix))
+	fmt.Printf("P1| событий %d, прошло бы префиксный отбор %d (%.1f%%), отсечено бы %d (%.1f%%) — БЕЗ учёта профайлера/drift/anomaly\n",
+		total, kept, 100*float64(kept)/float64(total), total-kept, 100*float64(total-kept)/float64(total))
+}
+
+// Какие file-правила не сводятся к префиксу и чем (для вопроса владельцу по П1).
+func TestP1WhyAny(t *testing.T) {
+	if os.Getenv("W87_DUMP") == "" {
+		t.Skip()
+	}
+	rules, err := LoadRulesFromDir("../../rules")
+	require.NoError(t, err)
+	re := NewRuleEngine(rules)
+	frs := re.byType[types.EventFileAccess]
+	why := map[string]int{}
+	for i := range frs {
+		var kp kPred
+		if frs[i].ConditionGroup != nil {
+			kp = kGroup(frs[i].ConditionGroup)
+		} else {
+			kp = kLeaf(&frs[i].Condition)
+		}
+		if !kp.any {
+			continue
+		}
+		var fields []string
+		var walk func(g *RuleConditionGroup)
+		walk = func(g *RuleConditionGroup) {
+			for j := range g.Conditions {
+				c := &g.Conditions[j]
+				fields = append(fields, normaliseFieldName(c.Field)+"/"+string(c.Op))
+			}
+			for j := range g.SubGroups {
+				walk(&g.SubGroups[j])
+			}
+		}
+		if frs[i].ConditionGroup != nil {
+			walk(frs[i].ConditionGroup)
+		} else {
+			fields = append(fields, normaliseFieldName(frs[i].Condition.Field)+"/"+string(frs[i].Condition.Op))
+		}
+		sort.Strings(fields)
+		why[strings.Join(fields, " ")]++
+	}
+	var ks []string
+	for k := range why {
+		ks = append(ks, k)
+	}
+	sort.Slice(ks, func(i, j int) bool { return why[ks[i]] > why[ks[j]] })
+	for _, k := range ks[:min(len(ks), 12)] {
+		fmt.Printf("P1WHY| %3d  %s\n", why[k], k)
+	}
+}

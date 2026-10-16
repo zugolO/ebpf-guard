@@ -35,3 +35,18 @@ func TestPublishRuntimeFlags(t *testing.T) {
 	require.Equal(t, 1.0, testutil.ToFloat64(exporter.RuntimeFlag.WithLabelValues("pprof_rule_labels")))
 	correlator.SetProfileLabels(false, false)
 }
+
+// Волна 8.7, П0(б): профили block/mutex выключены по умолчанию и включаются
+// рантайм-переключателем; серия флага следует за процессом.
+func TestPprofBlockMutexSwitch(t *testing.T) {
+	cfg := &config.Config{}
+	publishRuntimeFlags(cfg)
+	require.False(t, pprofBlockMutexOn())
+	require.Equal(t, 0.0, testutil.ToFloat64(exporter.RuntimeFlag.WithLabelValues("pprof_block_mutex")))
+	setPprofBlockMutex(true)
+	require.True(t, pprofBlockMutexOn())
+	require.Equal(t, 1.0, testutil.ToFloat64(exporter.RuntimeFlag.WithLabelValues("pprof_block_mutex")))
+	setPprofBlockMutex(false)
+	require.False(t, pprofBlockMutexOn())
+	require.Equal(t, 0.0, testutil.ToFloat64(exporter.RuntimeFlag.WithLabelValues("pprof_block_mutex")))
+}

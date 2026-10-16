@@ -1,6 +1,8 @@
 package main
 
 import (
+	"runtime"
+	"sync/atomic"
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/config"
@@ -16,6 +18,7 @@ func publishRuntimeFlags(cfg *config.Config) {
 	exporter.SetRuntimeFlag("pprof_event_labels", evLabels)
 	exporter.SetRuntimeFlag("pprof_rule_labels", ruleLabels)
 	exporter.SetRuntimeFlag("enable_pprof", cfg.Server.EnablePprof)
+	exporter.SetRuntimeFlag("pprof_block_mutex", pprofBlockMutexOn())
 	exporter.SetRuntimeFlag("arg_predicates_config", cfg.BPF.KernelFilter.ArgPredicates.Enabled)
 	iv := cfg.BPF.KernelFilter.ArgPredicates.CountersInterval
 	if iv <= 0 {
@@ -23,4 +26,28 @@ func publishRuntimeFlags(cfg *config.Config) {
 	}
 	exporter.RuntimeCountersInterval.Set(float64(iv) / float64(time.Second))
 	exporter.RuntimeBlockBackend.WithLabelValues(cfg.Enforcement.BlockBackend).Set(1)
+}
+
+// Волна 8.7, П0(б): профили block и mutex под рантайм-флагом (выключены всегда,
+// кроме отдельного окна 10 мин после idle). Ставка 10 мкс блокировки и доля 100
+// по мьютексу — шумно, но дёшево; вердикт по CPU на этом окне не берётся.
+const (
+	blockProfileRateNs = 10_000
+	mutexProfileFrac   = 100
+)
+
+var blockMutexOn atomic.Bool
+
+func pprofBlockMutexOn() bool { return blockMutexOn.Load() }
+
+func setPprofBlockMutex(on bool) {
+	if on {
+		runtime.SetBlockProfileRate(blockProfileRateNs)
+		runtime.SetMutexProfileFraction(mutexProfileFrac)
+	} else {
+		runtime.SetBlockProfileRate(0)
+		runtime.SetMutexProfileFraction(0)
+	}
+	blockMutexOn.Store(on)
+	exporter.SetRuntimeFlag("pprof_block_mutex", on)
 }

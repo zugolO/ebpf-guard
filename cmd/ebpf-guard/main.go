@@ -1248,6 +1248,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		return engine.GetRules()
 	})
 	srv.SetDeadRulesProvider(currentDeadRules)
+	// Волна 8.7, П0(б): профили block/mutex — отдельное окно после idle.
+	srv.SetRuntimeSwitch("pprof-block-mutex", pprofBlockMutexOn, setPprofBlockMutex)
 	srv.SetIncidentTracker(engine.IncidentTracker())
 	// Волна 6.3.L.1, item 2 (№423): рантайм-ручка инцидентного слоя. A/B его
 	// цены (RSS, потери кольцевого буфера) обязан идти на ОДНОМ бинаре и без

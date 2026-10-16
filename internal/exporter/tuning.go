@@ -444,6 +444,15 @@ func (s *Server) handleKernelPredicates(w http.ResponseWriter, r *http.Request) 
 	s.serveRuntimeSwitch(w, r, "kernel-predicates")
 }
 
+// handlePprofBlockMutex serves GET/POST /api/v1/tuning/pprof-block-mutex —
+// the runtime switch for the block and mutex profiles (wave 8.7, П0(б)). Off by
+// default: sampling blocking events costs CPU, so a measurement window turns it
+// on for its own 10 minutes and back off, never during the window a CPU verdict
+// is taken on. The profiles are read from /debug/pprof/block and /mutex.
+func (s *Server) handlePprofBlockMutex(w http.ResponseWriter, r *http.Request) {
+	s.serveRuntimeSwitch(w, r, "pprof-block-mutex")
+}
+
 func (s *Server) serveRuntimeSwitch(w http.ResponseWriter, r *http.Request, name string) {
 	s.mu.RLock()
 	sw, wired := s.runtimeSwitches[name]

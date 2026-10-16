@@ -38,8 +38,9 @@ func TestEventTypePartition(t *testing.T) {
 		{"net_close", types.EventNetClose, "network"},
 		{"file_access", types.EventFileAccess, "file"},
 		{"dns", types.EventDNS, "dns"},
-		{"tls_falls_back_to_full", types.EventTLS, "full"},
-		{"unmapped_zero_value_falls_back_to_full", types.EventType(0), "full"},
+		{"tls_goes_to_other", types.EventTLS, "other"},
+		{"gpu_goes_to_other", types.EventGPU, "other"},
+		{"unmapped_zero_value_goes_to_other", types.EventType(0), "other"},
 	}
 
 	for _, tc := range cases {

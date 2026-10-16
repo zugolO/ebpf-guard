@@ -109,3 +109,25 @@ func TestC4_ConcurrentFirstEvaluate(t *testing.T) {
 		t.Fatalf("eval errors: %d", st.EvalErrors)
 	}
 }
+
+// Волна 8.7, П5 (№564): первый tls-алерт не компилирует full. Живая куча после
+// первого tls-алерта растёт не более чем на 1 МиБ (до П5 — ≈ 2,8 МиБ на ночи 8.6).
+func TestP5_FirstTLSAlertHeapStep(t *testing.T) {
+	e, err := NewRegoEngine(RegoEngineConfig{Enabled: true, RulesDir: "../../rules/rego"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := liveHeap()
+	var ev types.Event
+	ev.Type = types.EventTLS
+	ev.TLS = &types.TLSEvent{}
+	if _, err := e.Evaluate(context.Background(), types.Alert{RuleID: "x", Event: ev}); err != nil {
+		t.Fatal(err)
+	}
+	step := float64(int64(liveHeap())-int64(before)) / (1 << 20)
+	t.Logf("P5: живая куча после первого tls-алерта: %+.2f МиБ", step)
+	if step > 1.0 {
+		t.Errorf("первый tls-алерт поднял живую кучу на %.2f МиБ > 1,0", step)
+	}
+	runtime.KeepAlive(e)
+}

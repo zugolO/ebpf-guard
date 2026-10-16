@@ -47,7 +47,13 @@ var regoPartitionModules = map[string][]string{
 	"network": {"base.rego", "network.rego", "k8s.rego", "lineage.rego"},
 	"file":    {"base.rego", "file.rego", "k8s.rego", "lineage.rego"},
 	"dns":     {"base.rego", "dns.rego", "lineage.rego"},
-	"full":    {"base.rego", "dns.rego", "file.rego", "k8s.rego", "lineage.rego", "network.rego", "process_injection.rego"},
+	// other — tls и прочие типы без своих подпакетов (волна 8.7, П5, №564):
+	// file/network/dns/process_injection/k8s требуют в input вложенную
+	// структуру события (file/network/dns/syscall), которой у таких типов нет.
+	// Раньше они шли в full: первый tls-алерт компилировал все 7 модулей и
+	// держал ступеньку ≈ 2,8 МиБ кучи до рестарта.
+	"other": {"base.rego", "lineage.rego"},
+	"full":  {"base.rego", "dns.rego", "file.rego", "k8s.rego", "lineage.rego", "network.rego", "process_injection.rego"},
 }
 
 // eventTypePartition maps an event type to its partition name so Evaluate picks
@@ -63,8 +69,21 @@ func eventTypePartition(et types.EventType) string {
 	case types.EventDNS:
 		return "dns"
 	default:
+		return "other"
+	}
+}
+
+// alertPartition выбирает партицию алерта. По типу события — eventTypePartition;
+// но тип вне syscall/network/file/dns, несущий вложенную структуру этих классов
+// (file/network/dns/syscall), идёт в full: подпакеты читают input.event.<структура>,
+// и сужение отбросило бы решения, которые full даёт сегодня. Тождество решений
+// не зависит от допущения «у tls нет File».
+func alertPartition(ev *types.Event) string {
+	p := eventTypePartition(ev.Type)
+	if p == "other" && (ev.File != nil || ev.Network != nil || ev.DNS != nil || ev.Syscall != nil) {
 		return "full"
 	}
+	return p
 }
 
 // decisionsPool recycles []PolicyDecision backing arrays across Evaluate calls.
@@ -272,8 +291,12 @@ func (re *RegoEngine) Evaluate(ctx context.Context, alert types.Alert) ([]Policy
 	}
 
 	// Pick the smallest prepared query that covers this event type.
-	partition := eventTypePartition(alert.Event.Type)
+	return re.evaluatePartition(ctx, alert, alertPartition(&alert.Event))
+}
 
+// evaluatePartition — тело Evaluate с заданной партицией (тесты тождества
+// гоняют один алерт через разные партиции).
+func (re *RegoEngine) evaluatePartition(ctx context.Context, alert types.Alert, partition string) ([]PolicyDecision, error) {
 	re.mu.RLock()
 	lq := re.partitioned[partition]
 	fallback := re.fallback

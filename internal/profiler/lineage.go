@@ -2,11 +2,10 @@
 package profiler
 
 import (
-	"fmt"
+	"bytes"
 	"log/slog"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -463,39 +462,60 @@ func (lt *LineageTracker) buildChainFromProc(pid uint32, maxDepth int) []types.P
 				s.mu.Unlock()
 			}
 		}
-		chain = append([]types.ProcessNode{{PID: cur, PPID: ppid, Comm: comm}}, chain...)
+		// Волна 8.7, П7: append от ребёнка к предку и один разворот в конце вместо
+		// prepend на каждом уровне (был O(d²) копирований срезов).
+		chain = append(chain, types.ProcessNode{PID: cur, PPID: ppid, Comm: comm})
 		if ppid == 0 || ppid == cur {
 			break
 		}
 		cur = ppid
 	}
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
 	return chain
 }
+
+// procStatusBufSize — сколько байт /proc/<pid>/status читает readProcStatus.
+// Name: — первая строка, PPid: — седьмая; обе укладываются в первые ~250 байт.
+const procStatusBufSize = 512
 
 // readProcStatus reads the process name and parent PID from /proc/<pid>/status
 // in a single syscall, replacing the separate readProcComm + readProcPPID calls
 // that previously required two /proc reads per level.
+//
+// Волна 8.7, П7: читается первые 512 байт в буфер на стеке и разбирается без
+// strings.Split/Fields (раньше — os.ReadFile целиком, ≈ 1,3 КиБ, и срез строк).
 func readProcStatus(pid uint32) (comm string, ppid uint32) {
 	lineageProcReads.Inc() // 8.5.5: чтений /proc трекером; на пути с таблицей ядра их быть не должно
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	f, err := os.Open("/proc/" + strconv.FormatUint(uint64(pid), 10) + "/status")
 	if err != nil {
 		return "", 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "Name:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				// Clone: fields[1] is a substring of string(data), and the comm
-				// outlives this call in the ancestry/proc caches. Without the
-				// copy every cached comm pins the whole ~1.3 KiB status file
-				// (wave 8.2 stage 4: 7 MiB of live heap after one attack pack).
-				comm = strings.Clone(fields[1])
+	var buf [procStatusBufSize]byte
+	n, _ := f.Read(buf[:])
+	f.Close()
+	return parseProcStatus(buf[:n])
+}
+
+// parseProcStatus достаёт Name: и PPid: из начала /proc/<pid>/status. comm —
+// копия (string(b) аллоцирует), а не подстрока буфера: она живёт в кэшах цепочек.
+func parseProcStatus(b []byte) (comm string, ppid uint32) {
+	for len(b) > 0 {
+		line := b
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			line, b = b[:i], b[i+1:]
+		} else {
+			b = nil
+		}
+		switch {
+		case bytes.HasPrefix(line, []byte("Name:")):
+			if f := bytes.Fields(line[len("Name:"):]); len(f) >= 1 {
+				comm = string(f[0])
 			}
-		} else if strings.HasPrefix(line, "PPid:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				v, err := strconv.ParseUint(fields[1], 10, 32)
-				if err == nil {
+		case bytes.HasPrefix(line, []byte("PPid:")):
+			if f := bytes.Fields(line[len("PPid:"):]); len(f) >= 1 {
+				if v, err := strconv.ParseUint(string(f[0]), 10, 32); err == nil {
 					ppid = uint32(v)
 				}
 			}

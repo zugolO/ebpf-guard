@@ -462,8 +462,12 @@ func (ei *EnrichmentInfo) ToTypesEnrichment() *types.EnrichmentInfo {
 		Namespace:   ei.Namespace,
 		PodUID:      ei.PodUID,
 		NodeName:    ei.NodeName,
-		Labels:      copyMap(ei.Labels),
-		Annotations: copyMap(ei.Annotations),
+		// Волна 8.7, П7: карты НЕ копируются на каждое событие. ei.Labels и
+		// ei.Annotations — уже собственная копия карты пода (attributionFor,
+		// copyMap при разрешении) и после создания не меняются; события пода
+		// делят одну неизменяемую копию. Потребители карты только читают.
+		Labels:      ei.Labels,
+		Annotations: ei.Annotations,
 		ContainerID: ei.ContainerID,
 	}
 }

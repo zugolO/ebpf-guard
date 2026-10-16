@@ -277,6 +277,7 @@ func TestDispatch_CorruptedIndexBreaksIdentity(t *testing.T) {
 	d := reOn.dispatch
 	for s := range d.sysLists {
 		d.sysLists[s] = nil // «правило потеряно из индекса»
+		d.sysEmpty[s] = nil // П3: список для событий с пустым proc.args — тоже
 	}
 	require.NotEmpty(t, firstDiff(want, orderedAlerts(reOn, evs)), "порча индекса обязана быть видна тождеству")
 }

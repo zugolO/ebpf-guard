@@ -141,10 +141,49 @@ func (re *RuleEngine) condValue(e *types.Event, cond *RuleCondition, dnsAnalysis
 type dispatchIndex struct {
 	sysSlot   [nrIndexSize]uint16           // nr → номер списка; 0 — «только неограниченные»
 	sysLists  [][]int32                     // [0] — неограниченные
+	// П3 (волна 8.7): то же без правил, обязательно требующих непустой proc.args
+	// (эвристика пуста у 99,5% syscall-событий idle). Применяется к событию с ProcArgs == "".
+	sysEmpty [][]int32
 	fileLists [len(fileOpNames) + 1][]int32 // [i] — op i; [len] — «только неограниченные»
 	// счётчики для тестов и отчёта
 	sysConstrained, sysTotal   int
 	fileConstrained, fileTotal int
+	sysArgsGated               int
+}
+
+// argsGateEnabled — выключатель П3 (мутация, бенч «до/после»); читается при построении индекса.
+var argsGateEnabled = true
+
+// requiresNonEmptyArgs — правило обязательно (прямым условием группы «and» или единственным
+// условием) читает proc.args оператором, который на пустой строке даёт false ДО сравнения
+// (evaluateCondition: пусто и код не equals/not_equals/not_in → false). Сэмплер правила
+// выключен (иначе пропуск правила изменил бы его счётчики).
+func requiresNonEmptyArgs(r *Rule) bool {
+	if !r.skipSampler {
+		return false
+	}
+	gate := func(c *RuleCondition) bool {
+		if c.fieldID != fidProcArgs {
+			return false
+		}
+		switch c.opCode {
+		case condOpEquals, condOpNotEquals, condOpNotIn, condOpUnknown, condOpCapsGained, condOpCapsDropped:
+			return false
+		}
+		return true
+	}
+	if g := r.ConditionGroup; g != nil {
+		if g.Operator == "or" {
+			return false
+		}
+		for i := range g.Conditions {
+			if gate(&g.Conditions[i]) {
+				return true
+			}
+		}
+		return false
+	}
+	return gate(&r.Condition)
 }
 
 // requiredKey возвращает значения обязательного условия по полю want у
@@ -239,6 +278,23 @@ func (re *RuleEngine) buildDispatchIndex() {
 		}
 	}
 
+	// П3: списки для событий с пустым proc.args — без правил, требующих непустой.
+	d.sysEmpty = make([][]int32, len(d.sysLists))
+	gated := make([]bool, len(sys))
+	for i := range sys {
+		gated[i] = argsGateEnabled && requiresNonEmptyArgs(&sys[i])
+		if gated[i] {
+			d.sysArgsGated++
+		}
+	}
+	for s, l := range d.sysLists {
+		for _, i := range l {
+			if !gated[i] {
+				d.sysEmpty[s] = append(d.sysEmpty[s], i)
+			}
+		}
+	}
+
 	// file
 	for i := range file {
 		d.fileTotal++
@@ -292,6 +348,9 @@ func (re *RuleEngine) candidateRules(e *types.Event) (cand []int32, indexed bool
 		slot := uint16(0)
 		if s := e.Syscall; s != nil && s.Nr >= 0 && s.Nr < nrIndexSize {
 			slot = d.sysSlot[s.Nr]
+		}
+		if e.ProcArgs == "" {
+			return d.sysEmpty[slot], true
 		}
 		return d.sysLists[slot], true
 	case types.EventFileAccess:

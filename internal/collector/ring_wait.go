@@ -2,6 +2,7 @@ package collector
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/zugolO/ebpf-guard/internal/bpf"
@@ -20,9 +21,16 @@ import (
 // is concerned, and an A/B that read the request instead of the result would
 // label an OFF window as ON ([[entry-guard-must-read-runtime-not-config]]).
 func newEventRingReader(logger *slog.Logger, name string, m *ebpf.Map, netpoll bool) (*bpf.RingbufReader, error) {
+	return newEventRingReaderDrain(logger, name, m, netpoll, 0)
+}
+
+// newEventRingReaderDrain — то же с окном слива П2 (волна 8.7): drain > 0 включает его.
+func newEventRingReaderDrain(logger *slog.Logger, name string, m *ebpf.Map, netpoll bool, drain time.Duration) (*bpf.RingbufReader, error) {
 	reader, err := bpf.NewRingbufReaderWithOptions(m, bpf.RingbufReaderOptions{
-		Name:    name,
-		Netpoll: netpoll,
+		Name:        name,
+		Netpoll:     netpoll,
+		DrainWindow: drain,
+		OnDrain:     func() { exporter.RecordRingbufDrainWindow(name) },
 		OnWait: func() {
 			exporter.RecordRingbufNetpollPark(name)
 		},
@@ -39,6 +47,7 @@ func newEventRingReader(logger *slog.Logger, name string, m *ebpf.Map, netpoll b
 	}
 
 	exporter.SetRingbufWaitMode(name, reader.Mode())
+	exporter.SetRingbufDrainWindow(name, drain.Seconds())
 	logger.Info("ring buffer wait path",
 		slog.String("collector", name),
 		slog.String("mode", reader.Mode()))

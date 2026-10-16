@@ -446,6 +446,17 @@ type RingbufReader struct {
 	onWait     func()
 	onFallback func(reason, detail string)
 
+	// Волна 8.7, П2 (№566): окно слива. Если кольцо пусто, читатель сначала
+	// спит drain (события копятся), а не встаёт на ожидание: одно пробуждение
+	// на пачку вместо одного на событие, и вся цепочка за читателем (роутер,
+	// диспетчер, воркер) тоже просыпается раз на пачку — следующее звено
+	// разбирает очередь, пока она не опустеет. Порядок и состав событий не
+	// меняются. 0 — выключено (прежний путь).
+	drain   time.Duration
+	onDrain func()
+	done    chan struct{}
+	timer   *time.Timer
+
 	// ReadInto/Read are called from one goroutine per reader (the collector's
 	// readLoop), so the downgrade below needs no lock — same contract
 	// ringbuf.Reader's own buffer reuse already relies on.
@@ -466,6 +477,10 @@ type RingbufReaderOptions struct {
 	// OnFallback is called once if the netpoll path is refused or abandoned,
 	// with one of RingbufFallback* as reason and the full error text as detail.
 	OnFallback func(reason, detail string)
+	// DrainWindow — окно слива П2 (см. RingbufReader.drain); 0 выключает.
+	DrainWindow time.Duration
+	// OnDrain вызывается на каждое окно (метрика: ветка действительно шла).
+	OnDrain func()
 }
 
 // NewRingbufReader creates a new ring buffer reader from an eBPF map, waiting
@@ -497,6 +512,11 @@ func newRingbufReader(core ringbufCore, fd int, opts RingbufReaderOptions, newWa
 		name:       opts.Name,
 		onWait:     opts.OnWait,
 		onFallback: opts.OnFallback,
+		drain:      opts.DrainWindow,
+		onDrain:    opts.OnDrain,
+	}
+	if r.drain > 0 {
+		r.done = make(chan struct{})
 	}
 	if !opts.Netpoll {
 		return r
@@ -527,6 +547,13 @@ func (r *RingbufReader) Mode() string {
 // poller file, which is what interrupts a parked ReadInto — closing only the
 // cilium reader would leave the collector's readLoop parked forever.
 func (r *RingbufReader) Close() error {
+	if r.done != nil {
+		select {
+		case <-r.done:
+		default:
+			close(r.done)
+		}
+	}
 	var waitErr error
 	if r.wait != nil {
 		waitErr = r.wait.Close()
@@ -562,6 +589,9 @@ func (r *RingbufReader) Read() (ringbuf.Record, error) {
 // item 6). os.ErrDeadlineExceeded is therefore never returned to the caller
 // from this path.
 func (r *RingbufReader) ReadInto(rec *ringbuf.Record) error {
+	if r.drain > 0 {
+		r.drainPause()
+	}
 	if r.wait == nil {
 		return r.reader.ReadInto(rec)
 	}
@@ -611,6 +641,37 @@ func (r *RingbufReader) ReadInto(rec *ringbuf.Record) error {
 		if got {
 			return nil
 		}
+	}
+}
+
+// ringAvailable — необязательная способность ядра читателя (cilium/ebpf ≥ 0.12).
+type ringAvailable interface{ AvailableBytes() int }
+
+// drainPause спит окно слива, если в кольце ничего нет. Непустое кольцо читается
+// сразу: пока читатель отстаёт, окно не добавляет задержки. Закрытие читателя
+// прерывает сон.
+func (r *RingbufReader) drainPause() {
+	av, ok := r.reader.(ringAvailable)
+	if !ok || av.AvailableBytes() > 0 {
+		return
+	}
+	if r.timer == nil {
+		r.timer = time.NewTimer(r.drain)
+	} else {
+		r.timer.Reset(r.drain)
+	}
+	select {
+	case <-r.timer.C:
+	case <-r.done:
+		if !r.timer.Stop() {
+			select {
+			case <-r.timer.C:
+			default:
+			}
+		}
+	}
+	if r.onDrain != nil {
+		r.onDrain()
 	}
 }
 

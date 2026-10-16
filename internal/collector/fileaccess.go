@@ -28,6 +28,7 @@ type FileaccessCollector struct {
 	ringBufSize int // 0 = auto-detect
 
 	ringbufNetpoll bool // wave 8.1 item 6: netpoll wait path instead of blocking epoll_wait
+	drainWindow    time.Duration // wave 8.7 П2: окно слива кольца (0 — выключено)
 
 	trackOpen  bool // attach sys_enter_openat hooks
 	trackRead  bool // attach sys_enter_read hooks (high volume)
@@ -95,6 +96,14 @@ func (c *FileaccessCollector) WithRingbufNetpoll(enabled bool) *FileaccessCollec
 	return c
 }
 
+// WithRingbufDrainWindow задаёт окно слива кольца (волна 8.7, П2, №566): на пустом
+// кольце читатель спит окно, и события читаются пачкой — одно пробуждение на пачку.
+// 0 — прежний путь.
+func (c *FileaccessCollector) WithRingbufDrainWindow(d time.Duration) *FileaccessCollector {
+	c.drainWindow = d
+	return c
+}
+
 // Name returns the collector identifier.
 func (c *FileaccessCollector) Name() string {
 	return "fileaccess"
@@ -121,7 +130,7 @@ func (c *FileaccessCollector) Start(ctx context.Context, out chan<- types.Event)
 	}
 
 	// Create ring buffer reader
-	reader, err := newEventRingReader(c.logger, "fileaccess", c.objs.Events, c.ringbufNetpoll)
+	reader, err := newEventRingReaderDrain(c.logger, "fileaccess", c.objs.Events, c.ringbufNetpoll, c.drainWindow)
 	if err != nil {
 		c.loadError = err
 		c.status.SetUp("fileaccess", false)

@@ -110,3 +110,27 @@ func RecordRingbufNetpollPark(collector string) {
 func RecordRingbufNetpollFallback(collector, reason string) {
 	RingbufNetpollFallback.WithLabelValues(collector, reason).Inc()
 }
+
+// Волна 8.7, П2 (№566): окно слива читателя кольца. Обе ветки читаются из
+// /metrics ([[toggle-needs-both-branches-counted]]): gauge называет окно, счётчик
+// доказывает, что ветка шла (ноль при включённом окне = читатель встал в ожидание
+// до него).
+var (
+	RingbufDrainWindow = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ebpf_guard_ringbuf_drain_window_seconds",
+		Help: "Drain window of a collector's ring reader, seconds: with an empty ring the reader sleeps this long before waiting, so events are read in batches (wave 8.7 П2). 0 = off.",
+	}, []string{"collector"})
+	RingbufDrainWindows = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ebpf_guard_ringbuf_drain_windows_total",
+		Help: "Drain windows slept by a collector's ring reader (wave 8.7 П2); one per batch read.",
+	}, []string{"collector"})
+)
+
+// SetRingbufDrainWindow называет окно слива коллектора и заводит счётчик нулём.
+func SetRingbufDrainWindow(collector string, seconds float64) {
+	RingbufDrainWindow.WithLabelValues(collector).Set(seconds)
+	RingbufDrainWindows.WithLabelValues(collector)
+}
+
+// RecordRingbufDrainWindow считает одно окно слива.
+func RecordRingbufDrainWindow(collector string) { RingbufDrainWindows.WithLabelValues(collector).Inc() }

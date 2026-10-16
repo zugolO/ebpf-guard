@@ -769,6 +769,13 @@ type BPFConfig struct {
 	// Overridable at startup with EBPF_GUARD_RINGBUF_NETPOLL.
 	RingbufNetpoll bool `mapstructure:"ringbuf_netpoll"`
 
+	// RingbufDrainWindow (волна 8.7, П2, №566): окно слива читателя кольца файловых
+	// событий. На пустом кольце читатель спит окно, затем читает всё накопленное:
+	// одно пробуждение горутин на пачку вместо одного на событие (треть живого CPU
+	// на ночи 8.6 — пробуждения). 0 (по умолчанию) — выключено. Цена — задержка до
+	// окна на файловые события; кольцо за окно не переполняется (окно ≪ запаса кольца).
+	RingbufDrainWindow time.Duration `mapstructure:"ringbuf_drain_window"`
+
 	// KernelFilter configures BPF-side content-based event filtering.
 	// When enabled, events are dropped in the kernel before reaching the ring
 	// buffer, reducing userspace CPU overhead by 40-60% on typical workloads.
@@ -2206,6 +2213,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.map_sizes.fd_map_size", 65536)
 	v.SetDefault("bpf.ring_buf_size", 0) // 0 = auto-detect from /proc/meminfo
 	v.SetDefault("bpf.ringbuf_netpoll", false)
+	v.SetDefault("bpf.ringbuf_drain_window", 0)
 	// Event channel depth. Set explicitly so lowering correlator.buffer_size
 	// (the per-PID forensic ring buffer) never shrinks the ingest channel, which
 	// would increase drops under burst. Two channels of types.Event (224 B) are

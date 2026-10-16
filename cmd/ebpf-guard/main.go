@@ -1905,6 +1905,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			fo := cfg.Collectors.FileOps
 			fc.WithFileOps(fo.TrackOpen, fo.TrackRead, fo.TrackWrite)
 			fc.WithRingbufNetpoll(ringbufNetpoll)
+			fc.WithRingbufDrainWindow(cfg.BPF.RingbufDrainWindow)
 			// 5.9.6a: unconditionally attached now to register the kernel-side
 			// ringbuf_full counter, not only for the sampling/filter/observer
 			// options below.

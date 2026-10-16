@@ -35,9 +35,18 @@ SP=$!
     curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/heap" > "$OUT/heap-mid-$(awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%04.0f", n - t }').pprof"
   done ) &
 HP=$!
+# Волна 8.7, П0(а): CPU-профиль пода под пакетом — куски по 30 с, cpu-NNN.pprof в $OUT (метки event_type — от агента).
+CPUP=""
+if [ "${CPU_PROFILE:-0}" = 1 ]; then
+    rm -f "$OUT/STOP-CPU"
+    bash "$SETUP/w87-profiles.sh" pack-cpu "$API" "$TOKEN" "$OUT" 30 > "$OUT/cpu-loop.log" 2>&1 &
+    CPUP=$!
+fi
 ls "$SETUP/attacks/attack-results" 2>/dev/null | sort > "$OUT/results-before.lst"
 ( cd "$SETUP/attacks" && EBPF_GUARD_API="http://$API" EBPF_GUARD_TOKEN="$TOKEN" SKIP_INDUCED_DROP=1 bash ./run-all-attacks.sh > "$OUT/attacks.log" 2>&1; echo "rc=$?" > "$OUT/attacks.rc" )
 awk -v t="$t0" -v n="$(date +%s.%N)" 'BEGIN { printf "%.1f\n", n - t }' > "$OUT/t-att1"
+# конец пакета — конец профиля CPU (удержание после пакета в профиль не входит); последний кусок дописывается до 30 с
+if [ -n "$CPUP" ]; then touch "$OUT/STOP-CPU"; wait "$CPUP" 2>/dev/null; fi
 M > "$OUT/m-att1.txt"
 # Recall пода (8.2.5): манифест и снимки алертов ЭТОГО пакета — каталог
 # attack-results общий с пакетом гейта хоста, берутся только новые файлы.

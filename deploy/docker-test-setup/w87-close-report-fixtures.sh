@@ -36,6 +36,12 @@ w 8.7.2-restart '^НЕИЗМЕРИМ: 8\.7\.2 .*рестарт агента вн
 w 8.7.2-no-series '^НЕИЗМЕРИМ: 8\.7\.2 .*снимков 0' "$(IDLE=$T/нет BASE_IDLE=$BASE em cpu-idle)"
 w 8.7.2-wrong-base '^НЕИЗМЕРИМ: 8\.7\.2 .*база из архива .* не сходится с объявленной 0\.03058' "$(IDLE=$G BASE_IDLE=$(mkcpu wb 3 1000 145) em cpu-idle)"
 
+# ── 8.6.1 (сторож «не хуже ночи 8.6»): idle ≤ 0,6 × ночь 8.5 (0,0529) ─────────────────────
+BASE85=$(mkcpu base85 3 1526.52 97)                          # 0,0529 с/с на 28800 с
+w 8.6.1-good '^ДОСТИГНУТО: 8\.6\.1 .*57% базы' "$(IDLE=$(mkcpu g61 3 $((3 + 28800 * 3 / 100)) 97) BASE_IDLE=$BASE85 em cpu-idle86)"
+w 8.6.1-over '^ПРОВАЛЕН: 8\.6\.1 .*6[1-9]% базы' "$(IDLE=$(mkcpu o61 3 $((3 + 28800 * 33 / 1000)) 97) BASE_IDLE=$BASE85 em cpu-idle86)"
+w 8.6.1-wrong-base '^НЕИЗМЕРИМ: 8\.6\.1 .*не сходится с объявленной 0\.0529 .* — архив не ночь 8\.5' "$(IDLE=$G BASE_IDLE=$BASE em cpu-idle86)"   # база ночи 8.6 вместо 8.5 не принимается
+
 # ── 8.7.1: CPU на событие под пакетом + разложение по типу события ───────────────
 mkatt() { # <имя> <cpu_с> <событий> [t=600]
     local n=$1 cpu=$2 ev=$3 t=${4:-600}; local A=$T/$n/att; mkdir -p "$A"
@@ -247,7 +253,9 @@ mkng() { # <имя> <снимков> "<номер:МиБ> …" — next_gc 40 М
     done
     echo "$D"
 }
-EA=$T/edge.json; echo '[{"id":"1","timestamp":"2026-10-16T08:00:00Z","event_type":"file"},{"id":"2","timestamp":"2026-10-16T08:22:00Z","event_type":"tls"},{"id":"3","timestamp":"2026-10-16T09:00:00Z","event_type":"syscall"},{"id":"4","timestamp":"2026-10-16T10:00:00Z","event_type":"dns"}]' > "$EA"
+EA=$T/edge.json; echo '[{"id":"1","timestamp":"2026-10-16T08:00:00Z","rule_id":"fr_file"},{"id":"2","timestamp":"2026-10-16T08:22:00Z","rule_id":"fr_tls"},{"id":"3","timestamp":"2026-10-16T09:00:00Z","rule_id":"fr_sys"},{"id":"4","timestamp":"2026-10-16T10:00:00Z","rule_id":"fr_dns"}]' > "$EA"
+mkdir -p "$T/rules"; printf 'rules:\n  - id: fr_file\n    event_type: file\n  - id: fr_tls\n    event_type: tls\n  - id: fr_sys\n    event_type: syscall\n  - id: fr_dns\n    event_type: dns\n' > "$T/rules/a.yaml"
+export RULES_DIR=$T/rules
 r=$(IDLE=$(mkng ng1 20 "9:45.8") EDGE_ALERTS=$EA EDGE_N=2 em ref-811)
 w 811-ref-jump 'СПРАВОЧНО: 8\.1\.1 прыжков next_gc больше 1 МиБ за срез: 1 — снимок 9: 40\.0→45\.8 МиБ' "$r"
 w 811-ref-edge-types 'набор event_type алертов на краях окна .*: dns,file,syscall,tls|набор event_type алертов на краях окна .*: dns,file' "$r"
@@ -308,6 +316,8 @@ if [ "${1:-}" = --mutate ]; then
         rm -f "$f"
     }
     mut cpu-frac         's/CPU_FRAC=${CPU_FRAC:-0.8}/CPU_FRAC=${CPU_FRAC:-0.99}/'
+    mut cpu86-frac       's/CPU_FRAC=0.6 BASE_CPS_EXPECT=0.0529/CPU_FRAC=0.99 BASE_CPS_EXPECT=0.0529/'
+    mut cpu86-base       's/BASE_CPS_EXPECT=0.0529 BASE_NAME/BASE_CPS_EXPECT=0 BASE_NAME/'
     mut cpu-base-check   's/BASE_CPS_EXPECT=${BASE_CPS_EXPECT:-0.03058}/BASE_CPS_EXPECT=${BASE_CPS_EXPECT:-0}/'
     mut cpu-restart      's/\[ "\$s0" = "\$s1" \] || { echo "ERR рестарт агента внутри окна \$1/true || { echo "ERR рестарт агента внутри окна $1/'
     mut event-frac       's/EVENT_FRAC=${EVENT_FRAC:-0.6}/EVENT_FRAC=${EVENT_FRAC:-0.7}/'

@@ -5,6 +5,7 @@
 #
 # Режимы и метки:
 #   cpu-idle    8.7.2   CPU idle с/с ≤ 0,8 × ночь 8.6 (0,03058 → 0,0245)
+#   cpu-idle86  8.6.1   сторож «не хуже ночи 8.6»: idle ≤ 0,6 × ночь 8.5 (0,0529), прежняя формула
 #   cpu-event   8.7.1   CPU на событие под пакетом (поды этой ночи, медиана ≥ 5) ≤ 0,6 × ночь 8.5 (82,3 мкс), без смягчения
 #                       (решение 6 владельца 16.10); цена раскладывается по event_type из cpu-*.pprof (справочно)
 #   sched       8.7.3   доля планировщика Go (findRunnable cum) в idle-профилях ≤ 15%
@@ -62,15 +63,16 @@ _idle_cps() {   # <idle-dir> → «с/с cpu_с окно_с» | «ERR причи
     secs=$(( (n - 1) * SNAP_INTERVAL ))
     awk -v a="$c0" -v b="$c1" -v t="$secs" 'BEGIN { if (b < a) { print "ERR process_cpu_seconds_total убыл"; exit } printf "%.5f %.2f %d\n", (b - a) / t, b - a, t }'
 }
+CPU_LABEL=${CPU_LABEL:-8.7.2}; BASE_NAME=${BASE_NAME:-ночь 8.6}
 cpu_idle() {
-    echo "== w87 8.7.2: IDLE=${IDLE:-—} BASE_IDLE=${BASE_IDLE:-—}"
+    echo "== w87 $CPU_LABEL: IDLE=${IDLE:-—} BASE_IDLE=${BASE_IDLE:-—}"
     local cls="" fail="" ni bi
     ni=$(_idle_cps "$IDLE"); bi=$(_idle_cps "$BASE_IDLE")
     case "$ni" in ERR*) cls="$cls; idle ночи: ${ni#ERR }"; ni="" ;; esac
-    case "$bi" in ERR*) cls="$cls; idle базы (ночь 8.6): ${bi#ERR }"; bi="" ;; esac
+    case "$bi" in ERR*) cls="$cls; idle базы ($BASE_NAME): ${bi#ERR }"; bi="" ;; esac
     if [ -n "$bi" ]; then
         awk -v b="${bi%% *}" -v e="$BASE_CPS_EXPECT" 'BEGIN { d = (b - e) / e; if (d < 0) d = -d; exit !(d <= 0.01) }' \
-            || { cls="$cls; база из архива ${bi%% *} с/с не сходится с объявленной $BASE_CPS_EXPECT (±1%) — архив не ночи 8.6"; bi=""; }
+            || { cls="$cls; база из архива ${bi%% *} с/с не сходится с объявленной $BASE_CPS_EXPECT (±1%) — архив не $BASE_NAME"; bi=""; }
     fi
     if [ -n "$ni" ] && [ -n "$bi" ]; then
         awk -v n="${ni%% *}" -v b="${bi%% *}" -v f="$CPU_FRAC" 'BEGIN { printf "  idle ночи %.5f с/с, база %.5f с/с, отношение %.3f, порог %.2f\n", n, b, n / b, f }'
@@ -78,9 +80,9 @@ cpu_idle() {
             || fail="$fail; idle ${ni%% *} с/с = $(awk -v n="${ni%% *}" -v b="${bi%% *}" 'BEGIN { printf "%.0f", 100 * n / b }')% базы ${bi%% *} > $(awk -v f="$CPU_FRAC" 'BEGIN { printf "%.0f", 100 * f }')%"
     fi
     if [ -n "$ni" ] && [ -n "$bi" ]; then
-        verdict 8.7.2 "$fail" "$cls" "idle ${ni%% *} с/с = $(awk -v n="${ni%% *}" -v b="${bi%% *}" 'BEGIN { printf "%.0f", 100 * n / b }')% базы ${bi%% *} ≤ $(awk -v f="$CPU_FRAC" 'BEGIN { printf "%.0f", 100 * f }')%; CPU ${ni#* } с за окно $(echo "$ni" | awk '{ print $3 }') с"
+        verdict "$CPU_LABEL" "$fail" "$cls" "idle ${ni%% *} с/с = $(awk -v n="${ni%% *}" -v b="${bi%% *}" 'BEGIN { printf "%.0f", 100 * n / b }')% базы ${bi%% *} ≤ $(awk -v f="$CPU_FRAC" 'BEGIN { printf "%.0f", 100 * f }')%; CPU ${ni#* } с за окно $(echo "$ni" | awk '{ print $3 }') с"
     else
-        verdict 8.7.2 "" "$cls" ""
+        verdict "$CPU_LABEL" "" "$cls" ""
     fi
 }
 
@@ -264,11 +266,18 @@ ref_811() {
         else echo "СПРАВОЧНО: 8.1.1 прыжков next_gc больше ${STEP_MIB} МиБ за срез: $nst${steps:+ —$steps} (снимков $n; без серии $nse)"; fi
     fi
     if [ -s "$EDGE_ALERTS" ] && jq -e 'type == "array" or type == "object"' "$EDGE_ALERTS" > /dev/null 2>&1; then
-        local ets
+        # Алерт API не несёт event_type (память alert-has-no-event-type-axis): тип берётся из загруженных правил по rule_id.
+        local map ets T; T=$(mktemp -d)
+        # правила — простой YAML (`- id: X` … `event_type: Y`): awk, без pyyaml (мак его не имеет)
+        cat "${RULES_DIR:-$SETUP/../../rules}"/*.yaml 2> /dev/null | awk '
+            /^[[:space:]]*-[[:space:]]+id:[[:space:]]*/ { id = $0; sub(/^[[:space:]]*-[[:space:]]+id:[[:space:]]*/, "", id); gsub(/["'"'"']/, "", id); sub(/[[:space:]]+#.*/, "", id); sub(/[[:space:]]+$/, "", id); seen[id] = 0; cur = id; next }
+            /^[[:space:]]+event_type:[[:space:]]*/ && cur != "" && !seen[cur] { t = $0; sub(/^[[:space:]]+event_type:[[:space:]]*/, "", t); gsub(/["'"'"']/, "", t); sub(/[[:space:]]+#.*/, "", t); sub(/[[:space:]]+$/, "", t); print cur "\t" t; seen[cur] = 1 }' > "$T/map.tsv"
         ets=$(jq -r --argjson k "$EDGE_N" '(if type == "array" then . else .alerts // [] end) | sort_by(.timestamp // .Timestamp // "")
-            | (.[:$k] + .[-$k:]) | map((.event_type // .EventType // ((.event // .Event // {}) | (.type // .Type)) // "?") | tostring) | unique | join(",")' "$EDGE_ALERTS" 2> /dev/null)
-        echo "СПРАВОЧНО: 8.1.1 набор event_type алертов на краях окна (первые и последние $EDGE_N): ${ets:-∅}"
-        echo "$ets" | grep -qE '(^|,)(tls|4)(,|$)' && echo "СПРАВОЧНО: 8.1.1 на краях окна есть tls-алерт — ступенька Rego (№564) возможна; после П5 прыжок > 1 МиБ не ожидается"
+            | (.[:$k] + .[-$k:]) | map(.rule_id // .RuleID // "?") | unique | .[]' "$EDGE_ALERTS" 2> /dev/null \
+            | while read -r rid; do t=$(awk -F'\t' -v r="$rid" '$1 == r { print $2; exit }' "$T/map.tsv"); echo "${t:-?}"; done | sort -u | paste -sd, -)
+        rm -rf "$T"
+        echo "СПРАВОЧНО: 8.1.1 набор event_type алертов на краях окна (первые и последние $EDGE_N, тип — по правилу): ${ets:-∅}"
+        echo "$ets" | grep -qE '(^|,)tls(,|$)' && echo "СПРАВОЧНО: 8.1.1 на краях окна есть tls-алерт — ступенька Rego (№564) возможна; после П5 прыжок > 1 МиБ не ожидается"
     else
         echo "СПРАВОЧНО: 8.1.1 набор event_type алертов на краях окна НЕ СНЯТ (нет снимка алертов ${EDGE_ALERTS:-—})"
     fi
@@ -647,6 +656,7 @@ dlist() {
 
 case "$MODE" in
     cpu-idle) cpu_idle ;;
+    cpu-idle86) CPU_LABEL=8.6.1 CPU_FRAC=0.6 BASE_CPS_EXPECT=0.0529 BASE_NAME="ночь 8.5" cpu_idle ;;   # сторож «не хуже ночи 8.6»: прежний 8.6.1 (база ночи 8.5)
     cpu-event) cpu_event ;;
     sched) sched ;;
     rule-eval) rule_eval ;;

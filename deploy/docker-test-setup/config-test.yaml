@@ -8,6 +8,8 @@ server:
   enable_pprof: true  # волна 6.2.2, находка #244: /debug/pprof ни разу не снимался за всю историю проекта — по умолчанию выключен (server.enable_pprof: false), README его описывает, но стенд его не включал
 
 bpf:
+  # Волна 8.7, П2: окно слива читателя кольца файловых событий (пара ABBA 16.10: 0,73× по с/с, 0,79× по мкс на событие)
+  ringbuf_drain_window: 10ms
   map_sizes:
     events: 32768
     processes: 8192

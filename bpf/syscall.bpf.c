@@ -15,6 +15,13 @@
 #define EG_MAPS_KERNEL_FILTER
 #define EG_MAPS_OBSERVER
 #define EG_MAPS_AGENT_PID
+/*
+ * Волна 8.7, П6 (решение 5 владельца 16.10): кольцо syscall 4 → 1 МиБ. После F1
+ * поток syscall — 17 событий/с на idle (−89%), 1 МиБ держит >1000 событий по ~1 КиБ
+ * при минимуме чтения раз в окно. Сторож — ringbuf_full ≤ базы и потери protected = 0
+ * (метки 8.2.5 (а)(б)). Кольцо file не трогать: оно держит D1.
+ */
+#define EG_EVENTS_RING_BYTES (1 * 1024 * 1024)
 #include "common.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

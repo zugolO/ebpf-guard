@@ -66,6 +66,20 @@ func ComputeUprobeRingBufSize(cfg RingBufSizeConfig) int {
 	return ringBufMinBytes
 }
 
+// tlsRingBufDefaultBytes — кольцо TLS-коллектора по умолчанию (волна 8.7, П6): 1 МиБ
+// вместо 4. Поток почти пуст (на стенде кольцо взяло 3 события за ночь); минимум
+// ядра — страница, не 4 МиБ.
+const tlsRingBufDefaultBytes = 1 * 1024 * 1024
+
+// ComputeTLSRingBufSize — размер кольца tls_events: явный cfg.SizeBytes
+// уважается как у ComputeRingBufSize, без него — 1 МиБ.
+func ComputeTLSRingBufSize(cfg RingBufSizeConfig) int {
+	if cfg.SizeBytes > 0 {
+		return ComputeRingBufSize(cfg)
+	}
+	return tlsRingBufDefaultBytes
+}
+
 func clampRingBuf(n int) int {
 	if n < ringBufMinBytes {
 		return ringBufMinBytes

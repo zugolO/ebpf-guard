@@ -22,6 +22,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [0.10.0-alpha] - 2026-06-25
 
 ### Added
+- `server.pprof_stage_labels` (measurement mode, needs `enable_pprof`): pprof label `stage` on the event and alert path (collector, router, ingest worker, rules, anomaly, Rego, incidents, dispatch, HTTP) so CPU profiles split by stage; state exposed as `ebpf_guard_runtime_flag{flag="pprof_stage_labels"}`. Off by default (see `docs/pprof.md`)
 - CHANGELOG tracking with GoReleaser auto-generation (this file)
 - Expanded test coverage for `osint/`, `drift/`, and `autolearn/` modules
 - Wire-format unit tests for the `internal/bpf` ring-buffer parsers (`ParsePrivescEvent`, `ParseIOUringEvent`, `ParseBpfMonitorEvent`, `ParseKmodEvent`, `ParseCgroupEscapeEvent`, `ParseTlsClientHelloEvent`) and the `pkg/types` helpers

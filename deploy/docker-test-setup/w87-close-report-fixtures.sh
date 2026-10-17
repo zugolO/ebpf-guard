@@ -79,6 +79,12 @@ mksched() { # <имя> <число профилей> <findRunnable с> <проч
 w 8.7.3-good '^ДОСТИГНУТО: 8\.7\.3 .*runtime\.findRunnable cum 12\.5[0-9]*% ≤ 15%' "$(IDLE=$(mksched s1 8 1 7) em sched)"                # 1 / 8 = 12,5%
 w 8.7.3-over '^ПРОВАЛЕН: 8\.7\.3 .*доля планировщика 2[0-9.]+% > 15%' "$(IDLE=$(mksched s2 8 2 7) em sched)"                          # 2 / 9 = 22%
 w 8.7.3-edge-night-86 '^ПРОВАЛЕН: 8\.7\.3 ' "$(IDLE=$(mksched s3 8 29 71) em sched)"                                                   # ночь 8.6: 29%
+# заход Е3: секунды и отношение к базе того же прибора печатаются рядом с долей; вердикт по доле не меняется
+o=$(IDLE=$(mksched s6 8 2 7) BASE_IDLE=$(mksched s7 8 3 7) em sched)                                                                   # ночь 2/9 = 22%, база 3/10 = 30%
+w 8.7.3-abs-ratio 'СПРАВОЧНО \(Е3\): runtime\.findRunnable на 270 с: ночь [0-9.]+ с \(доля 22\.[0-9]+%\), база того же прибора [0-9.]+ с \(доля 30\.[0-9]+%\); секунды к базе 0\.67, доля к базе 0\.7[0-9]' "$o"
+w 8.7.3-abs-verdict-unchanged '^ПРОВАЛЕН: 8\.7\.3 .*доля планировщика 2[0-9.]+% > 15%' "$o"
+w 8.7.3-abs-no-base 'СПРАВОЧНО \(Е3\): .* с на 270 с \(доля [0-9.]+%\); базы того же прибора не задано' "$(IDLE=$(mksched s8 8 2 7) em sched)"
+w 8.7.3-abs-thin-base 'база .* меньше 6 idle-профилей или нет узла, отношение НЕ СЧИТАЕТСЯ' "$(IDLE=$(mksched s9 8 2 7) BASE_IDLE=$(mksched s10 3 3 7) em sched)"
 w 8.7.3-few '^НЕИЗМЕРИМ: 8\.7\.3 .*профилей 3 < 6' "$(IDLE=$(mksched s4 3 1 7) em sched)"
 w 8.7.3-no-node '^НЕИЗМЕРИМ: 8\.7\.3 .*нет итога|нет узла runtime.findRunnable' "$(d=$T/s5/idle; mkdir -p $d/snapshots; for i in 1 2 3 4 5 6 7; do mkpp "$d/snapshots/cpu-000$i.pprof" 30 "main>x:3"; done; IDLE=$d em sched)"
 
@@ -328,6 +334,7 @@ if [ "${1:-}" = --mutate ]; then
     mut split-unlabelled 's/tot - l, 100 \* (tot - l) \/ tot/0, 0/'
     mut sched-max        's/SCHED_MAX=${SCHED_MAX:-15}/SCHED_MAX=${SCHED_MAX:-99}/'
     mut sched-fn         's/SCHED_FN=${SCHED_FN:-runtime.findRunnable}/SCHED_FN=${SCHED_FN:-runtime.nothing}/'
+    mut sched-abs-ratio  's/cs \/ bs, cp \/ bp/bs \/ cs, bp \/ cp/'
     mut sched-min-profs  's/PROF_MIN=${PROF_MIN:-6}/PROF_MIN=${PROF_MIN:-0}/'
     mut prof-samples     's/PROF_MIN_SAMPLES=${PROF_MIN_SAMPLES:-1000}/PROF_MIN_SAMPLES=${PROF_MIN_SAMPLES:-0}/'
     mut prof-host        's/^    chk "хост (окно пакета)".*$/    :/'

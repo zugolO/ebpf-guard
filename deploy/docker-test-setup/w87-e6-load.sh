@@ -1,0 +1,170 @@
+#!/bin/bash
+# Волна 8.7, заход Е6: ступенчатый нагрузочный смок агента — хост и под k3s.
+#
+#   w87-e6-load.sh <host|pod> <steps|attack> <SRC> <OUT>
+#
+# Роль host: рабочий ebpf-guard-test ОСТАНАВЛИВАЕТСЯ на время смока (два агента делят 4 ядра, и кривая насыщения
+#   мерила бы обоих), второй агент из SRC (метки стадий Е1) — единственный на машине; по выходу рабочий поднимается
+#   обратно (trap). Роль pod: тот же бинарь из SRC в образе, чарт на k3s, рабочий так же остановлен (как в ночах 8.x).
+# Режим steps: прогрев WARM_S, затем ступени STEPS (ops/s генератора; 0 — фон без генератора, max — без ограничения),
+#   каждая STEP_S секунд: срез метрик/CPU/RSS до и после, CPU-профиль 30 с в середине ступени, затем пауза GAP_S
+#   и срез «слив» (догоняет ли агент хвост). Режим attack: генератор на ATTACK_RATE всё время пакета атак
+#   (run-all-attacks.sh), recall по comm — держится ли детект под нагрузкой.
+# Генератор — w87-e6-loadgen (e6load), смесь как поток ноды. Таблицу печатает w87-e6-table.sh.
+# Вердиктов не даёт: вход постановки задач производительности.
+set -u
+ROLE=${1:?host|pod}; MODE=${2:?steps|attack}; SRC=${3:?SRC}; OUT=${4:?OUT}
+STEPS=${STEPS:-0 500 1500 5000 15000 40000 100000 max}
+STEP_S=${STEP_S:-60}; GAP_S=${GAP_S:-20}; WARM_S=${WARM_S:-60}
+WORKERS=${WORKERS:-2}; MIX=${MIX:-read=60,open=20,prctl=15,connect=4,exec=1}; EXEC_CAP=${EXEC_CAP:-300}
+ATTACK_RATE=${ATTACK_RATE:-5000}
+# GEN_PROCS — число процессов генератора (темп делится поровну). Воркер движка выбирается по PID & mask
+# (CorrelationEngine.IngestAsyncPriority): 1 процесс = один горячий pid на одном воркере, N — поток многих pid.
+GEN_PROCS=${GEN_PROCS:-1}
+HERE=$(cd "$(dirname "$0")" && pwd)
+SERVICE=ebpf-guard-test.service
+NS=ebpf-guard; REL=e6; POD_TOKEN=w87e6podtoken0123456789abcdef0123; POD_STATE=/var/lib/ebpf-guard-pod
+export PATH=$PATH:/usr/local/go/bin:/root/bin:/usr/local/bin
+export KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
+source "$HERE/w85-second-agent-lib.sh"
+
+rm -rf "$OUT"; mkdir -p "$OUT"; exec > "$OUT/driver.log" 2>&1
+say() { echo "[$(date -u +%FT%TZ)] $*"; }
+die() { echo "die: $*" > "$OUT/DONE"; say "DIE: $*"; exit 1; }
+n_agents() { ps -eo cmd | grep -cE '^(/usr/local/bin/|[^ ]*/build/)ebpf-guard --config'; }
+
+GEN_PIDS=""; POD_UP=0; SA_UP=0
+cleanup() {
+    [ -n "$GEN_PIDS" ] && kill $GEN_PIDS 2> /dev/null
+    [ "$SA_UP" = 1 ] && sa_stop
+    if [ "$POD_UP" = 1 ]; then
+        helm uninstall "$REL" -n "$NS" > /dev/null 2>&1
+        local k; for k in $(seq 1 60); do [ "$(n_agents)" -eq 0 ] && break; sleep 2; done
+    fi
+    systemctl is-active --quiet "$SERVICE" || systemctl start "$SERVICE"
+    sleep 5
+    say "выход: рабочий $(systemctl is-active "$SERVICE"), агентов $(n_agents)"
+}
+trap cleanup EXIT
+
+say "w87-e6 role=$ROLE mode=$MODE head=$(cat "$SRC/GIT-HEAD" 2> /dev/null) steps='$STEPS' step=${STEP_S}s mix=$MIX workers=$WORKERS gen_procs=$GEN_PROCS"
+[ "$(n_agents)" -eq 1 ] || die "до запуска ожидался ровно один (рабочий) агент, есть $(n_agents)"
+[ -x "$SRC/build/ebpf-guard" ] || die "нет $SRC/build/ebpf-guard"
+( cd "$SRC" && go build -o build/e6load ./deploy/docker-test-setup/w87-e6-loadgen ) || die "сборка генератора"
+GEN="$SRC/build/e6load"
+sha256sum "$SRC/build/ebpf-guard" | cut -c1-12 > "$OUT/agent-sha12"
+
+# ── агент ────────────────────────────────────────────────────────────────────────────────────────────────────
+systemctl stop "$SERVICE" || die "не остановил рабочего"
+for k in $(seq 1 30); do [ "$(n_agents)" -eq 0 ] && break; sleep 1; done
+[ "$(n_agents)" -eq 0 ] || die "после остановки рабочего остались агенты"
+say "рабочий остановлен"
+
+if [ "$ROLE" = host ]; then
+    SA_UNIT= SA_CFG_PATCH="$HERE/w87-e1-patch.py" sa_start "$SRC" /root/w87-e6-run 19271 || die "второй агент не поднялся"
+    SA_UP=1; APID=$SA_PID; API=$SA_API; TOKEN=$SA_TOKEN
+else
+    [ "$(kubectl get node -o jsonpath='{.items[0].status.conditions[?(@.type=="DiskPressure")].status}')" = False ] || die "узел в DiskPressure"
+    helm status "$REL" -n "$NS" > /dev/null 2>&1 && die "релиз $REL уже стоит"
+    kubectl get ns "$NS" > /dev/null 2>&1 || kubectl create namespace "$NS" > /dev/null || die "namespace"
+    B="$OUT/pod-image"; mkdir -p "$B"
+    ( cd "$SRC" && CGO_ENABLED=0 go build -tags rego -trimpath -o "$B/ebpf-guard" ./cmd/ebpf-guard ) > "$OUT/pod-build.log" 2>&1 || die "сборка бинаря пода"
+    TAG="w87-e6-$(sha256sum "$B/ebpf-guard" | cut -c1-12)"; echo "$TAG" > "$OUT/pod-tag"
+    printf 'FROM gcr.io/distroless/static:debug\nCOPY ebpf-guard /usr/local/bin/ebpf-guard\nENV GOMEMLIMIT=off\nENTRYPOINT ["/usr/local/bin/ebpf-guard"]\n' > "$B/Dockerfile"
+    docker build -q -t "zugolo/ebpf-guard:$TAG" "$B" > "$OUT/pod-image.log" 2>&1 || die "docker build"
+    rm -f "$B/ebpf-guard"
+    docker save "zugolo/ebpf-guard:$TAG" | k3s ctr -n k8s.io images import - >> "$OUT/pod-image.log" 2>&1
+    k3s ctr -n k8s.io images ls -q | grep -q "zugolo/ebpf-guard:$TAG\$" || die "образ не импортирован"
+    # конфиг пода = config-test.yaml + метки стадий; rules/rego в поде разрешаются от workingDir /opt/ebpf-guard (= SRC)
+    python3 - "$SRC/deploy/docker-test-setup/config-test.yaml" "$OUT/pod-config.yaml" <<'PY' || die "конфиг пода"
+import sys, yaml
+c = yaml.safe_load(open(sys.argv[1]))
+assert c["server"]["enable_pprof"] is True
+c["server"]["pprof_stage_labels"] = True
+c["server"]["pprof_rule_labels"] = False
+yaml.safe_dump(c, open(sys.argv[2], "w"), allow_unicode=True, sort_keys=False)
+PY
+    mkdir -p "$POD_STATE"; echo 0 > "$POD_STATE/observer-root-pid"
+    W85_REPO="$SRC" W85_ARG_PREDICATES=1 python3 "$HERE/w82-pod-night-values.py" "$OUT/pod-config.yaml" "$TAG" "$POD_TOKEN" "$OUT/pod-values.yaml" \
+        > "$OUT/pod-values.log" 2>&1 || die "values: $(cat "$OUT/pod-values.log")"
+    # values-скрипт требует rules.path под /opt/ebpf-guard — путь внутри пода; hostPath ведёт в SRC
+    helm install "$REL" "$SRC/deploy/helm/ebpf-guard" -n "$NS" -f "$OUT/pod-values.yaml" > "$OUT/helm-install.txt" 2>&1 || die "helm install: $(tail -3 "$OUT/helm-install.txt")"
+    POD_UP=1; API=http://127.0.0.1:19091; TOKEN=$POD_TOKEN
+    APID=""
+    for k in $(seq 1 120); do
+        APID=$(pgrep -f '^/usr/local/bin/ebpf-guard --config' | head -1)
+        [ -n "$APID" ] && curl -sf --max-time 3 -H "Authorization: Bearer $TOKEN" "$API/metrics" > /dev/null && break
+        sleep 2
+    done
+    [ -n "$APID" ] || die "процесс пода не появился"
+    curl -sf --max-time 5 -H "Authorization: Bearer $TOKEN" "$API/metrics" > /dev/null || die "API пода не ответил"
+    kubectl -n "$NS" get pods -o wide > "$OUT/pods.txt" 2>&1
+fi
+echo "$APID" > "$OUT/agent-pid"
+[ "$(n_agents)" -eq 1 ] || die "после старта ожидался ровно один агент (смоковый), есть $(n_agents)"
+m() { curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" "$API/metrics"; }
+flag() { m | awk -v f="$1" '$0 ~ "^ebpf_guard_runtime_flag\\{flag=\"" f "\"\\}" { print $NF }'; }
+[ "$(flag pprof_stage_labels)" = 1 ] || die "pprof_stage_labels не 1 по рантайму"
+[ "$(flag enable_pprof)" = 1 ] || die "enable_pprof не 1 по рантайму"
+pst=$(m | awk '/^ebpf_guard_kernel_predicate_state\{/ && $NF == 1' | sed 's/.*state="\([^"]*\)".*/\1/')
+echo "kernel_predicate_state=$pst" > "$OUT/f1.txt"
+say "агент pid $APID ($ROLE), stage_labels=1, F1=$pst; прогрев ${WARM_S}s"
+sleep "$WARM_S"
+
+# ── срез ─────────────────────────────────────────────────────────────────────────────────────────────────────
+snap() { # snap <каталог> <метка>
+    local d=$1 t=$2
+    date +%s.%N > "$d/$t.t"
+    m > "$d/$t.prom"
+    awk '{ print $14 + $15 }' "/proc/$APID/stat" > "$d/$t.ticks" 2> /dev/null
+    awk '/^VmRSS/ { print $2 }' "/proc/$APID/status" > "$d/$t.rss" 2> /dev/null
+    head -1 /proc/stat > "$d/$t.cpu"
+}
+gen() { # gen <rate|max> <dur_s> <json> — GEN_PROCS процессов, итог каждого в <json>.<p>
+    local r=$1 p; [ "$r" = max ] && r=0
+    r=$(awk -v r="$r" -v n="$GEN_PROCS" 'BEGIN { print r / n }')
+    GEN_PIDS=""
+    for p in $(seq 1 "$GEN_PROCS"); do
+        "$GEN" -rate "$r" -dur "${2}s" -workers "$WORKERS" -mix "$MIX" -exec-cap "$(awk -v c="$EXEC_CAP" -v n="$GEN_PROCS" 'BEGIN { print c / n }')" \
+            -dir "/srv/e6/p$p" > "$3.$p" 2> "$3.$p.err" &
+        GEN_PIDS="$GEN_PIDS $!"
+    done
+}
+
+if [ "$MODE" = steps ]; then
+    i=0
+    for s in $STEPS; do
+        i=$((i + 1)); D=$(printf '%s/step-%02d-%s' "$OUT" "$i" "$s"); mkdir -p "$D"
+        kill -0 "$APID" 2> /dev/null || die "агент умер перед ступенью $s"
+        snap "$D" a
+        [ "$s" != 0 ] && gen "$s" "$STEP_S" "$D/gen.json"
+        ( sleep 15; curl -s --max-time 60 -H "Authorization: Bearer $TOKEN" "$API/debug/pprof/profile?seconds=30" > "$D/cpu.pprof" ) &
+        PROF=$!
+        if [ -n "$GEN_PIDS" ]; then wait $GEN_PIDS; GEN_PIDS=""; else sleep "$STEP_S"; fi
+        snap "$D" b
+        wait "$PROF"
+        sleep "$GAP_S"
+        snap "$D" c
+        say "ступень $s: gen $(cat "$D"/gen.json.[0-9]* 2> /dev/null | cut -c1-120 | head -2) профиль $(wc -c < "$D/cpu.pprof") Б"
+    done
+else
+    D="$OUT/attack"; mkdir -p "$D"
+    A="$SRC/deploy/docker-test-setup/attacks"
+    ls "$A/attack-results" 2> /dev/null | sort > "$D/results-before.lst"
+    snap "$D" a
+    gen "$ATTACK_RATE" 3600 "$D/gen.json"
+    sleep 15
+    snap "$D" g
+    ( cd "$A" && EBPF_GUARD_API="$API" EBPF_GUARD_TOKEN="$TOKEN" SKIP_INDUCED_DROP=1 bash ./run-all-attacks.sh > "$D/attacks.log" 2>&1; echo "rc=$?" > "$D/attacks.rc" )
+    snap "$D" b
+    kill -INT $GEN_PIDS 2> /dev/null; wait $GEN_PIDS 2> /dev/null; GEN_PIDS=""
+    sleep 20
+    snap "$D" c
+    cp "$A/attack-manifest.json" "$D/" 2> /dev/null
+    ls "$A/attack-results" 2> /dev/null | sort | comm -13 "$D/results-before.lst" - > "$D/results-new.lst"
+    for f in $(grep -E '^(baseline|final)-alerts-.*\.json$' "$D/results-new.lst"); do cp "$A/attack-results/$f" "$D/"; done
+    echo "recall по comm: $(ATT=$D bash "$HERE/w85-close-report.sh" recall)" | tee "$D/recall.txt"
+fi
+[ "$ROLE" = host ] && cp /root/w87-e6-run/agent.log "$OUT/agent.log"
+[ "$ROLE" = pod ] && kubectl -n "$NS" logs "ds/$REL-ebpf-guard" --tail=300 > "$OUT/pod.log" 2>&1
+echo "done $(date -u +%FT%TZ)" > "$OUT/DONE"

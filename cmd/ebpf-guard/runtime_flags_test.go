@@ -10,6 +10,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/profstage"
 )
 
 // Волна 8.6 C: флаги рантайма читаются из процесса, а не из конфига — дамп событий и метки правил
@@ -34,6 +35,12 @@ func TestPublishRuntimeFlags(t *testing.T) {
 	publishRuntimeFlags(cfg)
 	require.Equal(t, 1.0, testutil.ToFloat64(exporter.RuntimeFlag.WithLabelValues("pprof_rule_labels")))
 	correlator.SetProfileLabels(false, false)
+	// заход Е1: метки стадий — тоже по рантайму
+	require.Equal(t, 0.0, testutil.ToFloat64(exporter.RuntimeFlag.WithLabelValues("pprof_stage_labels")))
+	profstage.Enable(true)
+	publishRuntimeFlags(cfg)
+	require.Equal(t, 1.0, testutil.ToFloat64(exporter.RuntimeFlag.WithLabelValues("pprof_stage_labels")))
+	profstage.Enable(false)
 }
 
 // Волна 8.7, П0(б): профили block/mutex выключены по умолчанию и включаются

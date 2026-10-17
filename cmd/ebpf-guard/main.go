@@ -42,6 +42,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/osint"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/internal/profstage"
 	"github.com/zugolO/ebpf-guard/internal/qhwm"
 	"github.com/zugolO/ebpf-guard/internal/ruletest"
 	"github.com/zugolO/ebpf-guard/internal/runtime"
@@ -897,6 +898,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// Волна 8.6, G0(а): метки pprof event_type (и rule_file/rule_id) на проходе
 	// RuleEngine.EvaluateInto — до создания движка, метки правил строятся в нём.
 	correlator.SetProfileLabels(cfg.Server.EnablePprof, cfg.Server.EnablePprof && cfg.Server.PprofRuleLabels)
+	// Волна 8.7, заход Е1: метки стадий (stage) — до запуска горутин пути.
+	profstage.Enable(cfg.Server.EnablePprof && cfg.Server.PprofStageLabels)
 
 	// Волна 8.6, заход B: дамп событий движка (режим измерения, по умолчанию выключен).
 	if cfg.Server.EventDumpPath != "" {
@@ -2776,6 +2779,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			return
 		}
 		// Simple mode: auto-enforce high-confidence threats.
+		profstage.Set(profstage.DispatchEnforce)
 		if simpleEngine != nil && enf != nil {
 			simpleEngine.ProcessAlerts(dispatched, enf)
 		}
@@ -2784,16 +2788,19 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				simCollector.Record(a)
 			}
 		}
+		profstage.Set(profstage.DispatchStore)
 		if err := alertStore.StoreBatch(ctx, dispatched); err != nil {
 			slog.Warn("store alerts error", slog.Any("error", err))
 		}
 		// Forward alerts to Alertmanager webhook if configured.
+		profstage.Set(profstage.DispatchAM)
 		if alertmanagerClient != nil {
 			for _, a := range dispatched {
 				alertmanagerClient.SendAlert(ctx, a)
 			}
 		}
 		// Fan out to Slack / Teams / webhook notifiers if configured.
+		profstage.Set(profstage.DispatchNotify)
 		if fanout != nil {
 			for _, a := range dispatched {
 				fanout.Send(ctx, a)
@@ -2801,6 +2808,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		}
 		// Feature F: broadcast critical alerts to peer nodes (cross-node
 		// alert amplification) and extract IOCs for gossip sharing.
+		profstage.Set(profstage.DispatchGossip)
 		if gossipMgr != nil {
 			for _, a := range dispatched {
 				gossipMgr.BroadcastAlert(a)
@@ -2817,6 +2825,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// keys that received repeats are forwarded separately by the Reap ticker
 	// below.
 	dispatchAlerts := func(dispatched []types.Alert) {
+		profstage.Set(profstage.DispatchMetrics)
 		// Wave 5.1a: hold alerts below store.min_severity out of both intake
 		// sinks — the counter and the store — rather than only out of the
 		// notifiers. Wave 5.1 downgraded the seven-rule daemon cluster to info
@@ -2881,6 +2890,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		// потери детекта ([[dedup-is-third-suppression-layer]] — та же
 		// причина, по которой у каждого слоя есть своя величина).
 		// Ни одного окна — ни цикла, ни аллокации: обычное состояние агента.
+		profstage.Set(profstage.DispatchAgg)
 		forwarded := admitted
 		if alertSilencer != nil && alertSilencer.Active() {
 			kept := forwarded[:0:0]
@@ -3132,6 +3142,7 @@ func processEvent(
 	cfg *config.Config,
 	dispatchAsync func([]types.Alert),
 ) {
+	profstage.Set(profstage.RouterLog)
 	if eventLog != nil {
 		if wErr := eventLog.Write(event); wErr != nil {
 			slog.Debug("event log: write error", slog.Any("error", wErr))
@@ -3142,12 +3153,14 @@ func processEvent(
 	// can match. K8s pod metadata first (namespace, labels, pod name),
 	// then the runtime enricher fills container fields (name, image) and
 	// any node-local pod identity the k8s enricher could not resolve.
+	profstage.Set(profstage.RouterEnrich)
 	if k8sEnricher != nil {
 		k8sEnricher.EnrichEvent(&event)
 	}
 	if runtimeEnricher != nil {
 		runtimeEnricher.EnrichEvent(&event)
 	}
+	profstage.Set(profstage.RouterMetrics)
 
 	// Fleet-wide event metric: type/pod/namespace/node so the Grafana fleet
 	// dashboard can aggregate events/sec across the whole cluster, not just
@@ -3180,7 +3193,9 @@ func processEvent(
 	// instead of serializing on this one. Resulting alerts land in
 	// engine.pending and are drained by the periodic flush above — do
 	// NOT also dispatch a return value here, or every alert double-fires.
+	profstage.Set(profstage.RouterIngest)
 	engine.IngestAsyncPriority(ctx, event, protected)
+	profstage.Set(profstage.RouterDrift)
 
 	// Drift detection runs independently of the correlation engine's
 	// pending buffer, so its alerts are dispatched immediately.
@@ -3195,6 +3210,7 @@ func processEvent(
 			dispatchAsync(alerts)
 		}
 	}
+	profstage.Set(profstage.RouterLoop)
 }
 
 // gracefulShutdown orchestrates an ordered, time-bounded shutdown sequence:

@@ -147,6 +147,19 @@ go tool pprof -tagroot=event_type -top ...   # разбивка по типу
 `server.pprof_rule_labels: true` добавляет `rule_file` и `rule_id` (метка ставится
 на каждое правило — режим измерения, на боевом агенте не включать).
 
+### Метки стадий (волна 8.7, заход Е1)
+
+`server.pprof_stage_labels: true` (вместе с `enable_pprof`) ставит на горутины
+стадий метку `stage`: `collector`, `collector_route`,
+`router_log|enrich|metrics|ingest|drift|loop`, `ingest_loop`, `ingest_pre`,
+`rules`, `ingest_post`, `anomaly`, `rego`, `rego_loop`, `incident`,
+`pending_flush`, `dispatch_metrics|agg|enforce|store|alertmanager|notify|gossip`,
+`enforcer`, `http_metrics`, `http_api`. Метка держится на горутине до следующей установки, поэтому
+цикл между событиями имеет свои стадии (`*_loop`). Горутины без метки (GC,
+планировщик после снятия горутины с потока, фоновые тикеры) идут в остаток. Режим измерения, на боевом агенте
+не включать. Разбивка: `go tool pprof -tagroot=stage -top profile.pprof`.
+Состояние в процессе — `ebpf_guard_runtime_flag{flag="pprof_stage_labels"}`.
+
 ## Дамп событий движка (волна 8.6, заход B)
 
 Для офлайн-бенча движка на настоящем потоке (а не на замене из распределений)

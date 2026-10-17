@@ -147,3 +147,45 @@ flannel	6.2-preflight:1	CNI k3s
 bridge	6.2-preflight:6	CNI-плагин bridge (setup сети пода)
 loopback	6.2-preflight:4	CNI-плагин loopback (setup сети пода)
 mount	6.2-preflight:4	монтирование томов пода kubelet'ом
+#
+# ── Волна 8.7, заход Е4 (17.10.2026): акторы idle-часа ночи закрытия 8.7 ─────────────────────────────────────────
+# Окно 01:07:01…13:07:11 UTC (collect-8.7-night). Гейт 5.9.9.F.1d сработал впервые (в 8.6 была SKIP — серии
+# incidents_total{verdict="attack"} в срезах не было), дельта verdict="attack" за idle-час = 0, и в реестр не
+# попали 23 актора. Источник каждого назван по ЖУРНАЛУ НОЧИ (node-units.tsv: старты юнитов; process_tree из
+# idle/alerts-end.json; crontab стенда), а не по догадке; поле 2 — число алертов актора за окно (дельта alerts-end
+# против alerts-start). Пополнение законно по тому же основанию, что motd-news (5.9.9.F.5i) и tmpfiles (6.0f):
+# новое окно суток, а не подгонка вердикта.
+#
+# ЧЕГО ЗДЕСЬ НЕТ НАМЕРЕННО. Запрет постановки 5.9.9.F.3 («дописывание в реестр mandb/find/install запрещено»)
+# НЕ ослаблен и этой записью не затронут: mandb, (mandb), (find), install, (install) — дети man-db.service
+# 08:30:58 — остаются вне реестра, и FAIL гейта по этим пяти comm сохраняется. Снять запрет может только владелец.
+# Родовые comm (cat, head, rm, systemctl, flock) внесены только как дети названного юнита: реестр отвечает на
+# «бывает ли это фоном стенда», а не «безопасен ли этот процесс», и дельта verdict="attack" остаётся главной
+# величиной критерия — членством в реестре она не закрывается.
+#
+# cron.daily 06:25:01 UTC (crontab стенда: «25 6 * * * root … run-parts /etc/cron.daily», anacron не стоит; в
+# /etc/cron.daily: apport, apt-compat, dpkg, logrotate, man-db, e2scrub_all). Три алерта-триггера на каждый актор
+# (sigma_cron_job_created, supply_chain_dockerfile_persistence, supply_chain_pkg_install_etc_write) — одни и те же.
+apport	8.7-night:3	по cron.daily 06:25:01 (скрипт /etc/cron.daily/apport; не systemd-юнит)
+apt-compat	8.7-night:3	по cron.daily 06:25:01 (скрипт /etc/cron.daily/apt-compat)
+man-db	8.7-night:3	по cron.daily 06:25:01 (скрипт /etc/cron.daily/man-db) — НЕ man-db.service 08:30:58, чьи дети (mandb/find/install) в реестр не внесены
+# apt-daily-upgrade.service 06:49:21–06:49:37 UTC (node-units.tsv ночи; цена события 239 алертов, ночь 8.6 — 228).
+apt.systemd.dai	8.7-night:1	по apt-daily-upgrade.service (/usr/lib/apt/apt.systemd.daily; усечённое имя comm)
+apt-config	8.7-night:1	по apt-daily-upgrade.service (apt-config dump из apt.systemd.daily)
+apt-helper	8.7-night:2	по apt-daily-upgrade.service (apt-helper wait-online)
+apt-get	8.7-night:1	по apt-daily-upgrade.service (apt-get из unattended-upgrade; mitre_software_enum_dpkg)
+flock	8.7-night:1	по apt-daily-upgrade.service (блокировка в apt.systemd.daily)
+systemctl	8.7-night:2	по apt-daily-upgrade.service (проверка состояния юнитов из apt.systemd.daily)
+lsb_release	8.7-night:4	по apt-daily-upgrade.service (python-обвязка lsb_release в unattended-upgrade)
+unattended-upgr	8.7-night:9	по apt-daily-upgrade.service (unattended-upgrade; усечённое имя comm)
+# motd-news.service 08:18:40 UTC (node-units.tsv ночи; дети 50-motd-news — продолжение записи 5.9.9.F.5i).
+cat	8.7-night:1	по motd-news.service (50-motd-news читает /etc/default/motd-news)
+head	8.7-night:1	по motd-news.service (50-motd-news, усечение ответа)
+rm	8.7-night:1	по motd-news.service (50-motd-news, удаление временного файла)
+# Сеть ноды: родитель k3s-server (pid 759, process_tree в alerts-end.json) — синхронизация iptables/ipset
+# kube-proxy и сетевой политики; в окне ip6tables-restore стоял в 01:10:55, 02:10:55 и 03:10:55 (раз в час).
+ip6tables-resto	8.7-night:4	k3s-server → ip6tables-restore (синхронизация правил ноды, усечённое имя comm)
+ip6tables-save	8.7-night:4	k3s-server → ip6tables-save (то же)
+ipset	8.7-night:3	k3s-server → ipset (наборы kube-proxy/сетевой политики), 01:05–01:20
+# Демон docker стенда (pid 800, ppid 1) — единственный anomaly_detection на нём за окно, инцидент suspicious score 9.
+dockerd	8.7-night:1	системный демон docker (фон), 01:09:58

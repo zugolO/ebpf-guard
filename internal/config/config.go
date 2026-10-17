@@ -136,6 +136,12 @@ type ServerConfig struct {
 	// всегда). Измерительный режим: установка меток на каждое правило заметно
 	// дороже. Действует только вместе с enable_pprof.
 	PprofRuleLabels bool `mapstructure:"pprof_rule_labels"`
+	// PprofStageLabels (волна 8.7, заход Е1) ставит на горутины стадий пути
+	// события и алерта метку pprof stage (collector, router_*, ingest_pre, rules,
+	// anomaly, rego, incident, dispatch_*, http_*): CPU под пакетом раскладывается
+	// по стадиям. Цена — одна установка меток на смену стадии; на боевом агенте не
+	// включается. Действует только вместе с enable_pprof.
+	PprofStageLabels bool `mapstructure:"pprof_stage_labels"`
 	// EventDumpPath (волна 8.6, заход B) — файл JSONL, куда пишется выборка событий,
 	// дошедших до движка правил: вход офлайн-бенча G0. Пусто — выключено (цена —
 	// одна атомарная загрузка на событие). Файл содержит comm, пути и аргументы
@@ -2196,6 +2202,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.health_path", "/health")
 	v.SetDefault("server.enable_pprof", false)
 	v.SetDefault("server.pprof_rule_labels", false)
+	v.SetDefault("server.pprof_stage_labels", false)
 	v.SetDefault("server.event_dump_path", "")
 	v.SetDefault("server.event_dump_every", 1)
 	v.SetDefault("server.enable_debug", false)

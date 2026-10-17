@@ -20,6 +20,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
+	"github.com/zugolO/ebpf-guard/internal/profstage"
 	"github.com/zugolO/ebpf-guard/internal/util"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 	"go.opentelemetry.io/otel"
@@ -1186,6 +1187,7 @@ func (ce *CorrelationEngine) enforceWorker(ctx context.Context) {
 			if !ok {
 				return
 			}
+			profstage.Set(profstage.Enforcer)
 			if err := ce.actionExecutor.ExecuteAction(task.ctx, task.action, task.alert); err != nil {
 				slog.Warn("correlator: rule enforcement failed",
 					slog.String("rule_id", task.alert.RuleID),
@@ -1446,6 +1448,7 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 	var localPending []types.Alert
 	flushTicker := time.NewTicker(localFlushInterval)
 	defer flushTicker.Stop()
+	profstage.Set(profstage.RegoLoop)
 
 	for {
 		select {
@@ -1454,6 +1457,7 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 				ce.flushPending(&localPending)
 				return
 			}
+			profstage.Set(profstage.Rego)
 			enriched := ce.evaluateRegoPolicies(task.ctx, task.alerts)
 			task.cancel()
 
@@ -1482,6 +1486,7 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 			// Tracking here rather than before the queue keeps the pre-existing
 			// ordering contract: incidents are built from alerts that survived
 			// analyst feedback suppression, exactly as on the synchronous path.
+			profstage.Set(profstage.Incident)
 			if ce.incidentTracker != nil && ce.incidentIngestEnabled.Load() {
 				for i := range enriched {
 					ce.incidentTracker.Add(enriched[i])
@@ -1495,11 +1500,15 @@ func (ce *CorrelationEngine) regoWorker(ctx context.Context) {
 
 			localPending = append(localPending, enriched...)
 			if len(localPending) >= localFlushBatch {
+				profstage.Set(profstage.PendingFlush)
 				ce.flushPending(&localPending)
 			}
 			ce.regoWg.Done()
+			profstage.Set(profstage.RegoLoop)
 		case <-flushTicker.C:
+			profstage.Set(profstage.PendingFlush)
 			ce.flushPending(&localPending)
+			profstage.Set(profstage.RegoLoop)
 		case <-ctx.Done():
 			ce.flushPending(&localPending)
 			return
@@ -2004,6 +2013,11 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 	flushTicker := time.NewTicker(localFlushInterval)
 	defer flushTicker.Stop()
 
+	// Метка на горутину воркера держится до следующей Set, поэтому цикл между
+	// событиями (select, возраст в очереди, возврат задачи в пул) получает свою
+	// стадию, а не хвостовую стадию прошлого события (заход Е1: первый прогон
+	// приписал циклу воркера 4% CPU под именем «incident»).
+	profstage.Set(profstage.IngestLoop)
 	handle := func(task *workerTask) {
 		tctx, ev := task.ctx, task.event
 		workerTaskPool.Put(task)
@@ -2018,9 +2032,11 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 		if len(alerts) > 0 && !regoQueued {
 			localPending = append(localPending, alerts...)
 			if len(localPending) >= localFlushBatch {
+				profstage.Set(profstage.PendingFlush)
 				ce.flushPending(&localPending)
 			}
 		}
+		profstage.Set(profstage.IngestLoop)
 	}
 
 	// Both channels are closed together by closeIngestChannels; a closed one is
@@ -2054,7 +2070,9 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 			}
 			handle(task)
 		case <-flushTicker.C:
+			profstage.Set(profstage.PendingFlush)
 			ce.flushPending(&localPending)
+			profstage.Set(profstage.IngestLoop)
 		case <-ctx.Done():
 			ce.flushPending(&localPending)
 			return
@@ -2078,6 +2096,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, 
 	// stream). ep must stay valid until return — callers pass storage they own.
 	e := *ep
 	start := time.Now()
+	profstage.Set(profstage.IngestPre)
 
 	// Open an OTel span only when the event carries APM trace context (extracted
 	// by the TLS uprobe from HTTP/gRPC headers). Kernel-generated events (~99%
@@ -2339,6 +2358,10 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, 
 		})
 	}
 
+	// Стадия «после правил»: EvaluateInto сам снимает метки (profileLeave), поэтому
+	// стадию ставим заново.
+	profstage.Set(profstage.IngestPost)
+
 	// WASM plugin evaluation — run custom detection plugins.
 	if ce.wasmEngine != nil {
 		wasmAlerts := ce.wasmEngine.Evaluate(ctx, e)
@@ -2410,6 +2433,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, 
 	// ruleConfirmed=true suppresses EWMA baseline updates for events that
 	// rule/WASM/IOC detectors already confirmed as malicious.
 	if ce.enableAnomaly && ad != nil {
+		profstage.Set(profstage.Anomaly)
 		ruleConfirmed := len(alerts) > 0
 		if result := ad.ProcessEvent(e, ruleConfirmed); result != nil {
 			// Always report the score (even non-anomalous) so the cardinality-guarded
@@ -2559,6 +2583,8 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, 
 		}
 	}
 
+	profstage.Set(profstage.IngestPost)
+
 	// Syscall allowlist enforcement: record event during learning, check in enforcing.
 	// Record runs unconditionally so the profile accumulates even while other
 	// detectors are active; Check returns nil during the learning phase.
@@ -2667,6 +2693,7 @@ func (ce *CorrelationEngine) ingestWithAD(ctx context.Context, ep *types.Event, 
 	// Group alerts into incidents. Gated by the wave 6.3.L.1 A/B switch — see
 	// CorrelationEngineConfig.IncidentIngestEnabled; with the layer off the
 	// alerts themselves are untouched, only their promotion to incidents is.
+	profstage.Set(profstage.Incident)
 	if ce.incidentIngestEnabled.Load() {
 		for i := range alerts {
 			ce.incidentTracker.Add(alerts[i])

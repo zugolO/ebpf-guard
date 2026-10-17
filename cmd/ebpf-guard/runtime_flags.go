@@ -8,6 +8,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/profstage"
 )
 
 // publishRuntimeFlags выставляет серии рантайма (волна 8.6, заход C): что на самом деле включено в
@@ -17,6 +18,7 @@ func publishRuntimeFlags(cfg *config.Config) {
 	exporter.SetRuntimeFlag("event_dump", correlator.EventDumpActive())
 	exporter.SetRuntimeFlag("pprof_event_labels", evLabels)
 	exporter.SetRuntimeFlag("pprof_rule_labels", ruleLabels)
+	exporter.SetRuntimeFlag("pprof_stage_labels", profstage.Enabled())
 	exporter.SetRuntimeFlag("enable_pprof", cfg.Server.EnablePprof)
 	exporter.SetRuntimeFlag("pprof_block_mutex", pprofBlockMutexOn())
 	exporter.SetRuntimeFlag("arg_predicates_config", cfg.BPF.KernelFilter.ArgPredicates.Enabled)

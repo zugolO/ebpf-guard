@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/zugolO/ebpf-guard/internal/profstage"
 )
 
 // Pre-scrape hooks exist because two of the metrics this package publishes
@@ -86,7 +88,18 @@ func runPreScrapeHooks() {
 func MetricsHandler() http.Handler {
 	inner := promhttp.Handler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		profstage.Set(profstage.HTTPMetrics)
 		runPreScrapeHooks()
 		inner.ServeHTTP(w, r)
+	})
+}
+
+// stageMiddleware (волна 8.7, заход Е1) ставит на горутину запроса метку стадии
+// http_api; сбор /metrics перекрывает её своей (http_metrics). Выключено — одна
+// атомарная загрузка на запрос.
+func stageMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		profstage.Set(profstage.HTTPAPI)
+		next.ServeHTTP(w, r)
 	})
 }

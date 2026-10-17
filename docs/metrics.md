@@ -464,7 +464,7 @@ groups:
 | Attribute | Value |
 |-----------|-------|
 | **Type** | Gauge |
-| **Labels** | `flag` (event_dump\|pprof_event_labels\|pprof_rule_labels\|enable_pprof\|arg_predicates_config) |
+| **Labels** | `flag` (event_dump\|pprof_event_labels\|pprof_rule_labels\|pprof_stage_labels\|enable_pprof\|arg_predicates_config) |
 | **Description** | Runtime state of measurement and cost flags in this process (1 = on), read from the process, not from the config file. A measurement run checks that `event_dump` and `pprof_rule_labels` are 0 (wave 8.6). |
 
 ---

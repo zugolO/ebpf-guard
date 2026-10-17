@@ -31,7 +31,7 @@ var (
 func SetProfileLabels(eventType, rule bool) {
 	if eventType || rule {
 		for t := 1; t < byTypeSize; t++ {
-			ctx := pprof.WithLabels(context.Background(), pprof.Labels("event_type", types.EventType(t).String()))
+			ctx := pprof.WithLabels(context.Background(), pprof.Labels("stage", "rules", "event_type", types.EventType(t).String()))
 			profileTypeCtx[t].Store(&ctx)
 		}
 	}
@@ -52,7 +52,7 @@ func ruleProfileCtx(r *Rule) *context.Context {
 		file = "unknown"
 	}
 	ctx := pprof.WithLabels(context.Background(), pprof.Labels(
-		"event_type", r.EventType.String(), "rule_file", file, "rule_id", r.ID))
+		"stage", "rules", "event_type", r.EventType.String(), "rule_file", file, "rule_id", r.ID))
 	return &ctx
 }
 

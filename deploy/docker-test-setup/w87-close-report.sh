@@ -160,7 +160,40 @@ cpu_split() {
 }
 
 # ── 8.7.3: доля планировщика Go в idle-профилях ──────────────────────────────────
+NORM_SECS=${NORM_SECS:-270}; PROF_MIN=${PROF_MIN:-6}
 SCHED_MAX=${SCHED_MAX:-15}; SCHED_FN=${SCHED_FN:-runtime.findRunnable}
+# _sched_abs <idle-dir> → «доля% cum_с длительность_с профилей» | пусто. Один прибор для ночи и для базы: сведённые
+# idle-профили, `pprof -top -cum`, узел $SCHED_FN. Заход Е3 (волна 8.7): доля ВРЁТ там, где падает знаменатель
+# (ночь 8.7: findRunnable −32% в секундах, а доля 24,7% → 23,0%), поэтому рядом печатаются секунды.
+_sched_abs() {
+    local profs out dur pct cum
+    mapfile -t profs < <(ls "$1"/snapshots/cpu-*.pprof 2>/dev/null | sort)
+    [ "${#profs[@]}" -ge "$PROF_MIN" ] || return 0
+    out=$(go tool pprof -top -cum -nodecount=600 "${profs[@]}" 2> /dev/null)
+    dur=$(printf '%s\n' "$out" | sed -n 's/^Duration: *\([0-9.]*\)s.*/\1/p' | head -1)
+    printf '%s\n' "$out" | awk -v fn="$SCHED_FN" -v d="$dur" -v n="${#profs[@]}" '
+        $NF == fn { p = $5; sub(/%/, "", p); v = $4; if (v ~ /ms$/) { sub(/ms/, "", v); v = v / 1000 } else sub(/s$/, "", v); printf "%s %s %s %s\n", p, v, d, n; exit }'
+}
+# sched_abs — справочная строка (вердикта не меняет): секунды на NORM_SECS и отношение к базе ТОГО ЖЕ прибора.
+sched_abs() {
+    local cur base cp cs cd cn bp bs bd bn
+    cur=$(_sched_abs "$IDLE"); [ -n "$cur" ] || return 0
+    read -r cp cs cd cn <<< "$cur"
+    local cn_s; cn_s=$(awk -v c="$cs" -v d="$cd" -v n="$NORM_SECS" 'BEGIN { printf "%.2f", c * n / d }')
+    if [ -z "${BASE_IDLE:-}" ]; then
+        echo "  СПРАВОЧНО (Е3): $SCHED_FN cum ${cs} с за ${cd} с профилей = ${cn_s} с на ${NORM_SECS} с (доля ${cp}%); базы того же прибора не задано (BASE_IDLE)"
+        return 0
+    fi
+    base=$(_sched_abs "$BASE_IDLE")
+    if [ -z "$base" ]; then
+        echo "  СПРАВОЧНО (Е3): $SCHED_FN cum ${cs} с за ${cd} с = ${cn_s} с на ${NORM_SECS} с (доля ${cp}%); база $BASE_IDLE — меньше $PROF_MIN idle-профилей или нет узла, отношение НЕ СЧИТАЕТСЯ"
+        return 0
+    fi
+    read -r bp bs bd bn <<< "$base"
+    local bn_s; bn_s=$(awk -v c="$bs" -v d="$bd" -v n="$NORM_SECS" 'BEGIN { printf "%.2f", c * n / d }')
+    awk -v cs="$cn_s" -v bs="$bn_s" -v cp="$cp" -v bp="$bp" -v fn="$SCHED_FN" -v n="$NORM_SECS" 'BEGIN {
+        printf "  СПРАВОЧНО (Е3): %s на %d с: ночь %.2f с (доля %s%%), база того же прибора %.2f с (доля %s%%); секунды к базе %.2f, доля к базе %.2f\n", fn, n, cs, cp, bs, bp, cs / bs, cp / bp }'
+}
 sched() {
     echo "== w87 8.7.3: IDLE=${IDLE:-—} предел доли $SCHED_FN cum ≤ ${SCHED_MAX}% (ночь 8.6: ≈ 29%)"
     local cls="" fail="" profs n out pct tot
@@ -176,6 +209,7 @@ sched() {
             cls="$cls; в сведённом профиле нет итога (${tot:-—}) или узла $SCHED_FN (${pct:-—}) — профиль не от агента или pprof не разобрал"
         else
             echo "  профилей $n, всего сэмплов $tot; $SCHED_FN cum ${pct}%"
+            sched_abs
             awk -v v="$pct" -v l="$SCHED_MAX" 'BEGIN { exit !(v <= l) }' || fail="$fail; доля планировщика ${pct}% > ${SCHED_MAX}%"
             verdict 8.7.3 "$fail" "$cls" "$SCHED_FN cum ${pct}% ≤ ${SCHED_MAX}% по $n профилям (${tot})"
             return
@@ -284,7 +318,7 @@ ref_811() {
 }
 
 # ── 8.6.3а: секунды EvaluateInto в idle-профилях ────────────────────────────────
-NORM_SECS=${NORM_SECS:-270}; EVAL_LIMIT=${EVAL_LIMIT:-3.96}; PROF_MIN=${PROF_MIN:-6}
+EVAL_LIMIT=${EVAL_LIMIT:-3.96}
 rule_eval() {
     echo "== w87 8.6.3а: IDLE=${IDLE:-—} норма ${NORM_SECS} с, предел ${EVAL_LIMIT} с"
     local cls="" fail="" profs n out dur cum

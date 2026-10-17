@@ -225,6 +225,7 @@ func NewServerWithMultiTenant(bindAddress, metricsPath, healthPath string, enabl
 		}
 	}
 	handler = s.corsMiddleware(handler)
+	handler = stageMiddleware(handler)
 
 	s.server = &http.Server{
 		Addr:         bindAddress,
@@ -304,6 +305,7 @@ func NewServerWithRBAC(bindAddress, metricsPath, healthPath string, enablePprof,
 		handler = RBACMiddleware(viewerToken, adminToken)(mux)
 	}
 	handler = s.corsMiddleware(handler)
+	handler = stageMiddleware(handler)
 
 	s.server = &http.Server{
 		Addr:         bindAddress,

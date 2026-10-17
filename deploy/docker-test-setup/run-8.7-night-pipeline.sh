@@ -474,7 +474,7 @@ cat "$ART/close-report-85.txt"
     IDLE="$ART/idle" BASE_IDLE="$W86_BASE/idle-8.5" bash "$SETUP/w87-close-report.sh" cpu-idle86
     # 8.7.2 — idle ≤ 0,8 × ночь 8.6
     IDLE="$ART/idle" BASE_IDLE="$W87_BASE86/idle" bash "$SETUP/w87-close-report.sh" cpu-idle
-    IDLE="$ART/idle" bash "$SETUP/w87-close-report.sh" sched
+    IDLE="$ART/idle" BASE_IDLE="$W87_BASE86/idle" bash "$SETUP/w87-close-report.sh" sched
     # 8.7.1 — порог 82,3 мкс без смягчения (решение 6)
     POD_RUNS="$POD_RUNS_LIST" BASE_ATT="$W86_BASE/pod-attack-8.5" bash "$SETUP/w87-close-report.sh" cpu-event
     IDLE="$ART/idle" bash "$SETUP/w87-close-report.sh" rule-eval

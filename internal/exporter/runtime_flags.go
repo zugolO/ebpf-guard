@@ -11,7 +11,7 @@ import (
 // или метками правил измеряла бы не продукт.
 var (
 	// RuntimeFlag — булевы флаги измерительных режимов и вкладов в цену.
-	// flag ∈ event_dump, pprof_event_labels, pprof_rule_labels, enable_pprof,
+	// flag ∈ event_dump, pprof_event_labels, pprof_rule_labels, pprof_stage_labels, enable_pprof,
 	// arg_predicates_config.
 	RuntimeFlag = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{

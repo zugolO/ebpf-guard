@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/profstage"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -82,6 +83,7 @@ func (p *PriorityEventCollector) Start(ctx context.Context, _ chan<- types.Event
 	routerDone := make(chan struct{})
 	go func() {
 		defer close(routerDone)
+		profstage.Set(profstage.CollectorRoute)
 		for {
 			select {
 			case <-ctx.Done():

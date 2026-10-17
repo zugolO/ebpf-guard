@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zugolO/ebpf-guard/internal/profstage"
 	"github.com/zugolO/ebpf-guard/pkg/types"
 )
 
@@ -56,6 +57,7 @@ func runReadLoop(fn func()) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		profstage.Set(profstage.Collector)
 		fn()
 	}()
 	return done

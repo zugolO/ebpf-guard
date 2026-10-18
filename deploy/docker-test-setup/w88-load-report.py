@@ -403,6 +403,17 @@ def main():
                              f"минимальный простой ноды {ns[mn]['idle']:.1%} на ступени {st[mn]['name']} (порог {NODE_IDLE_MIN:.0%}); ступеней с насыщением {len(sat)}"
                              f"{(': ' + ', '.join(st[i]['name'] for i in sat)) if sat else ''}; ступени с потерями (простой/ядра агента/ядра генератора): {tab}"))
 
+    # ── 8.8.Т: справка для docs/capacity.md (вердикта нет: числа ступеней, из которых строится таблица «события/с ↔ limits.cpu») ──
+    rows_t = []
+    for i, n in enumerate(nums):
+        if not n or n["ops_s"] is None:
+            continue
+        tot = n["proc_s"] * n["dt"] + n["drops"] + n["shed"]
+        rows_t.append(f"{st[i]['name']}: {n['ops_s']:,.0f} оп/с → {n['proc_s']:,.0f} соб./с, дропы {100 * n['drops'] / max(n['drops'] + n['proc_s'] * n['dt'], 1):.1f}%, "
+                      f"сброс {100 * n['shed'] / max(tot, 1):.1f}%")
+    if rows_t:
+        lines.append(f"8.8.Т {role}: СПРАВКА — ёмкость без дропов {cap_d:,.0f} соб./с ({(cap_ops_d or 0):,.0f} оп/с); потолок обработки {peak:,.0f} соб./с; ступени: " + "; ".join(rows_t))
+
     # ── 8.8.Д ────────────────────────────────────────────────────────────────────────────────────────────────
     bad, n_gen = [], 0
     for s in st:

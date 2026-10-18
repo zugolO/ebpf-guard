@@ -166,6 +166,28 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 	// here. (Cancelled StrategyBlock sends leave the slot to the GC — shutdown.)
 	slot := types.GetEvent()
 	*slot = event
+	// Волна 8.8 (решение владельца 18.10): open и мутации файла (chmod/unlink/rename/
+	// truncate/rmdir) под перегрузкой не теряются так же, как read/write. Если bulk-очередь полна, такое
+	// событие уходит в очередь protected (без ожидания); теряется оно, только когда полны обе.
+	if !isHighPriority && fileEventMustKeep(&event) {
+		kept := false
+		select {
+		case p.lowPriorityCh <- slot:
+			kept = true
+		default:
+			select {
+			case p.highPriorityCh <- slot:
+				kept = true
+			default:
+			}
+		}
+		if kept {
+			if p.acceptedFn != nil {
+				p.acceptedFn(p.collector.Name(), isHighPriority)
+			}
+			return
+		}
+	}
 	sendEvent(ctx, targetCh, slot, p.strategy, droppedFunc)
 	if dropped {
 		types.PutEvent(slot)
@@ -183,4 +205,13 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 func (p *PriorityEventCollector) WithBackpressureStrategy(strategy BackpressureStrategy) Collector {
 	p.strategy = strategy
 	return p
+}
+
+// fileEventMustKeep reports whether a file event is an open or a mutation — the
+// operations the overload paths never discard (read/write are the volume).
+func fileEventMustKeep(e *types.Event) bool {
+	if e.Type != types.EventFileAccess || e.File == nil {
+		return false
+	}
+	return e.File.Op != 1 && e.File.Op != 2 // FILE_OP_READ, FILE_OP_WRITE
 }

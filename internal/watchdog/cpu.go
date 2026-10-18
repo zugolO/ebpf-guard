@@ -67,7 +67,13 @@ type CPUPressureWatcher struct {
 
 	checkInterval time.Duration
 	windowSize    int
-	numCPU        int // logged at startup; also used to scale thresholds when ScaleThresholdsByCPUCount is set
+	numCPU        int // logged at startup
+	// budgetCores is what thresholds are scaled by when ScaleThresholdsByCPUCount
+	// is set: the cgroup CPU quota when one applies, else numCPU (Р2, волна 8.8).
+	budgetCores   float64
+	budgetSource  string // "cgroup" or "numcpu"
+	shedProtected bool
+	fileShedRate  float64
 
 	// minDwell is the minimum time a shed level must be held before the
 	// watcher will step back down, even if the smoothed CPU% has already
@@ -122,6 +128,7 @@ type CPUPressureWatcher struct {
 	pressureLevel    prometheus.Gauge
 	pressurePercent  prometheus.Gauge
 	degradedFraction prometheus.Gauge
+	budgetGauge      prometheus.Gauge
 	transitionsTotal *prometheus.CounterVec
 }
 
@@ -163,6 +170,17 @@ type CPUConfig struct {
 	// ad-hoc CPUConfig literals (e.g. in tests) so existing fixed-threshold
 	// expectations are unaffected; DefaultCPUConfig sets it true.
 	ScaleThresholdsByCPUCount bool
+	// ShedProtected lets level 2 also cut syscall and network sampling (the
+	// protected classes). Default false (волна 8.8, Р3): protected events are
+	// never traded away by CPU pressure — Е6 lost them in the pod exactly when
+	// the agent was busiest. Level 2 then differs from level 1 only in its
+	// threshold and in the level gauge.
+	ShedProtected bool `mapstructure:"shed_protected"`
+	// FileShedRate is the file sampling multiplier applied at level >= 1
+	// (0 < r <= 1). Zero keeps the historical 0.1 (1 event in 10). With the
+	// proportional overload controller on, main raises it so this watcher stays
+	// a coarse backstop and does not by itself cut throughput below the plateau.
+	FileShedRate float64 `mapstructure:"file_shed_rate"`
 }
 
 // DefaultCPUConfig returns safe defaults: shed file collectors above 40% of
@@ -232,10 +250,15 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 	// (explicit or seeded above) — see ScaleThresholdsByCPUCount. Order
 	// matters: this must run after the CPULimitPercent seeding block, not
 	// before, so a seeded value is scaled too, not just an explicit one.
+	fileShedRate := config.FileShedRate
+	if fileShedRate <= 0 || fileShedRate > 1 {
+		fileShedRate = shedSamplingRate
+	}
+	budget, budgetSource := effectiveCPUs()
 	if config.ScaleThresholdsByCPUCount {
-		config.FileShedThreshold *= float64(numCPU)
-		config.AllShedThreshold *= float64(numCPU)
-		config.RecoveryThreshold *= float64(numCPU)
+		config.FileShedThreshold *= budget
+		config.AllShedThreshold *= budget
+		config.RecoveryThreshold *= budget
 	}
 
 	w := &CPUPressureWatcher{
@@ -248,6 +271,10 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 		windowSize:        config.WindowSize,
 		minDwell:          config.MinDwell,
 		numCPU:            numCPU,
+		budgetCores:       budget,
+		budgetSource:      budgetSource,
+		shedProtected:     config.ShedProtected,
+		fileShedRate:      fileShedRate,
 		cpuTimeFn:         readProcSelfCPUSeconds,
 		nowFn:             time.Now,
 		normalRates:       make(map[string]float64),
@@ -262,6 +289,10 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 		degradedFraction: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_cpu_degraded_fraction",
 			Help: "Fraction (0-1) of tracked watcher lifetime spent with sampling reduced (any shed level above normal). Lets an operator tell how much visibility was actually lost, rather than inferring it from log-grepping reduce/recover pairs.",
+		}),
+		budgetGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_cpu_watchdog_base_cores",
+			Help: "CPU cores the shedding thresholds are scaled by: the agent's cgroup CPU quota (cpu.max / cfs_quota_us) when set, else the host core count. In a pod with limits.cpu=500m this reads 0.5, not the node's cores.",
 		}),
 		// A gauge sampled at the end of a run cannot distinguish "one reduce
 		// under attack load, still shedding at the snapshot" from "flapping all
@@ -279,12 +310,13 @@ func NewCPUPressureWatcher(config CPUConfig, logger *slog.Logger, bpfController 
 	w.transitionsTotal.WithLabelValues("reduce").Add(0)
 	w.transitionsTotal.WithLabelValues("recover").Add(0)
 	w.pressureLevel.Set(cpuLevelNormal)
+	w.budgetGauge.Set(budget)
 	return w
 }
 
 // RegisterMetrics registers Prometheus metrics.
 func (w *CPUPressureWatcher) RegisterMetrics(reg prometheus.Registerer) error {
-	for _, c := range []prometheus.Collector{w.pressureLevel, w.pressurePercent, w.degradedFraction, w.transitionsTotal} {
+	for _, c := range []prometheus.Collector{w.pressureLevel, w.pressurePercent, w.degradedFraction, w.budgetGauge, w.transitionsTotal} {
 		if err := reg.Register(c); err != nil {
 			return err
 		}
@@ -320,6 +352,8 @@ func SetupCPUPressureWatcher(
 	go w.Start(ctx)
 	logger.Info("cpu pressure: adaptive load shedding enabled",
 		slog.Int("num_cpu", w.numCPU),
+		slog.Float64("base_cores", w.budgetCores),
+		slog.String("base_cores_source", w.budgetSource),
 		slog.Float64("file_shed_threshold_pct_of_one_core", w.fileShedThreshold),
 		slog.Float64("all_shed_threshold_pct_of_one_core", w.allShedThreshold),
 		slog.Float64("recovery_threshold_pct_of_one_core", w.recoveryThreshold),
@@ -516,7 +550,7 @@ func (w *CPUPressureWatcher) extrapolateNormalPct(cpuPct float64) float64 {
 	}
 	shedPortion := cpuPct * shedCPUFraction
 	remainder := cpuPct - shedPortion
-	return remainder + shedPortion/shedSamplingRate
+	return remainder + shedPortion/w.fileShedRate
 }
 
 // transitionLogGap is how long a gap since the last transition (of either
@@ -649,6 +683,9 @@ func (w *CPUPressureWatcher) enterFileShedMode() {
 // trades them away regardless of pressure level. Even L2 costs CPU budget
 // rather than detection coverage on the hooks that matter most.
 func (w *CPUPressureWatcher) enterAllShedMode() {
+	if !w.shedProtected {
+		return
+	}
 	w.shed("syscall")
 	w.shed("network")
 }
@@ -663,7 +700,11 @@ func (w *CPUPressureWatcher) shed(eventType string) {
 		return
 	}
 	w.normalRates[eventType] = 1.0
-	w.bpfController.SetSamplingRate(eventType, shedSamplingRate)
+	rate := shedSamplingRate
+	if eventType == "file" {
+		rate = w.fileShedRate
+	}
+	w.bpfController.SetSamplingRate(eventType, rate)
 }
 
 // recoverNormalMode restores every shed collector to full sampling.

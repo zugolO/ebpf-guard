@@ -721,6 +721,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 		WindowSize:                cp.WindowSize,
 		MinDwell:                  time.Duration(cp.MinDwell) * time.Second,
 		ScaleThresholdsByCPUCount: cp.ScaleByCPUCount,
+		// Волна 8.8, Р3: при включённом пропорциональном контроллере сброс по CPU —
+		// грубый запасной (0,5), а не 0,1 на все горячие процессы.
+		FileShedRate: func() float64 {
+			if cfg.BPF.OverloadShed.Enabled && os.Getenv("EBPF_GUARD_OVERLOAD_SHED") != "0" {
+				return cfg.BPF.OverloadShed.CPUFileShedRate
+			}
+			return 0
+		}(),
 		// Write through a named arbiter view so a CPU-pressure recovery
 		// restores the operator's configured base rate (not a hardcoded 1.0)
 		// and never overwrites another controller's active degradation (#304).
@@ -924,6 +932,21 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	if err := engine.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 		slog.Warn("correlation engine: failed to register Prometheus metrics",
 			slog.Any("error", err))
+	}
+
+	// Волна 8.8, Р5: горячий pid не останавливает bulk-диспетчер для остальных —
+	// полный канал воркера = дроп этого события с учётом, а не ожидание.
+	// EBPF_GUARD_BULK_DROP=0 возвращает прежнее ожидание (A/B лестницы Е6).
+	if os.Getenv("EBPF_GUARD_BULK_DROP") != "0" {
+		var lastHotLog atomic.Int64
+		engine.SetBulkDropOnCongestion(true, func(pid uint32) {
+			exporter.RecordEventDrop("ingest", "worker_full", false)
+			if now := time.Now().UnixNano(); now-lastHotLog.Load() > int64(10*time.Second) {
+				lastHotLog.Store(now)
+				slog.Warn("ingest worker congested: dropping bulk events of a hot pid instead of stalling the dispatcher",
+					slog.Uint64("pid", uint64(pid)))
+			}
+		})
 	}
 
 	// Волна 8.5, P1: таблица процессов в ядре. Открывается ДО коллекторов — пока общий
@@ -1671,6 +1694,7 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	var pathFilterCtrl atomic.Pointer[internalbpf.PathFilterController]
 	// Волна 8.1, item 11: источник счётчика ядерного сброса read/write без пути.
 	var unresolvedRWSource atomic.Pointer[collector.FileaccessCollector]
+	var hotShedSource atomic.Pointer[collector.FileaccessCollector]
 
 	// selfReportingCollectors records the collectors that publish their own
 	// up/down state through WithStatusReporter (finding №438). For these the
@@ -1947,6 +1971,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					}
 					if cfg.BPF.Sampling.Enabled {
 						enableSampling("fileaccess", fc.SamplingConfigMap(), cfg.BPF.Sampling, samplingMux, "file")
+						// Волна 8.8: порог «горячего» процесса и источник счётчиков сброса.
+						if err := fc.SetHotThreshold(cfg.BPF.Sampling.HotPIDThreshold); err != nil {
+							slog.Warn("fileaccess: hot-pid threshold unavailable (kernel default applies)", slog.Any("error", err))
+						} else {
+							hotShedSource.Store(fc)
+						}
 					}
 					if cfg.Correlator.ObserverExclude.Enabled {
 						observerRoot, observerCounters := fc.ObserverFilterMaps()
@@ -2650,6 +2680,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	exporter.EventsDropped.WithLabelValues("fileaccess", "path_denylist")
 	var lastPathFilterDropTotal uint64
 	var lastUnresolvedRW uint64
+	var lastHotSampled, lastHotShed uint64
+	lastShedByTGID := map[uint32]uint64{}
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -2708,6 +2740,23 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 					} else if delta := total - lastPathFilterDropTotal; delta > 0 {
 						exporter.RecordDroppedN("fileaccess", "path_denylist", delta)
 						lastPathFilterDropTotal = total
+					}
+				}
+
+				if fc := hotShedSource.Load(); fc != nil {
+					logHotShedByTGID(fc, lastShedByTGID)
+					if sampled, shed, err := fc.HotShedCounts(); err == nil {
+						if sampled < lastHotSampled || shed < lastHotShed {
+							lastHotSampled, lastHotShed = sampled, shed
+						} else {
+							if d := sampled - lastHotSampled; d > 0 {
+								exporter.FileHotShed.WithLabelValues("sampled").Add(float64(d))
+							}
+							if d := shed - lastHotShed; d > 0 {
+								exporter.FileHotShed.WithLabelValues("shed").Add(float64(d))
+							}
+							lastHotSampled, lastHotShed = sampled, shed
+						}
 					}
 				}
 
@@ -2970,12 +3019,47 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	// counters themselves — not by whether sampling was reduced, which is what
 	// let run #4 report visibility_reduced:false while losing 52% of network
 	// events.
-	const degradationThreshold = 5 * time.Second
+	// Волна 8.8, Р3: пропорциональный сброс bulk в ядре по заполнению очередей и
+	// темпу потерь. Протектед-классы не трогает. EBPF_GUARD_OVERLOAD_SHED=0
+	// выключает (A/B лестницы Е6).
+	var overload *watchdog.OverloadShedder
+	if cfg.BPF.OverloadShed.Enabled && os.Getenv("EBPF_GUARD_OVERLOAD_SHED") != "0" {
+		ocfg := watchdog.DefaultOverloadConfig()
+		if cfg.BPF.OverloadShed.MaxDivisor >= 2 {
+			ocfg.MaxDivisor = cfg.BPF.OverloadShed.MaxDivisor
+		}
+		overload = watchdog.NewOverloadShedder(ocfg, slog.Default(), samplingMux.Controller("overload"), watchdog.OverloadSignals{
+			BulkDropped:  exporter.LowPriorityDropTotal,
+			BulkAccepted: lowPriorityAccepted.Load,
+			Fill: func() float64 {
+				f := 0.0
+				if c := cap(lowPriorityEventCh); c > 0 {
+					f = float64(len(lowPriorityEventCh)) / float64(c)
+				}
+				for i := 0; i < engine.IngestWorkerCount(); i++ {
+					if l, c := engine.IngestWorkerQueueLenCap(i); c > 0 {
+						if wf := float64(l) / float64(c); wf > f {
+							f = wf
+						}
+					}
+				}
+				return f
+			},
+		})
+		if err := overload.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
+			slog.Warn("overload: failed to register metrics", slog.Any("error", err))
+		}
+		go overload.Start(ctx)
+		slog.Info("overload: proportional bulk shedding enabled (file sampling by queue pressure, hot processes only)",
+			slog.Float64("max_divisor", ocfg.MaxDivisor), slog.Uint64("hot_pid_threshold", uint64(cfg.BPF.Sampling.HotPIDThreshold)))
+	}
+
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		var degraded bool
 		var prevHiDrop, prevLoDrop, prevHiOK, prevLoOK int64
+		var hiTracker, loTracker lossTracker
 		for {
 			select {
 			case <-ctx.Done():
@@ -2994,14 +3078,21 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				exporter.EventsDroppedFraction.WithLabelValues("bulk").
 					Set(lossFraction(loDrop-prevLoDrop, loOK-prevLoOK))
 
-				// 5.9.2a: both hops (ringbuf_to_router, in each collector's
-				// readLoop, and router_to_queue, in recordEventDrop above) feed
-				// exporter.RecordEventDrop, so a drop at either one marks these
-				// timestamps — not just router_to_queue as before.
-				lastHiDrop := exporter.LastHighPriorityDropTime()
-				lastLoDrop := exporter.LastLowPriorityDropTime()
-				hiDegraded := lastHiDrop > 0 && time.Since(time.Unix(0, lastHiDrop)) < degradationThreshold
-				loDegraded := lastLoDrop > 0 && time.Since(time.Unix(0, lastLoDrop)) < degradationThreshold
+				// 8.8 Р1: degradation follows the loss RATE over a sliding 10 s
+				// window (see visibility.go), and the window share is published
+				// as its own series next to the per-second one.
+				now := time.Now()
+				hiWD, hiWA := hiTracker.observe(hiDrop-prevHiDrop, hiOK-prevHiOK)
+				loWD, loWA := loTracker.observe(loDrop-prevLoDrop, loOK-prevLoOK)
+				exporter.EventsDroppedFractionWindow.WithLabelValues("protected").Set(lossFraction(hiWD, hiWA))
+				exporter.EventsDroppedFractionWindow.WithLabelValues("bulk").Set(lossFraction(loWD, loWA))
+				hiDegraded := hiTracker.degraded(now, true, hiWD, hiWA)
+				// Сброс в ядре — потеря объёма по определению: пока контроллер
+				// сбрасывает, bulk читается как degraded, даже если дропов уже нет.
+				// То же для сброса по CPU (уровень >= 1 режет file у горячих процессов).
+				loDegraded := loTracker.degraded(now, false, loWD, loWA) ||
+					(overload != nil && overload.Active()) ||
+					(cpuWatcher != nil && cpuWatcher.PressureLevel() > 0)
 				nowDegraded := hiDegraded || loDegraded
 
 				var queues []string
@@ -3032,6 +3123,8 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 							slog.Int64("protected_dropped_in_window", hiDrop-prevHiDrop),
 							slog.Int64("bulk_dropped_since_start", loDrop),
 							slog.Int64("bulk_dropped_in_window", loDrop-prevLoDrop),
+							slog.Float64("protected_loss_fraction_10s", lossFraction(hiWD, hiWA)),
+							slog.Float64("bulk_loss_fraction_10s", lossFraction(loWD, loWA)),
 							slog.Any("dropped_by_collector_and_hop", exporter.DropBreakdownSnapshot()))
 					} else {
 						slog.Info("visibility restored: all priority queues flowing normally",
@@ -5561,4 +5654,50 @@ func mustMuteFamilyCost(family string) correlator.MuteFamilyCost {
 		panic("no recorded cost for mute family " + family)
 	}
 	return c
+}
+
+
+// logHotShedByTGID turns the kernel's per-process shed counters into a journal
+// line per process (comm, tgid, shed since the last look, shed in total) and
+// the by-comm metric — shedding must never be mute (волна 8.8). At most
+// maxHotShedLines lines per call; the rest are summed into one line.
+func logHotShedByTGID(fc *collector.FileaccessCollector, last map[uint32]uint64) {
+	const maxHotShedLines = 10
+	entries, err := fc.HotShedByTGID()
+	if err != nil {
+		return
+	}
+	seen := make(map[uint32]struct{}, len(entries))
+	lines, more, moreTotal := 0, 0, uint64(0)
+	for _, e := range entries {
+		seen[e.TGID] = struct{}{}
+		prev := last[e.TGID]
+		last[e.TGID] = e.Shed
+		if e.Shed < prev { // the kernel record was recreated for a reused tgid
+			prev = 0
+		}
+		delta := e.Shed - prev
+		if delta == 0 {
+			continue
+		}
+		exporter.RecordFileHotShed(e.Comm, float64(delta))
+		if lines >= maxHotShedLines {
+			more++
+			moreTotal += delta
+			continue
+		}
+		lines++
+		slog.Warn("file sampler shed events of a hot process",
+			slog.String("comm", e.Comm), slog.Uint64("tgid", uint64(e.TGID)),
+			slog.Uint64("shed", delta), slog.Uint64("shed_total", e.Shed))
+	}
+	if more > 0 {
+		slog.Warn("file sampler shed events of more hot processes",
+			slog.Int("processes", more), slog.Uint64("shed", moreTotal))
+	}
+	for tgid := range last { // forget records the kernel has evicted
+		if _, ok := seen[tgid]; !ok {
+			delete(last, tgid)
+		}
+	}
 }

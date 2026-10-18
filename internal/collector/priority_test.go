@@ -347,3 +347,55 @@ func TestPriorityRouting_PooledSlotsKeepEventIdentity(t *testing.T) {
 	wg.Wait()
 	assert.Zero(t, bad.Load(), "events corrupted by slot reuse")
 }
+
+func fileEv(op uint8) types.Event {
+	return types.Event{Type: types.EventFileAccess, File: &types.FileEvent{Op: op}}
+}
+
+// Волна 8.8: при полной bulk-очереди open и мутации файла уходят в protected-очередь,
+// read/write — теряются (они и есть объём).
+func TestPriorityRouting_FullBulkQueueKeepsOpenAndMutations(t *testing.T) {
+	hi := make(chan *types.Event, 64)
+	lo := make(chan *types.Event, 1) // never drained
+
+	events := []types.Event{fileEv(1)} // read fills the one slot
+	for i := 0; i < 20; i++ {
+		events = append(events, fileEv(1)) // read: overflow, dropped
+	}
+	events = append(events, fileEv(0), fileEv(4), fileEv(5)) // open, unlink, rename: kept via hi
+	events = append(events, fileEv(2))                       // write: dropped
+
+	var loDrops atomic.Int64
+	fc := newFakeCollector("keep", events...)
+	p := NewPriorityEventCollector(fc, hi, lo, StrategyDrop, func(_ string, high bool) {
+		if !high {
+			loDrops.Add(1)
+		}
+	}, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = p.Start(ctx, nil) }()
+	select {
+	case <-fc.sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("collector did not emit events in time")
+	}
+	require.Eventually(t, func() bool { return len(hi) == 3 }, 2*time.Second, 5*time.Millisecond,
+		"open+unlink+rename must reach the protected queue, got %d", len(hi))
+	for i := 0; i < 3; i++ {
+		e := <-hi
+		assert.NotEqual(t, uint8(1), e.File.Op)
+		assert.NotEqual(t, uint8(2), e.File.Op)
+	}
+	assert.EqualValues(t, 21, loDrops.Load(), "all reads/writes beyond the slot are dropped (20 reads + 1 write)")
+}
+
+func TestFileEventMustKeep(t *testing.T) {
+	for op, want := range map[uint8]bool{0: true, 1: false, 2: false, 3: true, 4: true, 5: true, 6: true, 7: true} {
+		e := fileEv(op)
+		assert.Equal(t, want, fileEventMustKeep(&e), "op %d", op)
+	}
+	n := types.Event{Type: types.EventTCPConnect}
+	assert.False(t, fileEventMustKeep(&n))
+	assert.False(t, fileEventMustKeep(&types.Event{Type: types.EventFileAccess}))
+}

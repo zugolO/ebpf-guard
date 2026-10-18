@@ -86,7 +86,7 @@ func TestCPUWatcher_ScaleThresholdsByCPUCount(t *testing.T) {
 		WindowSize:                1,
 		ScaleThresholdsByCPUCount: true,
 	}, nil, nil)
-	n := float64(w.numCPU)
+	n := w.budgetCores
 	assert.InDelta(t, 40.0*n, w.fileShedThreshold, 0.001)
 	assert.InDelta(t, 70.0*n, w.allShedThreshold, 0.001)
 	assert.InDelta(t, 20.0*n, w.recoveryThreshold, 0.001)
@@ -98,7 +98,7 @@ func TestCPUWatcher_ScaleThresholdsByCPUCount_AppliesToSeededValues(t *testing.T
 		WindowSize:                1,
 		ScaleThresholdsByCPUCount: true,
 	}, nil, nil)
-	n := float64(w.numCPU)
+	n := w.budgetCores
 	assert.InDelta(t, 12.0*n, w.fileShedThreshold, 0.001)
 	assert.InDelta(t, 21.0*n, w.allShedThreshold, 0.001) // 12 * 7/4, then * n
 	assert.InDelta(t, 6.0*n, w.recoveryThreshold, 0.001) // 12 * 0.5, then * n
@@ -121,7 +121,7 @@ func TestCPUWatcher_RegisterMetrics(t *testing.T) {
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	require.Len(t, families, 4)
+	require.Len(t, families, 5)
 	names := make([]string, 0, len(families))
 	for _, f := range families {
 		names = append(names, f.GetName())
@@ -155,6 +155,7 @@ func TestCPUWatcher_EscalateAndRecover(t *testing.T) {
 		RecoveryThreshold: 9,
 		WindowSize:        1,
 		MinDwell:          time.Nanosecond,
+		ShedProtected:     true, // legacy level-2 behaviour; the default no longer cuts protected
 	}
 	w, fc := newTestWatcher(t, cfg, bpf)
 	interval := time.Second
@@ -486,7 +487,7 @@ func TestSetupCPUPressureWatcher_EnabledRegistersAndRuns(t *testing.T) {
 	// Metrics registered (4 since волна 5.3 added the transition counter).
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	assert.Len(t, families, 4)
+	assert.Len(t, families, 5)
 
 	// Let the background goroutine tick at least once, then stop it cleanly.
 	time.Sleep(50 * time.Millisecond)
@@ -805,4 +806,27 @@ func TestCPUWatcher_TransitionsCounted(t *testing.T) {
 	assert.Equal(t, 1.0, testTransitionCount(t, w, "reduce"))
 	assert.Equal(t, 1.0, testTransitionCount(t, w, "recover"),
 		"one spike must produce exactly one reduce/recover pair — the shape the gate scores as PASS")
+}
+
+// Волна 8.8, Р3: level 2 does not touch the protected classes by default, and
+// FileShedRate sets the file multiplier.
+func TestCPUWatcher_Level2LeavesProtectedAlone(t *testing.T) {
+	bpf := newMockBPFController()
+	cfg := CPUConfig{
+		CheckInterval:     time.Second,
+		FileShedThreshold: 15,
+		AllShedThreshold:  25,
+		RecoveryThreshold: 9,
+		WindowSize:        1,
+		MinDwell:          time.Nanosecond,
+		FileShedRate:      0.5,
+	}
+	w, fc := newTestWatcher(t, cfg, bpf)
+	w.checkCPU()
+	fc.stepFor(30, time.Second)
+	w.checkCPU()
+	assert.Equal(t, cpuLevelAllShed, w.PressureLevel())
+	assert.Equal(t, 0.5, bpf.GetSamplingRate("file"))
+	assert.Equal(t, 0.0, bpf.GetSamplingRate("syscall"), "protected untouched")
+	assert.Equal(t, 0.0, bpf.GetSamplingRate("network"), "protected untouched")
 }

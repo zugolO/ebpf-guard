@@ -35,6 +35,9 @@ type FileaccessMaps struct {
 	SamplingConfig           *ebpf.Map `ebpf:"sampling_config"`
 	RwUnresolvedCfg          *ebpf.Map `ebpf:"rw_unresolved_cfg"`
 	RwUnresolvedDrops        *ebpf.Map `ebpf:"rw_unresolved_drops"`
+	FileHotMap               *ebpf.Map `ebpf:"file_hot_map"`
+	FileHotCfg               *ebpf.Map `ebpf:"file_hot_cfg"`
+	FileShedCounters         *ebpf.Map `ebpf:"file_shed_counters"`
 }
 
 // FileaccessPrograms holds the BPF programs exported by bpf/fileaccess.bpf.c.
@@ -171,6 +174,15 @@ func (o *FileaccessObjects) Close() error {
 	}
 	if o.RwUnresolvedDrops != nil {
 		errs = append(errs, o.RwUnresolvedDrops.Close())
+	}
+	if o.FileHotMap != nil {
+		errs = append(errs, o.FileHotMap.Close())
+	}
+	if o.FileHotCfg != nil {
+		errs = append(errs, o.FileHotCfg.Close())
+	}
+	if o.FileShedCounters != nil {
+		errs = append(errs, o.FileShedCounters.Close())
 	}
 	if o.ObserverExcludedCounters != nil {
 		errs = append(errs, o.ObserverExcludedCounters.Close())

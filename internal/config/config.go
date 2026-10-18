@@ -840,6 +840,9 @@ type BPFConfig struct {
 	// volume than the syscall allowlist filter, so file events need a base
 	// rate well below 1.0 even under normal load.
 	Sampling SamplingConfig `mapstructure:"sampling"`
+
+	// OverloadShed configures proportional bulk shedding by queue pressure.
+	OverloadShed OverloadShedConfig `mapstructure:"overload_shed"`
 }
 
 // SamplingConfig configures the BPF-side static sampling rates (1 in N events).
@@ -854,6 +857,28 @@ type SamplingConfig struct {
 	// writes fire on every syscall system-wide, so the default is well below
 	// 1 to avoid flooding the event channel. Default: 50.
 	FileRate uint32 `mapstructure:"file_rate"`
+	// HotPIDThreshold (волна 8.8): when the file sampler is active (FileRate > 1,
+	// or the overload controller / CPU watcher lowered the file rate), only
+	// "hot" processes — more than this many open/read/write events per 100 ms —
+	// are sampled; every other process keeps all its events, and mutations
+	// (chmod/unlink/rename/truncate/rmdir) are never sampled. Default: 300
+	// (≈ 3 000 events/s per process; a process paced at 100 events/s that
+	// catches up after being starved stays below it).
+	HotPIDThreshold uint32 `mapstructure:"hot_pid_threshold"`
+}
+
+// OverloadShedConfig configures the proportional bulk-shedding controller
+// (волна 8.8, Р3): it lowers the file sampling rate in the kernel while the
+// bulk queue is filling or bulk events are being dropped, and raises it back
+// after a calm period. Protected classes are never touched.
+type OverloadShedConfig struct {
+	// Enabled turns the controller on. Default: true.
+	Enabled bool `mapstructure:"enabled"`
+	// MaxDivisor caps the 1-in-N divisor. Default: 64.
+	MaxDivisor float64 `mapstructure:"max_divisor"`
+	// CPUFileShedRate is the file multiplier the CPU watcher applies at level
+	// >= 1 while the controller is on (it stays a coarse backstop). Default: 0.5.
+	CPUFileShedRate float64 `mapstructure:"cpu_file_shed_rate"`
 }
 
 // AdaptiveLoadConfig configures ring-buffer-load-based adaptive BPF sampling.
@@ -2247,6 +2272,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.sampling.syscall_rate", 1)
 	v.SetDefault("bpf.sampling.network_rate", 1)
 	v.SetDefault("bpf.sampling.file_rate", 50)
+	v.SetDefault("bpf.sampling.hot_pid_threshold", 300)
+	v.SetDefault("bpf.overload_shed.enabled", true)
+	v.SetDefault("bpf.overload_shed.max_divisor", 64)
+	v.SetDefault("bpf.overload_shed.cpu_file_shed_rate", 0.5)
 	v.SetDefault("bpf.btf_path", "")
 	v.SetDefault("bpf.btf_hub_enabled", true)
 	v.SetDefault("bpf.btf_hub_cache", "/var/lib/ebpf-guard/btf")

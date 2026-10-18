@@ -252,6 +252,17 @@ var (
 		[]string{"priority"},
 	)
 
+	// EventsDroppedFractionWindow is the dropped share over a sliding 10 s window
+	// (волна 8.8, Р1): the per-second series above jitters, this is the figure
+	// the degraded verdict and the 8.8.1 criterion are judged on.
+	EventsDroppedFractionWindow = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ebpf_guard_events_dropped_fraction_10s",
+			Help: "Fraction of events dropped over the last 10 s (0-1), by queue priority",
+		},
+		[]string{"priority"},
+	)
+
 	// EventsMalformed counts ring-buffer records that failed a wire-format
 	// sanity check before being handed to a collector's normal parse path, by
 	// collector and reason.
@@ -993,6 +1004,53 @@ var FileUnresolvedRWFiltered = promauto.NewCounter(
 		Help: "read/write events dropped in the kernel because the fd had no resolved path",
 	},
 )
+
+// FileHotShed counts file events of "hot" processes (above the per-tgid rate
+// threshold) handled by the kernel 1-in-N sampler while it is active (волна 8.8,
+// Р3/Р6): outcome="sampled" — let through, outcome="shed" — dropped in the
+// kernel. Like FileUnresolvedRWFiltered it is a deliberate shedding decision,
+// not a reason of events_dropped_total; the shed share is what the operator
+// reads next to the degraded flag.
+var FileHotShed = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_file_hot_shed_total",
+		Help: "File events of hot processes seen by the in-kernel sampler while active, by outcome (sampled=passed, shed=dropped)",
+	},
+	[]string{"outcome"},
+)
+
+// fileHotShedComms bounds the comm label cardinality of FileHotShedByComm.
+var (
+	fileHotShedCommsMu sync.Mutex
+	fileHotShedComms   = map[string]struct{}{}
+)
+
+const fileHotShedMaxComms = 32
+
+// FileHotShedByComm counts file events the in-kernel sampler shed, by process
+// name (волна 8.8: shedding is never mute). Names beyond fileHotShedMaxComms
+// fold into "other".
+var FileHotShedByComm = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ebpf_guard_file_hot_shed_by_comm_total",
+		Help: "File events shed in the kernel by the hot-process sampler, by comm (at most 32 names, rest as other)",
+	},
+	[]string{"comm"},
+)
+
+// RecordFileHotShed adds n shed events of the process named comm.
+func RecordFileHotShed(comm string, n float64) {
+	fileHotShedCommsMu.Lock()
+	if _, ok := fileHotShedComms[comm]; !ok {
+		if len(fileHotShedComms) >= fileHotShedMaxComms {
+			comm = "other"
+		} else {
+			fileHotShedComms[comm] = struct{}{}
+		}
+	}
+	fileHotShedCommsMu.Unlock()
+	FileHotShedByComm.WithLabelValues(comm).Add(n)
+}
 
 // RecordFileHookAttach records one attach outcome for a file-collector hook.
 func RecordFileHookAttach(hook, result string) {

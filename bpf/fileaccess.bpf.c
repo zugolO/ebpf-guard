@@ -235,6 +235,152 @@ static __always_inline bool fd_path_lookup(__u32 tgid, __u32 fd, struct fd_path 
 	return true;
 }
 
+
+/*
+ * Волна 8.8, Р3/Р6: сброс file-событий в ядре ТОЛЬКО у «горячих» процессов.
+ *
+ * Сэмплинг по приказу сторожа (file_rate = N > 1) раньше резал ВСЕ file-события
+ * равномерно — и вместе с шумом терял события правил: Е6 под нагрузкой в поде
+ * дал recall 13/16, не пойманы три атаки с файловым путём. Вывод множества
+ * путей из правил (как F1 для аргументов) для file не годится: префиксы
+ * правил накрывают /etc, /proc, /tmp, /var, /home, а треть правил (contains,
+ * suffix, regex без якоря) префикса вообще не имеет — защищать пришлось бы
+ * почти всё или почти ничего.
+ *
+ * Поэтому критерий другой — ТЕМП ПРОЦЕССА. Процесс, давший за окно в 100 мс
+ * больше file_hot_cfg.threshold событий open/read/write, «горячий»: только
+ * его события берутся 1 из N. Процессы с обычным темпом (атака, контрольные
+ * процессы, подавляющее большинство демонов) идут целиком при любом N.
+ * open (решение владельца 18.10) и мутации (chmod/unlink/rename/truncate/rmdir) не сбрасываются никогда: их
+ * мало, а правило на них — прямое свидетельство. Пока file_rate == 1 или
+ * сэмплинг выключен, функция выходит после одного чтения конфига: цена на
+ * idle — один lookup, как и у should_sample до этого.
+ *
+ * Счёт ведёт по tgid LRU-карта; гонка на count между потоками одного процесса
+ * допустима (порог приблизительный). file_shed_counters: [0] — горячие
+ * события, пропущенные счётчиком 1-из-N; [1] — сброшенные.
+ */
+#define FILE_HOT_WINDOW_NS (100ULL * 1000 * 1000)
+#define FILE_HOT_THRESHOLD_DEFAULT 300
+
+struct file_hot_state {
+	__u64 win_start;
+	__u64 shed;     /* сколько событий этого tgid сброшено сэмплером за жизнь записи */
+	__u32 count;
+	__u32 _pad;
+	char comm[16];  /* comm на момент появления записи — для строки журнала по tgid */
+};
+
+struct file_hot_cfg_t {
+	__u32 threshold; /* событий open/read/write на tgid за окно, выше — «горячий» */
+	__u32 _pad;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u32);
+	__type(value, struct file_hot_state);
+} file_hot_map SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct file_hot_cfg_t);
+} file_hot_cfg SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 2);
+	__type(key, __u32);
+	__type(value, __u64);
+} file_shed_counters SEC(".maps");
+
+static __always_inline void file_shed_count(__u32 idx)
+{
+	__u64 *cnt = bpf_map_lookup_elem(&file_shed_counters, &idx);
+
+	if (cnt)
+		__sync_fetch_and_add(cnt, 1);
+}
+
+/* true — событие идёт дальше; false — сброшено сэмплером у горячего процесса. */
+static __always_inline bool file_shed_pass(void)
+{
+	struct sampling_config *scfg;
+	struct file_hot_state *st;
+	struct file_hot_state fresh = {};
+	struct file_hot_cfg_t *hcfg;
+	__u32 zero = 0;
+	__u32 tgid;
+	__u32 thr = FILE_HOT_THRESHOLD_DEFAULT;
+	__u32 cnt;
+	__u64 now;
+
+	scfg = bpf_map_lookup_elem(&sampling_config, &zero);
+	if (!scfg || !scfg->enabled || scfg->file_rate == 1)
+		return true;
+	if (scfg->file_rate == 0)
+		return false; /* оператор выключил file-события */
+
+	tgid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	now = bpf_ktime_get_ns();
+	st = bpf_map_lookup_elem(&file_hot_map, &tgid);
+	if (!st) {
+		fresh.win_start = now;
+		fresh.count = 1;
+		bpf_get_current_comm(&fresh.comm, sizeof(fresh.comm));
+		bpf_map_update_elem(&file_hot_map, &tgid, &fresh, BPF_ANY);
+		return true;
+	}
+	if (now - st->win_start > FILE_HOT_WINDOW_NS) {
+		st->win_start = now;
+		st->count = 1;
+		return true;
+	}
+	hcfg = bpf_map_lookup_elem(&file_hot_cfg, &zero);
+	if (hcfg && hcfg->threshold)
+		thr = hcfg->threshold;
+	/* XADD с возвращаемым значением -mcpu=v1 не умеет: счёт неатомарный,
+	 * гонка потоков одного процесса лишь занижает счёт (порог приблизительный). */
+	cnt = st->count + 1;
+	st->count = cnt;
+	if (cnt <= thr)
+		return true;
+
+	/* горячий: 1 из N по общему счётчику сэмплера */
+	if (should_sample(EVENT_TYPE_FILE_ACCESS, 0)) {
+		file_shed_count(0);
+		return true;
+	}
+	file_shed_count(1);
+	__sync_fetch_and_add(&st->shed, 1);
+	return false;
+}
+
+/* open никогда не сбрасывается сэмплером (решение владельца 18.10): сбрасываются только
+ * повторные read/write по fd. Оператор мог выключить file целиком (file_rate == 0). */
+static __always_inline bool file_disabled_by_operator(void)
+{
+	struct sampling_config *scfg;
+	__u32 zero = 0;
+
+	scfg = bpf_map_lookup_elem(&sampling_config, &zero);
+	return scfg && scfg->enabled && scfg->file_rate == 0;
+}
+
+/* Резерв кольца для file-события; сэмплинг уже решён file_shed_pass(). */
+#define reserve_file_event() \
+	({ \
+		struct event *__e = bpf_ringbuf_reserve(&events, sizeof(struct event), 0); \
+		if (__e) \
+			record_event_emitted(); \
+		else \
+			record_ringbuf_full(); \
+		__e; \
+	})
+
 /*
  * Tracepoint for sys_enter_openat — capture filename into scratch map.
  * args[0]=dfd, args[1]=filename, args[2]=flags, args[3]=mode.
@@ -281,7 +427,10 @@ int trace_open(struct trace_event_raw_sys_enter *ctx)
 	if (observer_should_drop())
 		return 0;
 
-	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
+	if (file_disabled_by_operator())
+		return 0;
+
+	e = reserve_file_event();
 	if (!e)
 		return 0;
 
@@ -367,7 +516,8 @@ static __always_inline void file_op_emit(const char *path, __u8 truncated, __u8 
 	if (observer_should_drop())
 		return;
 
-	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
+	/* Волна 8.8: мутации не сбрасываются сэмплером (см. file_shed_pass). */
+	e = reserve_file_event();
 	if (!e)
 		return;
 
@@ -790,6 +940,11 @@ int trace_read(struct trace_event_raw_sys_enter *ctx)
 			return 0;
 	}
 
+	/* Волна 8.8: решение сэмплера ДО поиска fd и копии пути — у сброшенного
+	 * события не остаётся работы в ядре. */
+	if (!file_shed_pass())
+		return 0;
+
 	pid_tgid = bpf_get_current_pid_tgid();
 	tgid = (__u32)(pid_tgid >> 32);
 
@@ -821,7 +976,7 @@ int trace_read(struct trace_event_raw_sys_enter *ctx)
 	if (observer_should_drop())
 		return 0;
 
-	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
+	e = reserve_file_event();
 	if (!e)
 		return 0;
 
@@ -867,6 +1022,11 @@ int trace_write(struct trace_event_raw_sys_enter *ctx)
 			return 0;
 	}
 
+	/* Волна 8.8: решение сэмплера ДО поиска fd и копии пути — у сброшенного
+	 * события не остаётся работы в ядре. */
+	if (!file_shed_pass())
+		return 0;
+
 	pid_tgid = bpf_get_current_pid_tgid();
 	tgid = (__u32)(pid_tgid >> 32);
 
@@ -890,7 +1050,7 @@ int trace_write(struct trace_event_raw_sys_enter *ctx)
 	if (observer_should_drop())
 		return 0;
 
-	e = reserve_event_with_sampling(EVENT_TYPE_FILE_ACCESS, 0);
+	e = reserve_file_event();
 	if (!e)
 		return 0;
 

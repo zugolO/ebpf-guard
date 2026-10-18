@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -305,4 +307,122 @@ func TestIngestAsyncPriority_DriftIdentityVsLegacy(t *testing.T) {
 	require.NotEmpty(t, legacy["drift_file"], "novel file signatures must alert, otherwise the test proves nothing")
 	require.NotEmpty(t, legacy["drift_net"], "novel network signatures must alert, otherwise the test proves nothing")
 	assert.Equal(t, legacy, split)
+}
+
+// Волна 8.8, Р5: a hot pid whose worker channel is full must not stop the bulk
+// dispatcher for pids on other workers; its own surplus is dropped and counted.
+// The engine is assembled by hand with NO consumer goroutines, so the channels
+// fill deterministically.
+func TestIngestAsyncPriority_HotWorkerDoesNotStallOthers(t *testing.T) {
+	mk := func() *workerState {
+		return &workerState{ch: make(chan *workerTask, 2), chHi: make(chan *workerTask, 2)}
+	}
+	var dropped int
+	ce := &CorrelationEngine{ingestPool: []*workerState{mk(), mk()}, ingestMask: 1}
+	ce.SetBulkDropOnCongestion(true, func(uint32) { dropped++ })
+
+	ctx := context.Background()
+	start := time.Now()
+	const burst = 500
+	fe := &types.FileEvent{Op: 1} // read: open и мутации под перегрузкой не теряются
+	fe.Filename = "/x"
+	for i := 0; i < burst; i++ {
+		// pid 4 → worker 0 (never drained), pid 5 → worker 1 (also never
+		// drained, but only 2 events are sent to it before we stop).
+		ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 4, File: fe}, false)
+	}
+	elapsed := time.Since(start)
+	assert.Less(t, elapsed, 2*time.Second, "dispatcher stalled on the hot worker")
+	assert.Equal(t, burst-2, dropped, "all but the channel's capacity must be dropped")
+	assert.Equal(t, uint64(burst-2), ce.IngestBulkDropped(0))
+
+	// The other worker is untouched and still accepts without waiting.
+	t0 := time.Now()
+	ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 5, File: fe}, false)
+	assert.Less(t, time.Since(t0), 100*time.Millisecond)
+	assert.Equal(t, uint64(0), ce.IngestBulkDropped(1))
+	assert.Equal(t, 1, len(ce.ingestPool[1].ch))
+}
+
+// With drop-on-congestion off the old behaviour stays: a full channel blocks
+// until the context is cancelled.
+func TestIngestAsyncPriority_DropOffKeepsBlocking(t *testing.T) {
+	ce := &CorrelationEngine{ingestPool: []*workerState{{ch: make(chan *workerTask, 1), chHi: make(chan *workerTask, 1)}}, ingestMask: 0}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	fe := &types.FileEvent{}
+	ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 1, File: fe}, false)
+	t0 := time.Now()
+	ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 1, File: fe}, false)
+	assert.GreaterOrEqual(t, time.Since(t0), 100*time.Millisecond)
+	assert.Equal(t, uint64(0), ce.IngestBulkDropped(0))
+}
+
+// Волна 8.8, Р5/8.8.4: a light pid sharing a congested worker with a hot pid keeps
+// its events; only the hot pid's surplus is dropped.
+func TestIngestAsyncPriority_LightPidSurvivesOnHotWorker(t *testing.T) {
+	w := &workerState{ch: make(chan *workerTask, 8), chHi: make(chan *workerTask, 8)}
+	ce := &CorrelationEngine{ingestPool: []*workerState{w}, ingestMask: 0}
+	var dropsByPID sync.Map
+	var lightDropped atomic.Int64
+	ce.SetBulkDropOnCongestion(true, func(pid uint32) {
+		if pid == 200 {
+			lightDropped.Add(1)
+		}
+		dropsByPID.Store(pid, true)
+	})
+
+	// A slow consumer: one task per 200 µs frees slots the light pid waits for.
+	done := make(chan struct{})
+	var consumed int
+	go func() {
+		defer close(done)
+		for t := range w.ch {
+			consumed++
+			_ = t
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+
+	ctx := context.Background()
+	fe := &types.FileEvent{Op: 1}
+	var lightSent int
+	for i := 0; i < 3000; i++ {
+		ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 100, File: fe}, false) // hot
+		if i%50 == 0 {
+			ce.IngestAsyncPriority(ctx, types.Event{Type: types.EventFileAccess, PID: 200, File: fe}, false) // light
+			lightSent++
+		}
+	}
+	close(w.ch)
+	<-done
+
+	assert.Greater(t, ce.IngestBulkDropped(0), uint64(0), "hot pid surplus must be dropped")
+	// Every drop belongs to the hot pid, so consumed >= everything that was not dropped
+	// and the light pid's lightSent events are all among the consumed ones.
+	assert.Equal(t, 3000+lightSent-int(ce.IngestBulkDropped(0)), consumed, "accounting: sent - dropped == consumed")
+	assert.Equal(t, int64(0), lightDropped.Load(), "the light pid must never be dropped")
+}
+
+// Волна 8.8: у доминирующего pid на полном bulk-канале open уходит в protected-канал
+// воркера, read теряется.
+func TestIngestAsyncPriority_HeavyPidOpenSurvivesViaProtectedChannel(t *testing.T) {
+	w := &workerState{ch: make(chan *workerTask, 2), chHi: make(chan *workerTask, 8)}
+	ce := &CorrelationEngine{ingestPool: []*workerState{w}, ingestMask: 0}
+	var dropped int
+	ce.SetBulkDropOnCongestion(true, func(uint32) { dropped++ })
+	ctx := context.Background()
+	ev := func(op uint8) types.Event {
+		return types.Event{Type: types.EventFileAccess, PID: 7, File: &types.FileEvent{Op: op}}
+	}
+	for i := 0; i < 10; i++ {
+		ce.IngestAsyncPriority(ctx, ev(1), false) // reads fill bulk then drop
+	}
+	before := dropped
+	ce.IngestAsyncPriority(ctx, ev(0), false) // open of the heavy pid
+	ce.IngestAsyncPriority(ctx, ev(4), false) // unlink
+	assert.Equal(t, before, dropped, "open/unlink must not be dropped")
+	assert.Equal(t, 2, len(w.chHi), "they travel through the protected channel")
+	ce.IngestAsyncPriority(ctx, ev(2), false) // write
+	assert.Equal(t, before+1, dropped, "write is dropped")
 }

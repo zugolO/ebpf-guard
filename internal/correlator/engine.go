@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zugolO/ebpf-guard/internal/feedback"
 	"github.com/zugolO/ebpf-guard/internal/policy"
+	"github.com/zugolO/ebpf-guard/internal/loadprobe"
 	"github.com/zugolO/ebpf-guard/internal/profiler"
 	"github.com/zugolO/ebpf-guard/internal/profstage"
 	"github.com/zugolO/ebpf-guard/internal/util"
@@ -255,6 +256,9 @@ type CorrelationEngine struct {
 	// AnomalyDetector so ProcessEvent is always called from a single goroutine
 	// per instance.  IngestAsync routes events here; Ingest bypasses the pool.
 	ingestPool []*workerState
+	// bulkDropOnCongestion / bulkDropFn: see IngestAsyncPriority (волна 8.8, Р5).
+	bulkDropOnCongestion bool
+	bulkDropFn           func(pid uint32)
 	ingestMask uint32
 	// closeIngestOnce guards closing the ingest worker channels so both
 	// DrainIngestPool (called during graceful shutdown, before the final
@@ -398,6 +402,17 @@ type workerState struct {
 	// Read by CounterFuncs.
 	blocked      [2]atomic.Uint64
 	blockedNanos [2]atomic.Uint64
+	// Волна 8.8, Р5: a bulk event for a full worker channel is dropped (and
+	// counted) when its pid is the worker's dominant one, instead of stopping the
+	// single bulk dispatcher for every other pid.
+	bulkDropped atomic.Uint64
+	// heavyPID/heavyCnt: single-counter majority tracker (Misra–Gries, k=1) of the
+	// pid that dominates this worker's bulk traffic. While the worker is
+	// congested only that pid's events are dropped; other pids sharing the worker
+	// wait for a slot (one frees every worker service time, ~30 µs) and keep
+	// their events — the isolation 8.8.4 asks for.
+	heavyPID atomic.Uint32
+	heavyCnt atomic.Int32
 	ad *profiler.AnomalyDetector // nil when anomaly detection is disabled
 }
 
@@ -1790,6 +1805,12 @@ func (ce *CorrelationEngine) RegisterMetrics(reg prometheus.Registerer) error {
 	}
 	for i, w := range ce.ingestPool {
 		w := w
+		if err := reg.Register(prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "ebpf_guard_ingest_worker_bulk_dropped_total", ConstLabels: prometheus.Labels{"worker": strconv.Itoa(i)},
+			Help: "Bulk events dropped because this ingest worker's channel stayed full (волна 8.8, Р5).",
+		}, func() float64 { return float64(w.bulkDropped.Load()) })); err != nil {
+			return err
+		}
 		for cls, name := range []string{"bulk", "protected"} {
 			cls := cls
 			lbl := prometheus.Labels{"worker": strconv.Itoa(i), "class": name}
@@ -1887,13 +1908,61 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 	ch, cls := w.ch, 0
 	if protected {
 		ch, cls = w.chHi, 1
+	} else if ce.bulkDropOnCongestion {
+		w.noteBulk(e.PID)
 	}
 	select {
 	case ch <- t:
 		return
 	default:
 	}
-	// Channel full: this dispatcher now waits on this worker. Count it.
+	// Channel full. Bulk (волна 8.8, Р5): one hot pid must not stop the single
+	// bulk dispatcher for everyone — Е6 measured it parked on one worker for
+	// 54 s of 60 while every other process lost events. Wait briefly once, then
+	// drop for this worker until the congestion hold expires. Order inside a
+	// pid is preserved (dropping never reorders). Protected keeps blocking: it
+	// has its own dispatcher and its own channel, and its loss is never the
+	// designed outcome.
+	if !protected && ce.bulkDropOnCongestion {
+		// The pid that dominates this worker's bulk traffic is the one whose events
+		// fill the channel: drop its surplus at once instead of waiting a slot —
+		// a wait per event throttled the single dispatcher to this worker's
+		// service rate (54 s of 60 parked on one worker in Е6) and starved every
+		// other worker. Any other pid on the worker waits briefly for a slot (one
+		// frees every service time) and keeps its event.
+		if w.heavyPID.Load() == e.PID {
+			// open и мутации файла не теряются даже у доминирующего pid (решение владельца
+			// 18.10): при полном bulk-канале они идут в protected-канал воркера без ожидания.
+			if e.Type == types.EventFileAccess && e.File != nil && e.File.Op != 1 && e.File.Op != 2 {
+				select {
+				case w.chHi <- t:
+					return
+				default:
+				}
+			}
+			ce.dropBulk(w, t, e.PID)
+			return
+		}
+		start := time.Now()
+		timer := time.NewTimer(bulkCongestionWait)
+		select {
+		case ch <- t:
+			timer.Stop()
+			w.blocked[cls].Add(1)
+			w.blockedNanos[cls].Add(uint64(time.Since(start)))
+			return
+		case <-ctx.Done():
+			timer.Stop()
+			workerTaskPool.Put(t)
+			return
+		case <-timer.C:
+		}
+		w.blocked[cls].Add(1)
+		w.blockedNanos[cls].Add(uint64(time.Since(start)))
+		ce.dropBulk(w, t, e.PID)
+		return
+	}
+	// Count the wait.
 	start := time.Now()
 	select {
 	case ch <- t:
@@ -1902,6 +1971,52 @@ func (ce *CorrelationEngine) IngestAsyncPriority(ctx context.Context, e types.Ev
 	}
 	w.blocked[cls].Add(1)
 	w.blockedNanos[cls].Add(uint64(time.Since(start)))
+}
+
+// heavyTrackerCap bounds the majority counter so the candidate can change within
+// about that many events when the traffic mix shifts.
+const heavyTrackerCap = 64
+
+// noteBulk updates the worker's majority-pid tracker with one bulk event.
+func (w *workerState) noteBulk(pid uint32) {
+	if w.heavyPID.Load() == pid {
+		if w.heavyCnt.Add(1) > heavyTrackerCap {
+			w.heavyCnt.Store(heavyTrackerCap)
+		}
+		return
+	}
+	if w.heavyCnt.Add(-1) < 0 {
+		w.heavyPID.Store(pid)
+		w.heavyCnt.Store(1)
+	}
+}
+
+// Bulk congestion policy (волна 8.8, Р5).
+const bulkCongestionWait = 3 * time.Millisecond
+
+// dropBulk discards a bulk task whose worker is congested and reports it.
+func (ce *CorrelationEngine) dropBulk(w *workerState, t *workerTask, pid uint32) {
+	workerTaskPool.Put(t)
+	w.bulkDropped.Add(1)
+	if fn := ce.bulkDropFn; fn != nil {
+		fn(pid)
+	}
+}
+
+// SetBulkDropOnCongestion enables or disables Р5 (default enabled for engines
+// built through NewCorrelationEngineWithConfig). fn, if non-nil, is called for
+// every dropped bulk event with its pid; it must be cheap and non-blocking.
+func (ce *CorrelationEngine) SetBulkDropOnCongestion(enabled bool, fn func(pid uint32)) {
+	ce.bulkDropOnCongestion = enabled
+	ce.bulkDropFn = fn
+}
+
+// IngestBulkDropped returns bulk events dropped by worker i under congestion.
+func (ce *CorrelationEngine) IngestBulkDropped(i int) uint64 {
+	if i < 0 || i >= len(ce.ingestPool) {
+		return 0
+	}
+	return ce.ingestPool[i].bulkDropped.Load()
 }
 
 const (
@@ -2027,7 +2142,11 @@ func (ce *CorrelationEngine) runIngestWorker(ctx context.Context, w *workerState
 		if ev.Type != types.EventFileAccess {
 			cls = ingestAgeProtected
 		}
-		ingestEventAge[cls].Observe(time.Since(eventTime(&ev)).Seconds())
+		age := time.Since(eventTime(&ev)).Seconds()
+		ingestEventAge[cls].Observe(age)
+		if loadprobe.IsProbeComm(ev.Comm) {
+			loadprobe.RecordLoadProbe(ev.Comm, age)
+		}
 		alerts, regoQueued := ce.ingestWithAD(tctx, &ev, w.ad)
 		if len(alerts) > 0 && !regoQueued {
 			localPending = append(localPending, alerts...)

@@ -50,6 +50,23 @@ bpf:
     syscall_rate: 1
     network_rate: 1
     file_rate: 1
+    # Волна 8.8: когда файловый сэмплер работает (file_rate > 1, либо его
+    # включил контроллер перегрузки или сторож CPU), под 1-из-N попадают только
+    # «горячие» процессы — больше порога событий open/read/write за 100 мс
+    # (300 ≈ 3 000 событий/с на процесс). Остальные процессы идут целиком,
+    # мутации (chmod/unlink/rename/truncate/rmdir) не сбрасываются никогда.
+    hot_pid_threshold: 300
+
+  # Волна 8.8: пропорциональный контроллер перегрузки. Пока очередь bulk
+  # заполняется или bulk-события теряются, он наращивает делитель N файлового
+  # сэмплера в ядре (до max_divisor) и снимает его после спокойного периода.
+  # Классы protected (network, syscall, dns, …) не трогает. Метрики:
+  # ebpf_guard_overload_shed_{divisor,active}, ebpf_guard_file_hot_shed_total.
+  # Пока сброс идёт, /health читает bulk как degraded.
+  overload_shed:
+    enabled: true
+    max_divisor: 64
+    cpu_file_shed_rate: 0.5   # множитель file у сторожа CPU при включённом контроллере
 
   # BPF-side kernel filter: only emit events for the listed syscall numbers.
   # Extends the built-in defaults (execve, ptrace, capset, setns, memfd_create,
@@ -183,8 +200,13 @@ bpf:
   # Adaptive ring-buffer load controller: automatically reduces BPF sampling
   # rates for high-volume syscall/file events when the event channel starts
   # filling up, preventing silent kernel-side ring-buffer drops.
+  # Волна 8.8: ВЫКЛЮЧЕНО в поставке. Этот контроллер режет syscall и network
+  # (protected-классы), что противоречит правилу 8.8 «protected не сбрасывать»;
+  # заменён bpf.overload_shed (ниже). К тому же в cmd/ebpf-guard он нигде не
+  # создаётся (NewRingBufLoadController без вызова) — ключ был мёртвым, «true»
+  # только вводил в заблуждение.
   adaptive_load:
-    enabled: true
+    enabled: false
     check_interval: "2s"
     degraded_threshold: 0.50   # >50% queue full → reduce syscall/file rates
     critical_threshold: 0.80   # >80% queue full → further reduce all rates

@@ -184,6 +184,79 @@ func (c *FileaccessCollector) UnresolvedRWDropped() (uint64, error) {
 	return total, nil
 }
 
+// fileHotCfg mirrors struct file_hot_cfg_t in bpf/fileaccess.bpf.c.
+type fileHotCfg struct {
+	Threshold uint32
+	_         uint32
+}
+
+// SetHotThreshold writes file_hot_cfg (волна 8.8, Р3/Р6): events of open/read/
+// write per tgid per 100 ms window above which the process counts as "hot" and
+// only its events are subject to the 1-in-N sampler. 0 keeps the kernel default.
+func (c *FileaccessCollector) SetHotThreshold(threshold uint32) error {
+	if c.objs == nil || c.objs.FileHotCfg == nil {
+		return fmt.Errorf("collector/fileaccess: file_hot_cfg unavailable")
+	}
+	return c.objs.FileHotCfg.Update(uint32(0), fileHotCfg{Threshold: threshold}, ebpf.UpdateAny)
+}
+
+// HotShedCounts returns the cumulative in-kernel counts of hot-process events the
+// 1-in-N sampler let through ("sampled") and dropped ("shed"), summed across CPUs.
+func (c *FileaccessCollector) HotShedCounts() (sampled, shed uint64, err error) {
+	if c.objs == nil || c.objs.FileShedCounters == nil {
+		return 0, 0, nil
+	}
+	for idx, dst := range []*uint64{&sampled, &shed} {
+		var perCPU []uint64
+		if err := c.objs.FileShedCounters.Lookup(uint32(idx), &perCPU); err != nil {
+			return 0, 0, err
+		}
+		for _, v := range perCPU {
+			*dst += v
+		}
+	}
+	return sampled, shed, nil
+}
+
+// fileHotState mirrors struct file_hot_state in bpf/fileaccess.bpf.c.
+type fileHotState struct {
+	WinStart uint64
+	Shed     uint64
+	Count    uint32
+	_        uint32
+	Comm     [16]byte
+}
+
+// HotShedEntry is one process the in-kernel sampler has shed events of.
+type HotShedEntry struct {
+	TGID uint32
+	Comm string
+	Shed uint64 // cumulative for the lifetime of the kernel record
+}
+
+// HotShedByTGID lists processes with a non-zero shed count (волна 8.8: shedding
+// must not be silent — the agent logs and counts it per process).
+func (c *FileaccessCollector) HotShedByTGID() ([]HotShedEntry, error) {
+	if c.objs == nil || c.objs.FileHotMap == nil {
+		return nil, nil
+	}
+	var out []HotShedEntry
+	var key uint32
+	var val fileHotState
+	it := c.objs.FileHotMap.Iterate()
+	for it.Next(&key, &val) {
+		if val.Shed == 0 {
+			continue
+		}
+		n := 0
+		for n < len(val.Comm) && val.Comm[n] != 0 {
+			n++
+		}
+		out = append(out, HotShedEntry{TGID: key, Comm: string(val.Comm[:n]), Shed: val.Shed})
+	}
+	return out, it.Err()
+}
+
 // IsHealthy returns true if the collector loaded successfully.
 func (c *FileaccessCollector) IsHealthy() bool {
 	return c.loadError == nil && c.objs != nil

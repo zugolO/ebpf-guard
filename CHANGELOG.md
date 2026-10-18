@@ -11,6 +11,17 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Overload behaviour (wave 8.8): proportional `bpf.overload_shed` controller sheds bulk file events in the kernel by queue pressure instead of letting the pipeline collapse past its ceiling; the file sampler (`bpf.sampling.file_rate` / CPU watcher / controller) now applies only to "hot" processes (`bpf.sampling.hot_pid_threshold`, default 300 events per 100 ms) and never to mutations (chmod/unlink/rename/truncate/rmdir). `/health` reports `degraded` while shedding. New metrics `ebpf_guard_overload_shed_{divisor,active,steps_total}`, `ebpf_guard_file_hot_shed_total`, `ebpf_guard_events_dropped_fraction_10s`, `ebpf_guard_cpu_watchdog_base_cores`, `ebpf_guard_ingest_worker_bulk_dropped_total`
+- Load-probe counters `ebpf_guard_load_probe_events_total` / `ebpf_guard_load_probe_event_age_seconds` for processes whose comm starts with `w88` (measurement harness only)
+
+### Changed
+- Degraded visibility is now judged by loss RATE over a 10 s window (bulk: >= 1% and >= 10 events; protected: any drop) instead of "any drop in the last 5 s"
+- CPU pressure watcher scales its thresholds by the cgroup CPU quota (`cpu.max` / `cfs_quota_us`) when one is set, not by the host core count; level 2 no longer cuts syscall/network sampling unless `shed_protected` is set
+- A bulk event for a ingest worker whose channel is full is dropped (and counted as `ingest/worker_full`) when its pid dominates that worker, instead of stalling the single bulk dispatcher for every other pid
+
+- `adaptive_load` is disabled in the shipped `config/config.yaml` (the controller cuts syscall/network and is not wired in the agent); `open` and file mutations are never discarded by the file sampler or, under overload, by the bulk queue/worker hops
+
 ### Fixed
 - `CPUPressureWatcher` (issue #211 follow-up): CPU budget is now measured as an absolute percentage of a single core instead of a percentage of total host CPU, so the same default thresholds behave identically on a 1-core VPS and an 8-core box instead of scaling with unrelated hardware capacity
 - Widened hysteresis for CPU pressure load-shedding: raised default thresholds (40%/70%/20% of one core), grew the smoothing window to 30s, and added a `min_dwell` floor (default 30s) so the state machine no longer flaps every 10-15s under bursty attack traffic, which was cutting file/syscall/network visibility exactly while an attack was in progress

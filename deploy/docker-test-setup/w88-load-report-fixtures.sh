@@ -92,6 +92,14 @@ P25='{"name":"25000","ops":25000,"proc":10000,"drops":80000,"idle":0.35,"lost":0
 o=$(run pwin "$S0,$S1,$(two 50000 0.4 0),$P25"); has "$o" '^8\.8\.3 host: PASS.*\(10,000, 20,000\]' && ok "8.8.3: потери зонда на 2,5× не судятся (окно 2×)" || { bad "8.8.3 окно"; echo "$o"; }
 PA='{"name":"20000","ops":20000,"proc":10000,"drops":50000,"idle":0.4,"lost":0,"page":0.25}'
 o=$(run page "$S0,$S1,$PA"); has "$o" '^8\.8\.3 host: FAIL.*p99 возраста 250 мс' && ok "8.8.3: p99 250 мс — FAIL" || { bad "8.8.3 p99"; echo "$o"; }
+# 15–16. 8.8.1: на ступенях без потерь degraded при сбросе по замыслу (уровень сторожа 1) — не нарушение; без сброса — FAIL
+p881() { # p881 <имя> <уровень сторожа> — лестница без потерь и poll.tsv: degraded весь шаг
+    run "$1" "$S0,$S1" > /dev/null
+    for t in $(seq 1000 2 1060); do printf '%s\tdegraded\t0\t0\t%s\t1\n' "$t" "$2"; done > "$T/$1/poll.tsv"
+    python3 "${REPORT:-$HERE/w88-load-report.py}" "$T/$1" role=host cpu_limit=0.5 2>&1 | grep -a '^8\.8\.1 '
+}
+o=$(p881 shed 1); has "$o" '^8\.8\.1 host: PASS.*сбросе по замыслу' && ok "8.8.1: degraded при сбросе по замыслу — PASS" || { bad "8.8.1 сброс"; echo "$o"; }
+o=$(p881 noshed 0); has "$o" '^8\.8\.1 host: FAIL.*сброса нет, но не healthy' && ok "8.8.1: degraded без потерь и без сброса — FAIL" || { bad "8.8.1 ложная тревога"; echo "$o"; }
 # 9. плато без коллапса — PASS
 o=$(run plat "$S0,$S1,$(two 50000 0.4 0)"); has "$o" '^8\.8\.2 host: PASS' && ok "8.8.2: плато PASS" || { bad "8.8.2 плато"; echo "$o"; }
 
@@ -109,6 +117,7 @@ if [ "$MODE" = "--mutate" ]; then
     mutate "8.8.2 насыщение молчит" 's/elif sat_r and any/elif False and any/' 1
     mutate "справочный порог выключен" 's/"PASS" if worst <= CTL_LOSS_REF else "FAIL"/"FAIL"/' 1
     mutate "справочный порог 8.8.3 выключен" 's/("PASS" if worst <= PROBE_LOSS_REF else "FAIL")/"FAIL"/' 1
+    mutate "8.8.1 сброс прощает всё" 's/deg_noshed = \[rows\[i\]\[0\] for i in idx if rows\[i\]\[1\] != "healthy" and not shedding(rows\[i\])\]/deg_noshed = []/' 1
     mutate "порог 8.8.3 раздут" 's/^PROBE_LOSS_MAX_EVENTS = 1.0/PROBE_LOSS_MAX_EVENTS = 1e9/' 1
     mutate "окно 8.8.3 — 2,5×" 's/^PROBE_WINDOW_MAX = 2.0/PROBE_WINDOW_MAX = 2.5/' 1
     mutate "p99 8.8.3 не судится" 's/^PROBE_P99_MAX = 0.1/PROBE_P99_MAX = 1e9/' 1

@@ -49,7 +49,7 @@ def poll(out):
             if len(f) < 4:
                 continue
             try:
-                rows.append((float(f[0]), f[1], float(f[2]), float(f[3]), f[4] if len(f) > 4 else "na"))
+                rows.append((float(f[0]), f[1], float(f[2]), float(f[3]), f[4] if len(f) > 4 else "na", f[5] if len(f) > 5 else "na"))
             except ValueError:
                 continue
     except OSError:
@@ -222,7 +222,7 @@ def main():
     if not rows or not st:
         lines.append(verdict("8.8.1", role, None, "нет poll.tsv"))
     else:
-        bad, judged, notes = [], 0, []
+        bad, judged, notes, notes_shed = [], 0, [], []
         for s in st:
             t0, t1 = T.rd(f"{s['dir']}/step-start.t"), T.rd(f"{s['dir']}/step-end.t")
             if t0 is None or t1 is None:
@@ -235,6 +235,13 @@ def main():
             mx = max((w[0] for _, w in wf), default=0.0)
             t_loss = next((rows[i][0] for i, w in wf if w[0] >= LOSS_STEP_FRAC and w[1] >= 10), None)
             deg = [rows[i][0] for i in idx if rows[i][1] != "healthy"]
+            # Сброс по замыслу (сторож CPU уровень > 0 или делитель контроллера перегрузки > 1) читается как degraded
+            # (Р1, docs/capacity.md): на ступени без потерь такой отсчёт — не ложная тревога. Под ×8 j2 (19.10): уровень 1–2
+            # уже на 1 500 / 10 000 оп/с, потерь 0 — эмиттер красил это как «не healthy без потерь».
+            def shedding(r):
+                return any(v not in ("na", "") and float(v) > lim for v, lim in ((r[4], 0), (r[5], 1)))
+            deg_noshed = [rows[i][0] for i in idx if rows[i][1] != "healthy" and not shedding(rows[i])]
+            n_shed = sum(1 for i in idx if rows[i][1] != "healthy" and shedding(rows[i]))
             if t_loss is not None:
                 judged += 1
                 td = next((x for x in deg if x >= t_loss - 10), None)
@@ -242,13 +249,16 @@ def main():
                     bad.append(f"{s['name']}: потери с +{t_loss - t0:.0f}с, degraded " + ("нет" if td is None else f"+{td - t_loss:.0f}с"))
             elif mx < CLEAN_STEP_FRAC:
                 judged += 1
-                if deg:
-                    bad.append(f"{s['name']}: потерь нет (макс {mx:.4%}), но не healthy {len(deg)} отсч.")
+                if deg_noshed:
+                    bad.append(f"{s['name']}: потерь нет (макс {mx:.4%}), сброса нет, но не healthy {len(deg_noshed)} отсч.")
+                elif n_shed:
+                    notes_shed.append(f"{s['name']} ({n_shed} отсч.)")
             else:
                 notes.append(s["name"])
         lines.append(verdict("8.8.1", role, (not bad) if judged else None,
                              f"ступеней судимо {judged}" + (f"; нарушения: {'; '.join(bad)}" if bad else "") +
-                             (f"; серая зона (0,1…1%) не судится: {','.join(notes)}" if notes else "")))
+                             (f"; серая зона (0,1…1%) не судится: {','.join(notes)}" if notes else "") +
+                             (f"; degraded без потерь при сбросе по замыслу (не нарушение): {', '.join(notes_shed)}" if notes_shed else "")))
 
     # ── 8.8.2 ────────────────────────────────────────────────────────────────────────────────────────────────
     # Плато = за потолком обработка не падает. Опорная величина — потолок В ТОЧКЕ первых потерь: максимум «обработано» по

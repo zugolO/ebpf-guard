@@ -19,7 +19,8 @@ for r in "$@"; do
         host)   STEPS=$HOST_STEPS PROBE=1 CONTROLS=8 bash "$HERE/w88-load.sh" host steps "$SRC" "$OUT"; role=host ;;
         host8)  STEPS=$HOST_STEPS GEN_PROCS=8 PROBE=1 bash "$HERE/w88-load.sh" host steps "$SRC" "$OUT"; role=host ;;
         pod)    STEPS=$POD_STEPS PROBE=1 CONTROLS=8 bash "$HERE/w88-load.sh" pod steps "$SRC" "$OUT"; role=pod ;;
-        pod8)   STEPS=$POD_STEPS GEN_PROCS=8 PROBE=1 bash "$HERE/w88-load.sh" pod steps "$SRC" "$OUT"; role=pod ;;
+        # 19.10: умолчание чарта — 1 ядро (было 0,5 — 8.8.5 судил базу сторожа против чужой квоты)
+        pod8)   qcores=1; STEPS=$POD_STEPS GEN_PROCS=8 PROBE=1 bash "$HERE/w88-load.sh" pod steps "$SRC" "$OUT"; role=pod ;;
         # п.3 владельца: под 500m без зонда/контролей на ступени 0, зонд 100 оп/с, ступени как у pod1c
         pod05)  STEPS=${POD05_STEPS:-0 1500 5000 7500 10000 12500 15000 20000 30000 45000} AUX_SKIP_STEP0=1 PROBE_RATE=100 PROBE=1 CONTROLS=8 bash "$HERE/w88-load.sh" pod steps "$SRC" "$OUT"; role=pod ;;
         pod1c)  qcores=1; CPU_LIMIT=1 STEPS=$POD1_STEPS AUX_SKIP_STEP0=1 PROBE_RATE=100 PROBE=1 CONTROLS=8 bash "$HERE/w88-load.sh" pod steps "$SRC" "$OUT"; role=pod ;;

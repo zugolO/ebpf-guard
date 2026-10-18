@@ -52,7 +52,11 @@ securityContext:
 # Resource limits and requests
 resources:
   limits:
-    cpu: 500m
+    # Wave 8.8 (owner decision 18.10.2026): 1 core. At 500m the pod ceiling is
+    # ~18k events/s and past it the attack pack loses detection (12/16); at 1 core
+    # recall stays 16/16 at 20 000 ops/s. 500m remains a documented "economy
+    # profile" (docs/capacity.md) - set it explicitly if the node is quiet.
+    cpu: "1"
     # 192Mi = measured pod peak x 1.25 (wave 8.2 stage 4, item E). Pod
     # memory.current peaked at 141.3 MiB at second 6 of the process (startup:
     # BPF maps + BTF + cold binary text on the pod's own account) and at
@@ -434,6 +438,12 @@ config:
     kernel_filter:
       arg_predicates:
         enabled: true
+    # Wave 8.8 (owner decision 18.10.2026): file_rate 1 = every open/read/write
+    # reaches the rule engine; only "hot" processes are shed by the overload
+    # controller and the CPU watchdog. 50 (the old Go default) would sample 1-in-50
+    # of hot processes uniformly and halve file-detection visibility.
+    sampling:
+      file_rate: 1
     # BTF CO-RE portability settings (kernels 5.4+ without /sys/kernel/btf/vmlinux)
     btf_path: ""                              # explicit BTF file override; empty = auto-detect
     btf_hub_enabled: true                     # download from BTF hub on first run if local BTF absent

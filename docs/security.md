@@ -589,6 +589,6 @@ Use this checklist before deploying ebpf-guard to a production cluster.
 ### Operational
 - [ ] `profilerStatePersistence.enabled: true` on stable clusters (avoids re-learning on restart)
 - [ ] `auditLog.enabled: true` — rule-change audit trail ingested by SIEM
-- [ ] Resource limits set (default: `500m` CPU / `256Mi` memory; hardened: `1000m` / `512Mi`)
+- [ ] Resource limits set (default: `1` CPU / `256Mi` memory; hardened: `1000m` / `512Mi`)
 - [ ] `vpa.enabled: true` on autoscaled clusters
 - [ ] Dry-run mode (`enforcer.dry_run: true`) used to evaluate new enforcement rules before enabling

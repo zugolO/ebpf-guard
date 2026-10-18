@@ -853,9 +853,11 @@ type SamplingConfig struct {
 	SyscallRate uint32 `mapstructure:"syscall_rate"`
 	// NetworkRate samples 1 in N network events. 1 = all events. Default: 1.
 	NetworkRate uint32 `mapstructure:"network_rate"`
-	// FileRate samples 1 in N file-access events (open/read/write). Reads and
-	// writes fire on every syscall system-wide, so the default is well below
-	// 1 to avoid flooding the event channel. Default: 50.
+	// FileRate samples 1 in N file-access events (open/read/write). Default: 1
+	// (волна 8.8, решение владельца 18.10: прежние 50 при новом сэмплере
+	// резали бы не всё, а только горячие процессы, и при этом тихо вдвое
+	// сужали видимость файлового детекта; перегрузку держат HotPIDThreshold,
+	// контроллер перегрузки и сторож CPU, а не равномерное прореживание).
 	FileRate uint32 `mapstructure:"file_rate"`
 	// HotPIDThreshold (волна 8.8): when the file sampler is active (FileRate > 1,
 	// or the overload controller / CPU watcher lowered the file rate), only
@@ -2271,7 +2273,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("bpf.sampling.enabled", true)
 	v.SetDefault("bpf.sampling.syscall_rate", 1)
 	v.SetDefault("bpf.sampling.network_rate", 1)
-	v.SetDefault("bpf.sampling.file_rate", 50)
+	v.SetDefault("bpf.sampling.file_rate", 1)
 	v.SetDefault("bpf.sampling.hot_pid_threshold", 300)
 	v.SetDefault("bpf.overload_shed.enabled", true)
 	v.SetDefault("bpf.overload_shed.max_divisor", 64)

@@ -125,6 +125,9 @@ PY
     [ -n "$APID" ] || die "процесс пода не появился"
     curl -sf --max-time 5 -H "Authorization: Bearer $TOKEN" "$API/metrics" > /dev/null || die "API пода не ответил"
     kubectl -n "$NS" get pods -o wide > "$OUT/pods.txt" 2>&1
+    # фактический limits.cpu пода (при пустом CPU_LIMIT — умолчание чарта, не override); печатается в журнал прогона
+    kubectl -n "$NS" get pods -o jsonpath='{.items[0].spec.containers[0].resources.limits.cpu}' > "$OUT/pod-limits-cpu.txt" 2>&1
+    say "limits.cpu пода: $(cat "$OUT/pod-limits-cpu.txt") (CPU_LIMIT=${CPU_LIMIT:-<умолчание чарта>})"
 fi
 echo "$APID" > "$OUT/agent-pid"
 [ "$(n_agents)" -eq 1 ] || die "после старта ожидался ровно один агент (смоковый), есть $(n_agents)"

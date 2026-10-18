@@ -24,6 +24,8 @@ data:
       kernel_filter:
         arg_predicates:
           enabled: {{ dig "kernel_filter" "arg_predicates" "enabled" true .Values.config.bpf }}
+      sampling:
+        file_rate: {{ dig "sampling" "file_rate" 1 .Values.config.bpf }}
 
     rules:
       path: {{ .Values.config.rules.path | quote }}

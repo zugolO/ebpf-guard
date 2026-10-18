@@ -607,6 +607,39 @@ func TestKernelFilterConfig_ArgPredicatesDefaultOn(t *testing.T) {
 	assert.True(t, mgrOff.Get().BPF.KernelFilter.Enabled, "частичный блок не снимает kernel_filter")
 }
 
+// Волна 8.8, решение 2 владельца: file_rate по умолчанию 1. Сторожит все три пути
+// (как ArgPredicatesDefaultOn): пустой конфиг (умолчание Go), поставляемый
+// config/config.yaml и частичный блок, какой рендерит чарт, — и явное значение
+// по-прежнему применяется (экономный режим 50).
+func TestSamplingConfig_FileRateDefaultOne(t *testing.T) {
+	tmpDir := t.TempDir()
+	empty := filepath.Join(tmpDir, "empty.yaml")
+	require.NoError(t, os.WriteFile(empty, []byte(""), 0644))
+	mgr, err := NewManager(empty)
+	require.NoError(t, err)
+	defer mgr.Stop()
+	assert.Equal(t, uint32(1), mgr.Get().BPF.Sampling.FileRate, "умолчание Go")
+
+	partial := filepath.Join(tmpDir, "partial.yaml")
+	require.NoError(t, os.WriteFile(partial, []byte("bpf:\n  map_sizes:\n    events: 65536\n"), 0644))
+	mgrP, err := NewManager(partial)
+	require.NoError(t, err)
+	defer mgrP.Stop()
+	assert.Equal(t, uint32(1), mgrP.Get().BPF.Sampling.FileRate, "частичный блок bpf без sampling")
+
+	shipped, err := NewManagerSkipPermCheck(filepath.Join("..", "..", "config", "config.yaml"))
+	require.NoError(t, err)
+	defer shipped.Stop()
+	assert.Equal(t, uint32(1), shipped.Get().BPF.Sampling.FileRate, "config/config.yaml")
+
+	explicit := filepath.Join(tmpDir, "explicit.yaml")
+	require.NoError(t, os.WriteFile(explicit, []byte("bpf:\n  sampling:\n    file_rate: 50\n"), 0644))
+	mgrE, err := NewManager(explicit)
+	require.NoError(t, err)
+	defer mgrE.Stop()
+	assert.Equal(t, uint32(50), mgrE.Get().BPF.Sampling.FileRate, "явное значение")
+}
+
 func TestKernelFilterConfig_PathDenylistOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

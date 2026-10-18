@@ -1,0 +1,15 @@
+// Волна 8.8, Р7: время вне CPU потоков процесса $1 по ядерному стеку на момент ухода с CPU.
+//   bpftrace w88-offcpu.bt <tgid>
+// finish_task_switch у этого ядра не трассируется (isra) — берём tracepoint sched_switch (bpftrace 0.14: без BEGIN).
+// @off_ns[ядерный стек] — сумма наносекунд ожидания (futex, epoll, nanosleep, ...); @off_total_ns — всего.
+tracepoint:sched:sched_switch
+{
+  if (pid == $1) { @ts[tid] = nsecs; @st[tid] = kstack(5); }
+  $t = @ts[args->next_pid];
+  if ($t) {
+    @off_ns[@st[args->next_pid]] = sum(nsecs - $t);
+    @off_total_ns = sum(nsecs - $t);
+    delete(@ts[args->next_pid]);
+    delete(@st[args->next_pid]);
+  }
+}

@@ -713,8 +713,14 @@ if [ -f "$final_health" ]; then
                 pass "потери есть ($any_dropped_total) и в журнале зафиксирован переход в degraded ($degraded_transitions раз, 5.9.4d)"
             elif [ "${c3_induced_executed:-0}" -eq 1 ] && [ "${c3_induced_degraded:-0}" -eq 1 ]; then
                 pass "потери есть ($any_dropped_total); журнал перехода за окно не показал, но наведённый дроп (5.9.5b) наблюдал status=degraded опросом /health — механизм проверен управляемым входом"
+            elif [ "$visibility_reduced" = "true" ] && [ "$status" = "degraded" ]; then
+                # Волна 8.8 (решение владельца 18.10): критерий — СОСТОЯНИЕ, а не переход. Агент под перегрузкой был degraded
+                # всё окно прогона (перехода внутри окна нет, строка о нём — до начала окна), и финальный /health это
+                # показывает. Е6, под, 7,2 млн потерь: poll.tsv старого бинаря — degraded на каждом отсчёте ступеней с потерями
+                # (server-logs/collect-8.8/base-pod-poll.tsv). Флаг, залипший без потерь, ловится веткой «потерь нет» ниже.
+                pass "потери есть ($any_dropped_total), перехода внутри окна нет, но /health держит degraded на конце окна (проверка состояния, 5.9.4d)"
             else
-                fail "потери есть ($any_dropped_total), но перехода в degraded не видели ни в журнале за окно прогона, ни опросом /health во время наведённого дропа (5.9.4d/5.9.5b); наведённый дроп: исполнен=${c3_induced_executed:-0}, degraded=${c3_induced_degraded:-0}; финальный флаг для справки: visibility_reduced=$visibility_reduced status=$status"
+                fail "потери есть ($any_dropped_total), но перехода в degraded не видели ни в журнале за окно прогона, ни опросом /health во время наведённого дропа (5.9.4d/5.9.5b), и /health на конце окна не degraded; наведённый дроп: исполнен=${c3_induced_executed:-0}, degraded=${c3_induced_degraded:-0}; финальный флаг: visibility_reduced=$visibility_reduced status=$status"
             fi
         else
             # Журнал недоступен (не root / нет journalctl / нет .timestamp) —

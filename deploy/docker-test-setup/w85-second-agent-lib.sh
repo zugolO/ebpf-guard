@@ -15,6 +15,11 @@ SA_TOKEN=w85u1smoketoken0123456789abcdef012
 sa_start() {
     local SRC=$1 RUN=$2 PORT=$3 RULES=${4:-$1/rules}
     rm -rf "$RUN"; mkdir -p "$RUN"
+    export SA_PORT=$PORT SA_RUN=$RUN
+    if [ -n "${SA_CFG_FROM:-}" ]; then
+        # волна 8.8, п.6: база конфига — поставочный config/config.yaml (его правит SA_CFG_PATCH), а не config-test.yaml
+        cp "$SRC/$SA_CFG_FROM" "$RUN/config.yaml"
+    else
     python3 - "$RUN" "$RULES" "$SRC/deploy/docker-test-setup/config-test.yaml" "$PORT" <<'PY'
 import sys
 run, rules, base, port = sys.argv[1:5]
@@ -40,6 +45,7 @@ if os.environ.get('SA_PROC_TABLE') == 'off':
     s = s.replace('\nbpf:\n', '\nbpf:\n  proc_table:\n    enabled: false\n', 1)
 open(run + '/config.yaml', 'w').write(s)
 PY
+    fi
     if [ -n "${SA_CFG_PATCH:-}" ]; then python3 "$SA_CFG_PATCH" "$RUN/config.yaml" "$SRC" || { echo "CFG PATCH FAIL"; return 5; }; fi
     SA_API=http://127.0.0.1:$PORT
     # без setsid и без «&&» перед nohup: `cd && cmd &` уводит в фон ВСЮ цепочку, и $! — pid подоболочки. setsid форкает, и $! становится pid обёртки, а не агента (найдено на часе cmd 3: pid второго агента

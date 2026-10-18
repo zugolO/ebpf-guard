@@ -2254,7 +2254,8 @@ func setDefaults(v *viper.Viper) {
 	// preallocated (~28 MiB at 65536). Wave 8.1 item 10 tried 16384: idle peak is
 	// 1..62 entries, but under the attack suite event_low peaked at 15772/16384
 	// (router_to_queue drops 52290 vs 6315 at 65536, which itself peaks at 53247),
-	// so the default stays 65536.
+	// so the default stays 65536. Under a Go soft memory limit (the pod's
+	// GOMEMLIMIT) main caps it further — capQueueDepthByMemLimit, wave 8.8.
 	v.SetDefault("bpf.event_queue_depth", 65536)
 	v.SetDefault("bpf.kernel_filter.enabled", true)
 	v.SetDefault("bpf.kernel_filter.disable_default_daemon_denylist", false)

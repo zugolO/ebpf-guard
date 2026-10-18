@@ -20,3 +20,8 @@ k8s_token_access
 c2_high_port_outbound
 netintr_high_port_established
 netintr_loopback_high_port
+#
+# k8s_sa_token_theft — тот же класс, другой процесс: local-path-provisioner читает токен по своему таймеру. Прогон j1 (под 1 ядро,
+# 18.10.2026): без нагрузки алерт ×2 вышел внутри окна (18:38:07), под нагрузкой ×2 в 19:00:37 — ДО снимка baseline, поэтому
+# «новых» нет. Алерт создан в обоих прогонах; от нагрузки не зависит.
+k8s_sa_token_theft

@@ -89,6 +89,37 @@ func TestRecordEventDrop_BothHopsFeedTheSameWatcher(t *testing.T) {
 	assert.Equal(t, uint64(1), breakdown["network/router_to_queue"])
 }
 
+// TestRecordKernelDropN_FeedsDegradationTotals: потеря в кольце ядра
+// (ringbuf_full) обязана двигать те же итоги и часы, по которым /health
+// становится degraded, — и не трогать серию events_dropped_total (её пишет
+// RecordDroppedN вызывающего, двойного счёта быть не должно).
+func TestRecordKernelDropN_FeedsDegradationTotals(t *testing.T) {
+	EventsDropped.Reset()
+	dropBreakdownMu.Lock()
+	dropBreakdown = map[dropHop]uint64{}
+	dropBreakdownMu.Unlock()
+	lastHighPriorityDropTime.Store(0)
+	lastLowPriorityDropTime.Store(0)
+	hi0, lo0 := HighPriorityDropTotal(), LowPriorityDropTotal()
+
+	RecordKernelDropN("syscall", 0, true)
+	assert.Zero(t, LastHighPriorityDropTime(), "zero delta is not a drop")
+
+	RecordKernelDropN("syscall", 7, true)
+	assert.Equal(t, hi0+7, HighPriorityDropTotal())
+	assert.NotZero(t, LastHighPriorityDropTime())
+	assert.Zero(t, LastLowPriorityDropTime())
+
+	RecordKernelDropN("fileaccess", 3, false)
+	assert.Equal(t, lo0+3, LowPriorityDropTotal())
+	assert.NotZero(t, LastLowPriorityDropTime())
+
+	assert.Equal(t, 0, testutil.CollectAndCount(EventsDropped), "the series is the caller's, not ours")
+	breakdown := DropBreakdownSnapshot()
+	assert.Equal(t, uint64(7), breakdown["syscall/ringbuf_full"])
+	assert.Equal(t, uint64(3), breakdown["fileaccess/ringbuf_full"])
+}
+
 func TestSetCollectorUp(t *testing.T) {
 	// Reset metric before test
 	CollectorUp.Reset()

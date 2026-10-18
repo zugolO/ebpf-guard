@@ -1,10 +1,10 @@
 #!/bin/bash
-# Фикстуры w88-load-report.py (метки 8.8.2, 8.8.4, 8.8.Н): синтетические лестницы с известными потерями контрольных и простоем ноды.
+# Фикстуры w88-load-report.py (метки 8.8.2, 8.8.3, 8.8.4, 8.8.Н): синтетические лестницы с известными потерями контрольных и простоем ноды.
 #   w88-load-report-fixtures.sh            — фикстуры
 #   w88-load-report-fixtures.sh --mutate   — мутации эмиттера обязаны покраснить фикстуры
 # Лестница фикстуры: ступень 0 (калибровка r0 = 2 события на операцию, 2 контрольных), ёмкость 10 000 оп/с без потерь, далее
 # ступени с реальными дропами. Параметры ступени: ops, proc (соб./с обработано), drops, idle (доля простоя ноды), lost (событий
-# недосчитано у каждого контрольного).
+# недосчитано у каждого контрольного), plost/page (8.8.3: событий недосчитано у зонда w88p и верхняя граница корзины его возраста, с).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 MODE=${1:-}
@@ -22,16 +22,21 @@ for i, s in enumerate(spec, 1):
     w("a.t", "1000.0\n"); w("b.t", f"{1000 + DT}.0\n"); w("c.t", f"{1000 + DT + 5}.0\n")
     w("step-start.t", "1000.0\n"); w("step-end.t", f"{1000 + DT}.0\n")
     proc, drops = s["proc"] * DT, s["drops"]
-    def prom(ev, dr, age, seen):
+    def prom(ev, dr, age, seen, pseen, pn):
         t = f'ebpf_guard_events_total{{type="file"}} {ev}\nebpf_guard_events_dropped_total{{reason="ring"}} {dr}\nebpf_guard_ingest_event_age_seconds_count {age}\n'
         for k in (1, 2):
             t += f'ebpf_guard_load_probe_events_total{{probe="w88c{k}"}} {seen[k]}\n'
+        t += f'ebpf_guard_load_probe_events_total{{probe="w88p"}} {pseen}\n'
+        for le in ("0.05", "0.1", "0.25", "+Inf"):
+            n = pn if le == "+Inf" or float(le) >= s.get("page", 0.05) else 0
+            t += f'ebpf_guard_load_probe_event_age_seconds_bucket{{probe="w88p",le="{le}"}} {n}\n'
         return t
     sent = CTL_RATE * DT
     seen_c = {k: sent * R0 - s["lost"] for k in (1, 2)}
-    w("a.prom", prom(0, 0, 0, {1: 0, 2: 0}))
-    w("b.prom", prom(proc, drops, proc, {1: 0, 2: 0}))
-    w("c.prom", prom(proc, drops, proc, seen_c))
+    pseen = sent * R0 - s.get("plost", 0)
+    w("a.prom", prom(0, 0, 0, {1: 0, 2: 0}, 0, 0))
+    w("b.prom", prom(proc, drops, proc, {1: 0, 2: 0}, 0, pseen))
+    w("c.prom", prom(proc, drops, proc, seen_c, pseen, pseen))
     total = 24000   # 4 ядра × 60 с × 100 тиков
     idle = int(total * s["idle"])
     w("a.cpu", "cpu  0 0 0 0 0 0 0 0 0 0\n"); w("b.cpu", f"cpu  {total - idle} 0 0 {idle} 0 0 0 0 0 0\n")
@@ -40,6 +45,7 @@ for i, s in enumerate(spec, 1):
               open(f"{d}/gen.json.1", "w"))
     for k in (1, 2):
         json.dump({"ops_total": sent}, open(f"{d}/ctl.{k}.json", "w"))
+    json.dump({"ops_total": sent}, open(f"{d}/probe.json", "w"))
 PY
 
 # base: калибровка, ёмкость, 2×, прочее задаётся case-ом
@@ -49,7 +55,7 @@ run() { # run <имя> <ступени-через-запятую> [role] — п�
     rm -rf "$T/$1"; mkdir -p "$T/$1"
     python3 "$T/build.py" "$T/$1" "[$2]" || { echo "builder failed"; return 1; }
     cp "$HERE/w87-e6-table.py" "$T/" 2> /dev/null
-    python3 "${REPORT:-$HERE/w88-load-report.py}" "$T/$1" role=host cpu_limit=0.5 2>&1 | grep -aE '^8\.8\.(2|4|Н) '
+    python3 "${REPORT:-$HERE/w88-load-report.py}" "$T/$1" role=host cpu_limit=0.5 2>&1 | grep -aE '^8\.8\.(2|3|4|Н) '
 }
 # 2× ступень: дропы ≥ 1% (потолок достигнут), плато 1.0
 two() { echo "{\"name\":\"20000\",\"ops\":20000,\"proc\":10000,\"drops\":${1:-50000},\"idle\":${2:-0.4},\"lost\":${3:-0}}"; }
@@ -59,9 +65,9 @@ has() { grep -aqE "$2" <<< "$1"; }
 # 1. ноль потерь на 2× — PASS
 o=$(run clean "$S0,$S1,$(two 50000 0.4 0)"); has "$o" '^8\.8\.4 host: PASS' && ok "ноль потерь на 2×: 8.8.4 PASS" || { bad "ноль потерь на 2×"; echo "$o"; }
 # 2. одно потерянное событие — FAIL по порогу плана (0), прежний порог 0,5% справочно PASS
-o=$(run lose1 "$S0,$S1,$(two 50000 0.4 1)"); has "$o" '^8\.8\.4 host: FAIL' && has "$o" 'справочно по прежнему порогу 0\.5%: PASS' && ok "1 событие: FAIL по плану, 0,5% справочно PASS" || { bad "1 событие"; echo "$o"; }
+o=$(run lose1 "$S0,$S1,$(two 50000 0.4 1)"); has "$o" '^8\.8\.4 host: FAIL.*справочно по прежнему порогу 0\.5%: PASS' && ok "1 событие: FAIL по плану, 0,5% справочно PASS" || { bad "1 событие"; echo "$o"; }
 # 3. 0,6% — FAIL и по прежнему порогу
-o=$(run big "$S0,$S1,$(two 50000 0.4 72)"); has "$o" '^8\.8\.4 host: FAIL' && has "$o" 'справочно по прежнему порогу 0\.5%: FAIL' && ok "0,6%: FAIL, справочно FAIL" || { bad "0,6%"; echo "$o"; }
+o=$(run big "$S0,$S1,$(two 50000 0.4 72)"); has "$o" '^8\.8\.4 host: FAIL.*справочно по прежнему порогу 0\.5%: FAIL' && ok "0,6%: FAIL, справочно FAIL" || { bad "0,6%"; echo "$o"; }
 # 4. потери на 2.5× при чистых 2× — окно 2×, не 2,5×: PASS
 S25='{"name":"25000","ops":25000,"proc":10000,"drops":80000,"idle":0.35,"lost":200}'
 o=$(run window "$S0,$S1,$(two 50000 0.4 0),$S25"); has "$o" '^8\.8\.4 host: PASS' && ok "потери на 2,5× не судятся при чистых 2×" || { bad "окно 2×"; echo "$o"; }
@@ -78,6 +84,14 @@ o=$(run col "$S0,$S1,$(two 50000 0.4 0),$(printf "$COL" 0.3)"); has "$o" '^8\.8\
 o=$(run colsat "$S0,$S1,$(two 50000 0.4 0),$(printf "$COL" 0.05)"); has "$o" '^8\.8\.2 host: НЕИЗМЕРИМ.*простой ноды 5\.0%' && ok "8.8.2: коллапс при простое 5% — НЕИЗМЕРИМ с числом" || { bad "8.8.2 насыщение"; echo "$o"; }
 # 10. справка 8.8.Т печатается с числами ступеней
 o=$(run tab "$S0,$S1,$(two 50000 0.4 0)" ; python3 "${REPORT:-$HERE/w88-load-report.py}" "$T/tab" role=host cpu_limit=0.5 | grep -a '^8\.8\.Т'); has "$o" '^8\.8\.Т host: СПРАВКА.*20000: 20,000 оп/с → 10,000 соб\./с, дропы' && ok "8.8.Т: справка со ступенями" || { bad "8.8.Т"; echo "$o"; }
+# 11–14. 8.8.3 (protected-зонд): порог плана 0 событий, окно (ёмкость, 2×ёмкость], p99 ≤ 100 мс
+o=$(run pclean "$S0,$S1,$(two 50000 0.4 0)"); has "$o" '^8\.8\.3 host: PASS.*порог плана — 0 событий' && ok "8.8.3: зонд без потерь на 2× — PASS" || { bad "8.8.3 чисто"; echo "$o"; }
+P1='{"name":"20000","ops":20000,"proc":10000,"drops":50000,"idle":0.4,"lost":0,"plost":1}'
+o=$(run plose1 "$S0,$S1,$P1"); has "$o" '^8\.8\.3 host: FAIL.*справочно по прежнему порогу 0\.5%: PASS.*потеряно 1 соб' && ok "8.8.3: 1 событие зонда — FAIL, 0,5% справочно PASS" || { bad "8.8.3 одно событие"; echo "$o"; }
+P25='{"name":"25000","ops":25000,"proc":10000,"drops":80000,"idle":0.35,"lost":0,"plost":300}'
+o=$(run pwin "$S0,$S1,$(two 50000 0.4 0),$P25"); has "$o" '^8\.8\.3 host: PASS.*\(10,000, 20,000\]' && ok "8.8.3: потери зонда на 2,5× не судятся (окно 2×)" || { bad "8.8.3 окно"; echo "$o"; }
+PA='{"name":"20000","ops":20000,"proc":10000,"drops":50000,"idle":0.4,"lost":0,"page":0.25}'
+o=$(run page "$S0,$S1,$PA"); has "$o" '^8\.8\.3 host: FAIL.*p99 возраста 250 мс' && ok "8.8.3: p99 250 мс — FAIL" || { bad "8.8.3 p99"; echo "$o"; }
 # 9. плато без коллапса — PASS
 o=$(run plat "$S0,$S1,$(two 50000 0.4 0)"); has "$o" '^8\.8\.2 host: PASS' && ok "8.8.2: плато PASS" || { bad "8.8.2 плато"; echo "$o"; }
 
@@ -94,5 +108,9 @@ if [ "$MODE" = "--mutate" ]; then
     mutate "окно 2× заменено на самую дальнюю" 's/ctl_step = min(cand)\[1\]/ctl_step = max(cand)[1]/' 1
     mutate "8.8.2 насыщение молчит" 's/elif sat_r and any/elif False and any/' 1
     mutate "справочный порог выключен" 's/"PASS" if worst <= CTL_LOSS_REF else "FAIL"/"FAIL"/' 1
+    mutate "справочный порог 8.8.3 выключен" 's/("PASS" if worst <= PROBE_LOSS_REF else "FAIL")/"FAIL"/' 1
+    mutate "порог 8.8.3 раздут" 's/^PROBE_LOSS_MAX_EVENTS = 1.0/PROBE_LOSS_MAX_EVENTS = 1e9/' 1
+    mutate "окно 8.8.3 — 2,5×" 's/^PROBE_WINDOW_MAX = 2.0/PROBE_WINDOW_MAX = 2.5/' 1
+    mutate "p99 8.8.3 не судится" 's/^PROBE_P99_MAX = 0.1/PROBE_P99_MAX = 1e9/' 1
 fi
 echo "итого: $fails красных"; [ "$fails" -eq 0 ]

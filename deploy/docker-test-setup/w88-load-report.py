@@ -8,7 +8,7 @@
   8.8.1  видимость: на ступенях с потерями ≥ 1% за 10 с degraded в /health не позже 10 с от начала потерь;
          на ступенях без потерь (< 0,1% за 10 с) — healthy
   8.8.2  плато: обработано воркерами за потолком / ёмкость ≥ 0,9 на всех ступенях выше первой с потерями
-  8.8.3  protected-зонд w88p: потерь ≤ 0,5% и p99 возраста ≤ 100 мс на ступенях с bulk ≥ ёмкости
+  8.8.3  protected-зонд w88p: потерь 0 событий и p99 возраста ≤ 100 мс на ступенях с подачей в (ёмкость, 2×ёмкость]
   8.8.4  контрольные w88cK: потерь 0 (≥ 1 события — нарушение) у каждого на ступени, ближайшей к 2× ёмкости (по реальным дропам);
          0,5% печатается справочно
   8.8.Н  насыщение стенда: CPU генератора, агента и простой ноды по ступеням; ступень с простоем < 10% не судится (8.8.2, 8.8.4)
@@ -29,7 +29,9 @@ _spec.loader.exec_module(T)
 
 LOSS_STEP_FRAC = 0.01       # ступень «с потерями»: ≥ 1% за 10 с
 CLEAN_STEP_FRAC = 0.001     # «без потерь»: < 0,1% за 10 с
-PROBE_LOSS_MAX = 0.005      # 8.8.3: порог эмиттера (в плане — «потерь 0»; решения владельца о 0,5% в plan.md нет, не менялось)
+PROBE_LOSS_MAX_EVENTS = 1.0  # 8.8.3: порог плана «потерь 0» (решение владельца 18.10 по рекомендации): нарушение = потеряно ≥ 1 события
+PROBE_LOSS_REF = 0.005      # 0,5% — прежний порог эмиттера, печатается справочно
+PROBE_WINDOW_MAX = 2.0      # 8.8.3: «bulk до 2× ёмкости» (план); было 2,5× без решения
 CTL_LOSS_MAX_EVENTS = 1.0   # 8.8.4: план — «потерь канарейки контрольных 0»; нарушение = потеряно ≥ 1 события
 CTL_LOSS_REF = 0.005        # 0,5% — прежний порог эмиттера (376a82e), печатается справочно
 CTL_WINDOW_NEAR = (1.5, 2.5)  # 8.8.4: ступень, ближайшая к 2× ёмкости, должна лежать в [1,5; 2,5]×ёмкости, иначе НЕИЗМЕРИМ
@@ -321,9 +323,9 @@ def main():
         for i, s in enumerate(st):
             n = nums[i]
             if label == "8.8.3":
-                # «bulk до 2× ёмкости» (план): подача в операциях в (ёмкость, 2,5 × ёмкость]. Выше — физика: protected одного
+                # «bulk до 2× ёмкости» (план): подача в операциях в (ёмкость, 2 × ёмкость]. Выше — физика: protected одного
                 # генератора сам превышает бюджет пода.
-                if not n or not cap_ops_d or n["ops_s"] is None or not (cap_ops_d < n["ops_s"] <= 2.5 * cap_ops_d):
+                if not n or not cap_ops_d or n["ops_s"] is None or not (cap_ops_d < n["ops_s"] <= PROBE_WINDOW_MAX * cap_ops_d):
                     continue
             elif i != ctl_step:
                 continue
@@ -340,15 +342,16 @@ def main():
                 worst = max(worst, loss)
                 worst_ev = max(worst_ev, exp - seen)
                 p99 = hist_q(n["a"], n["b"], name, 0.99) if kind == "probe" else None
-                if label == "8.8.3" and loss > PROBE_LOSS_MAX:
-                    bad.append(f"{s['name']}/{name}: потеря {loss:.2%}")
+                if label == "8.8.3" and exp - seen >= PROBE_LOSS_MAX_EVENTS:
+                    bad.append(f"{s['name']}/{name}: потеряно {exp - seen:.0f} соб. ({loss:.2%})")
                 if label == "8.8.4" and exp - seen >= CTL_LOSS_MAX_EVENTS:
                     bad.append(f"{s['name']}/{name}: потеряно {exp - seen:.0f} соб. ({loss:.2%})")
                 if kind == "probe" and (p99 is None or p99 > PROBE_P99_MAX):
                     bad.append(f"{s['name']}/{name}: p99 возраста {'—' if p99 is None else f'{p99 * 1000:g} мс'} > {PROBE_P99_MAX * 1000:g}")
         if label == "8.8.3":
+            ref = f"; справочно по прежнему порогу {PROBE_LOSS_REF:.1%}: " + ("PASS" if worst <= PROBE_LOSS_REF else "FAIL")
             lines.append(verdict(label, role, (not bad) if judged else None,
-                                 (f"судимо {judged} пар (ступень×процесс; подача в (ёмкость, 2,5×ёмкость] = ({cap_ops_d:,.0f}, {2.5 * cap_ops_d:,.0f}] оп/с; ёмкость по реальным дропам), худшая потеря {worst:.2%}" if judged else "нет ступеней с подачей в (ёмкость, 2,5×ёмкость]") +
+                                 (f"судимо {judged} пар (ступень×процесс; подача в (ёмкость, 2×ёмкость] = ({cap_ops_d:,.0f}, {PROBE_WINDOW_MAX * cap_ops_d:,.0f}] оп/с; ёмкость по реальным дропам), худшая потеря {worst:.2%} ({worst_ev:.1f} соб.), порог плана — 0 событий{ref}" if judged else "нет ступеней с подачей в (ёмкость, 2×ёмкость]") +
                                  (f"; нарушения: {'; '.join(bad)}" if bad else "")))
             continue
         if ctl_step is None:

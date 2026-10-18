@@ -43,6 +43,19 @@ json.dump([x for x in a if x["comm"] != "c3"], open(f, "w"))
 PY
 o=$(v "$T/norec"); has "$o" '8\.8\.6 pod1c: FAIL.*recall 14/16' && ok "recall 14/16: FAIL при любом составе" || { bad "recall"; echo "$o"; }
 
+# алерт на генератор (comm e6load) есть только без нагрузки — прибор, не детект: PASS; тот же rule_id на процессе атаки судится
+mk "$T/genb" "$BASE_IDS c2_gen"; python3 - "$T/genb" <<'PY'
+import json, sys
+f = sys.argv[1] + "/final-alerts-20261018_100000.json"; a = json.load(open(f))
+for x in a:
+    if x["rule_id"] == "c2_gen": x["comm"] = "e6load"
+json.dump(a, open(f, "w"))
+PY
+v2() { ATT_TIMER_REG="$T/reg.txt" bash "$SCRIPT" pod1c "$1" "$T/genb" 2>&1; }
+o=$(v2 "$T/same"); has "$o" '8\.8\.6 pod1c: PASS' && ok "выпал только алерт на генератор: PASS" || { bad "генератор"; echo "$o"; }
+mk "$T/atkb" "$BASE_IDS c2_gen"; o=$(ATT_TIMER_REG="$T/reg.txt" bash "$SCRIPT" pod1c "$T/same" "$T/atkb" 2>&1)
+has "$o" '8\.8\.6 pod1c: FAIL.*выпало 1: c2_gen' && ok "тот же rule_id на процессе атаки судится: FAIL" || { bad "rule_id на атаке"; echo "$o"; }
+
 if [ "${1:-}" = "--mutate" ]; then
     echo "── мутации эмиттера ──"
     mutate() { # mutate <имя> <sed> <минимум красных>
@@ -51,6 +64,7 @@ if [ "${1:-}" = "--mutate" ]; then
         n=$(VERDICT="$T/mut.sh" bash "$0" 2>&1 | grep -c '^FAIL')
         [ "$n" -ge "$3" ] && ok "мутация '$1' краснит $n фикстур" || bad "мутация '$1' краснит только $n (< $3)"
     }
+    mutate "алерты прибора судятся" 's/test("^(e6load|w88p|w88c\[0-9\]+)\$")/test("^$NEVER")/' 1
     mutate "реестр не читается" 's|^reg=\$(grep -vE.*|reg=""|' 2
     mutate "реестр не печатается" 's|\${skipped:+; не судится|${skippedX:+; не судится|' 1
     mutate "выпавшие не считаются" 's|\[ "\$nm" -eq 0 \] \|\| verdict=FAIL|true \|\| verdict=FAIL|' 2

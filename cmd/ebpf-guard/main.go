@@ -988,6 +988,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	ringbufFullTrackers := &kernelCounterRegistry{
 		sink: func(collector string, delta uint64) {
 			exporter.RecordDroppedN(collector, "ringbuf_full", delta)
+			// Волна 8.8: protected-роутер блокируется на полной очереди, и потеря
+			// под перегрузкой уходит сюда — она обязана делать агент degraded так
+			// же, как потеря в юзерспейсе. fileaccess — единственный bulk-владелец кольца.
+			exporter.RecordKernelDropN(collector, delta, collector != "fileaccess")
 		},
 	}
 	// emittedTrackers holds the events_emitted_counters map for the same
@@ -1610,6 +1614,14 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 	eventQueueDepth := cfg.BPF.EventQueueDepth
 	if eventQueueDepth <= 0 {
 		eventQueueDepth = engineCfg.BufferSize
+	}
+	// Волна 8.8: под мягким пределом памяти (GOMEMLIMIT пода) полные очереди не
+	// должны упирать кучу в предел — см. capQueueDepthByMemLimit.
+	if capped, lowered := capQueueDepthByMemLimit(eventQueueDepth, debug.SetMemoryLimit(-1)); lowered {
+		slog.Info("event queue depth capped by the Go memory limit",
+			slog.Int("configured", eventQueueDepth), slog.Int("depth", capped),
+			slog.Int64("memory_limit_bytes", debug.SetMemoryLimit(-1)))
+		eventQueueDepth = capped
 	}
 
 	// P0-25: Separate event queues by priority to prevent network/dns event loss.
@@ -3065,6 +3077,10 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Потери кольца ядра входят в числитель (RecordKernelDropN): слив раз
+				// в секунду, а не по 15-секундному тику — иначе 10-секундное окно
+				// получало бы их пачкой и мигало.
+				ringbufFullTrackers.drain()
 				// 5.9.9.F.3g (finding #139): both hops now feed the numerator, not
 				// just router_to_queue — see exporter.HighPriorityDropTotal.
 				hiDrop, loDrop := exporter.HighPriorityDropTotal(), exporter.LowPriorityDropTotal()

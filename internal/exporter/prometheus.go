@@ -1130,6 +1130,33 @@ func RecordEventDrop(collector, hop string, highPriority bool) {
 	dropBreakdownMu.Unlock()
 }
 
+// RecordKernelDropN feeds n events lost in the kernel (reason ringbuf_full,
+// read as a periodic delta of the BPF counter) into the same protected/bulk
+// totals and drop-time watchers that RecordEventDrop feeds. The Prometheus
+// series is published by the caller (RecordDroppedN); this only makes the
+// loss visible to /health and the loss fraction.
+//
+// Волна 8.8, обвал за потолком: protected-роутер блокируется на полной
+// очереди, и потеря под перегрузкой переезжает из router_to_queue в кольцо
+// ядра. Без этой функции она перестала бы делать агент degraded — счётчики
+// деградации видели только хопы юзерспейса.
+func RecordKernelDropN(collector string, n uint64, highPriority bool) {
+	if n == 0 {
+		return
+	}
+	now := time.Now().UnixNano()
+	if highPriority {
+		lastHighPriorityDropTime.Store(now)
+		highPriorityDropTotal.Add(int64(n))
+	} else {
+		lastLowPriorityDropTime.Store(now)
+		lowPriorityDropTotal.Add(int64(n))
+	}
+	dropBreakdownMu.Lock()
+	dropBreakdown[dropHop{collector, "ringbuf_full"}] += n
+	dropBreakdownMu.Unlock()
+}
+
 // HighPriorityDropTotal returns the cumulative count of high-priority
 // (protected-queue) drops recorded via RecordEventDrop at ANY hop —
 // ringbuf_to_router and router_to_queue alike (see highPriorityDropTotal).

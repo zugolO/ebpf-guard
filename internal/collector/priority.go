@@ -28,7 +28,13 @@ type PriorityEventCollector struct {
 	droppedFn       func(collectorName string, isHighPriority bool)
 	acceptedFn      func(collectorName string, isHighPriority bool)
 	logger          *slog.Logger
-	dropLogger      *dropLogger
+	// dropLog is logger bound to the collector name once, at construction.
+	// Binding it per drop (logger.With in the drop callback) allocated a new
+	// handler on every dropped event: at the 1-core pod's max step that was
+	// 7% of CPU plus the GC it fed — the drop path got dearer exactly when
+	// drops were most frequent (волна 8.8, обвал за потолком).
+	dropLog    *slog.Logger
+	dropLogger *dropLogger
 }
 
 // NewPriorityEventCollector creates a new priority-aware collector wrapper.
@@ -47,6 +53,7 @@ func NewPriorityEventCollector(c Collector, highPriorityCh, lowPriorityCh chan<-
 		droppedFn:       droppedFn,
 		acceptedFn:      acceptedFn,
 		logger:          logger,
+		dropLog:         logger.With(slog.String("collector", c.Name())),
 		dropLogger:      newDropLogger(5 * time.Second),
 	}
 }
@@ -142,7 +149,7 @@ func (p *PriorityEventCollector) routeEvent(ctx context.Context, event types.Eve
 	dropped := false
 	droppedFunc := func() {
 		dropped = true
-		p.dropLogger.record(p.logger.With(slog.String("collector", p.collector.Name())), "router_to_queue")
+		p.dropLogger.record(p.dropLog, "router_to_queue")
 		if p.droppedFn != nil {
 			p.droppedFn(p.collector.Name(), isHighPriority)
 		}

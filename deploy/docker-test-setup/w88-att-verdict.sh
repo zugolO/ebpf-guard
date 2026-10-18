@@ -3,10 +3,14 @@
 #   w88-att-verdict.sh <роль> <ATT под нагрузкой> [ATT без нагрузки]
 # ATT — каталог <OUT>/attack прогона w88-load.sh <роль> attack. recall — формула секции 7 гейта (w85-close-report.sh recall).
 # Состав = множество rule_id НОВЫХ алертов (final минус baseline); выпавшие = есть без нагрузки, нет под нагрузкой.
+# Типы из attacks/att-composition-timer.txt (Rego-двойники фонового таймера ноды, один отчёт на жизнь процесса) не судятся, но
+# ПЕЧАТАЮТСЯ. Ось не переведена на details.base_rule_id: проверено на r4a хоста — она создаёт расхождение у близнецов, которых Rego
+# переименовывает в одно имя (netintr_dns_high_entropy_query → long_dns_query), и красит прежний PASS.
 # PASS: recall 16/16 и выпавших 0. Нет прогона без нагрузки — состав НЕИЗМЕРИМ (recall судится отдельно, но метка не PASS).
 set -u
 ROLE=${1:?роль}; ATT=${2:?ATT}; BASE=${3:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
+REG=${ATT_TIMER_REG:-$HERE/attacks/att-composition-timer.txt}
 ids() { # ids <каталог> — rule_id новых алертов, по строке
     local b f
     b=$(ls "$1"/baseline-alerts-*.json 2> /dev/null | tail -1); f=$(ls "$1"/final-alerts-*.json 2> /dev/null | tail -1)
@@ -24,7 +28,10 @@ if [ -z "$BASE" ]; then
 fi
 base=$(ids "$BASE") || { echo "8.8.6 $ROLE: НЕИЗМЕРИМ — нет снимков алертов без нагрузки ($BASE)"; exit 0; }
 nb=$(printf '%s\n' "$base" | grep -c .)
-miss=$(comm -23 <(printf '%s\n' "$base" | sort -u) <(printf '%s\n' "$under" | sort -u))
+miss_all=$(comm -23 <(printf '%s\n' "$base" | sort -u) <(printf '%s\n' "$under" | sort -u))
+reg=$(grep -vE '^[[:space:]]*(#|$)' "$REG" 2> /dev/null | sort -u)
+miss=$(comm -23 <(printf '%s\n' "$miss_all" | grep . | sort -u) <(printf '%s\n' "$reg" | grep . | sort -u))
+skipped=$(comm -12 <(printf '%s\n' "$miss_all" | grep . | sort -u) <(printf '%s\n' "$reg" | grep . | sort -u) | tr '\n' ' ')
 nm=$(printf '%s' "$miss" | grep -c .)
 verdict=PASS; [ "$rd" = "$rt" ] && [ "$rt" = 16 ] && [ "$nm" -eq 0 ] || verdict=FAIL
-echo "8.8.6 $ROLE: $verdict — recall $rd/$rt${rm:+ (не пойманы: $rm)}; типов детекта без нагрузки $nb, под нагрузкой $nl, выпало $nm${miss:+: $(printf '%s' "$miss" | head -8 | tr '\n' ' ')}"
+echo "8.8.6 $ROLE: $verdict — recall $rd/$rt${rm:+ (не пойманы: $rm)}; типов детекта без нагрузки $nb, под нагрузкой $nl, выпало $nm${miss:+: $(printf '%s' "$miss" | head -8 | tr '\n' ' ')}${skipped:+; не судится (реестр фонового таймера, attacks/att-composition-timer.txt): ${skipped% }}"

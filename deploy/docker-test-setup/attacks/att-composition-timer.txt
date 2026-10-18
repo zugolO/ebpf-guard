@@ -12,3 +12,11 @@
 # (все совпадения дошли до движка), suppressed{already_reported} = 25, выдано 2. Без нагрузки (att0) те же 2 вышли внутри окна
 # (01:38:05; 21 = 2 + 19), на r4a — 12:15:29 (15 = 2 + 13). Событие не терялось ни в одном прогоне.
 k8s_token_access
+#
+# c2_high_port_outbound / netintr_high_port_established / netintr_loopback_high_port — алерты на ГЕНЕРАТОР нагрузки (comm=e6load), а не на
+# пакет атак: правила требуют dport > 40000, а w87-e6-loadgen слушает 127.0.0.1:0 — эфемерный порт случайный (32768–60999). Прогон 18.10
+# под 2 ядра: алертов 0 и ни одной серии (alerts_total/dedup) при 1,19 млн сетевых событий — порт выпал ≤ 40000; в базе podatt0 (f2) 24
+# алерта, в f1-podattd 114 (dedup 455 тыс.). Присутствие типа определяет жребий порта измерителя.
+c2_high_port_outbound
+netintr_high_port_established
+netintr_loopback_high_port

@@ -1,7 +1,7 @@
 # ebpf-guard Makefile
 # Requires: go 1.23+, clang, llvm, kernel headers
 
-.PHONY: all generate build build-core build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker helm-lint bench bench-store bench-save-baseline bench-compare pgo-profile pgo-update build-pgo package package-deb package-rpm
+.PHONY: all generate build build-core build-full build-rego build-kafka build-tui test test-norace test-full rule-test lint clean docker docker-full helm-lint bench bench-store bench-save-baseline bench-compare pgo-profile pgo-update build-pgo package package-deb package-rpm
 
 # Variables
 BINARY_NAME := ebpf-guard
@@ -64,17 +64,16 @@ generate:
 	@echo "  Removing stub bindings now superseded by generated files..."
 	@rm -f internal/bpf/*_bpf_gen.go
 
-# Build the main binary — THE build that goes to the stand and to the image.
+# Build the main binary — THE build that goes to the stand ("full": core + rego).
 #
-# -tags rego is NOT optional here. The product default is policy.rego.enabled:
-# true (internal/config), and a binary built without the tag answers that
-# config with a hard stop: the Rego engine is a build-tag-gated no-op, so the
-# shipped default configuration does not start. A `make build` that produced
-# such a binary meant the standard build was a configuration the product
-# itself refuses ([[make-build-drops-rego-tag]]) — and, worse, the service
-# unit on the stand launches $(BUILD_DIR)/$(BINARY_NAME) by that exact name,
-# so build-rego's separate $(BINARY_NAME)-rego artifact was never the thing
-# under test.
+# Since wave 9 (Д15) the PRODUCT default is core: policy.rego.enabled is false and
+# the image/chart ship the binary built without the tag (`make docker`,
+# `make build-core`). `make build` stays the FULL artifact on purpose — the stand
+# unit launches $(BUILD_DIR)/$(BINARY_NAME) by that exact name and the night
+# labels read the Rego layer — so it must carry -tags rego, and the stand's config
+# sets policy.rego.enabled: true explicitly. A binary without the tag run with
+# policy.rego.enabled: true is not a hard stop but a loud warning (main.go) and no
+# policy is evaluated ([[make-build-drops-rego-tag]]).
 #
 # Acceptance, and the reason this is one line and not a comment:
 #   make build && ./build/ebpf-guard version   # must print rego=true
@@ -156,9 +155,14 @@ clean:
 	go clean
 
 # Build Docker image
+# core — умолчание образа (без Rego); full — отдельный тег с движком Rego (Д15, волна 9).
 docker:
-	@echo "Building Docker image..."
+	@echo "Building Docker image (core, no rego)..."
 	docker build -t ebpf-guard:latest .
+
+docker-full:
+	@echo "Building Docker image (full: -tags rego)..."
+	docker build --build-arg GO_TAGS=rego -t ebpf-guard:latest-full .
 
 # Lint Helm charts
 helm-lint:

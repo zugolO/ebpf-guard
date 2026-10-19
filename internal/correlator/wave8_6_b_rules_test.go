@@ -106,10 +106,12 @@ const w86bOldNotifyOnRelease = `
     action: block
 `
 
-// web_path_traversal_process: процесс — веб-воркер И путь — обход.
+// owasp_path_traversal (после слияния web_path_traversal_process, волна 9/Д18):
+// процесс — веб-воркер И путь — обход. Предикат 8.6 переехал вместе с правилом.
 func TestW86B_WebPathTraversalProcess_Predicate(t *testing.T) {
 	re := w86bShipped(t)
-	const id = "web_path_traversal_process"
+	const id = "owasp_path_traversal"
+	const oldID = "web_path_traversal_process"
 	attack := []struct{ comm, path string }{
 		{"nginx", "/var/www/html/../../etc/passwd"},
 		{"apache2", "/var/www/..\\..\\windows\\win.ini"},
@@ -136,11 +138,15 @@ func TestW86B_WebPathTraversalProcess_Predicate(t *testing.T) {
 	for _, c := range benign {
 		assert.Falsef(t, w86bFires(re, w86bFile(c.comm, c.path, 0, w86oRdonlyCloexec), id), "%s %s — не обход веб-воркером", c.comm, c.path)
 	}
+	// Слияние (Д18): старого id в поставке больше нет, а все его признаки — под новым.
+	for _, r := range func() []Rule { rs, _ := LoadRulesFromDir("../../rules"); return rs }() {
+		assert.NotEqual(t, oldID, r.ID, "web_path_traversal_process влит в owasp_path_traversal и не должен вернуться")
+	}
 	// Мутация: прежний предикат срабатывает на читателе /usr/lib/python3/….
 	old := w86bOldRule(t, w86bOldPathTraversal)
-	assert.True(t, w86bFires(old, w86bFile("python3", "/usr/lib/python3/dist-packages/x/../y.py", 0, 0), id),
+	assert.True(t, w86bFires(old, w86bFile("python3", "/usr/lib/python3/dist-packages/x/../y.py", 0, 0), oldID),
 		"прежнее условие обязано срабатывать на bash/python-читателе — иначе негативные случаи не различают")
-	assert.True(t, w86bFires(old, w86bFile("cat", "/opt/nginx/../etc/hosts", 0, 0), id), "прежнее: имя сервера в пути, процесс — cat")
+	assert.True(t, w86bFires(old, w86bFile("cat", "/opt/nginx/../etc/hosts", 0, 0), oldID), "прежнее: имя сервера в пути, процесс — cat")
 }
 
 func w86bCgroupRules(t *testing.T) []struct {

@@ -85,7 +85,8 @@ func TestProfilePresets_LiteIsSmallerThanProduction(t *testing.T) {
 	assert.Less(t, lite.MaxTrackedPIDs, prod.MaxTrackedPIDs)
 	assert.False(t, lite.SequenceEnabled)
 	assert.False(t, lite.LineageEnabled)
-	assert.True(t, prod.SequenceEnabled)
+	// Д4b (волна 9): SequenceProfiler — опция; ни один пресет его не включает.
+	assert.False(t, prod.SequenceEnabled)
 	assert.True(t, prod.LineageEnabled)
 }
 

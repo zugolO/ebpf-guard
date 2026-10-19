@@ -41,6 +41,16 @@ data:
       anomaly_threshold: {{ .Values.config.profiler.anomaly_threshold }}
       ewma_weight: {{ .Values.config.profiler.ewma_weight }}
       profile_ttl: {{ .Values.config.profiler.profile_ttl }}
+      sequence:
+        enabled: {{ dig "sequence" "enabled" false .Values.config.profiler }}
+
+    {{- $regoOn := dig "policy" "rego" "enabled" false .Values.config }}
+    {{- if and $regoOn (ne (.Values.image.variant | default "core") "full") }}
+    {{- fail "config.policy.rego.enabled=true requires image.variant=full (the core image is built without the rego tag, Д15)" }}
+    {{- end }}
+    policy:
+      rego:
+        enabled: {{ $regoOn }}
 
     alerting:
       enabled: {{ .Values.config.alerting.enabled }}

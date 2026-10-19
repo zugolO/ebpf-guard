@@ -663,6 +663,12 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 			},
 		}
 		prof = profiler.NewProfilerWithContext(ctx, profCfg, slog.Default())
+		if cfg.Profiler.Sequence.Enabled {
+			slog.Info("profiler: sequence profiler ENABLED (opt-in, Д4b) — cosine distance per syscall window",
+				slog.Int("window_size", cfg.Profiler.Sequence.WindowSize))
+		} else {
+			slog.Info("profiler: sequence profiler disabled (default since wave 9, Д4b); set profiler.sequence.enabled: true to opt in")
+		}
 		engineCfg.LineageTracker = prof.GetLineageTracker()
 		if err := prof.RegisterMetrics(prometheus.DefaultRegisterer); err != nil {
 			slog.Warn("profiler: failed to register Prometheus metrics",
@@ -694,7 +700,13 @@ func runAgent(cfgPath, logLevel string, dryRun bool, simulateMode bool, simulate
 				DisableSequenceThreshold: cfg.Watchdog.MemoryPressure.DisableSequenceThreshold,
 				DisableAllThreshold:      cfg.Watchdog.MemoryPressure.DisableAllThreshold,
 			}
-			seqProfilers := []watchdog.ControllableProfiler{prof.GetSequenceProfiler()}
+			// Д4b (волна 9): SequenceProfiler выключен по умолчанию. Тогда сбрасывать
+			// на уровне 1 нечего — сторож не получает пустышку, и его уровень 1
+			// честно называет себя «нечего отключать» (SequenceManaged=0).
+			var seqProfilers []watchdog.ControllableProfiler
+			if cfg.Profiler.Sequence.Enabled {
+				seqProfilers = append(seqProfilers, prof.GetSequenceProfiler())
+			}
 			memWatcher := watchdog.NewMemoryPressureWatcherWithSequence(
 				memCfg, slog.Default(), seqProfilers, nil, nil,
 			)

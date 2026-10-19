@@ -14,9 +14,15 @@ RUN go mod download
 # Copy source code (including rules/ for embedded filesystem)
 COPY . .
 
+# Два артефакта (волна 9, Д15). GO_TAGS пуст — core: без OPA, policy.rego
+# выключен (умолчание образа и чарта). GO_TAGS=rego — full: движок Rego в
+# бинаре, включается ключом policy.rego.enabled. Образ full — отдельный тег
+# (-full), собирается `make docker-full` / release.yml.
+ARG GO_TAGS=""
+
 # Build the binary (CGO disabled for static binary)
 # Embed rules/ directory via Go embed.
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags rego \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${GO_TAGS:+-tags "$GO_TAGS"} \
     -ldflags="-w -s -X main.Version=$(git describe --tags --always || echo 'dev') -X main.Commit=$(git rev-parse --short HEAD || echo 'unknown') -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     -o ebpf-guard \
     ./cmd/ebpf-guard

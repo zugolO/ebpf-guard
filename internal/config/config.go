@@ -2322,8 +2322,11 @@ func setDefaults(v *viper.Viper) {
 	// kernels is up to 4194304 — effectively unbounded.
 	v.SetDefault("profiler.max_tracked_pids", 4096)
 
-	// Sequence profiler defaults
-	v.SetDefault("profiler.sequence.enabled", true)
+	// Sequence profiler defaults. Волна 9 (В1, Д4b): по умолчанию ВЫКЛЮЧЕН — в
+	// живом потоке событий его не читает никто (читает только EWMA-профиль,
+	// only-ewma-profile-reads-the-event-stream), а держать его — кучу и cosine на
+	// каждый syscall. Опция: profiler.sequence.enabled: true.
+	v.SetDefault("profiler.sequence.enabled", false)
 	v.SetDefault("profiler.sequence.window_size", 64)
 	v.SetDefault("profiler.sequence.threshold", 0.3)
 
@@ -2500,7 +2503,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("watchdog.cpu_pressure.scale_by_cpu_count", true)
 
 	// Policy defaults (Sprint 23.0)
-	v.SetDefault("policy.rego.enabled", true)
+	v.SetDefault("policy.rego.enabled", false) // Д15 (волна 9): core по умолчанию; Rego — сборка full + ключ
 	v.SetDefault("policy.rego.rules_dir", "rules/rego")
 
 	// Compat defaults (Sprint 24.0)

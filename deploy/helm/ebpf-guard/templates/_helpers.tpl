@@ -64,7 +64,11 @@ Container image.
 */}}
 {{- define "ebpf-guard.image" -}}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
+{{- if eq (.Values.image.variant | default "core") "full" }}
+{{- printf "%s:%s-full" .Values.image.repository $tag }}
+{{- else }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
+{{- end }}
 {{- end }}
 
 {{/*

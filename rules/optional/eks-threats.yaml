@@ -1,0 +1,38 @@
+## Amazon EKS-Specific Attack Detection Rules
+# MITRE ATT&CK: T1552.005 (Cloud Instance Metadata API), T1552.001 (Credentials in Files),
+#               T1528 (Steal Application Access Token), T1613 (Container Discovery)
+# Detects attacks specific to Amazon EKS: IMDS credential theft, IRSA / Pod Identity
+# token abuse, static AWS credential harvesting, and ECR supply-chain attacks.
+
+rules:
+  # ============================================================================
+  # T1552.005 — Cloud Instance Metadata API
+  # EC2 IMDS access from pod context
+  # ============================================================================
+
+  # STS calls from pods using IRSA should come from the expected AWS region and
+  # service endpoint. An unusual source IP or region indicates the OIDC token
+  # was exfiltrated and is being replayed from an attacker-controlled host.
+  - id: eks_irsa_unusual_assume_role
+    name: "EKS: IRSA AssumeRoleWithWebIdentity from unexpected source"
+    description: >
+      An IAM AssumeRoleWithWebIdentity call was detected in cloud audit logs.
+      While expected for IRSA-enabled pods, this rule flags the action for
+      correlation with T1528: an exfiltrated OIDC token being replayed from an
+      unexpected IP or from a pod that has never performed this action before.
+      Correlate with EWMA anomaly scoring for per-service-account baselines.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values:
+            - "aws"
+        - field: cloud.action
+          op: equals
+          values:
+            - "AssumeRoleWithWebIdentity"
+    severity: warning
+    action: alert
+    tags: [mitre:T1528, mitre:T1078.004, eks, aws, irsa, sts, privilege-escalation, cloud]

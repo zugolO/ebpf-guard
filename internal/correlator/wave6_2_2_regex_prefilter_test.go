@@ -77,7 +77,7 @@ func TestWave6_2_2_RegexPrefilterCoversHotRules(t *testing.T) {
 	// together ~35% of all per-event rule cost before this change.
 	for _, id := range []string{
 		"webshell_common_filename",
-		"web_path_traversal_process",
+		"owasp_path_traversal", // + влитый web_path_traversal_process (Д18)
 		"supply_chain_lockfile_recon",
 		"mitre_ngrok_tunnel",
 		"appexploit_xmrig_download",

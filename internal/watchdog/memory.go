@@ -60,9 +60,10 @@ type MemoryPressureWatcher struct {
 	normalRates map[string]float64 // saved rates before downgrade
 
 	// Metrics
-	pressureGauge  *prometheus.GaugeVec
-	pressureRatio  prometheus.Gauge
-	pressureLevel  prometheus.Gauge
+	pressureGauge   *prometheus.GaugeVec
+	pressureRatio   prometheus.Gauge
+	pressureLevel   prometheus.Gauge
+	sequenceManaged prometheus.Gauge
 }
 
 // MemoryConfig holds configuration for memory pressure handling.
@@ -151,7 +152,11 @@ func NewMemoryPressureWatcherWithSequence(
 		}),
 		pressureLevel: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "ebpf_guard_memory_pressure_level",
-			Help: "Memory pressure level: 0=normal, 1=sequence_profiling_disabled, 2=all_profiling_disabled",
+			Help: "Memory pressure level: 0=normal, 1=sequence_profiling_disabled, 2=all_profiling_disabled. Level 1 sheds nothing when ebpf_guard_memory_pressure_sequence_profilers is 0 (sequence profiler is opt-in since wave 9)",
+		}),
+		sequenceManaged: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_guard_memory_pressure_sequence_profilers",
+			Help: "Number of sequence profilers the memory-pressure watcher can shed at level 1 (0 = sequence profiling is off, the level is a no-op)",
 		}),
 	}
 
@@ -159,13 +164,14 @@ func NewMemoryPressureWatcherWithSequence(
 	w.pressureGauge.WithLabelValues("normal").Set(1)
 	w.pressureGauge.WithLabelValues("low").Set(0)
 	w.pressureLevel.Set(pressureLevelNormal)
+	w.sequenceManaged.Set(float64(len(sequenceProfilers)))
 
 	return w
 }
 
 // RegisterMetrics registers Prometheus metrics.
 func (w *MemoryPressureWatcher) RegisterMetrics(reg prometheus.Registerer) error {
-	for _, c := range []prometheus.Collector{w.pressureGauge, w.pressureRatio, w.pressureLevel} {
+	for _, c := range []prometheus.Collector{w.pressureGauge, w.pressureRatio, w.pressureLevel, w.sequenceManaged} {
 		if err := reg.Register(c); err != nil {
 			return err
 		}
@@ -230,7 +236,11 @@ func (w *MemoryPressureWatcher) checkMemory() {
 			w.enterAllDisabledMode()
 			w.setState(pressureLevelAllDisabled)
 		} else if availPct < w.disableSequenceThreshold {
-			w.logger.Warn("memory pressure: sequence profiling disabled",
+			msg := "memory pressure: sequence profiling disabled"
+			if len(w.sequenceProfilers) == 0 {
+				msg = "memory pressure: level 1 — sequence profiling is off already (opt-in), nothing to shed"
+			}
+			w.logger.Warn(msg,
 				slog.String("available_pct", fmt.Sprintf("%.1f%%", availPct)),
 				slog.String("threshold", fmt.Sprintf("%.1f%%", w.disableSequenceThreshold)),
 			)
@@ -396,5 +406,5 @@ func (w *MemoryPressureWatcher) PressureLevel() int {
 }
 
 // exported for tests — field accessors
-func (w *MemoryPressureWatcher) getLowMemoryThreshold() float64  { return w.disableSequenceThreshold }
-func (w *MemoryPressureWatcher) getRecoveryThreshold() float64   { return w.recoveryThreshold }
+func (w *MemoryPressureWatcher) getLowMemoryThreshold() float64 { return w.disableSequenceThreshold }
+func (w *MemoryPressureWatcher) getRecoveryThreshold() float64  { return w.recoveryThreshold }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Волна 8.6, заход B, шаг 1: живые контроли трёх правил, исправленных ПРЕДИКАТОМ (web_path_traversal_process,
+# Волна 8.6, заход B, шаг 1: живые контроли трёх правил, исправленных ПРЕДИКАТОМ (owasp_path_traversal — после слияния Д18 бывший web_path_traversal_process,
 # container_escape_cgroup_v1_release_agent, privesc_cgroup_notify_on_release). Положительный контроль — настоящий процесс
 # с настоящим comm (копия /bin/cat под именем nginx, копия tee, python3 с сырым openat), НЕ шебанг-скрипт; перед каждым
 # контролем в журнал пишется /proc/self/comm процесса. Отрицательный — штатный читатель того же пути.
@@ -30,8 +30,8 @@ run() { # <имя> <ожидание: <rule>:<comm>:<yes|no> ...> -- коман�
 # comm процесса печатается самим процессом (шебанг-сторож: ноль без предъявленного comm не читается как провал)
 showcomm() { "$@"; }
 # --- положительные -------------------------------------------------------------------------------
-run P1_nginx_traversal  web_path_traversal_process:nginx:yes -- $W/bin/nginx $W/www/html/../../../../etc/hostname
-run P1b_python_traversal web_path_traversal_process:python3:yes -- python3 - <<PY
+run P1_nginx_traversal  owasp_path_traversal:nginx:yes -- $W/bin/nginx $W/www/html/../../../../etc/hostname
+run P1b_python_traversal owasp_path_traversal:python3:yes -- python3 - <<PY
 import ctypes
 libc = ctypes.CDLL(None, use_errno=True)
 libc.syscall.restype = ctypes.c_long
@@ -50,10 +50,10 @@ fd = libc.syscall(ctypes.c_long(257), ctypes.c_long(-100), ctypes.c_char_p(b"$W/
 print("fd", fd)
 PY
 # --- отрицательные -------------------------------------------------------------------------------
-run N1_cat_server_name_in_path web_path_traversal_process:cat:no -- $W/bin/cat $W/opt/nginx/../../../../etc/hostname
+run N1_cat_server_name_in_path owasp_path_traversal:cat:no -- $W/bin/cat $W/opt/nginx/../../../../etc/hostname
 run N2_cat_reads_release_agent container_escape_cgroup_v1_release_agent:cat:no privesc_cgroup_notify_on_release:cat:no -- $W/bin/cat $W/cgrp/release_agent
 run N3_cat_reads_notify privesc_cgroup_notify_on_release:cat:no -- $W/bin/cat $W/cgrp/notify_on_release
-run N4_python_reads_dist_packages web_path_traversal_process:python3:no -- python3 -c "print('comm=' + open('/proc/self/comm').read().strip()); open('/usr/lib/python3/dist-packages/apt/__init__.py').read(); print('read ok')"
+run N4_python_reads_dist_packages owasp_path_traversal:python3:no -- python3 -c "print('comm=' + open('/proc/self/comm').read().strip()); open('/usr/lib/python3/dist-packages/apt/__init__.py').read(); print('read ok')"
 run N5_tee_neighbour_name container_escape_cgroup_v1_release_agent:tee:no privesc_cgroup_notify_on_release:tee:no -- sh -c "echo x | $W/bin/tee $W/cgrp/release_agent.txt"
 alerts > "$OUT/alerts.json"
 python3 - "$OUT" "${CTLS[@]}" <<'PY'

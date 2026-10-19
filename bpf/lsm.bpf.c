@@ -315,34 +315,21 @@ int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *addr, int
 /* LSM hook: task_kill — called before sending signal
  *
  * Return 0 to allow, -EPERM to block
- * This hook is audit-only by default (always allows)
+ *
+ * Волна 9 (В1, Д17, решение владельца): аудит пишет ТОЛЬКО отказ. Сигналы
+ * разрешены всегда, поэтому запись в кольцо на каждый kill(2) была ценой без
+ * решения: кто кому какой сигнал послал — это шум ноды (systemd, runc, сам
+ * ядро-ресурс), а отказа в этом хуке нет. На сигналы остался один счётчик
+ * lsm_stats[LSM_STAT_TASK_KILL_ALLOW] → ebpf_guard_lsm_blocks_total{hook="task_kill",action="allow"}.
+ * Запись LSM_ACTION_AUDIT в кольцо больше не создаётся; Go-сторона
+ * (KmodCollector) на всякий случай не пишет в журнал и такие записи
+ * старого объекта и считает их в ebpf_guard_lsm_audit_skipped_total.
  */
 SEC("lsm/task_kill")
 int BPF_PROG(lsm_task_kill, struct task_struct *target, struct kernel_siginfo *info,
 	     int sig, const struct cred *cred)
 {
-	__u32 pid = bpf_get_current_pid_tgid() >> 32;
-
-	/* Always allow but emit an audit event recording who signalled whom */
 	update_stat(LSM_STAT_TASK_KILL_ALLOW);
-
-	struct lsm_audit_event *ae = bpf_ringbuf_reserve(&lsm_events,
-				sizeof(struct lsm_audit_event), 0);
-	if (ae) {
-		ae->type         = EVENT_TYPE_LSM_AUDIT;
-		ae->timestamp_ns = bpf_ktime_get_ns();
-		ae->pid          = pid;
-		ae->uid          = (__u32)bpf_get_current_uid_gid();
-		ae->target_pid   = (__u32)BPF_CORE_READ(target, tgid);
-		ae->action       = LSM_ACTION_AUDIT;
-		ae->hook         = LSM_HOOK_TASK_KILL;
-		ae->sig          = (__u8)sig;
-		ae->cgroup_id    = bpf_get_current_cgroup_id(); /* хвост п. 8 ревизии 6.6 */
-		bpf_get_current_comm(&ae->comm, sizeof(ae->comm));
-		__builtin_memset(&ae->path, 0, sizeof(ae->path));
-		bpf_ringbuf_submit(ae, 0);
-	}
-
 	return 0;
 }
 

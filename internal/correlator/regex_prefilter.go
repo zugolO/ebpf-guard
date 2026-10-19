@@ -18,7 +18,7 @@ import (
 //
 //	".*(c99|r57|…|backdoor)\\.php$"                webshell_common_filename
 //	".*/package-lock\\.json$"                      supply_chain_lockfile_recon
-//	"(nginx|apache|…|webrick).*?(\\.\\.|%2e|…)"    web_path_traversal_process
+//	"(nginx|apache|…|webrick).*?(\\.\\.|%2e|…)"    web_path_traversal_process (влито в owasp_path_traversal, волна 9)
 //
 // Two properties make those pathological on an idle node, where 98.7% of all
 // events are file events and essentially none of the paths can ever match:

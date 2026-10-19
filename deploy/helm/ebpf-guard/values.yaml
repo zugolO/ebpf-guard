@@ -3,6 +3,10 @@
 image:
   repository: zugolO/ebpf-guard
   tag: ""  # Defaults to .Chart.AppVersion
+  # Д15 (волна 9): "core" (умолчание) — образ без движка Rego, policy.rego выключен;
+  # "full" — образ с тегом -full (собран с -tags rego). С full политики включаются
+  # отдельно: config.policy.rego.enabled: true (иначе движок в образе не работает).
+  variant: core
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -464,6 +468,9 @@ config:
     anomaly_threshold: 0.8
     ewma_weight: 0.3
     profile_ttl: 86400
+    # Д4b (волна 9): SequenceProfiler (cosine по окну syscall) — опция, по умолчанию выключен.
+    sequence:
+      enabled: false
 
   alerting:
     enabled: false
@@ -477,6 +484,12 @@ config:
     enabled: true
     kubeconfig_path: ""
     resync_period: 300
+
+  # Д15 (волна 9): Rego — опция сборки full. true требует image.variant: full
+  # (иначе рендер падает: в core-образе движка нет).
+  policy:
+    rego:
+      enabled: false
 
   auth:
     enabled: true

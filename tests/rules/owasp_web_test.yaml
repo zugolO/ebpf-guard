@@ -196,3 +196,37 @@ tests:
         op: read
     expect: alert
     expect_severity: critical
+
+  # Волна 9 (В1/Д18): web_path_traversal_process влит сюда — его семейства comm и
+  # регистронезависимые формы кодирования.
+  - name: "merged web_path_traversal_process: python3 + mixed-case encoded traversal fires owasp_path_traversal"
+    rule_id: owasp_path_traversal
+    event:
+      type: file
+      comm: "python3"
+      file:
+        filename: "/srv/app/%2E%2E%5Cetc/passwd"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "merged web_path_traversal_process: php-fpm8.1 + overlong UTF-8 dot fires owasp_path_traversal"
+    rule_id: owasp_path_traversal
+    event:
+      type: file
+      comm: "php-fpm8.1"
+      file:
+        filename: "/srv/app/%C0%AE%C0%AE/etc/passwd"
+        op: open
+    expect: alert
+    expect_severity: critical
+
+  - name: "merged web_path_traversal_process: python3 reading its own dist-packages does not fire"
+    rule_id: owasp_path_traversal
+    event:
+      type: file
+      comm: "python3"
+      file:
+        filename: "/usr/lib/python3/dist-packages/apt/cache.py"
+        op: open
+    expect: no_alert

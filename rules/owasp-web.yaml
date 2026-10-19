@@ -39,6 +39,12 @@ rules:
             - "\\.\\.\\\\"
             - "%2e%2e%2f"
             - "%252e%252e%252f"
+            # Волна 9 (В1/Д18): регистронезависимые и смешанные формы из
+            # web_path_traversal_process (%2E%2E%5C, ..%2f, %C0%AE).
+            - "(?i)%2e%2e(%2f|%5c)"
+            - "(?i)%252e%252e(%252f|%255c)"
+            - "(?i)\\.\\.(%2f|%5c)"
+            - "(?i)%c0%ae"
       subgroups:
         - operator: or
           conditions:
@@ -46,6 +52,14 @@ rules:
               op: in
               values: ["nginx", "apache2", "httpd", "php-fpm", "node",
                         "python", "gunicorn", "uwsgi", "java", "tomcat"]
+            # Волна 9 (В1/Д18): слияние web_path_traversal_process сюда. Семейства
+            # comm, которые знал только он: python3/python3.11, php-fpm8.x, ruby и
+            # серверы за ними. Явный список выше остаётся — он ловит те же имена
+            # без цены regex; эта строка добавляет то, чего в списке нет.
+            - field: proc.comm
+              op: regex
+              values:
+                - "^(apache|lighttpd|caddy|traefik|php(-fpm|-cgi)?[0-9.]*|nodejs|python[0-9.]+|ruby|puma|unicorn|Passenger)$"
           # Wave 6.1 fix (finding №219): container.id proves web-workload role
           # for runtimes whose worker/request threads carry a comm OUTSIDE the
           # list above — Go binaries (comm = binary name), Tomcat (http-nio-*),
@@ -108,6 +122,14 @@ rules:
               op: in
               values: ["nginx", "apache2", "httpd", "php-fpm", "node",
                         "python", "gunicorn", "uwsgi", "java", "tomcat"]
+            # Волна 9 (В1/Д18): слияние web_path_traversal_process сюда. Семейства
+            # comm, которые знал только он: python3/python3.11, php-fpm8.x, ruby и
+            # серверы за ними. Явный список выше остаётся — он ловит те же имена
+            # без цены regex; эта строка добавляет то, чего в списке нет.
+            - field: proc.comm
+              op: regex
+              values:
+                - "^(apache|lighttpd|caddy|traefik|php(-fpm|-cgi)?[0-9.]*|nodejs|python[0-9.]+|ruby|puma|unicorn|Passenger)$"
           # Wave 6.1 fix (finding №219): container.id proves web-workload role
           # for runtimes whose worker/request threads carry a comm OUTSIDE the
           # list above — Go binaries (comm = binary name), Tomcat (http-nio-*),

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -124,10 +125,11 @@ func TestMemoryPressureWatcher_RegisterMetrics(t *testing.T) {
 	err := watcher.RegisterMetrics(reg)
 	require.NoError(t, err)
 
-	// Verify all three metrics are registered. Gather() returns families sorted by name.
+	// Verify all four metrics are registered. Gather() returns families sorted by name.
 	families, err := reg.Gather()
 	require.NoError(t, err)
-	require.Len(t, families, 3)
+	require.Len(t, families, 4)
+	assert.Equal(t, "ebpf_guard_memory_pressure_sequence_profilers", *families[3].Name)
 	assert.Equal(t, "ebpf_guard_memory_pressure_level", *families[0].Name)
 	assert.Equal(t, "ebpf_guard_memory_pressure_mode", *families[1].Name)
 	assert.Equal(t, "ebpf_guard_memory_pressure_ratio", *families[2].Name)
@@ -337,4 +339,23 @@ func BenchmarkMemoryPressureWatcher_ReadMemInfo(b *testing.B) {
 			b.Skip("/proc/meminfo not available")
 		}
 	}
+}
+
+// 9.1 / Д4b (волна 9): SequenceProfiler выключен по умолчанию — сторож не получает
+// пустышку, серия ..._sequence_profilers честно говорит 0, уровень 1 ничего не
+// сбрасывает (но и не ломается), а с профайлером в списке серия равна числу списка.
+func TestMemoryPressureWatcher_SequenceOffIsHonest(t *testing.T) {
+	cfg := MemoryConfig{Enabled: true, DisableSequenceThreshold: 30, DisableAllThreshold: 10, RecoveryThreshold: 50}
+
+	off := NewMemoryPressureWatcherWithSequence(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)), nil, nil, nil)
+	assert.Equal(t, 0.0, testutil.ToFloat64(off.sequenceManaged), "профайлера нет — серия 0")
+	off.mu.Lock()
+	off.enterSequenceDisabledMode() // не паникует на пустом списке
+	off.setState(pressureLevelSequenceDisabled)
+	off.mu.Unlock()
+	assert.Equal(t, 1, off.PressureLevel())
+
+	p := newMockProfiler()
+	on := NewMemoryPressureWatcherWithSequence(cfg, nil, []ControllableProfiler{p}, nil, nil)
+	assert.Equal(t, 1.0, testutil.ToFloat64(on.sequenceManaged), "профайлер в списке — серия 1")
 }

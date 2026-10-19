@@ -1,0 +1,40 @@
+## Google Kubernetes Engine (GKE) Attack Detection Rules
+# MITRE ATT&CK: T1552.005 (Cloud Instance Metadata API), T1552.001 (Credentials in Files),
+#               T1528 (Steal Application Access Token), T1613 (Container Discovery),
+#               T1078 (Valid Accounts)
+# Detects attacks specific to GKE: metadata server exploitation, workload identity
+# abuse, GCP service account key theft, and GKE-specific lateral movement paths.
+
+rules:
+  # ============================================================================
+  # T1552.005 — Cloud Instance Metadata API
+  # GKE metadata server access — service account token theft
+  # ============================================================================
+
+  # Creating a new service account key in GCP is a persistence mechanism:
+  # attackers with iam.serviceAccountKeys.create permission create a key as
+  # a backdoor that survives credential rotation and pod replacement.
+  - id: gke_service_account_key_creation
+    name: "GKE: GCP service account key created — persistence"
+    description: >
+      A GCP IAM call created a new service account key via CreateServiceAccountKey.
+      Long-lived service account keys are a persistence mechanism (T1528, T1078.004):
+      an attacker with sufficient IAM permissions creates a JSON key as a backdoor
+      that survives Kubernetes pod rotation and node replacement. Prefer Workload
+      Identity Federation over service account keys; alert on any key creation
+      from within a Kubernetes workload context.
+    event_type: cloud_audit
+    condition_group:
+      operator: and
+      conditions:
+        - field: cloud.provider
+          op: equals
+          values:
+            - "gcp"
+        - field: cloud.action
+          op: contains
+          values:
+            - "CreateServiceAccountKey"
+    severity: critical
+    action: alert
+    tags: [mitre:T1528, mitre:T1078.004, gke, gcp, service-account-key, persistence, cloud]

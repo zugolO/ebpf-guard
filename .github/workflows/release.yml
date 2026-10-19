@@ -197,8 +197,19 @@ jobs:
         path: dist/*
 
   docker:
-    name: Build and Push Docker Image
+    name: Build and Push Docker Image (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Д15 (волна 9): core — умолчание (без Rego), full — отдельный тег -full.
+          - variant: core
+            go_tags: ""
+            suffix: ""
+          - variant: full
+            go_tags: rego
+            suffix: "-full"
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -226,6 +237,8 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        flavor: |
+          suffix=${{ matrix.suffix }},onlatest=true
         tags: |
           type=ref,event=tag
           type=semver,pattern={{version}}
@@ -241,10 +254,12 @@ jobs:
         context: .
         platforms: linux/amd64,linux/arm64
         push: true
+        build-args: |
+          GO_TAGS=${{ matrix.go_tags }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: type=gha,scope=${{ matrix.variant }}
+        cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
     - name: Sign container image
       env:

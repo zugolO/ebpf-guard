@@ -89,6 +89,16 @@ func TestDeadRulesShippedSetOnStandConfig(t *testing.T) {
 	}
 	rep := re.DeadRules(internalbpf.DefaultMonitoredSyscalls(), off)
 	t.Logf("мёртвых %d из %d: %v", len(rep.Dead), rep.Loaded, rep.ByAxis)
-	require.Equal(t, 57, len(rep.Dead), "ожидаемый список на конфиге стенда — 57 правил; ось: %v", rep.ByAxis)
-	require.Equal(t, rep.Loaded-57, rep.Live)
+	// Волна 9 (В1, Д15): 34 cloud_audit + 9 gpu + 3 io_uring вынесены из
+	// поставки в rules/optional — из 57 названных остаются 11.
+	require.Equal(t, 11, len(rep.Dead), "ожидаемый список на конфиге стенда — 11 правил; ось: %v", rep.ByAxis)
+	require.Equal(t, rep.Loaded-11, rep.Live)
+
+	// Поставляемый каталог не несёт правил на типах без источника по умолчанию.
+	for _, r := range rules {
+		switch r.EventType {
+		case types.EventCloudAudit, types.EventIOUring, types.EventGPU:
+			t.Errorf("правило %s (тип %s) вернулось в поставку: его место в rules/optional", r.ID, r.EventType)
+		}
+	}
 }

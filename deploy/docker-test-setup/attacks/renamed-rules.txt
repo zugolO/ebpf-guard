@@ -28,3 +28,4 @@
 #
 # ФОРМАТ (табуляция): <старый_id> <новый_id> <пункт волны>
 drift_new_exec_critical	drift_exec_from_system_bin	5.9.9.F.5g
+web_path_traversal_process	owasp_path_traversal	9-A/Д18: слияние (оба critical, веб-воркер + обход пути); условие владельца 15.10, исполнено волной 9

@@ -192,39 +192,9 @@ rules:
     action: alert
     tags: [web-attack, path-traversal, owasp, a01-broken-access-control, encoding-evasion]
 
-  # Волна 8.6, заход B, шаг 1 (15.10.2026). Описание обещает «веб-сервер открывает
-  # файл с обходом пути», а условие искало ИМЕНА СЕРВЕРОВ ВНУТРИ filename:
-  # `(nginx|…|python|node|java|…).*?(\.\.|%2e|%2f|…)` совпадало с любым путём, где
-  # встречается имя сервера и затем «..», «%2f» или «%c0» — читатель
-  # /usr/lib/python3/…, любой процесс. По G0: литерал проходил 17 883 раза за
-  # 200 000 событий, regex — впустую, 15,7% CPU движка. Предикат приведён к
-  # описанию: процесс — веб-воркер (proc.comm), путь — обход. Дешёвая половина
-  # (comm, короткая строка с якорями) стоит первой.
-  # Сужение условия, id тот же → attacks/new-rules.txt. Заодно путь: одиночные
-  # «%2f», «%5c», «%c0» без «..» — обычные символы имени, не обход.
-  - id: web_path_traversal_process
-    name: "Web Attack: Path traversal by web server process"
-    description: "Web server process accessing files with path traversal patterns (reduces false positives vs. generic traversal rule)"
-    event_type: file
-    condition_group:
-      operator: and
-      conditions:
-        - field: proc.comm
-          op: regex
-          values:
-            - "^(nginx|apache2?|httpd|lighttpd|caddy|traefik|php(-fpm|-cgi)?[0-9.]*|node(js)?|python[0-9.]*|gunicorn|uwsgi|java|ruby|puma|unicorn|Passenger)$"
-        - field: filename
-          op: regex
-          values:
-            - "\\.\\./"
-            - "\\.\\.\\\\"
-            - "(?i)%2e%2e(%2f|%5c)"
-            - "(?i)%252e%252e(%252f|%255c)"
-            - "(?i)\\.\\.(%2f|%5c)"
-            - "(?i)%c0%ae"
-    severity: critical
-    action: alert
-    tags: [web-attack, path-traversal, owasp, a01-broken-access-control, web-server]
+  # web_path_traversal_process влит в owasp_path_traversal (rules/owasp-web.yaml):
+  # волна 9, В1/Д18, «почти дубль» — оба critical, оба «веб-воркер + обход пути».
+  # Старое имя читается гейтом как новое (attacks/renamed-rules.txt).
 
   # ============================================================================
   # Additional File-Based Attack Rules

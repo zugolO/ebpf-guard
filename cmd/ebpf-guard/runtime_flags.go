@@ -8,6 +8,7 @@ import (
 	"github.com/zugolO/ebpf-guard/internal/config"
 	"github.com/zugolO/ebpf-guard/internal/correlator"
 	"github.com/zugolO/ebpf-guard/internal/exporter"
+	"github.com/zugolO/ebpf-guard/internal/policy"
 	"github.com/zugolO/ebpf-guard/internal/profstage"
 )
 
@@ -21,6 +22,12 @@ func publishRuntimeFlags(cfg *config.Config) {
 	exporter.SetRuntimeFlag("pprof_stage_labels", profstage.Enabled())
 	exporter.SetRuntimeFlag("enable_pprof", cfg.Server.EnablePprof)
 	exporter.SetRuntimeFlag("pprof_block_mutex", pprofBlockMutexOn())
+	// Д15/Д4b (волна 9): что реально работает в процессе, а не что в конфиге.
+	exporter.SetRuntimeFlag("rego_built", policy.Supported)
+	exporter.SetRuntimeFlag("rego_config", cfg.Policy.Rego.Enabled)
+	// Слой реально оценивает политики только при обоих условиях: сборка full и ключ.
+	exporter.SetRuntimeFlag("rego_active", policy.Supported && cfg.Policy.Rego.Enabled)
+	exporter.SetRuntimeFlag("sequence_profiler", cfg.Profiler.Enabled && cfg.Profiler.Sequence.Enabled)
 	exporter.SetRuntimeFlag("arg_predicates_config", cfg.BPF.KernelFilter.ArgPredicates.Enabled)
 	iv := cfg.BPF.KernelFilter.ArgPredicates.CountersInterval
 	if iv <= 0 {

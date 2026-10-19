@@ -120,7 +120,7 @@ func ProfilePresets(profile string) (ProfileDefaults, error) {
 			ProcessesMap:    16384,
 			ConnectionsMap:  32768,
 			MaxTrackedPIDs:  4096,
-			SequenceEnabled: true,
+			SequenceEnabled: false, // Д4b (волна 9): опция, не умолчание
 			LineageEnabled:  true,
 		}, nil
 	case ProfileProduction:
@@ -129,7 +129,7 @@ func ProfilePresets(profile string) (ProfileDefaults, error) {
 			ProcessesMap:    32768,
 			ConnectionsMap:  65536,
 			MaxTrackedPIDs:  8192,
-			SequenceEnabled: true,
+			SequenceEnabled: false, // Д4b (волна 9): опция, не умолчание
 			LineageEnabled:  true,
 		}, nil
 	default:

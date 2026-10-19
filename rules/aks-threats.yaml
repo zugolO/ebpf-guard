@@ -158,33 +158,3 @@ rules:
   # ============================================================================
   # T1078.004 — Valid Cloud Accounts: Managed Identity token abuse (cloud audit)
   # ============================================================================
-
-  # An unusual or denied Azure IMDS token request recorded in Azure Activity Logs
-  # may indicate an attacker probing the managed identity endpoint or using a
-  # stolen token. The error_code field captures denied requests; empty error_code
-  # means the call succeeded (successful token issuance is also tracked).
-  - id: aks_managed_identity_token_abuse
-    name: "AKS: Azure managed identity token request — possible abuse"
-    description: >
-      A cloud audit event recorded an Azure managed identity OAuth2 token request
-      (via IMDS or managed identity endpoint). From an AKS cluster context, token
-      requests by unexpected workloads — especially those calling Azure Key Vault,
-      ARM, or Storage outside their expected scope — indicate T1078.004: an attacker
-      using a stolen or freshly acquired managed identity token to access Azure
-      resources beyond the pod's intended permissions.
-    event_type: cloud_audit
-    condition_group:
-      operator: and
-      conditions:
-        - field: cloud.provider
-          op: equals
-          values:
-            - "azure"
-        - field: cloud.action
-          op: in
-          values:
-            - "microsoft.compute/virtualmachines/extensions/read"
-            - "microsoft.managedidentity/userassignedidentities/federatedidentitycredentials/read"
-    severity: warning
-    action: alert
-    tags: [mitre:T1078.004, mitre:T1552.005, aks, azure, managed-identity, credential-access, cloud]

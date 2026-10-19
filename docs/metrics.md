@@ -194,7 +194,7 @@ topk(10, ebpf_guard_profiler_anomaly_score)
 ```yaml
 profiler:
   sequence:
-    enabled: true       # Enable sequence profiling
+    enabled: true       # Enable sequence profiling (opt-in: off by default since wave 9)
     window_size: 64     # Number of syscalls in the frequency window
     threshold: 0.3      # Distance threshold for anomaly detection
 ```

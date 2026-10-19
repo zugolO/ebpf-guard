@@ -42,7 +42,7 @@ and available at runtime via `GET /debug/state` (requires
 | `bpf.map_sizes.processes` | 2048 | 16384 | 32768 |
 | `bpf.map_sizes.connections` | 4096 | 32768 | 65536 |
 | `profiler.max_tracked_pids` | 256 | 4096 | 8192 |
-| `profiler.sequence.enabled` | false | true | true |
+| `profiler.sequence.enabled` | false | false | false |
 | `profiler.lineage.enabled` | true (off — see note) | true | true |
 | `GOMEMLIMIT` | ~40% of detected RAM | unset (Go default) | unset |
 | `GOGC` | 50 | unset (100) | unset |

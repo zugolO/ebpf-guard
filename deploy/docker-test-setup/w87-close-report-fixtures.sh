@@ -403,7 +403,7 @@ if [ "${1:-}" = --mutate ]; then
     mut chain-ctl-pid1   's/map(select((.root_pid \/\/ -1) != 1)) | map(select(.root_comm == \$r/map(select(.root_comm == $r/'
     mut chain-proc-reads 's/fail="\$fail; (б) чтений/: "$fail; (б) чтений/'
     mut ref-step         's/STEP_MIB=${STEP_MIB:-1}/STEP_MIB=${STEP_MIB:-100}/'
-    mut ref-tls          's/(tls|4)/(nothing)/'
+    mut ref-tls          's/(\^|,)tls(,|\$)/(^|,)nothing(,|$)/'
     mut dlist-defer      's/\*" \$id "\*) echo "  \$id: отложено решением/*) echo "  $id: отложено решением/'
     mut dlist-open       's/открыта) echo "  \$id: ОТКРЫТА — \$why"; fail=/открыта) echo "  $id: x"; : /'
     mut dlist-night      's/ДОСТИГНУТО) echo "  \$id: закрыт ночью/*) echo "  $id: закрыт ночью/'
